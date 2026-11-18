@@ -70,6 +70,49 @@ describe("putPrivateBytes", () => {
     await expect(putPrivateBytes(stagingUrl, bytes, "application/pdf", undefined, () => asXhr(plainXhr), uploadTestIdentity))
       .rejects.toThrow("上传对象失败 (400)");
   });
+
+  it("preserves localized Chinese lease-expiry messages on 400 UPLOAD_MISMATCH while filtering stack traces and technical strings", async () => {
+    const expiredXhr = new FakeXhr();
+    expiredXhr.status = 400;
+    expiredXhr.responseText = JSON.stringify({ error: { code: "UPLOAD_MISMATCH", message: "上传凭证已过期，请重试上传。\n at putStagingStream" } });
+    await expect(putPrivateBytes(stagingUrl, bytes, "application/pdf", undefined, () => asXhr(expiredXhr), uploadTestIdentity))
+      .rejects.toMatchObject({
+        name: "UploadUserError",
+        code: "UPLOAD_MISMATCH",
+        message: "上传凭证已过期，请重试上传。",
+      });
+
+    const topLevelXhr = new FakeXhr();
+    topLevelXhr.status = 400;
+    topLevelXhr.responseText = JSON.stringify({ code: "UPLOAD_MISMATCH", message: "上传已取消或凭证已过期，请重试上传。" });
+    await expect(putPrivateBytes(stagingUrl, bytes, "application/pdf", undefined, () => asXhr(topLevelXhr), uploadTestIdentity))
+      .rejects.toMatchObject({
+        name: "UploadUserError",
+        code: "UPLOAD_MISMATCH",
+        message: "上传已取消或凭证已过期，请重试上传。",
+      });
+
+    const longPrefix = "请重试".repeat(90);
+    const longXhr = new FakeXhr();
+    longXhr.status = 400;
+    longXhr.responseText = JSON.stringify({ error: { code: "UPLOAD_MISMATCH", message: longPrefix } });
+    await expect(putPrivateBytes(stagingUrl, bytes, "application/pdf", undefined, () => asXhr(longXhr), uploadTestIdentity))
+      .rejects.toMatchObject({
+        name: "UploadUserError",
+        code: "UPLOAD_MISMATCH",
+        message: longPrefix.slice(0, 240),
+      });
+
+    const technicalXhr = new FakeXhr();
+    technicalXhr.status = 400;
+    technicalXhr.responseText = JSON.stringify({ error: { code: "UPLOAD_MISMATCH", message: "参数 zod 错误" } });
+    await expect(putPrivateBytes(stagingUrl, bytes, "application/pdf", undefined, () => asXhr(technicalXhr), uploadTestIdentity))
+      .rejects.toMatchObject({
+        name: "UploadUserError",
+        code: "UPLOAD_MISMATCH",
+        message: "文件内容与扩展名不匹配，请确认未损坏或改名后重试。",
+      });
+  });
 });
 
 

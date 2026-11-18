@@ -16,19 +16,21 @@ const client = vi.hoisted(() => ({
   getSnapshot: () => client.snapshot,
 }));
 
+const useExamResourcesMock = vi.hoisted(() => vi.fn((_enabled: boolean) => ({
+  resources: {
+    courses: [{ id: courseA, title: "高数甲" }, { id: courseB, title: "高数乙" }],
+    sources: [],
+    goals: {},
+  },
+  loading: false,
+  error: null,
+  reload: () => undefined,
+})));
+
 vi.mock("./client", () => ({ createExamSprintClient: () => client }));
 vi.mock("../settings/appearance-preferences", () => ({ useDiagnosticsEnabled: () => false }));
 vi.mock("./use-exam-resources", () => ({
-  useExamResources: () => ({
-    resources: {
-      courses: [{ id: courseA, title: "高数甲" }, { id: courseB, title: "高数乙" }],
-      sources: [],
-      goals: {},
-    },
-    loading: false,
-    error: null,
-    reload: () => undefined,
-  }),
+  useExamResources: (enabled: boolean) => useExamResourcesMock(enabled),
 }));
 
 const lesson = { id: "lesson-1", topicId: "topic-1", title: "复数串讲", summary: "", steps: ["步骤"], workedExample: "例题", pitfalls: [] };
@@ -56,6 +58,8 @@ beforeEach(() => {
   client.sendIntegration.mockReset();
   client.load.mockReset();
   client.loadIntegration.mockReset();
+  client.loadForecast.mockReset();
+  useExamResourcesMock.mockClear();
   client.listeners.clear();
   client.snapshot = {
     overview: structuredClone(overview),
@@ -107,4 +111,35 @@ it("resets transient tab, lesson navigation, and lessonError when switching cour
   expect(host.querySelector("#sprint-lesson-next-step")).toBeNull();
   await act(async () => host.querySelector<HTMLButtonElement>("#sprint-tab-integration")!.click());
   expect(host.querySelector('section[aria-labelledby="sprint-binding-title"]')).not.toBeNull();
+});
+
+it("does not trigger extra loadIntegration or loadForecast calls during a courseId switch transition", async () => {
+  client.snapshot.integration.binding = { courseId: courseA, milestoneId: null, packSourceId: "pack-src", boundAt: "2026-11-14T08:00:00Z", skills: [], materials: [] };
+
+  await act(async () => root.render(createElement(ExamSprintView, { courseId: courseA })));
+  await act(async () => host.querySelector<HTMLButtonElement>("#sprint-tab-forecast")!.click());
+  expect(client.loadForecast).toHaveBeenCalledTimes(1);
+
+  client.loadIntegration.mockClear();
+  client.loadForecast.mockClear();
+  useExamResourcesMock.mockClear();
+
+  await act(async () => root.render(createElement(ExamSprintView, { courseId: courseB })));
+  expect(client.loadForecast).not.toHaveBeenCalled();
+  expect(client.loadIntegration).not.toHaveBeenCalled();
+  expect(useExamResourcesMock.mock.calls.at(-1)?.[0]).toBe(false);
+
+  await act(async () => root.render(createElement(ExamSprintView, { courseId: courseA })));
+  await act(async () => host.querySelector<HTMLButtonElement>("#sprint-tab-integration")!.click());
+  expect(client.loadIntegration).toHaveBeenCalledTimes(1);
+
+  client.loadIntegration.mockClear();
+  client.loadForecast.mockClear();
+  useExamResourcesMock.mockClear();
+
+  await act(async () => root.render(createElement(ExamSprintView, { courseId: undefined })));
+  expect(client.loadIntegration).not.toHaveBeenCalled();
+  expect(client.loadForecast).not.toHaveBeenCalled();
+  expect(host.querySelector("#sprint-tab-practice")!.getAttribute("aria-selected")).toBe("true");
+  expect(useExamResourcesMock.mock.calls.at(-1)?.[0]).toBe(false);
 });
