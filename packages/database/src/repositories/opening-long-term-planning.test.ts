@@ -45,6 +45,7 @@ vi.mock("./opening-learning-facts", async original => {
   return { ...mod, lockWorkspaceLearningHistory: vi.fn(async () => undefined) };
 });
 
+import { readOpeningLearningAgenda } from "./opening-learning-agenda";
 import { createOpeningLongTermPlanningRepository, selectLearningRecoveryTask } from "./opening-long-term-planning";
 
 const scope = { workspaceId: "11111111-1111-4111-8111-111111111111", ownerUserId: "22222222-2222-4222-8222-222222222222" };
@@ -122,3 +123,55 @@ it.each([
     })).rejects.toMatchObject({ code: "CONFLICT" });
   },
 );
+
+it("forwards injected clock to readOpeningLearningAgenda in both overview read and recover", async () => {
+  const agendaMock = vi.mocked(readOpeningLearningAgenda);
+  agendaMock.mockClear();
+
+  const snoozedUntil = Date.parse("2026-11-05T09:00:00Z");
+  let current = new Date("2026-11-02T09:00:00Z");
+  mocks.activityRow = {
+    id: activityId, course_id: courseId, status: "active",
+    create_intent: { protocol: "span-lesson-v1", source: "task", taskId },
+    checkpoint_json: { spanLesson: { sessionId: activityId, retestId: "66666666-6666-4666-8666-666666666666" } },
+    goal_json: {},
+  };
+  mocks.recoveryActivity = { activityId, sessionId: activityId, courseId };
+  mocks.tasks = [];
+  agendaMock.mockImplementation(async (_tx, _scope, _courseId, _activityId, options) => {
+    const deferred = (options?.now?.getTime() ?? Date.now()) < snoozedUntil;
+    return {
+      courseId, goalId: null, activityId, sessionId: activityId, itemVersionId: null,
+      status: deferred ? "deferred" : "active", mode: "diagnose", userOverride: null,
+      help: { delivered: false, level: "none" }, requirement: "span-v1", selectedAction: null,
+      returnTo: null, originActivityId: null, pendingRetestId: null, parentDecisionId: null,
+      decisionCurrent: true, invalidationReasons: deferred ? ["retest_deferred"] : [],
+      intent: null, moveId: "self-example", budget: null, decisionId: null,
+      resumable: !deferred, suggestion: null, dataAsOf: (options?.now ?? current).toISOString(),
+    };
+  });
+
+  const repo = createOpeningLongTermPlanningRepository(createFakeSql(), () => current);
+  const before = await repo.read(scope, "2026-11-02");
+  expect(before.recovery.href).toBeNull();
+  expect(before.recovery.agenda).toMatchObject({ status: "deferred", resumable: false });
+  expect(agendaMock).toHaveBeenLastCalledWith(expect.anything(), scope, courseId, activityId, { now: new Date("2026-11-02T09:00:00Z") });
+
+  await expect(repo.recover(scope, {
+    action: "continue", date: "2026-11-02", activityId, taskId: null,
+    expectedAcceptedVersion: 0, expectedBudgetRevision: 1, clientKey: "recovery-clock-before",
+  })).rejects.toMatchObject({ code: "CONFLICT" });
+  expect(agendaMock).toHaveBeenLastCalledWith(expect.anything(), scope, courseId, activityId, { now: new Date("2026-11-02T09:00:00Z") });
+
+  current = new Date("2026-11-05T09:00:00Z");
+  const atBoundary = await repo.read(scope, "2026-11-05");
+  expect(atBoundary.recovery.href).toBe(`/opening/courses/${courseId}/study/span?lesson=${activityId}&retest=66666666-6666-4666-8666-666666666666`);
+  expect(atBoundary.recovery.agenda).toMatchObject({ status: "active", resumable: true });
+  expect(agendaMock).toHaveBeenLastCalledWith(expect.anything(), scope, courseId, activityId, { now: new Date("2026-11-05T09:00:00Z") });
+
+  await expect(repo.recover(scope, {
+    action: "continue", date: "2026-11-05", activityId, taskId: null,
+    expectedAcceptedVersion: 0, expectedBudgetRevision: 1, clientKey: "recovery-clock-at",
+  })).resolves.toMatchObject({ activityId, taskId: null });
+  expect(agendaMock).toHaveBeenLastCalledWith(expect.anything(), scope, courseId, activityId, { now: new Date("2026-11-05T09:00:00Z") });
+});

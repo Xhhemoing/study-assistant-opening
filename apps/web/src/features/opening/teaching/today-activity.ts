@@ -4,35 +4,37 @@ import type {
   TeachingActivityGenerateStatus,
   TeachingActivityStatus,
 } from "@aistudy/contracts";
+import { compareCurrentLearningActivities } from "@aistudy/domain";
 
 const RESUMABLE: ReadonlySet<TeachingActivityStatus> = new Set(["active", "paused"]);
 
-function isResumableTodayActivity(row: TeachingActivity): boolean {
-  if (!RESUMABLE.has(row.status)) return false;
+/** Whether an activity row is a non-teachable shell, card session, legacy placeholder, or unavailable static lesson. */
+export function isTeachingActivityPlaceholder(row: TeachingActivity): boolean {
   const createIntent = (row as { createIntent?: { protocol?: unknown; legacy?: unknown } }).createIntent;
-  if (row.staticLessonUnavailable) return false;
+  if (row.staticLessonUnavailable) return true;
   if (
     createIntent?.protocol === "card-review-session-v1"
     || row.clientKey?.startsWith("card-session:")
     || Boolean(row.checkpointJson && typeof row.checkpointJson === "object" && "cardReviewSession" in row.checkpointJson)
     || (row.courseId === null && row.intentSummary === "有界卡片复习")
   ) {
-    return false;
+    return true;
   }
   if (createIntent?.legacy === true || row.clientKey?.startsWith("legacy-course-continue:")) {
-    return false;
+    return true;
   }
   if (!row.staticLesson && (
     createIntent?.protocol === "span-lesson-v1"
     || row.clientKey?.startsWith("span-lesson:")
     || Boolean(row.checkpointJson && typeof row.checkpointJson === "object" && "spanLesson" in row.checkpointJson)
   )) {
-    return false;
+    return true;
   }
-  if (row.intentKind === "course_continue" && row.contentVersion === 0 && !(row.staticLesson && row.courseId)) {
-    return false;
-  }
-  return true;
+  return row.intentKind === "course_continue" && row.contentVersion === 0 && !(row.staticLesson && row.courseId);
+}
+
+function isResumableTodayActivity(row: TeachingActivity): boolean {
+  return RESUMABLE.has(row.status) && !isTeachingActivityPlaceholder(row);
 }
 
 /** Most recently updated active/paused usable activity, or null. */
@@ -40,11 +42,7 @@ export function pickCurrentTeachingActivity(
   activities: readonly TeachingActivity[],
 ): TeachingActivity | null {
   const resumable = activities.filter(isResumableTodayActivity);
-  if (!resumable.length) return null;
-  return [...resumable].sort((a, b) => {
-    const byTime = b.updatedAt.localeCompare(a.updatedAt);
-    return byTime !== 0 ? byTime : b.id.localeCompare(a.id);
-  })[0]!;
+  return resumable.length ? [...resumable].sort(compareCurrentLearningActivities)[0]! : null;
 }
 
 export function todayActivityCtaLabel(activity: TeachingActivity | null): "继续学习" | "开始学习" {

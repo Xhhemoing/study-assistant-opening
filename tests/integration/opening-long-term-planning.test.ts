@@ -169,11 +169,11 @@ it.each(["cancelled", "completed", "declined", "superseded"] as const)(
     await expect(repo().recover(f.scope, { action: "shorten", activityId: lesson.activityId, taskId: null, minutes: 5, date, expectedAcceptedVersion: 0, expectedBudgetRevision: 1, clientKey: randomUUID() })).rejects.toMatchObject({ code: "CONFLICT", message: expect.stringContaining("原学习位置需重新确认") });
     expect(await f.sql`SELECT * FROM opening_teaching_activities WHERE course_id=${c.id} ORDER BY id`).toEqual(before);
   });
-it("blocks fallback task href and both continue/shorten when a delayed retest is deferred", async () => {
+it("blocks fallback task href and both continue/shorten when a delayed retest is deferred relative to injected now and honors snoozed_until boundaries", async () => {
   const c = await course(); await budget();
   const lesson = await delayedLesson(c.id), linked = await task(c.id, 20);
-  const futureSnooze = new Date(Date.now() + 86_400_000).toISOString();
-  await f.sql`UPDATE opening_retest_activities SET snoozed_until=${futureSnooze} WHERE id=${lesson.retestId}`;
+  const snoozedUntil = "2026-11-05T09:00:00Z";
+  await f.sql`UPDATE opening_retest_activities SET snoozed_until=${snoozedUntil} WHERE id=${lesson.retestId}`;
   await f.sql`UPDATE opening_teaching_activities SET create_intent=create_intent || ${f.sql.json({ source: "task", taskId: linked.id })} WHERE id=${lesson.activityId}`;
   const before = await f.sql`SELECT * FROM opening_teaching_activities WHERE course_id=${c.id} ORDER BY id`;
   const overview = await repo().read(f.scope, date);
@@ -181,10 +181,38 @@ it("blocks fallback task href and both continue/shorten when a delayed retest is
     activityId: lesson.activityId,
     taskId: linked.id,
     href: null,
-    agenda: { activityId: lesson.activityId, status: "deferred", resumable: false },
+    agenda: { activityId: lesson.activityId, status: "deferred", resumable: false, invalidationReasons: expect.arrayContaining(["retest_deferred"]) },
   });
   await expect(repo().recover(f.scope, { action: "continue", activityId: lesson.activityId, taskId: linked.id, date, expectedAcceptedVersion: 0, expectedBudgetRevision: 1, clientKey: randomUUID() })).rejects.toMatchObject({ code: "CONFLICT" });
   await expect(repo().recover(f.scope, { action: "shorten", activityId: lesson.activityId, taskId: linked.id, minutes: 5, date, expectedAcceptedVersion: 0, expectedBudgetRevision: 1, clientKey: randomUUID() })).rejects.toMatchObject({ code: "CONFLICT" });
+
+  const beforeBoundaryRepo = createOpeningLongTermPlanningRepository(f.sql, () => new Date("2026-11-05T08:59:59.999Z"));
+  const beforeBoundary = await beforeBoundaryRepo.read(f.scope, "2026-11-05");
+  expect(beforeBoundary.recovery).toMatchObject({
+    activityId: lesson.activityId,
+    taskId: linked.id,
+    href: null,
+    agenda: { activityId: lesson.activityId, status: "deferred", resumable: false, invalidationReasons: expect.arrayContaining(["retest_deferred"]) },
+  });
+  await expect(beforeBoundaryRepo.recover(f.scope, { action: "continue", activityId: lesson.activityId, taskId: linked.id, date: "2026-11-05", expectedAcceptedVersion: 0, expectedBudgetRevision: 1, clientKey: randomUUID() })).rejects.toMatchObject({ code: "CONFLICT" });
+
+  for (const boundaryNow of ["2026-11-05T09:00:00.000Z", "2026-11-05T09:00:00.001Z"]) {
+    const boundaryRepo = createOpeningLongTermPlanningRepository(f.sql, () => new Date(boundaryNow));
+    const expectedHref = `/opening/courses/${c.id}/study/span?lesson=${lesson.activityId}&retest=${lesson.retestId}`;
+    const atOrAfter = await boundaryRepo.read(f.scope, "2026-11-05");
+    expect(atOrAfter.recovery).toMatchObject({
+      activityId: lesson.activityId,
+      taskId: linked.id,
+      href: expectedHref,
+      agenda: { activityId: lesson.activityId, status: "active", resumable: true },
+    });
+    expect(atOrAfter.recovery.agenda?.invalidationReasons).not.toContain("retest_deferred");
+    await expect(boundaryRepo.recover(f.scope, { action: "continue", activityId: lesson.activityId, taskId: linked.id, date: "2026-11-05", expectedAcceptedVersion: 0, expectedBudgetRevision: 1, clientKey: randomUUID() })).resolves.toMatchObject({
+      href: expectedHref,
+      activityId: lesson.activityId,
+      taskId: linked.id,
+    });
+  }
   expect(await f.sql`SELECT * FROM opening_teaching_activities WHERE course_id=${c.id} ORDER BY id`).toEqual(before);
 });
 it("does not leak a non-agenda decision-bearing activity with a closed retest into overview recovery", async () => {

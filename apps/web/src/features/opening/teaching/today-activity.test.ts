@@ -1,9 +1,11 @@
-import { expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import type { TeachingActivity } from "@aistudy/contracts";
 import { probeMaterialsAvailability } from "@aistudy/domain";
+import { currentCourseActivity } from "../courses/course-study-model";
 import {
   buildStartLearningCreateInput,
   canRequestTeachingCompile,
+  isTeachingActivityPlaceholder,
   pickCurrentTeachingActivity,
   teachingActivityContentHonesty,
   teachingActivityGenerateStatusLabel,
@@ -184,4 +186,91 @@ it("excludes card sessions, legacy activities, empty course_continue shells, ses
     updatedAt: newer,
   };
   expect(pickCurrentTeachingActivity([usable, validStaticLesson])?.id).toBe(validStaticLesson.id);
+});
+
+describe("cross-surface multi-activity selection & shared placeholder helper", () => {
+  const courseId = "44444444-4444-4444-8444-444444444444";
+
+  it("preserves workspace-level card summary guard while keeping course-scoped activities usable", () => {
+    expect(isTeachingActivityPlaceholder({ ...base, courseId: null, intentSummary: "有界卡片复习" })).toBe(true);
+    expect(isTeachingActivityPlaceholder({ ...base, courseId, intentSummary: "有界卡片复习", contentVersion: 1 })).toBe(false);
+    expect(isTeachingActivityPlaceholder({
+      ...base,
+      courseId: null,
+      intentKind: "course_continue",
+      contentVersion: 0,
+      staticLesson: { protocol: "span-lesson-v1", sessionId: "99999999-9999-4999-8999-999999999999" },
+    })).toBe(true);
+    expect(isTeachingActivityPlaceholder({
+      ...base,
+      courseId,
+      intentKind: "course_continue",
+      contentVersion: 0,
+      staticLesson: { protocol: "span-lesson-v1", sessionId: "99999999-9999-4999-8999-999999999999" },
+    })).toBe(false);
+  });
+
+  it("aligns pickCurrentTeachingActivity and currentCourseActivity across fractional ISO timestamps", () => {
+    const wholeSecond = {
+      ...base,
+      id: "ffffffff-ffff-4fff-8fff-ffffffffffff",
+      courseId,
+      status: "paused" as const,
+      updatedAt: "2026-11-17T10:00:00Z",
+    };
+    const halfSecondLater = {
+      ...base,
+      id: "11111111-1111-4111-8111-111111111111",
+      courseId,
+      status: "active" as const,
+      updatedAt: "2026-11-17T10:00:00.500Z",
+    };
+    const nineTenthsLater = {
+      ...base,
+      id: "22222222-2222-4222-8222-222222222222",
+      courseId,
+      status: "paused" as const,
+      updatedAt: "2026-11-17T10:00:00.9Z",
+    };
+
+    const twoRows = [wholeSecond, halfSecondLater];
+    expect(pickCurrentTeachingActivity(twoRows)?.id).toBe(halfSecondLater.id);
+    expect(currentCourseActivity(twoRows, courseId)?.id).toBe(halfSecondLater.id);
+
+    const threeRows = [wholeSecond, halfSecondLater, nineTenthsLater];
+    expect(pickCurrentTeachingActivity(threeRows)?.id).toBe(nineTenthsLater.id);
+    expect(currentCourseActivity(threeRows, courseId)?.id).toBe(nineTenthsLater.id);
+  });
+
+  it("aligns UUID tie-breaks, active/paused combinations, and mixed shells across Today and Course", () => {
+    const lowUuid = {
+      ...base,
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      courseId,
+      status: "active" as const,
+      updatedAt: "2026-11-17T10:00:00Z",
+    };
+    const highUuidEquivalentFormat = {
+      ...base,
+      id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      courseId,
+      status: "paused" as const,
+      updatedAt: "2026-11-17T10:00:00.000Z",
+    };
+    const shellsAndClosed: TeachingActivity[] = [
+      { ...base, id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", courseId, status: "completed", updatedAt: "2026-11-17T12:00:00.000Z" },
+      { ...base, id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd", courseId, status: "skipped", updatedAt: "2026-11-17T12:00:00.000Z" },
+      { ...base, id: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", courseId, clientKey: "card-session:1", updatedAt: "2026-11-17T12:00:00.000Z" },
+      { ...base, id: "f1111111-1111-4111-8111-111111111111", courseId, checkpointJson: { cardReviewSession: { elapsedSeconds: 10 } }, updatedAt: "2026-11-17T12:00:00.000Z" },
+      { ...base, id: "f2222222-2222-4222-8222-222222222222", courseId, clientKey: `legacy-course-continue:${courseId}`, contentVersion: 1, updatedAt: "2026-11-17T12:00:00.000Z" },
+      { ...base, id: "f3333333-3333-4333-8333-333333333333", courseId, clientKey: "span-lesson:1", updatedAt: "2026-11-17T12:00:00.000Z" },
+      { ...base, id: "f4444444-4444-4444-8444-444444444444", courseId, intentKind: "course_continue", contentVersion: 0, updatedAt: "2026-11-17T12:00:00.000Z" },
+      { ...base, id: "f5555555-5555-4555-8555-555555555555", courseId, staticLessonUnavailable: "retest_unavailable", updatedAt: "2026-11-17T12:00:00.000Z" },
+    ];
+    const mixed = [...shellsAndClosed, lowUuid, highUuidEquivalentFormat];
+    expect(pickCurrentTeachingActivity(mixed)?.id).toBe(highUuidEquivalentFormat.id);
+    expect(currentCourseActivity(mixed, courseId)?.id).toBe(highUuidEquivalentFormat.id);
+    expect(pickCurrentTeachingActivity(shellsAndClosed)).toBeNull();
+    expect(currentCourseActivity(shellsAndClosed, courseId)).toBeNull();
+  });
 });

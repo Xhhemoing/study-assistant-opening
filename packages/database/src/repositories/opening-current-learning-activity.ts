@@ -18,7 +18,10 @@ async function candidates(db: Db, scope: Scope, courseId: string | null, options
     WHERE a.workspace_id=${scope.workspaceId} AND a.owner_user_id=${scope.ownerUserId}
       AND (${courseId}::uuid IS NULL OR a.course_id=${courseId}) AND a.status IN ('active','paused')
       AND a.create_intent->>'protocol' IS DISTINCT FROM 'card-review-session-v1'
+      AND a.client_key NOT LIKE 'card-session:%'
+      AND NOT (COALESCE(a.checkpoint_json,'{}'::jsonb) ? 'cardReviewSession')
       AND COALESCE(a.create_intent->>'legacy','false')<>'true'
+      AND a.client_key NOT LIKE 'legacy-course-continue:%'
       AND ${options.spanOnly ? db`a.create_intent->>'protocol'='span-lesson-v1'` : db`true`}
       AND ${options.retestReferences ? db`lower(a.checkpoint_json->'spanLesson'->>'retestId')=ANY(${options.retestReferences}::text[])`
         : options.spanOnly ? db`a.checkpoint_json->'spanLesson'->>'retestId' IS NULL` : db`true`}
