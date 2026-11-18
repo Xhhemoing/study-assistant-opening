@@ -1,0 +1,898 @@
+{
+  "cases": [
+    {
+      "name": "synthetic-home-01-default-workspace-roots",
+      "request": {
+        "method": "POST",
+        "path": "/api/opening/asset-graph/query",
+        "body": {
+          "op": "roots",
+          "context": {
+            "kind": "workspace"
+          },
+          "lens": "all"
+        }
+      },
+      "http": 200,
+      "response": {
+        "asOf": "2026-01-01T00:00:00.000Z",
+        "nodes": [
+          {
+            "id": "goal/20000000-0000-4000-8000-000000000001",
+            "kind": "goal",
+            "label": "合成：理解示例课程中的变化率"
+          },
+          {
+            "id": "document/60000000-0000-4000-8000-000000000001",
+            "kind": "document",
+            "label": "合成：从自由探索整理的个人笔记（未关联课程）"
+          }
+        ],
+        "edges": [],
+        "page": {
+          "nextCursor": null
+        },
+        "completeness": "complete",
+        "warnings": [],
+        "detail": null
+      }
+    },
+    {
+      "name": "synthetic-course-01-workspace-goal-roots",
+      "request": {
+        "method": "POST",
+        "path": "/api/opening/asset-graph/query",
+        "body": {
+          "op": "roots",
+          "context": {
+            "kind": "workspace"
+          },
+          "lens": "all",
+          "kinds": [
+            "goal"
+          ],
+          "q": "合成：理解示例课程中的变化率",
+          "limit": 20
+        }
+      },
+      "http": 200,
+      "response": {
+        "asOf": "2026-01-01T00:00:00.000Z",
+        "nodes": [
+          {
+            "id": "goal/20000000-0000-4000-8000-000000000001",
+            "kind": "goal",
+            "label": "合成：理解示例课程中的变化率"
+          }
+        ],
+        "edges": [],
+        "page": {
+          "nextCursor": null
+        },
+        "completeness": "complete",
+        "warnings": [],
+        "detail": null
+      }
+    },
+    {
+      "name": "synthetic-course-02-goal-neighbors",
+      "request": {
+        "method": "POST",
+        "path": "/api/opening/asset-graph/query",
+        "body": {
+          "op": "neighbors",
+          "context": {
+            "kind": "goal",
+            "id": "goal/20000000-0000-4000-8000-000000000001"
+          },
+          "lens": "all",
+          "focus": "goal/20000000-0000-4000-8000-000000000001",
+          "direction": "out",
+          "relations": [
+            "scopes"
+          ],
+          "limit": 20
+        }
+      },
+      "http": 200,
+      "response": {
+        "asOf": "2026-01-01T00:00:00.000Z",
+        "nodes": [
+          {
+            "id": "goal/20000000-0000-4000-8000-000000000001",
+            "kind": "goal",
+            "label": "合成：理解示例课程中的变化率"
+          },
+          {
+            "id": "requirement/30000000-0000-4000-8000-000000000001",
+            "kind": "requirement",
+            "label": "合成：解释平均变化率与瞬时变化率"
+          }
+        ],
+        "edges": [
+          {
+            "id": "recorded:scopes:goal/20000000-0000-4000-8000-000000000001:requirement/30000000-0000-4000-8000-000000000001",
+            "from": "goal/20000000-0000-4000-8000-000000000001",
+            "to": "requirement/30000000-0000-4000-8000-000000000001",
+            "relation": "scopes",
+            "basis": "recorded"
+          }
+        ],
+        "page": {
+          "nextCursor": null
+        },
+        "completeness": "complete",
+        "warnings": [],
+        "detail": null
+      }
+    },
+    {
+      "name": "synthetic-course-03-requirement-source-and-observation-neighbors",
+      "request": {
+        "method": "POST",
+        "path": "/api/opening/asset-graph/query",
+        "body": {
+          "op": "neighbors",
+          "context": {
+            "kind": "goal",
+            "id": "goal/20000000-0000-4000-8000-000000000001"
+          },
+          "lens": "all",
+          "focus": "requirement/30000000-0000-4000-8000-000000000001",
+          "direction": "out",
+          "relations": [
+            "usesSource",
+            "hasObservation"
+          ],
+          "limit": 20
+        }
+      },
+      "http": 200,
+      "response": {
+        "asOf": "2026-01-01T00:00:00.000Z",
+        "nodes": [
+          {
+            "id": "requirement/30000000-0000-4000-8000-000000000001",
+            "kind": "requirement",
+            "label": "合成：解释平均变化率与瞬时变化率"
+          },
+          {
+            "id": "source/40000000-0000-4000-8000-000000000001",
+            "kind": "source",
+            "label": "合成：变化率讲义",
+            "meta": {
+              "version": 1
+            }
+          },
+          {
+            "id": "observation/50000000-0000-4000-8000-000000000001",
+            "kind": "observation",
+            "label": "合成：提示后完成一次变化率练习",
+            "meta": {
+              "occurredAt": "2025-12-31T12:00:00.000Z",
+              "assistance": "hinted"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "id": "recorded:usesSource:requirement/30000000-0000-4000-8000-000000000001:source/40000000-0000-4000-8000-000000000001",
+            "from": "requirement/30000000-0000-4000-8000-000000000001",
+            "to": "source/40000000-0000-4000-8000-000000000001",
+            "relation": "usesSource",
+            "basis": "recorded",
+            "sourceVersion": 1,
+            "page": 18
+          },
+          {
+            "id": "recorded:hasObservation:requirement/30000000-0000-4000-8000-000000000001:observation/50000000-0000-4000-8000-000000000001",
+            "from": "requirement/30000000-0000-4000-8000-000000000001",
+            "to": "observation/50000000-0000-4000-8000-000000000001",
+            "relation": "hasObservation",
+            "basis": "recorded"
+          }
+        ],
+        "page": {
+          "nextCursor": null
+        },
+        "completeness": "complete",
+        "warnings": [],
+        "detail": null
+      }
+    },
+    {
+      "name": "synthetic-course-03b-requirement-neighbors-with-summary",
+      "request": {
+        "method": "POST",
+        "path": "/api/opening/asset-graph/query",
+        "body": {
+          "op": "neighbors",
+          "context": {
+            "kind": "goal",
+            "id": "goal/20000000-0000-4000-8000-000000000001"
+          },
+          "lens": "all",
+          "focus": "requirement/30000000-0000-4000-8000-000000000001",
+          "direction": "out",
+          "relations": [
+            "usesSource",
+            "hasObservation"
+          ],
+          "limit": 20,
+          "include": [
+            "summary"
+          ]
+        }
+      },
+      "http": 200,
+      "response": {
+        "asOf": "2026-01-01T00:00:00.000Z",
+        "nodes": [
+          {
+            "id": "requirement/30000000-0000-4000-8000-000000000001",
+            "kind": "requirement",
+            "label": "合成：解释平均变化率与瞬时变化率",
+            "summary": {
+              "learnerState": "hinted",
+              "requirementStatus": "assisted"
+            }
+          },
+          {
+            "id": "source/40000000-0000-4000-8000-000000000001",
+            "kind": "source",
+            "label": "合成：变化率讲义",
+            "meta": {
+              "version": 1
+            }
+          },
+          {
+            "id": "observation/50000000-0000-4000-8000-000000000001",
+            "kind": "observation",
+            "label": "合成：提示后完成一次变化率练习",
+            "meta": {
+              "occurredAt": "2025-12-31T12:00:00.000Z",
+              "assistance": "hinted"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "id": "recorded:usesSource:requirement/30000000-0000-4000-8000-000000000001:source/40000000-0000-4000-8000-000000000001",
+            "from": "requirement/30000000-0000-4000-8000-000000000001",
+            "to": "source/40000000-0000-4000-8000-000000000001",
+            "relation": "usesSource",
+            "basis": "recorded",
+            "sourceVersion": 1,
+            "page": 18
+          },
+          {
+            "id": "recorded:hasObservation:requirement/30000000-0000-4000-8000-000000000001:observation/50000000-0000-4000-8000-000000000001",
+            "from": "requirement/30000000-0000-4000-8000-000000000001",
+            "to": "observation/50000000-0000-4000-8000-000000000001",
+            "relation": "hasObservation",
+            "basis": "recorded"
+          }
+        ],
+        "page": {
+          "nextCursor": null
+        },
+        "completeness": "complete",
+        "warnings": [],
+        "detail": null
+      }
+    },
+    {
+      "name": "synthetic-course-03c-requirement-assets-lens",
+      "request": {
+        "method": "POST",
+        "path": "/api/opening/asset-graph/query",
+        "body": {
+          "op": "neighbors",
+          "context": {
+            "kind": "goal",
+            "id": "goal/20000000-0000-4000-8000-000000000001"
+          },
+          "lens": "assets",
+          "focus": "requirement/30000000-0000-4000-8000-000000000001",
+          "direction": "out",
+          "relations": [
+            "usesSource"
+          ],
+          "limit": 20
+        }
+      },
+      "http": 200,
+      "response": {
+        "asOf": "2026-01-01T00:00:00.000Z",
+        "nodes": [
+          {
+            "id": "requirement/30000000-0000-4000-8000-000000000001",
+            "kind": "requirement",
+            "label": "合成：解释平均变化率与瞬时变化率"
+          },
+          {
+            "id": "source/40000000-0000-4000-8000-000000000001",
+            "kind": "source",
+            "label": "合成：变化率讲义",
+            "meta": {
+              "version": 1
+            }
+          }
+        ],
+        "edges": [
+          {
+            "id": "recorded:usesSource:requirement/30000000-0000-4000-8000-000000000001:source/40000000-0000-4000-8000-000000000001",
+            "from": "requirement/30000000-0000-4000-8000-000000000001",
+            "to": "source/40000000-0000-4000-8000-000000000001",
+            "relation": "usesSource",
+            "basis": "recorded",
+            "sourceVersion": 1,
+            "page": 18
+          }
+        ],
+        "page": {
+          "nextCursor": null
+        },
+        "completeness": "complete",
+        "warnings": [],
+        "detail": null
+      }
+    },
+    {
+      "name": "synthetic-course-03d-requirement-evidence-lens",
+      "request": {
+        "method": "POST",
+        "path": "/api/opening/asset-graph/query",
+        "body": {
+          "op": "neighbors",
+          "context": {
+            "kind": "goal",
+            "id": "goal/20000000-0000-4000-8000-000000000001"
+          },
+          "lens": "evidence",
+          "focus": "requirement/30000000-0000-4000-8000-000000000001",
+          "direction": "out",
+          "relations": [
+            "hasObservation"
+          ],
+          "limit": 20
+        }
+      },
+      "http": 200,
+      "response": {
+        "asOf": "2026-01-01T00:00:00.000Z",
+        "nodes": [
+          {
+            "id": "requirement/30000000-0000-4000-8000-000000000001",
+            "kind": "requirement",
+            "label": "合成：解释平均变化率与瞬时变化率"
+          },
+          {
+            "id": "observation/50000000-0000-4000-8000-000000000001",
+            "kind": "observation",
+            "label": "合成：提示后完成一次变化率练习",
+            "meta": {
+              "occurredAt": "2025-12-31T12:00:00.000Z",
+              "assistance": "hinted"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "id": "recorded:hasObservation:requirement/30000000-0000-4000-8000-000000000001:observation/50000000-0000-4000-8000-000000000001",
+            "from": "requirement/30000000-0000-4000-8000-000000000001",
+            "to": "observation/50000000-0000-4000-8000-000000000001",
+            "relation": "hasObservation",
+            "basis": "recorded"
+          }
+        ],
+        "page": {
+          "nextCursor": null
+        },
+        "completeness": "complete",
+        "warnings": [],
+        "detail": null
+      }
+    },
+    {
+      "name": "synthetic-course-03e-source-incoming-requirement",
+      "request": {
+        "method": "POST",
+        "path": "/api/opening/asset-graph/query",
+        "body": {
+          "op": "neighbors",
+          "context": {
+            "kind": "goal",
+            "id": "goal/20000000-0000-4000-8000-000000000001"
+          },
+          "lens": "assets",
+          "focus": "source/40000000-0000-4000-8000-000000000001",
+          "direction": "in",
+          "relations": [
+            "usesSource"
+          ],
+          "limit": 20
+        }
+      },
+      "http": 200,
+      "response": {
+        "asOf": "2026-01-01T00:00:00.000Z",
+        "nodes": [
+          {
+            "id": "source/40000000-0000-4000-8000-000000000001",
+            "kind": "source",
+            "label": "合成：变化率讲义",
+            "meta": {
+              "version": 1
+            }
+          },
+          {
+            "id": "requirement/30000000-0000-4000-8000-000000000001",
+            "kind": "requirement",
+            "label": "合成：解释平均变化率与瞬时变化率"
+          }
+        ],
+        "edges": [
+          {
+            "id": "recorded:usesSource:requirement/30000000-0000-4000-8000-000000000001:source/40000000-0000-4000-8000-000000000001",
+            "from": "requirement/30000000-0000-4000-8000-000000000001",
+            "to": "source/40000000-0000-4000-8000-000000000001",
+            "relation": "usesSource",
+            "basis": "recorded",
+            "sourceVersion": 1,
+            "page": 18
+          }
+        ],
+        "page": {
+          "nextCursor": null
+        },
+        "completeness": "complete",
+        "warnings": [],
+        "detail": null
+      }
+    },
+    {
+      "name": "synthetic-course-04-requirement-detail-with-versioned-start-action",
+      "request": {
+        "method": "POST",
+        "path": "/api/opening/asset-graph/query",
+        "body": {
+          "op": "detail",
+          "context": {
+            "kind": "goal",
+            "id": "goal/20000000-0000-4000-8000-000000000001"
+          },
+          "lens": "all",
+          "focus": "requirement/30000000-0000-4000-8000-000000000001"
+        }
+      },
+      "http": 200,
+      "response": {
+        "asOf": "2026-01-01T00:00:00.000Z",
+        "nodes": [
+          {
+            "id": "requirement/30000000-0000-4000-8000-000000000001",
+            "kind": "requirement",
+            "label": "合成：解释平均变化率与瞬时变化率"
+          }
+        ],
+        "edges": [],
+        "page": {
+          "nextCursor": null
+        },
+        "completeness": "complete",
+        "warnings": [],
+        "detail": {
+          "id": "requirement/30000000-0000-4000-8000-000000000001",
+          "learnerState": "hinted",
+          "requirementStatus": "assisted",
+          "actions": [
+            {
+              "kind": "startCourseRequirement",
+              "courseId": "10000000-0000-4000-8000-000000000001",
+              "goalId": "20000000-0000-4000-8000-000000000001",
+              "requirementId": "30000000-0000-4000-8000-000000000001",
+              "expectedGoalRevision": 3,
+              "expectedRequirementRevision": 2,
+              "label": "继续学习这项要求"
+            }
+          ],
+          "notes": [
+            "所有实体、版本与状态均为设计用合成数据，不表示真实线上记录。",
+            "本例只表示已记录的提示后完成证据，不推导掌握率。",
+            "动作沿用课程要求学习入口，由客户端调用现有 start 接口后使用其返回的 href。"
+          ]
+        }
+      }
+    },
+    {
+      "name": "synthetic-unscoped-01-workspace-document-roots",
+      "request": {
+        "method": "POST",
+        "path": "/api/opening/asset-graph/query",
+        "body": {
+          "op": "roots",
+          "context": {
+            "kind": "workspace"
+          },
+          "lens": "assets",
+          "kinds": [
+            "document"
+          ],
+          "q": "合成：从自由探索整理的个人笔记",
+          "limit": 20
+        }
+      },
+      "http": 200,
+      "response": {
+        "asOf": "2026-01-01T00:00:00.000Z",
+        "nodes": [
+          {
+            "id": "document/60000000-0000-4000-8000-000000000001",
+            "kind": "document",
+            "label": "合成：从自由探索整理的个人笔记（未关联课程）"
+          }
+        ],
+        "edges": [],
+        "page": {
+          "nextCursor": null
+        },
+        "completeness": "complete",
+        "warnings": [],
+        "detail": null
+      }
+    },
+    {
+      "name": "synthetic-unscoped-02-document-incoming-promotion",
+      "request": {
+        "method": "POST",
+        "path": "/api/opening/asset-graph/query",
+        "body": {
+          "op": "neighbors",
+          "context": {
+            "kind": "workspace"
+          },
+          "lens": "assets",
+          "focus": "document/60000000-0000-4000-8000-000000000001",
+          "direction": "in",
+          "relations": [
+            "promotedTo"
+          ],
+          "limit": 20
+        }
+      },
+      "http": 200,
+      "response": {
+        "asOf": "2026-01-01T00:00:00.000Z",
+        "nodes": [
+          {
+            "id": "document/60000000-0000-4000-8000-000000000001",
+            "kind": "document",
+            "label": "合成：从自由探索整理的个人笔记（未关联课程）"
+          },
+          {
+            "id": "exploration/70000000-0000-4000-8000-000000000001",
+            "kind": "exploration",
+            "label": "合成：观察日常变化的自由探索"
+          }
+        ],
+        "edges": [
+          {
+            "id": "recorded:promotedTo:exploration/70000000-0000-4000-8000-000000000001:document/60000000-0000-4000-8000-000000000001",
+            "from": "exploration/70000000-0000-4000-8000-000000000001",
+            "to": "document/60000000-0000-4000-8000-000000000001",
+            "relation": "promotedTo",
+            "basis": "recorded"
+          }
+        ],
+        "page": {
+          "nextCursor": null
+        },
+        "completeness": "complete",
+        "warnings": [],
+        "detail": null
+      }
+    },
+    {
+      "name": "synthetic-unscoped-03-same-exploration-detail-without-invented-ui",
+      "request": {
+        "method": "POST",
+        "path": "/api/opening/asset-graph/query",
+        "body": {
+          "op": "detail",
+          "context": {
+            "kind": "workspace"
+          },
+          "lens": "assets",
+          "focus": "exploration/70000000-0000-4000-8000-000000000001"
+        }
+      },
+      "http": 200,
+      "response": {
+        "asOf": "2026-01-01T00:00:00.000Z",
+        "nodes": [
+          {
+            "id": "exploration/70000000-0000-4000-8000-000000000001",
+            "kind": "exploration",
+            "label": "合成：观察日常变化的自由探索"
+          }
+        ],
+        "edges": [],
+        "page": {
+          "nextCursor": null
+        },
+        "completeness": "complete",
+        "warnings": [],
+        "detail": {
+          "id": "exploration/70000000-0000-4000-8000-000000000001",
+          "learnerState": null,
+          "requirementStatus": null,
+          "actions": [],
+          "notes": [
+            "合成探索：开放状态，未关联课程或学习目标。",
+            "记录了一条“把日常观察整理为笔记”的开放问题；同一探索已通过 recorded promotedTo 关系产生上一步的个人笔记。",
+            "本候选图详情只呈现合成的已记录事实；当前没有为该探索声明可用的既有详情页面，因此不提供导航动作。",
+            "此个人笔记没有 linkedTo 课程要求的关系，也不继承课程学习状态。"
+          ]
+        }
+      }
+    },
+    {
+      "name": "synthetic-pagination-01-source-roots-first-page",
+      "request": {
+        "method": "POST",
+        "path": "/api/opening/asset-graph/query",
+        "body": {
+          "op": "roots",
+          "context": {
+            "kind": "workspace"
+          },
+          "lens": "assets",
+          "kinds": [
+            "source"
+          ],
+          "limit": 1
+        }
+      },
+      "http": 200,
+      "response": {
+        "asOf": "2026-01-01T00:00:00.000Z",
+        "nodes": [
+          {
+            "id": "source/40000000-0000-4000-8000-000000000001",
+            "kind": "source",
+            "label": "合成：变化率讲义",
+            "meta": {
+              "version": 1
+            }
+          }
+        ],
+        "edges": [],
+        "page": {
+          "nextCursor": "synthetic-source-roots-page-2-v1"
+        },
+        "completeness": "complete",
+        "warnings": [],
+        "detail": null
+      }
+    },
+    {
+      "name": "synthetic-pagination-02-source-roots-second-page-same-query",
+      "request": {
+        "method": "POST",
+        "path": "/api/opening/asset-graph/query",
+        "body": {
+          "op": "roots",
+          "context": {
+            "kind": "workspace"
+          },
+          "lens": "assets",
+          "kinds": [
+            "source"
+          ],
+          "limit": 1,
+          "cursor": "synthetic-source-roots-page-2-v1"
+        }
+      },
+      "http": 200,
+      "response": {
+        "asOf": "2026-01-01T00:00:00.000Z",
+        "nodes": [
+          {
+            "id": "source/40000000-0000-4000-8000-000000000002",
+            "kind": "source",
+            "label": "合成：变化率练习资料",
+            "meta": {
+              "version": 1
+            }
+          }
+        ],
+        "edges": [],
+        "page": {
+          "nextCursor": null
+        },
+        "completeness": "complete",
+        "warnings": [],
+        "detail": null
+      }
+    },
+    {
+      "name": "synthetic-empty-01-no-matching-roots",
+      "request": {
+        "method": "POST",
+        "path": "/api/opening/asset-graph/query",
+        "body": {
+          "op": "roots",
+          "context": {
+            "kind": "workspace"
+          },
+          "lens": "assets",
+          "kinds": [
+            "document"
+          ],
+          "q": "合成：不存在的示例标题",
+          "limit": 20
+        }
+      },
+      "http": 200,
+      "response": {
+        "asOf": "2026-01-01T00:00:00.000Z",
+        "nodes": [],
+        "edges": [],
+        "page": {
+          "nextCursor": null
+        },
+        "completeness": "complete",
+        "warnings": [],
+        "detail": null
+      }
+    },
+    {
+      "name": "synthetic-partial-01-known-goal-scope-only",
+      "request": {
+        "method": "POST",
+        "path": "/api/opening/asset-graph/query",
+        "body": {
+          "op": "neighbors",
+          "context": {
+            "kind": "goal",
+            "id": "goal/20000000-0000-4000-8000-000000000001"
+          },
+          "lens": "structure",
+          "focus": "goal/20000000-0000-4000-8000-000000000001",
+          "direction": "out",
+          "relations": [
+            "scopes"
+          ],
+          "limit": 20
+        }
+      },
+      "http": 200,
+      "response": {
+        "asOf": "2026-01-01T00:00:00.000Z",
+        "nodes": [
+          {
+            "id": "goal/20000000-0000-4000-8000-000000000001",
+            "kind": "goal",
+            "label": "合成：理解示例课程中的变化率"
+          },
+          {
+            "id": "requirement/30000000-0000-4000-8000-000000000001",
+            "kind": "requirement",
+            "label": "合成：解释平均变化率与瞬时变化率"
+          }
+        ],
+        "edges": [
+          {
+            "id": "recorded:scopes:goal/20000000-0000-4000-8000-000000000001:requirement/30000000-0000-4000-8000-000000000001",
+            "from": "goal/20000000-0000-4000-8000-000000000001",
+            "to": "requirement/30000000-0000-4000-8000-000000000001",
+            "relation": "scopes",
+            "basis": "recorded"
+          }
+        ],
+        "page": {
+          "nextCursor": null
+        },
+        "completeness": "partial",
+        "warnings": [
+          "部分适用范围暂未能核对，仅显示已确认的要求关系。"
+        ],
+        "detail": null
+      }
+    },
+    {
+      "name": "synthetic-not-found-01-inaccessible-or-missing-a",
+      "request": {
+        "method": "POST",
+        "path": "/api/opening/asset-graph/query",
+        "body": {
+          "op": "detail",
+          "context": {
+            "kind": "workspace"
+          },
+          "lens": "all",
+          "focus": "document/80000000-0000-4000-8000-000000000001"
+        }
+      },
+      "http": 404,
+      "response": {
+        "error": {
+          "code": "NOT_FOUND",
+          "message": "请求的资源不可用。"
+        }
+      }
+    },
+    {
+      "name": "synthetic-not-found-02-inaccessible-or-missing-b",
+      "request": {
+        "method": "POST",
+        "path": "/api/opening/asset-graph/query",
+        "body": {
+          "op": "detail",
+          "context": {
+            "kind": "workspace"
+          },
+          "lens": "all",
+          "focus": "document/80000000-0000-4000-8000-000000000002"
+        }
+      },
+      "http": 404,
+      "response": {
+        "error": {
+          "code": "NOT_FOUND",
+          "message": "请求的资源不可用。"
+        }
+      }
+    },
+    {
+      "name": "synthetic-cursor-stale-01-restart-same-source-roots-query",
+      "request": {
+        "method": "POST",
+        "path": "/api/opening/asset-graph/query",
+        "body": {
+          "op": "roots",
+          "context": {
+            "kind": "workspace"
+          },
+          "lens": "assets",
+          "kinds": [
+            "source"
+          ],
+          "limit": 1,
+          "cursor": "synthetic-expired-source-roots-v0"
+        }
+      },
+      "http": 409,
+      "response": {
+        "error": {
+          "code": "CURSOR_STALE",
+          "message": "分页上下文已失效，请从本次查询的第一页重新读取。"
+        }
+      }
+    },
+    {
+      "name": "synthetic-not-found-03-goal-context-unscoped-document",
+      "request": {
+        "method": "POST",
+        "path": "/api/opening/asset-graph/query",
+        "body": {
+          "op": "detail",
+          "context": {
+            "kind": "goal",
+            "id": "goal/20000000-0000-4000-8000-000000000001"
+          },
+          "lens": "all",
+          "focus": "document/60000000-0000-4000-8000-000000000001"
+        }
+      },
+      "http": 404,
+      "response": {
+        "error": {
+          "code": "NOT_FOUND",
+          "message": "请求的资源不可用。"
+        }
+      }
+    }
+  ]
+}
