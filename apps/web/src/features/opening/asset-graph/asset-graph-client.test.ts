@@ -5,6 +5,7 @@ import { assetGraphPageSchema, type AssetGraphQuery } from "@aistudy/contracts";
 import { clearSessionExpiry } from "../../auth/session-expiry";
 import {
   AssetGraphRequestError,
+  DEFAULT_ASSET_GRAPH_QUERY_ENDPOINT,
   createAssetGraphClient,
   createHttpAssetGraphTransport,
   createSyntheticAssetGraphTransport,
@@ -86,6 +87,62 @@ describe("createSyntheticAssetGraphTransport", () => {
 
 describe("createHttpAssetGraphTransport and createAssetGraphClient", () => {
   const endpoint = "/api/opening/asset-graph/query";
+
+  it("defaults to DEFAULT_ASSET_GRAPH_QUERY_ENDPOINT (/api/opening/asset-graph/query) and keeps empty endpoint rejected", async () => {
+    expect(DEFAULT_ASSET_GRAPH_QUERY_ENDPOINT).toBe("/api/opening/asset-graph/query");
+    expect(() => createHttpAssetGraphTransport("")).toThrow("Asset graph endpoint must be a non-empty string.");
+    expect(() => createHttpAssetGraphTransport("   ")).toThrow("Asset graph endpoint must be a non-empty string.");
+
+    const firstCase = fixtures.cases[0]!;
+    const fetchMock = vi.fn<typeof fetch>(async () =>
+      new Response(JSON.stringify(firstCase.response), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const transport = createHttpAssetGraphTransport(undefined, fetchMock);
+    const page = await transport({ op: "roots", context: { kind: "workspace" }, lens: "all" });
+    expect(page).toEqual(assetGraphPageSchema.parse(firstCase.response));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe("/api/opening/asset-graph/query");
+    expect(init?.method).toBe("POST");
+    expect(init?.credentials).toBe("same-origin");
+    expect(init?.cache).toBe("no-store");
+
+    const err404 = vi.fn<typeof fetch>(async () =>
+      new Response(JSON.stringify({ error: { code: "NOT_FOUND", message: "请求的资源不可用。" } }), {
+        status: 404,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    await expect(
+      createHttpAssetGraphTransport(undefined, err404)({ op: "roots", context: { kind: "workspace" }, lens: "all" }),
+    ).rejects.toEqual(new AssetGraphRequestError("NOT_FOUND", "请求的资源不可用。", 404));
+
+    const err409 = vi.fn<typeof fetch>(async () =>
+      new Response(JSON.stringify({ error: { code: "CURSOR_STALE", message: "游标已失效" } }), {
+        status: 409,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    await expect(
+      createHttpAssetGraphTransport(undefined, err409)({ op: "roots", context: { kind: "workspace" }, lens: "all" }),
+    ).rejects.toEqual(new AssetGraphRequestError("CURSOR_STALE", "游标已失效", 409));
+
+    const err500 = vi.fn<typeof fetch>(async () => new Response("Internal Server Error", { status: 500 }));
+    await expect(
+      createHttpAssetGraphTransport(undefined, err500)({ op: "roots", context: { kind: "workspace" }, lens: "all" }),
+    ).rejects.toMatchObject({ name: "AssetGraphRequestError", code: "NETWORK", status: 500 });
+
+    const errNet = vi.fn<typeof fetch>(async () => {
+      throw new TypeError("network down");
+    });
+    await expect(
+      createHttpAssetGraphTransport(undefined, errNet)({ op: "roots", context: { kind: "workspace" }, lens: "all" }),
+    ).rejects.toMatchObject({ name: "AssetGraphRequestError", code: "NETWORK" });
+  });
 
   it("sends same-origin POST with no-store cache, signal, and canonical JSON body", async () => {
     const firstCase = fixtures.cases[0]!;

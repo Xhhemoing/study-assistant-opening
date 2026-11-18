@@ -9,6 +9,8 @@ import {
 } from "@aistudy/contracts";
 import { createSessionFetch } from "../../auth/session-expiry";
 
+export const DEFAULT_ASSET_GRAPH_QUERY_ENDPOINT = "/api/opening/asset-graph/query" as const;
+
 export type AssetGraphClientErrorCode =
   | AssetGraphErrorCode
   | "NETWORK"
@@ -134,7 +136,7 @@ export function createSyntheticAssetGraphTransport(
  * Never falls back to synthetic fixtures when a request fails.
  */
 export function createHttpAssetGraphTransport(
-  endpoint: string,
+  endpoint: string = DEFAULT_ASSET_GRAPH_QUERY_ENDPOINT,
   transportFetch: typeof fetch = (input, init) => fetch(input, init),
 ): AssetGraphTransport {
   const trimmedEndpoint = endpoint.trim();

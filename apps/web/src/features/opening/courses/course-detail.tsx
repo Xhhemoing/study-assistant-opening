@@ -368,7 +368,10 @@ export function CourseDetail({ id, surface = "opening", mode, conversationId }: 
         <CoursePanel name="overview">
           {grouped ? <h2 className="text-base font-semibold">学习安排</h2> : null}
           {studyActions}
-          <Link className={ui.quiet} href={objectHref(`/opening/courses/${encodeURIComponent(id)}?tab=units#course-learning-route`)}>全课路线</Link>
+          <div className="flex flex-wrap items-center gap-3">
+            <Link className={ui.quiet} href={objectHref(`/opening/courses/${encodeURIComponent(id)}?tab=units#course-learning-route`)}>全课路线</Link>
+            <Link className={ui.quiet} href={objectHref(`/opening/map?context=course&id=course/${encodeURIComponent(id)}`)}>知识地图</Link>
+          </div>
           {grouped ? <>{goal}<CourseExamProgress courseId={id} /></> : <><CourseContents courseId={id} assets={assets} /><Link className={ui.quiet} href={objectHref(`/opening/courses/${encodeURIComponent(id)}?tab=units`)}>全部单元与学习目录</Link></>}
         </CoursePanel>
         <CoursePanel name="practice" secondary={grouped}>
@@ -388,7 +391,7 @@ export function CourseDetail({ id, surface = "opening", mode, conversationId }: 
           {grouped ? <><h2 className="text-base font-semibold">章节路线</h2><CourseContents courseId={id} assets={assets} /></> : null}
           <div id="course-units" className="scroll-mt-6"><CourseStudyAlternatives courseId={id} archived={Boolean(course.archivedAt)} /></div>
           <CourseRoutePanel courseId={id} archived={Boolean(course.archivedAt)} grouped={grouped} originalConversationId={conversationId} refreshToken={routeRefreshToken ?? 0} onKnowledgeRebuilt={bumpKnowledge} onChanged={bumpKnowledge} />
-          <section className="space-y-3"><h2 className="text-base font-semibold">课程单元</h2><p className="text-sm leading-6 text-text-2">从课程的知识关联和完整目录选择下一步。</p><CourseKnowledge courseId={id} knowledgeRefreshToken={knowledgeRefreshToken ?? 0} /></section>
+          <section className="space-y-3"><div className="flex flex-wrap items-center justify-between gap-2"><h2 className="text-base font-semibold">课程单元</h2><Link className={ui.quiet} href={objectHref(`/opening/map?context=course&id=course/${encodeURIComponent(id)}`)}>知识地图</Link></div><p className="text-sm leading-6 text-text-2">从课程的知识关联和完整目录选择下一步。</p><CourseKnowledge courseId={id} knowledgeRefreshToken={knowledgeRefreshToken ?? 0} /></section>
           {builtInLessonsForCourse(id, course).length ? <section className="space-y-3 border-t border-line pt-5"><h2 className="text-base font-semibold">现成的线性代数课</h2><p className="text-sm leading-6 text-text-2">图示、思考与独立练习都已备好，不会替换本课程的任务或学习进度。</p><div className="flex flex-wrap gap-2">{builtInLessonsForCourse(id, course).map(lesson => <Link key={lesson.id} className={ui.secondary} href={objectHref(lesson.href)}>{lesson.label}</Link>)}</div></section> : null}
         </CoursePanel>
         <CoursePanel name="progress">

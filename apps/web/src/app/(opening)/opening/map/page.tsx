@@ -7,6 +7,7 @@ import {
   type AssetGraphLens,
   type AssetGraphNodeId,
 } from "@aistudy/contracts";
+import { DEFAULT_ASSET_GRAPH_QUERY_ENDPOINT } from "../../../../features/opening/asset-graph/asset-graph-client";
 import { AssetGraphWorkspace } from "../../../../features/opening/asset-graph/asset-graph-workspace";
 
 function resolveContext(rawContext?: string, rawId?: string): AssetGraphContext {
@@ -47,6 +48,7 @@ export default async function OpeningMapPage({
 
   return (
     <AssetGraphWorkspace
+      endpoint={DEFAULT_ASSET_GRAPH_QUERY_ENDPOINT}
       initialContext={initialContext}
       initialLens={initialLens}
       initialFocus={initialFocus}
