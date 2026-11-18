@@ -250,6 +250,45 @@ export const assetGraphEdgeSchema = z
   })
   .strict();
 
+const SAFE_OPENING_ORIGIN = "https://aistudy.local";
+
+function hasControlOrBackslash(text: string): boolean {
+  for (let index = 0; index < text.length; index += 1) {
+    const code = text.charCodeAt(index);
+    if (code < 0x20 || code === 0x7f || code === 0x5c) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** Validate that a navigate action href stays on a safe same-origin `/opening/` route. */
+export function isSafeOpeningNavigateHref(value: string): boolean {
+  if (!value.startsWith("/opening/") || value.startsWith("//")) {
+    return false;
+  }
+  if (hasControlOrBackslash(value) || /\s/.test(value)) {
+    return false;
+  }
+  if (/%(?:2e|2f|5c)/i.test(value) || /(?:^|\/)\.{1,2}(?:\/|$|[?#])/.test(value)) {
+    return false;
+  }
+
+  try {
+    const parsed = new URL(value, SAFE_OPENING_ORIGIN);
+    if (parsed.origin !== SAFE_OPENING_ORIGIN || !parsed.pathname.startsWith("/opening/")) {
+      return false;
+    }
+    const decodedPathname = decodeURIComponent(parsed.pathname);
+    if (hasControlOrBackslash(decodedPathname) || /(?:^|\/)\.{1,2}(?:\/|$)/.test(decodedPathname)) {
+      return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export const assetGraphActionSchema = z.discriminatedUnion("kind", [
   z
     .object({
@@ -259,7 +298,7 @@ export const assetGraphActionSchema = z.discriminatedUnion("kind", [
         .min(1)
         .max(1000)
         .refine(
-          v => v.startsWith("/opening/") && !v.startsWith("//") && !/[\\\s]/.test(v),
+          isSafeOpeningNavigateHref,
           "Navigate action must stay on same-origin /opening/ route",
         ),
       label: z.string().min(1).max(120),

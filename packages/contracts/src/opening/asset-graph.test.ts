@@ -9,11 +9,16 @@ import {
   assetGraphPageSchema,
   assetGraphQuerySchema,
   formatAssetGraphNodeId,
+  isSafeOpeningNavigateHref,
   normalizeAssetGraphQueryValue,
   parseAssetGraphNodeId,
   type AssetGraphParsedNodeId,
 } from "./asset-graph";
-import { assetGraphPageSchema as barrelPageSchema, parseAssetGraphNodeId as barrelParse } from "../index";
+import {
+  assetGraphPageSchema as barrelPageSchema,
+  isSafeOpeningNavigateHref as barrelIsSafeOpeningNavigateHref,
+  parseAssetGraphNodeId as barrelParse,
+} from "../index";
 
 const uuid1 = "11111111-1111-4111-8111-111111111111";
 const uuid2 = "22222222-2222-4222-8222-222222222222";
@@ -573,9 +578,27 @@ describe("assetGraphPageSchema and assetGraphErrorResponseSchema", () => {
       "//evil.invalid/opening/courses",
       "/api/opening/asset-graph",
       "/opening/courses path",
+      "/opening/courses\u00a0path",
       "/opening/courses\\evil",
       "javascript:alert(1)",
+      "/opening/courses\u0000",
+      "/opening/courses\u0007",
+      "/opening/courses\u001f",
+      "/opening/courses\u007f",
+      "/opening/courses%00",
+      "/opening/courses%ZZ",
+      "/opening/../admin",
+      "/opening/../../api/auth/me",
+      "/opening/%2e%2e/admin",
+      "/opening/%2E%2E/admin",
+      "/opening/%2fadmin",
+      "/opening/%5cadmin",
+      "/opening/..",
+      "/opening/.",
+      "/opening/..#fragment",
+      "/opening/.?query=1",
     ]) {
+      expect(isSafeOpeningNavigateHref(unsafeHref)).toBe(false);
       expect(
         assetGraphPageSchema.safeParse({
           ...validBase,
@@ -594,6 +617,34 @@ describe("assetGraphPageSchema and assetGraphErrorResponseSchema", () => {
           },
         }).success,
       ).toBe(false);
+    }
+
+    // Safe navigate.href
+    for (const safeHref of [
+      "/opening/courses/10000000-0000-4000-8000-000000000001#course-goals",
+      "/opening/library?tab=materials&source=40000000-0000-4000-8000-000000000001&version=1",
+      "/opening/map?context=workspace",
+    ]) {
+      expect(isSafeOpeningNavigateHref(safeHref)).toBe(true);
+      expect(barrelIsSafeOpeningNavigateHref(safeHref)).toBe(true);
+      expect(
+        assetGraphPageSchema.safeParse({
+          ...validBase,
+          detail: {
+            id: courseNode.id,
+            learnerState: null,
+            requirementStatus: null,
+            notes: [],
+            actions: [
+              {
+                kind: "navigate",
+                href: safeHref,
+                label: "跳转",
+              },
+            ],
+          },
+        }).success,
+      ).toBe(true);
     }
   });
 });
