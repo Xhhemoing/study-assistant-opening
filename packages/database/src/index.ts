@@ -346,3 +346,10 @@ export * from "./repositories/opening-study-notes";
 export * from "./repositories/opening-answer-interpretation";
 export * from "./repositories/opening-source-visual-recognitions";
 export { createOpeningLearningAdviceContextRepository } from './repositories/opening-learning-advice-context';
+export {
+  createOpeningAssetGraphRepository,
+  OpeningAssetGraphError,
+  type OpeningAssetGraphErrorCode,
+  type OpeningAssetGraphOptions,
+  type OpeningAssetGraphRepository,
+} from "./repositories/opening-asset-graph";
