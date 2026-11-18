@@ -1023,4 +1023,87 @@ describe("TeachingContinueEntry jobInFlight polling and compile auto-transition"
       vi.useRealTimers();
     }
   });
+
+  it("calls onResumeUpdated with the latest callback ref on requestCompile and backoff polling without resetting backoff", async () => {
+    vi.useFakeTimers();
+    Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const queuedActivity: TeachingActivity = { ...shell, generateStatus: "queued" };
+    const queuedResume = learningResume({ ...empty, generateStatus: "queued", gates: { ...empty.gates, job: "in_flight" } });
+    const generatingResume = learningResume({ ...empty, generateStatus: "generating", gates: { ...empty.gates, job: "in_flight" } });
+    const failedResume = learningResume({ ...empty, generateStatus: "failed", gates: { ...empty.gates, job: "unknown" } });
+    const getTeachingResume = vi
+      .fn()
+      .mockResolvedValueOnce(queuedResume)
+      .mockResolvedValueOnce(generatingResume)
+      .mockResolvedValueOnce(failedResume);
+    const api = {
+      requestTeachingCompile: vi.fn().mockResolvedValue(queuedActivity),
+      getTeachingResume,
+      getTeachingClientInit: vi.fn(),
+    } as unknown as OpeningApi;
+    const onResumeUpdatedFirst = vi.fn();
+    const onResumeUpdatedSecond = vi.fn();
+
+    try {
+      await act(async () => {
+        root.render(createElement(TeachingContinueEntry, { activity: shell, resume: empty, teachingCompileEnabled: true, api, onResumeUpdated: onResumeUpdatedFirst }));
+      });
+      await act(async () => host.querySelector<HTMLButtonElement>('[data-teaching-request-compile="true"]')!.click());
+      expect(onResumeUpdatedFirst).toHaveBeenCalledExactlyOnceWith(queuedResume);
+
+      // Replacing onResumeUpdated keeps the active 3s timer intact instead of resetting backoff.
+      await act(async () => {
+        root.render(createElement(TeachingContinueEntry, { activity: queuedActivity, resume: queuedResume, teachingCompileEnabled: true, api, onResumeUpdated: onResumeUpdatedSecond }));
+      });
+      await act(async () => { await vi.advanceTimersByTimeAsync(2999); });
+      expect(getTeachingResume).toHaveBeenCalledTimes(1);
+      await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+      expect(getTeachingResume).toHaveBeenCalledTimes(2);
+      expect(onResumeUpdatedFirst).toHaveBeenCalledTimes(1);
+      expect(onResumeUpdatedSecond).toHaveBeenCalledExactlyOnceWith(generatingResume);
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(6000); });
+      expect(getTeachingResume).toHaveBeenCalledTimes(3);
+      expect(onResumeUpdatedSecond).toHaveBeenCalledTimes(2);
+      expect(onResumeUpdatedSecond).toHaveBeenNthCalledWith(2, failedResume);
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+      vi.useRealTimers();
+    }
+  });
+
+  it("calls onResumeUpdated once on manual reread and omits redundant calls on ResumeCard continue", async () => {
+    Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const queuedResume = learningResume({ ...empty, generateStatus: "queued", gates: { ...empty.gates, job: "in_flight" } });
+    const readyResume = learningResume({ generateStatus: "ready", contentVersion: 1, clientInit: clientInit(), gates: { ...empty.gates, job: "ready" } });
+    const api = {
+      requestTeachingCompile: vi.fn(),
+      getTeachingResume: vi.fn().mockResolvedValueOnce(readyResume),
+      getTeachingClientInit: vi.fn(),
+    } as unknown as OpeningApi;
+    const onResumeUpdated = vi.fn();
+
+    try {
+      await act(async () => {
+        root.render(createElement(TeachingContinueEntry, { activity: { ...shell, generateStatus: "queued" }, resume: queuedResume, teachingCompileEnabled: true, api, onResumeUpdated }));
+      });
+      await act(async () => host.querySelector<HTMLButtonElement>('[data-resume-continue-cta]')!.click());
+      expect(host.querySelector('[data-teaching-continue-entry="wait_init"]')).toBeTruthy();
+      expect(onResumeUpdated).not.toHaveBeenCalled();
+
+      await act(async () => host.querySelector<HTMLButtonElement>('[data-teaching-refresh-status="true"]')!.click());
+      expect(onResumeUpdated).toHaveBeenCalledExactlyOnceWith(readyResume);
+      expect(host.querySelector('[data-teaching-continue-entry="workspace"]')).toBeTruthy();
+    } finally {
+      await act(async () => root.unmount());
+      host.remove();
+    }
+  });
 });

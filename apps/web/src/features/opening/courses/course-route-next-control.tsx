@@ -14,6 +14,7 @@ function isNextPendingStale(command: Command, activityId: string, fresh: CourseR
   if (fresh.currentRoute.goalId !== command.input.goalId) return true;
   if (fresh.currentRoute.goalRevision !== command.input.expectedGoalRevision) return true;
   if (fresh.currentActivity.pathVersion !== command.input.expectedPathVersion) return true;
+  if ((command.input.observationId ?? null) !== (fresh.observationId ?? null)) return true;
   return false;
 }
 function key(id: string) { return `aistudy:route-next:${id}`; }

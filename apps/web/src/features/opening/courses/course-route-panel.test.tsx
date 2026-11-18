@@ -620,3 +620,43 @@ it("rereads the route cleanly on an initial 409 conflict without leaving the pan
   expect(button("学习这一项").disabled).toBe(false);
   expect(sessionStorage.getItem(`aistudy:route-command:${courseId}`)).toBeNull();
 });
+
+it("unlocks pending confirm command after a 409 reread detects an added requirement with unchanged prior revisions", async () => {
+  sessionStorage.clear();
+  const { CourseRouteRequestError } = await import("./course-route-client");
+  const addedId = "22222222-2222-4222-8222-222222222222";
+  const withAdded: CourseRouteSnapshot = {
+    ...confirmed,
+    summary: { ...confirmed.summary, total: 2, mandatory: 2 },
+    requirements: [
+      confirmed.requirements[0]!,
+      {
+        ...confirmed.requirements[0]!,
+        requirement: { ...confirmed.requirements[0]!.requirement, id: addedId, stableSkillId: addedId, requirementKey: "concept-two", title: "概念二", position: 1 },
+      },
+    ],
+  };
+  const api = client(confirmed);
+  vi.mocked(api.read).mockResolvedValueOnce(confirmed).mockResolvedValue(withAdded);
+  vi.mocked(api.confirm)
+    .mockRejectedValueOnce(new TypeError("lost"))
+    .mockRejectedValueOnce(new CourseRouteRequestError("版本已更新", 409));
+
+  await render(api, { goals: selectedGoal });
+  await act(async () => button("检查与确认课程范围").click());
+  await act(async () => button("确认这份全课范围").click());
+  expect(host.textContent).toContain("安排结果尚未确认");
+  expect(button("学习这一项").disabled).toBe(true);
+  expect(button("重新读取课程路线").disabled).toBe(true);
+  expect(sessionStorage.getItem(`aistudy:route-command:${courseId}`)).not.toBeNull();
+
+  await act(async () => button("重新确认这次安排").click());
+  expect(api.read).toHaveBeenCalledTimes(2);
+  expect(sessionStorage.getItem(`aistudy:route-command:${courseId}`)).toBeNull();
+  expect(host.textContent).not.toContain("安排结果尚未确认");
+  expect(host.textContent).toContain("已不能应用");
+  expect(host.textContent).toContain("概念二");
+  expect(button("学习这一项").disabled).toBe(false);
+  expect(button("检查与确认课程范围").disabled).toBe(false);
+  expect(button("重新读取课程路线").disabled).toBe(false);
+});

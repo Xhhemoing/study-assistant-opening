@@ -651,6 +651,7 @@ export type TeachingContinueEntryProps = {
   startInWorkspace?: boolean;
   initialClientInit?: ActivitySpecClientInit | null;
   onActivityUpdated?: (activity: TeachingActivity) => void;
+  onResumeUpdated?: (resume: LearningResume) => void;
   /**
    * When false, hide 「生成主讲内容」 (compiler off / capabilities).
    * Default true preserves prior call sites; Today wires the real switch.
@@ -675,6 +676,7 @@ export function TeachingContinueEntry({
   startInWorkspace = false,
   initialClientInit = null,
   onActivityUpdated,
+  onResumeUpdated,
   teachingCompileEnabled = true,
   contextualTools,
   headerLeading,
@@ -729,7 +731,12 @@ export function TeachingContinueEntry({
     if (resumeProp) setLiveResume(resumeProp);
   }, [resumeProp]);
 
-  const updateResume = useCallback((next: LearningResume) => {
+  const onActivityUpdatedRef = useRef(onActivityUpdated);
+  onActivityUpdatedRef.current = onActivityUpdated;
+  const onResumeUpdatedRef = useRef(onResumeUpdated);
+  onResumeUpdatedRef.current = onResumeUpdated;
+
+  const applyResume = useCallback((next: LearningResume) => {
     setLiveResume(next);
     const prev = activityRef.current;
     if (
@@ -747,13 +754,18 @@ export function TeachingContinueEntry({
         pathVersion: next.pathVersion,
       };
       setActivity(updated);
-      onActivityUpdated?.(updated);
+      onActivityUpdatedRef.current?.(updated);
     }
-  }, [onActivityUpdated]);
+  }, []);
+
+  const updateResume = useCallback((next: LearningResume) => {
+    applyResume(next);
+    onResumeUpdatedRef.current?.(next);
+  }, [applyResume]);
 
   const openWorkspaceFromResume = useCallback(
     async (resume: LearningResume) => {
-      updateResume(resume);
+      applyResume(resume);
       setWaitError(null);
 
       // Prefer resume.clientInit when present and usable.
@@ -802,7 +814,7 @@ export function TeachingContinueEntry({
         if (mounted.current) setWaitBusy(false);
       }
     },
-    [api, updateResume],
+    [api, applyResume],
   );
 
   const backToCard = useCallback(() => {
