@@ -40,13 +40,12 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  setAuthRuntimeForTests(null);
-  if (f) {
-    await f.sql`DELETE FROM workspaces WHERE id IN (${f.scope.workspaceId}, ${f.otherScope.workspaceId})`;
-    await f.sql`DELETE FROM users WHERE id IN (${f.scope.ownerUserId}, ${f.otherScope.ownerUserId})`;
+  try {
+    setAuthRuntimeForTests(null);
+    await runtime?.close();
+  } finally {
+    await f?.close();
   }
-  await runtime?.close();
-  await f?.close();
 });
 
 function jsonRequest(url: string, body: unknown, cookie = f.cookie): Request {
