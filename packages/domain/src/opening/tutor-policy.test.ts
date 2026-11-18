@@ -7,8 +7,10 @@ import {
   assistedItemBlocksIndependent,
   exposureLevelForMode,
   freshRetestExposure,
+  isAdaptiveTutorRecommendInput,
   makeTutorInstruction,
   marksReveal,
+  recommendAdaptiveTutorAction,
   recommendTutorAction,
   variantProblemRef,
   PAGE_CITATION_CLARIFY_MESSAGE,
@@ -127,18 +129,85 @@ describe("K02a tutor-policy", () => {
     expect(action.nodeId).toBeNull();
     expect(action.evidenceIds).toEqual([]);
   });
+
+  it("thin policy branches: hinted -> worked_example, null page -> clarify, assisted success / revealed -> variant, and requires skillLabel", () => {
+    expect(
+      recommendTutorAction({
+        skillLabel: "limits",
+        currentPage: 2,
+        sourceIds: [],
+        sessionExposures: ["hinted"],
+        assistedSuccessOnCurrentItem: false,
+        retestDue: false,
+      }),
+    ).toEqual({
+      kind: "worked_example",
+      skillLabel: "limits",
+      currentPage: 2,
+      nodeId: null,
+      evidenceIds: [],
+      problemRef: null,
+      reason: "Hint delivered; offer a full worked example if still stuck.",
+    });
+
+    expect(
+      recommendTutorAction({
+        skillLabel: " limits ",
+        currentPage: null,
+        sourceIds: [],
+        sessionExposures: [],
+        assistedSuccessOnCurrentItem: false,
+        retestDue: false,
+      }),
+    ).toMatchObject({ kind: "clarify", skillLabel: "limits", currentPage: null });
+
+    expect(
+      recommendTutorAction({
+        skillLabel: "limits",
+        currentPage: 2,
+        sourceIds: [],
+        problemRef: "prob-1",
+        sessionExposures: ["hinted"],
+        assistedSuccessOnCurrentItem: true,
+        retestDue: false,
+      }),
+    ).toMatchObject({ kind: "independent_variant", problemRef: "prob-1:variant" });
+
+    expect(
+      recommendTutorAction({
+        skillLabel: "limits",
+        currentPage: 2,
+        sourceIds: [],
+        sessionExposures: ["revealed"],
+        assistedSuccessOnCurrentItem: false,
+        retestDue: false,
+      }),
+    ).toMatchObject({ kind: "independent_variant", problemRef: "variant:1" });
+
+    expect(() =>
+      recommendTutorAction({
+        skillLabel: "   ",
+        currentPage: 2,
+        sourceIds: [],
+        sessionExposures: [],
+        assistedSuccessOnCurrentItem: false,
+        retestDue: false,
+      }),
+    ).toThrow("skillLabel is required");
+  });
 });
 
 describe("K02 adaptive tutor-policy (nodeId path)", () => {
-  it("asks for independent transfer after assisted success", () => {
-    expect(
-      recommendTutorAction({
-        nodeId: "n",
-        hasCheckedIndependent: false,
-        hasAssistance: true,
-        retestDue: false,
-      }),
-    ).toBe("independent_variant");
+  it("asks for independent transfer after assisted success via both recommendAdaptiveTutorAction and recommendTutorAction", () => {
+    const adaptiveInput = {
+      nodeId: "node-1",
+      hasCheckedIndependent: false,
+      hasAssistance: true,
+      retestDue: false,
+    };
+    expect(isAdaptiveTutorRecommendInput(adaptiveInput)).toBe(true);
+    expect(recommendAdaptiveTutorAction(adaptiveInput)).toBe("independent_variant");
+    expect(recommendTutorAction(adaptiveInput)).toBe("independent_variant");
   });
 
   it("prioritizes delayed retest when due", () => {
@@ -172,5 +241,20 @@ describe("K02 adaptive tutor-policy (nodeId path)", () => {
         retestDue: false,
       }),
     ).toBe("independent_variant");
+  });
+
+  it("requires a non-blank nodeId for adaptive recommendation", () => {
+    const blank = {
+      nodeId: "   ",
+      hasCheckedIndependent: false,
+      hasAssistance: true,
+      retestDue: false,
+    };
+    expect(() => recommendAdaptiveTutorAction(blank)).toThrow(
+      "nodeId is required for adaptive tutor recommendation",
+    );
+    expect(() => recommendTutorAction(blank)).toThrow(
+      "nodeId is required for adaptive tutor recommendation",
+    );
   });
 });

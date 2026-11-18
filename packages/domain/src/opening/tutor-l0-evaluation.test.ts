@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { teachingLearnerFocusSchema } from "@aistudy/contracts";
+import { NEXT_LEARNING_STEP_VERSION } from "./adaptive/next-learning-step";
 import { evaluateTutorL0, executeTutorL0Case, judgeTutorL0Output, parseTutorL0Fixture, tutorL0MeasurementSkeleton } from "./tutor-l0-evaluation";
 
 const fixture = () => JSON.parse(readFileSync(new URL("../../../../tests/fixtures/opening/tutor-l0-cases.json", import.meta.url), "utf8"));
@@ -188,6 +189,29 @@ describe("offline synthetic L0", () => {
     const thin = report.cases.find(row => row.caseId === "thin-hint-offer");
     expect(thin?.actualOutput).toMatchObject({ kind: "worked_example" });
     expect(thin?.scope.toolSideEffects).toBe("unknown");
+  });
+  it("passes all tutor-l0-cases.json cases under NEXT_LEARNING_STEP_VERSION with zero regressions", () => {
+    expect(NEXT_LEARNING_STEP_VERSION).toBe("next-learning-step-6");
+    const data = fixture();
+    const report = evaluateTutorL0(data);
+    expect(report.cases).toHaveLength(data.cases.length);
+    expect(report.summary).toMatchObject({
+      denominator: data.cases.length,
+      passed: data.cases.length,
+      failed: 0,
+      missing: 0,
+      errors: 0,
+      rulePassRatio: 1,
+    });
+    const nextCases = report.cases.filter(row => row.entry === "nextLearningStep");
+    expect(nextCases.length).toBeGreaterThan(0);
+    for (const row of nextCases) {
+      expect(row.policyVersion).toBe(NEXT_LEARNING_STEP_VERSION);
+    }
+    for (const row of report.cases) {
+      expect(row.judgment).toEqual({ status: "pass", violations: [] });
+      expect(row.error).toBeNull();
+    }
   });
   it("keeps rule replay identical when the model is explicitly disabled", () => {
     const data = parseTutorL0Fixture(fixture());

@@ -79,17 +79,6 @@ describe("nextLearningStep", () => {
     expect(nextLearningStep(input({ learningPhase: "maintain", phaseSource: "explicit" }))).not.toMatchObject({ phase: "maintain" });
     expect(nextLearningStep(input({}))).not.toHaveProperty("phase");
   });
-  it("owns legacy thin and adaptive decisions without manufacturing observations", () => {
-    expect(nextLearningStep({ kind: "adaptive", input: {
-      nodeId: "node-1", hasCheckedIndependent: false, hasAssistance: true, retestDue: false,
-    } })).toEqual({ kind: "independent_variant" });
-    expect(nextLearningStep({ kind: "thin", input: {
-      skillLabel: "limits", currentPage: 2, sourceIds: [], sessionExposures: ["hinted"],
-      assistedSuccessOnCurrentItem: false, retestDue: false,
-    } })).toEqual({ kind: "worked_example", skillLabel: "limits", currentPage: 2,
-      nodeId: null, evidenceIds: [], problemRef: null,
-      reason: "Hint delivered; offer a full worked example if still stuck." });
-  });
 
   it("captures only evaluated priority branches and the original rule decision", () => {
     const captured = captureNextLearningStep(input({ observations: [observation({ verifiedCorrect: "no" })] }));
