@@ -27,12 +27,14 @@ describe("study session V2 navigation", () => {
     ["/opening/courses/course-a/study?mode=sprint", "/opening/courses"],
     ["/opening/library", "/opening/library"],
     ["/opening/library/doc-a", "/opening/library"],
+    ["/opening/map", "/opening/library"],
+    ["/opening/map?context=course&id=course/10000000-0000-4000-8000-000000000001", "/opening/library"],
     ["/opening/search", "/opening/library"],
   ])("selects one owner for %s", (pathname, expected) => {
     expect(openingNavigation(options).filter(item => navigationIsActive(item.href, pathname, "", options)).map(item => item.href)).toEqual([expected]);
   });
 
-  it.each(["/opening/coursesx", "/opening/reviewx", "/opening/cardsx", "/opening/searchx", "/opening/settings"])("does not select a core destination for %s", pathname => {
+  it.each(["/opening/coursesx", "/opening/reviewx", "/opening/cardsx", "/opening/searchx", "/opening/mapx", "/opening/settings"])("does not select a core destination for %s", pathname => {
     expect(openingNavigation(options).filter(item => navigationIsActive(item.href, pathname, "", options))).toEqual([]);
   });
 

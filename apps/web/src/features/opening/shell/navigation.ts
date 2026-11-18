@@ -25,6 +25,6 @@ export function navigationIsActive(href: string, pathname: string, _search = "",
   if (within("/opening/courses")) return hrefPath === (studySessionV2 ? "/opening/courses" : "/opening/today");
   if (["/opening/agent", "/opening/assistant", "/opening/sprint", "/opening/suggestions"].some(within)) return hrefPath === "/opening/today";
   if (within("/opening/cards") || (studySessionV2 && within("/opening/review"))) return hrefPath === (studySessionV2 ? "/opening/today" : "/opening/review");
-  if (within("/opening/search")) return hrefPath === "/opening/library";
+  if (within("/opening/search") || within("/opening/map")) return hrefPath === "/opening/library";
   return within(hrefPath);
 }
