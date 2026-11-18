@@ -4,7 +4,7 @@ import { act, createElement, useEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { OpeningApi } from "../client/api";
-import type { TeachingActivity } from "@aistudy/contracts";
+import type { ActivitySpecClientInit, LearningResume, TeachingActivity } from "@aistudy/contracts";
 
 const data = vi.hoisted(() => ({
   course: { id: "11111111-1111-4111-8111-111111111111", title: "线性代数", archivedAt: null as string | null },
@@ -13,6 +13,7 @@ const data = vi.hoisted(() => ({
     status: "active", generateStatus: "ready", contentVersion: 1, pathVersion: 1, intentKind: "goal", intentSummary: "矩阵",
     sourceIds: [], clientKey: "test:course-study", createdAt: "2026-10-23T00:00:00.000Z", updatedAt: "2026-10-23T00:00:00.000Z" } satisfies TeachingActivity,
   teachingMount: vi.fn(), practiceMount: vi.fn(), practiceProps: vi.fn(), materialsProps: vi.fn(), router: { replace: vi.fn() },
+  useRealContinueEntry: false,
 }));
 vi.mock("next/navigation", () => ({ useRouter: () => data.router, usePathname: () => `/opening/courses/${data.course.id}/study` }));
 vi.mock("./course-detail", () => ({ useCourseBundle: () => ({ course: data.course, loading: false, error: null, reload: vi.fn() }) }));
@@ -20,10 +21,18 @@ vi.mock("./course-study-entry", () => ({ openCourseStudy: vi.fn(async () => ({ k
 vi.mock("./course-study-context-tools", () => ({ CourseStudyContextTools: () => null }));
 vi.mock("./course-study-materials", () => ({ CourseStudyMaterials: ({ children, gate, materialsHref }: { children: React.ReactNode; gate: string; materialsHref: string }) => { data.materialsProps({ gate, materialsHref }); return children; } }));
 vi.mock("./course-route-next-control", () => ({ CourseRouteNextControl: ({ originalConversationId }: { originalConversationId?: string | null }) => createElement("p", { "data-route-conversation": originalConversationId ?? "" }) }));
-vi.mock("../teaching/teaching-workspace", async () => ({ ...(await vi.importActual("../teaching/teaching-workspace")), TeachingContinueEntry: ({ onWorkspaceVisibilityChange, previousToolsAction }: { onWorkspaceVisibilityChange?: (visible: boolean) => void; previousToolsAction?: React.ReactNode }) => {
-  useEffect(() => { data.teachingMount(); }, []);
-  return <><textarea aria-label="讲解原答" defaultValue="讲解中的步骤" /><button onClick={() => onWorkspaceVisibilityChange?.(true)}>讲义已就绪</button>{previousToolsAction}</>;
-} }));
+vi.mock("../teaching/teaching-workspace", async () => {
+  const actual = await vi.importActual<typeof import("../teaching/teaching-workspace")>("../teaching/teaching-workspace");
+  function MockTeachingContinueEntry({ onWorkspaceVisibilityChange, previousToolsAction }: { onWorkspaceVisibilityChange?: (visible: boolean) => void; previousToolsAction?: React.ReactNode }) {
+    useEffect(() => { data.teachingMount(); }, []);
+    return <><textarea aria-label="讲解原答" defaultValue="讲解中的步骤" /><button onClick={() => onWorkspaceVisibilityChange?.(true)}>讲义已就绪</button>{previousToolsAction}</>;
+  }
+  return {
+    ...actual,
+    TeachingContinueEntry: (props: React.ComponentProps<typeof actual.TeachingContinueEntry>) =>
+      data.useRealContinueEntry ? <actual.TeachingContinueEntry {...props} /> : <MockTeachingContinueEntry {...props} />,
+  };
+});
 vi.mock("../learning/attempt-form", () => ({ LearningAttemptForm: (props: { initialFocus?: { skillLabel: string; requirementKey: string | null } }) => {
   data.practiceProps(props);
   useEffect(() => { data.practiceMount(); }, []);
@@ -39,6 +48,7 @@ let host: HTMLDivElement;
 let root: Root;
 beforeEach(() => {
   data.course.archivedAt = null;
+  data.useRealContinueEntry = false;
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
   vi.clearAllMocks();
   window.localStorage.clear();
@@ -330,4 +340,74 @@ it("passes learnerFocus from the active TeachingActivity as initialFocus when op
   await act(async () => root.render(<CourseStudyWorkspace courseId={data.course.id} teachingEnabled teachingCompileEnabled sourceIds={[]} timeZone="Asia/Shanghai" api={api} />));
   await click("独立练习");
   expect(data.practiceProps).toHaveBeenCalledWith(expect.objectContaining({ initialFocus: { skillLabel: "线性无关", requirementKey: "span:linear-combination:v1" } }));
+});
+
+function fullResume(overrides: Partial<LearningResume>): LearningResume {
+  return {
+    activityId: data.activity.id,
+    status: "active",
+    generateStatus: "queued",
+    contentVersion: 0,
+    pathVersion: 1,
+    clientInit: null,
+    thoughtTrain: { currentBlockId: null, skippedBlockIds: [], branchStack: [], commandLog: [] },
+    drafts: [],
+    interactionParams: {},
+    actualAttempts: [],
+    helpDelivered: [],
+    openProblems: [],
+    gates: { permission: "owned", materials: "available", unavailableSourceIds: [], job: "in_flight" },
+    continuableActions: ["wait_job"],
+    summary: { status: "skipped" },
+    ...overrides,
+  };
+}
+
+it.each(["failed", "ready"] as const)("syncs live LearningResume when an in-flight job transitions to %s while on the entry card", async outcome => {
+  vi.useFakeTimers();
+  data.useRealContinueEntry = true;
+  const blockId = "77777777-7777-4777-8777-777777777777";
+  const readyInit: ActivitySpecClientInit = {
+    id: "88888888-8888-4888-8888-888888888888",
+    activityId: data.activity.id,
+    teachingUnitId: "99999999-9999-4999-8999-999999999999",
+    documentId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    revisionNumber: 1,
+    blockOrder: [{ blockId, position: 0, blockType: "text", role: "teach" }],
+    sourceRefs: [],
+    goals: [{ goalId: "g1", statement: "矩阵基础" }],
+    verificationStatus: "structure_ok",
+    generationConfig: {},
+    version: 1,
+    createdAt: "2026-10-23T00:00:00.000Z",
+    updatedAt: "2026-10-23T00:00:00.000Z",
+    blocks: [{ blockId, position: 0, blockType: "text", role: "teach", content: { text: "矩阵定义" } }],
+    contentVersion: 1,
+    checkpointJson: {},
+  };
+  const queuedActivity: TeachingActivity = { ...data.activity, generateStatus: "queued", contentVersion: 0 };
+  const queuedResume = fullResume({ generateStatus: "queued", contentVersion: 0, clientInit: null, gates: { permission: "owned", materials: "available", unavailableSourceIds: [], job: "in_flight" } });
+  const nextResume = outcome === "failed"
+    ? fullResume({ generateStatus: "failed", contentVersion: 0, clientInit: null, gates: { permission: "owned", materials: "available", unavailableSourceIds: [], job: "unknown" } })
+    : fullResume({ generateStatus: "ready", contentVersion: 1, clientInit: readyInit, gates: { permission: "owned", materials: "available", unavailableSourceIds: [], job: "ready" } });
+
+  vi.mocked(openCourseStudy).mockResolvedValueOnce({ kind: "activity", activity: queuedActivity });
+  const getTeachingResume = vi.fn().mockResolvedValueOnce(queuedResume).mockResolvedValueOnce(nextResume);
+  const api = { getTeachingResume } as unknown as OpeningApi;
+
+  try {
+    await act(async () => root.render(<CourseStudyWorkspace courseId={data.course.id} teachingEnabled teachingCompileEnabled sourceIds={[]} timeZone="Asia/Shanghai" api={api} />));
+    expect(host.querySelector("[data-study-alternatives]")?.getAttribute("data-study-alternatives")).toBe("waiting");
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+    expect(getTeachingResume).toHaveBeenCalledTimes(2);
+    if (outcome === "failed") {
+      expect(host.querySelector("[data-study-alternatives]")?.getAttribute("data-study-alternatives")).toBe("failed");
+      expect(host.querySelector("[data-study-alternatives]")?.textContent).toContain("本次讲解生成未完成");
+    } else {
+      expect(host.querySelector("[data-study-alternatives]")).toBeNull();
+    }
+  } finally {
+    vi.useRealTimers();
+  }
 });

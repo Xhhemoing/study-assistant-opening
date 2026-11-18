@@ -67,3 +67,53 @@ it("unlocks pending next command after a 409 conflict triggers a reread with a n
   expect(button("核对结果并安排下一步").disabled).toBe(false);
   expect(button("安排3天后复测").disabled).toBe(false);
 });
+
+it("unlocks pending next command after a 409 reread detects a newly arrived observationId", async () => {
+  const { CourseRouteRequestError } = await import("./course-route-client");
+  const api = client();
+  vi.mocked(api.read)
+    .mockResolvedValueOnce({ ...snapshot, observationId: null } as never)
+    .mockResolvedValueOnce({ ...snapshot, observationId: id } as never);
+  vi.mocked(api.next)
+    .mockRejectedValueOnce(new TypeError("lost"))
+    .mockRejectedValueOnce(new CourseRouteRequestError("作答记录已更新", 409));
+
+  await render(api);
+  await act(async () => button("核对结果并安排下一步").click());
+  expect(host.textContent).toContain("下一步结果尚未确认");
+  expect(sessionStorage.getItem(`aistudy:route-next:${id}`)).not.toBeNull();
+
+  await act(async () => button("重新确认这次下一步").click());
+  expect(api.read).toHaveBeenCalledTimes(2);
+  expect(sessionStorage.getItem(`aistudy:route-next:${id}`)).toBeNull();
+  expect(host.textContent).not.toContain("下一步结果尚未确认");
+  expect(host.textContent).toContain("已不能应用");
+  expect(button("核对结果并安排下一步").disabled).toBe(false);
+  expect(button("安排3天后复测").disabled).toBe(false);
+});
+
+it("unlocks pending retest command after a 409 reread detects a changed observationId", async () => {
+  const { CourseRouteRequestError } = await import("./course-route-client");
+  const nextObservationId = "22222222-2222-4222-8222-222222222222";
+  const api = client();
+  const scheduleRetest = vi.fn()
+    .mockRejectedValueOnce(new TypeError("lost"))
+    .mockRejectedValueOnce(new CourseRouteRequestError("作答记录已更新", 409));
+  Object.assign(api, { scheduleRetest });
+  vi.mocked(api.read)
+    .mockResolvedValueOnce({ ...snapshot, observationId: id } as never)
+    .mockResolvedValueOnce({ ...snapshot, observationId: nextObservationId } as never);
+
+  await render(api);
+  await act(async () => button("安排3天后复测").click());
+  expect(host.textContent).toContain("复测安排结果尚未确认");
+  expect(sessionStorage.getItem(`aistudy:route-next:${id}`)).not.toBeNull();
+
+  await act(async () => button("重新确认这次复测").click());
+  expect(api.read).toHaveBeenCalledTimes(2);
+  expect(sessionStorage.getItem(`aistudy:route-next:${id}`)).toBeNull();
+  expect(host.textContent).not.toContain("复测安排结果尚未确认");
+  expect(host.textContent).toContain("已不能应用");
+  expect(button("核对结果并安排下一步").disabled).toBe(false);
+  expect(button("安排3天后复测").disabled).toBe(false);
+});

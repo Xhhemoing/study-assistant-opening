@@ -82,10 +82,13 @@ function isPendingCommandStale(command: Command, snapshot: CourseRouteSnapshot |
     if (command.input.expectedRevisions.length === 0) {
       return snapshot.scopeState === "confirmed" || snapshot.requirements.length > 0;
     }
-    return command.input.expectedRevisions.some((expected) => {
-      const row = snapshot.requirements.find((item) => item.requirement.id === expected.id);
-      return !row || row.requirement.revision !== expected.revision;
-    });
+    return (
+      snapshot.requirements.length !== command.input.expectedRevisions.length ||
+      command.input.expectedRevisions.some((expected) => {
+        const row = snapshot.requirements.find((item) => item.requirement.id === expected.id);
+        return !row || row.requirement.revision !== expected.revision;
+      })
+    );
   }
   if (snapshot) {
     const row = snapshot.requirements.find((item) => item.requirement.id === command.input.requirementId);
