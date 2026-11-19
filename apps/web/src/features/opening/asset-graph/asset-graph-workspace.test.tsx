@@ -4,10 +4,20 @@ import { resolve } from "node:path";
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { CourseRouteActionResult, TeachingActivity } from "@aistudy/contracts";
+import type {
+  AssetGraphEdge,
+  AssetGraphPage,
+  CourseRouteActionResult,
+  TeachingActivity,
+} from "@aistudy/contracts";
 import { notifyOpeningPrivacyChange } from "../client/privacy-change";
 import type { CourseRouteClient } from "../courses/course-route-client";
 import {
+  bundleCanvasEdges,
+  computeHighlightedLineage,
+} from "./asset-graph-canvas";
+import {
+  AssetGraphRequestError,
   createSyntheticAssetGraphTransport,
   type AssetGraphTransport,
   type SyntheticAssetGraphFixtures,
@@ -20,6 +30,31 @@ const fixturesPath = resolve(
 );
 const fixtures = JSON.parse(readFileSync(fixturesPath, "utf8")) as SyntheticAssetGraphFixtures;
 
+function fixtureCase(name: string) {
+  const found = fixtures.cases.find(item => item.name === name);
+  if (!found) {
+    throw new Error(`Missing fixture case: ${name}`);
+  }
+  return found;
+}
+
+function fixturePage(name: string): AssetGraphPage {
+  return fixtureCase(name).response as AssetGraphPage;
+}
+
+function fixtureNodeLabel(nodeId: string): string {
+  for (const entry of fixtures.cases) {
+    if (entry.http === 200) {
+      const page = entry.response as AssetGraphPage;
+      const node = page.nodes.find(item => item.id === nodeId);
+      if (node?.label) {
+        return node.label;
+      }
+    }
+  }
+  throw new Error(`Missing fixture node label for ${nodeId}`);
+}
+
 const COURSE_ID = "10000000-0000-4000-8000-000000000001";
 const GOAL_ID = "goal/20000000-0000-4000-8000-000000000001" as const;
 const REQ_ID = "requirement/30000000-0000-4000-8000-000000000001" as const;
@@ -30,6 +65,20 @@ const DOC_ID = "document/60000000-0000-4000-8000-000000000001" as const;
 const EXP_ID = "exploration/70000000-0000-4000-8000-000000000001" as const;
 const MISSING_DOC_ID = "document/80000000-0000-4000-8000-000000000001" as const;
 const ACTIVITY_ID = "90000000-0000-4000-8000-000000000001";
+
+const GOAL_LABEL = fixtureNodeLabel(GOAL_ID);
+const REQ_LABEL = fixtureNodeLabel(REQ_ID);
+const SOURCE_1_LABEL = fixtureNodeLabel(SOURCE_1_ID);
+const SOURCE_2_LABEL = fixtureNodeLabel(SOURCE_2_ID);
+const OBS_1_LABEL = fixtureNodeLabel(OBS_ID);
+const DOC_LABEL = fixtureNodeLabel(DOC_ID);
+const EXP_LABEL = fixtureNodeLabel(EXP_ID);
+const UNSCOPED_DOC_QUERY = String(
+  (fixtureCase("synthetic-unscoped-01-workspace-document-roots").request.body as { q?: string }).q,
+);
+const EXPLORATION_NOTE_0 =
+  fixturePage("synthetic-unscoped-03-same-exploration-detail-without-invented-ui").detail
+    ?.notes[0] ?? "";
 
 let container: HTMLDivElement;
 let root: Root;
@@ -85,7 +134,7 @@ function makeReadyResult(): Extract<CourseRouteActionResult, { kind: "ready" }> 
     status: "active",
     generateStatus: "ready",
     intentKind: "topic",
-    intentSummary: "变化率练习",
+    intentSummary: "专项练习",
     sourceIds: [],
     pathVersion: 1,
     contentVersion: 1,
@@ -102,6 +151,106 @@ function makeReadyResult(): Extract<CourseRouteActionResult, { kind: "ready" }> 
     action: "targeted_explain",
   };
 }
+
+describe("Canvas pure helpers (Slice B)", () => {
+  it("deduplicates multi-page edges by (from, to, relation, basis, sourceVersion, linkId) while keeping distinct basis or linkId separate", () => {
+    const edges: AssetGraphEdge[] = [
+      {
+        id: "e-p18",
+        from: REQ_ID,
+        to: SOURCE_1_ID,
+        relation: "usesSource",
+        basis: "recorded",
+        sourceVersion: 1,
+        page: 18,
+      },
+      {
+        id: "e-p5",
+        from: REQ_ID,
+        to: SOURCE_1_ID,
+        relation: "usesSource",
+        basis: "recorded",
+        sourceVersion: 1,
+        page: 5,
+      },
+      {
+        id: "e-suggested",
+        from: REQ_ID,
+        to: SOURCE_1_ID,
+        relation: "usesSource",
+        basis: "suggested",
+        sourceVersion: 1,
+        page: 9,
+      },
+      {
+        id: "e-shared-1",
+        from: REQ_ID,
+        to: OBS_ID,
+        relation: "hasObservation",
+        basis: "derived",
+        sharedAttribution: {
+          linkId: "a0000000-0000-4000-8000-000000000011",
+          linkRevision: 1,
+          stableSkillId: "b0000000-0000-4000-8000-000000000011",
+          sourceCourseId: COURSE_ID,
+          sourceCourseTitle: "基础化学",
+          sourceRequirementId: "30000000-0000-4000-8000-000000000001",
+          sourceRequirementTitle: "化学键基础",
+          sourceRequirementRevision: 1,
+          targetRequirementRevision: 1,
+          effective: true,
+        },
+      },
+      {
+        id: "e-shared-2",
+        from: REQ_ID,
+        to: OBS_ID,
+        relation: "hasObservation",
+        basis: "derived",
+        sharedAttribution: {
+          linkId: "a0000000-0000-4000-8000-000000000022",
+          linkRevision: 1,
+          stableSkillId: "b0000000-0000-4000-8000-000000000022",
+          sourceCourseId: COURSE_ID,
+          sourceCourseTitle: "基础化学",
+          sourceRequirementId: "30000000-0000-4000-8000-000000000001",
+          sourceRequirementTitle: "酸碱平衡",
+          sourceRequirementRevision: 1,
+          targetRequirementRevision: 1,
+          effective: true,
+        },
+      },
+    ];
+
+    const bundled = bundleCanvasEdges(edges);
+    expect(bundled).toHaveLength(4);
+    expect(bundled[0]?.pages).toEqual([5, 18]);
+    expect(bundled[0]?.edges).toHaveLength(2);
+    expect(bundled[1]?.primary.basis).toBe("suggested");
+  });
+
+  it("highlights 1-hop direct neighbors plus up to 3 upstream foundation hops and stops before hop 4", () => {
+    const k0 = "knowledge/41000000-0000-4000-8000-000000000000" as const;
+    const k1 = "knowledge/41000000-0000-4000-8000-000000000001" as const;
+    const k2 = "knowledge/41000000-0000-4000-8000-000000000002" as const;
+    const k3 = "knowledge/41000000-0000-4000-8000-000000000003" as const;
+    const k4 = "knowledge/41000000-0000-4000-8000-000000000004" as const;
+
+    const edges: AssetGraphEdge[] = [
+      { id: "map", from: REQ_ID, to: k0, relation: "mappedTo", basis: "recorded" },
+      { id: "hop1", from: k1, to: k0, relation: "prerequisite", basis: "recorded" },
+      { id: "hop2", from: k2, to: k1, relation: "prerequisite", basis: "derived" },
+      { id: "hop3", from: k3, to: k2, relation: "contains", basis: "recorded" },
+      { id: "hop4", from: k4, to: k3, relation: "prerequisite", basis: "suggested" },
+    ];
+
+    const lineage = computeHighlightedLineage(REQ_ID, edges);
+    expect([...lineage.nodeSet]).toEqual(expect.arrayContaining([REQ_ID, k0, k1, k2, k3]));
+    expect(lineage.nodeSet.has(k4)).toBe(false);
+    expect(lineage.edgeSet.has("hop3")).toBe(true);
+    expect(lineage.edgeSet.has("hop4")).toBe(false);
+  });
+});
 
 describe("AssetGraphWorkspace", () => {
   it("shows upcoming API notice with safe navigation links when neither transport nor endpoint is provided", async () => {
@@ -122,23 +271,23 @@ describe("AssetGraphWorkspace", () => {
     });
 
     // Initial workspace roots (Case 1)
-    expect(container.textContent).toContain("合成：理解示例课程中的变化率");
-    expect(container.textContent).toContain("合成：从自由探索整理的个人笔记（未关联课程）");
+    expect(container.textContent).toContain(GOAL_LABEL);
+    expect(container.textContent).toContain(DOC_LABEL);
 
     // Enter goal scope (Case 3)
     await act(async () => {
       findButton("进入目标范围", nodeCard(GOAL_ID)).click();
     });
     await flush();
-    expect(container.textContent).toContain("合成：解释平均变化率与瞬时变化率");
+    expect(container.textContent).toContain(REQ_LABEL);
 
     // Expand requirement outgoing neighbors (Case 4)
     await act(async () => {
       findButton("出边展开", nodeCard(REQ_ID)).click();
     });
     await flush();
-    expect(container.textContent).toContain("合成：变化率讲义");
-    expect(container.textContent).toContain("合成：提示后完成一次变化率练习");
+    expect(container.textContent).toContain(SOURCE_1_LABEL);
+    expect(container.textContent).toContain(OBS_1_LABEL);
 
     // Toggle summary display ON (Case 4b)
     const summaryCheckbox = container.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
@@ -198,7 +347,7 @@ describe("AssetGraphWorkspace", () => {
 
     await act(async () => {
       const setInput = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
-      setInput.call(searchInput, "合成：从自由探索整理的个人笔记");
+      setInput.call(searchInput, UNSCOPED_DOC_QUERY);
       searchInput.dispatchEvent(new Event("input", { bubbles: true }));
     });
     await act(async () => {
@@ -206,22 +355,22 @@ describe("AssetGraphWorkspace", () => {
     });
     await flush();
 
-    expect(nodeCard(DOC_ID).textContent).toContain("合成：从自由探索整理的个人笔记（未关联课程）");
+    expect(nodeCard(DOC_ID).textContent).toContain(DOC_LABEL);
 
     // Incoming expansion (Case 10)
     await act(async () => {
       findButton("入边探索", nodeCard(DOC_ID)).click();
     });
     await flush();
-    expect(nodeCard(EXP_ID).textContent).toContain("合成：观察日常变化的自由探索");
+    expect(nodeCard(EXP_ID).textContent).toContain(EXP_LABEL);
 
     // Exploration detail (Case 11)
     await act(async () => {
       findButton("查看详情", nodeCard(EXP_ID)).click();
     });
     await flush();
-    expect(container.textContent).toContain("合成探索：开放状态，未关联课程或学习目标。");
-    expect(container.textContent).toContain("当前节点暂无可直接打开的后续入口。");
+    expect(container.textContent).toContain(EXPLORATION_NOTE_0);
+    expect(container.textContent).toContain("这项内容下暂时没有可直接打开的后续入口。");
   });
 
   it("replays Path 3 (keeps requirement focus across all -> assets -> evidence lens switches)", async () => {
@@ -235,8 +384,8 @@ describe("AssetGraphWorkspace", () => {
       findButton("出边展开", nodeCard(REQ_ID)).click();
     });
     await flush();
-    expect(container.textContent).toContain("合成：变化率讲义");
-    expect(container.textContent).toContain("合成：提示后完成一次变化率练习");
+    expect(container.textContent).toContain(SOURCE_1_LABEL);
+    expect(container.textContent).toContain(OBS_1_LABEL);
 
     // Switch to assets lens (Case 5) -> requirement stays focused, shows source only
     await act(async () => {
@@ -244,8 +393,8 @@ describe("AssetGraphWorkspace", () => {
     });
     await flush();
     expect(nodeCard(REQ_ID).querySelector("button[aria-pressed='true']")).not.toBeNull();
-    expect(container.textContent).toContain("合成：变化率讲义");
-    expect(container.textContent).not.toContain("合成：提示后完成一次变化率练习");
+    expect(container.textContent).toContain(SOURCE_1_LABEL);
+    expect(container.textContent).not.toContain(OBS_1_LABEL);
 
     // Switch to evidence lens: requirement stays focused, shows observation only
     await act(async () => {
@@ -253,15 +402,19 @@ describe("AssetGraphWorkspace", () => {
     });
     await flush();
     expect(nodeCard(REQ_ID).querySelector("button[aria-pressed='true']")).not.toBeNull();
-    expect(nodeCard(OBS_ID).textContent).toContain("合成：提示后完成一次变化率练习");
-    expect(container.textContent).not.toContain("合成：变化率讲义");
+    expect(nodeCard(OBS_ID).textContent).toContain(OBS_1_LABEL);
+    expect(container.textContent).not.toContain(SOURCE_1_LABEL);
   });
 
   it("supports roots pagination and recovers from 409 CURSOR_STALE", async () => {
     const baseTransport = createSyntheticAssetGraphTransport(fixtures);
     let injectStaleOnce = false;
     const transport: AssetGraphTransport = async (query, signal) => {
-      if (query.op === "roots" && query.cursor === "synthetic-source-roots-page-2-v1" && injectStaleOnce) {
+      if (
+        query.op === "roots" &&
+        query.cursor === "synthetic-source-roots-page-2-v1" &&
+        injectStaleOnce
+      ) {
         injectStaleOnce = false;
         return baseTransport({ ...query, cursor: "synthetic-expired-source-roots-v0" }, signal);
       }
@@ -300,7 +453,7 @@ describe("AssetGraphWorkspace", () => {
       findButton("加载下一页").click();
     });
     await flush();
-    expect(nodeCard(SOURCE_2_ID).textContent).toContain("合成：变化率练习资料");
+    expect(nodeCard(SOURCE_2_ID).textContent).toContain(SOURCE_2_LABEL);
   });
 
   it("displays partial completeness warning with retry and handles 404 NOT_FOUND safely", async () => {
@@ -318,7 +471,7 @@ describe("AssetGraphWorkspace", () => {
       findButton("重试读取").click();
     });
     await flush();
-    expect(container.textContent).toContain("合成：解释平均变化率与瞬时变化率");
+    expect(container.textContent).toContain(REQ_LABEL);
 
     // Case 16 404 NOT_FOUND on initialFocus
     await renderWorkspace({
@@ -388,7 +541,9 @@ describe("AssetGraphWorkspace", () => {
     expect(secondPayload.minutes).toBe(firstPayload.minutes);
 
     expect(container.textContent).toContain("请先确认本课学习范围后再开始练习。");
-    expect(container.querySelector(`a[href="/opening/courses/${COURSE_ID}#course-learning-route"]`)).not.toBeNull();
+    expect(
+      container.querySelector(`a[href="/opening/courses/${COURSE_ID}#course-learning-route"]`),
+    ).not.toBeNull();
     expect(container.textContent).not.toContain("已达到课程要求");
   });
 
@@ -396,16 +551,25 @@ describe("AssetGraphWorkspace", () => {
     const COURSE_2 = "10000000-0000-4000-8000-000000000002";
     const REQ_2 = "requirement/30000000-0000-4000-8000-000000000002" as const;
     const OBS_2 = "observation/50000000-0000-4000-8000-000000000002" as const;
+    const sharedPage = fixturePage("synthetic-shared-skills-01-cross-course-evidence-neighbors");
+    const req2Label = fixtureNodeLabel(REQ_2);
+    const sharedAttr = sharedPage.edges[0]!.sharedAttribution!;
+    const expectedSharedCaption = `跨课共享自「${sharedAttr.sourceCourseTitle} · ${sharedAttr.sourceRequirementTitle}」（第 ${sharedAttr.sourceRequirementRevision} 版）`;
+
     const baseTransport = createSyntheticAssetGraphTransport(fixtures);
     const transport: AssetGraphTransport = async (query, signal) => {
-      if (query.op === "roots" && query.context.kind === "course" && query.context.id === `course/${COURSE_2}`) {
+      if (
+        query.op === "roots" &&
+        query.context.kind === "course" &&
+        query.context.id === `course/${COURSE_2}`
+      ) {
         return {
           asOf: "2026-01-01T00:00:00.000Z",
           nodes: [
             {
               id: REQ_2,
               kind: "requirement",
-              label: "合成：跨课应用变化率迁移",
+              label: req2Label,
               ...(query.include?.includes("summary")
                 ? { summary: { learnerState: "independent", requirementStatus: "verified" } }
                 : {}),
@@ -426,8 +590,8 @@ describe("AssetGraphWorkspace", () => {
       initialContext: { kind: "course", id: `course/${COURSE_2}` },
       initialLens: "evidence",
       courses: [
-        { id: COURSE_ID, title: "合成：微积分入门" },
-        { id: COURSE_2, title: "合成：高阶应用" },
+        { id: COURSE_ID, title: sharedAttr.sourceCourseTitle },
+        { id: COURSE_2, title: "高阶迁移课程" },
       ],
     });
 
@@ -443,14 +607,13 @@ describe("AssetGraphWorkspace", () => {
     });
     await flush();
 
+    expect(sharedAttr.sourceRequirementRevision).toBe(2);
     expect(nodeCard(REQ_2).textContent).toContain("独立完成");
     expect(nodeCard(REQ_2).textContent).toContain("已达到课程要求");
     expect(nodeCard(OBS_2).textContent).toContain("独立作答记录");
     expect(container.textContent).toContain("当前已展开关联");
     expect(container.textContent).toContain("跨课共享证据");
-    expect(container.textContent).toContain(
-      "跨课共享自「合成：微积分入门 · 合成：解释平均变化率与瞬时变化率」（第 2 版）",
-    );
+    expect(container.textContent).toContain(expectedSharedCaption);
     const sourceLink = Array.from(container.querySelectorAll("a")).find(a =>
       a.textContent?.includes("查看来源课程"),
     );
@@ -461,9 +624,1131 @@ describe("AssetGraphWorkspace", () => {
       nodeCard(OBS_2).querySelector("button")!.click();
     });
     await flush();
-    expect(container.textContent).toContain(
-      "跨课共享自「合成：微积分入门 · 合成：解释平均变化率与瞬时变化率」（第 2 版）",
-    );
+    expect(container.textContent).toContain(expectedSharedCaption);
     expect(container.querySelector(`a[href="/opening/courses/${COURSE_ID}"]`)).not.toBeNull();
+  });
+
+  it("supports switching between graph and list views, basis-distinct SVG edges, collapse, and pinned comparison", async () => {
+    const k1 = "knowledge/41000000-0000-4000-8000-000000000001" as const;
+    const transport: AssetGraphTransport = async query => {
+      if (query.op === "neighbors") {
+        return {
+          asOf: "2026-03-01T00:00:00.000Z",
+          nodes: [
+            { id: REQ_ID, kind: "requirement", label: "酯化平衡条件" },
+            { id: SOURCE_1_ID, kind: "source", label: "实验手册", meta: { version: 2 } },
+            {
+              id: OBS_ID,
+              kind: "observation",
+              label: "课堂练习提交",
+              meta: { occurredAt: "2026-02-20T09:30:00.000Z", assistance: "independent" },
+            },
+            { id: k1, kind: "knowledge", label: "可逆反应平衡常数" },
+          ],
+          edges: [
+            {
+              id: "edge-rec",
+              from: REQ_ID,
+              to: SOURCE_1_ID,
+              relation: "usesSource",
+              basis: "recorded",
+              sourceVersion: 2,
+              page: 12,
+            },
+            {
+              id: "edge-der",
+              from: REQ_ID,
+              to: OBS_ID,
+              relation: "hasObservation",
+              basis: "derived",
+            },
+            {
+              id: "edge-sug",
+              from: REQ_ID,
+              to: k1,
+              relation: "mappedTo",
+              basis: "suggested",
+            },
+          ],
+          page: { nextCursor: null },
+          completeness: "complete",
+          warnings: [],
+          detail: null,
+        };
+      }
+      return {
+        asOf: "2026-03-01T00:00:00.000Z",
+        nodes: [{ id: REQ_ID, kind: "requirement", label: "酯化平衡条件" }],
+        edges: [],
+        page: { nextCursor: null },
+        completeness: "complete",
+        warnings: [],
+        detail: null,
+      };
+    };
+
+    await renderWorkspace({ transport });
+    await act(async () => {
+      findButton("出边展开", nodeCard(REQ_ID)).click();
+    });
+    await flush();
+
+    // Verify basis-distinct SVG edges in Canvas
+    expect(container.querySelector('[data-edge-basis="recorded"]')).not.toBeNull();
+    expect(
+      container
+        .querySelector('[data-edge-basis="derived"] path')
+        ?.getAttribute("stroke-dasharray"),
+    ).toBe("8 4");
+    expect(
+      container
+        .querySelector('[data-edge-basis="suggested"] path')
+        ?.getAttribute("stroke-dasharray"),
+    ).toBe("3 4");
+
+    // Pin REQ_ID for comparison and focus SOURCE_1_ID
+    await act(async () => {
+      findButton("固定对比", nodeCard(REQ_ID)).click();
+    });
+    await flush();
+    await act(async () => {
+      nodeCard(SOURCE_1_ID).querySelector("button")!.click();
+    });
+    await flush();
+    expect(container.querySelector('section[aria-label="对比参考卡片"]')?.textContent).toContain(
+      "酯化平衡条件",
+    );
+
+    // Switch to List View and verify Relations / Nodes / Timeline tabs without extra network calls
+    const viewToolbar = container.querySelector('[aria-label="视图模式"]')!;
+    await act(async () => {
+      findButton("列表", viewToolbar).click();
+    });
+    await flush();
+
+    expect(container.querySelector("[data-list-view]")).not.toBeNull();
+    expect(container.querySelector('table[aria-label="已展开关联列表"]')?.textContent).toContain(
+      "第 12 页",
+    );
+
+    const timelineRadio = Array.from(
+      container.querySelectorAll<HTMLInputElement>('input[name="asset-graph-list-tab"]'),
+    ).find(input => input.parentElement?.textContent?.includes("练习时间线"))!;
+    await act(async () => {
+      timelineRadio.click();
+    });
+    await flush();
+    expect(container.textContent).toContain("课堂练习提交");
+
+    const nodesRadio = Array.from(
+      container.querySelectorAll<HTMLInputElement>('input[name="asset-graph-list-tab"]'),
+    ).find(input => input.parentElement?.textContent?.includes("当前展示的项目"))!;
+    await act(async () => {
+      nodesRadio.click();
+    });
+    await flush();
+
+    // Collapse REQ_ID from List View -> evicts unanchored leaf nodes
+    await act(async () => {
+      findButton("收起关联", nodeCard(REQ_ID)).click();
+    });
+    await flush();
+    expect(container.querySelector(`[data-node-card="${OBS_ID}"]`)).toBeNull();
+  });
+
+  it("Counterexample 1: renders real chapter titles ('第3章 有机反应：酯化') in both Graph and List views without any calculus sample text", async () => {
+    const chemGoalId = "goal/21000000-0000-4000-8000-000000000001" as const;
+    const chemReqId = "requirement/31000000-0000-4000-8000-000000000003" as const;
+    const chemSourceId = "source/41000000-0000-4000-8000-000000000003" as const;
+
+    const transport: AssetGraphTransport = async () => ({
+      asOf: "2026-03-10T00:00:00.000Z",
+      nodes: [
+        { id: chemGoalId, kind: "goal", label: "掌握羧酸衍生物制备与鉴定" },
+        { id: chemReqId, kind: "requirement", label: "第3章 有机反应：酯化" },
+        { id: chemSourceId, kind: "source", label: "有机化学实验讲义（第3章）" },
+      ],
+      edges: [
+        {
+          id: "chem-scope",
+          from: chemGoalId,
+          to: chemReqId,
+          relation: "scopes",
+          basis: "recorded",
+        },
+        {
+          id: "chem-source",
+          from: chemReqId,
+          to: chemSourceId,
+          relation: "usesSource",
+          basis: "recorded",
+          page: 42,
+        },
+      ],
+      page: { nextCursor: null },
+      completeness: "complete",
+      warnings: [],
+      detail: null,
+    });
+
+    await renderWorkspace({ transport });
+
+    // Graph view check
+    expect(container.textContent).toContain("第3章 有机反应：酯化");
+    expect(container.textContent).not.toContain("微分与 Taylor");
+    expect(container.textContent).not.toContain("积分与微分方程");
+    expect(container.textContent).not.toContain("变化率");
+
+    // List view check (Relations & Nodes sub-tabs)
+    const viewToolbar = container.querySelector('[aria-label="视图模式"]')!;
+    await act(async () => {
+      findButton("列表", viewToolbar).click();
+    });
+    await flush();
+
+    expect(container.textContent).toContain("第3章 有机反应：酯化");
+    expect(container.textContent).not.toContain("微分与 Taylor");
+    expect(container.textContent).not.toContain("积分与微分方程");
+
+    const nodesRadio = Array.from(
+      container.querySelectorAll<HTMLInputElement>('input[name="asset-graph-list-tab"]'),
+    ).find(input => input.parentElement?.textContent?.includes("当前展示的项目"))!;
+    await act(async () => {
+      nodesRadio.click();
+    });
+    await flush();
+
+    expect(nodeCard(chemReqId).textContent).toContain("第3章 有机反应：酯化");
+    expect(container.textContent).not.toContain("微分与 Taylor");
+  });
+
+  it("Counterexample 2: Case 21 REQ_2 shows cross-course badge & source link in both Canvas and List views, and needs_verification never claims independent completion for target course", async () => {
+    const COURSE_2 = "10000000-0000-4000-8000-000000000002";
+    const REQ_2 = "requirement/30000000-0000-4000-8000-000000000002" as const;
+    const OBS_2 = "observation/50000000-0000-4000-8000-000000000002" as const;
+    const sharedPage = fixturePage("synthetic-shared-skills-01-cross-course-evidence-neighbors");
+    const req2Label = fixtureNodeLabel(REQ_2);
+    const sharedEdge = sharedPage.edges[0]!;
+    const sharedAttr = sharedEdge.sharedAttribution!;
+    const expectedSharedCaption = `跨课共享自「${sharedAttr.sourceCourseTitle} · ${sharedAttr.sourceRequirementTitle}」（第 ${sharedAttr.sourceRequirementRevision} 版）`;
+
+    const transport: AssetGraphTransport = async query => {
+      if (query.op === "neighbors" && query.focus === REQ_2) {
+        return {
+          ...sharedPage,
+          nodes: sharedPage.nodes.map(node =>
+            node.id === REQ_2
+              ? {
+                  ...node,
+                  summary: {
+                    learnerState: null,
+                    requirementStatus: "needs_verification",
+                  },
+                }
+              : node,
+          ),
+        };
+      }
+      return {
+        asOf: "2026-01-01T00:00:00.000Z",
+        nodes: [
+          {
+            id: REQ_2,
+            kind: "requirement",
+            label: req2Label,
+            summary: {
+              learnerState: null,
+              requirementStatus: "needs_verification",
+            },
+          },
+        ],
+        edges: [],
+        page: { nextCursor: null },
+        completeness: "complete",
+        warnings: [],
+        detail: null,
+      };
+    };
+
+    await renderWorkspace({
+      transport,
+      initialContext: { kind: "course", id: `course/${COURSE_2}` },
+      initialLens: "evidence",
+      courses: [
+        { id: COURSE_ID, title: sharedAttr.sourceCourseTitle },
+        { id: COURSE_2, title: "有机合成进阶" },
+      ],
+    });
+
+    await act(async () => {
+      findButton("出边展开", nodeCard(REQ_2)).click();
+    });
+    await flush();
+
+    // 1) Graph (Canvas) view scoped assertions: SVG canvas, target requirement card, shared observation card, and detail panel
+    const canvasSvg = container.querySelector('svg[role="img"]')!;
+    const reqSvgNode = canvasSvg.querySelector(`[data-graph-node="${REQ_2}"]`)!;
+    expect(reqSvgNode.textContent).toContain("待独立检验");
+    expect(reqSvgNode.textContent).not.toContain("独立完成");
+    expect(reqSvgNode.textContent).not.toContain("已达到课程要求");
+    expect(canvasSvg.textContent).toContain("跨课共享证据");
+    expect(canvasSvg.textContent).toContain(expectedSharedCaption);
+
+    const canvasReqCard = nodeCard(REQ_2);
+    expect(canvasReqCard.textContent).toContain("课程要求：待独立检验");
+    expect(canvasReqCard.textContent).not.toContain("独立完成");
+    expect(canvasReqCard.textContent).not.toContain("已达到课程要求");
+    expect(canvasReqCard.textContent).toContain("跨课共享证据");
+    expect(canvasReqCard.textContent).toContain(expectedSharedCaption);
+    expect(canvasReqCard.querySelector(`a[href="/opening/courses/${COURSE_ID}"]`)).not.toBeNull();
+
+    const canvasObsCard = nodeCard(OBS_2);
+    expect(canvasObsCard.textContent).toContain("完成条件：独立完成");
+    expect(canvasObsCard.textContent).toContain("跨课共享证据");
+    expect(canvasObsCard.textContent).toContain(expectedSharedCaption);
+
+    const detailAside = container.querySelector('aside[aria-label="详情与后续行动面板"]')!;
+    expect(detailAside.textContent).toContain("待独立检验");
+    expect(detailAside.textContent).toContain("暂无练习状态");
+    expect(detailAside.textContent).not.toContain("独立完成");
+    expect(detailAside.textContent).not.toContain("已达到课程要求");
+    expect(detailAside.textContent).toContain("跨课共享证据");
+    expect(detailAside.textContent).toContain(expectedSharedCaption);
+    expect(detailAside.querySelector(`a[href="/opening/courses/${COURSE_ID}"]`)).not.toBeNull();
+
+    // 2) List view scoped assertions (both Relations table and Nodes list)
+    const viewToolbar = container.querySelector('[aria-label="视图模式"]')!;
+    await act(async () => {
+      findButton("列表", viewToolbar).click();
+    });
+    await flush();
+
+    const relationsTable = container.querySelector('table[aria-label="已展开关联列表"]')!;
+    expect(relationsTable.textContent).toContain("跨课共享证据");
+    expect(relationsTable.textContent).toContain(expectedSharedCaption);
+    expect(relationsTable.querySelector(`a[href="/opening/courses/${COURSE_ID}"]`)).not.toBeNull();
+
+    const nodesRadio = Array.from(
+      container.querySelectorAll<HTMLInputElement>('input[name="asset-graph-list-tab"]'),
+    ).find(input => input.parentElement?.textContent?.includes("当前展示的项目"))!;
+    await act(async () => {
+      nodesRadio.click();
+    });
+    await flush();
+
+    const listReqCard = nodeCard(REQ_2);
+    expect(listReqCard.textContent).toContain("课程要求：待独立检验");
+    expect(listReqCard.textContent).not.toContain("独立完成");
+    expect(listReqCard.textContent).not.toContain("已达到课程要求");
+    expect(listReqCard.textContent).toContain("跨课共享证据");
+    expect(listReqCard.textContent).toContain(expectedSharedCaption);
+    expect(listReqCard.querySelector(`a[href="/opening/courses/${COURSE_ID}"]`)).not.toBeNull();
+
+    const listObsCard = nodeCard(OBS_2);
+    expect(listObsCard.textContent).toContain("完成条件：独立完成");
+    expect(listObsCard.textContent).toContain("跨课共享证据");
+    expect(listObsCard.textContent).toContain(expectedSharedCaption);
+  });
+
+  it("Counterexample 3: 404/500 shows retryable error without demo routes or sample data; two consecutive CURSOR_STALE restarts once then stops at recoverable error", async () => {
+    const forbiddenDemoRoute = `/${["map", "demo"].join("-")}`;
+
+    // Part A: 500 error -> retryable LoadError, zero sample data, zero demo route
+    const transport500: AssetGraphTransport = async () => {
+      throw new AssetGraphRequestError("NETWORK", "知识地图服务暂时繁忙，请稍后重试。", 500);
+    };
+    await renderWorkspace({ transport: transport500 });
+    expect(container.textContent).toContain("知识地图服务暂时繁忙，请稍后重试。");
+    expect(findButton("重新读取")).toBeTruthy();
+    expect(container.querySelectorAll("[data-node-card]")).toHaveLength(0);
+    expect(container.innerHTML).not.toContain(forbiddenDemoRoute);
+
+    // Part B: 404 error on roots -> retryable LoadError, zero sample data, zero demo route
+    const transport404: AssetGraphTransport = async () => {
+      throw new AssetGraphRequestError("NOT_FOUND", "请求的资源不可用。", 404);
+    };
+    await renderWorkspace({ transport: transport404 });
+    expect(container.textContent).toContain("所选内容不可用或不在当前范围");
+    expect(findButton("重新读取")).toBeTruthy();
+    expect(container.querySelectorAll("[data-node-card]")).toHaveLength(0);
+    expect(container.innerHTML).not.toContain(forbiddenDemoRoute);
+
+    // Part C: Two consecutive CURSOR_STALE -> 1st auto-restarts roots, 2nd stops at recoverable LoadError without infinite loop
+    let rootsCallCount = 0;
+    let failWithStale = false;
+    const staleTransport: AssetGraphTransport = async query => {
+      rootsCallCount += 1;
+      if (!failWithStale && query.op === "roots" && !query.cursor) {
+        return {
+          asOf: "2026-03-10T00:00:00.000Z",
+          nodes: [{ id: SOURCE_1_ID, kind: "source", label: "物理化学实验指导" }],
+          edges: [],
+          page: { nextCursor: "cursor-page-2" },
+          completeness: "complete",
+          warnings: [],
+          detail: null,
+        };
+      }
+      throw new AssetGraphRequestError(
+        "CURSOR_STALE",
+        "分页上下文已失效，请重新读取当前内容。",
+        409,
+      );
+    };
+
+    await renderWorkspace({
+      transport: staleTransport,
+      initialLens: "assets",
+      initialPageLimit: 1,
+    });
+    expect(rootsCallCount).toBe(1);
+    expect(nodeCard(SOURCE_1_ID).textContent).toContain("物理化学实验指导");
+
+    failWithStale = true;
+    await act(async () => {
+      findButton("加载下一页").click();
+    });
+    await flush();
+
+    // 1 initial + 1 loadMoreRoots + 1 auto-restart = 3 calls total (no infinite loop)
+    expect(rootsCallCount).toBe(3);
+    expect(container.textContent).toContain("分页上下文已失效，请重新读取当前内容。");
+    expect(findButton("重新读取")).toBeTruthy();
+    expect(container.innerHTML).not.toContain(forbiddenDemoRoute);
+
+    // Clicking retry recovers once backend returns valid page
+    failWithStale = false;
+    await act(async () => {
+      findButton("重新读取").click();
+    });
+    await flush();
+    expect(rootsCallCount).toBe(4);
+    expect(nodeCard(SOURCE_1_ID).textContent).toContain("物理化学实验指导");
+  });
+
+  it("locks initial nodes sub-tab in 0-edge List view on expansion so focused expand button is not unmounted, while allowing manual sub-tab switches", async () => {
+    const transport: AssetGraphTransport = async query => {
+      if (query.op === "neighbors" && query.focus === REQ_ID) {
+        return {
+          asOf: "2026-03-11T00:00:00.000Z",
+          nodes: [
+            { id: REQ_ID, kind: "requirement", label: "酸碱滴定终点判断" },
+            { id: SOURCE_1_ID, kind: "source", label: "分析化学实验教材", meta: { version: 1 } },
+            {
+              id: OBS_ID,
+              kind: "observation",
+              label: "滴定实验练习记录",
+              meta: { occurredAt: "2026-03-10T10:15:00.000Z", assistance: "independent" },
+            },
+          ],
+          edges: [
+            {
+              id: "list-edge-source",
+              from: REQ_ID,
+              to: SOURCE_1_ID,
+              relation: "usesSource",
+              basis: "recorded",
+              page: 19,
+            },
+            {
+              id: "list-edge-obs",
+              from: REQ_ID,
+              to: OBS_ID,
+              relation: "hasObservation",
+              basis: "derived",
+            },
+          ],
+          page: { nextCursor: null },
+          completeness: "complete",
+          warnings: [],
+          detail: null,
+        };
+      }
+      return {
+        asOf: "2026-03-11T00:00:00.000Z",
+        nodes: [{ id: REQ_ID, kind: "requirement", label: "酸碱滴定终点判断" }],
+        edges: [],
+        page: { nextCursor: null },
+        completeness: "complete",
+        warnings: [],
+        detail: null,
+      };
+    };
+
+    await renderWorkspace({
+      transport,
+      initialViewMode: "list",
+    });
+
+    // Starts on nodes sub-tab when 0 edges exist
+    expect(container.querySelector("[data-list-view]")).not.toBeNull();
+    expect(container.querySelector('table[aria-label="已展开关联列表"]')).toBeNull();
+
+    const expandOutButton = findButton("查看材料与记录", nodeCard(REQ_ID));
+    expandOutButton.focus();
+    expect(document.activeElement).toBe(expandOutButton);
+
+    await act(async () => {
+      expandOutButton.click();
+    });
+    await flush();
+
+    // Remains on nodes sub-tab; original expand control stays mounted and retains focus
+    expect(container.querySelector('table[aria-label="已展开关联列表"]')).toBeNull();
+    expect(expandOutButton.isConnected).toBe(true);
+    expect(findButton("查看材料与记录", nodeCard(REQ_ID))).toBe(expandOutButton);
+    expect(document.activeElement).toBe(expandOutButton);
+    expect(nodeCard(SOURCE_1_ID).textContent).toContain("分析化学实验教材");
+
+    // Learner can still manually switch to Relations and Timeline sub-tabs
+    const relationsRadio = Array.from(
+      container.querySelectorAll<HTMLInputElement>('input[name="asset-graph-list-tab"]'),
+    ).find(input => input.parentElement?.textContent?.includes("关联列表（2）"))!;
+    await act(async () => {
+      relationsRadio.click();
+    });
+    await flush();
+    expect(container.querySelector('table[aria-label="已展开关联列表"]')?.textContent).toContain(
+      "第 19 页",
+    );
+
+    const timelineRadio = Array.from(
+      container.querySelectorAll<HTMLInputElement>('input[name="asset-graph-list-tab"]'),
+    ).find(input => input.parentElement?.textContent?.includes("练习时间线（1）"))!;
+    await act(async () => {
+      timelineRadio.click();
+    });
+    await flush();
+    expect(container.querySelector("[data-list-view]")?.textContent).toContain("滴定实验练习记录");
+  });
+
+  it("does not announce stale expansion success to screen readers when a subsequent expansion on the same node fails with 500", async () => {
+    const transport: AssetGraphTransport = async query => {
+      if (query.op === "neighbors" && query.focus === REQ_ID && query.direction === "out") {
+        return {
+          asOf: "2026-03-11T00:00:00.000Z",
+          nodes: [
+            { id: REQ_ID, kind: "requirement", label: "氧化还原配平规则" },
+            { id: SOURCE_1_ID, kind: "source", label: "无机化学基础讲义" },
+          ],
+          edges: [
+            {
+              id: "sr-out-edge",
+              from: REQ_ID,
+              to: SOURCE_1_ID,
+              relation: "usesSource",
+              basis: "recorded",
+            },
+          ],
+          page: { nextCursor: null },
+          completeness: "complete",
+          warnings: [],
+          detail: null,
+        };
+      }
+      if (query.op === "neighbors" && query.focus === REQ_ID && query.direction === "in") {
+        throw new AssetGraphRequestError("NETWORK", "入边关联读取失败，请稍后重试。", 500);
+      }
+      return {
+        asOf: "2026-03-11T00:00:00.000Z",
+        nodes: [{ id: REQ_ID, kind: "requirement", label: "氧化还原配平规则" }],
+        edges: [],
+        page: { nextCursor: null },
+        completeness: "complete",
+        warnings: [],
+        detail: null,
+      };
+    };
+
+    await renderWorkspace({ transport });
+
+    const srLiveRegion = () =>
+      container.querySelector<HTMLElement>('.sr-only[role="status"][aria-live="polite"]')!;
+
+    // 1) Outgoing expansion succeeds -> announces 1 source item
+    await act(async () => {
+      findButton("出边展开", nodeCard(REQ_ID)).click();
+    });
+    await flush();
+    expect(srLiveRegion().textContent).toBe("已展开 1 项学习资料");
+
+    // 2) Incoming expansion on the SAME node fails with 500 -> shows LoadError and MUST NOT announce old center success
+    await act(async () => {
+      findButton("入边探索", nodeCard(REQ_ID)).click();
+    });
+    await flush();
+
+    expect(container.textContent).toContain("入边关联读取失败，请稍后重试。");
+    expect(findButton("重新读取")).toBeTruthy();
+    expect(srLiveRegion().textContent).toBe("");
+    expect(srLiveRegion().textContent).not.toContain("已展开");
+    expect(srLiveRegion().textContent).not.toContain("项学习资料");
+  });
+
+  it("restores focus on same-button disabled blur, and never pulls focus back to A after moving to B detail with disabled blur", async () => {
+    let resolveExpandA!: (page: AssetGraphPage) => void;
+    let resolveDetailB!: (page: AssetGraphPage) => void;
+    let expandAttempt = 0;
+
+    const transport: AssetGraphTransport = async query => {
+      if (query.op === "roots") {
+        return {
+          asOf: "2026-03-12T00:00:00.000Z",
+          nodes: [
+            { id: REQ_ID, kind: "requirement", label: "要求 A：酯化反应条件" },
+            { id: DOC_ID, kind: "document", label: "笔记 B：实验安全要点" },
+          ],
+          edges: [],
+          page: { nextCursor: null },
+          completeness: "complete",
+          warnings: [],
+          detail: null,
+        };
+      }
+      if (query.op === "neighbors" && query.focus === REQ_ID) {
+        expandAttempt += 1;
+        return new Promise<AssetGraphPage>(resolve => {
+          resolveExpandA = resolve;
+        });
+      }
+      if (query.op === "detail" && query.focus === DOC_ID) {
+        return new Promise<AssetGraphPage>(resolve => {
+          resolveDetailB = resolve;
+        });
+      }
+      throw new Error(`Unexpected query: ${JSON.stringify(query)}`);
+    };
+
+    await renderWorkspace({
+      transport,
+      initialViewMode: "list",
+    });
+
+    function simulateDisabledBlur(button: HTMLButtonElement) {
+      const wasDisabled = button.disabled;
+      button.disabled = false;
+      button.blur();
+      button.disabled = wasDisabled;
+    }
+
+    // (a) Same button A expand -> explicit blur() simulates browser disabled-button focus drop -> restores focus to A on completion
+    const expandButtonA = findButton("查看材料与记录", nodeCard(REQ_ID));
+    expandButtonA.focus();
+    expect(document.activeElement).toBe(expandButtonA);
+
+    await act(async () => {
+      expandButtonA.click();
+    });
+    expect(expandButtonA.disabled).toBe(true);
+    // Explicitly simulate browser dropping focus to body when button becomes disabled
+    act(() => {
+      simulateDisabledBlur(expandButtonA);
+    });
+    expect(document.activeElement).toBe(document.body);
+
+    await act(async () => {
+      resolveExpandA({
+        asOf: "2026-03-12T00:00:01.000Z",
+        nodes: [
+          { id: REQ_ID, kind: "requirement", label: "要求 A：酯化反应条件" },
+          { id: SOURCE_1_ID, kind: "source", label: "有机化学教材" },
+        ],
+        edges: [
+          {
+            id: "focus-edge-1",
+            from: REQ_ID,
+            to: SOURCE_1_ID,
+            relation: "usesSource",
+            basis: "recorded",
+          },
+        ],
+        page: { nextCursor: null },
+        completeness: "complete",
+        warnings: [],
+        detail: null,
+      });
+    });
+    await flush();
+
+    expect(expandAttempt).toBe(1);
+    expect(expandButtonA.disabled).toBe(false);
+    expect(document.activeElement).toBe(expandButtonA);
+
+    // (b) Trigger a second expand on A, blur A, then move focus to B "查看详情", click B and blur B -> MUST NOT pull focus back to A
+    const expandInButtonA = findButton("追溯所属目标", nodeCard(REQ_ID));
+    expandInButtonA.focus();
+    expect(document.activeElement).toBe(expandInButtonA);
+
+    await act(async () => {
+      expandInButtonA.click();
+    });
+    expect(expandInButtonA.disabled).toBe(true);
+    act(() => {
+      simulateDisabledBlur(expandInButtonA);
+    });
+    expect(document.activeElement).toBe(document.body);
+
+    const detailButtonB = findButton("查看详情", nodeCard(DOC_ID));
+    act(() => {
+      detailButtonB.focus();
+    });
+    expect(document.activeElement).toBe(detailButtonB);
+
+    await act(async () => {
+      detailButtonB.click();
+    });
+    expect(detailButtonB.disabled).toBe(true);
+    act(() => {
+      simulateDisabledBlur(detailButtonB);
+    });
+    expect(document.activeElement).toBe(document.body);
+
+    // Must NEVER pull focus back to A when A's expanding state clears due to B's detail request
+    expect(document.activeElement).not.toBe(expandInButtonA);
+    expect(document.activeElement).not.toBe(expandButtonA);
+
+    // Resolve B detail and even settle stale A promise -> focus must still never snap back to A
+    await act(async () => {
+      resolveDetailB({
+        asOf: "2026-03-12T00:00:02.000Z",
+        nodes: [{ id: DOC_ID, kind: "document", label: "笔记 B：实验安全要点" }],
+        edges: [],
+        page: { nextCursor: null },
+        completeness: "complete",
+        warnings: [],
+        detail: {
+          id: DOC_ID,
+          learnerState: null,
+          requirementStatus: null,
+          notes: ["实验安全预习摘要"],
+          actions: [],
+        },
+      });
+      resolveExpandA({
+        asOf: "2026-03-12T00:00:02.000Z",
+        nodes: [{ id: REQ_ID, kind: "requirement", label: "要求 A：酯化反应条件" }],
+        edges: [],
+        page: { nextCursor: null },
+        completeness: "complete",
+        warnings: [],
+        detail: null,
+      });
+    });
+    await flush();
+
+    expect(container.textContent).toContain("实验安全预习摘要");
+    expect(document.activeElement).not.toBe(expandInButtonA);
+    expect(document.activeElement).not.toBe(expandButtonA);
+  });
+
+  it("locks list default sub-tab only after initial data is ready and falls back focus from body when focused card unmounts via 404 or privacy invalidation", async () => {
+    let resolveInitialRoots!: (page: AssetGraphPage) => void;
+    let rootsCount = 0;
+
+    const transport: AssetGraphTransport = async query => {
+      if (query.op === "roots") {
+        rootsCount += 1;
+        if (rootsCount === 1) {
+          return new Promise<AssetGraphPage>(resolve => {
+            resolveInitialRoots = resolve;
+          });
+        }
+        return {
+          asOf: "2026-03-12T00:00:10.000Z",
+          nodes: [{ id: SOURCE_1_ID, kind: "source", label: "隐私更新后可见资料" }],
+          edges: [],
+          page: { nextCursor: null },
+          completeness: "complete",
+          warnings: [],
+          detail: null,
+        };
+      }
+      if (query.op === "detail" && query.focus === DOC_ID) {
+        throw new AssetGraphRequestError("NOT_FOUND", "资源已不可用", 404);
+      }
+      return {
+        asOf: "2026-03-12T00:00:05.000Z",
+        nodes: [{ id: GOAL_ID, kind: "goal", label: "目标范围起点" }],
+        edges: [],
+        page: { nextCursor: null },
+        completeness: "complete",
+        warnings: [],
+        detail: null,
+      };
+    };
+
+    // Start in graph mode while roots is still loading, click "列表" before data resolves -> must NOT prematurely lock to "nodes"
+    await act(async () => {
+      root.render(createElement(AssetGraphWorkspace, { transport }));
+    });
+    const viewToolbar = container.querySelector('[aria-label="视图模式"]')!;
+    await act(async () => {
+      findButton("列表", viewToolbar).click();
+    });
+
+    // Now initial roots resolves WITH an edge -> list view should default to "relations" (not prematurely locked "nodes")
+    await act(async () => {
+      resolveInitialRoots({
+        asOf: "2026-03-12T00:00:00.000Z",
+        nodes: [
+          { id: REQ_ID, kind: "requirement", label: "第3章 有机反应：酯化" },
+          { id: DOC_ID, kind: "document", label: "待移除实验笔记" },
+        ],
+        edges: [
+          {
+            id: "initial-edge-1",
+            from: DOC_ID,
+            to: REQ_ID,
+            relation: "linkedTo",
+            basis: "recorded",
+          },
+        ],
+        page: { nextCursor: null },
+        completeness: "complete",
+        warnings: [],
+        detail: null,
+      });
+    });
+    await flush();
+
+    expect(container.querySelector('table[aria-label="已展开关联列表"]')).not.toBeNull();
+
+    // Switch to nodes sub-tab, focus button on DOC_ID card, trigger 404 -> card unmounts and focus moves off body to stable notice container
+    const nodesRadio = Array.from(
+      container.querySelectorAll<HTMLInputElement>('input[name="asset-graph-list-tab"]'),
+    ).find(input => input.parentElement?.textContent?.includes("当前展示的项目"))!;
+    await act(async () => {
+      nodesRadio.click();
+    });
+    await flush();
+
+    const docDetailBtn = findButton("查看详情", nodeCard(DOC_ID));
+    act(() => {
+      docDetailBtn.focus();
+    });
+    expect(document.activeElement).toBe(docDetailBtn);
+
+    await act(async () => {
+      docDetailBtn.click();
+    });
+    await flush();
+
+    expect(container.querySelector(`[data-node-card="${DOC_ID}"]`)).toBeNull();
+    expect(document.activeElement).not.toBe(document.body);
+    expect((document.activeElement as HTMLElement | null)?.getAttribute("tabindex")).toBe("-1");
+
+    // Focus button on remaining REQ_ID card, trigger privacy invalidation -> card unmounts and focus lands on stable tabIndex=-1 container
+    const reqDetailBtn = findButton("查看详情", nodeCard(REQ_ID));
+    act(() => {
+      reqDetailBtn.focus();
+    });
+    expect(document.activeElement).toBe(reqDetailBtn);
+
+    await act(async () => {
+      notifyOpeningPrivacyChange();
+    });
+    await flush();
+
+    expect(container.querySelector(`[data-node-card="${REQ_ID}"]`)).toBeNull();
+    expect(document.activeElement).not.toBe(document.body);
+    expect((document.activeElement as HTMLElement | null)?.getAttribute("tabindex")).toBe("-1");
+  });
+
+  it("announces added relation records instead of new source items when cross-page pagination returns the same source with a new page citation", async () => {
+    const transport: AssetGraphTransport = async query => {
+      if (query.op === "roots") {
+        return {
+          asOf: "2026-03-12T00:00:00.000Z",
+          nodes: [{ id: REQ_ID, kind: "requirement", label: "酯化反应机理" }],
+          edges: [],
+          page: { nextCursor: null },
+          completeness: "complete",
+          warnings: [],
+          detail: null,
+        };
+      }
+      if (query.op === "neighbors" && query.cursor === "dup-source-page-2") {
+        return {
+          asOf: "2026-03-12T00:00:02.000Z",
+          nodes: [
+            { id: REQ_ID, kind: "requirement", label: "酯化反应机理" },
+            { id: SOURCE_1_ID, kind: "source", label: "有机化学实验讲义" },
+          ],
+          edges: [
+            {
+              id: "dup-edge-p24",
+              from: REQ_ID,
+              to: SOURCE_1_ID,
+              relation: "usesSource",
+              basis: "recorded",
+              sourceVersion: 1,
+              page: 24,
+            },
+          ],
+          page: { nextCursor: null },
+          completeness: "complete",
+          warnings: [],
+          detail: null,
+        };
+      }
+      return {
+        asOf: "2026-03-12T00:00:00.000Z",
+        nodes: [
+          { id: REQ_ID, kind: "requirement", label: "酯化反应机理" },
+          { id: SOURCE_1_ID, kind: "source", label: "有机化学实验讲义" },
+        ],
+        edges: [
+          {
+            id: "dup-edge-p11",
+            from: REQ_ID,
+            to: SOURCE_1_ID,
+            relation: "usesSource",
+            basis: "recorded",
+            sourceVersion: 1,
+            page: 11,
+          },
+        ],
+        page: { nextCursor: "dup-source-page-2" },
+        completeness: "complete",
+        warnings: [],
+        detail: null,
+      };
+    };
+
+    await renderWorkspace({ transport });
+
+    const srLiveRegion = () =>
+      container.querySelector<HTMLElement>('.sr-only[role="status"][aria-live="polite"]')!;
+
+    await act(async () => {
+      findButton("出边展开", nodeCard(REQ_ID)).click();
+    });
+    await flush();
+    expect(srLiveRegion().textContent).toBe("已展开 1 项学习资料");
+
+    // Load page 2 returning the SAME source node with a new page-24 edge
+    await act(async () => {
+      findButton("加载更多关联", nodeCard(REQ_ID)).click();
+    });
+    await flush();
+
+    expect(srLiveRegion().textContent).toBe("已补充 1 条关联记录");
+    expect(srLiveRegion().textContent).not.toBe("已展开 1 项学习资料");
+  });
+
+  it("Case 21 adversarial combination: REQ_2 with cross-course learnerState='independent' and requirementStatus='needs_verification' shows 待独立检验 without claiming 已达到课程要求 before and after loading activeDetail", async () => {
+    const COURSE_2 = "10000000-0000-4000-8000-000000000002";
+    const REQ_2 = "requirement/30000000-0000-4000-8000-000000000002" as const;
+    const sharedPage = fixturePage("synthetic-shared-skills-01-cross-course-evidence-neighbors");
+    const req2Label = fixtureNodeLabel(REQ_2);
+    const sharedAttr = sharedPage.edges[0]!.sharedAttribution!;
+    const expectedSharedCaption = `跨课共享自「${sharedAttr.sourceCourseTitle} · ${sharedAttr.sourceRequirementTitle}」（第 ${sharedAttr.sourceRequirementRevision} 版）`;
+
+    const transport: AssetGraphTransport = async query => {
+      if (query.op === "detail" && query.focus === REQ_2) {
+        return {
+          asOf: "2026-03-12T00:00:05.000Z",
+          nodes: [
+            {
+              id: REQ_2,
+              kind: "requirement",
+              label: req2Label,
+              summary: {
+                learnerState: "independent",
+                requirementStatus: "needs_verification",
+              },
+            },
+          ],
+          edges: [],
+          page: { nextCursor: null },
+          completeness: "complete",
+          warnings: [],
+          detail: {
+            id: REQ_2,
+            learnerState: "independent",
+            requirementStatus: "needs_verification",
+            notes: ["跨课共享练习记录可供参考，但本课仍需完成一次独立检验。"],
+            actions: [
+              {
+                kind: "startCourseRequirement",
+                label: "在本课完成独立检验",
+                courseId: COURSE_2,
+                goalId: "20000000-0000-4000-8000-000000000002",
+                requirementId: "30000000-0000-4000-8000-000000000002",
+                expectedGoalRevision: 1,
+                expectedRequirementRevision: 1,
+              },
+            ],
+          },
+        };
+      }
+      if (query.op === "neighbors" && query.focus === REQ_2) {
+        return {
+          ...sharedPage,
+          nodes: sharedPage.nodes.map(node =>
+            node.id === REQ_2
+              ? {
+                  ...node,
+                  summary: {
+                    learnerState: "independent",
+                    requirementStatus: "needs_verification",
+                  },
+                }
+              : node,
+          ),
+        };
+      }
+      return {
+        asOf: "2026-03-12T00:00:00.000Z",
+        nodes: [
+          {
+            id: REQ_2,
+            kind: "requirement",
+            label: req2Label,
+            summary: {
+              learnerState: "independent",
+              requirementStatus: "needs_verification",
+            },
+          },
+        ],
+        edges: [],
+        page: { nextCursor: null },
+        completeness: "complete",
+        warnings: [],
+        detail: null,
+      };
+    };
+
+    await renderWorkspace({
+      transport,
+      initialContext: { kind: "course", id: `course/${COURSE_2}` },
+      initialLens: "evidence",
+      courses: [
+        { id: COURSE_ID, title: sharedAttr.sourceCourseTitle },
+        { id: COURSE_2, title: "有机合成进阶" },
+      ],
+    });
+
+    await act(async () => {
+      findButton("出边展开", nodeCard(REQ_2)).click();
+    });
+    await flush();
+
+    // Before loading activeDetail: card, SVG node, and aside all show 待独立检验 and never 已达到课程要求
+    const reqSvgNode = container.querySelector(`[data-graph-node="${REQ_2}"]`)!;
+    expect(reqSvgNode.textContent).toContain("待独立检验");
+    expect(reqSvgNode.textContent).not.toContain("已达到课程要求");
+
+    const reqCardBeforeDetail = nodeCard(REQ_2);
+    expect(reqCardBeforeDetail.textContent).toContain("练习状态：独立完成");
+    expect(reqCardBeforeDetail.textContent).toContain("课程要求：待独立检验");
+    expect(reqCardBeforeDetail.textContent).not.toContain("已达到课程要求");
+    expect(reqCardBeforeDetail.textContent).toContain(expectedSharedCaption);
+
+    // Load activeDetail for REQ_2 and verify right detail panel and card stay completely consistent
+    await act(async () => {
+      findButton("查看详情", nodeCard(REQ_2)).click();
+    });
+    await flush();
+
+    const detailAside = container.querySelector('aside[aria-label="详情与后续行动面板"]')!;
+    expect(detailAside.textContent).toContain("独立完成");
+    expect(detailAside.textContent).toContain("待独立检验");
+    expect(detailAside.textContent).not.toContain("已达到课程要求");
+    expect(detailAside.textContent).toContain("跨课共享练习记录可供参考，但本课仍需完成一次独立检验。");
+    expect(detailAside.textContent).toContain("在本课完成独立检验");
+
+    const reqCardAfterDetail = nodeCard(REQ_2);
+    expect(reqCardAfterDetail.textContent).toContain("练习状态：独立完成");
+    expect(reqCardAfterDetail.textContent).toContain("课程要求：待独立检验");
+    expect(reqCardAfterDetail.textContent).not.toContain("已达到课程要求");
+
+    // Verify List view Nodes tab consistency with activeDetail loaded
+    const viewToolbar = container.querySelector('[aria-label="视图模式"]')!;
+    await act(async () => {
+      findButton("列表", viewToolbar).click();
+    });
+    await flush();
+    const nodesRadio = Array.from(
+      container.querySelectorAll<HTMLInputElement>('input[name="asset-graph-list-tab"]'),
+    ).find(input => input.parentElement?.textContent?.includes("当前展示的项目"))!;
+    await act(async () => {
+      nodesRadio.click();
+    });
+    await flush();
+
+    const listReqCard = nodeCard(REQ_2);
+    expect(listReqCard.textContent).toContain("练习状态：独立完成");
+    expect(listReqCard.textContent).toContain("课程要求：待独立检验");
+    expect(listReqCard.textContent).not.toContain("已达到课程要求");
+  });
+
+  it("clears derived note D and pinned comparison, reloads visible roots, and falls back focus safely on neighbor NOT_FOUND", async () => {
+    let sourceDeleted = false;
+    const transport: AssetGraphTransport = async query => {
+      if (query.op === "roots") {
+        if (sourceDeleted) {
+          return {
+            asOf: "2026-03-13T00:05:00.000Z",
+            nodes: [{ id: SOURCE_2_ID, kind: "source", label: "仍可见的有机化学参考书" }],
+            edges: [],
+            page: { nextCursor: null },
+            completeness: "complete",
+            warnings: [],
+            detail: null,
+          };
+        }
+        return {
+          asOf: "2026-03-13T00:00:00.000Z",
+          nodes: [
+            { id: SOURCE_1_ID, kind: "source", label: "待删除资料 S" },
+            { id: DOC_ID, kind: "document", label: "引用 S 的派生笔记 D" },
+            { id: SOURCE_2_ID, kind: "source", label: "仍可见的有机化学参考书" },
+          ],
+          edges: [],
+          page: { nextCursor: null },
+          completeness: "complete",
+          warnings: [],
+          detail: null,
+        };
+      }
+      if (query.op === "neighbors" && query.focus === SOURCE_1_ID) {
+        throw new AssetGraphRequestError("NOT_FOUND", "请求的资源不可用。", 404);
+      }
+      throw new Error(`Unexpected query: ${JSON.stringify(query)}`);
+    };
+
+    await renderWorkspace({ transport });
+
+    // Pin derived note D for comparison
+    await act(async () => {
+      findButton("固定对比", nodeCard(DOC_ID)).click();
+    });
+    await flush();
+    expect(container.querySelector('section[aria-label="对比参考卡片"]')?.textContent).toContain(
+      "引用 S 的派生笔记 D",
+    );
+
+    // Focus expand button on source S, delete S on server, click expand -> 404 NOT_FOUND
+    const expandSourceBtn = findButton("入边探索", nodeCard(SOURCE_1_ID));
+    act(() => {
+      expandSourceBtn.focus();
+    });
+    expect(document.activeElement).toBe(expandSourceBtn);
+
+    sourceDeleted = true;
+    await act(async () => {
+      expandSourceBtn.click();
+    });
+    await flush();
+
+    // S, derived note D, and pinned comparison are gone; reloaded visible source remains; safe 404 notice shown; focus falls back off body
+    expect(container.querySelector(`[data-node-card="${SOURCE_1_ID}"]`)).toBeNull();
+    expect(container.querySelector(`[data-node-card="${DOC_ID}"]`)).toBeNull();
+    expect(container.querySelector('section[aria-label="对比参考卡片"]')).toBeNull();
+    expect(nodeCard(SOURCE_2_ID).textContent).toContain("仍可见的有机化学参考书");
+    expect(container.textContent).toContain("所选内容不可用或不在当前范围");
+    expect(document.activeElement).not.toBe(document.body);
+    expect((document.activeElement as HTMLElement | null)?.getAttribute("tabindex")).toBe("-1");
   });
 });

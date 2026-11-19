@@ -5,7 +5,9 @@ import {
   ArrowRight,
   Compass,
   FileSearch,
+  List,
   Network,
+  PinOff,
   RefreshCw,
   Search,
 } from "lucide-react";
@@ -23,9 +25,7 @@ import {
   isSafeOpeningNavigateHref,
   type AssetGraphAction,
   type AssetGraphContext,
-  type AssetGraphEdge,
   type AssetGraphLens,
-  type AssetGraphNode,
   type AssetGraphNodeId,
   type AssetGraphRootKind,
   type CourseRouteActionResult,
@@ -48,27 +48,34 @@ import {
   ui,
 } from "../design/ui";
 import { TransitionLink as Link } from "../v3/motion/view-transition";
-import { AssetGraphCanvas } from "./asset-graph-canvas";
+import {
+  AssetGraphCanvas,
+  ConnectedEdgeItem,
+  requirementStatusBadgeTone,
+} from "./asset-graph-canvas";
 import {
   createAssetGraphClient,
   createHttpAssetGraphTransport,
   type AssetGraphTransport,
 } from "./asset-graph-client";
+import { AssetGraphListView, type ListSubTab } from "./asset-graph-list-view";
 import {
   ASSISTANCE_LABELS,
-  EDGE_BASIS_LABELS,
   KNOWLEDGE_STATUS_LABELS,
   LEARNER_STATE_LABELS,
   LENS_LABELS,
   NODE_KIND_LABELS,
-  RELATION_LABELS,
+  NOT_FOUND_SAFE_NOTICE,
   REQUIREMENT_STATUS_LABELS,
   ROOT_KIND_OPTIONS,
   collectGraphWarnings,
   createAssetGraphStore,
+  getOwn,
   getVisibleEdges,
   getVisibleNodes,
   isGraphPartial,
+  resolveEffectiveNodeStates,
+  type AssetGraphDirection,
 } from "./asset-graph-model";
 
 type StartAction = Extract<AssetGraphAction, { kind: "startCourseRequirement" }>;
@@ -80,11 +87,24 @@ type PendingStartIntent = {
   minutes: number;
 };
 
+type PendingExpandFocusIntent = {
+  button: HTMLButtonElement;
+  generation: number;
+  requestSeq: number;
+};
+
+type LastFocusedCard = {
+  cardElement: HTMLElement;
+  element: Element;
+};
+
 type ContextChoiceOption = {
   value: string;
   label: string;
   context: AssetGraphContext;
 };
+
+export type AssetGraphViewMode = "graph" | "list";
 
 const LENS_OPTIONS: readonly AssetGraphLens[] = ["all", "structure", "assets", "evidence"];
 const MINUTE_OPTIONS = [15, 20, 30, 45] as const;
@@ -141,65 +161,6 @@ function formatReadableTime(iso: string): string {
   });
 }
 
-function ConnectedEdgeItem({
-  edge,
-  direction,
-  endpointNode,
-  onFocusNode,
-}: {
-  edge: AssetGraphEdge;
-  direction: "in" | "out";
-  endpointNode: AssetGraphNode | undefined;
-  onFocusNode: (nodeId: string) => void;
-}) {
-  const basisText =
-    direction === "out"
-      ? ` · ${EDGE_BASIS_LABELS[edge.basis]}`
-      : `（入边 · ${EDGE_BASIS_LABELS[edge.basis]}）`;
-  const sourceCourseHref = edge.sharedAttribution
-    ? `/opening/courses/${edge.sharedAttribution.sourceCourseId}`
-    : null;
-
-  return (
-    <li className="rounded-ctl bg-surface-2/60 p-2">
-      <span className="font-medium text-text">{RELATION_LABELS[edge.relation]}</span>
-      <span>{basisText}</span>
-      {edge.sourceVersion !== undefined ? (
-        <span> · 资料第 {edge.sourceVersion} 版</span>
-      ) : null}
-      {edge.page !== undefined ? <span> · 第 {edge.page} 页</span> : null}
-      {endpointNode ? (
-        <button
-          type="button"
-          className="mt-1 block text-left text-accent hover:underline"
-          onClick={() => onFocusNode(endpointNode.id)}
-        >
-          {direction === "out" ? `指向：${endpointNode.label}` : `来自：${endpointNode.label}`}
-        </button>
-      ) : null}
-      {edge.sharedAttribution ? (
-        <div className="mt-1.5 space-y-1 rounded-ctl border border-line bg-surface px-2 py-1.5">
-          <div className="flex flex-wrap items-center gap-1.5">
-            <span className={`${ui.badge} ${tone.neutral}`}>跨课共享证据</span>
-            <span className="text-xs text-text-2">
-              {`跨课共享自「${edge.sharedAttribution.sourceCourseTitle} · ${edge.sharedAttribution.sourceRequirementTitle}」（第 ${edge.sharedAttribution.sourceRequirementRevision} 版）`}
-            </span>
-          </div>
-          {sourceCourseHref && isSafeOpeningNavigateHref(sourceCourseHref) ? (
-            <Link
-              href={sourceCourseHref}
-              className="inline-flex items-center gap-1 text-xs font-medium text-accent hover:underline"
-            >
-              <span>查看来源课程</span>
-              <ArrowRight size={12} aria-hidden="true" />
-            </Link>
-          ) : null}
-        </div>
-      ) : null}
-    </li>
-  );
-}
-
 export type AssetGraphWorkspaceProps = {
   endpoint?: string;
   transport?: AssetGraphTransport;
@@ -208,6 +169,7 @@ export type AssetGraphWorkspaceProps = {
   initialLens?: AssetGraphLens;
   initialFocus?: AssetGraphNodeId | null;
   initialPageLimit?: number;
+  initialViewMode?: AssetGraphViewMode;
   courses?: readonly { id: string; title: string }[];
   goals?: readonly { id: string; title: string }[];
   onNavigate?: (href: string) => void;
@@ -221,6 +183,7 @@ export function AssetGraphWorkspace({
   initialLens = "all",
   initialFocus = null,
   initialPageLimit = ASSET_GRAPH_DEFAULT_LIMIT,
+  initialViewMode = "graph",
   courses = [],
   goals = [],
   onNavigate,
@@ -274,6 +237,7 @@ export function AssetGraphWorkspace({
       initialLens={initialLens}
       initialFocus={initialFocus}
       initialPageLimit={initialPageLimit}
+      initialViewMode={initialViewMode}
       courses={courses}
       goals={goals}
       onNavigate={onNavigate}
@@ -288,6 +252,7 @@ function ConnectedAssetGraphWorkspace({
   initialLens,
   initialFocus,
   initialPageLimit,
+  initialViewMode,
   courses,
   goals,
   onNavigate,
@@ -298,6 +263,7 @@ function ConnectedAssetGraphWorkspace({
   initialLens: AssetGraphLens;
   initialFocus: AssetGraphNodeId | null;
   initialPageLimit: number;
+  initialViewMode: AssetGraphViewMode;
   courses: readonly { id: string; title: string }[];
   goals: readonly { id: string; title: string }[];
   onNavigate?: (href: string) => void;
@@ -321,6 +287,9 @@ function ConnectedAssetGraphWorkspace({
 
   const state = useSyncExternalStore(store.subscribe, store.getState, store.getState);
 
+  const [viewMode, setViewMode] = useState<AssetGraphViewMode>(initialViewMode);
+  const [listSubTab, setListSubTab] = useState<ListSubTab | null>(null);
+  const [srAnnouncement, setSrAnnouncement] = useState("");
   const [searchInput, setSearchInput] = useState("");
   const [kindInput, setKindInput] = useState<AssetGraphRootKind | "">("");
   const [limitInput, setLimitInput] = useState<number>(initialPageLimit);
@@ -333,21 +302,36 @@ function ConnectedAssetGraphWorkspace({
   >(null);
   const mountedRef = useRef(true);
   const startBusyRef = useRef(false);
+  const workspaceRootRef = useRef<HTMLElement | null>(null);
+  const workspaceContentRef = useRef<HTMLDivElement | null>(null);
+  const noticeContainerRef = useRef<HTMLDivElement | null>(null);
+  const errorContainerRef = useRef<HTMLDivElement | null>(null);
+  const pendingExpandFocusRef = useRef<PendingExpandFocusIntent | null>(null);
+  const lastFocusedCardRef = useRef<LastFocusedCard | null>(null);
+
+  function clearPendingExpandFocus() {
+    pendingExpandFocusRef.current = null;
+  }
 
   useEffect(() => {
     mountedRef.current = true;
     void store.initialize(initialFocus);
     return () => {
       mountedRef.current = false;
+      pendingExpandFocusRef.current = null;
+      lastFocusedCardRef.current = null;
       store.dispose();
     };
   }, [store, initialFocus]);
 
   useEffect(() => {
     return subscribeOpeningPrivacyChange(() => {
+      pendingExpandFocusRef.current = null;
       setPendingStart(null);
       setStartError("");
       setChoiceResult(null);
+      setListSubTab(null);
+      setSrAnnouncement("");
       void store.invalidateByPrivacy();
     });
   }, [store]);
@@ -356,13 +340,111 @@ function ConnectedAssetGraphWorkspace({
     setLimitInput(initialPageLimit);
   }, [initialPageLimit]);
 
+  useEffect(() => {
+    function handleDocumentFocus(event: FocusEvent) {
+      const target = event.target instanceof Element ? event.target : null;
+      if (!target || target === document.body || target === document.documentElement) {
+        return;
+      }
+
+      const pending = pendingExpandFocusRef.current;
+      if (pending && target !== pending.button) {
+        pendingExpandFocusRef.current = null;
+      }
+
+      if (workspaceRootRef.current?.contains(target)) {
+        const card = target.closest<HTMLElement>("[data-node-card], [data-graph-node]");
+        lastFocusedCardRef.current = card ? { cardElement: card, element: target } : null;
+      } else {
+        lastFocusedCardRef.current = null;
+      }
+    }
+
+    document.addEventListener("focus", handleDocumentFocus, true);
+    return () => {
+      document.removeEventListener("focus", handleDocumentFocus, true);
+    };
+  }, []);
+
   const visibleNodes = useMemo(() => getVisibleNodes(state), [state]);
   const visibleEdges = useMemo(() => getVisibleEdges(state), [state]);
   const partial = isGraphPartial(state);
   const warnings = useMemo(() => collectGraphWarnings(state), [state]);
-  const selectedNode = state.selectedNodeId ? state.nodesById[state.selectedNodeId] ?? null : null;
+  const selectedNode = state.selectedNodeId
+    ? getOwn(state.nodesById, state.selectedNodeId) ??
+      (state.transitionCenter?.id === state.selectedNodeId ? state.transitionCenter : null)
+    : null;
   const activeDetail =
     state.detail && state.detail.id === state.selectedNodeId ? state.detail : null;
+
+  const isListDataReady =
+    !state.loadingRoots &&
+    state.expandingNodeId === null &&
+    state.loadingDetailNodeId === null &&
+    state.transitionCenter === null &&
+    visibleNodes.length > 0;
+
+  useEffect(() => {
+    if (viewMode !== "list") return;
+    if (listSubTab !== null) return;
+    if (!isListDataReady) return;
+    setListSubTab(visibleEdges.length > 0 ? "relations" : "nodes");
+  }, [viewMode, listSubTab, isListDataReady, visibleEdges.length]);
+
+  useEffect(() => {
+    const intent = pendingExpandFocusRef.current;
+    if (!intent) return;
+    if (
+      state.requestGeneration !== intent.generation ||
+      state.activeRequestSeq !== intent.requestSeq ||
+      state.error !== null ||
+      state.notice === NOT_FOUND_SAFE_NOTICE
+    ) {
+      pendingExpandFocusRef.current = null;
+      return;
+    }
+    if (state.expandingNodeId !== null) return;
+    pendingExpandFocusRef.current = null;
+    if (
+      intent.button.isConnected &&
+      !intent.button.disabled &&
+      (document.activeElement === null || document.activeElement === document.body)
+    ) {
+      intent.button.focus();
+    }
+  }, [
+    state.expandingNodeId,
+    state.activeRequestSeq,
+    state.requestGeneration,
+    state.error,
+    state.notice,
+  ]);
+
+  useEffect(() => {
+    const lastFocused = lastFocusedCardRef.current;
+    if (!lastFocused) return;
+    if (pendingExpandFocusRef.current !== null) return;
+    if (lastFocused.cardElement.isConnected) return;
+    lastFocusedCardRef.current = null;
+    if (document.activeElement !== null && document.activeElement !== document.body) {
+      return;
+    }
+    const fallbackTarget =
+      (state.error ? errorContainerRef.current : null) ??
+      (state.notice ? noticeContainerRef.current : null) ??
+      (viewMode === "list"
+        ? workspaceContentRef.current?.querySelector<HTMLElement>("[data-list-view]") ?? null
+        : null) ??
+      workspaceContentRef.current;
+    fallbackTarget?.focus();
+  }, [
+    visibleNodes,
+    viewMode,
+    state.error,
+    state.notice,
+    state.context,
+    state.requestGeneration,
+  ]);
 
   const contextOptions = useMemo<ContextChoiceOption[]>(() => {
     const map = new Map<string, ContextChoiceOption>();
@@ -446,17 +528,91 @@ function ConnectedAssetGraphWorkspace({
   }
 
   function handleContextChange(nextContext: AssetGraphContext, preserveFocusId?: string | null) {
+    clearPendingExpandFocus();
     resetActionTransientState();
+    setListSubTab(null);
+    setSrAnnouncement("");
     void store.selectContext(nextContext, preserveFocusId);
   }
 
   function handleLensChange(nextLens: AssetGraphLens) {
+    clearPendingExpandFocus();
     resetActionTransientState();
+    setSrAnnouncement("");
     void store.selectLens(nextLens);
+  }
+
+  async function handleExpandNode(
+    nodeId: AssetGraphNodeId,
+    direction: AssetGraphDirection,
+    triggerButton?: HTMLButtonElement | null,
+  ) {
+    resetActionTransientState();
+    setSrAnnouncement("");
+    clearPendingExpandFocus();
+    const shouldRestoreFocus = Boolean(
+      triggerButton && document.activeElement === triggerButton,
+    );
+    const prevSeq = store.getState().activeRequestSeq;
+    const expandPromise = store.expandNode(nodeId, direction);
+    const startedState = store.getState();
+    if (shouldRestoreFocus && triggerButton && startedState.activeRequestSeq !== prevSeq) {
+      pendingExpandFocusRef.current = {
+        button: triggerButton,
+        generation: startedState.requestGeneration,
+        requestSeq: startedState.activeRequestSeq,
+      };
+    }
+    const result = await expandPromise;
+    if (!mountedRef.current) return;
+    if (!result.applied) {
+      if (
+        pendingExpandFocusRef.current?.generation === startedState.requestGeneration &&
+        pendingExpandFocusRef.current?.requestSeq === startedState.activeRequestSeq
+      ) {
+        pendingExpandFocusRef.current = null;
+      }
+      return;
+    }
+    setSrAnnouncement(result.announcement);
+  }
+
+  async function handleLoadMoreNeighbors(
+    nodeId: AssetGraphNodeId,
+    triggerButton?: HTMLButtonElement | null,
+  ) {
+    setSrAnnouncement("");
+    clearPendingExpandFocus();
+    const shouldRestoreFocus = Boolean(
+      triggerButton && document.activeElement === triggerButton,
+    );
+    const prevSeq = store.getState().activeRequestSeq;
+    const loadPromise = store.loadMoreNeighbors(nodeId);
+    const startedState = store.getState();
+    if (shouldRestoreFocus && triggerButton && startedState.activeRequestSeq !== prevSeq) {
+      pendingExpandFocusRef.current = {
+        button: triggerButton,
+        generation: startedState.requestGeneration,
+        requestSeq: startedState.activeRequestSeq,
+      };
+    }
+    const result = await loadPromise;
+    if (!mountedRef.current) return;
+    if (!result.applied) {
+      if (
+        pendingExpandFocusRef.current?.generation === startedState.requestGeneration &&
+        pendingExpandFocusRef.current?.requestSeq === startedState.activeRequestSeq
+      ) {
+        pendingExpandFocusRef.current = null;
+      }
+      return;
+    }
+    setSrAnnouncement(result.announcement);
   }
 
   function handleSearchSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    clearPendingExpandFocus();
     resetActionTransientState();
     void store.applyFilters({
       searchQuery: searchInput,
@@ -467,6 +623,7 @@ function ConnectedAssetGraphWorkspace({
 
   function handleKindFilterChange(nextKind: AssetGraphRootKind | "") {
     setKindInput(nextKind);
+    clearPendingExpandFocus();
     resetActionTransientState();
     void store.applyFilters({
       searchQuery: searchInput,
@@ -477,6 +634,7 @@ function ConnectedAssetGraphWorkspace({
 
   function handleLimitChange(nextLimit: number) {
     setLimitInput(nextLimit);
+    clearPendingExpandFocus();
     resetActionTransientState();
     void store.applyFilters({
       searchQuery: searchInput,
@@ -489,6 +647,7 @@ function ConnectedAssetGraphWorkspace({
     setSearchInput("");
     setKindInput("");
     setLimitInput(ASSET_GRAPH_DEFAULT_LIMIT);
+    clearPendingExpandFocus();
     resetActionTransientState();
     void store.applyFilters({
       searchQuery: "",
@@ -565,13 +724,22 @@ function ConnectedAssetGraphWorkspace({
     }
   }
 
-  const effectiveLearnerState =
-    activeDetail?.learnerState ?? selectedNode?.summary?.learnerState ?? null;
-  const effectiveRequirementStatus =
-    activeDetail?.requirementStatus ?? selectedNode?.summary?.requirementStatus ?? null;
+  const effectiveStates = resolveEffectiveNodeStates(selectedNode, activeDetail);
+  const effectiveLearnerState = effectiveStates.learnerState ?? null;
+  const effectiveRequirementStatus = effectiveStates.requirementStatus ?? null;
+  const pinnedStates = state.pinnedComparison
+    ? resolveEffectiveNodeStates(state.pinnedComparison.node, state.pinnedComparison.detail)
+    : null;
 
   return (
-    <section className="flex h-full min-h-0 min-w-0 flex-col bg-bg text-text">
+    <section
+      ref={workspaceRootRef}
+      className="flex h-full min-h-0 min-w-0 flex-col bg-bg text-text"
+    >
+      <div role="status" aria-live="polite" className="sr-only">
+        {srAnnouncement}
+      </div>
+
       <PageHeader
         title="知识地图"
         action={
@@ -628,6 +796,38 @@ function ConnectedAssetGraphWorkspace({
               </div>
 
               <div className="flex flex-wrap items-center gap-2">
+                <div role="toolbar" aria-label="视图模式" className="flex flex-wrap gap-1.5">
+                  <button
+                    type="button"
+                    className={viewMode === "graph" ? ui.primary : ui.secondary}
+                    aria-pressed={viewMode === "graph"}
+                    onClick={() => {
+                      clearPendingExpandFocus();
+                      setViewMode("graph");
+                    }}
+                  >
+                    <Network size={14} aria-hidden="true" />
+                    关系图
+                  </button>
+                  <button
+                    type="button"
+                    className={viewMode === "list" ? ui.primary : ui.secondary}
+                    aria-pressed={viewMode === "list"}
+                    onClick={() => {
+                      clearPendingExpandFocus();
+                      if (viewMode !== "list") {
+                        if (listSubTab === null && isListDataReady) {
+                          setListSubTab(visibleEdges.length > 0 ? "relations" : "nodes");
+                        }
+                        setViewMode("list");
+                      }
+                    }}
+                  >
+                    <List size={14} aria-hidden="true" />
+                    列表
+                  </button>
+                </div>
+
                 <div role="toolbar" aria-label="观察视角" className="flex flex-wrap gap-1.5">
                   {LENS_OPTIONS.map(lens => (
                     <button
@@ -646,6 +846,7 @@ function ConnectedAssetGraphWorkspace({
                     type="checkbox"
                     checked={state.includeSummary}
                     onChange={event => {
+                      clearPendingExpandFocus();
                       resetActionTransientState();
                       void store.setIncludeSummary(event.target.checked);
                     }}
@@ -660,7 +861,7 @@ function ConnectedAssetGraphWorkspace({
               onSubmit={handleSearchSubmit}
               className="flex flex-wrap items-end gap-2.5 border-t border-line pt-3"
             >
-              <label className="min-w-[220px] flex-1 space-y-1">
+              <label className="min-w-56 flex-1 space-y-1">
                 <span className={ui.label}>标题检索</span>
                 <div className="flex items-center gap-2 rounded-ctl border border-text-3 bg-surface px-3">
                   <Search size={15} aria-hidden="true" className="shrink-0 text-text-3" />
@@ -723,8 +924,10 @@ function ConnectedAssetGraphWorkspace({
 
           {state.notice ? (
             <div
+              ref={noticeContainerRef}
+              tabIndex={-1}
               role="status"
-              className="flex flex-wrap items-center justify-between gap-2 rounded-tile border border-line-strong bg-surface-2 px-4 py-3 text-sm text-text"
+              className="flex flex-wrap items-center justify-between gap-2 rounded-tile border border-line-strong bg-surface-2 px-4 py-3 text-sm text-text focus:outline-none"
             >
               <span>{state.notice}</span>
               <button type="button" className={ui.quiet} onClick={() => store.clearNotice()}>
@@ -757,7 +960,10 @@ function ConnectedAssetGraphWorkspace({
               <button
                 type="button"
                 className={ui.secondary}
-                onClick={() => void store.retryCurrentView()}
+                onClick={() => {
+                  clearPendingExpandFocus();
+                  void store.retryCurrentView();
+                }}
               >
                 <RefreshCw size={14} aria-hidden="true" />
                 重试读取
@@ -766,14 +972,24 @@ function ConnectedAssetGraphWorkspace({
           ) : null}
 
           {state.error ? (
-            <LoadError
-              message={state.error.message}
-              onRetry={() => void store.retryCurrentView()}
-            />
+            <div ref={errorContainerRef} tabIndex={-1} className="focus:outline-none">
+              <LoadError
+                message={state.error.message}
+                onRetry={() => {
+                  clearPendingExpandFocus();
+                  void store.retryCurrentView();
+                }}
+              />
+            </div>
           ) : null}
 
-          <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_360px]">
-            <div className="min-w-0 space-y-4">
+          <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_var(--layout-companion)]">
+            <div
+              ref={workspaceContentRef}
+              tabIndex={-1}
+              data-workspace-content
+              className="min-w-0 space-y-4 focus:outline-none"
+            >
               {state.loadingRoots && visibleNodes.length === 0 ? (
                 <div className="rounded-tile border border-line bg-surface p-5">
                   <p role="status" className="mb-3 text-sm text-text-2">
@@ -782,34 +998,95 @@ function ConnectedAssetGraphWorkspace({
                   <LoadingRows label="正在读取个人知识地图" />
                 </div>
               ) : visibleNodes.length > 0 ? (
-                <AssetGraphCanvas
-                  nodes={visibleNodes}
-                  edges={visibleEdges}
-                  rootIds={state.rootIds}
-                  selectedNodeId={state.selectedNodeId}
-                  context={state.context}
-                  expandedCenters={state.expandedCenters}
-                  expandingNodeId={state.expandingNodeId}
-                  loadingDetailNodeId={state.loadingDetailNodeId}
-                  onSelectNode={nodeId => {
-                    resetActionTransientState();
-                    store.focusNode(nodeId);
-                  }}
-                  onExpandNode={(nodeId, direction) => {
-                    resetActionTransientState();
-                    void store.expandNode(nodeId, direction);
-                  }}
-                  onLoadMoreNeighbors={nodeId => {
-                    void store.loadMoreNeighbors(nodeId);
-                  }}
-                  onLoadDetail={nodeId => {
-                    resetActionTransientState();
-                    void store.loadDetail(nodeId);
-                  }}
-                  onEnterContext={(nextContext, focusId) => {
-                    handleContextChange(nextContext, focusId);
-                  }}
-                />
+                viewMode === "list" ? (
+                  <AssetGraphListView
+                    key={serializeContextValue(state.context)}
+                    nodes={visibleNodes}
+                    edges={visibleEdges}
+                    nodesById={state.nodesById}
+                    selectedNodeId={state.selectedNodeId}
+                    activeDetail={activeDetail}
+                    pinnedNodeId={state.pinnedComparison?.node.id ?? null}
+                    context={state.context}
+                    lens={state.lens}
+                    subTab={listSubTab}
+                    onSubTabChange={tab => {
+                      clearPendingExpandFocus();
+                      setListSubTab(tab);
+                    }}
+                    expandedCenters={state.expandedCenters}
+                    expandingNodeId={state.expandingNodeId}
+                    loadingDetailNodeId={state.loadingDetailNodeId}
+                    onSelectNode={nodeId => {
+                      clearPendingExpandFocus();
+                      resetActionTransientState();
+                      store.focusNode(nodeId);
+                    }}
+                    onExpandNode={(nodeId, direction, triggerButton) => {
+                      void handleExpandNode(nodeId, direction, triggerButton);
+                    }}
+                    onCollapseNode={nodeId => {
+                      clearPendingExpandFocus();
+                      store.collapseNode(nodeId);
+                    }}
+                    onLoadMoreNeighbors={(nodeId, triggerButton) => {
+                      void handleLoadMoreNeighbors(nodeId, triggerButton);
+                    }}
+                    onLoadDetail={nodeId => {
+                      clearPendingExpandFocus();
+                      resetActionTransientState();
+                      void store.loadDetail(nodeId);
+                    }}
+                    onEnterContext={(nextContext, focusId) => {
+                      handleContextChange(nextContext, focusId);
+                    }}
+                    onTogglePinNode={nodeId => {
+                      clearPendingExpandFocus();
+                      store.togglePinNode(nodeId);
+                    }}
+                  />
+                ) : (
+                  <AssetGraphCanvas
+                    nodes={visibleNodes}
+                    edges={visibleEdges}
+                    rootIds={state.rootIds}
+                    selectedNodeId={state.selectedNodeId}
+                    activeDetail={activeDetail}
+                    pinnedNodeId={state.pinnedComparison?.node.id ?? null}
+                    context={state.context}
+                    lens={state.lens}
+                    expandedCenters={state.expandedCenters}
+                    expandingNodeId={state.expandingNodeId}
+                    loadingDetailNodeId={state.loadingDetailNodeId}
+                    onSelectNode={nodeId => {
+                      clearPendingExpandFocus();
+                      resetActionTransientState();
+                      store.focusNode(nodeId);
+                    }}
+                    onExpandNode={(nodeId, direction, triggerButton) => {
+                      void handleExpandNode(nodeId, direction, triggerButton);
+                    }}
+                    onCollapseNode={nodeId => {
+                      clearPendingExpandFocus();
+                      store.collapseNode(nodeId);
+                    }}
+                    onLoadMoreNeighbors={(nodeId, triggerButton) => {
+                      void handleLoadMoreNeighbors(nodeId, triggerButton);
+                    }}
+                    onLoadDetail={nodeId => {
+                      clearPendingExpandFocus();
+                      resetActionTransientState();
+                      void store.loadDetail(nodeId);
+                    }}
+                    onEnterContext={(nextContext, focusId) => {
+                      handleContextChange(nextContext, focusId);
+                    }}
+                    onTogglePinNode={nodeId => {
+                      clearPendingExpandFocus();
+                      store.togglePinNode(nodeId);
+                    }}
+                  />
+                )
               ) : !state.error ? (
                 <div className="rounded-tile border border-line bg-surface p-6 shadow-card">
                   <EmptyState
@@ -844,7 +1121,10 @@ function ConnectedAssetGraphWorkspace({
                     type="button"
                     className={ui.secondary}
                     disabled={state.loadingMoreRoots}
-                    onClick={() => void store.loadMoreRoots()}
+                    onClick={() => {
+                      clearPendingExpandFocus();
+                      void store.loadMoreRoots();
+                    }}
                   >
                     {state.loadingMoreRoots ? "正在加载下一页…" : "加载下一页"}
                   </button>
@@ -853,9 +1133,54 @@ function ConnectedAssetGraphWorkspace({
             </div>
 
             <aside
-              aria-label="节点详情与行动面板"
+              aria-label="详情与后续行动面板"
               className="h-fit space-y-4 rounded-tile border border-line bg-surface p-4 shadow-card lg:sticky lg:top-4"
             >
+              {state.pinnedComparison ? (
+                <section
+                  aria-label="对比参考卡片"
+                  className="space-y-2 rounded-ctl border border-line bg-surface-2/50 p-3 text-xs"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-semibold text-text">对比参考</span>
+                    <button
+                      type="button"
+                      className="inline-flex items-center gap-1 text-text-2 hover:text-text"
+                      onClick={() => store.clearPinnedNode()}
+                    >
+                      <PinOff size={12} aria-hidden="true" />
+                      取消固定
+                    </button>
+                  </div>
+                  <button
+                    type="button"
+                    className="block text-left font-medium text-accent hover:underline"
+                    onClick={() => store.focusNode(state.pinnedComparison!.node.id)}
+                  >
+                    [{NODE_KIND_LABELS[state.pinnedComparison.node.kind]}]{" "}
+                    {state.pinnedComparison.node.label}
+                  </button>
+                  {pinnedStates?.learnerState || pinnedStates?.requirementStatus ? (
+                    <div className="flex flex-wrap gap-1.5">
+                      {pinnedStates.learnerState ? (
+                        <span className={`${ui.badge} ${tone.neutral}`}>
+                          {LEARNER_STATE_LABELS[pinnedStates.learnerState]}
+                        </span>
+                      ) : null}
+                      {pinnedStates.requirementStatus ? (
+                        <span
+                          className={`${ui.badge} ${requirementStatusBadgeTone(
+                            pinnedStates.requirementStatus,
+                          )}`}
+                        >
+                          {REQUIREMENT_STATUS_LABELS[pinnedStates.requirementStatus]}
+                        </span>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </section>
+              ) : null}
+
               {selectedNode || activeDetail ? (
                 <>
                   <div className="space-y-1.5 border-b border-line pb-3">
@@ -928,12 +1253,9 @@ function ConnectedAssetGraphWorkspace({
                         <span className="text-text-3">课程要求达成情况</span>
                         <span
                           className={`${ui.badge} ${
-                            effectiveRequirementStatus === "verified"
-                              ? tone.success
-                              : effectiveRequirementStatus === "blocked" ||
-                                  effectiveRequirementStatus === "needs_correction"
-                                ? tone.warning
-                                : tone.neutral
+                            effectiveRequirementStatus
+                              ? requirementStatusBadgeTone(effectiveRequirementStatus)
+                              : tone.neutral
                           }`}
                         >
                           {effectiveRequirementStatus
@@ -951,6 +1273,7 @@ function ConnectedAssetGraphWorkspace({
                         className={ui.secondary}
                         disabled={state.loadingDetailNodeId === selectedNode.id}
                         onClick={() => {
+                          clearPendingExpandFocus();
                           resetActionTransientState();
                           void store.loadDetail(selectedNode.id);
                         }}
@@ -959,7 +1282,7 @@ function ConnectedAssetGraphWorkspace({
                         {state.loadingDetailNodeId === selectedNode.id
                           ? "正在读取详情…"
                           : activeDetail
-                            ? "刷新节点详情"
+                            ? "刷新详情"
                             : "查看详情与行动"}
                       </button>
                     </div>
@@ -982,7 +1305,7 @@ function ConnectedAssetGraphWorkspace({
                         <h3 className="text-xs font-semibold text-text">可用行动</h3>
                         {activeDetail.actions.length === 0 ? (
                           <p className="text-xs text-text-3">
-                            当前节点暂无可直接打开的后续入口。
+                            这项内容下暂时没有可直接打开的后续入口。
                           </p>
                         ) : (
                           <div className="space-y-2.5">
@@ -1101,7 +1424,7 @@ function ConnectedAssetGraphWorkspace({
                             key={edge.id}
                             edge={edge}
                             direction="out"
-                            endpointNode={state.nodesById[edge.to]}
+                            endpointNode={getOwn(state.nodesById, edge.to)}
                             onFocusNode={store.focusNode}
                           />
                         ))}
@@ -1110,7 +1433,7 @@ function ConnectedAssetGraphWorkspace({
                             key={edge.id}
                             edge={edge}
                             direction="in"
-                            endpointNode={state.nodesById[edge.from]}
+                            endpointNode={getOwn(state.nodesById, edge.from)}
                             onFocusNode={store.focusNode}
                           />
                         ))}
@@ -1120,9 +1443,9 @@ function ConnectedAssetGraphWorkspace({
                 </>
               ) : (
                 <div className="space-y-2 text-sm text-text-2">
-                  <h2 className="text-base font-semibold text-text">节点详情</h2>
+                  <h2 className="text-base font-semibold text-text">详情与行动</h2>
                   <p className="text-xs leading-6 text-text-3">
-                    在左侧画布或节点清单中点击任意一项，或点击“查看详情”查看依据说明与后续学习入口。
+                    在左侧关系图或列表中点选任意一项，或点击“查看详情”阅读依据说明与后续学习入口。
                   </p>
                 </div>
               )}
