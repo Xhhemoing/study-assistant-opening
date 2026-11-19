@@ -21,7 +21,7 @@ chmod 700 "$apt_bin/apt-get"
 node_path=$(command -v node)
 sudo -- env PATH="$apt_bin:$PATH" "$node_path" node_modules/playwright/cli.js install-deps chromium
 install_timeout="${PLAYWRIGHT_INSTALL_TIMEOUT_SECONDS:-120}"
-[[ "$install_timeout" =~ ^[1-9][0-9]*$ ]]
+[[ "$install_timeout" =~ ^[1-9][0-9]*$ ]] && (( 10#$install_timeout <= 120 ))
 rc=0
 timeout --kill-after=5s "${install_timeout}s" "$node_path" node_modules/playwright/cli.js install chromium || rc=$?
 if (( rc == 124 )); then

@@ -205,3 +205,18 @@ test("configureCiOpeningTestDb always closes client when transaction fails", asy
   );
   assert.deepEqual(endCalls, [{ timeout: 5 }]);
 });
+
+test("configureCiOpeningTestDb validates URL before checking GITHUB_ACTIONS outside CI", async () => {
+  let createClientCalls = 0;
+  await assert.rejects(
+    configureCiOpeningTestDb("postgres://u:p@db.example/aistudy_opening_test", "1", {
+      env: {},
+      createClient: async () => {
+        createClientCalls += 1;
+        throw new Error("must not connect");
+      },
+    }),
+    /loopback/i,
+  );
+  assert.equal(createClientCalls, 0);
+});

@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import tempfile
 import unittest
@@ -87,6 +88,10 @@ if (process.argv[2] === 'install-deps') {{
   }}
   if (process.env.FAIL_ON === 'browser') {{
     process.exit(25);
+  }} else if (process.env.FAIL_ON === 'browser-sigkill') {{
+    process.kill(process.pid, 'SIGKILL');
+  }} else if (process.env.FAIL_ON === 'browser-timeout-both') {{
+    setTimeout(() => {{}}, 5000);
   }} else if (process.env.FAIL_ON === 'browser-timeout-once' || process.env.FAIL_ON === 'browser-timeout-then-fail') {{
     const attemptFile = process.env.BROWSER_ATTEMPT;
     if (!fs.existsSync(attemptFile)) {{
@@ -132,11 +137,17 @@ exports.registry = {
                 env.pop(var, None)
             if install_timeout:
                 env["PLAYWRIGHT_INSTALL_TIMEOUT_SECONDS"] = str(install_timeout)
-            result = subprocess.run(
-                ["bash", str(SCRIPT)], cwd=root, capture_output=True, text=True,
-                timeout=20,
-                env=env,
+            proc = subprocess.Popen(
+                ["bash", str(SCRIPT)], cwd=root, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, text=True, env=env, start_new_session=True,
             )
+            try:
+                stdout, stderr = proc.communicate(timeout=20)
+            except subprocess.TimeoutExpired:
+                os.killpg(proc.pid, signal.SIGKILL)
+                proc.communicate()
+                raise
+            result = subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
             calls = calls_file.read_text().replace(str(fixture_bin), '/fixture').splitlines() if calls_file.exists() else []
             config = config_dump_file.read_text() if config_dump_file.exists() else ""
             mirror_overrides = mirror_overrides_file.read_text() if mirror_overrides_file.exists() else ""
@@ -198,11 +209,34 @@ exports.registry = {
         self.assertEqual(mirror_overrides, expected_override)
         self.assertNotIn("Linked libraries OK:", result.stdout)
 
-        result, calls, _, _ = self.run_installer(install_timeout="0")
-        self.assertNotEqual(result.returncode, 0, result.stdout)
-        self.assertNotIn("browser:install chromium", calls)
+        result, calls, _, mirror_overrides = self.run_installer(
+            failure="browser-timeout-both", install_timeout="1",
+        )
+        self.assertEqual(result.returncode, 124, result.stderr)
+        self.assertEqual(calls[2:], ["browser:install chromium", "browser:install chromium"])
         self.assertFalse(any(call.startswith("ldd:") for call in calls), calls)
+        self.assertEqual(mirror_overrides, expected_override)
         self.assertNotIn("Linked libraries OK:", result.stdout)
+
+        result, calls, _, mirror_overrides = self.run_installer(
+            failure="browser-sigkill", install_timeout="1",
+        )
+        self.assertEqual(result.returncode, 137, result.stderr)
+        self.assertEqual(calls[2:], ["browser:install chromium"])
+        self.assertFalse(any(call.startswith("ldd:") for call in calls), calls)
+        self.assertEqual(mirror_overrides, "")
+        self.assertNotIn("Linked libraries OK:", result.stdout)
+
+        result, calls, _, _ = self.run_installer(install_timeout="120")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        for bad_timeout in ("0", "121", "600", "abc"):
+            with self.subTest(bad_timeout=bad_timeout):
+                result, calls, _, _ = self.run_installer(install_timeout=bad_timeout)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertNotIn("browser:install chromium", calls)
+                self.assertFalse(any(call.startswith("ldd:") for call in calls), calls)
+                self.assertNotIn("Linked libraries OK:", result.stdout)
 
     def test_static_ffmpeg_requires_positive_elf_evidence(self):
         result, calls, _, _ = self.run_installer(failure='static-valid')
