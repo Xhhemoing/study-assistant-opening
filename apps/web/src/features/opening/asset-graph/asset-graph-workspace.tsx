@@ -23,7 +23,9 @@ import {
   isSafeOpeningNavigateHref,
   type AssetGraphAction,
   type AssetGraphContext,
+  type AssetGraphEdge,
   type AssetGraphLens,
+  type AssetGraphNode,
   type AssetGraphNodeId,
   type AssetGraphRootKind,
   type CourseRouteActionResult,
@@ -137,6 +139,65 @@ function formatReadableTime(iso: string): string {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+function ConnectedEdgeItem({
+  edge,
+  direction,
+  endpointNode,
+  onFocusNode,
+}: {
+  edge: AssetGraphEdge;
+  direction: "in" | "out";
+  endpointNode: AssetGraphNode | undefined;
+  onFocusNode: (nodeId: string) => void;
+}) {
+  const basisText =
+    direction === "out"
+      ? ` · ${EDGE_BASIS_LABELS[edge.basis]}`
+      : `（入边 · ${EDGE_BASIS_LABELS[edge.basis]}）`;
+  const sourceCourseHref = edge.sharedAttribution
+    ? `/opening/courses/${edge.sharedAttribution.sourceCourseId}`
+    : null;
+
+  return (
+    <li className="rounded-ctl bg-surface-2/60 p-2">
+      <span className="font-medium text-text">{RELATION_LABELS[edge.relation]}</span>
+      <span>{basisText}</span>
+      {edge.sourceVersion !== undefined ? (
+        <span> · 资料第 {edge.sourceVersion} 版</span>
+      ) : null}
+      {edge.page !== undefined ? <span> · 第 {edge.page} 页</span> : null}
+      {endpointNode ? (
+        <button
+          type="button"
+          className="mt-1 block text-left text-accent hover:underline"
+          onClick={() => onFocusNode(endpointNode.id)}
+        >
+          {direction === "out" ? `指向：${endpointNode.label}` : `来自：${endpointNode.label}`}
+        </button>
+      ) : null}
+      {edge.sharedAttribution ? (
+        <div className="mt-1.5 space-y-1 rounded-ctl border border-line bg-surface px-2 py-1.5">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className={`${ui.badge} ${tone.neutral}`}>跨课共享证据</span>
+            <span className="text-xs text-text-2">
+              {`跨课共享自「${edge.sharedAttribution.sourceCourseTitle} · ${edge.sharedAttribution.sourceRequirementTitle}」（第 ${edge.sharedAttribution.sourceRequirementRevision} 版）`}
+            </span>
+          </div>
+          {sourceCourseHref && isSafeOpeningNavigateHref(sourceCourseHref) ? (
+            <Link
+              href={sourceCourseHref}
+              className="inline-flex items-center gap-1 text-xs font-medium text-accent hover:underline"
+            >
+              <span>查看来源课程</span>
+              <ArrowRight size={12} aria-hidden="true" />
+            </Link>
+          ) : null}
+        </div>
+      ) : null}
+    </li>
+  );
 }
 
 export type AssetGraphWorkspaceProps = {
@@ -1035,54 +1096,24 @@ function ConnectedAssetGraphWorkspace({
                     <div className="space-y-2 border-t border-line pt-3">
                       <h3 className="text-xs font-semibold text-text">当前已展开关联</h3>
                       <ul className="space-y-1.5 text-xs text-text-2">
-                        {connectedEdges.outgoing.map(edge => {
-                          const target = state.nodesById[edge.to];
-                          return (
-                            <li key={edge.id} className="rounded-ctl bg-surface-2/60 p-2">
-                              <span className="font-medium text-text">
-                                {RELATION_LABELS[edge.relation]}
-                              </span>
-                              <span> · {EDGE_BASIS_LABELS[edge.basis]}</span>
-                              {edge.sourceVersion !== undefined ? (
-                                <span> · 资料第 {edge.sourceVersion} 版</span>
-                              ) : null}
-                              {edge.page !== undefined ? <span> · 第 {edge.page} 页</span> : null}
-                              {target ? (
-                                <button
-                                  type="button"
-                                  className="mt-1 block text-left text-accent hover:underline"
-                                  onClick={() => store.focusNode(target.id)}
-                                >
-                                  指向：{target.label}
-                                </button>
-                              ) : null}
-                            </li>
-                          );
-                        })}
-                        {connectedEdges.incoming.map(edge => {
-                          const source = state.nodesById[edge.from];
-                          return (
-                            <li key={edge.id} className="rounded-ctl bg-surface-2/60 p-2">
-                              <span className="font-medium text-text">
-                                {RELATION_LABELS[edge.relation]}
-                              </span>
-                              <span>（入边 · {EDGE_BASIS_LABELS[edge.basis]}）</span>
-                              {edge.sourceVersion !== undefined ? (
-                                <span> · 资料第 {edge.sourceVersion} 版</span>
-                              ) : null}
-                              {edge.page !== undefined ? <span> · 第 {edge.page} 页</span> : null}
-                              {source ? (
-                                <button
-                                  type="button"
-                                  className="mt-1 block text-left text-accent hover:underline"
-                                  onClick={() => store.focusNode(source.id)}
-                                >
-                                  来自：{source.label}
-                                </button>
-                              ) : null}
-                            </li>
-                          );
-                        })}
+                        {connectedEdges.outgoing.map(edge => (
+                          <ConnectedEdgeItem
+                            key={edge.id}
+                            edge={edge}
+                            direction="out"
+                            endpointNode={state.nodesById[edge.to]}
+                            onFocusNode={store.focusNode}
+                          />
+                        ))}
+                        {connectedEdges.incoming.map(edge => (
+                          <ConnectedEdgeItem
+                            key={edge.id}
+                            edge={edge}
+                            direction="in"
+                            endpointNode={state.nodesById[edge.from]}
+                            onFocusNode={store.focusNode}
+                          />
+                        ))}
                       </ul>
                     </div>
                   ) : null}

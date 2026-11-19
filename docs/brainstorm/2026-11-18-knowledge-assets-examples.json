@@ -893,6 +893,81 @@
           "message": "请求的资源不可用。"
         }
       }
+    },
+    {
+      "name": "synthetic-shared-skills-01-cross-course-evidence-neighbors",
+      "request": {
+        "method": "POST",
+        "path": "/api/opening/asset-graph/query",
+        "body": {
+          "op": "neighbors",
+          "context": {
+            "kind": "course",
+            "id": "course/10000000-0000-4000-8000-000000000002"
+          },
+          "lens": "evidence",
+          "focus": "requirement/30000000-0000-4000-8000-000000000002",
+          "direction": "out",
+          "relations": [
+            "hasObservation"
+          ],
+          "limit": 20,
+          "include": [
+            "summary"
+          ]
+        }
+      },
+      "http": 200,
+      "response": {
+        "asOf": "2026-01-01T00:00:00.000Z",
+        "nodes": [
+          {
+            "id": "requirement/30000000-0000-4000-8000-000000000002",
+            "kind": "requirement",
+            "label": "合成：跨课应用变化率迁移",
+            "summary": {
+              "learnerState": "independent",
+              "requirementStatus": "verified"
+            }
+          },
+          {
+            "id": "observation/50000000-0000-4000-8000-000000000002",
+            "kind": "observation",
+            "label": "独立作答记录",
+            "meta": {
+              "occurredAt": "2026-01-01T00:00:00.000Z",
+              "assistance": "independent"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "id": "derived:hasObservation:requirement/30000000-0000-4000-8000-000000000002:observation/50000000-0000-4000-8000-000000000002:link:a0000000-0000-4000-8000-000000000001",
+            "from": "requirement/30000000-0000-4000-8000-000000000002",
+            "to": "observation/50000000-0000-4000-8000-000000000002",
+            "relation": "hasObservation",
+            "basis": "derived",
+            "sharedAttribution": {
+              "linkId": "a0000000-0000-4000-8000-000000000001",
+              "linkRevision": 1,
+              "stableSkillId": "b0000000-0000-4000-8000-000000000001",
+              "sourceCourseId": "10000000-0000-4000-8000-000000000001",
+              "sourceCourseTitle": "合成：微积分入门",
+              "sourceRequirementId": "30000000-0000-4000-8000-000000000001",
+              "sourceRequirementTitle": "合成：解释平均变化率与瞬时变化率",
+              "sourceRequirementRevision": 2,
+              "targetRequirementRevision": 2,
+              "effective": true
+            }
+          }
+        ],
+        "page": {
+          "nextCursor": null
+        },
+        "completeness": "complete",
+        "warnings": [],
+        "detail": null
+      }
     }
   ]
 }

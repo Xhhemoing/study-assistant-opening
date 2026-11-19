@@ -39,8 +39,8 @@ afterEach(() => {
 });
 
 describe("createSyntheticAssetGraphTransport", () => {
-  it("loads all 20 design fixture cases and matches each regardless of key ordering", async () => {
-    expect(fixtures.cases).toHaveLength(20);
+  it("loads all 21 design fixture cases and matches each regardless of key ordering", async () => {
+    expect(fixtures.cases).toHaveLength(21);
     const transport = createSyntheticAssetGraphTransport(fixtures);
 
     for (const item of fixtures.cases) {
