@@ -33,8 +33,15 @@ function transport(state: Server) {
     return state.post ? state.post() : Response.json({ jobId, kind: "build-course-knowledge", created: state.created });
   });
 }
-async function render(state: Server, onRebuilt = vi.fn()) {
-  await act(async () => root.render(<KnowledgeRebuildControl courseId={courseId} client={createKnowledgeRebuildClient(transport(state))} onRebuilt={onRebuilt} />));
+async function render(state: Server, onRebuilt = vi.fn(), onSyncUpdated = vi.fn()) {
+  await act(async () => root.render(
+    <KnowledgeRebuildControl
+      courseId={courseId}
+      client={createKnowledgeRebuildClient(transport(state))}
+      onRebuilt={onRebuilt}
+      onSyncUpdated={onSyncUpdated}
+    />,
+  ));
   return onRebuilt;
 }
 function action() { const node = host.querySelector("button"); if (!node) throw new Error("missing rebuild button"); return node; }
@@ -314,7 +321,7 @@ it.each([
   ["failed", "本次整理未能完成，请稍后重试；若资料无法读取，请先在资料页检查。"],
   ["outcome_unknown", "本次整理结果暂未确认，以刷新后为准；请稍后刷新确认，无需立即重复提交。"],
   ["cancelled", "本次整理已取消；如需更新知识点，请重新点击整理。"],
-] as const)("D2: stops polling on requestedJob=%s, notifies onRebuilt with terminal record, and never auto-reposts even if another job J2 races ahead", async (terminalState, expectedAlert) => {
+] as const)("D2: stops polling on requestedJob=%s, notifies onSyncUpdated (never onRebuilt), and never auto-reposts even if another job J2 races ahead", async (terminalState, expectedAlert) => {
   const otherJobId = "22222222-2222-4222-8222-222222222222";
   const state = server({
     version: 2,
@@ -332,7 +339,8 @@ it.each([
       requestedJob: null,
     },
   });
-  const onRebuilt = await render(state);
+  const onSyncUpdated = vi.fn();
+  const onRebuilt = await render(state, vi.fn(), onSyncUpdated);
   await act(async () => action().click());
 
   // J2 races ahead and bumps lastBuiltVersion AND fails another job, while J1 (requestedJob) is still running.
@@ -353,6 +361,7 @@ it.each([
   expect(action().disabled).toBe(true);
   expect(host.querySelector('[role="alert"]')).toBeNull();
   expect(onRebuilt).not.toHaveBeenCalled();
+  expect(onSyncUpdated).not.toHaveBeenCalled();
 
   // Now J1 reaches terminal failure/unknown/cancelled state.
   state.sync = {
@@ -365,13 +374,58 @@ it.each([
   await advance(KNOWLEDGE_POLL_INTERVAL_MS);
   expect(action().disabled).toBe(false);
   expect(host.querySelector('[role="alert"]')?.textContent).toBe(expectedAlert);
-  expect(onRebuilt).toHaveBeenCalledTimes(1);
-  expect(onRebuilt.mock.calls[0]?.[0]?.sync?.requestedJob).toEqual({ jobId, state: terminalState });
+  expect(onRebuilt).not.toHaveBeenCalled();
+  expect(onSyncUpdated).toHaveBeenCalledTimes(1);
+  expect(onSyncUpdated.mock.calls[0]?.[0]?.sync?.requestedJob).toEqual({ jobId, state: terminalState });
+  expect(onSyncUpdated.mock.calls[0]?.[1]).toBe(terminalState);
   expect(state.posts).toHaveLength(1);
   const readsAfterStop = state.reads;
   await advance(KNOWLEDGE_POLL_INTERVAL_MS * 4);
   expect(state.reads).toBe(readsAfterStop);
   expect(state.posts).toHaveLength(1);
+});
+
+it("keeps independent failed-job alert and skips onRebuilt even when a subsequent succeeded job already cleared lastFailedJob", async () => {
+  const state = server({
+    version: 2,
+    nodes: 1,
+    sync: {
+      status: "needs_rebuild",
+      activeJobId: null,
+      lastBuiltVersion: 2,
+      coveredSourceVersions: {},
+      eligibleSourceVersions: { [courseId]: 1 },
+      parsingSourceCount: 0,
+      unreadableSourceCount: 0,
+      rebuildBlockedByMaterials: false,
+      lastFailedJob: null,
+      requestedJob: null,
+    },
+  });
+  const onSyncUpdated = vi.fn();
+  const onRebuilt = await render(state, vi.fn(), onSyncUpdated);
+  await act(async () => action().click());
+
+  state.version = 4;
+  state.nodes = 3;
+  state.sync = {
+    status: "up_to_date",
+    activeJobId: null,
+    lastBuiltVersion: 4,
+    coveredSourceVersions: { [courseId]: 1 },
+    eligibleSourceVersions: { [courseId]: 1 },
+    parsingSourceCount: 0,
+    unreadableSourceCount: 0,
+    rebuildBlockedByMaterials: false,
+    lastFailedJob: null,
+    requestedJob: { jobId, state: "failed" },
+  };
+  await advance(KNOWLEDGE_POLL_INTERVAL_MS);
+  expect(action().disabled).toBe(false);
+  expect(host.querySelector('[role="alert"]')?.textContent).toBe("本次整理未能完成，请稍后重试；若资料无法读取，请先在资料页检查。");
+  expect(onRebuilt).not.toHaveBeenCalled();
+  expect(onSyncUpdated).toHaveBeenCalledTimes(1);
+  expect(onSyncUpdated.mock.calls[0]?.[1]).toBe("failed");
 });
 
 it.each([

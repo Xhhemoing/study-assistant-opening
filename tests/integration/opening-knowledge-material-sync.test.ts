@@ -445,6 +445,7 @@ describe("opening knowledge material lifecycle sync (real PG)", () => {
     });
 
     const afterExclude = await knowledge.getWithSync(f.scope, courseId);
+    expect(afterExclude.snapshot.nodes.length).toBeGreaterThan(0);
     expect(afterExclude.snapshot.nodes.every((n) => n.status === "needs_check")).toBe(true);
     expect(afterExclude.sync?.status).toBe("pending");
     expect(await runJob(jobs, afterExclude.sync!.activeJobId!, makeBuildHandler({ nodeStatus: "supported" }))).toBe(true);
@@ -468,6 +469,7 @@ describe("opening knowledge material lifecycle sync (real PG)", () => {
       expectedMembershipIds: impact3.courses.map((c) => c.membershipId),
     });
     const afterDelete = await knowledge.getWithSync(f.scope, courseId);
+    expect(afterDelete.snapshot.nodes.length).toBeGreaterThan(0);
     expect(afterDelete.snapshot.nodes.every((n) => n.status === "needs_check")).toBe(true);
     expect(afterDelete.sync?.status).toBe("pending");
     expect(await runJob(jobs, afterDelete.sync!.activeJobId!, makeBuildHandler({ nodeStatus: "supported" }))).toBe(true);
@@ -963,5 +965,111 @@ describe("opening knowledge material lifecycle sync (real PG)", () => {
     expect(postCommitRead.snapshot.nodes).toHaveLength(0);
     expect(postCommitRead.sync?.requestedJob).toEqual({ jobId: raceJob.jobId, state: "succeeded" });
     expect(postCommitRead.sync?.activeJobId).toBeNull();
+  });
+
+  it("GPT-P1-R2: rejects stale J1 batch after J2 commits V@2 nodes and evidence, preserving J2 exact node ID and chunk ID", async () => {
+    const knowledge = createOpeningKnowledgeRepository(f.sql);
+    const jobs = createOpeningJobRepository(f.sql);
+    const courses = createCourseMembershipRepository(f.sql);
+    const courseId = await seedCourse("Stale J1 vs J2 V2 Race");
+
+    const videoV = await seedSource({ name: "lecture.mp4", version: 1, text: "旧版 V1 转写" });
+    await courses.addAssetMembership({
+      workspaceId: f.scope.workspaceId,
+      courseId,
+      assetType: "source",
+      assetId: videoV.sourceId,
+      role: "core",
+      visibility: "course",
+      purpose: "teaching",
+    });
+
+    // J1 starts on V@1 and pauses inside extractGraph before writeback (will produce an empty/stale batch without V@2).
+    const j1 = await knowledge.enqueueRebuild(f.scope, courseId, { clientKey: "r2-stale-j1" });
+    expect(j1.created).toBe(true);
+
+    let enteredJ1!: () => void;
+    let releaseJ1!: () => void;
+    const j1Entered = new Promise<void>((resolve) => {
+      enteredJ1 = resolve;
+    });
+    const j1Proceed = new Promise<void>((resolve) => {
+      releaseJ1 = resolve;
+    });
+
+    const j1Handler = createBuildCourseKnowledgeHandler({
+      listAuthorizedChunks: (scope, cid) => knowledge.listAuthorizedChunks(scope, cid),
+      listReferencedNodeIds: (scope, cid) => knowledge.listReferencedNodeIds(scope, cid),
+      get: (scope, cid) => knowledge.getForRebuild(scope, cid),
+      replace: (scope, cid, input) => knowledge.replace(scope, cid, input),
+      extractGraph: async () => {
+        enteredJ1();
+        await j1Proceed;
+        return { nodes: [], edges: [] };
+      },
+    });
+    const j1Promise = runJob(jobs, j1.jobId, j1Handler);
+    await j1Entered;
+
+    // Upgrade V in-place to V@2 with a new readable chunk, then let J2 run and commit V@2 nodes + evidence.
+    const v2Text = "新版 V2 核心定理与证明";
+    const v2Bytes = Buffer.from(v2Text, "utf8");
+    const v2Sha = createHash("sha256").update(v2Bytes).digest("hex");
+    await f.sql`
+      UPDATE opening_sources
+      SET version = 2, bytes = ${v2Bytes.length}, sha256 = ${v2Sha}, parse_state = 'ready'
+      WHERE workspace_id = ${f.scope.workspaceId} AND id = ${videoV.sourceId}`;
+    await f.sql`
+      INSERT INTO opening_source_versions (source_id, version, workspace_id, bytes, sha256, availability)
+      VALUES (${videoV.sourceId}, 2, ${f.scope.workspaceId}, ${v2Bytes.length}, ${v2Sha}, 'available')`;
+    const v2ChunkId = randomUUID();
+    await f.sql`
+      INSERT INTO opening_source_chunks (id, source_id, source_version, page, text, image_object_key)
+      VALUES (${v2ChunkId}, ${videoV.sourceId}, 2, 1, ${v2Text}, NULL)`;
+
+    const j2 = await knowledge.enqueueRebuild(f.scope, courseId, { clientKey: "r2-fresh-j2-v2" });
+    expect(j2.created).toBe(true);
+    expect(await runJob(jobs, j2.jobId, makeBuildHandler({ nodeStatus: "supported" }))).toBe(true);
+
+    const afterJ2 = await knowledge.get(f.scope, courseId);
+    expect(afterJ2?.sourceVersions).toEqual({ [videoV.sourceId]: 2 });
+    expect(afterJ2?.snapshot.nodes).toHaveLength(1);
+    const j2Node = afterJ2!.snapshot.nodes[0]!;
+    expect(j2Node.evidenceChunkIds).toEqual([v2ChunkId]);
+
+    // Release stale J1: hits CAS conflict against J2's committed V@2 graph and MUST fail without overwriting.
+    releaseJ1();
+    await j1Promise;
+    const j1Status = await knowledge.readSyncStatus(f.scope, courseId, {
+      includeDetails: true,
+      requestedJobId: j1.jobId,
+    });
+    expect(j1Status.requestedJob).toEqual({ jobId: j1.jobId, state: "failed" });
+
+    // Even a direct replace() call at J2's exact version with stale extractedSourceVersions must be rejected.
+    await expect(
+      knowledge.replace(f.scope, courseId, {
+        expectedVersion: afterJ2!.version,
+        extractedSourceVersions: {},
+        snapshot: { courseId, version: afterJ2!.version + 1, nodes: [], edges: [] },
+        sourceVersions: {},
+      }),
+    ).rejects.toMatchObject({ code: "CONFLICT", reason: "MATERIAL_REPLACEMENT_BLOCKED" });
+    await expect(
+      knowledge.replace(f.scope, courseId, {
+        expectedVersion: afterJ2!.version,
+        extractedSourceVersions: { [videoV.sourceId]: 1 },
+        snapshot: { courseId, version: afterJ2!.version + 1, nodes: [], edges: [] },
+        sourceVersions: {},
+      }),
+    ).rejects.toMatchObject({ code: "CONFLICT", reason: "MATERIAL_REPLACEMENT_BLOCKED" });
+
+    // DB must still preserve J2's exact node ID and evidence chunk ID.
+    const preserved = await knowledge.get(f.scope, courseId);
+    expect(preserved?.version).toBe(afterJ2!.version);
+    expect(preserved?.sourceVersions).toEqual({ [videoV.sourceId]: 2 });
+    expect(preserved?.snapshot.nodes).toEqual([
+      expect.objectContaining({ id: j2Node.id, evidenceChunkIds: [v2ChunkId] }),
+    ]);
   });
 });

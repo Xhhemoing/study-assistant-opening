@@ -4,7 +4,16 @@ import { LoaderCircle, Sparkles } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type MutableRefObject } from "react";
 import { ui } from "../design/ui";
 import { userFacingMessage } from "../../../lib/user-facing-error";
-import { createKnowledgeRebuildClient, KnowledgeRebuildRequestError, type CourseKnowledgeRecord, type KnowledgeRebuildClient } from "./knowledge-rebuild-client";
+import {
+  createKnowledgeRebuildClient,
+  KnowledgeRebuildRequestError,
+  publishCourseKnowledgeSync,
+  type CourseKnowledgeRecord,
+  type KnowledgeRebuildClient,
+  type KnowledgeRebuildTerminalOutcome,
+} from "./knowledge-rebuild-client";
+
+export type { KnowledgeRebuildTerminalOutcome };
 
 export const KNOWLEDGE_POLL_INTERVAL_MS = 3_000;
 export const KNOWLEDGE_POLL_TIMEOUT_MS = 180_000;
@@ -113,7 +122,7 @@ function statusText(state: RebuildState): string {
   return "";
 }
 
-function requestedJobFailureMessage(state: "failed" | "outcome_unknown" | "cancelled"): string {
+function requestedJobFailureMessage(state: KnowledgeRebuildTerminalOutcome): string {
   if (state === "outcome_unknown") {
     return "本次整理结果暂未确认，以刷新后为准；请稍后刷新确认，无需立即重复提交。";
   }
@@ -123,16 +132,20 @@ function requestedJobFailureMessage(state: "failed" | "outcome_unknown" | "cance
   return "本次整理未能完成，请稍后重试；若资料无法读取，请先在资料页检查。";
 }
 
-export function KnowledgeRebuildControl({ courseId, client: suppliedClient, organized = false, onRebuilt }: {
+export function KnowledgeRebuildControl({ courseId, client: suppliedClient, organized = false, onRebuilt, onSyncUpdated }: {
   courseId: string;
   client?: KnowledgeRebuildClient;
   organized?: boolean;
   onRebuilt?: (record: CourseKnowledgeRecord) => void;
+  onSyncUpdated?: (record: CourseKnowledgeRecord, outcome: KnowledgeRebuildTerminalOutcome) => void;
 }) {
   const client = useMemo(() => suppliedClient ?? createKnowledgeRebuildClient(), [suppliedClient]);
   const [state, setState] = useState<RebuildState>({ kind: "idle" });
-  const operation = useRef<RebuildOperation | null>(null), notify = useRef(onRebuilt);
-  useEffect(() => { notify.current = onRebuilt; }, [onRebuilt]);
+  const operation = useRef<RebuildOperation | null>(null);
+  const notifyRebuilt = useRef(onRebuilt);
+  const notifySyncUpdated = useRef(onSyncUpdated);
+  useEffect(() => { notifyRebuilt.current = onRebuilt; }, [onRebuilt]);
+  useEffect(() => { notifySyncUpdated.current = onSyncUpdated; }, [onSyncUpdated]);
   useEffect(() => () => { if (operation.current) stopOperation(operation, operation.current); }, []);
   const stop = (current: RebuildOperation) => stopOperation(operation, current);
 
@@ -176,13 +189,15 @@ export function KnowledgeRebuildControl({ courseId, client: suppliedClient, orga
             if (requestedJob.state === "failed" || requestedJob.state === "outcome_unknown" || requestedJob.state === "cancelled") {
               stop(current);
               setState({ kind: "failed", message: requestedJobFailureMessage(requestedJob.state) });
-              notify.current?.(latest);
+              publishCourseKnowledgeSync(courseId, latest, requestedJob.state);
+              notifySyncUpdated.current?.(latest, requestedJob.state);
               return;
             }
             if (requestedJob.state === "succeeded") {
               stop(current);
               setState(classifyDoneState(latest));
-              notify.current?.(latest);
+              publishCourseKnowledgeSync(courseId, latest, "succeeded");
+              notifyRebuilt.current?.(latest);
               return;
             }
           }
@@ -201,7 +216,8 @@ export function KnowledgeRebuildControl({ courseId, client: suppliedClient, orga
         if (latest && completed) {
           stop(current);
           setState(classifyDoneState(latest));
-          notify.current?.(latest);
+          publishCourseKnowledgeSync(courseId, latest, "succeeded");
+          notifyRebuilt.current?.(latest);
         } else {
           current.poll = setTimeout(() => void tick(), KNOWLEDGE_POLL_INTERVAL_MS);
         }

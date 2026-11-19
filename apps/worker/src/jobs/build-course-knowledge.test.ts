@@ -408,4 +408,32 @@ describe("createBuildCourseKnowledgeHandler", () => {
     expect(replace).toHaveBeenCalledTimes(1);
     expect(get).toHaveBeenCalledTimes(1);
   });
+
+  it("aborts CAS retry without overwriting when J2 already committed V@2 not covered by stale J1 batch", async () => {
+    const v2ChunkId = "00000000-0000-4000-8000-0000000000a2";
+    const j2Snapshot = reconcileExtractedSnapshot(
+      courseId,
+      2,
+      { nodes: [{ label: "新版V2概念", kind: "concept", evidenceChunkIds: [v2ChunkId], status: "supported" }], edges: [] },
+      [chunk({ id: v2ChunkId, sourceVersion: 2 })],
+    );
+    const get = vi.fn()
+      // Initial read before J2 committed V@2 (graph was empty / v1)
+      .mockResolvedValueOnce({ version: 1, snapshot: { courseId, version: 1, nodes: [], edges: [] }, sourceVersions: {} })
+      // Re-read after CAS conflict sees J2's committed V@2 graph
+      .mockResolvedValueOnce({ version: 2, snapshot: j2Snapshot, sourceVersions: { [sourceId]: 2 } });
+    const replace = vi.fn().mockRejectedValueOnce(
+      Object.assign(new Error("stale knowledge version"), { code: "CONFLICT" }),
+    );
+    const handler = createBuildCourseKnowledgeHandler({
+      // Stale J1 extracted before V@2 was available (empty / uncovered V@2)
+      listAuthorizedChunks: async () => [],
+      get,
+      extractGraph: async () => ({ nodes: [], edges: [] }),
+      replace,
+    });
+    await expect(handler(job as never, { courseId })).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(get).toHaveBeenCalledTimes(2);
+    expect(replace).toHaveBeenCalledTimes(1);
+  });
 });

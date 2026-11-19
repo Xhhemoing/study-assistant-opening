@@ -1114,4 +1114,67 @@ describe("opening knowledge sync and coalescing", () => {
     expect(secondRead.sync?.requestedJob).toEqual({ jobId, state: "succeeded" });
     expect(secondRead.sync?.activeJobId).toBeNull();
   });
+
+  it("rejects stale worker CAS retry batch that did not cover V@2 after J2 already committed V@2 nodes and evidence", async () => {
+    const CH_V2 = "00000000-0000-4000-8000-000000000049";
+    const N_V2 = "00000000-0000-4000-8000-000000000059";
+    const db = makeFakeSql({
+      sources: [
+        // J2 already built against V@2 and V@2 is currently eligible
+        { id: S1, version: 2, uploadState: "uploaded", parseState: "ready", available: true, excluded: false, hasChunk: true, hasTextChunk: true, attached: true, purpose: "teaching" },
+      ],
+      chunks: [{ id: CH_V2, sourceId: S1, sourceVersion: 2, text: "V@2 最新核心定义" }],
+      knowledgeRows: [
+        knowledgeRow({
+          version: 2,
+          snapshot: {
+            courseId: C,
+            version: 2,
+            nodes: [{ id: N_V2, courseId: C, label: "V2核心概念", kind: "concept", evidenceChunkIds: [CH_V2], status: "supported" }],
+            edges: [],
+          },
+          source_versions: { [S1]: 2 },
+        }),
+      ],
+    });
+    const repo = createOpeningKnowledgeRepository(db.sql);
+
+    // Stale J1 retry with empty extractedSourceVersions={} must be rejected
+    await expect(
+      repo.replace(scope, C, {
+        expectedVersion: 2,
+        extractedSourceVersions: {},
+        snapshot: { courseId: C, version: 3, nodes: [], edges: [] },
+        sourceVersions: {},
+      }),
+    ).rejects.toMatchObject({ code: "CONFLICT", reason: "MATERIAL_REPLACEMENT_BLOCKED" });
+
+    // Stale J1 retry that only covered V@1 must also be rejected
+    await expect(
+      repo.replace(scope, C, {
+        expectedVersion: 2,
+        extractedSourceVersions: { [S1]: 1 },
+        snapshot: { courseId: C, version: 3, nodes: [], edges: [] },
+        sourceVersions: {},
+      }),
+    ).rejects.toMatchObject({ code: "CONFLICT", reason: "MATERIAL_REPLACEMENT_BLOCKED" });
+
+    // J2's exact node ID and evidence chunk ID must remain intact in DB
+    const preserved = db.knowledge.get(C)!;
+    expect(preserved.version).toBe(2);
+    expect(preserved.source_versions).toEqual({ [S1]: 2 });
+    expect(preserved.snapshot.nodes).toEqual([
+      expect.objectContaining({ id: N_V2, evidenceChunkIds: [CH_V2] }),
+    ]);
+
+    // Contrast: a batch that genuinely covered V@2 (e.g., legitimate 0-node extraction on V@2) is allowed
+    const legitimate = await repo.replace(scope, C, {
+      expectedVersion: 2,
+      extractedSourceVersions: { [S1]: 2 },
+      snapshot: { courseId: C, version: 3, nodes: [], edges: [] },
+      sourceVersions: {},
+    });
+    expect(legitimate.version).toBe(3);
+    expect(legitimate.sourceVersions).toEqual({});
+  });
 });

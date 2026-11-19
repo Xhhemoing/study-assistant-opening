@@ -277,6 +277,15 @@ export function createBuildCourseKnowledgeHandler(deps: BuildCourseKnowledgeDeps
       const reason = error && typeof error === "object" && "reason" in error ? (error as { reason?: unknown }).reason : undefined;
       if (code !== "CONFLICT" || reason === "MATERIAL_REPLACEMENT_BLOCKED") throw error;
       const latestCurrent = await deps.get(scope, body.courseId);
+      const hasUncoveredNewGraphSource = latestCurrent !== null
+        && Object.entries(latestCurrent.sourceVersions).some(
+          ([sourceId, version]) =>
+            current?.sourceVersions[sourceId] !== version
+            && coveredSourceVersions[sourceId] !== version,
+        );
+      if (hasUncoveredNewGraphSource) {
+        throw error;
+      }
       const latestReferenced = await deps.listReferencedNodeIds?.(scope, body.courseId) ?? [];
       saved = await attemptReplace(
         latestCurrent?.version ?? 0,

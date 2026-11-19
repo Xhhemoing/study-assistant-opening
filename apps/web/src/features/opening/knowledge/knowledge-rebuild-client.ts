@@ -66,3 +66,43 @@ export function createKnowledgeRebuildClient(transport: typeof fetch = (input, i
 }
 
 export type KnowledgeRebuildClient = ReturnType<typeof createKnowledgeRebuildClient>;
+
+export type KnowledgeRebuildTerminalOutcome = "failed" | "outcome_unknown" | "cancelled";
+export type CourseKnowledgeSyncOutcome = "succeeded" | KnowledgeRebuildTerminalOutcome;
+
+type CourseKnowledgeSyncListener = (
+  record: CourseKnowledgeRecord,
+  outcome: CourseKnowledgeSyncOutcome,
+) => void;
+
+const courseKnowledgeSyncListeners = new Map<string, Set<CourseKnowledgeSyncListener>>();
+
+export function publishCourseKnowledgeSync(
+  courseId: string,
+  record: CourseKnowledgeRecord,
+  outcome: CourseKnowledgeSyncOutcome,
+): void {
+  const listeners = courseKnowledgeSyncListeners.get(courseId);
+  if (!listeners) return;
+  for (const listener of [...listeners]) {
+    listener(record, outcome);
+  }
+}
+
+export function subscribeCourseKnowledgeSync(
+  courseId: string,
+  listener: CourseKnowledgeSyncListener,
+): () => void {
+  let listeners = courseKnowledgeSyncListeners.get(courseId);
+  if (!listeners) {
+    listeners = new Set();
+    courseKnowledgeSyncListeners.set(courseId, listeners);
+  }
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+    if (listeners.size === 0) {
+      courseKnowledgeSyncListeners.delete(courseId);
+    }
+  };
+}

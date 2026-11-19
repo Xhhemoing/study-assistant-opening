@@ -6,7 +6,7 @@ import { createOpeningApi, type OpeningApi, type ThinTutorActionView } from "../
 import { LoadError, secondaryButtonClass, ui } from "../design/ui";
 import { TUTOR_ACTION_KIND_LABEL } from "../learning/tutor-action-intents";
 import { KnowledgeEvidence, knowledgeKindLabel, knowledgeStatusLabel } from "./knowledge-evidence";
-import { createKnowledgeRebuildClient } from "./knowledge-rebuild-client";
+import { createKnowledgeRebuildClient, subscribeCourseKnowledgeSync } from "./knowledge-rebuild-client";
 import { userFacingMessage } from "../../../lib/user-facing-error";
 import { ConfirmKnowledgeNode } from "./confirm-knowledge-node";
 
@@ -201,6 +201,20 @@ export function CourseKnowledge({
       requestSeq.current += 1;
     };
   }, [load, knowledgeRefreshToken]);
+
+  useEffect(() => subscribeCourseKnowledgeSync(courseId, (latest) => {
+    if (!mounted.current) return;
+    const seq = ++requestSeq.current;
+    setLoading(false);
+    setError("");
+    setUnavailable(false);
+    setSnapshot(latest.snapshot);
+    setRecord(latest);
+    setSelected((previous) =>
+      previous ? latest.snapshot.nodes.find((item) => item.id === previous.id) ?? null : null,
+    );
+    void loadActions(latest.snapshot, seq);
+  }), [courseId, loadActions]);
 
   const ordered = useMemo(
     () => (snapshot ? chaptersFirst(snapshot.nodes) : []),

@@ -846,17 +846,17 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
           if (removesOldSourceEvidence) {
             const { eligibleSourceVersions, parsingSourceCount } = await readEligibleAndParsingMaterials(tx, scope, courseId);
             const missingIds = missingGraphSourceIds(previous.sourceVersions, eligibleSourceVersions);
-            const staleVersionIds = previousSourceIds.filter(
+            const uncoveredEligibleIds = previousSourceIds.filter(
               (sourceId) =>
                 sourceId in eligibleSourceVersions
-                && eligibleSourceVersions[sourceId] !== previous.sourceVersions[sourceId]
+                && sourceVersions[sourceId] !== previous.sourceVersions[sourceId]
                 && input.extractedSourceVersions![sourceId] !== eligibleSourceVersions[sourceId],
             );
-            const candidateProtectedIds = [...new Set([...missingIds, ...staleVersionIds])];
+            const candidateProtectedIds = [...new Set([...missingIds, ...uncoveredEligibleIds])];
             if (candidateProtectedIds.length > 0) {
               const mandatoryCleanupIds = await readMandatoryCleanupSourceIds(tx, scope, courseId, candidateProtectedIds);
               const protectedMissingIds = missingIds.filter((id) => !mandatoryCleanupIds.has(id));
-              const protectedStaleVersionIds = staleVersionIds.filter((id) => !mandatoryCleanupIds.has(id));
+              const protectedUncoveredIds = uncoveredEligibleIds.filter((id) => !mandatoryCleanupIds.has(id));
               if (protectedMissingIds.length > 0) {
                 const unreadableSourceCount = await readUnreadableSourceCount(tx, scope, courseId);
                 if (parsingSourceCount > 0 || unreadableSourceCount > 0) {
@@ -877,7 +877,7 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
                   );
                 }
               }
-              if (protectedStaleVersionIds.length > 0) {
+              if (protectedUncoveredIds.length > 0) {
                 throw new OpeningKnowledgeError(
                   "CONFLICT",
                   "课程中已有新的可读资料未纳入本次整理，已保留原有知识点，请按最新资料重新整理。",
