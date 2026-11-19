@@ -66,15 +66,17 @@ async function seedSource(options: {
   name?: string;
   version?: number;
   uploadState?: "pending" | "uploaded";
-  parseState?: "not_started" | "queued" | "running" | "ready";
+  parseState?: "not_started" | "queued" | "running" | "ready" | "failed";
   text?: string;
+  skipChunk?: boolean;
+  imageObjectKey?: string | null;
 } = {}) {
   const id = randomUUID();
   const version = options.version ?? 1;
   const uploadState = options.uploadState ?? "uploaded";
   const parseState = options.parseState ?? "ready";
   const text = options.text ?? `材料内容 ${id}`;
-  const bytes = Buffer.from(text, "utf8");
+  const bytes = Buffer.from(text || "binary-scan", "utf8");
   const sha256 = createHash("sha256").update(bytes).digest("hex");
 
   await f.sql`
@@ -87,11 +89,11 @@ async function seedSource(options: {
       INSERT INTO opening_source_versions (source_id, version, workspace_id, bytes, sha256, availability)
       VALUES (${id}, ${version}, ${f.scope.workspaceId}, ${bytes.length}, ${sha256}, 'available')`;
   }
-  if (uploadState === "uploaded" && parseState === "ready") {
+  if (uploadState === "uploaded" && parseState === "ready" && !options.skipChunk) {
     chunkId = randomUUID();
     await f.sql`
       INSERT INTO opening_source_chunks (id, source_id, source_version, page, text, image_object_key)
-      VALUES (${chunkId}, ${id}, ${version}, 1, ${text}, NULL)`;
+      VALUES (${chunkId}, ${id}, ${version}, 1, ${text}, ${options.imageObjectKey ?? null})`;
   }
 
   return { sourceId: id, chunkId, version };
@@ -470,5 +472,244 @@ describe("opening knowledge material lifecycle sync (real PG)", () => {
     expect(afterDelete.sync?.status).toBe("pending");
     expect(await runJob(jobs, afterDelete.sync!.activeJobId!, makeBuildHandler({ nodeStatus: "supported" }))).toBe(true);
     expect((await knowledge.readSyncStatus(f.scope, courseId)).status).toBe("empty");
+  });
+
+  it("D1: counts failed, zero-chunk, blank-text, and pure-image sources as unreadable while keeping queued in parsingSourceCount and recovering mixed image+text", async () => {
+    const knowledge = createOpeningKnowledgeRepository(f.sql);
+    const courses = createCourseMembershipRepository(f.sql);
+    const courseId = await seedCourse("D1 Unreadable Materials");
+
+    const sFailed = await seedSource({ name: "failed.pdf", parseState: "failed" });
+    const sZeroChunk = await seedSource({ name: "empty.pdf", parseState: "ready", skipChunk: true });
+    const sWhitespace = await seedSource({ name: "blank.txt", parseState: "ready", text: "  \n\t  " });
+    const sPureImage = await seedSource({ name: "scan.pdf", parseState: "ready", text: "", imageObjectKey: "opening/img/p1.png" });
+    const sQueued = await seedSource({ name: "queued.pdf", parseState: "queued" });
+
+    for (const src of [sFailed, sZeroChunk, sWhitespace, sPureImage, sQueued]) {
+      await courses.addAssetMembership({
+        workspaceId: f.scope.workspaceId,
+        courseId,
+        assetType: "source",
+        assetId: src.sourceId,
+        role: "core",
+        visibility: "course",
+        purpose: "teaching",
+      });
+    }
+
+    const beforeRecovery = await knowledge.readSyncStatus(f.scope, courseId, { includeDetails: true });
+    expect(beforeRecovery).toEqual({
+      status: "empty",
+      activeJobId: null,
+      lastBuiltVersion: null,
+      coveredSourceVersions: {},
+      eligibleSourceVersions: {},
+      parsingSourceCount: 1,
+      unreadableSourceCount: 4,
+      rebuildBlockedByMaterials: false,
+      lastFailedJob: null,
+      requestedJob: null,
+    });
+    expect(await knowledge.listAuthorizedChunks(f.scope, courseId)).toEqual([]);
+
+    // Adding a non-whitespace text chunk to the pure-image source makes it a mixed image+text eligible source.
+    await f.sql`
+      INSERT INTO opening_source_chunks (id, source_id, source_version, page, text, image_object_key)
+      VALUES (${randomUUID()}, ${sPureImage.sourceId}, ${sPureImage.version}, 2, '第二页正文：线性方程组', NULL)`;
+
+    const afterRecovery = await knowledge.readSyncStatus(f.scope, courseId, { includeDetails: true });
+    expect(afterRecovery.unreadableSourceCount).toBe(3);
+    expect(afterRecovery.parsingSourceCount).toBe(1);
+    expect(afterRecovery.eligibleSourceVersions).toEqual({ [sPureImage.sourceId]: 1 });
+    expect(afterRecovery.status).toBe("needs_rebuild");
+    expect((await knowledge.listAuthorizedChunks(f.scope, courseId)).map((c) => c.sourceId)).toEqual([sPureImage.sourceId]);
+  });
+
+  it("D2: exposes terminal failed/outcome_unknown in lastFailedJob without error leakage, clears on later success, and tracks requestedJob independently", async () => {
+    const knowledge = createOpeningKnowledgeRepository(f.sql);
+    const jobs = createOpeningJobRepository(f.sql);
+    const courses = createCourseMembershipRepository(f.sql);
+    const courseId = await seedCourse("D2 Job Truthfulness");
+    const s1 = await seedSource({ name: "s1.txt", text: "微积分基础" });
+    await courses.addAssetMembership({
+      workspaceId: f.scope.workspaceId,
+      courseId,
+      assetType: "source",
+      assetId: s1.sourceId,
+      role: "core",
+      visibility: "course",
+      purpose: "teaching",
+    });
+
+    const j1 = await knowledge.enqueueRebuild(f.scope, courseId, { clientKey: "d2-failed-job-1" });
+    await runJob(jobs, j1.jobId, async () => {
+      throw new Error("provider secret failure");
+    });
+
+    const afterFail = await knowledge.readSyncStatus(f.scope, courseId, { includeDetails: true, requestedJobId: j1.jobId });
+    expect(afterFail.lastFailedJob).toEqual({ jobId: j1.jobId, state: "failed" });
+    expect(afterFail.requestedJob).toEqual({ jobId: j1.jobId, state: "failed" });
+    expect("error" in (afterFail.lastFailedJob ?? {})).toBe(false);
+
+    // A later J2 succeeds -> clears lastFailedJob, while requestedJob for J1 still truthfully reports failed.
+    const j2 = await knowledge.enqueueRebuild(f.scope, courseId, { clientKey: "d2-succeeded-job-2" });
+    expect(await runJob(jobs, j2.jobId, makeBuildHandler({ nodeStatus: "supported" }))).toBe(true);
+
+    const afterJ2 = await knowledge.readSyncStatus(f.scope, courseId, { includeDetails: true, requestedJobId: j1.jobId });
+    expect(afterJ2.lastFailedJob).toBeNull();
+    expect(afterJ2.requestedJob).toEqual({ jobId: j1.jobId, state: "failed" });
+    expect(afterJ2.status).toBe("up_to_date");
+  });
+
+  it("D3: converges cleanly to up_to_date when C=E={S1,S2}, G={S1}, and nodes are needs_check without enqueueing on repeated reconciles", async () => {
+    const knowledge = createOpeningKnowledgeRepository(f.sql);
+    const jobs = createOpeningJobRepository(f.sql);
+    const courses = createCourseMembershipRepository(f.sql);
+    const courseId = await seedCourse("D3 Zero-Node Subset");
+    const s1 = await seedSource({ name: "s1.txt", text: "第一章 集合论" });
+    const s2 = await seedSource({ name: "s2.txt", text: "封面与目录" });
+
+    for (const src of [s1, s2]) {
+      await courses.addAssetMembership({
+        workspaceId: f.scope.workspaceId,
+        courseId,
+        assetType: "source",
+        assetId: src.sourceId,
+        role: "core",
+        visibility: "course",
+        purpose: "teaching",
+      });
+    }
+
+    const r = await knowledge.reconcileCourseMaterials(f.scope, courseId);
+    expect(r.enqueued?.created).toBe(true);
+    const partialExtractHandler = createBuildCourseKnowledgeHandler({
+      listAuthorizedChunks: (scope, cid) => knowledge.listAuthorizedChunks(scope, cid),
+      listReferencedNodeIds: (scope, cid) => knowledge.listReferencedNodeIds(scope, cid),
+      get: (scope, cid) => knowledge.getForRebuild(scope, cid),
+      replace: (scope, cid, input) => knowledge.replace(scope, cid, input),
+      onBuildCompleted: async (scope, cid, coveredSourceVersions) => {
+        await knowledge.reconcileCourseMaterials(scope, cid, { coveredSourceVersions });
+      },
+      extractGraph: async (chunks) => {
+        const s1Chunk = chunks.find((c) => c.sourceId === s1.sourceId);
+        return {
+          nodes: s1Chunk
+            ? [{ label: "集合论", kind: "concept", evidenceChunkIds: [s1Chunk.id], status: "needs_check" }]
+            : [],
+          edges: [],
+        };
+      },
+    });
+    expect(await runJob(jobs, r.enqueued!.jobId, partialExtractHandler)).toBe(true);
+
+    const sync = await knowledge.readSyncStatus(f.scope, courseId, { includeDetails: true });
+    expect(sync).toMatchObject({
+      status: "up_to_date",
+      activeJobId: null,
+      coveredSourceVersions: { [s1.sourceId]: 1, [s2.sourceId]: 1 },
+      eligibleSourceVersions: { [s1.sourceId]: 1, [s2.sourceId]: 1 },
+    });
+    expect((await knowledge.reconcileCourseMaterials(f.scope, courseId)).enqueued).toBeNull();
+    expect((await knowledge.reconcileCourseMaterials(f.scope, courseId)).enqueued).toBeNull();
+  });
+
+  it("D4: blocks destructive replacement on failed new version, returns 409 on new manual POST (preserving same-key replay), and rejects stale worker even if new source recovers before CAS retry", async () => {
+    const knowledge = createOpeningKnowledgeRepository(f.sql);
+    const jobs = createOpeningJobRepository(f.sql);
+    const p = principal();
+    const courseId = await seedCourse("D4 Replacement Guard");
+
+    const s1 = await seedSource({ name: "s1.txt", text: "核心定理 S1" });
+    const tSibling = await seedSource({ name: "t.txt", text: "辅助章节 T" });
+    for (const src of [s1, tSibling]) {
+      await addMembershipForPrincipal(runtime, p, courseId, {
+        assetType: "source",
+        assetId: src.sourceId,
+        role: "core",
+        visibility: "course",
+        purpose: "teaching",
+      });
+    }
+    const initSync = await knowledge.readSyncStatus(f.scope, courseId);
+    expect(await runJob(jobs, initSync.activeJobId!, makeBuildHandler({ nodeStatus: "supported" }))).toBe(true);
+    const baselineRecord = await knowledge.get(f.scope, courseId);
+    expect(baselineRecord?.snapshot.nodes).toHaveLength(2);
+    const preBlockedReceipt = await knowledge.enqueueRebuild(f.scope, courseId, { clientKey: "d4-existing-receipt-key" });
+
+    // Replace S1 with failed S2 -> rebuildBlockedByMaterials=true, auto reconcile does not enqueue, manual POST throws 409 CONFLICT
+    const s2Failed = await seedSource({ name: "s2-scan.pdf", parseState: "failed" });
+    await addMembershipForPrincipal(runtime, p, courseId, {
+      assetType: "source",
+      assetId: s2Failed.sourceId,
+      role: "core",
+      visibility: "course",
+      replacesSourceId: s1.sourceId,
+    });
+
+    const blockedSync = await knowledge.readSyncStatus(f.scope, courseId, { includeDetails: true });
+    expect(blockedSync.rebuildBlockedByMaterials).toBe(true);
+    expect(blockedSync.unreadableSourceCount).toBe(1);
+    expect((await knowledge.reconcileCourseMaterials(f.scope, courseId)).enqueued).toBeNull();
+
+    await expect(
+      knowledge.enqueueRebuild(f.scope, courseId, { clientKey: "d4-blocked-manual-key" }),
+    ).rejects.toMatchObject({ code: "CONFLICT", reason: "MATERIAL_REPLACEMENT_BLOCKED" });
+    // Same-key replay still returns existing receipt
+    await expect(
+      knowledge.enqueueRebuild(f.scope, courseId, { clientKey: "d4-existing-receipt-key" }),
+    ).resolves.toEqual({ jobId: preBlockedReceipt.jobId, kind: "build-course-knowledge", created: false });
+
+    // Run pre-queued stale worker that extracts ONLY sibling T while S2 is failed, then pause BEFORE replace:
+    // bump graph version (simulating CAS race) AND recover S2 to ready WITH text right before CAS retry.
+    let enteredExtract!: () => void;
+    let releaseExtract!: () => void;
+    const extractEntered = new Promise<void>((resolve) => {
+      enteredExtract = resolve;
+    });
+    const extractProceed = new Promise<void>((resolve) => {
+      releaseExtract = resolve;
+    });
+
+    const staleWorkerPromise = runJob(
+      jobs,
+      preBlockedReceipt.jobId,
+      makeBuildHandler({
+        nodeStatus: "supported",
+        onExtract: async (chunks) => {
+          expect(chunks.map((c) => c.sourceId)).toEqual([tSibling.sourceId]);
+          enteredExtract();
+          await extractProceed;
+        },
+      }),
+    );
+
+    await extractEntered;
+
+    // Bump version so the worker's first replace attempt hits CAS CONFLICT, AND recover S2 before CAS retry!
+    await f.sql`
+      UPDATE opening_course_knowledge
+      SET version = version + 1
+      WHERE workspace_id = ${f.scope.workspaceId} AND course_id = ${courseId}`;
+    await f.sql`
+      UPDATE opening_sources
+      SET parse_state = 'ready'
+      WHERE workspace_id = ${f.scope.workspaceId} AND id = ${s2Failed.sourceId}`;
+    await f.sql`
+      INSERT INTO opening_source_chunks (id, source_id, source_version, page, text, image_object_key)
+      VALUES (${randomUUID()}, ${s2Failed.sourceId}, 1, 1, '恢复后的新版核心定理 S2', NULL)`;
+
+    releaseExtract();
+    await staleWorkerPromise;
+
+    // Stale worker job must fail instead of overwriting and deleting S1's old nodes/evidence!
+    const afterStaleJob = await knowledge.readSyncStatus(f.scope, courseId, {
+      includeDetails: true,
+      requestedJobId: preBlockedReceipt.jobId,
+    });
+    expect(afterStaleJob.requestedJob).toEqual({ jobId: preBlockedReceipt.jobId, state: "failed" });
+    const preserved = await knowledge.get(f.scope, courseId);
+    expect(preserved?.sourceVersions).toEqual({ [s1.sourceId]: 1, [tSibling.sourceId]: 1 });
+    expect(preserved?.snapshot.nodes).toHaveLength(2);
   });
 });

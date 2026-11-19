@@ -174,6 +174,7 @@ describe("createBuildCourseKnowledgeHandler", () => {
       courseId,
       {
         expectedVersion: 3,
+        extractedSourceVersions: { [sourceId]: 1 },
         snapshot: expect.objectContaining({ courseId, version: 4, nodes: [expect.objectContaining({ label: "函数" })] }),
         sourceVersions: { [sourceId]: 1 },
       },
@@ -198,7 +199,7 @@ describe("createBuildCourseKnowledgeHandler", () => {
     expect(replace).toHaveBeenCalledWith(
       expect.anything(),
       courseId,
-      expect.objectContaining({ expectedVersion: 0, sourceVersions: {} }),
+      expect.objectContaining({ expectedVersion: 0, extractedSourceVersions: {}, sourceVersions: {} }),
     );
   });
 
@@ -360,5 +361,51 @@ describe("createBuildCourseKnowledgeHandler", () => {
     expect(replace.mock.calls[1]![2].expectedReferencedNodeIds).toEqual([confirmed.nodes[0]!.id]);
     expect(result.version).toBe(3);
     expect(result.coveredSourceVersions).toEqual({ [sourceId]: 1 });
+  });
+
+  it("D1: excludes whitespace-only and pure-image chunks from extraction and coveredSourceVersions while keeping mixed image+text sources", async () => {
+    const pureImageSource = "00000000-0000-4000-8000-0000000000s2";
+    const blankSource = "00000000-0000-4000-8000-0000000000s3";
+    const mixedSource = "00000000-0000-4000-8000-0000000000s4";
+    const extractGraph = vi.fn(async () => ({ nodes: [], edges: [] }));
+    const replace = vi.fn(async (_scope, _courseId, input) => ({
+      version: input.expectedVersion + 1,
+      snapshot: input.snapshot,
+    }));
+    const handler = createBuildCourseKnowledgeHandler({
+      listAuthorizedChunks: async () => [
+        chunk({ id: "00000000-0000-4000-8000-0000000000b1", sourceId: pureImageSource, text: "", imageObjectKey: "img/1.png" }),
+        chunk({ id: "00000000-0000-4000-8000-0000000000b2", sourceId: blankSource, text: "   \n\t  ", imageObjectKey: null }),
+        chunk({ id: "00000000-0000-4000-8000-0000000000b3", sourceId: mixedSource, text: "", imageObjectKey: "img/2.png" }),
+        chunk({ id: "00000000-0000-4000-8000-0000000000b4", sourceId: mixedSource, sourceVersion: 2, text: "线性代数", imageObjectKey: null }),
+      ],
+      get: async () => null,
+      extractGraph,
+      replace,
+    });
+    const result = await handler(job as never, { courseId });
+    expect(extractGraph).toHaveBeenCalledTimes(1);
+    expect(extractGraph.mock.calls[0]?.[0].map((c) => c.sourceId)).toEqual([mixedSource]);
+    expect(result.coveredSourceVersions).toEqual({ [mixedSource]: 2 });
+    expect(replace.mock.calls[0]?.[2].extractedSourceVersions).toEqual({ [mixedSource]: 2 });
+  });
+
+  it("D4: does not retry replace when rejected with MATERIAL_REPLACEMENT_BLOCKED", async () => {
+    const get = vi.fn().mockResolvedValue({ version: 1, snapshot: { courseId, version: 1, nodes: [], edges: [] }, sourceVersions: { [sourceId]: 1 } });
+    const replace = vi.fn().mockRejectedValue(
+      Object.assign(new Error("blocked"), { code: "CONFLICT", reason: "MATERIAL_REPLACEMENT_BLOCKED" }),
+    );
+    const handler = createBuildCourseKnowledgeHandler({
+      listAuthorizedChunks: async () => [],
+      get,
+      extractGraph: async () => ({ nodes: [], edges: [] }),
+      replace,
+    });
+    await expect(handler(job as never, { courseId })).rejects.toMatchObject({
+      code: "CONFLICT",
+      reason: "MATERIAL_REPLACEMENT_BLOCKED",
+    });
+    expect(replace).toHaveBeenCalledTimes(1);
+    expect(get).toHaveBeenCalledTimes(1);
   });
 });

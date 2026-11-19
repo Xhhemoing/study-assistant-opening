@@ -37,7 +37,8 @@ function mapError(error: unknown): never {
   if (error instanceof OpeningKnowledgeError) {
     if (error.code === "NOT_FOUND") throw new ApiError("NOT_FOUND", error.message, 404);
     if (error.code === "VALIDATION") throw new ApiError("VALIDATION", error.message, 400);
-    throw new ApiError("CONFLICT", error.message, 409);
+    const conflict = new ApiError("CONFLICT", error.message, 409);
+    throw error.reason ? Object.assign(conflict, { reason: error.reason }) : conflict;
   }
   throw error;
 }
@@ -45,10 +46,14 @@ function mapError(error: unknown): never {
 export function createOpeningKnowledgeService(sql: Sql) {
   const repo = createOpeningKnowledgeRepository(sql);
   return {
-    async get(scope: Scope, courseIdRaw: string) {
+    async get(scope: Scope, courseIdRaw: string, options?: { syncDetails?: boolean; jobId?: string }) {
       const courseId = uuidSchema.parse(courseIdRaw);
+      const requestedJobId = options?.jobId !== undefined ? uuidSchema.parse(options.jobId) : undefined;
       try {
-        return await repo.getWithSync(scope, courseId);
+        return await repo.getWithSync(scope, courseId, {
+          includeDetails: Boolean(options?.syncDetails),
+          ...(requestedJobId !== undefined ? { requestedJobId } : {}),
+        });
       } catch (error) {
         mapError(error);
       }

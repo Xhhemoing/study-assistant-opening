@@ -8,7 +8,13 @@ export async function GET(request: Request, context: Context): Promise<Response>
   try {
     const { scope, sql } = await requireOpeningScope(request);
     const courseId = (await context.params).id;
-    const record = await createOpeningKnowledgeService(sql).get(scope, courseId);
+    const url = new URL(request.url, "http://localhost");
+    const syncDetails = url.searchParams.get("syncDetails") === "1";
+    const jobId = url.searchParams.has("jobId") ? (url.searchParams.get("jobId") ?? "") : undefined;
+    const record = await createOpeningKnowledgeService(sql).get(scope, courseId, {
+      syncDetails,
+      ...(jobId !== undefined ? { jobId } : {}),
+    });
     return Response.json(record);
   } catch (error) {
     return jsonError(mapDomainError(error));

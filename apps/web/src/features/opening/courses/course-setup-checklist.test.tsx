@@ -96,3 +96,135 @@ it("preserves a valid originalConversationId on material and goal checklist link
   expect(control(item("资料已解析"), "去资料页").getAttribute("href")).toBe("?tab=materials#course-assets");
   expect(control(item("已选目标"), "去目标与成功标准").getAttribute("href")).toBe("?tab=overview#course-goals");
 });
+
+it.each([
+  [
+    "unreadable materials",
+    {
+      status: "up_to_date" as const,
+      activeJobId: null,
+      lastBuiltVersion: 1,
+      coveredSourceVersions: { [sourceId]: 1 },
+      eligibleSourceVersions: { [sourceId]: 1 },
+      parsingSourceCount: 0,
+      unreadableSourceCount: 1,
+      rebuildBlockedByMaterials: false,
+      lastFailedJob: null,
+      requestedJob: null,
+    },
+    "有 1 份资料无法读取文字",
+  ],
+  [
+    "needs_rebuild drift",
+    {
+      status: "needs_rebuild" as const,
+      activeJobId: null,
+      lastBuiltVersion: 1,
+      coveredSourceVersions: {},
+      eligibleSourceVersions: { [sourceId]: 1 },
+      parsingSourceCount: 0,
+      unreadableSourceCount: 0,
+      rebuildBlockedByMaterials: false,
+      lastFailedJob: null,
+      requestedJob: null,
+    },
+    "尚未同步最新材料",
+  ],
+  [
+    "blocked material replacement",
+    {
+      status: "needs_rebuild" as const,
+      activeJobId: null,
+      lastBuiltVersion: 1,
+      coveredSourceVersions: { [sourceId]: 1 },
+      eligibleSourceVersions: {},
+      parsingSourceCount: 0,
+      unreadableSourceCount: 1,
+      rebuildBlockedByMaterials: true,
+      lastFailedJob: null,
+      requestedJob: null,
+    },
+    "旧知识点已保留",
+  ],
+  [
+    "lastFailedJob present",
+    {
+      status: "up_to_date" as const,
+      activeJobId: null,
+      lastBuiltVersion: 1,
+      coveredSourceVersions: { [sourceId]: 1 },
+      eligibleSourceVersions: { [sourceId]: 1 },
+      parsingSourceCount: 0,
+      unreadableSourceCount: 0,
+      rebuildBlockedByMaterials: false,
+      lastFailedJob: { jobId: "33333333-3333-4333-8333-333333333333", state: "failed" as const },
+      requestedJob: null,
+    },
+    "上次整理未能完成",
+  ],
+])("keeps 知识已整理 incomplete even with non-empty nodes when sync has %s", async (_label, sync, expectedDetail) => {
+  const client: KnowledgeRebuildClient = {
+    read: vi.fn(async () => ({ ...record(3), sync })),
+    rebuild: vi.fn(),
+  };
+  await render(props({ snapshot: complete, goalId, knowledgeClient: client }));
+  expect(item("知识已整理").textContent).toContain("未完成");
+  expect(item("知识已整理").textContent).toContain(expectedDetail);
+});
+
+it("preserves sync state from rebuild completion so partial or drifted results stay incomplete while clean up_to_date marks done", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  try {
+    const jobId = "44444444-4444-4444-8444-444444444444";
+    let step = 0;
+    const client: KnowledgeRebuildClient = {
+      read: vi.fn(async (): Promise<CourseKnowledgeRecord> => {
+        step += 1;
+        if (step <= 2) {
+          return {
+            ...record(1),
+            sync: {
+              status: "needs_rebuild" as const,
+              activeJobId: null,
+              lastBuiltVersion: 1,
+              coveredSourceVersions: {},
+              eligibleSourceVersions: { [sourceId]: 1 },
+              parsingSourceCount: 0,
+              unreadableSourceCount: 1,
+              rebuildBlockedByMaterials: false,
+              lastFailedJob: null,
+              requestedJob: null,
+            },
+          };
+        }
+        return {
+          ...record(2),
+          version: 2,
+          sync: {
+            status: "up_to_date" as const,
+            activeJobId: null,
+            lastBuiltVersion: 2,
+            coveredSourceVersions: { [sourceId]: 1 },
+            eligibleSourceVersions: { [sourceId]: 1 },
+            parsingSourceCount: 0,
+            unreadableSourceCount: 1,
+            rebuildBlockedByMaterials: false,
+            lastFailedJob: null,
+            requestedJob: { jobId, state: "succeeded" as const },
+          },
+        };
+      }),
+      rebuild: vi.fn(async () => ({ jobId, kind: "build-course-knowledge" as const, created: true })),
+    };
+
+    const value = await render(props({ snapshot: complete, goalId, knowledgeClient: client }));
+    expect(item("知识已整理").textContent).toContain("未完成");
+    await act(async () => control(item("知识已整理"), "重新整理知识点").click());
+    await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
+    expect(value.onKnowledgeRebuilt).toHaveBeenCalledTimes(1);
+    expect(item("知识已整理").textContent).toContain("未完成");
+    expect(item("知识已整理").textContent).toContain("有 1 份资料无法读取文字");
+  } finally {
+    vi.useRealTimers();
+  }
+});
