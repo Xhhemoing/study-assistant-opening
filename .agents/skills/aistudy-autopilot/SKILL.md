@@ -1,135 +1,34 @@
 ---
 name: aistudy-autopilot
-description: Use when orchestrating continuous high-throughput autonomous development in AIstudy with one coordinator and multiple parallel subagents (isolated `share` coding workers, `inherit` read-only auditors/reviewers, `run_workflow` batching, fast local gates, and exact-head GitHub Actions CI merge).
+description: 在 AIstudy 中用 T3 或 Antigravity 连续推进已授权的开发目标。用于多卡调度、跨会话恢复、独立审查和精确提交交付。
 ---
 
-# AIstudy Autopilot Orchestrator Skill
+# AIstudy 自动推进
 
-单主控 + 多并行 Subagent 高吞吐持续开发工作流。严格遵守 `AGENTS.md` 与 `docs/operations/agent-workflow.md` 的默认 v2 并发与资源守卫（运行中实现 writer `<= 5`，除非当前会话获用户明确授权提高吞吐；派发新 writer 前确认可用内存 `available >= 500 MiB`；尊重平台真实配额、`scripts/run-heavy.mjs` 重验证锁以及未合入 H 栈深度 `<= 2`、未合入 H PR `> 4` 时暂停新 H 的栈限流），在守住安全门禁与类型/构建完整性的前提下压缩每轮端到端周期。
+入口是原目标及其持久 Kanban 卡。[多工具协作规则](../../../docs/operations/agent-workflow.md)规定写权、资源准入、验证范围、L/H/U 路径、唯一集成者和发布权限。使用 [Git 工作流](../aistudy-git-workflow/SKILL.md)处理获准的 Git 操作。
 
-## 核心架构：Hub-and-Spoke 流水线
+## 开始或恢复
 
-- **唯一主控 Coordinator（当前主对话）**：负责任务拆解、文件 `allowedPaths` 隔离、共享契约与迁移号协调、并发子 Agent 调度，并按 `AGENTS.md` 与 `docs/operations/agent-workflow.md` 的唯一集成者边界、v2 风险分级与 `--match-head-commit` 规则合入 PR、同步双干线及发起 `docs/STATUS.md` PR。主控**不与 worker 同时写业务文件**，不在同一步串行等待可并行的审查或子任务。
-- **唤醒活性不变量（Wakeup Liveness Invariant）**：全流程最终收尾前，主控在结束任何回合前必须核实至少有 1 个运行中 Subagent **或**本回合已调用 `schedule(..., TimerCondition="any")` 并拿到有效 `task-id`；严禁仅口头声称挂定时却未调工具导致会话永久休眠。
-- **隔离编码 Workers（`Workspace: "share"` / `aistudy-autopilot-worker`）**：每张任务卡拥有互不重叠的 `allowedPaths`、独立的 Git 工作树与分支，只跑 **30 秒级极速本地门禁**，通过后立刻 commit + push 并开 PR，将 PR 号与精确 40 位 `headRefOid` 交回主控。
-- **零上下文污染 Audit / Reviewer Subagents（`Workspace: "inherit"`）**：
-  - 全部严格只读，通过 `git diff` / `git show` / `gh pr view` 按提交 SHA 核对，绝不依赖可变工作区状态。
-  - 必须显式指定两个独立审视角度：**视角 A（安全 / 契约 / 信任边界 / 并发与隔离）** 与 **视角 B（业务行为 / UI / 测试覆盖与失败路径）**。
-  - **常驻热只读双审查员复用**：在多波推进期间保持安全/契约与行为/测试两个 `Workspace: "inherit"` 只读审查员常驻，跨 PR 通过 `send_message` 绑定精确 `headRefOid` 复用；编码 `Workspace: "share"` worktree 则随完自清 `node_modules` 并 `kill` 回收。
-- **批处理编排（`run_workflow`）**：当任务天然分裂成 >=4 个同构独立单元（多模块审计、多 PR 状态检查、多文件重构）时，使用 `run_workflow` 以 Python 代码编排 `parallel` / `pipeline`。
+1. 读当前目标、最近一个可验收的用户结果、原卡及其 parents。恢复时先处理已送达的交回、阻塞和授权变化，只核对会改变下一步的候选、远端状态与所有权。
+2. 从已就绪的动作里，优先完成离该用户结果最近的一步，例如把已有修复交回或把已达标的 PR 交给集成者。其余独立卡在资源允许时并行。父卡已审、交回或合入其他分支时，检查子卡所用基线是否真的包含所需接口及行为。
+3. 用原卡说明正常结果、最可能破坏它的反例和最接近该路径的验证。框架、后端、算法方案由独立 GPT 参与；实现按当前获准的模型分工交给 worker，PM 协调，公共接口由集成者确认。一个独立可用结果可跨多个文件。
 
-## 五阶段持续迭代闭环
+## 实现与审查
 
-### Wave 0 — 契约定稿、v2 分级与互斥分片（5 分钟）
-1. 同步基线：`git fetch study-assistant-opening --prune`；核实 `feat/opening-release` 与 `integration/opening` 状态，确认无未归档的脏工作区冲突。
-2. 明确本轮任务清单，先锁定任何跨包公开契约（`packages/contracts`、DB schema/migrations、共享 repository 接口），公开接口变更由唯一集成者确认后再派发。
-3. 为每张切片确定 v2 风险级别与目标基分支，并写入严格**文件互斥**的任务卡（含：`goal`、`baseSha`、`branch`、`baseBranch`、`risk`、`allowedPaths`、`commands`、`forbiddenPaths`），禁止两张并行卡写同一文件：
-   - **L（仅改测试、仅改文档、无行为变化的纯删死代码）**：目标分支为 `integration/opening`（仅当用户在当前会话明确授权整合批直合时，才可指向 `feat/opening-release`，且仍须满足完整审查与双项必选 CI）。
-   - **H（改变行为、数据、契约或公共接口，含 UI 行为；存疑按 H）**：从安全基线独立 PR 指向 `feat/opening-release`，不得借 L 集成池带入。
-   - **U（含迁移的版本部署、数据库迁移执行、破坏性迁移、生产配置、真数据操作、视觉模型配置、定样等）**：须用户逐次审批，不因高效推进放宽。
+- T3 首次委派前调一次 `orchestrator_capabilities` 并显式传齐 `target`（`providerInstanceId`、`model`、`options`）；实现任务由平台以 `isolation: "worktree"` 创建，Antigravity 使用其已配置的隔离 worker（`share`）和只读审查（`inherit`）。实际领取前检查写集合、接口和共享运行资源。涉及数据库或跨模块状态时，派单 brief 须写明全局锁序（如历史修订锁与 `workspaces` 行锁顺序）、复合主键／非空约束及备份恢复覆盖边界。续修优先保留原卡和候选；换 writer 须核实原 owner 停写并交回。
+- 文档卡检查 diff。行为卡复现原反例，在隔离工作树只跑最接近的 1–3 个测试文件、受影响包 `typecheck` 与改动文件 `eslint`，不在子工作树跑全包测试套件；验证收工交回前，仅清理该 worker 本轮在自身独占 worktree 内安装且确认无在途进程占用的 `node_modules`。涉及路由分层、学习者文案、颜色或 API 契约时用仓库对应边界检查。测试文件的实际类型覆盖与重验证串行规则见协作文档。本地浏览器验收由用户负责。
+- 有 commit、push 和开 PR 授权时按卡片执行，目标 remote 为 `study-assistant-opening`。需要子代理遵循本技能时在派单 brief 中明确要求加载。T3 主控立即 `link_pull_request` 关联已开或更新的 PR。首次完整 H 候选可在资源允许时并行必需 CI 与双审；增量微修轮次先跑快速独立 GPT 门禁，通过后再派发指定 Opus 复审（最终合入仍须两份批准均对应当前精确 head），避免阻塞未消就并跑双审再中途取消。已就绪的独立 PR 达标即合入，不等同批慢卡凑齐。T3 的每次正式审查或复查使用新的只读委派，输入为精确 head、实际差分、失败路径及相关调用者。共享工作目录可有用户修改，审查读取提交对象；增量复核仍须对当前候选给出结论。
+- 一个审查者给出可复现阻塞后，原 owner 在已授权范围内连续复现并集中修复，不因可逆局部 P1 人为触发单轮熔断停等用户拍板。旧提交上的发现可用于诊断。新 head 依风险分级取得相应审批与精确 CI。模型配额耗尽时，仅按适用于本次任务的明确授权改派，保留独立性并写明实际审查者。
+- 正式审查先核对完整 base-to-head 的范围、公开内容、授权／隔离和行为证据，再集中验证改动影响的边界。例如锁序需沿竞争的事务入口核对，UI 需覆盖失败回显与可访问性；PR 内容排除环境文件、本机路径和运维快照。
+- 原来通过的反例再次失败时，先查遗漏入口、失效的假设或修复引入的回归。具体续修、待裁决和未知结果的处置见[原卡推进规则](../../../docs/operations/agent-workflow.md#按事件推进原卡)。
 
-### Wave 1 — 全并行实现 + 极速本地门禁（10–25 分钟）
-- 派单前逐项核验默认 v2 并发与资源守卫：
-  - 运行中实现 writer 并发数 **`<= 5`**（除非当前会话获用户明确授权提高吞吐；只读审计/审查 Subagent 与已交回待审 PR 不占 writer 名额，`L` 占 writer 名额但不占 H 积压容量）；
-  - 每次新增 writer 前本机可用内存 **`available >= 500 MiB`**；
-  - 遵守平台真实配额、共享环境 `scripts/run-heavy.mjs` 重验证锁，以及未合入 H 栈 `<= 2`（未合入 H PR `> 4` 时暂停新 H，优先 L 或缺陷修复）。
-- 满足上述守卫后，对 N 个互不重叠的任务卡并发启动 `Workspace: "share"` 子 Agent。
-- 依赖与可选本地辅助脚本边界：
-  - `Workspace: "share"` 新建工作树默认不含 `node_modules`：纯文档卡片一般不在 worktree 中安装依赖；需要执行本地 unit/lint/tsc 检查（含脚本门禁）的编码工作树，须在派卡时预授权 `npm ci --prefer-offline --no-audit --no-fund`，并在终止子 Agent 前清理 `<worktree>/node_modules`（Windows 下用 `rmdir /s /q`）。
-  - 可选使用 `#421` 合入的本地看板辅助脚本（`scripts/local-dev-flow.mjs`、`scripts/local-dev-watch.mjs`、`scripts/local-dev-worker.mjs`）执行结构化 `.codex.json` 任务板调度、文件监听与本地 worker 调用，但仍须严格遵守并发 `<= 5`、`available >= 500 MiB`、严格 `allowedPaths` 与“不自动合入”规则。
-- 每个 worker 只执行最贴近改动的快速门禁（不在多个 worker 中并发执行完整 E2E 或全仓 build）：
-  - `node scripts/check-new-fixed-colors.mjs`
-  - `node scripts/check-server-boundary.mjs`
-    - **App Router 分层边界（Plan §7.4）**：`apps/web/src/app/**` 路由文件禁止直接运行时导入 `@aistudy/database` 或数据库/缓存驱动，须经 `apps/web/src/features/*/server/*` 的 `import "server-only"` 应用服务层适配。
-  - `node scripts/check-learner-copy.mjs --strict`
-  - `node scripts/check-api-contracts.mjs --strict`
-  - 改动涉及的 unit 测试：`npx vitest run --project unit <changed-tests>` 或 `node --test <tooling-tests>`
-  - 改动涉及包的 `npx eslint <changed-files>` 与所属包 `npm run typecheck -w @aistudy/<pkg>`（注意：`@aistudy/senseweave` 未定义 `typecheck` 脚本；`@aistudy/web`、`@aistudy/worker` 与其余 7 个 workspace 包 `ai`、`config`、`contracts`、`database`、`domain`、`jingwei`、`ui` 均有定义）。注意根级 `npm run typecheck` 仅覆盖各工作区 `src/`（不含 `*.test.ts[x]`）及 `tsconfig.e2e.json`（`tests/e2e/**/*.ts`、`tests/restart/**/*.ts`、`playwright*.ts`/`mts`、`scripts/db-reset-e2e.ts`），**不**检查 `tests/integration/**/*.test.ts`（含 `tests/integration/handler/**/*.test.ts`）、`tests/contract/*.test.ts` 或 `packages/*/src/**/*.test.ts`：
-    - 若改动 `tests/e2e/**/*.ts` 或 `tests/restart/**/*.ts`，运行根级 `npm run typecheck`（经 `run-heavy` 串行锁）或 `npx tsc -p tsconfig.e2e.json --noEmit`；
-    - 若改动 `tests/integration/**/*.test.ts`（含 `tests/integration/handler/**/*.test.ts`）、`tests/contract/*.test.ts` 或 `packages/*/src/**/*.test.ts`，运行 `npx eslint <changed-files>` 与对应 Vitest 项目（`--project integration` / `--project handler` / `--project contract` / `--project unit`）及精确 head CI；若需额外执行独立 `tsc --noEmit`，须显式传入匹配 `tsconfig.base.json` 的编译选项（如 `--strict --moduleResolution Bundler` 等），避免误以为根 `npm run typecheck` 已覆盖 `tests/integration/`。
-  - `git diff --check`（强制 LF，禁止 staged `.env`、`apps/web/next-env.d.ts`）
-- 通过后 worker **直接 commit + push 到 `study-assistant-opening` 并按 v2 分级创建 PR**（`L` 卡 `--base integration/opening`，仅当当次会话获明确整批授权时可用 `--base feat/opening-release`；`H` 卡独立 `--base feat/opening-release`），在 PR 正文标明风险分级、依据、完整 base-to-head 改动、`unverified` 范围，并向主控回报 PR 号、精确 40 位 `headRefOid`、改动文件与命令真实退出码：
-  - **PowerShell PR 正文防转义**：Windows `pwsh` 下创建/更新 PR 正文一律使用单引号 Here-String `@' ... '@ | gh pr create/edit --body-file -`，防止双引号内 Markdown 反引号触发转义。
+## 等待、交付与停止
 
-### Wave 2 — 远端全量 CI + 独立审查门禁（与 Wave 1/下一波重叠）
-- PR 一开出，`GitHub Actions` 按改动分类运行对应作业（`docs_only=false` 时并发运行 `integration-parser`、`handler-browser-spikes`、`static-unit-contract-spikes`、`production-build` 与 `isolated-worker-pdf-browser`；`docs_only=true` 时运行 `classify-changes` 与 `documentation-light-check`）。合并前在**精确最终 PR `headRefOid`** 上**必须同时通过两项必选 CI 门禁**：
-  - **`lint-typecheck-test-build`**（`quality`）
-  - **`real-worker-pdf-browser-flow`**（`worker-gate`）
-  二者缺一不可，绝不可省略 `real-worker-pdf-browser-flow`。
-- **审查门禁执行规则（严格区分渠道模式，绝不混淆替代）**：
-  1. **常态 v2 规则渠道（当 `Claude Opus 5.5 high` + 独立异家族 `GPT` 渠道已配置且按 v2 规则要求启用时）**：
-     - **`L` PR**（`integration/opening`）：合入前必须取得独立 `GPT` 批准，合入后进入指定 `Claude Opus 5.5 high` 后补审队列（补审发现真实缺陷立即开最高优先级修复 PR；完成前不得标为已通过）。
-     - **`H` PR**（`feat/opening-release`）：合入前**必须同时取得**指定 `Claude Opus 5.5 high` **与** 独立异家族 `GPT` 双方批准（并满足 `agent-workflow.md` 长期授权全部条件或用户逐次批准）。
-     - 若所需指定渠道不可用，如实记录未审/阻塞，不得以自审、空 verdict 或降级模型代替。
-  2. **Antigravity 会话明确授权的多 Subagent 自主运行模式（仅当用户在当前会话明确授权时）**：
-     - 对每个候选 PR 的精确 `headRefOid` 并发派发**两个独立只读 Subagent 审查视角**（**视角 A**：安全 / 契约 / 信任边界 / 并发与隔离；**视角 B**：业务行为 / UI / 测试覆盖与失败路径），与两项必选 CI 并行作为合入前技术审查门禁。
-     - 该模式**不削弱任何 `H`/`U` 用户审批边界**；**绝不可声称 Subagent 审查替代了指定 v2 签批（`Claude Opus 5.5 high` / 独立 `GPT`）**，除非当前会话/规则已获用户明确授权。
-- 所有只读审查统一核查：
-  1. 严格作用域（无 `.env`、`next-env.d.ts`、本机路径、生产 IP、未授权迁移或未授权跨界改动）
-  2. 信任边界（API 鉴权、`ownerId`/`workspaceId` 隔离、`lockWorkspaceLearningHistory` 锁序、`append-only` 事件不变量）
-  3. UI 与学习者文案（仅 Tailwind 语义 token，无原生 CSS / inline style，无禁用技术词）
-  4. 测试真实性（覆盖行为与失败路径，无弱化或跳过既有断言）
-- **两段式 CI 定时节拍（保护 30 步规划复盘周期）**：需要等待远端全量 CI 时使用事件驱动 `schedule(..., TimerCondition="any")`，严禁使用 shell `sleep` 轮询或高频短定时消耗步数预算；新 PR 推送后首轮设 `DurationSeconds=480`（8 分钟），唤醒后若仅余 `integration-parser` / `handler-browser-spikes` 等收尾作业设续轮 `180`–`300` 秒（并按唤醒活性不变量确认拿到有效 `task-id` 后再结束回合）。
+- T3 主控先处理已到达的结果和其他已就绪的独立动作，顺带只读核查运行中委派的最近活动时间（超过 20 分钟无新活动或异常退出仅触发只读核查远端分支、PR 与子线程状态；取消僵死运行须等终态生效，而转移写权与启动接手者前必须沿 2A 保守规则核实原 owner 已停止写入且已明确交回，不以接管授权或等待时长跳过停写与交回核验），再进入等待。针对委派遵循返回的 `next`；需要等待 PR 检查或评审时调用 `watch_pull_request` 并结束该回合，不向用户逐条播报中间子任务进度。按平台约定在最终交回前解除已结束的监听。其他宿主使用其实际提供的完成通知。无可用唤醒机制时在原卡登记恢复条件，并如实告知需要从哪里续接。
+- 按[CI 重跑与迟到通知](../../../docs/operations/agent-workflow.md#ci-重跑与迟到通知)核对当前提交和运行次数；排查失败优先读失败 job 的 `check-runs/<id>/annotations` 或失败步尾部摘要，不整包拉取数 MB 原始日志。已经处置的旧检查通知静默归并。新用户反馈、新评审意见和当前运行的新失败分别处理。共享基础设施故障共用诊断，待恢复条件满足后按授权只重跑失败作业。
+- 唯一集成者核实当前 base、head、未关闭的阻塞、授权及必需检查 `lint-typecheck-test-build` 和 `real-worker-pdf-browser-flow`。按协作规则执行 `--match-head-commit`、L 后补审、批量提升、双干线对齐及已合入干净 worktree 回收。合入后从目标分支读回实际结果；部署、迁移、清理和真实数据操作各按原授权处理。
+- 由唯一集成者在既有 STATUS 和总计划附录 F 按实际里程碑同步交付事实，涉及这些文件的变更沿原有 PR／CI 路径。达到约定结果就交付。UI 给出入口、数据前提、操作和预期结果，标明待用户浏览器验收。持续目标还有已授权里程碑时从原计划选下一项；只能等待时记录所等事件、责任人、解除条件。Windows `pwsh` 脚本优先用单引号 here-string（`@'...'@`）或 `node -e`，避免双引号内联 `python -c` 转义报错。用已有卡、委派和 PR 的时间戳区分排队、执行、审查和合入，缺少时间点就保留未知。
 
-### Wave 3 — 自动合入、双干线推进与分支/工作树回收
-- 同时满足以下全部条件后，由唯一集成者执行精确 SHA 合入：
-  1. 适用审查门禁已通过（常态 v2 渠道按 `L`/`H` 取得对应 `GPT` / `Claude Opus 5.5 high` 批准；或当前会话获用户明确授权 Antigravity 自主运行时，双视角独立只读 Subagent 均给出 `APPROVE` 且未越权替代未经授权豁免的 v2 签批或 `H`/`U` 审批）；
-  2. **精确最终 PR `headRefOid`** 上 **BOTH** `lint-typecheck-test-build`（`quality`）**AND** `real-worker-pdf-browser-flow`（`worker-gate`）均为 `SUCCESS`（绝不可省略 `real-worker-pdf-browser-flow`）。
-  ```powershell
-  gh pr merge <PR_NUM> --repo Xhhemoing/study-assistant-opening --merge --match-head-commit <HEAD_SHA> --delete-branch
-  ```
-- 若前序合入造成后续 PR 冲突：在干净工作区合入最新目标基分支（`integration/opening` 或 `feat/opening-release`），重跑受影响局部验证并 push；**必须在新 `headRefOid` 上重新取得对应审查确认，且 BOTH `lint-typecheck-test-build` 与 `real-worker-pdf-browser-flow` 全绿**后再合入。
-- **双干线推进与对齐**：
-  - `L` PR 合入 `integration/opening` 后，按 v2 节奏（至少累计 3 个 `L` 合入，或距上次提升约 6 小时）由唯一集成者发起提升 PR 合入 `feat/opening-release`（写明完整 base-to-head 差分与所含 PR，取得独立 `GPT` 快审与精确 `headRefOid` 两项必选 CI 全绿；所含 `L` 仍须完成 `Claude Opus 5.5 high` 后补审）。
-  - 仅当 `integration/opening` 相对 `feat/opening-release` **无未提升独有提交**（可用 `git merge-base --is-ancestor study-assistant-opening/integration/opening study-assistant-opening/feat/opening-release` 核实）时，在 `H` 合入或提升完成后将 `feat/opening-release` 快进同步回 `integration/opening`：
-    ```powershell
-    git checkout feat/opening-release
-    git fetch study-assistant-opening --prune
-    git merge --ff-only study-assistant-opening/feat/opening-release
-    git push study-assistant-opening feat/opening-release:integration/opening
-    ```
-- **Windows `share` worktree 实践提示**：
-  - 本地仓库配置启用长路径：`git config core.longpaths true`，并保持 subagent `Role` 简短（`<= 12` 字符），避免在 `Workspace: "share"` 检出深层工作树路径时触发 Windows `MAX_PATH` 失败。
-  - 若在 `Workspace: "share"` 编码 worktree 内执行了预授权的 `npm ci --prefer-offline --no-audit --no-fund`，在终止 subagent 或回收废弃 worktree 前先清理 `<worktree>/node_modules`（确认无未合并独有成果且符合清理授权后，Windows 先 `cmd /c "if exist `"<wt>\node_modules`" rmdir /s /q `"<wt>\node_modules`""`，再 `git worktree remove --force "<wt>"` + `git worktree prune`）。
+### 启动提示示例
 
-### Wave 4 — 收尾核对、U 级清单与浏览器验收交接
-- 更新 `docs/STATUS.md`（实际日期、已合 PR/SHA 列表、未解决缺陷、待审批事项，由唯一集成者负责）及 `docs/plans/2026-10-27-full-learning-loop-master-plan.md` 附录 F：**两者均必须通过独立 PR + 必选 CI（`lint-typecheck-test-build` 与 `real-worker-pdf-browser-flow`）后合入**（`scripts/ci/checks.py` 将 `STATUS.md` 排除在 `docs_only` 快速路径之外，因此修改 `docs/STATUS.md` 的 PR 会运行完整 CI）。
-- 将所有需要用户逐次审批的 U 级事项（含迁移的版本部署、数据库迁移执行、破坏性迁移、生产配置调整、真数据操作、视觉模型配置、定样）整理为只读核对单，**绝不越权执行**。
-- 输出中文《交付与浏览器验收清单》，标明所有前端交互均为 **待用户浏览器验收**，绝不伪造截图或本地 Playwright 结果。
-
----
-
-## 不可逾越的红线
-
-1. **禁止本地浏览器验收**：遵循根目录 `AGENTS.md`，Agent 绝不运行或委派本地 Playwright、浏览器自动化、截图或真机验收；远端 GitHub Actions CI 的浏览器检查保持启用。
-2. **禁止越权生产与数据操作**：绝不执行生产数据库迁移、破坏性迁移、定样越权拍板，不修改生产配置/密钥，不导出/篡改真实学习数据。
-3. **禁止公开仓库信息泄露**：`docs/`、commit message、PR 正文中绝不写入本机绝对路径（Windows/macOS/Linux 家目录或盘符路径）、主机 IP、服务端口快照或 PID。
-4. **禁止降级测试或伪造通过**：不得删除/跳过既有红测以换取绿灯；未执行的重检查须如实标注并交精确 SHA CI 把关。
-
----
-
-## 推荐配合命令与复用模板
-
-- 可用 `/goal` 搭配下文主控提示词触发多轮长时间自动推进；用 `/teamwork` 或 `run_workflow` 启动大规模并行切片。
-- 所有并行编码统一使用 `Workspace: "share"` 独立工作树，只读审计与审查统一使用 `Workspace: "inherit"` 并绑定精确 `headRefOid`，不与外部队列或脚本并发写同一工作区路径。
-
-### 主控 `/goal` 提示词模板
-
-```text
-请加载并严格遵循 .agents/skills/aistudy-autopilot/SKILL.md、docs/operations/agent-workflow.md 与根目录 AGENTS.md，采用“单主控 Coordinator + 多并行隔离 Subagent”模式推进开发：
-
-1. 本轮目标（按优先级）：
-   - <目标 1：例如高数测试版反馈缺陷全链路审计与修复>
-   - <目标 2：例如通用学习工作区 / M4-1b 收尾与文档同步>
-2. 执行方式：
-   - 先做只读多路审计，切分为 file-disjoint 的小任务卡并按 v2 分级（L/H/U）定好目标分支；
-   - 在默认 v2 并发与资源守卫（运行中 writer <= 5，除非当次会话获用户明确授权提高吞吐；available >= 500 MiB；尊重 H 栈上限与 run-heavy 锁）下并发派发 `Workspace: "share"` worker subagent 修复、补回归单测、跑极速本地门禁后 push & 开 PR（L 卡 `--base integration/opening`，仅当会话获整批授权时直指 `feat/opening-release`；H 卡独立 `--base feat/opening-release`）；
-   - 按 v2 规则在精确 `headRefOid` 上取得独立审查（启用指定 `Claude Opus 5.5 high` + 独立 `GPT` 渠道时按 L/H 要求取齐；若当前会话获用户明确授权 Antigravity 自主运行，则并发派发安全/边界与行为/测试双视角只读 reviewer subagent 作为合入前技术门禁，绝不擅代指定 v2 签批或 H/U 用户审批）；
-   - 等待远端 CI 使用 `schedule` 唤醒而非轮询 sleep；
-   - 审查门禁通过且精确 `headRefOid` 上 BOTH `lint-typecheck-test-build` 与 `real-worker-pdf-browser-flow` 均全绿后，由唯一集成者以 `--match-head-commit` 合入目标分支，按 v2 节奏批量提升 `integration/opening`，并在无未提升独有提交时对齐双干线、清理已合分支；
-   - 最后通过独立 PR + 必选 CI 更新 `docs/STATUS.md`（触发完整 CI）与附录 F，并输出 U 级核对单及中文《交付与浏览器验收清单》。
-3. 硬边界：
-   - 严禁运行本地 Playwright / 浏览器自动化 / 截图（标记“待用户浏览器验收”）；
-   - 严禁执行数据库迁移/破坏性迁移、修改生产配置、触碰真实用户数据或擅自定样；
-   - 公开文档与 PR 严禁出现本机绝对路径、主机拓扑或 PID。
-```
+> 按原卡推进课程知识整理，直到该修复合入目标分支并给出验收入口。用户取消重建后，重新读取课程仍应显示未完成。先确认已有候选和审批，沿面板、清单与任务结果检查这一条路径。若受阻，继续可独立完成的已授权工作；涉及产品取舍时带上反例和选项后果。
