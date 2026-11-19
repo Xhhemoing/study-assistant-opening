@@ -21,9 +21,16 @@ export const addMembershipBodySchema = z.object({
   sortOrder: z.number({ error: "排序值必须是整数。" }).int({ error: "排序值必须是整数。" }).optional(),
   visibility: z.enum(["private", "course", "public"], { error: "可见范围不正确。" }),
   purpose: courseSourcePurposeSchema.nullable().optional(),
+  replacesSourceId: assetIdSchema.optional(),
 }, { error: "请求内容格式不正确。" }).superRefine((value, ctx) => {
   if (value.assetType !== "source" && value.purpose != null) {
     ctx.addIssue({ code: "custom", path: ["purpose"], message: "只有原始资料可以设置课程用途。" });
+  }
+  if (value.assetType !== "source" && value.replacesSourceId !== undefined) {
+    ctx.addIssue({ code: "custom", path: ["replacesSourceId"], message: "只有原始资料支持替换旧资料。" });
+  }
+  if (value.replacesSourceId !== undefined && value.replacesSourceId === value.assetId) {
+    ctx.addIssue({ code: "custom", path: ["replacesSourceId"], message: "替换的旧资料不能与新资料相同。" });
   }
 });
 

@@ -2,11 +2,12 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import type { CourseKnowledgeSync } from "@aistudy/contracts";
 import { createKnowledgeRebuildClient } from "./knowledge-rebuild-client";
 import { KNOWLEDGE_POLL_INTERVAL_MS, KNOWLEDGE_POLL_TIMEOUT_MS, KnowledgeRebuildControl } from "./knowledge-rebuild-control";
 
 const courseId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", jobId = "11111111-1111-4111-8111-111111111111";
-type Server = { version: number; nodes: number; created: boolean; posts: unknown[]; reads: number; signals: AbortSignal[]; post?: () => Response | Promise<Response>; read?: (read: number) => Promise<Response> | undefined };
+type Server = { version: number; nodes: number; created: boolean; sync?: CourseKnowledgeSync; posts: unknown[]; reads: number; signals: AbortSignal[]; post?: () => Response | Promise<Response>; read?: (read: number) => Promise<Response> | undefined };
 let host: HTMLDivElement, root: Root;
 
 beforeEach(() => {
@@ -22,7 +23,7 @@ function held() { let release!: (response: Response) => void; const response = n
 const receipt = () => Response.json({ jobId, kind: "build-course-knowledge", created: true });
 function record(state: Server) {
   const nodes = Array.from({ length: state.nodes }, (_, index) => ({ id: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`, courseId, label: `知识点${index}`, kind: "concept", evidenceChunkIds: [], status: "suggested" }));
-  return { version: state.version, snapshot: { courseId, version: state.version, nodes, edges: [] }, sourceVersions: {} };
+  return { version: state.version, snapshot: { courseId, version: state.version, nodes, edges: [] }, sourceVersions: {}, ...(state.sync ? { sync: state.sync } : {}) };
 }
 function transport(state: Server) {
   return vi.fn<typeof fetch>(async (_input, init) => {
@@ -230,4 +231,81 @@ it.each([
   expect(host.querySelector('[role="alert"]')?.textContent).toBe(message);
   await act(async () => action().click());
   expect(state.posts).toHaveLength(2);
+});
+
+it("does not complete falsely on confirmNode version bump while active job is still running, and distinguishes pending follow-up", async () => {
+  const followUpJobId = "22222222-2222-4222-8222-222222222222";
+  const state = server({
+    version: 2,
+    nodes: 1,
+    sync: {
+      status: "needs_rebuild",
+      activeJobId: null,
+      lastBuiltVersion: 2,
+      coveredSourceVersions: { [courseId]: 1 },
+      eligibleSourceVersions: { [courseId]: 2 },
+      parsingSourceCount: 0,
+    },
+  });
+  const onRebuilt = await render(state);
+  await act(async () => action().click());
+  // Simulate confirmNode bumping version (2 -> 3) while rebuild job is still active (lastBuiltVersion remains 2).
+  state.version = 3;
+  state.sync = {
+    status: "pending",
+    activeJobId: jobId,
+    lastBuiltVersion: 2,
+    coveredSourceVersions: { [courseId]: 1 },
+    eligibleSourceVersions: { [courseId]: 2 },
+    parsingSourceCount: 0,
+  };
+  await advance(KNOWLEDGE_POLL_INTERVAL_MS);
+  expect(action().disabled).toBe(true);
+  expect(onRebuilt).not.toHaveBeenCalled();
+
+  // First job completes, but a follow-up coalesced job is now queued.
+  state.version = 4;
+  state.nodes = 3;
+  state.sync = {
+    status: "pending",
+    activeJobId: followUpJobId,
+    lastBuiltVersion: 4,
+    coveredSourceVersions: { [courseId]: 2 },
+    eligibleSourceVersions: { [courseId]: 2 },
+    parsingSourceCount: 1,
+  };
+  await advance(KNOWLEDGE_POLL_INTERVAL_MS);
+  expect(action().disabled).toBe(false);
+  expect(status()).toBe("已整理本批：共 3 个知识点；新加入的资料仍在后台继续整理。");
+  expect(onRebuilt).toHaveBeenCalledTimes(1);
+});
+
+it("completes immediately when an existing coalesced job already reached up_to_date", async () => {
+  const state = server({
+    version: 2,
+    nodes: 2,
+    created: false,
+    sync: {
+      status: "needs_rebuild",
+      activeJobId: null,
+      lastBuiltVersion: 2,
+      coveredSourceVersions: { [courseId]: 1 },
+      eligibleSourceVersions: { [courseId]: 2 },
+      parsingSourceCount: 0,
+    },
+  });
+  const onRebuilt = await render(state);
+  await act(async () => action().click());
+  state.sync = {
+    status: "up_to_date",
+    activeJobId: null,
+    lastBuiltVersion: 2,
+    coveredSourceVersions: { [courseId]: 2 },
+    eligibleSourceVersions: { [courseId]: 2 },
+    parsingSourceCount: 0,
+  };
+  await advance(KNOWLEDGE_POLL_INTERVAL_MS);
+  expect(action().disabled).toBe(false);
+  expect(status()).toBe("已整理：共 2 个知识点。刷新页面可查看新的知识图。");
+  expect(onRebuilt).toHaveBeenCalledTimes(1);
 });

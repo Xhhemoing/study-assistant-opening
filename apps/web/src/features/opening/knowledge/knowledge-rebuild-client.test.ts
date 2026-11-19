@@ -38,3 +38,24 @@ it("does not accept a receipt for another job kind or a malformed knowledge reco
   await expect(createKnowledgeRebuildClient(async () => Response.json({ jobId, kind: "tutor", created: true })).rebuild(courseId, "knowledge-rebuild:key-1")).rejects.toThrow();
   await expect(createKnowledgeRebuildClient(async () => Response.json({ ...record, version: -1 })).read(courseId)).rejects.toThrow();
 });
+
+it("parses optional sync metadata on read and rejects malformed sync payloads", async () => {
+  const synced = {
+    ...record,
+    sync: {
+      status: "pending" as const,
+      activeJobId: jobId,
+      lastBuiltVersion: 2,
+      coveredSourceVersions: { [courseId]: 1 },
+      eligibleSourceVersions: { [courseId]: 2 },
+      parsingSourceCount: 1,
+    },
+  };
+  await expect(createKnowledgeRebuildClient(async () => Response.json(synced)).read(courseId)).resolves.toEqual(synced);
+  await expect(
+    createKnowledgeRebuildClient(async () => Response.json({ ...synced, sync: { ...synced.sync, status: "stale" } })).read(courseId),
+  ).rejects.toThrow();
+  await expect(
+    createKnowledgeRebuildClient(async () => Response.json({ ...synced, sync: { ...synced.sync, parsingSourceCount: -1 } })).read(courseId),
+  ).rejects.toThrow();
+});

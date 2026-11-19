@@ -15,7 +15,7 @@ type RebuildState =
   | { kind: "idle" }
   | { kind: "requesting" }
   | { kind: "polling" }
-  | { kind: "done"; nodeCount: number }
+  | { kind: "done"; nodeCount: number; pendingFollowUp?: boolean }
   | { kind: "timeout" }
   | { kind: "failed"; message: string };
 
@@ -30,7 +30,12 @@ function stopOperation(operation: MutableRefObject<RebuildOperation | null>, cur
 
 function statusText(state: RebuildState): string {
   if (state.kind === "requesting" || state.kind === "polling") return "整理中：正在从已解析的资料里整理知识点，可能需要几分钟，可以留在本页等待。";
-  if (state.kind === "done") return state.nodeCount ? `已整理：共 ${state.nodeCount} 个知识点。刷新页面可查看新的知识图。` : "已整理，但当前资料里没有整理出知识点；请确认资料已解析完成。";
+  if (state.kind === "done") {
+    if (state.pendingFollowUp) {
+      return `已整理本批：共 ${state.nodeCount} 个知识点；新加入的资料仍在后台继续整理。`;
+    }
+    return state.nodeCount ? `已整理：共 ${state.nodeCount} 个知识点。刷新页面可查看新的知识图。` : "已整理，但当前资料里没有整理出知识点；请确认资料已解析完成。";
+  }
   if (state.kind === "timeout") return "没有看到新的整理结果，可以稍后刷新再看。";
   return "";
 }
@@ -62,12 +67,14 @@ export function KnowledgeRebuildControl({ courseId, client: suppliedClient, orga
     }, KNOWLEDGE_POLL_TIMEOUT_MS);
     setState({ kind: "requesting" });
     try {
-      const { version: baseline } = await client.read(courseId, signal);
+      const initial = await client.read(courseId, signal);
       if (!live()) return;
-      await client.rebuild(courseId, `knowledge-rebuild:${crypto.randomUUID()}`, signal);
+      const baseline = initial.version;
+      const baselineBuilt = initial.sync?.lastBuiltVersion ?? null;
+      const receipt = await client.rebuild(courseId, `knowledge-rebuild:${crypto.randomUUID()}`, signal);
       if (!live()) return;
       setState({ kind: "polling" });
-      // The rebuild job has no status route; a finished rebuild always stores a newer knowledge version.
+      // When sync metadata is present, wait until this job finishes (lastBuiltVersion advances past baselineBuilt).
       const tick = async () => {
         let latest: CourseKnowledgeRecord | null = null;
         try { latest = await client.read(courseId, signal); }
@@ -80,9 +87,21 @@ export function KnowledgeRebuildControl({ courseId, client: suppliedClient, orga
           }
         }
         if (!live()) return;
-        if (latest && latest.version > baseline) {
+        const completed = latest?.sync
+          ? latest.sync.activeJobId !== receipt.jobId
+            && (
+              (latest.sync.lastBuiltVersion !== null
+                && (baselineBuilt === null || latest.sync.lastBuiltVersion > baselineBuilt))
+              || (!receipt.created && latest.sync.status === "up_to_date" && latest.sync.activeJobId === null)
+            )
+          : Boolean(latest && latest.version > baseline);
+        if (latest && completed) {
           stop(current);
-          setState({ kind: "done", nodeCount: latest.snapshot.nodes.length });
+          setState({
+            kind: "done",
+            nodeCount: latest.snapshot.nodes.length,
+            pendingFollowUp: latest.sync?.status === "pending",
+          });
           notify.current?.(latest);
         } else current.poll = setTimeout(() => void tick(), KNOWLEDGE_POLL_INTERVAL_MS);
       };

@@ -4,6 +4,7 @@ import {
   createOpeningSourceRepository,
   createOpeningSourceActionsRepository,
   createOpeningPrivacyRepository,
+  createOpeningKnowledgeRepository,
   readOpeningExamPublicSource,
   OpeningSourceError,
   OpeningS3,
@@ -184,6 +185,16 @@ export function createOpeningSourceService(sql: Sql, storage: OpeningStorage = n
       const result = input.action === "retry_cleanup"
         ? { deleted: true, cleanup: await actions.cleanup(scope, id) }
         : await actions.apply(scope, id, input, storage, now());
+      if (input.action !== "retry_cleanup") {
+        try {
+          await createOpeningKnowledgeRepository(sql).reconcileCoursesForSource(scope, {
+            sourceId: id,
+            markInvalidated: true,
+          });
+        } catch {
+          // Best-effort sync: source action already committed.
+        }
+      }
       if (!result.deleted) return { sourceId: id, aiExcluded: true, deleted: false, cleanupPending: 0, retryAfter: null };
       for (const key of result.cleanup.keys) {
         try { await storage.deleteObject(key); }

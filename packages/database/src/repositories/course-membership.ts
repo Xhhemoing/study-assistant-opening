@@ -111,6 +111,7 @@ export type CourseMembershipRepository = {
     sortOrder?: number;
     visibility: CourseVisibility;
     purpose?: CourseSourcePurpose | null;
+    replacesSourceId?: string;
   }): Promise<AssetMembershipRecord>;
 
   updateAssetMembership(input: {
@@ -431,6 +432,15 @@ export function createCourseMembershipRepository(
       assertVisibility(input.visibility);
       assertPurpose(input.assetType, input.purpose);
       assertUuid(input.assetId, "assetId");
+      if (input.replacesSourceId !== undefined) {
+        if (input.assetType !== "source") {
+          throw new CourseMembershipError("VALIDATION", "只有原始资料支持替换旧资料。");
+        }
+        assertUuid(input.replacesSourceId, "replacesSourceId");
+        if (input.replacesSourceId === input.assetId) {
+          throw new CourseMembershipError("VALIDATION", "替换的旧资料不能与新资料相同。");
+        }
+      }
 
       const course = await loadCourse(input.workspaceId, input.courseId);
       if (course.workspaceId !== input.workspaceId) {
@@ -459,7 +469,10 @@ export function createCourseMembershipRepository(
         );
       }
 
-      const insert = (db: Sql | TransactionSql) => db`
+      const insert = (
+        db: Sql | TransactionSql,
+        purpose: CourseSourcePurpose | null = input.purpose ?? null,
+      ) => db`
           INSERT INTO course_asset_memberships (
             workspace_id,
             course_id,
@@ -477,7 +490,7 @@ export function createCourseMembershipRepository(
             ${input.role},
             ${sortOrder},
             ${input.visibility},
-            ${input.purpose ?? null}
+            ${purpose}
           )
           RETURNING *
         `;
@@ -485,9 +498,39 @@ export function createCourseMembershipRepository(
         const rows = input.assetType === "source" ? await sql.begin(async tx => {
           // Workspace -> source matches deletion; source remains locked until membership insertion commits.
           await tx`SELECT id FROM workspaces WHERE id=${input.workspaceId} FOR SHARE`;
+          if (input.replacesSourceId) {
+            const ownedCourse = await tx`SELECT id FROM courses WHERE id=${input.courseId}
+              AND workspace_id=${input.workspaceId} FOR SHARE`;
+            if (!ownedCourse.length) {
+              throw new CourseMembershipError("NOT_FOUND", `Course not found: ${input.courseId}`);
+            }
+          }
           const current = await tx`SELECT id FROM opening_sources WHERE id=${input.assetId}
             AND workspace_id=${input.workspaceId} FOR SHARE`;
           if (!current.length) throw new CourseMembershipError("NOT_FOUND", "Source not found");
+          if (input.replacesSourceId) {
+            const oldRows = await tx`
+              SELECT id, purpose FROM course_asset_memberships
+              WHERE workspace_id = ${input.workspaceId}
+                AND course_id = ${input.courseId}
+                AND asset_type = 'source'
+                AND asset_id = ${input.replacesSourceId}
+              FOR UPDATE`;
+            if (!oldRows.length) {
+              throw new CourseMembershipError(
+                "NOT_FOUND",
+                `Replaced source ${input.replacesSourceId} is not a member of course ${input.courseId}`,
+              );
+            }
+            const oldPurpose = (oldRows[0]!.purpose ?? null) as CourseSourcePurpose | null;
+            const effectivePurpose = input.purpose !== undefined ? input.purpose : oldPurpose;
+            await tx`
+              DELETE FROM course_asset_memberships
+              WHERE id = ${String(oldRows[0]!.id)}
+                AND workspace_id = ${input.workspaceId}
+                AND course_id = ${input.courseId}`;
+            return insert(tx, effectivePurpose);
+          }
           return insert(tx);
         }) : await insert(sql);
         return mapMembership(rows[0] as Record<string, unknown>);

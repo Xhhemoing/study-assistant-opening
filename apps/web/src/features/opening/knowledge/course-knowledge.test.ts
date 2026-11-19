@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { chaptersFirst, nextStepCopy, nextStepCta } from "./course-knowledge";
+import { chaptersFirst, knowledgeSyncNotice, nextStepCopy, nextStepCta } from "./course-knowledge";
 import { evidenceTargetsForNode } from "./knowledge-evidence";
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -93,5 +93,22 @@ describe("course-knowledge helpers", () => {
       reason: "先选定材料页",
     });
     expect(clarify?.href).toBe("#course-assets");
+  });
+
+  it("formats honest sync notices for parsing, pending, and needs_rebuild states", () => {
+    const base = {
+      activeJobId: null,
+      lastBuiltVersion: 1,
+      coveredSourceVersions: {},
+      eligibleSourceVersions: {},
+      parsingSourceCount: 0,
+    };
+    expect(knowledgeSyncNotice(undefined)).toBeNull();
+    expect(knowledgeSyncNotice({ ...base, status: "empty" })).toBeNull();
+    expect(knowledgeSyncNotice({ ...base, status: "up_to_date" })).toBeNull();
+    expect(knowledgeSyncNotice({ ...base, status: "pending", activeJobId: id(1), parsingSourceCount: 2 })).toContain("2 份新材料仍在解析中");
+    expect(knowledgeSyncNotice({ ...base, status: "up_to_date", parsingSourceCount: 1 })).toContain("1 份新材料仍在解析中");
+    expect(knowledgeSyncNotice({ ...base, status: "pending", activeJobId: id(1) })).toContain("重新整理");
+    expect(knowledgeSyncNotice({ ...base, status: "needs_rebuild" })).toContain("尚未同步最新材料");
   });
 });

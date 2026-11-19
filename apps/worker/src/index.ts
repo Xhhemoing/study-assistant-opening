@@ -222,18 +222,24 @@ export async function main(): Promise<void> {
     config: embeddingConfig, budget: scope => scopeBudget(budget, scope) });
   const models = createDbModelGateway(sql);
   const visualRecognitions = createOpeningSourceVisualRecognitionsRepository(sql);
+  const knowledge = createOpeningKnowledgeRepository(sql);
   const parse = runner ? createParseSourceHandler({ sources, chunks, storage, runner, tempDir: env.parserTempDir,
     segments: createOpeningPdfSegmentsRepository(sql), segmentTimeoutSeconds: startup.ocrSegmentTimeoutSeconds,
     assertCurrent: (scope, identity) => visualRecognitions.assertCurrent(scope, identity),
     recognizePage: createSourceVisualRecognition({ repository: visualRecognitions, gateway: models,
       budget: scope => scopeBudget(budget, scope), storage }),
+    onSourceReady: async (scope, { sourceId }) => {
+      await knowledge.reconcileCoursesForSource(scope, { sourceId });
+    },
   }) : parserDisabled;
-  const knowledge = createOpeningKnowledgeRepository(sql);
   const buildCourseKnowledge = createBuildCourseKnowledgeHandler({
     listAuthorizedChunks: (scope, courseId) => knowledge.listAuthorizedChunks(scope, courseId),
     listReferencedNodeIds: (scope, courseId) => knowledge.listReferencedNodeIds(scope, courseId),
     get: (scope, courseId) => knowledge.getForRebuild(scope, courseId),
     replace: (scope, courseId, input) => knowledge.replace(scope, courseId, input),
+    onBuildCompleted: async (scope, courseId, coveredSourceVersions) => {
+      await knowledge.reconcileCourseMaterials(scope, courseId, { coveredSourceVersions });
+    },
     // Own task route and ledger entry; retries of one job reuse one reservation.
     resolveProvider: async (scope, job, batch) => models.budgetedProvider(scope, "knowledge.extract", {
       budget: scopeBudget(budget, scope),
@@ -248,6 +254,9 @@ export async function main(): Promise<void> {
     storage,
     tempDir: env.parserTempDir,
     ...createMediaTranscribeWorkerDeps(sql, { budget, privacy: privacyRepo }),
+    onSourceReady: async (scope, { sourceId }) => {
+      await knowledge.reconcileCoursesForSource(scope, { sourceId });
+    },
     putObject: async ({ key, body, mime }) => {
       await storage.client.send(
         new PutObjectCommand({

@@ -1,7 +1,10 @@
 import { lockOpeningJobExecution } from "./opening-job-execution";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   knowledgeSnapshotSchema,
+  type CourseKnowledgeRecordResponse,
+  type CourseKnowledgeSync,
+  type CourseKnowledgeSyncStatus,
   type KnowledgeSnapshot,
   type SourceChunk,
   type Scope,
@@ -69,6 +72,15 @@ function parseSourceVersions(value: unknown): Record<string, number> {
 function sameVersions(left: Record<string, number>, right: Record<string, number>): boolean {
   return Object.keys(left).length === Object.keys(right).length
     && Object.entries(left).every(([id, version]) => right[id] === version);
+}
+
+function sourceVersionsHash(versions: Record<string, number>): string {
+  const canonical = JSON.stringify(
+    Object.keys(versions)
+      .sort()
+      .map((id) => [id, versions[id]]),
+  );
+  return createHash("sha256").update(canonical).digest("hex").slice(0, 16);
 }
 
 /** Evidence is compared and stored as a set: sorted unique chunk ids. */
@@ -188,6 +200,144 @@ async function hasTeachingPurposes(sql: Sql, scope: Scope, courseId: string, ver
   return admitted.length === ids.length;
 }
 
+async function readSyncStatusInternal(
+  db: Sql | TransactionSql,
+  scope: Scope,
+  courseId: string,
+): Promise<{ sync: CourseKnowledgeSync; record: OpeningKnowledgeRecord | null }> {
+  await assertOwnedCourse(db, scope, courseId);
+  const knowledgeRows = await db`
+    SELECT version, snapshot, source_versions
+    FROM opening_course_knowledge
+    WHERE workspace_id = ${scope.workspaceId}
+      AND owner_user_id = ${scope.ownerUserId}
+      AND course_id = ${courseId}`;
+  const record = knowledgeRows.length ? mapRecord(knowledgeRows[0] as Record<string, unknown>) : null;
+
+  const eligibleRows = await db`
+    SELECT s.id, s.version
+    FROM opening_sources s
+    JOIN opening_source_versions v
+      ON v.source_id = s.id AND v.workspace_id = s.workspace_id AND v.version = s.version
+    JOIN course_asset_memberships m
+      ON m.workspace_id = s.workspace_id
+      AND m.asset_type = 'source'
+      AND m.asset_id = s.id
+      AND m.course_id = ${courseId}
+      AND (m.purpose IS NULL OR m.purpose = 'teaching')
+    WHERE s.workspace_id = ${scope.workspaceId}
+      AND s.upload_state = 'uploaded'
+      AND s.parse_state = 'ready'
+      AND v.availability = 'available'
+      AND NOT EXISTS (
+        SELECT 1 FROM opening_privacy_exclusions e
+        WHERE e.workspace_id = s.workspace_id AND e.source_id = s.id
+      )
+      AND EXISTS (
+        SELECT 1 FROM opening_source_chunks c
+        WHERE c.source_id = s.id
+          AND c.source_version = s.version
+          AND (c.text ~ '[^[:space:]]' OR (c.image_object_key IS NOT NULL AND c.image_object_key <> ''))
+      )
+    ORDER BY s.id`;
+  const eligibleSourceVersions: Record<string, number> = {};
+  for (const row of eligibleRows as Array<Record<string, unknown>>) {
+    eligibleSourceVersions[String(row.id)] = Number(row.version);
+  }
+
+  const parsingRows = await db`
+    SELECT count(*)::int AS count
+    FROM opening_sources s
+    JOIN course_asset_memberships m
+      ON m.workspace_id = s.workspace_id
+      AND m.asset_type = 'source'
+      AND m.asset_id = s.id
+      AND m.course_id = ${courseId}
+      AND (m.purpose IS NULL OR m.purpose = 'teaching')
+    WHERE s.workspace_id = ${scope.workspaceId}
+      AND s.upload_state IN ('pending', 'uploaded')
+      AND s.parse_state IN ('not_started', 'queued', 'running')
+      AND NOT EXISTS (
+        SELECT 1 FROM opening_privacy_exclusions e
+        WHERE e.workspace_id = s.workspace_id AND e.source_id = s.id
+      )`;
+  const parsingSourceCount = Number((parsingRows[0] as Record<string, unknown> | undefined)?.count ?? 0);
+
+  const activeJobRows = await db`
+    SELECT id
+    FROM opening_jobs
+    WHERE workspace_id = ${scope.workspaceId}
+      AND owner_user_id = ${scope.ownerUserId}
+      AND kind = 'build-course-knowledge'
+      AND payload->>'courseId' = ${courseId}
+      AND state IN ('queued', 'running')
+    ORDER BY updated_at DESC, created_at DESC, id DESC
+    LIMIT 1`;
+  const activeJobId = activeJobRows.length ? String((activeJobRows[0] as Record<string, unknown>).id) : null;
+
+  const succeededRows = await db`
+    SELECT id, result
+    FROM opening_jobs
+    WHERE workspace_id = ${scope.workspaceId}
+      AND owner_user_id = ${scope.ownerUserId}
+      AND kind = 'build-course-knowledge'
+      AND payload->>'courseId' = ${courseId}
+      AND state = 'succeeded'
+    ORDER BY updated_at DESC, created_at DESC, id DESC
+    LIMIT 1`;
+  const latestSucceeded = succeededRows[0] as Record<string, unknown> | undefined;
+  const resultObj =
+    latestSucceeded?.result && typeof latestSucceeded.result === "object" && !Array.isArray(latestSucceeded.result)
+      ? (latestSucceeded.result as Record<string, unknown>)
+      : null;
+  const resultVersion =
+    resultObj && typeof resultObj.version === "number" && Number.isInteger(resultObj.version) && resultObj.version >= 0
+      ? resultObj.version
+      : null;
+  const hasResultCovered = Boolean(
+    resultObj
+      && "coveredSourceVersions" in resultObj
+      && resultObj.coveredSourceVersions !== null
+      && typeof resultObj.coveredSourceVersions === "object"
+      && !Array.isArray(resultObj.coveredSourceVersions),
+  );
+  const lastBuiltVersion = latestSucceeded
+    ? (resultVersion ?? (record ? record.version : null))
+    : (record ? record.version : null);
+  const coveredSourceVersions = hasResultCovered
+    ? parseSourceVersions(resultObj!.coveredSourceVersions)
+    : (record?.sourceVersions ?? {});
+
+  const hasNeedsCheck = Boolean(
+    record && [...record.snapshot.nodes, ...record.snapshot.edges].some((item) => item.status === "needs_check"),
+  );
+  let status: CourseKnowledgeSyncStatus;
+  if (activeJobId !== null) {
+    status = "pending";
+  } else if (Object.keys(eligibleSourceVersions).length === 0 && (!record || record.snapshot.nodes.length === 0)) {
+    status = "empty";
+  } else if (
+    !sameVersions(coveredSourceVersions, eligibleSourceVersions)
+    || (hasNeedsCheck && !sameVersions(record!.sourceVersions, eligibleSourceVersions))
+  ) {
+    status = "needs_rebuild";
+  } else {
+    status = "up_to_date";
+  }
+
+  return {
+    sync: {
+      status,
+      activeJobId,
+      lastBuiltVersion,
+      coveredSourceVersions,
+      eligibleSourceVersions,
+      parsingSourceCount,
+    },
+    record,
+  };
+}
+
 export function createOpeningKnowledgeRepository(sql: Sql) {
   return {
     /** Definitions contain source text and are only available to the rebuild worker. */
@@ -246,6 +396,46 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
           AND asset_id=ANY(${sourceIds}::uuid[]) AND purpose IN ('practice','reference','mock_exam')` : [];
       if (restricted.length) return null;
       return mapRecord(rows[0] as Record<string, unknown>);
+    },
+
+    async readSyncStatus(scope: Scope, courseId: string): Promise<CourseKnowledgeSync> {
+      const { sync } = await readSyncStatusInternal(sql, scope, courseId);
+      return sync;
+    },
+
+    async getWithSync(scope: Scope, courseId: string): Promise<CourseKnowledgeRecordResponse> {
+      const { sync, record } = await readSyncStatusInternal(sql, scope, courseId);
+      if (!record) {
+        return {
+          version: 0,
+          snapshot: { courseId, version: 0, nodes: [], edges: [] },
+          sourceVersions: {},
+          sync,
+        };
+      }
+      const sourceIds = Object.keys(record.sourceVersions);
+      const restricted = sourceIds.length
+        ? await sql`SELECT id FROM course_asset_memberships
+            WHERE workspace_id = ${scope.workspaceId}
+              AND course_id = ${courseId}
+              AND asset_type = 'source'
+              AND asset_id = ANY(${sourceIds}::uuid[])
+              AND purpose IN ('practice', 'reference', 'mock_exam')`
+        : [];
+      if (restricted.length) {
+        return {
+          version: record.version,
+          snapshot: { courseId, version: record.version, nodes: [], edges: [] },
+          sourceVersions: {},
+          sync,
+        };
+      }
+      return {
+        version: record.version,
+        snapshot: record.snapshot,
+        sourceVersions: record.sourceVersions,
+        sync,
+      };
     },
 
     /** A strict transition, not an idempotent replay: stale/duplicate submissions conflict. */
@@ -545,6 +735,99 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
       });
     },
 
+    async enqueueCoalescedRebuild(
+      scope: Scope,
+      courseId: string,
+      reasonKey: string,
+    ): Promise<{ jobId: string; kind: "build-course-knowledge"; created: boolean }> {
+      if (!reasonKey.trim()) {
+        throw new OpeningKnowledgeError("VALIDATION", "reasonKey must not be empty");
+      }
+      await assertOwnedCourse(sql, scope, courseId);
+      return sql.begin(async (tx) => {
+        const [workspace] = await tx`
+          SELECT privacy_epoch FROM workspaces
+          WHERE id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId} FOR SHARE`;
+        if (!workspace) throw new OpeningKnowledgeError("NOT_FOUND", "workspace not found");
+        const [course] = await tx`
+          SELECT id FROM courses
+          WHERE id = ${courseId} AND workspace_id = ${scope.workspaceId} AND archived_at IS NULL FOR UPDATE`;
+        if (!course) throw new OpeningKnowledgeError("NOT_FOUND", "course not found");
+
+        const queuedRows = await tx`
+          SELECT id FROM opening_jobs
+          WHERE workspace_id = ${scope.workspaceId}
+            AND owner_user_id = ${scope.ownerUserId}
+            AND kind = 'build-course-knowledge'
+            AND payload->>'courseId' = ${courseId}
+            AND state = 'queued'
+          ORDER BY created_at DESC, id DESC
+          LIMIT 1`;
+        if (queuedRows.length) {
+          return { jobId: String(queuedRows[0]!.id), kind: "build-course-knowledge" as const, created: false };
+        }
+
+        const runningRows = await tx`
+          SELECT id FROM opening_jobs
+          WHERE workspace_id = ${scope.workspaceId}
+            AND owner_user_id = ${scope.ownerUserId}
+            AND kind = 'build-course-knowledge'
+            AND payload->>'courseId' = ${courseId}
+            AND state = 'running'
+          ORDER BY updated_at DESC, created_at DESC, id DESC
+          LIMIT 1`;
+        const runningJobId = runningRows.length ? String(runningRows[0]!.id) : null;
+        const privacyEpoch = Number((workspace as { privacy_epoch?: number }).privacy_epoch ?? 0);
+        const payload = { courseId };
+        const baseKey = `build-course-knowledge:${courseId}:sync:${reasonKey}:${runningJobId ?? "idle"}`;
+
+        const tryInsert = async (jobKey: string) => {
+          const id = randomUUID();
+          const inserted = await tx`
+            INSERT INTO opening_jobs (id, workspace_id, owner_user_id, key, kind, payload, privacy_epoch)
+            VALUES (
+              ${id}, ${scope.workspaceId}, ${scope.ownerUserId}, ${jobKey},
+              ${"build-course-knowledge"}, ${tx.json(payload as never)}, ${privacyEpoch}
+            )
+            ON CONFLICT (workspace_id, key) DO NOTHING
+            RETURNING id`;
+          if (inserted.length) {
+            await tx`
+              INSERT INTO opening_outbox (workspace_id, job_id, topic, payload)
+              VALUES (
+                ${scope.workspaceId}, ${id}, ${"opening.job.enqueue"},
+                ${tx.json({ jobId: id, kind: "build-course-knowledge", courseId } as never)}
+              )`;
+            return { jobId: id, kind: "build-course-knowledge" as const, created: true };
+          }
+          return null;
+        };
+
+        const created = await tryInsert(baseKey);
+        if (created) return created;
+
+        const existing = await tx`
+          SELECT id, state, payload FROM opening_jobs
+          WHERE workspace_id = ${scope.workspaceId} AND key = ${baseKey}`;
+        const row = existing[0] as Record<string, unknown> | undefined;
+        if (!row) throw new OpeningKnowledgeError("NOT_FOUND", "rebuild job disappeared after conflict");
+        if (JSON.stringify(row.payload) !== JSON.stringify(payload)) {
+          throw new OpeningKnowledgeError("CONFLICT", "idempotency payload differs for the same key");
+        }
+        const existingState = typeof row.state === "string" ? row.state : undefined;
+        if (
+          existingState !== undefined
+          && existingState !== "queued"
+          && existingState !== "running"
+        ) {
+          // A previous completed job held this historical key; under the course lock, enqueue a fresh job.
+          const fresh = await tryInsert(`${baseKey}:${randomUUID()}`);
+          if (fresh) return fresh;
+        }
+        return { jobId: String(row.id), kind: "build-course-knowledge" as const, created: false };
+      });
+    },
+
     /**
      * Mark snapshot nodes/edges needs_check when listed sources change.
      * Returns courseIds whose source_versions listed any of the ids (even if already
@@ -553,6 +836,7 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
     async markNeedsCheckForSources(
       scope: Scope,
       sourceIds: readonly string[],
+      options?: { courseId?: string },
     ): Promise<{ updated: number; courseIds: string[] }> {
       const ids = [...new Set(sourceIds)].sort();
       if (!ids.length) return { updated: 0, courseIds: [] };
@@ -561,12 +845,20 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
         const owner = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId}
           AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
         if (!owner.length) throw new OpeningKnowledgeError("NOT_FOUND", "workspace not found");
-        const rows = await tx`
-          SELECT workspace_id, course_id, version, snapshot, source_versions
-          FROM opening_course_knowledge
-          WHERE workspace_id = ${scope.workspaceId}
-            AND owner_user_id = ${scope.ownerUserId}
-          FOR UPDATE`;
+        const rows = options?.courseId
+          ? await tx`
+              SELECT workspace_id, course_id, version, snapshot, source_versions
+              FROM opening_course_knowledge
+              WHERE workspace_id = ${scope.workspaceId}
+                AND owner_user_id = ${scope.ownerUserId}
+                AND course_id = ${options.courseId}
+              FOR UPDATE`
+          : await tx`
+              SELECT workspace_id, course_id, version, snapshot, source_versions
+              FROM opening_course_knowledge
+              WHERE workspace_id = ${scope.workspaceId}
+                AND owner_user_id = ${scope.ownerUserId}
+              FOR UPDATE`;
         let updated = 0;
         const courseIds: string[] = [];
         for (const row of rows as Array<Record<string, unknown>>) {
@@ -603,6 +895,145 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
         }
         return { updated, courseIds };
       });
+    },
+
+    async reconcileCourseMaterials(
+      scope: Scope,
+      courseId: string,
+      options?: {
+        invalidatedSourceIds?: readonly string[];
+        coveredSourceVersions?: Record<string, number>;
+      },
+    ): Promise<{
+      sync: CourseKnowledgeSync;
+      enqueued: { jobId: string; kind: "build-course-knowledge"; created: boolean } | null;
+    }> {
+      await assertOwnedCourse(sql, scope, courseId);
+      const knowledgeRows = await sql`
+        SELECT version, snapshot, source_versions
+        FROM opening_course_knowledge
+        WHERE workspace_id = ${scope.workspaceId}
+          AND owner_user_id = ${scope.ownerUserId}
+          AND course_id = ${courseId}`;
+      const existingRecord = knowledgeRows.length ? mapRecord(knowledgeRows[0] as Record<string, unknown>) : null;
+      const attachedRows = await sql`
+        SELECT m.asset_id AS source_id, s.version,
+          EXISTS (
+            SELECT 1 FROM opening_privacy_exclusions e
+            WHERE e.workspace_id = m.workspace_id AND e.source_id = m.asset_id
+          ) AS excluded
+        FROM course_asset_memberships m
+        LEFT JOIN opening_sources s
+          ON s.id = m.asset_id AND s.workspace_id = m.workspace_id
+        WHERE m.workspace_id = ${scope.workspaceId}
+          AND m.course_id = ${courseId}
+          AND m.asset_type = 'source'
+          AND (m.purpose IS NULL OR m.purpose = 'teaching')`;
+      const attachedById = new Map(
+        (attachedRows as Array<Record<string, unknown>>).map((row) => [
+          String(row.source_id),
+          {
+            version: row.version == null ? null : Number(row.version),
+            excluded: Boolean(row.excluded),
+          },
+        ]),
+      );
+      const invalidated = new Set<string>(options?.invalidatedSourceIds ?? []);
+      if (existingRecord) {
+        for (const [sourceId, builtVersion] of Object.entries(existingRecord.sourceVersions)) {
+          const attached = attachedById.get(sourceId);
+          if (!attached || attached.excluded || attached.version === null || attached.version !== builtVersion) {
+            invalidated.add(sourceId);
+          }
+        }
+        if ([...invalidated].some((id) => id in existingRecord.sourceVersions)) {
+          await this.markNeedsCheckForSources(scope, [...invalidated], { courseId });
+        }
+      }
+
+      const initial = await readSyncStatusInternal(sql, scope, courseId);
+      const effectiveCovered = options?.coveredSourceVersions ?? initial.sync.coveredSourceVersions;
+      const hasGraphOrStaleSources = Boolean(
+        initial.record
+          && (initial.record.snapshot.nodes.length > 0 || Object.keys(initial.record.sourceVersions).length > 0),
+      );
+      const shouldRebuild =
+        !sameVersions(effectiveCovered, initial.sync.eligibleSourceVersions)
+        && (Object.keys(initial.sync.eligibleSourceVersions).length > 0 || hasGraphOrStaleSources);
+      if (!shouldRebuild) {
+        return { sync: initial.sync, enqueued: null };
+      }
+      const enqueued = await this.enqueueCoalescedRebuild(
+        scope,
+        courseId,
+        sourceVersionsHash(initial.sync.eligibleSourceVersions),
+      );
+      const sync = enqueued.created
+        ? (await readSyncStatusInternal(sql, scope, courseId)).sync
+        : initial.sync;
+      return { sync, enqueued };
+    },
+
+    async reconcileCoursesForSource(
+      scope: Scope,
+      input: { sourceId: string; markInvalidated?: boolean },
+    ): Promise<{
+      courseIds: string[];
+      results: Array<{
+        courseId: string;
+        sync: CourseKnowledgeSync;
+        enqueued: { jobId: string; kind: "build-course-knowledge"; created: boolean } | null;
+      }>;
+    }> {
+      const courseRows = await sql`
+        SELECT DISTINCT c.id AS course_id
+        FROM courses c
+        JOIN workspaces w ON w.id = c.workspace_id
+        WHERE c.workspace_id = ${scope.workspaceId}
+          AND w.owner_user_id = ${scope.ownerUserId}
+          AND c.archived_at IS NULL
+          AND (
+            EXISTS (
+              SELECT 1 FROM course_asset_memberships m
+              WHERE m.workspace_id = c.workspace_id
+                AND m.course_id = c.id
+                AND m.asset_type = 'source'
+                AND m.asset_id = ${input.sourceId}
+                AND (m.purpose IS NULL OR m.purpose = 'teaching')
+            )
+            OR EXISTS (
+              SELECT 1 FROM opening_course_knowledge k
+              WHERE k.workspace_id = c.workspace_id
+                AND k.owner_user_id = ${scope.ownerUserId}
+                AND k.course_id = c.id
+                AND k.source_versions ? ${input.sourceId}
+            )
+            OR EXISTS (
+              SELECT 1 FROM opening_jobs j
+              WHERE j.workspace_id = c.workspace_id
+                AND j.owner_user_id = ${scope.ownerUserId}
+                AND j.kind = 'build-course-knowledge'
+                AND j.state = 'succeeded'
+                AND j.payload->>'courseId' = c.id::text
+                AND (j.result->'coveredSourceVersions') ? ${input.sourceId}
+            )
+          )
+        ORDER BY c.id`;
+      const courseIds = (courseRows as Array<Record<string, unknown>>).map((row) => String(row.course_id));
+      const results: Array<{
+        courseId: string;
+        sync: CourseKnowledgeSync;
+        enqueued: { jobId: string; kind: "build-course-knowledge"; created: boolean } | null;
+      }> = [];
+      for (const courseId of courseIds) {
+        const reconciled = await this.reconcileCourseMaterials(
+          scope,
+          courseId,
+          input.markInvalidated ? { invalidatedSourceIds: [input.sourceId] } : undefined,
+        );
+        results.push({ courseId, ...reconciled });
+      }
+      return { courseIds, results };
     },
   };
 }

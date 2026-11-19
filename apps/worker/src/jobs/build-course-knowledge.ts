@@ -54,6 +54,8 @@ export type BuildCourseKnowledgeDeps = {
   resolveProvider?: (scope: Scope, job: OpeningJobRecord, batch: KnowledgeExtractionBatch & { count: number }) => Promise<KnowledgeExtractProvider>;
   /** Optional: override LLM extraction for tests. */
   extractGraph?: (chunks: AuthorizedChunk[]) => Promise<ExtractedGraph>;
+  /** Best-effort post-build hook to reconcile any materials that changed during extraction. */
+  onBuildCompleted?: (scope: Scope, courseId: string, coveredSourceVersions: Record<string, number>) => Promise<void>;
 };
 
 export type ExtractedGraph = {
@@ -212,13 +214,14 @@ export function createBuildCourseKnowledgeHandler(deps: BuildCourseKnowledgeDeps
   return async function processBuildCourseKnowledge(
     job: OpeningJobRecord,
     payload: unknown,
-  ): Promise<{ version: number; snapshot: KnowledgeSnapshot }> {
+  ): Promise<{ version: number; snapshot: KnowledgeSnapshot; coveredSourceVersions: Record<string, number> }> {
     const body = payload as BuildCourseKnowledgePayload;
     if (!body || typeof body.courseId !== "string") throw new Error("build-course-knowledge payload missing courseId");
     const scope = openingJobScope(job);
     const current = await deps.get(scope, body.courseId);
     const expectedVersion = current?.version ?? 0;
     const chunks = (await deps.listAuthorizedChunks(scope, body.courseId)).filter(chunk => chunk.courseId === body.courseId);
+    const coveredSourceVersions = sourceVersionsFromChunks(chunks);
     const batches = knowledgeExtractionBatches(chunks), extracted: KnowledgeSnapshot[] = [];
     const chapterEdges: ExtractedGraph["edges"] = [];
     for (const batch of batches) {
@@ -239,16 +242,51 @@ export function createBuildCourseKnowledgeHandler(deps: BuildCourseKnowledgeDeps
       seenChunkIds.add(chunk.id);
     }
     const combined = connectKnowledgeChapters(mergeKnowledgeBatches(body.courseId, expectedVersion + 1, extracted, chunks, slicedChunkIds), chapterEdges);
-    const draft = retainKnowledgeIdentities(combined,
-      chunks, current?.snapshot, referenced, current?.nodeDefinitions);
-    const validated = (deps.validateSnapshot ?? validateKnowledgeSnapshot)(draft);
-    const used = new Set([...validated.nodes, ...validated.edges].flatMap(item => item.evidenceChunkIds));
-    const sourceVersions = sourceVersionsFromChunks(chunks.filter(chunk => used.has(chunk.id)));
-    return deps.replace(scope, body.courseId, {
-      expectedVersion,
-      ...(deps.listReferencedNodeIds ? { expectedReferencedNodeIds: referenced } : {}),
-      snapshot: validated,
-      sourceVersions,
-    });
+    const attemptReplace = async (
+      baseVersion: number,
+      baseSnapshot: KnowledgeSnapshot | undefined,
+      baseDefinitions: Record<string, string> | undefined,
+      baseReferenced: string[],
+    ) => {
+      const draft = retainKnowledgeIdentities(
+        { ...combined, version: baseVersion + 1 },
+        chunks,
+        baseSnapshot,
+        baseReferenced,
+        baseDefinitions,
+      );
+      const validated = (deps.validateSnapshot ?? validateKnowledgeSnapshot)(draft);
+      const used = new Set([...validated.nodes, ...validated.edges].flatMap(item => item.evidenceChunkIds));
+      const sourceVersions = sourceVersionsFromChunks(chunks.filter(chunk => used.has(chunk.id)));
+      return deps.replace(scope, body.courseId, {
+        expectedVersion: baseVersion,
+        ...(deps.listReferencedNodeIds ? { expectedReferencedNodeIds: baseReferenced } : {}),
+        snapshot: validated,
+        sourceVersions,
+      });
+    };
+    let saved: { version: number; snapshot: KnowledgeSnapshot };
+    try {
+      saved = await attemptReplace(expectedVersion, current?.snapshot, current?.nodeDefinitions, referenced);
+    } catch (error) {
+      const code = error && typeof error === "object" && "code" in error ? (error as { code?: unknown }).code : undefined;
+      if (code !== "CONFLICT") throw error;
+      const latestCurrent = await deps.get(scope, body.courseId);
+      const latestReferenced = await deps.listReferencedNodeIds?.(scope, body.courseId) ?? [];
+      saved = await attemptReplace(
+        latestCurrent?.version ?? 0,
+        latestCurrent?.snapshot,
+        latestCurrent?.nodeDefinitions,
+        latestReferenced,
+      );
+    }
+    if (deps.onBuildCompleted) {
+      try {
+        await deps.onBuildCompleted(scope, body.courseId, coveredSourceVersions);
+      } catch {
+        // Best-effort post-build reconciliation; saved snapshot is already durable.
+      }
+    }
+    return { version: saved.version, snapshot: saved.snapshot, coveredSourceVersions };
   };
 }

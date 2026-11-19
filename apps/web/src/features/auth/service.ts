@@ -9,6 +9,7 @@ import {
   createSqlClient,
   createWorkspacePreferencesRepository,
   createLearningEventRepository,
+  createOpeningKnowledgeRepository,
   createCardRepository,
   createBackupRestoreRepository,
   CourseMembershipError,
@@ -1107,6 +1108,24 @@ export async function setCourseArchivedForPrincipal(
   });
 }
 
+async function reconcileCourseKnowledgeBestEffort(
+  runtime: AuthRuntime,
+  principal: Principal,
+  courseId: string,
+  invalidatedSourceIds: readonly string[] = [],
+): Promise<void> {
+  try {
+    const scope = { workspaceId: boundWorkspaceId(principal), ownerUserId: principal.userId };
+    await createOpeningKnowledgeRepository(runtime.sql).reconcileCourseMaterials(
+      scope,
+      courseId,
+      invalidatedSourceIds.length ? { invalidatedSourceIds } : undefined,
+    );
+  } catch {
+    // Best-effort sync: membership update already committed.
+  }
+}
+
 export async function addMembershipForPrincipal(
   runtime: AuthRuntime,
   principal: Principal,
@@ -1118,6 +1137,7 @@ export async function addMembershipForPrincipal(
     sortOrder?: number;
     visibility: "private" | "course" | "public";
     purpose?: import("@aistudy/contracts").CourseSourcePurpose | null;
+    replacesSourceId?: string;
   },
 ) {
   assertAuthorized(principal, "membership.create", {
@@ -1125,7 +1145,7 @@ export async function addMembershipForPrincipal(
     workspaceId: principal.workspaceId,
     courseId,
   });
-  return runtime.courses.addAssetMembership({
+  const membership = await runtime.courses.addAssetMembership({
     workspaceId: principal.workspaceId,
     courseId,
     assetType: body.assetType,
@@ -1134,7 +1154,17 @@ export async function addMembershipForPrincipal(
     sortOrder: body.sortOrder,
     visibility: body.visibility,
     purpose: body.purpose,
+    replacesSourceId: body.replacesSourceId,
   });
+  if (body.assetType === "source") {
+    await reconcileCourseKnowledgeBestEffort(
+      runtime,
+      principal,
+      courseId,
+      body.replacesSourceId ? [body.replacesSourceId] : [],
+    );
+  }
+  return membership;
 }
 
 export async function updateMembershipPurposeForPrincipal(
@@ -1151,11 +1181,21 @@ export async function updateMembershipPurposeForPrincipal(
   assertAuthorized(principal, "membership.update", {
     type: "membership", workspaceId: principal.workspaceId, courseId,
   });
-  return runtime.courses.updateAssetMembership({
+  const membership = await runtime.courses.updateAssetMembership({
     workspaceId: boundWorkspaceId(principal), courseId,
     assetType: body.assetType, assetId: body.assetId,
     purpose: body.purpose, expectedUpdatedAt: body.expectedUpdatedAt,
   });
+  if (body.assetType === "source") {
+    const isTeaching = body.purpose === null || body.purpose === "teaching";
+    await reconcileCourseKnowledgeBestEffort(
+      runtime,
+      principal,
+      courseId,
+      isTeaching ? [] : [body.assetId],
+    );
+  }
+  return membership;
 }
 
 export async function removeMembershipForPrincipal(
@@ -1172,12 +1212,15 @@ export async function removeMembershipForPrincipal(
     workspaceId: principal.workspaceId,
     courseId,
   });
-  return runtime.courses.removeAssetMembership({
+  await runtime.courses.removeAssetMembership({
     workspaceId: principal.workspaceId,
     courseId,
     assetType: body.assetType,
     assetId: body.assetId,
   });
+  if (body.assetType === "source") {
+    await reconcileCourseKnowledgeBestEffort(runtime, principal, courseId, [body.assetId]);
+  }
 }
 
 export async function listCourseAssetsForPrincipal(
