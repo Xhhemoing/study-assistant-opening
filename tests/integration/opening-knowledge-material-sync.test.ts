@@ -710,6 +710,258 @@ describe("opening knowledge material lifecycle sync (real PG)", () => {
     expect(afterStaleJob.requestedJob).toEqual({ jobId: preBlockedReceipt.jobId, state: "failed" });
     const preserved = await knowledge.get(f.scope, courseId);
     expect(preserved?.sourceVersions).toEqual({ [s1.sourceId]: 1, [tSibling.sourceId]: 1 });
-    expect(preserved?.snapshot.nodes).toHaveLength(2);
+    const sortNodes = (nodes: ReadonlyArray<{ id: string; evidenceChunkIds: string[] }>) =>
+      [...nodes]
+        .map((n) => ({ id: n.id, evidenceChunkIds: [...n.evidenceChunkIds].sort() }))
+        .sort((a, b) => a.id.localeCompare(b.id));
+    expect(sortNodes(preserved?.snapshot.nodes ?? [])).toEqual(
+      sortNodes(baselineRecord?.snapshot.nodes ?? []),
+    );
+  });
+
+  it("GPT-P1: keeps write-side and enqueue protection for source A when A replacement fails even if sibling source B switches to practice purpose", async () => {
+    const knowledge = createOpeningKnowledgeRepository(f.sql);
+    const jobs = createOpeningJobRepository(f.sql);
+    const p = principal();
+    const courseId = await seedCourse("Mixed Per-Source Protection");
+
+    const sourceA = await seedSource({ name: "a.txt", text: "来源A核心定理" });
+    const sourceB = await seedSource({ name: "b.txt", text: "来源B章节讲义" });
+    await addMembershipForPrincipal(runtime, p, courseId, {
+      assetType: "source",
+      assetId: sourceA.sourceId,
+      role: "core",
+      visibility: "course",
+      purpose: "teaching",
+    });
+    const membershipB = await addMembershipForPrincipal(runtime, p, courseId, {
+      assetType: "source",
+      assetId: sourceB.sourceId,
+      role: "core",
+      visibility: "course",
+      purpose: "teaching",
+    });
+
+    const initSync = await knowledge.readSyncStatus(f.scope, courseId);
+    expect(await runJob(jobs, initSync.activeJobId!, makeBuildHandler({ nodeStatus: "supported" }))).toBe(true);
+    const baseline = await knowledge.get(f.scope, courseId);
+    const nodeA = baseline!.snapshot.nodes.find((n) => n.evidenceChunkIds.includes(sourceA.chunkId!));
+    expect(nodeA).toBeTruthy();
+
+    // Replace A with failed source A2 while switching B to practice purpose (mandatory cleanup for B ONLY).
+    const sourceAFailed = await seedSource({ name: "a-v2-failed.pdf", parseState: "failed" });
+    await addMembershipForPrincipal(runtime, p, courseId, {
+      assetType: "source",
+      assetId: sourceAFailed.sourceId,
+      role: "core",
+      visibility: "course",
+      replacesSourceId: sourceA.sourceId,
+    });
+    await updateMembershipPurposeForPrincipal(runtime, p, courseId, {
+      assetType: "source",
+      assetId: sourceB.sourceId,
+      purpose: "practice",
+      expectedUpdatedAt: membershipB.updatedAt.toISOString(),
+    });
+
+    const blockedSync = await knowledge.readSyncStatus(f.scope, courseId, { includeDetails: true });
+    expect(blockedSync.rebuildBlockedByMaterials).toBe(true);
+    expect(blockedSync.unreadableSourceCount).toBe(1);
+    expect((await knowledge.reconcileCourseMaterials(f.scope, courseId)).enqueued).toBeNull();
+
+    await expect(
+      knowledge.enqueueRebuild(f.scope, courseId, { clientKey: "mixed-per-source-blocked-key" }),
+    ).rejects.toMatchObject({ code: "CONFLICT", reason: "MATERIAL_REPLACEMENT_BLOCKED" });
+
+    // Direct worker write-side replace attempt with empty batch must also be rejected.
+    const currentVersion = await knowledge.getVersion(f.scope, courseId);
+    await expect(
+      knowledge.replace(f.scope, courseId, {
+        expectedVersion: currentVersion!,
+        extractedSourceVersions: {},
+        snapshot: { courseId, version: currentVersion! + 1, nodes: [], edges: [] },
+        sourceVersions: {},
+      }),
+    ).rejects.toMatchObject({ code: "CONFLICT", reason: "MATERIAL_REPLACEMENT_BLOCKED" });
+
+    // Verify stored row in opening_course_knowledge still preserves A's exact node ID and evidence chunk ID.
+    const [storedRow] = await f.sql`
+      SELECT snapshot, source_versions
+      FROM opening_course_knowledge
+      WHERE workspace_id = ${f.scope.workspaceId} AND course_id = ${courseId}`;
+    const storedSnapshot = storedRow!.snapshot as { nodes: Array<{ id: string; evidenceChunkIds: string[] }> };
+    expect(storedRow!.source_versions).toEqual({ [sourceA.sourceId]: 1, [sourceB.sourceId]: 1 });
+    expect(storedSnapshot.nodes.find((n) => n.id === nodeA!.id)).toMatchObject({
+      id: nodeA!.id,
+      evidenceChunkIds: [sourceA.chunkId],
+    });
+  });
+
+  it("Opus-B3: allows normal same-ID readable version upgrade (V@1 -> V@2) alongside an unrelated pure-image unreadable source", async () => {
+    const knowledge = createOpeningKnowledgeRepository(f.sql);
+    const jobs = createOpeningJobRepository(f.sql);
+    const courses = createCourseMembershipRepository(f.sql);
+    const courseId = await seedCourse("Same-ID Version Upgrade");
+
+    const videoV = await seedSource({ name: "lecture-video.mp4", version: 1, text: "第一版转写：微分定义" });
+    const pureImageB = await seedSource({
+      name: "cover-scan.pdf",
+      version: 1,
+      parseState: "ready",
+      text: "",
+      imageObjectKey: "opening/img/cover.png",
+    });
+    for (const src of [videoV, pureImageB]) {
+      await courses.addAssetMembership({
+        workspaceId: f.scope.workspaceId,
+        courseId,
+        assetType: "source",
+        assetId: src.sourceId,
+        role: "core",
+        visibility: "course",
+        purpose: "teaching",
+      });
+    }
+
+    const r1 = await knowledge.reconcileCourseMaterials(f.scope, courseId);
+    expect(r1.enqueued?.created).toBe(true);
+    expect(await runJob(jobs, r1.enqueued!.jobId, makeBuildHandler({ nodeStatus: "supported" }))).toBe(true);
+
+    // Upgrade videoV in-place to version 2 (ready + readable text) while pureImageB remains unreadable.
+    const v2Text = "第二版修正转写：微分与导数几何意义";
+    const v2Bytes = Buffer.from(v2Text, "utf8");
+    const v2Sha = createHash("sha256").update(v2Bytes).digest("hex");
+    await f.sql`
+      UPDATE opening_sources
+      SET version = 2, bytes = ${v2Bytes.length}, sha256 = ${v2Sha}, parse_state = 'ready'
+      WHERE workspace_id = ${f.scope.workspaceId} AND id = ${videoV.sourceId}`;
+    await f.sql`
+      INSERT INTO opening_source_versions (source_id, version, workspace_id, bytes, sha256, availability)
+      VALUES (${videoV.sourceId}, 2, ${f.scope.workspaceId}, ${v2Bytes.length}, ${v2Sha}, 'available')`;
+    const v2ChunkId = randomUUID();
+    await f.sql`
+      INSERT INTO opening_source_chunks (id, source_id, source_version, page, text, image_object_key)
+      VALUES (${v2ChunkId}, ${videoV.sourceId}, 2, 1, ${v2Text}, NULL)`;
+
+    const beforeRebuild = await knowledge.readSyncStatus(f.scope, courseId, { includeDetails: true });
+    expect(beforeRebuild.status).toBe("needs_rebuild");
+    expect(beforeRebuild.unreadableSourceCount).toBe(1);
+    expect(beforeRebuild.eligibleSourceVersions).toEqual({ [videoV.sourceId]: 2 });
+    expect(beforeRebuild.rebuildBlockedByMaterials).toBe(false);
+
+    const r2 = await knowledge.reconcileCourseMaterials(f.scope, courseId);
+    expect(r2.enqueued?.created).toBe(true);
+    expect(await runJob(jobs, r2.enqueued!.jobId, makeBuildHandler({ nodeStatus: "supported" }))).toBe(true);
+
+    const afterRebuild = await knowledge.getWithSync(f.scope, courseId, { includeDetails: true });
+    expect(afterRebuild.sourceVersions).toEqual({ [videoV.sourceId]: 2 });
+    expect(afterRebuild.snapshot.nodes.map((n) => n.evidenceChunkIds)).toEqual([[v2ChunkId]]);
+    expect(afterRebuild.sync).toMatchObject({
+      status: "up_to_date",
+      unreadableSourceCount: 1,
+      rebuildBlockedByMaterials: false,
+      coveredSourceVersions: { [videoV.sourceId]: 2 },
+      eligibleSourceVersions: { [videoV.sourceId]: 2 },
+    });
+  });
+
+  it("GPT-P1: getWithSync executes inside a REPEATABLE READ READ ONLY snapshot so concurrent worker completion cannot splice old V1 nodes with succeeded job state", async () => {
+    const knowledge = createOpeningKnowledgeRepository(f.sql);
+    const jobs = createOpeningJobRepository(f.sql);
+    const courses = createCourseMembershipRepository(f.sql);
+    const courseId = await seedCourse("Snapshot Consistency");
+
+    const s1 = await seedSource({ name: "s1.txt", text: "快照测试材料" });
+    await courses.addAssetMembership({
+      workspaceId: f.scope.workspaceId,
+      courseId,
+      assetType: "source",
+      assetId: s1.sourceId,
+      role: "core",
+      visibility: "course",
+      purpose: "teaching",
+    });
+
+    const r1 = await knowledge.reconcileCourseMaterials(f.scope, courseId);
+    expect(await runJob(jobs, r1.enqueued!.jobId, makeBuildHandler({ nodeStatus: "supported" }))).toBe(true);
+
+    // Seed an active running rebuild job that will commit V2 (0 nodes) + succeeded concurrently mid-GET.
+    const raceJob = await knowledge.enqueueRebuild(f.scope, courseId, { clientKey: "snapshot-race-job-1" });
+    await f.sql`
+      UPDATE opening_jobs
+      SET state = 'running', updated_at = now()
+      WHERE id = ${raceJob.jobId}`;
+
+    let sawRepeatableReadOnly = false;
+    let injectedConcurrentCommit = false;
+    const proxiedSql = new Proxy(f.sql, {
+      get(target, prop, receiver) {
+        if (prop === "begin") {
+          return (cb: (tx: typeof f.sql) => Promise<unknown>) =>
+            target.begin(async (tx) => {
+              const proxiedTx = new Proxy(tx, {
+                apply(txTarget, txThis, argArray) {
+                  const [strings] = argArray as [TemplateStringsArray];
+                  const queryText = Array.isArray(strings) && "raw" in strings
+                    ? strings.join("?").replace(/\s+/g, " ").trim()
+                    : "";
+                  if (queryText === "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY") {
+                    sawRepeatableReadOnly = true;
+                  }
+                  const pending = Reflect.apply(txTarget, txThis, argArray);
+                  if (!injectedConcurrentCommit && queryText.startsWith("SELECT version, snapshot, source_versions FROM opening_course_knowledge")) {
+                    injectedConcurrentCommit = true;
+                    return Promise.resolve(pending).then(async (rows) => {
+                      await f.sql.begin(async (writer) => {
+                        const emptyV2 = { courseId, version: 2, nodes: [], edges: [] };
+                        await writer`
+                          UPDATE opening_course_knowledge
+                          SET version = 2,
+                              snapshot = ${writer.json(emptyV2 as never)},
+                              source_versions = ${writer.json({} as never)},
+                              updated_at = now()
+                          WHERE workspace_id = ${f.scope.workspaceId} AND course_id = ${courseId}`;
+                        await writer`
+                          UPDATE opening_jobs
+                          SET state = 'succeeded',
+                              result = ${writer.json({ version: 2, coveredSourceVersions: { [s1.sourceId]: 1 } } as never)},
+                              updated_at = now()
+                          WHERE id = ${raceJob.jobId}`;
+                      });
+                      return rows;
+                    });
+                  }
+                  return pending;
+                },
+              });
+              return cb(proxiedTx as unknown as typeof f.sql);
+            });
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+
+    const snapshotRepo = createOpeningKnowledgeRepository(proxiedSql);
+    const inFlightRead = await snapshotRepo.getWithSync(f.scope, courseId, {
+      includeDetails: true,
+      requestedJobId: raceJob.jobId,
+    });
+    expect(sawRepeatableReadOnly).toBe(true);
+    expect(injectedConcurrentCommit).toBe(true);
+    // Single snapshot: pre-commit V1 node MUST pair with pre-commit running job state, never succeeded
+    expect(inFlightRead.version).toBe(1);
+    expect(inFlightRead.snapshot.nodes).toHaveLength(1);
+    expect(inFlightRead.sync?.requestedJob).toEqual({ jobId: raceJob.jobId, state: "running" });
+    expect(inFlightRead.sync?.activeJobId).toBe(raceJob.jobId);
+
+    // Next read sees post-commit V2 empty graph and succeeded job state together
+    const postCommitRead = await knowledge.getWithSync(f.scope, courseId, {
+      includeDetails: true,
+      requestedJobId: raceJob.jobId,
+    });
+    expect(postCommitRead.version).toBe(2);
+    expect(postCommitRead.snapshot.nodes).toHaveLength(0);
+    expect(postCommitRead.sync?.requestedJob).toEqual({ jobId: raceJob.jobId, state: "succeeded" });
+    expect(postCommitRead.sync?.activeJobId).toBeNull();
   });
 });

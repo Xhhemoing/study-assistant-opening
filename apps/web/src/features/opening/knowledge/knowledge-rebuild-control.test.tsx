@@ -312,9 +312,9 @@ it("completes immediately when an existing coalesced job already reached up_to_d
 
 it.each([
   ["failed", "本次整理未能完成，请稍后重试；若资料无法读取，请先在资料页检查。"],
-  ["outcome_unknown", "本次整理结果暂未确认，已保留现有知识点；请稍后刷新确认，无需立即重复提交。"],
+  ["outcome_unknown", "本次整理结果暂未确认，以刷新后为准；请稍后刷新确认，无需立即重复提交。"],
   ["cancelled", "本次整理已取消；如需更新知识点，请重新点击整理。"],
-] as const)("D2: stops polling on requestedJob=%s without firing onRebuilt or auto-reposting even if another job J2 races ahead", async (terminalState, expectedAlert) => {
+] as const)("D2: stops polling on requestedJob=%s, notifies onRebuilt with terminal record, and never auto-reposts even if another job J2 races ahead", async (terminalState, expectedAlert) => {
   const otherJobId = "22222222-2222-4222-8222-222222222222";
   const state = server({
     version: 2,
@@ -365,7 +365,8 @@ it.each([
   await advance(KNOWLEDGE_POLL_INTERVAL_MS);
   expect(action().disabled).toBe(false);
   expect(host.querySelector('[role="alert"]')?.textContent).toBe(expectedAlert);
-  expect(onRebuilt).not.toHaveBeenCalled();
+  expect(onRebuilt).toHaveBeenCalledTimes(1);
+  expect(onRebuilt.mock.calls[0]?.[0]?.sync?.requestedJob).toEqual({ jobId, state: terminalState });
   expect(state.posts).toHaveLength(1);
   const readsAfterStop = state.reads;
   await advance(KNOWLEDGE_POLL_INTERVAL_MS * 4);

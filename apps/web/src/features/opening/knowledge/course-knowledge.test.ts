@@ -106,7 +106,7 @@ describe("course-knowledge helpers", () => {
     expect(knowledgeSyncNotice(undefined)).toBeNull();
     expect(knowledgeSyncNotice({ ...base, status: "empty" })).toBeNull();
     expect(knowledgeSyncNotice({ ...base, status: "up_to_date" })).toBeNull();
-    expect(knowledgeSyncNotice({ ...base, status: "pending", activeJobId: id(1), parsingSourceCount: 2 })).toContain("2 份新材料仍在解析中");
+    expect(knowledgeSyncNotice({ ...base, status: "pending", activeJobId: id(1), parsingSourceCount: 2 })).toContain("另有 2 份资料仍在解析中");
     expect(knowledgeSyncNotice({ ...base, status: "up_to_date", parsingSourceCount: 1 })).toContain("1 份新材料仍在解析中");
     expect(knowledgeSyncNotice({ ...base, status: "pending", activeJobId: id(1) })).toContain("重新整理");
     expect(knowledgeSyncNotice({ ...base, status: "needs_rebuild" })).toContain("尚未同步最新材料");

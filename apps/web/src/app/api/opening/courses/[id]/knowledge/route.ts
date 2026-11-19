@@ -15,7 +15,7 @@ export async function GET(request: Request, context: Context): Promise<Response>
       syncDetails,
       ...(jobId !== undefined ? { jobId } : {}),
     });
-    return Response.json(record);
+    return Response.json(record, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
     return jsonError(mapDomainError(error));
   }

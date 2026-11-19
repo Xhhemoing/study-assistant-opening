@@ -2,7 +2,7 @@
 
 import type { CourseKnowledgeSync, CourseRouteSnapshot } from "@aistudy/contracts";
 import { CircleCheck, CircleDashed } from "lucide-react";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { tone, ui } from "../design/ui";
 import { conversationObjectHref, validConversationId } from "../assistant/conversation-links";
 import { KnowledgeRebuildControl } from "../knowledge/knowledge-rebuild-control";
@@ -99,15 +99,28 @@ export function CourseSetupChecklist({ courseId, snapshot, goals, goalId, goalsU
 }) {
   const client = useMemo(() => knowledgeClient ?? createKnowledgeRebuildClient(), [knowledgeClient]);
   const [knowledge, setKnowledge] = useState<KnowledgeStatus>({ status: "loading" });
+  const requestSeq = useRef(0);
   useEffect(() => {
-    if (archived) return;
-    let live = true;
+    if (archived) {
+      requestSeq.current += 1;
+      return;
+    }
+    const seq = ++requestSeq.current;
     void client.read(courseId)
-      .then(record => { if (live) setKnowledge({ status: "ready", nodeCount: record.snapshot.nodes.length, sync: record.sync }); })
-      .catch(() => { if (live) setKnowledge({ status: "unavailable" }); });
-    return () => { live = false; };
+      .then(record => {
+        if (requestSeq.current === seq) {
+          setKnowledge({ status: "ready", nodeCount: record.snapshot.nodes.length, sync: record.sync });
+        }
+      })
+      .catch(() => {
+        if (requestSeq.current === seq) {
+          setKnowledge({ status: "unavailable" });
+        }
+      });
+    return () => { requestSeq.current += 1; };
   }, [archived, client, courseId, reloadToken]);
   function rebuilt(record: CourseKnowledgeRecord) {
+    requestSeq.current += 1;
     setKnowledge({ status: "ready", nodeCount: record.snapshot.nodes.length, sync: record.sync });
     onKnowledgeRebuilt();
   }

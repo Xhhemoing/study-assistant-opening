@@ -228,3 +228,146 @@ it("preserves sync state from rebuild completion so partial or drifted results s
     vi.useRealTimers();
   }
 });
+
+it("discards a slow initial GET that resolves after rebuilt() already applied a newer result", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  try {
+    const jobId = "55555555-5555-4555-8555-555555555555";
+    let releaseInitialRead!: (rec: CourseKnowledgeRecord) => void;
+    const slowInitialRead = new Promise<CourseKnowledgeRecord>((resolve) => {
+      releaseInitialRead = resolve;
+    });
+    let calls = 0;
+    const client: KnowledgeRebuildClient = {
+      read: vi.fn(async (): Promise<CourseKnowledgeRecord> => {
+        calls += 1;
+        if (calls === 1) return slowInitialRead;
+        if (calls === 2) {
+          return {
+            ...record(0),
+            version: 0,
+            sync: {
+              status: "empty",
+              activeJobId: null,
+              lastBuiltVersion: null,
+              coveredSourceVersions: {},
+              eligibleSourceVersions: { [sourceId]: 1 },
+              parsingSourceCount: 0,
+              unreadableSourceCount: 0,
+              rebuildBlockedByMaterials: false,
+              lastFailedJob: null,
+              requestedJob: null,
+            },
+          };
+        }
+        return {
+          ...record(3),
+          version: 2,
+          sync: {
+            status: "up_to_date",
+            activeJobId: null,
+            lastBuiltVersion: 2,
+            coveredSourceVersions: { [sourceId]: 1 },
+            eligibleSourceVersions: { [sourceId]: 1 },
+            parsingSourceCount: 0,
+            unreadableSourceCount: 0,
+            rebuildBlockedByMaterials: false,
+            lastFailedJob: null,
+            requestedJob: { jobId, state: "succeeded" },
+          },
+        };
+      }),
+      rebuild: vi.fn(async () => ({ jobId, kind: "build-course-knowledge" as const, created: true })),
+    };
+
+    const value = await render(props({ snapshot: complete, goalId, knowledgeClient: client }));
+    expect(item("知识已整理").textContent).toContain("正在读取整理结果");
+
+    await act(async () => control(item("知识已整理"), "整理知识点").click());
+    await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
+    expect(value.onKnowledgeRebuilt).toHaveBeenCalledTimes(1);
+    expect(item("知识已整理").textContent).toContain("已完成");
+    expect(item("知识已整理").textContent).toContain("已整理出 3 个知识点。");
+
+    // Now the stale initial GET resolves late with 0 nodes and needs_rebuild: must NOT overwrite the newer rebuilt() result.
+    await act(async () => {
+      releaseInitialRead({
+        ...record(0),
+        version: 0,
+        sync: {
+          status: "needs_rebuild",
+          activeJobId: null,
+          lastBuiltVersion: null,
+          coveredSourceVersions: {},
+          eligibleSourceVersions: { [sourceId]: 1 },
+          parsingSourceCount: 0,
+          unreadableSourceCount: 0,
+          rebuildBlockedByMaterials: false,
+          lastFailedJob: null,
+          requestedJob: null,
+        },
+      });
+    });
+    expect(item("知识已整理").textContent).toContain("已完成");
+    expect(item("知识已整理").textContent).toContain("已整理出 3 个知识点。");
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it("updates checklist out of stale pending status when a rebuild job reaches terminal failure", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  try {
+    const jobId = "66666666-6666-4666-8666-666666666666";
+    let step = 0;
+    const client: KnowledgeRebuildClient = {
+      read: vi.fn(async (): Promise<CourseKnowledgeRecord> => {
+        step += 1;
+        if (step <= 2) {
+          return {
+            ...record(1),
+            sync: {
+              status: "pending",
+              activeJobId: jobId,
+              lastBuiltVersion: 1,
+              coveredSourceVersions: {},
+              eligibleSourceVersions: { [sourceId]: 1 },
+              parsingSourceCount: 0,
+              unreadableSourceCount: 0,
+              rebuildBlockedByMaterials: false,
+              lastFailedJob: null,
+              requestedJob: null,
+            },
+          };
+        }
+        return {
+          ...record(1),
+          sync: {
+            status: "needs_rebuild",
+            activeJobId: null,
+            lastBuiltVersion: 1,
+            coveredSourceVersions: {},
+            eligibleSourceVersions: { [sourceId]: 1 },
+            parsingSourceCount: 0,
+            unreadableSourceCount: 0,
+            rebuildBlockedByMaterials: false,
+            lastFailedJob: { jobId, state: "failed" },
+            requestedJob: { jobId, state: "failed" },
+          },
+        };
+      }),
+      rebuild: vi.fn(async () => ({ jobId, kind: "build-course-knowledge" as const, created: true })),
+    };
+
+    const value = await render(props({ snapshot: complete, goalId, knowledgeClient: client }));
+    expect(item("知识已整理").textContent).toContain("正在后台整理知识点");
+    await act(async () => control(item("知识已整理"), "重新整理知识点").click());
+    await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
+    expect(value.onKnowledgeRebuilt).toHaveBeenCalledTimes(1);
+    expect(item("知识已整理").textContent).toContain("未完成");
+    expect(item("知识已整理").textContent).toContain("上次整理未能完成");
+    expect(item("知识已整理").textContent).not.toContain("正在后台整理知识点");
+  } finally {
+    vi.useRealTimers();
+  }
+});

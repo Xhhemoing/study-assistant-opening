@@ -115,7 +115,7 @@ function statusText(state: RebuildState): string {
 
 function requestedJobFailureMessage(state: "failed" | "outcome_unknown" | "cancelled"): string {
   if (state === "outcome_unknown") {
-    return "本次整理结果暂未确认，已保留现有知识点；请稍后刷新确认，无需立即重复提交。";
+    return "本次整理结果暂未确认，以刷新后为准；请稍后刷新确认，无需立即重复提交。";
   }
   if (state === "cancelled") {
     return "本次整理已取消；如需更新知识点，请重新点击整理。";
@@ -176,6 +176,7 @@ export function KnowledgeRebuildControl({ courseId, client: suppliedClient, orga
             if (requestedJob.state === "failed" || requestedJob.state === "outcome_unknown" || requestedJob.state === "cancelled") {
               stop(current);
               setState({ kind: "failed", message: requestedJobFailureMessage(requestedJob.state) });
+              notify.current?.(latest);
               return;
             }
             if (requestedJob.state === "succeeded") {

@@ -235,6 +235,15 @@ function hasInvalidatedGraphSource(
   );
 }
 
+function missingGraphSourceIds(
+  graphSourceVersions: Record<string, number>,
+  eligibleSourceVersions: Record<string, number>,
+): string[] {
+  return Object.keys(graphSourceVersions).filter(
+    (sourceId) => !(sourceId in eligibleSourceVersions),
+  );
+}
+
 function hasMaterialDrift(
   coveredSourceVersions: Record<string, number>,
   graphSourceVersions: Record<string, number>,
@@ -348,13 +357,13 @@ async function readUnreadableSourceCount(
   return Number((rows[0] as Record<string, unknown> | undefined)?.count ?? 0);
 }
 
-async function readHasMandatoryCleanup(
+async function readMandatoryCleanupSourceIds(
   db: Sql | TransactionSql,
   scope: Scope,
   courseId: string,
   graphSourceIds: readonly string[],
-): Promise<boolean> {
-  if (!graphSourceIds.length) return false;
+): Promise<Set<string>> {
+  if (!graphSourceIds.length) return new Set();
   const ids = [...graphSourceIds];
   const rows = await db`
     SELECT
@@ -376,9 +385,13 @@ async function readHasMandatoryCleanup(
           AND m.purpose IN ('practice', 'reference', 'mock_exam')
       ) AS restricted_purpose
     FROM unnest(${ids}::uuid[]) AS src(id)`;
-  return (rows as Array<Record<string, unknown>>).some(
-    (row) => !row.source_exists || Boolean(row.excluded) || Boolean(row.restricted_purpose),
-  );
+  const cleanupIds = new Set<string>();
+  for (const row of rows as Array<Record<string, unknown>>) {
+    if (!row.source_exists || Boolean(row.excluded) || Boolean(row.restricted_purpose)) {
+      cleanupIds.add(String(row.source_id));
+    }
+  }
+  return cleanupIds;
 }
 
 async function readSyncStatusInternal(
@@ -408,11 +421,12 @@ async function readSyncStatusInternal(
   const unreadableSourceCount = needProtection ? await readUnreadableSourceCount(db, scope, courseId) : 0;
 
   const graphSources = record?.sourceVersions ?? {};
-  const hasLostEvidence = hasInvalidatedGraphSource(graphSources, eligibleSourceVersions);
+  const missingEvidenceIds = missingGraphSourceIds(graphSources, eligibleSourceVersions);
   let rebuildBlockedByMaterials = false;
-  if (needProtection && hasLostEvidence && (parsingSourceCount > 0 || unreadableSourceCount > 0)) {
-    const hasMandatoryCleanup = await readHasMandatoryCleanup(db, scope, courseId, Object.keys(graphSources));
-    rebuildBlockedByMaterials = !hasMandatoryCleanup;
+  if (needProtection && missingEvidenceIds.length > 0 && (parsingSourceCount > 0 || unreadableSourceCount > 0)) {
+    const mandatoryCleanupIds = await readMandatoryCleanupSourceIds(db, scope, courseId, missingEvidenceIds);
+    const protectedMissingIds = missingEvidenceIds.filter((id) => !mandatoryCleanupIds.has(id));
+    rebuildBlockedByMaterials = protectedMissingIds.length > 0;
   }
 
   const activeJobRows = await db`
@@ -540,6 +554,18 @@ async function readSyncStatusInternal(
   };
 }
 
+async function readSyncStatusInSnapshot(
+  sql: Sql,
+  scope: Scope,
+  courseId: string,
+  options?: ReadKnowledgeSyncOptions & { computeProtection?: boolean },
+) {
+  return sql.begin(async (tx) => {
+    await tx`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY`;
+    return readSyncStatusInternal(tx, scope, courseId, options);
+  });
+}
+
 export function createOpeningKnowledgeRepository(sql: Sql) {
   return {
     /** Definitions contain source text and are only available to the rebuild worker. */
@@ -601,43 +627,46 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
     },
 
     async readSyncStatus(scope: Scope, courseId: string, options?: ReadKnowledgeSyncOptions): Promise<CourseKnowledgeSync> {
-      const { sync } = await readSyncStatusInternal(sql, scope, courseId, options);
+      const { sync } = await readSyncStatusInSnapshot(sql, scope, courseId, options);
       return sync;
     },
 
     async getWithSync(scope: Scope, courseId: string, options?: ReadKnowledgeSyncOptions): Promise<CourseKnowledgeRecordResponse> {
-      const { sync, record } = await readSyncStatusInternal(sql, scope, courseId, options);
-      if (!record) {
-        return {
-          version: 0,
-          snapshot: { courseId, version: 0, nodes: [], edges: [] },
-          sourceVersions: {},
-          sync,
-        };
-      }
-      const sourceIds = Object.keys(record.sourceVersions);
-      const restricted = sourceIds.length
-        ? await sql`SELECT id FROM course_asset_memberships
-            WHERE workspace_id = ${scope.workspaceId}
-              AND course_id = ${courseId}
-              AND asset_type = 'source'
-              AND asset_id = ANY(${sourceIds}::uuid[])
-              AND purpose IN ('practice', 'reference', 'mock_exam')`
-        : [];
-      if (restricted.length) {
+      return sql.begin(async (tx) => {
+        await tx`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY`;
+        const { sync, record } = await readSyncStatusInternal(tx, scope, courseId, options);
+        if (!record) {
+          return {
+            version: 0,
+            snapshot: { courseId, version: 0, nodes: [], edges: [] },
+            sourceVersions: {},
+            sync,
+          };
+        }
+        const sourceIds = Object.keys(record.sourceVersions);
+        const restricted = sourceIds.length
+          ? await tx`SELECT id FROM course_asset_memberships
+              WHERE workspace_id = ${scope.workspaceId}
+                AND course_id = ${courseId}
+                AND asset_type = 'source'
+                AND asset_id = ANY(${sourceIds}::uuid[])
+                AND purpose IN ('practice', 'reference', 'mock_exam')`
+          : [];
+        if (restricted.length) {
+          return {
+            version: record.version,
+            snapshot: { courseId, version: record.version, nodes: [], edges: [] },
+            sourceVersions: {},
+            sync,
+          };
+        }
         return {
           version: record.version,
-          snapshot: { courseId, version: record.version, nodes: [], edges: [] },
-          sourceVersions: {},
+          snapshot: record.snapshot,
+          sourceVersions: record.sourceVersions,
           sync,
         };
-      }
-      return {
-        version: record.version,
-        snapshot: record.snapshot,
-        sourceVersions: record.sourceVersions,
-        sync,
-      };
+      });
     },
 
     /** A strict transition, not an idempotent replay: stale/duplicate submissions conflict. */
@@ -810,20 +839,25 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
           && previous !== null
           && Object.keys(previous.sourceVersions).length > 0
         ) {
-          const removesOldSourceEvidence = Object.entries(previous.sourceVersions).some(
-            ([sourceId, builtVersion]) => sourceVersions[sourceId] !== builtVersion,
+          const previousSourceIds = Object.keys(previous.sourceVersions);
+          const removesOldSourceEvidence = previousSourceIds.some(
+            (sourceId) => sourceVersions[sourceId] !== previous.sourceVersions[sourceId],
           );
           if (removesOldSourceEvidence) {
             const { eligibleSourceVersions, parsingSourceCount } = await readEligibleAndParsingMaterials(tx, scope, courseId);
-            const hasLostEvidence = hasInvalidatedGraphSource(previous.sourceVersions, eligibleSourceVersions);
-            if (hasLostEvidence) {
-              const hasMandatoryCleanup = await readHasMandatoryCleanup(
-                tx,
-                scope,
-                courseId,
-                Object.keys(previous.sourceVersions),
-              );
-              if (!hasMandatoryCleanup) {
+            const missingIds = missingGraphSourceIds(previous.sourceVersions, eligibleSourceVersions);
+            const staleVersionIds = previousSourceIds.filter(
+              (sourceId) =>
+                sourceId in eligibleSourceVersions
+                && eligibleSourceVersions[sourceId] !== previous.sourceVersions[sourceId]
+                && input.extractedSourceVersions![sourceId] !== eligibleSourceVersions[sourceId],
+            );
+            const candidateProtectedIds = [...new Set([...missingIds, ...staleVersionIds])];
+            if (candidateProtectedIds.length > 0) {
+              const mandatoryCleanupIds = await readMandatoryCleanupSourceIds(tx, scope, courseId, candidateProtectedIds);
+              const protectedMissingIds = missingIds.filter((id) => !mandatoryCleanupIds.has(id));
+              const protectedStaleVersionIds = staleVersionIds.filter((id) => !mandatoryCleanupIds.has(id));
+              if (protectedMissingIds.length > 0) {
                 const unreadableSourceCount = await readUnreadableSourceCount(tx, scope, courseId);
                 if (parsingSourceCount > 0 || unreadableSourceCount > 0) {
                   throw new OpeningKnowledgeError(
@@ -842,6 +876,13 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
                     "MATERIAL_REPLACEMENT_BLOCKED",
                   );
                 }
+              }
+              if (protectedStaleVersionIds.length > 0) {
+                throw new OpeningKnowledgeError(
+                  "CONFLICT",
+                  "课程中已有新的可读资料未纳入本次整理，已保留原有知识点，请按最新资料重新整理。",
+                  "MATERIAL_REPLACEMENT_BLOCKED",
+                );
               }
             }
           }
@@ -1219,7 +1260,7 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
         }
       }
 
-      const initial = await readSyncStatusInternal(sql, scope, courseId, { computeProtection: true });
+      const initial = await readSyncStatusInSnapshot(sql, scope, courseId, { computeProtection: true });
       if (initial.rebuildBlockedByMaterials) {
         return { sync: initial.sync, enqueued: null };
       }
@@ -1241,7 +1282,7 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
         sourceVersionsHash(initial.sync.eligibleSourceVersions),
       );
       const sync = enqueued.created
-        ? (await readSyncStatusInternal(sql, scope, courseId)).sync
+        ? (await readSyncStatusInSnapshot(sql, scope, courseId)).sync
         : initial.sync;
       return { sync, enqueued };
     },

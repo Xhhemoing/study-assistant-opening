@@ -182,7 +182,7 @@ describe("GET /api/opening/courses/[id]/knowledge syncDetails negotiation and jo
       result: { error: "secret provider error must never leak" },
     });
     const otherCourseJob = await seedJob({ courseId: courseB, state: "failed" });
-    const otherKindJob = await seedJob({ courseId: courseA, kind: "parse-source", state: "failed" });
+    const otherKindJob = await seedJob({ courseId: courseA, kind: "parse", state: "failed" });
     const foreignOwnerJob = await seedJob({ scope: f.otherScope, courseId: foreignCourse, state: "failed" });
 
     // Own jobId resolves with exact state and zero error leakage
