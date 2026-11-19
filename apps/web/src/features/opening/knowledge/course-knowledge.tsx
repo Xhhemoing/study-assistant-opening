@@ -1,11 +1,12 @@
 "use client";
 
-import type { KnowledgeNode, KnowledgeSnapshot, TutorAction } from "@aistudy/contracts";
+import type { CourseKnowledgeSync, KnowledgeNode, KnowledgeSnapshot, TutorAction } from "@aistudy/contracts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createOpeningApi, type OpeningApi, type ThinTutorActionView } from "../client/api";
 import { LoadError, secondaryButtonClass, ui } from "../design/ui";
 import { TUTOR_ACTION_KIND_LABEL } from "../learning/tutor-action-intents";
 import { KnowledgeEvidence, knowledgeKindLabel, knowledgeStatusLabel } from "./knowledge-evidence";
+import { createKnowledgeRebuildClient } from "./knowledge-rebuild-client";
 import { userFacingMessage } from "../../../lib/user-facing-error";
 import { ConfirmKnowledgeNode } from "./confirm-knowledge-node";
 
@@ -42,7 +43,26 @@ export function nextStepCta(
   return { href: `?${params.toString()}#course-practice`, label, reason: action.reason };
 }
 
-type KnowledgeRecord = Awaited<ReturnType<OpeningApi["getCourseKnowledge"]>>;
+type KnowledgeRecord = Awaited<ReturnType<OpeningApi["getCourseKnowledge"]>> & {
+  sync?: CourseKnowledgeSync;
+};
+
+export function knowledgeSyncNotice(sync: CourseKnowledgeSync | null | undefined): string | null {
+  if (!sync) return null;
+  if (sync.parsingSourceCount > 0 && sync.status === "pending") {
+    return `有 ${sync.parsingSourceCount} 份新材料仍在解析中，同时后台正在整理已可用材料的知识点；全部完成后可刷新查看完整内容。`;
+  }
+  if (sync.parsingSourceCount > 0) {
+    return `有 ${sync.parsingSourceCount} 份新材料仍在解析中，当前知识点尚未覆盖这些新材料。`;
+  }
+  if (sync.status === "pending") {
+    return "后台正在按最新材料重新整理课程知识点，完成后可刷新查看。";
+  }
+  if (sync.status === "needs_rebuild") {
+    return "课程材料已更新，当前知识点尚未同步最新材料，请重新整理知识点。";
+  }
+  return null;
+}
 
 /**
  * State after a server-confirmed node: the returned record replaces local graph state (so sibling
@@ -67,6 +87,10 @@ export function CourseKnowledge({
   knowledgeRefreshToken?: number;
 }) {
   const api = useMemo(() => supplied ?? createOpeningApi(), [supplied]);
+  const knowledgeClient = useMemo(
+    () => (supplied ? null : createKnowledgeRebuildClient()),
+    [supplied],
+  );
   const [snapshot, setSnapshot] = useState<KnowledgeSnapshot | null>(null);
   const [record, setRecord] = useState<KnowledgeRecord | null>(null);
   const [actions, setActions] = useState<ThinTutorActionView[]>([]);
@@ -100,7 +124,9 @@ export function CourseKnowledge({
     const seq = ++requestSeq.current;
     setLoading(true); setError(""); setUnavailable(false);
     try {
-      const knowledge = await api.getCourseKnowledge(courseId);
+      const knowledge: KnowledgeRecord = knowledgeClient
+        ? await knowledgeClient.read(courseId)
+        : await api.getCourseKnowledge(courseId);
       if (!mounted.current || requestSeq.current !== seq) return;
       setSnapshot(knowledge.snapshot);
       setRecord(knowledge);
@@ -121,7 +147,7 @@ export function CourseKnowledge({
         setLoading(false);
       }
     }
-  }, [api, courseId, loadActions]);
+  }, [api, courseId, knowledgeClient, loadActions]);
 
   useEffect(() => {
     mounted.current = true;
@@ -138,6 +164,7 @@ export function CourseKnowledge({
   );
   const chapters = ordered.filter((n) => n.kind === "chapter");
   const cta = nextStepCta(actions[0]);
+  const syncNotice = knowledgeSyncNotice(record?.sync);
 
   if (loading) {
     return <p className="text-xs text-text-3" role="status">正在读取课程知识…</p>;
@@ -153,6 +180,7 @@ export function CourseKnowledge({
       <section className="space-y-2" aria-labelledby="course-knowledge-heading" id="course-knowledge">
         <h2 className="text-sm font-semibold text-text" id="course-knowledge-heading">课程知识</h2>
         <p className="text-xs leading-6 text-text-3">还没有整理出课程知识。添加材料后，可在这里查看章节和概念。</p>
+        {syncNotice ? <p role="status" className="text-xs leading-6 text-text-2">{syncNotice}</p> : null}
       </section>
     );
   }
@@ -162,6 +190,7 @@ export function CourseKnowledge({
       <div>
         <h2 className="text-sm font-semibold text-text" id="course-knowledge-heading">课程知识</h2>
         <p className="mt-1 text-xs leading-6 text-text-3">选择章节查看材料依据，或继续下一步练习。</p>
+        {syncNotice ? <p role="status" className="mt-1 text-xs leading-6 text-text-2">{syncNotice}</p> : null}
       </div>
       <div className="rounded-lg border border-line bg-surface-2 p-3">
         <h3 className="text-xs font-semibold text-text">章节</h3>
@@ -213,7 +242,7 @@ export function CourseKnowledge({
                 </button>
                 {record ? <ConfirmKnowledgeNode node={node} record={record} api={api} onReload={() => void load()}
                   onConfirmed={next => {
-                    const state = confirmedKnowledgeState(next);
+                    const state = confirmedKnowledgeState({ ...next, sync: (next as KnowledgeRecord).sync ?? record.sync });
                     setRecord(state.record); setSnapshot(state.snapshot); setSelected(state.selected);
                     void loadActions(next.snapshot);
                   }} /> : null}

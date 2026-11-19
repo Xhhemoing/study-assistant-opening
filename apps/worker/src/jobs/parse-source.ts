@@ -34,7 +34,8 @@ export type ParseSourceVisualPageResult = { text: string; imageObjectKey: string
 export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: OpeningSourceChunksRepository; storage: Storage; runner: ParserRunner; tempDir: string;
   segments?: OpeningPdfSegmentsRepository; segmentPages?: number; segmentTimeoutSeconds?: number; executionPollMs?: number;
   recognizePage?: (input: ParseSourceVisualPageInput) => Promise<ParseSourceVisualPageResult>;
-  assertCurrent?: (scope: OpeningScope, input: { sourceId: string; sourceVersion: number }) => Promise<void> }) {
+  assertCurrent?: (scope: OpeningScope, input: { sourceId: string; sourceVersion: number }) => Promise<void>;
+  onSourceReady?: (scope: OpeningScope, input: { sourceId: string; sourceVersion: number }) => Promise<void> }) {
   const parser = createDoclingProcess({ run: deps.runner });
   // The parser child runs with cwd=services/parser; a relative tempDir would
   // resolve there and the CLI would reject the input as missing (exit 4).
@@ -74,6 +75,9 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Op
       const text = new TextDecoder().decode(Buffer.concat(parts));
       const chunks = source.mime === "text/html" ? htmlChunks(text) : markdownChunks(text); // plain text uses markdown chunker
       await deps.chunks.replaceChunks(scope, { sourceId: source.id, sourceVersion: source.version, chunks: chunks.map((chunk) => ({ page: chunk.page, slideLabel: null, startMs: null, endMs: null, text: chunk.text, imageObjectKey: null })) });
+      if (deps.onSourceReady) {
+        try { await deps.onSourceReady(scope, { sourceId: source.id, sourceVersion: source.version }); } catch { /* best-effort */ }
+      }
       return { pages: chunks.length };
     }
     const isImage = IMAGE_SOURCE_MIMES.has(source.mime);
@@ -158,6 +162,9 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Op
       const failedRanges = pdfResult?.failedRanges ?? [];
       if (failedRanges.length || lowQualityPages.length) {
         await deps.sources.markParseState(scope, source.id, "ready", createPdfPartialError(failedRanges, lowQualityPages));
+      }
+      if (deps.onSourceReady) {
+        try { await deps.onSourceReady(scope, { sourceId: source.id, sourceVersion: source.version }); } catch { /* best-effort */ }
       }
       return isImage ? { pages: 1, imageOnly: visualRecognitionUnavailable } : { pages: pages.length };
     } catch (error) {

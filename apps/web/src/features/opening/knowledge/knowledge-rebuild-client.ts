@@ -1,4 +1,4 @@
-import { knowledgeSnapshotSchema, uuidSchema } from "@aistudy/contracts";
+import { courseKnowledgeSyncSchema, knowledgeSnapshotSchema, uuidSchema } from "@aistudy/contracts";
 import { z } from "zod";
 import { createSessionFetch } from "../../auth/session-expiry";
 import { parseOpeningResponse } from "../client/parse-response";
@@ -7,6 +7,7 @@ const knowledgeRecordSchema = z.object({
   version: z.number().int().nonnegative(),
   snapshot: knowledgeSnapshotSchema,
   sourceVersions: z.record(z.string(), z.number().int().nonnegative()),
+  sync: courseKnowledgeSyncSchema.optional(),
 });
 const rebuildReceiptSchema = z.object({
   jobId: uuidSchema,

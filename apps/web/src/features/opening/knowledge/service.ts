@@ -8,7 +8,6 @@ import {
 import {
   createOpeningKnowledgeRepository,
   OpeningKnowledgeError,
-  type OpeningKnowledgeRecord,
 } from "@aistudy/database";
 import type { Sql } from "postgres";
 import { z } from "zod";
@@ -34,14 +33,6 @@ const rebuildBodySchema = z
   })
   .strict();
 
-function emptyRecord(courseId: string): OpeningKnowledgeRecord {
-  return {
-    version: 0,
-    snapshot: { courseId, version: 0, nodes: [], edges: [] },
-    sourceVersions: {},
-  };
-}
-
 function mapError(error: unknown): never {
   if (error instanceof OpeningKnowledgeError) {
     if (error.code === "NOT_FOUND") throw new ApiError("NOT_FOUND", error.message, 404);
@@ -57,8 +48,7 @@ export function createOpeningKnowledgeService(sql: Sql) {
     async get(scope: Scope, courseIdRaw: string) {
       const courseId = uuidSchema.parse(courseIdRaw);
       try {
-        const record = await repo.get(scope, courseId);
-        return record ?? emptyRecord(courseId);
+        return await repo.getWithSync(scope, courseId);
       } catch (error) {
         mapError(error);
       }

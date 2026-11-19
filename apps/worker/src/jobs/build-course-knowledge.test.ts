@@ -291,4 +291,74 @@ describe("createBuildCourseKnowledgeHandler", () => {
     });
     await expect(handler(job as never, {})).rejects.toThrow("missing courseId");
   });
+
+  it("returns coveredSourceVersions across all authorized chunks and triggers best-effort onBuildCompleted", async () => {
+    const unusedSourceId = "00000000-0000-4000-8000-0000000000s2";
+    const onBuildCompleted = vi.fn(async () => {
+      throw new Error("best-effort hook error");
+    });
+    const handler = createBuildCourseKnowledgeHandler({
+      listAuthorizedChunks: async () => [
+        chunk({ sourceVersion: 1 }),
+        chunk({ id: foreignChunkId, sourceId: unusedSourceId, sourceVersion: 3 }),
+      ],
+      get: async () => null,
+      extractGraph: async () => ({
+        nodes: [{ label: "函数", kind: "concept", evidenceChunkIds: [chunkId], status: "supported" }],
+        edges: [],
+      }),
+      replace: async (_s, _c, input) => ({ version: input.expectedVersion + 1, snapshot: input.snapshot }),
+      onBuildCompleted,
+    });
+    const result = await handler(job as never, { courseId });
+    expect(result.coveredSourceVersions).toEqual({ [sourceId]: 1, [unusedSourceId]: 3 });
+    expect(onBuildCompleted).toHaveBeenCalledWith(
+      { workspaceId: job.workspaceId, ownerUserId: job.ownerUserId },
+      courseId,
+      { [sourceId]: 1, [unusedSourceId]: 3 },
+    );
+  });
+
+  it("retries replace once on CAS CONFLICT after re-reading the latest snapshot and referenced nodes", async () => {
+    const initial = reconcileExtractedSnapshot(
+      courseId,
+      1,
+      { nodes: [{ label: "函数", kind: "concept", evidenceChunkIds: [chunkId] }], edges: [] },
+      [chunk()],
+    );
+    const confirmed = {
+      ...initial,
+      version: 2,
+      nodes: [{ ...initial.nodes[0]!, status: "supported" as const }],
+    };
+    const get = vi.fn()
+      .mockResolvedValueOnce({ version: 1, snapshot: initial, sourceVersions: { [sourceId]: 1 } })
+      .mockResolvedValueOnce({ version: 2, snapshot: confirmed, sourceVersions: { [sourceId]: 1 } });
+    const listReferencedNodeIds = vi.fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([confirmed.nodes[0]!.id]);
+    const replace = vi.fn()
+      .mockRejectedValueOnce(Object.assign(new Error("stale knowledge version"), { code: "CONFLICT" }))
+      .mockImplementationOnce(async (_scope, _courseId, input) => ({
+        version: input.expectedVersion + 1,
+        snapshot: input.snapshot,
+      }));
+    const handler = createBuildCourseKnowledgeHandler({
+      listAuthorizedChunks: async () => [chunk()],
+      listReferencedNodeIds,
+      get,
+      extractGraph: async () => ({
+        nodes: [{ label: "函数", kind: "concept", evidenceChunkIds: [chunkId], status: "supported" }],
+        edges: [],
+      }),
+      replace,
+    });
+    const result = await handler(job as never, { courseId });
+    expect(replace).toHaveBeenCalledTimes(2);
+    expect(replace.mock.calls[0]![2].expectedVersion).toBe(1);
+    expect(replace.mock.calls[1]![2].expectedVersion).toBe(2);
+    expect(replace.mock.calls[1]![2].expectedReferencedNodeIds).toEqual([confirmed.nodes[0]!.id]);
+    expect(result.version).toBe(3);
+    expect(result.coveredSourceVersions).toEqual({ [sourceId]: 1 });
+  });
 });

@@ -5,7 +5,7 @@ import path from "node:path";
 import { pipeline } from "node:stream/promises";
 import { Readable, Transform } from "node:stream";
 import type { MediaSegment, Scope } from "@aistudy/contracts";
-import type { OpeningJobRecord, OpeningSourceChunksRepository, OpeningSourceRepository } from "@aistudy/database";
+import type { OpeningJobRecord, OpeningScope, OpeningSourceChunksRepository, OpeningSourceRepository } from "@aistudy/database";
 import {
   MEDIA_VIDEO_MAX_BYTES,
   MEDIA_VIDEO_MAX_DURATION_MS,
@@ -74,6 +74,7 @@ export type ParseMediaDeps = {
     input: { path: string; durationMs: number; outputDir: string },
     signal: AbortSignal,
   ) => Promise<{ frames: ExtractedKeyframe[]; visualCoverageLimited: boolean }>;
+  onSourceReady?: (scope: OpeningScope, input: { sourceId: string; sourceVersion: number }) => Promise<void>;
 };
 
 export type ParseMediaPayload = {
@@ -326,6 +327,14 @@ export function createParseMediaHandler(deps: ParseMediaDeps) {
         });
         return { ok: false, transcription, durationMs: probe.durationMs,
           hasAudio: probe.hasAudio, hasVideo: probe.hasVideo, error: "no readable media content" };
+      }
+
+      if (deps.onSourceReady) {
+        try {
+          await deps.onSourceReady(scope, { sourceId: source.id, sourceVersion: source.version });
+        } catch {
+          // Best-effort sync: parsed chunks are already durable.
+        }
       }
 
       return {
