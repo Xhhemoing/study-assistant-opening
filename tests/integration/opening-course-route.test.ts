@@ -2230,7 +2230,9 @@ it.each([
     expect(fridayPlanned.unscheduledTaskIds).toEqual([]);
 
     // 3) Forging a Friday draft containing that cross-day retest must fail acceptPlan with CONFLICT task_changed,
-    // leaving BOTH the reserved day (v1, blocks intact) and Friday (v0, no blocks) untouched.
+    // leaving BOTH the reserved day (v1, blocks intact) and Friday (still null) completely unchanged.
+    const fridayStateBefore = await fridayPlans.getToday(f.scope, friday);
+    expect(fridayStateBefore).toBeNull();
     const forgedFridayDraft = await fridayPlans.proposePlan(f.scope, {
       date: friday,
       tasks: reservedTasks,
@@ -2249,9 +2251,33 @@ it.each([
       clientKey: randomUUID(),
     })).rejects.toMatchObject({ code: "CONFLICT", reason: "task_changed" });
 
-    const fridayState = await fridayPlans.getToday(f.scope, friday);
-    expect(fridayState?.acceptedVersion ?? 0).toBe(0);
-    expect(fridayState?.blocks ?? []).toEqual([]);
+    expect(await fridayPlans.getToday(f.scope, friday)).toEqual(fridayStateBefore);
     expect(await reservedPlans.getToday(f.scope, reservedDay)).toEqual(reservedDayState);
+
+    // 4) Forging a draft ON the reserved day itself whose block lies on a later day (2026-10-18)
+    // must ALSO fail acceptPlan with CONFLICT task_changed without modifying either day.
+    const forgedTargetDay = "2026-10-18";
+    const forgedTargetStateBefore = await reservedPlans.getToday(f.scope, forgedTargetDay);
+    expect(forgedTargetStateBefore).toBeNull();
+    const forgedOutOfDayBlockDraft = await reservedPlans.proposePlan(f.scope, {
+      date: reservedDay,
+      tasks: reservedTasks,
+      free: reservedFree,
+      blocks: [{
+        taskId: receipt.taskId,
+        start: "2026-10-18T19:15:00.000Z",
+        end: "2026-10-18T19:40:00.000Z",
+        reason: "forged-block-outside-reserved-day",
+      }],
+      unscheduledTaskIds: [],
+    });
+    await expect(reservedPlans.acceptPlan(f.scope, {
+      draftId: forgedOutOfDayBlockDraft.id,
+      expectedBaseVersion: 1,
+      clientKey: randomUUID(),
+    })).rejects.toMatchObject({ code: "CONFLICT", reason: "task_changed" });
+
+    expect(await reservedPlans.getToday(f.scope, reservedDay)).toEqual(reservedDayState);
+    expect(await reservedPlans.getToday(f.scope, forgedTargetDay)).toEqual(forgedTargetStateBefore);
   },
 );

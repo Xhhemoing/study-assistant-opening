@@ -1,10 +1,13 @@
-import { assistantCandidateSchema, conversationPlanMetadataSchema, coachPlanUndoResultSchema, localReplanMetadataSchema, suggestedTaskSchema, suggestionFeedbackInputSchema, taskItemSchema } from "@aistudy/contracts";
+import { assistantCandidateSchema, conversationPlanMetadataSchema, coachPlanUndoResultSchema, localReplanMetadataSchema, openingPlanningSettingsSchema, suggestedTaskSchema, suggestionFeedbackInputSchema, taskItemSchema, uuidSchema } from "@aistudy/contracts";
 import { suggestionFeedbackIdentity } from "./adaptive/suggestion-feedback";
 import { localReplanFixedBlocks, samePlannedBlocks } from "./adaptive/local-replan";
+import { resolveWorkspaceTimeZone } from "./local-day-bounds";
 import { isRecord, isUuid } from "./backup-validation";
 
 type Tables = Record<string, Record<string, unknown>[]>;
 const dateKey = (value: unknown) => value instanceof Date ? value.toISOString().slice(0, 10) : String(value).slice(0, 10);
+const ACTIVE_RETEST_STATUSES = new Set(["accepted", "in_progress"]);
+const LOCAL_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 /** Imported planning metadata must point to the same included owner, task and draft. */
 export function validateBackupPlanControl(tables: Tables, errors: string[]): void {
@@ -12,6 +15,12 @@ export function validateBackupPlanControl(tables: Tables, errors: string[]): voi
   const candidates = new Map((tables.opening_assistant_candidates ?? []).map(row => [row.id, row]));
   const conversations = new Map((tables.opening_conversations ?? []).map(row => [row.id, row]));
   const tasks = new Map((tables.opening_tasks ?? []).map(row => [row.id, row]));
+  const preferences = new Map((tables.workspace_preferences ?? []).map(row => [row.workspace_id, row]));
+  const inactiveRetestsByKey = new Set(
+    (tables.opening_retest_activities ?? [])
+      .filter(row => typeof row.task_id === "string" && typeof row.status === "string" && !ACTIVE_RETEST_STATUSES.has(row.status))
+      .map(row => `${String(row.workspace_id)}/${String(row.owner_user_id)}/${String(row.task_id).toLowerCase()}`),
+  );
   const clients = new Set<string>(), identities = new Set<string>(), ids = new Set<string>();
   for (const row of tables.opening_suggestion_feedback ?? []) {
     const draft = drafts.get(row.draft_id);
@@ -49,13 +58,38 @@ export function validateBackupPlanControl(tables: Tables, errors: string[]): voi
     if (draft.strategy_version !== "local-replan-v1" && snapshot?.localReplan === undefined) continue;
     const metadata = localReplanMetadataSchema.safeParse(snapshot?.localReplan);
     const savedTasks = taskItemSchema.array().safeParse(snapshot?.tasks);
-    if (!metadata.success || !savedTasks.success || draft.strategy_version !== "local-replan-v1"
+    const parsedInactiveRetestIds = snapshot?.inactiveRetestTaskIds === undefined
+      ? { success: true as const, data: [] as string[] }
+      : uuidSchema.array().max(200).safeParse(snapshot.inactiveRetestTaskIds);
+    const normalizedInactiveIds = parsedInactiveRetestIds.success
+      ? parsedInactiveRetestIds.data.map(id => id.toLowerCase())
+      : [];
+    if (!metadata.success || !savedTasks.success || !parsedInactiveRetestIds.success
+      || new Set(normalizedInactiveIds).size !== normalizedInactiveIds.length
+      || draft.strategy_version !== "local-replan-v1"
       || metadata.data.baseAcceptedVersion !== draft.base_version
       || savedTasks.data.some(task => !task.version) || new Set(savedTasks.data.map(task => task.id)).size !== savedTasks.data.length) {
       errors.push("local replan snapshot is invalid"); continue;
     }
-    const fixed = localReplanFixedBlocks({ acceptedBlocks: metadata.data.baselineBlocks, tasks: savedTasks.data,
-      now: new Date(metadata.data.proposedAt), preserveAll: metadata.data.preserveAll });
+    if (normalizedInactiveIds.some(taskId => !inactiveRetestsByKey.has(`${String(draft.workspace_id)}/${String(draft.owner_user_id)}/${taskId}`))) {
+      errors.push("local replan preserved baseline is invalid"); continue;
+    }
+    const rawDay = draft.day !== undefined && draft.day !== null ? dateKey(draft.day) : undefined;
+    const localDate = rawDay && LOCAL_DATE_RE.test(rawDay) ? rawDay : undefined;
+    const pref = preferences.get(draft.workspace_id);
+    const parsedPref = pref?.planning_settings != null ? openingPlanningSettingsSchema.safeParse(pref.planning_settings) : null;
+    const timeZone = localDate
+      ? resolveWorkspaceTimeZone(parsedPref?.success ? parsedPref.data.timeZone : undefined)
+      : undefined;
+    const fixed = localReplanFixedBlocks({
+      acceptedBlocks: metadata.data.baselineBlocks,
+      tasks: savedTasks.data,
+      now: new Date(metadata.data.proposedAt),
+      preserveAll: metadata.data.preserveAll,
+      localDate,
+      timeZone,
+      ...(normalizedInactiveIds.length ? { inactiveRetestTaskIds: new Set(normalizedInactiveIds) } : {}),
+    });
     if (!samePlannedBlocks(fixed.fixedBlocks, metadata.data.fixedBlocks)) errors.push("local replan preserved baseline is invalid");
   }
   const undoKeys = new Set<string>();

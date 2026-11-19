@@ -60,14 +60,21 @@ export async function proposeOpeningLocalPlan(sql: Sql, scope: Scope, raw: Local
     }
     const tasks = await repo.listTasks(scope);
     if (options.taskIds && options.taskIds.some(id => !tasks.some(task => task.id === id))) throw new OpeningPlanError("NOT_FOUND", "delta task not found");
-    const active = await tx`SELECT lower(create_intent->>'taskId') AS task_id FROM opening_teaching_activities
+    const excluded = await tx`SELECT lower(create_intent->>'taskId') AS task_id, 'teaching' AS kind
+      FROM opening_teaching_activities
       WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND status IN ('active','paused')
         AND create_intent->>'source'='task'
-      UNION
-      SELECT lower(task_id::text) AS task_id FROM opening_retest_activities
+      UNION ALL
+      SELECT lower(task_id::text) AS task_id, 'inactive_retest' AS kind
+      FROM opening_retest_activities
       WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
         AND task_id IS NOT NULL AND status NOT IN ('accepted','in_progress')`;
-    const activeIds = new Set(active.map(row => String(row.task_id)));
+    const activeIds = new Set(excluded.map(row => String(row.task_id)));
+    const inactiveRetestIds = new Set(
+      excluded
+        .filter(row => row.kind === "inactive_retest")
+        .map(row => String(row.task_id)),
+    );
     const configured = preference.settings ? deriveDayBlocks(input.date, preference.settings, await repo.listTimetable(scope)) : [];
     const constraints = [...(explicitFree ?? configured), ...(explicitFree ? configured.filter(block => block.kind !== "free") : []),
       ...(await repo.listHardBlocks(scope, input.date)).filter(block => block.kind !== "free" && (!preference.settings || block.kind === "locked"))];
@@ -75,14 +82,21 @@ export async function proposeOpeningLocalPlan(sql: Sql, scope: Scope, raw: Local
     const baseline = state?.blocks ?? [];
     const planningTasks = options.taskIds ? tasks.filter(task => options.taskIds!.includes(task.id) || baseline.some(block => block.taskId === task.id)) : tasks;
     const planned = buildLocalReplan({ acceptedBlocks: baseline, tasks: [...planningTasks, ...(additional?.tasks ?? [])], excludedTaskIds: activeIds,
-      constraints, now, preserveAll: options.preserveAll,
+      inactiveRetestTaskIds: inactiveRetestIds, constraints, now, preserveAll: options.preserveAll,
       candidateTaskIds: options.taskIds ? new Set([...options.taskIds, ...(additional?.tasks ?? []).map(task => task.id)]) : undefined, options: { localDate: input.date, timeZone: zone,
         ...(insideDay ? { planningNow: new Date(Math.ceil((now.getTime() + 60_000) / 60_000) * 60_000).toISOString() } : {}),
         ...(options.taskIds ? { preferredOrder: options.taskIds } : {}) } });
     if (!planned.changed) return { kind: "no_change" as const };
     if (planned.blocks.length > 200) throw new OpeningPlanError("VALIDATION", "计划时间块过多，请先整理任务。");
+    const releasedInactiveRetestTaskIds = [...new Set(
+      baseline
+        .filter(block => Date.parse(block.start) > now.getTime() && inactiveRetestIds.has(block.taskId.toLowerCase()))
+        .map(block => block.taskId),
+    )].sort();
     const snapshot = { ...additional?.snapshot, tasks: [...tasks, ...(additional?.tasks ?? [])], free: constraints,
-      localPlanIntent: intent, localReplan: { kind: "local_replan_v1", baseAcceptedVersion: base,
+      localPlanIntent: intent,
+      ...(releasedInactiveRetestTaskIds.length ? { inactiveRetestTaskIds: releasedInactiveRetestTaskIds } : {}),
+      localReplan: { kind: "local_replan_v1", baseAcceptedVersion: base,
         baselineBlocks: baseline, fixedBlocks: planned.fixedBlocks, releasedTaskVersions: planned.releasedTaskVersions,
         proposedAt: now.toISOString(), preserveAll: options.preserveAll ?? false, ...(explicitFree ? { explicitFree } : {}) } };
     const [row] = await tx`INSERT INTO opening_plan_drafts

@@ -7,6 +7,7 @@ import { validateOpeningLocalReplan } from "./opening-local-replan-validation";
 import { createOpeningPlansRepository } from "./opening-plans";
 import {
   effectivePlanningStartFloorMs,
+  isBlockAllowedForTaskWindow,
   projectCourseRoutePlanningWindow,
 } from "./opening-course-route-planning-window";
 
@@ -814,5 +815,185 @@ describe("projectCourseRoutePlanningWindow", () => {
         label,
       ).rejects.toMatchObject({ code: "CONFLICT", reason: "task_changed" });
     }
+  });
+
+  it("rejects same-day explicit reservation paired with a forged cross-day block in isBlockAllowedForTaskWindow, acceptOpeningPlan, and validateOpeningLocalReplan", async () => {
+    const friday = "2026-10-16";
+    const fridayNow = new Date("2026-10-16T19:00:00.000Z");
+    const fridayRow = makeCourseRouteRow({ retest_scheduled_start_at: FRIDAY_SLOT_START });
+    const fridayWindow = projectCourseRoutePlanningWindow(fridayRow, SCOPE);
+    const forgedSaturdayBlock = {
+      taskId: TASK_ID,
+      start: "2026-10-17T19:15:00.000Z",
+      end: "2026-10-17T19:40:00.000Z",
+      reason: "forged-saturday-block",
+    };
+
+    // 1) Pure helper boundary checks (UTC & Asia/Shanghai).
+    expect(isBlockAllowedForTaskWindow(
+      { start: FRIDAY_SLOT_START, end: FRIDAY_SLOT_END },
+      fridayWindow,
+      friday,
+      "UTC",
+    )).toBe(true);
+    expect(isBlockAllowedForTaskWindow(
+      { start: "2026-10-16T23:35:00.000Z", end: "2026-10-17T00:00:00.000Z" },
+      fridayWindow,
+      friday,
+      "UTC",
+    )).toBe(true);
+    expect(isBlockAllowedForTaskWindow(forgedSaturdayBlock, fridayWindow, friday, "UTC")).toBe(false);
+    expect(isBlockAllowedForTaskWindow(
+      { start: "2026-10-16T23:50:00.000Z", end: "2026-10-17T00:15:00.000Z" },
+      fridayWindow,
+      friday,
+      "UTC",
+    )).toBe(false);
+
+    const shanghaiWindow = projectCourseRoutePlanningWindow(
+      makeCourseRouteRow({ retest_scheduled_start_at: "2026-10-16T11:15:00.000Z" }),
+      SCOPE,
+    );
+    expect(isBlockAllowedForTaskWindow(
+      { start: "2026-10-16T11:15:00.000Z", end: "2026-10-16T11:40:00.000Z" },
+      shanghaiWindow,
+      friday,
+      "Asia/Shanghai",
+    )).toBe(true);
+    // 2026-10-16T16:15Z is 2026-10-17 00:15 in Asia/Shanghai -> outside 2026-10-16 local day.
+    expect(isBlockAllowedForTaskWindow(
+      { start: "2026-10-16T16:15:00.000Z", end: "2026-10-16T16:40:00.000Z" },
+      shanghaiWindow,
+      friday,
+      "Asia/Shanghai",
+    )).toBe(false);
+
+    // 2) Ordinary acceptOpeningPlan rejects Friday reservation + forged Saturday block without bumping version.
+    const [fridayTask] = await createOpeningPlansRepository(
+      vi.fn().mockResolvedValue([fridayRow]) as unknown as Sql,
+    ).listTasks(SCOPE);
+    let acceptedVersion = 0;
+    const draftId = id(75);
+    const draftRow = {
+      id: draftId,
+      workspace_id: SCOPE.workspaceId,
+      owner_user_id: SCOPE.ownerUserId,
+      day: friday,
+      version: 0,
+      base_version: 0,
+      status: "draft",
+      blocks: [forgedSaturdayBlock],
+      unscheduled_task_ids: [],
+      suggested_tasks: [],
+      origin: "user",
+      strategy_version: null,
+      hard_blocks_fingerprint: "fp",
+      input_snapshot: { tasks: [fridayTask], free: [] },
+    };
+    const fn = (parts: TemplateStringsArray) => {
+      if (!parts.raw) return {};
+      const query = parts.join("?");
+      if (query.includes("SELECT day FROM opening_plan_drafts")) return Promise.resolve([{ day: friday }]);
+      if (query.includes("pg_advisory_xact_lock") || query.includes("opening_workspace_history_revisions")) return Promise.resolve([]);
+      if (query.includes("FROM workspaces")) return Promise.resolve([{ id: SCOPE.workspaceId }]);
+      if (query.includes("FROM courses")) return Promise.resolve([{ id: COURSE_ID }]);
+      if (query.includes("INSERT INTO opening_plan_state")) return Promise.resolve([]);
+      if (query.includes("FROM opening_plan_state")) {
+        return Promise.resolve([{ accepted_version: acceptedVersion, accepted_blocks: [], hard_blocks_fingerprint: "fp" }]);
+      }
+      if (query.includes("SELECT * FROM opening_plan_drafts")) return Promise.resolve([draftRow]);
+      if (query.includes("FROM opening_plan_acceptances")) return Promise.resolve([]);
+      if (query.includes("FROM opening_hard_blocks") || query.includes("FROM opening_timetable_sessions")) return Promise.resolve([]);
+      if (query.includes("FROM workspace_preferences")) {
+        return Promise.resolve([{
+          planning_settings: {
+            weekOneMonday: "2026-09-07",
+            periodTimes: {},
+            dailyWindow: { start: "19:00", end: "21:00" },
+            lunch: { start: "12:00", end: "13:00" },
+            dinner: { start: "18:00", end: "19:00" },
+            sleep: { start: "23:00", end: "07:00" },
+            timeZone: "UTC",
+          },
+        }]);
+      }
+      if (query.includes("FROM opening_teaching_activities")
+        || query.includes("FROM opening_retest_activities")
+        || query.includes("FROM opening_learning_goals")) return Promise.resolve([]);
+      if (query.includes("FROM opening_tasks")) return Promise.resolve([fridayRow]);
+      if (query.includes("UPDATE opening_plan_state")) {
+        acceptedVersion += 1;
+        return Promise.resolve([]);
+      }
+      throw new Error(`Unexpected SQL: ${query}`);
+    };
+    const sql = Object.assign(fn, {
+      json: (v: unknown) => v,
+      begin: async (run: (tx: TransactionSql) => unknown) => run(sql as unknown as TransactionSql),
+    }) as unknown as Sql;
+
+    await expect(
+      acceptOpeningPlan(sql, SCOPE, { draftId, expectedBaseVersion: 0, clientKey: "same-day-res-forged-sat-block" }, fridayNow),
+    ).rejects.toMatchObject({ code: "CONFLICT", reason: "task_changed" });
+    expect(acceptedVersion).toBe(0);
+
+    // 3) Local replan validation rejects forged Saturday block in both fresh and futureFixed.
+    const freshDraft = {
+      id: id(76),
+      day: friday,
+      origin: "user",
+      strategy_version: "local-replan-v1",
+      suggested_tasks: [],
+      input_snapshot: {
+        tasks: [fridayTask],
+        localReplan: {
+          kind: "local_replan_v1",
+          baseAcceptedVersion: 1,
+          baselineBlocks: [],
+          fixedBlocks: [],
+          releasedTaskVersions: [],
+          proposedAt: fridayNow.toISOString(),
+          preserveAll: false,
+        },
+      },
+    };
+    await expect(
+      validateOpeningLocalReplan(sql as unknown as TransactionSql, SCOPE, {
+        day: friday,
+        state: { accepted_version: 1, accepted_blocks: [] },
+        draft: freshDraft,
+        blocks: [forgedSaturdayBlock],
+        now: fridayNow,
+      }),
+    ).rejects.toMatchObject({ code: "CONFLICT", reason: "task_changed" });
+
+    const fixedDraft = {
+      id: id(77),
+      day: friday,
+      origin: "user",
+      strategy_version: "local-replan-v1",
+      suggested_tasks: [],
+      input_snapshot: {
+        tasks: [fridayTask],
+        localReplan: {
+          kind: "local_replan_v1",
+          baseAcceptedVersion: 1,
+          baselineBlocks: [forgedSaturdayBlock],
+          fixedBlocks: [forgedSaturdayBlock],
+          releasedTaskVersions: [],
+          proposedAt: fridayNow.toISOString(),
+          preserveAll: true,
+        },
+      },
+    };
+    await expect(
+      validateOpeningLocalReplan(sql as unknown as TransactionSql, SCOPE, {
+        day: friday,
+        state: { accepted_version: 1, accepted_blocks: [forgedSaturdayBlock] },
+        draft: fixedDraft,
+        blocks: [forgedSaturdayBlock],
+        now: fridayNow,
+      }),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
   });
 });

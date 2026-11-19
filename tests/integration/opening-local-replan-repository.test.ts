@@ -500,3 +500,120 @@ it.each([
     expect(await plans.getToday(f.scope, otherDay)).toMatchObject({ acceptedVersion: 1, blocks: otherDayBaseline });
   },
 );
+
+it.each(["cancelled", "invalidated"] as const)(
+  "releases an unstarted %s retest block and confirms cleanly across normal, preserveAll, and delta local replans",
+  async (inactiveStatus) => {
+    const fridayNow = new Date(at("19:00"));
+    await createOpeningPlanningSettingsRepository(f.sql).set(f.scope, {
+      ...settings,
+      dailyWindow: { start: "19:00", end: "21:00" },
+    });
+    const plans = createOpeningPlansRepository(f.sql, { now: () => fridayNow });
+
+    // 1) Normal release-only local replan (no other tasks): must return draft (not no_change), remove inactive block, bump version 1 -> 2.
+    const retestNormal = await seedLegacyCourseRouteRetest();
+    await f.sql`UPDATE opening_retest_activities SET scheduled_start_at=${at("19:15")} WHERE id=${retestNormal.retestId}`;
+    await seed([block(retestNormal.taskId, "19:15", "19:40")]);
+    if (inactiveStatus === "cancelled") {
+      await createOpeningRetestActivityRepository(f.sql).transition(f.scope, retestNormal.retestId, {
+        type: "cancel",
+        at: fridayNow.toISOString(),
+      });
+    } else {
+      await f.sql`UPDATE opening_retest_activities
+        SET status='invalidated', reason='evidence_changed', invalidated_at=${fridayNow.toISOString()}
+        WHERE id=${retestNormal.retestId}`;
+    }
+
+    const normalProposed = await proposeOpeningLocalPlan(
+      f.sql,
+      f.scope,
+      { date, expectedAcceptedVersion: 1, clientKey: randomUUID() },
+      { now: fridayNow },
+    );
+    expect(normalProposed.kind).toBe("draft");
+    if (normalProposed.kind !== "draft") return;
+    expect(normalProposed.draft.blocks).toEqual([]);
+    expect(await plans.acceptPlan(f.scope, {
+      draftId: normalProposed.draft.id,
+      expectedBaseVersion: 1,
+      clientKey: randomUUID(),
+    })).toMatchObject({ status: "accepted", version: 2 });
+    expect(await plans.getToday(f.scope, date)).toMatchObject({ acceptedVersion: 2, blocks: [] });
+
+    // 2) preserveAll local replan: also releases the unstarted inactive retest block and confirms cleanly (v2 -> v3).
+    const retestPreserve = await seedLegacyCourseRouteRetest();
+    await f.sql`UPDATE opening_retest_activities SET scheduled_start_at=${at("19:15")} WHERE id=${retestPreserve.retestId}`;
+    const extraForPreserve = await task();
+    await f.sql`UPDATE opening_plan_state
+      SET accepted_blocks=${f.sql.json([block(retestPreserve.taskId, "19:15", "19:40")])}
+      WHERE workspace_id=${f.scope.workspaceId} AND day=${date}::date`;
+    if (inactiveStatus === "cancelled") {
+      await createOpeningRetestActivityRepository(f.sql).transition(f.scope, retestPreserve.retestId, {
+        type: "cancel",
+        at: fridayNow.toISOString(),
+      });
+    } else {
+      await f.sql`UPDATE opening_retest_activities
+        SET status='invalidated', reason='evidence_changed', invalidated_at=${fridayNow.toISOString()}
+        WHERE id=${retestPreserve.retestId}`;
+    }
+
+    const preserveProposed = await proposeOpeningLocalPlan(
+      f.sql,
+      f.scope,
+      { date, expectedAcceptedVersion: 2, clientKey: randomUUID() },
+      { now: fridayNow, preserveAll: true, taskIds: [extraForPreserve.id] },
+    );
+    expect(preserveProposed.kind).toBe("draft");
+    if (preserveProposed.kind !== "draft") return;
+    expect(preserveProposed.draft.blocks.some(item => item.taskId === retestPreserve.taskId)).toBe(false);
+    expect(preserveProposed.draft.blocks).toEqual([expect.objectContaining({ taskId: extraForPreserve.id })]);
+    expect(await plans.acceptPlan(f.scope, {
+      draftId: preserveProposed.draft.id,
+      expectedBaseVersion: 2,
+      clientKey: randomUUID(),
+    })).toMatchObject({ status: "accepted", version: 3 });
+    expect(await plans.getToday(f.scope, date)).toMatchObject({
+      acceptedVersion: 3,
+      blocks: preserveProposed.draft.blocks,
+    });
+
+    // 3) proposeDeltaPlan with existing accepted plan containing an unstarted inactive retest block -> removes block and confirms (v3 -> v4).
+    const retestDelta = await seedLegacyCourseRouteRetest();
+    await f.sql`UPDATE opening_retest_activities SET scheduled_start_at=${at("19:15")} WHERE id=${retestDelta.retestId}`;
+    const extraForDelta = await task();
+    await f.sql`UPDATE opening_plan_state
+      SET accepted_blocks=${f.sql.json([block(retestDelta.taskId, "19:15", "19:40")])}
+      WHERE workspace_id=${f.scope.workspaceId} AND day=${date}::date`;
+    if (inactiveStatus === "cancelled") {
+      await createOpeningRetestActivityRepository(f.sql).transition(f.scope, retestDelta.retestId, {
+        type: "cancel",
+        at: fridayNow.toISOString(),
+      });
+    } else {
+      await f.sql`UPDATE opening_retest_activities
+        SET status='invalidated', reason='evidence_changed', invalidated_at=${fridayNow.toISOString()}
+        WHERE id=${retestDelta.retestId}`;
+    }
+
+    const deltaDraft = await createOpeningPlanService(f.sql, { now: () => fridayNow }).proposeDeltaPlan(f.scope, {
+      date,
+      taskIds: [extraForDelta.id],
+      clientKey: randomUUID(),
+      free: [{ start: at("19:00"), end: at("21:00"), kind: "free" }],
+    });
+    expect(deltaDraft.blocks.some(item => item.taskId === retestDelta.taskId)).toBe(false);
+    expect(deltaDraft.blocks).toEqual([expect.objectContaining({ taskId: extraForDelta.id })]);
+    expect(await plans.acceptPlan(f.scope, {
+      draftId: deltaDraft.id,
+      expectedBaseVersion: 3,
+      clientKey: randomUUID(),
+    })).toMatchObject({ status: "accepted", version: 4 });
+    expect(await plans.getToday(f.scope, date)).toMatchObject({
+      acceptedVersion: 4,
+      blocks: deltaDraft.blocks,
+    });
+  },
+);

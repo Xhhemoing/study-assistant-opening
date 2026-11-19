@@ -196,3 +196,171 @@ it("preserves a same-day futureFixed retest reservation, releases it on user def
   expect(released.draft.blocks.some(b => b.taskId === id(20))).toBe(false);
   expect(released.draft.blocks.some(b => b.taskId === id(21))).toBe(true);
 });
+
+it("consistently releases pre-cancelled or invalidated unstarted retest blocks across normal, preserveAll, and delta local replans, and rejects forged inactiveRetestTaskIds", async () => {
+  const friday = "2026-10-16";
+  const fridayNow = new Date("2026-10-16T19:00:00.000Z");
+  const reservedBlock = {
+    taskId: id(40),
+    start: "2026-10-16T19:15:00.000Z",
+    end: "2026-10-16T19:40:00.000Z",
+    reason: "Confirmed retest",
+  };
+  const extraTaskRow = {
+    id: id(41),
+    workspace_id: scope.workspaceId,
+    owner_user_id: scope.ownerUserId,
+    version: 1,
+    status: "pending",
+    title: "Delta task",
+    minutes: 30,
+    due_at: null,
+    not_before: null,
+    priority: 1,
+    origin: "manual",
+  };
+  let retestStatus = "cancelled";
+  let includeExtraTask = false;
+  let storedDraft: Record<string, unknown> | undefined;
+  const makeRetestRow = () => ({
+    id: id(40),
+    workspace_id: scope.workspaceId,
+    owner_user_id: scope.ownerUserId,
+    version: 1,
+    status: "pending",
+    title: "Delayed retest",
+    minutes: 25,
+    due_at: "2026-10-26T19:00:00.000Z",
+    not_before: "2026-10-15T19:00:00.000Z",
+    priority: 1,
+    origin: "retest",
+    course_id: id(50),
+    candidate_id: id(51),
+    retest_activity_id: id(52),
+    retest_workspace_id: scope.workspaceId,
+    retest_owner_user_id: scope.ownerUserId,
+    retest_task_id: id(40),
+    retest_course_id: id(50),
+    retest_purpose: "retest",
+    retest_status: retestStatus,
+    retest_candidate_id: id(51),
+    retest_skill_label: "特征值",
+    retest_prompt: "延迟复测",
+    retest_not_before_at: "2026-10-15T19:00:00.000Z",
+    retest_recommended_at: "2026-10-15T19:00:00.000Z",
+    retest_scheduled_start_at: "2026-10-16T19:15:00.000Z",
+    retest_snoozed_until: null,
+    retest_deadline_at: "2026-10-26T19:00:00.000Z",
+  });
+  const db = Object.assign((parts: TemplateStringsArray, ...values: unknown[]) => {
+    if (!parts.raw) return {};
+    const query = parts.join("?");
+    if (query.includes("INSERT INTO opening_plan_drafts")) {
+      storedDraft = {
+        id: values[0],
+        day: friday,
+        version: 0,
+        base_version: 1,
+        status: "draft",
+        blocks: values[5],
+        unscheduled_task_ids: values[6],
+        input_snapshot: values[7],
+        hard_blocks_fingerprint: values[8],
+        origin: "user",
+        suggested_tasks: [],
+        strategy_version: "local-replan-v1",
+      };
+      return Promise.resolve([storedDraft]);
+    }
+    if (query.includes("FROM opening_plan_drafts")) return Promise.resolve([]);
+    if (query.includes("FROM opening_plan_state")) {
+      return Promise.resolve([{ accepted_version: 1, accepted_blocks: [reservedBlock] }]);
+    }
+    if (query.includes("planning_settings")) {
+      return Promise.resolve([{
+        planning_settings: {
+          weekOneMonday: "2026-09-07",
+          periodTimes: {},
+          dailyWindow: { start: "19:00", end: "21:00" },
+          lunch: { start: "12:00", end: "13:00" },
+          dinner: { start: "18:00", end: "19:00" },
+          sleep: { start: "23:00", end: "07:00" },
+          timeZone: "UTC",
+        },
+      }]);
+    }
+    if (query.includes("FROM opening_tasks")) {
+      return Promise.resolve(includeExtraTask ? [makeRetestRow(), extraTaskRow] : [makeRetestRow()]);
+    }
+    if (query.includes("FROM opening_teaching_activities")) {
+      if (query.includes("inactive_retest") && !["accepted", "in_progress"].includes(retestStatus)) {
+        return Promise.resolve([{ task_id: id(40), kind: "inactive_retest" }]);
+      }
+      return Promise.resolve([]);
+    }
+    if (query.includes("FROM opening_hard_blocks") || query.includes("FROM opening_timetable_sessions")) {
+      return Promise.resolve([]);
+    }
+    if (query.includes("FROM workspaces")) return Promise.resolve([{ id: scope.workspaceId }]);
+    if (query.includes("opening_workspace_history_revisions") || query.includes("pg_advisory_xact_lock")) {
+      return Promise.resolve([]);
+    }
+    throw new Error(`Unexpected SQL: ${query}`);
+  }, {
+    json: (value: unknown) => value,
+    begin: async (run: (tx: TransactionSql) => unknown) => run(db as unknown as TransactionSql),
+  });
+
+  // 1) Release-only normal local replan (no extra tasks) for cancelled & invalidated retests -> returns draft (not no_change) and validates.
+  for (const status of ["cancelled", "invalidated"]) {
+    retestStatus = status;
+    includeExtraTask = false;
+    const releaseOnly = await proposeOpeningLocalPlan(
+      db as unknown as Sql,
+      scope,
+      { date: friday, expectedAcceptedVersion: 1, clientKey: `release-${status}` },
+      { now: fridayNow },
+    );
+    expect(releaseOnly.kind, status).toBe("draft");
+    if (releaseOnly.kind !== "draft") return;
+    expect(releaseOnly.draft.blocks, status).toEqual([]);
+    await expect(validateOpeningLocalReplan(db as unknown as TransactionSql, scope, {
+      day: friday,
+      state: { accepted_version: 1, accepted_blocks: [reservedBlock] },
+      draft: storedDraft!,
+      blocks: releaseOnly.draft.blocks,
+      now: fridayNow,
+    })).resolves.toBeUndefined();
+  }
+
+  // 2) preserveAll + delta taskIds also release the unstarted inactive retest and validate cleanly.
+  retestStatus = "invalidated";
+  includeExtraTask = true;
+  const preserveDelta = await proposeOpeningLocalPlan(
+    db as unknown as Sql,
+    scope,
+    { date: friday, expectedAcceptedVersion: 1, clientKey: "preserve-delta-inactive" },
+    { now: fridayNow, preserveAll: true, taskIds: [id(41)] },
+  );
+  expect(preserveDelta.kind).toBe("draft");
+  if (preserveDelta.kind !== "draft") return;
+  expect(preserveDelta.draft.blocks.some(b => b.taskId === id(40))).toBe(false);
+  expect(preserveDelta.draft.blocks).toEqual([expect.objectContaining({ taskId: id(41) })]);
+  await expect(validateOpeningLocalReplan(db as unknown as TransactionSql, scope, {
+    day: friday,
+    state: { accepted_version: 1, accepted_blocks: [reservedBlock] },
+    draft: storedDraft!,
+    blocks: preserveDelta.draft.blocks,
+    now: fridayNow,
+  })).resolves.toBeUndefined();
+
+  // 3) Forging inactiveRetestTaskIds when DB shows the retest is active MUST fail validation.
+  retestStatus = "accepted";
+  await expect(validateOpeningLocalReplan(db as unknown as TransactionSql, scope, {
+    day: friday,
+    state: { accepted_version: 1, accepted_blocks: [reservedBlock] },
+    draft: storedDraft!,
+    blocks: preserveDelta.draft.blocks,
+    now: fridayNow,
+  })).rejects.toMatchObject({ code: "CONFLICT", reason: "task_changed" });
+});

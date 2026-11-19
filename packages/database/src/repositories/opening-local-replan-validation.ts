@@ -1,10 +1,11 @@
 import type { TransactionSql } from "postgres";
-import { conversationPlanMetadataSchema, localReplanMetadataSchema, plannedBlockSchema, taskItemSchema, type PlannedBlock, type Scope } from "@aistudy/contracts";
+import { conversationPlanMetadataSchema, localReplanMetadataSchema, plannedBlockSchema, taskItemSchema, uuidSchema, type PlannedBlock, type Scope } from "@aistudy/contracts";
 import { localReplanFixedBlocks, samePlannedBlocks, taskNotBeforeAt } from "@aistudy/domain";
 import { OpeningPlanError } from "./opening-plan-error";
 import { assertOpeningPlanConstraints } from "./opening-plan-constraints";
 import {
   isBlockAllowedForTaskWindow,
+  isBlockWithinLocalDay,
   isScheduledStartAllowedOnDay,
   readLockedTaskPlanningWindows,
   readWorkspacePlanningTimeZone,
@@ -17,11 +18,25 @@ export async function validateOpeningLocalReplan(tx: TransactionSql, scope: Scop
   const conflict = (message: string, reason: "stale_version" | "task_changed" | "slot_expired" = "stale_version") => {
     throw new OpeningPlanError("CONFLICT", message, reason);
   };
-  const snapshot = input.draft.input_snapshot as { tasks?: unknown; localReplan?: unknown } | null;
+  const snapshot = input.draft.input_snapshot as {
+    tasks?: unknown;
+    localReplan?: unknown;
+    inactiveRetestTaskIds?: unknown;
+  } | null;
   const meta = localReplanMetadataSchema.safeParse(snapshot?.localReplan);
   const tasks = taskItemSchema.array().safeParse(snapshot?.tasks);
   const baseline = plannedBlockSchema.array().safeParse(input.state.accepted_blocks ?? []);
-  if (!meta.success || !tasks.success || !baseline.success) return conflict("invalid local replan metadata");
+  const parsedInactiveRetestIds = snapshot?.inactiveRetestTaskIds === undefined
+    ? { success: true as const, data: [] as string[] }
+    : uuidSchema.array().max(200).safeParse(snapshot.inactiveRetestTaskIds);
+  const normalizedInactiveIds = parsedInactiveRetestIds.success
+    ? parsedInactiveRetestIds.data.map(id => id.toLowerCase())
+    : [];
+  if (!meta.success || !tasks.success || !baseline.success || !parsedInactiveRetestIds.success
+    || new Set(normalizedInactiveIds).size !== normalizedInactiveIds.length) {
+    return conflict("invalid local replan metadata");
+  }
+  const inactiveRetestTaskIds = new Set(normalizedInactiveIds);
   if (meta.data.baseAcceptedVersion !== Number(input.state.accepted_version)
     || !samePlannedBlocks(meta.data.baselineBlocks, baseline.data)) return conflict("accepted baseline changed");
   if (tasks.data.some(task => !task.version) || new Set(tasks.data.map(task => task.id)).size !== tasks.data.length) return conflict("invalid task version snapshot");
@@ -35,6 +50,7 @@ export async function validateOpeningLocalReplan(tx: TransactionSql, scope: Scop
     preserveAll: meta.data.preserveAll,
     localDate: input.day,
     timeZone,
+    ...(inactiveRetestTaskIds.size ? { inactiveRetestTaskIds } : {}),
   });
   if (!samePlannedBlocks(expected.fixedBlocks, meta.data.fixedBlocks)
     || JSON.stringify([...expected.releasedTaskVersions].sort((a, b) => a.id.localeCompare(b.id))) !== JSON.stringify([...meta.data.releasedTaskVersions].sort((a, b) => a.id.localeCompare(b.id)))) return conflict("invalid preserved blocks");
@@ -63,8 +79,16 @@ export async function validateOpeningLocalReplan(tx: TransactionSql, scope: Scop
     || meta.data.fixedBlocks.some(fixed => Date.parse(block.start) < Date.parse(fixed.end) && Date.parse(block.end) > Date.parse(fixed.start)))) return conflict("new blocks overlap");
   const futureFixed = meta.data.fixedBlocks.filter(block => Date.parse(block.end) > input.now.getTime());
   if (fresh.some(block => futureFixed.some(fixed => fixed.taskId === block.taskId))) return conflict("task already has a future block");
-  const ids = [...new Set([...fresh, ...futureFixed].map(block => block.taskId).concat(meta.data.releasedTaskVersions.map(task => task.id)))];
+  const ids = [...new Set([
+    ...fresh,
+    ...futureFixed,
+  ].map(block => block.taskId)
+    .concat(meta.data.releasedTaskVersions.map(task => task.id))
+    .concat(parsedInactiveRetestIds.data))];
   const suggestionIds = new Set(((input.draft.suggested_tasks ?? []) as { id: string }[]).map(item => item.id));
+  if (parsedInactiveRetestIds.data.some(id => suggestionIds.has(id))) {
+    return conflict("invalid inactive retest task", "task_changed");
+  }
   const existingIds = ids.filter(id => !suggestionIds.has(id));
   if (existingIds.length) {
     const newIds = fresh.map(block => block.taskId).filter(id => !suggestionIds.has(id));
@@ -78,7 +102,9 @@ export async function validateOpeningLocalReplan(tx: TransactionSql, scope: Scop
     if (current.length !== existingIds.length || current.some(task => {
       const saved = tasks.data.find(original => original.id === task.id);
       const scheduledNew = fresh.some(block => block.taskId === task.id);
-      const taskFutureFixed = futureFixed.filter(block => block.taskId === task.id);
+      const unstartedFutureFixed = futureFixed.filter(
+        block => block.taskId === task.id && Date.parse(block.start) > input.now.getTime(),
+      );
       if (!saved || task.version !== saved.version || task.status !== saved.status
         || task.window.notBefore !== (saved.notBefore ?? null)
         || task.minutes !== saved.minutes
@@ -91,19 +117,13 @@ export async function validateOpeningLocalReplan(tx: TransactionSql, scope: Scop
       )) {
         return true;
       }
-      if (taskFutureFixed.length > 0 && task.status === "pending") {
-        if (task.window.hasRetestActivity) {
-          if (!task.window.retestActive) return true;
-          if (taskFutureFixed.some(block => !isBlockAllowedForTaskWindow(block, task.window, input.day, timeZone))) {
-            return true;
-          }
-        } else if (!meta.data.preserveAll) {
-          if (taskFutureFixed.some(block =>
-            Date.parse(block.start) > input.now.getTime()
-            && !isBlockAllowedForTaskWindow(block, task.window, input.day, timeZone),
-          )) {
-            return true;
-          }
+      if (inactiveRetestTaskIds.has(task.id.toLowerCase()) && (!task.window.hasRetestActivity || task.window.retestActive)) {
+        return true;
+      }
+      if (unstartedFutureFixed.length > 0 && task.status === "pending" && task.window.hasRetestActivity) {
+        if (!task.window.retestActive) return true;
+        if (unstartedFutureFixed.some(block => !isBlockAllowedForTaskWindow(block, task.window, input.day, timeZone))) {
+          return true;
         }
       }
       if (!scheduledNew) return false;
@@ -122,7 +142,10 @@ export async function validateOpeningLocalReplan(tx: TransactionSql, scope: Scop
     return (earliest === null || Date.parse(earliest) <= startMs)
       && endMs - startMs === task.minutes * 60_000
       && (!task.dueAt || endMs <= Date.parse(task.dueAt))
-      && isScheduledStartAllowedOnDay(task.retest?.scheduledStartAt ?? null, input.day, timeZone);
+      && (!task.retest?.scheduledStartAt || (
+        isScheduledStartAllowedOnDay(task.retest.scheduledStartAt, input.day, timeZone)
+        && isBlockWithinLocalDay(block, input.day, timeZone)
+      ));
   }))) return conflict("unknown or deferred new task", "task_changed");
   await assertOpeningPlanConstraints(tx, scope, input.day, fresh, true, meta.data.explicitFree);
   await assertOpeningPlanConstraints(tx, scope, input.day, futureFixed, false);

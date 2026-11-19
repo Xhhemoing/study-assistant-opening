@@ -1,5 +1,5 @@
 import { openingPlanningSettingsSchema, type Scope } from "@aistudy/contracts";
-import { isInstantOnLocalDay, resolveWorkspaceTimeZone } from "@aistudy/domain";
+import { isInstantOnLocalDay, resolveLocalDayBounds, resolveWorkspaceTimeZone } from "@aistudy/domain";
 import type { TransactionSql } from "postgres";
 import { OpeningPlanError } from "./opening-plan-error";
 import { courseRouteDelayedProtocolSchema } from "./opening-course-route-retest-state";
@@ -280,8 +280,30 @@ export function isScheduledStartAllowedOnDay(
 }
 
 /**
+ * Validates that a block's start and end fall within the target local calendar day
+ * in the workspace timeZone: `[dayStart, nextDayStart]` with `start < nextDayStart`.
+ */
+export function isBlockWithinLocalDay(
+  block: { start: string; end: string },
+  day: string,
+  timeZone: string,
+): boolean {
+  const startMs = Date.parse(block.start);
+  const endMs = Date.parse(block.end);
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return false;
+  try {
+    const { dayStart, nextDayStart } = resolveLocalDayBounds(day, timeZone);
+    const dayStartMs = dayStart.getTime();
+    const nextDayStartMs = nextDayStart.getTime();
+    return startMs >= dayStartMs && startMs < nextDayStartMs && endMs <= nextDayStartMs;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Validates that a planned block satisfies a task's current planning window:
- * same-day explicit reservation (in workspace timeZone), start floor, and real hard deadline.
+ * same-day explicit reservation + block bounds (in workspace timeZone), start floor, and real hard deadline.
  */
 export function isBlockAllowedForTaskWindow(
   block: { start: string; end: string },
@@ -289,10 +311,13 @@ export function isBlockAllowedForTaskWindow(
   day: string,
   timeZone: string,
 ): boolean {
-  if (!isScheduledStartAllowedOnDay(window.scheduledStartAt, day, timeZone)) return false;
   const startMs = Date.parse(block.start);
   const endMs = Date.parse(block.end);
   if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return false;
+  if (window.scheduledStartAt) {
+    if (!isScheduledStartAllowedOnDay(window.scheduledStartAt, day, timeZone)) return false;
+    if (!isBlockWithinLocalDay(block, day, timeZone)) return false;
+  }
   const earliestStartMs = effectivePlanningStartFloorMs(window);
   if (earliestStartMs !== null && startMs < earliestStartMs) return false;
   const dueMs = window.dueAt ? Date.parse(window.dueAt) : null;
