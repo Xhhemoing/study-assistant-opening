@@ -1087,4 +1087,252 @@ describe("createAssetGraphStore", () => {
       announcement: "已更新关联，暂无新增学习资料",
     });
   });
+
+  it("clears source S, derived note D, pinnedComparison, and detail immediately on neighbor NOT_FOUND (both paginated and initial expand) and reloads current scope safely", async () => {
+    const SOURCE_S = SOURCE_1_ID;
+    const DERIVED_NOTE_D = DOC_ID;
+    const VISIBLE_REQ = REQ_ID;
+    const VISIBLE_SOURCE = SOURCE_2_ID;
+    const rootDerivedEdgeId = `recorded:linkedTo:${DERIVED_NOTE_D}:${SOURCE_S}`;
+    const neighborEdgeId = `recorded:usesSource:${VISIBLE_REQ}:${SOURCE_S}`;
+
+    let sourceDeleted = false;
+    let deferNextRootsReload = false;
+    let resolveDeferredReload: ((page: AssetGraphPage) => void) | null = null;
+    let signalReloadStarted: (() => void) | null = null;
+    let failReloadWith: AssetGraphRequestError | null = null;
+    const recordedRootsQueries: AssetGraphQuery[] = [];
+
+    const transport: AssetGraphTransport = async query => {
+      if (query.op === "roots") {
+        recordedRootsQueries.push(query);
+        if (failReloadWith) {
+          throw failReloadWith;
+        }
+        const buildReloadPage = (): AssetGraphPage =>
+          sourceDeleted
+            ? {
+                asOf: "2026-03-13T00:05:00.000Z",
+                nodes: [{ id: VISIBLE_SOURCE, kind: "source", label: "仍可见的有机化学参考书" }],
+                edges: [],
+                page: { nextCursor: null },
+                completeness: "complete",
+                warnings: [],
+                detail: null,
+              }
+            : {
+                asOf: "2026-03-13T00:00:00.000Z",
+                nodes: [
+                  { id: SOURCE_S, kind: "source", label: "待删除资料 S" },
+                  { id: DERIVED_NOTE_D, kind: "document", label: "引用 S 的派生笔记 D" },
+                  { id: VISIBLE_SOURCE, kind: "source", label: "仍可见的有机化学参考书" },
+                ],
+                edges: [
+                  {
+                    id: rootDerivedEdgeId,
+                    from: DERIVED_NOTE_D,
+                    to: SOURCE_S,
+                    relation: "linkedTo",
+                    basis: "recorded",
+                  },
+                ],
+                page: { nextCursor: null },
+                completeness: "complete",
+                warnings: [],
+                detail: null,
+              };
+
+        if (deferNextRootsReload) {
+          deferNextRootsReload = false;
+          signalReloadStarted?.();
+          return new Promise<AssetGraphPage>(resolve => {
+            resolveDeferredReload = resolve;
+          });
+        }
+        return buildReloadPage();
+      }
+
+      if (query.op === "detail" && query.focus === DERIVED_NOTE_D) {
+        return {
+          asOf: "2026-03-13T00:00:01.000Z",
+          nodes: [{ id: DERIVED_NOTE_D, kind: "document", label: "引用 S 的派生笔记 D" }],
+          edges: [],
+          page: { nextCursor: null },
+          completeness: "complete",
+          warnings: [],
+          detail: {
+            id: DERIVED_NOTE_D,
+            learnerState: null,
+            requirementStatus: null,
+            notes: ["基于资料 S 整理的派生摘要"],
+            actions: [],
+          },
+        };
+      }
+
+      if (query.op === "neighbors" && query.focus === SOURCE_S) {
+        if (sourceDeleted) {
+          throw new AssetGraphRequestError("NOT_FOUND", "请求的资源不可用。", 404);
+        }
+        return {
+          asOf: "2026-03-13T00:00:02.000Z",
+          nodes: [
+            { id: SOURCE_S, kind: "source", label: "待删除资料 S" },
+            { id: VISIBLE_REQ, kind: "requirement", label: "第3章 有机反应：酯化" },
+          ],
+          edges: [
+            {
+              id: neighborEdgeId,
+              from: VISIBLE_REQ,
+              to: SOURCE_S,
+              relation: "usesSource",
+              basis: "recorded",
+            },
+          ],
+          page: { nextCursor: "source-s-neighbors-p2" },
+          completeness: "complete",
+          warnings: [],
+          detail: null,
+        };
+      }
+
+      throw new Error(`Unexpected query: ${JSON.stringify(query)}`);
+    };
+
+    // Part 1: Paginated neighbor request (with cursor) hits NOT_FOUND after S is deleted
+    const store = createAssetGraphStore(createAssetGraphClient(transport), {
+      lens: "assets",
+      selectedKinds: ["source", "document"],
+      searchQuery: "有机",
+    });
+    await store.initialize();
+    await store.loadDetail(DERIVED_NOTE_D);
+    store.togglePinNode(DERIVED_NOTE_D);
+    await store.expandNode(SOURCE_S, "in");
+
+    expect(store.getState().rootIds).toEqual([SOURCE_S, DERIVED_NOTE_D, VISIBLE_SOURCE]);
+    expect(store.getState().pinnedComparison?.node.id).toBe(DERIVED_NOTE_D);
+    expect(store.getState().expandedCenters[SOURCE_S]?.nextCursor).toBe("source-s-neighbors-p2");
+
+    // Delete S on server -> D is also unreadable; loadMoreNeighbors(S) sends cursor and receives 404 NOT_FOUND
+    sourceDeleted = true;
+    deferNextRootsReload = true;
+    const reloadStarted = new Promise<void>(resolve => {
+      signalReloadStarted = resolve;
+    });
+    const pagedPromise = store.loadMoreNeighbors(SOURCE_S);
+
+    await reloadStarted;
+
+    // Immediately before reload resolves: S, D, edges, expandedCenters, pinnedComparison, and detail must already be wiped
+    const midReload = store.getState();
+    expect(midReload.nodesById).toEqual({});
+    expect(midReload.edgesById).toEqual({});
+    expect(midReload.rootIds).toEqual([]);
+    expect(midReload.rootEdgeIds).toEqual([]);
+    expect(midReload.expandedCenters).toEqual({});
+    expect(midReload.pinnedComparison).toBeNull();
+    expect(midReload.detail).toBeNull();
+    expect(midReload.selectedNodeId).toBeNull();
+    expect(midReload.notice).toBe(NOT_FOUND_SAFE_NOTICE);
+    expect(midReload.loadingRoots).toBe(true);
+
+    resolveDeferredReload!({
+      asOf: "2026-03-13T00:05:00.000Z",
+      nodes: [{ id: VISIBLE_SOURCE, kind: "source", label: "仍可见的有机化学参考书" }],
+      edges: [],
+      page: { nextCursor: null },
+      completeness: "complete",
+      warnings: [],
+      detail: null,
+    });
+    const pagedResult = await pagedPromise;
+    expect(pagedResult).toEqual({ applied: false, reason: "not_found" });
+
+    const afterPaged = store.getState();
+    expect(afterPaged.nodesById[SOURCE_S]).toBeUndefined();
+    expect(afterPaged.nodesById[DERIVED_NOTE_D]).toBeUndefined();
+    expect(afterPaged.nodesById[VISIBLE_REQ]).toBeUndefined();
+    expect(afterPaged.rootIds).toEqual([VISIBLE_SOURCE]);
+    expect(afterPaged.rootEdgeIds).toEqual([]);
+    expect(afterPaged.edgesById).toEqual({});
+    expect(afterPaged.expandedCenters).toEqual({});
+    expect(afterPaged.pinnedComparison).toBeNull();
+    expect(afterPaged.detail).toBeNull();
+    expect(afterPaged.selectedNodeId).toBeNull();
+    expect(afterPaged.notice).toBe(NOT_FOUND_SAFE_NOTICE);
+    expect(afterPaged.error).toBeNull();
+    expect(getVisibleNodes(afterPaged).map(n => n.id)).toEqual([VISIBLE_SOURCE]);
+    expect(recordedRootsQueries.at(-1)).toMatchObject({
+      op: "roots",
+      lens: "assets",
+      kinds: ["source", "document"],
+      q: "有机",
+    });
+    expect((recordedRootsQueries.at(-1) as { cursor?: string }).cursor).toBeUndefined();
+
+    // Part 2: Initial expandNode(S) (without cursor) hits NOT_FOUND -> also wipes S, D, pinnedComparison, detail and reloads
+    sourceDeleted = false;
+    const initialExpandStore = createAssetGraphStore(createAssetGraphClient(transport), {
+      lens: "assets",
+    });
+    await initialExpandStore.initialize();
+    await initialExpandStore.loadDetail(DERIVED_NOTE_D);
+    initialExpandStore.togglePinNode(DERIVED_NOTE_D);
+
+    expect(initialExpandStore.getState().rootIds).toContain(DERIVED_NOTE_D);
+    expect(initialExpandStore.getState().pinnedComparison?.node.id).toBe(DERIVED_NOTE_D);
+    expect(initialExpandStore.getState().detail?.id).toBe(DERIVED_NOTE_D);
+
+    sourceDeleted = true;
+    const initialResult = await initialExpandStore.expandNode(SOURCE_S, "in");
+    expect(initialResult).toEqual({ applied: false, reason: "not_found" });
+
+    const afterInitial = initialExpandStore.getState();
+    expect(afterInitial.nodesById[SOURCE_S]).toBeUndefined();
+    expect(afterInitial.nodesById[DERIVED_NOTE_D]).toBeUndefined();
+    expect(afterInitial.rootIds).toEqual([VISIBLE_SOURCE]);
+    expect(afterInitial.edgesById).toEqual({});
+    expect(afterInitial.expandedCenters).toEqual({});
+    expect(afterInitial.pinnedComparison).toBeNull();
+    expect(afterInitial.detail).toBeNull();
+    expect(afterInitial.notice).toBe(NOT_FOUND_SAFE_NOTICE);
+    expect(afterInitial.error).toBeNull();
+
+    // Part 3: If automatic roots reload also fails, stops safely in error state without looping or leaking S/D
+    recordedRootsQueries.length = 0;
+    sourceDeleted = false;
+    const failReloadStore = createAssetGraphStore(createAssetGraphClient(transport), {
+      lens: "assets",
+    });
+    await failReloadStore.initialize();
+    failReloadStore.togglePinNode(DERIVED_NOTE_D);
+    expect(recordedRootsQueries).toHaveLength(1);
+
+    sourceDeleted = true;
+    failReloadWith = new AssetGraphRequestError("CURSOR_STALE", "当前视图重读失败，请稍后重试。", 409);
+    const failedReloadResult = await failReloadStore.expandNode(SOURCE_S, "in");
+    expect(failedReloadResult).toEqual({ applied: false, reason: "not_found" });
+    // Bounded: 1 initial roots + 1 automatic reload attempt (no CURSOR_STALE loop)
+    expect(recordedRootsQueries).toHaveLength(2);
+
+    const afterFailedReload = failReloadStore.getState();
+    expect(afterFailedReload.nodesById).toEqual({});
+    expect(afterFailedReload.edgesById).toEqual({});
+    expect(afterFailedReload.rootIds).toEqual([]);
+    expect(afterFailedReload.pinnedComparison).toBeNull();
+    expect(afterFailedReload.detail).toBeNull();
+    expect(afterFailedReload.lastFailedOperation).toEqual({ op: "roots" });
+    expect(afterFailedReload.error).toEqual({
+      code: "CURSOR_STALE",
+      message: "当前视图重读失败，请稍后重试。",
+    });
+
+    // Recoverable via manual retryCurrentView once backend recovers
+    failReloadWith = null;
+    await failReloadStore.retryCurrentView();
+    expect(recordedRootsQueries).toHaveLength(3);
+    expect(failReloadStore.getState().error).toBeNull();
+    expect(failReloadStore.getState().rootIds).toEqual([VISIBLE_SOURCE]);
+  });
 });

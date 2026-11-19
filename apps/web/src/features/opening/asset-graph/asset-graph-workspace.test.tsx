@@ -1682,4 +1682,73 @@ describe("AssetGraphWorkspace", () => {
     expect(listReqCard.textContent).toContain("课程要求：待独立检验");
     expect(listReqCard.textContent).not.toContain("已达到课程要求");
   });
+
+  it("clears derived note D and pinned comparison, reloads visible roots, and falls back focus safely on neighbor NOT_FOUND", async () => {
+    let sourceDeleted = false;
+    const transport: AssetGraphTransport = async query => {
+      if (query.op === "roots") {
+        if (sourceDeleted) {
+          return {
+            asOf: "2026-03-13T00:05:00.000Z",
+            nodes: [{ id: SOURCE_2_ID, kind: "source", label: "仍可见的有机化学参考书" }],
+            edges: [],
+            page: { nextCursor: null },
+            completeness: "complete",
+            warnings: [],
+            detail: null,
+          };
+        }
+        return {
+          asOf: "2026-03-13T00:00:00.000Z",
+          nodes: [
+            { id: SOURCE_1_ID, kind: "source", label: "待删除资料 S" },
+            { id: DOC_ID, kind: "document", label: "引用 S 的派生笔记 D" },
+            { id: SOURCE_2_ID, kind: "source", label: "仍可见的有机化学参考书" },
+          ],
+          edges: [],
+          page: { nextCursor: null },
+          completeness: "complete",
+          warnings: [],
+          detail: null,
+        };
+      }
+      if (query.op === "neighbors" && query.focus === SOURCE_1_ID) {
+        throw new AssetGraphRequestError("NOT_FOUND", "请求的资源不可用。", 404);
+      }
+      throw new Error(`Unexpected query: ${JSON.stringify(query)}`);
+    };
+
+    await renderWorkspace({ transport });
+
+    // Pin derived note D for comparison
+    await act(async () => {
+      findButton("固定对比", nodeCard(DOC_ID)).click();
+    });
+    await flush();
+    expect(container.querySelector('section[aria-label="对比参考卡片"]')?.textContent).toContain(
+      "引用 S 的派生笔记 D",
+    );
+
+    // Focus expand button on source S, delete S on server, click expand -> 404 NOT_FOUND
+    const expandSourceBtn = findButton("入边探索", nodeCard(SOURCE_1_ID));
+    act(() => {
+      expandSourceBtn.focus();
+    });
+    expect(document.activeElement).toBe(expandSourceBtn);
+
+    sourceDeleted = true;
+    await act(async () => {
+      expandSourceBtn.click();
+    });
+    await flush();
+
+    // S, derived note D, and pinned comparison are gone; reloaded visible source remains; safe 404 notice shown; focus falls back off body
+    expect(container.querySelector(`[data-node-card="${SOURCE_1_ID}"]`)).toBeNull();
+    expect(container.querySelector(`[data-node-card="${DOC_ID}"]`)).toBeNull();
+    expect(container.querySelector('section[aria-label="对比参考卡片"]')).toBeNull();
+    expect(nodeCard(SOURCE_2_ID).textContent).toContain("仍可见的有机化学参考书");
+    expect(container.textContent).toContain("所选内容不可用或不在当前范围");
+    expect(document.activeElement).not.toBe(document.body);
+    expect((document.activeElement as HTMLElement | null)?.getAttribute("tabindex")).toBe("-1");
+  });
 });

@@ -658,6 +658,20 @@ export function applyPrivacyInvalidationReset(
   };
 }
 
+export function applyNotFoundReloadReset(
+  state: AssetGraphState,
+  notice = NOT_FOUND_SAFE_NOTICE,
+): AssetGraphState {
+  const cleared = clearGraphCollections(state, {
+    preserveSelectedNodeId: false,
+    preserveSameContextHelpers: false,
+  });
+  return {
+    ...cleared,
+    notice,
+  };
+}
+
 export function applyRootsPage(
   state: AssetGraphState,
   page: AssetGraphPage,
@@ -1320,6 +1334,12 @@ export function createAssetGraphStore(
     });
   }
 
+  async function restartAfterNotFoundNeighbors(): Promise<ExpandNodeResult> {
+    emit(applyNotFoundReloadReset(state));
+    await loadRoots({ cursor: undefined, allowCursorStaleRestart: false });
+    return { applied: false, reason: "not_found" };
+  }
+
   async function loadRoots(options?: {
     cursor?: string;
     append?: boolean;
@@ -1440,8 +1460,7 @@ export function createAssetGraphStore(
         return { applied: false, reason: "superseded" };
       }
       if (error instanceof AssetGraphRequestError && error.code === "NOT_FOUND") {
-        emit(applyNotFoundForFocus(state, focusId, { generation, requestSeq }));
-        return { applied: false, reason: "not_found" };
+        return restartAfterNotFoundNeighbors();
       }
       if (error instanceof AssetGraphRequestError && error.code === "CURSOR_STALE" && allowRestart) {
         return restartAfterCursorStaleNeighbors({
