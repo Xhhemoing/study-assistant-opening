@@ -360,3 +360,9 @@ export {
   type OpeningWritingWorkspaceRepository,
   type WritingCommandResult,
 } from "./repositories/opening-writing-workspace";
+export {
+  createOpeningDayAdjustmentRepository,
+  computeDayAdjustmentConfirmPayloadHash,
+  type DayAdjustmentFaultStage,
+  type OpeningDayAdjustmentOptions,
+} from "./repositories/opening-day-adjustment";

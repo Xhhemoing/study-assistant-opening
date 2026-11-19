@@ -8,6 +8,7 @@ import { createOpeningApi, OpeningApiError } from "../client/api";
 import { useDueReviewCount } from "../shell/review-count";
 import { TodayProgress } from "./today-progress";
 import { LongTermLearningCard } from "./long-term-learning-card";
+import { TodayDayAdjustment } from "./today-day-adjustment";
 import { currentTodayCourse, hasNoTodayCourses, type TodayResumeState } from "./today-read";
 import { TodayNoCourses, TodayResumeBody } from "./today-resume-view";
 import { localDateKey, resolveTodayTimeZone, TodayPlanView } from "./today-view";
@@ -439,6 +440,7 @@ export function TodayDashboard({
           ) : null}
         </div> : ctaError ? <p role="alert" className="px-5 pt-3 text-sm text-danger">{ctaError}</p> : null}
         {!planning ? <TodayProgress api={api} timeZone={timeZone} reloadToken={reloadToken} /> : null}
+        {!planning ? <TodayDayAdjustment date={localDateKey(new Date(), timeZone)} timeZone={timeZone} onChanged={rereadQueue} /> : null}
         {!planning ? <LongTermLearningCard date={localDateKey(new Date(), timeZone)} onChanged={rereadQueue} /> : null}
         {!planning && state.courses?.status === "ready" ? <TodayCourseList courses={state.courses.items} /> : null}
         <div className="flex min-h-0 flex-1 flex-col">

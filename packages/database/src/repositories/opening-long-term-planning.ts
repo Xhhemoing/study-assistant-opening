@@ -8,7 +8,7 @@ import type { Sql, TransactionSql } from "postgres";
 import { readLearningGoals, updateLearningGoalInTx } from "./opening-learning-goals";
 import { createOpeningPlansRepository, dailyDraftAdvisoryLockKeys, mapOpeningPlanDraft } from "./opening-plans";
 import { proposeOpeningLocalPlan } from "./opening-local-replan";
-import { calculateSpanTutorBudgetUsage } from "./opening-learning-capacity-usage";
+import { calculateSpanTutorBudgetUsage, evaluateDayPlanCapacity } from "./opening-learning-capacity-usage";
 import { readOpeningLearningCapacity, reserveOpeningLearningActivityBudget } from "./opening-learning-capacity";
 import { learningError, lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { readLearningCardSessions } from "./opening-long-term-card-session";
@@ -62,10 +62,25 @@ async function overview(db: Sql, scope: Scope, date: string | undefined, now: Da
   const warnings = ["共同预算包含已接受任务、复测与本次活动。缺席不代表能力下降；已接受安排保持原样。"];
   if (!state.budget) warnings.push("请明确设置工作区每日共同预算后生成计划；课程周预算不会自动相加成可用时间。");
   if (state.budget && state.usedMinutes > state.budget.dailyMinutes - state.budget.bufferMinutes) warnings.push("已承诺事项超过当前预算；保留原记录，请明确选择调整，当前不再追加安排。");
+  if (state.dayException) warnings.push(`今日临时可用时长为 ${state.dayException.remainingMinutes} 分钟；超出部分需明确改期或调整，已有安排不会自动改动。`);
   if (goals.some(goal => ["paused", "archived", "stopped"].includes(goal.lifecycle))) warnings.push("暂停、归档和停止目标不生成新建议；已接受事项保留，取消请使用原任务操作。");
+  const baseRemaining = state.budget ? Math.max(0, state.budget.dailyMinutes - state.budget.bufferMinutes - state.usedMinutes) : 0;
+  const exceptionRemaining = state.dayException
+    ? (() => {
+      const evaluated = evaluateDayPlanCapacity({
+        day: { localDate: state.localDate, timeZone: state.timeZone },
+        budget: state.budget,
+        dayException: state.dayException,
+        activities: state.activities,
+        tasks: state.tasks,
+        afterBlocks: state.blocks,
+      });
+      return evaluated.usageUncertain ? 0 : Math.floor(Math.max(0, evaluated.availableLowerMinutes - evaluated.requiredMinutes));
+    })()
+    : baseRemaining;
   return learningManagementOverviewSchema.parse({ date: state.localDate, timeZone: state.timeZone, budget: state.budget, acceptedVersion: accepted?.acceptedVersion ?? 0,
     acceptedBlocks: accepted?.blocks ?? [], committedMinutes: state.usedMinutes,
-    remainingMinutes: state.budget ? Math.max(0, state.budget.dailyMinutes - state.budget.bufferMinutes - state.usedMinutes) : 0,
+    remainingMinutes: state.dayException ? Math.min(baseRemaining, exceptionRemaining) : baseRemaining,
     overcommittedMinutes: state.budget ? Math.max(0, state.usedMinutes + state.budget.bufferMinutes - state.budget.dailyMinutes) : 0,
     tasks, recovery: { ...recovery, agenda, href: activity ? (!agenda || agenda.resumable ? activityHref(activity) : null) : task ? `/opening/today?task=${task.id}` : null }, warnings, cardSessions: sessions,
     maintenanceTasks: maintenance.flatMap(row => { const match = /^planner:\d{4}-\d{2}-\d{2}:maintenance:([a-f0-9-]{36}):([a-f0-9-]{36})$/.exec(String(row.client_key));
@@ -114,11 +129,25 @@ export function createOpeningLongTermPlanningRepository(sql: Sql, clock = () => 
         const fixedTasks = state.tasks.filter(task => task.status === "done" || acceptedIds.has(String(task.id)));
         const fixedMinutes = calculateSpanTutorBudgetUsage(state, state.activities, fixedTasks, state.blocks);
         const constraints = [...deriveDayBlocks(input.date, state.settings, await repo.listTimetable(scope)), ...(await repo.listHardBlocks(scope, input.date)).filter(block => block.kind === "locked")];
-        const planningNow = Math.max(now.getTime() + 60000, state.bounds.dayStart.getTime());
+        const exceptionFloor = state.dayException ? Date.parse(state.dayException.effectiveAt) : 0;
+        const planningNow = Math.max(now.getTime() + 60000, state.bounds.dayStart.getTime(), exceptionFloor);
         const future = constraints.map(block => block.kind === "free" ? { ...block, start: new Date(Math.max(Date.parse(block.start), planningNow)).toISOString() } : block)
           .filter(block => Date.parse(block.end) > Date.parse(block.start));
+        const exceptionCapMinutes = state.dayException
+          ? (() => {
+            const evaluated = evaluateDayPlanCapacity({
+              day: { localDate: state.localDate, timeZone: state.timeZone },
+              budget: state.budget,
+              dayException: state.dayException,
+              activities: state.activities,
+              tasks: state.tasks,
+              afterBlocks: state.blocks,
+            });
+            return evaluated.usageUncertain ? 0 : Math.max(0, evaluated.availableLowerMinutes - evaluated.requiredMinutes);
+          })()
+          : null;
         const capacity = allocateLearningCapacity({ dailyMinutes: state.budget.dailyMinutes, bufferMinutes: state.budget.bufferMinutes, spentMinutes: fixedMinutes,
-          free: [...future, ...state.blocks.map(block => ({ start: block.start, end: block.end, kind: "locked" as const }))], accepted: [], reservations: [] });
+          free: [...future, ...state.blocks.map(block => ({ start: block.start, end: block.end, kind: "locked" as const }))], accepted: [], reservations: [], exceptionCapMinutes });
         const free = capacity.free;
         if (!free.length) return { overview: await overview(db, scope, input.date, now), draft: null };
         const extra = await buildLongTermSuggestions(tx, scope, { date: input.date, timeZone: state.timeZone, now, goals: allowed, tasks, exactVerificationEnabled: options.exactVerificationEnabled });

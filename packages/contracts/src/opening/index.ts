@@ -12,6 +12,7 @@ export {
   isoDateTimeSchema,
   calendarDateSchema,
   sha256HexSchema,
+  ordinaryPlanClientKeySchema,
   scopeSchema,
   apiFailureSchema,
   type Scope,
@@ -313,3 +314,4 @@ export * from "./question-identity";
 export * from "./question-evaluation";
 export * from "./asset-graph";
 export * from "./writing-activity";
+export * from "./day-adjustment";

@@ -1,17 +1,42 @@
-import { learningManagementDraftMetadataSchema, plannedBlockSchema, type Scope } from "@aistudy/contracts";
+import {
+  DAY_ADJUSTMENT_STRATEGY_VERSION,
+  DAY_EXCEPTION_STRATEGY_VERSION,
+  isReservedDayAdjustmentProposeKey,
+  isReservedDayExceptionProposeKey,
+  learningManagementDraftMetadataSchema,
+  plannedBlockSchema,
+  type Scope,
+} from "@aistudy/contracts";
 import type { TransactionSql } from "postgres";
 import { resolveLocalDayBounds } from "@aistudy/domain";
-import { readOpeningLearningCapacity } from "./opening-learning-capacity";
-import { calculateSpanTutorBudgetUsage } from "./opening-learning-capacity-usage";
+import { collectNonDaySpilloverBlocks, readOpeningLearningCapacity } from "./opening-learning-capacity";
+import { calculateSpanTutorBudgetUsage, evaluateDayPlanCapacity } from "./opening-learning-capacity-usage";
 import { assertLearningGoalAction } from "./opening-learning-goals";
 import { learningError } from "./opening-learning-facts";
+import { OpeningPlanError } from "./opening-plan-error";
 
 /** Existing accept transaction owns locks and historical receipt replay before this check. */
 export async function assertOpeningLearningManagementDraft(tx: TransactionSql, scope: Scope, draft: Record<string, unknown>, now: Date) {
-  const snapshot = draft.input_snapshot as { learningManagement?: unknown } | null;
+  const snapshot = draft.input_snapshot as { learningManagement?: unknown; dayException?: unknown; dayAdjustment?: unknown } | null;
+  const reasons = draft.reasons && typeof draft.reasons === "object" && !Array.isArray(draft.reasons)
+    ? (draft.reasons as { dayException?: unknown; dayAdjustment?: unknown })
+    : null;
+  if (
+    draft.strategy_version === DAY_EXCEPTION_STRATEGY_VERSION
+    || draft.strategy_version === DAY_ADJUSTMENT_STRATEGY_VERSION
+    || snapshot?.dayException !== undefined
+    || snapshot?.dayAdjustment !== undefined
+    || reasons?.dayException !== undefined
+    || reasons?.dayAdjustment !== undefined
+    || isReservedDayExceptionProposeKey(draft.propose_client_key, draft.strategy_version, draft.input_snapshot)
+    || isReservedDayAdjustmentProposeKey(draft.propose_client_key, draft.strategy_version, draft.input_snapshot, draft.id)
+  ) {
+    throw new OpeningPlanError("CONFLICT", "当日临时调整记录不能通过普通单日计划入口确认。", "stale_version");
+  }
   const meta = snapshot?.learningManagement == null ? null : learningManagementDraftMetadataSchema.parse(snapshot.learningManagement);
   const current = await readOpeningLearningCapacity(tx, scope, now);
-  const day = meta?.localDate ?? (draft.day instanceof Date ? draft.day.toISOString().slice(0, 10) : String(draft.day).slice(0, 10));
+  const draftDay = draft.day instanceof Date ? draft.day.toISOString().slice(0, 10) : String(draft.day).slice(0, 10);
+  const day = meta?.localDate ?? draftDay;
   const state = await readOpeningLearningCapacity(tx, scope, resolveLocalDayBounds(day, current.timeZone).dayStart);
   const blocks = plannedBlockSchema.array().parse(draft.blocks ?? []);
   const fresh = blocks.filter(block => !state.blocks.some(old => old.taskId === block.taskId && old.start === block.start && old.end === block.end));
@@ -22,6 +47,35 @@ export async function assertOpeningLearningManagementDraft(tx: TransactionSql, s
   if (courseIds.length) {
     const active = await tx`SELECT id FROM courses WHERE id=ANY(${courseIds}::uuid[]) AND workspace_id=${scope.workspaceId} AND archived_at IS NULL FOR SHARE`;
     if (active.length !== courseIds.length) throw learningError("CONFLICT", "新安排关联的课程已归档或不可访问，请重新选择；已有安排保留。");
+  }
+  if (state.dayException && fresh.length) {
+    if (state.dayException.timeZone !== state.timeZone) {
+      throw new OpeningPlanError("CONFLICT", "今日临时调整记录的时区与当前工作区时区不一致，请重新声明今日剩余时长。", "stale_version");
+    }
+    const effectiveAtMs = Date.parse(state.dayException.effectiveAt);
+    if (fresh.some((block) => Date.parse(block.start) < effectiveAtMs)) {
+      throw new OpeningPlanError("CONFLICT", "新增安排时段早于今日临时调整时刻，请重新生成后再确认。", "slot_expired");
+    }
+    const spilloverBlocks = collectNonDaySpilloverBlocks({
+      day: draftDay,
+      dayStartMs: state.bounds.dayStart.getTime(),
+      nextDayStartMs: state.bounds.nextDayStart.getTime(),
+      planEntries: state.planEntries,
+    });
+    const evaluated = evaluateDayPlanCapacity({
+      day: { localDate: state.localDate, timeZone: state.timeZone },
+      budget: state.budget,
+      dayException: state.dayException,
+      activities: state.activities,
+      tasks: state.tasks,
+      afterBlocks: [...blocks, ...spilloverBlocks],
+    });
+    if (evaluated.usageUncertain) {
+      throw new OpeningPlanError("CONFLICT", "当前存在跨过今日临时调整时刻的学习记录，剩余容量暂无法确认，请先刷新核对。", "stale_version");
+    }
+    if (evaluated.shortfallMinutes > 0) {
+      throw new OpeningPlanError("CONFLICT", "新的安排超出今日临时可用时长上限，请先调整今日安排；已接受事项保留。", "stale_version");
+    }
   }
   if (!current.budget && !meta) return;
   if (!state.budget || meta && state.budget.revision !== meta.budgetRevision) throw learningError("CONFLICT", "共同预算已变化，请重新预览后确认。");

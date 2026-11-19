@@ -509,6 +509,7 @@ describe("projectCourseRoutePlanningWindow", () => {
           return Promise.resolve([{ accepted_version: acceptedVersion, accepted_blocks: [], hard_blocks_fingerprint: "fp" }]);
         }
         if (query.includes("SELECT * FROM opening_plan_drafts")) return Promise.resolve([draftRow]);
+        if (query.includes("FROM opening_plan_drafts") && query.includes("strategy_version")) return Promise.resolve([]);
         if (query.includes("FROM opening_plan_acceptances")) return Promise.resolve([]);
         if (query.includes("FROM opening_hard_blocks") || query.includes("FROM opening_timetable_sessions")) return Promise.resolve([]);
         if (query.includes("FROM opening_teaching_activities")
@@ -646,6 +647,7 @@ describe("projectCourseRoutePlanningWindow", () => {
           return Promise.resolve([{ accepted_version: acceptedVersion, accepted_blocks: [], hard_blocks_fingerprint: "fp" }]);
         }
         if (query.includes("SELECT * FROM opening_plan_drafts")) return Promise.resolve([draftRow]);
+        if (query.includes("FROM opening_plan_drafts") && query.includes("strategy_version")) return Promise.resolve([]);
         if (query.includes("FROM opening_plan_acceptances")) return Promise.resolve([]);
         if (query.includes("FROM opening_hard_blocks") || query.includes("FROM opening_timetable_sessions")) return Promise.resolve([]);
         if (query.includes("FROM workspace_preferences")) {
@@ -902,6 +904,7 @@ describe("projectCourseRoutePlanningWindow", () => {
         return Promise.resolve([{ accepted_version: acceptedVersion, accepted_blocks: [], hard_blocks_fingerprint: "fp" }]);
       }
       if (query.includes("SELECT * FROM opening_plan_drafts")) return Promise.resolve([draftRow]);
+      if (query.includes("FROM opening_plan_drafts") && query.includes("strategy_version")) return Promise.resolve([]);
       if (query.includes("FROM opening_plan_acceptances")) return Promise.resolve([]);
       if (query.includes("FROM opening_hard_blocks") || query.includes("FROM opening_timetable_sessions")) return Promise.resolve([]);
       if (query.includes("FROM workspace_preferences")) {
