@@ -606,10 +606,88 @@ export function toggleIncludeSummaryKeepFocus(
   };
 }
 
+export type ExpandNodeResult =
+  | {
+      applied: true;
+      focusId: AssetGraphNodeId;
+      direction: AssetGraphDirection;
+      addedNodes: AssetGraphNode[];
+      addedCount: number;
+      announcement: string;
+    }
+  | {
+      applied: false;
+      reason: "aborted" | "superseded" | "not_found" | "error";
+    };
+
 export function applyCursorStaleReset(
   state: AssetGraphState,
   notice = "当前内容列表已更新，已从第 1 页重新读取。",
+  retryTarget?: LastGraphOperation,
 ): AssetGraphState {
+  if (retryTarget?.op === "neighbors") {
+    const focusId = retryTarget.focus;
+    const evicted = getOwn(state.expandedCenters, focusId);
+    const nextExpanded: Record<string, ExpandedCenterState> = {};
+    for (const [key, center] of Object.entries(state.expandedCenters)) {
+      if (key !== focusId) {
+        nextExpanded[key] = center;
+      }
+    }
+
+    const stillAnchored = new Set<string>(state.rootIds);
+    for (const center of Object.values(nextExpanded)) {
+      for (const id of center.nodeIds) {
+        stillAnchored.add(id);
+      }
+    }
+
+    const evictedChildren = new Set(evicted ? evicted.nodeIds.filter(id => id !== focusId) : []);
+    const focusExists = Boolean(getOwn(state.nodesById, focusId));
+    const nextStandaloneIds = uniqueStrings([
+      ...(focusExists && !stillAnchored.has(focusId) ? [focusId] : []),
+      ...state.standaloneNodeIds.filter(id => !evictedChildren.has(id) || stillAnchored.has(id)),
+    ]);
+
+    const reconciled = reconcileActiveGraphDictionaries(
+      state.nodesById,
+      state.edgesById,
+      state.rootIds,
+      state.rootEdgeIds,
+      nextStandaloneIds,
+      nextExpanded,
+    );
+
+    const keepDetail = state.detail !== null && state.detail.id === focusId;
+    const updatedPinned =
+      state.pinnedComparison && getOwn(reconciled.nodesById, state.pinnedComparison.node.id)
+        ? state.pinnedComparison
+        : null;
+
+    return {
+      ...state,
+      nodesById: reconciled.nodesById,
+      edgesById: reconciled.edgesById,
+      standaloneNodeIds: nextStandaloneIds,
+      expandedCenters: nextExpanded,
+      transitionCenter: null,
+      selectedNodeId: focusId,
+      detail: keepDetail ? state.detail : null,
+      detailCompleteness: keepDetail ? state.detailCompleteness : null,
+      detailWarnings: keepDetail ? state.detailWarnings : [],
+      pinnedComparison: updatedPinned,
+      lastFailedOperation: null,
+      notice,
+      error: null,
+      loadingRoots: false,
+      loadingMoreRoots: false,
+      expandingNodeId: null,
+      loadingDetailNodeId: null,
+      requestGeneration: state.requestGeneration + 1,
+      activeRequestSeq: state.activeRequestSeq + 1,
+    };
+  }
+
   const cleared = clearGraphCollections(state, {
     preserveSelectedNodeId: false,
     preserveSameContextHelpers: false,
@@ -1280,23 +1358,20 @@ export function createAssetGraphStore(
     return isCurrentGeneration(state, generation) && state.activeRequestSeq === requestSeq;
   }
 
-  async function restartAfterCursorStale(retryTarget: LastGraphOperation) {
-    emit(applyCursorStaleReset(state));
-    if (retryTarget.op === "neighbors") {
-      await expandNode(retryTarget.focus, retryTarget.direction, {
-        relations: retryTarget.relations,
-        allowCursorStaleRestart: false,
-      });
-      return;
-    }
-    if (state.context.kind === "goal") {
-      await expandNode(state.context.id, "out", {
-        relations: defaultNeighborRelations(state.context.id, "out", state.lens),
-        allowCursorStaleRestart: false,
-      });
-      return;
-    }
-    await loadRoots({ allowCursorStaleRestart: false });
+  async function restartAfterCursorStaleRoots() {
+    emit(applyCursorStaleReset(state, undefined, { op: "roots" }));
+    await loadRoots({ cursor: undefined, allowCursorStaleRestart: false });
+  }
+
+  async function restartAfterCursorStaleNeighbors(
+    retryTarget: Extract<LastGraphOperation, { op: "neighbors" }>,
+  ): Promise<ExpandNodeResult> {
+    emit(applyCursorStaleReset(state, undefined, retryTarget));
+    return expandNode(retryTarget.focus, retryTarget.direction, {
+      relations: retryTarget.relations,
+      cursor: undefined,
+      allowCursorStaleRestart: false,
+    });
   }
 
   async function loadRoots(options?: {
@@ -1322,7 +1397,7 @@ export function createAssetGraphStore(
     } catch (error) {
       if (isAbortError(error) || !isActiveRequest(generation, requestSeq)) return;
       if (error instanceof AssetGraphRequestError && error.code === "CURSOR_STALE" && allowRestart) {
-        await restartAfterCursorStale({ op: "roots" });
+        await restartAfterCursorStaleRoots();
         return;
       }
       emit(
@@ -1349,7 +1424,7 @@ export function createAssetGraphStore(
       append?: boolean;
       allowCursorStaleRestart?: boolean;
     },
-  ) {
+  ): Promise<ExpandNodeResult> {
     const append = options?.append ?? false;
     const allowRestart = options?.allowCursorStaleRestart ?? true;
     const relations = options?.relations ?? defaultNeighborRelations(focusId, direction, state.lens);
@@ -1380,7 +1455,9 @@ export function createAssetGraphStore(
         },
         signal,
       );
-      if (!isActiveRequest(generation, requestSeq)) return;
+      if (!isActiveRequest(generation, requestSeq)) {
+        return { applied: false, reason: "superseded" };
+      }
       emit(
         applyNeighborsPage(state, page, {
           focus: focusId,
@@ -1391,20 +1468,39 @@ export function createAssetGraphStore(
           requestSeq,
         }),
       );
+      const appliedNodes = page.nodes
+        .map(item => getOwn(state.nodesById, item.id) ?? item)
+        .filter(node => node.id !== focusId);
+      const focusNodeItem = getOwn(state.nodesById, focusId);
+      return {
+        applied: true,
+        focusId,
+        direction,
+        addedNodes: appliedNodes,
+        addedCount: appliedNodes.length,
+        announcement: summarizeExpansionForScreenReader(
+          focusNodeItem ? [focusNodeItem, ...appliedNodes] : appliedNodes,
+          focusId,
+        ),
+      };
     } catch (error) {
-      if (isAbortError(error) || !isActiveRequest(generation, requestSeq)) return;
+      if (isAbortError(error)) {
+        return { applied: false, reason: "aborted" };
+      }
+      if (!isActiveRequest(generation, requestSeq)) {
+        return { applied: false, reason: "superseded" };
+      }
       if (error instanceof AssetGraphRequestError && error.code === "NOT_FOUND") {
         emit(applyNotFoundForFocus(state, focusId, { generation, requestSeq }));
-        return;
+        return { applied: false, reason: "not_found" };
       }
       if (error instanceof AssetGraphRequestError && error.code === "CURSOR_STALE" && allowRestart) {
-        await restartAfterCursorStale({
+        return restartAfterCursorStaleNeighbors({
           op: "neighbors",
           focus: focusId,
           direction,
           relations,
         });
-        return;
       }
       emit(
         applyRequestError(state, error, {
@@ -1413,13 +1509,16 @@ export function createAssetGraphStore(
           failedOperation: { op: "neighbors", focus: focusId, direction, relations },
         }),
       );
+      return { applied: false, reason: "error" };
     }
   }
 
-  async function loadMoreNeighbors(focusId: AssetGraphNodeId) {
+  async function loadMoreNeighbors(focusId: AssetGraphNodeId): Promise<ExpandNodeResult> {
     const center = getOwn(state.expandedCenters, focusId);
-    if (!center?.nextCursor || state.expandingNodeId) return;
-    await expandNode(focusId, center.direction, {
+    if (!center?.nextCursor || state.expandingNodeId) {
+      return { applied: false, reason: "superseded" };
+    }
+    return expandNode(focusId, center.direction, {
       relations: center.relations,
       cursor: center.nextCursor,
       append: true,
@@ -1587,7 +1686,13 @@ export function createAssetGraphStore(
       await loadDetail(state.selectedNodeId);
       return;
     }
-    if (state.context.kind === "goal" && state.rootIds.length === 0) {
+    if (
+      state.context.kind === "goal" &&
+      state.rootIds.length === 0 &&
+      state.rootsCompleteness === null &&
+      !state.searchQuery.trim() &&
+      state.selectedKinds.length === 0
+    ) {
       await expandNode(state.context.id, "out", {
         relations: defaultNeighborRelations(state.context.id, "out", state.lens),
       });

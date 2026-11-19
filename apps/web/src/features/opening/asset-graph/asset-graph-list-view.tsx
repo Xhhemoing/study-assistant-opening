@@ -11,7 +11,7 @@ import {
   Minimize2,
   Pin,
 } from "lucide-react";
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import type {
   AssetGraphContext,
   AssetGraphDetail,
@@ -103,7 +103,35 @@ export function AssetGraphListView({
   onEnterContext,
   onTogglePinNode,
 }: AssetGraphListViewProps) {
-  const effectiveSubTab: ListSubTab = subTab ?? (edges.length > 0 ? "relations" : "nodes");
+  const [initialDefaultSubTab] = useState<ListSubTab>(() =>
+    edges.length > 0 ? "relations" : "nodes",
+  );
+  const effectiveSubTab: ListSubTab = subTab ?? initialDefaultSubTab;
+  const pendingFocusButtonRef = useRef<HTMLButtonElement | null>(null);
+
+  useEffect(() => {
+    if (expandingNodeId !== null) return;
+    const button = pendingFocusButtonRef.current;
+    if (!button) return;
+    pendingFocusButtonRef.current = null;
+    if (
+      button.isConnected &&
+      (document.activeElement === null || document.activeElement === document.body)
+    ) {
+      button.focus();
+    }
+  }, [expandingNodeId]);
+
+  function handleExpandButtonClick(
+    event: MouseEvent<HTMLButtonElement>,
+    nodeId: AssetGraphNodeId,
+    direction: AssetGraphDirection,
+  ) {
+    if (document.activeElement === event.currentTarget) {
+      pendingFocusButtonRef.current = event.currentTarget;
+    }
+    onExpandNode(nodeId, direction);
+  }
 
   const timelineNodes = useMemo(() => {
     return nodes
@@ -361,7 +389,7 @@ export function AssetGraphListView({
                       type="button"
                       className={ui.secondary}
                       disabled={expandingNodeId === node.id}
-                      onClick={() => onExpandNode(node.id, "in")}
+                      onClick={event => handleExpandButtonClick(event, node.id, "in")}
                     >
                       <ArrowDownLeft size={14} aria-hidden="true" />
                       {labels.incomingLabel}
@@ -370,7 +398,7 @@ export function AssetGraphListView({
                       type="button"
                       className={ui.secondary}
                       disabled={expandingNodeId === node.id}
-                      onClick={() => onExpandNode(node.id, "out")}
+                      onClick={event => handleExpandButtonClick(event, node.id, "out")}
                     >
                       <ArrowUpRight size={14} aria-hidden="true" />
                       {labels.outgoingLabel}
@@ -379,7 +407,7 @@ export function AssetGraphListView({
                       type="button"
                       className={ui.quiet}
                       disabled={expandingNodeId === node.id}
-                      onClick={() => onExpandNode(node.id, "both")}
+                      onClick={event => handleExpandButtonClick(event, node.id, "both")}
                     >
                       <Expand size={14} aria-hidden="true" />
                       双向展开

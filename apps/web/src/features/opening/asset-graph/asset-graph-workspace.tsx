@@ -74,7 +74,6 @@ import {
   getVisibleNodes,
   isGraphPartial,
   resolveEffectiveNodeStates,
-  summarizeExpansionForScreenReader,
   type AssetGraphDirection,
 } from "./asset-graph-model";
 
@@ -306,6 +305,8 @@ function ConnectedAssetGraphWorkspace({
       setPendingStart(null);
       setStartError("");
       setChoiceResult(null);
+      setListSubTab(null);
+      setSrAnnouncement("");
       void store.invalidateByPrivacy();
     });
   }, [store]);
@@ -408,26 +409,30 @@ function ConnectedAssetGraphWorkspace({
 
   function handleContextChange(nextContext: AssetGraphContext, preserveFocusId?: string | null) {
     resetActionTransientState();
+    setListSubTab(null);
+    setSrAnnouncement("");
     void store.selectContext(nextContext, preserveFocusId);
   }
 
   function handleLensChange(nextLens: AssetGraphLens) {
     resetActionTransientState();
+    setSrAnnouncement("");
     void store.selectLens(nextLens);
   }
 
   async function handleExpandNode(nodeId: AssetGraphNodeId, direction: AssetGraphDirection) {
     resetActionTransientState();
-    await store.expandNode(nodeId, direction);
-    if (!mountedRef.current) return;
-    const latest = store.getState();
-    const center = getOwn(latest.expandedCenters, nodeId);
-    if (center) {
-      const centerNodes = center.nodeIds
-        .map(id => getOwn(latest.nodesById, id))
-        .filter((item): item is NonNullable<typeof item> => Boolean(item));
-      setSrAnnouncement(summarizeExpansionForScreenReader(centerNodes, nodeId));
-    }
+    setSrAnnouncement("");
+    const result = await store.expandNode(nodeId, direction);
+    if (!mountedRef.current || !result.applied) return;
+    setSrAnnouncement(result.announcement);
+  }
+
+  async function handleLoadMoreNeighbors(nodeId: AssetGraphNodeId) {
+    setSrAnnouncement("");
+    const result = await store.loadMoreNeighbors(nodeId);
+    if (!mountedRef.current || !result.applied) return;
+    setSrAnnouncement(result.announcement);
   }
 
   function handleSearchSubmit(event: FormEvent<HTMLFormElement>) {
@@ -623,7 +628,12 @@ function ConnectedAssetGraphWorkspace({
                     type="button"
                     className={viewMode === "list" ? ui.primary : ui.secondary}
                     aria-pressed={viewMode === "list"}
-                    onClick={() => setViewMode("list")}
+                    onClick={() => {
+                      if (viewMode !== "list") {
+                        setListSubTab(visibleEdges.length > 0 ? "relations" : "nodes");
+                        setViewMode("list");
+                      }
+                    }}
                   >
                     <List size={14} aria-hidden="true" />
                     列表
@@ -786,6 +796,7 @@ function ConnectedAssetGraphWorkspace({
               ) : visibleNodes.length > 0 ? (
                 viewMode === "list" ? (
                   <AssetGraphListView
+                    key={serializeContextValue(state.context)}
                     nodes={visibleNodes}
                     edges={visibleEdges}
                     nodesById={state.nodesById}
@@ -810,7 +821,7 @@ function ConnectedAssetGraphWorkspace({
                       store.collapseNode(nodeId);
                     }}
                     onLoadMoreNeighbors={nodeId => {
-                      void store.loadMoreNeighbors(nodeId);
+                      void handleLoadMoreNeighbors(nodeId);
                     }}
                     onLoadDetail={nodeId => {
                       resetActionTransientState();
@@ -847,7 +858,7 @@ function ConnectedAssetGraphWorkspace({
                       store.collapseNode(nodeId);
                     }}
                     onLoadMoreNeighbors={nodeId => {
-                      void store.loadMoreNeighbors(nodeId);
+                      void handleLoadMoreNeighbors(nodeId);
                     }}
                     onLoadDetail={nodeId => {
                       resetActionTransientState();
@@ -908,7 +919,7 @@ function ConnectedAssetGraphWorkspace({
               className="h-fit space-y-4 rounded-tile border border-line bg-surface p-4 shadow-card lg:sticky lg:top-4"
             >
               {state.pinnedComparison ? (
-                <div
+                <section
                   aria-label="对比参考卡片"
                   className="space-y-2 rounded-ctl border border-line bg-surface-2/50 p-3 text-xs"
                 >
@@ -949,7 +960,7 @@ function ConnectedAssetGraphWorkspace({
                       ) : null}
                     </div>
                   ) : null}
-                </div>
+                </section>
               ) : null}
 
               {selectedNode || activeDetail ? (

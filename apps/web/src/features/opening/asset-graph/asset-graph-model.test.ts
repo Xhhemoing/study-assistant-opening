@@ -361,7 +361,7 @@ describe("createAssetGraphStore", () => {
     expect(store.getState().rootIds).toEqual([SOURCE_1_ID, SOURCE_2_ID]);
     expect(store.getState().rootsCursor).toBeNull();
 
-    // Exact-operation restart on loadMoreNeighbors CURSOR_STALE
+    // Exact-operation restart on loadMoreNeighbors CURSOR_STALE preserves existing rootIds
     let neighborStaleOnce = false;
     const recordedQueries: AssetGraphQuery[] = [];
     const neighborTransport: AssetGraphTransport = async query => {
@@ -369,7 +369,10 @@ describe("createAssetGraphStore", () => {
       if (query.op === "roots") {
         return {
           asOf: "2026-01-01T00:00:00.000Z",
-          nodes: [{ id: REQ_ID, kind: "requirement", label: "第3章 有机反应：酯化" }],
+          nodes: [
+            { id: DOC_ID, kind: "document", label: "实验预习笔记" },
+            { id: REQ_ID, kind: "requirement", label: "第3章 有机反应：酯化" },
+          ],
           edges: [],
           page: { nextCursor: null },
           completeness: "complete",
@@ -405,10 +408,17 @@ describe("createAssetGraphStore", () => {
 
     const neighborStore = createAssetGraphStore(createAssetGraphClient(neighborTransport));
     await neighborStore.initialize();
+    expect(neighborStore.getState().rootIds).toEqual([DOC_ID, REQ_ID]);
     await neighborStore.expandNode(REQ_ID, "out", { relations: ["usesSource"] });
     expect(neighborStore.getState().expandedCenters[REQ_ID]?.nextCursor).toBe("nbr-page-2");
 
-    await neighborStore.loadMoreNeighbors(REQ_ID);
+    const reloadResult = await neighborStore.loadMoreNeighbors(REQ_ID);
+    expect(reloadResult).toMatchObject({
+      applied: true,
+      focusId: REQ_ID,
+      direction: "out",
+      addedCount: 1,
+    });
     const lastQuery = recordedQueries.at(-1);
     expect(lastQuery).toMatchObject({
       op: "neighbors",
@@ -418,6 +428,8 @@ describe("createAssetGraphStore", () => {
     });
     expect((lastQuery as { cursor?: string }).cursor).toBeUndefined();
     expect(neighborStore.getState().error).toBeNull();
+    expect(neighborStore.getState().rootIds).toEqual([DOC_ID, REQ_ID]);
+    expect(neighborStore.getState().nodesById[DOC_ID]).toBeDefined();
     expect(neighborStore.getState().nodesById[SOURCE_1_ID]).toBeDefined();
   });
 
@@ -626,5 +638,189 @@ describe("createAssetGraphStore", () => {
     expect(rootsCalls).toBe(4);
     expect(store.getState().error).toBeNull();
     expect(store.getState().rootIds).toEqual([SOURCE_1_ID]);
+  });
+
+  it("keeps filtered roots pagination in goal scope on roots when CURSOR_STALE occurs, and bounds consecutive CURSOR_STALE to 3 requests", async () => {
+    const recordedQueries: AssetGraphQuery[] = [];
+    let staleMode: "page2-once" | "always" | "off" = "page2-once";
+
+    const transport: AssetGraphTransport = async query => {
+      recordedQueries.push(query);
+      if (query.op !== "roots") {
+        throw new Error(`Unexpected query op in filtered goal roots flow: ${query.op}`);
+      }
+      if (staleMode === "always") {
+        throw new AssetGraphRequestError(
+          "CURSOR_STALE",
+          "目标范围筛选游标已失效，请重新读取。",
+          409,
+        );
+      }
+      if (staleMode === "page2-once" && query.cursor === "goal-filtered-roots-p2") {
+        staleMode = "off";
+        throw new AssetGraphRequestError(
+          "CURSOR_STALE",
+          "目标范围筛选游标已失效，请重新读取。",
+          409,
+        );
+      }
+      if (query.cursor === "goal-filtered-roots-p2") {
+        return {
+          asOf: "2026-03-02T00:00:00.000Z",
+          nodes: [{ id: SOURCE_2_ID, kind: "source", label: "有机合成实验讲义（下）" }],
+          edges: [],
+          page: { nextCursor: null },
+          completeness: "complete",
+          warnings: [],
+          detail: null,
+        };
+      }
+      return {
+        asOf: "2026-03-02T00:00:00.000Z",
+        nodes: [{ id: SOURCE_1_ID, kind: "source", label: "有机合成实验讲义（上）" }],
+        edges: [],
+        page: { nextCursor: "goal-filtered-roots-p2" },
+        completeness: "complete",
+        warnings: [],
+        detail: null,
+      };
+    };
+
+    // Part A: Single CURSOR_STALE in goal scope restarts filtered roots page 1 without switching to neighbors
+    const store = createAssetGraphStore(createAssetGraphClient(transport), {
+      context: { kind: "goal", id: GOAL_ID },
+      lens: "assets",
+    });
+
+    await store.applyFilters({
+      searchQuery: "实验讲义",
+      selectedKinds: ["source"],
+      pageLimit: 1,
+    });
+    expect(store.getState().rootIds).toEqual([SOURCE_1_ID]);
+    expect(store.getState().rootsCursor).toBe("goal-filtered-roots-p2");
+
+    await store.loadMoreRoots();
+
+    expect(recordedQueries).toHaveLength(3);
+    expect(recordedQueries[0]).toMatchObject({
+      op: "roots",
+      context: { kind: "goal", id: GOAL_ID },
+      lens: "assets",
+      q: "实验讲义",
+      kinds: ["source"],
+      limit: 1,
+    });
+    expect((recordedQueries[0] as { cursor?: string }).cursor).toBeUndefined();
+    expect(recordedQueries[1]).toMatchObject({
+      op: "roots",
+      context: { kind: "goal", id: GOAL_ID },
+      lens: "assets",
+      q: "实验讲义",
+      kinds: ["source"],
+      limit: 1,
+      cursor: "goal-filtered-roots-p2",
+    });
+    expect(recordedQueries[2]).toMatchObject({
+      op: "roots",
+      context: { kind: "goal", id: GOAL_ID },
+      lens: "assets",
+      q: "实验讲义",
+      kinds: ["source"],
+      limit: 1,
+    });
+    expect((recordedQueries[2] as { cursor?: string }).cursor).toBeUndefined();
+    expect(store.getState().searchQuery).toBe("实验讲义");
+    expect(store.getState().selectedKinds).toEqual(["source"]);
+    expect(store.getState().rootIds).toEqual([SOURCE_1_ID]);
+    expect(store.getState().rootsCursor).toBe("goal-filtered-roots-p2");
+    expect(store.getState().error).toBeNull();
+
+    // Part B: Consecutive CURSOR_STALE in goal-scoped filtered roots stops at 3 total calls in recoverable error state
+    recordedQueries.length = 0;
+    staleMode = "off";
+    const boundedStore = createAssetGraphStore(createAssetGraphClient(transport), {
+      context: { kind: "goal", id: GOAL_ID },
+      lens: "assets",
+    });
+
+    await boundedStore.applyFilters({
+      searchQuery: "实验讲义",
+      selectedKinds: ["source"],
+      pageLimit: 1,
+    });
+    expect(recordedQueries).toHaveLength(1);
+
+    staleMode = "always";
+    await boundedStore.loadMoreRoots();
+
+    expect(recordedQueries).toHaveLength(3);
+    expect(recordedQueries.map(item => item.op)).toEqual(["roots", "roots", "roots"]);
+    expect((recordedQueries[2] as { cursor?: string }).cursor).toBeUndefined();
+    expect(boundedStore.getState().searchQuery).toBe("实验讲义");
+    expect(boundedStore.getState().selectedKinds).toEqual(["source"]);
+    expect(boundedStore.getState().lastFailedOperation).toEqual({ op: "roots" });
+    expect(boundedStore.getState().error).toEqual({
+      code: "CURSOR_STALE",
+      message: "目标范围筛选游标已失效，请重新读取。",
+    });
+
+    // Manual recovery via retryCurrentView reloads filtered roots page 1 cleanly
+    staleMode = "off";
+    await boundedStore.retryCurrentView();
+    expect(recordedQueries).toHaveLength(4);
+    expect(recordedQueries[3]).toMatchObject({
+      op: "roots",
+      context: { kind: "goal", id: GOAL_ID },
+      lens: "assets",
+      q: "实验讲义",
+      kinds: ["source"],
+      limit: 1,
+    });
+    expect(boundedStore.getState().error).toBeNull();
+    expect(boundedStore.getState().rootIds).toEqual([SOURCE_1_ID]);
+  });
+
+  it("returns applied=false from expandNode when request errors or is superseded", async () => {
+    let failIncoming = false;
+    const transport: AssetGraphTransport = async query => {
+      if (query.op === "neighbors" && query.direction === "in" && failIncoming) {
+        throw new AssetGraphRequestError("NETWORK", "关联服务暂时繁忙", 500);
+      }
+      return {
+        asOf: "2026-03-02T00:00:00.000Z",
+        nodes: [
+          { id: REQ_ID, kind: "requirement", label: "酯化反应机理" },
+          { id: SOURCE_1_ID, kind: "source", label: "有机化学教材" },
+        ],
+        edges: [
+          {
+            id: "e-out-1",
+            from: REQ_ID,
+            to: SOURCE_1_ID,
+            relation: "usesSource",
+            basis: "recorded",
+          },
+        ],
+        page: { nextCursor: null },
+        completeness: "complete",
+        warnings: [],
+        detail: null,
+      };
+    };
+
+    const store = createAssetGraphStore(createAssetGraphClient(transport));
+    const okResult = await store.expandNode(REQ_ID, "out");
+    expect(okResult).toMatchObject({
+      applied: true,
+      focusId: REQ_ID,
+      direction: "out",
+      addedCount: 1,
+      announcement: "已展开 1 项学习资料",
+    });
+
+    failIncoming = true;
+    const errResult = await store.expandNode(REQ_ID, "in");
+    expect(errResult).toEqual({ applied: false, reason: "error" });
   });
 });

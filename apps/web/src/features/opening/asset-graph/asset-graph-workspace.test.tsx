@@ -715,7 +715,7 @@ describe("AssetGraphWorkspace", () => {
       nodeCard(SOURCE_1_ID).querySelector("button")!.click();
     });
     await flush();
-    expect(container.querySelector('[aria-label="对比参考卡片"]')?.textContent).toContain(
+    expect(container.querySelector('section[aria-label="对比参考卡片"]')?.textContent).toContain(
       "酯化平衡条件",
     );
 
@@ -825,6 +825,7 @@ describe("AssetGraphWorkspace", () => {
   it("Counterexample 2: Case 21 REQ_2 shows cross-course badge & source link in both Canvas and List views, and needs_verification never claims independent completion for target course", async () => {
     const COURSE_2 = "10000000-0000-4000-8000-000000000002";
     const REQ_2 = "requirement/30000000-0000-4000-8000-000000000002" as const;
+    const OBS_2 = "observation/50000000-0000-4000-8000-000000000002" as const;
     const sharedPage = fixturePage("synthetic-shared-skills-01-cross-course-evidence-neighbors");
     const req2Label = fixtureNodeLabel(REQ_2);
     const sharedEdge = sharedPage.edges[0]!;
@@ -840,7 +841,7 @@ describe("AssetGraphWorkspace", () => {
               ? {
                   ...node,
                   summary: {
-                    learnerState: "independent",
+                    learnerState: null,
                     requirementStatus: "needs_verification",
                   },
                 }
@@ -856,7 +857,7 @@ describe("AssetGraphWorkspace", () => {
             kind: "requirement",
             label: req2Label,
             summary: {
-              learnerState: "independent",
+              learnerState: null,
               requirementStatus: "needs_verification",
             },
           },
@@ -884,30 +885,48 @@ describe("AssetGraphWorkspace", () => {
     });
     await flush();
 
-    // 1) Graph (Canvas) view assertions
-    expect(nodeCard(REQ_2).textContent).toContain("待独立检验");
-    expect(container.textContent).toContain("跨课共享证据");
-    expect(container.textContent).toContain(expectedSharedCaption);
-    expect(container.querySelector(`a[href="/opening/courses/${COURSE_ID}"]`)).not.toBeNull();
-    expect(container.textContent).not.toContain("已完成独立作答");
-    expect(container.textContent).not.toContain("已达到课程要求");
+    // 1) Graph (Canvas) view scoped assertions: SVG canvas, target requirement card, shared observation card, and detail panel
+    const canvasSvg = container.querySelector('svg[role="img"]')!;
+    const reqSvgNode = canvasSvg.querySelector(`[data-graph-node="${REQ_2}"]`)!;
+    expect(reqSvgNode.textContent).toContain("待独立检验");
+    expect(reqSvgNode.textContent).not.toContain("独立完成");
+    expect(reqSvgNode.textContent).not.toContain("已达到课程要求");
+    expect(canvasSvg.textContent).toContain("跨课共享证据");
+    expect(canvasSvg.textContent).toContain(expectedSharedCaption);
 
-    // 2) List view assertions (both Relations table and Nodes list)
+    const canvasReqCard = nodeCard(REQ_2);
+    expect(canvasReqCard.textContent).toContain("课程要求：待独立检验");
+    expect(canvasReqCard.textContent).not.toContain("独立完成");
+    expect(canvasReqCard.textContent).not.toContain("已达到课程要求");
+    expect(canvasReqCard.textContent).toContain("跨课共享证据");
+    expect(canvasReqCard.textContent).toContain(expectedSharedCaption);
+    expect(canvasReqCard.querySelector(`a[href="/opening/courses/${COURSE_ID}"]`)).not.toBeNull();
+
+    const canvasObsCard = nodeCard(OBS_2);
+    expect(canvasObsCard.textContent).toContain("完成条件：独立完成");
+    expect(canvasObsCard.textContent).toContain("跨课共享证据");
+    expect(canvasObsCard.textContent).toContain(expectedSharedCaption);
+
+    const detailAside = container.querySelector('aside[aria-label="详情与后续行动面板"]')!;
+    expect(detailAside.textContent).toContain("待独立检验");
+    expect(detailAside.textContent).toContain("暂无练习状态");
+    expect(detailAside.textContent).not.toContain("独立完成");
+    expect(detailAside.textContent).not.toContain("已达到课程要求");
+    expect(detailAside.textContent).toContain("跨课共享证据");
+    expect(detailAside.textContent).toContain(expectedSharedCaption);
+    expect(detailAside.querySelector(`a[href="/opening/courses/${COURSE_ID}"]`)).not.toBeNull();
+
+    // 2) List view scoped assertions (both Relations table and Nodes list)
     const viewToolbar = container.querySelector('[aria-label="视图模式"]')!;
     await act(async () => {
       findButton("列表", viewToolbar).click();
     });
     await flush();
 
-    expect(container.querySelector("[data-list-view]")?.textContent).toContain("跨课共享证据");
-    expect(container.querySelector("[data-list-view]")?.textContent).toContain(
-      expectedSharedCaption,
-    );
-    expect(
-      container
-        .querySelector("[data-list-view]")
-        ?.querySelector(`a[href="/opening/courses/${COURSE_ID}"]`),
-    ).not.toBeNull();
+    const relationsTable = container.querySelector('table[aria-label="已展开关联列表"]')!;
+    expect(relationsTable.textContent).toContain("跨课共享证据");
+    expect(relationsTable.textContent).toContain(expectedSharedCaption);
+    expect(relationsTable.querySelector(`a[href="/opening/courses/${COURSE_ID}"]`)).not.toBeNull();
 
     const nodesRadio = Array.from(
       container.querySelectorAll<HTMLInputElement>('input[name="asset-graph-list-tab"]'),
@@ -917,10 +936,18 @@ describe("AssetGraphWorkspace", () => {
     });
     await flush();
 
-    expect(nodeCard(REQ_2).textContent).toContain("待独立检验");
-    expect(nodeCard(REQ_2).textContent).toContain("跨课共享证据");
-    expect(nodeCard(REQ_2).querySelector(`a[href="/opening/courses/${COURSE_ID}"]`)).not.toBeNull();
-    expect(container.textContent).not.toContain("已完成独立作答");
+    const listReqCard = nodeCard(REQ_2);
+    expect(listReqCard.textContent).toContain("课程要求：待独立检验");
+    expect(listReqCard.textContent).not.toContain("独立完成");
+    expect(listReqCard.textContent).not.toContain("已达到课程要求");
+    expect(listReqCard.textContent).toContain("跨课共享证据");
+    expect(listReqCard.textContent).toContain(expectedSharedCaption);
+    expect(listReqCard.querySelector(`a[href="/opening/courses/${COURSE_ID}"]`)).not.toBeNull();
+
+    const listObsCard = nodeCard(OBS_2);
+    expect(listObsCard.textContent).toContain("完成条件：独立完成");
+    expect(listObsCard.textContent).toContain("跨课共享证据");
+    expect(listObsCard.textContent).toContain(expectedSharedCaption);
   });
 
   it("Counterexample 3: 404/500 shows retryable error without demo routes or sample data; two consecutive CURSOR_STALE restarts once then stops at recoverable error", async () => {
@@ -997,5 +1024,164 @@ describe("AssetGraphWorkspace", () => {
     await flush();
     expect(rootsCallCount).toBe(4);
     expect(nodeCard(SOURCE_1_ID).textContent).toContain("物理化学实验指导");
+  });
+
+  it("locks initial nodes sub-tab in 0-edge List view on expansion so focused expand button is not unmounted, while allowing manual sub-tab switches", async () => {
+    const transport: AssetGraphTransport = async query => {
+      if (query.op === "neighbors" && query.focus === REQ_ID) {
+        return {
+          asOf: "2026-03-11T00:00:00.000Z",
+          nodes: [
+            { id: REQ_ID, kind: "requirement", label: "酸碱滴定终点判断" },
+            { id: SOURCE_1_ID, kind: "source", label: "分析化学实验教材", meta: { version: 1 } },
+            {
+              id: OBS_ID,
+              kind: "observation",
+              label: "滴定实验练习记录",
+              meta: { occurredAt: "2026-03-10T10:15:00.000Z", assistance: "independent" },
+            },
+          ],
+          edges: [
+            {
+              id: "list-edge-source",
+              from: REQ_ID,
+              to: SOURCE_1_ID,
+              relation: "usesSource",
+              basis: "recorded",
+              page: 19,
+            },
+            {
+              id: "list-edge-obs",
+              from: REQ_ID,
+              to: OBS_ID,
+              relation: "hasObservation",
+              basis: "derived",
+            },
+          ],
+          page: { nextCursor: null },
+          completeness: "complete",
+          warnings: [],
+          detail: null,
+        };
+      }
+      return {
+        asOf: "2026-03-11T00:00:00.000Z",
+        nodes: [{ id: REQ_ID, kind: "requirement", label: "酸碱滴定终点判断" }],
+        edges: [],
+        page: { nextCursor: null },
+        completeness: "complete",
+        warnings: [],
+        detail: null,
+      };
+    };
+
+    await renderWorkspace({
+      transport,
+      initialViewMode: "list",
+    });
+
+    // Starts on nodes sub-tab when 0 edges exist
+    expect(container.querySelector("[data-list-view]")).not.toBeNull();
+    expect(container.querySelector('table[aria-label="已展开关联列表"]')).toBeNull();
+
+    const expandOutButton = findButton("查看材料与记录", nodeCard(REQ_ID));
+    expandOutButton.focus();
+    expect(document.activeElement).toBe(expandOutButton);
+
+    await act(async () => {
+      expandOutButton.click();
+    });
+    await flush();
+
+    // Remains on nodes sub-tab; original expand control stays mounted and retains focus
+    expect(container.querySelector('table[aria-label="已展开关联列表"]')).toBeNull();
+    expect(expandOutButton.isConnected).toBe(true);
+    expect(findButton("查看材料与记录", nodeCard(REQ_ID))).toBe(expandOutButton);
+    expect(document.activeElement).toBe(expandOutButton);
+    expect(nodeCard(SOURCE_1_ID).textContent).toContain("分析化学实验教材");
+
+    // Learner can still manually switch to Relations and Timeline sub-tabs
+    const relationsRadio = Array.from(
+      container.querySelectorAll<HTMLInputElement>('input[name="asset-graph-list-tab"]'),
+    ).find(input => input.parentElement?.textContent?.includes("关联列表（2）"))!;
+    await act(async () => {
+      relationsRadio.click();
+    });
+    await flush();
+    expect(container.querySelector('table[aria-label="已展开关联列表"]')?.textContent).toContain(
+      "第 19 页",
+    );
+
+    const timelineRadio = Array.from(
+      container.querySelectorAll<HTMLInputElement>('input[name="asset-graph-list-tab"]'),
+    ).find(input => input.parentElement?.textContent?.includes("练习时间线（1）"))!;
+    await act(async () => {
+      timelineRadio.click();
+    });
+    await flush();
+    expect(container.querySelector("[data-list-view]")?.textContent).toContain("滴定实验练习记录");
+  });
+
+  it("does not announce stale expansion success to screen readers when a subsequent expansion on the same node fails with 500", async () => {
+    const transport: AssetGraphTransport = async query => {
+      if (query.op === "neighbors" && query.focus === REQ_ID && query.direction === "out") {
+        return {
+          asOf: "2026-03-11T00:00:00.000Z",
+          nodes: [
+            { id: REQ_ID, kind: "requirement", label: "氧化还原配平规则" },
+            { id: SOURCE_1_ID, kind: "source", label: "无机化学基础讲义" },
+          ],
+          edges: [
+            {
+              id: "sr-out-edge",
+              from: REQ_ID,
+              to: SOURCE_1_ID,
+              relation: "usesSource",
+              basis: "recorded",
+            },
+          ],
+          page: { nextCursor: null },
+          completeness: "complete",
+          warnings: [],
+          detail: null,
+        };
+      }
+      if (query.op === "neighbors" && query.focus === REQ_ID && query.direction === "in") {
+        throw new AssetGraphRequestError("NETWORK", "入边关联读取失败，请稍后重试。", 500);
+      }
+      return {
+        asOf: "2026-03-11T00:00:00.000Z",
+        nodes: [{ id: REQ_ID, kind: "requirement", label: "氧化还原配平规则" }],
+        edges: [],
+        page: { nextCursor: null },
+        completeness: "complete",
+        warnings: [],
+        detail: null,
+      };
+    };
+
+    await renderWorkspace({ transport });
+
+    const srLiveRegion = () =>
+      container.querySelector<HTMLElement>('.sr-only[role="status"][aria-live="polite"]')!;
+
+    // 1) Outgoing expansion succeeds -> announces 1 source item
+    await act(async () => {
+      findButton("出边展开", nodeCard(REQ_ID)).click();
+    });
+    await flush();
+    expect(srLiveRegion().textContent).toBe("已展开 1 项学习资料");
+
+    // 2) Incoming expansion on the SAME node fails with 500 -> shows LoadError and MUST NOT announce old center success
+    await act(async () => {
+      findButton("入边探索", nodeCard(REQ_ID)).click();
+    });
+    await flush();
+
+    expect(container.textContent).toContain("入边关联读取失败，请稍后重试。");
+    expect(findButton("重新读取")).toBeTruthy();
+    expect(srLiveRegion().textContent).toBe("");
+    expect(srLiveRegion().textContent).not.toContain("已展开");
+    expect(srLiveRegion().textContent).not.toContain("项学习资料");
   });
 });
