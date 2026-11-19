@@ -132,10 +132,10 @@ describe("createOpeningWritingWorkspaceRepository", () => {
     expect(view.currentVariant.variantLabel).toBe("初稿");
     expect(view.focusRestore).toEqual({ status: "exact", blockId: capturedBlockId });
 
-    const workspaceShareIndex = queries.findIndex((q) => q.sql.includes("FROM workspaces") && q.sql.includes("FOR SHARE"));
     const historyLockIndex = queries.findIndex((q) => q.sql.includes("opening_workspace_history_revisions") && q.sql.includes("FOR UPDATE"));
-    expect(workspaceShareIndex).toBeGreaterThanOrEqual(0);
-    expect(historyLockIndex).toBeGreaterThan(workspaceShareIndex);
+    const workspaceShareIndex = queries.findIndex((q) => q.sql.includes("FROM workspaces") && q.sql.includes("FOR SHARE"));
+    expect(historyLockIndex).toBeGreaterThanOrEqual(0);
+    expect(workspaceShareIndex).toBeGreaterThan(historyLockIndex);
     expect(queries.some((q) => q.sql.includes("opening_learning_observations"))).toBe(false);
   });
 
