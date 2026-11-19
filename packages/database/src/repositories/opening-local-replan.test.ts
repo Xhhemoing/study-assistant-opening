@@ -164,6 +164,7 @@ it("preserves a same-day futureFixed retest reservation, releases it on user def
   );
   expect(kept.kind).toBe("draft");
   if (kept.kind !== "draft") return;
+  expect((storedDraft!.input_snapshot as { timeZone?: unknown }).timeZone).toBe("UTC");
   expect(kept.draft.blocks).toEqual(expect.arrayContaining([reservedBlock]));
   await expect(validateOpeningLocalReplan(db as unknown as TransactionSql, scope, {
     day: friday,
@@ -193,6 +194,7 @@ it("preserves a same-day futureFixed retest reservation, releases it on user def
   );
   expect(released.kind).toBe("draft");
   if (released.kind !== "draft") return;
+  expect((storedDraft!.input_snapshot as { timeZone?: unknown }).timeZone).toBe("UTC");
   expect(released.draft.blocks.some(b => b.taskId === id(20))).toBe(false);
   expect(released.draft.blocks.some(b => b.taskId === id(21))).toBe(true);
 });

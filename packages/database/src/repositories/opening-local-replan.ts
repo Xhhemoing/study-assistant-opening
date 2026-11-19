@@ -95,6 +95,7 @@ export async function proposeOpeningLocalPlan(sql: Sql, scope: Scope, raw: Local
     )].sort();
     const snapshot = { ...additional?.snapshot, tasks: [...tasks, ...(additional?.tasks ?? [])], free: constraints,
       localPlanIntent: intent,
+      timeZone: zone,
       ...(releasedInactiveRetestTaskIds.length ? { inactiveRetestTaskIds: releasedInactiveRetestTaskIds } : {}),
       localReplan: { kind: "local_replan_v1", baseAcceptedVersion: base,
         baselineBlocks: baseline, fixedBlocks: planned.fixedBlocks, releasedTaskVersions: planned.releasedTaskVersions,
