@@ -314,4 +314,86 @@ describe("planDay", () => {
     });
     expect(todayOnly).toEqual({ blocks: [], unscheduledTaskIds: [], unscheduled: [] });
   });
+
+  it("pins explicit scheduledStartAt to its workspace-timezone calendar day (blocks both Thursday-on-Friday and Saturday-on-Friday)", () => {
+    const fridaySlot: TimeBlock[] = [
+      { start: "2026-10-16T19:00:00.000Z", end: "2026-10-16T20:00:00.000Z", kind: "free" },
+    ];
+    const thursdayReserved = retest(1, "2026-10-15T19:00:00.000Z", {
+      minutes: 25,
+      notBefore: "2026-10-15T19:00:00.000Z",
+      dueAt: "2026-10-26T19:00:00.000Z",
+    });
+    thursdayReserved.retest = {
+      ...thursdayReserved.retest!,
+      scheduledStartAt: "2026-10-15T19:15:00.000Z",
+    };
+    const saturdayReserved = retest(2, "2026-10-15T19:00:00.000Z", {
+      minutes: 25,
+      notBefore: "2026-10-15T19:00:00.000Z",
+      dueAt: "2026-10-26T19:00:00.000Z",
+    });
+    saturdayReserved.retest = {
+      ...saturdayReserved.retest!,
+      scheduledStartAt: "2026-10-17T19:15:00.000Z",
+    };
+
+    // Neither Thursday's reservation nor Saturday's reservation may enter Friday.
+    expect(planDay([thursdayReserved, saturdayReserved], fridaySlot, {
+      localDate: "2026-10-16",
+      timeZone: "UTC",
+      planningNow: "2026-10-16T18:00:00.000Z",
+    })).toEqual({ blocks: [], unscheduledTaskIds: [], unscheduled: [] });
+
+    // Thursday's reservation still schedules normally on Thursday.
+    const thursdayPlan = planDay([thursdayReserved], [
+      { start: "2026-10-15T19:00:00.000Z", end: "2026-10-15T20:00:00.000Z", kind: "free" },
+    ], {
+      localDate: "2026-10-15",
+      timeZone: "UTC",
+    });
+    expect(thursdayPlan.blocks).toEqual([
+      expect.objectContaining({
+        taskId: id(1),
+        start: "2026-10-15T19:15:00.000Z",
+        end: "2026-10-15T19:40:00.000Z",
+      }),
+    ]);
+
+    // Workspace timezone boundary (Asia/Shanghai = UTC+8):
+    // 2026-10-15T15:30Z is Thursday 23:30 Shanghai -> excluded on Friday 2026-10-16.
+    // 2026-10-15T16:30Z is Friday   00:30 Shanghai -> included on Friday 2026-10-16, excluded on Thursday & Saturday.
+    const shanghaiThursdayLate = retest(3, "2026-10-15T15:00:00.000Z", {
+      minutes: 25,
+      dueAt: "2026-10-26T19:00:00.000Z",
+    });
+    shanghaiThursdayLate.retest = {
+      ...shanghaiThursdayLate.retest!,
+      scheduledStartAt: "2026-10-15T15:30:00.000Z",
+    };
+    const shanghaiFridayEarly = retest(4, "2026-10-15T15:00:00.000Z", {
+      minutes: 25,
+      dueAt: "2026-10-26T19:00:00.000Z",
+    });
+    shanghaiFridayEarly.retest = {
+      ...shanghaiFridayEarly.retest!,
+      scheduledStartAt: "2026-10-15T16:30:00.000Z",
+    };
+    const shanghaiFridaySlot: TimeBlock[] = [
+      { start: "2026-10-15T16:00:00.000Z", end: "2026-10-15T18:00:00.000Z", kind: "free" },
+    ];
+    const shanghaiFridayPlan = planDay(
+      [shanghaiThursdayLate, shanghaiFridayEarly],
+      shanghaiFridaySlot,
+      { localDate: "2026-10-16", timeZone: "Asia/Shanghai" },
+    );
+    expect(shanghaiFridayPlan.blocks).toEqual([
+      expect.objectContaining({
+        taskId: id(4),
+        start: "2026-10-15T16:30:00.000Z",
+        end: "2026-10-15T16:55:00.000Z",
+      }),
+    ]);
+    expect(shanghaiFridayPlan.unscheduledTaskIds).toEqual([]);
+  });
 });

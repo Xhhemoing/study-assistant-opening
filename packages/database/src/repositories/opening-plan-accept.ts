@@ -11,7 +11,11 @@ import { readOpeningLearnerSnapshotCourses } from "./opening-learner-snapshot-re
 import { validateOpeningLocalReplan } from "./opening-local-replan-validation";
 import { assertOpeningPlanConstraints } from "./opening-plan-constraints";
 import { assertOpeningLearningManagementDraft } from "./opening-learning-management-draft";
-import { effectivePlanningStartFloorMs, readLockedTaskPlanningWindows } from "./opening-course-route-planning-window";
+import {
+  isBlockAllowedForTaskWindow,
+  readLockedTaskPlanningWindows,
+  readWorkspacePlanningTimeZone,
+} from "./opening-course-route-planning-window";
 
 /** One transaction owns selection, task creation and the accepted plan version. */
 export async function acceptOpeningPlan(sql: Sql, scope: Scope, input: AcceptPlanInput, now: Date, options: { source?: "coach"; expectedDraftVersion?: number } = {}) {
@@ -96,6 +100,7 @@ export async function acceptOpeningPlan(sql: Sql, scope: Scope, input: AcceptPla
     }
     const taskIds = [...new Set(blocks.filter(block => !suggestionIds.has(block.taskId)).map(block => block.taskId))];
     if (!local && taskIds.length) {
+      const timeZone = await readWorkspacePlanningTimeZone(tx, scope);
       const tasks = await readLockedTaskPlanningWindows(tx, scope, taskIds);
       const snapshot = (draft.input_snapshot as { tasks?: TaskItem[] } | null)?.tasks ?? [];
       if (tasks.length !== taskIds.length || tasks.some(task => {
@@ -103,7 +108,7 @@ export async function acceptOpeningPlan(sql: Sql, scope: Scope, input: AcceptPla
         if (!original || task.status !== "pending" || task.version !== original.version || !task.window.retestActive) {
           return true;
         }
-        if (task.window.isCourseRouteRetest && (
+        if ((task.window.isCourseRouteRetest || Boolean(original.retest)) && (
           task.window.notBefore !== (original.notBefore ?? null)
           || task.window.dueAt !== original.dueAt
           || task.window.scheduledStartAt !== (original.retest?.scheduledStartAt ?? null)
@@ -111,17 +116,9 @@ export async function acceptOpeningPlan(sql: Sql, scope: Scope, input: AcceptPla
         )) {
           return true;
         }
-        const earliestStartMs = effectivePlanningStartFloorMs(task.window);
-        const dueMs = task.window.dueAt ? Date.parse(task.window.dueAt) : null;
-        return blocks.some(block => {
-          if (block.taskId !== task.id) return false;
-          const startMs = Date.parse(block.start);
-          const endMs = Date.parse(block.end);
-          if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return true;
-          if (earliestStartMs !== null && startMs < earliestStartMs) return true;
-          if (dueMs !== null && endMs > dueMs) return true;
-          return false;
-        });
+        return blocks.some(block =>
+          block.taskId === task.id && !isBlockAllowedForTaskWindow(block, task.window, day, timeZone),
+        );
       })) {
         throw new OpeningPlanError("CONFLICT", "a planned task changed", "task_changed");
       }

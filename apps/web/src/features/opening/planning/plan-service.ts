@@ -242,7 +242,7 @@ export function createOpeningPlanService(sql: Sql, serviceOptions: OpeningPlanSe
         }
         const preference = await createOpeningPlanningSettingsRepository(sql).get(scope);
         const timeZone = preference.settings?.timeZone ?? DEFAULT_PLANNING_TIME_ZONE;
-        const tasks = await repo.listTasks(scope);
+        const tasks = await repo.listTasks(scope, { excludeInactiveRetests: true });
         const yesterday = addLocalDays(date, -1);
         const yesterdayState = await repo.getToday(scope, yesterday);
         const yesterdayAccepted = yesterdayState?.blocks ?? [];
@@ -319,7 +319,7 @@ export function createOpeningPlanService(sql: Sql, serviceOptions: OpeningPlanSe
         };
       },
       async () => {
-        const tasks = await repo.listTasks(scope);
+        const tasks = await repo.listTasks(scope, { excludeInactiveRetests: true });
         const state = await repo.getToday(scope, date);
         return countUnplannedPending(tasks, state?.blocks ?? []);
       },
@@ -411,7 +411,11 @@ export function createOpeningPlanService(sql: Sql, serviceOptions: OpeningPlanSe
       }
       if (ensured.hasNewerSuggestion) result.hasNewerSuggestion = true;
       if (state?.acceptedVersion && loadFeatureSwitches().adaptivePlanning) {
-        const offer = shouldOfferReplan({ acceptedBlocks: state.blocks, tasks: await repo.listTasks(scope), now: clock() });
+        const offer = shouldOfferReplan({
+          acceptedBlocks: state.blocks,
+          tasks: await repo.listTasks(scope, { excludeInactiveRetests: true }),
+          now: clock(),
+        });
         result.replanOffer = { ...offer, dismissalKey: `${scope.workspaceId}/${scope.ownerUserId}/${date}/${state.acceptedVersion}/${offer.reason}` };
       }
       return result;
@@ -425,7 +429,7 @@ export function createOpeningPlanService(sql: Sql, serviceOptions: OpeningPlanSe
 
     async proposePlan(scope: Scope, raw: unknown): Promise<PlanDraft> {
       const body = proposeBodySchema.parse(raw);
-      const tasks = await repo.listTasks(scope);
+      const tasks = await repo.listTasks(scope, { excludeInactiveRetests: true });
       const preference = await createOpeningPlanningSettingsRepository(sql).get(scope);
       const timeZone = preference.settings?.timeZone ?? DEFAULT_PLANNING_TIME_ZONE;
       let freeBlocks: TimeBlock[];
@@ -479,8 +483,8 @@ export function createOpeningPlanService(sql: Sql, serviceOptions: OpeningPlanSe
       const body = proposeDeltaBodySchema.parse(raw);
       const allTasks = await repo.listTasks(scope);
       const wanted = new Set(body.taskIds);
-      const tasks = allTasks.filter((task) => wanted.has(task.id));
-      if (tasks.length !== wanted.size) {
+      const owned = allTasks.filter((task) => wanted.has(task.id));
+      if (owned.length !== wanted.size) {
         throw new OpeningPlanError("VALIDATION", "delta taskIds did not match any owned tasks");
       }
       const state = await repo.getToday(scope, body.date);
@@ -491,6 +495,10 @@ export function createOpeningPlanService(sql: Sql, serviceOptions: OpeningPlanSe
         if (result.kind === "no_change") throw new OpeningPlanError("VALIDATION", "剩余可用时间没有可安排的变化。");
         return result.draft;
       }
+      const plannableIds = owned.some((task) => Boolean(task.retest))
+        ? new Set((await repo.listTasks(scope, { excludeInactiveRetests: true })).map((task) => task.id))
+        : null;
+      const tasks = plannableIds ? owned.filter((task) => plannableIds.has(task.id)) : owned;
       const preference = await createOpeningPlanningSettingsRepository(sql).get(scope);
       const timeZone = preference.settings?.timeZone ?? DEFAULT_PLANNING_TIME_ZONE;
       let freeBlocks: TimeBlock[];

@@ -3,7 +3,12 @@ import { conversationPlanMetadataSchema, localReplanMetadataSchema, plannedBlock
 import { localReplanFixedBlocks, samePlannedBlocks, taskNotBeforeAt } from "@aistudy/domain";
 import { OpeningPlanError } from "./opening-plan-error";
 import { assertOpeningPlanConstraints } from "./opening-plan-constraints";
-import { effectivePlanningStartFloorMs, readLockedTaskPlanningWindows } from "./opening-course-route-planning-window";
+import {
+  isBlockAllowedForTaskWindow,
+  isScheduledStartAllowedOnDay,
+  readLockedTaskPlanningWindows,
+  readWorkspacePlanningTimeZone,
+} from "./opening-course-route-planning-window";
 
 /** Persisted metadata is untrusted, including after backup import. Never let it exempt arbitrary blocks. */
 export async function validateOpeningLocalReplan(tx: TransactionSql, scope: Scope, input: {
@@ -22,7 +27,15 @@ export async function validateOpeningLocalReplan(tx: TransactionSql, scope: Scop
   if (tasks.data.some(task => !task.version) || new Set(tasks.data.map(task => task.id)).size !== tasks.data.length) return conflict("invalid task version snapshot");
   const proposedAt = new Date(meta.data.proposedAt);
   if (proposedAt > input.now) return conflict("invalid proposal time");
-  const expected = localReplanFixedBlocks({ acceptedBlocks: baseline.data, tasks: tasks.data, now: proposedAt, preserveAll: meta.data.preserveAll });
+  const timeZone = await readWorkspacePlanningTimeZone(tx, scope);
+  const expected = localReplanFixedBlocks({
+    acceptedBlocks: baseline.data,
+    tasks: tasks.data,
+    now: proposedAt,
+    preserveAll: meta.data.preserveAll,
+    localDate: input.day,
+    timeZone,
+  });
   if (!samePlannedBlocks(expected.fixedBlocks, meta.data.fixedBlocks)
     || JSON.stringify([...expected.releasedTaskVersions].sort((a, b) => a.id.localeCompare(b.id))) !== JSON.stringify([...meta.data.releasedTaskVersions].sort((a, b) => a.id.localeCompare(b.id)))) return conflict("invalid preserved blocks");
   const removed = [...baseline.data];
@@ -65,32 +78,40 @@ export async function validateOpeningLocalReplan(tx: TransactionSql, scope: Scop
     if (current.length !== existingIds.length || current.some(task => {
       const saved = tasks.data.find(original => original.id === task.id);
       const scheduledNew = fresh.some(block => block.taskId === task.id);
+      const taskFutureFixed = futureFixed.filter(block => block.taskId === task.id);
       if (!saved || task.version !== saved.version || task.status !== saved.status
         || task.window.notBefore !== (saved.notBefore ?? null)
         || task.minutes !== saved.minutes
         || task.window.dueAt !== saved.dueAt) {
         return true;
       }
-      if (task.window.isCourseRouteRetest && (
+      if ((task.window.isCourseRouteRetest || Boolean(saved.retest)) && (
         task.window.scheduledStartAt !== (saved.retest?.scheduledStartAt ?? null)
         || task.window.recommendedAt !== (saved.retest?.recommendedAt ?? null)
       )) {
         return true;
       }
+      if (taskFutureFixed.length > 0 && task.status === "pending") {
+        if (task.window.hasRetestActivity) {
+          if (!task.window.retestActive) return true;
+          if (taskFutureFixed.some(block => !isBlockAllowedForTaskWindow(block, task.window, input.day, timeZone))) {
+            return true;
+          }
+        } else if (!meta.data.preserveAll) {
+          if (taskFutureFixed.some(block =>
+            Date.parse(block.start) > input.now.getTime()
+            && !isBlockAllowedForTaskWindow(block, task.window, input.day, timeZone),
+          )) {
+            return true;
+          }
+        }
+      }
       if (!scheduledNew) return false;
       if (task.status !== "pending" || !task.window.retestActive) return true;
       if (task.window.notBefore && Date.parse(task.window.notBefore) > input.now.getTime()) return true;
-      const earliestStartMs = effectivePlanningStartFloorMs(task.window);
-      const dueMs = task.window.dueAt ? Date.parse(task.window.dueAt) : null;
-      return fresh.some(block => {
-        if (block.taskId !== task.id) return false;
-        const startMs = Date.parse(block.start);
-        const endMs = Date.parse(block.end);
-        if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return true;
-        if (earliestStartMs !== null && startMs < earliestStartMs) return true;
-        if (dueMs !== null && endMs > dueMs) return true;
-        return false;
-      });
+      return fresh.some(block =>
+        block.taskId === task.id && !isBlockAllowedForTaskWindow(block, task.window, input.day, timeZone),
+      );
     })) return conflict("task changed since proposal", "task_changed");
   }
   if (fresh.some(block => !tasks.data.some(task => {
@@ -100,7 +121,8 @@ export async function validateOpeningLocalReplan(tx: TransactionSql, scope: Scop
     const earliest = taskNotBeforeAt(task);
     return (earliest === null || Date.parse(earliest) <= startMs)
       && endMs - startMs === task.minutes * 60_000
-      && (!task.dueAt || endMs <= Date.parse(task.dueAt));
+      && (!task.dueAt || endMs <= Date.parse(task.dueAt))
+      && isScheduledStartAllowedOnDay(task.retest?.scheduledStartAt ?? null, input.day, timeZone);
   }))) return conflict("unknown or deferred new task", "task_changed");
   await assertOpeningPlanConstraints(tx, scope, input.day, fresh, true, meta.data.explicitFree);
   await assertOpeningPlanConstraints(tx, scope, input.day, futureFixed, false);

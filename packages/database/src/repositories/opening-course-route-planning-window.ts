@@ -1,5 +1,7 @@
-import type { Scope } from "@aistudy/contracts";
+import { openingPlanningSettingsSchema, type Scope } from "@aistudy/contracts";
+import { isInstantOnLocalDay, resolveWorkspaceTimeZone } from "@aistudy/domain";
 import type { TransactionSql } from "postgres";
+import { OpeningPlanError } from "./opening-plan-error";
 import { courseRouteDelayedProtocolSchema } from "./opening-course-route-retest-state";
 
 type CourseRouteDelayedProtocol = ReturnType<typeof courseRouteDelayedProtocolSchema.parse>;
@@ -203,8 +205,11 @@ export function projectCourseRoutePlanningWindow(
     effectiveDueAt = taskDueAt ?? deadlineAt;
   }
 
-  const target = scheduledStartAt ?? recommendedAt;
-  const floorCandidates = [taskNotBefore, retestNotBeforeAt, snoozedUntil, target].filter(
+  // Keep notBefore as the true earliest-start / deferral floor (never project explicit
+  // scheduledStartAt into notBefore, which would make local-replan treat a valid same-day
+  // future reservation as a deferred task). `effectivePlanningStartFloorMs` and
+  // `taskNotBeforeAt` combine `notBefore` with `scheduledStartAt ?? recommendedAt`.
+  const floorCandidates = [taskNotBefore, retestNotBeforeAt, snoozedUntil].filter(
     (value): value is ParsedInstant => value !== null,
   );
   const effectiveNotBefore = floorCandidates.length
@@ -238,6 +243,61 @@ export function effectivePlanningStartFloorMs(window: CourseRoutePlanningWindowP
     .map((value) => Date.parse(value))
     .filter(Number.isFinite);
   return candidates.length ? Math.max(...candidates) : null;
+}
+
+/**
+ * Reads the workspace planning timeZone inside an active plan acceptance/validation transaction.
+ */
+export async function readWorkspacePlanningTimeZone(
+  tx: TransactionSql,
+  scope: Scope,
+): Promise<string> {
+  const [preferences] = await tx`SELECT planning_settings FROM workspace_preferences WHERE workspace_id=${scope.workspaceId}`;
+  const stored = preferences?.planning_settings;
+  if (stored == null) return resolveWorkspaceTimeZone(undefined);
+  const parsed = openingPlanningSettingsSchema.safeParse(stored);
+  if (!parsed.success) {
+    throw new OpeningPlanError("CONFLICT", "planning constraints changed; refresh", "stale_version");
+  }
+  return resolveWorkspaceTimeZone(parsed.data.timeZone);
+}
+
+/**
+ * Explicit retest reservations (`scheduledStartAt`) are pinned to their local calendar
+ * day in the workspace timeZone; neither earlier nor later days may schedule or confirm them.
+ */
+export function isScheduledStartAllowedOnDay(
+  scheduledStartAt: string | null,
+  day: string,
+  timeZone: string,
+): boolean {
+  if (!scheduledStartAt) return true;
+  try {
+    return isInstantOnLocalDay(scheduledStartAt, day, timeZone);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Validates that a planned block satisfies a task's current planning window:
+ * same-day explicit reservation (in workspace timeZone), start floor, and real hard deadline.
+ */
+export function isBlockAllowedForTaskWindow(
+  block: { start: string; end: string },
+  window: CourseRoutePlanningWindowProjection,
+  day: string,
+  timeZone: string,
+): boolean {
+  if (!isScheduledStartAllowedOnDay(window.scheduledStartAt, day, timeZone)) return false;
+  const startMs = Date.parse(block.start);
+  const endMs = Date.parse(block.end);
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return false;
+  const earliestStartMs = effectivePlanningStartFloorMs(window);
+  if (earliestStartMs !== null && startMs < earliestStartMs) return false;
+  const dueMs = window.dueAt ? Date.parse(window.dueAt) : null;
+  if (dueMs !== null && endMs > dueMs) return false;
+  return true;
 }
 
 /**

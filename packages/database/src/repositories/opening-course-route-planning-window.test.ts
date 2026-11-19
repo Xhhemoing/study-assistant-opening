@@ -263,7 +263,7 @@ describe("projectCourseRoutePlanningWindow", () => {
     expect(legacyWithNarrowedDeadline.dueAt).toBe(FRIDAY_1930);
   });
 
-  it("computes the planning start floor from max(notBefore, notBeforeAt, snoozedUntil, scheduledStartAt ?? recommendedAt) while preserving recommendedAt and scheduledStartAt separately", () => {
+  it("keeps notBefore as earliest-start/deferral floor without projecting scheduledStartAt while computing effectivePlanningStartFloorMs accurately", () => {
     const snoozed = "2026-10-16T12:00:00.000Z";
     const reserved = "2026-10-16T18:00:00.000Z";
 
@@ -274,13 +274,14 @@ describe("projectCourseRoutePlanningWindow", () => {
       }),
       SCOPE,
     );
-    expect(withSnoozeAndReservation.notBefore).toBe(reserved);
+    expect(withSnoozeAndReservation.notBefore).toBe(snoozed);
     expect(withSnoozeAndReservation.recommendedAt).toBe(EARLIEST_AT);
     expect(withSnoozeAndReservation.scheduledStartAt).toBe(reserved);
     expect(effectivePlanningStartFloorMs(withSnoozeAndReservation)).toBe(Date.parse(reserved));
 
     // When explicit scheduledStartAt is earlier than recommendedAt, scheduledStartAt replaces
-    // recommendedAt as the target while retest_not_before_at still enforces the 72h floor.
+    // recommendedAt as the target while retest_not_before_at still enforces the 72h floor
+    // and notBefore stays at the 72h earliest-start floor rather than copying scheduledStartAt.
     const earlierRecommended = "2026-10-17T19:00:00.000Z";
     const earlierReservation = "2026-10-16T09:00:00.000Z";
     const movedEarlier = projectCourseRoutePlanningWindow(
@@ -290,9 +291,10 @@ describe("projectCourseRoutePlanningWindow", () => {
       }),
       SCOPE,
     );
-    expect(movedEarlier.notBefore).toBe(earlierReservation);
+    expect(movedEarlier.notBefore).toBe(EARLIEST_AT);
     expect(movedEarlier.recommendedAt).toBe(earlierRecommended);
     expect(movedEarlier.scheduledStartAt).toBe(earlierReservation);
+    expect(effectivePlanningStartFloorMs(movedEarlier)).toBe(Date.parse(earlierReservation));
   });
 
   it("tracks retestActive status and rejects cross-scope or mismatched ownership rows", () => {
@@ -558,5 +560,259 @@ describe("projectCourseRoutePlanningWindow", () => {
       acceptOpeningPlan(forged.sql, SCOPE, { draftId, expectedBaseVersion: 0, clientKey: "fail-end-past-due" }, now),
     ).rejects.toMatchObject({ code: "CONFLICT", reason: "task_changed" });
     expect(forged.getAcceptedVersion()).toBe(0);
+  });
+
+  it("rejects cross-day explicit scheduledStartAt in acceptOpeningPlan and validateOpeningLocalReplan (including Asia/Shanghai boundary)", async () => {
+    const friday = "2026-10-16";
+    const fridayNow = new Date("2026-10-16T19:00:00.000Z");
+    const fridayBlock = {
+      taskId: TASK_ID,
+      start: FRIDAY_SLOT_START,
+      end: FRIDAY_SLOT_END,
+      reason: "forged-cross-day",
+    };
+
+    const cases = [
+      {
+        label: "Thursday reservation forged onto Friday (UTC)",
+        timeZone: "UTC",
+        day: friday,
+        now: fridayNow,
+        scheduledStartAt: "2026-10-15T19:15:00.000Z",
+        block: fridayBlock,
+      },
+      {
+        label: "Saturday reservation forged onto Friday (UTC)",
+        timeZone: "UTC",
+        day: friday,
+        now: fridayNow,
+        scheduledStartAt: "2026-10-17T19:15:00.000Z",
+        block: fridayBlock,
+      },
+      {
+        label: "2026-10-15T16:30Z (= 2026-10-16 00:30 Asia/Shanghai) forged onto 2026-10-15 in Asia/Shanghai",
+        timeZone: "Asia/Shanghai",
+        day: "2026-10-15",
+        now: new Date("2026-10-15T12:00:00.000Z"),
+        scheduledStartAt: "2026-10-15T16:30:00.000Z",
+        notBefore: "2026-10-14T19:00:00.000Z",
+        block: {
+          taskId: TASK_ID,
+          start: "2026-10-15T13:00:00.000Z",
+          end: "2026-10-15T13:25:00.000Z",
+          reason: "forged-shanghai-prev-day",
+        },
+      },
+    ] as const;
+
+    for (const c of cases) {
+      const row = makeCourseRouteRow({
+        retest_scheduled_start_at: c.scheduledStartAt,
+        ...("notBefore" in c ? { not_before: c.notBefore, retest_not_before_at: c.notBefore } : {}),
+      });
+      const [task] = await createOpeningPlansRepository(
+        vi.fn().mockResolvedValue([row]) as unknown as Sql,
+      ).listTasks(SCOPE);
+
+      // 1) Ordinary acceptOpeningPlan rejects cross-day forged draft without bumping version.
+      let acceptedVersion = 0;
+      const draftId = id(70);
+      const draftRow = {
+        id: draftId,
+        workspace_id: SCOPE.workspaceId,
+        owner_user_id: SCOPE.ownerUserId,
+        day: c.day,
+        version: 0,
+        base_version: 0,
+        status: "draft",
+        blocks: [c.block],
+        unscheduled_task_ids: [],
+        suggested_tasks: [],
+        origin: "user",
+        strategy_version: null,
+        hard_blocks_fingerprint: "fp",
+        input_snapshot: { tasks: [task], free: [] },
+      };
+      const fn = (parts: TemplateStringsArray) => {
+        if (!parts.raw) return {};
+        const query = parts.join("?");
+        if (query.includes("SELECT day FROM opening_plan_drafts")) return Promise.resolve([{ day: c.day }]);
+        if (query.includes("pg_advisory_xact_lock") || query.includes("opening_workspace_history_revisions")) return Promise.resolve([]);
+        if (query.includes("FROM workspaces")) return Promise.resolve([{ id: SCOPE.workspaceId }]);
+        if (query.includes("FROM courses")) return Promise.resolve([{ id: COURSE_ID }]);
+        if (query.includes("INSERT INTO opening_plan_state")) return Promise.resolve([]);
+        if (query.includes("FROM opening_plan_state")) {
+          return Promise.resolve([{ accepted_version: acceptedVersion, accepted_blocks: [], hard_blocks_fingerprint: "fp" }]);
+        }
+        if (query.includes("SELECT * FROM opening_plan_drafts")) return Promise.resolve([draftRow]);
+        if (query.includes("FROM opening_plan_acceptances")) return Promise.resolve([]);
+        if (query.includes("FROM opening_hard_blocks") || query.includes("FROM opening_timetable_sessions")) return Promise.resolve([]);
+        if (query.includes("FROM workspace_preferences")) {
+          return Promise.resolve([{
+            planning_settings: {
+              weekOneMonday: "2026-09-07",
+              periodTimes: {},
+              dailyWindow: { start: "08:00", end: "22:00" },
+              lunch: { start: "12:00", end: "13:00" },
+              dinner: { start: "18:00", end: "19:00" },
+              sleep: { start: "23:00", end: "07:00" },
+              timeZone: c.timeZone,
+            },
+          }]);
+        }
+        if (query.includes("FROM opening_teaching_activities")
+          || query.includes("FROM opening_retest_activities")
+          || query.includes("FROM opening_learning_goals")) return Promise.resolve([]);
+        if (query.includes("FROM opening_tasks")) return Promise.resolve([row]);
+        if (query.includes("UPDATE opening_plan_state")) {
+          acceptedVersion += 1;
+          return Promise.resolve([]);
+        }
+        throw new Error(`Unexpected SQL: ${query}`);
+      };
+      const sql = Object.assign(fn, {
+        json: (v: unknown) => v,
+        begin: async (run: (tx: TransactionSql) => unknown) => run(sql as unknown as TransactionSql),
+      }) as unknown as Sql;
+
+      await expect(
+        acceptOpeningPlan(sql, SCOPE, { draftId, expectedBaseVersion: 0, clientKey: `cross-day-${c.label}` }, c.now),
+        c.label,
+      ).rejects.toMatchObject({ code: "CONFLICT", reason: "task_changed" });
+      expect(acceptedVersion, c.label).toBe(0);
+
+      // 2) Local replan validation also rejects forged fresh block for cross-day reservation.
+      const localDraft = {
+        id: id(71),
+        day: c.day,
+        origin: "user",
+        strategy_version: "local-replan-v1",
+        suggested_tasks: [],
+        input_snapshot: {
+          tasks: [task],
+          localReplan: {
+            kind: "local_replan_v1",
+            baseAcceptedVersion: 1,
+            baselineBlocks: [],
+            fixedBlocks: [],
+            releasedTaskVersions: [],
+            proposedAt: c.now.toISOString(),
+            preserveAll: false,
+            explicitFree: [{ start: c.block.start, end: c.block.end, kind: "free" }],
+          },
+        },
+      };
+      await expect(
+        validateOpeningLocalReplan(sql as unknown as TransactionSql, SCOPE, {
+          day: c.day,
+          state: { accepted_version: 1, accepted_blocks: [] },
+          draft: localDraft,
+          blocks: [c.block],
+          now: c.now,
+        }),
+        `localReplan: ${c.label}`,
+      ).rejects.toMatchObject({ code: "CONFLICT", reason: "task_changed" });
+    }
+  });
+
+  it("validateOpeningLocalReplan re-checks futureFixed retest blocks for active status, deferral/snooze, deadline narrowing, and cross-day reservation", async () => {
+    const day = "2026-10-16";
+    const now = new Date("2026-10-16T19:00:00.000Z");
+    const fixedBlock = {
+      taskId: TASK_ID,
+      start: FRIDAY_SLOT_START,
+      end: FRIDAY_SLOT_END,
+      reason: "已确认复测",
+    };
+    const otherTaskId = id(88);
+    const otherTaskRow = {
+      id: otherTaskId,
+      workspace_id: SCOPE.workspaceId,
+      owner_user_id: SCOPE.ownerUserId,
+      version: 1,
+      title: "普通任务",
+      minutes: 20,
+      due_at: null,
+      not_before: null,
+      priority: 1,
+      status: "pending",
+      origin: "manual",
+    };
+    const newBlock = {
+      taskId: otherTaskId,
+      start: "2026-10-16T19:45:00.000Z",
+      end: "2026-10-16T20:05:00.000Z",
+      reason: "新增任务",
+    };
+    const activeRow = makeCourseRouteRow({ retest_scheduled_start_at: FRIDAY_SLOT_START });
+    const [retestTask, otherTask] = await createOpeningPlansRepository(
+      vi.fn().mockResolvedValue([activeRow, otherTaskRow]) as unknown as Sql,
+    ).listTasks(SCOPE);
+
+    const draft = {
+      id: id(72),
+      day,
+      origin: "user",
+      strategy_version: "local-replan-v1",
+      suggested_tasks: [],
+      input_snapshot: {
+        tasks: [retestTask, otherTask],
+        localReplan: {
+          kind: "local_replan_v1",
+          baseAcceptedVersion: 1,
+          baselineBlocks: [fixedBlock],
+          fixedBlocks: [fixedBlock],
+          releasedTaskVersions: [],
+          proposedAt: now.toISOString(),
+          preserveAll: false,
+          explicitFree: [{ start: "2026-10-16T19:00:00.000Z", end: "2026-10-16T21:00:00.000Z", kind: "free" }],
+        },
+      },
+    };
+    const makeTx = (row: Record<string, unknown>): TransactionSql => {
+      const fn = (parts: TemplateStringsArray) => {
+        if (!parts.raw) return {};
+        const query = parts.join("?");
+        if (query.includes("FROM opening_teaching_activities")) return Promise.resolve([]);
+        if (query.includes("FROM opening_tasks")) return Promise.resolve([row, otherTaskRow]);
+        if (query.includes("FROM opening_hard_blocks") || query.includes("FROM opening_timetable_sessions")) return Promise.resolve([]);
+        if (query.includes("planning_settings")) {
+          return Promise.resolve([{
+            planning_settings: {
+              weekOneMonday: "2026-09-07",
+              periodTimes: {},
+              dailyWindow: { start: "19:00", end: "21:00" },
+              lunch: { start: "12:00", end: "13:00" },
+              dinner: { start: "18:00", end: "19:00" },
+              sleep: { start: "23:00", end: "07:00" },
+              timeZone: "UTC",
+            },
+          }]);
+        }
+        throw new Error(`Unexpected SQL: ${query}`);
+      };
+      return Object.assign(fn, { json: (v: unknown) => v }) as unknown as TransactionSql;
+    };
+    const state = { accepted_version: 1, accepted_blocks: [fixedBlock] };
+    const blocks = [fixedBlock, newBlock];
+
+    // Active & legal futureFixed validates cleanly.
+    await expect(validateOpeningLocalReplan(makeTx(activeRow), SCOPE, {
+      day, state, draft, blocks, now,
+    })).resolves.toBeUndefined();
+
+    // Mutating the retest activity after proposal rejects even though scheduledNew === false.
+    for (const [label, mutated] of [
+      ["cancelled", { ...activeRow, retest_status: "cancelled" }],
+      ["invalidated", { ...activeRow, retest_status: "invalidated" }],
+      ["snoozed past start", { ...activeRow, retest_snoozed_until: "2026-10-16T20:00:00.000Z" }],
+      ["deadline narrowed before end", { ...activeRow, retest_deadline_at: FRIDAY_1930 }],
+      ["moved scheduledStartAt to another day", { ...activeRow, retest_scheduled_start_at: "2026-10-17T19:15:00.000Z" }],
+    ] as const) {
+      await expect(
+        validateOpeningLocalReplan(makeTx(mutated), SCOPE, { day, state, draft, blocks, now }),
+        label,
+      ).rejects.toMatchObject({ code: "CONFLICT", reason: "task_changed" });
+    }
   });
 });

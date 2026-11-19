@@ -79,8 +79,16 @@ export function dailyDraftAdvisoryLockKeys(workspaceId: string, date: string): [
   return [digest.readInt32BE(0), digest.readInt32BE(4)];
 }
 
-function mapTask(row: Record<string, unknown>, scope?: OpeningScope): TaskItem {
-  const window = projectCourseRoutePlanningWindow(row, scope);
+export type ListTasksOptions = {
+  /** Exclude pending tasks whose linked retest activity is not active ('accepted' | 'in_progress'). */
+  excludeInactiveRetests?: boolean;
+};
+
+function mapTask(
+  row: Record<string, unknown>,
+  scope?: OpeningScope,
+  window = projectCourseRoutePlanningWindow(row, scope),
+): TaskItem {
   const projectedRow = window.isCourseRouteRetest && window.notBefore !== null
     ? { ...row, not_before: window.notBefore }
     : row;
@@ -149,7 +157,7 @@ export function mapOpeningPlanDraft(row: Record<string, unknown>): PlanDraft {
 
 export function createOpeningPlansRepository(sql: Sql, options: { now?: () => Date } = {}) {
   return {
-    async listTasks(scope: OpeningScope): Promise<TaskItem[]> {
+    async listTasks(scope: OpeningScope, listOptions: ListTasksOptions = {}): Promise<TaskItem[]> {
       const rows = await sql`
         SELECT
           t.*,
@@ -206,7 +214,12 @@ export function createOpeningPlansRepository(sql: Sql, options: { now?: () => Da
         ORDER BY t.created_at ASC`;
       const tasks: TaskItem[] = [];
       for (const row of rows) {
-        const task = mapTask(row as Record<string, unknown>, scope);
+        const record = row as Record<string, unknown>;
+        const window = projectCourseRoutePlanningWindow(record, scope);
+        if (listOptions.excludeInactiveRetests && record.status === "pending" && !window.retestActive) {
+          continue;
+        }
+        const task = mapTask(record, scope, window);
         // Card review and completed retest review retain their original execution paths.
         if (task.suggestionKind === "review_cards" || task.status === "done" && task.retest) { tasks.push(task); continue; }
         const ids = (row.teaching_binding_ids ?? []) as string[];

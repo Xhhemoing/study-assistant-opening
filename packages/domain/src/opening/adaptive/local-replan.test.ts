@@ -58,4 +58,105 @@ describe("local replanning", () => {
     expect(result.changed).toBe(false);
   });
 
+  it("preserves a legal same-day future retest reservation in fixedBlocks and releases it only after user deferral", () => {
+    const fridayNow = new Date("2026-10-16T19:00:00.000Z");
+    const eveningConstraints: TimeBlock[] = [{ start: "2026-10-16T19:00:00.000Z", end: "2026-10-16T21:00:00.000Z", kind: "free" }];
+    const reservedBlock: PlannedBlock = {
+      taskId: id(10),
+      start: "2026-10-16T19:15:00.000Z",
+      end: "2026-10-16T19:40:00.000Z",
+      reason: "延迟复测预约",
+    };
+    const retestTask = task(10, {
+      minutes: 25,
+      notBefore: "2026-10-15T19:00:00.000Z",
+      dueAt: "2026-10-26T19:00:00.000Z",
+      retest: {
+        candidateId: id(110),
+        activityId: id(210),
+        courseId: id(310),
+        skillLabel: "矩阵秩",
+        prompt: "延迟复测",
+        recommendedAt: "2026-10-15T19:00:00.000Z",
+        scheduledStartAt: "2026-10-16T19:15:00.000Z",
+      },
+    });
+    const extraTask = task(11, { minutes: 30 });
+
+    const kept = buildLocalReplan({
+      acceptedBlocks: [reservedBlock],
+      tasks: [retestTask, extraTask],
+      constraints: eveningConstraints,
+      now: fridayNow,
+      options: { localDate: "2026-10-16", timeZone: "UTC", planningNow: "2026-10-16T19:01:00.000Z" },
+    });
+    expect(kept.fixedBlocks).toEqual([reservedBlock]);
+    expect(kept.releasedTaskVersions).toEqual([]);
+    expect(kept.blocks).toEqual(expect.arrayContaining([reservedBlock]));
+    expect(kept.blocks.some(b => b.taskId === id(11))).toBe(true);
+
+    // User defers the task to 20:00 (> 19:15): fixed block MUST be released and not re-placed.
+    const deferredRetest = { ...retestTask, version: 2, notBefore: "2026-10-16T20:00:00.000Z" };
+    const released = buildLocalReplan({
+      acceptedBlocks: [reservedBlock],
+      tasks: [deferredRetest, extraTask],
+      constraints: eveningConstraints,
+      now: fridayNow,
+      options: { localDate: "2026-10-16", timeZone: "UTC", planningNow: "2026-10-16T19:01:00.000Z" },
+    });
+    expect(released.fixedBlocks).toEqual([]);
+    expect(released.releasedTaskVersions).toEqual([{ id: id(10), version: 2, status: "pending" }]);
+    expect(released.blocks.some(b => b.taskId === id(10))).toBe(false);
+    expect(released.blocks.some(b => b.taskId === id(11))).toBe(true);
+  });
+
+  it("releases cross-day futureFixed retest reservations and excludes cross-day reservations from candidates", () => {
+    const fridayNow = new Date("2026-10-16T19:00:00.000Z");
+    const eveningConstraints: TimeBlock[] = [{ start: "2026-10-16T19:00:00.000Z", end: "2026-10-16T21:00:00.000Z", kind: "free" }];
+    const thursdayReserved = task(20, {
+      minutes: 25,
+      notBefore: "2026-10-15T19:00:00.000Z",
+      dueAt: "2026-10-26T19:00:00.000Z",
+      retest: {
+        candidateId: id(120),
+        activityId: id(220),
+        courseId: id(320),
+        skillLabel: "矩阵秩",
+        prompt: "周四预约",
+        recommendedAt: "2026-10-15T19:00:00.000Z",
+        scheduledStartAt: "2026-10-15T19:15:00.000Z",
+      },
+    });
+    const saturdayReserved = task(21, {
+      minutes: 25,
+      notBefore: "2026-10-15T19:00:00.000Z",
+      dueAt: "2026-10-26T19:00:00.000Z",
+      retest: {
+        candidateId: id(121),
+        activityId: id(221),
+        courseId: id(320),
+        skillLabel: "特征值",
+        prompt: "周六预约",
+        recommendedAt: "2026-10-15T19:00:00.000Z",
+        scheduledStartAt: "2026-10-17T19:15:00.000Z",
+      },
+    });
+    const forgedBlock: PlannedBlock = {
+      taskId: id(20),
+      start: "2026-10-16T19:15:00.000Z",
+      end: "2026-10-16T19:40:00.000Z",
+      reason: "跨日块",
+    };
+
+    const result = buildLocalReplan({
+      acceptedBlocks: [forgedBlock],
+      tasks: [thursdayReserved, saturdayReserved],
+      constraints: eveningConstraints,
+      now: fridayNow,
+      options: { localDate: "2026-10-16", timeZone: "UTC", planningNow: "2026-10-16T19:01:00.000Z" },
+    });
+    expect(result.fixedBlocks).toEqual([]);
+    expect(result.releasedTaskVersions).toEqual([{ id: id(20), version: 1, status: "pending" }]);
+    expect(result.blocks).toEqual([]);
+  });
 });
