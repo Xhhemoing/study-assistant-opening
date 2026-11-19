@@ -1,12 +1,46 @@
-import { learningActivityBudgetSchema, learningManagementSettingsSchema, openingPlanningSettingsSchema, plannedBlockSchema, type Scope } from "@aistudy/contracts";
-import { localDateKeyInZone, resolveLocalDayBounds, resolveWorkspaceTimeZone } from "@aistudy/domain";
+import {
+  DAY_EXCEPTION_STRATEGY_VERSION,
+  dayExceptionSnapshotSchema,
+  learningActivityBudgetSchema,
+  learningManagementSettingsSchema,
+  openingPlanningSettingsSchema,
+  plannedBlockSchema,
+  type DayExceptionSnapshot,
+  type Scope,
+} from "@aistudy/contracts";
+import { evaluateDayExceptionCapacity, localDateKeyInZone, resolveLocalDayBounds, resolveWorkspaceTimeZone } from "@aistudy/domain";
 import type { Sql, TransactionSql } from "postgres";
-import { calculateSpanTutorBudgetUsage } from "./opening-learning-capacity-usage";
+import { calculateDayExceptionUsageBounds, calculateSpanTutorBudgetUsage } from "./opening-learning-capacity-usage";
 import { readUnusedStaleCourseRouteReservations } from "./opening-course-route-reservations";
 import { learningError, lockWorkspaceLearningHistory } from "./opening-learning-facts";
 
 type Row = Record<string, unknown>;
 const object = (value: unknown): Row => value && typeof value === "object" && !Array.isArray(value) ? value as Row : {};
+
+export type StoredDayException = DayExceptionSnapshot & { id: string };
+
+export async function readActiveDayException(
+  db: Sql | TransactionSql,
+  scope: Scope,
+  localDate: string,
+): Promise<StoredDayException | null> {
+  const [row] = await db`
+    SELECT id, version, input_snapshot
+    FROM opening_plan_drafts
+    WHERE workspace_id = ${scope.workspaceId}
+      AND owner_user_id = ${scope.ownerUserId}
+      AND day = ${localDate}::date
+      AND strategy_version = ${DAY_EXCEPTION_STRATEGY_VERSION}
+    ORDER BY version DESC, created_at DESC
+    LIMIT 1`;
+  if (!row) return null;
+  const parsed = dayExceptionSnapshotSchema.safeParse(object(row.input_snapshot).dayException);
+  if (!parsed.success || parsed.data.localDate !== localDate || parsed.data.revision !== Number(row.version)) {
+    throw learningError("CONFLICT", "当日临时调整记录异常，请先刷新核对。");
+  }
+  return { id: String(row.id), ...parsed.data };
+}
+
 /** Stored activity references carry reservations, not a second budget ledger. */
 export function normalizeLearningCapacityActivities(rows: Row[]): Row[] {
   return rows.flatMap(row => {
@@ -26,7 +60,7 @@ export async function readOpeningLearningCapacity(db: Sql | TransactionSql, scop
   const budget = row.learning_management == null ? null : learningManagementSettingsSchema.parse(row.learning_management);
   const settings = row.planning_settings == null ? null : openingPlanningSettingsSchema.parse(row.planning_settings);
   const timeZone = resolveWorkspaceTimeZone(settings?.timeZone), localDate = localDateKeyInZone(targetAt, timeZone), bounds = resolveLocalDayBounds(localDate, timeZone);
-  const activities = await db`SELECT id,course_id,status,created_at,create_intent,checkpoint_json,goal_json FROM opening_teaching_activities
+  const activities = await db`SELECT id,course_id,status,created_at,updated_at,create_intent,checkpoint_json,goal_json FROM opening_teaching_activities
     WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND (${excludeActivityId ?? null}::uuid IS NULL OR id<>${excludeActivityId ?? null}::uuid)
       AND ((created_at>=${bounds.dayStart} AND created_at<${bounds.nextDayStart}) OR goal_json ? 'tutorBudget' OR goal_json ? 'learningBudget')
       AND (create_intent->>'protocol' IN ('span-lesson-v1','card-review-session-v1','course-route-v1') OR goal_json ? 'learningBudget' OR goal_json ? 'tutorBudget' OR goal_json ? 'sessionMinutes')`;
@@ -39,7 +73,8 @@ export async function readOpeningLearningCapacity(db: Sql | TransactionSql, scop
   const released = new Set((await readUnusedStaleCourseRouteReservations(db, scope)).map(row=>String(row.id)));
   const normalized = normalizeLearningCapacityActivities(activities.filter(row=>!released.has(String(row.id))));
   const usedMinutes = calculateSpanTutorBudgetUsage({ localDate, timeZone }, normalized, tasks, blocks);
-  return { budget, settings, localDate, timeZone, bounds, activities: normalized, tasks, blocks, usedMinutes };
+  const dayException = await readActiveDayException(db, scope, localDate);
+  return { budget, settings, localDate, timeZone, bounds, activities: normalized, tasks, blocks, usedMinutes, dayException };
 }
 export async function assertOpeningWorkspaceCapacity(tx: TransactionSql, scope: Scope, input: { minutes: number; targetAt?: Date; activityId?: string }, now = new Date()) {
   await lockWorkspaceLearningHistory(tx, scope);
@@ -58,6 +93,31 @@ export async function assertOpeningWorkspaceCapacity(tx: TransactionSql, scope: 
   const withoutRecovery = recoveryId ? calculateSpanTutorBudgetUsage(state, activities.filter(row => row.id !== recoveryId || row.course_id !== activity?.course_id), state.tasks, state.blocks) : used;
   const proposed = used + Math.max(0, input.minutes - Math.max(used - withoutLinked, used - withoutRecovery));
   if (state.budget && proposed > state.budget.dailyMinutes - state.budget.bufferMinutes) throw learningError("CONFLICT", `工作区 ${state.localDate} 已占用 ${used} 分钟；共同预算不足，请缩短本次或调整未执行安排。`);
+  if (state.dayException) {
+    const baseActivities = activities.filter(row => {
+      if (linked && object(row.create_intent).taskId === linked) return false;
+      if (recoveryId && row.id === recoveryId && row.course_id === activity?.course_id) return false;
+      return true;
+    });
+    const baseTasks = linked ? state.tasks.filter(task => task.id !== linked) : state.tasks;
+    const baseBlocks = linked ? state.blocks.filter(block => block.taskId !== linked) : state.blocks;
+    const bounds = calculateDayExceptionUsageBounds(state, state.dayException.effectiveAt, baseActivities, baseTasks, baseBlocks);
+    const evaluated = evaluateDayExceptionCapacity({
+      dailyMinutes: state.budget?.dailyMinutes ?? null,
+      bufferMinutes: state.budget?.bufferMinutes ?? null,
+      dayUsedMinutes: bounds.dayUsedMinutes,
+      exceptionRemainingMinutes: state.dayException.remainingMinutes,
+      afterLowerMinutes: bounds.afterLowerMinutes,
+      afterUpperMinutes: bounds.afterUpperMinutes,
+      requiredMinutes: input.minutes,
+    });
+    if (evaluated.usageUncertain) {
+      throw learningError("CONFLICT", "存在跨过今日临时调整时刻的学习记录，当前剩余可用时长暂无法准确确认，请先刷新核对后再开始。");
+    }
+    if (evaluated.shortfallMinutes > 0) {
+      throw learningError("CONFLICT", `今日临时可用时长上限为 ${state.dayException.remainingMinutes} 分钟，剩余容量不足以安排本次 ${input.minutes} 分钟学习，请先调整今日安排或缩短时长。`);
+    }
+  }
   return state;
 }
 export async function reserveOpeningLearningActivityBudget(tx: TransactionSql, scope: Scope, input: { activityId: string; minutes: number; goalId?: string; expectedGoalRevision?: number }, now = new Date()) {

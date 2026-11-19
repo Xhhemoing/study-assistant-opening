@@ -28,6 +28,26 @@ export async function assertOpeningCourseRouteRetestCurrent(tx:TransactionSql,sc
   if(!all.raw.some(item=>item.id===protocol.data.baselineObservationId&&(item.rootObservationId??item.id)===protocol.data.baselineRootId))throw learningError("CONFLICT","延迟复测所依据的评价已更正或撤回，请重新核对。");
   return row;
 }
+/** Strict reschedule guard for cross-day adjustment: requires accepted status, active course, intact course-route protocol & baseline, without requiring submission earliest-start to have already arrived. */
+export async function assertOpeningCourseRouteRetestReschedulable(tx:TransactionSql,scope:Scope,retestId:string,now=new Date()){
+  const row=await readOpeningCourseRouteRetest(tx,scope,retestId);
+  if(!row||String(row.status)!=="accepted"||row.task_status!=="pending")throw learningError("CONFLICT","复测已开始、完成或失效，不能改约时间，请刷新核对。");
+  if(row.deadline_at&&new Date(row.deadline_at as Date).getTime()<now.getTime())throw learningError("CONFLICT","复测已超过截止时间，不能改约。");
+  const courseId=String(row.course_id);
+  const [course]=await tx`SELECT id FROM courses WHERE id=${courseId} AND workspace_id=${scope.workspaceId} AND archived_at IS NULL FOR SHARE`;
+  if(!course)throw learningError("CONFLICT","复测关联的课程已归档或不可访问，不能改约。");
+  const rawProtocol=row.learning_protocol as Record<string,unknown>|null;
+  const protocol=courseRouteDelayedProtocolSchema.safeParse(rawProtocol);
+  if(rawProtocol&&rawProtocol.protocolId==="course-route-delayed-v1"&&!protocol.success)throw learningError("CONFLICT","延迟复测的课程协议已失效，不能改约。");
+  if(protocol.success){
+    const goal=await readLearningGoal(tx,scope,protocol.data.goalId),requirements=await readCourseRequirements(tx,scope,courseId),requirement=requirements.find(item=>item.id===protocol.data.requirementId);
+    if(!goal||goal.revision!==protocol.data.goalRevision||!["active","maintenance","reduced"].includes(goal.lifecycle)||!goal.courseIds.includes(courseId)||!requirement
+      ||requirement.revision!==protocol.data.requirementRevision||requirement.stableSkillId!==protocol.data.stableSkillId)throw learningError("CONFLICT","延迟复测的目标或要求已变化，请重新核对。");
+    const all=await readCourseRouteObservations(tx,scope,courseId);
+    if(!all.raw.some(item=>item.id===protocol.data.baselineObservationId&&(item.rootObservationId??item.id)===protocol.data.baselineRootId))throw learningError("CONFLICT","延迟复测所依据的评价已更正或撤回，请重新核对。");
+  }
+  return row;
+}
 export async function readOpeningCourseRouteRetestOutcome(db:Sql|TransactionSql,scope:Scope,retestId:string,observation:CourseRouteObservation|null){
   const retest=await readOpeningCourseRouteRetest(db,scope,retestId),protocol=courseRouteDelayedProtocolSchema.safeParse(retest?.learning_protocol);
   let recordedIntervalHelp=false,recordedIntervalPractice=false;

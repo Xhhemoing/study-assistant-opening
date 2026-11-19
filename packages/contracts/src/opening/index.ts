@@ -313,3 +313,4 @@ export * from "./question-identity";
 export * from "./question-evaluation";
 export * from "./asset-graph";
 export * from "./writing-activity";
+export * from "./day-adjustment";
