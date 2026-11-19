@@ -99,15 +99,27 @@ export function isReservedDayExceptionProposeKey(
  * Matches only strict UUID-suffixed internal day-adjustment propose_client_key markers,
  * excluding drafts that carry another known legacy strategy_version (e.g. local-replan-v1)
  * or a legacy ordinary proposePlan snapshot without strategy_version.
+ * When draftId is supplied and proposeClientKey matches `day-adjustment:<draftId>` (case-insensitive),
+ * it is always treated as an internal day-adjustment key regardless of snapshot shape, because
+ * ordinary proposePlan receives the client key before generating draft.id.
  */
 export function isReservedDayAdjustmentProposeKey(
   proposeClientKey: unknown,
   strategyVersion?: unknown,
   inputSnapshot?: unknown,
+  draftId?: unknown,
 ): boolean {
   if (typeof proposeClientKey !== "string") return false;
   if (typeof strategyVersion === "string" && OTHER_KNOWN_DRAFT_STRATEGIES.has(strategyVersion)) {
     return false;
+  }
+  const trimmedKey = proposeClientKey.trim();
+  if (
+    typeof draftId === "string"
+    && draftId.trim().length > 0
+    && trimmedKey.toLowerCase() === `${DAY_ADJUSTMENT_PROPOSE_KEY_PREFIX}${draftId.trim().toLowerCase()}`
+  ) {
+    return DAY_ADJUSTMENT_RESERVED_PROPOSE_KEY_RE.test(trimmedKey);
   }
   if (strategyVersion == null && hasLegacyOrdinaryPlanSnapshot(inputSnapshot)) {
     return false;

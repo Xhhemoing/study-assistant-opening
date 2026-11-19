@@ -1804,4 +1804,284 @@ describe("closing boundary P1 & P2/P3 guards", () => {
       }),
     ).rejects.toMatchObject({ code: "CONFLICT", reason: "stale_version" });
   });
+
+  it("P1-2a: returns valid canConfirm=false preview and rejects confirm when keeping 200 source blocks and adding 1 quick task", async () => {
+    const now = new Date("2026-11-19T10:55:00.000Z"); // 18:55 Asia/Shanghai
+    const baseMs = Date.parse("2026-11-19T00:00:00.000Z"); // 08:00 Asia/Shanghai
+    const existingTasks = Array.from({ length: 200 }, (_, index) => {
+      const hex = String(index + 1).padStart(12, "0");
+      return {
+        id: `00000000-0000-4000-8000-${hex}`,
+        workspace_id: WS_A,
+        owner_user_id: OWNER_A,
+        title: `既有任务 ${index + 1}`,
+        minutes: 1,
+        status: "pending",
+        version: 1,
+        priority: 1,
+        due_at: null,
+        not_before: null,
+        course_id: null,
+        candidate_id: null,
+      };
+    });
+    const quickTaskId = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+    const quickTask = {
+      id: quickTaskId,
+      workspace_id: WS_A,
+      owner_user_id: OWNER_A,
+      title: "第201个快速任务",
+      minutes: 15,
+      status: "pending",
+      version: 1,
+      priority: 2,
+      due_at: null,
+      not_before: null,
+      course_id: null,
+      candidate_id: null,
+    };
+    const allTasks = [...existingTasks, quickTask];
+    const sourceBeforeBlocks = existingTasks.map((task, index) => ({
+      taskId: task.id,
+      start: new Date(baseMs + index * 60_000).toISOString(),
+      end: new Date(baseMs + (index + 1) * 60_000).toISOString(),
+      reason: "planned" as const,
+    }));
+
+    let writes = 0;
+    const sql = createMockSql((query, values) => {
+      if (query.includes("INSERT INTO opening_plan_state") || query.includes("INSERT INTO opening_plan_drafts")) {
+        writes += 1;
+      }
+      if (query.includes("pg_advisory_xact_lock") || query.includes("opening_workspace_history_revisions")) return [];
+      if (query.includes("FROM workspaces w LEFT JOIN workspace_preferences")) {
+        return [{ learning_management: null, planning_settings: planningSettings }];
+      }
+      if (query.includes("FROM workspaces")) return [{ id: WS_A }];
+      if (query.includes("FROM workspace_preferences")) return [{ planning_settings: planningSettings }];
+      if (query.includes("FROM opening_plan_drafts") && query.includes("strategy_version")) {
+        if (values[2] !== "2026-11-19") return [];
+        return [{
+          id: EXC_ID,
+          version: 1,
+          input_snapshot: {
+            dayException: {
+              kind: DAY_EXCEPTION_SNAPSHOT_KIND,
+              clientKey: "12121212-1212-4121-8121-121212121212",
+              localDate: "2026-11-19",
+              timeZone: "Asia/Shanghai",
+              effectiveAt: "2026-11-19T10:55:00.000Z",
+              remainingMinutes: 30,
+              expectedExceptionRevision: 0,
+              revision: 1,
+            },
+          },
+        }];
+      }
+      if (query.includes("FROM opening_plan_state")) {
+        if (query.includes("day = ANY(")) {
+          return [{ day: "2026-11-19", accepted_version: 1, accepted_blocks: sourceBeforeBlocks, hard_blocks_fingerprint: "" }];
+        }
+        return [{ day: "2026-11-19", accepted_version: 1, accepted_blocks: sourceBeforeBlocks }];
+      }
+      if (query.includes("SELECT DISTINCT course_id")) return [];
+      if (query.includes("FROM opening_tasks")) {
+        if (query.includes("ANY(") && Array.isArray(values[2])) {
+          const idSet = new Set(values[2] as string[]);
+          return allTasks.filter((t) => idSet.has(t.id));
+        }
+        return allTasks;
+      }
+      return [];
+    });
+
+    const repo = createOpeningDayAdjustmentRepository(sql, { clock: () => now });
+    const preview = await repo.preview(scope, {
+      date: "2026-11-19",
+      targetDate: null,
+      quickTaskId,
+    });
+    expect(preview.canConfirm).toBe(false);
+    expect(preview.sourceAfterBlocks).toHaveLength(200);
+    expect(preview.sourceAddedBlocks).toHaveLength(0);
+    expect(preview.blockers.some((b) => b.includes("200"))).toBe(true);
+    expect(preview.quickCandidates.every((c) => c.fits === false)).toBe(true);
+
+    await expect(
+      repo.confirm(scope, {
+        clientKey: "day-adjust:source-201-reject",
+        sourceDate: "2026-11-19",
+        targetDate: null,
+        expectedTimeZone: "Asia/Shanghai",
+        expectedExceptionRevision: 1,
+        expectedBudgetRevision: null,
+        expectedSourceAcceptedVersion: 1,
+        expectedTaskRevisions: [{ taskId: quickTaskId, version: 1 }],
+        expectedRetestRevisions: [],
+        sourceActions: {
+          keptBlocks: sourceBeforeBlocks,
+          removedBlocks: [],
+          addedBlocks: [
+            {
+              taskId: quickTaskId,
+              start: "2026-11-19T11:05:00.000Z",
+              end: "2026-11-19T11:20:00.000Z",
+              reason: "planned",
+            },
+          ],
+        },
+        targetActions: null,
+      }),
+    ).rejects.toMatchObject({ code: "CONFLICT", reason: "stale_version" });
+    expect(writes).toBe(0);
+  });
+
+  it("P1-2b: returns valid canConfirm=false preview and rejects confirm when moving 1 task onto a 200-block target day", async () => {
+    const now = new Date("2026-11-19T10:55:00.000Z"); // 18:55 Asia/Shanghai
+    const friBaseMs = Date.parse("2026-11-20T00:00:00.000Z"); // 08:00 Asia/Shanghai
+    const targetTasks = Array.from({ length: 200 }, (_, index) => {
+      const hex = String(index + 1).padStart(12, "0");
+      return {
+        id: `10000000-0000-4000-8000-${hex}`,
+        workspace_id: WS_A,
+        owner_user_id: OWNER_A,
+        title: `次日任务 ${index + 1}`,
+        minutes: 1,
+        status: "pending",
+        version: 1,
+        priority: 1,
+        due_at: null,
+        not_before: null,
+        course_id: null,
+        candidate_id: null,
+      };
+    });
+    const moveTask = {
+      id: MATH_ID,
+      workspace_id: WS_A,
+      owner_user_id: OWNER_A,
+      title: "待移出数学任务",
+      minutes: 25,
+      status: "pending",
+      version: 1,
+      priority: 1,
+      due_at: null,
+      not_before: null,
+      course_id: null,
+      candidate_id: null,
+    };
+    const allTasks = [...targetTasks, moveTask];
+    const sourceBeforeBlocks = [
+      {
+        taskId: MATH_ID,
+        start: "2026-11-19T11:15:00.000Z",
+        end: "2026-11-19T11:40:00.000Z",
+        reason: "planned" as const,
+      },
+    ];
+    const targetBeforeBlocks = targetTasks.map((task, index) => ({
+      taskId: task.id,
+      start: new Date(friBaseMs + index * 60_000).toISOString(),
+      end: new Date(friBaseMs + (index + 1) * 60_000).toISOString(),
+      reason: "planned" as const,
+    }));
+
+    let writes = 0;
+    const sql = createMockSql((query, values) => {
+      if (query.includes("INSERT INTO opening_plan_state") || query.includes("INSERT INTO opening_plan_drafts")) {
+        writes += 1;
+      }
+      if (query.includes("pg_advisory_xact_lock") || query.includes("opening_workspace_history_revisions")) return [];
+      if (query.includes("FROM workspaces w LEFT JOIN workspace_preferences")) {
+        return [{ learning_management: null, planning_settings: planningSettings }];
+      }
+      if (query.includes("FROM workspaces")) return [{ id: WS_A }];
+      if (query.includes("FROM workspace_preferences")) return [{ planning_settings: planningSettings }];
+      if (query.includes("FROM opening_plan_drafts") && query.includes("strategy_version")) {
+        if (values[2] !== "2026-11-19") return [];
+        return [{
+          id: EXC_ID,
+          version: 1,
+          input_snapshot: {
+            dayException: {
+              kind: DAY_EXCEPTION_SNAPSHOT_KIND,
+              clientKey: "12121212-1212-4121-8121-121212121212",
+              localDate: "2026-11-19",
+              timeZone: "Asia/Shanghai",
+              effectiveAt: "2026-11-19T10:55:00.000Z",
+              remainingMinutes: 15,
+              expectedExceptionRevision: 0,
+              revision: 1,
+            },
+          },
+        }];
+      }
+      if (query.includes("FROM opening_plan_state")) {
+        if (query.includes("day = ANY(")) {
+          return [
+            { day: "2026-11-19", accepted_version: 1, accepted_blocks: sourceBeforeBlocks, hard_blocks_fingerprint: "" },
+            { day: "2026-11-20", accepted_version: 1, accepted_blocks: targetBeforeBlocks, hard_blocks_fingerprint: "" },
+          ];
+        }
+        const queriedDay = values[1];
+        if (queriedDay === "2026-11-20") {
+          return [{ day: "2026-11-20", accepted_version: 1, accepted_blocks: targetBeforeBlocks }];
+        }
+        return [{ day: "2026-11-19", accepted_version: 1, accepted_blocks: sourceBeforeBlocks }];
+      }
+      if (query.includes("SELECT DISTINCT course_id")) return [];
+      if (query.includes("FROM opening_tasks")) {
+        if (query.includes("ANY(") && Array.isArray(values[2])) {
+          const idSet = new Set(values[2] as string[]);
+          return allTasks.filter((t) => idSet.has(t.id));
+        }
+        return allTasks;
+      }
+      return [];
+    });
+
+    const repo = createOpeningDayAdjustmentRepository(sql, { clock: () => now });
+    const preview = await repo.preview(scope, {
+      date: "2026-11-19",
+      targetDate: "2026-11-20",
+      moveTaskIds: [MATH_ID],
+    });
+    expect(preview.canConfirm).toBe(false);
+    expect(preview.targetBeforeBlocks).toHaveLength(200);
+    expect(preview.targetAfterBlocks).toHaveLength(200);
+    expect(preview.targetAddedBlocks).toHaveLength(0);
+    expect(preview.unplacedMoveTaskIds).toContain(MATH_ID);
+    expect(preview.blockers.some((b) => b.includes("200"))).toBe(true);
+
+    await expect(
+      repo.confirm(scope, {
+        clientKey: "day-adjust:target-201-reject",
+        sourceDate: "2026-11-19",
+        expectedTimeZone: "Asia/Shanghai",
+        expectedExceptionRevision: 1,
+        expectedBudgetRevision: null,
+        expectedSourceAcceptedVersion: 1,
+        expectedTargetAcceptedVersion: 1,
+        expectedTaskRevisions: [{ taskId: MATH_ID, version: 1 }],
+        expectedRetestRevisions: [],
+        sourceActions: {
+          keptBlocks: [],
+          removedBlocks: sourceBeforeBlocks,
+          addedBlocks: [],
+        },
+        targetActions: {
+          targetDate: "2026-11-20",
+          addedBlocks: [
+            {
+              taskId: MATH_ID,
+              start: "2026-11-20T11:15:00.000Z",
+              end: "2026-11-20T11:40:00.000Z",
+              reason: "planned",
+            },
+          ],
+        },
+      }),
+    ).rejects.toMatchObject({ code: "CONFLICT", reason: "stale_version" });
+    expect(writes).toBe(0);
+  });
 });

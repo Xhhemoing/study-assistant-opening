@@ -29,7 +29,7 @@ export async function assertOpeningLearningManagementDraft(tx: TransactionSql, s
     || reasons?.dayException !== undefined
     || reasons?.dayAdjustment !== undefined
     || isReservedDayExceptionProposeKey(draft.propose_client_key, draft.strategy_version, draft.input_snapshot)
-    || isReservedDayAdjustmentProposeKey(draft.propose_client_key, draft.strategy_version, draft.input_snapshot)
+    || isReservedDayAdjustmentProposeKey(draft.propose_client_key, draft.strategy_version, draft.input_snapshot, draft.id)
   ) {
     throw new OpeningPlanError("CONFLICT", "当日临时调整记录不能通过普通单日计划入口确认。", "stale_version");
   }

@@ -17,6 +17,11 @@ const FRI = "2026-11-20";
 const TIME_ZONE = "Asia/Shanghai";
 const THU_1855 = new Date("2026-11-19T10:55:00.000Z");
 
+function dateKey(value: unknown): string {
+  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  return String(value ?? "").slice(0, 10);
+}
+
 let f: OpeningFixture;
 
 async function emptyWorkspace() {
@@ -221,8 +226,9 @@ it("rejects tampered backup archives (missing target day, duplicate revision, st
   // 1. Missing target day state
   const missingTarget = structuredClone(snapshot.tables);
   missingTarget.opening_plan_state = missingTarget.opening_plan_state!.filter(
-    (row) => String(row.day).slice(0, 10) !== FRI,
+    (row) => dateKey(row.day) !== FRI,
   );
+  expect(missingTarget.opening_plan_state).toHaveLength(1);
   await assertRejectedWith(missingTarget, "day adjustment target day plan state is missing or behind receipt");
 
   // 2. Duplicate day-exception revision (distinct clientKey so revision uniqueness check is exercised)

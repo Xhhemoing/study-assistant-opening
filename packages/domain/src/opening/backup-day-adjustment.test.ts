@@ -514,10 +514,11 @@ describe("validateBackupDayAdjustment", () => {
     expect(errors.some((e) => e.includes("stripped day adjustment markers"))).toBe(true);
   });
 
-  it("allows legacy ordinary drafts with strategy_version=null, ordinary snapshot, and reserved UUID key while rejecting stripped drafts", () => {
+  it("allows legacy ordinary drafts with strategy_version=null, ordinary snapshot, and non-self reserved UUID key while rejecting stripped or self-matching draftId drafts", () => {
     const legacyDraftId = "88888888-8888-4888-8888-888888888882";
     const replanDraftId = "88888888-8888-4888-8888-888888888883";
     const legacyUuidKeyDraftId = "88888888-8888-4888-8888-888888888887";
+    const legacyClientKeyUuid = "88888888-8888-4888-8888-888888888890";
     const legacyExcUuidKeyDraftId = "88888888-8888-4888-8888-888888888888";
     const errors: string[] = [];
     validateBackupDayAdjustment(
@@ -573,7 +574,7 @@ describe("validateBackupDayAdjustment", () => {
               proposedAt: "2026-11-19T08:00:00.000Z",
               unscheduledReasons: [],
             },
-            propose_client_key: `${DAY_ADJUSTMENT_PROPOSE_KEY_PREFIX}${legacyUuidKeyDraftId}`,
+            propose_client_key: `${DAY_ADJUSTMENT_PROPOSE_KEY_PREFIX}${legacyClientKeyUuid}`,
             reasons: {},
           },
           {
@@ -603,6 +604,39 @@ describe("validateBackupDayAdjustment", () => {
     );
     expect(errors).toEqual([]);
 
+    // A tampered day-adjustment draft whose propose_client_key matches day-adjustment:<row.id>
+    // MUST still be caught even if strategy_version is nulled and an ordinary-looking snapshot is forged.
+    const selfIdSpoofErrors: string[] = [];
+    validateBackupDayAdjustment(
+      {
+        opening_plan_drafts: [
+          {
+            id: legacyUuidKeyDraftId,
+            workspace_id: WS,
+            owner_user_id: OWNER,
+            day: "2026-11-19",
+            version: 1,
+            base_version: 0,
+            status: "accepted",
+            blocks: [],
+            suggested_tasks: [],
+            origin: "user",
+            strategy_version: null,
+            input_snapshot: {
+              tasks: [],
+              free: [],
+              proposedAt: "2026-11-19T08:00:00.000Z",
+              unscheduledReasons: [],
+            },
+            propose_client_key: `${DAY_ADJUSTMENT_PROPOSE_KEY_PREFIX}${legacyUuidKeyDraftId}`,
+            reasons: {},
+          },
+        ],
+      },
+      selfIdSpoofErrors,
+    );
+    expect(selfIdSpoofErrors.some((e) => e.includes("marker mismatch"))).toBe(true);
+
     // A stripped adjustment draft lacking ordinary snapshot structure must still be rejected.
     const strippedErrors: string[] = [];
     validateBackupDayAdjustment(
@@ -621,7 +655,7 @@ describe("validateBackupDayAdjustment", () => {
             origin: "user",
             strategy_version: null,
             input_snapshot: {},
-            propose_client_key: `${DAY_ADJUSTMENT_PROPOSE_KEY_PREFIX}${legacyUuidKeyDraftId}`,
+            propose_client_key: `${DAY_ADJUSTMENT_PROPOSE_KEY_PREFIX}${legacyClientKeyUuid}`,
             reasons: {},
           },
         ],
@@ -629,6 +663,154 @@ describe("validateBackupDayAdjustment", () => {
       strippedErrors,
     );
     expect(strippedErrors.some((e) => e.includes("marker mismatch"))).toBe(true);
+  });
+
+  it("accepts a contiguous target day chain with coach undo_result_version and rejects forged source-less cross-day or duplicate receipts", () => {
+    const friV1DraftId = "88888888-8888-4888-8888-888888888891";
+    const friV3DraftId = "88888888-8888-4888-8888-888888888892";
+    const thuOrdinaryDraftId = "88888888-8888-4888-8888-888888888893";
+    const writingFriBlock = {
+      taskId: WRITING_ID,
+      start: "2026-11-20T09:00:00.000Z",
+      end: "2026-11-20T09:15:00.000Z",
+      reason: "planned",
+    };
+
+    // Positive control: source day has a day-exception + source-only ordinary removal; target day has
+    // v1 coach accept -> v2 coach undo (undo_result_version=2) -> v3 learner accept (contiguous 1..3).
+    const validUndoTables = validTables();
+    // Replace adjustment with a source-only ordinary accepted draft on THU so FRI isn't claimed by adj.
+    validUndoTables.opening_plan_drafts = [
+      validUndoTables.opening_plan_drafts![0]!,
+      {
+        id: thuOrdinaryDraftId,
+        workspace_id: WS,
+        owner_user_id: OWNER,
+        day: "2026-11-19",
+        version: 2,
+        base_version: 1,
+        status: "accepted",
+        blocks: [{ taskId: WRITING_ID, start: "2026-11-19T11:00:00.000Z", end: "2026-11-19T11:15:00.000Z", reason: "planned" }],
+        suggested_tasks: [],
+        origin: "user",
+        propose_client_key: "ordinary-thu-v2",
+        reasons: {},
+        strategy_version: null,
+        input_snapshot: { tasks: [], free: [], proposedAt: "2026-11-19T10:56:00.000Z", unscheduledReasons: [] },
+      },
+      {
+        id: friV1DraftId,
+        workspace_id: WS,
+        owner_user_id: OWNER,
+        day: "2026-11-20",
+        version: 1,
+        base_version: 0,
+        status: "accepted",
+        blocks: [writingFriBlock],
+        suggested_tasks: [],
+        origin: "auto_draft",
+        propose_client_key: "coach-fri-v1",
+        reasons: {},
+        strategy_version: null,
+        input_snapshot: { tasks: [], free: [], autoDraft: true },
+      },
+      {
+        id: friV3DraftId,
+        workspace_id: WS,
+        owner_user_id: OWNER,
+        day: "2026-11-20",
+        version: 3,
+        base_version: 2,
+        status: "accepted",
+        blocks: [writingFriBlock],
+        suggested_tasks: [],
+        origin: "user",
+        propose_client_key: "ordinary-fri-v3",
+        reasons: {},
+        strategy_version: null,
+        input_snapshot: { tasks: [], free: [], proposedAt: "2026-11-20T03:00:00.000Z", unscheduledReasons: [] },
+      },
+    ];
+    validUndoTables.opening_plan_state![1]!.accepted_version = 3;
+    validUndoTables.opening_plan_state![1]!.accepted_blocks = [writingFriBlock];
+    validUndoTables.opening_plan_acceptances = [
+      {
+        workspace_id: WS,
+        client_key: "ordinary-thu-v2",
+        draft_id: thuOrdinaryDraftId,
+        day: "2026-11-19",
+        accepted_version: 2,
+        payload_hash: PAYLOAD_HASH,
+        source: "learner",
+        before_blocks: [
+          { taskId: WRITING_ID, start: "2026-11-19T11:00:00.000Z", end: "2026-11-19T11:15:00.000Z", reason: "planned" },
+          { taskId: MATH_ID, start: "2026-11-19T11:15:00.000Z", end: "2026-11-19T11:40:00.000Z", reason: "planned" },
+        ],
+        created_task_versions: {},
+      },
+      {
+        workspace_id: WS,
+        client_key: "coach-fri-v1",
+        draft_id: friV1DraftId,
+        day: "2026-11-20",
+        accepted_version: 1,
+        payload_hash: "b".repeat(64),
+        source: "coach",
+        before_blocks: [],
+        created_task_versions: {},
+        undone_at: "2026-11-20T01:30:00.000Z",
+        undo_client_key: "coach-fri-undo-v2",
+        undo_result_version: 2,
+        undo_intent: { date: "2026-11-20" },
+        undo_result: { acceptedVersion: 2, blocks: [], closedTaskIds: [], replayed: false },
+      },
+      {
+        workspace_id: WS,
+        client_key: "ordinary-fri-v3",
+        draft_id: friV3DraftId,
+        day: "2026-11-20",
+        accepted_version: 3,
+        payload_hash: "c".repeat(64),
+        source: "learner",
+        before_blocks: [],
+        created_task_versions: {},
+      },
+    ];
+    const positiveErrors: string[] = [];
+    validateBackupDayAdjustment(validUndoTables, positiveErrors);
+    expect(positiveErrors).toEqual([]);
+
+    // Negative 1: forged source-less cross-day receipt (receipt.day = FRI pointing to a THU draft).
+    const crossDayForged = structuredClone(validUndoTables);
+    crossDayForged.opening_plan_acceptances!.push({
+      workspace_id: WS,
+      client_key: "forged-cross-day",
+      draft_id: thuOrdinaryDraftId,
+      day: "2026-11-20",
+      accepted_version: 4,
+      payload_hash: "d".repeat(64),
+      before_blocks: [],
+      created_task_versions: {},
+    });
+    const crossDayErrors: string[] = [];
+    validateBackupDayAdjustment(crossDayForged, crossDayErrors);
+    expect(crossDayErrors.some((e) => e.includes("invalid or duplicates day accepted version"))).toBe(true);
+
+    // Negative 2: forged source-less duplicate (workspace_id, day, accepted_version) receipt.
+    const dupVersionForged = structuredClone(validUndoTables);
+    dupVersionForged.opening_plan_acceptances!.push({
+      workspace_id: WS,
+      client_key: "forged-dup-v3",
+      draft_id: friV3DraftId,
+      day: "2026-11-20",
+      accepted_version: 3,
+      payload_hash: "e".repeat(64),
+      before_blocks: [],
+      created_task_versions: {},
+    });
+    const dupErrors: string[] = [];
+    validateBackupDayAdjustment(dupVersionForged, dupErrors);
+    expect(dupErrors.some((e) => e.includes("invalid or duplicates day accepted version"))).toBe(true);
   });
 
   it("passes full validateOpeningRestore + planOpeningRestoreApply with courses, workspace_preferences, retests, and history revisions", () => {

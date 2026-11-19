@@ -817,6 +817,8 @@ export function createOpeningDayAdjustmentRepository(
             blockers.push(`任务「${quickTask.title}」已在 ${targetDate} 的安排中，不能重复安排到今日。`);
           } else if (quickTask.retestId && !quickTask.window.retestActive) {
             blockers.push(`任务「${quickTask.title}」对应的复测已失效，无法安排。`);
+          } else if (keptBlocks.length + sourceAddedBlocks.length >= MAX_PREVIEW_ARRAY) {
+            blockers.push(`今日最多可安排 ${MAX_PREVIEW_ARRAY} 个任务时段，请先移出部分安排后再添加「${quickTask.title}」。`);
           } else {
             const { earliestMs: taskFloorMs, dueMs } = effectiveQuickSlotBoundsMs(quickTask);
             const earliestMs = Math.max(sourceFloorMs, taskFloorMs ?? 0);
@@ -927,6 +929,11 @@ export function createOpeningDayAdjustmentRepository(
               blockers.push(`复测「${task.title}」已开始或失效，无法改期。`);
               continue;
             }
+            if (targetBeforeBlocks.length + targetAddedBlocks.length >= MAX_PREVIEW_ARRAY) {
+              unplacedMoveTaskIds.push(taskId);
+              blockers.push(`${targetDate} 最多可安排 ${MAX_PREVIEW_ARRAY} 个任务时段，无法再移入「${task.title}」。`);
+              continue;
+            }
             const { earliestMs: taskFloor, dueMs } = effectiveRescheduleBoundsMs(task);
             const earliestMs = Math.max(targetFloorMs, taskFloor ?? 0);
             const preferredStartMs = placementByTaskId.get(taskId) ?? null;
@@ -1008,6 +1015,19 @@ export function createOpeningDayAdjustmentRepository(
           if (task.courseId && !activeCourseIds.has(task.courseId)) continue;
           if (activeTeachingTaskIds.has(task.id)) continue;
           if (task.retestId && !task.window.retestActive) continue;
+          if (keptBlocks.length >= MAX_PREVIEW_ARRAY) {
+            quickCandidates.push({
+              taskId: task.id,
+              title: task.title,
+              minutes: task.minutes,
+              version: task.version,
+              fits: false,
+              shortfallMinutes: 0,
+              reason: `今日最多可安排 ${MAX_PREVIEW_ARRAY} 个任务时段，请先移出部分安排后再添加。`,
+              suggestedSlot: null,
+            });
+            continue;
+          }
 
           const { earliestMs: taskFloorMs, dueMs } = effectiveQuickSlotBoundsMs(task);
           const earliestMs = Math.max(sourceFloorMs, taskFloorMs ?? 0);
@@ -1426,6 +1446,9 @@ export function createOpeningDayAdjustmentRepository(
           }
         }
         const sourceAfterBlocks = sortBlocks([...keptBlocks, ...sourceAddedBlocks]);
+        if (sourceAfterBlocks.length > MAX_PREVIEW_ARRAY) {
+          throw new OpeningPlanError("CONFLICT", `今日最多可安排 ${MAX_PREVIEW_ARRAY} 个任务时段，请先移出部分安排后再确认。`, "stale_version");
+        }
         const sourceAfterTaskIds = new Set(sourceAfterBlocks.map((b) => b.taskId));
 
         // Verify structural target diff integrity (when cross-day).
@@ -1465,6 +1488,9 @@ export function createOpeningDayAdjustmentRepository(
           }
         }
         const targetAfterBlocks = targetActions ? sortBlocks([...targetBeforeBlocks, ...targetAddedBlocks]) : [];
+        if (targetActions && targetAfterBlocks.length > MAX_PREVIEW_ARRAY) {
+          throw new OpeningPlanError("CONFLICT", `${targetActions.targetDate} 最多可安排 ${MAX_PREVIEW_ARRAY} 个任务时段，无法再移入更多安排。`, "stale_version");
+        }
 
         // 6. Lock relevant retest rows in ascending ID order, then lock tasks via #449 readLockedTaskPlanningWindows.
         const involvedTaskIds = [...new Set([

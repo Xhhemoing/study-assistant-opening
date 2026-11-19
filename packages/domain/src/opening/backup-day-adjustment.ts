@@ -99,7 +99,7 @@ function readDraftEvidence(row: Row) {
   const hasExceptionSnapshot = snapshot?.dayException !== undefined;
   const hasAdjustmentSnapshot = snapshot?.dayAdjustment !== undefined;
   const hasExceptionProposeKey = isReservedDayExceptionProposeKey(row.propose_client_key, row.strategy_version, row.input_snapshot);
-  const hasAdjustmentProposeKey = isReservedDayAdjustmentProposeKey(row.propose_client_key, row.strategy_version, row.input_snapshot);
+  const hasAdjustmentProposeKey = isReservedDayAdjustmentProposeKey(row.propose_client_key, row.strategy_version, row.input_snapshot, row.id);
   const hasExceptionReasons = reasons?.dayException !== undefined || summaryJson?.dayException !== undefined;
   const hasAdjustmentReasons = reasons?.dayAdjustment !== undefined || summaryJson?.dayAdjustment !== undefined;
 
@@ -199,6 +199,7 @@ export function validateBackupDayAdjustment(tables: Tables, errors: string[]): v
   }
 
   const acceptancesByDraftId = new Map<string, Row[]>();
+  const claimedAcceptanceDayVersions = new Set<string>();
   const accountedVersionsByScopeDay = new Map<string, { versions: Set<number>; maxVersion: number }>();
   const recordAccountedVersion = (workspaceId: string, ownerUserId: string, day: string, version: number) => {
     if (!Number.isSafeInteger(version) || version <= 0) return;
@@ -216,17 +217,47 @@ export function validateBackupDayAdjustment(tables: Tables, errors: string[]): v
     list.push(row);
     acceptancesByDraftId.set(id, list);
 
-    if (isUuid(row.workspace_id)) {
-      const ws = row.workspace_id.toLowerCase();
-      const linkedDraft = draftsById.get(id);
-      if (linkedDraft && sameUuid(linkedDraft.workspace_id, ws) && isUuid(linkedDraft.owner_user_id)) {
-        const owner = linkedDraft.owner_user_id.toLowerCase();
-        const day = dateKey(row.day);
-        recordAccountedVersion(ws, owner, day, Number(row.accepted_version));
-        if (row.undone_at != null) {
-          recordAccountedVersion(ws, owner, day, Number(row.undo_result_version));
-        }
+    if (!isUuid(row.workspace_id)) {
+      errors.push("day adjustment acceptance receipt is invalid or duplicates day accepted version");
+      continue;
+    }
+    const ws = row.workspace_id.toLowerCase();
+    const linkedDraft = draftsById.get(id);
+    const day = dateKey(row.day);
+    const acceptedVersion = Number(row.accepted_version);
+    const dayVersionKey = `${ws}/${day}/${acceptedVersion}`;
+    if (
+      !linkedDraft
+      || !sameUuid(linkedDraft.workspace_id, ws)
+      || !isUuid(linkedDraft.owner_user_id)
+      || day !== dateKey(linkedDraft.day)
+      || linkedDraft.status !== "accepted"
+      || !Number.isSafeInteger(acceptedVersion)
+      || acceptedVersion <= 0
+      || Number(linkedDraft.version) !== acceptedVersion
+      || claimedAcceptanceDayVersions.has(dayVersionKey)
+    ) {
+      errors.push("day adjustment acceptance receipt is invalid or duplicates day accepted version");
+      continue;
+    }
+    const owner = linkedDraft.owner_user_id.toLowerCase();
+    claimedAcceptanceDayVersions.add(dayVersionKey);
+    recordAccountedVersion(ws, owner, day, acceptedVersion);
+
+    if (row.undone_at != null) {
+      const undoVersion = Number(row.undo_result_version);
+      const undoDayVersionKey = `${ws}/${day}/${undoVersion}`;
+      if (
+        row.source !== "coach"
+        || !Number.isSafeInteger(undoVersion)
+        || undoVersion !== acceptedVersion + 1
+        || claimedAcceptanceDayVersions.has(undoDayVersionKey)
+      ) {
+        errors.push("day adjustment acceptance receipt is invalid or duplicates day accepted version");
+        continue;
       }
+      claimedAcceptanceDayVersions.add(undoDayVersionKey);
+      recordAccountedVersion(ws, owner, day, undoVersion);
     }
   }
 
@@ -632,6 +663,12 @@ export function validateBackupDayAdjustment(tables: Tables, errors: string[]): v
     }
 
     if (adj.targetDay !== null && adj.targetDate !== null) {
+      const targetDayVersionKey = `${workspaceId}/${adj.targetDate}/${adj.targetDay.afterVersion}`;
+      if (claimedAcceptanceDayVersions.has(targetDayVersionKey)) {
+        errors.push("day adjustment duplicates target day accepted version");
+        continue;
+      }
+      claimedAcceptanceDayVersions.add(targetDayVersionKey);
       recordAccountedVersion(workspaceId, ownerUserId, adj.targetDate, adj.targetDay.afterVersion);
     }
   }
