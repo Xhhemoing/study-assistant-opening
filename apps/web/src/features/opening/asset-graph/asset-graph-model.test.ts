@@ -133,8 +133,11 @@ describe("asset graph status labels & pure helpers", () => {
     expect(summarizeExpansionForScreenReader(nodes, REQ_ID)).toBe(
       "已展开 1 项学习资料、1 项练习记录",
     );
-    expect(summarizeExpansionForScreenReader([nodes[0]!], REQ_ID)).toBe(
-      "当前视角下没有新增关联内容",
+    expect(summarizeExpansionForScreenReader([nodes[0]!], REQ_ID, 2)).toBe(
+      "已补充 2 条关联记录",
+    );
+    expect(summarizeExpansionForScreenReader([nodes[0]!], REQ_ID, 0)).toBe(
+      "已更新关联，暂无新增学习资料",
     );
 
     expect(
@@ -361,7 +364,7 @@ describe("createAssetGraphStore", () => {
     expect(store.getState().rootIds).toEqual([SOURCE_1_ID, SOURCE_2_ID]);
     expect(store.getState().rootsCursor).toBeNull();
 
-    // Exact-operation restart on loadMoreNeighbors CURSOR_STALE preserves existing rootIds
+    // Exact-operation restart on loadMoreNeighbors CURSOR_STALE clears unverified rootIds and old nodes
     let neighborStaleOnce = false;
     const recordedQueries: AssetGraphQuery[] = [];
     const neighborTransport: AssetGraphTransport = async query => {
@@ -417,6 +420,8 @@ describe("createAssetGraphStore", () => {
       applied: true,
       focusId: REQ_ID,
       direction: "out",
+      addedNodeCount: 1,
+      addedEdgeCount: 1,
       addedCount: 1,
     });
     const lastQuery = recordedQueries.at(-1);
@@ -428,8 +433,10 @@ describe("createAssetGraphStore", () => {
     });
     expect((lastQuery as { cursor?: string }).cursor).toBeUndefined();
     expect(neighborStore.getState().error).toBeNull();
-    expect(neighborStore.getState().rootIds).toEqual([DOC_ID, REQ_ID]);
-    expect(neighborStore.getState().nodesById[DOC_ID]).toBeDefined();
+    expect(neighborStore.getState().rootIds).toEqual([]);
+    expect(neighborStore.getState().rootEdgeIds).toEqual([]);
+    expect(neighborStore.getState().nodesById[DOC_ID]).toBeUndefined();
+    expect(neighborStore.getState().nodesById[REQ_ID]).toBeDefined();
     expect(neighborStore.getState().nodesById[SOURCE_1_ID]).toBeDefined();
   });
 
@@ -822,5 +829,262 @@ describe("createAssetGraphStore", () => {
     failIncoming = true;
     const errResult = await store.expandNode(REQ_ID, "in");
     expect(errResult).toEqual({ applied: false, reason: "error" });
+  });
+
+  it("evicts revoked root R, other center edges pointing to R, and pinned comparison on neighbor CURSOR_STALE restart, and bounds consecutive CURSOR_STALE to 3 requests", async () => {
+    const REVOKED_ROOT_ID = DOC_ID;
+    const oldRootEdgeId = `recorded:linkedTo:${GOAL_ID}:${REVOKED_ROOT_ID}`;
+    const otherCenterEdgeId = `recorded:promotedTo:${EXP_ID}:${REVOKED_ROOT_ID}`;
+    const reqSourceEdgeId = `recorded:usesSource:${REQ_ID}:${SOURCE_1_ID}`;
+
+    let staleMode: "once" | "always" | "off" = "once";
+    const neighborQueries: AssetGraphQuery[] = [];
+
+    const transport: AssetGraphTransport = async query => {
+      if (query.op === "roots") {
+        return {
+          asOf: "2026-03-12T00:00:00.000Z",
+          nodes: [
+            { id: REVOKED_ROOT_ID, kind: "document", label: "隐私待撤回笔记 R" },
+            { id: GOAL_ID, kind: "goal", label: "有机反应机理目标" },
+            { id: EXP_ID, kind: "exploration", label: "自由探索草稿" },
+            { id: REQ_ID, kind: "requirement", label: "第3章 有机反应：酯化" },
+          ],
+          edges: [
+            {
+              id: oldRootEdgeId,
+              from: GOAL_ID,
+              to: REVOKED_ROOT_ID,
+              relation: "linkedTo",
+              basis: "recorded",
+            },
+          ],
+          page: { nextCursor: null },
+          completeness: "complete",
+          warnings: [],
+          detail: null,
+        };
+      }
+      if (query.op === "neighbors" && query.focus === EXP_ID) {
+        return {
+          asOf: "2026-03-12T00:00:00.000Z",
+          nodes: [
+            { id: EXP_ID, kind: "exploration", label: "自由探索草稿" },
+            { id: REVOKED_ROOT_ID, kind: "document", label: "隐私待撤回笔记 R" },
+          ],
+          edges: [
+            {
+              id: otherCenterEdgeId,
+              from: EXP_ID,
+              to: REVOKED_ROOT_ID,
+              relation: "promotedTo",
+              basis: "recorded",
+            },
+          ],
+          page: { nextCursor: null },
+          completeness: "complete",
+          warnings: [],
+          detail: null,
+        };
+      }
+      if (query.op === "neighbors" && query.focus === REQ_ID) {
+        neighborQueries.push(query);
+        if (staleMode === "always") {
+          throw new AssetGraphRequestError("CURSOR_STALE", "邻接分页游标已失效，请重新读取。", 409);
+        }
+        if (staleMode === "once" && query.cursor === "req-nbr-page-2") {
+          staleMode = "off";
+          throw new AssetGraphRequestError("CURSOR_STALE", "邻接分页游标已失效，请重新读取。", 409);
+        }
+        return {
+          asOf: "2026-03-12T00:00:05.000Z",
+          nodes: [
+            { id: REQ_ID, kind: "requirement", label: "第3章 有机反应：酯化" },
+            { id: SOURCE_1_ID, kind: "source", label: "有机化学实验讲义" },
+          ],
+          edges: [
+            {
+              id: reqSourceEdgeId,
+              from: REQ_ID,
+              to: SOURCE_1_ID,
+              relation: "usesSource",
+              basis: "recorded",
+            },
+          ],
+          page: { nextCursor: query.cursor ? null : "req-nbr-page-2" },
+          completeness: "complete",
+          warnings: [],
+          detail: null,
+        };
+      }
+      throw new Error(`Unexpected query: ${JSON.stringify(query)}`);
+    };
+
+    const store = createAssetGraphStore(createAssetGraphClient(transport));
+    await store.initialize();
+    await store.expandNode(EXP_ID, "out", { relations: ["promotedTo"] });
+    store.togglePinNode(REVOKED_ROOT_ID);
+    await store.expandNode(REQ_ID, "out", { relations: ["usesSource"] });
+
+    // Pre-check: R is in roots, pointed to by other center EXP_ID, and pinned for comparison
+    expect(store.getState().rootIds).toContain(REVOKED_ROOT_ID);
+    expect(store.getState().edgesById[oldRootEdgeId]).toBeDefined();
+    expect(store.getState().edgesById[otherCenterEdgeId]).toBeDefined();
+    expect(store.getState().pinnedComparison?.node.id).toBe(REVOKED_ROOT_ID);
+
+    // Neighbor page-2 hits CURSOR_STALE -> restarts page 1 without R
+    const restartResult = await store.loadMoreNeighbors(REQ_ID);
+    expect(restartResult).toMatchObject({
+      applied: true,
+      focusId: REQ_ID,
+      direction: "out",
+      addedNodeCount: 1,
+      addedEdgeCount: 1,
+    });
+
+    const afterRestart = store.getState();
+    expect(afterRestart.nodesById[REVOKED_ROOT_ID]).toBeUndefined();
+    expect(afterRestart.nodesById[GOAL_ID]).toBeUndefined();
+    expect(afterRestart.nodesById[EXP_ID]).toBeUndefined();
+    expect(afterRestart.rootIds).toEqual([]);
+    expect(afterRestart.rootEdgeIds).toEqual([]);
+    expect(afterRestart.edgesById[oldRootEdgeId]).toBeUndefined();
+    expect(afterRestart.edgesById[otherCenterEdgeId]).toBeUndefined();
+    expect(Object.keys(afterRestart.expandedCenters)).toEqual([REQ_ID]);
+    expect(afterRestart.pinnedComparison).toBeNull();
+    expect(getVisibleNodes(afterRestart).map(n => n.id)).toEqual([REQ_ID, SOURCE_1_ID]);
+    expect(getVisibleEdges(afterRestart).map(e => e.id)).toEqual([reqSourceEdgeId]);
+
+    // Consecutive CURSOR_STALE on neighbors bounds to 3 requests total (page1 + stale page2 + stale restart page1)
+    neighborQueries.length = 0;
+    staleMode = "off";
+    const boundedStore = createAssetGraphStore(createAssetGraphClient(transport));
+    await boundedStore.initialize();
+    boundedStore.togglePinNode(REVOKED_ROOT_ID);
+    await boundedStore.expandNode(REQ_ID, "out", { relations: ["usesSource"] });
+    expect(neighborQueries).toHaveLength(1);
+
+    staleMode = "always";
+    const failedResult = await boundedStore.loadMoreNeighbors(REQ_ID);
+    expect(failedResult).toEqual({ applied: false, reason: "error" });
+    expect(neighborQueries).toHaveLength(3);
+    expect((neighborQueries[2] as { cursor?: string }).cursor).toBeUndefined();
+    expect(boundedStore.getState().nodesById).toEqual({});
+    expect(boundedStore.getState().edgesById).toEqual({});
+    expect(boundedStore.getState().rootIds).toEqual([]);
+    expect(boundedStore.getState().pinnedComparison).toBeNull();
+    expect(boundedStore.getState().error).toEqual({
+      code: "CURSOR_STALE",
+      message: "邻接分页游标已失效，请重新读取。",
+    });
+    expect(boundedStore.getState().lastFailedOperation).toEqual({
+      op: "neighbors",
+      focus: REQ_ID,
+      direction: "out",
+      relations: ["usesSource"],
+    });
+
+    staleMode = "off";
+    await boundedStore.retryCurrentView();
+    expect(neighborQueries).toHaveLength(4);
+    expect(boundedStore.getState().error).toBeNull();
+    expect(boundedStore.getState().nodesById[SOURCE_1_ID]).toBeDefined();
+  });
+
+  it("counts cross-page duplicate source by visible node/edge ID diff so addedNodeCount is 0 and addedEdgeCount is 1", async () => {
+    const transport: AssetGraphTransport = async query => {
+      if (query.op === "roots") {
+        return {
+          asOf: "2026-03-12T00:00:00.000Z",
+          nodes: [{ id: REQ_ID, kind: "requirement", label: "酯化反应条件" }],
+          edges: [],
+          page: { nextCursor: null },
+          completeness: "complete",
+          warnings: [],
+          detail: null,
+        };
+      }
+      if (query.op === "neighbors" && query.cursor === "same-source-page-2") {
+        return {
+          asOf: "2026-03-12T00:00:01.000Z",
+          nodes: [
+            { id: REQ_ID, kind: "requirement", label: "酯化反应条件" },
+            { id: SOURCE_1_ID, kind: "source", label: "有机化学教材" },
+          ],
+          edges: [
+            {
+              id: "edge-source-p28",
+              from: REQ_ID,
+              to: SOURCE_1_ID,
+              relation: "usesSource",
+              basis: "recorded",
+              sourceVersion: 1,
+              page: 28,
+            },
+          ],
+          page: { nextCursor: null },
+          completeness: "complete",
+          warnings: [],
+          detail: null,
+        };
+      }
+      return {
+        asOf: "2026-03-12T00:00:00.000Z",
+        nodes: [
+          { id: REQ_ID, kind: "requirement", label: "酯化反应条件" },
+          { id: SOURCE_1_ID, kind: "source", label: "有机化学教材" },
+        ],
+        edges: [
+          {
+            id: "edge-source-p12",
+            from: REQ_ID,
+            to: SOURCE_1_ID,
+            relation: "usesSource",
+            basis: "recorded",
+            sourceVersion: 1,
+            page: 12,
+          },
+        ],
+        page: { nextCursor: "same-source-page-2" },
+        completeness: "complete",
+        warnings: [],
+        detail: null,
+      };
+    };
+
+    const store = createAssetGraphStore(createAssetGraphClient(transport));
+    await store.initialize();
+
+    const page1Result = await store.expandNode(REQ_ID, "out");
+    expect(page1Result).toMatchObject({
+      applied: true,
+      addedNodeCount: 1,
+      addedEdgeCount: 1,
+      addedCount: 1,
+      announcement: "已展开 1 项学习资料",
+    });
+
+    // Page 2 returns the SAME SOURCE_1_ID with a new page citation edge
+    const page2Result = await store.loadMoreNeighbors(REQ_ID);
+    expect(page2Result).toMatchObject({
+      applied: true,
+      addedNodeCount: 0,
+      addedEdgeCount: 1,
+      addedCount: 0,
+      announcement: "已补充 1 条关联记录",
+    });
+    if (page2Result.applied) {
+      expect(page2Result.announcement).not.toBe("已展开 1 项学习资料");
+    }
+
+    // Re-expanding with identical visible nodes and edges announces no-op update
+    const noopResult = await store.expandNode(REQ_ID, "out");
+    expect(noopResult).toMatchObject({
+      applied: true,
+      addedNodeCount: 0,
+      addedEdgeCount: 0,
+      addedCount: 0,
+      announcement: "已更新关联，暂无新增学习资料",
+    });
   });
 });

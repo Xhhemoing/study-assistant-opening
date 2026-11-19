@@ -290,17 +290,23 @@ export function getNodeTraversalLabels(
 export function summarizeExpansionForScreenReader(
   nodes: readonly AssetGraphNode[],
   focusId: string,
+  addedEdgeCount = 0,
 ): string {
   const added = nodes.filter(node => node.id !== focusId);
-  if (added.length === 0) return "当前视角下没有新增关联内容";
-  const counts = new Map<AssetGraphNodeKind, number>();
-  for (const item of added) {
-    counts.set(item.kind, (counts.get(item.kind) ?? 0) + 1);
+  if (added.length > 0) {
+    const counts = new Map<AssetGraphNodeKind, number>();
+    for (const item of added) {
+      counts.set(item.kind, (counts.get(item.kind) ?? 0) + 1);
+    }
+    const parts = [...counts.entries()].map(
+      ([kind, count]) => `${count} 项${NODE_KIND_LABELS[kind]}`,
+    );
+    return `已展开 ${parts.join("、")}`;
   }
-  const parts = [...counts.entries()].map(
-    ([kind, count]) => `${count} 项${NODE_KIND_LABELS[kind]}`,
-  );
-  return `已展开 ${parts.join("、")}`;
+  if (addedEdgeCount > 0) {
+    return `已补充 ${addedEdgeCount} 条关联记录`;
+  }
+  return "已更新关联，暂无新增学习资料";
 }
 
 export function isZeroNeighborResult(center: ExpandedCenterState | undefined): boolean {
@@ -612,6 +618,8 @@ export type ExpandNodeResult =
       focusId: AssetGraphNodeId;
       direction: AssetGraphDirection;
       addedNodes: AssetGraphNode[];
+      addedNodeCount: number;
+      addedEdgeCount: number;
       addedCount: number;
       announcement: string;
     }
@@ -623,71 +631,9 @@ export type ExpandNodeResult =
 export function applyCursorStaleReset(
   state: AssetGraphState,
   notice = "当前内容列表已更新，已从第 1 页重新读取。",
-  retryTarget?: LastGraphOperation,
+  _retryTarget?: LastGraphOperation,
 ): AssetGraphState {
-  if (retryTarget?.op === "neighbors") {
-    const focusId = retryTarget.focus;
-    const evicted = getOwn(state.expandedCenters, focusId);
-    const nextExpanded: Record<string, ExpandedCenterState> = {};
-    for (const [key, center] of Object.entries(state.expandedCenters)) {
-      if (key !== focusId) {
-        nextExpanded[key] = center;
-      }
-    }
-
-    const stillAnchored = new Set<string>(state.rootIds);
-    for (const center of Object.values(nextExpanded)) {
-      for (const id of center.nodeIds) {
-        stillAnchored.add(id);
-      }
-    }
-
-    const evictedChildren = new Set(evicted ? evicted.nodeIds.filter(id => id !== focusId) : []);
-    const focusExists = Boolean(getOwn(state.nodesById, focusId));
-    const nextStandaloneIds = uniqueStrings([
-      ...(focusExists && !stillAnchored.has(focusId) ? [focusId] : []),
-      ...state.standaloneNodeIds.filter(id => !evictedChildren.has(id) || stillAnchored.has(id)),
-    ]);
-
-    const reconciled = reconcileActiveGraphDictionaries(
-      state.nodesById,
-      state.edgesById,
-      state.rootIds,
-      state.rootEdgeIds,
-      nextStandaloneIds,
-      nextExpanded,
-    );
-
-    const keepDetail = state.detail !== null && state.detail.id === focusId;
-    const updatedPinned =
-      state.pinnedComparison && getOwn(reconciled.nodesById, state.pinnedComparison.node.id)
-        ? state.pinnedComparison
-        : null;
-
-    return {
-      ...state,
-      nodesById: reconciled.nodesById,
-      edgesById: reconciled.edgesById,
-      standaloneNodeIds: nextStandaloneIds,
-      expandedCenters: nextExpanded,
-      transitionCenter: null,
-      selectedNodeId: focusId,
-      detail: keepDetail ? state.detail : null,
-      detailCompleteness: keepDetail ? state.detailCompleteness : null,
-      detailWarnings: keepDetail ? state.detailWarnings : [],
-      pinnedComparison: updatedPinned,
-      lastFailedOperation: null,
-      notice,
-      error: null,
-      loadingRoots: false,
-      loadingMoreRoots: false,
-      expandingNodeId: null,
-      loadingDetailNodeId: null,
-      requestGeneration: state.requestGeneration + 1,
-      activeRequestSeq: state.activeRequestSeq + 1,
-    };
-  }
-
+  void _retryTarget;
   const cleared = clearGraphCollections(state, {
     preserveSelectedNodeId: false,
     preserveSameContextHelpers: false,
@@ -1458,6 +1404,8 @@ export function createAssetGraphStore(
       if (!isActiveRequest(generation, requestSeq)) {
         return { applied: false, reason: "superseded" };
       }
+      const previousVisibleNodeIds = new Set(getVisibleNodes(state).map(node => node.id));
+      const previousVisibleEdgeIds = new Set(getVisibleEdges(state).map(edge => edge.id));
       emit(
         applyNeighborsPage(state, page, {
           focus: focusId,
@@ -1468,20 +1416,21 @@ export function createAssetGraphStore(
           requestSeq,
         }),
       );
-      const appliedNodes = page.nodes
-        .map(item => getOwn(state.nodesById, item.id) ?? item)
-        .filter(node => node.id !== focusId);
-      const focusNodeItem = getOwn(state.nodesById, focusId);
+      const addedNodes = getVisibleNodes(state).filter(
+        node => node.id !== focusId && !previousVisibleNodeIds.has(node.id),
+      );
+      const addedEdgeCount = getVisibleEdges(state).filter(
+        edge => !previousVisibleEdgeIds.has(edge.id),
+      ).length;
       return {
         applied: true,
         focusId,
         direction,
-        addedNodes: appliedNodes,
-        addedCount: appliedNodes.length,
-        announcement: summarizeExpansionForScreenReader(
-          focusNodeItem ? [focusNodeItem, ...appliedNodes] : appliedNodes,
-          focusId,
-        ),
+        addedNodes,
+        addedNodeCount: addedNodes.length,
+        addedEdgeCount,
+        addedCount: addedNodes.length,
+        announcement: summarizeExpansionForScreenReader(addedNodes, focusId, addedEdgeCount),
       };
     } catch (error) {
       if (isAbortError(error)) {

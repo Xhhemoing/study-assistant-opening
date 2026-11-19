@@ -65,6 +65,7 @@ import {
   LEARNER_STATE_LABELS,
   LENS_LABELS,
   NODE_KIND_LABELS,
+  NOT_FOUND_SAFE_NOTICE,
   REQUIREMENT_STATUS_LABELS,
   ROOT_KIND_OPTIONS,
   collectGraphWarnings,
@@ -84,6 +85,17 @@ type PendingStartIntent = {
   action: StartAction;
   clientKey: string;
   minutes: number;
+};
+
+type PendingExpandFocusIntent = {
+  button: HTMLButtonElement;
+  generation: number;
+  requestSeq: number;
+};
+
+type LastFocusedCard = {
+  cardElement: HTMLElement;
+  element: Element;
 };
 
 type ContextChoiceOption = {
@@ -290,18 +302,31 @@ function ConnectedAssetGraphWorkspace({
   >(null);
   const mountedRef = useRef(true);
   const startBusyRef = useRef(false);
+  const workspaceRootRef = useRef<HTMLElement | null>(null);
+  const workspaceContentRef = useRef<HTMLDivElement | null>(null);
+  const noticeContainerRef = useRef<HTMLDivElement | null>(null);
+  const errorContainerRef = useRef<HTMLDivElement | null>(null);
+  const pendingExpandFocusRef = useRef<PendingExpandFocusIntent | null>(null);
+  const lastFocusedCardRef = useRef<LastFocusedCard | null>(null);
+
+  function clearPendingExpandFocus() {
+    pendingExpandFocusRef.current = null;
+  }
 
   useEffect(() => {
     mountedRef.current = true;
     void store.initialize(initialFocus);
     return () => {
       mountedRef.current = false;
+      pendingExpandFocusRef.current = null;
+      lastFocusedCardRef.current = null;
       store.dispose();
     };
   }, [store, initialFocus]);
 
   useEffect(() => {
     return subscribeOpeningPrivacyChange(() => {
+      pendingExpandFocusRef.current = null;
       setPendingStart(null);
       setStartError("");
       setChoiceResult(null);
@@ -315,6 +340,32 @@ function ConnectedAssetGraphWorkspace({
     setLimitInput(initialPageLimit);
   }, [initialPageLimit]);
 
+  useEffect(() => {
+    function handleDocumentFocus(event: FocusEvent) {
+      const target = event.target instanceof Element ? event.target : null;
+      if (!target || target === document.body || target === document.documentElement) {
+        return;
+      }
+
+      const pending = pendingExpandFocusRef.current;
+      if (pending && target !== pending.button) {
+        pendingExpandFocusRef.current = null;
+      }
+
+      if (workspaceRootRef.current?.contains(target)) {
+        const card = target.closest<HTMLElement>("[data-node-card], [data-graph-node]");
+        lastFocusedCardRef.current = card ? { cardElement: card, element: target } : null;
+      } else {
+        lastFocusedCardRef.current = null;
+      }
+    }
+
+    document.addEventListener("focus", handleDocumentFocus, true);
+    return () => {
+      document.removeEventListener("focus", handleDocumentFocus, true);
+    };
+  }, []);
+
   const visibleNodes = useMemo(() => getVisibleNodes(state), [state]);
   const visibleEdges = useMemo(() => getVisibleEdges(state), [state]);
   const partial = isGraphPartial(state);
@@ -325,6 +376,75 @@ function ConnectedAssetGraphWorkspace({
     : null;
   const activeDetail =
     state.detail && state.detail.id === state.selectedNodeId ? state.detail : null;
+
+  const isListDataReady =
+    !state.loadingRoots &&
+    state.expandingNodeId === null &&
+    state.loadingDetailNodeId === null &&
+    state.transitionCenter === null &&
+    visibleNodes.length > 0;
+
+  useEffect(() => {
+    if (viewMode !== "list") return;
+    if (listSubTab !== null) return;
+    if (!isListDataReady) return;
+    setListSubTab(visibleEdges.length > 0 ? "relations" : "nodes");
+  }, [viewMode, listSubTab, isListDataReady, visibleEdges.length]);
+
+  useEffect(() => {
+    const intent = pendingExpandFocusRef.current;
+    if (!intent) return;
+    if (
+      state.requestGeneration !== intent.generation ||
+      state.activeRequestSeq !== intent.requestSeq ||
+      state.error !== null ||
+      state.notice === NOT_FOUND_SAFE_NOTICE
+    ) {
+      pendingExpandFocusRef.current = null;
+      return;
+    }
+    if (state.expandingNodeId !== null) return;
+    pendingExpandFocusRef.current = null;
+    if (
+      intent.button.isConnected &&
+      !intent.button.disabled &&
+      (document.activeElement === null || document.activeElement === document.body)
+    ) {
+      intent.button.focus();
+    }
+  }, [
+    state.expandingNodeId,
+    state.activeRequestSeq,
+    state.requestGeneration,
+    state.error,
+    state.notice,
+  ]);
+
+  useEffect(() => {
+    const lastFocused = lastFocusedCardRef.current;
+    if (!lastFocused) return;
+    if (pendingExpandFocusRef.current !== null) return;
+    if (lastFocused.cardElement.isConnected) return;
+    lastFocusedCardRef.current = null;
+    if (document.activeElement !== null && document.activeElement !== document.body) {
+      return;
+    }
+    const fallbackTarget =
+      (state.error ? errorContainerRef.current : null) ??
+      (state.notice ? noticeContainerRef.current : null) ??
+      (viewMode === "list"
+        ? workspaceContentRef.current?.querySelector<HTMLElement>("[data-list-view]") ?? null
+        : null) ??
+      workspaceContentRef.current;
+    fallbackTarget?.focus();
+  }, [
+    visibleNodes,
+    viewMode,
+    state.error,
+    state.notice,
+    state.context,
+    state.requestGeneration,
+  ]);
 
   const contextOptions = useMemo<ContextChoiceOption[]>(() => {
     const map = new Map<string, ContextChoiceOption>();
@@ -408,6 +528,7 @@ function ConnectedAssetGraphWorkspace({
   }
 
   function handleContextChange(nextContext: AssetGraphContext, preserveFocusId?: string | null) {
+    clearPendingExpandFocus();
     resetActionTransientState();
     setListSubTab(null);
     setSrAnnouncement("");
@@ -415,28 +536,83 @@ function ConnectedAssetGraphWorkspace({
   }
 
   function handleLensChange(nextLens: AssetGraphLens) {
+    clearPendingExpandFocus();
     resetActionTransientState();
     setSrAnnouncement("");
     void store.selectLens(nextLens);
   }
 
-  async function handleExpandNode(nodeId: AssetGraphNodeId, direction: AssetGraphDirection) {
+  async function handleExpandNode(
+    nodeId: AssetGraphNodeId,
+    direction: AssetGraphDirection,
+    triggerButton?: HTMLButtonElement | null,
+  ) {
     resetActionTransientState();
     setSrAnnouncement("");
-    const result = await store.expandNode(nodeId, direction);
-    if (!mountedRef.current || !result.applied) return;
+    clearPendingExpandFocus();
+    const shouldRestoreFocus = Boolean(
+      triggerButton && document.activeElement === triggerButton,
+    );
+    const prevSeq = store.getState().activeRequestSeq;
+    const expandPromise = store.expandNode(nodeId, direction);
+    const startedState = store.getState();
+    if (shouldRestoreFocus && triggerButton && startedState.activeRequestSeq !== prevSeq) {
+      pendingExpandFocusRef.current = {
+        button: triggerButton,
+        generation: startedState.requestGeneration,
+        requestSeq: startedState.activeRequestSeq,
+      };
+    }
+    const result = await expandPromise;
+    if (!mountedRef.current) return;
+    if (!result.applied) {
+      if (
+        pendingExpandFocusRef.current?.generation === startedState.requestGeneration &&
+        pendingExpandFocusRef.current?.requestSeq === startedState.activeRequestSeq
+      ) {
+        pendingExpandFocusRef.current = null;
+      }
+      return;
+    }
     setSrAnnouncement(result.announcement);
   }
 
-  async function handleLoadMoreNeighbors(nodeId: AssetGraphNodeId) {
+  async function handleLoadMoreNeighbors(
+    nodeId: AssetGraphNodeId,
+    triggerButton?: HTMLButtonElement | null,
+  ) {
     setSrAnnouncement("");
-    const result = await store.loadMoreNeighbors(nodeId);
-    if (!mountedRef.current || !result.applied) return;
+    clearPendingExpandFocus();
+    const shouldRestoreFocus = Boolean(
+      triggerButton && document.activeElement === triggerButton,
+    );
+    const prevSeq = store.getState().activeRequestSeq;
+    const loadPromise = store.loadMoreNeighbors(nodeId);
+    const startedState = store.getState();
+    if (shouldRestoreFocus && triggerButton && startedState.activeRequestSeq !== prevSeq) {
+      pendingExpandFocusRef.current = {
+        button: triggerButton,
+        generation: startedState.requestGeneration,
+        requestSeq: startedState.activeRequestSeq,
+      };
+    }
+    const result = await loadPromise;
+    if (!mountedRef.current) return;
+    if (!result.applied) {
+      if (
+        pendingExpandFocusRef.current?.generation === startedState.requestGeneration &&
+        pendingExpandFocusRef.current?.requestSeq === startedState.activeRequestSeq
+      ) {
+        pendingExpandFocusRef.current = null;
+      }
+      return;
+    }
     setSrAnnouncement(result.announcement);
   }
 
   function handleSearchSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    clearPendingExpandFocus();
     resetActionTransientState();
     void store.applyFilters({
       searchQuery: searchInput,
@@ -447,6 +623,7 @@ function ConnectedAssetGraphWorkspace({
 
   function handleKindFilterChange(nextKind: AssetGraphRootKind | "") {
     setKindInput(nextKind);
+    clearPendingExpandFocus();
     resetActionTransientState();
     void store.applyFilters({
       searchQuery: searchInput,
@@ -457,6 +634,7 @@ function ConnectedAssetGraphWorkspace({
 
   function handleLimitChange(nextLimit: number) {
     setLimitInput(nextLimit);
+    clearPendingExpandFocus();
     resetActionTransientState();
     void store.applyFilters({
       searchQuery: searchInput,
@@ -469,6 +647,7 @@ function ConnectedAssetGraphWorkspace({
     setSearchInput("");
     setKindInput("");
     setLimitInput(ASSET_GRAPH_DEFAULT_LIMIT);
+    clearPendingExpandFocus();
     resetActionTransientState();
     void store.applyFilters({
       searchQuery: "",
@@ -553,7 +732,10 @@ function ConnectedAssetGraphWorkspace({
     : null;
 
   return (
-    <section className="flex h-full min-h-0 min-w-0 flex-col bg-bg text-text">
+    <section
+      ref={workspaceRootRef}
+      className="flex h-full min-h-0 min-w-0 flex-col bg-bg text-text"
+    >
       <div role="status" aria-live="polite" className="sr-only">
         {srAnnouncement}
       </div>
@@ -619,7 +801,10 @@ function ConnectedAssetGraphWorkspace({
                     type="button"
                     className={viewMode === "graph" ? ui.primary : ui.secondary}
                     aria-pressed={viewMode === "graph"}
-                    onClick={() => setViewMode("graph")}
+                    onClick={() => {
+                      clearPendingExpandFocus();
+                      setViewMode("graph");
+                    }}
                   >
                     <Network size={14} aria-hidden="true" />
                     关系图
@@ -629,8 +814,11 @@ function ConnectedAssetGraphWorkspace({
                     className={viewMode === "list" ? ui.primary : ui.secondary}
                     aria-pressed={viewMode === "list"}
                     onClick={() => {
+                      clearPendingExpandFocus();
                       if (viewMode !== "list") {
-                        setListSubTab(visibleEdges.length > 0 ? "relations" : "nodes");
+                        if (listSubTab === null && isListDataReady) {
+                          setListSubTab(visibleEdges.length > 0 ? "relations" : "nodes");
+                        }
                         setViewMode("list");
                       }
                     }}
@@ -658,6 +846,7 @@ function ConnectedAssetGraphWorkspace({
                     type="checkbox"
                     checked={state.includeSummary}
                     onChange={event => {
+                      clearPendingExpandFocus();
                       resetActionTransientState();
                       void store.setIncludeSummary(event.target.checked);
                     }}
@@ -735,8 +924,10 @@ function ConnectedAssetGraphWorkspace({
 
           {state.notice ? (
             <div
+              ref={noticeContainerRef}
+              tabIndex={-1}
               role="status"
-              className="flex flex-wrap items-center justify-between gap-2 rounded-tile border border-line-strong bg-surface-2 px-4 py-3 text-sm text-text"
+              className="flex flex-wrap items-center justify-between gap-2 rounded-tile border border-line-strong bg-surface-2 px-4 py-3 text-sm text-text focus:outline-none"
             >
               <span>{state.notice}</span>
               <button type="button" className={ui.quiet} onClick={() => store.clearNotice()}>
@@ -769,7 +960,10 @@ function ConnectedAssetGraphWorkspace({
               <button
                 type="button"
                 className={ui.secondary}
-                onClick={() => void store.retryCurrentView()}
+                onClick={() => {
+                  clearPendingExpandFocus();
+                  void store.retryCurrentView();
+                }}
               >
                 <RefreshCw size={14} aria-hidden="true" />
                 重试读取
@@ -778,14 +972,24 @@ function ConnectedAssetGraphWorkspace({
           ) : null}
 
           {state.error ? (
-            <LoadError
-              message={state.error.message}
-              onRetry={() => void store.retryCurrentView()}
-            />
+            <div ref={errorContainerRef} tabIndex={-1} className="focus:outline-none">
+              <LoadError
+                message={state.error.message}
+                onRetry={() => {
+                  clearPendingExpandFocus();
+                  void store.retryCurrentView();
+                }}
+              />
+            </div>
           ) : null}
 
           <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_var(--layout-companion)]">
-            <div className="min-w-0 space-y-4">
+            <div
+              ref={workspaceContentRef}
+              tabIndex={-1}
+              data-workspace-content
+              className="min-w-0 space-y-4 focus:outline-none"
+            >
               {state.loadingRoots && visibleNodes.length === 0 ? (
                 <div className="rounded-tile border border-line bg-surface p-5">
                   <p role="status" className="mb-3 text-sm text-text-2">
@@ -806,24 +1010,30 @@ function ConnectedAssetGraphWorkspace({
                     context={state.context}
                     lens={state.lens}
                     subTab={listSubTab}
-                    onSubTabChange={setListSubTab}
+                    onSubTabChange={tab => {
+                      clearPendingExpandFocus();
+                      setListSubTab(tab);
+                    }}
                     expandedCenters={state.expandedCenters}
                     expandingNodeId={state.expandingNodeId}
                     loadingDetailNodeId={state.loadingDetailNodeId}
                     onSelectNode={nodeId => {
+                      clearPendingExpandFocus();
                       resetActionTransientState();
                       store.focusNode(nodeId);
                     }}
-                    onExpandNode={(nodeId, direction) => {
-                      void handleExpandNode(nodeId, direction);
+                    onExpandNode={(nodeId, direction, triggerButton) => {
+                      void handleExpandNode(nodeId, direction, triggerButton);
                     }}
                     onCollapseNode={nodeId => {
+                      clearPendingExpandFocus();
                       store.collapseNode(nodeId);
                     }}
-                    onLoadMoreNeighbors={nodeId => {
-                      void handleLoadMoreNeighbors(nodeId);
+                    onLoadMoreNeighbors={(nodeId, triggerButton) => {
+                      void handleLoadMoreNeighbors(nodeId, triggerButton);
                     }}
                     onLoadDetail={nodeId => {
+                      clearPendingExpandFocus();
                       resetActionTransientState();
                       void store.loadDetail(nodeId);
                     }}
@@ -831,6 +1041,7 @@ function ConnectedAssetGraphWorkspace({
                       handleContextChange(nextContext, focusId);
                     }}
                     onTogglePinNode={nodeId => {
+                      clearPendingExpandFocus();
                       store.togglePinNode(nodeId);
                     }}
                   />
@@ -848,19 +1059,22 @@ function ConnectedAssetGraphWorkspace({
                     expandingNodeId={state.expandingNodeId}
                     loadingDetailNodeId={state.loadingDetailNodeId}
                     onSelectNode={nodeId => {
+                      clearPendingExpandFocus();
                       resetActionTransientState();
                       store.focusNode(nodeId);
                     }}
-                    onExpandNode={(nodeId, direction) => {
-                      void handleExpandNode(nodeId, direction);
+                    onExpandNode={(nodeId, direction, triggerButton) => {
+                      void handleExpandNode(nodeId, direction, triggerButton);
                     }}
                     onCollapseNode={nodeId => {
+                      clearPendingExpandFocus();
                       store.collapseNode(nodeId);
                     }}
-                    onLoadMoreNeighbors={nodeId => {
-                      void handleLoadMoreNeighbors(nodeId);
+                    onLoadMoreNeighbors={(nodeId, triggerButton) => {
+                      void handleLoadMoreNeighbors(nodeId, triggerButton);
                     }}
                     onLoadDetail={nodeId => {
+                      clearPendingExpandFocus();
                       resetActionTransientState();
                       void store.loadDetail(nodeId);
                     }}
@@ -868,6 +1082,7 @@ function ConnectedAssetGraphWorkspace({
                       handleContextChange(nextContext, focusId);
                     }}
                     onTogglePinNode={nodeId => {
+                      clearPendingExpandFocus();
                       store.togglePinNode(nodeId);
                     }}
                   />
@@ -906,7 +1121,10 @@ function ConnectedAssetGraphWorkspace({
                     type="button"
                     className={ui.secondary}
                     disabled={state.loadingMoreRoots}
-                    onClick={() => void store.loadMoreRoots()}
+                    onClick={() => {
+                      clearPendingExpandFocus();
+                      void store.loadMoreRoots();
+                    }}
                   >
                     {state.loadingMoreRoots ? "正在加载下一页…" : "加载下一页"}
                   </button>
@@ -1055,6 +1273,7 @@ function ConnectedAssetGraphWorkspace({
                         className={ui.secondary}
                         disabled={state.loadingDetailNodeId === selectedNode.id}
                         onClick={() => {
+                          clearPendingExpandFocus();
                           resetActionTransientState();
                           void store.loadDetail(selectedNode.id);
                         }}

@@ -1184,4 +1184,502 @@ describe("AssetGraphWorkspace", () => {
     expect(srLiveRegion().textContent).not.toContain("已展开");
     expect(srLiveRegion().textContent).not.toContain("项学习资料");
   });
+
+  it("restores focus on same-button disabled blur, and never pulls focus back to A after moving to B detail with disabled blur", async () => {
+    let resolveExpandA!: (page: AssetGraphPage) => void;
+    let resolveDetailB!: (page: AssetGraphPage) => void;
+    let expandAttempt = 0;
+
+    const transport: AssetGraphTransport = async query => {
+      if (query.op === "roots") {
+        return {
+          asOf: "2026-03-12T00:00:00.000Z",
+          nodes: [
+            { id: REQ_ID, kind: "requirement", label: "要求 A：酯化反应条件" },
+            { id: DOC_ID, kind: "document", label: "笔记 B：实验安全要点" },
+          ],
+          edges: [],
+          page: { nextCursor: null },
+          completeness: "complete",
+          warnings: [],
+          detail: null,
+        };
+      }
+      if (query.op === "neighbors" && query.focus === REQ_ID) {
+        expandAttempt += 1;
+        return new Promise<AssetGraphPage>(resolve => {
+          resolveExpandA = resolve;
+        });
+      }
+      if (query.op === "detail" && query.focus === DOC_ID) {
+        return new Promise<AssetGraphPage>(resolve => {
+          resolveDetailB = resolve;
+        });
+      }
+      throw new Error(`Unexpected query: ${JSON.stringify(query)}`);
+    };
+
+    await renderWorkspace({
+      transport,
+      initialViewMode: "list",
+    });
+
+    function simulateDisabledBlur(button: HTMLButtonElement) {
+      const wasDisabled = button.disabled;
+      button.disabled = false;
+      button.blur();
+      button.disabled = wasDisabled;
+    }
+
+    // (a) Same button A expand -> explicit blur() simulates browser disabled-button focus drop -> restores focus to A on completion
+    const expandButtonA = findButton("查看材料与记录", nodeCard(REQ_ID));
+    expandButtonA.focus();
+    expect(document.activeElement).toBe(expandButtonA);
+
+    await act(async () => {
+      expandButtonA.click();
+    });
+    expect(expandButtonA.disabled).toBe(true);
+    // Explicitly simulate browser dropping focus to body when button becomes disabled
+    act(() => {
+      simulateDisabledBlur(expandButtonA);
+    });
+    expect(document.activeElement).toBe(document.body);
+
+    await act(async () => {
+      resolveExpandA({
+        asOf: "2026-03-12T00:00:01.000Z",
+        nodes: [
+          { id: REQ_ID, kind: "requirement", label: "要求 A：酯化反应条件" },
+          { id: SOURCE_1_ID, kind: "source", label: "有机化学教材" },
+        ],
+        edges: [
+          {
+            id: "focus-edge-1",
+            from: REQ_ID,
+            to: SOURCE_1_ID,
+            relation: "usesSource",
+            basis: "recorded",
+          },
+        ],
+        page: { nextCursor: null },
+        completeness: "complete",
+        warnings: [],
+        detail: null,
+      });
+    });
+    await flush();
+
+    expect(expandAttempt).toBe(1);
+    expect(expandButtonA.disabled).toBe(false);
+    expect(document.activeElement).toBe(expandButtonA);
+
+    // (b) Trigger a second expand on A, blur A, then move focus to B "查看详情", click B and blur B -> MUST NOT pull focus back to A
+    const expandInButtonA = findButton("追溯所属目标", nodeCard(REQ_ID));
+    expandInButtonA.focus();
+    expect(document.activeElement).toBe(expandInButtonA);
+
+    await act(async () => {
+      expandInButtonA.click();
+    });
+    expect(expandInButtonA.disabled).toBe(true);
+    act(() => {
+      simulateDisabledBlur(expandInButtonA);
+    });
+    expect(document.activeElement).toBe(document.body);
+
+    const detailButtonB = findButton("查看详情", nodeCard(DOC_ID));
+    act(() => {
+      detailButtonB.focus();
+    });
+    expect(document.activeElement).toBe(detailButtonB);
+
+    await act(async () => {
+      detailButtonB.click();
+    });
+    expect(detailButtonB.disabled).toBe(true);
+    act(() => {
+      simulateDisabledBlur(detailButtonB);
+    });
+    expect(document.activeElement).toBe(document.body);
+
+    // Must NEVER pull focus back to A when A's expanding state clears due to B's detail request
+    expect(document.activeElement).not.toBe(expandInButtonA);
+    expect(document.activeElement).not.toBe(expandButtonA);
+
+    // Resolve B detail and even settle stale A promise -> focus must still never snap back to A
+    await act(async () => {
+      resolveDetailB({
+        asOf: "2026-03-12T00:00:02.000Z",
+        nodes: [{ id: DOC_ID, kind: "document", label: "笔记 B：实验安全要点" }],
+        edges: [],
+        page: { nextCursor: null },
+        completeness: "complete",
+        warnings: [],
+        detail: {
+          id: DOC_ID,
+          learnerState: null,
+          requirementStatus: null,
+          notes: ["实验安全预习摘要"],
+          actions: [],
+        },
+      });
+      resolveExpandA({
+        asOf: "2026-03-12T00:00:02.000Z",
+        nodes: [{ id: REQ_ID, kind: "requirement", label: "要求 A：酯化反应条件" }],
+        edges: [],
+        page: { nextCursor: null },
+        completeness: "complete",
+        warnings: [],
+        detail: null,
+      });
+    });
+    await flush();
+
+    expect(container.textContent).toContain("实验安全预习摘要");
+    expect(document.activeElement).not.toBe(expandInButtonA);
+    expect(document.activeElement).not.toBe(expandButtonA);
+  });
+
+  it("locks list default sub-tab only after initial data is ready and falls back focus from body when focused card unmounts via 404 or privacy invalidation", async () => {
+    let resolveInitialRoots!: (page: AssetGraphPage) => void;
+    let rootsCount = 0;
+
+    const transport: AssetGraphTransport = async query => {
+      if (query.op === "roots") {
+        rootsCount += 1;
+        if (rootsCount === 1) {
+          return new Promise<AssetGraphPage>(resolve => {
+            resolveInitialRoots = resolve;
+          });
+        }
+        return {
+          asOf: "2026-03-12T00:00:10.000Z",
+          nodes: [{ id: SOURCE_1_ID, kind: "source", label: "隐私更新后可见资料" }],
+          edges: [],
+          page: { nextCursor: null },
+          completeness: "complete",
+          warnings: [],
+          detail: null,
+        };
+      }
+      if (query.op === "detail" && query.focus === DOC_ID) {
+        throw new AssetGraphRequestError("NOT_FOUND", "资源已不可用", 404);
+      }
+      return {
+        asOf: "2026-03-12T00:00:05.000Z",
+        nodes: [{ id: GOAL_ID, kind: "goal", label: "目标范围起点" }],
+        edges: [],
+        page: { nextCursor: null },
+        completeness: "complete",
+        warnings: [],
+        detail: null,
+      };
+    };
+
+    // Start in graph mode while roots is still loading, click "列表" before data resolves -> must NOT prematurely lock to "nodes"
+    await act(async () => {
+      root.render(createElement(AssetGraphWorkspace, { transport }));
+    });
+    const viewToolbar = container.querySelector('[aria-label="视图模式"]')!;
+    await act(async () => {
+      findButton("列表", viewToolbar).click();
+    });
+
+    // Now initial roots resolves WITH an edge -> list view should default to "relations" (not prematurely locked "nodes")
+    await act(async () => {
+      resolveInitialRoots({
+        asOf: "2026-03-12T00:00:00.000Z",
+        nodes: [
+          { id: REQ_ID, kind: "requirement", label: "第3章 有机反应：酯化" },
+          { id: DOC_ID, kind: "document", label: "待移除实验笔记" },
+        ],
+        edges: [
+          {
+            id: "initial-edge-1",
+            from: DOC_ID,
+            to: REQ_ID,
+            relation: "linkedTo",
+            basis: "recorded",
+          },
+        ],
+        page: { nextCursor: null },
+        completeness: "complete",
+        warnings: [],
+        detail: null,
+      });
+    });
+    await flush();
+
+    expect(container.querySelector('table[aria-label="已展开关联列表"]')).not.toBeNull();
+
+    // Switch to nodes sub-tab, focus button on DOC_ID card, trigger 404 -> card unmounts and focus moves off body to stable notice container
+    const nodesRadio = Array.from(
+      container.querySelectorAll<HTMLInputElement>('input[name="asset-graph-list-tab"]'),
+    ).find(input => input.parentElement?.textContent?.includes("当前展示的项目"))!;
+    await act(async () => {
+      nodesRadio.click();
+    });
+    await flush();
+
+    const docDetailBtn = findButton("查看详情", nodeCard(DOC_ID));
+    act(() => {
+      docDetailBtn.focus();
+    });
+    expect(document.activeElement).toBe(docDetailBtn);
+
+    await act(async () => {
+      docDetailBtn.click();
+    });
+    await flush();
+
+    expect(container.querySelector(`[data-node-card="${DOC_ID}"]`)).toBeNull();
+    expect(document.activeElement).not.toBe(document.body);
+    expect((document.activeElement as HTMLElement | null)?.getAttribute("tabindex")).toBe("-1");
+
+    // Focus button on remaining REQ_ID card, trigger privacy invalidation -> card unmounts and focus lands on stable tabIndex=-1 container
+    const reqDetailBtn = findButton("查看详情", nodeCard(REQ_ID));
+    act(() => {
+      reqDetailBtn.focus();
+    });
+    expect(document.activeElement).toBe(reqDetailBtn);
+
+    await act(async () => {
+      notifyOpeningPrivacyChange();
+    });
+    await flush();
+
+    expect(container.querySelector(`[data-node-card="${REQ_ID}"]`)).toBeNull();
+    expect(document.activeElement).not.toBe(document.body);
+    expect((document.activeElement as HTMLElement | null)?.getAttribute("tabindex")).toBe("-1");
+  });
+
+  it("announces added relation records instead of new source items when cross-page pagination returns the same source with a new page citation", async () => {
+    const transport: AssetGraphTransport = async query => {
+      if (query.op === "roots") {
+        return {
+          asOf: "2026-03-12T00:00:00.000Z",
+          nodes: [{ id: REQ_ID, kind: "requirement", label: "酯化反应机理" }],
+          edges: [],
+          page: { nextCursor: null },
+          completeness: "complete",
+          warnings: [],
+          detail: null,
+        };
+      }
+      if (query.op === "neighbors" && query.cursor === "dup-source-page-2") {
+        return {
+          asOf: "2026-03-12T00:00:02.000Z",
+          nodes: [
+            { id: REQ_ID, kind: "requirement", label: "酯化反应机理" },
+            { id: SOURCE_1_ID, kind: "source", label: "有机化学实验讲义" },
+          ],
+          edges: [
+            {
+              id: "dup-edge-p24",
+              from: REQ_ID,
+              to: SOURCE_1_ID,
+              relation: "usesSource",
+              basis: "recorded",
+              sourceVersion: 1,
+              page: 24,
+            },
+          ],
+          page: { nextCursor: null },
+          completeness: "complete",
+          warnings: [],
+          detail: null,
+        };
+      }
+      return {
+        asOf: "2026-03-12T00:00:00.000Z",
+        nodes: [
+          { id: REQ_ID, kind: "requirement", label: "酯化反应机理" },
+          { id: SOURCE_1_ID, kind: "source", label: "有机化学实验讲义" },
+        ],
+        edges: [
+          {
+            id: "dup-edge-p11",
+            from: REQ_ID,
+            to: SOURCE_1_ID,
+            relation: "usesSource",
+            basis: "recorded",
+            sourceVersion: 1,
+            page: 11,
+          },
+        ],
+        page: { nextCursor: "dup-source-page-2" },
+        completeness: "complete",
+        warnings: [],
+        detail: null,
+      };
+    };
+
+    await renderWorkspace({ transport });
+
+    const srLiveRegion = () =>
+      container.querySelector<HTMLElement>('.sr-only[role="status"][aria-live="polite"]')!;
+
+    await act(async () => {
+      findButton("出边展开", nodeCard(REQ_ID)).click();
+    });
+    await flush();
+    expect(srLiveRegion().textContent).toBe("已展开 1 项学习资料");
+
+    // Load page 2 returning the SAME source node with a new page-24 edge
+    await act(async () => {
+      findButton("加载更多关联", nodeCard(REQ_ID)).click();
+    });
+    await flush();
+
+    expect(srLiveRegion().textContent).toBe("已补充 1 条关联记录");
+    expect(srLiveRegion().textContent).not.toBe("已展开 1 项学习资料");
+  });
+
+  it("Case 21 adversarial combination: REQ_2 with cross-course learnerState='independent' and requirementStatus='needs_verification' shows 待独立检验 without claiming 已达到课程要求 before and after loading activeDetail", async () => {
+    const COURSE_2 = "10000000-0000-4000-8000-000000000002";
+    const REQ_2 = "requirement/30000000-0000-4000-8000-000000000002" as const;
+    const sharedPage = fixturePage("synthetic-shared-skills-01-cross-course-evidence-neighbors");
+    const req2Label = fixtureNodeLabel(REQ_2);
+    const sharedAttr = sharedPage.edges[0]!.sharedAttribution!;
+    const expectedSharedCaption = `跨课共享自「${sharedAttr.sourceCourseTitle} · ${sharedAttr.sourceRequirementTitle}」（第 ${sharedAttr.sourceRequirementRevision} 版）`;
+
+    const transport: AssetGraphTransport = async query => {
+      if (query.op === "detail" && query.focus === REQ_2) {
+        return {
+          asOf: "2026-03-12T00:00:05.000Z",
+          nodes: [
+            {
+              id: REQ_2,
+              kind: "requirement",
+              label: req2Label,
+              summary: {
+                learnerState: "independent",
+                requirementStatus: "needs_verification",
+              },
+            },
+          ],
+          edges: [],
+          page: { nextCursor: null },
+          completeness: "complete",
+          warnings: [],
+          detail: {
+            id: REQ_2,
+            learnerState: "independent",
+            requirementStatus: "needs_verification",
+            notes: ["跨课共享练习记录可供参考，但本课仍需完成一次独立检验。"],
+            actions: [
+              {
+                kind: "startCourseRequirement",
+                label: "在本课完成独立检验",
+                courseId: COURSE_2,
+                goalId: "20000000-0000-4000-8000-000000000002",
+                requirementId: "30000000-0000-4000-8000-000000000002",
+                expectedGoalRevision: 1,
+                expectedRequirementRevision: 1,
+              },
+            ],
+          },
+        };
+      }
+      if (query.op === "neighbors" && query.focus === REQ_2) {
+        return {
+          ...sharedPage,
+          nodes: sharedPage.nodes.map(node =>
+            node.id === REQ_2
+              ? {
+                  ...node,
+                  summary: {
+                    learnerState: "independent",
+                    requirementStatus: "needs_verification",
+                  },
+                }
+              : node,
+          ),
+        };
+      }
+      return {
+        asOf: "2026-03-12T00:00:00.000Z",
+        nodes: [
+          {
+            id: REQ_2,
+            kind: "requirement",
+            label: req2Label,
+            summary: {
+              learnerState: "independent",
+              requirementStatus: "needs_verification",
+            },
+          },
+        ],
+        edges: [],
+        page: { nextCursor: null },
+        completeness: "complete",
+        warnings: [],
+        detail: null,
+      };
+    };
+
+    await renderWorkspace({
+      transport,
+      initialContext: { kind: "course", id: `course/${COURSE_2}` },
+      initialLens: "evidence",
+      courses: [
+        { id: COURSE_ID, title: sharedAttr.sourceCourseTitle },
+        { id: COURSE_2, title: "有机合成进阶" },
+      ],
+    });
+
+    await act(async () => {
+      findButton("出边展开", nodeCard(REQ_2)).click();
+    });
+    await flush();
+
+    // Before loading activeDetail: card, SVG node, and aside all show 待独立检验 and never 已达到课程要求
+    const reqSvgNode = container.querySelector(`[data-graph-node="${REQ_2}"]`)!;
+    expect(reqSvgNode.textContent).toContain("待独立检验");
+    expect(reqSvgNode.textContent).not.toContain("已达到课程要求");
+
+    const reqCardBeforeDetail = nodeCard(REQ_2);
+    expect(reqCardBeforeDetail.textContent).toContain("练习状态：独立完成");
+    expect(reqCardBeforeDetail.textContent).toContain("课程要求：待独立检验");
+    expect(reqCardBeforeDetail.textContent).not.toContain("已达到课程要求");
+    expect(reqCardBeforeDetail.textContent).toContain(expectedSharedCaption);
+
+    // Load activeDetail for REQ_2 and verify right detail panel and card stay completely consistent
+    await act(async () => {
+      findButton("查看详情", nodeCard(REQ_2)).click();
+    });
+    await flush();
+
+    const detailAside = container.querySelector('aside[aria-label="详情与后续行动面板"]')!;
+    expect(detailAside.textContent).toContain("独立完成");
+    expect(detailAside.textContent).toContain("待独立检验");
+    expect(detailAside.textContent).not.toContain("已达到课程要求");
+    expect(detailAside.textContent).toContain("跨课共享练习记录可供参考，但本课仍需完成一次独立检验。");
+    expect(detailAside.textContent).toContain("在本课完成独立检验");
+
+    const reqCardAfterDetail = nodeCard(REQ_2);
+    expect(reqCardAfterDetail.textContent).toContain("练习状态：独立完成");
+    expect(reqCardAfterDetail.textContent).toContain("课程要求：待独立检验");
+    expect(reqCardAfterDetail.textContent).not.toContain("已达到课程要求");
+
+    // Verify List view Nodes tab consistency with activeDetail loaded
+    const viewToolbar = container.querySelector('[aria-label="视图模式"]')!;
+    await act(async () => {
+      findButton("列表", viewToolbar).click();
+    });
+    await flush();
+    const nodesRadio = Array.from(
+      container.querySelectorAll<HTMLInputElement>('input[name="asset-graph-list-tab"]'),
+    ).find(input => input.parentElement?.textContent?.includes("当前展示的项目"))!;
+    await act(async () => {
+      nodesRadio.click();
+    });
+    await flush();
+
+    const listReqCard = nodeCard(REQ_2);
+    expect(listReqCard.textContent).toContain("练习状态：独立完成");
+    expect(listReqCard.textContent).toContain("课程要求：待独立检验");
+    expect(listReqCard.textContent).not.toContain("已达到课程要求");
+  });
 });

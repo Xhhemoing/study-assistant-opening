@@ -497,9 +497,16 @@ export type AssetGraphCanvasProps = {
   expandingNodeId: string | null;
   loadingDetailNodeId: string | null;
   onSelectNode: (nodeId: AssetGraphNodeId) => void;
-  onExpandNode: (nodeId: AssetGraphNodeId, direction: AssetGraphDirection) => void;
+  onExpandNode: (
+    nodeId: AssetGraphNodeId,
+    direction: AssetGraphDirection,
+    triggerButton?: HTMLButtonElement | null,
+  ) => void;
   onCollapseNode?: (nodeId: AssetGraphNodeId) => void;
-  onLoadMoreNeighbors: (nodeId: AssetGraphNodeId) => void;
+  onLoadMoreNeighbors: (
+    nodeId: AssetGraphNodeId,
+    triggerButton?: HTMLButtonElement | null,
+  ) => void;
   onLoadDetail: (nodeId: AssetGraphNodeId) => void;
   onEnterContext: (context: AssetGraphContext, focusId?: string) => void;
   onTogglePinNode?: (nodeId: AssetGraphNodeId) => void;
@@ -1086,7 +1093,7 @@ export function AssetGraphCanvas({
                     type="button"
                     className={ui.secondary}
                     disabled={isExpanding}
-                    onClick={() => onExpandNode(node.id, "in")}
+                    onClick={event => onExpandNode(node.id, "in", event.currentTarget)}
                   >
                     <ArrowDownLeft size={14} aria-hidden="true" />
                     入边探索
@@ -1095,7 +1102,7 @@ export function AssetGraphCanvas({
                     type="button"
                     className={ui.secondary}
                     disabled={isExpanding}
-                    onClick={() => onExpandNode(node.id, "out")}
+                    onClick={event => onExpandNode(node.id, "out", event.currentTarget)}
                   >
                     <ArrowUpRight size={14} aria-hidden="true" />
                     出边展开
@@ -1104,7 +1111,7 @@ export function AssetGraphCanvas({
                     type="button"
                     className={ui.quiet}
                     disabled={isExpanding}
-                    onClick={() => onExpandNode(node.id, "both")}
+                    onClick={event => onExpandNode(node.id, "both", event.currentTarget)}
                   >
                     <Expand size={14} aria-hidden="true" />
                     双向展开
@@ -1164,7 +1171,7 @@ export function AssetGraphCanvas({
                       type="button"
                       className={ui.secondary}
                       disabled={isExpanding}
-                      onClick={() => onLoadMoreNeighbors(node.id)}
+                      onClick={event => onLoadMoreNeighbors(node.id, event.currentTarget)}
                     >
                       加载更多关联
                     </button>

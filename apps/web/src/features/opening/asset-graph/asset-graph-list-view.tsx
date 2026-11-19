@@ -11,7 +11,7 @@ import {
   Minimize2,
   Pin,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
+import { useMemo } from "react";
 import type {
   AssetGraphContext,
   AssetGraphDetail,
@@ -73,9 +73,16 @@ export type AssetGraphListViewProps = {
   expandingNodeId: string | null;
   loadingDetailNodeId: string | null;
   onSelectNode: (nodeId: AssetGraphNodeId) => void;
-  onExpandNode: (nodeId: AssetGraphNodeId, direction: AssetGraphDirection) => void;
+  onExpandNode: (
+    nodeId: AssetGraphNodeId,
+    direction: AssetGraphDirection,
+    triggerButton?: HTMLButtonElement | null,
+  ) => void;
   onCollapseNode?: (nodeId: AssetGraphNodeId) => void;
-  onLoadMoreNeighbors: (nodeId: AssetGraphNodeId) => void;
+  onLoadMoreNeighbors: (
+    nodeId: AssetGraphNodeId,
+    triggerButton?: HTMLButtonElement | null,
+  ) => void;
   onLoadDetail: (nodeId: AssetGraphNodeId) => void;
   onEnterContext: (context: AssetGraphContext, focusId?: string) => void;
   onTogglePinNode?: (nodeId: AssetGraphNodeId) => void;
@@ -103,35 +110,7 @@ export function AssetGraphListView({
   onEnterContext,
   onTogglePinNode,
 }: AssetGraphListViewProps) {
-  const [initialDefaultSubTab] = useState<ListSubTab>(() =>
-    edges.length > 0 ? "relations" : "nodes",
-  );
-  const effectiveSubTab: ListSubTab = subTab ?? initialDefaultSubTab;
-  const pendingFocusButtonRef = useRef<HTMLButtonElement | null>(null);
-
-  useEffect(() => {
-    if (expandingNodeId !== null) return;
-    const button = pendingFocusButtonRef.current;
-    if (!button) return;
-    pendingFocusButtonRef.current = null;
-    if (
-      button.isConnected &&
-      (document.activeElement === null || document.activeElement === document.body)
-    ) {
-      button.focus();
-    }
-  }, [expandingNodeId]);
-
-  function handleExpandButtonClick(
-    event: MouseEvent<HTMLButtonElement>,
-    nodeId: AssetGraphNodeId,
-    direction: AssetGraphDirection,
-  ) {
-    if (document.activeElement === event.currentTarget) {
-      pendingFocusButtonRef.current = event.currentTarget;
-    }
-    onExpandNode(nodeId, direction);
-  }
+  const effectiveSubTab: ListSubTab = subTab ?? (edges.length > 0 ? "relations" : "nodes");
 
   const timelineNodes = useMemo(() => {
     return nodes
@@ -165,7 +144,8 @@ export function AssetGraphListView({
   return (
     <div
       data-list-view
-      className="space-y-4 rounded-tile border border-line bg-surface p-4 shadow-card"
+      tabIndex={-1}
+      className="space-y-4 rounded-tile border border-line bg-surface p-4 shadow-card focus:outline-none"
     >
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line pb-3">
         <Segmented<ListSubTab>
@@ -389,7 +369,7 @@ export function AssetGraphListView({
                       type="button"
                       className={ui.secondary}
                       disabled={expandingNodeId === node.id}
-                      onClick={event => handleExpandButtonClick(event, node.id, "in")}
+                      onClick={event => onExpandNode(node.id, "in", event.currentTarget)}
                     >
                       <ArrowDownLeft size={14} aria-hidden="true" />
                       {labels.incomingLabel}
@@ -398,7 +378,7 @@ export function AssetGraphListView({
                       type="button"
                       className={ui.secondary}
                       disabled={expandingNodeId === node.id}
-                      onClick={event => handleExpandButtonClick(event, node.id, "out")}
+                      onClick={event => onExpandNode(node.id, "out", event.currentTarget)}
                     >
                       <ArrowUpRight size={14} aria-hidden="true" />
                       {labels.outgoingLabel}
@@ -407,7 +387,7 @@ export function AssetGraphListView({
                       type="button"
                       className={ui.quiet}
                       disabled={expandingNodeId === node.id}
-                      onClick={event => handleExpandButtonClick(event, node.id, "both")}
+                      onClick={event => onExpandNode(node.id, "both", event.currentTarget)}
                     >
                       <Expand size={14} aria-hidden="true" />
                       双向展开
@@ -467,7 +447,7 @@ export function AssetGraphListView({
                         type="button"
                         className={ui.secondary}
                         disabled={expandingNodeId === node.id}
-                        onClick={() => onLoadMoreNeighbors(node.id)}
+                        onClick={event => onLoadMoreNeighbors(node.id, event.currentTarget)}
                       >
                         加载更多关联
                       </button>
