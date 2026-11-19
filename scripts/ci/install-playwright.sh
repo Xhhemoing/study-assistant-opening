@@ -3,6 +3,16 @@
 # Keep deps + browser installation + ldd inside the workflow's single 10m step.
 set -euo pipefail
 [[ "${GITHUB_ACTIONS:-}" == true ]]
+raw_timeout="${PLAYWRIGHT_INSTALL_TIMEOUT_SECONDS:-120}"
+if [[ ! "$raw_timeout" =~ ^[0-9]+$ ]]; then
+  echo "Invalid PLAYWRIGHT_INSTALL_TIMEOUT_SECONDS: ${raw_timeout}" >&2
+  exit 1
+fi
+install_timeout="${raw_timeout#"${raw_timeout%%[!0]*}"}"
+if [[ ! "$install_timeout" =~ ^([1-9][0-9]?|1[01][0-9]|120)$ ]]; then
+  echo "PLAYWRIGHT_INSTALL_TIMEOUT_SECONDS out of range (1..120): ${raw_timeout}" >&2
+  exit 1
+fi
 apt_bin=$(mktemp -d)
 trap 'rm -f "$apt_bin/apt-get"; rmdir "$apt_bin"' EXIT
 apt_get=$(command -v apt-get)
@@ -20,8 +30,6 @@ chmod 700 "$apt_bin/apt-get"
 # an official mirror is unavailable. No mirror fallback or ignored install error.
 node_path=$(command -v node)
 sudo -- env PATH="$apt_bin:$PATH" "$node_path" node_modules/playwright/cli.js install-deps chromium
-install_timeout="${PLAYWRIGHT_INSTALL_TIMEOUT_SECONDS:-120}"
-[[ "$install_timeout" =~ ^[1-9][0-9]*$ ]] && (( 10#$install_timeout <= 120 ))
 rc=0
 timeout --kill-after=5s "${install_timeout}s" "$node_path" node_modules/playwright/cli.js install chromium || rc=$?
 if (( rc == 124 )); then
