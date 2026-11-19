@@ -401,3 +401,109 @@ it("skips malformed writing checkpoints and partial manuscript metadata in cours
     sessionId: null,
   });
 });
+
+it("aligns SQL integer regex for JSONB decimal-zero numbers and enforces TS Zod second gate for bad updatedAt and malformed assistanceRecords", async () => {
+  const workGroupId = "11111111-1111-4111-8111-111111111111";
+  const docBadAssist = "22222222-2222-4222-8222-222222222222";
+  const fallbackOrdinary = row("33333333-3333-4333-8333-333333333333", {
+    course_id: "course-1",
+    updated_at: "2026-11-18T08:00:00Z",
+    create_intent: { intentKind: "topic" },
+    checkpoint_json: {},
+  });
+  const badTimestampRow = row("44444444-4444-4444-8444-444444444444", {
+    course_id: "course-1",
+    updated_at: "2026-11-18T12:00:00Z",
+    create_intent: { protocol: "writing-workspace-v1", workGroupId },
+    checkpoint_json: {
+      writingWorkspace: {
+        protocol: "writing-workspace-v1",
+        workGroupId,
+        activeDocumentId: docBadAssist,
+        activeVariantLabel: "初稿",
+        savedRevisionNumber: 1,
+        focusBlockId: null,
+        updatedAt: "bad timestamp",
+      },
+    },
+  });
+  const badAssistRow = row("55555555-5555-4555-8555-555555555555", {
+    course_id: "course-1",
+    updated_at: "2026-11-18T11:00:00Z",
+    create_intent: { protocol: "writing-workspace-v1", workGroupId },
+    checkpoint_json: {
+      writingWorkspace: {
+        protocol: "writing-workspace-v1",
+        workGroupId,
+        activeDocumentId: docBadAssist,
+        activeVariantLabel: "初稿",
+        savedRevisionNumber: 1,
+        focusBlockId: null,
+        updatedAt: "2026-11-18T11:00:00.000Z",
+      },
+    },
+  });
+  const badAssistDocLookup = [{
+    id: docBadAssist,
+    title: "畸形辅助记录稿件",
+    current_revision_number: 1,
+    has_meta: true,
+    meta: {
+      workGroupId,
+      variantLabel: "初稿",
+      parentDocumentId: null,
+      parentRevisionNumber: null,
+      keptAsPreferred: false,
+      focusBlockId: null,
+      assistanceRecords: [{}],
+    },
+    focus_exists: false,
+  }];
+
+  // Explicit lookups fail closed for both bad timestamp and malformed assistanceRecords
+  expect(
+    await readOpeningCurrentLearningActivity(db([badTimestampRow]), scope, "course-1", {
+      activityId: badTimestampRow.id,
+    }),
+  ).toBeNull();
+  expect(
+    await readOpeningCurrentLearningActivity(db([badAssistRow], badAssistDocLookup), scope, "course-1", {
+      activityId: badAssistRow.id,
+    }),
+  ).toBeNull();
+  expect(
+    await readOpeningWorkspaceActivityRecovery(db([badTimestampRow]), scope, {
+      activityId: badTimestampRow.id,
+    }),
+  ).toBeNull();
+  expect(
+    await readOpeningWorkspaceActivityRecovery(db([badAssistRow], badAssistDocLookup), scope, {
+      activityId: badAssistRow.id,
+    }),
+  ).toBeNull();
+
+  // Implicit lookups skip both malformed writing rows and verify relaxed SQL regex ^(0|[1-9][0-9]*)(\.0+)?$
+  const courseSql = db([badTimestampRow, badAssistRow, fallbackOrdinary], badAssistDocLookup);
+  expect(await readOpeningCurrentLearningActivity(courseSql, scope, "course-1")).toEqual({
+    activityId: fallbackOrdinary.id,
+    courseId: "course-1",
+    sessionId: null,
+  });
+  expect(queries(courseSql).join(" ")).toContain("^(0|[1-9][0-9]*)(\\.0+)?$");
+
+  const recoverySql = db([badTimestampRow, badAssistRow, fallbackOrdinary], badAssistDocLookup);
+  expect(await readOpeningCurrentLearningRecovery(recoverySql, scope)).toEqual({
+    activityId: fallbackOrdinary.id,
+    courseId: "course-1",
+    sessionId: null,
+  });
+
+  const workspaceSql = db([badTimestampRow, badAssistRow, fallbackOrdinary], badAssistDocLookup);
+  expect(await readOpeningWorkspaceActivityRecovery(workspaceSql, scope)).toEqual({
+    kind: "course",
+    activityId: fallbackOrdinary.id,
+    courseId: "course-1",
+    sessionId: null,
+  });
+  expect(queries(workspaceSql).join(" ")).toContain("^(0|[1-9][0-9]*)(\\.0+)?$");
+});

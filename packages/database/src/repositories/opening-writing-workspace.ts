@@ -351,13 +351,27 @@ export function createOpeningWritingWorkspaceRepository(
     `;
 
     let snapshotCurrentMeta: WritingVariantMeta | null = null;
-    const variants: WritingVariantSummary[] = groupRows.map((row) => {
+    const variants: WritingVariantSummary[] = [];
+    for (const row of groupRows) {
       const rowId = String(row.id).toLowerCase();
-      const meta = writingVariantMetaSchema.parse(row.meta);
+      const parsedMeta = writingVariantMetaSchema.safeParse(row.meta);
+      if (!parsedMeta.success) {
+        if (rowId === canonicalDocumentId) {
+          throw new OpeningWritingError("NOT_FOUND", "笔记不存在或不可用。");
+        }
+        continue;
+      }
+      const meta: WritingVariantMeta = {
+        ...parsedMeta.data,
+        workGroupId: parsedMeta.data.workGroupId.toLowerCase(),
+        parentDocumentId: parsedMeta.data.parentDocumentId == null
+          ? null
+          : parsedMeta.data.parentDocumentId.toLowerCase(),
+      };
       if (rowId === canonicalDocumentId) {
         snapshotCurrentMeta = meta;
       }
-      return {
+      variants.push({
         documentId: rowId,
         title: String(row.title),
         variantLabel: meta.variantLabel,
@@ -369,15 +383,18 @@ export function createOpeningWritingWorkspaceRepository(
         assistanceCount: meta.assistanceRecords.length,
         adoptedPolishCount: countAdoptedPolish(meta),
         updatedAt: toIso(row.updated_at),
-      };
-    });
+      });
+    }
 
     if (!snapshotCurrentMeta) {
       throw new OpeningWritingError("NOT_FOUND", "笔记不存在或不可用。");
     }
     const resolvedCurrentMeta: WritingVariantMeta = snapshotCurrentMeta;
 
-    const requested = options.requestedFocusBlockId?.trim() || null;
+    const rawRequested = options.requestedFocusBlockId?.trim() || null;
+    const requested = rawRequested && uuidSchema.safeParse(rawRequested).success
+      ? rawRequested.toLowerCase()
+      : rawRequested;
     const candidateFocus = requested ?? resolvedCurrentMeta.focusBlockId;
     let focusRestore: WritingFocusRestore;
     if (candidateFocus == null) {
@@ -391,7 +408,10 @@ export function createOpeningWritingWorkspaceRepository(
         LIMIT 1
       `;
       focusRestore = matchingBlocks.length
-        ? { status: "exact", blockId: candidateFocus }
+        ? {
+            status: "exact",
+            blockId: String(matchingBlocks[0]!.id).toLowerCase(),
+          }
         : {
             status: "block_missing",
             requestedBlockId: candidateFocus,
@@ -519,10 +539,6 @@ export function createOpeningWritingWorkspaceRepository(
             throw new OpeningWritingError("CONFLICT", "请求标识已被其他活动占用。");
           }
           if (parsedExisting.kind !== "writing") {
-            const intent = existing.create_intent as Record<string, unknown> | undefined;
-            if (!intent || intent.protocol !== WRITING_WORKSPACE_PROTOCOL) {
-              throw new OpeningWritingError("CONFLICT", "请求标识已被其他活动占用。");
-            }
             throw new OpeningWritingError("NOT_FOUND", "写作目标不存在或不可用。");
           }
 

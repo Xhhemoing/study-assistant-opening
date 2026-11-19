@@ -6,6 +6,7 @@ import {
   readOpeningWorkspaceActivityRecovery,
 } from "@aistudy/database";
 import {
+  WRITING_META_PROPERTY_KEY,
   WRITING_WORKSPACE_PROTOCOL,
   type CourselessActivityOutcome,
   type TeachingActivity,
@@ -507,7 +508,19 @@ describe("opening writing workspace route handlers", () => {
       const explicitRecovery = await readOpeningWorkspaceActivityRecovery(f.sql, f.scope, { activityId });
       expect(explicitRecovery).toBeNull();
       const implicitRecovery = await readOpeningWorkspaceActivityRecovery(f.sql, f.scope);
-      expect(implicitRecovery?.activityId).not.toBe(activityId);
+      expect(implicitRecovery).toMatchObject({
+        kind: "writing",
+        activityId: otherActivityId,
+        documentId: otherGroup.currentDocumentId,
+      });
+
+      // P1 #1: Explicit GET A?activity=<unreadableActivityId> fails closed with 404 and zero leakage
+      const explicitUnreadableActivityRes = await getWriting(
+        req(`/api/opening/writing/${docA}?activity=${activityId}`, "GET"),
+        docCtx(docA),
+      );
+      const explicitUnreadableActivityText = await explicitUnreadableActivityRes.text();
+      expect(explicitUnreadableActivityRes.status).toBe(404);
 
       const combinedPayload = JSON.stringify({
         replaySameText,
@@ -520,12 +533,13 @@ describe("opening writing workspace route handlers", () => {
         actListText,
         explicitRecovery,
         implicitRecovery,
+        explicitUnreadableActivityText,
       });
       for (const forbidden of [docB, bBlock2, secretLabel, secretSentence, secretFeedback, assistanceId]) {
         expect(combinedPayload).not.toContain(forbidden);
       }
 
-      // Surviving A 稿 remains accessible via its own document entry without exposing B
+      // Surviving A 稿 remains accessible via its own document entry, skips the unreadable activity, and never exposes B
       const viewARes = await getWriting(req(`/api/opening/writing/${docA}`, "GET"), docCtx(docA));
       const viewAText = await viewARes.text();
       expect(viewARes.status).toBe(200);
@@ -533,9 +547,10 @@ describe("opening writing workspace route handlers", () => {
       expect(viewABody.initialized).toBe(true);
       if (viewABody.initialized) {
         expect(viewABody.workspace.currentDocumentId).toBe(docA);
+        expect(viewABody.workspace.activityId).toBeNull();
         expect(viewABody.workspace.variants.map((v) => v.documentId)).toEqual([docInit, docA]);
       }
-      for (const forbidden of [docB, bBlock2, secretLabel, secretSentence, secretFeedback, assistanceId]) {
+      for (const forbidden of [activityId, docB, bBlock2, secretLabel, secretSentence, secretFeedback, assistanceId]) {
         expect(viewAText).not.toContain(forbidden);
       }
     };
@@ -662,7 +677,11 @@ describe("opening writing workspace route handlers", () => {
       );
       expect(res.status).toBe(201);
       const candidate = (await res.json()) as WritingWorkspaceView;
-      if (/[a-f]/.test(candidate.currentDocumentId)) {
+      if (
+        /[a-f]/.test(candidate.currentDocumentId)
+        && /[a-f]/.test(candidate.activityId ?? "")
+        && /[a-f]/.test(candidate.currentVariant.focusBlockId ?? "")
+      ) {
         started = candidate;
         break;
       }
@@ -673,19 +692,21 @@ describe("opening writing workspace route handlers", () => {
     expect(upperDocId).not.toBe(lowerDocId);
     const lowerActId = started!.activityId!;
     const upperActId = lowerActId.toUpperCase();
+    expect(upperActId).not.toBe(lowerActId);
     const lowerBlockId = started!.currentVariant.focusBlockId!;
     const upperBlockId = lowerBlockId.toUpperCase();
+    expect(upperBlockId).not.toBe(lowerBlockId);
 
-    // GPT #4: Both lowercase and valid uppercase UUIDs open the exact same owned readable manuscript
+    // GPT #4 + Round 2: Both lowercase and valid uppercase UUIDs (including ?focusBlock=) open the exact same owned readable manuscript
     const lowerRes = await getWriting(
-      req(`/api/opening/writing/${lowerDocId}?activity=${lowerActId}&block=${lowerBlockId}`, "GET"),
+      req(`/api/opening/writing/${lowerDocId}?activity=${lowerActId}&focusBlock=${lowerBlockId}`, "GET"),
       docCtx(lowerDocId),
     );
     expect(lowerRes.status).toBe(200);
     const lowerBody = (await lowerRes.json()) as WritingWorkspaceResponse;
 
     const upperRes = await getWriting(
-      req(`/api/opening/writing/${upperDocId}?activity=${upperActId}&block=${upperBlockId}`, "GET"),
+      req(`/api/opening/writing/${upperDocId}?activity=${upperActId}&focusBlock=${upperBlockId}`, "GET"),
       docCtx(upperDocId),
     );
     expect(upperRes.status).toBe(200);
@@ -731,6 +752,100 @@ describe("opening writing workspace route handlers", () => {
     );
     expect(emptyCkptPatchRes.status).toBe(404);
 
+    // P1 #2: start() on a malformed row lacking create_intent.protocol but containing checkpoint_json.writingWorkspace -> 404 (not 409)
+    const missingProtocolKey = `missing-proto-writing-${randomUUID()}`;
+    await f.sql`
+      INSERT INTO opening_teaching_activities (
+        id, workspace_id, owner_user_id, course_id, status, generate_status,
+        intent_kind, intent_summary, source_ids, goal_json, path_version, content_version,
+        checkpoint_json, client_key, create_intent
+      ) VALUES (
+        ${randomUUID()}, ${f.scope.workspaceId}, ${f.scope.ownerUserId}, ${null},
+        'active', 'ready', 'topic', '缺协议但含写作检查点', ${[] as string[]}, ${f.sql.json({})},
+        1, 0,
+        ${f.sql.json({
+          writingWorkspace: {
+            protocol: WRITING_WORKSPACE_PROTOCOL,
+            workGroupId: started!.workGroupId,
+            activeDocumentId: lowerDocId,
+            activeVariantLabel: "初稿",
+            savedRevisionNumber: 1,
+            focusBlockId: lowerBlockId,
+            updatedAt: new Date().toISOString(),
+          },
+        })},
+        ${missingProtocolKey},
+        ${f.sql.json({})}
+      )
+    `;
+    const missingProtoStartRes = await startWriting(
+      req("/api/opening/writing", "POST", {
+        clientKey: missingProtocolKey,
+        title: "畸形行重放探测",
+        initialText: "正文",
+      }),
+    );
+    expect(missingProtoStartRes.status).toBe(404);
+
+    // P1 #3: Malformed sibling manuscript is safely skipped when reading a valid sibling, while malformed sibling itself returns 404;
+    // JSONB decimal-zero numbers (1.0) remain readable.
+    const deriveMalformedRes = await commandWriting(
+      req(`/api/opening/writing/${lowerDocId}`, "POST", {
+        action: "derive_variant",
+        expectedRevisionNumber: 1,
+        variantLabel: "将损坏兄弟稿",
+        activityId: lowerActId,
+      }),
+      docCtx(lowerDocId),
+    );
+    expect(deriveMalformedRes.status).toBe(200);
+    const brokenSiblingId = ((await deriveMalformedRes.json()) as { workspace: WritingWorkspaceView }).workspace.currentDocumentId;
+
+    // Re-pin activity back to lowerDocId with JSONB 1.0 savedRevisionNumber, then corrupt brokenSiblingId's metadata
+    await commandWriting(
+      req(`/api/opening/writing/${lowerDocId}`, "POST", {
+        action: "save_checkpoint",
+        activityId: lowerActId,
+        focusBlockId: lowerBlockId,
+      }),
+      docCtx(lowerDocId),
+    );
+    await f.sql`
+      UPDATE opening_teaching_activities
+      SET checkpoint_json = jsonb_set(
+            checkpoint_json,
+            '{writingWorkspace,savedRevisionNumber}',
+            '1.0'::jsonb
+          )
+      WHERE id = ${lowerActId}
+    `;
+    await f.sql`
+      UPDATE library_properties
+      SET value = jsonb_set(value, '{assistanceRecords}', '[{}]'::jsonb)
+      WHERE workspace_id = ${f.scope.workspaceId}
+        AND subject_type = 'document'
+        AND subject_id = ${brokenSiblingId}
+        AND key = ${WRITING_META_PROPERTY_KEY}
+    `;
+
+    const validWithBrokenSiblingRes = await getWriting(
+      req(`/api/opening/writing/${lowerDocId}?activity=${lowerActId}`, "GET"),
+      docCtx(lowerDocId),
+    );
+    expect(validWithBrokenSiblingRes.status).toBe(200);
+    const validWithBrokenSiblingBody = (await validWithBrokenSiblingRes.json()) as WritingWorkspaceResponse;
+    expect(validWithBrokenSiblingBody.initialized).toBe(true);
+    if (validWithBrokenSiblingBody.initialized) {
+      expect(validWithBrokenSiblingBody.workspace.currentDocumentId).toBe(lowerDocId);
+      expect(validWithBrokenSiblingBody.workspace.variants.map((v) => v.documentId)).toEqual([lowerDocId]);
+    }
+
+    const brokenSiblingDirectRes = await getWriting(
+      req(`/api/opening/writing/${brokenSiblingId}`, "GET"),
+      docCtx(brokenSiblingId),
+    );
+    expect(brokenSiblingDirectRes.status).toBe(404);
+
     // GPT #2: Ordinary teaching activity created with clientKey = "writing-workgroup:..." (non-writing protocol, no writingWorkspace checkpoint)
     // remains visible via GET /api/opening/teaching-activities/[id] and GET /api/opening/teaching-activities.
     const ordinaryClientKey = `writing-workgroup:${randomUUID()}`;
@@ -761,5 +876,6 @@ describe("opening writing workspace route handlers", () => {
     const listedAll = (await listOrdinaryRes.json()) as TeachingActivity[];
     expect(listedAll.some((item) => item.id === createdOrdinary.id)).toBe(true);
     expect(listedAll.some((item) => item.id === emptyCkptId)).toBe(false);
+    expect(listedAll.some((item) => item.id === lowerActId)).toBe(true);
   });
 });

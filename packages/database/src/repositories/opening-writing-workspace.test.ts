@@ -71,6 +71,18 @@ describe("createOpeningWritingWorkspaceRepository", () => {
         capturedMeta = values[3];
         return [];
       }
+      if (text.includes("FROM library_documents d") && text.includes("LEFT JOIN library_properties p")) {
+        return [
+          {
+            id: capturedDocId,
+            title: "论证练习",
+            current_revision_number: 1,
+            has_meta: true,
+            meta: capturedMeta,
+            focus_exists: true,
+          },
+        ];
+      }
       if (text.includes("FROM library_documents d JOIN library_properties p")) {
         return [
           {
@@ -300,6 +312,13 @@ describe("createOpeningWritingWorkspaceRepository", () => {
         relationInserted = text.includes("'derived_from'") && values[1] === derivedDocId && values[2] === docId;
         return [];
       }
+      if (text.includes("FROM library_documents d") && text.includes("LEFT JOIN library_properties p")) {
+        const targetId = String(values[3]);
+        if (targetId === derivedDocId && derivedMeta) {
+          return [{ id: derivedDocId, title: "既有笔记", current_revision_number: 1, has_meta: true, meta: derivedMeta, focus_exists: true }];
+        }
+        return [{ id: docId, title: "既有笔记", current_revision_number: 1, has_meta: true, meta: storedMeta, focus_exists: true }];
+      }
       if (text.includes("FROM library_documents d JOIN library_properties p")) {
         return [
           { id: docId, title: "既有笔记", current_revision_number: 1, created_at: now, updated_at: now, meta: storedMeta },
@@ -395,6 +414,9 @@ describe("createOpeningWritingWorkspaceRepository", () => {
         expect(values[2]).toBe(WRITING_META_PROPERTY_KEY);
         adoptedMetaSaved = values[3] as Record<string, unknown>;
         return [];
+      }
+      if (text.includes("FROM library_documents d") && text.includes("LEFT JOIN library_properties p")) {
+        return [{ id: docId, title: "既有笔记", current_revision_number: 2, has_meta: true, meta: adoptedMetaSaved ?? metaWithSuggestion, focus_exists: true }];
       }
       if (text.includes("FROM library_documents d JOIN library_properties p")) {
         return [{ id: docId, title: "既有笔记", current_revision_number: 2, created_at: now, updated_at: now, meta: adoptedMetaSaved ?? metaWithSuggestion }];
@@ -548,7 +570,7 @@ describe("createOpeningWritingWorkspaceRepository", () => {
         return [existingActivity];
       }
       if (text.includes("FROM opening_teaching_activities a")) {
-        if (text.includes("create_intent->>'workGroupId'")) {
+        if (text.includes("create_intent->>'workGroupId'") || text.includes("WHERE a.id =")) {
           return [existingActivity];
         }
         // Teaching activity get / listByOwner embed openingWritingActivityReadableSql -> deleted docB omits existingActivity
@@ -628,12 +650,19 @@ describe("createOpeningWritingWorkspaceRepository", () => {
       ),
     ).toBe(false);
 
-    // Surviving variant A remains normally accessible via its own document entry
+    // P1 #1: Explicit GET A?activity=<unreadableActivityId> must fail closed with NOT_FOUND (404),
+    // while implicit GET A skips the unreadable activity and keeps A readable with zero leakage.
     const queriesBeforeReadOnly = queries.length;
+    await expect(
+      writingRepo.getView(SCOPE, docA, { activityId }),
+    ).rejects.toMatchObject({ name: "OpeningWritingError", code: "NOT_FOUND" });
+
     const viewA = await writingRepo.getView(SCOPE, docA);
     expect(viewA).not.toBeNull();
     expect(viewA!.currentDocumentId).toBe(docA);
+    expect(viewA!.activityId).toBeNull();
     expect(viewA!.variants.map((v) => v.documentId)).toEqual([docRoot, docA]);
+    expect(JSON.stringify(viewA)).not.toContain(activityId);
     expect(JSON.stringify(viewA)).not.toContain(docB);
     expect(JSON.stringify(viewA)).not.toContain(secretLabel);
     expect(
@@ -1079,11 +1108,11 @@ describe("createOpeningWritingWorkspaceRepository", () => {
     const repo = createOpeningWritingWorkspaceRepository(sql);
     const lowerView = await repo.getView(SCOPE, lowerDocId, {
       activityId: lowerActivityId,
-      focusBlockId: lowerBlockId,
+      requestedFocusBlockId: lowerBlockId,
     });
     const upperView = await repo.getView(SCOPE, upperDocId, {
       activityId: upperActivityId,
-      focusBlockId: upperBlockId,
+      requestedFocusBlockId: upperBlockId,
     });
 
     expect(lowerView).not.toBeNull();
@@ -1091,5 +1120,269 @@ describe("createOpeningWritingWorkspaceRepository", () => {
     expect(upperView!.currentDocumentId).toBe(lowerDocId);
     expect(upperView!.activityId).toBe(lowerActivityId);
     expect(upperView!.focusRestore).toEqual({ status: "exact", blockId: lowerBlockId });
+  });
+
+  it("P1 #2: acquires workspace history lock before owner lock and re-runs authorization replay after ON CONFLICT DO NOTHING, and rejects missing-protocol writingWorkspace rows in start() with NOT_FOUND", async () => {
+    const workGroupId = "33333333-3333-4333-8333-333333333333";
+    const deletedDocId = "44444444-4444-4444-8444-444444444444";
+    const racedActivityId = "55555555-5555-4555-8555-555555555555";
+    const ordinaryActivityId = "66666666-6666-4666-8666-666666666666";
+    const now = "2026-11-18T14:00:00.000Z";
+
+    // (a) Concurrent ON CONFLICT DO NOTHING won by an unreadable writing activity -> NOT_FOUND (not 409 CONFLICT),
+    // with lockWorkspaceLearningHistory acquired BEFORE lockLearningOwner (workspaces FOR SHARE).
+    const unreadableWritingWinner = {
+      id: racedActivityId,
+      workspace_id: SCOPE.workspaceId,
+      owner_user_id: SCOPE.ownerUserId,
+      course_id: null,
+      status: "active",
+      generate_status: "ready",
+      intent_kind: "topic",
+      intent_summary: "并发胜出但目标已删的写作活动",
+      source_ids: [],
+      goal_json: {},
+      path_version: 1,
+      content_version: 0,
+      client_key: "raced-unreadable-key",
+      created_at: now,
+      updated_at: now,
+      create_intent: { protocol: WRITING_WORKSPACE_PROTOCOL, workGroupId },
+      checkpoint_json: {
+        writingWorkspace: {
+          protocol: WRITING_WORKSPACE_PROTOCOL,
+          workGroupId,
+          activeDocumentId: deletedDocId,
+          activeVariantLabel: "B 稿",
+          savedRevisionNumber: 1,
+          focusBlockId: null,
+          updatedAt: now,
+        },
+      },
+    };
+    let selectClientKeyCount = 0;
+    const raceUnreadable = createMockSql((text) => {
+      if (text.includes("FROM workspaces")) return [{ id: SCOPE.workspaceId }];
+      if (text.includes("SELECT * FROM opening_teaching_activities") && text.includes("client_key =")) {
+        selectClientKeyCount += 1;
+        // First SELECT misses before concurrent commit; second SELECT after ON CONFLICT DO NOTHING sees the winning row.
+        return selectClientKeyCount === 1 ? [] : [unreadableWritingWinner];
+      }
+      if (text.startsWith("INSERT INTO opening_teaching_activities")) {
+        return [];
+      }
+      if (text.includes("FROM library_documents d") && text.includes("LEFT JOIN library_properties p")) {
+        return [];
+      }
+      return [];
+    });
+
+    const teachingUnreadable = createOpeningTeachingActivitiesRepository(raceUnreadable.sql);
+    await expect(
+      teachingUnreadable.create(SCOPE, {
+        clientKey: "raced-unreadable-key",
+        intentKind: "topic",
+        intentSummary: "并发同键创建",
+        createIntent: { intentKind: "topic" },
+      }),
+    ).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(selectClientKeyCount).toBe(2);
+
+    const historyLockIdx = raceUnreadable.queries.findIndex(
+      (q) => q.sql.includes("opening_workspace_history_revisions") && q.sql.includes("FOR UPDATE"),
+    );
+    const ownerShareIdx = raceUnreadable.queries.findIndex(
+      (q) => q.sql.includes("FROM workspaces") && q.sql.includes("FOR SHARE"),
+    );
+    expect(historyLockIdx).toBeGreaterThanOrEqual(0);
+    expect(ownerShareIdx).toBeGreaterThan(historyLockIdx);
+
+    // (b) Concurrent ON CONFLICT DO NOTHING won by a readable ordinary activity with same createIntent -> replays seamlessly
+    const ordinaryWinner = {
+      ...unreadableWritingWinner,
+      id: ordinaryActivityId,
+      client_key: "raced-ordinary-key",
+      create_intent: { intentKind: "topic" },
+      checkpoint_json: {},
+    };
+    let ordinarySelectCount = 0;
+    const raceOrdinary = createMockSql((text) => {
+      if (text.includes("FROM workspaces")) return [{ id: SCOPE.workspaceId }];
+      if (text.includes("SELECT * FROM opening_teaching_activities") && text.includes("client_key =")) {
+        ordinarySelectCount += 1;
+        return ordinarySelectCount === 1 ? [] : [ordinaryWinner];
+      }
+      if (text.startsWith("INSERT INTO opening_teaching_activities")) {
+        return [];
+      }
+      return [];
+    });
+    const replayedOrdinary = await createOpeningTeachingActivitiesRepository(raceOrdinary.sql).create(SCOPE, {
+      clientKey: "raced-ordinary-key",
+      intentKind: "topic",
+      intentSummary: "并发同键创建",
+      createIntent: { intentKind: "topic" },
+    });
+    expect(replayedOrdinary.id).toBe(ordinaryActivityId);
+    expect(ordinarySelectCount).toBe(2);
+
+    // (c) writingRepo.start() on a malformed row missing create_intent.protocol but containing checkpoint_json.writingWorkspace -> NOT_FOUND (404, not 409)
+    const missingProtocolRow = {
+      ...unreadableWritingWinner,
+      client_key: "writing-missing-protocol-key",
+      create_intent: {},
+    };
+    const missingProtoMock = createMockSql((text) => {
+      if (text.includes("FROM workspaces")) return [{ id: SCOPE.workspaceId }];
+      if (text.includes("FROM opening_teaching_activities") && text.includes("FOR UPDATE")) {
+        return [missingProtocolRow];
+      }
+      return [];
+    });
+    await expect(
+      createOpeningWritingWorkspaceRepository(missingProtoMock.sql).start(SCOPE, {
+        clientKey: "writing-missing-protocol-key",
+        title: "畸形行重放",
+        initialText: "正文",
+      }),
+    ).rejects.toMatchObject({ name: "OpeningWritingError", code: "NOT_FOUND" });
+  });
+
+  it("P1 #3: safely skips malformed sibling manuscripts in buildView while failing closed on malformed current manuscript and blocking bad updatedAt / assistanceRecords via TS Zod gate", async () => {
+    const workGroupId = "33333333-3333-4333-8333-333333333333";
+    const validDocId = "44444444-4444-4444-8444-444444444444";
+    const brokenSiblingId = "55555555-5555-4555-8555-555555555555";
+    const blockId = "66666666-6666-4666-8666-666666666666";
+    const validActivityId = "77777777-7777-4777-8777-777777777777";
+    const badTsActivityId = "88888888-8888-4888-8888-888888888888";
+    const badAssistActivityId = "99999999-9999-4999-8999-999999999999";
+    const now = "2026-11-18T14:30:00.000Z";
+
+    const validMeta = {
+      workGroupId,
+      variantLabel: "A 稿",
+      parentDocumentId: workGroupId,
+      parentRevisionNumber: 1,
+      keptAsPreferred: false,
+      focusBlockId: blockId,
+      assistanceRecords: [],
+    };
+    const malformedSiblingMeta = {
+      workGroupId,
+      variantLabel: "坏兄弟稿",
+      parentDocumentId: workGroupId,
+      parentRevisionNumber: 1,
+      keptAsPreferred: false,
+      focusBlockId: null,
+      assistanceRecords: [{}],
+    };
+    const validActivityRow = {
+      id: validActivityId,
+      workspace_id: SCOPE.workspaceId,
+      owner_user_id: SCOPE.ownerUserId,
+      course_id: null,
+      status: "active",
+      generate_status: "ready",
+      intent_kind: "topic",
+      intent_summary: "有效写作活动",
+      source_ids: [],
+      goal_json: {},
+      path_version: 1,
+      content_version: 0,
+      client_key: "valid-writing-key",
+      created_at: now,
+      updated_at: now,
+      create_intent: { protocol: WRITING_WORKSPACE_PROTOCOL, workGroupId },
+      checkpoint_json: {
+        writingWorkspace: {
+          protocol: WRITING_WORKSPACE_PROTOCOL,
+          workGroupId,
+          activeDocumentId: validDocId,
+          activeVariantLabel: "A 稿",
+          savedRevisionNumber: 1,
+          focusBlockId: blockId,
+          updatedAt: now,
+        },
+      },
+    };
+    const badTsActivityRow = {
+      ...validActivityRow,
+      id: badTsActivityId,
+      client_key: "bad-ts-writing-key",
+      checkpoint_json: {
+        writingWorkspace: {
+          ...validActivityRow.checkpoint_json.writingWorkspace,
+          updatedAt: "bad timestamp",
+        },
+      },
+    };
+    const badAssistActivityRow = {
+      ...validActivityRow,
+      id: badAssistActivityId,
+      client_key: "bad-assist-writing-key",
+      checkpoint_json: {
+        writingWorkspace: {
+          ...validActivityRow.checkpoint_json.writingWorkspace,
+          activeDocumentId: brokenSiblingId,
+        },
+      },
+    };
+
+    const { sql, queries } = createMockSql((text, values) => {
+      if (text.includes("FROM workspaces")) return [{ id: SCOPE.workspaceId }];
+      if (text.includes("FROM library_documents d") && text.includes("LEFT JOIN library_properties p")) {
+        const targetId = String(values[3]);
+        if (targetId === validDocId) {
+          return [{ id: validDocId, title: "有效稿件", current_revision_number: 1, has_meta: true, meta: validMeta, focus_exists: true }];
+        }
+        if (targetId === brokenSiblingId) {
+          return [{ id: brokenSiblingId, title: "坏兄弟稿件", current_revision_number: 1, has_meta: true, meta: malformedSiblingMeta, focus_exists: false }];
+        }
+        return [];
+      }
+      if (text.includes("FROM library_documents d JOIN library_properties p")) {
+        return [
+          { id: validDocId, title: "有效稿件", current_revision_number: 1, created_at: now, updated_at: now, meta: validMeta },
+          { id: brokenSiblingId, title: "坏兄弟稿件", current_revision_number: 1, created_at: now, updated_at: now, meta: malformedSiblingMeta },
+        ];
+      }
+      if (text.includes("FROM library_blocks") && text.includes("id::text =")) {
+        return [{ id: blockId }];
+      }
+      if (text.includes("FROM opening_teaching_activities a")) {
+        if (text.includes("WHERE a.id =")) {
+          const id = String(values[1]).toLowerCase();
+          if (id === validActivityId) return [validActivityRow];
+          if (id === badTsActivityId) return [badTsActivityRow];
+          if (id === badAssistActivityId) return [badAssistActivityRow];
+          return [];
+        }
+        return [badTsActivityRow, badAssistActivityRow, validActivityRow];
+      }
+      return [];
+    });
+
+    const writingRepo = createOpeningWritingWorkspaceRepository(sql);
+    const teachingRepo = createOpeningTeachingActivitiesRepository(sql);
+
+    // Valid manuscript opens cleanly and skips malformed sibling without throwing ZodError
+    const view = await writingRepo.getView(SCOPE, validDocId);
+    expect(view).not.toBeNull();
+    expect(view!.currentDocumentId).toBe(validDocId);
+    expect(view!.activityId).toBe(validActivityId);
+    expect(view!.variants.map((v) => v.documentId)).toEqual([validDocId]);
+
+    // Malformed manuscript itself still fails closed with NOT_FOUND
+    await expect(writingRepo.getView(SCOPE, brokenSiblingId)).rejects.toMatchObject({
+      name: "OpeningWritingError",
+      code: "NOT_FOUND",
+    });
+
+    // TS Zod second gate blocks updatedAt: "bad timestamp" and assistanceRecords: [{}] across teaching get/list
+    expect(await teachingRepo.get(SCOPE, badTsActivityId)).toBeNull();
+    expect(await teachingRepo.get(SCOPE, badAssistActivityId)).toBeNull();
+    const listed = await teachingRepo.listByOwner(SCOPE);
+    expect(listed.map((a) => a.id)).toEqual([validActivityId]);
+    expect(queries.map((q) => q.sql).join(" ")).toContain("^(0|[1-9][0-9]*)(\\.0+)?$");
   });
 });

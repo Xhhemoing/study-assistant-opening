@@ -517,7 +517,8 @@ it("excludes malformed writing checkpoints and partial manuscript metadata acros
     UPDATE library_properties
     SET value = ${f.sql.json({ workGroupId: partialMetaWorkspace.workGroupId })}
     WHERE workspace_id = ${f.scope.workspaceId}
-      AND document_id = ${partialMetaDocId}
+      AND subject_type = 'document'
+      AND subject_id = ${partialMetaDocId}
       AND key = ${WRITING_META_PROPERTY_KEY}
   `;
   await f.sql`
@@ -526,10 +527,78 @@ it("excludes malformed writing checkpoints and partial manuscript metadata acros
     WHERE id = ${partialMetaActivityId}
   `;
 
+  // P1 #3(a): Writing activity with bad updatedAt timestamp passes SQL jsonb_typeof='string' but must be blocked by TS Zod gate
+  const badTimestampWorkspace = await writing.start(f.scope, {
+    clientKey: `writing-bad-ts-${randomUUID()}`,
+    title: "坏时间戳的写作活动",
+    initialText: "第三篇初稿。",
+    variantLabel: "初稿",
+    courseId,
+  });
+  const badTimestampActivityId = badTimestampWorkspace.activityId!;
+  await f.sql`
+    UPDATE opening_teaching_activities
+    SET checkpoint_json = jsonb_set(
+          checkpoint_json,
+          '{writingWorkspace,updatedAt}',
+          '"bad timestamp"'::jsonb
+        ),
+        updated_at = '2026-11-04T00:00:00Z'
+    WHERE id = ${badTimestampActivityId}
+  `;
+
+  // P1 #3(b): Writing activity with malformed assistanceRecords: [{}] passes SQL jsonb_typeof='array' but must be blocked by TS Zod gate
+  const badAssistWorkspace = await writing.start(f.scope, {
+    clientKey: `writing-bad-assist-${randomUUID()}`,
+    title: "畸形辅助记录的写作活动",
+    initialText: "第四篇初稿。",
+    variantLabel: "初稿",
+    courseId,
+  });
+  const badAssistActivityId = badAssistWorkspace.activityId!;
+  await f.sql`
+    UPDATE library_properties
+    SET value = jsonb_set(value, '{assistanceRecords}', '[{}]'::jsonb)
+    WHERE workspace_id = ${f.scope.workspaceId}
+      AND subject_type = 'document'
+      AND subject_id = ${badAssistWorkspace.currentDocumentId}
+      AND key = ${WRITING_META_PROPERTY_KEY}
+  `;
+  await f.sql`
+    UPDATE opening_teaching_activities
+    SET updated_at = '2026-11-03T00:00:00Z'
+    WHERE id = ${badAssistActivityId}
+  `;
+
+  // P1 #3(c): Valid writing activity whose JSONB savedRevisionNumber is 1.0 stays readable (SQL regex aligns with Zod integer)
+  const decimalZeroWorkspace = await writing.start(f.scope, {
+    clientKey: `writing-decimal-zero-${randomUUID()}`,
+    title: "JSONB小数零版本号稿件",
+    initialText: "第五篇初稿。",
+    variantLabel: "初稿",
+    courseId,
+  });
+  const decimalZeroActivityId = decimalZeroWorkspace.activityId!;
+  await f.sql`
+    UPDATE opening_teaching_activities
+    SET checkpoint_json = jsonb_set(
+          checkpoint_json,
+          '{writingWorkspace,savedRevisionNumber}',
+          '1.0'::jsonb
+        ),
+        updated_at = '2026-10-31T00:00:00Z'
+    WHERE id = ${decimalZeroActivityId}
+  `;
+
   const before = await readFootprint();
 
-  // Explicit lookups reject both malformed writing rows
-  for (const malformedId of [missingRevActivityId, partialMetaActivityId]) {
+  // Explicit lookups reject all malformed writing rows (missing rev, partial meta, bad timestamp, malformed assistanceRecords)
+  for (const malformedId of [
+    missingRevActivityId,
+    partialMetaActivityId,
+    badTimestampActivityId,
+    badAssistActivityId,
+  ]) {
     expect(await teaching.get(f.scope, malformedId)).toBeNull();
     await expect(teaching.assertOwnedActivity(f.scope, malformedId)).rejects.toMatchObject({
       code: "NOT_FOUND",
@@ -542,17 +611,35 @@ it("excludes malformed writing checkpoints and partial manuscript metadata acros
     ).toBeNull();
   }
 
+  // Valid writing activity with JSONB 1.0 remains readable across get, current activity, and workspace recovery
+  expect((await teaching.get(f.scope, decimalZeroActivityId))?.id).toBe(decimalZeroActivityId);
+  expect(
+    await readOpeningCurrentLearningActivity(f.sql, f.scope, courseId, { activityId: decimalZeroActivityId }),
+  ).toEqual({
+    activityId: decimalZeroActivityId,
+    sessionId: null,
+    courseId,
+  });
+  expect(
+    await readOpeningWorkspaceActivityRecovery(f.sql, f.scope, { activityId: decimalZeroActivityId }),
+  ).toMatchObject({
+    kind: "writing",
+    activityId: decimalZeroActivityId,
+    documentId: decimalZeroWorkspace.currentDocumentId,
+    savedRevisionNumber: 1,
+  });
+
   // Ordinary activity carrying clientKey = "writing-workgroup:..." remains normally readable across get, listByOwner, and current/Today recovery
   const fetchedOrdinary = await teaching.get(f.scope, ordinaryPrefixed.id);
   expect(fetchedOrdinary?.id).toBe(ordinaryPrefixed.id);
   expect(fetchedOrdinary?.clientKey).toBe(ordinaryPrefixed.clientKey);
 
   const listed = (await teaching.listByOwner(f.scope)).map(row => teachingActivitySchema.parse(row));
-  expect(listed.map(row => row.id)).toEqual([ordinaryPrefixed.id]);
+  expect(listed.map(row => row.id)).toEqual([ordinaryPrefixed.id, decimalZeroActivityId]);
   expect(currentCourseActivity(listed, courseId)?.id).toBe(ordinaryPrefixed.id);
   expect(pickCurrentTeachingActivity(listed)?.id).toBe(ordinaryPrefixed.id);
 
-  // Implicit candidate selection skips both newer malformed writing activities and falls back to ordinaryPrefixed
+  // Implicit candidate selection skips all newer malformed writing activities and falls back to ordinaryPrefixed
   expect(await readOpeningCurrentLearningActivity(f.sql, f.scope, courseId)).toEqual({
     activityId: ordinaryPrefixed.id,
     sessionId: null,

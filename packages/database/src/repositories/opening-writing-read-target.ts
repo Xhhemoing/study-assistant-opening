@@ -139,7 +139,7 @@ export function openingWritingActivityReadableSql(
       AND jsonb_typeof(${activityAlias}.checkpoint_json->'writingWorkspace'->'activeVariantLabel') = 'string'
       AND char_length(btrim(${activityAlias}.checkpoint_json->'writingWorkspace'->>'activeVariantLabel')) BETWEEN 1 AND 80
       AND jsonb_typeof(${activityAlias}.checkpoint_json->'writingWorkspace'->'savedRevisionNumber') = 'number'
-      AND (${activityAlias}.checkpoint_json->'writingWorkspace'->>'savedRevisionNumber') ~ '^(0|[1-9][0-9]*)$'
+      AND (${activityAlias}.checkpoint_json->'writingWorkspace'->>'savedRevisionNumber') ~ '^(0|[1-9][0-9]*)(\\.0+)?$'
       AND (${activityAlias}.checkpoint_json->'writingWorkspace' ? 'focusBlockId')
       AND (
         jsonb_typeof(${activityAlias}.checkpoint_json->'writingWorkspace'->'focusBlockId') = 'null'
@@ -204,7 +204,7 @@ export function openingWritingActivityReadableSql(
             jsonb_typeof(wp.value->'parentRevisionNumber') = 'null'
             OR (
               jsonb_typeof(wp.value->'parentRevisionNumber') = 'number'
-              AND (wp.value->>'parentRevisionNumber') ~ '^(0|[1-9][0-9]*)$'
+              AND (wp.value->>'parentRevisionNumber') ~ '^(0|[1-9][0-9]*)(\\.0+)?$'
             )
           )
           AND jsonb_typeof(wp.value->'keptAsPreferred') = 'boolean'
@@ -355,8 +355,9 @@ export async function isAuthorizedWritingActivityRow(
 /**
  * Resolve the writing activity for a workGroup.
  * When `requestedActivityId` is explicitly supplied, missing, unowned, non-writing,
- * malformed-checkpoint, or cross-workGroup activities return `{ status: "not_found" }`
- * instead of falling back to a group-level view.
+ * malformed-checkpoint, cross-workGroup, or unreadable-target activities return
+ * `{ status: "not_found" }` instead of falling back to a group-level view.
+ * When omitted, unreadable activities are skipped so surviving manuscripts remain readable.
  */
 export async function readAuthorizedWritingActivityForGroup(
   db: Db,
@@ -389,6 +390,14 @@ export async function readAuthorizedWritingActivityForGroup(
     ) {
       return { status: "not_found" };
     }
+    const target = await readAuthorizedWritingDocument(db, scope, {
+      documentId: parsed.checkpoint.activeDocumentId,
+      expectedWorkGroupId: parsed.workGroupId,
+      focusBlockId: parsed.checkpoint.focusBlockId,
+    });
+    if (target.status !== "authorized") {
+      return { status: "not_found" };
+    }
     return {
       status: "found",
       activity: {
@@ -412,7 +421,15 @@ export async function readAuthorizedWritingActivityForGroup(
   `;
   for (const row of rows) {
     const parsed = parseAuthorizedWritingActivityCheckpoint(row);
-    if (parsed.kind === "writing" && parsed.workGroupId === normalizedGroup) {
+    if (parsed.kind !== "writing" || parsed.workGroupId !== normalizedGroup) {
+      continue;
+    }
+    const target = await readAuthorizedWritingDocument(db, scope, {
+      documentId: parsed.checkpoint.activeDocumentId,
+      expectedWorkGroupId: parsed.workGroupId,
+      focusBlockId: parsed.checkpoint.focusBlockId,
+    });
+    if (target.status === "authorized") {
       return {
         status: "found",
         activity: {
