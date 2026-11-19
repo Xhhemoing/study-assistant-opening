@@ -30,4 +30,56 @@ describe("opening task response versions", () => {
       status: "done", expectedVersion: 4, at: "2026-09-30T04:00:00.000Z",
     })).toMatchObject({ status: "done", version: 5 });
   });
+
+  it("excludes pending tasks whose retest activity is inactive only when excludeInactiveRetests is enabled", async () => {
+    const baseRetest = (id: string, status: string, taskStatus = "pending") => ({
+      id,
+      workspace_id: scope.workspaceId,
+      owner_user_id: scope.ownerUserId,
+      title: `Retest ${status}`,
+      minutes: 25,
+      due_at: "2026-10-26T19:00:00.000Z",
+      not_before: "2026-10-15T19:00:00.000Z",
+      priority: 1,
+      status: taskStatus,
+      version: 1,
+      origin: "retest",
+      course_id: "course-1",
+      candidate_id: `cand-${id}`,
+      retest_activity_id: `act-${id}`,
+      retest_workspace_id: scope.workspaceId,
+      retest_owner_user_id: scope.ownerUserId,
+      retest_task_id: id,
+      retest_course_id: "course-1",
+      retest_purpose: "retest",
+      retest_status: status,
+      retest_skill_label: "矩阵秩",
+      retest_prompt: "延迟复测",
+      retest_recommended_at: "2026-10-15T19:00:00.000Z",
+    });
+    const rows = [
+      task,
+      baseRetest("retest-accepted", "accepted"),
+      baseRetest("retest-in-progress", "in_progress"),
+      baseRetest("retest-cancelled", "cancelled"),
+      baseRetest("retest-declined", "declined"),
+      baseRetest("retest-invalidated", "invalidated"),
+      baseRetest("retest-superseded", "superseded"),
+      baseRetest("retest-completed", "completed"),
+      baseRetest("retest-done-task", "cancelled", "done"),
+    ];
+    const query = vi.fn().mockResolvedValue(rows);
+    const repo = createOpeningPlansRepository(query as unknown as Sql);
+
+    const unfiltered = await repo.listTasks(scope);
+    expect(unfiltered.map(item => item.id)).toEqual(rows.map(item => item.id));
+
+    const filtered = await repo.listTasks(scope, { excludeInactiveRetests: true });
+    expect(filtered.map(item => item.id)).toEqual([
+      "task",
+      "retest-accepted",
+      "retest-in-progress",
+      "retest-done-task",
+    ]);
+  });
 });

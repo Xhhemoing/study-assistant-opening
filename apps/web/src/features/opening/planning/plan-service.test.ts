@@ -1,8 +1,21 @@
 import { describe, expect, it } from "vitest";
 import { vi } from "vitest";
 import type { Sql } from "postgres";
-const taskReads = vi.hoisted(() => ({ listTasks: vi.fn() }));
-vi.mock("@aistudy/database", async original => ({ ...await original<typeof import("@aistudy/database")>(), createOpeningPlansRepository: () => taskReads }));
+const taskReads = vi.hoisted(() => ({
+  listTasks: vi.fn(),
+  getToday: vi.fn(),
+  proposePlan: vi.fn(),
+  upsertHardBlocks: vi.fn(),
+  listHardBlocks: vi.fn(),
+  listTimetable: vi.fn(),
+}));
+vi.mock("@aistudy/database", async original => ({
+  ...await original<typeof import("@aistudy/database")>(),
+  createOpeningPlansRepository: () => taskReads,
+  createOpeningPlanningSettingsRepository: () => ({
+    get: vi.fn().mockResolvedValue({ settings: null, invalidStoredSettings: false }),
+  }),
+}));
 import { planDay } from "@aistudy/domain";
 import { OpeningPlanError } from "@aistudy/database";
 import type { TaskItem, TimeBlock } from "@aistudy/contracts";
@@ -15,10 +28,61 @@ import {
 } from "./plan-service";
 
 const SH = "Asia/Shanghai";
-it("projects persisted minutes without replacing the legacy task field", async () => {
+it("projects persisted minutes without replacing the legacy task field and keeps UI listTasks unfiltered", async () => {
+  taskReads.listTasks.mockReset();
   taskReads.listTasks.mockResolvedValue([task(1)]);
-  expect(await createOpeningPlanService({} as Sql).listTasks({ workspaceId: id(1), ownerUserId: id(1) }))
+  const scope = { workspaceId: id(1), ownerUserId: id(1) };
+  expect(await createOpeningPlanService({} as Sql).listTasks(scope))
     .toEqual([{ ...task(1), estimateMinutes: 30 }]);
+  expect(taskReads.listTasks).toHaveBeenCalledWith(scope);
+});
+
+it("filters inactive retests in proposePlan and proposeDeltaPlan (when a retest task is requested)", async () => {
+  const scope = { workspaceId: id(1), ownerUserId: id(1) };
+  const freeSlot: TimeBlock[] = [{ start: "2026-10-09T09:00:00.000Z", end: "2026-10-09T11:00:00.000Z", kind: "free" }];
+  const fakeDraft = {
+    id: id(99),
+    date: "2026-10-09",
+    version: 0,
+    baseVersion: 0,
+    status: "draft" as const,
+    blocks: [],
+    unscheduledTaskIds: [],
+    unscheduledReasons: [],
+    suggestedTasks: [],
+  };
+  taskReads.listTasks.mockReset();
+  taskReads.getToday.mockReset();
+  taskReads.proposePlan.mockReset();
+  taskReads.upsertHardBlocks.mockReset();
+  taskReads.listTasks.mockResolvedValue([task(1)]);
+  taskReads.getToday.mockResolvedValue(null);
+  taskReads.upsertHardBlocks.mockResolvedValue([]);
+  taskReads.proposePlan.mockResolvedValue(fakeDraft);
+
+  const service = createOpeningPlanService({} as Sql, { now: () => new Date("2026-10-09T08:00:00.000Z") });
+  await service.proposePlan(scope, { date: "2026-10-09", free: freeSlot });
+  expect(taskReads.listTasks).toHaveBeenCalledWith(scope, { excludeInactiveRetests: true });
+
+  // Delta plan with a retest task: ownership check uses unfiltered listTasks, planning uses excludeInactiveRetests.
+  const inactiveRetest = retest(2, "2026-10-09T09:00:00.000Z");
+  taskReads.listTasks.mockReset();
+  taskReads.listTasks
+    .mockResolvedValueOnce([task(1), inactiveRetest])
+    .mockResolvedValueOnce([task(1)]);
+  taskReads.proposePlan.mockClear();
+  await service.proposeDeltaPlan(scope, {
+    date: "2026-10-09",
+    taskIds: [inactiveRetest.id],
+    free: freeSlot,
+    clientKey: "delta-test-key-1",
+  });
+  expect(taskReads.listTasks).toHaveBeenNthCalledWith(1, scope);
+  expect(taskReads.listTasks).toHaveBeenNthCalledWith(2, scope, { excludeInactiveRetests: true });
+  expect(taskReads.proposePlan).toHaveBeenCalledWith(
+    scope,
+    expect.objectContaining({ blocks: [] }),
+  );
 });
 
 it("preserves the conflict reason through the service's HTTP error mapping", () => {

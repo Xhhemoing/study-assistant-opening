@@ -27,6 +27,7 @@ import { readOpeningCurrentLearningActivity, readOpeningTaskTeachingBinding } fr
 import { recordOpeningPlanDraftDecision } from "./opening-plan-decision";
 
 import { acceptOpeningPlan } from "./opening-plan-accept";
+import { projectCourseRoutePlanningWindow } from "./opening-course-route-planning-window";
 
 export { OpeningPlanError };
 export type { OpeningPlanErrorCode } from "./opening-plan-error";
@@ -78,19 +79,31 @@ export function dailyDraftAdvisoryLockKeys(workspaceId: string, date: string): [
   return [digest.readInt32BE(0), digest.readInt32BE(4)];
 }
 
-function mapTask(row: Record<string, unknown>): TaskItem {
+export type ListTasksOptions = {
+  /** Exclude pending tasks whose linked retest activity is not active ('accepted' | 'in_progress'). */
+  excludeInactiveRetests?: boolean;
+};
+
+function mapTask(
+  row: Record<string, unknown>,
+  scope?: OpeningScope,
+  window = projectCourseRoutePlanningWindow(row, scope),
+): TaskItem {
+  const projectedRow = window.isCourseRouteRetest && window.notBefore !== null
+    ? { ...row, not_before: window.notBefore }
+    : row;
   const base: TaskItem = {
     id: row.id as string,
     version: Number(row.version),
     title: row.title as string,
     minutes: Number(row.minutes),
-    dueAt: row.due_at ? new Date(row.due_at as string | Date).toISOString() : null,
+    dueAt: window.dueAt,
     priority: Number(row.priority),
     status: row.status as TaskItem["status"],
     retest: null,
   };
   const activityId = row.retest_activity_id as string | null | undefined;
-  if (!activityId) return withTaskPlanningFields(base, row);
+  if (!activityId) return withTaskPlanningFields(base, projectedRow);
   const prompt = (row.retest_prompt as string | null | undefined) ?? base.title;
   return withTaskPlanningFields({
     ...base,
@@ -101,11 +114,10 @@ function mapTask(row: Record<string, unknown>): TaskItem {
       skillLabel: row.retest_skill_label as string,
       ...(typeof row.retest_requirement_key === "string" ? { requirementKey: row.retest_requirement_key } : {}),
       prompt,
-      recommendedAt: row.retest_recommended_at
-        ? new Date(row.retest_recommended_at as string | Date).toISOString()
-        : null,
+      recommendedAt: window.recommendedAt,
+      ...(window.scheduledStartAt ? { scheduledStartAt: window.scheduledStartAt } : {}),
     },
-  }, row);
+  }, projectedRow);
 }
 
 function formatPlanDay(value: unknown): string {
@@ -145,18 +157,36 @@ export function mapOpeningPlanDraft(row: Record<string, unknown>): PlanDraft {
 
 export function createOpeningPlansRepository(sql: Sql, options: { now?: () => Date } = {}) {
   return {
-    async listTasks(scope: OpeningScope): Promise<TaskItem[]> {
+    async listTasks(scope: OpeningScope, listOptions: ListTasksOptions = {}): Promise<TaskItem[]> {
       const rows = await sql`
         SELECT
           t.*,
           target.binding_ids AS teaching_binding_ids,
           target.onboarding_binding_exists,
           a.id AS retest_activity_id,
+          a.workspace_id AS retest_workspace_id,
+          a.owner_user_id AS retest_owner_user_id,
+          a.task_id AS retest_task_id,
           a.candidate_id AS retest_candidate_id,
+          a.candidate_reference_id AS retest_candidate_reference_id,
+          a.accept_client_key AS retest_accept_client_key,
           a.course_id AS retest_course_id,
+          a.purpose AS retest_purpose,
+          a.status AS retest_status,
+          a.learning_protocol AS retest_learning_protocol,
           a.skill_label AS retest_skill_label,
           a.requirement_key AS retest_requirement_key,
+          a.not_before_at AS retest_not_before_at,
           a.recommended_at AS retest_recommended_at,
+          a.scheduled_start_at AS retest_scheduled_start_at,
+          a.snoozed_until AS retest_snoozed_until,
+          a.deadline_at AS retest_deadline_at,
+          j.id AS retest_job_id,
+          j.workspace_id AS retest_job_workspace_id,
+          j.owner_user_id AS retest_job_owner_user_id,
+          j.kind AS retest_job_kind,
+          j.payload AS retest_job_payload,
+          j.result AS retest_job_result,
           COALESCE(j.result->'inputSnapshot'->>'prompt', j.payload->>'prompt') AS retest_prompt
         FROM opening_tasks t
         JOIN workspaces w ON w.id = t.workspace_id AND w.owner_user_id = t.owner_user_id
@@ -178,11 +208,18 @@ export function createOpeningPlansRepository(sql: Sql, options: { now?: () => Da
         LEFT JOIN opening_jobs j
           ON j.id = a.candidate_id
           AND j.workspace_id = t.workspace_id
+          AND j.owner_user_id = t.owner_user_id
+          AND j.kind = 'retest'
         WHERE t.workspace_id = ${scope.workspaceId} AND t.owner_user_id = ${scope.ownerUserId}
         ORDER BY t.created_at ASC`;
       const tasks: TaskItem[] = [];
       for (const row of rows) {
-        const task = mapTask(row as Record<string, unknown>);
+        const record = row as Record<string, unknown>;
+        const window = projectCourseRoutePlanningWindow(record, scope);
+        if (listOptions.excludeInactiveRetests && record.status === "pending" && !window.retestActive) {
+          continue;
+        }
+        const task = mapTask(record, scope, window);
         // Card review and completed retest review retain their original execution paths.
         if (task.suggestionKind === "review_cards" || task.status === "done" && task.retest) { tasks.push(task); continue; }
         const ids = (row.teaching_binding_ids ?? []) as string[];
