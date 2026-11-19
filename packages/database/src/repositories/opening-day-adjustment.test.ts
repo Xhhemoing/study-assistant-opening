@@ -1932,7 +1932,11 @@ describe("closing boundary P1 & P2/P3 guards", () => {
         },
         targetActions: null,
       }),
-    ).rejects.toMatchObject({ code: "CONFLICT", reason: "stale_version" });
+    ).rejects.toMatchObject({
+      code: "CONFLICT",
+      reason: "stale_version",
+      message: expect.stringContaining("今日最多可安排 200 个任务时段"),
+    });
     expect(writes).toBe(0);
   });
 
@@ -2081,7 +2085,11 @@ describe("closing boundary P1 & P2/P3 guards", () => {
           ],
         },
       }),
-    ).rejects.toMatchObject({ code: "CONFLICT", reason: "stale_version" });
+    ).rejects.toMatchObject({
+      code: "CONFLICT",
+      reason: "stale_version",
+      message: expect.stringContaining("2026-11-20 最多可安排 200 个任务时段"),
+    });
     expect(writes).toBe(0);
   });
 });

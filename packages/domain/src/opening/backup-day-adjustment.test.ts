@@ -517,6 +517,7 @@ describe("validateBackupDayAdjustment", () => {
   it("allows legacy ordinary drafts with strategy_version=null, ordinary snapshot, and non-self reserved UUID key while rejecting stripped or self-matching draftId drafts", () => {
     const legacyDraftId = "88888888-8888-4888-8888-888888888882";
     const replanDraftId = "88888888-8888-4888-8888-888888888883";
+    const replanClientKeyUuid = "88888888-8888-4888-8888-888888888889";
     const legacyUuidKeyDraftId = "88888888-8888-4888-8888-888888888887";
     const legacyClientKeyUuid = "88888888-8888-4888-8888-888888888890";
     const legacyExcUuidKeyDraftId = "88888888-8888-4888-8888-888888888888";
@@ -553,7 +554,7 @@ describe("validateBackupDayAdjustment", () => {
             origin: "user",
             strategy_version: "local-replan-v1",
             input_snapshot: {},
-            propose_client_key: `${DAY_ADJUSTMENT_PROPOSE_KEY_PREFIX}${replanDraftId}`,
+            propose_client_key: `${DAY_ADJUSTMENT_PROPOSE_KEY_PREFIX}${replanClientKeyUuid}`,
             reasons: {},
           },
           {
@@ -663,6 +664,113 @@ describe("validateBackupDayAdjustment", () => {
       strippedErrors,
     );
     expect(strippedErrors.some((e) => e.includes("marker mismatch"))).toBe(true);
+  });
+
+  it("rejects a same-day quick-task-add adjustment draft whose strategy_version is tampered to adaptive-1 and dayAdjustment metadata is cleared", () => {
+    const existingBlock = {
+      taskId: WRITING_ID,
+      start: "2026-11-19T11:00:00.000Z",
+      end: "2026-11-19T11:15:00.000Z",
+      reason: "planned",
+    };
+    const quickAddedBlock = {
+      taskId: MATH_ID,
+      start: "2026-11-19T11:15:00.000Z",
+      end: "2026-11-19T11:30:00.000Z",
+      reason: "planned",
+    };
+    const sameDayTables: Record<string, Record<string, unknown>[]> = {
+      opening_tasks: [
+        { id: WRITING_ID, workspace_id: WS, owner_user_id: OWNER, version: 1 },
+        { id: MATH_ID, workspace_id: WS, owner_user_id: OWNER, version: 1 },
+      ],
+      opening_plan_state: [
+        {
+          workspace_id: WS,
+          day: "2026-11-19",
+          accepted_version: 2,
+          accepted_blocks: [existingBlock, quickAddedBlock],
+        },
+      ],
+      opening_plan_drafts: [
+        validTables().opening_plan_drafts![0]!,
+        {
+          id: ADJ_ID,
+          workspace_id: WS,
+          owner_user_id: OWNER,
+          day: "2026-11-19",
+          version: 2,
+          base_version: 1,
+          status: "accepted",
+          blocks: [existingBlock, quickAddedBlock],
+          suggested_tasks: [],
+          origin: "user",
+          propose_client_key: `${DAY_ADJUSTMENT_PROPOSE_KEY_PREFIX}${ADJ_ID}`,
+          reasons: {
+            dayAdjustment: {
+              kind: DAY_ADJUSTMENT_SNAPSHOT_KIND,
+              sourceDate: "2026-11-19",
+              targetDate: null,
+              exceptionDraftId: EXC_ID,
+            },
+          },
+          strategy_version: DAY_ADJUSTMENT_STRATEGY_VERSION,
+          input_snapshot: {
+            dayAdjustment: {
+              kind: DAY_ADJUSTMENT_SNAPSHOT_KIND,
+              clientKey: "day-adjust:same-day-quick-add",
+              payloadHash: PAYLOAD_HASH,
+              confirmedAt: "2026-11-19T10:56:00.000Z",
+              timeZone: "Asia/Shanghai",
+              sourceDate: "2026-11-19",
+              targetDate: null,
+              exceptionDraftId: EXC_ID,
+              exceptionRevision: 1,
+              budgetRevision: 1,
+              sourceDay: {
+                day: "2026-11-19",
+                beforeVersion: 1,
+                afterVersion: 2,
+                beforeBlocks: [existingBlock],
+                afterBlocks: [existingBlock, quickAddedBlock],
+                keptBlocks: [existingBlock],
+                removedBlocks: [],
+                addedBlocks: [quickAddedBlock],
+              },
+              targetDay: null,
+              retestReschedules: [],
+            },
+          },
+        },
+      ],
+      opening_plan_acceptances: [
+        {
+          workspace_id: WS,
+          client_key: "day-adjust:same-day-quick-add",
+          draft_id: ADJ_ID,
+          day: "2026-11-19",
+          accepted_version: 2,
+          payload_hash: PAYLOAD_HASH,
+          source: "learner",
+          before_blocks: [existingBlock],
+          created_task_versions: {},
+        },
+      ],
+    };
+
+    const baselineErrors: string[] = [];
+    validateBackupDayAdjustment(sameDayTables, baselineErrors);
+    expect(baselineErrors).toEqual([]);
+
+    const tampered = structuredClone(sameDayTables);
+    const adjDraft = tampered.opening_plan_drafts![1]!;
+    adjDraft.strategy_version = "adaptive-1";
+    adjDraft.input_snapshot = {};
+    adjDraft.reasons = {};
+
+    const tamperedErrors: string[] = [];
+    validateBackupDayAdjustment(tampered, tamperedErrors);
+    expect(tamperedErrors).toContain("day adjustment draft marker mismatch");
   });
 
   it("accepts a contiguous target day chain with coach undo_result_version and rejects forged source-less cross-day or duplicate receipts", () => {
