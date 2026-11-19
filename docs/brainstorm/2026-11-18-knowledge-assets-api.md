@@ -13,7 +13,9 @@ promotion_target:
 
 # 个人知识资产图 · 数据与接口对接
 
-> 状态说明（2026-11-18）：本文档已由 `proposed` 晋升为 `promoted`，首期后端与前端全链路已由 `#437`–`#441` 落地于 `9918fa01`（以下正文保留原对接基线作为契约与样例参考）。
+> 状态说明（2026-11-18）：本文档已由 `proposed` 晋升为 `promoted`：
+> - 一期后端与前端全链路已由 `#437`–`#441` 落地于 `9918fa01`（以下第 1–6 节正文保留原对接基线作为契约与样例参考）；
+> - 二期跨课共享技能证据投影（Track 1B）已由 `#443`、`#445` 落地于 `909ea08a`（主干 `86d4cb67`），详见 [契约](../../packages/contracts/src/opening/asset-graph.ts)、[只读仓储](../../packages/database/src/repositories/opening-asset-graph.ts)、[知识地图前端](../../apps/web/src/features/opening/asset-graph/asset-graph-workspace.tsx) 与 [21 条请求与响应样例](2026-11-18-knowledge-assets-examples.json)（含 Case 21 `synthetic-shared-skills-01-cross-course-evidence-neighbors`）。
 
 给设计前端和实现后端的人。核对版本为 `c9072ef5`。**当前可以直接开发合成数据前端；统一图查询仍是提案。** 已存在的业务接口见第 2 节。配套的 [JSON 请求与响应样例](2026-11-18-knowledge-assets-examples.json) 可独立交给另一个模型，内容均为虚构。
 
@@ -147,7 +149,7 @@ type GraphPage = {
 | `course → goal (servesGoal)`、`goal → requirement (scopes)` | 前者按正式 `goal.courseIds`。后者限该目标所属课程的有效要求；显式 `goalIds` 或课程适用于所有目标的规则均可产生关系。默认适用通过 `derived` 标记。允许多课程目标。 |
 | `requirement → knowledge (mappedTo)`、`requirement → source (usesSource)` | `knowledgeNodeId` 可空；来源按 `sourceRefs` 保留实际版本和物理页。同源不同页/版本可有平行边。 |
 | `knowledge → knowledge` | `contains/prerequisite/appliesTo` 映射原有快照，`prerequisite` 方向是先修 → 后继。复用其审核状态；不把同现、章节顺序或名称相似升格为先修。 |
-| `requirement → observation (hasObservation)` | 必须通过要求身份、版本、effective head 与可见性检查。仅课程和标签相同不连。首批只投影本地合格归属；跨课程共享在附带原始要求、共享 link 及生效条件的 DTO 后再开放，避免重复计算。 |
+| `requirement → observation (hasObservation)` | 必须通过要求身份、版本、effective head 与可见性检查。仅课程和标签相同不连。首批只投影本地合格归属；跨课程共享在附带原始要求、共享 link 及生效条件的 DTO 后再开放，避免重复计算（二期已按第 7 节 `sharedAttribution` DTO 开放）。 |
 | `document/source → requirement/course/goal (linkedTo)` | 取有效学习资产关联。脱离的关系仅通过原历史视图查看；图上移除边不删除资产。 |
 | `exploration → document (promotedTo)` | 取已接受且目标文档 ID 一致的 promotion。裸笔记仍可从工作区独立发现，不能给它凭空补一个主题或课程。 |
 
@@ -204,3 +206,9 @@ if (result.kind === "choice") showCourseChoice(result.reason, result.message);
 | 评估动态分配能否改善选择 | 在相同视角、可用分钟与可见资料下比较候选的新覆盖和重复活动。优化器的候选来源、覆盖增益和用时估计属于“建议”，不进入事实邻边。建议成本与证据资格由原模块核实。完成真实作答或改评后再重读事实和行动，计划选中、点击和排序分数都不产生掌握记录。作品评价、时间回放和跨课程自动归并不列入这次对接。 |
 
 交给前端模型的一句话：**用附带的请求与响应实现“从任何可见节点出发、可双向展开、可换视角”的学习地图。保留服务端的身份、状态、缺口和动作语义；布局自由。先用样例走通上述两条路径，不访问真实账户，不调用尚未实现的图接口。**
+
+## 7. 二期落地补记：跨课共享技能证据（#443 / #445）
+
+- **契约扩展**：[asset-graph.ts](../../packages/contracts/src/opening/asset-graph.ts) 新增 `assetGraphSharedAttributionSchema`（含 `linkId`、`linkRevision`、`stableSkillId`、`sourceCourseId`、`sourceCourseTitle`、`sourceRequirementId`、`sourceRequirementTitle`、`sourceRequirementRevision`、`targetRequirementRevision`、`effective: true`），并在 `assetGraphEdgeSchema` 约束 `sharedAttribution` 仅允许挂在 `relation: "hasObservation"` 且 `basis: "derived"` 的边上。
+- **只读投影与游标失效**：[opening-asset-graph.ts](../../packages/database/src/repositories/opening-asset-graph.ts) 将有效 `course_requirement_evidence_links`（`shared-skills`）投影为带 `sharedAttribution` 的 `derived` `hasObservation` 边；跨课同名课程知识点继续保留各自的 `knowledge/<courseId>/<nodeId>` 身份，不跨课合并；分页游标绑定 `scopeFingerprint`，在共享链接增删/失效、要求修订或材料/隐私排除变更时按 `409 CURSOR_STALE` 失效。
+- **工作台展现与合成样例**：[asset-graph-workspace.tsx](../../apps/web/src/features/opening/asset-graph/asset-graph-workspace.tsx) 在邻接边渲染「跨课共享证据」徽章、来源课程/要求/版本说明与经 `isSafeOpeningNavigateHref` 校验的 `/opening/courses/:id` 来源课程跳转链接；[2026-11-18-knowledge-assets-examples.json](2026-11-18-knowledge-assets-examples.json) 已扩充至 21 条（新增 Case 21 `synthetic-shared-skills-01-cross-course-evidence-neighbors`）。真实账号 UI 交互待用户浏览器验收。

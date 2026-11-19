@@ -13,6 +13,10 @@ promotion_target:
 
 # 长效学习 Agent 的候选架构
 
+> 落地进度说明（2026-11-18）：本文整体多周委托调度框架仍处于 `exploring`（第 1–5 节对照 `c9072ef5` 保留问题分析）；其中两条前置能力切片已于 `86d4cb67` 落地主干（见文末“已落地切片”一节）：
+> - **Track 2B（课程资料变更知识同步，`#443` / `#446`）**：合并 `build-course-knowledge` 重建队列、`coveredSourceVersions`/`lastBuiltVersion` 与 `CourseKnowledgeSync` 状态同步；
+> - **Track 2A（无课程多稿写作工作区与跨活动恢复，`#443` / `#444`）**：`writing-workspace-v1` 多稿写作协议、四维批注/单句采纳与 Today 跨活动段落恢复。
+
 学生可以托付未来六周的备考，也可以随时打开一篇随笔。助手要记得两件事各自做到哪里，判断外界变化影响哪件事，在学生可以作决定的地方提供帮助。本文对照 `c9072ef5` 的现有实现，提出供讨论的设计。
 
 ## 从 DeepSeek 的 Super-agent 借什么
@@ -68,3 +72,15 @@ promotion_target:
 | 长效运行与成本 | 在新材料到达、两课争用时间、任务重复投递、Worker 中断及用户取消的情况下，核对积压、重复处理、等待和模型成本；同时检查漏学、无效提醒和未经授权的改排。 |
 
 第一轮比较优先选择“同一周内补发讲义、修改作文、十五分钟后离开再回来”。它同时检验主动跟进、跨任务接续、作品所有权和图谱变化。现阶段已用相同的合成作答输入直接调用活动证据契约，只变更是否提供课程 ID：带课程通过，无课程被拒，唯一错误字段为 `courseId`。它验证了此接口的具体限制。图谱并发、跨周体验及学习效果仍待后续验证。
+
+## 已落地切片（2026-11-18，#443 / #444 / #446）
+
+- **Track 2B — 课程资料变更触发的合并知识重建与状态同步（`#443` / `#446`，合入 `ee100bc1`）**：解决上文“构图期间新增材料竞态”与“仅凭 `version` 上升误判完成”问题。
+  - **契约与同步仓储**（[knowledge.ts](../../packages/contracts/src/opening/knowledge.ts) · [opening-knowledge.ts](../../packages/database/src/repositories/opening-knowledge.ts) · [course-membership.ts](../../packages/database/src/repositories/course-membership.ts)）：新增 `CourseKnowledgeSync`（`status`、`activeJobId`、`lastBuiltVersion`、`coveredSourceVersions`、`eligibleSourceVersions`、`parsingSourceCount`）与 `getWithSync`；`enqueueCoalescedRebuild` 折叠重复 `queued` 任务并在已有 `running` 任务时保留最多 1 条待跑续批任务；`POST /api/courses/[id]/memberships` 支持显式 `replacesSourceId` 替换旧资料。
+  - **Worker 与生命周期钩子**（[build-course-knowledge.ts](../../apps/worker/src/jobs/build-course-knowledge.ts) · [parse-source.ts](../../apps/worker/src/jobs/parse-source.ts) · [parse-media.ts](../../apps/worker/src/jobs/parse-media.ts) · [source-service.ts](../../apps/web/src/features/opening/sources/source-service.ts) · [auth/service.ts](../../apps/web/src/features/auth/service.ts)）：`build-course-knowledge` 在并发 `confirmNode` 导致 CAS `CONFLICT` 时重读并一次性重试，保存后记录 `coveredSourceVersions` 并触发 `onBuildCompleted`；资料解析完成、课程成员增改删及隐私排除/删除均接入同步重算。
+  - **前端同步感知**（[knowledge-rebuild-control.tsx](../../apps/web/src/features/opening/knowledge/knowledge-rebuild-control.tsx) · [course-knowledge.tsx](../../apps/web/src/features/opening/knowledge/course-knowledge.tsx)）：轮询改以 `activeJobId` 与 `lastBuiltVersion` 判断任务完成，避免被并发 `confirmNode` 递增 `version` 误导，并在存在新增或待解析材料时提示续批整理（UI 待用户浏览器验收）。
+- **Track 2A — 无课程多稿写作工作区与跨活动恢复（`#443` / `#444`，合入 `86d4cb67`）**：解决上文“无课程写作不能直接套用带 `courseId` 的作答证据契约”与“跨课程/无课程统一恢复”问题。
+  - **契约与证据隔离**（[writing-activity.ts](../../packages/contracts/src/opening/writing-activity.ts)）：定义 `writing-workspace-v1` 协议、四维反馈（`argument | language | structure | evidence`）、`polish_suggestion` 单句采纳与 `focusRestore`（`exact | block_missing | none`）；写作结局 `courselessActivityOutcomeSchema` 固定标记 `evidenceVerdict: "MASTERY_NOT_ESTABLISHED"`，零写入 `opening_learning_observations`。
+  - **线性文档存储与统一恢复**（[opening-writing-workspace.ts](../../packages/database/src/repositories/opening-writing-workspace.ts) · [current-learning-activity.ts](../../packages/domain/src/opening/current-learning-activity.ts) · [opening-current-learning-activity.ts](../../packages/database/src/repositories/opening-current-learning-activity.ts)）：在 `opening_teaching_activities`（`course_id = null`）挂载线性 `library_documents` / `library_revisions` / `library_relations`（`derived_from`）/ `library_properties`（`opening.writing.meta`）；`selectCurrentWorkspaceActivity` 与 `readOpeningWorkspaceActivityRecovery` 统一覆盖有课与无课活动并支持段落定位恢复。
+  - **服务、路由与界面**（[writing-workspace-service.ts](../../apps/web/src/features/opening/server/writing-workspace-service.ts) · [`/api/opening/writing`](../../apps/web/src/app/api/opening/writing/route.ts) · [`/api/opening/writing/[documentId]`](../../apps/web/src/app/api/opening/writing/[documentId]/route.ts) · [writing-variants-panel.tsx](../../apps/web/src/features/opening/editor/writing-variants-panel.tsx) · [document-editor.tsx](../../apps/web/src/features/opening/editor/document-editor.tsx) · [today-resume-view.tsx](../../apps/web/src/features/opening/planning/today-resume-view.tsx) · [today-dashboard.tsx](../../apps/web/src/features/opening/planning/today-dashboard.tsx)）：支持多稿分支比较、单句润色采纳、Today 主 CTA「继续写作」及段落缺失提示（UI 待用户浏览器验收）。
+- **仍待探索与后续验证**：多周学习委托调度、跨课时间冲突主动协调、AI 主动生成可逆草案及跨周学习效果评估仍保持 `exploring`。
