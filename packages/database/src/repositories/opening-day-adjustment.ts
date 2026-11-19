@@ -1,8 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { Sql, TransactionSql } from "postgres";
 import {
+  DAY_ADJUSTMENT_PROPOSE_KEY_PREFIX,
   DAY_ADJUSTMENT_SNAPSHOT_KIND,
   DAY_ADJUSTMENT_STRATEGY_VERSION,
+  DAY_EXCEPTION_PROPOSE_KEY_PREFIX,
   DAY_EXCEPTION_SNAPSHOT_KIND,
   DAY_EXCEPTION_STRATEGY_VERSION,
   dayAdjustmentConfirmInputSchema,
@@ -198,6 +200,23 @@ export function computeDayAdjustmentConfirmPayloadHash(input: DayAdjustmentConfi
   return createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
 }
 
+function buildDayExceptionReceipt(
+  id: string,
+  snapshot: DayExceptionSnapshot,
+  replayed: boolean,
+): DayExceptionReceipt {
+  return dayExceptionReceiptSchema.parse({
+    id,
+    localDate: snapshot.localDate,
+    timeZone: snapshot.timeZone,
+    effectiveAt: snapshot.effectiveAt,
+    remainingMinutes: snapshot.remainingMinutes,
+    expectedExceptionRevision: snapshot.expectedExceptionRevision,
+    revision: snapshot.revision,
+    replayed,
+  });
+}
+
 function buildConfirmReceipt(
   draftId: string,
   snapshot: DayAdjustmentSnapshot,
@@ -365,7 +384,7 @@ export function createOpeningDayAdjustmentRepository(
         throw new OpeningPlanError("VALIDATION", `invalid localDate: ${input.localDate}`);
       }
       const expectedTz = assertValidTimeZoneStrict(input.expectedTimeZone);
-      const now = clock();
+      const proposeClientKey = `${DAY_EXCEPTION_PROPOSE_KEY_PREFIX}${input.clientKey}`;
 
       return sql.begin(async (tx) => {
         // Lock order: day advisory lock -> workspace learning history -> workspace row.
@@ -378,37 +397,46 @@ export function createOpeningDayAdjustmentRepository(
           FOR UPDATE`;
         if (!owner) throw new OpeningPlanError("NOT_FOUND", "workspace not found");
 
-        // Idempotent replay check before clock/date checks (replays even after midnight).
+        // Tenant-scoped idempotent replay check before clock/date checks (replays even after midnight).
         const [existing] = await tx`
-          SELECT id, workspace_id, owner_user_id, day, version, base_version, strategy_version, input_snapshot
+          SELECT id, workspace_id, owner_user_id, day, version, base_version, strategy_version, input_snapshot, propose_client_key
           FROM opening_plan_drafts
-          WHERE id = ${input.clientKey}
+          WHERE workspace_id = ${scope.workspaceId}
+            AND owner_user_id = ${scope.ownerUserId}
+            AND propose_client_key = ${proposeClientKey}
           FOR UPDATE`;
         if (existing) {
-          if (
-            String(existing.workspace_id) !== scope.workspaceId
-            || String(existing.owner_user_id) !== scope.ownerUserId
-            || existing.strategy_version !== DAY_EXCEPTION_STRATEGY_VERSION
-          ) {
+          if (existing.strategy_version !== DAY_EXCEPTION_STRATEGY_VERSION) {
             throw new OpeningPlanError("CONFLICT", "clientKey already used for a different request", "selection_mismatch");
           }
           const saved = dayExceptionSnapshotSchema.safeParse(object(existing.input_snapshot).dayException);
           if (!saved.success) {
             throw new OpeningPlanError("CONFLICT", "stored day exception record is invalid", "selection_mismatch");
           }
-          const sameIntent = saved.data.localDate === input.localDate
+          const sameIntent = saved.data.clientKey === input.clientKey
+            && saved.data.localDate === input.localDate
             && saved.data.timeZone === expectedTz
             && saved.data.expectedExceptionRevision === input.expectedExceptionRevision
             && saved.data.remainingMinutes === input.remainingMinutes;
           if (!sameIntent) {
             throw new OpeningPlanError("CONFLICT", "clientKey selection differs", "selection_mismatch");
           }
-          return dayExceptionReceiptSchema.parse({
-            id: String(existing.id),
-            ...saved.data,
-            replayed: true,
-          });
+          return buildDayExceptionReceipt(String(existing.id), saved.data, true);
         }
+
+        // CAS on exception revision for (workspace, owner, localDate) — acquire row locks before reading clock().
+        const priorRows = await tx`
+          SELECT id, version
+          FROM opening_plan_drafts
+          WHERE workspace_id = ${scope.workspaceId}
+            AND owner_user_id = ${scope.ownerUserId}
+            AND day = ${input.localDate}::date
+            AND strategy_version = ${DAY_EXCEPTION_STRATEGY_VERSION}
+          ORDER BY version DESC
+          FOR UPDATE`;
+
+        // Read clock ONLY after holding all locks and excluding idempotent replay.
+        const now = clock();
 
         // Verify workspace timeZone and that localDate is still today.
         const currentTimeZone = await readWorkspacePlanningTimeZone(tx, scope);
@@ -420,24 +448,16 @@ export function createOpeningDayAdjustmentRepository(
           throw new OpeningPlanError("CONFLICT", "仅能为今天声明当日临时可用时长，请刷新日期。", "stale_version");
         }
 
-        // CAS on exception revision for (workspace, owner, localDate).
-        const priorRows = await tx`
-          SELECT id, version
-          FROM opening_plan_drafts
-          WHERE workspace_id = ${scope.workspaceId}
-            AND owner_user_id = ${scope.ownerUserId}
-            AND day = ${input.localDate}::date
-            AND strategy_version = ${DAY_EXCEPTION_STRATEGY_VERSION}
-          ORDER BY version DESC
-          FOR UPDATE`;
         const currentRevision = priorRows.length ? Number(priorRows[0]!.version) : 0;
         if (currentRevision !== input.expectedExceptionRevision) {
           throw new OpeningPlanError("CONFLICT", "今日临时可用时长已更新，请刷新后再提交。", "stale_version");
         }
 
+        const draftId = randomUUID();
         const nextRevision = currentRevision + 1;
         const snapshot: DayExceptionSnapshot = dayExceptionSnapshotSchema.parse({
           kind: DAY_EXCEPTION_SNAPSHOT_KIND,
+          clientKey: input.clientKey,
           localDate: input.localDate,
           timeZone: currentTimeZone,
           effectiveAt: now.toISOString(),
@@ -445,6 +465,13 @@ export function createOpeningDayAdjustmentRepository(
           expectedExceptionRevision: input.expectedExceptionRevision,
           revision: nextRevision,
         });
+        const reasonsMarker = {
+          dayException: {
+            kind: DAY_EXCEPTION_SNAPSHOT_KIND,
+            localDate: input.localDate,
+            revision: nextRevision,
+          },
+        };
 
         await tx`
           INSERT INTO opening_plan_drafts (
@@ -452,17 +479,13 @@ export function createOpeningDayAdjustmentRepository(
             blocks, unscheduled_task_ids, hard_blocks_fingerprint, input_snapshot,
             propose_client_key, origin, suggested_tasks, reasons, strategy_version
           ) VALUES (
-            ${input.clientKey}, ${scope.workspaceId}, ${scope.ownerUserId},
+            ${draftId}, ${scope.workspaceId}, ${scope.ownerUserId},
             ${input.localDate}::date, ${nextRevision}, ${input.expectedExceptionRevision},
             'accepted', '[]'::jsonb, '[]'::jsonb, '', ${tx.json({ dayException: snapshot })},
-            NULL, 'user', '[]'::jsonb, '{}'::jsonb, ${DAY_EXCEPTION_STRATEGY_VERSION}
+            ${proposeClientKey}, 'user', '[]'::jsonb, ${tx.json(reasonsMarker)}, ${DAY_EXCEPTION_STRATEGY_VERSION}
           )`;
 
-        return dayExceptionReceiptSchema.parse({
-          id: input.clientKey,
-          ...snapshot,
-          replayed: false,
-        });
+        return buildDayExceptionReceipt(draftId, snapshot, false);
       });
     },
 
@@ -592,6 +615,9 @@ export function createOpeningDayAdjustmentRepository(
         });
 
         const blockers: string[] = [];
+        if (dayException && dayException.timeZone !== timeZone) {
+          blockers.push("工作区时区已在声明今日可用时长后发生变化，请刷新并重新声明今日可用时长。");
+        }
         const hasExplicitDiff = input.moveTaskIds !== undefined || input.removeTaskIds !== undefined;
         let keptBlocks: PlannedBlock[] = [];
         let removedBlocks: PlannedBlock[] = [];
@@ -679,6 +705,7 @@ export function createOpeningDayAdjustmentRepository(
           sourceBounds.nextDayStart.getTime(),
         );
 
+        const moveTaskIdSet = new Set(moveTaskIds);
         const sourceAddedBlocks: PlannedBlock[] = [];
         if (input.quickTaskId) {
           const quickTask = taskMap.get(input.quickTaskId);
@@ -690,6 +717,8 @@ export function createOpeningDayAdjustmentRepository(
             blockers.push(`任务「${quickTask.title}」正在进行中，无法重复安排。`);
           } else if (keptBlocks.some((b) => b.taskId === quickTask.id)) {
             blockers.push(`任务「${quickTask.title}」已在今日保留安排中。`);
+          } else if (moveTaskIdSet.has(quickTask.id)) {
+            blockers.push(`任务「${quickTask.title}」正在改期到目标日期，不能同时安排在今日。`);
           } else if (quickTask.retestId && !quickTask.window.retestActive) {
             blockers.push(`任务「${quickTask.title}」对应的复测已失效，无法安排。`);
           } else {
@@ -703,6 +732,7 @@ export function createOpeningDayAdjustmentRepository(
               earliestMs,
               dueMs,
               preferredStartMs,
+              confirmBufferNowMs: now.getTime(),
             });
             if (!slot) {
               blockers.push(`任务「${quickTask.title}」需要完整 ${quickTask.minutes} 分钟连续时段，无法截断放入今日剩余时间。`);
@@ -877,6 +907,7 @@ export function createOpeningDayAdjustmentRepository(
             durationMinutes: task.minutes,
             earliestMs,
             dueMs,
+            confirmBufferNowMs: now.getTime(),
           });
           const candidateBlock = slot
             ? { taskId: task.id, start: slot.start, end: slot.end, reason: "planned" as const }
@@ -998,7 +1029,7 @@ export function createOpeningDayAdjustmentRepository(
           targetDate,
           timeZone,
           now: now.toISOString(),
-          dayException: dayException ? { ...dayException, replayed: false } : null,
+          dayException: dayException ? buildDayExceptionReceipt(dayException.id, dayException, false) : null,
           exceptionRevision: dayException?.revision ?? 0,
           budgetRevision: sourceCap.budget?.revision ?? null,
           sourceAcceptedVersion,
@@ -1063,7 +1094,6 @@ export function createOpeningDayAdjustmentRepository(
       }
 
       const payloadHash = computeDayAdjustmentConfirmPayloadHash(input);
-      const now = clock();
       const lockDates = [...new Set([
         input.sourceDate,
         ...(targetActions ? [targetActions.targetDate] : []),
@@ -1085,7 +1115,7 @@ export function createOpeningDayAdjustmentRepository(
           FOR UPDATE`;
         if (!owner) throw new OpeningPlanError("NOT_FOUND", "workspace not found");
 
-        // 4. Persistent idempotency receipt check (after auth/workspace lock, before fact re-checks)
+        // 4. Persistent idempotency receipt check (after auth/workspace lock, before clock & fact re-checks)
         const [receipt] = await tx`
           SELECT draft_id, day, accepted_version, payload_hash, source
           FROM opening_plan_acceptances
@@ -1143,7 +1173,7 @@ export function createOpeningDayAdjustmentRepository(
           throw new OpeningPlanError("CONFLICT", "目标日期计划版本已变化，请刷新后再确认。", "stale_version");
         }
 
-        // Verify workspace timeZone, active dayException revision, and budget revision.
+        // Verify workspace timeZone, active dayException revision/timeZone, and budget revision.
         const timeZone = await readWorkspacePlanningTimeZone(tx, scope);
         if (timeZone !== expectedTz) {
           throw new OpeningPlanError("CONFLICT", "工作区时区已变化，请刷新后再确认。", "stale_version");
@@ -1156,11 +1186,14 @@ export function createOpeningDayAdjustmentRepository(
         if (!sourceCap.dayException || sourceCap.dayException.revision !== input.expectedExceptionRevision) {
           throw new OpeningPlanError("CONFLICT", "当日临时可用时长已变化，请刷新后再确认。", "stale_version");
         }
+        if (sourceCap.dayException.timeZone !== timeZone) {
+          throw new OpeningPlanError("CONFLICT", "今日临时调整记录的时区与当前工作区时区不一致，请重新声明今日剩余时长。", "stale_version");
+        }
         if ((sourceCap.budget?.revision ?? null) !== input.expectedBudgetRevision) {
           throw new OpeningPlanError("CONFLICT", "工作区共同预算已变化，请刷新后再确认。", "stale_version");
         }
 
-        // Verify source diff integrity.
+        // Verify structural source diff integrity.
         const keptBlocks = sortBlocks(input.sourceActions.keptBlocks);
         const removedBlocks = sortBlocks(input.sourceActions.removedBlocks);
         const sourceAddedBlocks = sortBlocks(input.sourceActions.addedBlocks);
@@ -1182,18 +1215,15 @@ export function createOpeningDayAdjustmentRepository(
         ) {
           throw new OpeningPlanError("CONFLICT", "当日新增时段与保留安排冲突，请重新选择。", "stale_version");
         }
-        const sourceSlotFloorMs = Math.max(now.getTime(), effectiveAtMs);
         for (const block of sourceAddedBlocks) {
           if (!isBlockWithinLocalDay(block, input.sourceDate, timeZone)) {
             throw new OpeningPlanError("VALIDATION", "当日新增时段超出当日日期范围。");
           }
-          if (Date.parse(block.start) < sourceSlotFloorMs) {
-            throw new OpeningPlanError("CONFLICT", "所选今日时段已过期，请刷新后重新选择。", "slot_expired");
-          }
         }
         const sourceAfterBlocks = sortBlocks([...keptBlocks, ...sourceAddedBlocks]);
+        const sourceAfterTaskIds = new Set(sourceAfterBlocks.map((b) => b.taskId));
 
-        // Verify target diff integrity (when cross-day).
+        // Verify structural target diff integrity (when cross-day).
         const targetAddedBlocks = targetActions ? sortBlocks(targetActions.addedBlocks) : [];
         if (targetActions) {
           const removedTaskIds = new Set(removedBlocks.map((b) => b.taskId));
@@ -1201,6 +1231,7 @@ export function createOpeningDayAdjustmentRepository(
           if (
             new Set(targetAddedTaskIds).size !== targetAddedTaskIds.length
             || targetAddedTaskIds.some((id) => !removedTaskIds.has(id))
+            || targetAddedTaskIds.some((id) => sourceAfterTaskIds.has(id))
             || targetAddedTaskIds.some((id) => targetBeforeBlocks.some((existing) => existing.taskId === id))
             || hasAnyOverlap(targetAddedBlocks)
             || targetAddedBlocks.some((added) => targetBeforeBlocks.some((existing) => blocksOverlap(added, existing)))
@@ -1210,9 +1241,6 @@ export function createOpeningDayAdjustmentRepository(
           for (const block of targetAddedBlocks) {
             if (!isBlockWithinLocalDay(block, targetActions.targetDate, timeZone)) {
               throw new OpeningPlanError("VALIDATION", "目标日期时段超出该日期本地时间范围。");
-            }
-            if (Date.parse(block.start) < now.getTime()) {
-              throw new OpeningPlanError("CONFLICT", "目标时段已过期，请刷新后重新选择。", "slot_expired");
             }
           }
         }
@@ -1301,6 +1329,22 @@ export function createOpeningDayAdjustmentRepository(
               FOR SHARE`;
             if (activeCourses.length !== courseIds.length) {
               throw new OpeningPlanError("CONFLICT", "任务关联的课程已归档，不能改期或安排。", "task_changed");
+            }
+          }
+        }
+
+        // Read clock ONLY after holding all locks and excluding idempotent replay.
+        const now = clock();
+        const sourceSlotFloorMs = Math.max(now.getTime(), effectiveAtMs);
+        for (const block of sourceAddedBlocks) {
+          if (Date.parse(block.start) < sourceSlotFloorMs) {
+            throw new OpeningPlanError("CONFLICT", "所选今日时段已过期，请刷新后重新选择。", "slot_expired");
+          }
+        }
+        if (targetActions) {
+          for (const block of targetAddedBlocks) {
+            if (Date.parse(block.start) < now.getTime()) {
+              throw new OpeningPlanError("CONFLICT", "目标时段已过期，请刷新后重新选择。", "slot_expired");
             }
           }
         }
@@ -1538,6 +1582,15 @@ export function createOpeningDayAdjustmentRepository(
             : null,
           retestReschedules: retestReschedulesToApply,
         });
+        const adjustmentProposeKey = `${DAY_ADJUSTMENT_PROPOSE_KEY_PREFIX}${input.clientKey}`;
+        const adjustmentReasons = {
+          dayAdjustment: {
+            kind: DAY_ADJUSTMENT_SNAPSHOT_KIND,
+            sourceDate: input.sourceDate,
+            targetDate: targetActions ? targetActions.targetDate : null,
+            exceptionDraftId: sourceCap.dayException.id,
+          },
+        };
 
         await tx`
           INSERT INTO opening_plan_drafts (
@@ -1548,8 +1601,8 @@ export function createOpeningDayAdjustmentRepository(
             ${draftId}, ${scope.workspaceId}, ${scope.ownerUserId},
             ${input.sourceDate}::date, ${sourceAfterVersion}, ${sourceBeforeVersion}, 'accepted',
             ${tx.json(sourceAfterBlocks)}, '[]'::jsonb, ${sourceFingerprint},
-            ${tx.json({ dayAdjustment: snapshot })}, NULL, 'user', '[]'::jsonb, '{}'::jsonb,
-            ${DAY_ADJUSTMENT_STRATEGY_VERSION}
+            ${tx.json({ dayAdjustment: snapshot })}, ${adjustmentProposeKey}, 'user', '[]'::jsonb,
+            ${tx.json(adjustmentReasons)}, ${DAY_ADJUSTMENT_STRATEGY_VERSION}
           )`;
         if (options.onBeforeCommit) await options.onBeforeCommit("after_draft");
 

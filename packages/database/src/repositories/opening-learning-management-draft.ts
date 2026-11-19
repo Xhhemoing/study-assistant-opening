@@ -1,5 +1,7 @@
 import {
+  DAY_ADJUSTMENT_PROPOSE_KEY_PREFIX,
   DAY_ADJUSTMENT_STRATEGY_VERSION,
+  DAY_EXCEPTION_PROPOSE_KEY_PREFIX,
   DAY_EXCEPTION_STRATEGY_VERSION,
   learningManagementDraftMetadataSchema,
   plannedBlockSchema,
@@ -16,11 +18,19 @@ import { OpeningPlanError } from "./opening-plan-error";
 /** Existing accept transaction owns locks and historical receipt replay before this check. */
 export async function assertOpeningLearningManagementDraft(tx: TransactionSql, scope: Scope, draft: Record<string, unknown>, now: Date) {
   const snapshot = draft.input_snapshot as { learningManagement?: unknown; dayException?: unknown; dayAdjustment?: unknown } | null;
+  const proposeKey = typeof draft.propose_client_key === "string" ? draft.propose_client_key : "";
+  const reasons = draft.reasons && typeof draft.reasons === "object" && !Array.isArray(draft.reasons)
+    ? (draft.reasons as { dayException?: unknown; dayAdjustment?: unknown })
+    : null;
   if (
     draft.strategy_version === DAY_EXCEPTION_STRATEGY_VERSION
     || draft.strategy_version === DAY_ADJUSTMENT_STRATEGY_VERSION
     || snapshot?.dayException !== undefined
     || snapshot?.dayAdjustment !== undefined
+    || reasons?.dayException !== undefined
+    || reasons?.dayAdjustment !== undefined
+    || proposeKey.startsWith(DAY_EXCEPTION_PROPOSE_KEY_PREFIX)
+    || proposeKey.startsWith(DAY_ADJUSTMENT_PROPOSE_KEY_PREFIX)
   ) {
     throw new OpeningPlanError("CONFLICT", "当日临时调整记录不能通过普通单日计划入口确认。", "stale_version");
   }
@@ -39,6 +49,13 @@ export async function assertOpeningLearningManagementDraft(tx: TransactionSql, s
     if (active.length !== courseIds.length) throw learningError("CONFLICT", "新安排关联的课程已归档或不可访问，请重新选择；已有安排保留。");
   }
   if (state.dayException && fresh.length) {
+    if (state.dayException.timeZone !== state.timeZone) {
+      throw new OpeningPlanError("CONFLICT", "今日临时调整记录的时区与当前工作区时区不一致，请重新声明今日剩余时长。", "stale_version");
+    }
+    const effectiveAtMs = Date.parse(state.dayException.effectiveAt);
+    if (fresh.some((block) => Date.parse(block.start) < effectiveAtMs)) {
+      throw new OpeningPlanError("CONFLICT", "新增安排时段早于今日临时调整时刻，请重新生成后再确认。", "slot_expired");
+    }
     const evaluated = evaluateDayPlanCapacity({
       day: { localDate: state.localDate, timeZone: state.timeZone },
       budget: state.budget,

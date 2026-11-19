@@ -1,5 +1,9 @@
 import {
+  DAY_ADJUSTMENT_PROPOSE_KEY_PREFIX,
+  DAY_ADJUSTMENT_SNAPSHOT_KIND,
   DAY_ADJUSTMENT_STRATEGY_VERSION,
+  DAY_EXCEPTION_PROPOSE_KEY_PREFIX,
+  DAY_EXCEPTION_SNAPSHOT_KIND,
   DAY_EXCEPTION_STRATEGY_VERSION,
   dayAdjustmentSnapshotSchema,
   dayExceptionSnapshotSchema,
@@ -82,6 +86,41 @@ function hasAnyOverlap(blocks: readonly PlannedBlock[]): boolean {
   return false;
 }
 
+function readDraftEvidence(row: Row) {
+  const snapshot = isRecord(row.input_snapshot) ? row.input_snapshot : null;
+  const reasons = isRecord(row.reasons) ? row.reasons : null;
+  const summaryJson = isRecord(row.summary_json) ? row.summary_json : null;
+  const proposeKey = typeof row.propose_client_key === "string" ? row.propose_client_key : "";
+
+  const hasExceptionStrategy = row.strategy_version === DAY_EXCEPTION_STRATEGY_VERSION;
+  const hasAdjustmentStrategy = row.strategy_version === DAY_ADJUSTMENT_STRATEGY_VERSION;
+  const hasExceptionSnapshot = snapshot?.dayException !== undefined;
+  const hasAdjustmentSnapshot = snapshot?.dayAdjustment !== undefined;
+  const hasExceptionProposeKey = proposeKey.startsWith(DAY_EXCEPTION_PROPOSE_KEY_PREFIX);
+  const hasAdjustmentProposeKey = proposeKey.startsWith(DAY_ADJUSTMENT_PROPOSE_KEY_PREFIX);
+  const hasExceptionReasons = reasons?.dayException !== undefined || summaryJson?.dayException !== undefined;
+  const hasAdjustmentReasons = reasons?.dayAdjustment !== undefined || summaryJson?.dayAdjustment !== undefined;
+
+  const hasAnyException = hasExceptionStrategy || hasExceptionSnapshot || hasExceptionProposeKey || hasExceptionReasons;
+  const hasAnyAdjustment = hasAdjustmentStrategy || hasAdjustmentSnapshot || hasAdjustmentProposeKey || hasAdjustmentReasons;
+
+  return {
+    snapshot,
+    reasons,
+    proposeKey,
+    hasExceptionStrategy,
+    hasAdjustmentStrategy,
+    hasExceptionSnapshot,
+    hasAdjustmentSnapshot,
+    hasExceptionProposeKey,
+    hasAdjustmentProposeKey,
+    hasExceptionReasons,
+    hasAdjustmentReasons,
+    hasAnyException,
+    hasAnyAdjustment,
+  };
+}
+
 type ValidatedException = {
   id: string;
   workspaceId: string;
@@ -100,21 +139,54 @@ export function validateBackupDayAdjustment(tables: Tables, errors: string[]): v
   const taskRows = tables.opening_tasks ?? [];
   const retestRows = tables.opening_retest_activities ?? [];
 
+  // Structural cross-day draft reuse checks (fail-closed even if markers were stripped).
+  const acceptanceDaysByDraftId = new Map<string, Set<string>>();
+  for (const row of acceptanceRows) {
+    if (!isUuid(row.draft_id)) continue;
+    const id = row.draft_id.toLowerCase();
+    const days = acceptanceDaysByDraftId.get(id) ?? new Set<string>();
+    days.add(dateKey(row.day));
+    acceptanceDaysByDraftId.set(id, days);
+  }
+  for (const days of acceptanceDaysByDraftId.values()) {
+    if (days.size > 1) {
+      errors.push("day adjustment acceptance draft spans multiple days");
+      break;
+    }
+  }
+
+  const stateDaysByDraftId = new Map<string, Set<string>>();
+  for (const row of stateRows) {
+    if (!isUuid(row.plan_draft_id)) continue;
+    const id = row.plan_draft_id.toLowerCase();
+    const days = stateDaysByDraftId.get(id) ?? new Set<string>();
+    days.add(dateKey(row.day));
+    stateDaysByDraftId.set(id, days);
+  }
+  for (const days of stateDaysByDraftId.values()) {
+    if (days.size > 1) {
+      errors.push("day adjustment plan state draft spans multiple days");
+      break;
+    }
+  }
+
   const relevantDrafts = draftRows.filter((row) => {
-    const snapshot = isRecord(row.input_snapshot) ? row.input_snapshot : null;
-    return row.strategy_version === DAY_EXCEPTION_STRATEGY_VERSION
-      || row.strategy_version === DAY_ADJUSTMENT_STRATEGY_VERSION
-      || snapshot?.dayException !== undefined
-      || snapshot?.dayAdjustment !== undefined;
+    const ev = readDraftEvidence(row);
+    return ev.hasAnyException || ev.hasAnyAdjustment;
   });
 
   if (relevantDrafts.length === 0) return;
 
   const statesByKey = new Map<string, Row>();
+  const statesByWorkspace = new Map<string, Array<{ day: string; row: Row }>>();
   for (const row of stateRows) {
     if (!isUuid(row.workspace_id)) continue;
-    const key = `${row.workspace_id.toLowerCase()}/${dateKey(row.day)}`;
-    statesByKey.set(key, row);
+    const ws = row.workspace_id.toLowerCase();
+    const day = dateKey(row.day);
+    statesByKey.set(`${ws}/${day}`, row);
+    const list = statesByWorkspace.get(ws) ?? [];
+    list.push({ day, row });
+    statesByWorkspace.set(ws, list);
   }
 
   const tasksById = new Map<string, Row>();
@@ -123,12 +195,26 @@ export function validateBackupDayAdjustment(tables: Tables, errors: string[]): v
   }
 
   const retestsById = new Map<string, Row>();
+  const retestsByWorkspaceTask = new Map<string, Row[]>();
   for (const row of retestRows) {
     if (isUuid(row.id)) retestsById.set(row.id.toLowerCase(), row);
+    if (isUuid(row.workspace_id) && isUuid(row.task_id)) {
+      const key = `${row.workspace_id.toLowerCase()}/${row.task_id.toLowerCase()}`;
+      const list = retestsByWorkspaceTask.get(key) ?? [];
+      list.push(row);
+      retestsByWorkspaceTask.set(key, list);
+    }
   }
 
   const acceptancesByDraftId = new Map<string, Row[]>();
+  const acceptanceDaysByWorkspace = new Map<string, Set<string>>();
   for (const row of acceptanceRows) {
+    if (isUuid(row.workspace_id)) {
+      const ws = row.workspace_id.toLowerCase();
+      const set = acceptanceDaysByWorkspace.get(ws) ?? new Set<string>();
+      set.add(dateKey(row.day));
+      acceptanceDaysByWorkspace.set(ws, set);
+    }
     if (!isUuid(row.draft_id)) continue;
     const id = row.draft_id.toLowerCase();
     const list = acceptancesByDraftId.get(id) ?? [];
@@ -140,26 +226,24 @@ export function validateBackupDayAdjustment(tables: Tables, errors: string[]): v
   const exceptionsByWorkspaceDay = new Map<string, ValidatedException[]>();
   const exceptionDayRevisionKeys = new Set<string>();
   const exceptionWorkspaceDayRevisionKeys = new Set<string>();
+  const exceptionProposeKeys = new Set<string>();
+  const adjustmentProposeKeys = new Set<string>();
   const adjustmentRows: Array<{ row: Row; snapshot: DayAdjustmentSnapshot }> = [];
 
   for (const row of relevantDrafts) {
-    const snapshot = isRecord(row.input_snapshot) ? row.input_snapshot : null;
-    const hasExceptionStrategy = row.strategy_version === DAY_EXCEPTION_STRATEGY_VERSION;
-    const hasAdjustmentStrategy = row.strategy_version === DAY_ADJUSTMENT_STRATEGY_VERSION;
-    const hasExceptionSnapshot = snapshot?.dayException !== undefined;
-    const hasAdjustmentSnapshot = snapshot?.dayAdjustment !== undefined;
+    const ev = readDraftEvidence(row);
 
-    if ((hasExceptionStrategy || hasExceptionSnapshot) && (hasAdjustmentStrategy || hasAdjustmentSnapshot)) {
+    if (ev.hasAnyException && ev.hasAnyAdjustment) {
       errors.push("day adjustment draft carries conflicting exception and adjustment markers");
       continue;
     }
 
-    if (hasExceptionStrategy !== hasExceptionSnapshot) {
+    if (ev.hasAnyException && !(ev.hasExceptionStrategy && ev.hasExceptionSnapshot && ev.hasExceptionProposeKey && ev.hasExceptionReasons)) {
       errors.push("day exception draft marker mismatch");
       continue;
     }
 
-    if (hasAdjustmentStrategy !== hasAdjustmentSnapshot) {
+    if (ev.hasAnyAdjustment && !(ev.hasAdjustmentStrategy && ev.hasAdjustmentSnapshot && ev.hasAdjustmentProposeKey && ev.hasAdjustmentReasons)) {
       errors.push("day adjustment draft marker mismatch");
       continue;
     }
@@ -169,10 +253,14 @@ export function validateBackupDayAdjustment(tables: Tables, errors: string[]): v
       continue;
     }
 
-    if (hasExceptionStrategy) {
-      const parsed = dayExceptionSnapshotSchema.safeParse(snapshot?.dayException);
+    const workspaceId = row.workspace_id.toLowerCase();
+    const ownerUserId = row.owner_user_id.toLowerCase();
+
+    if (ev.hasExceptionStrategy) {
+      const parsed = dayExceptionSnapshotSchema.safeParse(ev.snapshot?.dayException);
       const parsedBlocks = plannedBlockSchema.array().safeParse(row.blocks ?? []);
       const suggestedTasks = Array.isArray(row.suggested_tasks) ? row.suggested_tasks : null;
+      const reasonMarker = isRecord(ev.reasons?.dayException) ? ev.reasons.dayException : null;
       if (!parsed.success
         || !parsedBlocks.success
         || parsedBlocks.data.length !== 0
@@ -180,11 +268,19 @@ export function validateBackupDayAdjustment(tables: Tables, errors: string[]): v
         || suggestedTasks.length !== 0
         || row.origin !== "user"
         || row.status !== "accepted"
-        || row.propose_client_key != null) {
+        || !reasonMarker) {
         errors.push("day exception draft structure or snapshot is invalid");
         continue;
       }
       const exc = parsed.data;
+      const expectedProposeKey = `${DAY_EXCEPTION_PROPOSE_KEY_PREFIX}${exc.clientKey}`;
+      if (ev.proposeKey !== expectedProposeKey
+        || reasonMarker.kind !== DAY_EXCEPTION_SNAPSHOT_KIND
+        || reasonMarker.localDate !== exc.localDate
+        || Number(reasonMarker.revision) !== exc.revision) {
+        errors.push("day exception draft marker mismatch");
+        continue;
+      }
       const tz = validTimeZone(exc.timeZone);
       if (!tz || !validLocalDate(exc.localDate) || dateKey(row.day) !== exc.localDate) {
         errors.push("day exception localDate or timeZone is invalid");
@@ -205,12 +301,18 @@ export function validateBackupDayAdjustment(tables: Tables, errors: string[]): v
         errors.push("day exception identity is duplicated");
         continue;
       }
+      const scopedProposeKey = `${workspaceId}/${ownerUserId}/${ev.proposeKey.toLowerCase()}`;
+      if (exceptionProposeKeys.has(scopedProposeKey)) {
+        errors.push("duplicate day exception propose_client_key");
+        continue;
+      }
+      exceptionProposeKeys.add(scopedProposeKey);
       if ((acceptancesByDraftId.get(id)?.length ?? 0) > 0) {
         errors.push("day exception draft must not have an acceptance receipt");
         continue;
       }
-      const workspaceDayRevKey = `${row.workspace_id.toLowerCase()}/${exc.localDate}/${exc.revision}`;
-      const scopeDayRevKey = `${row.workspace_id.toLowerCase()}/${row.owner_user_id.toLowerCase()}/${exc.localDate}/${exc.revision}`;
+      const workspaceDayRevKey = `${workspaceId}/${exc.localDate}/${exc.revision}`;
+      const scopeDayRevKey = `${workspaceId}/${ownerUserId}/${exc.localDate}/${exc.revision}`;
       if (exceptionDayRevisionKeys.has(scopeDayRevKey) || exceptionWorkspaceDayRevisionKeys.has(workspaceDayRevKey)) {
         errors.push("duplicate day exception revision for localDate");
         continue;
@@ -219,8 +321,8 @@ export function validateBackupDayAdjustment(tables: Tables, errors: string[]): v
       exceptionWorkspaceDayRevisionKeys.add(workspaceDayRevKey);
       const entry: ValidatedException = {
         id,
-        workspaceId: row.workspace_id.toLowerCase(),
-        ownerUserId: row.owner_user_id.toLowerCase(),
+        workspaceId,
+        ownerUserId,
         snapshot: exc,
       };
       validatedExceptions.set(id, entry);
@@ -231,25 +333,42 @@ export function validateBackupDayAdjustment(tables: Tables, errors: string[]): v
       continue;
     }
 
-    if (hasAdjustmentStrategy) {
-      const parsed = dayAdjustmentSnapshotSchema.safeParse(snapshot?.dayAdjustment);
+    if (ev.hasAdjustmentStrategy) {
+      const parsed = dayAdjustmentSnapshotSchema.safeParse(ev.snapshot?.dayAdjustment);
       const parsedBlocks = plannedBlockSchema.array().safeParse(row.blocks ?? []);
       const suggestedTasks = Array.isArray(row.suggested_tasks) ? row.suggested_tasks : null;
+      const reasonMarker = isRecord(ev.reasons?.dayAdjustment) ? ev.reasons.dayAdjustment : null;
       if (!parsed.success
         || !parsedBlocks.success
         || suggestedTasks === null
         || suggestedTasks.length !== 0
         || row.origin !== "user"
         || row.status !== "accepted"
-        || row.propose_client_key != null) {
+        || !reasonMarker) {
         errors.push("day adjustment draft structure or snapshot is invalid");
         continue;
       }
-      if (!sameBlockMultiset(parsedBlocks.data, parsed.data.sourceDay.afterBlocks)) {
+      const adj = parsed.data;
+      const expectedProposeKey = `${DAY_ADJUSTMENT_PROPOSE_KEY_PREFIX}${adj.clientKey}`;
+      if (ev.proposeKey !== expectedProposeKey
+        || reasonMarker.kind !== DAY_ADJUSTMENT_SNAPSHOT_KIND
+        || reasonMarker.sourceDate !== adj.sourceDate
+        || (reasonMarker.targetDate ?? null) !== adj.targetDate
+        || !sameUuid(reasonMarker.exceptionDraftId, adj.exceptionDraftId)) {
+        errors.push("day adjustment draft marker mismatch");
+        continue;
+      }
+      const scopedProposeKey = `${workspaceId}/${ownerUserId}/${ev.proposeKey}`;
+      if (adjustmentProposeKeys.has(scopedProposeKey)) {
+        errors.push("duplicate day adjustment propose_client_key");
+        continue;
+      }
+      adjustmentProposeKeys.add(scopedProposeKey);
+      if (!sameBlockMultiset(parsedBlocks.data, adj.sourceDay.afterBlocks)) {
         errors.push("day adjustment draft blocks do not match sourceDay.afterBlocks");
         continue;
       }
-      adjustmentRows.push({ row, snapshot: parsed.data });
+      adjustmentRows.push({ row, snapshot: adj });
     }
   }
 
@@ -300,6 +419,10 @@ export function validateBackupDayAdjustment(tables: Tables, errors: string[]): v
       || exceptionEntry.snapshot.localDate !== adj.sourceDate
       || exceptionEntry.snapshot.revision !== adj.exceptionRevision) {
       errors.push("day adjustment exception reference or scope is invalid");
+      continue;
+    }
+    if (exceptionEntry.snapshot.timeZone !== adj.timeZone) {
+      errors.push("day adjustment timeZone does not match referenced day exception");
       continue;
     }
 
@@ -381,9 +504,12 @@ export function validateBackupDayAdjustment(tables: Tables, errors: string[]): v
         continue;
       }
       const removedTaskIds = new Set(removedBlocks.map((b) => b.taskId.toLowerCase()));
+      const sourceAfterTaskIds = new Set(adj.sourceDay.afterBlocks.map((b) => b.taskId.toLowerCase()));
+      const targetBeforeTaskIds = new Set(target.beforeBlocks.map((b) => b.taskId.toLowerCase()));
       const addedTargetTaskIds = target.addedBlocks.map((b) => b.taskId.toLowerCase());
       if (new Set(addedTargetTaskIds).size !== addedTargetTaskIds.length
         || addedTargetTaskIds.some((id) => !removedTaskIds.has(id))
+        || addedTargetTaskIds.some((id) => sourceAfterTaskIds.has(id) || targetBeforeTaskIds.has(id))
         || target.addedBlocks.some((b) => !blockWithinLocalDay(b, adj.targetDate!, tz))
         || hasAnyOverlap(target.addedBlocks)
         || target.addedBlocks.some((added) => target.beforeBlocks.some((existing) => blocksOverlap(added, existing)))) {
@@ -414,9 +540,10 @@ export function validateBackupDayAdjustment(tables: Tables, errors: string[]): v
       continue;
     }
 
-    // Retest reschedules integrity & scope.
+    // Retest reschedules integrity & scope (forward + reverse completeness).
     let retestInvalid = false;
     const seenRetests = new Set<string>();
+    const rescheduledRetestByTaskId = new Map<string, string>();
     for (const item of adj.retestReschedules) {
       const retestId = item.retestId.toLowerCase();
       if (seenRetests.has(retestId) || item.afterVersion !== item.beforeVersion + 1) {
@@ -444,10 +571,35 @@ export function validateBackupDayAdjustment(tables: Tables, errors: string[]): v
         retestInvalid = true;
         break;
       }
+      rescheduledRetestByTaskId.set(item.taskId.toLowerCase(), retestId);
     }
     if (retestInvalid) {
       errors.push("day adjustment retest reschedule record is invalid");
       continue;
+    }
+
+    if (adj.targetDay) {
+      let missingReverseRetest = false;
+      for (const block of adj.targetDay.addedBlocks) {
+        const taskId = block.taskId.toLowerCase();
+        const matchingRetests = retestsByWorkspaceTask.get(`${workspaceId}/${taskId}`) ?? [];
+        for (const retestRow of matchingRetests) {
+          if (!sameUuid(retestRow.owner_user_id, ownerUserId)) {
+            missingReverseRetest = true;
+            break;
+          }
+          const recordedRetestId = rescheduledRetestByTaskId.get(taskId);
+          if (!recordedRetestId || !sameUuid(retestRow.id, recordedRetestId)) {
+            missingReverseRetest = true;
+            break;
+          }
+        }
+        if (missingReverseRetest) break;
+      }
+      if (missingReverseRetest) {
+        errors.push("day adjustment missing retest reschedule record for moved retest task");
+        continue;
+      }
     }
 
     // Unique acceptance receipt association.
@@ -467,6 +619,54 @@ export function validateBackupDayAdjustment(tables: Tables, errors: string[]): v
       || !receiptBeforeBlocks.success
       || !sameBlockMultiset(receiptBeforeBlocks.data, adj.sourceDay.beforeBlocks)) {
       errors.push("day adjustment acceptance receipt does not match adjustment snapshot");
+    }
+  }
+
+  // Cross-table stripping bypass guard: if a day has a validated day-exception, an unmarked accepted
+  // learner draft on that day must not remove tasks that appear on a later day's opening_plan_state
+  // without that later day having its own opening_plan_acceptances row.
+  for (const row of draftRows) {
+    if (!isUuid(row.id) || !isUuid(row.workspace_id) || !isUuid(row.owner_user_id)) continue;
+    if (row.status !== "accepted") continue;
+    const draftId = row.id.toLowerCase();
+    if (validatedExceptions.has(draftId) || adjustmentDraftIds.has(draftId)) continue;
+    const workspaceId = row.workspace_id.toLowerCase();
+    const ownerUserId = row.owner_user_id.toLowerCase();
+    const draftDay = dateKey(row.day);
+    if (!exceptionsByWorkspaceDay.has(`${workspaceId}/${ownerUserId}/${draftDay}`)) continue;
+
+    const receipts = (acceptancesByDraftId.get(draftId) ?? []).filter((r) => r.source === "learner");
+    if (receipts.length === 0) continue;
+    const draftBlocksParsed = plannedBlockSchema.array().safeParse(row.blocks ?? []);
+    if (!draftBlocksParsed.success) continue;
+    const draftTaskIds = new Set(draftBlocksParsed.data.map((b) => b.taskId.toLowerCase()));
+
+    const removedTaskIds = new Set<string>();
+    for (const receipt of receipts) {
+      const beforeParsed = plannedBlockSchema.array().safeParse(receipt.before_blocks ?? []);
+      if (!beforeParsed.success) continue;
+      for (const block of beforeParsed.data) {
+        const taskId = block.taskId.toLowerCase();
+        if (!draftTaskIds.has(taskId)) removedTaskIds.add(taskId);
+      }
+    }
+    if (removedTaskIds.size === 0) continue;
+
+    const wsAcceptanceDays = acceptanceDaysByWorkspace.get(workspaceId) ?? new Set<string>();
+    const wsStates = statesByWorkspace.get(workspaceId) ?? [];
+    let strippedDetected = false;
+    for (const stateEntry of wsStates) {
+      if (stateEntry.day <= draftDay) continue;
+      if (wsAcceptanceDays.has(stateEntry.day)) continue;
+      const stateBlocksParsed = plannedBlockSchema.array().safeParse(stateEntry.row.accepted_blocks ?? []);
+      if (!stateBlocksParsed.success) continue;
+      if (stateBlocksParsed.data.some((b) => removedTaskIds.has(b.taskId.toLowerCase()))) {
+        strippedDetected = true;
+        break;
+      }
+    }
+    if (strippedDetected) {
+      errors.push("unmarked accepted draft appears to have stripped day adjustment markers");
     }
   }
 }

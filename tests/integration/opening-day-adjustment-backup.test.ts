@@ -31,13 +31,14 @@ beforeEach(async () => {
   await f.sql`DELETE FROM workspace_preferences WHERE workspace_id = ${f.scope.workspaceId}`;
   await f.sql`DELETE FROM opening_workspace_history_revisions WHERE workspace_id = ${f.scope.workspaceId}`;
 
-  await createOpeningPlanningSettingsRepository(f.sql).save(f.scope, {
-    termStartDate: "2026-09-01",
+  await createOpeningPlanningSettingsRepository(f.sql).set(f.scope, {
+    weekOneMonday: "2026-09-07",
+    periodTimes: { "1": { start: "08:00", end: "08:45" } },
+    dailyWindow: { start: "07:30", end: "22:30" },
+    lunch: { start: "12:00", end: "12:45" },
+    dinner: { start: "18:00", end: "18:45" },
+    sleep: { start: "23:00", end: "07:00" },
     timeZone: TIME_ZONE,
-    sleepStart: "23:00",
-    sleepEnd: "07:00",
-    meals: [{ label: "晚饭", start: "18:00", end: "18:45" }],
-    periodTimes: [{ period: 1, start: "08:00", end: "08:45" }],
   });
 });
 
@@ -221,6 +222,21 @@ it("rejects tampered backup archives (missing target day, duplicate revision, st
     await executeOpeningRestoreApply(f.sql, {
       confirmLocalRestore: true,
       backup: makeBackup(stripped),
+      currentMemoryDeletions: snapshot.memoryDeletions,
+    }),
+  ).toMatchObject({ ok: false, code: "PREFLIGHT_REJECTED", mutated: false });
+
+  // 4. Dual-field strip (both strategy_version and input_snapshot.dayAdjustment cleared)
+  const dualStripped = structuredClone(snapshot.tables);
+  const dualAdj = dualStripped.opening_plan_drafts!.find(
+    (row) => row.strategy_version === "day-adjustment-v1",
+  )!;
+  dualAdj.strategy_version = null;
+  dualAdj.input_snapshot = {};
+  expect(
+    await executeOpeningRestoreApply(f.sql, {
+      confirmLocalRestore: true,
+      backup: makeBackup(dualStripped),
       currentMemoryDeletions: snapshot.memoryDeletions,
     }),
   ).toMatchObject({ ok: false, code: "PREFLIGHT_REJECTED", mutated: false });

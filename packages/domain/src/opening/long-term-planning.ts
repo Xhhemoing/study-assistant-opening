@@ -155,6 +155,8 @@ export function findContinuousFreeSlot(input: {
   earliestMs: number;
   dueMs?: number | null;
   preferredStartMs?: number | null;
+  /** Current instant so default slots inside an in-progress gap reserve confirmation buffer when slack permits. */
+  confirmBufferNowMs?: number | null;
 }): TimeBlock | null {
   const durationMs = input.durationMinutes * 60_000;
   if (!Number.isFinite(durationMs) || durationMs <= 0) return null;
@@ -176,11 +178,36 @@ export function findContinuousFreeSlot(input: {
   }
 
   for (const slot of sorted) {
-    const start = Math.max(slot.start, input.earliestMs);
-    const end = start + durationMs;
-    if (end <= Math.min(slot.end, dueMs)) {
-      return { start: new Date(start).toISOString(), end: new Date(end).toISOString(), kind: "free" };
+    const baseStart = Math.max(slot.start, input.earliestMs);
+    const slotLimit = Math.min(slot.end, dueMs);
+    if (baseStart + durationMs > slotLimit) continue;
+
+    let chosenStart = baseStart;
+    if (
+      input.confirmBufferNowMs != null
+      && Number.isFinite(input.confirmBufferNowMs)
+      && baseStart <= input.confirmBufferNowMs
+    ) {
+      const ceilMinute = Math.ceil(input.confirmBufferNowMs / 60_000) * 60_000;
+      const bufferedCandidates = [
+        ceilMinute + 5 * 60_000,
+        ceilMinute + 2 * 60_000,
+        ceilMinute + 1 * 60_000,
+        ceilMinute,
+      ];
+      for (const candidate of bufferedCandidates) {
+        if (candidate >= baseStart && candidate + durationMs <= slotLimit) {
+          chosenStart = candidate;
+          break;
+        }
+      }
     }
+
+    return {
+      start: new Date(chosenStart).toISOString(),
+      end: new Date(chosenStart + durationMs).toISOString(),
+      kind: "free",
+    };
   }
   return null;
 }

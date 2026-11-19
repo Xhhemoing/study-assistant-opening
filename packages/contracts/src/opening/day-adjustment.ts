@@ -6,6 +6,8 @@ export const DAY_EXCEPTION_STRATEGY_VERSION = "day-exception-v1" as const;
 export const DAY_ADJUSTMENT_STRATEGY_VERSION = "day-adjustment-v1" as const;
 export const DAY_EXCEPTION_SNAPSHOT_KIND = "day_exception_v1" as const;
 export const DAY_ADJUSTMENT_SNAPSHOT_KIND = "day_adjustment_v1" as const;
+export const DAY_EXCEPTION_PROPOSE_KEY_PREFIX = "day-exception:" as const;
+export const DAY_ADJUSTMENT_PROPOSE_KEY_PREFIX = "day-adjustment:" as const;
 
 export const dayAdjustmentTimeZoneSchema = z.string().trim().min(1).max(80);
 export const dayAdjustmentClientKeySchema = z.string().min(8).max(200);
@@ -14,6 +16,7 @@ export const dayAdjustmentClientKeySchema = z.string().min(8).max(200);
 export const dayExceptionSnapshotSchema = z
   .object({
     kind: z.literal(DAY_EXCEPTION_SNAPSHOT_KIND),
+    clientKey: uuidSchema,
     localDate: calendarDateSchema,
     timeZone: dayAdjustmentTimeZoneSchema,
     effectiveAt: isoDateTimeSchema,

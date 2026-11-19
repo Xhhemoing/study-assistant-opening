@@ -105,7 +105,6 @@ export function calculateDayExceptionUsageBounds(
   const intervals = new Map<string, Array<[number, number]>>();
   for (const block of blocks) {
     const taskId = String(block.taskId);
-    if (exclude.has(taskId)) continue;
     const start = Math.max(at(block.start), dayStart.getTime());
     const end = Math.min(at(block.end), nextDayStart.getTime());
     if (!Number.isFinite(start) || !Number.isFinite(end)) throw conflict("已接受安排的日期无法确认，请先核对今日安排。");
@@ -132,7 +131,6 @@ export function calculateDayExceptionUsageBounds(
   for (const task of tasks) {
     if (task.status === "skipped") continue;
     const taskId = String(task.id);
-    if (exclude.has(taskId)) continue;
     const key = `task:${taskId}`;
     const scheduled = blockStats.get(taskId);
     const protocol = object(task.learning_protocol);
@@ -144,6 +142,7 @@ export function calculateDayExceptionUsageBounds(
       charge(key, total, scheduled.after, scheduled.after + extra);
       continue;
     }
+    if (exclude.has(taskId)) continue;
     if (task.status === "done") {
       const updatedMs = at(task.updated_at);
       const createdMs = at(task.created_at);
@@ -179,6 +178,8 @@ export function calculateDayExceptionUsageBounds(
           charge(key, minutes, 0, minutes);
         }
       }
+    } else if (inDay(task.due_at)) {
+      charge(key, duration(task.minutes), 0, 0);
     }
   }
 
@@ -203,7 +204,7 @@ export function calculateDayExceptionUsageBounds(
     const linkedTask = intent.taskId ?? (spanLesson.retestId
       ? tasks.find(task => task.retest_id === spanLesson.retestId || task.candidate_id === spanLesson.retestId || task.candidate_reference_id === spanLesson.retestId)?.id
       : undefined);
-    if (linkedTask && exclude.has(String(linkedTask))) continue;
+    if (linkedTask && !blockStats.has(String(linkedTask)) && exclude.has(String(linkedTask))) continue;
     const minutes = stored.success
       ? stored.data.minutes
       : object(intent.intent).timeBudgetMinutes ?? goal.sessionMinutes ?? tasks.find(task => task.id === linkedTask)?.minutes;
@@ -253,11 +254,13 @@ export function evaluateDayPlanCapacity(input: {
   const { dayStart, nextDayStart } = resolveLocalDayBounds(input.day.localDate, input.day.timeZone);
   const effectiveAtIso = input.dayException ? input.dayException.effectiveAt : dayStart.toISOString();
   const effectiveAtMs = Date.parse(effectiveAtIso);
-  const exclude = input.excludeTaskIds ?? new Set<string>();
+  const afterBlockTaskIds = new Set(input.afterBlocks.map((block) => block.taskId));
+  const exclude = new Set(
+    [...(input.excludeTaskIds ?? [])].filter((taskId) => !afterBlockTaskIds.has(taskId)),
+  );
 
   const postRanges: Array<[number, number]> = [];
   for (const block of input.afterBlocks) {
-    if (exclude.has(block.taskId)) continue;
     const start = Math.max(Date.parse(block.start), effectiveAtMs, dayStart.getTime());
     const end = Math.min(Date.parse(block.end), nextDayStart.getTime());
     if (Number.isFinite(start) && Number.isFinite(end) && end > start) {

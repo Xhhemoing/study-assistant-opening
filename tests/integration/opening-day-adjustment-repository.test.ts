@@ -35,19 +35,17 @@ beforeEach(async () => {
   await f.sql`DELETE FROM opening_workspace_history_revisions WHERE workspace_id = ${f.scope.workspaceId}`;
 
   const settingsRepo = createOpeningPlanningSettingsRepository(f.sql);
-  await settingsRepo.save(f.scope, {
-    termStartDate: "2026-09-01",
+  await settingsRepo.set(f.scope, {
+    weekOneMonday: "2026-09-07",
+    periodTimes: {
+      "1": { start: "08:00", end: "08:45" },
+      "2": { start: "08:55", end: "09:40" },
+    },
+    dailyWindow: { start: "07:30", end: "22:30" },
+    lunch: { start: "12:00", end: "12:45" },
+    dinner: { start: "18:00", end: "18:45" },
+    sleep: { start: "23:00", end: "07:00" },
     timeZone: TIME_ZONE,
-    sleepStart: "23:00",
-    sleepEnd: "07:00",
-    meals: [
-      { label: "午饭", start: "12:00", end: "12:45" },
-      { label: "晚饭", start: "18:00", end: "18:45" },
-    ],
-    periodTimes: [
-      { period: 1, start: "08:00", end: "08:45" },
-      { period: 2, start: "08:55", end: "09:40" },
-    ],
   });
   await f.sql`
     UPDATE workspace_preferences
@@ -118,8 +116,9 @@ describe("opening-day-adjustment repository (kernel-v2 Phase 2)", () => {
       expectedExceptionRevision: 0,
       remainingMinutes: 15,
     });
+    expect(exc.id).toMatch(/^[0-9a-f-]{36}$/i);
+    expect(exc.id).not.toBe(declareKey);
     expect(exc).toMatchObject({
-      id: declareKey,
       localDate: THU,
       timeZone: TIME_ZONE,
       remainingMinutes: 15,
@@ -209,6 +208,7 @@ describe("opening-day-adjustment repository (kernel-v2 Phase 2)", () => {
       remainingMinutes: 15,
     });
     expect(replayedExc.replayed).toBe(true);
+    expect(replayedExc.id).toBe(exc.id);
     await expect(
       afterMidnightRepo.declareToday(f.scope, {
         clientKey: declareKey,
@@ -618,5 +618,150 @@ describe("opening-day-adjustment repository (kernel-v2 Phase 2)", () => {
     const rejected = results.filter((r) => r.status === "rejected");
     expect(fulfilled).toHaveLength(1);
     expect(rejected).toHaveLength(1);
+  });
+
+  it("isolates same clientKey across workspaces, confirms quick-slot 30s after preview, and charges target-day unscheduled due tasks", async () => {
+    // 1. Cross-workspace clientKey isolation
+    const otherFixture = await createOpeningFixture();
+    try {
+      await createOpeningPlanningSettingsRepository(f.sql).set(otherFixture.scope, {
+        weekOneMonday: "2026-09-07",
+        periodTimes: { "1": { start: "08:00", end: "08:45" } },
+        dailyWindow: { start: "07:30", end: "22:30" },
+        lunch: { start: "12:00", end: "12:45" },
+        dinner: { start: "18:00", end: "18:45" },
+        sleep: { start: "23:00", end: "07:00" },
+        timeZone: TIME_ZONE,
+      });
+      const repo = createOpeningDayAdjustmentRepository(f.sql, { clock: () => THU_1855 });
+      const sharedKey = randomUUID();
+      const excA = await repo.declareToday(f.scope, {
+        clientKey: sharedKey,
+        localDate: THU,
+        expectedTimeZone: TIME_ZONE,
+        expectedExceptionRevision: 0,
+        remainingMinutes: 15,
+      });
+      const excB = await repo.declareToday(otherFixture.scope, {
+        clientKey: sharedKey,
+        localDate: THU,
+        expectedTimeZone: TIME_ZONE,
+        expectedExceptionRevision: 0,
+        remainingMinutes: 30,
+      });
+      expect(excA.id).not.toBe(excB.id);
+      expect(excB.remainingMinutes).toBe(30);
+    } finally {
+      await otherFixture.close();
+    }
+
+    // 2. Preview inside in-progress gap (18:55) -> advance clock +30s -> manual confirm succeeds
+    const plans = createOpeningPlansRepository(f.sql, { now: () => THU_1855 });
+    const quick = await plans.createTask(f.scope, {
+      title: "速记卡片",
+      minutes: 15,
+      priority: 1,
+      dueAt: null,
+      candidateId: null,
+    });
+    let currentClock = new Date("2026-11-19T10:55:20.000Z"); // 18:55:20 Asia/Shanghai (inside free gap)
+    const liveRepo = createOpeningDayAdjustmentRepository(f.sql, { clock: () => currentClock });
+    const quickPreview = await liveRepo.preview(f.scope, {
+      date: THU,
+      quickTaskId: quick.id,
+    });
+    expect(quickPreview.status).toBe("ready");
+    expect(quickPreview.sourceAddedBlocks).toHaveLength(1);
+    currentClock = new Date(currentClock.getTime() + 30_000);
+    const quickReceipt = await liveRepo.confirm(f.scope, {
+      clientKey: `day-adjust:buffered:${randomUUID()}`,
+      sourceDate: THU,
+      expectedTimeZone: TIME_ZONE,
+      expectedExceptionRevision: quickPreview.exceptionRevision,
+      expectedBudgetRevision: quickPreview.budgetRevision,
+      expectedSourceAcceptedVersion: quickPreview.sourceAcceptedVersion,
+      expectedTaskRevisions: quickPreview.taskRevisions,
+      expectedRetestRevisions: quickPreview.retestRevisions,
+      sourceActions: {
+        keptBlocks: quickPreview.keptBlocks,
+        removedBlocks: quickPreview.removedBlocks,
+        addedBlocks: quickPreview.sourceAddedBlocks,
+      },
+      targetActions: null,
+    });
+    expect(quickReceipt.sourceBlocks.map((b) => b.taskId)).toEqual([quick.id]);
+
+    // 3. Target day with unscheduled pending task due on Fri charges shared budget (rejects overflow)
+    await f.sql`
+      UPDATE workspace_preferences
+      SET learning_management = ${f.sql.json({
+        dailyMinutes: 45,
+        bufferMinutes: 15,
+        revision: 2,
+        updatedAt: currentClock.toISOString(),
+      })}
+      WHERE workspace_id = ${f.scope.workspaceId}`;
+    const math = await plans.createTask(f.scope, {
+      title: "微积分练习",
+      minutes: 25,
+      priority: 1,
+      dueAt: null,
+      candidateId: null,
+    });
+    await plans.createTask(f.scope, {
+      title: "周五到期作业",
+      minutes: 25,
+      priority: 2,
+      dueAt: "2026-11-20T13:00:00.000Z", // unscheduled, due on Fri
+      candidateId: null,
+    });
+    await seedAcceptedPlan(
+      THU,
+      [
+        {
+          taskId: math.id,
+          start: "2026-11-19T12:00:00.000Z",
+          end: "2026-11-19T12:25:00.000Z",
+          reason: "planned",
+        },
+      ],
+      3,
+    );
+    await expect(
+      liveRepo.confirm(f.scope, {
+        clientKey: `day-adjust:target-due-budget:${randomUUID()}`,
+        sourceDate: THU,
+        expectedTimeZone: TIME_ZONE,
+        expectedExceptionRevision: 1,
+        expectedBudgetRevision: 2,
+        expectedSourceAcceptedVersion: 3,
+        expectedTargetAcceptedVersion: 0,
+        expectedTaskRevisions: [{ taskId: math.id, version: math.version }],
+        expectedRetestRevisions: [],
+        sourceActions: {
+          keptBlocks: [],
+          removedBlocks: [
+            {
+              taskId: math.id,
+              start: "2026-11-19T12:00:00.000Z",
+              end: "2026-11-19T12:25:00.000Z",
+              reason: "planned",
+            },
+          ],
+          addedBlocks: [],
+        },
+        targetActions: {
+          targetDate: FRI,
+          addedBlocks: [
+            {
+              taskId: math.id,
+              start: "2026-11-20T11:15:00.000Z",
+              end: "2026-11-20T11:40:00.000Z",
+              reason: "planned",
+            },
+          ],
+        },
+      }),
+    ).rejects.toMatchObject({ code: "CONFLICT", reason: "stale_version" });
   });
 });

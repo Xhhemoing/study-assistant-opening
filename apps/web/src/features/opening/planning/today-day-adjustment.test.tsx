@@ -283,7 +283,7 @@ describe("TodayDayAdjustment", () => {
     expect(host.textContent).toContain("调整已确认");
   });
 
-  it("shows usage_uncertain state while preserving declared minutes and disables confirm", async () => {
+  it("shows usage_uncertain state without claiming capacity fits and disables confirm", async () => {
     const uncertainPreview = makePreview({
       status: "usage_uncertain",
       dayException: {
@@ -297,6 +297,32 @@ describe("TodayDayAdjustment", () => {
         replayed: false,
       },
       exceptionRevision: 1,
+      capacityBefore: {
+        dailyMinutes: 90,
+        bufferMinutes: 15,
+        dayUsedMinutes: 20,
+        exceptionRemainingMinutes: 15,
+        afterLowerMinutes: 5,
+        afterUpperMinutes: 15,
+        availableLowerMinutes: 0,
+        availableUpperMinutes: 10,
+        requiredMinutes: 10,
+        shortfallMinutes: 0,
+        usageUncertain: true,
+      },
+      capacityAfter: {
+        dailyMinutes: 90,
+        bufferMinutes: 15,
+        dayUsedMinutes: 20,
+        exceptionRemainingMinutes: 15,
+        afterLowerMinutes: 5,
+        afterUpperMinutes: 15,
+        availableLowerMinutes: 0,
+        availableUpperMinutes: 10,
+        requiredMinutes: 10,
+        shortfallMinutes: 0,
+        usageUncertain: true,
+      },
       canConfirm: false,
     });
     const client: DayAdjustmentClient = {
@@ -313,10 +339,14 @@ describe("TodayDayAdjustment", () => {
     });
 
     expect(host.querySelector('[data-testid="day-adjustment-uncertain"]')).toBeTruthy();
+    const capacityText = host.querySelector('[data-testid="day-adjustment-capacity"]')?.textContent ?? "";
+    expect(capacityText).toContain("剩余时长待核对");
+    expect(capacityText).not.toContain("可容纳");
     expect(findButton("确认这次调整").disabled).toBe(true);
   });
 
-  it("preserves same clientKey for retry after transient error and refreshes on 409 conflict", async () => {
+  it("disables main confirm while pending after transient error, preserves 409 error on refresh, and resets stale quick selection", async () => {
+    const quickId = "88888888-8888-4888-8888-888888888888";
     const readyPreview = makePreview({
       status: "ready",
       dayException: {
@@ -335,6 +365,22 @@ describe("TodayDayAdjustment", () => {
       removedBlocks: [mathBefore],
       targetAfterBlocks: [mathFriday],
       targetAddedBlocks: [mathFriday],
+      quickCandidates: [
+        {
+          taskId: quickId,
+          title: "短时背词",
+          minutes: 10,
+          version: 1,
+          fits: true,
+          shortfallMinutes: 0,
+          reason: "可完整放入今日空档",
+          suggestedSlot: {
+            start: "2026-11-19T11:20:00.000Z",
+            end: "2026-11-19T11:30:00.000Z",
+            kind: "free",
+          },
+        },
+      ],
       canConfirm: true,
     });
 
@@ -354,18 +400,65 @@ describe("TodayDayAdjustment", () => {
       );
     });
 
+    // Select a quick candidate first so we can verify 409 resets selectedQuickTaskId.
+    await act(async () => {
+      findButton("补入今日空档").click();
+    });
+    expect(findButton("取消补入")).toBeTruthy();
+
     await act(async () => {
       findButton("确认这次调整").click();
     });
     const firstInput = vi.mocked(client.confirm).mock.calls[0]?.[0];
     expect(firstInput).toBeTruthy();
+    // Main confirm button MUST be disabled while pending retry is active so a new clientKey cannot be minted.
+    expect(findButton("确认这次调整").disabled).toBe(true);
+    await act(async () => {
+      findButton("确认这次调整").click();
+    });
+    expect(client.confirm).toHaveBeenCalledTimes(1);
 
     await act(async () => {
       findButton("重试这次确认").click();
     });
     const secondInput = vi.mocked(client.confirm).mock.calls[1]?.[0];
     expect(secondInput?.clientKey).toBe(firstInput?.clientKey);
-    // After 409 conflict, preview refreshes automatically.
+    // After 409 conflict, preview refreshes automatically, error message is preserved, and selection resets.
     expect(client.getPreview).toHaveBeenCalledTimes(2);
+    expect(host.querySelector('[role="alert"]')?.textContent).toContain("计划已更新");
+    expect(findButton("补入今日空档")).toBeTruthy();
+  });
+
+  it("keeps details panel expanded when user opens it and edits remaining minutes without active dayException", async () => {
+    const client: DayAdjustmentClient = {
+      getPreview: vi.fn(async () => makePreview()),
+      declareToday: vi.fn(),
+      preview: vi.fn(async () => makePreview()),
+      confirm: vi.fn(),
+    };
+
+    await act(async () => {
+      root.render(
+        <TodayDayAdjustment date={DATE} timeZone={TIME_ZONE} client={client} defaultOpen={false} />,
+      );
+    });
+
+    const details = host.querySelector('[data-testid="today-day-adjustment"]') as HTMLDetailsElement;
+    expect(details.open).toBe(false);
+
+    await act(async () => {
+      details.open = true;
+      details.dispatchEvent(new Event("toggle"));
+    });
+    expect(details.open).toBe(true);
+
+    const input = host.querySelector('input[aria-label="今天剩余可用分钟"]') as HTMLInputElement;
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+    await act(async () => {
+      setter?.call(input, "25");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(input.value).toBe("25");
+    expect(details.open).toBe(true);
   });
 });

@@ -182,6 +182,7 @@ export function TodayDayAdjustment({
   defaultOpen?: boolean;
 }) {
   const client = useMemo(() => suppliedClient ?? createDayAdjustmentClient(), [suppliedClient]);
+  const [isOpen, setIsOpen] = useState(defaultOpen);
   const [preview, setPreview] = useState<DayAdjustmentPreview | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -194,15 +195,21 @@ export function TodayDayAdjustment({
   const [notice, setNotice] = useState("");
   const inFlight = useRef(false);
 
+  const hasDayException = Boolean(preview?.dayException);
+  useEffect(() => {
+    if (hasDayException) setIsOpen(true);
+  }, [hasDayException]);
+
   const loadPreview = useCallback(
     async (options?: {
       targetDate?: string;
       quickTaskId?: string | null;
       moveTaskIds?: string[];
       usePost?: boolean;
+      preserveError?: boolean;
     }) => {
       setLoading(true);
-      setError("");
+      if (!options?.preserveError) setError("");
       try {
         const params: DayAdjustmentPreviewInput = {
           date,
@@ -252,8 +259,10 @@ export function TodayDayAdjustment({
     } catch (reason) {
       if (reason instanceof DayAdjustmentRequestError && reason.status === 409) {
         setPending(null);
+        setSelectedQuickTaskId(null);
+        setSelectedMoveTaskIds(undefined);
         setError(userFacingMessage(reason, "今日安排刚刚发生变化，请刷新后再重新声明。"));
-        await loadPreview();
+        await loadPreview({ preserveError: true });
       } else if (reason instanceof DayAdjustmentRequestError && reason.status >= 400 && reason.status < 500) {
         setPending(null);
         setError(userFacingMessage(reason, "请检查今天剩余可用时长后再试。"));
@@ -319,8 +328,10 @@ export function TodayDayAdjustment({
     } catch (reason) {
       if (reason instanceof DayAdjustmentRequestError && reason.status === 409) {
         setPending(null);
+        setSelectedQuickTaskId(null);
+        setSelectedMoveTaskIds(undefined);
         setError(userFacingMessage(reason, "安排或任务状态刚刚发生变化，已为你刷新最新方案，请核对后再确认。"));
-        await loadPreview();
+        await loadPreview({ preserveError: true });
       } else if (reason instanceof DayAdjustmentRequestError && reason.status >= 400 && reason.status < 500) {
         setPending(null);
         setError(userFacingMessage(reason, "当前调整方案无法确认，请调整后再试。"));
@@ -334,7 +345,7 @@ export function TodayDayAdjustment({
   }
 
   function handleConfirmClick() {
-    if (busy || !preview || !preview.canConfirm || !preview.dayException) return;
+    if (busy || pending !== null || !preview || !preview.canConfirm || !preview.dayException) return;
     const hasTarget = Boolean(preview.targetDate && preview.targetAddedBlocks.length > 0);
     const input: DayAdjustmentConfirmInput = {
       clientKey: `day-adjust:${crypto.randomUUID()}`,
@@ -381,7 +392,8 @@ export function TodayDayAdjustment({
     <details
       className="mx-4 my-2 space-y-3 rounded-panel border border-line bg-surface px-4 py-3 sm:mx-5"
       data-testid="today-day-adjustment"
-      open={defaultOpen || Boolean(preview?.dayException)}
+      open={isOpen}
+      onToggle={(event) => setIsOpen(event.currentTarget.open)}
     >
       <summary className="cursor-pointer text-sm font-medium text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">
         {summaryText}
@@ -443,13 +455,17 @@ export function TodayDayAdjustment({
             <p className="text-xs leading-6 text-text-2" data-testid="day-adjustment-capacity">
               今日临时上限 {preview.dayException.remainingMinutes} 分钟 · 调整前需安排{" "}
               {preview.capacityBefore.requiredMinutes} 分钟
-              {preview.capacityBefore.shortfallMinutes > 0
-                ? `（超出 ${preview.capacityBefore.shortfallMinutes} 分钟）`
-                : ""}
+              {preview.capacityBefore.usageUncertain
+                ? "（剩余时长待核对）"
+                : preview.capacityBefore.shortfallMinutes > 0
+                  ? `（超出 ${preview.capacityBefore.shortfallMinutes} 分钟）`
+                  : ""}
               {" · "}调整后需安排 {preview.capacityAfter.requiredMinutes} 分钟
-              {preview.capacityAfter.shortfallMinutes > 0
-                ? `（仍缺 ${preview.capacityAfter.shortfallMinutes} 分钟）`
-                : "（可容纳）"}
+              {preview.capacityAfter.usageUncertain
+                ? "（剩余时长待核对）"
+                : preview.capacityAfter.shortfallMinutes > 0
+                  ? `（仍缺 ${preview.capacityAfter.shortfallMinutes} 分钟）`
+                  : "（可容纳）"}
             </p>
 
             {preview.status === "usage_uncertain" ? (
@@ -646,7 +662,7 @@ export function TodayDayAdjustment({
                 type="button"
                 className={buttonClass}
                 data-testid="day-adjustment-confirm-btn"
-                disabled={busy || !preview.canConfirm}
+                disabled={busy || pending !== null || !preview.canConfirm}
                 onClick={handleConfirmClick}
               >
                 {busy ? "正在确认…" : "确认这次调整"}
