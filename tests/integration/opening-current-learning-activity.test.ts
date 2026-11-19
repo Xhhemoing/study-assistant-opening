@@ -12,7 +12,13 @@ import {
   readOpeningLearningAgenda,
   readOpeningWorkspaceActivityRecovery,
 } from "@aistudy/database";
-import { taskItemSchema, teachingActivitySchema, teachingActivityCreateInputSchema, type TeachingActivity } from "@aistudy/contracts";
+import {
+  WRITING_META_PROPERTY_KEY,
+  taskItemSchema,
+  teachingActivitySchema,
+  teachingActivityCreateInputSchema,
+  type TeachingActivity,
+} from "@aistudy/contracts";
 import { DEFAULT_STUDY_SESSION_INTENT, SPAN_REQUIREMENT_KEY, SPAN_SKILL_LABEL } from "@aistudy/domain";
 import { createSpanLessonSessionService } from "../../apps/web/src/features/opening/teaching/span/lesson-session-service";
 import { openCourseStudy } from "../../apps/web/src/features/opening/courses/course-study-entry";
@@ -460,5 +466,116 @@ it("filters unreadable writing activities across explicit and implicit recovery,
   // Surviving A 稿 still opens via its own document entry
   const viewA = await writing.getView(f.scope, docA);
   expect(viewA?.currentDocumentId).toBe(docA);
+  expect(await readFootprint()).toEqual(before);
+});
+
+it("excludes malformed writing checkpoints and partial manuscript metadata across get, listByOwner, and current/Today recovery while keeping ordinary writing-workgroup clientKey activities readable", async () => {
+  const writing = createOpeningWritingWorkspaceRepository(f.sql);
+  const teaching = createOpeningTeachingActivitiesRepository(f.sql);
+
+  // GPT #2: Ordinary teaching activity created with clientKey = "writing-workgroup:..." (non-writing protocol, no writingWorkspace checkpoint)
+  const ordinaryPrefixed = await teaching.create(f.scope, {
+    clientKey: `writing-workgroup:${randomUUID()}`,
+    courseId,
+    intentKind: "topic",
+    intentSummary: "普通主题学习（携带 writing-workgroup 前缀键）",
+    createIntent: { intentKind: "topic" },
+  });
+  await f.sql`UPDATE opening_teaching_activities SET updated_at = '2026-11-01T00:00:00Z' WHERE id = ${ordinaryPrefixed.id}`;
+
+  // GPT #1(a): Writing activity whose checkpoint retains valid activeDocumentId & matching workGroupId, but omits savedRevisionNumber
+  const missingRevWorkspace = await writing.start(f.scope, {
+    clientKey: `writing-malformed-ckpt-${randomUUID()}`,
+    title: "缺版本号的写作活动",
+    initialText: "第一段内容。",
+    variantLabel: "初稿",
+    courseId,
+  });
+  const missingRevActivityId = missingRevWorkspace.activityId!;
+  await f.sql`
+    UPDATE opening_teaching_activities
+    SET checkpoint_json = jsonb_set(
+          checkpoint_json,
+          '{writingWorkspace}',
+          (checkpoint_json->'writingWorkspace') - 'savedRevisionNumber'
+        ),
+        updated_at = '2026-11-06T00:00:00Z'
+    WHERE id = ${missingRevActivityId}
+  `;
+
+  // GPT #1(b): Writing activity with a valid checkpoint, but manuscript metadata in library_properties retains only { workGroupId }
+  const partialMetaWorkspace = await writing.start(f.scope, {
+    clientKey: `writing-malformed-meta-${randomUUID()}`,
+    title: "残缺元数据的写作活动",
+    initialText: "第二篇初稿。",
+    variantLabel: "初稿",
+    courseId,
+  });
+  const partialMetaActivityId = partialMetaWorkspace.activityId!;
+  const partialMetaDocId = partialMetaWorkspace.currentDocumentId;
+  await f.sql`
+    UPDATE library_properties
+    SET value = ${f.sql.json({ workGroupId: partialMetaWorkspace.workGroupId })}
+    WHERE workspace_id = ${f.scope.workspaceId}
+      AND document_id = ${partialMetaDocId}
+      AND key = ${WRITING_META_PROPERTY_KEY}
+  `;
+  await f.sql`
+    UPDATE opening_teaching_activities
+    SET updated_at = '2026-11-05T00:00:00Z'
+    WHERE id = ${partialMetaActivityId}
+  `;
+
+  const before = await readFootprint();
+
+  // Explicit lookups reject both malformed writing rows
+  for (const malformedId of [missingRevActivityId, partialMetaActivityId]) {
+    expect(await teaching.get(f.scope, malformedId)).toBeNull();
+    await expect(teaching.assertOwnedActivity(f.scope, malformedId)).rejects.toMatchObject({
+      code: "NOT_FOUND",
+    });
+    expect(
+      await readOpeningCurrentLearningActivity(f.sql, f.scope, courseId, { activityId: malformedId }),
+    ).toBeNull();
+    expect(
+      await readOpeningWorkspaceActivityRecovery(f.sql, f.scope, { activityId: malformedId }),
+    ).toBeNull();
+  }
+
+  // Ordinary activity carrying clientKey = "writing-workgroup:..." remains normally readable across get, listByOwner, and current/Today recovery
+  const fetchedOrdinary = await teaching.get(f.scope, ordinaryPrefixed.id);
+  expect(fetchedOrdinary?.id).toBe(ordinaryPrefixed.id);
+  expect(fetchedOrdinary?.clientKey).toBe(ordinaryPrefixed.clientKey);
+
+  const listed = (await teaching.listByOwner(f.scope)).map(row => teachingActivitySchema.parse(row));
+  expect(listed.map(row => row.id)).toEqual([ordinaryPrefixed.id]);
+  expect(currentCourseActivity(listed, courseId)?.id).toBe(ordinaryPrefixed.id);
+  expect(pickCurrentTeachingActivity(listed)?.id).toBe(ordinaryPrefixed.id);
+
+  // Implicit candidate selection skips both newer malformed writing activities and falls back to ordinaryPrefixed
+  expect(await readOpeningCurrentLearningActivity(f.sql, f.scope, courseId)).toEqual({
+    activityId: ordinaryPrefixed.id,
+    sessionId: null,
+    courseId,
+  });
+  expect(
+    await readOpeningCurrentLearningActivity(f.sql, f.scope, courseId, { activityId: ordinaryPrefixed.id }),
+  ).toEqual({
+    activityId: ordinaryPrefixed.id,
+    sessionId: null,
+    courseId,
+  });
+  expect(await readOpeningCurrentLearningRecovery(f.sql, f.scope)).toEqual({
+    activityId: ordinaryPrefixed.id,
+    sessionId: null,
+    courseId,
+  });
+  expect(await readOpeningWorkspaceActivityRecovery(f.sql, f.scope)).toEqual({
+    kind: "course",
+    activityId: ordinaryPrefixed.id,
+    sessionId: null,
+    courseId,
+  });
+
   expect(await readFootprint()).toEqual(before);
 });

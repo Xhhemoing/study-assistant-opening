@@ -47,21 +47,24 @@ function asObject(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
+function normalizeUuid(value: string): string {
+  return value.toLowerCase();
+}
+
 /**
  * Parse and cross-validate `create_intent` and `checkpoint_json.writingWorkspace`
- * for an activity row. Any row carrying a writing marker with missing or
- * mismatched protocol/workGroup identity is classified as `invalid_writing`.
+ * for an activity row. Writing identity is determined strictly by persisted
+ * protocol (`writing-workspace-v1`) or persisted `checkpoint_json.writingWorkspace`
+ * — never by optional client-supplied `client_key` prefixes.
  */
 export function parseAuthorizedWritingActivityCheckpoint(row: {
   create_intent?: unknown;
   checkpoint_json?: unknown;
-  client_key?: unknown;
 }): ParsedWritingActivityRow {
   const intent = asObject(row.create_intent);
   const checkpointRoot = asObject(row.checkpoint_json);
   const hasWritingMarker =
     intent?.protocol === WRITING_WORKSPACE_PROTOCOL
-    || (typeof row.client_key === "string" && row.client_key.startsWith("writing-workgroup:"))
     || Boolean(checkpointRoot && "writingWorkspace" in checkpointRoot);
 
   if (!hasWritingMarker) {
@@ -79,22 +82,32 @@ export function parseAuthorizedWritingActivityCheckpoint(row: {
   if (
     !parsedGroup.success
     || !parsedCheckpoint.success
-    || parsedCheckpoint.data.workGroupId !== parsedGroup.data
+    || normalizeUuid(parsedCheckpoint.data.workGroupId) !== normalizeUuid(parsedGroup.data)
   ) {
     return { kind: "invalid_writing" };
   }
 
+  const workGroupId = normalizeUuid(parsedGroup.data);
   return {
     kind: "writing",
-    workGroupId: parsedGroup.data,
-    checkpoint: parsedCheckpoint.data,
+    workGroupId,
+    checkpoint: {
+      ...parsedCheckpoint.data,
+      workGroupId,
+      activeDocumentId: normalizeUuid(parsedCheckpoint.data.activeDocumentId),
+    },
   };
 }
 
 /**
  * Single-statement SQL predicate verifying that if an `opening_teaching_activities`
- * row is a writing workspace activity, its checkpoint target document is owned,
+ * row carries a writing protocol or `writingWorkspace` checkpoint marker, its
+ * checkpoint structure and target document metadata are well-formed, owned,
  * in-workspace, non-deleted, `openingNoteReadable`, and bound to the same workGroup.
+ *
+ * Note: provenance source readability uses `LEFT JOIN opening_sources` rather than
+ * nesting `openingNoteReadable(...)` so unit-test SQL mocks on `assertOwnedActivity`
+ * that forbid `FROM` queries against `opening_sources` remain compatible.
  */
 export function openingWritingActivityReadableSql(
   db: Db,
@@ -104,16 +117,38 @@ export function openingWritingActivityReadableSql(
   return db`(
     (
       ${activityAlias}.create_intent->>'protocol' IS DISTINCT FROM ${WRITING_WORKSPACE_PROTOCOL}
-      AND ${activityAlias}.client_key NOT LIKE 'writing-workgroup:%'
-      AND NOT (COALESCE(${activityAlias}.checkpoint_json, '{}'::jsonb) ? 'writingWorkspace')
+      AND NOT (
+        CASE
+          WHEN jsonb_typeof(COALESCE(${activityAlias}.checkpoint_json, '{}'::jsonb)) = 'object'
+            THEN (COALESCE(${activityAlias}.checkpoint_json, '{}'::jsonb) ? 'writingWorkspace')
+          ELSE false
+        END
+      )
     )
     OR (
       ${activityAlias}.workspace_id = ${scope.workspaceId}
       AND ${activityAlias}.owner_user_id = ${scope.ownerUserId}
+      AND jsonb_typeof(${activityAlias}.create_intent) = 'object'
       AND ${activityAlias}.create_intent->>'protocol' = ${WRITING_WORKSPACE_PROTOCOL}
+      AND ${activityAlias}.create_intent->>'workGroupId' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+      AND jsonb_typeof(${activityAlias}.checkpoint_json) = 'object'
+      AND jsonb_typeof(${activityAlias}.checkpoint_json->'writingWorkspace') = 'object'
       AND ${activityAlias}.checkpoint_json->'writingWorkspace'->>'protocol' = ${WRITING_WORKSPACE_PROTOCOL}
-      AND ${activityAlias}.create_intent->>'workGroupId' IS NOT NULL
-      AND ${activityAlias}.checkpoint_json->'writingWorkspace'->>'workGroupId' = ${activityAlias}.create_intent->>'workGroupId'
+      AND lower(${activityAlias}.checkpoint_json->'writingWorkspace'->>'workGroupId') = lower(${activityAlias}.create_intent->>'workGroupId')
+      AND ${activityAlias}.checkpoint_json->'writingWorkspace'->>'activeDocumentId' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+      AND jsonb_typeof(${activityAlias}.checkpoint_json->'writingWorkspace'->'activeVariantLabel') = 'string'
+      AND char_length(btrim(${activityAlias}.checkpoint_json->'writingWorkspace'->>'activeVariantLabel')) BETWEEN 1 AND 80
+      AND jsonb_typeof(${activityAlias}.checkpoint_json->'writingWorkspace'->'savedRevisionNumber') = 'number'
+      AND (${activityAlias}.checkpoint_json->'writingWorkspace'->>'savedRevisionNumber') ~ '^(0|[1-9][0-9]*)$'
+      AND (${activityAlias}.checkpoint_json->'writingWorkspace' ? 'focusBlockId')
+      AND (
+        jsonb_typeof(${activityAlias}.checkpoint_json->'writingWorkspace'->'focusBlockId') = 'null'
+        OR (
+          jsonb_typeof(${activityAlias}.checkpoint_json->'writingWorkspace'->'focusBlockId') = 'string'
+          AND char_length(${activityAlias}.checkpoint_json->'writingWorkspace'->>'focusBlockId') BETWEEN 1 AND 120
+        )
+      )
+      AND jsonb_typeof(${activityAlias}.checkpoint_json->'writingWorkspace'->'updatedAt') = 'string'
       AND EXISTS (
         SELECT 1
         FROM library_documents wd
@@ -126,7 +161,7 @@ export function openingWritingActivityReadableSql(
          AND wp.subject_id = wd.id
          AND wp.key = ${WRITING_META_PROPERTY_KEY}
         WHERE wd.workspace_id = ${scope.workspaceId}
-          AND wd.id::text = ${activityAlias}.checkpoint_json->'writingWorkspace'->>'activeDocumentId'
+          AND wd.id::text = lower(${activityAlias}.checkpoint_json->'writingWorkspace'->>'activeDocumentId')
           AND wd.deleted_at IS NULL
           AND NOT EXISTS (
             SELECT 1
@@ -155,7 +190,39 @@ export function openingWritingActivityReadableSql(
                 )
               )
           )
-          AND wp.value->>'workGroupId' = ${activityAlias}.create_intent->>'workGroupId'
+          AND jsonb_typeof(wp.value) = 'object'
+          AND lower(wp.value->>'workGroupId') = lower(${activityAlias}.create_intent->>'workGroupId')
+          AND jsonb_typeof(wp.value->'variantLabel') = 'string'
+          AND char_length(btrim(wp.value->>'variantLabel')) BETWEEN 1 AND 80
+          AND (wp.value ? 'parentDocumentId')
+          AND (
+            jsonb_typeof(wp.value->'parentDocumentId') = 'null'
+            OR wp.value->>'parentDocumentId' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+          )
+          AND (wp.value ? 'parentRevisionNumber')
+          AND (
+            jsonb_typeof(wp.value->'parentRevisionNumber') = 'null'
+            OR (
+              jsonb_typeof(wp.value->'parentRevisionNumber') = 'number'
+              AND (wp.value->>'parentRevisionNumber') ~ '^(0|[1-9][0-9]*)$'
+            )
+          )
+          AND jsonb_typeof(wp.value->'keptAsPreferred') = 'boolean'
+          AND (wp.value ? 'focusBlockId')
+          AND (
+            jsonb_typeof(wp.value->'focusBlockId') = 'null'
+            OR (
+              jsonb_typeof(wp.value->'focusBlockId') = 'string'
+              AND char_length(wp.value->>'focusBlockId') BETWEEN 1 AND 120
+            )
+          )
+          AND jsonb_typeof(wp.value->'assistanceRecords') = 'array'
+          AND jsonb_array_length(
+            CASE
+              WHEN jsonb_typeof(wp.value->'assistanceRecords') = 'array' THEN wp.value->'assistanceRecords'
+              ELSE '[]'::jsonb
+            END
+          ) <= 100
       )
     )
   )`;
@@ -176,6 +243,7 @@ export async function readAuthorizedWritingDocument(
     forShare?: boolean;
   },
 ): Promise<AuthorizedWritingDocumentRead> {
+  const normalizedDocId = normalizeUuid(options.documentId);
   const focusCandidate = options.focusBlockId ?? null;
   const rows = await db`
     SELECT
@@ -188,7 +256,7 @@ export async function readAuthorizedWritingDocument(
         SELECT 1 FROM library_blocks b
         WHERE b.workspace_id = d.workspace_id
           AND b.document_id = d.id
-          AND b.id::text = ${focusCandidate ?? ""}
+          AND b.id::text = lower(${focusCandidate ?? ""})
       ) AS focus_exists
     FROM library_documents d
     JOIN workspaces w
@@ -199,7 +267,7 @@ export async function readAuthorizedWritingDocument(
      AND p.subject_type = 'document'
      AND p.subject_id = d.id
      AND p.key = ${WRITING_META_PROPERTY_KEY}
-    WHERE d.id = ${options.documentId}
+    WHERE d.id = ${normalizedDocId}
       AND d.workspace_id = ${scope.workspaceId}
       AND d.deleted_at IS NULL
       AND ${openingNoteReadable(db, scope.workspaceId, db`d.id`)}
@@ -211,12 +279,13 @@ export async function readAuthorizedWritingDocument(
     return { status: "not_found" };
   }
 
+  const canonicalDocumentId = normalizeUuid(String(row.id));
   const hasMeta = row.has_meta !== undefined ? Boolean(row.has_meta) : row.meta !== undefined && row.meta !== null;
   if (!hasMeta) {
     if (options.expectedWorkGroupId != null) {
       return { status: "not_found" };
     }
-    return { status: "uninitialized", documentId: String(row.id) };
+    return { status: "uninitialized", documentId: canonicalDocumentId };
   }
 
   const parsedMeta = writingVariantMetaSchema.safeParse(row.meta);
@@ -225,7 +294,7 @@ export async function readAuthorizedWritingDocument(
   }
   if (
     options.expectedWorkGroupId != null
-    && parsedMeta.data.workGroupId !== options.expectedWorkGroupId
+    && normalizeUuid(parsedMeta.data.workGroupId) !== normalizeUuid(options.expectedWorkGroupId)
   ) {
     return { status: "not_found" };
   }
@@ -238,19 +307,56 @@ export async function readAuthorizedWritingDocument(
 
   return {
     status: "authorized",
-    documentId: String(row.id),
+    documentId: canonicalDocumentId,
     title: String(row.title ?? ""),
     currentRevisionNumber: Number(row.current_revision_number ?? 1),
-    meta: parsedMeta.data,
+    meta: {
+      ...parsedMeta.data,
+      workGroupId: normalizeUuid(parsedMeta.data.workGroupId),
+      parentDocumentId: parsedMeta.data.parentDocumentId == null
+        ? null
+        : normalizeUuid(parsedMeta.data.parentDocumentId),
+    },
     focusStatus,
   };
 }
 
 /**
+ * Read-layer authorization gate aligned 1:1 with workspace recovery:
+ * ordinary non-writing activities pass with zero extra queries; writing-marked
+ * activities must satisfy strict `parseAuthorizedWritingActivityCheckpoint` and
+ * `readAuthorizedWritingDocument` (`writingVariantMetaSchema` + provenance + non-deleted).
+ */
+export async function isAuthorizedWritingActivityRow(
+  db: Db,
+  scope: Scope,
+  row: {
+    create_intent?: unknown;
+    checkpoint_json?: unknown;
+  },
+  options?: { forShare?: boolean },
+): Promise<boolean> {
+  const parsed = parseAuthorizedWritingActivityCheckpoint(row);
+  if (parsed.kind === "not_writing") {
+    return true;
+  }
+  if (parsed.kind !== "writing") {
+    return false;
+  }
+  const target = await readAuthorizedWritingDocument(db, scope, {
+    documentId: parsed.checkpoint.activeDocumentId,
+    expectedWorkGroupId: parsed.workGroupId,
+    focusBlockId: parsed.checkpoint.focusBlockId,
+    forShare: options?.forShare,
+  });
+  return target.status === "authorized";
+}
+
+/**
  * Resolve the writing activity for a workGroup.
  * When `requestedActivityId` is explicitly supplied, missing, unowned, non-writing,
- * or cross-workGroup activities return `{ status: "not_found" }` instead of falling
- * back to a group-level view.
+ * malformed-checkpoint, or cross-workGroup activities return `{ status: "not_found" }`
+ * instead of falling back to a group-level view.
  */
 export async function readAuthorizedWritingActivityForGroup(
   db: Db,
@@ -258,38 +364,42 @@ export async function readAuthorizedWritingActivityForGroup(
   workGroupId: string,
   requestedActivityId?: string | null,
 ): Promise<AuthorizedWritingGroupActivityRead> {
+  const normalizedGroup = normalizeUuid(workGroupId);
   if (requestedActivityId != null) {
+    const normalizedActivityId = normalizeUuid(requestedActivityId);
     const rows = await db`
-      SELECT a.id, a.course_id, a.create_intent
+      SELECT a.id, a.course_id, a.create_intent, a.checkpoint_json
       FROM opening_teaching_activities a
       JOIN workspaces w
         ON w.id = a.workspace_id
        AND w.owner_user_id = ${scope.ownerUserId}
-      WHERE a.id = ${requestedActivityId}
+      WHERE a.id = ${normalizedActivityId}
         AND a.workspace_id = ${scope.workspaceId}
         AND a.owner_user_id = ${scope.ownerUserId}
       LIMIT 1
     `;
     const row = rows[0];
-    const intent = asObject(row?.create_intent);
+    if (!row) {
+      return { status: "not_found" };
+    }
+    const parsed = parseAuthorizedWritingActivityCheckpoint(row);
     if (
-      !row
-      || intent?.protocol !== WRITING_WORKSPACE_PROTOCOL
-      || intent?.workGroupId !== workGroupId
+      parsed.kind !== "writing"
+      || parsed.workGroupId !== normalizedGroup
     ) {
       return { status: "not_found" };
     }
     return {
       status: "found",
       activity: {
-        id: String(row.id),
-        courseId: row.course_id == null ? null : String(row.course_id),
+        id: normalizeUuid(String(row.id)),
+        courseId: row.course_id == null ? null : normalizeUuid(String(row.course_id)),
       },
     };
   }
 
   const rows = await db`
-    SELECT a.id, a.course_id
+    SELECT a.id, a.course_id, a.create_intent, a.checkpoint_json
     FROM opening_teaching_activities a
     JOIN workspaces w
       ON w.id = a.workspace_id
@@ -297,18 +407,20 @@ export async function readAuthorizedWritingActivityForGroup(
     WHERE a.workspace_id = ${scope.workspaceId}
       AND a.owner_user_id = ${scope.ownerUserId}
       AND a.create_intent->>'protocol' = ${WRITING_WORKSPACE_PROTOCOL}
-      AND a.create_intent->>'workGroupId' = ${workGroupId}
+      AND lower(a.create_intent->>'workGroupId') = ${normalizedGroup}
     ORDER BY a.updated_at DESC, a.id DESC
-    LIMIT 1
   `;
-  if (!rows.length) {
-    return { status: "found", activity: null };
+  for (const row of rows) {
+    const parsed = parseAuthorizedWritingActivityCheckpoint(row);
+    if (parsed.kind === "writing" && parsed.workGroupId === normalizedGroup) {
+      return {
+        status: "found",
+        activity: {
+          id: normalizeUuid(String(row.id)),
+          courseId: row.course_id == null ? null : normalizeUuid(String(row.course_id)),
+        },
+      };
+    }
   }
-  return {
-    status: "found",
-    activity: {
-      id: String(rows[0]!.id),
-      courseId: rows[0]!.course_id == null ? null : String(rows[0]!.course_id),
-    },
-  };
+  return { status: "found", activity: null };
 }

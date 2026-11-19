@@ -1,4 +1,5 @@
 import {
+  uuidSchema,
   type Scope,
   type WritingActivityCheckpoint,
 } from "@aistudy/contracts";
@@ -16,8 +17,23 @@ type Db = Sql | TransactionSql;
 export type OpeningCurrentLearningReference = { activityId?: string | null; sessionId?: string | null; taskId?: string | null };
 export type OpeningCurrentLearningActivity = { activityId: string; sessionId: string | null; courseId: string };
 type CandidateOptions = { recoveryOnly?: boolean; hasDecisionOnly?: boolean; spanOnly?: boolean; retestReferences?: string[] | null; references?: string[]; sessionId?: string | null };
-async function candidates(db: Db, scope: Scope, courseId: string | null, options: CandidateOptions = {}) {
-  const rows = await db`SELECT a.id,a.course_id,a.status,a.updated_at,a.content_version,a.intent_kind,a.create_intent,s.id AS session_id
+type CourseCandidateRow = {
+  id: string;
+  courseId: string;
+  status: string;
+  updatedAt: string;
+  sessionId: string | null;
+  placeholder: boolean;
+  writingCheckpoint: WritingActivityCheckpoint | null;
+};
+
+function normalizeReferenceId(value: string): string {
+  return uuidSchema.safeParse(value).success ? value.toLowerCase() : value;
+}
+
+async function candidates(db: Db, scope: Scope, courseId: string | null, options: CandidateOptions = {}): Promise<CourseCandidateRow[]> {
+  const normalizedRefs = options.references?.map(id => id.toLowerCase());
+  const rows = await db`SELECT a.id,a.course_id,a.status,a.updated_at,a.content_version,a.intent_kind,a.create_intent,a.checkpoint_json,s.id AS session_id
     FROM opening_teaching_activities a
     JOIN workspaces w ON w.id=a.workspace_id AND w.owner_user_id=a.owner_user_id
     JOIN courses c ON c.id=a.course_id AND c.workspace_id=a.workspace_id AND c.archived_at IS NULL
@@ -45,16 +61,57 @@ async function candidates(db: Db, scope: Scope, courseId: string | null, options
       AND ${options.hasDecisionOnly ? db`(a.create_intent->>'protocol'='span-lesson-v1' OR a.goal_json ? 'courseRoute')
         AND EXISTS (SELECT 1 FROM opening_learning_decisions d WHERE d.workspace_id=a.workspace_id
         AND d.owner_user_id=a.owner_user_id AND d.layer='activity' AND d.target_id=a.id)` : db`true`}
-      AND ${options.references?.length ? db`a.id::text=ANY(${options.references}::text[])` : db`true`}`;
+      AND ${normalizedRefs?.length ? db`lower(a.id::text)=ANY(${normalizedRefs}::text[])` : db`true`}`;
   return rows.map(row => {
     const span = row.create_intent?.protocol === "span-lesson-v1";
-    return { id: String(row.id), courseId: String(row.course_id), status: String(row.status),
-      updatedAt: new Date(row.updated_at).toISOString(), sessionId: row.session_id ? String(row.session_id) : null,
-      // Static lessons own persisted session content; zero compiled blocks alone
-      // does not make them legacy placeholders.
-      placeholder: span ? !row.session_id : row.intent_kind === "course_continue" && Number(row.content_version) === 0 };
+    const parsedWriting = parseAuthorizedWritingActivityCheckpoint(row);
+    // Static lessons own persisted session content; zero compiled blocks alone
+    // does not make them legacy placeholders. Malformed writing activities are
+    // treated as non-selectable so explicit refs fail closed and candidate loops skip.
+    const placeholder = parsedWriting.kind !== "not_writing"
+      ? parsedWriting.kind !== "writing"
+      : span
+        ? !row.session_id
+        : row.intent_kind === "course_continue" && Number(row.content_version) === 0;
+    return {
+      id: String(row.id),
+      courseId: String(row.course_id),
+      status: String(row.status),
+      updatedAt: new Date(row.updated_at).toISOString(),
+      sessionId: row.session_id ? String(row.session_id) : null,
+      placeholder,
+      writingCheckpoint: parsedWriting.kind === "writing" ? parsedWriting.checkpoint : null,
+    };
   });
 }
+
+async function selectAuthorizedCourseCandidate(
+  db: Db,
+  scope: Scope,
+  rows: readonly CourseCandidateRow[],
+  courseId: string,
+  references: readonly string[] = [],
+  sessionId?: string | null,
+): Promise<CourseCandidateRow | null> {
+  const hasExplicitRef = references.length > 0;
+  let remaining = [...rows];
+  while (remaining.length) {
+    const selected = selectCurrentLearningActivity(remaining, courseId, references);
+    if (!selected) return null;
+    if (sessionId != null && selected.sessionId !== sessionId) return null;
+    if (!selected.writingCheckpoint) return selected;
+    const target = await readAuthorizedWritingDocument(db, scope, {
+      documentId: selected.writingCheckpoint.activeDocumentId,
+      expectedWorkGroupId: selected.writingCheckpoint.workGroupId,
+      focusBlockId: selected.writingCheckpoint.focusBlockId,
+    });
+    if (target.status === "authorized") return selected;
+    if (hasExplicitRef) return null;
+    remaining = remaining.filter(row => row.id !== selected.id);
+  }
+  return null;
+}
+
 export type OpeningTaskTeachingBinding = { kind: "unbound" } | { kind: "unavailable"; reason: "conflicting_binding" | "unavailable_binding" }
   | { kind: "current" | "continuation"; activityId: string; courseId: string };
 /** Persisted edges, not timestamps or task-looking keys, define a single task lineage. */
@@ -127,7 +184,7 @@ export async function readOpeningCurrentLearningActivity(db: Db, scope: Scope, c
     retestReferences = [retests[0]!.id, retests[0]!.candidate_id, retests[0]!.candidate_reference_id]
       .filter((id): id is string => typeof id === "string").map(id => id.toLowerCase());
   }
-  if (reference.activityId != null) references.push(reference.activityId);
+  if (reference.activityId != null) references.push(normalizeReferenceId(reference.activityId));
   if (reference.sessionId != null) {
     const [session] = await db`SELECT s.activity_id FROM opening_learning_sessions s
       JOIN opening_teaching_activities a ON a.id=s.activity_id AND a.course_id=s.course_id
@@ -136,16 +193,28 @@ export async function readOpeningCurrentLearningActivity(db: Db, scope: Scope, c
       WHERE s.id::text=${reference.sessionId} AND s.workspace_id=${scope.workspaceId}
         AND s.owner_user_id=${scope.ownerUserId} AND s.course_id=${courseId}`;
     if (!session) return null;
-    references.push(String(session.activity_id));
+    references.push(normalizeReferenceId(String(session.activity_id)));
   }
   if (reference.taskId != null) {
     const binding = await readOpeningTaskTeachingBinding(db, scope, courseId, reference.taskId);
     if (binding.kind === "unavailable" || binding.kind === "continuation") return null;
-    if (binding.kind === "current") references.push(binding.activityId);
+    if (binding.kind === "current") references.push(normalizeReferenceId(binding.activityId));
   }
-  const selected = selectCurrentLearningActivity(await candidates(db, scope, courseId,
-    { ...options, retestReferences, references, sessionId: reference.sessionId }), courseId, references);
-  if (!selected || reference.sessionId != null && selected.sessionId !== reference.sessionId) return null;
+  const rows = await candidates(db, scope, courseId, {
+    ...options,
+    retestReferences,
+    references,
+    sessionId: reference.sessionId,
+  });
+  const selected = await selectAuthorizedCourseCandidate(
+    db,
+    scope,
+    rows,
+    courseId,
+    references,
+    reference.sessionId,
+  );
+  if (!selected) return null;
   return { activityId: selected.id, sessionId: selected.sessionId, courseId };
 }
 /** Cross-course management chooses among course-owned candidates with the same
@@ -153,10 +222,16 @@ export async function readOpeningCurrentLearningActivity(db: Db, scope: Scope, c
 export async function readOpeningCurrentLearningRecovery(db: Db, scope: Scope): Promise<OpeningCurrentLearningActivity | null> {
   // Prefer usable activities with live retest bindings; if none remain, retain
   // decision-bearing activities so readers can expose non-resumable agendas.
-  const selectRecovery = (rows: Awaited<ReturnType<typeof candidates>>) => [...new Set(rows.map(row => row.courseId))]
-    .flatMap(courseId => selectCurrentLearningActivity(rows, courseId) ?? []).sort(compareCurrentLearningActivities)[0];
-  const current = selectRecovery(await candidates(db, scope, null, { recoveryOnly: true }))
-    ?? selectRecovery(await candidates(db, scope, null, { hasDecisionOnly: true }));
+  const selectRecovery = async (rows: CourseCandidateRow[]) => {
+    const perCourse: CourseCandidateRow[] = [];
+    for (const cid of new Set(rows.map(row => row.courseId))) {
+      const candidate = await selectAuthorizedCourseCandidate(db, scope, rows, cid);
+      if (candidate) perCourse.push(candidate);
+    }
+    return perCourse.sort(compareCurrentLearningActivities)[0];
+  };
+  const current = (await selectRecovery(await candidates(db, scope, null, { recoveryOnly: true })))
+    ?? (await selectRecovery(await candidates(db, scope, null, { hasDecisionOnly: true })));
   return current ? { activityId: current.id, sessionId: current.sessionId, courseId: current.courseId } : null;
 }
 
@@ -195,7 +270,8 @@ async function workspaceCandidates(
   scope: Scope,
   options: { recoveryOnly?: boolean; references?: string[]; sessionId?: string | null } = {},
 ): Promise<WorkspaceCandidateRow[]> {
-  const rows = await db`SELECT a.id,a.course_id,a.status,a.updated_at,a.content_version,a.intent_kind,a.create_intent,a.checkpoint_json,a.client_key,
+  const normalizedRefs = options.references?.map(id => id.toLowerCase());
+  const rows = await db`SELECT a.id,a.course_id,a.status,a.updated_at,a.content_version,a.intent_kind,a.create_intent,a.checkpoint_json,
       s.id AS session_id, (c.id IS NOT NULL) AS course_present
     FROM opening_teaching_activities a
     JOIN workspaces w ON w.id=a.workspace_id AND w.owner_user_id=a.owner_user_id
@@ -219,7 +295,7 @@ async function workspaceCandidates(
             AND (rt.id IS NULL OR rt.status NOT IN ('done','skipped'))
             AND lower(COALESCE(a.checkpoint_json->'spanLesson'->>'retestId',a.goal_json->'courseRoute'->>'retestId'))
               =ANY(ARRAY[lower(r.id::text),lower(r.candidate_id::text),lower(r.candidate_reference_id::text)])))` : db`true`}
-      AND ${options.references?.length ? db`a.id::text=ANY(${options.references}::text[])` : db`true`}`;
+      AND ${normalizedRefs?.length ? db`lower(a.id::text)=ANY(${normalizedRefs}::text[])` : db`true`}`;
   return rows
     .filter(row => row.course_id == null || row.course_present !== false)
     .map(row => {
@@ -253,7 +329,7 @@ export async function readOpeningWorkspaceActivityRecovery(
   reference: OpeningCurrentLearningReference = {},
 ): Promise<OpeningWorkspaceActivityRecovery | null> {
   const references: string[] = [];
-  if (reference.activityId != null) references.push(reference.activityId);
+  if (reference.activityId != null) references.push(normalizeReferenceId(reference.activityId));
   if (reference.sessionId != null) {
     const [session] = await db`SELECT s.activity_id FROM opening_learning_sessions s
       JOIN opening_teaching_activities a ON a.id=s.activity_id AND a.course_id IS NOT DISTINCT FROM s.course_id
@@ -262,7 +338,7 @@ export async function readOpeningWorkspaceActivityRecovery(
       WHERE s.id::text=${reference.sessionId} AND s.workspace_id=${scope.workspaceId}
         AND s.owner_user_id=${scope.ownerUserId}`;
     if (!session) return null;
-    references.push(String(session.activity_id));
+    references.push(normalizeReferenceId(String(session.activity_id)));
   }
   if (reference.taskId != null) {
     const [task] = await db`SELECT course_id FROM opening_tasks
@@ -270,7 +346,7 @@ export async function readOpeningWorkspaceActivityRecovery(
     if (!task || task.course_id == null) return null;
     const binding = await readOpeningTaskTeachingBinding(db, scope, String(task.course_id), reference.taskId);
     if (binding.kind === "unavailable" || binding.kind === "continuation") return null;
-    if (binding.kind === "current") references.push(binding.activityId);
+    if (binding.kind === "current") references.push(normalizeReferenceId(binding.activityId));
   }
   const hasExplicitRef = references.length > 0;
   let remaining = await workspaceCandidates(db, scope, {

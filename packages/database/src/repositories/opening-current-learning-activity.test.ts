@@ -314,3 +314,90 @@ it("enforces writing target authorization and workGroup match across explicit an
     }),
   ).toBeNull();
 });
+
+it("skips malformed writing checkpoints and partial manuscript metadata in course/today selection while preserving ordinary writing-workgroup clientKey activities", async () => {
+  const workGroupId = "11111111-1111-4111-8111-111111111111";
+  const docPartial = "22222222-2222-4222-8222-222222222222";
+  const readableOrdinary = row("33333333-3333-4333-8333-333333333333", {
+    course_id: "course-1",
+    updated_at: "2026-11-18T09:00:00Z",
+    client_key: `writing-workgroup:${workGroupId}`,
+    create_intent: { intentKind: "topic" },
+    checkpoint_json: {},
+  });
+  const missingSavedRevisionRow = row("44444444-4444-4444-8444-444444444444", {
+    course_id: "course-1",
+    updated_at: "2026-11-18T12:00:00Z",
+    create_intent: { protocol: "writing-workspace-v1", workGroupId },
+    checkpoint_json: {
+      writingWorkspace: {
+        protocol: "writing-workspace-v1",
+        workGroupId,
+        activeDocumentId: docPartial,
+        activeVariantLabel: "初稿",
+        focusBlockId: null,
+        updatedAt: "2026-11-18T12:00:00.000Z",
+      },
+    },
+  });
+  const partialMetaWritingRow = row("55555555-5555-4555-8555-555555555555", {
+    course_id: "course-1",
+    updated_at: "2026-11-18T11:00:00Z",
+    create_intent: { protocol: "writing-workspace-v1", workGroupId },
+    checkpoint_json: {
+      writingWorkspace: {
+        protocol: "writing-workspace-v1",
+        workGroupId,
+        activeDocumentId: docPartial,
+        activeVariantLabel: "初稿",
+        savedRevisionNumber: 1,
+        focusBlockId: null,
+        updatedAt: "2026-11-18T11:00:00.000Z",
+      },
+    },
+  });
+  const partialMetaDocLookup = [{
+    id: docPartial,
+    title: "残缺元数据稿件",
+    current_revision_number: 1,
+    has_meta: true,
+    meta: { workGroupId },
+    focus_exists: false,
+  }];
+
+  // Explicit lookups on either malformed writing row fail closed with null
+  expect(
+    await readOpeningCurrentLearningActivity(db([missingSavedRevisionRow]), scope, "course-1", {
+      activityId: missingSavedRevisionRow.id,
+    }),
+  ).toBeNull();
+  expect(
+    await readOpeningCurrentLearningActivity(db([partialMetaWritingRow], partialMetaDocLookup), scope, "course-1", {
+      activityId: partialMetaWritingRow.id,
+    }),
+  ).toBeNull();
+
+  // Implicit course & cross-course Today selection skip both malformed writing rows and return the ordinary activity (even with writing-workgroup: clientKey)
+  const courseFallbackSql = db([missingSavedRevisionRow, partialMetaWritingRow, readableOrdinary], partialMetaDocLookup);
+  expect(await readOpeningCurrentLearningActivity(courseFallbackSql, scope, "course-1")).toEqual({
+    activityId: readableOrdinary.id,
+    courseId: "course-1",
+    sessionId: null,
+  });
+  expect(queries(courseFallbackSql).join(" ")).not.toContain("writing-workgroup:%");
+
+  const recoveryFallbackSql = db([missingSavedRevisionRow, partialMetaWritingRow, readableOrdinary], partialMetaDocLookup);
+  expect(await readOpeningCurrentLearningRecovery(recoveryFallbackSql, scope)).toEqual({
+    activityId: readableOrdinary.id,
+    courseId: "course-1",
+    sessionId: null,
+  });
+
+  const workspaceFallbackSql = db([missingSavedRevisionRow, partialMetaWritingRow, readableOrdinary], partialMetaDocLookup);
+  expect(await readOpeningWorkspaceActivityRecovery(workspaceFallbackSql, scope)).toEqual({
+    kind: "course",
+    activityId: readableOrdinary.id,
+    courseId: "course-1",
+    sessionId: null,
+  });
+});

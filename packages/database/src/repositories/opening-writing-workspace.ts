@@ -81,7 +81,10 @@ function assertValidScope(rawScope: Scope): Scope {
   if (!parsed.success) {
     throw new OpeningWritingError("VALIDATION", "工作区或用户标识格式无效。");
   }
-  return parsed.data;
+  return {
+    workspaceId: parsed.data.workspaceId.toLowerCase(),
+    ownerUserId: parsed.data.ownerUserId.toLowerCase(),
+  };
 }
 
 function assertValidUuid(value: string, label: string): string {
@@ -89,7 +92,7 @@ function assertValidUuid(value: string, label: string): string {
   if (!parsed.success) {
     throw new OpeningWritingError("VALIDATION", `${label}格式无效。`);
   }
-  return parsed.data;
+  return parsed.data.toLowerCase();
 }
 
 function extractInlineText(value: unknown): string {
@@ -275,13 +278,14 @@ export function createOpeningWritingWorkspaceRepository(
       }
       if (
         row.create_intent?.protocol !== WRITING_WORKSPACE_PROTOCOL
-        || row.create_intent?.workGroupId !== workGroupId
+        || typeof row.create_intent?.workGroupId !== "string"
+        || row.create_intent.workGroupId.toLowerCase() !== workGroupId.toLowerCase()
       ) {
         throw new OpeningWritingError("CONFLICT", "写作活动与当前文稿组不匹配。");
       }
       return {
-        id: String(row.id),
-        courseId: row.course_id == null ? null : String(row.course_id),
+        id: String(row.id).toLowerCase(),
+        courseId: row.course_id == null ? null : String(row.course_id).toLowerCase(),
         checkpointJson:
           row.checkpoint_json && typeof row.checkpoint_json === "object"
             ? (row.checkpoint_json as Record<string, unknown>)
@@ -295,7 +299,7 @@ export function createOpeningWritingWorkspaceRepository(
       WHERE workspace_id = ${scope.workspaceId}
         AND owner_user_id = ${scope.ownerUserId}
         AND create_intent->>'protocol' = ${WRITING_WORKSPACE_PROTOCOL}
-        AND create_intent->>'workGroupId' = ${workGroupId}
+        AND lower(create_intent->>'workGroupId') = lower(${workGroupId})
       ORDER BY updated_at DESC, id DESC
       LIMIT 1
       FOR UPDATE
@@ -304,8 +308,8 @@ export function createOpeningWritingWorkspaceRepository(
       throw new OpeningWritingError("NOT_FOUND", "未找到关联的写作活动。");
     }
     return {
-      id: String(rows[0]!.id),
-      courseId: rows[0]!.course_id == null ? null : String(rows[0]!.course_id),
+      id: String(rows[0]!.id).toLowerCase(),
+      courseId: rows[0]!.course_id == null ? null : String(rows[0]!.course_id).toLowerCase(),
       checkpointJson:
         rows[0]!.checkpoint_json && typeof rows[0]!.checkpoint_json === "object"
           ? (rows[0]!.checkpoint_json as Record<string, unknown>)
@@ -320,6 +324,7 @@ export function createOpeningWritingWorkspaceRepository(
     currentMeta: WritingVariantMeta,
     options: { requestedFocusBlockId?: string | null; activityId?: string | null } = {},
   ): Promise<WritingWorkspaceView> {
+    const canonicalDocumentId = documentId.toLowerCase();
     const activity = await resolveActivityForView(
       db,
       scope,
@@ -341,15 +346,15 @@ export function createOpeningWritingWorkspaceRepository(
       WHERE d.workspace_id = ${scope.workspaceId}
         AND d.deleted_at IS NULL
         AND ${openingNoteReadable(db, scope.workspaceId, db`d.id`)}
-        AND p.value->>'workGroupId' = ${currentMeta.workGroupId}
+        AND lower(p.value->>'workGroupId') = lower(${currentMeta.workGroupId})
       ORDER BY d.created_at ASC, d.id ASC
     `;
 
     let snapshotCurrentMeta: WritingVariantMeta | null = null;
     const variants: WritingVariantSummary[] = groupRows.map((row) => {
-      const rowId = String(row.id);
+      const rowId = String(row.id).toLowerCase();
       const meta = writingVariantMetaSchema.parse(row.meta);
-      if (rowId === documentId) {
+      if (rowId === canonicalDocumentId) {
         snapshotCurrentMeta = meta;
       }
       return {
@@ -381,8 +386,8 @@ export function createOpeningWritingWorkspaceRepository(
       const matchingBlocks = await db`
         SELECT id FROM library_blocks
         WHERE workspace_id = ${scope.workspaceId}
-          AND document_id = ${documentId}
-          AND id::text = ${candidateFocus}
+          AND document_id = ${canonicalDocumentId}
+          AND id::text = lower(${candidateFocus})
         LIMIT 1
       `;
       focusRestore = matchingBlocks.length
@@ -395,10 +400,10 @@ export function createOpeningWritingWorkspaceRepository(
     }
 
     return writingWorkspaceViewSchema.parse({
-      workGroupId: resolvedCurrentMeta.workGroupId,
+      workGroupId: resolvedCurrentMeta.workGroupId.toLowerCase(),
       activityId: activity?.id ?? null,
       courseId: activity?.courseId ?? null,
-      currentDocumentId: documentId,
+      currentDocumentId: canonicalDocumentId,
       currentVariant: resolvedCurrentMeta,
       variants,
       focusRestore: writingFocusRestoreSchema.parse(focusRestore),
@@ -434,7 +439,7 @@ export function createOpeningWritingWorkspaceRepository(
     focusBlockId: string | null,
     nowIso: string,
   ): Promise<void> {
-    const documentId = String(doc.id);
+    const documentId = String(doc.id).toLowerCase();
     const clientKey = `writing-workgroup:${documentId}`;
     const existing = await tx`
       SELECT id, create_intent
@@ -447,7 +452,8 @@ export function createOpeningWritingWorkspaceRepository(
     if (existing.length) {
       if (
         existing[0]!.create_intent?.protocol !== WRITING_WORKSPACE_PROTOCOL
-        || existing[0]!.create_intent?.workGroupId !== documentId
+        || typeof existing[0]!.create_intent?.workGroupId !== "string"
+        || existing[0]!.create_intent.workGroupId.toLowerCase() !== documentId
       ) {
         throw new OpeningWritingError("CONFLICT", "写作活动标识冲突。");
       }
@@ -494,7 +500,7 @@ export function createOpeningWritingWorkspaceRepository(
       const input = parsedInput.data;
       const variantLabel = input.variantLabel ?? "初稿";
       const initialText = input.initialText ?? "";
-      const requestedCourseId = input.courseId ?? null;
+      const requestedCourseId = input.courseId == null ? null : input.courseId.toLowerCase();
 
       return sql.begin(async (tx) => {
         await lockWriteBoundary(tx, scope);
@@ -539,7 +545,7 @@ export function createOpeningWritingWorkspaceRepository(
             throw new OpeningWritingError("NOT_FOUND", "写作目标不存在或不可用。");
           }
 
-          const existingCourseId = existing.course_id == null ? null : String(existing.course_id);
+          const existingCourseId = existing.course_id == null ? null : String(existing.course_id).toLowerCase();
           if (existingCourseId !== requestedCourseId) {
             throw new OpeningWritingError("CONFLICT", "同一请求标识对应的写作参数不一致。");
           }
@@ -564,7 +570,7 @@ export function createOpeningWritingWorkspaceRepository(
           }
 
           return buildView(tx, scope, targetRead.documentId, targetRead.meta, {
-            activityId: String(existing.id),
+            activityId: String(existing.id).toLowerCase(),
           });
         }
 
@@ -688,7 +694,7 @@ export function createOpeningWritingWorkspaceRepository(
         return null;
       }
 
-      return buildView(sql, scope, documentId, docRead.meta, {
+      return buildView(sql, scope, docRead.documentId, docRead.meta, {
         requestedFocusBlockId: options.requestedFocusBlockId,
         activityId: validActivityId,
       });
@@ -912,7 +918,7 @@ export function createOpeningWritingWorkspaceRepository(
             cmd.activityId,
           );
           const recordIndex = currentMeta.assistanceRecords.findIndex(
-            (record) => record.id === cmd.assistanceId,
+            (record) => record.id.toLowerCase() === cmd.assistanceId.toLowerCase(),
           );
           if (recordIndex === -1) {
             throw new OpeningWritingError("NOT_FOUND", "未找到对应的写作辅助记录。");
@@ -973,7 +979,10 @@ export function createOpeningWritingWorkspaceRepository(
           const existingCheckpoint = writingActivityCheckpointSchema.safeParse(
             activity.checkpointJson.writingWorkspace,
           );
-          if (existingCheckpoint.success && existingCheckpoint.data.activeDocumentId === documentId) {
+          if (
+            existingCheckpoint.success
+            && existingCheckpoint.data.activeDocumentId.toLowerCase() === documentId.toLowerCase()
+          ) {
             await updateCheckpointInTx(tx, scope, activity.id, {
               ...existingCheckpoint.data,
               savedRevisionNumber: nextRevisionNumber,
@@ -1024,7 +1033,7 @@ export function createOpeningWritingWorkspaceRepository(
             WHERE d.workspace_id = ${scope.workspaceId}
               AND d.deleted_at IS NULL
               AND d.id <> ${documentId}
-              AND p.value->>'workGroupId' = ${currentMeta.workGroupId}
+              AND lower(p.value->>'workGroupId') = lower(${currentMeta.workGroupId})
             FOR UPDATE OF p
           `;
           for (const sibling of siblingRows) {

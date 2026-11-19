@@ -5,11 +5,12 @@ import {
   createOpeningPrivacyRepository,
   readOpeningWorkspaceActivityRecovery,
 } from "@aistudy/database";
-import type {
-  CourselessActivityOutcome,
-  TeachingActivity,
-  WritingWorkspaceResponse,
-  WritingWorkspaceView,
+import {
+  WRITING_WORKSPACE_PROTOCOL,
+  type CourselessActivityOutcome,
+  type TeachingActivity,
+  type WritingWorkspaceResponse,
+  type WritingWorkspaceView,
 } from "@aistudy/contracts";
 import { createAuthRuntime } from "../../../apps/web/src/features/auth/service";
 import { setAuthRuntimeForTests } from "../../../apps/web/src/server/runtime";
@@ -18,8 +19,13 @@ import {
   GET as getWriting,
   POST as commandWriting,
 } from "../../../apps/web/src/app/api/opening/writing/[documentId]/route";
-import { GET as listTeachingActivities } from "../../../apps/web/src/app/api/opening/teaching-activities/route";
+import {
+  GET as listTeachingActivities,
+  POST as createTeachingActivity,
+} from "../../../apps/web/src/app/api/opening/teaching-activities/route";
 import { GET as getTeachingActivity } from "../../../apps/web/src/app/api/opening/teaching-activities/[id]/route";
+import { PATCH as patchTeachingStatus } from "../../../apps/web/src/app/api/opening/teaching-activities/[id]/status/route";
+import { POST as associateTeachingCourse } from "../../../apps/web/src/app/api/opening/teaching-activities/[id]/associate-course/route";
 import { PATCH as patchDocument } from "../../../apps/web/src/app/api/documents/[id]/route";
 import { backupRows } from "../opening-backup-records-fixture";
 import { createOpeningFixture, type OpeningFixture } from "../opening-fixture";
@@ -443,14 +449,52 @@ describe("opening writing workspace route handlers", () => {
       );
       const replayDiffText = await replayDeletedDiff.text();
       expect(replayDeletedDiff.status).toBe(404);
+      expect(replaySameText).toBe(replayDiffText);
 
-      // (b) GET /api/opening/teaching-activities/[id] -> 404
+      // (b) GET/PATCH/POST /api/opening/teaching-activities/[id] & same-key create replay -> 404 (zero checkpointJson / existence leak)
       const actDetailRes = await getTeachingActivity(
         req(`/api/opening/teaching-activities/${activityId}`, "GET"),
         idCtx(activityId),
       );
       const actDetailText = await actDetailRes.text();
       expect(actDetailRes.status).toBe(404);
+
+      const patchStatusRes = await patchTeachingStatus(
+        req(`/api/opening/teaching-activities/${activityId}/status`, "PATCH", { status: "paused" }),
+        idCtx(activityId),
+      );
+      const patchStatusText = await patchStatusRes.text();
+      expect(patchStatusRes.status).toBe(404);
+
+      const associateRes = await associateTeachingCourse(
+        req(`/api/opening/teaching-activities/${activityId}/associate-course`, "POST", { courseId: null }),
+        idCtx(activityId),
+      );
+      const associateText = await associateRes.text();
+      expect(associateRes.status).toBe(404);
+
+      const genericReplaySameRes = await createTeachingActivity(
+        req("/api/opening/teaching-activities", "POST", {
+          clientKey: startKey,
+          intentKind: "topic",
+          intentSummary: "权限收口主稿组",
+          createIntent: { protocol: WRITING_WORKSPACE_PROTOCOL, workGroupId: docInit },
+        }),
+      );
+      const genericReplaySameText = await genericReplaySameRes.text();
+      expect(genericReplaySameRes.status).toBe(404);
+
+      const genericReplayDiffRes = await createTeachingActivity(
+        req("/api/opening/teaching-activities", "POST", {
+          clientKey: startKey,
+          intentKind: "question",
+          intentSummary: "异参通用创建探测",
+          createIntent: { intentKind: "question" },
+        }),
+      );
+      const genericReplayDiffText = await genericReplayDiffRes.text();
+      expect(genericReplayDiffRes.status).toBe(404);
+      expect(genericReplaySameText).toBe(genericReplayDiffText);
 
       // (c) GET /api/opening/teaching-activities + Today recovery -> omits deleted B target
       const actListRes = await listTeachingActivities(req("/api/opening/teaching-activities", "GET"));
@@ -469,6 +513,10 @@ describe("opening writing workspace route handlers", () => {
         replaySameText,
         replayDiffText,
         actDetailText,
+        patchStatusText,
+        associateText,
+        genericReplaySameText,
+        genericReplayDiffText,
         actListText,
         explicitRecovery,
         implicitRecovery,
@@ -597,5 +645,121 @@ describe("opening writing workspace route handlers", () => {
     `;
     expect(docsAfterRace?.count).toBe(docsBeforeRace?.count);
     expect(actsAfterRace?.count).toBe(actsBeforeRace?.count);
+  });
+
+  it("preserves ordinary writing-workgroup clientKey activities, rejects empty-checkpoint writing-workspace-v1 activities on explicit getView, and opens manuscripts via both lowercase and uppercase UUIDs", async () => {
+    // Ensure we obtain a manuscript whose UUID contains hex letters [a-f] so upper !== lower is guaranteed
+    let started: WritingWorkspaceView | null = null;
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const res = await startWriting(
+        req("/api/opening/writing", "POST", {
+          clientKey: `writing-round1-case-${attempt}-${randomUUID()}`,
+          title: "大小写与空检查点回归",
+          initialText: "第一段：用于验证大小写 UUID 与显式 activityId 校验。",
+          variantLabel: "初稿",
+          courseId: null,
+        }),
+      );
+      expect(res.status).toBe(201);
+      const candidate = (await res.json()) as WritingWorkspaceView;
+      if (/[a-f]/.test(candidate.currentDocumentId)) {
+        started = candidate;
+        break;
+      }
+    }
+    expect(started).not.toBeNull();
+    const lowerDocId = started!.currentDocumentId;
+    const upperDocId = lowerDocId.toUpperCase();
+    expect(upperDocId).not.toBe(lowerDocId);
+    const lowerActId = started!.activityId!;
+    const upperActId = lowerActId.toUpperCase();
+    const lowerBlockId = started!.currentVariant.focusBlockId!;
+    const upperBlockId = lowerBlockId.toUpperCase();
+
+    // GPT #4: Both lowercase and valid uppercase UUIDs open the exact same owned readable manuscript
+    const lowerRes = await getWriting(
+      req(`/api/opening/writing/${lowerDocId}?activity=${lowerActId}&block=${lowerBlockId}`, "GET"),
+      docCtx(lowerDocId),
+    );
+    expect(lowerRes.status).toBe(200);
+    const lowerBody = (await lowerRes.json()) as WritingWorkspaceResponse;
+
+    const upperRes = await getWriting(
+      req(`/api/opening/writing/${upperDocId}?activity=${upperActId}&block=${upperBlockId}`, "GET"),
+      docCtx(upperDocId),
+    );
+    expect(upperRes.status).toBe(200);
+    const upperBody = (await upperRes.json()) as WritingWorkspaceResponse;
+
+    expect(upperBody).toEqual(lowerBody);
+    expect(upperBody.initialized).toBe(true);
+    if (upperBody.initialized) {
+      expect(upperBody.workspace.currentDocumentId).toBe(lowerDocId);
+      expect(upperBody.workspace.activityId).toBe(lowerActId);
+      expect(upperBody.workspace.focusRestore).toEqual({ status: "exact", blockId: lowerBlockId });
+    }
+
+    // GPT #3: Generic teaching-activity create with protocol "writing-workspace-v1" + matching workGroupId persists {} checkpoint;
+    // explicit ?activity= lookup on getView MUST reject with 404 (NOT_FOUND), and generic get/status/replay also return 404.
+    const emptyCkptClientKey = `empty-writing-ckpt-${randomUUID()}`;
+    const emptyCkptCreateRes = await createTeachingActivity(
+      req("/api/opening/teaching-activities", "POST", {
+        clientKey: emptyCkptClientKey,
+        intentKind: "topic",
+        intentSummary: "空检查点写作协议壳",
+        createIntent: { protocol: WRITING_WORKSPACE_PROTOCOL, workGroupId: started!.workGroupId },
+      }),
+    );
+    expect(emptyCkptCreateRes.status).toBe(201);
+    const emptyCkptId = ((await emptyCkptCreateRes.json()) as TeachingActivity).id;
+
+    const emptyCkptViewRes = await getWriting(
+      req(`/api/opening/writing/${lowerDocId}?activity=${emptyCkptId}`, "GET"),
+      docCtx(lowerDocId),
+    );
+    expect(emptyCkptViewRes.status).toBe(404);
+
+    const emptyCkptActGetRes = await getTeachingActivity(
+      req(`/api/opening/teaching-activities/${emptyCkptId}`, "GET"),
+      idCtx(emptyCkptId),
+    );
+    expect(emptyCkptActGetRes.status).toBe(404);
+
+    const emptyCkptPatchRes = await patchTeachingStatus(
+      req(`/api/opening/teaching-activities/${emptyCkptId}/status`, "PATCH", { status: "paused" }),
+      idCtx(emptyCkptId),
+    );
+    expect(emptyCkptPatchRes.status).toBe(404);
+
+    // GPT #2: Ordinary teaching activity created with clientKey = "writing-workgroup:..." (non-writing protocol, no writingWorkspace checkpoint)
+    // remains visible via GET /api/opening/teaching-activities/[id] and GET /api/opening/teaching-activities.
+    const ordinaryClientKey = `writing-workgroup:${randomUUID()}`;
+    const createOrdinaryRes = await createTeachingActivity(
+      req("/api/opening/teaching-activities", "POST", {
+        clientKey: ordinaryClientKey,
+        intentKind: "topic",
+        intentSummary: "普通教学活动（携带 writing-workgroup 前缀键）",
+        createIntent: { intentKind: "topic" },
+      }),
+    );
+    expect(createOrdinaryRes.status).toBe(201);
+    const createdOrdinary = (await createOrdinaryRes.json()) as TeachingActivity;
+    expect(createdOrdinary.clientKey).toBe(ordinaryClientKey);
+
+    const getOrdinaryRes = await getTeachingActivity(
+      req(`/api/opening/teaching-activities/${createdOrdinary.id}`, "GET"),
+      idCtx(createdOrdinary.id),
+    );
+    expect(getOrdinaryRes.status).toBe(200);
+    await expect(getOrdinaryRes.json()).resolves.toMatchObject({
+      id: createdOrdinary.id,
+      clientKey: ordinaryClientKey,
+    });
+
+    const listOrdinaryRes = await listTeachingActivities(req("/api/opening/teaching-activities", "GET"));
+    expect(listOrdinaryRes.status).toBe(200);
+    const listedAll = (await listOrdinaryRes.json()) as TeachingActivity[];
+    expect(listedAll.some((item) => item.id === createdOrdinary.id)).toBe(true);
+    expect(listedAll.some((item) => item.id === emptyCkptId)).toBe(false);
   });
 });
