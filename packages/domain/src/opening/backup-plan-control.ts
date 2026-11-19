@@ -9,21 +9,13 @@ const dateKey = (value: unknown) => value instanceof Date ? value.toISOString().
 const ACTIVE_RETEST_STATUSES = new Set(["accepted", "in_progress"]);
 const LOCAL_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
-function parseSnapshotTimeZone(value: unknown): { ok: true; timeZone?: string } | { ok: false } {
+function parseTimeZone(value: unknown): { ok: true; timeZone?: string } | { ok: false } {
   if (value === undefined) return { ok: true };
   if (typeof value !== "string" || value.trim().length === 0 || value.trim().length > 80) return { ok: false };
   try {
     return { ok: true, timeZone: resolveWorkspaceTimeZone(value) };
   } catch {
     return { ok: false };
-  }
-}
-
-function safeWorkspaceTimeZone(candidate: string | undefined): string {
-  try {
-    return resolveWorkspaceTimeZone(candidate);
-  } catch {
-    return resolveWorkspaceTimeZone(undefined);
   }
 }
 
@@ -48,7 +40,18 @@ export function validateBackupPlanControl(tables: Tables, errors: string[]): voi
   const candidates = new Map((tables.opening_assistant_candidates ?? []).map(row => [row.id, row]));
   const conversations = new Map((tables.opening_conversations ?? []).map(row => [row.id, row]));
   const tasks = new Map((tables.opening_tasks ?? []).map(row => [row.id, row]));
-  const preferences = new Map((tables.workspace_preferences ?? []).map(row => [row.workspace_id, row]));
+  const preferenceTimeZones = new Map<unknown, string>();
+  for (const row of tables.workspace_preferences ?? []) {
+    const rawTimeZone = isRecord(row.planning_settings) ? row.planning_settings.timeZone : undefined;
+    const parsedPrefTimeZone = parseTimeZone(rawTimeZone);
+    if (!parsedPrefTimeZone.ok) {
+      errors.push("workspace planning settings timeZone is invalid");
+      continue;
+    }
+    if (parsedPrefTimeZone.timeZone && openingPlanningSettingsSchema.safeParse(row.planning_settings).success) {
+      preferenceTimeZones.set(row.workspace_id, parsedPrefTimeZone.timeZone);
+    }
+  }
   const inactiveRetestsByKey = new Set(
     (tables.opening_retest_activities ?? [])
       .filter(row => typeof row.task_id === "string" && typeof row.status === "string" && !ACTIVE_RETEST_STATUSES.has(row.status))
@@ -94,7 +97,7 @@ export function validateBackupPlanControl(tables: Tables, errors: string[]): voi
     const parsedInactiveRetestIds = snapshot?.inactiveRetestTaskIds === undefined
       ? { success: true as const, data: [] as string[] }
       : uuidSchema.array().max(200).safeParse(snapshot.inactiveRetestTaskIds);
-    const parsedTimeZone = parseSnapshotTimeZone(snapshot?.timeZone);
+    const parsedTimeZone = parseTimeZone(snapshot?.timeZone);
     const normalizedInactiveIds = parsedInactiveRetestIds.success
       ? parsedInactiveRetestIds.data.map(id => id.toLowerCase())
       : [];
@@ -110,10 +113,8 @@ export function validateBackupPlanControl(tables: Tables, errors: string[]): voi
     }
     const rawDay = draft.day !== undefined && draft.day !== null ? dateKey(draft.day) : undefined;
     const localDate = rawDay && LOCAL_DATE_RE.test(rawDay) ? rawDay : undefined;
-    const pref = preferences.get(draft.workspace_id);
-    const parsedPref = pref?.planning_settings != null ? openingPlanningSettingsSchema.safeParse(pref.planning_settings) : null;
     const timeZone = localDate
-      ? (parsedTimeZone.timeZone ?? safeWorkspaceTimeZone(parsedPref?.success ? parsedPref.data.timeZone : undefined))
+      ? (parsedTimeZone.timeZone ?? preferenceTimeZones.get(draft.workspace_id) ?? resolveWorkspaceTimeZone(undefined))
       : undefined;
     const proposedAt = new Date(metadata.data.proposedAt);
     const fixed = localReplanFixedBlocks({

@@ -468,3 +468,86 @@ it("accepts a confirmed UTC Friday 19:15 retest draft through planOpeningRestore
     errors: ["local replan snapshot is invalid"],
   });
 });
+
+it("rejects an archive with invalid planning_settings.timeZone even when snapshot.timeZone is valid", () => {
+  const courseId = "33333333-3333-4333-8333-333333333333";
+  const retestBlock = {
+    taskId,
+    start: "2026-10-16T19:15:00.000Z",
+    end: "2026-10-16T19:40:00.000Z",
+    reason: "延迟复测预约",
+  };
+  const retestTask = {
+    id: taskId,
+    version: 1,
+    title: "周五 UTC 延迟复测",
+    minutes: 25,
+    dueAt: "2026-10-26T19:00:00.000Z",
+    notBefore: "2026-10-15T19:00:00.000Z",
+    priority: 1,
+    status: "pending" as const,
+    retest: {
+      candidateId: "11111111-1111-4111-8111-111111111111",
+      activityId: "22222222-2222-4222-8222-222222222222",
+      courseId,
+      skillLabel: "矩阵秩",
+      prompt: "延迟复测",
+      recommendedAt: "2026-10-15T19:00:00.000Z",
+      scheduledStartAt: "2026-10-16T19:15:00.000Z",
+    },
+  };
+  const archive = makeBackup({
+    opening_tasks: [{
+      id: taskId,
+      workspace_id: workspace,
+      owner_user_id: owner,
+      version: 1,
+      origin: "retest",
+      course_id: courseId,
+    }],
+    opening_plan_drafts: [{
+      id: draftId,
+      workspace_id: workspace,
+      owner_user_id: owner,
+      day: "2026-10-16",
+      origin: "user",
+      base_version: 1,
+      status: "accepted",
+      strategy_version: "local-replan-v1",
+      input_snapshot: {
+        tasks: [retestTask],
+        timeZone: "UTC",
+        localReplan: {
+          kind: "local_replan_v1",
+          baseAcceptedVersion: 1,
+          baselineBlocks: [retestBlock],
+          fixedBlocks: [retestBlock],
+          releasedTaskVersions: [],
+          proposedAt: "2026-10-16T19:00:00.000Z",
+          preserveAll: false,
+        },
+      },
+    }],
+    opening_retest_activities: [{
+      id: "22222222-2222-4222-8222-222222222222",
+      workspace_id: workspace,
+      owner_user_id: owner,
+      course_id: courseId,
+      candidate_id: null,
+      task_id: taskId,
+      reopened_from_activity_id: null,
+      status: "accepted",
+    }],
+    workspace_preferences: [makePreferencesRow("Invalid/Zone")],
+  });
+
+  expect(planOpeningRestoreApply(archive, [], {
+    confirmLocalRestore: true,
+    availableCourseIds: [courseId],
+    currentLearningState: emptyLearningState,
+  })).toMatchObject({
+    ok: false,
+    code: "PREFLIGHT_REJECTED",
+    errors: ["workspace planning settings timeZone is invalid"],
+  });
+});
