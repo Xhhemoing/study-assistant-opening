@@ -250,7 +250,9 @@ describe("opening knowledge material lifecycle sync (real PG)", () => {
 
     const finalRecord = await service.get(f.scope, courseId);
     expect(finalRecord.version).toBe(4);
-    expect(finalRecord.snapshot.nodes.find((n) => n.id === node1.id)?.status).toBe("supported");
+    // Expanding sourceVersions to include S2 intentionally resets prior whole-graph confirmations to "needs_check"
+    // (while V2 above preserved "supported" on the unchanged { S1 } source set).
+    expect(finalRecord.snapshot.nodes.find((n) => n.id === node1.id)?.status).toBe("needs_check");
     expect(finalRecord.snapshot.nodes).toHaveLength(2);
     expect(finalRecord.sync).toEqual({
       status: "up_to_date",
