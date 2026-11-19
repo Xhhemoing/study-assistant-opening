@@ -1,13 +1,15 @@
 import {
-  WRITING_WORKSPACE_PROTOCOL,
-  writingActivityCheckpointSchema,
   type Scope,
   type WritingActivityCheckpoint,
 } from "@aistudy/contracts";
 import { isDeepStrictEqual } from "node:util";
 import { compareCurrentLearningActivities, selectCurrentLearningActivity, selectCurrentWorkspaceActivity } from "@aistudy/domain";
 import type { Sql, TransactionSql } from "postgres";
-import { openingNoteReadable } from "./opening-note-provenance";
+import {
+  openingWritingActivityReadableSql,
+  parseAuthorizedWritingActivityCheckpoint,
+  readAuthorizedWritingDocument,
+} from "./opening-writing-read-target";
 
 type Db = Sql | TransactionSql;
 /** Server-side identities only; never pass browser-provided task projections here. */
@@ -28,6 +30,7 @@ async function candidates(db: Db, scope: Scope, courseId: string | null, options
       AND NOT (COALESCE(a.checkpoint_json,'{}'::jsonb) ? 'cardReviewSession')
       AND COALESCE(a.create_intent->>'legacy','false')<>'true'
       AND a.client_key NOT LIKE 'legacy-course-continue:%'
+      AND ${openingWritingActivityReadableSql(db, scope, db`a`)}
       AND ${options.spanOnly ? db`a.create_intent->>'protocol'='span-lesson-v1'` : db`true`}
       AND ${options.retestReferences ? db`lower(a.checkpoint_json->'spanLesson'->>'retestId')=ANY(${options.retestReferences}::text[])`
         : options.spanOnly ? db`a.checkpoint_json->'spanLesson'->>'retestId' IS NULL` : db`true`}
@@ -192,7 +195,7 @@ async function workspaceCandidates(
   scope: Scope,
   options: { recoveryOnly?: boolean; references?: string[]; sessionId?: string | null } = {},
 ): Promise<WorkspaceCandidateRow[]> {
-  const rows = await db`SELECT a.id,a.course_id,a.status,a.updated_at,a.content_version,a.intent_kind,a.create_intent,a.checkpoint_json,
+  const rows = await db`SELECT a.id,a.course_id,a.status,a.updated_at,a.content_version,a.intent_kind,a.create_intent,a.checkpoint_json,a.client_key,
       s.id AS session_id, (c.id IS NOT NULL) AS course_present
     FROM opening_teaching_activities a
     JOIN workspaces w ON w.id=a.workspace_id AND w.owner_user_id=a.owner_user_id
@@ -207,6 +210,7 @@ async function workspaceCandidates(
       AND NOT (COALESCE(a.checkpoint_json,'{}'::jsonb) ? 'cardReviewSession')
       AND COALESCE(a.create_intent->>'legacy','false')<>'true'
       AND a.client_key NOT LIKE 'legacy-course-continue:%'
+      AND ${openingWritingActivityReadableSql(db, scope, db`a`)}
       AND ${options.recoveryOnly ? db`(COALESCE(a.checkpoint_json->'spanLesson'->>'retestId',a.goal_json->'courseRoute'->>'retestId') IS NULL
         OR EXISTS (SELECT 1 FROM opening_retest_activities r
           LEFT JOIN opening_tasks rt ON rt.id=r.task_id AND rt.workspace_id=r.workspace_id AND rt.owner_user_id=r.owner_user_id
@@ -221,11 +225,9 @@ async function workspaceCandidates(
     .map(row => {
       const protocol = row.create_intent?.protocol;
       const span = protocol === "span-lesson-v1";
-      const parsedWriting = protocol === WRITING_WORKSPACE_PROTOCOL
-        ? writingActivityCheckpointSchema.safeParse(row.checkpoint_json?.writingWorkspace)
-        : null;
-      const placeholder = protocol === WRITING_WORKSPACE_PROTOCOL
-        ? !parsedWriting?.success
+      const parsedWriting = parseAuthorizedWritingActivityCheckpoint(row);
+      const placeholder = parsedWriting.kind !== "not_writing"
+        ? parsedWriting.kind !== "writing"
         : span
           ? !row.session_id
           : row.intent_kind === "course_continue" && Number(row.content_version) === 0;
@@ -236,7 +238,7 @@ async function workspaceCandidates(
         updatedAt: new Date(row.updated_at).toISOString(),
         sessionId: row.session_id ? String(row.session_id) : null,
         placeholder,
-        writingCheckpoint: parsedWriting?.success ? parsedWriting.data : null,
+        writingCheckpoint: parsedWriting.kind === "writing" ? parsedWriting.checkpoint : null,
       };
     });
 }
@@ -282,37 +284,23 @@ export async function readOpeningWorkspaceActivityRecovery(
     if (selected.writingCheckpoint) {
       if (reference.sessionId != null) return null;
       const checkpoint = selected.writingCheckpoint;
-      const docs = await db`
-        SELECT d.id, d.current_revision_number,
-          EXISTS (
-            SELECT 1 FROM library_blocks b
-            WHERE b.workspace_id = d.workspace_id
-              AND b.document_id = d.id
-              AND b.id::text = ${checkpoint.focusBlockId ?? ""}
-          ) AS focus_exists
-        FROM library_documents d
-        WHERE d.id = ${checkpoint.activeDocumentId}
-          AND d.workspace_id = ${scope.workspaceId}
-          AND d.deleted_at IS NULL
-          AND ${openingNoteReadable(db, scope.workspaceId, db`d.id`)}
-        LIMIT 1`;
-      if (docs.length) {
-        const focusStatus = checkpoint.focusBlockId == null
-          ? "none"
-          : docs[0]!.focus_exists
-            ? "exact"
-            : "block_missing";
+      const target = await readAuthorizedWritingDocument(db, scope, {
+        documentId: checkpoint.activeDocumentId,
+        expectedWorkGroupId: checkpoint.workGroupId,
+        focusBlockId: checkpoint.focusBlockId,
+      });
+      if (target.status === "authorized") {
         return {
           kind: "writing",
           activityId: selected.id,
           courseId: selected.courseId,
           workGroupId: checkpoint.workGroupId,
-          documentId: checkpoint.activeDocumentId,
+          documentId: target.documentId,
           variantLabel: checkpoint.activeVariantLabel,
           savedRevisionNumber: checkpoint.savedRevisionNumber,
-          currentRevisionNumber: Number(docs[0]!.current_revision_number),
+          currentRevisionNumber: target.currentRevisionNumber,
           focusBlockId: checkpoint.focusBlockId,
-          focusStatus,
+          focusStatus: target.focusStatus,
         };
       }
       if (hasExplicitRef) return null;

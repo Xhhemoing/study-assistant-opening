@@ -18,6 +18,7 @@ import {
   lockLearningOwner,
   lockWorkspaceLearningHistory,
 } from "./opening-learning-facts";
+import { openingWritingActivityReadableSql } from "./opening-writing-read-target";
 
 /** Teaching admission is course-local even when callers provide explicit sourceIds. */
 export async function assertOpeningTeachingSourcePurposes(
@@ -79,7 +80,8 @@ export async function assertOwnedActivity(
       AND r.status IN ('accepted','in_progress')
     WHERE a.id = ${activityId}
       AND a.workspace_id = ${scope.workspaceId}
-      AND a.owner_user_id = ${scope.ownerUserId}`;
+      AND a.owner_user_id = ${scope.ownerUserId}
+      AND ${openingWritingActivityReadableSql(sql, scope, sql`a`)}`;
   if (!rows.length) throw learningError("NOT_FOUND", "teaching activity not found");
   if (rows[0]!.static_lesson_retest_unavailable === true) throw learningError("CONFLICT", "原延迟复测已取消或关联不可用，原活动与记录保留；未创建替代活动。");
   return mapTeachingActivity(rows[0] as Record<string, unknown>);
@@ -492,6 +494,7 @@ export function createOpeningTeachingActivitiesRepository(sql: Sql) {
           AND r.status IN ('accepted','in_progress')
         WHERE a.workspace_id = ${scope.workspaceId}
           AND a.owner_user_id = ${scope.ownerUserId}
+          AND ${openingWritingActivityReadableSql(sql, scope, sql`a`)}
         ORDER BY a.updated_at DESC, a.id`;
       return rows.map((row) => mapTeachingActivity(row as Record<string, unknown>));
     },

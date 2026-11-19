@@ -4,6 +4,7 @@ import {
   WRITING_META_PROPERTY_KEY,
   WRITING_WORKSPACE_PROTOCOL,
 } from "@aistudy/contracts";
+import { createOpeningTeachingActivitiesRepository } from "./opening-teaching-activities";
 import {
   OpeningWritingError,
   createOpeningWritingWorkspaceRepository,
@@ -147,11 +148,11 @@ describe("createOpeningWritingWorkspaceRepository", () => {
       if (text.includes("FROM opening_teaching_activities") && text.includes("FOR UPDATE")) {
         return [existingActivity];
       }
+      if (text.includes("FROM library_documents d") && text.includes("LEFT JOIN library_properties p")) {
+        return [{ id: docId, title: "同题重放", current_revision_number: 2, has_meta: true, meta, focus_exists: true }];
+      }
       if (text.includes("FROM library_revisions")) {
         return [{ title: "同题重放", blocks: [{ content: { blockNoteContent: "原初文本", props: null, children: [] } }] }];
-      }
-      if (text.includes("FROM library_properties")) {
-        return [{ value: meta }];
       }
       if (text.includes("FROM library_documents d JOIN library_properties p")) {
         return [{ id: docId, title: "同题重放", current_revision_number: 2, created_at: now, updated_at: now, meta }];
@@ -185,9 +186,9 @@ describe("createOpeningWritingWorkspaceRepository", () => {
     const now = "2026-11-18T10:00:00.000Z";
 
     const uninitSql = createMockSql((text) => {
-      if (text.includes("FROM workspaces")) return [{ id: SCOPE.workspaceId }];
-      if (text.includes("FROM library_documents d")) return [{ id: docId }];
-      if (text.includes("FROM library_properties")) return [];
+      if (text.includes("FROM library_documents d") && text.includes("LEFT JOIN library_properties p")) {
+        return [{ id: docId, title: "普通笔记", current_revision_number: 1, has_meta: false, meta: null, focus_exists: false }];
+      }
       return [];
     }).sql;
     expect(await createOpeningWritingWorkspaceRepository(uninitSql).getView(SCOPE, docId)).toBeNull();
@@ -202,12 +203,12 @@ describe("createOpeningWritingWorkspaceRepository", () => {
       assistanceRecords: [],
     };
     const missingSql = createMockSql((text) => {
-      if (text.includes("FROM workspaces")) return [{ id: SCOPE.workspaceId }];
       if (text.includes("FROM library_documents d JOIN library_properties p")) {
         return [{ id: docId, title: "普通笔记", current_revision_number: 2, created_at: now, updated_at: now, meta }];
       }
-      if (text.includes("FROM library_documents d")) return [{ id: docId }];
-      if (text.includes("FROM library_properties")) return [{ value: meta }];
+      if (text.includes("FROM library_documents d") && text.includes("LEFT JOIN library_properties p")) {
+        return [{ id: docId, title: "普通笔记", current_revision_number: 2, has_meta: true, meta, focus_exists: false }];
+      }
       if (text.includes("FROM library_blocks")) return [];
       if (text.includes("FROM opening_teaching_activities")) return [];
       return [];
@@ -420,5 +421,385 @@ describe("createOpeningWritingWorkspaceRepository", () => {
       evidenceVerdict: "MASTERY_NOT_ESTABLISHED",
     });
     expect(observationQuerySeen).toBe(false);
+  });
+
+  it("counterexample 1: rejects start replay and teaching activity get/list with zero leakage when pinned variant B is deleted, while keeping surviving variant A readable", async () => {
+    const docRoot = "33333333-3333-4333-8333-333333333333";
+    const docA = "44444444-4444-4444-8444-444444444444";
+    const docB = "55555555-5555-4555-8555-555555555555";
+    const blockA = "66666666-6666-4666-8666-666666666666";
+    const blockB = "77777777-7777-4777-8777-777777777777";
+    const activityId = "88888888-8888-4888-8888-888888888888";
+    const assistanceId = "99999999-9999-4999-8999-999999999999";
+    const now = "2026-11-18T11:00:00.000Z";
+    const secretLabel = "B稿-绝密删稿标识";
+    const secretSnapshot = "UNIQUE_DELETED_SENTENCE_LEAK_GUARD_991";
+    const secretFeedback = "UNIQUE_DELETED_FEEDBACK_LEAK_GUARD_991";
+
+    const rootMeta = {
+      workGroupId: docRoot,
+      variantLabel: "初稿",
+      parentDocumentId: null,
+      parentRevisionNumber: null,
+      keptAsPreferred: false,
+      focusBlockId: blockA,
+      assistanceRecords: [],
+    };
+    const metaA = {
+      workGroupId: docRoot,
+      variantLabel: "A 稿",
+      parentDocumentId: docRoot,
+      parentRevisionNumber: 1,
+      keptAsPreferred: false,
+      focusBlockId: blockA,
+      assistanceRecords: [],
+    };
+    const existingActivity = {
+      id: activityId,
+      workspace_id: SCOPE.workspaceId,
+      owner_user_id: SCOPE.ownerUserId,
+      course_id: null,
+      status: "active",
+      generate_status: "ready",
+      intent_kind: "topic",
+      intent_summary: "双稿测试",
+      source_ids: [],
+      goal_json: {},
+      path_version: 1,
+      content_version: 0,
+      client_key: "writing-ce1-key",
+      created_at: now,
+      updated_at: now,
+      create_intent: { protocol: WRITING_WORKSPACE_PROTOCOL, workGroupId: docRoot },
+      checkpoint_json: {
+        writingWorkspace: {
+          protocol: WRITING_WORKSPACE_PROTOCOL,
+          workGroupId: docRoot,
+          activeDocumentId: docB,
+          activeVariantLabel: secretLabel,
+          savedRevisionNumber: 2,
+          focusBlockId: blockB,
+          updatedAt: now,
+        },
+      },
+    };
+
+    // Simulate state after docB is deleted (deleted_at IS NOT NULL / openingNoteReadable false),
+    // even if library_properties row for docB still holds assistanceRecords in storage.
+    let sawReadableWritingPredicate = false;
+    const { sql, queries } = createMockSql((text, values) => {
+      if (text.includes("checkpoint_json->'writingWorkspace'->>'activeDocumentId'")) {
+        sawReadableWritingPredicate = true;
+        return [];
+      }
+      if (text.includes("FROM workspaces")) return [{ id: SCOPE.workspaceId }];
+      if (text.includes("FROM opening_teaching_activities") && text.includes("FOR UPDATE")) {
+        return [existingActivity];
+      }
+      if (text.includes("FROM library_documents d") && text.includes("LEFT JOIN library_properties p")) {
+        const requestedDocId = String(values[3]);
+        if (requestedDocId === docRoot) {
+          return [{ id: docRoot, title: "双稿测试", current_revision_number: 1, has_meta: true, meta: rootMeta, focus_exists: true }];
+        }
+        if (requestedDocId === docA) {
+          return [{ id: docA, title: "双稿测试", current_revision_number: 1, has_meta: true, meta: metaA, focus_exists: true }];
+        }
+        // docB is deleted/revoked -> filtered by d.deleted_at IS NULL AND openingNoteReadable
+        return [];
+      }
+      if (text.includes("FROM library_documents d JOIN library_properties p")) {
+        return [
+          { id: docRoot, title: "双稿测试", current_revision_number: 1, created_at: now, updated_at: now, meta: rootMeta },
+          { id: docA, title: "双稿测试", current_revision_number: 1, created_at: now, updated_at: now, meta: metaA },
+        ];
+      }
+      if (text.includes("FROM library_blocks")) return [{ id: blockA }];
+      if (text.includes("FROM opening_teaching_activities a")) {
+        if (text.includes("create_intent->>'workGroupId' =")) {
+          return [{ id: activityId, course_id: null }];
+        }
+        // Teaching activity get / listByOwner embed openingWritingActivityReadableSql -> deleted docB omits existingActivity
+        return sawReadableWritingPredicate ? [] : [existingActivity];
+      }
+      return [];
+    });
+
+    const writingRepo = createOpeningWritingWorkspaceRepository(sql);
+    const teachingRepo = createOpeningTeachingActivitiesRepository(sql);
+
+    // (a) Replay start with same clientKey (both exact params and mutated params) -> NOT_FOUND, zero writes, zero leak
+    let sameReplayErr: unknown = null;
+    try {
+      await writingRepo.start(SCOPE, {
+        clientKey: "writing-ce1-key",
+        title: "双稿测试",
+        initialText: "初始段落",
+      });
+    } catch (err) {
+      sameReplayErr = err;
+    }
+    expect(sameReplayErr).toMatchObject({ name: "OpeningWritingError", code: "NOT_FOUND" });
+
+    let diffReplayErr: unknown = null;
+    try {
+      await writingRepo.start(SCOPE, {
+        clientKey: "writing-ce1-key",
+        title: "改参探测标题",
+        initialText: "改参探测正文",
+      });
+    } catch (err) {
+      diffReplayErr = err;
+    }
+    expect(diffReplayErr).toMatchObject({ name: "OpeningWritingError", code: "NOT_FOUND" });
+
+    // (b) Teaching activity get -> null; assertOwnedActivity -> NOT_FOUND
+    const activityDetail = await teachingRepo.get(SCOPE, activityId);
+    expect(sawReadableWritingPredicate).toBe(true);
+    expect(activityDetail).toBeNull();
+    await expect(teachingRepo.assertOwnedActivity(SCOPE, activityId)).rejects.toMatchObject({
+      code: "NOT_FOUND",
+    });
+
+    // (c) Teaching activity listByOwner -> omits deleted B activity
+    const listedActivities = await teachingRepo.listByOwner(SCOPE);
+    expect(listedActivities).toEqual([]);
+
+    const serializedPayloads = JSON.stringify({
+      sameReplayErr: sameReplayErr instanceof Error ? { code: (sameReplayErr as OpeningWritingError).code, message: sameReplayErr.message } : sameReplayErr,
+      diffReplayErr: diffReplayErr instanceof Error ? { code: (diffReplayErr as OpeningWritingError).code, message: diffReplayErr.message } : diffReplayErr,
+      activityDetail,
+      listedActivities,
+    });
+    for (const forbidden of [secretLabel, secretSnapshot, secretFeedback, docB, blockB, assistanceId]) {
+      expect(serializedPayloads).not.toContain(forbidden);
+    }
+    expect(
+      queries.some(
+        (q) =>
+          /^(INSERT|UPDATE|DELETE)\b/.test(q.sql)
+          && !q.sql.startsWith("INSERT INTO opening_workspace_history_revisions"),
+      ),
+    ).toBe(false);
+
+    // Surviving variant A remains normally accessible via its own document entry
+    const queriesBeforeReadOnly = queries.length;
+    const viewA = await writingRepo.getView(SCOPE, docA);
+    expect(viewA).not.toBeNull();
+    expect(viewA!.currentDocumentId).toBe(docA);
+    expect(viewA!.variants.map((v) => v.documentId)).toEqual([docRoot, docA]);
+    expect(JSON.stringify(viewA)).not.toContain(docB);
+    expect(JSON.stringify(viewA)).not.toContain(secretLabel);
+    expect(
+      queries.slice(queriesBeforeReadOnly).some((q) => /^(INSERT|UPDATE|DELETE)\b/.test(q.sql)),
+    ).toBe(false);
+  });
+
+  it("counterexample 2: rejects explicit cross-group or missing activityId on getView with NOT_FOUND, while preserving block_missing and readable feedback on same variant B", async () => {
+    const group1 = "33333333-3333-4333-8333-333333333333";
+    const group2 = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const docB = "55555555-5555-4555-8555-555555555555";
+    const docPlain = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const deletedBlock2 = "77777777-7777-4777-8777-777777777777";
+    const group1ActivityId = "88888888-8888-4888-8888-888888888888";
+    const otherGroupActivityId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const assistanceId = "99999999-9999-4999-8999-999999999999";
+    const now = "2026-11-18T11:30:00.000Z";
+
+    const metaB = {
+      workGroupId: group1,
+      variantLabel: "B 稿",
+      parentDocumentId: group1,
+      parentRevisionNumber: 1,
+      keptAsPreferred: true,
+      focusBlockId: deletedBlock2,
+      assistanceRecords: [
+        {
+          id: assistanceId,
+          documentId: docB,
+          baseRevisionNumber: 1,
+          targetBlockId: deletedBlock2,
+          targetBlockTextSnapshot: "B 稿原第二段文本。",
+          dimension: "structure",
+          kind: "feedback",
+          suggestionText: "建议补充反例收束。",
+          adoptedAt: null,
+          adoptedRevisionNumber: null,
+          createdAt: now,
+        },
+      ],
+    };
+
+    const { sql } = createMockSql((text, values) => {
+      if (text.includes("FROM library_documents d") && text.includes("LEFT JOIN library_properties p")) {
+        const targetId = String(values[3]);
+        if (targetId === docPlain) {
+          return [{ id: docPlain, title: "普通未初始化笔记", current_revision_number: 1, has_meta: false, meta: null, focus_exists: false }];
+        }
+        if (targetId === docB) {
+          return [{ id: docB, title: "双稿测试", current_revision_number: 3, has_meta: true, meta: metaB, focus_exists: false }];
+        }
+        return [];
+      }
+      if (text.includes("FROM opening_teaching_activities a")) {
+        if (text.includes("WHERE a.id =")) {
+          const actId = String(values[1]);
+          if (actId === otherGroupActivityId) {
+            return [{ id: otherGroupActivityId, course_id: null, create_intent: { protocol: WRITING_WORKSPACE_PROTOCOL, workGroupId: group2 } }];
+          }
+          if (actId === group1ActivityId) {
+            return [{ id: group1ActivityId, course_id: null, create_intent: { protocol: WRITING_WORKSPACE_PROTOCOL, workGroupId: group1 } }];
+          }
+          return [];
+        }
+        return [{ id: group1ActivityId, course_id: null }];
+      }
+      if (text.includes("FROM library_documents d JOIN library_properties p")) {
+        return [
+          { id: group1, title: "双稿测试", current_revision_number: 1, created_at: now, updated_at: now, meta: { ...metaB, variantLabel: "初稿", parentDocumentId: null, parentRevisionNumber: null, keptAsPreferred: false, focusBlockId: null, assistanceRecords: [] } },
+          { id: docB, title: "双稿测试", current_revision_number: 3, created_at: now, updated_at: now, meta: metaB },
+        ];
+      }
+      if (text.includes("FROM library_blocks")) {
+        return [];
+      }
+      return [];
+    });
+
+    const repo = createOpeningWritingWorkspaceRepository(sql);
+
+    // Explicit activity from another workGroup -> NOT_FOUND (404), never falls back to group view
+    await expect(
+      repo.getView(SCOPE, docB, { activityId: otherGroupActivityId }),
+    ).rejects.toMatchObject({ name: "OpeningWritingError", code: "NOT_FOUND" });
+
+    // Explicit activity on an uninitialized note -> NOT_FOUND (404)
+    await expect(
+      repo.getView(SCOPE, docPlain, { activityId: group1ActivityId }),
+    ).rejects.toMatchObject({ name: "OpeningWritingError", code: "NOT_FOUND" });
+
+    // Deleting B's second block still opens the exact same B variant with block_missing and preserved feedback
+    const viewB = await repo.getView(SCOPE, docB, { activityId: group1ActivityId });
+    expect(viewB).not.toBeNull();
+    expect(viewB!.currentDocumentId).toBe(docB);
+    expect(viewB!.activityId).toBe(group1ActivityId);
+    expect(viewB!.focusRestore).toEqual({
+      status: "block_missing",
+      requestedBlockId: deletedBlock2,
+      message: "上次定位的段落已删除或合并，已打开当前服务器保存的内容。",
+    });
+    expect(viewB!.currentVariant.assistanceRecords).toHaveLength(1);
+    expect(viewB!.currentVariant.assistanceRecords[0]!.suggestionText).toBe("建议补充反例收束。");
+  });
+
+  it("counterexample 3: enforces single-snapshot consistency when concurrent revocation filters B out of variants during replay or getView", async () => {
+    const docA = "33333333-3333-4333-8333-333333333333";
+    const docB = "55555555-5555-4555-8555-555555555555";
+    const blockB = "77777777-7777-4777-8777-777777777777";
+    const activityId = "88888888-8888-4888-8888-888888888888";
+    const assistanceId = "99999999-9999-4999-8999-999999999999";
+    const now = "2026-11-18T12:00:00.000Z";
+    const secretSentence = "CONCURRENT_REVOKE_SNAPSHOT_SENTENCE_777";
+
+    const metaA = {
+      workGroupId: docA,
+      variantLabel: "初稿",
+      parentDocumentId: null,
+      parentRevisionNumber: null,
+      keptAsPreferred: false,
+      focusBlockId: null,
+      assistanceRecords: [],
+    };
+    const metaB = {
+      workGroupId: docA,
+      variantLabel: "B 稿",
+      parentDocumentId: docA,
+      parentRevisionNumber: 1,
+      keptAsPreferred: true,
+      focusBlockId: blockB,
+      assistanceRecords: [
+        {
+          id: assistanceId,
+          documentId: docB,
+          baseRevisionNumber: 1,
+          targetBlockId: blockB,
+          targetBlockTextSnapshot: secretSentence,
+          dimension: "language",
+          kind: "polish_suggestion",
+          suggestionText: "并发撤权前的建议",
+          adoptedAt: null,
+          adoptedRevisionNumber: null,
+          createdAt: now,
+        },
+      ],
+    };
+    const existingActivity = {
+      id: activityId,
+      course_id: null,
+      create_intent: { protocol: WRITING_WORKSPACE_PROTOCOL, workGroupId: docA },
+      checkpoint_json: {
+        writingWorkspace: {
+          protocol: WRITING_WORKSPACE_PROTOCOL,
+          workGroupId: docA,
+          activeDocumentId: docB,
+          activeVariantLabel: "B 稿",
+          savedRevisionNumber: 1,
+          focusBlockId: blockB,
+          updatedAt: now,
+        },
+      },
+    };
+
+    // Simulate concurrent revocation committing right before buildView's groupRows snapshot:
+    // initial readAuthorizedWritingDocument still saw docB, while groupRows only sees [docA].
+    // buildView MUST reject with NOT_FOUND rather than returning variants:[A] + currentVariant:B.
+    const { sql, queries } = createMockSql((text, values) => {
+      if (text.includes("FROM workspaces")) return [{ id: SCOPE.workspaceId }];
+      if (text.includes("FROM opening_teaching_activities") && text.includes("FOR UPDATE")) {
+        return [existingActivity];
+      }
+      if (text.includes("FROM library_documents d") && text.includes("LEFT JOIN library_properties p")) {
+        const targetId = String(values[3]);
+        if (targetId === docA) {
+          return [{ id: docA, title: "并发测试", current_revision_number: 1, has_meta: true, meta: metaA, focus_exists: false }];
+        }
+        return [{ id: docB, title: "并发测试", current_revision_number: 1, has_meta: true, meta: metaB, focus_exists: true }];
+      }
+      if (text.includes("FROM library_revisions")) {
+        return [{ title: "并发测试", blocks: [{ content: { blockNoteContent: "初稿正文", props: null, children: [] } }] }];
+      }
+      if (text.includes("FROM opening_teaching_activities a")) {
+        return [{ id: activityId, course_id: null, create_intent: { protocol: WRITING_WORKSPACE_PROTOCOL, workGroupId: docA } }];
+      }
+      if (text.includes("FROM library_documents d JOIN library_properties p")) {
+        // Post-revocation snapshot omits docB!
+        return [{ id: docA, title: "并发测试", current_revision_number: 1, created_at: now, updated_at: now, meta: metaA }];
+      }
+      return [];
+    });
+
+    const repo = createOpeningWritingWorkspaceRepository(sql);
+    await expect(repo.getView(SCOPE, docB)).rejects.toMatchObject({
+      name: "OpeningWritingError",
+      code: "NOT_FOUND",
+    });
+    expect(queries.some((q) => /^(INSERT|UPDATE|DELETE)\b/.test(q.sql))).toBe(false);
+
+    await expect(
+      repo.start(SCOPE, {
+        clientKey: "writing-ce3-key",
+        title: "并发测试",
+        initialText: "初稿正文",
+      }),
+    ).rejects.toMatchObject({
+      name: "OpeningWritingError",
+      code: "NOT_FOUND",
+    });
+    expect(
+      queries.some(
+        (q) =>
+          /^(INSERT|UPDATE|DELETE)\b/.test(q.sql)
+          && !q.sql.startsWith("INSERT INTO opening_workspace_history_revisions"),
+      ),
+    ).toBe(false);
   });
 });

@@ -101,6 +101,15 @@ it("recovers course-less writing workspace pinned to checkpoint variant and veri
   const workGroupId = "11111111-1111-4111-8111-111111111111";
   const docB = "22222222-2222-4222-8222-222222222222";
   const block2 = "33333333-3333-4333-8333-333333333333";
+  const metaB = {
+    workGroupId,
+    variantLabel: "B 稿",
+    parentDocumentId: workGroupId,
+    parentRevisionNumber: 1,
+    keptAsPreferred: true,
+    focusBlockId: block2,
+    assistanceRecords: [],
+  };
   const writingRow = row("44444444-4444-4444-8444-444444444444", {
     course_id: null,
     updated_at: "2026-11-18T10:00:00Z",
@@ -118,7 +127,10 @@ it("recovers course-less writing workspace pinned to checkpoint variant and veri
     },
   });
 
-  const exactSql = db([writingRow], [{ id: docB, current_revision_number: 3, focus_exists: true }]);
+  const exactSql = db(
+    [writingRow],
+    [{ id: docB, title: "论证草稿", current_revision_number: 3, has_meta: true, meta: metaB, focus_exists: true }],
+  );
   expect(await readOpeningWorkspaceActivityRecovery(exactSql, scope)).toEqual({
     kind: "writing",
     activityId: writingRow.id,
@@ -135,7 +147,10 @@ it("recovers course-less writing workspace pinned to checkpoint variant and veri
   expect(sqlText).toContain("LEFT JOIN courses c ON c.id=a.course_id AND c.workspace_id=a.workspace_id");
   expect(sqlText).toContain("a.course_id IS NULL OR c.archived_at IS NULL");
 
-  const missingBlockSql = db([writingRow], [{ id: docB, current_revision_number: 4, focus_exists: false }]);
+  const missingBlockSql = db(
+    [writingRow],
+    [{ id: docB, title: "论证草稿", current_revision_number: 4, has_meta: true, meta: metaB, focus_exists: false }],
+  );
   expect(await readOpeningWorkspaceActivityRecovery(missingBlockSql, scope)).toMatchObject({
     kind: "writing",
     documentId: docB,
@@ -150,7 +165,10 @@ it("recovers course-less writing workspace pinned to checkpoint variant and veri
       writingWorkspace: { ...writingRow.checkpoint_json.writingWorkspace, focusBlockId: null },
     },
   };
-  const noneSql = db([noFocusRow], [{ id: docB, current_revision_number: 2, focus_exists: false }]);
+  const noneSql = db(
+    [noFocusRow],
+    [{ id: docB, title: "论证草稿", current_revision_number: 2, has_meta: true, meta: { ...metaB, focusBlockId: null }, focus_exists: false }],
+  );
   expect(await readOpeningWorkspaceActivityRecovery(noneSql, scope)).toMatchObject({
     kind: "writing",
     focusBlockId: null,
@@ -202,4 +220,97 @@ it("dispatches course recovery when course activity is newer or when writing doc
     courseId: "course-1",
     sessionId: "sess-1",
   });
+});
+
+it("enforces writing target authorization and workGroup match across explicit and implicit workspace/course recovery without write side effects", async () => {
+  const group1 = "11111111-1111-4111-8111-111111111111";
+  const group2 = "99999999-9999-4999-8999-999999999999";
+  const docB = "22222222-2222-4222-8222-222222222222";
+  const courseFallbackRow = row("55555555-5555-4555-8555-555555555555", {
+    course_id: "course-1",
+    updated_at: "2026-11-18T08:00:00Z",
+    session_id: "sess-live",
+  });
+  const writingCandidate = row("44444444-4444-4444-8444-444444444444", {
+    course_id: "course-1",
+    updated_at: "2026-11-18T12:00:00Z",
+    create_intent: { protocol: "writing-workspace-v1", workGroupId: group1 },
+    checkpoint_json: {
+      writingWorkspace: {
+        protocol: "writing-workspace-v1",
+        workGroupId: group1,
+        activeDocumentId: docB,
+        activeVariantLabel: "B 绝密删稿",
+        savedRevisionNumber: 2,
+        focusBlockId: null,
+        updatedAt: "2026-11-18T12:00:00.000Z",
+      },
+    },
+  });
+
+  // Explicit activityId whose document meta belongs to another workGroup -> null (never falls back)
+  const mismatchedMetaExplicit = db(
+    [writingCandidate],
+    [{
+      id: docB,
+      title: "B 绝密删稿",
+      current_revision_number: 2,
+      has_meta: true,
+      meta: {
+        workGroupId: group2,
+        variantLabel: "B 绝密删稿",
+        parentDocumentId: null,
+        parentRevisionNumber: null,
+        keptAsPreferred: false,
+        focusBlockId: null,
+        assistanceRecords: [],
+      },
+      focus_exists: false,
+    }],
+  );
+  expect(
+    await readOpeningWorkspaceActivityRecovery(mismatchedMetaExplicit, scope, {
+      activityId: writingCandidate.id,
+    }),
+  ).toBeNull();
+  expect(queries(mismatchedMetaExplicit).some(q => /INSERT|UPDATE|DELETE/.test(q))).toBe(false);
+
+  // Implicit recovery skips uninitialized/mismatched writing target and never leaks B's label/id;
+  // also verify course-level candidate SQL carries the writing readability gate so courseFallback cannot resurrect it.
+  const implicitSkipSql = db(
+    [writingCandidate],
+    [{ id: docB, title: "普通笔记", current_revision_number: 1, has_meta: false, meta: null, focus_exists: false }],
+    [courseFallbackRow],
+  );
+  const recovered = await readOpeningWorkspaceActivityRecovery(implicitSkipSql, scope);
+  expect(recovered).toEqual({
+    kind: "course",
+    activityId: courseFallbackRow.id,
+    courseId: "course-1",
+    sessionId: "sess-live",
+  });
+  expect(JSON.stringify(recovered)).not.toContain("B 绝密删稿");
+  expect(JSON.stringify(recovered)).not.toContain(docB);
+  expect(queries(implicitSkipSql).some(q => /INSERT|UPDATE|DELETE/.test(q))).toBe(false);
+
+  // Verify SQL readability gate is embedded in both course candidates() and workspaceCandidates()
+  const allFragments = queries(implicitSkipSql).join(" ");
+  expect(allFragments).toContain("checkpoint_json->'writingWorkspace'->>'activeDocumentId'");
+  expect(allFragments).toContain("wd.deleted_at IS NULL");
+
+  // Malformed writing row (create_intent.workGroupId !== checkpoint.workGroupId) is treated as non-resumable placeholder
+  const malformedIntentRow = {
+    ...writingCandidate,
+    checkpoint_json: {
+      writingWorkspace: {
+        ...writingCandidate.checkpoint_json.writingWorkspace,
+        workGroupId: group2,
+      },
+    },
+  };
+  expect(
+    await readOpeningWorkspaceActivityRecovery(db([malformedIntentRow]), scope, {
+      activityId: malformedIntentRow.id,
+    }),
+  ).toBeNull();
 });

@@ -1,6 +1,17 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { createOpeningPlansRepository, createOpeningSpanSessionRepository, createOpeningTeachingActivitiesRepository, createOpeningLearningRepository, readOpeningCurrentLearningActivity, readOpeningCurrentLearningRecovery, readOpeningLearningAgenda } from "@aistudy/database";
+import {
+  createLibraryRepository,
+  createOpeningLearningRepository,
+  createOpeningPlansRepository,
+  createOpeningSpanSessionRepository,
+  createOpeningTeachingActivitiesRepository,
+  createOpeningWritingWorkspaceRepository,
+  readOpeningCurrentLearningActivity,
+  readOpeningCurrentLearningRecovery,
+  readOpeningLearningAgenda,
+  readOpeningWorkspaceActivityRecovery,
+} from "@aistudy/database";
 import { taskItemSchema, teachingActivitySchema, teachingActivityCreateInputSchema, type TeachingActivity } from "@aistudy/contracts";
 import { DEFAULT_STUDY_SESSION_INTENT, SPAN_REQUIREMENT_KEY, SPAN_SKILL_LABEL } from "@aistudy/domain";
 import { createSpanLessonSessionService } from "../../apps/web/src/features/opening/teaching/span/lesson-session-service";
@@ -335,5 +346,119 @@ it("excludes card-session keys, cardReviewSession checkpoints, and legacy-course
   expect(currentCourseActivity(rows, courseId)?.id).toBe(usable);
   expect(pickCurrentTeachingActivity(rows)?.id).toBe(usable);
   expect(courseStudyActivities(rows, courseId).map(row => row.id)).toEqual([usable]);
+  expect(await readFootprint()).toEqual(before);
+});
+
+it("filters unreadable writing activities across explicit and implicit recovery, course selectors, and teaching activity get/list with zero write side effects", async () => {
+  const usableCourseActivity = await activity({ at: "2026-11-01T00:00:00Z" });
+  const writing = createOpeningWritingWorkspaceRepository(f.sql);
+  const teaching = createOpeningTeachingActivitiesRepository(f.sql);
+  const library = createLibraryRepository(f.sql);
+
+  const secretLabel = `B稿-待隐藏-${randomUUID().slice(0, 8)}`;
+  const secretSentence = `SECRET_WRITING_RECOVERY_SENTENCE_${randomUUID()}`;
+  const secretFeedback = `SECRET_WRITING_RECOVERY_FEEDBACK_${randomUUID()}`;
+
+  const started = await writing.start(f.scope, {
+    clientKey: `writing-recovery-filter-${randomUUID()}`,
+    title: "课程内写作演练",
+    initialText: secretSentence,
+    variantLabel: "初稿",
+    courseId,
+  });
+  const writingActivityId = started.activityId!;
+  const docInit = started.currentDocumentId;
+
+  const derivedA = await writing.command(f.scope, docInit, {
+    action: "derive_variant",
+    expectedRevisionNumber: 1,
+    variantLabel: "A 稿",
+    activityId: writingActivityId,
+  });
+  const docA = derivedA.workspace.currentDocumentId;
+
+  const derivedB = await writing.command(f.scope, docInit, {
+    action: "derive_variant",
+    expectedRevisionNumber: 1,
+    variantLabel: secretLabel,
+    activityId: writingActivityId,
+  });
+  const docB = derivedB.workspace.currentDocumentId;
+  const blockB = derivedB.workspace.currentVariant.focusBlockId!;
+
+  await writing.command(f.scope, docB, {
+    action: "record_feedback",
+    expectedRevisionNumber: 1,
+    targetBlockId: blockB,
+    dimension: "argument",
+    kind: "feedback",
+    suggestionText: secretFeedback,
+  });
+  await writing.command(f.scope, docB, {
+    action: "save_checkpoint",
+    activityId: writingActivityId,
+    focusBlockId: blockB,
+    keptAsPreferred: true,
+  });
+
+  // Make the writing activity strictly newer than usableCourseActivity so implicit recovery would select it when readable
+  await f.sql`UPDATE opening_teaching_activities SET updated_at='2026-11-05T00:00:00Z' WHERE id=${writingActivityId}`;
+  expect(await readOpeningWorkspaceActivityRecovery(f.sql, f.scope)).toMatchObject({
+    kind: "writing",
+    activityId: writingActivityId,
+    courseId,
+    documentId: docB,
+    variantLabel: secretLabel,
+  });
+
+  // Delete pinned target B; surviving A remains readable on its own document entry
+  await library.softDeleteDocument({ workspaceId: f.scope.workspaceId, documentId: docB });
+  const before = await readFootprint();
+
+  // Explicit target references must fail closed (null / NOT_FOUND) and never substitute usableCourseActivity or docA
+  expect(
+    await readOpeningWorkspaceActivityRecovery(f.sql, f.scope, { activityId: writingActivityId }),
+  ).toBeNull();
+  expect(
+    await readOpeningCurrentLearningActivity(f.sql, f.scope, courseId, { activityId: writingActivityId }),
+  ).toBeNull();
+  expect(await teaching.get(f.scope, writingActivityId)).toBeNull();
+  await expect(teaching.assertOwnedActivity(f.scope, writingActivityId)).rejects.toMatchObject({
+    code: "NOT_FOUND",
+  });
+
+  // Implicit recovery & listing omit the unreadable writing activity and fall back to usableCourseActivity
+  const implicitWorkspaceRecovery = await readOpeningWorkspaceActivityRecovery(f.sql, f.scope);
+  expect(implicitWorkspaceRecovery).toEqual({
+    kind: "course",
+    activityId: usableCourseActivity,
+    sessionId: null,
+    courseId,
+  });
+  expect(await readOpeningCurrentLearningActivity(f.sql, f.scope, courseId)).toEqual({
+    activityId: usableCourseActivity,
+    sessionId: null,
+    courseId,
+  });
+  expect(await readOpeningCurrentLearningRecovery(f.sql, f.scope)).toEqual({
+    activityId: usableCourseActivity,
+    sessionId: null,
+    courseId,
+  });
+
+  const listed = (await teaching.listByOwner(f.scope)).map(row => teachingActivitySchema.parse(row));
+  expect(listed.map(row => row.id)).toEqual([usableCourseActivity]);
+  expect(currentCourseActivity(listed, courseId)?.id).toBe(usableCourseActivity);
+  expect(pickCurrentTeachingActivity(listed)?.id).toBe(usableCourseActivity);
+  expect(courseStudyActivities(listed, courseId).map(row => row.id)).toEqual([usableCourseActivity]);
+
+  const serialized = JSON.stringify({ implicitWorkspaceRecovery, listed });
+  for (const forbidden of [writingActivityId, docB, blockB, secretLabel, secretSentence, secretFeedback]) {
+    expect(serialized).not.toContain(forbidden);
+  }
+
+  // Surviving A 稿 still opens via its own document entry
+  const viewA = await writing.getView(f.scope, docA);
+  expect(viewA?.currentDocumentId).toBe(docA);
   expect(await readFootprint()).toEqual(before);
 });
