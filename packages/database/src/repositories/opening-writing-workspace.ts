@@ -389,7 +389,13 @@ export function createOpeningWritingWorkspaceRepository(
     if (!snapshotCurrentMeta) {
       throw new OpeningWritingError("NOT_FOUND", "笔记不存在或不可用。");
     }
-    const resolvedCurrentMeta: WritingVariantMeta = snapshotCurrentMeta;
+    const preferredCount = variants.filter((variant) => variant.keptAsPreferred).length;
+    const normalizedVariants: WritingVariantSummary[] = preferredCount > 1
+      ? variants.map((variant) => ({ ...variant, keptAsPreferred: false }))
+      : variants;
+    const resolvedCurrentMeta: WritingVariantMeta = preferredCount > 1
+      ? { ...snapshotCurrentMeta, keptAsPreferred: false }
+      : snapshotCurrentMeta;
 
     const rawRequested = options.requestedFocusBlockId?.trim() || null;
     const requested = rawRequested && uuidSchema.safeParse(rawRequested).success
@@ -425,7 +431,7 @@ export function createOpeningWritingWorkspaceRepository(
       courseId: activity?.courseId ?? null,
       currentDocumentId: canonicalDocumentId,
       currentVariant: resolvedCurrentMeta,
-      variants,
+      variants: normalizedVariants,
       focusRestore: writingFocusRestoreSchema.parse(focusRestore),
     });
   }
@@ -742,6 +748,115 @@ export function createOpeningWritingWorkspaceRepository(
         const doc = docRows[0]!;
         const currentRevision = Number(doc.current_revision_number);
 
+        const preferredIntent =
+          cmd.action === "set_preferred_variant"
+            ? { keptAsPreferred: cmd.keptAsPreferred, activityId: cmd.activityId }
+            : cmd.action === "save_checkpoint" && typeof cmd.keptAsPreferred === "boolean"
+              ? { keptAsPreferred: cmd.keptAsPreferred, activityId: cmd.activityId }
+              : null;
+
+        if (preferredIntent !== null) {
+          const targetPropRows = preferredIntent.keptAsPreferred
+            ? await tx`
+                SELECT value FROM library_properties
+                WHERE workspace_id = ${scope.workspaceId}
+                  AND subject_type = 'document'
+                  AND subject_id = ${documentId}
+                  AND key = ${WRITING_META_PROPERTY_KEY}
+              `
+            : await tx`
+                SELECT value FROM library_properties
+                WHERE workspace_id = ${scope.workspaceId}
+                  AND subject_type = 'document'
+                  AND subject_id = ${documentId}
+                  AND key = ${WRITING_META_PROPERTY_KEY}
+                FOR UPDATE
+              `;
+          if (!targetPropRows.length) {
+            throw new OpeningWritingError("NOT_FOUND", "笔记不存在或不可用。");
+          }
+          const parsedTargetMeta = writingVariantMetaSchema.safeParse(targetPropRows[0]!.value);
+          if (!parsedTargetMeta.success) {
+            throw new OpeningWritingError("NOT_FOUND", "笔记不存在或不可用。");
+          }
+          const targetWorkGroupId = parsedTargetMeta.data.workGroupId.toLowerCase();
+
+          if (preferredIntent.activityId !== undefined) {
+            await resolveActivityForView(
+              tx,
+              scope,
+              targetWorkGroupId,
+              preferredIntent.activityId,
+            );
+          }
+
+          let updatedMeta: WritingVariantMeta;
+          if (preferredIntent.keptAsPreferred) {
+            const groupPropRows = await tx`
+              SELECT d.id, p.value AS meta
+              FROM library_documents d
+              JOIN library_properties p
+                ON p.workspace_id = d.workspace_id
+               AND p.subject_type = 'document'
+               AND p.subject_id = d.id
+               AND p.key = ${WRITING_META_PROPERTY_KEY}
+              JOIN workspaces w
+                ON w.id = d.workspace_id
+               AND w.owner_user_id = ${scope.ownerUserId}
+              WHERE d.workspace_id = ${scope.workspaceId}
+                AND d.deleted_at IS NULL
+                AND ${openingNoteReadable(tx, scope.workspaceId, tx`d.id`)}
+                AND lower(p.value->>'workGroupId') = lower(${targetWorkGroupId})
+              ORDER BY d.id ASC
+              FOR UPDATE OF p
+            `;
+
+            let lockedCurrentMeta: WritingVariantMeta | null = null;
+            for (const row of groupPropRows) {
+              const rowId = String(row.id).toLowerCase();
+              const parsedRowMeta = writingVariantMetaSchema.safeParse(row.meta);
+              if (!parsedRowMeta.success) {
+                if (rowId === documentId) {
+                  throw new OpeningWritingError("NOT_FOUND", "笔记不存在或不可用。");
+                }
+                continue;
+              }
+              if (rowId === documentId) {
+                lockedCurrentMeta = parsedRowMeta.data;
+              } else if (parsedRowMeta.data.keptAsPreferred) {
+                await upsertWritingMeta(tx, scope.workspaceId, rowId, {
+                  ...parsedRowMeta.data,
+                  keptAsPreferred: false,
+                });
+              }
+            }
+            if (!lockedCurrentMeta) {
+              throw new OpeningWritingError("NOT_FOUND", "笔记不存在或不可用。");
+            }
+            updatedMeta = {
+              ...lockedCurrentMeta,
+              keptAsPreferred: true,
+            };
+            if (!lockedCurrentMeta.keptAsPreferred) {
+              await upsertWritingMeta(tx, scope.workspaceId, documentId, updatedMeta);
+            }
+          } else {
+            updatedMeta = {
+              ...parsedTargetMeta.data,
+              keptAsPreferred: false,
+            };
+            if (parsedTargetMeta.data.keptAsPreferred) {
+              await upsertWritingMeta(tx, scope.workspaceId, documentId, updatedMeta);
+            }
+          }
+
+          return {
+            workspace: await buildView(tx, scope, documentId, updatedMeta, {
+              activityId: preferredIntent.activityId,
+            }),
+          };
+        }
+
         const [timeRow] = await tx`SELECT now() AS now_ts`;
         const nowIso = toIso(timeRow?.now_ts ?? new Date());
 
@@ -777,7 +892,11 @@ export function createOpeningWritingWorkspaceRepository(
           await upsertWritingMeta(tx, scope.workspaceId, documentId, currentMeta);
           await ensureBootstrapWorkgroupActivity(tx, scope, doc, initialFocusBlockId, nowIso);
         } else {
-          currentMeta = writingVariantMetaSchema.parse(propRows[0]!.value);
+          const parsedMeta = writingVariantMetaSchema.safeParse(propRows[0]!.value);
+          if (!parsedMeta.success) {
+            throw new OpeningWritingError("NOT_FOUND", "笔记不存在或不可用。");
+          }
+          currentMeta = parsedMeta.data;
         }
 
         if (cmd.action === "derive_variant") {
@@ -1016,14 +1135,18 @@ export function createOpeningWritingWorkspaceRepository(
             revisionNumber: nextRevisionNumber,
             assistance: "revealed",
             adoptedPolishCount: countAdoptedPolish(updatedMeta),
-            keptAsPreferred: updatedMeta.keptAsPreferred,
+            keptAsPreferred: workspace.currentVariant.keptAsPreferred,
             evidenceVerdict: "MASTERY_NOT_ESTABLISHED",
           });
 
           return { workspace, outcome };
         }
 
-        // save_checkpoint
+        if (cmd.action !== "save_checkpoint") {
+          throw new OpeningWritingError("VALIDATION", "写作区指令格式不正确。");
+        }
+
+        // save_checkpoint (focus + activity resume breakpoint only; preferred flag untouched)
         if (
           cmd.focusBlockId !== null
           && !blockRows.some((block) => String(block.id) === cmd.focusBlockId)
@@ -1037,39 +1160,9 @@ export function createOpeningWritingWorkspaceRepository(
           cmd.activityId,
         );
 
-        if (cmd.keptAsPreferred === true) {
-          const siblingRows = await tx`
-            SELECT d.id, p.value AS meta
-            FROM library_documents d
-            JOIN library_properties p
-              ON p.workspace_id = d.workspace_id
-             AND p.subject_type = 'document'
-             AND p.subject_id = d.id
-             AND p.key = ${WRITING_META_PROPERTY_KEY}
-            WHERE d.workspace_id = ${scope.workspaceId}
-              AND d.deleted_at IS NULL
-              AND d.id <> ${documentId}
-              AND lower(p.value->>'workGroupId') = lower(${currentMeta.workGroupId})
-            FOR UPDATE OF p
-          `;
-          for (const sibling of siblingRows) {
-            const siblingMeta = writingVariantMetaSchema.parse(sibling.meta);
-            if (siblingMeta.keptAsPreferred) {
-              await upsertWritingMeta(tx, scope.workspaceId, String(sibling.id), {
-                ...siblingMeta,
-                keptAsPreferred: false,
-              });
-            }
-          }
-        }
-
         const updatedMeta: WritingVariantMeta = {
           ...currentMeta,
           focusBlockId: cmd.focusBlockId,
-          keptAsPreferred:
-            cmd.keptAsPreferred !== undefined
-              ? cmd.keptAsPreferred
-              : currentMeta.keptAsPreferred,
         };
         await upsertWritingMeta(tx, scope.workspaceId, documentId, updatedMeta);
 

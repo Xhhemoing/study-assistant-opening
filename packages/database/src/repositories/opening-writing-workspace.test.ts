@@ -1390,4 +1390,416 @@ describe("createOpeningWritingWorkspaceRepository", () => {
     expect(listed.map((a) => a.id)).toEqual([validActivityId]);
     expect(queries.map((q) => q.sql).join(" ")).toContain("^(0|[1-9][0-9]*)(\\.0+)?$");
   });
+
+  it("F2: decouples set_preferred_variant from checkpoint_json/updated_at/focusBlockId, preserves lock order, handles stale unstar & legacy save_checkpoint, and skips malformed siblings", async () => {
+    const workGroupId = "33333333-3333-4333-8333-333333333333";
+    const docA = "44444444-4444-4444-8444-444444444444";
+    const docB = "55555555-5555-4555-8555-555555555555";
+    const brokenSiblingId = "66666666-6666-4666-8666-666666666666";
+    const blockA1 = "77777777-7777-4777-8777-777777777777";
+    const blockB2 = "88888888-8888-4888-8888-888888888888";
+    const missingBlock = "99999999-9999-4999-8999-999999999999";
+    const activityId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const otherGroupActivityId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const otherGroupId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const assistAId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    const assistBId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+    const now = "2026-11-19T08:00:00.000Z";
+
+    const assistA = {
+      id: assistAId,
+      documentId: docA,
+      baseRevisionNumber: 1,
+      targetBlockId: blockA1,
+      targetBlockTextSnapshot: "A 稿首段。",
+      dimension: "argument",
+      kind: "feedback",
+      suggestionText: "保留 A 稿论点反馈。",
+      adoptedAt: null,
+      adoptedRevisionNumber: null,
+      createdAt: now,
+    };
+    const assistB = {
+      id: assistBId,
+      documentId: docB,
+      baseRevisionNumber: 2,
+      targetBlockId: blockB2,
+      targetBlockTextSnapshot: "B 稿第二段。",
+      dimension: "language",
+      kind: "polish_suggestion",
+      suggestionText: "保留 B 稿润色建议。",
+      adoptedAt: null,
+      adoptedRevisionNumber: null,
+      createdAt: now,
+    };
+
+    const metaByDoc = new Map<string, Record<string, unknown>>([
+      [
+        docA,
+        {
+          workGroupId,
+          variantLabel: "A 稿",
+          parentDocumentId: workGroupId,
+          parentRevisionNumber: 1,
+          keptAsPreferred: false,
+          focusBlockId: blockA1,
+          assistanceRecords: [assistA],
+        },
+      ],
+      [
+        docB,
+        {
+          workGroupId,
+          variantLabel: "B 稿",
+          parentDocumentId: workGroupId,
+          parentRevisionNumber: 1,
+          keptAsPreferred: false,
+          focusBlockId: blockB2,
+          assistanceRecords: [assistB],
+        },
+      ],
+      [
+        brokenSiblingId,
+        {
+          workGroupId,
+          variantLabel: "损坏兄弟稿",
+          parentDocumentId: workGroupId,
+          parentRevisionNumber: 1,
+          keptAsPreferred: true,
+          focusBlockId: null,
+          assistanceRecords: [{}],
+        },
+      ],
+    ]);
+
+    const activityRow = {
+      id: activityId,
+      course_id: null,
+      create_intent: { protocol: WRITING_WORKSPACE_PROTOCOL, workGroupId },
+      checkpoint_json: {
+        writingWorkspace: {
+          protocol: WRITING_WORKSPACE_PROTOCOL,
+          workGroupId,
+          activeDocumentId: docB,
+          activeVariantLabel: "B 稿",
+          savedRevisionNumber: 2,
+          focusBlockId: blockB2,
+          updatedAt: now,
+        },
+      },
+    };
+    const otherGroupActivityRow = {
+      id: otherGroupActivityId,
+      course_id: null,
+      create_intent: { protocol: WRITING_WORKSPACE_PROTOCOL, workGroupId: otherGroupId },
+      checkpoint_json: {
+        writingWorkspace: {
+          protocol: WRITING_WORKSPACE_PROTOCOL,
+          workGroupId: otherGroupId,
+          activeDocumentId: docB,
+          activeVariantLabel: "B 稿",
+          savedRevisionNumber: 2,
+          focusBlockId: blockB2,
+          updatedAt: now,
+        },
+      },
+    };
+
+    const { sql, queries } = createMockSql((text, values) => {
+      if (text.includes("FROM workspaces")) return [{ id: SCOPE.workspaceId }];
+      if (text.includes("SELECT * FROM library_documents")) {
+        const id = String(values[0]).toLowerCase();
+        if (metaByDoc.has(id)) {
+          return [{ id, workspace_id: SCOPE.workspaceId, title: "多稿解耦测试", lifecycle: "scratch", current_revision_number: id === docB ? 2 : 1 }];
+        }
+        return [];
+      }
+      if (text.startsWith("SELECT value FROM library_properties")) {
+        const id = String(values[1]).toLowerCase();
+        const found = metaByDoc.get(id);
+        return found ? [{ value: structuredClone(found) }] : [];
+      }
+      if (text.includes("FROM library_documents d JOIN library_properties p") && text.includes("FOR UPDATE OF p")) {
+        return [...metaByDoc.entries()]
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([id, meta]) => ({ id, meta: structuredClone(meta) }));
+      }
+      if (text.startsWith("INSERT INTO library_properties")) {
+        const id = String(values[1]).toLowerCase();
+        metaByDoc.set(id, structuredClone(values[3] as Record<string, unknown>));
+        return [];
+      }
+      if (text.includes("FROM library_documents d") && text.includes("LEFT JOIN library_properties p")) {
+        const id = String(values[3]).toLowerCase();
+        const found = metaByDoc.get(id);
+        return found
+          ? [{ id, title: "多稿解耦测试", current_revision_number: id === docB ? 2 : 1, has_meta: true, meta: structuredClone(found), focus_exists: true }]
+          : [];
+      }
+      if (text.includes("FROM library_documents d JOIN library_properties p")) {
+        return [...metaByDoc.entries()]
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([id, meta]) => ({
+            id,
+            title: "多稿解耦测试",
+            current_revision_number: id === docB ? 2 : 1,
+            created_at: now,
+            updated_at: now,
+            meta: structuredClone(meta),
+          }));
+      }
+      if (text.includes("FROM opening_teaching_activities a")) {
+        if (text.includes("WHERE a.id =")) {
+          const id = String(values[1]).toLowerCase();
+          if (id === activityId) return [activityRow];
+          if (id === otherGroupActivityId) return [otherGroupActivityRow];
+          return [];
+        }
+        return [activityRow];
+      }
+      if (text.includes("FROM library_blocks") && text.includes("id::text =")) {
+        const docId = String(values[1]).toLowerCase();
+        const blockId = String(values[2]).toLowerCase();
+        if (docId === docA && blockId === blockA1) return [{ id: blockA1 }];
+        if (docId === docB && blockId === blockB2) return [{ id: blockB2 }];
+        return [];
+      }
+      return [];
+    });
+
+    const repo = createOpeningWritingWorkspaceRepository(sql);
+
+    // 1. Star A while checkpoint stays on B paragraph 2; broken sibling is safely skipped via safeParse
+    const starredA = await repo.command(SCOPE, docA, {
+      action: "set_preferred_variant",
+      keptAsPreferred: true,
+      activityId,
+    });
+    expect(starredA.outcome).toBeUndefined();
+    expect(starredA.workspace.currentDocumentId).toBe(docA);
+    expect(starredA.workspace.currentVariant.keptAsPreferred).toBe(true);
+    expect(starredA.workspace.currentVariant.focusBlockId).toBe(blockA1);
+    expect(starredA.workspace.currentVariant.assistanceRecords).toEqual([assistA]);
+    expect(starredA.workspace.variants.find((v) => v.documentId === docA)?.keptAsPreferred).toBe(true);
+    expect(starredA.workspace.variants.find((v) => v.documentId === docB)?.keptAsPreferred).toBe(false);
+
+    // Verify lock order (history lock -> workspaces FOR SHARE) and sibling lock SQL filters + ordering
+    const historyLockIdx = queries.findIndex(
+      (q) => q.sql.includes("opening_workspace_history_revisions") && q.sql.includes("FOR UPDATE"),
+    );
+    const workspaceShareIdx = queries.findIndex(
+      (q) => q.sql.includes("FROM workspaces") && q.sql.includes("FOR SHARE"),
+    );
+    const siblingLockQuery = queries.find((q) => q.sql.includes("FOR UPDATE OF p"));
+    expect(historyLockIdx).toBeGreaterThanOrEqual(0);
+    expect(workspaceShareIdx).toBeGreaterThan(historyLockIdx);
+    expect(siblingLockQuery).toBeDefined();
+    expect(siblingLockQuery!.sql).toContain("JOIN workspaces w");
+    expect(siblingLockQuery!.sql).toContain("d.deleted_at IS NULL");
+    expect(siblingLockQuery!.sql).toContain("ORDER BY d.id ASC FOR UPDATE OF p");
+
+    // 2. Repeat star A is idempotent (no extra library_properties writes)
+    const propWritesBeforeRepeat = queries.filter((q) => q.sql.startsWith("INSERT INTO library_properties")).length;
+    const repeatedA = await repo.command(SCOPE, docA, {
+      action: "set_preferred_variant",
+      keptAsPreferred: true,
+      activityId,
+    });
+    expect(repeatedA.workspace.currentVariant.keptAsPreferred).toBe(true);
+    expect(queries.filter((q) => q.sql.startsWith("INSERT INTO library_properties")).length).toBe(propWritesBeforeRepeat);
+
+    // 3. Star B -> clears A while preserving A's focusBlockId & assistanceRecords
+    const starredB = await repo.command(SCOPE, docB, {
+      action: "set_preferred_variant",
+      keptAsPreferred: true,
+      activityId,
+    });
+    expect(starredB.workspace.currentVariant.keptAsPreferred).toBe(true);
+    expect(starredB.workspace.variants.find((v) => v.documentId === docA)?.keptAsPreferred).toBe(false);
+    expect(metaByDoc.get(docA)).toMatchObject({
+      keptAsPreferred: false,
+      focusBlockId: blockA1,
+      assistanceRecords: [assistA],
+    });
+
+    // 4. Stale "unstar A" MUST NOT clear B!
+    const staleUnstarA = await repo.command(SCOPE, docA, {
+      action: "set_preferred_variant",
+      keptAsPreferred: false,
+      activityId,
+    });
+    expect(staleUnstarA.workspace.currentVariant.keptAsPreferred).toBe(false);
+    expect(staleUnstarA.workspace.variants.find((v) => v.documentId === docB)?.keptAsPreferred).toBe(true);
+    expect(metaByDoc.get(docB)).toMatchObject({
+      keptAsPreferred: true,
+      focusBlockId: blockB2,
+      assistanceRecords: [assistB],
+    });
+
+    // 5. Legacy save_checkpoint with boolean keptAsPreferred: true/false ignores non-existent focusBlockId
+    //    and validates explicit activityId first (cross-group -> 404, zero writes)
+    const propWritesBeforeLegacyCross = queries.filter((q) => q.sql.startsWith("INSERT INTO library_properties")).length;
+    await expect(
+      repo.command(SCOPE, docA, {
+        action: "save_checkpoint",
+        focusBlockId: missingBlock,
+        keptAsPreferred: true,
+        activityId: otherGroupActivityId,
+      }),
+    ).rejects.toMatchObject({ name: "OpeningWritingError", code: "NOT_FOUND" });
+    expect(queries.filter((q) => q.sql.startsWith("INSERT INTO library_properties")).length).toBe(propWritesBeforeLegacyCross);
+
+    const legacyStarA = await repo.command(SCOPE, docA, {
+      action: "save_checkpoint",
+      focusBlockId: missingBlock,
+      keptAsPreferred: true,
+      activityId,
+    });
+    expect(legacyStarA.workspace.currentVariant.keptAsPreferred).toBe(true);
+    expect(legacyStarA.workspace.currentVariant.focusBlockId).toBe(blockA1);
+    expect(legacyStarA.workspace.variants.find((v) => v.documentId === docB)?.keptAsPreferred).toBe(false);
+
+    const legacyUnstarA = await repo.command(SCOPE, docA, {
+      action: "save_checkpoint",
+      focusBlockId: missingBlock,
+      keptAsPreferred: false,
+      activityId,
+    });
+    expect(legacyUnstarA.workspace.currentVariant.keptAsPreferred).toBe(false);
+    expect(legacyUnstarA.workspace.currentVariant.focusBlockId).toBe(blockA1);
+
+    // Never touched checkpoint_json/updated_at, observations, document revisions, or history revision counter
+    expect(queries.some((q) => q.sql.includes("UPDATE opening_teaching_activities"))).toBe(false);
+    expect(queries.some((q) => q.sql.includes("opening_learning_observations"))).toBe(false);
+    expect(queries.some((q) => q.sql.includes("UPDATE opening_workspace_history_revisions"))).toBe(false);
+    expect(queries.some((q) => q.sql.includes("INSERT INTO library_revisions"))).toBe(false);
+    expect(queries.some((q) => q.sql.includes("UPDATE library_documents"))).toBe(false);
+  });
+
+  it("F2: rejects set_preferred_variant on uninitialized ordinary notes and malformed targets with 404 (zero writes), and converges multi-starred dirty data on read without writing", async () => {
+    const workGroupId = "33333333-3333-4333-8333-333333333333";
+    const docPlain = "44444444-4444-4444-8444-444444444444";
+    const docMalformed = "55555555-5555-4555-8555-555555555555";
+    const docA = "66666666-6666-4666-8666-666666666666";
+    const docB = "77777777-7777-4777-8777-777777777777";
+    const now = "2026-11-19T08:30:00.000Z";
+
+    const dirtyStore = new Map<string, Record<string, unknown>>([
+      [
+        docMalformed,
+        {
+          workGroupId,
+          variantLabel: "畸形目标",
+          keptAsPreferred: false,
+          assistanceRecords: [{}],
+        },
+      ],
+      [
+        docA,
+        {
+          workGroupId,
+          variantLabel: "A 稿",
+          parentDocumentId: workGroupId,
+          parentRevisionNumber: 1,
+          keptAsPreferred: true,
+          focusBlockId: null,
+          assistanceRecords: [],
+        },
+      ],
+      [
+        docB,
+        {
+          workGroupId,
+          variantLabel: "B 稿",
+          parentDocumentId: workGroupId,
+          parentRevisionNumber: 1,
+          keptAsPreferred: true,
+          focusBlockId: null,
+          assistanceRecords: [],
+        },
+      ],
+    ]);
+
+    const { sql, queries } = createMockSql((text, values) => {
+      if (text.includes("FROM workspaces")) return [{ id: SCOPE.workspaceId }];
+      if (text.includes("SELECT * FROM library_documents")) {
+        const id = String(values[0]).toLowerCase();
+        return [{ id, workspace_id: SCOPE.workspaceId, title: "边界测试", lifecycle: "scratch", current_revision_number: 1 }];
+      }
+      if (text.startsWith("SELECT value FROM library_properties")) {
+        const id = String(values[1]).toLowerCase();
+        const found = dirtyStore.get(id);
+        return found ? [{ value: structuredClone(found) }] : [];
+      }
+      if (text.includes("FROM library_documents d JOIN library_properties p") && text.includes("FOR UPDATE OF p")) {
+        return [docA, docB].map((id) => ({ id, meta: structuredClone(dirtyStore.get(id)!) }));
+      }
+      if (text.startsWith("INSERT INTO library_properties")) {
+        const id = String(values[1]).toLowerCase();
+        dirtyStore.set(id, structuredClone(values[3] as Record<string, unknown>));
+        return [];
+      }
+      if (text.includes("FROM library_documents d") && text.includes("LEFT JOIN library_properties p")) {
+        const id = String(values[3]).toLowerCase();
+        const found = dirtyStore.get(id);
+        return found
+          ? [{ id, title: "脏数据收敛", current_revision_number: 1, has_meta: true, meta: structuredClone(found), focus_exists: false }]
+          : [{ id, title: "普通笔记", current_revision_number: 1, has_meta: false, meta: null, focus_exists: false }];
+      }
+      if (text.includes("FROM library_documents d JOIN library_properties p")) {
+        return [docA, docB].map((id) => ({
+          id,
+          title: "脏数据收敛",
+          current_revision_number: 1,
+          created_at: now,
+          updated_at: now,
+          meta: structuredClone(dirtyStore.get(id)!),
+        }));
+      }
+      if (text.includes("FROM opening_teaching_activities")) return [];
+      return [];
+    });
+
+    const repo = createOpeningWritingWorkspaceRepository(sql);
+
+    // 1. Uninitialized ordinary note -> 404 NOT_FOUND with zero writes (both new and legacy commands)
+    await expect(
+      repo.command(SCOPE, docPlain, { action: "set_preferred_variant", keptAsPreferred: true }),
+    ).rejects.toMatchObject({ name: "OpeningWritingError", code: "NOT_FOUND" });
+    await expect(
+      repo.command(SCOPE, docPlain, { action: "save_checkpoint", focusBlockId: null, keptAsPreferred: false }),
+    ).rejects.toMatchObject({ name: "OpeningWritingError", code: "NOT_FOUND" });
+
+    // 2. Malformed target metadata -> 404 NOT_FOUND with zero writes
+    await expect(
+      repo.command(SCOPE, docMalformed, { action: "set_preferred_variant", keptAsPreferred: true }),
+    ).rejects.toMatchObject({ name: "OpeningWritingError", code: "NOT_FOUND" });
+
+    expect(
+      queries.some(
+        (q) =>
+          /^(INSERT|UPDATE|DELETE)\b/.test(q.sql)
+          && !q.sql.startsWith("INSERT INTO opening_workspace_history_revisions"),
+      ),
+    ).toBe(false);
+
+    // 3. Multi-starred historical dirty data: GET shows NO preferred variant and performs zero DB writes
+    const queriesBeforeGet = queries.length;
+    const dirtyView = await repo.getView(SCOPE, docA);
+    expect(dirtyView).not.toBeNull();
+    expect(dirtyView!.currentVariant.keptAsPreferred).toBe(false);
+    expect(dirtyView!.variants.every((v) => v.keptAsPreferred === false)).toBe(true);
+    expect(queries.slice(queriesBeforeGet).some((q) => /^(INSERT|UPDATE|DELETE)\b/.test(q.sql))).toBe(false);
+
+    // 4. Next explicit set_preferred_variant(true) on A converges storage & view to unique preferred A
+    const converged = await repo.command(SCOPE, docA, {
+      action: "set_preferred_variant",
+      keptAsPreferred: true,
+    });
+    expect(converged.workspace.currentVariant.keptAsPreferred).toBe(true);
+    expect(converged.workspace.variants.find((v) => v.documentId === docA)?.keptAsPreferred).toBe(true);
+    expect(converged.workspace.variants.find((v) => v.documentId === docB)?.keptAsPreferred).toBe(false);
+    expect(dirtyStore.get(docA)?.keptAsPreferred).toBe(true);
+    expect(dirtyStore.get(docB)?.keptAsPreferred).toBe(false);
+  });
 });

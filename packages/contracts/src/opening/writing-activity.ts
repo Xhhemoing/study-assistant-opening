@@ -131,9 +131,17 @@ export const writingCommandInputSchema = z.discriminatedUnion("action", [
     .strict(),
   z
     .object({
+      action: z.literal("set_preferred_variant"),
+      keptAsPreferred: z.boolean(),
+      activityId: uuidSchema.optional(),
+    })
+    .strict(),
+  z
+    .object({
       action: z.literal("save_checkpoint"),
       activityId: uuidSchema.optional(),
       focusBlockId: z.string().min(1).max(120).nullable(),
+      /** Legacy client compatibility only; dispatched to set_preferred_variant when boolean. */
       keptAsPreferred: z.boolean().optional(),
     })
     .strict(),

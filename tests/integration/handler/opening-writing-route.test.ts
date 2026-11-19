@@ -163,17 +163,26 @@ describe("opening writing workspace route handlers", () => {
     );
     expect(patchB1.status).toBe(200);
 
-    // Pin checkpoint to B 稿 paragraph 2 and mark preferred
+    // Pin checkpoint to B 稿 paragraph 2, then mark B 稿 preferred via dedicated command
     const pinB = await commandWriting(
       req(`/api/opening/writing/${docB}`, "POST", {
         action: "save_checkpoint",
         activityId,
         focusBlockId: bBlock2,
-        keptAsPreferred: true,
       }),
       docCtx(docB),
     );
     expect(pinB.status).toBe(200);
+
+    const preferB = await commandWriting(
+      req(`/api/opening/writing/${docB}`, "POST", {
+        action: "set_preferred_variant",
+        activityId,
+        keptAsPreferred: true,
+      }),
+      docCtx(docB),
+    );
+    expect(preferB.status).toBe(200);
 
     // Record argument feedback on B 稿 before editing A
     const feedbackArgRes = await commandWriting(
@@ -395,11 +404,20 @@ describe("opening writing workspace route handlers", () => {
         action: "save_checkpoint",
         activityId,
         focusBlockId: bBlock2,
-        keptAsPreferred: true,
       }),
       docCtx(docB),
     );
     expect(pinBRes.status).toBe(200);
+
+    const preferBRes = await commandWriting(
+      req(`/api/opening/writing/${docB}`, "POST", {
+        action: "set_preferred_variant",
+        activityId,
+        keptAsPreferred: true,
+      }),
+      docCtx(docB),
+    );
+    expect(preferBRes.status).toBe(200);
 
     // Counterexample 2: Explicit cross-group activityId on readable B -> 404 (never falls back to group 1 view)
     const wrongGroupViewRes = await getWriting(
@@ -877,5 +895,393 @@ describe("opening writing workspace route handlers", () => {
     expect(listedAll.some((item) => item.id === createdOrdinary.id)).toBe(true);
     expect(listedAll.some((item) => item.id === emptyCkptId)).toBe(false);
     expect(listedAll.some((item) => item.id === lowerActId)).toBe(true);
+  });
+
+  it("F2: decouples set_preferred_variant from checkpoint/updated_at/revisions, keeps legacy save_checkpoint preferred compat, guards uninitialized/malformed/unreadable targets, and converges multi-starred dirty data", async () => {
+    const library = createLibraryRepository(f.sql);
+
+    // 1. Uninitialized ordinary note: set_preferred_variant & legacy preferred save_checkpoint return 404 with zero metadata/activity creation
+    const plainDoc = await library.createDocument({
+      workspaceId: f.scope.workspaceId,
+      title: "未初始化普通笔记",
+      blocks: [{ id: randomUUID(), type: "paragraph", content: { blockNoteContent: "普通笔记正文。", props: null, children: [] } }],
+    });
+    const [actCountBeforePlain] = await f.sql<{ count: number }[]>`
+      SELECT count(*)::int AS count FROM opening_teaching_activities WHERE workspace_id = ${f.scope.workspaceId}
+    `;
+    const plainPreferRes = await commandWriting(
+      req(`/api/opening/writing/${plainDoc.id}`, "POST", {
+        action: "set_preferred_variant",
+        keptAsPreferred: true,
+      }),
+      docCtx(plainDoc.id),
+    );
+    expect(plainPreferRes.status).toBe(404);
+    const plainLegacyRes = await commandWriting(
+      req(`/api/opening/writing/${plainDoc.id}`, "POST", {
+        action: "save_checkpoint",
+        focusBlockId: null,
+        keptAsPreferred: false,
+      }),
+      docCtx(plainDoc.id),
+    );
+    expect(plainLegacyRes.status).toBe(404);
+
+    const [plainMetaCount] = await f.sql<{ count: number }[]>`
+      SELECT count(*)::int AS count
+      FROM library_properties
+      WHERE workspace_id = ${f.scope.workspaceId}
+        AND subject_type = 'document'
+        AND subject_id = ${plainDoc.id}
+        AND key = ${WRITING_META_PROPERTY_KEY}
+    `;
+    const [actCountAfterPlain] = await f.sql<{ count: number }[]>`
+      SELECT count(*)::int AS count FROM opening_teaching_activities WHERE workspace_id = ${f.scope.workspaceId}
+    `;
+    expect(plainMetaCount?.count).toBe(0);
+    expect(actCountAfterPlain?.count).toBe(actCountBeforePlain?.count);
+
+    // 2. Create writing workspace with 初稿, A 稿, B 稿, C 稿 (soft-deleted unreadable), and D 稿 (malformed sibling)
+    const startRes = await startWriting(
+      req("/api/opening/writing", "POST", {
+        clientKey: `writing-f2-main-${randomUUID()}`,
+        title: "F2 星标与断点解耦测试",
+        initialText: "初稿段落。",
+        variantLabel: "初稿",
+        courseId: null,
+      }),
+    );
+    expect(startRes.status).toBe(201);
+    const started = (await startRes.json()) as WritingWorkspaceView;
+    const docInit = started.currentDocumentId;
+    const activityId = started.activityId!;
+
+    const otherStartRes = await startWriting(
+      req("/api/opening/writing", "POST", {
+        clientKey: `writing-f2-other-${randomUUID()}`,
+        title: "F2 跨组对比稿",
+        initialText: "其他组正文。",
+      }),
+    );
+    expect(otherStartRes.status).toBe(201);
+    const otherActivityId = ((await otherStartRes.json()) as WritingWorkspaceView).activityId!;
+
+    const derive = async (variantLabel: string) => {
+      const res = await commandWriting(
+        req(`/api/opening/writing/${docInit}`, "POST", {
+          action: "derive_variant",
+          expectedRevisionNumber: 1,
+          variantLabel,
+          activityId,
+        }),
+        docCtx(docInit),
+      );
+      expect(res.status).toBe(200);
+      return ((await res.json()) as { workspace: WritingWorkspaceView }).workspace;
+    };
+
+    const viewA0 = await derive("A 稿");
+    const docA = viewA0.currentDocumentId;
+    const blockA1 = viewA0.currentVariant.focusBlockId!;
+    const viewB0 = await derive("B 稿");
+    const docB = viewB0.currentDocumentId;
+    const viewC0 = await derive("已删兄弟稿");
+    const docC = viewC0.currentDocumentId;
+    const viewD0 = await derive("畸形兄弟稿");
+    const docD = viewD0.currentDocumentId;
+
+    // Mark C preferred, then soft-delete C; its DB keptAsPreferred must stay true untouched!
+    expect(
+      (await commandWriting(
+        req(`/api/opening/writing/${docC}`, "POST", { action: "set_preferred_variant", keptAsPreferred: true }),
+        docCtx(docC),
+      )).status,
+    ).toBe(200);
+    await library.softDeleteDocument({ workspaceId: f.scope.workspaceId, documentId: docC });
+
+    // Corrupt D sibling metadata
+    await f.sql`
+      UPDATE library_properties
+      SET value = jsonb_set(value, '{assistanceRecords}', '[{}]'::jsonb)
+      WHERE workspace_id = ${f.scope.workspaceId}
+        AND subject_type = 'document'
+        AND subject_id = ${docD}
+        AND key = ${WRITING_META_PROPERTY_KEY}
+    `;
+
+    // Give B 稿 two paragraphs and record feedback on A & B
+    const bBlock1 = randomUUID();
+    const bBlock2 = randomUUID();
+    expect(
+      (await patchDocument(
+        req(`/api/documents/${docB}`, "PATCH", {
+          expectedRevisionNumber: 1,
+          title: "F2 星标与断点解耦测试",
+          blocks: [
+            { id: bBlock1, type: "paragraph", content: { blockNoteContent: "B 第一段。", props: null, children: [] } },
+            { id: bBlock2, type: "paragraph", content: { blockNoteContent: "B 第二段。", props: null, children: [] } },
+          ],
+        }),
+        idCtx(docB),
+      )).status,
+    ).toBe(200);
+
+    expect(
+      (await commandWriting(
+        req(`/api/opening/writing/${docA}`, "POST", {
+          action: "record_feedback",
+          expectedRevisionNumber: 1,
+          targetBlockId: blockA1,
+          dimension: "argument",
+          kind: "feedback",
+          suggestionText: "A 稿保留反馈",
+        }),
+        docCtx(docA),
+      )).status,
+    ).toBe(200);
+
+    // Pin checkpoint to B paragraph 2 (pure save_checkpoint)
+    expect(
+      (await commandWriting(
+        req(`/api/opening/writing/${docB}`, "POST", {
+          action: "save_checkpoint",
+          activityId,
+          focusBlockId: bBlock2,
+        }),
+        docCtx(docB),
+      )).status,
+    ).toBe(200);
+
+    // Snapshot activity checkpoint_json, updated_at, history revision, doc revisions, and observation count
+    const [actBefore] = await f.sql<{ checkpoint_json: unknown; updated_at: Date }[]>`
+      SELECT checkpoint_json, updated_at
+      FROM opening_teaching_activities
+      WHERE id = ${activityId}
+    `;
+    const [histBefore] = await f.sql<{ revision: number }[]>`
+      SELECT revision FROM opening_workspace_history_revisions
+      WHERE workspace_id = ${f.scope.workspaceId} AND owner_user_id = ${f.scope.ownerUserId}
+    `;
+    const [obsBefore] = await f.sql<{ count: number }[]>`
+      SELECT count(*)::int AS count FROM opening_learning_observations WHERE workspace_id = ${f.scope.workspaceId}
+    `;
+
+    // Strict schema rejects focusBlockId / expectedRevisionNumber / extra field on set_preferred_variant with 400
+    for (const invalidPayload of [
+      { action: "set_preferred_variant", keptAsPreferred: true, focusBlockId: blockA1 },
+      { action: "set_preferred_variant", keptAsPreferred: true, expectedRevisionNumber: 1 },
+      { action: "set_preferred_variant", keptAsPreferred: true, extra: 1 },
+    ]) {
+      const badRes = await commandWriting(
+        req(`/api/opening/writing/${docA}`, "POST", invalidPayload),
+        docCtx(docA),
+      );
+      expect(badRes.status).toBe(400);
+    }
+
+    // Cross-group activityId & malformed target D return 404
+    expect(
+      (await commandWriting(
+        req(`/api/opening/writing/${docA}`, "POST", {
+          action: "set_preferred_variant",
+          keptAsPreferred: true,
+          activityId: otherActivityId,
+        }),
+        docCtx(docA),
+      )).status,
+    ).toBe(404);
+    expect(
+      (await commandWriting(
+        req(`/api/opening/writing/${docD}`, "POST", {
+          action: "set_preferred_variant",
+          keptAsPreferred: true,
+        }),
+        docCtx(docD),
+      )).status,
+    ).toBe(404);
+
+    // 3. Star A, repeat star A (idempotent), star B, stale unstar A (must NOT clear B!)
+    const starARes = await commandWriting(
+      req(`/api/opening/writing/${docA}`, "POST", {
+        action: "set_preferred_variant",
+        keptAsPreferred: true,
+        activityId,
+      }),
+      docCtx(docA),
+    );
+    expect(starARes.status).toBe(200);
+    const starABody = (await starARes.json()) as { workspace: WritingWorkspaceView; outcome?: unknown };
+    expect("outcome" in starABody).toBe(false);
+    expect(starABody.workspace.currentVariant.keptAsPreferred).toBe(true);
+    expect(starABody.workspace.currentVariant.focusBlockId).toBe(blockA1);
+    expect(starABody.workspace.currentVariant.assistanceRecords).toHaveLength(1);
+    expect(starABody.workspace.variants.filter((v) => v.keptAsPreferred).map((v) => v.documentId)).toEqual([docA]);
+
+    const repeatStarARes = await commandWriting(
+      req(`/api/opening/writing/${docA}`, "POST", {
+        action: "set_preferred_variant",
+        keptAsPreferred: true,
+        activityId,
+      }),
+      docCtx(docA),
+    );
+    expect(repeatStarARes.status).toBe(200);
+    expect(((await repeatStarARes.json()) as { workspace: WritingWorkspaceView }).workspace.currentVariant.keptAsPreferred).toBe(true);
+
+    const starBRes = await commandWriting(
+      req(`/api/opening/writing/${docB}`, "POST", {
+        action: "set_preferred_variant",
+        keptAsPreferred: true,
+        activityId,
+      }),
+      docCtx(docB),
+    );
+    expect(starBRes.status).toBe(200);
+    const starBBody = (await starBRes.json()) as { workspace: WritingWorkspaceView };
+    expect(starBBody.workspace.variants.filter((v) => v.keptAsPreferred).map((v) => v.documentId)).toEqual([docB]);
+
+    // Stale unstar A must NOT clear B
+    const staleUnstarARes = await commandWriting(
+      req(`/api/opening/writing/${docA}`, "POST", {
+        action: "set_preferred_variant",
+        keptAsPreferred: false,
+        activityId,
+      }),
+      docCtx(docA),
+    );
+    expect(staleUnstarARes.status).toBe(200);
+    const staleUnstarABody = (await staleUnstarARes.json()) as { workspace: WritingWorkspaceView };
+    expect(staleUnstarABody.workspace.currentVariant.keptAsPreferred).toBe(false);
+    expect(staleUnstarABody.workspace.variants.filter((v) => v.keptAsPreferred).map((v) => v.documentId)).toEqual([docB]);
+
+    // 4. Legacy save_checkpoint with keptAsPreferred: true & false ignores non-existent focusBlockId & keeps checkpoint untouched
+    const legacyBadActRes = await commandWriting(
+      req(`/api/opening/writing/${docA}`, "POST", {
+        action: "save_checkpoint",
+        activityId: otherActivityId,
+        focusBlockId: randomUUID(),
+        keptAsPreferred: true,
+      }),
+      docCtx(docA),
+    );
+    expect(legacyBadActRes.status).toBe(404);
+
+    const legacyStarARes = await commandWriting(
+      req(`/api/opening/writing/${docA}`, "POST", {
+        action: "save_checkpoint",
+        activityId,
+        focusBlockId: randomUUID(),
+        keptAsPreferred: true,
+      }),
+      docCtx(docA),
+    );
+    expect(legacyStarARes.status).toBe(200);
+    const legacyStarABody = (await legacyStarARes.json()) as { workspace: WritingWorkspaceView };
+    expect(legacyStarABody.workspace.currentVariant.keptAsPreferred).toBe(true);
+    expect(legacyStarABody.workspace.currentVariant.focusBlockId).toBe(blockA1);
+    expect(legacyStarABody.workspace.variants.filter((v) => v.keptAsPreferred).map((v) => v.documentId)).toEqual([docA]);
+
+    const legacyUnstarARes = await commandWriting(
+      req(`/api/opening/writing/${docA}`, "POST", {
+        action: "save_checkpoint",
+        activityId,
+        focusBlockId: randomUUID(),
+        keptAsPreferred: false,
+      }),
+      docCtx(docA),
+    );
+    expect(legacyUnstarARes.status).toBe(200);
+    const legacyUnstarABody = (await legacyUnstarARes.json()) as { workspace: WritingWorkspaceView };
+    expect(legacyUnstarABody.workspace.currentVariant.keptAsPreferred).toBe(false);
+    expect(legacyUnstarABody.workspace.currentVariant.focusBlockId).toBe(blockA1);
+
+    // Verify checkpoint_json, activity updated_at, history revision, doc revisions, observations, and deleted sibling C are ALL untouched
+    const [actAfter] = await f.sql<{ checkpoint_json: unknown; updated_at: Date }[]>`
+      SELECT checkpoint_json, updated_at
+      FROM opening_teaching_activities
+      WHERE id = ${activityId}
+    `;
+    const [histAfter] = await f.sql<{ revision: number }[]>`
+      SELECT revision FROM opening_workspace_history_revisions
+      WHERE workspace_id = ${f.scope.workspaceId} AND owner_user_id = ${f.scope.ownerUserId}
+    `;
+    const [obsAfter] = await f.sql<{ count: number }[]>`
+      SELECT count(*)::int AS count FROM opening_learning_observations WHERE workspace_id = ${f.scope.workspaceId}
+    `;
+    const [docARev] = await f.sql<{ current_revision_number: number }[]>`
+      SELECT current_revision_number FROM library_documents WHERE id = ${docA}
+    `;
+    const [docBRev] = await f.sql<{ current_revision_number: number }[]>`
+      SELECT current_revision_number FROM library_documents WHERE id = ${docB}
+    `;
+    const [deletedSiblingProp] = await f.sql<{ kept: boolean }[]>`
+      SELECT (value->>'keptAsPreferred')::boolean AS kept
+      FROM library_properties
+      WHERE workspace_id = ${f.scope.workspaceId}
+        AND subject_type = 'document'
+        AND subject_id = ${docC}
+        AND key = ${WRITING_META_PROPERTY_KEY}
+    `;
+    expect(actAfter?.checkpoint_json).toEqual(actBefore?.checkpoint_json);
+    expect(actAfter?.updated_at.toISOString()).toBe(actBefore?.updated_at.toISOString());
+    expect(histAfter?.revision).toBe(histBefore?.revision);
+    expect(obsAfter?.count).toBe(obsBefore?.count);
+    expect(docARev?.current_revision_number).toBe(1);
+    expect(docBRev?.current_revision_number).toBe(2);
+    expect(deletedSiblingProp?.kept).toBe(true);
+
+    // Recovery still resolves directly to B paragraph 2
+    const recovery = await readOpeningWorkspaceActivityRecovery(f.sql, f.scope, { activityId });
+    expect(recovery).toMatchObject({
+      kind: "writing",
+      documentId: docB,
+      focusBlockId: bBlock2,
+      focusStatus: "exact",
+    });
+
+    // 5. Historical multi-starred dirty data: GET shows NO preferred variant (without mutating DB),
+    //    and next explicit set_preferred_variant converges DB & view to unique preferred A.
+    await f.sql`
+      UPDATE library_properties
+      SET value = jsonb_set(value, '{keptAsPreferred}', 'true'::jsonb)
+      WHERE workspace_id = ${f.scope.workspaceId}
+        AND subject_type = 'document'
+        AND subject_id IN (${docA}, ${docB})
+        AND key = ${WRITING_META_PROPERTY_KEY}
+    `;
+    const dirtyGetRes = await getWriting(
+      req(`/api/opening/writing/${docA}?activity=${activityId}`, "GET"),
+      docCtx(docA),
+    );
+    expect(dirtyGetRes.status).toBe(200);
+    const dirtyGetBody = (await dirtyGetRes.json()) as WritingWorkspaceResponse;
+    expect(dirtyGetBody.initialized).toBe(true);
+    if (dirtyGetBody.initialized) {
+      expect(dirtyGetBody.workspace.currentVariant.keptAsPreferred).toBe(false);
+      expect(dirtyGetBody.workspace.variants.every((v) => v.keptAsPreferred === false)).toBe(true);
+    }
+    const dirtyDbRows = await f.sql<{ subject_id: string; kept: boolean }[]>`
+      SELECT subject_id, (value->>'keptAsPreferred')::boolean AS kept
+      FROM library_properties
+      WHERE workspace_id = ${f.scope.workspaceId}
+        AND subject_type = 'document'
+        AND subject_id IN (${docA}, ${docB})
+        AND key = ${WRITING_META_PROPERTY_KEY}
+      ORDER BY subject_id ASC
+    `;
+    expect(dirtyDbRows.every((r) => r.kept === true)).toBe(true);
+
+    const convergeRes = await commandWriting(
+      req(`/api/opening/writing/${docA}`, "POST", {
+        action: "set_preferred_variant",
+        keptAsPreferred: true,
+        activityId,
+      }),
+      docCtx(docA),
+    );
+    expect(convergeRes.status).toBe(200);
+    const convergeBody = (await convergeRes.json()) as { workspace: WritingWorkspaceView };
+    expect(convergeBody.workspace.currentVariant.keptAsPreferred).toBe(true);
+    expect(convergeBody.workspace.variants.filter((v) => v.keptAsPreferred).map((v) => v.documentId)).toEqual([docA]);
   });
 });

@@ -194,7 +194,7 @@ export function WritingVariantsPanel({
     }
   }
 
-  async function handleSaveCheckpoint(nextKept?: boolean) {
+  async function handleSaveCheckpoint() {
     if (busy || !state?.initialized) return;
     setBusy(true);
     setActionError("");
@@ -203,19 +203,32 @@ export function WritingVariantsPanel({
       const result = await api.command(documentId, {
         action: "save_checkpoint",
         focusBlockId: selectedFocusBlockId || null,
-        ...(nextKept !== undefined ? { keptAsPreferred: nextKept } : {}),
         ...(state.workspace.activityId ? { activityId: state.workspace.activityId } : {}),
       });
       applyWorkspaceUpdate(result.workspace);
-      setNotice(
-        nextKept === true
-          ? "已标记为本周保留稿"
-          : nextKept === false
-            ? "已取消本周保留稿标记"
-            : "已保存续写段落位置",
-      );
+      setNotice("已保存续写段落位置");
     } catch (error) {
       handleActionError(error, "保存续写位置失败，请稍后重试。");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleSetPreferredVariant(nextKept: boolean) {
+    if (busy || !state?.initialized) return;
+    setBusy(true);
+    setActionError("");
+    setNotice("");
+    try {
+      const result = await api.command(documentId, {
+        action: "set_preferred_variant",
+        keptAsPreferred: nextKept,
+        ...(state.workspace.activityId ? { activityId: state.workspace.activityId } : {}),
+      });
+      applyWorkspaceUpdate(result.workspace);
+      setNotice(nextKept ? "已标记为本周保留稿" : "已取消本周保留稿标记");
+    } catch (error) {
+      handleActionError(error, "更新本周保留稿失败，请稍后重试。");
     } finally {
       setBusy(false);
     }
@@ -477,7 +490,7 @@ export function WritingVariantsPanel({
               type="button"
               className={workspace.currentVariant.keptAsPreferred ? ui.primary : ui.secondary}
               disabled={busy}
-              onClick={() => void handleSaveCheckpoint(!workspace.currentVariant.keptAsPreferred)}
+              onClick={() => void handleSetPreferredVariant(!workspace.currentVariant.keptAsPreferred)}
             >
               <Star aria-hidden="true" size={14} />
               {workspace.currentVariant.keptAsPreferred ? "已标为本周保留稿" : "标为本周保留稿"}
