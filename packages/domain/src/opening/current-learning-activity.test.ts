@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { selectCurrentLearningActivity, compareCurrentLearningActivities } from "./current-learning-activity";
+import { selectCurrentLearningActivity, selectCurrentWorkspaceActivity, compareCurrentLearningActivities } from "./current-learning-activity";
 const row = (id: string, overrides = {}) => ({ id, courseId: "course", status: "active", updatedAt: "2026-11-01T00:00:00Z", placeholder: false, ...overrides });
 it("uses descending timestamp then descending id without mutating its inputs", () => {
   const rows = [row("a"), row("c"), row("b")];
@@ -15,4 +15,14 @@ it("selects an explicit older active identity, never a conflicting, missing, clo
 it("never falls back across courses or to completed/skipped placeholders", () => {
   expect(selectCurrentLearningActivity([row("foreign", { courseId: "other" }), row("done", { status: "completed" }), row("skip", { status: "skipped" }), row("shell", { placeholder: true })], "course")).toBeNull();
   expect(selectCurrentLearningActivity([row("paused", { status: "paused" })], "course")?.id).toBe("paused");
+});
+it("selectCurrentWorkspaceActivity selects newest active/paused across course-bound and course-less rows", () => {
+  const courseOld = row("course-old", { courseId: "c1", updatedAt: "2026-11-01T00:00:00Z" });
+  const courselessNew = row("writing-new", { courseId: null, status: "paused", updatedAt: "2026-11-02T00:00:00Z" });
+  const shellNewest = row("shell", { courseId: null, placeholder: true, updatedAt: "2026-11-03T00:00:00Z" });
+  const doneNewest = row("done", { courseId: null, status: "completed", updatedAt: "2026-11-04T00:00:00Z" });
+  expect(selectCurrentWorkspaceActivity([courseOld, courselessNew, shellNewest, doneNewest], null)?.id).toBe("writing-new");
+  expect(selectCurrentWorkspaceActivity([courseOld, courselessNew], "c1")?.id).toBe("course-old");
+  expect(selectCurrentWorkspaceActivity([courseOld, courselessNew], null, ["course-old"])?.id).toBe("course-old");
+  expect(selectCurrentWorkspaceActivity([courseOld, courselessNew], null, ["course-old", "writing-new"])).toBeNull();
 });

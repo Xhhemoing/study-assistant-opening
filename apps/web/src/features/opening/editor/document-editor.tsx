@@ -1,9 +1,9 @@
 "use client";
 
 import { zh } from "@blocknote/core/locales";
-import { promotionResponseSchema } from "@aistudy/contracts";
+import { promotionResponseSchema, type WritingWorkspaceResponse } from "@aistudy/contracts";
 import { BlockNoteViewRaw, useCreateBlockNote } from "@blocknote/react";
-import { ArrowLeft, Check, Clock3, PanelRight, Redo2, Save, Undo2 } from "lucide-react";
+import { ArrowLeft, Check, Clock3, GitBranch, PanelRight, Redo2, Save, Undo2 } from "lucide-react";
 import { TransitionLink as Link } from "../v3/motion/view-transition";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createEditorApi, EditorApiError, type EditorDocument } from "./editor-api";
@@ -42,13 +42,37 @@ import { Inspector } from "../design/inspector";
 import { LoadError, LoadingRows, ui } from "../design/ui";
 import { useAppearancePreferences } from "../settings/appearance-preferences";
 import { AssetLearningLinks } from "../learning-links/asset-learning-links";
+import { WritingVariantsPanel, type WritingEditorBlockOption } from "./writing-variants-panel";
+import { createWritingWorkspaceApi } from "./writing-workspace-api";
 
 type SaveState = "saved" | "unsaved" | "saving" | "error" | "conflict";
 
-export function DocumentEditor({ documentId, basePath = DEFAULT_LIBRARY_BASE_PATH }: { documentId: string; basePath?: LibraryBasePath }) {
+function extractDraftBlockText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) return content.map(extractDraftBlockText).join("");
+  if (content && typeof content === "object") {
+    const obj = content as Record<string, unknown>;
+    if (typeof obj.text === "string") return obj.text;
+    if ("content" in obj) return extractDraftBlockText(obj.content);
+  }
+  return "";
+}
+
+export function DocumentEditor({
+  documentId,
+  basePath = DEFAULT_LIBRARY_BASE_PATH,
+  focusBlockId,
+  activityId,
+}: {
+  documentId: string;
+  basePath?: LibraryBasePath;
+  focusBlockId?: string;
+  activityId?: string;
+}) {
   const { resolvedTheme } = useAppearancePreferences();
   const api = useMemo(() => createEditorApi(), []);
   const knowledgeLinksApi = useMemo(() => createKnowledgeLinksApi(), []);
+  const writingApi = useMemo(() => createWritingWorkspaceApi(), []);
   const [document, setDocument] = useState<EditorDocument | null>(null);
   const [draft, setDraft] = useState<LocalNoteDraft | null>(null);
   const [loadError, setLoadError] = useState("");
@@ -56,6 +80,8 @@ export function DocumentEditor({ documentId, basePath = DEFAULT_LIBRARY_BASE_PAT
   const [saveState, setSaveState] = useState<SaveState>("saving");
   const [historyOpen, setHistoryOpen] = useState(false);
   const [propertiesOpen, setPropertiesOpen] = useState(false);
+  const [writingOpen, setWritingOpen] = useState(false);
+  const [writingResponse, setWritingResponse] = useState<WritingWorkspaceResponse | null>(null);
   const [notice, setNotice] = useState("");
   const [sourceExplorationId, setSourceExplorationId] = useState<string | null>(null);
   const draftRef = useRef<LocalNoteDraft | null>(null);
@@ -122,6 +148,40 @@ export function DocumentEditor({ documentId, basePath = DEFAULT_LIBRARY_BASE_PAT
       .catch(() => { if (active) setSourceExplorationId(null); });
     return () => { active = false; };
   }, [documentId]);
+
+  useEffect(() => {
+    if (basePath !== "/opening/library") {
+      setWritingResponse(null);
+      return;
+    }
+    let active = true;
+    writingApi.get(documentId, { focusBlockId: focusBlockId ?? null, activityId: activityId ?? null })
+      .then((response) => {
+        if (!active) return;
+        setWritingResponse(response);
+        if (response.initialized) {
+          setWritingOpen(true);
+        }
+      })
+      .catch(() => {
+        if (active) setWritingResponse(null);
+      });
+    return () => { active = false; };
+  }, [activityId, basePath, documentId, focusBlockId, reloadToken, writingApi]);
+
+  const writingFocusBlockId = writingResponse?.initialized && writingResponse.workspace.focusRestore.status === "exact"
+    ? writingResponse.workspace.focusRestore.blockId
+    : null;
+  useEffect(() => {
+    if (!writingFocusBlockId || !document) return;
+    const escaped = typeof CSS !== "undefined" && typeof CSS.escape === "function"
+      ? CSS.escape(writingFocusBlockId)
+      : writingFocusBlockId.replace(/"/g, '\\"');
+    const target = window.document.querySelector(`[data-id="${escaped}"]`);
+    if (target && typeof (target as HTMLElement).scrollIntoView === "function") {
+      (target as HTMLElement).scrollIntoView({ block: "center" });
+    }
+  }, [document, writingFocusBlockId]);
 
   const initialContent = useMemo(
     () => (draft ? draftBlocksToEditorBlocks(draft.blocks) : undefined),
@@ -320,21 +380,28 @@ export function DocumentEditor({ documentId, basePath = DEFAULT_LIBRARY_BASE_PAT
     error: "本地副本或服务器保存失败",
     conflict: "保存冲突：本地修改已保留，请选择处理方式",
   }[saveState];
+  const writingBlocks: WritingEditorBlockOption[] = draft.blocks.map((block) => ({
+    id: block.id,
+    text: extractDraftBlockText(block.content),
+  }));
+  const writingFocusRestore = writingResponse?.initialized ? writingResponse.workspace.focusRestore : null;
 
   return <div className="flex h-full min-h-0 flex-col bg-surface text-text">
     <header className="flex min-h-12 shrink-0 flex-wrap items-center gap-2 border-b border-line px-3 py-2">
       <Link className={ui.quiet} href={basePath} aria-label="返回知识库"><ArrowLeft aria-hidden="true" size={14} /><span className="hidden sm:inline">知识库</span></Link>
       <label className="min-w-28 flex-1"><span className="sr-only">笔记标题</span><input className={`${ui.input} border-transparent font-medium`} value={draft.title} onChange={(event) => updateSafetyCopy({ ...draft, title: event.target.value, updatedAt: new Date().toISOString() })} /></label>
       <span className="inline-flex items-center gap-1.5 text-xs text-text-3" role="status" aria-live="polite">{saveState === "saved" ? <Check aria-hidden="true" size={13} className="text-accent" /> : null}{notice || statusText}</span>
-      <div className="flex items-center gap-1"><button className={ui.icon} type="button" onClick={() => { editor.undo(); updateBlocks(editor.document); }} aria-label="撤销" title="撤销"><Undo2 aria-hidden="true" size={15} /></button><button className={ui.icon} type="button" onClick={() => { editor.redo(); updateBlocks(editor.document); }} aria-label="重做" title="重做"><Redo2 aria-hidden="true" size={15} /></button><button className={ui.icon} type="button" onClick={() => { setHistoryOpen(true); setPropertiesOpen(false); }} aria-label="打开版本历史" title="版本历史"><Clock3 aria-hidden="true" size={15} /></button><button className={`${ui.icon} ${propertiesOpen ? "bg-accent-soft text-accent" : ""}`} type="button" onClick={() => { setPropertiesOpen(!propertiesOpen); setHistoryOpen(false); }} aria-label="笔记属性与关联" aria-expanded={propertiesOpen}><PanelRight aria-hidden="true" size={15} /></button></div>
+      <div className="flex items-center gap-1"><button className={ui.icon} type="button" onClick={() => { editor.undo(); updateBlocks(editor.document); }} aria-label="撤销" title="撤销"><Undo2 aria-hidden="true" size={15} /></button><button className={ui.icon} type="button" onClick={() => { editor.redo(); updateBlocks(editor.document); }} aria-label="重做" title="重做"><Redo2 aria-hidden="true" size={15} /></button><button className={ui.icon} type="button" onClick={() => { setHistoryOpen(true); setPropertiesOpen(false); setWritingOpen(false); }} aria-label="打开版本历史" title="版本历史"><Clock3 aria-hidden="true" size={15} /></button>{basePath === "/opening/library" ? <button className={`${ui.icon} ${writingOpen ? "bg-accent-soft text-accent" : ""}`} type="button" onClick={() => { setWritingOpen(!writingOpen); setPropertiesOpen(false); setHistoryOpen(false); }} aria-label="多稿写作与润色" aria-expanded={writingOpen} title="多稿写作"><GitBranch aria-hidden="true" size={15} /></button> : null}<button className={`${ui.icon} ${propertiesOpen ? "bg-accent-soft text-accent" : ""}`} type="button" onClick={() => { setPropertiesOpen(!propertiesOpen); setHistoryOpen(false); setWritingOpen(false); }} aria-label="笔记属性与关联" aria-expanded={propertiesOpen}><PanelRight aria-hidden="true" size={15} /></button></div>
       <button className={ui.primary} title="保存 · Ctrl / ⌘ S" type="button" onClick={saveDocument} disabled={saveState === "saving" || conflict !== null}><Save aria-hidden="true" size={14} />保存</button>
     </header>
     <div className="flex min-h-0 flex-1">
       <div className="min-w-0 flex-1 overflow-y-auto"><div className="mx-auto max-w-[760px] px-5 py-5 sm:px-8"><div className="mb-5 flex flex-wrap items-center justify-between gap-2"><h1 className="text-xs font-medium text-text-3" title="本地保留安全副本；保存会创建服务器版本。">编辑笔记 · v{document.currentRevisionNumber}</h1>{sourceExplorationId && basePath === "/library" ? <Link className={ui.quiet} href={`/explore/${sourceExplorationId}`}>返回来源探索</Link> : null}</div>
+        {writingFocusRestore?.status === "block_missing" ? <p role="status" className="mb-4 rounded-md border border-warn/30 bg-warn-soft px-3 py-2 text-xs leading-5 text-warn">{writingFocusRestore.message}</p> : null}
         {conflict ? <DraftConflictPanel reason={conflict} diff={diff} busy={conflictBusy} confirmingDiscard={confirmingDiscard} savedAsNewHref={savedAsNewHref} relationNote={relationNote} onViewDiff={() => void viewDiff()} onSaveAsNew={() => void saveAsNewNote()} onDiscard={requestDiscard} onCancelDiscard={() => setConfirmingDiscard(false)} /> : null}
         {!conflict && savedAsNewHref ? <p className="mb-4 text-xs text-text-2" role="status">本地修改已另存为新笔记：<Link className="underline" href={savedAsNewHref}>打开副本</Link>{relationNote ? `（${relationNote}）` : ""}</p> : null}
         <section className="min-h-80 text-sm leading-7 [&_.bn-container]:bg-surface [&_.bn-container]:font-sans [&_.bn-editor]:min-h-80 [&_.bn-editor]:bg-surface [&_.bn-editor]:px-0 [&_.bn-editor]:text-sm [&_.bn-editor]:leading-7 [&_.bn-editor]:text-text" aria-label="笔记编辑器"><BlockNoteViewRaw editor={editor} theme={resolvedTheme} onChange={(nextEditor) => updateBlocks(nextEditor.document)} /></section>
       </div></div>
+      {basePath === "/opening/library" ? <Inspector open={writingOpen} onClose={() => setWritingOpen(false)} title="多稿写作与润色" id="document-writing-variants"><WritingVariantsPanel documentId={documentId} currentRevisionNumber={document.currentRevisionNumber} blocks={writingBlocks} basePath={basePath} focusBlockId={focusBlockId ?? null} activityId={activityId ?? null} hasUnsavedEdits={saveState === "unsaved" || saveState === "saving" || conflict !== null} api={writingApi} initialResponse={writingResponse} onWorkspaceLoaded={setWritingResponse} onDocumentUpdated={() => { void (async () => { if (saveState === "saved") { const requestVersion = editVersionRef.current; const expectedBaseRevision = document.currentRevisionNumber; try { const synced = await api.fetchDocument(documentId); if (editVersionRef.current === requestVersion && draftRef.current?.baseRevisionNumber === expectedBaseRevision) { saveLocalDraft(documentId, documentToDraft(synced)); } } catch { /* Reload below preserves recovery if pre-sync fails. */ } } setReloadToken((value) => value + 1); })(); }} /></Inspector> : null}
       <Inspector open={propertiesOpen} onClose={() => setPropertiesOpen(false)} title="笔记属性与关联" id="document-properties"><div className="space-y-4">{basePath === "/opening/library" ? <AssetLearningLinks assetType="document" assetId={documentId} /> : null}<PropertiesPanel documentId={documentId} /><ReadOnlyPropertiesPanel documentId={documentId} /><RelationAuthoringPanel documentId={documentId} basePath={basePath} /><BacklinksPanel documentId={documentId} basePath={basePath} /><RevisionReviewPanel documentId={documentId} /></div></Inspector>
       <VersionHistoryDrawer documentId={documentId} open={historyOpen} onClose={() => setHistoryOpen(false)} onRestore={restoreRevision} api={api} />
     </div>

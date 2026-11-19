@@ -1,8 +1,10 @@
-import type {
-  TeachingActivity,
-  TeachingActivityCreateInput,
-  TeachingActivityGenerateStatus,
-  TeachingActivityStatus,
+import {
+  WRITING_WORKSPACE_PROTOCOL,
+  writingActivityCheckpointSchema,
+  type TeachingActivity,
+  type TeachingActivityCreateInput,
+  type TeachingActivityGenerateStatus,
+  type TeachingActivityStatus,
 } from "@aistudy/contracts";
 import { compareCurrentLearningActivities } from "@aistudy/domain";
 
@@ -45,7 +47,51 @@ export function pickCurrentTeachingActivity(
   return resumable.length ? [...resumable].sort(compareCurrentLearningActivities)[0]! : null;
 }
 
-export function todayActivityCtaLabel(activity: TeachingActivity | null): "继续学习" | "开始学习" {
+export type WritingActivityTarget = {
+  activityId: string;
+  workGroupId: string;
+  documentId: string;
+  variantLabel: string;
+  savedRevisionNumber: number;
+  focusBlockId: string | null;
+  href: string;
+};
+
+/** Resolve deep-link target for an independent multi-draft writing activity. */
+export function resolveWritingActivityTarget(
+  activity: Pick<TeachingActivity, "id" | "checkpointJson"> | null | undefined,
+): WritingActivityTarget | null {
+  if (!activity) return null;
+  const createIntent = (activity as { createIntent?: { protocol?: unknown } }).createIntent;
+  if (
+    createIntent?.protocol !== undefined
+    && createIntent.protocol !== WRITING_WORKSPACE_PROTOCOL
+  ) {
+    return null;
+  }
+  const raw = activity.checkpointJson && typeof activity.checkpointJson === "object"
+    ? (activity.checkpointJson as Record<string, unknown>).writingWorkspace
+    : undefined;
+  const parsed = writingActivityCheckpointSchema.safeParse(raw);
+  if (!parsed.success) return null;
+  const checkpoint = parsed.data;
+  const params = new URLSearchParams();
+  if (checkpoint.focusBlockId) params.set("block", checkpoint.focusBlockId);
+  params.set("activity", activity.id);
+  return {
+    activityId: activity.id,
+    workGroupId: checkpoint.workGroupId,
+    documentId: checkpoint.activeDocumentId,
+    variantLabel: checkpoint.activeVariantLabel,
+    savedRevisionNumber: checkpoint.savedRevisionNumber,
+    focusBlockId: checkpoint.focusBlockId,
+    href: `/opening/library/${encodeURIComponent(checkpoint.activeDocumentId)}?${params.toString()}`,
+  };
+}
+
+export function todayActivityCtaLabel(activity: TeachingActivity | null): string {
+  const writingTarget = resolveWritingActivityTarget(activity);
+  if (writingTarget) return `继续写作：${writingTarget.variantLabel}`;
   return activity ? "继续学习" : "开始学习";
 }
 

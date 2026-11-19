@@ -18,6 +18,7 @@ import type { ActivitySpecClientInit, LearningResume, TeachingActivity } from "@
 import {
   buildStartLearningCreateInput,
   pickCurrentTeachingActivity,
+  resolveWritingActivityTarget,
   todayActivityCtaLabel,
 } from "../teaching/today-activity";
 import {
@@ -164,6 +165,7 @@ export function TodayDashboard({
   const timeZone = useMemo(() => resolveTodayTimeZone(workspaceTimeZone), [workspaceTimeZone]);
   const rereadQueue = useCallback(() => { setReloadToken((value) => value + 1); }, []);
   const currentActivity = selectedActivity ?? pickCurrentTeachingActivity(activities);
+  const writingTarget = resolveWritingActivityTarget(currentActivity);
   const estimateActivityId = currentActivity?.id, estimateCourseId = currentActivity?.courseId;
   useEffect(() => {
     if (!estimateActivityId || !estimateCourseId) return;
@@ -181,7 +183,7 @@ export function TodayDashboard({
     : state.kind === "ready" && state.continueItem ? { targetType: "conversation", targetId: state.continueItem.conversationId }
       : currentCourse ? { targetType: "course", targetId: currentCourse.id } : null);
   const courseTitle = currentCourse?.title;
-  const ctaLabel = todayActivityCtaLabel(pickCurrentTeachingActivity(activities));
+  const ctaLabel = todayActivityCtaLabel(currentActivity ?? pickCurrentTeachingActivity(activities));
   const assistantHref = state.continueItem
     ? `/opening/assistant?conversation=${encodeURIComponent(state.continueItem.conversationId)}`
     : "/opening/assistant";
@@ -198,7 +200,7 @@ export function TodayDashboard({
   }, []);
 
   useEffect(() => {
-    if (noCourses || state.kind !== "ready" && state.kind !== "empty") return;
+    if (state.kind !== "ready" && state.kind !== "empty") return;
     const controller = new AbortController();
     setActivityLoad("loading");
     api.listTeachingActivities()
@@ -214,11 +216,11 @@ export function TodayDashboard({
         setActivityLoad("error");
       });
     return () => controller.abort();
-  }, [api, reloadToken, state.kind, noCourses]);
+  }, [api, reloadToken, state.kind]);
 
   // V2-14: prefer LearningResume package for continue; clientInit may be null (fail-soft).
   useEffect(() => {
-    if (!teachingLoopTrialEnabled || !currentActivity) {
+    if (!teachingLoopTrialEnabled || !currentActivity || writingTarget) {
       setClientInit(null);
       setClientInitLoad("idle");
       setLearningResume(null);
@@ -292,7 +294,12 @@ export function TodayDashboard({
   const runPrimaryCta = useCallback(async () => {
     if (taskStartInFlight.current) return;
     setCtaError(null);
-    const existing = pickCurrentTeachingActivity(activities);
+    const existing = selectedActivity ?? pickCurrentTeachingActivity(activities);
+    const existingWriting = resolveWritingActivityTarget(existing);
+    if (existingWriting) {
+      window.location.assign(existingWriting.href);
+      return;
+    }
     const plan = planTodayPrimaryCta(existing, clientInit, Boolean(state.continueItem));
     if (plan.kind === "setup") {
       window.location.assign("/onboarding");
@@ -334,7 +341,7 @@ export function TodayDashboard({
       taskStartInFlight.current = false;
       setCtaBusy(false);
     }
-  }, [activities, api, clientInit, state.continueItem, timeZone]);
+  }, [activities, api, clientInit, selectedActivity, state.continueItem, timeZone]);
 
   const startTaskLearning = useCallback(async (selected: StudyTask) => {
     if (taskStartInFlight.current || !teachingLoopTrialEnabled) return;
@@ -367,14 +374,14 @@ export function TodayDashboard({
   const finishedToday = !currentActivity && currentCourse && !state.continueItem ? finishedTodayActivity(activities, currentCourse.id, timeZone) : null;
   const courseStudyHref = currentCourse ? `/opening/courses/${encodeURIComponent(currentCourse.id)}/study${finishedToday ? `?after=${encodeURIComponent(finishedToday.id)}` : ""}` : "";
   // F1 一键学习会话：有到期卡片时，主按钮先进入连续复习，完成后直接接到当前学习单元。
-  const sessionStudy = currentActivity?.courseId
+  const sessionStudy = !writingTarget && currentActivity?.courseId
     ? { href: `/opening/courses/${encodeURIComponent(currentActivity.courseId)}/study?activity=${encodeURIComponent(currentActivity.id)}`, label: currentActivity.intentSummary }
-    : !currentActivity && currentCourse ? { href: courseStudyHref, label: currentCourse.title } : null;
+    : !writingTarget && !currentActivity && currentCourse ? { href: courseStudyHref, label: currentCourse.title } : null;
   const sessionPrimary = sessionStudy && dueCardCount > 0
     ? <Link className={buttonClass} data-today-primary-cta="true" data-today-session="true" href={todaySessionHref(sessionStudy)}>{finishedToday ? `先复习 ${dueCardCount} 张卡，再学下一节` : `开始学习 · 先复习 ${dueCardCount} 张卡`}</Link>
     : null;
   const heading = <div className="group-data-[focus=true]/workspace:hidden"><V3PageHeader title={planning ? "学习安排" : "今日学习"} fact={<time dateTime={localDateKey(new Date(), timeZone)}>{friendlyTodayLabel(new Date(), timeZone)}</time>} /></div>;
-  if (noCourses && !planning) return <div className="min-h-full bg-bg text-text">{heading}<TodayNoCourses /><TodayAskBar /><TodayCourseList courses={[]} /><nav aria-label="今日其他安排" className="px-5 pb-4"><Link href="/opening/review" className={ui.quiet}>复习</Link></nav></div>;
+  if (noCourses && !planning && !writingTarget) return <div className="min-h-full bg-bg text-text">{heading}<TodayNoCourses /><TodayAskBar /><TodayCourseList courses={[]} /><nav aria-label="今日其他安排" className="px-5 pb-4"><Link href="/opening/review" className={ui.quiet}>复习</Link></nav></div>;
 
   return (
     <TaskQueueRefreshContext.Provider value={rereadQueue}>
@@ -394,7 +401,17 @@ export function TodayDashboard({
             finished={finishedToday}
             activity={currentActivity ? { title: currentActivity.intentSummary, courseId: currentActivity.courseId, id: currentActivity.id, contentVersion: currentActivity.contentVersion } : null}
             resume={learningResume}
-            primaryAction={sessionPrimary ?? (currentActivity?.courseId ? <Link className={buttonClass} href={`/opening/courses/${encodeURIComponent(currentActivity.courseId)}/study?activity=${encodeURIComponent(currentActivity.id)}`} data-today-primary-cta="true">继续：{currentActivity.intentSummary}</Link> : currentActivity ? (
+            primaryAction={writingTarget ? (
+              <button
+                type="button"
+                className={buttonClass}
+                data-today-primary-cta="true"
+                onClick={() => void runPrimaryCta()}
+                disabled={ctaBusy || activityLoad === "loading"}
+              >
+                {ctaLabel}
+              </button>
+            ) : sessionPrimary ?? (currentActivity?.courseId ? <Link className={buttonClass} href={`/opening/courses/${encodeURIComponent(currentActivity.courseId)}/study?activity=${encodeURIComponent(currentActivity.id)}`} data-today-primary-cta="true">继续：{currentActivity.intentSummary}</Link> : currentActivity ? (
               <button
                 type="button"
                 className={buttonClass}

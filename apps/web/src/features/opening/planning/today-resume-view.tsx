@@ -2,7 +2,7 @@ import { TransitionLink as Link } from "../v3/motion/view-transition";
 import { buttonClass, EmptyState, secondaryButtonClass, ui } from "../design/ui";
 import { hasNoTodayCourses, type TodayResumeState } from "./today-read";
 import type { TeachingActivity } from "@aistudy/contracts";
-import { todayActivityCtaLabel } from "../teaching/today-activity";
+import { resolveWritingActivityTarget, todayActivityCtaLabel } from "../teaching/today-activity";
 
 const primary = `${buttonClass} mt-4`;
 
@@ -32,18 +32,47 @@ export function TodayResumeBody({
       <EmptyState title="学习记录暂时无法读取" description="读取失败时不会以空状态代替。" action={<Link href="/opening/today" className={secondaryButtonClass}>重新读取</Link>} />
     );
   }
-  if (hasNoTodayCourses(state)) return <TodayNoCourses />;
-  const item = state.continueItem;
+  const writingTarget = resolveWritingActivityTarget(activity ?? null);
   const ctaLabel = todayActivityCtaLabel(activity ?? null);
+  const noTodayCourses = hasNoTodayCourses(state);
+  if (noTodayCourses && !writingTarget) return <TodayNoCourses />;
+  const item = state.continueItem;
   // Without an interactive handler, land on Today dashboard (activity wiring lives there).
-  const primaryHref = "/opening/today";
+  const primaryHref = writingTarget ? writingTarget.href : "/opening/today";
   const assistantHref = item
     ? `/opening/assistant?conversation=${encodeURIComponent(item.conversationId)}`
     : "/opening/assistant";
 
   return (
     <>
-      {item ? (
+      {writingTarget && (noTodayCourses || !item) ? (
+        <article className="border-b border-line bg-surface px-5 py-5">
+          <h2 className="text-sm font-semibold text-text">
+            继续：{activity?.intentSummary ?? writingTarget.variantLabel}
+          </h2>
+          <p className="mt-2 text-sm text-text-3">上次稿件：{writingTarget.variantLabel}</p>
+          {onPrimaryCta ? (
+            <button type="button" className={primary} data-today-primary-cta="true" onClick={onPrimaryCta} disabled={primaryBusy}>
+              {primaryBusy ? "处理中…" : ctaLabel}
+            </button>
+          ) : (
+            <Link className={primary} href={writingTarget.href} data-today-primary-cta="true">
+              {ctaLabel}
+            </Link>
+          )}
+          <p className="mt-3">
+            {noTodayCourses ? (
+              <Link href="/opening/courses/new" className={ui.quiet}>
+                添加第一门课
+              </Link>
+            ) : (
+              <Link href={assistantHref} className={ui.quiet} data-today-assistant-secondary="true">
+                打开自由对话（次要）
+              </Link>
+            )}
+          </p>
+        </article>
+      ) : item ? (
         <article className="border-b border-line bg-surface px-5 py-5">
           <h2 className="text-sm font-semibold text-text">继续：{item.title}</h2>
           {item.lastUserText ? (

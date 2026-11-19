@@ -1,12 +1,21 @@
-import { describe, expect, it } from "vitest";
+// @vitest-environment jsdom
+
+import { act, createElement } from "react";
+import { createRoot } from "react-dom/client";
+import { renderToStaticMarkup } from "react-dom/server";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { TeachingActivity } from "@aistudy/contracts";
 import { probeMaterialsAvailability } from "@aistudy/domain";
 import { currentCourseActivity } from "../courses/course-study-model";
+import { TodayResumeBody } from "../planning/today-resume-view";
+import { TodayDashboard } from "../planning/today-dashboard";
+import type { OpeningApi } from "../client/api";
 import {
   buildStartLearningCreateInput,
   canRequestTeachingCompile,
   isTeachingActivityPlaceholder,
   pickCurrentTeachingActivity,
+  resolveWritingActivityTarget,
   teachingActivityContentHonesty,
   teachingActivityGenerateStatusLabel,
   todayActivityCtaLabel,
@@ -272,5 +281,125 @@ describe("cross-surface multi-activity selection & shared placeholder helper", (
     expect(currentCourseActivity(mixed, courseId)?.id).toBe(highUuidEquivalentFormat.id);
     expect(pickCurrentTeachingActivity(shellsAndClosed)).toBeNull();
     expect(currentCourseActivity(shellsAndClosed, courseId)).toBeNull();
+  });
+});
+
+describe("course-less writing workspace Today resume integration", () => {
+  const roots: ReturnType<typeof createRoot>[] = [];
+  afterEach(async () => {
+    for (const root of roots.splice(0)) {
+      await act(async () => root.unmount());
+    }
+    document.body.innerHTML = "";
+    vi.unstubAllGlobals();
+  });
+
+  const workGroupId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const docB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const block2 = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+  const writingActivity: TeachingActivity = {
+    ...base,
+    id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+    courseId: null,
+    intentSummary: "独立思辨短文",
+    generateStatus: "ready",
+    checkpointJson: {
+      writingWorkspace: {
+        protocol: "writing-workspace-v1",
+        workGroupId,
+        activeDocumentId: docB,
+        activeVariantLabel: "B 稿",
+        savedRevisionNumber: 2,
+        focusBlockId: block2,
+        updatedAt: "2026-11-18T10:00:00.000Z",
+      },
+    },
+  };
+
+  it("resolves writing target and CTA label only for writing activities", () => {
+    const target = resolveWritingActivityTarget(writingActivity);
+    expect(target).toEqual({
+      activityId: writingActivity.id,
+      workGroupId,
+      documentId: docB,
+      variantLabel: "B 稿",
+      savedRevisionNumber: 2,
+      focusBlockId: block2,
+      href: `/opening/library/${docB}?block=${block2}&activity=${writingActivity.id}`,
+    });
+    expect(todayActivityCtaLabel(writingActivity)).toBe("继续写作：B 稿");
+
+    expect(resolveWritingActivityTarget(base)).toBeNull();
+    expect(todayActivityCtaLabel(base)).toBe("继续学习");
+    expect(todayActivityCtaLabel(null)).toBe("开始学习");
+  });
+
+  it("renders course-less writing CTA in TodayResumeBody only when writing target exists", () => {
+    const emptyNoWriting = renderToStaticMarkup(
+      createElement(TodayResumeBody, {
+        state: { kind: "empty", courses: { status: "ready", items: [] } },
+      }),
+    );
+    expect(emptyNoWriting).toContain("添加第一门课");
+    expect(emptyNoWriting).not.toContain("继续写作：");
+
+    const withWriting = renderToStaticMarkup(
+      createElement(TodayResumeBody, {
+        state: { kind: "empty", courses: { status: "ready", items: [] } },
+        activity: writingActivity,
+      }),
+    );
+    expect(withWriting).toContain("继续写作：B 稿");
+    expect(withWriting).toContain(`/opening/library/${docB}?block=${block2}&amp;activity=${writingActivity.id}`);
+  });
+
+  it("navigates TodayDashboard primary CTA to writingTarget.href even without courses", async () => {
+    const assign = vi.fn();
+    const originalLocation = window.location;
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ count: 0 }, { status: 200 })));
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      value: { ...originalLocation, assign },
+    });
+
+    try {
+      const api = {
+        listTeachingActivities: vi.fn(async () => [writingActivity]),
+        getTeachingResume: vi.fn(),
+        listTasks: vi.fn(async () => ({ tasks: [] })),
+        getToday: vi.fn(async () => ({ date: "2026-11-18", acceptedVersion: null, blocks: [] })),
+      } as unknown as OpeningApi;
+
+      const host = document.createElement("div");
+      host.className = "group/workspace";
+      document.body.append(host);
+      const root = createRoot(host);
+      roots.push(root);
+
+      await act(async () => {
+        root.render(
+          createElement(TodayDashboard, {
+            state: { kind: "empty", courses: { status: "ready", items: [] } },
+            api,
+            teachingLoopTrialEnabled: true,
+          }),
+        );
+      });
+
+      const cta = host.querySelector<HTMLButtonElement>('[data-today-primary-cta="true"]');
+      expect(cta?.textContent).toBe("继续写作：B 稿");
+      await act(async () => {
+        cta?.click();
+      });
+      expect(assign).toHaveBeenCalledWith(
+        `/opening/library/${docB}?block=${block2}&activity=${writingActivity.id}`,
+      );
+    } finally {
+      Object.defineProperty(window, "location", {
+        configurable: true,
+        value: originalLocation,
+      });
+    }
   });
 });
