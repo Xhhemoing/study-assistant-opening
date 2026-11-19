@@ -27,6 +27,11 @@ import type { Sql, TransactionSql } from "postgres";
 import { LibraryError, createLibraryRepository } from "./library";
 import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { openingNoteReadable } from "./opening-note-provenance";
+import {
+  parseAuthorizedWritingActivityCheckpoint,
+  readAuthorizedWritingActivityForGroup,
+  readAuthorizedWritingDocument,
+} from "./opening-writing-read-target";
 
 type Db = Sql | TransactionSql;
 
@@ -76,7 +81,10 @@ function assertValidScope(rawScope: Scope): Scope {
   if (!parsed.success) {
     throw new OpeningWritingError("VALIDATION", "工作区或用户标识格式无效。");
   }
-  return parsed.data;
+  return {
+    workspaceId: parsed.data.workspaceId.toLowerCase(),
+    ownerUserId: parsed.data.ownerUserId.toLowerCase(),
+  };
 }
 
 function assertValidUuid(value: string, label: string): string {
@@ -84,7 +92,7 @@ function assertValidUuid(value: string, label: string): string {
   if (!parsed.success) {
     throw new OpeningWritingError("VALIDATION", `${label}格式无效。`);
   }
-  return parsed.data;
+  return parsed.data.toLowerCase();
 }
 
 function extractInlineText(value: unknown): string {
@@ -229,45 +237,20 @@ export function createOpeningWritingWorkspaceRepository(
     workGroupId: string,
     requestedActivityId?: string | null,
   ): Promise<{ id: string; courseId: string | null } | null> {
-    if (requestedActivityId) {
-      const validActivityId = assertValidUuid(requestedActivityId, "活动编号");
-      const rows = await db`
-        SELECT id, course_id, create_intent
-        FROM opening_teaching_activities
-        WHERE id = ${validActivityId}
-          AND workspace_id = ${scope.workspaceId}
-          AND owner_user_id = ${scope.ownerUserId}
-        LIMIT 1
-      `;
-      const row = rows[0];
-      if (
-        !row
-        || row.create_intent?.protocol !== WRITING_WORKSPACE_PROTOCOL
-        || row.create_intent?.workGroupId !== workGroupId
-      ) {
-        return null;
-      }
-      return {
-        id: String(row.id),
-        courseId: row.course_id == null ? null : String(row.course_id),
-      };
+    const validActivityId =
+      requestedActivityId !== undefined && requestedActivityId !== null
+        ? assertValidUuid(requestedActivityId, "活动编号")
+        : null;
+    const resolved = await readAuthorizedWritingActivityForGroup(
+      db,
+      scope,
+      workGroupId,
+      validActivityId,
+    );
+    if (resolved.status === "not_found") {
+      throw new OpeningWritingError("NOT_FOUND", "写作活动不存在。");
     }
-
-    const rows = await db`
-      SELECT id, course_id
-      FROM opening_teaching_activities
-      WHERE workspace_id = ${scope.workspaceId}
-        AND owner_user_id = ${scope.ownerUserId}
-        AND create_intent->>'protocol' = ${WRITING_WORKSPACE_PROTOCOL}
-        AND create_intent->>'workGroupId' = ${workGroupId}
-      ORDER BY updated_at DESC, id DESC
-      LIMIT 1
-    `;
-    if (!rows.length) return null;
-    return {
-      id: String(rows[0]!.id),
-      courseId: rows[0]!.course_id == null ? null : String(rows[0]!.course_id),
-    };
+    return resolved.activity;
   }
 
   async function resolveOwnedActivityForWrite(
@@ -295,13 +278,14 @@ export function createOpeningWritingWorkspaceRepository(
       }
       if (
         row.create_intent?.protocol !== WRITING_WORKSPACE_PROTOCOL
-        || row.create_intent?.workGroupId !== workGroupId
+        || typeof row.create_intent?.workGroupId !== "string"
+        || row.create_intent.workGroupId.toLowerCase() !== workGroupId.toLowerCase()
       ) {
         throw new OpeningWritingError("CONFLICT", "写作活动与当前文稿组不匹配。");
       }
       return {
-        id: String(row.id),
-        courseId: row.course_id == null ? null : String(row.course_id),
+        id: String(row.id).toLowerCase(),
+        courseId: row.course_id == null ? null : String(row.course_id).toLowerCase(),
         checkpointJson:
           row.checkpoint_json && typeof row.checkpoint_json === "object"
             ? (row.checkpoint_json as Record<string, unknown>)
@@ -315,7 +299,7 @@ export function createOpeningWritingWorkspaceRepository(
       WHERE workspace_id = ${scope.workspaceId}
         AND owner_user_id = ${scope.ownerUserId}
         AND create_intent->>'protocol' = ${WRITING_WORKSPACE_PROTOCOL}
-        AND create_intent->>'workGroupId' = ${workGroupId}
+        AND lower(create_intent->>'workGroupId') = lower(${workGroupId})
       ORDER BY updated_at DESC, id DESC
       LIMIT 1
       FOR UPDATE
@@ -324,8 +308,8 @@ export function createOpeningWritingWorkspaceRepository(
       throw new OpeningWritingError("NOT_FOUND", "未找到关联的写作活动。");
     }
     return {
-      id: String(rows[0]!.id),
-      courseId: rows[0]!.course_id == null ? null : String(rows[0]!.course_id),
+      id: String(rows[0]!.id).toLowerCase(),
+      courseId: rows[0]!.course_id == null ? null : String(rows[0]!.course_id).toLowerCase(),
       checkpointJson:
         rows[0]!.checkpoint_json && typeof rows[0]!.checkpoint_json === "object"
           ? (rows[0]!.checkpoint_json as Record<string, unknown>)
@@ -340,6 +324,14 @@ export function createOpeningWritingWorkspaceRepository(
     currentMeta: WritingVariantMeta,
     options: { requestedFocusBlockId?: string | null; activityId?: string | null } = {},
   ): Promise<WritingWorkspaceView> {
+    const canonicalDocumentId = documentId.toLowerCase();
+    const activity = await resolveActivityForView(
+      db,
+      scope,
+      currentMeta.workGroupId,
+      options.activityId,
+    );
+
     const groupRows = await db`
       SELECT d.id, d.title, d.current_revision_number, d.created_at, d.updated_at, p.value AS meta
       FROM library_documents d
@@ -348,17 +340,39 @@ export function createOpeningWritingWorkspaceRepository(
        AND p.subject_type = 'document'
        AND p.subject_id = d.id
        AND p.key = ${WRITING_META_PROPERTY_KEY}
+      JOIN workspaces w
+        ON w.id = d.workspace_id
+       AND w.owner_user_id = ${scope.ownerUserId}
       WHERE d.workspace_id = ${scope.workspaceId}
         AND d.deleted_at IS NULL
         AND ${openingNoteReadable(db, scope.workspaceId, db`d.id`)}
-        AND p.value->>'workGroupId' = ${currentMeta.workGroupId}
+        AND lower(p.value->>'workGroupId') = lower(${currentMeta.workGroupId})
       ORDER BY d.created_at ASC, d.id ASC
     `;
 
-    const variants: WritingVariantSummary[] = groupRows.map((row) => {
-      const meta = writingVariantMetaSchema.parse(row.meta);
-      return {
-        documentId: String(row.id),
+    let snapshotCurrentMeta: WritingVariantMeta | null = null;
+    const variants: WritingVariantSummary[] = [];
+    for (const row of groupRows) {
+      const rowId = String(row.id).toLowerCase();
+      const parsedMeta = writingVariantMetaSchema.safeParse(row.meta);
+      if (!parsedMeta.success) {
+        if (rowId === canonicalDocumentId) {
+          throw new OpeningWritingError("NOT_FOUND", "笔记不存在或不可用。");
+        }
+        continue;
+      }
+      const meta: WritingVariantMeta = {
+        ...parsedMeta.data,
+        workGroupId: parsedMeta.data.workGroupId.toLowerCase(),
+        parentDocumentId: parsedMeta.data.parentDocumentId == null
+          ? null
+          : parsedMeta.data.parentDocumentId.toLowerCase(),
+      };
+      if (rowId === canonicalDocumentId) {
+        snapshotCurrentMeta = meta;
+      }
+      variants.push({
+        documentId: rowId,
         title: String(row.title),
         variantLabel: meta.variantLabel,
         currentRevisionNumber: Number(row.current_revision_number),
@@ -369,11 +383,19 @@ export function createOpeningWritingWorkspaceRepository(
         assistanceCount: meta.assistanceRecords.length,
         adoptedPolishCount: countAdoptedPolish(meta),
         updatedAt: toIso(row.updated_at),
-      };
-    });
+      });
+    }
 
-    const requested = options.requestedFocusBlockId?.trim() || null;
-    const candidateFocus = requested ?? currentMeta.focusBlockId;
+    if (!snapshotCurrentMeta) {
+      throw new OpeningWritingError("NOT_FOUND", "笔记不存在或不可用。");
+    }
+    const resolvedCurrentMeta: WritingVariantMeta = snapshotCurrentMeta;
+
+    const rawRequested = options.requestedFocusBlockId?.trim() || null;
+    const requested = rawRequested && uuidSchema.safeParse(rawRequested).success
+      ? rawRequested.toLowerCase()
+      : rawRequested;
+    const candidateFocus = requested ?? resolvedCurrentMeta.focusBlockId;
     let focusRestore: WritingFocusRestore;
     if (candidateFocus == null) {
       focusRestore = { status: "none" };
@@ -381,12 +403,15 @@ export function createOpeningWritingWorkspaceRepository(
       const matchingBlocks = await db`
         SELECT id FROM library_blocks
         WHERE workspace_id = ${scope.workspaceId}
-          AND document_id = ${documentId}
-          AND id::text = ${candidateFocus}
+          AND document_id = ${canonicalDocumentId}
+          AND id::text = lower(${candidateFocus})
         LIMIT 1
       `;
       focusRestore = matchingBlocks.length
-        ? { status: "exact", blockId: candidateFocus }
+        ? {
+            status: "exact",
+            blockId: String(matchingBlocks[0]!.id).toLowerCase(),
+          }
         : {
             status: "block_missing",
             requestedBlockId: candidateFocus,
@@ -394,19 +419,12 @@ export function createOpeningWritingWorkspaceRepository(
           };
     }
 
-    const activity = await resolveActivityForView(
-      db,
-      scope,
-      currentMeta.workGroupId,
-      options.activityId,
-    );
-
     return writingWorkspaceViewSchema.parse({
-      workGroupId: currentMeta.workGroupId,
+      workGroupId: resolvedCurrentMeta.workGroupId.toLowerCase(),
       activityId: activity?.id ?? null,
       courseId: activity?.courseId ?? null,
-      currentDocumentId: documentId,
-      currentVariant: currentMeta,
+      currentDocumentId: canonicalDocumentId,
+      currentVariant: resolvedCurrentMeta,
       variants,
       focusRestore: writingFocusRestoreSchema.parse(focusRestore),
     });
@@ -441,7 +459,7 @@ export function createOpeningWritingWorkspaceRepository(
     focusBlockId: string | null,
     nowIso: string,
   ): Promise<void> {
-    const documentId = String(doc.id);
+    const documentId = String(doc.id).toLowerCase();
     const clientKey = `writing-workgroup:${documentId}`;
     const existing = await tx`
       SELECT id, create_intent
@@ -454,7 +472,8 @@ export function createOpeningWritingWorkspaceRepository(
     if (existing.length) {
       if (
         existing[0]!.create_intent?.protocol !== WRITING_WORKSPACE_PROTOCOL
-        || existing[0]!.create_intent?.workGroupId !== documentId
+        || typeof existing[0]!.create_intent?.workGroupId !== "string"
+        || existing[0]!.create_intent.workGroupId.toLowerCase() !== documentId
       ) {
         throw new OpeningWritingError("CONFLICT", "写作活动标识冲突。");
       }
@@ -501,7 +520,7 @@ export function createOpeningWritingWorkspaceRepository(
       const input = parsedInput.data;
       const variantLabel = input.variantLabel ?? "初稿";
       const initialText = input.initialText ?? "";
-      const requestedCourseId = input.courseId ?? null;
+      const requestedCourseId = input.courseId == null ? null : input.courseId.toLowerCase();
 
       return sql.begin(async (tx) => {
         await lockWriteBoundary(tx, scope);
@@ -515,16 +534,34 @@ export function createOpeningWritingWorkspaceRepository(
         `;
         if (existingRows.length) {
           const existing = existingRows[0]!;
-          const intent = existing.create_intent as Record<string, unknown> | undefined;
-          if (
-            !intent
-            || intent.protocol !== WRITING_WORKSPACE_PROTOCOL
-            || typeof intent.workGroupId !== "string"
-          ) {
+          const parsedExisting = parseAuthorizedWritingActivityCheckpoint(existing);
+          if (parsedExisting.kind === "not_writing") {
             throw new OpeningWritingError("CONFLICT", "请求标识已被其他活动占用。");
           }
-          const workGroupId = intent.workGroupId;
-          const existingCourseId = existing.course_id == null ? null : String(existing.course_id);
+          if (parsedExisting.kind !== "writing") {
+            throw new OpeningWritingError("NOT_FOUND", "写作目标不存在或不可用。");
+          }
+
+          const { workGroupId, checkpoint } = parsedExisting;
+          const targetDocumentId = checkpoint.activeDocumentId;
+          const docReads = new Map<string, Awaited<ReturnType<typeof readAuthorizedWritingDocument>>>();
+          for (const docIdToRead of [...new Set([workGroupId, targetDocumentId])].sort()) {
+            docReads.set(
+              docIdToRead,
+              await readAuthorizedWritingDocument(tx, scope, {
+                documentId: docIdToRead,
+                expectedWorkGroupId: workGroupId,
+                forShare: true,
+              }),
+            );
+          }
+          const rootRead = docReads.get(workGroupId)!;
+          const targetRead = docReads.get(targetDocumentId)!;
+          if (rootRead.status !== "authorized" || targetRead.status !== "authorized") {
+            throw new OpeningWritingError("NOT_FOUND", "写作目标不存在或不可用。");
+          }
+
+          const existingCourseId = existing.course_id == null ? null : String(existing.course_id).toLowerCase();
           if (existingCourseId !== requestedCourseId) {
             throw new OpeningWritingError("CONFLICT", "同一请求标识对应的写作参数不一致。");
           }
@@ -535,48 +572,21 @@ export function createOpeningWritingWorkspaceRepository(
               AND revision_number = 1
             LIMIT 1
           `;
-          const [rootProp] = await tx`
-            SELECT value FROM library_properties
-            WHERE workspace_id = ${scope.workspaceId}
-              AND subject_type = 'document'
-              AND subject_id = ${workGroupId}
-              AND key = ${WRITING_META_PROPERTY_KEY}
-            LIMIT 1
-          `;
-          const rootMeta = rootProp ? writingVariantMetaSchema.safeParse(rootProp.value) : null;
           const rev1Blocks = Array.isArray(rev1?.blocks) ? rev1.blocks : [];
           const rev1InitialText = rev1Blocks[0]
             ? extractBlockPlainText((rev1Blocks[0] as { content?: unknown }).content)
             : "";
           if (
             !rev1
-            || !rootMeta?.success
             || String(rev1.title) !== input.title
             || rev1InitialText !== initialText
-            || rootMeta.data.variantLabel !== variantLabel
+            || rootRead.meta.variantLabel !== variantLabel
           ) {
             throw new OpeningWritingError("CONFLICT", "同一请求标识对应的写作参数不一致。");
           }
 
-          const checkpoint = writingActivityCheckpointSchema.safeParse(
-            existing.checkpoint_json?.writingWorkspace,
-          );
-          const targetDocumentId = checkpoint.success
-            ? checkpoint.data.activeDocumentId
-            : workGroupId;
-          const [targetProp] = await tx`
-            SELECT value FROM library_properties
-            WHERE workspace_id = ${scope.workspaceId}
-              AND subject_type = 'document'
-              AND subject_id = ${targetDocumentId}
-              AND key = ${WRITING_META_PROPERTY_KEY}
-            LIMIT 1
-          `;
-          const targetMeta = targetProp
-            ? writingVariantMetaSchema.parse(targetProp.value)
-            : rootMeta.data;
-          return buildView(tx, scope, targetDocumentId, targetMeta, {
-            activityId: String(existing.id),
+          return buildView(tx, scope, targetRead.documentId, targetRead.meta, {
+            activityId: String(existing.id).toLowerCase(),
           });
         }
 
@@ -681,47 +691,29 @@ export function createOpeningWritingWorkspaceRepository(
     async getView(rawScope, rawDocumentId, options = {}) {
       const scope = assertValidScope(rawScope);
       const documentId = assertValidUuid(rawDocumentId, "笔记编号");
-      if (options.activityId) {
-        assertValidUuid(options.activityId, "活动编号");
-      }
+      const hasExplicitActivity =
+        options.activityId !== undefined && options.activityId !== null;
+      const validActivityId = hasExplicitActivity
+        ? assertValidUuid(options.activityId!, "活动编号")
+        : null;
 
-      const owners = await sql`
-        SELECT id FROM workspaces
-        WHERE id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}
-        LIMIT 1
-      `;
-      if (!owners.length) {
-        throw new OpeningWritingError("NOT_FOUND", "工作区不存在。");
-      }
-
-      const docRows = await sql`
-        SELECT d.id
-        FROM library_documents d
-        WHERE d.id = ${documentId}
-          AND d.workspace_id = ${scope.workspaceId}
-          AND d.deleted_at IS NULL
-          AND ${openingNoteReadable(sql, scope.workspaceId, sql`d.id`)}
-        LIMIT 1
-      `;
-      if (!docRows.length) {
+      const docRead = await readAuthorizedWritingDocument(sql, scope, {
+        documentId,
+      });
+      if (docRead.status === "not_found") {
         throw new OpeningWritingError("NOT_FOUND", "笔记不存在或不可用。");
       }
-
-      const propRows = await sql`
-        SELECT value
-        FROM library_properties
-        WHERE workspace_id = ${scope.workspaceId}
-          AND subject_type = 'document'
-          AND subject_id = ${documentId}
-          AND key = ${WRITING_META_PROPERTY_KEY}
-        LIMIT 1
-      `;
-      if (!propRows.length) {
+      if (docRead.status === "uninitialized") {
+        if (hasExplicitActivity) {
+          throw new OpeningWritingError("NOT_FOUND", "写作活动不存在。");
+        }
         return null;
       }
 
-      const currentMeta = writingVariantMetaSchema.parse(propRows[0]!.value);
-      return buildView(sql, scope, documentId, currentMeta, options);
+      return buildView(sql, scope, docRead.documentId, docRead.meta, {
+        requestedFocusBlockId: options.requestedFocusBlockId,
+        activityId: validActivityId,
+      });
     },
 
     async command(rawScope, rawDocumentId, rawCommand) {
@@ -942,7 +934,7 @@ export function createOpeningWritingWorkspaceRepository(
             cmd.activityId,
           );
           const recordIndex = currentMeta.assistanceRecords.findIndex(
-            (record) => record.id === cmd.assistanceId,
+            (record) => record.id.toLowerCase() === cmd.assistanceId.toLowerCase(),
           );
           if (recordIndex === -1) {
             throw new OpeningWritingError("NOT_FOUND", "未找到对应的写作辅助记录。");
@@ -1003,7 +995,10 @@ export function createOpeningWritingWorkspaceRepository(
           const existingCheckpoint = writingActivityCheckpointSchema.safeParse(
             activity.checkpointJson.writingWorkspace,
           );
-          if (existingCheckpoint.success && existingCheckpoint.data.activeDocumentId === documentId) {
+          if (
+            existingCheckpoint.success
+            && existingCheckpoint.data.activeDocumentId.toLowerCase() === documentId.toLowerCase()
+          ) {
             await updateCheckpointInTx(tx, scope, activity.id, {
               ...existingCheckpoint.data,
               savedRevisionNumber: nextRevisionNumber,
@@ -1054,7 +1049,7 @@ export function createOpeningWritingWorkspaceRepository(
             WHERE d.workspace_id = ${scope.workspaceId}
               AND d.deleted_at IS NULL
               AND d.id <> ${documentId}
-              AND p.value->>'workGroupId' = ${currentMeta.workGroupId}
+              AND lower(p.value->>'workGroupId') = lower(${currentMeta.workGroupId})
             FOR UPDATE OF p
           `;
           for (const sibling of siblingRows) {
