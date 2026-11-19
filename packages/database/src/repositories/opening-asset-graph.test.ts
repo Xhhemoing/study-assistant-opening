@@ -110,6 +110,7 @@ type MockDbState = {
     updated_at: string;
   }>;
   assetLinks: Array<Record<string, unknown>>;
+  sharedLinks?: Array<Record<string, unknown>>;
   promotions: Array<Record<string, unknown>>;
   observationHeaders: Array<Record<string, unknown>>;
   observationChains: Array<Record<string, unknown>>;
@@ -418,18 +419,97 @@ function createHarness(state: MockDbState) {
     }
     if (text.startsWith("SELECT id, title, updated_at FROM courses")) return Promise.resolve(state.courses);
     if (text.includes("FROM course_goals g")) return Promise.resolve(state.goals);
-    if (text.includes("FROM course_requirements")) return Promise.resolve(state.requirements);
-    if (text.includes("FROM opening_course_knowledge")) return Promise.resolve(state.knowledge);
+    if (text.startsWith("SELECT course_id FROM course_requirements")) {
+      const reqId = String(values[0]);
+      const req = state.requirements.find(r => String(r.id) === reqId);
+      return Promise.resolve(req ? [{ course_id: req.course_id }] : []);
+    }
+    if (text.includes("FROM course_requirements")) {
+      const courseParam = values[2];
+      const allowedCourses = Array.isArray(courseParam)
+        ? new Set(courseParam.map(String))
+        : typeof courseParam === "string"
+          ? new Set([courseParam])
+          : null;
+      return Promise.resolve(
+        state.requirements.filter(
+          r =>
+            r.lifecycle === "active" &&
+            (!allowedCourses || allowedCourses.has(String(r.course_id))),
+        ),
+      );
+    }
+    if (text.includes("FROM course_requirement_evidence_links l")) {
+      const reqById = new Map(state.requirements.map(r => [String(r.id), r]));
+      const activeCourseIds = new Set(state.courses.map(c => String(c.id)));
+      const links = (state.sharedLinks ?? []).filter(l => l.active === true);
+      if (text.startsWith("SELECT l.*")) {
+        const targetCourseId = String(values[2]);
+        return Promise.resolve(
+          links.filter(l => {
+            const s = reqById.get(String(l.source_requirement_id));
+            const t = reqById.get(String(l.target_requirement_id));
+            return (
+              s &&
+              t &&
+              String(t.course_id) === targetCourseId &&
+              activeCourseIds.has(String(s.course_id))
+            );
+          }),
+        );
+      }
+      const targetCourseIds = Array.isArray(values[2]) ? new Set(values[2].map(String)) : new Set<string>();
+      const allowedSourceCourses = Array.isArray(values[3])
+        ? new Set(values[3].map(String))
+        : activeCourseIds;
+      return Promise.resolve(
+        links.flatMap(l => {
+          const s = reqById.get(String(l.source_requirement_id));
+          const t = reqById.get(String(l.target_requirement_id));
+          if (
+            !s ||
+            !t ||
+            !targetCourseIds.has(String(t.course_id)) ||
+            !allowedSourceCourses.has(String(s.course_id)) ||
+            !activeCourseIds.has(String(s.course_id))
+          ) {
+            return [];
+          }
+          return [
+            {
+              ...l,
+              source_course_id: s.course_id,
+              source_requirement_title: s.title,
+              target_course_id: t.course_id,
+            },
+          ];
+        }),
+      );
+    }
+    if (text.includes("FROM opening_course_knowledge")) {
+      const courseParam = Array.isArray(values[2]) ? new Set(values[2].map(String)) : null;
+      return Promise.resolve(
+        state.knowledge.filter(k => !courseParam || courseParam.has(String(k.course_id))),
+      );
+    }
     if (text.startsWith("SELECT d.id, d.title")) return Promise.resolve(state.documents);
     if (text.startsWith("SELECT s.id, s.name")) return Promise.resolve(state.sources);
     if (text.startsWith("SELECT source_id FROM opening_privacy_exclusions")) return Promise.resolve(state.exclusions);
     if (text.startsWith("SELECT id FROM opening_sources")) return Promise.resolve(state.allSourceIds);
     if (text.startsWith("SELECT id, title, status, course_id")) return Promise.resolve(state.explorations);
-    if (text.includes("FROM course_asset_memberships")) return Promise.resolve(state.memberships);
+    if (text.includes("FROM course_asset_memberships")) {
+      const courseParam = Array.isArray(values[1]) ? new Set(values[1].map(String)) : null;
+      return Promise.resolve(
+        state.memberships.filter(m => !courseParam || courseParam.has(String(m.course_id))),
+      );
+    }
     if (text.includes("FROM opening_learning_asset_links")) return Promise.resolve(state.assetLinks);
     if (text.includes("FROM promotion_records")) return Promise.resolve(state.promotions);
     if (text.includes("FROM opening_learning_observations o") && text.includes("AS eval_req_id")) {
-      return Promise.resolve(state.observationHeaders);
+      const courseParam = Array.isArray(values[2]) ? new Set(values[2].map(String)) : null;
+      return Promise.resolve(
+        state.observationHeaders.filter(h => !courseParam || courseParam.has(String(h.course_id))),
+      );
     }
     if (text.includes("FROM opening_learning_observations o") && text.includes("AS item_source_id")) {
       return Promise.resolve(state.observationChains);
@@ -1695,5 +1775,842 @@ describe("createOpeningAssetGraphRepository (unit)", () => {
         { op: "roots", context: { kind: "workspace" }, lens: "all", cursor: p1.page.nextCursor! },
       ),
     ).rejects.toMatchObject({ code: "CURSOR_STALE" });
+  });
+
+  it("projects cross-course shared-skills evidence in course, goal, and workspace contexts while keeping homonymous knowledge nodes separate", async () => {
+    const actualProjection = await vi.importActual<
+      typeof import("./opening-course-shared-skill-projection")
+    >("./opening-course-shared-skill-projection");
+    mockedReaders.readSharedCourseEvidence.mockImplementation(
+      actualProjection.readSharedCourseEvidence,
+    );
+
+    const SRC_2 = "88888888-8888-4888-8888-888888888882";
+    const REQ_TARGET = "55555555-5555-4555-8555-555555555553";
+    const LINK_1 = "12121212-1212-4121-8121-121212121212";
+    const OBS_UNSHARED = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb3";
+    const CHUNK_1 = "abababab-abab-4aba-8aba-abababababa1";
+    const CHUNK_2 = "abababab-abab-4aba-8aba-abababababa2";
+
+    const state = makeBaseState();
+    state.courses.push({
+      id: COURSE_2,
+      title: "Numerical Methods",
+      updated_at: "2026-11-18T00:00:00.000Z",
+    });
+    state.goals[1] = {
+      ...state.goals[1]!,
+      course_id: COURSE_2,
+      course_ids: [COURSE_2],
+      title: "数值计算目标",
+      lifecycle: "active",
+    };
+    state.adaptivePlanning = {
+      autonomy: "copilot",
+      coachBudgetMinutes: 60,
+      courseGoals: {},
+      courseGoalRefs: { [COURSE_1]: GOAL_1, [COURSE_2]: GOAL_2 },
+    };
+    state.requirements = [
+      {
+        ...state.requirements[0]!,
+        revision: 1,
+        verification: {
+          kind: "rubric",
+          status: "ready",
+          exerciseKeys: ["q-span"],
+          rubric: "说明向量在线性张成中的判定步骤。",
+          missingReasons: [],
+        },
+        evidence_conditions: {
+          responseFormat: "text",
+          timeLimitSeconds: null,
+          assistance: "independent",
+        },
+      },
+      {
+        id: REQ_2,
+        workspace_id: SCOPE.workspaceId,
+        owner_user_id: SCOPE.ownerUserId,
+        course_id: COURSE_1,
+        stable_skill_id: SKILL_2,
+        knowledge_node_id: KN_2,
+        requirement_key: "req:unshared",
+        title: "非共享要求",
+        position: 1,
+        mandatory: false,
+        goal_ids: [GOAL_1],
+        prerequisite_ids: [],
+        source_refs: [{ sourceId: SRC_1, sourceVersion: 2 }],
+        verification: {
+          kind: "manual",
+          status: "ready",
+          exerciseKeys: [],
+          rubric: null,
+          missingReasons: [],
+        },
+        revision: 1,
+        lifecycle: "active",
+        origin: "confirmed",
+        approved_at: "2026-11-02T00:00:00.000Z",
+        updated_at: "2026-11-18T00:00:00.000Z",
+      },
+      {
+        id: REQ_TARGET,
+        workspace_id: SCOPE.workspaceId,
+        owner_user_id: SCOPE.ownerUserId,
+        course_id: COURSE_2,
+        stable_skill_id: SKILL_1,
+        knowledge_node_id: KN_1,
+        requirement_key: "req:nm-span",
+        title: "数值分析中的线性张成应用",
+        position: 0,
+        mandatory: true,
+        goal_ids: [GOAL_2],
+        prerequisite_ids: [],
+        source_refs: [{ sourceId: SRC_2, sourceVersion: 1 }],
+        verification: {
+          kind: "rubric",
+          status: "ready",
+          exerciseKeys: ["q-nm"],
+          rubric: "说明向量在线性张成中的判定步骤。",
+          missingReasons: [],
+        },
+        evidence_conditions: {
+          responseFormat: "text",
+          timeLimitSeconds: null,
+          assistance: "independent",
+        },
+        revision: 2,
+        lifecycle: "active",
+        origin: "confirmed",
+        approved_at: "2026-11-03T00:00:00.000Z",
+        updated_at: "2026-11-18T00:00:00.000Z",
+      },
+    ];
+    // Homonymous knowledge node with the exact same KN_1 UUID and label in COURSE_2.
+    state.knowledge.push({
+      course_id: COURSE_2,
+      version: 1,
+      snapshot: {
+        courseId: COURSE_2,
+        version: 1,
+        nodes: [
+          {
+            id: KN_1,
+            courseId: COURSE_2,
+            label: "线性组合",
+            kind: "concept",
+            evidenceChunkIds: [],
+            status: "supported",
+          },
+        ],
+        edges: [],
+      } satisfies KnowledgeSnapshot,
+      updated_at: "2026-11-18T00:00:00.000Z",
+    });
+    state.sources.push({
+      id: SRC_2,
+      name: "Numerical Methods.pdf",
+      version: 1,
+      upload_state: "uploaded",
+      parse_state: "ready",
+      updated_at: "2026-11-18T00:00:00.000Z",
+      ai_excluded: false,
+    });
+    state.allSourceIds.push({ id: SRC_2 });
+    state.memberships.push({
+      id: "dddddddd-dddd-4ddd-8ddd-ddddddddddd2",
+      course_id: COURSE_2,
+      asset_type: "source",
+      asset_id: SRC_2,
+      updated_at: "2026-11-18T00:00:00.000Z",
+    });
+    state.sharedLinks = [
+      {
+        id: LINK_1,
+        workspace_id: SCOPE.workspaceId,
+        owner_user_id: SCOPE.ownerUserId,
+        source_requirement_id: REQ_1,
+        source_requirement_revision: 1,
+        target_requirement_id: REQ_TARGET,
+        target_requirement_revision: 2,
+        stable_skill_id: SKILL_1,
+        revision: 1,
+        active: true,
+        updated_at: "2026-11-18T01:00:00.000Z",
+      },
+    ];
+    state.observationHeaders = [
+      {
+        id: OBS_1,
+        course_id: COURSE_1,
+        root_id: OBS_1,
+        history_revision: 1,
+        workspace_history_revision: 1,
+        occurred_at: "2026-11-18T01:00:00.000Z",
+        submitted_at: "2026-11-18T01:00:00.000Z",
+        recorded_at: "2026-11-18T01:00:00.000Z",
+        requirement_key: "req:span",
+        eval_req_id: REQ_1,
+      },
+      {
+        id: OBS_2,
+        course_id: COURSE_1,
+        root_id: OBS_2,
+        history_revision: 1,
+        workspace_history_revision: 2,
+        occurred_at: "2026-11-18T01:05:00.000Z",
+        submitted_at: "2026-11-18T01:05:00.000Z",
+        recorded_at: "2026-11-18T01:05:00.000Z",
+        requirement_key: "req:span",
+        eval_req_id: REQ_1,
+      },
+      {
+        id: OBS_UNSHARED,
+        course_id: COURSE_1,
+        root_id: OBS_UNSHARED,
+        history_revision: 1,
+        workspace_history_revision: 3,
+        occurred_at: "2026-11-18T01:10:00.000Z",
+        submitted_at: "2026-11-18T01:10:00.000Z",
+        recorded_at: "2026-11-18T01:10:00.000Z",
+        requirement_key: "req:unshared",
+        eval_req_id: REQ_2,
+      },
+    ];
+
+    mockedReaders.readCourseRouteMaterials.mockImplementation(async (_db, _scope, cid) =>
+      cid === COURSE_1
+        ? [{ sourceId: SRC_1, sourceVersion: 2, title: "Linear Algebra Notes.pdf", available: true }]
+        : [{ sourceId: SRC_2, sourceVersion: 1, title: "Numerical Methods.pdf", available: true }],
+    );
+    mockedReaders.readCourseRouteSourceChunks.mockImplementation(async (_db, _scope, cid) =>
+      cid === COURSE_1
+        ? [
+            { id: CHUNK_1, sourceId: SRC_1, sourceVersion: 2, page: 3 },
+            { id: CHUNK_2, sourceId: SRC_1, sourceVersion: 2, page: 4 },
+          ]
+        : [{ id: randomUUID(), sourceId: SRC_2, sourceVersion: 1, page: 1 }],
+    );
+    mockedReaders.readCourseRouteObservations.mockImplementation(async (_db, _scope, cid) => {
+      if (cid !== COURSE_1) return { raw: [], projected: [] };
+      return {
+        raw: [
+          {
+            id: OBS_1,
+            rootObservationId: OBS_1,
+            workspaceId: SCOPE.workspaceId,
+            sessionId: randomUUID(),
+            courseId: COURSE_1,
+            activityId: randomUUID(),
+            skillLabel: "SECRET-SPAN",
+            sourceIds: [SRC_1],
+            problemId: randomUUID(),
+            retestId: null,
+            answer: "SECRET-ANS-1",
+            outcome: "correct",
+            assistance: "independent",
+            clientKey: "k1",
+            occurredAt: "2026-11-18T01:00:00.000Z",
+            submittedAt: "2026-11-18T01:00:00.000Z",
+            recordedAt: "2026-11-18T01:00:00.000Z",
+            sourceTurnIds: [],
+            verdictSource: "deterministic",
+            referenceSourceId: null,
+            evidenceVerdict: "MASTERY_NOT_ESTABLISHED",
+            attemptId: ATTEMPT_1,
+            itemVersionId: randomUUID(),
+            requirementKey: "req:span",
+            startedAt: "2026-11-18T00:55:00.000Z",
+            sourceVersions: { [SRC_1]: 2 },
+            historyRevision: 1,
+            referenceCheck: null,
+          },
+          {
+            id: OBS_2,
+            rootObservationId: OBS_2,
+            workspaceId: SCOPE.workspaceId,
+            sessionId: randomUUID(),
+            courseId: COURSE_1,
+            activityId: randomUUID(),
+            skillLabel: "SECRET-SPAN",
+            sourceIds: [SRC_1],
+            problemId: randomUUID(),
+            retestId: null,
+            answer: "SECRET-ANS-2",
+            outcome: "correct",
+            assistance: "independent",
+            clientKey: "k2",
+            occurredAt: "2026-11-18T01:05:00.000Z",
+            submittedAt: "2026-11-18T01:05:00.000Z",
+            recordedAt: "2026-11-18T01:05:00.000Z",
+            sourceTurnIds: [],
+            verdictSource: "deterministic",
+            referenceSourceId: null,
+            evidenceVerdict: "MASTERY_NOT_ESTABLISHED",
+            attemptId: randomUUID(),
+            itemVersionId: randomUUID(),
+            requirementKey: "req:span",
+            startedAt: "2026-11-18T01:00:00.000Z",
+            sourceVersions: { [SRC_1]: 2 },
+            historyRevision: 1,
+            referenceCheck: null,
+          },
+          {
+            id: OBS_UNSHARED,
+            rootObservationId: OBS_UNSHARED,
+            workspaceId: SCOPE.workspaceId,
+            sessionId: randomUUID(),
+            courseId: COURSE_1,
+            activityId: randomUUID(),
+            skillLabel: "SECRET-UNSHARED",
+            sourceIds: [SRC_1],
+            problemId: randomUUID(),
+            retestId: null,
+            answer: "SECRET-ANS-3",
+            outcome: "correct",
+            assistance: "independent",
+            clientKey: "k3",
+            occurredAt: "2026-11-18T01:10:00.000Z",
+            submittedAt: "2026-11-18T01:10:00.000Z",
+            recordedAt: "2026-11-18T01:10:00.000Z",
+            sourceTurnIds: [],
+            verdictSource: "deterministic",
+            referenceSourceId: null,
+            evidenceVerdict: "MASTERY_NOT_ESTABLISHED",
+            attemptId: randomUUID(),
+            itemVersionId: randomUUID(),
+            requirementKey: "req:unshared",
+            startedAt: "2026-11-18T01:08:00.000Z",
+            sourceVersions: { [SRC_1]: 2 },
+            historyRevision: 1,
+            referenceCheck: null,
+          },
+        ],
+        projected: [
+          {
+            id: OBS_1,
+            skillLabel: "SECRET-SPAN",
+            requirementKey: "req:span",
+            itemVersionId: null,
+            attemptedAt: "2026-11-18T01:00:00.000Z",
+            assistance: "independent",
+            verifiedCorrect: "yes",
+            independentAttempt: "yes",
+            usableForCurrentVersion: "yes",
+            problemId: null,
+            questionIdentity: "item-span-1",
+            firstQuestionExposure: true,
+            evidenceContext: { responseFormat: "text", elapsedSeconds: 30 },
+            courseRequirement: {
+              id: REQ_1,
+              revision: 1,
+              stableSkillId: SKILL_1,
+              requirementKey: "req:span",
+            },
+          },
+          {
+            id: OBS_2,
+            skillLabel: "SECRET-SPAN",
+            requirementKey: "req:span",
+            itemVersionId: null,
+            attemptedAt: "2026-11-18T01:05:00.000Z",
+            assistance: "independent",
+            verifiedCorrect: "yes",
+            independentAttempt: "yes",
+            usableForCurrentVersion: "yes",
+            problemId: null,
+            questionIdentity: "item-span-2",
+            firstQuestionExposure: true,
+            evidenceContext: { responseFormat: "text", elapsedSeconds: 30 },
+            courseRequirement: {
+              id: REQ_1,
+              revision: 1,
+              stableSkillId: SKILL_1,
+              requirementKey: "req:span",
+            },
+          },
+          {
+            id: OBS_UNSHARED,
+            skillLabel: "SECRET-UNSHARED",
+            requirementKey: "req:unshared",
+            itemVersionId: null,
+            attemptedAt: "2026-11-18T01:10:00.000Z",
+            assistance: "independent",
+            verifiedCorrect: "yes",
+            independentAttempt: "yes",
+            usableForCurrentVersion: "yes",
+            problemId: null,
+            questionIdentity: "item-unshared",
+            firstQuestionExposure: true,
+            evidenceContext: { responseFormat: "text", elapsedSeconds: 30 },
+            courseRequirement: {
+              id: REQ_2,
+              revision: 1,
+              stableSkillId: SKILL_2,
+              requirementKey: "req:unshared",
+            },
+          },
+        ],
+      };
+    });
+
+    const { repo } = createHarness(state);
+
+    // 1. Course context (COURSE_2): roots summary uses shared evidence without false missing-evidence warning.
+    const courseRoots = await repo.query(SCOPE, {
+      op: "roots",
+      context: { kind: "course", id: `course/${COURSE_2}` },
+      lens: "evidence",
+      include: ["summary"],
+    });
+    expect(courseRoots.warnings).toEqual([]);
+    expect(courseRoots.nodes.find(n => n.id === `requirement/${REQ_TARGET}`)?.summary).toEqual({
+      learnerState: "independent",
+      requirementStatus: "verified",
+    });
+
+    // 2. Course context neighbors on REQ_TARGET emits derived:hasObservation with sharedAttribution.
+    const expectedAttr = {
+      linkId: LINK_1,
+      linkRevision: 1,
+      stableSkillId: SKILL_1,
+      sourceCourseId: COURSE_1,
+      sourceCourseTitle: "Linear Algebra",
+      sourceRequirementId: REQ_1,
+      sourceRequirementTitle: "判断向量是否在线性张成内",
+      sourceRequirementRevision: 1,
+      targetRequirementRevision: 2,
+      effective: true,
+    };
+    const courseNeighbors = await repo.query(SCOPE, {
+      op: "neighbors",
+      context: { kind: "course", id: `course/${COURSE_2}` },
+      lens: "evidence",
+      focus: `requirement/${REQ_TARGET}`,
+      direction: "out",
+    });
+    expect(courseNeighbors.edges).toEqual([
+      {
+        id: `derived:hasObservation:requirement/${REQ_TARGET}:observation/${OBS_1}:link:${LINK_1}`,
+        from: `requirement/${REQ_TARGET}`,
+        to: `observation/${OBS_1}`,
+        relation: "hasObservation",
+        basis: "derived",
+        sharedAttribution: expectedAttr,
+      },
+      {
+        id: `derived:hasObservation:requirement/${REQ_TARGET}:observation/${OBS_2}:link:${LINK_1}`,
+        from: `requirement/${REQ_TARGET}`,
+        to: `observation/${OBS_2}`,
+        relation: "hasObservation",
+        basis: "derived",
+        sharedAttribution: expectedAttr,
+      },
+    ]);
+
+    // 3. Focusing shared observation in COURSE_2 context works for neighbors & detail; unshared observation is NOT_FOUND.
+    const sharedObsIn = await repo.query(SCOPE, {
+      op: "neighbors",
+      context: { kind: "course", id: `course/${COURSE_2}` },
+      lens: "evidence",
+      focus: `observation/${OBS_1}`,
+      direction: "in",
+    });
+    expect(sharedObsIn.edges).toHaveLength(1);
+    expect(sharedObsIn.edges[0]?.sharedAttribution).toEqual(expectedAttr);
+
+    const sharedObsDetail = await repo.query(SCOPE, {
+      op: "detail",
+      context: { kind: "course", id: `course/${COURSE_2}` },
+      lens: "evidence",
+      focus: `observation/${OBS_1}`,
+    });
+    expect(sharedObsDetail.detail?.notes.some(n => n.includes("Linear Algebra"))).toBe(true);
+    expect(sharedObsDetail.detail?.notes.some(n => n.includes("跨课共享"))).toBe(true);
+    expect(sharedObsDetail.detail?.actions).toEqual([
+      { kind: "navigate", href: `/opening/courses/${COURSE_1}`, label: "查看来源课程" },
+    ]);
+
+    await expect(
+      repo.query(SCOPE, {
+        op: "detail",
+        context: { kind: "course", id: `course/${COURSE_2}` },
+        lens: "evidence",
+        focus: `observation/${OBS_UNSHARED}`,
+      }),
+    ).rejects.toMatchObject({ code: "NOT_FOUND" });
+
+    // 4. Requirement detail cites sourceCourseTitle, sourceRequirementTitle, sourceRequirementRevision, and 跨课共享有效证据.
+    const reqTargetDetail = await repo.query(SCOPE, {
+      op: "detail",
+      context: { kind: "course", id: `course/${COURSE_2}` },
+      lens: "all",
+      focus: `requirement/${REQ_TARGET}`,
+    });
+    expect(reqTargetDetail.detail?.learnerState).toBe("independent");
+    expect(reqTargetDetail.detail?.requirementStatus).toBe("verified");
+    expect(
+      reqTargetDetail.detail?.notes.some(
+        n =>
+          n.includes("跨课共享有效证据") &&
+          n.includes("Linear Algebra") &&
+          n.includes("判断向量是否在线性张成内") &&
+          n.includes("第 1 版"),
+      ),
+    ).toBe(true);
+
+    // 5. Goal context (GOAL_2 covers COURSE_2 only, not COURSE_1) still projects cross-course evidence while keeping REQ_1 hidden.
+    const goalNeighbors = await repo.query(SCOPE, {
+      op: "neighbors",
+      context: { kind: "goal", id: `goal/${GOAL_2}` },
+      lens: "evidence",
+      focus: `requirement/${REQ_TARGET}`,
+      direction: "out",
+    });
+    expect(goalNeighbors.edges).toHaveLength(2);
+    await expect(
+      repo.query(SCOPE, {
+        op: "detail",
+        context: { kind: "goal", id: `goal/${GOAL_2}` },
+        lens: "all",
+        focus: `requirement/${REQ_1}`,
+      }),
+    ).rejects.toMatchObject({ code: "NOT_FOUND" });
+
+    // 6. Workspace context: observation incoming edges include both local recorded and cross-course derived; homonymous knowledge nodes remain distinct.
+    const wsObsIn = await repo.query(SCOPE, {
+      op: "neighbors",
+      context: { kind: "workspace" },
+      lens: "evidence",
+      focus: `observation/${OBS_1}`,
+      direction: "in",
+    });
+    expect(wsObsIn.edges.map(e => ({ id: e.id, basis: e.basis })).sort((a, b) => a.id.localeCompare(b.id))).toEqual([
+      {
+        id: `derived:hasObservation:requirement/${REQ_TARGET}:observation/${OBS_1}:link:${LINK_1}`,
+        basis: "derived",
+      },
+      {
+        id: `recorded:hasObservation:requirement/${REQ_1}:observation/${OBS_1}`,
+        basis: "recorded",
+      },
+    ]);
+
+    const wsKnowledgeRoots = await repo.query(SCOPE, {
+      op: "roots",
+      context: { kind: "workspace" },
+      lens: "structure",
+      kinds: ["knowledge"],
+    });
+    expect(wsKnowledgeRoots.nodes.map(n => n.id)).toContain(`knowledge/${COURSE_1}/${KN_1}`);
+    expect(wsKnowledgeRoots.nodes.map(n => n.id)).toContain(`knowledge/${COURSE_2}/${KN_1}`);
+
+    // 7. dueRetest flips shared summary learnerState to "retest".
+    const baseLearnerState = await mockedReaders.readOpeningLearnerState(
+      {} as never,
+      SCOPE,
+      { courseId: COURSE_2 },
+    );
+    mockedReaders.readOpeningLearnerState.mockResolvedValueOnce({
+      ...baseLearnerState,
+      display: {
+        ...baseLearnerState.display,
+        requirements: [
+          {
+            courseId: COURSE_2,
+            requirementKey: "req:nm-span",
+            skillLabel: "数值分析中的线性张成应用",
+            state: "retest",
+            observationIds: [],
+            dueRetest: true,
+          },
+        ],
+      },
+    });
+    const retestRoots = await repo.query(SCOPE, {
+      op: "roots",
+      context: { kind: "course", id: `course/${COURSE_2}` },
+      lens: "evidence",
+      include: ["summary"],
+    });
+    expect(retestRoots.nodes.find(n => n.id === `requirement/${REQ_TARGET}`)?.summary).toEqual({
+      learnerState: "retest",
+      requirementStatus: "verified",
+    });
+  });
+
+  it("invalidates shared-skill cursors with CURSOR_STALE and hides shared evidence on unlink, revision bump, or source material exclusion", async () => {
+    const actualProjection = await vi.importActual<
+      typeof import("./opening-course-shared-skill-projection")
+    >("./opening-course-shared-skill-projection");
+    mockedReaders.readSharedCourseEvidence.mockImplementation(
+      actualProjection.readSharedCourseEvidence,
+    );
+
+    const SRC_2 = "88888888-8888-4888-8888-888888888882";
+    const REQ_TARGET = "55555555-5555-4555-8555-555555555553";
+    const LINK_1 = "12121212-1212-4121-8121-121212121212";
+    const CHUNK_1 = "abababab-abab-4aba-8aba-abababababa1";
+
+    const buildState = () => {
+      const state = makeBaseState();
+      state.courses.push({
+        id: COURSE_2,
+        title: "Course Two",
+        updated_at: "2026-11-18T00:00:00.000Z",
+      });
+      state.requirements = [
+        {
+          ...state.requirements[0]!,
+          revision: 1,
+          verification: {
+            kind: "rubric",
+            status: "ready",
+            exerciseKeys: ["q1"],
+            rubric: "完整推导理由",
+            missingReasons: [],
+          },
+          evidence_conditions: {
+            responseFormat: "text",
+            timeLimitSeconds: null,
+            assistance: "independent",
+          },
+        },
+        {
+          id: REQ_TARGET,
+          workspace_id: SCOPE.workspaceId,
+          owner_user_id: SCOPE.ownerUserId,
+          course_id: COURSE_2,
+          stable_skill_id: SKILL_1,
+          knowledge_node_id: null,
+          requirement_key: "req:c2",
+          title: "目标要求",
+          position: 0,
+          mandatory: true,
+          goal_ids: [],
+          prerequisite_ids: [],
+          source_refs: [{ sourceId: SRC_2, sourceVersion: 1 }],
+          verification: {
+            kind: "rubric",
+            status: "ready",
+            exerciseKeys: ["q2"],
+            rubric: "完整推导理由",
+            missingReasons: [],
+          },
+          evidence_conditions: {
+            responseFormat: "text",
+            timeLimitSeconds: null,
+            assistance: "independent",
+          },
+          revision: 1,
+          lifecycle: "active",
+          origin: "confirmed",
+          approved_at: "2026-11-02T00:00:00.000Z",
+          updated_at: "2026-11-18T00:00:00.000Z",
+        },
+      ];
+      state.sources.push({
+        id: SRC_2,
+        name: "C2.pdf",
+        version: 1,
+        upload_state: "uploaded",
+        parse_state: "ready",
+        updated_at: "2026-11-18T00:00:00.000Z",
+        ai_excluded: false,
+      });
+      state.allSourceIds.push({ id: SRC_2 });
+      state.sharedLinks = [
+        {
+          id: LINK_1,
+          workspace_id: SCOPE.workspaceId,
+          owner_user_id: SCOPE.ownerUserId,
+          source_requirement_id: REQ_1,
+          source_requirement_revision: 1,
+          target_requirement_id: REQ_TARGET,
+          target_requirement_revision: 1,
+          stable_skill_id: SKILL_1,
+          revision: 1,
+          active: true,
+          updated_at: "2026-11-18T01:00:00.000Z",
+        },
+      ];
+      state.observationHeaders = [
+        {
+          id: OBS_1,
+          course_id: COURSE_1,
+          root_id: OBS_1,
+          history_revision: 1,
+          workspace_history_revision: 1,
+          occurred_at: "2026-11-18T01:00:00.000Z",
+          submitted_at: "2026-11-18T01:00:00.000Z",
+          recorded_at: "2026-11-18T01:00:00.000Z",
+          requirement_key: "req:span",
+          eval_req_id: REQ_1,
+        },
+        {
+          id: OBS_2,
+          course_id: COURSE_1,
+          root_id: OBS_2,
+          history_revision: 1,
+          workspace_history_revision: 2,
+          occurred_at: "2026-11-18T01:05:00.000Z",
+          submitted_at: "2026-11-18T01:05:00.000Z",
+          recorded_at: "2026-11-18T01:05:00.000Z",
+          requirement_key: "req:span",
+          eval_req_id: REQ_1,
+        },
+      ];
+      return state;
+    };
+
+    const state = buildState();
+    mockedReaders.readCourseRouteMaterials.mockImplementation(async (_db, _scope, cid) =>
+      cid === COURSE_1
+        ? [
+            {
+              sourceId: SRC_1,
+              sourceVersion: 2,
+              title: "Linear Algebra Notes.pdf",
+              available: !state.exclusions.some(e => e.source_id === SRC_1),
+            },
+          ]
+        : [{ sourceId: SRC_2, sourceVersion: 1, title: "C2.pdf", available: true }],
+    );
+    mockedReaders.readCourseRouteSourceChunks.mockImplementation(async (_db, _scope, cid) =>
+      cid === COURSE_1
+        ? state.exclusions.some(e => e.source_id === SRC_1)
+          ? []
+          : [
+              { id: CHUNK_1, sourceId: SRC_1, sourceVersion: 2, page: 3 },
+              { id: randomUUID(), sourceId: SRC_1, sourceVersion: 2, page: 4 },
+            ]
+        : [{ id: randomUUID(), sourceId: SRC_2, sourceVersion: 1, page: 1 }],
+    );
+    mockedReaders.readCourseRouteObservations.mockImplementation(async (_db, _scope, cid) => {
+      if (cid !== COURSE_1) return { raw: [], projected: [] };
+      const makeObs = (id: string, qid: string) => ({
+        raw: {
+          id,
+          rootObservationId: id,
+          workspaceId: SCOPE.workspaceId,
+          sessionId: randomUUID(),
+          courseId: COURSE_1,
+          activityId: randomUUID(),
+          skillLabel: "span",
+          sourceIds: [SRC_1],
+          problemId: randomUUID(),
+          retestId: null,
+          answer: "ans",
+          outcome: "correct" as const,
+          assistance: "independent" as const,
+          clientKey: id,
+          occurredAt: "2026-11-18T01:00:00.000Z",
+          submittedAt: "2026-11-18T01:00:00.000Z",
+          recordedAt: "2026-11-18T01:00:00.000Z",
+          sourceTurnIds: [],
+          verdictSource: "deterministic" as const,
+          referenceSourceId: null,
+          evidenceVerdict: "MASTERY_NOT_ESTABLISHED" as const,
+          attemptId: randomUUID(),
+          itemVersionId: randomUUID(),
+          requirementKey: "req:span",
+          startedAt: "2026-11-18T00:55:00.000Z",
+          sourceVersions: { [SRC_1]: 2 },
+          historyRevision: 1,
+          referenceCheck: null,
+        },
+        projected: {
+          id,
+          skillLabel: "span",
+          requirementKey: "req:span",
+          itemVersionId: null,
+          attemptedAt: "2026-11-18T01:00:00.000Z",
+          assistance: "independent" as const,
+          verifiedCorrect: "yes" as const,
+          independentAttempt: "yes" as const,
+          usableForCurrentVersion: "yes" as const,
+          problemId: null,
+          questionIdentity: qid,
+          firstQuestionExposure: true,
+          evidenceContext: { responseFormat: "text" as const, elapsedSeconds: 20 },
+          courseRequirement: {
+            id: REQ_1,
+            revision: 1,
+            stableSkillId: SKILL_1,
+            requirementKey: "req:span",
+          },
+        },
+      });
+      const o1 = makeObs(OBS_1, "q1");
+      const o2 = makeObs(OBS_2, "q2");
+      return { raw: [o1.raw, o2.raw], projected: [o1.projected, o2.projected] };
+    });
+
+    const { repo } = createHarness(state);
+    const getFirstPage = () =>
+      repo.query(SCOPE, {
+        op: "neighbors",
+        context: { kind: "course", id: `course/${COURSE_2}` },
+        lens: "evidence",
+        focus: `requirement/${REQ_TARGET}`,
+        direction: "out",
+        limit: 1,
+      });
+
+    // 1. Unlink (active = false) -> CURSOR_STALE + hides shared edge & observation
+    const p1 = await getFirstPage();
+    expect(p1.page.nextCursor).toBeTruthy();
+    state.sharedLinks![0]!.active = false;
+    await expect(
+      repo.query(SCOPE, {
+        op: "neighbors",
+        context: { kind: "course", id: `course/${COURSE_2}` },
+        lens: "evidence",
+        focus: `requirement/${REQ_TARGET}`,
+        direction: "out",
+        limit: 1,
+        cursor: p1.page.nextCursor!,
+      }),
+    ).rejects.toMatchObject({ code: "CURSOR_STALE" });
+    expect((await getFirstPage()).edges).toEqual([]);
+
+    // 2. Restore link, then bump source requirement revision -> CURSOR_STALE + hides shared edge
+    state.sharedLinks![0]!.active = true;
+    const p2 = await getFirstPage();
+    expect(p2.page.nextCursor).toBeTruthy();
+    state.requirements[0]!.revision = 2;
+    await expect(
+      repo.query(SCOPE, {
+        op: "neighbors",
+        context: { kind: "course", id: `course/${COURSE_2}` },
+        lens: "evidence",
+        focus: `requirement/${REQ_TARGET}`,
+        direction: "out",
+        limit: 1,
+        cursor: p2.page.nextCursor!,
+      }),
+    ).rejects.toMatchObject({ code: "CURSOR_STALE" });
+    expect((await getFirstPage()).edges).toEqual([]);
+
+    // 3. Restore source revision, then privacy-exclude source material (without bumping privacyEpoch) -> CURSOR_STALE + hides shared evidence
+    state.requirements[0]!.revision = 1;
+    const p3 = await getFirstPage();
+    expect(p3.page.nextCursor).toBeTruthy();
+    state.exclusions = [{ source_id: SRC_1 }];
+    state.sources[0]!.ai_excluded = true;
+    await expect(
+      repo.query(SCOPE, {
+        op: "neighbors",
+        context: { kind: "course", id: `course/${COURSE_2}` },
+        lens: "evidence",
+        focus: `requirement/${REQ_TARGET}`,
+        direction: "out",
+        limit: 1,
+        cursor: p3.page.nextCursor!,
+      }),
+    ).rejects.toMatchObject({ code: "CURSOR_STALE" });
+    expect((await getFirstPage()).edges).toEqual([]);
   });
 });

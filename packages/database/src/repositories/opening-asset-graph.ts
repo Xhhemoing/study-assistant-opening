@@ -19,6 +19,7 @@ import {
   type AssetGraphRelation,
   type AssetGraphRequirementStatus,
   type AssetGraphRootKind,
+  type AssetGraphSharedAttribution,
   type AssetGraphStateSummary,
   type CourseRequirement,
   type KnowledgeSnapshot,
@@ -140,6 +141,20 @@ type ObservationHeaderRecord = {
 type LoadedCourseObservations = {
   filteredRaw: Awaited<ReturnType<typeof readCourseRouteObservations>>["raw"];
   filteredProjected: ExamCourseRouteObservation[];
+};
+
+type SharedSkillLinkRecord = {
+  id: string;
+  revision: number;
+  stableSkillId: string;
+  sourceRequirementId: string;
+  sourceRequirementRevision: number;
+  targetRequirementId: string;
+  targetRequirementRevision: number;
+  updatedAt: string | null;
+  sourceCourseId: string;
+  sourceRequirementTitle: string;
+  targetCourseId: string;
 };
 
 const REQUIREMENT_STATUS_LABELS: Record<AssetGraphRequirementStatus, string> = {
@@ -360,6 +375,7 @@ export function createOpeningAssetGraphRepository(
           }
         }
 
+        const targetCourseSet = new Set(targetCourseIds);
         const requirementRows = targetCourseIds.length
           ? await tx`
               SELECT id, workspace_id, owner_user_id, course_id, stable_skill_id, knowledge_node_id,
@@ -379,12 +395,148 @@ export function createOpeningAssetGraphRepository(
         const activeRequirementsByCourse = new Map<string, CourseRequirement[]>();
         for (const row of requirementRows) {
           const req = mapCourseRequirement(row);
+          if (!targetCourseSet.has(req.courseId) || req.lifecycle !== "active") continue;
           activeRequirementsById.set(req.id, req);
           reqUpdatedAtById.set(req.id, toIso(row.updated_at));
           const list = activeRequirementsByCourse.get(req.courseId) ?? [];
           list.push(req);
           activeRequirementsByCourse.set(req.courseId, list);
         }
+
+        const loadedRequirementsByCourse = new Map<string, CourseRequirement[]>();
+        for (const cid of targetCourseIds) {
+          loadedRequirementsByCourse.set(cid, activeRequirementsByCourse.get(cid) ?? []);
+        }
+        const ensureCourseRequirementsLoaded = async (
+          courseId: string,
+        ): Promise<CourseRequirement[]> => {
+          const cached = loadedRequirementsByCourse.get(courseId);
+          if (cached) return cached;
+          if (!activeCourses.has(courseId)) {
+            loadedRequirementsByCourse.set(courseId, []);
+            return [];
+          }
+          const rows = await tx`
+            SELECT id, workspace_id, owner_user_id, course_id, stable_skill_id, knowledge_node_id,
+                   requirement_key, title, position, mandatory, goal_ids, prerequisite_ids,
+                   source_refs, verification, evidence_conditions, revision, lifecycle, origin,
+                   approved_at, updated_at
+            FROM course_requirements
+            WHERE workspace_id = ${validScope.workspaceId}
+              AND owner_user_id = ${validScope.ownerUserId}
+              AND course_id = ${courseId}
+              AND lifecycle = 'active'
+            ORDER BY course_id, position, id
+          `;
+          const reqs: CourseRequirement[] = [];
+          for (const row of rows) {
+            const req = mapCourseRequirement(row);
+            if (req.courseId !== courseId || req.lifecycle !== "active") continue;
+            reqUpdatedAtById.set(req.id, toIso(row.updated_at));
+            reqs.push(req);
+          }
+          loadedRequirementsByCourse.set(courseId, reqs);
+          return reqs;
+        };
+
+        const activeCourseIds = [...activeCourses.keys()];
+        const sharedSkillLinkRows =
+          targetCourseIds.length && activeCourseIds.length
+            ? await tx`
+                SELECT l.id, l.revision, l.stable_skill_id, l.source_requirement_id,
+                       l.source_requirement_revision, l.target_requirement_id,
+                       l.target_requirement_revision, l.updated_at,
+                       s.course_id AS source_course_id, s.title AS source_requirement_title,
+                       t.course_id AS target_course_id
+                FROM course_requirement_evidence_links l
+                JOIN course_requirements t
+                  ON t.id = l.target_requirement_id
+                  AND t.workspace_id = l.workspace_id
+                  AND t.owner_user_id = l.owner_user_id
+                JOIN course_requirements s
+                  ON s.id = l.source_requirement_id
+                  AND s.workspace_id = l.workspace_id
+                  AND s.owner_user_id = l.owner_user_id
+                JOIN courses c
+                  ON c.id = s.course_id
+                  AND c.workspace_id = s.workspace_id
+                  AND c.archived_at IS NULL
+                WHERE l.workspace_id = ${validScope.workspaceId}
+                  AND l.owner_user_id = ${validScope.ownerUserId}
+                  AND l.active = true
+                  AND t.course_id = ANY(${targetCourseIds}::uuid[])
+                  AND s.course_id = ANY(${activeCourseIds}::uuid[])
+                ORDER BY l.id
+              `
+            : [];
+        const sharedSkillLinks: SharedSkillLinkRecord[] = sharedSkillLinkRows
+          .filter(row => row.active === undefined || row.active === true)
+          .map(row => ({
+            id: String(row.id),
+            revision: Number(row.revision),
+            stableSkillId: String(row.stable_skill_id),
+            sourceRequirementId: String(row.source_requirement_id),
+            sourceRequirementRevision: Number(row.source_requirement_revision),
+            targetRequirementId: String(row.target_requirement_id),
+            targetRequirementRevision: Number(row.target_requirement_revision),
+            updatedAt: toIso(row.updated_at),
+            sourceCourseId: String(row.source_course_id),
+            sourceRequirementTitle: normalizeLabel(row.source_requirement_title, "课程要求"),
+            targetCourseId: String(row.target_course_id),
+          }))
+          .filter(
+            link =>
+              targetCourseSet.has(link.targetCourseId) &&
+              activeCourses.has(link.sourceCourseId),
+          );
+        const sharedLinksById = new Map(sharedSkillLinks.map(link => [link.id, link]));
+
+        // Compute context-scoped visible courses, goals, and requirements early so shared-skill sources are bounded accurately.
+        const visibleCourseIds = new Set<string>(targetCourseIds);
+        const visibleGoalIds = new Set<string>();
+        const visibleRequirementIds = new Set<string>();
+        if (query.context.kind === "workspace") {
+          for (const id of visibleGoalsById.keys()) visibleGoalIds.add(id);
+          for (const id of activeRequirementsById.keys()) visibleRequirementIds.add(id);
+        } else if (contextCourseId !== null) {
+          for (const goal of visibleGoalsById.values()) {
+            if (goal.courseIds.includes(contextCourseId)) visibleGoalIds.add(goal.id);
+          }
+          for (const req of activeRequirementsByCourse.get(contextCourseId) ?? []) {
+            visibleRequirementIds.add(req.id);
+          }
+        } else if (contextGoalId !== null) {
+          visibleGoalIds.add(contextGoalId);
+          for (const req of activeRequirementsById.values()) {
+            if (!visibleCourseIds.has(req.courseId)) continue;
+            const explicit = req.goalIds.includes(contextGoalId);
+            const defaultApplicable =
+              req.goalIds.length === 0 &&
+              !adaptivePrefsInvalid &&
+              !conflictCourseIds.has(req.courseId);
+            if (explicit || defaultApplicable) {
+              visibleRequirementIds.add(req.id);
+            }
+          }
+        }
+
+        const visibleSharedLinks = sharedSkillLinks.filter(link =>
+          visibleRequirementIds.has(link.targetRequirementId),
+        );
+        const referencedSourceCourseIds = [
+          ...new Set(visibleSharedLinks.map(link => link.sourceCourseId)),
+        ].sort();
+        const referencedSourceCourseSet = new Set(referencedSourceCourseIds);
+        const referencedSourceRequirementIds = [
+          ...new Set(visibleSharedLinks.map(link => link.sourceRequirementId)),
+        ].sort();
+        for (const sourceCid of referencedSourceCourseIds) {
+          await ensureCourseRequirementsLoaded(sourceCid);
+        }
+        const allRelevantCourseIds = [
+          ...new Set([...targetCourseIds, ...referencedSourceCourseIds]),
+        ];
+        const allRelevantCourseSet = new Set(allRelevantCourseIds);
 
         const knowledgeRows = targetCourseIds.length
           ? await tx`
@@ -402,6 +554,7 @@ export function createOpeningAssetGraphRepository(
         >();
         for (const row of knowledgeRows) {
           const courseId = String(row.course_id);
+          if (!targetCourseSet.has(courseId)) continue;
           const parsedSnapshot = knowledgeSnapshotSchema.safeParse(row.snapshot);
           if (!parsedSnapshot.success || parsedSnapshot.data.courseId !== courseId) {
             completeness = "partial";
@@ -508,22 +661,24 @@ export function createOpeningAssetGraphRepository(
           });
         }
 
-        const membershipRows = targetCourseIds.length
+        const membershipRows = allRelevantCourseIds.length
           ? await tx`
               SELECT id, course_id, asset_type, asset_id, updated_at
               FROM course_asset_memberships
               WHERE workspace_id = ${validScope.workspaceId}
-                AND course_id = ANY(${targetCourseIds}::uuid[])
+                AND course_id = ANY(${allRelevantCourseIds}::uuid[])
               ORDER BY id
             `
           : [];
-        const memberships: MembershipRecord[] = membershipRows.map(row => ({
-          id: String(row.id),
-          courseId: String(row.course_id),
-          assetType: String(row.asset_type),
-          assetId: String(row.asset_id),
-          updatedAt: toIso(row.updated_at),
-        }));
+        const memberships: MembershipRecord[] = membershipRows
+          .filter(row => allRelevantCourseSet.has(String(row.course_id)))
+          .map(row => ({
+            id: String(row.id),
+            courseId: String(row.course_id),
+            assetType: String(row.asset_type),
+            assetId: String(row.asset_id),
+            updatedAt: toIso(row.updated_at),
+          }));
 
         const assetLinkRows = await tx`
           SELECT id, asset_type, asset_id, course_id, goal_id, requirement_id, revision, updated_at
@@ -563,7 +718,7 @@ export function createOpeningAssetGraphRepository(
           updatedAt: toIso(row.updated_at),
         }));
 
-        const observationHeaderRows = targetCourseIds.length
+        const observationHeaderRows = allRelevantCourseIds.length
           ? await tx`
               SELECT o.id, o.course_id, COALESCE(o.root_observation_id, o.id) AS root_id,
                      o.history_revision, o.workspace_history_revision,
@@ -582,37 +737,34 @@ export function createOpeningAssetGraphRepository(
                 AND v.owner_user_id = o.owner_user_id
               WHERE o.workspace_id = ${validScope.workspaceId}
                 AND o.owner_user_id = ${validScope.ownerUserId}
-                AND o.course_id = ANY(${targetCourseIds}::uuid[])
+                AND o.course_id = ANY(${allRelevantCourseIds}::uuid[])
                 AND COALESCE(o.revision_kind, 'original') <> 'retract'
               ORDER BY o.id
             `
           : [];
-        const observationHeaders: ObservationHeaderRecord[] = observationHeaderRows.map(row => ({
-          id: String(row.id),
-          courseId: String(row.course_id),
-          rootId: String(row.root_id),
-          historyRevision: Number(row.history_revision ?? 0),
-          workspaceHistoryRevision: Number(row.workspace_history_revision ?? 0),
-          occurredAt: toIso(row.occurred_at),
-          submittedAt: toIso(row.submitted_at),
-          recordedAt: toIso(row.recorded_at),
-          requirementKey: row.requirement_key == null ? null : String(row.requirement_key),
-          evalReqId: row.eval_req_id == null ? null : String(row.eval_req_id),
-        }));
+        const observationHeaders: ObservationHeaderRecord[] = observationHeaderRows
+          .filter(row => allRelevantCourseSet.has(String(row.course_id)))
+          .map(row => ({
+            id: String(row.id),
+            courseId: String(row.course_id),
+            rootId: String(row.root_id),
+            historyRevision: Number(row.history_revision ?? 0),
+            workspaceHistoryRevision: Number(row.workspace_history_revision ?? 0),
+            occurredAt: toIso(row.occurred_at),
+            submittedAt: toIso(row.submitted_at),
+            recordedAt: toIso(row.recorded_at),
+            requirementKey: row.requirement_key == null ? null : String(row.requirement_key),
+            evalReqId: row.eval_req_id == null ? null : String(row.eval_req_id),
+          }));
         const observationHeaderById = new Map(observationHeaders.map(row => [row.id, row]));
 
-        // Compute context-scoped visible sets for the 7 non-observation node kinds.
-        const visibleCourseIds = new Set<string>(targetCourseIds);
-        const visibleGoalIds = new Set<string>();
-        const visibleRequirementIds = new Set<string>();
+        // Compute remaining context-scoped visible sets for knowledge/source/document/exploration nodes.
         const visibleKnowledgeNodeIds = new Set<string>();
         const visibleSourceIds = new Set<string>();
         const visibleDocumentIds = new Set<string>();
         const visibleExplorationIds = new Set<string>();
 
         if (query.context.kind === "workspace") {
-          for (const id of visibleGoalsById.keys()) visibleGoalIds.add(id);
-          for (const id of activeRequirementsById.keys()) visibleRequirementIds.add(id);
           for (const [courseId, entry] of knowledgeSnapshotsByCourse) {
             for (const node of entry.snapshot.nodes) {
               visibleKnowledgeNodeIds.add(
@@ -624,11 +776,7 @@ export function createOpeningAssetGraphRepository(
           for (const id of workspaceDocuments.keys()) visibleDocumentIds.add(id);
           for (const id of workspaceExplorations.keys()) visibleExplorationIds.add(id);
         } else if (contextCourseId !== null) {
-          for (const goal of visibleGoalsById.values()) {
-            if (goal.courseIds.includes(contextCourseId)) visibleGoalIds.add(goal.id);
-          }
           for (const req of activeRequirementsByCourse.get(contextCourseId) ?? []) {
-            visibleRequirementIds.add(req.id);
             for (const ref of req.sourceRefs) {
               if (workspaceSources.has(ref.sourceId)) visibleSourceIds.add(ref.sourceId);
             }
@@ -680,16 +828,9 @@ export function createOpeningAssetGraphRepository(
             }
           }
         } else if (contextGoalId !== null) {
-          visibleGoalIds.add(contextGoalId);
-          for (const req of activeRequirementsById.values()) {
-            if (!visibleCourseIds.has(req.courseId)) continue;
-            const explicit = req.goalIds.includes(contextGoalId);
-            const defaultApplicable =
-              req.goalIds.length === 0 &&
-              !adaptivePrefsInvalid &&
-              !conflictCourseIds.has(req.courseId);
-            if (!explicit && !defaultApplicable) continue;
-            visibleRequirementIds.add(req.id);
+          for (const rid of visibleRequirementIds) {
+            const req = activeRequirementsById.get(rid);
+            if (!req) continue;
             if (req.knowledgeNodeId) {
               const knEntry = knowledgeSnapshotsByCourse.get(req.courseId);
               if (knEntry?.snapshot.nodes.some(node => node.id === req.knowledgeNodeId)) {
@@ -808,20 +949,83 @@ export function createOpeningAssetGraphRepository(
           visibleNodeMap.set(id, { id, kind: "exploration", label: exp.title });
         }
 
+        // Lazy per-course material & chunk loaders (also used in shared-skill scopeFingerprint binding).
+        const courseMaterialsCache = new Map<
+          string,
+          Awaited<ReturnType<typeof readCourseRouteMaterials>>
+        >();
+        const ensureCourseMaterialsLoaded = async (courseId: string) => {
+          const cached = courseMaterialsCache.get(courseId);
+          if (cached) return cached;
+          const materials = await readCourseRouteMaterials(tx, validScope, courseId);
+          courseMaterialsCache.set(courseId, materials);
+          return materials;
+        };
+
+        const courseChunksCache = new Map<
+          string,
+          Awaited<ReturnType<typeof readCourseRouteSourceChunks>>
+        >();
+        const ensureCourseSourceChunksLoaded = async (courseId: string) => {
+          const cached = courseChunksCache.get(courseId);
+          if (cached) return cached;
+          const chunks = await readCourseRouteSourceChunks(tx, validScope, courseId);
+          courseChunksCache.set(courseId, chunks);
+          return chunks;
+        };
+
+        for (const sourceCid of referencedSourceCourseIds) {
+          await ensureCourseMaterialsLoaded(sourceCid);
+          await ensureCourseSourceChunksLoaded(sourceCid);
+        }
+
+        const loadedSourceReqById = new Map<string, CourseRequirement>();
+        for (const cid of referencedSourceCourseIds) {
+          for (const req of loadedRequirementsByCourse.get(cid) ?? []) {
+            loadedSourceReqById.set(req.id, req);
+          }
+        }
+        const sharedSourceRequirementsForFingerprint = referencedSourceRequirementIds
+          .map(id => loadedSourceReqById.get(id))
+          .filter((r): r is CourseRequirement => Boolean(r))
+          .map(r => ({
+            id: r.id,
+            courseId: r.courseId,
+            revision: r.revision,
+            lifecycle: r.lifecycle,
+            approvedAt: r.approvedAt,
+            sourceRefs: r.sourceRefs,
+            verification: r.verification,
+            evidenceConditions: r.evidenceConditions ?? null,
+            updatedAt: reqUpdatedAtById.get(r.id) ?? null,
+          }));
+        const referencedSourceMaterialIds = new Set<string>();
+        for (const r of sharedSourceRequirementsForFingerprint) {
+          for (const ref of r.sourceRefs) {
+            referencedSourceMaterialIds.add(ref.sourceId);
+          }
+        }
+        for (const m of memberships) {
+          if (referencedSourceCourseSet.has(m.courseId) && m.assetType === "source") {
+            referencedSourceMaterialIds.add(m.assetId);
+          }
+        }
+
         // Compute deterministic context-scoped fingerprint BEFORE cursor validation.
         const visibleRequirementKeys = new Set(
           [...visibleRequirementIds]
             .map(rid => activeRequirementsById.get(rid)?.requirementKey)
             .filter((k): k is string => typeof k === "string"),
         );
+        const localObsHeaders = observationHeaders.filter(h => targetCourseSet.has(h.courseId));
         const scopedObsHeaders =
           query.context.kind === "goal"
-            ? observationHeaders.filter(
+            ? localObsHeaders.filter(
                 h =>
                   (h.requirementKey !== null && visibleRequirementKeys.has(h.requirementKey)) ||
                   (h.evalReqId !== null && visibleRequirementIds.has(h.evalReqId)),
               )
-            : observationHeaders;
+            : localObsHeaders;
 
         const scopeFingerprint = hashAssetGraphScopeFingerprint({
           privacyEpoch,
@@ -858,6 +1062,8 @@ export function createOpeningAssetGraphRepository(
                 knowledgeNodeId: r.knowledgeNodeId,
                 goalIds: r.goalIds,
                 sourceRefs: r.sourceRefs,
+                verification: r.verification,
+                evidenceConditions: r.evidenceConditions ?? null,
                 updatedAt: reqUpdatedAtById.get(id) ?? null,
               };
             }),
@@ -928,6 +1134,57 @@ export function createOpeningAssetGraphRepository(
             submittedAt: h.submittedAt,
             recordedAt: h.recordedAt,
           })),
+          sharedLinks: visibleSharedLinks.map(l => ({
+            id: l.id,
+            revision: l.revision,
+            stableSkillId: l.stableSkillId,
+            sourceRequirementId: l.sourceRequirementId,
+            sourceRequirementRevision: l.sourceRequirementRevision,
+            targetRequirementId: l.targetRequirementId,
+            targetRequirementRevision: l.targetRequirementRevision,
+            updatedAt: l.updatedAt,
+          })),
+          sharedSourceRequirements: sharedSourceRequirementsForFingerprint,
+          sharedSourceMaterials: [...referencedSourceMaterialIds]
+            .sort()
+            .map(id => ({
+              id,
+              source: workspaceSources.get(id) ?? null,
+              excluded: excludedSourceIds.has(id),
+            })),
+          sharedSourceRouteMaterials: referencedSourceCourseIds.map(cid => ({
+            courseId: cid,
+            materials: [...(courseMaterialsCache.get(cid) ?? [])].sort((a, b) =>
+              compareStrings(a.sourceId, b.sourceId),
+            ),
+          })),
+          sharedSourceChunks: referencedSourceCourseIds.map(cid => ({
+            courseId: cid,
+            chunks: [...(courseChunksCache.get(cid) ?? [])].sort((a, b) =>
+              compareStrings(a.id, b.id),
+            ),
+          })),
+          sharedSourceMemberships: memberships
+            .filter(m => referencedSourceCourseSet.has(m.courseId))
+            .map(m => ({
+              id: m.id,
+              courseId: m.courseId,
+              assetType: m.assetType,
+              assetId: m.assetId,
+              updatedAt: m.updatedAt,
+            })),
+          sharedSourceObservations: observationHeaders
+            .filter(h => referencedSourceCourseSet.has(h.courseId))
+            .map(h => ({
+              id: h.id,
+              courseId: h.courseId,
+              rootId: h.rootId,
+              historyRevision: h.historyRevision,
+              workspaceHistoryRevision: h.workspaceHistoryRevision,
+              occurredAt: h.occurredAt,
+              submittedAt: h.submittedAt,
+              recordedAt: h.recordedAt,
+            })),
           selectedGoalRefs: [...visibleCourseIds]
             .sort()
             .map(cid => [cid, courseGoalRefs[cid] ?? null]),
@@ -941,6 +1198,7 @@ export function createOpeningAssetGraphRepository(
             courseId: string;
             node: AssetGraphNode;
             matchedRequirementIds: Set<string>;
+            sharedAttributionsByTargetReqId: Map<string, AssetGraphSharedAttribution[]>;
           }
         >();
 
@@ -1045,6 +1303,11 @@ export function createOpeningAssetGraphRepository(
                 : rawObs.assistance;
             const occurredAt = rawObs.submittedAt ?? rawObs.occurredAt;
             const obsNodeId = formatAssetGraphNodeId({ kind: "observation", uuid: rawObs.id });
+            const existingObs = visibleObservationsByNodeId.get(obsNodeId);
+            if (existingObs) {
+              for (const rid of matchedReqIds) existingObs.matchedRequirementIds.add(rid);
+              continue;
+            }
             const obsNode: AssetGraphNode = {
               id: obsNodeId,
               kind: "observation",
@@ -1056,12 +1319,126 @@ export function createOpeningAssetGraphRepository(
               courseId,
               node: obsNode,
               matchedRequirementIds: matchedReqIds,
+              sharedAttributionsByTargetReqId: new Map(),
             });
           }
 
           const loaded = { filteredRaw, filteredProjected };
           courseObservationsCache.set(courseId, loaded);
           return loaded;
+        };
+
+        const sharedEvidenceCache = new Map<
+          string,
+          Awaited<ReturnType<typeof readSharedCourseEvidence>>
+        >();
+        const sharedAttributionsByReqId = new Map<string, AssetGraphSharedAttribution[]>();
+
+        const ensureSharedEvidenceLoaded = async (targetCourseId: string) => {
+          const cached = sharedEvidenceCache.get(targetCourseId);
+          if (cached) return cached;
+
+          const sharedEvidence = await readSharedCourseEvidence(tx, validScope, targetCourseId, {
+            requirements: ensureCourseRequirementsLoaded,
+            observations: async cid => {
+              const loaded = await ensureCourseObservationsLoaded(cid);
+              return { projected: loaded.filteredProjected };
+            },
+            sources: ensureCourseMaterialsLoaded,
+            chunks: ensureCourseSourceChunksLoaded,
+          });
+
+          for (const obs of sharedEvidence) {
+            for (const ref of obs.sharedFor ?? []) {
+              if (!visibleRequirementIds.has(ref.requirementId)) continue;
+              const targetReq = activeRequirementsById.get(ref.requirementId);
+              if (!targetReq || targetReq.courseId !== targetCourseId) continue;
+
+              const link = sharedLinksById.get(ref.linkId);
+              if (
+                !link ||
+                link.targetCourseId !== targetCourseId ||
+                link.targetRequirementId !== ref.requirementId ||
+                link.sourceCourseId !== ref.sourceCourseId ||
+                link.sourceRequirementId !== ref.sourceRequirementId ||
+                link.targetRequirementRevision !== ref.requirementRevision ||
+                link.stableSkillId !== ref.stableSkillId
+              ) {
+                continue;
+              }
+
+              const sourceCourse = activeCourses.get(ref.sourceCourseId);
+              if (!sourceCourse) continue;
+
+              const sourceReqs = await ensureCourseRequirementsLoaded(ref.sourceCourseId);
+              const sourceReq = sourceReqs.find(r => r.id === ref.sourceRequirementId);
+              const sourceRequirementTitle = normalizeLabel(
+                link.sourceRequirementTitle,
+                sourceReq?.title ?? "课程要求",
+              );
+
+              const attr: AssetGraphSharedAttribution = {
+                linkId: link.id,
+                linkRevision: link.revision,
+                stableSkillId: ref.stableSkillId,
+                sourceCourseId: ref.sourceCourseId,
+                sourceCourseTitle: sourceCourse.title,
+                sourceRequirementId: ref.sourceRequirementId,
+                sourceRequirementTitle,
+                sourceRequirementRevision: link.sourceRequirementRevision,
+                targetRequirementRevision: link.targetRequirementRevision,
+                effective: true,
+              };
+
+              const reqAttrList = sharedAttributionsByReqId.get(ref.requirementId) ?? [];
+              if (!reqAttrList.some(existing => existing.linkId === attr.linkId)) {
+                reqAttrList.push(attr);
+                sharedAttributionsByReqId.set(ref.requirementId, reqAttrList);
+              }
+
+              const obsNodeId = formatAssetGraphNodeId({ kind: "observation", uuid: obs.id });
+              let obsEntry = visibleObservationsByNodeId.get(obsNodeId);
+              if (!obsEntry) {
+                const sourceObs = courseObservationsCache.get(ref.sourceCourseId);
+                const rawObs = sourceObs?.filteredRaw.find(row => row.id === obs.id);
+                const header = observationHeaderById.get(obs.id);
+                const rawOccurredAt =
+                  rawObs?.submittedAt ??
+                  rawObs?.occurredAt ??
+                  header?.submittedAt ??
+                  header?.occurredAt ??
+                  obs.attemptedAt;
+                const occurredAt = toIso(rawOccurredAt) ?? obs.attemptedAt;
+                const obsNode: AssetGraphNode = {
+                  id: obsNodeId,
+                  kind: "observation",
+                  label: observationLabel(obs.assistance),
+                  meta: { occurredAt, assistance: obs.assistance },
+                };
+                visibleNodeMap.set(obsNodeId, obsNode);
+                obsEntry = {
+                  courseId: ref.sourceCourseId,
+                  node: obsNode,
+                  matchedRequirementIds: new Set<string>(),
+                  sharedAttributionsByTargetReqId: new Map<
+                    string,
+                    AssetGraphSharedAttribution[]
+                  >(),
+                };
+                visibleObservationsByNodeId.set(obsNodeId, obsEntry);
+              }
+
+              const obsAttrList =
+                obsEntry.sharedAttributionsByTargetReqId.get(ref.requirementId) ?? [];
+              if (!obsAttrList.some(existing => existing.linkId === attr.linkId)) {
+                obsAttrList.push(attr);
+                obsEntry.sharedAttributionsByTargetReqId.set(ref.requirementId, obsAttrList);
+              }
+            }
+          }
+
+          sharedEvidenceCache.set(targetCourseId, sharedEvidence);
+          return sharedEvidence;
         };
 
         // Compute summary & missing-material metadata per course in batch.
@@ -1083,20 +1460,9 @@ export function createOpeningAssetGraphRepository(
 
           const localObs = await ensureCourseObservationsLoaded(courseId);
           const courseReqs = activeRequirementsByCourse.get(courseId) ?? [];
-          const materials = await readCourseRouteMaterials(tx, validScope, courseId);
-          const chunks = await readCourseRouteSourceChunks(tx, validScope, courseId);
-          const sharedEvidence = await readSharedCourseEvidence(tx, validScope, courseId, {
-            requirements: async cid =>
-              cid === courseId
-                ? courseReqs
-                : activeRequirementsByCourse.get(cid) ?? [],
-            observations: async cid => {
-              const loaded = await ensureCourseObservationsLoaded(cid);
-              return { projected: loaded.filteredProjected };
-            },
-            sources: async cid => readCourseRouteMaterials(tx, validScope, cid),
-            chunks: async cid => readCourseRouteSourceChunks(tx, validScope, cid),
-          });
+          const materials = await ensureCourseMaterialsLoaded(courseId);
+          const chunks = await ensureCourseSourceChunksLoaded(courseId);
+          const sharedEvidence = await ensureSharedEvidenceLoaded(courseId);
 
           const progressList = courseRequirementProgress(
             courseReqs,
@@ -1147,6 +1513,35 @@ export function createOpeningAssetGraphRepository(
             );
 
             if (matchedFeatures.length === 0) {
+              const hasQualifiedShared = sharedEvidence.some(
+                obs =>
+                  obs.verifiedCorrect === "yes" &&
+                  obs.independentAttempt === "yes" &&
+                  obs.assistance === "independent" &&
+                  obs.usableForCurrentVersion === "yes" &&
+                  obs.sharedFor?.some(
+                    ref =>
+                      ref.requirementId === req.id &&
+                      ref.requirementRevision === req.revision &&
+                      ref.stableSkillId === req.stableSkillId,
+                  ),
+              );
+              if (hasQualifiedShared && progress?.status === "verified") {
+                const displayReq = learnerState.display.requirements.find(
+                  item => item.courseId === courseId && item.requirementKey === req.requirementKey,
+                );
+                const dueRetest = displayReq?.dueRetest ?? false;
+                resultMap.set(req.id, {
+                  summary: {
+                    learnerState: dueRetest ? "retest" : "independent",
+                    requirementStatus,
+                  },
+                  sourcesAvailable: progress.sourcesAvailable,
+                  missingReasons: progress.missingReasons,
+                });
+                continue;
+              }
+
               warningSet.add("部分课程要求尚无匹配当前版本与身份的作答证据，学习状态已安全置空。");
               resultMap.set(req.id, {
                 summary: { learnerState: null, requirementStatus },
@@ -1360,7 +1755,19 @@ export function createOpeningAssetGraphRepository(
           if (!header) {
             throw new OpeningAssetGraphError("NOT_FOUND", ASSET_GRAPH_NOT_FOUND_MESSAGE);
           }
-          await ensureCourseObservationsLoaded(header.courseId);
+          if (targetCourseSet.has(header.courseId)) {
+            await ensureCourseObservationsLoaded(header.courseId);
+          }
+          const sharedTargetCoursesForObs = [
+            ...new Set(
+              visibleSharedLinks
+                .filter(link => link.sourceCourseId === header.courseId)
+                .map(link => link.targetCourseId),
+            ),
+          ];
+          for (const targetCid of sharedTargetCoursesForObs) {
+            await ensureSharedEvidenceLoaded(targetCid);
+          }
         }
 
         const focusNode = visibleNodeMap.get(query.focus);
@@ -1394,14 +1801,17 @@ export function createOpeningAssetGraphRepository(
             ? new Set(query.relations.filter(rel => lensRelations.has(rel)))
             : lensRelations;
 
-          // Load course observations only if focus is a requirement needing `hasObservation` (already loaded if focus is observation).
+          // Load course observations & shared evidence only when `hasObservation` may be traversed.
           if (
             focusParsed.kind === "requirement" &&
             allowedRelations.has("hasObservation") &&
             query.direction !== "in"
           ) {
             const req = activeRequirementsById.get(focusParsed.uuid);
-            if (req) await ensureCourseObservationsLoaded(req.courseId);
+            if (req) {
+              await ensureCourseObservationsLoaded(req.courseId);
+              await ensureSharedEvidenceLoaded(req.courseId);
+            }
           }
 
           // Collect all deterministic edges across the 10 relation types, bounded by visibleNodeMap.
@@ -1567,6 +1977,22 @@ export function createOpeningAssetGraphRepository(
                   basis: "recorded",
                 });
               }
+              for (const [targetReqId, attrs] of entry.sharedAttributionsByTargetReqId) {
+                const targetReqNodeId = formatAssetGraphNodeId({
+                  kind: "requirement",
+                  uuid: targetReqId,
+                });
+                for (const attr of attrs) {
+                  pushEdge({
+                    id: `derived:hasObservation:${targetReqNodeId}:${obsNodeId}:link:${attr.linkId}`,
+                    from: targetReqNodeId,
+                    to: obsNodeId,
+                    relation: "hasObservation",
+                    basis: "derived",
+                    sharedAttribution: attr,
+                  });
+                }
+              }
             }
           }
 
@@ -1683,6 +2109,7 @@ export function createOpeningAssetGraphRepository(
           const req = activeRequirementsById.get(focusParsed.uuid)!;
           const summaries = await ensureCourseSummaries(req.courseId);
           const summaryEntry = summaries.get(req.id);
+          const sharedAttrs = sharedAttributionsByReqId.get(req.id) ?? [];
           learnerState = summaryEntry?.summary.learnerState ?? null;
           requirementStatus = summaryEntry?.summary.requirementStatus ?? null;
 
@@ -1693,7 +2120,18 @@ export function createOpeningAssetGraphRepository(
           );
           if (requirementStatus !== null) {
             notes.push(
-              `当前路线状态为“${REQUIREMENT_STATUS_LABELS[requirementStatus]}”（基于当前有效要求与本地合格作答投影）。`,
+              sharedAttrs.length > 0
+                ? `当前路线状态为“${REQUIREMENT_STATUS_LABELS[requirementStatus]}”（基于当前有效要求、本地合格作答与跨课共享有效证据投影）。`
+                : `当前路线状态为“${REQUIREMENT_STATUS_LABELS[requirementStatus]}”（基于当前有效要求与本地合格作答投影）。`,
+            );
+          }
+          for (const attr of sharedAttrs) {
+            if (notes.length >= 20) break;
+            notes.push(
+              `已关联跨课共享有效证据：来自「${attr.sourceCourseTitle} · ${attr.sourceRequirementTitle}」（第 ${attr.sourceRequirementRevision} 版）。`.slice(
+                0,
+                500,
+              ),
             );
           }
           if (learnerState !== null) {
@@ -1814,12 +2252,41 @@ export function createOpeningAssetGraphRepository(
         } else if (focusParsed.kind === "observation") {
           const obsEntry = visibleObservationsByNodeId.get(focusNode.id)!;
           const occurredAt = focusNode.meta?.occurredAt ?? asOf;
+          const sharedTargetEntries = [...obsEntry.sharedAttributionsByTargetReqId.entries()];
+          const isCrossCourseOrigin =
+            (contextCourseId !== null && obsEntry.courseId !== contextCourseId) ||
+            sharedTargetEntries.length > 0;
+          const sourceCourseTitle = activeCourses.get(obsEntry.courseId)?.title ?? "来源课程";
+
           notes.push(`作答形式：${focusNode.label}，记录时间：${occurredAt}。`);
-          notes.push("此为安全脱敏后的本地有效作答摘要，不包含题干、作答原文或参考答案。");
+          if (isCrossCourseOrigin) {
+            notes.push(
+              `来源课程：「${sourceCourseTitle}」，此为安全脱敏后的跨课共享有效证据摘要，不包含题干、作答原文或参考答案。`.slice(
+                0,
+                500,
+              ),
+            );
+            const seenLinks = new Set<string>();
+            for (const [targetReqId, attrs] of sharedTargetEntries) {
+              const targetReqTitle = activeRequirementsById.get(targetReqId)?.title;
+              for (const attr of attrs) {
+                if (seenLinks.has(attr.linkId) || notes.length >= 20) continue;
+                seenLinks.add(attr.linkId);
+                notes.push(
+                  `跨课共享自「${attr.sourceCourseTitle} · ${attr.sourceRequirementTitle}」（第 ${attr.sourceRequirementRevision} 版）${targetReqTitle ? `，用于「${targetReqTitle}」` : ""}。`.slice(
+                    0,
+                    500,
+                  ),
+                );
+              }
+            }
+          } else {
+            notes.push("此为安全脱敏后的本地有效作答摘要，不包含题干、作答原文或参考答案。");
+          }
           actions.push({
             kind: "navigate",
             href: `/opening/courses/${obsEntry.courseId}`,
-            label: "查看所属课程",
+            label: isCrossCourseOrigin ? "查看来源课程" : "查看所属课程",
           });
         }
 

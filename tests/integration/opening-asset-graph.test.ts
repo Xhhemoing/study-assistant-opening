@@ -11,6 +11,7 @@ import {
   createOpeningAssetGraphRepository,
   createOpeningBudgetRepository,
   createOpeningCourseRouteRepository,
+  createOpeningCourseSharedSkillRepository,
   createOpeningEphemeralProvenanceRepository,
   createOpeningLearningAssetLinkRepository,
   createOpeningLearningAttemptRepository,
@@ -700,6 +701,458 @@ it("hides permanently deleted sources, their derived notes/observations, while k
       context: { kind: "workspace" },
       lens: "structure",
       focus: `requirement/${reqId}`,
+    }),
+  ).rejects.toMatchObject({ code: "NOT_FOUND" });
+});
+
+it("projects cross-course shared-skills evidence with attribution, keeps homonymous knowledge separate, and invalidates on unlink/revision/exclusion", async () => {
+  const course1Id = randomUUID();
+  const course2Id = randomUUID();
+  await f.sql`INSERT INTO courses(id,workspace_id,title,slug) VALUES
+    (${course1Id},${f.scope.workspaceId},'线性代数基础',${course1Id}),
+    (${course2Id},${f.scope.workspaceId},'高等矩阵应用',${course2Id})`;
+
+  const src1 = await insertUploadedSource(1, "线代讲义.pdf");
+  const src2 = await insertUploadedSource(1, "矩阵应用讲义.pdf");
+  const m1 = randomUUID();
+  const m2 = randomUUID();
+  await f.sql`INSERT INTO course_asset_memberships(id,workspace_id,course_id,asset_type,asset_id,role,visibility) VALUES
+    (${m1},${f.scope.workspaceId},${course1Id},'source',${src1.sourceId},'core','course'),
+    (${m2},${f.scope.workspaceId},${course2Id},'source',${src2.sourceId},'core','course')`;
+
+  const sharedKnId = randomUUID();
+  const snapshot1: KnowledgeSnapshot = {
+    courseId: course1Id,
+    version: 1,
+    nodes: [{ id: sharedKnId, courseId: course1Id, label: "矩阵的秩", kind: "concept", evidenceChunkIds: [src1.chunkId], status: "supported" }],
+    edges: [],
+  };
+  const snapshot2: KnowledgeSnapshot = {
+    courseId: course2Id,
+    version: 1,
+    nodes: [{ id: sharedKnId, courseId: course2Id, label: "矩阵的秩", kind: "concept", evidenceChunkIds: [src2.chunkId], status: "supported" }],
+    edges: [],
+  };
+  await f.sql`INSERT INTO opening_course_knowledge(workspace_id,owner_user_id,course_id,version,snapshot,source_versions) VALUES
+    (${f.scope.workspaceId},${f.scope.ownerUserId},${course1Id},1,${f.sql.json(snapshot1)},${f.sql.json({ [src1.sourceId]: 1 })}),
+    (${f.scope.workspaceId},${f.scope.ownerUserId},${course2Id},1,${f.sql.json(snapshot2)},${f.sql.json({ [src2.sourceId]: 1 })})`;
+
+  const goalsRepo = createOpeningLearningGoalRepository(f.sql);
+  const goal1 = await goalsRepo.create(f.scope, {
+    clientKey: randomUUID(),
+    courseIds: [course1Id],
+    title: "基础线代目标",
+    kind: "interest",
+    targetDate: null,
+    examDate: null,
+    weeklyMinutes: 90,
+    priority: 1,
+    learningMode: "understand",
+    successCriteria: "",
+  });
+  const goal2 = await goalsRepo.create(f.scope, {
+    clientKey: randomUUID(),
+    courseIds: [course2Id],
+    title: "矩阵迁移目标",
+    kind: "interest",
+    targetDate: null,
+    examDate: null,
+    weeklyMinutes: 90,
+    priority: 1,
+    learningMode: "understand",
+    successCriteria: "",
+  });
+
+  const skillId = randomUUID();
+  const sharedRubric = "正确运用分数通分并说明计算依据。";
+  const sharedConditions = { responseFormat: "numeric" as const, timeLimitSeconds: null, assistance: "independent" as const };
+  const sourceReqId = randomUUID();
+  const targetReqId = randomUUID();
+
+  const route = createOpeningCourseRouteRepository(f.sql, { compilerEnabled: true });
+  await route.confirm(f.scope, course1Id, {
+    expectedRevisions: [],
+    confirmScope: true,
+    requirements: [
+      {
+        id: sourceReqId,
+        stableSkillId: skillId,
+        knowledgeNodeId: sharedKnId,
+        requirementKey: "la:fraction-add",
+        title: "独立完成基础分数通分",
+        position: 0,
+        mandatory: true,
+        goalIds: [goal1.id],
+        prerequisiteIds: [],
+        sourceRefs: [{ sourceId: src1.sourceId, sourceVersion: 1, chunkId: src1.chunkId, page: 1 }],
+        evidenceConditions: sharedConditions,
+        verification: { kind: "rubric", status: "ready", exerciseKeys: ["q-base"], rubric: sharedRubric, missingReasons: [] },
+        origin: "confirmed",
+      },
+    ],
+  });
+  await route.confirm(f.scope, course2Id, {
+    expectedRevisions: [],
+    confirmScope: true,
+    requirements: [
+      {
+        id: targetReqId,
+        stableSkillId: randomUUID(),
+        knowledgeNodeId: sharedKnId,
+        requirementKey: "app:fraction-transfer",
+        title: "矩阵变换中的通分迁移",
+        position: 0,
+        mandatory: true,
+        goalIds: [goal2.id],
+        prerequisiteIds: [],
+        sourceRefs: [{ sourceId: src2.sourceId, sourceVersion: 1, chunkId: src2.chunkId, page: 1 }],
+        evidenceConditions: sharedConditions,
+        verification: { kind: "rubric", status: "ready", exerciseKeys: ["q-app"], rubric: sharedRubric, missingReasons: [] },
+        origin: "confirmed",
+      },
+    ],
+  });
+  await f.sql`UPDATE course_requirements
+    SET verification=${f.sql.json({ kind: "rubric", status: "ready", exerciseKeys: ["q-ready"], rubric: sharedRubric, missingReasons: [] })}
+    WHERE id IN (${sourceReqId}, ${targetReqId})
+      AND workspace_id=${f.scope.workspaceId}
+      AND owner_user_id=${f.scope.ownerUserId}`;
+
+  const started = assertReady(
+    await route.start(f.scope, course1Id, {
+      goalId: goal1.id,
+      expectedGoalRevision: 1,
+      requirementId: sourceReqId,
+      expectedRequirementRevision: 1,
+      clientKey: randomUUID(),
+      minutes: 20,
+    }),
+  );
+
+  const content = createOpeningTeachingContentRepository(f.sql);
+  const p1Id = randomUUID();
+  const a1Id = randomUUID();
+  const p2Id = randomUUID();
+  const a2Id = randomUUID();
+  const unit = await content.createUnit(f.scope, {
+    title: "分数通分双题独立验证",
+    blocks: [
+      { id: p1Id, type: "prompt", content: { text: "计算 1/3 + 1/4", interaction: { kind: "numeric" } } },
+      { id: a1Id, type: "answer_key", content: { answer: "7/12", hidden: true } },
+      { id: p2Id, type: "prompt", content: { text: "计算 1/2 + 1/3", interaction: { kind: "numeric" } } },
+      { id: a2Id, type: "answer_key", content: { answer: "5/6", hidden: true } },
+    ],
+  });
+  await content.publishActivitySpec(f.scope, {
+    activityId: started.activity.id,
+    teachingUnitId: unit.id,
+    expectedVersion: 0,
+    expectedRevisionNumber: 1,
+    revisionNumber: 1,
+    blockOrder: [
+      { blockId: p1Id, blockType: "prompt", role: "prompt", position: 0 },
+      { blockId: a1Id, blockType: "answer_key", role: "answer_key", position: 1 },
+      { blockId: p2Id, blockType: "prompt", role: "prompt", position: 2 },
+      { blockId: a2Id, blockType: "answer_key", role: "answer_key", position: 3 },
+    ],
+    sourceRefs: [{ sourceId: src1.sourceId, chunkId: src1.chunkId, version: 1 }],
+  });
+
+  const learning = createOpeningLearningRepository(f.sql);
+  const attempts = createOpeningLearningAttemptRepository(f.sql);
+  const session = await learning.createSession(f.scope, {
+    activityId: started.activity.id,
+    courseId: course1Id,
+    skillLabel: started.activity.learnerFocus!.skillLabel,
+    sourceIds: [src1.sourceId],
+  });
+  const att1 = await attempts.create(f.scope, {
+    sessionId: session.id,
+    clientKey: randomUUID(),
+    teachingBlock: { blockId: p1Id, contentVersion: 1 },
+  });
+  const obs1 = await learning.insertObservation(f.scope, {
+    attemptId: att1.id,
+    sessionId: session.id,
+    courseId: course1Id,
+    skillLabel: started.activity.learnerFocus!.skillLabel,
+    sourceIds: [src1.sourceId],
+    problemId: att1.problemId,
+    answer: "7/12",
+    outcome: "unverified",
+    assistance: "independent",
+    clientKey: randomUUID(),
+  });
+  const att2 = await attempts.create(f.scope, {
+    sessionId: session.id,
+    clientKey: randomUUID(),
+    teachingBlock: { blockId: p2Id, contentVersion: 1 },
+  });
+  const obs2 = await learning.insertObservation(f.scope, {
+    attemptId: att2.id,
+    sessionId: session.id,
+    courseId: course1Id,
+    skillLabel: started.activity.learnerFocus!.skillLabel,
+    sourceIds: [src1.sourceId],
+    problemId: att2.problemId,
+    answer: "5/6",
+    outcome: "unverified",
+    assistance: "independent",
+    clientKey: randomUUID(),
+  });
+
+  const sharedRepo = createOpeningCourseSharedSkillRepository(f.sql);
+  const linked = await sharedRepo.command(f.scope, course2Id, {
+    action: "link",
+    sourceRequirementId: sourceReqId,
+    expectedSourceRevision: 1,
+    targetRequirementId: targetReqId,
+    expectedTargetRevision: 1,
+    expectedLinkRevision: 0,
+    confirmed: true,
+  });
+  const linkId = linked.links[0]!.id;
+
+  const before = await readWriteFootprint();
+  const graphRepo = createOpeningAssetGraphRepository(f.sql, {
+    cursorSecret: "integration-shared-skills-secret-1234",
+  });
+
+  // 1. Course context (course2): summary verified/independent without missing-evidence warning.
+  const c2Roots = await graphRepo.query(f.scope, {
+    op: "roots",
+    context: { kind: "course", id: `course/${course2Id}` },
+    lens: "evidence",
+    include: ["summary"],
+  });
+  expect(c2Roots.warnings).toEqual([]);
+  expect(c2Roots.nodes.find(n => n.id === `requirement/${targetReqId}`)?.summary).toEqual({
+    learnerState: "independent",
+    requirementStatus: "verified",
+  });
+
+  // 2. Course context neighbors with pagination returns derived:hasObservation + sharedAttribution.
+  const page1 = await graphRepo.query(f.scope, {
+    op: "neighbors",
+    context: { kind: "course", id: `course/${course2Id}` },
+    lens: "evidence",
+    focus: `requirement/${targetReqId}`,
+    direction: "out",
+    limit: 1,
+  });
+  expect(page1.edges).toHaveLength(1);
+  expect(page1.page.nextCursor).toBeTruthy();
+  const page2 = await graphRepo.query(f.scope, {
+    op: "neighbors",
+    context: { kind: "course", id: `course/${course2Id}` },
+    lens: "evidence",
+    focus: `requirement/${targetReqId}`,
+    direction: "out",
+    limit: 1,
+    cursor: page1.page.nextCursor!,
+  });
+  expect(page2.edges).toHaveLength(1);
+  expect(page2.page.nextCursor).toBeNull();
+
+  const allSharedEdges = [...page1.edges, ...page2.edges];
+  expect(allSharedEdges.map(e => e.to).sort()).toEqual(
+    [`observation/${obs1.id}`, `observation/${obs2.id}`].sort(),
+  );
+  for (const edge of allSharedEdges) {
+    expect(edge).toMatchObject({
+      basis: "derived",
+      relation: "hasObservation",
+      sharedAttribution: {
+        linkId,
+        linkRevision: 1,
+        stableSkillId: skillId,
+        sourceCourseId: course1Id,
+        sourceCourseTitle: "线性代数基础",
+        sourceRequirementId: sourceReqId,
+        sourceRequirementTitle: "独立完成基础分数通分",
+        sourceRequirementRevision: 1,
+        targetRequirementRevision: 2,
+        effective: true,
+      },
+    });
+  }
+
+  // 3. Observation detail & neighbors in course2 + goal2 + workspace contexts.
+  const obsDetailInC2 = await graphRepo.query(f.scope, {
+    op: "detail",
+    context: { kind: "course", id: `course/${course2Id}` },
+    lens: "evidence",
+    focus: `observation/${obs1.id}`,
+  });
+  expect(obsDetailInC2.detail?.actions).toEqual([
+    { kind: "navigate", href: `/opening/courses/${course1Id}`, label: "查看来源课程" },
+  ]);
+  expect(obsDetailInC2.detail?.notes.some(n => n.includes("线性代数基础"))).toBe(true);
+
+  const reqDetailInGoal2 = await graphRepo.query(f.scope, {
+    op: "detail",
+    context: { kind: "goal", id: `goal/${goal2.id}` },
+    lens: "all",
+    focus: `requirement/${targetReqId}`,
+  });
+  expect(reqDetailInGoal2.detail?.learnerState).toBe("independent");
+  expect(reqDetailInGoal2.detail?.requirementStatus).toBe("verified");
+  expect(
+    reqDetailInGoal2.detail?.notes.some(
+      n =>
+        n.includes("跨课共享有效证据") &&
+        n.includes("线性代数基础") &&
+        n.includes("独立完成基础分数通分") &&
+        n.includes("第 1 版"),
+    ),
+  ).toBe(true);
+
+  const wsObsIn = await graphRepo.query(f.scope, {
+    op: "neighbors",
+    context: { kind: "workspace" },
+    lens: "evidence",
+    focus: `observation/${obs1.id}`,
+    direction: "in",
+  });
+  expect(wsObsIn.edges.map(e => e.basis).sort()).toEqual(["derived", "recorded"]);
+
+  // Homonymous knowledge nodes stay strictly separate per course.
+  const wsKnowledge = await graphRepo.query(f.scope, {
+    op: "roots",
+    context: { kind: "workspace" },
+    lens: "structure",
+    kinds: ["knowledge"],
+  });
+  expect(wsKnowledge.nodes.map(n => n.id)).toEqual(
+    expect.arrayContaining([
+      `knowledge/${course1Id}/${sharedKnId}`,
+      `knowledge/${course2Id}/${sharedKnId}`,
+    ]),
+  );
+
+  // Zero writes from asset-graph queries.
+  expect(await readWriteFootprint()).toEqual(before);
+
+  // 4. Unlink -> CURSOR_STALE & hides shared observation/edges in course2.
+  const cursorBeforeUnlink = page1.page.nextCursor!;
+  await sharedRepo.command(f.scope, course2Id, {
+    action: "unlink",
+    linkId,
+    expectedRevision: 1,
+  });
+  await expect(
+    graphRepo.query(f.scope, {
+      op: "neighbors",
+      context: { kind: "course", id: `course/${course2Id}` },
+      lens: "evidence",
+      focus: `requirement/${targetReqId}`,
+      direction: "out",
+      limit: 1,
+      cursor: cursorBeforeUnlink,
+    }),
+  ).rejects.toMatchObject({ code: "CURSOR_STALE" });
+  await expect(
+    graphRepo.query(f.scope, {
+      op: "detail",
+      context: { kind: "course", id: `course/${course2Id}` },
+      lens: "evidence",
+      focus: `observation/${obs1.id}`,
+    }),
+  ).rejects.toMatchObject({ code: "NOT_FOUND" });
+
+  // 5. Re-link, then bump source requirement revision -> CURSOR_STALE & hides shared evidence.
+  await sharedRepo.command(f.scope, course2Id, {
+    action: "link",
+    sourceRequirementId: sourceReqId,
+    expectedSourceRevision: 1,
+    targetRequirementId: targetReqId,
+    expectedTargetRevision: 2,
+    expectedLinkRevision: 2,
+    confirmed: true,
+  });
+  const pageBeforeRevBump = await graphRepo.query(f.scope, {
+    op: "neighbors",
+    context: { kind: "course", id: `course/${course2Id}` },
+    lens: "evidence",
+    focus: `requirement/${targetReqId}`,
+    direction: "out",
+    limit: 1,
+  });
+  expect(pageBeforeRevBump.page.nextCursor).toBeTruthy();
+
+  await f.sql`UPDATE course_requirements SET revision = 2, updated_at = now()
+    WHERE id = ${sourceReqId} AND workspace_id = ${f.scope.workspaceId} AND owner_user_id = ${f.scope.ownerUserId}`;
+  await expect(
+    graphRepo.query(f.scope, {
+      op: "neighbors",
+      context: { kind: "course", id: `course/${course2Id}` },
+      lens: "evidence",
+      focus: `requirement/${targetReqId}`,
+      direction: "out",
+      limit: 1,
+      cursor: pageBeforeRevBump.page.nextCursor!,
+    }),
+  ).rejects.toMatchObject({ code: "CURSOR_STALE" });
+  expect(
+    (
+      await graphRepo.query(f.scope, {
+        op: "neighbors",
+        context: { kind: "course", id: `course/${course2Id}` },
+        lens: "evidence",
+        focus: `requirement/${targetReqId}`,
+        direction: "out",
+      })
+    ).edges,
+  ).toEqual([]);
+
+  // 6. Restore source revision and verify privacy-excluding source1 -> CURSOR_STALE & hides shared evidence.
+  await f.sql`UPDATE course_requirements SET revision = 1, updated_at = now()
+    WHERE id = ${sourceReqId} AND workspace_id = ${f.scope.workspaceId} AND owner_user_id = ${f.scope.ownerUserId}`;
+  const pageBeforeExclude = await graphRepo.query(f.scope, {
+    op: "neighbors",
+    context: { kind: "course", id: `course/${course2Id}` },
+    lens: "evidence",
+    focus: `requirement/${targetReqId}`,
+    direction: "out",
+    limit: 1,
+  });
+  expect(pageBeforeExclude.page.nextCursor).toBeTruthy();
+
+  await createOpeningSourceActionsRepository(f.sql).apply(
+    f.scope,
+    src1.sourceId,
+    { action: "exclude", expectedVersion: 1, expectedMembershipIds: [m1] },
+    sourceKeys,
+    new Date(),
+  );
+  await expect(
+    graphRepo.query(f.scope, {
+      op: "neighbors",
+      context: { kind: "course", id: `course/${course2Id}` },
+      lens: "evidence",
+      focus: `requirement/${targetReqId}`,
+      direction: "out",
+      limit: 1,
+      cursor: pageBeforeExclude.page.nextCursor!,
+    }),
+  ).rejects.toMatchObject({ code: "CURSOR_STALE" });
+  expect(
+    (
+      await graphRepo.query(f.scope, {
+        op: "neighbors",
+        context: { kind: "course", id: `course/${course2Id}` },
+        lens: "evidence",
+        focus: `requirement/${targetReqId}`,
+        direction: "out",
+      })
+    ).edges,
+  ).toEqual([]);
+  await expect(
+    graphRepo.query(f.scope, {
+      op: "detail",
+      context: { kind: "course", id: `course/${course2Id}` },
+      lens: "evidence",
+      focus: `observation/${obs1.id}`,
     }),
   ).rejects.toMatchObject({ code: "NOT_FOUND" });
 });

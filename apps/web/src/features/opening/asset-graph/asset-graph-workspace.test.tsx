@@ -391,4 +391,79 @@ describe("AssetGraphWorkspace", () => {
     expect(container.querySelector(`a[href="/opening/courses/${COURSE_ID}#course-learning-route"]`)).not.toBeNull();
     expect(container.textContent).not.toContain("已达到课程要求");
   });
+
+  it("renders cross-course sharedAttribution badge, caption, and source course link in expanded edges (Case 21)", async () => {
+    const COURSE_2 = "10000000-0000-4000-8000-000000000002";
+    const REQ_2 = "requirement/30000000-0000-4000-8000-000000000002" as const;
+    const OBS_2 = "observation/50000000-0000-4000-8000-000000000002" as const;
+    const baseTransport = createSyntheticAssetGraphTransport(fixtures);
+    const transport: AssetGraphTransport = async (query, signal) => {
+      if (query.op === "roots" && query.context.kind === "course" && query.context.id === `course/${COURSE_2}`) {
+        return {
+          asOf: "2026-01-01T00:00:00.000Z",
+          nodes: [
+            {
+              id: REQ_2,
+              kind: "requirement",
+              label: "合成：跨课应用变化率迁移",
+              ...(query.include?.includes("summary")
+                ? { summary: { learnerState: "independent", requirementStatus: "verified" } }
+                : {}),
+            },
+          ],
+          edges: [],
+          page: { nextCursor: null },
+          completeness: "complete",
+          warnings: [],
+          detail: null,
+        };
+      }
+      return baseTransport(query, signal);
+    };
+
+    await renderWorkspace({
+      transport,
+      initialContext: { kind: "course", id: `course/${COURSE_2}` },
+      initialLens: "evidence",
+      courses: [
+        { id: COURSE_ID, title: "合成：微积分入门" },
+        { id: COURSE_2, title: "合成：高阶应用" },
+      ],
+    });
+
+    // Focus REQ_2 first, then toggle summary ON -> triggers Case 21 directly from fixtures
+    await act(async () => {
+      nodeCard(REQ_2).querySelector("button")!.click();
+    });
+    await flush();
+
+    const summaryCheckbox = container.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    await act(async () => {
+      summaryCheckbox.click();
+    });
+    await flush();
+
+    expect(nodeCard(REQ_2).textContent).toContain("独立完成");
+    expect(nodeCard(REQ_2).textContent).toContain("已达到课程要求");
+    expect(nodeCard(OBS_2).textContent).toContain("独立作答记录");
+    expect(container.textContent).toContain("当前已展开关联");
+    expect(container.textContent).toContain("跨课共享证据");
+    expect(container.textContent).toContain(
+      "跨课共享自「合成：微积分入门 · 合成：解释平均变化率与瞬时变化率」（第 2 版）",
+    );
+    const sourceLink = Array.from(container.querySelectorAll("a")).find(a =>
+      a.textContent?.includes("查看来源课程"),
+    );
+    expect(sourceLink?.getAttribute("href")).toBe(`/opening/courses/${COURSE_ID}`);
+
+    // Focusing the observation shows the incoming shared attribution edge too
+    await act(async () => {
+      nodeCard(OBS_2).querySelector("button")!.click();
+    });
+    await flush();
+    expect(container.textContent).toContain(
+      "跨课共享自「合成：微积分入门 · 合成：解释平均变化率与瞬时变化率」（第 2 版）",
+    );
+    expect(container.querySelector(`a[href="/opening/courses/${COURSE_ID}"]`)).not.toBeNull();
+  });
 });
