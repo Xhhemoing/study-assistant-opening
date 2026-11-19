@@ -11,6 +11,8 @@ export const taskRetestProjectionSchema = z.object({
   requirementKey: z.string().max(200).nullable().optional(),
   prompt: z.string().min(1).max(4000),
   recommendedAt: isoDateTimeSchema.nullable(),
+  /** Optional explicit reservation start time; omitted on legacy snapshots without a reservation. */
+  scheduledStartAt: isoDateTimeSchema.nullable().optional(),
 }).strict();
 
 /** A read-only navigation hint, not permission to bypass task admission or a course cursor. */

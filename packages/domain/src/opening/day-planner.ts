@@ -97,11 +97,13 @@ function resolveDayEnd(free: readonly TimeBlock[], options: PlanDayOptions): Day
 }
 
 /**
- * Earliest allowable start: the later of a retest's recommendedAt and a deferral's
- * notBefore. Null when neither is set.
+ * Earliest allowable start: the later of a retest's active start target
+ * (`scheduledStartAt ?? recommendedAt`) and a task's `notBefore`.
+ * Null when neither is set.
  */
 export function taskNotBeforeAt(task: TaskItem): string | null {
-  const candidates = [task.retest?.recommendedAt, task.notBefore].filter(
+  const retestTarget = task.retest?.scheduledStartAt ?? task.retest?.recommendedAt;
+  const candidates = [retestTarget, task.notBefore].filter(
     (value): value is string => typeof value === "string" && value !== "",
   );
   if (!candidates.length) return null;

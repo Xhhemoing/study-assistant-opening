@@ -62,7 +62,11 @@ export async function proposeOpeningLocalPlan(sql: Sql, scope: Scope, raw: Local
     if (options.taskIds && options.taskIds.some(id => !tasks.some(task => task.id === id))) throw new OpeningPlanError("NOT_FOUND", "delta task not found");
     const active = await tx`SELECT lower(create_intent->>'taskId') AS task_id FROM opening_teaching_activities
       WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND status IN ('active','paused')
-        AND create_intent->>'source'='task'`;
+        AND create_intent->>'source'='task'
+      UNION
+      SELECT lower(task_id::text) AS task_id FROM opening_retest_activities
+      WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
+        AND task_id IS NOT NULL AND status NOT IN ('accepted','in_progress')`;
     const activeIds = new Set(active.map(row => String(row.task_id)));
     const configured = preference.settings ? deriveDayBlocks(input.date, preference.settings, await repo.listTimetable(scope)) : [];
     const constraints = [...(explicitFree ?? configured), ...(explicitFree ? configured.filter(block => block.kind !== "free") : []),

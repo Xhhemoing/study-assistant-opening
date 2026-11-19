@@ -1,8 +1,9 @@
 import type { TransactionSql } from "postgres";
 import { conversationPlanMetadataSchema, localReplanMetadataSchema, plannedBlockSchema, taskItemSchema, type PlannedBlock, type Scope } from "@aistudy/contracts";
-import { localReplanFixedBlocks, samePlannedBlocks } from "@aistudy/domain";
+import { localReplanFixedBlocks, samePlannedBlocks, taskNotBeforeAt } from "@aistudy/domain";
 import { OpeningPlanError } from "./opening-plan-error";
 import { assertOpeningPlanConstraints } from "./opening-plan-constraints";
+import { effectivePlanningStartFloorMs, readLockedTaskPlanningWindows } from "./opening-course-route-planning-window";
 
 /** Persisted metadata is untrusted, including after backup import. Never let it exempt arbitrary blocks. */
 export async function validateOpeningLocalReplan(tx: TransactionSql, scope: Scope, input: {
@@ -60,22 +61,47 @@ export async function validateOpeningLocalReplan(tx: TransactionSql, scope: Scop
         AND lower(create_intent->>'taskId') IN ${tx(newIds)} LIMIT 1`;
       if (started.length) return conflict("task learning already started", "task_changed");
     }
-    const current = await tx`SELECT id, version, status, not_before, minutes, due_at FROM opening_tasks WHERE workspace_id=${scope.workspaceId}
-      AND owner_user_id=${scope.ownerUserId} AND id IN ${tx(existingIds)} ORDER BY id FOR UPDATE`;
+    const current = await readLockedTaskPlanningWindows(tx, scope, existingIds);
     if (current.length !== existingIds.length || current.some(task => {
       const saved = tasks.data.find(original => original.id === task.id);
       const scheduledNew = fresh.some(block => block.taskId === task.id);
-      return !saved || Number(task.version) !== saved.version || task.status !== saved.status
-        || (task.not_before ? new Date(task.not_before as string | Date).toISOString() : null) !== (saved.notBefore ?? null)
-        || Number(task.minutes) !== saved.minutes
-        || (task.due_at ? new Date(task.due_at as string | Date).toISOString() : null) !== saved.dueAt
-        || (scheduledNew && (task.status !== "pending" || (task.not_before && new Date(task.not_before as string | Date) > input.now)));
+      if (!saved || task.version !== saved.version || task.status !== saved.status
+        || task.window.notBefore !== (saved.notBefore ?? null)
+        || task.minutes !== saved.minutes
+        || task.window.dueAt !== saved.dueAt) {
+        return true;
+      }
+      if (task.window.isCourseRouteRetest && (
+        task.window.scheduledStartAt !== (saved.retest?.scheduledStartAt ?? null)
+        || task.window.recommendedAt !== (saved.retest?.recommendedAt ?? null)
+      )) {
+        return true;
+      }
+      if (!scheduledNew) return false;
+      if (task.status !== "pending" || !task.window.retestActive) return true;
+      if (task.window.notBefore && Date.parse(task.window.notBefore) > input.now.getTime()) return true;
+      const earliestStartMs = effectivePlanningStartFloorMs(task.window);
+      const dueMs = task.window.dueAt ? Date.parse(task.window.dueAt) : null;
+      return fresh.some(block => {
+        if (block.taskId !== task.id) return false;
+        const startMs = Date.parse(block.start);
+        const endMs = Date.parse(block.end);
+        if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return true;
+        if (earliestStartMs !== null && startMs < earliestStartMs) return true;
+        if (dueMs !== null && endMs > dueMs) return true;
+        return false;
+      });
     })) return conflict("task changed since proposal", "task_changed");
   }
-  if (fresh.some(block => !tasks.data.some(task => task.id === block.taskId && task.status === "pending"
-    && (!task.notBefore || Date.parse(task.notBefore) <= Date.parse(block.start))
-    && Date.parse(block.end) - Date.parse(block.start) === task.minutes * 60_000
-    && (!task.dueAt || Date.parse(block.end) <= Date.parse(task.dueAt))))) return conflict("unknown or deferred new task", "task_changed");
+  if (fresh.some(block => !tasks.data.some(task => {
+    if (task.id !== block.taskId || task.status !== "pending") return false;
+    const startMs = Date.parse(block.start);
+    const endMs = Date.parse(block.end);
+    const earliest = taskNotBeforeAt(task);
+    return (earliest === null || Date.parse(earliest) <= startMs)
+      && endMs - startMs === task.minutes * 60_000
+      && (!task.dueAt || endMs <= Date.parse(task.dueAt));
+  }))) return conflict("unknown or deferred new task", "task_changed");
   await assertOpeningPlanConstraints(tx, scope, input.day, fresh, true, meta.data.explicitFree);
   await assertOpeningPlanConstraints(tx, scope, input.day, futureFixed, false);
 }

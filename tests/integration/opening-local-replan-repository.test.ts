@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, expect, it } from "vitest";
-import { createOpeningPlansRepository, createOpeningPlanningSettingsRepository, proposeOpeningLocalPlan } from "@aistudy/database";
+import { createOpeningPlansRepository, createOpeningPlanningSettingsRepository, createOpeningRetestActivityRepository, proposeOpeningLocalPlan } from "@aistudy/database";
 import type { PlannedBlock } from "@aistudy/contracts";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { createOpeningPlanService } from "../../apps/web/src/features/opening/planning/plan-service";
@@ -13,7 +13,9 @@ beforeEach(async () => {
   await f.sql`DELETE FROM opening_plan_acceptances WHERE workspace_id=${f.scope.workspaceId}`;
   await f.sql`DELETE FROM opening_plan_drafts WHERE workspace_id=${f.scope.workspaceId}`;
   await f.sql`DELETE FROM opening_plan_state WHERE workspace_id=${f.scope.workspaceId}`;
+  await f.sql`DELETE FROM opening_retest_activities WHERE workspace_id=${f.scope.workspaceId}`;
   await f.sql`DELETE FROM opening_tasks WHERE workspace_id=${f.scope.workspaceId}`;
+  await f.sql`DELETE FROM opening_jobs WHERE workspace_id=${f.scope.workspaceId}`;
   await f.sql`DELETE FROM opening_hard_blocks WHERE workspace_id=${f.scope.workspaceId}`;
   await createOpeningPlanningSettingsRepository(f.sql).set(f.scope, settings);
 });
@@ -125,4 +127,222 @@ it("rejects a forged task duration and deadline in a persisted snapshot", async 
   await f.sql`UPDATE opening_plan_drafts SET input_snapshot=${f.sql.json(snapshot)},blocks=${f.sql.json(blocks)} WHERE id=${draft.id}`;
   await expect(createOpeningPlansRepository(f.sql, { now: () => now }).acceptPlan(f.scope,
     { draftId: draft.id, expectedBaseVersion: 1, clientKey: randomUUID() })).rejects.toMatchObject({ code: "CONFLICT", reason: "task_changed" });
+});
+
+async function seedLegacyCourseRouteRetest() {
+  const courseId = randomUUID();
+  const candidateId = randomUUID();
+  const taskId = randomUUID();
+  const retestId = randomUUID();
+  const baselineObsId = randomUUID();
+  const baselineRootId = randomUUID();
+  const acceptClientKey = `legacy-retest:${randomUUID()}`;
+  const payloadHash = `hash-${randomUUID()}`;
+  const earliestAt = "2026-10-15T19:00:00.000Z";
+  const deadline14d = "2026-10-26T19:00:00.000Z";
+  const prompt = "矩阵秩：3天后离开原答案独立完成新题，按已确认的课程要求核对。";
+
+  await f.sql`INSERT INTO courses(id, workspace_id, title, slug)
+    VALUES(${courseId}, ${f.scope.workspaceId}, 'Course route replan', ${courseId})`;
+  await f.sql`INSERT INTO opening_jobs(id, workspace_id, owner_user_id, key, kind, payload, result, state)
+    VALUES(${candidateId}, ${f.scope.workspaceId}, ${f.scope.ownerUserId}, ${`retest:${candidateId}`}, 'retest',
+      ${f.sql.json({
+        id: candidateId,
+        courseId,
+        skillLabel: "矩阵秩",
+        requirementKey: "rank-proof",
+        prompt,
+        sourceIds: [],
+        dueAt: earliestAt,
+        accepted: true,
+        kind: "task",
+        evidenceObservationIds: [baselineObsId],
+        evidenceRootIds: [baselineRootId],
+        acceptClientKey,
+        acceptPayloadHash: payloadHash,
+        taskId,
+      })},
+      ${f.sql.json({
+        accepted: true,
+        clientKey: acceptClientKey,
+        payloadHash,
+        taskId,
+        baseVersion: 0,
+        inputSnapshot: {
+          kind: "retest",
+          candidateId,
+          courseId,
+          skillLabel: "矩阵秩",
+          prompt,
+          sourceIds: [],
+          dueAt: earliestAt,
+          heuristic: true,
+        },
+        scheduled: false,
+      })},
+      'succeeded')`;
+  await f.sql`INSERT INTO opening_tasks(
+      id, workspace_id, owner_user_id, title, minutes, due_at, not_before,
+      priority, status, version, candidate_id, course_id, skill_label, requirement_key, origin
+    ) VALUES (
+      ${taskId}, ${f.scope.workspaceId}, ${f.scope.ownerUserId}, ${prompt}, 25, ${earliestAt}, ${earliestAt},
+      1, 'pending', 1, ${candidateId}, ${courseId}, '矩阵秩', 'rank-proof', 'retest'
+    )`;
+  await f.sql`INSERT INTO opening_retest_activities(
+      id, workspace_id, owner_user_id, course_id, skill_label, requirement_key, purpose,
+      evidence_cycle_id, candidate_id, candidate_reference_id, task_id, status, version,
+      accept_client_key, learning_protocol, not_before_at, recommended_at, deadline_at
+    ) VALUES (
+      ${retestId}, ${f.scope.workspaceId}, ${f.scope.ownerUserId}, ${courseId}, '矩阵秩', 'rank-proof', 'retest',
+      ${candidateId}, ${candidateId}, ${candidateId}, ${taskId}, 'accepted', 2,
+      ${acceptClientKey},
+      ${f.sql.json({
+        protocolId: "course-route-delayed-v1",
+        goalId: randomUUID(),
+        goalRevision: 1,
+        requirementId: randomUUID(),
+        requirementRevision: 1,
+        stableSkillId: randomUUID(),
+        baselineObservationId: baselineObsId,
+        baselineRootId,
+        originActivityId: randomUUID(),
+        minutes: 25,
+      })},
+      ${earliestAt}, ${earliestAt}, ${deadline14d}
+    )`;
+
+  return { courseId, candidateId, taskId, retestId, earliestAt, deadline14d };
+}
+
+it("accepts a legacy-miswritten course-route delayed retest through local replan without false task_changed", async () => {
+  const fridayNow = new Date(at("19:00"));
+  await createOpeningPlanningSettingsRepository(f.sql).set(f.scope, {
+    ...settings,
+    dailyWindow: { start: "19:15", end: "19:40" },
+  });
+  const prior = await task();
+  await createOpeningPlansRepository(f.sql).updateTaskStatus(f.scope, prior.id, {
+    status: "done",
+    expectedVersion: 1,
+    at: at("09:30"),
+  });
+  const baseline = [block(prior.id, "09:00", "09:30")];
+  await seed(baseline);
+
+  const retest = await seedLegacyCourseRouteRetest();
+  const proposed = await proposeOpeningLocalPlan(
+    f.sql,
+    f.scope,
+    { date, expectedAcceptedVersion: 1, clientKey: randomUUID() },
+    { now: fridayNow },
+  );
+  expect(proposed.kind).toBe("draft");
+  if (proposed.kind !== "draft") return;
+  expect(proposed.draft.blocks).toEqual([
+    ...baseline,
+    expect.objectContaining({ taskId: retest.taskId, start: at("19:15"), end: at("19:40") }),
+  ]);
+
+  const plans = createOpeningPlansRepository(f.sql, { now: () => fridayNow });
+  const acceptKey = randomUUID();
+  const accepted = await plans.acceptPlan(f.scope, {
+    draftId: proposed.draft.id,
+    expectedBaseVersion: 1,
+    clientKey: acceptKey,
+  });
+  expect(accepted).toMatchObject({ status: "accepted", version: 2 });
+  // Same-key replay returns original receipt without incrementing version again.
+  expect(await plans.acceptPlan(f.scope, {
+    draftId: proposed.draft.id,
+    expectedBaseVersion: 1,
+    clientKey: acceptKey,
+  })).toMatchObject({ id: proposed.draft.id, status: "accepted", version: 2 });
+  expect((await plans.getToday(f.scope, date))?.acceptedVersion).toBe(2);
+});
+
+it.each(["cancel", "snooze", "narrow_deadline"] as const)(
+  "rejects local replan acceptance after delayed retest %s without changing accepted baseline",
+  async (mutation) => {
+    const fridayNow = new Date(at("19:00"));
+    await createOpeningPlanningSettingsRepository(f.sql).set(f.scope, {
+      ...settings,
+      dailyWindow: { start: "19:15", end: "19:40" },
+    });
+    const prior = await task();
+    await createOpeningPlansRepository(f.sql).updateTaskStatus(f.scope, prior.id, {
+      status: "done",
+      expectedVersion: 1,
+      at: at("09:30"),
+    });
+    const baseline = [block(prior.id, "09:00", "09:30")];
+    await seed(baseline);
+
+    const retest = await seedLegacyCourseRouteRetest();
+    const proposed = await proposeOpeningLocalPlan(
+      f.sql,
+      f.scope,
+      { date, expectedAcceptedVersion: 1, clientKey: randomUUID() },
+      { now: fridayNow },
+    );
+    expect(proposed.kind).toBe("draft");
+    if (proposed.kind !== "draft") return;
+
+    const activities = createOpeningRetestActivityRepository(f.sql);
+    if (mutation === "cancel") {
+      await activities.transition(f.scope, retest.retestId, { type: "cancel", at: fridayNow.toISOString() });
+    } else if (mutation === "snooze") {
+      await activities.transition(f.scope, retest.retestId, { type: "snooze", until: "2026-10-17T19:00:00.000Z" });
+    } else {
+      await f.sql`UPDATE opening_retest_activities SET deadline_at=${at("19:30")} WHERE id=${retest.retestId}`;
+    }
+
+    const plans = createOpeningPlansRepository(f.sql, { now: () => fridayNow });
+    await expect(plans.acceptPlan(f.scope, {
+      draftId: proposed.draft.id,
+      expectedBaseVersion: 1,
+      clientKey: randomUUID(),
+    })).rejects.toMatchObject({ code: "CONFLICT", reason: "task_changed" });
+    expect(await plans.getToday(f.scope, date)).toMatchObject({ acceptedVersion: 1, blocks: baseline });
+  },
+);
+
+it("rejects a forged local replan block whose start is legal but end exceeds the real retest hard deadline", async () => {
+  const fridayNow = new Date(at("19:00"));
+  await createOpeningPlanningSettingsRepository(f.sql).set(f.scope, {
+    ...settings,
+    dailyWindow: { start: "19:15", end: "19:40" },
+  });
+  const prior = await task();
+  await createOpeningPlansRepository(f.sql).updateTaskStatus(f.scope, prior.id, {
+    status: "done",
+    expectedVersion: 1,
+    at: at("09:30"),
+  });
+  const baseline = [block(prior.id, "09:00", "09:30")];
+  await seed(baseline);
+
+  const retest = await seedLegacyCourseRouteRetest();
+  const proposed = await proposeOpeningLocalPlan(
+    f.sql,
+    f.scope,
+    { date, expectedAcceptedVersion: 1, clientKey: randomUUID() },
+    { now: fridayNow },
+  );
+  expect(proposed.kind).toBe("draft");
+  if (proposed.kind !== "draft") return;
+
+  // Narrow both DB deadline and forged draft snapshot to Friday 19:30 while keeping block 19:15-19:40.
+  await f.sql`UPDATE opening_retest_activities SET deadline_at=${at("19:30")} WHERE id=${retest.retestId}`;
+  const [row] = await f.sql`SELECT input_snapshot FROM opening_plan_drafts WHERE id=${proposed.draft.id}`;
+  const snapshot = row!.input_snapshot;
+  snapshot.tasks = snapshot.tasks.map((item: { id: string }) => item.id === retest.taskId ? { ...item, dueAt: at("19:30") } : item);
+  await f.sql`UPDATE opening_plan_drafts SET input_snapshot=${f.sql.json(snapshot)} WHERE id=${proposed.draft.id}`;
+
+  const plans = createOpeningPlansRepository(f.sql, { now: () => fridayNow });
+  await expect(plans.acceptPlan(f.scope, {
+    draftId: proposed.draft.id,
+    expectedBaseVersion: 1,
+    clientKey: randomUUID(),
+  })).rejects.toMatchObject({ code: "CONFLICT", reason: "task_changed" });
+  expect(await plans.getToday(f.scope, date)).toMatchObject({ acceptedVersion: 1, blocks: baseline });
 });

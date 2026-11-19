@@ -48,22 +48,23 @@ export function createOpeningCourseRouteRetestRepository(sql:Sql,options:{exactV
       if(existing)return receipt(existing); // Terminal/cancelled receipts remain terminal, even with a new HTTP key.
       const baselineAt=Math.max(Date.parse(head.submittedAt??""),Date.parse(head.recordedAt??""));
       if(!Number.isFinite(baselineAt))throw learningError("CONFLICT","原答案缺少可信提交时间，暂不能建立延迟间隔。");
-      const dueAt=new Date(baselineAt+72*60*60*1000).toISOString();
-      await assertOpeningWorkspaceCapacity(tx,scope,{minutes:input.minutes,targetAt:new Date(dueAt)});
+      const earliestAt=new Date(baselineAt+72*60*60*1000).toISOString();
+      const deadlineAt=new Date(baselineAt+14*86400000).toISOString();
+      await assertOpeningWorkspaceCapacity(tx,scope,{minutes:input.minutes,targetAt:new Date(earliestAt)});
       const db=transactionClient(tx),candidateId=randomUUID(),candidate={id:candidateId,courseId,skillLabel:head.skillLabel,requirementKey:head.requirementKey,
-        prompt:`${head.skillLabel}：3天后离开原答案独立完成新题，按已确认的课程要求核对。`,sourceIds:head.sourceIds,dueAt,accepted:false,kind:"task" as const,
+        prompt:`${head.skillLabel}：3天后离开原答案独立完成新题，按已确认的课程要求核对。`,sourceIds:head.sourceIds,dueAt:earliestAt,accepted:false,kind:"task" as const,
         evidenceObservationIds:[head.id],evidenceRootIds:[head.rootObservationId??head.id]};
       const saved=await createOpeningRetestRepository(db).saveCandidates(scope,[candidate]);
       if(saved.length!==1)throw learningError("CONFLICT","本要求已有复测安排，或复测建议当前已关闭；请核对已有任务与学习设置。");
       const task=await createOpeningPlansRepository(db).createTask(scope,{title:candidate.prompt.slice(0,240),minutes:input.minutes,dueAt:null,priority:1,candidateId,clientKey:input.clientKey,baseVersion:0,
-        inputSnapshot:{kind:"retest",candidateId,courseId,skillLabel:head.skillLabel,prompt:candidate.prompt,sourceIds:head.sourceIds,dueAt,heuristic:true}});
+        inputSnapshot:{kind:"retest",candidateId,courseId,skillLabel:head.skillLabel,prompt:candidate.prompt,sourceIds:head.sourceIds,dueAt:earliestAt,heuristic:true}});
       const protocol={protocolId:"course-route-delayed-v1" as const,goalId:goal.id,goalRevision:goal.revision,requirementId:context.requirementId,requirementRevision:context.requirementRevision,
         stableSkillId:context.stableSkillId,baselineObservationId:head.id,baselineRootId:head.rootObservationId??head.id,originActivityId:input.activityId,minutes:input.minutes};
       const [scheduled]=await tx`UPDATE opening_retest_activities SET learning_protocol=${tx.json(protocol)},candidate_reference_id=${candidateId},accept_client_key=${input.clientKey},
-        not_before_at=${dueAt},recommended_at=${dueAt},deadline_at=${new Date(baselineAt+14*86400000).toISOString()},version=version+1,updated_at=now()
+        not_before_at=${earliestAt},recommended_at=${earliestAt},deadline_at=${deadlineAt},version=version+1,updated_at=now()
         WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND candidate_id=${candidateId} AND task_id=${task.id} RETURNING *`;
       if(!scheduled)throw learningError("CONFLICT","延迟复测任务回执未完整保存。");
-      await tx`UPDATE opening_tasks SET not_before=${dueAt},due_at=${dueAt} WHERE id=${task.id} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+      await tx`UPDATE opening_tasks SET not_before=${earliestAt},due_at=${deadlineAt} WHERE id=${task.id} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
       await nextWorkspaceLearningHistoryRevision(tx,scope);
       return receipt({...scheduled,task_status:"pending"});
     });
