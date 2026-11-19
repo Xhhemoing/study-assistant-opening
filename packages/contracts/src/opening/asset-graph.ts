@@ -238,6 +238,23 @@ export const assetGraphNodeSchema = z
     }
   });
 
+export const assetGraphSharedAttributionSchema = z
+  .object({
+    linkId: uuidSchema,
+    linkRevision: z.number().int().positive(),
+    stableSkillId: uuidSchema,
+    sourceCourseId: uuidSchema,
+    sourceCourseTitle: z.string().min(1).max(300),
+    sourceRequirementId: uuidSchema,
+    sourceRequirementTitle: z.string().min(1).max(300),
+    sourceRequirementRevision: z.number().int().positive(),
+    targetRequirementRevision: z.number().int().positive(),
+    effective: z.literal(true),
+  })
+  .strict();
+
+export type AssetGraphSharedAttribution = z.infer<typeof assetGraphSharedAttributionSchema>;
+
 export const assetGraphEdgeSchema = z
   .object({
     id: z.string().min(1).max(512),
@@ -247,8 +264,27 @@ export const assetGraphEdgeSchema = z
     basis: z.enum(["recorded", "derived", "suggested"]),
     sourceVersion: z.number().int().nonnegative().optional(),
     page: z.number().int().positive().optional(),
+    sharedAttribution: assetGraphSharedAttributionSchema.optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((value, ctx) => {
+    if (value.sharedAttribution !== undefined) {
+      if (value.relation !== "hasObservation") {
+        ctx.addIssue({
+          code: "custom",
+          path: ["relation"],
+          message: "sharedAttribution is only allowed on hasObservation edges",
+        });
+      }
+      if (value.basis !== "derived") {
+        ctx.addIssue({
+          code: "custom",
+          path: ["basis"],
+          message: "sharedAttribution requires basis to be derived",
+        });
+      }
+    }
+  });
 
 const SAFE_OPENING_ORIGIN = "https://aistudy.local";
 

@@ -4,21 +4,29 @@ import {
   ASSET_GRAPH_LENS_DEFAULT_ROOT_KINDS,
   ASSET_GRAPH_LENS_RELATIONS,
   ASSET_GRAPH_MAX_LIMIT,
+  assetGraphEdgeSchema,
   assetGraphErrorResponseSchema,
   assetGraphNodeKindSchema,
   assetGraphPageSchema,
   assetGraphQuerySchema,
+  assetGraphSharedAttributionSchema,
   formatAssetGraphNodeId,
   isSafeOpeningNavigateHref,
   normalizeAssetGraphQueryValue,
   parseAssetGraphNodeId,
   type AssetGraphParsedNodeId,
+  type AssetGraphSharedAttribution,
 } from "./asset-graph";
 import {
   assetGraphPageSchema as barrelPageSchema,
+  assetGraphSharedAttributionSchema as barrelSharedAttributionSchema,
   isSafeOpeningNavigateHref as barrelIsSafeOpeningNavigateHref,
   parseAssetGraphNodeId as barrelParse,
+  type AssetGraphSharedAttribution as BarrelAssetGraphSharedAttribution,
 } from "../index";
+import {
+  assetGraphSharedAttributionSchema as openingSharedAttributionSchema,
+} from "./index";
 
 const uuid1 = "11111111-1111-4111-8111-111111111111";
 const uuid2 = "22222222-2222-4222-8222-222222222222";
@@ -700,5 +708,152 @@ describe("normalizeAssetGraphQueryValue", () => {
     expect(normalizeAssetGraphQueryValue("all")).toBe("all");
     expect(normalizeAssetGraphQueryValue(20)).toBe(20);
     expect(normalizeAssetGraphQueryValue(false)).toBe(false);
+  });
+});
+
+describe("assetGraphSharedAttributionSchema and shared observation edges", () => {
+  const validAttribution: AssetGraphSharedAttribution = {
+    linkId: uuid1,
+    linkRevision: 1,
+    stableSkillId: uuid2,
+    sourceCourseId: uuid3,
+    sourceCourseTitle: "高等数学 I",
+    sourceRequirementId: uuid4,
+    sourceRequirementTitle: "链式求导法则",
+    sourceRequirementRevision: 2,
+    targetRequirementRevision: 3,
+    effective: true,
+  };
+
+  it("validates derived hasObservation edges with sharedAttribution and re-exports schema", () => {
+    expect(assetGraphSharedAttributionSchema.parse(validAttribution)).toEqual(validAttribution);
+    expect(barrelSharedAttributionSchema.parse(validAttribution)).toEqual(validAttribution);
+    expect(openingSharedAttributionSchema.parse(validAttribution)).toEqual(validAttribution);
+
+    const typedBarrelAttribution: BarrelAssetGraphSharedAttribution = validAttribution;
+    expect(typedBarrelAttribution.effective).toBe(true);
+
+    const derivedSharedEdge = {
+      id: "edge-shared-obs-1",
+      from: `requirement/${uuid1}`,
+      to: `observation/${uuid2}`,
+      relation: "hasObservation" as const,
+      basis: "derived" as const,
+      sharedAttribution: validAttribution,
+    };
+    expect(assetGraphEdgeSchema.parse(derivedSharedEdge)).toEqual(derivedSharedEdge);
+
+    const pageWithSharedEdge = {
+      asOf,
+      nodes: [
+        {
+          id: `requirement/${uuid1}`,
+          kind: "requirement" as const,
+          label: "导数应用",
+        },
+        {
+          id: `observation/${uuid2}`,
+          kind: "observation" as const,
+          label: "跨课程共享证据",
+        },
+      ],
+      edges: [derivedSharedEdge],
+      page: { nextCursor: null },
+      completeness: "complete" as const,
+      warnings: [],
+      detail: null,
+    };
+    expect(assetGraphPageSchema.parse(pageWithSharedEdge)).toEqual(pageWithSharedEdge);
+  });
+
+  it("rejects sharedAttribution on non-hasObservation relations or non-derived basis", () => {
+    for (const relation of ["mappedTo", "usesSource", "linkedTo", "contains", "scopes"] as const) {
+      const parsed = assetGraphEdgeSchema.safeParse({
+        id: `edge-bad-relation-${relation}`,
+        from: `requirement/${uuid1}`,
+        to: `observation/${uuid2}`,
+        relation,
+        basis: "derived",
+        sharedAttribution: validAttribution,
+      });
+      expect(parsed.success).toBe(false);
+      if (!parsed.success) {
+        expect(parsed.error.issues.some(issue => issue.path.join(".") === "relation")).toBe(true);
+      }
+    }
+
+    for (const basis of ["recorded", "suggested"] as const) {
+      const parsed = assetGraphEdgeSchema.safeParse({
+        id: `edge-bad-basis-${basis}`,
+        from: `requirement/${uuid1}`,
+        to: `observation/${uuid2}`,
+        relation: "hasObservation",
+        basis,
+        sharedAttribution: validAttribution,
+      });
+      expect(parsed.success).toBe(false);
+      if (!parsed.success) {
+        expect(parsed.error.issues.some(issue => issue.path.join(".") === "basis")).toBe(true);
+      }
+    }
+
+    const bothBad = assetGraphEdgeSchema.safeParse({
+      id: "edge-bad-both",
+      from: `requirement/${uuid1}`,
+      to: `observation/${uuid2}`,
+      relation: "mappedTo",
+      basis: "recorded",
+      sharedAttribution: validAttribution,
+    });
+    expect(bothBad.success).toBe(false);
+    if (!bothBad.success) {
+      const paths = bothBad.error.issues.map(issue => issue.path.join("."));
+      expect(paths).toContain("relation");
+      expect(paths).toContain("basis");
+    }
+  });
+
+  it("enforces strict validation on sharedAttribution fields", () => {
+    expect(
+      assetGraphSharedAttributionSchema.safeParse({
+        ...validAttribution,
+        effective: false,
+      }).success,
+    ).toBe(false);
+
+    expect(
+      assetGraphSharedAttributionSchema.safeParse({
+        ...validAttribution,
+        linkRevision: 0,
+      }).success,
+    ).toBe(false);
+
+    expect(
+      assetGraphSharedAttributionSchema.safeParse({
+        ...validAttribution,
+        sourceRequirementRevision: 0,
+      }).success,
+    ).toBe(false);
+
+    expect(
+      assetGraphSharedAttributionSchema.safeParse({
+        ...validAttribution,
+        targetRequirementRevision: -1,
+      }).success,
+    ).toBe(false);
+
+    expect(
+      assetGraphSharedAttributionSchema.safeParse({
+        ...validAttribution,
+        sourceCourseTitle: "",
+      }).success,
+    ).toBe(false);
+
+    expect(
+      assetGraphSharedAttributionSchema.safeParse({
+        ...validAttribution,
+        extra: "not-allowed",
+      }).success,
+    ).toBe(false);
   });
 });

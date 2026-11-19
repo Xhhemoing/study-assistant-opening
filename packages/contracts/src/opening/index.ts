@@ -228,7 +228,7 @@ export {
   type MediaSegmentsResponse,
   type MediaSegmentCorrectionResult,
 } from "./media";
-export { knowledgeNodeSchema, knowledgeEdgeSchema, knowledgeSnapshotSchema, skillEvidenceSchema, tutorActionSchema, type KnowledgeNode, type KnowledgeEdge, type KnowledgeSnapshot, type SkillEvidence, type TutorAction } from "./knowledge";
+export * from "./knowledge";
 export { actionCandidateSchema, actionDigestSchema, type ActionCandidate, type ActionDigest } from "./proactive";
 
 export * from "./learning-evidence";
@@ -312,3 +312,4 @@ export * from "./course-shared-skill";
 export * from "./question-identity";
 export * from "./question-evaluation";
 export * from "./asset-graph";
+export * from "./writing-activity";
