@@ -4,10 +4,12 @@ import {
   createOpeningDayAdjustmentRepository,
   createOpeningPlanningSettingsRepository,
   createOpeningPlansRepository,
+  executeOpeningRestoreApply,
+  OPENING_RESTORE_APPLY_ORDER,
+  readOpeningBackupRecords,
+  readOpeningRestoreNamespaceCounts,
 } from "@aistudy/database";
 import type { OpeningBackup } from "@aistudy/domain";
-import { executeOpeningRestoreApply } from "../../packages/database/src/repositories/opening-backup-apply";
-import { readOpeningBackupRecords } from "../../packages/database/src/repositories/opening-backup-records";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 
 const THU = "2026-11-19";
@@ -17,19 +19,28 @@ const THU_1855 = new Date("2026-11-19T10:55:00.000Z");
 
 let f: OpeningFixture;
 
+async function emptyWorkspace() {
+  const snapshot = await readOpeningBackupRecords(f.sql, f.scope);
+  await f.sql.begin(async (tx) => {
+    for (const table of [...OPENING_RESTORE_APPLY_ORDER].reverse()) {
+      if (!snapshot.tables[table]?.length) continue;
+      if (table === "opening_source_chunks") {
+        await tx`DELETE FROM opening_source_chunks WHERE source_id IN (SELECT id FROM opening_sources WHERE workspace_id = ${f.scope.workspaceId})`;
+      } else {
+        await tx`DELETE FROM ${tx(table)} WHERE workspace_id = ${f.scope.workspaceId}`;
+      }
+    }
+  });
+  const counts = await readOpeningRestoreNamespaceCounts(f.sql, f.scope.workspaceId);
+  expect(Object.values(counts).every((value) => value === 0)).toBe(true);
+}
+
 beforeAll(async () => {
   f = await createOpeningFixture();
 });
 
 beforeEach(async () => {
-  await f.sql`DELETE FROM opening_plan_acceptances WHERE workspace_id = ${f.scope.workspaceId}`;
-  await f.sql`DELETE FROM opening_plan_drafts WHERE workspace_id = ${f.scope.workspaceId}`;
-  await f.sql`DELETE FROM opening_plan_state WHERE workspace_id = ${f.scope.workspaceId}`;
-  await f.sql`DELETE FROM opening_retest_activities WHERE workspace_id = ${f.scope.workspaceId}`;
-  await f.sql`DELETE FROM opening_tasks WHERE workspace_id = ${f.scope.workspaceId}`;
-  await f.sql`DELETE FROM courses WHERE workspace_id = ${f.scope.workspaceId}`;
-  await f.sql`DELETE FROM workspace_preferences WHERE workspace_id = ${f.scope.workspaceId}`;
-  await f.sql`DELETE FROM opening_workspace_history_revisions WHERE workspace_id = ${f.scope.workspaceId}`;
+  await emptyWorkspace();
 
   await createOpeningPlanningSettingsRepository(f.sql).set(f.scope, {
     weekOneMonday: "2026-09-07",
@@ -146,18 +157,17 @@ it("roundtrips day-exception + cross-day reschedule + retest reschedule through 
     objects: [],
   };
 
-  await f.sql`DELETE FROM opening_plan_acceptances WHERE workspace_id = ${f.scope.workspaceId}`;
-  await f.sql`DELETE FROM opening_plan_drafts WHERE workspace_id = ${f.scope.workspaceId}`;
-  await f.sql`DELETE FROM opening_plan_state WHERE workspace_id = ${f.scope.workspaceId}`;
-  await f.sql`DELETE FROM opening_retest_activities WHERE workspace_id = ${f.scope.workspaceId}`;
-  await f.sql`DELETE FROM opening_tasks WHERE workspace_id = ${f.scope.workspaceId}`;
+  await emptyWorkspace();
+  const live = await readOpeningBackupRecords(f.sql, f.scope);
 
   const result = await executeOpeningRestoreApply(f.sql, {
     confirmLocalRestore: true,
     backup,
-    currentMemoryDeletions: snapshot.memoryDeletions,
+    currentDeletionJournal: live.deletionJournal,
+    currentMemoryDeletions: live.memoryDeletions,
+    currentLearningState: { workspacePreferences: null, courses: [] },
   });
-  expect(result).toMatchObject({ ok: true, code: "APPLY_OK" });
+  expect(result, JSON.stringify(result)).toMatchObject({ ok: true, code: "APPLY_OK" });
 
   const states = await f.sql`
     SELECT day::text AS day, accepted_version FROM opening_plan_state
@@ -175,6 +185,10 @@ it("roundtrips day-exception + cross-day reschedule + retest reschedule through 
 it("rejects tampered backup archives (missing target day, duplicate revision, stripped marker) before any restore mutation", async () => {
   await seedCrossDayAdjustmentWithRetest();
   const snapshot = await readOpeningBackupRecords(f.sql, f.scope);
+  const currentLearningState = {
+    workspacePreferences: snapshot.tables.workspace_preferences[0] ?? null,
+    courses: snapshot.tables.courses,
+  };
 
   const makeBackup = (tables: typeof snapshot.tables): OpeningBackup => ({
     format: "opening-backup",
@@ -187,32 +201,42 @@ it("rejects tampered backup archives (missing target day, duplicate revision, st
     objects: [],
   });
 
+  const assertRejectedWith = async (tables: typeof snapshot.tables, expectedError: string) => {
+    const result = await executeOpeningRestoreApply(f.sql, {
+      confirmLocalRestore: true,
+      backup: makeBackup(tables),
+      currentDeletionJournal: snapshot.deletionJournal,
+      currentMemoryDeletions: snapshot.memoryDeletions,
+      currentLearningState,
+    });
+    expect(result, JSON.stringify(result)).toMatchObject({
+      ok: false,
+      code: "PREFLIGHT_REJECTED",
+      mutated: false,
+    });
+    expect(result.errors.some((error) => error.includes("current learning state"))).toBe(false);
+    expect(result.errors.some((error) => error.includes(expectedError)), JSON.stringify(result.errors)).toBe(true);
+  };
+
   // 1. Missing target day state
   const missingTarget = structuredClone(snapshot.tables);
   missingTarget.opening_plan_state = missingTarget.opening_plan_state!.filter(
     (row) => String(row.day).slice(0, 10) !== FRI,
   );
-  expect(
-    await executeOpeningRestoreApply(f.sql, {
-      confirmLocalRestore: true,
-      backup: makeBackup(missingTarget),
-      currentMemoryDeletions: snapshot.memoryDeletions,
-    }),
-  ).toMatchObject({ ok: false, code: "PREFLIGHT_REJECTED", mutated: false });
+  await assertRejectedWith(missingTarget, "day adjustment target day plan state is missing or behind receipt");
 
-  // 2. Duplicate day-exception revision
+  // 2. Duplicate day-exception revision (distinct clientKey so revision uniqueness check is exercised)
   const duplicateExc = structuredClone(snapshot.tables);
   const excRow = duplicateExc.opening_plan_drafts!.find(
     (row) => row.strategy_version === "day-exception-v1",
   )!;
-  duplicateExc.opening_plan_drafts!.push({ ...structuredClone(excRow), id: randomUUID() });
-  expect(
-    await executeOpeningRestoreApply(f.sql, {
-      confirmLocalRestore: true,
-      backup: makeBackup(duplicateExc),
-      currentMemoryDeletions: snapshot.memoryDeletions,
-    }),
-  ).toMatchObject({ ok: false, code: "PREFLIGHT_REJECTED", mutated: false });
+  const dupClientKey = randomUUID();
+  const dupExc = structuredClone(excRow);
+  dupExc.id = randomUUID();
+  dupExc.propose_client_key = `day-exception:${dupClientKey}`;
+  ((dupExc.input_snapshot as Record<string, unknown>).dayException as Record<string, unknown>).clientKey = dupClientKey;
+  duplicateExc.opening_plan_drafts!.push(dupExc);
+  await assertRejectedWith(duplicateExc, "duplicate day exception revision for localDate");
 
   // 3. Stripped strategy_version marker
   const stripped = structuredClone(snapshot.tables);
@@ -220,13 +244,7 @@ it("rejects tampered backup archives (missing target day, duplicate revision, st
     (row) => row.strategy_version === "day-adjustment-v1",
   )!;
   adjRow.strategy_version = null;
-  expect(
-    await executeOpeningRestoreApply(f.sql, {
-      confirmLocalRestore: true,
-      backup: makeBackup(stripped),
-      currentMemoryDeletions: snapshot.memoryDeletions,
-    }),
-  ).toMatchObject({ ok: false, code: "PREFLIGHT_REJECTED", mutated: false });
+  await assertRejectedWith(stripped, "day adjustment draft marker mismatch");
 
   // 4. Dual-field strip (both strategy_version and input_snapshot.dayAdjustment cleared)
   const dualStripped = structuredClone(snapshot.tables);
@@ -235,11 +253,5 @@ it("rejects tampered backup archives (missing target day, duplicate revision, st
   )!;
   dualAdj.strategy_version = null;
   dualAdj.input_snapshot = {};
-  expect(
-    await executeOpeningRestoreApply(f.sql, {
-      confirmLocalRestore: true,
-      backup: makeBackup(dualStripped),
-      currentMemoryDeletions: snapshot.memoryDeletions,
-    }),
-  ).toMatchObject({ ok: false, code: "PREFLIGHT_REJECTED", mutated: false });
+  await assertRejectedWith(dualStripped, "day adjustment draft marker mismatch");
 });

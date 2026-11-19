@@ -6,9 +6,11 @@ import {
   DAY_EXCEPTION_PROPOSE_KEY_PREFIX,
   DAY_EXCEPTION_SNAPSHOT_KIND,
   DAY_EXCEPTION_STRATEGY_VERSION,
+  conversationPlanInputSchema,
   dayExceptionReceiptSchema,
   learningManagementCommandSchema,
   localReplanInputSchema,
+  ordinaryPlanClientKeySchema,
   type DayAdjustmentConfirmInput,
 } from "@aistudy/contracts";
 import {
@@ -22,6 +24,7 @@ import {
 } from "./opening-learning-capacity-usage";
 import { assertOpeningLearningManagementDraft } from "./opening-learning-management-draft";
 import { OpeningPlanError } from "./opening-plan-error";
+import { createOpeningPlansRepository } from "./opening-plans";
 
 const WS_A = "11111111-1111-4111-8111-111111111111";
 const OWNER_A = "22222222-2222-4222-8222-222222222222";
@@ -1383,5 +1386,422 @@ describe("closing boundary P1 & P2/P3 guards", () => {
         new Date("2026-11-19T11:00:00.000Z"),
       ),
     ).rejects.toMatchObject({ code: "CONFLICT" });
+  });
+
+  it("P1-1: ordinary plan confirmation counts cross-day spillover kept blocks under active dayException after timezone shift", async () => {
+    // Old timezone row (day = 2026-11-18) has a 10m block at 11:05Z-11:15Z (19:05-19:15 Asia/Shanghai on 2026-11-19).
+    const spilloverBlock = {
+      taskId: MATH_ID,
+      start: "2026-11-19T11:05:00.000Z",
+      end: "2026-11-19T11:15:00.000Z",
+      reason: "planned",
+    };
+    const tx = createMockSql((query, values) => {
+      if (query.includes("FROM workspaces w LEFT JOIN workspace_preferences")) {
+        return [{
+          learning_management: { dailyMinutes: 90, bufferMinutes: 15, revision: 1, updatedAt: "2026-11-19T00:00:00.000Z" },
+          planning_settings: planningSettings,
+        }];
+      }
+      if (query.includes("FROM opening_plan_drafts") && query.includes("strategy_version")) {
+        if (values[2] !== "2026-11-19") return [];
+        return [{
+          id: EXC_ID,
+          version: 1,
+          input_snapshot: {
+            dayException: {
+              kind: DAY_EXCEPTION_SNAPSHOT_KIND,
+              clientKey: "12121212-1212-4121-8121-121212121212",
+              localDate: "2026-11-19",
+              timeZone: "Asia/Shanghai",
+              effectiveAt: "2026-11-19T11:00:00.000Z",
+              remainingMinutes: 15,
+              expectedExceptionRevision: 0,
+              revision: 1,
+            },
+          },
+        }];
+      }
+      if (query.includes("FROM opening_plan_state")) {
+        return [{ day: "2026-11-18", accepted_blocks: [spilloverBlock] }];
+      }
+      if (query.includes("SELECT DISTINCT course_id")) return [];
+      if (query.includes("FROM opening_tasks")) {
+        return [
+          { id: MATH_ID, status: "pending", minutes: 10 },
+          { id: WRITING_ID, status: "pending", minutes: 10 },
+          { id: DUE_TODAY_ID, status: "pending", minutes: 5 },
+        ];
+      }
+      return [];
+    }) as unknown as Parameters<typeof assertOpeningLearningManagementDraft>[0];
+
+    // Adding a non-overlapping 10m block on 2026-11-19 brings post-effectiveAt total to 10 + 10 = 20m > 15m -> rejected!
+    await expect(
+      assertOpeningLearningManagementDraft(
+        tx,
+        scope,
+        {
+          day: "2026-11-19",
+          strategy_version: null,
+          input_snapshot: { tasks: [], free: [], proposedAt: "2026-11-19T11:01:00.000Z", unscheduledReasons: [] },
+          suggested_tasks: [],
+          blocks: [
+            {
+              taskId: WRITING_ID,
+              start: "2026-11-19T11:20:00.000Z",
+              end: "2026-11-19T11:30:00.000Z",
+              reason: "planned",
+            },
+          ],
+        },
+        new Date("2026-11-19T11:02:00.000Z"),
+      ),
+    ).rejects.toMatchObject({ code: "CONFLICT", reason: "stale_version" });
+
+    // Adding a 5m block brings post-effectiveAt total to 10 + 5 = 15m <= 15m -> allowed!
+    await expect(
+      assertOpeningLearningManagementDraft(
+        tx,
+        scope,
+        {
+          day: "2026-11-19",
+          strategy_version: null,
+          input_snapshot: { tasks: [], free: [], proposedAt: "2026-11-19T11:01:00.000Z", unscheduledReasons: [] },
+          suggested_tasks: [],
+          blocks: [
+            {
+              taskId: DUE_TODAY_ID,
+              start: "2026-11-19T11:20:00.000Z",
+              end: "2026-11-19T11:25:00.000Z",
+              reason: "planned",
+            },
+          ],
+        },
+        new Date("2026-11-19T11:02:00.000Z"),
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  it("P1-3: enforces case-insensitive reserved prefixes on creation while allowing legacy ordinary drafts with reserved UUID keys", async () => {
+    const upperAdjKey = `DAY-ADJUSTMENT:${WRITING_ID}`;
+    const upperExcKey = `Day-Exception:${EXC_ID}`;
+
+    // 1. Case-insensitive rejection across all ordinary command schemas & opening-plans.proposePlan.
+    expect(ordinaryPlanClientKeySchema.safeParse(upperAdjKey).success).toBe(false);
+    expect(ordinaryPlanClientKeySchema.safeParse(upperExcKey).success).toBe(false);
+    expect(
+      localReplanInputSchema.safeParse({ date: "2026-11-19", clientKey: upperAdjKey }).success,
+    ).toBe(false);
+    expect(
+      learningManagementCommandSchema.safeParse({
+        action: "preview",
+        date: "2026-11-19",
+        expectedAcceptedVersion: 0,
+        expectedBudgetRevision: 1,
+        clientKey: upperExcKey,
+      }).success,
+    ).toBe(false);
+    expect(
+      conversationPlanInputSchema.safeParse({
+        candidateId: MATH_ID,
+        expectedVersion: 0,
+        date: "2026-11-19",
+        expectedAcceptedVersion: 0,
+        clientKey: upperAdjKey,
+      }).success,
+    ).toBe(false);
+
+    const plansRepo = createOpeningPlansRepository(
+      createMockSql(() => []) as unknown as Sql,
+    );
+    await expect(
+      plansRepo.proposePlan(scope, {
+        date: "2026-11-19",
+        clientKey: upperAdjKey,
+        tasks: [],
+        free: [],
+        blocks: [],
+        unscheduledTaskIds: [],
+      }),
+    ).rejects.toMatchObject({ code: "VALIDATION" });
+
+    // 2. Legacy ordinary draft (strategy_version === null + ordinary proposePlan snapshot) with day-adjustment:<UUID> is allowed.
+    const emptyTx = createMockSql((query) => {
+      if (query.includes("FROM workspaces w LEFT JOIN workspace_preferences")) {
+        return [{ learning_management: null, planning_settings: null }];
+      }
+      return [];
+    }) as unknown as Parameters<typeof assertOpeningLearningManagementDraft>[0];
+
+    await expect(
+      assertOpeningLearningManagementDraft(
+        emptyTx,
+        scope,
+        {
+          day: "2026-11-19",
+          strategy_version: null,
+          input_snapshot: {
+            tasks: [],
+            free: [],
+            proposedAt: "2026-11-19T08:00:00.000Z",
+            unscheduledReasons: [],
+          },
+          reasons: {},
+          suggested_tasks: [],
+          blocks: [],
+          propose_client_key: `${DAY_ADJUSTMENT_PROPOSE_KEY_PREFIX}${WRITING_ID}`,
+        },
+        new Date("2026-11-19T11:05:00.000Z"),
+      ),
+    ).resolves.toBeUndefined();
+
+    // 3. Stripped adjustment draft without ordinary snapshot structure is still rejected.
+    await expect(
+      assertOpeningLearningManagementDraft(
+        emptyTx,
+        scope,
+        {
+          day: "2026-11-19",
+          strategy_version: null,
+          input_snapshot: {},
+          reasons: {},
+          suggested_tasks: [],
+          blocks: [],
+          propose_client_key: `${DAY_ADJUSTMENT_PROPOSE_KEY_PREFIX}${WRITING_ID}`,
+        },
+        new Date("2026-11-19T11:05:00.000Z"),
+      ),
+    ).rejects.toMatchObject({ code: "CONFLICT", reason: "stale_version" });
+  });
+
+  it("P1-4: preserves mutated task versions in 200-block source plan + remove 1 + add 1 quick task (201 IDs) so preview->confirm succeeds", async () => {
+    const now = new Date("2026-11-19T10:55:00.000Z");
+    const baseMs = Date.parse("2026-11-19T00:00:00.000Z"); // 08:00 Asia/Shanghai
+    // 199 past 1-minute blocks (08:00..11:19 local, all ended before effectiveAt 18:55 local = 10:55Z)
+    // + 1 future 20-minute block (19:00..19:20 local = 11:00Z..11:20Z) to be removed.
+    const existingTasks = Array.from({ length: 200 }, (_, index) => {
+      const hex = String(index + 1).padStart(12, "0");
+      const id = `00000000-0000-4000-8000-${hex}`;
+      const isLast = index === 199;
+      return {
+        id,
+        workspace_id: WS_A,
+        owner_user_id: OWNER_A,
+        title: `既有任务 ${index + 1}`,
+        minutes: isLast ? 20 : 1,
+        status: "pending",
+        version: 1,
+        priority: 1,
+        due_at: null,
+        not_before: null,
+        course_id: null,
+        candidate_id: null,
+      };
+    });
+    const removedTask = existingTasks[199]!;
+    const quickTaskId = "ffffffff-ffff-4fff-8fff-ffffffffffff"; // sorts AFTER all 200 source tasks!
+    const quickTask = {
+      id: quickTaskId,
+      workspace_id: WS_A,
+      owner_user_id: OWNER_A,
+      title: "15分钟快速巩固",
+      minutes: 15,
+      status: "pending",
+      version: 3,
+      priority: 2,
+      due_at: null,
+      not_before: null,
+      course_id: null,
+      candidate_id: null,
+    };
+    const allTasks = [...existingTasks, quickTask];
+    const sourceBeforeBlocks = existingTasks.map((task, index) => {
+      if (index === 199) {
+        return {
+          taskId: task.id,
+          start: "2026-11-19T11:00:00.000Z",
+          end: "2026-11-19T11:20:00.000Z",
+          reason: "planned",
+        };
+      }
+      const start = new Date(baseMs + index * 60_000).toISOString();
+      const end = new Date(baseMs + (index + 1) * 60_000).toISOString();
+      return { taskId: task.id, start, end, reason: "planned" };
+    });
+
+    const sql = createMockSql((query, values) => {
+      if (query.includes("pg_advisory_xact_lock") || query.includes("opening_workspace_history_revisions")) return [];
+      if (query.includes("FROM workspaces w LEFT JOIN workspace_preferences")) {
+        return [{
+          learning_management: null,
+          planning_settings: planningSettings,
+        }];
+      }
+      if (query.includes("FROM workspaces")) return [{ id: WS_A }];
+      if (query.includes("FROM workspace_preferences")) return [{ planning_settings: planningSettings }];
+      if (query.includes("FROM opening_plan_drafts") && query.includes("strategy_version")) {
+        if (values[2] !== "2026-11-19") return [];
+        return [{
+          id: EXC_ID,
+          version: 1,
+          input_snapshot: {
+            dayException: {
+              kind: DAY_EXCEPTION_SNAPSHOT_KIND,
+              clientKey: "12121212-1212-4121-8121-121212121212",
+              localDate: "2026-11-19",
+              timeZone: "Asia/Shanghai",
+              effectiveAt: "2026-11-19T10:55:00.000Z",
+              remainingMinutes: 15,
+              expectedExceptionRevision: 0,
+              revision: 1,
+            },
+          },
+        }];
+      }
+      if (query.includes("FROM opening_plan_state")) {
+        if (query.includes("day = ANY(")) {
+          return [{ day: "2026-11-19", accepted_version: 1, accepted_blocks: sourceBeforeBlocks, hard_blocks_fingerprint: "" }];
+        }
+        return [{ day: "2026-11-19", accepted_version: 1, accepted_blocks: sourceBeforeBlocks }];
+      }
+      if (query.includes("SELECT DISTINCT course_id")) return [];
+      if (query.includes("FROM opening_tasks")) {
+        if (query.includes("ANY(") && Array.isArray(values[2])) {
+          const idSet = new Set(values[2] as string[]);
+          return allTasks.filter((t) => idSet.has(t.id));
+        }
+        return allTasks;
+      }
+      return [];
+    });
+
+    const repo = createOpeningDayAdjustmentRepository(sql, { clock: () => now });
+    const preview = await repo.preview(scope, {
+      date: "2026-11-19",
+      targetDate: null,
+      removeTaskIds: [removedTask.id],
+      quickTaskId,
+    });
+    expect(preview.canConfirm).toBe(true);
+    expect(preview.removedBlocks).toHaveLength(1);
+    expect(preview.sourceAddedBlocks).toHaveLength(1);
+    expect(preview.sourceAddedBlocks[0]!.taskId).toBe(quickTaskId);
+    expect(preview.taskRevisions).toHaveLength(201);
+    expect(preview.taskRevisions.some((item) => item.taskId === removedTask.id)).toBe(true);
+    expect(preview.taskRevisions.some((item) => item.taskId === quickTaskId && item.version === 3)).toBe(true);
+
+    const receipt = await repo.confirm(scope, {
+      clientKey: "day-adjust:200-blocks-plus-quick",
+      sourceDate: preview.sourceDate,
+      targetDate: preview.targetDate,
+      expectedTimeZone: preview.timeZone,
+      expectedExceptionRevision: preview.exceptionRevision,
+      expectedBudgetRevision: preview.budgetRevision,
+      expectedSourceAcceptedVersion: preview.sourceAcceptedVersion,
+      expectedTaskRevisions: preview.taskRevisions,
+      expectedRetestRevisions: preview.retestRevisions,
+      sourceActions: {
+        keptBlocks: preview.keptBlocks,
+        removedBlocks: preview.removedBlocks,
+        addedBlocks: preview.sourceAddedBlocks,
+      },
+      targetActions: null,
+    });
+    expect(receipt.sourceAfterVersion).toBe(2);
+    expect(receipt.sourceBlocks).toHaveLength(200);
+    expect(receipt.sourceBlocks.some((b) => b.taskId === quickTaskId)).toBe(true);
+    expect(receipt.sourceBlocks.some((b) => b.taskId === removedTask.id)).toBe(false);
+  });
+
+  it("P2: rejects source-only confirm adding a quick task already scheduled on targetDate even when targetActions is null", async () => {
+    const now = new Date("2026-11-19T10:55:00.000Z");
+    const mathBlock = {
+      taskId: MATH_ID,
+      start: "2026-11-19T11:15:00.000Z",
+      end: "2026-11-19T11:40:00.000Z",
+      reason: "planned",
+    };
+    const writingOnFri = {
+      taskId: WRITING_ID,
+      start: "2026-11-20T11:00:00.000Z",
+      end: "2026-11-20T11:15:00.000Z",
+      reason: "planned",
+    };
+
+    const sql = createMockSql((query, values) => {
+      if (query.includes("pg_advisory_xact_lock") || query.includes("opening_workspace_history_revisions")) return [];
+      if (query.includes("FROM workspaces w LEFT JOIN workspace_preferences")) {
+        return [{
+          learning_management: { dailyMinutes: 90, bufferMinutes: 15, revision: 1, updatedAt: "2026-11-19T00:00:00.000Z" },
+          planning_settings: planningSettings,
+        }];
+      }
+      if (query.includes("FROM workspaces")) return [{ id: WS_A }];
+      if (query.includes("FROM workspace_preferences")) return [{ planning_settings: planningSettings }];
+      if (query.includes("FROM opening_plan_drafts") && query.includes("strategy_version")) {
+        if (values[2] !== "2026-11-19") return [];
+        return [{
+          id: EXC_ID,
+          version: 1,
+          input_snapshot: {
+            dayException: {
+              kind: DAY_EXCEPTION_SNAPSHOT_KIND,
+              clientKey: "12121212-1212-4121-8121-121212121212",
+              localDate: "2026-11-19",
+              timeZone: "Asia/Shanghai",
+              effectiveAt: "2026-11-19T10:55:00.000Z",
+              remainingMinutes: 15,
+              expectedExceptionRevision: 0,
+              revision: 1,
+            },
+          },
+        }];
+      }
+      if (query.includes("FROM opening_plan_state")) {
+        if (query.includes("day = ANY(")) {
+          return [
+            { day: "2026-11-19", accepted_version: 1, accepted_blocks: [mathBlock], hard_blocks_fingerprint: "" },
+            { day: "2026-11-20", accepted_version: 1, accepted_blocks: [writingOnFri], hard_blocks_fingerprint: "" },
+          ];
+        }
+        return [
+          { day: "2026-11-19", accepted_blocks: [mathBlock] },
+          { day: "2026-11-20", accepted_blocks: [writingOnFri] },
+        ];
+      }
+      return [];
+    });
+
+    const repo = createOpeningDayAdjustmentRepository(sql, { clock: () => now });
+    await expect(
+      repo.confirm(scope, {
+        clientKey: "day-adjust:source-only-target-dup",
+        sourceDate: "2026-11-19",
+        targetDate: "2026-11-20",
+        expectedTimeZone: "Asia/Shanghai",
+        expectedExceptionRevision: 1,
+        expectedBudgetRevision: 1,
+        expectedSourceAcceptedVersion: 1,
+        expectedTaskRevisions: [
+          { taskId: MATH_ID, version: 1 },
+          { taskId: WRITING_ID, version: 1 },
+        ],
+        expectedRetestRevisions: [],
+        sourceActions: {
+          keptBlocks: [],
+          removedBlocks: [mathBlock],
+          addedBlocks: [
+            {
+              taskId: WRITING_ID,
+              start: "2026-11-19T11:15:00.000Z",
+              end: "2026-11-19T11:30:00.000Z",
+              reason: "planned",
+            },
+          ],
+        },
+        targetActions: null,
+      }),
+    ).rejects.toMatchObject({ code: "CONFLICT", reason: "stale_version" });
   });
 });

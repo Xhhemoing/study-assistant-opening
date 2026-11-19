@@ -8,6 +8,8 @@ import {
   DAY_EXCEPTION_STRATEGY_VERSION,
 } from "@aistudy/contracts";
 import { validateBackupDayAdjustment } from "./backup-day-adjustment";
+import { planOpeningRestoreApply } from "./backup-apply-plan";
+import { validateOpeningRestore, type OpeningBackup } from "./backup-policy";
 import {
   evaluateDayExceptionCapacity,
   findContinuousFreeSlot,
@@ -397,9 +399,126 @@ describe("validateBackupDayAdjustment", () => {
     expect(tamperedErrors.some((e) => e.includes("stripped day adjustment markers"))).toBe(true);
   });
 
-  it("allows legacy ordinary drafts with non-UUID day-adjustment prefix and legacy local-replan-v1 drafts with UUID suffix", () => {
+  it("rejects v1 -> quad-stripped cross-day v2 -> ordinary v3 target day chain where intermediate v2 lacks accounting", () => {
+    const tables = validTables();
+    const friV1DraftId = "88888888-8888-4888-8888-888888888884";
+    const friV3DraftId = "88888888-8888-4888-8888-888888888885";
+    const extraTaskId = "88888888-8888-4888-8888-888888888886";
+    const friV1Block = {
+      taskId: WRITING_ID,
+      start: "2026-11-20T09:00:00.000Z",
+      end: "2026-11-20T09:15:00.000Z",
+      reason: "planned",
+    };
+    const mathFriBlock = {
+      taskId: MATH_ID,
+      start: "2026-11-20T11:15:00.000Z",
+      end: "2026-11-20T11:40:00.000Z",
+      reason: "planned",
+    };
+    const extraFriBlock = {
+      taskId: extraTaskId,
+      start: "2026-11-20T12:00:00.000Z",
+      end: "2026-11-20T12:15:00.000Z",
+      reason: "planned",
+    };
+
+    tables.opening_tasks!.push({ id: extraTaskId, workspace_id: WS, owner_user_id: OWNER, version: 1 });
+    tables.opening_plan_drafts!.push(
+      {
+        id: friV1DraftId,
+        workspace_id: WS,
+        owner_user_id: OWNER,
+        day: "2026-11-20",
+        version: 1,
+        base_version: 0,
+        status: "accepted",
+        blocks: [friV1Block],
+        suggested_tasks: [],
+        origin: "user",
+        propose_client_key: "ordinary-fri-v1",
+        reasons: {},
+        strategy_version: null,
+        input_snapshot: { tasks: [], free: [], proposedAt: "2026-11-20T01:00:00.000Z", unscheduledReasons: [] },
+      },
+      {
+        id: friV3DraftId,
+        workspace_id: WS,
+        owner_user_id: OWNER,
+        day: "2026-11-20",
+        version: 3,
+        base_version: 2,
+        status: "accepted",
+        blocks: [friV1Block, mathFriBlock, extraFriBlock],
+        suggested_tasks: [],
+        origin: "user",
+        propose_client_key: "ordinary-fri-v3",
+        reasons: {},
+        strategy_version: null,
+        input_snapshot: { tasks: [], free: [], proposedAt: "2026-11-20T03:00:00.000Z", unscheduledReasons: [] },
+      },
+    );
+    tables.opening_plan_acceptances!.push(
+      {
+        workspace_id: WS,
+        client_key: "ordinary-fri-v1",
+        draft_id: friV1DraftId,
+        day: "2026-11-20",
+        accepted_version: 1,
+        payload_hash: "b".repeat(64),
+        source: "learner",
+        before_blocks: [],
+        created_task_versions: {},
+      },
+      {
+        workspace_id: WS,
+        client_key: "ordinary-fri-v3",
+        draft_id: friV3DraftId,
+        day: "2026-11-20",
+        accepted_version: 3,
+        payload_hash: "c".repeat(64),
+        source: "learner",
+        before_blocks: [friV1Block, mathFriBlock],
+        created_task_versions: {},
+      },
+    );
+
+    // Target day is now at v3, keeping the moved math block from v2.
+    tables.opening_plan_state![1]!.accepted_version = 3;
+    tables.opening_plan_state![1]!.accepted_blocks = [friV1Block, mathFriBlock, extraFriBlock];
+
+    // Positive control: when v2 is a valid day-adjustment-v1 (versions 1, 2, 3 all accounted), passes cleanly.
+    const intact = structuredClone(tables);
+    const intactAdj = (intact.opening_plan_drafts![1]!.input_snapshot as { dayAdjustment: Record<string, unknown> }).dayAdjustment;
+    intactAdj.targetDay = {
+      day: "2026-11-20",
+      beforeVersion: 1,
+      afterVersion: 2,
+      beforeBlocks: [friV1Block],
+      afterBlocks: [friV1Block, mathFriBlock],
+      addedBlocks: [mathFriBlock],
+    };
+    const intactErrors: string[] = [];
+    validateBackupDayAdjustment(intact, intactErrors);
+    expect(intactErrors).toEqual([]);
+
+    // Tampered: all 4 markers on v2 adjustment draft are stripped -> v2 has no accounting while v1 and v3 do.
+    const adj = tables.opening_plan_drafts![1]!;
+    adj.strategy_version = null;
+    adj.input_snapshot = {};
+    adj.propose_client_key = null;
+    adj.reasons = {};
+
+    const errors: string[] = [];
+    validateBackupDayAdjustment(tables, errors);
+    expect(errors.some((e) => e.includes("stripped day adjustment markers"))).toBe(true);
+  });
+
+  it("allows legacy ordinary drafts with strategy_version=null, ordinary snapshot, and reserved UUID key while rejecting stripped drafts", () => {
     const legacyDraftId = "88888888-8888-4888-8888-888888888882";
     const replanDraftId = "88888888-8888-4888-8888-888888888883";
+    const legacyUuidKeyDraftId = "88888888-8888-4888-8888-888888888887";
+    const legacyExcUuidKeyDraftId = "88888888-8888-4888-8888-888888888888";
     const errors: string[] = [];
     validateBackupDayAdjustment(
       {
@@ -436,11 +555,204 @@ describe("validateBackupDayAdjustment", () => {
             propose_client_key: `${DAY_ADJUSTMENT_PROPOSE_KEY_PREFIX}${replanDraftId}`,
             reasons: {},
           },
+          {
+            id: legacyUuidKeyDraftId,
+            workspace_id: WS,
+            owner_user_id: OWNER,
+            day: "2026-11-19",
+            version: 3,
+            base_version: 2,
+            status: "accepted",
+            blocks: [],
+            suggested_tasks: [],
+            origin: "user",
+            strategy_version: null,
+            input_snapshot: {
+              tasks: [],
+              free: [],
+              proposedAt: "2026-11-19T08:00:00.000Z",
+              unscheduledReasons: [],
+            },
+            propose_client_key: `${DAY_ADJUSTMENT_PROPOSE_KEY_PREFIX}${legacyUuidKeyDraftId}`,
+            reasons: {},
+          },
+          {
+            id: legacyExcUuidKeyDraftId,
+            workspace_id: WS,
+            owner_user_id: OWNER,
+            day: "2026-11-19",
+            version: 4,
+            base_version: 3,
+            status: "accepted",
+            blocks: [],
+            suggested_tasks: [],
+            origin: "user",
+            strategy_version: null,
+            input_snapshot: {
+              tasks: [],
+              free: [],
+              proposedAt: "2026-11-19T09:00:00.000Z",
+              unscheduledReasons: [],
+            },
+            propose_client_key: `${DAY_EXCEPTION_PROPOSE_KEY_PREFIX}${legacyExcUuidKeyDraftId}`,
+            reasons: {},
+          },
         ],
       },
       errors,
     );
     expect(errors).toEqual([]);
+
+    // A stripped adjustment draft lacking ordinary snapshot structure must still be rejected.
+    const strippedErrors: string[] = [];
+    validateBackupDayAdjustment(
+      {
+        opening_plan_drafts: [
+          {
+            id: legacyUuidKeyDraftId,
+            workspace_id: WS,
+            owner_user_id: OWNER,
+            day: "2026-11-19",
+            version: 1,
+            base_version: 0,
+            status: "accepted",
+            blocks: [],
+            suggested_tasks: [],
+            origin: "user",
+            strategy_version: null,
+            input_snapshot: {},
+            propose_client_key: `${DAY_ADJUSTMENT_PROPOSE_KEY_PREFIX}${legacyUuidKeyDraftId}`,
+            reasons: {},
+          },
+        ],
+      },
+      strippedErrors,
+    );
+    expect(strippedErrors.some((e) => e.includes("marker mismatch"))).toBe(true);
+  });
+
+  it("passes full validateOpeningRestore + planOpeningRestoreApply with courses, workspace_preferences, retests, and history revisions", () => {
+    const courseId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const baseTables = validTables();
+    baseTables.workspace_preferences = [
+      {
+        workspace_id: WS,
+        default_entry: null,
+        ai_settings: null,
+        planning_settings: {
+          weekOneMonday: "2026-09-07",
+          periodTimes: { "1": { start: "08:00", end: "08:45" } },
+          dailyWindow: { start: "07:30", end: "22:30" },
+          lunch: { start: "12:00", end: "12:45" },
+          dinner: { start: "18:00", end: "18:45" },
+          sleep: { start: "23:00", end: "07:00" },
+          timeZone: "Asia/Shanghai",
+        },
+        adaptive_planning: null,
+        learning_management: null,
+        intervention_settings: null,
+        auto_grade_on_save: null,
+        assessment_enabled: null,
+        retest_suggestions_enabled: null,
+        automatic_reminders_enabled: null,
+        retest_suggestions_enabled_at: null,
+        automatic_reminders_enabled_at: null,
+      },
+    ];
+    baseTables.courses = [
+      {
+        id: courseId,
+        workspace_id: WS,
+        title: "微积分",
+        slug: "calculus-aaaaaaaa",
+        description: null,
+        schema_version: 1,
+        archived_at: null,
+        assessment_enabled: null,
+        retest_suggestions_enabled: null,
+        automatic_reminders_enabled: null,
+        intervention_settings: null,
+        retest_suggestions_enabled_at: null,
+        automatic_reminders_enabled_at: null,
+      },
+    ];
+    baseTables.opening_tasks![1]!.course_id = courseId;
+    baseTables.opening_retest_activities![0]!.course_id = courseId;
+    baseTables.opening_retest_activities![0]!.skill_label = "极限";
+    baseTables.opening_retest_activities![0]!.purpose = "retest";
+    baseTables.opening_retest_activities![0]!.status = "accepted";
+    baseTables.opening_retest_activities![0]!.candidate_id = null;
+    baseTables.opening_retest_activities![0]!.learning_protocol = null;
+    baseTables.opening_workspace_history_revisions = [
+      {
+        workspace_id: WS,
+        owner_user_id: OWNER,
+        revision: 1,
+      },
+    ];
+
+    const memoryDeletions = { workspaceId: WS, memories: [] };
+    const makeBackup = (tables: Record<string, Record<string, unknown>[]>): OpeningBackup => ({
+      format: "opening-backup",
+      version: 1,
+      workspaceId: WS,
+      privacyEpoch: 0,
+      deletionJournal: [],
+      memoryDeletions,
+      tables,
+      objects: [],
+    });
+
+    const fullBackup = makeBackup(baseTables);
+    const preview = validateOpeningRestore(fullBackup, [], memoryDeletions);
+    expect(preview.errors).toEqual([]);
+    expect(preview.allowed).toBe(true);
+
+    // Without currentLearningState, planOpeningRestoreApply rejects before apply.
+    const missingLearningState = planOpeningRestoreApply(fullBackup, [], {
+      confirmLocalRestore: true,
+      currentMemoryDeletions: memoryDeletions,
+    });
+    expect(missingLearningState).toMatchObject({
+      ok: false,
+      code: "PREFLIGHT_REJECTED",
+      errors: ["current learning state preflight is required"],
+    });
+
+    // Empty-workspace target learning state passes preflight cleanly.
+    const emptyPlan = planOpeningRestoreApply(fullBackup, [], {
+      confirmLocalRestore: true,
+      currentMemoryDeletions: memoryDeletions,
+      currentLearningState: { workspacePreferences: null, courses: [] },
+    });
+    expect(emptyPlan.ok, JSON.stringify(emptyPlan)).toBe(true);
+
+    // Matching live learning state also passes preflight, and tampered archives surface day-adjustment errors.
+    const liveLearningState = {
+      workspacePreferences: baseTables.workspace_preferences[0]!,
+      courses: baseTables.courses,
+    };
+    const livePlan = planOpeningRestoreApply(fullBackup, [], {
+      confirmLocalRestore: true,
+      currentMemoryDeletions: memoryDeletions,
+      currentLearningState: liveLearningState,
+    });
+    expect(livePlan.ok, JSON.stringify(livePlan)).toBe(true);
+
+    const missingTarget = structuredClone(baseTables);
+    missingTarget.opening_plan_state = missingTarget.opening_plan_state!.filter(
+      (row) => String(row.day).slice(0, 10) !== "2026-11-20",
+    );
+    const tamperedPlan = planOpeningRestoreApply(makeBackup(missingTarget), [], {
+      confirmLocalRestore: true,
+      currentMemoryDeletions: memoryDeletions,
+      currentLearningState: liveLearningState,
+    });
+    expect(tamperedPlan).toMatchObject({ ok: false, code: "PREFLIGHT_REJECTED" });
+    if (!tamperedPlan.ok) {
+      expect(tamperedPlan.errors.some((e) => e.includes("current learning state"))).toBe(false);
+      expect(tamperedPlan.errors).toContain("day adjustment target day plan state is missing or behind receipt");
+    }
   });
 });
 

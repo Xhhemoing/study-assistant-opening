@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { calendarDateSchema, uuidSchema } from "./foundation";
+import { calendarDateSchema, ordinaryPlanClientKeySchema, uuidSchema } from "./foundation";
 import { planDraftSchema } from "./planning";
 
 /** A saved tutor candidate is the authority for task text; clients only clarify scope/time. */
@@ -8,7 +8,7 @@ export const conversationPlanInputSchema = z.object({
   expectedVersion: z.number().int().nonnegative(),
   date: calendarDateSchema,
   expectedAcceptedVersion: z.number().int().nonnegative(),
-  clientKey: z.string().min(8).max(200),
+  clientKey: ordinaryPlanClientKeySchema,
   /** Omitted asks the learner to choose; null explicitly means no course. */
   courseId: uuidSchema.nullable().optional(),
   minutes: z.number().int().min(1).max(240).optional(),

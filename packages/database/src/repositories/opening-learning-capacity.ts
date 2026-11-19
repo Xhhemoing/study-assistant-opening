@@ -6,6 +6,7 @@ import {
   openingPlanningSettingsSchema,
   plannedBlockSchema,
   type DayExceptionSnapshot,
+  type PlannedBlock,
   type Scope,
 } from "@aistudy/contracts";
 import { evaluateDayExceptionCapacity, localDateKeyInZone, resolveLocalDayBounds, resolveWorkspaceTimeZone } from "@aistudy/domain";
@@ -18,6 +19,50 @@ type Row = Record<string, unknown>;
 const object = (value: unknown): Row => value && typeof value === "object" && !Array.isArray(value) ? value as Row : {};
 
 export type StoredDayException = DayExceptionSnapshot & { id: string };
+export type DayPlanEntry = { day: string | null; blocks: readonly PlannedBlock[] };
+
+function normalizeSpilloverBlock(block: PlannedBlock): PlannedBlock {
+  return {
+    taskId: block.taskId,
+    start: new Date(block.start).toISOString(),
+    end: new Date(block.end).toISOString(),
+    reason: block.reason,
+  };
+}
+
+function spilloverBlockSignature(block: PlannedBlock): string {
+  const normalized = normalizeSpilloverBlock(block);
+  return `${normalized.taskId.toLowerCase()}|${normalized.start}|${normalized.end}|${normalized.reason}`;
+}
+
+function spilloverBlockOverlapsRange(block: PlannedBlock, rangeStartMs: number, rangeEndMs: number): boolean {
+  const startMs = Date.parse(block.start);
+  const endMs = Date.parse(block.end);
+  return Number.isFinite(startMs) && Number.isFinite(endMs) && startMs < rangeEndMs && endMs > rangeStartMs;
+}
+
+/** Collects accepted blocks stored under other `day` rows whose instants overlap `[dayStartMs, nextDayStartMs)`. */
+export function collectNonDaySpilloverBlocks(input: {
+  day: string;
+  dayStartMs: number;
+  nextDayStartMs: number;
+  planEntries: readonly DayPlanEntry[];
+  excludeDays?: ReadonlySet<string>;
+  excludeBlockSignatures?: ReadonlySet<string>;
+}): PlannedBlock[] {
+  const excludedDays = new Set<string>([input.day, ...(input.excludeDays ?? [])]);
+  const spillover: PlannedBlock[] = [];
+  for (const entry of input.planEntries) {
+    if (entry.day !== null && excludedDays.has(entry.day)) continue;
+    for (const block of entry.blocks) {
+      if (entry.day === null && input.excludeBlockSignatures?.has(spilloverBlockSignature(block))) continue;
+      if (spilloverBlockOverlapsRange(block, input.dayStartMs, input.nextDayStartMs)) {
+        spillover.push(normalizeSpilloverBlock(block));
+      }
+    }
+  }
+  return spillover.sort((a, b) => Date.parse(a.start) - Date.parse(b.start) || a.taskId.localeCompare(b.taskId));
+}
 
 export async function readActiveDayException(
   db: Sql | TransactionSql,

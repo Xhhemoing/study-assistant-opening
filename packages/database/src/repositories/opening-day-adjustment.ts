@@ -45,7 +45,11 @@ import {
 import { OpeningPlanError } from "./opening-plan-error";
 import { dailyDraftAdvisoryLockKeys, fingerprintHardBlocks } from "./opening-plans";
 import { lockWorkspaceLearningHistory, nextWorkspaceLearningHistoryRevision } from "./opening-learning-facts";
-import { readOpeningLearningCapacity } from "./opening-learning-capacity";
+import {
+  collectNonDaySpilloverBlocks,
+  readOpeningLearningCapacity,
+  type DayPlanEntry,
+} from "./opening-learning-capacity";
 import { evaluateDayPlanCapacity } from "./opening-learning-capacity-usage";
 import { assertOpeningPlanConstraints } from "./opening-plan-constraints";
 import { assertOpeningCourseRouteRetestReschedulable } from "./opening-course-route-retest-state";
@@ -169,6 +173,7 @@ function assertValidTimeZoneStrict(value: string): string {
 export function computeDayAdjustmentConfirmPayloadHash(input: DayAdjustmentConfirmInput): string {
   const canonical = {
     sourceDate: input.sourceDate,
+    ...(input.targetDate && !input.targetActions ? { targetDate: input.targetDate } : {}),
     expectedTimeZone: input.expectedTimeZone.trim(),
     expectedExceptionRevision: input.expectedExceptionRevision,
     expectedBudgetRevision: input.expectedBudgetRevision,
@@ -345,37 +350,14 @@ type TaskPreviewRecord = {
 };
 
 const MAX_PREVIEW_ARRAY = 200;
+const MAX_PREVIEW_REVISIONS = 400;
 const MAX_PREVIEW_ISSUES = 50;
 const ACTIVE_RETEST_STATUSES = new Set(["accepted", "in_progress"]);
-
-type DayPlanEntry = { day: string | null; blocks: readonly PlannedBlock[] };
 
 function blockOverlapsRange(block: PlannedBlock, rangeStartMs: number, rangeEndMs: number): boolean {
   const startMs = Date.parse(block.start);
   const endMs = Date.parse(block.end);
   return Number.isFinite(startMs) && Number.isFinite(endMs) && startMs < rangeEndMs && endMs > rangeStartMs;
-}
-
-function collectNonDaySpilloverBlocks(input: {
-  day: string;
-  dayStartMs: number;
-  nextDayStartMs: number;
-  planEntries: readonly DayPlanEntry[];
-  excludeDays?: ReadonlySet<string>;
-  excludeBlockSignatures?: ReadonlySet<string>;
-}): PlannedBlock[] {
-  const excludedDays = new Set<string>([input.day, ...(input.excludeDays ?? [])]);
-  const spillover: PlannedBlock[] = [];
-  for (const entry of input.planEntries) {
-    if (entry.day !== null && excludedDays.has(entry.day)) continue;
-    for (const block of entry.blocks) {
-      if (entry.day === null && input.excludeBlockSignatures?.has(blockSignature(block))) continue;
-      if (blockOverlapsRange(block, input.dayStartMs, input.nextDayStartMs)) {
-        spillover.push(normalizeBlock(block));
-      }
-    }
-  }
-  return sortBlocks(spillover);
 }
 
 function collectTargetSpilloverBlocks(input: {
@@ -1106,26 +1088,42 @@ export function createOpeningDayAdjustmentRepository(
           }
         }
 
-        const priorityReferencedIds = [...new Set([
+        const requiredConfirmTaskIds = [...new Set([
           ...removedBlocks.map((b) => b.taskId),
           ...sourceAddedBlocks.map((b) => b.taskId),
           ...targetAddedBlocks.map((b) => b.taskId),
+        ])].sort();
+        const requiredConfirmTaskSet = new Set(requiredConfirmTaskIds);
+        const remainingSourceTaskIds = [...new Set([
           ...sourceBeforeBlocks.map((b) => b.taskId),
           ...sourceAfterBlocks.map((b) => b.taskId),
-        ])].sort();
-        const priorityReferencedSet = new Set(priorityReferencedIds);
-        const secondaryReferencedIds = [...new Set([
+        ])]
+          .filter((id) => !requiredConfirmTaskSet.has(id))
+          .sort();
+        const sourceReferencedSet = new Set([
+          ...requiredConfirmTaskIds,
+          ...remainingSourceTaskIds,
+        ]);
+        const remainingTargetTaskIds = [...new Set([
           ...targetBeforeBlocks.map((b) => b.taskId),
           ...targetAfterBlocks.map((b) => b.taskId),
         ])]
-          .filter((id) => !priorityReferencedSet.has(id))
+          .filter((id) => !sourceReferencedSet.has(id))
           .sort();
         const boundedReferencedTaskIds = [
-          ...priorityReferencedIds,
-          ...secondaryReferencedIds,
+          ...requiredConfirmTaskIds,
+          ...remainingSourceTaskIds,
+          ...remainingTargetTaskIds,
         ]
-          .slice(0, MAX_PREVIEW_ARRAY)
+          .slice(0, MAX_PREVIEW_REVISIONS)
           .sort();
+        const boundedReferencedTaskSet = new Set(boundedReferencedTaskIds);
+        if (
+          requiredConfirmTaskIds.length > MAX_PREVIEW_REVISIONS
+          || requiredConfirmTaskIds.some((id) => !boundedReferencedTaskSet.has(id))
+        ) {
+          blockers.push("本次调整涉及的变更任务数量超出单次确认上限，请分批调整后再确认。");
+        }
 
         const taskRevisions: DayAdjustmentTaskRevision[] = [];
         const retestRevisions: DayAdjustmentRetestRevision[] = [];
@@ -1226,15 +1224,21 @@ export function createOpeningDayAdjustmentRepository(
       }
       const expectedTz = assertValidTimeZoneStrict(input.expectedTimeZone);
       const targetActions = input.targetActions ?? null;
-      if (targetActions) {
+      const guardTargetDate = targetActions?.targetDate ?? input.targetDate ?? null;
+      if (targetActions && input.targetDate && input.targetDate !== targetActions.targetDate) {
+        throw new OpeningPlanError("VALIDATION", "targetDate must match targetActions.targetDate");
+      }
+      if (guardTargetDate !== null) {
         try {
-          assertValidLocalDate(targetActions.targetDate);
+          assertValidLocalDate(guardTargetDate);
         } catch {
-          throw new OpeningPlanError("VALIDATION", `invalid targetDate: ${targetActions.targetDate}`);
+          throw new OpeningPlanError("VALIDATION", `invalid targetDate: ${guardTargetDate}`);
         }
-        if (targetActions.targetDate <= input.sourceDate) {
+        if (guardTargetDate <= input.sourceDate) {
           throw new OpeningPlanError("VALIDATION", "targetDate must be after sourceDate");
         }
+      }
+      if (targetActions) {
         if (targetActions.addedBlocks.length === 0) {
           throw new OpeningPlanError("VALIDATION", "targetActions must include at least one block");
         }
@@ -1249,9 +1253,12 @@ export function createOpeningDayAdjustmentRepository(
       }
 
       const payloadHash = computeDayAdjustmentConfirmPayloadHash(input);
+      const shouldGuardTarget =
+        targetActions !== null
+        || (guardTargetDate !== null && input.sourceActions.addedBlocks.length > 0);
       const lockDates = [...new Set([
         input.sourceDate,
-        ...(targetActions ? [targetActions.targetDate] : []),
+        ...(shouldGuardTarget && guardTargetDate !== null ? [guardTargetDate] : []),
       ])].sort();
 
       return sql.begin(async (tx) => {
@@ -1319,9 +1326,11 @@ export function createOpeningDayAdjustmentRepository(
           throw new OpeningPlanError("CONFLICT", "当日计划版本已变化，请刷新后再确认。", "stale_version");
         }
 
-        const targetStateRow = targetActions ? (stateByDay.get(targetActions.targetDate) ?? null) : null;
+        const targetStateRow = shouldGuardTarget && guardTargetDate !== null
+          ? (stateByDay.get(guardTargetDate) ?? null)
+          : null;
         const targetBeforeVersion = targetActions ? (targetStateRow ? Number(targetStateRow.accepted_version) : 0) : null;
-        const targetBeforeBlocks = targetActions
+        const targetBeforeBlocks = shouldGuardTarget
           ? sortBlocks(targetStateRow ? plannedBlockSchema.array().max(200).parse(targetStateRow.accepted_blocks ?? []) : [])
           : [];
         if (targetActions && targetBeforeVersion !== (input.expectedTargetAcceptedVersion ?? 0)) {
@@ -1358,16 +1367,18 @@ export function createOpeningDayAdjustmentRepository(
         });
         const sourceSpilloverTaskIds = new Set(sourceSpilloverBlocks.map((b) => b.taskId));
 
-        const targetBounds = targetActions ? resolveLocalDayBounds(targetActions.targetDate, timeZone) : null;
-        const targetCap = targetActions && targetBounds
+        const targetBounds = shouldGuardTarget && guardTargetDate !== null
+          ? resolveLocalDayBounds(guardTargetDate, timeZone)
+          : null;
+        const targetCap = shouldGuardTarget && targetBounds
           ? await readOpeningLearningCapacity(tx, scope, targetBounds.dayStart)
           : null;
-        if (targetCap?.dayException && targetCap.dayException.timeZone !== timeZone) {
+        if (targetActions && targetCap?.dayException && targetCap.dayException.timeZone !== timeZone) {
           throw new OpeningPlanError("CONFLICT", "目标日期临时调整记录的时区与当前工作区时区不一致，请刷新核对。", "stale_version");
         }
-        const targetNonSourceSpilloverBlocks = targetActions && targetBounds && targetCap
+        const targetNonSourceSpilloverBlocks = shouldGuardTarget && guardTargetDate !== null && targetBounds && targetCap
           ? collectNonDaySpilloverBlocks({
-              day: targetActions.targetDate,
+              day: guardTargetDate,
               dayStartMs: targetBounds.dayStart.getTime(),
               nextDayStartMs: targetBounds.nextDayStart.getTime(),
               planEntries: targetCap.planEntries,
@@ -1400,7 +1411,7 @@ export function createOpeningDayAdjustmentRepository(
         if (
           new Set(sourceAddedTaskIds).size !== sourceAddedTaskIds.length
           || sourceAddedTaskIds.some((id) => keptTaskIds.has(id) || sourceSpilloverTaskIds.has(id))
-          || (targetActions !== null && sourceAddedTaskIds.some((id) => targetExistingTaskIds.has(id)))
+          || (shouldGuardTarget && sourceAddedTaskIds.some((id) => targetExistingTaskIds.has(id)))
           || hasAnyOverlap(sourceAddedBlocks)
           || sourceAddedBlocks.some((added) =>
             keptBlocks.some((kept) => blocksOverlap(added, kept))

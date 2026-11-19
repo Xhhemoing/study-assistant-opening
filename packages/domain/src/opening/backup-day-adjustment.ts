@@ -98,8 +98,8 @@ function readDraftEvidence(row: Row) {
   const hasAdjustmentStrategy = row.strategy_version === DAY_ADJUSTMENT_STRATEGY_VERSION;
   const hasExceptionSnapshot = snapshot?.dayException !== undefined;
   const hasAdjustmentSnapshot = snapshot?.dayAdjustment !== undefined;
-  const hasExceptionProposeKey = isReservedDayExceptionProposeKey(row.propose_client_key, row.strategy_version);
-  const hasAdjustmentProposeKey = isReservedDayAdjustmentProposeKey(row.propose_client_key, row.strategy_version);
+  const hasExceptionProposeKey = isReservedDayExceptionProposeKey(row.propose_client_key, row.strategy_version, row.input_snapshot);
+  const hasAdjustmentProposeKey = isReservedDayAdjustmentProposeKey(row.propose_client_key, row.strategy_version, row.input_snapshot);
   const hasExceptionReasons = reasons?.dayException !== undefined || summaryJson?.dayException !== undefined;
   const hasAdjustmentReasons = reasons?.dayAdjustment !== undefined || summaryJson?.dayAdjustment !== undefined;
 
@@ -673,12 +673,21 @@ export function validateBackupDayAdjustment(tables: Tables, errors: string[]): v
       if (stateEntry.day <= draftDay) continue;
       const stateVersion = Number(stateEntry.row.accepted_version);
       const accounted = accountedVersionsByScopeDay.get(`${workspaceId}/${ownerUserId}/${stateEntry.day}`);
-      const hasMatchingVersionReceipt = Number.isSafeInteger(stateVersion)
-        && stateVersion > 0
-        && accounted !== undefined
-        && accounted.versions.has(stateVersion)
-        && stateVersion <= accounted.maxVersion;
-      if (hasMatchingVersionReceipt) continue;
+      let hasFullVersionAccounting = false;
+      if (Number.isSafeInteger(stateVersion) && stateVersion > 0 && accounted !== undefined && stateVersion <= accounted.maxVersion) {
+        hasFullVersionAccounting = true;
+        for (let version = 1; version <= stateVersion; version += 1) {
+          if (!accounted.versions.has(version)) {
+            hasFullVersionAccounting = false;
+            break;
+          }
+        }
+      }
+      if (hasFullVersionAccounting) continue;
+      if (Number.isSafeInteger(stateVersion) && stateVersion > 0) {
+        strippedDetected = true;
+        break;
+      }
       const stateBlocksParsed = plannedBlockSchema.array().safeParse(stateEntry.row.accepted_blocks ?? []);
       if (!stateBlocksParsed.success) continue;
       if (stateBlocksParsed.data.some((b) => removedTaskIds.has(b.taskId.toLowerCase()))) {

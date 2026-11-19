@@ -360,6 +360,7 @@ export function TodayDayAdjustment({
     const input: DayAdjustmentConfirmInput = {
       clientKey: `day-adjust:${crypto.randomUUID()}`,
       sourceDate: preview.sourceDate,
+      ...(preview.targetDate ? { targetDate: preview.targetDate } : {}),
       expectedTimeZone: preview.timeZone,
       expectedExceptionRevision: preview.exceptionRevision,
       expectedBudgetRevision: preview.budgetRevision,

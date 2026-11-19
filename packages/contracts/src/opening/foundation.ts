@@ -45,20 +45,51 @@ export const DAY_ADJUSTMENT_RESERVED_PROPOSE_KEY_RE =
 const OTHER_KNOWN_DRAFT_STRATEGIES = new Set(["local-replan-v1", "adaptive-1"]);
 
 export function isReservedDayAdjustmentProposePrefix(value: string): boolean {
-  return value.startsWith(DAY_EXCEPTION_PROPOSE_KEY_PREFIX)
-    || value.startsWith(DAY_ADJUSTMENT_PROPOSE_KEY_PREFIX);
+  const normalized = value.toLowerCase();
+  return normalized.startsWith(DAY_EXCEPTION_PROPOSE_KEY_PREFIX)
+    || normalized.startsWith(DAY_ADJUSTMENT_PROPOSE_KEY_PREFIX);
+}
+
+/**
+ * Recognizes the canonical ordinary proposePlan / ensureAutoDraft input_snapshot shape
+ * (tasks + free arrays plus ordinary metadata, with no dayException/dayAdjustment markers),
+ * so pre-existing legacy ordinary drafts (strategy_version === null) whose propose_client_key
+ * happened to match day-exception:<UUID> or day-adjustment:<UUID> are not misclassified.
+ */
+export function hasLegacyOrdinaryPlanSnapshot(inputSnapshot: unknown): boolean {
+  if (!inputSnapshot || typeof inputSnapshot !== "object" || Array.isArray(inputSnapshot)) {
+    return false;
+  }
+  const snap = inputSnapshot as Record<string, unknown>;
+  if (snap.dayException !== undefined || snap.dayAdjustment !== undefined) {
+    return false;
+  }
+  return (
+    Array.isArray(snap.tasks)
+    && Array.isArray(snap.free)
+    && (
+      (typeof snap.proposedAt === "string" && Number.isFinite(Date.parse(snap.proposedAt)))
+      || snap.autoDraft === true
+      || Array.isArray(snap.unscheduledReasons)
+    )
+  );
 }
 
 /**
  * Matches only strict UUID-suffixed internal day-exception propose_client_key markers,
- * excluding drafts that carry another known legacy strategy_version (e.g. local-replan-v1).
+ * excluding drafts that carry another known legacy strategy_version (e.g. local-replan-v1)
+ * or a legacy ordinary proposePlan snapshot without strategy_version.
  */
 export function isReservedDayExceptionProposeKey(
   proposeClientKey: unknown,
   strategyVersion?: unknown,
+  inputSnapshot?: unknown,
 ): boolean {
   if (typeof proposeClientKey !== "string") return false;
   if (typeof strategyVersion === "string" && OTHER_KNOWN_DRAFT_STRATEGIES.has(strategyVersion)) {
+    return false;
+  }
+  if (strategyVersion == null && hasLegacyOrdinaryPlanSnapshot(inputSnapshot)) {
     return false;
   }
   return DAY_EXCEPTION_RESERVED_PROPOSE_KEY_RE.test(proposeClientKey);
@@ -66,14 +97,19 @@ export function isReservedDayExceptionProposeKey(
 
 /**
  * Matches only strict UUID-suffixed internal day-adjustment propose_client_key markers,
- * excluding drafts that carry another known legacy strategy_version (e.g. local-replan-v1).
+ * excluding drafts that carry another known legacy strategy_version (e.g. local-replan-v1)
+ * or a legacy ordinary proposePlan snapshot without strategy_version.
  */
 export function isReservedDayAdjustmentProposeKey(
   proposeClientKey: unknown,
   strategyVersion?: unknown,
+  inputSnapshot?: unknown,
 ): boolean {
   if (typeof proposeClientKey !== "string") return false;
   if (typeof strategyVersion === "string" && OTHER_KNOWN_DRAFT_STRATEGIES.has(strategyVersion)) {
+    return false;
+  }
+  if (strategyVersion == null && hasLegacyOrdinaryPlanSnapshot(inputSnapshot)) {
     return false;
   }
   return DAY_ADJUSTMENT_RESERVED_PROPOSE_KEY_RE.test(proposeClientKey);
