@@ -2,7 +2,9 @@ import { lockOpeningJobExecution } from "./opening-job-execution";
 import { createHash, randomUUID } from "node:crypto";
 import {
   knowledgeSnapshotSchema,
+  type CourseKnowledgeFailedJob,
   type CourseKnowledgeRecordResponse,
+  type CourseKnowledgeRequestedJob,
   type CourseKnowledgeSync,
   type CourseKnowledgeSyncStatus,
   type KnowledgeSnapshot,
@@ -17,10 +19,12 @@ export type OpeningKnowledgeErrorCode = "NOT_FOUND" | "VALIDATION" | "CONFLICT";
 
 export class OpeningKnowledgeError extends Error {
   readonly code: OpeningKnowledgeErrorCode;
-  constructor(code: OpeningKnowledgeErrorCode, message: string) {
+  readonly reason?: string;
+  constructor(code: OpeningKnowledgeErrorCode, message: string, reason?: string) {
     super(message);
     this.name = "OpeningKnowledgeError";
     this.code = code;
+    if (reason !== undefined) this.reason = reason;
   }
 }
 
@@ -32,10 +36,17 @@ export type OpeningKnowledgeRecord = {
   sourceVersions: Record<string, number>;
 };
 
+export type ReadKnowledgeSyncOptions = {
+  includeDetails?: boolean;
+  requestedJobId?: string;
+};
+
 export type ReplaceKnowledgeInput = {
   expectedVersion: number;
   /** Automatic rebuilds pin references observed before reconciliation; manual edits omit this. */
   expectedReferencedNodeIds?: readonly string[];
+  /** Worker rebuilds pass the source versions actually included in this extraction batch. */
+  extractedSourceVersions?: Record<string, number>;
   snapshot: KnowledgeSnapshot;
   sourceVersions: Record<string, number>;
 };
@@ -200,20 +211,63 @@ async function hasTeachingPurposes(sql: Sql, scope: Scope, courseId: string, ver
   return admitted.length === ids.length;
 }
 
-async function readSyncStatusInternal(
+const REQUESTED_JOB_STATES = new Set<CourseKnowledgeRequestedJob["state"]>([
+  "queued",
+  "running",
+  "succeeded",
+  "failed",
+  "outcome_unknown",
+  "cancelled",
+]);
+
+function parseRequestedJobState(raw: unknown): CourseKnowledgeRequestedJob["state"] | null {
+  return typeof raw === "string" && REQUESTED_JOB_STATES.has(raw as CourseKnowledgeRequestedJob["state"])
+    ? (raw as CourseKnowledgeRequestedJob["state"])
+    : null;
+}
+
+function hasInvalidatedGraphSource(
+  graphSourceVersions: Record<string, number>,
+  eligibleSourceVersions: Record<string, number>,
+): boolean {
+  return Object.entries(graphSourceVersions).some(
+    ([sourceId, builtVersion]) => eligibleSourceVersions[sourceId] !== builtVersion,
+  );
+}
+
+function missingGraphSourceIds(
+  graphSourceVersions: Record<string, number>,
+  eligibleSourceVersions: Record<string, number>,
+): string[] {
+  return Object.keys(graphSourceVersions).filter(
+    (sourceId) => !(sourceId in eligibleSourceVersions),
+  );
+}
+
+function hasMaterialDrift(
+  coveredSourceVersions: Record<string, number>,
+  graphSourceVersions: Record<string, number>,
+  eligibleSourceVersions: Record<string, number>,
+): boolean {
+  return !sameVersions(coveredSourceVersions, eligibleSourceVersions)
+    || hasInvalidatedGraphSource(graphSourceVersions, eligibleSourceVersions);
+}
+
+function blockedRebuildMessage(parsingSourceCount: number, unreadableSourceCount: number): string {
+  if (parsingSourceCount > 0 && unreadableSourceCount > 0) {
+    return "当前有资料仍在解析，且有资料无法读取文字。已保留原有知识点，请先等待解析完成并在资料页处理无法读取的资料后再重新整理。";
+  }
+  if (unreadableSourceCount > 0) {
+    return "当前有资料无法读取文字。已保留原有知识点，请先在资料页重试解析、替换或移除无法读取的资料后再重新整理。";
+  }
+  return "当前有资料仍在解析中。已保留原有知识点，请等待解析完成后再重新整理。";
+}
+
+async function readEligibleAndParsingMaterials(
   db: Sql | TransactionSql,
   scope: Scope,
   courseId: string,
-): Promise<{ sync: CourseKnowledgeSync; record: OpeningKnowledgeRecord | null }> {
-  await assertOwnedCourse(db, scope, courseId);
-  const knowledgeRows = await db`
-    SELECT version, snapshot, source_versions
-    FROM opening_course_knowledge
-    WHERE workspace_id = ${scope.workspaceId}
-      AND owner_user_id = ${scope.ownerUserId}
-      AND course_id = ${courseId}`;
-  const record = knowledgeRows.length ? mapRecord(knowledgeRows[0] as Record<string, unknown>) : null;
-
+): Promise<{ eligibleSourceVersions: Record<string, number>; parsingSourceCount: number }> {
   const eligibleRows = await db`
     SELECT s.id, s.version
     FROM opening_sources s
@@ -237,7 +291,7 @@ async function readSyncStatusInternal(
         SELECT 1 FROM opening_source_chunks c
         WHERE c.source_id = s.id
           AND c.source_version = s.version
-          AND (c.text ~ '[^[:space:]]' OR (c.image_object_key IS NOT NULL AND c.image_object_key <> ''))
+          AND c.text ~ '[^[:space:]]'
       )
     ORDER BY s.id`;
   const eligibleSourceVersions: Record<string, number> = {};
@@ -246,7 +300,7 @@ async function readSyncStatusInternal(
   }
 
   const parsingRows = await db`
-    SELECT count(*)::int AS count
+    SELECT count(DISTINCT s.id)::int AS count
     FROM opening_sources s
     JOIN course_asset_memberships m
       ON m.workspace_id = s.workspace_id
@@ -262,6 +316,118 @@ async function readSyncStatusInternal(
         WHERE e.workspace_id = s.workspace_id AND e.source_id = s.id
       )`;
   const parsingSourceCount = Number((parsingRows[0] as Record<string, unknown> | undefined)?.count ?? 0);
+  return { eligibleSourceVersions, parsingSourceCount };
+}
+
+async function readUnreadableSourceCount(
+  db: Sql | TransactionSql,
+  scope: Scope,
+  courseId: string,
+): Promise<number> {
+  const rows = await db`
+    SELECT count(DISTINCT s.id)::int AS count
+    FROM opening_sources s
+    JOIN opening_source_versions v
+      ON v.source_id = s.id AND v.workspace_id = s.workspace_id AND v.version = s.version
+    JOIN course_asset_memberships m
+      ON m.workspace_id = s.workspace_id
+      AND m.asset_type = 'source'
+      AND m.asset_id = s.id
+      AND m.course_id = ${courseId}
+      AND (m.purpose IS NULL OR m.purpose = 'teaching')
+    WHERE s.workspace_id = ${scope.workspaceId}
+      AND s.upload_state = 'uploaded'
+      AND v.availability = 'available'
+      AND NOT EXISTS (
+        SELECT 1 FROM opening_privacy_exclusions e
+        WHERE e.workspace_id = s.workspace_id AND e.source_id = s.id
+      )
+      AND (
+        s.parse_state = 'failed'
+        OR (
+          s.parse_state = 'ready'
+          AND NOT EXISTS (
+            SELECT 1 FROM opening_source_chunks c
+            WHERE c.source_id = s.id
+              AND c.source_version = s.version
+              AND c.text ~ '[^[:space:]]'
+          )
+        )
+      )`;
+  return Number((rows[0] as Record<string, unknown> | undefined)?.count ?? 0);
+}
+
+async function readMandatoryCleanupSourceIds(
+  db: Sql | TransactionSql,
+  scope: Scope,
+  courseId: string,
+  graphSourceIds: readonly string[],
+): Promise<Set<string>> {
+  if (!graphSourceIds.length) return new Set();
+  const ids = [...graphSourceIds];
+  const rows = await db`
+    SELECT
+      src.id AS source_id,
+      EXISTS (
+        SELECT 1 FROM opening_sources s
+        WHERE s.workspace_id = ${scope.workspaceId} AND s.id = src.id
+      ) AS source_exists,
+      EXISTS (
+        SELECT 1 FROM opening_privacy_exclusions e
+        WHERE e.workspace_id = ${scope.workspaceId} AND e.source_id = src.id
+      ) AS excluded,
+      EXISTS (
+        SELECT 1 FROM course_asset_memberships m
+        WHERE m.workspace_id = ${scope.workspaceId}
+          AND m.course_id = ${courseId}
+          AND m.asset_type = 'source'
+          AND m.asset_id = src.id
+          AND m.purpose IN ('practice', 'reference', 'mock_exam')
+      ) AS restricted_purpose
+    FROM unnest(${ids}::uuid[]) AS src(id)`;
+  const cleanupIds = new Set<string>();
+  for (const row of rows as Array<Record<string, unknown>>) {
+    if (!row.source_exists || Boolean(row.excluded) || Boolean(row.restricted_purpose)) {
+      cleanupIds.add(String(row.source_id));
+    }
+  }
+  return cleanupIds;
+}
+
+async function readSyncStatusInternal(
+  db: Sql | TransactionSql,
+  scope: Scope,
+  courseId: string,
+  options?: ReadKnowledgeSyncOptions & { computeProtection?: boolean },
+): Promise<{
+  sync: CourseKnowledgeSync;
+  record: OpeningKnowledgeRecord | null;
+  unreadableSourceCount: number;
+  rebuildBlockedByMaterials: boolean;
+}> {
+  await assertOwnedCourse(db, scope, courseId);
+  const knowledgeRows = await db`
+    SELECT version, snapshot, source_versions
+    FROM opening_course_knowledge
+    WHERE workspace_id = ${scope.workspaceId}
+      AND owner_user_id = ${scope.ownerUserId}
+      AND course_id = ${courseId}`;
+  const record = knowledgeRows.length ? mapRecord(knowledgeRows[0] as Record<string, unknown>) : null;
+
+  const { eligibleSourceVersions, parsingSourceCount } = await readEligibleAndParsingMaterials(db, scope, courseId);
+
+  const includeDetails = Boolean(options?.includeDetails);
+  const needProtection = includeDetails || Boolean(options?.computeProtection);
+  const unreadableSourceCount = needProtection ? await readUnreadableSourceCount(db, scope, courseId) : 0;
+
+  const graphSources = record?.sourceVersions ?? {};
+  const missingEvidenceIds = missingGraphSourceIds(graphSources, eligibleSourceVersions);
+  let rebuildBlockedByMaterials = false;
+  if (needProtection && missingEvidenceIds.length > 0 && (parsingSourceCount > 0 || unreadableSourceCount > 0)) {
+    const mandatoryCleanupIds = await readMandatoryCleanupSourceIds(db, scope, courseId, missingEvidenceIds);
+    const protectedMissingIds = missingEvidenceIds.filter((id) => !mandatoryCleanupIds.has(id));
+    rebuildBlockedByMaterials = protectedMissingIds.length > 0;
+  }
 
   const activeJobRows = await db`
     SELECT id
@@ -301,41 +467,101 @@ async function readSyncStatusInternal(
       && typeof resultObj.coveredSourceVersions === "object"
       && !Array.isArray(resultObj.coveredSourceVersions),
   );
-  const lastBuiltVersion = latestSucceeded
-    ? (resultVersion ?? (record ? record.version : null))
-    : (record ? record.version : null);
+  const lastBuiltVersion = latestSucceeded ? resultVersion : null;
   const coveredSourceVersions = hasResultCovered
     ? parseSourceVersions(resultObj!.coveredSourceVersions)
     : (record?.sourceVersions ?? {});
 
-  const hasNeedsCheck = Boolean(
-    record && [...record.snapshot.nodes, ...record.snapshot.edges].some((item) => item.status === "needs_check"),
-  );
   let status: CourseKnowledgeSyncStatus;
   if (activeJobId !== null) {
     status = "pending";
-  } else if (Object.keys(eligibleSourceVersions).length === 0 && (!record || record.snapshot.nodes.length === 0)) {
-    status = "empty";
   } else if (
-    !sameVersions(coveredSourceVersions, eligibleSourceVersions)
-    || (hasNeedsCheck && !sameVersions(record!.sourceVersions, eligibleSourceVersions))
+    Object.keys(eligibleSourceVersions).length === 0
+    && (!record || (record.snapshot.nodes.length === 0 && Object.keys(record.sourceVersions).length === 0))
   ) {
+    status = "empty";
+  } else if (hasMaterialDrift(coveredSourceVersions, graphSources, eligibleSourceVersions)) {
     status = "needs_rebuild";
   } else {
     status = "up_to_date";
   }
 
+  const baseSync: CourseKnowledgeSync = {
+    status,
+    activeJobId,
+    lastBuiltVersion,
+    coveredSourceVersions,
+    eligibleSourceVersions,
+    parsingSourceCount,
+  };
+
+  if (!includeDetails) {
+    return {
+      sync: baseSync,
+      record,
+      unreadableSourceCount,
+      rebuildBlockedByMaterials,
+    };
+  }
+
+  const terminalRows = await db`
+    SELECT id, state
+    FROM opening_jobs
+    WHERE workspace_id = ${scope.workspaceId}
+      AND owner_user_id = ${scope.ownerUserId}
+      AND kind = 'build-course-knowledge'
+      AND payload->>'courseId' = ${courseId}
+      AND state IN ('succeeded', 'failed', 'outcome_unknown', 'cancelled')
+    ORDER BY updated_at DESC, created_at DESC, id DESC
+    LIMIT 1`;
+  const latestTerminal = terminalRows[0] as Record<string, unknown> | undefined;
+  const lastFailedJob: CourseKnowledgeFailedJob | null =
+    latestTerminal && (latestTerminal.state === "failed" || latestTerminal.state === "outcome_unknown")
+      ? { jobId: String(latestTerminal.id), state: latestTerminal.state }
+      : null;
+
+  let requestedJob: CourseKnowledgeRequestedJob | null = null;
+  if (options?.requestedJobId) {
+    const requestedRows = await db`
+      SELECT id, state
+      FROM opening_jobs
+      WHERE id = ${options.requestedJobId}
+        AND workspace_id = ${scope.workspaceId}
+        AND owner_user_id = ${scope.ownerUserId}
+        AND kind = 'build-course-knowledge'
+        AND payload->>'courseId' = ${courseId}
+      LIMIT 1`;
+    const reqRow = requestedRows[0] as Record<string, unknown> | undefined;
+    const reqState = reqRow ? parseRequestedJobState(reqRow.state) : null;
+    if (reqRow && reqState) {
+      requestedJob = { jobId: String(reqRow.id), state: reqState };
+    }
+  }
+
   return {
     sync: {
-      status,
-      activeJobId,
-      lastBuiltVersion,
-      coveredSourceVersions,
-      eligibleSourceVersions,
-      parsingSourceCount,
+      ...baseSync,
+      unreadableSourceCount,
+      rebuildBlockedByMaterials,
+      lastFailedJob,
+      requestedJob,
     },
     record,
+    unreadableSourceCount,
+    rebuildBlockedByMaterials,
   };
+}
+
+async function readSyncStatusInSnapshot(
+  sql: Sql,
+  scope: Scope,
+  courseId: string,
+  options?: ReadKnowledgeSyncOptions & { computeProtection?: boolean },
+) {
+  return sql.begin(async (tx) => {
+    await tx`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY`;
+    return readSyncStatusInternal(tx, scope, courseId, options);
+  });
 }
 
 export function createOpeningKnowledgeRepository(sql: Sql) {
@@ -398,44 +624,47 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
       return mapRecord(rows[0] as Record<string, unknown>);
     },
 
-    async readSyncStatus(scope: Scope, courseId: string): Promise<CourseKnowledgeSync> {
-      const { sync } = await readSyncStatusInternal(sql, scope, courseId);
+    async readSyncStatus(scope: Scope, courseId: string, options?: ReadKnowledgeSyncOptions): Promise<CourseKnowledgeSync> {
+      const { sync } = await readSyncStatusInSnapshot(sql, scope, courseId, options);
       return sync;
     },
 
-    async getWithSync(scope: Scope, courseId: string): Promise<CourseKnowledgeRecordResponse> {
-      const { sync, record } = await readSyncStatusInternal(sql, scope, courseId);
-      if (!record) {
-        return {
-          version: 0,
-          snapshot: { courseId, version: 0, nodes: [], edges: [] },
-          sourceVersions: {},
-          sync,
-        };
-      }
-      const sourceIds = Object.keys(record.sourceVersions);
-      const restricted = sourceIds.length
-        ? await sql`SELECT id FROM course_asset_memberships
-            WHERE workspace_id = ${scope.workspaceId}
-              AND course_id = ${courseId}
-              AND asset_type = 'source'
-              AND asset_id = ANY(${sourceIds}::uuid[])
-              AND purpose IN ('practice', 'reference', 'mock_exam')`
-        : [];
-      if (restricted.length) {
+    async getWithSync(scope: Scope, courseId: string, options?: ReadKnowledgeSyncOptions): Promise<CourseKnowledgeRecordResponse> {
+      return sql.begin(async (tx) => {
+        await tx`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY`;
+        const { sync, record } = await readSyncStatusInternal(tx, scope, courseId, options);
+        if (!record) {
+          return {
+            version: 0,
+            snapshot: { courseId, version: 0, nodes: [], edges: [] },
+            sourceVersions: {},
+            sync,
+          };
+        }
+        const sourceIds = Object.keys(record.sourceVersions);
+        const restricted = sourceIds.length
+          ? await tx`SELECT id FROM course_asset_memberships
+              WHERE workspace_id = ${scope.workspaceId}
+                AND course_id = ${courseId}
+                AND asset_type = 'source'
+                AND asset_id = ANY(${sourceIds}::uuid[])
+                AND purpose IN ('practice', 'reference', 'mock_exam')`
+          : [];
+        if (restricted.length) {
+          return {
+            version: record.version,
+            snapshot: { courseId, version: record.version, nodes: [], edges: [] },
+            sourceVersions: {},
+            sync,
+          };
+        }
         return {
           version: record.version,
-          snapshot: { courseId, version: record.version, nodes: [], edges: [] },
-          sourceVersions: {},
+          snapshot: record.snapshot,
+          sourceVersions: record.sourceVersions,
           sync,
         };
-      }
-      return {
-        version: record.version,
-        snapshot: record.snapshot,
-        sourceVersions: record.sourceVersions,
-        sync,
-      };
+      });
     },
 
     /** A strict transition, not an idempotent replay: stale/duplicate submissions conflict. */
@@ -537,7 +766,7 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
           AND c.source_version = s.version
           AND v.availability = 'available'
           AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=s.workspace_id AND e.source_id=s.id)
-          AND (c.text ~ '[^[:space:]]' OR (c.image_object_key IS NOT NULL AND c.image_object_key <> ''))
+          AND c.text ~ '[^[:space:]]'
         ORDER BY c.source_id, c.page NULLS LAST, c.created_at`;
       return rows.map((row) => {
         const record = row as Record<string, unknown>;
@@ -603,6 +832,59 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
         }
 
         const previous = current ? mapRecord(current) : null;
+        if (
+          input.extractedSourceVersions !== undefined
+          && previous !== null
+          && Object.keys(previous.sourceVersions).length > 0
+        ) {
+          const previousSourceIds = Object.keys(previous.sourceVersions);
+          const removesOldSourceEvidence = previousSourceIds.some(
+            (sourceId) => sourceVersions[sourceId] !== previous.sourceVersions[sourceId],
+          );
+          if (removesOldSourceEvidence) {
+            const { eligibleSourceVersions, parsingSourceCount } = await readEligibleAndParsingMaterials(tx, scope, courseId);
+            const missingIds = missingGraphSourceIds(previous.sourceVersions, eligibleSourceVersions);
+            const uncoveredEligibleIds = previousSourceIds.filter(
+              (sourceId) =>
+                sourceId in eligibleSourceVersions
+                && sourceVersions[sourceId] !== previous.sourceVersions[sourceId]
+                && input.extractedSourceVersions![sourceId] !== eligibleSourceVersions[sourceId],
+            );
+            const candidateProtectedIds = [...new Set([...missingIds, ...uncoveredEligibleIds])];
+            if (candidateProtectedIds.length > 0) {
+              const mandatoryCleanupIds = await readMandatoryCleanupSourceIds(tx, scope, courseId, candidateProtectedIds);
+              const protectedMissingIds = missingIds.filter((id) => !mandatoryCleanupIds.has(id));
+              const protectedUncoveredIds = uncoveredEligibleIds.filter((id) => !mandatoryCleanupIds.has(id));
+              if (protectedMissingIds.length > 0) {
+                const unreadableSourceCount = await readUnreadableSourceCount(tx, scope, courseId);
+                if (parsingSourceCount > 0 || unreadableSourceCount > 0) {
+                  throw new OpeningKnowledgeError(
+                    "CONFLICT",
+                    blockedRebuildMessage(parsingSourceCount, unreadableSourceCount),
+                    "MATERIAL_REPLACEMENT_BLOCKED",
+                  );
+                }
+                const missedEligibleSource = Object.entries(eligibleSourceVersions).some(
+                  ([sourceId, version]) => input.extractedSourceVersions![sourceId] !== version,
+                );
+                if (missedEligibleSource) {
+                  throw new OpeningKnowledgeError(
+                    "CONFLICT",
+                    "课程中已有新的可读资料未纳入本次整理，已保留原有知识点，请按最新资料重新整理。",
+                    "MATERIAL_REPLACEMENT_BLOCKED",
+                  );
+                }
+              }
+              if (protectedUncoveredIds.length > 0) {
+                throw new OpeningKnowledgeError(
+                  "CONFLICT",
+                  "课程中已有新的可读资料未纳入本次整理，已保留原有知识点，请按最新资料重新整理。",
+                  "MATERIAL_REPLACEMENT_BLOCKED",
+                );
+              }
+            }
+          }
+        }
         const evidence = await assertAuthorizedChunks(tx, scope, courseId,
           [...new Set([...draft.nodes, ...draft.edges].flatMap(item => item.evidenceChunkIds))].sort(), sourceVersions);
         const definitions = Object.fromEntries(draft.nodes.flatMap(node => {
@@ -703,9 +985,34 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
           SELECT privacy_epoch FROM workspaces
           WHERE id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId} FOR SHARE`;
         if (!workspace) throw new OpeningKnowledgeError("NOT_FOUND", "workspace not found");
+        const [course] = await tx`
+          SELECT id FROM courses
+          WHERE id = ${courseId} AND workspace_id = ${scope.workspaceId} AND archived_at IS NULL FOR UPDATE`;
+        if (!course) throw new OpeningKnowledgeError("NOT_FOUND", "course not found");
+
+        const payload = { courseId };
+        const existingBefore = await tx`
+          SELECT id, payload FROM opening_jobs
+          WHERE workspace_id = ${scope.workspaceId} AND key = ${key}`;
+        const existingRow = existingBefore[0] as Record<string, unknown> | undefined;
+        if (existingRow) {
+          if (JSON.stringify(existingRow.payload) !== JSON.stringify(payload)) {
+            throw new OpeningKnowledgeError("CONFLICT", "idempotency payload differs for the same key");
+          }
+          return { jobId: String(existingRow.id), kind: "build-course-knowledge" as const, created: false };
+        }
+
+        const currentSync = await readSyncStatusInternal(tx, scope, courseId, { computeProtection: true });
+        if (currentSync.rebuildBlockedByMaterials) {
+          throw new OpeningKnowledgeError(
+            "CONFLICT",
+            blockedRebuildMessage(currentSync.sync.parsingSourceCount, currentSync.unreadableSourceCount),
+            "MATERIAL_REPLACEMENT_BLOCKED",
+          );
+        }
+
         const privacyEpoch = Number((workspace as { privacy_epoch?: number }).privacy_epoch ?? 0);
         const jobId = randomUUID();
-        const payload = { courseId };
         const inserted = await tx`
           INSERT INTO opening_jobs (id, workspace_id, owner_user_id, key, kind, payload, privacy_epoch)
           VALUES (
@@ -951,14 +1258,18 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
         }
       }
 
-      const initial = await readSyncStatusInternal(sql, scope, courseId);
+      const initial = await readSyncStatusInSnapshot(sql, scope, courseId, { computeProtection: true });
+      if (initial.rebuildBlockedByMaterials) {
+        return { sync: initial.sync, enqueued: null };
+      }
       const effectiveCovered = options?.coveredSourceVersions ?? initial.sync.coveredSourceVersions;
+      const graphSources = initial.record?.sourceVersions ?? {};
       const hasGraphOrStaleSources = Boolean(
         initial.record
-          && (initial.record.snapshot.nodes.length > 0 || Object.keys(initial.record.sourceVersions).length > 0),
+          && (initial.record.snapshot.nodes.length > 0 || Object.keys(graphSources).length > 0),
       );
       const shouldRebuild =
-        !sameVersions(effectiveCovered, initial.sync.eligibleSourceVersions)
+        hasMaterialDrift(effectiveCovered, graphSources, initial.sync.eligibleSourceVersions)
         && (Object.keys(initial.sync.eligibleSourceVersions).length > 0 || hasGraphOrStaleSources);
       if (!shouldRebuild) {
         return { sync: initial.sync, enqueued: null };
@@ -969,7 +1280,7 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
         sourceVersionsHash(initial.sync.eligibleSourceVersions),
       );
       const sync = enqueued.created
-        ? (await readSyncStatusInternal(sql, scope, courseId)).sync
+        ? (await readSyncStatusInSnapshot(sql, scope, courseId)).sync
         : initial.sync;
       return { sync, enqueued };
     },

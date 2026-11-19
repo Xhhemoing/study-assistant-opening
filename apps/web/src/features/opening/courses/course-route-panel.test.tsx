@@ -660,3 +660,123 @@ it("unlocks pending confirm command after a 409 reread detects an added requirem
   expect(button("检查与确认课程范围").disabled).toBe(false);
   expect(button("重新读取课程路线").disabled).toBe(false);
 });
+
+it.each([
+  ["cancelled", "本次整理已取消"],
+  ["outcome_unknown", "本次整理结果暂未确认"],
+] as const)("preserves unresolved %s rebuild outcome across route-read failure unmounting checklist until a newer rebuild succeeds and isolates per courseId", async (terminalState, expectedDetail) => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  try {
+    sessionStorage.clear();
+    const jobId = "77777777-7777-4777-8777-777777777778";
+    const otherCourseId = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff";
+    let readStep = 0;
+    const knowledgeRead = vi.fn(async (targetCourseId: string, options?: AbortSignal | { signal?: AbortSignal; jobId?: string }) => {
+      readStep += 1;
+      const requestedJobId = options && !("aborted" in options) ? options.jobId : undefined;
+      if (targetCourseId === otherCourseId) {
+        return {
+          ...knowledgeRecord(1, 2),
+          snapshot: { ...knowledgeRecord(1, 2).snapshot, courseId: otherCourseId },
+          sync: {
+            status: "up_to_date" as const,
+            activeJobId: null,
+            lastBuiltVersion: 1,
+            coveredSourceVersions: { [id]: 1 },
+            eligibleSourceVersions: { [id]: 1 },
+            parsingSourceCount: 0,
+            unreadableSourceCount: 0,
+            rebuildBlockedByMaterials: false,
+            lastFailedJob: null,
+            requestedJob: null,
+          },
+        };
+      }
+      if (readStep <= 2) {
+        return {
+          ...knowledgeRecord(1, 3),
+          sync: {
+            status: "up_to_date" as const,
+            activeJobId: null,
+            lastBuiltVersion: 1,
+            coveredSourceVersions: { [id]: 1 },
+            eligibleSourceVersions: { [id]: 1 },
+            parsingSourceCount: 0,
+            unreadableSourceCount: 0,
+            rebuildBlockedByMaterials: false,
+            lastFailedJob: null,
+            requestedJob: null,
+          },
+        };
+      }
+      return {
+        ...knowledgeRecord(1, 3),
+        sync: {
+          status: "up_to_date" as const,
+          activeJobId: null,
+          lastBuiltVersion: 1,
+          coveredSourceVersions: { [id]: 1 },
+          eligibleSourceVersions: { [id]: 1 },
+          parsingSourceCount: 0,
+          unreadableSourceCount: 0,
+          rebuildBlockedByMaterials: false,
+          lastFailedJob: null,
+          requestedJob: requestedJobId === jobId ? { jobId, state: terminalState } : null,
+        },
+      };
+    });
+    const knowledge: KnowledgeRebuildClient = {
+      read: knowledgeRead,
+      rebuild: vi.fn(async () => ({ jobId, kind: "build-course-knowledge" as const, created: true })),
+    };
+    const otherSnapshot: CourseRouteSnapshot = { ...confirmed, courseId: otherCourseId };
+    const api = client(confirmed);
+    vi.mocked(api.read)
+      .mockResolvedValueOnce(confirmed)
+      .mockRejectedValueOnce(new Error("route offline"))
+      .mockResolvedValueOnce(confirmed)
+      .mockResolvedValueOnce(otherSnapshot);
+
+    const checklistKnowledgeItem = () => {
+      const node = [...host.querySelectorAll("ol li")].find(row => row.querySelector("p")?.firstChild?.textContent === "知识已整理");
+      if (!node) throw new Error("missing 知识已整理");
+      return node;
+    };
+
+    await render(api, { goals: selectedGoal, knowledge });
+    expect(checklistKnowledgeItem().querySelector("p span")?.textContent).toBe("已完成");
+
+    // Manual rebuild ends in cancelled / outcome_unknown -> 未完成.
+    await act(async () => button("重新整理知识点").click());
+    await act(async () => { await vi.advanceTimersByTimeAsync(KNOWLEDGE_POLL_INTERVAL_MS); });
+    expect(checklistKnowledgeItem().querySelector("p span")?.textContent).toBe("未完成");
+    expect(checklistKnowledgeItem().textContent).toContain(expectedDetail);
+
+    // Route reload fails -> snapshot clears and CourseSetupChecklist unmounts.
+    await act(async () => button("重新读取课程路线").click());
+    expect(host.querySelector("#course-setup-heading")).toBeNull();
+    expect(host.textContent).toContain("课程路线暂不可读取。");
+
+    // Clicking 重新读取课程路线 again succeeds and remounts CourseSetupChecklist with preserved jobId -> still 未完成.
+    await act(async () => button("重新读取课程路线").click());
+    expect(host.querySelector("#course-setup-heading")).not.toBeNull();
+    expect(knowledgeRead).toHaveBeenLastCalledWith(courseId, { jobId });
+    expect(checklistKnowledgeItem().querySelector("p span")?.textContent).toBe("未完成");
+    expect(checklistKnowledgeItem().textContent).not.toContain("已完成");
+    expect(checklistKnowledgeItem().textContent).toContain(expectedDetail);
+
+    // Switching courseId remounts RoutePanel with clean state (no leaked jobId from previous course).
+    await act(async () => root.render(
+      <CourseRoutePanel
+        courseId={otherCourseId}
+        client={api}
+        knowledgeClient={knowledge}
+        goalsClient={{ list: vi.fn(async () => noGoals) }}
+      />,
+    ));
+    expect(knowledgeRead).toHaveBeenLastCalledWith(otherCourseId);
+    expect(checklistKnowledgeItem().querySelector("p span")?.textContent).toBe("已完成");
+  } finally {
+    vi.useRealTimers();
+  }
+});

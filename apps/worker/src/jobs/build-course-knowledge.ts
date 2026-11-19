@@ -45,6 +45,7 @@ export type BuildCourseKnowledgeDeps = {
     input: {
       expectedVersion: number;
       expectedReferencedNodeIds?: readonly string[];
+      extractedSourceVersions?: Record<string, number>;
       snapshot: KnowledgeSnapshot;
       sourceVersions: Record<string, number>;
     },
@@ -220,7 +221,9 @@ export function createBuildCourseKnowledgeHandler(deps: BuildCourseKnowledgeDeps
     const scope = openingJobScope(job);
     const current = await deps.get(scope, body.courseId);
     const expectedVersion = current?.version ?? 0;
-    const chunks = (await deps.listAuthorizedChunks(scope, body.courseId)).filter(chunk => chunk.courseId === body.courseId);
+    const chunks = (await deps.listAuthorizedChunks(scope, body.courseId)).filter(
+      (chunk) => chunk.courseId === body.courseId && Boolean(chunk.text?.trim()),
+    );
     const coveredSourceVersions = sourceVersionsFromChunks(chunks);
     const batches = knowledgeExtractionBatches(chunks), extracted: KnowledgeSnapshot[] = [];
     const chapterEdges: ExtractedGraph["edges"] = [];
@@ -261,6 +264,7 @@ export function createBuildCourseKnowledgeHandler(deps: BuildCourseKnowledgeDeps
       return deps.replace(scope, body.courseId, {
         expectedVersion: baseVersion,
         ...(deps.listReferencedNodeIds ? { expectedReferencedNodeIds: baseReferenced } : {}),
+        extractedSourceVersions: coveredSourceVersions,
         snapshot: validated,
         sourceVersions,
       });
@@ -270,8 +274,18 @@ export function createBuildCourseKnowledgeHandler(deps: BuildCourseKnowledgeDeps
       saved = await attemptReplace(expectedVersion, current?.snapshot, current?.nodeDefinitions, referenced);
     } catch (error) {
       const code = error && typeof error === "object" && "code" in error ? (error as { code?: unknown }).code : undefined;
-      if (code !== "CONFLICT") throw error;
+      const reason = error && typeof error === "object" && "reason" in error ? (error as { reason?: unknown }).reason : undefined;
+      if (code !== "CONFLICT" || reason === "MATERIAL_REPLACEMENT_BLOCKED") throw error;
       const latestCurrent = await deps.get(scope, body.courseId);
+      const hasUncoveredNewGraphSource = latestCurrent !== null
+        && Object.entries(latestCurrent.sourceVersions).some(
+          ([sourceId, version]) =>
+            current?.sourceVersions[sourceId] !== version
+            && coveredSourceVersions[sourceId] !== version,
+        );
+      if (hasUncoveredNewGraphSource) {
+        throw error;
+      }
       const latestReferenced = await deps.listReferencedNodeIds?.(scope, body.courseId) ?? [];
       saved = await attemptReplace(
         latestCurrent?.version ?? 0,

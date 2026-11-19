@@ -223,4 +223,62 @@ describe("knowledge contracts", () => {
       }).success,
     ).toBe(false);
   });
+
+  it("validates optional syncDetails fields and rejects error leakage or invalid job states", () => {
+    const detailedSync: CourseKnowledgeSync = {
+      status: "needs_rebuild",
+      activeJobId: null,
+      lastBuiltVersion: 2,
+      coveredSourceVersions: { [chunkId]: 1 },
+      eligibleSourceVersions: {},
+      parsingSourceCount: 0,
+      unreadableSourceCount: 1,
+      rebuildBlockedByMaterials: true,
+      lastFailedJob: { jobId: nodeId, state: "outcome_unknown" },
+      requestedJob: { jobId: otherNode, state: "cancelled" },
+    };
+    expect(courseKnowledgeSyncSchema.parse(detailedSync)).toEqual(detailedSync);
+
+    const explicitZerosAndNulls: CourseKnowledgeSync = {
+      status: "up_to_date",
+      activeJobId: null,
+      lastBuiltVersion: 2,
+      coveredSourceVersions: { [chunkId]: 1 },
+      eligibleSourceVersions: { [chunkId]: 1 },
+      parsingSourceCount: 0,
+      unreadableSourceCount: 0,
+      rebuildBlockedByMaterials: false,
+      lastFailedJob: null,
+      requestedJob: null,
+    };
+    expect(courseKnowledgeSyncSchema.parse(explicitZerosAndNulls)).toEqual(explicitZerosAndNulls);
+
+    expect(
+      courseKnowledgeSyncSchema.safeParse({ ...detailedSync, unreadableSourceCount: -1 }).success,
+    ).toBe(false);
+    expect(
+      courseKnowledgeSyncSchema.safeParse({
+        ...detailedSync,
+        lastFailedJob: { jobId: nodeId, state: "failed", error: "provider secret" },
+      }).success,
+    ).toBe(false);
+    expect(
+      courseKnowledgeSyncSchema.safeParse({
+        ...detailedSync,
+        lastFailedJob: { jobId: nodeId, state: "succeeded" },
+      }).success,
+    ).toBe(false);
+    expect(
+      courseKnowledgeSyncSchema.safeParse({
+        ...detailedSync,
+        requestedJob: { jobId: otherNode, state: "failed", error: "leak" },
+      }).success,
+    ).toBe(false);
+    expect(
+      courseKnowledgeSyncSchema.safeParse({
+        ...detailedSync,
+        requestedJob: { jobId: "not-a-uuid", state: "running" },
+      }).success,
+    ).toBe(false);
+  });
 });
