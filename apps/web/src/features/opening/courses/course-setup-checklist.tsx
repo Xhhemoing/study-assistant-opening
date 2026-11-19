@@ -110,6 +110,54 @@ function SetupItem({ done, title, detail, children }: { done: boolean; title: st
   </li>;
 }
 
+type UnresolvedRebuildAttempt = {
+  courseId: string;
+  outcome: "cancelled" | "outcome_unknown";
+  jobId: string | null;
+  builtVersion: number | null;
+  recordVersion: number;
+};
+
+function resolveRefreshedKnowledge(
+  record: CourseKnowledgeRecord,
+  pendingAttempt: UnresolvedRebuildAttempt | null,
+): {
+  sync?: CourseKnowledgeSync;
+  lastAttemptOutcome: KnowledgeRebuildTerminalOutcome | null;
+  nextAttempt: UnresolvedRebuildAttempt | null;
+} {
+  if (!pendingAttempt) {
+    return { sync: record.sync, lastAttemptOutcome: null, nextAttempt: null };
+  }
+  const requestedJob = record.sync?.requestedJob ?? null;
+  const sameRequestedJob = Boolean(
+    requestedJob && pendingAttempt.jobId && requestedJob.jobId === pendingAttempt.jobId,
+  );
+  const nextBuiltVersion = record.sync?.lastBuiltVersion ?? null;
+  const builtVersionAdvanced = nextBuiltVersion !== null
+    && (pendingAttempt.builtVersion === null || nextBuiltVersion > pendingAttempt.builtVersion);
+  const recordVersionAdvanced = !record.sync && record.version > pendingAttempt.recordVersion;
+
+  if ((sameRequestedJob && requestedJob?.state === "succeeded") || builtVersionAdvanced || recordVersionAdvanced) {
+    const sync = record.sync && sameRequestedJob && requestedJob?.state !== "succeeded"
+      ? { ...record.sync, requestedJob: null }
+      : record.sync;
+    return { sync, lastAttemptOutcome: null, nextAttempt: null };
+  }
+  if (sameRequestedJob && requestedJob?.state === "failed") {
+    return { sync: record.sync, lastAttemptOutcome: "failed", nextAttempt: null };
+  }
+  const outcome = sameRequestedJob
+    && (requestedJob?.state === "cancelled" || requestedJob?.state === "outcome_unknown")
+    ? requestedJob.state
+    : pendingAttempt.outcome;
+  return {
+    sync: record.sync,
+    lastAttemptOutcome: outcome,
+    nextAttempt: { ...pendingAttempt, outcome },
+  };
+}
+
 export function CourseSetupChecklist({ courseId, snapshot, goals, goalId, goalsUnavailable, goalsHref, archived = false, scopeActionDisabled = false, reloadToken = 0, originalConversationId, knowledgeClient, onReviewScope, onKnowledgeRebuilt }: {
   courseId: string;
   snapshot: Pick<CourseRouteSnapshot, "materials" | "scopeState" | "suggestions" | "summary">;
@@ -129,20 +177,30 @@ export function CourseSetupChecklist({ courseId, snapshot, goals, goalId, goalsU
   const client = useMemo(() => knowledgeClient ?? createKnowledgeRebuildClient(), [knowledgeClient]);
   const [knowledge, setKnowledge] = useState<KnowledgeStatus>({ status: "loading" });
   const requestSeq = useRef(0);
+  const unresolvedAttempt = useRef<UnresolvedRebuildAttempt | null>(null);
   useEffect(() => {
+    if (unresolvedAttempt.current && unresolvedAttempt.current.courseId !== courseId) {
+      unresolvedAttempt.current = null;
+    }
     if (archived) {
       requestSeq.current += 1;
       return;
     }
     const seq = ++requestSeq.current;
-    void client.read(courseId)
+    const pendingAttempt = unresolvedAttempt.current?.courseId === courseId ? unresolvedAttempt.current : null;
+    const readPromise = pendingAttempt?.jobId
+      ? client.read(courseId, { jobId: pendingAttempt.jobId })
+      : client.read(courseId);
+    void readPromise
       .then(record => {
         if (requestSeq.current === seq) {
+          const resolved = resolveRefreshedKnowledge(record, pendingAttempt);
+          unresolvedAttempt.current = resolved.nextAttempt;
           setKnowledge({
             status: "ready",
             nodeCount: record.snapshot.nodes.length,
-            sync: record.sync,
-            lastAttemptOutcome: null,
+            sync: resolved.sync,
+            lastAttemptOutcome: resolved.lastAttemptOutcome,
           });
         }
       })
@@ -155,6 +213,7 @@ export function CourseSetupChecklist({ courseId, snapshot, goals, goalId, goalsU
   }, [archived, client, courseId, reloadToken]);
   function rebuilt(record: CourseKnowledgeRecord) {
     requestSeq.current += 1;
+    unresolvedAttempt.current = null;
     setKnowledge({
       status: "ready",
       nodeCount: record.snapshot.nodes.length,
@@ -165,6 +224,15 @@ export function CourseSetupChecklist({ courseId, snapshot, goals, goalId, goalsU
   }
   function syncUpdated(record: CourseKnowledgeRecord, outcome: KnowledgeRebuildTerminalOutcome) {
     requestSeq.current += 1;
+    unresolvedAttempt.current = outcome === "cancelled" || outcome === "outcome_unknown"
+      ? {
+          courseId,
+          outcome,
+          jobId: record.sync?.requestedJob?.jobId ?? null,
+          builtVersion: record.sync?.lastBuiltVersion ?? null,
+          recordVersion: record.version,
+        }
+      : null;
     setKnowledge({
       status: "ready",
       nodeCount: record.snapshot.nodes.length,
