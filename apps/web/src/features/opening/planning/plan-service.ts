@@ -1,6 +1,7 @@
 import {
   acceptPlanInputSchema,
   localReplanInputSchema,
+  ordinaryPlanClientKeySchema,
   type LocalReplanResult,
   openingPlanningSettingsSchema,
   taskCreateInputSchema,
@@ -57,7 +58,7 @@ const proposeBodySchema = z
         }),
       )
       .optional(),
-    clientKey: z.string().min(8).max(200).optional(),
+    clientKey: ordinaryPlanClientKeySchema.optional(),
   })
   .strict();
 
@@ -75,7 +76,7 @@ const proposeDeltaBodySchema = z
         }),
       )
       .optional(),
-    clientKey: z.string().min(8).max(200),
+    clientKey: ordinaryPlanClientKeySchema,
   })
   .strict();
 

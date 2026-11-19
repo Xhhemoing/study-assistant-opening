@@ -119,7 +119,7 @@ function validTables(): Record<string, Record<string, unknown>[]> {
         blocks: [writingBlock],
         suggested_tasks: [],
         origin: "user",
-        propose_client_key: `${DAY_ADJUSTMENT_PROPOSE_KEY_PREFIX}day-adjust:thu-to-fri`,
+        propose_client_key: `${DAY_ADJUSTMENT_PROPOSE_KEY_PREFIX}${ADJ_ID}`,
         reasons: {
           dayAdjustment: {
             kind: DAY_ADJUSTMENT_SNAPSHOT_KIND,
@@ -340,6 +340,107 @@ describe("validateBackupDayAdjustment", () => {
     const errors: string[] = [];
     validateBackupDayAdjustment(tables, errors);
     expect(errors.some((e) => e.includes("effectiveAt does not fall on its localDate"))).toBe(true);
+  });
+
+  it("rejects quad-stripped cross-day adjustment even when target day already has an ordinary v1 receipt", () => {
+    const tables = validTables();
+    const friV1DraftId = "88888888-8888-4888-8888-888888888881";
+    const existingFriBlock = {
+      taskId: WRITING_ID,
+      start: "2026-11-20T09:00:00.000Z",
+      end: "2026-11-20T09:15:00.000Z",
+      reason: "planned",
+    };
+    tables.opening_plan_drafts!.push({
+      id: friV1DraftId,
+      workspace_id: WS,
+      owner_user_id: OWNER,
+      day: "2026-11-20",
+      version: 1,
+      base_version: 0,
+      status: "accepted",
+      blocks: [existingFriBlock],
+      suggested_tasks: [],
+      origin: "user",
+      propose_client_key: "ordinary-fri-v1",
+      reasons: {},
+      strategy_version: null,
+      input_snapshot: {},
+    });
+    tables.opening_plan_acceptances!.push({
+      workspace_id: WS,
+      client_key: "ordinary-fri-v1",
+      draft_id: friV1DraftId,
+      day: "2026-11-20",
+      accepted_version: 1,
+      payload_hash: "b".repeat(64),
+      source: "learner",
+      before_blocks: [],
+      created_task_versions: {},
+    });
+    // Target day was advanced to v2 by cross-day adjustment, then all 4 markers on adj draft were stripped.
+    tables.opening_plan_state![1]!.accepted_version = 2;
+    const adj = tables.opening_plan_drafts![1]!;
+    adj.strategy_version = null;
+    adj.input_snapshot = {};
+    adj.propose_client_key = null;
+    adj.reasons = {};
+
+    const errors: string[] = [];
+    validateBackupDayAdjustment(tables, errors);
+    expect(errors.some((e) => e.includes("stripped day adjustment markers"))).toBe(true);
+
+    // Tampering acceptance receipt source to "coach" must NOT bypass the cross-table stripping check either.
+    tables.opening_plan_acceptances![0]!.source = "coach";
+    const tamperedErrors: string[] = [];
+    validateBackupDayAdjustment(tables, tamperedErrors);
+    expect(tamperedErrors.some((e) => e.includes("stripped day adjustment markers"))).toBe(true);
+  });
+
+  it("allows legacy ordinary drafts with non-UUID day-adjustment prefix and legacy local-replan-v1 drafts with UUID suffix", () => {
+    const legacyDraftId = "88888888-8888-4888-8888-888888888882";
+    const replanDraftId = "88888888-8888-4888-8888-888888888883";
+    const errors: string[] = [];
+    validateBackupDayAdjustment(
+      {
+        opening_plan_drafts: [
+          {
+            id: legacyDraftId,
+            workspace_id: WS,
+            owner_user_id: OWNER,
+            day: "2026-11-19",
+            version: 1,
+            base_version: 0,
+            status: "accepted",
+            blocks: [],
+            suggested_tasks: [],
+            origin: "user",
+            strategy_version: null,
+            input_snapshot: {},
+            propose_client_key: `${DAY_ADJUSTMENT_PROPOSE_KEY_PREFIX}legacy-key-1`,
+            reasons: {},
+          },
+          {
+            id: replanDraftId,
+            workspace_id: WS,
+            owner_user_id: OWNER,
+            day: "2026-11-19",
+            version: 2,
+            base_version: 1,
+            status: "accepted",
+            blocks: [],
+            suggested_tasks: [],
+            origin: "user",
+            strategy_version: "local-replan-v1",
+            input_snapshot: {},
+            propose_client_key: `${DAY_ADJUSTMENT_PROPOSE_KEY_PREFIX}${replanDraftId}`,
+            reasons: {},
+          },
+        ],
+      },
+      errors,
+    );
+    expect(errors).toEqual([]);
   });
 });
 

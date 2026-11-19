@@ -7,6 +7,8 @@ import {
   DAY_EXCEPTION_STRATEGY_VERSION,
   dayAdjustmentSnapshotSchema,
   dayExceptionSnapshotSchema,
+  isReservedDayAdjustmentProposeKey,
+  isReservedDayExceptionProposeKey,
   plannedBlockSchema,
   type DayAdjustmentSnapshot,
   type DayExceptionSnapshot,
@@ -96,8 +98,8 @@ function readDraftEvidence(row: Row) {
   const hasAdjustmentStrategy = row.strategy_version === DAY_ADJUSTMENT_STRATEGY_VERSION;
   const hasExceptionSnapshot = snapshot?.dayException !== undefined;
   const hasAdjustmentSnapshot = snapshot?.dayAdjustment !== undefined;
-  const hasExceptionProposeKey = proposeKey.startsWith(DAY_EXCEPTION_PROPOSE_KEY_PREFIX);
-  const hasAdjustmentProposeKey = proposeKey.startsWith(DAY_ADJUSTMENT_PROPOSE_KEY_PREFIX);
+  const hasExceptionProposeKey = isReservedDayExceptionProposeKey(row.propose_client_key, row.strategy_version);
+  const hasAdjustmentProposeKey = isReservedDayAdjustmentProposeKey(row.propose_client_key, row.strategy_version);
   const hasExceptionReasons = reasons?.dayException !== undefined || summaryJson?.dayException !== undefined;
   const hasAdjustmentReasons = reasons?.dayAdjustment !== undefined || summaryJson?.dayAdjustment !== undefined;
 
@@ -155,27 +157,17 @@ export function validateBackupDayAdjustment(tables: Tables, errors: string[]): v
     }
   }
 
-  const stateDaysByDraftId = new Map<string, Set<string>>();
-  for (const row of stateRows) {
-    if (!isUuid(row.plan_draft_id)) continue;
-    const id = row.plan_draft_id.toLowerCase();
-    const days = stateDaysByDraftId.get(id) ?? new Set<string>();
-    days.add(dateKey(row.day));
-    stateDaysByDraftId.set(id, days);
-  }
-  for (const days of stateDaysByDraftId.values()) {
-    if (days.size > 1) {
-      errors.push("day adjustment plan state draft spans multiple days");
-      break;
-    }
-  }
-
   const relevantDrafts = draftRows.filter((row) => {
     const ev = readDraftEvidence(row);
     return ev.hasAnyException || ev.hasAnyAdjustment;
   });
 
   if (relevantDrafts.length === 0) return;
+
+  const draftsById = new Map<string, Row>();
+  for (const row of draftRows) {
+    if (isUuid(row.id)) draftsById.set(row.id.toLowerCase(), row);
+  }
 
   const statesByKey = new Map<string, Row>();
   const statesByWorkspace = new Map<string, Array<{ day: string; row: Row }>>();
@@ -207,19 +199,35 @@ export function validateBackupDayAdjustment(tables: Tables, errors: string[]): v
   }
 
   const acceptancesByDraftId = new Map<string, Row[]>();
-  const acceptanceDaysByWorkspace = new Map<string, Set<string>>();
+  const accountedVersionsByScopeDay = new Map<string, { versions: Set<number>; maxVersion: number }>();
+  const recordAccountedVersion = (workspaceId: string, ownerUserId: string, day: string, version: number) => {
+    if (!Number.isSafeInteger(version) || version <= 0) return;
+    const key = `${workspaceId}/${ownerUserId}/${day}`;
+    const entry = accountedVersionsByScopeDay.get(key) ?? { versions: new Set<number>(), maxVersion: 0 };
+    entry.versions.add(version);
+    if (version > entry.maxVersion) entry.maxVersion = version;
+    accountedVersionsByScopeDay.set(key, entry);
+  };
+
   for (const row of acceptanceRows) {
-    if (isUuid(row.workspace_id)) {
-      const ws = row.workspace_id.toLowerCase();
-      const set = acceptanceDaysByWorkspace.get(ws) ?? new Set<string>();
-      set.add(dateKey(row.day));
-      acceptanceDaysByWorkspace.set(ws, set);
-    }
     if (!isUuid(row.draft_id)) continue;
     const id = row.draft_id.toLowerCase();
     const list = acceptancesByDraftId.get(id) ?? [];
     list.push(row);
     acceptancesByDraftId.set(id, list);
+
+    if (isUuid(row.workspace_id)) {
+      const ws = row.workspace_id.toLowerCase();
+      const linkedDraft = draftsById.get(id);
+      if (linkedDraft && sameUuid(linkedDraft.workspace_id, ws) && isUuid(linkedDraft.owner_user_id)) {
+        const owner = linkedDraft.owner_user_id.toLowerCase();
+        const day = dateKey(row.day);
+        recordAccountedVersion(ws, owner, day, Number(row.accepted_version));
+        if (row.undone_at != null) {
+          recordAccountedVersion(ws, owner, day, Number(row.undo_result_version));
+        }
+      }
+    }
   }
 
   const validatedExceptions = new Map<string, ValidatedException>();
@@ -349,8 +357,9 @@ export function validateBackupDayAdjustment(tables: Tables, errors: string[]): v
         continue;
       }
       const adj = parsed.data;
-      const expectedProposeKey = `${DAY_ADJUSTMENT_PROPOSE_KEY_PREFIX}${adj.clientKey}`;
-      if (ev.proposeKey !== expectedProposeKey
+      const expectedProposeKey = `${DAY_ADJUSTMENT_PROPOSE_KEY_PREFIX}${String(row.id).toLowerCase()}`;
+      if (!ev.proposeKey.startsWith(DAY_ADJUSTMENT_PROPOSE_KEY_PREFIX)
+        || ev.proposeKey.toLowerCase() !== expectedProposeKey
         || reasonMarker.kind !== DAY_ADJUSTMENT_SNAPSHOT_KIND
         || reasonMarker.sourceDate !== adj.sourceDate
         || (reasonMarker.targetDate ?? null) !== adj.targetDate
@@ -358,7 +367,7 @@ export function validateBackupDayAdjustment(tables: Tables, errors: string[]): v
         errors.push("day adjustment draft marker mismatch");
         continue;
       }
-      const scopedProposeKey = `${workspaceId}/${ownerUserId}/${ev.proposeKey}`;
+      const scopedProposeKey = `${workspaceId}/${ownerUserId}/${ev.proposeKey.toLowerCase()}`;
       if (adjustmentProposeKeys.has(scopedProposeKey)) {
         errors.push("duplicate day adjustment propose_client_key");
         continue;
@@ -619,12 +628,18 @@ export function validateBackupDayAdjustment(tables: Tables, errors: string[]): v
       || !receiptBeforeBlocks.success
       || !sameBlockMultiset(receiptBeforeBlocks.data, adj.sourceDay.beforeBlocks)) {
       errors.push("day adjustment acceptance receipt does not match adjustment snapshot");
+      continue;
+    }
+
+    if (adj.targetDay !== null && adj.targetDate !== null) {
+      recordAccountedVersion(workspaceId, ownerUserId, adj.targetDate, adj.targetDay.afterVersion);
     }
   }
 
   // Cross-table stripping bypass guard: if a day has a validated day-exception, an unmarked accepted
-  // learner draft on that day must not remove tasks that appear on a later day's opening_plan_state
-  // without that later day having its own opening_plan_acceptances row.
+  // draft on that day must not remove tasks that appear on a later day's opening_plan_state whose
+  // accepted_version is not accounted for by an acceptance receipt (or validated adjustment) on
+  // (workspace_id, owner_user_id, target_day).
   for (const row of draftRows) {
     if (!isUuid(row.id) || !isUuid(row.workspace_id) || !isUuid(row.owner_user_id)) continue;
     if (row.status !== "accepted") continue;
@@ -635,7 +650,7 @@ export function validateBackupDayAdjustment(tables: Tables, errors: string[]): v
     const draftDay = dateKey(row.day);
     if (!exceptionsByWorkspaceDay.has(`${workspaceId}/${ownerUserId}/${draftDay}`)) continue;
 
-    const receipts = (acceptancesByDraftId.get(draftId) ?? []).filter((r) => r.source === "learner");
+    const receipts = acceptancesByDraftId.get(draftId) ?? [];
     if (receipts.length === 0) continue;
     const draftBlocksParsed = plannedBlockSchema.array().safeParse(row.blocks ?? []);
     if (!draftBlocksParsed.success) continue;
@@ -652,12 +667,18 @@ export function validateBackupDayAdjustment(tables: Tables, errors: string[]): v
     }
     if (removedTaskIds.size === 0) continue;
 
-    const wsAcceptanceDays = acceptanceDaysByWorkspace.get(workspaceId) ?? new Set<string>();
     const wsStates = statesByWorkspace.get(workspaceId) ?? [];
     let strippedDetected = false;
     for (const stateEntry of wsStates) {
       if (stateEntry.day <= draftDay) continue;
-      if (wsAcceptanceDays.has(stateEntry.day)) continue;
+      const stateVersion = Number(stateEntry.row.accepted_version);
+      const accounted = accountedVersionsByScopeDay.get(`${workspaceId}/${ownerUserId}/${stateEntry.day}`);
+      const hasMatchingVersionReceipt = Number.isSafeInteger(stateVersion)
+        && stateVersion > 0
+        && accounted !== undefined
+        && accounted.versions.has(stateVersion)
+        && stateVersion <= accounted.maxVersion;
+      if (hasMatchingVersionReceipt) continue;
       const stateBlocksParsed = plannedBlockSchema.array().safeParse(stateEntry.row.accepted_blocks ?? []);
       if (!stateBlocksParsed.success) continue;
       if (stateBlocksParsed.data.some((b) => removedTaskIds.has(b.taskId.toLowerCase()))) {

@@ -33,13 +33,13 @@ export class DayAdjustmentRequestError extends Error {
 export type DayAdjustmentDeclareResponse = {
   action: "declare_today";
   receipt: DayExceptionReceipt;
-  preview: DayAdjustmentPreview;
+  preview: DayAdjustmentPreview | null;
 };
 
 export type DayAdjustmentConfirmResponse = {
   action: "confirm";
   receipt: DayAdjustmentConfirmReceipt;
-  preview: DayAdjustmentPreview;
+  preview: DayAdjustmentPreview | null;
 };
 
 export type DayAdjustmentClient = {
@@ -106,11 +106,11 @@ export function createDayAdjustmentClient(
       });
       const body = await parseJsonResponse(response);
       if (!response.ok) throwForFailedResponse(response, body);
-      const record = body as { receipt: unknown; preview: unknown };
+      const record = body as { receipt: unknown; preview?: unknown };
       return {
         action: "declare_today",
         receipt: dayExceptionReceiptSchema.parse(record.receipt),
-        preview: dayAdjustmentPreviewSchema.parse(record.preview),
+        preview: record.preview == null ? null : dayAdjustmentPreviewSchema.parse(record.preview),
       };
     },
 
@@ -138,11 +138,11 @@ export function createDayAdjustmentClient(
       });
       const body = await parseJsonResponse(response);
       if (!response.ok) throwForFailedResponse(response, body);
-      const record = body as { receipt: unknown; preview: unknown };
+      const record = body as { receipt: unknown; preview?: unknown };
       return {
         action: "confirm",
         receipt: dayAdjustmentConfirmReceiptSchema.parse(record.receipt),
-        preview: dayAdjustmentPreviewSchema.parse(record.preview),
+        preview: record.preview == null ? null : dayAdjustmentPreviewSchema.parse(record.preview),
       };
     },
   };
@@ -228,7 +228,9 @@ export function TodayDayAdjustment({
           setTargetDateInput(next.targetDate);
         }
       } catch (reason) {
-        setError(userFacingMessage(reason, "今日时间调整暂无法读取，请稍后刷新重试。"));
+        if (!options?.preserveError) {
+          setError(userFacingMessage(reason, "今日时间调整暂无法读取，请稍后刷新重试。"));
+        }
       } finally {
         setLoading(false);
       }
@@ -250,12 +252,16 @@ export function TodayDayAdjustment({
     try {
       const result = await client.declareToday(input);
       setPending(null);
-      setPreview(result.preview);
       setSelectedQuickTaskId(null);
       setSelectedMoveTaskIds(undefined);
       setMinutesInput(String(result.receipt.remainingMinutes));
-      if (result.preview.targetDate) setTargetDateInput(result.preview.targetDate);
       setNotice(`已记录今天剩余 ${result.receipt.remainingMinutes} 分钟，原有安排尚未改动，请核对下方调整方案。`);
+      if (result.preview) {
+        setPreview(result.preview);
+        if (result.preview.targetDate) setTargetDateInput(result.preview.targetDate);
+      } else {
+        void loadPreview();
+      }
     } catch (reason) {
       if (reason instanceof DayAdjustmentRequestError && reason.status === 409) {
         setPending(null);
@@ -276,7 +282,7 @@ export function TodayDayAdjustment({
   }
 
   function handleDeclareSubmit(minutesOverride?: number) {
-    if (busy || !preview) return;
+    if (busy || pending !== null || !preview) return;
     const parsed = minutesOverride ?? Number(minutesInput);
     if (!Number.isInteger(parsed) || parsed < 1 || parsed > 600) {
       setError("今天剩余可用时长须为 1 至 600 之间的整数分钟。");
@@ -317,7 +323,6 @@ export function TodayDayAdjustment({
     try {
       const result = await client.confirm(input);
       setPending(null);
-      setPreview(result.preview);
       setSelectedQuickTaskId(null);
       setSelectedMoveTaskIds(undefined);
       const movedSummary = result.receipt.targetDate
@@ -325,6 +330,11 @@ export function TodayDayAdjustment({
         : "";
       setNotice(`调整已确认，今日安排已更新${movedSummary}。`);
       onChanged?.();
+      if (result.preview) {
+        setPreview(result.preview);
+      } else {
+        void loadPreview();
+      }
     } catch (reason) {
       if (reason instanceof DayAdjustmentRequestError && reason.status === 409) {
         setPending(null);
@@ -410,7 +420,7 @@ export function TodayDayAdjustment({
               key={minutes}
               type="button"
               className={ui.secondary}
-              disabled={busy || loading || !preview}
+              disabled={busy || loading || pending !== null || !preview}
               onClick={() => handleDeclareSubmit(minutes)}
             >
               今天只剩 {minutes} 分钟
@@ -428,14 +438,14 @@ export function TodayDayAdjustment({
               min={1}
               max={600}
               value={minutesInput}
-              disabled={busy}
+              disabled={busy || pending !== null}
               onChange={(event) => setMinutesInput(event.target.value)}
             />
           </label>
           <button
             type="button"
             className={ui.secondary}
-            disabled={busy || loading || !preview}
+            disabled={busy || loading || pending !== null || !preview}
             onClick={() => handleDeclareSubmit()}
           >
             记录今天可用时长

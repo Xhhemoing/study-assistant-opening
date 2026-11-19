@@ -7,12 +7,15 @@ import {
   DAY_EXCEPTION_SNAPSHOT_KIND,
   DAY_EXCEPTION_STRATEGY_VERSION,
   dayExceptionReceiptSchema,
+  learningManagementCommandSchema,
+  localReplanInputSchema,
   type DayAdjustmentConfirmInput,
 } from "@aistudy/contracts";
 import {
   computeDayAdjustmentConfirmPayloadHash,
   createOpeningDayAdjustmentRepository,
 } from "./opening-day-adjustment";
+import { assertOpeningWorkspaceCapacity } from "./opening-learning-capacity";
 import {
   calculateDayExceptionUsageBounds,
   evaluateDayPlanCapacity,
@@ -406,7 +409,7 @@ describe("createOpeningDayAdjustmentRepository P1 behavioral invariants", () => 
       reason: "planned",
     };
 
-    const sql = createMockSql((query) => {
+    const sql = createMockSql((query, values) => {
       if (query.includes("pg_advisory_xact_lock") || query.includes("opening_workspace_history_revisions")) return [];
       if (query.includes("FROM workspaces w LEFT JOIN workspace_preferences")) {
         return [{
@@ -441,6 +444,7 @@ describe("createOpeningDayAdjustmentRepository P1 behavioral invariants", () => 
         return [{ day: "2026-11-19", accepted_version: 1, accepted_blocks: [mathBefore], hard_blocks_fingerprint: "" }];
       }
       if (query.includes("FROM opening_plan_drafts") && query.includes("strategy_version")) {
+        if (values[2] !== "2026-11-19") return [];
         return [{
           id: EXC_ID,
           version: 1,
@@ -686,12 +690,71 @@ describe("assertOpeningLearningManagementDraft day-adjustment isolation guard", 
     { strategy_version: null, input_snapshot: { dayAdjustment: { kind: "day_adjustment_v1" } } },
     { strategy_version: null, input_snapshot: {}, reasons: { dayException: { kind: "day_exception_v1" } } },
     { strategy_version: null, input_snapshot: {}, reasons: { dayAdjustment: { kind: "day_adjustment_v1" } } },
-    { strategy_version: null, input_snapshot: {}, propose_client_key: `${DAY_EXCEPTION_PROPOSE_KEY_PREFIX}abc` },
-    { strategy_version: null, input_snapshot: {}, propose_client_key: `${DAY_ADJUSTMENT_PROPOSE_KEY_PREFIX}abc` },
+    { strategy_version: null, input_snapshot: {}, propose_client_key: `${DAY_EXCEPTION_PROPOSE_KEY_PREFIX}${EXC_ID}` },
+    { strategy_version: null, input_snapshot: {}, propose_client_key: `${DAY_ADJUSTMENT_PROPOSE_KEY_PREFIX}${WRITING_ID}` },
   ])("rejects ordinary accept bypass for %j", async (draft) => {
     await expect(
       assertOpeningLearningManagementDraft(unusedTx, scope, draft, new Date()),
     ).rejects.toBeInstanceOf(OpeningPlanError);
+  });
+
+  it("allows legacy non-UUID day-adjustment prefix and legacy local-replan-v1 UUID keys while blocking reserved prefixes on new command schemas", async () => {
+    const emptyTx = createMockSql((query) => {
+      if (query.includes("FROM workspaces w LEFT JOIN workspace_preferences")) {
+        return [{
+          learning_management: null,
+          planning_settings: null,
+        }];
+      }
+      return [];
+    }) as unknown as Parameters<typeof assertOpeningLearningManagementDraft>[0];
+
+    await expect(
+      assertOpeningLearningManagementDraft(
+        emptyTx,
+        scope,
+        {
+          day: "2026-11-19",
+          strategy_version: null,
+          input_snapshot: {},
+          suggested_tasks: [],
+          blocks: [],
+          propose_client_key: `${DAY_ADJUSTMENT_PROPOSE_KEY_PREFIX}legacy-key-1`,
+        },
+        new Date("2026-11-19T11:05:00.000Z"),
+      ),
+    ).resolves.toBeUndefined();
+
+    await expect(
+      assertOpeningLearningManagementDraft(
+        emptyTx,
+        scope,
+        {
+          day: "2026-11-19",
+          strategy_version: "local-replan-v1",
+          input_snapshot: {},
+          suggested_tasks: [],
+          blocks: [],
+          propose_client_key: `${DAY_ADJUSTMENT_PROPOSE_KEY_PREFIX}${WRITING_ID}`,
+        },
+        new Date("2026-11-19T11:05:00.000Z"),
+      ),
+    ).resolves.toBeUndefined();
+
+    // New ordinary command schemas reject reserved prefixes.
+    expect(
+      localReplanInputSchema.safeParse({
+        date: "2026-11-19",
+        clientKey: `${DAY_ADJUSTMENT_PROPOSE_KEY_PREFIX}custom-1`,
+      }).success,
+    ).toBe(false);
+    expect(
+      learningManagementCommandSchema.safeParse({
+        action: "preview",
+        date: "2026-11-19",
+        clientKey: `${DAY_EXCEPTION_PROPOSE_KEY_PREFIX}custom-1`,
+      }).success,
+    ).toBe(false);
   });
 
   it("rejects ordinary acceptPlan fresh blocks starting before active dayException.effectiveAt", async () => {
@@ -756,5 +819,569 @@ describe("assertOpeningLearningManagementDraft day-adjustment isolation guard", 
         new Date("2026-11-19T11:05:00.000Z"),
       ),
     ).rejects.toMatchObject({ code: "CONFLICT", reason: "slot_expired" });
+  });
+});
+
+describe("closing boundary P1 & P2/P3 guards", () => {
+  const scope = { workspaceId: WS_A, ownerUserId: OWNER_A };
+  const planningSettings = {
+    weekOneMonday: "2026-09-07",
+    periodTimes: {},
+    dailyWindow: { start: "07:30", end: "22:30" },
+    lunch: { start: "12:00", end: "12:45" },
+    dinner: { start: "18:00", end: "18:45" },
+    sleep: { start: "23:00", end: "07:00" },
+    timeZone: "Asia/Shanghai",
+  };
+
+  it("P1-1: counts cross-day spillover blocks from another day row after timezone switch in target overlap and budget checks", async () => {
+    const SPILL_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1";
+    // Stored under 2026-11-19 row (e.g. old America/Los_Angeles Thu evening), actually falls on 2026-11-20 09:00-09:25 Asia/Shanghai!
+    const thuRetainedSpilloverBlock = {
+      taskId: SPILL_ID,
+      start: "2026-11-20T01:00:00.000Z",
+      end: "2026-11-20T01:25:00.000Z",
+      reason: "planned",
+    };
+    const mathBlock = {
+      taskId: MATH_ID,
+      start: "2026-11-19T11:15:00.000Z",
+      end: "2026-11-19T11:40:00.000Z",
+      reason: "planned",
+    };
+    const now = new Date("2026-11-19T10:55:00.000Z");
+
+    const sql = createMockSql((query, values) => {
+      if (query.includes("pg_advisory_xact_lock") || query.includes("opening_workspace_history_revisions")) return [];
+      if (query.includes("FROM workspaces w LEFT JOIN workspace_preferences")) {
+        return [{
+          // Net daily budget = 55 - 15 = 40m; spillover 25m + moved math 25m = 50m > 40m (shortfall 10m).
+          learning_management: { dailyMinutes: 55, bufferMinutes: 15, revision: 1, updatedAt: "2026-11-19T00:00:00.000Z" },
+          planning_settings: planningSettings,
+        }];
+      }
+      if (query.includes("FROM workspaces")) return [{ id: WS_A }];
+      if (query.includes("FROM workspace_preferences")) return [{ planning_settings: planningSettings }];
+      if (query.includes("FROM opening_plan_drafts") && query.includes("strategy_version")) {
+        if (values[2] !== "2026-11-19") return [];
+        return [{
+          id: EXC_ID,
+          version: 1,
+          input_snapshot: {
+            dayException: {
+              kind: DAY_EXCEPTION_SNAPSHOT_KIND,
+              clientKey: "12121212-1212-4121-8121-121212121212",
+              localDate: "2026-11-19",
+              timeZone: "Asia/Shanghai",
+              effectiveAt: "2026-11-19T10:55:00.000Z",
+              remainingMinutes: 15,
+              expectedExceptionRevision: 0,
+              revision: 1,
+            },
+          },
+        }];
+      }
+      if (query.includes("FROM opening_plan_state")) {
+        if (query.includes("day = ANY(") || query.includes("day>=")) {
+          return [
+            { day: "2026-11-19", accepted_version: 1, accepted_blocks: [mathBlock, thuRetainedSpilloverBlock], hard_blocks_fingerprint: "" },
+          ];
+        }
+        const day = String(values[1]);
+        if (day === "2026-11-19") {
+          return [{ accepted_version: 1, accepted_blocks: [mathBlock, thuRetainedSpilloverBlock] }];
+        }
+        return [];
+      }
+      if (query.includes("SELECT DISTINCT course_id")) return [];
+      if (query.includes("FROM opening_tasks")) {
+        return [
+          {
+            id: MATH_ID,
+            workspace_id: WS_A,
+            owner_user_id: OWNER_A,
+            title: "高数",
+            minutes: 25,
+            status: "pending",
+            version: 1,
+            priority: 1,
+            due_at: null,
+            not_before: null,
+            course_id: null,
+            candidate_id: null,
+          },
+          {
+            id: SPILL_ID,
+            workspace_id: WS_A,
+            owner_user_id: OWNER_A,
+            title: "跨时区晚间块",
+            minutes: 25,
+            status: "pending",
+            version: 1,
+            priority: 2,
+            due_at: null,
+            not_before: null,
+            course_id: null,
+            candidate_id: null,
+          },
+        ];
+      }
+      return [];
+    });
+
+    const repo = createOpeningDayAdjustmentRepository(sql, { clock: () => now });
+    // Preview: requesting Fri 01:00Z (overlaps spillover block) must NOT overlap it, AND budget shortfall is detected!
+    const preview = await repo.preview(scope, {
+      date: "2026-11-19",
+      targetDate: "2026-11-20",
+      moveTaskIds: [MATH_ID],
+      targetStartAt: "2026-11-20T01:00:00.000Z",
+    });
+    expect(preview.targetAddedBlocks).toEqual([]);
+    expect(preview.unplacedMoveTaskIds).toEqual([MATH_ID]);
+    expect(preview.canConfirm).toBe(false);
+
+    // Preview on a non-overlapping Fri slot still detects 10m budget overflow (25m spillover + 25m moved > 40m).
+    const previewOverflow = await repo.preview(scope, {
+      date: "2026-11-19",
+      targetDate: "2026-11-20",
+      moveTaskIds: [MATH_ID],
+      targetStartAt: "2026-11-20T02:00:00.000Z",
+    });
+    expect(previewOverflow.targetCapacityAfter?.shortfallMinutes).toBe(10);
+    expect(previewOverflow.canConfirm).toBe(false);
+
+    // Confirm overlapping the spillover block is rejected.
+    await expect(
+      repo.confirm(scope, {
+        clientKey: "day-adjust:spill-overlap",
+        sourceDate: "2026-11-19",
+        expectedTimeZone: "Asia/Shanghai",
+        expectedExceptionRevision: 1,
+        expectedBudgetRevision: 1,
+        expectedSourceAcceptedVersion: 1,
+        expectedTargetAcceptedVersion: 0,
+        expectedTaskRevisions: [
+          { taskId: MATH_ID, version: 1 },
+          { taskId: SPILL_ID, version: 1 },
+        ],
+        expectedRetestRevisions: [],
+        sourceActions: {
+          keptBlocks: [thuRetainedSpilloverBlock],
+          removedBlocks: [mathBlock],
+          addedBlocks: [],
+        },
+        targetActions: {
+          targetDate: "2026-11-20",
+          addedBlocks: [
+            {
+              taskId: MATH_ID,
+              start: "2026-11-20T01:00:00.000Z",
+              end: "2026-11-20T01:25:00.000Z",
+              reason: "planned",
+            },
+          ],
+        },
+      }),
+    ).rejects.toMatchObject({ code: "CONFLICT", reason: "stale_version" });
+
+    // Confirm on a non-overlapping Fri slot that exceeds budget (25m + 25m > 40m) is also rejected.
+    await expect(
+      repo.confirm(scope, {
+        clientKey: "day-adjust:spill-budget",
+        sourceDate: "2026-11-19",
+        expectedTimeZone: "Asia/Shanghai",
+        expectedExceptionRevision: 1,
+        expectedBudgetRevision: 1,
+        expectedSourceAcceptedVersion: 1,
+        expectedTargetAcceptedVersion: 0,
+        expectedTaskRevisions: [
+          { taskId: MATH_ID, version: 1 },
+          { taskId: SPILL_ID, version: 1 },
+        ],
+        expectedRetestRevisions: [],
+        sourceActions: {
+          keptBlocks: [thuRetainedSpilloverBlock],
+          removedBlocks: [mathBlock],
+          addedBlocks: [],
+        },
+        targetActions: {
+          targetDate: "2026-11-20",
+          addedBlocks: [
+            {
+              taskId: MATH_ID,
+              start: "2026-11-20T02:00:00.000Z",
+              end: "2026-11-20T02:25:00.000Z",
+              reason: "planned",
+            },
+          ],
+        },
+      }),
+    ).rejects.toMatchObject({ code: "CONFLICT", reason: "stale_version" });
+  });
+
+  it("P1-2: enforces snoozed_until and deadline_at for non-course-route retest tasks in quick-slot preview and Tx2 confirm", async () => {
+    const now = new Date("2026-11-19T10:55:00.000Z");
+    const snoozedUntil = "2026-11-19T13:00:00.000Z"; // 21:00 Asia/Shanghai
+    const sql = createMockSql((query, values) => {
+      if (query.includes("pg_advisory_xact_lock") || query.includes("opening_workspace_history_revisions")) return [];
+      if (query.includes("FROM workspaces w LEFT JOIN workspace_preferences")) {
+        return [{
+          learning_management: { dailyMinutes: 90, bufferMinutes: 15, revision: 1, updatedAt: "2026-11-19T00:00:00.000Z" },
+          planning_settings: planningSettings,
+        }];
+      }
+      if (query.includes("FROM workspaces")) return [{ id: WS_A }];
+      if (query.includes("FROM workspace_preferences")) return [{ planning_settings: planningSettings }];
+      if (query.includes("FROM opening_plan_drafts") && query.includes("strategy_version")) {
+        if (values[2] !== "2026-11-19") return [];
+        return [{
+          id: EXC_ID,
+          version: 1,
+          input_snapshot: {
+            dayException: {
+              kind: DAY_EXCEPTION_SNAPSHOT_KIND,
+              clientKey: "12121212-1212-4121-8121-121212121212",
+              localDate: "2026-11-19",
+              timeZone: "Asia/Shanghai",
+              effectiveAt: "2026-11-19T10:55:00.000Z",
+              remainingMinutes: 15,
+              expectedExceptionRevision: 0,
+              revision: 1,
+            },
+          },
+        }];
+      }
+      if (query.includes("FROM opening_retest_activities")) {
+        return [{
+          id: RETEST_ID,
+          task_id: WRITING_ID,
+          course_id: null,
+          status: "accepted",
+          version: 1,
+          scheduled_start_at: null,
+          recommended_at: null,
+          not_before_at: null,
+          snoozed_until: snoozedUntil,
+          deadline_at: "2026-11-19T14:00:00.000Z",
+          learning_protocol: null,
+        }];
+      }
+      if (query.includes("SELECT DISTINCT course_id")) return [];
+      if (query.includes("FROM opening_tasks")) {
+        return [{
+          id: WRITING_ID,
+          workspace_id: WS_A,
+          owner_user_id: OWNER_A,
+          title: "非路线复测",
+          minutes: 15,
+          status: "pending",
+          version: 1,
+          priority: 1,
+          due_at: null,
+          not_before: null,
+          course_id: null,
+          candidate_id: null,
+          retest_activity_id: RETEST_ID,
+          retest_workspace_id: WS_A,
+          retest_owner_user_id: OWNER_A,
+          retest_task_id: WRITING_ID,
+          retest_course_id: null,
+          retest_purpose: "retest",
+          retest_status: "accepted",
+          retest_version: 1,
+          retest_learning_protocol: null,
+          retest_not_before_at: null,
+          retest_recommended_at: null,
+          retest_scheduled_start_at: null,
+          retest_snoozed_until: snoozedUntil,
+          retest_deadline_at: "2026-11-19T14:00:00.000Z",
+        }];
+      }
+      return [];
+    });
+
+    const repo = createOpeningDayAdjustmentRepository(sql, { clock: () => now });
+    // Preview quickCandidate must NOT suggest a slot earlier than snoozed_until (13:00Z).
+    const preview = await repo.preview(scope, {
+      date: "2026-11-19",
+      quickTaskId: WRITING_ID,
+      quickStartAt: "2026-11-19T11:15:00.000Z",
+    });
+    expect(preview.sourceAddedBlocks).toEqual([]);
+    expect(preview.canConfirm).toBe(false);
+    const candidate = preview.quickCandidates.find((c) => c.taskId === WRITING_ID);
+    expect(candidate?.fits).toBe(true);
+    expect(Date.parse(candidate!.suggestedSlot!.start)).toBeGreaterThanOrEqual(Date.parse(snoozedUntil));
+
+    // Tx2 confirm placing quick slot before snoozed_until is rejected.
+    await expect(
+      repo.confirm(scope, {
+        clientKey: "day-adjust:retest-snooze-bypass",
+        sourceDate: "2026-11-19",
+        expectedTimeZone: "Asia/Shanghai",
+        expectedExceptionRevision: 1,
+        expectedBudgetRevision: 1,
+        expectedSourceAcceptedVersion: 0,
+        expectedTaskRevisions: [{ taskId: WRITING_ID, version: 1 }],
+        expectedRetestRevisions: [],
+        sourceActions: {
+          keptBlocks: [],
+          removedBlocks: [],
+          addedBlocks: [
+            {
+              taskId: WRITING_ID,
+              start: "2026-11-19T11:15:00.000Z",
+              end: "2026-11-19T11:30:00.000Z",
+              reason: "planned",
+            },
+          ],
+        },
+        targetActions: null,
+      }),
+    ).rejects.toMatchObject({ code: "CONFLICT", reason: "task_changed" });
+  });
+
+  it("P1-5: caps quickCandidates to 200 deterministically when workspace has >200 pending tasks", async () => {
+    const now = new Date("2026-11-19T10:55:00.000Z");
+    const manyTasks = Array.from({ length: 205 }, (_, index) => {
+      const hex = String(index + 1).padStart(12, "0");
+      return {
+        id: `00000000-0000-4000-8000-${hex}`,
+        workspace_id: WS_A,
+        owner_user_id: OWNER_A,
+        title: `任务 ${index + 1}`,
+        minutes: 15,
+        status: "pending",
+        version: 1,
+        priority: 1,
+        due_at: null,
+        not_before: null,
+        course_id: null,
+        candidate_id: null,
+      };
+    });
+    const lastTaskId = manyTasks[204]!.id;
+
+    const sql = createMockSql((query, values) => {
+      if (query.includes("FROM workspaces w LEFT JOIN workspace_preferences")) {
+        return [{
+          learning_management: { dailyMinutes: 90, bufferMinutes: 15, revision: 1, updatedAt: "2026-11-19T00:00:00.000Z" },
+          planning_settings: planningSettings,
+        }];
+      }
+      if (query.includes("FROM opening_plan_drafts") && query.includes("strategy_version")) {
+        if (values[2] !== "2026-11-19") return [];
+        return [{
+          id: EXC_ID,
+          version: 1,
+          input_snapshot: {
+            dayException: {
+              kind: DAY_EXCEPTION_SNAPSHOT_KIND,
+              clientKey: "12121212-1212-4121-8121-121212121212",
+              localDate: "2026-11-19",
+              timeZone: "Asia/Shanghai",
+              effectiveAt: "2026-11-19T10:55:00.000Z",
+              remainingMinutes: 15,
+              expectedExceptionRevision: 0,
+              revision: 1,
+            },
+          },
+        }];
+      }
+      if (query.includes("FROM opening_tasks")) return manyTasks;
+      return [];
+    });
+
+    const repo = createOpeningDayAdjustmentRepository(sql, { clock: () => now });
+    const preview = await repo.preview(scope, {
+      date: "2026-11-19",
+      quickTaskId: lastTaskId,
+    });
+    expect(preview.quickCandidates).toHaveLength(200);
+    expect(preview.quickCandidates.some((c) => c.taskId === lastTaskId)).toBe(true);
+    expect(preview.sourceAddedBlocks[0]?.taskId).toBe(lastTaskId);
+  });
+
+  it("P2/P3-2: skips and rejects quick-slot scheduling for a task already scheduled on the target day", async () => {
+    const now = new Date("2026-11-19T10:55:00.000Z");
+    const mathBlock = {
+      taskId: MATH_ID,
+      start: "2026-11-19T11:15:00.000Z",
+      end: "2026-11-19T11:40:00.000Z",
+      reason: "planned",
+    };
+    const writingOnFri = {
+      taskId: WRITING_ID,
+      start: "2026-11-20T11:00:00.000Z",
+      end: "2026-11-20T11:15:00.000Z",
+      reason: "planned",
+    };
+
+    const sql = createMockSql((query, values) => {
+      if (query.includes("pg_advisory_xact_lock") || query.includes("opening_workspace_history_revisions")) return [];
+      if (query.includes("FROM workspaces w LEFT JOIN workspace_preferences")) {
+        return [{
+          learning_management: { dailyMinutes: 90, bufferMinutes: 15, revision: 1, updatedAt: "2026-11-19T00:00:00.000Z" },
+          planning_settings: planningSettings,
+        }];
+      }
+      if (query.includes("FROM workspaces")) return [{ id: WS_A }];
+      if (query.includes("FROM workspace_preferences")) return [{ planning_settings: planningSettings }];
+      if (query.includes("FROM opening_plan_drafts") && query.includes("strategy_version")) {
+        if (values[2] !== "2026-11-19") return [];
+        return [{
+          id: EXC_ID,
+          version: 1,
+          input_snapshot: {
+            dayException: {
+              kind: DAY_EXCEPTION_SNAPSHOT_KIND,
+              clientKey: "12121212-1212-4121-8121-121212121212",
+              localDate: "2026-11-19",
+              timeZone: "Asia/Shanghai",
+              effectiveAt: "2026-11-19T10:55:00.000Z",
+              remainingMinutes: 15,
+              expectedExceptionRevision: 0,
+              revision: 1,
+            },
+          },
+        }];
+      }
+      if (query.includes("FROM opening_plan_state")) {
+        if (query.includes("day = ANY(") || query.includes("day>=")) {
+          return [
+            { day: "2026-11-19", accepted_version: 1, accepted_blocks: [mathBlock], hard_blocks_fingerprint: "" },
+            { day: "2026-11-20", accepted_version: 1, accepted_blocks: [writingOnFri], hard_blocks_fingerprint: "" },
+          ];
+        }
+        const day = String(values[1]);
+        if (day === "2026-11-19") return [{ accepted_version: 1, accepted_blocks: [mathBlock] }];
+        if (day === "2026-11-20") return [{ accepted_version: 1, accepted_blocks: [writingOnFri] }];
+        return [];
+      }
+      if (query.includes("FROM opening_tasks")) {
+        return [
+          {
+            id: MATH_ID,
+            workspace_id: WS_A,
+            owner_user_id: OWNER_A,
+            title: "高数",
+            minutes: 25,
+            status: "pending",
+            version: 1,
+            priority: 1,
+            due_at: null,
+            not_before: null,
+            course_id: null,
+            candidate_id: null,
+          },
+          {
+            id: WRITING_ID,
+            workspace_id: WS_A,
+            owner_user_id: OWNER_A,
+            title: "写作",
+            minutes: 15,
+            status: "pending",
+            version: 1,
+            priority: 2,
+            due_at: null,
+            not_before: null,
+            course_id: null,
+            candidate_id: null,
+          },
+        ];
+      }
+      return [];
+    });
+
+    const repo = createOpeningDayAdjustmentRepository(sql, { clock: () => now });
+    const preview = await repo.preview(scope, {
+      date: "2026-11-19",
+      targetDate: "2026-11-20",
+      quickTaskId: WRITING_ID,
+    });
+    expect(preview.quickCandidates.some((c) => c.taskId === WRITING_ID)).toBe(false);
+    expect(preview.sourceAddedBlocks).toEqual([]);
+    expect(preview.blockers.some((b) => b.includes("2026-11-20"))).toBe(true);
+
+    await expect(
+      repo.confirm(scope, {
+        clientKey: "day-adjust:cross-day-dup",
+        sourceDate: "2026-11-19",
+        expectedTimeZone: "Asia/Shanghai",
+        expectedExceptionRevision: 1,
+        expectedBudgetRevision: 1,
+        expectedSourceAcceptedVersion: 1,
+        expectedTargetAcceptedVersion: 1,
+        expectedTaskRevisions: [
+          { taskId: MATH_ID, version: 1 },
+          { taskId: WRITING_ID, version: 1 },
+        ],
+        expectedRetestRevisions: [],
+        sourceActions: {
+          keptBlocks: [],
+          removedBlocks: [mathBlock],
+          addedBlocks: [
+            {
+              taskId: WRITING_ID,
+              start: "2026-11-19T11:15:00.000Z",
+              end: "2026-11-19T11:30:00.000Z",
+              reason: "planned",
+            },
+          ],
+        },
+        targetActions: {
+          targetDate: "2026-11-20",
+          addedBlocks: [
+            {
+              taskId: MATH_ID,
+              start: "2026-11-20T11:30:00.000Z",
+              end: "2026-11-20T11:55:00.000Z",
+              reason: "planned",
+            },
+          ],
+        },
+      }),
+    ).rejects.toMatchObject({ code: "CONFLICT", reason: "stale_version" });
+  });
+
+  it("P2/P3-3: assertOpeningWorkspaceCapacity rejects when active dayException timeZone differs from workspace timeZone", async () => {
+    const tx = createMockSql((query) => {
+      if (query.includes("FROM workspaces w LEFT JOIN workspace_preferences")) {
+        return [{
+          learning_management: { dailyMinutes: 90, bufferMinutes: 15, revision: 1, updatedAt: "2026-11-19T00:00:00.000Z" },
+          planning_settings: planningSettings,
+        }];
+      }
+      if (query.includes("FROM workspaces")) return [{ id: WS_A }];
+      if (query.includes("FROM opening_plan_drafts") && query.includes("strategy_version")) {
+        return [{
+          id: EXC_ID,
+          version: 1,
+          input_snapshot: {
+            dayException: {
+              kind: DAY_EXCEPTION_SNAPSHOT_KIND,
+              clientKey: "12121212-1212-4121-8121-121212121212",
+              localDate: "2026-11-19",
+              timeZone: "UTC", // drifted from Asia/Shanghai!
+              effectiveAt: "2026-11-19T10:55:00.000Z",
+              remainingMinutes: 15,
+              expectedExceptionRevision: 0,
+              revision: 1,
+            },
+          },
+        }];
+      }
+      return [];
+    }) as unknown as Parameters<typeof assertOpeningWorkspaceCapacity>[0];
+
+    await expect(
+      assertOpeningWorkspaceCapacity(
+        tx,
+        scope,
+        { minutes: 10, targetAt: new Date("2026-11-19T11:00:00.000Z") },
+        new Date("2026-11-19T11:00:00.000Z"),
+      ),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
   });
 });

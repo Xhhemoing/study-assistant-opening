@@ -392,15 +392,15 @@ describe("opening-day-adjustment repository (kernel-v2 Phase 2)", () => {
     expect(states[0]!.day).toBe(THU);
     expect(Number(states[0]!.accepted_version)).toBe(1);
     expect(
-      await f.sql`SELECT id FROM opening_plan_acceptances WHERE workspace_id = ${f.scope.workspaceId}`,
+      await f.sql`SELECT client_key FROM opening_plan_acceptances WHERE workspace_id = ${f.scope.workspaceId}`,
     ).toHaveLength(0);
   });
 
   it("atomically updates retest scheduled_start_at and history revision, and enforces retest status and window guardrails", async () => {
     const courseId = randomUUID();
     await f.sql`
-      INSERT INTO courses (id, workspace_id, title)
-      VALUES (${courseId}, ${f.scope.workspaceId}, '微积分')`;
+      INSERT INTO courses (id, workspace_id, title, slug)
+      VALUES (${courseId}, ${f.scope.workspaceId}, '微积分', ${`calculus-${courseId.slice(0, 8)}`})`;
     const plans = createOpeningPlansRepository(f.sql, { now: () => THU_1855 });
     const task = await plans.createTask(f.scope, {
       title: "极限复测",

@@ -461,4 +461,111 @@ describe("TodayDayAdjustment", () => {
     expect(input.value).toBe("25");
     expect(details.open).toBe(true);
   });
+
+  it("disables declare buttons and minutes input while pending retry is active and preserves 409 error when refresh fails", async () => {
+    const readyPreview = makePreview({
+      status: "ready",
+      dayException: {
+        id: EXC_ID,
+        localDate: DATE,
+        timeZone: TIME_ZONE,
+        effectiveAt: "2026-11-19T10:55:00.000Z",
+        remainingMinutes: 15,
+        expectedExceptionRevision: 0,
+        revision: 1,
+        replayed: false,
+      },
+      exceptionRevision: 1,
+      sourceAfterBlocks: [writingBlock],
+      keptBlocks: [writingBlock],
+      removedBlocks: [mathBefore],
+      targetAfterBlocks: [mathFriday],
+      targetAddedBlocks: [mathFriday],
+      canConfirm: true,
+    });
+
+    const client: DayAdjustmentClient = {
+      getPreview: vi
+        .fn()
+        .mockResolvedValueOnce(readyPreview)
+        .mockRejectedValueOnce(new TypeError("refresh network down")),
+      declareToday: vi
+        .fn()
+        .mockRejectedValueOnce(new TypeError("declare timeout"))
+        .mockRejectedValueOnce(new DayAdjustmentRequestError("今日临时可用时长已更新", 409, "CONFLICT", "stale_version")),
+      preview: vi.fn(async () => readyPreview),
+      confirm: vi.fn(),
+    };
+
+    await act(async () => {
+      root.render(
+        <TodayDayAdjustment date={DATE} timeZone={TIME_ZONE} client={client} defaultOpen />,
+      );
+    });
+
+    // Trigger transient error on declareToday -> pending retry active.
+    await act(async () => {
+      findButton("今天只剩 15 分钟").click();
+    });
+    expect(client.declareToday).toHaveBeenCalledTimes(1);
+    expect(findButton("今天只剩 15 分钟").disabled).toBe(true);
+    expect(findButton("今天只剩 30 分钟").disabled).toBe(true);
+    expect(findButton("记录今天可用时长").disabled).toBe(true);
+    const input = host.querySelector('input[aria-label="今天剩余可用分钟"]') as HTMLInputElement;
+    expect(input.disabled).toBe(true);
+
+    // Retry returns 409, then auto-refresh fails -> original 409 message MUST be preserved.
+    await act(async () => {
+      findButton("重试这次确认").click();
+    });
+    expect(client.declareToday).toHaveBeenCalledTimes(2);
+    expect(client.getPreview).toHaveBeenCalledTimes(2);
+    expect(host.querySelector('[role="alert"]')?.textContent).toContain("今日临时可用时长已更新");
+    expect(findButton("今天只剩 15 分钟").disabled).toBe(false);
+  });
+
+  it("handles null post-commit preview on declareToday by showing success notice and reloading preview", async () => {
+    const initialPreview = makePreview();
+    const reloadedPreview = makePreview({
+      status: "no_change",
+      dayException: {
+        id: EXC_ID,
+        localDate: DATE,
+        timeZone: TIME_ZONE,
+        effectiveAt: "2026-11-19T10:55:00.000Z",
+        remainingMinutes: 15,
+        expectedExceptionRevision: 0,
+        revision: 1,
+        replayed: false,
+      },
+      exceptionRevision: 1,
+    });
+    const client: DayAdjustmentClient = {
+      getPreview: vi
+        .fn()
+        .mockResolvedValueOnce(initialPreview)
+        .mockResolvedValueOnce(reloadedPreview),
+      declareToday: vi.fn(async () => ({
+        action: "declare_today" as const,
+        receipt: reloadedPreview.dayException!,
+        preview: null,
+      })),
+      preview: vi.fn(async () => reloadedPreview),
+      confirm: vi.fn(),
+    };
+
+    await act(async () => {
+      root.render(
+        <TodayDayAdjustment date={DATE} timeZone={TIME_ZONE} client={client} defaultOpen />,
+      );
+    });
+
+    await act(async () => {
+      findButton("今天只剩 15 分钟").click();
+    });
+
+    expect(client.declareToday).toHaveBeenCalledTimes(1);
+    expect(client.getPreview).toHaveBeenCalledTimes(2);
+    expect(host.textContent).toContain("已记录今天剩余 15 分钟");
+  });
 });

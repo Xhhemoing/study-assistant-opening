@@ -83,7 +83,12 @@ export async function POST(request: Request): Promise<Response> {
     if (parsed.action === "declare_today") {
       const { action: _action, ...declareInput } = parsed;
       const receipt = await service.declareToday(scope, declareInput);
-      const preview = await service.preview(scope, { date: receipt.localDate });
+      let preview = null;
+      try {
+        preview = await service.preview(scope, { date: receipt.localDate });
+      } catch {
+        preview = null;
+      }
       return Response.json(
         { action: "declare_today" as const, receipt, preview },
         { headers: PRIVATE_NO_STORE },
@@ -101,10 +106,15 @@ export async function POST(request: Request): Promise<Response> {
 
     const { action: _action, ...confirmInput } = parsed;
     const receipt = await service.confirm(scope, confirmInput);
-    const preview = await service.preview(scope, {
-      date: receipt.sourceDate,
-      targetDate: receipt.targetDate,
-    });
+    let preview = null;
+    try {
+      preview = await service.preview(scope, {
+        date: receipt.sourceDate,
+        targetDate: receipt.targetDate,
+      });
+    } catch {
+      preview = null;
+    }
     return Response.json(
       { action: "confirm" as const, receipt, preview },
       { headers: PRIVATE_NO_STORE },

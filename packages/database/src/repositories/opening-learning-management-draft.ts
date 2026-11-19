@@ -1,8 +1,8 @@
 import {
-  DAY_ADJUSTMENT_PROPOSE_KEY_PREFIX,
   DAY_ADJUSTMENT_STRATEGY_VERSION,
-  DAY_EXCEPTION_PROPOSE_KEY_PREFIX,
   DAY_EXCEPTION_STRATEGY_VERSION,
+  isReservedDayAdjustmentProposeKey,
+  isReservedDayExceptionProposeKey,
   learningManagementDraftMetadataSchema,
   plannedBlockSchema,
   type Scope,
@@ -18,7 +18,6 @@ import { OpeningPlanError } from "./opening-plan-error";
 /** Existing accept transaction owns locks and historical receipt replay before this check. */
 export async function assertOpeningLearningManagementDraft(tx: TransactionSql, scope: Scope, draft: Record<string, unknown>, now: Date) {
   const snapshot = draft.input_snapshot as { learningManagement?: unknown; dayException?: unknown; dayAdjustment?: unknown } | null;
-  const proposeKey = typeof draft.propose_client_key === "string" ? draft.propose_client_key : "";
   const reasons = draft.reasons && typeof draft.reasons === "object" && !Array.isArray(draft.reasons)
     ? (draft.reasons as { dayException?: unknown; dayAdjustment?: unknown })
     : null;
@@ -29,8 +28,8 @@ export async function assertOpeningLearningManagementDraft(tx: TransactionSql, s
     || snapshot?.dayAdjustment !== undefined
     || reasons?.dayException !== undefined
     || reasons?.dayAdjustment !== undefined
-    || proposeKey.startsWith(DAY_EXCEPTION_PROPOSE_KEY_PREFIX)
-    || proposeKey.startsWith(DAY_ADJUSTMENT_PROPOSE_KEY_PREFIX)
+    || isReservedDayExceptionProposeKey(draft.propose_client_key, draft.strategy_version)
+    || isReservedDayAdjustmentProposeKey(draft.propose_client_key, draft.strategy_version)
   ) {
     throw new OpeningPlanError("CONFLICT", "当日临时调整记录不能通过普通单日计划入口确认。", "stale_version");
   }

@@ -1,19 +1,20 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { Sql } from "postgres";
-import type {
-  AcceptPlanInput,
-  PlanBlockReason,
-  PlanDraft,
-  PlanDraftOrigin,
-  PlannedBlock,
-  SuggestedTask,
-  TaskCreateInput,
-  TaskCreateResult,
-  TaskDeferInput,
-  TaskItem,
-  TaskStatusUpdateInput,
-  TimeBlock,
-  WeekSession,
+import {
+  isReservedDayAdjustmentProposePrefix,
+  type AcceptPlanInput,
+  type PlanBlockReason,
+  type PlanDraft,
+  type PlanDraftOrigin,
+  type PlannedBlock,
+  type SuggestedTask,
+  type TaskCreateInput,
+  type TaskCreateResult,
+  type TaskDeferInput,
+  type TaskItem,
+  type TaskStatusUpdateInput,
+  type TimeBlock,
+  type WeekSession,
 } from "@aistudy/contracts";
 import type { OpeningScope } from "./opening-sources";
 import { OpeningPlanError } from "./opening-plan-error";
@@ -436,6 +437,9 @@ export function createOpeningPlansRepository(sql: Sql, options: { now?: () => Da
     async proposePlan(scope: OpeningScope, input: ProposePlanInput): Promise<PlanDraft> {
       if (!/^\d{4}-\d{2}-\d{2}$/.test(input.date)) {
         throw new OpeningPlanError("VALIDATION", "date must be YYYY-MM-DD (no invented dates)");
+      }
+      if (input.clientKey && isReservedDayAdjustmentProposePrefix(input.clientKey)) {
+        throw new OpeningPlanError("VALIDATION", "clientKey cannot start with reserved day-exception: or day-adjustment: prefix");
       }
       const state = await this.getToday(scope, input.date);
       const baseVersion = state?.acceptedVersion ?? 0;

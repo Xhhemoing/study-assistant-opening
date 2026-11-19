@@ -12,6 +12,7 @@ export {
   isoDateTimeSchema,
   calendarDateSchema,
   sha256HexSchema,
+  ordinaryPlanClientKeySchema,
   scopeSchema,
   apiFailureSchema,
   type Scope,

@@ -48,7 +48,9 @@ afterAll(async () => {
 
 async function seedCrossDayAdjustmentWithRetest() {
   const courseId = randomUUID();
-  await f.sql`INSERT INTO courses (id, workspace_id, title) VALUES (${courseId}, ${f.scope.workspaceId}, '微积分')`;
+  await f.sql`
+    INSERT INTO courses (id, workspace_id, title, slug)
+    VALUES (${courseId}, ${f.scope.workspaceId}, '微积分', ${`calculus-${courseId.slice(0, 8)}`})`;
   const plans = createOpeningPlansRepository(f.sql, { now: () => THU_1855 });
   const writing = await plans.createTask(f.scope, {
     title: "英语写作",

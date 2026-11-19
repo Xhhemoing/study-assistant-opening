@@ -1,13 +1,32 @@
 import { z } from "zod";
-import { calendarDateSchema, isoDateTimeSchema, sha256HexSchema, uuidSchema } from "./foundation";
+import {
+  calendarDateSchema,
+  DAY_ADJUSTMENT_PROPOSE_KEY_PREFIX,
+  DAY_ADJUSTMENT_RESERVED_PROPOSE_KEY_RE,
+  DAY_EXCEPTION_PROPOSE_KEY_PREFIX,
+  DAY_EXCEPTION_RESERVED_PROPOSE_KEY_RE,
+  isReservedDayAdjustmentProposeKey,
+  isReservedDayAdjustmentProposePrefix,
+  isReservedDayExceptionProposeKey,
+  isoDateTimeSchema,
+  sha256HexSchema,
+  uuidSchema,
+} from "./foundation";
 import { plannedBlockSchema, timeBlockSchema } from "./planning";
 
 export const DAY_EXCEPTION_STRATEGY_VERSION = "day-exception-v1" as const;
 export const DAY_ADJUSTMENT_STRATEGY_VERSION = "day-adjustment-v1" as const;
 export const DAY_EXCEPTION_SNAPSHOT_KIND = "day_exception_v1" as const;
 export const DAY_ADJUSTMENT_SNAPSHOT_KIND = "day_adjustment_v1" as const;
-export const DAY_EXCEPTION_PROPOSE_KEY_PREFIX = "day-exception:" as const;
-export const DAY_ADJUSTMENT_PROPOSE_KEY_PREFIX = "day-adjustment:" as const;
+export {
+  DAY_EXCEPTION_PROPOSE_KEY_PREFIX,
+  DAY_ADJUSTMENT_PROPOSE_KEY_PREFIX,
+  DAY_EXCEPTION_RESERVED_PROPOSE_KEY_RE,
+  DAY_ADJUSTMENT_RESERVED_PROPOSE_KEY_RE,
+  isReservedDayAdjustmentProposePrefix,
+  isReservedDayExceptionProposeKey,
+  isReservedDayAdjustmentProposeKey,
+};
 
 export const dayAdjustmentTimeZoneSchema = z.string().trim().min(1).max(80);
 export const dayAdjustmentClientKeySchema = z.string().min(8).max(200);

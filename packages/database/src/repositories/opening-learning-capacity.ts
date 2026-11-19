@@ -67,14 +67,22 @@ export async function readOpeningLearningCapacity(db: Sql | TransactionSql, scop
   const tasks = await db`SELECT t.*,r.id AS retest_id,r.candidate_id,r.candidate_reference_id,r.scheduled_start_at,r.recommended_at,r.not_before_at,r.snoozed_until,r.learning_protocol
     FROM opening_tasks t LEFT JOIN opening_retest_activities r ON r.task_id=t.id AND r.workspace_id=t.workspace_id AND r.owner_user_id=t.owner_user_id
     WHERE t.workspace_id=${scope.workspaceId} AND t.owner_user_id=${scope.ownerUserId} AND t.status IN ('pending','done')`;
-  const plans = await db`SELECT accepted_blocks FROM opening_plan_state WHERE workspace_id=${scope.workspaceId} AND accepted_version>0
+  const plans = await db`SELECT day, accepted_blocks FROM opening_plan_state WHERE workspace_id=${scope.workspaceId} AND accepted_version>0
     AND EXISTS(SELECT 1 FROM jsonb_array_elements(accepted_blocks) b WHERE (b->>'start')::timestamptz<${bounds.nextDayStart} AND (b->>'end')::timestamptz>${bounds.dayStart})`;
-  const blocks = plans.flatMap(plan => plannedBlockSchema.array().max(200).parse(plan.accepted_blocks));
+  const planEntries = plans.map((plan) => ({
+    day: plan.day instanceof Date
+      ? plan.day.toISOString().slice(0, 10)
+      : typeof plan.day === "string" && plan.day.length >= 10
+        ? plan.day.slice(0, 10)
+        : null,
+    blocks: plannedBlockSchema.array().max(200).parse(plan.accepted_blocks),
+  }));
+  const blocks = planEntries.flatMap((entry) => entry.blocks);
   const released = new Set((await readUnusedStaleCourseRouteReservations(db, scope)).map(row=>String(row.id)));
   const normalized = normalizeLearningCapacityActivities(activities.filter(row=>!released.has(String(row.id))));
   const usedMinutes = calculateSpanTutorBudgetUsage({ localDate, timeZone }, normalized, tasks, blocks);
   const dayException = await readActiveDayException(db, scope, localDate);
-  return { budget, settings, localDate, timeZone, bounds, activities: normalized, tasks, blocks, usedMinutes, dayException };
+  return { budget, settings, localDate, timeZone, bounds, activities: normalized, tasks, blocks, planEntries, usedMinutes, dayException };
 }
 export async function assertOpeningWorkspaceCapacity(tx: TransactionSql, scope: Scope, input: { minutes: number; targetAt?: Date; activityId?: string }, now = new Date()) {
   await lockWorkspaceLearningHistory(tx, scope);
@@ -94,6 +102,9 @@ export async function assertOpeningWorkspaceCapacity(tx: TransactionSql, scope: 
   const proposed = used + Math.max(0, input.minutes - Math.max(used - withoutLinked, used - withoutRecovery));
   if (state.budget && proposed > state.budget.dailyMinutes - state.budget.bufferMinutes) throw learningError("CONFLICT", `工作区 ${state.localDate} 已占用 ${used} 分钟；共同预算不足，请缩短本次或调整未执行安排。`);
   if (state.dayException) {
+    if (state.dayException.timeZone !== state.timeZone) {
+      throw learningError("CONFLICT", "今日临时调整记录的时区与当前工作区时区不一致，请重新声明今日剩余时长。");
+    }
     const baseActivities = activities.filter(row => {
       if (linked && object(row.create_intent).taskId === linked) return false;
       if (recoveryId && row.id === recoveryId && row.course_id === activity?.course_id) return false;
