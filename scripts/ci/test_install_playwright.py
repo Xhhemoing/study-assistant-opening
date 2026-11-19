@@ -11,6 +11,7 @@ SCRIPT = Path(__file__).with_name("install-playwright.sh").resolve()
 ROOT = SCRIPT.parents[2]
 PLAYWRIGHT_CLI = ROOT / "node_modules/playwright/cli.js"
 NODE = shutil.which("node")
+FALLBACK_MIRROR = "https://playwright.download.prss.microsoft.com/dbazure/download/playwright"
 
 
 class PlaywrightInstallerTests(unittest.TestCase):
@@ -19,7 +20,7 @@ class PlaywrightInstallerTests(unittest.TestCase):
         if not NODE or not PLAYWRIGHT_CLI.exists():
             raise RuntimeError("Node and npm ci required: fixtures must not silently skip")
 
-    def run_installer(self, failure="", cache_hit="true", ci="true"):
+    def run_installer(self, failure="", cache_hit="true", ci="true", install_timeout=""):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             bin_dir = root / "bin"
@@ -78,7 +79,25 @@ if (process.argv[2] === 'install-deps') {{
   require({json.dumps(str(PLAYWRIGHT_CLI))});
 }} else {{
   fs.appendFileSync(process.env.CALLS, `browser:${{process.argv.slice(2).join(' ')}}\\n`);
-  process.exit(process.env.FAIL_ON === 'browser' ? 25 : 0);
+  if (process.env.PLAYWRIGHT_DOWNLOAD_HOST || process.env.PLAYWRIGHT_CHROMIUM_DOWNLOAD_HOST) {{
+    fs.appendFileSync(
+      process.env.MIRROR_OVERRIDES,
+      `${{process.env.PLAYWRIGHT_DOWNLOAD_HOST || ''}}|${{process.env.PLAYWRIGHT_CHROMIUM_DOWNLOAD_HOST || ''}}\\n`,
+    );
+  }}
+  if (process.env.FAIL_ON === 'browser') {{
+    process.exit(25);
+  }} else if (process.env.FAIL_ON === 'browser-timeout-once' || process.env.FAIL_ON === 'browser-timeout-then-fail') {{
+    const attemptFile = process.env.BROWSER_ATTEMPT;
+    if (!fs.existsSync(attemptFile)) {{
+      fs.writeFileSync(attemptFile, '1');
+      setTimeout(() => {{}}, 5000);
+    }} else {{
+      process.exit(process.env.FAIL_ON === 'browser-timeout-then-fail' ? 26 : 0);
+    }}
+  }} else {{
+    process.exit(0);
+  }}
 }}
 ''')
             registry = root / "node_modules/playwright-core/lib/server/registry/index.js"
@@ -97,64 +116,111 @@ exports.registry = {
             calls_file = root / "calls"
             wrapper_path_file = root / "wrapper-path"
             config_dump_file = root / "config-dump"
+            mirror_overrides_file = root / "mirror-overrides"
+            browser_attempt_file = root / "browser-attempt"
+            env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                   "GITHUB_ACTIONS": ci, "FAIL_ON": failure,
+                   "FIXTURE_BIN": str(fixture_bin),
+                   "PLAYWRIGHT_CACHE_HIT": cache_hit,
+                   "CALLS": str(calls_file), "WRAPPER_PATH": str(wrapper_path_file),
+                   "CONFIG_DUMP": str(config_dump_file),
+                   "MIRROR_OVERRIDES": str(mirror_overrides_file),
+                   "BROWSER_ATTEMPT": str(browser_attempt_file)}
+            for var in ("PLAYWRIGHT_INSTALL_TIMEOUT_SECONDS",
+                        "PLAYWRIGHT_DOWNLOAD_HOST",
+                        "PLAYWRIGHT_CHROMIUM_DOWNLOAD_HOST"):
+                env.pop(var, None)
+            if install_timeout:
+                env["PLAYWRIGHT_INSTALL_TIMEOUT_SECONDS"] = str(install_timeout)
             result = subprocess.run(
                 ["bash", str(SCRIPT)], cwd=root, capture_output=True, text=True,
                 timeout=20,
-                env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}",
-                     "GITHUB_ACTIONS": ci, "FAIL_ON": failure,
-                     "FIXTURE_BIN": str(fixture_bin),
-                     "PLAYWRIGHT_CACHE_HIT": cache_hit,
-                     "CALLS": str(calls_file), "WRAPPER_PATH": str(wrapper_path_file),
-                     "CONFIG_DUMP": str(config_dump_file)},
+                env=env,
             )
             calls = calls_file.read_text().replace(str(fixture_bin), '/fixture').splitlines() if calls_file.exists() else []
             config = config_dump_file.read_text() if config_dump_file.exists() else ""
+            mirror_overrides = mirror_overrides_file.read_text() if mirror_overrides_file.exists() else ""
             if wrapper_path_file.exists():
                 self.assertFalse(Path(wrapper_path_file.read_text()).exists(),
                                  "Temporary APT wrapper must be cleaned on success and failure")
-            return result, calls, config
+            return result, calls, config, mirror_overrides
 
     def test_cache_hit_and_miss_install_deps_and_browser_then_check_all_libraries(self):
         for cache_hit in ("true", "false"):
             with self.subTest(cache_hit=cache_hit):
-                result, calls, config = self.run_installer(cache_hit=cache_hit)
+                result, calls, config, mirror_overrides = self.run_installer(cache_hit=cache_hit)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(calls[0], "apt:update")
                 self.assertTrue(calls[1].startswith("apt:install -y --no-install-recommends "))
                 self.assertEqual(calls[2:], ["browser:install chromium", "ldd:/fixture/chromium",
                                            "ldd:/fixture/chromium-headless-shell", "ldd:/fixture/ffmpeg"])
-                for setting in ('Acquire::Retries "2";', 'Acquire::http::Timeout "15";',
+                for setting in ('Acquire::Retries "5";', 'Acquire::http::Timeout "15";',
                                 'Acquire::https::Timeout "15";', 'APT::Update::Error-Mode "any";'):
                     self.assertEqual(config.count(setting), 2,
                                      "Both APT calls must parse CLI options after explicit sudo env PATH")
+                self.assertEqual(mirror_overrides, "")
                 self.assertEqual(result.stdout.count("Linked libraries OK:"), 3)
 
     def test_failures_never_become_success_or_continue_installation(self):
         for failure, count in (("apt-update", 1), ("apt-install", 2), ("browser", 3),
                                ("ldd-exit", 4), ("ldd-missing", 4)):
             with self.subTest(failure=failure):
-                result, calls, _ = self.run_installer(failure=failure)
+                result, calls, _, _ = self.run_installer(failure=failure)
                 self.assertNotEqual(result.returncode, 0, result.stdout)
+                if failure == "browser":
+                    self.assertEqual(result.returncode, 25, result.stderr)
                 self.assertEqual(len(calls), count, result.stderr)
                 self.assertNotIn("Linked libraries OK:", result.stdout)
 
+    def test_browser_timeout_retries_once_on_fallback_mirror_and_fails_closed(self):
+        expected_override = f"{FALLBACK_MIRROR}|{FALLBACK_MIRROR}\n"
+
+        result, calls, _, mirror_overrides = self.run_installer(
+            failure="browser-timeout-once", install_timeout="1",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(calls[2:], [
+            "browser:install chromium",
+            "browser:install chromium",
+            "ldd:/fixture/chromium",
+            "ldd:/fixture/chromium-headless-shell",
+            "ldd:/fixture/ffmpeg",
+        ])
+        self.assertEqual(mirror_overrides, expected_override)
+        self.assertEqual(result.stdout.count("Linked libraries OK:"), 3)
+
+        result, calls, _, mirror_overrides = self.run_installer(
+            failure="browser-timeout-then-fail", install_timeout="1",
+        )
+        self.assertEqual(result.returncode, 26, result.stderr)
+        self.assertEqual(calls[2:], ["browser:install chromium", "browser:install chromium"])
+        self.assertFalse(any(call.startswith("ldd:") for call in calls), calls)
+        self.assertEqual(mirror_overrides, expected_override)
+        self.assertNotIn("Linked libraries OK:", result.stdout)
+
+        result, calls, _, _ = self.run_installer(install_timeout="0")
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertNotIn("browser:install chromium", calls)
+        self.assertFalse(any(call.startswith("ldd:") for call in calls), calls)
+        self.assertNotIn("Linked libraries OK:", result.stdout)
+
     def test_static_ffmpeg_requires_positive_elf_evidence(self):
-        result, calls, _ = self.run_installer(failure='static-valid')
+        result, calls, _, _ = self.run_installer(failure='static-valid')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('Static ELF verified: ffmpeg', result.stdout)
         self.assertEqual(calls[-3:], ['readelf:-h', 'readelf:-l', 'readelf:-d'])
-        dynamic_result, _, _ = self.run_installer(failure='static-valid-dynamic')
+        dynamic_result, _, _, _ = self.run_installer(failure='static-valid-dynamic')
         self.assertEqual(dynamic_result.returncode, 0, dynamic_result.stderr)
         for failure in ('static-inspect-failure', 'static-invalid-header', 'static-interpreter', 'static-needed',
                         'static-empty-program', 'static-empty-dynamic', 'static-incomplete-program',
                         'static-incomplete-dynamic', 'static-warning'):
             with self.subTest(failure=failure):
-                result, _, _ = self.run_installer(failure=failure)
+                result, _, _, _ = self.run_installer(failure=failure)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertNotIn('Static ELF verified:', result.stdout)
 
     def test_refuses_non_ci_invocation_before_sudo(self):
-        result, calls, _ = self.run_installer(ci="")
+        result, calls, _, _ = self.run_installer(ci="")
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(calls, [])
 

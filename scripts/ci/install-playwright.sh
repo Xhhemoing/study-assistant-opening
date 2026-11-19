@@ -10,7 +10,7 @@ apt_get=$(command -v apt-get)
 # Command-line -o options take precedence without touching any system config.
 {
   printf '#!/usr/bin/env bash\nexec %q ' "$apt_get"
-  printf '%s\n' '-o Acquire::Retries=2 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 -o APT::Update::Error-Mode=any "$@"'
+  printf '%s\n' '-o Acquire::Retries=5 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 -o APT::Update::Error-Mode=any "$@"'
 } > "$apt_bin/apt-get"
 chmod 700 "$apt_bin/apt-get"
 
@@ -20,7 +20,20 @@ chmod 700 "$apt_bin/apt-get"
 # an official mirror is unavailable. No mirror fallback or ignored install error.
 node_path=$(command -v node)
 sudo -- env PATH="$apt_bin:$PATH" "$node_path" node_modules/playwright/cli.js install-deps chromium
-node node_modules/playwright/cli.js install chromium
+install_timeout="${PLAYWRIGHT_INSTALL_TIMEOUT_SECONDS:-120}"
+[[ "$install_timeout" =~ ^[1-9][0-9]*$ ]]
+rc=0
+timeout --kill-after=5s "${install_timeout}s" "$node_path" node_modules/playwright/cli.js install chromium || rc=$?
+if (( rc == 124 )); then
+  fallback_mirror="https://playwright.download.prss.microsoft.com/dbazure/download/playwright"
+  rc=0
+  PLAYWRIGHT_DOWNLOAD_HOST="$fallback_mirror" \
+  PLAYWRIGHT_CHROMIUM_DOWNLOAD_HOST="$fallback_mirror" \
+    timeout --kill-after=5s "${install_timeout}s" "$node_path" node_modules/playwright/cli.js install chromium || rc=$?
+fi
+if (( rc != 0 )); then
+  exit "$rc"
+fi
 
 # A restored browser cache is not evidence that this runner has its system libs.
 # Check every executable installed for Chromium, including the default headless

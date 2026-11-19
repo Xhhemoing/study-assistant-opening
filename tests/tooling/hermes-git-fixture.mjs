@@ -17,7 +17,7 @@ export function gitFixture(root, inherited = process.env) {
     GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null',
   };
   const run = (...args) => {
-    const result = spawnSync('git', args, { cwd: root, env, encoding: 'utf8' });
+    const result = spawnSync('git', ['-c', 'maintenance.auto=false', '-c', 'gc.auto=0', ...args], { cwd: root, env, encoding: 'utf8' });
     assert.equal(result.status, 0, result.stderr);
     return result.stdout.trim();
   };

@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import setup, { assertOpeningTestDatabase } from "../../scripts/opening-test-db.mjs";
+import setup, {
+  assertOpeningTestDatabase,
+  configureCiOpeningTestDb,
+} from "../../scripts/opening-test-db.mjs";
 
 const baseUrl = "postgres://u:p@127.0.0.1/aistudy_opening_test";
 const wrapper = fileURLToPath(new URL("../../scripts/opening-test-db.mjs", import.meta.url));
@@ -93,4 +96,112 @@ test("PR-B scratch override: accepts only the named scratch DB and rejects bad n
   } finally {
     if (saved === undefined) delete process.env.OPENING_TEST_DB_SCRATCH_NAME; else process.env.OPENING_TEST_DB_SCRATCH_NAME = saved;
   }
+});
+
+for (const { name, url, enabled, message } of [
+  { name: "non-loopback host", url: "postgres://u:p@db.example/aistudy_opening_test", enabled: "1", message: /loopback/i },
+  { name: "database query override", url: `${baseUrl}?database=production`, enabled: "1", message: /database.*parameter/i },
+  { name: "wrong database", url: "postgres://u:p@127.0.0.1/production", enabled: "1", message: /exactly aistudy_opening_test/i },
+  { name: "missing opt-in", url: baseUrl, enabled: "", message: /OPENING_TEST_DB=1/ },
+]) {
+  test(`configureCiOpeningTestDb rejects ${name} before creating a client even in CI`, async () => {
+    let createClientCalls = 0;
+    await assert.rejects(
+      configureCiOpeningTestDb(url, enabled, {
+        env: { GITHUB_ACTIONS: "true" },
+        createClient: async () => {
+          createClientCalls += 1;
+          throw new Error("must not connect");
+        },
+      }),
+      message,
+    );
+    assert.equal(createClientCalls, 0);
+  });
+}
+
+test("configureCiOpeningTestDb is a no-op outside GitHub Actions", async () => {
+  for (const env of [{}, { GITHUB_ACTIONS: "false" }, { GITHUB_ACTIONS: "1" }]) {
+    let createClientCalls = 0;
+    const result = await configureCiOpeningTestDb(baseUrl, "1", {
+      env,
+      createClient: async () => {
+        createClientCalls += 1;
+        throw new Error("must not connect outside CI");
+      },
+    });
+    assert.deepEqual(result, { configured: false, tables: 0 });
+    assert.equal(createClientCalls, 0);
+  }
+});
+
+test("configureCiOpeningTestDb disables autovacuum for public tables in one CI transaction and closes client", async () => {
+  const connectedUrls = [];
+  const catalogQueries = [];
+  const unsafeStatements = [];
+  const endCalls = [];
+  let beginCalls = 0;
+
+  const result = await configureCiOpeningTestDb(baseUrl, "1", {
+    env: { GITHUB_ACTIONS: "true" },
+    createClient: async (connectionUrl) => {
+      connectedUrls.push(connectionUrl);
+      return {
+        async begin(callback) {
+          beginCalls += 1;
+          const tx = async (strings) => {
+            catalogQueries.push(strings.join(""));
+            return [
+              { name: "plain_table", has_toast: false },
+              { name: "toasted_table", has_toast: true },
+              { name: 'odd"name', has_toast: true },
+            ];
+          };
+          tx.unsafe = async (statement) => {
+            unsafeStatements.push(statement);
+          };
+          return await callback(tx);
+        },
+        async end(opts) {
+          endCalls.push(opts);
+        },
+      };
+    },
+  });
+
+  assert.deepEqual(result, { configured: true, tables: 3 });
+  assert.deepEqual(connectedUrls, [baseUrl]);
+  assert.equal(beginCalls, 1);
+  assert.equal(catalogQueries.length, 1);
+  assert.match(catalogQueries[0], /n\.nspname\s*=\s*'public'\s+AND\s+c\.relkind\s*=\s*'r'/);
+  assert.match(catalogQueries[0], /c\.reltoastrelid\s*<>\s*0\s+AS\s+has_toast/);
+  assert.deepEqual(unsafeStatements, [
+    'ALTER TABLE "public"."plain_table" SET (autovacuum_enabled = false)',
+    'ALTER TABLE "public"."toasted_table" SET (autovacuum_enabled = false, toast.autovacuum_enabled = false)',
+    'ALTER TABLE "public"."odd""name" SET (autovacuum_enabled = false, toast.autovacuum_enabled = false)',
+  ]);
+  assert.deepEqual(endCalls, [{ timeout: 5 }]);
+});
+
+test("configureCiOpeningTestDb always closes client when transaction fails", async () => {
+  const endCalls = [];
+  await assert.rejects(
+    configureCiOpeningTestDb(baseUrl, "1", {
+      env: { GITHUB_ACTIONS: "true" },
+      createClient: async () => ({
+        async begin(callback) {
+          const tx = async () => [{ name: "broken_table", has_toast: false }];
+          tx.unsafe = async () => {
+            throw new Error("simulated ALTER TABLE failure");
+          };
+          return await callback(tx);
+        },
+        async end(opts) {
+          endCalls.push(opts);
+        },
+      }),
+    }),
+    /simulated ALTER TABLE failure/,
+  );
+  assert.deepEqual(endCalls, [{ timeout: 5 }]);
 });
