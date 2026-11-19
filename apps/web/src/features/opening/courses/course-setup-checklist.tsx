@@ -2,7 +2,7 @@
 
 import type { CourseKnowledgeSync, CourseRouteSnapshot } from "@aistudy/contracts";
 import { CircleCheck, CircleDashed } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type MutableRefObject, type ReactNode } from "react";
 import { tone, ui } from "../design/ui";
 import { conversationObjectHref, validConversationId } from "../assistant/conversation-links";
 import { KnowledgeRebuildControl, type KnowledgeRebuildTerminalOutcome } from "../knowledge/knowledge-rebuild-control";
@@ -110,12 +110,11 @@ function SetupItem({ done, title, detail, children }: { done: boolean; title: st
   </li>;
 }
 
-type UnresolvedRebuildAttempt = {
+export type UnresolvedRebuildAttempt = {
   courseId: string;
   outcome: "cancelled" | "outcome_unknown";
   jobId: string | null;
   builtVersion: number | null;
-  recordVersion: number;
 };
 
 function resolveRefreshedKnowledge(
@@ -136,9 +135,8 @@ function resolveRefreshedKnowledge(
   const nextBuiltVersion = record.sync?.lastBuiltVersion ?? null;
   const builtVersionAdvanced = nextBuiltVersion !== null
     && (pendingAttempt.builtVersion === null || nextBuiltVersion > pendingAttempt.builtVersion);
-  const recordVersionAdvanced = !record.sync && record.version > pendingAttempt.recordVersion;
 
-  if ((sameRequestedJob && requestedJob?.state === "succeeded") || builtVersionAdvanced || recordVersionAdvanced) {
+  if ((sameRequestedJob && requestedJob?.state === "succeeded") || builtVersionAdvanced) {
     const sync = record.sync && sameRequestedJob && requestedJob?.state !== "succeeded"
       ? { ...record.sync, requestedJob: null }
       : record.sync;
@@ -158,7 +156,7 @@ function resolveRefreshedKnowledge(
   };
 }
 
-export function CourseSetupChecklist({ courseId, snapshot, goals, goalId, goalsUnavailable, goalsHref, archived = false, scopeActionDisabled = false, reloadToken = 0, originalConversationId, knowledgeClient, onReviewScope, onKnowledgeRebuilt }: {
+export function CourseSetupChecklist({ courseId, snapshot, goals, goalId, goalsUnavailable, goalsHref, archived = false, scopeActionDisabled = false, reloadToken = 0, originalConversationId, knowledgeClient, unresolvedAttemptRef, onReviewScope, onKnowledgeRebuilt }: {
   courseId: string;
   snapshot: Pick<CourseRouteSnapshot, "materials" | "scopeState" | "suggestions" | "summary">;
   /** Goals linked to this course; null until the goal list has been read. */
@@ -171,13 +169,15 @@ export function CourseSetupChecklist({ courseId, snapshot, goals, goalId, goalsU
   reloadToken?: number;
   originalConversationId?: string | null;
   knowledgeClient?: KnowledgeRebuildClient;
+  unresolvedAttemptRef?: MutableRefObject<UnresolvedRebuildAttempt | null>;
   onReviewScope: () => void;
   onKnowledgeRebuilt: () => void;
 }) {
   const client = useMemo(() => knowledgeClient ?? createKnowledgeRebuildClient(), [knowledgeClient]);
   const [knowledge, setKnowledge] = useState<KnowledgeStatus>({ status: "loading" });
   const requestSeq = useRef(0);
-  const unresolvedAttempt = useRef<UnresolvedRebuildAttempt | null>(null);
+  const localUnresolvedAttempt = useRef<UnresolvedRebuildAttempt | null>(null);
+  const unresolvedAttempt = unresolvedAttemptRef ?? localUnresolvedAttempt;
   useEffect(() => {
     if (unresolvedAttempt.current && unresolvedAttempt.current.courseId !== courseId) {
       unresolvedAttempt.current = null;
@@ -210,7 +210,7 @@ export function CourseSetupChecklist({ courseId, snapshot, goals, goalId, goalsU
         }
       });
     return () => { requestSeq.current += 1; };
-  }, [archived, client, courseId, reloadToken]);
+  }, [archived, client, courseId, reloadToken, unresolvedAttempt]);
   function rebuilt(record: CourseKnowledgeRecord) {
     requestSeq.current += 1;
     unresolvedAttempt.current = null;
@@ -230,7 +230,6 @@ export function CourseSetupChecklist({ courseId, snapshot, goals, goalId, goalsU
           outcome,
           jobId: record.sync?.requestedJob?.jobId ?? null,
           builtVersion: record.sync?.lastBuiltVersion ?? null,
-          recordVersion: record.version,
         }
       : null;
     setKnowledge({

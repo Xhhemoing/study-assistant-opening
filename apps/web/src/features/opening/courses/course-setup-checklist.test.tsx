@@ -670,3 +670,128 @@ it("keeps independent failed-request feedback while reflecting course-wide up_to
     vi.useRealTimers();
   }
 });
+
+it("keeps 知识已整理 incomplete after confirmNode increments graph version on a legacy graph without a succeeded build job until a real rebuild succeeds", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  try {
+    const jobId = "77777777-7777-4777-8777-777777777779";
+    let step = 0;
+    const read = vi.fn(async (_courseId: string, options?: AbortSignal | { signal?: AbortSignal; jobId?: string }): Promise<CourseKnowledgeRecord> => {
+      step += 1;
+      const requestedJobId = options && !("aborted" in options) ? options.jobId : undefined;
+      if (step <= 2) {
+        // Pre-existing knowledge graph with no historical succeeded build-course-knowledge job -> lastBuiltVersion: null.
+        return {
+          ...record(3),
+          version: 1,
+          sync: {
+            status: "up_to_date",
+            activeJobId: null,
+            lastBuiltVersion: null,
+            coveredSourceVersions: { [sourceId]: 1 },
+            eligibleSourceVersions: { [sourceId]: 1 },
+            parsingSourceCount: 0,
+            unreadableSourceCount: 0,
+            rebuildBlockedByMaterials: false,
+            lastFailedJob: null,
+            requestedJob: null,
+          },
+        };
+      }
+      if (step === 3) {
+        // Manual rebuild job is cancelled.
+        return {
+          ...record(3),
+          version: 1,
+          sync: {
+            status: "up_to_date",
+            activeJobId: null,
+            lastBuiltVersion: null,
+            coveredSourceVersions: { [sourceId]: 1 },
+            eligibleSourceVersions: { [sourceId]: 1 },
+            parsingSourceCount: 0,
+            unreadableSourceCount: 0,
+            rebuildBlockedByMaterials: false,
+            lastFailedJob: null,
+            requestedJob: requestedJobId === jobId ? { jobId, state: "cancelled" } : null,
+          },
+        };
+      }
+      if (step === 4) {
+        // confirmNode increments graph version 1 -> 2, while lastBuiltVersion remains null and requestedJob still echoes cancelled.
+        return {
+          ...record(3),
+          version: 2,
+          sync: {
+            status: "up_to_date",
+            activeJobId: null,
+            lastBuiltVersion: null,
+            coveredSourceVersions: { [sourceId]: 1 },
+            eligibleSourceVersions: { [sourceId]: 1 },
+            parsingSourceCount: 0,
+            unreadableSourceCount: 0,
+            rebuildBlockedByMaterials: false,
+            lastFailedJob: null,
+            requestedJob: requestedJobId === jobId ? { jobId, state: "cancelled" } : null,
+          },
+        };
+      }
+      if (step === 5) {
+        // Even a response omitting sync with a bumped raw graph version (e.g. confirmNode) must not clear unresolvedAttempt.
+        return {
+          ...record(3),
+          version: 3,
+        };
+      }
+      // Genuine external rebuild succeeds and records lastBuiltVersion: 4.
+      return {
+        ...record(3),
+        version: 4,
+        sync: {
+          status: "up_to_date",
+          activeJobId: null,
+          lastBuiltVersion: 4,
+          coveredSourceVersions: { [sourceId]: 1 },
+          eligibleSourceVersions: { [sourceId]: 1 },
+          parsingSourceCount: 0,
+          unreadableSourceCount: 0,
+          rebuildBlockedByMaterials: false,
+          lastFailedJob: null,
+          requestedJob: requestedJobId === jobId ? { jobId, state: "cancelled" } : null,
+        },
+      };
+    });
+    const client: KnowledgeRebuildClient = {
+      read,
+      rebuild: vi.fn(async () => ({ jobId, kind: "build-course-knowledge" as const, created: true })),
+    };
+
+    const value = await render(props({ snapshot: complete, goalId, knowledgeClient: client }));
+    expect(item("知识已整理").querySelector("p span")?.textContent).toBe("已完成");
+
+    await act(async () => control(item("知识已整理"), "重新整理知识点").click());
+    await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
+    expect(item("知识已整理").querySelector("p span")?.textContent).toBe("未完成");
+    expect(item("知识已整理").textContent).toContain("本次整理已取消");
+
+    // Refresh after confirmNode bumped version 1 -> 2 without any succeeded build job: must stay 未完成.
+    await render({ ...value, reloadToken: 1 });
+    expect(read).toHaveBeenLastCalledWith(courseId, { jobId });
+    expect(item("知识已整理").querySelector("p span")?.textContent).toBe("未完成");
+    expect(item("知识已整理").textContent).toContain("本次整理已取消");
+
+    // Refresh with bumped raw version and no sync metadata: still must stay 未完成.
+    await render({ ...value, reloadToken: 2 });
+    expect(read).toHaveBeenLastCalledWith(courseId, { jobId });
+    expect(item("知识已整理").querySelector("p span")?.textContent).toBe("未完成");
+    expect(item("知识已整理").textContent).toContain("本次整理已取消");
+
+    // Refresh after a genuine new rebuild succeeds (lastBuiltVersion: 4): clears unresolvedAttempt and restores 已完成.
+    await render({ ...value, reloadToken: 3 });
+    expect(read).toHaveBeenLastCalledWith(courseId, { jobId });
+    expect(item("知识已整理").querySelector("p span")?.textContent).toBe("已完成");
+    expect(item("知识已整理").textContent).toContain("已整理出 3 个知识点。");
+  } finally {
+    vi.useRealTimers();
+  }
+});

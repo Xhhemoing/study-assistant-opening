@@ -8,7 +8,7 @@ import { createCourseRouteClient, CourseRouteRequestError, type CourseRouteClien
 import { createLearningGoalClient, type LearningGoalClient } from "./learning-goal-client";
 import { userFacingMessage } from "../../../lib/user-facing-error";
 import { CourseSharedSkillControl } from "./course-shared-skill-control";
-import { CourseSetupChecklist } from "./course-setup-checklist";
+import { CourseSetupChecklist, type UnresolvedRebuildAttempt } from "./course-setup-checklist";
 import type { KnowledgeRebuildClient } from "../knowledge/knowledge-rebuild-client";
 import { conversationObjectHref } from "../assistant/conversation-links";
 const statusLabels = { unobserved: "待开始", needs_correction: "需要纠偏", assisted: "受助完成，待独立验证", needs_verification: "待验证", verified: "已有验证记录", blocked: "暂时受阻" };
@@ -112,8 +112,14 @@ function RoutePanel({ courseId, archived = false, grouped = false, originalConve
   const [result, setResult] = useState<CourseRouteActionResult | null>(null), [pending, setPending] = useState<Command | null>(() => readCommand(courseId)), [storageWarning, setStorageWarning] = useState(false);
   const [routeStale, setRouteStale] = useState(false), [revealScope, setRevealScope] = useState(0);
   const writing = useRef(false), active = useRef(true), scopeEditor = useRef<HTMLFieldSetElement>(null), pendingRef = useRef(pending), lastRefreshToken = useRef(refreshToken);
+  const unresolvedKnowledgeAttempt = useRef<UnresolvedRebuildAttempt | null>(null);
   pendingRef.current = pending;
   useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
+  useEffect(() => {
+    if (unresolvedKnowledgeAttempt.current && unresolvedKnowledgeAttempt.current.courseId !== courseId) {
+      unresolvedKnowledgeAttempt.current = null;
+    }
+  }, [courseId]);
   useEffect(() => {
     if (refreshToken !== lastRefreshToken.current) {
       lastRefreshToken.current = refreshToken;
@@ -214,7 +220,7 @@ function RoutePanel({ courseId, archived = false, grouped = false, originalConve
   return <section id="course-learning-route" aria-labelledby="course-route-heading" className="space-y-3 border-t border-line pt-5">
     <div className="flex flex-wrap items-center justify-between gap-2"><h2 id="course-route-heading" className="text-base font-semibold">全课路线与下一步</h2><a className={ui.quiet} href={goalsHref}>目标与成功标准</a></div>
     <p className="text-xs leading-6 text-text-3">先核对目标、资料和课程范围，再进入真实学习活动。提取建议与知识图不代表已覆盖全课，学习记录也不会自动宣称掌握。</p>
-    {snapshot ? <CourseSetupChecklist courseId={courseId} snapshot={snapshot} goals={goals ? availableGoals : null} goalId={goalId} goalsUnavailable={Boolean(goalError)} goalsHref={goalsHref} archived={archived} scopeActionDisabled={locked || loading} reloadToken={reload} originalConversationId={originalConversationId} knowledgeClient={knowledgeClient} onReviewScope={reviewScope} onKnowledgeRebuilt={() => { setRouteStale(true); onKnowledgeRebuilt?.(); }} /> : null}
+    {snapshot ? <CourseSetupChecklist courseId={courseId} snapshot={snapshot} goals={goals ? availableGoals : null} goalId={goalId} goalsUnavailable={Boolean(goalError)} goalsHref={goalsHref} archived={archived} scopeActionDisabled={locked || loading} reloadToken={reload} originalConversationId={originalConversationId} knowledgeClient={knowledgeClient} unresolvedAttemptRef={unresolvedKnowledgeAttempt} onReviewScope={reviewScope} onKnowledgeRebuilt={() => { setRouteStale(true); onKnowledgeRebuilt?.(); }} /> : null}
     {routeStale && (editing || busy || pending) ? <p role="status" className="text-xs text-text-2">知识点已重新整理；完成当前编辑或确认后会重新读取课程路线，显示新的建议。</p> : null}
     {loading ? <p role="status" className="text-sm text-text-3">正在读取课程路线…</p> : snapshot ? <>
       <p className="text-sm text-text-2">{snapshot.scopeState === "confirmed" ? `已确认 ${snapshot.summary.total} 项要求，其中 ${snapshot.summary.mandatory} 项必修；${snapshot.summary.verified} 项已有验证记录，${snapshot.summary.blocked} 项受阻。` : "尚未确认全课范围，请对照大纲和全部资料检查。"}</p>

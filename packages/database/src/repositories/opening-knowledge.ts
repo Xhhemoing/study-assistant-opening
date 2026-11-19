@@ -467,9 +467,7 @@ async function readSyncStatusInternal(
       && typeof resultObj.coveredSourceVersions === "object"
       && !Array.isArray(resultObj.coveredSourceVersions),
   );
-  const lastBuiltVersion = latestSucceeded
-    ? (resultVersion ?? (record ? record.version : null))
-    : (record ? record.version : null);
+  const lastBuiltVersion = latestSucceeded ? resultVersion : null;
   const coveredSourceVersions = hasResultCovered
     ? parseSourceVersions(resultObj!.coveredSourceVersions)
     : (record?.sourceVersions ?? {});

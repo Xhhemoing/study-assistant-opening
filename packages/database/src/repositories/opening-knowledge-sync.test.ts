@@ -128,9 +128,10 @@ function makeFakeSql(init?: {
       }
 
       if (q.startsWith("SELECT w.id FROM workspaces w JOIN courses c")) {
-        const courseId = String(values[0]);
-        const wsId = String(values[1]);
-        const ownerId = String(values[2]);
+        const isConfirmOrder = q.includes("WHERE w.id=?");
+        const wsId = String(isConfirmOrder ? values[0] : values[1]);
+        const ownerId = String(isConfirmOrder ? values[1] : values[2]);
+        const courseId = String(isConfirmOrder ? values[2] : values[0]);
         const course = view.courses.get(courseId);
         init?.onQuery?.(q);
         return course && !course.archived && wsId === W && ownerId === U ? [{ id: W }] : [];
@@ -158,7 +159,7 @@ function makeFakeSql(init?: {
         return row ? [{ ...row, node_definitions: {} }] : [];
       }
 
-      if (q.startsWith("SELECT version, snapshot, source_versions FROM opening_course_knowledge")) {
+      if (q.startsWith("SELECT version, snapshot, source_versions FROM opening_course_knowledge") || q.startsWith("SELECT version,snapshot,source_versions FROM opening_course_knowledge")) {
         const row = view.knowledge.get(String(values[2]));
         init?.onQuery?.(q);
         return row ? [row] : [];
@@ -179,12 +180,18 @@ function makeFakeSql(init?: {
         return [];
       }
 
-      if (q.startsWith("UPDATE opening_course_knowledge SET version = ?")) {
+      if (q.startsWith("INSERT INTO opening_knowledge_confirmations")) {
+        confirmations.add(String(values[3]));
+        init?.onQuery?.(q);
+        return [];
+      }
+
+      if (q.startsWith("UPDATE opening_course_knowledge SET version = ?") || q.startsWith("UPDATE opening_course_knowledge SET version=?")) {
         const version = Number(values[0]);
         const snapshot = values[1] as KnowledgeRow["snapshot"];
         const courseId = String(values[3]);
         const row = knowledge.get(courseId);
-        if (row && row.version === Number(values[4])) {
+        if (row && (values.length < 5 || row.version === Number(values[4]))) {
           row.version = version;
           row.snapshot = snapshot;
         }
@@ -193,7 +200,7 @@ function makeFakeSql(init?: {
       }
 
       if (q.startsWith("SELECT c.* FROM opening_source_chunks c")) {
-        const chunkIds = values[2] as string[];
+        const chunkIds = (values.length === 2 ? values[1] : values[2]) as string[];
         const found = chunkIds
           .map((id) => view.chunks.get(id))
           .filter((chunk): chunk is ChunkState => {
@@ -262,7 +269,7 @@ function makeFakeSql(init?: {
         return [stored];
       }
 
-      if (q.startsWith("SELECT s.id, s.version FROM opening_sources s")) {
+      if (q.startsWith("SELECT s.id, s.version FROM opening_sources s") || q.startsWith("SELECT s.id,s.version FROM opening_sources s")) {
         init?.onQuery?.(q);
         return [...view.sources.values()]
           .filter(
@@ -1176,5 +1183,79 @@ describe("opening knowledge sync and coalescing", () => {
     });
     expect(legitimate.version).toBe(3);
     expect(legitimate.sourceVersions).toEqual({});
+  });
+
+  it("keeps lastBuiltVersion null after confirmNode bumps graph version when no succeeded rebuild job exists, and advances it only after a genuine succeeded rebuild", async () => {
+    const cancelledJobId = randomUUID();
+    const succeededJobId = randomUUID();
+    const db = makeFakeSql({
+      sources: [
+        { id: S1, version: 1, uploadState: "uploaded", parseState: "ready", available: true, excluded: false, hasChunk: true, hasTextChunk: true, attached: true, purpose: "teaching" },
+      ],
+      chunks: [{ id: CH1, sourceId: S1, sourceVersion: 1, text: "极限定义正文" }],
+      knowledgeRows: [
+        knowledgeRow({
+          version: 1,
+          snapshot: {
+            courseId: C,
+            version: 1,
+            nodes: [{ id: N1, courseId: C, label: "极限", kind: "concept", evidenceChunkIds: [CH1], status: "needs_check" }],
+            edges: [],
+          },
+          source_versions: { [S1]: 1 },
+        }),
+      ],
+      jobs: [{
+        id: cancelledJobId,
+        workspace_id: W,
+        owner_user_id: U,
+        key: "k-cancelled",
+        kind: "build-course-knowledge",
+        payload: { courseId: C },
+        result: null,
+        state: "cancelled",
+        privacy_epoch: 0,
+        created_at: new Date(10),
+        updated_at: new Date(20),
+      }],
+    });
+    const repo = createOpeningKnowledgeRepository(db.sql);
+
+    const beforeConfirm = await repo.getWithSync(scope, C, { includeDetails: true, requestedJobId: cancelledJobId });
+    expect(beforeConfirm.version).toBe(1);
+    expect(beforeConfirm.sync?.status).toBe("up_to_date");
+    expect(beforeConfirm.sync?.lastBuiltVersion).toBeNull();
+    expect(beforeConfirm.sync?.requestedJob).toEqual({ jobId: cancelledJobId, state: "cancelled" });
+
+    // Confirming a single node increments graph version 1 -> 2, but must NOT fabricate a succeeded rebuild version.
+    const confirmed = await repo.confirmNode(scope, C, N1, {
+      expectedVersion: 1,
+      sourceVersions: { [S1]: 1 },
+    });
+    expect(confirmed.version).toBe(2);
+    expect(confirmed.snapshot.nodes[0]?.status).toBe("supported");
+
+    const afterConfirm = await repo.getWithSync(scope, C, { includeDetails: true, requestedJobId: cancelledJobId });
+    expect(afterConfirm.version).toBe(2);
+    expect(afterConfirm.sync?.status).toBe("up_to_date");
+    expect(afterConfirm.sync?.lastBuiltVersion).toBeNull();
+    expect(afterConfirm.sync?.requestedJob).toEqual({ jobId: cancelledJobId, state: "cancelled" });
+
+    // Once a genuine rebuild job succeeds, lastBuiltVersion reflects that job's built version.
+    db.jobs.push({
+      id: succeededJobId,
+      workspace_id: W,
+      owner_user_id: U,
+      key: "k-succeeded",
+      kind: "build-course-knowledge",
+      payload: { courseId: C },
+      result: { version: 3, coveredSourceVersions: { [S1]: 1 } },
+      state: "succeeded",
+      privacy_epoch: 0,
+      created_at: new Date(30),
+      updated_at: new Date(40),
+    });
+    const afterRebuild = await repo.getWithSync(scope, C, { includeDetails: true, requestedJobId: cancelledJobId });
+    expect(afterRebuild.sync?.lastBuiltVersion).toBe(3);
   });
 });
