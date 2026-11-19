@@ -15,3 +15,16 @@ export function selectCurrentLearningActivity<T extends CurrentLearningActivity>
   return rows.filter(row => row.courseId === courseId && !row.placeholder && ["active", "paused"].includes(row.status)
     && (!explicit.length || row.id === explicit[0])).sort(compareCurrentLearningActivities)[0] ?? null;
 }
+
+/** Select the newest active/paused non-placeholder activity across course-bound and course-less rows, or filter to a single courseId when provided. */
+export function selectCurrentWorkspaceActivity<T extends CurrentLearningActivity>(
+  rows: readonly T[],
+  courseId: string | null = null,
+  references: readonly string[] = [],
+): T | null {
+  const explicit = [...new Set(references)];
+  if (explicit.length > 1) return null;
+  return rows.filter(row => (courseId === null || row.courseId === courseId) && !row.placeholder
+    && ["active", "paused"].includes(row.status) && (!explicit.length || row.id === explicit[0]))
+    .sort(compareCurrentLearningActivities)[0] ?? null;
+}

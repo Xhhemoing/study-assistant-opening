@@ -1,7 +1,13 @@
-import type { Scope } from "@aistudy/contracts";
+import {
+  WRITING_WORKSPACE_PROTOCOL,
+  writingActivityCheckpointSchema,
+  type Scope,
+  type WritingActivityCheckpoint,
+} from "@aistudy/contracts";
 import { isDeepStrictEqual } from "node:util";
-import { compareCurrentLearningActivities, selectCurrentLearningActivity } from "@aistudy/domain";
+import { compareCurrentLearningActivities, selectCurrentLearningActivity, selectCurrentWorkspaceActivity } from "@aistudy/domain";
 import type { Sql, TransactionSql } from "postgres";
+import { openingNoteReadable } from "./opening-note-provenance";
 
 type Db = Sql | TransactionSql;
 /** Server-side identities only; never pass browser-provided task projections here. */
@@ -149,4 +155,183 @@ export async function readOpeningCurrentLearningRecovery(db: Db, scope: Scope): 
   const current = selectRecovery(await candidates(db, scope, null, { recoveryOnly: true }))
     ?? selectRecovery(await candidates(db, scope, null, { hasDecisionOnly: true }));
   return current ? { activityId: current.id, sessionId: current.sessionId, courseId: current.courseId } : null;
+}
+
+export type OpeningWorkspaceActivityRecovery =
+  | {
+      kind: "writing";
+      activityId: string;
+      courseId: string | null;
+      workGroupId: string;
+      documentId: string;
+      variantLabel: string;
+      savedRevisionNumber: number;
+      currentRevisionNumber: number;
+      focusBlockId: string | null;
+      focusStatus: "exact" | "block_missing" | "none";
+    }
+  | {
+      kind: "course";
+      activityId: string;
+      sessionId: string | null;
+      courseId: string;
+    };
+
+type WorkspaceCandidateRow = {
+  id: string;
+  courseId: string | null;
+  status: string;
+  updatedAt: string;
+  sessionId: string | null;
+  placeholder: boolean;
+  writingCheckpoint: WritingActivityCheckpoint | null;
+};
+
+async function workspaceCandidates(
+  db: Db,
+  scope: Scope,
+  options: { recoveryOnly?: boolean; references?: string[]; sessionId?: string | null } = {},
+): Promise<WorkspaceCandidateRow[]> {
+  const rows = await db`SELECT a.id,a.course_id,a.status,a.updated_at,a.content_version,a.intent_kind,a.create_intent,a.checkpoint_json,
+      s.id AS session_id, (c.id IS NOT NULL) AS course_present
+    FROM opening_teaching_activities a
+    JOIN workspaces w ON w.id=a.workspace_id AND w.owner_user_id=a.owner_user_id
+    LEFT JOIN courses c ON c.id=a.course_id AND c.workspace_id=a.workspace_id
+    LEFT JOIN opening_learning_sessions s ON s.id::text=COALESCE(a.checkpoint_json->'spanLesson'->>'sessionId',${options.sessionId ?? null}::text)
+      AND s.activity_id=a.id AND s.course_id=a.course_id AND s.workspace_id=a.workspace_id AND s.owner_user_id=a.owner_user_id
+    WHERE a.workspace_id=${scope.workspaceId} AND a.owner_user_id=${scope.ownerUserId}
+      AND (a.course_id IS NULL OR c.archived_at IS NULL)
+      AND a.status IN ('active','paused')
+      AND a.create_intent->>'protocol' IS DISTINCT FROM 'card-review-session-v1'
+      AND a.client_key NOT LIKE 'card-session:%'
+      AND NOT (COALESCE(a.checkpoint_json,'{}'::jsonb) ? 'cardReviewSession')
+      AND COALESCE(a.create_intent->>'legacy','false')<>'true'
+      AND a.client_key NOT LIKE 'legacy-course-continue:%'
+      AND ${options.recoveryOnly ? db`(COALESCE(a.checkpoint_json->'spanLesson'->>'retestId',a.goal_json->'courseRoute'->>'retestId') IS NULL
+        OR EXISTS (SELECT 1 FROM opening_retest_activities r
+          LEFT JOIN opening_tasks rt ON rt.id=r.task_id AND rt.workspace_id=r.workspace_id AND rt.owner_user_id=r.owner_user_id
+          WHERE r.workspace_id=a.workspace_id AND r.owner_user_id=a.owner_user_id
+            AND r.course_id=a.course_id AND r.status IN ('proposed','accepted','in_progress')
+            AND (rt.id IS NULL OR rt.status NOT IN ('done','skipped'))
+            AND lower(COALESCE(a.checkpoint_json->'spanLesson'->>'retestId',a.goal_json->'courseRoute'->>'retestId'))
+              =ANY(ARRAY[lower(r.id::text),lower(r.candidate_id::text),lower(r.candidate_reference_id::text)])))` : db`true`}
+      AND ${options.references?.length ? db`a.id::text=ANY(${options.references}::text[])` : db`true`}`;
+  return rows
+    .filter(row => row.course_id == null || row.course_present !== false)
+    .map(row => {
+      const protocol = row.create_intent?.protocol;
+      const span = protocol === "span-lesson-v1";
+      const parsedWriting = protocol === WRITING_WORKSPACE_PROTOCOL
+        ? writingActivityCheckpointSchema.safeParse(row.checkpoint_json?.writingWorkspace)
+        : null;
+      const placeholder = protocol === WRITING_WORKSPACE_PROTOCOL
+        ? !parsedWriting?.success
+        : span
+          ? !row.session_id
+          : row.intent_kind === "course_continue" && Number(row.content_version) === 0;
+      return {
+        id: String(row.id),
+        courseId: row.course_id == null ? null : String(row.course_id),
+        status: String(row.status),
+        updatedAt: new Date(row.updated_at).toISOString(),
+        sessionId: row.session_id ? String(row.session_id) : null,
+        placeholder,
+        writingCheckpoint: parsedWriting?.success ? parsedWriting.data : null,
+      };
+    });
+}
+
+/**
+ * Workspace-wide activity recovery across course-bound and course-less writing
+ * activities. Course-bound dispatch preserves existing recovery semantics.
+ */
+export async function readOpeningWorkspaceActivityRecovery(
+  db: Db,
+  scope: Scope,
+  reference: OpeningCurrentLearningReference = {},
+): Promise<OpeningWorkspaceActivityRecovery | null> {
+  const references: string[] = [];
+  if (reference.activityId != null) references.push(reference.activityId);
+  if (reference.sessionId != null) {
+    const [session] = await db`SELECT s.activity_id FROM opening_learning_sessions s
+      JOIN opening_teaching_activities a ON a.id=s.activity_id AND a.course_id IS NOT DISTINCT FROM s.course_id
+        AND a.workspace_id=s.workspace_id AND a.owner_user_id=s.owner_user_id
+      JOIN workspaces w ON w.id=s.workspace_id AND w.owner_user_id=s.owner_user_id
+      WHERE s.id::text=${reference.sessionId} AND s.workspace_id=${scope.workspaceId}
+        AND s.owner_user_id=${scope.ownerUserId}`;
+    if (!session) return null;
+    references.push(String(session.activity_id));
+  }
+  if (reference.taskId != null) {
+    const [task] = await db`SELECT course_id FROM opening_tasks
+      WHERE id::text=${reference.taskId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+    if (!task || task.course_id == null) return null;
+    const binding = await readOpeningTaskTeachingBinding(db, scope, String(task.course_id), reference.taskId);
+    if (binding.kind === "unavailable" || binding.kind === "continuation") return null;
+    if (binding.kind === "current") references.push(binding.activityId);
+  }
+  const hasExplicitRef = references.length > 0;
+  let remaining = await workspaceCandidates(db, scope, {
+    recoveryOnly: !hasExplicitRef,
+    references,
+    sessionId: reference.sessionId,
+  });
+  while (remaining.length) {
+    const selected = selectCurrentWorkspaceActivity(remaining, null, references);
+    if (!selected) break;
+    if (selected.writingCheckpoint) {
+      if (reference.sessionId != null) return null;
+      const checkpoint = selected.writingCheckpoint;
+      const docs = await db`
+        SELECT d.id, d.current_revision_number,
+          EXISTS (
+            SELECT 1 FROM library_blocks b
+            WHERE b.workspace_id = d.workspace_id
+              AND b.document_id = d.id
+              AND b.id::text = ${checkpoint.focusBlockId ?? ""}
+          ) AS focus_exists
+        FROM library_documents d
+        WHERE d.id = ${checkpoint.activeDocumentId}
+          AND d.workspace_id = ${scope.workspaceId}
+          AND d.deleted_at IS NULL
+          AND ${openingNoteReadable(db, scope.workspaceId, db`d.id`)}
+        LIMIT 1`;
+      if (docs.length) {
+        const focusStatus = checkpoint.focusBlockId == null
+          ? "none"
+          : docs[0]!.focus_exists
+            ? "exact"
+            : "block_missing";
+        return {
+          kind: "writing",
+          activityId: selected.id,
+          courseId: selected.courseId,
+          workGroupId: checkpoint.workGroupId,
+          documentId: checkpoint.activeDocumentId,
+          variantLabel: checkpoint.activeVariantLabel,
+          savedRevisionNumber: checkpoint.savedRevisionNumber,
+          currentRevisionNumber: Number(docs[0]!.current_revision_number),
+          focusBlockId: checkpoint.focusBlockId,
+          focusStatus,
+        };
+      }
+      if (hasExplicitRef) return null;
+      remaining = remaining.filter(row => row.id !== selected.id);
+      continue;
+    }
+    if (selected.courseId != null) {
+      if (reference.sessionId != null && selected.sessionId !== reference.sessionId) return null;
+      return {
+        kind: "course",
+        activityId: selected.id,
+        sessionId: selected.sessionId,
+        courseId: selected.courseId,
+      };
+    }
+    if (hasExplicitRef) return null;
+    remaining = remaining.filter(row => row.id !== selected.id);
+  }
+  if (hasExplicitRef || reference.sessionId != null) return null;
+  const courseFallback = await readOpeningCurrentLearningRecovery(db, scope);
+  return courseFallback ? { kind: "course", ...courseFallback } : null;
 }

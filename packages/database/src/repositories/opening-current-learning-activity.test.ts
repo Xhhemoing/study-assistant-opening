@@ -1,6 +1,11 @@
 import { expect, it, vi } from "vitest";
 import type { Sql } from "postgres";
-import { readOpeningCurrentLearningActivity, readOpeningCurrentLearningRecovery, readOpeningTaskTeachingBinding } from "./opening-current-learning-activity";
+import {
+  readOpeningCurrentLearningActivity,
+  readOpeningCurrentLearningRecovery,
+  readOpeningTaskTeachingBinding,
+  readOpeningWorkspaceActivityRecovery,
+} from "./opening-current-learning-activity";
 const scope = { workspaceId: "workspace", ownerUserId: "owner" };
 const row = (id: string, extra = {}) => ({ id, course_id: "course", status: "active", updated_at: "2026-11-01T00:00:00Z", content_version: 1, intent_kind: "topic", create_intent: {}, ...extra });
 function db(...results: unknown[][]) {
@@ -90,4 +95,111 @@ it("excludes card-session keys, cardReviewSession checkpoints, and legacy-course
     expect(query).toContain("NOT (COALESCE(a.checkpoint_json,'{}'::jsonb) ? 'cardReviewSession')");
     expect(query).toContain("a.client_key NOT LIKE 'legacy-course-continue:%'");
   }
+});
+
+it("recovers course-less writing workspace pinned to checkpoint variant and verifies block status", async () => {
+  const workGroupId = "11111111-1111-4111-8111-111111111111";
+  const docB = "22222222-2222-4222-8222-222222222222";
+  const block2 = "33333333-3333-4333-8333-333333333333";
+  const writingRow = row("44444444-4444-4444-8444-444444444444", {
+    course_id: null,
+    updated_at: "2026-11-18T10:00:00Z",
+    create_intent: { protocol: "writing-workspace-v1", workGroupId },
+    checkpoint_json: {
+      writingWorkspace: {
+        protocol: "writing-workspace-v1",
+        workGroupId,
+        activeDocumentId: docB,
+        activeVariantLabel: "B 稿",
+        savedRevisionNumber: 2,
+        focusBlockId: block2,
+        updatedAt: "2026-11-18T10:00:00.000Z",
+      },
+    },
+  });
+
+  const exactSql = db([writingRow], [{ id: docB, current_revision_number: 3, focus_exists: true }]);
+  expect(await readOpeningWorkspaceActivityRecovery(exactSql, scope)).toEqual({
+    kind: "writing",
+    activityId: writingRow.id,
+    courseId: null,
+    workGroupId,
+    documentId: docB,
+    variantLabel: "B 稿",
+    savedRevisionNumber: 2,
+    currentRevisionNumber: 3,
+    focusBlockId: block2,
+    focusStatus: "exact",
+  });
+  const sqlText = queries(exactSql).find(item => item.includes("FROM opening_teaching_activities a"))!;
+  expect(sqlText).toContain("LEFT JOIN courses c ON c.id=a.course_id AND c.workspace_id=a.workspace_id");
+  expect(sqlText).toContain("a.course_id IS NULL OR c.archived_at IS NULL");
+
+  const missingBlockSql = db([writingRow], [{ id: docB, current_revision_number: 4, focus_exists: false }]);
+  expect(await readOpeningWorkspaceActivityRecovery(missingBlockSql, scope)).toMatchObject({
+    kind: "writing",
+    documentId: docB,
+    currentRevisionNumber: 4,
+    focusBlockId: block2,
+    focusStatus: "block_missing",
+  });
+
+  const noFocusRow = {
+    ...writingRow,
+    checkpoint_json: {
+      writingWorkspace: { ...writingRow.checkpoint_json.writingWorkspace, focusBlockId: null },
+    },
+  };
+  const noneSql = db([noFocusRow], [{ id: docB, current_revision_number: 2, focus_exists: false }]);
+  expect(await readOpeningWorkspaceActivityRecovery(noneSql, scope)).toMatchObject({
+    kind: "writing",
+    focusBlockId: null,
+    focusStatus: "none",
+  });
+});
+
+it("dispatches course recovery when course activity is newer or when writing doc is deleted", async () => {
+  const workGroupId = "11111111-1111-4111-8111-111111111111";
+  const docA = "22222222-2222-4222-8222-222222222222";
+  const writingOld = row("44444444-4444-4444-8444-444444444444", {
+    course_id: null,
+    updated_at: "2026-11-18T09:00:00Z",
+    create_intent: { protocol: "writing-workspace-v1", workGroupId },
+    checkpoint_json: {
+      writingWorkspace: {
+        protocol: "writing-workspace-v1",
+        workGroupId,
+        activeDocumentId: docA,
+        activeVariantLabel: "初稿",
+        savedRevisionNumber: 1,
+        focusBlockId: null,
+        updatedAt: "2026-11-18T09:00:00.000Z",
+      },
+    },
+  });
+  const courseNew = row("55555555-5555-4555-8555-555555555555", {
+    course_id: "course-1",
+    updated_at: "2026-11-18T11:00:00Z",
+    session_id: "sess-1",
+  });
+
+  expect(await readOpeningWorkspaceActivityRecovery(db([writingOld, courseNew]), scope)).toEqual({
+    kind: "course",
+    activityId: courseNew.id,
+    courseId: "course-1",
+    sessionId: "sess-1",
+  });
+
+  // If explicit reference points to a deleted writing document, never fall back to another activity.
+  const deletedExplicitSql = db([writingOld], []);
+  expect(await readOpeningWorkspaceActivityRecovery(deletedExplicitSql, scope, { activityId: writingOld.id })).toBeNull();
+
+  // Without explicit reference, deleted writing doc falls through to remaining live course candidate.
+  const deletedFallbackSql = db([writingOld, { ...courseNew, updated_at: "2026-11-18T08:00:00Z" }], []);
+  expect(await readOpeningWorkspaceActivityRecovery(deletedFallbackSql, scope)).toEqual({
+    kind: "course",
+    activityId: courseNew.id,
+    courseId: "course-1",
+    sessionId: "sess-1",
+  });
 });

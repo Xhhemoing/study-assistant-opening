@@ -353,3 +353,10 @@ export {
   type OpeningAssetGraphOptions,
   type OpeningAssetGraphRepository,
 } from "./repositories/opening-asset-graph";
+export {
+  createOpeningWritingWorkspaceRepository,
+  OpeningWritingError,
+  type OpeningWritingErrorCode,
+  type OpeningWritingWorkspaceRepository,
+  type WritingCommandResult,
+} from "./repositories/opening-writing-workspace";
