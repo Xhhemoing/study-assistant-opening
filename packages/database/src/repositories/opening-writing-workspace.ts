@@ -190,11 +190,9 @@ export function createOpeningWritingWorkspaceRepository(
   const library = createLibraryRepository(sql);
 
   async function lockWriteBoundary(tx: TransactionSql, scope: Scope): Promise<void> {
-    try {
-      await lockWorkspaceLearningHistory(tx, scope);
-    } catch (error) {
-      mapLibraryError(error);
-    }
+    // Acquire workspaces FOR SHARE before touching opening_workspace_history_revisions
+    // so writing writes align with opening-backup-apply.ts (workspaces -> history)
+    // while remaining compatible with sibling FOR SHARE owner locks.
     const owners = await tx`
       SELECT id FROM workspaces
       WHERE id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}
@@ -202,6 +200,11 @@ export function createOpeningWritingWorkspaceRepository(
     `;
     if (!owners.length) {
       throw new OpeningWritingError("NOT_FOUND", "工作区不存在。");
+    }
+    try {
+      await lockWorkspaceLearningHistory(tx, scope);
+    } catch (error) {
+      mapLibraryError(error);
     }
   }
 

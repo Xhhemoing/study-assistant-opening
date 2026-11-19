@@ -132,10 +132,10 @@ describe("createOpeningWritingWorkspaceRepository", () => {
     expect(view.currentVariant.variantLabel).toBe("初稿");
     expect(view.focusRestore).toEqual({ status: "exact", blockId: capturedBlockId });
 
-    const historyLockIndex = queries.findIndex((q) => q.sql.includes("opening_workspace_history_revisions") && q.sql.includes("FOR UPDATE"));
     const workspaceShareIndex = queries.findIndex((q) => q.sql.includes("FROM workspaces") && q.sql.includes("FOR SHARE"));
-    expect(historyLockIndex).toBeGreaterThanOrEqual(0);
-    expect(workspaceShareIndex).toBeGreaterThan(historyLockIndex);
+    const historyLockIndex = queries.findIndex((q) => q.sql.includes("opening_workspace_history_revisions") && q.sql.includes("FOR UPDATE"));
+    expect(workspaceShareIndex).toBeGreaterThanOrEqual(0);
+    expect(historyLockIndex).toBeGreaterThan(workspaceShareIndex);
     expect(queries.some((q) => q.sql.includes("opening_learning_observations"))).toBe(false);
   });
 
@@ -1056,8 +1056,9 @@ describe("createOpeningWritingWorkspaceRepository", () => {
   it("opens the same owned readable manuscript with both lowercase and uppercase UUIDs", async () => {
     const lowerDocId = "abcdef12-3456-4abc-8def-abcdef123456";
     const upperDocId = lowerDocId.toUpperCase();
-    const lowerBlockId = "fedcba98-7654-4fed-8cba-fedcba987654";
-    const upperBlockId = lowerBlockId.toUpperCase();
+    const defaultBlockId = "fedcba98-7654-4fed-8cba-fedcba987654";
+    const secondBlockId = "a1b2c3d4-e5f6-4a1b-8c2d-e3f4a5b6c7d8";
+    const upperSecondBlockId = secondBlockId.toUpperCase();
     const lowerActivityId = "12345678-9abc-4def-8123-456789abcdef";
     const upperActivityId = lowerActivityId.toUpperCase();
     const now = "2026-11-18T13:00:00.000Z";
@@ -1068,7 +1069,7 @@ describe("createOpeningWritingWorkspaceRepository", () => {
       parentDocumentId: null,
       parentRevisionNumber: null,
       keptAsPreferred: false,
-      focusBlockId: lowerBlockId,
+      focusBlockId: defaultBlockId,
       assistanceRecords: [],
     };
     const activityRow = {
@@ -1082,7 +1083,7 @@ describe("createOpeningWritingWorkspaceRepository", () => {
           activeDocumentId: lowerDocId,
           activeVariantLabel: "初稿",
           savedRevisionNumber: 1,
-          focusBlockId: lowerBlockId,
+          focusBlockId: defaultBlockId,
           updatedAt: now,
         },
       },
@@ -1100,7 +1101,8 @@ describe("createOpeningWritingWorkspaceRepository", () => {
         return [{ id: lowerDocId, title: "大小写兼容测试", current_revision_number: 1, created_at: now, updated_at: now, meta }];
       }
       if (text.includes("FROM library_blocks") && text.includes("id::text =")) {
-        return [{ id: lowerBlockId }];
+        expect(String(values[2])).toBe(secondBlockId);
+        return [{ id: secondBlockId }];
       }
       return [];
     });
@@ -1108,21 +1110,21 @@ describe("createOpeningWritingWorkspaceRepository", () => {
     const repo = createOpeningWritingWorkspaceRepository(sql);
     const lowerView = await repo.getView(SCOPE, lowerDocId, {
       activityId: lowerActivityId,
-      requestedFocusBlockId: lowerBlockId,
+      requestedFocusBlockId: secondBlockId,
     });
     const upperView = await repo.getView(SCOPE, upperDocId, {
       activityId: upperActivityId,
-      requestedFocusBlockId: upperBlockId,
+      requestedFocusBlockId: upperSecondBlockId,
     });
 
     expect(lowerView).not.toBeNull();
     expect(upperView).toEqual(lowerView);
     expect(upperView!.currentDocumentId).toBe(lowerDocId);
     expect(upperView!.activityId).toBe(lowerActivityId);
-    expect(upperView!.focusRestore).toEqual({ status: "exact", blockId: lowerBlockId });
+    expect(upperView!.focusRestore).toEqual({ status: "exact", blockId: secondBlockId });
   });
 
-  it("P1 #2: acquires workspace history lock before owner lock and re-runs authorization replay after ON CONFLICT DO NOTHING, and rejects missing-protocol writingWorkspace rows in start() with NOT_FOUND", async () => {
+  it("P1 #2: locks workspaces FOR SHARE without re-entering workspace history, re-runs authorization replay after ON CONFLICT DO NOTHING, and rejects missing-protocol writingWorkspace rows in start() with NOT_FOUND", async () => {
     const workGroupId = "33333333-3333-4333-8333-333333333333";
     const deletedDocId = "44444444-4444-4444-8444-444444444444";
     const racedActivityId = "55555555-5555-4555-8555-555555555555";
@@ -1130,7 +1132,7 @@ describe("createOpeningWritingWorkspaceRepository", () => {
     const now = "2026-11-18T14:00:00.000Z";
 
     // (a) Concurrent ON CONFLICT DO NOTHING won by an unreadable writing activity -> NOT_FOUND (not 409 CONFLICT),
-    // with lockWorkspaceLearningHistory acquired BEFORE lockLearningOwner (workspaces FOR SHARE).
+    // acquiring workspaces FOR SHARE without re-entering opening_workspace_history_revisions.
     const unreadableWritingWinner = {
       id: racedActivityId,
       workspace_id: SCOPE.workspaceId,
@@ -1188,14 +1190,17 @@ describe("createOpeningWritingWorkspaceRepository", () => {
     ).rejects.toMatchObject({ code: "NOT_FOUND" });
     expect(selectClientKeyCount).toBe(2);
 
-    const historyLockIdx = raceUnreadable.queries.findIndex(
-      (q) => q.sql.includes("opening_workspace_history_revisions") && q.sql.includes("FOR UPDATE"),
-    );
     const ownerShareIdx = raceUnreadable.queries.findIndex(
       (q) => q.sql.includes("FROM workspaces") && q.sql.includes("FOR SHARE"),
     );
-    expect(historyLockIdx).toBeGreaterThanOrEqual(0);
-    expect(ownerShareIdx).toBeGreaterThan(historyLockIdx);
+    const activityLockIdx = raceUnreadable.queries.findIndex(
+      (q) => q.sql.includes("FROM opening_teaching_activities") && q.sql.includes("FOR UPDATE"),
+    );
+    expect(ownerShareIdx).toBeGreaterThanOrEqual(0);
+    expect(activityLockIdx).toBeGreaterThan(ownerShareIdx);
+    expect(
+      raceUnreadable.queries.some((q) => q.sql.includes("opening_workspace_history_revisions")),
+    ).toBe(false);
 
     // (b) Concurrent ON CONFLICT DO NOTHING won by a readable ordinary activity with same createIntent -> replays seamlessly
     const ordinaryWinner = {

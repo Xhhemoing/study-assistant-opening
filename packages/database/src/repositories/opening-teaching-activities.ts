@@ -239,10 +239,10 @@ export async function createOpeningTeachingActivityInTransaction(
   tx: TransactionSql, scope: Scope, input: TeachingActivityCreateInput,
   options: { enqueueCompile?: boolean; replayOnly?: boolean } = {},
 ): Promise<TeachingActivity> {
-  await lockWorkspaceLearningHistory(tx, scope);
   await lockLearningOwner(tx, scope);
-  // Serializes with coach undo's workspace FOR UPDATE. A start request
-  // prepared before undo must not create an activity for a withdrawn task.
+  // Serializes with coach undo's and empty-workspace restore's workspace FOR UPDATE
+  // without re-entering opening_workspace_history_revisions (callers such as
+  // card-variant creation already fence history before entering this helper).
   if (input.createIntent.source === "task" && typeof input.createIntent.taskId === "string") {
     const withdrawn = await tx`SELECT 1 FROM opening_plan_acceptances a
       JOIN opening_plan_drafts d ON d.id=a.draft_id AND d.workspace_id=a.workspace_id
