@@ -300,9 +300,9 @@ exports.registry = {
         try:
             proc = subprocess.Popen(
                 [
-                    "bash", "-c", '"$@"', "_",
+                    "bash", "-c", '"$@"; exit "$?"', "_",
                     REAL_TIMEOUT, "30s", sys.executable, "-c",
-                    "import os, time; os.write(int(os.environ['READY_FD']), b'1'); time.sleep(30)",
+                    "import os, time; os.write(int(os.environ['READY_FD']), f'{os.getsid(0)}:{os.getpgrp()}\\n'.encode()); time.sleep(30)",
                 ],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -315,7 +315,9 @@ exports.registry = {
             write_fd = -1
             ready, _, _ = select.select([read_fd], [], [], 5.0)
             self.assertTrue(ready, "Detached timeout child did not start")
-            self.assertEqual(os.read(read_fd, 1), b"1")
+            child_sid_str, child_pgid_str = os.read(read_fd, 64).decode().strip().split(":")
+            self.assertEqual(int(child_sid_str), proc.pid)
+            self.assertNotEqual(int(child_pgid_str), proc.pid)
             with self.assertRaises(subprocess.TimeoutExpired):
                 proc.communicate(timeout=0.1)
             _terminate_timed_out_proc(proc)
