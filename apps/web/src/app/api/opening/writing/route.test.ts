@@ -208,4 +208,71 @@ describe("/api/opening/writing routes", () => {
       consoleSpy.mockRestore();
     }
   });
+
+  it("POST /api/opening/writing/[documentId] supports strict set_preferred_variant and legacy save_checkpoint preferred compatibility", async () => {
+    const preferredView: WritingWorkspaceView = {
+      ...VIEW,
+      currentVariant: { ...VIEW.currentVariant, keptAsPreferred: true },
+      variants: [{ ...VIEW.variants[0]!, keptAsPreferred: true }],
+    };
+    mocks.command.mockResolvedValueOnce({ workspace: preferredView });
+
+    const setPreferredPayload = {
+      action: "set_preferred_variant",
+      keptAsPreferred: true,
+      activityId: ACTIVITY_ID,
+    };
+    const okRes = await docRoute.POST(
+      req(`http://localhost/api/opening/writing/${DOC_ID}`, "POST", JSON.stringify(setPreferredPayload)),
+      ctx(),
+    );
+    expect(okRes.status).toBe(200);
+    expect(okRes.headers.get("cache-control")).toBe("private, no-store");
+    const okBody = await okRes.json();
+    expect(okBody).toEqual({ workspace: preferredView });
+    expect("outcome" in okBody).toBe(false);
+    expect(mocks.command).toHaveBeenCalledWith(SCOPE, DOC_ID, setPreferredPayload);
+
+    // Strict schema rejects focusBlockId, expectedRevisionNumber, or extra fields with 400 VALIDATION
+    for (const invalidBody of [
+      { action: "set_preferred_variant", keptAsPreferred: true, focusBlockId: BLOCK_ID },
+      { action: "set_preferred_variant", keptAsPreferred: true, focusBlockId: null },
+      { action: "set_preferred_variant", keptAsPreferred: true, expectedRevisionNumber: 1 },
+      { action: "set_preferred_variant", keptAsPreferred: false, extraField: true },
+    ]) {
+      mocks.command.mockClear();
+      const badRes = await docRoute.POST(
+        req(`http://localhost/api/opening/writing/${DOC_ID}`, "POST", JSON.stringify(invalidBody)),
+        ctx(),
+      );
+      expect(badRes.status).toBe(400);
+      expect(badRes.headers.get("cache-control")).toBe("private, no-store");
+      await expect(badRes.json()).resolves.toMatchObject({ error: { code: "VALIDATION" } });
+      expect(mocks.command).not.toHaveBeenCalled();
+    }
+
+    // NOT_FOUND from repository (e.g. uninitialized note or cross-group activity) maps to 404
+    mocks.command.mockRejectedValueOnce(new OpeningWritingError("NOT_FOUND", "笔记不存在或不可用。"));
+    const notFoundRes = await docRoute.POST(
+      req(`http://localhost/api/opening/writing/${DOC_ID}`, "POST", JSON.stringify({ action: "set_preferred_variant", keptAsPreferred: true })),
+      ctx(),
+    );
+    expect(notFoundRes.status).toBe(404);
+    expect(notFoundRes.headers.get("cache-control")).toBe("private, no-store");
+
+    // Legacy client sending save_checkpoint with boolean keptAsPreferred: false is forwarded cleanly
+    mocks.command.mockResolvedValueOnce({ workspace: VIEW });
+    const legacyPayload = {
+      action: "save_checkpoint",
+      focusBlockId: BLOCK_ID,
+      keptAsPreferred: false,
+      activityId: ACTIVITY_ID,
+    };
+    const legacyRes = await docRoute.POST(
+      req(`http://localhost/api/opening/writing/${DOC_ID}`, "POST", JSON.stringify(legacyPayload)),
+      ctx(),
+    );
+    expect(legacyRes.status).toBe(200);
+    expect(mocks.command).toHaveBeenCalledWith(SCOPE, DOC_ID, legacyPayload);
+  });
 });

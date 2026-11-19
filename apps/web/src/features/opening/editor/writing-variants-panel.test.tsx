@@ -211,11 +211,130 @@ describe("WritingVariantsPanel & writingWorkspaceApi", () => {
       preferBtn.click();
     });
     expect(command).toHaveBeenLastCalledWith(DOC_B, {
-      action: "save_checkpoint",
-      focusBlockId: BLOCK_1,
+      action: "set_preferred_variant",
       keptAsPreferred: true,
       activityId: ACTIVITY_ID,
     });
+    expect(onDocumentUpdated).toHaveBeenCalledTimes(1);
+    expect(host.textContent).toContain("已标记为本周保留稿");
+  });
+
+  it("decouples save_checkpoint and set_preferred_variant buttons, preserves unsaved edits and focus, and protects against 404 errors", async () => {
+    const workspace = makeWorkspace({
+      currentVariant: {
+        ...makeWorkspace().currentVariant,
+        keptAsPreferred: false,
+        focusBlockId: BLOCK_1,
+      },
+      focusRestore: { status: "exact", blockId: BLOCK_1 },
+    });
+    const starredWorkspace = makeWorkspace({
+      currentVariant: {
+        ...workspace.currentVariant,
+        keptAsPreferred: true,
+      },
+      variants: workspace.variants.map((v) => ({
+        ...v,
+        keptAsPreferred: v.documentId === DOC_B,
+      })),
+      focusRestore: { status: "exact", blockId: BLOCK_1 },
+    });
+    const checkpointedWorkspace = makeWorkspace({
+      currentVariant: {
+        ...starredWorkspace.currentVariant,
+        focusBlockId: BLOCK_2,
+      },
+      variants: starredWorkspace.variants.map((v) =>
+        v.documentId === DOC_B ? { ...v, focusBlockId: BLOCK_2 } : v,
+      ),
+      focusRestore: { status: "exact", blockId: BLOCK_2 },
+    });
+
+    const { WritingWorkspaceApiError } = await import("./writing-workspace-api");
+    const get = vi.fn().mockResolvedValue({ initialized: true, workspace });
+    const command = vi
+      .fn()
+      .mockResolvedValueOnce({ workspace: starredWorkspace })
+      .mockResolvedValueOnce({ workspace: checkpointedWorkspace })
+      .mockRejectedValueOnce(new WritingWorkspaceApiError("NOT_FOUND", "笔记不存在或不可用。", 404));
+    const onDocumentUpdated = vi.fn();
+    const onWorkspaceLoaded = vi.fn();
+
+    const host = await mountPanel({
+      documentId: DOC_B,
+      currentRevisionNumber: 1,
+      blocks: [
+        { id: BLOCK_1, text: "第一段内容" },
+        { id: BLOCK_2, text: "第二段内容" },
+      ],
+      activityId: ACTIVITY_ID,
+      hasUnsavedEdits: true,
+      api: { start: vi.fn(), get, command },
+      onDocumentUpdated,
+      onWorkspaceLoaded,
+    });
+
+    // Change focus select to BLOCK_2 and type into suggestion textarea to verify neither is clobbered
+    const focusSelect = host.querySelector('select[aria-label="选择续写段落"]') as HTMLSelectElement;
+    await act(async () => {
+      focusSelect.value = BLOCK_2;
+      focusSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(focusSelect.value).toBe(BLOCK_2);
+
+    // Clicking star button sends ONLY set_preferred_variant (no focusBlockId), even with hasUnsavedEdits=true
+    const starBtn = [...host.querySelectorAll("button")].find((b) =>
+      b.textContent?.includes("标为本周保留稿"),
+    )!;
+    expect(starBtn.disabled).toBe(false);
+    await act(async () => {
+      starBtn.click();
+    });
+    expect(command).toHaveBeenNthCalledWith(1, DOC_B, {
+      action: "set_preferred_variant",
+      keptAsPreferred: true,
+      activityId: ACTIVITY_ID,
+    });
+    expect(host.textContent).toContain("已标记为本周保留稿");
+    expect(host.textContent).toContain("已标为本周保留稿");
+    expect(focusSelect.value).toBe(BLOCK_2);
+    expect(onDocumentUpdated).not.toHaveBeenCalled();
+    expect(get).toHaveBeenCalledTimes(1);
+
+    // Clicking checkpoint button sends ONLY save_checkpoint (no keptAsPreferred)
+    const checkpointBtn = [...host.querySelectorAll("button")].find(
+      (b) => b.textContent === "设为下次续写段落",
+    )!;
+    await act(async () => {
+      checkpointBtn.click();
+    });
+    expect(command).toHaveBeenNthCalledWith(2, DOC_B, {
+      action: "save_checkpoint",
+      focusBlockId: BLOCK_2,
+      activityId: ACTIVITY_ID,
+    });
+    expect(host.textContent).toContain("已保存续写段落位置");
+    expect(onDocumentUpdated).not.toHaveBeenCalled();
+
+    // Clicking star button again to unstar when server returns 404:
+    // shows error alert, does NOT report success, preserves preferred state & focus selection
+    const unstarBtn = [...host.querySelectorAll("button")].find((b) =>
+      b.textContent?.includes("已标为本周保留稿"),
+    )!;
+    await act(async () => {
+      unstarBtn.click();
+    });
+    expect(command).toHaveBeenNthCalledWith(3, DOC_B, {
+      action: "set_preferred_variant",
+      keptAsPreferred: false,
+      activityId: ACTIVITY_ID,
+    });
+    const alert = host.querySelector('[role="alert"]');
+    expect(alert?.textContent).toContain("笔记不存在或不可用。");
+    expect(host.textContent).not.toContain("已取消本周保留稿标记");
+    expect(host.textContent).toContain("已标为本周保留稿");
+    expect(focusSelect.value).toBe(BLOCK_2);
+    expect(onDocumentUpdated).not.toHaveBeenCalled();
   });
 
   it("createWritingWorkspaceApi sends expected HTTP requests and validates responses", async () => {
