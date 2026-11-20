@@ -304,3 +304,67 @@ it("keeps an unsaved in-memory matrix answer recoverable when the next ordinary 
   expect(parsePracticeDraftCollection(JSON.parse(disk.data.get(ordinaryKey)!), ordinary))
     .toMatchObject({ activeId: matrix.id, drafts: [expect.objectContaining({ id: matrix.id, fields: expect.objectContaining({ answer: "still editable in memory" }) })] });
 });
+
+it("preserves newer stored answers on untouched drafts while reconciling a locally edited draft", () => {
+  const course = crypto.randomUUID();
+  const ordinary = practiceScope(course, "ordinary");
+  const manual = practiceScope(course, "manual");
+  const ordinaryKey = `opening-practice:v2:${ordinary}`;
+  const draftA = emptyPracticeDraft(ordinary, { matrixMode: true, answer: "initial A" });
+  const draftB = emptyPracticeDraft(ordinary, { matrixMode: true, matrixVariant: 1, answer: "initial B" });
+  const disk = { ...storage(), removeItem: (key: string) => { disk.data.delete(key); } };
+  disk.data.set(ordinaryKey, JSON.stringify({ version: 2, scope: ordinary, activeId: draftA.id, drafts: [draftA, draftB] }));
+
+  const scopes = { ordinary, manual };
+  expect(readPartitionedPracticeDraftCollection(scopes, draftA, disk))
+    .toMatchObject({ activeId: draftA.id, drafts: [draftA, draftB] });
+
+  disk.setItem.mockImplementation(() => { throw new Error("quota exceeded"); });
+  const editedA = patchPracticeDraft(ordinary, { matrixMode: true }, { fields: { answer: "edited A locally" } }, disk, draftA.id);
+  expect(editedA.persisted).toBe(false);
+
+  const newerB = { ...draftB, fields: { ...draftB.fields, answer: "newer B saved elsewhere" } };
+  disk.data.set(ordinaryKey, JSON.stringify({ version: 2, scope: ordinary, activeId: draftB.id, drafts: [draftA, newerB] }));
+  disk.setItem.mockImplementation((key, value) => { disk.data.set(key, value); });
+
+  const reconciled = readPartitionedPracticeDraftCollection(scopes, draftA, disk);
+  expect(reconciled?.drafts.map(d => [d.id, d.fields.answer])).toEqual([
+    [draftA.id, "edited A locally"],
+    [draftB.id, "newer B saved elsewhere"],
+  ]);
+});
+
+it("reuses the assigned identity without duplicating a legacy v1 matrix draft without ID after save and read outages", () => {
+  const course = crypto.randomUUID();
+  const ordinary = practiceScope(course, "ordinary");
+  const manual = practiceScope(course, "manual");
+  const legacyKey = `opening-practice:v1:${ordinary}`;
+  const ordinaryKey = `opening-practice:v2:${ordinary}`;
+  const { id: _omittedId, ...legacyWithoutId } = emptyPracticeDraft(ordinary, { matrixMode: true, answer: "legacy matrix v1" });
+  void _omittedId;
+  const disk = { ...storage(), removeItem: (key: string) => { disk.data.delete(key); } };
+  disk.data.set(legacyKey, JSON.stringify(legacyWithoutId));
+
+  const scopes = { ordinary, manual };
+  const initial = readPartitionedPracticeDraftCollection(scopes, emptyPracticeDraft(ordinary, { matrixMode: true }), disk);
+  expect(initial?.drafts).toHaveLength(1);
+  const assignedId = initial!.drafts[0]!.id;
+
+  disk.setItem.mockImplementation(() => { throw new Error("quota exceeded"); });
+  const edited = patchPracticeDraft(ordinary, { matrixMode: true }, { fields: { answer: "edited legacy matrix" } }, disk);
+  expect(edited.persisted).toBe(false);
+
+  disk.getItem.mockImplementation(key => {
+    if (key === ordinaryKey || key === legacyKey) throw new Error("read outage");
+    return disk.data.get(key) ?? null;
+  });
+  expect(readPartitionedPracticeDraftCollection(scopes, emptyPracticeDraft(ordinary, { matrixMode: true }), disk))
+    .toMatchObject({ activeId: assignedId, drafts: [edited.draft] });
+
+  disk.getItem.mockImplementation(key => disk.data.get(key) ?? null);
+  disk.setItem.mockImplementation((key, value) => { disk.data.set(key, value); });
+  const recovered = readPartitionedPracticeDraftCollection(scopes, emptyPracticeDraft(ordinary, { matrixMode: true }), disk);
+  expect(recovered?.drafts).toHaveLength(1);
+  expect(recovered?.drafts[0]).toMatchObject({ id: assignedId, fields: { answer: "edited legacy matrix" } });
+  expect(disk.data.has(legacyKey)).toBe(false);
+});

@@ -30,8 +30,16 @@ export type PracticeStart = NonNullable<PracticeDraft["start"]>;
 export type PracticeDraftCollection = { version: 2; scope: string; activeId: string; drafts: PracticeDraft[] };
 const memory = new Map<string, PracticeDraftCollection>();
 const dirty = new Set<string>();
+const dirtyDraftIds = new Map<string, Set<string>>();
+const legacyIds = new Map<string, { raw: string; id: string }>();
 const unreconciled = new Set<string>();
 const blocked = new Map<string, string>();
+
+function markDirtyDraft(scope: string, draftId: string): void {
+  let ids = dirtyDraftIds.get(scope);
+  if (!ids) { ids = new Set(); dirtyDraftIds.set(scope, ids); }
+  ids.add(draftId);
+}
 const storageKey = (scope: string) => `opening-practice:v2:${scope}`;
 const legacyStorageKey = (scope: string) => `opening-practice:v1:${scope}`;
 type ReadStorage = Pick<Storage, "getItem">;
@@ -115,14 +123,31 @@ function readStoredPracticeDraftCollection(scope: string, storage: ReadStorage):
     raw = storage.getItem(storageKey(scope));
     if (raw === null) { raw = storage.getItem(legacyStorageKey(scope)); legacy = true; }
   } catch { unreadable("无法读取练习草稿，已停止新建和切换。请允许此页面使用浏览器存储后重试。"); }
-  if (raw === null) { blocked.delete(scope); return null; }
+  if (raw === null) {
+    blocked.delete(scope);
+    if (!dirty.has(scope)) legacyIds.delete(scope);
+    return null;
+  }
   let parsed: unknown;
   try { parsed = JSON.parse(raw); } catch { unreadable("保存的练习草稿无法解析，原内容未改动。请恢复浏览器存储后重试。"); }
   let collection: PracticeDraftCollection | null;
   if (legacy) {
-    const draft = parsePracticeDraft(parsed, scope);
-    collection = draft ? { version: 2, scope, activeId: draft.id, drafts: [draft] } : null;
-  } else collection = parsePracticeDraftCollection(parsed, scope);
+    const hasExplicitId = typeof (parsed as { id?: unknown } | null)?.id === "string";
+    const parsedDraft = parsePracticeDraft(parsed, scope);
+    if (parsedDraft) {
+      let draft = parsedDraft;
+      if (!hasExplicitId) {
+        const remembered = legacyIds.get(scope);
+        const id = remembered && remembered.raw === raw ? remembered.id : parsedDraft.id;
+        legacyIds.set(scope, { raw, id });
+        draft = { ...parsedDraft, id };
+      } else legacyIds.delete(scope);
+      collection = { version: 2, scope, activeId: draft.id, drafts: [draft] };
+    } else collection = null;
+  } else {
+    legacyIds.delete(scope);
+    collection = parsePracticeDraftCollection(parsed, scope);
+  }
   if (!collection) unreadable("保存的练习草稿身份或内容无效，原内容未改动，已停止新建和切换。");
   blocked.delete(scope);
   return { collection, legacy };
@@ -165,6 +190,7 @@ function persistCollection(collection: PracticeDraftCollection, storage: WriteSt
     if (!storage) throw new Error("storage unavailable");
     storage.setItem(storageKey(collection.scope), JSON.stringify(collection));
     dirty.delete(collection.scope);
+    dirtyDraftIds.delete(collection.scope);
     return true;
   } catch { dirty.add(collection.scope); return false; }
 }
@@ -208,12 +234,13 @@ function migrateOrdinaryManualDrafts(scopes: PracticeDraftScopes, source: Stored
   // Remove the source only after the destination is durable. A retry keeps the existing copy by ID.
   try {
     const oldKey = legacyStorageKey(scopes.ordinary);
-    if (legacy) storage.removeItem(oldKey);
+    if (legacy) { storage.removeItem(oldKey); legacyIds.delete(scopes.ordinary); }
     else {
       const oldRaw = storage.getItem(oldKey);
       if (oldRaw !== null) {
         if (!parsePracticeDraft(JSON.parse(oldRaw), scopes.ordinary)) throw new Error(migrationError);
         storage.removeItem(oldKey);
+        legacyIds.delete(scopes.ordinary);
       }
     }
     const matrixDrafts = ordinary.drafts.filter(draft => draft.fields.matrixMode === true);
@@ -223,11 +250,13 @@ function migrateOrdinaryManualDrafts(scopes: PracticeDraftScopes, source: Stored
       storage.setItem(storageKey(scopes.ordinary), JSON.stringify(remaining));
       memory.set(scopes.ordinary, remaining);
       dirty.delete(scopes.ordinary);
+      dirtyDraftIds.delete(scopes.ordinary);
       unreconciled.delete(scopes.ordinary);
     } else {
       storage.removeItem(storageKey(scopes.ordinary));
       memory.delete(scopes.ordinary);
       dirty.delete(scopes.ordinary);
+      dirtyDraftIds.delete(scopes.ordinary);
       unreconciled.delete(scopes.ordinary);
     }
   } catch (reason) {
@@ -246,6 +275,7 @@ export function readPartitionedPracticeDraftCollection(scopes: PracticeDraftScop
       ordinary = readStoredPracticeDraftCollection(scopes.ordinary, storage);
       ordinaryReadSucceeded = true;
       if (!unsavedOrdinary) {
+        dirtyDraftIds.delete(scopes.ordinary);
         unreconciled.delete(scopes.ordinary);
         if (ordinary) memory.set(scopes.ordinary, ordinary.collection);
         else memory.delete(scopes.ordinary);
@@ -265,22 +295,39 @@ export function readPartitionedPracticeDraftCollection(scopes: PracticeDraftScop
     }
     if (ordinaryReadSucceeded && unsavedOrdinary && memory.has(scopes.ordinary)) {
       const cached = memory.get(scopes.ordinary)!;
+      const editedIds = dirtyDraftIds.get(scopes.ordinary);
+      const isLocallyEdited = (id: string) => Boolean(editedIds?.has(id));
       const cachedById = new Map(cached.drafts.map(draft => [draft.id, draft]));
       const storedDrafts = ordinary?.collection.drafts ?? [];
       const storedIds = new Set(storedDrafts.map(draft => draft.id));
       const mergedDrafts = [
-        ...storedDrafts.map(draft => cachedById.get(draft.id) ?? draft),
-        ...cached.drafts.filter(draft => !storedIds.has(draft.id)),
+        ...storedDrafts.map(draft => (isLocallyEdited(draft.id) ? cachedById.get(draft.id) : undefined) ?? draft),
+        ...cached.drafts.filter(draft => !storedIds.has(draft.id) && isLocallyEdited(draft.id)),
       ];
-      const storedManualActive = storedDrafts.find(draft => draft.id === ordinary?.collection.activeId && draft.fields.matrixMode !== true)?.id;
-      const reconciled = { version: 2 as const, scope: scopes.ordinary, activeId: storedManualActive ?? cached.activeId, drafts: mergedDrafts };
-      if (reconciled.drafts.some(draft => draft.fields.matrixMode !== true)) {
-        unreconciled.add(scopes.ordinary);
-        migrateOrdinaryManualDrafts(scopes, { collection: reconciled, legacy: Boolean(ordinary?.legacy) }, fallback, storage);
-      } else {
-        memory.set(scopes.ordinary, reconciled);
+      if (mergedDrafts.length === 0) {
+        memory.delete(scopes.ordinary);
+        dirty.delete(scopes.ordinary);
+        dirtyDraftIds.delete(scopes.ordinary);
         unreconciled.delete(scopes.ordinary);
-        persistCollection(reconciled, storage);
+      } else {
+        const storedManualActive = storedDrafts.find(draft => draft.id === ordinary?.collection.activeId && draft.fields.matrixMode !== true)?.id;
+        const preferredActive = storedManualActive
+          ?? (isLocallyEdited(cached.activeId) && mergedDrafts.some(draft => draft.id === cached.activeId)
+            ? cached.activeId
+            : (ordinary?.collection.activeId && mergedDrafts.some(draft => draft.id === ordinary.collection.activeId)
+              ? ordinary.collection.activeId
+              : mergedDrafts[0]!.id));
+        const reconciled = { version: 2 as const, scope: scopes.ordinary, activeId: preferredActive, drafts: mergedDrafts };
+        if (reconciled.drafts.some(draft => draft.fields.matrixMode !== true)) {
+          unreconciled.add(scopes.ordinary);
+          migrateOrdinaryManualDrafts(scopes, { collection: reconciled, legacy: Boolean(ordinary?.legacy) }, fallback, storage);
+        } else {
+          memory.set(scopes.ordinary, reconciled);
+          unreconciled.delete(scopes.ordinary);
+          if (persistCollection(reconciled, storage) && ordinary?.legacy) {
+            try { storage.removeItem(legacyStorageKey(scopes.ordinary)); legacyIds.delete(scopes.ordinary); } catch { /* v2 already authoritative */ }
+          }
+        }
       }
     } else if (!unsavedOrdinary && ordinary?.collection.drafts.some(draft => draft.fields.matrixMode !== true)) {
       migrateOrdinaryManualDrafts(scopes, ordinary, fallback, storage);
@@ -311,7 +358,9 @@ export function writePracticeDraft(draft: PracticeDraft, storage: WriteStorage |
   const next = { ...collection, drafts: found ? collection.drafts.map(value => value.id === draft.id ? draft : value) : [...collection.drafts, draft] };
   // Keep the latest inputs in this document even if the browser refuses persistence.
   memory.set(draft.scope, next);
-  return persistCollection(next, storage);
+  const saved = persistCollection(next, storage);
+  if (!saved) markDirtyDraft(draft.scope, draft.id);
+  return saved;
 }
 
 export type DraftPatch = Partial<Omit<PracticeDraft, "scope" | "version" | "id" | "fields">> & { fields?: Partial<PracticeFields> };
