@@ -37,14 +37,20 @@ function matrixScope(courseId: string, exercise?: MatrixExerciseInput) {
   return practiceScope(courseId, "matrix", undefined, undefined, undefined, exercise);
 }
 
+function replaceMatrixVariant(variant: number) {
+  const url = new URL(window.location.href);
+  const value = String(variant);
+  if (url.searchParams.get("variant") === value) return;
+  url.searchParams.set("variant", value);
+  window.history.replaceState(null, "", url);
+}
+
 function BoundMatrixEntry(props: Extract<Props, { boundExercise: MatrixExerciseInput }>) {
   const [variant, setVariant] = useState(props.boundExercise.variant);
   const exercise = { ...props.boundExercise, variant };
   const scope = matrixScope(props.courseId, exercise);
   function switchVariant(nextVariant: number) {
-    const url = new URL(window.location.href);
-    url.searchParams.set("variant", String(nextVariant));
-    window.history.replaceState(null, "", url);
+    replaceMatrixVariant(nextVariant);
     setVariant(nextVariant);
   }
   return <MatrixController key={scope} {...props} boundExercise={exercise} scope={scope} onSwitchVariant={switchVariant} />;
@@ -68,7 +74,10 @@ function MatrixController(props: ControllerProps) {
     const linked = continuity.drafts.find(draft => draft.fields.matrixVariant === variant);
     if (linked) continuity.restore(linked.id);
   }, [props.boundExercise, continuity]);
-  return <div className="space-y-3"><MatrixForm key={continuity.draft.id} {...props} continuity={continuity} /><PracticeDraftShelf continuity={continuity} allowAnother={!props.boundExercise} /></div>;
+  return <div className="space-y-3"><MatrixForm key={continuity.draft.id} {...props} continuity={continuity} />
+    <PracticeDraftShelf continuity={continuity} allowAnother={!props.boundExercise}
+      onRestored={props.boundExercise || props.initialVariant !== undefined ? saved => replaceMatrixVariant(saved.fields.matrixVariant) : undefined} />
+  </div>;
 }
 function MatrixForm({ courseId, sources, onRecorded, onBack, initialKey, initialVariant, boundExercise, boundSourceAvailable, scope, continuity, onSwitchVariant }: ControllerProps & { continuity: PracticeContinuity }) {
   const diagnostics = useDiagnosticsEnabled();

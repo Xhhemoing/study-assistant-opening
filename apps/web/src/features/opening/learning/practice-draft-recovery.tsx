@@ -2,6 +2,7 @@
 
 import { TransitionLink as Link } from "../v3/motion/view-transition";
 import { useRef, useState } from "react";
+import type { PracticeContinuity, PracticeDraft } from "./practice-draft";
 
 /** Keep the raw answer accessible even when the old material can no longer be resumed. */
 export function PracticeDraftRecovery({ courseId, answer, pending, resumeDisabled = false, onResume }: {
@@ -32,8 +33,8 @@ export function PracticeDraftRecovery({ courseId, answer, pending, resumeDisable
 }
 
 /** Switching keeps the old answer/request intact; server records are re-read after resuming. */
-export function PracticeDraftShelf({ continuity, allowAnother = true }: {
-  continuity: import("./practice-draft").PracticeContinuity; allowAnother?: boolean;
+export function PracticeDraftShelf({ continuity, allowAnother = true, onRestored }: {
+  continuity: PracticeContinuity; allowAnother?: boolean; onRestored?: (draft: PracticeDraft) => void;
 }) {
   const { draft, drafts, ready, loadError, switchError, reload, restore, startAnother } = continuity;
   const archived = drafts.filter(value => value.id !== draft.id);
@@ -49,7 +50,7 @@ export function PracticeDraftShelf({ continuity, allowAnother = true }: {
         <p className="text-sm font-medium text-text">练习 {index + 1} · {saved.fields.skillLabel || "矩阵练习"}{saved.fields.skillLabel ? "" : ` · 第 ${saved.fields.matrixVariant + 1} 组`}</p>
         {saved.fields.stem ? <p className="whitespace-pre-wrap break-words text-xs text-text-2">{saved.fields.stem}</p> : null}
         {saved.fields.answer ? <label className="block text-xs text-text-2">保留的原答案（可选中复制）<textarea readOnly value={saved.fields.answer} rows={3} className="mt-1 w-full rounded border border-text-3 bg-bg px-3 py-2 text-sm" /></label> : <p className="text-xs text-text-3">尚未填写答案，已保留原练习和保存请求。</p>}
-        <button type="button" onClick={() => restore(saved.id)} className="rounded border border-line px-3 py-2 text-sm text-text">继续这次练习</button>
+        <button type="button" onClick={() => { if (restore(saved.id)) onRestored?.(saved); }} className="rounded border border-line px-3 py-2 text-sm text-text">继续这次练习</button>
       </li>)}</ul>
     </details> : null}
   </div>;

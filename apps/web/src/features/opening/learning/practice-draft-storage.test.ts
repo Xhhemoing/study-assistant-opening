@@ -525,6 +525,43 @@ it("retries removal of the verified v1 after the migrated manual answer is edite
   expect([...disk.data.keys()]).toEqual([`opening-practice:v2:${manual}`]);
 });
 
+it.each([false, true])("opens matrix practice after a reload with pending legacy cleanup (replacement: %s)", async replaced => {
+  const course = crypto.randomUUID();
+  const ordinary = practiceScope(course, "ordinary");
+  const manual = practiceScope(course, "manual");
+  const matrix = practiceScope(course, "matrix");
+  const scopes = { ordinary, manual };
+  const legacyKey = `opening-practice:v1:${ordinary}`;
+  const ordinaryKey = `opening-practice:v2:${ordinary}`;
+  const original = emptyPracticeDraft(ordinary, { answer: "original v1 answer" });
+  const disk = { ...storage(), removeItem: vi.fn((_key: string): void => { throw new Error("removeItem blocked"); }) };
+  disk.data.set(legacyKey, JSON.stringify(original));
+
+  const manualFallback = emptyPracticeDraft(manual);
+  expect(readPartitionedPracticeDraftCollection(scopes, manualFallback, disk)?.drafts)
+    .toEqual([{ ...original, scope: manual }]);
+  expect(disk.data.has(legacyKey)).toBe(true);
+  expect(patchPracticeDraft(manual, {}, { fields: { answer: "revised manual answer" } }, disk).persisted).toBe(true);
+  expect(parsePracticeDraftCollection(JSON.parse(disk.data.get(ordinaryKey)!), ordinary)?.drafts).toEqual([original]);
+
+  const replacement = JSON.stringify({ ...original, fields: { ...original.fields, answer: "another tab's legacy answer" } });
+  if (replaced) disk.data.set(legacyKey, replacement);
+  disk.removeItem.mockImplementation(key => { disk.data.delete(key); });
+  vi.resetModules();
+  const reloaded = await import("./practice-draft-storage");
+
+  // Matrix practice first admits the ordinary scope, then edits in its own scope.
+  reloaded.readPartitionedPracticeDraftCollection(scopes, emptyPracticeDraft(ordinary, { matrixMode: true }), disk);
+  const matrixDraft = emptyPracticeDraft(matrix, { matrixMode: true, matrixVariant: 3 });
+  reloaded.initializePracticeDraft(matrixDraft);
+  expect(reloaded.patchPracticeDraft(matrix, {}, { fields: { answer: "[[3]]" } }, disk).persisted).toBe(true);
+  expect(reloaded.parsePracticeDraftCollection(JSON.parse(disk.data.get(`opening-practice:v2:${matrix}`)!), matrix)?.drafts[0]?.fields.answer)
+    .toBe("[[3]]");
+  expect(reloaded.readPartitionedPracticeDraftCollection(scopes, manualFallback, disk)?.drafts)
+    .toEqual([{ ...original, scope: manual, fields: { ...original.fields, answer: "revised manual answer" } }]);
+  expect(disk.data.get(legacyKey)).toBe(replaced ? replacement : undefined);
+});
+
 it.each(["ordinary save", "ordinary save with missing v2", "matrix reconciliation", "matrix to manual"] as const)(
   "preserves a replacement v1 draft during %s",
   path => {
@@ -608,8 +645,7 @@ it.each(["malformed", "same ID", "new ID", "manual to matrix"] as const)(
     disk.data.set(legacyKey, raw);
     expect(readPartitionedPracticeDraftCollection(scopes, fallback, disk)?.drafts).toEqual([migrated]);
     expect(disk.data.get(legacyKey)).toBe(raw);
-    if (replacementKind === "malformed") {
-      expect(() => readPartitionedPracticeDraftCollection(scopes, emptyPracticeDraft(ordinary), disk)).toThrow();
-    }
+    expect(() => readPartitionedPracticeDraftCollection(scopes, emptyPracticeDraft(ordinary, { matrixMode: true }), disk)).not.toThrow();
+    expect(disk.data.get(legacyKey)).toBe(raw);
   },
 );

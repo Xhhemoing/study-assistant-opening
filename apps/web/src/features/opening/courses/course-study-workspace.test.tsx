@@ -229,6 +229,22 @@ it.each([false, true])("renders one course-route control for a completed activit
   expect(controls[0]?.closest('[aria-label="本次学习小结"]')).not.toBeNull();
 });
 
+it("keeps the completed activity summary and route action available while resume can be retried", async () => {
+  const activity = { ...data.activity, status: "completed" as const, routeManaged: true };
+  vi.mocked(openCourseStudy).mockResolvedValueOnce({ kind: "activity", activity });
+  const api = { getTeachingResume: vi.fn().mockRejectedValue(new Error("学习位置暂时无法读取，请重试。")) } as unknown as OpeningApi;
+  vi.stubGlobal("fetch", vi.fn(async () => Response.json({
+    coveredBlockIds: [], skippedBlockIds: [], attempts: { total: 0, correct: 0, incorrect: 0, unverified: 0 },
+    openQuestions: [], taskId: null,
+  })));
+  await act(async () => root.render(<CourseStudyWorkspace courseId={data.course.id} activityId={activity.id}
+    teachingEnabled teachingCompileEnabled sourceIds={[]} timeZone="Asia/Shanghai" api={api} />));
+  expect(host.textContent).toContain("学习位置暂时无法读取");
+  expect([...host.querySelectorAll("button")].some(button => button.textContent === "重新读取")).toBe(true);
+  const summary = host.querySelector('[aria-label="本次学习小结"]');
+  expect(summary?.querySelector("[data-route-conversation]")).toBeTruthy();
+});
+
 it("carries the original conversation from a read-only retest to its learning records", async () => {
   const conversation = "66666666-6666-4666-8666-666666666666";
   const courseId = data.course.id, activityId = data.activity.id;

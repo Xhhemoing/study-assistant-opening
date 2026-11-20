@@ -200,8 +200,14 @@ function cleanupLegacyDraft(scope: string, storage: PartitionStorage, migrated: 
   const comparable = parsePracticeDraft({ ...legacy, scope: destination }, destination);
   if (!comparable) return false;
 
-  const saved = storage.getItem(storageKey(destination));
-  const durable = saved === null ? null : parsePracticeDraftCollection(JSON.parse(saved), destination);
+  function readDurableDrafts(partition: string) {
+    const saved = storage.getItem(storageKey(partition));
+    return saved === null ? undefined : parsePracticeDraftCollection(JSON.parse(saved), partition)?.drafts;
+  }
+  function matchesLegacy(draft: PracticeDraft, expected: PracticeDraft) {
+    return JSON.stringify(draft) === JSON.stringify(hasId ? expected : { ...expected, id: draft.id });
+  }
+  const durable = readDurableDrafts(destination);
   const remembered = legacySnapshots.get(scope);
   const snapshot = remembered?.raw === raw ? remembered : undefined;
   const migratedDraft = snapshot
@@ -210,12 +216,15 @@ function cleanupLegacyDraft(scope: string, storage: PartitionStorage, migrated: 
   const edited = migratedDraft && parsePracticeDraft(migratedDraft, destination);
   // An edited copy may supersede the exact v1 bytes we loaded. For any other
   // source, require the full draft in the correct v2 partition before deleting.
-  const copy = durable?.drafts.find(draft => {
+  const destinationCopy = durable?.find(draft => {
     if (snapshot?.destination === destination && snapshot.id === draft.id) return true;
-    const serialized = JSON.stringify(draft);
-    const expected = hasId ? comparable : { ...comparable, id: draft.id };
-    return serialized === JSON.stringify(expected) || (edited && serialized === JSON.stringify(edited));
+    return matchesLegacy(draft, comparable) || (edited && JSON.stringify(draft) === JSON.stringify(edited));
   });
+  // After a reload the manual copy may already have been edited. The original
+  // in ordinary v2 still proves remigration of those v1 bytes is unnecessary.
+  const copy = destinationCopy ?? (destination !== scope && durable
+    ? readDurableDrafts(scope)?.find(draft => matchesLegacy(draft, legacy) && durable.some(manual => manual.id === draft.id))
+    : undefined);
   if (!copy || storage.getItem(key) !== raw) return false;
 
   // If removal fails, the same bytes can be cleaned up after further edits to this copy.
@@ -280,12 +289,13 @@ function migrateOrdinaryManualDrafts(scopes: PracticeDraftScopes, source: Stored
     memory.set(scopes.manual, next);
   }
 
-  // Compact the source only after cleanup can account for the live v1 bytes.
+  // Leave ordinary v2 in place if cleanup is pending, so reads won't fall
+  // back to an unresolved v1 while the migrated drafts remain available.
+  const matrixDrafts = ordinary.drafts.filter(draft => draft.fields.matrixMode === true);
   try {
-    const matrixDrafts = ordinary.drafts.filter(draft => draft.fields.matrixMode === true);
-    if (!cleanupLegacyDraft(scopes.ordinary, storage, [...added, ...matrixDrafts], scopes.manual)) {
-      throw new Error("暂时无法确认旧练习草稿已迁移，原答案已保留。");
-    }
+    if (!cleanupLegacyDraft(scopes.ordinary, storage, [...added, ...matrixDrafts], scopes.manual)) return;
+  } catch { return; }
+  try {
     if (matrixDrafts.length) {
       const active = matrixDrafts.find(draft => draft.id === ordinary.activeId) ?? matrixDrafts[0]!;
       const remaining = { ...ordinary, activeId: active.id, drafts: matrixDrafts };

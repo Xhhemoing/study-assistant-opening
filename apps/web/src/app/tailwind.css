@@ -367,7 +367,7 @@
   background-color: var(--color-surface);
   border: 1px solid var(--key-border);
   border-bottom-color: var(--key-border-bottom);
-  box-shadow: inset 0 1px 0 rgb(255 255 255 / .75), 0 1px 1px rgb(31 30 27 / .05);
+  box-shadow: var(--key-shadow);
   font-family: var(--font-mono);
   font-size: 11px;
   line-height: 1;

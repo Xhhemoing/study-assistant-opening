@@ -141,23 +141,44 @@ it("reopens the switched matrix draft from the updated URL and the original draf
   }
 });
 
-it("recovers the linked variant when an older draft collection had another variant active", async () => {
+it("updates the linked URL only after the archived matrix variant is restored", async () => {
   const courseId = crypto.randomUUID(), sourceId = crypto.randomUUID();
   const linked = { sourceId, exerciseKey: "addition", variant: 2 } as const;
   const scope = boundScope(courseId, linked);
   const fields = { sourceId, matrixKey: linked.exerciseKey, matrixVariant: linked.variant };
   const original = emptyPracticeDraft(scope, { ...fields, answer: "[[1]]" });
+  const archived = emptyPracticeDraft(scope, { ...fields, matrixVariant: 3, answer: "[[2]]" });
   initializePracticeDraft(original);
-  switchPracticeDraft(scope, original.id, emptyPracticeDraft(scope, { ...fields, matrixVariant: 3, answer: "[[2]]" }), sessionStorage);
+  switchPracticeDraft(scope, original.id, archived, sessionStorage);
   const host = document.createElement("div");
   const root = createRoot(host);
+  const originalUrl = window.location.href;
+  const entryUrl = `/opening/courses/${courseId}/study?mode=matrix&exercise=addition&variant=2&sourceId=${sourceId}&conversation=keep#practice`;
+  const currentUrl = () => `${window.location.pathname}${window.location.search}${window.location.hash}`;
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   try {
+    window.history.replaceState(null, "", entryUrl);
     await act(async () => root.render(createElement(MatrixExerciseForm, { courseId, boundExercise: linked, boundSourceAvailable: true, onRecorded() {} })));
     expect(host.textContent).toContain("本次题组：3");
     expect(host.querySelector("textarea")?.value).toBe("[[2]]");
+
+    const restore = () => act(async () => {
+      const button = [...host.querySelectorAll("button")].find(item => item.textContent === "继续这次练习");
+      button!.click();
+    });
+    const save = vi.spyOn(Storage.prototype, "setItem").mockImplementationOnce(() => { throw new Error("quota exceeded"); });
+    try { await restore(); } finally { save.mockRestore(); }
+    expect(currentUrl()).toBe(entryUrl);
+    expect(host.textContent).toContain("本次题组：3");
+
+    await restore();
+    expect(host.textContent).toContain("本次题组：4");
+    expect(host.querySelector("textarea")?.value).toBe("[[1]]");
+    expect(currentUrl()).toBe(entryUrl.replace("variant=2", "variant=3"));
+    expect(JSON.parse(sessionStorage.getItem(`opening-practice:v2:${scope}`)!).activeId).toBe(archived.id);
   } finally {
     await act(async () => root.unmount());
+    window.history.replaceState(null, "", originalUrl);
     vi.unstubAllGlobals();
     sessionStorage.clear();
   }
