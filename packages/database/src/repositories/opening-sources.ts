@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { Sql } from "postgres";
+import type { Sql, TransactionSql } from "postgres";
 import type { SourceRecord, UploadInput, UploadTicket } from "@aistudy/contracts";
 import type { OpeningJobRecord } from "./opening-jobs";
 import { lockWorkspaceLearningHistory, nextWorkspaceLearningHistoryRevision } from "./opening-learning-facts";
@@ -107,6 +107,14 @@ function mapSource(row: Record<string, unknown>): SourceRecord {
     error: (row.error as SourceRecord["error"]) ?? null,
     createdAt: new Date(row.created_at as string | Date).toISOString(),
   };
+}
+
+export async function requireActiveCaptureCourse(tx: TransactionSql, scope: OpeningScope, courseId?: string | null) {
+  if (!courseId) return;
+  const [course] = await tx`SELECT c.id FROM courses c JOIN workspaces w ON w.id=c.workspace_id
+    WHERE c.id=${courseId} AND c.workspace_id=${scope.workspaceId} AND w.owner_user_id=${scope.ownerUserId}
+      AND c.archived_at IS NULL FOR SHARE OF c, w`;
+  if (!course) throw new OpeningSourceError("NOT_FOUND", "找不到这门课程。");
 }
 
 function assertMatch(
@@ -262,15 +270,12 @@ export function createOpeningSourceRepository(sql: Sql, options: OpeningSourceRe
               throw new OpeningSourceError("CONFLICT", capture
                 ? "这次保存请求已变化或结束，请重新保存讲解。" : "上传请求已变化或结束，请重新选择文件。");
             }
+            if (canResume) await requireActiveCaptureCourse(tx, scope, binding?.courseId);
             return source;
           }
         }
         if (capture?.completedOnly) throw new OpeningSourceError("CONFLICT", "找不到这次保存的资料。");
-        if (capture?.intent.courseId) {
-          const course = await tx`SELECT id FROM courses WHERE id=${capture.intent.courseId}
-            AND workspace_id=${scope.workspaceId} AND archived_at IS NULL FOR SHARE`;
-          if (!course.length) throw new OpeningSourceError("NOT_FOUND", "找不到这门课程。");
-        }
+        await requireActiveCaptureCourse(tx, scope, capture?.intent.courseId);
         await reserveOpeningSourceQuota(tx, scope, input.bytes, quota);
         const id = input.uploadId ?? randomUUID();
         const rows = await tx`
@@ -374,6 +379,7 @@ export function createOpeningSourceRepository(sql: Sql, options: OpeningSourceRe
         if (current.uploadState !== "pending") {
           throw new OpeningSourceError("CONFLICT", `cannot complete uploadState=${current.uploadState}`);
         }
+        await requireActiveCaptureCourse(tx, scope, currentRows[0]!.text_capture_intent?.courseId);
         assertMatch({ bytes: current.bytes, sha256: current.sha256, mime: current.mime }, actual);
         const rows = await tx`
           WITH completed AS (
@@ -405,6 +411,7 @@ export function createOpeningSourceRepository(sql: Sql, options: OpeningSourceRe
         const current = mapSource(currentRows[0] as Record<string, unknown>);
         if (current.uploadState === "uploaded") return current;
         if (current.uploadState !== "pending") throw new OpeningSourceError("CONFLICT", "Upload is no longer pending");
+        await requireActiveCaptureCourse(tx, scope, currentRows[0]!.text_capture_intent?.courseId);
         assertMatch({ bytes: current.bytes, sha256: current.sha256, mime: current.mime }, input.actual);
         await input.beforeComplete?.(current);
         const sourceRows = await tx`UPDATE opening_sources SET upload_state = 'uploaded', parse_state = 'queued', error = NULL, updated_at = now() WHERE id = ${id} AND workspace_id = ${scope.workspaceId} AND upload_state = 'pending' RETURNING *`;

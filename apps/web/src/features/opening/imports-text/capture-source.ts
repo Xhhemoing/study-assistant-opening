@@ -1,5 +1,5 @@
 import "server-only";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { Sql } from "postgres";
 import { uploadInputSchema } from "@aistudy/contracts";
 import type { Principal } from "../../../lib/authorization";
@@ -34,8 +34,10 @@ export async function saveCaptureSource(
   courseId: string | null = null,
 ) {
   const bytes = new TextEncoder().encode(prepared.markdown);
-  const uploadId = clientKey ? uploadIdFor(principal, clientKey, scheduleNextDayRetell) : undefined;
-  const oppositeUploadId = clientKey ? uploadIdFor(principal, clientKey, !scheduleNextDayRetell) : undefined;
+  // A one-off course capture still needs a durable binding through completion.
+  const key = clientKey ?? (courseId ? randomUUID() : undefined);
+  const uploadId = key ? uploadIdFor(principal, key, scheduleNextDayRetell) : undefined;
+  const oppositeUploadId = key ? uploadIdFor(principal, key, !scheduleNextDayRetell) : undefined;
   const capture = oppositeUploadId ? {
     oppositeUploadId,
     intent: {
@@ -64,11 +66,12 @@ export async function saveCaptureSource(
     const saved = await sources.completeUpload(principal, source.id);
     return { sourceId: saved.id, name: saved.name, bytes: saved.bytes, replayed: false };
   } catch (error) {
-    const policyError = error instanceof UploadPolicyError;
-    if (!capture || (!policyError && !isSourceUnavailable(error))) throw error;
+    const stagingUnavailable = error instanceof UploadPolicyError
+      || (isOpeningDataError(error, "storage") && error.code === "NOT_FOUND");
+    if (!capture || (!stagingUnavailable && !isSourceUnavailable(error))) throw error;
     // Another exact replay may have completed after this request reserved the pending row.
     const saved = await sources.captureSource(principal, input, { ...capture, completedOnly: true }).catch(recheck => {
-      if (policyError && isSourceUnavailable(recheck)) throw error;
+      if (isSourceUnavailable(recheck)) throw error;
       throw recheck;
     });
     return { sourceId: saved.id, name: saved.name, bytes: saved.bytes, replayed: true };

@@ -4,7 +4,7 @@ import { readOpeningRawBody } from "../../../../../features/opening/request-body
 import { captureInputSchema } from "../../../../../features/opening/imports-text/capture-input";
 import { prepareCapture } from "../../../../../features/opening/imports-text/markdown";
 import { saveCaptureSource } from "../../../../../features/opening/imports-text/capture-source";
-import { requireCaptureCourse, finishCapture } from "../../../../../features/opening/imports-text/retell-task";
+import { finishCapture } from "../../../../../features/opening/imports-text/retell-task";
 
 export async function POST(request: Request): Promise<Response> {
   try {
@@ -19,7 +19,6 @@ export async function POST(request: Request): Promise<Response> {
     const input = captureInputSchema.parse(json);
     const capture = prepareCapture(input);
     if (!capture.content) throw new ApiError("VALIDATION", "请先粘贴讲解内容。", 400);
-    if (!input.clientKey) await requireCaptureCourse(sql, scope, input.courseId);
     const source = await saveCaptureSource(
       sql,
       principal,

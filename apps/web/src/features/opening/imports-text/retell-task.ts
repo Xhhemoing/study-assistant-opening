@@ -1,16 +1,9 @@
 import "server-only";
-import type { Sql, TransactionSql } from "postgres";
+import type { Sql } from "postgres";
 import type { Scope } from "@aistudy/contracts";
-import { lockWorkspaceLearningHistory } from "@aistudy/database";
+import { lockWorkspaceLearningHistory, requireActiveCaptureCourse } from "@aistudy/database";
 import { resolveWorkspaceTimeZone } from "@aistudy/domain";
 import { ApiError } from "../../auth/service";
-
-export async function requireCaptureCourse(db: Sql | TransactionSql, scope: Scope, courseId?: string | null) {
-  if (!courseId) return;
-  const [course] = await db`SELECT id FROM courses WHERE id = ${courseId}
-    AND workspace_id = ${scope.workspaceId} AND archived_at IS NULL FOR SHARE`;
-  if (!course) throw new ApiError("NOT_FOUND", "找不到这门课程。", 404);
-}
 
 type RetellInput = { sourceId: string; title: string; courseId?: string | null; timeZone?: string };
 
@@ -31,7 +24,7 @@ export async function finishCapture(sql: Sql, scope: Scope, input: RetellInput &
           WHERE id = ${input.sourceId} AND workspace_id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}`
       : [];
     if (courseId && (!source.linked || (input.scheduleNextDayRetell && !existing))) {
-      await requireCaptureCourse(tx, scope, courseId);
+      await requireActiveCaptureCourse(tx, scope, courseId);
     }
     if (courseId && !source.linked) {
       await tx`INSERT INTO course_asset_memberships (workspace_id, course_id, asset_type, asset_id, role, visibility, purpose)

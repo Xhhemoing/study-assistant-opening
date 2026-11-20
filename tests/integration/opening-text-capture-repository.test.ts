@@ -1,11 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { createOpeningSourceActionsRepository, OpeningS3 } from "@aistudy/database";
+import { createOpeningSourceActionsRepository, OpeningS3, OpeningStorageError } from "@aistudy/database";
+import { POST as startTeaching } from "../../apps/web/src/app/api/opening/teaching-activities/route";
 import { POST } from "../../apps/web/src/app/api/opening/imports/text/route";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 
 let f: OpeningFixture;
-vi.mock("../../apps/web/src/features/opening/runtime", () => ({
+vi.mock("../../apps/web/src/features/opening/runtime", async importOriginal => ({
+  ...await importOriginal<typeof import("../../apps/web/src/features/opening/runtime")>(),
   requireOpeningScope: async () => ({ sql: f.sql, scope: f.scope, principal: {
     userId: f.scope.ownerUserId, workspaceId: f.scope.workspaceId, sessionId: "capture-test",
   } }),
@@ -106,6 +108,88 @@ it("keeps a missing staging object as a validation error while the source is sti
   expect((await post(courseA)).status).toBe(400);
   expect(await f.sql`SELECT upload_state FROM opening_sources WHERE workspace_id=${f.scope.workspaceId}`)
     .toEqual([{ upload_state: "pending" }]);
+});
+
+it("recovers a lost staging object between HEAD and digest only for a completed exact capture", async () => {
+  const missing = new OpeningStorageError("NOT_FOUND", "missing staging object");
+  const digest = vi.mocked(OpeningS3.prototype.streamDigest);
+  digest.mockRejectedValueOnce(missing);
+  const pending = await post(courseA);
+  expect(pending.status).toBe(404);
+  expect(await pending.json()).toMatchObject({ error: { message: missing.message } });
+
+  let winner;
+  digest.mockImplementationOnce(async key => {
+    const response = await post(courseA);
+    expect(response.status).toBe(201);
+    winner = await response.json();
+    expect((await OpeningS3.prototype.headObject(key)).exists).toBe(false);
+    throw missing;
+  });
+  const replay = await post(courseA);
+  expect(replay.status).toBe(200);
+  expect(await replay.json()).toEqual(winner);
+  expect(OpeningS3.prototype.copyStagingToFinal).toHaveBeenCalledTimes(1);
+});
+
+it("stops an interrupted reservation before sending any bytes on retry to an archived course", async () => {
+  const put = vi.mocked(OpeningS3.prototype.putObject);
+  put.mockRejectedValueOnce(new OpeningStorageError("NOT_FOUND", "staging unavailable"));
+  expect((await post(courseA)).status).toBe(404);
+  await f.sql`UPDATE courses SET archived_at=now() WHERE id=${courseA}`;
+  put.mockClear();
+  const retry = await post(courseA);
+  expect(retry.status).toBe(404);
+  expect(await retry.json()).toMatchObject({ error: { message: "找不到这门课程。" } });
+  expect(put).not.toHaveBeenCalled();
+  expect(OpeningS3.prototype.copyStagingToFinal).not.toHaveBeenCalled();
+  expect(await f.sql`SELECT id FROM opening_jobs WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
+});
+
+it("rejects course archival before the canonical copy and before a later pending retry stages bytes", async () => {
+  const digest = vi.mocked(OpeningS3.prototype.streamDigest);
+  const read = digest.getMockImplementation()!;
+  digest.mockImplementationOnce(async (...args) => {
+    const result = await read(...args);
+    await f.sql`UPDATE courses SET archived_at=now() WHERE id=${courseA}`;
+    return result;
+  });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const response = await post(courseA, true);
+    expect(response.status).toBe(404);
+    expect(await response.json()).toMatchObject({ error: { code: "NOT_FOUND", message: "找不到这门课程。" } });
+  }
+  expect(OpeningS3.prototype.putObject).toHaveBeenCalledTimes(1);
+  expect(OpeningS3.prototype.copyStagingToFinal).not.toHaveBeenCalled();
+  expect(await f.sql`SELECT upload_state, parse_state FROM opening_sources WHERE workspace_id=${f.scope.workspaceId}`)
+    .toEqual([{ upload_state: "pending", parse_state: "not_started" }]);
+  expect(await f.sql`SELECT id FROM opening_jobs WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
+  expect(await f.sql`SELECT source_id FROM opening_source_versions WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
+});
+
+it("enforces the planner's retell start window at creation and resumes an existing activity", async () => {
+  const retestId = randomUUID();
+  await f.sql`INSERT INTO opening_retest_activities(id,workspace_id,owner_user_id,course_id,skill_label,evidence_cycle_id,status)
+    VALUES(${retestId},${f.scope.workspaceId},${f.scope.ownerUserId},${courseA},'Recall',${randomUUID()},'accepted')`;
+  const saved = await post(courseA, true);
+  expect(saved.status).toBe(201);
+  const { taskId } = await saved.json();
+  const start = () => startTeaching(new Request("http://localhost/api/opening/teaching-activities", { method: "POST",
+    body: JSON.stringify({ clientKey: `task:${taskId}`, intentKind: "goal", intentSummary: "Recall", createIntent: { taskId } }) }));
+  await f.sql`UPDATE opening_tasks SET created_at=now()-interval '1 day', not_before=now()-interval '1 hour' WHERE id=${taskId}`;
+  expect((await start()).status).toBe(409); // Open-ended retest, even after the stored floor.
+  await f.sql`UPDATE opening_retest_activities SET status='completed', completed_at=now()-interval '1 minute' WHERE id=${retestId}`;
+  await f.sql`UPDATE opening_tasks SET not_before=now()+interval '1 hour' WHERE id=${taskId}`;
+  expect((await start()).status).toBe(409); // Retest closed, stored floor still in the future.
+  expect(await f.sql`SELECT id FROM opening_teaching_activities WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
+  await f.sql`UPDATE opening_tasks SET not_before=now()-interval '1 hour' WHERE id=${taskId}`;
+  const admitted = await start();
+  expect(admitted.status).toBe(201);
+  const activity = await admitted.json();
+  await f.sql`UPDATE opening_tasks SET not_before=now()+interval '1 hour' WHERE id=${taskId}`;
+  const replay = await start();
+  expect(replay.status).toBe(201);
+  expect(await replay.json()).toMatchObject({ id: activity.id });
 });
 
 it("distinguishes a provider hint from identical text pasted into the body", async () => {

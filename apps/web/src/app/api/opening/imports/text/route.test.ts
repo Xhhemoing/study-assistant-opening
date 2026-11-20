@@ -1,11 +1,11 @@
 import { createHash } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { OpeningSourceError } from "@aistudy/database";
+import { OpeningSourceError, OpeningStorageError } from "@aistudy/database";
 import { POST } from "./route";
 
 const deps = vi.hoisted(() => ({
   scope: { workspaceId: "5d884393-cdef-43a0-9004-f3fc6f48bada", ownerUserId: "a0ec7242-238a-42fb-97f7-44a97ffef6de" },
-  sql: vi.fn(), captureSource: vi.fn(), reissueUploadTicket: vi.fn(), beginUpload: vi.fn(), putStaging: vi.fn(), completeUpload: vi.fn(), schedule: vi.fn(), course: vi.fn(),
+  sql: vi.fn(), captureSource: vi.fn(), reissueUploadTicket: vi.fn(), beginUpload: vi.fn(), putStaging: vi.fn(), completeUpload: vi.fn(), schedule: vi.fn(),
 }));
 vi.mock("../../../../../features/opening/runtime", () => ({
   requireOpeningScope: vi.fn(async () => ({ scope: deps.scope, sql: deps.sql,
@@ -13,7 +13,7 @@ vi.mock("../../../../../features/opening/runtime", () => ({
 }));
 vi.mock("../../../../../features/opening/sources/source-service", () => ({ createOpeningSourceService: () => deps }));
 vi.mock("../../../../../features/opening/imports-text/retell-task", () => ({
-  requireCaptureCourse: deps.course, finishCapture: deps.schedule,
+  finishCapture: deps.schedule,
 }));
 
 const post = (body: string, headers?: HeadersInit) => POST(new Request("http://localhost/api/opening/imports/text", {
@@ -139,6 +139,22 @@ describe("POST /api/opening/imports/text", () => {
     expect(deps.reissueUploadTicket).not.toHaveBeenCalled();
     expect(deps.putStaging).not.toHaveBeenCalled();
     expect(deps.schedule).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false])("rechecks a storage NOT_FOUND against completed intent (completed=%s)", async completed => {
+    const body = JSON.stringify({ content: "资料", clientKey: "digest-race", scheduleNextDayRetell: false });
+    deps.completeUpload.mockRejectedValue(new OpeningStorageError("NOT_FOUND", "staging gone"));
+    deps.captureSource.mockResolvedValueOnce({ id: "source", uploadState: "pending" });
+    if (completed) deps.captureSource.mockResolvedValueOnce({ id: "source", uploadState: "uploaded", name: "资料.md", bytes: 7 });
+    else deps.captureSource.mockRejectedValueOnce(new OpeningSourceError("CONFLICT", "still pending"));
+    deps.schedule.mockResolvedValue(null);
+    const result = await post(body);
+    expect(result.status).toBe(completed ? 200 : 404);
+    expect(deps.captureSource.mock.calls[1]).toEqual([
+      ...deps.captureSource.mock.calls[0]!.slice(0, 2),
+      { ...deps.captureSource.mock.calls[0]![2], completedOnly: true },
+    ]);
+    if (!completed) expect(await result.json()).toMatchObject({ error: { message: "staging gone" } });
   });
 
   it("does not schedule after an incomplete upload", async () => {
