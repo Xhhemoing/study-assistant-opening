@@ -26,6 +26,22 @@ const PDF_CHUNK_TEXT_LIMIT = 100_000;
 type Storage = { presignGet(key: string, input: { expiresInSeconds: number; responseContentDisposition: string; responseCacheControl: string }): Promise<string>; finalKey(id: string, version: number): string };
 type SourceRepo = Pick<OpeningSourceRepository, "get" | "markParseState">;
 
+function readCappedPdfPages(value: unknown): Set<number> {
+  if (Array.isArray(value)) {
+    return new Set(value.filter((page): page is number => Number.isInteger(page) && page >= 1 && page <= 2_000));
+  }
+  // Older partial warnings store only the ranges shown in the reader.
+  const ranges = typeof value === "string"
+    ? value.match(/(?:^|；)第 (\d{1,4}(?:–\d{1,4})?(?:、\d{1,4}(?:–\d{1,4})?)*)(?: 等共 \d{1,4})? 页达到文本长度上限，已保留原文或截短$/u)?.[1]
+    : undefined;
+  const pages = new Set<number>();
+  for (const range of ranges?.split("、") ?? []) {
+    const [start, end = start] = range.split("–").map(Number) as [number, number?];
+    for (let page = Math.max(1, start); page <= Math.min(2_000, end); page++) pages.add(page);
+  }
+  return pages;
+}
+
 function trackSourceDownload(source: { bytes: number; sha256?: string | null }) {
   const digest = createHash("sha256");
   let bytes = 0;
@@ -85,7 +101,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
     const sourceId = (payload as { sourceId?: unknown }).sourceId;
     if (typeof sourceId !== "string") throw new Error("parse payload missing sourceId");
     const scope = openingJobScope(job);
-    const source = await deps.sources.get(scope, sourceId);
+    const source = await deps.sources.get(scope, sourceId, { includePdfTextCap: true });
     if (source.uploadState !== "uploaded") throw new Error("source is not uploaded");
     const expectedVersion = (payload as { sourceVersion?: unknown }).sourceVersion;
     if (expectedVersion !== undefined && expectedVersion !== source.version) throw Object.assign(new Error("source version changed during parse"), { code: "CONFLICT" });
@@ -223,6 +239,8 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
       let pageCount: number;
       const publication = { sourceId: source.id, sourceVersion: source.version };
       if (isPdf) {
+        const previousCappedPages = readCappedPdfPages(source.pdfTextCap ??
+          (source.error?.code === "PARSE_PARTIAL" ? source.error.message : undefined));
         const lowQualityPages: number[] = [];
         const preservePages: number[] = [];
         let usablePages = 0;
@@ -250,19 +268,25 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
               for (const preparedPage of prepared) {
                 let chunk = await consumePage(preparedPage, recognizePage);
                 if (!chunk) continue;
+                const { page, text: nativeText } = preparedPage.page;
+                if (chunk === preparedPage.saved &&
+                  (previousCappedPages.has(page) ||
+                    (nativeText.length > PDF_CHUNK_TEXT_LIMIT && chunk.text.length <= PDF_CHUNK_TEXT_LIMIT))) {
+                  cappedTextPages.add(page);
+                }
                 if (chunk.text.length > PDF_CHUNK_TEXT_LIMIT) {
                   if (chunk === preparedPage.saved) {
                     // Existing rows can fit PostgreSQL's code-point limit but exceed the UTF-16 bound.
-                    preservePages.push(preparedPage.page.page);
+                    preservePages.push(page);
                     usablePages++;
                     continue;
                   }
-                  cappedTextPages.add(preparedPage.page.page);
+                  cappedTextPages.add(page);
                   const text = chunk.text.slice(0, PDF_CHUNK_TEXT_LIMIT).replace(/[\uD800-\uDBFF]$/u, "");
                   if (!text.trim() && !chunk.imageObjectKey) continue;
                   chunk = { ...chunk, text };
                 }
-                if (checkPdfPageQuality(chunk.text).quality === "low_quality") lowQualityPages.push(preparedPage.page.page);
+                if (checkPdfPageQuality(chunk.text).quality === "low_quality") lowQualityPages.push(page);
                 await stage.appendFile(`${JSON.stringify(chunk)}\n`, "utf8");
                 usablePages++;
               }
@@ -270,14 +294,19 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
           },
         }).finally(() => stage.close());
         pageCount = result.pageCount;
-        const failedRanges = [...result.failedRanges, ...skippedVisionPages.map(String)];
-        const warning = failedRanges.length || lowQualityPages.length || cappedTextPages.size
-          ? createPdfPartialError(failedRanges, lowQualityPages, [...cappedTextPages]) : null;
-        if (warning && !usablePages) throw new Error(warning.message);
         for (const range of result.failedRanges) {
           const [start, end] = range.split("-").map(Number) as [number, number];
-          for (let page = start; page <= end; page++) preservePages.push(page);
+          for (let page = start; page <= end; page++) {
+            preservePages.push(page);
+            if (previousCappedPages.has(page)) cappedTextPages.add(page);
+          }
         }
+        const failedRanges = [...result.failedRanges, ...skippedVisionPages.map(String)];
+        const pdfTextCap = [...cappedTextPages];
+        const warning = failedRanges.length || lowQualityPages.length || pdfTextCap.length
+          ? { ...createPdfPartialError(failedRanges, lowQualityPages, pdfTextCap), ...(pdfTextCap.length ? { pdfTextCap } : {}) }
+          : null;
+        if (warning && !usablePages) throw new Error(warning.message);
         signal.throwIfAborted();
         await assertCurrent?.();
         await deps.chunks.replacePdfChunks(scope, { ...publication, chunks: readStagedPdfChunks(stagePath, signal), preservePages,

@@ -16,7 +16,11 @@ export type OpeningSourceChunksRepository = {
 };
 export type OpeningPdfChunkPublisher = {
   /** The stream must be staged locally before publication, with one chunk per physical page. */
-  replacePdfChunks(scope: OpeningScope, input: ChunkPublication & { chunks: AsyncIterable<NewSourceChunk>; preservePages: number[] }): Promise<void>;
+  replacePdfChunks(scope: OpeningScope, input: ChunkPublication & {
+    chunks: AsyncIterable<NewSourceChunk>; preservePages: number[];
+    /** Exact page numbers stored with the warning for a same-version retry. */
+    warning?: ApiFailure & { pdfTextCap?: number[] };
+  }): Promise<void>;
 };
 export function mapChunk(row: Record<string, unknown>): SourceChunk { return { id: row.id as string, sourceId: row.source_id as string, sourceVersion: Number(row.source_version), page: row.page == null ? null : Number(row.page), slideLabel: row.slide_label as string | null, startMs: row.start_ms == null ? null : Number(row.start_ms), endMs: row.end_ms == null ? null : Number(row.end_ms), text: row.text as string, imageObjectKey: row.image_object_key as string | null }; }
 async function fetchChunks(sql: Sql, scope: OpeningScope, sourceId: string, version: number, pages?: number[]): Promise<SourceChunk[]> {

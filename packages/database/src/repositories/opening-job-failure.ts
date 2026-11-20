@@ -128,7 +128,9 @@ export async function failOpeningJob(sql: Sql, id: string, value: unknown,
             WHERE e.workspace_id = s.workspace_id AND e.source_id = s.id)`;
     } else {
       await tx`
-        UPDATE opening_sources s SET parse_state = 'failed', error = ${tx.json(error)}, updated_at = now()
+        UPDATE opening_sources s SET parse_state = 'failed', error = ${tx.json(error)}::jsonb ||
+          CASE WHEN s.error ? 'pdfTextCap' THEN jsonb_build_object('pdfTextCap', s.error->'pdfTextCap') ELSE '{}'::jsonb END,
+          updated_at = now()
         WHERE s.id = ${sourceId} AND s.workspace_id = ${workspace.id}
           AND s.upload_state = 'uploaded'
           AND (${sourceVersion}::integer IS NULL OR s.version = ${sourceVersion}::integer)

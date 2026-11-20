@@ -3,11 +3,13 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
+import { OpeningModelRoutingError } from "@aistudy/ai";
+import { sourceRecordSchema } from "@aistudy/contracts";
 import { openingJobScope, createOpeningJobRepository, createOpeningPdfSegmentsRepository, createOpeningSourceChunksRepository,
   createOpeningSourceRepository, readOpeningSourceContent } from "@aistudy/database";
 import { createOpeningSourceService } from "../../apps/web/src/features/opening/sources/source-service";
 import { createOpeningTestStorage } from "./opening-storage-fixture";
-import { createParseSourceHandler } from "../../apps/worker/src/jobs/parse-source";
+import { createParseSourceHandler, type ParseSourceVisualPageInput } from "../../apps/worker/src/jobs/parse-source";
 import { runJob } from "../../apps/worker/src/runtime/run-job";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 
@@ -73,6 +75,57 @@ it("runs a normal partial retry through service, outbox target, Worker and both 
     const calls = runner.mock.calls.length;
     expect(await runJob(d.jobs, d.id, handler)).toBe(false);
     expect(runner).toHaveBeenCalledTimes(calls);
+  } finally { await rm(tempDir, { recursive: true, force: true }); }
+});
+
+it.each(["native", "vision"] as const)("retains a %s text cap and its citation through a successful queued retry", async textSource => {
+  const sourceId = randomUUID(), bytes = Buffer.from("%PDF capped retry");
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "pdf-capped-retry-"));
+  const sources = createOpeningSourceRepository(f.sql), chunks = createOpeningSourceChunksRepository(f.sql);
+  const jobs = createOpeningJobRepository(f.sql);
+  const payload = { sourceId, sourceVersion: 0 };
+  const privacyEpoch = await jobs.workspacePrivacyEpoch(f.scope.workspaceId);
+  const cappedText = "x".repeat(100_001);
+  const cappedMessage = "第 1 页达到文本长度上限，已保留原文或截短";
+  let retry = false;
+  const recognizePage = vi.fn(async ({ physicalPage }: ParseSourceVisualPageInput) => {
+    if (physicalPage === 1) return { text: cappedText, imageObjectKey: "recognized/1" };
+    if (retry) return { text: "Recovered second page", imageObjectKey: "recognized/2" };
+    throw new OpeningModelRoutingError("vision route unavailable");
+  });
+  try {
+    await f.sql`INSERT INTO opening_sources(id,workspace_id,name,mime,bytes,sha256,version,upload_state,parse_state)
+      VALUES (${sourceId},${f.scope.workspaceId},'cap.pdf','application/pdf',${bytes.length},${createHash("sha256").update(bytes).digest("hex")},0,'uploaded','queued')`;
+    const first = await jobs.createOnce(f.scope, { kind: "parse", key: randomUUID(), payload, privacyEpoch });
+    const handler = createParseSourceHandler({ sources, chunks, tempDir, recognizePage,
+      segments: createOpeningPdfSegmentsRepository(f.sql),
+      storage: { finalKey: () => "synthetic-original", presignGet: async () => `data:application/pdf;base64,${bytes.toString("base64")}` },
+      runner: async argv => ({ exitCode: 0, stdout: JSON.stringify(argv.includes("--inspect-pdf") ? { pageCount: 2 } : { pages: [
+        { page: 1, text: textSource === "native" ? cappedText : "", imagePath: null },
+        { page: 2, text: "", imagePath: null },
+      ] }) }),
+    });
+    expect(await runJob(jobs, first.id, handler)).toBe(true);
+    const firstSource = sourceRecordSchema.parse(await sources.get(f.scope, sourceId));
+    expect(firstSource.error).toEqual({ code: "PARSE_PARTIAL", retryable: true,
+      message: `第 2 页未能识别，可以重新解析；${cappedMessage}` });
+    const [original] = await chunks.listChunks(f.scope, sourceId);
+    expect(original?.text).toHaveLength(100_000);
+
+    const service = createOpeningSourceService(f.sql, createOpeningTestStorage());
+    const queued = await service.retryParse({ userId: f.scope.ownerUserId, workspaceId: f.scope.workspaceId, sessionId: "capped-retry" }, sourceId);
+    expect(sourceRecordSchema.parse(queued)).toMatchObject({ parseState: "queued", error: null });
+    const [second] = await f.sql`SELECT id FROM opening_jobs WHERE workspace_id=${f.scope.workspaceId}
+      AND kind='parse' AND payload->>'sourceId'=${sourceId} AND state='queued'`;
+    retry = true;
+    recognizePage.mockClear();
+    expect(await runJob(jobs, String(second!.id), handler)).toBe(true);
+    const final = sourceRecordSchema.parse(await sources.get(f.scope, sourceId));
+    expect(final.error).toEqual({ code: "PARSE_PARTIAL", message: cappedMessage, retryable: false });
+    expect(await chunks.listChunks(f.scope, sourceId)).toEqual([original,
+      expect.objectContaining({ page: 2, text: "[视觉转写与描述]\nRecovered second page" }),
+    ]);
+    expect(recognizePage).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ physicalPage: 2 }));
   } finally { await rm(tempDir, { recursive: true, force: true }); }
 });
 

@@ -335,6 +335,63 @@ describe("parse source handler", () => {
   });
 
   it.each([
+    { scenario: "oversized native text", nativeText: "n".repeat(100_001), capped: true },
+    { scenario: "oversized vision text", nativeText: "", visionText: "v".repeat(100_001), capped: true },
+    { scenario: "vision text at exactly the limit", nativeText: "",
+      visionText: "v".repeat(100_000 - "[视觉转写与描述]\n".length), capped: false },
+  ])("reuses the saved chunk and retains the correct warning for $scenario", async ({ nativeText, visionText, capped }) => {
+    const pages = [
+      { page: 1, text: nativeText, imagePath: null },
+      { page: 2, text: "", imagePath: null },
+    ];
+    const published: SourceChunk[] = [];
+    const current = source();
+    let visionAvailableForPageTwo = false;
+    const recognizePage = vi.fn(async ({ physicalPage }: ParseSourceVisualPageInput) => {
+      if (physicalPage === 1 && visionText) return { text: visionText, imageObjectKey: "trusted/page-1" };
+      if (physicalPage === 2 && visionAvailableForPageTwo) {
+        return { text: "Recovered second page", imageObjectKey: "trusted/page-2" };
+      }
+      throw new OpeningModelRoutingError("vision route unavailable");
+    });
+    const d = await deps({
+      source: current, published, recognizePage,
+      segments: { assertCurrent: async () => {}, read: async () => ({ state: "ready", pages }), save: async () => {} },
+    });
+    const cappedMessage = "第 1 页达到文本长度上限，已保留原文或截短";
+
+    await expect(d.handler(job, { sourceId })).resolves.toEqual({ pages: 2, warnings: 1, degraded: true });
+    const first = d.replaceInput() as { chunks: NewSourceChunk[]; warning: ApiFailure };
+    expect(first.warning).toMatchObject({
+      code: "PARSE_PARTIAL", retryable: true,
+      message: "第 2 页未能识别，可以重新解析" + (capped ? `；${cappedMessage}` : ""),
+    });
+    expect(first.chunks).toHaveLength(1);
+    const original = first.chunks[0]!;
+    expect(original).toMatchObject({ page: 1, imageObjectKey: visionText ? "trusted/page-1" : null });
+    expect(original.text).toHaveLength(100_000);
+    current.error = visionText ? first.warning : null;
+    published.push({ ...original, sourceId, sourceVersion: 7, id: "00000000-0000-4000-8000-000000000004" });
+
+    recognizePage.mockClear();
+    visionAvailableForPageTwo = true;
+    await expect(d.handler(job, { sourceId })).resolves.toEqual({ pages: 2 });
+    const retry = d.replaceInput() as { chunks: NewSourceChunk[]; warning?: ApiFailure };
+    // PDF publication retains the original citation UUID when all chunk fields match.
+    expect(retry.chunks).toEqual([
+      original,
+      { page: 2, slideLabel: null, startMs: null, endMs: null,
+        imageObjectKey: "trusted/page-2", text: "[视觉转写与描述]\nRecovered second page" },
+    ]);
+    expect(recognizePage).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ physicalPage: 2 }));
+    if (capped) {
+      expect(retry.warning).toMatchObject({ code: "PARSE_PARTIAL", message: cappedMessage, retryable: false });
+    } else {
+      expect(retry.warning).toBeUndefined();
+    }
+  });
+
+  it.each([
     { pageCount: 2, cachedPages: [2], missingPages: "1", warnings: 1 },
     { pageCount: 6, cachedPages: [2, 3, 5], missingPages: "1、4、6", warnings: 3 },
   ])("publishes cached scans after routing fails on page 1 of a $pageCount-page PDF", async ({ pageCount, cachedPages, missingPages, warnings }) => {
