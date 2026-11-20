@@ -68,12 +68,13 @@ function evaluationsMatch(
   }
 }
 
-function snapshotResponse(value: unknown): unknown {
-  if (value === null || typeof value !== "object") return value;
+function snapshotResponse(value: unknown): { ok: true; value: unknown } | { ok: false } {
+  if (typeof value === "function" || typeof value === "symbol") return { ok: false };
+  if (value === null || typeof value !== "object") return { ok: true, value };
   try {
-    return structuredClone(value);
+    return { ok: true, value: structuredClone(value) };
   } catch {
-    return value;
+    return { ok: false };
   }
 }
 
@@ -92,6 +93,7 @@ export function qualifyCartridgeEmission(
     cartridgeVersion: string;
     probeId: string;
     response: unknown;
+    responseCloneFailed: boolean;
   }>;
   let capturedObservation: Readonly<{
     outcome: string | null;
@@ -107,7 +109,7 @@ export function qualifyCartridgeEmission(
     const cartridgeId = emission.cartridgeId;
     const cartridgeVersion = emission.cartridgeVersion;
     const probeId = emission.probeId;
-    const response = snapshotResponse(emission.response);
+    const cloned = snapshotResponse(emission.response);
     if (typeof cartridgeId !== "string" || typeof cartridgeVersion !== "string" || typeof probeId !== "string") {
       return {
         qualified: false,
@@ -119,7 +121,13 @@ export function qualifyCartridgeEmission(
         reasonCodes: ["cartridge_evaluation_failed"],
       };
     }
-    capturedEmission = Object.freeze({ cartridgeId, cartridgeVersion, probeId, response });
+    capturedEmission = Object.freeze({
+      cartridgeId,
+      cartridgeVersion,
+      probeId,
+      response: cloned.ok ? cloned.value : undefined,
+      responseCloneFailed: !cloned.ok,
+    });
     const rawOutcome = observation && typeof observation === "object" ? observation.outcome : null;
     const rawRequirementKey = observation && typeof observation === "object" ? observation.requirementKey : null;
     capturedObservation = Object.freeze({
@@ -172,14 +180,19 @@ export function qualifyCartridgeEmission(
     return reject("cartridge_probe_requirement_mismatch");
   }
 
+  if (capturedEmission.responseCloneFailed) return reject("cartridge_response_invalid");
+
   const verified = evaluateProbeWithSnapshot(snapshot, capturedEmission.response);
   if (verified.encodingFailed) return reject("cartridge_evaluation_failed");
+
+  const cartridgeCopy = snapshotResponse(capturedEmission.response);
+  if (!cartridgeCopy.ok) return reject("cartridge_response_invalid");
 
   let cartridgeEvaluation: unknown;
   try {
     cartridgeEvaluation = cartridge.evaluateProbeResponse(
       capturedEmission.probeId,
-      snapshotResponse(capturedEmission.response),
+      cartridgeCopy.value,
     );
   } catch {
     return reject("cartridge_evaluation_failed");

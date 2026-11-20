@@ -390,4 +390,22 @@ describe("assembleLearnerState with cartridge evidence", () => {
       transfer: { usable: "unknown", reasonCodes: ["transfer_baseline_not_established"] },
     });
   });
+
+  it("rejects non-cloneable object responses without reading live mutable properties during scoring", () => {
+    const valid = emit().response as Record<string, unknown>;
+    let getterReads = 0;
+    const uncloneable = {
+      ...valid,
+      uncloneableFn: () => "cannot clone",
+      get popped() {
+        getterReads += 1;
+        return valid.popped;
+      },
+    };
+    const qualification = qualifyCartridgeEmission(registry, emit({ response: uncloneable }));
+    expect(qualification.qualified).toBe(false);
+    expect(qualification.reasonCodes).toEqual(["cartridge_response_invalid"]);
+    // structuredClone fails at the function property or runs once during upfront snapshot, never re-reading live getters in scoring.
+    expect(getterReads).toBeLessThanOrEqual(1);
+  });
 });
