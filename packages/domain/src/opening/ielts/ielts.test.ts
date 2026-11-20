@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   IELTS_CARTRIDGE_ID,
   analyzeCrossDraftTransfer,
@@ -888,5 +888,214 @@ describe("Speaking Part 3 oral transfer seed, strict verification gates & Unicod
       expect(receipt.epistemicStatus).toBe("practice_feedback");
       expect(receipt.epistemicReason).not.toContain("已确认");
     }
+  });
+});
+
+describe("Writing transfer review regressions", () => {
+  it("advances past a rejected Unicode match without re-entering a surrogate pair", () => {
+    const paragraph = "😀 Great!\uFE0F";
+    const exec = RegExp.prototype.exec;
+    const rejectedOffsets = new Set<number>();
+    const spy = vi.spyOn(RegExp.prototype, "exec").mockImplementation(function (this: RegExp, value) {
+      if (value === paragraph.toLowerCase() && this.source === "😀\\s+great!") {
+        if (rejectedOffsets.has(this.lastIndex)) throw new Error("Grounding repeated a rejected match");
+        rejectedOffsets.add(this.lastIndex);
+      }
+      return exec.call(this, value);
+    });
+    try {
+      expect(locateGroundedExcerpt(paragraph, "😀 Great!")).toBeNull();
+      expect(locateGroundedExcerpt(paragraph, paragraph)?.matchedText).toBe(paragraph);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(locateGroundedExcerpt("😀 Great!\uFE0F Then 😀 great!", "😀 Great!")?.matchedText)
+      .toBe("😀 great!");
+    expect(locateGroundedExcerpt("👩‍🔬 Great!", "🔬 Great!")).toBeNull();
+  });
+
+  it.each(["😀 Great!\uFE0F", "Test.\u0301", "a".repeat(129) + "👩‍🔬"])(
+    "keeps automatic Writing evidence on grapheme boundaries in %s",
+    (paragraph) => {
+      const { receipt } = evaluateRevisedDraftDeterministically({
+        baselineDraft: DRAFT_1,
+        revisedDraft: { ...DRAFT_2, paragraphs: [paragraph] },
+        targets: TARGETS,
+        receiptId: "r-grapheme",
+      });
+      const span = receipt.criteria.TR.evidenceSpans[0]!;
+      const expected = paragraph.startsWith("a") ? "a".repeat(129) : paragraph;
+      expect(span.excerpt).toBe(expected);
+      expect(paragraph.slice(span.startOffset, span.endOffset)).toBe(expected);
+    },
+  );
+
+  it("does not count interior noun lists as substantive rewriting", () => {
+    const report = analyzeCrossDraftTransfer({
+      draft1: {
+        ...DRAFT_1,
+        paragraphs: [
+          "Rail can reduce per-capita emissions.",
+          "Transit should reduce chronic congestion.",
+          "Therefore, leaders can build.",
+        ],
+      },
+      draft2: {
+        ...DRAFT_2,
+        paragraphs: [
+          "Rail can, orchard, lantern, glacier, compass, apricot, marble, reduce per-capita emissions.",
+          "Transit should, walnut, cactus, harbor, mineral, summit, pebble, reduce chronic congestion.",
+          "Therefore, leaders can, a, b, c, d, e, f, build.",
+        ],
+      },
+      targets: TARGETS,
+    });
+    expect(report.summary.hasSubstantiveRevision).toBe(false);
+    expect(report.summary.transferredCount).toBe(0);
+  });
+
+  it("checks target context after stripping interior padding even when the rest of the essay is rewritten", () => {
+    const baseline = "Therefore, leaders can build safe stations in rural districts before the next regional election.";
+    const genuineRevision = DRAFT_2.paragraphs[1]!.replace(
+      "Over a twenty-year horizon, predictable transit schedules also anchor commercial productivity and cut municipal road-maintenance costs.",
+      "",
+    );
+    const report = analyzeCrossDraftTransfer({
+      draft1: { ...DRAFT_1, paragraphs: [baseline, ...DRAFT_1.paragraphs.slice(1)] },
+      draft2: {
+        ...DRAFT_2,
+        paragraphs: [
+          "Therefore, leaders can, a, b, c, d, e, f, build safe shelters near isolated villages during winter emergencies.",
+          genuineRevision,
+          ...DRAFT_2.paragraphs.slice(2).map((p) => p.replace("therefore ", "")),
+        ],
+      },
+      targets: TARGETS,
+    });
+    expect(report.summary.hasSubstantiveRevision).toBe(true);
+    expect(report.items.find((item) => item.targetId === "t-cohesion")?.revisedMatched)
+      .toEqual(["consequently"]);
+  });
+
+  it.each([1, 2, 3])("vetoes non-advancing same-prompt version %s", (version) => {
+    const result = evaluateRevisedDraftDeterministically({
+      baselineDraft: { ...DRAFT_1, version: 3 },
+      revisedDraft: { ...DRAFT_2, version },
+      targets: TARGETS,
+      freshPromptTransfer: true,
+      receiptId: "r-invalid-lineage",
+    });
+    expect(result.transferReport.summary.meetsCrossDraftVerification).toBe(false);
+    expect(result.receipt.countsTowardMastery).toBe(false);
+  });
+
+  it("binds a direct rubric receipt to a same-prompt advancing baseline", () => {
+    const input = {
+      receiptId: "r-bound-lineage",
+      taskMode: "writing_task2" as const,
+      draft: DRAFT_2,
+      assessments: buildValidDraft2Assessments(),
+      crossDraftTransferVerified: true,
+    };
+    const verified = createValidatedRubricReceipt({ ...input, baselineDraft: DRAFT_1 });
+    expect(verified.ok && verified.receipt.evidenceSource).toBe("unassisted_cross_draft_transfer");
+
+    for (const baselineDraft of [
+      undefined,
+      { ...DRAFT_1, promptId: "different-question" },
+      { ...DRAFT_1, version: DRAFT_2.version },
+    ]) {
+      const rejected = createValidatedRubricReceipt({ ...input, baselineDraft });
+      expect(rejected.ok && rejected.receipt.epistemicStatus).toBe("practice_feedback");
+    }
+  });
+
+  it("applies fresh-prompt criteria when prompt IDs differ", () => {
+    const candidate = {
+      baselineDraft: DRAFT_1,
+      revisedDraft: { ...DRAFT_2, promptId: "different-rail-question" },
+      targets: TARGETS,
+      receiptId: "r-fresh-prompt",
+    };
+    const unconfirmed = evaluateRevisedDraftDeterministically(candidate);
+    expect(unconfirmed.transferReport.summary.meetsCrossDraftVerification).toBe(false);
+    expect(unconfirmed.receipt.epistemicStatus).toBe("practice_feedback");
+
+    const fresh = evaluateRevisedDraftDeterministically({
+      ...candidate,
+      revisedDraft: { ...candidate.revisedDraft, version: 1 },
+      freshPromptTransfer: true,
+    });
+    expect(fresh.transferReport.summary.meetsCrossDraftVerification).toBe(false);
+    expect(fresh.receipt.evidenceSource).toBe("unassisted_fresh_prompt_transfer");
+    expect(fresh.receipt.countsTowardMastery).toBe(true);
+
+    const noTargets = evaluateRevisedDraftDeterministically({
+      ...candidate,
+      targets: [],
+      freshPromptTransfer: true,
+    });
+    expect(noTargets.receipt.countsTowardMastery).toBe(false);
+  });
+
+  it.each([
+    ["consequently", " Consequently ", "CONSEQUENTLY", "consequently", "consequently", "consequently"],
+    ["long-term fiscal viability", "fiscal viability", "viability"],
+  ])("awards one LR credit to duplicate or overlapping targets (%s)", (...patterns) => {
+    const targets = patterns.map((pattern, index): IeltsUpgradeTarget => ({
+      id: "lr-target-" + index,
+      category: "targetCollocations",
+      criterion: "LR",
+      label: pattern,
+      targetPatterns: [pattern],
+      guidance: "Use the expression in a complete argument.",
+    }));
+    const input = {
+      baselineDraft: DRAFT_1,
+      revisedDraft: DRAFT_2,
+      receiptId: "r-unique-evidence",
+    };
+    const single = evaluateRevisedDraftDeterministically({ ...input, targets: targets.slice(0, 1) });
+    const duplicated = evaluateRevisedDraftDeterministically({ ...input, targets });
+    expect(single.transferReport.summary.transferredCount).toBe(1);
+    expect(duplicated.transferReport.summary.transferredCount).toBe(1);
+    expect(duplicated.receipt.criteria.LR.band).toBe(single.receipt.criteria.LR.band);
+  });
+});
+
+describe("Speaking contextual transfer regressions", () => {
+  const seed = buildSpeakingPart3Seed({
+    promptId: DRAFT_2.promptId,
+    topic: "urban transit",
+    coreClaim: "Governments should prioritise urban transit.",
+    supportingReason: "Reliable trains connect more riders.",
+    activeCollocations: ["per-capita emissions", "long-term fiscal viability"],
+  }, DRAFT_2.draftId);
+
+  const setup =
+    "Personally, I think municipal leaders often prefer highway projects because impatient drivers notice wider asphalt roads right before major municipal elections. " +
+    "However, building large urban rail networks requires years of careful planning and steady political commitment across densely populated districts. " +
+    "Admittedly, families in outer suburban neighbourhoods still rely on cars when local bus routes run infrequently during late evenings.";
+
+  it("rejects coordinated noun fragments with verb-like modifiers", () => {
+    const transcript = setup.slice(0, -1) +
+      ", and the per-capita emissions transport funding budget, and the long-term fiscal viability regional support package.";
+    const receipt = evaluateSpeakingRetelling({ seed, transcript, durationSeconds: 75, assisted: false });
+    expect(receipt.transferredCollocations).toEqual([]);
+    expect(receipt.countsTowardMastery).toBe(false);
+  });
+
+  it("credits two targets under one concise shared predicate", () => {
+    const transcript = setup + " Local officials also face annual budget reviews in spring. The board should monitor long-term fiscal viability and per-capita emissions.";
+    const receipt = evaluateSpeakingRetelling({ seed, transcript, durationSeconds: 75, assisted: false });
+    expect(receipt.wordCount).toBe(78);
+    expect(receipt.transferredCollocations).toEqual(seed.targetSpokenCollocations);
+    expect(receipt.countsTowardMastery).toBe(true);
+  });
+
+  it.each(["😀 Great!\uFE0F", "Test.\u0301"])("keeps the full final grapheme in Speaking quotes for %s", (transcript) => {
+    const receipt = evaluateSpeakingRetelling({ seed, transcript, durationSeconds: 75, assisted: false });
+    expect(receipt.evidenceQuotes[0]?.quote).toBe(transcript);
+    expect(receipt.evidenceQuotes[0]?.endOffset).toBe(transcript.length);
   });
 });

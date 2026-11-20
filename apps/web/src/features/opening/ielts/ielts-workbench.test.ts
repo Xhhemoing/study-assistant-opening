@@ -346,3 +346,49 @@ describe("IeltsSpeakingTransferCard", () => {
     ).toBe(4);
   });
 });
+
+it("uses readable foreground and keeps the CC tint on the selected chip", async () => {
+  await act(async () => root.render(createElement(IeltsDraftCritiqueWorkbench)));
+  const chip = [...host.querySelectorAll("button")].find((button) =>
+    button.classList.contains("hover:border-obj-2/40"),
+  );
+  expect(chip).toBeDefined();
+  await act(async () => chip!.click());
+  expect(chip!.classList).toContain("text-text");
+  expect(chip!.classList).not.toContain("text-obj-2");
+  expect(chip!.classList).toContain("border-obj-2/45");
+  expect(chip!.classList).toContain("bg-obj-2/12");
+});
+
+it.each(["custom seed", "custom transcript", "mismatched receipt"])(
+  "starts without a demo Speaking receipt for a %s",
+  async (variant) => {
+    const fixture = IELTS_WRITING_SPEAKING_FIXTURE;
+    const props = variant === "custom seed"
+      ? { seed: { ...fixture.speakingSeed, seedId: "custom-speaking-seed" } }
+      : variant === "custom transcript"
+        ? { initialTranscript: "Another transcript with its own independent answer." }
+        : { initialTranscript: fixture.initialSpeakingTranscript + " Changed.", initialReceipt: fixture.initialSpeakingReceipt };
+    await act(async () => root.render(createElement(IeltsSpeakingTransferCard, props)));
+    expect(host.querySelector("[data-speaking-epistemic]")).toBeNull();
+    expect(host.querySelectorAll('[data-collocation-state="transferred"]')).toHaveLength(0);
+    expect(host.querySelectorAll("[data-speaking-quote]")).toHaveLength(0);
+  },
+);
+
+it("shows an explicitly matched Speaking receipt", async () => {
+  const fixture = IELTS_WRITING_SPEAKING_FIXTURE;
+  const { evaluateSpeakingRetelling } = await import("./domain-bridge");
+  const seed = { ...fixture.speakingSeed, seedId: "custom-speaking-seed" };
+  const transcript = fixture.initialSpeakingTranscript;
+  const durationSeconds = fixture.initialSpeakingDurationSeconds;
+  const initialReceipt = evaluateSpeakingRetelling({ seed, transcript, durationSeconds, assisted: false });
+  await act(async () => root.render(createElement(IeltsSpeakingTransferCard, {
+    seed,
+    initialTranscript: transcript,
+    initialDurationSeconds: durationSeconds,
+    initialReceipt,
+  })));
+  expect(host.querySelector("[data-speaking-epistemic]")?.getAttribute("data-speaking-epistemic"))
+    .toBe("rubric_verified_evidence");
+});

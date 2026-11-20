@@ -267,6 +267,7 @@ export type IeltsSpeakingFeedbackReceipt = {
   readonly receiptId: string;
   readonly cartridgeId: typeof IELTS_CARTRIDGE_ID;
   readonly seedId: string;
+  readonly sourceTranscript: string;
   readonly taskMode: "speaking_part3";
   readonly feedbackMode: "transcript_practice_feedback";
   readonly pronunciationAssessed: false;

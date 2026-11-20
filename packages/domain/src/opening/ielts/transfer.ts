@@ -1,9 +1,11 @@
+import { graphemeBoundaries } from "./graphemes";
 import {
   clampToIeltsBand,
   countDraftWords,
   countEnglishWords,
   createValidatedRubricReceipt,
   detectMemorizedTemplates,
+  getWritingTransferLineage,
   hasMemorizedTemplateStuffing,
 } from "./rubric";
 import type {
@@ -76,12 +78,30 @@ export function splitElementaryClauses(text: string): string[] {
     .filter(Boolean);
 }
 
-function matchesPattern(text: string, pattern: string): boolean {
+function patternRegex(pattern: string, flags: string): RegExp | undefined {
   const trimmed = pattern.trim();
-  if (!trimmed) return false;
+  if (!trimmed) return undefined;
   const parts = trimmed.split(/\s+/).map(escapeRegExp);
-  const regex = new RegExp(`(?<![\\p{L}\\p{N}])${parts.join("\\s+")}(?![\\p{L}\\p{N}])`, "iu");
-  return regex.test(text);
+  return new RegExp("(?<![\\p{L}\\p{N}])" + parts.join("\\s+") + "(?![\\p{L}\\p{N}])", flags);
+}
+
+function matchesPattern(text: string, pattern: string): boolean {
+  return patternRegex(pattern, "iu")?.test(text) ?? false;
+}
+
+type MatchRange = { readonly start: number; readonly end: number };
+
+function rangesOverlap(a: MatchRange, b: MatchRange): boolean {
+  return a.start < b.end && b.start < a.end;
+}
+
+function findPatternRanges(text: string, pattern: string): MatchRange[] {
+  const regex = patternRegex(pattern, "giu");
+  if (!regex) return [];
+  return Array.from(text.matchAll(regex), (match) => ({
+    start: match.index,
+    end: match.index + match[0].length,
+  }));
 }
 
 function findMatchedPatterns(
@@ -193,33 +213,33 @@ export function detectLowEntropyStuffing(paragraphs: readonly string[]): boolean
 }
 
 function isMechanicalKeywordSentence(
-  sentence: string,
+  clause: CoreClause,
   allTargetPatterns: readonly string[],
 ): boolean {
-  const words = tokenizeWords(sentence);
-  if (words.length < 7) return true;
-  if (!CLAUSE_VERB_CUE.test(sentence)) return true;
-  if (isLowEntropySentence(sentence)) return true;
+  if (!clause.substantive) return true;
 
-  // Measure how many words of this sentence are just concatenated target expressions.
-  const matchedPatterns = allTargetPatterns.filter((pattern) =>
-    matchesPattern(sentence, pattern),
-  );
-  if (matchedPatterns.length === 0) return false;
-
-  const matchedWordCount = matchedPatterns.reduce(
-    (sum, pattern) => sum + tokenizeWords(pattern).length,
-    0,
-  );
-  const nonTargetWords = Math.max(0, words.length - matchedWordCount);
-
-  if (matchedPatterns.length >= 3 && matchedWordCount / words.length >= 0.45) {
-    return true;
+  // Count distinct evidence even when several target aliases overlap.
+  const candidates = allTargetPatterns
+    .flatMap((pattern) =>
+      findPatternRanges(clause.text, pattern).map((range) => ({ ...range, pattern })),
+    )
+    .sort((a, b) => (b.end - b.start) - (a.end - a.start));
+  const distinctMatches: MatchRange[] = [];
+  const matchedPatterns = new Set<string>();
+  let matchedWordCount = 0;
+  for (const match of candidates) {
+    if (matchedPatterns.has(match.pattern) || distinctMatches.some((other) => rangesOverlap(match, other))) {
+      continue;
+    }
+    distinctMatches.push(match);
+    matchedPatterns.add(match.pattern);
+    matchedWordCount += countEnglishWords(clause.text.slice(match.start, match.end));
   }
-  if (matchedPatterns.length >= 2 && nonTargetWords <= 4) {
-    return true;
-  }
-  return false;
+
+  return (
+    (matchedPatterns.size >= 3 && matchedWordCount / clause.tokens.length >= 0.45) ||
+    (matchedPatterns.size >= 2 && clause.tokens.length - matchedWordCount <= 4)
+  );
 }
 
 function normalizeSentenceTokenKey(sentence: string): string {
@@ -257,11 +277,8 @@ function longestContiguousCommonRun(a: readonly string[], b: readonly string[]):
 }
 
 /**
- * Strips trailing (and >= 2 consecutive leading) comma-separated segments that
- * lack a predicate verb cue (e.g. ", orchard, lantern, glacier, compass"),
- * preserving a single fronted discourse marker/prepositional phrase
- * ("Consequently,", "Admittedly,", "Over a twenty-year horizon,") and every
- * segment with its own clause verb.
+ * Removes verbless comma-list padding at the edges and between verbal segments.
+ * A single fronted marker, prepositional phrase or interior aside can be meaningful.
  */
 function stripVerblessCommaLists(clause: string): string {
   const segments = clause
@@ -287,37 +304,50 @@ function stripVerblessCommaLists(clause: string): string {
     start += leadingVerbless;
   }
 
-  return segments.slice(start, end).join(", ");
+  const core: string[] = [];
+  for (let i = start; i < end;) {
+    const segment = segments[i]!;
+    if (CLAUSE_VERB_CUE.test(segment)) {
+      core.push(segment);
+      i += 1;
+      continue;
+    }
+
+    let next = i + 1;
+    while (next < end && !CLAUSE_VERB_CUE.test(segments[next]!)) next += 1;
+    if (next === i + 1) core.push(segment);
+    i = next;
+  }
+  return core.join(", ");
 }
 
-function isSubstantiveElementaryClause(clause: string): boolean {
-  const core = stripVerblessCommaLists(clause);
-  const words = tokenizeWords(core);
-  return (
-    words.length >= 7 &&
-    CLAUSE_VERB_CUE.test(core) &&
-    !isLowEntropySentence(core)
-  );
+type CoreClause = {
+  readonly text: string;
+  readonly tokens: readonly string[];
+  readonly substantive: boolean;
+};
+
+function prepareCoreClause(clause: string): CoreClause {
+  const text = stripVerblessCommaLists(clause);
+  const tokens = tokenizeWords(text);
+  return {
+    text,
+    tokens,
+    substantive: tokens.length >= 7 && CLAUSE_VERB_CUE.test(text) && !isLowEntropySentence(text),
+  };
 }
 
 /**
  * Checks whether an elementary clause is substantively changed from every
  * baseline elementary clause (regardless of baseline length, including short
- * < 6-word baselines). Strips verbless comma-list tails/heads first and blocks
- * verbatim copies, punctuation-only swaps, and baseline clauses with appended
- * or prepended noun lists.
+ * < 6-word baselines). Preprocessed tokens ignore comma-list padding.
  */
 function isClauseSubstantivelyChangedFromBaseline(
-  clause: string,
+  words: readonly string[],
   baselineCoreClauseKeys: ReadonlySet<string>,
   baselineCoreClauseTokens: readonly (readonly string[])[],
 ): boolean {
-  const coreClause = stripVerblessCommaLists(clause);
-  const key = normalizeSentenceTokenKey(coreClause);
-  if (!key || baselineCoreClauseKeys.has(key)) {
-    return false;
-  }
-  const words = tokenizeWords(coreClause);
+  if (!words.length || baselineCoreClauseKeys.has(words.join(" "))) return false;
   const wordSet = new Set(words);
 
   for (const baseWords of baselineCoreClauseTokens) {
@@ -407,30 +437,21 @@ function startsWithTokens(
 }
 
 /**
- * Checks whether EVERY occurrence of `pattern` in the clause's core (with
- * verbless comma-list tails stripped) sits inside the same local
- * `[phrase - 4 words, phrase + 4 words]` neighborhood — or preserves the exact
- * immediate pre-target / post-target subject+predicate words — as an occurrence
- * in the baseline draft.
+ * Checks whether every occurrence in the stripped clause sits inside the same
+ * local [phrase - 4 words, phrase + 4 words] neighborhood as a baseline match,
+ * including matches that preserve the immediate subject and predicate.
  */
 function isPatternLocalContextCopiedFromBaseline(
-  clause: string,
-  pattern: string,
-  baselineCoreClauseTokens: readonly (readonly string[])[],
+  clauseTokens: readonly string[],
+  patternTokens: readonly string[],
+  baselineWindows: readonly LocalContextWindow[],
 ): boolean {
-  const patternTokens = tokenizeWords(pattern);
-  const candTokens = tokenizeWords(stripVerblessCommaLists(clause));
-  const candWindows = extractPatternLocalWindows(candTokens, patternTokens, 4);
-  if (candWindows.length === 0) return false;
-
-  const baseWindows: LocalContextWindow[] = [];
-  for (const baseTokens of baselineCoreClauseTokens) {
-    baseWindows.push(...extractPatternLocalWindows(baseTokens, patternTokens, 4));
-  }
-  if (baseWindows.length === 0) return false;
+  if (!baselineWindows.length) return false;
+  const candWindows = extractPatternLocalWindows(clauseTokens, patternTokens, 4);
+  if (!candWindows.length) return false;
 
   return candWindows.every((cw) =>
-    baseWindows.some((bw) => {
+    baselineWindows.some((bw) => {
       if (tokenJaccardSimilarity(cw.full, bw.full) >= 0.75) return true;
       if (
         cw.full.length >= 2 &&
@@ -466,6 +487,7 @@ function isPatternLocalContextCopiedFromBaseline(
 function assessSubstantiveRevision(
   draft1: IeltsEssayDraft,
   draft2: IeltsEssayDraft,
+  revisedClauses: readonly (CoreClause & { readonly changed: boolean })[],
 ): boolean {
   const norm1 = normalizeForEquality(draft1.paragraphs);
   const norm2 = normalizeForEquality(draft2.paragraphs);
@@ -481,26 +503,8 @@ function assessSubstantiveRevision(
   }
   if (changedParagraphs === 0) return false;
 
-  const baselineCoreClauses = draft1.paragraphs
-    .flatMap(splitElementaryClauses)
-    .map(stripVerblessCommaLists);
-  const baselineCoreClauseKeys = new Set(
-    baselineCoreClauses.map(normalizeSentenceTokenKey).filter(Boolean),
-  );
-  const baselineCoreClauseTokens = baselineCoreClauses.map(tokenizeWords);
-
-  const revisedClauses = draft2.paragraphs.flatMap(splitElementaryClauses);
-  const rewrittenSubstantiveCoreClauses = revisedClauses
-    .filter(
-      (c) =>
-        isSubstantiveElementaryClause(c) &&
-        isClauseSubstantivelyChangedFromBaseline(
-          c,
-          baselineCoreClauseKeys,
-          baselineCoreClauseTokens,
-        ),
-    )
-    .map(stripVerblessCommaLists);
+  const substantiveClauses = revisedClauses.filter((clause) => clause.substantive);
+  const rewrittenSubstantiveCoreClauses = substantiveClauses.filter((clause) => clause.changed);
 
   const rewrittenRatio =
     revisedClauses.length > 0
@@ -510,17 +514,14 @@ function assessSubstantiveRevision(
   // Only count new vocabulary that lives inside genuinely rewritten core clauses
   // (never appended colon/semicolon/dash/comma bare noun lists).
   const terms1 = extractMeaningfulTerms(draft1.paragraphs.join(" "));
-  const substantiveRevisedText = rewrittenSubstantiveCoreClauses.join(" ");
+  const substantiveRevisedText = rewrittenSubstantiveCoreClauses.map((clause) => clause.text).join(" ");
   const substantiveTerms2 = extractMeaningfulTerms(substantiveRevisedText);
   const newlyAddedSubstantiveTerms = [...substantiveTerms2].filter(
     (t) => !terms1.has(t),
   );
 
   const allClauseTerms2 = extractMeaningfulTerms(
-    revisedClauses
-      .filter(isSubstantiveElementaryClause)
-      .map(stripVerblessCommaLists)
-      .join(" "),
+    substantiveClauses.map((clause) => clause.text).join(" "),
   );
   const removedTerms = [...terms1].filter((t) => !allClauseTerms2.has(t));
   const unionSize = new Set([...terms1, ...allClauseTerms2]).size;
@@ -595,6 +596,19 @@ export type AnalyzeCrossDraftTransferInput = {
 export function analyzeCrossDraftTransfer(
   input: AnalyzeCrossDraftTransferInput,
 ): IeltsCrossDraftTransferReport {
+  return analyzeTransfer(input, false);
+}
+
+function analyzeTransfer(
+  input: AnalyzeCrossDraftTransferInput,
+  freshPromptConfirmed: boolean,
+): IeltsCrossDraftTransferReport {
+  const samePrompt = input.draft1.promptId === input.draft2.promptId;
+  const lineage = getWritingTransferLineage(input.draft1, input.draft2);
+  const advancingLineage = lineage === "advancing_revision";
+  const freshPrompt = lineage === "fresh_prompt" && freshPromptConfirmed;
+  const canEvaluateTransfer = advancingLineage || freshPrompt;
+
   const paragraphDiffs = diffEssayParagraphs(
     input.draft1.paragraphs,
     input.draft2.paragraphs,
@@ -602,20 +616,41 @@ export function analyzeCrossDraftTransfer(
   const memorizedTemplateHits = detectMemorizedTemplates(input.draft2.paragraphs);
   const hasStuffing = hasMemorizedTemplateStuffing(memorizedTemplateHits);
   const hasLowEntropyStuffing = detectLowEntropyStuffing(input.draft2.paragraphs);
-  const hasSubstantiveRevision = assessSubstantiveRevision(
-    input.draft1,
-    input.draft2,
-  );
-
-  const baselineCoreClauses = input.draft1.paragraphs
+  const baselineCoreClauseTokens = input.draft1.paragraphs
     .flatMap(splitElementaryClauses)
-    .map(stripVerblessCommaLists);
+    .map((clause) => tokenizeWords(stripVerblessCommaLists(clause)));
   const baselineCoreClauseKeys = new Set(
-    baselineCoreClauses.map(normalizeSentenceTokenKey).filter(Boolean),
+    baselineCoreClauseTokens.map((tokens) => tokens.join(" ")).filter(Boolean),
   );
-  const baselineCoreClauseTokens = baselineCoreClauses.map(tokenizeWords);
-
-  const allTargetPatterns = input.targets.flatMap((t) => t.targetPatterns);
+  const allTargetPatterns = [...new Set(
+    input.targets.flatMap((target) => target.targetPatterns.map(normalizeText)).filter(Boolean),
+  )];
+  const baselineContexts = new Map(allTargetPatterns.map((pattern) => {
+    const tokens = tokenizeWords(pattern);
+    const windows = baselineCoreClauseTokens.flatMap((clause) =>
+      extractPatternLocalWindows(clause, tokens),
+    );
+    return [pattern, { tokens, windows }] as const;
+  }));
+  const revisedClauses = input.draft2.paragraphs.flatMap((paragraph, paragraphIndex) =>
+    splitElementaryClauses(paragraph).map((raw) => {
+      const core = prepareCoreClause(raw);
+      return {
+        ...core,
+        raw,
+        paragraphIndex,
+        changed: core.substantive && isClauseSubstantivelyChangedFromBaseline(
+          core.tokens,
+          baselineCoreClauseKeys,
+          baselineCoreClauseTokens,
+        ),
+        mechanical: isMechanicalKeywordSentence(core, allTargetPatterns),
+        claimedRanges: [] as MatchRange[],
+      };
+    }),
+  );
+  const hasSubstantiveRevision = assessSubstantiveRevision(input.draft1, input.draft2, revisedClauses);
+  const claimedPatterns = new Set<string>();
   let hasMechanicalKeywordPaste = false;
 
   const items: IeltsUpgradeTransferItem[] = input.targets.map((target) => {
@@ -640,45 +675,53 @@ export function analyzeCrossDraftTransfer(
     const contextualParagraphs = new Set<number>();
     let matchedOnlyInMechanicalPaste = false;
     let matchedOnlyInUnchangedSentence = false;
+    let overlapsCreditedEvidence = false;
 
     if (rawRevHit.matched.length > 0) {
       let sawMechanical = false;
       let sawUnchanged = false;
 
-      input.draft2.paragraphs.forEach((paragraph, paragraphIndex) => {
-        const clauses = splitElementaryClauses(paragraph);
-        for (const pattern of target.targetPatterns) {
-          for (const clause of clauses) {
-            if (!matchesPattern(clause, pattern)) continue;
-            const coreClause = stripVerblessCommaLists(clause);
-            if (
-              !matchesPattern(coreClause, pattern) ||
-              isMechanicalKeywordSentence(coreClause, allTargetPatterns)
-            ) {
-              hasMechanicalKeywordPaste = true;
-              sawMechanical = true;
-              continue;
-            }
-            if (
-              !isClauseSubstantivelyChangedFromBaseline(
-                coreClause,
-                baselineCoreClauseKeys,
-                baselineCoreClauseTokens,
-              ) ||
-              isPatternLocalContextCopiedFromBaseline(
-                coreClause,
-                pattern,
-                baselineCoreClauseTokens,
-              )
-            ) {
-              sawUnchanged = true;
-              continue;
-            }
-            contextualMatched.add(pattern);
-            contextualParagraphs.add(paragraphIndex);
+      for (const pattern of target.targetPatterns) {
+        const patternKey = normalizeText(pattern);
+        const baselineContext = baselineContexts.get(patternKey);
+        if (!baselineContext) continue;
+
+        for (const clause of revisedClauses) {
+          if (!matchesPattern(clause.raw, pattern)) continue;
+          const ranges = findPatternRanges(clause.text, pattern);
+          if (!ranges.length || clause.mechanical) {
+            hasMechanicalKeywordPaste = true;
+            sawMechanical = true;
+            continue;
+          }
+          if (
+            !clause.changed ||
+            isPatternLocalContextCopiedFromBaseline(
+              clause.tokens,
+              baselineContext.tokens,
+              baselineContext.windows,
+            )
+          ) {
+            sawUnchanged = true;
+            continue;
+          }
+          const availableRanges = claimedPatterns.has(patternKey) ? [] : ranges.filter(
+            (range) => !clause.claimedRanges.some((claimed) => rangesOverlap(range, claimed)),
+          );
+          if (!availableRanges.length) {
+            overlapsCreditedEvidence = true;
+            continue;
+          }
+          contextualMatched.add(pattern);
+          contextualParagraphs.add(clause.paragraphIndex);
+          if (canEvaluateTransfer && hasSubstantiveRevision && !revCliche.matched.length) {
+            clause.claimedRanges.push(...availableRanges);
           }
         }
-      });
+        if (canEvaluateTransfer && hasSubstantiveRevision && !revCliche.matched.length && contextualMatched.has(pattern)) {
+          claimedPatterns.add(patternKey);
+        }
+      }
 
       if (contextualMatched.size === 0) {
         if (sawMechanical) matchedOnlyInMechanicalPaste = true;
@@ -704,6 +747,9 @@ export function analyzeCrossDraftTransfer(
     ) {
       status = "regressed";
       explanation = `二稿新增了偏笼统或薄弱表达（${revWeak.matched.join(" / ")}），尚未替换为目标升级结构。`;
+    } else if (!canEvaluateTransfer && revMatchedList.length > 0) {
+      status = "pending";
+      explanation = "跨稿迁移需在同一题目下推进稿件版本，新题作答需单独复核。";
     } else if (matchedOnlyInMechanicalPaste) {
       status = "pending";
       explanation = `仅检测到目标词组的机械拼贴或重复填充句（${rawRevHit.matched.join(" / ")}），需融入完整论证语境后再复核。`;
@@ -717,9 +763,12 @@ export function analyzeCrossDraftTransfer(
       explanation = clearedWeak
         ? `已成功替换为目标表达（${revMatchedList.join(" / ")}），并清除了原稿薄弱说法。`
         : `已在第 ${revParagraphList.map((idx) => idx + 1).join("、")} 段自然运用目标表达（${revMatchedList.join(" / ")}）。`;
+    } else if (overlapsCreditedEvidence) {
+      status = "pending";
+      explanation = "该表达与已计入的迁移证据重复，请在不同语境下使用其他目标表达。";
     } else {
       status = "pending";
-      explanation = `尚未在改写稿中观察到目标表达，建议按提示在相关段落尝试改写。`;
+      explanation = "尚未在改写稿中观察到目标表达，建议按提示在相关段落尝试改写。";
     }
 
     return {
@@ -747,7 +796,11 @@ export function analyzeCrossDraftTransfer(
   const transferRate = totalTargets > 0 ? transferredCount / totalTargets : 0;
 
   let disqualificationReason: string | undefined;
-  if (totalTargets === 0) {
+  if (!canEvaluateTransfer) {
+    disqualificationReason = samePrompt
+      ? "稿件版本未推进，暂不计作有效跨草稿迁移。"
+      : "题目已更换，须完成独立新题迁移复核后才可计入正式掌握度。";
+  } else if (totalTargets === 0) {
     disqualificationReason = "当前未配置目标迁移项，无法确认跨草稿迁移，暂作为练习诊断反馈。";
   } else if (!hasSubstantiveRevision) {
     disqualificationReason = "修订稿相对初稿缺少实质性句法或内容改写，仅保留为练习诊断反馈，不计入正式掌握度。";
@@ -763,14 +816,7 @@ export function analyzeCrossDraftTransfer(
 
   const minimumTransferred = Math.max(1, Math.ceil(totalTargets * 0.5));
   const meetsCrossDraftVerification =
-    totalTargets > 0 &&
-    hasSubstantiveRevision &&
-    !hasLowEntropyStuffing &&
-    !hasMechanicalKeywordPaste &&
-    !hasStuffing &&
-    regressedCount === 0 &&
-    memorizedClicheCount === 0 &&
-    transferredCount >= minimumTransferred;
+    advancingLineage && !disqualificationReason && transferredCount >= minimumTransferred;
 
   return {
     fromDraftId: input.draft1.draftId,
@@ -800,11 +846,13 @@ function firstSentenceSnippet(paragraph: string, maxChars = 130): string {
   const trimmed = paragraph.trim();
   if (!trimmed) return "";
   const match = trimmed.match(/^[^.!?]+[.!?]?/);
-  const sentence = (match ? match[0] : trimmed).trim();
-  if (sentence.length <= maxChars) return sentence;
-  const sliced = sentence.slice(0, maxChars);
-  const lastSpace = sliced.lastIndexOf(" ");
-  return (lastSpace > 40 ? sliced.slice(0, lastSpace) : sliced).trim();
+  const boundaries = graphemeBoundaries(trimmed);
+  const sentenceEnd = boundaries.ceil(match?.[0].length ?? trimmed.length);
+  if (sentenceEnd <= maxChars) return trimmed.slice(0, sentenceEnd);
+  const limit = boundaries.floor(maxChars) || boundaries.ceil(maxChars);
+  const lastSpace = trimmed.lastIndexOf(" ", limit - 1);
+  const end = lastSpace > 40 ? boundaries.floor(lastSpace) : limit;
+  return trimmed.slice(0, end);
 }
 
 function findParagraphMatching(
@@ -847,11 +895,13 @@ export function evaluateRevisedDraftDeterministically(
   readonly transferReport: IeltsCrossDraftTransferReport;
   readonly receipt: IeltsRubricReceipt;
 } {
-  const transferReport = analyzeCrossDraftTransfer({
+  const freshPrompt = input.revisedDraft.promptId !== input.baselineDraft.promptId &&
+    input.freshPromptTransfer === true;
+  const transferReport = analyzeTransfer({
     draft1: input.baselineDraft,
     draft2: input.revisedDraft,
     targets: input.targets,
-  });
+  }, freshPrompt);
 
   const nonEmptyParagraphs = input.revisedDraft.paragraphs.map((p) => p.trim()).filter(Boolean);
   const paragraphs = nonEmptyParagraphs.length > 0 ? nonEmptyParagraphs : ["(Empty draft)"];
@@ -1020,12 +1070,9 @@ export function evaluateRevisedDraftDeterministically(
     },
   ];
 
-  // Guard freshPromptTransfer too against empty targets or low-entropy / mechanical stuffing.
   const canQualifyFreshPrompt =
-    Boolean(input.freshPromptTransfer) &&
-    transferReport.summary.totalTargets > 0 &&
-    !transferReport.summary.hasLowEntropyStuffing &&
-    !transferReport.summary.hasMechanicalKeywordPaste &&
+    freshPrompt &&
+    !transferReport.summary.disqualificationReason &&
     transferReport.summary.transferredCount >=
       Math.max(1, Math.ceil(transferReport.summary.totalTargets * 0.5));
 
@@ -1033,13 +1080,11 @@ export function evaluateRevisedDraftDeterministically(
     receiptId: input.receiptId,
     taskMode: "writing_task2",
     draft: { ...input.revisedDraft, paragraphs },
+    baselineDraft: input.baselineDraft,
     assessments,
     crossDraftTransferVerified: transferReport.summary.meetsCrossDraftVerification,
     freshPromptTransfer: canQualifyFreshPrompt,
-    disqualificationReason:
-      input.revisedDraft.version >= 2
-        ? transferReport.summary.disqualificationReason
-        : undefined,
+    disqualificationReason: transferReport.summary.disqualificationReason,
     createdAt: input.createdAt,
   });
 

@@ -23,19 +23,33 @@ export type IeltsSpeakingTransferCardProps = {
 };
 
 export function IeltsSpeakingTransferCard({
-  seed = IELTS_WRITING_SPEAKING_FIXTURE.speakingSeed,
-  initialTranscript = IELTS_WRITING_SPEAKING_FIXTURE.initialSpeakingTranscript,
-  initialDurationSeconds = IELTS_WRITING_SPEAKING_FIXTURE.initialSpeakingDurationSeconds,
-  initialReceipt = IELTS_WRITING_SPEAKING_FIXTURE.initialSpeakingReceipt,
+  seed: providedSeed,
+  initialTranscript,
+  initialDurationSeconds,
+  initialReceipt,
   onEvaluated,
 }: IeltsSpeakingTransferCardProps) {
-  const [transcript, setTranscript] = useState(initialTranscript);
-  const [durationInput, setDurationInput] = useState(String(initialDurationSeconds));
-  const [assisted, setAssisted] = useState(false);
-  const [receipt, setReceipt] = useState<IeltsSpeakingFeedbackReceipt>(initialReceipt);
+  const demo = IELTS_WRITING_SPEAKING_FIXTURE;
+  const seed = providedSeed ?? demo.speakingSeed;
+  const useDemo = providedSeed === undefined && initialTranscript === undefined &&
+    initialDurationSeconds === undefined && initialReceipt === undefined;
+  const startingTranscript = useDemo ? demo.initialSpeakingTranscript : initialTranscript ?? "";
+  const candidateReceipt = useDemo ? demo.initialSpeakingReceipt : initialReceipt;
+  const matchingReceipt = candidateReceipt?.seedId === seed.seedId &&
+    candidateReceipt.sourceTranscript === startingTranscript &&
+    (initialDurationSeconds === undefined || initialDurationSeconds === candidateReceipt.durationSeconds)
+      ? candidateReceipt
+      : null;
 
-  const epistemicMeta = EPISTEMIC_BADGE_META[receipt.epistemicStatus];
-  const paceMeta = SPEAKING_PACE_META[receipt.paceStatus];
+  const [transcript, setTranscript] = useState(startingTranscript);
+  const [durationInput, setDurationInput] = useState(
+    String(initialDurationSeconds ?? matchingReceipt?.durationSeconds ?? ""),
+  );
+  const [assisted, setAssisted] = useState(false);
+  const [evaluatedReceipt, setReceipt] = useState<IeltsSpeakingFeedbackReceipt | null>(matchingReceipt);
+  const receipt = evaluatedReceipt?.seedId === seed.seedId ? evaluatedReceipt : null;
+  const epistemicMeta = receipt ? EPISTEMIC_BADGE_META[receipt.epistemicStatus] : null;
+  const paceMeta = receipt ? SPEAKING_PACE_META[receipt.paceStatus] : null;
 
   function handleEvaluate() {
     if (!transcript.trim()) return;
@@ -70,31 +84,31 @@ export function IeltsSpeakingTransferCard({
 
         <div className="flex flex-wrap items-center gap-2">
           <span
-            data-speaking-mode={receipt.feedbackMode}
+            data-speaking-mode="transcript_practice_feedback"
             className="rounded-tile border border-line bg-surface-2 px-3 py-1 text-meta font-medium text-text"
           >
             转写练习反馈 / 迁移检核
           </span>
-          <span
-            data-speaking-epistemic={receipt.epistemicStatus}
-            className={`inline-flex items-center gap-1.5 rounded-pill border px-3 py-1 text-meta font-medium ${epistemicMeta.badgeClass}`}
-          >
+          {receipt && epistemicMeta && (
             <span
-              aria-hidden="true"
-              className={`size-2 rounded-pill ${epistemicMeta.dotClass}`}
-            />
-            {epistemicMeta.speakingLabel}
-          </span>
+              data-speaking-epistemic={receipt.epistemicStatus}
+              className={`inline-flex items-center gap-1.5 rounded-pill border px-3 py-1 text-meta font-medium ${epistemicMeta.badgeClass}`}
+            >
+              <span aria-hidden="true" className={`size-2 rounded-pill ${epistemicMeta.dotClass}`} />
+              {epistemicMeta.speakingLabel}
+            </span>
+          )}
         </div>
       </header>
 
-      {/* Honest Scope Disclosure */}
-      <p
-        data-pronunciation-disclaimer
-        className="rounded-ctl border border-line bg-surface-2/70 px-3.5 py-2.5 text-meta text-text-2"
-      >
-        {receipt.assessmentScopeNote}
-      </p>
+      {receipt && (
+        <p
+          data-pronunciation-disclaimer
+          className="rounded-ctl border border-line bg-surface-2/70 px-3.5 py-2.5 text-meta text-text-2"
+        >
+          {receipt.assessmentScopeNote}
+        </p>
+      )}
 
       {/* Examiner Follow-Up Prompt */}
       <div className="space-y-2 rounded-tile border border-line bg-bg p-4">
@@ -121,13 +135,13 @@ export function IeltsSpeakingTransferCard({
             本轮目标活性搭配（来自写作二稿）
           </h3>
           <span className="text-meta tabular-nums text-text-2">
-            已迁移 {receipt.transferredCollocations.length} /{" "}
+            已迁移 {receipt?.transferredCollocations.length ?? 0} /{" "}
             {seed.targetSpokenCollocations.length}
           </span>
         </div>
         <div className="flex flex-wrap gap-2">
           {seed.targetSpokenCollocations.map((phrase) => {
-            const matched = receipt.transferredCollocations.includes(phrase);
+            const matched = receipt?.transferredCollocations.includes(phrase) ?? false;
             return (
               <span
                 key={phrase}
@@ -156,7 +170,10 @@ export function IeltsSpeakingTransferCard({
             aria-label="口语复述记录输入框"
             rows={5}
             value={transcript}
-            onChange={(event) => setTranscript(event.target.value)}
+            onChange={(event) => {
+              setTranscript(event.target.value);
+              setReceipt(null);
+            }}
             placeholder="先口头计时说 60–90 秒，再粘贴转写稿或记录你的关键表达..."
             className="block w-full rounded-ctl border border-line-strong bg-surface px-3.5 py-2.5 font-reading text-read leading-6 text-text placeholder:text-text-3 focus:border-text focus:outline-none"
           />
@@ -172,7 +189,10 @@ export function IeltsSpeakingTransferCard({
                 min={1}
                 max={180}
                 value={durationInput}
-                onChange={(event) => setDurationInput(event.target.value)}
+                onChange={(event) => {
+                  setDurationInput(event.target.value);
+                  setReceipt(null);
+                }}
                 className="w-20 rounded-ctl border border-line-strong bg-surface px-2.5 py-1 text-center tabular-nums text-text"
               />
               <span>秒</span>
@@ -182,7 +202,10 @@ export function IeltsSpeakingTransferCard({
               <input
                 type="checkbox"
                 checked={assisted}
-                onChange={(event) => setAssisted(event.target.checked)}
+                onChange={(event) => {
+                  setAssisted(event.target.checked);
+                  setReceipt(null);
+                }}
                 className="size-4 accent-ink"
               />
               <span>对照了写作稿件（不计入正式掌握度）</span>
@@ -199,100 +222,101 @@ export function IeltsSpeakingTransferCard({
         </div>
       </div>
 
-      {/* Structured Transcript Practice Feedback */}
-      <div className="space-y-3 border-t border-line pt-4">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <h3 className="text-ui-lg font-semibold text-text">转写迁移检核反馈</h3>
-          <div className="flex flex-wrap items-center gap-2">
-            <span
-              data-speaking-pace={receipt.paceStatus}
-              className={`rounded-pill border px-2.5 py-0.5 text-cap font-medium ${paceMeta.badgeClass}`}
+      {receipt && paceMeta && (
+        <div className="space-y-3 border-t border-line pt-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h3 className="text-ui-lg font-semibold text-text">转写迁移检核反馈</h3>
+            <div className="flex flex-wrap items-center gap-2">
+              <span
+                data-speaking-pace={receipt.paceStatus}
+                className={`rounded-pill border px-2.5 py-0.5 text-cap font-medium ${paceMeta.badgeClass}`}
+              >
+                {paceMeta.label}
+                {receipt.durationSeconds !== null ? ` · ${receipt.durationSeconds} 秒` : ""}
+              </span>
+              <span className="rounded-pill border border-line bg-surface-2 px-2.5 py-0.5 text-cap tabular-nums text-text-2">
+                {receipt.wordCount} 词
+              </span>
+            </div>
+          </div>
+
+          <p className="text-meta text-text-2">{receipt.epistemicReason}</p>
+
+          {receipt.memorizedTemplateHits.length > 0 && (
+            <div
+              role="alert"
+              className="rounded-ctl border border-danger/30 bg-danger-soft p-3 text-meta text-danger"
             >
-              {paceMeta.label}
-              {receipt.durationSeconds !== null ? ` · ${receipt.durationSeconds} 秒` : ""}
-            </span>
-            <span className="rounded-pill border border-line bg-surface-2 px-2.5 py-0.5 text-cap tabular-nums text-text-2">
-              {receipt.wordCount} 词
-            </span>
-          </div>
-        </div>
+              检测到口语模板套话：
+              {receipt.memorizedTemplateHits.map((h) => h.phrase).join("、")}
+              。建议改用自然口语过渡，直接给出核心判断与具体例子。
+            </div>
+          )}
 
-        <p className="text-meta text-text-2">{receipt.epistemicReason}</p>
-
-        {receipt.memorizedTemplateHits.length > 0 && (
-          <div
-            role="alert"
-            className="rounded-ctl border border-danger/30 bg-danger-soft p-3 text-meta text-danger"
-          >
-            检测到口语模板套话：
-            {receipt.memorizedTemplateHits.map((h) => h.phrase).join("、")}
-            。建议改用自然口语过渡，直接给出核心判断与具体例子。
-          </div>
-        )}
-
-        {/* Honest Transcript Signals (No fake official Band / No Writing TR) */}
-        <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
-          {SPEAKING_SIGNAL_ORDER.map((signalKey) => {
-            const signal = receipt.transcriptSignals[signalKey];
-            const ratingMeta = SPEAKING_SIGNAL_RATING_META[signal.rating];
-            return (
-              <div
-                key={signal.key}
-                data-speaking-signal={signal.key}
-                className="rounded-tile border border-line bg-bg p-3"
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-ui font-semibold text-text">
-                    {signal.label}
-                  </span>
-                  <span
-                    className={`rounded-pill border px-2.5 py-0.5 text-cap font-medium ${ratingMeta.badgeClass}`}
-                  >
-                    {ratingMeta.label}
-                  </span>
+          {/* Honest Transcript Signals (No fake official Band / No Writing TR) */}
+          <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+            {SPEAKING_SIGNAL_ORDER.map((signalKey) => {
+              const signal = receipt.transcriptSignals[signalKey];
+              const ratingMeta = SPEAKING_SIGNAL_RATING_META[signal.rating];
+              return (
+                <div
+                  key={signal.key}
+                  data-speaking-signal={signal.key}
+                  className="rounded-tile border border-line bg-bg p-3"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-ui font-semibold text-text">
+                      {signal.label}
+                    </span>
+                    <span
+                      className={`rounded-pill border px-2.5 py-0.5 text-cap font-medium ${ratingMeta.badgeClass}`}
+                    >
+                      {ratingMeta.label}
+                    </span>
+                  </div>
+                  <p className="mt-1.5 text-meta text-text-2">{signal.note}</p>
                 </div>
-                <p className="mt-1.5 text-meta text-text-2">{signal.note}</p>
-              </div>
-            );
-          })}
-        </div>
-
-        {receipt.evidenceQuotes.length > 0 && (
-          <div className="space-y-2">
-            <p className="text-cap font-medium text-text-3">转写原句引证与微调建议</p>
-            {receipt.evidenceQuotes.map((item) => (
-              <div
-                key={item.id}
-                data-speaking-quote={item.signal}
-                className="rounded-ctl border border-line bg-bg p-3 text-meta"
-              >
-                {item.matchedExpression && (
-                  <p className="mb-1 text-cap font-medium text-accent">
-                    命中表达：{item.matchedExpression}
-                  </p>
-                )}
-                <blockquote className="border-l-2 border-line-strong pl-2.5 font-reading text-ui text-text">
-                  &ldquo;{item.quote}&rdquo;
-                </blockquote>
-                <p className="mt-1.5 text-text-2">{item.diagnosis}</p>
-                <p className="mt-1 text-text-2">
-                  <strong className="font-medium text-accent">更自然说法：</strong>
-                  <span className="font-reading text-text">{item.upgradeRewrite}</span>
-                </p>
-              </div>
-            ))}
+              );
+            })}
           </div>
-        )}
 
-        <div className="rounded-ctl border border-line bg-surface-2/60 p-3 text-cap text-text-2">
-          <p className="font-medium text-text">口语中建议避开的生硬书面衔接：</p>
-          <ul className="mt-1 list-disc space-y-0.5 pl-4">
-            {seed.avoidWrittenClunkyPhrases.map((phrase) => (
-              <li key={phrase}>{phrase}</li>
-            ))}
-          </ul>
+          {receipt.evidenceQuotes.length > 0 && (
+            <div className="space-y-2">
+              <p className="text-cap font-medium text-text-3">转写原句引证与微调建议</p>
+              {receipt.evidenceQuotes.map((item) => (
+                <div
+                  key={item.id}
+                  data-speaking-quote={item.signal}
+                  className="rounded-ctl border border-line bg-bg p-3 text-meta"
+                >
+                  {item.matchedExpression && (
+                    <p className="mb-1 text-cap font-medium text-accent">
+                      命中表达：{item.matchedExpression}
+                    </p>
+                  )}
+                  <blockquote className="border-l-2 border-line-strong pl-2.5 font-reading text-ui text-text">
+                    &ldquo;{item.quote}&rdquo;
+                  </blockquote>
+                  <p className="mt-1.5 text-text-2">{item.diagnosis}</p>
+                  <p className="mt-1 text-text-2">
+                    <strong className="font-medium text-accent">更自然说法：</strong>
+                    <span className="font-reading text-text">{item.upgradeRewrite}</span>
+                  </p>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div className="rounded-ctl border border-line bg-surface-2/60 p-3 text-cap text-text-2">
+            <p className="font-medium text-text">口语中建议避开的生硬书面衔接：</p>
+            <ul className="mt-1 list-disc space-y-0.5 pl-4">
+              {seed.avoidWrittenClunkyPhrases.map((phrase) => (
+                <li key={phrase}>{phrase}</li>
+              ))}
+            </ul>
+          </div>
         </div>
-      </div>
+      )}
     </section>
   );
 }

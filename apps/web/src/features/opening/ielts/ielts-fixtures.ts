@@ -263,6 +263,7 @@ function mustValidateReceipt(
     receiptId,
     taskMode: "writing_task2",
     draft,
+    baselineDraft: DRAFT_1,
     assessments,
     crossDraftTransferVerified,
   });

@@ -47,7 +47,7 @@ export const CRITERION_STYLES: Readonly<Record<IeltsCriterion, CriterionVisualSt
     zhLabel: IELTS_CRITERION_META.CC.zhLabel,
     officialName: IELTS_CRITERION_META.CC.officialName,
     chipClass: "border-line bg-surface text-text-2 hover:border-obj-2/40 hover:text-text",
-    activeChipClass: "border-obj-2/45 bg-obj-2/12 text-obj-2 font-medium",
+    activeChipClass: "border-obj-2/45 bg-obj-2/12 text-text font-medium",
     markClass: "bg-obj-2/12 text-text border-b-2 border-obj-2/50 hover:bg-obj-2/20",
     activeMarkClass: "bg-obj-2/24 text-text border-b-2 border-obj-2 ring-2 ring-obj-2/35",
     badgeClass: "border-obj-2/30 bg-obj-2/12 text-obj-2",

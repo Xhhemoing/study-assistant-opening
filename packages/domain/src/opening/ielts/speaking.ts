@@ -1,3 +1,4 @@
+import { graphemeBoundaries } from "./graphemes";
 import {
   countEnglishWords,
   detectMemorizedTemplates,
@@ -64,94 +65,92 @@ function tokenizeWords(text: string): string[] {
   return text.toLowerCase().match(/[\p{L}\p{N}]+(?:['’-][\p{L}\p{N}]+)*/gu) ?? [];
 }
 
-/**
- * Ensures a matched target phrase in Speaking sits inside a genuine verbal
- * sub-clause (split on hard boundaries `.!?;:—--` AND comma/enumeration
- * boundaries `,，、/`).
- * - Blocks comma-tacked verbless fragments (e.g. `, per-capita emissions`,
- *   `, and the per-capita emissions, and the long-term fiscal viability.`)
- *   because those comma segments lack their own governing verb and content words.
- * - Preserves legitimate unpunctuated direct coordination sharing a governing
- *   verb inside the same comma-free clause (e.g. `should monitor long-term
- *   fiscal viability and per-capita emissions before approving...`).
- */
+const SPEAKING_MODAL = /^(?:can|could|may|might|must|shall|should|will|would)$/u;
+const SPEAKING_FINITE_AUXILIARY = /^(?:is|are|was|were|am|do|does|did|have|has|had)$/u;
+const SPEAKING_DETERMINER = /^(?:the|a|an|this|that|these|those|its|their|our|your|his|her|my)$/u;
+const SPEAKING_AMBIGUOUS_VERB = /^(?:cut|cuts|help|helps|need|needs|fund|funds|back|backs|pair|pairs|support|supports|monitor|monitors|track|tracks|balance|balances|shift|shifts|address|addresses|offer|offers)$/u;
+const SPEAKING_SUBJECT_PRONOUN = /^(?:i|you|he|she|it|we|they)$/u;
+const SPEAKING_VERB_COMPLEMENT = /^(?:to|for|with|on|at|from|by|in|them|him|her|us|it)$/u;
+
+type SpokenTargetSpan = { readonly start: number; readonly end: number };
+
+function hasSpokenSubjectAndPredicate(
+  segment: string,
+  targetSpans: readonly SpokenTargetSpan[],
+): boolean {
+  const words = Array.from(
+    segment.matchAll(/[\p{L}\p{N}]+(?:['’-][\p{L}\p{N}]+)*/gu),
+    (word) => ({ text: word[0].toLowerCase(), index: word.index }),
+  );
+  const subjectStart = /^(?:and|or)$/u.test(words[0]?.text ?? "") ? 1 : 0;
+  const hasDeterminer = SPEAKING_DETERMINER.test(words[subjectStart]?.text ?? "");
+  let hasSubject = false;
+
+  for (let i = subjectStart; i < words.length; i += 1) {
+    const word = words[i]!;
+    const { text } = word;
+    const previous = words[i - 1]?.text;
+    const next = words[i + 1];
+    const insideTarget = targetSpans.some(({ start, end }) => word.index >= start && word.index < end);
+    if (hasSubject && !insideTarget && next && previous !== "to") {
+      if (SPEAKING_MODAL.test(text)) {
+        // A modal must govern an overt verb. "Can funding" can be a noun phrase.
+        if (SPEAKING_CLAUSE_VERB_CUE.test(next.text) && !next.text.endsWith("ing")) return true;
+      } else if (SPEAKING_FINITE_AUXILIARY.test(text)) {
+        return true;
+      } else if (
+        SPEAKING_CLAUSE_VERB_CUE.test(text) &&
+        !/^(?:be|been|being)$/u.test(text) &&
+        !text.endsWith("ing") &&
+        !SPEAKING_DETERMINER.test(previous ?? "")
+      ) {
+        // In a determiner-led phrase, an ambiguous word followed by another bare
+        // noun may be a modifier ("support package"), even after the target span.
+        const hasObjectCue = SPEAKING_DETERMINER.test(next.text) ||
+          SPEAKING_VERB_COMPLEMENT.test(next.text) ||
+          targetSpans.some(({ start }) => next.index === start);
+        if (!hasDeterminer || !SPEAKING_AMBIGUOUS_VERB.test(text) || hasObjectCue) {
+          return true;
+        }
+      }
+    }
+    if (
+      SPEAKING_SUBJECT_PRONOUN.test(text) ||
+      (text.length >= 2 && !SPEAKING_STOP_WORDS.has(text) && !SPEAKING_DETERMINER.test(text))
+    ) {
+      hasSubject = true;
+    }
+  }
+  return false;
+}
+
+/** Each comma segment must supply its own subject and predicate. */
 function isContextualSpokenClause(
   clause: string,
   targetCollocation: string,
   allTargetCollocations: readonly string[],
 ): boolean {
-  const clauseWords = tokenizeWords(clause);
-  if (clauseWords.length < 7) return false;
-  if (!SPEAKING_CLAUSE_VERB_CUE.test(clause)) return false;
-
   const targetRegex = buildPhraseRegex(targetCollocation);
-  const segments = clause
-    .split(/[,，、/]+/u)
-    .map((seg) => seg.trim())
-    .filter(Boolean);
-  const matchingSegments = segments.filter((seg) => targetRegex.test(seg));
-  if (matchingSegments.length === 0) return false;
+  return clause.split(/[,，、/]+/u).some((segment) => {
+    if (!targetRegex.test(segment) || tokenizeWords(segment).length < 6) return false;
 
-  return matchingSegments.some((seg) => {
-    const segWords = tokenizeWords(seg);
-    if (segWords.length < 6) return false;
+    const spans = allTargetCollocations.flatMap((phrase) =>
+      Array.from(segment.matchAll(new RegExp(buildPhraseRegex(phrase).source, "giu")), (match) => ({
+        start: match.index,
+        end: match.index + match[0].length,
+      })),
+    ).sort((a, b) => a.start - b.start || b.end - a.end);
 
-    let segResidual = seg;
-    let segMatchedWordCount = 0;
-    let segMatchedTargetCount = 0;
-    const segMatchedSpans: Array<{ start: number; end: number }> = [];
-
-    for (const phrase of allTargetCollocations) {
-      const regex = buildPhraseRegex(phrase);
-      const globalRegex = new RegExp(regex.source, "giu");
-      let found = false;
-      for (const match of seg.matchAll(globalRegex)) {
-        found = true;
-        const start = match.index ?? 0;
-        segMatchedSpans.push({ start, end: start + match[0].length });
-      }
-      if (found) {
-        segMatchedTargetCount += 1;
-        segMatchedWordCount += tokenizeWords(phrase).length;
-        segResidual = segResidual.replace(globalRegex, " ");
-      }
-    }
-
-    // The comma-free segment containing this target MUST carry its own governing
-    // predicate verb outside the target phrases themselves (rejecting verbless
-    // trailing fragments like ", and the per-capita emissions").
-    if (!SPEAKING_CLAUSE_VERB_CUE.test(segResidual)) {
-      return false;
-    }
-
-    const segResidualWords = tokenizeWords(segResidual);
-    const segResidualContentWords = segResidualWords.filter(
-      (w) => w.length >= 3 && !SPEAKING_STOP_WORDS.has(w),
-    );
-    if (segResidualWords.length < 3 || segResidualContentWords.length < 3) {
-      return false;
-    }
-
-    // When multiple targets share the same comma-free verbal clause (e.g. direct
-    // coordination "should monitor X and Y before approving..."), require rich
-    // surrounding clause syntax and reject zero-word mechanical juxtaposition.
-    if (segMatchedTargetCount >= 2) {
-      if (
-        segResidualWords.length < 4 * segMatchedTargetCount - 2 ||
-        segMatchedWordCount / segWords.length >= 0.48
-      ) {
+    // Adjacent target phrases with no words between them are a mechanical list.
+    // Genuine coordination leaves a conjunction or another predicate between phrases.
+    let previousEnd = -1;
+    for (const { start, end } of spans) {
+      if (previousEnd >= 0 && start >= previousEnd && !segment.slice(previousEnd, start).trim()) {
         return false;
       }
-      segMatchedSpans.sort((a, b) => a.start - b.start);
-      for (let i = 0; i < segMatchedSpans.length - 1; i += 1) {
-        const between = seg.slice(segMatchedSpans[i]!.end, segMatchedSpans[i + 1]!.start);
-        if (/^\s*$/u.test(between)) {
-          return false;
-        }
-      }
+      previousEnd = Math.max(previousEnd, end);
     }
-
-    return true;
+    return hasSpokenSubjectAndPredicate(segment, spans);
   });
 }
 
@@ -232,15 +231,17 @@ type GroundedSentence = {
  */
 function extractGroundedSentences(rawTranscript: string): GroundedSentence[] {
   const results: GroundedSentence[] = [];
-  const regex = /[^.!?\n]+(?:[.!?]+|$)/gu;
-  for (const match of rawTranscript.matchAll(regex)) {
+  const boundaries = graphemeBoundaries(rawTranscript);
+  const regex = /[^.!?\n]+(?:[.!?]+|(?=\n)|$)/gu;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(rawTranscript)) !== null) {
     const raw = match[0];
-    const startRaw = match.index ?? 0;
     const leadingSpaces = raw.length - raw.trimStart().length;
     const trimmed = raw.trim();
     if (!trimmed) continue;
-    const startOffset = startRaw + leadingSpaces;
-    const endOffset = startOffset + trimmed.length;
+    const startOffset = boundaries.floor(match.index + leadingSpaces);
+    const endOffset = boundaries.ceil(match.index + leadingSpaces + trimmed.length);
+    regex.lastIndex = Math.max(regex.lastIndex, endOffset);
     results.push({
       text: rawTranscript.slice(startOffset, endOffset),
       startOffset,
@@ -506,6 +507,7 @@ export function evaluateSpeakingRetelling(
     receiptId: `speaking-receipt-${input.seed.seedId}`,
     cartridgeId: IELTS_CARTRIDGE_ID,
     seedId: input.seed.seedId,
+    sourceTranscript: rawTranscript,
     taskMode: "speaking_part3",
     feedbackMode: "transcript_practice_feedback",
     pronunciationAssessed: false,

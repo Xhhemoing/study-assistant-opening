@@ -1,3 +1,4 @@
+import { graphemeBoundaries } from "./graphemes";
 import {
   IELTS_CARTRIDGE_ID,
   IELTS_CRITERIA,
@@ -223,17 +224,19 @@ export function locateGroundedExcerpt(
   const trimmed = excerpt.trim();
   if (!trimmed) return null;
 
+  const boundaries = graphemeBoundaries(paragraph);
   const exactIndex = paragraph.indexOf(trimmed);
-  if (exactIndex !== -1) {
-    const endIdx = exactIndex + trimmed.length;
-    const nextChar = paragraph.slice(endIdx);
-    if (!/^\p{M}/u.test(nextChar)) {
-      return {
-        startOffset: exactIndex,
-        endOffset: endIdx,
-        matchedText: paragraph.slice(exactIndex, endIdx),
-      };
-    }
+  const exactEnd = exactIndex + trimmed.length;
+  if (
+    exactIndex >= 0 &&
+    boundaries.floor(exactIndex) === exactIndex &&
+    boundaries.floor(exactEnd) === exactEnd
+  ) {
+    return {
+      startOffset: exactIndex,
+      endOffset: exactEnd,
+      matchedText: trimmed,
+    };
   }
 
   const { folded: foldedParagraph, map } = foldWithUtf16Offsets(paragraph);
@@ -246,27 +249,21 @@ export function locateGroundedExcerpt(
   const regex = new RegExp(foldedNeedleTokens.join("\\s+"), "gu");
   let match: RegExpExecArray | null;
   while ((match = regex.exec(foldedParagraph)) !== null) {
-    if (match[0].length === 0) {
-      regex.lastIndex += 1;
-      continue;
-    }
-
     const matchStart = match.index;
     const matchEnd = matchStart + match[0].length;
-    // Reject matches that split a base character from its immediately following combining mark.
-    if (matchEnd < foldedParagraph.length && /^\p{M}/u.test(foldedParagraph.slice(matchEnd))) {
-      regex.lastIndex = matchStart + 1;
+    const startOffset = map[matchStart]!.origStart;
+    const endOffset = map[matchEnd - 1]!.origEnd;
+    if (
+      map[matchStart - 1]?.origStart === startOffset ||
+      map[matchEnd]?.origEnd === endOffset ||
+      boundaries.floor(startOffset) !== startOffset ||
+      boundaries.floor(endOffset) !== endOffset
+    ) {
+      // In Unicode mode starting inside a surrogate pair can repeat this match.
+      const codePoint = foldedParagraph.codePointAt(matchStart)!;
+      regex.lastIndex = matchStart + (codePoint > 0xffff ? 2 : 1);
       continue;
     }
-
-    const startEntry = map[matchStart];
-    const endEntry = map[matchEnd - 1];
-    if (!startEntry || !endEntry) {
-      return null;
-    }
-
-    const startOffset = startEntry.origStart;
-    const endOffset = endEntry.origEnd;
     return {
       startOffset,
       endOffset,
@@ -382,10 +379,28 @@ export function resolveIeltsEpistemicStatus(
   };
 }
 
+type DraftLineage = Pick<IeltsEssayDraft, "promptId" | "version">;
+
+export function getWritingTransferLineage(
+  baseline: DraftLineage | undefined,
+  revised: DraftLineage,
+): "advancing_revision" | "fresh_prompt" | null {
+  if (
+    !baseline ||
+    !Number.isSafeInteger(baseline.version) || baseline.version < 1 ||
+    !Number.isSafeInteger(revised.version) || revised.version < 1
+  ) {
+    return null;
+  }
+  if (revised.promptId !== baseline.promptId) return "fresh_prompt";
+  return revised.version > baseline.version ? "advancing_revision" : null;
+}
+
 export type CreateRubricReceiptInput = {
   readonly receiptId: string;
   readonly taskMode: IeltsTaskMode;
   readonly draft: IeltsEssayDraft;
+  readonly baselineDraft?: DraftLineage;
   readonly assessments: readonly IeltsCriterionAssessment[];
   readonly crossDraftTransferVerified: boolean;
   readonly freshPromptTransfer?: boolean;
@@ -523,11 +538,12 @@ export function createValidatedRubricReceipt(
 
   const wordCount = countDraftWords(paragraphs);
   const memorizedTemplateFlags = detectMemorizedTemplates(paragraphs);
+  const lineage = getWritingTransferLineage(input.baselineDraft, input.draft);
   const epistemic = resolveIeltsEpistemicStatus({
     draftVersion: input.draft.version,
     assisted: input.draft.assisted,
-    crossDraftTransferVerified: input.crossDraftTransferVerified,
-    freshPromptTransfer: input.freshPromptTransfer,
+    crossDraftTransferVerified: lineage === "advancing_revision" && input.crossDraftTransferVerified,
+    freshPromptTransfer: lineage === "fresh_prompt" && input.freshPromptTransfer,
     memorizedTemplateHits: memorizedTemplateFlags,
     wordCount,
     minVerifiedWords: input.minVerifiedWords,
