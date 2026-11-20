@@ -33,6 +33,10 @@
     "./material-source-locator": {
       "types": "./src/opening/material-source-locator.ts",
       "default": "./src/opening/material-source-locator.ts"
+    },
+    "./opening/cartridges": {
+      "types": "./src/opening/cartridges/index.ts",
+      "default": "./src/opening/cartridges/index.ts"
     }
   },
   "scripts": {

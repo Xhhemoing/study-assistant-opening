@@ -1,5 +1,12 @@
 import { evaluateAssistance, evaluateDelayedCheck } from "./evidence-eligibility-timing";
 import { evaluateAiCorrectness } from "./ai-evaluation";
+import {
+  qualifyCartridgeEmission,
+  type CartridgeEvidenceObservationFacts,
+  type CartridgeEvidenceQualification,
+  type CartridgeObservationEmission,
+} from "./cartridges/evidence-gate";
+import type { CartridgeRegistry } from "./cartridges/registry";
 import type {
   EvidenceEligibility,
   EvidenceEligibilityContext,
@@ -207,4 +214,55 @@ export function evaluateEvidenceEligibility(
   );
   result.reasonCodes = [...reasons].sort();
   return result;
+}
+
+/** Server-assembled cartridge facts: the trusted registry plus raw emissions keyed by observation id. */
+export type CartridgeEvidenceInput = {
+  registry: CartridgeRegistry;
+  emissions: Readonly<Record<string, CartridgeObservationEmission>>;
+};
+
+/**
+ * Cartridge metadata can only withhold formal qualification, never grant it. An emission
+ * that is not from an L4 cartridge with a verified distinguishable probe stays honest
+ * practice/continuity feedback: correctness and delayed-check use become unknown.
+ */
+export function applyCartridgeEvidenceGate(
+  eligibility: EvidenceEligibility,
+  qualification: CartridgeEvidenceQualification | null | undefined,
+): EvidenceEligibility {
+  if (!qualification || qualification.qualified) return eligibility;
+  const reasonCodes = [...new Set<EvidenceEligibilityReasonCode>([...eligibility.reasonCodes, "verification_source_untrusted"])].sort();
+  return {
+    ...eligibility,
+    verifiedCorrect: "unknown",
+    usableForDelayedCheck: eligibility.usableForDelayedCheck === "no" ? "no" : "unknown",
+    reasonCodes,
+  };
+}
+
+/** Gate an already-qualified observation by its cartridge emission, if one was recorded. */
+export function gateObservationCartridgeEvidence(
+  eligibility: EvidenceEligibility,
+  observationId: string,
+  observation: CartridgeEvidenceObservationFacts,
+  input: CartridgeEvidenceInput | null | undefined,
+): { eligibility: EvidenceEligibility; qualification: CartridgeEvidenceQualification | null } {
+  const emission = input?.emissions[observationId];
+  if (!input || !emission) return { eligibility, qualification: null };
+  const qualification = qualifyCartridgeEmission(input.registry, emission, observation);
+  return { eligibility: applyCartridgeEvidenceGate(eligibility, qualification), qualification };
+}
+
+/** `evaluateEvidenceEligibility` followed by the optional cartridge gate. */
+export function evaluateCartridgeEvidenceEligibility(
+  observation: EvidenceObservation,
+  context: EvidenceEligibilityContext,
+  cartridge?: { registry: CartridgeRegistry; emission: CartridgeObservationEmission } | null,
+): { eligibility: EvidenceEligibility; qualification: CartridgeEvidenceQualification | null } {
+  const eligibility = evaluateEvidenceEligibility(observation, context);
+  if (!cartridge) return { eligibility, qualification: null };
+  const qualification = qualifyCartridgeEmission(cartridge.registry, cartridge.emission,
+    { outcome: observation.outcome ?? null, requirementKey: observation.requirementKey ?? null });
+  return { eligibility: applyCartridgeEvidenceGate(eligibility, qualification), qualification };
 }
