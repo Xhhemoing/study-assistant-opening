@@ -3,30 +3,35 @@ import { once } from "node:events";
 import { createConnection, createServer, type AddressInfo, type Socket } from "node:net";
 import { Redis } from "ioredis";
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
-import { createOpeningBudgetRepository, createOpeningConversationRepository, createOpeningSourceChunksRepository,
-  createOpeningTutorJobsRepository } from "@aistudy/database";
+import { advanceOpeningWorkspacePrivacyEpoch, createOpeningBudgetRepository, createOpeningConversationRepository,
+  createOpeningPrivacyRepository, createOpeningSourceActionsRepository, createOpeningSourceChunksRepository, createOpeningTutorJobsRepository,
+  tutorStreamEpochKey } from "@aistudy/database";
 import { createTutorTurnHandler, type TutorTurnDeps } from "../../apps/worker/src/jobs/tutor-turn";
 import { createTutorStreamReader, createTutorStreamWriter, createWorkerTutorStreamWriter,
   type TutorStreamDelta } from "../../apps/worker/src/runtime/tutor-stream";
 import { getTutorJobService } from "../../apps/web/src/features/opening/server/data-services";
+import { deleteOwnedMemory } from "../../packages/database/src/repositories/opening-memory-delete";
+import { backupRows } from "./opening-backup-records-fixture";
 import { createOpeningFixture } from "./opening-fixture";
 import { closeRace, openRaceSession, track, waitUntilBlocked } from "./opening-race-helpers";
 
-const redis = new Redis(process.env.REDIS_URL ?? "redis://127.0.0.1:6379", {
+const redisUrl = process.env.REDIS_URL ?? "redis://127.0.0.1:6379";
+const redis = new Redis(redisUrl, {
   lazyConnect: true, enableOfflineQueue: false, maxRetriesPerRequest: 0, connectTimeout: 3_000, commandTimeout: 3_000,
   retryStrategy: () => null,
 });
 
 it("publishes only into the expected execution and confirms missing/old writes as zero", async () => {
   const workspaceId = randomUUID(), jobId = randomUUID(), executionId = randomUUID();
-  const key = `opening:tutor-stream:${workspaceId}:${jobId}`; keys.push(key);
+  const key = `opening:tutor-stream:${workspaceId}:${jobId}`; keys.push(key, tutorStreamEpochKey(workspaceId));
   const writer = createTutorStreamWriter(redis), reader = createTutorStreamReader(redis);
-  expect(await writer.append(workspaceId, jobId, "missing", executionId)).toBe(0);
+  expect(await writer.append(workspaceId, jobId, "missing", executionId, 0)).toBe(0);
   await writer.begin(workspaceId, jobId, { privacyEpoch: 0, contextSourceRefs: [], exposureReceiptId: null, executionId });
-  expect(await writer.append(workspaceId, jobId, "wrong", randomUUID())).toBe(0);
-  expect(await writer.append(workspaceId, jobId, "legacy")).toBe(0);
-  expect(await writer.append(workspaceId, jobId, "first", executionId)).toBe(1);
-  expect(await writer.append(workspaceId, jobId, " second", executionId)).toBe(2);
+  expect(await writer.append(workspaceId, jobId, "wrong", randomUUID(), 0)).toBe(0);
+  expect(await writer.append(workspaceId, jobId, "wrong epoch", executionId, 1)).toBe(0);
+  expect(await writer.append(workspaceId, jobId, "legacy", undefined, 0)).toBe(0);
+  expect(await writer.append(workspaceId, jobId, "first", executionId, 0)).toBe(1);
+  expect(await writer.append(workspaceId, jobId, " second", executionId, 0)).toBe(2);
   expect(await reader.read(workspaceId, jobId)).toMatchObject({ text: "first second", sequence: 2, executionId });
 });
 
@@ -37,21 +42,21 @@ it("keeps an execution sealed if cancellation beats cache initialization", async
   const context = { privacyEpoch: 0, contextSourceRefs: [], exposureReceiptId: null, executionId };
   await writer.seal(workspaceId, jobId, executionId);
   await writer.begin(workspaceId, jobId, context);
-  expect(await writer.append(workspaceId, jobId, "sealed", executionId)).toBe(0);
+  expect(await writer.append(workspaceId, jobId, "sealed", executionId, 0)).toBe(0);
   expect(await reader.read(workspaceId, jobId)).toBeNull();
 });
 redis.on("error", () => undefined);
 const keys: string[] = [];
-beforeAll(async () => { await redis.connect(); });
+beforeAll(async () => { vi.stubEnv("REDIS_URL", redisUrl); await redis.connect(); });
 afterAll(async () => {
   try { if (keys.length && redis.status === "ready") await redis.del(...keys); }
-  finally { redis.disconnect(); }
+  finally { redis.disconnect(); vi.unstubAllEnvs(); }
 });
 
 it("pushes real increments, restores the complete reconnect snapshot and isolates workspaces with an expiry", async () => {
   const workspaceId = randomUUID(), jobId = randomUUID();
   const key = `opening:tutor-stream:${workspaceId}:${jobId}`;
-  keys.push(key);
+  keys.push(key, tutorStreamEpochKey(workspaceId));
   const writer = createTutorStreamWriter(redis), reader = createTutorStreamReader(redis);
   const received: TutorStreamDelta[] = [];
   let notify: (() => void) | undefined;
@@ -64,8 +69,8 @@ it("pushes real increments, restores the complete reconnect snapshot and isolate
     const context = { privacyEpoch: 2, contextSourceRefs: [], exposureReceiptId: null, claimToken: randomUUID() };
     await writer.begin(workspaceId, jobId, context);
     expect(await reader.read(workspaceId, jobId)).toEqual({ ...context, text: "", sequence: 0 });
-    await writer.append(workspaceId, jobId, "先看矩阵");
-    await writer.append(workspaceId, jobId, "的第一行。");
+    await writer.append(workspaceId, jobId, "先看矩阵", undefined, 2);
+    await writer.append(workspaceId, jobId, "的第一行。", undefined, 2);
     await allDeltas;
     expect(received).toEqual([{ text: "先看矩阵", sequence: 1 }, { text: "的第一行。", sequence: 2 }]);
     expect(await reader.read(workspaceId, jobId)).toEqual({ ...context, text: "先看矩阵的第一行。", sequence: 2 });
@@ -96,7 +101,7 @@ async function streamFixture(historySourceId?: string) {
   }
   const { jobId } = await append("Current question");
   const key = `opening:tutor-stream:${scope.workspaceId}:${jobId}`;
-  keys.push(key);
+  keys.push(key, tutorStreamEpochKey(scope.workspaceId));
   const writer = createTutorStreamWriter(redis), reader = createTutorStreamReader(redis);
   const jobs = createOpeningTutorJobsRepository(sql);
   const deps = { tutorJobs: jobs, stream: writer, chunks: createOpeningSourceChunksRepository(sql),
@@ -115,7 +120,7 @@ function deferred() {
 
 /** Retain bytes already written by ioredis, even when its end of the TCP connection closes. */
 async function openRedisTransport() {
-  const endpoint = new URL(process.env.REDIS_URL ?? "redis://127.0.0.1:6379");
+  const endpoint = new URL(redisUrl);
   const sockets = new Set<Socket>();
   let forward: ((bytes: Buffer) => void) | undefined;
   let upstream: Socket;
@@ -187,19 +192,19 @@ it.each(["cancellation", "privacy epoch"])("fences a timed-out append before %s 
     const context = { privacyEpoch: 0, contextSourceRefs: [], exposureReceiptId: null,
       claimToken: job.claimToken, executionId: job.executionId };
     await writer.begin(scope.workspaceId, jobId, context);
-    expect(await appendWriter.append(scope.workspaceId, jobId, "First", job.executionId)).toBe(1);
+    expect(await appendWriter.append(scope.workspaceId, jobId, "First", job.executionId, 0)).toBe(1);
     const before = await reader.read(scope.workspaceId, jobId);
     expect(before).toMatchObject({ text: "First", sequence: 1 });
     const stalledAppend = appendTransport.holdWrites();
     const stalledControl = controlTransport.holdWrites();
     const publishing = track(createOpeningTutorJobsRepository(publication.sql).withStreamPublication(scope, jobId, context, async () => {
-      await appendWriter.append(scope.workspaceId, jobId, " unsafe tail", job.executionId);
+      await appendWriter.append(scope.workspaceId, jobId, " unsafe tail", job.executionId, 0);
     }));
     try {
       await Promise.race([stalledAppend.received, publishing.then(() => { throw new Error("append settled before reaching TCP"); })]);
       const revoking = revocation === "cancellation"
         ? track(createOpeningTutorJobsRepository(revocationSession.sql).cancel(scope, jobId))
-        : track(revocationSession.sql`UPDATE workspaces SET privacy_epoch=privacy_epoch+1 WHERE id=${scope.workspaceId} RETURNING privacy_epoch`);
+        : track(revocationSession.sql.begin(tx => advanceOpeningWorkspacePrivacyEpoch(tx, scope)));
       const first = await Promise.race([
         stalledControl.received.then(async () => {
           await expect(controlEval.mock.results[0]?.value).rejects.toThrow("Command timed out");
@@ -216,7 +221,7 @@ it.each(["cancellation", "privacy epoch"])("fences a timed-out append before %s 
       await expect(publishing).rejects.toThrow("Command timed out");
       const result = await revoking;
       if (revocation === "cancellation") expect(result).toMatchObject({ status: "cancelled" });
-      else expect(result).toMatchObject([{ privacy_epoch: 1 }]);
+      else expect(result).toBe(1);
 
       // Forward the original EVAL only after PostgreSQL commits. The reply
       // confirms Redis actually evaluated the stale bytes on the original connection.
@@ -230,8 +235,9 @@ it.each(["cancellation", "privacy epoch"])("fences a timed-out append before %s 
       expect(first).toBe("control timed out");
       const newExecutionId = randomUUID(), newJobId = randomUUID();
       keys.push(`opening:tutor-stream:${scope.workspaceId}:${newJobId}`);
-      await appendWriter.begin(scope.workspaceId, newJobId, { ...context, executionId: newExecutionId });
-      expect(await appendWriter.append(scope.workspaceId, newJobId, "New turn", newExecutionId)).toBe(1);
+      const privacyEpoch = revocation === "privacy epoch" ? 1 : 0;
+      await appendWriter.begin(scope.workspaceId, newJobId, { ...context, privacyEpoch, executionId: newExecutionId });
+      expect(await appendWriter.append(scope.workspaceId, newJobId, "New turn", newExecutionId, privacyEpoch)).toBe(1);
       expect(duplicate).toHaveBeenCalledTimes(2);
     } finally {
       stalledControl.release();
@@ -283,11 +289,11 @@ it.each(["web", "repository"] as const)("keeps Redis unchanged when %s cancellat
     expect(before).toMatchObject({ sequence: 1, text: "First" });
     const cancelled = path === "web" ? (await getTutorJobService(sql).cancel(scope, jobId))?.job : await jobs.cancel(scope, jobId);
     expect(cancelled?.status).toBe("cancelled");
-    if (path === "web") expect(await writer.append(scope.workspaceId, jobId, "sealed", cancelled?.executionId)).toBe(0);
+    expect(await writer.append(scope.workspaceId, jobId, "sealed", cancelled?.executionId, 0)).toBe(0);
     resume.resolve();
     expect(await settled).toMatchObject({ code: "CONFLICT" });
     expect(await reader.read(scope.workspaceId, jobId)).toEqual(before);
-    expect(await writer.append(scope.workspaceId, jobId, "sealed", cancelled?.executionId)).toBe(0);
+    expect(await writer.append(scope.workspaceId, jobId, "sealed", cancelled?.executionId, 0)).toBe(0);
     await redis.publish(`${key}:events`, JSON.stringify({ text: "checkpoint", sequence: 3 }));
     await checkpoint.promise;
     expect(observed).toEqual([{ text: "First", sequence: 1 }]);
@@ -295,6 +301,104 @@ it.each(["web", "repository"] as const)("keeps Redis unchanged when %s cancellat
     resume.resolve();
     await settled;
     await unsubscribe();
+    await fixture.close();
+  }
+});
+
+it.each([
+  "web cancellation", "repository cancellation", "source exclusion", "source deletion", "recorded exclusion", "memory deletion",
+] as const)("rejects delayed Redis bytes after the publishing PG backend dies and %s commits", async revocation => {
+  const sourceId = randomUUID();
+  const { fixture, scope, sql, reader, writer, jobs, jobId, key } = await streamFixture(sourceId);
+  const publication = openRaceSession();
+  const transport = await openRedisTransport();
+  const appendRedis = redis.duplicate({ host: "127.0.0.1", port: transport.port });
+  const appendWriter = createTutorStreamWriter(appendRedis);
+  const observed: TutorStreamDelta[] = [];
+  const checkpoint = deferred();
+  const unsubscribe = await reader.subscribe(scope.workspaceId, jobId, delta => {
+    if (delta.text === "checkpoint") checkpoint.resolve();
+    else observed.push(delta);
+  });
+  try {
+    await Promise.all([publication.ready, appendRedis.connect()]);
+    const memoryId = revocation === "recorded exclusion" || revocation === "memory deletion"
+      ? await backupRows(sql, scope).memory() : null;
+    const job = (await jobs.claim(jobId))!;
+    const context = { privacyEpoch: 0, contextSourceRefs: [], exposureReceiptId: null,
+      claimToken: job.claimToken, executionId: job.executionId };
+    await writer.begin(scope.workspaceId, jobId, context);
+    expect(await appendWriter.append(scope.workspaceId, jobId, "First", job.executionId, 0)).toBe(1);
+    const before = await reader.read(scope.workspaceId, jobId);
+    expect(before).toMatchObject({ text: "First", sequence: 1 });
+    const stalled = transport.holdWrites();
+    let appendResult: Promise<number> | undefined;
+    const publishing = track(createOpeningTutorJobsRepository(publication.sql).withStreamPublication(scope, jobId, context, async () => {
+      appendResult = appendWriter.append(scope.workspaceId, jobId, " unsafe tail", job.executionId, 0);
+      await appendResult;
+    }));
+    try {
+      await Promise.race([stalled.received, publishing.then(() => { throw new Error("append settled before reaching TCP"); })]);
+      const [terminated] = await sql`SELECT pg_terminate_backend(${publication.pid}) AS terminated`;
+      expect(terminated?.terminated).toBe(true);
+      await expect(publishing).rejects.toMatchObject({ code: "CONNECTION_CLOSED" });
+      if (revocation === "web cancellation") {
+        expect(await getTutorJobService(sql).cancel(scope, jobId)).toMatchObject({ job: { status: "cancelled" }, conflict: false });
+      } else if (revocation === "repository cancellation") {
+        expect(await jobs.cancel(scope, jobId)).toMatchObject({ status: "cancelled" });
+      } else {
+        if (revocation === "recorded exclusion") {
+          await createOpeningPrivacyRepository(sql).recordExclusions(sql, scope, {
+            sourceIds: [sourceId], memoryId: memoryId!, deletedAt: new Date(),
+          });
+        } else if (revocation === "memory deletion") {
+          const [memory] = await sql`SELECT version FROM opening_memories WHERE id=${memoryId}`;
+          await deleteOwnedMemory(sql, scope, { id: memoryId!, expectedVersion: Number(memory!.version),
+            deleteSourceText: false, clientKey: randomUUID() });
+        } else {
+          const action = revocation === "source exclusion" ? "exclude" : "delete";
+          const keys = { stagingKey: (id: string) => id, finalKey: (id: string) => id };
+          await createOpeningSourceActionsRepository(sql).apply(scope, sourceId,
+            { action, expectedVersion: 0, expectedMembershipIds: [] }, keys, new Date());
+        }
+        expect(await sql`SELECT privacy_epoch FROM workspaces WHERE id=${scope.workspaceId}`).toMatchObject([{ privacy_epoch: 1 }]);
+      }
+
+      const reply = stalled.nextReply();
+      stalled.release();
+      expect(await reply).toBe(":0\r\n");
+      expect(await appendResult).toBe(0);
+      expect(await reader.read(scope.workspaceId, jobId)).toEqual(before);
+      await redis.publish(`${key}:events`, JSON.stringify({ text: "checkpoint", sequence: 3 }));
+      await checkpoint.promise;
+      expect(observed).toEqual([{ text: "First", sequence: 1 }]);
+    } finally {
+      stalled.release();
+      await expect(publishing).rejects.toThrow();
+    }
+  } finally {
+    await unsubscribe();
+    appendRedis.disconnect();
+    await Promise.all([transport.close(), closeRace(publication.sql), fixture.close()]);
+  }
+}, 15_000);
+
+it.each(["missing configuration", "unreachable Redis"] as const)("rolls back cancellation and privacy changes with %s", async failure => {
+  const { fixture, scope, sql, jobs, jobId } = await streamFixture();
+  const server = createServer(socket => socket.destroy());
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  try {
+    await jobs.claim(jobId);
+    const port = (server.address() as AddressInfo).port;
+    vi.stubEnv("REDIS_URL", failure === "missing configuration" ? undefined : `redis://127.0.0.1:${port}`);
+    await expect(jobs.cancel(scope, jobId)).rejects.toThrow();
+    await expect(sql.begin(tx => advanceOpeningWorkspacePrivacyEpoch(tx, scope))).rejects.toThrow();
+    expect(await jobs.get(scope, jobId)).toMatchObject({ status: "running" });
+    expect(await sql`SELECT privacy_epoch FROM workspaces WHERE id=${scope.workspaceId}`).toMatchObject([{ privacy_epoch: 0 }]);
+  } finally {
+    vi.stubEnv("REDIS_URL", redisUrl);
+    await new Promise<void>(resolve => { server.close(() => resolve()); });
     await fixture.close();
   }
 });
@@ -312,7 +416,7 @@ it("holds cancellation behind an append already admitted by PostgreSQL", async (
     const publishing = track(createOpeningTutorJobsRepository(publication.sql).withStreamPublication(scope, jobId, context, async () => {
       admitted.resolve();
       await append.promise;
-      expect(await writer.append(scope.workspaceId, jobId, "Published first", job.executionId)).toBe(1);
+      expect(await writer.append(scope.workspaceId, jobId, "Published first", job.executionId, 0)).toBe(1);
     }));
     await Promise.race([admitted.promise, publishing]);
     const cancelling = track(createOpeningTutorJobsRepository(cancellation.sql).cancel(scope, jobId));

@@ -17,6 +17,7 @@ import { contextSourceRefsIncluded, mergeContextSourceRefs } from "./opening-con
 import type { OpeningScope } from "./opening-sources";
 import type { ContextSourceRef } from "./opening-context-provenance";
 import { loadTutorHistory, loadTutorHistoryContext, type TutorHistoryPurpose } from "./opening-tutor-history";
+import { fenceCancelledOpeningTutorStream } from "./opening-tutor-stream-fence";
 
 /** Terminal job error; nextAction "clarify" routes a refusal to the Clarify path (LAB-A01). */
 export type OpeningTutorJobError = { message: string; code?: string; nextAction?: "clarify" };
@@ -170,6 +171,7 @@ export type OpeningTutorJobsRepositoryOptions = {
    * terminal status. The worker sweep (expireStale) covers jobs nobody is polling.
    */
   staleMs?: number;
+  tutorStreamRedisUrl?: string;
 };
 
 export const TUTOR_INTERRUPTED_MESSAGE = "回答任务已中断，执行结果待确认；为避免重复调用未自动重发。";
@@ -469,7 +471,11 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
             AND workspace_id = ${scope.workspaceId}
             AND NOT (status = ANY(${[...TERMINAL_TURN_STATUSES]}::text[]))
         `;
-        return mapJob(rows[0] as Record<string, unknown>);
+        const job = mapJob(rows[0] as Record<string, unknown>);
+        // Confirm the Redis fence before committing even if the publishing PG
+        // backend died and released its locks with Redis bytes still in flight.
+        if (job.executionId) await fenceCancelledOpeningTutorStream(job.workspaceId, job.id, job.executionId, options.tutorStreamRedisUrl);
+        return job;
       }).catch(async (error: unknown) => {
         if (error !== coordinationChanged) throw error;
         // Preserve the original CAS's filtering/casts (notably invalid job UUIDs)
@@ -491,9 +497,10 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
       return job;
     },
 
-    /** Order the Redis append against terminal job writes and workspace privacy changes. */
+    /** Authorize Redis initialization or append against current job and workspace privacy. */
     async withStreamPublication(scope: OpeningScope, id: string, context: StreamPublicationContext,
       publish: () => Promise<void>): Promise<void> {
+      let transactionClosed = false;
       await sql.begin(async tx => {
         // Acquire locks in the same order as cancellation and other terminal writes.
         const [workspace] = await tx`SELECT privacy_epoch FROM workspaces
@@ -508,7 +515,17 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
             AND j.timing_execution_id IS NOT DISTINCT FROM ${context.executionId ?? null}::uuid FOR SHARE OF j`;
         if (!job) throw Object.assign(new Error("tutor stream execution is no longer current"), { code: "CONFLICT" });
         if (context.contextSourceRefs.length) await assertStreamSources(tx, scope, context.contextSourceRefs);
-        await publish();
+        try {
+          await publish();
+        } finally {
+          // postgres.js can reject begin() when the connection dies while this
+          // callback is awaiting Redis. The server has already rolled back.
+          // Keep the abandoned callback from finalizing on the closed socket.
+          if (transactionClosed) await new Promise<never>(() => undefined);
+        }
+      }).catch((error: unknown) => {
+        transactionClosed = true;
+        throw error;
       });
     },
 

@@ -415,6 +415,7 @@ describe("tutor turn handler", () => {
     const cancelled = Object.assign(new Error("tutor job cancelled"), { code: "CONFLICT" });
     const stream = { begin: async () => {}, append: vi.fn(async (_workspace: string, _job: string, _text: string) => 1) };
     tutorJobs.withStreamPublication.mockImplementationOnce(async (_scope, _job, _context, publish) => publish())
+      .mockImplementationOnce(async (_scope, _job, _context, publish) => publish())
       .mockRejectedValueOnce(cancelled);
     provider.complete.mockImplementationOnce(async (_input, _signal, delta) => {
       await delta("First");
@@ -507,7 +508,7 @@ describe("tutor turn handler", () => {
     expect(tutorJobs.completeTurn).not.toHaveBeenCalled();
     expect(record.mock.calls.map(call => call[1].kind)).toEqual(["tutor_first_text", "tutor_first_chunk"]);
     expect(record).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ executionId, claimToken, observedAt: expect.any(Date), durationMs: expect.any(Number) }));
-    expect(stream.append.mock.calls[0]).toEqual([claimedJob.workspaceId, claimedJob.id, "First", executionId]);
+    expect(stream.append.mock.calls[0]).toEqual([claimedJob.workspaceId, claimedJob.id, "First", executionId, 0]);
     finish(); await run;
     expect(provider.complete).toHaveBeenCalledOnce(); expect(unavailable).not.toHaveBeenCalled();
     } finally { vi.useRealTimers(); }

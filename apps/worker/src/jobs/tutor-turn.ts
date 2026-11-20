@@ -407,9 +407,10 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
       let streamAvailable = Boolean(deps.stream);
       if (deps.stream) {
         try {
-          await deps.stream.begin(scope.workspaceId, claimed.id, { ...streamContext,
-            exposureReceiptId: exposureReceipt?.id ?? null,
-            ...(attemptContext ? { attemptFence: tutorAttemptFence(attemptContext) } : {}) });
+          await deps.tutorJobs.withStreamPublication(scope, claimed.id, streamContext, () =>
+            deps.stream!.begin(scope.workspaceId, claimed.id, { ...streamContext,
+              exposureReceiptId: exposureReceipt?.id ?? null,
+              ...(attemptContext ? { attemptFence: tutorAttemptFence(attemptContext) } : {}) }));
         } catch (error) {
           streamAvailable = false;
           deps.onStreamUnavailable?.(error);
@@ -430,7 +431,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
             try {
               // Keep this inside the publication transaction: on a transport
               // error the worker writer settles only after Redis confirms the seal.
-              const sequence = await deps.stream!.append(scope.workspaceId, claimed.id, text, claimed.executionId);
+              const sequence = await deps.stream!.append(scope.workspaceId, claimed.id, text, claimed.executionId, streamContext.privacyEpoch);
               if (sequence === 1) recordTiming("tutor_first_chunk", new Date(), Math.round(performance.now() - firstTextAt));
             } catch (error) { streamAvailable = false; deps.onStreamUnavailable?.(error); }
           });

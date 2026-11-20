@@ -1,6 +1,9 @@
 import type IORedis from "ioredis";
 import { setTimeout as delay } from "node:timers/promises";
-import { parseContextSourceRefs, tutorAttemptFenceSchema, type TutorAttemptFence, type ContextSourceRef } from "@aistudy/database";
+import {
+  parseContextSourceRefs, sealOpeningTutorStream, TUTOR_STREAM_TTL_SECONDS, tutorAttemptFenceSchema,
+  tutorStreamEpochKey, tutorStreamKey, type ContextSourceRef, type TutorAttemptFence,
+} from "@aistudy/database";
 import { uuidSchema } from "@aistudy/contracts";
 
 export type TutorStreamContext = {
@@ -13,12 +16,11 @@ export type TutorStreamContext = {
 };
 export type TutorStreamDelta = { text: string; sequence: number };
 export type TutorStreamSnapshot = TutorStreamContext & TutorStreamDelta;
-const TTL_SECONDS = 15 * 60;
-const keyFor = (workspaceId: string, jobId: string) => `opening:tutor-stream:${workspaceId}:${jobId}`;
-const channelFor = (workspaceId: string, jobId: string) => `${keyFor(workspaceId, jobId)}:events`;
+const channelFor = (workspaceId: string, jobId: string) => `${tutorStreamKey(workspaceId, jobId)}:events`;
 
 const DELTA_BATCH_MAX_BYTES = 256;
 const DELTA_BATCH_MAX_MS = 40;
+const DELTA_BATCH_BOUNDARY = /[.!?。！？\n]/u;
 
 /** Scope the buffer and its timer to one provider execution. */
 export async function withTutorDeltaBatches<T>(
@@ -57,7 +59,8 @@ export async function withTutorDeltaBatches<T>(
 
     if (!buffer) deadline = receivedAt + DELTA_BATCH_MAX_MS;
     buffer += delta;
-    if (first || Buffer.byteLength(buffer, "utf8") >= DELTA_BATCH_MAX_BYTES || performance.now() >= deadline) {
+    if (first || DELTA_BATCH_BOUNDARY.test(delta) || Buffer.byteLength(buffer, "utf8") >= DELTA_BATCH_MAX_BYTES
+      || performance.now() >= deadline) {
       first = false;
       await flush();
       signal.throwIfAborted();
@@ -97,39 +100,39 @@ export function createTutorStreamWriter(redis: IORedis) {
   return {
     async begin(workspaceId: string, jobId: string, context: TutorStreamContext) {
       await redis.eval(`
+        local epoch = tonumber(ARGV[4])
+        local minimum = tonumber(redis.call('GET', KEYS[2]) or '0')
+        if epoch < minimum then return end
         if redis.call('HGET', KEYS[1], 'executionId') == ARGV[1]
           and redis.call('HGET', KEYS[1], 'sealed') == '1' then return end
+        redis.call('SET', KEYS[2], epoch, 'EX', ARGV[3])
         redis.call('DEL', KEYS[1])
-        redis.call('HSET', KEYS[1], 'executionId', ARGV[1], 'context', ARGV[2], 'text', '', 'sequence', '0')
+        redis.call('HSET', KEYS[1], 'executionId', ARGV[1], 'privacyEpoch', ARGV[4], 'context', ARGV[2], 'text', '', 'sequence', '0')
         redis.call('EXPIRE', KEYS[1], ARGV[3])
-      `, 1, keyFor(workspaceId, jobId), context.executionId ?? "", JSON.stringify(context), TTL_SECONDS);
+      `, 2, tutorStreamKey(workspaceId, jobId), tutorStreamEpochKey(workspaceId),
+      context.executionId ?? "", JSON.stringify(context), TUTOR_STREAM_TTL_SECONDS, context.privacyEpoch);
     },
-    async seal(workspaceId: string, jobId: string, executionId: string) {
-      await redis.eval(`
-        local execution = redis.call('HGET', KEYS[1], 'executionId')
-        if execution == ARGV[1] then
-          redis.call('HSET', KEYS[1], 'sealed', '1')
-        elseif not execution then
-          -- Cancellation may arrive before the worker initializes its cache.
-          redis.call('HSET', KEYS[1], 'executionId', ARGV[1], 'sealed', '1')
-          redis.call('EXPIRE', KEYS[1], ARGV[2])
-        end
-      `, 1, keyFor(workspaceId, jobId), executionId, TTL_SECONDS);
-    },
-    async append(workspaceId: string, jobId: string, text: string, executionId?: string): Promise<number> {
+    seal: (workspaceId: string, jobId: string, executionId: string) => sealOpeningTutorStream(redis, workspaceId, jobId, executionId),
+    async append(workspaceId: string, jobId: string, text: string, executionId: string | undefined, privacyEpoch: number): Promise<number> {
       if (!text) return 0;
       // Append, sequence and notification are one atomic operation. A late subscriber reads the full snapshot.
       const result = await redis.eval(`
         if redis.call('EXISTS', KEYS[1]) == 0 then return 0 end
         if (redis.call('HGET', KEYS[1], 'executionId') or '') ~= ARGV[3] then return 0 end
         if redis.call('HGET', KEYS[1], 'sealed') == '1' then return 0 end
+        if redis.call('HGET', KEYS[1], 'privacyEpoch') ~= ARGV[4] then return 0 end
+        local epoch = tonumber(ARGV[4])
+        local minimum = tonumber(redis.call('GET', KEYS[3]))
+        if not epoch or not minimum or epoch < minimum then return 0 end
         local text = redis.call('HGET', KEYS[1], 'text') or ''
         local sequence = redis.call('HINCRBY', KEYS[1], 'sequence', 1)
         redis.call('HSET', KEYS[1], 'text', text .. ARGV[1])
         redis.call('EXPIRE', KEYS[1], ARGV[2])
+        redis.call('EXPIRE', KEYS[3], ARGV[2])
         redis.call('PUBLISH', KEYS[2], cjson.encode({text=ARGV[1], sequence=sequence}))
         return sequence
-      `, 2, keyFor(workspaceId, jobId), channelFor(workspaceId, jobId), text, TTL_SECONDS, executionId ?? "");
+      `, 3, tutorStreamKey(workspaceId, jobId), channelFor(workspaceId, jobId), tutorStreamEpochKey(workspaceId),
+      text, TUTOR_STREAM_TTL_SECONDS, executionId ?? "", privacyEpoch);
       if (typeof result !== "number" || !Number.isSafeInteger(result) || result < 0) throw new Error("invalid stream publication sequence");
       return result;
     },
@@ -139,29 +142,73 @@ export type TutorStreamWriter = ReturnType<typeof createTutorStreamWriter>;
 
 /** The worker holds PostgreSQL publication locks until this append settles. */
 export function createWorkerTutorStreamWriter(producer: IORedis, reportError: (error: unknown) => void) {
-  const control = createTutorStreamWriter(producer);
-  let appendConnection: ReturnType<typeof openAppendConnection> | undefined;
+  const sharedControl = { redis: producer, writer: createTutorStreamWriter(producer), ready: undefined };
+  let useSharedControl = true;
+  let controlConnection: ReturnType<typeof openConnection> | undefined;
+  let appendConnection: ReturnType<typeof openConnection> | undefined;
 
-  function openAppendConnection() {
+  function openConnection() {
     const redis = producer.duplicate({ lazyConnect: true, autoResendUnfulfilledCommands: false,
       maxRetriesPerRequest: 0, enableOfflineQueue: false, retryStrategy: () => null });
     redis.on("error", reportError);
     return { redis, writer: createTutorStreamWriter(redis), ready: redis.connect() };
   }
 
-  function disconnect(connection = appendConnection) {
+  function closeConnection(redis: IORedis) {
+    redis.disconnect();
+    // ioredis starts a graceful close. Discard unsent data immediately.
+    redis.stream?.destroy();
+  }
+
+  function disconnectAppend(connection = appendConnection) {
     if (!connection || connection !== appendConnection) return;
     appendConnection = undefined;
-    connection.redis.disconnect();
-    // ioredis disconnect starts a graceful socket close. Discard unsent data immediately.
-    connection.redis.stream?.destroy();
+    closeConnection(connection.redis);
+  }
+
+  function retireControl(connection: typeof sharedControl | ReturnType<typeof openConnection>) {
+    if (connection === sharedControl) {
+      // The borrowed producer also serves the worker queues.
+      useSharedControl = false;
+    } else if (connection === controlConnection) {
+      controlConnection = undefined;
+      closeConnection(connection.redis);
+    }
+  }
+
+  const isClosed = (redis: IORedis) => redis.status === "end" || redis.status === "close";
+  async function seal(workspaceId: string, jobId: string, executionId: string) {
+    const previous = useSharedControl ? sharedControl : controlConnection;
+    if (previous && isClosed(previous.redis)) retireControl(previous);
+    const connection = useSharedControl ? sharedControl : controlConnection ??= openConnection();
+    try {
+      await connection.ready;
+      await connection.writer.seal(workspaceId, jobId, executionId);
+    } catch (error) {
+      if (isClosed(connection.redis) || (connection !== sharedControl && connection.redis.status !== "ready")
+        || (error instanceof Error && error.message === "Connection is closed.")) retireControl(connection);
+      throw error;
+    }
+  }
+
+  async function getAppendConnection() {
+    if (appendConnection && isClosed(appendConnection.redis)) disconnectAppend();
+    const connection = appendConnection ??= openConnection();
+    try {
+      await connection.ready;
+      if (connection.redis.status !== "ready") throw new Error("tutor stream Redis is disconnected");
+    } catch (error) {
+      disconnectAppend(connection);
+      throw error;
+    }
+    return connection;
   }
 
   async function sealUntilConfirmed(workspaceId: string, jobId: string, executionId: string) {
     let reported = false;
     for (;;) {
       try {
-        await control.seal(workspaceId, jobId, executionId);
+        await seal(workspaceId, jobId, executionId);
         return;
       } catch (error) {
         if (!reported) reportError(error);
@@ -172,24 +219,23 @@ export function createWorkerTutorStreamWriter(producer: IORedis, reportError: (e
   }
 
   return {
-    begin: control.begin,
-    seal: control.seal,
-    disconnect: () => disconnect(),
-    async append(workspaceId: string, jobId: string, text: string, executionId?: string) {
+    async begin(...args: Parameters<TutorStreamWriter["begin"]>) {
+      const connection = await getAppendConnection();
+      try { await connection.writer.begin(...args); }
+      catch (error) { disconnectAppend(connection); throw error; }
+    },
+    seal,
+    disconnect() {
+      disconnectAppend();
+      if (controlConnection) retireControl(controlConnection);
+    },
+    async append(workspaceId: string, jobId: string, text: string, executionId: string | undefined, privacyEpoch: number) {
       if (!text) return 0;
-      if (appendConnection?.redis.status === "end") disconnect();
-      const connection = appendConnection ??= openAppendConnection();
+      const connection = await getAppendConnection();
       try {
-        await connection.ready;
-        if (connection.redis.status !== "ready") throw new Error("tutor stream Redis is disconnected");
+        return await connection.writer.append(workspaceId, jobId, text, executionId, privacyEpoch);
       } catch (error) {
-        disconnect(connection);
-        throw error;
-      }
-      try {
-        return await connection.writer.append(workspaceId, jobId, text, executionId);
-      } catch (error) {
-        disconnect(connection);
+        disconnectAppend(connection);
         // Redis may still execute bytes already in transit. A confirmed seal on
         // the control connection orders that EVAL on Redis: it either already
         // ran under the PG locks, or sees the seal (or a missing/new execution).
@@ -218,7 +264,7 @@ function parseSnapshot(row: Record<string, string>): TutorStreamSnapshot | null 
 export function createTutorStreamReader(redis: IORedis) {
   return {
     async read(workspaceId: string, jobId: string): Promise<TutorStreamSnapshot | null> {
-      return parseSnapshot(await redis.hgetall(keyFor(workspaceId, jobId)));
+      return parseSnapshot(await redis.hgetall(tutorStreamKey(workspaceId, jobId)));
     },
     async subscribe(workspaceId: string, jobId: string, onDelta: (delta: TutorStreamDelta) => void, onUnavailable?: () => void): Promise<() => Promise<void>> {
       const subscriber = redis.duplicate({ lazyConnect: true });

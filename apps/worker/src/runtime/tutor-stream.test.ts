@@ -1,6 +1,6 @@
 import type IORedis from "ioredis";
 import { expect, it, vi } from "vitest";
-import { createTutorStreamReader, createTutorStreamWriter, withTutorDeltaBatches } from "./tutor-stream";
+import { createTutorStreamReader, createTutorStreamWriter, createWorkerTutorStreamWriter, withTutorDeltaBatches } from "./tutor-stream";
 
 function deferred() {
   let resolve!: () => void;
@@ -22,10 +22,10 @@ it("sm95 parses the cached attempt fence and rejects malformed identities before
 it("returns only confirmed publication sequences and includes the expected execution identity", async () => {
   const evalScript = vi.fn().mockResolvedValueOnce(1).mockResolvedValueOnce(0);
   const writer = createTutorStreamWriter({ eval: evalScript } as unknown as IORedis);
-  expect(await writer.append("workspace", "job", "hello", "execution")).toBe(1);
-  expect(await writer.append("workspace", "job", "stale", "old-execution")).toBe(0);
-  expect(evalScript.mock.calls[0]?.at(-1)).toBe("execution");
-  expect(await writer.append("workspace", "job", "", "execution")).toBe(0);
+  expect(await writer.append("workspace", "job", "hello", "execution", 2)).toBe(1);
+  expect(await writer.append("workspace", "job", "stale", "old-execution", 1)).toBe(0);
+  expect(evalScript.mock.calls[0]?.slice(-2)).toEqual(["execution", 2]);
+  expect(await writer.append("workspace", "job", "", "execution", 2)).toBe(0);
   expect(evalScript).toHaveBeenCalledTimes(2);
 });
 
@@ -48,6 +48,58 @@ it("flushes at the monotonic deadline even when the timer callback has not run",
     now.mockRestore();
     vi.useRealTimers();
   }
+});
+
+it.each(["Done.", "Done!", "Done?", "好。", "好！", "什么？", "Line\nNext"])("publishes %j before the provider finishes", async delta => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+  try {
+    const published: string[] = [];
+    await withTutorDeltaBatches(async (_signal, emit) => {
+      await emit("First");
+      await emit(" Next: ");
+      expect(published).toEqual(["First"]);
+      await emit(delta);
+      expect(published).toEqual(["First", " Next: " + delta]);
+    }, async text => { published.push(text); });
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it("confirms an unknown append on a replacement control connection after an outage", async () => {
+  const transportError = new Error("Command timed out");
+  const connectionClosed = new Error("Connection is closed.");
+  const endedControl = {
+    status: "ready", options: { retryStrategy: () => null }, disconnect: vi.fn(),
+    eval: vi.fn<() => Promise<void>>().mockRejectedValue(connectionClosed),
+    duplicate: vi.fn(),
+  };
+  const appendConnection = {
+    status: "ready", on: vi.fn(), connect: vi.fn().mockResolvedValue(undefined), disconnect: vi.fn(),
+    eval: vi.fn(async () => { endedControl.status = "end"; throw transportError; }),
+  };
+  const unreachable = {
+    status: "end", on: vi.fn(), disconnect: vi.fn(), connect: vi.fn().mockRejectedValue(connectionClosed),
+  };
+  const replacement = {
+    status: "ready", on: vi.fn(), disconnect: vi.fn(),
+    eval: vi.fn().mockResolvedValue(undefined), connect: vi.fn().mockResolvedValue(undefined),
+  };
+  endedControl.duplicate.mockReturnValueOnce(appendConnection).mockReturnValueOnce(unreachable).mockReturnValue(replacement);
+  const writer = createWorkerTutorStreamWriter(endedControl as unknown as IORedis, vi.fn());
+  let failure: unknown;
+  const result = writer.append("workspace", "job", "tail", "execution", 0).catch(error => { failure = error; });
+  try {
+    await vi.waitFor(() => expect(unreachable.disconnect).toHaveBeenCalled());
+    expect(failure).toBeUndefined();
+    await vi.waitFor(() => expect(failure).toBe(transportError), { timeout: 1500 });
+    expect(replacement.eval).toHaveBeenCalledTimes(1);
+  } finally {
+    endedControl.eval.mockResolvedValue(undefined); // Let a failing candidate finish cleanup.
+    await result;
+    writer.disconnect();
+  }
+  expect(replacement.disconnect).toHaveBeenCalledOnce();
 });
 
 it("drains overlapping callbacks accepted before close in arrival order", async () => {

@@ -3,6 +3,7 @@ import type { Sql, TransactionSql } from "postgres";
 import type { OpeningScope } from "./opening-sources";
 import { lockWorkspaceLearningHistory, nextWorkspaceLearningHistoryRevision } from "./opening-learning-facts";
 import { invalidateOpeningLearningEligibility } from "./opening-learning-eligibility";
+import { advanceOpeningWorkspacePrivacyEpoch } from "./opening-tutor-stream-fence";
 
 export type PrivacyExclusion = {
   workspaceId: string;
@@ -84,9 +85,9 @@ export function createOpeningPrivacyRepository(sql: Sql | TransactionSql) {
           await tx`UPDATE opening_course_knowledge SET node_definitions='{}'::jsonb
             WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
               AND source_versions ?| ${recorded}::text[]`;
-          await tx`UPDATE workspaces SET privacy_epoch=privacy_epoch+1, updated_at=now() WHERE id=${scope.workspaceId}`;
           await nextWorkspaceLearningHistoryRevision(tx, scope);
           await invalidateOpeningLearningEligibility(tx, scope, { sourceIds: recorded });
+          await advanceOpeningWorkspacePrivacyEpoch(tx, scope);
         }
         return sourceIds;
       });

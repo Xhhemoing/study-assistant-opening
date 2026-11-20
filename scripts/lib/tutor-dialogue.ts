@@ -252,7 +252,8 @@ export async function collectTutorStreamSafety(options: { git: string; redisUrl:
   assertStreamRedisUrl(options.redisUrl);
   const sql = createSqlClient(url.toString());
   const redis = new Redis(options.redisUrl, { lazyConnect: true, enableOfflineQueue: false,
-    maxRetriesPerRequest: 0, connectTimeout: 3000, commandTimeout: 3000, retryStrategy: () => null });
+    autoResendUnfulfilledCommands: false, maxRetriesPerRequest: 0, connectTimeout: 3000,
+    commandTimeout: 3000, retryStrategy: () => null });
   redis.on("error", () => undefined);
   const writer = createWorkerTutorStreamWriter(redis, () => undefined);
   const report: DialogueReport = { synthetic: true, transport: "controlled_provider",
@@ -264,7 +265,8 @@ export async function collectTutorStreamSafety(options: { git: string; redisUrl:
   const check = (value: unknown, label: string) => { if (!value) throw new Error(`STREAM_CHECK_FAILED:${label}`); };
   try {
     await redis.connect();
-    const conversations = createOpeningConversationRepository(sql), jobs = createOpeningTutorJobsRepository(sql);
+    const conversations = createOpeningConversationRepository(sql);
+    const jobs = createOpeningTutorJobsRepository(sql, { tutorStreamRedisUrl: options.redisUrl });
     const chunks = createOpeningSourceChunksRepository(sql), budget = createOpeningBudgetRepository(sql, { envCapCents: 100_000 });
     const reader = createTutorStreamReader(redis);
     for (const caseId of STREAM_SAFETY_CASES) {
@@ -305,10 +307,13 @@ export async function collectTutorStreamSafety(options: { git: string; redisUrl:
           provider: { complete: async (value, _signal, onDelta) => {
             calls++; check(value.outputFormat === "markdown" && onDelta, "real_stream_callback");
             report.requests.push({ ordinal: report.requests.length + 1, caseId, actor: "tutor", input: value, status: null, raw: null });
-            for (const delta of ["先看等式两边。", "再尝试同减一个数。 "]) {
+            // In the cancellation case the provider returns usage before the
+            // buffered tail drains. A sentence boundary would abort it first.
+            const deltas = ["先看等式两边。", caseId === "stream_success" ? "再尝试同减一个数。 " : "再尝试同减一个数"];
+            for (const delta of deltas) {
               await onDelta!(delta);
               if (caseId === "stream_success" && published.length === 1) {
-                // The tail is buffered. Wait for Redis, then authorize the actual snapshot.
+                // Observe the second Redis notification before authorizing its snapshot.
                 let timeout: ReturnType<typeof setTimeout> | undefined;
                 try {
                   await Promise.race([secondBatch, new Promise<never>((_resolve, reject) => {
@@ -326,7 +331,7 @@ export async function collectTutorStreamSafety(options: { git: string; redisUrl:
                 await jobs.cancel(scope, saved.jobId); cancelHelp = (await facts()).help;
               }
             }
-            return { text: "先看等式两边。再尝试同减一个数。 ", citedChunkIds: [], candidates: [], requestId: "controlled-stream",
+            return { text: deltas.join(""), citedChunkIds: [], candidates: [], requestId: "controlled-stream",
               inputTokens: 10, outputTokens: 10 };
           } }, config: { maxContextCharacters: 1000, reservedCents: 100, maxOutputTokens: 100, ...pricing } });
         let handlerError: string | undefined;

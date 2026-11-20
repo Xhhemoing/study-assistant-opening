@@ -4,6 +4,7 @@ import type { SourceActionInput, SourceDeletion, SourceImpact } from "@aistudy/c
 import { OpeningSourceError, type OpeningScope } from "./opening-sources";
 import { lockWorkspaceLearningHistory, nextWorkspaceLearningHistoryRevision } from "./opening-learning-facts";
 import { invalidateOpeningLearningEligibility } from "./opening-learning-eligibility";
+import { advanceOpeningWorkspacePrivacyEpoch } from "./opening-tutor-stream-fence";
 
 type Keys = { stagingKey(id: string): string; finalKey(id: string, version: number): string };
 type Cleanup = { keys: string[]; notBefore: string | null };
@@ -60,13 +61,14 @@ export function createOpeningSourceActionsRepository(sql: Sql) {
         }
         await tx`INSERT INTO opening_privacy_exclusions(id,workspace_id,source_id,deleted_at)
           VALUES(${randomUUID()},${scope.workspaceId},${id},${now}) ON CONFLICT(workspace_id,source_id) DO NOTHING`;
-        // Both first exclusion and later asset deletion fence in-flight model/writeback snapshots.
-        await tx`UPDATE workspaces SET privacy_epoch=privacy_epoch+1 WHERE id=${scope.workspaceId}`;
         await tx`UPDATE opening_course_knowledge SET node_definitions='{}'::jsonb
           WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND source_versions ? ${id}`;
         await nextWorkspaceLearningHistoryRevision(tx, scope);
         await invalidateOpeningLearningEligibility(tx, scope, { sourceIds: [id] });
-        if (input.action === "exclude") return { deleted: false, cleanup: { keys: [], notBefore: null } };
+        if (input.action === "exclude") {
+          await advanceOpeningWorkspacePrivacyEpoch(tx, scope);
+          return { deleted: false, cleanup: { keys: [], notBefore: null } };
+        }
 
         const versions = await tx`SELECT version FROM opening_source_versions WHERE workspace_id=${scope.workspaceId} AND source_id=${id}
           UNION SELECT source_version AS version FROM opening_source_chunks WHERE source_id=${id}`;
@@ -90,6 +92,7 @@ export function createOpeningSourceActionsRepository(sql: Sql) {
         await tx`DELETE FROM course_asset_memberships WHERE workspace_id=${scope.workspaceId} AND asset_type='source' AND asset_id=${id}`;
         await tx`UPDATE opening_source_versions SET availability='unavailable' WHERE workspace_id=${scope.workspaceId} AND source_id=${id}`;
         await tx`DELETE FROM opening_sources WHERE workspace_id=${scope.workspaceId} AND id=${id}`;
+        await advanceOpeningWorkspacePrivacyEpoch(tx, scope);
         return { deleted: true, cleanup: { keys: pending, notBefore: notBefore.toISOString() } };
       });
     },

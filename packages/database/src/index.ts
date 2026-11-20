@@ -62,6 +62,10 @@ export { magicMatchesMime } from "./storage/magic";
 export * from "./schema/opening-assistant-candidates";
 export * from "./repositories/opening-candidates";
 export * from "./repositories/opening-tutor-jobs";
+export {
+  advanceOpeningWorkspacePrivacyEpoch, sealOpeningTutorStream, TUTOR_STREAM_TTL_SECONDS,
+  tutorStreamEpochKey, tutorStreamKey,
+} from "./repositories/opening-tutor-stream-fence";
 export * from "./repositories/opening-context-provenance";
 
 export * from "./schema/opening-memory";
