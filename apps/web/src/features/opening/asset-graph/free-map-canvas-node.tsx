@@ -120,7 +120,7 @@ export function FreeMapCanvasNode({
   }
 
   return (
-    <g className={dimmed ? "opacity-45" : undefined}>
+    <g data-free-map-focus-node={node.id} className={dimmed ? "opacity-45" : undefined}>
       <g
         transform={`translate(${point.x} ${point.y})`}
         data-free-map-node={node.id}

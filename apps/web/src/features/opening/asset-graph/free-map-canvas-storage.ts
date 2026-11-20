@@ -1,3 +1,4 @@
+import { FREE_MAP_STORAGE_PREFIX } from "../client/privacy-change";
 import type { SessionIdentity } from "../../auth/session-identity";
 import type { MapPoint } from "./free-map-canvas-geometry";
 
@@ -16,7 +17,7 @@ export function buildFreeMapPersistKey(
 }
 
 export function freeMapStorageKey(persistKey: string | undefined): string | null {
-  return persistKey ? `aistudy/free-map/geometry/${encodeURIComponent(persistKey)}` : null;
+  return persistKey ? `${FREE_MAP_STORAGE_PREFIX}${encodeURIComponent(persistKey)}` : null;
 }
 
 /** localStorage is an untrusted boundary. Retain finite numeric coordinates only, never captions or study evidence. */

@@ -75,7 +75,7 @@ type MockDbState = {
   courses: Array<{ id: string; title: string; updated_at: string }>;
   goals: Array<Record<string, unknown>>;
   requirements: Array<Record<string, unknown>>;
-  knowledge: Array<{ course_id: string; version: number; snapshot: unknown; updated_at: string }>;
+  knowledge: Array<{ course_id: string; version: number; snapshot: unknown; updated_at: string; source_versions?: Record<string, number> }>;
   sources: Array<{
     id: string;
     name: string;
@@ -508,6 +508,7 @@ function createHarness(state: MockDbState) {
     if (text.includes("FROM opening_source_chunks c")) {
       const courseIds = Array.isArray(values[1]) ? new Set(values[1].map(String)) : new Set<string>();
       const chunkIds = Array.isArray(values[2]) ? new Set(values[2].map(String)) : new Set<string>();
+      const visibleSourceIds = new Set((values[3] as string[] | undefined) ?? []);
       const excluded = new Set(state.exclusions.map(e => String(e.source_id)));
       const sourceById = new Map(state.sources.map(s => [String(s.id), s]));
       const rows: Array<{
@@ -518,7 +519,7 @@ function createHarness(state: MockDbState) {
         course_id: string;
       }> = [];
       for (const chunk of state.sourceChunks ?? []) {
-        if (!chunkIds.has(chunk.id)) continue;
+        if (!chunkIds.has(chunk.id) || !visibleSourceIds.has(chunk.source_id)) continue;
         if (chunk.availability === "unavailable") continue;
         const src = sourceById.get(chunk.source_id);
         if (!src) continue;
@@ -1049,6 +1050,7 @@ describe("createOpeningAssetGraphRepository (unit)", () => {
       lens: "structure",
       focus: `knowledge/${COURSE_1}/${KN_2}`,
       direction: "out",
+      includeKnowledgeEdgeDetails: true,
     });
     expect(knOut.edges).toEqual([
       {
@@ -2703,6 +2705,7 @@ describe("honest knowledgeStatus edge projection and live chunk re-verification"
       lens: "structure",
       focus: `knowledge/${COURSE_1}/${KN_1}`,
       direction: "out",
+        includeKnowledgeEdgeDetails: true,
     });
 
     const prereq = out.edges.find(e => e.relation === "prerequisite");
@@ -2770,27 +2773,32 @@ describe("honest knowledgeStatus edge projection and live chunk re-verification"
         lens: "structure",
         focus: `knowledge/${COURSE_1}/${KN_1}`,
         direction: "out",
+        includeKnowledgeEdgeDetails: true,
       });
       return res.edges.find(e => e.relation === "prerequisite");
     };
 
-    // 1. Privacy excluded source -> needs_check without provenance
-    const sExcluded = buildState();
-    sExcluded.exclusions = [{ source_id: SRC_1 }];
-    sExcluded.sources[0]!.ai_excluded = true;
-    expect(await queryEdge(sExcluded)).toEqual({
-      id: `recorded:prerequisite:knowledge/${COURSE_1}/${KN_1}:knowledge/${COURSE_1}/${KN_2}`,
-      from: `knowledge/${COURSE_1}/${KN_1}`,
-      to: `knowledge/${COURSE_1}/${KN_2}`,
-      relation: "prerequisite",
-      basis: "recorded",
-      knowledgeStatus: "needs_check",
-    });
+    for (const condition of ["excluded", "deleted", "reference", "mock_exam", "practice"]) {
+      const state = buildState();
+      state.knowledge[0]!.source_versions = { [SRC_1]: 2 };
+      if (condition === "excluded") state.exclusions = [{ source_id: SRC_1 }];
+      else if (condition === "deleted") state.allSourceIds = state.allSourceIds.filter(row => row.id !== SRC_1);
+      else state.memberships[0]!.purpose = condition;
 
-    // 2. Non-teaching membership purpose -> needs_check without provenance
-    const sNonTeaching = buildState();
-    sNonTeaching.memberships[0]!.purpose = "reference";
-    expect(await queryEdge(sNonTeaching)).toEqual({
+      const { repo } = createHarness(state);
+      const focus = `knowledge/${COURSE_1}/${KN_1}`;
+      const context = { kind: "course", id: `course/${COURSE_1}` } as const;
+      const roots = await repo.query(SCOPE, { op: "roots", context, lens: "structure", kinds: ["knowledge"] });
+      expect(roots.nodes).toEqual([]);
+      await expect(repo.query(SCOPE, { op: "detail", context, lens: "structure", focus }))
+        .rejects.toMatchObject({ code: "NOT_FOUND" });
+      await expect(queryEdge(state)).rejects.toMatchObject({ code: "NOT_FOUND" });
+    }
+
+    const partial = buildState();
+    partial.knowledge[0]!.source_versions = { [SRC_1]: 2 };
+    (partial.knowledge[0]!.snapshot as KnowledgeSnapshot).edges[0]!.evidenceChunkIds.push(CHUNK_2);
+    expect(await queryEdge(partial)).toEqual({
       id: `recorded:prerequisite:knowledge/${COURSE_1}/${KN_1}:knowledge/${COURSE_1}/${KN_2}`,
       from: `knowledge/${COURSE_1}/${KN_1}`,
       to: `knowledge/${COURSE_1}/${KN_2}`,
@@ -2860,6 +2868,7 @@ describe("honest knowledgeStatus edge projection and live chunk re-verification"
       lens: "structure",
       focus: `knowledge/${COURSE_1}/${KN_1}`,
       direction: "out",
+        includeKnowledgeEdgeDetails: true,
     });
 
     expect(out.edges).toEqual([
@@ -2917,6 +2926,7 @@ describe("honest knowledgeStatus edge projection and live chunk re-verification"
         lens: "structure",
         focus: `knowledge/${COURSE_1}/${KN_1}`,
         direction: "out",
+        includeKnowledgeEdgeDetails: true,
         limit: 1,
       });
 
@@ -2931,6 +2941,7 @@ describe("honest knowledgeStatus edge projection and live chunk re-verification"
         lens: "structure",
         focus: `knowledge/${COURSE_1}/${KN_1}`,
         direction: "out",
+        includeKnowledgeEdgeDetails: true,
         limit: 1,
         cursor: p1.page.nextCursor!,
       }),
@@ -2949,6 +2960,7 @@ describe("honest knowledgeStatus edge projection and live chunk re-verification"
         lens: "structure",
         focus: `knowledge/${COURSE_1}/${KN_1}`,
         direction: "out",
+        includeKnowledgeEdgeDetails: true,
         limit: 1,
         cursor: p2.page.nextCursor!,
       }),
@@ -2968,6 +2980,7 @@ describe("honest knowledgeStatus edge projection and live chunk re-verification"
         lens: "structure",
         focus: `knowledge/${COURSE_1}/${KN_1}`,
         direction: "out",
+        includeKnowledgeEdgeDetails: true,
         limit: 1,
         cursor: p3.page.nextCursor!,
       }),

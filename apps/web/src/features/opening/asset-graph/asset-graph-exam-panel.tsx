@@ -16,6 +16,7 @@ import type {
   CourseRouteSnapshot,
   CourseRouteTaskContext,
 } from "@aistudy/contracts";
+import { getVerifiedSessionNamespace } from "../../auth/session-identity";
 import { userFacingMessage } from "../../../lib/user-facing-error";
 import { subscribeOpeningPrivacyChange } from "../client/privacy-change";
 import type { CourseRouteClient } from "../courses/course-route-client";
@@ -66,7 +67,7 @@ export type AssetGraphExamPanelProps = {
   ) => void;
   onStartBoundRetest: (
     courseId: string,
-    taskContext: Extract<CourseRouteTaskContext, { managed: true }>,
+    taskContext: Extract<CourseRouteTaskContext, { managed: true }> & { retestId: string },
   ) => void;
 };
 
@@ -81,10 +82,18 @@ export function AssetGraphExamPanel({
   onStartOrdinaryPractice,
   onStartBoundRetest,
 }: AssetGraphExamPanelProps) {
-  const [snapshot, setSnapshot] = useState<CourseRouteSnapshot | null>(null);
+  const [loaded, setLoaded] = useState<{
+    snapshot: CourseRouteSnapshot;
+    generation: number;
+    identity: string | null;
+  } | null>(null);
+  const snapshot = loaded?.snapshot.courseId === courseId && loaded.identity === getVerifiedSessionNamespace()
+    ? loaded.snapshot
+    : null;
+  const [clock, setClock] = useState(() => Date.now());
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [reloadTick, setReloadTick] = useState(0);
+  const [refreshGeneration, setRefreshGeneration] = useState(0);
   const [showAllItems, setShowAllItems] = useState(false);
   const [showBlockedList, setShowBlockedList] = useState(false);
   const [taskContexts, setTaskContexts] = useState<Record<string, CourseRouteTaskContext | null>>(
@@ -92,29 +101,31 @@ export function AssetGraphExamPanel({
   );
   const [loadingTaskIds, setLoadingTaskIds] = useState<ReadonlySet<string>>(() => new Set());
 
-  const readGenerationRef = useRef(0);
-  const taskGenerationRef = useRef(0);
+  const refreshGenerationRef = useRef(0);
 
   const canReadRoute = typeof routeClient.read === "function";
 
   const triggerReload = useCallback(() => {
-    setReloadTick(prev => prev + 1);
+    setRefreshGeneration(++refreshGenerationRef.current);
   }, []);
 
   useEffect(() => {
     return subscribeOpeningPrivacyChange(() => {
-      setSnapshot(null);
+      setLoaded(null);
       setTaskContexts({});
       setLoadingTaskIds(new Set());
       setError("");
-      setReloadTick(prev => prev + 1);
+      triggerReload();
     });
-  }, []);
+  }, [triggerReload]);
 
   useEffect(() => {
     if (!canReadRoute || !routeClient.read) return;
-    const generation = ++readGenerationRef.current;
+    const generation = refreshGeneration;
+    const identity = getVerifiedSessionNamespace();
     let active = true;
+    const current = () => active && refreshGenerationRef.current === generation &&
+      getVerifiedSessionNamespace() === identity;
     setLoading(true);
     setError("");
     setTaskContexts({});
@@ -123,23 +134,38 @@ export function AssetGraphExamPanel({
     void routeClient
       .read(courseId)
       .then(result => {
-        if (!active || readGenerationRef.current !== generation) return;
-        setSnapshot(result);
+        if (!current()) return;
+        if (result.courseId !== courseId) throw new Error("课程路线与当前课程不匹配。");
+        setClock(Date.now());
+        setLoaded({ snapshot: result, generation, identity });
       })
       .catch(reason => {
-        if (!active || readGenerationRef.current !== generation) return;
-        setSnapshot(null);
+        if (!current()) return;
+        setLoaded(null);
         setError(userFacingMessage(reason, "当前未能读取本课学习要求，请稍后重试。"));
       })
       .finally(() => {
-        if (!active || readGenerationRef.current !== generation) return;
+        if (!current()) return;
         setLoading(false);
       });
 
     return () => {
       active = false;
     };
-  }, [canReadRoute, courseId, routeClient, reloadTick]);
+  }, [canReadRoute, courseId, routeClient, refreshGeneration]);
+
+  const asOfMs = Math.max(clock, Date.parse(asOf ?? "") || 0);
+  useEffect(() => {
+    const nextOpening = Math.min(...(snapshot?.requirements ?? []).flatMap(progress => {
+      const delayed = progress.delayedCheck;
+      const opens = Date.parse(delayed?.notBeforeAt ?? "");
+      return delayed?.status === "pending" && opens > asOfMs ? [opens] : [];
+    }));
+    if (!Number.isFinite(nextOpening)) return;
+    const timer = window.setTimeout(() => setClock(Date.now()),
+      Math.min(2_147_483_647, Math.max(1, nextOpening - Date.now())));
+    return () => window.clearTimeout(timer);
+  }, [asOfMs, snapshot]);
 
   const requirementRefs = useMemo<readonly PaperReviewRequirementRef[] | undefined>(() => {
     if (!snapshot) return undefined;
@@ -150,40 +176,42 @@ export function AssetGraphExamPanel({
   }, [snapshot]);
 
   const paperScope = useMemo(() => ({ kind: "course" as const, id: courseId }), [courseId]);
-  const paper = usePaperReviewSession(paperScope, requirementRefs);
+  const paper = usePaperReviewSession(snapshot ? paperScope : null, requirementRefs);
 
   const plan = useMemo(() => {
     if (!snapshot) return null;
     return buildCourseExamPickerPlan(snapshot, {
-      asOf,
+      asOf: new Date(asOfMs).toISOString(),
       isPaperMarked: (reqId, revision) => paper.isMarked(reqId, revision),
     });
-  }, [snapshot, asOf, paper]);
+  }, [snapshot, asOfMs, paper]);
 
   const dueRetestTaskIdsKey = plan ? plan.dueRetestTaskIds.join(",") : "";
 
   useEffect(() => {
     const taskIds = dueRetestTaskIdsKey ? dueRetestTaskIdsKey.split(",") : [];
-    if (taskIds.length === 0 || !routeClient.task) {
+    const task = routeClient.task;
+    if (taskIds.length === 0 || !task || !snapshot || loaded?.generation !== refreshGeneration) {
       setLoadingTaskIds(new Set());
       return;
     }
 
-    const generation = ++taskGenerationRef.current;
     let active = true;
+    setTaskContexts({});
     setLoadingTaskIds(new Set(taskIds));
 
     void Promise.all(
       taskIds.map(async taskId => {
         try {
-          const context = await routeClient.task!(courseId, taskId);
+          const context = await task(courseId, taskId);
           return [taskId, context] as const;
         } catch {
           return [taskId, null] as const;
         }
       }),
     ).then(entries => {
-      if (!active || taskGenerationRef.current !== generation) return;
+      if (!active || refreshGenerationRef.current !== refreshGeneration ||
+        getVerifiedSessionNamespace() !== loaded.identity) return;
       const nextMap: Record<string, CourseRouteTaskContext | null> = {};
       for (const [taskId, context] of entries) {
         nextMap[taskId] = context;
@@ -195,7 +223,7 @@ export function AssetGraphExamPanel({
     return () => {
       active = false;
     };
-  }, [courseId, dueRetestTaskIdsKey, routeClient]);
+  }, [courseId, dueRetestTaskIdsKey, loaded, refreshGeneration, routeClient, snapshot]);
 
   if (!canReadRoute) return null;
 
@@ -373,7 +401,9 @@ export function AssetGraphExamPanel({
                   const retestBinding = item.dueRetest
                     ? resolveRetestTaskBinding(
                         item.retestTaskId ? taskContexts[item.retestTaskId] : null,
-                        req.id,
+                        courseId,
+                        item.progress,
+                        asOfMs,
                       )
                     : null;
 
@@ -420,12 +450,8 @@ export function AssetGraphExamPanel({
                       </div>
 
                       <div className="space-y-1.5 border-t border-line pt-2">
-                        {item.dueRetest && retestBinding ? (
-                          isLoadingTask ? (
-                            <button type="button" className={`${ui.secondary} w-full`} disabled>
-                              正在核对复测任务…
-                            </button>
-                          ) : retestBinding.kind === "bound_retest" ? (
+                        {item.pendingRetest ? (
+                          !loading && !isLoadingTask && retestBinding?.kind === "bound_retest" ? (
                             <button
                               type="button"
                               className={`${ui.primary} w-full justify-between`}
@@ -437,36 +463,25 @@ export function AssetGraphExamPanel({
                             </button>
                           ) : (
                             <div className="space-y-1.5">
-                              <p className="text-micro text-warn">{retestBinding.reason}</p>
-                              <div className="flex flex-wrap gap-1.5">
-                                <Link
-                                  href={retestBinding.todayHref}
-                                  className={`${ui.secondary} flex-1 justify-center`}
-                                >
-                                  前往今日任务继续复测
-                                </Link>
-                                <button
-                                  type="button"
-                                  className={`${ui.quiet} w-full`}
-                                  disabled={busy}
-                                  onClick={() =>
-                                    onStartOrdinaryPractice(
-                                      courseId,
-                                      item.progress,
-                                      EXAM_PICKER_PRACTICE_MINUTES,
-                                    )
-                                  }
-                                >
-                                  {isStarting ? "正在开启练习…" : retestBinding.ordinaryLabel}
-                                </button>
-                              </div>
+                              <p className="text-micro text-warn">
+                                {loading || isLoadingTask ? "正在核对复测任务…" :
+                                  item.dueRetest && retestBinding?.kind === "unbound_retest" ? retestBinding.reason :
+                                  item.progress.delayedCheck?.notBeforeAt ? (
+                                    <>等待独立复测，最早开放时间 <time dateTime={item.progress.delayedCheck.notBeforeAt}>
+                                      {new Date(item.progress.delayedCheck.notBeforeAt).toLocaleString("zh-CN", {
+                                        dateStyle: "medium", timeStyle: "long",
+                                      })}
+                                    </time></>
+                                  ) : "复测开放时间暂不可用。"}
+                              </p>
+                              <Link href="/opening/today" className={ui.secondary}>前往今日任务查看复测</Link>
                             </div>
                           )
                         ) : (
                           <button
                             type="button"
                             className={`${ui.primary} w-full justify-between`}
-                            disabled={busy}
+                            disabled={busy || loading}
                             onClick={() =>
                               onStartOrdinaryPractice(
                                 courseId,

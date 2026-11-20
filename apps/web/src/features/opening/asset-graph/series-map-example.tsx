@@ -3,10 +3,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, BookOpen, X } from "lucide-react";
 import type { AssetGraphNodeId } from "@aistudy/contracts";
+import { getVerifiedSessionIdentity } from "../../auth/session-identity";
+import { SERIES_CHECK_KEY, subscribeOpeningPrivacyChange } from "../client/privacy-change";
+import { buildFreeMapPersistKey } from "./free-map-canvas-storage";
 import { tone, ui } from "../design/ui";
 import { FreeMapCanvas } from "./free-map-canvas";
 import {
-  SERIES_CHECK_KEY,
   SERIES_COMPARISON,
   SERIES_MARK,
   SERIES_QUESTIONS,
@@ -29,6 +31,8 @@ export function SeriesMapExample({
   const [check, setCheck] = useState<SeriesCheck>(() => readSeriesCheck(null));
   const currentCheck = useRef(check);
   const [loaded, setLoaded] = useState(false);
+  const [persistKey, setPersistKey] = useState<string>();
+  const [privacyGeneration, setPrivacyGeneration] = useState(0);
   const [storageMessage, setStorageMessage] = useState("");
   const [mode, setMode] = useState<"exam" | "study">("exam");
   const [selectedId, setSelectedId] = useState<AssetGraphNodeId>(SERIES_COMPARISON);
@@ -38,15 +42,27 @@ export function SeriesMapExample({
   const title = useRef<HTMLHeadingElement>(null);
 
   useEffect(() => {
-    try {
-      currentCheck.current = readSeriesCheck(
-        JSON.parse(localStorage.getItem(SERIES_CHECK_KEY) ?? "null"),
-      );
-      setCheck(currentCheck.current);
-    } catch {
-      setStorageMessage("未能恢复本机示例记录，可在当前会话继续体验。");
+    const key = buildFreeMapPersistKey(getVerifiedSessionIdentity(), "series-sandbox");
+    setPersistKey(key);
+    if (key) {
+      try {
+        currentCheck.current = readSeriesCheck(
+          JSON.parse(localStorage.getItem(`${SERIES_CHECK_KEY}:${key}`) ?? "null"),
+        );
+        setCheck(currentCheck.current);
+      } catch {
+        setStorageMessage("未能恢复本机示例记录，可在当前会话继续体验。");
+      }
     }
     setLoaded(true);
+    return subscribeOpeningPrivacyChange(() => {
+      currentCheck.current = readSeriesCheck(null);
+      setCheck(currentCheck.current);
+      setExerciseOpen(false);
+      setStorageMessage("");
+      setPersistKey(buildFreeMapPersistKey(getVerifiedSessionIdentity(), "series-sandbox"));
+      setPrivacyGeneration(value => value + 1);
+    });
   }, []);
 
   useEffect(() => {
@@ -71,8 +87,9 @@ export function SeriesMapExample({
   function update(next: SeriesCheck) {
     currentCheck.current = next;
     setCheck(next);
+    if (!persistKey || persistKey !== buildFreeMapPersistKey(getVerifiedSessionIdentity(), "series-sandbox")) return;
     try {
-      localStorage.setItem(SERIES_CHECK_KEY, JSON.stringify(next));
+      localStorage.setItem(`${SERIES_CHECK_KEY}:${persistKey}`, JSON.stringify(next));
     } catch {
       setStorageMessage("浏览器未允许保存，示例记录仅保留到本次页面关闭。");
     }
@@ -151,8 +168,8 @@ export function SeriesMapExample({
                 selectedId={selectedId}
                 mode={mode}
                 onSelect={setSelectedId}
-                layoutKey="series-example-v1"
-                persistKey="series-example-layout-v1"
+                layoutKey={`series-example-v1:p${privacyGeneration}`}
+                persistKey={persistKey}
               />
             </div>
             <aside

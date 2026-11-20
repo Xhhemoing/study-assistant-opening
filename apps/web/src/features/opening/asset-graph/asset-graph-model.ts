@@ -1303,6 +1303,7 @@ export function createAssetGraphStore(
 ) {
   let state = createInitialAssetGraphState(initialOptions);
   let activeController: AbortController | null = null;
+  let includeKnowledgeEdgeDetails = true;
   const listeners = new Set<() => void>();
 
   function emit(next: AssetGraphState) {
@@ -1333,6 +1334,17 @@ export function createAssetGraphStore(
 
   function isActiveRequest(generation: number, requestSeq: number): boolean {
     return isCurrentGeneration(state, generation) && state.activeRequestSeq === requestSeq;
+  }
+
+  function downgradeKnowledgeEdgeDetails(error: unknown): boolean {
+    if (!includeKnowledgeEdgeDetails || !(error instanceof AssetGraphRequestError) ||
+        error.code !== "VALIDATION") return false;
+    includeKnowledgeEdgeDetails = false;
+    emit(clearGraphCollections(state, {
+      preserveSelectedNodeId: false,
+      preserveSameContextHelpers: false,
+    }));
+    return true;
   }
 
   async function restartAfterCursorStaleRoots() {
@@ -1374,11 +1386,18 @@ export function createAssetGraphStore(
     });
 
     try {
-      const page = await client.roots(buildRootsQueryParams(state, options?.cursor), signal);
+      const page = await client.roots({
+        ...buildRootsQueryParams(state, options?.cursor),
+        ...(includeKnowledgeEdgeDetails ? { includeKnowledgeEdgeDetails: true } : {}),
+      }, signal);
       if (!isActiveRequest(generation, requestSeq)) return;
       emit(applyRootsPage(state, page, { append, generation, requestSeq }));
     } catch (error) {
       if (isAbortError(error) || !isActiveRequest(generation, requestSeq)) return;
+      if (downgradeKnowledgeEdgeDetails(error)) {
+        await loadRoots();
+        return;
+      }
       if (error instanceof AssetGraphRequestError && error.code === "CURSOR_STALE" && allowRestart) {
         await restartAfterCursorStaleRoots();
         return;
@@ -1433,6 +1452,7 @@ export function createAssetGraphStore(
           direction,
           ...(relations && relations.length > 0 ? { relations: [...relations] } : {}),
           limit: state.pageLimit,
+          ...(includeKnowledgeEdgeDetails ? { includeKnowledgeEdgeDetails: true } : {}),
           ...(options?.cursor ? { cursor: options.cursor } : {}),
           ...(state.includeSummary ? { include: ["summary"] as ["summary"] } : {}),
         },
@@ -1475,6 +1495,9 @@ export function createAssetGraphStore(
       }
       if (!isActiveRequest(generation, requestSeq)) {
         return { applied: false, reason: "superseded" };
+      }
+      if (downgradeKnowledgeEdgeDetails(error)) {
+        return expandNode(focusId, direction, { relations });
       }
       if (error instanceof AssetGraphRequestError && error.code === "NOT_FOUND") {
         return restartAfterNotFoundNeighbors();
@@ -1529,6 +1552,7 @@ export function createAssetGraphStore(
           context: state.context,
           lens: state.lens,
           focus: focusId,
+          ...(includeKnowledgeEdgeDetails ? { includeKnowledgeEdgeDetails: true } : {}),
         },
         signal,
       );
@@ -1536,6 +1560,10 @@ export function createAssetGraphStore(
       emit(applyDetailPage(state, page, { generation, requestSeq }));
     } catch (error) {
       if (isAbortError(error) || !isActiveRequest(generation, requestSeq)) return;
+      if (downgradeKnowledgeEdgeDetails(error)) {
+        await loadDetail(focusId);
+        return;
+      }
       if (error instanceof AssetGraphRequestError && error.code === "NOT_FOUND") {
         emit(applyNotFoundForFocus(state, focusId, { generation, requestSeq }));
         return;

@@ -76,21 +76,10 @@ function edgeStrokeClass(edge: AssetGraphEdge, fallbackStroke: string): string {
 
 /** A remount makes invalidation synchronous: no frame can show the previous scope's nodes. */
 export function FreeMapCanvas(props: FreeMapCanvasProps) {
-  const [scope, setScope] = useState({
-    layoutKey: props.layoutKey,
-    persistKey: props.persistKey,
-    restoreGeometry: true,
-  });
-  let restoreGeometry = scope.restoreGeometry;
-  if (scope.layoutKey !== props.layoutKey || scope.persistKey !== props.persistKey) {
-    restoreGeometry = scope.persistKey !== props.persistKey;
-    setScope({ layoutKey: props.layoutKey, persistKey: props.persistKey, restoreGeometry });
-  }
   return (
     <FreeMapCanvasSurface
       key={JSON.stringify([props.layoutKey, props.persistKey ?? null])}
       {...props}
-      restoreGeometry={restoreGeometry}
     />
   );
 }
@@ -107,8 +96,7 @@ function FreeMapCanvasSurface({
   locateRequest,
   highlightedNodeIds,
   highlightedEdgeIds,
-  restoreGeometry,
-}: FreeMapCanvasProps & { restoreGeometry: boolean }) {
+}: FreeMapCanvasProps) {
   const [snapshot, setSnapshot] = useState(() => ({
     nodes,
     edges,
@@ -169,13 +157,6 @@ function FreeMapCanvasSurface({
 
   useEffect(() => {
     if (!storageKey) return;
-    if (!restoreGeometry) {
-      const removed = removeFreeMapStorage(storageKey);
-      restored.current = {};
-      if (!removed) setStorageNotice("无法重置本机位置，已使用初始布局。");
-      setGeometryReady(true);
-      return;
-    }
     const { ok, positions } = readFreeMapStorage(storageKey);
     if (!ok) {
       setStorageNotice("无法读取本机位置，已使用初始布局。");
@@ -194,7 +175,7 @@ function FreeMapCanvasSurface({
       },
     }));
     setGeometryReady(true);
-  }, [storageKey, restoreGeometry]);
+  }, [storageKey]);
 
   useEffect(() => {
     if (!selectedId) return;
@@ -363,6 +344,23 @@ function FreeMapCanvasSurface({
           aria-label={`学习地图：${nodes.length} 个已加载节点，${visible.size} 个可见节点`}
           aria-describedby={`${prefix}-help`}
           tabIndex={0}
+          onFocus={event => {
+            if (!geometryReady || !(event.target instanceof Element)) return;
+            const nodeId = event.target.closest("[data-free-map-focus-node]")
+              ?.getAttribute("data-free-map-focus-node");
+            const point = nodeId ? layout.positions[nodeId] : undefined;
+            if (!point) return;
+            const isFold = event.target.closest('[data-map-control="fold"]') !== null;
+            const target = isFold ? { x: point.x + 108, y: point.y + 32 } : point;
+            const { camera, size } = gestures;
+            const x = target.x * camera.k + camera.x;
+            const y = target.y * camera.k + camera.y;
+            const marginX = isFold ? 20 : MAP_NODE_WIDTH / 2 * camera.k;
+            const marginY = isFold ? 20 : MAP_NODE_HEIGHT / 2 * camera.k;
+            if (x < marginX || x > size.width - marginX || y < marginY || y > size.height - marginY) {
+              gestures.focus(target);
+            }
+          }}
           onKeyDown={event => {
             if (event.target !== event.currentTarget) return;
             const directions: Record<string, MapPoint> = {
@@ -617,7 +615,7 @@ function FreeMapCanvasSurface({
           画布操作与关系说明
         </summary>
         <p id={`${prefix}-help`} className="max-w-3xl py-2 leading-relaxed">
-          拖节点移动整支（包括暂时收起的内容），Alt 拖动或勾选“只移当前节点”可独移。拖空白平移，滚轮在指针处缩放，双指可平移缩放。Tab
+          拖节点移动整支（包括暂时收起的内容），Alt 拖动或勾选“只移当前节点”可独移。拖空白平移，按住 Ctrl 或 Command 滚动可在指针处缩放，双指可平移缩放。Tab
           聚焦节点，回车查看；方向键移动，Shift 加速，Alt 独移。聚焦画布空白时，方向键平移，+ / −
           缩放，0 适配。圆钮只收起已加载分支；“加载关联”获取更多内容。实线为已佐证或已记录关系，橙色虚线为待核对，点线为待确认建议。分支配色和拖动分组仅帮助整理，不代表额外的知识关系。
         </p>

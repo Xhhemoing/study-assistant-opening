@@ -81,6 +81,36 @@ describe("FreeMapCanvas", () => {
     container.remove();
   });
 
+  it("pans to a focused offscreen node and preserves saved positions through a layout remount", () => {
+    const persistKey = "u-canvas:ws-canvas:course:test";
+    const stored = { [COURSE_NODE]: { x: 0, y: 0 }, [REQ_NODE]: { x: 5_000, y: 0 } };
+    const key = freeMapStorageKey(persistKey)!;
+    window.localStorage.setItem(key, JSON.stringify(stored));
+    const props = {
+      nodes: [
+        { id: COURSE_NODE, kind: "course" as const, label: "高等数学" },
+        { id: REQ_NODE, kind: "requirement" as const, label: "比较判别" },
+      ],
+      edges: [] as AssetGraphEdge[],
+      onSelect: vi.fn(),
+      selectedId: COURSE_NODE,
+      mode: "exam" as const,
+      persistKey,
+    };
+    act(() => root.render(createElement(FreeMapCanvas, { ...props, layoutKey: "first" })));
+    const node = container.querySelector<SVGGElement>(`[data-graph-node="${REQ_NODE}"]`)!;
+    const viewport = node.closest("svg")!.querySelector("g[transform]")!;
+    const prior = viewport.getAttribute("transform");
+    act(() => node.focus());
+    expect(document.activeElement).toBe(node);
+    expect(viewport.getAttribute("transform")).not.toBe(prior);
+
+    act(() => root.render(createElement(FreeMapCanvas, { ...props, layoutKey: "second" })));
+    expect(window.localStorage.getItem(key)).toBe(JSON.stringify(stored));
+    expect(container.querySelector(`[data-graph-node="${REQ_NODE}"]`)?.getAttribute("transform"))
+      .toBe("translate(5000 0)");
+  });
+
   it("renders nodes with isolated geometry storage and supports keyboard selection & branch fold", () => {
     const nodes: AssetGraphNode[] = [
       { id: COURSE_NODE, kind: "course", label: "高等数学" },
@@ -123,6 +153,13 @@ describe("FreeMapCanvas", () => {
     const reqNode = container.querySelector<SVGGElement>(`[data-graph-node="${REQ_NODE}"]`)!;
     expect(reqNode).not.toBeNull();
     expect(reqNode.textContent).toContain("待独立检验");
+
+    const svg = reqNode.closest("svg")!;
+    const plainWheel = new WheelEvent("wheel", { deltaY: 36, bubbles: true, cancelable: true });
+    const zoomWheel = new WheelEvent("wheel", { deltaY: 36, ctrlKey: true, bubbles: true, cancelable: true });
+    act(() => { svg.dispatchEvent(plainWheel); svg.dispatchEvent(zoomWheel); });
+    expect(plainWheel.defaultPrevented).toBe(false);
+    expect(zoomWheel.defaultPrevented).toBe(true);
 
     act(() => {
       reqNode.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));

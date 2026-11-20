@@ -190,6 +190,9 @@ const KNOWLEDGE_STATUS_LABELS: Record<AssetGraphKnowledgeStatus, string> = {
   needs_check: "待核对",
 };
 
+const KNOWLEDGE_RELATIONS = new Set<AssetGraphRelation>(["contains", "prerequisite", "appliesTo"]);
+const RESTRICTED_KNOWLEDGE_PURPOSES = new Set(["reference", "practice", "mock_exam"]);
+
 const KNOWLEDGE_STATUS_RANK: Record<AssetGraphKnowledgeStatus, number> = {
   suggested: 1,
   needs_check: 2,
@@ -322,7 +325,27 @@ export function createOpeningAssetGraphRepository(
           parsedQuery.error.issues[0]?.message ?? "资产图查询参数无效。",
         );
       }
-      const query = parsedQuery.data;
+      const effectiveIncludeKnowledgeEdgeDetails = parsedQuery.data.includeKnowledgeEdgeDetails === true &&
+        !/^(off|false|0)$/i.test(process.env.OPENING_ASSET_GRAPH_KNOWLEDGE_EDGE_DETAILS?.trim() ?? "");
+      const query = { ...parsedQuery.data, includeKnowledgeEdgeDetails: effectiveIncludeKnowledgeEdgeDetails };
+      const queryRelations = ASSET_GRAPH_LENS_RELATIONS[query.lens].filter(
+        relation => query.op !== "neighbors" || !query.relations || query.relations.includes(relation),
+      );
+      const rootKinds = query.op === "roots"
+        ? query.kinds ?? ASSET_GRAPH_LENS_DEFAULT_ROOT_KINDS[query.lens]
+        : [];
+      const focusKind = query.op === "roots" ? null : parseAssetGraphNodeId(query.focus)?.kind;
+      const knowledgeRelations = new Set(queryRelations.filter(relation => KNOWLEDGE_RELATIONS.has(relation)));
+      const projectsKnowledgeEdges = query.op === "neighbors" && focusKind === "knowledge" && knowledgeRelations.size > 0;
+      const projectsKnowledgeNodes = rootKinds.includes("knowledge") ||
+        (query.op === "neighbors" && (focusKind === "knowledge" ||
+          (focusKind === "requirement" && query.direction !== "in" && queryRelations.includes("mappedTo"))));
+      const projectsSourceNodes = rootKinds.includes("source") || (query.op === "neighbors" && (
+        focusKind === "source" ||
+        (focusKind === "requirement" && query.direction !== "in" && queryRelations.includes("usesSource")) ||
+        ((focusKind === "requirement" || focusKind === "goal" || focusKind === "course") &&
+          query.direction !== "out" && queryRelations.includes("linkedTo"))
+      ));
       const secret = resolveCursorSecret(options.cursorSecret);
       const queryDigest = computeAssetGraphQueryDigest(query);
 
@@ -592,7 +615,7 @@ export function createOpeningAssetGraphRepository(
 
         const knowledgeRows = targetCourseIds.length
           ? await tx`
-              SELECT course_id, version, snapshot, updated_at
+              SELECT course_id, version, snapshot, source_versions, updated_at
               FROM opening_course_knowledge
               WHERE workspace_id = ${validScope.workspaceId}
                 AND owner_user_id = ${validScope.ownerUserId}
@@ -602,7 +625,7 @@ export function createOpeningAssetGraphRepository(
           : [];
         const knowledgeSnapshotsByCourse = new Map<
           string,
-          { snapshot: KnowledgeSnapshot; updatedAt: string | null }
+          { snapshot: KnowledgeSnapshot; sourceIds: string[]; updatedAt: string | null }
         >();
         for (const row of knowledgeRows) {
           const courseId = String(row.course_id);
@@ -615,6 +638,7 @@ export function createOpeningAssetGraphRepository(
           }
           knowledgeSnapshotsByCourse.set(courseId, {
             snapshot: parsedSnapshot.data,
+            sourceIds: Object.keys(row.source_versions ?? {}),
             updatedAt: toIso(row.updated_at),
           });
         }
@@ -732,6 +756,22 @@ export function createOpeningAssetGraphRepository(
             purpose: row.purpose == null ? null : String(row.purpose),
             updatedAt: toIso(row.updated_at),
           }));
+
+        const restrictedSourceIdsByCourse = new Map<string, Set<string>>();
+        for (const membership of memberships) {
+          if (membership.assetType !== "source" || !membership.purpose ||
+              !RESTRICTED_KNOWLEDGE_PURPOSES.has(membership.purpose)) continue;
+          const restricted = restrictedSourceIdsByCourse.get(membership.courseId) ?? new Set<string>();
+          restricted.add(membership.assetId);
+          restrictedSourceIdsByCourse.set(membership.courseId, restricted);
+        }
+        for (const [courseId, entry] of knowledgeSnapshotsByCourse) {
+          const restricted = restrictedSourceIdsByCourse.get(courseId);
+          if (entry.sourceIds.some(id =>
+            !existingSourceIds.has(id) || excludedSourceIds.has(id) || restricted?.has(id))) {
+            knowledgeSnapshotsByCourse.delete(courseId);
+          }
+        }
 
         const assetLinkRows = await tx`
           SELECT id, asset_type, asset_id, course_id, goal_id, requirement_id, revision, updated_at
@@ -1064,11 +1104,15 @@ export function createOpeningAssetGraphRepository(
           }
         }
 
-        // Precompute re-verified knowledge edges BEFORE scopeFingerprint so any source unlink,
-        // purpose change, privacy exclusion, version drift, or graph rebuild invalidates cursors.
+        // Check only evidence that can contribute to this neighbor window.
         const knowledgeChunkIdsSet = new Set<string>();
         const knowledgeChunkCourseIdsSet = new Set<string>();
-        for (const cid of visibleCourseIds) {
+        const knowledgeIncludesEdge = (from: string, to: string, relation: AssetGraphRelation) =>
+          query.op === "neighbors" && knowledgeRelations.has(relation) &&
+          visibleKnowledgeNodeIds.has(from) && visibleKnowledgeNodeIds.has(to) &&
+          ((query.direction !== "in" && query.focus === from) ||
+            (query.direction !== "out" && query.focus === to));
+        for (const cid of effectiveIncludeKnowledgeEdgeDetails && projectsKnowledgeEdges ? visibleCourseIds : []) {
           const knEntry = knowledgeSnapshotsByCourse.get(cid);
           if (!knEntry) continue;
           for (const edge of knEntry.snapshot.edges) {
@@ -1082,7 +1126,8 @@ export function createOpeningAssetGraphRepository(
               courseId: cid,
               nodeId: edge.to,
             });
-            if (!visibleNodeMap.has(fromNodeId) || !visibleNodeMap.has(toNodeId)) continue;
+            const relation = edge.kind === "applies_to" ? "appliesTo" : edge.kind;
+            if (edge.status !== "supported" || !knowledgeIncludesEdge(fromNodeId, toNodeId, relation)) continue;
             for (const chunkId of edge.evidenceChunkIds) {
               knowledgeChunkIdsSet.add(chunkId);
               knowledgeChunkCourseIdsSet.add(cid);
@@ -1093,7 +1138,7 @@ export function createOpeningAssetGraphRepository(
         const knowledgeChunkCourseIds = [...knowledgeChunkCourseIdsSet].sort();
 
         const verifiedKnowledgeChunksByCourse = new Map<string, Map<string, VerifiedKnowledgeChunk>>();
-        if (uniqueKnowledgeChunkIds.length > 0 && knowledgeChunkCourseIds.length > 0) {
+        if (uniqueKnowledgeChunkIds.length > 0 && visibleSourceIds.size > 0) {
           const chunkRows = await tx`
             SELECT c.id, c.source_id, c.source_version, c.page, m.course_id
             FROM opening_source_chunks c
@@ -1113,6 +1158,7 @@ export function createOpeningAssetGraphRepository(
               AND m.course_id = ANY(${knowledgeChunkCourseIds}::uuid[])
               AND (m.purpose IS NULL OR m.purpose = 'teaching')
             WHERE c.id = ANY(${uniqueKnowledgeChunkIds}::uuid[])
+              AND c.source_id = ANY(${[...visibleSourceIds].sort()}::uuid[])
               AND s.upload_state = 'uploaded'
               AND s.parse_state = 'ready'
               AND NOT EXISTS (
@@ -1127,7 +1173,7 @@ export function createOpeningAssetGraphRepository(
             const id = String(row.id);
             const sourceId = String(row.source_id);
             if (!knowledgeChunkCourseIdsSet.has(cid) || !knowledgeChunkIdsSet.has(id)) continue;
-            if (!workspaceSources.has(sourceId) || excludedSourceIds.has(sourceId)) continue;
+            if (!visibleSourceIds.has(sourceId) || excludedSourceIds.has(sourceId)) continue;
             const courseMap =
               verifiedKnowledgeChunksByCourse.get(cid) ?? new Map<string, VerifiedKnowledgeChunk>();
             courseMap.set(id, {
@@ -1143,7 +1189,7 @@ export function createOpeningAssetGraphRepository(
 
         const resolvedKnowledgeEdgesByCourse = new Map<string, AssetGraphEdge[]>();
         const resolvedKnowledgeEdges: AssetGraphEdge[] = [];
-        for (const cid of [...visibleCourseIds].sort()) {
+        for (const cid of projectsKnowledgeEdges ? [...visibleCourseIds].sort() : []) {
           const knEntry = knowledgeSnapshotsByCourse.get(cid);
           if (!knEntry) continue;
           const courseChunks = verifiedKnowledgeChunksByCourse.get(cid);
@@ -1161,31 +1207,18 @@ export function createOpeningAssetGraphRepository(
               courseId: cid,
               nodeId: edge.to,
             });
-            if (!visibleNodeMap.has(fromNodeId) || !visibleNodeMap.has(toNodeId)) continue;
+            if (!knowledgeIncludesEdge(fromNodeId, toNodeId, relation)) continue;
 
-            const verifiedChunks: VerifiedKnowledgeChunk[] = [];
-            if (courseChunks && edge.evidenceChunkIds.length > 0) {
-              const seenChunkIds = new Set<string>();
-              for (const chunkId of edge.evidenceChunkIds) {
-                if (seenChunkIds.has(chunkId)) continue;
-                seenChunkIds.add(chunkId);
-                const verified = courseChunks.get(chunkId);
-                if (verified) verifiedChunks.push(verified);
-              }
-              verifiedChunks.sort(compareVerifiedKnowledgeChunks);
-            }
-            const primaryChunk = verifiedChunks[0];
-
-            let knowledgeStatus: AssetGraphKnowledgeStatus;
-            if (edge.status === "suggested") {
-              knowledgeStatus = "suggested";
-            } else if (edge.status === "supported" && primaryChunk !== undefined) {
-              knowledgeStatus = "supported";
-            } else {
-              // Stored needs_check, OR stored supported with zero live-verified teaching chunks:
-              // project read-only needs_check and omit unverified provenance.
-              knowledgeStatus = "needs_check";
-            }
+            const chunkIds = [...new Set(edge.evidenceChunkIds)];
+            const verifiedChunks = chunkIds
+              .map(id => courseChunks?.get(id))
+              .filter((chunk): chunk is VerifiedKnowledgeChunk => chunk !== undefined)
+              .sort(compareVerifiedKnowledgeChunks);
+            const knowledgeStatus = edge.status === "supported" &&
+              (chunkIds.length === 0 || verifiedChunks.length !== chunkIds.length)
+                ? "needs_check"
+                : edge.status;
+            const primaryChunk = knowledgeStatus === "supported" ? verifiedChunks[0] : undefined;
             const basis: "recorded" | "suggested" =
               knowledgeStatus === "suggested" ? "suggested" : "recorded";
 
@@ -1210,15 +1243,20 @@ export function createOpeningAssetGraphRepository(
 
             const dedupeKey = `${relation}:${fromNodeId}:${toNodeId}`;
             const existing = courseDedupe.get(dedupeKey);
-            if (!existing || compareKnowledgeEdgesForDedupe(candidateEdge, existing) > 0) {
+            if (!existing || (effectiveIncludeKnowledgeEdgeDetails
+              ? compareKnowledgeEdgesForDedupe(candidateEdge, existing) > 0
+              : candidateEdge.basis === "recorded" && existing.basis === "suggested")) {
               courseDedupe.set(dedupeKey, candidateEdge);
             }
           }
           const courseEdges = [...courseDedupe.values()].sort(
             (a, b) => compareStrings(a.relation, b.relation) || compareStrings(a.id, b.id),
           );
-          resolvedKnowledgeEdgesByCourse.set(cid, courseEdges);
-          resolvedKnowledgeEdges.push(...courseEdges);
+          const projected = effectiveIncludeKnowledgeEdgeDetails ? courseEdges : courseEdges.map(
+            ({ id, from, to, relation, basis }) => ({ id, from, to, relation, basis }),
+          );
+          resolvedKnowledgeEdgesByCourse.set(cid, projected);
+          resolvedKnowledgeEdges.push(...projected);
         }
 
         // Compute deterministic context-scoped fingerprint BEFORE cursor validation.
@@ -1240,6 +1278,7 @@ export function createOpeningAssetGraphRepository(
         const scopeFingerprint = hashAssetGraphScopeFingerprint({
           privacyEpoch,
           context: query.context,
+          includeKnowledgeEdgeDetails: effectiveIncludeKnowledgeEdgeDetails,
           adaptivePrefsInvalid,
           scopesPartial,
           courses: [...visibleCourseIds]
@@ -1277,67 +1316,35 @@ export function createOpeningAssetGraphRepository(
                 updatedAt: reqUpdatedAtById.get(id) ?? null,
               };
             }),
-          knowledge: [...visibleCourseIds]
+          knowledge: (projectsKnowledgeNodes ? [...visibleCourseIds] : [])
             .sort()
             .flatMap(cid => {
               const entry = knowledgeSnapshotsByCourse.get(cid);
               if (!entry) return [];
-              return [
-                {
-                  courseId: cid,
-                  version: entry.snapshot.version,
-                  updatedAt: entry.updatedAt,
-                  nodeIds: entry.snapshot.nodes
-                    .map(n => formatAssetGraphNodeId({ kind: "knowledge", courseId: cid, nodeId: n.id }))
-                    .filter(nid => visibleKnowledgeNodeIds.has(nid))
-                    .sort(),
-                  edges: (resolvedKnowledgeEdgesByCourse.get(cid) ?? []).map(edge => ({
-                    id: edge.id,
-                    from: edge.from,
-                    to: edge.to,
-                    relation: edge.relation,
-                    basis: edge.basis,
-                    knowledgeStatus: edge.knowledgeStatus ?? null,
-                    sourceNodeId: edge.sourceNodeId ?? null,
-                    sourceVersion: edge.sourceVersion ?? null,
-                    page: edge.page ?? null,
-                  })),
-                },
-              ];
+              const nodes = entry.snapshot.nodes
+                .map(n => formatAssetGraphNodeId({ kind: "knowledge", courseId: cid, nodeId: n.id }))
+                .filter(nid => visibleKnowledgeNodeIds.has(nid))
+                .sort()
+                .map(nid => visibleNodeMap.get(nid));
+              if (nodes.length === 0) return [];
+              return [{
+                courseId: cid,
+                ...(query.context.kind !== "goal"
+                  ? { version: entry.snapshot.version, updatedAt: entry.updatedAt }
+                  : {}),
+                nodes,
+                edges: resolvedKnowledgeEdgesByCourse.get(cid) ?? [],
+              }];
             }),
-          sources: [...visibleSourceIds]
+          sources: (projectsSourceNodes ? [...visibleSourceIds] : [])
             .sort()
             .map(id => workspaceSources.get(id)),
-          readableSourceEpoch: {
-            excluded: [...excludedSourceIds].sort(),
-            readable: [...workspaceSources.values()]
-              .filter(src => visibleSourceIds.has(src.id) || memberships.some(m => visibleCourseIds.has(m.courseId) && m.assetType === "source" && m.assetId === src.id))
-              .sort((a, b) => compareStrings(a.id, b.id))
-              .map(src => ({
-                id: src.id,
-                version: src.version,
-                uploadState: src.uploadState,
-                parseState: src.parseState,
-                aiExcluded: src.aiExcluded,
-                updatedAt: src.updatedAt,
-              })),
-          },
           documents: [...visibleDocumentIds]
             .sort()
             .map(id => workspaceDocuments.get(id)),
           explorations: [...visibleExplorationIds]
             .sort()
             .map(id => workspaceExplorations.get(id)),
-          memberships: memberships
-            .filter(m => visibleCourseIds.has(m.courseId))
-            .map(m => ({
-              id: m.id,
-              courseId: m.courseId,
-              assetType: m.assetType,
-              assetId: m.assetId,
-              purpose: m.purpose,
-              updatedAt: m.updatedAt,
-            })),
           assetLinks: assetLinks
             .filter(l => {
               const target = resolveAssetLinkTargetNodeId(l);

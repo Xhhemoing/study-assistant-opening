@@ -6,7 +6,6 @@ import {
 } from "@aistudy/contracts";
 
 // This namespace is exclusively a local sandbox demonstration; it is never sent to the real graph API.
-export const SERIES_CHECK_KEY = "aistudy-series-example-comparison-check-v1";
 
 export const SERIES_QUESTIONS = [
   {

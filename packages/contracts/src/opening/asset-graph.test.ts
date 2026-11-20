@@ -952,6 +952,13 @@ describe("assetGraphEdgeSchema knowledgeStatus and sourceNodeId invariants", () 
     expect(needsCheckWithDerived.success).toBe(false);
   });
 
+  it("allows sourceNodeId only on recorded knowledge relations", () => {
+    const edge = { id: "edge", from: knFrom, to: knTo, sourceNodeId: srcId };
+    expect(assetGraphEdgeSchema.safeParse({ ...edge, relation: "usesSource", basis: "recorded" }).success).toBe(false);
+    expect(assetGraphEdgeSchema.safeParse({ ...edge, relation: "contains", basis: "suggested" }).success).toBe(false);
+    expect(assetGraphEdgeSchema.safeParse({ ...edge, relation: "contains", basis: "derived" }).success).toBe(false);
+  });
+
   it("rejects non-source sourceNodeId values", () => {
     for (const badSourceNodeId of [`course/${uuid4}`, `document/${uuid4}`, knFrom]) {
       const parsed = assetGraphEdgeSchema.safeParse({

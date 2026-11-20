@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { assetGraphPageSchema } from "@aistudy/contracts";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { assetGraphPageSchema, type AssetGraphQuery, type KnowledgeSnapshot } from "@aistudy/contracts";
 import { hashSessionToken } from "@aistudy/database";
+import { backupRows } from "../opening-backup-records-fixture";
 import { createOpeningFixture, type OpeningFixture } from "../opening-fixture";
 import { createAuthRuntime } from "../../../apps/web/src/features/auth/service";
 import { createSessionJwt } from "../../../apps/web/src/lib/session";
@@ -65,6 +66,134 @@ async function postQuery(body: unknown, cookie = f.cookie): Promise<Response> {
 }
 
 describe("POST /api/opening/asset-graph/query handler integration", () => {
+  it("projects opt-in knowledge evidence with real SQL scope and preserves legacy HTTP responses through rollback", async () => {
+    const { sql, scope } = f;
+    const course = randomUUID();
+    const [start, target, partial, suggestion] = Array.from({ length: 4 }, () => randomUUID());
+    await sql`INSERT INTO courses (id,workspace_id,title,slug) VALUES (${course},${scope.workspaceId},'知识边验收',${course})`;
+    const goalResponse = await createLearningGoal(jsonRequest("http://localhost/api/opening/learning-goals", {
+      courseIds: [course], title: "核对知识边", kind: "custom", targetDate: "2027-03-01",
+      examDate: null, weeklyMinutes: 120, priority: 1, learningMode: "auto",
+      successCriteria: "用本目标可见材料验证", clientKey: randomUUID(),
+    }));
+    expect(goalResponse.status).toBe(200);
+    const { id: goal } = await goalResponse.json() as { id: string };
+    const seeds = backupRows(sql, scope);
+    const teaching = await seeds.source();
+    const hidden = await seeds.source();
+    const visibleChunk = await seeds.chunk(teaching);
+    const hiddenChunk = await seeds.chunk(hidden);
+    for (const source of [teaching, hidden]) {
+      await sql`INSERT INTO opening_source_versions (source_id,version,workspace_id,bytes,sha256,availability)
+        VALUES (${source},1,${scope.workspaceId},21,${"a".repeat(64)},'available')`;
+      await sql`INSERT INTO course_asset_memberships (workspace_id,course_id,asset_type,asset_id,role,visibility,purpose)
+        VALUES (${scope.workspaceId},${course},'source',${source},'core','course','teaching')`;
+    }
+
+    const nodeIds = [start!, target!, partial!, suggestion!];
+    const snapshot: KnowledgeSnapshot = {
+      courseId: course, version: 1,
+      nodes: nodeIds.map((id, index) => ({
+        id, courseId: course, label: `概念 ${index + 1}`, kind: "concept",
+        status: "supported", evidenceChunkIds: [visibleChunk],
+      })),
+      edges: [
+        { from: start!, to: target!, kind: "prerequisite", status: "supported", evidenceChunkIds: [visibleChunk] },
+        { from: start!, to: partial!, kind: "contains", status: "supported", evidenceChunkIds: [visibleChunk, hiddenChunk] },
+        { from: start!, to: suggestion!, kind: "applies_to", status: "suggested", evidenceChunkIds: [visibleChunk] },
+      ],
+    };
+    await sql`INSERT INTO opening_course_knowledge (workspace_id,owner_user_id,course_id,version,snapshot,source_versions)
+      VALUES (${scope.workspaceId},${scope.ownerUserId},${course},1,${sql.json(snapshot)},${sql.json({ [teaching]: 1, [hidden]: 1 })})`;
+    const verification = { kind: "manual", status: "missing", exerciseKeys: [], rubric: null, missingReasons: [] };
+    for (const [position, node] of nodeIds.entries()) {
+      const sourceRefs = position === 0 ? [{ sourceId: teaching, sourceVersion: 1, page: 1 }] : [];
+      await sql`INSERT INTO course_requirements (
+        id,workspace_id,owner_user_id,course_id,stable_skill_id,knowledge_node_id,requirement_key,title,
+        position,mandatory,goal_ids,prerequisite_ids,source_refs,verification,revision,lifecycle,origin,approved_at
+      ) VALUES (${randomUUID()},${scope.workspaceId},${scope.ownerUserId},${course},${randomUUID()},${node},
+        ${`concept-${position}`},${`要求 ${position}`},${position},true,${[goal]}::uuid[],'{}'::uuid[],
+        ${sql.json(sourceRefs)},${sql.json(verification)},1,'active','confirmed',now())`;
+    }
+
+    const context = { kind: "goal", id: `goal/${goal}` } as const;
+    const query = {
+      op: "neighbors", context, lens: "structure", focus: `knowledge/${course}/${start}`, direction: "out",
+    } as const satisfies AssetGraphQuery;
+    const optIn = { ...query, includeKnowledgeEdgeDetails: true };
+    const page = async (body: AssetGraphQuery) => {
+      const response = await postQuery(body);
+      expect(response.status).toBe(200);
+      return assetGraphPageSchema.parse(await response.json());
+    };
+    const assertLegacy = (edges: Awaited<ReturnType<typeof page>>["edges"]) => {
+      expect(edges).toHaveLength(3);
+      expect(edges.map(edge => Object.keys(edge).sort())).toEqual(
+        Array.from({ length: 3 }, () => ["basis", "from", "id", "relation", "to"]),
+      );
+    };
+
+    vi.stubEnv("OPENING_ASSET_GRAPH_KNOWLEDGE_EDGE_DETAILS", "");
+    try {
+      const legacy = await page(query);
+      assertLegacy(legacy.edges);
+      expect(legacy.nodes[0]?.meta?.knowledgeStatus).toBe("supported");
+      const enriched = await page(optIn);
+      const edges = Object.fromEntries(enriched.edges.map(edge => [edge.relation, edge]));
+      expect(edges.prerequisite).toMatchObject({
+        knowledgeStatus: "supported", sourceNodeId: `source/${teaching}`, sourceVersion: 1, page: 1,
+      });
+      expect(edges.contains).toMatchObject({ knowledgeStatus: "needs_check" });
+      expect(edges.contains).not.toHaveProperty("sourceNodeId");
+      expect(edges.appliesTo).toMatchObject({ knowledgeStatus: "suggested" });
+      expect(edges.appliesTo).not.toHaveProperty("sourceNodeId");
+      const hiddenDetail = await postQuery({ op: "detail", context, lens: "all", focus: `source/${hidden}` });
+      expect(hiddenDetail.status).toBe(404);
+
+      const paged = { ...optIn, limit: 1 };
+      const cursor = (await page(paged)).page.nextCursor!;
+      expect(cursor).toBeTruthy();
+      const evidenceQuery = { op: "roots", lens: "evidence", context, limit: 1, includeKnowledgeEdgeDetails: true } as const;
+      const evidenceCursor = (await page(evidenceQuery)).page.nextCursor!;
+      expect(evidenceCursor).toBeTruthy();
+      await sql`UPDATE opening_sources SET version=version+1, updated_at=now() WHERE id=${hidden}`;
+      await page({ ...paged, cursor });
+      await page({ ...evidenceQuery, cursor: evidenceCursor });
+
+      await sql`UPDATE opening_source_chunks SET page=2 WHERE id=${visibleChunk}`;
+      const changed = await postQuery({ ...paged, cursor });
+      expect(changed.status).toBe(409);
+      await expect(changed.json()).resolves.toMatchObject({ error: { code: "CURSOR_STALE" } });
+      await page({ ...evidenceQuery, cursor: evidenceCursor });
+
+      await sql`UPDATE opening_sources SET upload_state='pending' WHERE id=${teaching}`;
+      expect((await page(optIn)).edges.find(edge => edge.relation === "prerequisite"))
+        .toMatchObject({ knowledgeStatus: "needs_check" });
+      await sql`UPDATE opening_sources SET upload_state='uploaded', parse_state='queued' WHERE id=${teaching}`;
+      expect((await page(optIn)).edges.find(edge => edge.relation === "prerequisite"))
+        .toMatchObject({ knowledgeStatus: "needs_check" });
+      await sql`UPDATE opening_sources SET parse_state='ready' WHERE id=${teaching}`;
+
+      const rollbackCursor = (await page(paged)).page.nextCursor!;
+      vi.stubEnv("OPENING_ASSET_GRAPH_KNOWLEDGE_EDGE_DETAILS", "off");
+      const rolledBack = await page(optIn);
+      assertLegacy(rolledBack.edges);
+      expect(rolledBack.edges).toEqual(legacy.edges);
+      const stale = await postQuery({ ...paged, cursor: rollbackCursor });
+      expect(stale.status).toBe(409);
+      await expect(stale.json()).resolves.toMatchObject({ error: { code: "CURSOR_STALE" } });
+
+      await sql`UPDATE course_asset_memberships SET purpose='reference' WHERE course_id=${course} AND asset_id=${hidden}`;
+      expect((await postQuery(optIn)).status).toBe(404);
+      await sql`UPDATE course_asset_memberships SET purpose='teaching' WHERE course_id=${course} AND asset_id=${hidden}`;
+      await sql`INSERT INTO opening_privacy_exclusions (workspace_id,source_id,deleted_at,asset_deleted_at)
+        VALUES (${scope.workspaceId},${hidden},now(),now())`;
+      expect((await postQuery(optIn)).status).toBe(404);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("requires real cookie auth and rejects malformed/oversized/invalid payloads", async () => {
     const unauth = await postQuery(
       { op: "roots", context: { kind: "workspace" }, lens: "all" },

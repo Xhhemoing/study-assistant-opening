@@ -105,6 +105,7 @@ export function useFreeMapGestures({
     const svg = svgRef.current;
     if (!svg) return;
     function wheel(event: WheelEvent) {
+      if (!event.ctrlKey && !event.metaKey) return;
       event.preventDefault();
       const rect = svg!.getBoundingClientRect();
       const delta =

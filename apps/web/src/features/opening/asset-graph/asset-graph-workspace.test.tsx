@@ -12,6 +12,7 @@ import type {
   CourseRouteTaskContext,
   TeachingActivity,
 } from "@aistudy/contracts";
+import OpeningMapPage from "../../../app/(opening)/opening/map/page";
 import { publishVerifiedSessionIdentity } from "../../auth/session-identity";
 import { notifyOpeningPrivacyChange } from "../client/privacy-change";
 import type { CourseRouteClient } from "../courses/course-route-client";
@@ -31,7 +32,13 @@ const fixturesPath = resolve(
   __dirname,
   "../../../../../../docs/brainstorm/2026-11-18-knowledge-assets-examples.json",
 );
-const fixtures = JSON.parse(readFileSync(fixturesPath, "utf8")) as SyntheticAssetGraphFixtures;
+const designFixtures = JSON.parse(readFileSync(fixturesPath, "utf8")) as SyntheticAssetGraphFixtures;
+const fixtures: SyntheticAssetGraphFixtures = {
+  cases: designFixtures.cases.map(item => ({
+    ...item,
+    request: { body: { ...(item.request.body as object), includeKnowledgeEdgeDetails: true } },
+  })),
+};
 
 function fixtureCase(name: string) {
   const found = fixtures.cases.find(item => item.name === name);
@@ -97,6 +104,7 @@ afterEach(async () => {
   await act(async () => root.unmount());
   container.remove();
   vi.unstubAllGlobals();
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -1768,6 +1776,9 @@ describe("AssetGraphWorkspace", () => {
     const SKILL_3 = "40000000-0000-4000-8000-000000000013";
     const SKILL_4 = "40000000-0000-4000-8000-000000000014";
     const ACTIVITY_ID = "80000000-0000-4000-8000-000000000099";
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+    vi.setSystemTime(new Date("2026-03-02T00:00:00.000Z"));
+    const opens = "2026-03-02T00:01:00.000Z";
 
     const makeReq = (id: string, skillId: string, title: string, position: number) => ({
       id,
@@ -1821,7 +1832,7 @@ describe("AssetGraphWorkspace", () => {
             status: "pending",
             retestId: "70000000-0000-4000-8000-000000000012",
             taskId: TASK_UNBOUND_UUID,
-            notBeforeAt: "2026-03-01T00:00:00.000Z",
+            notBeforeAt: opens,
           },
         },
         {
@@ -1872,6 +1883,7 @@ describe("AssetGraphWorkspace", () => {
           managed: true,
           courseId: COURSE_ID,
           taskId: TASK_BOUND_UUID,
+          retestId: "70000000-0000-4000-8000-000000000011",
           expectedTaskVersion: 3,
           goalId: GOAL_UUID,
           expectedGoalRevision: 5,
@@ -1908,6 +1920,17 @@ describe("AssetGraphWorkspace", () => {
             { id: `course/${COURSE_ID}`, kind: "course", label: "高等数学 · 级数" },
             { id: `requirement/${REQ_BOUND_UUID}`, kind: "requirement", label: "级数比较判别法" },
           ],
+          edges: [],
+          page: { nextCursor: null },
+          completeness: "complete",
+          warnings: [],
+          detail: null,
+        };
+      }
+      if (query.op === "neighbors" && query.focus === `requirement/${REQ_UNOBS_UUID}`) {
+        return {
+          asOf: "2026-03-02T00:00:00.000Z",
+          nodes: [{ id: query.focus, kind: "requirement", label: "交错级数莱布尼茨判别" }],
           edges: [],
           page: { nextCursor: null },
           completeness: "complete",
@@ -1964,6 +1987,10 @@ describe("AssetGraphWorkspace", () => {
     );
     expect(examPanel.querySelector(`[data-exam-picker-item="${REQ_BLOCKED_UUID}"]`)).toBeNull();
 
+    await act(async () => findButton("刷新清单", examPanel).click());
+    await flush();
+    expect(taskSpy.mock.calls.filter(([, id]) => id === TASK_BOUND_UUID)).toHaveLength(2);
+
     // Bound verified+due retest item renders "开始独立复测" and sends taskId + expectedTaskVersion + taskContext.minutes
     const boundCard = examPanel.querySelector<HTMLElement>(
       `[data-exam-picker-item="${REQ_BOUND_UUID}"]`,
@@ -1982,17 +2009,35 @@ describe("AssetGraphWorkspace", () => {
       expectedRequirementRevision: 2,
       taskId: TASK_BOUND_UUID,
       expectedTaskVersion: 3,
+      expectedRetestId: "70000000-0000-4000-8000-000000000011",
       minutes: 10,
     });
     expect(navigated[0]).toBe(`/opening/courses/${COURSE_ID}/study?activity=${ACTIVITY_ID}`);
 
-    // Unbound verified+due retest MUST NOT be labeled "开始独立复测"
     const unboundCard = examPanel.querySelector<HTMLElement>(
       `[data-exam-picker-item="${REQ_UNBOUND_UUID}"]`,
     )!;
+    expect(unboundCard.querySelector("time")?.dateTime).toBe(opens);
+    expect(unboundCard.textContent).not.toContain("开始 15 分钟练习");
+    expect(taskSpy.mock.calls.some(([, id]) => id === TASK_UNBOUND_UUID)).toBe(false);
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(unboundCard.getAttribute("data-exam-bucket")).toBe("due_retest");
+    expect(taskSpy.mock.calls.some(([, id]) => id === TASK_UNBOUND_UUID)).toBe(true);
     expect(unboundCard.textContent).not.toContain("开始独立复测");
     expect(unboundCard.querySelector('a[href="/opening/today"]')).not.toBeNull();
-    expect(unboundCard.textContent).toContain("按 15 分钟普通练习开始（不替代复测任务）");
+    expect(unboundCard.textContent).not.toContain("开始 15 分钟练习");
+
+    startSpy.mockRejectedValueOnce(new TypeError("network down")).mockResolvedValueOnce({
+      kind: "choice", reason: "evidence_changed",
+      message: "请核对当前活动后继续复测。", courseId: COURSE_ID,
+      href: `/opening/courses/${COURSE_ID}#course-learning-route`,
+      requirementIds: [REQ_BOUND_UUID],
+    });
+    await act(async () => findButton("开始独立复测", boundCard).click());
+    expect(container.textContent).toContain("本次安排结果未确认");
+    await act(async () => findButton("重试本次安排").click());
+    expect(container.textContent).toContain("请核对当前活动后继续复测。");
+    expect(startSpy.mock.calls[2]?.[1]).toEqual(startSpy.mock.calls[1]?.[1]);
 
     // Ordinary 1A practice loads detail and starts with 15-min preset and NO taskId
     const unobsCard = examPanel.querySelector<HTMLElement>(
@@ -2010,12 +2055,33 @@ describe("AssetGraphWorkspace", () => {
       ordinaryBtn.click();
     });
     await flush();
-    expect(startSpy).toHaveBeenCalledTimes(2);
-    expect(startSpy.mock.calls[1]?.[1]).toMatchObject({
+    expect(startSpy).toHaveBeenCalledTimes(4);
+    expect(startSpy.mock.calls[3]?.[1]).toMatchObject({
       requirementId: REQ_UNOBS_UUID,
       minutes: 15,
     });
-    expect(startSpy.mock.calls[1]?.[1]).not.toHaveProperty("taskId");
+    expect(startSpy.mock.calls[3]?.[1]).not.toHaveProperty("taskId");
+  });
+
+  it("enters the direct sandbox without contacting the graph or course route", async () => {
+    window.history.replaceState(null, "", "/opening/map?sandbox=series");
+    const fetchGraph = vi.fn<typeof fetch>(async () =>
+      Response.json(fixturePage("synthetic-home-01-default-workspace-roots")));
+    vi.stubGlobal("fetch", fetchGraph);
+    try {
+      const sandbox = new URL(window.location.href).searchParams.get("sandbox")!;
+      const page = await OpeningMapPage({ searchParams: Promise.resolve({ sandbox }) });
+      await act(async () => root.render(page));
+      await act(async () => notifyOpeningPrivacyChange());
+      expect(container.textContent).toContain("数项级数示例");
+      expect(fetchGraph).not.toHaveBeenCalled();
+
+      await act(async () => findButton("返回真实地图").click());
+      expect(new URL(window.location.href).searchParams.has("sandbox")).toBe(false);
+      expect(fetchGraph).toHaveBeenCalledTimes(1);
+    } finally {
+      window.history.replaceState(null, "", "/");
+    }
   });
 
   it("persists 2A paper-review checklist in sessionStorage with undo, next round, and privacy-change clearing, and isolates Series Sandbox", async () => {

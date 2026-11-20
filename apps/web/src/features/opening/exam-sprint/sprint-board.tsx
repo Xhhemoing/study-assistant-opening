@@ -11,7 +11,7 @@ import { planAcceptFailure } from "../planning/plan-accept-errors";
 import { clearSprintCheckpoint, readSprintCheckpoint, resumeSprintAcceptance, saveSprintCheckpoint, sprintAcceptance, type SprintCheckpoint } from "./sprint-checkpoint";
 import { SprintBudgetPreview } from "./sprint-budget-preview";
 import { SprintPaperReviewPanel } from "./sprint-paper-review";
-import { sprintCandidateBlocks, sprintPlanChanges, sprintTaskHref, sprintTaskTitle, sprintTodayTasks } from "./sprint-plan-model";
+import { sprintCandidateBlocks, sprintCourseMapHref, sprintPlanChanges, sprintTaskHref, sprintTaskTitle, sprintTodayTasks } from "./sprint-plan-model";
 import { userFacingMessage } from "../../../lib/user-facing-error";
 
 type SprintApi = Pick<OpeningApi, "getPlanningSettings" | "getAdaptivePrefs" | "getToday" | "listTasks" | "proposePlan" | "acceptPlan" | "rejectPlan">;
@@ -144,7 +144,7 @@ function SprintBoardContent({ courseId, courseTitle, api: suppliedApi }: Props) 
   const minutes = today.reduce((sum, item) => sum + Math.round((Date.parse(item.block.end) - Date.parse(item.block.start)) / 60000), 0);
   const facts = [courseTitle, data?.goal?.targetDate ? `目标 ${data.goal.targetDate}` : null, data && today.length ? `今天已安排 ${minutes} 分钟` : null].filter(Boolean).join(" · ");
   return <section className="space-y-6">
-    <PageHeader title="考前冲刺" actions={<div className="flex flex-wrap items-center gap-3"><p className="text-sm text-text-2">{facts}</p>{next ? <Link className={ui.primary} href={objectHref(sprintTaskHref(next.task))}>开始：{next.task.title}</Link> : <Link className={ui.secondary} href={objectHref(`/opening/courses/${encodeURIComponent(courseId)}/study`)}>从课程继续</Link>}</div>} />
+    <PageHeader title="考前冲刺" actions={<div className="flex flex-wrap items-center gap-3"><p className="text-sm text-text-2">{facts}</p><Link className={ui.quiet} href={sprintCourseMapHref(courseId)}>查看课程地图</Link>{next ? <Link className={ui.primary} href={objectHref(sprintTaskHref(next.task))}>开始：{next.task.title}</Link> : <Link className={ui.secondary} href={objectHref(`/opening/courses/${encodeURIComponent(courseId)}/study`)}>从课程继续</Link>}</div>} />
     <div className="space-y-6 px-5 pb-5 sm:px-7">
       {error ? <div role="alert" className="space-y-2 text-sm text-danger"><p>{error}</p><button type="button" className={ui.secondary} disabled={busy} onClick={() => void refresh()}>重新读取计划</button></div> : null}
       {data && recoveryProblem ? <div role="alert" className="space-y-2"><p className="text-sm text-warn">{recoveryProblem}</p><button type="button" className={ui.secondary} disabled={busy} onClick={discardRecovery}>清除恢复记录</button></div> : null}

@@ -30,7 +30,7 @@ function renderHook<T>(useValue: () => T) {
   act(() => {
     root.render(createElement(Probe));
   });
-  return { result };
+  return { result, rerender: () => act(() => root.render(createElement(Probe))) };
 }
 
 const ID_A = { id: "11111111-1111-4111-8111-111111111111", workspaceId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1" };
@@ -186,6 +186,49 @@ describe("paper-review-session", () => {
     expect(mapHook.result.current.markedCount).toBe(0);
     expect(sprintHook.result.current.markedCount).toBe(0);
     expect(window.sessionStorage.length).toBe(0);
+  });
+
+  it("keeps failed writes across views and prunes undo before a changed revision can reappear", () => {
+    const scope = { kind: "course" as const, id: COURSE_1 };
+    const refs = [{ id: REQ_1, revision: 1 }];
+    let currentRefs = refs;
+    const mounted = renderHook(() => usePaperReviewSession(scope, currentRefs));
+    const other = renderHook(() => usePaperReviewSession(scope, refs));
+    const storage = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new DOMException("QuotaExceededError");
+    });
+    try {
+      act(() => mounted.result.current.toggle(REQ_1, 1));
+      expect(mounted.result.current.markedCount).toBe(1);
+      expect(other.result.current.markedCount).toBe(1);
+      expect(mounted.result.current.storageAvailable).toBe(false);
+      expect(other.result.current.storageAvailable).toBe(false);
+
+      act(() => mounted.result.current.startNextRound());
+      currentRefs = [{ id: REQ_1, revision: 2 }];
+      mounted.rerender();
+      act(() => mounted.result.current.undo());
+      expect(readPaperReviewSessionState(scope).state.items).toEqual({});
+      expect(mounted.result.current.markedCount).toBe(0);
+      expect(mounted.result.current.storageAvailable).toBe(false);
+      act(() => notifyOpeningPrivacyChange());
+      expect(readPaperReviewSessionState(scope).persisted).toBe(true);
+    } finally {
+      storage.mockRestore();
+    }
+  });
+
+  it("clears review and sandbox storage when the corresponding views are unmounted", () => {
+    const key = buildPaperReviewStorageKey(ID_A, { kind: "course", id: COURSE_1 });
+    window.sessionStorage.setItem(key, "{}");
+    window.localStorage.setItem("aistudy/free-map/geometry/course", "{}");
+    window.localStorage.setItem("aistudy-series-example-comparison-check-v1", "{}");
+    window.localStorage.setItem("aistudy-unrelated", "keep");
+    notifyOpeningPrivacyChange();
+    expect(window.sessionStorage.getItem(key)).toBeNull();
+    expect(window.localStorage.getItem("aistudy/free-map/geometry/course")).toBeNull();
+    expect(window.localStorage.getItem("aistudy-series-example-comparison-check-v1")).toBeNull();
+    expect(window.localStorage.getItem("aistudy-unrelated")).toBe("keep");
   });
 
   it("degrades gracefully without writing to sessionStorage when identity is missing or storage throws", () => {

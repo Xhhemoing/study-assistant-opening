@@ -49,8 +49,10 @@ export const courseRouteConfirmSchema = z.object({expectedRevisions:z.array(z.ob
 const actionBase={goalId:uuidSchema,expectedGoalRevision:z.number().int().positive(),clientKey:z.string().min(8).max(160),
   minutes:z.number().int().min(5).max(180).default(20)};
 export const courseRouteStartSchema=z.object({...actionBase,requirementId:uuidSchema,expectedRequirementRevision:z.number().int().positive(),
-  taskId:uuidSchema.optional(),expectedTaskVersion:z.number().int().positive().optional()}).strict()
-  .refine(value=>(value.taskId===undefined)===(value.expectedTaskVersion===undefined),"Task identity and version must be supplied together");
+  taskId:uuidSchema.optional(),expectedTaskVersion:z.number().int().positive().optional(),
+  expectedRetestId:uuidSchema.optional(),protectPendingRetest:z.literal(true).optional()}).strict()
+  .refine(value=>(value.taskId===undefined)===(value.expectedTaskVersion===undefined),"Task identity and version must be supplied together")
+  .refine(value=>value.expectedRetestId===undefined||value.taskId!==undefined,"A retest start requires its task identity and version");
 export const courseRouteNextSchema=z.object({...actionBase,activityId:uuidSchema,expectedPathVersion:z.number().int().positive(),observationId:uuidSchema.nullable()}).strict();
 const citationCountSchema = z.number().int().nonnegative().safe();
 const citationCountsSchema = z.object({
@@ -100,7 +102,7 @@ export const courseRouteSnapshotSchema=z.object({courseId:uuidSchema,scopeState:
 export const courseRouteActionResultSchema=z.discriminatedUnion("kind",[
   z.object({kind:z.literal("ready"),activity:teachingActivitySchema,href:z.string(),resumed:z.boolean(),
     requirementId:uuidSchema,action:z.enum(["diagnose","targeted_explain","reduced_help_practice","transfer_check","full_explain","prerequisite","return","comprehensive"])}).strict(),
-  z.object({kind:z.literal("choice"),reason:z.enum(["scope_unconfirmed","source_unavailable","verification_unavailable","evidence_unknown","evidence_changed","configuration","course_complete","retest_waiting","retest_expired","retest_cancelled","authorization_required","binding_unavailable"]),
+  z.object({kind:z.literal("choice"),reason:z.enum(["scope_unconfirmed","source_unavailable","verification_unavailable","evidence_unknown","evidence_changed","configuration","course_complete","retest_pending","retest_waiting","retest_expired","retest_cancelled","authorization_required","binding_unavailable"]),
     message:z.string(),courseId:uuidSchema,href:z.string(),requirementIds:z.array(uuidSchema)}).strict(),
 ]);
 export type CourseRequirement=z.infer<typeof courseRequirementSchema>;
@@ -119,7 +121,8 @@ export const courseRouteTaskContextSchema=z.discriminatedUnion("managed",[
   z.object({managed:z.literal(false)}).strict(),
   z.object({managed:z.literal(true),courseId:uuidSchema,taskId:uuidSchema,expectedTaskVersion:z.number().int().positive(),
     goalId:uuidSchema,expectedGoalRevision:z.number().int().positive(),requirementId:uuidSchema,expectedRequirementRevision:z.number().int().positive(),
-    minutes:z.number().int().min(5).max(180),notBeforeAt:isoDateTimeSchema.nullable(),available:z.boolean(),reason:z.string().nullable()}).strict(),
+    minutes:z.number().int().min(5).max(180),notBeforeAt:isoDateTimeSchema.nullable(),available:z.boolean(),reason:z.string().nullable(),
+    retestId:uuidSchema.optional()}).strict(),
 ]);
 export type CourseRouteRetestSchedule=z.infer<typeof courseRouteRetestScheduleSchema>;
 export type CourseRouteRetestReceipt=z.infer<typeof courseRouteRetestReceiptSchema>;

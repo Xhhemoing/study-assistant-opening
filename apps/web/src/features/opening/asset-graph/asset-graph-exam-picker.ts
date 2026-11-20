@@ -13,8 +13,8 @@ export type ExamPickerBucket =
   | "unobserved";
 
 export const EXAM_PICKER_BUCKET_RANK: Record<ExamPickerBucket, number> = {
-  needs_correction: 1,
-  due_retest: 2,
+  needs_correction: 2,
+  due_retest: 1,
   pending_verification: 3,
   unobserved: 4,
 };
@@ -30,6 +30,7 @@ export type ExamPickerItem = {
   progress: CourseRequirementProgress;
   bucket: ExamPickerBucket;
   dueRetest: boolean;
+  pendingRetest: boolean;
   retestTaskId: string | null;
   paperMarked: boolean;
 };
@@ -48,12 +49,10 @@ export type RetestTaskBindingResolution =
   | {
       kind: "bound_retest";
       label: "开始独立复测";
-      taskContext: Extract<CourseRouteTaskContext, { managed: true }>;
+      taskContext: Extract<CourseRouteTaskContext, { managed: true }> & { retestId: string };
     }
   | {
       kind: "unbound_retest";
-      ordinaryLabel: "按 15 分钟普通练习开始（不替代复测任务）";
-      todayHref: "/opening/today";
       reason: string;
     };
 
@@ -98,15 +97,16 @@ export function buildCourseExamPickerPlan(
       continue;
     }
 
-    // CRITICAL: Check delayed retest due BEFORE skipping status === "verified"!
     const dueRetest = isDelayedRetestDue(progress, asOfMs);
+    const pendingRetest = progress.delayedCheck?.status === "pending";
 
     let bucket: ExamPickerBucket | null = null;
-    if (progress.status === "needs_correction") {
-      bucket = "needs_correction";
-    } else if (dueRetest) {
+    if (dueRetest) {
       bucket = "due_retest";
+    } else if (progress.status === "needs_correction") {
+      bucket = "needs_correction";
     } else if (
+      pendingRetest ||
       progress.status === "assisted" ||
       progress.status === "needs_verification"
     ) {
@@ -129,6 +129,7 @@ export function buildCourseExamPickerPlan(
       progress,
       bucket,
       dueRetest,
+      pendingRetest,
       retestTaskId,
       paperMarked: isPaperMarked(progress.requirement.id, progress.requirement.revision),
     });
@@ -161,35 +162,44 @@ export function buildCourseExamPickerPlan(
   };
 }
 
-/**
- * Enforce the retest task-binding invariant:
- * ONLY when `managed === true && available === true && requirementId === expectedRequirementId`
- * may the UI label the action "开始独立复测" and start the bound retest task.
- */
+/** Match the live task to the exact delayed check in the current route snapshot. */
 export function resolveRetestTaskBinding(
   taskContext: CourseRouteTaskContext | null | undefined,
-  expectedRequirementId: string,
+  courseId: string,
+  progress: CourseRequirementProgress,
+  asOfMs: number,
 ): RetestTaskBindingResolution {
+  const delayed = progress.delayedCheck;
   if (
     taskContext &&
     taskContext.managed === true &&
     taskContext.available === true &&
-    taskContext.requirementId === expectedRequirementId
+    Number.isInteger(taskContext.expectedTaskVersion) && taskContext.expectedTaskVersion > 0 &&
+    progress.status !== "blocked" &&
+    isDelayedRetestDue(progress, asOfMs) &&
+    taskContext.courseId === courseId &&
+    taskContext.taskId === delayed?.taskId &&
+    typeof taskContext.retestId === "string" &&
+    taskContext.retestId === delayed.retestId &&
+    taskContext.notBeforeAt === delayed.notBeforeAt &&
+    taskContext.requirementId === progress.requirement.id &&
+    taskContext.expectedRequirementRevision === progress.requirement.revision
   ) {
     return {
       kind: "bound_retest",
       label: "开始独立复测",
-      taskContext,
+      taskContext: { ...taskContext, retestId: taskContext.retestId },
     };
   }
   const reason =
-    taskContext && taskContext.managed === true && taskContext.reason
+    delayed && taskContext?.managed && taskContext.courseId === courseId &&
+    taskContext.taskId === delayed.taskId && taskContext.retestId === delayed.retestId &&
+    taskContext.requirementId === progress.requirement.id &&
+    taskContext.expectedRequirementRevision === progress.requirement.revision && taskContext.reason
       ? taskContext.reason
       : "当前复测任务暂不可直接从此启动，可前往今日任务继续。";
   return {
     kind: "unbound_retest",
-    ordinaryLabel: "按 15 分钟普通练习开始（不替代复测任务）",
-    todayHref: "/opening/today",
     reason,
   };
 }

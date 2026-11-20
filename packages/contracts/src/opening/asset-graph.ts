@@ -133,6 +133,7 @@ const windowShape = {
   limit: z.number().int().min(1).max(ASSET_GRAPH_MAX_LIMIT).optional(),
   cursor: z.string().trim().min(1).max(2048).optional(),
   include: z.array(z.literal("summary")).min(1).max(1).optional(),
+  includeKnowledgeEdgeDetails: z.boolean().optional(),
 };
 
 export const assetGraphQuerySchema = z.discriminatedUnion("op", [
@@ -181,6 +182,7 @@ export const assetGraphQuerySchema = z.discriminatedUnion("op", [
       context: assetGraphContextSchema,
       lens: assetGraphLensSchema,
       focus: assetGraphNodeIdSchema,
+      includeKnowledgeEdgeDetails: z.boolean().optional(),
     })
     .strict(),
 ]);
@@ -324,14 +326,15 @@ export const assetGraphEdgeSchema = z
         });
       }
     }
-    if (
-      value.sourceNodeId !== undefined &&
+    if (value.sourceNodeId !== undefined && (
+      !KNOWLEDGE_EDGE_RELATIONS.has(value.relation) ||
+      value.basis !== "recorded" ||
       parseAssetGraphNodeId(value.sourceNodeId)?.kind !== "source"
-    ) {
+    )) {
       ctx.addIssue({
         code: "custom",
         path: ["sourceNodeId"],
-        message: "sourceNodeId must be a source node id",
+        message: "sourceNodeId requires a source node id on a recorded knowledge edge",
       });
     }
   });

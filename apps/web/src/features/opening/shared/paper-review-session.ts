@@ -3,7 +3,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { z } from "zod";
 import { getVerifiedSessionIdentity, type SessionIdentity } from "../../auth/session-identity";
-import { subscribeOpeningPrivacyChange } from "../client/privacy-change";
+import {
+  PAPER_REVIEW_STORAGE_PREFIX,
+  registerOpeningPrivacyCleanup,
+  subscribeOpeningPrivacyChange,
+} from "../client/privacy-change";
+export { PAPER_REVIEW_STORAGE_PREFIX };
 
 export type PaperReviewScopeKind = "course" | "goal";
 
@@ -36,7 +41,8 @@ export const paperReviewSessionStateSchema = z
 export type PaperReviewItem = z.infer<typeof paperReviewItemSchema>;
 export type PaperReviewSessionState = z.infer<typeof paperReviewSessionStateSchema>;
 
-export const PAPER_REVIEW_STORAGE_PREFIX = "aistudy:paper-review:v1";
+const fallbackStates = new Map<string, PaperReviewSessionState>();
+registerOpeningPrivacyCleanup(() => fallbackStates.clear());
 
 function createInitialState(now = new Date().toISOString()): PaperReviewSessionState {
   return {
@@ -72,11 +78,11 @@ export function readPaperReviewSessionState(
   if (!identity) {
     return { state: createInitialState(), persisted: false };
   }
-  const storage = getSafeSessionStorage();
-  if (!storage) {
-    return { state: createInitialState(), persisted: false };
-  }
   const key = buildPaperReviewStorageKey(identity, scope);
+  const fallback = fallbackStates.get(key);
+  if (fallback) return { state: fallback, persisted: false };
+  const storage = getSafeSessionStorage();
+  if (!storage) return { state: createInitialState(), persisted: false };
   try {
     const raw = storage.getItem(key);
     if (!raw) {
@@ -107,24 +113,31 @@ export function writePaperReviewSessionState(
   if (!identity) return false;
   const parsed = paperReviewSessionStateSchema.safeParse(state);
   if (!parsed.success) return false;
-  const storage = getSafeSessionStorage();
-  if (!storage) return false;
   const key = buildPaperReviewStorageKey(identity, scope);
   try {
-    storage.setItem(key, JSON.stringify(parsed.data));
-    return true;
+    const storage = getSafeSessionStorage();
+    if (storage) {
+      storage.setItem(key, JSON.stringify(parsed.data));
+      fallbackStates.delete(key);
+      return true;
+    }
   } catch {
-    return false;
+    // Preserve the newer value for other views of this scope.
   }
+  fallbackStates.set(key, parsed.data);
+  return false;
 }
 
 /** Remove all paper review session entries for the given identity (or all paper review keys when identity is omitted). */
 export function clearPaperReviewSessionStorage(identity?: SessionIdentity | null): void {
-  const storage = getSafeSessionStorage();
-  if (!storage) return;
   const prefix = identity
     ? `${PAPER_REVIEW_STORAGE_PREFIX}:${identity.id}:${identity.workspaceId}:`
     : `${PAPER_REVIEW_STORAGE_PREFIX}:`;
+  for (const key of fallbackStates.keys()) {
+    if (key.startsWith(prefix)) fallbackStates.delete(key);
+  }
+  const storage = getSafeSessionStorage();
+  if (!storage) return;
   try {
     const keysToDelete: string[] = [];
     for (let i = 0; i < storage.length; i += 1) {
@@ -222,92 +235,98 @@ export function usePaperReviewSession(
   const scopeKind = scope?.kind ?? null;
   const scopeId = scope?.id ?? null;
 
-  const [state, setState] = useState<PaperReviewSessionState>(() => {
-    if (!scopeKind || !scopeId) return createInitialState();
-    return readPaperReviewSessionState({ kind: scopeKind, id: scopeId }).state;
-  });
-  const [storageAvailable, setStorageAvailable] = useState<boolean>(() => {
-    if (!scopeKind || !scopeId) return false;
-    return readPaperReviewSessionState({ kind: scopeKind, id: scopeId }).persisted;
-  });
-  const [undoSnapshot, setUndoSnapshot] = useState<PaperReviewSessionState | null>(null);
-  const stateRef = useRef(state);
-  stateRef.current = state;
-
   const activeScope = useMemo<PaperReviewScope | null>(
     () => (scopeKind && scopeId ? { kind: scopeKind, id: scopeId } : null),
     [scopeKind, scopeId],
   );
+  const [hydrated, setHydrated] = useState(false);
+  const [loaded, setLoaded] = useState<{
+    key: string;
+    state: PaperReviewSessionState;
+    persisted: boolean;
+  } | null>(null);
+  const [undoEntry, setUndoEntry] = useState<{ key: string; state: PaperReviewSessionState } | null>(null);
+  const identity = hydrated ? getVerifiedSessionIdentity() : null;
+  const scopeKey = activeScope && hydrated
+    ? identity
+      ? buildPaperReviewStorageKey(identity, activeScope)
+      : JSON.stringify([activeScope.kind, activeScope.id])
+    : null;
+  const emptyState = useMemo(() => createInitialState(), []);
+  const active = loaded !== null && loaded.key === scopeKey ? loaded : null;
+  const unpruned = active?.state ?? emptyState;
+  const state = useMemo(
+    () => requirements ? pruneStalePaperReviewItems(unpruned, requirements).state : unpruned,
+    [requirements, unpruned],
+  );
+  const stateRef = useRef(state);
+  stateRef.current = state;
+  const undoSnapshot = useMemo(() => {
+    if (!undoEntry || undoEntry.key !== scopeKey) return null;
+    return requirements ? pruneStalePaperReviewItems(undoEntry.state, requirements).state : undoEntry.state;
+  }, [requirements, scopeKey, undoEntry]);
 
-  // Sync on scope change or in-tab cross-component update.
+  useEffect(() => setHydrated(true), []);
+
   useEffect(() => {
-    if (!activeScope) {
-      setState(createInitialState());
-      setStorageAvailable(false);
-      setUndoSnapshot(null);
-      return;
-    }
-    const loadFromStorage = () => {
-      const loaded = readPaperReviewSessionState(activeScope);
-      setState(loaded.state);
-      setStorageAvailable(loaded.persisted);
-    };
-    loadFromStorage();
-    setUndoSnapshot(null);
-
-    const identity = getVerifiedSessionIdentity();
-    const key = identity ? buildPaperReviewStorageKey(identity, activeScope) : null;
-    const unsubscribeScope = key ? subscribeScopeKey(key, loadFromStorage) : () => undefined;
-    const unsubscribePrivacy = subscribeOpeningPrivacyChange(() => {
-      clearPaperReviewSessionStorage(getVerifiedSessionIdentity());
-      const fresh = createInitialState();
-      setState(fresh);
-      setUndoSnapshot(null);
-      if (key) notifyScopeKey(key);
+    if (!activeScope || !scopeKey) return;
+    const load = () => setLoaded({
+      key: scopeKey,
+      ...readPaperReviewSessionState(activeScope),
     });
-
+    load();
+    setUndoEntry(null);
+    const unsubscribeScope = subscribeScopeKey(scopeKey, load);
+    const unsubscribePrivacy = subscribeOpeningPrivacyChange(() => {
+      setUndoEntry(null);
+      load();
+    });
     return () => {
       unsubscribeScope();
       unsubscribePrivacy();
     };
-  }, [activeScope]);
+  }, [activeScope, scopeKey]);
 
-  // Auto-invalidate stale entries when current course requirements are loaded/updated.
-  useEffect(() => {
-    if (!activeScope || !requirements) return;
-    const current = stateRef.current;
-    if (Object.keys(current.items).length === 0) return;
-    const { state: pruned, prunedCount } = pruneStalePaperReviewItems(current, requirements);
-    if (prunedCount === 0) return;
-    setState(pruned);
-    const identity = getVerifiedSessionIdentity();
-    if (identity) {
-      const ok = writePaperReviewSessionState(activeScope, pruned, identity);
-      setStorageAvailable(ok);
-      notifyScopeKey(buildPaperReviewStorageKey(identity, activeScope));
+  const save = useCallback((next: PaperReviewSessionState) => {
+    if (!activeScope || !scopeKey || !active) return false;
+    const currentIdentity = getVerifiedSessionIdentity();
+    const currentKey = currentIdentity
+      ? buildPaperReviewStorageKey(currentIdentity, activeScope)
+      : JSON.stringify([activeScope.kind, activeScope.id]);
+    if (currentKey !== scopeKey) return false;
+    stateRef.current = next;
+    if (currentIdentity) {
+      writePaperReviewSessionState(activeScope, next, currentIdentity);
+      notifyScopeKey(scopeKey);
+    } else {
+      setLoaded({ key: scopeKey, state: next, persisted: false });
     }
-  }, [activeScope, requirements]);
+    return true;
+  }, [active, activeScope, scopeKey]);
+
+  useEffect(() => {
+    if (active && state !== unpruned) save(state);
+  }, [active, save, state, unpruned]);
+
+  useEffect(() => {
+    if (undoEntry && undoSnapshot && undoEntry.state !== undoSnapshot) {
+      setUndoEntry({ key: undoEntry.key, state: undoSnapshot });
+    }
+  }, [undoEntry, undoSnapshot]);
 
   const commit = useCallback(
     (next: PaperReviewSessionState, previousForUndo: PaperReviewSessionState | null) => {
-      setUndoSnapshot(previousForUndo);
-      setState(next);
-      if (!activeScope) return;
-      const identity = getVerifiedSessionIdentity();
-      if (!identity) {
-        setStorageAvailable(false);
-        return;
+      if (scopeKey && save(next)) {
+        setUndoEntry(previousForUndo ? { key: scopeKey, state: previousForUndo } : null);
       }
-      const ok = writePaperReviewSessionState(activeScope, next, identity);
-      setStorageAvailable(ok);
-      notifyScopeKey(buildPaperReviewStorageKey(identity, activeScope));
     },
-    [activeScope],
+    [save, scopeKey],
   );
 
   const toggle = useCallback(
     (requirementId: string, requirementRevision: number) => {
-      if (!Number.isInteger(requirementRevision) || requirementRevision <= 0) return;
+      if (!Number.isInteger(requirementRevision) || requirementRevision <= 0 ||
+        (requirements && !requirements.some(req => req.id === requirementId && req.revision === requirementRevision))) return;
       const prev = stateRef.current;
       const now = new Date().toISOString();
       const nextItems = { ...prev.items };
@@ -330,11 +349,12 @@ export function usePaperReviewSession(
         prev,
       );
     },
-    [commit],
+    [commit, requirements],
   );
 
   const startNextRound = useCallback(() => {
     const prev = stateRef.current;
+    if (Object.keys(prev.items).length === 0) return;
     const now = new Date().toISOString();
     commit(
       {
@@ -371,7 +391,7 @@ export function usePaperReviewSession(
     markedIds,
     markedCount: markedIds.size,
     canUndo: undoSnapshot !== null,
-    storageAvailable,
+    storageAvailable: active?.persisted ?? false,
     isMarked,
     toggle,
     undo,

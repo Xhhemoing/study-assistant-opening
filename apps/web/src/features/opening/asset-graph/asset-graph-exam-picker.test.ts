@@ -79,7 +79,7 @@ function makeSnapshot(requirements: CourseRequirementProgress[]): CourseRouteSna
 }
 
 describe("asset-graph-exam-picker", () => {
-  it("preserves verified requirements with due delayed retest while excluding blocked and non-due verified items", () => {
+  it("ranks due retests first even when correction is needed and keeps waiting and blocked items separate", () => {
     const reqCorrection = makeProgress(1, { status: "needs_correction" });
     const reqVerifiedDue = makeProgress(2, {
       status: "verified",
@@ -99,6 +99,10 @@ describe("asset-graph-exam-picker", () => {
         notBeforeAt: "2026-11-22T08:00:00.000Z",
       },
     });
+    const reqCorrectionDue = makeProgress(7, {
+      status: "needs_correction",
+      delayedCheck: reqVerifiedDue.delayedCheck,
+    });
     const reqAssisted = makeProgress(4, { status: "assisted" });
     const reqUnobserved = makeProgress(5, { status: "unobserved" });
     const reqBlocked = makeProgress(6, { status: "blocked" });
@@ -114,20 +118,26 @@ describe("asset-graph-exam-picker", () => {
         reqVerifiedFuture,
         reqVerifiedDue,
         reqCorrection,
+        reqCorrectionDue,
       ]),
       { asOf: AS_OF },
     );
 
-    expect(plan.totalCount).toBe(6);
+    expect(plan.totalCount).toBe(7);
     expect(plan.verifiedCount).toBe(2);
     expect(plan.blockedCount).toBe(1);
     expect(plan.blockedItems.map(i => i.requirement.id)).toEqual([reqBlocked.requirement.id]);
     expect(plan.items.map(i => [i.progress.requirement.id, i.bucket])).toEqual([
-      [reqCorrection.requirement.id, "needs_correction"],
       [reqVerifiedDue.requirement.id, "due_retest"],
+      [reqCorrectionDue.requirement.id, "due_retest"],
+      [reqCorrection.requirement.id, "needs_correction"],
+      [reqVerifiedFuture.requirement.id, "pending_verification"],
       [reqAssisted.requirement.id, "pending_verification"],
       [reqUnobserved.requirement.id, "unobserved"],
     ]);
+    expect(plan.items.find(item => item.progress === reqVerifiedFuture)).toMatchObject({
+      pendingRetest: true, dueRetest: false, retestTaskId: null,
+    });
     expect(plan.dueRetestTaskIds).toEqual([TASK_1]);
   });
 
@@ -152,42 +162,49 @@ describe("asset-graph-exam-picker", () => {
   });
 
   it("enforces strict retest task-binding invariant before allowing '开始独立复测'", () => {
-    const reqId = "55555555-5555-4555-8555-555555555502";
-    const otherReqId = "55555555-5555-4555-8555-555555555599";
+    const progress = makeProgress(2, {
+      revision: 4,
+      delayedCheck: { status: "pending", retestId: RETEST_1, taskId: TASK_1, notBeforeAt: "2026-11-19T08:00:00.000Z" },
+    });
+    const bind = (context: CourseRouteTaskContext | null) =>
+      resolveRetestTaskBinding(context, COURSE_1, progress, Date.parse(AS_OF));
 
     const validCtx: CourseRouteTaskContext = {
       managed: true,
       courseId: COURSE_1,
       taskId: TASK_1,
+      retestId: RETEST_1,
       expectedTaskVersion: 3,
       goalId: GOAL_1,
       expectedGoalRevision: 2,
-      requirementId: reqId,
+      requirementId: progress.requirement.id,
       expectedRequirementRevision: 4,
       minutes: 15,
       notBeforeAt: "2026-11-19T08:00:00.000Z",
       available: true,
       reason: null,
     };
-    expect(resolveRetestTaskBinding(validCtx, reqId)).toMatchObject({
+    expect(bind(validCtx)).toMatchObject({
       kind: "bound_retest",
       label: "开始独立复测",
     });
 
     // Unavailable task -> NEVER label 独立复测
-    expect(resolveRetestTaskBinding({ ...validCtx, available: false, reason: "复测尚未到时间" }, reqId)).toMatchObject({
+    expect(bind({ ...validCtx, available: false, reason: "复测尚未到时间" })).toMatchObject({
       kind: "unbound_retest",
-      ordinaryLabel: "按 15 分钟普通练习开始（不替代复测任务）",
-      todayHref: "/opening/today",
     });
 
-    // Requirement mismatch -> NEVER label 独立复测
-    expect(resolveRetestTaskBinding({ ...validCtx, requirementId: otherReqId }, reqId).kind).toBe(
-      "unbound_retest",
-    );
-
-    // Unmanaged or missing context -> NEVER label 独立复测
-    expect(resolveRetestTaskBinding({ managed: false }, reqId).kind).toBe("unbound_retest");
-    expect(resolveRetestTaskBinding(null, reqId).kind).toBe("unbound_retest");
+    for (const mismatch of [
+      { courseId: GOAL_1 },
+      { taskId: GOAL_1 },
+      { requirementId: GOAL_1 },
+      { expectedRequirementRevision: 5 },
+      { retestId: GOAL_1 },
+      { retestId: undefined }, // Managed maintenance task
+    ]) {
+      expect(bind({ ...validCtx, ...mismatch }).kind).toBe("unbound_retest");
+    }
+    expect(bind({ managed: false }).kind).toBe("unbound_retest");
+    expect(bind(null).kind).toBe("unbound_retest");
   });
 });

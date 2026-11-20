@@ -105,7 +105,33 @@ describe("SprintPaperReviewPanel", () => {
     dispose = null;
   });
 
-  it("stays network-free when collapsed, reflects pre-marked session state, and supports toggle/undo/next-round on expand", async () => {
+  it("ignores a late route response after a course switch and retains the new course's checklist", async () => {
+    const nextCourse = "33333333-3333-4333-8333-333333333332";
+    const first = makeSnapshot();
+    const next = makeSnapshot();
+    next.courseId = nextCourse;
+    next.requirements[0]!.requirement = {
+      ...next.requirements[0]!.requirement, courseId: nextCourse, title: "新课程要求", revision: 9,
+    };
+    const read = vi.fn()
+      .mockImplementationOnce(() => new Promise<CourseRouteSnapshot>(resolve => { resolveFirst = resolve; }))
+      .mockResolvedValueOnce(next);
+    let resolveFirst: (snapshot: CourseRouteSnapshot) => void = () => { throw new Error("Read not started"); };
+    await act(async () => root.render(createElement(SprintPaperReviewPanel, {
+      courseId: COURSE_1, routeClient: { read }, defaultOpen: true,
+    })));
+    await act(async () => root.render(createElement(SprintPaperReviewPanel, {
+      courseId: nextCourse, routeClient: { read }, defaultOpen: true,
+    })));
+    await act(async () => resolveFirst(first));
+    expect(container.textContent).toContain("新课程要求");
+    const checkbox = container.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    await act(async () => checkbox.click());
+    expect(checkbox.checked).toBe(true);
+    expect(container.textContent).toContain("已标 1 项");
+  });
+
+  it("keeps the collapsed count hidden until revisions are verified and supports toggle, undo, and a new round", async () => {
     writePaperReviewSessionState(
       { kind: "course", id: COURSE_1 },
       {
@@ -125,8 +151,12 @@ describe("SprintPaperReviewPanel", () => {
     });
     await flush();
 
-    expect(container.textContent).toContain("第 1 轮 · 已标 1 项");
+    expect(container.textContent).not.toContain("已标");
     expect(read).not.toHaveBeenCalled();
+    const map = container.querySelector<HTMLAnchorElement>("a")!;
+    expect(map.pathname).toBe("/opening/map");
+    expect(new URL(map.href).searchParams.get("context")).toBe("course");
+    expect(new URL(map.href).searchParams.get("id")).toBe(`course/${COURSE_1}`);
 
     await act(async () => {
       findButton("展开纸上核对", container).click();
@@ -157,5 +187,6 @@ describe("SprintPaperReviewPanel", () => {
     });
     await flush();
     expect(container.textContent).toContain("第 2 轮 · 已标 0 项");
+    expect(findButton("开启新一轮纸上核对", container).disabled).toBe(true);
   });
 });
