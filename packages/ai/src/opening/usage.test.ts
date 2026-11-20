@@ -148,4 +148,37 @@ describe("provider usage", () => {
     });
     expect(discountedRate).toBe(fullRate);
   });
+
+  it("preserves exact single-product rounding when cached rate equals standard input rate", () => {
+    const base = estimateUsage({
+      inputTokens: 62_500,
+      outputTokens: 2_000,
+      estimated: false,
+    }, {
+      inputCentsPerMillion: 12.8,
+      outputCentsPerMillion: 100,
+    });
+    const withCachedReport = estimateUsage({
+      inputTokens: 62_500,
+      outputTokens: 2_000,
+      cachedInputTokens: 42_024,
+      estimated: false,
+    }, {
+      inputCentsPerMillion: 12.8,
+      outputCentsPerMillion: 100,
+    });
+    const withExplicitEqualCachedRate = estimateUsage({
+      inputTokens: 62_500,
+      outputTokens: 2_000,
+      cachedInputTokens: 42_024,
+      estimated: false,
+    }, {
+      inputCentsPerMillion: 12.8,
+      outputCentsPerMillion: 100,
+      cachedInputCentsPerMillion: 12.8,
+    });
+    expect(base).toBe(1);
+    expect(withCachedReport).toBe(1);
+    expect(withExplicitEqualCachedRate).toBe(1);
+  });
 });

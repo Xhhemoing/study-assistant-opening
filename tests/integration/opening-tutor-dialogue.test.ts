@@ -116,9 +116,13 @@ describe("real Worker/database/provider dialogue with fetch-only replacement", (
           expect(Object.keys(student).sort()).toEqual(["deliveredTutor", "limitedKnowledge", "problem"]);
           expect(body.messages.some(row => row.content.includes("answerStrings"))).toBe(false);
         }
-        if (calls === 2) expect(body.messages.slice(1, 3)).toEqual([
-          { role: "user", content: fixture.cases[0]!.firstUser }, { role: "assistant", content: texts[0] },
-        ]);
+        if (calls === 2) {
+          expect(body.messages[1]?.content).toContain("UNTRUSTED DATA");
+          expect(body.messages[2]?.role).toBe("assistant");
+          expect(body.messages.slice(3, 5)).toEqual([
+            { role: "user", content: fixture.cases[0]!.firstUser }, { role: "assistant", content: texts[0] },
+          ]);
+        }
         const id = `controlled-${++calls}`;
         const answer = JSON.stringify({ text: texts[calls - 1], citedChunkIds: [], candidates: [] });
         const content = calls === 1 ? texts[0] : calls === 3 ? `\`\`\`json\n${answer}\n\`\`\`` : calls === 4 ? `说明：${answer}以上是解答。` : answer;

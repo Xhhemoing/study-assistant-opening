@@ -41,9 +41,12 @@ export async function readOpeningProviderStream(body: ReadableStream<Uint8Array>
     if (value.usage != null) {
       const parsedUsage = parseProviderUsage(value.usage);
       if (!parsedUsage) invalid("invalid provider stream usage");
-      inputTokens = parsedUsage.inputTokens;
-      outputTokens = parsedUsage.outputTokens;
-      cachedInputTokens = parsedUsage.cachedInputTokens;
+      if (parsedUsage.inputTokens !== null) inputTokens = parsedUsage.inputTokens;
+      if (parsedUsage.outputTokens !== null) outputTokens = parsedUsage.outputTokens;
+      if (parsedUsage.cachedInputTokens !== null) cachedInputTokens = parsedUsage.cachedInputTokens;
+      if (cachedInputTokens !== null && inputTokens !== null) {
+        cachedInputTokens = Math.min(cachedInputTokens, inputTokens);
+      }
     }
     if (!Array.isArray(value.choices)) invalid("invalid provider stream choices");
     for (const raw of value.choices) {

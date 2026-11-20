@@ -111,9 +111,15 @@ export function estimateUsage(
   usage: OpeningUsage,
   pricing: OpeningPricing,
 ): number {
+  const cachedRate = pricing.cachedInputCentsPerMillion ?? pricing.inputCentsPerMillion;
+  if (cachedRate === pricing.inputCentsPerMillion) {
+    return Math.ceil(
+      (usage.inputTokens * pricing.inputCentsPerMillion
+        + usage.outputTokens * pricing.outputCentsPerMillion) / 1_000_000,
+    );
+  }
   const cached = clampCachedTokens(usage.inputTokens, usage.cachedInputTokens);
   const uncached = usage.inputTokens - cached;
-  const cachedRate = pricing.cachedInputCentsPerMillion ?? pricing.inputCentsPerMillion;
   return Math.ceil(
     (uncached * pricing.inputCentsPerMillion
       + cached * cachedRate

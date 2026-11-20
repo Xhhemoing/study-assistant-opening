@@ -380,6 +380,65 @@ describe("opening provider", () => {
     expect(body.messages[1]?.content).toBe("plain question");
   });
 
+  it("normalizes irregular ephemeral history boundaries and consecutive roles with and without chunks", () => {
+    const chunks = [{
+      id: "00000000-0000-4000-8000-000000000001",
+      sourceId: "00000000-0000-4000-8000-000000000002",
+      sourceVersion: 0,
+      page: 1,
+      slideLabel: null,
+      startMs: null,
+      endMs: null,
+      text: "chunk text",
+      imageObjectKey: null,
+    }];
+    const baseWithChunks = openingProviderRequestBody(
+      { ...input, chunks, history: [], text: "q1" },
+      { model: "model" },
+    );
+    const irregularHistory = [
+      { role: "assistant" as const, text: "earlier hint 1" },
+      { role: "assistant" as const, text: "earlier hint 2" },
+      { role: "user" as const, text: "follow-up 1" },
+      { role: "user" as const, text: "follow-up 2" },
+    ];
+
+    const withChunks = openingProviderRequestBody(
+      { ...input, chunks, history: irregularHistory, text: "current question" },
+      { model: "model" },
+    );
+    expect(withChunks.messages.slice(0, 3)).toEqual(baseWithChunks.messages.slice(0, 3));
+    expect(withChunks.messages.map((message) => message.role)).toEqual([
+      "system",
+      "user",
+      "assistant",
+      "user",
+      "assistant",
+      "user",
+      "assistant",
+      "user",
+    ]);
+    expect(withChunks.messages[4]?.content).toBe("earlier hint 1\n\nearlier hint 2");
+    expect(withChunks.messages[5]?.content).toBe("follow-up 1\n\nfollow-up 2");
+    expect(withChunks.messages.at(-1)?.content).toBe("current question");
+
+    const withoutChunks = openingProviderRequestBody(
+      { ...input, chunks: [], history: irregularHistory, text: "current question" },
+      { model: "model" },
+    );
+    expect(withoutChunks.messages.map((message) => message.role)).toEqual([
+      "system",
+      "user",
+      "assistant",
+      "user",
+      "assistant",
+      "user",
+    ]);
+    expect(withoutChunks.messages[2]?.content).toBe("earlier hint 1\n\nearlier hint 2");
+    expect(withoutChunks.messages[3]?.content).toBe("follow-up 1\n\nfollow-up 2");
+    expect(withoutChunks.messages.at(-1)?.content).toBe("current question");
+  });
+
   it("extracts cachedInputTokens in answer and tool-call responses and clamps values exceeding prompt_tokens", async () => {
     const answerProvider = createOpeningProvider({
       baseUrl: "https://model.example",

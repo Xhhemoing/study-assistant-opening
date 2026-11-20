@@ -149,6 +149,38 @@ describe("direct Markdown streaming", () => {
     });
   });
 
+  it("retains earlier non-null usage fields across split SSE usage chunks and clamps against final prompt_tokens", async () => {
+    const h1 = harness();
+    h1.write(
+      delta("answer")
+      + event({ choices: [], usage: { prompt_tokens: 120, prompt_tokens_details: { cached_tokens: 96 } } })
+      + stop
+      + event({ choices: [], usage: { completion_tokens: 18 } })
+      + done,
+    );
+    await expect(h1.provider.complete(input)).resolves.toMatchObject({
+      text: "answer",
+      inputTokens: 120,
+      outputTokens: 18,
+      cachedInputTokens: 96,
+    });
+
+    const h2 = harness();
+    h2.write(
+      delta("answer")
+      + event({ choices: [], usage: { prompt_tokens_details: { cached_tokens: 90 } } })
+      + stop
+      + event({ choices: [], usage: { prompt_tokens: 50, completion_tokens: 10 } })
+      + done,
+    );
+    await expect(h2.provider.complete(input)).resolves.toMatchObject({
+      text: "answer",
+      inputTokens: 50,
+      outputTokens: 10,
+      cachedInputTokens: 50,
+    });
+  });
+
   it.each([
     ["negative cached_tokens", { prompt_tokens: 24, completion_tokens: 8, prompt_tokens_details: { cached_tokens: -1 } }],
     ["float cached_tokens", { prompt_tokens: 24, completion_tokens: 8, prompt_tokens_details: { cached_tokens: 1.5 } }],
