@@ -3,6 +3,7 @@
 import { useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import {
   IELTS_CRITERIA,
+  analyzeCrossDraftTransfer,
   countDraftWords,
   evaluateRevisedDraftDeterministically,
   type IeltsCriterion,
@@ -63,6 +64,22 @@ function draftEditorText(draft: IeltsEssayDraft): string {
   return draft.paragraphs.join("\n\n").replace(/\r\n?/gu, "\n");
 }
 
+function evaluationFingerprint(
+  fixture: IeltsWorkbenchFixture,
+  draft: IeltsEssayDraft,
+  receipt: IeltsRubricReceipt,
+  report: IeltsCrossDraftTransferReport,
+): string {
+  return JSON.stringify([
+    fixture.promptId, fixture.promptTitleZh, fixture.promptStatementEn, fixture.promptTaskTypeLabel,
+    fixture.targetWordCount, fixture.draft1, fixture.draft1Receipt, fixture.targets, draft, receipt, report,
+  ], (_key, value: unknown) => {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) return value;
+    const record = value as Record<string, unknown>;
+    return Object.fromEntries(Object.keys(record).sort().map((key) => [key, record[key]]));
+  });
+}
+
 const PARAGRAPH_BREAK = /\n\s*\n+/u;
 
 export function IeltsDraftCritiqueWorkbench({
@@ -77,21 +94,6 @@ export function IeltsDraftCritiqueWorkbench({
     draftIdentity(fixture.draft2),
     fixture.draft2Receipt.receiptId,
   ]);
-  return (
-    <WritingAttempt
-      key={attemptKey}
-      fixture={fixture}
-      initialView={initialView}
-      onRevisionEvaluated={onRevisionEvaluated}
-    />
-  );
-}
-
-function WritingAttempt({
-  fixture,
-  initialView,
-  onRevisionEvaluated,
-}: IeltsDraftCritiqueWorkbenchProps & { fixture: IeltsWorkbenchFixture; initialView: DraftViewMode }) {
   const tabsIdPrefix = useId();
   const tabRefs = useRef<Partial<Record<DraftViewMode, HTMLButtonElement | null>>>({});
 
@@ -99,13 +101,19 @@ function WritingAttempt({
   const [criterionFilter, setCriterionFilter] = useState<IeltsCriterion | "ALL">("ALL");
   const [selectedSpanId, setSelectedSpanId] = useState<string | null>(null);
 
-  const [draft2, setDraft2] = useState<IeltsEssayDraft>(fixture.draft2);
-  const [draft2Receipt, setDraft2Receipt] = useState<IeltsRubricReceipt>(
-    fixture.draft2Receipt,
-  );
-  const [transferReport, setTransferReport] = useState<IeltsCrossDraftTransferReport>(
-    fixture.transferReport,
-  );
+  const authorityFingerprint = evaluationFingerprint(fixture, fixture.draft2, fixture.draft2Receipt, fixture.transferReport);
+  const authoritative = {
+    attemptKey,
+    authorityFingerprint,
+    draft2: fixture.draft2,
+    draft2Receipt: fixture.draft2Receipt,
+    transferReport: fixture.transferReport,
+  };
+  const [evaluation, setEvaluation] = useState({
+    ...authoritative,
+    cachedFingerprint: authorityFingerprint as string | null,
+  });
+  const { draft2, draft2Receipt, transferReport: savedReport } = evaluation;
 
   const [composerOpen, setComposerOpen] = useState(false);
   const [composerText, setComposerText] = useState(() => draftEditorText(fixture.draft2));
@@ -114,9 +122,37 @@ function WritingAttempt({
   const composerGuidanceId = `${tabsIdPrefix}-revision-guidance`;
   const [revisionCount, setRevisionCount] = useState(0);
 
+  if (evaluation.authorityFingerprint !== authorityFingerprint) {
+    setEvaluation({ ...authoritative, cachedFingerprint: null });
+    setComposerNeedsText(false);
+    setSelectedSpanId(null);
+    if (evaluation.attemptKey !== attemptKey) {
+      setComposerText(draftEditorText(fixture.draft2));
+      setComposerAssisted(fixture.draft2.assisted);
+      setViewMode(initialView);
+      setCriterionFilter("ALL");
+      setComposerOpen(false);
+      setRevisionCount(0);
+    }
+  }
+
+  const transferReport = useMemo(() => {
+    const targetIds = new Set(fixture.targets.map(({ id }) => id));
+    const matchesAttempt = savedReport.fromDraftId === fixture.draft1.draftId && savedReport.toDraftId === draft2.draftId &&
+      savedReport.items.length === targetIds.size && savedReport.items.every(({ targetId }) => targetIds.has(targetId));
+    // Targets may arrive before their corresponding report.
+    return matchesAttempt ? savedReport : analyzeCrossDraftTransfer({ draft1: fixture.draft1, draft2, targets: fixture.targets });
+  }, [fixture.draft1, fixture.targets, draft2, savedReport]);
   const activeDraft = viewMode === "draft1" ? fixture.draft1 : draft2;
   const activeReceipt = viewMode === "draft1" ? fixture.draft1Receipt : draft2Receipt;
-  const epistemicMeta = EPISTEMIC_BADGE_META[activeReceipt.epistemicStatus];
+  const canShowVerifiedReceipt = activeReceipt.masteryQualified && activeReceipt.countsTowardMastery && !activeDraft.assisted &&
+    activeReceipt.promptId === activeDraft.promptId && activeReceipt.draftId === activeDraft.draftId &&
+    activeReceipt.draftVersion === activeDraft.version && (viewMode === "draft1" ||
+      (transferReport === savedReport && transferReport.summary.masteryQualified));
+  const epistemicStatus = activeReceipt.epistemicStatus === "rubric_verified_evidence" && !canShowVerifiedReceipt
+    ? "practice_feedback"
+    : activeReceipt.epistemicStatus;
+  const epistemicMeta = EPISTEMIC_BADGE_META[epistemicStatus];
 
   const activeWordCount = useMemo(
     () => countDraftWords(activeDraft.paragraphs),
@@ -170,10 +206,9 @@ function WritingAttempt({
 
   function handleAnalyzeRevision() {
     const paragraphs = composerText.split(PARAGRAPH_BREAK);
-    const evaluatedParagraphs = draftEditorText(draft2).split(PARAGRAPH_BREAK);
-    if (composerAssisted === draft2.assisted &&
-      paragraphs.join("\n\n") === evaluatedParagraphs.join("\n\n")
-    ) {
+    const composerDraft = { ...draft2, paragraphs, assisted: composerAssisted };
+    const fingerprint = evaluationFingerprint(fixture, composerDraft, draft2Receipt, transferReport);
+    if (fingerprint === evaluation.cachedFingerprint) {
       setComposerNeedsText(false);
       activateTab("draft2");
       return;
@@ -181,11 +216,9 @@ function WritingAttempt({
 
     const nextCount = revisionCount + 1;
     const updatedDraft: IeltsEssayDraft = {
-      ...draft2,
+      ...composerDraft,
       draftId: `${fixture.draft2.draftId}-rev-${nextCount}`,
       version: Math.max(2, draft2.version),
-      assisted: composerAssisted,
-      paragraphs,
       createdAt: new Date().toISOString(),
     };
 
@@ -203,9 +236,13 @@ function WritingAttempt({
 
     setComposerNeedsText(false);
     setRevisionCount(nextCount);
-    setDraft2(updatedDraft);
-    setDraft2Receipt(evaluated.receipt);
-    setTransferReport(evaluated.transferReport);
+    setEvaluation({
+      ...authoritative,
+      draft2: updatedDraft,
+      draft2Receipt: evaluated.receipt,
+      transferReport: evaluated.transferReport,
+      cachedFingerprint: evaluationFingerprint(fixture, updatedDraft, evaluated.receipt, evaluated.transferReport),
+    });
     activateTab("draft2");
     onRevisionEvaluated?.({
       revisedDraft: updatedDraft,
@@ -215,9 +252,10 @@ function WritingAttempt({
   }
 
   function handleResetRevision() {
-    setDraft2(fixture.draft2);
-    setDraft2Receipt(fixture.draft2Receipt);
-    setTransferReport(fixture.transferReport);
+    setEvaluation({
+      ...authoritative,
+      cachedFingerprint: evaluation.cachedFingerprint === authorityFingerprint ? authorityFingerprint : null,
+    });
     setComposerText(draftEditorText(fixture.draft2));
     setComposerAssisted(fixture.draft2.assisted);
     setComposerNeedsText(false);
@@ -256,7 +294,7 @@ function WritingAttempt({
             </div>
 
             <div
-              data-epistemic-badge={activeReceipt.epistemicStatus}
+              data-epistemic-badge={epistemicStatus}
               className={`inline-flex items-center gap-2 rounded-pill border px-3 py-1 text-meta font-medium ${epistemicMeta.badgeClass}`}
             >
               <span
@@ -269,7 +307,8 @@ function WritingAttempt({
         </div>
 
         <p className="mt-3 border-t border-line pt-3 text-meta text-text-2">
-          {activeReceipt.epistemicReason}
+          {epistemicStatus === activeReceipt.epistemicStatus ? activeReceipt.epistemicReason :
+            transferReport.summary.disqualificationReason ?? "本轮迁移证据已更新，请重新分析改写。"}
         </p>
       </header>
 

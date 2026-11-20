@@ -409,7 +409,7 @@ export type CreateRubricReceiptInput = {
   readonly receiptId: string;
   readonly taskMode: IeltsTaskMode;
   readonly draft: IeltsEssayDraft;
-  readonly baselineDraft?: DraftLineage;
+  readonly baselineDraft?: DraftLineage & Pick<IeltsEssayDraft, "paragraphs">;
   readonly assessments: readonly IeltsCriterionAssessment[];
   readonly crossDraftTransferVerified: boolean;
   readonly freshPromptTransfer?: boolean;
@@ -565,7 +565,8 @@ export function createValidatedRubricReceipt(
   const epistemic = resolveIeltsEpistemicStatus({
     draftVersion: input.draft.version,
     assisted: input.draft.assisted,
-    crossDraftTransferVerified: lineage === "advancing_revision" && input.crossDraftTransferVerified,
+    crossDraftTransferVerified: lineage === "advancing_revision" && input.crossDraftTransferVerified &&
+      countDraftWords(input.baselineDraft?.paragraphs ?? []) > 0,
     freshPromptTransfer: lineage === "fresh_prompt" && input.freshPromptTransfer,
     memorizedTemplateHits: memorizedTemplateFlags,
     wordCount,

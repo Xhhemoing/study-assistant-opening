@@ -1119,6 +1119,45 @@ describe("Writing lineage and evidence regressions", () => {
     receiptId: "r-round-six",
   };
 
+  it.each([[], ["..."], ["   "], ["12345 ???"]].map((paragraphs) => ({ paragraphs })))(
+    "keeps a revision with a non-lexical baseline as practice ($paragraphs)",
+    ({ paragraphs }) => {
+      const baselineDraft = { ...DRAFT_1, paragraphs };
+      const direct = createValidatedRubricReceipt({
+        receiptId: "r-missing-baseline",
+        taskMode: "writing_task2",
+        draft: DRAFT_2,
+        assessments: buildValidDraft2Assessments(),
+        baselineDraft,
+        crossDraftTransferVerified: true,
+      });
+      const { receipt, transferReport } = evaluateNonEmptyRevision({ ...input, baselineDraft });
+      expect(receipt).toMatchObject({ epistemicStatus: "practice_feedback", countsTowardMastery: false });
+      expect(transferReport.summary).toMatchObject({ meetsCrossDraftVerification: false, transferredCount: 0 });
+      expect(direct.ok && direct.receipt.countsTowardMastery).toBe(false);
+    },
+  );
+
+  it("cites the new target occurrence when the same clause also contains a copied occurrence", () => {
+    const copied = "Officials monitor per-capita emissions across remote industrial zones";
+    const clause = `${copied} but electrified transit can substantially lower per-capita emissions in crowded urban neighbourhoods`;
+    const paragraph = `${clause} where diesel fumes linger near schools and clinics even on days when regional traffic levels remain unusually low.`;
+    const { receipt, transferReport } = evaluateNonEmptyRevision({
+      ...input,
+      baselineDraft: { ...DRAFT_1, paragraphs: [`${copied} to ensure rural factories comply with national reporting requirements during scheduled winter inspections.`, ...DRAFT_1.paragraphs] },
+      revisedDraft: { ...DRAFT_2, paragraphs: [paragraph, ...DRAFT_2.paragraphs.map((text) => text.replaceAll("per-capita emissions", "urban air pollution"))] },
+      targets: [{ ...TARGETS[0]!, targetPatterns: ["per-capita emissions"] }],
+    });
+    const span = receipt.criteria.LR.evidenceSpans[0]!;
+    expect(transferReport.items[0]?.status).toBe("transferred");
+    expect(receipt.countsTowardMastery).toBe(true);
+    expect(span.paragraphIndex).toBe(0);
+    expect(span.startOffset).toBeGreaterThanOrEqual(paragraph.indexOf("per-capita emissions") + "per-capita emissions".length);
+    expect(span.startOffset).toBeLessThanOrEqual(paragraph.lastIndexOf("per-capita emissions"));
+    expect(span.endOffset).toBeGreaterThanOrEqual(paragraph.lastIndexOf("per-capita emissions") + "per-capita emissions".length);
+    expect(span.excerpt).toBe(paragraph.slice(span.startOffset, span.endOffset));
+  });
+
   it("cites the allocated Task Response occurrence after an unrelated funding sentence", () => {
     const paragraphs = ["The funding table appears in Appendix B.", ...DRAFT_2.paragraphs];
     const { receipt, transferReport } = evaluateNonEmptyRevision({
@@ -1333,6 +1372,15 @@ describe("Speaking clause and evidence regressions", () => {
     ["A table of reduced per-capita emissions across districts.", false],
     ["A report on sharply reduced per-capita emissions.", false],
     ["A report on traffic and reduced per-capita emissions.", false],
+    ["A breakdown of average reported per-capita emissions by district.", false],
+    ["A report on urban reduced per-capita emissions.", false],
+    ["A summary of municipal reported per-capita emissions.", false],
+    ["A comparison with reported per-capita emissions.", false],
+    ["A classification by reduced per-capita emissions.", false],
+    ["Our city reported lower per-capita emissions.", true],
+    ["The districts with smaller fleets reported lower per-capita emissions.", true],
+    ["It's reduced per-capita emissions significantly.", true],
+    ["That’s helped cut per-capita emissions.", true],
     ["The city's trains reduced harmful per-capita emissions across the entire city.", true],
     ["The switch to trains reduced harmful per-capita emissions across the entire city.", true],
     ["The council in our city reduced harmful per-capita emissions throughout spring.", true],
@@ -1362,6 +1410,37 @@ describe("Speaking clause and evidence regressions", () => {
     expect(receipt.transferredCollocations).toEqual(credited ? ["per-capita emissions"] : []);
     expect(receipt.countsTowardMastery).toBe(credited);
     expect(receipt.epistemicStatus).toBe(credited ? "rubric_verified_evidence" : "practice_feedback");
+  });
+
+  it.each([
+    "because", "although", "though", "even though", "while", "whereas", "since", "unless",
+    "until", "if", "whether", "when", "whenever", "once", "after", "before", "so that",
+    "and", "or", "but", "yet", ";", "—",
+  ])("scopes Speaking evidence to the target clause across %s", (link) => {
+    const evaluate = (sentence: string) => evaluateSpeakingRetelling({
+      seed, transcript: setup + sentence, durationSeconds: 75, assisted: false,
+    });
+    const rejected = evaluate(`Buses are expensive ${link} the city's reported per-capita emissions.`);
+    expect(rejected.transferredCollocations).toEqual([]);
+    expect(rejected.countsTowardMastery).toBe(false);
+    const accepted = evaluate(`Buses are cleaner ${link} the city reduced per-capita emissions.`);
+    expect(accepted.transferredCollocations).toEqual(["per-capita emissions"]);
+    expect(accepted.countsTowardMastery).toBe(true);
+  });
+
+  it.each([
+    ["I spoke to the analyst who the city's reported per-capita emissions.", false],
+    ["I spoke to the analyst who reported per-capita emissions.", true],
+    ["The board hired engineers that reduced per-capita emissions.", true],
+    ["The board hired engineers that the city's reported per-capita emissions.", false],
+    ["The speaker said, 'Buses are expensive; the city's reported per-capita emissions.'", false],
+    ["The speaker said, 'Buses are cleaner—our city reduced per-capita emissions.'", true],
+  ])("checks relative and quoted clauses containing the Speaking target in %s", (sentence, credited) => {
+    const receipt = evaluateSpeakingRetelling({
+      seed, transcript: setup + sentence, durationSeconds: 75, assisted: false,
+    });
+    expect(receipt.transferredCollocations).toEqual(credited ? ["per-capita emissions"] : []);
+    expect(receipt.countsTowardMastery).toBe(credited);
   });
 
   it.each([

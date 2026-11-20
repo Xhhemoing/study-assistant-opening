@@ -135,6 +135,46 @@ describe("IeltsDraftCritiqueWorkbench", () => {
     expect(host.querySelector("textarea")?.hasAttribute("aria-invalid")).toBe(false);
   });
 
+  it("syncs revoked Writing evidence under the same receipt ID and reanalyzes against the new targets", async () => {
+    const fixture = IELTS_WRITING_SPEAKING_FIXTURE;
+    const onRevisionEvaluated = vi.fn();
+    const targets: typeof fixture.targets = [];
+    const downgraded = evaluateRevisedDraftDeterministically({
+      baselineDraft: fixture.draft1,
+      revisedDraft: fixture.draft2,
+      targets,
+      receiptId: fixture.draft2Receipt.receiptId,
+    });
+    if (!downgraded.ok) throw new Error("Expected a receipt for the existing Writing draft");
+    const render = (nextFixture: typeof fixture) => act(async () => root.render(createElement(
+      IeltsDraftCritiqueWorkbench, { fixture: nextFixture, onRevisionEvaluated },
+    )));
+    const nextFixture = { ...fixture, targets, draft2Receipt: downgraded.receipt, transferReport: downgraded.transferReport };
+
+    await render(fixture);
+    await act(async () => writingButton("打开改写编辑区").click());
+    expect(host.querySelector('[data-epistemic-badge="rubric_verified_evidence"]')).not.toBeNull();
+    expect(host.querySelector("[data-transfer-summary]")?.textContent).toContain("已迁移 4 / 4");
+
+    await render({ ...fixture, targets });
+    expect(host.querySelector('[data-epistemic-badge="rubric_verified_evidence"]')).toBeNull();
+    expect(host.querySelector("[data-transfer-summary]")?.textContent).toContain("已迁移 0 / 0");
+
+    await render(nextFixture);
+    expect(host.querySelector('[data-epistemic-badge="rubric_verified_evidence"]')).toBeNull();
+    expect(host.querySelector('[data-epistemic-badge="practice_feedback"]')).not.toBeNull();
+    expect(host.querySelector("[data-transfer-summary]")?.textContent).toContain("已迁移 0 / 0");
+    expect(onRevisionEvaluated).not.toHaveBeenCalled();
+
+    await act(async () => writingButton("重新分析改写").click());
+    await render(structuredClone(nextFixture));
+    await act(async () => writingButton("重新分析改写").click());
+    expect(onRevisionEvaluated).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      receipt: expect.objectContaining({ epistemicStatus: "practice_feedback", countsTowardMastery: false }),
+      transferReport: expect.objectContaining({ summary: expect.objectContaining({ transferredCount: 0, totalTargets: 0 }) }),
+    }));
+  });
+
   it("asks for English text when a punctuation-only revision is submitted", async () => {
     const onRevisionEvaluated = vi.fn();
     await act(async () => root.render(createElement(IeltsDraftCritiqueWorkbench, { onRevisionEvaluated })));
@@ -507,6 +547,38 @@ it("shows an explicitly matched Speaking receipt", async () => {
   })));
   expect(host.querySelector("[data-speaking-epistemic]")?.getAttribute("data-speaking-epistemic"))
     .toBe("rubric_verified_evidence");
+});
+
+it("restores downgraded Speaking feedback under the same receipt ID", async () => {
+  const fixture = IELTS_WRITING_SPEAKING_FIXTURE;
+  const initial = fixture.initialSpeakingReceipt;
+  const revoked = {
+    ...initial,
+    epistemicStatus: "practice_feedback" as const,
+    masteryQualified: false,
+    countsTowardMastery: false,
+    transferredCollocations: [],
+    pendingCollocations: initial.transferredCollocations,
+    evidenceQuotes: [],
+  };
+  const render = (initialReceipt: typeof initial) => act(async () => root.render(createElement(
+    IeltsSpeakingTransferCard, {
+      seed: fixture.speakingSeed,
+      initialTranscript: fixture.initialSpeakingTranscript,
+      initialDurationSeconds: fixture.initialSpeakingDurationSeconds,
+      initialReceipt,
+    },
+  )));
+
+  await render(initial);
+  expect(host.querySelector('[data-speaking-epistemic="rubric_verified_evidence"]')).not.toBeNull();
+  await render(revoked);
+  expect(host.querySelector('[data-speaking-epistemic="rubric_verified_evidence"]')).toBeNull();
+  expect(host.querySelector('[data-speaking-epistemic="practice_feedback"]')).not.toBeNull();
+  expect(host.textContent).toContain("已迁移 0 / 5");
+
+  await render({ ...initial, masteryQualified: false });
+  expect(host.querySelector('[data-speaking-epistemic="rubric_verified_evidence"]')).toBeNull();
 });
 
 it("withholds stale Speaking feedback after the targets change on the same seed", async () => {

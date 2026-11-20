@@ -45,8 +45,8 @@ export function IeltsSpeakingTransferCard({
   const startingDuration = String(initialDurationSeconds ?? matchingReceipt?.durationSeconds ?? "");
   const attemptKey = JSON.stringify([
     seed.seedId, seed.cartridgeId, seed.sourcePromptId, seed.sourceDraftId,
-    startingTranscript, startingDuration,
-    matchingReceipt?.receiptId, matchingReceipt?.createdAt, matchingReceipt?.assisted,
+    startingTranscript, startingDuration, seed.timeWindowSeconds,
+    [...getSpeakingTargets(seed.targetSpokenCollocations).values()], matchingReceipt,
   ]);
   return (
     <SpeakingAttempt
@@ -83,7 +83,8 @@ function SpeakingAttempt({
     : [];
   const receipt = evaluatedReceipt?.seedId === seed.seedId &&
     evaluatedTargets.length === targets.length && targets.every((target) => evaluatedTargets.includes(target)) &&
-    (evaluatedReceipt.epistemicStatus !== "rubric_verified_evidence" || hasRequiredWritingReceipt(seed))
+    (evaluatedReceipt.epistemicStatus !== "rubric_verified_evidence" ||
+      (evaluatedReceipt.masteryQualified && evaluatedReceipt.countsTowardMastery && hasRequiredWritingReceipt(seed)))
     ? evaluatedReceipt
     : null;
   const epistemicMeta = receipt ? EPISTEMIC_BADGE_META[receipt.epistemicStatus] : null;

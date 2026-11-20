@@ -43,7 +43,7 @@ const SPEAKING_STOP_WORDS = new Set([
 ]);
 
 const SPEAKING_CLAUSE_VERB_CUE =
-  /^(?:be|think|believe|feel|see|say|says|said|mean|means|meant|make|makes|made|take|takes|took|help|helps|helped|lower|lowers|ease|eases|need|needs|want|wants|rely|relies|build|builds|spend|spends|invest|invests|fund|funds|protect|protects|back|backs|pair|pairs|trigger|triggers|grow|grows|matter|matters|require|requires|struggle|struggles|notice|notices|pour|pours|choose|chooses|avoid|avoids|reduce|reduces|improve|improves|deliver|delivers|encourage|encourages|undermine|undermines|resolve|resolves|support|supports|prefer|prefers|coordinate|coordinates|monitor|monitors|approve|approves|track|tracks|evaluate|evaluates|balance|balances|weigh|weighs|assess|assesses|shift|shifts|curb|curbs|maintain|maintains|expand|expands|address|addresses|justify|justifies)$/u;
+  /^(?:be|think|believe|feel|see|say|says|said|mean|means|meant|make|makes|made|take|takes|took|help|helps|helped|lower|lowers|ease|eases|need|needs|want|wants|rely|relies|build|builds|spend|spends|invest|invests|fund|funds|protect|protects|back|backs|pair|pairs|trigger|triggers|grow|grows|matter|matters|require|requires|struggle|struggles|notice|notices|pour|pours|choose|chooses|avoid|avoids|reduce|reduces|alleviate|alleviates|improve|improves|deliver|delivers|encourage|encourages|undermine|undermines|resolve|resolves|support|supports|prefer|prefers|coordinate|coordinates|monitor|monitors|approve|approves|track|tracks|evaluate|evaluates|balance|balances|weigh|weighs|assess|assesses|shift|shifts|curb|curbs|maintain|maintains|expand|expands|address|addresses|justify|justifies)$/u;
 
 const MIN_VERIFIED_SPEAKING_WORDS = 75;
 
@@ -64,15 +64,20 @@ const SPEAKING_FINITE_AUXILIARY = /^(?:is|are|was|were|am|do|does|did|have|has|h
 const SPEAKING_DETERMINER = /^(?:the|a|an|this|that|these|those|whose|my|our|your|his|her|its|their)$/u;
 const SPEAKING_POSSESSIVE_END = /(?:['’]s|s['’])$/u;
 const SPEAKING_PRENOMINAL_ADJECTIVE =
-  /^(?:new|old|recent|latest|last|first|final|initial|preliminary|local|regional|annual|seasonal|comprehensive)$/u;
+  /^(?:new|old|recent|latest|last|first|final|initial|preliminary|local|regional|annual|seasonal|comprehensive|average|urban|rural|national|total|overall|estimated|high|low|higher|lower)$/u;
+const SPEAKING_ADJECTIVAL_ENDING = /(?:al|ic|ive|ous|ary|able|ible|ful|less|wide)$/u;
 const SPEAKING_UNINFLECTED_VERB = /^(?:cut|set|put|cost|let|spread|hit|hurt|shut|split)s?$/u;
 const SPEAKING_AMBIGUOUS_VERB = /^(?:help|helps|need|needs|fund|funds|back|backs|pair|pairs|support|supports|monitor|monitors|track|tracks|balance|balances|shift|shifts|address|addresses|offer|offers|trigger|triggers|notice|notices|curb|curbs)$/u;
 const SPEAKING_SUBJECT_PRONOUN = /^(?:i|you|he|she|it|we|they)$/u;
+const SPEAKING_CONTRACTED_SUBJECT = /^(?:(?:he|she|it|that|this|there)['’]s|i['’]m|(?:you|we|they)['’](?:re|ve)|(?:i|you|he|she|it|we|they|that)['’](?:ll|d)|i['’]ve)$/u;
 const SPEAKING_OBJECT_PRONOUN = /^(?:me|you|him|her|it|us|them)$/u;
 const SPEAKING_DITRANSITIVE = /^(?:give|gives|gave|offer|offers|offered|show|shows|showed|send|sends|sent|tell|tells|told)$/u;
 const SPEAKING_PREPOSITION = /^(?:of|to|for|with|on|at|from|by|in|near|under|over|about|across|through|throughout|between|among|into|onto|within|outside|against|towards?|without|after|before|during)$/u;
-const SPEAKING_COORDINATOR = /^(?:and|or)$/u;
-const SPEAKING_CLAUSE_LINK = /^(?:as|but|because|although|while|whereas|if|unless|when|which)$/u;
+const SPEAKING_COORDINATOR = /^(?:and|or|but|nor|yet)$/u;
+const SPEAKING_SUBORDINATOR = /^(?:although|though|while|whereas|if|unless|until|whether|when|whenever|once|after|before|where|whose|whom|who|which|because|since)$/u;
+const SPEAKING_RELATIVE_SUBJECT = /^(?:who|which|that)$/u;
+const SPEAKING_COPULA = /^(?:is|are|was|were|am)$/u;
+const SPEAKING_PREDICATIVE_ADJECTIVE = /^(?:expensive|cheap|clean|cleaner|costly|difficult|easy|important|popular|reliable|necessary|affordable|better|worse|available|effective|efficient)$/u;
 const SPEAKING_ADVERB = /^(?:not|never|often|sometimes|always|already|still|also|only|just|really|rather|then|today|yesterday|tomorrow|newly|recently|previously|sharply|slightly|significantly)$/u;
 const SPEAKING_LY_NOUN = /^(?:ally|assembly|family|fly|italy|july|reply|supply)$/u;
 const SPEAKING_INTRANSITIVE_END = /^(?:rise|rises|rose|fall|falls|fell|grow|grows|grew|vary|varies|varied|matter|matters|mattered)$/u;
@@ -89,7 +94,7 @@ function isSpokenVerb(word: string): boolean {
 }
 
 type SpokenTargetSpan = MatchRange & { readonly target: string };
-type SpokenWord = { readonly text: string; readonly index: number };
+type SpokenWord = { readonly text: string; readonly index: number; readonly end: number };
 
 function hasTargetInVerbObject(
   words: readonly SpokenWord[],
@@ -100,7 +105,7 @@ function hasTargetInVerbObject(
   let inObjectComplement = false;
   for (const { text, index } of words) {
     if (targetStarts.has(index)) return true;
-    if (SPEAKING_CLAUSE_LINK.test(text) || SPEAKING_COORDINATOR.test(text) ||
+    if (SPEAKING_COORDINATOR.test(text) ||
       SPEAKING_MODAL.test(text) || SPEAKING_FINITE_AUXILIARY.test(text)) return false;
     if (SPEAKING_PREPOSITION.test(text)) {
       if (!allowObjectComplement || !hasObjectHead || inObjectComplement) return false;
@@ -112,35 +117,26 @@ function hasTargetInVerbObject(
   return false;
 }
 
-function hasSpokenSubjectAndPredicate(
-  segment: string,
+function findSpokenPredicate(
+  words: readonly SpokenWord[],
   targetSpans: readonly SpokenTargetSpan[],
-): boolean {
-  const words = Array.from(
-    segment.matchAll(/[\p{L}\p{N}]+(?:['’-][\p{L}\p{N}]+)*(?:(?<=s)['’](?![\p{L}\p{N}]))?/giu),
-    (word) => ({ text: word[0].toLowerCase(), index: word.index }),
-  );
+  relativeSubject?: string,
+): number | undefined {
   const targetStarts = new Set(targetSpans.map(({ start }) => start));
-  let subjectHead: string | undefined;
+  let subjectHead = relativeSubject;
   let inSubjectComplement = false;
   let complementHead: string | undefined;
+  let complementHasDeterminer = false;
   let canStartInfinitive = false;
   let infinitiveComplement = false;
 
   for (let i = 0; i < words.length; i += 1) {
     const word = words[i]!;
     const { text } = word;
-    if (SPEAKING_CLAUSE_LINK.test(text)) {
-      subjectHead = undefined;
-      inSubjectComplement = false;
-      complementHead = undefined;
-      canStartInfinitive = false;
-      infinitiveComplement = false;
-      continue;
-    }
     if (SPEAKING_PREPOSITION.test(text)) {
       inSubjectComplement = true;
       complementHead = undefined;
+      complementHasDeterminer = false;
       canStartInfinitive = text === "to";
       infinitiveComplement = false;
       continue;
@@ -148,10 +144,16 @@ function hasSpokenSubjectAndPredicate(
 
     const next = words[i + 1]?.text;
     if (isSpokenAdverbCue(text)) continue;
+    const insideTarget = targetSpans.some(({ start, end }) => word.index >= start && word.index < end);
+    if (!subjectHead && !inSubjectComplement && !insideTarget && next && SPEAKING_CONTRACTED_SUBJECT.test(text)) {
+      return i;
+    }
     if (SPEAKING_DETERMINER.test(text) || SPEAKING_POSSESSIVE_END.test(text) || SPEAKING_COORDINATOR.test(text)) {
       // Open a new nominal slot for a modifier or the next coordinated noun.
-      if (inSubjectComplement) complementHead = undefined;
-      else subjectHead = undefined;
+      if (inSubjectComplement) {
+        complementHead = undefined;
+        complementHasDeterminer = !SPEAKING_COORDINATOR.test(text);
+      } else subjectHead = undefined;
       canStartInfinitive = false;
       continue;
     }
@@ -161,15 +163,18 @@ function hasSpokenSubjectAndPredicate(
     }
     const nominalHead = inSubjectComplement ? complementHead : subjectHead;
     const regularPast = SPEAKING_REGULAR_PAST.test(text);
-    const insideTarget = targetSpans.some(({ start, end }) => word.index >= start && word.index < end);
-    if (subjectHead && nominalHead && !insideTarget) {
+    // A target such as "alleviate chronic congestion" can start at the finite verb.
+    const startsWithPredicate = targetStarts.has(word.index) && !inSubjectComplement &&
+      isSpokenVerb(text) && (SPEAKING_SUBJECT_PRONOUN.test(subjectHead ?? "") ||
+        (!SPEAKING_AMBIGUOUS_VERB.test(text) && !SPEAKING_UNINFLECTED_VERB.test(text)));
+    if (subjectHead && nominalHead && (!insideTarget || startsWithPredicate)) {
       if (!next) {
-        return !infinitiveComplement && SPEAKING_INTRANSITIVE_END.test(text);
+        if (!infinitiveComplement && SPEAKING_INTRANSITIVE_END.test(text)) return i;
       } else if (SPEAKING_MODAL.test(text)) {
         const complement = words.slice(i + 1).find(({ text: part }) => !isSpokenAdverbCue(part));
-        if (complement && isSpokenVerb(complement.text)) return true;
+        if (complement && isSpokenVerb(complement.text)) return i;
       } else if (SPEAKING_FINITE_AUXILIARY.test(text)) {
-        return true;
+        return i;
       } else if (!infinitiveComplement && text !== "be") {
         const knownVerb = isSpokenVerb(text);
         if (knownVerb || regularPast) {
@@ -181,18 +186,20 @@ function hasSpokenSubjectAndPredicate(
             SPEAKING_PRESENT_PARTICIPLE.test(objectStart?.text ?? "");
           const takesTarget = !possiblyNounModifier &&
             hasTargetInVerbObject(object, targetStarts, regularPast || !inSubjectComplement);
-          if (takesTarget || SPEAKING_DETERMINER.test(next) || SPEAKING_OBJECT_PRONOUN.test(next)) return true;
+          if (takesTarget || SPEAKING_DETERMINER.test(next) || SPEAKING_OBJECT_PRONOUN.test(next)) return i;
 
           if (knownVerb && !inSubjectComplement && (
             SPEAKING_SUBJECT_PRONOUN.test(subjectHead) || !ambiguousVerb ||
             (SPEAKING_PREPOSITION.test(next) && /[^s]s$/u.test(subjectHead))
-          )) return true;
+          )) return i;
         }
       }
     }
 
     // Without a noun head, a participle or adjective can introduce the noun phrase.
-    const prenominalModifier = SPEAKING_PRENOMINAL_ADJECTIVE.test(text) || (regularPast && !text.endsWith("eed"));
+    const prenominalModifier = SPEAKING_PRENOMINAL_ADJECTIVE.test(text) || (regularPast && !text.endsWith("eed")) ||
+      (inSubjectComplement && !complementHasDeterminer && SPEAKING_ADJECTIVAL_ENDING.test(text) &&
+        SPEAKING_REGULAR_PAST.test(next ?? ""));
     if (!nominalHead && prenominalModifier) continue;
     const canHeadNounPhrase = SPEAKING_SUBJECT_PRONOUN.test(text) ||
       (text.length >= 2 && !SPEAKING_STOP_WORDS.has(text) &&
@@ -202,10 +209,9 @@ function hasSpokenSubjectAndPredicate(
       else subjectHead = text;
     }
   }
-  return false;
 }
 
-function isContextualSpokenClause(
+function hasAdjacentSpokenTargets(
   segment: string,
   spans: readonly SpokenTargetSpan[],
 ): boolean {
@@ -213,11 +219,96 @@ function isContextualSpokenClause(
   let previousEnd = -1;
   for (const { start, end } of spans) {
     if (previousEnd >= 0 && start >= previousEnd && !segment.slice(previousEnd, start).trim()) {
-      return false;
+      return true;
     }
     previousEnd = Math.max(previousEnd, end);
   }
-  return hasSpokenSubjectAndPredicate(segment, spans);
+  return false;
+}
+
+function isSubordinateBoundary(words: readonly SpokenWord[], index: number): boolean {
+  const text = words[index]!.text;
+  const next = words[index + 1]?.text ?? "";
+  const previous = words[index - 1]?.text ?? "";
+  if (SPEAKING_SUBORDINATOR.test(text)) return text !== "because" || next !== "of";
+  if (text === "as") return !/^(?:well|long|soon|much|many|such|known|regarded|viewed|seen)$/u.test(next) &&
+    !/^(?:well|such|same|known|regarded|viewed|seen)$/u.test(previous);
+  if (text === "so") return next === "that" || SPEAKING_DETERMINER.test(next) || SPEAKING_SUBJECT_PRONOUN.test(next);
+  if (text !== "that" || index === 0 || previous === "so" || SPEAKING_COORDINATOR.test(previous)) return false;
+
+  // "That" can also be a determiner in a verb's object ("measure that level").
+  return SPEAKING_DETERMINER.test(next) || SPEAKING_SUBJECT_PRONOUN.test(next) || SPEAKING_POSSESSIVE_END.test(next) ||
+    (!SPEAKING_PREPOSITION.test(previous) && (isSpokenVerb(next) || isSpokenAdverbCue(next) ||
+      SPEAKING_MODAL.test(next) || SPEAKING_REGULAR_PAST.test(next)));
+}
+
+function startsCoordinatedClause(
+  left: readonly SpokenWord[],
+  right: readonly SpokenWord[],
+  targets: readonly SpokenTargetSpan[],
+  relativeSubject?: string,
+): boolean {
+  const predicateIndex = findSpokenPredicate(left, targets, relativeSubject);
+  if (predicateIndex === undefined) return false;
+  if (findSpokenPredicate(right, targets) !== undefined) return true;
+
+  const rightStart = right.find(({ text }) => !isSpokenAdverbCue(text))?.text ?? "";
+  if (SPEAKING_SUBJECT_PRONOUN.test(rightStart) && !SPEAKING_OBJECT_PRONOUN.test(rightStart)) return true;
+
+  // A predicative adjective cannot share its copula with a trailing noun phrase.
+  const complement = left.slice(predicateIndex + 1).filter(({ text }) => !isSpokenAdverbCue(text));
+  return SPEAKING_COPULA.test(left[predicateIndex]!.text) && complement.length === 1 &&
+    SPEAKING_PREDICATIVE_ADJECTIVE.test(complement[0]!.text) &&
+    (SPEAKING_DETERMINER.test(rightStart) || SPEAKING_POSSESSIVE_END.test(rightStart) ||
+      targets.some(({ start }) => start === right[0]?.index));
+}
+
+function contextualSpokenTargets(segment: string, spans: readonly SpokenTargetSpan[]): SpokenTargetSpan[] {
+  const words = Array.from(
+    segment.matchAll(/[\p{L}\p{N}]+(?:['’-][\p{L}\p{N}]+)*(?:(?<=s)['’](?![\p{L}\p{N}]))?/giu),
+    (word) => ({ text: word[0].toLowerCase(), index: word.index, end: word.index + word[0].length }),
+  );
+  const boundaries = words.map((_, index) => isSubordinateBoundary(words, index));
+  const contextual: SpokenTargetSpan[] = [];
+  let start = 0;
+  let startOffset = 0;
+  let relativeSubject: string | undefined;
+
+  function creditScope(end: number) {
+    const matches = spans.filter((span) => span.start >= startOffset &&
+      span.end <= (words[end]?.index ?? segment.length));
+    if (matches.length > 0 && !hasAdjacentSpokenTargets(segment, matches) &&
+      findSpokenPredicate(words.slice(start, end), matches, relativeSubject) !== undefined) {
+      contextual.push(...matches);
+    }
+  }
+
+  for (const [index, { text, index: wordOffset }] of words.entries()) {
+    // Quoted text can retain semicolons and dashes inside a single spoken part.
+    const previousEnd = words[index - 1]?.end ?? 0;
+    if (/[;—–]|-{2,}|\s-\s/u.test(segment.slice(previousEnd, wordOffset))) {
+      creditScope(index);
+      start = index;
+      startOffset = previousEnd;
+      relativeSubject = undefined;
+    }
+    const isSubordinate = boundaries[index];
+    if (!isSubordinate) {
+      if (!SPEAKING_COORDINATOR.test(text)) continue;
+      const rightEnd = words.findIndex((word, i) => i > index && (boundaries[i] || SPEAKING_COORDINATOR.test(word.text)));
+      if (!startsCoordinatedClause(words.slice(start, index), words.slice(index + 1, rightEnd < 0 ? undefined : rightEnd), spans, relativeSubject)) continue;
+    }
+
+    creditScope(index);
+    start = index + 1;
+    if (text === "so" && words[start]?.text === "that") start += 1;
+    startOffset = words[start - 1]!.end;
+    const first = words.slice(start).find(({ text: word }) => !isSpokenAdverbCue(word))?.text ?? "";
+    relativeSubject = SPEAKING_RELATIVE_SUBJECT.test(text) &&
+      (isSpokenVerb(first) || SPEAKING_MODAL.test(first) || SPEAKING_REGULAR_PAST.test(first)) ? text : undefined;
+  }
+  creditScope(words.length);
+  return contextual;
 }
 
 function cleanSpokenCollocations(rawCollocations: readonly string[]): string[] {
@@ -325,9 +416,10 @@ function allocateSpeakingEvidence(sentences: readonly GroundedSentence[], target
           start: start - part.startOffset,
           end: end - part.startOffset,
         }));
-        if (!isContextualSpokenClause(part.text, local)) continue;
-        for (const { target, start, end } of matches) {
-          candidates.get(target)!.push({ paragraphIndex: 0, start, end, sentence });
+        for (const { target, start, end } of contextualSpokenTargets(part.text, local)) {
+          candidates.get(target)!.push({
+            paragraphIndex: 0, start: part.startOffset + start, end: part.startOffset + end, sentence,
+          });
         }
       }
     }

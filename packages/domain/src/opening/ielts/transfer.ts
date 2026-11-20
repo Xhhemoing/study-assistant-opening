@@ -51,8 +51,10 @@ function escapeRegExp(literal: string): string {
   return literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+const WORD_TOKEN = /[\p{L}\p{N}]+(?:['’-][\p{L}\p{N}]+)*/gu;
+
 function tokenizeWords(text: string): string[] {
-  return (text.toLowerCase().match(/[\p{L}\p{N}]+(?:['’-][\p{L}\p{N}]+)*/gu) ?? []);
+  return text.toLowerCase().match(WORD_TOKEN) ?? [];
 }
 
 function patternRegex(pattern: string, flags: string): RegExp | undefined {
@@ -292,20 +294,28 @@ function selectCoreParts(segments: readonly GroundedTextSpan[]): readonly Ground
 }
 
 type CoreClause = {
+  readonly raw: GroundedClause;
   readonly parts: readonly GroundedTextSpan[];
   readonly text: string;
   readonly tokens: readonly string[];
+  readonly tokenRanges: readonly MatchRange[];
   readonly substantive: boolean;
 };
 
 function prepareCoreClause(clause: GroundedClause): CoreClause {
   const parts = selectCoreParts(clause.parts);
   const text = parts.map((part) => part.text).join(", ");
-  const tokens = tokenizeWords(text);
+  const words = parts.flatMap((part) => Array.from(part.text.matchAll(WORD_TOKEN), (match) => {
+    const start = part.startOffset + match.index;
+    return { token: match[0].toLowerCase(), start, end: start + match[0].length };
+  }));
+  const tokens = words.map(({ token }) => token);
   return {
+    raw: clause,
     parts,
     text,
     tokens,
+    tokenRanges: words,
     substantive: tokens.length >= 7 && CLAUSE_VERB_CUE.test(text) && !isLowEntropySentence(text),
   };
 }
@@ -358,32 +368,20 @@ type LocalContextWindow = {
   readonly full: readonly string[];
 };
 
-function extractPatternLocalWindows(
-  clauseTokens: readonly string[],
-  patternTokens: readonly string[],
-  radius = 4,
-): LocalContextWindow[] {
-  if (patternTokens.length === 0 || clauseTokens.length < patternTokens.length) {
-    return [];
-  }
-  const windows: LocalContextWindow[] = [];
-  for (let i = 0; i <= clauseTokens.length - patternTokens.length; i += 1) {
-    let matched = true;
-    for (let k = 0; k < patternTokens.length; k += 1) {
-      if (clauseTokens[i + k] !== patternTokens[k]) {
-        matched = false;
-        break;
-      }
-    }
-    if (!matched) continue;
-    const pre = clauseTokens.slice(Math.max(0, i - radius), i);
-    const post = clauseTokens.slice(
-      i + patternTokens.length,
-      Math.min(clauseTokens.length, i + patternTokens.length + radius),
-    );
-    windows.push({ pre, post, full: [...pre, ...post] });
-  }
-  return windows;
+function getPatternLocalWindow(clause: CoreClause, range: MatchRange): LocalContextWindow {
+  const first = clause.tokenRanges.findIndex(({ end }) => end > range.start);
+  const before = first < 0 ? clause.tokens.length : first;
+  const after = clause.tokenRanges.findIndex(({ start }) => start >= range.end);
+  const pre = clause.tokens.slice(Math.max(0, before - 4), before);
+  const post = after < 0 ? [] : clause.tokens.slice(after, after + 4);
+  return { pre, post, full: [...pre, ...post] };
+}
+
+function findClausePatternRanges(clause: CoreClause, pattern: string): MatchRange[] {
+  return findPatternRanges(clause.raw.text, pattern).map(({ start, end }) => ({
+    start: clause.raw.startOffset + start,
+    end: clause.raw.startOffset + end,
+  }));
 }
 
 function endsWithTokens(
@@ -410,51 +408,38 @@ function startsWithTokens(
 }
 
 /**
- * Checks whether every occurrence in the stripped clause sits inside the same
- * local [phrase - 4 words, phrase + 4 words] neighborhood as a baseline match,
+ * Checks whether the occurrence sits inside the same four-word neighborhood
+ * on either side of a baseline match,
  * including matches that preserve the immediate subject and predicate.
  */
 function isPatternLocalContextCopiedFromBaseline(
-  clauseTokens: readonly string[],
-  patternTokens: readonly string[],
+  cw: LocalContextWindow,
   baselineWindows: readonly LocalContextWindow[],
 ): boolean {
-  if (!baselineWindows.length) return false;
-  const candWindows = extractPatternLocalWindows(clauseTokens, patternTokens, 4);
-  if (!candWindows.length) return false;
-
-  return candWindows.every((cw) =>
-    baselineWindows.some((bw) => {
-      if (tokenJaccardSimilarity(cw.full, bw.full) >= 0.75) return true;
-      if (
-        cw.full.length >= 2 &&
-        longestContiguousCommonRun(cw.full, bw.full) >= Math.min(4, cw.full.length)
-      ) {
-        return true;
-      }
-      // Exact pre-target subject+verb preserved while post-target only adds verbless tail:
-      if (
-        bw.pre.length >= 2 &&
-        endsWithTokens(cw.pre, bw.pre) &&
-        (bw.post.length === 0
-          ? !CLAUSE_VERB_CUE.test(cw.post.join(" "))
-          : tokenJaccardSimilarity(cw.post, bw.post) >= 0.75)
-      ) {
-        return true;
-      }
-      // Symmetrically, exact post-target predicate preserved while pre-target adds no verb:
-      if (
-        bw.post.length >= 2 &&
-        startsWithTokens(cw.post, bw.post) &&
-        (bw.pre.length === 0
-          ? !CLAUSE_VERB_CUE.test(cw.pre.join(" "))
-          : tokenJaccardSimilarity(cw.pre, bw.pre) >= 0.75)
-      ) {
-        return true;
-      }
-      return false;
-    }),
-  );
+  return baselineWindows.some((bw) => {
+    if (tokenJaccardSimilarity(cw.full, bw.full) >= 0.75) return true;
+    if (
+      cw.full.length >= 2 &&
+      longestContiguousCommonRun(cw.full, bw.full) >= Math.min(4, cw.full.length)
+    ) {
+      return true;
+    }
+    // Exact pre-target subject+verb preserved while post-target only adds verbless tail:
+    if (
+      bw.pre.length >= 2 &&
+      endsWithTokens(cw.pre, bw.pre) &&
+      (bw.post.length === 0
+        ? !CLAUSE_VERB_CUE.test(cw.post.join(" "))
+        : tokenJaccardSimilarity(cw.post, bw.post) >= 0.75)
+    ) {
+      return true;
+    }
+    // Symmetrically, exact post-target predicate preserved while pre-target adds no verb:
+    return bw.post.length >= 2 && startsWithTokens(cw.post, bw.post) &&
+      (bw.pre.length === 0
+        ? !CLAUSE_VERB_CUE.test(cw.pre.join(" "))
+        : tokenJaccardSimilarity(cw.pre, bw.pre) >= 0.75);
+  });
 }
 
 function assessSubstantiveRevision(
@@ -594,6 +579,7 @@ type WritingCandidate = MatchRange & {
   readonly sentence: GroundedSentence;
   readonly pattern: string;
   readonly exclusiveKey: string;
+  readonly citationBounds: MatchRange;
 };
 
 function analyzeTransfer(
@@ -606,7 +592,8 @@ function analyzeTransfer(
   const lineage = getWritingTransferLineage(input.draft1, input.draft2);
   const advancingLineage = lineage === "advancing_revision";
   const freshPrompt = lineage === "fresh_prompt" && freshPromptConfirmed;
-  const canEvaluateTransfer = advancingLineage || freshPrompt;
+  const hasBaselineText = countDraftWords(input.draft1.paragraphs) > 0;
+  const canEvaluateTransfer = (advancingLineage && hasBaselineText) || freshPrompt;
   const targetsById = new Map<string, IeltsUpgradeTarget>();
   for (const target of input.targets) {
     if (!targetsById.has(target.id)) targetsById.set(target.id, target);
@@ -620,28 +607,27 @@ function analyzeTransfer(
   const memorizedTemplateHits = detectMemorizedTemplates(input.draft2.paragraphs);
   const hasStuffing = hasMemorizedTemplateStuffing(memorizedTemplateHits);
   const hasLowEntropyStuffing = detectLowEntropyStuffing(input.draft2.paragraphs, revisedParagraphs);
-  const baselineCoreClauseTokens = input.draft1.paragraphs
+  const baselineClauses = input.draft1.paragraphs
     .flatMap(segmentIeltsText)
-    .flatMap((sentence) => sentence.clauses.map((clause) => prepareCoreClause(clause).tokens));
+    .flatMap((sentence) => sentence.clauses.map(prepareCoreClause));
+  const baselineCoreClauseTokens = baselineClauses.map(({ tokens }) => tokens);
   const baselineCoreClauseKeys = new Set(
     baselineCoreClauseTokens.map((tokens) => tokens.join(" ")).filter(Boolean),
   );
   const allTargetPatterns = [...new Set(
     targets.flatMap((target) => target.targetPatterns.map(normalizeText)).filter(Boolean),
   )].sort();
-  const baselineContexts = new Map(allTargetPatterns.map((pattern) => {
-    const tokens = tokenizeWords(pattern);
-    const windows = baselineCoreClauseTokens.flatMap((clause) =>
-      extractPatternLocalWindows(clause, tokens),
-    );
-    return [pattern, { tokens, windows }] as const;
-  }));
+  const baselineContexts = new Map(allTargetPatterns.map((pattern) => [pattern, baselineClauses.flatMap((clause) => {
+    const droppedParts = clause.raw.parts.filter((part) => !clause.parts.includes(part));
+    return findClausePatternRanges(clause, pattern)
+      .filter((range) => !droppedParts.some((part) => rangesOverlap(range, { start: part.startOffset, end: part.endOffset })))
+      .map((range) => getPatternLocalWindow(clause, range));
+  })]));
   const revisedClauses = revisedParagraphs.flatMap((sentences, paragraphIndex) =>
     sentences.flatMap((sentence) => sentence.clauses.map((raw) => {
       const core = prepareCoreClause(raw);
       return {
         ...core,
-        raw,
         sentence,
         paragraphIndex,
         changed: core.substantive && isClauseSubstantivelyChangedFromBaseline(
@@ -683,12 +669,9 @@ function analyzeTransfer(
       const baselineContext = baselineContexts.get(patternKey)!;
 
       for (const clause of revisedClauses) {
-        const rawRanges = findPatternRanges(clause.raw.text, pattern);
+        const rawRanges = findClausePatternRanges(clause, pattern);
         if (rawRanges.length === 0) continue;
-        const ranges = rawRanges.map(({ start, end }) => ({
-          start: clause.raw.startOffset + start,
-          end: clause.raw.startOffset + end,
-        })).filter((range) => !clause.droppedParts.some((part) =>
+        const ranges = rawRanges.filter((range) => !clause.droppedParts.some((part) =>
           rangesOverlap(range, { start: part.startOffset, end: part.endOffset }),
         ));
         if (ranges.length < rawRanges.length || clause.mechanical) {
@@ -696,24 +679,31 @@ function analyzeTransfer(
           sawMechanical = true;
         }
         if (ranges.length === 0 || clause.mechanical) continue;
-        if (
-          !clause.changed ||
-          isPatternLocalContextCopiedFromBaseline(
-            clause.tokens,
-            baselineContext.tokens,
-            baselineContext.windows,
-          )
-        ) {
+        if (!clause.changed) {
           sawUnchanged = true;
           continue;
         }
+        const copied = new Set(ranges.filter((range) =>
+          isPatternLocalContextCopiedFromBaseline(getPatternLocalWindow(clause, range), baselineContext),
+        ));
+        if (copied.size > 0) sawUnchanged = true;
         for (const range of ranges) {
+          if (copied.has(range)) continue;
+          let { startOffset: citationStart, endOffset: citationEnd } = clause.sentence;
+          for (const excluded of copied) {
+            if (excluded.end <= range.start) citationStart = excluded.end;
+            if (excluded.start >= range.end) {
+              citationEnd = excluded.start;
+              break;
+            }
+          }
           candidates.push({
             ...range,
             paragraphIndex: clause.paragraphIndex,
             sentence: clause.sentence,
             pattern,
             exclusiveKey: patternKey,
+            citationBounds: { start: citationStart, end: citationEnd },
           });
         }
       }
@@ -806,6 +796,8 @@ function analyzeTransfer(
   let disqualificationReason: string | undefined;
   if (revisedWordCount === 0) {
     disqualificationReason = "请先提交至少一段写作正文，再复核改写。";
+  } else if (advancingLineage && !hasBaselineText) {
+    disqualificationReason = "请先提交含英文正文的一稿，再复核跨草稿迁移。";
   } else if (!canEvaluateTransfer) {
     disqualificationReason = samePrompt
       ? "当前稿件与所选底稿的版本关系无法确认，暂不计作有效跨草稿迁移。"
@@ -863,16 +855,19 @@ function evidenceSnippet(
   source: Pick<GroundedTextSpan, "text" | "startOffset">,
   paragraphIndex: number,
   match?: MatchRange,
+  citationBounds?: MatchRange,
 ): ParagraphEvidence {
   const { text, startOffset } = source;
   const boundaries = graphemeBoundaries(text);
   const requiredStart = boundaries.floor(match?.start ?? 0);
   const requiredEnd = boundaries.ceil(match?.end ?? 0);
-  const width = Math.max(130, requiredEnd - requiredStart);
+  const minStart = boundaries.ceil((citationBounds?.start ?? startOffset) - startOffset);
+  const maxEnd = boundaries.floor((citationBounds?.end ?? startOffset + text.length) - startOffset);
+  const width = Math.min(maxEnd - minStart, Math.max(130, requiredEnd - requiredStart));
   const contextBefore = Math.floor((width - (requiredEnd - requiredStart)) / 2);
-  const windowStart = Math.max(0, Math.min(requiredStart - contextBefore, text.length - width));
+  const windowStart = Math.max(minStart, Math.min(requiredStart - contextBefore, maxEnd - width));
   let start = boundaries.ceil(windowStart);
-  const windowEnd = Math.min(text.length, windowStart + width);
+  const windowEnd = Math.min(maxEnd, windowStart + width);
   let end = boundaries.floor(windowEnd);
   if (end === start) end = boundaries.ceil(windowEnd);
 
@@ -1000,11 +995,11 @@ export function evaluateRevisedDraftDeterministically(
   ): ParagraphEvidence {
     const occurrence = creditedOccurrences.get(criterion);
     if (!occurrence) return findParagraphEvidence(segmentedParagraphs, patterns, fallbackPosition);
-    const { sentence, paragraphIndex, start, end } = occurrence;
+    const { sentence, paragraphIndex, start, end, citationBounds } = occurrence;
     return evidenceSnippet(sentence, paragraphIndex, {
       start: start - sentence.startOffset,
       end: end - sentence.startOffset,
-    });
+    }, citationBounds);
   }
 
   const trLoc = findCriterionEvidence(
