@@ -41,6 +41,14 @@ describe("qualifyCartridgeEmission", () => {
       qualified: true, evaluation: { outcome: "incorrect", matchedHypothesisId: "H_FIFO_QUEUE_CONFUSION" } });
   });
 
+  it("rejects an unwrapped lookup returning a cartridge registered under a different id", () => {
+    const unwrappedRegistry = { ...registry, getCartridge: () => stack408Cartridge };
+    const facts = { outcome: "correct", requirementKey: "408.ds.stack.lifo-trace" };
+    expect(qualifyCartridgeEmission(unwrappedRegistry, emit(), facts).qualified).toBe(true);
+    expect(qualifyCartridgeEmission(unwrappedRegistry, emit({ cartridgeId: "other.domain.v1" }), facts))
+      .toMatchObject({ qualified: false, evaluation: null, reasonCodes: ["cartridge_unregistered"] });
+  });
+
   it.each(["getter", "Proxy"] as const)("rejects a %s installed as the evaluator during unwrapped probe lookup", kind => {
     let calls = 0;
     const evaluate = stack408Cartridge.evaluateProbeResponse;

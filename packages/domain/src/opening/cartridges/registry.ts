@@ -52,6 +52,15 @@ export class CartridgeRegistrationError extends Error {
   }
 }
 
+function readProbeId(probe: unknown): string {
+  try {
+    const id = readCartridgeDataProperty(probe, "probeId");
+    return typeof id === "string" ? id : "";
+  } catch {
+    return "";
+  }
+}
+
 function validateEvidenceContracts(
   cartridge: EvidenceCartridge<unknown>,
   issues: CartridgeRegistrationIssue[],
@@ -82,24 +91,32 @@ function validateEvidenceContracts(
   const seen = new Set<string>();
   const reports: ProbeDistinguishabilityReport[] = [];
   for (const probe of probes) {
-    const report = verifyProbeDistinguishability(probe);
-    reports.push(report);
-    const probeId = report.probeId;
+    const probeId = readProbeId(probe);
     if (probeId && seen.has(probeId)) issues.push({ code: "evidence_probe_id_duplicate", detail: probeId });
     if (probeId) seen.add(probeId);
-    let lookedUp: unknown;
-    let lookupFailed = false;
+    if (probeId) {
+      try {
+        const lookedUp = callCartridgeDataMethod(cartridge, "getProbe", [probeId]);
+        if (lookedUp !== probe || readProbeId(probe) !== probeId) {
+          issues.push({ code: "evidence_probe_lookup_mismatch", detail: probeId });
+        }
+      } catch (error) {
+        issues.push({ code: "evidence_probe_lookup_failed", detail: `${probeId}: ${safeErrorDetail(error)}` });
+      }
+    }
     try {
-      lookedUp = callCartridgeDataMethod(cartridge, "getProbe", [probeId]);
+      const snapshot = deepFreeze(cloneProbeDefinition(probe));
+      const report = verifyProbeDistinguishability(snapshot);
+      reports.push(report);
+      if (!report.distinguishable) {
+        issues.push({ code: "evidence_probe_not_distinguishable", detail: `${probeId}: ${report.issues.join(", ")}` });
+      }
     } catch (error) {
-      lookupFailed = true;
-      issues.push({ code: "evidence_probe_lookup_failed", detail: `${probeId}: ${safeErrorDetail(error)}` });
-    }
-    if (!lookupFailed && lookedUp !== probe) {
-      issues.push({ code: "evidence_probe_lookup_mismatch", detail: probeId });
-    }
-    if (!report.distinguishable) {
-      issues.push({ code: "evidence_probe_not_distinguishable", detail: `${probeId}: ${report.issues.join(", ")}` });
+      issues.push({ code: "evidence_probe_not_distinguishable", detail: `${probeId}: ${safeErrorDetail(error)}` });
+      reports.push(deepFreeze<ProbeDistinguishabilityReport>({
+        probeId, distinguishable: false, predictions: [], ambiguousPairs: [],
+        degenerateAgainstCorrectModel: [], issues: ["prediction_failed"],
+      }));
     }
   }
   return { pinnedEvidenceContract, probeReports: reports };
@@ -112,7 +129,8 @@ type CartridgeDefinitionValidation =
 /**
  * Validate a cartridge against the capability level its manifest declares. A higher
  * level must satisfy every lower-level contract; L4 additionally requires every probe
- * to pass the distinguishability pre-check.
+ * to pass the distinguishability pre-check. Pass the source cartridge definition.
+ * Registered L4 facades return independent snapshots and do not satisfy raw lookup identity.
  */
 export function validateCartridge(candidate: unknown): CartridgeValidationReport {
   const result = validateCartridgeDefinition(candidate);

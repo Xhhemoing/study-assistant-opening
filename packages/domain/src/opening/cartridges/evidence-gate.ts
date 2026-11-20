@@ -1,8 +1,9 @@
 import { evaluateProbeWithSnapshot } from "./capability-helpers";
 import {
   callCartridgeDataMethod, cloneCartridgeData, isInspectableCartridgeObject, readCartridgeDataProperty,
+  isPlainCartridgeRecord,
 } from "./clone-cartridge-data";
-import { cloneProbeDefinition } from "./probe-definition";
+import { cloneProbeDefinition, deepFreeze } from "./probe-definition";
 import {
   snapshotAndVerifyProbe,
   type DistinguishableProbeSpec,
@@ -54,6 +55,13 @@ export interface CartridgeEvidenceObservationFacts {
   requirementKey?: string | null;
 }
 
+export function malformedCartridgeEmission(): CartridgeEvidenceQualification {
+  return {
+    qualified: false, cartridgeId: "", probeId: "", level: null,
+    evaluation: null, distinguishability: null, reasonCodes: ["cartridge_evaluation_failed"],
+  };
+}
+
 function evaluationsMatch(
   expected: CartridgeProbeEvaluation,
   actual: unknown,
@@ -90,7 +98,7 @@ function snapshotResponse(value: unknown) {
  */
 export function qualifyCartridgeEmission(
   registry: CartridgeRegistry,
-  emission: CartridgeObservationEmission,
+  emission: unknown,
   observation: CartridgeEvidenceObservationFacts = {},
 ): CartridgeEvidenceQualification {
   let capturedEmission: Readonly<{
@@ -104,16 +112,9 @@ export function qualifyCartridgeEmission(
     requirementKey: string | null;
   }>;
   try {
-    if (!emission || typeof emission !== "object") {
-      return {
-        qualified: false, cartridgeId: "", probeId: "", level: null,
-        evaluation: null, distinguishability: null, reasonCodes: ["cartridge_evaluation_failed"],
-      };
-    }
-    const cartridgeId = emission.cartridgeId;
-    const cartridgeVersion = emission.cartridgeVersion;
-    const probeId = emission.probeId;
-    const cloned = snapshotResponse(emission.response);
+    if (!isInspectableCartridgeObject(emission)) return malformedCartridgeEmission();
+    const { cartridgeId, cartridgeVersion, probeId, response } = emission as Partial<CartridgeObservationEmission>;
+    const cloned = snapshotResponse(response);
     if (typeof cartridgeId !== "string" || typeof cartridgeVersion !== "string" || typeof probeId !== "string") {
       return {
         qualified: false,
@@ -138,10 +139,7 @@ export function qualifyCartridgeEmission(
       requirementKey: rawRequirementKey ?? null,
     });
   } catch {
-    return {
-      qualified: false, cartridgeId: "", probeId: "", level: null,
-      evaluation: null, distinguishability: null, reasonCodes: ["cartridge_evaluation_failed"],
-    };
+    return malformedCartridgeEmission();
   }
 
   const result: CartridgeEvidenceQualification = {
@@ -160,7 +158,12 @@ export function qualifyCartridgeEmission(
   if (!cartridge) return reject("cartridge_unregistered");
   let manifestVersion: string;
   try {
-    const manifest = cloneCartridgeData(readCartridgeDataProperty(cartridge, "manifest"));
+    const rawManifest = readCartridgeDataProperty(cartridge, "manifest");
+    if (!isPlainCartridgeRecord(rawManifest)) return reject("cartridge_evaluation_failed");
+    const manifest = cloneCartridgeData(rawManifest);
+    if (!Object.hasOwn(manifest, "id") || typeof manifest.id !== "string" || manifest.id !== capturedEmission.cartridgeId) {
+      return reject("cartridge_unregistered");
+    }
     result.level = manifest.level;
     manifestVersion = manifest.version;
   } catch {
@@ -172,7 +175,7 @@ export function qualifyCartridgeEmission(
   let probe: DistinguishableProbeSpec<unknown, unknown> | null;
   try {
     const lookedUp = callCartridgeDataMethod(cartridge, "getProbe", [capturedEmission.probeId]);
-    probe = lookedUp === null ? null : cloneProbeDefinition(lookedUp);
+    probe = lookedUp === null ? null : deepFreeze(cloneProbeDefinition(lookedUp));
   } catch {
     return reject("cartridge_probe_lookup_failed");
   }

@@ -9,6 +9,12 @@ export function isInspectableCartridgeFunction(value: unknown): value is (...arg
   return typeof value === "function" && isProxy?.(value) === false;
 }
 
+export function isPlainCartridgeRecord(value: unknown): value is object {
+  if (!isInspectableCartridgeObject(value) || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
 const typedArrayPrototype = Object.getPrototypeOf(Uint8Array.prototype) as object;
 const typedArrayPrototypes = new Set<object>([
   Int8Array.prototype, Uint8Array.prototype, Uint8ClampedArray.prototype,
@@ -85,7 +91,7 @@ function requirePrivateArrayBuffer(value: object): void {
   requireNoOwnProperties(value);
 }
 
-function projectCartridgeData(value: unknown, seen: WeakMap<object, object>): unknown {
+function projectCartridgeData(value: unknown, seen: WeakMap<object, object>, plainOnly = false): unknown {
   if (typeof value === "symbol" || typeof value === "function") {
     throw new TypeError("Cartridge data cannot contain symbols or functions");
   }
@@ -97,6 +103,10 @@ function projectCartridgeData(value: unknown, seen: WeakMap<object, object>): un
   if (existing) return existing;
 
   const prototype = Object.getPrototypeOf(value) as object | null;
+  const isArray = Array.isArray(value);
+  if (plainOnly && (isArray ? prototype !== Array.prototype : prototype !== Object.prototype && prototype !== null)) {
+    throw new TypeError("Immutable cartridge probe data requires plain records and arrays");
+  }
   if (ArrayBuffer.isView(value)) {
     if (prototype !== DataView.prototype && (!prototype || !typedArrayPrototypes.has(prototype))) {
       throw new TypeError("Cartridge data requires a standard binary view");
@@ -146,7 +156,6 @@ function projectCartridgeData(value: unknown, seen: WeakMap<object, object>): un
     return copy;
   }
 
-  const isArray = Array.isArray(value);
   if (isArray ? prototype !== Array.prototype : prototype !== Object.prototype && prototype !== null) {
     throw new TypeError("Cartridge data contains an unsupported object");
   }
@@ -162,7 +171,7 @@ function projectCartridgeData(value: unknown, seen: WeakMap<object, object>): un
     if (isArray && key === "length") continue;
     if (isArray && !isElementIndex(key, length)) throw new TypeError("Cartridge data requires canonical array indices");
     const entry = readEnumerableDataProperty(value, key);
-    Object.defineProperty(copy, key, { enumerable: true, value: projectCartridgeData(entry, seen) });
+    Object.defineProperty(copy, key, { enumerable: true, value: projectCartridgeData(entry, seen, plainOnly) });
   }
   return copy;
 }
@@ -172,4 +181,9 @@ export function cloneCartridgeData<T>(value: T): T {
   // Only fresh containers and verified built-in leaves reach the native clone.
   // Cloning the binary leaves together preserves relationships between buffers and views.
   return structuredClone(projectCartridgeData(value, new WeakMap())) as T;
+}
+
+/** Capture probe fields whose data graph can be made immutable by freezing it. */
+export function clonePlainCartridgeData<T>(value: T): T {
+  return structuredClone(projectCartridgeData(value, new WeakMap(), true)) as T;
 }

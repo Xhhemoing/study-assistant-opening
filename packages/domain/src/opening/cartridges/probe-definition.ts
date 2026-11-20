@@ -1,15 +1,12 @@
 import {
-  cloneCartridgeData, copyCartridgeArray, isInspectableCartridgeFunction, isInspectableCartridgeObject,
+  clonePlainCartridgeData, copyCartridgeArray, isInspectableCartridgeFunction, isInspectableCartridgeObject,
+  isPlainCartridgeRecord,
   readCartridgeDataProperty,
 } from "./clone-cartridge-data";
-import type { DistinguishableProbeSpec } from "./probe-protocol";
+import { isValidObservableKey, type DistinguishableProbeSpec } from "./probe-protocol";
 
 function cloneProbeRecord(value: unknown, callbackKeys: readonly string[], nestedKeys: readonly string[] = []) {
-  if (!isInspectableCartridgeObject(value)) {
-    throw new TypeError("Cartridge probe requires an inspectable non-Proxy object");
-  }
-  const prototype = Object.getPrototypeOf(value);
-  if (prototype !== Object.prototype && prototype !== null) {
+  if (!isPlainCartridgeRecord(value)) {
     throw new TypeError("Cartridge probe requires a plain record");
   }
 
@@ -19,6 +16,7 @@ function cloneProbeRecord(value: unknown, callbackKeys: readonly string[], neste
     if (typeof key !== "string") throw new TypeError("Cartridge probe requires string keys");
     const member = readCartridgeDataProperty(value, key);
     if (callbackKeys.includes(key)) {
+      if (key === "parseResponse" && member === undefined) continue;
       if (!isInspectableCartridgeFunction(member)) throw new TypeError(`Cartridge probe requires ${key}()`);
       // Forward the receiver without exposing the cartridge's original function object.
       callbacks[key] = {
@@ -30,15 +28,32 @@ function cloneProbeRecord(value: unknown, callbackKeys: readonly string[], neste
       data[key] = member;
     }
   }
-  return { ...cloneCartridgeData(data), ...callbacks };
+  return { ...clonePlainCartridgeData(data), ...callbacks };
+}
+
+function cloneProbeModel(value: unknown) {
+  const model = cloneProbeRecord(value, ["predict"]);
+  if (!Object.hasOwn(model, "id") || !isValidObservableKey(model.id)
+    || !Object.hasOwn(model, "predict")) {
+    throw new TypeError("Cartridge probe model requires an id and predict()");
+  }
+  return model;
 }
 
 /** Copy probe data independently while retaining its descriptor-checked behavior. */
 export function cloneProbeDefinition(value: unknown): DistinguishableProbeSpec<unknown, unknown> {
   const record = cloneProbeRecord(value, ["observableKey", "parseResponse"], ["correctModel", "hypotheses"]);
-  const correctModel = cloneProbeRecord(readCartridgeDataProperty(value, "correctModel"), ["predict"]);
-  const hypotheses = copyCartridgeArray(readCartridgeDataProperty(value, "hypotheses") as readonly unknown[])
-    .map(model => cloneProbeRecord(model, ["predict"]));
+  if (!Object.hasOwn(record, "probeId") || !isValidObservableKey(record.probeId)
+    || !Object.hasOwn(record, "requirementKey") || !isValidObservableKey(record.requirementKey)
+    || !Object.hasOwn(record, "observableKey") || !Object.hasOwn(record, "input")) {
+    throw new TypeError("Cartridge probe requires a probeId, requirementKey, observableKey(), and input");
+  }
+  const correctModel = cloneProbeModel(readCartridgeDataProperty(value, "correctModel"));
+  const rawHypotheses = readCartridgeDataProperty(value, "hypotheses");
+  if (!isInspectableCartridgeObject(rawHypotheses) || Object.getPrototypeOf(rawHypotheses) !== Array.prototype) {
+    throw new TypeError("Cartridge probe requires a plain hypotheses array");
+  }
+  const hypotheses = copyCartridgeArray(rawHypotheses as readonly unknown[]).map(cloneProbeModel);
   return { ...record, correctModel, hypotheses } as unknown as DistinguishableProbeSpec<unknown, unknown>;
 }
 

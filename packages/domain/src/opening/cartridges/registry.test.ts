@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { qualifyCartridgeEmission } from "./evidence-gate";
 import {
   CartridgeRegistrationError,
@@ -119,6 +119,78 @@ describe("CartridgeRegistry", () => {
     expect(lookup.prompt).toContain("push 2");
     expect(listed.prompt).toContain("push 2");
   });
+
+  it.each(["correct predict", "hypothesis predict", "hypothesis id", "probeId", "requirementKey", "observableKey", "input", "hypotheses"] as const)(
+    "rejects a runtime probe missing %s in listings, lookup, and evidence qualification", field => {
+      const original = stack408Cartridge.getProbe(traceProbeId)!;
+      const probe = {
+        ...original,
+        correctModel: { ...original.correctModel },
+        hypotheses: original.hypotheses.map(model => ({ ...model })),
+      };
+      const candidate = { ...stack408Cartridge, listProbes: () => [probe], getProbe: () => probe };
+      const registry = createCartridgeRegistry([candidate]);
+      const registered = registry.getCartridge(candidate.manifest.id)!;
+      if (!hasEvidenceCapability(registered)) throw new Error("Expected an evidence cartridge");
+      if (field === "correct predict") Reflect.deleteProperty(probe.correctModel, "predict");
+      else if (field === "hypothesis predict") Reflect.deleteProperty(probe.hypotheses[0]!, "predict");
+      else if (field === "hypothesis id") Reflect.deleteProperty(probe.hypotheses[0]!, "id");
+      else Reflect.deleteProperty(probe, field);
+
+      expect(() => registered.listProbes()).toThrow(TypeError);
+      expect(() => registered.getProbe(traceProbeId)).toThrow(TypeError);
+      for (const lookup of [registry, { ...registry, getCartridge: () => candidate }]) {
+        expect(qualifyCartridgeEmission(lookup, traceEmission).qualified).toBe(false);
+      }
+    },
+  );
+
+  it.each([
+    ["Date input", { createdAt: new Date(0) }],
+    ["Map input", { entries: new Map() }],
+    ["typed array input", new Uint8Array([1, 2])],
+  ])("rejects %s even when every model produces a distinct prediction", (_kind, input) => {
+    const original = stack408Cartridge.getProbe(traceProbeId)!;
+    const probe = {
+      ...original,
+      input,
+      correctModel: { ...original.correctModel, predict: () => "correct" },
+      hypotheses: original.hypotheses.map(model => ({ ...model, predict: () => model.id })),
+      observableKey: (value: unknown) => String(value),
+    };
+    const candidate = { ...stack408Cartridge, listProbes: () => [probe], getProbe: () => probe };
+    const registry = createCartridgeRegistry();
+    for (const result of [validateCartridge(candidate), registry.registerCartridge(candidate)]) {
+      expect(result).toMatchObject({ ok: false, issues: [{ code: "evidence_probe_not_distinguishable" }] });
+    }
+    expect(registry.getCartridge(candidate.manifest.id)).toBeNull();
+  });
+
+  it.each(["getter", "Proxy", "class instance", "function", "symbol key", "non-enumerable field"] as const)(
+    "rejects a probe with a %s on display data at registration", kind => {
+      const read = vi.fn(() => "display prompt");
+      const trap = vi.fn((): never => { throw new Error("Unexpected Proxy trap"); });
+      const original = stack408Cartridge.getProbe(traceProbeId)!;
+      const probe = { ...original, metadata: { display: {} } };
+      switch (kind) {
+        case "getter": Object.defineProperty(probe, "prompt", { get: read, enumerable: true }); break;
+        case "Proxy": probe.metadata.display = new Proxy({}, { ownKeys: trap, getPrototypeOf: trap }); break;
+        case "class instance": probe.metadata.display = new (class { title = "display"; })(); break;
+        case "function": probe.hypotheses = [{ ...probe.hypotheses[0]!, description: (() => "display") as unknown as string },
+          ...probe.hypotheses.slice(1)]; break;
+        case "symbol key": Object.defineProperty(probe.metadata, Symbol("display"), { value: "display", enumerable: true }); break;
+        case "non-enumerable field": Object.defineProperty(probe.metadata, "hidden", { value: "display" }); break;
+      }
+      const candidate = { ...stack408Cartridge, listProbes: () => [probe], getProbe: () => probe };
+      const registry = createCartridgeRegistry();
+      for (const result of [validateCartridge(candidate), registry.registerCartridge(candidate)]) {
+        expect(result).toMatchObject({ ok: false, issues: [{ code: "evidence_probe_not_distinguishable" }] });
+      }
+      expect(read).not.toHaveBeenCalled();
+      expect(trap).not.toHaveBeenCalled();
+      expect(registry.getCartridge(candidate.manifest.id)).toBeNull();
+    },
+  );
 
   it.each(["deleted", "getter", "Proxy", "invalid strings"] as const)(
     "pins the validated evidence versions when a listing callback leaves the contract %s",

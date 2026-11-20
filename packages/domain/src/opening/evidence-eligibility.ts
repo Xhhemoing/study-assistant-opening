@@ -1,6 +1,8 @@
 import { evaluateAssistance, evaluateDelayedCheck } from "./evidence-eligibility-timing";
 import { evaluateAiCorrectness } from "./ai-evaluation";
+import { isPlainCartridgeRecord, readCartridgeDataProperty } from "./cartridges/clone-cartridge-data";
 import {
+  malformedCartridgeEmission,
   qualifyCartridgeEmission,
   type CartridgeEvidenceObservationFacts,
   type CartridgeEvidenceQualification,
@@ -248,10 +250,25 @@ export function gateObservationCartridgeEvidence(
   observation: CartridgeEvidenceObservationFacts,
   input: CartridgeEvidenceInput | null | undefined,
 ): { eligibility: EvidenceEligibility; qualification: CartridgeEvidenceQualification | null } {
-  const emissions = input?.emissions;
-  const emission = emissions && Object.hasOwn(emissions, observationId) ? emissions[observationId] : undefined;
-  if (!input || !emission) return { eligibility, qualification: null };
-  const qualification = qualifyCartridgeEmission(input.registry, emission, observation);
+  if (input == null) return { eligibility, qualification: null };
+  let qualification: CartridgeEvidenceQualification;
+  try {
+    if (!isPlainCartridgeRecord(input)) throw new TypeError("Cartridge evidence input requires a plain record");
+    const emissionsProperty = Object.getOwnPropertyDescriptor(input, "emissions");
+    if (!emissionsProperty) return { eligibility, qualification: null };
+    if (!Object.hasOwn(emissionsProperty, "value")) throw new TypeError("Cartridge emissions require a data property");
+
+    const emissions: unknown = emissionsProperty.value;
+    if (emissions === undefined) return { eligibility, qualification: null };
+    if (!isPlainCartridgeRecord(emissions)) throw new TypeError("Cartridge emissions require a plain record");
+    const entry = Object.getOwnPropertyDescriptor(emissions, observationId);
+    if (!entry) return { eligibility, qualification: null };
+    if (!Object.hasOwn(entry, "value")) throw new TypeError("Cartridge emission requires a data property");
+
+    qualification = qualifyCartridgeEmission(readCartridgeDataProperty(input, "registry"), entry.value, observation);
+  } catch {
+    qualification = malformedCartridgeEmission();
+  }
   return { eligibility: applyCartridgeEvidenceGate(eligibility, qualification), qualification };
 }
 
