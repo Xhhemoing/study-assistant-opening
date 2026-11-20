@@ -32,6 +32,7 @@ const memory = new Map<string, PracticeDraftCollection>();
 const dirty = new Set<string>();
 const dirtyDraftIds = new Map<string, Set<string>>();
 const legacyIds = new Map<string, { raw: string; id: string }>();
+const loadedFromLegacy = new Set<string>();
 const unreconciled = new Set<string>();
 const blocked = new Map<string, string>();
 
@@ -45,6 +46,12 @@ const legacyStorageKey = (scope: string) => `opening-practice:v1:${scope}`;
 type ReadStorage = Pick<Storage, "getItem">;
 type WriteStorage = Pick<Storage, "setItem">;
 type PartitionStorage = ReadStorage & WriteStorage & Pick<Storage, "removeItem">;
+function isReadStorage(storage: WriteStorage | null): storage is WriteStorage & ReadStorage {
+  return Boolean(storage && "getItem" in storage && typeof storage.getItem === "function");
+}
+function hasRemoveItem(storage: WriteStorage | null): storage is WriteStorage & Pick<Storage, "removeItem"> {
+  return Boolean(storage && "removeItem" in storage && typeof storage.removeItem === "function");
+}
 type StoredPracticeDraftCollection = { collection: PracticeDraftCollection; legacy: boolean };
 
 export function practiceScope(courseId: string, mode: "ordinary" | "manual" | "matrix" | "span", retest?: { retestId: string; prompt: string; skillLabel: string; requirementKey?: string | null; retestActivityId?: string } | null, focus?: { skillLabel: string; requirementKey: string | null }, problem?: { sourceId: string; sourceVersion: number }, matrixExercise?: MatrixExerciseInput): string {
@@ -125,7 +132,10 @@ function readStoredPracticeDraftCollection(scope: string, storage: ReadStorage):
   } catch { unreadable("无法读取练习草稿，已停止新建和切换。请允许此页面使用浏览器存储后重试。"); }
   if (raw === null) {
     blocked.delete(scope);
-    if (!dirty.has(scope)) legacyIds.delete(scope);
+    if (!dirty.has(scope)) {
+      legacyIds.delete(scope);
+      loadedFromLegacy.delete(scope);
+    }
     return null;
   }
   let parsed: unknown;
@@ -145,10 +155,14 @@ function readStoredPracticeDraftCollection(scope: string, storage: ReadStorage):
       collection = { version: 2, scope, activeId: draft.id, drafts: [draft] };
     } else collection = null;
   } else {
-    legacyIds.delete(scope);
     collection = parsePracticeDraftCollection(parsed, scope);
   }
   if (!collection) unreadable("保存的练习草稿身份或内容无效，原内容未改动，已停止新建和切换。");
+  if (legacy) loadedFromLegacy.add(scope);
+  else {
+    legacyIds.delete(scope);
+    loadedFromLegacy.delete(scope);
+  }
   blocked.delete(scope);
   return { collection, legacy };
 }
@@ -191,6 +205,13 @@ function persistCollection(collection: PracticeDraftCollection, storage: WriteSt
     storage.setItem(storageKey(collection.scope), JSON.stringify(collection));
     dirty.delete(collection.scope);
     dirtyDraftIds.delete(collection.scope);
+    if (loadedFromLegacy.has(collection.scope) && hasRemoveItem(storage)) {
+      try {
+        storage.removeItem(legacyStorageKey(collection.scope));
+        legacyIds.delete(collection.scope);
+        loadedFromLegacy.delete(collection.scope);
+      } catch { /* v2 is already durable */ }
+    }
     return true;
   } catch { dirty.add(collection.scope); return false; }
 }
@@ -350,17 +371,61 @@ export function assertPracticeDraftSaved(scope: string): void {
   if (dirty.has(scope)) throw new Error("原答案和请求尚未成功保存到浏览器，已暂停发送。请先复制答案或释放浏览器存储后重试。");
 }
 
+function mergeWithStoredCollection(
+  scope: string,
+  cached: PracticeDraftCollection,
+  stored: StoredPracticeDraftCollection | null,
+  extraEditedIds?: ReadonlySet<string>,
+  explicitActiveId?: string,
+): PracticeDraftCollection {
+  const editedIds = dirtyDraftIds.get(scope);
+  const isEdited = (id: string) => Boolean(editedIds?.has(id) || extraEditedIds?.has(id));
+  const cachedById = new Map(cached.drafts.map(value => [value.id, value]));
+  const storedDrafts = stored?.collection.drafts ?? [];
+  const storedIds = new Set(storedDrafts.map(value => value.id));
+  const mergedDrafts = [
+    ...storedDrafts.map(value => (isEdited(value.id) ? cachedById.get(value.id) : undefined) ?? value),
+    ...cached.drafts.filter(value => !storedIds.has(value.id) && isEdited(value.id)),
+  ];
+  const activeId = explicitActiveId && mergedDrafts.some(value => value.id === explicitActiveId)
+    ? explicitActiveId
+    : (isEdited(cached.activeId) && mergedDrafts.some(value => value.id === cached.activeId)
+      ? cached.activeId
+      : (stored?.collection.activeId && mergedDrafts.some(value => value.id === stored.collection.activeId)
+        ? stored.collection.activeId
+        : (mergedDrafts.some(value => value.id === cached.activeId) ? cached.activeId : mergedDrafts[0]!.id)));
+  return { version: 2, scope, activeId, drafts: mergedDrafts };
+}
+
 export function writePracticeDraft(draft: PracticeDraft, storage: WriteStorage | null): boolean {
   const error = blocked.get(draft.scope);
   if (error) throw new Error(error);
+  const wasDirty = dirty.has(draft.scope);
   const collection = memory.get(draft.scope) ?? { version: 2 as const, scope: draft.scope, activeId: draft.id, drafts: [] };
   const found = collection.drafts.some(value => value.id === draft.id);
-  const next = { ...collection, drafts: found ? collection.drafts.map(value => value.id === draft.id ? draft : value) : [...collection.drafts, draft] };
+  let next: PracticeDraftCollection = {
+    ...collection,
+    drafts: found ? collection.drafts.map(value => value.id === draft.id ? draft : value) : [...collection.drafts, draft],
+  };
   // Keep the latest inputs in this document even if the browser refuses persistence.
   memory.set(draft.scope, next);
-  const saved = persistCollection(next, storage);
-  if (!saved) markDirtyDraft(draft.scope, draft.id);
-  return saved;
+  markDirtyDraft(draft.scope, draft.id);
+  if (wasDirty && isReadStorage(storage)) {
+    const previousBlocked = blocked.get(draft.scope);
+    try {
+      const stored = readStoredPracticeDraftCollection(draft.scope, storage);
+      next = mergeWithStoredCollection(draft.scope, next, stored);
+      memory.set(draft.scope, next);
+      unreconciled.delete(draft.scope);
+    } catch {
+      if (previousBlocked === undefined) blocked.delete(draft.scope);
+      else blocked.set(draft.scope, previousBlocked);
+      unreconciled.add(draft.scope);
+      dirty.add(draft.scope);
+      return false;
+    }
+  }
+  return persistCollection(next, storage);
 }
 
 export type DraftPatch = Partial<Omit<PracticeDraft, "scope" | "version" | "id" | "fields">> & { fields?: Partial<PracticeFields> };
@@ -388,7 +453,24 @@ export function switchPracticeDraft(scope: string, expectedActiveId: string, tar
     if (target.scope !== scope || drafts.some(value => value.id === target.id)) throw new Error("新草稿身份无效，当前答案未改动。");
     drafts = [...drafts, target]; targetId = target.id;
   }
-  const next = { ...current, activeId: targetId, drafts };
+  let next: PracticeDraftCollection = { ...current, activeId: targetId, drafts };
+  if (dirty.has(scope) && isReadStorage(storage)) {
+    const previousBlocked = blocked.get(scope);
+    try {
+      const stored = readStoredPracticeDraftCollection(scope, storage);
+      const extraIds = typeof target === "string" ? undefined : new Set([target.id]);
+      next = mergeWithStoredCollection(scope, next, stored, extraIds, targetId);
+      if (!next.drafts.some(value => value.id === targetId)) throw new Error("找不到这份保留的草稿，当前答案未改动。");
+      unreconciled.delete(scope);
+    } catch (reason) {
+      if (previousBlocked === undefined) blocked.delete(scope);
+      else blocked.set(scope, previousBlocked);
+      unreconciled.add(scope);
+      dirty.add(scope);
+      if (reason instanceof Error && reason.message.includes("找不到这份保留的草稿")) throw reason;
+      throw new Error("未能保存全部草稿，已取消切换；当前原答案和请求仍保留。请先复制答案或释放浏览器存储后重试。");
+    }
+  }
   if (!persistCollection(next, storage)) throw new Error("未能保存全部草稿，已取消切换；当前原答案和请求仍保留。请先复制答案或释放浏览器存储后重试。");
   memory.set(scope, next);
   return next;

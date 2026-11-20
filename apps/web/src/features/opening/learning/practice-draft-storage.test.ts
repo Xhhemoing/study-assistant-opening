@@ -368,3 +368,60 @@ it("reuses the assigned identity without duplicating a legacy v1 matrix draft wi
   expect(recovered?.drafts[0]).toMatchObject({ id: assignedId, fields: { answer: "edited legacy matrix" } });
   expect(disk.data.has(legacyKey)).toBe(false);
 });
+
+it("reconciles with live storage before retrying an edit while the form stays open so newer sibling answers survive", () => {
+  const scope = newScope();
+  const key = `opening-practice:v2:${scope}`;
+  const draftA = emptyPracticeDraft(scope, { skillLabel: "A", answer: "initial A" });
+  const draftB = emptyPracticeDraft(scope, { skillLabel: "B", answer: "initial B" });
+  const disk = { ...storage(), removeItem: (k: string) => { disk.data.delete(k); } };
+  disk.data.set(key, JSON.stringify({ version: 2, scope, activeId: draftA.id, drafts: [draftA, draftB] }));
+  expect(readPracticeDraftCollection(scope, disk)).toMatchObject({ activeId: draftA.id, drafts: [draftA, draftB] });
+
+  disk.setItem.mockImplementation(() => { throw new Error("quota exceeded"); });
+  const firstEditA = patchPracticeDraft(scope, {}, { fields: { answer: "unsaved A1" } }, disk, draftA.id);
+  expect(firstEditA.persisted).toBe(false);
+
+  const newerB = { ...draftB, fields: { ...draftB.fields, answer: "newer B from sibling tab" } };
+  disk.data.set(key, JSON.stringify({ version: 2, scope, activeId: draftB.id, drafts: [draftA, newerB] }));
+  disk.setItem.mockImplementation((k, v) => { disk.data.set(k, v); });
+
+  const retriedEditA = patchPracticeDraft(scope, {}, { fields: { answer: "saved A2" } }, disk, draftA.id);
+  expect(retriedEditA.persisted).toBe(true);
+  const persisted = parsePracticeDraftCollection(JSON.parse(disk.data.get(key)!), scope);
+  expect(persisted?.drafts.map(d => [d.id, d.fields.answer])).toEqual([
+    [draftA.id, "saved A2"],
+    [draftB.id, "newer B from sibling tab"],
+  ]);
+});
+
+it("retains the remembered UUID of an ID-less legacy v1 draft across a rejected invalid v2 value", () => {
+  const course = crypto.randomUUID();
+  const ordinary = practiceScope(course, "ordinary");
+  const manual = practiceScope(course, "manual");
+  const legacyKey = `opening-practice:v1:${ordinary}`;
+  const ordinaryKey = `opening-practice:v2:${ordinary}`;
+  const { id: _omitted, ...legacyWithoutId } = emptyPracticeDraft(ordinary, { matrixMode: true, answer: "legacy matrix v1" });
+  void _omitted;
+  const disk = { ...storage(), removeItem: (k: string) => { disk.data.delete(k); } };
+  disk.data.set(legacyKey, JSON.stringify(legacyWithoutId));
+
+  const scopes = { ordinary, manual };
+  const initial = readPartitionedPracticeDraftCollection(scopes, emptyPracticeDraft(ordinary, { matrixMode: true }), disk);
+  const assignedId = initial!.drafts[0]!.id;
+
+  disk.setItem.mockImplementation(() => { throw new Error("quota exceeded"); });
+  const edited = patchPracticeDraft(ordinary, { matrixMode: true }, { fields: { answer: "edited legacy matrix" } }, disk);
+  expect(edited.persisted).toBe(false);
+
+  disk.data.set(ordinaryKey, "{}");
+  expect(readPartitionedPracticeDraftCollection(scopes, emptyPracticeDraft(ordinary, { matrixMode: true }), disk))
+    .toMatchObject({ activeId: assignedId, drafts: [edited.draft] });
+
+  disk.data.delete(ordinaryKey);
+  disk.setItem.mockImplementation((k, v) => { disk.data.set(k, v); });
+  const recovered = readPartitionedPracticeDraftCollection(scopes, emptyPracticeDraft(ordinary, { matrixMode: true }), disk);
+  expect(recovered?.drafts).toHaveLength(1);
+  expect(recovered?.drafts[0]).toMatchObject({ id: assignedId, fields: { answer: "edited legacy matrix" } });
+  expect(disk.data.has(legacyKey)).toBe(false);
+});
