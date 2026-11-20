@@ -71,6 +71,7 @@ export type IeltsCriterionAssessment = {
 export type IeltsEssayDraft = {
   readonly draftId: string;
   readonly version: number;
+  readonly basedOnVersion?: number;
   readonly label: string;
   readonly promptId: string;
   readonly paragraphs: readonly string[];
@@ -213,6 +214,10 @@ export type IeltsSpeakingPart3Seed = {
   readonly cartridgeId: typeof IELTS_CARTRIDGE_ID;
   readonly sourcePromptId: string;
   readonly sourceDraftId: string;
+  readonly requiresVerifiedReceipt?: boolean;
+  /** Optional catalog allow-list of verified Writing receipt IDs. */
+  readonly verifiedTransferIds?: readonly string[];
+  readonly verifiedWritingReceipt?: IeltsRubricReceipt;
   readonly topic: string;
   readonly followUpQuestion: string;
   readonly followUpQuestionZh: string;
@@ -268,6 +273,7 @@ export type IeltsSpeakingFeedbackReceipt = {
   readonly cartridgeId: typeof IELTS_CARTRIDGE_ID;
   readonly seedId: string;
   readonly sourceTranscript: string;
+  readonly assisted: boolean;
   readonly taskMode: "speaking_part3";
   readonly feedbackMode: "transcript_practice_feedback";
   readonly pronunciationAssessed: false;

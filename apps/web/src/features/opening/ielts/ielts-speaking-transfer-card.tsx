@@ -45,7 +45,7 @@ export function IeltsSpeakingTransferCard({
   const [durationInput, setDurationInput] = useState(
     String(initialDurationSeconds ?? matchingReceipt?.durationSeconds ?? ""),
   );
-  const [assisted, setAssisted] = useState(false);
+  const [assisted, setAssisted] = useState(matchingReceipt?.assisted ?? false);
   const [evaluatedReceipt, setReceipt] = useState<IeltsSpeakingFeedbackReceipt | null>(matchingReceipt);
   const receipt = evaluatedReceipt?.seedId === seed.seedId ? evaluatedReceipt : null;
   const epistemicMeta = receipt ? EPISTEMIC_BADGE_META[receipt.epistemicStatus] : null;

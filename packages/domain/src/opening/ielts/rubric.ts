@@ -379,7 +379,7 @@ export function resolveIeltsEpistemicStatus(
   };
 }
 
-type DraftLineage = Pick<IeltsEssayDraft, "promptId" | "version">;
+type DraftLineage = Pick<IeltsEssayDraft, "promptId" | "version" | "basedOnVersion">;
 
 export function getWritingTransferLineage(
   baseline: DraftLineage | undefined,
@@ -392,8 +392,15 @@ export function getWritingTransferLineage(
   ) {
     return null;
   }
+  const parent = revised.basedOnVersion;
+  if (parent !== undefined && (!Number.isSafeInteger(parent) || parent < 1 || parent >= revised.version)) {
+    return null;
+  }
   if (revised.promptId !== baseline.promptId) return "fresh_prompt";
-  return revised.version > baseline.version ? "advancing_revision" : null;
+  const followsBaseline = parent === undefined
+    ? revised.version === baseline.version + 1
+    : parent === baseline.version;
+  return followsBaseline ? "advancing_revision" : null;
 }
 
 export type CreateRubricReceiptInput = {
@@ -505,7 +512,21 @@ export function createValidatedRubricReceipt(
       }
 
       const paragraphText = paragraphs[span.paragraphIndex] ?? "";
-      const located = locateGroundedExcerpt(paragraphText, span.excerpt);
+      const { startOffset, endOffset, excerpt } = span;
+      let located: ReturnType<typeof locateGroundedExcerpt> = null;
+      if (startOffset === undefined && endOffset === undefined) {
+        located = locateGroundedExcerpt(paragraphText, excerpt);
+      } else if (
+        startOffset !== undefined && Number.isInteger(startOffset) &&
+        endOffset !== undefined && Number.isInteger(endOffset) &&
+        startOffset >= 0 && endOffset > startOffset && endOffset <= paragraphText.length &&
+        paragraphText.slice(startOffset, endOffset) === excerpt
+      ) {
+        const boundaries = graphemeBoundaries(paragraphText);
+        if (boundaries.floor(startOffset) === startOffset && boundaries.floor(endOffset) === endOffset) {
+          located = { startOffset, endOffset, matchedText: excerpt };
+        }
+      }
       if (!located) {
         errors.push({
           code: "EXCERPT_NOT_GROUNDED",

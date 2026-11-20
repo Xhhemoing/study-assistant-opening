@@ -137,11 +137,7 @@ export function IeltsDraftCritiqueWorkbench({
   }
 
   function handleAnalyzeRevision() {
-    const paragraphs = composerText
-      .split(/\n\s*\n+/)
-      .map((part) => part.trim())
-      .filter(Boolean);
-    if (paragraphs.length === 0) return;
+    const paragraphs = composerText.split(/\n\s*\n+/);
 
     const nextCount = revisionCount + 1;
     const updatedDraft: IeltsEssayDraft = {
@@ -159,6 +155,8 @@ export function IeltsDraftCritiqueWorkbench({
       targets: fixture.targets,
       receiptId: `receipt-live-${nextCount}`,
     });
+
+    if (!evaluated.ok) return;
 
     setRevisionCount(nextCount);
     setDraft2(updatedDraft);

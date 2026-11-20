@@ -12,10 +12,18 @@ import {
   hasMemorizedTemplateStuffing,
   isValidIeltsBand,
   locateGroundedExcerpt,
+  type EvaluateRevisedDraftInput,
   type IeltsCriterionAssessment,
   type IeltsEssayDraft,
   type IeltsUpgradeTarget,
 } from "./index";
+import { segmentIeltsText } from "./text-segments";
+
+function evaluateNonEmptyRevision(input: EvaluateRevisedDraftInput) {
+  const result = evaluateRevisedDraftDeterministically(input);
+  if (!result.ok) throw new Error("Expected a Writing receipt for a non-empty revision");
+  return result;
+}
 
 const DRAFT_1: IeltsEssayDraft = {
   draftId: "draft-1",
@@ -310,7 +318,7 @@ describe("IELTS rubric validation & band scoring", () => {
         `${DRAFT_2.paragraphs[3]} In a nutshell, rail wins. In a nutshell, roads fail.`,
       ],
     };
-    const evaluated = evaluateRevisedDraftDeterministically({
+    const evaluated = evaluateNonEmptyRevision({
       baselineDraft: DRAFT_1,
       revisedDraft: stuffedDraft,
       targets: TARGETS,
@@ -349,7 +357,7 @@ describe("IELTS rubric validation & band scoring", () => {
 
 describe("Honest evidence epistemology & Writing anti-gaming transfer guards", () => {
   it("keeps single-draft and assisted revisions strictly as practice_feedback", () => {
-    const singleDraftResult = evaluateRevisedDraftDeterministically({
+    const singleDraftResult = evaluateNonEmptyRevision({
       baselineDraft: DRAFT_1,
       revisedDraft: DRAFT_1,
       targets: TARGETS,
@@ -380,7 +388,7 @@ describe("Honest evidence epistemology & Writing anti-gaming transfer guards", (
       draftId: "draft-2-copy",
       version: 2,
     };
-    const evaluated = evaluateRevisedDraftDeterministically({
+    const evaluated = evaluateNonEmptyRevision({
       baselineDraft: DRAFT_2,
       revisedDraft: identicalV2,
       targets: TARGETS,
@@ -403,7 +411,7 @@ describe("Honest evidence epistemology & Writing anti-gaming transfer guards", (
       ],
     };
 
-    const evaluated = evaluateRevisedDraftDeterministically({
+    const evaluated = evaluateNonEmptyRevision({
       baselineDraft: DRAFT_2,
       revisedDraft: punctuationSwappedDraft,
       targets: TARGETS,
@@ -440,7 +448,7 @@ describe("Honest evidence epistemology & Writing anti-gaming transfer guards", (
       ],
     };
 
-    const colonResult = evaluateRevisedDraftDeterministically({
+    const colonResult = evaluateNonEmptyRevision({
       baselineDraft: DRAFT_2,
       revisedDraft: colonSuffixDraft,
       targets: TARGETS,
@@ -476,7 +484,7 @@ describe("Honest evidence epistemology & Writing anti-gaming transfer guards", (
       ],
     };
 
-    const commaResult = evaluateRevisedDraftDeterministically({
+    const commaResult = evaluateNonEmptyRevision({
       baselineDraft: DRAFT_2,
       revisedDraft: commaSuffixDraft,
       targets: TARGETS,
@@ -513,7 +521,7 @@ describe("Honest evidence epistemology & Writing anti-gaming transfer guards", (
       ],
     };
 
-    const evaluated = evaluateRevisedDraftDeterministically({
+    const evaluated = evaluateNonEmptyRevision({
       baselineDraft: shortBaseline,
       revisedDraft: shortPaddedRevision,
       targets: TARGETS,
@@ -529,7 +537,7 @@ describe("Honest evidence epistemology & Writing anti-gaming transfer guards", (
   });
 
   it("blocks empty targetExpressions list from qualifying as verified transfer", () => {
-    const evaluated = evaluateRevisedDraftDeterministically({
+    const evaluated = evaluateNonEmptyRevision({
       baselineDraft: DRAFT_1,
       revisedDraft: DRAFT_2,
       targets: [],
@@ -556,7 +564,7 @@ describe("Honest evidence epistemology & Writing anti-gaming transfer guards", (
       ],
     };
 
-    const evaluated = evaluateRevisedDraftDeterministically({
+    const evaluated = evaluateNonEmptyRevision({
       baselineDraft: DRAFT_1,
       revisedDraft: gamedDraft,
       targets: TARGETS,
@@ -574,7 +582,7 @@ describe("Honest evidence epistemology & Writing anti-gaming transfer guards", (
 
   it("promotes unassisted verified Draft 2 transfer with zero cliché stuffing to rubric_verified_evidence", () => {
     expect(countDraftWords(DRAFT_2.paragraphs)).toBeGreaterThanOrEqual(180);
-    const evaluated = evaluateRevisedDraftDeterministically({
+    const evaluated = evaluateNonEmptyRevision({
       baselineDraft: DRAFT_1,
       revisedDraft: DRAFT_2,
       targets: TARGETS,
@@ -824,8 +832,8 @@ describe("Speaking Part 3 oral transfer seed, strict verification gates & Unicod
     });
     expect(coordinatedReceipt.wordCount).toBeGreaterThanOrEqual(75);
     expect(coordinatedReceipt.transferredCollocations).toEqual([
-      "per-capita emissions",
       "long-term fiscal viability",
+      "per-capita emissions",
     ]);
     expect(coordinatedReceipt.masteryQualified).toBe(true);
     expect(coordinatedReceipt.countsTowardMastery).toBe(true);
@@ -917,7 +925,7 @@ describe("Writing transfer review regressions", () => {
   it.each(["😀 Great!\uFE0F", "Test.\u0301", "a".repeat(129) + "👩‍🔬"])(
     "keeps automatic Writing evidence on grapheme boundaries in %s",
     (paragraph) => {
-      const { receipt } = evaluateRevisedDraftDeterministically({
+      const { receipt } = evaluateNonEmptyRevision({
         baselineDraft: DRAFT_1,
         revisedDraft: { ...DRAFT_2, paragraphs: [paragraph] },
         targets: TARGETS,
@@ -978,7 +986,7 @@ describe("Writing transfer review regressions", () => {
   });
 
   it.each([1, 2, 3])("vetoes non-advancing same-prompt version %s", (version) => {
-    const result = evaluateRevisedDraftDeterministically({
+    const result = evaluateNonEmptyRevision({
       baselineDraft: { ...DRAFT_1, version: 3 },
       revisedDraft: { ...DRAFT_2, version },
       targets: TARGETS,
@@ -1017,11 +1025,11 @@ describe("Writing transfer review regressions", () => {
       targets: TARGETS,
       receiptId: "r-fresh-prompt",
     };
-    const unconfirmed = evaluateRevisedDraftDeterministically(candidate);
+    const unconfirmed = evaluateNonEmptyRevision(candidate);
     expect(unconfirmed.transferReport.summary.meetsCrossDraftVerification).toBe(false);
     expect(unconfirmed.receipt.epistemicStatus).toBe("practice_feedback");
 
-    const fresh = evaluateRevisedDraftDeterministically({
+    const fresh = evaluateNonEmptyRevision({
       ...candidate,
       revisedDraft: { ...candidate.revisedDraft, version: 1 },
       freshPromptTransfer: true,
@@ -1029,8 +1037,9 @@ describe("Writing transfer review regressions", () => {
     expect(fresh.transferReport.summary.meetsCrossDraftVerification).toBe(false);
     expect(fresh.receipt.evidenceSource).toBe("unassisted_fresh_prompt_transfer");
     expect(fresh.receipt.countsTowardMastery).toBe(true);
+    expect(fresh.transferReport.summary.masteryQualified).toBe(true);
 
-    const noTargets = evaluateRevisedDraftDeterministically({
+    const noTargets = evaluateNonEmptyRevision({
       ...candidate,
       targets: [],
       freshPromptTransfer: true,
@@ -1055,8 +1064,10 @@ describe("Writing transfer review regressions", () => {
       revisedDraft: DRAFT_2,
       receiptId: "r-unique-evidence",
     };
-    const single = evaluateRevisedDraftDeterministically({ ...input, targets: targets.slice(0, 1) });
-    const duplicated = evaluateRevisedDraftDeterministically({ ...input, targets });
+    const single = evaluateNonEmptyRevision({ ...input, targets: targets.slice(0, 1) });
+    const duplicated = evaluateNonEmptyRevision({ ...input, targets });
+    const repeatedId = evaluateNonEmptyRevision({ ...input, targets: [targets[0]!, targets[0]!] });
+    expect(repeatedId.transferReport.summary.transferredCount).toBe(1);
     expect(single.transferReport.summary.transferredCount).toBe(1);
     expect(duplicated.transferReport.summary.transferredCount).toBe(1);
     expect(duplicated.receipt.criteria.LR.band).toBe(single.receipt.criteria.LR.band);
@@ -1089,7 +1100,7 @@ describe("Speaking contextual transfer regressions", () => {
     const transcript = setup + " Local officials also face annual budget reviews in spring. The board should monitor long-term fiscal viability and per-capita emissions.";
     const receipt = evaluateSpeakingRetelling({ seed, transcript, durationSeconds: 75, assisted: false });
     expect(receipt.wordCount).toBe(78);
-    expect(receipt.transferredCollocations).toEqual(seed.targetSpokenCollocations);
+    expect(receipt.transferredCollocations).toEqual(["long-term fiscal viability", "per-capita emissions"]);
     expect(receipt.countsTowardMastery).toBe(true);
   });
 
@@ -1097,5 +1108,263 @@ describe("Speaking contextual transfer regressions", () => {
     const receipt = evaluateSpeakingRetelling({ seed, transcript, durationSeconds: 75, assisted: false });
     expect(receipt.evidenceQuotes[0]?.quote).toBe(transcript);
     expect(receipt.evidenceQuotes[0]?.endOffset).toBe(transcript.length);
+  });
+});
+
+describe("round-six Writing transfer regressions", () => {
+  const input = {
+    baselineDraft: DRAFT_1,
+    revisedDraft: DRAFT_2,
+    targets: TARGETS,
+    receiptId: "r-round-six",
+  };
+
+  it.each([undefined, 0, -1, 1.5, Number.NaN, 3])(
+    "rejects a disconnected version 4 revision with parent %s",
+    (basedOnVersion) => {
+      const result = evaluateRevisedDraftDeterministically({
+        ...input,
+        revisedDraft: { ...DRAFT_2, version: 4, basedOnVersion },
+      });
+      expect(result.transferReport.summary.meetsCrossDraftVerification).toBe(false);
+      expect(result.receipt?.masteryQualified).toBe(false);
+      const direct = createValidatedRubricReceipt({
+        ...input,
+        taskMode: "writing_task2",
+        draft: { ...DRAFT_2, version: 4, basedOnVersion },
+        assessments: buildValidDraft2Assessments(),
+        crossDraftTransferVerified: true,
+      });
+      expect(direct.ok && direct.receipt.masteryQualified).toBe(false);
+    },
+  );
+
+  it("accepts a later draft explicitly bound to the supplied baseline", () => {
+    const result = evaluateRevisedDraftDeterministically({
+      ...input,
+      revisedDraft: { ...DRAFT_2, version: 4, basedOnVersion: 1 },
+    });
+    expect(result.receipt?.evidenceSource).toBe("unassisted_cross_draft_transfer");
+  });
+
+  it("uses the receipt's mastery decision for assisted transfer", () => {
+    const revisedDraft = { ...DRAFT_2, assisted: true };
+    const result = evaluateRevisedDraftDeterministically({ ...input, revisedDraft });
+    const standalone = analyzeCrossDraftTransfer({ draft1: DRAFT_1, draft2: revisedDraft, targets: TARGETS });
+    expect(standalone.summary.masteryQualified).toBe(false);
+    expect(result.transferReport.summary.meetsCrossDraftVerification).toBe(true);
+    expect(result.transferReport.summary.masteryQualified).toBe(false);
+    expect(result.receipt?.masteryQualified).toBe(false);
+  });
+
+  it.each([
+    "A separate paragraph about buses.",
+    "Dr. Patel monitors per-capita emissions near “St. Anne’s”.",
+  ])("keeps the original paragraph index and whitespace offsets for %s", (sentence) => {
+    const paragraph = "  " + sentence;
+    const paragraphs = ["", paragraph, "  "];
+    const result = evaluateNonEmptyRevision({
+      ...input,
+      revisedDraft: { ...DRAFT_2, paragraphs },
+    });
+    for (const assessment of Object.values(result.receipt.criteria)) {
+      expect(assessment.evidenceSpans[0]).toMatchObject({
+        paragraphIndex: 1,
+        startOffset: 2,
+        endOffset: paragraph.length,
+        excerpt: sentence,
+      });
+    }
+  });
+
+  it("cites the sentence containing the evidence cue after a quotation", () => {
+    const first = "The doctor said \"Expect delays.\"";
+    const evidence = "The council monitors emissions each week.";
+    const paragraph = first + " " + evidence + " " + evidence;
+    const result = evaluateRevisedDraftDeterministically({
+      ...input,
+      revisedDraft: { ...DRAFT_2, paragraphs: [paragraph] },
+    });
+    expect(result.receipt?.criteria.LR.evidenceSpans[0]).toMatchObject({
+      startOffset: first.length + 1,
+      endOffset: first.length + 1 + evidence.length,
+      excerpt: evidence,
+    });
+  });
+
+  it.each([{ paragraphs: [] }, { paragraphs: ["", " \t "] }])(
+    "returns an explicit empty result without a receipt for $paragraphs",
+    ({ paragraphs }) => {
+      const result = evaluateRevisedDraftDeterministically({
+        ...input,
+        revisedDraft: { ...DRAFT_2, paragraphs },
+      });
+      expect(result).toMatchObject({ ok: false, reason: "empty_draft", receipt: null });
+      expect(result.transferReport.summary.masteryQualified).toBe(false);
+    },
+  );
+
+  it("allocates distinct evidence to both overlapping target choices in either order", () => {
+    const common = { category: "cohesiveDevices", criterion: "CC", guidance: "Connect the claims." } as const;
+    const flexible = { ...common, id: "a-flexible", label: "Flexible", targetPatterns: ["therefore", "consequently"] };
+    const limited = { ...common, id: "b-limited", label: "Limited", targetPatterns: ["consequently"] };
+    const first = evaluateRevisedDraftDeterministically({ ...input, targets: [flexible, limited] });
+    const second = evaluateRevisedDraftDeterministically({ ...input, targets: [limited, flexible] });
+    expect(first.transferReport.summary).toEqual(second.transferReport.summary);
+    expect(first.transferReport.summary.transferredCount).toBe(2);
+    expect(first.receipt?.criteria.CC.band).toBe(7);
+    expect(second.receipt?.criteria.CC.band).toBe(7);
+    expect(first.transferReport.items.find((item) => item.targetId === flexible.id)?.revisedMatched).toEqual(["therefore"]);
+    expect(second.transferReport.items.find((item) => item.targetId === flexible.id)?.revisedMatched).toEqual(["therefore"]);
+  });
+});
+
+describe("round-six Speaking transfer regressions", () => {
+  const seed = buildSpeakingPart3Seed({
+    promptId: DRAFT_2.promptId,
+    topic: "urban transit",
+    coreClaim: "Governments should prioritise urban transit.",
+    supportingReason: "Reliable trains connect more riders.",
+    activeCollocations: ["per-capita emissions"],
+  }, DRAFT_2.draftId);
+  const setup =
+    "Personally, I think municipal leaders often prefer highway projects because impatient drivers notice wider asphalt roads right before major municipal elections. " +
+    "Building large urban rail networks requires years of careful planning and steady political commitment across densely populated districts. " +
+    "Admittedly, families in outer suburban neighbourhoods still rely on cars when local bus routes run infrequently during late evenings. " +
+    "Local officials also face annual budget reviews in spring. ";
+
+  it.each([
+    ["Yesterday in our neighborhood library per-capita emissions support package.", false],
+    ["The council offers commuters per-capita emissions data each week.", true],
+    ["Dr. Patel monitors per-capita emissions near “St. Anne’s”.", true],
+  ])("checks finite predicates and exact quotes in %s", (sentence, credited) => {
+    const transcript = "  " + setup + sentence;
+    const receipt = evaluateSpeakingRetelling({ seed, transcript, durationSeconds: 75, assisted: false });
+    expect(receipt.transferredCollocations).toEqual(credited ? ["per-capita emissions"] : []);
+    expect(receipt.masteryQualified).toBe(credited);
+    if (credited) {
+      expect(receipt.evidenceQuotes.find((quote) => quote.matchedExpression)).toMatchObject({
+        quote: sentence,
+        startOffset: 2 + setup.length,
+        endOffset: transcript.length,
+      });
+    }
+  });
+
+  it("requires an eligible Writing receipt for the source draft when the seed opts in", () => {
+    const transcript = setup + "Local planners should monitor per-capita emissions across the district.";
+    const verified = createValidatedRubricReceipt({
+      receiptId: "r-speaking-source",
+      taskMode: "writing_task2",
+      baselineDraft: DRAFT_1,
+      draft: DRAFT_2,
+      assessments: buildValidDraft2Assessments(),
+      crossDraftTransferVerified: true,
+    });
+    if (!verified.ok) throw new Error("Expected a verified Writing fixture");
+    const evaluate = (extra: {
+      verifiedTransferIds?: readonly string[];
+      verifiedWritingReceipt?: typeof verified.receipt;
+    }) => {
+      const gatedSeed = { ...seed, requiresVerifiedReceipt: true, ...extra };
+      return evaluateSpeakingRetelling({ seed: gatedSeed, transcript, durationSeconds: 75, assisted: false });
+    };
+    expect(evaluate({ verifiedTransferIds: [] }).epistemicStatus).toBe("practice_feedback");
+    expect(evaluate({ verifiedTransferIds: [verified.receipt.receiptId] }).masteryQualified).toBe(false);
+    expect(evaluate({
+      verifiedWritingReceipt: { ...verified.receipt, draftId: "another-draft" },
+    }).masteryQualified).toBe(false);
+    expect(evaluate({
+      verifiedWritingReceipt: { ...verified.receipt, masteryQualified: false },
+    }).masteryQualified).toBe(false);
+    expect(evaluate({
+      verifiedWritingReceipt: verified.receipt,
+      verifiedTransferIds: [],
+    }).masteryQualified).toBe(false);
+    expect(evaluate({
+      verifiedWritingReceipt: verified.receipt,
+      verifiedTransferIds: [verified.receipt.receiptId],
+    }).epistemicStatus).toBe("rubric_verified_evidence");
+  });
+
+  it("gives overlapping spoken targets credit only for distinct occurrences in either order", () => {
+    const targets = ["emissions", "per-capita emissions"];
+    const sentence = "Local planners should monitor per-capita emissions across the district.";
+    const extraSentence = "The regional board tracks emissions from the municipal bus fleet each week.";
+    const evaluate = (targetSpokenCollocations: string[], otherSentence: string) =>
+      evaluateSpeakingRetelling({
+        seed: { ...seed, targetSpokenCollocations },
+        transcript: setup + sentence + " " + otherSentence,
+        durationSeconds: 75,
+        assisted: false,
+        createdAt: DRAFT_2.createdAt,
+      });
+
+    const forward = evaluate(targets, "");
+    const reverse = evaluate([...targets].reverse(), "");
+    expect(forward.transferredCollocations).toHaveLength(1);
+    expect(reverse.transferredCollocations).toEqual(forward.transferredCollocations);
+    expect(forward.masteryQualified).toBe(false);
+
+    const result = evaluate(targets, extraSentence);
+    expect(result).toEqual(evaluate([...targets].reverse(), extraSentence));
+    expect(result.masteryQualified).toBe(true);
+    expect(result.evidenceQuotes.find((quote) => quote.matchedExpression === "emissions")?.quote)
+      .toBe(extraSentence);
+    expect(result.evidenceQuotes.find((quote) => quote.matchedExpression === "per-capita emissions")?.quote)
+      .toBe(sentence);
+  });
+});
+
+describe("IELTS source boundaries", () => {
+  it("keeps abbreviation periods inside sentences with exact original offsets", () => {
+    const expected = [
+      "Prof. Lane asked Mr. Ross and Mrs. Cole to meet Ms. Singh at No. 7 St. Anne’s Lane.",
+      "Dr. J. R. Patel compared U.S. and U.K. rules, e.g. late fees vs. permits, i.e. common restrictions, etc.",
+      "The board met again.",
+    ];
+    const source = "  " + expected.join("\r\n ") + "  ";
+    const sentences = segmentIeltsText(source);
+    expect(sentences.map(({ text }) => text)).toEqual(expected);
+    for (const sentence of sentences) {
+      expect(source.slice(sentence.startOffset, sentence.endOffset)).toBe(sentence.text);
+    }
+  });
+
+  it("keeps quoted punctuation intact in sentences and separates inner clauses", () => {
+    const first = "She said ‘Dr. Ross spoke. Please wait!’";
+    const second = "Everyone waited.";
+    const sentences = segmentIeltsText(first + " " + second);
+    expect(sentences.map(({ text }) => text)).toEqual([first, second]);
+    expect(sentences[0]?.clauses.map(({ text }) => text)).toEqual(["She said ‘Dr. Ross spoke", "Please wait!’"]);
+  });
+
+  it("uses the supplied occurrence when an excerpt appears more than once", () => {
+    const excerpt = "The council monitors emissions each week.";
+    const draft = { ...DRAFT_2, paragraphs: [excerpt + " " + excerpt] };
+    const span = {
+      paragraphIndex: 0,
+      excerpt,
+      startOffset: excerpt.length + 1,
+      endOffset: draft.paragraphs[0]!.length,
+    };
+    const assessments = buildValidDraft2Assessments().map((assessment) => ({
+      ...assessment,
+      evidenceSpans: [{ ...assessment.evidenceSpans[0]!, ...span }],
+    }));
+    const input = { receiptId: "r-exact-occurrence", taskMode: "writing_task2", draft, crossDraftTransferVerified: false } as const;
+    const result = createValidatedRubricReceipt({ ...input, assessments });
+    expect(result.ok && result.receipt.criteria.TR.evidenceSpans[0]).toMatchObject(span);
+
+    const invalid = createValidatedRubricReceipt({
+      ...input,
+      assessments: assessments.map((assessment) => ({
+        ...assessment,
+        evidenceSpans: assessment.evidenceSpans.map((evidence) => ({
+          ...evidence, endOffset: evidence.endOffset + 1,
+        })),
+      })),
+    });
+    expect(invalid.ok).toBe(false);
   });
 });

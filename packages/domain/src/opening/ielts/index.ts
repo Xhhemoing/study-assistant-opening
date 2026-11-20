@@ -67,6 +67,7 @@ export {
 export type {
   AnalyzeCrossDraftTransferInput,
   EvaluateRevisedDraftInput,
+  EvaluateRevisedDraftResult,
 } from "./transfer";
 
 export {

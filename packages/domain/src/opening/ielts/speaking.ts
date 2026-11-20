@@ -1,13 +1,11 @@
-import { graphemeBoundaries } from "./graphemes";
+import { allocateIeltsSpans, compareText, type MatchRange } from "./span-allocation";
+import { segmentIeltsText, type GroundedSentence } from "./text-segments";
 import {
   countEnglishWords,
   detectMemorizedTemplates,
   hasMemorizedTemplateStuffing,
 } from "./rubric";
-import {
-  detectLowEntropyStuffing,
-  splitElementaryClauses,
-} from "./transfer";
+import { detectLowEntropyStuffing } from "./transfer";
 import {
   IELTS_CARTRIDGE_ID,
   type IeltsSpeakingEvidenceQuote,
@@ -58,11 +56,7 @@ function escapeRegExp(literal: string): string {
 
 function buildPhraseRegex(phrase: string): RegExp {
   const parts = phrase.trim().split(/\s+/).map(escapeRegExp);
-  return new RegExp(`(?<![\\p{L}\\p{N}])${parts.join("\\s+")}(?![\\p{L}\\p{N}])`, "iu");
-}
-
-function tokenizeWords(text: string): string[] {
-  return text.toLowerCase().match(/[\p{L}\p{N}]+(?:['’-][\p{L}\p{N}]+)*/gu) ?? [];
+  return new RegExp(`(?<![\\p{L}\\p{N}])${parts.join("\\s+")}(?![\\p{L}\\p{N}])`, "giu");
 }
 
 const SPEAKING_MODAL = /^(?:can|could|may|might|must|shall|should|will|would)$/u;
@@ -71,8 +65,10 @@ const SPEAKING_DETERMINER = /^(?:the|a|an|this|that|these|those|its|their|our|yo
 const SPEAKING_AMBIGUOUS_VERB = /^(?:cut|cuts|help|helps|need|needs|fund|funds|back|backs|pair|pairs|support|supports|monitor|monitors|track|tracks|balance|balances|shift|shifts|address|addresses|offer|offers)$/u;
 const SPEAKING_SUBJECT_PRONOUN = /^(?:i|you|he|she|it|we|they)$/u;
 const SPEAKING_VERB_COMPLEMENT = /^(?:to|for|with|on|at|from|by|in|them|him|her|us|it)$/u;
+const SPEAKING_DITRANSITIVE = /^(?:give|gives|gave|offer|offers|offered|show|shows|showed|send|sends|sent|tell|tells|told)$/u;
+const SPEAKING_PREPOSITION = /^(?:to|for|with|on|at|from|by|in|near|under|over)$/u;
 
-type SpokenTargetSpan = { readonly start: number; readonly end: number };
+type SpokenTargetSpan = MatchRange & { readonly target: string };
 
 function hasSpokenSubjectAndPredicate(
   segment: string,
@@ -83,8 +79,10 @@ function hasSpokenSubjectAndPredicate(
     (word) => ({ text: word[0].toLowerCase(), index: word.index }),
   );
   const subjectStart = /^(?:and|or)$/u.test(words[0]?.text ?? "") ? 1 : 0;
-  const hasDeterminer = SPEAKING_DETERMINER.test(words[subjectStart]?.text ?? "");
   let hasSubject = false;
+  let hasSubjectPronoun = false;
+
+  if (words.length < 6) return false;
 
   for (let i = subjectStart; i < words.length; i += 1) {
     const word = words[i]!;
@@ -99,21 +97,31 @@ function hasSpokenSubjectAndPredicate(
       } else if (SPEAKING_FINITE_AUXILIARY.test(text)) {
         return true;
       } else if (
-        SPEAKING_CLAUSE_VERB_CUE.test(text) &&
+        (SPEAKING_CLAUSE_VERB_CUE.test(text) || SPEAKING_DITRANSITIVE.test(text)) &&
         !/^(?:be|been|being)$/u.test(text) &&
         !text.endsWith("ing") &&
         !SPEAKING_DETERMINER.test(previous ?? "")
       ) {
-        // In a determiner-led phrase, an ambiguous word followed by another bare
-        // noun may be a modifier ("support package"), even after the target span.
-        const hasObjectCue = SPEAKING_DETERMINER.test(next.text) ||
-          SPEAKING_VERB_COMPLEMENT.test(next.text) ||
-          targetSpans.some(({ start }) => next.index === start);
-        if (!hasDeterminer || !SPEAKING_AMBIGUOUS_VERB.test(text) || hasObjectCue) {
+        // A bare noun after a verb-shaped word can be part of the same noun
+        // phrase. A ditransitive can instead take a recipient before the target.
+        const takesTarget = targetSpans.some(({ start }) => start === next.index);
+        const takesRecipient = SPEAKING_DITRANSITIVE.test(text) &&
+          [2, 3, 4].some((distance) => {
+            const target = words[i + distance];
+            if (!target || !targetSpans.some(({ start }) => start === target.index)) return false;
+            const recipient = words.slice(i + 1, i + distance);
+            return !recipient.some((part) => SPEAKING_PREPOSITION.test(part.text)) &&
+              !SPEAKING_DETERMINER.test(recipient.at(-1)!.text);
+          });
+        if (
+          !SPEAKING_AMBIGUOUS_VERB.test(text) || hasSubjectPronoun || takesTarget || takesRecipient ||
+          SPEAKING_DETERMINER.test(next.text) || SPEAKING_VERB_COMPLEMENT.test(next.text)
+        ) {
           return true;
         }
       }
     }
+    hasSubjectPronoun ||= SPEAKING_SUBJECT_PRONOUN.test(text);
     if (
       SPEAKING_SUBJECT_PRONOUN.test(text) ||
       (text.length >= 2 && !SPEAKING_STOP_WORDS.has(text) && !SPEAKING_DETERMINER.test(text))
@@ -124,34 +132,19 @@ function hasSpokenSubjectAndPredicate(
   return false;
 }
 
-/** Each comma segment must supply its own subject and predicate. */
 function isContextualSpokenClause(
-  clause: string,
-  targetCollocation: string,
-  allTargetCollocations: readonly string[],
+  segment: string,
+  spans: readonly SpokenTargetSpan[],
 ): boolean {
-  const targetRegex = buildPhraseRegex(targetCollocation);
-  return clause.split(/[,，、/]+/u).some((segment) => {
-    if (!targetRegex.test(segment) || tokenizeWords(segment).length < 6) return false;
-
-    const spans = allTargetCollocations.flatMap((phrase) =>
-      Array.from(segment.matchAll(new RegExp(buildPhraseRegex(phrase).source, "giu")), (match) => ({
-        start: match.index,
-        end: match.index + match[0].length,
-      })),
-    ).sort((a, b) => a.start - b.start || b.end - a.end);
-
-    // Adjacent target phrases with no words between them are a mechanical list.
-    // Genuine coordination leaves a conjunction or another predicate between phrases.
-    let previousEnd = -1;
-    for (const { start, end } of spans) {
-      if (previousEnd >= 0 && start >= previousEnd && !segment.slice(previousEnd, start).trim()) {
-        return false;
-      }
-      previousEnd = Math.max(previousEnd, end);
+  // Adjacent target phrases without intervening words are a mechanical list.
+  let previousEnd = -1;
+  for (const { start, end } of spans) {
+    if (previousEnd >= 0 && start >= previousEnd && !segment.slice(previousEnd, start).trim()) {
+      return false;
     }
-    return hasSpokenSubjectAndPredicate(segment, spans);
-  });
+    previousEnd = Math.max(previousEnd, end);
+  }
+  return hasSpokenSubjectAndPredicate(segment, spans);
 }
 
 function cleanSpokenCollocations(rawCollocations: readonly string[]): string[] {
@@ -219,36 +212,73 @@ function classifySpeakingPace(
   return "on_target";
 }
 
-type GroundedSentence = {
-  readonly text: string;
-  readonly startOffset: number;
-  readonly endOffset: number;
+function getSpeakingTargets(collocations: readonly string[]): Map<string, string> {
+  const targets = new Map<string, string>();
+  for (const collocation of collocations) {
+    const phrase = collocation.trim();
+    if (!phrase) continue;
+    const key = phrase.toLowerCase().replace(/\s+/gu, " ");
+    const existing = targets.get(key);
+    if (!existing || compareText(phrase, existing) < 0) targets.set(key, phrase);
+  }
+  return new Map([...targets].sort(([a], [b]) => compareText(a, b)));
+}
+
+type SpeakingCandidate = MatchRange & {
+  readonly paragraphIndex: 0;
+  readonly sentence: GroundedSentence;
 };
 
-/**
- * Splits the ORIGINAL UNTRIMMED transcript into sentences while preserving exact
- * UTF-16 offsets so `rawTranscript.slice(startOffset, endOffset) === text` always holds.
- */
-function extractGroundedSentences(rawTranscript: string): GroundedSentence[] {
-  const results: GroundedSentence[] = [];
-  const boundaries = graphemeBoundaries(rawTranscript);
-  const regex = /[^.!?\n]+(?:[.!?]+|(?=\n)|$)/gu;
-  let match: RegExpExecArray | null;
-  while ((match = regex.exec(rawTranscript)) !== null) {
-    const raw = match[0];
-    const leadingSpaces = raw.length - raw.trimStart().length;
-    const trimmed = raw.trim();
-    if (!trimmed) continue;
-    const startOffset = boundaries.floor(match.index + leadingSpaces);
-    const endOffset = boundaries.ceil(match.index + leadingSpaces + trimmed.length);
-    regex.lastIndex = Math.max(regex.lastIndex, endOffset);
-    results.push({
-      text: rawTranscript.slice(startOffset, endOffset),
-      startOffset,
-      endOffset,
-    });
+function allocateSpeakingEvidence(sentences: readonly GroundedSentence[], targets: ReadonlyMap<string, string>) {
+  const patterns = [...targets].map(([target, phrase]) => ({ target, regex: buildPhraseRegex(phrase) }));
+  const candidates = new Map([...targets.keys()].map((target) => [target, [] as SpeakingCandidate[]]));
+  const observed = new Set<string>();
+
+  for (const sentence of sentences) {
+    const spans = patterns.flatMap(({ target, regex }) =>
+      Array.from(sentence.text.matchAll(regex), (match) => {
+        observed.add(target);
+        const start = sentence.startOffset + match.index;
+        return { target, start, end: start + match[0].length };
+      }),
+    ).sort((a, b) => a.start - b.start || b.end - a.end || compareText(a.target, b.target));
+
+    for (const clause of sentence.clauses) {
+      for (const part of clause.spokenParts) {
+        const matches = spans.filter(({ start, end }) => start >= part.startOffset && end <= part.endOffset);
+        if (matches.length === 0) continue;
+        const local = matches.map(({ target, start, end }) => ({
+          target,
+          start: start - part.startOffset,
+          end: end - part.startOffset,
+        }));
+        if (!isContextualSpokenClause(part.text, local)) continue;
+        for (const { target, start, end } of matches) {
+          candidates.get(target)!.push({ paragraphIndex: 0, start, end, sentence });
+        }
+      }
+    }
   }
-  return results;
+  return {
+    allocated: allocateIeltsSpans(candidates),
+    hasBareTargetPaste: [...observed].some((target) => candidates.get(target)!.length === 0),
+  };
+}
+
+function hasRequiredWritingReceipt(seed: IeltsSpeakingPart3Seed): boolean {
+  if (!seed.requiresVerifiedReceipt) return true;
+  const receipt = seed.verifiedWritingReceipt;
+  if (!receipt?.receiptId) return false;
+  return receipt.cartridgeId === seed.cartridgeId &&
+    receipt.taskMode === "writing_task2" &&
+    receipt.promptId === seed.sourcePromptId &&
+    receipt.draftId === seed.sourceDraftId &&
+    receipt.epistemicStatus === "rubric_verified_evidence" &&
+    receipt.countsTowardMastery === true && receipt.masteryQualified === true &&
+    (receipt.evidenceSource === "unassisted_cross_draft_transfer" ||
+      receipt.evidenceSource === "unassisted_fresh_prompt_transfer") &&
+    (seed.verifiedTransferIds === undefined ||
+      (Array.isArray(seed.verifiedTransferIds) && seed.verifiedTransferIds.includes(receipt.receiptId)));
 }
 
 /**
@@ -272,44 +302,24 @@ export function evaluateSpeakingRetelling(
       ? input.durationSeconds
       : null;
 
-  const paragraphs = trimmedTranscript ? [trimmedTranscript] : [];
+  const sentences = segmentIeltsText(rawTranscript);
+  const paragraphs = [rawTranscript];
   const memorizedTemplateHits = detectMemorizedTemplates(paragraphs);
   const hasStuffing = hasMemorizedTemplateStuffing(memorizedTemplateHits);
-  const hasLowEntropy = detectLowEntropyStuffing(paragraphs);
-  // Compute offsets directly on the original untrimmed transcript!
-  const sentences = extractGroundedSentences(rawTranscript);
+  const hasLowEntropy = detectLowEntropyStuffing(paragraphs, [sentences]);
+  const targets = getSpeakingTargets(input.seed.targetSpokenCollocations);
+  const { allocated, hasBareTargetPaste } = allocateSpeakingEvidence(sentences, targets);
 
-  // Require contextual clause integration before crediting any target collocation hit.
   const transferredCollocations: string[] = [];
   const pendingCollocations: string[] = [];
   const matchedSentenceByCollocation = new Map<string, GroundedSentence>();
-  let hasBareTargetPaste = false;
-
-  for (const collocation of input.seed.targetSpokenCollocations) {
-    const regex = buildPhraseRegex(collocation);
-    const matchingSentences = sentences.filter((sentence) =>
-      regex.test(sentence.text),
-    );
-    const contextualSentence = matchingSentences.find((sentence) =>
-      splitElementaryClauses(sentence.text).some(
-        (clause) =>
-          regex.test(clause) &&
-          isContextualSpokenClause(
-            clause,
-            collocation,
-            input.seed.targetSpokenCollocations,
-          ),
-      ),
-    );
-
-    if (contextualSentence) {
-      transferredCollocations.push(collocation);
-      matchedSentenceByCollocation.set(collocation, contextualSentence);
+  for (const [target, expression] of targets) {
+    const match = allocated.get(target);
+    if (match) {
+      transferredCollocations.push(expression);
+      matchedSentenceByCollocation.set(expression, match.sentence);
     } else {
-      if (matchingSentences.length > 0) {
-        hasBareTargetPaste = true;
-      }
-      pendingCollocations.push(collocation);
+      pendingCollocations.push(expression);
     }
   }
 
@@ -367,7 +377,7 @@ export function evaluateSpeakingRetelling(
               : "继续保持这种把精准搭配融入自然口语句式的表达习惯，避免生硬背诵书面语。",
         });
       });
-    } else if (input.seed.targetSpokenCollocations.length > 0) {
+    } else if (targets.size > 0) {
       const longestSentence = [...sentences].sort(
         (a, b) => b.text.length - a.text.length,
       )[0]!;
@@ -380,22 +390,24 @@ export function evaluateSpeakingRetelling(
         diagnosis: hasBareTargetPaste
           ? "仅检测到孤立拼贴的目标词组片段，尚未融入完整口语句子语境。"
           : "本次转写尚未命中任何目标活性搭配，建议结合提示词把写作二稿中的核心搭配自然说出来。",
-        upgradeRewrite: `可尝试在完整从句中自然带出：${input.seed.targetSpokenCollocations.slice(0, 2).join(", ")}。`,
+        upgradeRewrite: `可尝试在完整从句中自然带出：${pendingCollocations.slice(0, 2).join(", ")}。`,
       });
     }
   }
 
   // Airtight mastery / verification gate — NEVER bypassed by freshPromptTransfer or bare fragments!
-  const targetCount = input.seed.targetSpokenCollocations.length;
+  const targetCount = targets.size;
   const requiredTransferred = targetCount > 0 ? Math.min(2, targetCount) : 1;
   const hasEnoughTargets = targetCount > 0;
   const hasEnoughTransfer =
     hasEnoughTargets && transferredCollocations.length >= requiredTransferred;
   const hasValidPace = paceStatus === "on_target";
   const hasEnoughWords = wordCount >= MIN_VERIFIED_SPEAKING_WORDS;
+  const hasWritingReceipt = hasRequiredWritingReceipt(input.seed);
 
   const masteryQualified =
     !input.assisted &&
+    hasWritingReceipt &&
     hasValidPace &&
     hasEnoughTargets &&
     hasEnoughTransfer &&
@@ -416,6 +428,8 @@ export function evaluateSpeakingRetelling(
       : `独立在 ${input.seed.timeWindowSeconds.min}–${input.seed.timeWindowSeconds.max} 秒内完成 Part 3 追问复述并命中 ${transferredCollocations.length} 组目标搭配，已确认为口语转写迁移证据（不含语音发音评分）。`;
   } else if (input.assisted) {
     epistemicReason = "本次口语复述参照了写作稿件或提示，仅作转写练习反馈，不计入正式掌握度。";
+  } else if (!hasWritingReceipt) {
+    epistemicReason = "这道口语题需先通过来源写作稿件的迁移复核，本次仅作转写练习反馈。";
   } else if (paceStatus === "invalid_duration") {
     epistemicReason = "作答时长无效或缺失，无法确认是否落在 60–90 秒有效区间，本次仅作转写练习反馈。";
   } else if (!hasValidPace) {
@@ -508,6 +522,7 @@ export function evaluateSpeakingRetelling(
     cartridgeId: IELTS_CARTRIDGE_ID,
     seedId: input.seed.seedId,
     sourceTranscript: rawTranscript,
+    assisted: input.assisted,
     taskMode: "speaking_part3",
     feedbackMode: "transcript_practice_feedback",
     pronunciationAssessed: false,

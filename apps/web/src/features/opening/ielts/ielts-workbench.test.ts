@@ -392,3 +392,27 @@ it("shows an explicitly matched Speaking receipt", async () => {
   expect(host.querySelector("[data-speaking-epistemic]")?.getAttribute("data-speaking-epistemic"))
     .toBe("rubric_verified_evidence");
 });
+
+it("restores a matching assisted Speaking receipt and preserves assistance on reevaluation", async () => {
+  const fixture = IELTS_WRITING_SPEAKING_FIXTURE;
+  const { evaluateSpeakingRetelling } = await import("./domain-bridge");
+  const seed = { ...fixture.speakingSeed, seedId: "assisted-speaking-seed" };
+  const transcript = fixture.initialSpeakingTranscript;
+  const durationSeconds = fixture.initialSpeakingDurationSeconds;
+  const initialReceipt = evaluateSpeakingRetelling({ seed, transcript, durationSeconds, assisted: true });
+  const onEvaluated = vi.fn();
+  await act(async () => root.render(createElement(IeltsSpeakingTransferCard, {
+    seed,
+    initialTranscript: transcript,
+    initialDurationSeconds: durationSeconds,
+    initialReceipt,
+    onEvaluated,
+  })));
+  expect(host.querySelector<HTMLInputElement>('input[type="checkbox"]')?.checked).toBe(true);
+  await act(async () => host.querySelector<HTMLButtonElement>("button")!.click());
+  expect(onEvaluated).toHaveBeenCalledWith(expect.objectContaining({
+    assisted: true,
+    epistemicStatus: "practice_feedback",
+    masteryQualified: false,
+  }));
+});

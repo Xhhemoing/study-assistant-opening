@@ -54,6 +54,7 @@ const DRAFT_1: IeltsEssayDraft = {
 const DRAFT_2: IeltsEssayDraft = {
   draftId: "urban-rail-draft-2",
   version: 2,
+  basedOnVersion: DRAFT_1.version,
   label: "二稿",
   promptId: PROMPT_ID,
   assisted: false,
@@ -296,7 +297,17 @@ const CORE_ARGUMENT: IeltsWritingCoreArgument = {
   ],
 };
 
-const SPEAKING_SEED = buildSpeakingPart3Seed(CORE_ARGUMENT, DRAFT_2.draftId);
+const DRAFT_2_RECEIPT = mustValidateReceipt(
+  "receipt-d2",
+  DRAFT_2,
+  DRAFT_2_ASSESSMENTS,
+  TRANSFER_REPORT.summary.meetsCrossDraftVerification,
+);
+const SPEAKING_SEED: IeltsSpeakingPart3Seed = {
+  ...buildSpeakingPart3Seed(CORE_ARGUMENT, DRAFT_2.draftId),
+  requiresVerifiedReceipt: true,
+  verifiedWritingReceipt: DRAFT_2_RECEIPT,
+};
 
 const INITIAL_SPEAKING_TRANSCRIPT =
   "Personally, I think governments struggle because drivers notice a wider highway almost immediately, whereas a new rail line takes years of disruption before anyone can ride it. " +
@@ -324,12 +335,7 @@ export const IELTS_WRITING_SPEAKING_FIXTURE: IeltsWorkbenchFixture = {
   draft1: DRAFT_1,
   draft2: DRAFT_2,
   draft1Receipt: mustValidateReceipt("receipt-d1", DRAFT_1, DRAFT_1_ASSESSMENTS, false),
-  draft2Receipt: mustValidateReceipt(
-    "receipt-d2",
-    DRAFT_2,
-    DRAFT_2_ASSESSMENTS,
-    TRANSFER_REPORT.summary.meetsCrossDraftVerification,
-  ),
+  draft2Receipt: DRAFT_2_RECEIPT,
   targets: UPGRADE_TARGETS,
   transferReport: TRANSFER_REPORT,
   coreArgument: CORE_ARGUMENT,

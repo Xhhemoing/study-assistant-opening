@@ -1,4 +1,6 @@
 import { graphemeBoundaries } from "./graphemes";
+import { allocateIeltsSpans, compareText, rangesOverlap, type MatchRange } from "./span-allocation";
+import { segmentIeltsText, type GroundedClause, type GroundedSentence, type GroundedTextSpan } from "./text-segments";
 import {
   clampToIeltsBand,
   countDraftWords,
@@ -7,6 +9,7 @@ import {
   detectMemorizedTemplates,
   getWritingTransferLineage,
   hasMemorizedTemplateStuffing,
+  resolveIeltsEpistemicStatus,
 } from "./rubric";
 import type {
   IeltsBandScore,
@@ -51,33 +54,6 @@ function tokenizeWords(text: string): string[] {
   return (text.toLowerCase().match(/[\p{L}\p{N}]+(?:['’-][\p{L}\p{N}]+)*/gu) ?? []);
 }
 
-function splitSentences(paragraph: string): string[] {
-  const parts = paragraph
-    .split(/(?<=[.!?])\s+/)
-    .map((part) => part.trim())
-    .filter(Boolean);
-  return parts.length > 0 ? parts : paragraph.trim() ? [paragraph.trim()] : [];
-}
-
-/**
- * Splits text into elementary clauses along sentence boundaries, colons,
- * semicolons, em/en dashes, double hyphens, spaced hyphens, and parentheticals
- * (preserving intra-word hyphens like "per-capita" or "long-term").
- * Ensures appended noun lists after ":", ";", "—", "--", or "(...)" are
- * isolated from the preceding clause rather than borrowing its verb or
- * distorting its similarity score.
- */
-export function splitElementaryClauses(text: string): string[] {
-  const normalizedParentheticals = text
-    .replace(/\(([^()]*)\)/gu, "; $1 ;")
-    .replace(/\[([^[\]]*)\]/gu, "; $1 ;");
-
-  return normalizedParentheticals
-    .split(/(?:[.!?]+|[;:\n]+|[\u2014\u2013]+|--+|\s+-\s+)/u)
-    .map((part) => part.trim())
-    .filter(Boolean);
-}
-
 function patternRegex(pattern: string, flags: string): RegExp | undefined {
   const trimmed = pattern.trim();
   if (!trimmed) return undefined;
@@ -87,12 +63,6 @@ function patternRegex(pattern: string, flags: string): RegExp | undefined {
 
 function matchesPattern(text: string, pattern: string): boolean {
   return patternRegex(pattern, "iu")?.test(text) ?? false;
-}
-
-type MatchRange = { readonly start: number; readonly end: number };
-
-function rangesOverlap(a: MatchRange, b: MatchRange): boolean {
-  return a.start < b.end && b.start < a.end;
 }
 
 function findPatternRanges(text: string, pattern: string): MatchRange[] {
@@ -156,7 +126,10 @@ function isLowEntropySentence(sentence: string): boolean {
  * Detects repetitive filler padding (word spam, low lexical diversity, repeated
  * 3-grams, or copy-pasted identical sentences) across the draft or within any paragraph.
  */
-export function detectLowEntropyStuffing(paragraphs: readonly string[]): boolean {
+export function detectLowEntropyStuffing(
+  paragraphs: readonly string[],
+  segmentedParagraphs: readonly (readonly GroundedSentence[])[] = paragraphs.map(segmentIeltsText),
+): boolean {
   const fullText = paragraphs.join(" ");
   const allWords = tokenizeWords(fullText);
   if (allWords.length >= 60) {
@@ -168,7 +141,7 @@ export function detectLowEntropyStuffing(paragraphs: readonly string[]): boolean
   const globalTrigrams = new Map<string, number>();
   const seenSentences = new Map<string, number>();
 
-  for (const paragraph of paragraphs) {
+  for (const [index, paragraph] of paragraphs.entries()) {
     const words = tokenizeWords(paragraph);
     if (words.length >= 18) {
       const paraTtr = new Set(words).size / words.length;
@@ -198,8 +171,8 @@ export function detectLowEntropyStuffing(paragraphs: readonly string[]): boolean
       if (gCount >= 4) return true;
     }
 
-    for (const sentence of splitSentences(paragraph)) {
-      const sWords = tokenizeWords(sentence);
+    for (const sentence of segmentedParagraphs[index] ?? []) {
+      const sWords = tokenizeWords(sentence.text);
       if (sWords.length >= 5) {
         const key = sWords.join(" ");
         const sCount = (seenSentences.get(key) ?? 0) + 1;
@@ -280,15 +253,11 @@ function longestContiguousCommonRun(a: readonly string[], b: readonly string[]):
  * Removes verbless comma-list padding at the edges and between verbal segments.
  * A single fronted marker, prepositional phrase or interior aside can be meaningful.
  */
-function stripVerblessCommaLists(clause: string): string {
-  const segments = clause
-    .split(/[,，、]+/u)
-    .map((s) => s.trim())
-    .filter(Boolean);
-  if (segments.length <= 1) return clause.trim();
+function selectCoreParts(segments: readonly GroundedTextSpan[]): readonly GroundedTextSpan[] {
+  if (segments.length <= 1) return segments;
 
   let end = segments.length;
-  while (end > 1 && !CLAUSE_VERB_CUE.test(segments[end - 1]!)) {
+  while (end > 1 && !CLAUSE_VERB_CUE.test(segments[end - 1]!.text)) {
     end -= 1;
   }
 
@@ -296,7 +265,7 @@ function stripVerblessCommaLists(clause: string): string {
   let leadingVerbless = 0;
   while (
     start + leadingVerbless < end &&
-    !CLAUSE_VERB_CUE.test(segments[start + leadingVerbless]!)
+    !CLAUSE_VERB_CUE.test(segments[start + leadingVerbless]!.text)
   ) {
     leadingVerbless += 1;
   }
@@ -304,33 +273,36 @@ function stripVerblessCommaLists(clause: string): string {
     start += leadingVerbless;
   }
 
-  const core: string[] = [];
+  const core: GroundedTextSpan[] = [];
   for (let i = start; i < end;) {
     const segment = segments[i]!;
-    if (CLAUSE_VERB_CUE.test(segment)) {
+    if (CLAUSE_VERB_CUE.test(segment.text)) {
       core.push(segment);
       i += 1;
       continue;
     }
 
     let next = i + 1;
-    while (next < end && !CLAUSE_VERB_CUE.test(segments[next]!)) next += 1;
+    while (next < end && !CLAUSE_VERB_CUE.test(segments[next]!.text)) next += 1;
     if (next === i + 1) core.push(segment);
     i = next;
   }
-  return core.join(", ");
+  return core;
 }
 
 type CoreClause = {
+  readonly parts: readonly GroundedTextSpan[];
   readonly text: string;
   readonly tokens: readonly string[];
   readonly substantive: boolean;
 };
 
-function prepareCoreClause(clause: string): CoreClause {
-  const text = stripVerblessCommaLists(clause);
+function prepareCoreClause(clause: GroundedClause): CoreClause {
+  const parts = selectCoreParts(clause.parts);
+  const text = parts.map((part) => part.text).join(", ");
   const tokens = tokenizeWords(text);
   return {
+    parts,
     text,
     tokens,
     substantive: tokens.length >= 7 && CLAUSE_VERB_CUE.test(text) && !isLowEntropySentence(text),
@@ -587,22 +559,44 @@ export type AnalyzeCrossDraftTransferInput = {
   readonly targets: readonly IeltsUpgradeTarget[];
 };
 
-/**
- * Deterministic cross-draft analyzer comparing Draft 1 -> Draft 2+ across
- * collocations, syntactic structures, cohesive devices, and counterargument depth.
- * Guards against empty targets, unchanged/punctuation-only resubmissions, low-entropy
- * filler stuffing, and mechanical keyword-list pasting.
- */
+type TransferAnalysis = Omit<IeltsCrossDraftTransferReport, "summary"> & {
+  readonly summary: Omit<IeltsCrossDraftTransferReport["summary"], "masteryQualified">;
+};
+
+function finalizeTransferReport(
+  analysis: TransferAnalysis,
+  masteryQualified: boolean,
+): IeltsCrossDraftTransferReport {
+  return { ...analysis, summary: { ...analysis.summary, masteryQualified } };
+}
+
+/** Checks revisions for contextual target transfer and resolves Writing mastery eligibility. */
 export function analyzeCrossDraftTransfer(
   input: AnalyzeCrossDraftTransferInput,
 ): IeltsCrossDraftTransferReport {
-  return analyzeTransfer(input, false);
+  const analysis = analyzeTransfer(input, false, input.draft2.paragraphs.map(segmentIeltsText));
+  const { masteryQualified } = resolveIeltsEpistemicStatus({
+    draftVersion: input.draft2.version,
+    assisted: input.draft2.assisted,
+    crossDraftTransferVerified: analysis.summary.meetsCrossDraftVerification,
+    memorizedTemplateHits: analysis.memorizedTemplateHits,
+    wordCount: countDraftWords(input.draft2.paragraphs),
+    disqualificationReason: analysis.summary.disqualificationReason,
+  });
+  return finalizeTransferReport(analysis, masteryQualified);
 }
+
+type WritingCandidate = MatchRange & {
+  readonly paragraphIndex: number;
+  readonly pattern: string;
+  readonly exclusiveKey: string;
+};
 
 function analyzeTransfer(
   input: AnalyzeCrossDraftTransferInput,
   freshPromptConfirmed: boolean,
-): IeltsCrossDraftTransferReport {
+  revisedParagraphs: readonly (readonly GroundedSentence[])[],
+): TransferAnalysis {
   const samePrompt = input.draft1.promptId === input.draft2.promptId;
   const lineage = getWritingTransferLineage(input.draft1, input.draft2);
   const advancingLineage = lineage === "advancing_revision";
@@ -615,16 +609,16 @@ function analyzeTransfer(
   );
   const memorizedTemplateHits = detectMemorizedTemplates(input.draft2.paragraphs);
   const hasStuffing = hasMemorizedTemplateStuffing(memorizedTemplateHits);
-  const hasLowEntropyStuffing = detectLowEntropyStuffing(input.draft2.paragraphs);
+  const hasLowEntropyStuffing = detectLowEntropyStuffing(input.draft2.paragraphs, revisedParagraphs);
   const baselineCoreClauseTokens = input.draft1.paragraphs
-    .flatMap(splitElementaryClauses)
-    .map((clause) => tokenizeWords(stripVerblessCommaLists(clause)));
+    .flatMap(segmentIeltsText)
+    .flatMap((sentence) => sentence.clauses.map((clause) => prepareCoreClause(clause).tokens));
   const baselineCoreClauseKeys = new Set(
     baselineCoreClauseTokens.map((tokens) => tokens.join(" ")).filter(Boolean),
   );
   const allTargetPatterns = [...new Set(
     input.targets.flatMap((target) => target.targetPatterns.map(normalizeText)).filter(Boolean),
-  )];
+  )].sort();
   const baselineContexts = new Map(allTargetPatterns.map((pattern) => {
     const tokens = tokenizeWords(pattern);
     const windows = baselineCoreClauseTokens.flatMap((clause) =>
@@ -632,8 +626,8 @@ function analyzeTransfer(
     );
     return [pattern, { tokens, windows }] as const;
   }));
-  const revisedClauses = input.draft2.paragraphs.flatMap((paragraph, paragraphIndex) =>
-    splitElementaryClauses(paragraph).map((raw) => {
+  const revisedClauses = revisedParagraphs.flatMap((sentences, paragraphIndex) =>
+    sentences.flatMap((sentence) => sentence.clauses.map((raw) => {
       const core = prepareCoreClause(raw);
       return {
         ...core,
@@ -645,15 +639,14 @@ function analyzeTransfer(
           baselineCoreClauseTokens,
         ),
         mechanical: isMechanicalKeywordSentence(core, allTargetPatterns),
-        claimedRanges: [] as MatchRange[],
+        droppedParts: raw.parts.filter((part) => !core.parts.includes(part)),
       };
-    }),
+    })),
   );
   const hasSubstantiveRevision = assessSubstantiveRevision(input.draft1, input.draft2, revisedClauses);
-  const claimedPatterns = new Set<string>();
   let hasMechanicalKeywordPaste = false;
 
-  const items: IeltsUpgradeTransferItem[] = input.targets.map((target) => {
+  const targetMatches = input.targets.map((target) => {
     const baseHit = findMatchedPatterns(input.draft1.paragraphs, target.targetPatterns);
     const rawRevHit = findMatchedPatterns(input.draft2.paragraphs, target.targetPatterns);
     const baseWeak = findMatchedPatterns(
@@ -669,68 +662,69 @@ function analyzeTransfer(
       target.clichePatterns,
     );
 
-    // Verify each revised match appears in a real, non-filler, substantively revised elementary core clause
-    // (after stripping verbless comma-list tails) whose local context was not copied from Draft 1.
-    const contextualMatched = new Set<string>();
-    const contextualParagraphs = new Set<number>();
-    let matchedOnlyInMechanicalPaste = false;
-    let matchedOnlyInUnchangedSentence = false;
-    let overlapsCreditedEvidence = false;
+    const candidates: WritingCandidate[] = [];
+    let sawMechanical = false;
+    let sawUnchanged = false;
 
-    if (rawRevHit.matched.length > 0) {
-      let sawMechanical = false;
-      let sawUnchanged = false;
+    // Verify matches against the original text, excluding any stripped comma-list padding.
+    for (const pattern of rawRevHit.matched) {
+      const patternKey = normalizeText(pattern);
+      const baselineContext = baselineContexts.get(patternKey)!;
 
-      for (const pattern of target.targetPatterns) {
-        const patternKey = normalizeText(pattern);
-        const baselineContext = baselineContexts.get(patternKey);
-        if (!baselineContext) continue;
-
-        for (const clause of revisedClauses) {
-          if (!matchesPattern(clause.raw, pattern)) continue;
-          const ranges = findPatternRanges(clause.text, pattern);
-          if (!ranges.length || clause.mechanical) {
-            hasMechanicalKeywordPaste = true;
-            sawMechanical = true;
-            continue;
-          }
-          if (
-            !clause.changed ||
-            isPatternLocalContextCopiedFromBaseline(
-              clause.tokens,
-              baselineContext.tokens,
-              baselineContext.windows,
-            )
-          ) {
-            sawUnchanged = true;
-            continue;
-          }
-          const availableRanges = claimedPatterns.has(patternKey) ? [] : ranges.filter(
-            (range) => !clause.claimedRanges.some((claimed) => rangesOverlap(range, claimed)),
-          );
-          if (!availableRanges.length) {
-            overlapsCreditedEvidence = true;
-            continue;
-          }
-          contextualMatched.add(pattern);
-          contextualParagraphs.add(clause.paragraphIndex);
-          if (canEvaluateTransfer && hasSubstantiveRevision && !revCliche.matched.length) {
-            clause.claimedRanges.push(...availableRanges);
-          }
+      for (const clause of revisedClauses) {
+        const rawRanges = findPatternRanges(clause.raw.text, pattern);
+        if (rawRanges.length === 0) continue;
+        const ranges = rawRanges.map(({ start, end }) => ({
+          start: clause.raw.startOffset + start,
+          end: clause.raw.startOffset + end,
+        })).filter((range) => !clause.droppedParts.some((part) =>
+          rangesOverlap(range, { start: part.startOffset, end: part.endOffset }),
+        ));
+        if (ranges.length < rawRanges.length || clause.mechanical) {
+          hasMechanicalKeywordPaste = true;
+          sawMechanical = true;
         }
-        if (canEvaluateTransfer && hasSubstantiveRevision && !revCliche.matched.length && contextualMatched.has(pattern)) {
-          claimedPatterns.add(patternKey);
+        if (ranges.length === 0 || clause.mechanical) continue;
+        if (
+          !clause.changed ||
+          isPatternLocalContextCopiedFromBaseline(
+            clause.tokens,
+            baselineContext.tokens,
+            baselineContext.windows,
+          )
+        ) {
+          sawUnchanged = true;
+          continue;
         }
-      }
-
-      if (contextualMatched.size === 0) {
-        if (sawMechanical) matchedOnlyInMechanicalPaste = true;
-        else if (sawUnchanged) matchedOnlyInUnchangedSentence = true;
+        for (const range of ranges) {
+          candidates.push({ ...range, paragraphIndex: clause.paragraphIndex, pattern, exclusiveKey: patternKey });
+        }
       }
     }
+    return { target, baseHit, rawRevHit, baseWeak, revWeak, revCliche, candidates, sawMechanical, sawUnchanged };
+  });
 
-    const revMatchedList = [...contextualMatched];
-    const revParagraphList = [...contextualParagraphs].sort((a, b) => a - b);
+  const canAllocate = canEvaluateTransfer && hasSubstantiveRevision;
+  const eligibleTargets = targetMatches
+    .filter(({ revCliche }) => canAllocate && revCliche.matched.length === 0)
+    .sort((a, b) => compareText(a.target.criterion, b.target.criterion) || compareText(a.target.label, b.target.label));
+  const candidatesById = new Map<string, WritingCandidate[]>();
+  for (const { target, candidates } of eligibleTargets) {
+    const existing = candidatesById.get(target.id);
+    if (existing) existing.push(...candidates);
+    else candidatesById.set(target.id, [...candidates]);
+  }
+  const allocated = new Set(allocateIeltsSpans(candidatesById).values());
+
+  const items: IeltsUpgradeTransferItem[] = targetMatches.map((match) => {
+    const { target, baseHit, rawRevHit, baseWeak, revWeak, revCliche, candidates, sawMechanical, sawUnchanged } = match;
+    const winner = candidates.find((candidate) => allocated.has(candidate));
+    const matches = canAllocate && revCliche.matched.length === 0 ? (winner ? [winner] : []) : candidates;
+    const revMatchedList = [...new Set(matches.map(({ pattern }) => pattern))];
+    const revParagraphList = [...new Set(matches.map(({ paragraphIndex }) => paragraphIndex))].sort((a, b) => a - b);
+    const matchedOnlyInMechanicalPaste = candidates.length === 0 && sawMechanical;
+    const matchedOnlyInUnchangedSentence = candidates.length === 0 && !sawMechanical && sawUnchanged;
+    const overlapsCreditedEvidence = canAllocate && candidates.length > 0 && !winner;
 
     let status: IeltsTransferStatus;
     let explanation: string;
@@ -796,9 +790,11 @@ function analyzeTransfer(
   const transferRate = totalTargets > 0 ? transferredCount / totalTargets : 0;
 
   let disqualificationReason: string | undefined;
-  if (!canEvaluateTransfer) {
+  if (revisedParagraphs.every((sentences) => sentences.length === 0)) {
+    disqualificationReason = "请先提交至少一段写作正文，再复核改写。";
+  } else if (!canEvaluateTransfer) {
     disqualificationReason = samePrompt
-      ? "稿件版本未推进，暂不计作有效跨草稿迁移。"
+      ? "当前稿件与所选底稿的版本关系无法确认，暂不计作有效跨草稿迁移。"
       : "题目已更换，须完成独立新题迁移复核后才可计入正式掌握度。";
   } else if (totalTargets === 0) {
     disqualificationReason = "当前未配置目标迁移项，无法确认跨草稿迁移，暂作为练习诊断反馈。";
@@ -836,44 +832,44 @@ function analyzeTransfer(
       hasLowEntropyStuffing,
       hasMechanicalKeywordPaste,
       meetsCrossDraftVerification,
-      masteryQualified: meetsCrossDraftVerification,
       disqualificationReason,
     },
   };
 }
 
-function firstSentenceSnippet(paragraph: string, maxChars = 130): string {
-  const trimmed = paragraph.trim();
-  if (!trimmed) return "";
-  const match = trimmed.match(/^[^.!?]+[.!?]?/);
-  const boundaries = graphemeBoundaries(trimmed);
-  const sentenceEnd = boundaries.ceil(match?.[0].length ?? trimmed.length);
-  if (sentenceEnd <= maxChars) return trimmed.slice(0, sentenceEnd);
-  const limit = boundaries.floor(maxChars) || boundaries.ceil(maxChars);
-  const lastSpace = trimmed.lastIndexOf(" ", limit - 1);
-  const end = lastSpace > 40 ? boundaries.floor(lastSpace) : limit;
-  return trimmed.slice(0, end);
+type ParagraphEvidence = {
+  readonly paragraphIndex: number;
+  readonly excerpt: string;
+  readonly startOffset: number;
+  readonly endOffset: number;
+};
+
+function sentenceSnippet(sentence: GroundedSentence, paragraphIndex: number): ParagraphEvidence {
+  const { text, startOffset } = sentence;
+  let length = text.length;
+  if (length > 130) {
+    const boundaries = graphemeBoundaries(text);
+    const limit = boundaries.floor(130) || boundaries.ceil(130);
+    const lastSpace = text.lastIndexOf(" ", limit - 1);
+    length = lastSpace > 40 ? boundaries.floor(lastSpace) : limit;
+  }
+  return { paragraphIndex, excerpt: text.slice(0, length), startOffset, endOffset: startOffset + length };
 }
 
-function findParagraphMatching(
-  paragraphs: readonly string[],
+function findParagraphEvidence(
+  paragraphs: readonly (readonly GroundedSentence[])[],
   patterns: readonly string[],
-  fallbackIndex: number,
-): { paragraphIndex: number; excerpt: string } {
-  for (let i = 0; i < paragraphs.length; i += 1) {
-    const p = paragraphs[i] ?? "";
-    for (const pattern of patterns) {
-      if (matchesPattern(p, pattern)) {
-        const snippet = firstSentenceSnippet(p);
-        if (snippet) return { paragraphIndex: i, excerpt: snippet };
-      }
-    }
+  fallbackPosition: number,
+): ParagraphEvidence {
+  const nonEmpty = paragraphs.flatMap((sentences, paragraphIndex) =>
+    sentences.length > 0 ? [{ sentences, paragraphIndex }] : [],
+  );
+  for (const { sentences, paragraphIndex } of nonEmpty) {
+    const match = sentences.find((sentence) => patterns.some((pattern) => matchesPattern(sentence.text, pattern)));
+    if (match) return sentenceSnippet(match, paragraphIndex);
   }
-  const safeIndex = Math.min(Math.max(0, fallbackIndex), Math.max(0, paragraphs.length - 1));
-  return {
-    paragraphIndex: safeIndex,
-    excerpt: firstSentenceSnippet(paragraphs[safeIndex] ?? "") || (paragraphs[safeIndex] ?? "").trim(),
-  };
+  const fallback = nonEmpty[Math.min(fallbackPosition, nonEmpty.length - 1)]!;
+  return sentenceSnippet(fallback.sentences[0]!, fallback.paragraphIndex);
 }
 
 export type EvaluateRevisedDraftInput = {
@@ -885,26 +881,35 @@ export type EvaluateRevisedDraftInput = {
   readonly createdAt?: string;
 };
 
-/**
- * Deterministic live evaluator used when a learner edits Draft 2 in the workbench.
- * Always produces a validated, span-grounded 4-dimension receipt + transfer report.
- */
+export type EvaluateRevisedDraftResult = {
+  readonly transferReport: IeltsCrossDraftTransferReport;
+} & (
+  | { readonly ok: true; readonly receipt: IeltsRubricReceipt }
+  | { readonly ok: false; readonly reason: "empty_draft"; readonly receipt: null }
+);
+
+/** Evaluates a revision and issues a grounded rubric receipt when there is submitted text. */
 export function evaluateRevisedDraftDeterministically(
   input: EvaluateRevisedDraftInput,
-): {
-  readonly transferReport: IeltsCrossDraftTransferReport;
-  readonly receipt: IeltsRubricReceipt;
-} {
+): EvaluateRevisedDraftResult {
   const freshPrompt = input.revisedDraft.promptId !== input.baselineDraft.promptId &&
     input.freshPromptTransfer === true;
+  const paragraphs = input.revisedDraft.paragraphs;
+  const segmentedParagraphs = paragraphs.map(segmentIeltsText);
   const transferReport = analyzeTransfer({
     draft1: input.baselineDraft,
     draft2: input.revisedDraft,
     targets: input.targets,
-  }, freshPrompt);
+  }, freshPrompt, segmentedParagraphs);
 
-  const nonEmptyParagraphs = input.revisedDraft.paragraphs.map((p) => p.trim()).filter(Boolean);
-  const paragraphs = nonEmptyParagraphs.length > 0 ? nonEmptyParagraphs : ["(Empty draft)"];
+  if (segmentedParagraphs.every((sentences) => sentences.length === 0)) {
+    return {
+      ok: false,
+      reason: "empty_draft",
+      receipt: null,
+      transferReport: finalizeTransferReport(transferReport, false),
+    };
+  }
   const wordCount = countDraftWords(paragraphs);
   const templateHits = transferReport.memorizedTemplateHits;
   const templatePenalty =
@@ -947,27 +952,27 @@ export function evaluateRevisedDraftDeterministically(
     return clampToIeltsBand(penalized);
   };
 
-  const trLoc = findParagraphMatching(
-    paragraphs,
+  const trLoc = findParagraphEvidence(
+    segmentedParagraphs,
     ["admittedly", "critics", "while", "counter", "public transit", "funding"],
-    Math.min(2, paragraphs.length - 1),
+    2,
   );
-  const ccLoc = findParagraphMatching(
-    paragraphs,
+  const ccLoc = findParagraphEvidence(
+    segmentedParagraphs,
     ["consequently", "by contrast", "moreover", "this shift", "such investment", "in turn"],
-    Math.min(1, paragraphs.length - 1),
+    1,
   );
-  const lrLoc = findParagraphMatching(
-    paragraphs,
+  const lrLoc = findParagraphEvidence(
+    segmentedParagraphs,
     templateHits.length > 0
       ? templateHits.map((h) => h.phrase)
       : ["alleviate", "viability", "emissions", "congestion", "infrastructure"],
     0,
   );
-  const graLoc = findParagraphMatching(
-    paragraphs,
+  const graLoc = findParagraphEvidence(
+    segmentedParagraphs,
     ["while", "although", "whereas", "which", "whereby", "rather than"],
-    Math.min(1, paragraphs.length - 1),
+    1,
   );
 
   const trBand = scoreCriterion("TR");
@@ -977,8 +982,7 @@ export function evaluateRevisedDraftDeterministically(
 
   const trSpan: IeltsSpanEvidence = {
     id: `${input.receiptId}-tr-1`,
-    paragraphIndex: trLoc.paragraphIndex,
-    excerpt: trLoc.excerpt,
+    ...trLoc,
     criterion: "TR",
     diagnosis:
       criterionTransfers("TR").some((i) => i.status === "transferred")
@@ -990,8 +994,7 @@ export function evaluateRevisedDraftDeterministically(
 
   const ccSpan: IeltsSpanEvidence = {
     id: `${input.receiptId}-cc-1`,
-    paragraphIndex: ccLoc.paragraphIndex,
-    excerpt: ccLoc.excerpt,
+    ...ccLoc,
     criterion: "CC",
     diagnosis:
       criterionTransfers("CC").some((i) => i.status === "transferred")
@@ -1003,8 +1006,7 @@ export function evaluateRevisedDraftDeterministically(
 
   const lrSpan: IeltsSpanEvidence = {
     id: `${input.receiptId}-lr-1`,
-    paragraphIndex: lrLoc.paragraphIndex,
-    excerpt: lrLoc.excerpt,
+    ...lrLoc,
     criterion: "LR",
     diagnosis:
       templateHits.length > 0
@@ -1018,8 +1020,7 @@ export function evaluateRevisedDraftDeterministically(
 
   const graSpan: IeltsSpanEvidence = {
     id: `${input.receiptId}-gra-1`,
-    paragraphIndex: graLoc.paragraphIndex,
-    excerpt: graLoc.excerpt,
+    ...graLoc,
     criterion: "GRA",
     diagnosis:
       criterionTransfers("GRA").some((i) => i.status === "transferred")
@@ -1079,7 +1080,7 @@ export function evaluateRevisedDraftDeterministically(
   const validated = createValidatedRubricReceipt({
     receiptId: input.receiptId,
     taskMode: "writing_task2",
-    draft: { ...input.revisedDraft, paragraphs },
+    draft: input.revisedDraft,
     baselineDraft: input.baselineDraft,
     assessments,
     crossDraftTransferVerified: transferReport.summary.meetsCrossDraftVerification,
@@ -1095,7 +1096,8 @@ export function evaluateRevisedDraftDeterministically(
   }
 
   return {
-    transferReport,
+    ok: true,
+    transferReport: finalizeTransferReport(transferReport, validated.receipt.masteryQualified),
     receipt: validated.receipt,
   };
 }
