@@ -263,11 +263,13 @@ function blockedRebuildMessage(parsingSourceCount: number, unreadableSourceCount
   return "当前有资料仍在解析中。已保留原有知识点，请等待解析完成后再重新整理。";
 }
 
-async function readEligibleAndParsingMaterials(
+async function readEligibleSourceVersions(
   db: Sql | TransactionSql,
   scope: Scope,
   courseId: string,
-): Promise<{ eligibleSourceVersions: Record<string, number>; parsingSourceCount: number }> {
+  lockIds?: string[],
+): Promise<Record<string, number>> {
+  if (lockIds?.length === 0) return {};
   const eligibleRows = await db`
     SELECT s.id, s.version
     FROM opening_sources s
@@ -280,6 +282,7 @@ async function readEligibleAndParsingMaterials(
       AND m.course_id = ${courseId}
       AND (m.purpose IS NULL OR m.purpose = 'teaching')
     WHERE s.workspace_id = ${scope.workspaceId}
+      ${lockIds ? db`AND s.id IN ${db(lockIds)}` : db``}
       AND s.upload_state = 'uploaded'
       AND s.parse_state = 'ready'
       AND v.availability = 'available'
@@ -292,12 +295,18 @@ async function readEligibleAndParsingMaterials(
         WHERE c.source_id = s.id
           AND c.source_version = s.version
           AND c.text ~ '[^[:space:]]'
+          ${lockIds ? db`LIMIT 1 FOR SHARE OF c` : db``}
       )
-    ORDER BY s.id`;
-  const eligibleSourceVersions: Record<string, number> = {};
-  for (const row of eligibleRows as Array<Record<string, unknown>>) {
-    eligibleSourceVersions[String(row.id)] = Number(row.version);
-  }
+    ORDER BY s.id ${lockIds ? db`FOR SHARE OF s, v, m` : db``}`;
+  return Object.fromEntries(eligibleRows.map(row => [String(row.id), Number(row.version)]));
+}
+
+async function readEligibleAndParsingMaterials(
+  db: Sql | TransactionSql,
+  scope: Scope,
+  courseId: string,
+): Promise<{ eligibleSourceVersions: Record<string, number>; parsingSourceCount: number }> {
+  const eligibleSourceVersions = await readEligibleSourceVersions(db, scope, courseId);
 
   const parsingRows = await db`
     SELECT count(DISTINCT s.id)::int AS count
@@ -394,6 +403,39 @@ async function readMandatoryCleanupSourceIds(
   return cleanupIds;
 }
 
+function receiptCoverage(record: OpeningKnowledgeRecord, result: Record<string, unknown> | null) {
+  return result?.version === record.version && result.coveredSourceVersions
+    && typeof result.coveredSourceVersions === "object" && !Array.isArray(result.coveredSourceVersions)
+    ? parseSourceVersions(result.coveredSourceVersions)
+    : record.sourceVersions;
+}
+
+async function coverageForEdit(
+  tx: TransactionSql,
+  scope: Scope,
+  courseId: string,
+  previous: OpeningKnowledgeRecord | null,
+  sourceVersions: Record<string, number>,
+  extracted?: Record<string, number>,
+): Promise<Record<string, number>> {
+  let previousCoverage = previous?.snapshot.coveredSourceVersions;
+  if (extracted === undefined && previous && previousCoverage === undefined) {
+    const [job] = await tx`SELECT result FROM opening_jobs
+      WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
+        AND kind='build-course-knowledge' AND payload->>'courseId'=${courseId} AND state='succeeded'
+        AND result->'version'=${tx.json(previous.version)}
+      ORDER BY updated_at DESC, created_at DESC, id DESC LIMIT 1`;
+    previousCoverage = receiptCoverage(previous, job?.result ?? null);
+  }
+  const proposed = extracted ?? { ...previousCoverage, ...sourceVersions };
+  const live = await readEligibleSourceVersions(tx, scope, courseId, Object.keys(proposed).sort());
+  if (extracted !== undefined && (!sameVersions(extracted, live)
+    || Object.entries(sourceVersions).some(([id, version]) => extracted[id] !== version))) {
+    throw new OpeningKnowledgeError("CONFLICT", "课程材料已变化，请按最新可读资料重新整理。", "MATERIAL_REPLACEMENT_BLOCKED");
+  }
+  return Object.fromEntries(Object.entries(proposed).filter(([id, version]) => live[id] === version));
+}
+
 async function readSyncStatusInternal(
   db: Sql | TransactionSql,
   scope: Scope,
@@ -460,17 +502,10 @@ async function readSyncStatusInternal(
     resultObj && typeof resultObj.version === "number" && Number.isInteger(resultObj.version) && resultObj.version >= 0
       ? resultObj.version
       : null;
-  const hasResultCovered = Boolean(
-    resultObj
-      && "coveredSourceVersions" in resultObj
-      && resultObj.coveredSourceVersions !== null
-      && typeof resultObj.coveredSourceVersions === "object"
-      && !Array.isArray(resultObj.coveredSourceVersions),
-  );
   const lastBuiltVersion = latestSucceeded ? resultVersion : null;
-  const coveredSourceVersions = hasResultCovered
-    ? parseSourceVersions(resultObj!.coveredSourceVersions)
-    : (record?.sourceVersions ?? {});
+  const coveredSourceVersions = record
+    ? record.snapshot.coveredSourceVersions ?? receiptCoverage(record, resultObj)
+    : {};
 
   let status: CourseKnowledgeSyncStatus;
   if (activeJobId !== null) {
@@ -724,7 +759,8 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
           throw error;
         }
         const version = current.version + 1;
-        const snapshot: KnowledgeSnapshot = { ...current.snapshot, version,
+        const coveredSourceVersions = await coverageForEdit(tx, scope, courseId, current, current.sourceVersions);
+        const snapshot: KnowledgeSnapshot = { ...current.snapshot, version, coveredSourceVersions,
           nodes: current.snapshot.nodes.map(item => item.id === nodeId ? { ...item, status: "supported" } : item) };
         await tx`UPDATE opening_course_knowledge SET version=${version},snapshot=${tx.json(snapshot as never)},updated_at=now()
           WHERE workspace_id=${scope.workspaceId} AND course_id=${courseId}`;
@@ -825,7 +861,9 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
           const existing = mapRecord(current);
           const replayable = existing.snapshot.nodes.length > 0
             && [...existing.snapshot.nodes, ...existing.snapshot.edges].every(item => item.status !== "needs_check");
-          if (replayable && sameGraph(existing.snapshot, draft) && sameVersions(existing.sourceVersions, sourceVersions)) return existing;
+          const sameCoverage = input.extractedSourceVersions === undefined
+            || sameVersions(existing.snapshot.coveredSourceVersions ?? {}, input.extractedSourceVersions);
+          if (replayable && sameCoverage && sameGraph(existing.snapshot, draft) && sameVersions(existing.sourceVersions, sourceVersions)) return existing;
         }
         if (currentVersion !== input.expectedVersion) {
           throw new OpeningKnowledgeError("CONFLICT", "stale knowledge version");
@@ -887,6 +925,7 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
         }
         const evidence = await assertAuthorizedChunks(tx, scope, courseId,
           [...new Set([...draft.nodes, ...draft.edges].flatMap(item => item.evidenceChunkIds))].sort(), sourceVersions);
+        const coveredSourceVersions = await coverageForEdit(tx, scope, courseId, previous, sourceVersions, input.extractedSourceVersions);
         const definitions = Object.fromEntries(draft.nodes.flatMap(node => {
           const definition = knowledgeNodeDefinition(node, evidence);
           return definition ? [[node.id, definition]] : [];
@@ -937,7 +976,7 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
           }
           return node;
         });
-        const stored: KnowledgeSnapshot = { ...draft, nodes, version: newVersion };
+        const stored: KnowledgeSnapshot = { ...draft, nodes, version: newVersion, coveredSourceVersions };
         const rows = await tx`
           INSERT INTO opening_course_knowledge (
             workspace_id, owner_user_id, course_id, version, snapshot, source_versions, node_definitions, updated_at
@@ -1137,13 +1176,13 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
 
     /**
      * Mark snapshot nodes/edges needs_check when listed sources change.
-     * Returns courseIds whose source_versions listed any of the ids (even if already
+     * Returns courseIds whose graph evidence or coverage listed any of the ids (even if already
      * needs_check / not dirty) so callers can enqueue full-course rebuilds.
      */
     async markNeedsCheckForSources(
       scope: Scope,
       sourceIds: readonly string[],
-      options?: { courseId?: string },
+      options?: { courseId?: string; expectedVersion?: number },
     ): Promise<{ updated: number; courseIds: string[] }> {
       const ids = [...new Set(sourceIds)].sort();
       if (!ids.length) return { updated: 0, courseIds: [] };
@@ -1169,29 +1208,40 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
         let updated = 0;
         const courseIds: string[] = [];
         for (const row of rows as Array<Record<string, unknown>>) {
+          if (options?.expectedVersion !== undefined && Number(row.version) !== options.expectedVersion) continue;
           const sourceVersions = parseSourceVersions(row.source_versions);
-          if (!ids.some((id) => id in sourceVersions)) continue;
+          const snapshot = knowledgeSnapshotSchema.parse(row.snapshot);
+          const evidenceAffected = ids.some((id) => id in sourceVersions);
+          const coverage = snapshot.coveredSourceVersions;
+          if (!evidenceAffected && !ids.some((id) => coverage && id in coverage)) continue;
           const courseId = String(row.course_id);
           courseIds.push(courseId);
           // Revoke even if the graph was already needs_check; the CAS fence advances below.
-          await tx`DELETE FROM opening_knowledge_confirmations WHERE workspace_id=${scope.workspaceId}
-            AND owner_user_id=${scope.ownerUserId} AND course_id=${courseId}`;
-          const snapshot = knowledgeSnapshotSchema.parse(row.snapshot);
+          if (evidenceAffected) {
+            await tx`DELETE FROM opening_knowledge_confirmations WHERE workspace_id=${scope.workspaceId}
+              AND owner_user_id=${scope.ownerUserId} AND course_id=${courseId}`;
+          }
           let dirty = false;
           const nodes = snapshot.nodes.map((node) => {
-            if (node.status === "needs_check") return node;
+            if (!evidenceAffected || node.status === "needs_check") return node;
             dirty = true;
             return { ...node, status: "needs_check" as const };
           });
           const edges = snapshot.edges.map((edge) => {
-            if (edge.status === "needs_check") return edge;
+            if (!evidenceAffected || edge.status === "needs_check") return edge;
             dirty = true;
             return { ...edge, status: "needs_check" as const };
           });
           // Even an already-pending graph needs a new CAS fence: a confirmation submitted before
           // this maintenance must conflict after it, rather than approve the invalidated view.
           const version = Number(row.version) + 1;
-          const next: KnowledgeSnapshot = { ...snapshot, version, nodes, edges };
+          const next: KnowledgeSnapshot = { ...snapshot, version, nodes, edges,
+            ...(coverage && {
+              coveredSourceVersions: Object.fromEntries(
+                Object.entries(coverage).filter(([id]) => !ids.includes(id)),
+              ),
+            }),
+          };
           await tx`
             UPDATE opening_course_knowledge
             SET version = ${version}, snapshot = ${tx.json(next as never)}, updated_at = now()
@@ -1247,14 +1297,15 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
       );
       const invalidated = new Set<string>(options?.invalidatedSourceIds ?? []);
       if (existingRecord) {
-        for (const [sourceId, builtVersion] of Object.entries(existingRecord.sourceVersions)) {
+        const knownVersions = { ...existingRecord.snapshot.coveredSourceVersions, ...existingRecord.sourceVersions };
+        for (const [sourceId, builtVersion] of Object.entries(knownVersions)) {
           const attached = attachedById.get(sourceId);
           if (!attached || attached.excluded || attached.version === null || attached.version !== builtVersion) {
             invalidated.add(sourceId);
           }
         }
-        if ([...invalidated].some((id) => id in existingRecord.sourceVersions)) {
-          await this.markNeedsCheckForSources(scope, [...invalidated], { courseId });
+        if ([...invalidated].some((id) => id in knownVersions)) {
+          await this.markNeedsCheckForSources(scope, [...invalidated], { courseId, expectedVersion: existingRecord.version });
         }
       }
 
@@ -1262,7 +1313,8 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
       if (initial.rebuildBlockedByMaterials) {
         return { sync: initial.sync, enqueued: null };
       }
-      const effectiveCovered = options?.coveredSourceVersions ?? initial.sync.coveredSourceVersions;
+      const effectiveCovered = initial.record?.snapshot.coveredSourceVersions
+        ?? options?.coveredSourceVersions ?? initial.sync.coveredSourceVersions;
       const graphSources = initial.record?.sourceVersions ?? {};
       const hasGraphOrStaleSources = Boolean(
         initial.record
@@ -1317,7 +1369,7 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
               WHERE k.workspace_id = c.workspace_id
                 AND k.owner_user_id = ${scope.ownerUserId}
                 AND k.course_id = c.id
-                AND k.source_versions ? ${input.sourceId}
+                AND (k.source_versions ? ${input.sourceId} OR (k.snapshot->'coveredSourceVersions') ? ${input.sourceId})
             )
             OR EXISTS (
               SELECT 1 FROM opening_jobs j

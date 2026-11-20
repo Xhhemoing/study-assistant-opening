@@ -31,9 +31,36 @@ function normalizeReferenceId(value: string): string {
   return uuidSchema.safeParse(value).success ? value.toLowerCase() : value;
 }
 
+// Activity mutations still carry the legacy learner timestamp. Other learner
+// actions can advance it without writing to the activity checkpoint.
+function learnerEngagementAt(db: Db) {
+  return db`GREATEST(a.updated_at,
+    (SELECT max(GREATEST(attempt.started_at,attempt.submitted_at)) FROM opening_learning_attempts attempt
+      WHERE attempt.activity_id=a.id AND attempt.workspace_id=a.workspace_id AND attempt.owner_user_id=a.owner_user_id
+        AND attempt.course_id=a.course_id),
+    (SELECT max(event.created_at) FROM opening_study_intent_events event
+      WHERE event.activity_id=a.id AND event.workspace_id=a.workspace_id AND event.owner_user_id=a.owner_user_id),
+    (SELECT max(turn.created_at) FROM opening_turns turn
+      JOIN opening_conversations conversation ON conversation.id=turn.conversation_id
+        AND conversation.workspace_id=turn.workspace_id AND conversation.owner_user_id=a.owner_user_id
+      WHERE turn.workspace_id=a.workspace_id AND turn.role='user'
+        AND (turn.context_anchor->>'activityId'=a.id::text
+          OR EXISTS (SELECT 1 FROM opening_learning_sessions session
+            WHERE session.id=turn.learning_session_id AND session.activity_id=a.id
+              AND session.workspace_id=a.workspace_id AND session.owner_user_id=a.owner_user_id
+              AND session.course_id IS NOT DISTINCT FROM a.course_id))),
+    (SELECT revision.created_at FROM library_revisions revision
+      WHERE a.create_intent->>'protocol'='writing-workspace-v1'
+        AND revision.workspace_id=a.workspace_id
+        AND revision.document_id::text=lower(a.checkpoint_json->'writingWorkspace'->>'activeDocumentId')
+        AND revision.revision_number>1
+      ORDER BY revision.revision_number DESC LIMIT 1)
+  )`;
+}
+
 async function candidates(db: Db, scope: Scope, courseId: string | null, options: CandidateOptions = {}): Promise<CourseCandidateRow[]> {
   const normalizedRefs = options.references?.map(id => id.toLowerCase());
-  const rows = await db`SELECT a.id,a.course_id,a.status,a.updated_at,a.content_version,a.intent_kind,a.create_intent,a.checkpoint_json,s.id AS session_id
+  const rows = await db`SELECT a.id,a.course_id,a.status,${learnerEngagementAt(db)} AS updated_at,a.content_version,a.intent_kind,a.create_intent,a.checkpoint_json,s.id AS session_id
     FROM opening_teaching_activities a
     JOIN workspaces w ON w.id=a.workspace_id AND w.owner_user_id=a.owner_user_id
     JOIN courses c ON c.id=a.course_id AND c.workspace_id=a.workspace_id AND c.archived_at IS NULL
@@ -271,7 +298,7 @@ async function workspaceCandidates(
   options: { recoveryOnly?: boolean; references?: string[]; sessionId?: string | null } = {},
 ): Promise<WorkspaceCandidateRow[]> {
   const normalizedRefs = options.references?.map(id => id.toLowerCase());
-  const rows = await db`SELECT a.id,a.course_id,a.status,a.updated_at,a.content_version,a.intent_kind,a.create_intent,a.checkpoint_json,
+  const rows = await db`SELECT a.id,a.course_id,a.status,${learnerEngagementAt(db)} AS updated_at,a.content_version,a.intent_kind,a.create_intent,a.checkpoint_json,
       s.id AS session_id, (c.id IS NOT NULL) AS course_present
     FROM opening_teaching_activities a
     JOIN workspaces w ON w.id=a.workspace_id AND w.owner_user_id=a.owner_user_id

@@ -6,6 +6,7 @@ import {
   createOpeningPlansRepository,
   createOpeningSpanSessionRepository,
   createOpeningTeachingActivitiesRepository,
+  createOpeningTeachingContentRepository,
   createOpeningWritingWorkspaceRepository,
   readOpeningCurrentLearningActivity,
   readOpeningCurrentLearningRecovery,
@@ -60,6 +61,57 @@ async function readFootprint() {
     preferences: await f.sql`SELECT * FROM workspace_preferences WHERE workspace_id=${f.scope.workspaceId}`,
   };
 }
+
+it("keeps learner activity ahead of background publish, then ranks an actual bound document revision first", async () => {
+  const older = await activity({ at: "2026-01-01T00:00:00Z", placeholder: true });
+  const current = await activity({ at: "2026-01-02T00:00:00Z" });
+  const content = createOpeningTeachingContentRepository(f.sql), blockId = randomUUID();
+  const unit = await content.createUnit(f.scope, {
+    title: "Compiled lesson", blocks: [{ id: blockId, type: "text", content: { text: "Background publication" } }],
+  });
+  await content.publishActivitySpec(f.scope, {
+    activityId: older, teachingUnitId: unit.id, expectedVersion: 0, revisionNumber: 1,
+    blockOrder: [{ blockId, blockType: "text", role: "teach", position: 0 }],
+  });
+  await expect(readOpeningCurrentLearningRecovery(f.sql, f.scope)).resolves.toMatchObject({ activityId: current });
+  await expect(readOpeningWorkspaceActivityRecovery(f.sql, f.scope)).resolves.toMatchObject({ kind: "course", activityId: current });
+
+  const library = createLibraryRepository(f.sql);
+  const docId = randomUUID();
+  await f.sql`INSERT INTO library_documents(id,workspace_id,title,lifecycle,current_revision_number)
+    VALUES(${docId},${f.scope.workspaceId},'Writing draft','scratch',1)`;
+  await f.sql`INSERT INTO library_revisions(workspace_id,document_id,revision_number,title,lifecycle,blocks,created_at)
+    VALUES(${f.scope.workspaceId},${docId},1,'Writing draft','scratch','[]'::jsonb,'2026-01-01T00:00:00Z')`;
+  const writingActivity = randomUUID();
+  const checkpoint = { writingWorkspace: {
+    protocol: "writing-workspace-v1", workGroupId: docId, activeDocumentId: docId,
+    activeVariantLabel: "Draft", savedRevisionNumber: 1, focusBlockId: null, updatedAt: "2026-01-01T00:00:00Z",
+  } };
+  await f.sql`INSERT INTO opening_teaching_activities
+    (id,workspace_id,owner_user_id,course_id,status,intent_kind,intent_summary,client_key,create_intent,checkpoint_json,updated_at)
+    VALUES(${writingActivity},${f.scope.workspaceId},${f.scope.ownerUserId},${courseId},'active','topic','Writing draft',${randomUUID()},
+      ${f.sql.json({ protocol: "writing-workspace-v1", workGroupId: docId })},${f.sql.json(checkpoint)},'2026-01-01T00:00:00Z')`;
+  await f.sql`INSERT INTO library_properties(workspace_id,subject_type,subject_id,key,value_type,value)
+    VALUES(${f.scope.workspaceId},'document',${docId},${WRITING_META_PROPERTY_KEY},'json',
+      ${f.sql.json({ workGroupId: docId, variantLabel: "Draft", parentDocumentId: null, parentRevisionNumber: null,
+        keptAsPreferred: false, focusBlockId: null, assistanceRecords: [] })})`;
+  const coverage = () => f.sql`SELECT * FROM opening_course_question_exposure_coverage WHERE workspace_id=${f.scope.workspaceId}`;
+  const before = await coverage();
+  expect(before).toMatchObject([{ invalidated: false }]);
+  await expect(readOpeningWorkspaceActivityRecovery(f.sql, f.scope)).resolves.toMatchObject({ activityId: current });
+  await library.updateDocument({
+    workspaceId: f.scope.workspaceId, documentId: docId, expectedRevisionNumber: 1,
+    blocks: [{ id: randomUUID(), type: "paragraph", content: { text: "New draft paragraph" } }],
+  });
+  await expect(readOpeningWorkspaceActivityRecovery(f.sql, f.scope)).resolves.toMatchObject({
+    kind: "writing", activityId: writingActivity, documentId: docId, savedRevisionNumber: 1, currentRevisionNumber: 2,
+  });
+  await expect(readOpeningCurrentLearningRecovery(f.sql, f.scope)).resolves.toMatchObject({ activityId: writingActivity });
+  const [stored] = await f.sql`SELECT checkpoint_json,updated_at FROM opening_teaching_activities WHERE id=${writingActivity}`;
+  expect(stored!.checkpoint_json).toEqual(checkpoint);
+  expect(new Date(stored!.updated_at).toISOString()).toBe("2026-01-01T00:00:00.000Z");
+  expect(await coverage()).toEqual(before);
+});
 const terminalRetestRecoveryCases = (["cancelled", "completed"] as const).flatMap(retestStatus =>
   (["active", "paused"] as const).flatMap(status => (["same", "other"] as const).map(course => ({ retestStatus, status, course }))));
 it.each(terminalRetestRecoveryCases)("recovers older $course-course progress past a newer $status lesson with $retestStatus retest", async ({ retestStatus, status, course }) => {

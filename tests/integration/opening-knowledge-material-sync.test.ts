@@ -136,6 +136,33 @@ function makeBuildHandler(options?: {
 }
 
 describe("opening knowledge material lifecycle sync (real PG)", () => {
+  it("persists a zero-node build and distinguishes readable material from ready-but-empty and failed material without a job receipt", async () => {
+    const courseId = await seedCourse();
+    const readable = await seedSource({ text: "Cover page and acknowledgements" });
+    const blank = await seedSource({ text: " \t\n" });
+    const failed = await seedSource({ parseState: "failed" });
+    const membership = createCourseMembershipRepository(f.sql);
+    for (const material of [readable, blank, failed]) {
+      await membership.addAssetMembership({ workspaceId: f.scope.workspaceId, courseId, assetType: "source",
+        assetId: material.sourceId, role: "core", visibility: "course", purpose: "teaching" });
+    }
+    const knowledge = createOpeningKnowledgeRepository(f.sql);
+    const covered = { [readable.sourceId]: readable.version };
+    const input = { expectedVersion: 0, sourceVersions: {}, snapshot: { courseId, version: 0, nodes: [], edges: [] } };
+    await expect(knowledge.replace(f.scope, courseId, {
+      ...input, extractedSourceVersions: { ...covered, [blank.sourceId]: blank.version },
+    })).rejects.toMatchObject({ code: "CONFLICT", reason: "MATERIAL_REPLACEMENT_BLOCKED" });
+    const saved = await knowledge.replace(f.scope, courseId, { ...input, extractedSourceVersions: covered });
+    const [stored] = await f.sql`SELECT snapshot,source_versions FROM opening_course_knowledge WHERE course_id=${courseId}`;
+    expect(stored).toMatchObject({ snapshot: { version: 1, nodes: [], coveredSourceVersions: covered }, source_versions: {} });
+    await expect(knowledge.readSyncStatus(f.scope, courseId, { includeDetails: true })).resolves.toMatchObject({
+      status: "up_to_date", lastBuiltVersion: null, coveredSourceVersions: covered, eligibleSourceVersions: covered, unreadableSourceCount: 2,
+    });
+    await expect(knowledge.replace(f.scope, courseId, { ...input, expectedVersion: saved.version })).resolves.toMatchObject({
+      snapshot: { version: 2, coveredSourceVersions: covered },
+    });
+  });
+
   it("handles V2 running + V3 arriving + confirmNode CAS race and converges to up_to_date", async () => {
     const knowledge = createOpeningKnowledgeRepository(f.sql);
     const jobs = createOpeningJobRepository(f.sql);

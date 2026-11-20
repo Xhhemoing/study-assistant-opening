@@ -294,13 +294,14 @@ export function createBuildCourseKnowledgeHandler(deps: BuildCourseKnowledgeDeps
         latestReferenced,
       );
     }
+    const committedCoverage = saved.snapshot.coveredSourceVersions ?? coveredSourceVersions;
     if (deps.onBuildCompleted) {
       try {
-        await deps.onBuildCompleted(scope, body.courseId, coveredSourceVersions);
+        await deps.onBuildCompleted(scope, body.courseId, committedCoverage);
       } catch {
         // Best-effort post-build reconciliation; saved snapshot is already durable.
       }
     }
-    return { version: saved.version, snapshot: saved.snapshot, coveredSourceVersions };
+    return { version: saved.version, snapshot: saved.snapshot, coveredSourceVersions: committedCoverage };
   };
 }

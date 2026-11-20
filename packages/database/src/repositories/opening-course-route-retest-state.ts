@@ -51,21 +51,53 @@ export async function assertOpeningCourseRouteRetestReschedulable(tx:Transaction
 export async function readOpeningCourseRouteRetestOutcome(db:Sql|TransactionSql,scope:Scope,retestId:string,observation:CourseRouteObservation|null){
   const retest=await readOpeningCourseRouteRetest(db,scope,retestId),protocol=courseRouteDelayedProtocolSchema.safeParse(retest?.learning_protocol);
   let recordedIntervalHelp=false,recordedIntervalPractice=false;
-  const [record]=observation?await db`SELECT o.submitted_at,a.started_at,b.recorded_at AS baseline_at,
+  const [record]=observation?await db`SELECT o.submitted_at,a.started_at,a.item_version_id,a.problem_id,b.recorded_at AS baseline_at,
       EXISTS(SELECT 1 FROM opening_learning_observations root WHERE root.id=COALESCE(b.root_observation_id,b.id)
-        AND root.workspace_id=b.workspace_id AND COALESCE(root.effective_head_id,root.id)=b.id AND COALESCE(b.revision_kind,'original')<>'retract') AS baseline_current
+        AND root.workspace_id=b.workspace_id AND root.owner_user_id=b.owner_user_id
+        AND COALESCE(root.effective_head_id,root.id)=b.id AND COALESCE(b.revision_kind,'original')<>'retract') AS baseline_current
     FROM opening_learning_observations o JOIN opening_learning_attempts a ON a.id=o.attempt_id AND a.workspace_id=o.workspace_id AND a.owner_user_id=o.owner_user_id
     JOIN opening_retest_activities r ON r.id=o.retest_id AND r.workspace_id=o.workspace_id AND r.owner_user_id=o.owner_user_id
     JOIN opening_learning_observations b ON b.id::text=r.learning_protocol->>'baselineObservationId' AND b.workspace_id=r.workspace_id AND b.owner_user_id=r.owner_user_id
     WHERE o.id=${observation.id} AND o.workspace_id=${scope.workspaceId} AND o.owner_user_id=${scope.ownerUserId} AND r.id=${retestId}`:[];
-  if(record&&protocol.success){
-    const [interval]=await db`SELECT EXISTS(SELECT 1 FROM opening_help_exposures h JOIN opening_learning_sessions l ON l.id=h.session_id AND l.workspace_id=h.workspace_id
-      JOIN opening_teaching_activities activity ON activity.id=l.activity_id AND activity.workspace_id=l.workspace_id AND activity.owner_user_id=l.owner_user_id
-      WHERE h.workspace_id=${scope.workspaceId} AND l.owner_user_id=${scope.ownerUserId} AND h.delivered=TRUE
-        AND activity.goal_json->'courseRoute'->>'requirementId'=${protocol.data.requirementId}
-        AND COALESCE(h.released_at,h.delivered_at)>${record.baseline_at as Date} AND COALESCE(h.released_at,h.delivered_at)<=${record.started_at as Date}) AS helped,
+  if(record&&retest&&protocol.success){
+    const courseId=String(retest.course_id), requirementKey=retest.requirement_key as string | null;
+    const requirementId=protocol.data.requirementId;
+    const [interval]=await db`SELECT EXISTS(
+      SELECT 1 FROM opening_help_exposures h
+      LEFT JOIN opening_learning_sessions l ON l.id=h.session_id AND l.workspace_id=h.workspace_id
+        AND l.owner_user_id=${scope.ownerUserId}
+      WHERE h.workspace_id=${scope.workspaceId}
+        AND (h.owner_user_id=${scope.ownerUserId} OR (h.owner_user_id IS NULL AND l.id IS NOT NULL))
+        AND h.delivered=TRUE AND (h.support_domain='language' AND h.kind IN ('instruction','hint')) IS NOT TRUE
+        AND COALESCE(h.released_at,h.delivered_at,h.created_at)>${record.baseline_at as Date}
+        AND COALESCE(h.released_at,h.delivered_at,h.created_at)<=${record.started_at as Date}
+        AND (
+          h.item_version_id=${(record.item_version_id as string | null | undefined) ?? null}
+          OR h.problem_id=${(record.problem_id as string | null | undefined) ?? null}
+          OR EXISTS (SELECT 1 FROM opening_teaching_activities activity
+            WHERE activity.workspace_id=h.workspace_id AND activity.owner_user_id=${scope.ownerUserId}
+              AND activity.course_id=${courseId} AND activity.id IN (h.activity_id,l.activity_id)
+              AND activity.goal_json->'courseRoute'->>'requirementId'=${requirementId})
+          OR EXISTS (SELECT 1 FROM opening_learning_attempts bound
+            WHERE bound.workspace_id=h.workspace_id AND bound.owner_user_id=${scope.ownerUserId}
+              AND bound.course_id=${courseId} AND bound.requirement_key=${requirementKey}
+              AND (bound.item_version_id=h.item_version_id OR bound.problem_id=h.problem_id))
+          OR EXISTS (SELECT 1 FROM opening_learning_item_versions item
+            LEFT JOIN opening_teaching_activities activity ON activity.id=item.activity_id
+              AND activity.workspace_id=item.workspace_id AND activity.owner_user_id=item.owner_user_id
+              AND activity.course_id=item.course_id
+            WHERE item.workspace_id=h.workspace_id AND item.owner_user_id=${scope.ownerUserId}
+              AND item.course_id=${courseId} AND (item.id=h.item_version_id OR item.problem_id=h.problem_id)
+              AND (item.evaluation_spec->'courseRequirement'->>'id'=${requirementId}
+                OR item.evaluation_spec->>'requirementKey'=${requirementKey}
+                OR activity.goal_json->'courseRoute'->>'requirementId'=${requirementId}
+                OR EXISTS (SELECT 1 FROM opening_course_reserved_questions reserved
+                  WHERE reserved.workspace_id=item.workspace_id AND reserved.owner_user_id=item.owner_user_id
+                    AND reserved.course_id=item.course_id AND reserved.issued_item_version_id=item.id
+                    AND reserved.requirement_id=${requirementId})))
+        )) AS helped,
       EXISTS(SELECT 1 FROM opening_learning_attempts a WHERE a.workspace_id=${scope.workspaceId} AND a.owner_user_id=${scope.ownerUserId}
-        AND a.course_id=${retest!.course_id as string} AND a.requirement_key=${retest!.requirement_key as string}
+        AND a.course_id=${courseId} AND a.requirement_key=${requirementKey}
         AND a.started_at>${record.baseline_at as Date} AND a.started_at<${record.started_at as Date}) AS practiced`;
     recordedIntervalHelp=interval?.helped===true;recordedIntervalPractice=interval?.practiced===true;
   }

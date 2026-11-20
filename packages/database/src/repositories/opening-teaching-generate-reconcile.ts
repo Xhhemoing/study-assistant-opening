@@ -129,7 +129,7 @@ export async function reconcileTeachingGenerate(
       const again = decideTeachingGenerateReconcile(decisionInput(locked, current, current ? new Date(current.now).getTime() : nowMs, options.staleMs));
       if (again.action !== "mark_activity" || (current?.id ?? null) !== (job?.id ?? null)) return null;
       const [row] = await tx<{ generate_status: GenerateStatus }[]>`
-        UPDATE opening_teaching_activities SET generate_status = ${again.generateStatus}, updated_at = now()
+        UPDATE opening_teaching_activities SET generate_status = ${again.generateStatus}
         WHERE id = ${activityId} AND workspace_id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}
           AND generate_status IN ('queued', 'generating')
         RETURNING generate_status`;
