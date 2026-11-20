@@ -3,11 +3,13 @@ import { BackupRestoreError } from "./backup-types";
 import { assertNativeCardRestorePrivacy, assertNativeNoteRestorePrivacy } from "./native-note-privacy";
 import type { Sql } from "postgres";
 import { listMigrationFiles } from "../migrate";
-import { planNativeRestore } from "@aistudy/domain/native";
+import { assertFileHashes, planNativeRestore } from "@aistudy/domain/native";
 import { dumpWorkspaceSnapshot, snapshotToPackage, assertBackupWorkspaceOwner } from "./backup-dump";
 import { applyRestorePlan, loadExistingIds } from "./backup-insert";
 import { wrapBackupError } from "./backup-map";
 import type { BackupRestoreRepository } from "./backup-types";
+import { privateExamDocumentIds, readBackupAnswerBlockIds } from "./opening-backup-library";
+import { projectNativeBackupLibrary } from "./backup-native-library";
 
 // This entrypoint is also re-exported by the database package's public barrel.
 export { BACKUP_FORBIDDEN_TABLES, EXPLICIT_NON_EXPORTED_WORKSPACE_TABLES } from "./opening-backup-empty-namespace";
@@ -37,17 +39,23 @@ export function createBackupRestoreRepository(sql: Sql): BackupRestoreRepository
         return await sql.begin(async (tx) => {
           await tx`SELECT id FROM workspaces WHERE id=${input.workspaceId} AND owner_user_id=${input.ownerUserId} FOR UPDATE`;
           await assertBackupWorkspaceOwner(tx as unknown as Sql, input.workspaceId, input.ownerUserId);
-          const existingIds = await loadExistingIds(tx as Sql, input.packed, input.workspaceId);
+          const privateExams = await privateExamDocumentIds(tx, input.workspaceId);
+          const privateBlocks = await readBackupAnswerBlockIds(tx, input.workspaceId);
+          const library = projectNativeBackupLibrary(input.packed.records, privateExams, privateBlocks);
+          const files = input.packed.files.filter(file => library.fileAllowed(file.path));
+          if (files.length !== input.packed.files.length) assertFileHashes(input.packed.files);
+          const packed = { ...input.packed, records: { ...input.packed.records, ...library.records }, files };
+          const existingIds = await loadExistingIds(tx as Sql, packed, input.workspaceId);
           const plan = planNativeRestore({
-            packed: input.packed,
+            packed,
             targetWorkspaceId: input.workspaceId,
             targetOwnerUserId: input.ownerUserId,
             existingIds,
             conflictPolicy: input.conflictPolicy,
             compatibleMigrationIds,
           });
-          await assertNativeNoteRestorePrivacy(tx as unknown as Sql, input.workspaceId, input.packed);
-          await assertNativeCardRestorePrivacy(tx as unknown as Sql, input.workspaceId, input.packed);
+          await assertNativeNoteRestorePrivacy(tx as unknown as Sql, input.workspaceId, packed);
+          await assertNativeCardRestorePrivacy(tx as unknown as Sql, input.workspaceId, packed);
           await applyRestorePlan(tx as Sql, plan);
           return {
             conflictPolicy: input.conflictPolicy,

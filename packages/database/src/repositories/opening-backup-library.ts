@@ -1,8 +1,49 @@
 import type { Sql, TransactionSql } from "postgres";
 import { contextSourceRefsIncluded } from "./opening-context-provenance";
 import type { OpeningBackupRecordSnapshot } from "./opening-backup-records";
+import { backupPrivateLibrary, isBackupAnswerBlock } from "./backup-private-library";
+import { asObject } from "./backup-map";
 
 type Tables = OpeningBackupRecordSnapshot["tables"];
+type LibraryTables = Partial<Record<string, Record<string, unknown>[]>>;
+
+function privateTeachingBlockIds(tables: LibraryTables) {
+  return (tables.opening_teaching_activity_specs ?? []).flatMap(row => Array.isArray(row.block_order)
+    ? row.block_order.flatMap(ref => {
+      const block = asObject(ref);
+      return block && isBackupAnswerBlock(block) ? [block.blockId] : [];
+    }) : []);
+}
+
+export async function readBackupAnswerBlockIds(sql: Sql | TransactionSql, workspace: string): Promise<unknown[]> {
+  const specs = await sql`SELECT block_order FROM opening_teaching_activity_specs WHERE workspace_id=${workspace}`;
+  return privateTeachingBlockIds({ opening_teaching_activity_specs: specs });
+}
+
+function projectTeachingBlockOrder(row: Record<string, unknown>, blockAllowed: (block: Record<string, unknown>) => boolean) {
+  return Array.isArray(row.block_order) ? { ...row, block_order: row.block_order.filter(ref => {
+    const block = asObject(ref);
+    return !block || blockAllowed({ ...block, id: block.blockId });
+  }) } : row;
+}
+
+export function projectOpeningRestoreLibrary<T extends LibraryTables>(tables: T): T {
+  // Missing inventory has separate legacy recovery semantics.
+  if (tables.library_documents === undefined) return tables;
+  const library = backupPrivateLibrary(tables.library_documents, tables.library_blocks ?? [], tables.library_revisions ?? [],
+    "document_id", [], privateTeachingBlockIds(tables));
+  return { ...tables,
+    library_documents: library.documents,
+    ...(tables.library_blocks && { library_blocks: library.blocks }),
+    ...(tables.library_revisions && { library_revisions: library.revisions }),
+    ...(tables.library_relations && { library_relations: tables.library_relations.filter(row =>
+      library.assetAllowed(row.from_id) && library.assetAllowed(row.to_id)) }),
+    ...(tables.library_properties && { library_properties: tables.library_properties.filter(row => library.assetAllowed(row.subject_id)) }),
+    ...(tables.opening_note_provenance && { opening_note_provenance: tables.opening_note_provenance.filter(row => library.documentAllowed(row.document_id)) }),
+    ...(tables.opening_teaching_activity_specs && { opening_teaching_activity_specs: tables.opening_teaching_activity_specs.map(row =>
+      projectTeachingBlockOrder(row, library.blockAllowed)) }),
+  };
+}
 
 /** The caller's teaching activity is aliased as a in both inventory queries. */
 function isGeneratedExamActivity(sql: Sql | TransactionSql) {
@@ -53,13 +94,15 @@ export async function readBackupLibrary(tx: TransactionSql, workspace: string, t
         WHERE u.document_id=d.id AND req->>'id'=u.generation_config->'extras'->>'requestId'
           AND ((req->'input'->>'sourceId')=ANY(${tables.opening_sources.map(row => String(row.id))}::text[])) IS NOT TRUE)
     ORDER BY d.id`];
-  const ids = documents.map(row => String(row.id));
+  const candidateIds = documents.map(row => String(row.id));
   const blocks = [...await tx`SELECT b.id,b.workspace_id,b.document_id,b.type,b.position,b.content,b.created_at,b.updated_at
-    FROM library_blocks b WHERE b.workspace_id=${workspace} AND b.document_id=ANY(${ids}::uuid[]) ORDER BY b.id`];
-  const blockIds = blocks.map(row => String(row.id));
+    FROM library_blocks b WHERE b.workspace_id=${workspace} AND b.document_id=ANY(${candidateIds}::uuid[]) ORDER BY b.id`];
   const revisions = [...await tx`SELECT r.id,r.workspace_id,r.document_id,r.revision_number,r.parent_revision_number,
       r.title,r.lifecycle,r.reason,r.blocks,r.created_at FROM library_revisions r
-    WHERE r.workspace_id=${workspace} AND r.document_id=ANY(${ids}::uuid[]) ORDER BY r.document_id,r.revision_number`];
+    WHERE r.workspace_id=${workspace} AND r.document_id=ANY(${candidateIds}::uuid[]) ORDER BY r.document_id,r.revision_number`];
+  const library = backupPrivateLibrary(documents, blocks, revisions, "document_id", [], privateTeachingBlockIds(tables));
+  const ids = library.documents.map(row => String(row.id));
+  const blockIds = library.blocks.map(row => String(row.id));
   const relations = [...await tx`SELECT id,workspace_id,from_type,from_id,to_type,to_id,relation_type,created_at,source
     FROM library_relations WHERE workspace_id=${workspace}
       AND ((from_type='document' AND from_id=ANY(${ids}::uuid[])) OR (from_type='block' AND from_id=ANY(${blockIds}::uuid[])))
@@ -71,26 +114,11 @@ export async function readBackupLibrary(tx: TransactionSql, workspace: string, t
     ORDER BY id`];
   const provenance = [...await tx`SELECT document_id,workspace_id,context_source_refs,created_at
     FROM opening_note_provenance WHERE workspace_id=${workspace} AND document_id=ANY(${ids}::uuid[]) ORDER BY document_id`];
-  // Teaching revisions can retain an answer after its live block was edited away.
-  // Keep block identities for published specs; their plaintext stays server-side.
-  const teachingDocs = new Set(tables.opening_teaching_units.map(row => row.document_id));
-  const hidden = new Set<unknown>();
-  for (const spec of tables.opening_teaching_activity_specs) {
-    if (Array.isArray(spec.block_order)) for (const ref of spec.block_order) {
-      if (ref?.role === "answer_key" || ref?.blockType === "solution" || ref?.blockType === "answer_key") hidden.add(ref.blockId);
-    }
-  }
-  const projectBlock = (block: Record<string, unknown>) => hidden.has(block.id) || block.type === "answer_key" || block.type === "solution"
-    ? { ...block, content: {} } : block;
-  for (const block of blocks) if (teachingDocs.has(block.document_id)) Object.assign(block, projectBlock(block));
-  for (const revision of revisions) if (teachingDocs.has(revision.document_id) && Array.isArray(revision.blocks)) {
-    revision.blocks = revision.blocks.map(projectBlock);
-  }
   const documentsIncluded = new Set(ids);
   tables.opening_teaching_units = tables.opening_teaching_units.filter(row => documentsIncluded.has(String(row.document_id)));
   const units = new Set(tables.opening_teaching_units.map(row => row.id));
   tables.opening_teaching_activity_specs = tables.opening_teaching_activity_specs.filter(row =>
-    documentsIncluded.has(String(row.document_id)) && units.has(row.teaching_unit_id));
-  return { library_documents: documents, library_blocks: blocks, library_revisions: revisions,
+    documentsIncluded.has(String(row.document_id)) && units.has(row.teaching_unit_id)).map(row => projectTeachingBlockOrder(row, library.blockAllowed));
+  return { library_documents: library.documents, library_blocks: library.blocks, library_revisions: library.revisions,
     library_relations: relations, library_properties: properties, opening_note_provenance: provenance };
 }

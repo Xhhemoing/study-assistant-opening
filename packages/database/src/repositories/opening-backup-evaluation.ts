@@ -1,5 +1,6 @@
 /** Restored bytes never carry server scoring authority, even on a historical revision. */
 export function normalizeOpeningImportedEvaluation(table: string, row: Record<string, unknown>): Record<string, unknown> {
+  if (table === "opening_exam_help_receipts") return { ...row, content_snapshot: null };
   if (table === "course_goals") return { ...row, active: false,
     lifecycle: ["archived", "stopped"].includes(String(row.lifecycle)) ? row.lifecycle : "paused" };
   if (table === "course_requirements") return { ...row, approved_at: null };

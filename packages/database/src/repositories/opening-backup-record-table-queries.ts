@@ -229,7 +229,7 @@ export async function readOpeningBackupTableRows(
     .map(row => ({ ...row, revision: Number(row.revision) }));
   tables.opening_learning_item_versions = asRows(await tx`
     SELECT v.id,v.workspace_id,v.owner_user_id,v.course_id,v.activity_id,v.problem_id,v.source_id,v.source_version,
-      v.physical_page,v.chunk_id,v.stem_snapshot,v.artifact_kind,v.evaluation_spec,v.teaching_revision_id,v.teaching_block_id,v.created_at
+      v.physical_page,v.chunk_id,v.stem_snapshot,v.artifact_kind,NULL::jsonb AS evaluation_spec,v.teaching_revision_id,v.teaching_block_id,v.created_at
     FROM opening_learning_item_versions v WHERE v.workspace_id=${id} AND v.owner_user_id=${userId}
       AND NOT EXISTS (SELECT 1 FROM library_revisions r WHERE r.id=v.teaching_revision_id AND r.document_id=ANY(${privateExams}::uuid[]))
       AND (v.source_id IS NULL OR ${cleanUuidSources(tx,id,tx`ARRAY[v.source_id]`)})

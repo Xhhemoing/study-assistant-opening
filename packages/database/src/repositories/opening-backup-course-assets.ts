@@ -33,7 +33,7 @@ export async function readBackupCourseAssets(tx: TransactionSql, workspace: stri
   tables.opening_exam_source_mappings = [...await tx`SELECT r.sprint_id,r.source_item_id,r.skill_ids,r.updated_at,s.workspace_id,s.owner_user_id
     FROM opening_exam_source_mappings r JOIN opening_exam_sprints s ON s.id=r.sprint_id
     WHERE s.workspace_id=${workspace} AND s.owner_user_id=${owner} ORDER BY r.sprint_id,r.source_item_id`];
-  tables.opening_exam_help_receipts = [...await tx`SELECT r.id,r.attempt_link_id,r.kind,r.delivered_at,r.history_revision,r.workspace_history_revision,r.content_snapshot,s.workspace_id,s.owner_user_id
+  tables.opening_exam_help_receipts = [...await tx`SELECT r.id,r.attempt_link_id,r.kind,r.delivered_at,r.history_revision,r.workspace_history_revision,NULL::text AS content_snapshot,s.workspace_id,s.owner_user_id
     FROM opening_exam_help_receipts r JOIN opening_exam_attempt_links link ON link.id=r.attempt_link_id JOIN opening_exam_sprints s ON s.id=link.sprint_id
     WHERE s.workspace_id=${workspace} AND s.owner_user_id=${owner} ORDER BY r.id`];
   // A binding describes the material consumed by the sprint. Dropping only the

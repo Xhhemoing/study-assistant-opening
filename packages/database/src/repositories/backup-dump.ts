@@ -1,6 +1,7 @@
 import { isForbiddenBackupTable } from "../../../contracts/src/opening/backup-inventory";
-import { isPrivateExamActivity, privateExamDocumentIds } from "./opening-backup-library";
-import { applyNativeNoteExportPrivacy, filterNativeNotes } from "./native-note-privacy";
+import { isPrivateExamActivity, privateExamDocumentIds, readBackupAnswerBlockIds } from "./opening-backup-library";
+import { applyNativeNoteExportPrivacy } from "./native-note-privacy";
+import { projectNativeBackupLibrary } from "./backup-native-library";
 import { attachNativeLearningLinks } from "./native-learning-links";
 import type { Sql } from "postgres";
 import {
@@ -9,7 +10,7 @@ import {
   type NativeBackupSnapshot,
 } from "@aistudy/domain/native";
 import { listMigrationFiles } from "../migrate";
-import { camelRow, filesFromBlocks } from "./backup-map";
+import { camelRow } from "./backup-map";
 import { BackupRestoreError } from "./backup-types";
 
 export async function assertBackupWorkspaceOwner(
@@ -105,12 +106,11 @@ export async function dumpWorkspaceSnapshot(
       { targets: promotionTargets.filter(row => !examCards.has(String(row.targetId))) }, "promotionId"),
     cards: nestBy(cards.filter(row => !examCards.has(row.id)), { reviewStates: cardStates }, "cardId"),
     events: events.filter(row => !examCards.has(String(row.contentId))),
-    files: filesFromBlocks(blocks),
+    files: [],
   };
-  const learnerSnapshot = privateExams.length
-    ? filterNativeNotes(snapshot, new Map(privateExams.map(id => [id, null])))
-    : snapshot;
-  return applyNativeNoteExportPrivacy(sql, workspaceId, learnerSnapshot);
+  const privateBlocks = await readBackupAnswerBlockIds(sql, workspaceId);
+  const { records: learnerSnapshot } = projectNativeBackupLibrary(snapshot, privateExams, privateBlocks);
+  return applyNativeNoteExportPrivacy(sql, workspaceId, { ...snapshot, ...learnerSnapshot });
 }
 
 export function snapshotToPackage(snapshot: NativeBackupSnapshot) {

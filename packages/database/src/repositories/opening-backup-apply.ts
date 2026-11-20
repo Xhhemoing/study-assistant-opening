@@ -6,6 +6,8 @@ import { restoreOpeningGradingMetadata } from "./opening-grading-restore";
 import { openingAdaptivePrefsSchema } from "@aistudy/contracts";
 import { cardSourcesIncluded } from "./card-sources";
 import { validateRetainedMaterialImportState } from "./opening-material-import-state";
+import { projectOpeningRestoreLibrary } from "./opening-backup-library";
+import { restoreKnowledgeDefinitions } from "./opening-backup-knowledge";
 /**
  * Opening-scoped restore apply executor (Q03).
  *
@@ -454,7 +456,10 @@ export async function executeOpeningRestoreApply(
     return { ok: false, code: "PREFLIGHT_REJECTED", mutated: false, guarantees: RESTORE_GUARANTEES, preview,
       errors: forbidden ? [`Forbidden backup table: ${forbidden}`] : preview.errors };
   }
-  const planned = planOpeningRestoreApply(args.backup, journal, {
+  const normalized = normalizeOpeningRestoreHistory(args.backup as OpeningBackup);
+  const backup: OpeningBackup = { ...normalized,
+    tables: projectOpeningRestoreLibrary(normalized.tables as Record<string, Record<string, unknown>[]>) };
+  const planned = planOpeningRestoreApply(backup, journal, {
     confirmLocalRestore: true,
     availableCourseIds: args.availableCourseIds,
     currentLearningState: args.currentLearningState,
@@ -489,7 +494,6 @@ export async function executeOpeningRestoreApply(
     }
   }
 
-  const backup = normalizeOpeningRestoreHistory(args.backup as OpeningBackup);
   const workspaceId = backup.workspaceId;
 
   let objectPutStarted = false;
@@ -505,8 +509,17 @@ export async function executeOpeningRestoreApply(
     let pendingJobsCancelled = 0;
 
     await sql.begin(async (tx) => {
-      const [workspace] = await tx`SELECT owner_user_id FROM workspaces WHERE id=${workspaceId} FOR UPDATE`;
+      const [workspace] = await tx`SELECT owner_user_id FROM workspaces WHERE id=${workspaceId}`;
       if (!workspace) throw new Error("restore workspace owner is missing");
+      const owner = String(workspace.owner_user_id);
+      // Match lockWorkspaceLearningHistory before locking the workspace. Track
+      // our provisional row so the empty-target check still sees all prior rows.
+      const seeded = await tx`INSERT INTO opening_workspace_history_revisions(workspace_id,owner_user_id,revision)
+        VALUES(${workspaceId},${owner},0) ON CONFLICT DO NOTHING RETURNING workspace_id`;
+      await tx`SELECT revision FROM opening_workspace_history_revisions
+        WHERE workspace_id=${workspaceId} AND owner_user_id=${owner} FOR UPDATE`;
+      const [lockedWorkspace] = await tx`SELECT id FROM workspaces WHERE id=${workspaceId} AND owner_user_id=${owner} FOR UPDATE`;
+      if (!lockedWorkspace) throw new Error("restore workspace owner changed");
       const assetErrors: string[] = [];
       validateBackupWorkspaceAssets(backup.tables as Record<string, Record<string, unknown>[]>, assetErrors, String(workspace.owner_user_id));
       if (assetErrors.length) throw new Error(assetErrors.join("; "));
@@ -532,6 +545,7 @@ export async function executeOpeningRestoreApply(
         if (linkErrors.length) throw new Error(linkErrors.join("; "));
       }
       const liveCounts = await readOpeningRestoreNamespaceCounts(tx as unknown as Sql, workspaceId);
+      if (seeded.length) liveCounts.opening_workspace_history_revisions -= 1;
       const emptyLive = evaluateOpeningRestoreEmptyNamespace(liveCounts);
       if (!emptyLive.ok) {
         const err = new Error(`TARGET_NOT_EMPTY:${emptyLive.errors.join("|")}`);
@@ -541,7 +555,8 @@ export async function executeOpeningRestoreApply(
 
       const importedVersions = new Map<Record<string, unknown>, Record<string, unknown>>();
       const historyRows = (backup.tables.opening_workspace_history_revisions as Record<string, unknown>[] | undefined) ?? [];
-      const history = historyRows.find(row => row.owner_user_id === workspace.owner_user_id && row.workspace_id === workspaceId);
+      const history = historyRows.find(row => String(row.owner_user_id).toLowerCase() === owner
+        && String(row.workspace_id).toLowerCase() === workspaceId.toLowerCase());
       for (const row of (backup.tables.opening_source_versions as Record<string, unknown>[] | undefined) ?? []) {
         const manifest = validateRetainedMaterialImportState({ material_manifest_revision: 0, ...row },
           String(row.source_id), Number(row.version), Number(history?.revision ?? 0));
@@ -591,7 +606,15 @@ export async function executeOpeningRestoreApply(
             const [admitted] = await tx`SELECT ${cardSourcesIncluded(tx, workspaceId, tx`${row.source_ids as string[]}::uuid[]`)} AS included`;
             if (!admitted?.included) throw new Error("card source is deleted, excluded, or unavailable");
           }
-          await tx`INSERT INTO ${tx(table)} ${tx(payload)}`;
+          if (table === "opening_course_knowledge") {
+            payload.node_definitions = tx.json(await restoreKnowledgeDefinitions(tx, row, workspaceId));
+          }
+          if (table === "opening_workspace_history_revisions" && row === history) {
+            await tx`UPDATE opening_workspace_history_revisions SET revision=${Number(row.revision)}
+              WHERE workspace_id=${workspaceId} AND owner_user_id=${owner}`;
+          } else {
+            await tx`INSERT INTO ${tx(table)} ${tx(payload)}`;
+          }
           rowsInserted += 1;
         }
         if (table === "opening_learning_observations") {
@@ -604,6 +627,8 @@ export async function executeOpeningRestoreApply(
           }
         }
       }
+      if (!history) await tx`DELETE FROM opening_workspace_history_revisions
+        WHERE workspace_id=${workspaceId} AND owner_user_id=${owner}`;
 
       if (backup.objects.length > 0 && !args.objectPut) {
         objectApplyDeferred = true;

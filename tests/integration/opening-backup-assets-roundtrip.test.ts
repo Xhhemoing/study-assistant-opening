@@ -1,4 +1,5 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { setTimeout } from "node:timers/promises";
 import { expect, it } from "vitest";
 import type { Sql, TransactionSql } from "postgres";
 import { assertOpeningTestDatabase } from "@aistudy/config";
@@ -8,7 +9,14 @@ import { EXAM_SPRINT_PACK } from "@aistudy/domain/exam-sprint-catalog";
 import { createSqlClient } from "../../packages/database/src/migrate";
 import { createMemoryOpeningRestoreObjectPut, executeOpeningRestoreApply, readOpeningBackupRecords, readOpeningRestoreNamespaceCounts } from "../../packages/database/src/repositories/opening-backup";
 import { insertTestTeachingActivity } from "./opening-fixture";
-import { dumpWorkspaceSnapshot } from "../../packages/database/src/repositories/backup-dump";
+import { dumpWorkspaceSnapshot, snapshotToPackage } from "../../packages/database/src/repositories/backup-dump";
+import { createBackupRestoreRepository } from "../../packages/database/src/repositories/backup-restore";
+import { createOpeningKnowledgeRepository } from "../../packages/database/src/repositories/opening-knowledge";
+import { createOpeningFirstLearningRepository } from "../../packages/database/src/repositories/opening-first-learning";
+import { lockWorkspaceLearningHistory } from "../../packages/database/src/repositories/opening-learning-facts";
+import { createOpeningExamSprintRepository } from "../../packages/database/src/repositories/opening-exam-sprint";
+import { examPackDirectorySections } from "../../packages/database/src/repositories/opening-exam-source-format";
+import { validExamLessonExposure } from "../../packages/domain/src/opening/exam-sprint/lesson-exposure-mapping";
 import { exportSprintPack, restoreSprintPack } from "../../packages/database/src/repositories/opening-backup-exam-pack";
 import { backupRows, sourceBytes, sourceHash } from "./opening-backup-records-fixture";
 
@@ -72,14 +80,23 @@ it.skipIf(process.env.OPENING_TEST_DB !== "1" || !process.env.OPENING_TEST_DATAB
     const w = randomUUID(), u = randomUUID(), course = randomUUID(), doc = randomUUID(), block = randomUUID(), sprint = randomUUID();
     const scope = { workspaceId: w, ownerUserId: u };
     const examDoc = randomUUID(), examBlock = randomUUID(), examSprint = randomUUID();
+    const answerBlock = randomUUID(), historicalKey = randomUUID(), legacyExam = randomUUID(), attachment = randomUUID();
+    const keyContent = { answer: "private standalone answer", href: "private-key.txt", bytesBase64: "YWJj" };
+    const oldBlocks = [{ id: block, type: "text", position: 0, content: { text: "ordinary essay revision" } },
+      { id: historicalKey, type: "answer_key", position: 1, content: { answer: "private old key" } }];
     try {
-      await expect(sql.begin(async outer => {
+      await sql.begin(async outer => {
         await outer`INSERT INTO users(id,email,display_name,password_hash) VALUES(${u},${u + "@backup.test"},'fixture','test')`;
         await outer`INSERT INTO workspaces(id,owner_user_id) VALUES(${w},${u})`;
         let backup: OpeningBackup | undefined;
-        await expect(outer.savepoint(async tx => {
+        let nativeBackup: ReturnType<typeof snapshotToPackage> | undefined;
+        let sourceVersions: Record<string, number> = {};
+        await outer.savepoint(async tx => {
           const db = transactionClient(tx), rows = backupRows(db, scope);
           const source = await rows.source(), chunk = await rows.chunk(source), denied = await rows.source();
+          sourceVersions = { [source]: 1 };
+          await tx`INSERT INTO opening_source_versions(source_id,version,workspace_id,bytes,sha256,availability)
+            VALUES(${source},1,${w},${sourceBytes.length},${sourceHash},'available')`;
           const privateDoc = randomUUID(), privateCourse = randomUUID(), node = randomUUID();
           await tx`INSERT INTO courses(id,workspace_id,title,slug) VALUES(${course},${w},'Course','course'),(${privateCourse},${w},'Other','other')`;
           await tx`INSERT INTO library_documents(id,workspace_id,title,lifecycle) VALUES
@@ -89,13 +106,22 @@ it.skipIf(process.env.OPENING_TEST_DB !== "1" || !process.env.OPENING_TEST_DATAB
               VALUES(${documentId},${w},${tx.json([{ sourceId, sourceVersion: 1 }])})`;
           }
           await tx`INSERT INTO library_blocks(id,workspace_id,document_id,type,position) VALUES(${block},${w},${doc},'text',0)`;
+          await tx`INSERT INTO library_blocks(id,workspace_id,document_id,type,position,content)
+            VALUES(${answerBlock},${w},${doc},'answer_key',1,${tx.json(keyContent)})`;
           await tx`INSERT INTO library_revisions(workspace_id,document_id,revision_number,title,lifecycle,blocks)
-            VALUES(${w},${doc},1,'Essay','confirmed','[]'),(${w},${privateDoc},1,'excluded revision text','confirmed','[]')`;
+            VALUES(${w},${doc},1,'Essay','confirmed',${tx.json(oldBlocks)}),(${w},${privateDoc},1,'excluded revision text','confirmed','[]')`;
           await tx`INSERT INTO library_properties(workspace_id,subject_type,subject_id,key,value_type,value)
             VALUES(${w},'block',${block},'language','string','"en"'),(${w},'document',${privateDoc},'hidden','string','"excluded property"')`;
           await tx`INSERT INTO library_relations(workspace_id,from_type,from_id,to_type,to_id,relation_type)
             VALUES(${w},'document',${doc},'block',${block},'references'),(${w},'document',${doc},'document',${privateDoc},'references')`;
-          for (const [courseId, sourceId] of [[course,source],[privateCourse,denied]] as const) {
+          await tx`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,visibility)
+            VALUES(${w},${course},'source',${source},'core','course')`;
+          const knowledge = createOpeningKnowledgeRepository(db);
+          await knowledge.replace(scope, course, { expectedVersion: 0, sourceVersions,
+            snapshot: { courseId: course, version: 0, nodes: [{ id: node, courseId: course, label: "Algebra",
+              kind: "concept", evidenceChunkIds: [chunk], status: "needs_check" }], edges: [] } });
+          await knowledge.confirmNode(scope, course, node, { expectedVersion: 1, sourceVersions });
+          for (const [courseId, sourceId] of [[privateCourse,denied]] as const) {
             const snapshot = { courseId, version: 1, nodes: [{ id: node, courseId, label: "Algebra", kind: "concept",
               evidenceChunkIds: [chunk], status: "supported" }], edges: [] };
             await tx`INSERT INTO opening_course_knowledge(workspace_id,owner_user_id,course_id,version,snapshot,source_versions,node_definitions)
@@ -196,9 +222,23 @@ it.skipIf(process.env.OPENING_TEST_DB !== "1" || !process.env.OPENING_TEST_DATAB
             const wire = JSON.stringify(artifact);
             expect(wire).toContain(doc);
             expect(wire).not.toContain(examDoc);
-            expect(wire).not.toMatch(/private (solution|grading key|live answer|historical answer|exam property)|private-exam\.txt/);
+            expect(wire).not.toMatch(/private (solution|grading key|live answer|historical answer|exam property|standalone answer|old key)|private-(exam|key)\.txt/);
+            expect(wire).toContain("ordinary essay revision");
           }
           expect(native.files).toHaveLength(0);
+          // Native v1 stores attachments as block content plus a file manifest.
+          const examContent = { href: "private-paper.txt", bytesBase64: "YWJj" };
+          const legacyExamBlocks = [{ id: randomUUID(), type: "answer_key", position: 0,
+            content: { generated: true, hidden: true, answer: "private generated answer\n\n评分要点：\n- key" } }];
+          const safeDoc = { id: legacyExam, workspaceId: w, title: "Legacy generated paper", lifecycle: "confirmed", openingProvenance: null };
+          const paper = { id: attachment, workspaceId: w, documentId: legacyExam, type: "file", position: 0, content: examContent };
+          nativeBackup = snapshotToPackage({ ...native, courses: [], memberships: [], documents: [
+            ...native.documents.filter(row => row.id === doc).map(row => ({ ...row, openingProvenance: null })), safeDoc],
+            blocks: [...native.blocks, paper, { id: answerBlock, workspaceId: w, documentId: doc, type: "answer_key", position: 1, content: keyContent }],
+            revisions: [...native.revisions.filter(row => row.documentId === doc).map(row => ({ ...row, blocks: oldBlocks })),
+              { id: randomUUID(), workspaceId: w, documentId: legacyExam, revisionNumber: 1, title: safeDoc.title,
+                lifecycle: "confirmed", blocks: legacyExamBlocks }],
+            relations: [], files: [{ path: examContent.href, mediaType: "text/plain", bytes: sourceBytes }] });
           for (const name of ["opening_exam_bindings","opening_exam_attempt_links","opening_exam_source_observations",
             "opening_exam_help_receipts"]) expect(backup.tables[name], name).toHaveLength(1);
           await rows.exclude(denied);
@@ -210,8 +250,18 @@ it.skipIf(process.env.OPENING_TEST_DB !== "1" || !process.env.OPENING_TEST_DATAB
           expect(JSON.stringify(filtered)).not.toMatch(/server-only text|excluded note text|excluded property|node_definitions|excluded revision text/);
           expect(filtered.tables.opening_exam_sprints?.find(row => (row as { id: string }).id === sprint)).toMatchObject({ pack_snapshot: { id: EXAM_SPRINT_PACK.id, version: EXAM_SPRINT_PACK.version } });
           throw discardSeed;
-        })).rejects.toBe(discardSeed);
-        if (!backup) throw new Error("missing snapshot");
+        }).catch(error => { if (error !== discardSeed) throw error; });
+        if (!backup || !nativeBackup) throw new Error("missing snapshot");
+        const legacyNative = nativeBackup;
+        await outer.savepoint(async tx => {
+          const repository = createBackupRestoreRepository(transactionClient(tx));
+          const result = await repository.restoreWorkspace({ ...scope, packed: legacyNative, conflictPolicy: "reject" });
+          expect(result.applied).toMatchObject({ documents: 1, blocks: 1, revisions: 1, files: 0 });
+          expect(await tx`SELECT id FROM library_documents WHERE workspace_id=${w}`).toEqual([{ id: doc }]);
+          expect(await tx`SELECT blocks FROM library_revisions WHERE document_id=${doc}`)
+            .toEqual([{ blocks: [oldBlocks[0]] }]);
+          throw discardSeed;
+        }).catch(error => { if (error !== discardSeed) throw error; });
         const wire: OpeningBackup = JSON.parse(JSON.stringify(backup));
         expect(validateOpeningRestore(wire, [], wire.memoryDeletions)).toMatchObject({ allowed: true, errors: [] });
         const publication = structuredClone(wire);
@@ -226,14 +276,32 @@ it.skipIf(process.env.OPENING_TEST_DB !== "1" || !process.env.OPENING_TEST_DATAB
         expect(validateOpeningRestore(forged, [], forged.memoryDeletions).errors).toContain(
           "opening_course_knowledge has an invalid identity, owner or asset reference");
         const objectPut = createMemoryOpeningRestoreObjectPut();
-        const result = await executeOpeningRestoreApply(transactionClient(outer), { confirmLocalRestore: true, backup: wire,
+        const legacy = structuredClone(wire);
+        legacy.tables.library_documents!.push({ id: legacyExam, workspace_id: w, title: "Legacy generated paper", lifecycle: "confirmed" });
+        for (const row of legacyNative.records.blocks.filter(row => row.id === answerBlock || row.id === attachment)) {
+          const { workspaceId, documentId, ...fields } = row;
+          legacy.tables.library_blocks!.push({ ...fields, workspace_id: workspaceId, document_id: documentId });
+        }
+        (legacy.tables.library_revisions!.find(row => row.document_id === doc)!).blocks = oldBlocks;
+        legacy.tables.library_revisions!.push({ id: randomUUID(), workspace_id: w, document_id: legacyExam,
+          revision_number: 1, title: "Legacy generated paper", lifecycle: "confirmed",
+          blocks: legacyNative.records.revisions.find(row => row.documentId === legacyExam)!.blocks });
+        const result = await executeOpeningRestoreApply(transactionClient(outer), { confirmLocalRestore: true, backup: legacy,
           objectBodies: new Map(wire.objects.map(object => [object.archivePath, sourceBytes])), objectPut,
           currentMemoryDeletions: wire.memoryDeletions, currentLearningState: { workspacePreferences: null, courses: [] } });
         expect(result, result.errors.join(", ")).toMatchObject({ ok: true, objectApplyDeferred: false, objectsApplied: 2 });
         const counts = await readOpeningRestoreNamespaceCounts(transactionClient(outer), w);
         for (const [name, records] of Object.entries(wire.tables)) expect(counts[name as keyof typeof counts], name).toBe(records.length);
-        const [graph] = await outer`SELECT node_definitions FROM opening_course_knowledge WHERE course_id=${course}`;
-        expect(graph?.node_definitions).toEqual({});
+        const knowledge = createOpeningKnowledgeRepository(transactionClient(outer));
+        const restoredGraph = await knowledge.getForRebuild(scope, course);
+        expect(Object.keys(restoredGraph!.nodeDefinitions)).toHaveLength(1);
+        const [receipt] = await outer`SELECT id FROM opening_knowledge_confirmations WHERE course_id=${course}`;
+        const rebuilt = await knowledge.replace(scope, course, { expectedVersion: restoredGraph!.version, sourceVersions,
+          expectedReferencedNodeIds: await knowledge.listReferencedNodeIds(scope, course), snapshot: { ...restoredGraph!.snapshot,
+            nodes: restoredGraph!.snapshot.nodes.map(node => ({ ...node, status: "needs_check" })) } });
+        expect(rebuilt.snapshot.nodes[0]?.status).toBe("supported");
+        expect(await outer`SELECT id FROM opening_knowledge_confirmations WHERE course_id=${course}`).toEqual([receipt]);
+        expect(await outer`SELECT blocks FROM library_revisions WHERE document_id=${doc}`).toEqual([{ blocks: [oldBlocks[0]] }]);
         const [property] = await outer`SELECT value FROM library_properties WHERE subject_id=${block}`;
         expect(property?.value).toBe("en");
         const [restored] = await outer`SELECT pack_snapshot FROM opening_exam_sprints WHERE id=${sprint}`;
@@ -242,6 +310,135 @@ it.skipIf(process.env.OPENING_TEST_DB !== "1" || !process.env.OPENING_TEST_DATAB
         expect(generated?.pack_snapshot.requests[0]).toMatchObject({ status: "unknown", proposal: null, activityId: null });
         expect(await outer`SELECT id FROM library_documents WHERE id=${examDoc}`).toHaveLength(0);
         throw rollback;
-      })).rejects.toBe(rollback);
+      }).catch(error => { if (error !== rollback) throw error; });
     } finally { await sql.end(); }
   }, 60_000);
+
+it("serializes first-learning initialization and restore on an empty workspace", async () => {
+  const url = assertOpeningTestDatabase(process.env.OPENING_TEST_DATABASE_URL!, process.env.OPENING_TEST_DB);
+  const application = `restore-lock-test-${randomUUID()}`;
+  const sql = createSqlClient(url.toString(), { max: 2 });
+  url.searchParams.set("application_name", application);
+  url.searchParams.set("statement_timeout", "5000");
+  const restoring = createSqlClient(url.toString(), { max: 1 });
+  const workspaceId = randomUUID(), ownerUserId = randomUUID(), clientKey = randomUUID();
+  const scope = { workspaceId, ownerUserId }, startDate = "2026-11-19";
+  let restore: ReturnType<typeof executeOpeningRestoreApply> | undefined;
+  try {
+    await sql`INSERT INTO users(id,email,display_name,password_hash)
+      VALUES(${ownerUserId},${ownerUserId + "@backup.test"},'fixture','test')`;
+    await sql`INSERT INTO workspaces(id,owner_user_id) VALUES(${workspaceId},${ownerUserId})`;
+    const records = await readOpeningBackupRecords(sql, scope);
+    const composed = composeOpeningBackupDraft({ records, staging: {
+      snapshot: { workspaceId, privacyEpoch: 0, deletionJournal: [], memoryDeletions: records.memoryDeletions, sources: [] }, objects: [],
+    } });
+    if (!composed.ok) throw new Error(composed.errors.join(", "));
+    composed.backup.tables.opening_workspace_history_revisions = [{ workspace_id: workspaceId, owner_user_id: ownerUserId, revision: 0 }];
+
+    const initialized = await sql.begin(async tx => {
+      await lockWorkspaceLearningHistory(tx, scope);
+      restore = executeOpeningRestoreApply(restoring, { confirmLocalRestore: true, backup: composed.backup,
+        currentMemoryDeletions: records.memoryDeletions, currentLearningState: { workspacePreferences: null, courses: [] } });
+      // Hold the real history insert until the other connection is waiting for
+      // this transaction. Before the fix it held the workspace lock here.
+      let blocked: string | undefined;
+      for (let probe = 0; probe < 100 && blocked === undefined; probe++) {
+        const [row] = await sql`SELECT query FROM pg_stat_activity WHERE application_name=${application}
+          AND cardinality(pg_blocking_pids(pid)) > 0`;
+        if (row) blocked = String(row.query);
+        else await setTimeout(20);
+      }
+      expect(blocked).toMatch(/INSERT INTO opening_workspace_history_revisions[\s\S]*ON CONFLICT DO NOTHING/);
+      return createOpeningFirstLearningRepository(transactionClient(tx)).initialize(scope, {
+        intent: { clientKey, topic: "Arithmetic", goal: "", targetDate: null, minutes: 20,
+          startTime: null, timeZone: "UTC", sourceIds: [] },
+        startDate, planTimeZone: "UTC", days: [],
+      });
+    });
+    expect(initialized.courseId).toBe(clientKey);
+    expect(await restore).toMatchObject({ ok: false, code: "TARGET_NOT_EMPTY", mutated: false });
+    expect(await sql`SELECT revision FROM opening_workspace_history_revisions WHERE workspace_id=${workspaceId}`)
+      .toEqual([{ revision: "1" }]);
+  } finally {
+    await restore;
+    await sql`DELETE FROM opening_workspace_history_revisions WHERE workspace_id=${workspaceId}`;
+    await sql`DELETE FROM workspaces WHERE id=${workspaceId}`;
+    await sql`DELETE FROM users WHERE id=${ownerUserId}`;
+    await Promise.all([sql.end(), restoring.end()]);
+  }
+}, 15_000);
+
+it("keeps unanswered mock conversion receipts while removing the catalog solution from backup and restore", async () => {
+  const url = assertOpeningTestDatabase(process.env.OPENING_TEST_DATABASE_URL!, process.env.OPENING_TEST_DB);
+  const sql = createSqlClient(url.toString(), { max: 1 });
+  const rollback = new Error("rollback conversion fixture"), discardSeed = new Error("discard conversion source");
+  const w = randomUUID(), u = randomUUID(), course = randomUUID(), sprint = randomUUID(), source = randomUUID();
+  const scope = { workspaceId: w, ownerUserId: u }, pack = EXAM_SPRINT_PACK;
+  const sections = examPackDirectorySections(pack);
+  const body = Buffer.from(sections.map(section => section.text).join("\n\n"), "utf8");
+  const sha256 = createHash("sha256").update(body).digest("hex");
+  const archivedSource = { sourceId: source, version: 0, sha256, bytes: body.length };
+  const archivePath = `objects/${source}/v0.bin`;
+  try {
+    await sql.begin(async outer => {
+      await outer`INSERT INTO users(id,email,display_name,password_hash) VALUES(${u},${u + "@backup.test"},'fixture','test')`;
+      await outer`INSERT INTO workspaces(id,owner_user_id) VALUES(${w},${u})`;
+      let backup: OpeningBackup | undefined;
+      let legacyContent: string | undefined;
+      await outer.savepoint(async tx => {
+        const db = transactionClient(tx), repo = createOpeningExamSprintRepository(db, pack);
+        await tx`INSERT INTO courses(id,workspace_id,title,slug) VALUES(${course},${w},'Course','course')`;
+        await tx`INSERT INTO opening_sources(id,workspace_id,name,mime,version,bytes,sha256,upload_state,parse_state)
+          VALUES(${source},${w},'Exam directory','text/plain',0,${body.length},${sha256},'uploaded','ready')`;
+        await tx`INSERT INTO opening_source_versions(source_id,version,workspace_id,bytes,sha256,availability)
+          VALUES(${source},0,${w},${body.length},${sha256},'available')`;
+        for (const [index, section] of sections.entries()) {
+          await tx`INSERT INTO opening_source_chunks(source_id,source_version,page,text) VALUES(${source},0,${index + 1},${section.text})`;
+        }
+        await tx`INSERT INTO opening_exam_sprints(id,workspace_id,owner_user_id,pack_snapshot,state)
+          VALUES(${sprint},${w},${u},${tx.json(pack as never)},${tx.json(createExamSprintState(new Date().toISOString()) as never)})`;
+        await tx`INSERT INTO opening_exam_bindings(sprint_id,course_id,binding) VALUES(${sprint},${course},
+          ${tx.json({ courseId: course, packSourceId: source, materials: [], milestoneId: null, boundAt: new Date().toISOString(),
+            skills: [...new Set(pack.questions.map(question => question.skillId))]
+              .map(skillId => ({ skillId, nodeId: randomUUID(), requirementKey: skillId })) })})`;
+        const mock = await repo.act(scope, { action: "start", mode: "mock-a", clientKey: randomUUID() });
+        const attempt = mock.currentAttempt!;
+        const question = pack.questions.find(entry => entry.id === attempt.questionId)!;
+        const lesson = pack.lessons.find(entry => entry.id === question.lessonId)!;
+        const mapping = validExamLessonExposure(lesson)!;
+        const converted = await repo.act(scope, { action: "switch_to_teaching", clientKey: randomUUID(),
+          expectedAttemptId: attempt.id, expectedRunId: mock.activeRun!.id, lessonId: lesson.id, packVersion: pack.version,
+          contentFingerprint: mapping.contentFingerprint, mappingVersion: mapping.mappingVersion, confirmedEndScoredMock: true });
+        expect(converted.activeRun).toBeNull();
+        expect(converted.attempts.find(entry => entry.id === attempt.id)).toMatchObject({ answer: null, independent: false });
+        const [receipt] = await tx`SELECT r.* FROM opening_exam_help_receipts r JOIN opening_exam_attempt_links l
+          ON l.id=r.attempt_link_id WHERE l.sprint_id=${sprint}`;
+        legacyContent = `${question.answer}\n${question.explanation}`;
+        expect(receipt).toMatchObject({ kind: "solution", content_snapshot: legacyContent });
+        const records = await readOpeningBackupRecords(db, scope);
+        expect(records.tables.opening_exam_help_receipts).toMatchObject([{ ...receipt, content_snapshot: null }]);
+        expect(JSON.stringify(records)).not.toContain(JSON.stringify(question.explanation).slice(1, -1));
+        const composed = composeOpeningBackupDraft({ records, staging: {
+          snapshot: { workspaceId: w, privacyEpoch: records.privacyEpoch, deletionJournal: records.deletionJournal,
+            memoryDeletions: records.memoryDeletions, sources: [archivedSource] },
+          objects: [{ ...archivedSource, actualSha256: sha256, archivePath }],
+        } });
+        if (!composed.ok) throw new Error(composed.errors.join(", "));
+        backup = composed.backup;
+        throw discardSeed;
+      }).catch(error => { if (error !== discardSeed) throw error; });
+      if (!backup || !legacyContent) throw new Error("missing conversion archive");
+      const wire: OpeningBackup = JSON.parse(JSON.stringify(backup));
+      const archivedReceipt = wire.tables.opening_exam_help_receipts![0] as Record<string, unknown>;
+      archivedReceipt.content_snapshot = legacyContent;
+      const result = await executeOpeningRestoreApply(transactionClient(outer), { confirmLocalRestore: true,
+        backup: wire, currentMemoryDeletions: wire.memoryDeletions, currentLearningState: { workspacePreferences: null, courses: [] } });
+      expect(result, result.errors.join(", ")).toMatchObject({ ok: true });
+      const [receipt] = await outer`SELECT * FROM opening_exam_help_receipts WHERE id=${String(archivedReceipt.id)}`;
+      expect(receipt).toMatchObject({ id: archivedReceipt.id, attempt_link_id: archivedReceipt.attempt_link_id, kind: "solution",
+        delivered_at: new Date(String(archivedReceipt.delivered_at)), history_revision: archivedReceipt.history_revision,
+        workspace_history_revision: archivedReceipt.workspace_history_revision, content_snapshot: null });
+      throw rollback;
+    }).catch(error => { if (error !== rollback) throw error; });
+  } finally { await sql.end(); }
+}, 30_000);
