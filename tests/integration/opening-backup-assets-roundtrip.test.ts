@@ -198,7 +198,8 @@ it.skipIf(process.env.OPENING_TEST_DB !== "1" || !process.env.OPENING_TEST_DATAB
     const examDoc = randomUUID(), examBlock = randomUUID(), examSprint = randomUUID();
     const answerBlock = randomUUID(), historicalKey = randomUUID(), legacyExam = randomUUID(), attachment = randomUUID();
     const keyContent = { answer: "private standalone answer", href: "private-key.txt", bytesBase64: "YWJj" };
-    const oldBlocks = [{ id: block, type: "text", position: 0, content: { text: "ordinary essay revision" } },
+    const liveContent = { text: "ordinary essay", meta: { sourceId: "external-reference" } };
+    const oldBlocks = [{ id: block, type: "text", position: 0, content: { ...liveContent, text: "ordinary essay revision" } },
       { id: historicalKey, type: "answer_key", position: 1, content: { answer: "private old key" } }];
     try {
       await sql.begin(async outer => {
@@ -221,7 +222,8 @@ it.skipIf(process.env.OPENING_TEST_DB !== "1" || !process.env.OPENING_TEST_DATAB
             await tx`INSERT INTO opening_note_provenance(document_id,workspace_id,context_source_refs)
               VALUES(${documentId},${w},${tx.json([{ sourceId, sourceVersion: 1 }])})`;
           }
-          await tx`INSERT INTO library_blocks(id,workspace_id,document_id,type,position) VALUES(${block},${w},${doc},'text',0)`;
+          await tx`INSERT INTO library_blocks(id,workspace_id,document_id,type,position,content)
+            VALUES(${block},${w},${doc},'text',0,${tx.json(liveContent)})`;
           await tx`INSERT INTO library_blocks(id,workspace_id,document_id,type,position,content)
             VALUES(${answerBlock},${w},${doc},'answer_key',1,${tx.json(keyContent)})`;
           await tx`INSERT INTO library_revisions(workspace_id,document_id,revision_number,title,lifecycle,blocks)
@@ -348,17 +350,41 @@ it.skipIf(process.env.OPENING_TEST_DB !== "1" || !process.env.OPENING_TEST_DATAB
             content: { generated: true, hidden: true, answer: "private generated answer\n\n评分要点：\n- key" } }];
           const safeDoc = { id: legacyExam, workspaceId: w, title: "Legacy generated paper", lifecycle: "confirmed", openingProvenance: null };
           const paper = { id: attachment, workspaceId: w, documentId: legacyExam, type: "file", position: 0, content: examContent };
-          nativeBackup = snapshotToPackage({ ...native, courses: [], memberships: [], documents: [
-            ...native.documents.filter(row => row.id === doc).map(row => ({ ...row, openingProvenance: null })), safeDoc],
-            blocks: [...native.blocks, paper, { id: answerBlock, workspaceId: w, documentId: doc, type: "answer_key", position: 1, content: keyContent }],
-            revisions: [...native.revisions.filter(row => row.documentId === doc).map(row => ({ ...row, blocks: oldBlocks })),
-              { id: randomUUID(), workspaceId: w, documentId: legacyExam, revisionNumber: 1, title: safeDoc.title,
-                lifecycle: "confirmed", blocks: legacyExamBlocks }],
-            relations: [], files: [{ path: examContent.href, mediaType: "text/plain", bytes: sourceBytes }] });
           for (const name of ["opening_exam_bindings","opening_exam_attempt_links","opening_exam_source_observations",
             "opening_exam_help_receipts"]) expect(backup.tables[name], name).toHaveLength(1);
+          const historyDoc = randomUUID(), historyBlock = randomUUID(), deniedChunk = await rows.chunk(denied);
+          await tx`INSERT INTO library_documents(id,workspace_id,title,lifecycle)
+            VALUES(${historyDoc},${w},'Historical citation','confirmed')`;
+          await tx`INSERT INTO library_blocks(id,workspace_id,document_id,type,position,content)
+            VALUES(${historyBlock},${w},${historyDoc},'text',0,${tx.json(liveContent)})`;
+          await tx`INSERT INTO library_revisions(workspace_id,document_id,revision_number,title,lifecycle,blocks)
+            VALUES(${w},${historyDoc},1,'Historical citation','confirmed',${tx.json([{ id: historyBlock, type: "text", position: 0,
+              content: { text: "excluded historical citation", citationBinding: { blockId: historyBlock, role: "teach",
+                status: "bound", factualSupport: "unverified", refs: [{ sourceId: denied, sourceVersion: 1, chunkId: deniedChunk, page: null }] } },
+            }])})`;
+          const beforeExclusion = await snapshot();
+          expect(beforeExclusion.tables.library_revisions).toContainEqual(expect.objectContaining({ document_id: historyDoc }));
+          const nativeBeforeExclusion = await dumpWorkspaceSnapshot(db, w, u);
+          expect(nativeBeforeExclusion.revisions).toContainEqual(expect.objectContaining({ documentId: historyDoc }));
+          nativeBackup = snapshotToPackage({ ...native, courses: [], memberships: [], documents: [
+            ...native.documents.filter(row => row.id === doc).map(row => ({ ...row, openingProvenance: null })), safeDoc,
+            ...nativeBeforeExclusion.documents.filter(row => row.id === historyDoc)],
+            blocks: [...native.blocks, paper, { id: answerBlock, workspaceId: w, documentId: doc, type: "answer_key", position: 1, content: keyContent },
+              ...nativeBeforeExclusion.blocks.filter(row => row.documentId === historyDoc)],
+            revisions: [...native.revisions.filter(row => row.documentId === doc).map(row => ({ ...row, blocks: oldBlocks })),
+              { id: randomUUID(), workspaceId: w, documentId: legacyExam, revisionNumber: 1, title: safeDoc.title,
+                lifecycle: "confirmed", blocks: legacyExamBlocks },
+              ...nativeBeforeExclusion.revisions.filter(row => row.documentId === historyDoc)],
+            relations: [], files: [{ path: examContent.href, mediaType: "text/plain", bytes: sourceBytes }] });
           await rows.exclude(denied);
           const filtered = await snapshot();
+          const filteredNative = await dumpWorkspaceSnapshot(db, w, u);
+          for (const artifact of [filtered, filteredNative]) {
+            expect(JSON.stringify(artifact)).not.toContain(historyDoc);
+            expect(JSON.stringify(artifact)).not.toContain("excluded historical citation");
+          }
+          expect(validateOpeningRestore(beforeExclusion, filtered.deletionJournal, filtered.memoryDeletions).errors)
+            .toContain("table library_revisions references a deleted source");
           for (const table of ["library_documents","library_revisions","library_properties","library_relations","opening_note_provenance",
             "opening_course_knowledge","opening_knowledge_confirmations","opening_exam_papers","opening_exam_reviews"] as const) {
             expect(filtered.tables[table], table).toHaveLength(1);
@@ -418,6 +444,7 @@ it.skipIf(process.env.OPENING_TEST_DB !== "1" || !process.env.OPENING_TEST_DATAB
         expect(rebuilt.snapshot.nodes[0]?.status).toBe("supported");
         expect(await outer`SELECT id FROM opening_knowledge_confirmations WHERE course_id=${course}`).toEqual([receipt]);
         expect(await outer`SELECT blocks FROM library_revisions WHERE document_id=${doc}`).toEqual([{ blocks: [oldBlocks[0]] }]);
+        expect(await outer`SELECT content FROM library_blocks WHERE id=${block}`).toEqual([{ content: liveContent }]);
         const [property] = await outer`SELECT value FROM library_properties WHERE subject_id=${block}`;
         expect(property?.value).toBe("en");
         const [restored] = await outer`SELECT pack_snapshot FROM opening_exam_sprints WHERE id=${sprint}`;

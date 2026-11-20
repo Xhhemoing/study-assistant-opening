@@ -1,5 +1,5 @@
 import { isForbiddenBackupTable } from "../../../contracts/src/opening/backup-inventory";
-import { isPrivateExamActivity, privateExamDocumentIds, readBackupAnswerBlockIds } from "./opening-backup-library";
+import { isPrivateExamActivity, privateExamDocumentIds, readBackupAnswerBlockIds, readBackupLibrarySourceIds } from "./opening-backup-library";
 import { applyNativeNoteExportPrivacy } from "./native-note-privacy";
 import { projectNativeBackupLibrary } from "./backup-native-library";
 import { attachNativeLearningLinks } from "./native-learning-links";
@@ -108,8 +108,8 @@ export async function dumpWorkspaceSnapshot(
     events: events.filter(row => !examCards.has(String(row.contentId))),
     files: [],
   };
-  const privateBlocks = await readBackupAnswerBlockIds(sql, workspaceId);
-  const { records: learnerSnapshot } = projectNativeBackupLibrary(snapshot, privateExams, privateBlocks);
+  const [privateBlocks, sourceIds] = await Promise.all([readBackupAnswerBlockIds(sql, workspaceId), readBackupLibrarySourceIds(sql, workspaceId)]);
+  const { records: learnerSnapshot } = projectNativeBackupLibrary(snapshot, privateExams, privateBlocks, sourceIds);
   return applyNativeNoteExportPrivacy(sql, workspaceId, { ...snapshot, ...learnerSnapshot });
 }
 

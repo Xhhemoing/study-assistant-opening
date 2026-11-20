@@ -8,7 +8,7 @@ import { dumpWorkspaceSnapshot, snapshotToPackage, assertBackupWorkspaceOwner } 
 import { applyRestorePlan, loadExistingIds } from "./backup-insert";
 import { wrapBackupError } from "./backup-map";
 import type { BackupRestoreRepository } from "./backup-types";
-import { privateExamDocumentIds, readBackupAnswerBlockIds } from "./opening-backup-library";
+import { privateExamDocumentIds, readBackupAnswerBlockIds, readBackupLibrarySourceIds } from "./opening-backup-library";
 import { projectNativeBackupLibrary } from "./backup-native-library";
 
 // This entrypoint is also re-exported by the database package's public barrel.
@@ -40,8 +40,9 @@ export function createBackupRestoreRepository(sql: Sql): BackupRestoreRepository
           await tx`SELECT id FROM workspaces WHERE id=${input.workspaceId} AND owner_user_id=${input.ownerUserId} FOR UPDATE`;
           await assertBackupWorkspaceOwner(tx as unknown as Sql, input.workspaceId, input.ownerUserId);
           const privateExams = await privateExamDocumentIds(tx, input.workspaceId);
-          const privateBlocks = await readBackupAnswerBlockIds(tx, input.workspaceId);
-          const library = projectNativeBackupLibrary(input.packed.records, privateExams, privateBlocks);
+          const [privateBlocks, sourceIds] = await Promise.all([readBackupAnswerBlockIds(tx, input.workspaceId),
+            input.packed.sourceWorkspaceId === input.workspaceId ? readBackupLibrarySourceIds(tx, input.workspaceId) : new Set<string>()]);
+          const library = projectNativeBackupLibrary(input.packed.records, privateExams, privateBlocks, sourceIds);
           const files = input.packed.files.filter(file => library.fileAllowed(file.path));
           if (files.length !== input.packed.files.length) assertFileHashes(input.packed.files);
           const packed = { ...input.packed, records: { ...input.packed.records, ...library.records }, files };

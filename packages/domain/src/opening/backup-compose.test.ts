@@ -107,6 +107,21 @@ describe("composeOpeningBackupDraft", () => {
     expect(result.backup.objects[0]).not.toHaveProperty("actualSha256");
   });
 
+  it("preserves opaque block content in the live projection and revision snapshot", () => {
+    const value = input();
+    const documentId = "33333333-3333-4333-8333-333333333333";
+    const block = { id: "44444444-4444-4444-8444-444444444444", type: "text", position: 0,
+      content: { text: "Saved note", meta: { sourceId: "external-reference" } } };
+    const live = { ...block, document_id: documentId, workspace_id: workspaceId };
+    const revision = { id: "55555555-5555-4555-8555-555555555555", document_id: documentId,
+      workspace_id: workspaceId, blocks: [block] };
+    Object.assign(value.records.tables, { library_documents: [{ id: documentId, workspace_id: workspaceId }],
+      library_blocks: [live], library_revisions: [revision] });
+    expect(composeOpeningBackupDraft(value)).toMatchObject({ ok: true, backup: { tables: {
+      library_blocks: [live], library_revisions: [revision],
+    } } });
+  });
+
   it.each([
     ["EPOCH_MISMATCH", { records: { ...input().records, privacyEpoch: 5 } }],
     ["WORKSPACE_MISMATCH", { staging: { ...input().staging, snapshot: { ...input().staging.snapshot, workspaceId: "33333333-3333-4333-8333-333333333333" } } }],

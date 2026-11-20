@@ -11,7 +11,8 @@ import { validateBackupDayAdjustment } from "./backup-day-adjustment";
 import { validateBackupPlanFeedback } from "./backup-plan-feedback";
 import { validateBackupSystemQuery } from "./backup-system-query";
 import { validateBackupLearningState } from "./backup-learning-state";
-import { isJournal, isMemoryDeletions, isRecord, isTables, isUuid, parseUuidArray, sourceReferences, validObject } from "./backup-validation";
+import { isJournal, isMemoryDeletions, isRecord, isTables, isUuid, libraryBlockSourceReferences,
+  libraryRevisionSourceReferences, parseUuidArray, sourceReferences, validObject } from "./backup-validation";
 
 export type OpeningDeletionMark = { sourceId: string; deletedAt: string; assetDeletedAt?: string | null };
 export type OpeningMemoryDeletions = {
@@ -328,8 +329,14 @@ export function validateOpeningRestore(
           errors.push("assistant candidate source turn is missing or invalid");
         }
       }
-      const refs = sourceReferences(row, name === "opening_problem_refs" || name === "opening_learning_item_versions");
+      const libraryContent = name === "library_blocks" || name === "library_revisions";
+      const refs = name === "library_blocks" ? libraryBlockSourceReferences(row)
+        : name === "library_revisions" ? libraryRevisionSourceReferences(row.blocks)
+          : sourceReferences(row, name === "opening_problem_refs" || name === "opening_learning_item_versions");
       if (refs === null) errors.push(`table ${name} has invalid source lineage`);
+      if (libraryContent && refs?.some(id => !ownedSources.has(id))) {
+        errors.push(`table ${name} references a source missing from the backup`);
+      }
       if (name === "opening_sources") {
         if (!isUuid(row.id)) errors.push("source identity is missing or invalid");
         else if (deleted.has(row.id.toLowerCase())) errors.push("deleted source cannot be restored");

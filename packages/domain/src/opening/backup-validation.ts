@@ -95,6 +95,26 @@ function parseCitations(value: unknown): string[] | null {
   return refs;
 }
 
+/** Both the live projection and saved revision blocks persist compiler citation lineage here. */
+export function libraryBlockSourceReferences(block: Record<string, unknown>): string[] | null {
+  const binding = isRecord(block.content) ? block.content.citationBinding : undefined;
+  if (!isRecord(binding) || binding.refs === undefined) return [];
+  if (!Array.isArray(binding.refs)) return null;
+  return parseCitations(binding.refs)?.map(id => id.toLowerCase()) ?? null;
+}
+
+export function libraryRevisionSourceReferences(blocks: unknown): string[] | null {
+  if (!Array.isArray(blocks)) return null;
+  const refs: string[] = [];
+  for (const block of blocks) {
+    if (!isRecord(block)) return null;
+    const ids = libraryBlockSourceReferences(block);
+    if (!ids) return null;
+    for (const id of ids) refs.push(id);
+  }
+  return refs;
+}
+
 function collectSourceIds(value: unknown, refs: Set<string>): boolean {
   if (Array.isArray(value)) return value.every((item) => collectSourceIds(item, refs));
   if (!isRecord(value)) return true;

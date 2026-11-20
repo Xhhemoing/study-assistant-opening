@@ -5,6 +5,31 @@ import { sourceReferences } from "./backup-validation";
 const workspaceId = "22222222-2222-4222-8222-222222222222";
 const referenceId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 
+it.each(["library_blocks", "library_revisions"])("checks only typed block citations in %s", table => {
+  const documentId = "33333333-3333-4333-8333-333333333333";
+  const id = "44444444-4444-4444-8444-444444444444";
+  const block = { id, type: "text", position: 0, content: {
+    meta: { sourceId: "external-reference", referenceSourceId: referenceId },
+  } };
+  const row = { id, document_id: documentId, workspace_id: workspaceId };
+  const archive: OpeningBackup = { format: "opening-backup", version: 1, workspaceId, privacyEpoch: 0,
+    deletionJournal: [], objects: [], tables: { library_documents: [{ id: documentId, workspace_id: workspaceId }] } };
+  const currentJournal = [{ sourceId: referenceId, deletedAt: "2026-09-28T00:00:00.000Z" }];
+  const addBlock = (content: Record<string, unknown>) => {
+    archive.tables[table] = [table === "library_blocks" ? { ...row, content } : { ...row, blocks: [{ ...block, content }] }];
+  };
+  addBlock(block.content);
+  expect(validateOpeningRestore(archive, currentJournal)).toMatchObject({ allowed: true, errors: [] });
+
+  const citationBinding = { blockId: id, role: "teach", status: "bound", factualSupport: "unverified",
+    refs: [{ sourceId: referenceId.toUpperCase(), sourceVersion: 1, chunkId: id, page: null }] };
+  addBlock({ ...block.content, citationBinding });
+  expect(validateOpeningRestore(archive, []).errors).toContain(`table ${table} references a source missing from the backup`);
+  expect(validateOpeningRestore(archive, currentJournal).errors).toContain(`table ${table} references a deleted source`);
+  addBlock({ ...block.content, citationBinding: { ...citationBinding, refs: [{ sourceId: "external-reference", sourceVersion: 1 }] } });
+  expect(validateOpeningRestore(archive, []).errors).toContain(`table ${table} has invalid source lineage`);
+});
+
 it("rejects restoring a historical check whose only source link is reference_check.referenceId", () => {
   const archive: OpeningBackup = {
     format: "opening-backup", version: 1, workspaceId, privacyEpoch: 0,

@@ -20,6 +20,12 @@ export async function readBackupAnswerBlockIds(sql: Sql | TransactionSql, worksp
   return privateTeachingBlockIds({ opening_teaching_activity_specs: specs });
 }
 
+export async function readBackupLibrarySourceIds(sql: Sql | TransactionSql, workspace: string): Promise<Set<string>> {
+  const rows = await sql`SELECT s.id FROM opening_sources s WHERE s.workspace_id=${workspace} AND s.upload_state='uploaded'
+    AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=${workspace} AND e.source_id=s.id)`;
+  return new Set(rows.map(row => String(row.id)));
+}
+
 function projectTeachingBlockOrder(row: Record<string, unknown>, blockAllowed: (block: Record<string, unknown>) => boolean) {
   return Array.isArray(row.block_order) ? { ...row, block_order: row.block_order.filter(ref => {
     const block = asObject(ref);
@@ -100,7 +106,8 @@ export async function readBackupLibrary(tx: TransactionSql, workspace: string, t
   const revisions = [...await tx`SELECT r.id,r.workspace_id,r.document_id,r.revision_number,r.parent_revision_number,
       r.title,r.lifecycle,r.reason,r.blocks,r.created_at FROM library_revisions r
     WHERE r.workspace_id=${workspace} AND r.document_id=ANY(${candidateIds}::uuid[]) ORDER BY r.document_id,r.revision_number`];
-  const library = backupPrivateLibrary(documents, blocks, revisions, "document_id", [], privateTeachingBlockIds(tables));
+  const sourceIds = new Set(tables.opening_sources.map(row => String(row.id)));
+  const library = backupPrivateLibrary(documents, blocks, revisions, "document_id", [], privateTeachingBlockIds(tables), sourceIds);
   const ids = library.documents.map(row => String(row.id));
   const blockIds = library.blocks.map(row => String(row.id));
   const relations = [...await tx`SELECT id,workspace_id,from_type,from_id,to_type,to_id,relation_type,created_at,source

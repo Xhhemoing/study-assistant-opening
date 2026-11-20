@@ -1,3 +1,4 @@
+import { libraryBlockSourceReferences } from "@aistudy/domain";
 import { asObject } from "./backup-map";
 
 type Row = Record<string, unknown>;
@@ -31,7 +32,7 @@ function revisionBlocks(row: Row): Row[] {
 
 /** Inspect both live and historical content. Legacy native packages may have no teaching rows. */
 export function backupPrivateLibrary<T extends Row>(documents: T[], blocks: T[], revisions: T[], documentKey: DocumentKey,
-  privateDocuments: readonly string[] = [], privateBlockIds: readonly unknown[] = []) {
+  privateDocuments: readonly string[] = [], privateBlockIds: readonly unknown[] = [], includedSources?: ReadonlySet<string>) {
   const blockedDocuments = new Set(privateDocuments.map(idKey));
   const blockedBlocks = new Set(privateBlockIds.map(idKey).filter(Boolean));
   const blocksByDocument = [
@@ -43,6 +44,10 @@ export function backupPrivateLibrary<T extends Row>(documents: T[], blocks: T[],
   for (const { documentId, block } of blocksByDocument) {
     if (isGeneratedExamBlock(block)) blockedDocuments.add(idKey(documentId));
     if (isBackupAnswerBlock(block) && idKey(block.id)) blockedBlocks.add(idKey(block.id));
+    if (includedSources) {
+      const refs = libraryBlockSourceReferences(block);
+      if (!refs || refs.some(id => !includedSources.has(id))) blockedDocuments.add(idKey(documentId));
+    }
   }
   const documentAllowed = (id: unknown) => !blockedDocuments.has(idKey(id));
   const blockAllowed = (block: Row) => !isBackupAnswerBlock(block) && !blockedBlocks.has(idKey(block.id));
