@@ -343,7 +343,23 @@ const probeHistoryEntrySchema = z.object({
   diagnosis: z.enum(["correct_model", "misconception", "unclassified", "invalid_response"]),
   matchedHypothesisId: z.string().nullable(),
   at: z.iso.datetime(),
-}).strict();
+}).strict().superRefine((entry, ctx) => {
+  const probe = STACK_408_PROBES.find(probe => probe.probeId === entry.probeId);
+  if (!probe || probe.requirementKey !== entry.requirementKey) {
+    ctx.addIssue({ code: "custom", message: `probe ${entry.probeId} does not belong to ${entry.requirementKey}` });
+    return;
+  }
+  const { outcome, diagnosis, matchedHypothesisId } = entry;
+  // An unclassified attempt may have a well-formed unmatched response or no verified result.
+  const expectedOutcome = { correct_model: "correct", misconception: "incorrect", invalid_response: "unverified" } as const;
+  const outcomeMatches = diagnosis === "unclassified" ? outcome !== "correct" : outcome === expectedOutcome[diagnosis];
+  const hypothesisMatches = diagnosis === "misconception"
+    ? probe.hypotheses.some(hypothesis => hypothesis.role === "misconception" && hypothesis.id === matchedHypothesisId)
+    : matchedHypothesisId === null;
+  if (!outcomeMatches || !hypothesisMatches) {
+    ctx.addIssue({ code: "custom", message: "outcome, diagnosis, and matchedHypothesisId are inconsistent" });
+  }
+});
 
 export const stack408StateSchema = z.object({
   schemaVersion: z.literal(1),
@@ -387,10 +403,7 @@ function parseState(raw: unknown): CartridgeValidationResult<Stack408State> {
   }
   const parsed = stack408StateSchema.safeParse(value);
   if (!parsed.success) return { ok: false, issues: parsed.error.issues.map(issue => `${issue.path.join(".")}: ${issue.message}`) };
-  const probes = new Map(STACK_408_PROBES.map(probe => [probe.probeId, probe.requirementKey]));
-  const issues = parsed.data.probeHistory.flatMap((entry, index) => probes.get(entry.probeId) === entry.requirementKey
-    ? [] : [`probeHistory.${index}: probe ${entry.probeId} does not belong to ${entry.requirementKey}`]);
-  return issues.length ? { ok: false, issues } : { ok: true, value: parsed.data };
+  return { ok: true, value: parsed.data };
 }
 
 /* -------------------------------------------------------------- material -- */

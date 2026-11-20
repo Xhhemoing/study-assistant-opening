@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { isCitationGrounded } from "./capability-helpers";
 import { verifyProbeDistinguishability } from "./probe-protocol";
+import { createCartridgeRegistry } from "./registry";
 import {
   STACK_408_REQUIREMENTS,
   createInitialStack408State,
@@ -16,7 +17,7 @@ import {
   stack408Cartridge,
   type StackTraceInput,
 } from "./stack-408-v1";
-import type { CartridgeMaterialChunk, ContinuityCartridge } from "./types";
+import { CartridgeContinuityStateError, type CartridgeMaterialChunk, type ContinuityCartridge } from "./types";
 
 const TRACE_PROBE = "408.stack.trace.interleaved-underflow.v1";
 const POINTER_PROBE = "408.stack.pointer.pre-increment.v1";
@@ -153,6 +154,48 @@ describe("408.stack.v1 continuity (L1)", () => {
     const state = recordStack408ProbeAttempt(createInitialStack408State(), evaluation, "2026-11-19T00:00:00.000Z");
     const tampered = { ...state, probeHistory: [{ ...state.probeHistory[0]!, requirementKey: "408.ds.stack.pointer-convention" }] };
     expect(stack408Cartridge.parseContinuityState(tampered)).toMatchObject({ ok: false });
+  });
+
+  it.each([
+    ["correct", "invalid_response", null],
+    ["correct", "correct_model", "H_FIFO_QUEUE_CONFUSION"],
+    ["correct", "correct_model", "M_CORRECT_LIFO"],
+    ["incorrect", "correct_model", null],
+    ["correct", "misconception", "H_FIFO_QUEUE_CONFUSION"],
+    ["incorrect", "misconception", null],
+    ["incorrect", "misconception", "H_UNKNOWN"],
+    ["incorrect", "misconception", "H_BYPASS_LIFO_ORDER"],
+    ["correct", "unclassified", null],
+    ["unverified", "unclassified", "H_FIFO_QUEUE_CONFUSION"],
+    ["incorrect", "invalid_response", null],
+    ["unverified", "invalid_response", "H_FIFO_QUEUE_CONFUSION"],
+  ] as const)("rejects persisted %s / %s / %s entries", (outcome, diagnosis, matchedHypothesisId) => {
+    const state = recordStack408ProbeAttempt(createInitialStack408State(), evaluation, "2026-11-19T00:00:00.000Z");
+    const tampered = { ...state, probeHistory: [{ ...state.probeHistory[0], outcome, diagnosis, matchedHypothesisId }] };
+    const persisted = JSON.stringify(tampered);
+    expect(stack408Cartridge.parseContinuityState(persisted)).toMatchObject({
+      ok: false, issues: [expect.stringContaining("probeHistory.0")],
+    });
+    const cartridge: ContinuityCartridge = stack408Cartridge;
+    const registered = createCartridgeRegistry([cartridge]).getCartridge(cartridge.manifest.id)!;
+    expect(() => cartridge.buildResumeSummary(persisted)).toThrow(CartridgeContinuityStateError);
+    expect(() => registered.buildResumeSummary(persisted)).toThrow(CartridgeContinuityStateError);
+  });
+
+  it.each([
+    ["incorrect", "misconception", "H_FIFO_QUEUE_CONFUSION"],
+    ["incorrect", "unclassified", null],
+    ["unverified", "unclassified", null],
+    ["unverified", "invalid_response", null],
+  ] as const)("restores %s / %s / %s entries without completing the checkpoint", (outcome, diagnosis, matchedHypothesisId) => {
+    const state = recordStack408ProbeAttempt(createInitialStack408State(),
+      { ...evaluation, outcome, diagnosis, matchedHypothesisId }, "2026-11-19T00:00:00.000Z");
+    const persisted = stack408Cartridge.serializeContinuityState(state);
+    expect(stack408Cartridge.parseContinuityState(persisted)).toEqual({ ok: true, value: state });
+    const cartridge: ContinuityCartridge = stack408Cartridge;
+    expect(cartridge.buildResumeSummary(persisted)).toMatchObject({
+      completedSteps: 0, nextRequirementKey: "408.ds.stack.lifo-trace",
+    });
   });
 
   it("validates unknown state and accepts serialized state in the direct resume summary", () => {

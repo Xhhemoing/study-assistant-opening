@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { BlockList } from "node:net";
+import { describe, expect, it, vi } from "vitest";
 import {
   applyCartridgeEvidenceGate,
   evaluateCartridgeEvidenceEligibility,
@@ -64,6 +65,38 @@ describe("qualifyCartridgeEmission", () => {
     metadata.self = metadata;
     expect(qualifyCartridgeEmission(registry, emit({ response: { ...CORRECT, metadata } })))
       .toMatchObject({ qualified: false, reasonCodes: ["cartridge_response_invalid"] });
+  });
+
+  it("rejects Node BlockList data before lookup can mutate its backing state", () => {
+    const blockList = new BlockList();
+    const address = "192.0.2.1";
+    const base = stack408Cartridge.getProbe(TRACE_PROBE)!;
+    const probe = {
+      ...base,
+      parseResponse: vi.fn((raw: unknown) => {
+        const { rules } = raw as { rules: BlockList };
+        return base.parseResponse(rules.check(address) ? CORRECT : FIFO);
+      }),
+    };
+    const getProbe = vi.fn(() => probe);
+    const evaluateProbeResponse = vi.fn((_id: string, raw: unknown) => evaluateProbeWithSpec(probe, raw));
+    const localRegistry = createCartridgeRegistry([{
+      ...stack408Cartridge, listProbes: () => [probe], getProbe, evaluateProbeResponse,
+    }]);
+    getProbe.mockClear().mockImplementation(() => {
+      blockList.addAddress(address);
+      return probe;
+    });
+    const lookup = vi.spyOn(localRegistry, "getCartridge");
+
+    expect(qualifyCartridgeEmission(localRegistry, emit({ response: { rules: blockList } }))).toMatchObject({
+      qualified: false, reasonCodes: ["cartridge_response_invalid"],
+    });
+    expect(lookup).not.toHaveBeenCalled();
+    expect(getProbe).not.toHaveBeenCalled();
+    expect(probe.parseResponse).not.toHaveBeenCalled();
+    expect(evaluateProbeResponse).not.toHaveBeenCalled();
+    expect(blockList.check(address)).toBe(false);
   });
 
   it("captures the response once and isolates private bytes from lookup and both scorers", () => {
@@ -472,7 +505,6 @@ describe("assembleLearnerState with cartridge evidence", () => {
     const qualification = qualifyCartridgeEmission(registry, emit({ response: uncloneable }));
     expect(qualification.qualified).toBe(false);
     expect(qualification.reasonCodes).toEqual(["cartridge_response_invalid"]);
-    // structuredClone fails at the function property or runs once during upfront snapshot, never re-reading live getters in scoring.
-    expect(getterReads).toBeLessThanOrEqual(1);
+    expect(getterReads).toBe(0);
   });
 });

@@ -102,13 +102,12 @@ export function validateCartridge(candidate: unknown): CartridgeValidationReport
   if (!candidate || typeof candidate !== "object") {
     return { ok: false, issues: [{ code: "cartridge_not_object", detail: typeof candidate }], probeReports: [] };
   }
-  let rawManifest: unknown;
+  let parsed: ReturnType<typeof cartridgeManifestSchema.safeParse>;
   try {
-    rawManifest = (candidate as { manifest?: unknown }).manifest;
+    parsed = cartridgeManifestSchema.safeParse((candidate as { manifest?: unknown }).manifest);
   } catch (error) {
     return { ok: false, probeReports: [], issues: [{ code: "manifest_invalid", detail: safeErrorDetail(error) }] };
   }
-  const parsed = cartridgeManifestSchema.safeParse(rawManifest);
   if (!parsed.success) {
     return { ok: false, probeReports: [],
       issues: parsed.error.issues.map(issue => ({ code: "manifest_invalid" as const, detail: `${issue.path.join(".")}: ${issue.message}` })) };
@@ -141,9 +140,10 @@ export interface CartridgeRegistry {
   listCartridgesByCapability(level: CartridgeCapabilityLevel): AnyTeachingCartridge[];
 }
 
-function wrapCartridge(cartridge: AnyTeachingCartridge, level: CartridgeCapabilityLevel): AnyTeachingCartridge {
+function wrapCartridge(cartridge: AnyTeachingCartridge, pinnedManifest: Readonly<CartridgeManifest>): AnyTeachingCartridge {
+  const { level } = pinnedManifest;
   const facade: AnyTeachingCartridge = {
-    get manifest() { return cartridge.manifest; },
+    manifest: pinnedManifest,
     serializeContinuityState(state) { return cartridge.serializeContinuityState(state); },
     parseContinuityState(raw) { return cartridge.parseContinuityState(raw); },
     buildResumeSummary(raw) {
@@ -177,7 +177,9 @@ export function createCartridgeRegistry(initial: readonly unknown[] = []): Cartr
         return { ok: false, probeReports: report.probeReports,
           issues: [{ code: "duplicate_cartridge_id", detail: report.manifest.id }] };
       }
-      entries.set(report.manifest.id, wrapCartridge(cartridge as AnyTeachingCartridge, report.manifest.level));
+      // The validated schema has only scalar fields, so freezing this copy covers the whole manifest.
+      const pinnedManifest = Object.freeze({ ...report.manifest });
+      entries.set(pinnedManifest.id, wrapCartridge(cartridge as AnyTeachingCartridge, pinnedManifest));
       return report;
     },
     getCartridge(id) {

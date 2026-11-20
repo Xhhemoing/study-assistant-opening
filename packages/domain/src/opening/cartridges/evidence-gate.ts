@@ -72,7 +72,7 @@ function evaluationsMatch(
 function snapshotResponse(value: unknown) {
   try {
     const verifiedResponseCopy = cloneCartridgeData(value);
-    // Clone the captured data so live getters run only once and both scorers start with the same response.
+    // Both scorers start from independently held copies of the same capture.
     const cartridgeResponseCopy = structuredClone(verifiedResponseCopy);
     return { verifiedResponseCopy, cartridgeResponseCopy };
   } catch {
@@ -146,6 +146,7 @@ export function qualifyCartridgeEmission(
     level: null, evaluation: null, distinguishability: null, reasonCodes: [],
   };
   const reject = (code: CartridgeEvidenceGateReasonCode) => ({ ...result, reasonCodes: [code] });
+  if (!capturedEmission.response) return reject("cartridge_response_invalid");
 
   let cartridge: ReturnType<CartridgeRegistry["getCartridge"]>;
   try {
@@ -163,7 +164,6 @@ export function qualifyCartridgeEmission(
   }
   if (manifestVersion !== capturedEmission.cartridgeVersion) return reject("cartridge_version_mismatch");
   if (!hasEvidenceCapability(cartridge)) return reject("cartridge_level_below_evidence");
-  if (!capturedEmission.response) return reject("cartridge_response_invalid");
 
   let probe: DistinguishableProbeSpec<unknown, unknown> | null;
   try {

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { qualifyCartridgeEmission } from "./evidence-gate";
 import {
   CartridgeRegistrationError,
   createCartridgeRegistry,
@@ -55,6 +56,50 @@ describe("CartridgeRegistry", () => {
     expect(registry.listCartridges().map(row => row.manifest.id)).toEqual(["408.stack.l2", "408.stack.v1", "demo.notes.v1"]);
     expect(listCartridgesByCapability(registry, "L2_SCHEDULABLE").map(row => row.manifest.id)).toEqual(["408.stack.l2", "408.stack.v1"]);
     expect(listCartridgesByCapability(registry, "L4_EVIDENCE").map(row => row.manifest.id)).toEqual(["408.stack.v1"]);
+  });
+
+  it("uses the immutable validated manifest for identity, capability, and evidence qualification", () => {
+    const original = { ...stack408Cartridge.manifest, id: "alpha.v1", version: "1.0.0" };
+    const candidate = { ...stack408Cartridge, manifest: { ...original } };
+    const registry = createCartridgeRegistry();
+    const report = registry.registerCartridge(candidate);
+    expect(report.ok).toBe(true);
+    if (!report.ok) return;
+    Reflect.set(report.manifest, "version", "9.0.0");
+    candidate.manifest.id = "beta.v1";
+    candidate.manifest.version = "2.0.0";
+
+    const registered = registry.getCartridge("alpha.v1")!;
+    const emission = {
+      cartridgeId: "alpha.v1",
+      cartridgeVersion: "1.0.0",
+      probeId: "408.stack.trace.interleaved-underflow.v1",
+      response: { outputs: "2,3,1,UNDERFLOW", finalTop: -1 },
+    };
+    expect(qualifyCartridgeEmission(registry, { ...emission, cartridgeVersion: "2.0.0" })).toMatchObject({
+      qualified: false, reasonCodes: ["cartridge_version_mismatch"],
+    });
+    candidate.manifest = { ...candidate.manifest, level: "L1_CONTINUITY" };
+    Object.defineProperty(candidate, "manifest", { get() { throw new Error("manifest re-read after registration"); } });
+    expect(registered.manifest).toEqual(original);
+    expect(Object.isFrozen(registered.manifest)).toBe(true);
+    expect(registry.getCartridge("beta.v1")).toBeNull();
+    expect(registry.listCartridges()).toEqual([registered]);
+    expect(registry.listCartridgesByCapability("L4_EVIDENCE")).toEqual([registered]);
+    expect(hasEvidenceCapability(registered)).toBe(true);
+    expect(qualifyCartridgeEmission(registry, emission)).toMatchObject({ qualified: true });
+  });
+
+  it("rejects a manifest whose field getter throws during schema parsing", () => {
+    const candidate = {
+      ...continuityOnly,
+      manifest: { ...continuityOnly.manifest, get version(): string { throw new Error("version unavailable"); } },
+    };
+    const registry = createCartridgeRegistry();
+    expect(registry.registerCartridge(candidate)).toMatchObject({
+      ok: false, issues: [{ code: "manifest_invalid", detail: "version unavailable" }],
+    });
+    expect(registry.listCartridges()).toEqual([]);
   });
 
   it("validates and restores unknown state before building a registered cartridge's resume summary", () => {
