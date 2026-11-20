@@ -3,9 +3,15 @@ import { toDisplayShareCard } from "../../../features/opening/share/schema";
 import { verifyPitfallShareToken } from "../../../features/opening/share/token-codec";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 export const alt = "AIstudy 防踩坑避雷卡";
 export const size = { width: 1200, height: 630 };
 export const contentType = "image/png";
+
+const OG_RESPONSE_OPTIONS = {
+  ...size,
+  headers: { "Cache-Control": "no-store" },
+};
 
 type OpenGraphImageProps = {
   params: Promise<{ token: string }>;
@@ -75,7 +81,7 @@ export default async function OpenGraphImage({ params }: OpenGraphImageProps) {
           </div>
         </div>
       ),
-      { ...size },
+      OG_RESPONSE_OPTIONS,
     );
   }
 
@@ -230,6 +236,6 @@ export default async function OpenGraphImage({ params }: OpenGraphImageProps) {
         </div>
       </div>
     ),
-    { ...size },
+    OG_RESPONSE_OPTIONS,
   );
 }

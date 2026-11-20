@@ -7,7 +7,10 @@ const navMocks = vi.hoisted(() => ({
   notFound: vi.fn(() => {
     throw new Error("NEXT_NOT_FOUND");
   }),
-  ogCalls: [] as Array<{ element: unknown; options: { width?: number; height?: number } | undefined }>,
+  ogCalls: [] as Array<{
+    element: unknown;
+    options: { width?: number; height?: number; headers?: Record<string, string> } | undefined;
+  }>,
 }));
 
 vi.mock("next/navigation", () => ({
@@ -19,18 +22,21 @@ vi.mock("next/navigation", () => ({
 
 vi.mock("next/og", () => ({
   ImageResponse: class MockImageResponse extends Response {
-    constructor(element: unknown, options?: { width?: number; height?: number }) {
+    constructor(
+      element: unknown,
+      options?: { width?: number; height?: number; headers?: Record<string, string> },
+    ) {
       navMocks.ogCalls.push({ element, options });
       super(new Uint8Array([137, 80, 78, 71]), {
         status: 200,
-        headers: { "content-type": "image/png" },
+        headers: { "content-type": "image/png", ...(options?.headers ?? {}) },
       });
     }
   },
 }));
 
 import SharePitfallNotFound from "../../../app/s/[token]/not-found";
-import OpenGraphImage from "../../../app/s/[token]/opengraph-image";
+import OpenGraphImage, { dynamic as ogDynamic } from "../../../app/s/[token]/opengraph-image";
 import SharePitfallPage, { generateMetadata } from "../../../app/s/[token]/page";
 import { InvalidShareCard, PitfallShareCard } from "./share-card";
 import { signPitfallShareToken } from "./token-codec";
@@ -185,7 +191,9 @@ describe("PitfallShareCard, /s/[token] page, and opengraph-image", () => {
     expect(host.textContent).toContain("这张避雷卡已失效或链接不完整");
   });
 
-  it("generates OpenGraph ImageResponse for valid, small-cohort, and invalid tokens", async () => {
+  it("generates non-cacheable OpenGraph ImageResponse for valid, small-cohort, and invalid tokens", async () => {
+    expect(ogDynamic).toBe("force-dynamic");
+
     const signed = signPitfallShareToken(
       {
         subjectLabel: "数据结构",
@@ -203,7 +211,12 @@ describe("PitfallShareCard, /s/[token] page, and opengraph-image", () => {
     });
     expect(validOg).toBeInstanceOf(Response);
     expect(validOg.status).toBe(200);
-    expect(navMocks.ogCalls[0]?.options).toEqual({ width: 1200, height: 630 });
+    expect(validOg.headers.get("cache-control")).toBe("no-store");
+    expect(navMocks.ogCalls[0]?.options).toEqual({
+      width: 1200,
+      height: 630,
+      headers: { "Cache-Control": "no-store" },
+    });
     expect(JSON.stringify(navMocks.ogCalls[0]?.element)).toContain("BFS 入队时就该标记已访问");
     expect(JSON.stringify(navMocks.ogCalls[0]?.element)).toContain("约 52% 同学曾在此踩坑 · 36 人样本");
 
@@ -227,7 +240,12 @@ describe("PitfallShareCard, /s/[token] page, and opengraph-image", () => {
     });
     expect(fallbackOg).toBeInstanceOf(Response);
     expect(fallbackOg.status).toBe(200);
-    expect(navMocks.ogCalls[2]?.options).toEqual({ width: 1200, height: 630 });
+    expect(fallbackOg.headers.get("cache-control")).toBe("no-store");
+    expect(navMocks.ogCalls[2]?.options).toEqual({
+      width: 1200,
+      height: 630,
+      headers: { "Cache-Control": "no-store" },
+    });
     expect(JSON.stringify(navMocks.ogCalls[2]?.element)).toContain("把容易做错的题，变成清晰的避坑口诀");
     expect(JSON.stringify(navMocks.ogCalls[2]?.element)).not.toMatch(/signature|hmac|secret/i);
   });

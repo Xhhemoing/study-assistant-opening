@@ -1,15 +1,33 @@
 import { toDisplayShareCard, type ShareCardData } from "./schema";
 
-function stripXmlControlChars(value: string): string {
+/**
+ * Strip characters disallowed in XML 1.0 (Section 2.2):
+ * C0 controls (except TAB/LF/CR), DEL (0x7F), noncharacters U+FFFE/U+FFFF,
+ * and unpaired UTF-16 surrogates (U+D800-U+DFFF). Valid surrogate pairs are kept.
+ */
+export function stripXmlIllegalChars(value: string): string {
   let result = "";
   for (let i = 0; i < value.length; i++) {
     const code = value.charCodeAt(i);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = i + 1 < value.length ? value.charCodeAt(i + 1) : 0;
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        result += value[i]! + value[i + 1]!;
+        i++;
+      }
+      continue;
+    }
+    if (code >= 0xdc00 && code <= 0xdfff) {
+      continue;
+    }
     const disallowed =
       (code >= 0x00 && code <= 0x08) ||
       code === 0x0b ||
       code === 0x0c ||
       (code >= 0x0e && code <= 0x1f) ||
-      code === 0x7f;
+      code === 0x7f ||
+      code === 0xfffe ||
+      code === 0xffff;
     if (!disallowed) {
       result += value[i]!;
     }
@@ -18,7 +36,7 @@ function stripXmlControlChars(value: string): string {
 }
 
 export function escapeXml(value: string): string {
-  return stripXmlControlChars(value)
+  return stripXmlIllegalChars(value)
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;")
@@ -47,7 +65,7 @@ export function wrapPosterLines(
   maxUnitsPerLine: number,
   maxLines: number,
 ): string[] {
-  const normalized = text.replace(/\s+/g, " ").trim();
+  const normalized = stripXmlIllegalChars(text).replace(/\s+/g, " ").trim();
   if (!normalized || maxLines <= 0) return [];
 
   const chars = [...normalized];
@@ -60,8 +78,8 @@ export function wrapPosterLines(
     const width = charDisplayWidth(ch);
     if (units + width > maxUnitsPerLine && current.length > 0) {
       if (lines.length + 1 >= maxLines) {
-        const trimmed = current.trimEnd();
-        lines.push(`${trimmed.slice(0, Math.max(1, trimmed.length - 1))}…`);
+        const trimmedChars = [...current.trimEnd()];
+        lines.push(`${trimmedChars.slice(0, Math.max(1, trimmedChars.length - 1)).join("")}…`);
         return lines;
       }
       // Prefer breaking on the last ASCII space inside the current line if close to the edge.

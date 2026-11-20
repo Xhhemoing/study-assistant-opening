@@ -23,9 +23,28 @@ function isDisallowedControlCode(code: number): boolean {
   );
 }
 
-function hasDisallowedControlChars(value: string): boolean {
+/**
+ * Detect disallowed control characters and XML 1.0 illegal code points:
+ * U+FFFE, U+FFFF, and unpaired UTF-16 surrogates (U+D800-U+DFFF).
+ * Valid surrogate pairs (U+10000-U+10FFFF) are permitted.
+ */
+export function hasDisallowedXmlOrControlChars(value: string): boolean {
   for (let i = 0; i < value.length; i++) {
-    if (isDisallowedControlCode(value.charCodeAt(i))) return true;
+    const code = value.charCodeAt(i);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = i + 1 < value.length ? value.charCodeAt(i + 1) : 0;
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        i++;
+        continue;
+      }
+      return true;
+    }
+    if (code >= 0xdc00 && code <= 0xdfff) {
+      return true;
+    }
+    if (isDisallowedControlCode(code) || code === 0xfffe || code === 0xffff) {
+      return true;
+    }
   }
   return false;
 }
@@ -78,7 +97,7 @@ export function sanitizeShareText(value: string): string {
 }
 
 export function detectSharePrivacyViolation(value: string): SharePrivacyViolation | null {
-  if (hasDisallowedControlChars(value)) return "control_chars";
+  if (hasDisallowedXmlOrControlChars(value)) return "control_chars";
   if (UUID_PATTERN.test(value)) return "uuid";
   if (EMAIL_PATTERN.test(value)) return "email";
   if (IDENTIFIER_LEAK_PATTERN.test(value)) return "identifier";
@@ -132,8 +151,8 @@ export function normalizeCohortTrapRate(
 function safeShareTextSchema(maxLength: number, fieldName: string) {
   return z
     .string()
-    .refine((value) => !hasDisallowedControlChars(value), {
-      message: `${fieldName} contains disallowed control characters`,
+    .refine((value) => !hasDisallowedXmlOrControlChars(value), {
+      message: `${fieldName} contains disallowed control or XML-invalid characters`,
     })
     .transform(sanitizeShareText)
     .refine((value) => value.length >= 1, {
@@ -146,6 +165,31 @@ function safeShareTextSchema(maxLength: number, fieldName: string) {
       message: `${fieldName} contains restricted personal or identifier text`,
     });
 }
+
+/**
+ * Strict HTTP request contract for POST /api/opening/share.
+ * Clients may ONLY select a server-authoritative pitfallId and optional TTL;
+ * arbitrary copy or cohort statistics are rejected to prevent forged badges.
+ */
+export const shareMintRequestSchema = z
+  .object({
+    pitfallId: z
+      .string()
+      .trim()
+      .min(1, "pitfallId is required")
+      .max(64, "pitfallId must be at most 64 characters")
+      .regex(/^[a-z0-9][a-z0-9-]*$/, "pitfallId format is invalid"),
+    expiresInSeconds: z
+      .number()
+      .int()
+      .min(SHARE_TOKEN_MIN_TTL_SECONDS)
+      .max(SHARE_TOKEN_MAX_TTL_SECONDS)
+      .optional(),
+  })
+  .strict();
+
+export type ShareMintRequest = z.input<typeof shareMintRequestSchema>;
+export type ParsedShareMintRequest = z.output<typeof shareMintRequestSchema>;
 
 export const shareMintInputSchema = z
   .object({

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { buildPitfallPosterSvg, buildPosterFilename, escapeXml } from "./poster";
+import { buildPitfallPosterSvg, buildPosterFilename, escapeXml, stripXmlIllegalChars } from "./poster";
+import { hasDisallowedXmlOrControlChars } from "./schema";
 
 describe("deterministic XML-escaped SVG poster builder", () => {
   const baseCard = {
@@ -41,6 +42,36 @@ describe("deterministic XML-escaped SVG poster builder", () => {
     expect(svg).toContain("&amp;&amp;");
     expect(svg).toContain("&#39;");
     expect(escapeXml(`& < > " '`)).toBe("&amp; &lt; &gt; &quot; &#39;");
+  });
+
+  it("strips XML 1.0 illegal code points (U+FFFE, U+FFFF, lone surrogates) while preserving valid surrogate pairs", () => {
+    const loneHigh = String.fromCharCode(0xd800);
+    const loneLow = String.fromCharCode(0xdfff);
+    const validPair = "𠮷"; // U+20BB7
+
+    const dirtyCard = {
+      subjectLabel: `高数\uFFFE测\uFFFF试`,
+      pitfallTitle: `包含${loneHigh}孤立高代理与${loneLow}孤立低代理以及合法字形${validPair}\uFFFF`,
+      trapSummary: `带空字符\u0000与\uFFFE和\uFFFF的易错摘要${loneHigh}`,
+      takeawayRule: `口诀\uFFFF保留合法字符${validPair}${loneLow}并保持合法XML`,
+      cohortSampleSize: 35,
+      cohortTrapRate: 60,
+    };
+
+    const svg = buildPitfallPosterSvg(dirtyCard);
+    expect(hasDisallowedXmlOrControlChars(svg)).toBe(false);
+    expect(svg).not.toContain("\uFFFE");
+    expect(svg).not.toContain("\uFFFF");
+    expect(svg).not.toContain("\u0000");
+    expect(svg).toContain(validPair);
+    expect(svg).toContain("高数测试");
+    expect(svg.startsWith('<?xml version="1.0" encoding="UTF-8"?>')).toBe(true);
+    expect(svg.endsWith("</svg>")).toBe(true);
+
+    // Direct helper assertions
+    expect(stripXmlIllegalChars(`A\uFFFEB\uFFFFC${loneHigh}D${loneLow}E${validPair}`)).toBe(
+      `ABCDE${validPair}`,
+    );
   });
 
   it("omits cohort trap rate badge whenever cohortSampleSize < 30", () => {

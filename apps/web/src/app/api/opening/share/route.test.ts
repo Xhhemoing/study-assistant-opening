@@ -1,3 +1,4 @@
+import { getShareablePitfallById } from "@aistudy/domain";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({ scope: vi.fn() }));
@@ -10,15 +11,7 @@ import { verifyPitfallShareToken } from "../../../../features/opening/share/toke
 import { POST } from "./route";
 
 const TEST_SECRET = "route-share-test-secret-0123456789abcdef";
-
-const VALID_PAYLOAD = {
-  subjectLabel: "线性代数",
-  pitfallTitle: "特征值相同不代表矩阵一定可对角化",
-  trapSummary: "只看到有重根就默认能对角化，忘了检查几何重数是否等于代数重数。",
-  takeawayRule: "重特征值先算 n - rank(A - λI)，相等才可对角化。",
-  cohortSampleSize: 42,
-  cohortTrapRate: 67.4,
-};
+const VALID_PITFALL_ID = "math-linalg-diagonalizable-multiplicity";
 
 function jsonRequest(body: unknown, headers: Record<string, string> = {}) {
   return new Request("http://localhost/api/opening/share", {
@@ -123,53 +116,63 @@ describe("POST /api/opening/share", () => {
     },
   );
 
-  it("mints a verifiable stateless share token with 201 and no-store cache header", async () => {
-    const response = await POST(jsonRequest(VALID_PAYLOAD));
+  it("mints a verifiable stateless share token solely from the server-authoritative catalog", async () => {
+    const expectedEntry = getShareablePitfallById(VALID_PITFALL_ID);
+    expect(expectedEntry).not.toBeNull();
+
+    const response = await POST(
+      jsonRequest({ pitfallId: VALID_PITFALL_ID, expiresInSeconds: 3600 }),
+    );
     expect(response.status).toBe(201);
     expect(response.headers.get("cache-control")).toBe("no-store");
 
     const data = (await response.json()) as {
+      pitfallId: string;
       token: string;
       sharePath: string;
       expiresAt: string;
     };
+    expect(data.pitfallId).toBe(VALID_PITFALL_ID);
     expect(data.sharePath).toBe(`/s/${data.token}`);
     expect(Date.parse(data.expiresAt)).toBeGreaterThan(Date.now());
 
     const verified = verifyPitfallShareToken(data.token, { authSecret: TEST_SECRET });
     expect(verified.ok).toBe(true);
-    if (verified.ok) {
-      expect(verified.payload.subjectLabel).toBe("线性代数");
-      expect(verified.payload.cohortSampleSize).toBe(42);
-      expect(verified.payload.cohortTrapRate).toBe(67);
-    }
-  });
-
-  it("forces cohortTrapRate to null when cohortSampleSize < 30", async () => {
-    const response = await POST(
-      jsonRequest({ ...VALID_PAYLOAD, cohortSampleSize: 15, cohortTrapRate: 70 }),
-    );
-    expect(response.status).toBe(201);
-    const data = (await response.json()) as { token: string };
-    const verified = verifyPitfallShareToken(data.token, { authSecret: TEST_SECRET });
-    expect(verified.ok).toBe(true);
-    if (verified.ok) {
-      expect(verified.payload.cohortSampleSize).toBe(15);
+    if (verified.ok && expectedEntry) {
+      expect(verified.payload.subjectLabel).toBe(expectedEntry.subjectLabel);
+      expect(verified.payload.pitfallTitle).toBe(expectedEntry.pitfallTitle);
+      expect(verified.payload.trapSummary).toBe(expectedEntry.trapSummary);
+      expect(verified.payload.takeawayRule).toBe(expectedEntry.takeawayRule);
+      expect(verified.payload.cohortSampleSize).toBe(0);
       expect(verified.payload.cohortTrapRate).toBeNull();
+      expect(verified.payload.exp - verified.payload.iat).toBe(3600);
     }
   });
 
-  it("rejects privacy violations, UUIDs in text, and malformed JSON with 400", async () => {
-    const withUserId = await POST(jsonRequest({ ...VALID_PAYLOAD, userId: "u-1" }));
-    expect(withUserId.status).toBe(400);
+  it("returns 404 NOT_FOUND for unknown pitfallId", async () => {
+    const response = await POST(jsonRequest({ pitfallId: "unknown-pitfall-id" }));
+    expect(response.status).toBe(404);
+  });
 
-    const withUuid = await POST(
-      jsonRequest({
-        ...VALID_PAYLOAD,
-        trapSummary: "错题 550e8400-e29b-41d4-a716-446655440000 别再错",
-      }),
-    );
-    expect(withUuid.status).toBe(400);
+  it("rejects client-forged copy, cohort stats, PII fields, and malformed JSON with 400", async () => {
+    const forgedBodies = [
+      { pitfallId: VALID_PITFALL_ID, title: "官方认证：点击领券" },
+      { pitfallId: VALID_PITFALL_ID, misconception: "伪造错因" },
+      { pitfallId: VALID_PITFALL_ID, reframe: "伪造口诀" },
+      { pitfallId: VALID_PITFALL_ID, ctaHref: "https://phishing.example" },
+      { pitfallId: VALID_PITFALL_ID, pitfallTitle: "伪造标题" },
+      { pitfallId: VALID_PITFALL_ID, trapSummary: "伪造摘要" },
+      { pitfallId: VALID_PITFALL_ID, takeawayRule: "伪造规则" },
+      { pitfallId: VALID_PITFALL_ID, cohortSampleSize: 5000, cohortTrapRate: 99 },
+      { pitfallId: VALID_PITFALL_ID, userId: "u-1" },
+      { pitfallId: "INVALID_ID_FORMAT" },
+      { pitfallId: VALID_PITFALL_ID, expiresInSeconds: 10 },
+    ];
+
+    for (const body of forgedBodies) {
+      const response = await POST(jsonRequest(body));
+      expect(response.status).toBe(400);
+    }
 
     const invalidJson = await POST(jsonRequest("{bad-json"));
     expect(invalidJson.status).toBe(400);
@@ -180,9 +183,14 @@ describe("POST /api/opening/share", () => {
     expect(emptyBody.status).toBe(400);
   });
 
-  it("returns 503 CONFIGURATION when AUTH_SECRET is missing", async () => {
+  it("returns 503 CONFIGURATION when AUTH_SECRET is missing, low-entropy, or a placeholder", async () => {
     delete process.env.AUTH_SECRET;
-    const response = await POST(jsonRequest(VALID_PAYLOAD));
-    expect(response.status).toBe(503);
+    expect((await POST(jsonRequest({ pitfallId: VALID_PITFALL_ID }))).status).toBe(503);
+
+    process.env.AUTH_SECRET = "a".repeat(32);
+    expect((await POST(jsonRequest({ pitfallId: VALID_PITFALL_ID }))).status).toBe(503);
+
+    process.env.AUTH_SECRET = "change-me-0123456789abcdefghijkl";
+    expect((await POST(jsonRequest({ pitfallId: VALID_PITFALL_ID }))).status).toBe(503);
   });
 });

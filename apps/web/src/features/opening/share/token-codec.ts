@@ -1,5 +1,6 @@
 import "server-only";
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { getShareablePitfallById } from "@aistudy/domain";
 import {
   SHARE_TOKEN_DEFAULT_TTL_SECONDS,
   SHARE_TOKEN_MAX_LENGTH,
@@ -7,18 +8,24 @@ import {
   findForbiddenShareKeys,
   normalizeCohortTrapRate,
   shareMintInputSchema,
+  shareMintRequestSchema,
   shareTokenPayloadSchema,
   type ShareTokenPayload,
 } from "./schema";
 
 export const SHARE_KEY_DERIVATION_CONTEXT = "opening:pitfall-share:v1";
 export const SHARE_AUTH_SECRET_MIN_LENGTH = 32;
+export const SHARE_AUTH_SECRET_MIN_UNIQUE_CHARS = 8;
 
 const HMAC_SHA256_BYTES = 32;
 const BASE64URL_SEGMENT = /^[A-Za-z0-9_-]+$/;
+const PLACEHOLDER_SECRET_PATTERN =
+  /(?:change[-_ ]?me|replace[-_ ]?with|your[-_ ]?secret|example|placeholder|default[-_ ]?secret|dummy[-_ ]?secret|insert[-_ ]?secret)/i;
 
 export class ShareTokenConfigError extends Error {
-  constructor(message = "AUTH_SECRET must be at least 32 characters") {
+  constructor(
+    message = "AUTH_SECRET must be a non-placeholder high-entropy secret of at least 32 characters",
+  ) {
     super(message);
     this.name = "ShareTokenConfigError";
   }
@@ -28,6 +35,13 @@ export class ShareTokenValidationError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "ShareTokenValidationError";
+  }
+}
+
+export class SharePitfallNotFoundError extends Error {
+  constructor(pitfallId: string) {
+    super(`Unknown pitfallId: ${pitfallId}`);
+    this.name = "SharePitfallNotFoundError";
   }
 }
 
@@ -41,6 +55,10 @@ export type SignedShareToken = {
   sharePath: string;
   expiresAt: string;
   payload: ShareTokenPayload;
+};
+
+export type AuthoritativeSignedShareToken = SignedShareToken & {
+  pitfallId: string;
 };
 
 export type VerifyShareTokenFailureReason =
@@ -57,15 +75,25 @@ export type VerifyShareTokenResult =
 
 /**
  * Derive a domain-separated 256-bit HMAC signing key from AUTH_SECRET.
- * Refuses to proceed if AUTH_SECRET is absent or shorter than 32 characters.
+ * Refuses to proceed if AUTH_SECRET is absent, shorter than 32 characters,
+ * low-entropy (< 8 distinct characters), or matches common example placeholders.
  */
 export function deriveShareSigningKey(authSecret?: string): Buffer {
   const secret = authSecret ?? process.env.AUTH_SECRET;
+  if (typeof secret !== "string") {
+    throw new ShareTokenConfigError();
+  }
+  const trimmed = secret.trim();
   if (
-    typeof secret !== "string" ||
     secret.length < SHARE_AUTH_SECRET_MIN_LENGTH ||
-    secret.trim().length < SHARE_AUTH_SECRET_MIN_LENGTH
+    trimmed.length < SHARE_AUTH_SECRET_MIN_LENGTH
   ) {
+    throw new ShareTokenConfigError();
+  }
+  if (new Set([...trimmed]).size < SHARE_AUTH_SECRET_MIN_UNIQUE_CHARS) {
+    throw new ShareTokenConfigError();
+  }
+  if (PLACEHOLDER_SECRET_PATTERN.test(trimmed)) {
     throw new ShareTokenConfigError();
   }
   return createHmac("sha256", secret)
@@ -133,6 +161,52 @@ export function signPitfallShareToken(
     sharePath: `/s/${token}`,
     expiresAt: new Date(payload.exp * 1000).toISOString(),
     payload,
+  };
+}
+
+/**
+ * Server-authoritative share minting from the verified domain catalog.
+ * Accepts ONLY `{ pitfallId, expiresInSeconds? }` and ignores/rejects any
+ * client-supplied copy or cohort statistics.
+ */
+export function mintPitfallShareTokenById(
+  requestInput: unknown,
+  options: ShareCodecOptions = {},
+): AuthoritativeSignedShareToken {
+  const forbidden = findForbiddenShareKeys(requestInput);
+  if (forbidden.length > 0) {
+    throw new ShareTokenValidationError("Payload contains restricted privacy fields");
+  }
+
+  const parsed = shareMintRequestSchema.safeParse(requestInput);
+  if (!parsed.success) {
+    const firstIssue = parsed.error.issues[0];
+    throw new ShareTokenValidationError(firstIssue?.message ?? "Invalid share mint request");
+  }
+
+  const entry = getShareablePitfallById(parsed.data.pitfallId);
+  if (!entry) {
+    throw new SharePitfallNotFoundError(parsed.data.pitfallId);
+  }
+
+  const signed = signPitfallShareToken(
+    {
+      subjectLabel: entry.subjectLabel,
+      pitfallTitle: entry.pitfallTitle,
+      trapSummary: entry.trapSummary,
+      takeawayRule: entry.takeawayRule,
+      cohortSampleSize: entry.cohortSampleSize,
+      cohortTrapRate: entry.cohortTrapRate,
+      ...(parsed.data.expiresInSeconds !== undefined
+        ? { ttlSeconds: parsed.data.expiresInSeconds }
+        : {}),
+    },
+    options,
+  );
+
+  return {
+    pitfallId: entry.pitfallId,
+    ...signed,
   };
 }
 

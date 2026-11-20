@@ -1,4 +1,5 @@
 import { createHmac } from "node:crypto";
+import { SHAREABLE_PITFALL_CATALOG } from "@aistudy/domain";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   SHARE_TOKEN_DEFAULT_TTL_SECONDS,
@@ -7,9 +8,11 @@ import {
 } from "./schema";
 import {
   SHARE_KEY_DERIVATION_CONTEXT,
+  SharePitfallNotFoundError,
   ShareTokenConfigError,
   ShareTokenValidationError,
   deriveShareSigningKey,
+  mintPitfallShareTokenById,
   signPitfallShareToken,
   verifyPitfallShareToken,
 } from "./token-codec";
@@ -70,15 +73,9 @@ describe("stateless HMAC-SHA256 pitfall share token codec", () => {
     ).toEqual({ ok: false, reason: "invalid_signature" });
   });
 
-  it("refuses to sign or verify when AUTH_SECRET is missing or shorter than 32 chars", () => {
+  it("refuses to sign or verify when AUTH_SECRET is missing, short, low-entropy, or a placeholder", () => {
     delete process.env.AUTH_SECRET;
     expect(() => signPitfallShareToken(VALID_INPUT)).toThrow(ShareTokenConfigError);
-    expect(() => signPitfallShareToken(VALID_INPUT, { authSecret: "short-secret-12345" })).toThrow(
-      ShareTokenConfigError,
-    );
-    expect(() =>
-      signPitfallShareToken(VALID_INPUT, { authSecret: "   short-even-with-spaces   " }),
-    ).toThrow(ShareTokenConfigError);
 
     const signed = signPitfallShareToken(VALID_INPUT, {
       authSecret: TEST_SECRET,
@@ -88,10 +85,31 @@ describe("stateless HMAC-SHA256 pitfall share token codec", () => {
       ok: false,
       reason: "misconfigured",
     });
-    expect(verifyPitfallShareToken(signed.token, { authSecret: "too-short" })).toEqual({
-      ok: false,
-      reason: "misconfigured",
-    });
+
+    const weakOrPlaceholderSecrets = [
+      "short-secret-12345",
+      "   short-even-with-spaces   ",
+      "a".repeat(32),
+      "ab".repeat(20),
+      "1234567".repeat(5),
+      "change-me-0123456789abcdefghijkl",
+      "CHANGE_ME_PRODUCTION_SECRET_0123456",
+      "please-replace-with-real-key-012345",
+      "your-secret-key-0123456789abcdefgh",
+      "YOUR_SECRET_VALUE_0123456789ABCDEF",
+      "example-signing-key-0123456789abcd",
+      "placeholder-auth-key-0123456789abc",
+      "default-secret-value-0123456789abc",
+    ];
+
+    for (const badSecret of weakOrPlaceholderSecrets) {
+      expect(() =>
+        signPitfallShareToken(VALID_INPUT, { authSecret: badSecret, nowMs: BASE_TIME_MS }),
+      ).toThrow(ShareTokenConfigError);
+      expect(
+        verifyPitfallShareToken(signed.token, { authSecret: badSecret, nowMs: BASE_TIME_MS }),
+      ).toEqual({ ok: false, reason: "misconfigured" });
+    }
   });
 
   it("signs and verifies a valid token with default 30-day TTL and bounded URL-safe format", () => {
@@ -154,7 +172,6 @@ describe("stateless HMAC-SHA256 pitfall share token codec", () => {
     });
     const [payloadSeg, sigSeg] = signed.token.split(".") as [string, string];
 
-    // Flip a character in the signature
     const flippedSig = `${sigSeg[0] === "A" ? "B" : "A"}${sigSeg.slice(1)}`;
     expect(
       verifyPitfallShareToken(`${payloadSeg}.${flippedSig}`, {
@@ -163,7 +180,6 @@ describe("stateless HMAC-SHA256 pitfall share token codec", () => {
       }),
     ).toEqual({ ok: false, reason: "invalid_signature" });
 
-    // Flip a character in the payload
     const flippedPayload = `${payloadSeg[0] === "e" ? "f" : "e"}${payloadSeg.slice(1)}`;
     expect(
       verifyPitfallShareToken(`${flippedPayload}.${sigSeg}`, {
@@ -172,7 +188,6 @@ describe("stateless HMAC-SHA256 pitfall share token codec", () => {
       }),
     ).toEqual({ ok: false, reason: "invalid_signature" });
 
-    // Wrong secret
     expect(
       verifyPitfallShareToken(signed.token, {
         authSecret: OTHER_SECRET,
@@ -180,7 +195,6 @@ describe("stateless HMAC-SHA256 pitfall share token codec", () => {
       }),
     ).toEqual({ ok: false, reason: "invalid_signature" });
 
-    // Single-bit flip in the decoded 32-byte digest (exercises fixed-length timingSafeEqual)
     const rawSigBytes = Buffer.from(sigSeg, "base64url");
     expect(rawSigBytes.byteLength).toBe(32);
     rawSigBytes[31] = rawSigBytes[31]! ^ 0x01;
@@ -191,7 +205,6 @@ describe("stateless HMAC-SHA256 pitfall share token codec", () => {
       }),
     ).toEqual({ ok: false, reason: "invalid_signature" });
 
-    // 31-byte and 33-byte signatures (must reject cleanly without RangeError)
     const sig31 = Buffer.alloc(31, 0x42).toString("base64url");
     const sig33 = Buffer.alloc(33, 0x42).toString("base64url");
     expect(
@@ -207,7 +220,6 @@ describe("stateless HMAC-SHA256 pitfall share token codec", () => {
       }),
     ).toEqual({ ok: false, reason: "invalid_signature" });
 
-    // Non-canonical base64url trailing bits on a 32-byte signature (43rd char has 2 low padding bits)
     const lastChar = sigSeg[sigSeg.length - 1]!;
     const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     const nonCanonicalChar = alphabet[(alphabet.indexOf(lastChar) ^ 1) % 64]!;
@@ -219,7 +231,6 @@ describe("stateless HMAC-SHA256 pitfall share token codec", () => {
       }),
     ).toEqual({ ok: false, reason: "invalid_signature" });
 
-    // Truncated signature
     expect(
       verifyPitfallShareToken(`${payloadSeg}.${sigSeg.slice(0, 16)}`, {
         authSecret: TEST_SECRET,
@@ -227,7 +238,6 @@ describe("stateless HMAC-SHA256 pitfall share token codec", () => {
       }),
     ).toEqual({ ok: false, reason: "invalid_signature" });
 
-    // Malformed shapes
     expect(
       verifyPitfallShareToken("not-a-valid-token", { authSecret: TEST_SECRET }),
     ).toEqual({ ok: false, reason: "malformed" });
@@ -235,7 +245,6 @@ describe("stateless HMAC-SHA256 pitfall share token codec", () => {
       verifyPitfallShareToken(`${payloadSeg}.${sigSeg}.extra`, { authSecret: TEST_SECRET }),
     ).toEqual({ ok: false, reason: "malformed" });
 
-    // Oversized token > 2048 chars
     expect(
       verifyPitfallShareToken(`${"a".repeat(SHARE_TOKEN_MAX_LENGTH)}.${sigSeg}`, {
         authSecret: TEST_SECRET,
@@ -243,8 +252,7 @@ describe("stateless HMAC-SHA256 pitfall share token codec", () => {
     ).toEqual({ ok: false, reason: "oversized" });
   });
 
-  it("enforces hard privacy gates against forbidden keys and PII/UUIDs in text", () => {
-    // Forbidden extra fields rejected on mint
+  it("enforces hard privacy gates against forbidden keys, PII/UUIDs, and XML 1.0 illegal code points", () => {
     for (const extra of [
       { userId: "u-1" },
       { workspaceId: "w-1" },
@@ -261,13 +269,16 @@ describe("stateless HMAC-SHA256 pitfall share token codec", () => {
       ).toThrow(ShareTokenValidationError);
     }
 
-    // Embedded UUID, email, identifier, and raw personal score rejected in text
     for (const leakedText of [
       "题目来源 550e8400-e29b-41d4-a716-446655440000 易错点",
       "联系 alice.chen@university.edu 获取讲义",
       "userId: 12345 的错题",
       "本次得分：72分，注意审题",
       "grade=B+ 容易错",
+      "包含非法码点 \uFFFE 字符",
+      "包含非法码点 \uFFFF 字符",
+      `孤立高代理项 ${String.fromCharCode(0xd800)} 测试`,
+      `孤立低代理项 ${String.fromCharCode(0xdc00)} 测试`,
     ]) {
       expect(() =>
         signPitfallShareToken(
@@ -277,7 +288,19 @@ describe("stateless HMAC-SHA256 pitfall share token codec", () => {
       ).toThrow(ShareTokenValidationError);
     }
 
-    // Even a validly-signed forged token carrying userId or UUID is rejected on verify
+    // Valid surrogate pair (U+20BB7 𠮷) is permitted
+    const withValidSurrogatePair = signPitfallShareToken(
+      { ...VALID_INPUT, pitfallTitle: "注意辨析特殊字形 𠮷 与常见误区" },
+      { authSecret: TEST_SECRET, nowMs: BASE_TIME_MS },
+    );
+    expect(
+      verifyPitfallShareToken(withValidSurrogatePair.token, {
+        authSecret: TEST_SECRET,
+        nowMs: BASE_TIME_MS,
+      }).ok,
+    ).toBe(true);
+
+    // Forged signed token containing U+FFFF or userId is rejected on decode
     const forgedWithUserId = forgeSignedToken({
       v: 1,
       iat: Math.floor(BASE_TIME_MS / 1000),
@@ -292,6 +315,24 @@ describe("stateless HMAC-SHA256 pitfall share token codec", () => {
     });
     expect(
       verifyPitfallShareToken(forgedWithUserId, {
+        authSecret: TEST_SECRET,
+        nowMs: BASE_TIME_MS,
+      }),
+    ).toEqual({ ok: false, reason: "invalid_payload" });
+
+    const forgedWithXmlIllegal = forgeSignedToken({
+      v: 1,
+      iat: Math.floor(BASE_TIME_MS / 1000),
+      exp: Math.floor(BASE_TIME_MS / 1000) + 3600,
+      subjectLabel: "线性代数",
+      pitfallTitle: "非法\uFFFF字符",
+      trapSummary: "AB 通常不等于 BA。",
+      takeawayRule: "左乘与右乘必须分开写。",
+      cohortSampleSize: 40,
+      cohortTrapRate: 50,
+    });
+    expect(
+      verifyPitfallShareToken(forgedWithXmlIllegal, {
         authSecret: TEST_SECRET,
         nowMs: BASE_TIME_MS,
       }),
@@ -313,7 +354,6 @@ describe("stateless HMAC-SHA256 pitfall share token codec", () => {
     expect(thresholdCohort.payload.cohortSampleSize).toBe(30);
     expect(thresholdCohort.payload.cohortTrapRate).toBe(78);
 
-    // Even if a validly-signed token embeds a non-null rate with n < 30, decode forces null
     const forgedSmallCohort = forgeSignedToken({
       v: 1,
       iat: Math.floor(BASE_TIME_MS / 1000),
@@ -333,6 +373,54 @@ describe("stateless HMAC-SHA256 pitfall share token codec", () => {
     if (decoded.ok) {
       expect(decoded.payload.cohortSampleSize).toBe(12);
       expect(decoded.payload.cohortTrapRate).toBeNull();
+    }
+  });
+
+  it("mints tokens exclusively from the server-authoritative catalog and blocks forged fields", () => {
+    for (const entry of SHAREABLE_PITFALL_CATALOG) {
+      const minted = mintPitfallShareTokenById(
+        { pitfallId: entry.pitfallId, expiresInSeconds: 7200 },
+        { authSecret: TEST_SECRET, nowMs: BASE_TIME_MS },
+      );
+      expect(minted.pitfallId).toBe(entry.pitfallId);
+      const verified = verifyPitfallShareToken(minted.token, {
+        authSecret: TEST_SECRET,
+        nowMs: BASE_TIME_MS,
+      });
+      expect(verified.ok).toBe(true);
+      if (verified.ok) {
+        expect(verified.payload.subjectLabel).toBe(entry.subjectLabel);
+        expect(verified.payload.pitfallTitle).toBe(entry.pitfallTitle);
+        expect(verified.payload.trapSummary).toBe(entry.trapSummary);
+        expect(verified.payload.takeawayRule).toBe(entry.takeawayRule);
+        expect(verified.payload.cohortSampleSize).toBe(0);
+        expect(verified.payload.cohortTrapRate).toBeNull();
+        expect(verified.payload.exp - verified.payload.iat).toBe(7200);
+      }
+    }
+
+    expect(() =>
+      mintPitfallShareTokenById(
+        { pitfallId: "does-not-exist-in-catalog" },
+        { authSecret: TEST_SECRET, nowMs: BASE_TIME_MS },
+      ),
+    ).toThrow(SharePitfallNotFoundError);
+
+    for (const forgedOverride of [
+      { pitfallId: "math-calculus-lhopital-form", title: "钓鱼标题" },
+      { pitfallId: "math-calculus-lhopital-form", misconception: "伪造错因" },
+      { pitfallId: "math-calculus-lhopital-form", reframe: "伪造口诀" },
+      { pitfallId: "math-calculus-lhopital-form", ctaHref: "https://evil.example" },
+      { pitfallId: "math-calculus-lhopital-form", pitfallTitle: "覆盖标题" },
+      { pitfallId: "math-calculus-lhopital-form", cohortSampleSize: 9999 },
+      { pitfallId: "math-calculus-lhopital-form", cohortTrapRate: 99 },
+    ]) {
+      expect(() =>
+        mintPitfallShareTokenById(forgedOverride, {
+          authSecret: TEST_SECRET,
+          nowMs: BASE_TIME_MS,
+        }),
+      ).toThrow(ShareTokenValidationError);
     }
   });
 });

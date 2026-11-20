@@ -7,9 +7,10 @@ import { readOpeningRawBody } from "../../../../features/opening/request-body";
 import { requireOpeningScope } from "../../../../features/opening/runtime";
 import { SHARE_MINT_MAX_BODY_BYTES } from "../../../../features/opening/share/schema";
 import {
+  SharePitfallNotFoundError,
   ShareTokenConfigError,
   ShareTokenValidationError,
-  signPitfallShareToken,
+  mintPitfallShareTokenById,
 } from "../../../../features/opening/share/token-codec";
 
 async function readShareMintJsonBody(request: Request): Promise<unknown> {
@@ -31,18 +32,19 @@ async function readShareMintJsonBody(request: Request): Promise<unknown> {
 }
 
 /**
- * Mint a stateless HMAC-SHA256 pitfall share token.
- * Requires an authenticated Opening scope and strictly strips/rejects personal
- * identifiers, raw scores/grades, and sub-threshold (n < 30) cohort trap rates.
+ * Mint a stateless HMAC-SHA256 pitfall share token from the server-authoritative
+ * catalog. Clients may only specify `{ pitfallId, expiresInSeconds? }`; copy and
+ * cohort statistics are never accepted from the request body.
  */
 export async function POST(request: Request): Promise<Response> {
   try {
     await requireOpeningScope(request);
     const body = await readShareMintJsonBody(request);
-    const signed = signPitfallShareToken(body);
+    const signed = mintPitfallShareTokenById(body);
 
     return Response.json(
       {
+        pitfallId: signed.pitfallId,
         token: signed.token,
         sharePath: signed.sharePath,
         expiresAt: signed.expiresAt,
@@ -54,6 +56,9 @@ export async function POST(request: Request): Promise<Response> {
     );
   } catch (error) {
     void request.body?.cancel().catch(() => undefined);
+    if (error instanceof SharePitfallNotFoundError) {
+      return jsonError(new ApiError("NOT_FOUND", error.message, 404));
+    }
     if (error instanceof ShareTokenValidationError) {
       return jsonError(new ApiError("VALIDATION", error.message, 400));
     }
