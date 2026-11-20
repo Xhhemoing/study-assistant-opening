@@ -51,5 +51,6 @@ export function prepareCapture(input: { content: string; title?: string; provide
   const sections = [content];
   if (summary) sections.push("## 我的关键步骤\n\n" + summary);
   if (input.providerHint) sections.push("讲解来源：" + providers[input.providerHint]);
-  return { content, title, name: title + ".md", markdown: sections.join("\n\n") + "\n", keySteps };
+  const normalizedInput = [clean(input.title ?? ""), content, summary, input.providerHint ?? null];
+  return { normalizedInput, content, title, name: title + ".md", markdown: sections.join("\n\n") + "\n", keySteps };
 }

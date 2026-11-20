@@ -46,6 +46,22 @@ it("labels the controls, previews steps, preserves the paste on failure and retr
   expect(host.querySelector("textarea")!.value).toBe("");
 });
 
+it("preserves the paste on conflict and uses a fresh key on the next click", async () => {
+  const fetcher = vi.fn().mockResolvedValueOnce(new Response(null, { status: 409 }))
+    .mockResolvedValueOnce(Response.json({ sourceId: "saved", taskId: "task" }));
+  vi.stubGlobal("fetch", fetcher);
+  await fill("先列出方程");
+  await submit();
+  expect(host.querySelector("[role=alert]")?.textContent).toContain("冲突或已过期");
+  expect(host.querySelector("textarea")!.value).toBe("先列出方程");
+  expect(fetcher).toHaveBeenCalledTimes(1);
+  await submit();
+  const [first, second] = fetcher.mock.calls.map(([, request]) => JSON.parse(request.body));
+  expect(second.clientKey).not.toBe(first.clientKey);
+  expect(second).toEqual({ ...first, clientKey: second.clientKey });
+  expect(host.querySelector("textarea")!.value).toBe("");
+});
+
 it("disables submission while saving and honors the scheduling toggle", async () => {
   let finish!: (response: Response) => void;
   const fetcher = vi.fn(() => new Promise<Response>(resolve => { finish = resolve; }));

@@ -69,11 +69,30 @@ describe("workspace upload quota with real SQL", () => {
     expect(await f.sql`SELECT course_id FROM opening_tasks WHERE id=${source.id}`).toEqual(scheduleNextDayRetell ? [{ course_id: courseId }] : []);
   });
 
+  it("releases both legacy keys on initial retell scheduling without changing the learner's tasks", async () => {
+    const repo = createOpeningSourceRepository(f.sql);
+    const input = upload(4);
+    const source = await repo.create(f.scope, input);
+    const key = `text-retell:${source.id}`;
+    await f.sql`INSERT INTO opening_tasks (id, workspace_id, owner_user_id, title, minutes, origin, client_key) VALUES
+      (${randomUUID()}, ${f.scope.workspaceId}, ${f.scope.ownerUserId}, 'My task', 15, 'manual', ${key}),
+      (${randomUUID()}, ${f.scope.workspaceId}, ${f.scope.ownerUserId}, 'Course task', 20, 'course_seed', ${key + ":deferred"})`;
+    const legacyTasks = () => f.sql`SELECT * FROM opening_tasks WHERE workspace_id=${f.scope.workspaceId}
+      AND origin IN ('manual', 'course_seed') ORDER BY id`;
+    const before = await legacyTasks();
+    await repo.complete(f.scope, source.id, input);
+    const capture = { sourceId: source.id, title: "Notes", scheduleNextDayRetell: true };
+    expect(await finishCapture(f.sql, f.scope, capture)).toMatchObject({ taskId: source.id, replayed: false });
+    expect(await finishCapture(f.sql, f.scope, capture)).toMatchObject({ taskId: source.id, replayed: true });
+    expect(await legacyTasks()).toEqual(before.map(task => ({ ...task, client_key: null })));
+    expect(await f.sql`SELECT client_key FROM opening_tasks WHERE id=${source.id} AND origin='agent'`).toEqual([{ client_key: key }]);
+  });
+
   it("reserves one of two competing capture intents and lets the winner retry", async () => {
     const repo = createOpeningSourceRepository(f.sql);
     const ids = [randomUUID(), randomUUID()] as const;
     const reserve = (index: 0 | 1) => repo.create(f.scope, { ...upload(4), uploadId: ids[index] }, {
-      oppositeUploadId: ids[index === 0 ? 1 : 0], intent: { courseId: null, scheduleNextDayRetell: index === 1 },
+      oppositeUploadId: ids[index === 0 ? 1 : 0], intent: { courseId: null, scheduleNextDayRetell: index === 1, inputDigest: "a".repeat(64) },
     });
     const results = await Promise.allSettled([reserve(0), reserve(1)]);
     expect(results.filter(result => result.status === "rejected")).toMatchObject([{ reason: { code: "CONFLICT" } }]);
@@ -86,7 +105,7 @@ describe("workspace upload quota with real SQL", () => {
     const repo = createOpeningSourceRepository(f.sql);
     const ids = [randomUUID(), randomUUID()] as const;
     const reserve = (index: 0 | 1) => repo.create(f.scope, { ...upload(4), uploadId: ids[index] }, {
-      oppositeUploadId: ids[index === 0 ? 1 : 0], intent: { courseId: null, scheduleNextDayRetell: index === 1 },
+      oppositeUploadId: ids[index === 0 ? 1 : 0], intent: { courseId: null, scheduleNextDayRetell: index === 1, inputDigest: "a".repeat(64) },
     });
     const pending = await reserve(1);
     await createOpeningSourceActionsRepository(f.sql).apply(f.scope, pending.id,

@@ -49,7 +49,7 @@ describe("POST /api/opening/imports/text", () => {
     expect(response.status).toBe(201);
     expect(await response.json()).toMatchObject({ sourceId: "source", keySteps: ["验证起点"], taskId: "task", deferredBehindActiveRetest: true });
     const [principal, input, capture] = deps.captureSource.mock.calls[0]!;
-    expect(capture.intent).toEqual({ courseId: null, scheduleNextDayRetell: true });
+    expect(capture.intent).toEqual({ inputDigest: expect.stringMatching(/^[0-9a-f]{64}$/), courseId: null, scheduleNextDayRetell: true });
     expect(principal.userId).toBe(deps.scope.ownerUserId);
     expect(input).toMatchObject({ name: "归纳.md", mime: "text/markdown", bytes: bytes.length,
       sha256: createHash("sha256").update(bytes).digest("hex") });
@@ -127,7 +127,7 @@ describe("POST /api/opening/imports/text", () => {
     deps.captureSource.mockRejectedValue(new OpeningSourceError("CONFLICT", "capture key unavailable"));
     const response = await post(JSON.stringify({ clientKey: "same-key", content: "资料", courseId, scheduleNextDayRetell: false }));
     expect(response.status).toBe(409);
-    expect(deps.captureSource.mock.calls[0]![2].intent).toEqual({ courseId: courseId.toLowerCase(), scheduleNextDayRetell: false });
+    expect(deps.captureSource.mock.calls[0]![2].intent).toMatchObject({ courseId: courseId.toLowerCase(), scheduleNextDayRetell: false });
     expect(deps.putStaging).not.toHaveBeenCalled();
     expect(deps.schedule).not.toHaveBeenCalled();
   });

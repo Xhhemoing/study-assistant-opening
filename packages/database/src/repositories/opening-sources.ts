@@ -21,7 +21,7 @@ export type OpeningScope = OpeningJobScope;
 export type OpeningTextCapture = {
   oppositeUploadId: string;
   completedOnly?: boolean;
-  intent: { courseId: string | null; scheduleNextDayRetell: boolean };
+  intent: { courseId: string | null; scheduleNextDayRetell: boolean; inputDigest: string };
 };
 
 /**
@@ -250,15 +250,17 @@ export function createOpeningSourceRepository(sql: Sql, options: OpeningSourceRe
             const source = mapSource(existing[0] as Record<string, unknown>);
             const binding = existing[0]!.text_capture_intent;
             if (capture && (binding?.courseId !== capture.intent.courseId
+              || binding?.inputDigest !== capture.intent.inputDigest
               || binding?.scheduleNextDayRetell !== capture.intent.scheduleNextDayRetell)) {
-              throw new OpeningSourceError("CONFLICT", "这次保存请求与原来的设置不一致。");
+              throw new OpeningSourceError("CONFLICT", "这次保存的讲解内容或设置已变化，请重新保存。");
             }
             const canResume = source.uploadState === "pending" && !capture?.completedOnly;
             const canReplay = capture && source.uploadState === "uploaded";
             if (source.name !== input.name || source.mime !== input.mime || source.bytes !== input.bytes
               || source.sha256.toLowerCase() !== input.sha256.toLowerCase()
               || source.version !== 0 || !(canResume || canReplay)) {
-              throw new OpeningSourceError("CONFLICT", "上传请求已变化或结束，请重新选择文件。");
+              throw new OpeningSourceError("CONFLICT", capture
+                ? "这次保存请求已变化或结束，请重新保存讲解。" : "上传请求已变化或结束，请重新选择文件。");
             }
             return source;
           }

@@ -12,9 +12,9 @@ vi.mock("../../apps/web/src/features/opening/runtime", () => ({
 }));
 
 let courseA: string, courseB: string;
-const post = (courseId: string | null, scheduleNextDayRetell = false, content = "Original") =>
+const post = (courseId: string | null, scheduleNextDayRetell = false, content = "Original", providerHint?: string) =>
   POST(new Request("http://localhost/api/opening/imports/text", { method: "POST",
-    body: JSON.stringify({ clientKey: "one-capture", title: "Notes", content, courseId, scheduleNextDayRetell }) }));
+    body: JSON.stringify({ clientKey: "one-capture", title: "Notes", content, providerHint, courseId, scheduleNextDayRetell }) }));
 
 beforeEach(async () => {
   f = await createOpeningFixture();
@@ -26,7 +26,7 @@ beforeEach(async () => {
   const store = OpeningS3.prototype;
   vi.spyOn(store, "putObject").mockImplementation(async (key, bytes) => { objects.set(key, bytes); });
   vi.spyOn(store, "headObject").mockImplementation(async key => ({
-    exists: objects.has(key), bytes: objects.get(key)!.length, etag: "test", mime: "text/markdown",
+    exists: objects.has(key), bytes: objects.get(key)?.length ?? 0, etag: "test", mime: "text/markdown",
   }));
   vi.spyOn(store, "streamDigest").mockImplementation(async key => {
     const bytes = objects.get(key)!;
@@ -71,6 +71,67 @@ it.each([true, false])("binds a pending and completed source-only capture to its
   expect(put).toHaveBeenCalledTimes(1);
   expect(await f.sql`SELECT course_id FROM course_asset_memberships WHERE asset_id=${sourceId}`)
     .toEqual(withCourse ? [{ course_id: original }] : []);
+});
+
+it("replays when the winning request deletes staging after the other read the pending source", async () => {
+  const head = vi.mocked(OpeningS3.prototype.headObject);
+  const read = head.getMockImplementation()!;
+  let entered!: () => void, release!: () => void;
+  const paused = new Promise<void>(resolve => { entered = resolve; });
+  const resume = new Promise<void>(resolve => { release = resolve; });
+  head.mockImplementationOnce(async key => {
+    entered();
+    await resume;
+    const object = await read(key);
+    expect(object.exists).toBe(false);
+    return object;
+  });
+  const concurrent = post(courseA, true);
+  let created;
+  try {
+    await Promise.race([paused, concurrent.then(r => { throw new Error(`Unexpected HTTP ${r.status} before HEAD`); })]);
+    const winner = await post(courseA, true);
+    expect(winner.status).toBe(201);
+    created = await winner.json();
+  } finally {
+    release();
+  }
+  const replay = await concurrent;
+  expect(replay.status).toBe(200);
+  expect(await replay.json()).toEqual(created);
+});
+
+it("keeps a missing staging object as a validation error while the source is still pending", async () => {
+  vi.mocked(OpeningS3.prototype.headObject).mockResolvedValueOnce({ exists: false, bytes: 0, etag: "", mime: "" });
+  expect((await post(courseA)).status).toBe(400);
+  expect(await f.sql`SELECT upload_state FROM opening_sources WHERE workspace_id=${f.scope.workspaceId}`)
+    .toEqual([{ upload_state: "pending" }]);
+});
+
+it("distinguishes a provider hint from identical text pasted into the body", async () => {
+  expect((await post(null, false, "Original", "chatgpt")).status).toBe(201);
+  expect((await post(null, false, "Original\n\n讲解来源：ChatGPT")).status).toBe(409);
+  expect((await post(null, false, "Original", "chatgpt")).status).toBe(200);
+  expect(OpeningS3.prototype.putObject).toHaveBeenCalledTimes(1);
+});
+
+it.each([true, false])("replays a completed archived course and refuses incomplete repairs (retell=%s)", async retell => {
+  const created = await post(courseA, retell);
+  expect(created.status).toBe(201);
+  const result = await created.json();
+  await f.sql`UPDATE courses SET archived_at=now() WHERE id=${courseA}`;
+  const replay = await post(courseA, retell);
+  expect(replay.status).toBe(200);
+  expect(await replay.json()).toEqual(result);
+  if (retell) {
+    await f.sql`DELETE FROM opening_tasks WHERE id=${result.taskId}`;
+    expect((await post(courseA, retell)).status).toBe(404);
+    expect(await f.sql`SELECT id FROM opening_tasks WHERE id=${result.taskId}`).toHaveLength(0);
+  } else {
+    await f.sql`DELETE FROM course_asset_memberships WHERE asset_id=${result.sourceId}`;
+    expect((await post(courseA, retell)).status).toBe(404);
+    expect(await f.sql`SELECT id FROM course_asset_memberships WHERE asset_id=${result.sourceId}`).toHaveLength(0);
+  }
 });
 
 it("fails closed when a pre-migration capture has no recorded course intent", async () => {

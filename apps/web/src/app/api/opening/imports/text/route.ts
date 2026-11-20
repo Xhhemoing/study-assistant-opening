@@ -23,8 +23,7 @@ export async function POST(request: Request): Promise<Response> {
     const source = await saveCaptureSource(
       sql,
       principal,
-      capture.name,
-      capture.markdown,
+      capture,
       input.clientKey,
       input.scheduleNextDayRetell,
       input.courseId ?? null,

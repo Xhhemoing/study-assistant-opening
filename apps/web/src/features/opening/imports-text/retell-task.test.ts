@@ -28,6 +28,7 @@ function transaction(active: boolean, openEnded: boolean, lastDeadlineAt: Date |
     if (text.includes("FROM opening_sources")) return [{ id: sourceId }];
     if (text.includes("FROM opening_retest_activities") && text.includes("AS tomorrow")) return windows();
     if (text.includes("FROM opening_retest_activities")) return holds();
+    if (text.includes("UPDATE opening_tasks SET client_key=NULL")) return [];
     if (text.includes("INSERT INTO opening_tasks")) return writes(values);
     throw new Error("Unexpected scheduling query: " + text);
   });

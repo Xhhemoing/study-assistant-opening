@@ -42,7 +42,10 @@ export function ExternalAiCaptureCard({ courseId, timeZone }: Props) {
         else if (response.status === 401) setError("请登录后再保存讲解。");
         else if (response.status === 400) setError("请检查讲解内容和关键步骤后再保存。");
         else if (response.status === 404) setError("课程或资料已不可用，请重新打开后再试。");
-        else setError("未能确认保存结果，可用当前内容重试。");
+        else if (response.status === 409) {
+          attempt.current = null;
+          setError("这次保存请求有冲突或已过期。讲解内容已保留，请再次点击保存。");
+        } else setError("未能确认保存结果，可用当前内容重试。");
         return;
       }
       const result = await response.json();
@@ -63,7 +66,7 @@ export function ExternalAiCaptureCard({ courseId, timeZone }: Props) {
   }
 
   return <section aria-labelledby={heading} className={`${ui.panel} space-y-4 p-4`}>
-    <h2 id={heading} className="text-lg font-semibold text-text-1">保存外部 AI 讲解</h2>
+    <h2 id={heading} className="text-lg font-semibold text-text">保存外部 AI 讲解</h2>
     <form onSubmit={submit} aria-busy={busy}>
       <fieldset disabled={busy} className="space-y-4">
         <label className="block space-y-1">讲解来自

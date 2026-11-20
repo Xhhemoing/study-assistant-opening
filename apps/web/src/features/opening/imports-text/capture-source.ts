@@ -4,7 +4,13 @@ import type { Sql } from "postgres";
 import { uploadInputSchema } from "@aistudy/contracts";
 import type { Principal } from "../../../lib/authorization";
 import { createOpeningSourceService } from "../sources/source-service";
+import { UploadPolicyError } from "../sources/upload-policy";
 import { isOpeningDataError } from "../server/data-services";
+import type { prepareCapture } from "./markdown";
+
+function isSourceUnavailable(error: unknown) {
+  return isOpeningDataError(error, "source") && (error.code === "CONFLICT" || error.code === "NOT_FOUND");
+}
 
 // The uploader accepts UUID operation IDs. UUIDv5 maps arbitrary client keys
 // and scheduling intent into that primary key, separately per owner and workspace.
@@ -22,18 +28,24 @@ function uploadIdFor(principal: Principal, key: string, scheduleNextDayRetell: b
 export async function saveCaptureSource(
   sql: Sql,
   principal: Principal,
-  name: string,
-  markdown: string,
+  prepared: ReturnType<typeof prepareCapture>,
   clientKey?: string,
   scheduleNextDayRetell = true,
   courseId: string | null = null,
 ) {
-  const bytes = new TextEncoder().encode(markdown);
+  const bytes = new TextEncoder().encode(prepared.markdown);
   const uploadId = clientKey ? uploadIdFor(principal, clientKey, scheduleNextDayRetell) : undefined;
   const oppositeUploadId = clientKey ? uploadIdFor(principal, clientKey, !scheduleNextDayRetell) : undefined;
-  const capture = oppositeUploadId ? { oppositeUploadId, intent: { courseId, scheduleNextDayRetell } } : undefined;
+  const capture = oppositeUploadId ? {
+    oppositeUploadId,
+    intent: {
+      courseId,
+      scheduleNextDayRetell,
+      inputDigest: createHash("sha256").update(JSON.stringify(prepared.normalizedInput)).digest("hex"),
+    },
+  } : undefined;
   const input = uploadInputSchema.parse({
-    name,
+    name: prepared.name,
     mime: "text/markdown",
     bytes: bytes.length,
     sha256: createHash("sha256").update(bytes).digest("hex"),
@@ -52,9 +64,13 @@ export async function saveCaptureSource(
     const saved = await sources.completeUpload(principal, source.id);
     return { sourceId: saved.id, name: saved.name, bytes: saved.bytes, replayed: false };
   } catch (error) {
-    if (!capture || !isOpeningDataError(error, "source") || !["CONFLICT", "NOT_FOUND"].includes(error.code)) throw error;
+    const policyError = error instanceof UploadPolicyError;
+    if (!capture || (!policyError && !isSourceUnavailable(error))) throw error;
     // Another exact replay may have completed after this request reserved the pending row.
-    const saved = await sources.captureSource(principal, input, { ...capture, completedOnly: true });
+    const saved = await sources.captureSource(principal, input, { ...capture, completedOnly: true }).catch(recheck => {
+      if (policyError && isSourceUnavailable(recheck)) throw error;
+      throw recheck;
+    });
     return { sourceId: saved.id, name: saved.name, bytes: saved.bytes, replayed: true };
   }
 }
