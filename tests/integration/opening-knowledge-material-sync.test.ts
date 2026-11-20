@@ -261,6 +261,39 @@ describe("opening knowledge material lifecycle sync (real PG)", () => {
     expect(new Set(rebuilt.snapshot.nodes.flatMap(node => node.evidenceChunkIds))).toEqual(new Set(liveChunks.map(chunk => chunk.id)));
   });
 
+  it("rebuilds a legacy graph after an additive parser retry and node confirmation without a build receipt", async () => {
+    const courseId = await seedCourse();
+    const material = await seedSource({ text: "Cited page" });
+    const versions = { [material.sourceId]: material.version };
+    await createCourseMembershipRepository(f.sql).addAssetMembership({ workspaceId: f.scope.workspaceId, courseId,
+      assetType: "source", assetId: material.sourceId, role: "core", visibility: "course", purpose: "teaching" });
+    const nodeId = randomUUID();
+    const snapshot = { courseId, version: 1, nodes: [{ id: nodeId, courseId, label: "Cited concept", kind: "concept",
+      evidenceChunkIds: [material.chunkId!], status: "needs_check" }], edges: [] };
+    await f.sql`INSERT INTO opening_course_knowledge (workspace_id, owner_user_id, course_id, version, snapshot, source_versions)
+      VALUES (${f.scope.workspaceId}, ${f.scope.ownerUserId}, ${courseId}, 1, ${f.sql.json(snapshot)}, ${f.sql.json(versions)})`;
+
+    const knowledge = createOpeningKnowledgeRepository(f.sql);
+    const parser = createOpeningSourceChunksRepository(f.sql);
+    await expect(knowledge.readSyncStatus(f.scope, courseId)).resolves.toMatchObject({ status: "up_to_date", lastBuiltVersion: null });
+    await parser.replaceChunks(f.scope, { sourceId: material.sourceId, sourceVersion: material.version,
+      chunks: [{ page: 1, text: "Cited page" }, { page: 2, text: "Added page" }] });
+    const liveChunks = await parser.listChunks(f.scope, material.sourceId);
+    expect(liveChunks.map(chunk => chunk.id)).toContain(material.chunkId);
+    expect(liveChunks).toHaveLength(2);
+
+    const confirmed = await knowledge.confirmNode(f.scope, courseId, nodeId, { expectedVersion: 1, sourceVersions: versions });
+    expect(confirmed.snapshot).toEqual({ ...snapshot, version: 2, coveredSourceVersions: versions,
+      nodes: [{ ...snapshot.nodes[0], status: "supported" }] });
+    await expect(knowledge.readSyncStatus(f.scope, courseId)).resolves.toMatchObject({ status: "needs_rebuild", lastBuiltVersion: null });
+    const rebuild = await knowledge.reconcileCourseMaterials(f.scope, courseId);
+    expect(rebuild.enqueued).toMatchObject({ created: true });
+    expect(await runJob(createOpeningJobRepository(f.sql), rebuild.enqueued!.jobId, makeBuildHandler())).toBe(true);
+    const rebuilt = await knowledge.getWithSync(f.scope, courseId);
+    expect(rebuilt).toMatchObject({ version: 3, sync: { status: "up_to_date", lastBuiltVersion: 3 } });
+    expect(new Set(rebuilt.snapshot.nodes.flatMap(node => node.evidenceChunkIds))).toEqual(new Set(liveChunks.map(chunk => chunk.id)));
+  });
+
   it("persists a zero-node build and distinguishes readable material from ready-but-empty and failed material without a job receipt", async () => {
     const courseId = await seedCourse();
     const readable = await seedSource({ text: "Cover page and acknowledgements" });
@@ -1009,6 +1042,9 @@ describe("opening knowledge material lifecycle sync (real PG)", () => {
 
     const r2 = await knowledge.reconcileCourseMaterials(f.scope, courseId);
     expect(r2.enqueued?.created).toBe(true);
+    const historical = await knowledge.get(f.scope, courseId);
+    expect(historical?.snapshot.coveredSourceVersions).toEqual({ [videoV.sourceId]: 1 });
+    expect(historical?.snapshot.nodes.map(node => node.status)).toEqual(["needs_check"]);
     expect(await runJob(jobs, r2.enqueued!.jobId, makeBuildHandler({ nodeStatus: "supported" }))).toBe(true);
 
     const afterRebuild = await knowledge.getWithSync(f.scope, courseId, { includeDetails: true });

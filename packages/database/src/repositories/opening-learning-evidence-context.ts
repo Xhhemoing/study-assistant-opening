@@ -7,7 +7,7 @@ import { mapLearningObservation, type LearningSql } from "./opening-learning-fac
 import { openingExamIdentityStateQuery } from "./opening-exam-skill-identity";
 import { OpeningExamSprintRepositoryError, parseExamSprintSnapshot } from "./opening-exam-sprint-snapshot";
 import { readExamSourceExposure } from "./opening-exam-source-exposure";
-import { openingRetestAnswerAt, openingRetestHelpMatches } from "./opening-retest-help-match";
+import { openingHelpCourseAndDomainMatches, openingRetestAnswerAt, openingRetestHelpMatches, openingUnboundHelpScopeMatches } from "./opening-retest-help-match";
 
 type Row = Record<string, unknown>;
 function possibleOpenAttemptOnly(row: Row): boolean {
@@ -113,10 +113,18 @@ export async function readOpeningLearningEvidenceContexts(
     WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND id =ANY(${sessionIds}::uuid[])`;
   const origins = new Map(sessions.map(row => [String(row.id), String(row.course_id)]));
   const courseIds = [...new Set(origins.values())];
+  const observationIds = records.map(record => record.id);
   // Keep direct receipts and cross-publication associations in one snapshot read.
   // The target tag is internal only: it must not rebind the immutable raw receipt.
   const helpRows = courseIds.length || itemIds.length ? await db`SELECT h.id,h.session_id,h.attempt_id,h.problem_id,h.level,h.kind,h.delivered,h.delivered_at,h.history_revision,h.workspace_history_revision,h.support_domain,h.context_anchor,h.release_intent,COALESCE(h.course_id,l.course_id) AS course_id,
-      NULL::uuid AS target_item_id,h.created_at
+      NULL::uuid AS target_item_id,h.created_at,
+      CASE WHEN h.attempt_id IS NULL AND h.problem_id IS NULL THEN ARRAY(
+        SELECT o.id FROM opening_learning_observations o
+        WHERE o.id=ANY(${observationIds}::uuid[]) AND o.workspace_id=h.workspace_id
+          AND o.owner_user_id=${scope.ownerUserId}
+          AND (o.session_id=h.session_id OR o.retest_id IS NOT NULL)
+          AND ${openingHelpCourseAndDomainMatches(db)} AND ${openingUnboundHelpScopeMatches(db)}
+      ) END AS scoped_observation_ids
     FROM opening_help_exposures h LEFT JOIN opening_learning_sessions l ON l.id=h.session_id AND l.workspace_id=h.workspace_id
     WHERE ${courseIds.length > 0} AND h.workspace_id=${scope.workspaceId} AND COALESCE(h.owner_user_id,l.owner_user_id)=${scope.ownerUserId}
       AND h.delivered=TRUE AND (COALESCE(h.course_id,l.course_id) =ANY(${courseIds}::uuid[]) OR (h.course_id IS NULL AND h.session_id IS NULL))
@@ -140,7 +148,7 @@ export async function readOpeningLearningEvidenceContexts(
     SELECT h.id,h.session_id,h.attempt_id,
       v.problem_id,h.level,h.kind,h.delivered,h.delivered_at,h.history_revision,
       h.workspace_history_revision,h.support_domain,h.context_anchor,h.release_intent,
-      v.course_id,v.id AS target_item_id,h.created_at
+      v.course_id,v.id AS target_item_id,h.created_at,NULL::uuid[] AS scoped_observation_ids
     FROM opening_learning_item_versions v JOIN opening_help_exposures h
       ON h.workspace_id=v.workspace_id AND h.owner_user_id=v.owner_user_id AND h.course_id=v.course_id AND h.delivered=TRUE
     WHERE v.id=ANY(${itemIds}::uuid[]) AND v.workspace_id=${scope.workspaceId} AND v.owner_user_id=${scope.ownerUserId}
@@ -181,7 +189,7 @@ export async function readOpeningLearningEvidenceContexts(
       LEFT JOIN opening_learning_sessions l ON l.id=h.session_id AND l.workspace_id=h.workspace_id AND l.owner_user_id=o.owner_user_id
       WHERE ${openingRetestHelpMatches(db)}
     ) h ON TRUE
-    WHERE o.workspace_id=${scope.workspaceId} AND o.owner_user_id=${scope.ownerUserId} AND o.id=ANY(${records.map(record => record.id)}::uuid[])
+    WHERE o.workspace_id=${scope.workspaceId} AND o.owner_user_id=${scope.ownerUserId} AND o.id=ANY(${observationIds}::uuid[])
     GROUP BY r.id,o.id,a.id,baseline.recorded_at` : [];
   const intervalByObservation = new Map(intervalExposures.map(row => [String(row.observation_id), row]));
   // Catalogue help is a retrievable receipt, not an invented assistant turn.
@@ -351,6 +359,7 @@ export async function readOpeningLearningEvidenceContexts(
     const origin = origins.get(record.sessionId);
     const interval = intervalByObservation.get(record.id);
     const item = items.find(row => row.id === record.itemVersionId);
+    const unboundScopeMatches = (row: Row) => (row.scoped_observation_ids as string[] | null)?.includes(record.id) === true;
     const sourceHelp = item ? help.filter(row => {
       if (row.attempt_id != null || row.problem_id != null || row.course_id != null && row.course_id !== record.courseId) return false;
       const anchor = row.context_anchor as { sourceId?: string; sourceVersion?: number; page?: number | null; chunkId?: string | null } | null;
@@ -370,11 +379,11 @@ export async function readOpeningLearningEvidenceContexts(
       return anchor?.activityId === teachingSpec.activityId && anchor.blockId === teachingSpec.blockId && anchor.contentVersion === teachingSpec.contentVersion;
     }).map(row => ({ ...row, problem_id: record.problemId, same_question: true })) : [];
     const matchedHistory = [
-      ...sourceHelp, ...uncertainSourceHelp,
+      ...[...sourceHelp, ...uncertainSourceHelp].filter(row => !record.retestId || unboundScopeMatches(row)),
       ...crossRevisionHelp.filter(row => row.target_item_id === record.itemVersionId).map((row): Row => ({ ...row, same_question: true })),
       ...(record.attemptId ? helpByAttempt.get(`${origin}:${record.attemptId}`) ?? [] : []),
       ...(record.problemId ? helpByProblem.get(`${origin}:${record.problemId}`) ?? [] : []),
-      ...(legacyHelp.get(record.sessionId) ?? []), ...teachingHelp,
+      ...(legacyHelp.get(record.sessionId) ?? []).filter(unboundScopeMatches), ...teachingHelp,
     ];
     const scopedHistory = record.retestId ? matchedHistory.filter(row =>
       (row.course_id == null || row.course_id === record.courseId)

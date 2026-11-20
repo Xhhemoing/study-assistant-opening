@@ -47,17 +47,18 @@ it("attributes released interval help by scoped item, problem and activity when 
       usableForCurrentVersion: "yes", problemId: attempt.problemId, firstQuestionExposure: true,
       courseRequirement: { id: requirementId, revision: 1, stableSkillId, requirementKey },
     };
-    const outcome = () => readOpeningCourseRouteRetestOutcome(f.sql, f.scope, retestId, observation);
+    const outcome = (independentAttempt = observation.independentAttempt) =>
+      readOpeningCourseRouteRetestOutcome(f.sql, f.scope, retestId, { ...observation, independentAttempt });
     async function exposure(input: {
       domain: string; at?: string; itemVersionId?: string | null; problemId?: string | null;
       activityId?: string; released?: boolean; ownerId?: string; attemptId?: string; attemptOnly?: boolean; course?: string;
-      sourceId?: string; sourceRefs?: string[]; skillLabel?: string; requirementKey?: string;
+      sourceId?: string; sourceRefs?: string[]; skillLabel?: string; requirementKey?: string; sessionId?: string;
     }) {
       const id = randomUUID(), released = input.released ?? true;
       const deliveredAt = released ? input.at ?? releaseAt : null;
       await f.sql`INSERT INTO opening_help_exposures
         (id,workspace_id,owner_user_id,course_id,session_id,kind,level,delivered,release_key,released_at,delivered_at,support_domain,item_version_id,problem_id,activity_id,attempt_id,context_anchor,release_intent)
-        VALUES(${id},${workspaceId},${input.ownerId ?? ownerUserId},${input.course ?? courseId},NULL,'hint','hinted',${released},${id},
+        VALUES(${id},${workspaceId},${input.ownerId ?? ownerUserId},${input.course ?? courseId},${input.sessionId ?? null},'hint','hinted',${released},${id},
           ${deliveredAt},${deliveredAt},${input.domain},${input.itemVersionId ?? null},${input.problemId ?? null},${input.activityId ?? null},
           ${input.attemptId ?? null},${input.sourceId ? f.sql.json({ sourceId: input.sourceId }) : null},
           ${f.sql.json({ originReference: { possibleOpenAttemptOnly: input.attemptOnly ?? false, skillLabel: input.skillLabel ?? null,
@@ -85,6 +86,24 @@ it("attributes released interval help by scoped item, problem and activity when 
     await f.sql`UPDATE opening_learning_observations SET started_at=${startedAt},problem_id=${attempt.problemId},
       item_version_id=${attempt.itemVersionId} WHERE id=${observationId}`;
     expect((await projected()).independentAttempt).toBe("yes");
+
+    for (const unrelated of [
+      { sourceId: randomUUID() }, { sourceRefs: [randomUUID()] }, { skillLabel: "unrelated" },
+      { requirementKey: "unrelated" }, { course: randomUUID() }, { domain: "language" },
+    ]) {
+      const helpId = await exposure({ domain: "math", sessionId, ...unrelated });
+      const evidence = await projected();
+      expect(evidence.independentAttempt, JSON.stringify(unrelated)).toBe("yes");
+      expect(await outcome(evidence.independentAttempt)).toBe("passed");
+      await f.sql`DELETE FROM opening_help_exposures WHERE id=${helpId}`;
+    }
+    const inScopeHelp = await exposure({ domain: "math", sessionId, sourceId, at: startedAt });
+    expect((await projected()).independentAttempt).toBe("no");
+    expect(await outcome()).toBe("assisted");
+    await f.sql`DELETE FROM opening_help_exposures WHERE id=${inScopeHelp}`;
+    const legacyOnly = await exposure({ domain: "math", sessionId, sourceId, at: baselineAt });
+    expect((await projected()).independentAttempt).toBe("unknown");
+    await f.sql`DELETE FROM opening_help_exposures WHERE id=${legacyOnly}`;
 
     for (const input of [
       { domain: "math", itemVersionId: attempt.itemVersionId },
