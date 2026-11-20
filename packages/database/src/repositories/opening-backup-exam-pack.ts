@@ -6,13 +6,15 @@ import { parseExamSprintSnapshot } from "./opening-exam-sprint-snapshot";
 type Row = Record<string, unknown>;
 const catalogReference = { id: EXAM_SPRINT_PACK.id, version: EXAM_SPRINT_PACK.version };
 
-/** Preserve the pinned identity. Correct answers and unreleased mocks come only from the server catalog. */
+/** Learner recovery preserves catalog identity and request history. The target supplies
+ * the exact catalog version. Generated papers, rubrics and teaching revisions are
+ * omitted because an empty target cannot reconstruct their private publication. */
 export function exportSprintPack(row: Row): Row {
   if (row.course_id != null) {
     const pack = courseExamSnapshotSchema.parse(row.pack_snapshot);
     // Keep the learner's request, source and identity. A ready request requires its
     // private answer-bearing proposal; importing it cannot certify a ready publication.
-    return { ...row, pack_snapshot: { ...pack, requests: pack.requests.map(request =>
+    return { ...row, state: {}, pack_snapshot: { ...pack, requests: pack.requests.map(request =>
       request.status === "pending" || request.status === "ready"
         ? { ...request, status: "unknown", proposal: null, activityId: null } : request) } };
   }
@@ -32,7 +34,7 @@ export function exportSprintPack(row: Row): Row {
 export function restoreSprintPack(row: Row): Row {
   if (row.course_id != null) {
     const pack = courseExamSnapshotSchema.parse(row.pack_snapshot);
-    if (pack.requests.some(request => request.proposal !== null || request.status === "pending")) {
+    if (!isDeepStrictEqual(row.state, {}) || pack.requests.some(request => request.proposal !== null || request.status === "pending")) {
       throw new Error("Private or pending exam request in learner backup");
     }
     return row;

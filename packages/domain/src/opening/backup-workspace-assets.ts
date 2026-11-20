@@ -63,7 +63,7 @@ export function backupAssetAdmission(tables: Tables) {
       if (row.course_id == null) return typeof row.pack_snapshot.id === "string" && typeof row.pack_snapshot.version === "string"
         && Object.keys(row.pack_snapshot).every(key => key === "id" || key === "version");
       const pack = courseExamSnapshotSchema.safeParse(row.pack_snapshot);
-      return pack.success && pack.data.requests.every(request => request.proposal === null && request.status !== "pending");
+      return Object.keys(row.state).length === 0 && pack.success && pack.data.requests.every(request => request.proposal === null && request.status !== "pending");
     }
     if (name === "opening_exam_help_receipts") return sameOwner(row, links.get(row.attempt_link_id));
     if (!sameOwner(row, sprints.get(row.sprint_id))) return false;
@@ -81,6 +81,14 @@ export function validateBackupWorkspaceAssets(tables: Tables, errors: string[], 
   const admitted = backupAssetAdmission(tables);
   if (owner !== undefined || tables.library_documents !== undefined) {
     const docs = new Set(tables.library_documents?.map(row => row.id));
+    const examActivities = new Set(tables.opening_teaching_activities
+      ?.filter(row => isRecord(row.create_intent) && row.create_intent.kind === "course_exam").map(row => row.id));
+    const generated = (row: Row) => isRecord(row.generation_config) && isRecord(row.generation_config.extras)
+      && row.generation_config.extras.kind === "course_exam";
+    if (tables.opening_teaching_units?.some(generated)
+      || tables.opening_teaching_activity_specs?.some(spec => generated(spec) || examActivities.has(spec.activity_id))) {
+      errors.push("Private generated exam publications cannot be restored from a learner backup");
+    }
     for (const name of ["opening_teaching_units", "opening_teaching_activity_specs"]) {
       if (tables[name]?.some(row => !docs.has(row.document_id))) errors.push(`${name} references a missing library document`);
     }

@@ -1,5 +1,6 @@
 import { isForbiddenBackupTable } from "../../../contracts/src/opening/backup-inventory";
-import { applyNativeNoteExportPrivacy } from "./native-note-privacy";
+import { privateExamDocumentIds } from "./opening-backup-library";
+import { applyNativeNoteExportPrivacy, filterNativeNotes } from "./native-note-privacy";
 import { attachNativeLearningLinks } from "./native-learning-links";
 import type { Sql } from "postgres";
 import {
@@ -78,7 +79,7 @@ export async function dumpWorkspaceSnapshot(
   if (!latestMigrationId) {
     throw new BackupRestoreError("VALIDATION", "No migrations are registered");
   }
-  return applyNativeNoteExportPrivacy(sql, workspaceId, {
+  const snapshot: NativeBackupSnapshot = {
     sourceWorkspaceId: workspaceId,
     workspace,
     latestMigrationId,
@@ -98,7 +99,12 @@ export async function dumpWorkspaceSnapshot(
     cards: nestBy(cards, { reviewStates: cardStates }, "cardId"),
     events,
     files: filesFromBlocks(blocks),
-  });
+  };
+  const privateExams = await privateExamDocumentIds(sql, workspaceId);
+  const learnerSnapshot = privateExams.length
+    ? filterNativeNotes(snapshot, new Map(privateExams.map(id => [id, null])))
+    : snapshot;
+  return applyNativeNoteExportPrivacy(sql, workspaceId, learnerSnapshot);
 }
 
 export function snapshotToPackage(snapshot: NativeBackupSnapshot) {

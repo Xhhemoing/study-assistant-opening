@@ -7,21 +7,28 @@ import { EXAM_SPRINT_PACK } from "@aistudy/domain/exam-sprint-catalog";
 import { createSqlClient } from "../migrate";
 import { createMemoryOpeningRestoreObjectPut, executeOpeningRestoreApply, readOpeningBackupRecords, readOpeningRestoreNamespaceCounts } from "./opening-backup";
 import { insertTestTeachingActivity } from "../../../../tests/integration/opening-fixture";
+import { dumpWorkspaceSnapshot } from "./backup-dump";
 import { exportSprintPack, restoreSprintPack } from "./opening-backup-exam-pack";
 import { backupRows, sourceBytes, sourceHash } from "../../../../tests/integration/opening-backup-records-fixture";
 
-it("retains generated exam request history without disclosing its unpublished answer material", () => {
-  const id = randomUUID(), activityId = randomUUID(), sourceId = randomUUID(), chunk = randomUUID();
+function publishedRequest(activityId: string, sourceId: string, chunk: string) {
+  const id = randomUUID();
   const question = { topic: "Algebra", prompt: "Solve the equation", referenceAnswer: "private solution",
     rubric: ["private grading key"], hints: { direction: "d", concept: "c", firstStep: "s" }, evidenceChunkIds: [chunk], estimatedMinutes: 1 };
-  const request = { id, input: { sourceId, questionCount: 3, clientKey: "exam-request" }, sourceVersion: 1,
+  return { id, input: { sourceId, questionCount: 3, clientKey: "exam-request" }, sourceVersion: 1,
     sourceTitle: "My paper", privacyEpoch: 0, createdAt: new Date().toISOString(), status: "ready", activityId, modelLabel: null,
     proposal: { title: "Paper", topics: [{ label: "Algebra", evidenceChunkIds: [chunk] }], questions: [question,question,question] } };
+}
+
+it("retains generated exam request history without disclosing its unpublished answer material", () => {
+  const request = publishedRequest(randomUUID(), randomUUID(), randomUUID());
   const row = { course_id: randomUUID(), state: {}, pack_snapshot: { format: "course-exam-v1", requests: [request] } };
   const projected = exportSprintPack(row);
-  expect(projected.pack_snapshot).toMatchObject({ requests: [{ id, input: request.input, status: "unknown", activityId: null, proposal: null }] });
+  expect(projected.pack_snapshot).toMatchObject({ requests: [{ id: request.id, input: request.input, status: "unknown", activityId: null, proposal: null }] });
   expect(JSON.stringify(projected)).not.toContain("private solution");
   expect(restoreSprintPack(projected)).toEqual(projected);
+  expect(exportSprintPack({ ...row, state: { referenceAnswer: "private" } }).state).toEqual({});
+  expect(() => restoreSprintPack({ ...projected, state: { referenceAnswer: "private" } })).toThrow(/private/i);
   expect(() => restoreSprintPack(row)).toThrow(/private/i);
 });
 
@@ -41,6 +48,7 @@ it.skipIf(process.env.OPENING_TEST_DB !== "1" || !process.env.OPENING_TEST_DATAB
     const rollback = new Error("rollback B3 fixture"), discardSeed = new Error("discard source fixture");
     const w = randomUUID(), u = randomUUID(), course = randomUUID(), doc = randomUUID(), block = randomUUID(), sprint = randomUUID();
     const scope = { workspaceId: w, ownerUserId: u };
+    const examDoc = randomUUID(), examBlock = randomUUID(), examSprint = randomUUID();
     try {
       await expect(sql.begin(async outer => {
         await outer`INSERT INTO users(id,email,display_name,password_hash) VALUES(${u},${u + "@backup.test"},'fixture','test')`;
@@ -88,6 +96,22 @@ it.skipIf(process.env.OPENING_TEST_DB !== "1" || !process.env.OPENING_TEST_DATAB
               VALUES(${randomUUID()},${sprint},${w},${u},'item-a',${id},1,${source},1,${randomUUID()},'{}','failed',0)`;
           }
           const activity = await insertTestTeachingActivity(db, scope, course);
+          const request = publishedRequest(activity, source, chunk);
+          await tx`INSERT INTO opening_exam_sprints(id,workspace_id,owner_user_id,course_id,pack_snapshot,state)
+            VALUES(${examSprint},${w},${u},${course},${tx.json({ format: "course-exam-v1", requests: [request] })},'{}')`;
+          const unit = randomUUID();
+          await tx`INSERT INTO library_documents(id,workspace_id,title,lifecycle) VALUES(${examDoc},${w},'Generated exam','confirmed')`;
+          await tx`INSERT INTO library_blocks(id,workspace_id,document_id,type,position,content)
+            VALUES(${examBlock},${w},${examDoc},'answer_key',0,'{"answer":"private live answer","href":"private-exam.txt","bytesBase64":"YWJj"}')`;
+          await tx`INSERT INTO library_revisions(workspace_id,document_id,revision_number,title,lifecycle,blocks)
+            VALUES(${w},${examDoc},1,'Exam','confirmed','[{"type":"text","content":{"text":"private historical answer"}}]')`;
+          await tx`INSERT INTO library_properties(workspace_id,subject_type,subject_id,key,value_type,value)
+            VALUES(${w},'block',${examBlock},'answer','string','"private exam property"')`;
+          await tx`INSERT INTO opening_teaching_units(id,workspace_id,owner_user_id,title,document_id,current_revision_number,generation_config)
+            VALUES(${unit},${w},${u},'Exam',${examDoc},1,${tx.json({ extras: { kind: "course_exam", requestId: request.id } })})`;
+          await tx`INSERT INTO opening_teaching_activity_specs(id,workspace_id,owner_user_id,activity_id,teaching_unit_id,document_id,
+            revision_number,version,block_order) VALUES(${randomUUID()},${w},${u},${activity},${unit},${examDoc},1,1,
+            ${tx.json([{ blockId: examBlock, position: 0, blockType: "answer_key", role: "answer_key" }])})`;
           const session = randomUUID(), observation = randomUUID(), attempt = randomUUID(), link = randomUUID();
           await tx`INSERT INTO opening_learning_sessions(id,workspace_id,owner_user_id,course_id,activity_id,skill_label)
             VALUES(${session},${w},${u},${course},${activity},'Algebra')`;
@@ -103,6 +127,8 @@ it.skipIf(process.env.OPENING_TEST_DB !== "1" || !process.env.OPENING_TEST_DATAB
             VALUES(${sprint},'record-a',ARRAY['skill-a'],${observation})`;
           await tx`INSERT INTO opening_exam_help_receipts(id,attempt_link_id,kind,delivered_at,history_revision,workspace_history_revision)
             VALUES(${randomUUID()},${link},'hint',now(),0,0)`;
+          await tx`UPDATE opening_learning_attempts SET context_anchor=${tx.json({ purpose: "exam_help", activityId: activity,
+            blockId: examBlock, contentVersion: 1 })} WHERE id=${attempt}`;
           const snapshot = async () => {
             const records = await readOpeningBackupRecords(db, scope);
             const sources = records.tables.opening_sources.map(row => ({ sourceId: String(row.id), version: Number(row.version),
@@ -114,7 +140,21 @@ it.skipIf(process.env.OPENING_TEST_DB !== "1" || !process.env.OPENING_TEST_DATAB
             return composed.backup;
           };
           backup = await snapshot();
-          for (const name of ["opening_exam_sprints","opening_exam_bindings","opening_exam_attempt_links","opening_exam_source_observations",
+          const courseSprint = backup.tables.opening_exam_sprints?.find(row => (row as { id: string }).id === examSprint);
+          expect(courseSprint).toMatchObject({ pack_snapshot: { requests: [{ id: request.id, status: "unknown", activityId: null, proposal: null }] } });
+          expect(backup.tables.opening_learning_attempts?.[0]).toMatchObject({ context_anchor: {
+            purpose: "exam_help", activityId: activity, blockId: null, contentVersion: null } });
+          // Later edits may replace the unit metadata. The pinned publication still owns the document.
+          await tx`UPDATE opening_teaching_units SET generation_config='{}' WHERE id=${unit}`;
+          const native = await dumpWorkspaceSnapshot(db, w, u);
+          for (const artifact of [backup, native]) {
+            const wire = JSON.stringify(artifact);
+            expect(wire).toContain(doc);
+            expect(wire).not.toContain(examDoc);
+            expect(wire).not.toMatch(/private (solution|grading key|live answer|historical answer|exam property)|private-exam\.txt/);
+          }
+          expect(native.files).toHaveLength(0);
+          for (const name of ["opening_exam_bindings","opening_exam_attempt_links","opening_exam_source_observations",
             "opening_exam_help_receipts"]) expect(backup.tables[name], name).toHaveLength(1);
           await rows.exclude(denied);
           const filtered = await snapshot();
@@ -123,12 +163,17 @@ it.skipIf(process.env.OPENING_TEST_DB !== "1" || !process.env.OPENING_TEST_DATAB
             expect(filtered.tables[table], table).toHaveLength(1);
           }
           expect(JSON.stringify(filtered)).not.toMatch(/server-only text|excluded note text|excluded property|node_definitions|excluded revision text/);
-          expect((filtered.tables.opening_exam_sprints?.[0] as Record<string, unknown>).pack_snapshot).toEqual({ id: EXAM_SPRINT_PACK.id, version: EXAM_SPRINT_PACK.version });
+          expect(filtered.tables.opening_exam_sprints?.find(row => (row as { id: string }).id === sprint)).toMatchObject({ pack_snapshot: { id: EXAM_SPRINT_PACK.id, version: EXAM_SPRINT_PACK.version } });
           throw discardSeed;
         })).rejects.toBe(discardSeed);
         if (!backup) throw new Error("missing snapshot");
         const wire: OpeningBackup = JSON.parse(JSON.stringify(backup));
         expect(validateOpeningRestore(wire, [], wire.memoryDeletions)).toMatchObject({ allowed: true, errors: [] });
+        const publication = structuredClone(wire);
+        publication.tables.opening_teaching_units!.push({ id: randomUUID(), workspace_id: w, owner_user_id: u,
+          document_id: doc, generation_config: { extras: { kind: "course_exam" } } });
+        expect(validateOpeningRestore(publication, [], wire.memoryDeletions).errors).toContain(
+          "Private generated exam publications cannot be restored from a learner backup");
         const forged = structuredClone(wire);
         (forged.tables.opening_exam_help_receipts![0] as Record<string, unknown>).attempt_link_id = randomUUID();
         expect(validateOpeningRestore(forged, [], forged.memoryDeletions).allowed).toBe(false);
@@ -148,6 +193,9 @@ it.skipIf(process.env.OPENING_TEST_DB !== "1" || !process.env.OPENING_TEST_DATAB
         expect(property?.value).toBe("en");
         const [restored] = await outer`SELECT pack_snapshot FROM opening_exam_sprints WHERE id=${sprint}`;
         expect(restored?.pack_snapshot).toEqual(EXAM_SPRINT_PACK);
+        const [generated] = await outer`SELECT pack_snapshot FROM opening_exam_sprints WHERE id=${examSprint}`;
+        expect(generated?.pack_snapshot.requests[0]).toMatchObject({ status: "unknown", proposal: null, activityId: null });
+        expect(await outer`SELECT id FROM library_documents WHERE id=${examDoc}`).toHaveLength(0);
         throw rollback;
       })).rejects.toBe(rollback);
     } finally { await sql.end(); }
