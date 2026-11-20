@@ -32,6 +32,7 @@ const memory = new Map<string, PracticeDraftCollection>();
 const dirty = new Set<string>();
 const dirtyDraftIds = new Map<string, Set<string>>();
 const legacySnapshots = new Map<string, { raw: string; id: string; destination?: string }>();
+const pendingArchiveCleanup = new Map<string, { source: PracticeDraft; targetScope: string }>();
 const unreconciled = new Set<string>();
 const blocked = new Map<string, string>();
 
@@ -509,6 +510,49 @@ export function switchPracticeDraft(scope: string, expectedActiveId: string, tar
   return next;
 }
 
+/** Hide a moved archive while its destination owns the active draft, and retry safe cleanup. */
+export function reconcileMovedPracticeArchives(
+  collection: PracticeDraftCollection, targetScopeFor: (draft: PracticeDraft) => string, storage: PartitionStorage | null,
+): ReadonlySet<string> {
+  const hidden = new Set<string>();
+  if (!storage) return hidden;
+  const { scope, activeId, drafts } = collection;
+  const removable = new Set<string>();
+  for (const draft of drafts) {
+    if (draft.id === activeId) continue;
+    const targetScope = targetScopeFor(draft);
+    if (targetScope === scope) continue;
+    try {
+      const raw = storage.getItem(storageKey(targetScope));
+      const target = raw === null ? null : parsePracticeDraftCollection(JSON.parse(raw), targetScope);
+      if (target?.activeId !== draft.id) continue;
+      // After a reload, identical persisted copies also identify an interrupted move.
+      const moved = target.drafts.find(value => value.id === draft.id);
+      const sameCopy = JSON.stringify(moved) === JSON.stringify(parsePracticeDraft({ ...draft, scope: targetScope }, targetScope));
+      const pending = pendingArchiveCleanup.get(draft.id);
+      const unchangedSource = pending?.targetScope === targetScope
+        && JSON.stringify(pending.source) === JSON.stringify(parsePracticeDraft(draft, scope));
+      if (dirtyDraftIds.get(scope)?.has(draft.id) && !sameCopy && !unchangedSource) continue;
+      hidden.add(draft.id);
+      if (sameCopy || unchangedSource) removable.add(draft.id);
+    } catch { /* An unreadable destination cannot prove a move. */ }
+  }
+  if (!removable.size || dirty.has(scope)) return hidden;
+  try {
+    const key = storageKey(scope);
+    const raw = storage.getItem(key);
+    const saved = raw === null ? null : parsePracticeDraftCollection(JSON.parse(raw), scope);
+    // Preserve work that changed in storage since this collection was loaded.
+    if (saved && JSON.stringify(saved) === JSON.stringify(parsePracticeDraftCollection(collection, scope))) {
+      const next = { ...collection, drafts: drafts.filter(draft => !removable.has(draft.id)) };
+      storage.setItem(key, JSON.stringify(next));
+      memory.set(scope, next);
+      for (const id of removable) pendingArchiveCleanup.delete(id);
+    }
+  } catch { /* Keep the source archive until cleanup can be saved. */ }
+  return hidden;
+}
+
 /** Promote an archive in the collection the destination URL will reopen. */
 export function moveArchivedPracticeDraft(
   scope: string, expectedActiveId: string, draftId: string, targetScope: string, storage: PartitionStorage | null,
@@ -544,23 +588,33 @@ export function moveArchivedPracticeDraft(
   };
   const nextSource = { ...source, drafts: source.drafts.filter(draft => draft.id !== draftId) };
 
-  // Keep the source intact until the destination write succeeds. If source cleanup
-  // fails, restore the previous destination before reporting the failed switch.
   try {
     storage.setItem(targetKey, JSON.stringify(nextTarget));
-    try {
-      storage.setItem(storageKey(scope), JSON.stringify(nextSource));
-    } catch {
-      if (previousTarget === null) storage.removeItem(targetKey);
-      else storage.setItem(targetKey, previousTarget);
-      throw new Error(moveError);
-    }
   } catch { throw new Error(moveError); }
 
-  for (const saved of [nextSource, nextTarget]) {
+  let sourceSaved = false;
+  try {
+    storage.setItem(storageKey(scope), JSON.stringify(nextSource));
+    pendingArchiveCleanup.delete(draftId);
+    sourceSaved = true;
+  } catch {
+    let rolledBack = false;
+    try {
+      if (previousTarget === null) storage.removeItem(targetKey);
+      else storage.setItem(targetKey, previousTarget);
+      rolledBack = true;
+    } catch {
+      // The destination is durable. Leave the source selection and archive intact for cleanup on reopen.
+      const sourceCopy = storedSource?.collection.drafts.find(draft => draft.id === draftId);
+      if (sourceCopy) pendingArchiveCleanup.set(draftId, { source: sourceCopy, targetScope });
+    }
+    if (rolledBack) throw new Error(moveError);
+  }
+
+  for (const saved of sourceSaved ? [nextSource, nextTarget] : [nextTarget]) {
     memory.set(saved.scope, saved);
     unreconciled.delete(saved.scope);
     finishCollectionSave(saved, storage);
   }
-  return nextSource;
+  return nextTarget;
 }

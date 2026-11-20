@@ -1,5 +1,5 @@
 import { expect, it, vi } from "vitest";
-import { assertPracticeDraftSaved, emptyPracticeDraft, parsePracticeDraftCollection, patchPracticeDraft, practiceScope, readPartitionedPracticeDraftCollection, readPracticeDraft, readPracticeDraftCollection, switchPracticeDraft, writePracticeDraft } from "./practice-draft-storage";
+import { assertPracticeDraftSaved, emptyPracticeDraft, moveArchivedPracticeDraft, parsePracticeDraftCollection, patchPracticeDraft, practiceScope, readPartitionedPracticeDraftCollection, readPracticeDraft, readPracticeDraftCollection, switchPracticeDraft, writePracticeDraft } from "./practice-draft-storage";
 import { runPracticeRequest } from "./practice-draft";
 
 const courseId = "11111111-1111-4111-8111-111111111111";
@@ -38,6 +38,57 @@ it("starts another practice without losing a frozen request, then restores exact
   expect(restored.drafts.find(value => value.id === next.id)?.fields.answer).toBe("new work");
   const persisted = JSON.parse(disk.data.get(`opening-practice:v2:${scope}`)!);
   expect(parsePracticeDraftCollection(persisted, scope)).toEqual(restored);
+});
+
+it.each([
+  { failure: "destination write", hasTarget: true, committed: false },
+  { failure: "source write", hasTarget: true, committed: false },
+  { failure: "source write and rollback setItem", hasTarget: true, committed: true },
+  { failure: "source write and rollback removeItem", hasTarget: false, committed: true },
+] as const)("keeps both matrix drafts consistent after failing $failure", async ({ failure, hasTarget, committed }) => {
+  const courseId = crypto.randomUUID();
+  const sourceId = crypto.randomUUID();
+  const exercise = { sourceId, exerciseKey: "addition", variant: 2 } as const;
+  const source = practiceScope(courseId, "matrix", null, undefined, undefined, exercise);
+  const target = practiceScope(courseId, "matrix", null, undefined, undefined, { ...exercise, variant: 3 });
+  const sourceKey = `opening-practice:v2:${source}`;
+  const targetKey = `opening-practice:v2:${target}`;
+  const fields = { sourceId, matrixKey: "addition" as const, matrixVariant: 2 };
+  const original = emptyPracticeDraft(source, { ...fields, answer: "[[1]]" });
+  const archived = emptyPracticeDraft(source, { ...fields, matrixVariant: 3, answer: "[[2]]" });
+  const existing = emptyPracticeDraft(target, { ...fields, matrixVariant: 3, answer: "[[99]]" });
+  const disk = { ...storage(), removeItem: vi.fn((key: string) => { disk.data.delete(key); }) };
+  writePracticeDraft(archived, disk);
+  switchPracticeDraft(source, archived.id, original, disk);
+  if (hasTarget) writePracticeDraft(existing, disk);
+  const previousTarget = disk.data.get(targetKey);
+  disk.setItem.mockImplementation((key, value) => {
+    if (key === sourceKey || (key === targetKey && (
+      failure === "destination write" || (failure === "source write and rollback setItem" && value === previousTarget)
+    ))) throw new Error("write denied");
+    disk.data.set(key, value);
+  });
+  if (!hasTarget) disk.removeItem.mockImplementation(() => { throw new Error("rollback remove denied"); });
+
+  expect(readPracticeDraft(target, disk)).toEqual(hasTarget ? existing : null);
+  let moveFailure: unknown;
+  try { moveArchivedPracticeDraft(source, original.id, archived.id, target, disk); }
+  catch (reason) { moveFailure = reason; }
+
+  const destination = committed ? { ...archived, scope: target } : existing;
+  expect(readPracticeDraft(source, null)).toEqual(original);
+  expect(readPracticeDraft(target, null)).toEqual(destination);
+  expect(readPracticeDraft(source, null, archived.id)).toEqual(archived);
+  if (hasTarget) expect(readPracticeDraft(target, null, existing.id)).toEqual(existing);
+
+  vi.resetModules();
+  const cold = await import("./practice-draft-storage");
+  expect(cold.readPracticeDraft(source, disk)).toEqual(original);
+  expect(cold.readPracticeDraft(target, disk)).toEqual(destination);
+  expect(cold.readPracticeDraft(source, disk, archived.id)).toEqual(archived);
+  if (hasTarget) expect(cold.readPracticeDraft(target, disk, existing.id)).toEqual(existing);
+  if (committed) expect(moveFailure).toBeUndefined();
+  else expect(moveFailure).toEqual(new Error("草稿未切换，原答案已保留。请允许使用浏览器存储或释放空间后重试。"));
 });
 
 it("refuses a second same-tick switch from stale controls rather than discarding the new active draft", () => {

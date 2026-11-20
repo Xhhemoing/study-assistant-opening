@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { LearningAttempt, LearningObservation } from "@aistudy/contracts";
 import type { createOpeningLearningClient } from "../client/learning-client";
 import { raiseAssistanceOnly, type DeliveredAssistance } from "./reference-check";
-import { assertPracticeDraftSaved, emptyPracticeDraft, initializePracticeDraft, isRecoverableManualDraft, moveArchivedPracticeDraft, patchPracticeDraft, practiceDraftHasUnsavedStorage, readPartitionedPracticeDraftCollection, readPracticeDraftCollection, switchPracticeDraft, type DraftPatch, type PracticeDraft, type PracticeDraftCollection, type PracticeDraftScopes, type PracticeFields } from "./practice-draft-storage";
+import { assertPracticeDraftSaved, emptyPracticeDraft, initializePracticeDraft, isRecoverableManualDraft, moveArchivedPracticeDraft, patchPracticeDraft, practiceDraftHasUnsavedStorage, readPartitionedPracticeDraftCollection, readPracticeDraftCollection, reconcileMovedPracticeArchives, switchPracticeDraft, type DraftPatch, type PracticeDraft, type PracticeDraftCollection, type PracticeDraftScopes, type PracticeFields } from "./practice-draft-storage";
 import { userFacingMessage } from "../../../lib/user-facing-error";
 export * from "./practice-draft-storage";
 
@@ -39,7 +39,7 @@ function browserStorage(): Storage | null {
   try { return typeof window === "undefined" ? null : window.sessionStorage; } catch { return null; }
 }
 
-export function usePracticeDraft(scope: string, initial: Partial<PracticeFields>, scopes?: PracticeDraftScopes) {
+export function usePracticeDraft(scope: string, initial: Partial<PracticeFields>, scopes?: PracticeDraftScopes, targetScopeFor?: (draft: PracticeDraft) => string) {
   const [fallback] = useState(() => emptyPracticeDraft(scope, initial));
   const [collection, setCollection] = useState<PracticeDraftCollection>({ version: 2, scope, activeId: fallback.id, drafts: [fallback] });
   const [ready, setReady] = useState(false);
@@ -47,6 +47,7 @@ export function usePracticeDraft(scope: string, initial: Partial<PracticeFields>
   const [switchError, setSwitchError] = useState("");
   const [storageWarning, setStorageWarning] = useState(false);
   const [loadRevision, setLoadRevision] = useState(0);
+  const [hiddenArchives, setHiddenArchives] = useState<ReadonlySet<string>>();
   useEffect(() => {
     try {
       const storage = browserStorage();
@@ -54,13 +55,17 @@ export function usePracticeDraft(scope: string, initial: Partial<PracticeFields>
         ? readPartitionedPracticeDraftCollection(scopes, fallback, storage)
         : readPracticeDraftCollection(scope, storage);
       if (!stored && !storage) throw new Error("无法读取练习草稿，已停止新建和切换。请允许此页面使用浏览器存储后重试。");
-      setCollection(stored ?? initializePracticeDraft(fallback));
+      const restored = stored ?? initializePracticeDraft(fallback);
+      if (targetScopeFor) setHiddenArchives(reconcileMovedPracticeArchives(restored, targetScopeFor, storage));
+      setCollection(targetScopeFor ? readPracticeDraftCollection(scope, null)! : restored);
       setStorageWarning(practiceDraftHasUnsavedStorage(scope));
       setLoadError(""); setReady(true);
     } catch (reason) { setLoadError(userFacingMessage(reason, "无法读取练习草稿")); setReady(false); }
-  }, [scope, fallback, scopes, loadRevision]);
+  }, [scope, fallback, scopes, loadRevision, targetScopeFor]);
   const draft = collection.drafts.find(value => value.id === collection.activeId)!;
-  const drafts = scopes?.manual === scope ? collection.drafts.filter(isRecoverableManualDraft) : collection.drafts;
+  const drafts = scopes?.manual === scope ? collection.drafts.filter(isRecoverableManualDraft)
+    : hiddenArchives?.size ? collection.drafts.filter(value => value.id === draft.id || !hiddenArchives.has(value.id))
+      : collection.drafts;
   const patch = useCallback((change: DraftPatch | ((current: PracticeDraft) => DraftPatch)) => {
     if (!ready) throw new Error("练习草稿尚未读完，未修改已保存的内容。");
     const result = patchPracticeDraft(scope, initial, change, browserStorage(), draft.id);
@@ -71,7 +76,13 @@ export function usePracticeDraft(scope: string, initial: Partial<PracticeFields>
   }, [scope, draft.id, ready]);
   function select(switchDraft: (storage: Storage | null) => PracticeDraftCollection): boolean {
     if (!ready) return false;
-    try { setCollection(switchDraft(browserStorage())); setSwitchError(""); setStorageWarning(false); return true; }
+    try {
+      const selected = switchDraft(browserStorage());
+      setCollection(selected.scope === scope ? selected : readPracticeDraftCollection(scope, null)!);
+      setSwitchError("");
+      setStorageWarning(practiceDraftHasUnsavedStorage(scope));
+      return true;
+    }
     catch (reason) { setSwitchError(userFacingMessage(reason, "草稿未切换，原答案已保留")); return false; }
   }
   return { draft, drafts, patch, ready, storageWarning, loadError, switchError,

@@ -10,7 +10,7 @@ import { createMatrixExerciseSpec } from "@aistudy/domain";
 import CourseStudyPage from "../../../app/(opening)/opening/courses/[id]/study/page";
 import { MatrixExerciseForm } from "./matrix-exercise-form";
 import { LearningEvidenceEligibilityDetails } from "./eligibility-details";
-import { emptyPracticeDraft, initializePracticeDraft, practiceScope, switchPracticeDraft, type PracticeDraftCollection } from "./practice-draft";
+import { emptyPracticeDraft, initializePracticeDraft, patchPracticeDraft, practiceScope, readPracticeDraft, switchPracticeDraft, writePracticeDraft, type PracticeDraftCollection } from "./practice-draft";
 
 const client = vi.hoisted(() => ({
   createSession: vi.fn(), createAttempt: vi.fn(), getAttempt: vi.fn(), listObservations: vi.fn(),
@@ -155,9 +155,11 @@ function studyEntry(courseId: string) {
   }
   return {
     host,
-    async open() {
+    async open(cold = false) {
       await unmount();
-      const page = await CourseStudyPage({
+      if (cold) vi.resetModules();
+      const StudyPage = cold ? (await import("../../../app/(opening)/opening/courses/[id]/study/page")).default : CourseStudyPage;
+      const page = await StudyPage({
         params: Promise.resolve({ id: courseId }),
         searchParams: Promise.resolve(Object.fromEntries(new URLSearchParams(window.location.search))),
       });
@@ -268,6 +270,81 @@ it.each([
     expect(view.answer()).toBe("[[3]]");
     expect(storedCollection(targetScope)?.activeId).toBe(archived.id);
   } finally { await view.cleanUp(); }
+});
+
+it.each(["setItem", "removeItem"] as const)("switches to the durable bound variant when source cleanup and rollback %s fail", async rollback => {
+  const courseId = crypto.randomUUID(), sourceId = crypto.randomUUID();
+  const linked = { sourceId, exerciseKey: "addition", variant: 2 } as const;
+  const scope = boundScope(courseId, linked), targetScope = boundScope(courseId, { ...linked, variant: 3 });
+  const fields = { sourceId, matrixKey: linked.exerciseKey, matrixVariant: linked.variant };
+  const start = {
+    sessionId: null, clientKey: `matrix-start:${crypto.randomUUID()}`, createInput: null,
+    sessionInput: { courseId, sourceIds: [sourceId], skillLabel: "矩阵加法" },
+  };
+  const original = { ...emptyPracticeDraft(scope, { ...fields, answer: "[[1]]" }), start };
+  const archived = { ...emptyPracticeDraft(scope, { ...fields, matrixVariant: 3, answer: "[[2]]" }), start };
+  const existing = { ...emptyPracticeDraft(targetScope, { ...fields, matrixVariant: 3, answer: "[[99]]" }), start };
+  if (rollback === "setItem") writePracticeDraft(existing, sessionStorage);
+  writePracticeDraft(archived, sessionStorage);
+  switchPracticeDraft(scope, archived.id, original, sessionStorage);
+  const previousTarget = sessionStorage.getItem(storageKey(targetScope));
+  const view = studyEntry(courseId);
+  const sourceUrl = `/opening/courses/${courseId}/study?mode=matrix&exercise=addition&variant=2&sourceId=${sourceId}&conversation=keep#practice`;
+  const targetUrl = sourceUrl.replace("variant=2", "variant=3");
+  const setItem = Storage.prototype.setItem;
+  const save = vi.spyOn(Storage.prototype, "setItem").mockImplementation(function (this: Storage, key, value) {
+    if (key === storageKey(scope) || (key === storageKey(targetScope) && value === previousTarget)) throw new Error("write denied");
+    setItem.call(this, key, value);
+  });
+  const removeItem = Storage.prototype.removeItem;
+  const remove = vi.spyOn(Storage.prototype, "removeItem").mockImplementation(function (this: Storage, key) {
+    if (rollback === "removeItem" && key === storageKey(targetScope)) throw new Error("rollback remove denied");
+    removeItem.call(this, key);
+  });
+  try {
+    window.history.replaceState(null, "", sourceUrl);
+    await view.open();
+    await view.click("继续这次练习");
+    expect(`${location.pathname}${location.search}${location.hash}`).toBe(targetUrl);
+    expect(view.host.textContent).not.toContain("草稿未切换");
+    expect(view.answer()).toBe("[[2]]");
+    expect(readPracticeDraft(targetScope, null)?.id).toBe(archived.id);
+    expect(readPracticeDraft(scope, null)?.id).toBe(original.id);
+
+    for (const [url, openedScope, id, answer] of [
+      [targetUrl, targetScope, archived.id, "[[2]]"],
+      [sourceUrl, scope, original.id, "[[1]]"],
+    ] as const) {
+      window.history.replaceState(null, "", url);
+      for (const cold of [false, true]) {
+        await view.open(cold);
+        const storage = cold ? await import("./practice-draft-storage") : { readPracticeDraft };
+        expect(view.answer()).toBe(answer);
+        expect(storage.readPracticeDraft(openedScope, null)?.id).toBe(id);
+        if (openedScope === scope) expect(view.host.textContent).not.toContain("继续这次练习");
+      }
+    }
+    expect(storedCollection(scope)?.drafts).toEqual([archived, original]);
+    expect(storedCollection(targetScope)?.drafts).toEqual(rollback === "setItem"
+      ? [existing, { ...archived, scope: targetScope }]
+      : [{ ...archived, scope: targetScope }]);
+
+    save.mockRestore();
+    remove.mockRestore();
+    // Pending cleanup can also finish in the same document after the destination was edited.
+    if (rollback === "setItem") {
+      patchPracticeDraft(targetScope, {}, { fields: { answer: "[[3]]" } }, sessionStorage, archived.id);
+    }
+    await view.open(rollback === "removeItem");
+    expect(view.answer()).toBe("[[1]]");
+    expect(storedCollection(scope)?.drafts).toEqual([original]);
+    expect(storedCollection(targetScope)?.drafts.find(draft => draft.id === archived.id)?.fields.answer)
+      .toBe(rollback === "setItem" ? "[[3]]" : "[[2]]");
+  } finally {
+    save.mockRestore();
+    remove.mockRestore();
+    await view.cleanUp();
+  }
 });
 
 it("restores a variant from the course matrix lesson URL and reopens the same draft", async () => {

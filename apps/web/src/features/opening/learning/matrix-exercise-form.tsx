@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import type { LearningAttempt, LearningObservation, MatrixExerciseInput, MatrixExerciseSpec, SourceRecord } from "@aistudy/contracts";
 import { matrixExerciseSkillLabel, matrixExerciseStem } from "@aistudy/domain";
 import { createOpeningLearningClient } from "../client/learning-client";
@@ -59,11 +59,15 @@ function BoundMatrixEntry(props: Extract<Props, { boundExercise: MatrixExerciseI
 type ControllerProps = Props & { scope: string; onSwitchVariant?: (variant: number) => void };
 
 function MatrixController(props: ControllerProps) {
-  const continuity = usePracticeDraft(props.scope, {
+  const { boundExercise, courseId, scope } = props;
+  const targetScopeFor = useCallback((saved: PracticeDraft) => boundExercise
+    ? matrixScope(courseId, { ...boundExercise, variant: saved.fields.matrixVariant })
+    : scope, [boundExercise, courseId, scope]);
+  const continuity = usePracticeDraft(scope, {
     matrixKey: props.boundExercise?.exerciseKey ?? props.initialKey ?? "multiplication",
     matrixVariant: props.boundExercise?.variant ?? props.initialVariant ?? 0,
     sourceId: props.boundExercise?.sourceId ?? "",
-  });
+  }, undefined, boundExercise ? targetScopeFor : undefined);
   const checkedLinkedDraft = useRef(false);
   useEffect(() => {
     if (!props.boundExercise || !continuity.ready || checkedLinkedDraft.current) return;
@@ -76,10 +80,7 @@ function MatrixController(props: ControllerProps) {
   }, [props.boundExercise, continuity]);
   function restoreDraft(saved: PracticeDraft) {
     const { matrixVariant } = saved.fields;
-    const targetScope = props.boundExercise
-      ? matrixScope(props.courseId, { ...props.boundExercise, variant: matrixVariant })
-      : props.scope;
-    if (!continuity.restore(saved.id, targetScope)) return;
+    if (!continuity.restore(saved.id, targetScopeFor(saved))) return;
     if (props.onSwitchVariant) props.onSwitchVariant(matrixVariant);
     else if (props.syncVariantInUrl || props.initialVariant !== undefined) replaceMatrixVariant(matrixVariant);
   }

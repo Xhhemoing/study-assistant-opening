@@ -75,7 +75,7 @@ export function TodayAskBar() {
       openAssistantDrawer("/opening/assistant", text);
       setDraft("");
     }}>
-      <span className="flex size-8 shrink-0 items-center justify-center rounded-xl bg-ai-soft text-ai-2 shadow-[inset_0_1px_0_rgb(255_255_255/0.35)]" aria-hidden="true">
+      <span className="flex size-8 shrink-0 items-center justify-center rounded-xl bg-accent-soft text-ai-2 shadow-[inset_0_1px_0_rgb(255_255_255/0.35)]" aria-hidden="true">
         <Sparkles aria-hidden="true" size={16} />
       </span>
       <input ref={inputRef} aria-label="向 AI 提问" placeholder="说一句想法、贴一道题，或直接问资料里的任何一段…" value={draft} onChange={event => setDraft(event.target.value)} onCompositionStart={() => { composing.current = true; }} onCompositionEnd={() => { composing.current = false; }} onKeyDown={event => {
