@@ -1,7 +1,7 @@
 ---
 title: AIstudy 架构定界、第三代学习原生 Super-agent 升级与国内外全流程商业化总蓝图（五视角多轮自驱深研 v2.1）
 date: 2026-11-19
-status: approved
+status: validated
 scope:
   - 架构本质裁决：旧版课程中心 Opening vs DeepSeek Super-agent（Kernel v2）vs 第三代学习原生架构（Kernel v3）
   - 四大原创架构创新：双室认知主权物理隔离、可区分竞争错因的神经符号探针、可证伪离线巩固、L1–L4 可插拔教学卡带协议
@@ -20,12 +20,12 @@ related:
   - docs/brainstorm/2026-11-18-long-running-learning-agent.md
   - docs/brainstorm/2026-11-19-map-and-kernel-convergence.md
 promotion_target:
-  - 已获创始人执行拍板（v2.1）：当前 100% 聚焦 Phase 0 护栏、UI 协同收口（与 VibeDesign 触感体系合流）与地图收敛交付；商业化与全渠道宣发归档为 Phase 1+ 增长蓝图，获批子项按阶段提升至 PRD、UX_AND_AI_POLICY 与具体切片计划
+  - 已获创始人四项执行拍板（v2.1）：当前 100% 聚焦 Phase 0 护栏、UI 协同收口（与 VibeDesign 触感体系合流）与地图收敛交付；商业化与全渠道宣发归档为 Phase 1+ 增长蓝图，获批子项按阶段提升至 PRD、UX_AND_AI_POLICY 与具体切片计划
 ---
 
 # AIstudy 架构定界、第三代学习原生 Super-agent 升级与国内外全流程商业化总蓝图（v2.1）
 
-> 本文在首版收敛稿基础上，针对**「项目本质架构究竟对齐新版 Super-agent 还是旧版、有哪些超越通用 Agent 的原创升级构想、以及国内外真实市场需求与宣发收款财税全商业闭环」**三大核心命题，经五路异构视角（综合主持、认知与算法架构、产品哲学与破圈交互、全栈工程审计、国内外市场与全流程商业化）开展**多轮自驱深潜核查（Self-Directed Deep Dive）**后定稿，并在 **v2.1** 正式固化创始人的四项执行拍板（第二旗舰卡带锁定雅思、`@aistudy/senseweave` 冻结与 `@aistudy/jingwei` 升格、`v3/` 未接线孤儿文件冻结、以及当前 100% 聚焦 Phase 0 / UI 收口 / 地图收敛而将商业化归档为 Phase 1+ 增长蓝图）。所有源码事实均核对至仓库实表与分支快照（`b51cde03` 及待合入的 `02d0bfb3` `#448`、`73d34924` `#449–#453`、`db4a736e` `#454`）。
+> 本文在首版收敛稿基础上，针对**「项目本质架构究竟对齐新版 Super-agent 还是旧版、有哪些超越通用 Agent 的原创升级构想、以及国内外真实市场需求与宣发收款财税全商业闭环」**三大核心命题，经五路异构视角（综合主持、认知与算法架构、产品哲学与破圈交互、全栈工程审计、国内外市场与全流程商业化）开展**多轮自驱深潜核查（Self-Directed Deep Dive）**后定稿，并在 **v2.1** 正式固化创始人的四项执行拍板（第二旗舰卡带锁定雅思、`@aistudy/senseweave` 冻结与 `@aistudy/jingwei` 升格、`v3/` 未引用孤儿文件冻结、以及当前 100% 聚焦 Phase 0 / UI 收口 / 地图收敛而将商业化归档为 Phase 1+ 增长蓝图）。所有源码事实均核对至仓库实表与分支基线（`feat/opening-release` `b1b98a9c`，已含 `#449`–`#456` 及 `#454` `eb966c84`；`integration/opening` 已含 `#448` `02d0bfb3`）。
 
 ---
 
@@ -35,16 +35,16 @@ promotion_target:
 
 源码逐行审计表明，AIstudy 当前并非单纯的“旧架构”或“已完成的 Super-agent”，而是处在**约 58% 完成度的架构转型半渡期**：
 
-1. **已落地的 Super-agent 骨架（`Kernel v2` 先行切片，`#443–#454`）**：
+1. **已落地的 Super-agent 骨架（`Kernel v2` 先行切片，`#443–#456`）**：
    - 延迟复测排程窗口已从单课程硬编码抽离为跨课统一窗口；
    - [opening-knowledge.ts](../../packages/database/src/repositories/opening-knowledge.ts) 与 `build-course-knowledge` 已实现课程资料变更合并与 `coveredSourceVersions` 静默核对；
    - 无课程多稿写作工作台与跨活动恢复（[opening-current-learning-activity.ts](../../packages/database/src/repositories/opening-current-learning-activity.ts)）已将标星等非接续操作剥离；
-   - 待合入的 `#454`（`db4a736e`）已通过双事务 `DayOverride` + 按本地日期字典序加锁（`opening-daily-draft:${workspaceId}:${day}` → 历史锁）跑通跨日时间改排。
+   - 已合入主线的 `#454`（`eb966c84`，UI 待用户浏览器验收）已通过双事务 `DayOverride` + 按本地日期字典序加锁（`opening-daily-draft:${workspaceId}:${day}` → 历史锁）跑通跨日时间改排。
 2. **仍拽住系统的四大旧版遗留耦合**：
    - **单轮对话与单 Handler 巨石**：[tutor-turn.ts](../../apps/worker/src/jobs/tutor-turn.ts)（605 行）将租约心跳、父预算、课程下一步、草案提议、系统只读查询、语言支持与流式教学 7 重职责硬塞在同一入口；
    - **课程与学科硬编码**：20 个核心 API 强绑 `courseId`，48 个非测试文件耦合线性代数 `spanLesson / span-exact-v1 / SpanDraftAnswer`（含 12 个已弃用非 `/api/opening` 历史路由）；
-   - **界面碎片化与幕僚长隐身**：`(opening)` 下膨胀出 29 个页面，`v3/` 目录 50 个非测试文件中仅 9 个被外部引用（41+ 个孤儿样板），而 `ActionDigest`、`LocalReplanCard`、`CoachPlanControl` 等核心 Agent 能力竟全部埋在 `/opening/settings/learning?planning=1`（导致教练自动确认在 `/opening/today` 首屏**实际从不触发**）；
-   - **推理缓存倒置与备份脑裂**：[provider.ts](../../packages/ai/src/opening/provider.ts) 第 258 行将高频变化的 `input.text` 拼在稳定课程资料之前（且将资料置于动态 `history` 之后），直接破坏跨轮 Prefix Cache；[opening-backup-records.ts](../../packages/database/src/repositories/opening-backup-records.ts) 在 110 张实表中仅覆盖 45 张，且存在 `0109` 预留复测题导出泄题隐患。
+   - **界面碎片化与幕僚长隐身**：`(opening)` 下膨胀出 29 个页面，`v3/` 目录 50 个非测试源码文件（含测试共 53 个文件）中仅 `v3/motion/*`、`v3/shell/*`、`v3/ui/*`、`v3/workspace/split-view.tsx` 4 组子域存在外部引用（直接外部引用入口共 10 个文件，含子目录内配套共 23 个非测试源码文件），另有 27 个非测试源码文件外部零引用（其中 `v3/start/start-composer.tsx` 与 `v3/learning/session-summary.tsx` 为白名单待复活组件，其余 25 个为孤儿样板）；而 `ActionDigest`、`LocalReplanCard`、`CoachPlanControl` 等核心 Agent 能力竟全部埋在 `/opening/settings/learning?planning=1`（导致教练自动确认在 `/opening/today` 首屏**实际从不触发**）；
+   - **推理缓存倒置与备份脑裂**：[provider.ts](../../packages/ai/src/opening/provider.ts) 的 `buildInput` 将高频变化的 `input.text` 拼在稳定课程资料之前（且将资料置于动态 `history` 之后），直接破坏跨轮 Prefix Cache；[opening-backup-records.ts](../../packages/database/src/repositories/opening-backup-records.ts) 在 110 张实表中仅覆盖 45 张，且须严防误将 `0109` 预留复测题表或课程知识内部定义导出至学习者客户端。
 
 ### 1.2 两层明确裁决：内核层全面升级 Super-agent，体验层坚决拒绝“单聊天框包打天下”
 
@@ -106,7 +106,7 @@ flowchart TB
   - **通用多稿写作与费曼口语基座（`L1–L3` + 可选量规 `L4`）**：支撑通用无课程多稿修订迁移（诚实标记不冒充闭卷应试掌握）及费曼讲解练习反馈。
 - **渲染器与 `v3/` 孤儿清理拍板（已获用户授权按工程最优裁决执行）**：
   - **渲染内核裁决（11 倍体量悬殊）**：保留并升格轻量安全的 **`@aistudy/jingwei`（16 文件、874 LOC，5 处核心教学链路在用）** 作为卡带统一结构化交互渲染器；**立即默认关闸并冻结 `@aistudy/senseweave`（75 文件、9,563 LOC，仅 3 处可选文本装饰引用）**，90 天内剥离归档；
-  - **`v3/` 孤儿文件冻结**：冻结 `v3/` 下约 **41 个未接线孤儿文件**（禁止新增引用或继续堆叠样板），**仅保留已接线的 `v3/shell/*`、`v3/ui/*`、`v3/workspace/split-view.tsx`、`v3/start/start-composer.tsx` 与 `v3/learning/session-summary.tsx`**，并统一纳入 VibeDesign 触感体系协同收口。
+  - **`v3/` 孤儿文件冻结与底座保护**：**已外部接线保留**：`v3/motion/*`（全站动画与视图过渡核心底座，含被外部引用 94 次的 `view-transition` 与 3 次的 `feedback`）、`v3/shell/*`、`v3/ui/*`、`v3/workspace/split-view.tsx`（直接外部引用入口共 10 个文件，含这 4 组子目录配套共 23 个非测试源码文件）；**冻结但白名单保留待复活**：`v3/start/start-composer.tsx`、`v3/learning/session-summary.tsx`（当前外部引用为 0，共 2 个文件）；**其余 25 个未引用非测试源码文件（含测试共 26 个孤儿文件）予以冻结**（禁止新增引用或继续堆叠样板），并统一纳入 VibeDesign 触感体系协同收口。
 
 ---
 
@@ -141,23 +141,23 @@ flowchart TB
 
 ## 4. 全栈P0工程护栏清算（三天可修、放任必出事故的隐患表）
 
-1. **修复推理请求拼装倒置，实测砍半 Token 成本**：
+1. **修复推理请求拼装倒置，预期大幅压降跨轮 Token 成本（基于真实 Prompt 长度测算，待真实负载核验）**：
    - 将 [provider.ts](../../packages/ai/src/opening/provider.ts) 的消息序列化顺序从“动态历史在先、最新提问拼在稳定课程资料前”重构为 **`[System] → [稳定已授权课程资料/量规前缀（清晰标注非信任材料边界）] → [动态对话历史] → [当前轮动态输入]`**，并在 [usage.ts](../../packages/ai/src/opening/usage.ts) 解析 `cached_tokens / cache_read_input_tokens`。
-   - 经真实 Prompt 长度精算：修复并启用国内外分层路由后，20 题族（60 题 + 60 次异家族盲解）单套 AI 编译费降至 **国内 ¥0.45–¥0.85 / 海外 \$0.40–\$0.85**；单生 28 天高频使用（60 轮辅导 + 18 次拍图 + 30 次判分 + 20 次提炼，40% 客观题走本地确定性判分）边际 AI 成本降至 **国内 ¥0.85–¥1.25 / 海外 \$0.35–\$0.65**。
+   - 基于真实 Prompt 长度的测算预期（待真实负载核验）：修复并启用国内外分层路由后，20 题族（60 题 + 60 次异家族盲解）单套 AI 编译费预计降至 **国内 ¥0.45–¥0.85 / 海外 \$0.40–\$0.85**；单生 28 天高频使用（60 轮辅导 + 18 次拍图 + 30 次判分 + 20 次提炼，40% 客观题走本地确定性判分）边际 AI 成本预计降至 **国内 ¥0.85–¥1.25 / 海外 \$0.35–\$0.65**。
 2. **修复 3 处静默失真的状态机与并发间隙**：
-   - **跨入口帮助归因（[opening-course-route-retest-state.ts](../../packages/database/src/repositories/opening-course-route-retest-state.ts) 第 42 行）**：补齐 `kind / support_domain` 过滤（避免纯语言辅助误伤数学独立资格），同时补上按题目版本/要求锚定的跨会话匹配（堵住 `session_id IS NULL` 的讲义摘录泄题漏网）；
-   - **知识构图发布与回执同事务（[opening-knowledge.ts](../../packages/database/src/repositories/opening-knowledge.ts) 第 808 行）**：将实际处理的 `coveredSourceVersions` 随图发布在同一事务持久化，消除进程在图提交后、`run-job` 写回执前退出导致的覆盖度失真，并严格区分“可读文本零节点”与“空文本不可读”；
-   - **跨日改排跨午夜护栏与预算取消竞态**：在 `#454` 持锁后补充“源日期仍为工作区今日且禁止移除确认时刻已结束的源块”校验；在 [opening-budget.ts](../../packages/database/src/repositories/opening-budget.ts) 第 388 行规定用户撤权只撤交付权限、唯独掌握传输层确证的调用所有者可判 `not_sent`。
-3. **110 张实表 vs 45 张备份表全差集治理与 `0109` 防泄题红线**：
-   - 立即将漏备的 **Bucket A（9 张：`library_*` 写作资产、`opening_course_knowledge` 等）** 与 **Bucket B（13 张：`opening_exam_*` 冲刺表与暴露覆盖表）** 合并为统一的 `WorkspaceBundleV2` 快照，消除 Native 备份与 Opening 备份脑裂；
-   - **高危反作弊拦截**：导出 [0109_opening_course_reserved_questions.sql](../../packages/database/src/migrations/0109_opening_course_reserved_questions.sql) 时，对 `state IN ('available', 'reserved')` 的未发放复测题**强制脱敏剔除 `question_json` 与 `key_json`**，防止学生点“导出备份”提前偷看明天的复测原题与答案；
-   - 将 **20 张安全/凭证/队列/预算账本表 + 全部新增商业订单与权益表** 写入 `BACKUP_FORBIDDEN_TABLES` 强断言黑名单，封死“回放旧快照无限刷额度”。
+   - **跨入口帮助归因（[opening-course-route-retest-state.ts](../../packages/database/src/repositories/opening-course-route-retest-state.ts) `readOpeningCourseRouteRetestOutcome` 第 62–69 行）**：补齐 `kind / support_domain` 过滤（避免纯语言辅助误伤数学独立资格），同时补上按题目版本/要求锚定的跨会话匹配（堵住 `session_id IS NULL` 的讲义摘录泄题漏网）；
+   - **知识构图发布与回执同事务（[opening-knowledge.ts](../../packages/database/src/repositories/opening-knowledge.ts) `publishSnapshot` 第 808 行）**：将实际处理的 `coveredSourceVersions` 随图发布在同一事务持久化，消除进程在图提交后、`run-job` 写回执前退出导致的覆盖度失真，并严格区分“可读文本零节点”与“空文本不可读”；
+   - **跨日改排跨午夜护栏与预算取消竞态**：在 `#454`（`opening-day-adjustment.ts`）持锁后补充“源日期仍为工作区今日且禁止移除确认时刻已结束的源块”校验；在 [opening-budget.ts](../../packages/database/src/repositories/opening-budget.ts) `changeState`（第 388–396 行）规定用户撤权只撤交付权限、唯独掌握传输层确证的调用所有者可判 `not_sent`。
+3. **110 张实表 vs 45 张备份表全差集治理与 `0109` 整表禁导防泄题红线**：
+   - 立即将漏备的安全学习者资产表（`library_*` 写作资产、`opening_course_knowledge`、`opening_exam_*` 冲刺表等）合并为统一的 `WorkspaceBundleV2` 快照，消除 Native 备份与 Opening 备份脑裂；导出 `opening_course_knowledge` 时剥离服务端私有 `node_definitions` 字段；
+   - **高危反作弊拦截（整表禁导而非局部脱敏）**：当前 [opening-backup-records.ts](../../packages/database/src/repositories/opening-backup-records.ts) 原本未导出 [0109_opening_course_reserved_questions.sql](../../packages/database/src/migrations/0109_opening_course_reserved_questions.sql)，且若仅剥离 `available/reserved` 行仍会泄漏 `issued` 行与未发放即 `revoked` 行的 `key_json`（见 `0109` 第 17–47 行）。因此**学习者备份导出必须将 `opening_course_reserved_questions`、`opening_course_question_exposures` 与 `opening_course_question_exposure_coverage` 整表保留在 `BACKUP_FORBIDDEN_TABLES` 排除/禁止导出黑名单中**，绝不向客户端导出任何预留题与答案键；
+   - 将上述 `0109` 题库曝光表、**安全/凭证/队列/预算账本表 + 全部新增商业订单与权益表** 统一写入 `BACKUP_FORBIDDEN_TABLES` 强断言黑名单，封死“导出备份偷题”与“回放旧快照无限刷额度”。
 
 ---
 
 ## 5. 国内外真实市场容量与全流程商业化闭环（从首单验证到规模化营收）
 
-### 5.1 已核实的一手市场容量与竞争窗口（2026–2027 基准）
+### 5.1 市场容量与竞争窗口研判基准（2026–2027 调研快照，提升至正式 PRD 前须逐项复核一手信源）
 
 - **国内市场（庞大的刚性应试与在学基数 + 拍题搜题信任危机）**：
   - 高等教育在学总规模 **4,872.57 万人**；**2027 届全国硕士研究生招生考试报名 347 万人**（2025 届 388 万、2026 届 343 万，高数/线代/概率与 408 计算机统考为最高客单刚需区）；国家统一法律职业资格考试客观题报名 **93 万+**、注册会计师（CPA）报名 **76.29 万**、2026 国考通过资格审查 **371.8 万**；雅思单次考试报名费高达 **¥1,990**（重考一次的金钱与时间痛感极强）。
@@ -180,7 +180,7 @@ flowchart TB
 - **海外公域队列（投入 \$1,100 / 观察 12 个月）**：40 单 \$19 月卡 + 20 单 \$39 Pass → 14 人升档 \$99 年包 + 6 人直购年包 + 12 个续费月 ⇒ 净收款 **\$3,748**，获客前贡献 **\$2,662**，去重买家 66 人（**CAC = \$16.67**），**队列 LTV/CAC = `2.42×`**，扣渠道后净赚 **+\$1,562**。
 - **通往规模化里程碑（国内 ¥10 万 MRR + 海外 \$1.5 万 MRR）的精确配比**：
   - **国内 ¥100,050 MRR**：**50 家小型督学工作室（`× ¥1,299/月`）+ 900 名活跃月订学生（`× ¥39/月`）**（考季 ¥129–¥269 固定包现金流在此之上额外叠加）；
-  - **海外 \$15,001 MRR**：**600 名年付会员（`× \$99/12`）+ 529 名月付会员（`× \$19/月`）**（外加 \$39 Exam Pass 考季脉冲现金流）。
+  - **海外 \$15,001 MRR**：**600 名年付会员（`× $99/12`）+ 529 名月付会员（`× $19/月`）**（外加 \$39 Exam Pass 考季脉冲现金流）。
 
 ### 5.3 国内外全渠道宣发 SOP 与首月预算分配（¥6,000 + \$1,200 小步快跑）
 
@@ -205,12 +205,12 @@ flowchart TB
 > **重大支付变动核实**：知名海外 MoR 平台 **Lemon Squeezy 已于 2026 年 11 月 16 日正式停止新商家注册**（并入 Stripe Managed Payments，不仅不支持中国大陆主体直开，且条款明确排除第三方市场分账与真人一对一辅导）。架构与商业计划中已彻底移除 Lemon Squeezy。
 
 1. **国内外双轨收单路线**：
-   - **海外 Track 1（Day 1 零税务负担全球收单）**：采用成熟 SaaS MoR **Paddle**（`5% + \$0.50`，全自动代征代缴欧盟 VAT 与美国各州销售税）或开发者友好的 **Creem / Polar.sh**；
-   - **海外 Track 2（月流水破 \$5k–\$10k 后降费率并行）**：设立 **美国 LLC + Stripe 直连**（费率降至 `~2.9% + \$0.30`，注意外资独资 US LLC 每年须按规提交 **IRS Form 5472 + Pro-forma 1120** 信息申报，严防 \$25,000 漏报罚金）；
+   - **海外 Track 1（Day 1 零税务负担全球收单）**：采用成熟 SaaS MoR **Paddle**（`5% + $0.50`，全自动代征代缴欧盟 VAT 与美国各州销售税）或开发者友好的 **Creem / Polar.sh**；
+   - **海外 Track 2（月流水破 \$5k–\$10k 后降费率并行）**：设立 **美国 LLC + Stripe 直连**（费率降至 `~2.9% + $0.30`，注意外资独资 US LLC 每年须按规提交 **IRS Form 5472 + Pro-forma 1120** 信息申报，严防 \$25,000 漏报罚金）；
    - **国内 Stage 1（冷启动零阻塞）**：企业/合规店铺售卖一次性核销兑换码（`entitlement_redeem_codes`）；
    - **国内 Stage 2（规模化闭环）**：接入 **2026 微信小程序「AI 应用成长计划」虚拟支付**（打通大学生微信内拼团与移动端闭环）+ **企业微信支付 Native/JSAPI + 支付宝当面付/电脑网站支付**。
 2. **与 [opening-budget.ts](../../packages/database/src/repositories/opening-budget.ts) 的三账本解耦（修复无币种混加与向上取整失真）**：
-   - 源码核查发现现有 `amountCents` 无币种列（混配中美模型会把人民币分与美元美分直接相加），且 [usage.ts](../../packages/ai/src/opening/usage.ts) 第 55 行按单次调用向上取整。商业化层明确拆分为同一事务边界协调的**三类独立权威事实**：
+   - 源码核查发现现有 `amountCents` 无币种列（混配中美模型会把人民币分与美元美分直接相加），且 [usage.ts](../../packages/ai/src/opening/usage.ts) 的 `estimateUsage` / `reservationCentsForInput` / `actualCentsForOutput`（第 36、60、65 行）均按单次调用 `Math.ceil` 向上取整。商业化层明确拆分为同一事务边界协调的**三类独立权威事实**：
      1. **商户订单账（收了多少钱）**：`merchant + providerOrderId + orderLine`（Webhook 幂等去重、含税额、退款与拒付冲回）；
      2. **用户交付权益账（还能用几次）**：`grantId + benefitCode + periodId`，按学生可理解的完整交付计次（如 1 次「拍照步骤评阅」内部无论调几次 OCR/LLM/CAS 只在**可用结果持久化并获准交付时扣 1 次**，超时无结果绝不吞次数；`BYOK` 在模型路由选路层硬拦截，严禁静默回退消耗平台密钥）；
      3. **底层供应商准入与原币成本账（花了多少钱）**：保留 `opening-budget` 单部署单币种保守准入熔断，另记供应商原币高精度微元成本与缓存命中明细。
@@ -237,8 +237,8 @@ flowchart TB
 
 | 阶段 | 核心战役 | 架构与产品关键交付 | 商业与增长验收门禁 |
 |---|---|---|---|
-| **Phase 0：P0 护栏闪电战与地图/UI 收口**<br>（Day 1–14，零新表，当前 100% 研发主线） | 堵漏洞、砍半推理成本、唤醒首屏幕僚长、UI 协同收口与地图收敛交付 | 1. 修复 [provider.ts](../../packages/ai/src/opening/provider.ts) 跨轮 Prefix Cache 顺序与 `cached_tokens` 统计；<br>2. 修补复测双向帮助归因、知识构图同事务覆盖度、跨活动显式接续与 `#454` 跨午夜边界；<br>3. 合并 `WorkspaceBundleV2` 备份清单、写死 `BACKUP_FORBIDDEN_TABLES` 并拦截 `0109` 未发放题泄题；**立即默认关闸并冻结 `@aistudy/senseweave`，升格 `@aistudy/jingwei`，并冻结 `v3/` 约 41 个未接线孤儿文件**（仅保留已接线的 `v3/shell/*`、`v3/ui/*`、`v3/workspace/split-view.tsx`、`v3/start/start-composer.tsx` 与 `v3/learning/session-summary.tsx`）；<br>4. 推进「幕僚长三问首屏 + 意图栏」与 **VibeDesign 触感体系 UI 协同收口**、完成知识地图收束与学习内核协同代码交付，把 `CoachPlanControl` 挂回首屏并上线三态幂等写入去“111 处未确认”文案。 | • 单生 28 天模拟负载成本实测落入 `¥0.85–¥1.25`；<br>• 30 道高数金标样本通过自动评阅门禁（误判对 `≤5%`）；<br>• 备份恢复与防泄题端到端演练零泄漏；<br>• 地图收敛与 VibeDesign UI 收口切片通过主干回归门禁。 |
-| **Phase 1：破圈钩子与首单闭环**<br>（Day 15–45，唯一新表，归档待启动） | 跑通「猜错步 / 收编站 / 课代表卡」与首波净利 | 1. 解绑 [access-policy.ts](../../apps/web/src/features/opening/access-policy.ts) 公开漏斗，上线 `/try` 90 秒验真页、`/s/[token]` 无状态签名分享页 + 海报生成、外部 AI 粘贴收编站（`/api/opening/imports/text`）与零新表「一句话托付 + 影子周」；<br>2. 跑通有限域 CAS + 异家族盲解首份高数/微积分种子题包；<br>3. 上线三账本商业权益核销（国内兑换码 + 小红书 ¥9.9 钩子 → ¥49/¥199；海外 Paddle 接入 \$19/\$39）。 | • 同考纲首测 `N=20`：首诊 `≥14`、次日复测 `≥10`、独立兑现 `≥7`；<br>• 首月 `¥6,000 + \$1,200` 试投：千次合格到达首诊率 `≥35%`，跑通首批 ¥199 核心包与 2 家付费试点督学室。 |
+| **Phase 0：P0 护栏闪电战与地图/UI 收口**<br>（Day 1–14，零新表，当前 100% 研发主线） | 堵漏洞、压降推理成本、唤醒首屏幕僚长、UI 协同收口与地图收敛交付 | 1. 修复 [provider.ts](../../packages/ai/src/opening/provider.ts) 跨轮 Prefix Cache 顺序与 `cached_tokens` 统计；<br>2. 修补复测双向帮助归因、知识构图同事务覆盖度、跨活动显式接续与 `#454` 跨午夜边界；<br>3. 合并 `WorkspaceBundleV2` 备份清单、剥离 `opening_course_knowledge.node_definitions`，并将 `0109` 预留题与曝光表整表保留在 `BACKUP_FORBIDDEN_TABLES` 禁导清单中；**立即默认关闸并冻结 `@aistudy/senseweave`，升格 `@aistudy/jingwei`，保护已外部接线的 `v3/motion/*`、`v3/shell/*`、`v3/ui/*`、`v3/workspace/split-view.tsx`（10 个直接引用入口 / 23 个非测试源码文件），白名单保留待复活的 `v3/start/start-composer.tsx`、`v3/learning/session-summary.tsx`（2 个文件），并冻结其余 25 个未引用非测试孤儿文件**；<br>4. 推进「幕僚长三问首屏 + 意图栏」与 **VibeDesign 触感体系 UI 协同收口**、完成知识地图收束与学习内核协同代码交付，把 `CoachPlanControl` 挂回首屏并上线三态幂等写入去“111 处未确认”文案。 | • 单生 28 天模拟负载成本实测核验落入 `¥0.85–¥1.25` 预期区间；<br>• 30 道高数金标样本通过自动评阅门禁（误判对 `≤5%`）；<br>• 备份恢复与 `0109` 整表禁导防泄题端到端演练零泄漏；<br>• 地图收敛与 VibeDesign UI 收口切片通过主干回归门禁。 |
+| **Phase 1：破圈钩子与首单闭环**<br>（Day 15–45，核心分享/托付零新表，商业三账本独立建表，归档待启动） | 跑通「猜错步 / 收编站 / 课代表卡」与首波净利 | 1. 解绑 [access-policy.ts](../../apps/web/src/features/opening/access-policy.ts) 公开漏斗，上线 `/try` 90 秒验真页、`/s/[token]` 无状态签名分享页 + 海报生成、外部 AI 粘贴收编站（`/api/opening/imports/text`）与零新表「一句话托付 + 影子周」；<br>2. 跑通有限域 CAS + 异家族盲解首份高数/微积分种子题包；<br>3. 上线三账本商业权益核销（国内兑换码 + 小红书 ¥9.9 钩子 → ¥49/¥199；海外 Paddle 接入 \$19/\$39）。 | • 同考纲首测 `N=20`：首诊 `≥14`、次日复测 `≥10`、独立兑现 `≥7`；<br>• 首月 `¥6,000 + $1,200` 试投：千次合格到达首诊率 `≥35%`，跑通首批 ¥199 核心包与 2 家付费试点督学室。 |
 | **Phase 2：Kernel v3 双室隔离与多学科扩张**<br>（Day 46–90） | 物理隔离双室、第二旗舰卡带（雅思）并行 408 与公域正循环 | 1. 拆分 [tutor-turn.ts](../../apps/worker/src/jobs/tutor-turn.ts) 落地 `logistics / teaching` 双室 PG 角色隔离与 `TeachingCartridge` SPI；<br>2. 上线**第二旗舰学科卡带——雅思卡带（`ielts-writing-speaking-v1`：优先落地双栏多稿写作对照精批、TR/CC/LR/GRA 四维量规证据回执、跨稿句式/论点迁移与口语复述反馈）**，并行推进 **408 数据结构/计组卡带**，同步交付 **B站/YouTube 外部视频时间轴微探针** 与 **笨学弟费曼擂台（`teachback-arena-v1`）**；<br>3. 推进国内 ICP/大模型应用“S”号登记与微信小程序虚拟支付接入。 | • 连续两批公域队列 `LTV/CAC ≥ 2.0×`，退款率 `≤8%`，60 天内回收渠道获客费；<br>• 签约 `10–15` 家小型督学工作室（第二个月真实续费率 `≥85%`）。 |
 | **Phase 3：规模化 MRR 与创作者市场**<br>（Day 91–180） | 冲击国内 ¥10万 / 海外 \$1.5万 MRR + 开放卡带生态 | 1. 物理清理 30 天零流量的旧路由与 `v3/` 孤儿死代码；<br>2. 上线可区分错因神经符号探针与可证伪离线巩固假设；<br>3. 引入 CLA，开放第三方创作者签名题包市场（70/30 净额分润 + 合规税务结算）及美区 LLC Stripe 直连双轨切换。 | • 迈向 **50 家督学室 + 900 月订（¥10万 MRR）** 与 **海外 600 年付 + 529 月付（\$1.5万 MRR）**，建立跨考季复购飞轮。 |
 
@@ -249,5 +249,5 @@ flowchart TB
 | 日期 | 状态 | 变化 | 依据 |
 |---|---|---|---|
 | 2026-11-19 | proposed | v1：完成五模型首轮三回合对抗推演，输出产品去焦虑、零新表防污染、`/try` 漏斗与单班 ¥49 单元经济基线 | 仓库源码首轮审计、认知科学文献与单班回本模型 |
-| 2026-11-19 | proposed | **v2（全面升级）**：经五模型多轮自驱深潜核查，明确「内核层 Super-agent（Kernel v2→v3）+ 体验层幕僚长与专业工坊」两层架构定界；新增双室认知主权物理隔离、神经符号可区分探针、可证伪离线巩固、`L1–L4` 教学卡带 SPI 与精卫/织感裁决；补齐零新表影子周、收编站、网课课代表卡、笨学弟擂台与无状态签名分享规格；升级国内外全商业流程（公域三级产品价值阶梯、千人队列 LTV/CAC、Lemon Squeezy 11-16 关停后 Paddle/Stripe/微信虚拟支付双轨底座、三账本解耦、2026-11-01 自然人 VAT 扣缴合规与创作者市场模板） | `b51cde03` / `02d0bfb3` / `73d34924` / `db4a736e` 逐行源码实查、TypeScript 卡带内存实测、DeepSeek `dsh-superagent` 原文与 2026–2027 一手市场/税法/支付规则核验 |
-| 2026-11-19 | approved | **v2.1（approved）**：固化四项执行拍板——① 锁定**雅思卡带（`ielts-writing-speaking-v1`）**为紧随高数/线代之后的第二旗舰学科卡带（与 408 并列推进，优先落地双栏多稿写作与 TR/CC/LR/GRA 四维量规评阅工坊及口语复述反馈）；② 立即默认关闸并冻结 `@aistudy/senseweave`（9,563 LOC），保留升格 `@aistudy/jingwei`（874 LOC）；③ 冻结 `v3/` 约 41 个未接线孤儿文件，仅保留已接线的 `v3/shell/*`、`v3/ui/*`、`v3/workspace/split-view.tsx`、`v3/start/start-composer.tsx` 与 `v3/learning/session-summary.tsx`；④ 商业化与全渠道宣发归档为 Phase 1+ 增长蓝图，当前研发 100% 集中推进 Phase 0 护栏、UI 协同收口（与 VibeDesign 触感体系合流）与地图收敛代码交付 | 用户/创始人四项执行拍板确认 |
+| 2026-11-19 | proposed | **v2（全面升级）**：经五模型多轮自驱深潜核查，明确「内核层 Super-agent（Kernel v2→v3）+ 体验层幕僚长与专业工坊」两层架构定界；新增双室认知主权物理隔离、神经符号可区分探针、可证伪离线巩固、`L1–L4` 教学卡带 SPI 与精卫/织感裁决；补齐零新表影子周、收编站、网课课代表卡、笨学弟擂台与无状态签名分享规格；升级国内外全商业流程（公域三级产品价值阶梯、千人队列 LTV/CAC、Lemon Squeezy 11-16 关停后 Paddle/Stripe/微信虚拟支付双轨底座、三账本解耦、2026-11-01 自然人 VAT 扣缴合规与创作者市场模板） | `b51cde03` / `02d0bfb3` / `b1b98a9c`（含 `#449`–`#456`）逐行源码实查、TypeScript 卡带内存实测、DeepSeek `dsh-superagent` 原文与 2026–2027 市场/税法/支付规则调研 |
+| 2026-11-19 | validated | **v2.1（四项创始人执行拍板已确认）**：固化四项执行拍板——① 锁定**雅思卡带（`ielts-writing-speaking-v1`）**为紧随高数/线代之后的第二旗舰学科卡带（与 408 并列推进，优先落地双栏多稿写作与 TR/CC/LR/GRA 四维量规评阅工坊及口语复述反馈）；② 立即默认关闸并冻结 `@aistudy/senseweave`（9,563 LOC），保留升格 `@aistudy/jingwei`（874 LOC）；③ 保护已外部接线的 `v3/motion/*`、`v3/shell/*`、`v3/ui/*`、`v3/workspace/split-view.tsx`（10 个直接引用入口 / 23 个非测试源码文件），白名单保留待复活的 `v3/start/start-composer.tsx`、`v3/learning/session-summary.tsx`（2 个文件），冻结其余 25 个未引用非测试孤儿文件；④ 商业化与全渠道宣发归档为 Phase 1+ 增长蓝图，当前研发 100% 集中推进 Phase 0 护栏、UI 协同收口（与 VibeDesign 触感体系合流）与地图收敛代码交付；同步将 `0109` 预留题与曝光表收敛为整表禁导黑名单 | 用户/创始人四项执行拍板确认 + 异家族双审校核 |
