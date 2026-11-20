@@ -464,3 +464,51 @@ it("keeps legacy v1 cleanup pending across a dirty retry when an earlier v2 save
   expect(retriedSave.persisted).toBe(true);
   expect(disk.data.has(legacyKey)).toBe(false);
 });
+
+it("remembers pending v1 cleanup when matrix reconciliation loads v2 alongside a stale valid v1 key and v1 removal throws", () => {
+  const ordinary = newScope();
+  const manual = `${ordinary}:manual`;
+  const scopes = { ordinary, manual };
+  const legacyKey = `opening-practice:v1:${ordinary}`;
+  const v2Key = `opening-practice:v2:${ordinary}`;
+  const staleV1 = emptyPracticeDraft(ordinary, { matrixMode: true, answer: "stale v1 matrix" });
+  const initialV2Draft = emptyPracticeDraft(ordinary, { matrixMode: true, answer: "initial v2 matrix" });
+  let failRemove = true;
+  const disk = {
+    ...storage(),
+    removeItem: (k: string) => {
+      if (failRemove) throw new Error("removeItem blocked");
+      disk.data.delete(k);
+    },
+  };
+  disk.data.set(legacyKey, JSON.stringify(staleV1));
+  disk.data.set(
+    v2Key,
+    JSON.stringify({ version: 2, scope: ordinary, activeId: initialV2Draft.id, drafts: [initialV2Draft] }),
+  );
+
+  expect(
+    readPartitionedPracticeDraftCollection(scopes, emptyPracticeDraft(ordinary, { matrixMode: true }), disk),
+  ).toMatchObject({ activeId: initialV2Draft.id, drafts: [initialV2Draft] });
+
+  // Mark ordinary scope dirty by failing a save, then recover setItem while removeItem still throws during matrix reconciliation.
+  disk.setItem.mockImplementation(() => { throw new Error("quota exceeded"); });
+  const unsaved1 = patchPracticeDraft(ordinary, { matrixMode: true }, { fields: { answer: "matrix edit 1" } }, disk);
+  expect(unsaved1.persisted).toBe(false);
+
+  disk.setItem.mockImplementation((k, v) => { disk.data.set(k, v); });
+  const reconciled1 = readPartitionedPracticeDraftCollection(scopes, emptyPracticeDraft(ordinary, { matrixMode: true }), disk);
+  expect(reconciled1?.drafts[0]?.fields.answer).toBe("matrix edit 1");
+  expect(disk.data.has(legacyKey)).toBe(true);
+
+  // Subsequent failed save + dirty retry must still remove the validated stale v1 key once removeItem recovers.
+  disk.setItem.mockImplementation(() => { throw new Error("quota exceeded again"); });
+  const unsaved2 = patchPracticeDraft(ordinary, { matrixMode: true }, { fields: { answer: "matrix edit 2" } }, disk);
+  expect(unsaved2.persisted).toBe(false);
+
+  failRemove = false;
+  disk.setItem.mockImplementation((k, v) => { disk.data.set(k, v); });
+  const retriedSave = patchPracticeDraft(ordinary, { matrixMode: true }, { fields: { answer: "matrix edit 3" } }, disk);
+  expect(retriedSave.persisted).toBe(true);
+  expect(disk.data.has(legacyKey)).toBe(false);
+});

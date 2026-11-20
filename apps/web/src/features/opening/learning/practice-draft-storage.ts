@@ -261,13 +261,19 @@ function migrateOrdinaryManualDrafts(scopes: PracticeDraftScopes, source: Stored
   // Remove the source only after the destination is durable. A retry keeps the existing copy by ID.
   try {
     const oldKey = legacyStorageKey(scopes.ordinary);
-    if (legacy) { storage.removeItem(oldKey); legacyIds.delete(scopes.ordinary); }
-    else {
+    if (legacy || loadedFromLegacy.has(scopes.ordinary)) {
+      loadedFromLegacy.add(scopes.ordinary);
+      storage.removeItem(oldKey);
+      legacyIds.delete(scopes.ordinary);
+      loadedFromLegacy.delete(scopes.ordinary);
+    } else {
       const oldRaw = storage.getItem(oldKey);
       if (oldRaw !== null) {
         if (!parsePracticeDraft(JSON.parse(oldRaw), scopes.ordinary)) throw new Error(migrationError);
+        loadedFromLegacy.add(scopes.ordinary);
         storage.removeItem(oldKey);
         legacyIds.delete(scopes.ordinary);
+        loadedFromLegacy.delete(scopes.ordinary);
       }
     }
     const matrixDrafts = ordinary.drafts.filter(draft => draft.fields.matrixMode === true);
@@ -355,14 +361,17 @@ export function readPartitionedPracticeDraftCollection(scopes: PracticeDraftScop
             try {
               const oldKey = legacyStorageKey(scopes.ordinary);
               if (ordinary?.legacy || loadedFromLegacy.has(scopes.ordinary)) {
+                loadedFromLegacy.add(scopes.ordinary);
                 storage.removeItem(oldKey);
                 legacyIds.delete(scopes.ordinary);
                 loadedFromLegacy.delete(scopes.ordinary);
               } else {
                 const oldRaw = storage.getItem(oldKey);
                 if (oldRaw !== null && parsePracticeDraft(JSON.parse(oldRaw), scopes.ordinary)) {
+                  loadedFromLegacy.add(scopes.ordinary);
                   storage.removeItem(oldKey);
                   legacyIds.delete(scopes.ordinary);
+                  loadedFromLegacy.delete(scopes.ordinary);
                 }
               }
             } catch { /* v2 already authoritative */ }
