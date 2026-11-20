@@ -264,11 +264,11 @@ export async function readOpeningBackupTableRows(
   // Preserve complete references when a privacy exclusion removes any part of a learning fact.
   const sourceIds = new Set(tables.opening_sources.map(row => row.id));
   const conversationsById = new Map(tables.opening_conversations.map(row => [row.id, row]));
-  const initialUserTurnCourse = new Map<unknown, unknown>();
+  const initialUserTurnCourse = new Map<string, unknown>();
   for (const turn of tables.opening_turns) {
     const conv = conversationsById.get(turn.conversation_id);
-    if (turn.role === "user" && conv && conv.workspace_id === id && conv.owner_user_id === userId) {
-      initialUserTurnCourse.set(turn.id, conv.course_id ?? null);
+    if (turn.role === "user" && typeof turn.id === "string" && conv && conv.workspace_id === id && conv.owner_user_id === userId) {
+      initialUserTurnCourse.set(turn.id.toLowerCase(), conv.course_id ?? null);
     }
   }
   const initialActivityIds = new Set(tables.opening_teaching_activities.map(row => row.id));
@@ -347,14 +347,19 @@ export async function readOpeningBackupTableRows(
     tables.opening_turns = tables.opening_turns.filter(row => (row.attempt_id === null || attemptIds.has(row.attempt_id))
       && (row.learning_session_id == null || sessionIds.has(row.learning_session_id)) && admittedAnchor(row));
     turnIds = new Set(tables.opening_turns.map(row => row.id));
+    const turnIdsLower = new Set(
+      tables.opening_turns.flatMap(row => (typeof row.id === "string" ? [row.id.toLowerCase()] : [])),
+    );
     const droppedOriginTurnActivities = new Set(
       tables.opening_teaching_activities
         .filter(row => {
           const intent = row.create_intent;
-          const sourceTurnId = intent !== null && typeof intent === "object" && !Array.isArray(intent)
+          const rawSourceTurnId = intent !== null && typeof intent === "object" && !Array.isArray(intent)
             ? (intent as { sourceTurnId?: unknown }).sourceTurnId
             : undefined;
-          if (sourceTurnId === undefined || turnIds.has(sourceTurnId)) return false;
+          if (typeof rawSourceTurnId !== "string") return false;
+          const sourceTurnId = rawSourceTurnId.toLowerCase();
+          if (turnIdsLower.has(sourceTurnId)) return false;
           return initialUserTurnCourse.has(sourceTurnId)
             && initialUserTurnCourse.get(sourceTurnId) === (row.course_id ?? null);
         })
