@@ -651,7 +651,8 @@ export function createOpeningDayAdjustmentRepository(
               AND status IN ('active', 'paused') AND create_intent->>'source' = 'task'`,
           tx`SELECT
               t.id, t.workspace_id, t.owner_user_id, t.title, t.minutes, t.priority, t.version, t.status,
-              t.due_at, t.not_before, t.course_id, t.candidate_id, t.origin,
+              t.due_at, t.not_before, t.course_id, t.candidate_id, t.origin, t.client_key,
+              retest_hold.retest_hold_open_ended, retest_hold.retest_hold_end_at,
               a.id AS retest_activity_id, a.workspace_id AS retest_workspace_id, a.owner_user_id AS retest_owner_user_id,
               a.task_id AS retest_task_id, a.course_id AS retest_course_id, a.purpose AS retest_purpose,
               a.status AS retest_status, a.version AS retest_version, a.candidate_id AS retest_candidate_id,
@@ -662,6 +663,26 @@ export function createOpeningDayAdjustmentRepository(
               j.id AS retest_job_id, j.workspace_id AS retest_job_workspace_id, j.owner_user_id AS retest_job_owner_user_id,
               j.kind AS retest_job_kind, j.payload AS retest_job_payload, j.result AS retest_job_result
             FROM opening_tasks t
+            LEFT JOIN LATERAL (
+              SELECT
+                bool_or(r.status IN ('proposed', 'accepted', 'in_progress')
+                  AND (r.deadline_at IS NULL OR r.deadline_at <= statement_timestamp())) AS retest_hold_open_ended,
+                max(CASE
+                  WHEN r.status IN ('proposed', 'accepted', 'in_progress') THEN r.deadline_at
+                  ELSE COALESCE(r.completed_at, r.declined_at, r.cancelled_at, r.invalidated_at, r.superseded_at, r.updated_at)
+                END) AS retest_hold_end_at
+              FROM (SELECT 1) AS _gate
+              JOIN opening_retest_activities r
+                ON t.origin = 'agent'
+                AND t.client_key LIKE 'text-retell:%:deferred'
+                AND r.workspace_id = t.workspace_id
+                AND r.owner_user_id = t.owner_user_id
+                AND (t.course_id IS NULL OR r.course_id = t.course_id)
+                AND (
+                  r.status IN ('proposed', 'accepted', 'in_progress')
+                  OR COALESCE(r.completed_at, r.declined_at, r.cancelled_at, r.invalidated_at, r.superseded_at, r.updated_at) >= t.created_at
+                )
+            ) retest_hold ON (t.origin = 'agent' AND t.client_key LIKE 'text-retell:%:deferred')
             LEFT JOIN opening_retest_activities a
               ON a.task_id = t.id AND a.workspace_id = t.workspace_id AND a.owner_user_id = t.owner_user_id
             LEFT JOIN opening_jobs j

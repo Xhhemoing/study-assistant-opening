@@ -24,6 +24,7 @@ export const openingSources = pgTable(
     version: integer("version").notNull().default(0),
     uploadState: text("upload_state").notNull(),
     parseState: text("parse_state").notNull(),
+    textCaptureIntent: jsonb("text_capture_intent").$type<{ courseId: string | null; scheduleNextDayRetell: boolean; inputDigest: string }>(),
     error: jsonb("error"),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()

@@ -90,7 +90,11 @@ function mapTask(
   scope?: OpeningScope,
   window = projectCourseRoutePlanningWindow(row, scope),
 ): TaskItem {
-  const projectedRow = window.isCourseRouteRetest && window.notBefore !== null
+  const isDeferredRetell = row.origin === "agent"
+    && typeof row.client_key === "string"
+    && row.client_key.startsWith("text-retell:")
+    && row.client_key.endsWith(":deferred");
+  const projectedRow = (window.isCourseRouteRetest || isDeferredRetell) && window.notBefore !== null
     ? { ...row, not_before: window.notBefore }
     : row;
   const base: TaskItem = {
@@ -164,6 +168,8 @@ export function createOpeningPlansRepository(sql: Sql, options: { now?: () => Da
           t.*,
           target.binding_ids AS teaching_binding_ids,
           target.onboarding_binding_exists,
+          retest_hold.retest_hold_open_ended,
+          retest_hold.retest_hold_end_at,
           a.id AS retest_activity_id,
           a.workspace_id AS retest_workspace_id,
           a.owner_user_id AS retest_owner_user_id,
@@ -202,6 +208,26 @@ export function createOpeningPlansRepository(sql: Sql, options: { now?: () => Da
               OR (t.origin IN ('manual', 'course_seed') AND t.client_key = 'first-learning-activity:' || teaching.id::text
                 AND teaching.create_intent->>'source' = 'onboarding' AND teaching.client_key LIKE 'first-learning:%'))
         ) target ON true
+        LEFT JOIN LATERAL (
+          SELECT
+            bool_or(r.status IN ('proposed', 'accepted', 'in_progress')
+              AND (r.deadline_at IS NULL OR r.deadline_at <= statement_timestamp())) AS retest_hold_open_ended,
+            max(CASE
+              WHEN r.status IN ('proposed', 'accepted', 'in_progress') THEN r.deadline_at
+              ELSE COALESCE(r.completed_at, r.declined_at, r.cancelled_at, r.invalidated_at, r.superseded_at, r.updated_at)
+            END) AS retest_hold_end_at
+          FROM (SELECT 1) AS _gate
+          JOIN opening_retest_activities r
+            ON t.origin = 'agent'
+            AND t.client_key LIKE 'text-retell:%:deferred'
+            AND r.workspace_id = t.workspace_id
+            AND r.owner_user_id = t.owner_user_id
+            AND (t.course_id IS NULL OR r.course_id = t.course_id)
+            AND (
+              r.status IN ('proposed', 'accepted', 'in_progress')
+              OR COALESCE(r.completed_at, r.declined_at, r.cancelled_at, r.invalidated_at, r.superseded_at, r.updated_at) >= t.created_at
+            )
+        ) retest_hold ON (t.origin = 'agent' AND t.client_key LIKE 'text-retell:%:deferred')
         LEFT JOIN opening_retest_activities a
           ON a.task_id = t.id
           AND a.workspace_id = t.workspace_id
@@ -328,9 +354,48 @@ export function createOpeningPlansRepository(sql: Sql, options: { now?: () => Da
         };
         const before = current.not_before ? new Date(current.not_before as string | Date).getTime() : null;
         const after = input.notBefore === null ? null : new Date(input.notBefore).getTime();
-        if (before === after) return readTask();
+        const deferredRetell = current.origin === "agent"
+          && typeof current.client_key === "string"
+          && current.client_key.startsWith("text-retell:")
+          && current.client_key.endsWith(":deferred");
+        if (deferredRetell) {
+          const courseId = (current.course_id as string | null) ?? null;
+          const createdAt = current.created_at instanceof Date || typeof current.created_at === "string"
+            ? current.created_at
+            : new Date(0);
+          const [hold] = await tx<{ blocked: boolean | null }[]>`
+            SELECT
+              bool_or(r.status IN ('proposed', 'accepted', 'in_progress')
+                AND (r.deadline_at IS NULL OR r.deadline_at <= statement_timestamp()))
+              OR max(CASE
+                WHEN r.status IN ('proposed', 'accepted', 'in_progress') THEN r.deadline_at
+                ELSE COALESCE(r.completed_at, r.declined_at, r.cancelled_at, r.invalidated_at, r.superseded_at, r.updated_at)
+              END) + interval '1 second' > COALESCE(${input.notBefore}::timestamptz, statement_timestamp()) AS blocked
+            FROM (SELECT 1) AS _gate
+            JOIN opening_retest_activities r
+              ON r.workspace_id = ${scope.workspaceId}
+              AND r.owner_user_id = ${scope.ownerUserId}
+              AND (${courseId}::uuid IS NULL OR r.course_id = ${courseId})
+              AND (
+                r.status IN ('proposed', 'accepted', 'in_progress')
+                OR COALESCE(r.completed_at, r.declined_at, r.cancelled_at, r.invalidated_at, r.superseded_at, r.updated_at) >= ${createdAt}
+              )`;
+          if (hold?.blocked) {
+            throw new OpeningPlanError("CONFLICT", "retell task remains deferred behind an active retest");
+          }
+        }
+        const clearHold = deferredRetell && input.notBefore === null;
+        if (before === after && !clearHold) return readTask();
+        if (clearHold) {
+          // A manual task saved before the namespace was reserved may own the resume key.
+          // Its task remains intact. Only that obsolete quick-add key can be released.
+          await tx`UPDATE opening_tasks SET client_key=NULL WHERE workspace_id=${scope.workspaceId}
+            AND owner_user_id=${scope.ownerUserId} AND client_key=${String(current.client_key).slice(0, -":deferred".length)}
+            AND origin IN ('manual', 'course_seed')`;
+        }
         const updated = await tx`UPDATE opening_tasks
-          SET not_before=${input.notBefore}, version=version + 1, updated_at=now()
+          SET not_before=${input.notBefore}, version=version + 1, updated_at=now(),
+            client_key=CASE WHEN ${clearHold} THEN left(client_key, -length(':deferred')) ELSE client_key END
           WHERE id=${taskId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} RETURNING *`;
         await recordOpeningPlanFeedback(tx, scope, updated[0] as Record<string, unknown>,
           input.notBefore === null ? "resumed" : "deferred", input.feedback);

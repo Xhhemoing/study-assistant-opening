@@ -10,6 +10,7 @@ import type {
 } from "@aistudy/contracts";
 import { teachingLearnerFocusSchema } from "@aistudy/contracts";
 import { assertPublicTeachingActivityIntent, hasOpeningSpanCourseBinding } from "./opening-span-course-binding";
+import { readLockedTaskPlanningWindows } from "./opening-course-route-planning-window";
 import { readOpeningTaskTeachingBinding } from "./opening-current-learning-activity";
 import {
   admitLearningSources,
@@ -239,16 +240,16 @@ export async function createOpeningTeachingActivityInTransaction(
   tx: TransactionSql, scope: Scope, input: TeachingActivityCreateInput,
   options: { enqueueCompile?: boolean; replayOnly?: boolean } = {},
 ): Promise<TeachingActivity> {
+  const taskId = input.createIntent.source === "task" && typeof input.createIntent.taskId === "string"
+    ? input.createIntent.taskId.toLowerCase() : null;
+  if (taskId) await lockWorkspaceLearningHistory(tx, scope);
   await lockLearningOwner(tx, scope);
-  // Serializes with coach undo's and empty-workspace restore's workspace FOR UPDATE
-  // without re-entering opening_workspace_history_revisions (callers such as
-  // card-variant creation already fence history before entering this helper).
-  if (input.createIntent.source === "task" && typeof input.createIntent.taskId === "string") {
+  if (taskId) {
     const withdrawn = await tx`SELECT 1 FROM opening_plan_acceptances a
       JOIN opening_plan_drafts d ON d.id=a.draft_id AND d.workspace_id=a.workspace_id
       WHERE a.workspace_id=${scope.workspaceId} AND d.owner_user_id=${scope.ownerUserId}
         AND a.source='coach' AND a.undone_at IS NOT NULL
-        AND a.created_task_versions ? ${input.createIntent.taskId.toLowerCase()} LIMIT 1`;
+        AND a.created_task_versions ? ${taskId} LIMIT 1`;
     if (withdrawn.length) throw learningError("CONFLICT", "该教练任务已撤销，请重新读取今日任务。");
   }
   const sourceIds = [...new Set(input.sourceIds ?? [])].sort();
@@ -317,6 +318,13 @@ export async function createOpeningTeachingActivityInTransaction(
       FOR UPDATE`)[0];
     if (!existing) {
       if (options.replayOnly) throw learningError("VALIDATION", "目标日期已过去，且没有可恢复的同一学习意图");
+      if (taskId) {
+        const [task] = await readLockedTaskPlanningWindows(tx, scope, [taskId]);
+        if (!task) throw learningError("NOT_FOUND", "task not found");
+        if (task.window.notBefore && Date.parse(task.window.notBefore) > Date.now()) {
+          throw learningError("CONFLICT", "这项任务尚未到开始时间。");
+        }
+      }
       const id = randomUUID();
       const goalJson = input.goalJson ?? {};
       const generateStatus = options.enqueueCompile ? "queued" : "ready";
