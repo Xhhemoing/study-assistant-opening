@@ -81,11 +81,14 @@ export function ActivitySummaryCard({ activityId, activity, originalConversation
       if (!current()) return;
       let task: TaskItem | null = null;
       if (summary.taskId) {
-        const result = await api.listTasks();
-        task = result.tasks.find((row) => row.id === summary.taskId) ?? null;
+        try {
+          const result = await api.listTasks();
+          task = result.tasks.find((row) => row.id === summary.taskId) ?? null;
+        } catch (reason) {
+          if (current()) setFailure({ activityId, message: userFacingMessage(reason, "无法读取关联任务") });
+        }
       }
-      // A summary and its linked task are one snapshot. Never pair a new
-      // summary with the previous activity's task while the second read waits.
+      // Publish the summary with its own task lookup result, even if the lookup failed.
       if (current()) setSnapshot({ activityId, summary, task });
     } catch (reason) {
       if (current()) setFailure({ activityId, message: userFacingMessage(reason, "无法读取学习小结") });

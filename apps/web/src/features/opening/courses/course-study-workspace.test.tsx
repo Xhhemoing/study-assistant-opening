@@ -205,6 +205,30 @@ it("passes the original conversation into the route next control", async () => {
   expect(host.querySelector("[data-route-conversation]")?.getAttribute("data-route-conversation")).toBe(conversation);
 });
 
+it.each([false, true])("renders one course-route control for a completed activity (task lookup fails: %s)", async taskLookupFails => {
+  const conversation = "66666666-6666-4666-8666-666666666666";
+  const activity = { ...data.activity, status: "completed" as const, routeManaged: true };
+  vi.mocked(openCourseStudy).mockResolvedValueOnce({ kind: "activity", activity });
+  const taskId = "33333333-3333-4333-8333-333333333333";
+  const linkedTask = { id: taskId, title: "关联练习", status: "pending", version: 1 };
+  const listTasks = vi.fn().mockResolvedValue({ tasks: [linkedTask] });
+  if (taskLookupFails) listTasks.mockRejectedValueOnce(new Error("任务暂时无法读取"));
+  const api = { getTeachingResume: vi.fn(async () => fullResume({
+    status: "completed", gates: { permission: "owned", materials: "unavailable", unavailableSourceIds: [], job: "ready" },
+  })), listTasks } as unknown as OpeningApi;
+  vi.stubGlobal("fetch", vi.fn(async () => Response.json({
+    coveredBlockIds: [], skippedBlockIds: [], attempts: { total: 0, correct: 0, incorrect: 0, unverified: 0 },
+    openQuestions: [], taskId,
+  })));
+  await act(async () => root.render(<CourseStudyWorkspace courseId={data.course.id} activityId={activity.id}
+    originalConversationId={conversation} teachingEnabled teachingCompileEnabled sourceIds={[]} timeZone="Asia/Shanghai" api={api} />));
+  expect(listTasks).toHaveBeenCalledOnce();
+  const controls = host.querySelectorAll("[data-route-conversation]");
+  expect(controls).toHaveLength(1);
+  expect(controls[0]?.getAttribute("data-route-conversation")).toBe(conversation);
+  expect(controls[0]?.closest('[aria-label="本次学习小结"]')).not.toBeNull();
+});
+
 it("carries the original conversation from a read-only retest to its learning records", async () => {
   const conversation = "66666666-6666-4666-8666-666666666666";
   const courseId = data.course.id, activityId = data.activity.id;

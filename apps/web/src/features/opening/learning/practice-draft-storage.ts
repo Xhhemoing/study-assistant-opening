@@ -31,8 +31,7 @@ export type PracticeDraftCollection = { version: 2; scope: string; activeId: str
 const memory = new Map<string, PracticeDraftCollection>();
 const dirty = new Set<string>();
 const dirtyDraftIds = new Map<string, Set<string>>();
-const legacyIds = new Map<string, { raw: string; id: string }>();
-const loadedFromLegacy = new Set<string>();
+const legacySnapshots = new Map<string, { raw: string; id: string; destination?: string }>();
 const unreconciled = new Set<string>();
 const blocked = new Map<string, string>();
 
@@ -132,43 +131,27 @@ function readStoredPracticeDraftCollection(scope: string, storage: ReadStorage):
   } catch { unreadable("无法读取练习草稿，已停止新建和切换。请允许此页面使用浏览器存储后重试。"); }
   if (raw === null) {
     blocked.delete(scope);
-    if (!dirty.has(scope)) {
-      legacyIds.delete(scope);
-      loadedFromLegacy.delete(scope);
-    }
+    if (!dirty.has(scope)) legacySnapshots.delete(scope);
     return null;
   }
   let parsed: unknown;
   try { parsed = JSON.parse(raw); } catch { unreadable("保存的练习草稿无法解析，原内容未改动。请恢复浏览器存储后重试。"); }
   let collection: PracticeDraftCollection | null;
   if (legacy) {
-    const hasExplicitId = typeof (parsed as { id?: unknown } | null)?.id === "string";
     const parsedDraft = parsePracticeDraft(parsed, scope);
     if (parsedDraft) {
-      let draft = parsedDraft;
-      if (!hasExplicitId) {
-        const remembered = legacyIds.get(scope);
-        const id = remembered && remembered.raw === raw ? remembered.id : parsedDraft.id;
-        legacyIds.set(scope, { raw, id });
-        draft = { ...parsedDraft, id };
-      } else legacyIds.delete(scope);
+      const snapshot = legacySnapshots.get(scope);
+      const id = snapshot?.raw === raw ? snapshot.id : parsedDraft.id;
+      // A dirty retry can prefer the in-memory edit over a different v1 draft with the same ID.
+      // Only a clean load can establish which v1 bytes those local edits descend from.
+      if (!dirty.has(scope) && snapshot?.raw !== raw) legacySnapshots.set(scope, { raw, id });
+      const draft = { ...parsedDraft, id };
       collection = { version: 2, scope, activeId: draft.id, drafts: [draft] };
     } else collection = null;
   } else {
     collection = parsePracticeDraftCollection(parsed, scope);
   }
   if (!collection) unreadable("保存的练习草稿身份或内容无效，原内容未改动，已停止新建和切换。");
-  if (legacy) loadedFromLegacy.add(scope);
-  else {
-    legacyIds.delete(scope);
-    if (loadedFromLegacy.has(scope)) {
-      try {
-        if (storage.getItem(legacyStorageKey(scope)) === null) loadedFromLegacy.delete(scope);
-      } catch {
-        // Keep legacy cleanup pending until the legacy key is removed or confirmed absent.
-      }
-    }
-  }
   blocked.delete(scope);
   return { collection, legacy };
 }
@@ -201,6 +184,47 @@ export function readPracticeDraft(scope: string, storage: ReadStorage | null, dr
   return collection?.drafts.find(draft => draft.id === (draftId ?? collection.activeId)) ?? null;
 }
 
+function cleanupLegacyDraft(scope: string, storage: PartitionStorage, migrated: readonly PracticeDraft[], manualScope?: string): boolean {
+  const key = legacyStorageKey(scope);
+  const raw = storage.getItem(key);
+  if (raw === null) {
+    legacySnapshots.delete(scope);
+    return true;
+  }
+
+  const value: unknown = JSON.parse(raw);
+  const legacy = parsePracticeDraft(value, scope);
+  if (!legacy) return false;
+  const hasId = typeof (value as { id?: unknown }).id === "string";
+  const destination = manualScope && !legacy.fields.matrixMode ? manualScope : scope;
+  const comparable = parsePracticeDraft({ ...legacy, scope: destination }, destination);
+  if (!comparable) return false;
+
+  const saved = storage.getItem(storageKey(destination));
+  const durable = saved === null ? null : parsePracticeDraftCollection(JSON.parse(saved), destination);
+  const remembered = legacySnapshots.get(scope);
+  const snapshot = remembered?.raw === raw ? remembered : undefined;
+  const migratedDraft = snapshot
+    ? migrated.find(draft => draft.id === snapshot.id && draft.scope === destination)
+    : undefined;
+  const edited = migratedDraft && parsePracticeDraft(migratedDraft, destination);
+  // An edited copy may supersede the exact v1 bytes we loaded. For any other
+  // source, require the full draft in the correct v2 partition before deleting.
+  const copy = durable?.drafts.find(draft => {
+    if (snapshot?.destination === destination && snapshot.id === draft.id) return true;
+    const serialized = JSON.stringify(draft);
+    const expected = hasId ? comparable : { ...comparable, id: draft.id };
+    return serialized === JSON.stringify(expected) || (edited && serialized === JSON.stringify(edited));
+  });
+  if (!copy || storage.getItem(key) !== raw) return false;
+
+  // If removal fails, the same bytes can be cleaned up after further edits to this copy.
+  legacySnapshots.set(scope, { raw, id: copy.id, destination });
+  storage.removeItem(key);
+  legacySnapshots.delete(scope);
+  return true;
+}
+
 function persistCollection(collection: PracticeDraftCollection, storage: WriteStorage | null): boolean {
   if (unreconciled.has(collection.scope)) {
     dirty.add(collection.scope);
@@ -211,25 +235,10 @@ function persistCollection(collection: PracticeDraftCollection, storage: WriteSt
     storage.setItem(storageKey(collection.scope), JSON.stringify(collection));
     dirty.delete(collection.scope);
     dirtyDraftIds.delete(collection.scope);
-    if (loadedFromLegacy.has(collection.scope) && hasRemoveItem(storage)) {
+    if (hasRemoveItem(storage) && isReadStorage(storage)) {
       try {
-        const oldKey = legacyStorageKey(collection.scope);
-        if (isReadStorage(storage)) {
-          const oldRaw = storage.getItem(oldKey);
-          if (oldRaw === null) {
-            legacyIds.delete(collection.scope);
-            loadedFromLegacy.delete(collection.scope);
-          } else if (parsePracticeDraft(JSON.parse(oldRaw), collection.scope)) {
-            storage.removeItem(oldKey);
-            legacyIds.delete(collection.scope);
-            loadedFromLegacy.delete(collection.scope);
-          }
-        } else {
-          storage.removeItem(oldKey);
-          legacyIds.delete(collection.scope);
-          loadedFromLegacy.delete(collection.scope);
-        }
-      } catch { /* v2 is already durable; preserve unvalidated/corrupt v1 */ }
+        cleanupLegacyDraft(collection.scope, storage, collection.drafts);
+      } catch { /* Keep v1 when cleanup cannot be verified or completed. */ }
     }
     return true;
   } catch { dirty.add(collection.scope); return false; }
@@ -271,28 +280,12 @@ function migrateOrdinaryManualDrafts(scopes: PracticeDraftScopes, source: Stored
     memory.set(scopes.manual, next);
   }
 
-  // Remove the source only after the destination is durable. A retry keeps the existing copy by ID.
+  // Compact the source only after cleanup can account for the live v1 bytes.
   try {
-    const oldKey = legacyStorageKey(scopes.ordinary);
-    if (legacy) {
-      loadedFromLegacy.add(scopes.ordinary);
-      storage.removeItem(oldKey);
-      legacyIds.delete(scopes.ordinary);
-      loadedFromLegacy.delete(scopes.ordinary);
-    } else {
-      const oldRaw = storage.getItem(oldKey);
-      if (oldRaw === null) {
-        legacyIds.delete(scopes.ordinary);
-        loadedFromLegacy.delete(scopes.ordinary);
-      } else {
-        if (!parsePracticeDraft(JSON.parse(oldRaw), scopes.ordinary)) throw new Error(migrationError);
-        loadedFromLegacy.add(scopes.ordinary);
-        storage.removeItem(oldKey);
-        legacyIds.delete(scopes.ordinary);
-        loadedFromLegacy.delete(scopes.ordinary);
-      }
-    }
     const matrixDrafts = ordinary.drafts.filter(draft => draft.fields.matrixMode === true);
+    if (!cleanupLegacyDraft(scopes.ordinary, storage, [...added, ...matrixDrafts], scopes.manual)) {
+      throw new Error("暂时无法确认旧练习草稿已迁移，原答案已保留。");
+    }
     if (matrixDrafts.length) {
       const active = matrixDrafts.find(draft => draft.id === ordinary.activeId) ?? matrixDrafts[0]!;
       const remaining = { ...ordinary, activeId: active.id, drafts: matrixDrafts };
@@ -373,28 +366,7 @@ export function readPartitionedPracticeDraftCollection(scopes: PracticeDraftScop
         } else {
           memory.set(scopes.ordinary, reconciled);
           unreconciled.delete(scopes.ordinary);
-          if (persistCollection(reconciled, storage)) {
-            try {
-              const oldKey = legacyStorageKey(scopes.ordinary);
-              if (ordinary?.legacy) {
-                loadedFromLegacy.add(scopes.ordinary);
-                storage.removeItem(oldKey);
-                legacyIds.delete(scopes.ordinary);
-                loadedFromLegacy.delete(scopes.ordinary);
-              } else {
-                const oldRaw = storage.getItem(oldKey);
-                if (oldRaw === null) {
-                  legacyIds.delete(scopes.ordinary);
-                  loadedFromLegacy.delete(scopes.ordinary);
-                } else if (parsePracticeDraft(JSON.parse(oldRaw), scopes.ordinary)) {
-                  loadedFromLegacy.add(scopes.ordinary);
-                  storage.removeItem(oldKey);
-                  legacyIds.delete(scopes.ordinary);
-                  loadedFromLegacy.delete(scopes.ordinary);
-                }
-              }
-            } catch { /* v2 already authoritative */ }
-          }
+          persistCollection(reconciled, storage);
         }
       }
     } else if (!unsavedOrdinary && ordinary?.collection.drafts.some(draft => draft.fields.matrixMode !== true)) {

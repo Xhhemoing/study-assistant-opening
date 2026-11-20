@@ -38,21 +38,29 @@ afterEach(async () => { await act(async () => root.unmount()); container.remove(
 async function render(activityId: string) { await act(async () => root.render(createElement(ActivitySummaryCard, { activityId, api }))); }
 
 it.each([
-  ["assisted_check", "独立试做同类题", "next"],
-  ["schedule_retest", "确认延迟复测安排", "scheduleRetest"],
-] as const)("offers only the %s action and submits it on confirmation", async (kind, label, action) => {
+  ["assisted_check", "独立试做同类题", "next", false],
+  ["assisted_check", "独立试做同类题", "next", true],
+  ["schedule_retest", "确认延迟复测安排", "scheduleRetest", false],
+  ["schedule_retest", "确认延迟复测安排", "scheduleRetest", true],
+] as const)("offers and submits %s via %s (%s, task lookup fails: %s)", async (kind, label, action, taskLookupFails) => {
   sessionStorage.clear();
   vi.clearAllMocks();
   const activityId = "11111111-1111-4111-8111-111111111111";
   const courseId = "22222222-2222-4222-8222-222222222222";
   const observationId = "33333333-3333-4333-8333-333333333333";
   const activity = { id: activityId, courseId, routeManaged: true, status: "completed", pathVersion: 2 } as TeachingActivity;
-  getSummary.mockResolvedValue({ ...summary("已完成"), nextStep: { kind, observationId } });
+  const linkedTask = task("linked-task");
+  getSummary.mockResolvedValue({ ...summary("已完成", linkedTask.id), nextStep: { kind, observationId } });
+  if (taskLookupFails) vi.mocked(api.listTasks).mockRejectedValueOnce(new Error("任务暂时无法读取"));
+  else vi.mocked(api.listTasks).mockResolvedValue({ tasks: [linkedTask] });
   routeClient.read.mockResolvedValue({ currentActivity: activity, currentRoute: { goalId: courseId, goalRevision: 1 }, observationId });
   routeClient.next.mockResolvedValue({ kind: "choice", href: "/opening/courses", message: "请确认课程路线" });
   routeClient.scheduleRetest.mockResolvedValue({ href: "/opening/review", notBeforeAt: "2026-11-23T00:00:00Z", taskStatus: "pending", retestStatus: "accepted" });
   await act(async () => root.render(createElement(ActivitySummaryCard, { activityId, activity, api })));
-  const buttons = [...container.querySelectorAll("button")];
+  const card = container.querySelector('[aria-label="本次学习小结"]');
+  expect(card).not.toBeNull();
+  expect(card?.textContent).toContain(taskLookupFails ? "关联任务当前不可用" : linkedTask.title);
+  const buttons = [...card!.querySelectorAll("button")].filter(button => button.dataset.taskId === undefined);
   expect(buttons.map(button => button.textContent)).toEqual([label]);
   expect(routeClient.read).not.toHaveBeenCalled();
   expect(routeClient.next).not.toHaveBeenCalled();
