@@ -1,4 +1,4 @@
-import { courseExamSnapshotSchema, knowledgeSnapshotSchema } from "@aistudy/contracts";
+import { courseExamSnapshotSchema, storedKnowledgeSnapshotSchema } from "@aistudy/contracts";
 import { COURSE_BACKUP_TABLES, LIBRARY_BACKUP_TABLES } from "../../../contracts/src/opening/backup-inventory";
 import { isRecord, isUuid, sourceReferences } from "./backup-validation";
 
@@ -52,8 +52,14 @@ export function backupAssetAdmission(tables: Tables) {
       if (!isRecord(row.source_versions) || !sourceReferences(row)?.every(id => sources.has(id))) return false;
       if (name === "opening_knowledge_confirmations") return sameOwner(row, graphs.get(row.course_id))
         && Array.isArray(row.evidence_chunk_ids) && row.evidence_chunk_ids.length > 0 && row.evidence_chunk_ids.every(id => chunks.has(id));
-      const graph = knowledgeSnapshotSchema.safeParse(row.snapshot);
-      return !("node_definitions" in row) && graph.success && graph.data.courseId === row.course_id
+      const snapshot = row.snapshot;
+      if ("node_definitions" in row || !isRecord(snapshot)) return false;
+      const graph = storedKnowledgeSnapshotSchema.safeParse(snapshot);
+      if (!graph.success || graph.data.courseId !== row.course_id) return false;
+      // Validate the keys on the original maps because the backup retains the original JSON.
+      const coverage = snapshot.coveredSourceVersions ?? {};
+      return Object.keys(coverage).every(id => sources.has(id))
+        && Object.keys(snapshot.coveredSourceChunkDigests ?? {}).every(id => Object.hasOwn(coverage, id))
         && graph.data.nodes.every(node => node.courseId === row.course_id)
         && [...graph.data.nodes, ...graph.data.edges].every(item => item.evidenceChunkIds.every(id => chunks.has(id)));
     }

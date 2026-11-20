@@ -1,11 +1,11 @@
-import { knowledgeSnapshotSchema } from "@aistudy/contracts";
+import { storedKnowledgeSnapshotSchema } from "@aistudy/contracts";
 import { knowledgeNodeDefinition } from "@aistudy/domain";
 import type { TransactionSql } from "postgres";
 import { mapChunk } from "./opening-source-chunks";
 
 /** Rebuild the same definitions as knowledge publication, with restored course evidence. */
 export async function restoreKnowledgeDefinitions(tx: TransactionSql, row: Record<string, unknown>, workspaceId: string) {
-  const snapshot = knowledgeSnapshotSchema.parse(row.snapshot);
+  const snapshot = storedKnowledgeSnapshotSchema.parse(row.snapshot);
   const ids = [...new Set(snapshot.nodes.flatMap(node => node.evidenceChunkIds))];
   if (!ids.length) return {};
   const chunks = (await tx`SELECT c.* FROM opening_source_chunks c

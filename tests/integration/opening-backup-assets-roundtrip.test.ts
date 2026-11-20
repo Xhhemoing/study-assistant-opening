@@ -211,11 +211,15 @@ it.skipIf(process.env.OPENING_TEST_DB !== "1" || !process.env.OPENING_TEST_DATAB
         let sourceVersions: Record<string, number> = {};
         await outer.savepoint(async tx => {
           const db = transactionClient(tx), rows = backupRows(db, scope);
-          const source = await rows.source(), chunk = await rows.chunk(source), denied = await rows.source();
+          const source = await rows.source(), chunk = await rows.chunk(source);
+          const denied = await rows.source(), deniedChunk = await rows.chunk(denied), unread = await rows.source("pending");
+          const sourceDigest = createHash("sha256").update(chunk).digest("hex");
+          const deniedDigest = createHash("sha256").update(deniedChunk).digest("hex");
           sourceVersions = { [source]: 1 };
           await tx`INSERT INTO opening_source_versions(source_id,version,workspace_id,bytes,sha256,availability)
-            VALUES(${source},1,${w},${sourceBytes.length},${sourceHash},'available')`;
-          const privateDoc = randomUUID(), privateCourse = randomUUID(), node = randomUUID();
+            VALUES(${source},1,${w},${sourceBytes.length},${sourceHash},'available'),
+              (${denied},1,${w},${sourceBytes.length},${sourceHash},'available')`;
+          const privateDoc = randomUUID(), privateCourse = randomUUID(), node = randomUUID(), privateNode = randomUUID();
           await tx`INSERT INTO courses(id,workspace_id,title,slug) VALUES(${course},${w},'Course','course'),(${privateCourse},${w},'Other','other')`;
           await tx`INSERT INTO library_documents(id,workspace_id,title,lifecycle) VALUES
             (${doc},${w},'Essay','confirmed'),(${privateDoc},${w},'excluded note text','confirmed')`;
@@ -234,21 +238,22 @@ it.skipIf(process.env.OPENING_TEST_DB !== "1" || !process.env.OPENING_TEST_DATAB
           await tx`INSERT INTO library_relations(workspace_id,from_type,from_id,to_type,to_id,relation_type)
             VALUES(${w},'document',${doc},'block',${block},'references'),(${w},'document',${doc},'document',${privateDoc},'references')`;
           await tx`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,visibility)
-            VALUES(${w},${course},'source',${source},'core','course')`;
+            VALUES(${w},${course},'source',${source},'core','course'),
+              (${w},${course},'source',${unread},'core','course'),
+              (${w},${privateCourse},'source',${source},'core','course'),
+              (${w},${privateCourse},'source',${denied},'core','course')`;
           const knowledge = createOpeningKnowledgeRepository(db);
-          await knowledge.replace(scope, course, { expectedVersion: 0, sourceVersions,
-            snapshot: { courseId: course, version: 0, nodes: [{ id: node, courseId: course, label: "Algebra",
-              kind: "concept", evidenceChunkIds: [chunk], status: "needs_check" }], edges: [] } });
-          await knowledge.confirmNode(scope, course, node, { expectedVersion: 1, sourceVersions });
-          for (const [courseId, sourceId] of [[privateCourse,denied]] as const) {
-            const snapshot = { courseId, version: 1, nodes: [{ id: node, courseId, label: "Algebra", kind: "concept",
-              evidenceChunkIds: [chunk], status: "supported" }], edges: [] };
-            await tx`INSERT INTO opening_course_knowledge(workspace_id,owner_user_id,course_id,version,snapshot,source_versions,node_definitions)
-              VALUES(${w},${u},${courseId},1,${tx.json(snapshot)},${tx.json({ [sourceId]: 1 })},'{"private":"server-only text"}')`;
-            await tx`INSERT INTO opening_knowledge_confirmations(id,workspace_id,owner_user_id,course_id,node_id,node_label,node_kind,
-              graph_version_before,graph_version_after,source_versions,evidence_chunk_ids)
-              VALUES(${randomUUID()},${w},${u},${courseId},${node},'Algebra','concept',0,1,${tx.json({ [sourceId]: 1 })},${tx.json([chunk])})`;
-          }
+          const publishAndConfirm = async (courseId: string, nodeId: string, extractedSourceVersions: Record<string, number>,
+            extractedChunkDigests: Record<string, string>) => {
+            await knowledge.replace(scope, courseId, { expectedVersion: 0, sourceVersions, extractedSourceVersions,
+              extractedChunkDigests, snapshot: { courseId, version: 0, nodes: [{ id: nodeId, courseId, label: "Algebra",
+                kind: "concept", evidenceChunkIds: [chunk], status: "needs_check" }], edges: [] } });
+            return knowledge.confirmNode(scope, courseId, nodeId, { expectedVersion: 1, sourceVersions });
+          };
+          const coveredSourceChunkDigests = { [source]: sourceDigest };
+          const confirmed = await publishAndConfirm(course, node, sourceVersions, coveredSourceChunkDigests);
+          const privateDigests = { ...coveredSourceChunkDigests, [denied]: deniedDigest };
+          await publishAndConfirm(privateCourse, privateNode, { ...sourceVersions, [denied]: 1 }, privateDigests);
           await tx`INSERT INTO opening_exam_sprints(id,workspace_id,owner_user_id,pack_snapshot,state)
             VALUES(${sprint},${w},${u},${tx.json(EXAM_SPRINT_PACK as never)},${tx.json(createExamSprintState(new Date().toISOString()) as never)})`;
           await tx`INSERT INTO opening_exam_bindings(sprint_id,course_id,binding) VALUES(${sprint},${course},
@@ -328,6 +333,16 @@ it.skipIf(process.env.OPENING_TEST_DB !== "1" || !process.env.OPENING_TEST_DATAB
             return composed.backup;
           };
           backup = await snapshot();
+          expect(backup.tables.opening_course_knowledge).toContainEqual(expect.objectContaining({
+            course_id: course, version: 2, snapshot: { ...confirmed.snapshot, coveredSourceChunkDigests },
+          }));
+          expect(backup.tables.opening_course_knowledge?.find(row => row.course_id === privateCourse))
+            .toMatchObject({ snapshot: { coveredSourceChunkDigests: privateDigests } });
+          expect(backup.tables.opening_knowledge_confirmations).toEqual(expect.arrayContaining([
+            expect.objectContaining({ course_id: course, node_id: node, graph_version_before: 1, graph_version_after: 2,
+              source_versions: sourceVersions, evidence_chunk_ids: [chunk] }),
+            expect.objectContaining({ course_id: privateCourse, node_id: privateNode }),
+          ]));
           const courseSprint = backup.tables.opening_exam_sprints?.find(row => (row as { id: string }).id === examSprint);
           expect(courseSprint).toMatchObject({ pack_snapshot: { requests: [{ id: request.id, status: "unknown", activityId: null, proposal: null }] } });
           const serialized = JSON.stringify(backup);
@@ -353,7 +368,7 @@ it.skipIf(process.env.OPENING_TEST_DB !== "1" || !process.env.OPENING_TEST_DATAB
           const paper = { id: attachment, workspaceId: w, documentId: legacyExam, type: "file", position: 0, content: examContent };
           for (const name of ["opening_exam_bindings","opening_exam_attempt_links","opening_exam_source_observations",
             "opening_exam_help_receipts"]) expect(backup.tables[name], name).toHaveLength(1);
-          const historyDoc = randomUUID(), historyBlock = randomUUID(), deniedChunk = await rows.chunk(denied);
+          const historyDoc = randomUUID(), historyBlock = randomUUID();
           const historyUnit = randomUUID(), historyActivity = randomUUID(), historySpec = randomUUID();
           const historySession = randomUUID(), historyAttempt = randomUUID();
           await tx`INSERT INTO library_documents(id,workspace_id,title,lifecycle,current_revision_number)
@@ -419,7 +434,12 @@ it.skipIf(process.env.OPENING_TEST_DB !== "1" || !process.env.OPENING_TEST_DATAB
             "opening_course_knowledge","opening_knowledge_confirmations","opening_exam_papers","opening_exam_reviews"] as const) {
             expect(filtered.tables[table], table).toHaveLength(1);
           }
-          expect(JSON.stringify(filtered)).not.toMatch(/server-only text|excluded note text|excluded property|node_definitions|excluded revision text/);
+          expect(filtered.tables.opening_course_knowledge?.[0]).toMatchObject({
+            course_id: course, snapshot: { ...confirmed.snapshot, coveredSourceChunkDigests },
+          });
+          expect(filtered.tables.opening_knowledge_confirmations?.[0]).toMatchObject({ node_id: node });
+          expect(JSON.stringify(filtered)).not.toContain(deniedDigest);
+          expect(JSON.stringify(filtered)).not.toMatch(/excluded note text|excluded property|node_definitions|excluded revision text/);
           expect(filtered.tables.opening_exam_sprints?.find(row => (row as { id: string }).id === sprint)).toMatchObject({ pack_snapshot: { id: EXAM_SPRINT_PACK.id, version: EXAM_SPRINT_PACK.version } });
           throw discardSeed;
         }).catch(error => { if (error !== discardSeed) throw error; });
@@ -467,12 +487,17 @@ it.skipIf(process.env.OPENING_TEST_DB !== "1" || !process.env.OPENING_TEST_DATAB
         const knowledge = createOpeningKnowledgeRepository(transactionClient(outer));
         const restoredGraph = await knowledge.getForRebuild(scope, course);
         expect(Object.keys(restoredGraph!.nodeDefinitions)).toHaveLength(1);
-        const [receipt] = await outer`SELECT id FROM opening_knowledge_confirmations WHERE course_id=${course}`;
+        const [stored] = await outer`SELECT snapshot FROM opening_course_knowledge WHERE course_id=${course}`;
+        expect(stored?.snapshot).toEqual(wire.tables.opening_course_knowledge!.find(row => row.course_id === course)!.snapshot);
+        expect(await knowledge.readSyncStatus(scope, course)).toMatchObject({ status: "up_to_date",
+          coveredSourceVersions: sourceVersions });
+        const receipts = await outer`SELECT * FROM opening_knowledge_confirmations WHERE workspace_id=${w} ORDER BY id`;
+        expect(JSON.parse(JSON.stringify(receipts))).toEqual(wire.tables.opening_knowledge_confirmations);
         const rebuilt = await knowledge.replace(scope, course, { expectedVersion: restoredGraph!.version, sourceVersions,
           expectedReferencedNodeIds: await knowledge.listReferencedNodeIds(scope, course), snapshot: { ...restoredGraph!.snapshot,
             nodes: restoredGraph!.snapshot.nodes.map(node => ({ ...node, status: "needs_check" })) } });
         expect(rebuilt.snapshot.nodes[0]?.status).toBe("supported");
-        expect(await outer`SELECT id FROM opening_knowledge_confirmations WHERE course_id=${course}`).toEqual([receipt]);
+        expect(await outer`SELECT * FROM opening_knowledge_confirmations WHERE workspace_id=${w} ORDER BY id`).toEqual(receipts);
         expect(await outer`SELECT blocks FROM library_revisions WHERE document_id=${doc}`).toEqual([{ blocks: [oldBlocks[0]] }]);
         expect(await outer`SELECT content FROM library_blocks WHERE id=${block}`).toEqual([{ content: liveContent }]);
         const [property] = await outer`SELECT value FROM library_properties WHERE subject_id=${block}`;
