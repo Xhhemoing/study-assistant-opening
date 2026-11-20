@@ -1,21 +1,19 @@
 import {
-  clampToIeltsBand,
-  computeOverallIeltsBand,
   countEnglishWords,
   detectMemorizedTemplates,
   hasMemorizedTemplateStuffing,
   locateGroundedExcerpt,
-  resolveIeltsEpistemicStatus,
 } from "./rubric";
+import { detectLowEntropyStuffing } from "./transfer";
 import {
   IELTS_CARTRIDGE_ID,
-  type IeltsBandScore,
-  type IeltsCriterion,
-  type IeltsSpanEvidence,
+  type IeltsSpeakingEvidenceQuote,
   type IeltsSpeakingFeedbackReceipt,
   type IeltsSpeakingPaceStatus,
   type IeltsSpeakingPart3Seed,
   type IeltsSpeakingRetellingInput,
+  type IeltsSpeakingSignalKey,
+  type IeltsSpeakingTranscriptSignal,
   type IeltsWritingCoreArgument,
 } from "./types";
 
@@ -33,6 +31,20 @@ const DEFAULT_AVOID_IN_SPEECH = [
   "In conclusion（口语收束更自然用 So overall / Taken together）",
   "Every coin has two sides（套话谚语，直接说出具体权衡点）",
 ] as const;
+
+const MIN_VERIFIED_SPEAKING_WORDS = 75;
+
+const SPEAKING_SCOPE_NOTE =
+  "当前仅基于口语转写文本与作答时长进行迁移检核，不含真实语音发音（Pronunciation）与声学流利度评分，不构成官方口语 Band。";
+
+function escapeRegExp(literal: string): string {
+  return literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function buildPhraseRegex(phrase: string): RegExp {
+  const parts = phrase.trim().split(/\s+/).map(escapeRegExp);
+  return new RegExp(`(?<![\\p{L}\\p{N}])${parts.join("\\s+")}(?![\\p{L}\\p{N}])`, "iu");
+}
 
 function cleanSpokenCollocations(rawCollocations: readonly string[]): string[] {
   const seen = new Set<string>();
@@ -87,204 +99,295 @@ export function buildSpeakingPart3Seed(
   };
 }
 
-function classifySpeakingPace(durationSeconds: number): IeltsSpeakingPaceStatus {
-  if (durationSeconds < 60) return "too_short";
-  if (durationSeconds > 90) return "over_time";
+function classifySpeakingPace(
+  durationSeconds: number,
+  window: { readonly min: number; readonly max: number },
+): IeltsSpeakingPaceStatus {
+  if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) {
+    return "invalid_duration";
+  }
+  if (durationSeconds < window.min) return "too_short";
+  if (durationSeconds > window.max) return "over_time";
   return "on_target";
 }
 
-function extractSentences(transcript: string): string[] {
-  const raw = transcript
-    .split(/(?<=[.!?])\s+|\n+/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-  return raw.length > 0 ? raw : [transcript.trim()].filter(Boolean);
+type GroundedSentence = {
+  readonly text: string;
+  readonly startOffset: number;
+  readonly endOffset: number;
+};
+
+/**
+ * Splits a transcript into sentences while preserving exact UTF-16 offsets
+ * into the original transcript string (Unicode-safe, zero index drift).
+ */
+function extractGroundedSentences(transcript: string): GroundedSentence[] {
+  const results: GroundedSentence[] = [];
+  const regex = /[^.!?\n]+(?:[.!?]+|$)/gu;
+  for (const match of transcript.matchAll(regex)) {
+    const raw = match[0];
+    const startRaw = match.index ?? 0;
+    const leadingSpaces = raw.length - raw.trimStart().length;
+    const trimmed = raw.trim();
+    if (!trimmed) continue;
+    const startOffset = startRaw + leadingSpaces;
+    const endOffset = startOffset + trimmed.length;
+    results.push({
+      text: transcript.slice(startOffset, endOffset),
+      startOffset,
+      endOffset,
+    });
+  }
+  return results;
 }
 
 /**
- * Evaluates a learner's Speaking Part 3 oral retelling transcript with span-grounded
- * quotes, active collocation transfer tracking, pace check, and honest epistemology.
+ * Evaluates a learner's Speaking Part 3 oral retelling transcript with strict
+ * duration/target/transfer verification (no fresh-prompt bypass), Unicode-safe
+ * exact sentence citations, and honest transcript-only speaking signals (no fake
+ * official Band or Writing Task Response claim).
  */
 export function evaluateSpeakingRetelling(
   input: IeltsSpeakingRetellingInput,
 ): IeltsSpeakingFeedbackReceipt {
   const trimmedTranscript = input.transcript.trim();
-  const paragraphs = [trimmedTranscript || "(No spoken response recorded)"];
   const wordCount = countEnglishWords(trimmedTranscript);
-  const paceStatus = classifySpeakingPace(input.durationSeconds);
+  const paceStatus = classifySpeakingPace(
+    input.durationSeconds,
+    input.seed.timeWindowSeconds,
+  );
+  const safeDurationSeconds =
+    Number.isFinite(input.durationSeconds) && input.durationSeconds > 0
+      ? input.durationSeconds
+      : null;
+
+  const paragraphs = trimmedTranscript ? [trimmedTranscript] : [];
   const memorizedTemplateHits = detectMemorizedTemplates(paragraphs);
   const hasStuffing = hasMemorizedTemplateStuffing(memorizedTemplateHits);
+  const hasLowEntropy = detectLowEntropyStuffing(paragraphs);
+  const sentences = extractGroundedSentences(trimmedTranscript);
 
-  const lowerTranscript = trimmedTranscript.toLowerCase();
+  // Match target collocations strictly via Unicode-safe regex on actual sentences.
   const transferredCollocations: string[] = [];
   const pendingCollocations: string[] = [];
+  const matchedSentenceByCollocation = new Map<string, GroundedSentence>();
 
   for (const collocation of input.seed.targetSpokenCollocations) {
-    if (lowerTranscript.includes(collocation.toLowerCase())) {
+    const regex = buildPhraseRegex(collocation);
+    const containingSentence = sentences.find((sentence) => regex.test(sentence.text));
+    if (containingSentence) {
       transferredCollocations.push(collocation);
+      matchedSentenceByCollocation.set(collocation, containingSentence);
     } else {
       pendingCollocations.push(collocation);
     }
   }
 
-  const hasSpokenSignpost = /\b(personally|to be honest|that said|on the other hand|in the long run|the main reason|admittedly|for instance|for example)\b/i.test(
-    trimmedTranscript,
-  );
-  const hasComplexClause = /\b(while|although|even though|whereas|which|because|if)\b/i.test(
-    trimmedTranscript,
-  );
-  const hasStiffWrittenConnector = /\b(furthermore|moreover|henceforth|in conclusion)\b/i.test(
-    trimmedTranscript,
-  );
+  const hasSpokenSignpost =
+    /\b(personally|to be honest|that said|on the other hand|in the long run|the main reason|admittedly|for instance|for example|on top of that)\b/iu.test(
+      trimmedTranscript,
+    );
+  const hasComplexClause =
+    /\b(while|although|even though|whereas|which|because|if|unless)\b/iu.test(
+      trimmedTranscript,
+    );
+  const hasStiffWrittenConnector =
+    /\b(furthermore|moreover|henceforth|in conclusion)\b/iu.test(trimmedTranscript);
 
-  const transferRatio =
-    input.seed.targetSpokenCollocations.length > 0
-      ? transferredCollocations.length / input.seed.targetSpokenCollocations.length
-      : 0;
+  // Build exact, Unicode-safe, sentence-aligned evidence quotes.
+  const evidenceQuotes: IeltsSpeakingEvidenceQuote[] = [];
 
-  const paceBonus = paceStatus === "on_target" ? 0.5 : -0.5;
-  const templatePenalty = hasStuffing ? 1.0 : memorizedTemplateHits.length > 0 ? 0.5 : 0;
-
-  const trBand = clampToIeltsBand(
-    6.0 + (wordCount >= 85 ? 0.5 : -0.5) + (paceStatus === "on_target" ? 0.5 : 0) - templatePenalty * 0.5,
-  );
-  const ccBand = clampToIeltsBand(
-    6.0 + (hasSpokenSignpost ? 0.5 : 0) + (hasStiffWrittenConnector ? -0.5 : 0.5) + paceBonus * 0.5,
-  );
-  const lrBand = clampToIeltsBand(
-    6.0 + (transferRatio >= 0.5 ? 1.0 : transferredCollocations.length > 0 ? 0.5 : 0) - templatePenalty,
-  );
-  const graBand = clampToIeltsBand(
-    6.0 + (hasComplexClause ? 0.5 : 0) + (wordCount >= 90 ? 0.5 : 0),
-  );
-
-  const scores: Record<IeltsCriterion, IeltsBandScore> = {
-    TR: trBand,
-    CC: ccBand,
-    LR: lrBand,
-    GRA: graBand,
-  };
-  const estimatedBand = computeOverallIeltsBand(scores);
-
-  const sentences = extractSentences(trimmedTranscript);
-  const firstSentence = sentences[0] ?? trimmedTranscript;
-  const secondSentence = sentences[1] ?? firstSentence;
-
-  const evidenceSpans: IeltsSpanEvidence[] = [];
-  if (firstSentence) {
-    const loc = locateGroundedExcerpt(trimmedTranscript, firstSentence);
-    evidenceSpans.push({
-      id: `${input.seed.seedId}-sp-tr`,
-      paragraphIndex: 0,
-      excerpt: firstSentence,
-      criterion: "TR",
+  if (sentences.length > 0) {
+    const firstSentence = sentences[0]!;
+    evidenceQuotes.push({
+      id: `${input.seed.seedId}-sp-fluency`,
+      signal: "fluencyCohesion",
+      quote: firstSentence.text,
+      startOffset: firstSentence.startOffset,
+      endOffset: firstSentence.endOffset,
       diagnosis:
-        wordCount >= 85 && paceStatus === "on_target"
-          ? "回应直接切入抽象政策权衡，展开长度符合 Part 3 追问预期。"
-          : paceStatus === "too_short"
-            ? "口语展开偏短（不足 60 秒），建议补一个具体城市或通勤者的例子。"
-            : "回应较长，注意在 60–90 秒内收束核心判断，避免原地重复。",
+        hasStiffWrittenConnector
+          ? "转写中带有明显书面连接词（如 Furthermore / In conclusion），口语中改用 That said / On top of that 会更自然。"
+          : hasSpokenSignpost && paceStatus === "on_target"
+            ? "开头直接切入政策权衡并具备清晰口语过渡线索，时长控制在目标窗口内。"
+            : paceStatus === "too_short"
+              ? "回应偏短（不足 60 秒），建议补一个具体城市或通勤者视角把观点说透。"
+              : paceStatus === "invalid_duration"
+                ? "未提供有效作答时长，无法确认节奏控制，请在 60–90 秒内重新计时复述。"
+                : "可进一步用口语路标词（Personally / That said / For instance）串联观点的正反两面。",
       upgradeRewrite:
-        "I think the main tension is that voters feel road improvements immediately, whereas high-capacity rail takes years to pay off.",
-      startOffset: loc?.startOffset,
-      endOffset: loc?.endOffset,
+        "Personally, I think the core tension is that drivers feel highway widening right away, whereas urban rail takes years to pay off.",
     });
+
+    // For lexicalTransfer quote: strictly cite the ACTUAL sentence containing a matched collocation!
+    if (transferredCollocations.length > 0) {
+      const firstMatchedExpression = transferredCollocations[0]!;
+      const matchedSentence = matchedSentenceByCollocation.get(firstMatchedExpression)!;
+      const inThisSentence = transferredCollocations.filter((expr) =>
+        buildPhraseRegex(expr).test(matchedSentence.text),
+      );
+      const loc = locateGroundedExcerpt(trimmedTranscript, matchedSentence.text);
+      evidenceQuotes.push({
+        id: `${input.seed.seedId}-sp-lexical`,
+        signal: "lexicalTransfer",
+        quote: matchedSentence.text,
+        matchedExpression: inThisSentence.join(" / "),
+        startOffset: loc?.startOffset ?? matchedSentence.startOffset,
+        endOffset: loc?.endOffset ?? matchedSentence.endOffset,
+        diagnosis: `该句已自然迁移写作目标表达（${inThisSentence.join(" / ")}），使口语论述更具体。`,
+        upgradeRewrite:
+          pendingCollocations.length > 0
+            ? `下一轮可继续把尚未用到的表达带入口语：${pendingCollocations.slice(0, 2).join(", ")}。`
+            : "继续保持这种把精准搭配融入自然口语句式的表达习惯，避免生硬背诵书面语。",
+      });
+    } else if (input.seed.targetSpokenCollocations.length > 0) {
+      const longestSentence = [...sentences].sort(
+        (a, b) => b.text.length - a.text.length,
+      )[0]!;
+      evidenceQuotes.push({
+        id: `${input.seed.seedId}-sp-lexical`,
+        signal: "lexicalTransfer",
+        quote: longestSentence.text,
+        startOffset: longestSentence.startOffset,
+        endOffset: longestSentence.endOffset,
+        diagnosis: "本次转写尚未命中任何目标活性搭配，建议结合提示词把写作二稿中的核心搭配自然说出来。",
+        upgradeRewrite: `可尝试自然带出：${input.seed.targetSpokenCollocations.slice(0, 2).join(", ")}。`,
+      });
+    }
   }
 
-  if (secondSentence) {
-    const loc = locateGroundedExcerpt(trimmedTranscript, secondSentence);
-    evidenceSpans.push({
-      id: `${input.seed.seedId}-sp-lr`,
-      paragraphIndex: 0,
-      excerpt: secondSentence,
-      criterion: "LR",
-      diagnosis:
-        transferredCollocations.length > 0
-          ? `已成功把写作中的核心搭配迁移到口语表达（${transferredCollocations.join(" / ")}）。`
-          : "写作二稿中的目标搭配尚未出现在口语复述中，建议下轮至少自然带出 2 组搭配。",
-      upgradeRewrite:
-        transferredCollocations.length > 0
-          ? "Keep using concrete phrases like long-term fiscal viability and per-capita emissions with natural spoken signposts."
-          : `Try weaving in: ${input.seed.targetSpokenCollocations.slice(0, 2).join(", ")}.`,
-      startOffset: loc?.startOffset,
-      endOffset: loc?.endOffset,
-    });
-  }
+  // Airtight mastery / verification gate — NEVER bypassed by freshPromptTransfer!
+  const targetCount = input.seed.targetSpokenCollocations.length;
+  const requiredTransferred = targetCount > 0 ? Math.min(2, targetCount) : 1;
+  const hasEnoughTargets = targetCount > 0;
+  const hasEnoughTransfer =
+    hasEnoughTargets && transferredCollocations.length >= requiredTransferred;
+  const hasValidPace = paceStatus === "on_target";
+  const hasEnoughWords = wordCount >= MIN_VERIFIED_SPEAKING_WORDS;
 
-  const meetsOralTransfer =
-    paceStatus === "on_target" &&
-    transferredCollocations.length >= Math.min(2, input.seed.targetSpokenCollocations.length) &&
+  const masteryQualified =
+    !input.assisted &&
+    hasValidPace &&
+    hasEnoughTargets &&
+    hasEnoughTransfer &&
+    hasEnoughWords &&
+    !hasStuffing &&
+    !hasLowEntropy &&
     !hasStiffWrittenConnector;
 
-  const epistemic = resolveIeltsEpistemicStatus({
-    draftVersion: 2,
-    assisted: input.assisted,
-    crossDraftTransferVerified: meetsOralTransfer,
-    freshPromptTransfer: input.freshPromptTransfer,
-    memorizedTemplateHits,
-    wordCount,
-    minVerifiedWords: 75,
-  });
+  const epistemicStatus = masteryQualified
+    ? "rubric_verified_evidence"
+    : "practice_feedback";
 
-  const epistemicReason =
-    epistemic.epistemicStatus === "rubric_verified_evidence"
-      ? "独立在 60–90 秒内完成 Part 3 追问复述，并自然迁移写作精修搭配，已确认为量规复核证据。"
-      : input.assisted
-        ? "本次口语复述开启了提示或稿件参照，仅作练习诊断反馈，不计入正式掌握度。"
-        : hasStuffing
-          ? "口语回答包含明显模板套话，需改为自然口语逻辑后重新复述。"
-          : paceStatus !== "on_target"
-            ? "时长未落在 60–90 秒目标区间内，本次保留为练习诊断反馈。"
-            : hasStiffWrittenConnector
-              ? "检测到偏生硬的书面连接词（如 Furthermore / In conclusion），改用自然口语衔接后可升级为量规复核证据。"
-              : "核心目标搭配迁移数量尚未达标，建议再完成一轮独立口语复述。";
+  let epistemicReason: string;
+  if (masteryQualified) {
+    epistemicReason = input.freshPromptTransfer
+      ? `独立在 ${input.seed.timeWindowSeconds.min}–${input.seed.timeWindowSeconds.max} 秒内完成新题口语迁移并命中 ${transferredCollocations.length} 组目标搭配，已确认为口语转写迁移证据（不含语音发音评分）。`
+      : `独立在 ${input.seed.timeWindowSeconds.min}–${input.seed.timeWindowSeconds.max} 秒内完成 Part 3 追问复述并命中 ${transferredCollocations.length} 组目标搭配，已确认为口语转写迁移证据（不含语音发音评分）。`;
+  } else if (input.assisted) {
+    epistemicReason = "本次口语复述参照了写作稿件或提示，仅作转写练习反馈，不计入正式掌握度。";
+  } else if (paceStatus === "invalid_duration") {
+    epistemicReason = "作答时长无效或缺失，无法确认是否落在 60–90 秒有效区间，本次仅作转写练习反馈。";
+  } else if (!hasValidPace) {
+    epistemicReason =
+      paceStatus === "too_short"
+        ? `当前作答时长（${safeDurationSeconds} 秒）低于 60–90 秒有效窗口，本次仅作转写练习反馈。`
+        : `当前作答时长（${safeDurationSeconds} 秒）超出 60–90 秒有效窗口，建议精炼观点后重新复述。`;
+  } else if (!hasEnoughTargets) {
+    epistemicReason = "当前题卡未配置目标口语迁移表达，无法完成迁移检核，仅作转写练习反馈。";
+  } else if (hasStuffing || hasLowEntropy) {
+    epistemicReason = "检测到模板套话或低信息量重复填充，本次仅作转写练习反馈，不计入正式掌握度。";
+  } else if (hasStiffWrittenConnector) {
+    epistemicReason = "检测到偏生硬的书面连接词（如 Furthermore / In conclusion），改用自然口语衔接后可重新复核。";
+  } else if (!hasEnoughWords) {
+    epistemicReason = `当前转写有效词数为 ${wordCount} 词，低于 60–90 秒口语展开门槛（${MIN_VERIFIED_SPEAKING_WORDS} 词），暂作转写练习反馈。`;
+  } else {
+    epistemicReason = `当前命中 ${transferredCollocations.length}/${targetCount} 组目标搭配（至少需自然迁移 ${requiredTransferred} 组），本次仅作转写练习反馈。`;
+  }
+
+  const transcriptSignals: Record<IeltsSpeakingSignalKey, IeltsSpeakingTranscriptSignal> = {
+    fluencyCohesion: {
+      key: "fluencyCohesion",
+      label: "流利与衔接线索",
+      rating:
+        hasStiffWrittenConnector || hasLowEntropy
+          ? "needs_work"
+          : hasSpokenSignpost && hasEnoughWords
+            ? "strong"
+            : "developing",
+      note: hasStiffWrittenConnector
+        ? "出现书面语连接词，建议改用 That said / On top of that 等自然口语路标词。"
+        : hasSpokenSignpost
+          ? "转写具备清晰的口语路标词与正反推进线索（不含声学停顿检测）。"
+          : "可补充 Personally / That said / For instance 等口语衔接词增强节奏。",
+    },
+    lexicalTransfer: {
+      key: "lexicalTransfer",
+      label: "词汇迁移",
+      rating: !hasEnoughTargets || transferredCollocations.length === 0
+        ? "needs_work"
+        : hasEnoughTransfer && !hasStuffing
+          ? "strong"
+          : "developing",
+      note: !hasEnoughTargets
+        ? "未设定目标迁移搭配，当前仅记录基础词汇使用。"
+        : transferredCollocations.length > 0
+          ? `已迁移 ${transferredCollocations.length}/${targetCount} 组写作二稿活性搭配。`
+          : `尚未命中目标搭配（0/${targetCount}），建议在下轮口语中自然带出 2 组以上。`,
+    },
+    syntacticVariety: {
+      key: "syntacticVariety",
+      label: "句式多样性",
+      rating:
+        hasComplexClause && hasEnoughWords && !hasLowEntropy
+          ? "strong"
+          : hasComplexClause
+            ? "developing"
+            : "needs_work",
+      note: hasComplexClause
+        ? "自然运用了让步或因果从句（While / Whereas / Because），口语句式有层次。"
+        : "句式偏短平，建议用 While / Even though 引出对比或让步视角。",
+    },
+    durationCompliance: {
+      key: "durationCompliance",
+      label: "时长达标度",
+      rating:
+        paceStatus === "on_target" && hasEnoughWords
+          ? "strong"
+          : paceStatus === "on_target"
+            ? "developing"
+            : "needs_work",
+      note:
+        paceStatus === "invalid_duration"
+          ? "时长无效，需记录有效的 60–90 秒计时结果。"
+          : paceStatus === "on_target"
+            ? `作答 ${safeDurationSeconds} 秒，落在 60–90 秒目标区间内。`
+            : paceStatus === "too_short"
+              ? `作答 ${safeDurationSeconds} 秒，低于 60 秒下限，观点展开偏简略。`
+              : `作答 ${safeDurationSeconds} 秒，超过 90 秒上限，建议收紧收尾。`,
+    },
+  };
 
   return {
     receiptId: `speaking-receipt-${input.seed.seedId}`,
     cartridgeId: IELTS_CARTRIDGE_ID,
     seedId: input.seed.seedId,
     taskMode: "speaking_part3",
-    estimatedBand,
-    epistemicStatus: epistemic.epistemicStatus,
-    countsTowardMastery: epistemic.countsTowardMastery,
+    feedbackMode: "transcript_practice_feedback",
+    pronunciationAssessed: false,
+    assessmentScopeNote: SPEAKING_SCOPE_NOTE,
+    epistemicStatus,
+    countsTowardMastery: masteryQualified,
+    masteryQualified,
     epistemicReason,
     wordCount,
-    durationSeconds: input.durationSeconds,
+    durationSeconds: safeDurationSeconds,
     paceStatus,
     transferredCollocations,
     pendingCollocations,
-    evidenceSpans,
+    evidenceQuotes,
     memorizedTemplateHits,
-    criteriaNotes: {
-      TR: {
-        band: trBand,
-        note:
-          wordCount >= 85
-            ? "能从个人体验上升到城市与公共预算层面展开分析。"
-            : "论点偏简短，可补充反方权衡或现实案例延展。",
-      },
-      CC: {
-        band: ccBand,
-        note: hasStiffWrittenConnector
-          ? "带有书面连接词痕迹，口语中改用 That said / On top of that 更自然。"
-          : hasSpokenSignpost
-            ? "口语衔接自然，观点推进有清晰的路标词。"
-            : "可加入 That said / For instance 等口语过渡词增强节奏。",
-      },
-      LR: {
-        band: lrBand,
-        note:
-          transferredCollocations.length > 0
-            ? `已迁移 ${transferredCollocations.length}/${input.seed.targetSpokenCollocations.length} 组目标搭配。`
-            : "尚未带出目标活性搭配，建议结合提示词再练一轮。",
-      },
-      GRA: {
-        band: graBand,
-        note: hasComplexClause
-          ? "自然运用了让步或因果复合句，口语句法有层次。"
-          : "句式偏单一，尝试用 While / Even though 引出对比视角。",
-      },
-    },
+    transcriptSignals,
     createdAt: input.createdAt ?? new Date().toISOString(),
   };
 }

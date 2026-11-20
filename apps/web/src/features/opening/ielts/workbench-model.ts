@@ -1,10 +1,13 @@
 import {
   IELTS_CRITERION_META,
+  locateGroundedExcerpt,
   type IeltsBandScore,
   type IeltsCriterion,
   type IeltsEpistemicStatus,
   type IeltsSpanEvidence,
   type IeltsSpeakingPaceStatus,
+  type IeltsSpeakingSignalKey,
+  type IeltsSpeakingSignalRating,
   type IeltsTransferStatus,
   type IeltsUpgradeCategory,
 } from "./domain-bridge";
@@ -116,14 +119,14 @@ export const EPISTEMIC_BADGE_META: Readonly<
 > = {
   practice_feedback: {
     writingLabel: "练习诊断反馈 · 不计入正式掌握度",
-    speakingLabel: "练习诊断反馈 · 不计入正式掌握度",
+    speakingLabel: "转写练习反馈 · 不计入正式掌握度",
     shortTag: "练习诊断",
     badgeClass: "border-warn/35 bg-warn-soft text-warn",
     dotClass: "bg-warn",
   },
   rubric_verified_evidence: {
     writingLabel: "量规复核证据 · 跨稿迁移已确认",
-    speakingLabel: "量规复核证据 · 口语迁移已确认",
+    speakingLabel: "口语转写迁移已确认 · 不含语音发音评分",
     shortTag: "量规复核",
     badgeClass: "border-accent/35 bg-accent-soft text-accent",
     dotClass: "bg-accent",
@@ -133,6 +136,10 @@ export const EPISTEMIC_BADGE_META: Readonly<
 export const SPEAKING_PACE_META: Readonly<
   Record<IeltsSpeakingPaceStatus, { readonly label: string; readonly badgeClass: string }>
 > = {
+  invalid_duration: {
+    label: "时长无效（需 60–90 秒）",
+    badgeClass: "border-danger/30 bg-danger-soft text-danger",
+  },
   too_short: {
     label: "时长偏短（低于 60 秒）",
     badgeClass: "border-warn/30 bg-warn-soft text-warn",
@@ -143,6 +150,30 @@ export const SPEAKING_PACE_META: Readonly<
   },
   over_time: {
     label: "略微超时（超过 90 秒）",
+    badgeClass: "border-warn/30 bg-warn-soft text-warn",
+  },
+};
+
+export const SPEAKING_SIGNAL_ORDER: readonly IeltsSpeakingSignalKey[] = [
+  "fluencyCohesion",
+  "lexicalTransfer",
+  "syntacticVariety",
+  "durationCompliance",
+];
+
+export const SPEAKING_SIGNAL_RATING_META: Readonly<
+  Record<IeltsSpeakingSignalRating, { readonly label: string; readonly badgeClass: string }>
+> = {
+  strong: {
+    label: "表现扎实",
+    badgeClass: "border-accent/30 bg-accent-soft text-accent",
+  },
+  developing: {
+    label: "逐步成形",
+    badgeClass: "border-line-strong bg-surface-2 text-text-2",
+  },
+  needs_work: {
+    label: "仍需打磨",
     badgeClass: "border-warn/30 bg-warn-soft text-warn",
   },
 };
@@ -163,7 +194,7 @@ export type ParagraphHighlightSegment =
 
 /**
  * Splits a paragraph into non-overlapping plain-text and span-highlighted segments
- * so criterion-linked quotes render cleanly inside the paper sheet.
+ * using Unicode-safe UTF-16 offset location (zero `.toLowerCase()` index drift).
  */
 export function segmentParagraphWithSpans(
   paragraph: string,
@@ -182,9 +213,9 @@ export function segmentParagraphWithSpans(
       ) {
         return { span, start: span.startOffset, end: span.endOffset };
       }
-      const idx = paragraph.toLowerCase().indexOf(span.excerpt.trim().toLowerCase());
-      if (idx === -1) return null;
-      return { span, start: idx, end: idx + span.excerpt.trim().length };
+      const located = locateGroundedExcerpt(paragraph, span.excerpt);
+      if (!located) return null;
+      return { span, start: located.startOffset, end: located.endOffset };
     })
     .filter(
       (entry): entry is { span: IeltsSpanEvidence; start: number; end: number } =>
@@ -201,7 +232,6 @@ export function segmentParagraphWithSpans(
 
   for (const item of eligible) {
     if (item.start < cursor) {
-      // Skip overlapping spans cleanly to keep DOM deterministic.
       continue;
     }
     if (item.start > cursor) {

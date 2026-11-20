@@ -47,22 +47,27 @@ describe("workbench-model helpers", () => {
     expect(formatTimeBox(2040, 2400)).toBe("34 / 40 分钟");
   });
 
-  it("segments a paragraph into plain and highlighted span slices while respecting criterion filters", () => {
-    const paragraph = IELTS_WRITING_SPEAKING_FIXTURE.draft2.paragraphs[1]!;
-    const p1Spans = [
-      ...IELTS_WRITING_SPEAKING_FIXTURE.draft2Receipt.criteria.CC.evidenceSpans,
-      ...IELTS_WRITING_SPEAKING_FIXTURE.draft2Receipt.criteria.LR.evidenceSpans,
-    ].filter((s) => s.paragraphIndex === 1);
+  it("segments a paragraph into plain and highlighted span slices without Unicode offset drift", () => {
+    const paragraph =
+      "İstanbul planners invested in urban rail to ALLEVIATE CHRONIC CONGESTION across dense districts.";
+    const spans = [
+      {
+        id: "istanbul-span",
+        paragraphIndex: 0,
+        excerpt: "alleviate chronic congestion",
+        criterion: "LR" as const,
+        diagnosis: "精准学术搭配。",
+        upgradeRewrite: "alleviate chronic urban congestion",
+      },
+    ];
 
-    const allSegments = segmentParagraphWithSpans(paragraph, p1Spans, "ALL");
-    expect(allSegments.some((s) => s.kind === "span")).toBe(true);
-    expect(allSegments.map((s) => s.text).join("")).toBe(paragraph);
+    const segments = segmentParagraphWithSpans(paragraph, spans, "ALL");
+    expect(segments.map((s) => s.text).join("")).toBe(paragraph);
+    const highlighted = segments.find((s) => s.kind === "span");
+    expect(highlighted?.text).toBe("ALLEVIATE CHRONIC CONGESTION");
 
-    const lrOnly = segmentParagraphWithSpans(paragraph, p1Spans, "LR");
-    const spanCriteria = lrOnly
-      .filter((s) => s.kind === "span")
-      .map((s) => s.span.criterion);
-    expect(spanCriteria).toEqual(["LR"]);
+    const filteredOut = segmentParagraphWithSpans(paragraph, spans, "TR");
+    expect(filteredOut).toEqual([{ kind: "text", text: paragraph }]);
   });
 });
 
@@ -70,7 +75,6 @@ describe("IeltsDraftCritiqueWorkbench", () => {
   it("renders Draft 2 verified evidence, switches to Draft 1 practice feedback and comparison view", async () => {
     await act(async () => root.render(createElement(IeltsDraftCritiqueWorkbench)));
 
-    // Default Draft 2 state
     expect(
       host.querySelector("[data-epistemic-badge]")?.getAttribute("data-epistemic-badge"),
     ).toBe("rubric_verified_evidence");
@@ -84,7 +88,6 @@ describe("IeltsDraftCritiqueWorkbench", () => {
     );
     expect(host.querySelectorAll("[data-span-id]").length).toBeGreaterThan(0);
 
-    // Switch to Draft 1
     const draft1Tab = [...host.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find(
       (b) => b.textContent === "一稿",
     )!;
@@ -100,7 +103,6 @@ describe("IeltsDraftCritiqueWorkbench", () => {
       "with the rapid development of",
     );
 
-    // Switch to Comparison View
     const compareTab = [...host.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find(
       (b) => b.textContent === "对照视图",
     )!;
@@ -108,6 +110,107 @@ describe("IeltsDraftCritiqueWorkbench", () => {
     expect(host.textContent).toContain("逐段改写对照");
     expect(host.textContent).toContain("一稿原文");
     expect(host.textContent).toContain("二稿改写");
+  });
+
+  it("supports WAI-ARIA tablist/tabpanel linkage and ArrowLeft/ArrowRight/Home/End keyboard navigation", async () => {
+    await act(async () => root.render(createElement(IeltsDraftCritiqueWorkbench)));
+
+    const tabs = [...host.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
+    expect(tabs).toHaveLength(3);
+    const [tabDraft1, tabDraft2, tabCompare] = tabs as [
+      HTMLButtonElement,
+      HTMLButtonElement,
+      HTMLButtonElement,
+    ];
+
+    // Initial active tab is Draft 2 with linked tabpanel.
+    expect(tabDraft2.getAttribute("aria-selected")).toBe("true");
+    expect(tabDraft2.tabIndex).toBe(0);
+    expect(tabDraft1.tabIndex).toBe(-1);
+    const panelInitial = host.querySelector('[role="tabpanel"]')!;
+    expect(panelInitial.id).toBe(tabDraft2.getAttribute("aria-controls"));
+    expect(panelInitial.getAttribute("aria-labelledby")).toBe(tabDraft2.id);
+
+    // IME composing events must not hijack tab switching.
+    tabDraft2.focus();
+    await act(async () => {
+      tabDraft2.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "ArrowRight",
+          bubbles: true,
+          cancelable: true,
+          isComposing: true,
+        }),
+      );
+    });
+    expect(tabDraft2.getAttribute("aria-selected")).toBe("true");
+
+    // ArrowRight moves to Compare tab and shifts focus + tabpanel linkage.
+    await act(async () => {
+      tabDraft2.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "ArrowRight",
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    expect(tabCompare.getAttribute("aria-selected")).toBe("true");
+    expect(document.activeElement).toBe(tabCompare);
+    const comparePanel = host.querySelector('[role="tabpanel"]')!;
+    expect(comparePanel.id).toBe(tabCompare.getAttribute("aria-controls"));
+    expect(comparePanel.getAttribute("aria-labelledby")).toBe(tabCompare.id);
+
+    // ArrowRight from last tab wraps to first tab (Draft 1).
+    await act(async () => {
+      tabCompare.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "ArrowRight",
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    expect(tabDraft1.getAttribute("aria-selected")).toBe("true");
+    expect(document.activeElement).toBe(tabDraft1);
+
+    // ArrowLeft from first tab wraps back to Compare tab.
+    await act(async () => {
+      tabDraft1.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "ArrowLeft",
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    expect(tabCompare.getAttribute("aria-selected")).toBe("true");
+    expect(document.activeElement).toBe(tabCompare);
+
+    // Home jumps to first tab, End jumps to last tab.
+    await act(async () => {
+      tabCompare.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Home",
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    expect(tabDraft1.getAttribute("aria-selected")).toBe("true");
+    expect(document.activeElement).toBe(tabDraft1);
+
+    await act(async () => {
+      tabDraft1.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "End",
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    expect(tabCompare.getAttribute("aria-selected")).toBe("true");
+    expect(document.activeElement).toBe(tabCompare);
   });
 
   it("downgrades epistemic status to practice_feedback when inline revision introduces memorized clichés", async () => {
@@ -146,11 +249,29 @@ describe("IeltsDraftCritiqueWorkbench", () => {
 });
 
 describe("IeltsSpeakingTransferCard", () => {
-  it("renders Part 3 follow-up prompt and updates feedback honestly when re-evaluating oral response", async () => {
+  it("presents honest transcript practice feedback without fake official Band or Writing Task Response, and enforces strict pace & transfer gates", async () => {
     const onEvaluated = vi.fn();
     await act(async () =>
       root.render(createElement(IeltsSpeakingTransferCard, { onEvaluated })),
     );
+
+    // Must NOT claim an official Band score or Writing's Task Response dimension
+    expect(host.querySelector("[data-speaking-band]")).toBeNull();
+    expect(host.textContent).not.toContain("Task Response");
+    expect(host.textContent).not.toContain("任务回应");
+    expect(
+      host.querySelector("[data-speaking-mode]")?.textContent,
+    ).toContain("转写练习反馈 / 迁移检核");
+    expect(
+      host.querySelector("[data-pronunciation-disclaimer]")?.textContent,
+    ).toContain("不含真实语音发音");
+
+    // All 4 honest transcript signals rendered
+    expect(host.querySelectorAll("[data-speaking-signal]")).toHaveLength(4);
+    expect(host.textContent).toContain("流利与衔接线索");
+    expect(host.textContent).toContain("词汇迁移");
+    expect(host.textContent).toContain("句式多样性");
+    expect(host.textContent).toContain("时长达标度");
 
     expect(
       host
@@ -164,7 +285,7 @@ describe("IeltsSpeakingTransferCard", () => {
       host.querySelectorAll('[data-collocation-state="transferred"]').length,
     ).toBeGreaterThanOrEqual(4);
 
-    // Edit to a short response and lower duration to 35s
+    // Short 15-second answer downgrades honestly to practice_feedback
     const textarea = host.querySelector<HTMLTextAreaElement>(
       '[aria-label="口语复述记录输入框"]',
     )!;
@@ -177,7 +298,7 @@ describe("IeltsSpeakingTransferCard", () => {
         textarea,
         "I think trains are better for cities because they alleviate chronic congestion.",
       );
-      setNativeInputValue(durationInput, "35");
+      setNativeInputValue(durationInput, "15");
     });
 
     const evalBtn = [...host.querySelectorAll<HTMLButtonElement>("button")].find(

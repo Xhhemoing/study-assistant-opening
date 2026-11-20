@@ -27,20 +27,41 @@ const STOP_WORDS = new Set([
   "can", "not", "but", "all", "one", "two", "its", "our", "you", "your",
 ]);
 
+const CLAUSE_VERB_CUE =
+  /\b(is|are|was|were|be|been|being|am|can|could|may|might|must|shall|should|will|would|do|does|did|have|has|had|make|makes|made|offer|offers|offered|help|helps|helped|deliver|delivers|delivered|address|addresses|addressed|encourage|encourages|encouraged|undermine|undermines|undermined|resolve|resolves|resolved|require|requires|required|support|supports|supported|reduce|reduces|reduced|improve|improves|improved|provide|provides|provided|create|creates|created|allow|allows|allowed|show|shows|showed|suggest|suggests|contend|believe|argue|think|claim|need|needs|face|faces|lack|lacks|anchor|anchors|shift|shifts|ease|eases|cut|cuts|lower|lowers|curb|curbs|build|builds|spend|spends|invest|invests|expand|expands|rely|relies|trigger|triggers|sustain|sustains|prioritise|prioritises|prioritize|prioritizes|remain|remains|become|becomes|became|dominate|dominates|transport|transports|pair|pairs|pairing)\b/iu;
+
 function normalizeText(text: string): string {
   return text.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+function normalizeForEquality(paragraphs: readonly string[]): string {
+  return paragraphs
+    .map((p) => p.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, "").replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .join("\n");
 }
 
 function escapeRegExp(literal: string): string {
   return literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+function tokenizeWords(text: string): string[] {
+  return (text.toLowerCase().match(/[\p{L}\p{N}]+(?:['’-][\p{L}\p{N}]+)*/gu) ?? []);
+}
+
+function splitSentences(paragraph: string): string[] {
+  const parts = paragraph
+    .split(/(?<=[.!?])\s+/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  return parts.length > 0 ? parts : paragraph.trim() ? [paragraph.trim()] : [];
+}
+
 function matchesPattern(text: string, pattern: string): boolean {
-  const trimmed = pattern.trim().toLowerCase();
+  const trimmed = pattern.trim();
   if (!trimmed) return false;
-  // Multi-word phrases match across flexible whitespace; single words enforce word boundaries.
   const parts = trimmed.split(/\s+/).map(escapeRegExp);
-  const regex = new RegExp(`\\b${parts.join("\\s+")}\\b`, "i");
+  const regex = new RegExp(`(?<![\\p{L}\\p{N}])${parts.join("\\s+")}(?![\\p{L}\\p{N}])`, "iu");
   return regex.test(text);
 }
 
@@ -70,8 +91,152 @@ function findMatchedPatterns(
 }
 
 function extractMeaningfulTerms(text: string): Set<string> {
-  const words = text.toLowerCase().match(/[a-z]{4,}(?:-[a-z]{2,})*/g) ?? [];
+  const words = text.toLowerCase().match(/[\p{L}]{4,}(?:-[\p{L}]{2,})*/gu) ?? [];
   return new Set(words.filter((word) => !STOP_WORDS.has(word)));
+}
+
+function isLowEntropySentence(sentence: string): boolean {
+  const words = tokenizeWords(sentence);
+  if (words.length < 8) return false;
+  const unique = new Set(words);
+  if (unique.size / words.length < 0.45) return true;
+
+  const contentCounts = new Map<string, number>();
+  for (const w of words) {
+    if (w.length < 3 || STOP_WORDS.has(w)) continue;
+    const count = (contentCounts.get(w) ?? 0) + 1;
+    contentCounts.set(w, count);
+    if (count >= 4 || (words.length >= 12 && count / words.length >= 0.25)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Detects repetitive filler padding (word spam, low lexical diversity, repeated
+ * 3-grams, or copy-pasted identical sentences) across the draft or within any paragraph.
+ */
+export function detectLowEntropyStuffing(paragraphs: readonly string[]): boolean {
+  const fullText = paragraphs.join(" ");
+  const allWords = tokenizeWords(fullText);
+  if (allWords.length >= 60) {
+    const overallTtr = new Set(allWords).size / allWords.length;
+    if (overallTtr < 0.36) return true;
+  }
+
+  // Repeated 3-gram stuffing across essay or inside any paragraph.
+  const globalTrigrams = new Map<string, number>();
+  const seenSentences = new Map<string, number>();
+
+  for (const paragraph of paragraphs) {
+    const words = tokenizeWords(paragraph);
+    if (words.length >= 18) {
+      const paraTtr = new Set(words).size / words.length;
+      if (paraTtr < 0.38) return true;
+    }
+
+    // Single content-word spam inside a paragraph.
+    const paraCounts = new Map<string, number>();
+    for (const w of words) {
+      if (w.length < 3 || STOP_WORDS.has(w)) continue;
+      const c = (paraCounts.get(w) ?? 0) + 1;
+      paraCounts.set(w, c);
+      if (c >= 6 || (words.length >= 12 && c / words.length >= 0.22)) {
+        return true;
+      }
+    }
+
+    const paraTrigrams = new Map<string, number>();
+    for (let i = 0; i <= words.length - 3; i += 1) {
+      const trigram = `${words[i]} ${words[i + 1]} ${words[i + 2]}`;
+      const pCount = (paraTrigrams.get(trigram) ?? 0) + 1;
+      paraTrigrams.set(trigram, pCount);
+      if (pCount >= 3) return true;
+
+      const gCount = (globalTrigrams.get(trigram) ?? 0) + 1;
+      globalTrigrams.set(trigram, gCount);
+      if (gCount >= 4) return true;
+    }
+
+    for (const sentence of splitSentences(paragraph)) {
+      const sWords = tokenizeWords(sentence);
+      if (sWords.length >= 5) {
+        const key = sWords.join(" ");
+        const sCount = (seenSentences.get(key) ?? 0) + 1;
+        seenSentences.set(key, sCount);
+        if (sCount >= 2) return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+function isMechanicalKeywordSentence(
+  sentence: string,
+  allTargetPatterns: readonly string[],
+): boolean {
+  const words = tokenizeWords(sentence);
+  if (words.length < 7) return true;
+  if (!CLAUSE_VERB_CUE.test(sentence)) return true;
+  if (isLowEntropySentence(sentence)) return true;
+
+  // Measure how many words of this sentence are just concatenated target expressions.
+  const matchedPatterns = allTargetPatterns.filter((pattern) =>
+    matchesPattern(sentence, pattern),
+  );
+  if (matchedPatterns.length === 0) return false;
+
+  const matchedWordCount = matchedPatterns.reduce(
+    (sum, pattern) => sum + tokenizeWords(pattern).length,
+    0,
+  );
+  const nonTargetWords = Math.max(0, words.length - matchedWordCount);
+
+  if (matchedPatterns.length >= 3 && matchedWordCount / words.length >= 0.45) {
+    return true;
+  }
+  if (matchedPatterns.length >= 2 && nonTargetWords <= 4) {
+    return true;
+  }
+  return false;
+}
+
+function assessSubstantiveRevision(
+  draft1: IeltsEssayDraft,
+  draft2: IeltsEssayDraft,
+  paragraphDiffs: readonly IeltsParagraphDiff[],
+): boolean {
+  const norm1 = normalizeForEquality(draft1.paragraphs);
+  const norm2 = normalizeForEquality(draft2.paragraphs);
+  if (!norm2 || norm1 === norm2) return false;
+
+  const changedParagraphs = paragraphDiffs.filter((d) => d.status !== "unchanged").length;
+  if (changedParagraphs === 0) return false;
+
+  const terms1 = extractMeaningfulTerms(draft1.paragraphs.join(" "));
+  const terms2 = extractMeaningfulTerms(draft2.paragraphs.join(" "));
+  const newlyAddedTerms = [...terms2].filter((t) => !terms1.has(t));
+  const removedTerms = [...terms1].filter((t) => !terms2.has(t));
+  const unionSize = new Set([...terms1, ...terms2]).size;
+  const jaccardDistance =
+    unionSize > 0 ? (newlyAddedTerms.length + removedTerms.length) / unionSize : 0;
+
+  const sentences1 = new Set(
+    draft1.paragraphs.flatMap(splitSentences).map((s) => normalizeText(s)),
+  );
+  const sentences2 = draft2.paragraphs.flatMap(splitSentences);
+  const rewrittenSentences = sentences2.filter(
+    (s) => !sentences1.has(normalizeText(s)),
+  ).length;
+  const rewrittenRatio = sentences2.length > 0 ? rewrittenSentences / sentences2.length : 0;
+
+  // Require real content/syntactic rewrite, not a tiny 1-2 word tweak or identical resubmission.
+  return (
+    newlyAddedTerms.length >= 12 &&
+    (jaccardDistance >= 0.18 || (changedParagraphs >= 2 && rewrittenRatio >= 0.25))
+  );
 }
 
 export function diffEssayParagraphs(
@@ -126,6 +291,8 @@ export type AnalyzeCrossDraftTransferInput = {
 /**
  * Deterministic cross-draft analyzer comparing Draft 1 -> Draft 2+ across
  * collocations, syntactic structures, cohesive devices, and counterargument depth.
+ * Guards against empty targets, unchanged/trivial resubmissions, low-entropy filler
+ * stuffing, and mechanical keyword-list pasting.
  */
 export function analyzeCrossDraftTransfer(
   input: AnalyzeCrossDraftTransferInput,
@@ -136,10 +303,19 @@ export function analyzeCrossDraftTransfer(
   );
   const memorizedTemplateHits = detectMemorizedTemplates(input.draft2.paragraphs);
   const hasStuffing = hasMemorizedTemplateStuffing(memorizedTemplateHits);
+  const hasLowEntropyStuffing = detectLowEntropyStuffing(input.draft2.paragraphs);
+  const hasSubstantiveRevision = assessSubstantiveRevision(
+    input.draft1,
+    input.draft2,
+    paragraphDiffs,
+  );
+
+  const allTargetPatterns = input.targets.flatMap((t) => t.targetPatterns);
+  let hasMechanicalKeywordPaste = false;
 
   const items: IeltsUpgradeTransferItem[] = input.targets.map((target) => {
     const baseHit = findMatchedPatterns(input.draft1.paragraphs, target.targetPatterns);
-    const revHit = findMatchedPatterns(input.draft2.paragraphs, target.targetPatterns);
+    const rawRevHit = findMatchedPatterns(input.draft2.paragraphs, target.targetPatterns);
     const baseWeak = findMatchedPatterns(
       input.draft1.paragraphs,
       target.weakBaselinePatterns,
@@ -153,28 +329,62 @@ export function analyzeCrossDraftTransfer(
       target.clichePatterns,
     );
 
+    // Verify each revised match appears in a real, non-filler complete sentence context.
+    const contextualMatched = new Set<string>();
+    const contextualParagraphs = new Set<number>();
+    let matchedOnlyInMechanicalPaste = false;
+
+    if (rawRevHit.matched.length > 0) {
+      input.draft2.paragraphs.forEach((paragraph, paragraphIndex) => {
+        const sentences = splitSentences(paragraph);
+        for (const pattern of target.targetPatterns) {
+          for (const sentence of sentences) {
+            if (!matchesPattern(sentence, pattern)) continue;
+            if (isMechanicalKeywordSentence(sentence, allTargetPatterns)) {
+              hasMechanicalKeywordPaste = true;
+            } else {
+              contextualMatched.add(pattern);
+              contextualParagraphs.add(paragraphIndex);
+            }
+          }
+        }
+      });
+      if (contextualMatched.size === 0) {
+        matchedOnlyInMechanicalPaste = true;
+      }
+    }
+
+    const revMatchedList = [...contextualMatched];
+    const revParagraphList = [...contextualParagraphs].sort((a, b) => a - b);
+
     let status: IeltsTransferStatus;
     let explanation: string;
 
     if (revCliche.matched.length > 0) {
       status = "memorized_cliche";
       explanation = `二稿中出现了模板套话（${revCliche.matched.join(" / ")}），需替换为贴合题干语境的原创表达。`;
-    } else if (baseHit.matched.length > 0 && revHit.matched.length === 0) {
+    } else if (baseHit.matched.length > 0 && rawRevHit.matched.length === 0) {
       status = "regressed";
       explanation = `一稿原有的目标表达（${baseHit.matched.join(" / ")}）在改写中丢失，建议恢复并完善。`;
     } else if (
       revWeak.matched.length > baseWeak.matched.length &&
-      revHit.matched.length === 0
+      revMatchedList.length === 0
     ) {
       status = "regressed";
       explanation = `二稿新增了偏笼统或薄弱表达（${revWeak.matched.join(" / ")}），尚未替换为目标升级结构。`;
-    } else if (revHit.matched.length > 0) {
+    } else if (matchedOnlyInMechanicalPaste) {
+      status = "pending";
+      explanation = `仅检测到目标词组的机械拼贴或重复填充句（${rawRevHit.matched.join(" / ")}），需融入完整论证语境后再复核。`;
+    } else if (revMatchedList.length > 0 && !hasSubstantiveRevision) {
+      status = "pending";
+      explanation = `当前草稿相对一稿缺少实质性改写，暂不计作有效跨草稿迁移。`;
+    } else if (revMatchedList.length > 0) {
       status = "transferred";
       const clearedWeak =
         baseWeak.matched.length > 0 && revWeak.matched.length < baseWeak.matched.length;
       explanation = clearedWeak
-        ? `已成功替换为目标表达（${revHit.matched.join(" / ")}），并清除了原稿薄弱说法。`
-        : `已在第 ${revHit.paragraphIndices.map((idx) => idx + 1).join("、")} 段自然运用目标表达（${revHit.matched.join(" / ")}）。`;
+        ? `已成功替换为目标表达（${revMatchedList.join(" / ")}），并清除了原稿薄弱说法。`
+        : `已在第 ${revParagraphList.map((idx) => idx + 1).join("、")} 段自然运用目标表达（${revMatchedList.join(" / ")}）。`;
     } else {
       status = "pending";
       explanation = `尚未在改写稿中观察到目标表达，建议按提示在相关段落尝试改写。`;
@@ -187,8 +397,8 @@ export function analyzeCrossDraftTransfer(
       label: target.label,
       status,
       baselineMatched: baseHit.matched,
-      revisedMatched: revHit.matched,
-      matchedParagraphIndices: revHit.paragraphIndices,
+      revisedMatched: revMatchedList,
+      matchedParagraphIndices: revParagraphList,
       clicheHits: revCliche.matched,
       guidance: target.guidance,
       explanation,
@@ -204,8 +414,27 @@ export function analyzeCrossDraftTransfer(
   const totalTargets = items.length;
   const transferRate = totalTargets > 0 ? transferredCount / totalTargets : 0;
 
-  const minimumTransferred = totalTargets > 0 ? Math.max(1, Math.ceil(totalTargets * 0.5)) : 0;
+  let disqualificationReason: string | undefined;
+  if (totalTargets === 0) {
+    disqualificationReason = "当前未配置目标迁移项，无法确认跨草稿迁移，暂作为练习诊断反馈。";
+  } else if (!hasSubstantiveRevision) {
+    disqualificationReason = "修订稿相对初稿缺少实质性句法或内容改写，仅保留为练习诊断反馈，不计入正式掌握度。";
+  } else if (hasLowEntropyStuffing) {
+    disqualificationReason = "检测到低信息量重复填充文本，已降级为练习诊断反馈，不计入正式掌握度。";
+  } else if (hasMechanicalKeywordPaste) {
+    disqualificationReason = "检测到脱离完整论证句境的机械关键词拼贴，已降级为练习诊断反馈，不计入正式掌握度。";
+  } else if (hasStuffing || memorizedClicheCount > 0) {
+    disqualificationReason = "检测到模板套话堆砌，需替换为贴合语境的原创表达后才可计入量规复核证据。";
+  } else if (regressedCount > 0) {
+    disqualificationReason = "检测到部分维度相对一稿出现回退，需修复后再确认正式迁移。";
+  }
+
+  const minimumTransferred = Math.max(1, Math.ceil(totalTargets * 0.5));
   const meetsCrossDraftVerification =
+    totalTargets > 0 &&
+    hasSubstantiveRevision &&
+    !hasLowEntropyStuffing &&
+    !hasMechanicalKeywordPaste &&
     !hasStuffing &&
     regressedCount === 0 &&
     memorizedClicheCount === 0 &&
@@ -225,7 +454,12 @@ export function analyzeCrossDraftTransfer(
       pendingCount,
       transferRate,
       hasMemorizedStuffing: hasStuffing,
+      hasSubstantiveRevision,
+      hasLowEntropyStuffing,
+      hasMechanicalKeywordPaste,
       meetsCrossDraftVerification,
+      masteryQualified: meetsCrossDraftVerification,
+      disqualificationReason,
     },
   };
 }
@@ -236,7 +470,6 @@ function firstSentenceSnippet(paragraph: string, maxChars = 130): string {
   const match = trimmed.match(/^[^.!?]+[.!?]?/);
   const sentence = (match ? match[0] : trimmed).trim();
   if (sentence.length <= maxChars) return sentence;
-  // Slice on a word boundary so the snippet stays an exact substring of the paragraph.
   const sliced = sentence.slice(0, maxChars);
   const lastSpace = sliced.lastIndexOf(" ");
   return (lastSpace > 40 ? sliced.slice(0, lastSpace) : sliced).trim();
@@ -292,7 +525,17 @@ export function evaluateRevisedDraftDeterministically(
   const paragraphs = nonEmptyParagraphs.length > 0 ? nonEmptyParagraphs : ["(Empty draft)"];
   const wordCount = countDraftWords(paragraphs);
   const templateHits = transferReport.memorizedTemplateHits;
-  const templatePenalty = templateHits.some((h) => h.severity === "blocking") ? 1.0 : templateHits.length > 0 ? 0.5 : 0;
+  const templatePenalty =
+    templateHits.some((h) => h.severity === "blocking") || templateHits.length >= 2
+      ? 1.0
+      : templateHits.length > 0
+        ? 0.5
+        : 0;
+  const stuffingPenalty =
+    transferReport.summary.hasLowEntropyStuffing ||
+    transferReport.summary.hasMechanicalKeywordPaste
+      ? 1.0
+      : 0;
 
   const criterionTransfers = (criterion: "TR" | "CC" | "LR" | "GRA") =>
     transferReport.items.filter((item) => item.criterion === criterion);
@@ -302,9 +545,23 @@ export function evaluateRevisedDraftDeterministically(
     const transferred = related.filter((r) => r.status === "transferred").length;
     const regressed = related.filter((r) => r.status === "regressed").length;
     const cliches = related.filter((r) => r.status === "memorized_cliche").length;
-    const lengthBonus = wordCount >= 240 ? 0.5 : wordCount < 160 ? -0.5 : 0;
-    const base = 6.0 + lengthBonus + transferred * 0.5 - regressed * 0.5 - cliches * 0.5;
-    const penalized = criterion === "LR" || criterion === "TR" ? base - templatePenalty : base - templatePenalty * 0.5;
+    const lengthBonus =
+      wordCount >= 240 && !transferReport.summary.hasLowEntropyStuffing
+        ? 0.5
+        : wordCount < 160
+          ? -0.5
+          : 0;
+    const base =
+      6.0 +
+      lengthBonus +
+      transferred * 0.5 -
+      regressed * 0.5 -
+      cliches * 0.5 -
+      stuffingPenalty;
+    const penalized =
+      criterion === "LR" || criterion === "TR"
+        ? base - templatePenalty
+        : base - templatePenalty * 0.5;
     return clampToIeltsBand(penalized);
   };
 
@@ -431,13 +688,26 @@ export function evaluateRevisedDraftDeterministically(
     },
   ];
 
+  // Guard freshPromptTransfer too against empty targets or low-entropy / mechanical stuffing.
+  const canQualifyFreshPrompt =
+    Boolean(input.freshPromptTransfer) &&
+    transferReport.summary.totalTargets > 0 &&
+    !transferReport.summary.hasLowEntropyStuffing &&
+    !transferReport.summary.hasMechanicalKeywordPaste &&
+    transferReport.summary.transferredCount >=
+      Math.max(1, Math.ceil(transferReport.summary.totalTargets * 0.5));
+
   const validated = createValidatedRubricReceipt({
     receiptId: input.receiptId,
     taskMode: "writing_task2",
     draft: { ...input.revisedDraft, paragraphs },
     assessments,
     crossDraftTransferVerified: transferReport.summary.meetsCrossDraftVerification,
-    freshPromptTransfer: input.freshPromptTransfer,
+    freshPromptTransfer: canQualifyFreshPrompt,
+    disqualificationReason:
+      input.revisedDraft.version >= 2
+        ? transferReport.summary.disqualificationReason
+        : undefined,
     createdAt: input.createdAt,
   });
 

@@ -85,6 +85,8 @@ export type IeltsMemorizedTemplateHit = {
   readonly paragraphIndex: number;
   readonly severity: "warning" | "blocking";
   readonly advice: string;
+  readonly startOffset?: number;
+  readonly endOffset?: number;
 };
 
 export type IeltsRubricReceipt = {
@@ -98,6 +100,7 @@ export type IeltsRubricReceipt = {
   readonly criteria: Readonly<Record<IeltsCriterion, IeltsCriterionAssessment>>;
   readonly epistemicStatus: IeltsEpistemicStatus;
   readonly countsTowardMastery: boolean;
+  readonly masteryQualified: boolean;
   readonly epistemicReason: string;
   readonly evidenceSource: IeltsEvidenceSourceKind;
   readonly memorizedTemplateFlags: readonly IeltsMemorizedTemplateHit[];
@@ -179,7 +182,12 @@ export type IeltsCrossDraftTransferSummary = {
   readonly pendingCount: number;
   readonly transferRate: number;
   readonly hasMemorizedStuffing: boolean;
+  readonly hasSubstantiveRevision: boolean;
+  readonly hasLowEntropyStuffing: boolean;
+  readonly hasMechanicalKeywordPaste: boolean;
   readonly meetsCrossDraftVerification: boolean;
+  readonly masteryQualified: boolean;
+  readonly disqualificationReason?: string;
 };
 
 export type IeltsCrossDraftTransferReport = {
@@ -223,26 +231,59 @@ export type IeltsSpeakingRetellingInput = {
   readonly createdAt?: string;
 };
 
-export type IeltsSpeakingPaceStatus = "too_short" | "on_target" | "over_time";
+export type IeltsSpeakingPaceStatus =
+  | "invalid_duration"
+  | "too_short"
+  | "on_target"
+  | "over_time";
+
+export type IeltsSpeakingSignalKey =
+  | "fluencyCohesion"
+  | "lexicalTransfer"
+  | "syntacticVariety"
+  | "durationCompliance";
+
+export type IeltsSpeakingSignalRating = "strong" | "developing" | "needs_work";
+
+export type IeltsSpeakingTranscriptSignal = {
+  readonly key: IeltsSpeakingSignalKey;
+  readonly label: string;
+  readonly rating: IeltsSpeakingSignalRating;
+  readonly note: string;
+};
+
+export type IeltsSpeakingEvidenceQuote = {
+  readonly id: string;
+  readonly signal: IeltsSpeakingSignalKey;
+  readonly quote: string;
+  readonly matchedExpression?: string;
+  readonly startOffset: number;
+  readonly endOffset: number;
+  readonly diagnosis: string;
+  readonly upgradeRewrite: string;
+};
 
 export type IeltsSpeakingFeedbackReceipt = {
   readonly receiptId: string;
   readonly cartridgeId: typeof IELTS_CARTRIDGE_ID;
   readonly seedId: string;
   readonly taskMode: "speaking_part3";
-  readonly estimatedBand: IeltsBandScore;
+  readonly feedbackMode: "transcript_practice_feedback";
+  readonly pronunciationAssessed: false;
+  readonly assessmentScopeNote: string;
   readonly epistemicStatus: IeltsEpistemicStatus;
   readonly countsTowardMastery: boolean;
+  readonly masteryQualified: boolean;
   readonly epistemicReason: string;
   readonly wordCount: number;
-  readonly durationSeconds: number;
+  readonly durationSeconds: number | null;
   readonly paceStatus: IeltsSpeakingPaceStatus;
   readonly transferredCollocations: readonly string[];
   readonly pendingCollocations: readonly string[];
-  readonly evidenceSpans: readonly IeltsSpanEvidence[];
+  readonly evidenceQuotes: readonly IeltsSpeakingEvidenceQuote[];
   readonly memorizedTemplateHits: readonly IeltsMemorizedTemplateHit[];
-  readonly criteriaNotes: Readonly<
-    Record<IeltsCriterion, { readonly band: IeltsBandScore; readonly note: string }>
+  readonly transcriptSignals: Readonly<
+    Record<IeltsSpeakingSignalKey, IeltsSpeakingTranscriptSignal>
   >;
   readonly createdAt: string;
 };

@@ -21,10 +21,14 @@ export type {
   IeltsRubricValidationError,
   IeltsRubricValidationResult,
   IeltsSpanEvidence,
+  IeltsSpeakingEvidenceQuote,
   IeltsSpeakingFeedbackReceipt,
   IeltsSpeakingPaceStatus,
   IeltsSpeakingPart3Seed,
   IeltsSpeakingRetellingInput,
+  IeltsSpeakingSignalKey,
+  IeltsSpeakingSignalRating,
+  IeltsSpeakingTranscriptSignal,
   IeltsTaskMode,
   IeltsTransferStatus,
   IeltsUpgradeCategory,
@@ -55,6 +59,7 @@ export type {
 
 export {
   analyzeCrossDraftTransfer,
+  detectLowEntropyStuffing,
   diffEssayParagraphs,
   evaluateRevisedDraftDeterministically,
 } from "./transfer";

@@ -2,17 +2,16 @@
 
 import { useState } from "react";
 import {
-  IELTS_CRITERIA,
   evaluateSpeakingRetelling,
   type IeltsSpeakingFeedbackReceipt,
   type IeltsSpeakingPart3Seed,
 } from "./domain-bridge";
 import { IELTS_WRITING_SPEAKING_FIXTURE } from "./ielts-fixtures";
 import {
-  CRITERION_STYLES,
   EPISTEMIC_BADGE_META,
   SPEAKING_PACE_META,
-  formatBandScore,
+  SPEAKING_SIGNAL_ORDER,
+  SPEAKING_SIGNAL_RATING_META,
 } from "./workbench-model";
 
 export type IeltsSpeakingTransferCardProps = {
@@ -31,7 +30,7 @@ export function IeltsSpeakingTransferCard({
   onEvaluated,
 }: IeltsSpeakingTransferCardProps) {
   const [transcript, setTranscript] = useState(initialTranscript);
-  const [durationSeconds, setDurationSeconds] = useState(initialDurationSeconds);
+  const [durationInput, setDurationInput] = useState(String(initialDurationSeconds));
   const [assisted, setAssisted] = useState(false);
   const [receipt, setReceipt] = useState<IeltsSpeakingFeedbackReceipt>(initialReceipt);
 
@@ -40,10 +39,12 @@ export function IeltsSpeakingTransferCard({
 
   function handleEvaluate() {
     if (!transcript.trim()) return;
+    const parsedDuration =
+      durationInput.trim() === "" ? Number.NaN : Number(durationInput);
     const nextReceipt = evaluateSpeakingRetelling({
       seed,
       transcript,
-      durationSeconds,
+      durationSeconds: parsedDuration,
       assisted,
     });
     setReceipt(nextReceipt);
@@ -69,10 +70,10 @@ export function IeltsSpeakingTransferCard({
 
         <div className="flex flex-wrap items-center gap-2">
           <span
-            data-speaking-band
-            className="rounded-tile border border-line bg-surface-2 px-3 py-1 text-ui font-semibold tabular-nums text-text"
+            data-speaking-mode={receipt.feedbackMode}
+            className="rounded-tile border border-line bg-surface-2 px-3 py-1 text-meta font-medium text-text"
           >
-            Band {formatBandScore(receipt.estimatedBand)}
+            转写练习反馈 / 迁移检核
           </span>
           <span
             data-speaking-epistemic={receipt.epistemicStatus}
@@ -86,6 +87,14 @@ export function IeltsSpeakingTransferCard({
           </span>
         </div>
       </header>
+
+      {/* Honest Scope Disclosure */}
+      <p
+        data-pronunciation-disclaimer
+        className="rounded-ctl border border-line bg-surface-2/70 px-3.5 py-2.5 text-meta text-text-2"
+      >
+        {receipt.assessmentScopeNote}
+      </p>
 
       {/* Examiner Follow-Up Prompt */}
       <div className="space-y-2 rounded-tile border border-line bg-bg p-4">
@@ -160,12 +169,10 @@ export function IeltsSpeakingTransferCard({
               <input
                 type="number"
                 aria-label="口语作答时长秒数"
-                min={15}
+                min={1}
                 max={180}
-                value={durationSeconds}
-                onChange={(event) =>
-                  setDurationSeconds(Math.max(15, Number(event.target.value) || 60))
-                }
+                value={durationInput}
+                onChange={(event) => setDurationInput(event.target.value)}
                 className="w-20 rounded-ctl border border-line-strong bg-surface px-2.5 py-1 text-center tabular-nums text-text"
               />
               <span>秒</span>
@@ -192,16 +199,17 @@ export function IeltsSpeakingTransferCard({
         </div>
       </div>
 
-      {/* Structured Oral Feedback Summary */}
+      {/* Structured Transcript Practice Feedback */}
       <div className="space-y-3 border-t border-line pt-4">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <h3 className="text-ui-lg font-semibold text-text">口语迁移反馈</h3>
+          <h3 className="text-ui-lg font-semibold text-text">转写迁移检核反馈</h3>
           <div className="flex flex-wrap items-center gap-2">
             <span
               data-speaking-pace={receipt.paceStatus}
               className={`rounded-pill border px-2.5 py-0.5 text-cap font-medium ${paceMeta.badgeClass}`}
             >
-              {paceMeta.label} · {receipt.durationSeconds} 秒
+              {paceMeta.label}
+              {receipt.durationSeconds !== null ? ` · ${receipt.durationSeconds} 秒` : ""}
             </span>
             <span className="rounded-pill border border-line bg-surface-2 px-2.5 py-0.5 text-cap tabular-nums text-text-2">
               {receipt.wordCount} 词
@@ -222,46 +230,54 @@ export function IeltsSpeakingTransferCard({
           </div>
         )}
 
+        {/* Honest Transcript Signals (No fake official Band / No Writing TR) */}
         <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
-          {IELTS_CRITERIA.map((code) => {
-            const note = receipt.criteriaNotes[code];
-            const style = CRITERION_STYLES[code];
+          {SPEAKING_SIGNAL_ORDER.map((signalKey) => {
+            const signal = receipt.transcriptSignals[signalKey];
+            const ratingMeta = SPEAKING_SIGNAL_RATING_META[signal.rating];
             return (
               <div
-                key={code}
+                key={signal.key}
+                data-speaking-signal={signal.key}
                 className="rounded-tile border border-line bg-bg p-3"
               >
-                <div className="flex items-center justify-between">
-                  <span
-                    className={`rounded-pill border px-2 py-0.5 text-cap font-semibold ${style.badgeClass}`}
-                  >
-                    {code} · {style.zhLabel}
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-ui font-semibold text-text">
+                    {signal.label}
                   </span>
-                  <span className="text-ui font-semibold tabular-nums text-text">
-                    {formatBandScore(note.band)}
+                  <span
+                    className={`rounded-pill border px-2.5 py-0.5 text-cap font-medium ${ratingMeta.badgeClass}`}
+                  >
+                    {ratingMeta.label}
                   </span>
                 </div>
-                <p className="mt-1.5 text-meta text-text-2">{note.note}</p>
+                <p className="mt-1.5 text-meta text-text-2">{signal.note}</p>
               </div>
             );
           })}
         </div>
 
-        {receipt.evidenceSpans.length > 0 && (
+        {receipt.evidenceQuotes.length > 0 && (
           <div className="space-y-2">
-            <p className="text-cap font-medium text-text-3">原文引证与口语微调建议</p>
-            {receipt.evidenceSpans.map((span) => (
+            <p className="text-cap font-medium text-text-3">转写原句引证与微调建议</p>
+            {receipt.evidenceQuotes.map((item) => (
               <div
-                key={span.id}
+                key={item.id}
+                data-speaking-quote={item.signal}
                 className="rounded-ctl border border-line bg-bg p-3 text-meta"
               >
+                {item.matchedExpression && (
+                  <p className="mb-1 text-cap font-medium text-accent">
+                    命中表达：{item.matchedExpression}
+                  </p>
+                )}
                 <blockquote className="border-l-2 border-line-strong pl-2.5 font-reading text-ui text-text">
-                  &ldquo;{span.excerpt}&rdquo;
+                  &ldquo;{item.quote}&rdquo;
                 </blockquote>
-                <p className="mt-1.5 text-text-2">{span.diagnosis}</p>
+                <p className="mt-1.5 text-text-2">{item.diagnosis}</p>
                 <p className="mt-1 text-text-2">
                   <strong className="font-medium text-accent">更自然说法：</strong>
-                  <span className="font-reading text-text">{span.upgradeRewrite}</span>
+                  <span className="font-reading text-text">{item.upgradeRewrite}</span>
                 </p>
               </div>
             ))}

@@ -9,7 +9,9 @@ import {
   detectMemorizedTemplates,
   evaluateRevisedDraftDeterministically,
   evaluateSpeakingRetelling,
+  hasMemorizedTemplateStuffing,
   isValidIeltsBand,
+  locateGroundedExcerpt,
   type IeltsCriterionAssessment,
   type IeltsEssayDraft,
   type IeltsUpgradeTarget,
@@ -166,11 +168,8 @@ describe("IELTS rubric validation & band scoring", () => {
     expect(isValidIeltsBand(6.25)).toBe(false);
     expect(isValidIeltsBand(Number.NaN)).toBe(false);
 
-    // Average 6.25 -> rounds up to 6.5
     expect(computeOverallIeltsBand({ TR: 6.5, CC: 6.5, LR: 6, GRA: 6 })).toBe(6.5);
-    // Average 6.75 -> rounds up to 7.0
     expect(computeOverallIeltsBand({ TR: 7, CC: 7, LR: 6.5, GRA: 6.5 })).toBe(7);
-    // Average 7.25 -> rounds up to 7.5
     expect(computeOverallIeltsBand({ TR: 7.5, CC: 7, LR: 7.5, GRA: 7 })).toBe(7.5);
   });
 
@@ -216,6 +215,83 @@ describe("IELTS rubric validation & band scoring", () => {
     }
   });
 
+  it("preserves exact UTF-16 slice offsets after Unicode case-expanding characters like İstanbul", () => {
+    const paragraph =
+      "İstanbul planners expanded rail corridors to ALLEVIATE CHRONIC CONGESTION across dense districts.";
+    const loc = locateGroundedExcerpt(paragraph, "alleviate chronic congestion");
+    expect(loc).not.toBeNull();
+    expect(paragraph.slice(loc!.startOffset, loc!.endOffset)).toBe(
+      "ALLEVIATE CHRONIC CONGESTION",
+    );
+    expect(loc!.matchedText).toBe("ALLEVIATE CHRONIC CONGESTION");
+
+    // Verify receipt validation stores exact UTF-16 offsets with zero drift.
+    const istanbulDraft: IeltsEssayDraft = {
+      ...DRAFT_2,
+      paragraphs: [
+        `İstanbul and ${DRAFT_2.paragraphs[0]}`,
+        ...DRAFT_2.paragraphs.slice(1),
+      ],
+    };
+    const assessments = buildValidDraft2Assessments().map((a) =>
+      a.criterion === "LR"
+        ? {
+            ...a,
+            evidenceSpans: [
+              {
+                ...a.evidenceSpans[0]!,
+                paragraphIndex: 0,
+                excerpt: "LONG-TERM FISCAL VIABILITY",
+              },
+            ],
+          }
+        : a,
+    );
+    const validated = createValidatedRubricReceipt({
+      receiptId: "r-istanbul",
+      taskMode: "writing_task2",
+      draft: istanbulDraft,
+      assessments,
+      crossDraftTransferVerified: true,
+    });
+    expect(validated.ok).toBe(true);
+    if (validated.ok) {
+      const span = validated.receipt.criteria.LR.evidenceSpans[0]!;
+      expect(
+        istanbulDraft.paragraphs[0]!.slice(span.startOffset, span.endOffset),
+      ).toBe(span.excerpt);
+      expect(span.excerpt.toLowerCase()).toBe("long-term fiscal viability");
+    }
+  });
+
+  it("counts repeated warning-level memorized templates within the same paragraph and triggers stuffing gate", () => {
+    const doubleTemplateParagraph =
+      "In a nutshell, urban rail is efficient. In a nutshell, cities should avoid endless highway widening.";
+    const hits = detectMemorizedTemplates([doubleTemplateParagraph]);
+    expect(hits).toHaveLength(2);
+    expect(hits.every((h) => h.phrase === "in a nutshell" && h.paragraphIndex === 0)).toBe(true);
+    expect(hits[0]!.startOffset).not.toBe(hits[1]!.startOffset);
+    expect(hasMemorizedTemplateStuffing(hits)).toBe(true);
+
+    const stuffedDraft: IeltsEssayDraft = {
+      ...DRAFT_2,
+      paragraphs: [
+        ...DRAFT_2.paragraphs.slice(0, 3),
+        `${DRAFT_2.paragraphs[3]} In a nutshell, rail wins. In a nutshell, roads fail.`,
+      ],
+    };
+    const evaluated = evaluateRevisedDraftDeterministically({
+      baselineDraft: DRAFT_1,
+      revisedDraft: stuffedDraft,
+      targets: TARGETS,
+      receiptId: "r-double-template",
+    });
+    expect(evaluated.receipt.memorizedTemplateFlags.length).toBeGreaterThanOrEqual(2);
+    expect(evaluated.receipt.epistemicStatus).toBe("practice_feedback");
+    expect(evaluated.receipt.masteryQualified).toBe(false);
+    expect(evaluated.receipt.countsTowardMastery).toBe(false);
+  });
+
   it("rejects invalid band steps and out-of-range paragraph indices", () => {
     const badAssessments = buildValidDraft2Assessments().map((item) =>
       item.criterion === "GRA"
@@ -241,7 +317,7 @@ describe("IELTS rubric validation & band scoring", () => {
   });
 });
 
-describe("Honest evidence epistemology (practice_feedback vs rubric_verified_evidence)", () => {
+describe("Honest evidence epistemology & Writing anti-gaming transfer guards", () => {
   it("keeps single-draft and assisted revisions strictly as practice_feedback", () => {
     const singleDraftResult = evaluateRevisedDraftDeterministically({
       baselineDraft: DRAFT_1,
@@ -250,6 +326,7 @@ describe("Honest evidence epistemology (practice_feedback vs rubric_verified_evi
       receiptId: "r-d1",
     });
     expect(singleDraftResult.receipt.epistemicStatus).toBe("practice_feedback");
+    expect(singleDraftResult.receipt.masteryQualified).toBe(false);
     expect(singleDraftResult.receipt.countsTowardMastery).toBe(false);
 
     const assistedDraft2 = { ...DRAFT_2, assisted: true };
@@ -263,95 +340,95 @@ describe("Honest evidence epistemology (practice_feedback vs rubric_verified_evi
     expect(assistedResult.ok).toBe(true);
     if (assistedResult.ok) {
       expect(assistedResult.receipt.epistemicStatus).toBe("practice_feedback");
-      expect(assistedResult.receipt.countsTowardMastery).toBe(false);
+      expect(assistedResult.receipt.masteryQualified).toBe(false);
     }
   });
 
-  it("blocks formal verification when memorized template stuffing is present", () => {
-    const stuffedDraft2: IeltsEssayDraft = {
+  it("blocks identical resubmission (no substantive revision) from mastery qualification", () => {
+    const identicalV2: IeltsEssayDraft = {
       ...DRAFT_2,
+      draftId: "draft-2-copy",
+      version: 2,
+    };
+    const evaluated = evaluateRevisedDraftDeterministically({
+      baselineDraft: DRAFT_2,
+      revisedDraft: identicalV2,
+      targets: TARGETS,
+      receiptId: "r-identical",
+    });
+    expect(evaluated.transferReport.summary.hasSubstantiveRevision).toBe(false);
+    expect(evaluated.transferReport.summary.masteryQualified).toBe(false);
+    expect(evaluated.receipt.masteryQualified).toBe(false);
+    expect(evaluated.receipt.epistemicStatus).toBe("practice_feedback");
+  });
+
+  it("blocks empty targetExpressions list from qualifying as verified transfer", () => {
+    const evaluated = evaluateRevisedDraftDeterministically({
+      baselineDraft: DRAFT_1,
+      revisedDraft: DRAFT_2,
+      targets: [],
+      receiptId: "r-empty-targets",
+    });
+    expect(evaluated.transferReport.summary.totalTargets).toBe(0);
+    expect(evaluated.transferReport.summary.meetsCrossDraftVerification).toBe(false);
+    expect(evaluated.transferReport.summary.masteryQualified).toBe(false);
+    expect(evaluated.receipt.masteryQualified).toBe(false);
+    expect(evaluated.receipt.epistemicStatus).toBe("practice_feedback");
+  });
+
+  it("blocks low-entropy repetitive filler + mechanical keyword pasting at the end of a draft", () => {
+    const gamedDraft: IeltsEssayDraft = {
+      ...DRAFT_1,
+      draftId: "draft-2-gamed",
+      version: 2,
       paragraphs: [
-        `Every coin has two sides. ${DRAFT_2.paragraphs[0]}`,
-        ...DRAFT_2.paragraphs.slice(1),
+        "Traffic in cities is challenging for daily travellers and local planners.",
+        "Trains carry commuters efficiently during busy weekday mornings and evenings.",
+        "Buses and roads still play a supporting role for families in outer suburbs.",
+        "Urban city transport policy matters. Urban city transport policy matters. Urban city transport policy matters. " +
+          "Alleviate chronic congestion, per-capita emissions, long-term fiscal viability, while expanding motorways, which undermines, consequently, therefore, admittedly, induced traffic demand.",
       ],
     };
-    const hits = detectMemorizedTemplates(stuffedDraft2.paragraphs);
-    expect(hits.some((h) => h.phrase === "every coin has two sides" && h.severity === "blocking")).toBe(true);
 
-    const result = evaluateRevisedDraftDeterministically({
+    const evaluated = evaluateRevisedDraftDeterministically({
       baselineDraft: DRAFT_1,
-      revisedDraft: stuffedDraft2,
+      revisedDraft: gamedDraft,
       targets: TARGETS,
-      receiptId: "r-stuffed",
+      receiptId: "r-gamed",
     });
-    expect(result.receipt.epistemicStatus).toBe("practice_feedback");
-    expect(result.receipt.countsTowardMastery).toBe(false);
+    expect(
+      evaluated.transferReport.summary.hasLowEntropyStuffing ||
+        evaluated.transferReport.summary.hasMechanicalKeywordPaste,
+    ).toBe(true);
+    expect(evaluated.transferReport.summary.meetsCrossDraftVerification).toBe(false);
+    expect(evaluated.transferReport.summary.masteryQualified).toBe(false);
+    expect(evaluated.receipt.masteryQualified).toBe(false);
+    expect(evaluated.receipt.epistemicStatus).toBe("practice_feedback");
   });
 
   it("promotes unassisted verified Draft 2 transfer with zero cliché stuffing to rubric_verified_evidence", () => {
     expect(countDraftWords(DRAFT_2.paragraphs)).toBeGreaterThanOrEqual(180);
-    const result = createValidatedRubricReceipt({
-      receiptId: "r-verified-d2",
-      taskMode: "writing_task2",
-      draft: DRAFT_2,
-      assessments: buildValidDraft2Assessments(),
-      crossDraftTransferVerified: true,
-    });
-    expect(result.ok).toBe(true);
-    if (result.ok) {
-      expect(result.receipt.cartridgeId).toBe(IELTS_CARTRIDGE_ID);
-      expect(result.receipt.overallBand).toBe(7.5);
-      expect(result.receipt.epistemicStatus).toBe("rubric_verified_evidence");
-      expect(result.receipt.countsTowardMastery).toBe(true);
-      expect(result.receipt.criteria.LR.evidenceSpans[0]?.startOffset).toBeTypeOf("number");
-    }
-  });
-
-  it("allows unassisted fresh-prompt transfer to qualify as rubric_verified_evidence", () => {
-    const freshDraft: IeltsEssayDraft = {
-      ...DRAFT_2,
-      draftId: "fresh-1",
-      version: 1,
-      promptId: "fresh-public-parks-v1",
-      assisted: false,
-    };
-    const result = createValidatedRubricReceipt({
-      receiptId: "r-fresh",
-      taskMode: "writing_task2",
-      draft: freshDraft,
-      assessments: buildValidDraft2Assessments(),
-      crossDraftTransferVerified: false,
-      freshPromptTransfer: true,
-    });
-    expect(result.ok).toBe(true);
-    if (result.ok) {
-      expect(result.receipt.epistemicStatus).toBe("rubric_verified_evidence");
-      expect(result.receipt.evidenceSource).toBe("unassisted_fresh_prompt_transfer");
-      expect(result.receipt.countsTowardMastery).toBe(true);
-    }
-  });
-});
-
-describe("Cross-draft transfer analyzer", () => {
-  it("tracks transferred upgrades and paragraph diffs cleanly from Draft 1 to Draft 2", () => {
-    const report = analyzeCrossDraftTransfer({
-      draft1: DRAFT_1,
-      draft2: DRAFT_2,
+    const evaluated = evaluateRevisedDraftDeterministically({
+      baselineDraft: DRAFT_1,
+      revisedDraft: DRAFT_2,
       targets: TARGETS,
+      receiptId: "r-verified-d2",
     });
-    expect(report.summary.transferredCount).toBe(4);
-    expect(report.summary.regressedCount).toBe(0);
-    expect(report.summary.memorizedClicheCount).toBe(0);
-    expect(report.summary.meetsCrossDraftVerification).toBe(true);
-    expect(report.paragraphDiffs).toHaveLength(4);
-    expect(report.paragraphDiffs.every((d) => d.status === "revised")).toBe(true);
+    expect(evaluated.transferReport.summary.hasSubstantiveRevision).toBe(true);
+    expect(evaluated.transferReport.summary.hasLowEntropyStuffing).toBe(false);
+    expect(evaluated.transferReport.summary.hasMechanicalKeywordPaste).toBe(false);
+    expect(evaluated.transferReport.summary.meetsCrossDraftVerification).toBe(true);
+    expect(evaluated.receipt.cartridgeId).toBe(IELTS_CARTRIDGE_ID);
+    expect(evaluated.receipt.epistemicStatus).toBe("rubric_verified_evidence");
+    expect(evaluated.receipt.masteryQualified).toBe(true);
+    expect(evaluated.receipt.countsTowardMastery).toBe(true);
   });
 
   it("classifies regressed, memorized_cliche, and pending statuses deterministically", () => {
     const baseWithCounter: IeltsEssayDraft = {
       ...DRAFT_1,
       paragraphs: [
-        "Admittedly, induced traffic demand limits road expansion.",
+        "Admittedly, induced traffic demand limits road expansion across growing districts.",
         ...DRAFT_1.paragraphs.slice(1),
       ],
     };
@@ -360,10 +437,10 @@ describe("Cross-draft transfer analyzer", () => {
       draftId: "draft-2-poor",
       version: 2,
       paragraphs: [
-        "Every coin has two sides when cities debate transport spending.",
-        "Trains are useful for daily commuters in large cities.",
-        "Cars remain convenient for suburban families.",
-        "In a nutshell, cities need balanced transport options.",
+        "Every coin has two sides when metropolitan councils debate transport spending.",
+        "Commuter trains carry passengers reliably during busy weekday rush hours.",
+        "Private cars remain convenient for families living in low-density suburbs.",
+        "In a nutshell, municipal governments should balance diverse mobility options.",
       ],
     };
 
@@ -383,65 +460,126 @@ describe("Cross-draft transfer analyzer", () => {
   });
 });
 
-describe("Speaking Part 3 oral transfer seed & feedback", () => {
-  it("converts a refined Writing Task 2 argument into a 60-90s Part 3 seed and evaluates oral transfer", () => {
-    const seed = buildSpeakingPart3Seed(
-      {
-        promptId: "urban-rail-funding-v1",
-        topic: "urban public transport funding",
-        coreClaim: "High-capacity rail delivers stronger long-term urban mobility than widening highways.",
-        supportingReason: "Rail moves far more commuters per corridor while cutting per-capita emissions.",
-        counterPerspective: "Suburban residents may rely on cars where station density is still low.",
-        activeCollocations: [
-          "alleviate chronic congestion",
-          "per-capita emissions",
-          "long-term fiscal viability",
-          "Furthermore", // Stiff written connector should be stripped for speech
-        ],
-      },
-      "draft-2",
-    );
+describe("Speaking Part 3 oral transfer seed, strict verification gates & Unicode sentence alignment", () => {
+  const baseSeed = buildSpeakingPart3Seed(
+    {
+      promptId: "urban-rail-funding-v1",
+      topic: "urban public transport funding",
+      coreClaim: "High-capacity rail delivers stronger long-term urban mobility than widening highways.",
+      supportingReason: "Rail moves far more commuters per corridor while cutting per-capita emissions.",
+      counterPerspective: "Suburban residents may rely on cars where station density is still low.",
+      activeCollocations: [
+        "alleviate chronic congestion",
+        "per-capita emissions",
+        "long-term fiscal viability",
+        "Furthermore",
+      ],
+    },
+    "draft-2",
+  );
 
-    expect(seed.timeWindowSeconds).toEqual({ min: 60, max: 90 });
-    expect(seed.targetSpokenCollocations).not.toContain("Furthermore");
-    expect(seed.targetSpokenCollocations).toContain("alleviate chronic congestion");
+  const strongTranscript =
+    "İstanbul is a great example of why governments struggle when voters feel wider roads immediately, whereas urban rail takes years to build. " +
+    "People naturally appreciate quick road repairs during election cycles. " +
+    "That said, investing in mass transit is the only way to alleviate chronic congestion and lower per-capita emissions over the next decade. " +
+    "Admittedly, suburban families still rely on cars when stations are far away, which is why feeder buses matter too. " +
+    "In the long run, protecting long-term fiscal viability requires funding high-capacity rail rather than endless highway expansion.";
 
-    const strongTranscript =
-      "Personally, I think governments struggle because voters feel wider roads immediately, whereas urban rail takes years to build. " +
-      "That said, investing in mass transit is the only way to alleviate chronic congestion and lower per-capita emissions over the next decade. " +
-      "Admittedly, suburban families still rely on cars when stations are far away, which is why feeder buses matter too. " +
-      "In the long run, protecting long-term fiscal viability requires funding high-capacity rail rather than endless highway expansion.";
+  it("strips stiff written connectors, aligns lexical quote to the exact matching sentence after İstanbul, and never fabricates official Band", () => {
+    expect(baseSeed.timeWindowSeconds).toEqual({ min: 60, max: 90 });
+    expect(baseSeed.targetSpokenCollocations).not.toContain("Furthermore");
+    expect(baseSeed.targetSpokenCollocations).toContain("alleviate chronic congestion");
 
-    const verifiedReceipt = evaluateSpeakingRetelling({
-      seed,
+    const receipt = evaluateSpeakingRetelling({
+      seed: baseSeed,
       transcript: strongTranscript,
       durationSeconds: 76,
       assisted: false,
     });
 
-    expect(verifiedReceipt.paceStatus).toBe("on_target");
-    expect(verifiedReceipt.transferredCollocations).toHaveLength(3);
-    expect(verifiedReceipt.evidenceSpans.length).toBeGreaterThan(0);
-    expect(verifiedReceipt.epistemicStatus).toBe("rubric_verified_evidence");
-    expect(verifiedReceipt.countsTowardMastery).toBe(true);
+    expect(receipt.pronunciationAssessed).toBe(false);
+    expect(receipt.feedbackMode).toBe("transcript_practice_feedback");
+    expect(receipt.paceStatus).toBe("on_target");
+    expect(receipt.transferredCollocations).toHaveLength(3);
+    expect(receipt.masteryQualified).toBe(true);
+    expect(receipt.epistemicStatus).toBe("rubric_verified_evidence");
 
-    // Assisted or too-short response must stay practice_feedback
-    const assistedReceipt = evaluateSpeakingRetelling({
-      seed,
+    // Lexical evidence quote MUST cite the 3rd sentence (where the expression actually lives),
+    // with exact UTF-16 offsets even after "İstanbul"!
+    const lexicalQuote = receipt.evidenceQuotes.find(
+      (q) => q.signal === "lexicalTransfer",
+    )!;
+    expect(lexicalQuote).toBeDefined();
+    expect(lexicalQuote.quote).toContain("alleviate chronic congestion");
+    expect(
+      strongTranscript.slice(lexicalQuote.startOffset, lexicalQuote.endOffset),
+    ).toBe(lexicalQuote.quote);
+  });
+
+  it("blocks 15-second short answers even when freshPromptTransfer is true", () => {
+    const receipt = evaluateSpeakingRetelling({
+      seed: baseSeed,
       transcript: strongTranscript,
-      durationSeconds: 76,
-      assisted: true,
-    });
-    expect(assistedReceipt.epistemicStatus).toBe("practice_feedback");
-    expect(assistedReceipt.countsTowardMastery).toBe(false);
-
-    const shortReceipt = evaluateSpeakingRetelling({
-      seed,
-      transcript: "I think trains are better because they alleviate chronic congestion.",
-      durationSeconds: 32,
+      durationSeconds: 15,
       assisted: false,
+      freshPromptTransfer: true,
     });
-    expect(shortReceipt.paceStatus).toBe("too_short");
-    expect(shortReceipt.epistemicStatus).toBe("practice_feedback");
+    expect(receipt.paceStatus).toBe("too_short");
+    expect(receipt.masteryQualified).toBe(false);
+    expect(receipt.countsTowardMastery).toBe(false);
+    expect(receipt.epistemicStatus).toBe("practice_feedback");
+    expect(receipt.epistemicReason).not.toContain("已确认");
+  });
+
+  it("blocks 0 target hits even when duration is 75s and freshPromptTransfer is true", () => {
+    const noTargetTranscript =
+      "Personally, I think municipal leaders often prefer highway projects because drivers see immediate asphalt upgrades before the next election. " +
+      "However, building big trains takes many years of planning and construction noise across local neighbourhoods. " +
+      "Admittedly, families in distant outer districts still need cars to reach schools and clinics when bus routes run infrequently. " +
+      "In the long run, cities should coordinate local buses with reliable trains so residents gradually choose shared transit over private driving.";
+
+    const receipt = evaluateSpeakingRetelling({
+      seed: baseSeed,
+      transcript: noTargetTranscript,
+      durationSeconds: 75,
+      assisted: false,
+      freshPromptTransfer: true,
+    });
+    expect(receipt.transferredCollocations).toHaveLength(0);
+    expect(receipt.masteryQualified).toBe(false);
+    expect(receipt.countsTowardMastery).toBe(false);
+    expect(receipt.epistemicStatus).toBe("practice_feedback");
+  });
+
+  it("blocks empty targetSpokenCollocations list even when freshPromptTransfer is true", () => {
+    const emptySeed = { ...baseSeed, targetSpokenCollocations: [] };
+    const receipt = evaluateSpeakingRetelling({
+      seed: emptySeed,
+      transcript: strongTranscript,
+      durationSeconds: 75,
+      assisted: false,
+      freshPromptTransfer: true,
+    });
+    expect(receipt.masteryQualified).toBe(false);
+    expect(receipt.countsTowardMastery).toBe(false);
+    expect(receipt.epistemicStatus).toBe("practice_feedback");
+  });
+
+  it("blocks NaN or non-finite duration even when freshPromptTransfer is true", () => {
+    for (const badDuration of [Number.NaN, Number.POSITIVE_INFINITY, -10, 0]) {
+      const receipt = evaluateSpeakingRetelling({
+        seed: baseSeed,
+        transcript: strongTranscript,
+        durationSeconds: badDuration,
+        assisted: false,
+        freshPromptTransfer: true,
+      });
+      expect(receipt.paceStatus).toBe("invalid_duration");
+      expect(receipt.durationSeconds).toBeNull();
+      expect(receipt.masteryQualified).toBe(false);
+      expect(receipt.countsTowardMastery).toBe(false);
+      expect(receipt.epistemicStatus).toBe("practice_feedback");
+      expect(receipt.epistemicReason).not.toContain("已确认");
+    }
   });
 });

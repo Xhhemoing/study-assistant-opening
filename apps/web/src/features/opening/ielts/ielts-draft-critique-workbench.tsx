@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import {
   IELTS_CRITERIA,
   countDraftWords,
@@ -60,6 +60,9 @@ export function IeltsDraftCritiqueWorkbench({
   initialView = "draft2",
   onRevisionEvaluated,
 }: IeltsDraftCritiqueWorkbenchProps) {
+  const tabsIdPrefix = useId();
+  const tabRefs = useRef<Partial<Record<DraftViewMode, HTMLButtonElement | null>>>({});
+
   const [viewMode, setViewMode] = useState<DraftViewMode>(initialView);
   const [criterionFilter, setCriterionFilter] = useState<IeltsCriterion | "ALL">("ALL");
   const [selectedSpanId, setSelectedSpanId] = useState<string | null>(null);
@@ -96,6 +99,43 @@ export function IeltsDraftCritiqueWorkbench({
         : IELTS_CRITERIA.filter((code) => code === criterionFilter),
     [criterionFilter],
   );
+
+  const tabDomId = (mode: DraftViewMode) => `${tabsIdPrefix}-tab-${mode}`;
+  const panelDomId = (mode: DraftViewMode) => `${tabsIdPrefix}-panel-${mode}`;
+
+  function activateTab(mode: DraftViewMode, moveFocus = false) {
+    setViewMode(mode);
+    setSelectedSpanId(null);
+    if (moveFocus) {
+      tabRefs.current[mode]?.focus();
+    }
+  }
+
+  function handleTabKeyDown(
+    event: KeyboardEvent<HTMLButtonElement>,
+    currentIndex: number,
+  ) {
+    if (event.nativeEvent.isComposing) return;
+
+    let nextIndex: number | null = null;
+    if (event.key === "ArrowRight") {
+      nextIndex = (currentIndex + 1) % VIEW_TABS.length;
+    } else if (event.key === "ArrowLeft") {
+      nextIndex = (currentIndex - 1 + VIEW_TABS.length) % VIEW_TABS.length;
+    } else if (event.key === "Home") {
+      nextIndex = 0;
+    } else if (event.key === "End") {
+      nextIndex = VIEW_TABS.length - 1;
+    }
+
+    if (nextIndex !== null) {
+      event.preventDefault();
+      const targetTab = VIEW_TABS[nextIndex];
+      if (targetTab) {
+        activateTab(targetTab.id, true);
+      }
+    }
+  }
 
   function handleAnalyzeRevision() {
     const paragraphs = composerText
@@ -202,19 +242,23 @@ export function IeltsDraftCritiqueWorkbench({
               aria-label="草稿视图切换"
               className="inline-flex items-center gap-1 rounded-pill bg-surface-2 p-1"
             >
-              {VIEW_TABS.map((tab) => {
+              {VIEW_TABS.map((tab, index) => {
                 const selected = viewMode === tab.id;
                 return (
                   <button
                     key={tab.id}
+                    ref={(node) => {
+                      tabRefs.current[tab.id] = node;
+                    }}
+                    id={tabDomId(tab.id)}
                     type="button"
                     role="tab"
                     aria-selected={selected}
-                    onClick={() => {
-                      setViewMode(tab.id);
-                      setSelectedSpanId(null);
-                    }}
-                    className={`rounded-pill px-3.5 py-1.5 text-meta font-medium transition-colors ${
+                    aria-controls={panelDomId(tab.id)}
+                    tabIndex={selected ? 0 : -1}
+                    onClick={() => activateTab(tab.id)}
+                    onKeyDown={(event) => handleTabKeyDown(event, index)}
+                    className={`rounded-pill px-3.5 py-1.5 text-meta font-medium transition-colors focus-visible:outline-2 focus-visible:outline-focus-ring ${
                       selected
                         ? "bg-surface text-text shadow-card"
                         : "text-text-2 hover:text-text"
@@ -287,11 +331,14 @@ export function IeltsDraftCritiqueWorkbench({
             </div>
           )}
 
-          {/* Manuscript Paper Sheet */}
+          {/* Manuscript Paper Sheet / Comparison Tabpanel */}
           {viewMode !== "compare" ? (
             <article
-              aria-label={`${activeDraft.label}正文与句段标注`}
-              className="rounded-panel border border-line bg-surface p-6 shadow-card"
+              id={panelDomId(viewMode)}
+              role="tabpanel"
+              aria-labelledby={tabDomId(viewMode)}
+              tabIndex={0}
+              className="rounded-panel border border-line bg-surface p-6 shadow-card focus-visible:outline-2 focus-visible:outline-focus-ring"
             >
               <div className="mb-4 flex items-center justify-between border-b border-line pb-3">
                 <div className="flex items-center gap-2">
@@ -358,10 +405,12 @@ export function IeltsDraftCritiqueWorkbench({
               </div>
             </article>
           ) : (
-            /* Paragraph-by-Paragraph Comparison View */
             <section
-              aria-label="一稿与二稿逐段对照"
-              className="space-y-3 rounded-panel border border-line bg-surface p-5 shadow-card"
+              id={panelDomId("compare")}
+              role="tabpanel"
+              aria-labelledby={tabDomId("compare")}
+              tabIndex={0}
+              className="space-y-3 rounded-panel border border-line bg-surface p-5 shadow-card focus-visible:outline-2 focus-visible:outline-focus-ring"
             >
               <div className="flex items-center justify-between border-b border-line pb-3">
                 <h2 className="text-ui-lg font-semibold text-text">逐段改写对照</h2>

@@ -107,7 +107,7 @@ export function computeOverallIeltsBand(
 }
 
 export function countEnglishWords(text: string): number {
-  const tokens = text.trim().match(/[A-Za-z0-9]+(?:['’-][A-Za-z0-9]+)*/g);
+  const tokens = text.trim().match(/[\p{L}\p{N}]+(?:['’-][\p{L}\p{N}]+)*/gu);
   return tokens ? tokens.length : 0;
 }
 
@@ -115,24 +115,45 @@ export function countDraftWords(paragraphs: readonly string[]): number {
   return paragraphs.reduce((total, paragraph) => total + countEnglishWords(paragraph), 0);
 }
 
-function normalizeForMatch(text: string): string {
-  return text.toLowerCase().replace(/\s+/g, " ").trim();
+function escapeRegExp(literal: string): string {
+  return literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+function buildFlexiblePhraseRegex(phrase: string, flags: string): RegExp {
+  const tokens = phrase
+    .trim()
+    .split(/\s+/)
+    .map(escapeRegExp);
+  const pattern = tokens.join("\\s+");
+  const startsWord = /^[\p{L}\p{N}]/u.test(phrase.trim());
+  const endsWord = /[\p{L}\p{N}]$/u.test(phrase.trim());
+  const prefix = startsWord ? "(?<![\\p{L}\\p{N}])" : "";
+  const suffix = endsWord ? "(?![\\p{L}\\p{N}])" : "";
+  return new RegExp(`${prefix}${pattern}${suffix}`, flags);
+}
+
+/**
+ * Counts EVERY occurrence of memorized templates across every paragraph (global
+ * match per paragraph so repeated boilerplate in the same paragraph is never missed).
+ */
 export function detectMemorizedTemplates(
   paragraphs: readonly string[],
 ): IeltsMemorizedTemplateHit[] {
   const hits: IeltsMemorizedTemplateHit[] = [];
   paragraphs.forEach((paragraph, paragraphIndex) => {
-    const normalized = normalizeForMatch(paragraph);
-    if (!normalized) return;
+    if (!paragraph.trim()) return;
     for (const entry of IELTS_MEMORIZED_TEMPLATE_CATALOG) {
-      if (normalized.includes(entry.phrase)) {
+      const regex = buildFlexiblePhraseRegex(entry.phrase, "giu");
+      for (const match of paragraph.matchAll(regex)) {
+        const startOffset = match.index ?? 0;
+        const endOffset = startOffset + match[0].length;
         hits.push({
           phrase: entry.phrase,
           paragraphIndex,
           severity: entry.severity,
           advice: entry.advice,
+          startOffset,
+          endOffset,
         });
       }
     }
@@ -147,37 +168,41 @@ export function hasMemorizedTemplateStuffing(
 }
 
 /**
- * Locates a concrete excerpt inside a paragraph (case-insensitive, tolerant of
- * repeated whitespace) and returns character offsets in the original paragraph.
+ * Unicode-safe excerpt locator: matches directly against the original UTF-16 string
+ * using exact search or `/.../iu` regex without `.toLowerCase()` length-drift (e.g. "İ" -> "i\u0307").
+ * Guarantees `paragraph.slice(startOffset, endOffset)` aligns 100% with the matched text.
  */
 export function locateGroundedExcerpt(
   paragraph: string,
   excerpt: string,
-): { startOffset: number; endOffset: number } | null {
+): { startOffset: number; endOffset: number; matchedText: string } | null {
   const trimmed = excerpt.trim();
   if (!trimmed) return null;
 
   const exactIndex = paragraph.indexOf(trimmed);
   if (exactIndex !== -1) {
-    return { startOffset: exactIndex, endOffset: exactIndex + trimmed.length };
+    return {
+      startOffset: exactIndex,
+      endOffset: exactIndex + trimmed.length,
+      matchedText: paragraph.slice(exactIndex, exactIndex + trimmed.length),
+    };
   }
 
-  const lowerParagraph = paragraph.toLowerCase();
-  const lowerExcerpt = trimmed.toLowerCase();
-  const ciIndex = lowerParagraph.indexOf(lowerExcerpt);
-  if (ciIndex !== -1) {
-    return { startOffset: ciIndex, endOffset: ciIndex + trimmed.length };
-  }
-
-  // Whitespace-flexible match while keeping exact offsets in the original paragraph.
   const escapedTokens = trimmed
     .split(/\s+/)
-    .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
-  const flexibleRegex = new RegExp(escapedTokens.join("\\s+"), "i");
-  const match = flexibleRegex.exec(paragraph);
+    .map(escapeRegExp);
+  const regex = new RegExp(escapedTokens.join("\\s+"), "iu");
+  const match = regex.exec(paragraph);
   if (match && typeof match.index === "number") {
-    return { startOffset: match.index, endOffset: match.index + match[0].length };
+    const startOffset = match.index;
+    const endOffset = startOffset + match[0].length;
+    return {
+      startOffset,
+      endOffset,
+      matchedText: paragraph.slice(startOffset, endOffset),
+    };
   }
+
   return null;
 }
 
@@ -189,11 +214,13 @@ export type EpistemicResolutionInput = {
   readonly memorizedTemplateHits: readonly IeltsMemorizedTemplateHit[];
   readonly wordCount: number;
   readonly minVerifiedWords?: number;
+  readonly disqualificationReason?: string;
 };
 
 export type EpistemicResolution = {
   readonly epistemicStatus: IeltsEpistemicStatus;
   readonly countsTowardMastery: boolean;
+  readonly masteryQualified: boolean;
   readonly evidenceSource: IeltsEvidenceSourceKind;
   readonly epistemicReason: string;
 };
@@ -214,6 +241,7 @@ export function resolveIeltsEpistemicStatus(
     return {
       epistemicStatus: "practice_feedback",
       countsTowardMastery: false,
+      masteryQualified: false,
       evidenceSource: "assisted_revision",
       epistemicReason: "本次作答包含提示或脚手架辅助，仅作练习诊断反馈，不计入正式掌握度。",
     };
@@ -223,6 +251,7 @@ export function resolveIeltsEpistemicStatus(
     return {
       epistemicStatus: "practice_feedback",
       countsTowardMastery: false,
+      masteryQualified: false,
       evidenceSource:
         input.draftVersion <= 1 ? "single_draft_diagnostic" : "assisted_revision",
       epistemicReason: "检测到高频模板套话堆砌，需替换为贴合语境的原创表达后才可计入量规复核证据。",
@@ -233,8 +262,20 @@ export function resolveIeltsEpistemicStatus(
     return {
       epistemicStatus: "practice_feedback",
       countsTowardMastery: false,
+      masteryQualified: false,
       evidenceSource: "single_draft_diagnostic",
       epistemicReason: `当前有效词数为 ${input.wordCount} 词，低于独立复核门槛（${minWords} 词），暂作为练习诊断反馈。`,
+    };
+  }
+
+  if (input.disqualificationReason) {
+    return {
+      epistemicStatus: "practice_feedback",
+      countsTowardMastery: false,
+      masteryQualified: false,
+      evidenceSource:
+        input.draftVersion <= 1 ? "single_draft_diagnostic" : "assisted_revision",
+      epistemicReason: input.disqualificationReason,
     };
   }
 
@@ -242,6 +283,7 @@ export function resolveIeltsEpistemicStatus(
     return {
       epistemicStatus: "rubric_verified_evidence",
       countsTowardMastery: true,
+      masteryQualified: true,
       evidenceSource: "unassisted_fresh_prompt_transfer",
       epistemicReason: "独立完成新题迁移作答且未检测到模板套话，已确认为量规复核证据。",
     };
@@ -251,6 +293,7 @@ export function resolveIeltsEpistemicStatus(
     return {
       epistemicStatus: "rubric_verified_evidence",
       countsTowardMastery: true,
+      masteryQualified: true,
       evidenceSource: "unassisted_cross_draft_transfer",
       epistemicReason: "独立完成多稿精修并确认核心改写目标已迁移落地，已确认为量规复核证据。",
     };
@@ -259,6 +302,7 @@ export function resolveIeltsEpistemicStatus(
   return {
     epistemicStatus: "practice_feedback",
     countsTowardMastery: false,
+    masteryQualified: false,
     evidenceSource: "single_draft_diagnostic",
     epistemicReason:
       input.draftVersion <= 1
@@ -275,6 +319,7 @@ export type CreateRubricReceiptInput = {
   readonly crossDraftTransferVerified: boolean;
   readonly freshPromptTransfer?: boolean;
   readonly minVerifiedWords?: number;
+  readonly disqualificationReason?: string;
   readonly createdAt?: string;
 };
 
@@ -387,6 +432,7 @@ export function createValidatedRubricReceipt(
 
       groundedSpans.push({
         ...span,
+        excerpt: located.matchedText,
         startOffset: located.startOffset,
         endOffset: located.endOffset,
       });
@@ -414,6 +460,7 @@ export function createValidatedRubricReceipt(
     memorizedTemplateHits: memorizedTemplateFlags,
     wordCount,
     minVerifiedWords: input.minVerifiedWords,
+    disqualificationReason: input.disqualificationReason,
   });
 
   const receipt: IeltsRubricReceipt = {
@@ -427,6 +474,7 @@ export function createValidatedRubricReceipt(
     criteria: groundedCriteria,
     epistemicStatus: epistemic.epistemicStatus,
     countsTowardMastery: epistemic.countsTowardMastery,
+    masteryQualified: epistemic.masteryQualified,
     epistemicReason: epistemic.epistemicReason,
     evidenceSource: epistemic.evidenceSource,
     memorizedTemplateFlags,
