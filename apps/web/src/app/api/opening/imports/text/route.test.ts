@@ -70,7 +70,11 @@ describe("POST /api/opening/imports/text", () => {
     await post(body);
     const uploadId = deps.beginUpload.mock.calls[0]![1].uploadId;
     deps.beginUpload.mockRejectedValue(new OpeningSourceError("CONFLICT", "completed upload"));
-    deps.sql.mockResolvedValueOnce([{ id: uploadId }]).mockResolvedValueOnce([]);
+    deps.sql
+      .mockResolvedValueOnce([]) // oppositeUploadId check on valid replay
+      .mockResolvedValueOnce([{ id: uploadId }]) // savedRows recovery
+      .mockResolvedValueOnce([]) // oppositeUploadId check on mismatched content replay
+      .mockResolvedValueOnce([]); // savedRows miss on mismatched content
     deps.schedule.mockResolvedValue({ taskId: uploadId, replayed: true, deferredBehindActiveRetest: true });
     const replay = await post(body);
     expect(replay.status).toBe(200);
@@ -79,6 +83,16 @@ describe("POST /api/opening/imports/text", () => {
     expect((await post(JSON.stringify({ content: "不同资料", clientKey: "arbitrary-key" }))).status).toBe(409);
     expect(deps.putStaging).toHaveBeenCalledTimes(1);
     expect(deps.schedule).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects replaying the same clientKey with a changed scheduleNextDayRetell choice", async () => {
+    const first = await post(JSON.stringify({ content: "资料", clientKey: "intent-key", scheduleNextDayRetell: false }));
+    expect(first.status).toBe(201);
+    const sourceOnlyId = deps.beginUpload.mock.calls[0]![1].uploadId;
+    deps.sql.mockResolvedValueOnce([{ id: sourceOnlyId }]);
+    const mutated = await post(JSON.stringify({ content: "资料", clientKey: "intent-key", scheduleNextDayRetell: true }));
+    expect(mutated.status).toBe(409);
+    expect(deps.schedule).not.toHaveBeenCalled();
   });
 
   it("does not schedule after an incomplete upload", async () => {

@@ -19,18 +19,52 @@ export async function scheduleRetell(sql: Sql, scope: Scope, input: RetellInput)
     await lockWorkspaceLearningHistory(tx, scope);
     await requireCaptureCourse(tx, scope, input.courseId);
     const courseId = input.courseId ?? null;
-    // One ordinary task per source. The original deferral decision survives
-    // task edits, retest completion and retries on subsequent calendar days.
+    // One agent-scheduled retell task per source. The original deferral decision
+    // survives task edits, retest completion and retries on subsequent calendar days.
     const key = `text-retell:${input.sourceId}`;
     const deferredKey = key + ":deferred";
-    const [existing] = await tx`SELECT id, client_key, course_id, not_before FROM opening_tasks
+    const [existing] = await tx`SELECT id, client_key, course_id, not_before, created_at FROM opening_tasks
       WHERE id = ${input.sourceId} AND workspace_id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}`;
     if (existing) {
       if (![key, deferredKey].includes(existing.client_key) || existing.course_id !== courseId) {
         throw new ApiError("CONFLICT", "这次保存已关联其他任务。", 409);
       }
-      return { taskId: input.sourceId, notBefore: existing.not_before as Date | null,
-        deferredBehindActiveRetest: existing.client_key === deferredKey, replayed: true };
+      if (existing.client_key !== deferredKey) {
+        return {
+          taskId: input.sourceId,
+          notBefore: existing.not_before as Date | null,
+          deferredBehindActiveRetest: false,
+          replayed: true,
+        };
+      }
+      const createdAt = existing.created_at instanceof Date || typeof existing.created_at === "string"
+        ? existing.created_at
+        : new Date(0);
+      const [hold] = await tx<{ open_ended: boolean | null; end_at: Date | null }[]>`SELECT
+        bool_or(r.status IN ('proposed', 'accepted', 'in_progress')
+          AND (r.deadline_at IS NULL OR r.deadline_at <= statement_timestamp())) AS open_ended,
+        max(CASE
+          WHEN r.status IN ('proposed', 'accepted', 'in_progress') THEN r.deadline_at
+          ELSE COALESCE(r.completed_at, r.declined_at, r.cancelled_at, r.invalidated_at, r.superseded_at, r.updated_at)
+        END) AS end_at
+        FROM opening_retest_activities r
+        WHERE r.workspace_id = ${scope.workspaceId} AND r.owner_user_id = ${scope.ownerUserId}
+          AND (${courseId}::uuid IS NULL OR r.course_id = ${courseId})
+          AND (
+            r.status IN ('proposed', 'accepted', 'in_progress')
+            OR COALESCE(r.completed_at, r.declined_at, r.cancelled_at, r.invalidated_at, r.superseded_at, r.updated_at) >= ${createdAt}
+          )`;
+      const baseFloorMs = existing.not_before ? new Date(existing.not_before as string | Date).getTime() : 0;
+      const endFloorMs = hold?.end_at ? new Date(hold.end_at).getTime() + 1000 : 0;
+      const resolvedNotBefore = hold?.open_ended
+        ? null
+        : new Date(Math.max(baseFloorMs, endFloorMs));
+      return {
+        taskId: input.sourceId,
+        notBefore: resolvedNotBefore,
+        deferredBehindActiveRetest: true,
+        replayed: true,
+      };
     }
 
     const [source] = await tx`SELECT s.id FROM opening_sources s
@@ -41,25 +75,36 @@ export async function scheduleRetell(sql: Sql, scope: Scope, input: RetellInput)
     const [preferences] = input.timeZone ? [] : await tx`SELECT planning_settings->>'timeZone' AS zone
       FROM workspace_preferences WHERE workspace_id = ${scope.workspaceId}`;
     const zone = resolveWorkspaceTimeZone(input.timeZone ?? preferences?.zone);
-    // PostgreSQL resolves local midnight even in zones with a clock change at midnight.
-    const [window] = await tx<{ tomorrow: Date; active: boolean; last_at: Date | null }[]>`SELECT
+    // Only a future hard retest deadline counts as a reliable end time; open-ended
+    // or overdue active retests keep the retell held until the retest closes.
+    const [window] = await tx<{
+      tomorrow: Date;
+      active: boolean;
+      open_ended: boolean | null;
+      last_deadline_at: Date | null;
+    }[]>`SELECT
       ((statement_timestamp() AT TIME ZONE ${zone})::date + 1)::timestamp AT TIME ZONE ${zone} AS tomorrow,
-      count(*) > 0 AS active, max(greatest(r.not_before_at, r.recommended_at,
-        r.scheduled_start_at, r.deadline_at, r.snoozed_until, t.not_before, t.due_at)) AS last_at
+      count(*) > 0 AS active,
+      bool_or(r.deadline_at IS NULL OR r.deadline_at <= statement_timestamp()) AS open_ended,
+      max(r.deadline_at) AS last_deadline_at
       FROM opening_retest_activities r
-      LEFT JOIN opening_tasks t ON t.id = r.task_id AND t.workspace_id = r.workspace_id AND t.owner_user_id = r.owner_user_id
       WHERE r.workspace_id = ${scope.workspaceId} AND r.owner_user_id = ${scope.ownerUserId}
         AND (${courseId}::uuid IS NULL OR r.course_id = ${courseId})
         AND r.status IN ('proposed', 'accepted', 'in_progress')`;
     if (!window) throw new Error("Missing retell scheduling window");
-    // One second also clears any sub-millisecond precision in the stored deadline.
-    const notBefore = window.active
-      ? new Date(Math.max(window.tomorrow.getTime(), window.last_at?.getTime() ?? 0) + 1000)
+    const storedNotBefore = window.active
+      ? new Date(Math.max(window.tomorrow.getTime(), window.last_deadline_at ? window.last_deadline_at.getTime() + 1000 : 0))
       : window.tomorrow;
+    const reportedNotBefore = window.active && Boolean(window.open_ended) ? null : storedNotBefore;
     const title = window.active ? "完成复测后，闭卷复述已保存讲解的关键步骤" : `闭卷复述《${input.title}》的关键步骤`;
-    await tx`INSERT INTO opening_tasks (id, workspace_id, owner_user_id, course_id, title, minutes, client_key, not_before)
+    await tx`INSERT INTO opening_tasks (id, workspace_id, owner_user_id, course_id, title, minutes, origin, client_key, not_before)
       VALUES (${input.sourceId}, ${scope.workspaceId}, ${scope.ownerUserId}, ${courseId},
-        ${title}, 10, ${window.active ? deferredKey : key}, ${notBefore})`;
-    return { taskId: input.sourceId, notBefore, deferredBehindActiveRetest: window.active, replayed: false };
+        ${title}, 10, ${"agent"}, ${window.active ? deferredKey : key}, ${storedNotBefore})`;
+    return {
+      taskId: input.sourceId,
+      notBefore: reportedNotBefore,
+      deferredBehindActiveRetest: window.active,
+      replayed: false,
+    };
   });
 }
