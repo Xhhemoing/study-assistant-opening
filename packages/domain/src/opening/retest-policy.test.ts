@@ -117,3 +117,39 @@ describe("buildRetestCandidates", () => {
     expect(batch.some((c) => c.prompt.includes("fractions"))).toBe(false);
   });
 });
+
+describe("retention ordering", () => {
+  const now = "2026-09-14T10:00:00.000Z";
+  const courseId = "11111111-1111-4111-8111-111111111111";
+  const sourceId = "77777777-7777-4777-8777-777777777777";
+  const summary = (skillLabel: string, status: LearningSummary["status"], lastObservedAt: string | null): LearningSummary =>
+    ({ skillLabel, status, lastObservedAt, evidenceIds: [], sampleCount: 1 });
+  const select = (summaries: LearningSummary[], limit = 1, delayDays = 2) => buildRetestCandidates({
+    courseId, summaries, now, limit, delayDays,
+    sourceIdsBySkill: Object.fromEntries(summaries.map(item => [item.skillLabel, [sourceId]])),
+    promptsBySkill: Object.fromEntries(summaries.map(item => [item.skillLabel, "Redo the original question."])),
+  });
+
+  it("selects the older observation within the same stability stage before applying the cap", () => {
+    const recent = summary("recent", "needs_check", "2026-09-14T04:00:00.000Z");
+    const older = summary("older", "needs_check", "2026-09-12T10:00:00.000Z");
+    expect(select([recent, older])).toMatchObject([{ skillLabel: "older", dueAt: now }]);
+  });
+
+  it("prioritizes lower retention even when its observation is more recent", () => {
+    // 36 elapsed hours / 48-hour half-life vs. 24 elapsed hours / 24-hour half-life.
+    const stable = summary("stable", "needs_check", "2026-09-12T22:00:00.000Z");
+    const fragile = summary("fragile", "needs_review", "2026-09-13T10:00:00.000Z");
+    expect(select([stable, fragile], 2)).toMatchObject([
+      { skillLabel: "fragile", dueAt: "2026-09-15T10:00:00.000Z" },
+      { skillLabel: "stable", dueAt: "2026-09-14T22:00:00.000Z" },
+    ]);
+  });
+
+  it("clamps missing and future observations to zero elapsed time and breaks ties by skill label", () => {
+    const future = summary("future", "needs_review", "2026-09-15T10:00:00.000Z");
+    const missing = summary("absent", "needs_check", null);
+    const older = summary("older", "needs_check", "2026-09-13T10:00:00.000Z");
+    expect(select([future, missing, older], 3, 0).map(item => item.skillLabel)).toEqual(["older", "absent", "future"]);
+  });
+});

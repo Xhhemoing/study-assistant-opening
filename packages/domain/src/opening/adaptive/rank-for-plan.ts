@@ -1,6 +1,7 @@
 import type { CourseGoal, PlanBlockReason, PlannedBlock, SuggestedTask, TaskItem } from "@aistudy/contracts";
 import { localDateKeyInZone } from "../daily-draft";
 import { taskNotBeforeAt } from "../day-planner";
+import { resolveLocalDayBounds } from "../local-day-bounds";
 import { taskCourseId } from "./types";
 import { goalPlanningPriority, goalPlanningReason, resolveGoalLearningContext } from "./goal-policy";
 
@@ -80,13 +81,14 @@ export function rankForPlan(input: RankForPlanInput): RankForPlanResult {
     return { id: task.id, courseId: taskCourseId(task), reason };
   };
   const nowMs = input.now.getTime();
+  const dayEndMs = resolveLocalDayBounds(date, timeZone).nextDayStart.getTime();
 
   const deadlines = pending
-    .filter((task) => task.dueAt !== null && localDateKeyInZone(new Date(task.dueAt), timeZone) <= date)
+    .filter((task) => deadlineMs(task) <= dayEndMs)
     .sort(compareOwnTasks)
     .map((task) => take(task, {
       code: "deadline",
-      label: Date.parse(task.dueAt!) <= nowMs ? "已逾期，优先处理" : "今天截止",
+      label: deadlineMs(task) <= nowMs ? "已逾期，优先处理" : "今天截止",
     }));
 
   const retests = pending

@@ -6,6 +6,12 @@ export const DEFAULT_RETEST_DELAY_DAYS = 2;
 /** Small candidate batch cap for L02. */
 export const DEFAULT_RETEST_BATCH_LIMIT = 1;
 
+const DAY_MS = 86_400_000;
+
+function compareText(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
 function newCandidateId(): string {
   if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
   return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (character) => {
@@ -26,7 +32,7 @@ export function suggestRetestAt(occurredAt: string, delayDays: number): string {
   if (!Number.isFinite(delayDays) || delayDays < 0) {
     throw new Error(`invalid delayDays: ${delayDays}`);
   }
-  const ms = base + delayDays * 24 * 60 * 60 * 1000;
+  const ms = base + delayDays * DAY_MS;
   return new Date(ms).toISOString();
 }
 
@@ -49,17 +55,30 @@ export function buildRetestCandidates(
 ): RetestCandidate[] {
   const delayDays = input.delayDays ?? DEFAULT_RETEST_DELAY_DAYS;
   const limit = input.limit ?? DEFAULT_RETEST_BATCH_LIMIT;
-  const eligible = input.summaries.filter(
-    (s) => s.status === "needs_check" || s.status === "needs_review",
-  );
+  const nowMs = Date.parse(input.now);
+  const baseHalfLife = delayDays > 0 ? delayDays : DEFAULT_RETEST_DELAY_DAYS;
+  const eligible = input.summaries
+    .filter((summary) => summary.status === "needs_check" || summary.status === "needs_review")
+    .map((summary) => {
+      const occurredAt = summary.lastObservedAt ?? input.now;
+      const ageMs = nowMs - Date.parse(occurredAt);
+      const elapsedDays = Number.isFinite(ageMs) ? Math.max(0, ageMs) / DAY_MS : 0;
+      // Use half the policy delay for known review gaps and the full delay for
+      // skills awaiting a check. Compare -log2(retention) to avoid underflow.
+      const stageHalfLife = summary.status === "needs_review" ? baseHalfLife / 2 : baseHalfLife;
+      const halfLife = Math.max(1 / DAY_MS, stageHalfLife);
+      return { summary, occurredAt, forgettingRisk: elapsedDays / halfLife };
+    })
+    .sort((a, b) => b.forgettingRisk - a.forgettingRisk
+      || compareText(a.summary.skillLabel, b.summary.skillLabel)
+      || compareText(a.occurredAt, b.occurredAt));
 
   const out: RetestCandidate[] = [];
-  for (const summary of eligible) {
+  for (const { summary, occurredAt } of eligible) {
     if (out.length >= limit) break;
     const sourceIds = input.sourceIdsBySkill[summary.skillLabel] ?? [];
     const prompt = input.promptsBySkill[summary.skillLabel];
     if (!sourceIds.length || !prompt) continue;
-    const occurredAt = summary.lastObservedAt ?? input.now;
     out.push({
       id: newCandidateId(),
       courseId: input.courseId,

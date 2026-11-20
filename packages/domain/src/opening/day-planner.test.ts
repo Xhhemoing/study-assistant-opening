@@ -397,3 +397,75 @@ describe("planDay", () => {
     expect(shanghaiFridayPlan.unscheduledTaskIds).toEqual([]);
   });
 });
+
+describe("bounded feasibility repair", () => {
+  it("saves the only long pre-deadline slot for the task that needs it", () => {
+    const tasks = [
+      task(1, { minutes: 20, dueAt: at("10:30") }),
+      task(2, { minutes: 40, dueAt: at("10:40") }),
+    ];
+    const windows = [slot("09:00", "09:40"), slot("10:00", "10:20")];
+    const result = planDay(tasks, windows);
+    expect(result.unscheduled).toEqual([]);
+    expect(result.blocks.map(({ taskId, start, end }) => [taskId, start, end])).toEqual([
+      [id(2), at("09:00"), at("09:40")],
+      [id(1), at("10:00"), at("10:20")],
+    ]);
+    expect(planDay([...tasks].reverse(), [...windows].reverse())).toEqual(result);
+  });
+
+  it("protects a hard deadline against a preferred undated carry-over", () => {
+    const result = planDay([task(1), task(2, { dueAt: at("09:30") })], [
+      slot("09:00", "09:30"),
+    ], { preferredOrder: [id(1), id(2)] });
+    expect(result.blocks.map(block => block.taskId)).toEqual([id(2)]);
+    expect(result.unscheduledTaskIds).toEqual([id(1)]);
+  });
+
+  it("relocates two draft blocks to make a contiguous deadline window", () => {
+    const tasks = [
+      task(1, { minutes: 10, dueAt: at("10:00"), notBefore: at("09:00") }),
+      retest(2, at("09:05"), { minutes: 10, dueAt: at("10:00") }),
+      task(3, { minutes: 40, dueAt: at("09:40") }),
+    ];
+    const windows = [slot("08:50", "10:10"), slot("10:00", "10:05", "locked")];
+    const result = planDay(tasks, windows, {
+      planningNow: at("09:00"), preferredOrder: [id(1), id(2), id(3)],
+    });
+    expect(result.unscheduled).toEqual([]);
+    expect(result.blocks.map(({ taskId, start, end }) => [taskId, start, end])).toEqual([
+      [id(3), at("09:00"), at("09:40")],
+      [id(1), at("09:40"), at("09:50")],
+      [id(2), at("09:50"), at("10:00")],
+    ]);
+  });
+
+  it("tries the next occupied window after a relocation would miss its deadline", () => {
+    const result = planDay([
+      task(1, { minutes: 20, dueAt: at("10:20") }),
+      task(2, { minutes: 20, dueAt: at("11:20"), notBefore: at("10:00") }),
+      task(3, { minutes: 40, dueAt: at("10:40") }),
+    ], [slot("09:00", "09:40"), slot("10:00", "10:40"), slot("11:00", "11:20")], {
+      preferredOrder: [id(1), id(2), id(3)],
+    });
+    expect(result.unscheduled).toEqual([]);
+    expect(result.blocks.map(({ taskId, start, end }) => [taskId, start, end])).toEqual([
+      [id(1), at("09:00"), at("09:20")],
+      [id(3), at("10:00"), at("10:40")],
+      [id(2), at("11:00"), at("11:20")],
+    ]);
+  });
+
+  it("keeps the original placement after a failed repair and leaves locked time untouched", () => {
+    const result = planDay([
+      task(1, { minutes: 20, notBefore: at("09:10"), dueAt: at("09:30") }),
+      task(2, { minutes: 40, dueAt: at("09:40") }),
+      task(3, { minutes: 20 }),
+    ], [slot("09:00", "10:10"), slot("09:40", "09:50", "locked")]);
+    expect(result.unscheduled).toEqual([{ taskId: id(2), reason: "free_time_exhausted" }]);
+    expect(result.blocks.map(({ taskId, start, end }) => [taskId, start, end])).toEqual([
+      [id(1), at("09:10"), at("09:30")],
+      [id(3), at("09:50"), at("10:10")],
+    ]);
+  });
+});

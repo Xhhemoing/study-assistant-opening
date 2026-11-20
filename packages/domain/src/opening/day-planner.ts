@@ -49,8 +49,8 @@ export type PlanDayOptions = {
   localDate?: string;
   timeZone?: string;
   /**
-   * When set, schedule pending tasks in this order (unknown ids fall back to
-   * deadline/priority sort after preferred ones). Used by daily auto-draft carry-over.
+   * Within each deadline band, prefer tasks in this order, then fall back to
+   * deadline and priority. Deadlines within the planning day take precedence.
    */
   preferredOrder?: readonly string[];
   /**
@@ -159,34 +159,106 @@ function taskNotBeforeMs(task: TaskItem): number {
 }
 
 /**
- * Place `duration` inside `slot` no earlier than `earliest`, ending by `due`.
- * Returns null when the window does not fit. On success, mutates `slots` so any
- * empty prefix before the chosen start stays available for later tasks.
+ * Original free windows are disjoint after subtracting hard constraints.
+ * A draft partitions each window into available and occupied segments.
  */
-function tryPlaceInSlot(
-  slots: MutableSlot[],
-  index: number,
-  duration: number,
-  earliest: number,
-  due: number,
-): { start: number; end: number } | null {
-  const slot = slots[index];
-  if (!slot) return null;
-  const start = Math.max(slot.start, earliest);
-  const end = start + duration;
-  if (end > Math.min(slot.end, due)) return null;
+type Work = { task: TaskItem; duration: number; earliest: number; due: number };
+type Segment = MutableSlot & { window: number; work?: Work };
+const MAX_REPAIR_ATTEMPTS = 8;
+const MAX_RELOCATED_BLOCKS = 2;
 
-  const originalEnd = slot.end;
-  if (start > slot.start) {
-    // Keep [slot.start, start) for other tasks; remainder after the block if any.
-    slot.end = start;
-    if (end < originalEnd) {
-      slots.splice(index + 1, 0, { start: end, end: originalEnd });
-    }
-  } else {
-    slot.start = end;
+function fits(slot: MutableSlot, work: Work): boolean {
+  return Math.max(slot.start, work.earliest) + work.duration <= Math.min(slot.end, work.due);
+}
+
+function soleFeasibleWindow(windows: readonly MutableSlot[], work: Work): number | undefined {
+  if (!Number.isFinite(work.due)) return undefined;
+  let sole: number | undefined;
+  for (const [index, slot] of windows.entries()) {
+    if (!fits(slot, work)) continue;
+    if (sole !== undefined) return undefined;
+    sole = index;
   }
-  return { start, end };
+  return sole;
+}
+
+function placeAt(segments: Segment[], index: number, start: number, work: Work): void {
+  const slot = segments[index]!;
+  const { window } = slot;
+  const end = start + work.duration;
+  const parts: Segment[] = [{ start, end, window, work }];
+  if (slot.start < start) parts.unshift({ start: slot.start, end: start, window });
+  if (end < slot.end) parts.push({ start: end, end: slot.end, window });
+  segments.splice(index, 1, ...parts);
+}
+
+/** Prefer a window that no remaining hard-deadlined task depends on exclusively. */
+function placeFirstFit(segments: Segment[], work: Work, reservations: readonly number[]): boolean {
+  let fallback = -1;
+  for (const [index, segment] of segments.entries()) {
+    if (segment.work || !fits(segment, work)) continue;
+    if (fallback < 0) fallback = index;
+    if (reservations[segment.window]) continue;
+    fallback = index;
+    break;
+  }
+  if (fallback < 0) return false;
+  placeAt(segments, fallback, Math.max(segments[fallback]!.start, work.earliest), work);
+  return true;
+}
+
+function isRelocatable(current: Work, incoming: Work): boolean {
+  return current.duration < incoming.duration
+    || (current.earliest <= incoming.earliest && current.due >= incoming.due);
+}
+
+/**
+ * Try the earliest and latest fits in a region freed by up to two draft blocks.
+ * Inspect each region once and bound the number of trial copies per task.
+ * Commit a swap only if every displaced block fits again with its own bounds.
+ */
+function repairPlacement(segments: Segment[], incoming: Work, reservations: readonly number[]): Segment[] | null {
+  let attempts = 0;
+  for (const [index, first] of segments.entries()) {
+    if (!first.work) continue;
+    const before = segments[index - 1];
+    const from = before?.window === first.window && !before.work ? index - 1 : index;
+    const left = segments[from]!.start;
+    const displaced: Work[] = [];
+    let occupied = index;
+    while (displaced.length < MAX_RELOCATED_BLOCKS) {
+      const last = segments[occupied];
+      if (last?.window !== first.window || !last.work || !isRelocatable(last.work, incoming)) break;
+      displaced.push(last.work);
+
+      const after = segments[occupied + 1];
+      const through = after?.window === first.window && !after.work ? occupied + 1 : occupied;
+      const right = segments[through]!.end;
+      // Times are integral milliseconds. Require the candidate to intersect the
+      // first and last displaced blocks, so each trial moves only what it needs.
+      const earliest = Math.max(left, incoming.earliest, last.start - incoming.duration + 1);
+      const latest = Math.min(right, incoming.due) - incoming.duration;
+      const latestOverlap = Math.min(latest, first.end - 1);
+      if (earliest <= latestOverlap) {
+        for (const start of earliest === latestOverlap ? [earliest] : [earliest, latestOverlap]) {
+          const orders = displaced.length === 1 ? [displaced] : [displaced, [...displaced].reverse()];
+          for (const order of orders) {
+            if (attempts >= MAX_REPAIR_ATTEMPTS) return null;
+            attempts += 1;
+            const trial = [
+              ...segments.slice(0, from),
+              { start: left, end: right, window: first.window },
+              ...segments.slice(through + 1),
+            ];
+            placeAt(trial, from, start, incoming);
+            if (order.every((item) => placeFirstFit(trial, item, reservations))) return trial;
+          }
+        }
+      }
+      occupied = through + 1;
+    }
+  }
+  return null;
 }
 
 /**
@@ -252,11 +324,13 @@ export function planDay(
     && !isReservedForDifferentDay(task, reservationBounds),
   );
   const preferred = options.preferredOrder;
-  if (preferred && preferred.length) {
+  if (preferred?.length) {
     const rank = new Map(preferred.map((id, index) => [id, index]));
+    const deadlineInDay = (task: TaskItem) => task.dueAt !== null && deadline(task) <= dayEndMs;
     pending.sort((a, b) => {
-      const ra = rank.get(a.id);
-      const rb = rank.get(b.id);
+      const hardA = deadlineInDay(a), hardB = deadlineInDay(b);
+      if (hardA !== hardB) return hardA ? -1 : 1;
+      const ra = rank.get(a.id), rb = rank.get(b.id);
       if (ra !== undefined && rb !== undefined) return ra - rb;
       if (ra !== undefined) return -1;
       if (rb !== undefined) return 1;
@@ -265,38 +339,50 @@ export function planDay(
   } else {
     pending.sort(compareTasks);
   }
-  const slots: MutableSlot[] = availableTimeSlots(free).map((slot) => ({
+
+  const originalSlots: MutableSlot[] = availableTimeSlots(free).map((slot) => ({
     start: Math.max(Date.parse(slot.start), dayStartMs ?? Number.NEGATIVE_INFINITY),
     end: Math.min(Date.parse(slot.end), dayStartMs === undefined ? Number.POSITIVE_INFINITY : dayEndMs),
   })).filter(slot => slot.start < slot.end);
-  const originalSlots = slots.map((slot) => ({ ...slot }));
+  const reservations = originalSlots.map(() => 0);
+  const workItems = pending.map((task) => {
+    const work = {
+      task,
+      duration: task.minutes * 60_000,
+      earliest: Math.max(taskNotBeforeMs(task), planningNowMs),
+      due: deadline(task),
+    };
+    const window = soleFeasibleWindow(originalSlots, work);
+    if (window !== undefined) reservations[window]! += 1;
+    return { work, window };
+  });
+
+  let segments: Segment[] = originalSlots.map((slot, window) => ({ ...slot, window }));
   const result: DayPlanResult = { blocks: [], unscheduledTaskIds: [], unscheduled: [] };
-  for (const task of pending) {
-    const duration = task.minutes * 60_000;
-    const due = deadline(task);
-    const earliest = Math.max(taskNotBeforeMs(task), planningNowMs);
-    let placed: { start: number; end: number } | null = null;
-    for (let i = 0; i < slots.length; i += 1) {
-      placed = tryPlaceInSlot(slots, i, duration, earliest, due);
-      if (placed) break;
-    }
-    if (!placed) {
-      result.unscheduledTaskIds.push(task.id);
-      result.unscheduled.push({
-        taskId: task.id,
-        reason: unscheduledReason(originalSlots, duration, earliest, due),
-      });
+  for (const { work, window } of workItems) {
+    if (window !== undefined) reservations[window]! -= 1;
+    if (placeFirstFit(segments, work, reservations)) continue;
+    const repaired = repairPlacement(segments, work, reservations);
+    if (repaired) {
+      segments = repaired;
       continue;
     }
+    result.unscheduledTaskIds.push(work.task.id);
+    result.unscheduled.push({
+      taskId: work.task.id,
+      reason: unscheduledReason(originalSlots, work.duration, work.earliest, work.due),
+    });
+  }
+  for (const { start, end, work } of segments) {
+    if (!work) continue;
     result.blocks.push({
-      taskId: task.id,
-      start: new Date(placed.start).toISOString(),
-      end: new Date(placed.end).toISOString(),
-      reason: task.dueAt !== null
+      taskId: work.task.id,
+      start: new Date(start).toISOString(),
+      end: new Date(end).toISOString(),
+      reason: work.task.dueAt !== null
         ? "按已确认截止时间优先安排，预计用时不侵占固定安排。"
         : "按任务优先级安排在已确认空闲时间内，用时为估计。",
     });
   }
-  result.blocks.sort((a, b) => Date.parse(a.start) - Date.parse(b.start));
   return result;
 }
