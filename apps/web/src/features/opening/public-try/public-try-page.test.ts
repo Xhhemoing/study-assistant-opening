@@ -1,5 +1,6 @@
+import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, expect, it, vi } from "vitest";
-import PublicTryPage from "../../../app/try/page";
+import PublicTryPage, { dynamic as tryDynamic } from "../../../app/try/page";
 
 afterEach(() => vi.unstubAllEnvs());
 
@@ -13,7 +14,14 @@ it("serves an anonymous challenge with the controlled account entry", async () =
   expect((await PublicTryPage(pageProps)).props.entry).toBe("/register");
 });
 
-it("returns Next's not-found response when the challenge is disabled", async () => {
+it("renders a calm login fallback page instead of 404 when the challenge is disabled", async () => {
+  expect(tryDynamic).toBe("force-dynamic");
   vi.stubEnv("OPENING_PUBLIC_TRY", "0");
-  await expect(PublicTryPage(pageProps)).rejects.toThrow(expect.objectContaining({ digest: "NEXT_HTTP_ERROR_FALLBACK;404" }));
+  const element = await PublicTryPage(pageProps);
+  const html = renderToStaticMarkup(element);
+
+  expect(html).toContain("公开体验挑战暂未开放");
+  expect(html).toContain("当前环境已关闭免登录挑战入口，你可以直接登录进入完整学习空间。");
+  expect(html).toContain('href="/login"');
+  expect(html).toContain("登录进入学习空间");
 });

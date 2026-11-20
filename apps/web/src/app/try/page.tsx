@@ -1,5 +1,4 @@
 import Link from "next/link";
-import { notFound } from "next/navigation";
 import { allowsPublicTryChallenge, publicTryEntry } from "../../features/opening/access-policy";
 import { ChallengeSheet } from "../../features/opening/public-try/challenge-sheet";
 import { challenges } from "../../features/opening/public-try/challenges";
@@ -9,7 +8,37 @@ export const dynamic = "force-dynamic";
 export const metadata = { title: "找出推导中的错步 · AIstudy" };
 
 export default async function PublicTryPage({ searchParams }: { searchParams: Promise<TrySearchParams> }) {
-  if (!allowsPublicTryChallenge()) notFound();
+  if (!allowsPublicTryChallenge()) {
+    return (
+      <main className="min-h-screen bg-bg text-text">
+        <div className="mx-auto flex min-h-screen max-w-xl flex-col justify-center px-5 py-12">
+          <article className="overflow-hidden rounded-card border border-line bg-surface shadow-card">
+            <div className="h-1.5 w-full bg-line-strong" aria-hidden="true" />
+            <div className="space-y-4 p-6 sm:p-8">
+              <p className="text-meta font-medium text-text-3">AIstudy · 公开体验挑战</p>
+              <h1
+                data-page-title=""
+                className="font-serif text-display font-semibold tracking-tight text-text"
+              >
+                公开体验挑战暂未开放
+              </h1>
+              <p className="text-read leading-relaxed text-text-2">
+                当前环境已关闭免登录挑战入口，你可以直接登录进入完整学习空间。
+              </p>
+              <div className="pt-2">
+                <Link
+                  href="/login"
+                  className="inline-flex min-h-11 items-center justify-center rounded-ctl bg-ink px-5 py-2.5 text-ui-lg font-medium text-on-ink transition-opacity hover:opacity-90 focus-visible:outline-focus-ring"
+                >
+                  登录进入学习空间
+                </Link>
+              </div>
+            </div>
+          </article>
+        </div>
+      </main>
+    );
+  }
   const params = await searchParams;
   const context = parseTryContinuation(params);
   if (context && (params.continued === "login" || params.continued === "register")) {
