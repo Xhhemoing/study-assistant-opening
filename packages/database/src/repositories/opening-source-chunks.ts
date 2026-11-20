@@ -6,6 +6,7 @@ import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { enqueueOpeningSourceIndex } from "./opening-source-index-jobs";
 import { preserveOpeningKnowledgeDefinitions } from "./opening-knowledge-definitions";
 import { knowledgeChunkDigests } from "./opening-knowledge-snapshot";
+import { resolvedKnowledgeCoverage } from "./opening-knowledge-legacy-coverage";
 export type NewSourceChunk = Omit<SourceChunk, "id" | "sourceId" | "sourceVersion">;
 export type OpeningSourceChunksRepository = { replaceChunks(scope: OpeningScope, input: { sourceId: string; sourceVersion: number; chunks: NewSourceChunk[] }): Promise<void>; listChunks(scope: OpeningScope, sourceId: string): Promise<SourceChunk[]>; listChunksAtVersion(scope: OpeningScope, sourceId: string, sourceVersion: number): Promise<SourceChunk[]>; listForSources(scope: OpeningScope, sourceIds: string[]): Promise<SourceChunk[]>; };
 export function mapChunk(row: Record<string, unknown>): SourceChunk { return { id: row.id as string, sourceId: row.source_id as string, sourceVersion: Number(row.source_version), page: row.page == null ? null : Number(row.page), slideLabel: row.slide_label as string | null, startMs: row.start_ms == null ? null : Number(row.start_ms), endMs: row.end_ms == null ? null : Number(row.end_ms), text: row.text as string, imageObjectKey: row.image_object_key as string | null }; }
@@ -29,13 +30,7 @@ async function backfillLegacyChunkDigest(tx: TransactionSql, scope: OpeningScope
       COALESCE(graph.snapshot->'coveredSourceChunkDigests', '{}'::jsonb) || jsonb_build_object(${sourceId}::text, ${digest}::text))
     WHERE graph.workspace_id=${scope.workspaceId} AND graph.owner_user_id=${scope.ownerUserId}
       AND NOT (COALESCE(graph.snapshot->'coveredSourceChunkDigests', '{}'::jsonb) ? ${sourceId})
-      AND COALESCE(graph.snapshot->'coveredSourceVersions', (
-        SELECT CASE WHEN jsonb_typeof(j.result->'coveredSourceVersions')='object' THEN j.result->'coveredSourceVersions' END
-        FROM opening_jobs j WHERE j.workspace_id=graph.workspace_id AND j.owner_user_id=graph.owner_user_id
-          AND j.kind='build-course-knowledge' AND j.state='succeeded' AND j.payload->>'courseId'=graph.course_id::text
-          AND j.result->'version'=to_jsonb(graph.version)
-        ORDER BY j.updated_at DESC, j.created_at DESC, j.id DESC LIMIT 1
-      ), graph.source_versions)->>${sourceId}=${String(sourceVersion)}
+      AND ${resolvedKnowledgeCoverage(tx)}->>${sourceId}=${String(sourceVersion)}
       AND (${removedReadable} OR EXISTS (SELECT 1 FROM unnest(${added.map(chunk => chunk.text)}::text[]) added(text)
         WHERE added.text ~ '[^[:space:]]'))`;
 }

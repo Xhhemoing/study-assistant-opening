@@ -35,6 +35,17 @@ describe("Backup v2 knowledge snapshots", () => {
       .toEqual({ admitted: true, errors: [] });
   });
 
+  it("admits parser-backfilled digests on legacy graphs with cited source versions", () => {
+    expect(validateGraph({ courseId, version: 1, nodes: [], edges: [], coveredSourceChunkDigests: { [sourceId]: digest } },
+      { source_versions: { [sourceId]: 1 } })).toEqual({ admitted: true, errors: [] });
+  });
+
+  it("rejects excluded digest sources on a legacy graph", () => {
+    expect(validateGraph({ courseId, version: 1, nodes: [], edges: [],
+      coveredSourceChunkDigests: { [sourceId]: digest, [excludedId]: digest } },
+      { source_versions: { [sourceId]: 1 } }).admitted).toBe(false);
+  });
+
   it.each([
     ["malformed digest", { coveredSourceChunkDigests: { [sourceId]: "not a SHA-256" } }],
     ["admitted source missing from coverage", { coveredSourceVersions: {}, coveredSourceChunkDigests: { [sourceId]: digest } }],

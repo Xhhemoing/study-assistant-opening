@@ -3,12 +3,29 @@ import { COURSE_BACKUP_TABLES } from "../../../contracts/src/opening/backup-inve
 import { backupAssetAdmission, examSourcesIncluded } from "../../../domain/src/opening/backup-workspace-assets";
 import type { OpeningBackupRecordSnapshot } from "./opening-backup-records";
 import { exportSprintPack } from "./opening-backup-exam-pack";
+import { resolvedKnowledgeCoverage } from "./opening-knowledge-legacy-coverage";
+import { asObject } from "./backup-map";
 
 export async function readBackupCourseAssets(tx: TransactionSql, workspace: string, owner: string,
   tables: OpeningBackupRecordSnapshot["tables"]) {
   tables.opening_course_knowledge = [...await tx`SELECT r.workspace_id,r.owner_user_id,r.course_id,r.version,r.snapshot,r.source_versions,r.updated_at
     FROM opening_course_knowledge r
     WHERE r.workspace_id=${workspace} AND r.owner_user_id=${owner} ORDER BY r.course_id`];
+  const legacyGraphs = tables.opening_course_knowledge.flatMap(row => {
+    const snapshot = asObject(row.snapshot);
+    return snapshot && !Object.hasOwn(snapshot, "coveredSourceVersions") && asObject(snapshot.coveredSourceChunkDigests)
+      ? [{ row, snapshot }] : [];
+  });
+  if (legacyGraphs.length) {
+    // Persist just the legacy coverage in the archive since build jobs are never exported.
+    const coverage = await tx`SELECT graph.course_id,${resolvedKnowledgeCoverage(tx)} AS versions
+      FROM opening_course_knowledge graph WHERE graph.workspace_id=${workspace} AND graph.owner_user_id=${owner}
+        AND graph.course_id=ANY(${legacyGraphs.map(({ row }) => String(row.course_id))}::uuid[])`;
+    const byCourse = new Map(coverage.map(row => [row.course_id, row.versions]));
+    for (const { row, snapshot } of legacyGraphs) {
+      row.snapshot = { ...snapshot, coveredSourceVersions: byCourse.get(row.course_id) };
+    }
+  }
   tables.opening_knowledge_confirmations = [...await tx`SELECT r.id,r.workspace_id,r.owner_user_id,r.course_id,r.node_id,r.node_label,r.node_kind,r.confirmed_at,r.graph_version_before,r.graph_version_after,r.source_versions,r.evidence_chunk_ids
     FROM opening_knowledge_confirmations r
     WHERE r.workspace_id=${workspace} AND r.owner_user_id=${owner} ORDER BY r.id`];

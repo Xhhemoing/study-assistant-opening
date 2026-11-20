@@ -57,9 +57,11 @@ export function backupAssetAdmission(tables: Tables) {
       const graph = storedKnowledgeSnapshotSchema.safeParse(snapshot);
       if (!graph.success || graph.data.courseId !== row.course_id) return false;
       // Validate the keys on the original maps because the backup retains the original JSON.
-      const coverage = snapshot.coveredSourceVersions ?? {};
-      return Object.keys(coverage).every(id => sources.has(id))
-        && Object.keys(snapshot.coveredSourceChunkDigests ?? {}).every(id => Object.hasOwn(coverage, id))
+      const coverage = snapshot.coveredSourceVersions;
+      const digestCoverage = coverage ?? row.source_versions;
+      return Object.keys(coverage ?? {}).every(id => sources.has(id))
+        && Object.keys(snapshot.coveredSourceChunkDigests ?? {}).every(id =>
+          sources.has(id) && Object.hasOwn(digestCoverage, id))
         && graph.data.nodes.every(node => node.courseId === row.course_id)
         && [...graph.data.nodes, ...graph.data.edges].every(item => item.evidenceChunkIds.every(id => chunks.has(id)));
     }

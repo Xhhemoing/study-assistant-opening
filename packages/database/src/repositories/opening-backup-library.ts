@@ -20,6 +20,21 @@ export async function readBackupAnswerBlockIds(sql: Sql | TransactionSql, worksp
   return privateTeachingBlockIds({ opening_teaching_activity_specs: specs });
 }
 
+export function excludedTeachingDocumentIds(specs: Record<string, unknown>[], sources: ReadonlySet<string>): string[] {
+  return specs.flatMap(spec => {
+    const refs = spec.source_refs;
+    return typeof spec.document_id === "string" && (!Array.isArray(refs) || refs.some(ref => {
+      const id = asObject(ref)?.sourceId;
+      return typeof id !== "string" || !sources.has(id);
+    })) ? [spec.document_id] : [];
+  });
+}
+
+export function readBackupTeachingSourceRefs(sql: Sql, workspace: string) {
+  return sql`SELECT spec.document_id,spec.source_refs FROM opening_teaching_activity_specs spec
+    JOIN library_documents d ON d.id=spec.document_id WHERE d.workspace_id=${workspace}`;
+}
+
 export async function readBackupLibrarySourceIds(sql: Sql | TransactionSql, workspace: string): Promise<Set<string>> {
   const rows = await sql`SELECT s.id FROM opening_sources s WHERE s.workspace_id=${workspace} AND s.upload_state='uploaded'
     AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=${workspace} AND e.source_id=s.id)`;
@@ -82,18 +97,17 @@ export function isPrivateExamActivity(sql: Sql | TransactionSql, privateExams: s
 /** The same historical lineage predicate used by native note export. Child objects follow
  * admitted document and block identities, including both ends of polymorphic relations. */
 export async function readBackupLibrary(tx: TransactionSql, workspace: string, tables: Tables, privateExams: string[]) {
+  const sourceIds = new Set(tables.opening_sources.map(row => String(row.id)));
+  const excludedDocuments = [...privateExams, ...excludedTeachingDocumentIds(tables.opening_teaching_activity_specs, sourceIds)];
   const documents = [...await tx`SELECT d.id,d.workspace_id,d.title,d.lifecycle,d.schema_version,d.current_revision_number,
       d.created_at,d.updated_at,d.deleted_at FROM library_documents d
-    WHERE d.workspace_id=${workspace} AND NOT (d.id=ANY(${privateExams}::uuid[]))
+    WHERE d.workspace_id=${workspace} AND NOT (d.id=ANY(${excludedDocuments}::uuid[]))
       AND NOT EXISTS (SELECT 1 FROM opening_note_provenance p WHERE p.document_id=d.id AND
         (p.workspace_id<>d.workspace_id OR NOT (${contextSourceRefsIncluded(tx, workspace, tx`p.context_source_refs`, true)})))
       AND NOT EXISTS (SELECT 1 FROM opening_teaching_units u WHERE u.document_id=d.id
         AND NOT (u.id=ANY(${tables.opening_teaching_units.map(row => String(row.id))}::uuid[])))
       AND NOT EXISTS (SELECT 1 FROM opening_teaching_activity_specs spec WHERE spec.document_id=d.id
         AND NOT (spec.id=ANY(${tables.opening_teaching_activity_specs.map(row => String(row.id))}::uuid[])))
-      AND NOT EXISTS (SELECT 1 FROM opening_teaching_activity_specs spec
-        CROSS JOIN LATERAL jsonb_array_elements(spec.source_refs) ref WHERE spec.document_id=d.id
-        AND ((ref->>'sourceId')=ANY(${tables.opening_sources.map(row => String(row.id))}::text[])) IS NOT TRUE)
       AND NOT EXISTS (SELECT 1 FROM opening_teaching_units u
         JOIN opening_exam_sprints s ON s.workspace_id=u.workspace_id AND s.owner_user_id=u.owner_user_id
         CROSS JOIN LATERAL jsonb_array_elements(s.pack_snapshot->'requests') req
@@ -106,7 +120,6 @@ export async function readBackupLibrary(tx: TransactionSql, workspace: string, t
   const revisions = [...await tx`SELECT r.id,r.workspace_id,r.document_id,r.revision_number,r.parent_revision_number,
       r.title,r.lifecycle,r.reason,r.blocks,r.created_at FROM library_revisions r
     WHERE r.workspace_id=${workspace} AND r.document_id=ANY(${candidateIds}::uuid[]) ORDER BY r.document_id,r.revision_number`];
-  const sourceIds = new Set(tables.opening_sources.map(row => String(row.id)));
   const library = backupPrivateLibrary(documents, blocks, revisions, "document_id", [], privateTeachingBlockIds(tables), sourceIds);
   const ids = library.documents.map(row => String(row.id));
   const blockIds = library.blocks.map(row => String(row.id));
