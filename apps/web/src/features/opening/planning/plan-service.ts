@@ -385,9 +385,14 @@ export function createOpeningPlanService(sql: Sql, serviceOptions: OpeningPlanSe
       return repo.listTimetable(scope);
     },
 
-    async saveTimetable(scope: Scope, raw: unknown): Promise<WeekSession[]> {
+    timetableSnapshot(scope: Scope) {
+      return repo.timetableSnapshot(scope);
+    },
+
+    async saveTimetable(scope: Scope, raw: unknown, rawRevision?: unknown): Promise<WeekSession[]> {
       const sessions = z.array(weekSessionSchema).parse(raw);
-      return repo.replaceTimetable(scope, sessions);
+      const revision = z.union([uuidSchema, z.literal("empty")]).optional().parse(rawRevision);
+      return repo.replaceTimetable(scope, sessions, revision);
     },
 
     ensureDailyDraft,

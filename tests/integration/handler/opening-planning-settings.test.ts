@@ -5,7 +5,7 @@ import { deriveDayBlocks } from "@aistudy/domain";
 import type { OpeningPlanningSettings } from "@aistudy/contracts";
 import { GET as getPlanningSettings, PUT as putPlanningSettings } from "../../../apps/web/src/app/api/opening/planning-settings/route";
 import { POST as proposePlan } from "../../../apps/web/src/app/api/opening/plans/route";
-import { PUT as putTimetable } from "../../../apps/web/src/app/api/opening/timetable/route";
+import { GET as getTimetable, PUT as putTimetable } from "../../../apps/web/src/app/api/opening/timetable/route";
 import { POST as createTask } from "../../../apps/web/src/app/api/opening/tasks/route";
 import { POST as register } from "../../../apps/web/src/app/api/auth/register/route";
 import { createAuthRuntime } from "../../../apps/web/src/features/auth/service";
@@ -193,6 +193,26 @@ describe("opening planning-settings handlers (DL9)", () => {
 
     expect(derivedDraft.blocks).toEqual(explicitDraft.blocks);
     expect(derivedDraft.unscheduledTaskIds).toEqual(explicitDraft.unscheduledTaskIds);
+  });
+
+  it("allows only one replacement of a timetable revision, including the empty timetable", async () => {
+    const path = "/api/opening/timetable";
+    const snapshot = async () => (await getTimetable(req(path))).json();
+    const replace = (courseName: string, expectedRevision: string) => putTimetable(req(path, "PUT", {
+      sessions: [{ courseName, weekday: 1, weeks: [1], startPeriod: 1, endPeriod: 2 }], expectedRevision,
+    }));
+    const { revision } = await snapshot();
+    const candidates = ["物理", "历史"];
+    const results = await Promise.all(candidates.map(name => replace(name, revision)));
+    expect(results.map(r => r.status).sort()).toEqual([200, 409]);
+    const winner = candidates[results.findIndex(r => r.status === 200)]!;
+    const current = await snapshot();
+    expect(current.sessions).toMatchObject([{ courseName: winner }]);
+    expect(current.revision).not.toBe(revision);
+
+    expect((await replace("数学", current.revision)).status).toBe(200);
+    expect((await replace(winner, current.revision)).status).toBe(409);
+    expect((await snapshot()).sessions).toMatchObject([{ courseName: "数学" }]);
   });
 
   it("requires authentication", async () => {

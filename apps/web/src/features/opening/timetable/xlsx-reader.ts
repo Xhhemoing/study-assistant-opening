@@ -23,7 +23,8 @@ const labeledWeeks = new RegExp(`(?:周次\\s*[:：]?|周\\s*[:：])\\s*第?\\s*
 const leadingWeeks = new RegExp(`周\\s*(?=\\d+\\s*[-－至,，、]\\s*\\d)${weekListPattern}\\s*([单双])?周?${paritySuffix}`);
 // Consume one complete list and its delimiter so a parity suffix applies to the whole list.
 const columnSegment = new RegExp(
-  /((?:\s*[[（【(])*)(?:\s*(周次|周)\s*[:：]?)?\s*第?\s*/.source + weekListPattern
+  /((?:\s*(?:(?:周次\s*[:：]?|周\s*[:：])\s*)?[[（【(])*)/.source
+  + /(?:\s*(周次|周)\s*[:：]?)?\s*第?\s*/.source + weekListPattern
   + /\s*([单双])?周?(?:\s*([单双])周?)?/.source
   + /((?:\s*[)）】\]])*)\s*([,，、;；]|$)/.source,
   "y",
@@ -64,6 +65,7 @@ function columnWeekList(value: string): number[] | undefined {
   // Resolve parenthesized parity suffixes before matching wrappers around week lists.
   const source = value.replace(/\s+/g, " ").replace(/^周次\s*[:：]?\s*/, "")
     .replace(/\(\s*([单双]周?)\s*\)|（\s*([单双]周?)\s*）/g, "$1$2");
+  if (/^周\s*1$/.test(value)) return undefined;
   const result = new Set<number>();
   const closers: string[] = [];
   const segments = new RegExp(columnSegment);
@@ -71,7 +73,10 @@ function columnWeekList(value: string): number[] | undefined {
     const match = segments.exec(source);
     if (!match) return undefined;
     const [, open, prefix, list, beforeWeek, afterWeek, close, separator] = match;
-    for (const char of open!.replace(/\s/g, "")) closers.push(matchingClose[char]!);
+    for (const char of open!) {
+      const closer = matchingClose[char];
+      if (closer) closers.push(closer);
+    }
     for (const char of close!.replace(/\s/g, "")) {
       if (closers.pop() !== char) return undefined;
     }

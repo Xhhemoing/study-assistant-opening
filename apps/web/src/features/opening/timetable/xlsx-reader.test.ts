@@ -77,7 +77,7 @@ it.each([
   expect(result.warnings).toEqual([]);
 });
 
-it.each(["周一", "周二", "周三", "周四", "周五", "周六", "周日", "周天", "周0", "周61"])("rejects %s in the weeks column", column => {
+it.each(["周一", "周二", "周三", "周四", "周五", "周六", "周日", "周天", "周1", "周0", "周61"])("rejects %s in the weeks column", column => {
   const result = parseTimetableSheets([{ sheet: "课表", data: [
     ["课程", "星期", "周次", "节次"], ["物理2", "周三", column, "3-4节"],
   ] }]);
@@ -113,6 +113,9 @@ it.each(["物理2", "英语4", "高数1 1-2节", "物理2 周三", "物理2 周�
 const semesterWeeks = Array.from({ length: 16 }, (_, i) => i + 1);
 
 it.each([
+  ["【周次：(周1-16)】", semesterWeeks],
+  ["周次：(1-16周)", semesterWeeks],
+  ["(周：【1-8周】)", semesterWeeks.slice(0, 8)],
   ["(1-16周)", semesterWeeks],
   ["（1-16周）", semesterWeeks],
   ["[1-16周]", semesterWeeks],
@@ -149,6 +152,7 @@ it("preserves both courses in a workbook mixing plain and wrapped week columns",
 });
 
 it.each([
+  "【周次：(周1-16】", "【周次：(周1-16】)", "【周次：(周1-16)】末",
   "(1-16周", "1-16周)", "（1-16周)", "【(1-16周】)", "(周1-8", "周次：1周）",
   "1-8周(单", "1-8周(单）", "1-8周单)", "(1-8周), (周三)", "星期三", "(星期三)",
   "(1周)(2周)", "(1周),", "(1周);()", "(1周);(2-61周)",

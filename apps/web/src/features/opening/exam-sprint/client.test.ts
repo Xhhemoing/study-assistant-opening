@@ -400,6 +400,28 @@ describe("exam integration shares mutation recovery", () => {
     expect(fetcher.mock.calls[0]![1]?.body).toBe(fetcher.mock.calls[2]![1]?.body);
   });
 
+  it.each([401, 403, 408, 429])("keeps the photo review key after replay is blocked with %i", async status => {
+    const fetcher = vi.fn<Fetcher>().mockRejectedValueOnce(new TypeError("lost POST response"))
+      .mockResolvedValueOnce(Response.json(overview()))
+      .mockResolvedValueOnce(Response.json({}, { status }))
+      .mockResolvedValueOnce(Response.json(overview()))
+      .mockResolvedValueOnce(Response.json(review));
+    const keys = vi.fn(() => key);
+    const client = createExamSprintClient({ fetcher, keyFactory: keys });
+    const command = { action: "review", input: reviewInput } as const;
+    await client.sendIntegration(command);
+    await client.recover();
+    expect(client.getSnapshot().uncertain).toBe(true);
+    await client.sendIntegration(command);
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    await client.recover();
+    expect(fetcher.mock.calls.map(([, init]) => init?.method)).toEqual(["POST", "GET", "POST", "GET", "POST"]);
+    const posts = fetcher.mock.calls.filter(([, init]) => init?.method === "POST");
+    expect(posts.map(([, init]) => JSON.parse(String(init?.body)))).toEqual(Array(3).fill({ ...reviewInput, clientKey: key }));
+    expect(keys).toHaveBeenCalledOnce();
+    expect(client.getSnapshot()).toMatchObject({ uncertain: false, review: { id: review.id } });
+  });
+
   it("reuses the original image-review request when no review id was received", async () => {
     const fetcher = vi.fn<Fetcher>().mockRejectedValueOnce(new Error("lost review receipt"))
       .mockResolvedValueOnce(Response.json(overview())).mockResolvedValueOnce(Response.json(review))

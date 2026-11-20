@@ -156,6 +156,26 @@ export function mapOpeningPlanDraft(row: Record<string, unknown>): PlanDraft {
   return draft;
 }
 
+async function readTimetableSnapshot(sql: Sql, scope: OpeningScope) {
+  const rows = await sql`
+    SELECT * FROM opening_timetable_sessions
+    WHERE workspace_id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}
+    ORDER BY weekday, start_period, id`;
+  const sessions = rows.map((row) => {
+    const r = row as Record<string, unknown>;
+    return {
+      courseName: r.course_name as string,
+      courseId: (r.course_id as string | null) ?? null,
+      weekday: Number(r.weekday),
+      weeks: (r.weeks as number[]) ?? [],
+      startPeriod: Number(r.start_period),
+      endPeriod: Number(r.end_period),
+    };
+  });
+  // Full replacement assigns fresh primary keys even when the first course is unchanged.
+  return { sessions, revision: (rows[0]?.id as string | undefined) ?? "empty" };
+}
+
 export function createOpeningPlansRepository(sql: Sql, options: { now?: () => Date } = {}) {
   return {
     async listTasks(scope: OpeningScope, listOptions: ListTasksOptions = {}): Promise<TaskItem[]> {
@@ -339,29 +359,22 @@ export function createOpeningPlansRepository(sql: Sql, options: { now?: () => Da
       });
     },
 
-    async listTimetable(scope: OpeningScope): Promise<WeekSession[]> {
-      const rows = await sql`
-        SELECT * FROM opening_timetable_sessions
-        WHERE workspace_id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}
-        ORDER BY weekday, start_period`;
-      return rows.map((row) => {
-        const r = row as Record<string, unknown>;
-        return {
-          courseName: r.course_name as string,
-          courseId: (r.course_id as string | null) ?? null,
-          weekday: Number(r.weekday),
-          weeks: (r.weeks as number[]) ?? [],
-          startPeriod: Number(r.start_period),
-          endPeriod: Number(r.end_period),
-        };
-      });
+    timetableSnapshot(scope: OpeningScope) {
+      return readTimetableSnapshot(sql, scope);
     },
 
-    async replaceTimetable(scope: OpeningScope, sessions: WeekSession[]): Promise<WeekSession[]> {
-      await sql.begin(async (tx) => {
+    async listTimetable(scope: OpeningScope): Promise<WeekSession[]> {
+      return (await readTimetableSnapshot(sql, scope)).sessions;
+    },
+
+    async replaceTimetable(scope: OpeningScope, sessions: WeekSession[], expectedRevision?: string): Promise<WeekSession[]> {
+      return sql.begin(async (tx) => {
         const owner = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId}
           AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
         if (!owner.length) throw new OpeningPlanError("NOT_FOUND", "workspace not found");
+        if (expectedRevision !== undefined && (await readTimetableSnapshot(tx, scope)).revision !== expectedRevision) {
+          throw new OpeningPlanError("CONFLICT", "课表已更新，请核对最新课表后重新导入。");
+        }
         await tx`DELETE FROM opening_timetable_sessions
           WHERE workspace_id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}`;
         for (const s of sessions) {
@@ -373,8 +386,8 @@ export function createOpeningPlansRepository(sql: Sql, options: { now?: () => Da
               ${s.courseId ?? null}, ${s.weekday}, ${s.weeks}, ${s.startPeriod}, ${s.endPeriod}
             )`;
         }
+        return (await readTimetableSnapshot(tx, scope)).sessions;
       });
-      return this.listTimetable(scope);
     },
 
     async listHardBlocks(scope: OpeningScope, day: string): Promise<TimeBlock[]> {

@@ -23,6 +23,9 @@ function errorMessage(body: unknown, status: number): string {
   return status === 401 ? "登录已过期，请重新登录。" : `请求失败（${status}），请稍后重试。`;
 }
 export function createExamSprintClientKey(): string { return crypto.randomUUID(); }
+// The sprint routes reject invalid input, missing resources, conflicts and oversized bodies.
+// Other failures can precede the receipt lookup and leave an earlier attempt unresolved.
+const terminalWriteStatuses = new Set([400, 404, 409, 413]);
 const uncertainMessage = "上一操作的保存结果尚未确认。请恢复该操作后继续，以免重复记录。";
 const describeError = (error: unknown) => userFacingMessage(error, "连接失败，请稍后重试。");
 
@@ -88,7 +91,7 @@ export function createExamSprintClient(options: { fetcher?: typeof fetch; keyFac
       return result;
     } catch (error) {
       if (!isCurrent(operation)) return;
-      const rejected = writeAttempted && error instanceof HttpError && error.status >= 400 && error.status < 500 && error.status !== 408;
+      const rejected = writeAttempted && error instanceof HttpError && terminalWriteStatuses.has(error.status);
       if (!rejected) {
         publish({ error: `${describeError(error)} ${uncertainMessage}`, uncertain: true });
         return;

@@ -5,17 +5,19 @@ import { useCallback, useRef, useState, type ChangeEvent } from "react";
 import { buttonClass, inputClass, secondaryButtonClass } from "../design/ui";
 import { parseTimetableFile, type ParsedTimetable } from "./xlsx-reader";
 import { userFacingMessage } from "../../../lib/user-facing-error";
+import { defaultPutTimetable, readTimetable, sameTimetable } from "./timetable-client";
 
 const WEEKDAY_LABELS = ["", "周一", "周二", "周三", "周四", "周五", "周六", "周日"] as const;
 
 export type TimetablePut = (sessions: WeekSession[]) => Promise<WeekSession[]>;
 
+type Preview = { fileName: string; parsed: ParsedTimetable; revision: string };
+
 export type TimetableImportState =
   | { phase: "idle" }
-  | { phase: "preview"; fileName: string; parsed: ParsedTimetable }
-  | { phase: "saving"; fileName: string; parsed: ParsedTimetable }
+  | ({ phase: "preview" | "saving" } & Preview)
   | { phase: "saved"; count: number }
-  | { phase: "error"; message: string; preview?: { fileName: string; parsed: ParsedTimetable } };
+  | { phase: "error"; message: string; preview?: Preview; needsRead?: boolean };
 
 /** Cancel discards preview only — never writes timetable. */
 export function cancelTimetablePreview(): TimetableImportState {
@@ -35,20 +37,6 @@ export async function confirmTimetableImport(
   } catch (reason) {
     return { ok: false, message: userFacingMessage(reason, "课表保存失败，请重试。") };
   }
-}
-
-export async function defaultPutTimetable(sessions: WeekSession[]): Promise<WeekSession[]> {
-  const response = await fetch("/api/opening/timetable", {
-    method: "PUT",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ sessions }),
-  });
-  const body = await response.json().catch(() => ({})) as { sessions?: WeekSession[]; error?: { message?: string } };
-  if (!response.ok) {
-    throw new Error(typeof body.error?.message === "string" ? body.error.message : "课表保存失败，请重试。");
-  }
-  if (!Array.isArray(body.sessions)) throw new Error("课表保存响应无效。");
-  return body.sessions;
 }
 
 export function previewSessionRows(sessions: WeekSession[]): Array<{
@@ -87,7 +75,7 @@ function formatWeeks(weeks: number[]): string {
   return `${parts.join(",")} 周`;
 }
 
-export function TimetableImport({ put = defaultPutTimetable }: { put?: TimetablePut }) {
+export function TimetableImport({ put = defaultPutTimetable }: { put?: typeof defaultPutTimetable }) {
   const [state, setState] = useState<TimetableImportState>({ phase: "idle" });
   const [busy, setBusy] = useState(false);
 
@@ -97,13 +85,16 @@ export function TimetableImport({ put = defaultPutTimetable }: { put?: Timetable
     if (!file) return;
     setBusy(true);
     setState({ phase: "idle" });
+    let fallback = "无法读取课表文件，请选择有效的 xlsx。";
     try {
       const parsed = await parseTimetableFile(file);
-      setState({ phase: "preview", fileName: file.name, parsed });
+      fallback = "暂时无法读取已保存的课表，请稍后重新选择文件。";
+      const { revision } = await readTimetable();
+      setState({ phase: "preview", fileName: file.name, parsed, revision });
     } catch (reason) {
       setState({
         phase: "error",
-        message: userFacingMessage(reason, "无法读取课表文件，请选择有效的 xlsx。"),
+        message: userFacingMessage(reason, fallback),
       });
     } finally {
       setBusy(false);
@@ -117,16 +108,32 @@ export function TimetableImport({ put = defaultPutTimetable }: { put?: Timetable
   async function onConfirm() {
     if (!preview || busy || saving.current) return;
     saving.current = true;
-    const { fileName, parsed } = preview;
+    const { fileName, parsed, revision } = preview;
     setBusy(true);
-    setState({ phase: "saving", fileName, parsed });
-    const result = await confirmTimetableImport(parsed.sessions, put);
-    saving.current = false;
-    setBusy(false);
-    if (result.ok) {
-      setState({ phase: "saved", count: result.sessions.length });
-    } else {
-      setState({ phase: "error", message: result.message, preview: { fileName, parsed } });
+    setState({ phase: "saving", fileName, parsed, revision });
+    try {
+      let retryMessage = "已核对课表，可以重新确认保存。";
+      if (!(state.phase === "error" && state.needsRead)) {
+        const result = await confirmTimetableImport(parsed.sessions, rows => put(rows, revision));
+        if (result.ok) {
+          setState({ phase: "saved", count: result.sessions.length });
+          return;
+        }
+        retryMessage = result.message;
+      }
+      const current = await readTimetable();
+      if (sameTimetable(current.sessions, parsed.sessions)) {
+        setState({ phase: "saved", count: current.sessions.length });
+      } else if (current.revision !== revision) {
+        setState({ phase: "error", message: "课表已更新，请核对最新课表后重新选择文件。" });
+      } else {
+        setState({ phase: "error", message: retryMessage, preview });
+      }
+    } catch {
+      setState({ phase: "error", message: "暂时无法核对保存结果，请稍后再核对。", preview, needsRead: true });
+    } finally {
+      saving.current = false;
+      setBusy(false);
     }
   }
 
@@ -211,7 +218,7 @@ export function TimetableImport({ put = defaultPutTimetable }: { put?: Timetable
               disabled={busy || !preview.parsed.sessions.length}
               onClick={() => void onConfirm()}
             >
-              {busy && state.phase === "saving" ? "正在保存…" : "确认加入课表"}
+              {busy ? "正在处理…" : state.phase === "error" && state.needsRead ? "核对保存结果" : "确认加入课表"}
             </button>
             <button type="button" className={secondaryButtonClass} disabled={busy} onClick={onCancel}>
               取消预览
