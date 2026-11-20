@@ -1,4 +1,5 @@
 import type { LearningObservation } from "@aistudy/contracts";
+import type { JobHandler } from "../runtime/run-job";
 import type { RemindHandlerDeps } from "../jobs/remind";
 
 export type ChamberRole = "logistics" | "teaching";
@@ -12,6 +13,13 @@ export type TeachingChamberDeps = Readonly<{
   gradeAssessmentAttempt: (attemptId: string) => Promise<LearningObservation>;
 }>;
 
-export type LogisticsChamberDeps = Readonly<{
+type ReminderPorts = Required<Pick<RemindHandlerDeps, "record" | "isCurrent" | "externalConfig" | "resolveTimeZone">>;
+
+export type LogisticsPorts = ReminderPorts & {
   sendReminder: RemindHandlerDeps["send"];
-}> & { readonly [K in keyof TeachingChamberDeps]?: never };
+  indexSource: JobHandler;
+  buildCourseKnowledge: JobHandler;
+  extractStudyActions: JobHandler;
+};
+
+export type LogisticsChamberDeps = Readonly<LogisticsPorts> & { readonly [K in keyof TeachingChamberDeps]?: never };

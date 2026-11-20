@@ -60,6 +60,13 @@ describe("delayed retest isolation", () => {
       }
     });
 
+  it.each([undefined, null])("keeps a different requirement protected when its concept is %s", conceptId => {
+    const snapshot = { now, windows: [{ ...window, requirementKey: "another-requirement", conceptId }] };
+    const conflict = expect.objectContaining({ code: "ACTIVE_RETEST_WINDOW_CONFLICT", httpStatus: 409, retryAfter: 10 });
+    expect(() => launchTeachbackArena(challenge, snapshot)).toThrowError(conflict);
+    expect(() => recordTeachbackDiagnosis(challenge, correct, snapshot)).toThrowError(conflict);
+  });
+
   it("keeps the deadline instant protected and releases the next millisecond", () => {
     const time = Date.parse(window.times.deadlineAt!);
     expect(checkTeachbackRetestConflict(target, { windows: [window], now: new Date(time) })?.retryAfter).toBe(1);

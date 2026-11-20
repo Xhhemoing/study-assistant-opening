@@ -132,12 +132,13 @@ describe("explicit chamber roles", () => {
     expect(report.probe).not.toHaveBeenCalled();
   });
 
-  it("splits the legacy learning consumers and grants only reminder delivery to logistics", async () => {
+  it("splits legacy learning consumers into logistical batch work and teaching", async () => {
     const check = vi.fn(), report = health();
     const logistics = await prepareWorkerRole(" logistics ", check, report);
     const teaching = await prepareWorkerRole("teaching", check, report);
     const learning = await prepareWorkerRole("learning", check, report);
-    expect([...logistics.queueKinds]).toEqual(["remind"]);
+    expect([...logistics.queueKinds]).toEqual(["remind", "build-course-knowledge", "extract-study-actions", "index-source"]);
+    expect((await prepareWorkerRole("tutor", check, report)).queueKinds).toEqual(teaching.queueKinds);
     expect(teaching.queueKinds.has("grade-observation")).toBe(true);
     expect(teaching.queueKinds.has("retest")).toBe(true);
     expect([...logistics.queueKinds, ...teaching.queueKinds].sort()).toEqual([...learning.queueKinds].sort());

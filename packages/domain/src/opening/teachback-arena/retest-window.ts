@@ -32,12 +32,11 @@ export function checkTeachbackRetestConflict(target: TeachbackTarget, snapshot: 
   for (const window of snapshot.windows) {
     if (window.status !== "accepted" && window.status !== "in_progress") continue;
     if (window.courseId && window.courseId !== target.courseId) continue;
-    // Old snapshots can lack canonical IDs. Only release a window when the
-    // available identities establish a different target (never compare display labels).
-    const sameConcept = !!window.conceptId && window.conceptId === target.conceptId;
-    const sameRequirement = !!window.requirementKey && window.requirementKey === target.requirementKey;
-    const comparable = (window.conceptId && target.conceptId) || (window.requirementKey && target.requirementKey);
-    if (comparable && !sameConcept && !sameRequirement) continue;
+    // Different requirements can test the same concept. Both concepts must be
+    // known to establish separation, and a shared requirement still protects both.
+    const distinctConcepts = window.conceptId && target.conceptId && window.conceptId !== target.conceptId;
+    const sharedRequirement = window.requirementKey && window.requirementKey === target.requirementKey;
+    if (distinctConcepts && !sharedRequirement) continue;
     const end = window.times.deadlineAt === null ? Infinity : Date.parse(window.times.deadlineAt);
     if (Number.isNaN(end)) throw new RangeError("Invalid delayed retest deadline");
     if (end >= now) latestDeadline = Math.max(latestDeadline, end);

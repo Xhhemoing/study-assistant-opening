@@ -7,11 +7,10 @@ import type { ParserOcrHealth } from "@aistudy/database";
 import { probeParserOcr } from "../parsers/ocr-health";
 import { createParserActivity } from "../parsers/parser-activity";
 
-type RuntimeRole = WorkerRole | ChamberRole;
-
-export function parseWorkerRole(raw: string | undefined): RuntimeRole {
+export function parseWorkerRole(raw: string | undefined): WorkerRole {
   const role = raw?.trim() || "all";
   switch (role) {
+    case "tutor": return "teaching";
     case "all": case "parser": case "learning": case "logistics": case "teaching":
       return role;
     default:
@@ -19,12 +18,14 @@ export function parseWorkerRole(raw: string | undefined): RuntimeRole {
   }
 }
 
+export const workerRunsParser = (role: WorkerRole) => role === "all" || role === "parser";
+
 // New queue kinds need an explicit owner before a chamber may consume them.
 const queueOwner = {
   parse: "parser", "parse-media": "parser", remind: "logistics",
   tutor: "teaching", "tutor-metadata": "teaching", retest: "teaching",
-  "build-course-knowledge": "teaching", "extract-study-actions": "teaching",
-  "compile-teaching-unit": "teaching", "index-source": "teaching",
+  "build-course-knowledge": "logistics", "extract-study-actions": "logistics",
+  "compile-teaching-unit": "teaching", "index-source": "logistics",
   "recognize-photo-question": "teaching", "grade-observation": "teaching",
 } as const satisfies Record<typeof OPENING_QUEUE_KINDS[number], ChamberRole | "parser">;
 
@@ -35,7 +36,7 @@ export async function prepareWorkerRole(
   health: { probe?: (signal?: AbortSignal) => Promise<ParserOcrHealth>; record?: (report: ParserOcrHealth) => Promise<void>; now?: () => number; evidenceTtlMs?: number } = {},
 ) {
   const role = parseWorkerRole(rawRole);
-  const runsParser = role === "all" || role === "parser";
+  const runsParser = workerRunsParser(role);
   const queueKinds = new Set<string>(OPENING_QUEUE_KINDS.filter(kind =>
     role === "all" || role === queueOwner[kind] || (role === "learning" && queueOwner[kind] !== "parser"),
   ));

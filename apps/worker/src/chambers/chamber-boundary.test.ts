@@ -40,9 +40,9 @@ function outsideImports(file: string, source: string): string[] {
   }
   function visit(node: ts.Node) {
     if (ts.isImportDeclaration(node)) {
-      // These two erased data contracts are the only external chamber dependencies.
+      // These erased data contracts are the only external chamber dependencies.
       const allowedType = node.importClause?.isTypeOnly && ts.isStringLiteral(node.moduleSpecifier)
-        && ["@aistudy/contracts", "../jobs/remind"].includes(node.moduleSpecifier.text);
+        && ["@aistudy/contracts", "../jobs/remind", "../runtime/run-job"].includes(node.moduleSpecifier.text);
       if (!allowedType) check(node.moduleSpecifier);
     } else if (ts.isExportDeclaration(node)) {
       check(node.moduleSpecifier);
@@ -69,16 +69,21 @@ describe("chamber sovereignty", () => {
     const diagnostics = program.getSemanticDiagnostics(program.getSourceFile(testFile));
     expect(diagnostics.map(d => ts.flattenDiagnosticMessageText(d.messageText, "\n"))).toEqual([]);
     expect(typeof checkPortTypes).toBe("function");
-  });
+  }, 30_000);
 
   it("passes only the reminder operation and never reads or exposes leaked ports", async () => {
     const sendReminder = vi.fn(async () => ({ receiptId: "sent" }));
     const input = {
+      record: vi.fn(), isCurrent: vi.fn(), externalConfig: vi.fn(), resolveTimeZone: vi.fn(),
+      indexSource: vi.fn(), buildCourseKnowledge: vi.fn(), extractStudyActions: vi.fn(),
       sendReminder, futureSecret: vi.fn(), gradeAssessmentAttempt: vi.fn(),
       get hidden_answer_blocks(): never { throw new Error("private getter invoked"); },
     };
     const deps = createLogisticsChamberDeps(input);
-    expect(Reflect.ownKeys(deps)).toEqual(["sendReminder"]);
+    expect(Object.keys(deps).sort()).toEqual([
+      "buildCourseKnowledge", "externalConfig", "extractStudyActions", "indexSource",
+      "isCurrent", "record", "resolveTimeZone", "sendReminder",
+    ]);
     expect(Object.getPrototypeOf(deps)).toBeNull();
     expect(Object.isFrozen(deps)).toBe(true);
     const message = { recipientId: "owner", text: "due", idempotencyKey: "once" };
