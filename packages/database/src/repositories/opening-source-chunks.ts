@@ -1,10 +1,11 @@
 import { controlledLearningTools, type SourceChunk } from "@aistudy/contracts";
-import type { Sql } from "postgres";
+import type { Sql, TransactionSql } from "postgres";
 import type { OpeningScope } from "./opening-sources";
 import { lockOpeningJobExecution } from "./opening-job-execution";
 import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { enqueueOpeningSourceIndex } from "./opening-source-index-jobs";
 import { preserveOpeningKnowledgeDefinitions } from "./opening-knowledge-definitions";
+import { knowledgeChunkDigests } from "./opening-knowledge-snapshot";
 export type NewSourceChunk = Omit<SourceChunk, "id" | "sourceId" | "sourceVersion">;
 export type OpeningSourceChunksRepository = { replaceChunks(scope: OpeningScope, input: { sourceId: string; sourceVersion: number; chunks: NewSourceChunk[] }): Promise<void>; listChunks(scope: OpeningScope, sourceId: string): Promise<SourceChunk[]>; listChunksAtVersion(scope: OpeningScope, sourceId: string, sourceVersion: number): Promise<SourceChunk[]>; listForSources(scope: OpeningScope, sourceIds: string[]): Promise<SourceChunk[]>; };
 export function mapChunk(row: Record<string, unknown>): SourceChunk { return { id: row.id as string, sourceId: row.source_id as string, sourceVersion: Number(row.source_version), page: row.page == null ? null : Number(row.page), slideLabel: row.slide_label as string | null, startMs: row.start_ms == null ? null : Number(row.start_ms), endMs: row.end_ms == null ? null : Number(row.end_ms), text: row.text as string, imageObjectKey: row.image_object_key as string | null }; }
@@ -18,6 +19,27 @@ function chunkContent(chunks: NewSourceChunk[]): string[] {
     chunk.endMs ?? null, chunk.text, chunk.imageObjectKey ?? null,
   ])).sort();
 }
+
+async function backfillLegacyChunkDigest(tx: TransactionSql, scope: OpeningScope, sourceId: string, sourceVersion: number,
+  digest: string, removedReadable: boolean, added: NewSourceChunk[]) {
+  // The first readable change freezes the old chunk set, including uncited pages.
+  // Legacy coverage may exist only in the succeeded build receipt or cited versions.
+  await tx`UPDATE opening_course_knowledge graph
+    SET snapshot=jsonb_set(graph.snapshot, '{coveredSourceChunkDigests}',
+      COALESCE(graph.snapshot->'coveredSourceChunkDigests', '{}'::jsonb) || jsonb_build_object(${sourceId}::text, ${digest}::text))
+    WHERE graph.workspace_id=${scope.workspaceId} AND graph.owner_user_id=${scope.ownerUserId}
+      AND NOT (COALESCE(graph.snapshot->'coveredSourceChunkDigests', '{}'::jsonb) ? ${sourceId})
+      AND COALESCE(graph.snapshot->'coveredSourceVersions', (
+        SELECT CASE WHEN jsonb_typeof(j.result->'coveredSourceVersions')='object' THEN j.result->'coveredSourceVersions' END
+        FROM opening_jobs j WHERE j.workspace_id=graph.workspace_id AND j.owner_user_id=graph.owner_user_id
+          AND j.kind='build-course-knowledge' AND j.state='succeeded' AND j.payload->>'courseId'=graph.course_id::text
+          AND j.result->'version'=to_jsonb(graph.version)
+        ORDER BY j.updated_at DESC, j.created_at DESC, j.id DESC LIMIT 1
+      ), graph.source_versions)->>${sourceId}=${String(sourceVersion)}
+      AND (${removedReadable} OR EXISTS (SELECT 1 FROM unnest(${added.map(chunk => chunk.text)}::text[]) added(text)
+        WHERE added.text ~ '[^[:space:]]'))`;
+}
+
 export function createOpeningSourceChunksRepository(sql: Sql): OpeningSourceChunksRepository { return {
   async replaceChunks(scope, input) {
     await sql.begin(async tx => {
@@ -26,17 +48,19 @@ export function createOpeningSourceChunksRepository(sql: Sql): OpeningSourceChun
       await lockWorkspaceLearningHistory(tx, scope);
       await lockOpeningJobExecution(tx, scope);
       await preserveOpeningKnowledgeDefinitions(tx, scope, input.sourceId);
-      const [row] = await tx`SELECT version,upload_state FROM opening_sources
+      const [row] = await tx`SELECT id,version,upload_state FROM opening_sources
         WHERE id=${input.sourceId} AND workspace_id=${scope.workspaceId} FOR UPDATE`;
       if (!row) throw new Error("source not found");
       if (Number(row.version) !== input.sourceVersion || row.upload_state !== "uploaded") throw new Error("CONFLICT: source version changed during parse");
       if (!chunksHaveReadableContent(input.chunks)) throw new Error("source has no readable text; check OCR or upload a text-readable original");
-      const existing = await tx`SELECT * FROM opening_source_chunks WHERE source_id=${input.sourceId} AND source_version=${input.sourceVersion}`;
-      const previousContent = chunkContent(existing.map(row => mapChunk(row)));
+      const existing = await tx`SELECT *, text ~ '[^[:space:]]' AS readable FROM opening_source_chunks
+        WHERE source_id=${input.sourceId} AND source_version=${input.sourceVersion}`;
+      const existingChunks = existing.map(row => mapChunk(row));
+      const previousContent = chunkContent(existingChunks);
       const nextContent = chunkContent(input.chunks);
       // Replaying or extending a partial parse must preserve unchanged citations.
       if (previousContent.length !== nextContent.length || previousContent.some((value, index) => value !== nextContent[index])) {
-        const unmatched = existing.map(row => mapChunk(row));
+        const unmatched = [...existingChunks];
         const added: NewSourceChunk[] = [];
         for (const chunk of input.chunks) {
           const content = chunkContent([chunk])[0];
@@ -44,6 +68,11 @@ export function createOpeningSourceChunksRepository(sql: Sql): OpeningSourceChun
           if (index !== -1) unmatched.splice(index, 1);
           else added.push(chunk);
         }
+        const sourceId = String(row.id);
+        const readableIds = new Set(existing.filter(chunk => chunk.readable).map(chunk => String(chunk.id)));
+        const digest = knowledgeChunkDigests(existingChunks.filter(chunk => readableIds.has(chunk.id)))[sourceId];
+        if (digest) await backfillLegacyChunkDigest(tx, scope, sourceId, input.sourceVersion, digest,
+          unmatched.some(chunk => readableIds.has(chunk.id)), added);
         // Free changed page keys before inserting replacements in this transaction.
         if (unmatched.length) await tx`DELETE FROM opening_source_chunks WHERE id IN ${tx(unmatched.map(chunk => chunk.id))}`;
         for (const chunk of added) await tx`INSERT INTO opening_source_chunks(source_id,source_version,page,slide_label,start_ms,end_ms,text,image_object_key)

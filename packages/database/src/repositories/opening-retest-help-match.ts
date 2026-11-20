@@ -1,7 +1,14 @@
-import type { Sql, TransactionSql } from "postgres";
+import type { Fragment, Sql, TransactionSql } from "postgres";
 
 export function openingRetestAnswerAt(db: Sql | TransactionSql) {
   return db`COALESCE(a.submitted_at,o.submitted_at,o.recorded_at,o.occurred_at)`;
+}
+
+function openingHelpSourceMatches(db: Sql | TransactionSql, ref: Fragment) {
+  const sourceId = db`lower(${ref}->>'sourceId')`;
+  const sourceVersion = db`${ref}->>'sourceVersion'`;
+  return db`${sourceId}=ANY(o.source_ids::text[])
+    AND (${sourceVersion} IS NULL OR ${sourceVersion}=o.source_versions->>${sourceId})`;
 }
 
 function openingHelpReferenceSources(db: Sql | TransactionSql) {
@@ -9,7 +16,7 @@ function openingHelpReferenceSources(db: Sql | TransactionSql) {
   const sources = db`CASE WHEN jsonb_typeof(${reference}->'sourceRefs')='array'
     THEN ${reference}->'sourceRefs' ELSE '[]'::jsonb END`;
   const matches = db`EXISTS (SELECT 1 FROM jsonb_array_elements(${sources}) ref
-    WHERE lower(ref->>'sourceId')=ANY(o.source_ids::text[]))`;
+    WHERE ${openingHelpSourceMatches(db, db`ref`)})`;
   return { reference, sources, matches };
 }
 
@@ -24,7 +31,7 @@ export function openingUnboundHelpScopeMatches(db: Sql | TransactionSql) {
   const { reference, sources, matches } = openingHelpReferenceSources(db);
   return db`COALESCE(h.release_intent->>'possibleOpenAttemptOnly','')<>'true'
     AND COALESCE(${reference}->>'possibleOpenAttemptOnly','')<>'true'
-    AND (h.context_anchor->>'sourceId' IS NULL OR lower(h.context_anchor->>'sourceId')=ANY(o.source_ids::text[]))
+    AND (h.context_anchor->>'sourceId' IS NULL OR (${openingHelpSourceMatches(db, db`h.context_anchor`)}))
     AND (jsonb_array_length(${sources})=0 OR ${matches})
     AND (${reference}->>'skillLabel' IS NULL OR ${reference}->>'skillLabel'=o.skill_label)
     AND (${reference}->>'requirementKey' IS NULL OR ${reference}->>'requirementKey'=o.requirement_key)`;
@@ -48,7 +55,7 @@ export function openingRetestHelpMatches(db: Sql | TransactionSql) {
         AND (
           h.item_version_id=a.item_version_id OR h.problem_id=a.problem_id
           OR h.activity_id=a.activity_id OR h.session_id=o.session_id
-          OR lower(h.context_anchor->>'sourceId')=ANY(o.source_ids::text[])
+          OR (${openingHelpSourceMatches(db, db`h.context_anchor`)})
           OR ${matches}
           OR ${reference}->>'skillLabel'=o.skill_label
           OR (l.course_id=o.course_id AND l.skill_label=o.skill_label)

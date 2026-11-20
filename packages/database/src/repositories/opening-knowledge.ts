@@ -10,10 +10,12 @@ import {
   type SourceChunk,
   type Scope,
 } from "@aistudy/contracts";
-import { coverageFields, filteredCoverage, readPublicKnowledgeSnapshot, storedKnowledgeSnapshotSchema, type StoredKnowledgeSnapshot } from "./opening-knowledge-snapshot";
+import { coverageFields, filteredCoverage, knowledgeChunkDigests, readPublicKnowledgeSnapshot, storedKnowledgeSnapshotSchema, type StoredKnowledgeSnapshot } from "./opening-knowledge-snapshot";
 import { knowledgeNodeDefinition, sameKnowledgeNodeIdentity, validateKnowledgeSnapshot } from "@aistudy/domain";
 import type { Sql, TransactionSql } from "postgres";
 import { mapChunk } from "./opening-source-chunks";
+
+export { knowledgeChunkDigests } from "./opening-knowledge-snapshot";
 
 export type OpeningKnowledgeErrorCode = "NOT_FOUND" | "VALIDATION" | "CONFLICT";
 
@@ -300,10 +302,8 @@ async function readEligibleSourceVersions(
   db: Sql | TransactionSql,
   scope: Scope,
   courseId: string,
-  lock?: { sourceIds?: string[] },
+  lock = false,
 ): Promise<Record<string, number>> {
-  const lockIds = lock?.sourceIds;
-  if (lockIds?.length === 0) return {};
   const eligibleRows = await db`
     SELECT s.id, s.version
     FROM opening_sources s
@@ -316,7 +316,6 @@ async function readEligibleSourceVersions(
       AND m.course_id = ${courseId}
       AND (m.purpose IS NULL OR m.purpose = 'teaching')
     WHERE s.workspace_id = ${scope.workspaceId}
-      ${lockIds ? db`AND s.id IN ${db(lockIds)}` : db``}
       AND s.upload_state = 'uploaded'
       AND s.parse_state = 'ready'
       AND v.availability = 'available'
@@ -332,19 +331,6 @@ async function readEligibleSourceVersions(
       )
     ORDER BY s.id ${lock ? db`FOR SHARE OF s, v, m` : db``}`;
   return Object.fromEntries(eligibleRows.map(row => [String(row.id), Number(row.version)]));
-}
-
-/** Parser retries retain identical rows and allocate new IDs for changed or added chunks. */
-export function knowledgeChunkDigests(chunks: readonly Pick<SourceChunk, "id" | "sourceId">[]): Record<string, string> {
-  const idsBySource = new Map<string, string[]>();
-  for (const chunk of chunks) {
-    const ids = idsBySource.get(chunk.sourceId) ?? [];
-    ids.push(chunk.id);
-    idsBySource.set(chunk.sourceId, ids);
-  }
-  return Object.fromEntries([...idsBySource].map(([id, ids]) => [
-    id, createHash("sha256").update(ids.sort().join(",")).digest("hex"),
-  ]));
 }
 
 async function readChunkDigests(db: Sql | TransactionSql, versions: Record<string, number>, lock = false) {
@@ -371,8 +357,9 @@ async function hasLegacyChunkDrift(
   if (!legacyIds.length) return false;
   const evidenceIds = evidenceSet([...record.snapshot.nodes, ...record.snapshot.edges].flatMap(item => item.evidenceChunkIds));
   // Chunks are immutable. An identical retry preserves their IDs and creation times,
-  // even though the parser touches the source row's updated_at. Confirmations and
-  // invalidation leave the graph publication timestamp intact.
+  // even though the parser touches the source and queues indexing. Changed retries
+  // backfill a digest before deleting chunks. Confirmations and invalidation leave
+  // the graph publication timestamp intact for rows still relying on this fallback.
   const [row] = await db`
     WITH live_readable_chunks AS (
       SELECT c.id, c.source_id, c.created_at
@@ -512,8 +499,20 @@ async function coverageForEdit(
   extracted?: Record<string, number>,
   extractedChunkDigests?: Record<string, string>,
 ) {
+  if (extracted !== undefined) {
+    // Publication holds the workspace lock shared by parser, membership and privacy
+    // writers. Compare every eligible source, including those absent at extraction.
+    const live = await readEligibleSourceVersions(tx, scope, courseId, true);
+    if (!sameVersions(extracted, live)
+      || Object.entries(sourceVersions).some(([id, version]) => extracted[id] !== version)
+      || !sameVersions(extractedChunkDigests ?? {}, await readChunkDigests(tx, live, true))) {
+      throw new OpeningKnowledgeError("CONFLICT", "课程材料已变化，请按最新可读资料重新整理。", "MATERIAL_REPLACEMENT_BLOCKED");
+    }
+    return coverageFields(extracted, extractedChunkDigests);
+  }
+
   let previousCoverage = previous?.snapshot.coveredSourceVersions;
-  if (extracted === undefined && previous && previousCoverage === undefined) {
+  if (previous && previousCoverage === undefined) {
     const [job] = await tx`SELECT result FROM opening_jobs
       WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
         AND kind='build-course-knowledge' AND payload->>'courseId'=${courseId} AND state='succeeded'
@@ -521,21 +520,13 @@ async function coverageForEdit(
       ORDER BY updated_at DESC, created_at DESC, id DESC LIMIT 1`;
     previousCoverage = receiptCoverage(previous, job?.result ?? null);
   }
-  const proposed = extracted ?? { ...previousCoverage, ...sourceVersions };
-  // Publication holds the workspace lock shared by parser, membership and privacy
-  // writers. Lock and compare every eligible source, including those absent at extraction.
-  const live = await readEligibleSourceVersions(tx, scope, courseId,
-    extracted === undefined ? { sourceIds: Object.keys(proposed).sort() } : {});
-  if (extracted !== undefined && (!sameVersions(extracted, live)
-    || Object.entries(sourceVersions).some(([id, version]) => extracted[id] !== version)
-    || !sameVersions(extractedChunkDigests ?? {}, await readChunkDigests(tx, live, true)))) {
-    throw new OpeningKnowledgeError("CONFLICT", "课程材料已变化，请按最新可读资料重新整理。", "MATERIAL_REPLACEMENT_BLOCKED");
-  }
-  const covered = Object.fromEntries(Object.entries(proposed).filter(([id, version]) => live[id] === version));
+  const proposed = { ...previousCoverage, ...sourceVersions };
+  const authorized = await readAuthorizedHistoricalCoverage(tx, scope, courseId, Object.keys(proposed));
+  const covered = filteredCoverage(proposed, authorized);
   const previousDigests = previous?.snapshot.coveredSourceChunkDigests;
   const carriedDigests = Object.fromEntries(Object.entries(previousDigests ?? {})
     .filter(([id]) => covered[id] !== undefined && covered[id] === previousCoverage?.[id]));
-  return coverageFields(covered, extracted === undefined ? carriedDigests : extractedChunkDigests);
+  return coverageFields(covered, carriedDigests);
 }
 
 async function readSyncStatusInternal(

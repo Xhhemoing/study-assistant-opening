@@ -18,7 +18,16 @@ it("attributes released interval help by scoped item, problem and activity when 
     const releaseAt = "2026-11-18T10:30:00Z";
     const { workspaceId, ownerUserId } = f.scope;
     const { courseId, sessionId, sourceId } = base;
-    const attempt = await base.start({ requirementKey });
+    await f.sql`INSERT INTO opening_source_versions (source_id,version,workspace_id,bytes,sha256,availability)
+      SELECT id,version,workspace_id,bytes,sha256,'available' FROM opening_sources WHERE id=${sourceId} ON CONFLICT DO NOTHING`;
+    await f.sql`UPDATE opening_sources SET version=2 WHERE id=${sourceId}`;
+    await f.sql`INSERT INTO opening_source_versions (source_id,version,workspace_id,bytes,sha256,availability)
+      SELECT id,version,workspace_id,bytes,sha256,'available' FROM opening_sources WHERE id=${sourceId} ON CONFLICT DO NOTHING`;
+    const [currentChunk] = await f.sql`INSERT INTO opening_source_chunks (source_id,source_version,page,text)
+      VALUES(${sourceId},2,1,'Revised source evidence') RETURNING id`;
+    const attempt = await base.start({ requirementKey, problem: { sourceId, chunkId: currentChunk!.id, physicalPage: 1,
+      stemSnapshot: "1/2 + 1/2?", artifactKind: "reference_item" } });
+    expect(attempt.sourceVersions).toEqual({ [sourceId]: 2 });
     const priorAttempt = await base.attempts.create(f.scope, { clientKey: randomUUID(), sessionId, problemId: attempt.problemId!, requirementKey });
     expect(priorAttempt.itemVersionId).toBe(attempt.itemVersionId);
     const [session] = await f.sql`SELECT activity_id FROM opening_learning_sessions WHERE id=${sessionId}`;
@@ -36,10 +45,11 @@ it("attributes released interval help by scoped item, problem and activity when 
       { id: observationId, attemptId: attempt.id, retestId, recordedAt: "2026-11-18T11:05:00Z" },
     ]) {
       await f.sql`INSERT INTO opening_learning_observations
-        (id,workspace_id,owner_user_id,course_id,session_id,activity_id,skill_label,requirement_key,attempt_id,retest_id,source_ids,
+        (id,workspace_id,owner_user_id,course_id,session_id,activity_id,skill_label,requirement_key,attempt_id,retest_id,source_ids,source_versions,
           answer,outcome,assistance,client_key,verdict_source,recorded_at,submitted_at,workspace_history_revision)
         VALUES(${entry.id},${workspaceId},${ownerUserId},${courseId},${sessionId},${activityId},'fractions',${requirementKey},
-          ${entry.attemptId},${entry.retestId},${[sourceId]},'1','correct','independent',${entry.id},'reference_checked',${entry.recordedAt},${entry.recordedAt},0)`;
+          ${entry.attemptId},${entry.retestId},${[sourceId]},${f.sql.json({ [sourceId]: entry.retestId ? 2 : 1 })},
+          '1','correct','independent',${entry.id},'reference_checked',${entry.recordedAt},${entry.recordedAt},0)`;
     }
     const observation: CourseRouteObservation = {
       id: observationId, skillLabel: "fractions", requirementKey, attemptedAt: startedAt,
@@ -62,7 +72,7 @@ it("attributes released interval help by scoped item, problem and activity when 
           ${deliveredAt},${deliveredAt},${input.domain},${input.itemVersionId ?? null},${input.problemId ?? null},${input.activityId ?? null},
           ${input.attemptId ?? null},${input.sourceId ? f.sql.json({ sourceId: input.sourceId }) : null},
           ${f.sql.json({ originReference: { possibleOpenAttemptOnly: input.attemptOnly ?? false, skillLabel: input.skillLabel ?? null,
-            requirementKey: input.requirementKey ?? null, sourceRefs: (input.sourceRefs ?? []).map(sourceId => ({ sourceId, sourceVersion: 1 })) } })})`;
+            requirementKey: input.requirementKey ?? null, sourceRefs: (input.sourceRefs ?? []).map(sourceId => ({ sourceId, sourceVersion: 2 })) } })})`;
       return id;
     }
     await exposure({ domain: "language", itemVersionId: attempt.itemVersionId });
@@ -116,10 +126,29 @@ it("attributes released interval help by scoped item, problem and activity when 
       await f.sql`DELETE FROM opening_help_exposures WHERE id=${helpId}`;
     }
 
-    // The actual delivery boundary commits a receipt without a session, item,
-    // or attempt. Bind it to the activity and capture the answer afterwards.
     await f.sql`UPDATE opening_teaching_activities SET goal_json='{}' WHERE id=${activityId}`;
-    const delivered = await createOpeningStudyExposureRepository(f.sql).deliver(f.scope, {
+    const exposures = createOpeningStudyExposureRepository(f.sql);
+    for (const pin of ["anchor", "origin"] as const) {
+      const historical = await exposures.deliver(f.scope, {
+        releaseKey: randomUUID(), origin: "assistant", kind: "hint", level: "hinted", supportDomain: "math", sessionId,
+        contextAnchor: pin === "anchor" ? { purpose: "learning_help", courseId, sourceId, sourceVersion: 1 }
+          : { purpose: "learning_help", courseId },
+        ...(pin === "origin" ? { originReference: { type: "source" as const, id: sourceId, version: "1",
+          sourceRefs: [{ sourceId, sourceVersion: 1 }] } } : {}),
+      });
+      expect(historical.contextAnchor).toMatchObject({ attemptId: null, itemVersionId: null });
+      if (pin === "anchor") expect(historical.contextAnchor).toMatchObject({ sourceId, sourceVersion: 1 });
+      await f.sql`UPDATE opening_help_exposures SET released_at=${startedAt},delivered_at=${startedAt},workspace_history_revision=0
+        WHERE id=${historical.id}`;
+      expect({ outcome: await outcome(), independence: (await projected()).independentAttempt }, pin)
+        .toEqual({ outcome: "passed", independence: "yes" });
+      await f.sql`UPDATE opening_help_exposures SET released_at=${baselineAt},delivered_at=${baselineAt} WHERE id=${historical.id}`;
+      expect(await outcome()).toBe("passed");
+      expect((await projected()).independentAttempt).toBe("yes");
+      await f.sql`DELETE FROM opening_help_exposures WHERE id=${historical.id}`;
+    }
+    // An activity-only receipt counts once the answer captures its delivery.
+    const delivered = await exposures.deliver(f.scope, {
       releaseKey: randomUUID(), origin: "assistant", kind: "hint", level: "hinted", supportDomain: "math",
       contextAnchor: { purpose: "learning_help", courseId, activityId },
     });

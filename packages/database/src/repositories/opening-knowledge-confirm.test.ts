@@ -13,7 +13,7 @@ const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")
 const scope = { workspaceId: id(1), ownerUserId: id(2) }, courseId = id(3), nodeId = id(4), sourceId = id(5), chunkId = id(6);
 const sourceVersions = { [sourceId]: 1 };
 const isEligibilityFragment = (query: string) =>
-  ["AND s.id IN ?", "LIMIT 1 FOR SHARE OF c", "FOR SHARE OF s, v, m"].includes(query.trim());
+  ["LIMIT 1 FOR SHARE OF c", "FOR SHARE OF s, v, m"].includes(query.trim());
 
 function fixture(options: { owner?: boolean; status?: "needs_check" | "supported" | "suggested"; liveVersion?: number; failAudit?: boolean;
   evidence?: string[]; } = {}) {
@@ -35,7 +35,7 @@ function fixture(options: { owner?: boolean; status?: "needs_check" | "supported
     if (query.includes("FROM workspaces")) return Promise.resolve(options.owner === false ? [] : [{ id: scope.workspaceId }]);
     if (query.includes("SELECT version,snapshot")) return Promise.resolve([state]);
     if (query.includes("SELECT s.id,s.version")) return Promise.resolve([{ id: sourceId, version: options.liveVersion ?? 1 }]);
-    if (query.includes("SELECT s.id, s.version")) return Promise.resolve([{ id: sourceId, version: options.liveVersion ?? 1 }]);
+    if (query.includes("SELECT m.asset_id FROM course_asset_memberships")) return Promise.resolve([{ asset_id: sourceId }]);
     if (query.includes("SELECT c.*")) { chunkQueries.push(values); return Promise.resolve([chunk]); }
     if (query.includes("UPDATE opening_course_knowledge")) {
       state = { ...state, version: values[0] as number, snapshot: values[1] as KnowledgeSnapshot };
@@ -74,7 +74,7 @@ function replaceFixture(old: KnowledgeSnapshot, options: { chunks?: ReturnType<t
     const query = strings.join("?");
     if (isEligibilityFragment(query)) return {};
     if (query.includes("SELECT result FROM opening_jobs")) return Promise.resolve([]);
-    if (query.includes("SELECT s.id, s.version")) return Promise.resolve([{ id: sourceId, version: chunks[0]?.source_version ?? 1 }]);
+    if (query.includes("SELECT m.asset_id FROM course_asset_memberships")) return Promise.resolve([{ asset_id: sourceId }]);
     if (query.includes("FROM workspaces")) return Promise.resolve([{ id: scope.workspaceId }]);
     if (query.includes("SELECT version, snapshot")) return Promise.resolve([{ version: 2, snapshot: old,
       source_versions: sourceVersions, node_definitions: definitions }]);
@@ -153,7 +153,7 @@ describe("manual knowledge confirmation transaction (unit, no database)", () => 
       const query = strings.join("?");
       if (isEligibilityFragment(query)) return {};
       if (query.includes("SELECT result FROM opening_jobs")) return Promise.resolve([]);
-      if (query.includes("SELECT s.id, s.version")) return Promise.resolve([{ id: sourceId, version: chunk.sourceVersion }]);
+      if (query.includes("SELECT m.asset_id FROM course_asset_memberships")) return Promise.resolve([{ asset_id: sourceId }]);
       if (query.includes("FROM workspaces")) return Promise.resolve([{ id: scope.workspaceId }]);
       if (query.includes("SELECT version, snapshot")) return Promise.resolve([{ version: 2, snapshot: old,
         source_versions: sourceVersions, node_definitions: { [nodeId]: definition } }]);
