@@ -57,8 +57,8 @@ type RecognizeSourcePage = (input: ParseSourceVisualPageInput) => Promise<ParseS
 export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: OpeningSourceChunksRepository; storage: Storage; runner: ParserRunner; tempDir: string;
   segments?: OpeningPdfSegmentsRepository; segmentPages?: number; segmentTimeoutSeconds?: number; executionPollMs?: number;
   recognizePage?: RecognizeSourcePage;
-  /** Inputs share the original PDF, scope and execution signal, in physical page order. */
-  recognizePages?: (inputs: readonly ParseSourceVisualPageInput[]) => AsyncGenerator<ParseSourceVisualPageResult, void, void>;
+  /** Yields one result per input in physical page order. Null means a cache miss with model routing unavailable. */
+  recognizePages?: (inputs: readonly ParseSourceVisualPageInput[], cacheOnly: boolean) => AsyncGenerator<ParseSourceVisualPageResult | null, void, void>;
   assertCurrent?: (scope: OpeningScope, input: { sourceId: string; sourceVersion: number }) => Promise<void>;
   onSourceReady?: (scope: OpeningScope, input: { sourceId: string; sourceVersion: number }) => Promise<void> }) {
   const parser = createDoclingProcess({ run: deps.runner });
@@ -168,7 +168,10 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Op
         const reusable = saved && (!visual || saved.some(chunk => chunk.imageObjectKey)) ? saved : undefined;
         return { page, visual, saved, reusable };
       };
-      const consumePage = async ({ page, visual, saved, reusable }: ReturnType<typeof preparePage>, recognizePage = deps.recognizePage) => {
+      const consumePage = async ({ page, visual, saved, reusable }: ReturnType<typeof preparePage>,
+        recognizePage: ((input: ParseSourceVisualPageInput) => Promise<ParseSourceVisualPageResult | null>) | undefined =
+          visualRecognitionUnavailable ? undefined : deps.recognizePage,
+      ) => {
         signal.throwIfAborted();
         if (reusable) {
           chunks.push(...reusable);
@@ -177,25 +180,27 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Op
         let text = page.text;
         let imageObjectKey: string | null = null;
         if (isImage && !deps.recognizePage) throw new Error(`visual recognition is required for physical page ${page.page}`);
-        if (visual && !visualRecognitionUnavailable && recognizePage) {
+        if (visual && recognizePage) {
           await assertCurrent?.();
-          let result: ParseSourceVisualPageResult | undefined;
+          let result: ParseSourceVisualPageResult | null;
           try {
             result = await recognizePage(visual);
           } catch (error) {
             if (!(error instanceof OpeningModelRoutingError)) throw error;
-            visualRecognitionUnavailable = true;
+            result = null;
           }
           signal.throwIfAborted();
           await assertCurrent?.();
-          if (!visualRecognitionUnavailable) {
+          if (result === null) {
+            visualRecognitionUnavailable = true;
+          } else {
             if (!result || typeof result.text !== "string" || !result.text.trim() || typeof result.imageObjectKey !== "string" || !result.imageObjectKey.trim()) throw new Error(`visual recognition returned no readable content or image for physical page ${page.page}`);
             const extractionLabel = visual.visualKinds.includes("scan") ? "本地提取（可能含OCR）" : "原生提取";
             text = `${page.text ? `[${extractionLabel}]\n${page.text}\n\n` : ""}[视觉转写与描述]\n${result.text}`;
             imageObjectKey = result.imageObjectKey;
           }
         }
-        if (isPdf && visual && visualRecognitionUnavailable) {
+        if (isPdf && visual && imageObjectKey === null) {
           skippedVisionPages.push(page.page);
           if (saved) { chunks.push(...saved); return; }
         }
@@ -210,13 +215,14 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Op
           segments: deps.segments, signal, segmentPages: deps.segmentPages, timeoutSeconds: deps.segmentTimeoutSeconds,
           onPages: async pages => {
             const prepared = pages.map(preparePage);
-            const recognition = visualRecognitionUnavailable ? undefined
-              : deps.recognizePages?.(prepared.flatMap(({ visual, reusable }) => visual && !reusable ? [visual] : []));
+            const recognition = deps.recognizePages?.(
+              prepared.flatMap(({ visual, reusable }) => visual && !reusable ? [visual] : []), visualRecognitionUnavailable,
+            );
             const recognizePage = recognition ? async () => {
               const next = await recognition.next();
               if (next.done) throw new Error("visual recognition batch ended before all pages were recognized");
               return next.value;
-            } : deps.recognizePage;
+            } : undefined;
             try {
               for (const page of prepared) await consumePage(page, recognizePage);
             } finally { await recognition?.return(); }

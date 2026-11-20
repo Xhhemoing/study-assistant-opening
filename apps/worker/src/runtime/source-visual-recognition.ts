@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { createSourceVisualRecognitionInput, parseSourceVisualRecognitionOutput, isBudgetReplayError, type ModelGateway } from "@aistudy/ai";
+import { createSourceVisualRecognitionInput, parseSourceVisualRecognitionOutput, isBudgetReplayError, OpeningModelRoutingError, type ModelGateway } from "@aistudy/ai";
 import type { OpeningModelSnapshot, ProviderInput, Scope } from "@aistudy/contracts";
 import type { createOpeningSourceVisualRecognitionsRepository, SourceVisualRecord } from "@aistudy/database";
 import type { ParseSourceVisualPageInput, ParseSourceVisualPageResult } from "../jobs/parse-source";
@@ -104,13 +104,13 @@ export function createSourceVisualRecognition(deps: {
     return recognize(input, imageParts);
   }
 
-  async function* recognizePages(inputs: readonly ParseSourceVisualPageInput[]) {
+  async function* recognizePages(inputs: readonly ParseSourceVisualPageInput[], cacheOnly: boolean) {
     for (let start = 0; start < inputs.length; start += MAX_PDF_RENDER_PAGES) {
       const batch = inputs.slice(start, start + MAX_PDF_RENDER_PAGES);
       const { localFilePath, signal } = batch[0]!;
       const entries = [];
       for (const input of batch) entries.push({ input, cached: await readCached(input) });
-      const requests = entries.flatMap(({ input: { sourceId, physicalPage }, cached }) => cached ? [] : [{ sourceId, physicalPage }]);
+      const requests = cacheOnly ? [] : entries.flatMap(({ input: { sourceId, physicalPage }, cached }) => cached ? [] : [{ sourceId, physicalPage }]);
       const bytes = requests.length ? await readFile(localFilePath) : undefined;
       signal.throwIfAborted();
       let images: Awaited<ReturnType<typeof renderPdf>> | undefined;
@@ -129,10 +129,20 @@ export function createSourceVisualRecognition(deps: {
         signal.throwIfAborted();
         if (cached) {
           yield readableResult(cached);
+        } else if (cacheOnly) {
+          yield null;
         } else {
           const index = nextImage++;
           const imageParts = images ? [images[index]!] : await renderPdf(bytes!, [requests[index]!]);
-          yield await recognize(input, imageParts);
+          let result: ParseSourceVisualPageResult | null;
+          try {
+            result = await recognize(input, imageParts);
+          } catch (error) {
+            if (!(error instanceof OpeningModelRoutingError)) throw error;
+            cacheOnly = true;
+            result = null;
+          }
+          yield result;
         }
       }
     }

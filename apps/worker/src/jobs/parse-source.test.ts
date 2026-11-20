@@ -31,7 +31,7 @@ function source(overrides: Partial<SourceRecord> = {}): SourceRecord {
   return { id: sourceId, workspaceId: scope.workspaceId, name: "source.pdf", mime: "application/pdf", bytes: 3, sha256: digest(defaultBytes), version: 7, uploadState: "uploaded", parseState: "not_started", error: null, createdAt: new Date().toISOString(), ...overrides };
 }
 type VisualDeps = Pick<Parameters<typeof createParseSourceHandler>[0], "recognizePage" | "recognizePages">;
-async function deps(input: VisualDeps & { source?: SourceRecord; exitCode?: number; stdout?: string; pageCount?: number; bytes?: Uint8Array; segments?: OpeningPdfSegmentsRepository; published?: SourceChunk[]; assertCurrent?: Parameters<typeof createParseSourceHandler>[0]["assertCurrent"] } = {}) {
+async function deps(input: VisualDeps & { source?: SourceRecord; exitCode?: number; stdout?: string; pageCount?: number; bytes?: Uint8Array; segments?: OpeningPdfSegmentsRepository; segmentPages?: number; published?: SourceChunk[]; assertCurrent?: Parameters<typeof createParseSourceHandler>[0]["assertCurrent"] } = {}) {
   const content = input.bytes ?? defaultBytes;
   const current = input.source ?? source({ bytes: content.byteLength, sha256: digest(content) });
   const states: State[] = [];
@@ -51,7 +51,8 @@ async function deps(input: VisualDeps & { source?: SourceRecord; exitCode?: numb
       chunks: { replaceChunks: async (_scope, input) => { replaceInput = input; states.push("ready"); if (input.warning) warnings.push(input.warning); }, listChunks: async () => [], listChunksAtVersion: async () => input.published ?? [], listForSources: async () => [] },
       storage: { finalKey: () => "final", presignGet: async () => `data:application/pdf;base64,${Buffer.from(content).toString("base64")}` },
       runner: async (...args: Parameters<ParserRunner>) => { argvs.push(args[0]); runs += 1; return { exitCode: input.exitCode ?? 0, stdout: args[0].includes("--inspect-pdf") ? JSON.stringify({ pageCount: input.pageCount ?? 2 }) : input.stdout ?? JSON.stringify({ pages: [{ page: 1, text: "Alpha", imagePath: null }, { page: 2, text: "Beta", imagePath: null }] }) }; },
-      tempDir, segments: input.segments, recognizePage: input.recognizePage, recognizePages: input.recognizePages, assertCurrent: input.assertCurrent,
+      tempDir, segments: input.segments, segmentPages: input.segmentPages,
+      recognizePage: input.recognizePage, recognizePages: input.recognizePages, assertCurrent: input.assertCurrent,
     }),
   }));
   dirs.push(await dirPromise);
@@ -294,6 +295,51 @@ describe("parse source handler", () => {
       { page: 2, text: "Previously recognized scan", imageObjectKey: "trusted/page-2" },
     ] });
     expect(d.warnings).toEqual([]);
+  });
+
+  it.each([
+    { pageCount: 2, cachedPages: [2], missingPages: "1", warnings: 1 },
+    { pageCount: 6, cachedPages: [2, 3, 5], missingPages: "1、4、6", warnings: 3 },
+  ])("publishes cached scans after routing fails on page 1 of a $pageCount-page PDF", async ({ pageCount, cachedPages, missingPages, warnings }) => {
+    const call = vi.fn<ModelGateway["call"]>(async () => { throw new OpeningModelRoutingError("vision route unavailable"); });
+    const renderPdf = vi.fn<NonNullable<Parameters<typeof createSourceVisualRecognition>[0]["renderPdf"]>>(
+      async (_bytes, requests) => requests.map(request => ({ ...request, mediaType: "image/png", data: "data:image/png;base64,cGFnZQ==" })),
+    );
+    const visual = createSourceVisualRecognition({
+      repository: {
+        read: async (_scope, { physicalPage }) => cachedPages.includes(physicalPage) ? {
+          result: { transcription: `Cached readable transcription for page ${physicalPage}`, description: "", uncertainties: [], contentKinds: ["text"] },
+          modelSnapshot: { id: "vision", providerId: "test", modelName: "vision", inputCentsPerMillion: 10, outputCentsPerMillion: 50 },
+          operationId: `stored-page-${physicalPage}`, imageObjectKey: "final",
+        } : null,
+        save: async () => { throw new Error("unexpected recognition write"); },
+        assertCurrent: async () => {}, ledger: async () => "unsent", releasedReservation: async () => null,
+      },
+      gateway: { call }, budget: () => ({
+        reserve: async () => { throw new Error("unexpected budget reservation"); },
+        claimExecution: async () => false, release: async () => {}, settle: async () => {}, markUnknown: async () => {},
+      }),
+      storage: { finalKey: () => "final" }, renderPdf,
+    });
+    const pages = Array.from({ length: pageCount }, (_, index) => ({
+      page: index + 1, text: "", imagePath: null, visualKinds: ["scan" as const],
+    }));
+    const d = await deps({ ...visual, pageCount, segmentPages: 4, segments: {
+      assertCurrent: async () => {}, save: async () => {},
+      read: async (_scope, { pageStart, pageEnd }) => ({ state: "ready", pages: pages.slice(pageStart - 1, pageEnd) }),
+    } });
+
+    await expect(d.handler(job, { sourceId })).resolves.toEqual({ pages: pageCount, warnings, degraded: true });
+
+    expect(d.states).toEqual(["ready"]);
+    expect(d.replaceInput()).toMatchObject({ chunks: cachedPages.map(page => ({
+      page, text: expect.stringContaining(`Cached readable transcription for page ${page}`), imageObjectKey: "final",
+    })) });
+    expect(d.warnings).toEqual([{ code: "PARSE_PARTIAL", message: `第 ${missingPages} 页未能识别，可以重新解析`, retryable: true }]);
+    expect(call).toHaveBeenCalledExactlyOnceWith(scope, "materials.recognize-page", expect.objectContaining({
+      input: expect.objectContaining({ imageParts: [expect.objectContaining({ physicalPage: 1 })] }),
+    }));
+    expect(renderPdf).toHaveBeenCalledExactlyOnceWith(defaultBytes, [{ sourceId, physicalPage: 1 }]);
   });
 
   it("preserves local PDF text and skips remaining recognition after a routing error", async () => {

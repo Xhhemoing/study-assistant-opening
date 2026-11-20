@@ -48,11 +48,11 @@ async function fixture(complete = vi.fn(async (_input: ProviderInput) => respons
   const gateway = createModelGateway({ resolve: async () => resolvedModel(complete),
     ...(fallback ? { resolveFallback: async () => resolvedModel(fallback, "controlled-fallback") } : {}) });
   const repository = createOpeningSourceVisualRecognitionsRepository(f.sql);
-  const recognizePage = createSourceVisualRecognition({ repository, gateway, budget: scope => scopeBudget(budget, scope), storage });
   const chunks = createOpeningSourceChunksRepository(f.sql), tempDir = await mkdtemp(path.join(os.tmpdir(), "aistudy-visual-chain-"));
   dirs.push(tempDir);
   const parse = createParseSourceHandler({ sources: createOpeningSourceRepository(f.sql), chunks, storage,
-    runner: async () => { throw new Error("image input must not run the document parser"); }, tempDir, recognizePage,
+    runner: async () => { throw new Error("image input must not run the document parser"); }, tempDir,
+    ...createSourceVisualRecognition({ repository, gateway, budget: scope => scopeBudget(budget, scope), storage }),
     assertCurrent: (scope, input) => repository.assertCurrent(scope, input) });
   return { sourceId, job, makeJob, parse, budget, gateway, repository, chunks, complete };
 }
