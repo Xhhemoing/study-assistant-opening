@@ -36,7 +36,13 @@ const fixturesPath = resolve(
   __dirname,
   "../../../../../../docs/brainstorm/2026-11-18-knowledge-assets-examples.json",
 );
-const fixtures = JSON.parse(readFileSync(fixturesPath, "utf8")) as SyntheticAssetGraphFixtures;
+const designFixtures = JSON.parse(readFileSync(fixturesPath, "utf8")) as SyntheticAssetGraphFixtures;
+const fixtures: SyntheticAssetGraphFixtures = {
+  cases: designFixtures.cases.map(item => ({
+    ...item,
+    request: { body: { ...(item.request.body as object), includeKnowledgeEdgeDetails: true } },
+  })),
+};
 
 function fixtureCase(name: string) {
   const found = fixtures.cases.find(item => item.name === name);
@@ -324,6 +330,39 @@ describe("createAssetGraphStore", () => {
     expect(store.getState().selectedNodeId).toBe(REQ_ID);
     expect(Object.keys(store.getState().nodesById)).toEqual([REQ_ID, OBS_ID]);
     expect(store.getState().nodesById[SOURCE_1_ID]).toBeUndefined();
+  });
+
+  it("restarts from page one in legacy mode after a strict server rejects the opt-in on pagination", async () => {
+    const enriched = fixtureCase("synthetic-home-01-default-workspace-roots").response as AssetGraphPage;
+    const legacy = fixtureCase("synthetic-unscoped-01-workspace-document-roots").response as AssetGraphPage;
+    const queries: AssetGraphQuery[] = [];
+    const transport: AssetGraphTransport = async query => {
+      queries.push(query);
+      if (query.op === "roots" && query.cursor) {
+        throw new AssetGraphRequestError("VALIDATION", "Unknown query field", 400);
+      }
+      if (query.includeKnowledgeEdgeDetails) {
+        return { ...enriched, page: { nextCursor: "enriched-only-cursor" } };
+      }
+      return legacy;
+    };
+    const store = createAssetGraphStore(createAssetGraphClient(transport));
+
+    await store.initialize();
+    store.togglePinNode(enriched.nodes[0]!.id);
+    await store.loadMoreRoots();
+    expect(queries).toMatchObject([
+      { includeKnowledgeEdgeDetails: true },
+      { includeKnowledgeEdgeDetails: true, cursor: "enriched-only-cursor" },
+      { op: "roots" },
+    ]);
+    expect(queries[2]).not.toHaveProperty("cursor");
+    expect(queries[2]).not.toHaveProperty("includeKnowledgeEdgeDetails");
+    expect(store.getState().pinnedComparison).toBeNull();
+    expect(getVisibleNodes(store.getState()).map(node => node.id)).toEqual(legacy.nodes.map(node => node.id));
+
+    await store.selectLens("assets");
+    expect(queries.at(-1)).not.toHaveProperty("includeKnowledgeEdgeDetails");
   });
 
   it("handles 409 CURSOR_STALE on roots and neighbors by restarting the exact operation once", async () => {

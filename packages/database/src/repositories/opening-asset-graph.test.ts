@@ -75,7 +75,7 @@ type MockDbState = {
   courses: Array<{ id: string; title: string; updated_at: string }>;
   goals: Array<Record<string, unknown>>;
   requirements: Array<Record<string, unknown>>;
-  knowledge: Array<{ course_id: string; version: number; snapshot: unknown; updated_at: string }>;
+  knowledge: Array<{ course_id: string; version: number; snapshot: unknown; updated_at: string; source_versions?: Record<string, number> }>;
   sources: Array<{
     id: string;
     name: string;
@@ -107,7 +107,15 @@ type MockDbState = {
     course_id: string;
     asset_type: string;
     asset_id: string;
+    purpose?: string | null;
     updated_at: string;
+  }>;
+  sourceChunks?: Array<{
+    id: string;
+    source_id: string;
+    source_version: number;
+    page: number | null;
+    availability?: "available" | "unavailable";
   }>;
   assetLinks: Array<Record<string, unknown>>;
   sharedLinks?: Array<Record<string, unknown>>;
@@ -497,6 +505,46 @@ function createHarness(state: MockDbState) {
     if (text.startsWith("SELECT source_id FROM opening_privacy_exclusions")) return Promise.resolve(state.exclusions);
     if (text.startsWith("SELECT id FROM opening_sources")) return Promise.resolve(state.allSourceIds);
     if (text.startsWith("SELECT id, title, status, course_id")) return Promise.resolve(state.explorations);
+    if (text.includes("FROM opening_source_chunks c")) {
+      const courseIds = Array.isArray(values[1]) ? new Set(values[1].map(String)) : new Set<string>();
+      const chunkIds = Array.isArray(values[2]) ? new Set(values[2].map(String)) : new Set<string>();
+      const visibleSourceIds = new Set((values[3] as string[] | undefined) ?? []);
+      const excluded = new Set(state.exclusions.map(e => String(e.source_id)));
+      const sourceById = new Map(state.sources.map(s => [String(s.id), s]));
+      const rows: Array<{
+        id: string;
+        source_id: string;
+        source_version: number;
+        page: number | null;
+        course_id: string;
+      }> = [];
+      for (const chunk of state.sourceChunks ?? []) {
+        if (!chunkIds.has(chunk.id) || !visibleSourceIds.has(chunk.source_id)) continue;
+        if (chunk.availability === "unavailable") continue;
+        const src = sourceById.get(chunk.source_id);
+        if (!src) continue;
+        if (src.upload_state !== "uploaded" || src.parse_state !== "ready") continue;
+        if (src.version !== chunk.source_version) continue;
+        if (excluded.has(src.id) || src.ai_excluded) continue;
+        for (const membership of state.memberships) {
+          if (
+            membership.asset_type === "source" &&
+            membership.asset_id === src.id &&
+            courseIds.has(membership.course_id) &&
+            (membership.purpose == null || membership.purpose === "teaching")
+          ) {
+            rows.push({
+              id: chunk.id,
+              source_id: chunk.source_id,
+              source_version: chunk.source_version,
+              page: chunk.page,
+              course_id: membership.course_id,
+            });
+          }
+        }
+      }
+      return Promise.resolve(rows);
+    }
     if (text.includes("FROM course_asset_memberships")) {
       const courseParam = Array.isArray(values[1]) ? new Set(values[1].map(String)) : null;
       return Promise.resolve(
@@ -1002,6 +1050,7 @@ describe("createOpeningAssetGraphRepository (unit)", () => {
       lens: "structure",
       focus: `knowledge/${COURSE_1}/${KN_2}`,
       direction: "out",
+      includeKnowledgeEdgeDetails: true,
     });
     expect(knOut.edges).toEqual([
       {
@@ -1010,6 +1059,8 @@ describe("createOpeningAssetGraphRepository (unit)", () => {
         to: `knowledge/${COURSE_1}/${KN_1}`,
         relation: "appliesTo",
         basis: "suggested",
+        knowledgeStatus: "suggested",
+        evidenceRefs: [],
       },
     ]);
   });
@@ -2612,5 +2663,346 @@ describe("createOpeningAssetGraphRepository (unit)", () => {
       }),
     ).rejects.toMatchObject({ code: "CURSOR_STALE" });
     expect((await getFirstPage()).edges).toEqual([]);
+  });
+});
+
+describe("honest knowledgeStatus edge projection and live chunk re-verification", () => {
+  const CHUNK_1 = "dddddddd-dddd-4ddd-8ddd-ddddddddddd1";
+  const CHUNK_2 = "dddddddd-dddd-4ddd-8ddd-ddddddddddd2";
+  const CHUNK_ZERO_PAGE = "dddddddd-dddd-4ddd-8ddd-ddddddddddd3";
+  const KN_3 = "77777777-7777-4777-8777-777777777773";
+
+  it("projects verified sourceNodeId/sourceVersion/positive page for supported edges and omits non-positive or null page", async () => {
+    const state = makeBaseState();
+    state.sourceChunks = [
+      { id: CHUNK_1, source_id: SRC_1, source_version: 2, page: 12 },
+      { id: CHUNK_ZERO_PAGE, source_id: SRC_1, source_version: 2, page: 0 },
+    ];
+    state.knowledge = [
+      {
+        course_id: COURSE_1,
+        version: 4,
+        updated_at: "2026-11-18T01:00:00.000Z",
+        snapshot: {
+          courseId: COURSE_1,
+          version: 4,
+          nodes: [
+            { id: KN_1, courseId: COURSE_1, label: "线性组合", kind: "concept", evidenceChunkIds: [CHUNK_1], status: "supported" },
+            { id: KN_2, courseId: COURSE_1, label: "线性相关", kind: "concept", evidenceChunkIds: [CHUNK_ZERO_PAGE], status: "supported" },
+            { id: KN_3, courseId: COURSE_1, label: "线性无关", kind: "concept", evidenceChunkIds: [], status: "needs_check" },
+          ],
+          edges: [
+            { from: KN_1, to: KN_2, kind: "prerequisite", evidenceChunkIds: [CHUNK_1], status: "supported" },
+            { from: KN_1, to: KN_3, kind: "contains", evidenceChunkIds: [CHUNK_ZERO_PAGE], status: "supported" },
+          ],
+        } satisfies KnowledgeSnapshot,
+      },
+    ];
+    const { repo, executedSql } = createHarness(state);
+
+    const out = await repo.query(SCOPE, {
+      op: "neighbors",
+      context: { kind: "course", id: `course/${COURSE_1}` },
+      lens: "structure",
+      focus: `knowledge/${COURSE_1}/${KN_1}`,
+      direction: "out",
+        includeKnowledgeEdgeDetails: true,
+    });
+
+    const prereq = out.edges.find(e => e.relation === "prerequisite");
+    expect(prereq).toEqual({
+      id: `recorded:prerequisite:knowledge/${COURSE_1}/${KN_1}:knowledge/${COURSE_1}/${KN_2}`,
+      from: `knowledge/${COURSE_1}/${KN_1}`,
+      to: `knowledge/${COURSE_1}/${KN_2}`,
+      relation: "prerequisite",
+      basis: "recorded",
+      knowledgeStatus: "supported",
+      sourceNodeId: `source/${SRC_1}`,
+      sourceVersion: 2,
+      page: 12,
+      evidenceRefs: [{ sourceId: SRC_1, sourceVersion: 2, chunkId: CHUNK_1, page: 12 }],
+    });
+
+    const contains = out.edges.find(e => e.relation === "contains");
+    expect(contains).toEqual({
+      id: `recorded:contains:knowledge/${COURSE_1}/${KN_1}:knowledge/${COURSE_1}/${KN_3}`,
+      from: `knowledge/${COURSE_1}/${KN_1}`,
+      to: `knowledge/${COURSE_1}/${KN_3}`,
+      relation: "contains",
+      basis: "recorded",
+      knowledgeStatus: "supported",
+      sourceNodeId: `source/${SRC_1}`,
+      sourceVersion: 2,
+      evidenceRefs: [{ sourceId: SRC_1, sourceVersion: 2, chunkId: CHUNK_ZERO_PAGE }],
+    });
+    expect("page" in contains!).toBe(false);
+
+    // Ensure SQL never selects chunk text or chunk_index.
+    const chunkQueries = executedSql.filter(q => q.includes("FROM opening_source_chunks c"));
+    expect(chunkQueries).toHaveLength(1);
+    expect(chunkQueries[0]).not.toMatch(/\bc\.text\b|\bchunk_index\b/);
+  });
+
+  it("read-only downgrades supported edges to needs_check and omits provenance when chunks fail live re-verification", async () => {
+    const buildState = () => {
+      const state = makeBaseState();
+      state.sourceChunks = [{ id: CHUNK_1, source_id: SRC_1, source_version: 2, page: 7 }];
+      state.knowledge = [
+        {
+          course_id: COURSE_1,
+          version: 4,
+          updated_at: "2026-11-18T01:00:00.000Z",
+          snapshot: {
+            courseId: COURSE_1,
+            version: 4,
+            nodes: [
+              { id: KN_1, courseId: COURSE_1, label: "线性组合", kind: "concept", evidenceChunkIds: [CHUNK_1], status: "supported" },
+              { id: KN_2, courseId: COURSE_1, label: "线性相关", kind: "concept", evidenceChunkIds: [], status: "supported" },
+            ],
+            edges: [
+              { from: KN_1, to: KN_2, kind: "prerequisite", evidenceChunkIds: [CHUNK_1], status: "supported" },
+            ],
+          } satisfies KnowledgeSnapshot,
+        },
+      ];
+      return state;
+    };
+
+    const queryEdge = async (state: MockDbState) => {
+      const { repo } = createHarness(state);
+      const res = await repo.query(SCOPE, {
+        op: "neighbors",
+        context: { kind: "course", id: `course/${COURSE_1}` },
+        lens: "structure",
+        focus: `knowledge/${COURSE_1}/${KN_1}`,
+        direction: "out",
+        includeKnowledgeEdgeDetails: true,
+      });
+      return res.edges.find(e => e.relation === "prerequisite");
+    };
+
+    for (const condition of ["excluded", "deleted", "reference", "mock_exam", "practice"]) {
+      const state = buildState();
+      state.knowledge[0]!.source_versions = { [SRC_1]: 2 };
+      if (condition === "excluded") state.exclusions = [{ source_id: SRC_1 }];
+      else if (condition === "deleted") state.allSourceIds = state.allSourceIds.filter(row => row.id !== SRC_1);
+      else state.memberships[0]!.purpose = condition;
+
+      const { repo } = createHarness(state);
+      const focus = `knowledge/${COURSE_1}/${KN_1}`;
+      const context = { kind: "course", id: `course/${COURSE_1}` } as const;
+      const roots = await repo.query(SCOPE, { op: "roots", context, lens: "structure", kinds: ["knowledge"] });
+      expect(roots.nodes).toEqual([]);
+      await expect(repo.query(SCOPE, { op: "detail", context, lens: "structure", focus }))
+        .rejects.toMatchObject({ code: "NOT_FOUND" });
+      await expect(queryEdge(state)).rejects.toMatchObject({ code: "NOT_FOUND" });
+    }
+
+    const partial = buildState();
+    partial.knowledge[0]!.source_versions = { [SRC_1]: 2 };
+    (partial.knowledge[0]!.snapshot as KnowledgeSnapshot).edges[0]!.evidenceChunkIds.push(CHUNK_2);
+    expect(await queryEdge(partial)).toEqual({
+      id: `recorded:prerequisite:knowledge/${COURSE_1}/${KN_1}:knowledge/${COURSE_1}/${KN_2}`,
+      from: `knowledge/${COURSE_1}/${KN_1}`,
+      to: `knowledge/${COURSE_1}/${KN_2}`,
+      relation: "prerequisite",
+      basis: "recorded",
+      knowledgeStatus: "needs_check",
+      evidenceRefs: [],
+    });
+
+    // 3. Unlinked membership -> needs_check without provenance
+    const sUnlinked = buildState();
+    sUnlinked.memberships = [];
+    expect(await queryEdge(sUnlinked)).toEqual({
+      id: `recorded:prerequisite:knowledge/${COURSE_1}/${KN_1}:knowledge/${COURSE_1}/${KN_2}`,
+      from: `knowledge/${COURSE_1}/${KN_1}`,
+      to: `knowledge/${COURSE_1}/${KN_2}`,
+      relation: "prerequisite",
+      basis: "recorded",
+      knowledgeStatus: "needs_check",
+      evidenceRefs: [],
+    });
+
+    // 4. Unavailable source version -> needs_check without provenance
+    const sUnavailable = buildState();
+    sUnavailable.sourceChunks![0]!.availability = "unavailable";
+    expect(await queryEdge(sUnavailable)).toEqual({
+      id: `recorded:prerequisite:knowledge/${COURSE_1}/${KN_1}:knowledge/${COURSE_1}/${KN_2}`,
+      from: `knowledge/${COURSE_1}/${KN_1}`,
+      to: `knowledge/${COURSE_1}/${KN_2}`,
+      relation: "prerequisite",
+      basis: "recorded",
+      knowledgeStatus: "needs_check",
+      evidenceRefs: [],
+    });
+  });
+
+  it("unions verified evidence from duplicate supported edges within the winning status", async () => {
+    const state = makeBaseState();
+    const reviewChunk = "dddddddd-dddd-4ddd-8ddd-ddddddddddd4";
+    state.sourceChunks = [
+      { id: CHUNK_1, source_id: SRC_1, source_version: 2, page: 5 },
+      { id: CHUNK_ZERO_PAGE, source_id: SRC_1, source_version: 2, page: 0 },
+      { id: reviewChunk, source_id: SRC_1, source_version: 2, page: 1 },
+    ];
+    state.knowledge = [
+      {
+        course_id: COURSE_1,
+        version: 4,
+        updated_at: "2026-11-18T01:00:00.000Z",
+        snapshot: {
+          courseId: COURSE_1,
+          version: 4,
+          nodes: [
+            { id: KN_1, courseId: COURSE_1, label: "线性组合", kind: "concept", evidenceChunkIds: [], status: "supported" },
+            { id: KN_2, courseId: COURSE_1, label: "线性相关", kind: "concept", evidenceChunkIds: [], status: "supported" },
+            { id: KN_3, courseId: COURSE_1, label: "线性无关", kind: "concept", evidenceChunkIds: [], status: "supported" },
+          ],
+          edges: [
+            // KN_1 -> KN_2: suggested + needs_check + verified supported => supported wins
+            { from: KN_1, to: KN_2, kind: "prerequisite", evidenceChunkIds: [], status: "suggested" },
+            { from: KN_1, to: KN_2, kind: "prerequisite", evidenceChunkIds: [reviewChunk], status: "needs_check" },
+            { from: KN_1, to: KN_2, kind: "prerequisite", evidenceChunkIds: [CHUNK_ZERO_PAGE], status: "supported" },
+            { from: KN_1, to: KN_2, kind: "prerequisite", evidenceChunkIds: [CHUNK_1], status: "supported" },
+            { from: KN_1, to: KN_2, kind: "prerequisite", evidenceChunkIds: [CHUNK_1], status: "supported" },
+            { from: KN_1, to: KN_2, kind: "prerequisite", evidenceChunkIds: [reviewChunk, CHUNK_2], status: "supported" },
+            // KN_1 -> KN_3: suggested + unverified supported (downgraded to needs_check) => needs_check wins over suggested
+            { from: KN_1, to: KN_3, kind: "contains", evidenceChunkIds: [], status: "suggested" },
+            { from: KN_1, to: KN_3, kind: "contains", evidenceChunkIds: [CHUNK_2], status: "supported" },
+          ],
+        } satisfies KnowledgeSnapshot,
+      },
+    ];
+
+    const { repo } = createHarness(state);
+    const out = await repo.query(SCOPE, {
+      op: "neighbors",
+      context: { kind: "course", id: `course/${COURSE_1}` },
+      lens: "structure",
+      focus: `knowledge/${COURSE_1}/${KN_1}`,
+      direction: "out",
+        includeKnowledgeEdgeDetails: true,
+    });
+
+    expect(out.edges).toEqual([
+      {
+        id: `recorded:contains:knowledge/${COURSE_1}/${KN_1}:knowledge/${COURSE_1}/${KN_3}`,
+        from: `knowledge/${COURSE_1}/${KN_1}`,
+        to: `knowledge/${COURSE_1}/${KN_3}`,
+        relation: "contains",
+        basis: "recorded",
+        knowledgeStatus: "needs_check",
+        evidenceRefs: [],
+      },
+      {
+        id: `recorded:prerequisite:knowledge/${COURSE_1}/${KN_1}:knowledge/${COURSE_1}/${KN_2}`,
+        from: `knowledge/${COURSE_1}/${KN_1}`,
+        to: `knowledge/${COURSE_1}/${KN_2}`,
+        relation: "prerequisite",
+        basis: "recorded",
+        knowledgeStatus: "supported",
+        sourceNodeId: `source/${SRC_1}`,
+        sourceVersion: 2,
+        page: 5,
+        evidenceRefs: [
+          { sourceId: SRC_1, sourceVersion: 2, chunkId: CHUNK_1, page: 5 },
+          { sourceId: SRC_1, sourceVersion: 2, chunkId: CHUNK_ZERO_PAGE },
+        ],
+      },
+    ]);
+  });
+
+  it("invalidates neighbor cursors with CURSOR_STALE on source unlinking, purpose change, privacy exclusion, or graph rebuild", async () => {
+    const state = makeBaseState();
+    state.sourceChunks = [{ id: CHUNK_1, source_id: SRC_1, source_version: 2, page: 9 }];
+    state.knowledge = [
+      {
+        course_id: COURSE_1,
+        version: 4,
+        updated_at: "2026-11-18T01:00:00.000Z",
+        snapshot: {
+          courseId: COURSE_1,
+          version: 4,
+          nodes: [
+            { id: KN_1, courseId: COURSE_1, label: "线性组合", kind: "concept", evidenceChunkIds: [CHUNK_1], status: "supported" },
+            { id: KN_2, courseId: COURSE_1, label: "线性相关", kind: "concept", evidenceChunkIds: [], status: "supported" },
+            { id: KN_3, courseId: COURSE_1, label: "线性无关", kind: "concept", evidenceChunkIds: [], status: "supported" },
+          ],
+          edges: [
+            { from: KN_1, to: KN_2, kind: "prerequisite", evidenceChunkIds: [CHUNK_1], status: "supported" },
+            { from: KN_1, to: KN_3, kind: "contains", evidenceChunkIds: [], status: "suggested" },
+          ],
+        } satisfies KnowledgeSnapshot,
+      },
+    ];
+
+    const { repo } = createHarness(state);
+    const readPage1 = () =>
+      repo.query(SCOPE, {
+        op: "neighbors",
+        context: { kind: "course", id: `course/${COURSE_1}` },
+        lens: "structure",
+        focus: `knowledge/${COURSE_1}/${KN_1}`,
+        direction: "out",
+        includeKnowledgeEdgeDetails: true,
+        limit: 1,
+      });
+
+    // 1. Membership purpose change -> CURSOR_STALE
+    const p1 = await readPage1();
+    expect(p1.page.nextCursor).toBeTruthy();
+    state.memberships[0]!.purpose = "reference";
+    await expect(
+      repo.query(SCOPE, {
+        op: "neighbors",
+        context: { kind: "course", id: `course/${COURSE_1}` },
+        lens: "structure",
+        focus: `knowledge/${COURSE_1}/${KN_1}`,
+        direction: "out",
+        includeKnowledgeEdgeDetails: true,
+        limit: 1,
+        cursor: p1.page.nextCursor!,
+      }),
+    ).rejects.toMatchObject({ code: "CURSOR_STALE" });
+
+    // 2. Restore purpose, then privacy exclusion (without privacyEpoch bump) -> CURSOR_STALE
+    state.memberships[0]!.purpose = "teaching";
+    const p2 = await readPage1();
+    expect(p2.page.nextCursor).toBeTruthy();
+    state.exclusions = [{ source_id: SRC_1 }];
+    state.sources[0]!.ai_excluded = true;
+    await expect(
+      repo.query(SCOPE, {
+        op: "neighbors",
+        context: { kind: "course", id: `course/${COURSE_1}` },
+        lens: "structure",
+        focus: `knowledge/${COURSE_1}/${KN_1}`,
+        direction: "out",
+        includeKnowledgeEdgeDetails: true,
+        limit: 1,
+        cursor: p2.page.nextCursor!,
+      }),
+    ).rejects.toMatchObject({ code: "CURSOR_STALE" });
+
+    // 3. Restore privacy, then knowledge graph version rebuild -> CURSOR_STALE
+    state.exclusions = [];
+    state.sources[0]!.ai_excluded = false;
+    const p3 = await readPage1();
+    expect(p3.page.nextCursor).toBeTruthy();
+    (state.knowledge[0]!.snapshot as KnowledgeSnapshot).version = 5;
+    state.knowledge[0]!.version = 5;
+    await expect(
+      repo.query(SCOPE, {
+        op: "neighbors",
+        context: { kind: "course", id: `course/${COURSE_1}` },
+        lens: "structure",
+        focus: `knowledge/${COURSE_1}/${KN_1}`,
+        direction: "out",
+        includeKnowledgeEdgeDetails: true,
+        limit: 1,
+        cursor: p3.page.nextCursor!,
+      }),
+    ).rejects.toMatchObject({ code: "CURSOR_STALE" });
   });
 });

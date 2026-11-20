@@ -1394,12 +1394,16 @@ it("keeps a delayed retest separate from an active ordinary transfer check",asyn
   const retests=createOpeningCourseRouteRetestRepository(f.sql),snapshot=await x.repo.read(f.scope,x.courseId,baseline.activity.id);
   const receipt=await retests.schedule(f.scope,x.courseId,{goalId:x.goal.id,expectedGoalRevision:1,activityId:baseline.activity.id,
     expectedPathVersion:snapshot.currentActivity!.pathVersion,observationId:answered.observation.id,clientKey:randomUUID(),minutes:20});
-  const task=await retests.readTask(f.scope,x.courseId,receipt.taskId);
+  const task=await retests.readTask(f.scope,x.courseId,receipt.taskId,{includeRetestId:true});
   expect(task.managed).toBe(true);if(!task.managed)throw new Error("Expected managed retest");
+  expect(task.retestId).toBe(receipt.retestId);
   const request={goalId:task.goalId,expectedGoalRevision:task.expectedGoalRevision,requirementId:task.requirementId,
     expectedRequirementRevision:task.expectedRequirementRevision,taskId:task.taskId,expectedTaskVersion:task.expectedTaskVersion,
     clientKey:randomUUID(),minutes:task.minutes};
-  const started=ready(await x.repo.start(f.scope,x.courseId,request));
+  await f.sql`UPDATE opening_tasks SET version=version+1 WHERE id=${task.taskId} AND workspace_id=${f.scope.workspaceId}`;
+  await expect(x.repo.start(f.scope,x.courseId,{...request,expectedRetestId:receipt.retestId})).rejects.toMatchObject({code:"CONFLICT"});
+  request.expectedTaskVersion++;
+  const started=ready(await x.repo.start(f.scope,x.courseId,{...request,expectedRetestId:receipt.retestId}));
   const retestDecision=await activityDecision(started);expect(retestDecision.reasonCodes).toContain("accepted_retest_transfer_check");
   expect(retestDecision.evidenceRefs).toContain(`retest:${receipt.retestId}`);
   expect(started.activity.id).not.toBe(ordinary.activity.id);

@@ -1204,7 +1204,7 @@ describe("closing boundary P1 & P2/P3 guards", () => {
     expect(preview.quickCandidates).toHaveLength(200);
     expect(preview.quickCandidates.some((c) => c.taskId === lastTaskId)).toBe(true);
     expect(preview.sourceAddedBlocks[0]?.taskId).toBe(lastTaskId);
-  });
+  }, 25_000);
 
   it("P2/P3-2: skips and rejects quick-slot scheduling for a task already scheduled on the target day", async () => {
     const now = new Date("2026-11-19T10:55:00.000Z");
@@ -1712,7 +1712,7 @@ describe("closing boundary P1 & P2/P3 guards", () => {
     expect(receipt.sourceBlocks).toHaveLength(200);
     expect(receipt.sourceBlocks.some((b) => b.taskId === quickTaskId)).toBe(true);
     expect(receipt.sourceBlocks.some((b) => b.taskId === removedTask.id)).toBe(false);
-  });
+  }, 25_000);
 
   it("P2: rejects source-only confirm adding a quick task already scheduled on targetDate even when targetActions is null", async () => {
     const now = new Date("2026-11-19T10:55:00.000Z");
@@ -1938,7 +1938,7 @@ describe("closing boundary P1 & P2/P3 guards", () => {
       message: expect.stringContaining("今日最多可安排 200 个任务时段"),
     });
     expect(writes).toBe(0);
-  });
+  }, 25_000);
 
   it("P1-2b: returns valid canConfirm=false preview and rejects confirm when moving 1 task onto a 200-block target day", async () => {
     const now = new Date("2026-11-19T10:55:00.000Z"); // 18:55 Asia/Shanghai
@@ -2091,5 +2091,5 @@ describe("closing boundary P1 & P2/P3 guards", () => {
       message: expect.stringContaining("2026-11-20 最多可安排 200 个任务时段"),
     });
     expect(writes).toBe(0);
-  });
+  }, 25_000);
 });

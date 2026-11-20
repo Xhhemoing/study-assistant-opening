@@ -300,16 +300,18 @@ describe("opening tutor turn durable path (guarded)", () => {
     const { deps, provider } = buildDeps(actualChunkId);
     const fetchImpl = vi.fn(async (_url: unknown, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body));
-      // Prove server history reached the real adapter HTTP body (fetch-only mock).
-      // messages[0]=system, then prior user/assistant, then current question+chunks.
+      // Prove server history and prefix-cached source context reached the real adapter HTTP body.
+      // messages[0]=system, messages[1..2]=source chunks+ack, messages[3..4]=prior history, messages[5]=current question.
       expect(body.messages[0].role).toBe("system");
-      expect(body.messages.slice(1, 3)).toEqual([
+      expect(body.messages[1].role).toBe("user");
+      expect(body.messages[1].content).toContain("Newton wrote the laws of motion");
+      expect(body.messages[1].content).toContain(actualChunkId);
+      expect(body.messages[2].role).toBe("assistant");
+      expect(body.messages.slice(3, 5)).toEqual([
         { role: "user", content: "what did we cover yesterday" },
         { role: "assistant", content: "we covered inertia" },
       ]);
-      expect(body.messages[3].content).toContain("explain the laws of motion");
-      expect(body.messages[3].content).toContain("Newton wrote the laws of motion");
-      expect(body.messages[3].content).toContain(actualChunkId);
+      expect(body.messages[5].content).toBe("explain the laws of motion");
       return new Response(JSON.stringify({
         choices: [{ message: { content: JSON.stringify({
           text: "The laws of motion are F = ma.", citedChunkIds: [actualChunkId],
