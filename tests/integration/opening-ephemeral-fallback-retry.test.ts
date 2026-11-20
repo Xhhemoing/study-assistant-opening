@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
-import { OpeningProviderError, runBudgetedCall, type BudgetedRepository, type ResolvedTaskModel } from "@aistudy/ai";
+import { OpeningProviderError, runBudgetedCall, withModelFallback, type BudgetedRepository, type ResolvedTaskModel } from "@aistudy/ai";
 import { createOpeningBudgetRepository, createOpeningEphemeralProvenanceRepository } from "@aistudy/database";
 import { createEphemeralTutorService } from "../../apps/web/src/features/opening/tutor/ephemeral-service";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
@@ -20,6 +20,13 @@ function ledger() {
     markUnknown: id => repo.markUnknown(f.scope, id),
   };
   return { repo, budget };
+}
+
+function model(name: string, complete: ResolvedTaskModel["provider"]["complete"]): ResolvedTaskModel {
+  return {
+    provider: { complete }, inputCentsPerMillion: 1, outputCentsPerMillion: 1,
+    modelSnapshot: { id: name, providerId: "controlled", modelName: name, inputCentsPerMillion: 1, outputCentsPerMillion: 1 },
+  };
 }
 
 it.each(["old-to-new", "new-to-old", "unclaimed-legacy", "unclaimed-encoded"] as const)("reuses the paid reservation and its provenance for %s", async scenario => {
@@ -69,16 +76,65 @@ it.each(["old-to-new", "new-to-old", "unclaimed-legacy", "unclaimed-encoded"] as
   expect(await provenance.resolveHistory(scope, [{ provenanceId: existingId }], 0)).toEqual([]);
 });
 
+it.each(["pre-reservation failure", "released not_sent"] as const)("fences both rollback retry routes after %s", async primaryFailure => {
+  const { budget } = ledger();
+  const { scope } = f;
+  const clientKey = randomUUID(), requestId = `eph:${clientKey}`;
+  const parentBudget = { id: `study-ephemeral:${scope.workspaceId}:${clientKey}` };
+  const notSent = new OpeningProviderError("PROVIDER_AUTH", "bad credentials");
+  const primaryCall = vi.fn(async () => { throw notSent; });
+  const paidCall = vi.fn(async () => ({
+    text: "answered", citedChunkIds: [], candidates: [], requestId: "paid", inputTokens: 1, outputTokens: 1,
+  }));
+  const primary = model("primary", primaryCall), fallback = model("fallback", paidCall);
+  const service = createEphemeralTutorService({
+    budget, provider: null,
+    resolveModel: async () => {
+      if (primaryFailure === "pre-reservation failure") throw notSent;
+      return primary;
+    },
+    resolveFallbackModel: async () => fallback,
+    sources: { listOwnedIds: async () => [] }, chunks: { listForSources: async () => [] },
+    privacy: { snapshot: async () => ({ epoch: 0, excludedSourceIds: [] }), currentEpoch: async () => 0 },
+    config: { maxContextCharacters: 1000, maxOutputTokens: 32, reservedCents: 10, inputCentsPerMillion: 1, outputCentsPerMillion: 1 },
+  });
+  const request = { text: "Explain", sourceIds: [], history: [], clientKey };
+  await expect(service.replyEphemeral(scope, request)).resolves.toMatchObject({ text: "answered" });
+  expect(primaryCall).toHaveBeenCalledTimes(primaryFailure === "released not_sent" ? 1 : 0);
+  expect(paidCall).toHaveBeenCalledOnce();
+
+  // The rollback release checks the exact key, then may try the exact fallback
+  // suffix on a released primary or when primary resolution fails.
+  const recoveredPrimary = model("primary", paidCall);
+  const legacyReserve = (route: ResolvedTaskModel, key: string) => runBudgetedCall({
+    provider: route.provider, modelSnapshot: route.modelSnapshot, budget, parentBudget, requestFamily: null,
+    requestId: key, reservedCents: 10, actualCents: () => 1,
+    input: { text: request.text, instruction: "Explain", mode: "explain", chunks: [], maxOutputTokens: 32, mediaCapability: "text_only", imageParts: [] },
+  });
+  await expect(withModelFallback({
+    primary: async () => recoveredPrimary, fallback: async () => fallback, operationId: requestId, run: legacyReserve,
+  })).rejects.toMatchObject({ code: primaryFailure === "released not_sent" ? "BUDGET_REPLAY_COMPLETED" : "CONFLICT" });
+  await expect(legacyReserve(fallback, `${requestId}:fallback`)).rejects.toMatchObject({
+    code: primaryFailure === "released not_sent" ? "BUDGET_REPLAY_COMPLETED" : "BUDGET_REPLAY_RELEASED",
+  });
+  expect(paidCall).toHaveBeenCalledOnce();
+  const rows = await f.sql`SELECT request_id, state, amount_cents FROM opening_budget_reservations
+    WHERE workspace_id=${scope.workspaceId} AND parent_interaction_id=${parentBudget.id}`;
+  expect(rows).toHaveLength(2);
+  expect(rows.filter(row => row.state !== "released")).toEqual([{
+    request_id: primaryFailure === "released not_sent" ? `${requestId}:fallback` : requestId,
+    state: "completed", amount_cents: 1,
+  }]);
+  await expect(service.replyEphemeral(scope, request)).rejects.toMatchObject({ code: "BUDGET_REPLAY_COMPLETED" });
+  expect(paidCall).toHaveBeenCalledOnce();
+});
+
 it.each(["unknown", "completed", "not_sent"] as const)("keeps the whole operation's %s fallback history after the user removes that route", async outcome => {
   const { budget } = ledger();
   const primaryCall = vi.fn(async () => { throw new OpeningProviderError("PROVIDER_AUTH", "bad credentials"); });
   const fallbackCall = vi.fn(async () => {
     if (outcome !== "completed") throw new OpeningProviderError(outcome === "unknown" ? "PROVIDER_TIMEOUT" : "PROVIDER_AUTH", "controlled fallback");
     return { text: "answered", citedChunkIds: [], candidates: [], requestId: "receipt", inputTokens: 1, outputTokens: 1 };
-  });
-  const model = (name: string, complete: ResolvedTaskModel["provider"]["complete"]): ResolvedTaskModel => ({
-    provider: { complete }, inputCentsPerMillion: 1, outputCentsPerMillion: 1,
-    modelSnapshot: { id: name, providerId: "controlled", modelName: name, inputCentsPerMillion: 1, outputCentsPerMillion: 1 },
   });
   const primary = model("primary", primaryCall), fallback = model("fallback", fallbackCall);
   let configuredFallback: ResolvedTaskModel | null = fallback;

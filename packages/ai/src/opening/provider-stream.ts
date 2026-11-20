@@ -46,27 +46,27 @@ export async function readOpeningProviderStream(body: ReadableStream<Uint8Array>
   async function event() {
     if (!data.length) return;
     const payload = data.join("\n"); data = [];
-    if (payload === "[DONE]") { if (!stopped) invalid("provider stream ended before a complete answer"); done = true; return; }
+    if (payload === "[DONE]") { if (!stopped && !answerFailure) invalid("provider stream ended before a complete answer"); done = true; return; }
     let parsed: unknown;
     try { parsed = JSON.parse(payload); } catch { invalid("provider returned malformed stream JSON"); }
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) invalid("invalid provider stream event");
     const value = parsed as Record<string, unknown>;
-    // Usage preceding any later generated delta describes only partial output.
+    // Earlier output usage becomes partial when another generated delta arrives.
     // Usage in this same frame can describe the output it carries.
     if (Array.isArray(value.choices) && value.choices.some(hasGeneratedDelta)) {
-      latestUsage = null;
+      if (latestUsage) latestUsage.outputTokens = null;
       hasTerminalOutputUsage = false;
     }
     // Even an embedded rate-limit error follows a sent request; never release its reservation.
     if (value.error) invalid("provider stream failed");
     if (typeof value.id === "string") requestId = value.id;
     if (!Array.isArray(value.choices)) invalid("invalid provider stream choices");
+    const [firstChoice] = value.choices;
+    const terminal = !stopped && value.choices.length === 1 && firstChoice?.index === 0
+      && typeof firstChoice.finish_reason === "string" && firstChoice.finish_reason.length > 0;
     if (value.usage != null) {
       const parsedUsage = parseProviderUsage(value.usage, { clamp: false });
       if (!parsedUsage) invalid("invalid provider stream usage");
-      const [choice] = value.choices;
-      const terminal = !stopped && value.choices.length === 1 && choice?.index === 0
-        && typeof choice.finish_reason === "string" && choice.finish_reason.length > 0;
       const trailer = stopped && value.choices.length === 0;
       if (!stopped || trailer) {
         latestUsage = {
@@ -78,12 +78,18 @@ export async function readOpeningProviderStream(body: ReadableStream<Uint8Array>
       }
     }
     for (const raw of value.choices) {
-      if (answerFailure) break;
+      if (answerFailure && stopped) break;
       if (!raw || typeof raw !== "object") invalid("invalid provider stream choice");
       const choice = raw as Record<string, unknown>;
       if (choice.index !== 0) invalid("unexpected provider stream choice");
       const delta = choice.delta as Record<string, unknown> | undefined;
-      if (delta?.refusal) throw new OpeningProviderStreamError("PROVIDER_REFUSAL", "provider refused the request");
+      if (delta?.refusal) answerFailure ??= new OpeningProviderStreamError("PROVIDER_REFUSAL", "provider refused the request");
+      if (answerFailure) {
+        // Refusal stops answer delivery immediately. The existing stream limit
+        // and abort signal still apply while waiting for the accounting trailer.
+        if (terminal) stopped = true;
+        continue;
+      }
       if (choice.finish_reason != null && choice.finish_reason !== "stop") {
         // Keep consuming the bounded stream so a trailing accounting frame is retained.
         answerFailure = new OpeningProviderStreamError("PROVIDER_RESPONSE", "provider did not finish the answer");

@@ -289,6 +289,8 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
         const fallback = isNotSentFailure(error) && deps.resolveFallbackModel ? await deps.resolveFallbackModel(scope, input.mode) : null;
         if (!fallback) throw error;
         selected = fallback;
+        // Tell the ledger this is the fallback route. It claims the canonical
+        // key if free and fences the suffix that older deployments can use.
         selectedRequestId = `${requestId}:fallback`;
       }
       if (imageOnlySources && selected?.supportsVision !== true) {

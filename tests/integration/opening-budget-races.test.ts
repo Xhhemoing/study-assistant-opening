@@ -213,9 +213,13 @@ describe("opening budget races (two independent connections, deterministic barri
     expect(primary).toHaveBeenCalledOnce();
     expect(fallback).toHaveBeenCalledOnce();
     expect(otherPrimary).toHaveBeenCalledTimes(2);
-    const rows = await fixture.sql`SELECT DISTINCT request_id FROM opening_budget_reservations WHERE workspace_id=${scope.workspaceId}`;
-    expect(rows).toHaveLength(4);
-    expect(rows.map(row => row.request_id)).toEqual(expect.arrayContaining(["eph:lesson-123:retry", "eph:lesson-123:fallback", "eph:lesson-123:retry:bar"]));
+    const rows = await fixture.sql`SELECT request_id, state, amount_cents FROM opening_budget_reservations WHERE workspace_id=${scope.workspaceId}`;
+    const completed = rows.filter(row => row.state === "completed");
+    expect(completed).toHaveLength(4);
+    expect(completed.map(row => row.request_id)).toEqual(expect.arrayContaining(["eph:lesson-123", "eph:lesson-123:retry", "eph:lesson-123:retry:bar"]));
+    expect(rows.filter(row => row.state !== "completed")).toEqual([
+      { request_id: "eph:lesson-123:fallback", state: "released", amount_cents: 0 },
+    ]);
   });
 
   it("replays a legacy exact key for its parent even when it looks like another client's fallback", async () => {

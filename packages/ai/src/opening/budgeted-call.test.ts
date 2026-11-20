@@ -81,6 +81,61 @@ describe("ledgerActionForProviderError", () => {
 });
 
 describe("durable provider receipts", () => {
+  const streamInput: ProviderInput = {
+    instruction: "teach", text: "question", mode: "explain", chunks: [], maxOutputTokens: 100,
+    mediaCapability: "text_only", imageParts: [], outputFormat: "markdown",
+  };
+  const streamFrame = (value: unknown) => `data: ${JSON.stringify(value)}\n\n`;
+  const streamChoice = (delta: object, finish_reason: string | null = null) => streamFrame({
+    choices: [{ index: 0, delta, finish_reason }],
+  });
+  const promptUsage = streamFrame({ choices: [], usage: { prompt_tokens: 37, prompt_cache_hit_tokens: 10 } });
+  const completionTrailer = streamFrame({ choices: [], usage: { completion_tokens: 11 } }) + "data: [DONE]\n\n";
+
+  it("settles prompt and cached usage reported before generated text with trailer completion usage", async () => {
+    const b = fakeBudget();
+    const body = promptUsage + streamChoice({ content: "ans" }) + streamChoice({ content: "wer" })
+      + streamChoice({}, "stop") + completionTrailer;
+    const provider = createOpeningProvider({ baseUrl: "https://model.example", apiKey: "key", model: "model",
+      fetchImpl: async () => new Response(body) });
+    const actualCents = vi.fn((usage: ProviderOutput) => usage.inputTokens! + usage.outputTokens! - usage.cachedInputTokens!);
+    await expect(runBudgetedCall({ ...options, input: streamInput, provider, budget: b.api, actualCents }))
+      .resolves.toMatchObject({ text: "answer", inputTokens: 37, outputTokens: 11, cachedInputTokens: 10 });
+    expect(actualCents).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      inputTokens: 37, outputTokens: 11, cachedInputTokens: 10,
+    }));
+    expect(b.repo.settled).toEqual([{ reservationId: "res-1", actualCents: 38 }]);
+    expect(b.repo.unknowns).toEqual([]);
+  });
+
+  it.each(["stop", "content_filter", "truncated EOF"])("accounts for a streamed refusal with %s", async finish => {
+    const b = fakeBudget(), delivered = vi.fn(), persistResult = vi.fn();
+    const complete = finish !== "truncated EOF";
+    const body = promptUsage + streamChoice({ refusal: "refused", content: "hidden" })
+      + streamChoice({ content: "also hidden" })
+      + (complete ? streamChoice({}, finish) + completionTrailer
+        : streamFrame({ choices: [], usage: { completion_tokens: 3 } }));
+    const provider = createOpeningProvider({ baseUrl: "https://model.example", apiKey: "key", model: "model",
+      fetchImpl: async () => new Response(body) });
+    const actualCents = vi.fn((usage: ProviderOutput) => usage.inputTokens! + usage.outputTokens! - usage.cachedInputTokens!);
+    await expect(runBudgetedCall({ ...options, input: streamInput, provider, budget: b.api, actualCents,
+      onTextDelta: delivered, persistResult })).rejects.toMatchObject({ code: "PROVIDER_REFUSAL", requestSent: true });
+    expect(delivered).not.toHaveBeenCalled();
+    expect(persistResult).not.toHaveBeenCalled();
+    expect(b.repo.released).toEqual([]);
+    if (complete) {
+      expect(actualCents).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+        inputTokens: 37, outputTokens: 11, cachedInputTokens: 10,
+      }));
+      expect(b.repo.settled).toEqual([{ reservationId: "res-1", actualCents: 38 }]);
+      expect(b.repo.unknowns).toEqual([]);
+    } else {
+      expect(actualCents).not.toHaveBeenCalled();
+      expect(b.repo.settled).toEqual([]);
+      expect(b.repo.unknowns).toEqual(["res-1"]);
+    }
+  });
+
   it.each(["interrupted", "aborted", "delivery failed"])("keeps a partial stream %s unknown and refuses the same ledger key on replay", async failure => {
     const b = fakeBudget(), persistResult = vi.fn();
     const caller = new AbortController(), deltas: string[] = [];
@@ -180,7 +235,7 @@ describe("durable provider receipts", () => {
     { failure: "truncated stream", format: "markdown", code: "PROVIDER_RESPONSE", billed: true,
       body: 'data: {"choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":"length"}]}\n\ndata: {"choices":[],"usage":{"prompt_tokens":37,"completion_tokens":11}}\n\ndata: [DONE]\n\n' },
     { failure: "interim stream usage", format: "markdown", code: "PROVIDER_RESPONSE", billed: false,
-      body: 'data: {"choices":[{"index":0,"delta":{"content":"partial"}}]}\n\ndata: {"choices":[],"usage":{"prompt_tokens":37,"completion_tokens":1}}\n\ndata: {"choices":[{"index":0,"delta":{"content":" more"}}]}\n\n' },
+      body: 'data: {"choices":[{"index":0,"delta":{"content":"partial"}}]}\n\ndata: {"choices":[],"usage":{"prompt_tokens":37,"completion_tokens":3}}\n\ndata: {"choices":[{"index":0,"delta":{"content":" more"}}]}\n\n' },
     { failure: "HTTP refusal", format: "json", code: "PROVIDER_REFUSAL", billed: true,
       body: '{"choices":[{"message":{"refusal":"no"}}],"usage":{"prompt_tokens":37,"completion_tokens":11}}' },
     { failure: "malformed HTTP task JSON", format: "json", code: "PROVIDER_RESPONSE", billed: true,

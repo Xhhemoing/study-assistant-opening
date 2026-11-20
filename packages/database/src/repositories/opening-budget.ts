@@ -528,21 +528,35 @@ export function createOpeningBudgetRepository(
         const alternateId = parentBudget && input.alternateRequestFamily && input.requestFamily
           ? input.alternateRequestFamily + input.requestId.slice(input.requestFamily.length)
           : null;
+        const canonicalFallbackId = alternateId && input.requestId === `${input.requestFamily}:fallback`
+          ? input.requestFamily ?? null : null;
         const exactRows = await tx`SELECT * FROM opening_budget_reservations
-          WHERE request_id = ${input.requestId} OR (request_id = ${alternateId}
+          WHERE request_id IN (${input.requestId}, ${canonicalFallbackId}) OR (request_id = ${alternateId}
             AND workspace_id = ${scope.workspaceId} AND parent_interaction_id = ${parentBudget?.id ?? null})`;
         const primary = exactRows.find(row => row.request_id === input.requestId);
         const alternate = exactRows.find(row => row.request_id === alternateId);
-        // Prefer the old reader's exact key whenever it belongs to this interaction.
-        // Only an occupied exact key or an existing alternate justifies changing keys.
+        // Keep an existing exact key unless it belongs to another interaction.
         const primaryOccupied = primary && (primary.workspace_id !== scope.workspaceId
           || (primary.parent_interaction_id !== null && primary.parent_interaction_id !== parentBudget?.id));
-        const requestId = alternateId && (primaryOccupied || (!primary && alternate)) ? alternateId : input.requestId;
+        // A fallback with no prior reservation can claim the canonical key, even
+        // when a different interaction occupies its legacy fallback suffix.
+        const fallbackStartsFamily = canonicalFallbackId !== null && (!primary || primaryOccupied)
+          && !alternate && !exactRows.some(row => row.request_id === canonicalFallbackId);
+        const requestId = fallbackStartsFamily ? canonicalFallbackId
+          : alternateId && (primaryOccupied || (!primary && alternate)) ? alternateId : input.requestId;
         const existing = requestId === input.requestId ? primary : alternate;
         const existingRow = existing ? mapReservation(existing as Record<string, unknown>) : null;
         // An operator switching back to a finite day must not invalidate an already
         // recorded implicit parent's replay. This never moves a request to a new parent.
         if (!parentBudget && existingRow?.parentInteractionId === input.requestId) parentBudget = { id: input.requestId };
+        // A consumed canonical key may hold the fallback model's terms. Once
+        // execution started, the current route cannot change this turn's receipt.
+        if (existingRow && alternateId && requestId === input.requestFamily && existingRow.workspaceId === scope.workspaceId
+          && existingRow.parentInteractionId === parentBudget?.id && existingRow.purpose === input.purpose
+          && (existingRow.state === "completed" || (existingRow.state === "reserved"
+            && (existingRow.executionClaimedAt || existingRow.outcomeUnknownAt)))) {
+          return { ...existingRow, replayed: true };
+        }
         if (existingRow) {
           // Original amounts survive settlement. An old, unparented reservation
           // may be adopted once below; an attributed request can never move parents.
@@ -624,6 +638,19 @@ export function createOpeningBudgetRepository(
           RETURNING *
         `;
         if (!rows.length) throw new OpeningBudgetError("BUDGET_EXCEEDED", "daily workspace budget exceeded");
+        if (fallbackStartsFamily) {
+          // Older code can bypass the canonical key if model resolution fails.
+          // Fence that exact suffix in the same transaction with a non-billable
+          // terminal row. A conflicting row already fences the old exact lookup.
+          await tx`
+            INSERT INTO opening_budget_reservations (id, workspace_id, purpose, amount_cents, reserved_amount_cents,
+              request_id, model_snapshot, parent_interaction_id, state, release_reason, created_at, updated_at)
+            VALUES (${randomUUID()}, ${scope.workspaceId}, ${input.purpose}, 0, ${input.amountCents},
+              ${input.requestId}, ${modelSnapshot === null ? null : tx.json(modelSnapshot)}, ${parentBudget?.id ?? null},
+              'released', 'not_sent', ${instant}, ${instant})
+            ON CONFLICT (request_id) DO NOTHING
+          `;
+        }
         return mapReservation(rows[0] as Record<string, unknown>);
       });
       } catch (error) {

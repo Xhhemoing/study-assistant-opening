@@ -59,7 +59,7 @@ describe("direct Markdown streaming", () => {
   });
 
   it("treats a streamed refusal as a sent failure", async () => {
-    const h = harness(); h.write(event({ choices: [{ index: 0, delta: { refusal: "refused" } }] }));
+    const h = harness(); h.write(event({ choices: [{ index: 0, delta: { refusal: "refused" } }] }) + stop + done);
     await expect(h.provider.complete(input)).rejects.toMatchObject({ code: "PROVIDER_REFUSAL", requestSent: true });
     expect(h.cancel).toHaveBeenCalledOnce();
   });
