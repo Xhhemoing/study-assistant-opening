@@ -512,3 +512,42 @@ it("remembers pending v1 cleanup when matrix reconciliation loads v2 alongside a
   expect(retriedSave.persisted).toBe(true);
   expect(disk.data.has(legacyKey)).toBe(false);
 });
+
+it("preserves a malformed replacement v1 draft when retrying pending v1 cleanup during manual migration", () => {
+  const ordinary = newScope();
+  const manual = `${ordinary}:manual`;
+  const scopes = { ordinary, manual };
+  const legacyKey = `opening-practice:v1:${ordinary}`;
+  const v2Key = `opening-practice:v2:${ordinary}`;
+  const staleV1 = emptyPracticeDraft(ordinary, { answer: "old v1 answer" });
+  const manualInOrdinary = emptyPracticeDraft(ordinary, { answer: "migrated v2 answer" });
+  let failRemove = true;
+  const disk = {
+    ...storage(),
+    removeItem: (k: string) => {
+      if (failRemove && k === legacyKey) throw new Error("removeItem blocked");
+      disk.data.delete(k);
+    },
+  };
+  disk.data.set(legacyKey, JSON.stringify(staleV1));
+  disk.data.set(
+    v2Key,
+    JSON.stringify({ version: 2, scope: ordinary, activeId: manualInOrdinary.id, drafts: [manualInOrdinary] }),
+  );
+
+  // Manual entry copies to manual v2 and marks legacy cleanup pending when removeItem(legacyKey) throws.
+  expect(
+    readPartitionedPracticeDraftCollection(scopes, emptyPracticeDraft(manual), disk)?.drafts.some(
+      d => d.fields.answer === "migrated v2 answer",
+    ),
+  ).toBe(true);
+  expect(disk.data.has(legacyKey)).toBe(true);
+
+  // Replace v1 with malformed JSON containing recoverable text; retry must preserve it rather than deleting blindly.
+  failRemove = false;
+  disk.data.set(legacyKey, '{"answer":"precious unparsed text"');
+  expect(() =>
+    readPartitionedPracticeDraftCollection(scopes, emptyPracticeDraft(ordinary, { matrixMode: true }), disk),
+  ).toThrow();
+  expect(disk.data.get(legacyKey)).toBe('{"answer":"precious unparsed text"');
+});

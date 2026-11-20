@@ -213,10 +213,23 @@ function persistCollection(collection: PracticeDraftCollection, storage: WriteSt
     dirtyDraftIds.delete(collection.scope);
     if (loadedFromLegacy.has(collection.scope) && hasRemoveItem(storage)) {
       try {
-        storage.removeItem(legacyStorageKey(collection.scope));
-        legacyIds.delete(collection.scope);
-        loadedFromLegacy.delete(collection.scope);
-      } catch { /* v2 is already durable */ }
+        const oldKey = legacyStorageKey(collection.scope);
+        if (isReadStorage(storage)) {
+          const oldRaw = storage.getItem(oldKey);
+          if (oldRaw === null) {
+            legacyIds.delete(collection.scope);
+            loadedFromLegacy.delete(collection.scope);
+          } else if (parsePracticeDraft(JSON.parse(oldRaw), collection.scope)) {
+            storage.removeItem(oldKey);
+            legacyIds.delete(collection.scope);
+            loadedFromLegacy.delete(collection.scope);
+          }
+        } else {
+          storage.removeItem(oldKey);
+          legacyIds.delete(collection.scope);
+          loadedFromLegacy.delete(collection.scope);
+        }
+      } catch { /* v2 is already durable; preserve unvalidated/corrupt v1 */ }
     }
     return true;
   } catch { dirty.add(collection.scope); return false; }
@@ -261,14 +274,17 @@ function migrateOrdinaryManualDrafts(scopes: PracticeDraftScopes, source: Stored
   // Remove the source only after the destination is durable. A retry keeps the existing copy by ID.
   try {
     const oldKey = legacyStorageKey(scopes.ordinary);
-    if (legacy || loadedFromLegacy.has(scopes.ordinary)) {
+    if (legacy) {
       loadedFromLegacy.add(scopes.ordinary);
       storage.removeItem(oldKey);
       legacyIds.delete(scopes.ordinary);
       loadedFromLegacy.delete(scopes.ordinary);
     } else {
       const oldRaw = storage.getItem(oldKey);
-      if (oldRaw !== null) {
+      if (oldRaw === null) {
+        legacyIds.delete(scopes.ordinary);
+        loadedFromLegacy.delete(scopes.ordinary);
+      } else {
         if (!parsePracticeDraft(JSON.parse(oldRaw), scopes.ordinary)) throw new Error(migrationError);
         loadedFromLegacy.add(scopes.ordinary);
         storage.removeItem(oldKey);
@@ -360,14 +376,17 @@ export function readPartitionedPracticeDraftCollection(scopes: PracticeDraftScop
           if (persistCollection(reconciled, storage)) {
             try {
               const oldKey = legacyStorageKey(scopes.ordinary);
-              if (ordinary?.legacy || loadedFromLegacy.has(scopes.ordinary)) {
+              if (ordinary?.legacy) {
                 loadedFromLegacy.add(scopes.ordinary);
                 storage.removeItem(oldKey);
                 legacyIds.delete(scopes.ordinary);
                 loadedFromLegacy.delete(scopes.ordinary);
               } else {
                 const oldRaw = storage.getItem(oldKey);
-                if (oldRaw !== null && parsePracticeDraft(JSON.parse(oldRaw), scopes.ordinary)) {
+                if (oldRaw === null) {
+                  legacyIds.delete(scopes.ordinary);
+                  loadedFromLegacy.delete(scopes.ordinary);
+                } else if (parsePracticeDraft(JSON.parse(oldRaw), scopes.ordinary)) {
                   loadedFromLegacy.add(scopes.ordinary);
                   storage.removeItem(oldKey);
                   legacyIds.delete(scopes.ordinary);
