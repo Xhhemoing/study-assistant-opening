@@ -21,24 +21,23 @@ export async function readBackupAnswerBlockIds(sql: Sql | TransactionSql, worksp
 }
 
 export function excludedTeachingDocumentIds(specs: Record<string, unknown>[], sources: ReadonlySet<string>): string[] {
-  return specs.flatMap(spec => {
-    const refs = spec.source_refs;
-    return typeof spec.document_id === "string" && (!Array.isArray(refs) || refs.some(ref => {
-      const id = asObject(ref)?.sourceId;
-      return typeof id !== "string" || !sources.has(id);
-    })) ? [spec.document_id] : [];
-  });
+  return specs.flatMap(spec => typeof spec.document_id === "string" &&
+    (!Array.isArray(spec.source_refs) || spec.source_refs.some(ref => {
+      const source = asObject(ref)?.sourceId;
+      return typeof source !== "string" || !sources.has(source.toLowerCase());
+    })) ? [spec.document_id] : []);
 }
 
-export function readBackupTeachingSourceRefs(sql: Sql, workspace: string) {
+export function readBackupTeachingSourceRefs(sql: Sql | TransactionSql, workspace: string) {
   return sql`SELECT spec.document_id,spec.source_refs FROM opening_teaching_activity_specs spec
-    JOIN library_documents d ON d.id=spec.document_id WHERE d.workspace_id=${workspace}`;
+    JOIN library_documents d ON d.id=spec.document_id
+    WHERE spec.workspace_id=${workspace} AND d.workspace_id=${workspace}`;
 }
 
-export async function readBackupLibrarySourceIds(sql: Sql | TransactionSql, workspace: string): Promise<Set<string>> {
-  const rows = await sql`SELECT s.id FROM opening_sources s WHERE s.workspace_id=${workspace} AND s.upload_state='uploaded'
+export async function readBackupLibrarySourceVersions(sql: Sql | TransactionSql, workspace: string): Promise<Map<string, number>> {
+  const rows = await sql<{ id: string; version: number }[]>`SELECT s.id, s.version FROM opening_sources s WHERE s.workspace_id=${workspace} AND s.upload_state='uploaded'
     AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=${workspace} AND e.source_id=s.id)`;
-  return new Set(rows.map(row => String(row.id)));
+  return new Map(rows.map(row => [row.id, row.version]));
 }
 
 function projectTeachingBlockOrder(row: Record<string, unknown>, blockAllowed: (block: Record<string, unknown>) => boolean) {

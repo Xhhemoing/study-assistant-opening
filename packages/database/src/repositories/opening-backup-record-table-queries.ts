@@ -1,4 +1,5 @@
 import { projectBackupFormalGoalReferences, projectBackupCourseMilestoneReferences } from "@aistudy/domain";
+import { retainBackupEventChains } from "@aistudy/domain/native";
 import { isPrivateExamActivity, privateExamDocumentIds, readBackupLibrary } from "./opening-backup-library";
 import { readBackupCourseAssets } from "./opening-backup-course-assets";
 import { readOpeningBackupCourseRecords } from "./opening-backup-course-records";
@@ -419,7 +420,10 @@ export async function readOpeningBackupTableRows(
   tables.cards = tables.cards.filter(row => !excludedObservations.has(row.origin_observation_root_id));
   const cardIds = new Set(tables.cards.map(row => row.id));
   tables.card_review_states = tables.card_review_states.filter(row => cardIds.has(row.card_id));
-  tables.learning_events = tables.learning_events.filter(row => cardIds.has(row.content_id));
+  tables.learning_events = retainBackupEventChains(
+    tables.learning_events.filter(row => cardIds.has(row.content_id)),
+    "corrects_event_id",
+  );
   // Privacy/source filtering may omit a protocol's baseline. Keep the task and
   // stable identity, but never export a dangling baseline or replay receipt.
   tables.opening_retest_activities = tables.opening_retest_activities.map(row => {

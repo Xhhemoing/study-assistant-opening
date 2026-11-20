@@ -2,18 +2,21 @@ import { cardReadable, cardSourcesIncluded } from "./card-sources";
 import { uuidSchema } from "@aistudy/contracts";
 import type { Sql } from "postgres";
 import type { NativeBackupPackage } from "@aistudy/contracts";
-import type { NativeBackupSnapshot, NativeBackupRecord } from "@aistudy/domain/native";
-import { contextSourceRefsIncluded, parseContextSourceRefs, type ContextSourceRef } from "./opening-context-provenance";
+import { retainBackupEventChains, type NativeBackupSnapshot, type NativeBackupRecord } from "@aistudy/domain/native";
+import { contextSourceRefsIncluded, parseContextSourceRefs } from "./opening-context-provenance";
 import { BackupRestoreError } from "./backup-types";
 import { asRecords, filesFromBlocks } from "./backup-map";
+import { parseBackupSourceRefs, type BackupSourceRef } from "./native-backup-teaching";
 
-export type NoteBackupProvenance = { contextSourceRefs: ContextSourceRef[] };
+export type NoteBackupProvenance = { contextSourceRefs: BackupSourceRef[] };
 
 /** Remove the whole linked note, including historical text and native dependants. */
-export function filterNativeNotes(snapshot: NativeBackupSnapshot, provenance: ReadonlyMap<string, NoteBackupProvenance | null>): NativeBackupSnapshot {
+export function filterNativeNotes(snapshot: NativeBackupSnapshot, provenance: ReadonlyMap<string, NoteBackupProvenance | null>,
+  privateCards: ReadonlySet<string> = new Set()): NativeBackupSnapshot {
   const blockedDocs = new Set([...provenance].filter(([, value]) => value === null).map(([id]) => id));
   const blockedBlocks = new Set(snapshot.blocks.filter(row => blockedDocs.has(String(row.documentId))).map(row => row.id));
-  const blockedCards = new Set(snapshot.cards.filter(row => blockedDocs.has(String(row.sourceDocumentId))).map(row => row.id));
+  const blockedCards = new Set(snapshot.cards.filter(row => privateCards.has(row.id) || blockedDocs.has(String(row.sourceDocumentId))
+    || Array.isArray(row.originTeachingDocumentIds) && row.originTeachingDocumentIds.some(id => blockedDocs.has(id))).map(row => row.id));
   const blocked = new Set([...blockedDocs, ...blockedBlocks, ...blockedCards]);
   const blocks = snapshot.blocks.filter(row => !blockedDocs.has(String(row.documentId)));
   return {
@@ -24,28 +27,31 @@ export function filterNativeNotes(snapshot: NativeBackupSnapshot, provenance: Re
     relations: snapshot.relations.filter(row => !blocked.has(String(row.fromId)) && !blocked.has(String(row.toId))),
     memberships: snapshot.memberships.filter(row => row.assetType !== "source" && !blocked.has(String(row.assetId))),
     cards: snapshot.cards.filter(row => !blockedCards.has(row.id)),
-    events: snapshot.events.filter(row => !blocked.has(String(row.contentId))),
-    promotions: snapshot.promotions.filter(row => !blocked.has(String(row.targetId))),
+    events: retainBackupEventChains(snapshot.events.filter(row => !blocked.has(String(row.contentId))), "correctsEventId"),
+    promotions: snapshot.promotions.filter(row => !blocked.has(String(row.targetId))).map(row => Array.isArray(row.targets)
+      ? { ...row, targets: row.targets.filter(target => !blocked.has(String(target?.targetId))) } : row),
     files: filesFromBlocks(blocks),
   };
 }
 
-export async function applyNativeNoteExportPrivacy(sql: Sql, workspaceId: string, snapshot: NativeBackupSnapshot): Promise<NativeBackupSnapshot> {
+export async function applyNativeNoteExportPrivacy(sql: Sql, workspaceId: string, snapshot: NativeBackupSnapshot,
+  publications: ReadonlyMap<string, BackupSourceRef[]>): Promise<NativeBackupSnapshot> {
   const rows = await sql`SELECT document_id, context_source_refs,
     ${contextSourceRefsIncluded(sql, workspaceId, sql`context_source_refs`, true)} AS included
     FROM opening_note_provenance WHERE workspace_id=${workspaceId}`;
   const provenance = new Map<string, NoteBackupProvenance | null>();
+  for (const [id, refs] of publications) {
+    if (refs.length) provenance.set(id, { contextSourceRefs: refs });
+  }
   for (const row of rows) {
-    const refs = parseContextSourceRefs(row.context_source_refs);
-    provenance.set(String(row.document_id), row.included && refs !== null ? { contextSourceRefs: refs } : null);
+    const id = String(row.document_id);
+    const refs = Array.isArray(row.context_source_refs)
+      ? parseBackupSourceRefs([...row.context_source_refs, ...(publications.get(id) ?? [])]) : null;
+    provenance.set(id, row.included && refs !== null ? { contextSourceRefs: refs } : null);
   }
   const blockedCards = new Set((await sql`SELECT c.id FROM cards c WHERE c.workspace_id=${workspaceId}
     AND NOT (${cardReadable(sql, workspaceId)})`).map(row => String(row.id)));
-  const filtered = filterNativeNotes(snapshot, provenance);
-  return { ...filtered, cards: filtered.cards.filter(row => !blockedCards.has(row.id)),
-    events: filtered.events.filter(row => !blockedCards.has(String(row.contentId))),
-    memberships: filtered.memberships.filter(row => !blockedCards.has(String(row.assetId))),
-    promotions: filtered.promotions.filter(row => !blockedCards.has(String(row.targetId))) };
+  return filterNativeNotes(snapshot, provenance, blockedCards);
 }
 
 /** Null denotes an ordinary note; absent metadata is only compatible with pre-0035 archives. */
@@ -57,7 +63,7 @@ export function readNoteBackupProvenance(record: NativeBackupRecord, requiresMet
   if (record.openingProvenance === null) return null;
   const value = record.openingProvenance;
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new BackupRestoreError("VALIDATION", "Backup note provenance is invalid");
-  const refs = parseContextSourceRefs((value as Record<string, unknown>).contextSourceRefs);
+  const refs = parseBackupSourceRefs((value as Record<string, unknown>).contextSourceRefs);
   if (refs === null) throw new BackupRestoreError("VALIDATION", "Backup note provenance is unknown");
   return { contextSourceRefs: refs };
 }

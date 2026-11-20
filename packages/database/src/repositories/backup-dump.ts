@@ -1,5 +1,6 @@
 import { isForbiddenBackupTable } from "../../../contracts/src/opening/backup-inventory";
-import { isPrivateExamActivity, privateExamDocumentIds, readBackupAnswerBlockIds, readBackupLibrarySourceIds, readBackupTeachingSourceRefs } from "./opening-backup-library";
+import { privateExamDocumentIds, readBackupAnswerBlockIds, readBackupLibrarySourceVersions, readBackupTeachingSourceRefs } from "./opening-backup-library";
+import { attachNativeTeachingOrigins, publicationSourceRefsByDocument, readNativeTeachingOrigins } from "./native-backup-teaching";
 import { applyNativeNoteExportPrivacy } from "./native-note-privacy";
 import { projectNativeBackupLibrary } from "./backup-native-library";
 import { attachNativeLearningLinks } from "./native-learning-links";
@@ -81,39 +82,36 @@ export async function dumpWorkspaceSnapshot(
     throw new BackupRestoreError("VALIDATION", "No migrations are registered");
   }
   const privateExams = await privateExamDocumentIds(sql, workspaceId);
-  // Auto-created cards may carry exam text even when they have no source document.
-  const examCards = new Set((await sql`SELECT c.id FROM cards c
-    JOIN opening_learning_observations o ON o.id=c.origin_observation_root_id AND o.workspace_id=c.workspace_id
-    JOIN opening_teaching_activities a ON a.id=o.activity_id AND a.workspace_id=o.workspace_id
-    WHERE c.workspace_id=${workspaceId} AND ${isPrivateExamActivity(sql, privateExams)}`).map(row => String(row.id)));
+  const [privateBlocks, sourceVersions, teachingSpecs, origins] = await Promise.all([
+    readBackupAnswerBlockIds(sql, workspaceId), readBackupLibrarySourceVersions(sql, workspaceId),
+    readBackupTeachingSourceRefs(sql, workspaceId), readNativeTeachingOrigins(sql, workspaceId, cards, privateExams),
+  ]);
   const snapshot: NativeBackupSnapshot = {
     sourceWorkspaceId: workspaceId,
     workspace,
     latestMigrationId,
     courses,
-    memberships: memberships.filter(row => !examCards.has(String(row.assetId))),
+    memberships,
     goals,
     windows,
     documents: await attachNativeLearningLinks(sql, workspaceId, documents),
     blocks,
-    relations: relations.filter(row => !examCards.has(String(row.fromId)) && !examCards.has(String(row.toId))),
+    relations,
     revisions,
     explorations: nestBy(explorations, {
       branches: branches,
       blocks: explorationBlocks,
     }, "explorationId"),
-    promotions: nestBy(promotions.filter(row => !examCards.has(String(row.targetId))),
-      { targets: promotionTargets.filter(row => !examCards.has(String(row.targetId))) }, "promotionId"),
-    cards: nestBy(cards.filter(row => !examCards.has(row.id)), { reviewStates: cardStates }, "cardId"),
-    events: events.filter(row => !examCards.has(String(row.contentId))),
+    promotions: nestBy(promotions, { targets: promotionTargets }, "promotionId"),
+    cards: nestBy(attachNativeTeachingOrigins(cards, origins), { reviewStates: cardStates }, "cardId"),
+    events,
     files: [],
   };
-  const [privateBlocks, sourceIds, teachingSpecs] = await Promise.all([
-    readBackupAnswerBlockIds(sql, workspaceId), readBackupLibrarySourceIds(sql, workspaceId),
-    readBackupTeachingSourceRefs(sql, workspaceId),
-  ]);
-  const { records: learnerSnapshot } = projectNativeBackupLibrary(snapshot, privateExams, privateBlocks, sourceIds, teachingSpecs);
-  return applyNativeNoteExportPrivacy(sql, workspaceId, { ...snapshot, ...learnerSnapshot });
+  const { records: learnerSnapshot } = projectNativeBackupLibrary(
+    snapshot, privateExams, privateBlocks, new Set(sourceVersions.keys()), teachingSpecs, origins,
+  );
+  return applyNativeNoteExportPrivacy(sql, workspaceId, { ...snapshot, ...learnerSnapshot },
+    publicationSourceRefsByDocument(teachingSpecs, sourceVersions));
 }
 
 export function snapshotToPackage(snapshot: NativeBackupSnapshot) {

@@ -3,6 +3,7 @@ import { setTimeout } from "node:timers/promises";
 import { expect, it } from "vitest";
 import type { Sql, TransactionSql } from "postgres";
 import { assertOpeningTestDatabase } from "@aistudy/config";
+import { nativeBackupPackageSchema } from "@aistudy/contracts";
 import type { ExamSprintState } from "@aistudy/contracts";
 import { applyExamSprintCommand, examSprintOverview, composeOpeningBackupDraft, createExamSprintState, validateOpeningRestore, type OpeningBackup } from "@aistudy/domain";
 import { EXAM_SPRINT_PACK } from "@aistudy/domain/exam-sprint-catalog";
@@ -203,7 +204,10 @@ it("excludes ordinary teaching text when only its publication spec cites the exc
       const db = transactionClient(tx), rows = backupRows(db, scope);
       await tx`INSERT INTO users(id,email,display_name,password_hash) VALUES(${u},${u + "@backup.test"},'fixture','test')`;
       await tx`INSERT INTO workspaces(id,owner_user_id) VALUES(${w},${u})`;
-      const source = await rows.source(), activity = await insertTestTeachingActivity(db, scope);
+      const source = await rows.source(), initialSource = await rows.source(), session = await rows.learning([initialSource]);
+      const observation = await rows.observation(session, [initialSource]);
+      const [origin] = await tx`SELECT activity_id FROM opening_learning_sessions WHERE id=${session}`;
+      const activity = String(origin!.activity_id);
       await tx`INSERT INTO library_documents(id,workspace_id,title,lifecycle,current_revision_number) VALUES
         (${doc},${w},'Lesson','published',1),(${unrelated},${w},'Independent essay','confirmed',1)`;
       await tx`INSERT INTO library_blocks(id,workspace_id,document_id,type,position,content)
@@ -219,14 +223,27 @@ it("excludes ordinary teaching text when only its publication spec cites the exc
       await tx`INSERT INTO opening_teaching_activity_specs(id,workspace_id,owner_user_id,activity_id,teaching_unit_id,document_id,
           revision_number,block_order,source_refs,version)
         VALUES(${randomUUID()},${w},${u},${activity},${unit},${doc},1,
-          ${tx.json([{ blockId: block, blockType: "text", role: "teach" }])},${tx.json([{ sourceId: source, sourceVersion: 1 }])},1)`;
+          ${tx.json([{ blockId: block, blockType: "text", role: "teach" }])},${tx.json([{ sourceId: initialSource, version: 1 }])},1)`;
+      const card = randomUUID(), review = randomUUID(), correction = randomUUID();
+      await tx`INSERT INTO cards(id,workspace_id,owner_user_id,front,back,origin_observation_root_id,source_ids)
+        VALUES(${card},${w},${u},'Automatic error card','Original answer',${observation},${[initialSource]})`;
+      await tx`INSERT INTO learning_events(id,workspace_id,owner_user_id,type,schema_version,idempotency_key,occurred_at,content_id,content_version,payload)
+        VALUES(${review},${w},${u},'review',1,${review},now(),${card},1,'{"grade":"good"}')`;
+      await tx`INSERT INTO learning_events(id,workspace_id,owner_user_id,type,schema_version,idempotency_key,occurred_at,corrects_event_id,payload)
+        VALUES(${correction},${w},${u},'correction',1,${correction},now(),${review},'{"note":"Private correction"}')`;
       const native = () => createBackupRestoreRepository(db).exportWorkspace(scope);
       const opening = () => readOpeningBackupRecords(db, scope);
+      expect((await native()).records.cards).toMatchObject([{ id: card, sourceDocumentId: null, originObservationRootId: observation }]);
+      await tx`UPDATE opening_teaching_activity_specs SET version=2,
+        source_refs=${tx.json([{ sourceId: initialSource, version: 1 }, { sourceId: source }])}
+        WHERE activity_id=${activity}`;
       expect((await native()).records.blocks).toContainEqual(expect.objectContaining({ id: block, content: { text } }));
       expect((await opening()).tables).toMatchObject({
         library_blocks: [expect.objectContaining({ id: block, content: { text } })],
         library_relations: [expect.objectContaining({ to_id: block })],
         library_properties: [expect.objectContaining({ subject_id: doc })],
+        cards: [expect.objectContaining({ id: card, source_document_id: null })],
+        learning_events: [expect.objectContaining({ id: review })],
       });
       await rows.exclude(source);
       const openingAfter = await opening(), nativeAfter = await native();
@@ -235,7 +252,71 @@ it("excludes ordinary teaching text when only its publication spec cites the exc
         expect(JSON.stringify(artifact)).not.toContain(doc);
         expect(JSON.stringify(artifact)).not.toContain(block);
         expect(JSON.stringify(artifact)).not.toContain(text);
+        for (const omitted of [card, review, correction, observation]) {
+          expect(JSON.stringify(artifact)).not.toContain(omitted);
+        }
       }
+      throw rollback;
+    }).catch(error => { if (error !== rollback) throw error; });
+  } finally { await sql.end(); }
+});
+
+it.each(["excluded", "missing"] as const)("skips native publication lineage on restore when a cited source is %s", async unavailable => {
+  const url = assertOpeningTestDatabase(process.env.OPENING_TEST_DATABASE_URL!, process.env.OPENING_TEST_DB);
+  const sql = createSqlClient(url.toString(), { max: 1 });
+  const rollback = new Error("rollback publication restore fixture");
+  const workspaceId = randomUUID(), ownerUserId = randomUUID(), doc = randomUUID(), block = randomUUID(), unit = randomUUID();
+  const scope = { workspaceId, ownerUserId };
+  try {
+    await sql.begin("isolation level repeatable read", async tx => {
+      const db = transactionClient(tx), rows = backupRows(db, scope), backups = createBackupRestoreRepository(db);
+      await tx`INSERT INTO users(id,email,display_name,password_hash) VALUES(${ownerUserId},${ownerUserId + "@backup.test"},'fixture','test')`;
+      await tx`INSERT INTO workspaces(id,owner_user_id) VALUES(${workspaceId},${ownerUserId})`;
+      const source = await rows.source(), session = await rows.learning();
+      const observation = await rows.observation(session);
+      const [origin] = await tx`SELECT activity_id FROM opening_learning_sessions WHERE id=${session}`;
+      const activity = String(origin!.activity_id);
+      await tx`INSERT INTO library_documents(id,workspace_id,title,lifecycle,current_revision_number)
+        VALUES(${doc},${workspaceId},'Lesson','published',1)`;
+      await tx`INSERT INTO library_blocks(id,workspace_id,document_id,type,position,content)
+        VALUES(${block},${workspaceId},${doc},'text',0,'{"text":"Publication-derived explanation"}')`;
+      await tx`INSERT INTO opening_teaching_units(id,workspace_id,owner_user_id,title,document_id,current_revision_number)
+        VALUES(${unit},${workspaceId},${ownerUserId},'Lesson',${doc},1)`;
+      await tx`INSERT INTO opening_teaching_activity_specs(id,workspace_id,owner_user_id,activity_id,teaching_unit_id,document_id,
+        revision_number,source_refs,version)
+        VALUES(${randomUUID()},${workspaceId},${ownerUserId},${activity},${unit},${doc},1,${tx.json([{ sourceId: source }])},1)`;
+      const card = randomUUID(), review = randomUUID(), correction = randomUUID();
+      await tx`INSERT INTO cards(id,workspace_id,owner_user_id,front,back,origin_observation_root_id)
+        VALUES(${card},${workspaceId},${ownerUserId},'Lesson card','Learner answer',${observation})`;
+      await tx`INSERT INTO learning_events(id,workspace_id,owner_user_id,type,schema_version,idempotency_key,occurred_at,content_id,content_version,payload)
+        VALUES(${review},${workspaceId},${ownerUserId},'review',1,${review},now(),${card},1,'{"grade":"good"}')`;
+      await tx`INSERT INTO learning_events(id,workspace_id,owner_user_id,type,schema_version,idempotency_key,occurred_at,corrects_event_id,payload)
+        VALUES(${correction},${workspaceId},${ownerUserId},'correction',1,${correction},now(),${review},'{"note":"Lesson correction"}')`;
+      const packed = nativeBackupPackageSchema.parse(JSON.parse(JSON.stringify(await backups.exportWorkspace(scope))));
+      expect(packed.counts).toMatchObject({ documents: 1, blocks: 1, cards: 1, events: 2 });
+      const provenance = { contextSourceRefs: [{ sourceId: source, sourceVersion: 1, publication: true }] };
+
+      // Remove the destination spec so the archive must supply the publication lineage.
+      await tx`TRUNCATE learning_events`;
+      await tx`DELETE FROM cards WHERE id=${card}`;
+      await tx`DELETE FROM opening_teaching_activity_specs WHERE activity_id=${activity}`;
+      await tx`DELETE FROM opening_teaching_units WHERE id=${unit}`;
+      await tx`DELETE FROM library_documents WHERE id=${doc}`;
+      if (unavailable === "missing") {
+        await tx.savepoint(async () => {
+          const admitted = await backups.restoreWorkspace({ ...scope, packed, conflictPolicy: "reject" });
+          expect(admitted.applied).toMatchObject({ documents: 1, blocks: 1, cards: 1, events: 2 });
+          expect((await backups.exportWorkspace(scope)).records.documents).toMatchObject([{ id: doc, openingProvenance: provenance }]);
+          throw rollback;
+        }).catch(error => { if (error !== rollback) throw error; });
+      }
+      if (unavailable === "excluded") await rows.exclude(source);
+      else await tx`DELETE FROM opening_sources WHERE id=${source}`;
+      const result = await backups.restoreWorkspace({ ...scope, packed, conflictPolicy: "reject" });
+      expect(result.applied).toMatchObject({ documents: 0, blocks: 0, cards: 0, events: 0 });
+      expect(await tx`SELECT id FROM library_documents WHERE id=${doc}`).toEqual([]);
+      expect(await tx`SELECT id FROM cards WHERE id=${card}`).toEqual([]);
+      expect(await tx`SELECT id FROM learning_events WHERE workspace_id=${workspaceId}`).toEqual([]);
       throw rollback;
     }).catch(error => { if (error !== rollback) throw error; });
   } finally { await sql.end(); }
