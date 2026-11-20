@@ -103,10 +103,12 @@ it("retries a v1 migration after source cleanup fails without creating a second 
   };
   const scopes = { ordinary, manual };
   const fallback = emptyPracticeDraft(manual);
-  expect(() => readPartitionedPracticeDraftCollection(scopes, fallback, storage)).toThrow("cleanup failed");
+  const loaded = readPartitionedPracticeDraftCollection(scopes, fallback, storage);
   const copied = JSON.parse(stored.get(manualKey)!);
+  expect(loaded).toEqual(copied);
   expect(copied.drafts).toHaveLength(1);
   expect(copied.drafts[0].fields.answer).toBe("original answer");
+  expect(stored.has(oldKey)).toBe(true);
 
   blockCleanup = false;
   vi.resetModules();

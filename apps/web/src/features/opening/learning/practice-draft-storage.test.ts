@@ -115,16 +115,27 @@ it.each(["corrupt", "denied"] as const)("blocks fresh writes when existing stora
   expect(readPracticeDraft(scope, disk)?.fields.answer).toBe("restored browser copy");
 });
 
-it.each(["malformed", "unreadable"] as const)("reads and saves manual drafts while preserving %s ordinary storage", mode => {
+it.each([
+  ["cold", "malformed"],
+  ["cold", "unreadable"],
+  ["cached", "malformed"],
+  ["cached", "invalid schema"],
+  ["cached", "unreadable"],
+] as const)("reads and saves manual drafts on a %s load with %s ordinary storage", (cache, mode) => {
   const course = crypto.randomUUID();
   const ordinary = practiceScope(course, "ordinary");
   const manual = practiceScope(course, "manual");
   const ordinaryKey = `opening-practice:v2:${ordinary}`;
   const manualKey = `opening-practice:v2:${manual}`;
   const legacy = emptyPracticeDraft(ordinary, { answer: "saved ordinary answer" });
-  const rawOrdinary = mode === "malformed" ? "{broken" : JSON.stringify({ version: 2, scope: ordinary, activeId: legacy.id, drafts: [legacy] });
   const saved = emptyPracticeDraft(manual, { answer: "saved manual answer" });
   const disk = { ...storage(), removeItem: (key: string) => { disk.data.delete(key); } };
+  const validOrdinary = JSON.stringify({ version: 2, scope: ordinary, activeId: legacy.id, drafts: [legacy] });
+  if (cache === "cached") {
+    disk.data.set(ordinaryKey, validOrdinary);
+    expect(readPracticeDraft(ordinary, disk)).toEqual(legacy);
+  }
+  const rawOrdinary = mode === "malformed" ? "{broken" : mode === "invalid schema" ? '{"version":2}' : validOrdinary;
   disk.data.set(ordinaryKey, rawOrdinary);
   disk.data.set(manualKey, JSON.stringify({ version: 2, scope: manual, activeId: saved.id, drafts: [saved] }));
   if (mode === "unreadable") {
@@ -142,6 +153,39 @@ it.each(["malformed", "unreadable"] as const)("reads and saves manual drafts whi
     .toBe("edited manual answer");
   expect(() => readPartitionedPracticeDraftCollection(scopes, emptyPracticeDraft(ordinary), disk)).toThrow();
   expect(disk.data.get(ordinaryKey)).toBe(rawOrdinary);
+});
+
+it("reopens manual practice after a failed matrix-only cleanup and retries from live ordinary storage", () => {
+  const course = crypto.randomUUID();
+  const ordinary = practiceScope(course, "ordinary");
+  const manual = practiceScope(course, "manual");
+  const ordinaryKey = `opening-practice:v2:${ordinary}`;
+  const legacy = emptyPracticeDraft(ordinary, { answer: "legacy manual answer" });
+  const matrix = emptyPracticeDraft(ordinary, { matrixMode: true, answer: "matrix answer" });
+  const disk = { ...storage(), removeItem: (key: string) => { disk.data.delete(key); } };
+  const rawOrdinary = JSON.stringify({ version: 2, scope: ordinary, activeId: legacy.id, drafts: [legacy, matrix] });
+  disk.data.set(ordinaryKey, rawOrdinary);
+  expect(readPracticeDraft(ordinary, disk)).toEqual(legacy);
+  disk.setItem.mockImplementation((key, value) => {
+    if (key === ordinaryKey) throw new Error("cleanup write denied");
+    disk.data.set(key, value);
+  });
+
+  const scopes = { ordinary, manual };
+  const fallback = emptyPracticeDraft(manual);
+  expect(readPartitionedPracticeDraftCollection(scopes, fallback, disk))
+    .toMatchObject({ activeId: legacy.id, drafts: [{ ...legacy, scope: manual }] });
+  expect(disk.data.get(ordinaryKey)).toBe(rawOrdinary);
+  const edited = patchPracticeDraft(manual, {}, { fields: { answer: "edited manual answer" } }, disk);
+  expect(edited.persisted).toBe(true);
+
+  const updatedMatrix = { ...matrix, fields: { ...matrix.fields, answer: "newer matrix answer" } };
+  disk.data.set(ordinaryKey, JSON.stringify({ version: 2, scope: ordinary, activeId: matrix.id, drafts: [legacy, updatedMatrix] }));
+  disk.setItem.mockImplementation((key, value) => { disk.data.set(key, value); });
+  expect(readPartitionedPracticeDraftCollection(scopes, fallback, disk))
+    .toMatchObject({ activeId: legacy.id, drafts: [edited.draft] });
+  expect(parsePracticeDraftCollection(JSON.parse(disk.data.get(ordinaryKey)!), ordinary))
+    .toMatchObject({ activeId: matrix.id, drafts: [updatedMatrix] });
 });
 
 it("loads a legacy draft once with a stable local identity while preserving frozen server request keys", () => {

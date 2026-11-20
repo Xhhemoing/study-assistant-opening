@@ -32,9 +32,11 @@ const memory = new Map<string, PracticeDraftCollection>();
 const dirty = new Set<string>();
 const blocked = new Map<string, string>();
 const storageKey = (scope: string) => `opening-practice:v2:${scope}`;
+const legacyStorageKey = (scope: string) => `opening-practice:v1:${scope}`;
 type ReadStorage = Pick<Storage, "getItem">;
 type WriteStorage = Pick<Storage, "setItem">;
 type PartitionStorage = ReadStorage & WriteStorage & Pick<Storage, "removeItem">;
+type StoredPracticeDraftCollection = { collection: PracticeDraftCollection; legacy: boolean };
 
 export function practiceScope(courseId: string, mode: "ordinary" | "manual" | "matrix" | "span", retest?: { retestId: string; prompt: string; skillLabel: string; requirementKey?: string | null; retestActivityId?: string } | null, focus?: { skillLabel: string; requirementKey: string | null }, problem?: { sourceId: string; sourceVersion: number }, matrixExercise?: MatrixExerciseInput): string {
   // Retest content/requirement changes never attach an older frozen request to a newer task.
@@ -104,21 +106,13 @@ export function parsePracticeDraftCollection(raw: unknown, scope: string): Pract
   return { ...parsed.data, drafts: valid };
 }
 
-/** A bad stored checkpoint blocks new writes; it is never silently replaced by an empty draft. */
-export function readPracticeDraftCollection(scope: string, storage: ReadStorage | null): PracticeDraftCollection | null {
-  const cached = memory.get(scope);
-  if (cached) return cached;
-  if (!storage) {
-    const error = blocked.get(scope);
-    if (error) throw new Error(error);
-    return null;
-  }
+function readStoredPracticeDraftCollection(scope: string, storage: ReadStorage): StoredPracticeDraftCollection | null {
   function unreadable(message: string): never { blocked.set(scope, message); throw new Error(message); }
   let raw: string | null;
   let legacy = false;
   try {
     raw = storage.getItem(storageKey(scope));
-    if (raw === null) { raw = storage.getItem(`opening-practice:v1:${scope}`); legacy = true; }
+    if (raw === null) { raw = storage.getItem(legacyStorageKey(scope)); legacy = true; }
   } catch { unreadable("无法读取练习草稿，已停止新建和切换。请允许此页面使用浏览器存储后重试。"); }
   if (raw === null) { blocked.delete(scope); return null; }
   let parsed: unknown;
@@ -130,8 +124,22 @@ export function readPracticeDraftCollection(scope: string, storage: ReadStorage 
   } else collection = parsePracticeDraftCollection(parsed, scope);
   if (!collection) unreadable("保存的练习草稿身份或内容无效，原内容未改动，已停止新建和切换。");
   blocked.delete(scope);
-  memory.set(scope, collection);
-  return collection;
+  return { collection, legacy };
+}
+
+/** A bad stored checkpoint blocks new writes; it is never silently replaced by an empty draft. */
+export function readPracticeDraftCollection(scope: string, storage: ReadStorage | null): PracticeDraftCollection | null {
+  const cached = memory.get(scope);
+  if (cached) return cached;
+  if (!storage) {
+    const error = blocked.get(scope);
+    if (error) throw new Error(error);
+    return null;
+  }
+  const stored = readStoredPracticeDraftCollection(scope, storage);
+  if (!stored) return null;
+  memory.set(scope, stored.collection);
+  return stored.collection;
 }
 
 export function initializePracticeDraft(draft: PracticeDraft): PracticeDraftCollection {
@@ -162,52 +170,78 @@ export function isRecoverableManualDraft(draft: PracticeDraft): boolean {
   return draft.fields.matrixMode !== true && !draft.observationId;
 }
 
-function migrateOrdinaryManualDrafts(scopes: PracticeDraftScopes, ordinary: PracticeDraftCollection, fallback: PracticeDraft, storage: PartitionStorage): void {
+function migrateOrdinaryManualDrafts(scopes: PracticeDraftScopes, source: StoredPracticeDraftCollection, fallback: PracticeDraft, storage: PartitionStorage): void {
+  const { collection: ordinary, legacy } = source;
+  const manualEntry = fallback.scope === scopes.manual;
   const manual = readPracticeDraftCollection(scopes.manual, storage);
   const moved = ordinary.drafts.filter(draft => draft.fields.matrixMode !== true);
   const existingIds = new Set(manual?.drafts.map(draft => draft.id));
   const added = moved.filter(draft => !existingIds.has(draft.id)).map(draft => ({ ...draft, scope: scopes.manual }));
   const drafts = [...(manual?.drafts ?? []), ...added];
   const legacyActive = added.find(draft => draft.id === ordinary.activeId && isRecoverableManualDraft(draft));
-  const activeId = manual?.activeId ?? legacyActive?.id ?? fallback.id;
-  if (activeId === fallback.id && !drafts.some(draft => draft.id === activeId)) drafts.push(fallback);
-
-  function save(collection: PracticeDraftCollection) {
-    if (!persistCollection(collection, storage)) throw new Error("无法迁移练习草稿，原答案已保留。请释放浏览器存储后重试。");
-    memory.set(collection.scope, collection);
-  }
+  const manualFallback = manualEntry ? fallback : emptyPracticeDraft(scopes.manual);
+  const activeId = manual?.activeId ?? legacyActive?.id ?? manualFallback.id;
+  if (activeId === manualFallback.id && !drafts.some(draft => draft.id === activeId)) drafts.push(manualFallback);
+  const migrationError = "无法迁移练习草稿，原答案已保留。请释放浏览器存储后重试。";
 
   // A v1 draft can lack an ID. Save the assigned ID before copying so a retry can recognize it.
-  if (storage.getItem(storageKey(scopes.ordinary)) === null) save(ordinary);
+  if (legacy) {
+    try {
+      storage.setItem(storageKey(scopes.ordinary), JSON.stringify(ordinary));
+      memory.set(scopes.ordinary, ordinary);
+    } catch {
+      if (manualEntry && manual) return;
+      throw new Error(migrationError);
+    }
+  }
   if (!manual || added.length || dirty.has(scopes.manual)) {
-    save({ version: 2, scope: scopes.manual, activeId, drafts });
+    const next = { version: 2 as const, scope: scopes.manual, activeId, drafts };
+    if (!persistCollection(next, storage)) throw new Error(migrationError);
+    memory.set(scopes.manual, next);
   }
 
   // Remove the source only after the destination is durable. A retry keeps the existing copy by ID.
-  storage.removeItem(`opening-practice:v1:${scopes.ordinary}`);
-  const matrixDrafts = ordinary.drafts.filter(draft => draft.fields.matrixMode === true);
-  if (matrixDrafts.length) {
-    const active = matrixDrafts.find(draft => draft.id === ordinary.activeId) ?? matrixDrafts[0]!;
-    save({ ...ordinary, activeId: active.id, drafts: matrixDrafts });
-  } else {
-    storage.removeItem(storageKey(scopes.ordinary));
-    memory.delete(scopes.ordinary);
-    dirty.delete(scopes.ordinary);
+  try {
+    const oldKey = legacyStorageKey(scopes.ordinary);
+    if (legacy) storage.removeItem(oldKey);
+    else {
+      const oldRaw = storage.getItem(oldKey);
+      if (oldRaw !== null) {
+        if (!parsePracticeDraft(JSON.parse(oldRaw), scopes.ordinary)) throw new Error(migrationError);
+        storage.removeItem(oldKey);
+      }
+    }
+    const matrixDrafts = ordinary.drafts.filter(draft => draft.fields.matrixMode === true);
+    if (matrixDrafts.length) {
+      const active = matrixDrafts.find(draft => draft.id === ordinary.activeId) ?? matrixDrafts[0]!;
+      const remaining = { ...ordinary, activeId: active.id, drafts: matrixDrafts };
+      storage.setItem(storageKey(scopes.ordinary), JSON.stringify(remaining));
+      memory.set(scopes.ordinary, remaining);
+    } else {
+      storage.removeItem(storageKey(scopes.ordinary));
+      memory.delete(scopes.ordinary);
+    }
+  } catch (reason) {
+    if (!manualEntry) throw reason;
   }
 }
 
 export function readPartitionedPracticeDraftCollection(scopes: PracticeDraftScopes, fallback: PracticeDraft, storage: PartitionStorage | null): PracticeDraftCollection | null {
-  let ordinary: PracticeDraftCollection | null = null;
-  try {
-    ordinary = readPracticeDraftCollection(scopes.ordinary, storage);
-  } catch (reason) {
-    // An unreadable migration source stays blocked in its own scope.
-    if (fallback.scope !== scopes.manual) throw reason;
-  }
-  if (ordinary?.drafts.some(draft => draft.fields.matrixMode !== true)) {
-    if (!storage) throw new Error("无法迁移练习草稿，原答案已保留。请允许此页面使用浏览器存储后重试。");
-    const manualFallback = fallback.scope === scopes.manual ? fallback : emptyPracticeDraft(scopes.manual);
-    migrateOrdinaryManualDrafts(scopes, ordinary, manualFallback, storage);
+  if (storage) {
+    let ordinary: StoredPracticeDraftCollection | null = null;
+    const unsavedOrdinary = dirty.has(scopes.ordinary);
+    try {
+      // Revalidate on every migration attempt, including after an interrupted cleanup.
+      ordinary = readStoredPracticeDraftCollection(scopes.ordinary, storage);
+    } catch (reason) {
+      if (!unsavedOrdinary) memory.delete(scopes.ordinary);
+      if (fallback.scope !== scopes.manual) throw reason;
+    }
+    if (!unsavedOrdinary && ordinary?.collection.drafts.some(draft => draft.fields.matrixMode !== true)) {
+      migrateOrdinaryManualDrafts(scopes, ordinary, fallback, storage);
+    }
+  } else if (fallback.scope !== scopes.manual && readPracticeDraftCollection(scopes.ordinary, null)?.drafts.some(draft => draft.fields.matrixMode !== true)) {
+    throw new Error("无法迁移练习草稿，原答案已保留。请允许此页面使用浏览器存储后重试。");
   }
   const collection = readPracticeDraftCollection(fallback.scope, storage);
   if (fallback.scope !== scopes.manual || !collection) return collection;
