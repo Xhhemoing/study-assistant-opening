@@ -91,7 +91,7 @@ function PracticeController(props: Props & ModeActions & { scope: string; scopes
   return <div className="space-y-3"><PracticeForm key={continuity.draft.id} {...props} continuity={continuity} /><PracticeDraftShelf continuity={continuity} allowAnother={!props.retest && !props.initialFocus} /></div>;
 }
 
-function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, onRecorded, initialMatrixKey, initialMatrixVariant, initialFocus, initialProblem, onAskAttempt, continuity, photoSession, onShowMatrix, onBackToManual }: Props & ModeActions & { continuity: PracticeContinuity }) {
+function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, onRecorded, initialMode, initialMatrixKey, initialMatrixVariant, initialFocus, initialProblem, onAskAttempt, continuity, photoSession, onShowMatrix, onBackToManual }: Props & ModeActions & { continuity: PracticeContinuity }) {
   const { studySessionV2 } = useOpeningCapabilities();
   const usePhotoShell = Boolean(photoSession && initialProblem && studySessionV2);
   const answerForm = useRef<HTMLFormElement>(null);
@@ -295,7 +295,7 @@ function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, o
     catch (reason) { setError(userFacingMessage(reason, "文件暂时无法读取，请重试。")); }
   }
 
-  if (ready && onBackToManual) return <MatrixExerciseForm courseId={courseId} initialKey={initialMatrixKey} initialVariant={initialMatrixVariant} sources={readySources} onRecorded={onRecorded} onBack={onBackToManual} />;
+  if (ready && onBackToManual) return <MatrixExerciseForm courseId={courseId} initialKey={initialMatrixKey} initialVariant={initialMatrixVariant} syncVariantInUrl={initialMode === "matrix"} sources={readySources} onRecorded={onRecorded} onBack={onBackToManual} />;
   const content = (
     <fieldset disabled={!ready} aria-busy={!ready} className="space-y-3 border-t border-line pt-4">
       {!ready ? <p className="text-sm text-text-3" role="status">正在恢复练习…</p> : null}

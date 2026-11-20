@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { LearningAttempt, LearningObservation } from "@aistudy/contracts";
 import type { createOpeningLearningClient } from "../client/learning-client";
 import { raiseAssistanceOnly, type DeliveredAssistance } from "./reference-check";
-import { assertPracticeDraftSaved, emptyPracticeDraft, initializePracticeDraft, isRecoverableManualDraft, patchPracticeDraft, practiceDraftHasUnsavedStorage, readPartitionedPracticeDraftCollection, readPracticeDraftCollection, switchPracticeDraft, type DraftPatch, type PracticeDraft, type PracticeDraftCollection, type PracticeDraftScopes, type PracticeFields } from "./practice-draft-storage";
+import { assertPracticeDraftSaved, emptyPracticeDraft, initializePracticeDraft, isRecoverableManualDraft, moveArchivedPracticeDraft, patchPracticeDraft, practiceDraftHasUnsavedStorage, readPartitionedPracticeDraftCollection, readPracticeDraftCollection, switchPracticeDraft, type DraftPatch, type PracticeDraft, type PracticeDraftCollection, type PracticeDraftScopes, type PracticeFields } from "./practice-draft-storage";
 import { userFacingMessage } from "../../../lib/user-facing-error";
 export * from "./practice-draft-storage";
 
@@ -69,16 +69,18 @@ export function usePracticeDraft(scope: string, initial: Partial<PracticeFields>
     return result.draft;
   // Initial inputs belong to this scope. Each callback captures its own immutable draft identity.
   }, [scope, draft.id, ready]);
-  function select(target: PracticeDraft | string): boolean {
+  function select(switchDraft: (storage: Storage | null) => PracticeDraftCollection): boolean {
     if (!ready) return false;
-    try { setCollection(switchPracticeDraft(scope, draft.id, target, browserStorage())); setSwitchError(""); setStorageWarning(false); return true; }
+    try { setCollection(switchDraft(browserStorage())); setSwitchError(""); setStorageWarning(false); return true; }
     catch (reason) { setSwitchError(userFacingMessage(reason, "草稿未切换，原答案已保留")); return false; }
   }
   return { draft, drafts, patch, ready, storageWarning, loadError, switchError,
     requireSaved: () => assertPracticeDraftSaved(scope),
     reload: () => setLoadRevision(value => value + 1),
-    restore: (id: string) => drafts.some(value => value.id === id) && select(id),
-    startAnother: (fields: Partial<PracticeFields> = initial) => select(emptyPracticeDraft(scope, fields)),
+    restore: (id: string, targetScope = scope) => drafts.some(value => value.id === id) && select(storage => targetScope === scope
+      ? switchPracticeDraft(scope, draft.id, id, storage)
+      : moveArchivedPracticeDraft(scope, draft.id, id, targetScope, storage)),
+    startAnother: (fields: Partial<PracticeFields> = initial) => select(storage => switchPracticeDraft(scope, draft.id, emptyPracticeDraft(scope, fields), storage)),
   };
 }
 

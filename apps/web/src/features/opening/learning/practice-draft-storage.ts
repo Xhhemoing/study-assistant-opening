@@ -234,6 +234,16 @@ function cleanupLegacyDraft(scope: string, storage: PartitionStorage, migrated: 
   return true;
 }
 
+function finishCollectionSave(collection: PracticeDraftCollection, storage: WriteStorage): void {
+  dirty.delete(collection.scope);
+  dirtyDraftIds.delete(collection.scope);
+  if (hasRemoveItem(storage) && isReadStorage(storage)) {
+    try {
+      cleanupLegacyDraft(collection.scope, storage, collection.drafts);
+    } catch { /* Keep v1 when cleanup cannot be verified or completed. */ }
+  }
+}
+
 function persistCollection(collection: PracticeDraftCollection, storage: WriteStorage | null): boolean {
   if (unreconciled.has(collection.scope)) {
     dirty.add(collection.scope);
@@ -242,13 +252,7 @@ function persistCollection(collection: PracticeDraftCollection, storage: WriteSt
   try {
     if (!storage) throw new Error("storage unavailable");
     storage.setItem(storageKey(collection.scope), JSON.stringify(collection));
-    dirty.delete(collection.scope);
-    dirtyDraftIds.delete(collection.scope);
-    if (hasRemoveItem(storage) && isReadStorage(storage)) {
-      try {
-        cleanupLegacyDraft(collection.scope, storage, collection.drafts);
-      } catch { /* Keep v1 when cleanup cannot be verified or completed. */ }
-    }
+    finishCollectionSave(collection, storage);
     return true;
   } catch { dirty.add(collection.scope); return false; }
 }
@@ -503,4 +507,60 @@ export function switchPracticeDraft(scope: string, expectedActiveId: string, tar
   if (!persistCollection(next, storage)) throw new Error("未能保存全部草稿，已取消切换；当前原答案和请求仍保留。请先复制答案或释放浏览器存储后重试。");
   memory.set(scope, next);
   return next;
+}
+
+/** Promote an archive in the collection the destination URL will reopen. */
+export function moveArchivedPracticeDraft(
+  scope: string, expectedActiveId: string, draftId: string, targetScope: string, storage: PartitionStorage | null,
+): PracticeDraftCollection {
+  const moveError = "草稿未切换，原答案已保留。请允许使用浏览器存储或释放空间后重试。";
+  const current = memory.get(scope);
+  if (!storage || !current || current.activeId !== expectedActiveId || draftId === expectedActiveId || scope === targetScope) {
+    throw new Error(moveError);
+  }
+
+  const storedSource = readStoredPracticeDraftCollection(scope, storage);
+  if (!storedSource && !dirtyDraftIds.get(scope)?.size) throw new Error(moveError);
+  const source = mergeWithStoredCollection(scope, current, storedSource);
+  const archived = source.drafts.find(draft => draft.id === draftId);
+  if (!archived || source.activeId !== expectedActiveId) throw new Error(moveError);
+  const moved = parsePracticeDraft({ ...archived, scope: targetScope }, targetScope);
+  if (!moved) throw new Error(moveError);
+
+  const targetKey = storageKey(targetScope);
+  const previousTarget = storage.getItem(targetKey);
+  const storedTarget = readStoredPracticeDraftCollection(targetScope, storage);
+  const cachedTarget = memory.get(targetScope);
+  const target = cachedTarget && dirtyDraftIds.get(targetScope)?.size
+    ? mergeWithStoredCollection(targetScope, cachedTarget, storedTarget)
+    : storedTarget?.collection;
+  const targetDrafts = target?.drafts ?? [];
+  const existing = targetDrafts.find(draft => draft.id === draftId);
+  if (existing && JSON.stringify(existing) !== JSON.stringify(moved)) throw new Error(moveError);
+
+  const nextTarget: PracticeDraftCollection = {
+    version: 2, scope: targetScope, activeId: draftId,
+    drafts: existing ? targetDrafts : [...targetDrafts, moved],
+  };
+  const nextSource = { ...source, drafts: source.drafts.filter(draft => draft.id !== draftId) };
+
+  // Keep the source intact until the destination write succeeds. If source cleanup
+  // fails, restore the previous destination before reporting the failed switch.
+  try {
+    storage.setItem(targetKey, JSON.stringify(nextTarget));
+    try {
+      storage.setItem(storageKey(scope), JSON.stringify(nextSource));
+    } catch {
+      if (previousTarget === null) storage.removeItem(targetKey);
+      else storage.setItem(targetKey, previousTarget);
+      throw new Error(moveError);
+    }
+  } catch { throw new Error(moveError); }
+
+  for (const saved of [nextSource, nextTarget]) {
+    memory.set(saved.scope, saved);
+    unreconciled.delete(saved.scope);
+    finishCollectionSave(saved, storage);
+  }
+  return nextSource;
 }

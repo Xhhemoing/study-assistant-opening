@@ -7,7 +7,7 @@ import { createOpeningLearningClient } from "../client/learning-client";
 import { useDiagnosticsEnabled } from "../settings/appearance-preferences";
 import { LearningEvidenceEligibilityDetails } from "./eligibility-details";
 import { PracticeDraftRecovery, PracticeDraftShelf } from "./practice-draft-recovery";
-import { assertPracticeAttempt, practiceScope, readPracticeDraft, readPracticeRecord, restoredPracticeAssistance, runPracticeRequest, usePracticeDraft, type PracticeContinuity } from "./practice-draft";
+import { assertPracticeAttempt, practiceScope, readPracticeDraft, readPracticeRecord, restoredPracticeAssistance, runPracticeRequest, usePracticeDraft, type PracticeContinuity, type PracticeDraft } from "./practice-draft";
 import { raiseAssistanceOnly, isAssistanceAllowed } from "./reference-check";
 import { userFacingMessage } from "../../../lib/user-facing-error";
 
@@ -23,7 +23,7 @@ const reasonText: Record<string, string> = {
 };
 
 /** Built-in deterministic questions use the same session/attempt/observation history as ordinary work. */
-type Props = { courseId: string; initialKey?: Key; initialVariant?: number; onRecorded: () => void } & (
+type Props = { courseId: string; initialKey?: Key; initialVariant?: number; syncVariantInUrl?: boolean; onRecorded: () => void } & (
   | { sources: SourceRecord[]; onBack: () => void; boundExercise?: undefined; boundSourceAvailable?: undefined }
   | { boundExercise: MatrixExerciseInput; boundSourceAvailable: boolean; sources?: undefined; onBack?: undefined }
 );
@@ -74,9 +74,17 @@ function MatrixController(props: ControllerProps) {
     const linked = continuity.drafts.find(draft => draft.fields.matrixVariant === variant);
     if (linked) continuity.restore(linked.id);
   }, [props.boundExercise, continuity]);
+  function restoreDraft(saved: PracticeDraft) {
+    const { matrixVariant } = saved.fields;
+    const targetScope = props.boundExercise
+      ? matrixScope(props.courseId, { ...props.boundExercise, variant: matrixVariant })
+      : props.scope;
+    if (!continuity.restore(saved.id, targetScope)) return;
+    if (props.onSwitchVariant) props.onSwitchVariant(matrixVariant);
+    else if (props.syncVariantInUrl || props.initialVariant !== undefined) replaceMatrixVariant(matrixVariant);
+  }
   return <div className="space-y-3"><MatrixForm key={continuity.draft.id} {...props} continuity={continuity} />
-    <PracticeDraftShelf continuity={continuity} allowAnother={!props.boundExercise}
-      onRestored={props.boundExercise || props.initialVariant !== undefined ? saved => replaceMatrixVariant(saved.fields.matrixVariant) : undefined} />
+    <PracticeDraftShelf continuity={continuity} allowAnother={!props.boundExercise} onRestore={restoreDraft} />
   </div>;
 }
 function MatrixForm({ courseId, sources, onRecorded, onBack, initialKey, initialVariant, boundExercise, boundSourceAvailable, scope, continuity, onSwitchVariant }: ControllerProps & { continuity: PracticeContinuity }) {
