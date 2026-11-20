@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import type { Sql } from "postgres";
-import { createOpeningKnowledgeRepository } from "./opening-knowledge";
+import { createOpeningKnowledgeRepository, knowledgeChunkDigests } from "./opening-knowledge";
 
 const W = "00000000-0000-4000-8000-000000000001";
 const U = "00000000-0000-4000-8000-000000000002";
@@ -95,7 +95,7 @@ function makeFakeSql(init?: {
       }
       const fragment = parts.join("?").trim();
       if (fragment === "AND s.id IN ?") return values[0];
-      if (["", "LIMIT 1 FOR SHARE OF c", "FOR SHARE OF s, v, m"].includes(fragment)) return null;
+      if (["", "FOR SHARE OF c", "FOR SHARE OF s, v, m"].includes(fragment)) return null;
       return (async () => {
       const q = parts.join("?").replace(/\s+/g, " ").trim();
       txRecord?.statements.push(q);
@@ -271,6 +271,12 @@ function makeFakeSql(init?: {
         knowledge.set(courseId, stored);
         init?.onQuery?.(q);
         return [stored];
+      }
+
+      if (q.startsWith("SELECT c.id,c.source_id,c.source_version FROM opening_source_chunks c")) {
+        const requested = values[0] as string[];
+        return [...view.chunks.values()].filter(chunk => requested.includes(chunk.sourceId) && chunk.text.trim())
+          .map(chunk => ({ id: chunk.id, source_id: chunk.sourceId, source_version: chunk.sourceVersion }));
       }
 
       if (q.startsWith("SELECT s.id, s.version FROM opening_sources s") || q.startsWith("SELECT s.id,s.version FROM opening_sources s")) {
@@ -604,13 +610,16 @@ describe("opening knowledge sync and coalescing", () => {
       { id: S1, version: 2, uploadState: "uploaded", parseState: "ready", available: true, excluded: false, hasChunk: true, purpose: "teaching" },
       { id: S2, version: 1, uploadState: "uploaded", parseState: "ready", available: true, excluded: false, hasChunk: true, hasTextChunk: false, purpose: "teaching" },
     ];
-    const db = makeFakeSql({ sources });
+    const chunks = [{ id: CH1, sourceId: S1, sourceVersion: 2, text: "Cover page" }];
+    const db = makeFakeSql({ sources, chunks });
     const repo = createOpeningKnowledgeRepository(db.sql);
     const input = { expectedVersion: 0, snapshot: { courseId: C, version: 0, nodes: [], edges: [] }, sourceVersions: {} };
     await expect(repo.replace(scope, C, { ...input, extractedSourceVersions: { [S1]: 2, [S2]: 1 } }))
       .rejects.toMatchObject({ code: "CONFLICT" });
     expect(db.knowledge.has(C)).toBe(false);
-    const saved = await repo.replace(scope, C, { ...input, extractedSourceVersions: { [S1]: 2 } });
+    const saved = await repo.replace(scope, C, {
+      ...input, extractedSourceVersions: { [S1]: 2 }, extractedChunkDigests: knowledgeChunkDigests(chunks),
+    });
     expect(db.knowledge.get(C)?.snapshot.coveredSourceVersions).toEqual({ [S1]: 2 });
     expect(db.jobs).toEqual([]);
     await expect(repo.readSyncStatus(scope, C, { includeDetails: true })).resolves.toMatchObject({
@@ -1079,6 +1088,7 @@ describe("opening knowledge sync and coalescing", () => {
     const replaced = await repo.replace(scope, C, {
       expectedVersion: 1,
       extractedSourceVersions: { [S1]: 2 },
+      extractedChunkDigests: knowledgeChunkDigests([{ id: CH_V2, sourceId: S1 }]),
       snapshot: {
         courseId: C,
         version: 2,
@@ -1213,6 +1223,7 @@ describe("opening knowledge sync and coalescing", () => {
     const legitimate = await repo.replace(scope, C, {
       expectedVersion: 2,
       extractedSourceVersions: { [S1]: 2 },
+      extractedChunkDigests: knowledgeChunkDigests([{ id: CH_V2, sourceId: S1 }]),
       snapshot: { courseId: C, version: 3, nodes: [], edges: [] },
       sourceVersions: {},
     });

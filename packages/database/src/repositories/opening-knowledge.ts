@@ -1,7 +1,6 @@
 import { lockOpeningJobExecution } from "./opening-job-execution";
 import { createHash, randomUUID } from "node:crypto";
 import {
-  knowledgeSnapshotSchema,
   type CourseKnowledgeFailedJob,
   type CourseKnowledgeRecordResponse,
   type CourseKnowledgeRequestedJob,
@@ -11,6 +10,7 @@ import {
   type SourceChunk,
   type Scope,
 } from "@aistudy/contracts";
+import { coverageFields, filteredCoverage, readPublicKnowledgeSnapshot, storedKnowledgeSnapshotSchema, type StoredKnowledgeSnapshot } from "./opening-knowledge-snapshot";
 import { knowledgeNodeDefinition, sameKnowledgeNodeIdentity, validateKnowledgeSnapshot } from "@aistudy/domain";
 import type { Sql, TransactionSql } from "postgres";
 import { mapChunk } from "./opening-source-chunks";
@@ -47,6 +47,8 @@ export type ReplaceKnowledgeInput = {
   expectedReferencedNodeIds?: readonly string[];
   /** Worker rebuilds pass the source versions actually included in this extraction batch. */
   extractedSourceVersions?: Record<string, number>;
+  /** Digests of the exact readable chunk rows sent to extraction. */
+  extractedChunkDigests?: Record<string, string>;
   snapshot: KnowledgeSnapshot;
   sourceVersions: Record<string, number>;
 };
@@ -80,7 +82,7 @@ function parseSourceVersions(value: unknown): Record<string, number> {
   return out;
 }
 
-function sameVersions(left: Record<string, number>, right: Record<string, number>): boolean {
+function sameVersions<T extends number | string>(left: Record<string, T>, right: Record<string, T>): boolean {
   return Object.keys(left).length === Object.keys(right).length
     && Object.entries(left).every(([id, version]) => right[id] === version);
 }
@@ -104,8 +106,14 @@ function nodeSourceVersions(chunkIds: readonly string[], chunks: readonly Source
   return Object.fromEntries(chunks.filter(chunk => ids.has(chunk.id)).map(chunk => [chunk.sourceId, chunk.sourceVersion]));
 }
 
-function mapRecord(row: Record<string, unknown>): OpeningKnowledgeRecord {
-  const snapshot = knowledgeSnapshotSchema.parse(row.snapshot);
+type StoredKnowledgeRecord = OpeningKnowledgeRecord & { snapshot: StoredKnowledgeSnapshot };
+
+function publicRecord(record: StoredKnowledgeRecord, eligible?: Record<string, number>): OpeningKnowledgeRecord {
+  return { ...record, snapshot: readPublicKnowledgeSnapshot(record.snapshot, eligible) };
+}
+
+function mapRecord(row: Record<string, unknown>): StoredKnowledgeRecord {
+  const snapshot = storedKnowledgeSnapshotSchema.parse(row.snapshot);
   return {
     version: Number(row.version),
     snapshot: { ...snapshot, version: Number(row.version) },
@@ -202,13 +210,21 @@ async function assertAuthorizedChunks(
 }
 
 /** Purpose changes hide stale source-derived context without mutating confirmations/history. */
-async function hasTeachingPurposes(sql: Sql, scope: Scope, courseId: string, versions: Record<string, number>): Promise<boolean> {
+async function hasTeachingPurposes(sql: Sql | TransactionSql, scope: Scope, courseId: string, versions: Record<string, number>): Promise<boolean> {
   const ids = Object.keys(versions);
   if (!ids.length) return true;
   const admitted = await sql`SELECT m.asset_id FROM course_asset_memberships m
     WHERE m.workspace_id=${scope.workspaceId} AND m.course_id=${courseId} AND m.asset_type='source'
       AND m.asset_id IN ${sql(ids)} AND (m.purpose IS NULL OR m.purpose='teaching')`;
   return admitted.length === ids.length;
+}
+
+async function hasRestrictedGraphSources(db: Sql | TransactionSql, scope: Scope, courseId: string, versions: Record<string, number>): Promise<boolean> {
+  const ids = Object.keys(versions);
+  const restricted = ids.length ? await db`SELECT id FROM course_asset_memberships
+    WHERE workspace_id=${scope.workspaceId} AND course_id=${courseId} AND asset_type='source'
+      AND asset_id=ANY(${ids}::uuid[]) AND purpose IN ('practice','reference','mock_exam')` : [];
+  return restricted.length > 0;
 }
 
 const REQUESTED_JOB_STATES = new Set<CourseKnowledgeRequestedJob["state"]>([
@@ -295,10 +311,34 @@ async function readEligibleSourceVersions(
         WHERE c.source_id = s.id
           AND c.source_version = s.version
           AND c.text ~ '[^[:space:]]'
-          ${lockIds ? db`LIMIT 1 FOR SHARE OF c` : db``}
       )
     ORDER BY s.id ${lockIds ? db`FOR SHARE OF s, v, m` : db``}`;
   return Object.fromEntries(eligibleRows.map(row => [String(row.id), Number(row.version)]));
+}
+
+/** Parser retries retain identical rows and allocate new IDs for changed or added chunks. */
+export function knowledgeChunkDigests(chunks: readonly Pick<SourceChunk, "id" | "sourceId">[]): Record<string, string> {
+  const idsBySource = new Map<string, string[]>();
+  for (const chunk of chunks) {
+    const ids = idsBySource.get(chunk.sourceId) ?? [];
+    ids.push(chunk.id);
+    idsBySource.set(chunk.sourceId, ids);
+  }
+  return Object.fromEntries([...idsBySource].map(([id, ids]) => [
+    id, createHash("sha256").update(ids.sort().join(",")).digest("hex"),
+  ]));
+}
+
+async function readChunkDigests(db: Sql | TransactionSql, versions: Record<string, number>, lock = false) {
+  const ids = Object.keys(versions).sort();
+  if (!ids.length) return {};
+  const rows = await db`SELECT c.id,c.source_id,c.source_version
+    FROM opening_source_chunks c
+    JOIN opening_sources s ON s.id=c.source_id AND s.version=c.source_version
+    WHERE c.source_id IN ${db(ids)} AND c.text ~ '[^[:space:]]'
+    ORDER BY c.id ${lock ? db`FOR SHARE OF c` : db``}`;
+  return knowledgeChunkDigests(rows.filter(row => versions[String(row.source_id)] === Number(row.source_version))
+    .map(row => ({ id: String(row.id), sourceId: String(row.source_id) })));
 }
 
 async function readEligibleAndParsingMaterials(
@@ -414,10 +454,11 @@ async function coverageForEdit(
   tx: TransactionSql,
   scope: Scope,
   courseId: string,
-  previous: OpeningKnowledgeRecord | null,
+  previous: StoredKnowledgeRecord | null,
   sourceVersions: Record<string, number>,
   extracted?: Record<string, number>,
-): Promise<Record<string, number>> {
+  extractedChunkDigests?: Record<string, string>,
+) {
   let previousCoverage = previous?.snapshot.coveredSourceVersions;
   if (extracted === undefined && previous && previousCoverage === undefined) {
     const [job] = await tx`SELECT result FROM opening_jobs
@@ -430,10 +471,15 @@ async function coverageForEdit(
   const proposed = extracted ?? { ...previousCoverage, ...sourceVersions };
   const live = await readEligibleSourceVersions(tx, scope, courseId, Object.keys(proposed).sort());
   if (extracted !== undefined && (!sameVersions(extracted, live)
-    || Object.entries(sourceVersions).some(([id, version]) => extracted[id] !== version))) {
+    || Object.entries(sourceVersions).some(([id, version]) => extracted[id] !== version)
+    || !sameVersions(extractedChunkDigests ?? {}, await readChunkDigests(tx, live, true)))) {
     throw new OpeningKnowledgeError("CONFLICT", "课程材料已变化，请按最新可读资料重新整理。", "MATERIAL_REPLACEMENT_BLOCKED");
   }
-  return Object.fromEntries(Object.entries(proposed).filter(([id, version]) => live[id] === version));
+  const covered = Object.fromEntries(Object.entries(proposed).filter(([id, version]) => live[id] === version));
+  const previousDigests = previous?.snapshot.coveredSourceChunkDigests;
+  const carriedDigests = Object.fromEntries(Object.entries(previousDigests ?? {})
+    .filter(([id]) => covered[id] !== undefined && covered[id] === previousCoverage?.[id]));
+  return coverageFields(covered, extracted === undefined ? carriedDigests : extractedChunkDigests);
 }
 
 async function readSyncStatusInternal(
@@ -443,9 +489,11 @@ async function readSyncStatusInternal(
   options?: ReadKnowledgeSyncOptions & { computeProtection?: boolean },
 ): Promise<{
   sync: CourseKnowledgeSync;
-  record: OpeningKnowledgeRecord | null;
+  record: StoredKnowledgeRecord | null;
   unreadableSourceCount: number;
   rebuildBlockedByMaterials: boolean;
+  storedCoverage: Record<string, number>;
+  chunkDrift: boolean;
 }> {
   await assertOwnedCourse(db, scope, courseId);
   const knowledgeRows = await db`
@@ -506,6 +554,9 @@ async function readSyncStatusInternal(
   const coveredSourceVersions = record
     ? record.snapshot.coveredSourceVersions ?? receiptCoverage(record, resultObj)
     : {};
+  const recordedDigests = record?.snapshot.coveredSourceChunkDigests ?? {};
+  const liveDigests = await readChunkDigests(db, filteredCoverage(eligibleSourceVersions, recordedDigests));
+  const chunkDrift = !sameVersions(recordedDigests, liveDigests);
 
   let status: CourseKnowledgeSyncStatus;
   if (activeJobId !== null) {
@@ -515,7 +566,7 @@ async function readSyncStatusInternal(
     && (!record || (record.snapshot.nodes.length === 0 && Object.keys(record.sourceVersions).length === 0))
   ) {
     status = "empty";
-  } else if (hasMaterialDrift(coveredSourceVersions, graphSources, eligibleSourceVersions)) {
+  } else if (chunkDrift || hasMaterialDrift(coveredSourceVersions, graphSources, eligibleSourceVersions)) {
     status = "needs_rebuild";
   } else {
     status = "up_to_date";
@@ -525,7 +576,7 @@ async function readSyncStatusInternal(
     status,
     activeJobId,
     lastBuiltVersion,
-    coveredSourceVersions,
+    coveredSourceVersions: filteredCoverage(coveredSourceVersions, eligibleSourceVersions),
     eligibleSourceVersions,
     parsingSourceCount,
   };
@@ -536,6 +587,8 @@ async function readSyncStatusInternal(
       record,
       unreadableSourceCount,
       rebuildBlockedByMaterials,
+      storedCoverage: coveredSourceVersions,
+      chunkDrift,
     };
   }
 
@@ -584,6 +637,8 @@ async function readSyncStatusInternal(
     record,
     unreadableSourceCount,
     rebuildBlockedByMaterials,
+    storedCoverage: coveredSourceVersions,
+    chunkDrift,
   };
 }
 
@@ -599,33 +654,64 @@ async function readSyncStatusInSnapshot(
   });
 }
 
+async function listAuthorizedChunks(sql: Sql | TransactionSql, scope: Scope, courseId: string): Promise<AuthorizedKnowledgeChunk[]> {
+  const rows = await sql`
+    SELECT c.*, m.course_id
+    FROM opening_source_chunks c
+    JOIN opening_sources s ON s.id = c.source_id
+    JOIN opening_source_versions v ON v.source_id=s.id AND v.workspace_id=s.workspace_id AND v.version=c.source_version
+    JOIN course_asset_memberships m
+      ON m.workspace_id = s.workspace_id
+      AND m.asset_type = 'source'
+      AND m.asset_id = s.id
+      AND m.course_id = ${courseId}
+      AND (m.purpose IS NULL OR m.purpose = 'teaching')
+    WHERE s.workspace_id = ${scope.workspaceId}
+      AND s.upload_state = 'uploaded'
+      AND s.parse_state = 'ready'
+      AND c.source_version = s.version
+      AND v.availability = 'available'
+      AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=s.workspace_id AND e.source_id=s.id)
+      AND c.text ~ '[^[:space:]]'
+    ORDER BY c.source_id, c.page NULLS LAST, c.created_at`;
+  return rows.map((row) => {
+    const record = row as Record<string, unknown>;
+    return { ...mapChunk(record), courseId: String(record.course_id) };
+  });
+}
+
 export function createOpeningKnowledgeRepository(sql: Sql) {
   return {
     /** Definitions contain source text and are only available to the rebuild worker. */
     async getForRebuild(scope: Scope, courseId: string): Promise<(OpeningKnowledgeRecord & { nodeDefinitions: Record<string, string> }) | null> {
-      await assertOwnedCourse(sql, scope, courseId);
-      const [row] = await sql`SELECT version,snapshot,source_versions,node_definitions FROM opening_course_knowledge
-        WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND course_id=${courseId}`;
-      if (!row) return null;
-      const current = mapRecord(row);
-      if (await hasTeachingPurposes(sql, scope, courseId, current.sourceVersions)) {
-        return { ...current, nodeDefinitions: row.node_definitions as Record<string, string> };
-      }
-      // A restricted graph still exists: keep its real CAS version, but never
-      // return its restricted labels/definitions to reconciliation or the model.
-      // Retain only complete, currently authorized evidence so legal identities
-      // survive the rebuild instead of being recreated under a false version 0.
-      const chunks = await this.listAuthorizedChunks(scope, courseId);
-      const allowed = new Set(chunks.map(chunk => chunk.id));
-      const nodes = current.snapshot.nodes.filter(node => node.evidenceChunkIds.length > 0
-        && node.evidenceChunkIds.every(id => allowed.has(id)));
-      const ids = new Set(nodes.map(node => node.id));
-      const edges = current.snapshot.edges.filter(edge => ids.has(edge.from) && ids.has(edge.to)
-        && edge.evidenceChunkIds.every(id => allowed.has(id)));
-      const definitions = row.node_definitions as Record<string, string>;
-      return { version: current.version, snapshot: { ...current.snapshot, nodes, edges },
-        sourceVersions: Object.fromEntries(chunks.map(chunk => [chunk.sourceId, chunk.sourceVersion])),
-        nodeDefinitions: Object.fromEntries(Object.entries(definitions).filter(([id]) => ids.has(id))) };
+      return sql.begin(async tx => {
+        await tx`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY`;
+        await assertOwnedCourse(tx, scope, courseId);
+        const [row] = await tx`SELECT version,snapshot,source_versions,node_definitions FROM opening_course_knowledge
+          WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND course_id=${courseId}`;
+        if (!row) return null;
+        const current = mapRecord(row);
+        const eligible = current.snapshot.coveredSourceVersions
+          ? await readEligibleSourceVersions(tx, scope, courseId) : {};
+        const record = publicRecord(current, eligible);
+        const definitions = row.node_definitions as Record<string, string>;
+        if (await hasTeachingPurposes(tx, scope, courseId, current.sourceVersions)) {
+          return { ...record, nodeDefinitions: definitions };
+        }
+        // Keep the CAS version and only complete, currently authorized evidence.
+        const chunks = await listAuthorizedChunks(tx, scope, courseId);
+        const allowed = new Set(chunks.map(chunk => chunk.id));
+        const nodes = record.snapshot.nodes.filter(node => node.evidenceChunkIds.length > 0
+          && node.evidenceChunkIds.every(id => allowed.has(id)));
+        const ids = new Set(nodes.map(node => node.id));
+        const edges = record.snapshot.edges.filter(edge => ids.has(edge.from) && ids.has(edge.to)
+          && edge.evidenceChunkIds.every(id => allowed.has(id)));
+        const survivingEvidence = new Set([...nodes, ...edges].flatMap(item => item.evidenceChunkIds));
+        return { version: record.version, snapshot: { ...record.snapshot, nodes, edges },
+          sourceVersions: Object.fromEntries(chunks.filter(chunk => survivingEvidence.has(chunk.id))
+            .map(chunk => [chunk.sourceId, chunk.sourceVersion])),
+          nodeDefinitions: Object.fromEntries(Object.entries(definitions).filter(([id]) => ids.has(id))) };
+      });
     },
     async assertExtractionBatch(scope: Scope, courseId: string, chunks: readonly SourceChunk[]): Promise<void> {
       await sql.begin(async tx => {
@@ -641,22 +727,22 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
       return referencedNodeIds(sql, scope, courseId);
     },
     async get(scope: Scope, courseId: string): Promise<OpeningKnowledgeRecord | null> {
-      await assertOwnedCourse(sql, scope, courseId);
-      const rows = await sql`
-        SELECT version, snapshot, source_versions
-        FROM opening_course_knowledge
-        WHERE workspace_id = ${scope.workspaceId}
-          AND owner_user_id = ${scope.ownerUserId}
-          AND course_id = ${courseId}`;
-      if (!rows.length) return null;
-      const sourceIds = Object.keys(parseSourceVersions(rows[0]!.source_versions));
-      // Preserve the existing historical read after unlink; only explicit purpose
-      // restrictions hide this graph here. Rebuild admission above stays strict.
-      const restricted = sourceIds.length ? await sql`SELECT id FROM course_asset_memberships
-        WHERE workspace_id=${scope.workspaceId} AND course_id=${courseId} AND asset_type='source'
-          AND asset_id=ANY(${sourceIds}::uuid[]) AND purpose IN ('practice','reference','mock_exam')` : [];
-      if (restricted.length) return null;
-      return mapRecord(rows[0] as Record<string, unknown>);
+      return sql.begin(async tx => {
+        await tx`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY`;
+        await assertOwnedCourse(tx, scope, courseId);
+        const [row] = await tx`
+          SELECT version, snapshot, source_versions
+          FROM opening_course_knowledge
+          WHERE workspace_id = ${scope.workspaceId}
+            AND owner_user_id = ${scope.ownerUserId}
+            AND course_id = ${courseId}`;
+        if (!row) return null;
+        const record = mapRecord(row);
+        // Preserve historical graphs after unlink. Explicit restricted purposes hide graph evidence.
+        if (await hasRestrictedGraphSources(tx, scope, courseId, record.sourceVersions)) return null;
+        const eligible = record.snapshot.coveredSourceVersions ? await readEligibleSourceVersions(tx, scope, courseId) : {};
+        return publicRecord(record, eligible);
+      });
     },
 
     async readSyncStatus(scope: Scope, courseId: string, options?: ReadKnowledgeSyncOptions): Promise<CourseKnowledgeSync> {
@@ -676,16 +762,7 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
             sync,
           };
         }
-        const sourceIds = Object.keys(record.sourceVersions);
-        const restricted = sourceIds.length
-          ? await tx`SELECT id FROM course_asset_memberships
-              WHERE workspace_id = ${scope.workspaceId}
-                AND course_id = ${courseId}
-                AND asset_type = 'source'
-                AND asset_id = ANY(${sourceIds}::uuid[])
-                AND purpose IN ('practice', 'reference', 'mock_exam')`
-          : [];
-        if (restricted.length) {
+        if (await hasRestrictedGraphSources(tx, scope, courseId, record.sourceVersions)) {
           return {
             version: record.version,
             snapshot: { courseId, version: record.version, nodes: [], edges: [] },
@@ -694,9 +771,7 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
           };
         }
         return {
-          version: record.version,
-          snapshot: record.snapshot,
-          sourceVersions: record.sourceVersions,
+          ...publicRecord(record, sync.eligibleSourceVersions),
           sync,
         };
       });
@@ -759,8 +834,9 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
           throw error;
         }
         const version = current.version + 1;
-        const coveredSourceVersions = await coverageForEdit(tx, scope, courseId, current, current.sourceVersions);
-        const snapshot: KnowledgeSnapshot = { ...current.snapshot, version, coveredSourceVersions,
+        const { coveredSourceVersions: _versions, coveredSourceChunkDigests: _digests, ...graph } = current.snapshot;
+        const coverage = await coverageForEdit(tx, scope, courseId, current, current.sourceVersions);
+        const snapshot: StoredKnowledgeSnapshot = { ...graph, version, ...coverage,
           nodes: current.snapshot.nodes.map(item => item.id === nodeId ? { ...item, status: "supported" } : item) };
         await tx`UPDATE opening_course_knowledge SET version=${version},snapshot=${tx.json(snapshot as never)},updated_at=now()
           WHERE workspace_id=${scope.workspaceId} AND course_id=${courseId}`;
@@ -768,7 +844,7 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
           (id,workspace_id,owner_user_id,course_id,node_id,node_label,node_kind,graph_version_before,graph_version_after,source_versions,evidence_chunk_ids)
           VALUES (${randomUUID()},${scope.workspaceId},${scope.ownerUserId},${courseId},${nodeId},${node.label},${node.kind},${current.version},${version},
             ${tx.json(nodeSourceVersions(evidenceIds, chunks))},${tx.json(evidenceIds)})`;
-        return { ...current, version, snapshot };
+        return publicRecord({ ...current, version, snapshot });
       });
     },
 
@@ -785,29 +861,7 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
 
     async listAuthorizedChunks(scope: Scope, courseId: string): Promise<AuthorizedKnowledgeChunk[]> {
       await assertOwnedCourse(sql, scope, courseId);
-      const rows = await sql`
-        SELECT c.*, m.course_id
-        FROM opening_source_chunks c
-        JOIN opening_sources s ON s.id = c.source_id
-        JOIN opening_source_versions v ON v.source_id=s.id AND v.workspace_id=s.workspace_id AND v.version=c.source_version
-        JOIN course_asset_memberships m
-          ON m.workspace_id = s.workspace_id
-          AND m.asset_type = 'source'
-          AND m.asset_id = s.id
-          AND m.course_id = ${courseId}
-          AND (m.purpose IS NULL OR m.purpose = 'teaching')
-        WHERE s.workspace_id = ${scope.workspaceId}
-          AND s.upload_state = 'uploaded'
-          AND s.parse_state = 'ready'
-          AND c.source_version = s.version
-          AND v.availability = 'available'
-          AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=s.workspace_id AND e.source_id=s.id)
-          AND c.text ~ '[^[:space:]]'
-        ORDER BY c.source_id, c.page NULLS LAST, c.created_at`;
-      return rows.map((row) => {
-        const record = row as Record<string, unknown>;
-        return { ...mapChunk(record), courseId: String(record.course_id) };
-      });
+      return listAuthorizedChunks(sql, scope, courseId);
     },
 
     /**
@@ -863,7 +917,14 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
             && [...existing.snapshot.nodes, ...existing.snapshot.edges].every(item => item.status !== "needs_check");
           const sameCoverage = input.extractedSourceVersions === undefined
             || sameVersions(existing.snapshot.coveredSourceVersions ?? {}, input.extractedSourceVersions);
-          if (replayable && sameCoverage && sameGraph(existing.snapshot, draft) && sameVersions(existing.sourceVersions, sourceVersions)) return existing;
+          const sameDigests = input.extractedChunkDigests === undefined
+            || sameVersions(existing.snapshot.coveredSourceChunkDigests ?? {}, input.extractedChunkDigests);
+          if (replayable && sameCoverage && sameDigests && sameGraph(existing.snapshot, draft) && sameVersions(existing.sourceVersions, sourceVersions)) {
+            if (input.extractedSourceVersions !== undefined) {
+              await coverageForEdit(tx, scope, courseId, existing, sourceVersions, input.extractedSourceVersions, input.extractedChunkDigests);
+            }
+            return publicRecord(existing, await readEligibleSourceVersions(tx, scope, courseId));
+          }
         }
         if (currentVersion !== input.expectedVersion) {
           throw new OpeningKnowledgeError("CONFLICT", "stale knowledge version");
@@ -923,9 +984,9 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
             }
           }
         }
+        const coverage = await coverageForEdit(tx, scope, courseId, previous, sourceVersions, input.extractedSourceVersions, input.extractedChunkDigests);
         const evidence = await assertAuthorizedChunks(tx, scope, courseId,
           [...new Set([...draft.nodes, ...draft.edges].flatMap(item => item.evidenceChunkIds))].sort(), sourceVersions);
-        const coveredSourceVersions = await coverageForEdit(tx, scope, courseId, previous, sourceVersions, input.extractedSourceVersions);
         const definitions = Object.fromEntries(draft.nodes.flatMap(node => {
           const definition = knowledgeNodeDefinition(node, evidence);
           return definition ? [[node.id, definition]] : [];
@@ -976,7 +1037,8 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
           }
           return node;
         });
-        const stored: KnowledgeSnapshot = { ...draft, nodes, version: newVersion, coveredSourceVersions };
+        const { coveredSourceVersions: _versions, ...graph } = draft;
+        const stored: StoredKnowledgeSnapshot = { ...graph, nodes, version: newVersion, ...coverage };
         const rows = await tx`
           INSERT INTO opening_course_knowledge (
             workspace_id, owner_user_id, course_id, version, snapshot, source_versions, node_definitions, updated_at
@@ -1004,7 +1066,7 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
           await tx`DELETE FROM opening_knowledge_confirmations WHERE workspace_id=${scope.workspaceId}
             AND owner_user_id=${scope.ownerUserId} AND course_id=${courseId} AND node_id IN ${tx(revoked)}`;
         }
-        return mapRecord(rows[0] as Record<string, unknown>);
+        return publicRecord(mapRecord(rows[0] as Record<string, unknown>));
       });
     },
 
@@ -1210,9 +1272,8 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
         for (const row of rows as Array<Record<string, unknown>>) {
           if (options?.expectedVersion !== undefined && Number(row.version) !== options.expectedVersion) continue;
           const sourceVersions = parseSourceVersions(row.source_versions);
-          const snapshot = knowledgeSnapshotSchema.parse(row.snapshot);
+          const { coveredSourceVersions: coverage, coveredSourceChunkDigests: digests, ...snapshot } = storedKnowledgeSnapshotSchema.parse(row.snapshot);
           const evidenceAffected = ids.some((id) => id in sourceVersions);
-          const coverage = snapshot.coveredSourceVersions;
           if (!evidenceAffected && !ids.some((id) => coverage && id in coverage)) continue;
           const courseId = String(row.course_id);
           courseIds.push(courseId);
@@ -1235,13 +1296,9 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
           // Even an already-pending graph needs a new CAS fence: a confirmation submitted before
           // this maintenance must conflict after it, rather than approve the invalidated view.
           const version = Number(row.version) + 1;
-          const next: KnowledgeSnapshot = { ...snapshot, version, nodes, edges,
-            ...(coverage && {
-              coveredSourceVersions: Object.fromEntries(
-                Object.entries(coverage).filter(([id]) => !ids.includes(id)),
-              ),
-            }),
-          };
+          const retainedCoverage = Object.fromEntries(Object.entries(coverage ?? {}).filter(([id]) => !ids.includes(id)));
+          const next: StoredKnowledgeSnapshot = { ...snapshot, version, nodes, edges,
+            ...coverageFields(retainedCoverage, filteredCoverage(digests, retainedCoverage)) };
           await tx`
             UPDATE opening_course_knowledge
             SET version = ${version}, snapshot = ${tx.json(next as never)}, updated_at = now()
@@ -1314,14 +1371,14 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
         return { sync: initial.sync, enqueued: null };
       }
       const effectiveCovered = initial.record?.snapshot.coveredSourceVersions
-        ?? options?.coveredSourceVersions ?? initial.sync.coveredSourceVersions;
+        ?? options?.coveredSourceVersions ?? initial.storedCoverage;
       const graphSources = initial.record?.sourceVersions ?? {};
       const hasGraphOrStaleSources = Boolean(
         initial.record
           && (initial.record.snapshot.nodes.length > 0 || Object.keys(graphSources).length > 0),
       );
       const shouldRebuild =
-        hasMaterialDrift(effectiveCovered, graphSources, initial.sync.eligibleSourceVersions)
+        (initial.chunkDrift || hasMaterialDrift(effectiveCovered, graphSources, initial.sync.eligibleSourceVersions))
         && (Object.keys(initial.sync.eligibleSourceVersions).length > 0 || hasGraphOrStaleSources);
       if (!shouldRebuild) {
         return { sync: initial.sync, enqueued: null };

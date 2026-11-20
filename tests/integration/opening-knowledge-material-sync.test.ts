@@ -4,6 +4,8 @@ import {
   createCourseMembershipRepository,
   createOpeningJobRepository,
   createOpeningKnowledgeRepository,
+  createOpeningSourceChunksRepository,
+  knowledgeChunkDigests,
   type OpeningStorage,
 } from "@aistudy/database";
 import {
@@ -136,6 +138,63 @@ function makeBuildHandler(options?: {
 }
 
 describe("opening knowledge material lifecycle sync (real PG)", () => {
+  it.each(["practice", "reference", "mock_exam"] as const)("redacts zero-node coverage when a source becomes %s", async purpose => {
+    const courseId = await seedCourse();
+    const material = await seedSource();
+    const [membership] = await f.sql`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,visibility,purpose)
+      VALUES(${f.scope.workspaceId},${courseId},'source',${material.sourceId},'core','course','teaching') RETURNING id`;
+    const knowledge = createOpeningKnowledgeRepository(f.sql);
+    const saved = await knowledge.replace(f.scope, courseId, {
+      expectedVersion: 0, sourceVersions: {}, extractedSourceVersions: { [material.sourceId]: material.version },
+      extractedChunkDigests: knowledgeChunkDigests(await knowledge.listAuthorizedChunks(f.scope, courseId)),
+      snapshot: { courseId, version: 0, nodes: [], edges: [] },
+    });
+    await f.sql`UPDATE course_asset_memberships SET purpose=${purpose} WHERE id=${membership!.id}`;
+    const empty = { courseId, version: saved.version, nodes: [], edges: [] };
+    await expect(knowledge.get(f.scope, courseId)).resolves.toMatchObject({ snapshot: empty, sourceVersions: {} });
+    expect((await knowledge.get(f.scope, courseId))?.snapshot).toEqual(empty);
+    const synced = await knowledge.getWithSync(f.scope, courseId);
+    expect(synced.snapshot).toEqual(empty);
+    expect(synced.sync?.coveredSourceVersions).toEqual({});
+    expect(synced.sourceVersions).toEqual({});
+    expect(await knowledge.getForRebuild(f.scope, courseId)).toEqual({
+      version: saved.version, snapshot: empty, sourceVersions: {}, nodeDefinitions: {},
+    });
+  });
+
+  it("rejects in-flight zero-node coverage and invalidates committed coverage when a parser replaces readable chunks at the same version", async () => {
+    const courseId = await seedCourse();
+    const material = await seedSource({ text: "Original cover page" });
+    await createCourseMembershipRepository(f.sql).addAssetMembership({ workspaceId: f.scope.workspaceId, courseId,
+      assetType: "source", assetId: material.sourceId, role: "core", visibility: "course", purpose: "teaching" });
+    const knowledge = createOpeningKnowledgeRepository(f.sql);
+    const parser = createOpeningSourceChunksRepository(f.sql);
+    const parse = (text: string, extra?: string) => parser.replaceChunks(f.scope, {
+      sourceId: material.sourceId, sourceVersion: material.version,
+      chunks: [{ page: 1, text }, ...(extra ? [{ page: 2, text: extra }] : [])],
+    });
+    const build = (onExtract?: () => Promise<void>) => createBuildCourseKnowledgeHandler({
+      listAuthorizedChunks: knowledge.listAuthorizedChunks,
+      get: knowledge.getForRebuild.bind(knowledge),
+      replace: knowledge.replace,
+      extractGraph: async () => {
+        await onExtract?.();
+        return { nodes: [], edges: [] };
+      },
+    });
+    const job = { ...f.scope } as Parameters<ReturnType<typeof build>>[0];
+    await expect(build(() => parse("Replacement cover page"))(job, { courseId }))
+      .rejects.toMatchObject({ code: "CONFLICT", reason: "MATERIAL_REPLACEMENT_BLOCKED" });
+    await expect(knowledge.get(f.scope, courseId)).resolves.toBeNull();
+    await build()(job, { courseId });
+    await parse("Replacement cover page");
+    await expect(knowledge.getWithSync(f.scope, courseId)).resolves.toMatchObject({ sync: { status: "up_to_date" } });
+    await parse("Replacement cover page", "New readable page");
+    const stale = { sync: { status: "needs_rebuild", eligibleSourceVersions: { [material.sourceId]: material.version } } };
+    await expect(knowledge.getWithSync(f.scope, courseId)).resolves.toMatchObject(stale);
+    await expect(knowledge.reconcileCourseMaterials(f.scope, courseId)).resolves.toMatchObject({ enqueued: { created: true } });
+  });
+
   it("persists a zero-node build and distinguishes readable material from ready-but-empty and failed material without a job receipt", async () => {
     const courseId = await seedCourse();
     const readable = await seedSource({ text: "Cover page and acknowledgements" });
@@ -152,7 +211,10 @@ describe("opening knowledge material lifecycle sync (real PG)", () => {
     await expect(knowledge.replace(f.scope, courseId, {
       ...input, extractedSourceVersions: { ...covered, [blank.sourceId]: blank.version },
     })).rejects.toMatchObject({ code: "CONFLICT", reason: "MATERIAL_REPLACEMENT_BLOCKED" });
-    const saved = await knowledge.replace(f.scope, courseId, { ...input, extractedSourceVersions: covered });
+    const saved = await knowledge.replace(f.scope, courseId, {
+      ...input, extractedSourceVersions: covered,
+      extractedChunkDigests: knowledgeChunkDigests(await knowledge.listAuthorizedChunks(f.scope, courseId)),
+    });
     const [stored] = await f.sql`SELECT snapshot,source_versions FROM opening_course_knowledge WHERE course_id=${courseId}`;
     expect(stored).toMatchObject({ snapshot: { version: 1, nodes: [], coveredSourceVersions: covered }, source_versions: {} });
     await expect(knowledge.readSyncStatus(f.scope, courseId, { includeDetails: true })).resolves.toMatchObject({

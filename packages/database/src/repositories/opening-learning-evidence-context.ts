@@ -7,8 +7,13 @@ import { mapLearningObservation, type LearningSql } from "./opening-learning-fac
 import { openingExamIdentityStateQuery } from "./opening-exam-skill-identity";
 import { OpeningExamSprintRepositoryError, parseExamSprintSnapshot } from "./opening-exam-sprint-snapshot";
 import { readExamSourceExposure } from "./opening-exam-source-exposure";
+import { openingRetestAnswerAt, openingRetestHelpMatches } from "./opening-retest-help-match";
 
 type Row = Record<string, unknown>;
+function possibleOpenAttemptOnly(row: Row): boolean {
+  const intent = row.release_intent as { possibleOpenAttemptOnly?: boolean; originReference?: { possibleOpenAttemptOnly?: boolean } } | null;
+  return intent?.possibleOpenAttemptOnly === true || intent?.originReference?.possibleOpenAttemptOnly === true;
+}
 export type OpeningEvidenceDependencies = {
   helpRevision: number;
   itemMatches: boolean;
@@ -159,21 +164,26 @@ export async function readOpeningLearningEvidenceContexts(
   const baselineEvidence = baselineRecords.length ? await readOpeningLearningEvidenceContexts(db, scope, baselineRecords, false) : {};
   const baselineEligibility = new Map(Object.entries(baselineEvidence).map(([id, evidence]) => [id, evaluateEvidenceEligibility(evidence.observation, evidence.context)]));
   const intervalExposures = retestProtocols.length ? await db`SELECT r.id AS retest_id,o.id AS observation_id,count(h.id)::int AS recorded_count,
+      ${openingRetestAnswerAt(db)} AS answer_at,
+      jsonb_agg(to_jsonb(h)) FILTER (WHERE h.id IS NOT NULL AND
+        r.learning_protocol->>'protocolId'='course-route-delayed-v1' AND
+        COALESCE(h.released_at,h.delivered_at,h.created_at)>=a.started_at) AS answer_help,
       (SELECT count(*)::int FROM opening_learning_attempts practice WHERE practice.workspace_id=o.workspace_id AND practice.owner_user_id=o.owner_user_id
         AND practice.course_id=o.course_id AND practice.requirement_key IS NOT DISTINCT FROM o.requirement_key AND practice.id<>o.attempt_id
         AND practice.started_at>baseline.recorded_at AND practice.started_at<=o.started_at) AS recorded_practice_count
-    FROM opening_learning_observations o JOIN opening_retest_activities r ON r.id=o.retest_id AND r.workspace_id=o.workspace_id AND r.owner_user_id=o.owner_user_id
+    FROM opening_learning_observations o JOIN opening_retest_activities r ON r.id=o.retest_id AND r.workspace_id=o.workspace_id
+      AND r.owner_user_id=o.owner_user_id AND r.course_id=o.course_id
+    JOIN opening_learning_attempts a ON a.id=o.attempt_id AND a.workspace_id=o.workspace_id AND a.owner_user_id=o.owner_user_id AND a.course_id=o.course_id
     JOIN opening_learning_observations baseline ON baseline.id::text=r.learning_protocol->>'baselineObservationId'
       AND baseline.workspace_id=o.workspace_id AND baseline.owner_user_id=o.owner_user_id
-    LEFT JOIN opening_help_exposures h ON h.workspace_id=o.workspace_id AND COALESCE(h.owner_user_id,
-        (SELECT l.owner_user_id FROM opening_learning_sessions l WHERE l.id=h.session_id AND l.workspace_id=h.workspace_id))=o.owner_user_id
-      AND h.delivered=TRUE AND h.support_domain<>'language' AND (h.course_id IS NULL OR h.course_id=o.course_id) AND COALESCE(h.released_at,h.delivered_at)>baseline.recorded_at AND COALESCE(h.released_at,h.delivered_at)<=o.started_at
-      AND (h.attempt_id=o.attempt_id OR h.problem_id=o.problem_id OR h.context_anchor->>'sourceId'=ANY(o.source_ids::text[])
-        OR h.release_intent->'originReference'->>'skillLabel'=o.skill_label
-        OR EXISTS(SELECT 1 FROM opening_learning_sessions l WHERE l.id=h.session_id AND l.workspace_id=h.workspace_id
-          AND l.course_id=o.course_id AND l.skill_label=o.skill_label))
+    LEFT JOIN LATERAL (
+      SELECT h.* FROM opening_help_exposures h
+      LEFT JOIN opening_learning_sessions l ON l.id=h.session_id AND l.workspace_id=h.workspace_id AND l.owner_user_id=o.owner_user_id
+      WHERE ${openingRetestHelpMatches(db)}
+    ) h ON TRUE
     WHERE o.workspace_id=${scope.workspaceId} AND o.owner_user_id=${scope.ownerUserId} AND o.id=ANY(${records.map(record => record.id)}::uuid[])
-    GROUP BY r.id,o.id,baseline.recorded_at` : [];
+    GROUP BY r.id,o.id,a.id,baseline.recorded_at` : [];
+  const intervalByObservation = new Map(intervalExposures.map(row => [String(row.observation_id), row]));
   // Catalogue help is a retrievable receipt, not an invented assistant turn.
   // Keep the immutable exposure/protocol link even if the observation is revised.
   const examRows = courseIds.length && (attemptIds.length || problemIds.length) ? await db`SELECT e.id AS exam_link_id,
@@ -333,12 +343,13 @@ export async function readOpeningLearningEvidenceContexts(
   const add = (map: Map<string, Row[]>, key: string, row: Row) => { const entries = map.get(key) ?? []; entries.push(row); map.set(key, entries); };
   for (const row of [...help, ...examHelp]) {
     if (row.attempt_id) add(helpByAttempt, `${row.course_id}:${row.attempt_id}`, row);
-    if (row.problem_id && !(row.release_intent as { originReference?: { possibleOpenAttemptOnly?: boolean } } | null)?.originReference?.possibleOpenAttemptOnly) add(helpByProblem, `${row.course_id}:${row.problem_id}`, row);
+    if (row.problem_id && !possibleOpenAttemptOnly(row)) add(helpByProblem, `${row.course_id}:${row.problem_id}`, row);
     if (row.attempt_id == null && row.problem_id == null) add(legacyHelp, String(row.session_id), row);
   }
   const result: Record<string, OpeningEvidenceInput> = {};
   for (const record of records) {
     const origin = origins.get(record.sessionId);
+    const interval = intervalByObservation.get(record.id);
     const item = items.find(row => row.id === record.itemVersionId);
     const sourceHelp = item ? help.filter(row => {
       if (row.attempt_id != null || row.problem_id != null || row.course_id != null && row.course_id !== record.courseId) return false;
@@ -358,13 +369,23 @@ export async function readOpeningLearningEvidenceContexts(
       const anchor = row.context_anchor as { activityId?: string; blockId?: string; contentVersion?: number } | null;
       return anchor?.activityId === teachingSpec.activityId && anchor.blockId === teachingSpec.blockId && anchor.contentVersion === teachingSpec.contentVersion;
     }).map(row => ({ ...row, problem_id: record.problemId, same_question: true })) : [];
-    const history = [...new Map([
+    const matchedHistory = [
       ...sourceHelp, ...uncertainSourceHelp,
       ...crossRevisionHelp.filter(row => row.target_item_id === record.itemVersionId).map((row): Row => ({ ...row, same_question: true })),
       ...(record.attemptId ? helpByAttempt.get(`${origin}:${record.attemptId}`) ?? [] : []),
       ...(record.problemId ? helpByProblem.get(`${origin}:${record.problemId}`) ?? [] : []),
       ...(legacyHelp.get(record.sessionId) ?? []), ...teachingHelp,
-    ].map(row => [String(row.id), row])).values()];
+    ];
+    const scopedHistory = record.retestId ? matchedHistory.filter(row =>
+      (row.course_id == null || row.course_id === record.courseId)
+      && (row.attempt_id != null || possibleOpenAttemptOnly(row) ? row.attempt_id === record.attemptId : true)) : matchedHistory;
+    // The interval predicate has already associated these delivered hints with
+    // this open answer, including receipts with only an activity anchor.
+    const answerHelp = (interval?.answer_help as Row[] | null | undefined)?.map((row): Row => ({
+      ...row, attempt_id: record.attemptId, problem_id: record.problemId,
+      delivered_at: row.released_at ?? row.delivered_at ?? row.created_at, retest_answer_help: true,
+    })) ?? [];
+    const history = [...new Map([...scopedHistory, ...answerHelp].map(row => [String(row.id), row])).values()];
     if (record.problemId) {
       for (const prior of priorsByProblem.get(record.problemId) ?? []) {
         if (String(prior.id) === record.id) continue;
@@ -424,7 +445,8 @@ export async function readOpeningLearningEvidenceContexts(
         ...(row.support_domain === "language" || row.support_domain === "math" || row.support_domain === "unknown" ? { supportDomain: row.support_domain } : {}),
         ...(row.workspace_history_revision != null && answerEventRevision(record, chains.get(record.rootObservationId ?? record.id) ?? []) != null
           ? { serverOrder: Number(row.workspace_history_revision) < answerEventRevision(record, chains.get(record.rootObservationId ?? record.id) ?? [])! ? "before_answer" as const : "after_answer" as const } : {}),
-        attemptId: row.attempt_id as string | null, problemId: (row.release_intent as { originReference?: { possibleOpenAttemptOnly?: boolean } } | null)?.originReference?.possibleOpenAttemptOnly ? null : row.problem_id as string | null,
+        attemptId: row.attempt_id as string | null,
+        problemId: possibleOpenAttemptOnly(row) && row.retest_answer_help !== true ? null : row.problem_id as string | null,
         level: row.level as "hinted" | "revealed",
         kind: (row.kind as "instruction" | "hint" | "solution" | "evaluation_feedback" | null | undefined) ?? "hint",
         ...(row.same_question === true ? { sameQuestion: true } : {}),
@@ -447,9 +469,10 @@ export async function readOpeningLearningEvidenceContexts(
         const baseline = baselineEligibility.get(String(retest.baseline_id));
         context.delayedCheck = { protocolId: protocol.protocolId, attemptId: record.attemptId, earliestAt, priorAnswerPolicy: "require_unseen_problem",
           baselineEstablished: baseline?.independentAttempt === "yes" && baseline.verifiedCorrect === "yes" && baseline.usableForCurrentVersion === "yes",
-          ...(record.startedAt ? { intervalExposure: { from: baselineAt, to: Date.parse(record.startedAt), complete: false,
-            recordedCount: Number(intervalExposures.find(row => row.observation_id === record.id)?.recorded_count ?? 0),
-            recordedPracticeCount: Number(intervalExposures.find(row => row.observation_id === record.id)?.recorded_practice_count ?? 0) } } : {}) };
+          ...(record.startedAt ? { intervalExposure: { from: baselineAt,
+            to: interval?.answer_at ? new Date(interval.answer_at as Date).getTime() : Date.parse(record.startedAt), complete: false,
+            recordedCount: Number(interval?.recorded_count ?? 0),
+            recordedPracticeCount: Number(interval?.recorded_practice_count ?? 0) } } : {}) };
       }
     }
     if (context.serverEvaluation?.evaluatorVersion === "span-exact-v1") {

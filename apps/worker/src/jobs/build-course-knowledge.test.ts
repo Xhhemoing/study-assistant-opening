@@ -175,6 +175,7 @@ describe("createBuildCourseKnowledgeHandler", () => {
       {
         expectedVersion: 3,
         extractedSourceVersions: { [sourceId]: 1 },
+        extractedChunkDigests: { [sourceId]: expect.stringMatching(/^[0-9a-f]{64}$/) },
         snapshot: expect.objectContaining({ courseId, version: 4, nodes: [expect.objectContaining({ label: "函数" })] }),
         sourceVersions: { [sourceId]: 1 },
       },

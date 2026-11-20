@@ -16,12 +16,13 @@ type Db = Sql | TransactionSql;
 /** Server-side identities only; never pass browser-provided task projections here. */
 export type OpeningCurrentLearningReference = { activityId?: string | null; sessionId?: string | null; taskId?: string | null };
 export type OpeningCurrentLearningActivity = { activityId: string; sessionId: string | null; courseId: string };
-type CandidateOptions = { recoveryOnly?: boolean; hasDecisionOnly?: boolean; spanOnly?: boolean; retestReferences?: string[] | null; references?: string[]; sessionId?: string | null };
+type CandidateOptions = { recoveryOnly?: boolean; hasDecisionOnly?: boolean; spanOnly?: boolean; retestReferences?: string[] | null; references?: string[]; sessionId?: string | null; rankByEngagement?: boolean };
 type CourseCandidateRow = {
   id: string;
   courseId: string;
   status: string;
   updatedAt: string;
+  learnerEngagedAt?: string | null;
   sessionId: string | null;
   placeholder: boolean;
   writingCheckpoint: WritingActivityCheckpoint | null;
@@ -31,10 +32,10 @@ function normalizeReferenceId(value: string): string {
   return uuidSchema.safeParse(value).success ? value.toLowerCase() : value;
 }
 
-// Activity mutations still carry the legacy learner timestamp. Other learner
-// actions can advance it without writing to the activity checkpoint.
+// Persisted engagement outranks the legacy activity timestamp, which may contain a background publish.
 function learnerEngagementAt(db: Db) {
-  return db`GREATEST(a.updated_at,
+  const documentId = db`a.checkpoint_json->'writingWorkspace'->>'activeDocumentId'`;
+  return db`GREATEST(
     (SELECT max(GREATEST(attempt.started_at,attempt.submitted_at)) FROM opening_learning_attempts attempt
       WHERE attempt.activity_id=a.id AND attempt.workspace_id=a.workspace_id AND attempt.owner_user_id=a.owner_user_id
         AND attempt.course_id=a.course_id),
@@ -52,7 +53,9 @@ function learnerEngagementAt(db: Db) {
     (SELECT revision.created_at FROM library_revisions revision
       WHERE a.create_intent->>'protocol'='writing-workspace-v1'
         AND revision.workspace_id=a.workspace_id
-        AND revision.document_id::text=lower(a.checkpoint_json->'writingWorkspace'->>'activeDocumentId')
+        AND revision.document_id=CASE
+          WHEN (${documentId}) ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+          THEN (${documentId})::uuid END
         AND revision.revision_number>1
       ORDER BY revision.revision_number DESC LIMIT 1)
   )`;
@@ -60,7 +63,8 @@ function learnerEngagementAt(db: Db) {
 
 async function candidates(db: Db, scope: Scope, courseId: string | null, options: CandidateOptions = {}): Promise<CourseCandidateRow[]> {
   const normalizedRefs = options.references?.map(id => id.toLowerCase());
-  const rows = await db`SELECT a.id,a.course_id,a.status,${learnerEngagementAt(db)} AS updated_at,a.content_version,a.intent_kind,a.create_intent,a.checkpoint_json,s.id AS session_id
+  const engagement = options.rankByEngagement ? db`,${learnerEngagementAt(db)} AS learner_engaged_at` : db``;
+  const rows = await db`SELECT a.id,a.course_id,a.status,a.updated_at,a.content_version,a.intent_kind,a.create_intent,a.checkpoint_json,s.id AS session_id${engagement}
     FROM opening_teaching_activities a
     JOIN workspaces w ON w.id=a.workspace_id AND w.owner_user_id=a.owner_user_id
     JOIN courses c ON c.id=a.course_id AND c.workspace_id=a.workspace_id AND c.archived_at IS NULL
@@ -88,7 +92,8 @@ async function candidates(db: Db, scope: Scope, courseId: string | null, options
       AND ${options.hasDecisionOnly ? db`(a.create_intent->>'protocol'='span-lesson-v1' OR a.goal_json ? 'courseRoute')
         AND EXISTS (SELECT 1 FROM opening_learning_decisions d WHERE d.workspace_id=a.workspace_id
         AND d.owner_user_id=a.owner_user_id AND d.layer='activity' AND d.target_id=a.id)` : db`true`}
-      AND ${normalizedRefs?.length ? db`lower(a.id::text)=ANY(${normalizedRefs}::text[])` : db`true`}`;
+      AND ${normalizedRefs?.length ? db`lower(a.id::text)=ANY(${normalizedRefs}::text[])` : db`true`}
+    ORDER BY a.updated_at DESC,a.id DESC`;
   return rows.map(row => {
     const span = row.create_intent?.protocol === "span-lesson-v1";
     const parsedWriting = parseAuthorizedWritingActivityCheckpoint(row);
@@ -105,6 +110,7 @@ async function candidates(db: Db, scope: Scope, courseId: string | null, options
       courseId: String(row.course_id),
       status: String(row.status),
       updatedAt: new Date(row.updated_at).toISOString(),
+      learnerEngagedAt: row.learner_engaged_at ? new Date(row.learner_engaged_at).toISOString() : null,
       sessionId: row.session_id ? String(row.session_id) : null,
       placeholder,
       writingCheckpoint: parsedWriting.kind === "writing" ? parsedWriting.checkpoint : null,
@@ -200,7 +206,7 @@ export async function readOpeningTaskTeachingBinding(db: Db, scope: Scope, cours
 }
 /** Read-only identity owner. Content, authorization and receipts stay with their existing readers. */
 export async function readOpeningCurrentLearningActivity(db: Db, scope: Scope, courseId: string,
-  reference: OpeningCurrentLearningReference = {}, options: { spanOnly?: boolean; retestId?: string } = {}): Promise<OpeningCurrentLearningActivity | null> {
+  reference: OpeningCurrentLearningReference = {}, options: { spanOnly?: boolean; retestId?: string; rankByEngagement?: boolean } = {}): Promise<OpeningCurrentLearningActivity | null> {
   const references: string[] = [];
   let retestReferences: string[] | null = null;
   if (options.retestId) {
@@ -229,6 +235,7 @@ export async function readOpeningCurrentLearningActivity(db: Db, scope: Scope, c
   }
   const rows = await candidates(db, scope, courseId, {
     ...options,
+    rankByEngagement: references.length === 0 && (options.rankByEngagement ?? true),
     retestReferences,
     references,
     sessionId: reference.sessionId,
@@ -257,8 +264,8 @@ export async function readOpeningCurrentLearningRecovery(db: Db, scope: Scope): 
     }
     return perCourse.sort(compareCurrentLearningActivities)[0];
   };
-  const current = (await selectRecovery(await candidates(db, scope, null, { recoveryOnly: true })))
-    ?? (await selectRecovery(await candidates(db, scope, null, { hasDecisionOnly: true })));
+  const current = (await selectRecovery(await candidates(db, scope, null, { recoveryOnly: true, rankByEngagement: true })))
+    ?? (await selectRecovery(await candidates(db, scope, null, { hasDecisionOnly: true, rankByEngagement: true })));
   return current ? { activityId: current.id, sessionId: current.sessionId, courseId: current.courseId } : null;
 }
 
@@ -287,6 +294,7 @@ type WorkspaceCandidateRow = {
   courseId: string | null;
   status: string;
   updatedAt: string;
+  learnerEngagedAt?: string | null;
   sessionId: string | null;
   placeholder: boolean;
   writingCheckpoint: WritingActivityCheckpoint | null;
@@ -298,7 +306,8 @@ async function workspaceCandidates(
   options: { recoveryOnly?: boolean; references?: string[]; sessionId?: string | null } = {},
 ): Promise<WorkspaceCandidateRow[]> {
   const normalizedRefs = options.references?.map(id => id.toLowerCase());
-  const rows = await db`SELECT a.id,a.course_id,a.status,${learnerEngagementAt(db)} AS updated_at,a.content_version,a.intent_kind,a.create_intent,a.checkpoint_json,
+  const engagement = options.recoveryOnly ? db`,${learnerEngagementAt(db)} AS learner_engaged_at` : db``;
+  const rows = await db`SELECT a.id,a.course_id,a.status,a.updated_at,a.content_version,a.intent_kind,a.create_intent,a.checkpoint_json${engagement},
       s.id AS session_id, (c.id IS NOT NULL) AS course_present
     FROM opening_teaching_activities a
     JOIN workspaces w ON w.id=a.workspace_id AND w.owner_user_id=a.owner_user_id
@@ -339,6 +348,7 @@ async function workspaceCandidates(
         courseId: row.course_id == null ? null : String(row.course_id),
         status: String(row.status),
         updatedAt: new Date(row.updated_at).toISOString(),
+        learnerEngagedAt: row.learner_engaged_at ? new Date(row.learner_engaged_at).toISOString() : null,
         sessionId: row.session_id ? String(row.session_id) : null,
         placeholder,
         writingCheckpoint: parsedWriting.kind === "writing" ? parsedWriting.checkpoint : null,

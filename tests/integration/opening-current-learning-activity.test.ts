@@ -112,6 +112,21 @@ it("keeps learner activity ahead of background publish, then ranks an actual bou
   expect(new Date(stored!.updated_at).toISOString()).toBe("2026-01-01T00:00:00.000Z");
   expect(await coverage()).toEqual(before);
 });
+it("recovers the newer learner action past a later pre-upgrade background publication", async () => {
+  const older = await staticLesson();
+  const newer = await staticLesson();
+  for (const [lesson, at] of [[older, "2026-11-01T09:00:00Z"], [newer, "2026-11-01T10:00:00Z"]] as const) {
+    await f.sql`INSERT INTO opening_study_intent_events(id,workspace_id,owner_user_id,session_id,activity_id,client_key,
+      version,event_kind,payload,resulting_intent,action,created_at)
+      VALUES(${randomUUID()},${f.scope.workspaceId},${f.scope.ownerUserId},${lesson.sessionId},${lesson.activityId},
+        ${randomUUID()},1,'signal','{}','{}','continue',${at})`;
+    await f.sql`UPDATE opening_teaching_activities SET updated_at=${at} WHERE id=${lesson.activityId}`;
+  }
+  await f.sql`UPDATE opening_teaching_activities SET updated_at='2026-11-01T11:00:00Z' WHERE id=${older.activityId}`;
+  await expect(readOpeningCurrentLearningActivity(f.sql, f.scope, courseId)).resolves.toMatchObject({ activityId: newer.activityId });
+  await expect(readOpeningCurrentLearningRecovery(f.sql, f.scope)).resolves.toMatchObject({ activityId: newer.activityId });
+  await expect(readOpeningWorkspaceActivityRecovery(f.sql, f.scope)).resolves.toMatchObject({ activityId: newer.activityId });
+});
 const terminalRetestRecoveryCases = (["cancelled", "completed"] as const).flatMap(retestStatus =>
   (["active", "paused"] as const).flatMap(status => (["same", "other"] as const).map(course => ({ retestStatus, status, course }))));
 it.each(terminalRetestRecoveryCases)("recovers older $course-course progress past a newer $status lesson with $retestStatus retest", async ({ retestStatus, status, course }) => {
