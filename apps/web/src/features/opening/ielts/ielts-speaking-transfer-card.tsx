@@ -49,11 +49,15 @@ export function IeltsSpeakingTransferCard({
   );
   const [assisted, setAssisted] = useState(matchingReceipt?.assisted ?? false);
   const [evaluatedReceipt, setReceipt] = useState<IeltsSpeakingFeedbackReceipt | null>(matchingReceipt);
+  const targets = [...getSpeakingTargets(seed.targetSpokenCollocations).values()];
+  const evaluatedTargets = evaluatedReceipt
+    ? [...evaluatedReceipt.transferredCollocations, ...evaluatedReceipt.pendingCollocations]
+    : [];
   const receipt = evaluatedReceipt?.seedId === seed.seedId &&
+    evaluatedTargets.length === targets.length && targets.every((target) => evaluatedTargets.includes(target)) &&
     (evaluatedReceipt.epistemicStatus !== "rubric_verified_evidence" || hasRequiredWritingReceipt(seed))
     ? evaluatedReceipt
     : null;
-  const targets = [...getSpeakingTargets(seed.targetSpokenCollocations).values()];
   const epistemicMeta = receipt ? EPISTEMIC_BADGE_META[receipt.epistemicStatus] : null;
   const paceMeta = receipt ? SPEAKING_PACE_META[receipt.paceStatus] : null;
 

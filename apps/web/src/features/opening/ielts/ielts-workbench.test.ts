@@ -427,6 +427,35 @@ it("shows an explicitly matched Speaking receipt", async () => {
     .toBe("rubric_verified_evidence");
 });
 
+it("withholds stale Speaking feedback after the targets change on the same seed", async () => {
+  const fixture = IELTS_WRITING_SPEAKING_FIXTURE;
+  const initialProps = {
+    initialTranscript: fixture.initialSpeakingTranscript,
+    initialDurationSeconds: fixture.initialSpeakingDurationSeconds,
+    initialReceipt: fixture.initialSpeakingReceipt,
+  };
+  const changedSeed = { ...fixture.speakingSeed, targetSpokenCollocations: ["affordable housing"] };
+  const render = (seed: typeof changedSeed, key: string) =>
+    act(async () => root.render(createElement(IeltsSpeakingTransferCard, { ...initialProps, seed, key })));
+  const verifiedBadge = () => host.querySelector('[data-speaking-epistemic="rubric_verified_evidence"]');
+
+  await render(fixture.speakingSeed, "existing");
+  expect(verifiedBadge()).not.toBeNull();
+  expect(host.textContent).toContain("已迁移 5 / 5");
+
+  for (const key of ["existing", "restored"]) {
+    await render(changedSeed, key);
+    expect(verifiedBadge()).toBeNull();
+    expect(host.textContent).toContain("已迁移 0 / 1");
+    expect(host.querySelector('[data-collocation-state="pending"]')?.textContent).toBe("affordable housing");
+    expect(host.querySelectorAll("[data-speaking-quote]")).toHaveLength(0);
+  }
+
+  await act(async () => host.querySelector<HTMLButtonElement>("button")!.click());
+  expect(host.querySelector('[data-speaking-epistemic="practice_feedback"]')).not.toBeNull();
+  expect(host.textContent).toContain("已迁移 0 / 1");
+});
+
 it.each(["removed", "invalidated"])("withholds restored Speaking mastery when the Writing receipt is %s", async (change) => {
   const fixture = IELTS_WRITING_SPEAKING_FIXTURE;
   const initialProps = {

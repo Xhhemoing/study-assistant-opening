@@ -108,8 +108,8 @@ export function computeOverallIeltsBand(
 }
 
 export function countEnglishWords(text: string): number {
-  const tokens = text.trim().match(/[\p{L}\p{N}]+(?:['’-][\p{L}\p{N}]+)*/gu);
-  return tokens ? tokens.length : 0;
+  const tokens = text.match(/[\p{L}\p{N}]+(?:['’-][\p{L}\p{N}]+)*/gu);
+  return tokens?.filter((token) => /[A-Za-z]/u.test(token)).length ?? 0;
 }
 
 export function countDraftWords(paragraphs: readonly string[]): number {

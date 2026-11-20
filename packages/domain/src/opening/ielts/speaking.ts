@@ -70,8 +70,14 @@ const SPEAKING_DITRANSITIVE = /^(?:give|gives|gave|offer|offers|offered|show|sho
 const SPEAKING_PREPOSITION = /^(?:of|to|for|with|on|at|from|by|in|near|under|over|about|across|through|throughout|between|among|into|onto|within|outside|against|towards?|without|after|before|during)$/u;
 const SPEAKING_COORDINATOR = /^(?:and|or)$/u;
 const SPEAKING_CLAUSE_LINK = /^(?:as|but|because|although|while|whereas|if|unless|when|which)$/u;
-const SPEAKING_ADVERB = /^(?:not|never|often|sometimes|always|already|still|also|only|just|really|rather|then|today|yesterday|tomorrow)$/u;
+const SPEAKING_ADVERB = /^(?:not|never|often|sometimes|always|already|still|also|only|just|really|rather|then|today|yesterday|tomorrow|newly|recently|previously|sharply|slightly|significantly)$/u;
 const SPEAKING_INTRANSITIVE_END = /^(?:rise|rises|rose|fall|falls|fell|grow|grows|grew|vary|varies|varied|matter|matters|mattered)$/u;
+const SPEAKING_PRESENT_PARTICIPLE = /^[a-z]{2,}ing$/u;
+const SPEAKING_REGULAR_PAST = /^[a-z]{2,}ed$/u;
+
+function isSpokenAdverbCue(word: string): boolean {
+  return SPEAKING_ADVERB.test(word) || word.endsWith("ly");
+}
 
 function isSpokenVerb(word: string): boolean {
   return SPEAKING_CLAUSE_VERB_CUE.test(word) || SPEAKING_FINITE_AUXILIARY.test(word) ||
@@ -138,7 +144,7 @@ function hasSpokenSubjectAndPredicate(
     const next = words[i + 1]?.text;
     const inSubjectComplement = subjectPreposition !== undefined;
     if (subjectPreposition === "to" && !complementHead && !SPEAKING_DETERMINER.test(previous)) {
-      if (SPEAKING_ADVERB.test(text) || text.endsWith("ly")) continue;
+      if (isSpokenAdverbCue(text)) continue;
       infinitiveComplement = isSpokenVerb(text);
     }
     const insideTarget = targetSpans.some(({ start, end }) => word.index >= start && word.index < end);
@@ -148,24 +154,30 @@ function hasSpokenSubjectAndPredicate(
       if (!next) {
         return !inSubjectComplement && SPEAKING_INTRANSITIVE_END.test(text);
       } else if (SPEAKING_MODAL.test(text)) {
-        const complement = words.slice(i + 1).find(({ text: part }) =>
-          !SPEAKING_ADVERB.test(part) && !part.endsWith("ly"),
-        );
+        const complement = words.slice(i + 1).find(({ text: part }) => !isSpokenAdverbCue(part));
         if (complement && isSpokenVerb(complement.text)) return true;
       } else if (SPEAKING_FINITE_AUXILIARY.test(text)) {
         return true;
-      } else if (!infinitiveComplement && text !== "be" && isSpokenVerb(text)) {
-        // A nominal object can start with modifiers or a ditransitive recipient.
-        const takesTarget = hasTargetInVerbObject(words.slice(i + 1, i + 6), targetStarts, !inSubjectComplement);
-        if (takesTarget || SPEAKING_DETERMINER.test(next) || SPEAKING_OBJECT_PRONOUN.test(next)) return true;
+      } else if (!infinitiveComplement && text !== "be") {
+        const knownVerb = isSpokenVerb(text);
+        // An -ed ending alone is ambiguous in a subject's prepositional phrase.
+        const regularPast = !inSubjectComplement && SPEAKING_REGULAR_PAST.test(text);
+        if (knownVerb || regularPast) {
+          const ambiguousVerb = SPEAKING_AMBIGUOUS_VERB.test(text) || SPEAKING_UNINFLECTED_VERB.test(text);
+          const object = words.slice(i + 1, i + 6);
+          const objectStart = object.find(({ text: part }) => !isSpokenAdverbCue(part));
+          // A bare participle can modify the preceding noun, as in "shifts affecting emissions".
+          const possiblyNounModifier = (ambiguousVerb || inSubjectComplement) &&
+            SPEAKING_PRESENT_PARTICIPLE.test(objectStart?.text ?? "");
+          const takesTarget = !possiblyNounModifier &&
+            hasTargetInVerbObject(object, targetStarts, !inSubjectComplement);
+          if (takesTarget || SPEAKING_DETERMINER.test(next) || SPEAKING_OBJECT_PRONOUN.test(next)) return true;
 
-        // Within a subject's prepositional complement, a noun can govern
-        // another preposition, as in "a table of seasonal shifts in emissions".
-        if (!inSubjectComplement && (
-          SPEAKING_SUBJECT_PRONOUN.test(subjectHead) ||
-          (!SPEAKING_AMBIGUOUS_VERB.test(text) && !SPEAKING_UNINFLECTED_VERB.test(text)) ||
-          (SPEAKING_PREPOSITION.test(next) && /[^s]s$/u.test(subjectHead))
-        )) return true;
+          if (knownVerb && !inSubjectComplement && (
+            SPEAKING_SUBJECT_PRONOUN.test(subjectHead) || !ambiguousVerb ||
+            (SPEAKING_PREPOSITION.test(next) && /[^s]s$/u.test(subjectHead))
+          )) return true;
+        }
       }
     }
 

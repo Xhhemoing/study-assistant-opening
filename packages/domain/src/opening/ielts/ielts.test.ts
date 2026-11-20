@@ -1323,6 +1323,11 @@ describe("Speaking clause and evidence regressions", () => {
 
   it.each([
     ["A table of seasonal shifts in per-capita emissions across districts.", false],
+    ["A table of seasonal shifts affecting per-capita emissions across districts.", false],
+    ["Seasonal shifts significantly affecting per-capita emissions across districts.", false],
+    ["A table of reduced per-capita emissions across districts.", false],
+    ["A table of sharply reduced per-capita emissions across districts.", false],
+    ["A newly revised per-capita emissions plan for the region.", false],
     ["A report on sharp cuts in per-capita emissions across districts.", false],
     ["A newly revised plan for lowering per-capita emissions downtown.", false],
     ["A summary about recent shifts toward lower per-capita emissions.", false],
@@ -1332,6 +1337,12 @@ describe("Speaking clause and evidence regressions", () => {
     ["A strategy to help lower harmful per-capita emissions across the region.", false],
     ["A table of travel times and seasonal shifts in per-capita emissions.", false],
     ["Reliable trains cut harmful per-capita emissions across the entire city.", true],
+    ["Reliable trains reduced harmful per-capita emissions across the entire city.", true],
+    ["My family reduced harmful per-capita emissions by switching to rail.", true],
+    ["The board reported harmful per-capita emissions across the entire city.", true],
+    ["The council studied per-capita emissions across the entire city.", true],
+    ["Reliable trains are reducing harmful per-capita emissions across the entire city.", true],
+    ["Reliable trains could be reducing harmful per-capita emissions across the entire city.", true],
     ["Trains cut harmful per-capita emissions.", true],
     ["Per-capita emissions rise.", true],
     ["The council sets tighter limits on per-capita emissions across the city.", true],
@@ -1360,6 +1371,37 @@ describe("Speaking clause and evidence regressions", () => {
     });
     expect(receipt.transferredCollocations).toEqual(credited ? ["per-capita emissions"] : []);
     expect(receipt.masteryQualified).toBe(credited);
+    expect(receipt.countsTowardMastery).toBe(credited);
+  });
+
+  it("excludes standalone numbers from the word count and Speaking mastery", () => {
+    const verified = createValidatedRubricReceipt({
+      receiptId: "r-speaking-numeric-padding",
+      taskMode: "writing_task2",
+      baselineDraft: DRAFT_1,
+      draft: DRAFT_2,
+      assessments: buildValidDraft2Assessments(),
+      crossDraftTransferVerified: true,
+    });
+    if (!verified.ok || !verified.receipt.masteryQualified) throw new Error("Expected a verified Writing fixture");
+
+    const sentence = "Reliable trains cut harmful per-capita emissions across the entire city.";
+    const numbers = Array.from({ length: 70 }, (_, index) => index + 1).join(" ");
+    const transcript = `${numbers} ${sentence}`;
+    const receipt = evaluateSpeakingRetelling({
+      seed: { ...seed, requiresVerifiedReceipt: true, verifiedWritingReceipt: verified.receipt },
+      transcript,
+      durationSeconds: 75,
+      assisted: false,
+    });
+    expect(receipt).toMatchObject({
+      wordCount: 10,
+      masteryQualified: false,
+      countsTowardMastery: false,
+      epistemicStatus: "practice_feedback",
+      transferredCollocations: ["per-capita emissions"],
+    });
+    expect(countDraftWords([transcript, "$12.50 / 50% / 18–25 / 2020-2024"])).toBe(10);
   });
 
   it("counts equivalent Speaking targets once for transfer and mastery", () => {
