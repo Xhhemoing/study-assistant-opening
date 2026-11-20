@@ -119,6 +119,26 @@ describe("verifyProbeDistinguishability", () => {
     expect(verifyProbeDistinguishability(spec(3, [H_ADD], { requirementKey: "" })).issues).toEqual(["probe_identity_incomplete"]);
   });
 
+  it.each(["spec", "correct model", "hypothesis"] as const)("rejects a Proxy-backed %s before reading its members", field => {
+    const probe = spec(3);
+    let reads = 0;
+    const get: ProxyHandler<object>["get"] = (target, key) => {
+      reads += 1;
+      return Reflect.get(target, key);
+    };
+    const candidate = field === "spec" ? new Proxy(probe, { get }) : {
+      ...probe,
+      correctModel: field === "correct model" ? new Proxy(probe.correctModel, { get }) : probe.correctModel,
+      hypotheses: field === "hypothesis" ? [new Proxy(H_ADD, { get }), H_SQUARE] : probe.hypotheses,
+    };
+
+    expect(snapshotAndVerifyProbe(candidate)).toMatchObject({
+      report: { distinguishable: false },
+      correctObservableKey: null,
+    });
+    expect(reads).toBe(0);
+  });
+
   it("treats throwing or nondeterministic simulators as unverifiable", () => {
     const throwing = hypothesis("H_THROWS", () => { throw new Error("boom"); });
     expect(verifyProbeDistinguishability(spec(3, [H_ADD, throwing]))).toMatchObject({

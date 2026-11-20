@@ -239,10 +239,10 @@ const TOKEN_ALIASES: Readonly<Record<string, string>> = {
 };
 
 function normalizeTraceToken(token: unknown): string | null {
-  if (typeof token === "number") return Number.isInteger(token) ? String(token) : null;
+  if (typeof token === "number") return Number.isSafeInteger(token) ? String(token) : null;
   if (typeof token !== "string") return null;
   const trimmed = token.trim();
-  if (/^-?\d+$/.test(trimmed)) return String(Number(trimmed));
+  if (/^[+-]?\d+$/.test(trimmed)) return BigInt(trimmed).toString();
   const alias = trimmed.toUpperCase();
   return Object.hasOwn(TOKEN_ALIASES, alias) ? TOKEN_ALIASES[alias]! : null;
 }

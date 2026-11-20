@@ -1,3 +1,12 @@
+// Domain also has browser consumers. Resolve the Node detector without a static runtime import.
+const isProxy = (globalThis.process?.getBuiltinModule?.("node:util") as typeof import("node:util") | undefined)
+  ?.types.isProxy;
+
+export function isInspectableCartridgeObject(value: unknown): value is object {
+  // A runtime without the detector cannot safely trust a descriptor snapshot.
+  return value !== null && typeof value === "object" && isProxy?.(value) === false;
+}
+
 const typedArrayPrototype = Object.getPrototypeOf(Uint8Array.prototype) as object;
 const typedArrayPrototypes = new Set<object>([
   Int8Array.prototype, Uint8Array.prototype, Uint8ClampedArray.prototype,
@@ -29,7 +38,9 @@ function isElementIndex(key: string | symbol, length: number): boolean {
 
 /** Snapshot a dense list of cartridge definitions while preserving element identity. */
 export function copyCartridgeArray<T>(value: readonly T[]): T[] {
-  if (!Array.isArray(value)) throw new TypeError("Cartridge list requires an array");
+  if (!isInspectableCartridgeObject(value) || !Array.isArray(value)) {
+    throw new TypeError("Cartridge list requires an inspectable non-Proxy array");
+  }
   const length: unknown = Object.getOwnPropertyDescriptor(value, "length")?.value;
   if (typeof length !== "number" || !Number.isInteger(length) || length < 0 || length > 0xffff_ffff) {
     throw new TypeError("Cartridge list has an invalid array length");
@@ -60,6 +71,9 @@ function projectCartridgeData(value: unknown, seen: WeakMap<object, object>): un
     throw new TypeError("Cartridge data cannot contain symbols or functions");
   }
   if (value === null || typeof value !== "object") return value;
+  if (!isInspectableCartridgeObject(value)) {
+    throw new TypeError("Cartridge data requires inspectable non-Proxy objects");
+  }
   const existing = seen.get(value);
   if (existing) return existing;
 

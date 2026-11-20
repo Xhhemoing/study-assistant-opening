@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { isCitationGrounded } from "./capability-helpers";
+import { evaluateProbeWithSpec, isCitationGrounded } from "./capability-helpers";
 import { verifyProbeDistinguishability } from "./probe-protocol";
 import { createCartridgeRegistry } from "./registry";
 import {
   STACK_408_REQUIREMENTS,
   createInitialStack408State,
+  createStackTraceProbe,
   enumerateFeasiblePopSequences,
+  parseStackTraceResponse,
   recordStack408ProbeAttempt,
   simulateBypassLifoFeasibility,
   simulateCorrectFeasibility,
@@ -134,6 +136,25 @@ describe("408.stack.v1 probes", () => {
 
   it("does not evaluate unknown probes", () => {
     expect(stack408Cartridge.evaluateProbeResponse("missing", {})).toMatchObject({ outcome: "unverified", diagnosis: "invalid_response" });
+  });
+
+  it("grades adjacent integer strings beyond the safe number range distinctly", () => {
+    const probe = createStackTraceProbe("large-integer-trace", "408.ds.stack.lifo-trace", {
+      capacity: 2,
+      ops: [{ op: "push", value: 7 }, { op: "push", value: 9007199254740992 }, { op: "pop" }],
+    }, "写出出栈结果。");
+
+    expect(evaluateProbeWithSpec(probe, { outputs: "9007199254740992", finalTop: 0 })).toMatchObject({ outcome: "correct" });
+    expect(evaluateProbeWithSpec(probe, { outputs: "9007199254740993", finalTop: 0 })).toMatchObject({ outcome: "incorrect" });
+  });
+
+  it("canonicalizes signed and zero-padded decimal integers", () => {
+    expect(parseStackTraceResponse({ outputs: "007,-0,+007,-007", finalTop: 0 }))
+      .toEqual({ outputs: ["7", "0", "7", "-7"], finalTop: 0 });
+  });
+
+  it("rejects unsafe numeric response tokens", () => {
+    expect(parseStackTraceResponse({ outputs: [9007199254740992], finalTop: 0 })).toBeNull();
   });
 });
 

@@ -205,20 +205,58 @@ describe("CartridgeRegistry", () => {
     expect(registry.getCartridge(candidate.manifest.id)).toBeNull();
   });
 
-  it("validates all own probe elements even when a property read reports a shorter list", () => {
+  it("rejects a Proxy-backed probe list before inspecting its descriptors", () => {
     const [first] = stack408Cartridge.listProbes();
     const invalid = { ...first!, probeId: "invalid", hypotheses: [] };
+    let trapCalls = 0;
     const probes = new Proxy([first!, invalid], {
-      get: (target, key) => key === "length" ? 1 : Reflect.get(target, key),
+      ownKeys() { trapCalls += 1; return ["0", "length"]; },
+      getOwnPropertyDescriptor(target, key) {
+        trapCalls += 1;
+        const descriptor = Reflect.getOwnPropertyDescriptor(target, key);
+        return key === "length" ? { ...descriptor, value: 1 } : descriptor;
+      },
     });
     const registry = createCartridgeRegistry();
-    const candidate = { ...stack408Cartridge, listProbes: () => probes, getProbe: (id: string) => id === "invalid" ? invalid : first! };
+    const candidate = { ...stack408Cartridge, listProbes: () => probes, getProbe: () => first! };
 
-    expect(registry.registerCartridge(candidate)).toMatchObject({
-      ok: false,
-      issues: [{ code: "evidence_probe_not_distinguishable" }],
-      probeReports: [{ distinguishable: true }, { probeId: "invalid", distinguishable: false }],
+    for (const result of [validateCartridge(candidate), registry.registerCartridge(candidate)]) {
+      expect(result).toMatchObject({
+        ok: false, issues: [{ code: "evidence_probe_listing_failed" }], probeReports: [],
+      });
+    }
+    expect(trapCalls).toBe(0);
+    expect(registry.getCartridge(candidate.manifest.id)).toBeNull();
+  });
+
+  it("rejects a Proxy-backed hypothesis list that hides an ambiguous third entry", () => {
+    const [first] = stack408Cartridge.listProbes();
+    const [a, b] = first!.hypotheses;
+    const target = [a!, b!, { ...a!, id: "H_DUPLICATE_PREDICTION" }];
+    let trapCalls = 0;
+    const hypotheses = new Proxy(target, {
+      ownKeys() { trapCalls += 1; return ["0", "1", "length"]; },
+      getOwnPropertyDescriptor(target, key) {
+        trapCalls += 1;
+        const descriptor = Reflect.getOwnPropertyDescriptor(target, key);
+        return key === "length" ? { ...descriptor, value: 2 } : descriptor;
+      },
     });
+    const probe = { ...first!, hypotheses };
+    const candidate = { ...stack408Cartridge, listProbes: () => [probe], getProbe: () => probe };
+    const registry = createCartridgeRegistry();
+    const unwrapped = { ...probe, hypotheses: target };
+    const control = validateCartridge({ ...candidate, listProbes: () => [unwrapped], getProbe: () => unwrapped });
+    expect(control.probeReports[0]?.issues).toContain("ambiguous_hypothesis_pair");
+
+    for (const result of [validateCartridge(candidate), registry.registerCartridge(candidate)]) {
+      expect(result).toMatchObject({
+        ok: false,
+        issues: [{ code: "evidence_probe_not_distinguishable" }],
+        probeReports: [{ distinguishable: false, issues: expect.arrayContaining(["prediction_failed"]) }],
+      });
+    }
+    expect(trapCalls).toBe(0);
     expect(registry.getCartridge(candidate.manifest.id)).toBeNull();
   });
 

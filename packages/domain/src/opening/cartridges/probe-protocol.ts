@@ -1,4 +1,4 @@
-import { cloneCartridgeData, copyCartridgeArray } from "./clone-cartridge-data";
+import { cloneCartridgeData, copyCartridgeArray, isInspectableCartridgeObject } from "./clone-cartridge-data";
 
 /**
  * Distinguishable competing-misconception probe protocol.
@@ -140,7 +140,7 @@ interface CapturedModel<TInput, TObservable> {
 }
 
 function captureModel<TInput, TObservable>(raw: unknown): CapturedModel<TInput, TObservable> {
-  if (!raw || typeof raw !== "object") return { id: "", predict: null };
+  if (!isInspectableCartridgeObject(raw)) return { id: "", predict: null };
   const candidate = raw as Partial<ObservableModel<TInput, TObservable>>;
   const idRead = safeRead(() => candidate.id);
   const predictRead = safeRead(() => candidate.predict);
@@ -161,7 +161,7 @@ export function snapshotAndVerifyProbe<TInput, TObservable>(
   spec: DistinguishableProbeSpec<TInput, TObservable>,
 ): VerifiedProbeSnapshot<TObservable> {
   const issues = new Set<ProbeDistinguishabilityIssue>();
-  if (!spec || typeof spec !== "object") {
+  if (!isInspectableCartridgeObject(spec)) {
     issues.add("probe_identity_incomplete");
     issues.add("no_competing_hypotheses");
     const report: ProbeDistinguishabilityReport = Object.freeze({

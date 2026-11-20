@@ -60,6 +60,14 @@ describe("cloneCartridgeData", () => {
     expect(get).not.toHaveBeenCalled();
   });
 
+  it.each([["object", {}], ["array", [1]]] as const)("rejects a Proxy-backed %s before invoking traps", (_kind, target) => {
+    const ownKeys = vi.fn(Reflect.ownKeys);
+    const proxy = new Proxy(target, { ownKeys });
+    expect(() => cloneCartridgeData(proxy)).toThrow(TypeError);
+    expect(() => cloneCartridgeData(new Map([["nested", proxy]]))).toThrow(TypeError);
+    expect(ownKeys).not.toHaveBeenCalled();
+  });
+
   it("validates the actual buffer even when the view shadows it", () => {
     const view = new Uint8Array(new SharedArrayBuffer(2));
     Object.defineProperty(view, "buffer", { value: new ArrayBuffer(2) });
