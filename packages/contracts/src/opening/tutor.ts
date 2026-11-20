@@ -195,6 +195,7 @@ export const providerOutputSchema = z
     candidates: z.array(assistantCandidateSchema).max(16),
     inputTokens: z.number().int().nonnegative().nullable(),
     outputTokens: z.number().int().nonnegative().nullable(),
+    cachedInputTokens: z.number().int().nonnegative().nullable().optional(),
     toolCalls: z.array(providerToolCallSchema).max(4).optional(),
   })
   .strict();

@@ -101,4 +101,63 @@ describe("direct Markdown streaming", () => {
     await expect(pending).rejects.toMatchObject({ code: "PROVIDER_ABORTED", requestSent: true });
     expect(h.cancel).toHaveBeenCalledOnce();
   });
+
+  it("extracts cachedInputTokens from prompt_tokens_details and prompt_cache_hit_tokens in SSE usage", async () => {
+    const h1 = harness();
+    h1.write(delta("answer") + stop + event({
+      choices: [],
+      usage: { prompt_tokens: 100, completion_tokens: 12, prompt_tokens_details: { cached_tokens: 80 } },
+    }) + done);
+    await expect(h1.provider.complete(input)).resolves.toMatchObject({
+      text: "answer",
+      inputTokens: 100,
+      outputTokens: 12,
+      cachedInputTokens: 80,
+    });
+
+    const h2 = harness();
+    h2.write(delta("answer") + stop + event({
+      choices: [],
+      usage: { prompt_tokens: 100, completion_tokens: 12, prompt_cache_hit_tokens: 64 },
+    }) + done);
+    await expect(h2.provider.complete(input)).resolves.toMatchObject({
+      text: "answer",
+      inputTokens: 100,
+      outputTokens: 12,
+      cachedInputTokens: 64,
+    });
+  });
+
+  it("clamps streamed cached tokens to prompt_tokens and leaves absent cached usage null", async () => {
+    const h1 = harness();
+    h1.write(delta("answer") + stop + event({
+      choices: [],
+      usage: { prompt_tokens: 50, completion_tokens: 10, prompt_tokens_details: { cached_tokens: 99 } },
+    }) + done);
+    await expect(h1.provider.complete(input)).resolves.toMatchObject({
+      inputTokens: 50,
+      outputTokens: 10,
+      cachedInputTokens: 50,
+    });
+
+    const h2 = harness();
+    h2.write(delta("answer") + stop + done);
+    await expect(h2.provider.complete(input)).resolves.toMatchObject({
+      inputTokens: null,
+      outputTokens: null,
+      cachedInputTokens: null,
+    });
+  });
+
+  it.each([
+    ["negative cached_tokens", { prompt_tokens: 24, completion_tokens: 8, prompt_tokens_details: { cached_tokens: -1 } }],
+    ["float cached_tokens", { prompt_tokens: 24, completion_tokens: 8, prompt_tokens_details: { cached_tokens: 1.5 } }],
+    ["string cached_tokens", { prompt_tokens: 24, completion_tokens: 8, prompt_tokens_details: { cached_tokens: "10" } }],
+    ["non-object prompt_tokens_details", { prompt_tokens: 24, completion_tokens: 8, prompt_tokens_details: "bad" }],
+    ["negative prompt_cache_hit_tokens", { prompt_tokens: 24, completion_tokens: 8, prompt_cache_hit_tokens: -3 }],
+  ])("rejects malformed streamed cached usage (%s)", async (_name, badUsage) => {
+    const h = harness();
+    h.write(delta("answer") + stop + event({ choices: [], usage: badUsage }) + done);
+    await expect(h.provider.complete(input)).rejects.toMatchObject({ code: "PROVIDER_RESPONSE", requestSent: true });
+  });
 });

@@ -17,10 +17,12 @@ export {
   actualCentsForOutput,
   estimateUsage,
   extractUsage,
+  parseProviderUsage,
   reservationCentsForInput,
   usageFromOutput,
   type OpeningPricing,
   type OpeningUsage,
+  type ParsedProviderUsage,
 } from "./opening/usage";
 
 export { ROLE_POLICIES, getRolePolicy, type RolePolicy } from "./roles";

@@ -1,4 +1,5 @@
 import { providerOutputSchema, type ProviderOutput } from "@aistudy/contracts";
+import { parseProviderUsage } from "./usage";
 
 export type ProviderTextDelta = (delta: string) => void | Promise<void>;
 
@@ -22,7 +23,7 @@ export async function readOpeningProviderStream(body: ReadableStream<Uint8Array>
 }): Promise<ProviderOutput> {
   const reader = body.getReader(), decoder = new TextDecoder("utf-8", { fatal: true });
   let buffer = "", data: string[] = [], text = "", bytes = 0, done = false, stopped = false;
-  let requestId: string | null = null, inputTokens: number | null = null, outputTokens: number | null = null;
+  let requestId: string | null = null, inputTokens: number | null = null, outputTokens: number | null = null, cachedInputTokens: number | null = null;
   function invalid(message: string): never { throw new OpeningProviderStreamError("PROVIDER_RESPONSE", message); }
   const abort = () => { void reader.cancel(options.signal.reason).catch(() => undefined); };
   options.signal.addEventListener("abort", abort, { once: true });
@@ -38,12 +39,11 @@ export async function readOpeningProviderStream(body: ReadableStream<Uint8Array>
     if (value.error) invalid("provider stream failed");
     if (typeof value.id === "string") requestId = value.id;
     if (value.usage != null) {
-      const usage = value.usage as Record<string, unknown>;
-      for (const token of [usage.prompt_tokens, usage.completion_tokens]) {
-        if (token != null && (typeof token !== "number" || !Number.isSafeInteger(token) || token < 0)) invalid("invalid provider stream usage");
-      }
-      inputTokens = typeof usage.prompt_tokens === "number" ? usage.prompt_tokens : null;
-      outputTokens = typeof usage.completion_tokens === "number" ? usage.completion_tokens : null;
+      const parsedUsage = parseProviderUsage(value.usage);
+      if (!parsedUsage) invalid("invalid provider stream usage");
+      inputTokens = parsedUsage.inputTokens;
+      outputTokens = parsedUsage.outputTokens;
+      cachedInputTokens = parsedUsage.cachedInputTokens;
     }
     if (!Array.isArray(value.choices)) invalid("invalid provider stream choices");
     for (const raw of value.choices) {
@@ -102,7 +102,7 @@ export async function readOpeningProviderStream(body: ReadableStream<Uint8Array>
     }
     if (!done) invalid("provider stream was interrupted");
     if (!text.trim()) invalid("provider returned an empty answer");
-    const output = providerOutputSchema.safeParse({ text, citedChunkIds: [], candidates: [], requestId, inputTokens, outputTokens });
+    const output = providerOutputSchema.safeParse({ text, citedChunkIds: [], candidates: [], requestId, inputTokens, outputTokens, cachedInputTokens });
     if (!output.success) invalid("invalid provider stream output");
     return output.data;
   } finally {
