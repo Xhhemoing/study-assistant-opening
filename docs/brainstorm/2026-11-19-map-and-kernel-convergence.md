@@ -91,7 +91,7 @@ promotion_target:
 
 - **方案 3A（当前批准基线：零迁移收束 + 沙盒隔离微探针）**：
   1. 将自由画布组件并入 `#450` 的单一 `AssetGraphWorkspace`（提供自由画布 / 结构画布或统一关系图 + 列表视图，移除重复的 `FreeMapEntry` 与局部 40 项挑题器）；坐标按 `(workspace/user, context, nodeId)` 存本机 `localStorage` 且只存坐标数值。
-  2. 在 `assetGraphEdgeSchema`（`.strict()`）上通过同单前后端原子切流（或先行下发宽松读取契约）增加可选 `knowledgeStatus`（`suggested | supported | needs_check`）与重验后的可选出处信息，服务端重验 `evidenceChunkIds` 所属课程资料权限、可读版本与非空正整数 `page`，并纳入 `scopeFingerprint` 游标失效计算。
+  2. 在 `assetGraphEdgeSchema`（`.strict()`）上通过客户端显式协商（`includeKnowledgeEdgeDetails`）增加可选 `knowledgeStatus`（`suggested | supported | needs_check`）与重验后的可选出处信息（未传协商位的已打开旧标签页默认保持原严格边形状），服务端重验 `evidenceChunkIds` 所属课程资料权限、可读版本与非空正整数 `page`，并连同协商位纳入 `scopeFingerprint` 游标失效计算。
   3. 边上“一句话追问 / 反例”默认作为临时只读核对，不静默建卡、不在画布预取笔记正文；学生显式点击保存时才通过既有 `study-notes` 绑定到课程或课程要求。
   4. 两步诊断微探针首版仅保留在级数内置示例（沙盒）中，不在真实课程待复测要求上直接写入作答或放行提示，保护延迟复测的 `independent` 资格。
 - **方案 3B（重型方案：稳定知识边表 + 边级笔记关联 + 真实课程内联微探针）**：为 `opening_course_knowledge_edges` 增加跨版本稳定主键与对齐算法，扩展 `learning_asset_links` 支持 `knowledge_edge`，并在真实课程图谱内直接运行计分微探针。需数据库迁移、跨版本图对齐规则及复测“先测 / 先练”显式分流协议，当前时机不成熟。
@@ -106,13 +106,13 @@ promotion_target:
 | 成本 | 零数据库迁移，零静默模型调用 | 迁移维护、备份恢复预检与测试夹具成本显著上升 | 最低 |
 | 可解释性 | 推荐分母（全课程 `N` 项要求）、排序优先级与“纸上复习不计入掌握”文案完全透明可核对 | 容量扣减、跨日改排与边对齐失败原因较难向学生一眼解释 | 高 |
 | 隐私与安全 | 会话键隔离 `userId + workspaceId`；边出处重验当前可读资料与隐私排除；不预取笔记正文 | 新增持久化表须同步接入删除、导出与隐私纪元递增 | 高 |
-| 可迁移/可回滚 | 零数据库迁移；契约 `.strict()` 增量字段随单体前后端原子切流（回滚时同步停发新边字段或前后端同退） | 含 schema 变更与备份恢复联动，回滚成本高 | 可直接回退 |
+| 可迁移/可回滚 | 零数据库迁移；契约 `.strict()` 增量字段按请求显式协商返回（旧标签页默认收原形状，回滚零数据库依赖） | 含 schema 变更与备份恢复联动，回滚成本高 | 可直接回退 |
 | 扩展性 | 预留升级钩子：待 `#454` 浏览器验收与耗时校准稳定后可平滑把 `minutes=15` 升级为容量联动预览 | 提前固化尚未验证的边身份与纸面模型，易形成历史包袱 | 需重新设计考前辅助层 |
 | 失败降级 | `learning-route` 未确认范围时明确提示先确认范围；`sessionStorage` 不可用时仅禁用纸面勾选且不阻断地图与答题 | 任一容量或持久化子链路异常均可能导致主入口报错阻断 | 退化为纯静态图 |
 
 ## 8. 推荐结论
 
-- **推荐方案**：采用 **1A + 2A + 3A** 组合，即以 `learning-route` 全课程快照驱动地图考前挑题、普通练习预填 **15 分钟学习意图**且到期复测强绑 `taskId + expectedTaskVersion`（**1A**），以浏览器 `sessionStorage` 提供跨 `/opening/map` 与 `/opening/sprint` 共享、带 `requirementRevision` 校验的可撤销 **本轮纸上已复习（2A）**，并将自由画布交互并入单一 `AssetGraphWorkspace`、零迁移原子切流补齐课程知识边 `knowledgeStatus` 与重验出处、保持边追问默认临时且微探针留在级数沙盒（**3A**）。同时顺手完成续学首屏与资料列表解耦及活动小结单一推荐动作接线。
+- **推荐方案**：采用 **1A + 2A + 3A** 组合，即以 `learning-route` 全课程快照驱动地图考前挑题、到期复测优先于普通纠错判定并强绑 `taskId + expectedTaskVersion`、普通练习预填 **15 分钟学习意图**（**1A**），以浏览器 `sessionStorage` 提供跨 `/opening/map` 与 `/opening/sprint` 共享、带 `requirementRevision` 校验的可撤销 **本轮纸上已复习（2A）**，并将自由画布交互并入单一 `AssetGraphWorkspace`、按客户端显式协商零迁移补齐课程知识边 `knowledgeStatus` 与重验出处、保持边追问默认临时且微探针留在级数沙盒（**3A**）。同时顺手完成续学首屏与资料列表解耦及活动小结单一推荐动作接线。
 - **适用边界**：Opening 单科邀请试用与高数考前专题验收阶段；单门课程要求规模在百级以内、图谱单页有界窗口 `<= 40`。
 - **暂不采用**：
   - 不在地图侧新增独立的服务端“15 分钟可兑现时间承诺”接口（待 `#454` 完成真实浏览器走查且单题耗时有校准依据后再议）；
@@ -124,14 +124,14 @@ promotion_target:
   1. `#454` 通过真实浏览器走查，且至少 1 个高数专题积累了题目实际耗时分布后，评估将 1A 升级为与当日剩余容量联动的时长预览（1B）；
   2. 真实试用中出现明确高频诉求“跨设备/跨天保留多轮纸面核对清单”，再立项评估轻量服务端轮次记录（2B）；
   3. 课程知识图重建频率与边级纠错样本证明需要跨版本保留人工边批注时，再设计稳定知识边身份与对齐迁移。
-- **回退方案**：前端视图切换与会话级纸面标记零服务端迁移依赖；`assetGraphEdgeSchema` 新增可选字段在模块化单体内前后端同单原子发布（若需回退，同步停发新增边字段或整体回退发布包即可，无需回滚数据库）；若自由画布交互在特定设备出现兼容问题，用户可在同一工作台一键切回列表视图或基础关系图。
+- **回退方案**：前端视图切换与会话级纸面标记零服务端迁移依赖；`assetGraphEdgeSchema` 新增可选字段仅对显式协商的新客户端返回（已打开旧标签页默认保持原严格边形状，若需回退直接停发或整体回退发布包即可，无需回滚数据库）；若自由画布交互在特定设备出现兼容问题，用户可在同一工作台一键切回列表视图或基础关系图。
 
 ## 9. 验证计划
 
 - **数据集或测试夹具**：
-  - 既有 [21 条资产图合成夹具](2026-11-18-knowledge-assets-examples.json) 扩展课程知识边 `suggested / supported / needs_check`、缺失页码 chunk 与隐私排除重验用例；
+  - 既有 [21 条资产图合成夹具](2026-11-18-knowledge-assets-examples.json) 扩展课程知识边 `suggested / supported / needs_check`、缺失页码 chunk、隐私排除重验与旧客户端未协商兼容用例；
   - 内置高数无穷级数示例模型（正项级数、比较判别法、比值/根值判别法、莱布尼茨交错级数）用于自由画布与两步沙盒微探针单测；
-  - `CourseRouteSnapshot` 多状态要求夹具（覆盖 `needs_correction`、含 `verified` 在内的到期 `retest`、`assisted`、`needs_verification`、`unobserved`、无到期复测的 `verified`、`blocked` 及 `scopeState !== "confirmed"`）。
+  - `CourseRouteSnapshot` 多状态要求夹具（覆盖 `needs_correction`、含 `verified` 及与 `needs_correction` 同时成立的到期 `retest`、`assisted`、`needs_verification`、`unobserved`、无到期复测的 `verified`、`blocked` 及 `scopeState !== "confirmed"`）。
 - **当前基线**：`feat/opening-release`（`b1b98a9c`，已含 `#449`–`#456`）单一工作台 + 关系图/列表双视图；76/76 离线教学规则回归通过；批改 `calibrated=false`。
 - **离线指标**：
   - 契约与单测：知识边状态与出处重验准确率 100%（无越权资料泄露、无 `chunk_index` 伪页码、资料版本或隐私变更后旧游标 100% 返回 `CURSOR_STALE`）；

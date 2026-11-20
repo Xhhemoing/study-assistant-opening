@@ -55,16 +55,16 @@ flowchart LR
 - **分母与前置判断**：
   - 若 `snapshot.scopeState !== "confirmed"`：显示“当前课程尚有待确认的学习要求范围，请先确认范围后再按全课优先级挑题”，提供跳转课程范围确认入口。
   - 若 `snapshot.scopeState === "confirmed"`：显示全课程有效要求分母（如 `全课共 N 项要求，已验证 V 项`）。先排除 `status === "blocked"` 的项（若存在 `blocked` 项，单独提示阻塞数量而不混入可立即作答推荐）；**注意不得在检查 `delayedCheck` 之前提前过滤掉 `status === "verified"` 的要求**——仅当某项 `status === "verified"` 且不存在到期 `delayedCheck`（`delayedCheck?.status === "pending"` 且 `notBeforeAt <= asOf`）时才跳过；对于 `delayedCheck?.status === "pending"` 但 `notBeforeAt > asOf`（仍在等待窗口内）的要求，单独提示复测开放时间而不触发会污染间隔期独立资格的普通练习。
-- **确定性排序规则**（仅依据服务端已返回字段，不推断未返回答题结果）：
-  1. `status === "needs_correction"`（有待纠错作答，优先重做出错步骤）；
-  2. `delayedCheck?.status === "pending"` 且 `notBeforeAt <= asOf`（已到复测窗口，无论当前 `status` 是否为 `"verified"`，优先完成正式独立复测）；
-  3. `status === "assisted"` 或 `status === "needs_verification"`（上次受助完成或证据尚不足，需补一次独立检验）；
+- **确定性排序规则**（仅依据服务端已返回字段，不推断未返回答题结果；注意服务端快照中 `status === "needs_correction"` 与到期 `delayedCheck` 独立计算、可同时成立，**必须先归类待处理正式复测，再归类普通练习**）：
+  1. `delayedCheck?.status === "pending"` 且 `notBeforeAt <= asOf`（已到复测窗口，无论当前 `status` 为 `"verified"`、`"needs_correction"` 或其他值，一律先走正式独立复测分支，严禁落入普通纠错练习而污染复测窗口）；
+  2. `status === "needs_correction"`（且无等待中或已到期 `delayedCheck`，有待纠错作答，优先重做出错步骤）；
+  3. `status === "assisted"` 或 `status === "needs_verification"`（且无等待中或已到期 `delayedCheck`，上次受助完成或证据尚不足，需补一次独立检验）；
   4. `status === "unobserved"`（尚无作答证据，可先做首道诊断练习）。
   - 同级内部按：① 本轮尚未标记“纸上已复习”（2A）优先于已标记项（若同级全部已纸上勾选，仍保留该项并标注“本轮纸上已过，仍待线上独立验证”）；② `requirement.mandatory === true` 优先；③ `requirement.position` 升序稳定打破平局。
 - **动作衔接（严格区分正式复测与普通 15 分钟练习）**：
   - 「在图中定位这项要求」：若当前图谱已加载对应 `requirement/<id>` 节点则直接选中并平移画布/滚动列表至可见区域；若尚未在当前分页窗口内，则以该 `requirement/<id>` 作为 `focus` 执行 `neighbors` / `detail` 查询并定位。
-  - **当命中的是第 2 类「到期独立复测」时**：由于服务端 [opening-course-route-actions.ts](../../packages/database/src/repositories/opening-course-route-actions.ts) 第 201–214 行仅通过 `taskId` 与 `expectedTaskVersion` 绑定 `opening_retest_activities`，前端必须携带该要求关联的待处理复测 `taskId + expectedTaskVersion`（及 `minutes: 15` 预选时长）调用 `routeClient.start`，或当客户端未持有对应任务版本时引导跳转 `/opening/today` 的正式复测入口；**严禁在缺失 `taskId / expectedTaskVersion` 时回退调用普通 `executeStartRequirement`**。
-  - **当命中的是第 1/3/4 类「普通要求练习/检验」时**（且该要求无等待中 `delayedCheck`）：将 `AssetGraphWorkspace` 的 `selectedMinutes` 预置为 `15`，复用既有 `executeStartRequirement`（调用 `routeClient.start(courseId, { requirementId, minutes: 15, clientKey })`）进入 `/opening/courses/[id]/study`。
+  - **当命中的是第 1 类「到期独立复测」时**：由于服务端 [opening-course-route-actions.ts](../../packages/database/src/repositories/opening-course-route-actions.ts) 第 201–214 行仅通过 `taskId` 与 `expectedTaskVersion` 绑定 `opening_retest_activities`，前端必须携带完整乐观并发字段与复测任务标识（`{ goalId, expectedGoalRevision, requirementId, expectedRequirementRevision, taskId, expectedTaskVersion, minutes: 15, clientKey }`）调用 `routeClient.start`，或当客户端未持有对应任务版本时引导跳转 `/opening/today` 的正式复测入口；**严禁在缺失 `taskId / expectedTaskVersion` 时回退调用普通 `executeStartRequirement`**。
+  - **当命中的是第 2/3/4 类「普通要求练习/检验」时**（且该要求无等待中或已到期 `delayedCheck`）：将 `AssetGraphWorkspace` 的 `selectedMinutes` 预置为 `15`，复用既有 `executeStartRequirement`（调用 `routeClient.start(courseId, { goalId, expectedGoalRevision, requirementId, expectedRequirementRevision, minutes: 15, clientKey })`，对齐 [course-route.ts](../../packages/contracts/src/opening/course-route.ts) 第 49–53 行）进入 `/opening/courses/[id]/study`。
 
 ### 2.2 会话级跨页「本轮纸上已复习」（2A 规格）
 
@@ -81,15 +81,16 @@ flowchart LR
   - 监听既有隐私变更通知（`subscribeOpeningPrivacyChange`）以及身份/工作区切换；当 `userId` 或 `workspaceId` 尚未就绪或 `sessionStorage` 被浏览器禁用时，优雅降级为不持久化或禁用勾选按钮，不阻塞地图浏览或冲刺答题。
   - 同页与同标签页内路由切换（`/opening/map` ↔ `/opening/sprint`）读取同一 `sessionStorage` 键，保持勾选计数、单条撤销与轮次重置完全一致。
 
-### 2.3 知识边核验状态与重验出处（零迁移契约与 `.strict()` 切流规格）
+### 2.3 知识边核验状态与重验出处（零迁移契约与 `.strict()` 显式协商切流规格）
 
-- **契约增量与 `.strict()` 兼容策略**：当前 [asset-graph.ts](../../packages/contracts/src/opening/asset-graph.ts) 第 258–269 行的 `assetGraphEdgeSchema` 使用 `.strict()` 解析，若旧客户端直接收到未知边字段将拒绝整页响应。因此必须采用**模块化单体内契约 + Web 客户端 + 服务端投影同单原子切流**（若未来拆分为独立客户端灰度发布，则须先发布接受新可选字段的客户端契约再开启服务端下发）：
-  - `knowledgeStatus: z.enum(["suggested", "supported", "needs_check"]).optional()`：仅允许出现在 `contains | prerequisite | appliesTo` 课程知识边上；当 `knowledgeStatus === "suggested"` 时 `basis` 仍为 `"suggested"`，当 `knowledgeStatus` 为 `"supported"` 或 `"needs_check"` 时 `basis` 保持 `"recorded"`，由 `superRefine` 保证一致性。
-  - 复用 `assetGraphEdgeSchema` 已有的 `sourceVersion`、`page`（正整数）以及新增可选 `sourceNodeId: assetGraphNodeIdSchema.optional()`（`superRefine` 校验须以 `source/` 开头），仅在服务端完成重验后填入代表性可读证据锚点。
+- **契约增量与已打开旧标签页 `.strict()` 兼容策略**：当前 [asset-graph.ts](../../packages/contracts/src/opening/asset-graph.ts) 第 258–269 行的 `assetGraphEdgeSchema` 及 [asset-graph-client.ts](../../apps/web/src/features/opening/asset-graph/asset-graph-client.ts) 第 188–205 行均使用 `.strict()` 解析，即使同版本发布，浏览器中尚未刷新的已打开地图标签页在发起下一次查询时若收到未知边字段仍会拒绝整页响应。因此必须采用**请求显式协商（Client Opt-In）+ 默认保留 v1 边响应形状**：
+  - 查询请求新增可选协商标记（如 `includeKnowledgeEdgeDetails: z.boolean().optional()`，旧客户端未传或为 `false` 时服务端严禁下发新增边字段，100% 兼容在途已打开的旧 `.strict()` 标签页；新客户端显式传 `true` 时服务端才投影新增边字段，并将该协商位纳入 `scopeFingerprint` 防止跨模式混用游标）；
+  - `knowledgeStatus: z.enum(["suggested", "supported", "needs_check"]).optional()`：仅在客户端显式协商开启时允许出现在 `contains | prerequisite | appliesTo` 课程知识边上；当 `knowledgeStatus === "suggested"` 时 `basis` 仍为 `"suggested"`，当 `knowledgeStatus` 为 `"supported"` 或 `"needs_check"` 时 `basis` 保持 `"recorded"`，由 `superRefine` 保证一致性；
+  - 复用 `assetGraphEdgeSchema` 已有的 `sourceVersion`、`page`（正整数）以及新增可选 `sourceNodeId: assetGraphNodeIdSchema.optional()`（`superRefine` 校验须以 `source/` 开头），仅在客户端协商开启且服务端完成重验后填入代表性可读证据锚点。
 - **只读仓储重验与游标指纹**（[opening-asset-graph.ts](../../packages/database/src/repositories/opening-asset-graph.ts)）：
   - 去重优先级固定为：`supported > needs_check > suggested`。
   - 解析 `edge.evidenceChunkIds` 时，必须核对对应 chunk 所属 `source_id` 当前仍绑定于该课程、处于当前工作区可读版本且未被隐私设置排除；若 `chunk.page` 为 `null` 或非正整数，只允许携带经重验的 `sourceNodeId` / `sourceVersion`，**严禁用 `chunk_index` 伪充页码**；若全部引用资料已撤权或不可读，则不返回任何出处字段，且若原状态为 `supported` 则在投影层按只读降级提示为 `needs_check`（不静默改写底层快照表）。
-  - 将可见课程知识快照版本、边状态摘要与可读资料纪元一并纳入 `scopeFingerprint`，确保资料撤权、重新构图或隐私变更后旧分页游标确定性返回 `CURSOR_STALE`。
+  - 将可见课程知识快照版本、边状态摘要、可读资料纪元与边详情协商位一并纳入 `scopeFingerprint`，确保资料撤权、重新构图或隐私变更后旧分页游标确定性返回 `CURSOR_STALE`。
 
 ### 2.4 续学首屏故障隔离与活动小结衔接
 
@@ -108,7 +109,7 @@ flowchart LR
 | `.agents/skills/aistudy-autopilot/SKILL.md`、`docs/operations/agent-workflow.md` | 核对最新门禁规则后独立整理为文档类（`L`）切片提交 | `integration/opening` → 批次提升至 `feat/opening-release` |
 | `free-map-canvas-geometry.ts`、`free-map-canvas-gestures.ts`、`free-map-canvas-layout.ts`、`free-map-canvas-node.tsx`、`free-map-canvas-storage.ts`、`free-map-canvas.tsx` 及其单测 | **保留并接入单一工作台**；`free-map-canvas-storage.ts` 的 `persistKey` 强制拼入 `userId:workspaceId:contextKey`，仅存有限数值坐标 | 并入 `apps/web/src/features/opening/asset-graph/`，由 `AssetGraphWorkspace` 驱动 |
 | `series-map-example-model.ts`、`series-map-example.tsx` 及其单测 | **保留为内置沙盒示例模式**，承载两步诊断微探针与级数判别法关系演示，明确标识“示例沙盒 · 不计入个人课程记录” | 并入 `AssetGraphWorkspace` 示例入口 |
-| `free-map-entry.tsx`、`free-map-navigation.tsx`、`free-map-review.tsx` 及其单测 | **不保留独立双入口与 40 项分页挑题实现**；其考前挑题与纸上勾选需求改由 `learning-route`（1A，含到期复测任务强绑定）+ `paper-review-session.ts`（2A）在统一工作台与冲刺台中实现 | 逻辑升级吸收，消除重复状态机 |
+| `free-map-entry.tsx`、`free-map-navigation.tsx`、`free-map-review.tsx` 及其单测 | **不保留独立双入口与 40 项分页挑题实现**；其考前挑题与纸上勾选需求改由 `learning-route`（1A，含到期复测优先判定与任务强绑定）+ `paper-review-session.ts`（2A）在统一工作台与冲刺台中实现 | 逻辑升级吸收，消除重复状态机 |
 | `opening/map/page.tsx`、`asset-graph-model.ts`、`asset-graph-workspace.tsx` | 以远端 `#450` 最新版本为基底，融合自由画布视图、列表视图与 `1A/2A` 面板 | `apps/web/src/app/(opening)/opening/map/page.tsx` 及 `asset-graph` 模块 |
 
 ## 4. 分切片推进顺序与验收门禁
@@ -117,11 +118,11 @@ flowchart LR
    - 已完成：PR `#454`（`eb966c84`，当日例外与跨日复测改排）、`#455`（CI 看门狗加固）与 `#456`（Wave 1–2 状态同步）已合入 `feat/opening-release`（相关 UI 保留在阶段末统一交用户浏览器验收）；
    - 待收口：在独立 `worktree` 按 `L` 类路径提交多工具协作文档细则更新（`agent-workflow.md` 与 `aistudy-autopilot/SKILL.md`：默认单文件单测 + 所属包 `typecheck`，禁委派并行跑全仓 `build`，双审汇聚后单轮返工）。
 2. **切片 1（知识地图单一工作台收束 + 1A + 2A，H 级主线 PR）**：
-   - 基于 `feat/opening-release` 最新头整合 `FreeMapCanvas`、`AssetGraphListView`、级数沙盒示例、`learning-route` 全课挑题 + 普通练习 `15` 分钟预填与到期复测 `taskId + expectedTaskVersion` 强绑定（1A），以及跨 `/opening/map` 与 `/opening/sprint` 共享的会话级“本轮纸上已复习”（2A）；
-   - 验证：相关 `unit` 单测（含视图切换焦点恢复、未确认范围提示、`verified` 项到期复测不被漏筛、到期复测禁止无 `taskId` 降级启动、`minutes=15` 透传、`sessionStorage` 版本失效与零服务端写入断言）+ `@aistudy/web` 类型检查 + `eslint` + `check-new-fixed-colors` + `check-learner-copy`。
+   - 基于 `feat/opening-release` 最新头整合 `FreeMapCanvas`、`AssetGraphListView`、级数沙盒示例、`learning-route` 全课挑题 + 普通练习 `15` 分钟预填与到期复测优先判定及 `taskId + expectedTaskVersion` 强绑定（1A），以及跨 `/opening/map` 与 `/opening/sprint` 共享的会话级“本轮纸上已复习”（2A）；
+   - 验证：相关 `unit` 单测（含视图切换焦点恢复、未确认范围提示、`verified` 项到期复测不被漏筛、**`needs_correction` 与到期 `delayedCheck` 同时成立时优先归为正式复测夹具**、到期复测禁止无 `taskId` 降级启动、`minutes=15` 透传、`sessionStorage` 版本失效与零服务端写入断言）+ `@aistudy/web` 类型检查 + `eslint` + `check-new-fixed-colors` + `check-learner-copy`。
 3. **切片 2（课程知识边 `knowledgeStatus` 与重验出处，H 级主线 PR，可与切片 1 同单原子合流）**：
-   - 同单原子扩展 `asset-graph` `.strict()` 契约、Web 读取渲染与 `opening-asset-graph.ts` 只读投影，补齐 `suggested / supported / needs_check` 边样式区分、重验页码/资料版本展示与 `scopeFingerprint` 游标失效；
-   - 验证：`packages/contracts`、`packages/database`、`apps/web` 类型检查 + 契约/仓储/handler 测试 + `check-api-contracts --strict` + `check-server-boundary`。
+   - 扩展 `asset-graph` `.strict()` 契约、客户端显式协商参数（`includeKnowledgeEdgeDetails`）与 `opening-asset-graph.ts` 只读投影，默认向未协商旧标签页保持原严格边形状，协商开启时透出 `suggested / supported / needs_check` 边样式区分、重验页码/资料版本展示与 `scopeFingerprint` 游标失效；
+   - 验证：`packages/contracts`、`packages/database`、`apps/web` 类型检查 + 契约/仓储/handler 测试（**含未传协商参数的旧 `.strict()` 客户端请求新服务端不报未知字段的兼容回归用例**）+ `check-api-contracts --strict` + `check-server-boundary`。
 4. **切片 3（续学首屏解耦与活动小结单一下一步接线，H 级主线 PR）**：
    - 拆分 `course-study-workspace` 的课程/活动核心加载与资料列表二级加载，接通 `activity-summary-card` 单一下一步动作；
    - 验证：课程工作台故障注入单测（资料列表失败不阻断续学答题）+ 小结动作分支单测 + `@aistudy/web` 类型检查。
