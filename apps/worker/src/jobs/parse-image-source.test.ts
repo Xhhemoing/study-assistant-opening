@@ -54,9 +54,8 @@ async function makeHandler(current: SourceRecord, recognizePage?: Parameters<typ
         replaceInput = input;
         states.push("ready");
       },
-      listChunks: async () => [],
+      replacePdfChunks: async () => { throw new Error("unexpected PDF publication"); },
       listChunksAtVersion: async () => [],
-      listForSources: async () => [],
     },
     storage: {
       finalKey: (id, version) => `opening/sources/${id}/v${version}`,

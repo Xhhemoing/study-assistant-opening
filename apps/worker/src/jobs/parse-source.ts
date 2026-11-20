@@ -1,8 +1,8 @@
 import { OpeningModelRoutingError } from "@aistudy/ai";
 import { openingJobScope } from "@aistudy/database";
 import { createHash } from "node:crypto";
-import { createWriteStream } from "node:fs";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { createReadStream, createWriteStream } from "node:fs";
+import { mkdir, mkdtemp, open, rm } from "node:fs/promises";
 import path from "node:path";
 import { pipeline } from "node:stream/promises";
 import { Readable, Transform } from "node:stream";
@@ -13,7 +13,7 @@ import { markdownChunks } from "./markdown-chunks";
 import { htmlChunks } from "./html-chunks";
 import type { ParserRunner, ParsedPage, VisualPageKind } from "../parsers/types";
 import type { OpeningScope } from "@aistudy/database";
-import type { NewSourceChunk, OpeningSourceChunksRepository } from "@aistudy/database";
+import type { NewSourceChunk, OpeningPdfChunkPublisher, OpeningSourceChunksRepository } from "@aistudy/database";
 import type { OpeningPdfSegmentsRepository } from "@aistudy/database";
 import { parsePdfSegments, watchPdfExecution } from "../parsers/pdf-segments";
 import { checkPdfPageQuality } from "../parsers/pdf-page-quality";
@@ -45,6 +45,20 @@ function trackSourceDownload(source: { bytes: number; sha256?: string | null }) 
   };
 }
 
+async function* readStagedPdfChunks(file: string, signal: AbortSignal): AsyncGenerator<NewSourceChunk> {
+  let pending = "";
+  for await (const data of createReadStream(file, { encoding: "utf8", signal })) {
+    pending += data;
+    let start = 0;
+    for (let end = pending.indexOf("\n"); end >= 0; end = pending.indexOf("\n", start)) {
+      yield JSON.parse(pending.slice(start, end)) as NewSourceChunk;
+      start = end + 1;
+    }
+    pending = pending.slice(start);
+  }
+  if (pending) throw new Error("incomplete PDF chunk staging file");
+}
+
 export type ParseSourceVisualPageInput = {
   scope: OpeningScope; job: OpeningJobRecord; sourceId: string; sourceVersion: number;
   physicalPage: number; nativeText: string; visualKinds: VisualPageKind[];
@@ -54,7 +68,7 @@ export type ParseSourceVisualPageInput = {
 export type ParseSourceVisualPageResult = { text: string; imageObjectKey: string };
 type RecognizeSourcePage = (input: ParseSourceVisualPageInput) => Promise<ParseSourceVisualPageResult>;
 
-export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: OpeningSourceChunksRepository; storage: Storage; runner: ParserRunner; tempDir: string;
+export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pick<OpeningSourceChunksRepository, "replaceChunks" | "listChunksAtVersion"> & OpeningPdfChunkPublisher; storage: Storage; runner: ParserRunner; tempDir: string;
   segments?: OpeningPdfSegmentsRepository; segmentPages?: number; segmentTimeoutSeconds?: number; executionPollMs?: number;
   recognizePage?: RecognizeSourcePage;
   /** Yields one result per input in physical page order. Null means a cache miss with model routing unavailable. */
@@ -143,40 +157,23 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Op
       download.finish();
       signal.throwIfAborted();
       const isPdf = source.mime === "application/pdf";
-      const chunks: NewSourceChunk[] = [];
-      // Durable PDF pages already published at this version include any visual
-      // transcription. Reuse them rather than recognizing successful pages again.
-      const published = new Map<number, NewSourceChunk[]>();
-      if (isPdf && deps.segments) {
-        for (const chunk of await deps.chunks.listChunksAtVersion(scope, source.id, source.version)) {
-          if (chunk.page == null) continue;
-          const saved = published.get(chunk.page) ?? [];
-          saved.push({ page: chunk.page, slideLabel: chunk.slideLabel ?? null,
-            startMs: chunk.startMs, endMs: chunk.endMs, text: chunk.text, imageObjectKey: chunk.imageObjectKey });
-          published.set(chunk.page, saved);
-        }
-      }
       let visualRecognitionUnavailable = !deps.recognizePage && !(isPdf && deps.recognizePages);
       const skippedVisionPages: number[] = [];
-      const preparePage = (page: ParsedPage) => {
+      const preparePage = (page: ParsedPage, saved?: NewSourceChunk) => {
         const visualKinds = page.visualKinds?.length ? page.visualKinds : !page.text.trim() && (isImage || isPdf) ? ["scan" as const] : [];
         const visual = (isPdf || isImage) && visualKinds.length > 0
           ? { scope, job, sourceId: source.id, sourceVersion: source.version, physicalPage: page.page,
             nativeText: page.text, visualKinds, localFilePath: temp, mime: source.mime, signal }
           : undefined;
-        const saved = published.get(page.page);
-        const reusable = saved && (!visual || saved.some(chunk => chunk.imageObjectKey)) ? saved : undefined;
+        const reusable = saved && (!visual || saved.imageObjectKey) ? saved : undefined;
         return { page, visual, saved, reusable };
       };
       const consumePage = async ({ page, visual, saved, reusable }: ReturnType<typeof preparePage>,
         recognizePage: ((input: ParseSourceVisualPageInput) => Promise<ParseSourceVisualPageResult | null>) | undefined =
           visualRecognitionUnavailable ? undefined : deps.recognizePage,
-      ) => {
+      ): Promise<NewSourceChunk | undefined> => {
         signal.throwIfAborted();
-        if (reusable) {
-          chunks.push(...reusable);
-          return;
-        }
+        if (reusable) return reusable;
         let text = page.text;
         let imageObjectKey: string | null = null;
         if (isImage && !deps.recognizePage) throw new Error(`visual recognition is required for physical page ${page.page}`);
@@ -202,19 +199,29 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Op
         }
         if (isPdf && visual && imageObjectKey === null) {
           skippedVisionPages.push(page.page);
-          if (saved) { chunks.push(...saved); return; }
+          if (saved) return saved;
         }
         if (isImage && visualRecognitionUnavailable) imageObjectKey = deps.storage.finalKey(source.id, source.version);
-        if (text.trim() || imageObjectKey) chunks.push({ page: page.page, slideLabel: null, startMs: null, endMs: null, text, imageObjectKey });
+        if (text.trim() || imageObjectKey) return { page: page.page, slideLabel: null, startMs: null, endMs: null, text, imageObjectKey };
       };
 
       let pageCount: number;
-      const failedRanges: string[] = [];
+      const publication = { sourceId: source.id, sourceVersion: source.version };
       if (isPdf) {
-        const result = await parsePdfSegments({ path: temp, sourceId: source.id, sourceVersion: source.version, scope, runner: deps.runner,
+        const lowQualityPages: number[] = [];
+        let stagedCount = 0;
+        const stagePath = path.join(workDir, "chunks.ndjson");
+        const stage = await open(stagePath, "wx", 0o600);
+        const result = await parsePdfSegments({ path: temp, ...publication, scope, runner: deps.runner,
           segments: deps.segments, signal, segmentPages: deps.segmentPages, timeoutSeconds: deps.segmentTimeoutSeconds,
           onPages: async pages => {
-            const prepared = pages.map(preparePage);
+            // Read only this segment's previously published text, including saved vision.
+            const existing = deps.segments
+              ? await deps.chunks.listChunksAtVersion(scope, source.id, source.version, pages.map(page => page.page))
+              : [];
+            const published = new Map(existing.map(({ page, slideLabel, startMs, endMs, text, imageObjectKey }) =>
+              [page, { page, slideLabel, startMs, endMs, text, imageObjectKey }]));
+            const prepared = pages.map(page => preparePage(page, published.get(page.page)));
             const recognition = deps.recognizePages?.(
               prepared.flatMap(({ visual, reusable }) => visual && !reusable ? [visual] : []), visualRecognitionUnavailable,
             );
@@ -224,24 +231,42 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Op
               return next.value;
             } : undefined;
             try {
-              for (const page of prepared) await consumePage(page, recognizePage);
+              for (const preparedPage of prepared) {
+                const chunk = await consumePage(preparedPage, recognizePage);
+                if (!chunk) continue;
+                if (checkPdfPageQuality(chunk.text).quality === "low_quality") lowQualityPages.push(preparedPage.page.page);
+                await stage.appendFile(`${JSON.stringify(chunk)}\n`, "utf8");
+                stagedCount++;
+              }
             } finally { await recognition?.return(); }
-          } });
+          },
+        }).finally(() => stage.close());
         pageCount = result.pageCount;
-        failedRanges.push(...result.failedRanges, ...skippedVisionPages.map(String));
+        const failedRanges = [...result.failedRanges, ...skippedVisionPages.map(String)];
+        const warning = failedRanges.length || lowQualityPages.length ? createPdfPartialError(failedRanges, lowQualityPages) : null;
+        if (warning && !stagedCount) throw new Error(warning.message);
+        const preservePages: number[] = [];
+        for (const range of result.failedRanges) {
+          const [start, end] = range.split("-").map(Number) as [number, number];
+          for (let page = start; page <= end; page++) preservePages.push(page);
+        }
+        signal.throwIfAborted();
+        await assertCurrent?.();
+        await deps.chunks.replacePdfChunks(scope, { ...publication, chunks: readStagedPdfChunks(stagePath, signal), preservePages,
+          ...(warning ? { warning } : {}) });
       } else {
         const pages: ParsedPage[] = isImage ? [{ page: 1, text: "", imagePath: null, visualKinds: ["scan"] }]
           : await parser.parseDocument({ path: temp, mime: source.mime, maxPages: 2000 }, signal);
         pageCount = pages.length;
-        for (const page of pages) await consumePage(preparePage(page));
+        const chunks: NewSourceChunk[] = [];
+        for (const page of pages) {
+          const chunk = await consumePage(preparePage(page));
+          if (chunk) chunks.push(chunk);
+        }
+        signal.throwIfAborted();
+        await assertCurrent?.();
+        await deps.chunks.replaceChunks(scope, { ...publication, chunks });
       }
-
-      const lowQualityPages = isPdf ? chunks.filter(chunk => checkPdfPageQuality(chunk.text).quality === "low_quality").map(chunk => chunk.page).filter((page): page is number => page != null) : [];
-      const warning = failedRanges.length || lowQualityPages.length ? createPdfPartialError(failedRanges, lowQualityPages) : null;
-      signal.throwIfAborted();
-      await assertCurrent?.();
-      if (warning && !chunks.length) throw new Error(warning.message);
-      await deps.chunks.replaceChunks(scope, { sourceId: source.id, sourceVersion: source.version, chunks, ...(warning ? { warning } : {}) });
       if (deps.onSourceReady) {
         try { await deps.onSourceReady(scope, { sourceId: source.id, sourceVersion: source.version }); } catch { /* best-effort */ }
       }
@@ -251,6 +276,9 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Op
       if (error instanceof UnsupportedMimeError) throw new UnsupportedSourceError("unsupported source MIME");
       if (error instanceof ConversionFailedError) throw new Error(`document conversion failed: ${error.message}`);
       throw error;
-    } finally { await execution?.stop(); await rm(workDir, { recursive: true, force: true }); }
+    } finally {
+      try { await execution?.stop(); }
+      finally { await rm(workDir, { recursive: true, force: true }); }
+    }
   };
 }

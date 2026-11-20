@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { OpeningModelRoutingError, type ModelGateway } from "@aistudy/ai";
 import { sourceRecordSchema, type ApiFailure, type SourceChunk, type SourceRecord } from "@aistudy/contracts";
 import { parseSourceVisualRecognitionOutput } from "@aistudy/ai";
-import type { OpeningJobRecord, OpeningPdfSegmentsRepository } from "@aistudy/database";
+import type { NewSourceChunk, OpeningJobRecord, OpeningPdfSegmentsRepository, OpeningSourceChunksRepository } from "@aistudy/database";
 import type { ParserRunner } from "../parsers/types";
 import { createSourceVisualRecognition } from "../runtime/source-visual-recognition";
 import { createParseSourceHandler, type ParseSourceVisualPageInput } from "./parse-source";
@@ -31,12 +31,17 @@ function source(overrides: Partial<SourceRecord> = {}): SourceRecord {
   return { id: sourceId, workspaceId: scope.workspaceId, name: "source.pdf", mime: "application/pdf", bytes: 3, sha256: digest(defaultBytes), version: 7, uploadState: "uploaded", parseState: "not_started", error: null, createdAt: new Date().toISOString(), ...overrides };
 }
 type VisualDeps = Pick<Parameters<typeof createParseSourceHandler>[0], "recognizePage" | "recognizePages">;
-async function deps(input: VisualDeps & { source?: SourceRecord; exitCode?: number; stdout?: string; pageCount?: number; bytes?: Uint8Array; segments?: OpeningPdfSegmentsRepository; segmentPages?: number; published?: SourceChunk[]; assertCurrent?: Parameters<typeof createParseSourceHandler>[0]["assertCurrent"] } = {}) {
+async function deps(input: VisualDeps & { source?: SourceRecord; exitCode?: number; stdout?: string; pageCount?: number; bytes?: Uint8Array; runner?: ParserRunner; segments?: OpeningPdfSegmentsRepository; segmentPages?: number; published?: SourceChunk[]; assertCurrent?: Parameters<typeof createParseSourceHandler>[0]["assertCurrent"] } = {}) {
   const content = input.bytes ?? defaultBytes;
   const current = input.source ?? source({ bytes: content.byteLength, sha256: digest(content) });
   const states: State[] = [];
   const warnings: ApiFailure[] = [];
   let replaceInput: unknown;
+  const replaceChunks: OpeningSourceChunksRepository["replaceChunks"] = async (_scope, input) => {
+    replaceInput = input;
+    states.push("ready");
+    if (input.warning) warnings.push(input.warning);
+  };
   let runs = 0;
   const argvs: string[][] = [];
   const dirPromise = mkdtemp(path.join(os.tmpdir(), "opening-parse-test-"));
@@ -48,9 +53,18 @@ async function deps(input: VisualDeps & { source?: SourceRecord; exitCode?: numb
     replaceInput: () => replaceInput,
     handler: createParseSourceHandler({
       sources: { get: async () => current, markParseState: async (_scope, _id, state, error) => { states.push(state); if (error) warnings.push(error); return current; } },
-      chunks: { replaceChunks: async (_scope, input) => { replaceInput = input; states.push("ready"); if (input.warning) warnings.push(input.warning); }, listChunks: async () => [], listChunksAtVersion: async () => input.published ?? [], listForSources: async () => [] },
+      chunks: {
+        replaceChunks,
+        replacePdfChunks: async (scope, { chunks, ...publication }) => {
+          const rows: NewSourceChunk[] = [];
+          for await (const chunk of chunks) rows.push(chunk);
+          await replaceChunks(scope, { ...publication, chunks: rows });
+        },
+        listChunksAtVersion: async (_scope, _sourceId, _version, pages) =>
+          (input.published ?? []).filter(chunk => pages && chunk.page != null && pages.includes(chunk.page)),
+      },
       storage: { finalKey: () => "final", presignGet: async () => `data:application/pdf;base64,${Buffer.from(content).toString("base64")}` },
-      runner: async (...args: Parameters<ParserRunner>) => { argvs.push(args[0]); runs += 1; return { exitCode: input.exitCode ?? 0, stdout: args[0].includes("--inspect-pdf") ? JSON.stringify({ pageCount: input.pageCount ?? 2 }) : input.stdout ?? JSON.stringify({ pages: [{ page: 1, text: "Alpha", imagePath: null }, { page: 2, text: "Beta", imagePath: null }] }) }; },
+      runner: async (...args: Parameters<ParserRunner>) => { argvs.push(args[0]); runs += 1; return input.runner ? input.runner(...args) : { exitCode: input.exitCode ?? 0, stdout: args[0].includes("--inspect-pdf") ? JSON.stringify({ pageCount: input.pageCount ?? 2 }) : input.stdout ?? JSON.stringify({ pages: [{ page: 1, text: "Alpha", imagePath: null }, { page: 2, text: "Beta", imagePath: null }] }) }; },
       tempDir, segments: input.segments, segmentPages: input.segmentPages,
       recognizePage: input.recognizePage, recognizePages: input.recognizePages, assertCurrent: input.assertCurrent,
     }),
@@ -60,12 +74,35 @@ async function deps(input: VisualDeps & { source?: SourceRecord; exitCode?: numb
 }
 
 describe("parse source handler", () => {
+  it("retains published pages when their segment fails during a partial retry", async () => {
+    const saved = { id: "saved-page", sourceId, sourceVersion: 7, page: 1, slideLabel: null,
+      startMs: null, endMs: null, text: "Previously published page", imageObjectKey: "saved/page-1" };
+    const d = await deps({
+      segmentPages: 1, published: [saved],
+      segments: { assertCurrent: async () => {}, read: async () => null, save: async () => {} },
+      runner: async argv => {
+        if (argv.includes("--inspect-pdf")) return { exitCode: 0, stdout: '{"pageCount":2}' };
+        if (argv[argv.indexOf("--page-start") + 1] === "1") return { exitCode: 4, stdout: "" };
+        return { exitCode: 0, stdout: JSON.stringify({ pages: [{ page: 2, text: "Recovered page", imagePath: null }] }) };
+      },
+    });
+    await expect(d.handler(job, { sourceId })).resolves.toEqual({ pages: 1 });
+    expect(d.replaceInput()).toMatchObject({ preservePages: [1],
+      chunks: [{ page: 2, text: "Recovered page" }],
+      warning: { code: "PARSE_PARTIAL", retryable: true },
+    });
+  });
+
   it.each(["low quality", "discrete failures"])("keeps large PDF %s errors readable by the source contract", async scenario => {
     const d = await deps();
     let error: ApiFailure | null = null;
     const handler = createParseSourceHandler({
       sources: { get: async () => source(), markParseState: async () => { throw new Error("unexpected separate parse state write"); } },
-      chunks: { replaceChunks: async (_scope, input) => { error = input.warning ?? null; }, listChunks: async () => [], listChunksAtVersion: async () => [], listForSources: async () => [] },
+      chunks: {
+        replaceChunks: async () => { throw new Error("unexpected array publication"); },
+        replacePdfChunks: async (_scope, input) => { error = input.warning ?? null; },
+        listChunksAtVersion: async () => [],
+      },
       storage: { finalKey: () => "final", presignGet: async () => "data:application/pdf;base64,cGRm" },
       tempDir: d.tempDir,
       runner: async argv => {
@@ -351,7 +388,7 @@ describe("parse source handler", () => {
     ] }) });
     await expect(d.handler(job, { sourceId })).resolves.toEqual({ pages: 3, warnings: 2, degraded: true });
     expect(d.warnings).toEqual([{ code: "PARSE_PARTIAL", message: "第 2–3 页未能识别，可以重新解析", retryable: true }]);
-    expect(d.replaceInput()).toEqual({ sourceId, sourceVersion: 7, warning: d.warnings[0], chunks: [
+    expect(d.replaceInput()).toEqual({ sourceId, sourceVersion: 7, preservePages: [], warning: d.warnings[0], chunks: [
       { page: 1, slideLabel: null, startMs: null, endMs: null, text: "native prose", imageObjectKey: null },
       { page: 2, slideLabel: null, startMs: null, endMs: null, text: "local formula", imageObjectKey: null },
       { page: 3, slideLabel: null, startMs: null, endMs: null, text: "local OCR", imageObjectKey: null },
@@ -374,7 +411,7 @@ describe("parse source handler", () => {
       { page: 2, text: "", imagePath: null, visualKinds: ["scan"] },
     ] }) });
     await expect(d.handler(job, { sourceId })).resolves.toEqual({ pages: 2, warnings: 1, degraded: true });
-    expect(d.replaceInput()).toEqual({ sourceId, sourceVersion: 7, warning: d.warnings[0], chunks: [
+    expect(d.replaceInput()).toEqual({ sourceId, sourceVersion: 7, preservePages: [], warning: d.warnings[0], chunks: [
       { page: 1, slideLabel: null, startMs: null, endMs: null, text: "native prose", imageObjectKey: null },
     ] });
     expect(d.warnings).toEqual([{ code: "PARSE_PARTIAL", message: "第 2 页未能识别，可以重新解析", retryable: true }]);
@@ -406,7 +443,7 @@ describe("parse source handler", () => {
   it("replaces PDF chunks, marks ready, and cleans the temporary file", async () => {
     const d = await deps();
     await d.handler(job, { sourceId });
-    expect(d.replaceInput()).toEqual({ sourceId, sourceVersion: 7, chunks: [
+    expect(d.replaceInput()).toEqual({ sourceId, sourceVersion: 7, preservePages: [], chunks: [
       { page: 1, slideLabel: null, startMs: null, endMs: null, text: "Alpha", imageObjectKey: null },
       { page: 2, slideLabel: null, startMs: null, endMs: null, text: "Beta", imageObjectKey: null },
     ] });
@@ -466,7 +503,11 @@ describe("parse source handler", () => {
     const original = d.handler;
     const conflict = createParseSourceHandler({
       sources: { get: async () => source(), markParseState: async () => source() },
-      chunks: { replaceChunks: async () => { throw new Error("CONFLICT: source version changed during parse"); }, listChunks: async () => [], listChunksAtVersion: async () => [], listForSources: async () => [] },
+      chunks: {
+        replaceChunks: async () => { throw new Error("unexpected array publication"); },
+        replacePdfChunks: async () => { throw new Error("CONFLICT: source version changed during parse"); },
+        listChunksAtVersion: async () => [],
+      },
       storage: { finalKey: () => "final", presignGet: async () => "data:application/pdf;base64,cGRm" },
       runner: async argv => ({ exitCode: 0, stdout: argv.includes("--inspect-pdf") ? '{"pageCount":1}' : '{"pages":[{"page":1,"text":"body","imagePath":null}]}' }), tempDir: d.tempDir,
     });
@@ -501,7 +542,7 @@ describe("parse source handler", () => {
     };
     const handler = createParseSourceHandler({
       sources: { get: async () => source(), markParseState: async () => source() },
-      chunks: { replaceChunks: replace, listChunks: async () => [], listChunksAtVersion: async () => [], listForSources: async () => [] },
+      chunks: { replaceChunks: replace, replacePdfChunks: replace, listChunksAtVersion: async () => [] },
       storage: { finalKey: () => "final", presignGet: async () => "data:application/pdf;base64,cGRm" },
       runner, tempDir: d.tempDir, segments, executionPollMs: 5,
     });

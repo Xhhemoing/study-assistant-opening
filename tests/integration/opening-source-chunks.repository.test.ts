@@ -74,6 +74,26 @@ async function semanticState(sourceId: string) {
   };
 }
 
+it.each(["unreadable stream", "invalid final chunk"] as const)("rolls back PDF publication for an %s", async scenario => {
+  const sourceId = await seed();
+  const repository = createOpeningSourceChunksRepository(f.sql);
+  const warning = { code: "PARSE_PARTIAL", message: "Retry is available", retryable: true };
+  await repository.replaceChunks(f.scope, { sourceId, sourceVersion: 1, chunks: [chunk("Published page")], warning });
+  const before = await semanticState(sourceId);
+  async function* pdfChunks() {
+    if (scenario === "unreadable stream") {
+      yield chunk("   ");
+      return;
+    }
+    for (let page = 1; page <= 64; page++) yield chunk(`Replacement ${page}`, page);
+    yield chunk("x".repeat(100_001), 65);
+  }
+  await expect(repository.replacePdfChunks(f.scope, {
+    sourceId, sourceVersion: 1, chunks: pdfChunks(), preservePages: [],
+  })).rejects.toThrow(scenario === "unreadable stream" ? "no readable text" : "opening_source_chunks_text_check");
+  expect(await semanticState(sourceId)).toEqual(before);
+});
+
 // A valid legacy graph makes a premature definition write observable too.
 async function legacyGraph(sourceId: string, scope = f.scope) {
   const courseId = randomUUID(), nodeId = randomUUID(), chunkId = randomUUID();

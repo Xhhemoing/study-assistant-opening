@@ -97,6 +97,30 @@ it("keeps published pages readable when a normal partial retry fails again in th
   } finally { await rm(tempDir, { recursive: true, force: true }); }
 });
 
+it("keeps the exact citation ID in a failed segment while publishing another segment", async () => {
+  const d = await seedRetry(true), tempDir = await mkdtemp(path.join(os.tmpdir(), "pdf-retry-segment-"));
+  try {
+    const handler = createParseSourceHandler({ sources: d.sources, chunks: d.chunks, tempDir, segmentPages: 1,
+      segments: createOpeningPdfSegmentsRepository(f.sql),
+      storage: { finalKey: () => "synthetic-original", presignGet: async () => `data:application/pdf;base64,${d.bytes.toString("base64")}` },
+      runner: async argv => {
+        if (argv.includes("--inspect-pdf")) return { exitCode: 0, stdout: '{"pageCount":2}' };
+        if (argv[argv.indexOf("--page-start") + 1] === "1") return { exitCode: 4, stdout: "" };
+        return { exitCode: 0, stdout: JSON.stringify({ pages: [{ page: 2, text: "Recovered second page", imagePath: null }] }) };
+      },
+    });
+    expect(await runJob(d.jobs, d.id, handler)).toBe(true);
+    const saved = await d.chunks.listChunks(f.scope, d.sourceId);
+    expect(saved.map(chunk => chunk.page)).toEqual([1, 2]);
+    expect(saved[0]).toEqual(d.original[0]);
+    await expectPublishedPage(d);
+    expect(await d.sources.get(f.scope, d.sourceId)).toMatchObject({
+      parseState: "ready", error: { code: "PARSE_PARTIAL", message: "第 1 页未能识别，可以重新解析", retryable: true },
+    });
+    expect(await d.jobs.get(f.scope, d.id)).toMatchObject({ state: "succeeded", result: { pages: 1 } });
+  } finally { await rm(tempDir, { recursive: true, force: true }); }
+});
+
 it("does not expose retained PDF text to a foreign owner, excluded source, or different current version", async () => {
   const d = await seedRetry(true);
   const foreignOwner = { ...f.scope, ownerUserId: f.otherScope.ownerUserId };
