@@ -1,11 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { createConnection, createServer, type AddressInfo, type Socket } from "node:net";
+import { createServer, type AddressInfo } from "node:net";
 import { Redis } from "ioredis";
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import { advanceOpeningWorkspacePrivacyEpoch, createOpeningBudgetRepository, createOpeningConversationRepository,
   createOpeningPrivacyRepository, createOpeningSourceActionsRepository, createOpeningSourceChunksRepository, createOpeningTutorJobsRepository,
   tutorStreamEpochKey } from "@aistudy/database";
+import { fenceCancelledOpeningTutorStream } from "../../packages/database/src/repositories/opening-tutor-stream-fence";
+import { createProducerRedisConnection } from "../../apps/worker/src/runtime/queue";
 import { createTutorTurnHandler, type TutorTurnDeps } from "../../apps/worker/src/jobs/tutor-turn";
 import { createTutorStreamReader, createTutorStreamWriter, createWorkerTutorStreamWriter,
   type TutorStreamDelta } from "../../apps/worker/src/runtime/tutor-stream";
@@ -13,7 +15,7 @@ import { getTutorJobService } from "../../apps/web/src/features/opening/server/d
 import { deleteOwnedMemory } from "../../packages/database/src/repositories/opening-memory-delete";
 import { backupRows } from "./opening-backup-records-fixture";
 import { createOpeningFixture } from "./opening-fixture";
-import { closeRace, openRaceSession, track, waitUntilBlocked } from "./opening-race-helpers";
+import { closeRace, deferred, openRaceSession, openRedisTransport, track, waitUntilBlocked } from "./opening-race-helpers";
 
 const redisUrl = process.env.REDIS_URL ?? "redis://127.0.0.1:6379";
 const redis = new Redis(redisUrl, {
@@ -51,6 +53,32 @@ beforeAll(async () => { vi.stubEnv("REDIS_URL", redisUrl); await redis.connect()
 afterAll(async () => {
   try { if (keys.length && redis.status === "ready") await redis.del(...keys); }
   finally { redis.disconnect(); vi.unstubAllEnvs(); }
+});
+
+it("fences the publisher's query-selected Redis database without changing DB 0", async () => {
+  const url = new URL(redisUrl);
+  url.pathname = "";
+  url.searchParams.set("db", "3");
+  const producer = createProducerRedisConnection({ url: url.toString() });
+  const defaultDb = new Redis(redisUrl, { db: 0 });
+  const workspaceId = randomUUID(), jobId = randomUUID(), executionId = randomUUID();
+  const context = { privacyEpoch: 0, contextSourceRefs: [], exposureReceiptId: null, executionId };
+  const writer = createWorkerTutorStreamWriter(producer, () => undefined);
+  const db0Writer = createTutorStreamWriter(defaultDb);
+  try {
+    if (producer.status !== "ready") await once(producer, "ready", { signal: AbortSignal.timeout(3_000) });
+    await writer.begin(workspaceId, jobId, context);
+    await db0Writer.begin(workspaceId, jobId, context);
+    expect(await writer.append(workspaceId, jobId, "in DB 3", executionId, 0)).toBe(1);
+    await fenceCancelledOpeningTutorStream(workspaceId, jobId, executionId, url.toString());
+    expect(await writer.append(workspaceId, jobId, "sealed", executionId, 0)).toBe(0);
+    expect(await createTutorStreamReader(producer).read(workspaceId, jobId)).toMatchObject({ text: "in DB 3", sequence: 1 });
+    expect(await db0Writer.append(workspaceId, jobId, "in DB 0", executionId, 0)).toBe(1);
+  } finally {
+    const streamKeys = [`opening:tutor-stream:${workspaceId}:${jobId}`, tutorStreamEpochKey(workspaceId)];
+    try { await Promise.all([producer.del(...streamKeys), defaultDb.del(...streamKeys)]); }
+    finally { writer.disconnect(); producer.disconnect(); defaultDb.disconnect(); }
+  }
 });
 
 it("pushes real increments, restores the complete reconnect snapshot and isolates workspaces with an expiry", async () => {
@@ -112,68 +140,10 @@ async function streamFixture(historySourceId?: string) {
 
 const output = { text: "First unsafe tail", citedChunkIds: [], candidates: [], requestId: null, inputTokens: 10, outputTokens: 10 };
 
-function deferred() {
-  let resolve!: () => void;
-  const promise = new Promise<void>(done => { resolve = done; });
-  return { promise, resolve };
-}
-
-/** Retain bytes already written by ioredis, even when its end of the TCP connection closes. */
-async function openRedisTransport() {
-  const endpoint = new URL(redisUrl);
-  const sockets = new Set<Socket>();
-  let forward: ((bytes: Buffer) => void) | undefined;
-  let upstream: Socket;
-  const server = createServer(client => {
-    const peer = createConnection(Number(endpoint.port || 6379), endpoint.hostname);
-    upstream = peer;
-    for (const socket of [client, peer]) {
-      sockets.add(socket);
-      socket.on("close", () => sockets.delete(socket));
-      socket.on("error", () => socket.destroy());
-    }
-    client.on("data", bytes => { if (forward) forward(bytes); else peer.write(bytes); });
-    peer.on("data", bytes => { if (client.writable) client.write(bytes); });
-  });
-  server.listen(0, "127.0.0.1");
-  await once(server, "listening");
-  const port = (server.address() as AddressInfo).port;
-  return {
-    port,
-    holdWrites() {
-      const received = deferred();
-      const buffered: Buffer[] = [];
-      const peer = upstream;
-      forward = bytes => { buffered.push(bytes); received.resolve(); };
-      return {
-        received: received.promise,
-        release() {
-          if (!forward) return;
-          forward = undefined;
-          if (buffered.length) peer.write(Buffer.concat(buffered));
-        },
-        async nextReply() {
-          let reply = "";
-          const signal = AbortSignal.timeout(3_000);
-          while (!reply.includes("\r\n")) {
-            const [bytes] = await once(peer, "data", { signal }) as [Buffer];
-            reply += bytes.toString("utf8");
-          }
-          return reply;
-        },
-      };
-    },
-    async close() {
-      for (const socket of sockets) socket.destroy();
-      await new Promise<void>(resolve => { server.close(() => resolve()); });
-    },
-  };
-}
-
 it.each(["cancellation", "privacy epoch"])("fences a timed-out append before %s commits even when Redis control stalls", async revocation => {
   const { fixture, scope, reader, writer, jobs, jobId, key } = await streamFixture();
   const publication = openRaceSession(), revocationSession = openRaceSession();
-  const [appendTransport, controlTransport] = await Promise.all([openRedisTransport(), openRedisTransport()]);
+  const [appendTransport, controlTransport] = await Promise.all([openRedisTransport(redisUrl), openRedisTransport(redisUrl)]);
   const producer = redis.duplicate();
   const control = redis.duplicate({ host: "127.0.0.1", port: controlTransport.port, commandTimeout: 200 });
   const replacement = redis.duplicate();
@@ -323,7 +293,7 @@ it.each([
   const sourceId = randomUUID();
   const { fixture, scope, sql, reader, writer, jobs, jobId, key } = await streamFixture(sourceId);
   const publication = openRaceSession();
-  const transport = await openRedisTransport();
+  const transport = await openRedisTransport(redisUrl);
   const appendRedis = redis.duplicate({ host: "127.0.0.1", port: transport.port });
   const appendWriter = createTutorStreamWriter(appendRedis);
   const observed: TutorStreamDelta[] = [];

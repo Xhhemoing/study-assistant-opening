@@ -10,6 +10,7 @@ import { qualifyObservationRevision } from "./opening-observation-revision-histo
 import { reconcileOpeningRetestEvidence } from "./opening-retests";
 import { acceptedAiGradingOutcome, corroborateArithmeticGrade } from "@aistudy/domain";
 import { readOpeningAiGradingContext } from "./opening-ai-grading-context";
+import { fenceOpeningTutorAttemptHead } from "./opening-tutor-stream-fence";
 export { readOpeningObservationHistory } from "./opening-observation-revision-history";
 
 /** Workspace watermark → owner/privacy → sorted course watermarks → root → candidates. */
@@ -158,6 +159,8 @@ export async function reviseOpeningLearningObservation(sql: Sql, scope: Scope, r
       await tx`INSERT INTO opening_outbox(workspace_id,job_id,topic,payload)
         VALUES(${scope.workspaceId},${jobId},'opening.job.enqueue',${tx.json({ jobId, kind: "retest", ...payload })})`;
     }
-    return result(record, "applied");
+    const applied = await result(record, "applied");
+    await fenceOpeningTutorAttemptHead(String(root.workspace_id), String(root.id), id);
+    return applied;
   }) as Promise<ObservationRevisionResult>;
 }

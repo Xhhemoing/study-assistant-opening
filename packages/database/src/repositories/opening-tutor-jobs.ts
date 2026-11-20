@@ -61,8 +61,12 @@ type StreamPublicationContext = {
   privacyEpoch: number; contextSourceRefs: ContextSourceRef[]; claimToken?: string; executionId?: string;
 };
 
-async function assertStreamSources(tx: TransactionSql, scope: OpeningScope, refs: ContextSourceRef[]) {
-  const [available] = await tx`SELECT 1 WHERE ${contextSourceRefsIncluded(tx, scope.workspaceId, tx`${tx.json(refs)}::jsonb`)}`;
+async function assertStreamSources(tx: TransactionSql, scope: OpeningScope, refs: ContextSourceRef[], verifiedAttemptRefs?: ContextSourceRef[]) {
+  // The attempt-context read already checks historical availability and privacy for these exact versions.
+  const liveRefs = verifiedAttemptRefs?.length
+    ? refs.filter(ref => !verifiedAttemptRefs.some(pinned => pinned.sourceId === ref.sourceId && pinned.sourceVersion === ref.sourceVersion))
+    : refs;
+  const [available] = await tx`SELECT 1 WHERE ${contextSourceRefsIncluded(tx, scope.workspaceId, tx`${tx.json(liveRefs)}::jsonb`)}`;
   if (!available) throw Object.assign(new Error("stream material unavailable or excluded"), { code: "CONFLICT" });
 }
 
@@ -521,7 +525,9 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
           await assertTutorAttemptContext(tx, scope,
             { jobId: id, userTurnId: String(job.user_turn_id), claimToken: context.claimToken }, context.attemptContext);
         }
-        if (context.contextSourceRefs.length) await assertStreamSources(tx, scope, context.contextSourceRefs);
+        if (context.contextSourceRefs.length) {
+          await assertStreamSources(tx, scope, context.contextSourceRefs, context.attemptContext?.sourceRefs);
+        }
         try {
           await publish();
         } finally {
@@ -558,13 +564,15 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
         }
         if (context.executionId !== undefined && row.timing_execution_id !== context.executionId) throw new Error("stream execution changed");
         const boundAttempt = row.attempt_id ?? (row.context_anchor as StudyContextAnchor | null)?.attemptId;
+        let verifiedAttemptRefs: ContextSourceRef[] | undefined;
         if (boundAttempt || context.attemptFence) {
           const fence = tutorAttemptFenceSchema.safeParse(context.attemptFence);
           if (!fence.success || !boundAttempt) throw new Error("stream attempt fence missing");
           const current = await readTutorAttemptContext(tx, scope, { jobId: id, userTurnId: String(row.user_turn_id), claimToken: context.claimToken });
           if (!current || !isDeepStrictEqual(tutorAttemptFence(current), fence.data)) throw new Error("stream attempt context changed");
+          verifiedAttemptRefs = current.sourceRefs;
         }
-        await assertStreamSources(tx, scope, context.contextSourceRefs);
+        await assertStreamSources(tx, scope, context.contextSourceRefs, verifiedAttemptRefs);
         if (context.exposureReceiptId) {
           const [exposure] = await tx`SELECT id FROM opening_help_exposures WHERE id=${context.exposureReceiptId}
             AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}

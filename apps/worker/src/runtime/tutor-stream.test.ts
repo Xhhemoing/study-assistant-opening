@@ -24,7 +24,7 @@ it("returns only confirmed publication sequences and includes the expected execu
   const writer = createTutorStreamWriter({ eval: evalScript } as unknown as IORedis);
   expect(await writer.append("workspace", "job", "hello", "execution", 2)).toBe(1);
   expect(await writer.append("workspace", "job", "stale", "old-execution", 1)).toBe(0);
-  expect(evalScript.mock.calls[0]?.slice(-2)).toEqual(["execution", 2]);
+  expect(evalScript.mock.calls[0]?.slice(-3)).toEqual(["execution", 2, ""]);
   expect(await writer.append("workspace", "job", "", "execution", 2)).toBe(0);
   expect(evalScript).toHaveBeenCalledTimes(2);
 });

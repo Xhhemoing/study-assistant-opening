@@ -1,19 +1,23 @@
 import { randomUUID } from "node:crypto";
+import { once } from "node:events";
+import { createServer, type AddressInfo } from "node:net";
 import { Redis } from "ioredis";
-import { createTutorStreamReader, createTutorStreamWriter } from "../../apps/worker/src/runtime/tutor-stream";
+import { createTutorStreamReader, createTutorStreamWriter, type TutorStreamDelta } from "../../apps/worker/src/runtime/tutor-stream";
 import { createJobStreamResponse } from "../../apps/web/src/features/opening/server/job-stream";
 import { createTutorService } from "../../apps/web/src/features/opening/tutor/tutor-service";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createOpeningAiGradingRepository, createOpeningBudgetRepository, createOpeningConversationRepository,
-  createOpeningPrivacyRepository, createOpeningSourceChunksRepository, createOpeningTutorJobsRepository, tutorAttemptFence, tutorStreamEpochKey,
+  createOpeningPrivacyRepository, createOpeningSourceChunksRepository, createOpeningStudyExposureRepository, createOpeningTutorJobsRepository,
+  tutorAttemptFence, tutorStreamAttemptHeadKey, tutorStreamEpochKey, tutorStreamKey,
 } from "@aistudy/database";
 import type { ProviderInput } from "@aistudy/contracts";
 import { reviseOpeningLearningObservation } from "../../packages/database/src/repositories/opening-observation-revisions";
-import { createTutorTurnHandler } from "../../apps/worker/src/jobs/tutor-turn";
+import { createTutorTurnHandler, type TutorTurnDeps } from "../../apps/worker/src/jobs/tutor-turn";
 import { createOpeningMaterialRetriever } from "../../apps/worker/src/runtime/material-retrieval";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { learningAttemptFixture } from "./opening-learning-attempt-fixture";
+import { closeRace, deferred, openRaceSession, openRedisTransport, track } from "./opening-race-helpers";
 
 let fixture: OpeningFixture;
 beforeAll(async () => { fixture = await createOpeningFixture(); });
@@ -46,25 +50,27 @@ async function seed(photo = false) {
     const claimed = await jobs.claim(saved.jobId);
     return { userTurnId: saved.turnId, jobId: saved.jobId, claimToken: claimed!.claimToken, executionId: claimed!.executionId };
   };
-  const correct = () => reviseOpeningLearningObservation(fixture.sql, fixture.scope, {
-    rootObservationId: original.id, revisesObservationId: graded.id, expectedHead: graded.id, revisionKind: "replace",
+  const correct = (rootObservationId = original.id) => reviseOpeningLearningObservation(fixture.sql, fixture.scope, {
+    rootObservationId, revisesObservationId: graded.id, expectedHead: graded.id, revisionKind: "replace",
     reason: "sm95 changed answer", clientKey: randomUUID(),
     replacement: { answer: "sm95 revised answer", outcome: "unverified", assistance: graded.assistance },
   });
   return { ...f, attempt, original, graded, saved, jobs, claim, correct, conversations, conversation, workSource };
 }
 
-function handler(f: Awaited<ReturnType<typeof seed>>, hook?: () => Promise<void>) {
+function handler(f: Awaited<ReturnType<typeof seed>>, hook?: (onTextDelta?: (text: string) => Promise<void>) => Promise<void>,
+  stream?: TutorTurnDeps["stream"]) {
   const inputs: ProviderInput[] = [];
-  const provider = { complete: vi.fn(async (input: ProviderInput) => {
+  const provider = { complete: vi.fn(async (input: ProviderInput, _signal?: AbortSignal, onTextDelta?: (text: string) => Promise<void>) => {
     inputs.push(input);
-    await hook?.();
+    await hook?.(onTextDelta);
     return { text: "sm95 explanation", citedChunkIds: [], candidates: [], inputTokens: 10, outputTokens: 5, requestId: null };
   }) };
   const budget = createOpeningBudgetRepository(fixture.sql, { envCapCents: 100000 });
   const reserve = vi.spyOn(budget, "reserve"), claimExecution = vi.spyOn(budget, "claimExecution");
   return { inputs, provider, reserve, claimExecution, run: createTutorTurnHandler({ tutorJobs: f.jobs, chunks: createOpeningSourceChunksRepository(fixture.sql),
-    budget, provider, privacy: createOpeningPrivacyRepository(fixture.sql), retrieveContext: createOpeningMaterialRetriever(fixture.sql, budget, null),
+    budget, provider, stream, streamExposures: createOpeningStudyExposureRepository(fixture.sql),
+    privacy: createOpeningPrivacyRepository(fixture.sql), retrieveContext: createOpeningMaterialRetriever(fixture.sql, budget, null),
     config: { maxContextCharacters: 5000, reservedCents: 1, maxOutputTokens: 256, inputCentsPerMillion: 100, outputCentsPerMillion: 200 } }) };
 }
 
@@ -116,6 +122,133 @@ describe("sm95 same-attempt explain context", () => {
     expect(publish).toHaveBeenCalledOnce();
   });
 
+  it("rejects H1 bytes already in transit when its PostgreSQL backend dies before H2 commits", async () => {
+    const f = await seed(), target = await f.claim();
+    const { scope, sql } = fixture;
+    const snapshot = (await f.jobs.readAttemptContext(scope, target))!;
+    const context = { privacyEpoch: snapshot.privacyEpoch, contextSourceRefs: snapshot.sourceRefs, exposureReceiptId: null,
+      claimToken: target.claimToken, executionId: target.executionId, attemptFence: tutorAttemptFence(snapshot) };
+    const redisUrl = process.env.REDIS_URL!;
+    const redis = new Redis(redisUrl, { lazyConnect: true, maxRetriesPerRequest: 0, commandTimeout: 3_000 });
+    const transport = await openRedisTransport(redisUrl);
+    const appendRedis = redis.duplicate({ host: "127.0.0.1", port: transport.port });
+    const publication = openRaceSession();
+    const writer = createTutorStreamWriter(redis), reader = createTutorStreamReader(redis);
+    const key = tutorStreamKey(scope.workspaceId, f.saved.jobId);
+    const checkpoint = deferred(), events: TutorStreamDelta[] = [];
+    let unsubscribe: (() => Promise<void>) | undefined;
+    try {
+      await Promise.all([publication.ready, redis.connect(), appendRedis.connect()]);
+      unsubscribe = await reader.subscribe(scope.workspaceId, f.saved.jobId, delta => {
+        if (delta.text === "checkpoint") checkpoint.resolve();
+        else events.push(delta);
+      });
+      await writer.begin(scope.workspaceId, f.saved.jobId, context);
+      const before = await reader.read(scope.workspaceId, f.saved.jobId);
+      expect(before).toMatchObject({ text: "", sequence: 0 });
+      const stalled = transport.holdWrites();
+      let appendResult: Promise<number> | undefined;
+      const publishing = track(createOpeningTutorJobsRepository(publication.sql).withStreamPublication(scope, f.saved.jobId,
+        { ...context, attemptContext: snapshot }, async () => {
+          appendResult = createTutorStreamWriter(appendRedis).append(scope.workspaceId, f.saved.jobId,
+            "stale H1 bytes", target.executionId, snapshot.privacyEpoch, context.attemptFence);
+          await appendResult;
+        }));
+      try {
+        await Promise.race([stalled.received, publishing.then(() => { throw new Error("append settled before reaching TCP"); })]);
+        const [terminated] = await sql`SELECT pg_terminate_backend(${publication.pid}) AS terminated`;
+        expect(terminated?.terminated).toBe(true);
+        await expect(publishing).rejects.toMatchObject({ code: "CONNECTION_CLOSED" });
+        // PostgreSQL accepts either UUID casing. The Redis fence must use the stored root identity.
+        const revised = await f.correct(f.original.id.toUpperCase());
+        const latest = (await f.jobs.readAttemptContext(scope, target))!;
+        expect(latest.headObservationId).toBe(revised.headObservationId);
+        const reply = stalled.nextReply();
+        stalled.release();
+        expect(await reply).toBe(":0\r\n");
+        expect(await appendResult).toBe(0);
+        await writer.begin(scope.workspaceId, f.saved.jobId, context);
+        expect(await reader.read(scope.workspaceId, f.saved.jobId)).toEqual(before);
+        await redis.publish(`${key}:events`, JSON.stringify({ text: "checkpoint", sequence: 1 }));
+        await checkpoint.promise;
+        expect(events).toEqual([]);
+        const h2Fence = tutorAttemptFence(latest);
+        await writer.begin(scope.workspaceId, f.saved.jobId, { ...context, attemptFence: h2Fence });
+        expect(await writer.append(scope.workspaceId, f.saved.jobId, "late H1 after H2 begin",
+          target.executionId, snapshot.privacyEpoch, context.attemptFence)).toBe(0);
+        expect(await writer.append(scope.workspaceId, f.saved.jobId, "current H2 bytes",
+          target.executionId, snapshot.privacyEpoch, h2Fence)).toBe(1);
+        expect(await reader.read(scope.workspaceId, f.saved.jobId)).toMatchObject({ text: "current H2 bytes", sequence: 1 });
+      } finally {
+        stalled.release();
+        await publishing.catch(() => undefined);
+      }
+    } finally {
+      try {
+        await unsubscribe?.();
+        if (redis.status === "ready") await redis.del(key, tutorStreamEpochKey(scope.workspaceId), tutorStreamAttemptHeadKey(scope.workspaceId, f.original.id));
+      } finally {
+        redis.disconnect();
+        appendRedis.disconnect();
+        await Promise.all([transport.close(), closeRace(publication.sql)]);
+      }
+    }
+  }, 15_000);
+
+  it("rolls back an unconfirmed Redis head fence and allows revisions with Redis unset", async () => {
+    const f = await seed(), target = await f.claim();
+    const server = createServer(socket => socket.once("data", () => socket.end("-ERR head fence failed\r\n")));
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    try {
+      vi.stubEnv("REDIS_URL", `redis://127.0.0.1:${(server.address() as AddressInfo).port}`);
+      await expect(f.correct()).rejects.toThrow("ERR head fence failed");
+      expect(await f.jobs.readAttemptContext(fixture.scope, target)).toMatchObject({ headObservationId: f.graded.id });
+      vi.stubEnv("REDIS_URL", undefined);
+      const revised = await f.correct();
+      expect(await f.jobs.readAttemptContext(fixture.scope, target)).toMatchObject({ headObservationId: revised.headObservationId });
+    } finally {
+      vi.unstubAllEnvs();
+      await new Promise<void>(resolve => { server.close(() => resolve()); });
+    }
+  });
+
+  it("streams and saves an explanation pinned to available source v1 after it advances to v2", async () => {
+    const f = await seed();
+    const { scope, sql } = fixture;
+    await sql`UPDATE opening_sources SET version=2 WHERE id=${f.sourceId}`;
+    await sql`INSERT INTO opening_source_versions (source_id,version,workspace_id,availability)
+      VALUES (${f.sourceId},0,${scope.workspaceId},'available') ON CONFLICT DO NOTHING`;
+    const redis = new Redis(process.env.REDIS_URL!, { maxRetriesPerRequest: 0 });
+    const reader = createTutorStreamReader(redis);
+    const h = handler(f, async emit => {
+      await emit!("sm95 explanation");
+      const snapshot = (await reader.read(scope.workspaceId, f.saved.jobId))!;
+      expect(snapshot).toMatchObject({ text: "sm95 explanation", sequence: 1,
+        contextSourceRefs: [{ sourceId: f.sourceId, sourceVersion: 1 }] });
+      expect(await f.jobs.readStream(scope, f.saved.jobId, snapshot)).toMatchObject({ status: "running" });
+      const extraRefs = [...snapshot.contextSourceRefs, { sourceId: f.sourceId, sourceVersion: 0 }];
+      const attemptContext = (await f.jobs.readAttemptContext(scope, {
+        jobId: f.saved.jobId, userTurnId: f.saved.turnId, claimToken: snapshot.claimToken,
+      }))!;
+      const publish = vi.fn();
+      await expect(f.jobs.withStreamPublication(scope, f.saved.jobId, { ...snapshot, attemptContext, contextSourceRefs: extraRefs }, publish))
+        .rejects.toMatchObject({ code: "CONFLICT" });
+      expect(publish).not.toHaveBeenCalled();
+    }, createTutorStreamWriter(redis));
+    try {
+      expect(await h.run(f.saved.jobId)).toEqual({ skipped: false });
+      expect(h.provider.complete).toHaveBeenCalledOnce();
+      expect(await f.jobs.get(scope, f.saved.jobId)).toMatchObject({ status: "succeeded" });
+      expect(await sql`SELECT text,context_source_refs FROM opening_turns WHERE id=${f.saved.assistantTurnId}`)
+        .toMatchObject([{ text: "sm95 explanation", context_source_refs: [{ sourceId: f.sourceId, sourceVersion: 1 }] }]);
+    } finally {
+      try { await redis.del(tutorStreamKey(scope.workspaceId, f.saved.jobId), tutorStreamEpochKey(scope.workspaceId),
+        tutorStreamAttemptHeadKey(scope.workspaceId, f.original.id)); }
+      finally { redis.disconnect(); }
+    }
+  });
+
   it("sm95 P1b denies H1 cached bytes after H2 edit on reconnect and delayed flush", async () => {
     const f = await seed(), target = await f.claim();
     const snapshot = (await f.jobs.readAttemptContext(fixture.scope, target))!;
@@ -127,7 +260,7 @@ describe("sm95 same-attempt explain context", () => {
       const writer = createTutorStreamWriter(redis), reader = createTutorStreamReader(redis);
       await writer.begin(fixture.scope.workspaceId, f.saved.jobId, context);
       expect(await writer.append(fixture.scope.workspaceId, f.saved.jobId, "sm95 H1 cached secret bytes",
-        context.executionId, snapshot.privacyEpoch)).toBe(1);
+        context.executionId, snapshot.privacyEpoch, context.attemptFence)).toBe(1);
       const cached = (await reader.read(fixture.scope.workspaceId, f.saved.jobId))!;
       expect(cached.attemptFence).toEqual(context.attemptFence);
       const job = (await f.jobs.readStream(fixture.scope, f.saved.jobId, cached))!;

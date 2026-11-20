@@ -2,7 +2,7 @@ import type IORedis from "ioredis";
 import { setTimeout as delay } from "node:timers/promises";
 import {
   parseContextSourceRefs, sealOpeningTutorStream, TUTOR_STREAM_TTL_SECONDS, tutorAttemptFenceSchema,
-  tutorStreamEpochKey, tutorStreamKey, type ContextSourceRef, type TutorAttemptFence,
+  tutorStreamAttemptHeadKey, tutorStreamEpochKey, tutorStreamKey, type ContextSourceRef, type TutorAttemptFence,
 } from "@aistudy/database";
 import { uuidSchema } from "@aistudy/contracts";
 
@@ -17,6 +17,29 @@ export type TutorStreamContext = {
 export type TutorStreamDelta = { text: string; sequence: number };
 export type TutorStreamSnapshot = TutorStreamContext & TutorStreamDelta;
 const channelFor = (workspaceId: string, jobId: string) => `${tutorStreamKey(workspaceId, jobId)}:events`;
+
+function attemptHeadBinding(workspaceId: string, fence?: TutorAttemptFence) {
+  if (fence?.rootObservationId && fence.headObservationId) {
+    return { key: tutorStreamAttemptHeadKey(workspaceId, fence.rootObservationId), id: fence.headObservationId };
+  }
+}
+
+const redisTransportCodes = new Set([
+  "ECONNREFUSED", "ECONNRESET", "ECONNABORTED", "ETIMEDOUT", "EPIPE", "ENETDOWN", "ENETUNREACH", "EHOSTUNREACH", "ENOTFOUND", "EAI_AGAIN",
+]);
+const redisTransportMessages = new Set([
+  "Command timed out", "Connection is closed.", "tutor stream Redis is disconnected",
+  "Stream isn't writeable and enableOfflineQueue options is false",
+]);
+
+export function isTutorStreamUnavailable(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  if (error.name === "ReplyError") return /^(LOADING|READONLY|CLUSTERDOWN|MASTERDOWN|OOM)\b/.test(error.message);
+  if (error.name === "MaxRetriesPerRequestError") return true;
+  if (error.name !== "Error" && error.name !== "AggregateError") return false;
+  if ("code" in error) return typeof error.code === "string" && redisTransportCodes.has(error.code);
+  return redisTransportMessages.has(error.message);
+}
 
 const DELTA_BATCH_MAX_BYTES = 256;
 const DELTA_BATCH_MAX_MS = 40;
@@ -99,22 +122,33 @@ export async function withTutorDeltaBatches<T>(
 export function createTutorStreamWriter(redis: IORedis) {
   return {
     async begin(workspaceId: string, jobId: string, context: TutorStreamContext) {
+      const key = tutorStreamKey(workspaceId, jobId);
+      const head = attemptHeadBinding(workspaceId, context.attemptFence);
       await redis.eval(`
         local epoch = tonumber(ARGV[4])
         local minimum = tonumber(redis.call('GET', KEYS[2]) or '0')
         if epoch < minimum then return end
         if redis.call('HGET', KEYS[1], 'executionId') == ARGV[1]
           and redis.call('HGET', KEYS[1], 'sealed') == '1' then return end
+        if ARGV[5] ~= '' then
+          local head = redis.call('GET', KEYS[3])
+          if head and head ~= ARGV[5] then return end
+          redis.call('SET', KEYS[3], ARGV[5], 'EX', ARGV[3])
+        end
         redis.call('SET', KEYS[2], epoch, 'EX', ARGV[3])
         redis.call('DEL', KEYS[1])
         redis.call('HSET', KEYS[1], 'executionId', ARGV[1], 'privacyEpoch', ARGV[4], 'context', ARGV[2], 'text', '', 'sequence', '0')
+        if ARGV[5] ~= '' then redis.call('HSET', KEYS[1], 'attemptHeadKey', KEYS[3], 'attemptHeadId', ARGV[5]) end
         redis.call('EXPIRE', KEYS[1], ARGV[3])
-      `, 2, tutorStreamKey(workspaceId, jobId), tutorStreamEpochKey(workspaceId),
-      context.executionId ?? "", JSON.stringify(context), TUTOR_STREAM_TTL_SECONDS, context.privacyEpoch);
+      `, 3, key, tutorStreamEpochKey(workspaceId), head?.key ?? key,
+      context.executionId ?? "", JSON.stringify(context), TUTOR_STREAM_TTL_SECONDS, context.privacyEpoch, head?.id ?? "");
     },
     seal: (workspaceId: string, jobId: string, executionId: string) => sealOpeningTutorStream(redis, workspaceId, jobId, executionId),
-    async append(workspaceId: string, jobId: string, text: string, executionId: string | undefined, privacyEpoch: number): Promise<number> {
+    async append(workspaceId: string, jobId: string, text: string, executionId: string | undefined, privacyEpoch: number,
+      attemptFence?: TutorAttemptFence): Promise<number> {
       if (!text) return 0;
+      const key = tutorStreamKey(workspaceId, jobId);
+      const head = attemptHeadBinding(workspaceId, attemptFence);
       // Append, sequence and notification are one atomic operation. A late subscriber reads the full snapshot.
       const result = await redis.eval(`
         if redis.call('EXISTS', KEYS[1]) == 0 then return 0 end
@@ -124,6 +158,14 @@ export function createTutorStreamWriter(redis: IORedis) {
         local epoch = tonumber(ARGV[4])
         local minimum = tonumber(redis.call('GET', KEYS[3]))
         if not epoch or not minimum or epoch < minimum then return 0 end
+        local headKey = redis.call('HGET', KEYS[1], 'attemptHeadKey')
+        if ARGV[5] ~= '' then
+          if headKey ~= KEYS[4] or redis.call('HGET', KEYS[1], 'attemptHeadId') ~= ARGV[5]
+            or redis.call('GET', KEYS[4]) ~= ARGV[5] then return 0 end
+          redis.call('EXPIRE', KEYS[4], ARGV[2])
+        elseif headKey then
+          return 0
+        end
         local text = redis.call('HGET', KEYS[1], 'text') or ''
         local sequence = redis.call('HINCRBY', KEYS[1], 'sequence', 1)
         redis.call('HSET', KEYS[1], 'text', text .. ARGV[1])
@@ -131,8 +173,8 @@ export function createTutorStreamWriter(redis: IORedis) {
         redis.call('EXPIRE', KEYS[3], ARGV[2])
         redis.call('PUBLISH', KEYS[2], cjson.encode({text=ARGV[1], sequence=sequence}))
         return sequence
-      `, 3, tutorStreamKey(workspaceId, jobId), channelFor(workspaceId, jobId), tutorStreamEpochKey(workspaceId),
-      text, TUTOR_STREAM_TTL_SECONDS, executionId ?? "", privacyEpoch);
+      `, 4, key, channelFor(workspaceId, jobId), tutorStreamEpochKey(workspaceId), head?.key ?? key,
+      text, TUTOR_STREAM_TTL_SECONDS, executionId ?? "", privacyEpoch, head?.id ?? "");
       if (typeof result !== "number" || !Number.isSafeInteger(result) || result < 0) throw new Error("invalid stream publication sequence");
       return result;
     },
@@ -150,7 +192,11 @@ export function createWorkerTutorStreamWriter(producer: IORedis, reportError: (e
     const redis = producer.duplicate({ lazyConnect: true, autoResendUnfulfilledCommands: false,
       maxRetriesPerRequest: 0, enableOfflineQueue: false, retryStrategy: () => null });
     redis.on("error", reportError);
-    return { redis, writer: createTutorStreamWriter(redis), ready: redis.connect() };
+    const ready = redis.connect().then(async () => {
+      // ioredis emits initial SELECT failures without rejecting connect().
+      if (redis.options?.db) await redis.select(redis.options.db);
+    });
+    return { redis, writer: createTutorStreamWriter(redis), ready };
   }
 
   function closeConnection(redis: IORedis) {
@@ -222,11 +268,12 @@ export function createWorkerTutorStreamWriter(producer: IORedis, reportError: (e
       disconnectAppend();
       retireControl();
     },
-    async append(workspaceId: string, jobId: string, text: string, executionId: string | undefined, privacyEpoch: number) {
+    async append(...args: Parameters<TutorStreamWriter["append"]>) {
+      const [workspaceId, jobId, text, executionId] = args;
       if (!text) return 0;
       const connection = await getAppendConnection();
       try {
-        return await connection.writer.append(workspaceId, jobId, text, executionId, privacyEpoch);
+        return await connection.writer.append(...args);
       } catch (error) {
         disconnectAppend(connection);
         // Redis may still execute bytes already in transit. A confirmed seal on

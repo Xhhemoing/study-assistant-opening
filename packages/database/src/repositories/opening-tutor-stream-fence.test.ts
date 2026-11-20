@@ -20,13 +20,14 @@ async function withRedisServer(run: (url: string) => Promise<void>, onConnection
   }
 }
 
-it("authenticates and selects the Redis DB before sealing, with byte-length arguments and split replies", async () => {
+it.each(["?db=3", "/?db=3", "/3?db=4"])(
+  "authenticates and selects Redis DB 3 for %s before sealing, with byte-length arguments and split replies", async suffix => {
   const password = "密\r\n码";
   const auth = Buffer.from("*3\r\n$4\r\nAUTH\r\n$5\r\ntutor\r\n$8\r\n" + password + "\r\n");
   const select = Buffer.from("*2\r\n$6\r\nSELECT\r\n$1\r\n3\r\n");
   const received: Buffer[] = [];
   await withRedisServer(async address => {
-    const url = "redis://tutor:" + encodeURIComponent(password) + "@" + address + "/3";
+    const url = "redis://tutor:" + encodeURIComponent(password) + "@" + address + suffix;
     await fenceCancelledOpeningTutorStream("workspace", "job", "execution", url);
   }, socket => {
     let bytes = Buffer.alloc(0);

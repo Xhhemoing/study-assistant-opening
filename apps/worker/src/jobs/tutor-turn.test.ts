@@ -422,10 +422,21 @@ describe("tutor turn handler", () => {
     expect(provider.complete).not.toHaveBeenCalled();
   });
 
+  it.each([new TypeError("invalid stream context"), Object.assign(new Error("stream forbidden"), { code: "FORBIDDEN" })])(
+    "propagates an unexpected stream begin error before reserving budget: %s", async failure => {
+      const { deps, budget, provider } = setup();
+      const stream = { begin: vi.fn().mockRejectedValue(failure), append: vi.fn() };
+      const onStreamUnavailable = vi.fn();
+      await expect(createTutorTurnHandler({ ...deps, stream, onStreamUnavailable })(claimedJob.id)).rejects.toBe(failure);
+      expect(onStreamUnavailable).not.toHaveBeenCalled();
+      expect(budget.reserve).not.toHaveBeenCalled();
+      expect(provider.complete).not.toHaveBeenCalled();
+    });
+
   it.each(["without streaming", "after Redis begin fails"])("rechecks an unbound claim before sending %s", async mode => {
     const { deps, tutorJobs, budget, provider } = setup();
     const stream = mode === "after Redis begin fails"
-      ? { begin: vi.fn().mockRejectedValue(new Error("Redis unavailable")), append: vi.fn() }
+      ? { begin: vi.fn().mockRejectedValue(new Error("Command timed out")), append: vi.fn() }
       : undefined;
     budget.claimExecution.mockImplementationOnce(async () => {
       tutorJobs.get.mockResolvedValue({ ...claimedJob, status: "cancelled" });
@@ -535,7 +546,7 @@ describe("tutor turn handler", () => {
     expect(tutorJobs.completeTurn).not.toHaveBeenCalled();
     expect(record.mock.calls.map(call => call[1].kind)).toEqual(["tutor_first_text", "tutor_first_chunk"]);
     expect(record).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ executionId, claimToken, observedAt: expect.any(Date), durationMs: expect.any(Number) }));
-    expect(stream.append.mock.calls[0]).toEqual([claimedJob.workspaceId, claimedJob.id, "First", executionId, 0]);
+    expect(stream.append.mock.calls[0]).toEqual([claimedJob.workspaceId, claimedJob.id, "First", executionId, 0, undefined]);
     finish(); await run;
     expect(provider.complete).toHaveBeenCalledOnce(); expect(unavailable).not.toHaveBeenCalled();
     } finally { vi.useRealTimers(); }

@@ -1,11 +1,25 @@
 import { connect, isIP } from "node:net";
 import { connect as connectTls } from "node:tls";
+import { parse } from "node:url";
 import type { TransactionSql } from "postgres";
 import type { OpeningScope } from "./opening-sources";
 
 export const TUTOR_STREAM_TTL_SECONDS = 15 * 60;
 export const tutorStreamKey = (workspaceId: string, jobId: string) => `opening:tutor-stream:${workspaceId}:${jobId}`;
 export const tutorStreamEpochKey = (workspaceId: string) => `opening:tutor-stream:epoch:${workspaceId}`;
+export const tutorStreamAttemptHeadKey = (workspaceId: string, rootObservationId: string) =>
+  `opening:tutor-stream:attempt-head:${workspaceId}:${rootObservationId}`;
+
+/** Match ioredis 5.6.1's URL precedence and decimal conversion. */
+export function openingRedisDatabase(redisUrl: string): number {
+  const { pathname, query } = parse(redisUrl, true, true);
+  // A nonempty pathname takes precedence over db. "database" is not an ioredis option.
+  const raw = pathname && pathname.length > 1 ? pathname.slice(1) : query.db;
+  if (raw === undefined) return 0;
+  const db = typeof raw === "string" ? Number.parseInt(raw, 10) : NaN;
+  if (!Number.isSafeInteger(db) || db < 0) throw new Error("Invalid Redis database index");
+  return db;
+}
 
 export async function sealOpeningTutorStream(redis: RedisEval, workspaceId: string, jobId: string, executionId: string) {
   await redis.eval(`
@@ -81,15 +95,15 @@ async function evalRevocationRedis(redisUrl: string, script: string, keyCount: n
   const useTls = url.protocol === "rediss:";
   const host = url.hostname.replace(/^\[|\]$/g, "");
   const port = Number(url.port || "6379");
-  const db = url.pathname.slice(1);
-  if ((!useTls && url.protocol !== "redis:") || !host || (db && (!/^\d+$/.test(db) || !Number.isSafeInteger(Number(db))))) {
+  if ((!useTls && url.protocol !== "redis:") || !host) {
     throw new Error("Invalid Redis fence URL");
   }
+  const db = openingRedisDatabase(redisUrl);
   const username = decodeURIComponent(url.username);
   const password = decodeURIComponent(url.password);
   const commands: RedisArgument[][] = [];
   if (username || password) commands.push(username ? ["AUTH", username, password] : ["AUTH", password]);
-  if (Number(db)) commands.push(["SELECT", Number(db)]);
+  if (db) commands.push(["SELECT", db]);
   commands.push(["EVAL", script, keyCount, ...args]);
 
   await new Promise<void>((resolve, reject) => {
@@ -133,6 +147,16 @@ export async function fenceCancelledOpeningTutorStream(workspaceId: string, jobI
   if (!redisUrl) throw new Error("Redis is required to cancel a claimed tutor execution");
   await sealOpeningTutorStream({ eval: (script, keyCount, ...args) => evalRevocationRedis(redisUrl, script, keyCount, ...args) },
     workspaceId, jobId, executionId);
+}
+
+/** Confirm the new head while the revision transaction still holds the root lock. */
+export async function fenceOpeningTutorAttemptHead(workspaceId: string, rootObservationId: string, headObservationId: string,
+  redisUrl = process.env.REDIS_URL?.trim()): Promise<void> {
+  if (!redisUrl) return;
+  // Outlive existing stream snapshots, while bounding the effect of a failed PG commit.
+  await evalRevocationRedis(redisUrl, `
+    redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])
+  `, 1, tutorStreamAttemptHeadKey(workspaceId, rootObservationId), headObservationId, TUTOR_STREAM_TTL_SECONDS);
 }
 
 /** Call inside the revocation transaction, before it can commit. */

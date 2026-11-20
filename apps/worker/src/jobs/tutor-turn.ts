@@ -51,7 +51,7 @@ import {
   type ResolvedTaskModel,
   type ParentInteractionBudget,
 } from "@aistudy/ai";
-import { withTutorDeltaBatches, type TutorStreamWriter } from "../runtime/tutor-stream";
+import { isTutorStreamUnavailable, withTutorDeltaBatches, type TutorStreamWriter } from "../runtime/tutor-stream";
 import { chunksAtSnapshots } from "./tutor-chunks";
 import { prepareTutorNextAction, type TutorNextActionService } from "./tutor-next-action";
 import { withJobHeartbeat } from "../runtime/lifecycle";
@@ -405,14 +405,19 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
       const streamContext = { privacyEpoch: jobEpoch ?? 0, contextSourceRefs, claimToken: claimed.claimToken,
         executionId: claimed.executionId };
       const publicationContext = { ...streamContext, attemptContext: attemptContext ?? undefined };
+      const attemptFence = attemptContext && deps.stream ? tutorAttemptFence(attemptContext) : undefined;
       let streamAvailable = Boolean(deps.stream);
       if (deps.stream) {
         const stream = deps.stream;
         const cacheContext = { ...streamContext, exposureReceiptId: exposureReceipt?.id ?? null,
-          ...(attemptContext ? { attemptFence: tutorAttemptFence(attemptContext) } : {}) };
+          ...(attemptFence ? { attemptFence } : {}) };
         await deps.tutorJobs.withStreamPublication(scope, claimed.id, publicationContext, async () => {
           try { await stream.begin(scope.workspaceId, claimed.id, cacheContext); }
-          catch (error) { streamAvailable = false; deps.onStreamUnavailable?.(error); }
+          catch (error) {
+            if (!isTutorStreamUnavailable(error)) throw error;
+            streamAvailable = false;
+            deps.onStreamUnavailable?.(error);
+          }
         });
       }
       let firstTextAt: number | null = null;
@@ -429,7 +434,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
             try {
               // Keep this inside the publication transaction: on a transport
               // error the worker writer settles only after Redis confirms the seal.
-              const sequence = await deps.stream!.append(scope.workspaceId, claimed.id, text, claimed.executionId, streamContext.privacyEpoch);
+              const sequence = await deps.stream!.append(scope.workspaceId, claimed.id, text, claimed.executionId, streamContext.privacyEpoch, attemptFence);
               if (sequence === 1) recordTiming("tutor_first_chunk", new Date(), Math.round(performance.now() - firstTextAt));
             } catch (error) { streamAvailable = false; deps.onStreamUnavailable?.(error); }
           });
