@@ -13,6 +13,10 @@ vi.mock("./opening-learning-capacity", () => ({ reserveOpeningLearningActivityBu
 vi.mock("./opening-course-route-decision", () => ({ captureOpeningCourseRouteDecision: mocks.capture }));
 vi.mock("./opening-learning-decisions", () => ({ recordOpeningLearningDecision: mocks.record }));
 vi.mock("./opening-learning-facts", () => ({ lockWorkspaceLearningHistory: vi.fn(), learningError: (code: string, message: string) => Object.assign(new Error(message), { code }) }));
+vi.mock("./opening-course-route-reserved-start", async importOriginal => ({
+  ...await importOriginal<typeof import("./opening-course-route-reserved-start")>(),
+  prepareCourseReservedStart: vi.fn(),
+}));
 import { createOpeningCourseRouteActions } from "./opening-course-route-actions";
 
 const requirement: CourseRequirement = { id: "r", courseId: "c", stableSkillId: "s", knowledgeNodeId: null, requirementKey: "key", title: "秩", position: 0, mandatory: true,
@@ -37,6 +41,38 @@ beforeEach(() => {
 });
 
 describe("course route action canonical teaching decisions", () => {
+  it("fails closed for guarded ordinary starts and for a retest intent that resolves to a maintenance task", async () => {
+    const retestId = randomUUID();
+    const taskId = randomUUID();
+    mocks.read.mockResolvedValue({
+      scopeState: "confirmed",
+      requirements: [{
+        requirement, status: "needs_correction", sourcesAvailable: true,
+        delayedCheck: { status: "pending", retestId, taskId, notBeforeAt: "2026-01-01T00:00:00.000Z" },
+      }],
+    });
+    const actions = createOpeningCourseRouteActions(sql, { compilerEnabled: true });
+    const input = {
+      goalId: "g", expectedGoalRevision: 1, requirementId: "r", expectedRequirementRevision: 1,
+      clientKey: "request", minutes: 20,
+    };
+    await expect(actions.start(scope, "c", { ...input, protectPendingRetest: true }))
+      .resolves.toMatchObject({ kind: "choice", reason: "retest_pending" });
+    await expect(actions.start(scope, "c", {
+      ...input, taskId, expectedTaskVersion: 1, expectedRetestId: randomUUID(),
+    })).resolves.toMatchObject({ kind: "choice", reason: "retest_cancelled" });
+
+    query.mockResolvedValueOnce([]).mockResolvedValueOnce([{
+      id: taskId, status: "pending", version: 1, course_id: "c",
+      requirement_key: requirement.requirementKey, client_key: "planner:2026-11-19:maintenance:g:r",
+    }]);
+    await expect(actions.start(scope, "c", {
+      ...input, taskId, expectedTaskVersion: 1, expectedRetestId: retestId,
+    })).resolves.toMatchObject({ kind: "choice", reason: "retest_cancelled" });
+    expect(mocks.create).not.toHaveBeenCalled();
+    expect(mocks.reserve).not.toHaveBeenCalled();
+  });
+
   it("两次相同受助错误不再混用targeted动作与full原因，回执捕获同一规范输入", async () => {
     mocks.observations.mockResolvedValue({ projected: [row("older", { attemptedAt: "2026-10-26T00:00:00Z" }), row("latest")], raw: [] });
     const result = await start();

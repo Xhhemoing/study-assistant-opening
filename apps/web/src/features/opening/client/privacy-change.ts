@@ -1,9 +1,38 @@
+export const PAPER_REVIEW_STORAGE_PREFIX = "aistudy:paper-review:v1";
+export const FREE_MAP_STORAGE_PREFIX = "aistudy/free-map/geometry/";
+export const SERIES_CHECK_KEY = "aistudy-series-example-comparison-check-v1";
+
+const cleanupListeners = new Set<() => void>();
+
+export function registerOpeningPrivacyCleanup(cleanup: () => void): void {
+  cleanupListeners.add(cleanup);
+}
+
+function clearStorage(kind: "sessionStorage" | "localStorage", prefixes: readonly string[]) {
+  try {
+    const storage = window[kind];
+    for (let index = storage.length - 1; index >= 0; index--) {
+      const key = storage.key(index);
+      if (key && prefixes.some(prefix => key.startsWith(prefix))) storage.removeItem(key);
+    }
+  } catch {
+    // Browser storage can be unavailable.
+  }
+}
+
 const channelName = "aistudy:opening-privacy-change";
 const signal = "changed";
 const listeners = new Set<() => void>();
 let channel: BroadcastChannel | null = null;
 
-function publishLocally() { for (const listener of listeners) listener(); }
+function publishLocally() {
+  if (typeof window !== "undefined") {
+    clearStorage("sessionStorage", [`${PAPER_REVIEW_STORAGE_PREFIX}:`]);
+    clearStorage("localStorage", [FREE_MAP_STORAGE_PREFIX, SERIES_CHECK_KEY]);
+  }
+  for (const cleanup of cleanupListeners) cleanup();
+  for (const listener of listeners) listener();
+}
 function connect() {
   if (channel || typeof window === "undefined" || typeof window.BroadcastChannel !== "function") return;
   try {

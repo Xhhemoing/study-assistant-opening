@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { courseRequirementSourceRefSchema } from "./course-route";
 import { isoDateTimeSchema, uuidSchema } from "./foundation";
 
 export const assetGraphNodeKindSchema = z.enum([
@@ -133,6 +134,7 @@ const windowShape = {
   limit: z.number().int().min(1).max(ASSET_GRAPH_MAX_LIMIT).optional(),
   cursor: z.string().trim().min(1).max(2048).optional(),
   include: z.array(z.literal("summary")).min(1).max(1).optional(),
+  includeKnowledgeEdgeDetails: z.boolean().optional(),
 };
 
 export const assetGraphQuerySchema = z.discriminatedUnion("op", [
@@ -181,6 +183,7 @@ export const assetGraphQuerySchema = z.discriminatedUnion("op", [
       context: assetGraphContextSchema,
       lens: assetGraphLensSchema,
       focus: assetGraphNodeIdSchema,
+      includeKnowledgeEdgeDetails: z.boolean().optional(),
     })
     .strict(),
 ]);
@@ -210,12 +213,18 @@ export const assetGraphStateSummarySchema = z
   })
   .strict();
 
+export const assetGraphKnowledgeStatusSchema = z.enum([
+  "suggested",
+  "supported",
+  "needs_check",
+]);
+
 export const assetGraphNodeMetaSchema = z
   .object({
     occurredAt: isoDateTimeSchema.optional(),
     assistance: z.enum(["independent", "hinted", "revealed", "unknown"]).optional(),
     version: z.number().int().nonnegative().optional(),
-    knowledgeStatus: z.enum(["suggested", "supported", "needs_check"]).optional(),
+    knowledgeStatus: assetGraphKnowledgeStatusSchema.optional(),
   })
   .strict();
 
@@ -255,6 +264,12 @@ export const assetGraphSharedAttributionSchema = z
 
 export type AssetGraphSharedAttribution = z.infer<typeof assetGraphSharedAttributionSchema>;
 
+const KNOWLEDGE_EDGE_RELATIONS = new Set<AssetGraphRelation>([
+  "contains",
+  "prerequisite",
+  "appliesTo",
+]);
+
 export const assetGraphEdgeSchema = z
   .object({
     id: z.string().min(1).max(512),
@@ -262,6 +277,11 @@ export const assetGraphEdgeSchema = z
     to: assetGraphNodeIdSchema,
     relation: assetGraphRelationSchema,
     basis: z.enum(["recorded", "derived", "suggested"]),
+    knowledgeStatus: assetGraphKnowledgeStatusSchema.optional(),
+    // Present only when the knowledge edge has an authoritative stored score.
+    confidence: z.number().optional(),
+    evidenceRefs: z.array(courseRequirementSourceRefSchema.required({ chunkId: true })).optional(),
+    sourceNodeId: assetGraphNodeIdSchema.optional(),
     sourceVersion: z.number().int().nonnegative().optional(),
     page: z.number().int().positive().optional(),
     sharedAttribution: assetGraphSharedAttributionSchema.optional(),
@@ -283,6 +303,43 @@ export const assetGraphEdgeSchema = z
           message: "sharedAttribution requires basis to be derived",
         });
       }
+    }
+    if (value.knowledgeStatus !== undefined) {
+      if (!KNOWLEDGE_EDGE_RELATIONS.has(value.relation)) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["relation"],
+          message: "knowledgeStatus is only allowed on contains, prerequisite, or appliesTo edges",
+        });
+      }
+      if (value.knowledgeStatus === "suggested" && value.basis !== "suggested") {
+        ctx.addIssue({
+          code: "custom",
+          path: ["basis"],
+          message: "knowledgeStatus suggested requires basis to be suggested",
+        });
+      }
+      if (
+        (value.knowledgeStatus === "supported" || value.knowledgeStatus === "needs_check") &&
+        value.basis !== "recorded"
+      ) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["basis"],
+          message: "knowledgeStatus supported or needs_check requires basis to be recorded",
+        });
+      }
+    }
+    if (value.sourceNodeId !== undefined && (
+      !KNOWLEDGE_EDGE_RELATIONS.has(value.relation) ||
+      value.basis !== "recorded" ||
+      parseAssetGraphNodeId(value.sourceNodeId)?.kind !== "source"
+    )) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["sourceNodeId"],
+        message: "sourceNodeId requires a source node id on a recorded knowledge edge",
+      });
     }
   });
 
@@ -437,6 +494,7 @@ export const assetGraphErrorResponseSchema = z
 
 export type AssetGraphLearnerState = z.infer<typeof assetGraphLearnerStateSchema>;
 export type AssetGraphRequirementStatus = z.infer<typeof assetGraphRequirementStatusSchema>;
+export type AssetGraphKnowledgeStatus = z.infer<typeof assetGraphKnowledgeStatusSchema>;
 export type AssetGraphStateSummary = z.infer<typeof assetGraphStateSummarySchema>;
 export type AssetGraphNodeMeta = z.infer<typeof assetGraphNodeMetaSchema>;
 export type AssetGraphNode = z.infer<typeof assetGraphNodeSchema>;

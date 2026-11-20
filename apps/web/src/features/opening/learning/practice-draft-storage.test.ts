@@ -425,3 +425,42 @@ it("retains the remembered UUID of an ID-less legacy v1 draft across a rejected 
   expect(recovered?.drafts[0]).toMatchObject({ id: assignedId, fields: { answer: "edited legacy matrix" } });
   expect(disk.data.has(legacyKey)).toBe(false);
 });
+
+it("keeps legacy v1 cleanup pending across a dirty retry when an earlier v2 save succeeded but v1 removal failed", () => {
+  const scope = newScope();
+  const legacyKey = `opening-practice:v1:${scope}`;
+  const v2Key = `opening-practice:v2:${scope}`;
+  const legacyDraft = emptyPracticeDraft(scope, { skillLabel: "Stack", answer: "stale v1 answer" });
+  let failRemove = true;
+  const disk = {
+    ...storage(),
+    removeItem: (k: string) => {
+      if (failRemove) throw new Error("removeItem blocked");
+      disk.data.delete(k);
+    },
+  };
+  disk.data.set(legacyKey, JSON.stringify(legacyDraft));
+
+  expect(readPracticeDraftCollection(scope, disk)).toMatchObject({
+    activeId: legacyDraft.id,
+    drafts: [legacyDraft],
+  });
+
+  // First edit writes v2 durably, while v1 removeItem throws.
+  const firstSave = patchPracticeDraft(scope, {}, { fields: { answer: "v2 answer 1" } }, disk);
+  expect(firstSave.persisted).toBe(true);
+  expect(disk.data.has(v2Key)).toBe(true);
+  expect(disk.data.has(legacyKey)).toBe(true);
+
+  // Next edit hits quota, marking the scope dirty while v2 already exists on disk.
+  disk.setItem.mockImplementation(() => { throw new Error("quota exceeded"); });
+  const failedEdit = patchPracticeDraft(scope, {}, { fields: { answer: "unsaved answer 2" } }, disk);
+  expect(failedEdit.persisted).toBe(false);
+
+  // Dirty retry reads valid v2 during reconciliation and must still remove the stale v1 key once storage recovers.
+  failRemove = false;
+  disk.setItem.mockImplementation((k, v) => { disk.data.set(k, v); });
+  const retriedSave = patchPracticeDraft(scope, {}, { fields: { answer: "durable answer 3" } }, disk);
+  expect(retriedSave.persisted).toBe(true);
+  expect(disk.data.has(legacyKey)).toBe(false);
+});

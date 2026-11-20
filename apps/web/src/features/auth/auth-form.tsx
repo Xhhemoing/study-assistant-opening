@@ -3,8 +3,10 @@
 import { ArrowRight, Eye, EyeOff, LoaderCircle } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useRef, useState, type FormEvent } from "react";
+import { continuedTryHref, type TryContinuation } from "../opening/public-try/continuation";
 import {
   authServerErrorMessage,
+  safeAuthReturnPath,
   type FormErrors,
   validateLoginInput,
   validateRegisterInput,
@@ -12,9 +14,10 @@ import {
 
 type AuthMode = "login" | "register";
 
-export function AuthForm({ mode, returnTo, registrationClosed = false }: {
+export function AuthForm({ mode, returnTo, tryContext, registrationClosed = false }: {
   mode: AuthMode;
-  returnTo?: string | null;
+  returnTo?: string | string[] | null;
+  tryContext?: TryContinuation | null;
   registrationClosed?: boolean;
 }) {
   const router = useRouter();
@@ -74,7 +77,8 @@ export function AuthForm({ mode, returnTo, registrationClosed = false }: {
         return;
       }
       authenticated = true;
-      const target = mode === "register" ? "/onboarding" : returnTo ?? "/";
+      const target = tryContext ? continuedTryHref(tryContext, mode)
+        : mode === "register" ? "/onboarding" : safeAuthReturnPath(returnTo) ?? "/";
       setNavigationTarget(target);
       router.replace(target);
       router.refresh();
@@ -135,7 +139,7 @@ export function AuthForm({ mode, returnTo, registrationClosed = false }: {
         </button>
       </fieldset>
       {navigationTarget ? <div className="mt-4 text-sm leading-6 text-text-2">
-        <p role="status">{mode === "register" ? "账户已创建，正在进入设置。" : "登录成功，正在进入学习空间。"}</p>
+        <p role="status">{tryContext ? "正在返回刚才的挑战。" : mode === "register" ? "账户已创建，正在进入设置。" : "登录成功，正在进入学习空间。"}</p>
         <a className="inline-flex min-h-11 items-center font-medium text-accent underline underline-offset-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent" href={navigationTarget}>若页面未跳转，点此继续</a>
       </div> : null}
     </form>

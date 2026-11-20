@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { loadEnv, loadOpeningUploadQuota, loadOpeningAutoGradeDailyCap, EnvValidationError } from "./env";
 import { loadOpeningModel, loadOpeningTutorConfig } from "./opening-model";
-import { loadFeatureSwitches, resolveCapabilities } from "./server-config";
+import { loadFeatureSwitches, loadServerConfig, resolveCapabilities } from "./server-config";
 import { loadOpeningEmbeddingConfig } from "./opening-embedding";
 import { loadWorkerEnv } from "./worker-env";
 import { loadWorkerStartupConfig } from "./worker-startup";
@@ -120,6 +120,12 @@ describe("loadEnv", () => {
     expect(env.authSecret).toBe(valid.AUTH_SECRET);
     expect(env.sessionTtlSeconds).toBe(604800);
     expect(env.sessionCookieSecure).toBe(false);
+  });
+
+  it("allows existing knowledge edge rollback values at web startup", () => {
+    for (const value of ["off", "false", "0"]) {
+      expect(() => loadServerConfig({ ...valid, OPENING_ASSET_GRAPH_KNOWLEDGE_EDGE_DETAILS: value }, "web")).not.toThrow();
+    }
   });
 
   it("uses secure session cookies by default in production and accepts an explicit override", () => {

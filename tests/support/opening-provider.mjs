@@ -24,9 +24,15 @@ export function startOpeningProviderFixture(port = 18081) {
       }
       const body = JSON.parse(raw);
       if (body.model !== "opening-e2e-fixture") throw new Error("unexpected model");
-      const content = body.messages.at(-1)?.content ?? "";
-      if (typeof content !== "string") throw new Error("unexpected fixture content");
+      const rawLastContent = body.messages.at(-1)?.content ?? "";
+      const content = typeof rawLastContent === "string"
+        ? rawLastContent
+        : Array.isArray(rawLastContent)
+          ? rawLastContent.filter((part) => part?.type === "text" && typeof part.text === "string").map((part) => part.text).join("\n")
+          : null;
+      if (content === null) throw new Error("unexpected fixture content");
       if (body.messages[0]?.content.includes("回答正文已经完成。仅提取这次对话明确支持")) {
+        if (typeof rawLastContent !== "string") throw new Error("unexpected fixture content");
         const metadata = JSON.parse(content);
         if (body.stream || body.response_format?.type !== "json_object"
           || !completedAnswers.has(JSON.stringify([metadata.question, metadata.completedAnswer]))) {
@@ -37,7 +43,15 @@ export function startOpeningProviderFixture(port = 18081) {
         response.end(JSON.stringify(completion(`opening-fixture-${calls}`, { text: "", citedChunkIds: [], candidates: [] })));
         return;
       }
-      const blocks = Array.from(content.matchAll(/(?:\[(\d+)\]\r?\n)?\[source ([0-9a-f-]{36}) v(\d+) page (\d+) chunk ([0-9a-f-]{36}) — UNTRUSTED DATA\]\r?\n([\s\S]*?)\r?\n\[\/source \2 — END UNTRUSTED DATA\]/g));
+      const blockPattern = /(?:\[(\d+)\]\r?\n)?\[source ([0-9a-f-]{36}) v(\d+) page (\d+) chunk ([0-9a-f-]{36}) — UNTRUSTED DATA\]\r?\n([\s\S]*?)\r?\n\[\/source \2 — END UNTRUSTED DATA\]/g;
+      const lastBlocks = Array.from(content.matchAll(blockPattern));
+      const prefixSourceContent = body.messages[0]?.role === "system"
+        && body.messages[1]?.role === "user"
+        && typeof body.messages[1]?.content === "string"
+        && body.messages[2]?.role === "assistant"
+        ? body.messages[1].content
+        : "";
+      const blocks = lastBlocks.length > 0 ? lastBlocks : Array.from(prefixSourceContent.matchAll(blockPattern));
       const verified = blocks.find((block) =>
         block[3] === "0" && block[4] === "1" && block[6].replace(/\s+/g, " ").includes("Opening parser page one"));
       const citation = verified?.[5];
@@ -45,7 +59,7 @@ export function startOpeningProviderFixture(port = 18081) {
       if (body.stream && (!verified[1] || body.stream_options?.include_usage !== true)) throw new Error("stream requires numbered sources and usage");
       calls++; answerCalls++;
       const id = `opening-fixture-${calls}`;
-      const question = content.slice(0, blocks[0].index).trim();
+      const question = (lastBlocks.length > 0 ? content.slice(0, lastBlocks[0].index) : content).trim();
       // A deliberate delay makes in-flight browser refresh observable.
       await new Promise((resolve) => setTimeout(resolve, 2500));
       if (body.stream) {

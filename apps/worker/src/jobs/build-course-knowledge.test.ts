@@ -175,6 +175,7 @@ describe("createBuildCourseKnowledgeHandler", () => {
       {
         expectedVersion: 3,
         extractedSourceVersions: { [sourceId]: 1 },
+        extractedChunkDigests: { [sourceId]: expect.stringMatching(/^[0-9a-f]{64}$/) },
         snapshot: expect.objectContaining({ courseId, version: 4, nodes: [expect.objectContaining({ label: "函数" })] }),
         sourceVersions: { [sourceId]: 1 },
       },
@@ -318,6 +319,29 @@ describe("createBuildCourseKnowledgeHandler", () => {
       courseId,
       { [sourceId]: 1, [unusedSourceId]: 3 },
     );
+  });
+
+  it("passes readable zero-node coverage to replace and publishes its committed value", async () => {
+    const replace = vi.fn<Parameters<typeof createBuildCourseKnowledgeHandler>[0]["replace"]>(async (_scope, _courseId, input) => ({
+      version: input.expectedVersion + 1,
+      snapshot: { ...input.snapshot, coveredSourceVersions: input.extractedSourceVersions },
+    }));
+    const onBuildCompleted = vi.fn(async () => {});
+    const handler = createBuildCourseKnowledgeHandler({
+      listAuthorizedChunks: async () => [chunk({ sourceVersion: 1 })],
+      get: async () => null,
+      extractGraph: async () => ({ nodes: [], edges: [] }),
+      replace,
+      onBuildCompleted,
+    });
+    await expect(handler(job as never, { courseId })).resolves.toMatchObject({
+      coveredSourceVersions: { [sourceId]: 1 },
+      snapshot: { nodes: [], coveredSourceVersions: { [sourceId]: 1 } },
+    });
+    expect(replace).toHaveBeenCalledWith(expect.anything(), courseId, expect.objectContaining({
+      sourceVersions: {}, extractedSourceVersions: { [sourceId]: 1 },
+    }));
+    expect(onBuildCompleted).toHaveBeenCalledWith(expect.anything(), courseId, { [sourceId]: 1 });
   });
 
   it("retries replace once on CAS CONFLICT after re-reading the latest snapshot and referenced nodes", async () => {

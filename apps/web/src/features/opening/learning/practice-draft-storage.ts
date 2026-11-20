@@ -161,7 +161,13 @@ function readStoredPracticeDraftCollection(scope: string, storage: ReadStorage):
   if (legacy) loadedFromLegacy.add(scope);
   else {
     legacyIds.delete(scope);
-    loadedFromLegacy.delete(scope);
+    if (loadedFromLegacy.has(scope)) {
+      try {
+        if (storage.getItem(legacyStorageKey(scope)) === null) loadedFromLegacy.delete(scope);
+      } catch {
+        // Keep legacy cleanup pending until the legacy key is removed or confirmed absent.
+      }
+    }
   }
   blocked.delete(scope);
   return { collection, legacy };
@@ -345,8 +351,21 @@ export function readPartitionedPracticeDraftCollection(scopes: PracticeDraftScop
         } else {
           memory.set(scopes.ordinary, reconciled);
           unreconciled.delete(scopes.ordinary);
-          if (persistCollection(reconciled, storage) && ordinary?.legacy) {
-            try { storage.removeItem(legacyStorageKey(scopes.ordinary)); legacyIds.delete(scopes.ordinary); } catch { /* v2 already authoritative */ }
+          if (persistCollection(reconciled, storage)) {
+            try {
+              const oldKey = legacyStorageKey(scopes.ordinary);
+              if (ordinary?.legacy || loadedFromLegacy.has(scopes.ordinary)) {
+                storage.removeItem(oldKey);
+                legacyIds.delete(scopes.ordinary);
+                loadedFromLegacy.delete(scopes.ordinary);
+              } else {
+                const oldRaw = storage.getItem(oldKey);
+                if (oldRaw !== null && parsePracticeDraft(JSON.parse(oldRaw), scopes.ordinary)) {
+                  storage.removeItem(oldKey);
+                  legacyIds.delete(scopes.ordinary);
+                }
+              }
+            } catch { /* v2 already authoritative */ }
           }
         }
       }

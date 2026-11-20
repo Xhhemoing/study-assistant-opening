@@ -20,7 +20,7 @@ export async function readOpeningLearningAgenda(tx: TransactionSql, scope: Scope
   const now = options.now ?? new Date();
   // An exact historical request still reads its original receipt/status. Only
   // the unbound current lookup applies active/paused candidate selection.
-  const current = activityId == null ? await readOpeningCurrentLearningActivity(tx, scope, courseId) : null;
+  const current = activityId == null ? await readOpeningCurrentLearningActivity(tx, scope, courseId, {}, { rankByEngagement: false }) : null;
   const selectedId = activityId ?? current?.activityId;
   if (selectedId == null) return null;
   const [activity] = await tx`SELECT a.*,s.id AS session_id,s.skill_label,c.archived_at

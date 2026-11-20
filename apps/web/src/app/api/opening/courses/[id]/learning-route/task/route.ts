@@ -3,5 +3,9 @@ import { requireOpeningScope } from "../../../../../../../features/opening/runti
 import { createCourseRouteService } from "../../../../../../../features/opening/teaching/course-route-service";
 export async function GET(request:Request,context:{params:Promise<{id:string}>}){try{
   const {scope,sql}=await requireOpeningScope(request),courseId=(await context.params).id;
-  return Response.json(await createCourseRouteService(sql).readTask(scope,courseId,new URL(request.url).searchParams.get("taskId")??""),{headers:{"Cache-Control":"no-store"}});
+  const params=new URL(request.url).searchParams;
+  const task=await createCourseRouteService(sql).readTask(scope,courseId,params.get("taskId")??"",{
+    includeRetestId:params.get("includeRetestId")==="true",
+  });
+  return Response.json(task,{headers:{"Cache-Control":"no-store"}});
 }catch(error){return jsonError(mapDomainError(error));}}
