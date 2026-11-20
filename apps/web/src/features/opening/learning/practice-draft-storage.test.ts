@@ -1,5 +1,5 @@
 import { expect, it, vi } from "vitest";
-import { assertPracticeDraftSaved, emptyPracticeDraft, parsePracticeDraftCollection, patchPracticeDraft, practiceScope, readPracticeDraft, readPracticeDraftCollection, switchPracticeDraft, writePracticeDraft } from "./practice-draft-storage";
+import { assertPracticeDraftSaved, emptyPracticeDraft, parsePracticeDraftCollection, patchPracticeDraft, practiceScope, readPartitionedPracticeDraftCollection, readPracticeDraft, readPracticeDraftCollection, switchPracticeDraft, writePracticeDraft } from "./practice-draft-storage";
 import { runPracticeRequest } from "./practice-draft";
 
 const courseId = "11111111-1111-4111-8111-111111111111";
@@ -113,6 +113,35 @@ it.each(["corrupt", "denied"] as const)("blocks fresh writes when existing stora
   disk.getItem.mockImplementation(key => disk.data.get(key) ?? null);
   disk.data.set(`opening-practice:v2:${scope}`, JSON.stringify({ version: 2, scope, activeId: repaired.id, drafts: [repaired] }));
   expect(readPracticeDraft(scope, disk)?.fields.answer).toBe("restored browser copy");
+});
+
+it.each(["malformed", "unreadable"] as const)("reads and saves manual drafts while preserving %s ordinary storage", mode => {
+  const course = crypto.randomUUID();
+  const ordinary = practiceScope(course, "ordinary");
+  const manual = practiceScope(course, "manual");
+  const ordinaryKey = `opening-practice:v2:${ordinary}`;
+  const manualKey = `opening-practice:v2:${manual}`;
+  const legacy = emptyPracticeDraft(ordinary, { answer: "saved ordinary answer" });
+  const rawOrdinary = mode === "malformed" ? "{broken" : JSON.stringify({ version: 2, scope: ordinary, activeId: legacy.id, drafts: [legacy] });
+  const saved = emptyPracticeDraft(manual, { answer: "saved manual answer" });
+  const disk = { ...storage(), removeItem: (key: string) => { disk.data.delete(key); } };
+  disk.data.set(ordinaryKey, rawOrdinary);
+  disk.data.set(manualKey, JSON.stringify({ version: 2, scope: manual, activeId: saved.id, drafts: [saved] }));
+  if (mode === "unreadable") {
+    disk.getItem.mockImplementation(key => {
+      if (key === ordinaryKey) throw new Error("denied");
+      return disk.data.get(key) ?? null;
+    });
+  }
+
+  const scopes = { ordinary, manual };
+  expect(readPartitionedPracticeDraftCollection(scopes, emptyPracticeDraft(manual), disk))
+    .toMatchObject({ activeId: saved.id, drafts: [saved] });
+  expect(patchPracticeDraft(manual, {}, { fields: { answer: "edited manual answer" } }, disk).persisted).toBe(true);
+  expect(parsePracticeDraftCollection(JSON.parse(disk.data.get(manualKey)!), manual)?.drafts[0]?.fields.answer)
+    .toBe("edited manual answer");
+  expect(() => readPartitionedPracticeDraftCollection(scopes, emptyPracticeDraft(ordinary), disk)).toThrow();
+  expect(disk.data.get(ordinaryKey)).toBe(rawOrdinary);
 });
 
 it("loads a legacy draft once with a stable local identity while preserving frozen server request keys", () => {

@@ -197,7 +197,13 @@ function migrateOrdinaryManualDrafts(scopes: PracticeDraftScopes, ordinary: Prac
 }
 
 export function readPartitionedPracticeDraftCollection(scopes: PracticeDraftScopes, fallback: PracticeDraft, storage: PartitionStorage | null): PracticeDraftCollection | null {
-  const ordinary = readPracticeDraftCollection(scopes.ordinary, storage);
+  let ordinary: PracticeDraftCollection | null = null;
+  try {
+    ordinary = readPracticeDraftCollection(scopes.ordinary, storage);
+  } catch (reason) {
+    // An unreadable migration source stays blocked in its own scope.
+    if (fallback.scope !== scopes.manual) throw reason;
+  }
   if (ordinary?.drafts.some(draft => draft.fields.matrixMode !== true)) {
     if (!storage) throw new Error("无法迁移练习草稿，原答案已保留。请允许此页面使用浏览器存储后重试。");
     const manualFallback = fallback.scope === scopes.manual ? fallback : emptyPracticeDraft(scopes.manual);

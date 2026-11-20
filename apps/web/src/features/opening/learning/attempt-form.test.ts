@@ -30,7 +30,7 @@ it("starts pasted questions with a saved problem even when no source is selected
   expect(practiceQuestionInput(" ", "")).toBeUndefined();
 });
 
-it.each(["submit", "archive then submit another"] as const)("recovers a legacy manual answer and keeps it out of the active form after %s", async action => {
+it.each(["submit", "archive then submit another", "a lost-response retry"] as const)("recovers a legacy manual answer and keeps it out of the active form after %s", async action => {
   const courseId = crypto.randomUUID(), sessionId = crypto.randomUUID(), attemptId = crypto.randomUUID();
   const scope = practiceScope(courseId, "ordinary");
   const clientKey = "legacy-manual-attempt";
@@ -114,13 +114,27 @@ it.each(["submit", "archive then submit another"] as const)("recovers a legacy m
     }
 
     await click("继续此练习");
+    const submissionCount = client.submitAttempt.mock.calls.length;
+    const manualScope = practiceScope(courseId, "manual");
+    const manualKey = `opening-practice:v2:${manualScope}`;
+    if (action === "a lost-response retry") {
+      client.submitAttempt.mockRejectedValueOnce(new Error("response lost"));
+    }
     await submit();
+    if (action === "a lost-response retry") {
+      expect(host.textContent).not.toContain("原答案已保存");
+      client.listObservations.mockResolvedValueOnce([observation]);
+      await submit();
+    }
     expect(host.textContent).toContain("原答案已保存");
+    expect(client.submitAttempt).toHaveBeenCalledTimes(submissionCount + 1);
     expect(client.submitAttempt).toHaveBeenLastCalledWith(attemptId, expect.objectContaining({ answer: observation.answer }));
     await reopen();
     expect(host.querySelector('fieldset input[list^="opening-skill-labels-"]')).not.toBeNull();
     expect(host.textContent).not.toContain("已找回未完成的练习");
     expect([...host.querySelectorAll("textarea")].map(input => input.value)).not.toContain("修改后的答案");
+    expect(parsePracticeDraftCollection(JSON.parse(sessionStorage.getItem(manualKey)!), manualScope)?.drafts)
+      .toContainEqual(expect.objectContaining({ id: draft.id, observationId: observation.id }));
     if (action === "submit") {
       expect(parsePracticeDraftCollection(JSON.parse(sessionStorage.getItem(storageKey)!), scope))
         .toMatchObject({ activeId: matrix.id, drafts: [matrix] });

@@ -240,7 +240,10 @@ function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, o
     try {
       if (draft.submission) {
         const existing = await readPracticeRecord(client, courseId, attempt, draft.observationId);
-        if (existing.observation) { setRecorded(existing.observation); onRecorded(); return; }
+        if (existing.observation) {
+          patch({ observationId: existing.observation.rootObservationId ?? existing.observation.id });
+          setRecorded(existing.observation); onRecorded(); return;
+        }
       }
       requireSaved();
       const result = await runPracticeRequest(`${scope}:submit:${submission.input.clientKey}`, () => client.submitAttempt(submission.attemptId, submission.input));
