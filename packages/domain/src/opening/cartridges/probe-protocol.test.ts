@@ -2,9 +2,12 @@ import { describe, expect, it } from "vitest";
 import { evaluateProbeWithSpec } from "./capability-helpers";
 import {
   classifyProbeResponse,
+  classifyProbeResponseWithSnapshot,
+  snapshotAndVerifyProbe,
   verifyProbeDistinguishability,
   type DistinguishableProbeSpec,
   type MisconceptionHypothesis,
+  type VerifiedProbeSnapshot,
 } from "./probe-protocol";
 
 type Spec = DistinguishableProbeSpec<number, number>;
@@ -162,6 +165,35 @@ describe("evaluateProbeWithSpec single-snapshot hardening", () => {
       diagnosis: "unclassified",
       matchedHypothesisId: null,
       observableKey: null,
+    });
+  });
+
+  it("deeply freezes VerifiedProbeSnapshot and prevents external tampering with its scoring table", () => {
+    const snapshot = snapshotAndVerifyProbe(spec(3));
+    expect("hypothesisByObservableKey" in snapshot).toBe(false);
+    expect(Object.isFrozen(snapshot)).toBe(true);
+    expect(Object.isFrozen(snapshot.report)).toBe(true);
+    expect(Object.isFrozen(snapshot.report.predictions)).toBe(true);
+    expect(Object.isFrozen(snapshot.report.predictions[0])).toBe(true);
+
+    const degenerateSnapshot = snapshotAndVerifyProbe(spec(2));
+    expect(Object.isFrozen(degenerateSnapshot.report.ambiguousPairs)).toBe(true);
+    expect(Object.isFrozen(degenerateSnapshot.report.ambiguousPairs[0])).toBe(true);
+    expect(Object.isFrozen(degenerateSnapshot.report.degenerateAgainstCorrectModel)).toBe(true);
+    expect(Object.isFrozen(degenerateSnapshot.report.degenerateAgainstCorrectModel[0])).toBe(true);
+
+    // Unmatched response 7 stays unclassified and cannot be injected via a forged Map property.
+    expect(classifyProbeResponseWithSnapshot(snapshot, 7)).toEqual({
+      classification: { observableKey: "7", wellFormed: true, match: null },
+      encodingFailed: false,
+    });
+    const forgedSnapshot = {
+      ...snapshot,
+      hypothesisByObservableKey: new Map([["7", "H_INJECTED"]]),
+    } as unknown as VerifiedProbeSnapshot<number>;
+    expect(classifyProbeResponseWithSnapshot(forgedSnapshot, 7)).toEqual({
+      classification: { observableKey: null, wellFormed: false, match: null },
+      encodingFailed: true,
     });
   });
 });

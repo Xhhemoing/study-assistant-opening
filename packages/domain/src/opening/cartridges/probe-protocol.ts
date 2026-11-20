@@ -69,11 +69,21 @@ export interface VerifiedProbeSnapshot<TObservable = unknown> {
   readonly report: ProbeDistinguishabilityReport;
   /** Populated only when `report.distinguishable` is true. */
   readonly correctObservableKey: string | null;
-  /** Populated only when `report.distinguishable` is true. */
+  readonly observableKey: ((observable: TObservable) => string) | null;
+  readonly parseResponse: ((response: unknown) => TObservable | null) | null;
+}
+
+interface PrivateSnapshotState<TObservable = unknown> {
+  readonly distinguishable: boolean;
+  readonly correctModelId: string;
+  readonly correctObservableKey: string | null;
   readonly hypothesisByObservableKey: ReadonlyMap<string, string>;
   readonly observableKey: ((observable: TObservable) => string) | null;
   readonly parseResponse: ((response: unknown) => TObservable | null) | null;
 }
+
+/** Module-private lookup state so callers cannot mutate the snapshot's scoring table. */
+const SNAPSHOT_STATE = new WeakMap<VerifiedProbeSnapshot<unknown>, PrivateSnapshotState<unknown>>();
 
 /** Runtime guard: observable keys must be non-empty, non-whitespace strings. */
 export function isValidObservableKey(key: unknown): key is string {
@@ -150,20 +160,28 @@ export function snapshotAndVerifyProbe<TInput, TObservable>(
     const report: ProbeDistinguishabilityReport = Object.freeze({
       probeId: "",
       distinguishable: false,
-      predictions: [],
-      ambiguousPairs: [],
-      degenerateAgainstCorrectModel: [],
-      issues: [...issues].sort(),
+      predictions: Object.freeze([]) as unknown as ProbeModelPrediction[],
+      ambiguousPairs: Object.freeze([]) as unknown as ProbeDistinguishabilityReport["ambiguousPairs"],
+      degenerateAgainstCorrectModel: Object.freeze([]) as unknown as ProbeDistinguishabilityReport["degenerateAgainstCorrectModel"],
+      issues: Object.freeze([...issues].sort()) as ProbeDistinguishabilityIssue[],
     });
-    return Object.freeze({
+    const snapshot: VerifiedProbeSnapshot<TObservable> = Object.freeze({
       probeId: "",
       requirementKey: "",
       report,
       correctObservableKey: null,
-      hypothesisByObservableKey: new Map<string, string>(),
       observableKey: null,
       parseResponse: null,
     });
+    SNAPSHOT_STATE.set(snapshot as VerifiedProbeSnapshot<unknown>, Object.freeze({
+      distinguishable: false,
+      correctModelId: "",
+      correctObservableKey: null,
+      hypothesisByObservableKey: new Map<string, string>(),
+      observableKey: null,
+      parseResponse: null,
+    }));
+    return snapshot;
   }
 
   const probeIdRead = safeRead(() => spec.probeId);
@@ -226,13 +244,13 @@ export function snapshotAndVerifyProbe<TInput, TObservable>(
     const left = misconceptions[i]!;
     if (left.observableKey === null) continue;
     if (correctKey !== null && left.observableKey === correctKey) {
-      degenerateAgainstCorrectModel.push({ hypothesisId: left.modelId, observableKey: left.observableKey });
+      degenerateAgainstCorrectModel.push(Object.freeze({ hypothesisId: left.modelId, observableKey: left.observableKey }));
     }
     for (let j = i + 1; j < misconceptions.length; j += 1) {
       const right = misconceptions[j]!;
       if (right.observableKey !== null && right.observableKey === left.observableKey) {
         const [a, b] = [left.modelId, right.modelId].sort();
-        ambiguousPairs.push({ a: a!, b: b!, observableKey: left.observableKey });
+        ambiguousPairs.push(Object.freeze({ a: a!, b: b!, observableKey: left.observableKey }));
       }
     }
   }
@@ -260,15 +278,24 @@ export function snapshotAndVerifyProbe<TInput, TObservable>(
     }
   }
 
-  return Object.freeze({
+  const correctObservableKey = distinguishable ? correctKey : null;
+  const snapshot: VerifiedProbeSnapshot<TObservable> = Object.freeze({
     probeId,
     requirementKey,
     report,
-    correctObservableKey: distinguishable ? correctKey : null,
-    hypothesisByObservableKey,
+    correctObservableKey,
     observableKey: encodeObservable,
     parseResponse,
   });
+  SNAPSHOT_STATE.set(snapshot as VerifiedProbeSnapshot<unknown>, Object.freeze({
+    distinguishable,
+    correctModelId: correctModel.id,
+    correctObservableKey,
+    hypothesisByObservableKey,
+    observableKey: encodeObservable as ((observable: unknown) => string) | null,
+    parseResponse: parseResponse as ((response: unknown) => unknown) | null,
+  }));
+  return snapshot;
 }
 
 /** Deterministic H_A != H_B and H_i != M* pre-check for a single probe input. */
@@ -299,12 +326,15 @@ export function classifyProbeResponseWithSnapshot<TObservable>(
   snapshot: VerifiedProbeSnapshot<TObservable>,
   response: unknown,
 ): SnapshotResponseClassification {
-  if (!snapshot.parseResponse || !snapshot.observableKey) {
+  const priv = snapshot && typeof snapshot === "object"
+    ? SNAPSHOT_STATE.get(snapshot as VerifiedProbeSnapshot<unknown>)
+    : undefined;
+  if (!priv || !priv.parseResponse || !priv.observableKey) {
     return { classification: { observableKey: null, match: null, wellFormed: false }, encodingFailed: true };
   }
-  let observable: TObservable | null | undefined;
+  let observable: unknown;
   try {
-    observable = snapshot.parseResponse(response);
+    observable = priv.parseResponse(response);
   } catch {
     observable = null;
   }
@@ -313,24 +343,23 @@ export function classifyProbeResponseWithSnapshot<TObservable>(
   }
   let key: unknown;
   try {
-    key = snapshot.observableKey(observable);
+    key = priv.observableKey(observable);
   } catch {
     return { classification: { observableKey: null, match: null, wellFormed: false }, encodingFailed: true };
   }
   if (!isValidObservableKey(key)) {
     return { classification: { observableKey: null, match: null, wellFormed: false }, encodingFailed: true };
   }
-  if (!snapshot.report.distinguishable || snapshot.correctObservableKey === null) {
+  if (!priv.distinguishable || priv.correctObservableKey === null) {
     return { classification: { observableKey: key, wellFormed: true, match: null }, encodingFailed: false };
   }
-  if (key === snapshot.correctObservableKey) {
-    const correctModelId = snapshot.report.predictions[0]!.modelId;
+  if (key === priv.correctObservableKey) {
     return {
-      classification: { observableKey: key, wellFormed: true, match: { role: "correct", modelId: correctModelId } },
+      classification: { observableKey: key, wellFormed: true, match: { role: "correct", modelId: priv.correctModelId } },
       encodingFailed: false,
     };
   }
-  const matchedHypothesisId = snapshot.hypothesisByObservableKey.get(key) ?? null;
+  const matchedHypothesisId = priv.hypothesisByObservableKey.get(key) ?? null;
   return {
     classification: {
       observableKey: key,

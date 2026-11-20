@@ -150,20 +150,31 @@ export function assembleLearnerState(input: { evidence: CourseEvidence; dataAsOf
     return time(a) - time(b) || a.id.localeCompare(b.id);
   });
   const withheldByCartridge = new Set<string>();
+  const gatedById = new Map<string, ReturnType<typeof gateObservationCartridgeEvidence>>();
+  const gatedByObservation = new Map<LearningObservation, ReturnType<typeof gateObservationCartridgeEvidence>>();
+  for (const row of ordered) {
+    let gated = gatedById.get(row.id);
+    if (!gated) {
+      const facts = input.evidence.evidenceContexts[row.id];
+      gated = gateObservationCartridgeEvidence(
+        evaluateEvidenceEligibility(facts?.observation ?? { courseId: row.courseId, problemId: row.problemId, assistance: row.assistance, outcome: row.outcome, verdictSource: row.verdictSource }, facts?.context ?? {}),
+        row.id, { outcome: facts?.observation.outcome ?? row.outcome, requirementKey: facts?.observation.requirementKey ?? null }, input.cartridgeEvidence);
+      gatedById.set(row.id, gated);
+    }
+    gatedByObservation.set(row, gated);
+    if (gated.qualification && !gated.qualification.qualified) withheldByCartridge.add(row.id);
+  }
   const features = ordered.map((row, ordinal): LearnerStateFeature => {
     const facts = input.evidence.evidenceContexts[row.id];
-    const gated = gateObservationCartridgeEvidence(
-      evaluateEvidenceEligibility(facts?.observation ?? { courseId: row.courseId, problemId: row.problemId, assistance: row.assistance, outcome: row.outcome, verdictSource: row.verdictSource }, facts?.context ?? {}),
-      row.id, { outcome: facts?.observation.outcome ?? row.outcome, requirementKey: facts?.observation.requirementKey ?? null }, input.cartridgeEvidence);
-    const eligibility = gated.eligibility;
-    if (gated.qualification && !gated.qualification.qualified) withheldByCartridge.add(row.id);
+    const eligibility = gatedByObservation.get(row)!.eligibility;
     const specification = input.transferSpecifications?.[row.id];
     const baselineFamilyObservedBefore = Boolean(specification && ordered.some(prior => {
       if (prior.id === row.id || prior.courseId !== row.courseId || input.observationFamilies?.[prior.id] !== specification.fromFamilyId) return false;
       const baseline = input.evidence.evidenceContexts[prior.id];
       if (!baseline || (baseline.observation.submittedAt ?? Date.parse(prior.submittedAt ?? prior.occurredAt)) >= (facts?.observation.submittedAt ?? Date.parse(row.submittedAt ?? row.occurredAt))) return false;
-      const qualified = gateObservationCartridgeEvidence(evaluateEvidenceEligibility(baseline.observation, baseline.context), prior.id,
-        { outcome: baseline.observation.outcome ?? null, requirementKey: baseline.observation.requirementKey ?? null }, input.cartridgeEvidence).eligibility;
+      const priorGated = gatedByObservation.get(prior)!;
+      if (priorGated.qualification && !priorGated.qualification.qualified) return false;
+      const qualified = priorGated.eligibility;
       return qualified.independentAttempt === "yes" && qualified.verifiedCorrect === "yes" && qualified.usableForCurrentVersion === "yes";
     }));
     const transfer = evaluateTransferEligibility({ specification, eligibility, baselineFamilyObservedBefore, evaluation: facts?.context.serverEvaluation });

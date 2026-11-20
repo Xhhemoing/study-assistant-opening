@@ -194,6 +194,50 @@ describe("qualifyCartridgeEmission", () => {
     expect(result.qualified).toBe(false);
     expect(result.reasonCodes).toEqual(["cartridge_evaluation_mismatch"]);
   });
+
+  it("snapshots emission and observation before callbacks so in-place mutation during getProbe cannot spoof identity or response", () => {
+    const mutableEmission = emit({ cartridgeId: "408.stack.mutator", probeId: "original", response: { outputs: "1,2,3,UNDERFLOW", finalTop: -1 } });
+    const mutatingProbeCartridge = {
+      ...stack408Cartridge,
+      manifest: { ...stack408Cartridge.manifest, id: "408.stack.mutator" },
+      getProbe: (id: string) => {
+        if (id === "original") {
+          // Mutate the caller's emission object in place to try matching the returned probeId and correct response.
+          mutableEmission.probeId = TRACE_PROBE;
+          (mutableEmission.response as { outputs: string }).outputs = "2,3,1,UNDERFLOW";
+          return stack408Cartridge.getProbe(TRACE_PROBE);
+        }
+        return stack408Cartridge.getProbe(id);
+      },
+    };
+    const localRegistry = createCartridgeRegistry([mutatingProbeCartridge]);
+    const identityResult = qualifyCartridgeEmission(localRegistry, mutableEmission, { outcome: "correct" });
+    expect(identityResult.qualified).toBe(false);
+    expect(identityResult.probeId).toBe("original");
+    expect(identityResult.reasonCodes).toEqual(["cartridge_probe_identity_mismatch"]);
+
+    // Even when probeId matches, mutating emission.response in place during getProbe cannot overwrite the captured response.
+    const mutableResponseEmission = emit({
+      cartridgeId: "408.stack.resp-mutator",
+      probeId: TRACE_PROBE,
+      response: { outputs: "1,2,3,UNDERFLOW", finalTop: -1 },
+    });
+    let armed = false;
+    const mutatingResponseCartridge = {
+      ...stack408Cartridge,
+      manifest: { ...stack408Cartridge.manifest, id: "408.stack.resp-mutator" },
+      getProbe: (id: string) => {
+        if (armed) (mutableResponseEmission.response as { outputs: string }).outputs = "2,3,1,UNDERFLOW";
+        return stack408Cartridge.getProbe(id);
+      },
+    };
+    const respRegistry = createCartridgeRegistry([mutatingResponseCartridge]);
+    armed = true;
+    const respResult = qualifyCartridgeEmission(respRegistry, mutableResponseEmission, { outcome: "correct" });
+    expect(respResult.qualified).toBe(false);
+    expect(respResult.evaluation?.outcome).toBe("incorrect");
+    expect(respResult.reasonCodes).toEqual(["cartridge_outcome_conflict"]);
+  });
 });
 
 describe("applyCartridgeEvidenceGate", () => {
@@ -252,5 +296,98 @@ describe("assembleLearnerState with cartridge evidence", () => {
     expect(result.display.requirements[0]?.state).toBe("insufficient");
     expect(result.summary[0]?.status).toBe("needs_check");
     expect(result.policyVersion).toBe(read().policyVersion);
+  });
+
+  it("evaluates each observation gate once and never lets a withheld baseline qualify a transfer observation", () => {
+    const baseProbe = stack408Cartridge.getProbe(TRACE_PROBE)!;
+    let gateLookups = 0;
+    let registrationDone = false;
+    const flakyBaselineCartridge = {
+      ...stack408Cartridge,
+      manifest: { ...stack408Cartridge.manifest, id: "408.stack.flaky-baseline" },
+      getProbe: (id: string) => {
+        if (registrationDone && id === TRACE_PROBE) {
+          gateLookups += 1;
+          // First gate evaluation fails; a second re-evaluation of the same baseline would succeed if uncached.
+          if (gateLookups === 1) return degenerate;
+        }
+        return stack408Cartridge.getProbe(id);
+      },
+    };
+    const localRegistry = createCartridgeRegistry([stack408Cartridge, flakyBaselineCartridge]);
+    registrationDone = true;
+
+    const baselineTime = "2026-11-18T10:00:00.000Z";
+    const transferTime = "2026-11-19T10:00:00.000Z";
+    const baselineObs = { ...learningObservation, id: "obs-baseline", submittedAt: baselineTime, occurredAt: baselineTime };
+    const transferObs = { ...learningObservation, id: "obs-transfer", submittedAt: transferTime, occurredAt: transferTime };
+    const transferServerEval = {
+      evaluatorVersion: "span-exact-v1",
+      specVersion: "span-v1",
+      decision: "correct" as const,
+      outcome: "correct" as const,
+      coreEvidenceComplete: true,
+      observationId: "obs-transfer",
+      attemptId: qualifiedInput.observation.attemptId!,
+      problemId: qualifiedInput.observation.problemId!,
+      itemVersionId: qualifiedInput.observation.itemVersionId!,
+      requirementKey: "408.ds.stack.lifo-trace",
+      skills: { equation: "correct" as const, coefficients: "correct" as const, allCoordinates: "correct" as const, systemConsistency: "correct" as const },
+    };
+    const twoObsEvidence = {
+      observations: [baselineObs, transferObs],
+      evidenceContexts: {
+        "obs-baseline": {
+          observation: { ...qualifiedInput.observation, requirementKey: "408.ds.stack.lifo-trace", submittedAt: Date.parse(baselineTime) },
+          context: qualifiedInput.context,
+        },
+        "obs-transfer": {
+          observation: { ...qualifiedInput.observation, requirementKey: "408.ds.stack.lifo-trace", submittedAt: Date.parse(transferTime) },
+          context: { ...qualifiedInput.context, serverEvaluation: transferServerEval },
+        },
+      },
+    };
+    const transferSpecifications = {
+      "obs-transfer": {
+        fromFamilyId: "family-base",
+        familyId: "family-transfer",
+        changes: ["boundary-variation"],
+        knowledgeComponents: ["span:vector-equation"],
+      },
+    };
+    const observationFamilies = { "obs-baseline": "family-base", "obs-transfer": "family-transfer" };
+
+    // Control: when the baseline is qualified, transfer is usable.
+    const control = assembleLearnerState({
+      evidence: twoObsEvidence,
+      stateVersion: "state-control",
+      dataAsOf: "2026-11-20T00:00:00.000Z",
+      transferSpecifications,
+      observationFamilies,
+      cartridgeEvidence: { registry: localRegistry, emissions: { "obs-baseline": emit() } },
+    });
+    expect(control.features[1]?.transfer.usable).toBe("yes");
+
+    // Stateful baseline that fails its first (and only) gate check must stay withheld and cannot establish transfer baseline.
+    const result = assembleLearnerState({
+      evidence: twoObsEvidence,
+      stateVersion: "state-1",
+      dataAsOf: "2026-11-20T00:00:00.000Z",
+      transferSpecifications,
+      observationFamilies,
+      cartridgeEvidence: {
+        registry: localRegistry,
+        emissions: { "obs-baseline": emit({ cartridgeId: "408.stack.flaky-baseline", probeId: baseProbe.probeId }) },
+      },
+    });
+    expect(gateLookups).toBe(1);
+    expect(result.features[0]).toMatchObject({
+      observationId: "obs-baseline",
+      eligibility: { verifiedCorrect: "unknown" },
+    });
+    expect(result.features[1]).toMatchObject({
+      observationId: "obs-transfer",
+      transfer: { usable: "unknown", reasonCodes: ["transfer_baseline_not_established"] },
+    });
   });
 });

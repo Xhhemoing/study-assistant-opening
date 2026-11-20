@@ -13,6 +13,7 @@ import {
   hasMaterialReactiveCapability,
   hasSchedulableCapability,
   meetsCapabilityLevel,
+  safeErrorDetail,
   type ContinuityCartridge,
 } from "./types";
 
@@ -136,5 +137,50 @@ describe("CartridgeRegistry", () => {
     expect(badEncoderReport.ok).toBe(false);
     expect(!badEncoderReport.ok && badEncoderReport.issues[0]?.code).toBe("evidence_probe_not_distinguishable");
     expect(badEncoderReport.probeReports[0]?.issues).toContain("invalid_observable_key");
+  });
+
+  it("handles unprintable thrown values (null-prototype and throwing Symbol.toPrimitive) without secondary crashes", () => {
+    const nullProto = Object.create(null) as unknown;
+    const throwingToPrimitive = {
+      [Symbol.toPrimitive]() { throw new Error("boom"); },
+    };
+    const brokenError = Object.defineProperty(new Error("ignored"), "message", {
+      get() { throw throwingToPrimitive; },
+    });
+
+    expect(safeErrorDetail(new Error("plain boom"))).toBe("plain boom");
+    expect(safeErrorDetail(nullProto)).toBe("unprintable thrown value");
+    expect(safeErrorDetail(throwingToPrimitive)).toBe("unprintable thrown value");
+    expect(safeErrorDetail(brokenError)).toBe("unprintable thrown value");
+
+    for (const weird of [nullProto, throwingToPrimitive]) {
+      const badLookup = validateCartridge({
+        ...stack408Cartridge,
+        manifest: { ...stack408Cartridge.manifest, id: "408.stack.weird-lookup" },
+        getProbe: () => { throw weird; },
+      });
+      expect(badLookup.ok).toBe(false);
+      expect(!badLookup.ok && badLookup.issues.every(issue =>
+        issue.code === "evidence_probe_lookup_failed" && issue.detail.includes("unprintable thrown value"))).toBe(true);
+
+      const badList = validateCartridge({
+        ...stack408Cartridge,
+        manifest: { ...stack408Cartridge.manifest, id: "408.stack.weird-list" },
+        listProbes: () => { throw weird; },
+      });
+      expect(badList).toMatchObject({
+        ok: false,
+        issues: [{ code: "evidence_probe_listing_failed", detail: "unprintable thrown value" }],
+      });
+
+      const badManifest = Object.defineProperty({}, "manifest", {
+        get() { throw weird; },
+        enumerable: true,
+      });
+      expect(validateCartridge(badManifest)).toMatchObject({
+        ok: false,
+        issues: [{ code: "manifest_invalid", detail: "unprintable thrown value" }],
+      });
+    }
   });
 });

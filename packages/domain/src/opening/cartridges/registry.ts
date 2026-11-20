@@ -3,6 +3,7 @@ import {
   CARTRIDGE_LEVEL_METHODS,
   cartridgeManifestSchema,
   meetsCapabilityLevel,
+  safeErrorDetail,
   type AnyTeachingCartridge,
   type CartridgeCapabilityLevel,
   type CartridgeManifest,
@@ -50,7 +51,7 @@ function validateEvidenceContracts(
   try {
     contract = cartridge.evidenceContract;
   } catch (error) {
-    issues.push({ code: "evidence_contract_missing", detail: String(error) });
+    issues.push({ code: "evidence_contract_missing", detail: safeErrorDetail(error) });
     contract = undefined;
   }
   if (!contract?.evaluatorVersion || !contract.specVersion) {
@@ -60,7 +61,7 @@ function validateEvidenceContracts(
   try {
     probes = cartridge.listProbes();
   } catch (error) {
-    issues.push({ code: "evidence_probe_listing_failed", detail: String(error) });
+    issues.push({ code: "evidence_probe_listing_failed", detail: safeErrorDetail(error) });
     return [];
   }
   if (!Array.isArray(probes) || probes.length === 0) {
@@ -81,7 +82,7 @@ function validateEvidenceContracts(
       lookedUp = cartridge.getProbe(probeId);
     } catch (error) {
       lookupFailed = true;
-      issues.push({ code: "evidence_probe_lookup_failed", detail: `${probeId}: ${String(error)}` });
+      issues.push({ code: "evidence_probe_lookup_failed", detail: `${probeId}: ${safeErrorDetail(error)}` });
     }
     if (!lookupFailed && lookedUp !== probe) {
       issues.push({ code: "evidence_probe_lookup_mismatch", detail: probeId });
@@ -106,7 +107,7 @@ export function validateCartridge(candidate: unknown): CartridgeValidationReport
   try {
     rawManifest = (candidate as { manifest?: unknown }).manifest;
   } catch (error) {
-    return { ok: false, probeReports: [], issues: [{ code: "manifest_invalid", detail: String(error) }] };
+    return { ok: false, probeReports: [], issues: [{ code: "manifest_invalid", detail: safeErrorDetail(error) }] };
   }
   const parsed = cartridgeManifestSchema.safeParse(rawManifest);
   if (!parsed.success) {

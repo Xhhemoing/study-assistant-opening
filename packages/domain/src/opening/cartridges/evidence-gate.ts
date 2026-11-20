@@ -68,6 +68,15 @@ function evaluationsMatch(
   }
 }
 
+function snapshotResponse(value: unknown): unknown {
+  if (value === null || typeof value !== "object") return value;
+  try {
+    return structuredClone(value);
+  } catch {
+    return value;
+  }
+}
+
 /**
  * Decide whether a cartridge emission may contribute to formal mastery/learner-state
  * progression. L1–L3 cartridges, unregistered cartridges and unverified probes stay
@@ -78,12 +87,64 @@ export function qualifyCartridgeEmission(
   emission: CartridgeObservationEmission,
   observation: CartridgeEvidenceObservationFacts = {},
 ): CartridgeEvidenceQualification {
+  let capturedEmission: Readonly<{
+    cartridgeId: string;
+    cartridgeVersion: string;
+    probeId: string;
+    response: unknown;
+  }>;
+  let capturedObservation: Readonly<{
+    outcome: string | null;
+    requirementKey: string | null;
+  }>;
+  try {
+    if (!emission || typeof emission !== "object") {
+      return {
+        qualified: false, cartridgeId: "", probeId: "", level: null,
+        evaluation: null, distinguishability: null, reasonCodes: ["cartridge_evaluation_failed"],
+      };
+    }
+    const cartridgeId = emission.cartridgeId;
+    const cartridgeVersion = emission.cartridgeVersion;
+    const probeId = emission.probeId;
+    const response = snapshotResponse(emission.response);
+    if (typeof cartridgeId !== "string" || typeof cartridgeVersion !== "string" || typeof probeId !== "string") {
+      return {
+        qualified: false,
+        cartridgeId: typeof cartridgeId === "string" ? cartridgeId : "",
+        probeId: typeof probeId === "string" ? probeId : "",
+        level: null,
+        evaluation: null,
+        distinguishability: null,
+        reasonCodes: ["cartridge_evaluation_failed"],
+      };
+    }
+    capturedEmission = Object.freeze({ cartridgeId, cartridgeVersion, probeId, response });
+    const rawOutcome = observation && typeof observation === "object" ? observation.outcome : null;
+    const rawRequirementKey = observation && typeof observation === "object" ? observation.requirementKey : null;
+    capturedObservation = Object.freeze({
+      outcome: rawOutcome ?? null,
+      requirementKey: rawRequirementKey ?? null,
+    });
+  } catch {
+    return {
+      qualified: false, cartridgeId: "", probeId: "", level: null,
+      evaluation: null, distinguishability: null, reasonCodes: ["cartridge_evaluation_failed"],
+    };
+  }
+
   const result: CartridgeEvidenceQualification = {
-    qualified: false, cartridgeId: emission.cartridgeId, probeId: emission.probeId,
+    qualified: false, cartridgeId: capturedEmission.cartridgeId, probeId: capturedEmission.probeId,
     level: null, evaluation: null, distinguishability: null, reasonCodes: [],
   };
   const reject = (code: CartridgeEvidenceGateReasonCode) => ({ ...result, reasonCodes: [code] });
-  const cartridge = registry.getCartridge(emission.cartridgeId);
+
+  let cartridge: ReturnType<CartridgeRegistry["getCartridge"]>;
+  try {
+    cartridge = registry.getCartridge(capturedEmission.cartridgeId);
+  } catch {
+    return reject("cartridge_evaluation_failed");
+  }
   if (!cartridge) return reject("cartridge_unregistered");
   let manifestVersion: string;
   try {
@@ -92,12 +153,12 @@ export function qualifyCartridgeEmission(
   } catch {
     return reject("cartridge_evaluation_failed");
   }
-  if (manifestVersion !== emission.cartridgeVersion) return reject("cartridge_version_mismatch");
+  if (manifestVersion !== capturedEmission.cartridgeVersion) return reject("cartridge_version_mismatch");
   if (!hasEvidenceCapability(cartridge)) return reject("cartridge_level_below_evidence");
 
   let probe: DistinguishableProbeSpec<unknown, unknown> | null;
   try {
-    probe = cartridge.getProbe(emission.probeId);
+    probe = cartridge.getProbe(capturedEmission.probeId);
   } catch {
     return reject("cartridge_probe_lookup_failed");
   }
@@ -105,18 +166,21 @@ export function qualifyCartridgeEmission(
 
   const snapshot = snapshotAndVerifyProbe(probe);
   result.distinguishability = snapshot.report;
-  if (snapshot.probeId !== emission.probeId) return reject("cartridge_probe_identity_mismatch");
+  if (snapshot.probeId !== capturedEmission.probeId) return reject("cartridge_probe_identity_mismatch");
   if (!snapshot.report.distinguishable) return reject("cartridge_probe_not_distinguishable");
-  if (observation.requirementKey && observation.requirementKey !== snapshot.requirementKey) {
+  if (capturedObservation.requirementKey && capturedObservation.requirementKey !== snapshot.requirementKey) {
     return reject("cartridge_probe_requirement_mismatch");
   }
 
-  const verified = evaluateProbeWithSnapshot(snapshot, emission.response);
+  const verified = evaluateProbeWithSnapshot(snapshot, capturedEmission.response);
   if (verified.encodingFailed) return reject("cartridge_evaluation_failed");
 
   let cartridgeEvaluation: unknown;
   try {
-    cartridgeEvaluation = cartridge.evaluateProbeResponse(emission.probeId, emission.response);
+    cartridgeEvaluation = cartridge.evaluateProbeResponse(
+      capturedEmission.probeId,
+      snapshotResponse(capturedEmission.response),
+    );
   } catch {
     return reject("cartridge_evaluation_failed");
   }
@@ -127,7 +191,7 @@ export function qualifyCartridgeEmission(
   result.evaluation = verified.evaluation;
   if (result.evaluation.diagnosis === "invalid_response") return reject("cartridge_response_invalid");
   if (result.evaluation.outcome === "unverified") return reject("cartridge_outcome_unverified");
-  if (observation.outcome != null && observation.outcome !== result.evaluation.outcome) {
+  if (capturedObservation.outcome != null && capturedObservation.outcome !== result.evaluation.outcome) {
     return reject("cartridge_outcome_conflict");
   }
   return { ...result, qualified: true, reasonCodes: ["cartridge_evidence_qualified"] };

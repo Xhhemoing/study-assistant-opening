@@ -218,3 +218,22 @@ export function hasEvidenceCapability<TState>(
     return false;
   }
 }
+
+/** Format an unknown thrown value into a string without ever throwing a secondary error. */
+export function safeErrorDetail(error: unknown): string {
+  try {
+    if (error instanceof Error) {
+      const message = error.message;
+      if (typeof message === "string" && message.length > 0) return message;
+      const name = error.name;
+      if (typeof name === "string" && name.length > 0) return name;
+    }
+  } catch {
+    // Fall through to safe string coercion below.
+  }
+  try {
+    return String(error);
+  } catch {
+    return "unprintable thrown value";
+  }
+}
