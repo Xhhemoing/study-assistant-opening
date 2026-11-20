@@ -1,6 +1,6 @@
 import { courseExamSnapshotSchema, storedKnowledgeSnapshotSchema } from "@aistudy/contracts";
 import { COURSE_BACKUP_TABLES, LIBRARY_BACKUP_TABLES } from "../../../contracts/src/opening/backup-inventory";
-import { isRecord, isUuid, sourceReferences } from "./backup-validation";
+import { isRecord, isUuid, noteProvenanceSourceReferences, sourceReferences } from "./backup-validation";
 
 type Row = Record<string, unknown>;
 type Tables = Record<string, Row[]>;
@@ -45,8 +45,8 @@ export function backupAssetAdmission(tables: Tables) {
     if (name === "library_relations") return endpoint(row.from_type, row.from_id) && endpoint(row.to_type, row.to_id);
     if (name === "library_properties") return endpoint(row.subject_type, row.subject_id);
     if (name === "library_blocks" || name === "library_revisions") return documents.has(row.document_id);
-    if (name === "opening_note_provenance") return documents.has(row.document_id) && Array.isArray(row.context_source_refs)
-      && !!sourceReferences(row)?.every(id => sources.has(id));
+    if (name === "opening_note_provenance") return documents.has(row.document_id)
+      && !!noteProvenanceSourceReferences(row)?.every(id => sources.has(id));
     if (!isUuid(row.owner_user_id) || row.course_id != null && !courses.has(row.course_id)) return false;
     if (name === "opening_course_knowledge" || name === "opening_knowledge_confirmations") {
       if (!isRecord(row.source_versions) || !sourceReferences(row)?.every(id => sources.has(id))) return false;

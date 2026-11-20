@@ -1,7 +1,8 @@
 import { retainBackupEventChains, type NativeBackupSnapshot } from "@aistudy/domain/native";
 import { asObject } from "./backup-map";
 import { backupPrivateLibrary } from "./backup-private-library";
-import { parseBackupSourceRefs, type NativeTeachingOrigins } from "./native-backup-teaching";
+import { parseBackupSourceRefs } from "./backup-publication-provenance";
+import type { NativeTeachingOrigins } from "./native-backup-teaching";
 import { excludedTeachingDocumentIds } from "./opening-backup-library";
 
 type NativeLibrary = Pick<NativeBackupSnapshot,
@@ -19,12 +20,13 @@ export function projectNativeBackupLibrary<T extends Record<string, unknown>>(re
     }
   }
   const library = backupPrivateLibrary(records.documents, records.blocks, records.revisions, "documentId", excludedDocuments, privateBlockIds, includedSources);
+  const deletedDocs = new Set(records.documents.filter(row => row.deletedAt != null).map(row => row.id));
   const blockedCards = new Set(records.cards.filter(row => {
     const origin = origins?.get(String(row.originObservationRootId).toLowerCase());
     return !library.documentAllowed(row.sourceDocumentId) || origin?.privateExam
       || origin?.sourceIds.some(id => !includedSources.has(id))
       || origin?.documentIds.some(id => !library.documentAllowed(id))
-      || Array.isArray(row.originTeachingDocumentIds) && row.originTeachingDocumentIds.some(id => !library.documentAllowed(id));
+      || Array.isArray(row.originTeachingDocumentIds) && row.originTeachingDocumentIds.some(id => deletedDocs.has(id) || !library.documentAllowed(id));
   }).map(row => row.id));
   const keep = (id: unknown) => library.assetAllowed(id) && !blockedCards.has(id);
   return {

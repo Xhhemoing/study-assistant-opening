@@ -1,24 +1,21 @@
 import type { Sql, TransactionSql } from "postgres";
-import { contextSourceRefsIncluded } from "./opening-context-provenance";
+import { contextSourceRefsIncluded, noteContextSourceRefs } from "./opening-context-provenance";
 import type { OpeningBackupRecordSnapshot } from "./opening-backup-records";
-import { backupPrivateLibrary, isBackupAnswerBlock } from "./backup-private-library";
+import { backupPrivateLibrary } from "./backup-private-library";
 import { asObject } from "./backup-map";
 import { withPublicationCardSourceIds } from "./card-sources";
+import { historicalTeachingDocumentsByCard, parseBackupSourceRefs, publicationAnswerKeysByDocument, publicationMetadata, publicationMetadataIds, publicationSourceRefsByDocument } from "./backup-publication-provenance";
 
 type Tables = OpeningBackupRecordSnapshot["tables"];
 type LibraryTables = Partial<Record<string, Record<string, unknown>[]>>;
 
 function privateTeachingBlockIds(tables: LibraryTables) {
-  return (tables.opening_teaching_activity_specs ?? []).flatMap(row => Array.isArray(row.block_order)
-    ? row.block_order.flatMap(ref => {
-      const block = asObject(ref);
-      return block && isBackupAnswerBlock(block) ? [block.blockId] : [];
-    }) : []);
+  return [...publicationAnswerKeysByDocument(tables.opening_teaching_activity_specs ?? [], tables.opening_note_provenance ?? []).values()].flat();
 }
 
-export async function readBackupAnswerBlockIds(sql: Sql | TransactionSql, workspace: string): Promise<unknown[]> {
-  const specs = await sql`SELECT block_order FROM opening_teaching_activity_specs WHERE workspace_id=${workspace}`;
-  return privateTeachingBlockIds({ opening_teaching_activity_specs: specs });
+export function readBackupNoteProvenance(sql: Sql | TransactionSql, workspace: string) {
+  return sql`SELECT document_id,workspace_id,context_source_refs,created_at
+    FROM opening_note_provenance WHERE workspace_id=${workspace} ORDER BY document_id`;
 }
 
 export function excludedTeachingDocumentIds(specs: Record<string, unknown>[], sources: ReadonlySet<string>): string[] {
@@ -30,32 +27,54 @@ export function excludedTeachingDocumentIds(specs: Record<string, unknown>[], so
 }
 
 export function readBackupTeachingSourceRefs(sql: Sql | TransactionSql, workspace: string) {
-  return sql`SELECT spec.document_id,spec.source_refs FROM opening_teaching_activity_specs spec
+  return sql`SELECT spec.document_id,spec.source_refs,spec.block_order FROM opening_teaching_activity_specs spec
     JOIN library_documents d ON d.id=spec.document_id
     WHERE spec.workspace_id=${workspace} AND d.workspace_id=${workspace}`;
 }
 
 /** Portable automatic cards retain publication lineage even after the spec is detached. */
-export function projectOpeningBackupCardSources(tables: LibraryTables) {
+export function projectOpeningBackupCardSources(tables: LibraryTables, allProvenance = tables.opening_note_provenance ?? []) {
   const observations = new Map((tables.opening_learning_observations ?? []).map(row => [row.id, row.activity_id]));
   const specs = tables.opening_teaching_activity_specs ?? [];
   const documentByActivity = new Map(specs.map(row => [row.activity_id, row.document_id]));
   const sourcesByDocument = new Map<string, Set<string>>();
   function addSources(document: unknown, refs: unknown, historical: boolean) {
     if (typeof document !== "string" || !Array.isArray(refs)) return;
-    const sources = sourcesByDocument.get(document) ?? new Set<string>();
+    const id = document.toLowerCase();
+    const sources = sourcesByDocument.get(id) ?? new Set<string>();
     for (const value of refs) {
       const ref = asObject(value);
       if (typeof ref?.sourceId === "string" && (!historical || ref.publication === true)) sources.add(ref.sourceId.toLowerCase());
     }
-    sourcesByDocument.set(document, sources);
+    sourcesByDocument.set(id, sources);
   }
   for (const row of specs) addSources(row.document_id, row.source_refs, false);
-  for (const row of tables.opening_note_provenance ?? []) addSources(row.document_id, row.context_source_refs, true);
-  return (tables.cards ?? []).map(card => {
-    const document = documentByActivity.get(observations.get(card.origin_observation_root_id));
-    const sourceIds = typeof document === "string" ? sourcesByDocument.get(document) : undefined;
-    return sourceIds?.size ? { ...card, source_ids: withPublicationCardSourceIds(card.source_ids, sourceIds) } : card;
+  for (const row of allProvenance) addSources(row.document_id, row.context_source_refs, true);
+  const historicalDocuments = historicalTeachingDocumentsByCard(allProvenance);
+  const includedDocuments = tables.library_documents && new Set(tables.library_documents.filter(row => row.deleted_at == null)
+    .map(row => String(row.id).toLowerCase()));
+  const includedSources = new Set((tables.opening_sources ?? []).map(row => String(row.id).toLowerCase()));
+  return (tables.cards ?? []).flatMap(card => {
+    const historical = card.origin_observation_root_id == null ? [] : historicalDocuments.get(String(card.id).toLowerCase()) ?? [];
+    const documents = [...historical,
+      documentByActivity.get(observations.get(card.origin_observation_root_id)), card.source_document_id]
+      .filter((id): id is string => typeof id === "string").map(id => id.toLowerCase());
+    if (includedDocuments && documents.some(document => !includedDocuments.has(document))) return [];
+    const sourceIds = documents.flatMap(document => [...(sourcesByDocument.get(document) ?? [])]);
+    if (sourceIds.some(id => !includedSources.has(id))) return [];
+    return [sourceIds.length ? { ...card, source_ids: withPublicationCardSourceIds(card.source_ids, sourceIds) } : card];
+  });
+}
+
+export function projectOpeningBackupProvenance(rows: Record<string, unknown>[], cardIds: ReadonlySet<unknown>) {
+  return rows.map(row => {
+    const refs = parseBackupSourceRefs(row.context_source_refs);
+    if (!refs) return row;
+    const answers = publicationMetadataIds(row.context_source_refs, "answerKeyBlockIds");
+    const cards = publicationMetadataIds(row.context_source_refs, "publicationCardIds").filter(id => cardIds.has(id));
+    return { ...row, context_source_refs: [
+      ...refs, ...publicationMetadata(answers, cards),
+    ] };
   });
 }
 
@@ -72,11 +91,34 @@ function projectTeachingBlockOrder(row: Record<string, unknown>, blockAllowed: (
   }) } : row;
 }
 
+function withOpeningPublicationProvenance(tables: LibraryTables) {
+  const provenance = new Map((tables.opening_note_provenance ?? []).map(row => [String(row.document_id).toLowerCase(), row]));
+  const docs = new Map((tables.library_documents ?? []).map(row => [String(row.id).toLowerCase(), row]));
+  const specs = tables.opening_teaching_activity_specs ?? [];
+  const sources = new Map((tables.opening_sources ?? []).map(row => [String(row.id).toLowerCase(), Number(row.version)]));
+  const publications = publicationSourceRefsByDocument(specs, sources);
+  const answerKeys = publicationAnswerKeysByDocument(specs, [...provenance.values()]);
+  for (const id of new Set([...publications.keys(), ...answerKeys.keys()])) {
+    const document = docs.get(id);
+    const refs = publications.get(id) ?? [];
+    const answers = answerKeys.get(id) ?? [];
+    if (!document || (!refs.length && !answers.length)) continue;
+    const row = provenance.get(id) ?? { document_id: document.id, workspace_id: document.workspace_id, context_source_refs: [] };
+    if (!Array.isArray(row.context_source_refs)) continue;
+    const combined = parseBackupSourceRefs([...row.context_source_refs, ...refs]);
+    if (combined) provenance.set(id, { ...row, context_source_refs: [
+      ...combined, ...publicationMetadata(answers, publicationMetadataIds(row.context_source_refs, "publicationCardIds")),
+    ] });
+  }
+  return [...provenance.values()];
+}
+
 export function projectOpeningRestoreLibrary<T extends LibraryTables>(tables: T): T {
   // Missing inventory has separate legacy recovery semantics.
   if (tables.library_documents === undefined) return tables;
+  const provenanceRows = withOpeningPublicationProvenance(tables);
   const library = backupPrivateLibrary(tables.library_documents, tables.library_blocks ?? [], tables.library_revisions ?? [],
-    "document_id", [], privateTeachingBlockIds(tables));
+    "document_id", [], privateTeachingBlockIds({ ...tables, opening_note_provenance: provenanceRows }));
   return { ...tables,
     library_documents: library.documents,
     ...(tables.library_blocks && { library_blocks: library.blocks }),
@@ -84,7 +126,7 @@ export function projectOpeningRestoreLibrary<T extends LibraryTables>(tables: T)
     ...(tables.library_relations && { library_relations: tables.library_relations.filter(row =>
       library.assetAllowed(row.from_id) && library.assetAllowed(row.to_id)) }),
     ...(tables.library_properties && { library_properties: tables.library_properties.filter(row => library.assetAllowed(row.subject_id)) }),
-    ...(tables.opening_note_provenance && { opening_note_provenance: tables.opening_note_provenance.filter(row => library.documentAllowed(row.document_id)) }),
+    ...(provenanceRows.length > 0 && { opening_note_provenance: provenanceRows.filter(row => library.documentAllowed(row.document_id)) }),
     ...(tables.opening_teaching_activity_specs && { opening_teaching_activity_specs: tables.opening_teaching_activity_specs.map(row =>
       projectTeachingBlockOrder(row, library.blockAllowed)) }),
   };
@@ -120,14 +162,15 @@ export function isPrivateExamActivity(sql: Sql | TransactionSql, privateExams: s
 
 /** The same historical lineage predicate used by native note export. Child objects follow
  * admitted document and block identities, including both ends of polymorphic relations. */
-export async function readBackupLibrary(tx: TransactionSql, workspace: string, tables: Tables, privateExams: string[]) {
+export async function readBackupLibrary(tx: TransactionSql, workspace: string, tables: Tables, privateExams: string[],
+  provenance: Record<string, unknown>[]) {
   const sourceIds = new Set(tables.opening_sources.map(row => String(row.id)));
   const excludedDocuments = [...privateExams, ...excludedTeachingDocumentIds(tables.opening_teaching_activity_specs, sourceIds)];
   const documents = [...await tx`SELECT d.id,d.workspace_id,d.title,d.lifecycle,d.schema_version,d.current_revision_number,
       d.created_at,d.updated_at,d.deleted_at FROM library_documents d
     WHERE d.workspace_id=${workspace} AND NOT (d.id=ANY(${excludedDocuments}::uuid[]))
       AND NOT EXISTS (SELECT 1 FROM opening_note_provenance p WHERE p.document_id=d.id AND
-        (p.workspace_id<>d.workspace_id OR NOT (${contextSourceRefsIncluded(tx, workspace, tx`p.context_source_refs`, true)})))
+        (p.workspace_id<>d.workspace_id OR NOT (${contextSourceRefsIncluded(tx, workspace, noteContextSourceRefs(tx, tx`p.context_source_refs`), true)})))
       AND NOT EXISTS (SELECT 1 FROM opening_teaching_units u WHERE u.document_id=d.id
         AND NOT (u.id=ANY(${tables.opening_teaching_units.map(row => String(row.id))}::uuid[])))
       AND NOT EXISTS (SELECT 1 FROM opening_teaching_activity_specs spec WHERE spec.document_id=d.id
@@ -144,7 +187,8 @@ export async function readBackupLibrary(tx: TransactionSql, workspace: string, t
   const revisions = [...await tx`SELECT r.id,r.workspace_id,r.document_id,r.revision_number,r.parent_revision_number,
       r.title,r.lifecycle,r.reason,r.blocks,r.created_at FROM library_revisions r
     WHERE r.workspace_id=${workspace} AND r.document_id=ANY(${candidateIds}::uuid[]) ORDER BY r.document_id,r.revision_number`];
-  const library = backupPrivateLibrary(documents, blocks, revisions, "document_id", [], privateTeachingBlockIds(tables), sourceIds);
+  const library = backupPrivateLibrary(documents, blocks, revisions, "document_id", [],
+    privateTeachingBlockIds({ ...tables, opening_note_provenance: provenance }), sourceIds);
   const ids = library.documents.map(row => String(row.id));
   const blockIds = library.blocks.map(row => String(row.id));
   const relations = [...await tx`SELECT id,workspace_id,from_type,from_id,to_type,to_id,relation_type,created_at,source
@@ -156,13 +200,15 @@ export async function readBackupLibrary(tx: TransactionSql, workspace: string, t
     FROM library_properties WHERE workspace_id=${workspace}
       AND ((subject_type='document' AND subject_id=ANY(${ids}::uuid[])) OR (subject_type='block' AND subject_id=ANY(${blockIds}::uuid[])))
     ORDER BY id`];
-  const provenance = [...await tx`SELECT document_id,workspace_id,context_source_refs,created_at
-    FROM opening_note_provenance WHERE workspace_id=${workspace} AND document_id=ANY(${ids}::uuid[]) ORDER BY document_id`];
   const documentsIncluded = new Set(ids);
   tables.opening_teaching_units = tables.opening_teaching_units.filter(row => documentsIncluded.has(String(row.document_id)));
   const units = new Set(tables.opening_teaching_units.map(row => row.id));
-  tables.opening_teaching_activity_specs = tables.opening_teaching_activity_specs.filter(row =>
-    documentsIncluded.has(String(row.document_id)) && units.has(row.teaching_unit_id)).map(row => projectTeachingBlockOrder(row, library.blockAllowed));
+  const specs = tables.opening_teaching_activity_specs.filter(row => documentsIncluded.has(String(row.document_id)) && units.has(row.teaching_unit_id));
+  tables.opening_teaching_activity_specs = specs.map(row => projectTeachingBlockOrder(row, library.blockAllowed));
   return { library_documents: library.documents, library_blocks: library.blocks, library_revisions: library.revisions,
-    library_relations: relations, library_properties: properties, opening_note_provenance: provenance };
+    library_relations: relations, library_properties: properties,
+    opening_note_provenance: withOpeningPublicationProvenance({
+      library_documents: library.documents, opening_teaching_activity_specs: specs, opening_sources: tables.opening_sources,
+      opening_note_provenance: provenance.filter(row => documentsIncluded.has(String(row.document_id))),
+    }) };
 }

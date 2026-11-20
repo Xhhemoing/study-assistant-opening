@@ -3,12 +3,14 @@ import { uuidSchema } from "@aistudy/contracts";
 import type { Sql } from "postgres";
 import type { NativeBackupPackage } from "@aistudy/contracts";
 import { retainBackupEventChains, type NativeBackupSnapshot, type NativeBackupRecord } from "@aistudy/domain/native";
-import { contextSourceRefsIncluded, parseContextSourceRefs } from "./opening-context-provenance";
+import { contextSourceRefsIncluded, noteContextSourceRefs, parseNoteContextSourceRefs } from "./opening-context-provenance";
 import { BackupRestoreError } from "./backup-types";
 import { asRecords, filesFromBlocks } from "./backup-map";
-import { attachNativeCardPublicationSources, parseBackupSourceRefs, type BackupSourceRef } from "./native-backup-teaching";
+import { attachNativeCardPublicationSources } from "./native-backup-teaching";
+import { mergeNotePublicationProvenance, parseBackupSourceRefs, type BackupSourceRef } from "./backup-publication-provenance";
+import type { ExistingBackupIds } from "@aistudy/domain";
 
-export type NoteBackupProvenance = { contextSourceRefs: BackupSourceRef[] };
+export type NoteBackupProvenance = { contextSourceRefs: BackupSourceRef[]; answerKeyBlockIds?: string[] };
 
 /** Remove the whole linked note, including historical text and native dependants. */
 export function filterNativeNotes(snapshot: NativeBackupSnapshot, provenance: ReadonlyMap<string, NoteBackupProvenance | null>,
@@ -35,19 +37,22 @@ export function filterNativeNotes(snapshot: NativeBackupSnapshot, provenance: Re
 }
 
 export async function applyNativeNoteExportPrivacy(sql: Sql, workspaceId: string, snapshot: NativeBackupSnapshot,
-  publications: ReadonlyMap<string, BackupSourceRef[]>): Promise<NativeBackupSnapshot> {
+  publications: ReadonlyMap<string, BackupSourceRef[]>, answerKeys: ReadonlyMap<string, string[]>): Promise<NativeBackupSnapshot> {
   const rows = await sql`SELECT document_id, context_source_refs,
-    ${contextSourceRefsIncluded(sql, workspaceId, sql`context_source_refs`, true)} AS included
+    ${contextSourceRefsIncluded(sql, workspaceId, noteContextSourceRefs(sql, sql`context_source_refs`), true)} AS included
     FROM opening_note_provenance WHERE workspace_id=${workspaceId}`;
   const provenance = new Map<string, NoteBackupProvenance | null>();
-  for (const [id, refs] of publications) {
-    if (refs.length) provenance.set(id, { contextSourceRefs: refs });
+  const note = (id: string, refs: BackupSourceRef[]) => ({ contextSourceRefs: refs,
+    ...(answerKeys.has(id) && { answerKeyBlockIds: answerKeys.get(id) }) });
+  for (const id of new Set([...publications.keys(), ...answerKeys.keys()])) {
+    const refs = parseBackupSourceRefs(publications.get(id) ?? []);
+    if (refs?.length || answerKeys.has(id)) provenance.set(id, refs ? note(id, refs) : null);
   }
   for (const row of rows) {
     const id = String(row.document_id);
     const refs = Array.isArray(row.context_source_refs)
       ? parseBackupSourceRefs([...row.context_source_refs, ...(publications.get(id) ?? [])]) : null;
-    provenance.set(id, row.included && refs !== null ? { contextSourceRefs: refs } : null);
+    provenance.set(id, row.included && refs !== null ? note(id, refs) : null);
   }
   const blockedCards = new Set((await sql`SELECT c.id FROM cards c WHERE c.workspace_id=${workspaceId}
     AND NOT (${cardReadable(sql, workspaceId)})`).map(row => String(row.id)));
@@ -65,9 +70,15 @@ export function readNoteBackupProvenance(record: NativeBackupRecord, requiresMet
   if (record.openingProvenance === null) return null;
   const value = record.openingProvenance;
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new BackupRestoreError("VALIDATION", "Backup note provenance is invalid");
-  const refs = parseBackupSourceRefs((value as Record<string, unknown>).contextSourceRefs);
+  const { contextSourceRefs, answerKeyBlockIds } = value as Record<string, unknown>;
+  const refs = parseBackupSourceRefs(contextSourceRefs);
   if (refs === null) throw new BackupRestoreError("VALIDATION", "Backup note provenance is unknown");
-  return { contextSourceRefs: refs };
+  if (answerKeyBlockIds !== undefined && (!Array.isArray(answerKeyBlockIds) || !answerKeyBlockIds.every(id => uuidSchema.safeParse(id).success))) {
+    throw new BackupRestoreError("VALIDATION", "Backup answer-key block identities are invalid");
+  }
+  return { contextSourceRefs: refs, ...(Array.isArray(answerKeyBlockIds) && {
+    answerKeyBlockIds: [...new Set(answerKeyBlockIds.map(id => String(id).toLowerCase()))],
+  }) };
 }
 
 export async function assertNativeNoteRestorePrivacy(sql: Sql, workspaceId: string, packed: NativeBackupPackage): Promise<void> {
@@ -78,10 +89,11 @@ export async function assertNativeNoteRestorePrivacy(sql: Sql, workspaceId: stri
   }
   for (const card of asRecords(packed.records.cards)) {
     if (typeof card.sourceDocumentId === "string") documentIds.add(card.sourceDocumentId);
+    for (const id of teachingDocumentIds(card)) documentIds.add(id);
   }
   const current = documentIds.size ? await sql`SELECT document_id, context_source_refs FROM opening_note_provenance
     WHERE workspace_id=${workspaceId} AND document_id=ANY(${[...documentIds]}::uuid[])` : [];
-  const origins = current.map(row => ({ contextSourceRefs: parseContextSourceRefs(row.context_source_refs) }));
+  const origins = current.map(row => ({ contextSourceRefs: parseNoteContextSourceRefs(row.context_source_refs) }));
   for (const record of asRecords(packed.records.documents)) {
     const value = readNoteBackupProvenance(record, modern);
     if (value) {
@@ -98,9 +110,19 @@ export async function assertNativeNoteRestorePrivacy(sql: Sql, workspaceId: stri
   }
 }
 
+function teachingDocumentIds(card: NativeBackupRecord): string[] {
+  if (card.originTeachingDocumentIds === undefined) return [];
+  if (card.originObservationRootId == null || !Array.isArray(card.originTeachingDocumentIds)
+    || !card.originTeachingDocumentIds.every(id => uuidSchema.safeParse(id).success)) {
+    throw new BackupRestoreError("VALIDATION", "Automatic card teaching document lineage is invalid");
+  }
+  return [...new Set(card.originTeachingDocumentIds.map(id => String(id).toLowerCase()))];
+}
+
 /** Native cards keep their original source namespace; importing text cannot drop known lineage. */
-export async function assertNativeCardRestorePrivacy(sql: Sql, workspaceId: string, packed: NativeBackupPackage): Promise<void> {
+export async function assertNativeCardRestorePrivacy(sql: Sql, workspaceId: string, packed: NativeBackupPackage, existingIds: ExistingBackupIds): Promise<void> {
   const modern = Number.parseInt(packed.schemaManifest.latestMigrationId.slice(0, 4), 10) >= 64;
+  const retained = new Set(existingIds.cards);
   for (const card of asRecords(packed.records.cards)) {
     const ids = card.sourceIds === undefined && !modern ? [] : card.sourceIds;
     if (!Array.isArray(ids) || (card.originObservationRootId == null && ids.length > 32)
@@ -115,10 +137,51 @@ export async function assertNativeCardRestorePrivacy(sql: Sql, workspaceId: stri
           AND owner_user_id=${String(card.ownerUserId)} AND COALESCE(root_observation_id,id)=id`;
       if (!origin) throw new BackupRestoreError("VALIDATION", "automatic card observation origin is unavailable");
     }
-    const [current] = await sql`SELECT source_ids FROM cards WHERE id=${card.id} AND workspace_id=${workspaceId}`;
-    if (current && (current.source_ids as string[]).some(id => !ids.includes(id))) throw new BackupRestoreError("VALIDATION", "restore cannot remove card source lineage");
+    const [current] = retained.has(card.id) ? await sql`SELECT source_ids,origin_observation_root_id,source_document_id
+      FROM cards WHERE id=${card.id} AND workspace_id=${workspaceId} FOR UPDATE` : [];
+    if (current && ((current.origin_observation_root_id != null && card.originObservationRootId != null
+      && current.origin_observation_root_id !== card.originObservationRootId)
+      || (current.source_document_id != null && card.sourceDocumentId != null && current.source_document_id !== card.sourceDocumentId))) {
+      throw new BackupRestoreError("VALIDATION", "Restore cannot replace retained card origins");
+    }
     if (ids.length && packed.sourceWorkspaceId !== workspaceId) throw new BackupRestoreError("VALIDATION", "linked cards require their original workspace and source materials");
-    const [admitted] = await sql`SELECT ${cardSourcesIncluded(sql, workspaceId, sql`${ids}::uuid[]`)} AS included`;
+    const combined = [...new Set([...ids, ...((current?.source_ids ?? []) as string[])])];
+    const [admitted] = await sql`SELECT ${cardSourcesIncluded(sql, workspaceId, sql`${combined}::uuid[]`)} AS included`;
     if (!admitted?.included) throw new BackupRestoreError("VALIDATION", "card source is deleted, excluded, or unavailable");
+  }
+}
+
+/** Apply privacy metadata to admitted parents, including content left in place by skip. */
+export async function retainNativeRestoreProvenance(tx: Sql, workspaceId: string, packed: NativeBackupPackage, existingIds: ExistingBackupIds) {
+  for (const document of asRecords(packed.records.documents)) {
+    const note = readNoteBackupProvenance(document, false);
+    if (note) await mergeNotePublicationProvenance(tx, workspaceId, document.id, note.contextSourceRefs, note.answerKeyBlockIds);
+  }
+  const retained = new Set(existingIds.cards);
+  const cardsByDocument = new Map<string, string[]>();
+  for (const card of asRecords(packed.records.cards)) {
+    const origin = card.originObservationRootId as string | null | undefined;
+    const noteId = card.sourceDocumentId as string | null | undefined;
+    if (retained.has(card.id) && (Array.isArray(card.sourceIds) && card.sourceIds.length || origin || noteId)) {
+      if (noteId) {
+        const [document] = await tx`SELECT id FROM library_documents WHERE id=${noteId} AND workspace_id=${workspaceId} FOR SHARE`;
+        if (!document) throw new BackupRestoreError("VALIDATION", "Card note is outside target workspace");
+      }
+      await tx`UPDATE cards c SET source_ids=ARRAY(
+        SELECT DISTINCT source.id FROM unnest(c.source_ids || ${(card.sourceIds ?? []) as string[]}::uuid[]) AS source(id) ORDER BY source.id),
+        origin_observation_root_id=COALESCE(c.origin_observation_root_id,${origin ?? null}),
+        source_document_id=COALESCE(c.source_document_id,${noteId ?? null})
+        WHERE c.id=${card.id} AND c.workspace_id=${workspaceId}`;
+    }
+    for (const id of teachingDocumentIds(card)) {
+      const cards = cardsByDocument.get(id) ?? [];
+      cards.push(card.id);
+      cardsByDocument.set(id, cards);
+    }
+  }
+  for (const [id, cards] of cardsByDocument) {
+    const [document] = await tx`SELECT id FROM library_documents WHERE id=${id} AND workspace_id=${workspaceId} AND deleted_at IS NULL FOR SHARE`;
+    if (!document) throw new BackupRestoreError("VALIDATION", "Automatic card teaching document is unavailable");
+    await mergeNotePublicationProvenance(tx, workspaceId, id, [], [], cards);
   }
 }

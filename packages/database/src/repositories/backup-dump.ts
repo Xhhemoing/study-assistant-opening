@@ -1,6 +1,7 @@
 import { isForbiddenBackupTable } from "../../../contracts/src/opening/backup-inventory";
-import { privateExamDocumentIds, readBackupAnswerBlockIds, readBackupLibrarySourceVersions, readBackupTeachingSourceRefs } from "./opening-backup-library";
-import { attachNativeTeachingOrigins, publicationSourceRefsByDocument, readNativeTeachingOrigins } from "./native-backup-teaching";
+import { privateExamDocumentIds, readBackupLibrarySourceVersions, readBackupNoteProvenance, readBackupTeachingSourceRefs } from "./opening-backup-library";
+import { attachNativeTeachingOrigins, readNativeTeachingOrigins } from "./native-backup-teaching";
+import { historicalTeachingDocumentsByCard, publicationAnswerKeysByDocument, publicationSourceRefsByDocument } from "./backup-publication-provenance";
 import { applyNativeNoteExportPrivacy } from "./native-note-privacy";
 import { projectNativeBackupLibrary } from "./backup-native-library";
 import { attachNativeLearningLinks } from "./native-learning-links";
@@ -82,10 +83,11 @@ export async function dumpWorkspaceSnapshot(
     throw new BackupRestoreError("VALIDATION", "No migrations are registered");
   }
   const privateExams = await privateExamDocumentIds(sql, workspaceId);
-  const [privateBlocks, sourceVersions, teachingSpecs, origins] = await Promise.all([
-    readBackupAnswerBlockIds(sql, workspaceId), readBackupLibrarySourceVersions(sql, workspaceId),
+  const [noteProvenance, sourceVersions, teachingSpecs, origins] = await Promise.all([
+    readBackupNoteProvenance(sql, workspaceId), readBackupLibrarySourceVersions(sql, workspaceId),
     readBackupTeachingSourceRefs(sql, workspaceId), readNativeTeachingOrigins(sql, workspaceId, cards, privateExams),
   ]);
+  const answerKeys = publicationAnswerKeysByDocument(teachingSpecs, noteProvenance);
   const snapshot: NativeBackupSnapshot = {
     sourceWorkspaceId: workspaceId,
     workspace,
@@ -103,15 +105,15 @@ export async function dumpWorkspaceSnapshot(
       blocks: explorationBlocks,
     }, "explorationId"),
     promotions: nestBy(promotions, { targets: promotionTargets }, "promotionId"),
-    cards: nestBy(attachNativeTeachingOrigins(cards, origins), { reviewStates: cardStates }, "cardId"),
+    cards: nestBy(attachNativeTeachingOrigins(cards, origins, historicalTeachingDocumentsByCard(noteProvenance)), { reviewStates: cardStates }, "cardId"),
     events,
     files: [],
   };
   const { records: learnerSnapshot } = projectNativeBackupLibrary(
-    snapshot, privateExams, privateBlocks, new Set(sourceVersions.keys()), teachingSpecs, origins,
+    snapshot, privateExams, [...answerKeys.values()].flat(), new Set(sourceVersions.keys()), teachingSpecs, origins,
   );
   return applyNativeNoteExportPrivacy(sql, workspaceId, { ...snapshot, ...learnerSnapshot },
-    publicationSourceRefsByDocument(teachingSpecs, sourceVersions));
+    publicationSourceRefsByDocument(teachingSpecs, sourceVersions), answerKeys);
 }
 
 export function snapshotToPackage(snapshot: NativeBackupSnapshot) {

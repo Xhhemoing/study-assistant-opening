@@ -474,9 +474,11 @@ export async function executeOpeningRestoreApply(
       errors: forbidden ? [`Forbidden backup table: ${forbidden}`] : preview.errors };
   }
   const normalized = normalizeOpeningRestoreHistory(args.backup as OpeningBackup);
-  const tables = projectOpeningRestoreLibrary(normalized.tables as Record<string, Record<string, unknown>[]>);
+  const rawTables = normalized.tables as Record<string, Record<string, unknown>[]>;
+  const tables = projectOpeningRestoreLibrary(rawTables);
   const backup: OpeningBackup = { ...normalized, tables: {
-    ...tables, ...(tables.cards && { cards: projectOpeningBackupCardSources(tables) }),
+    ...tables, ...(tables.cards && { cards: projectOpeningBackupCardSources(tables,
+      [...(rawTables.opening_note_provenance ?? []), ...(tables.opening_note_provenance ?? [])]) }),
   } };
   const planned = planOpeningRestoreApply(backup, journal, {
     confirmLocalRestore: true,

@@ -12,7 +12,7 @@ import { validateBackupPlanFeedback } from "./backup-plan-feedback";
 import { validateBackupSystemQuery } from "./backup-system-query";
 import { validateBackupLearningState } from "./backup-learning-state";
 import { isJournal, isMemoryDeletions, isRecord, isTables, isUuid, libraryBlockSourceReferences,
-  libraryRevisionSourceReferences, parseUuidArray, sourceReferences, validObject } from "./backup-validation";
+  libraryRevisionSourceReferences, noteProvenanceSourceReferences, parseUuidArray, sourceReferences, validObject } from "./backup-validation";
 
 export type OpeningDeletionMark = { sourceId: string; deletedAt: string; assetDeletedAt?: string | null };
 export type OpeningMemoryDeletions = {
@@ -332,6 +332,7 @@ export function validateOpeningRestore(
       const libraryContent = name === "library_blocks" || name === "library_revisions";
       const refs = name === "library_blocks" ? libraryBlockSourceReferences(row)
         : name === "library_revisions" ? libraryRevisionSourceReferences(row.blocks)
+        : name === "opening_note_provenance" ? noteProvenanceSourceReferences(row)
           : sourceReferences(row, name === "opening_problem_refs" || name === "opening_learning_item_versions");
       if (refs === null) errors.push(`table ${name} has invalid source lineage`);
       if (libraryContent && refs?.some(id => !ownedSources.has(id))) {

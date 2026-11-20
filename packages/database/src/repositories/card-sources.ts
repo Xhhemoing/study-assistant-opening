@@ -1,6 +1,6 @@
 import type { Sql, TransactionSql } from "postgres";
 import { CardRepositoryError } from "./cards-types";
-import { contextSourceRefsIncluded, parseContextSourceRefs } from "./opening-context-provenance";
+import { contextSourceRefsIncluded, noteContextSourceRefs, parseNoteContextSourceRefs } from "./opening-context-provenance";
 
 type Db = Sql | TransactionSql;
 /** Identity-based lineage remains private after source exclusion/deletion, including historical text. */
@@ -15,7 +15,7 @@ export function cardReadable(db: Db, workspaceId: string) {
   return db`${cardSourcesIncluded(db, workspaceId, db`c.source_ids`)}
     AND (${document} IS NULL OR EXISTS (SELECT 1 FROM library_documents d WHERE d.id=${document} AND d.workspace_id=${workspaceId}))
     AND NOT EXISTS (SELECT 1 FROM opening_note_provenance np WHERE np.document_id=${document}
-      AND (np.workspace_id<>${workspaceId} OR NOT (${contextSourceRefsIncluded(db, workspaceId, db`np.context_source_refs`, true)})))`;
+      AND (np.workspace_id<>${workspaceId} OR NOT (${contextSourceRefsIncluded(db, workspaceId, noteContextSourceRefs(db, db`np.context_source_refs`), true)})))`;
 }
 
 export function withPublicationCardSourceIds(existing: unknown, publicationIds: Iterable<string>) {
@@ -42,7 +42,7 @@ export async function planCardEvidence(db: Db, workspaceId: string, card: { id: 
     LEFT JOIN opening_note_provenance np ON np.document_id=c.source_document_id AND np.workspace_id=c.workspace_id
     WHERE c.id=${card.id} AND c.workspace_id=${workspaceId}`;
   if (!row) throw new CardRepositoryError("NOT_FOUND", "card not found");
-  const refs = row.provenance_id ? parseContextSourceRefs(row.context_source_refs) : [];
+  const refs = row.provenance_id ? parseNoteContextSourceRefs(row.context_source_refs) : [];
   if (!refs) return { kind: "skip", reason: "skipped_source_unavailable" };
   const ids = [...new Set([...(row.source_ids as string[]), ...refs.map(ref => ref.sourceId)])].sort();
   if (ids.length > 32) return { kind: "skip", reason: "skipped_source_unavailable" };

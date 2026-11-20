@@ -1,6 +1,6 @@
 import { captureOpeningObservationCardOrigin } from "./opening-card-drafts";
 import { admitLearningSources, lockWorkspaceLearningHistory } from "./opening-learning-facts";
-import { parseContextSourceRefs } from "./opening-context-provenance";
+import { parseNoteContextSourceRefs } from "./opening-context-provenance";
 import { createInitialState } from "@aistudy/domain";
 import { randomUUID } from "node:crypto";
 import type { Sql } from "postgres";
@@ -44,7 +44,7 @@ export function createCardRepository(sql: Sql): CardRepository {
               WHERE d.id=${input.sourceDocumentId} AND d.workspace_id=${input.workspaceId} FOR SHARE OF d`;
             if (!document) throw new CardRepositoryError("NOT_FOUND", "source note not found");
             if (document.provenance_id) {
-              const refs = parseContextSourceRefs(document.context_source_refs);
+              const refs = parseNoteContextSourceRefs(document.context_source_refs);
               if (!refs) throw new CardRepositoryError("VALIDATION", "source note provenance unavailable");
               sourceIds = [...new Set([...sourceIds, ...refs.map(ref => ref.sourceId)])].sort();
             }

@@ -1,6 +1,6 @@
 import { projectBackupFormalGoalReferences, projectBackupCourseMilestoneReferences } from "@aistudy/domain";
 import { retainBackupEventChains } from "@aistudy/domain/native";
-import { isPrivateExamActivity, privateExamDocumentIds, projectOpeningBackupCardSources, readBackupLibrary } from "./opening-backup-library";
+import { isPrivateExamActivity, privateExamDocumentIds, projectOpeningBackupCardSources, projectOpeningBackupProvenance, readBackupLibrary, readBackupNoteProvenance } from "./opening-backup-library";
 import { readBackupCourseAssets } from "./opening-backup-course-assets";
 import { readOpeningBackupCourseRecords } from "./opening-backup-course-records";
 import { readOpeningBackupLearningLinks } from "./opening-backup-learning-links";
@@ -291,6 +291,7 @@ export async function readOpeningBackupTableRows(
   let attemptIds!: Set<unknown>;
   let turnIds!: Set<unknown>;
   let admittedAnchor!: (row: Record<string, unknown>) => boolean;
+  const noteProvenance = await readBackupNoteProvenance(tx, id);
   for (;;) {
     const currentActivityIds = new Set(tables.opening_teaching_activities.map(row => row.id));
     if (tables.opening_teaching_activity_specs.some(row => !currentActivityIds.has(row.activity_id))) {
@@ -299,7 +300,7 @@ export async function readOpeningBackupTableRows(
       const keptUnitsAfterDrop = new Set(tables.opening_teaching_activity_specs.map(row => row.teaching_unit_id));
       tables.opening_teaching_units = tables.opening_teaching_units.filter(row => !unitsFromSpecs.has(row.id) || keptUnitsAfterDrop.has(row.id));
     }
-    libraryTables = await readBackupLibrary(tx, id, tables, privateExams);
+    libraryTables = await readBackupLibrary(tx, id, tables, privateExams, noteProvenance);
     const specsAfterLibrary = new Map<unknown, number>();
     for (const spec of tables.opening_teaching_activity_specs) {
       specsAfterLibrary.set(spec.activity_id, (specsAfterLibrary.get(spec.activity_id) ?? 0) + 1);
@@ -418,6 +419,7 @@ export async function readOpeningBackupTableRows(
   const completeObservationIds = new Set(tables.opening_learning_observations.map(row => row.id));
   const excludedObservations = new Set(lineage.filter(row => !completeObservationIds.has(row.id)).map(row => row.id));
   tables.cards = tables.cards.filter(row => !excludedObservations.has(row.origin_observation_root_id));
+  tables.cards = projectOpeningBackupCardSources({ ...tables, ...libraryTables }, noteProvenance);
   const cardIds = new Set(tables.cards.map(row => row.id));
   tables.card_review_states = tables.card_review_states.filter(row => cardIds.has(row.card_id));
   tables.learning_events = retainBackupEventChains(
@@ -474,7 +476,7 @@ export async function readOpeningBackupTableRows(
     ORDER BY session_id, version, id`);
   Object.assign(tables, await readOpeningBackupLearningLinks(tx, id, userId, tables));
   Object.assign(tables, libraryTables);
-  tables.cards = projectOpeningBackupCardSources(tables);
+  tables.opening_note_provenance = projectOpeningBackupProvenance(libraryTables.opening_note_provenance, cardIds);
   await readBackupCourseAssets(tx, id, userId, tables);
   return tables;
 }

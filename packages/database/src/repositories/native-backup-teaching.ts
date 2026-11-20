@@ -1,46 +1,10 @@
 import { uuidSchema } from "@aistudy/contracts";
 import type { Sql, TransactionSql } from "postgres";
-import { asObject } from "./backup-map";
-import { parseContextSourceRefs, type ContextSourceRef } from "./opening-context-provenance";
 import { isPrivateExamActivity } from "./opening-backup-library";
 import { withPublicationCardSourceIds } from "./card-sources";
+import type { BackupSourceRef } from "./backup-publication-provenance";
 
 type Row = Record<string, unknown>;
-type PublicationSourceRef = ContextSourceRef & { publication: true };
-export type BackupSourceRef = ContextSourceRef & { publication?: true };
-
-// The existing provenance JSON also persists publication lineage across native restores.
-export function parseBackupSourceRefs(value: unknown): BackupSourceRef[] | null {
-  if (!Array.isArray(value)) return null;
-  const refs = parseContextSourceRefs(value);
-  if (!refs) return null;
-  const publicationRefs = new Set(parseContextSourceRefs(value
-    .filter(ref => asObject(ref)?.publication === true))?.map(ref => `${ref.sourceId}:${ref.sourceVersion}`));
-  return refs.map(ref => publicationRefs.has(`${ref.sourceId}:${ref.sourceVersion}`)
-    ? { ...ref, publication: true } : ref);
-}
-
-export function publicationSourceRefsByDocument(specs: Row[], sourceVersions: ReadonlyMap<string, number>) {
-  const documents = new Map<string, PublicationSourceRef[]>();
-  for (const spec of specs) {
-    if (typeof spec.document_id !== "string" || !Array.isArray(spec.source_refs)) continue;
-    const refs = documents.get(spec.document_id) ?? [];
-    for (const value of spec.source_refs) {
-      const citation = asObject(value);
-      if (typeof citation?.sourceId !== "string") continue;
-      const sourceId = citation.sourceId.toLowerCase();
-      const currentVersion = sourceVersions.get(sourceId);
-      if (currentVersion === undefined) continue;
-      const rawVersion = citation.version ?? citation.sourceVersion;
-      const version = typeof rawVersion === "string" && /^\d+$/.test(rawVersion) ? Number(rawVersion) : rawVersion;
-      const sourceVersion = typeof version === "number" && Number.isSafeInteger(version) && version >= 0
-        ? version : currentVersion;
-      refs.push({ sourceId, sourceVersion, publication: true });
-    }
-    documents.set(spec.document_id, refs);
-  }
-  return documents;
-}
 
 type TeachingOrigin = { documentIds: string[]; sourceIds: string[]; privateExam: boolean };
 export type NativeTeachingOrigins = ReadonlyMap<string, TeachingOrigin>;
@@ -64,11 +28,14 @@ export async function readNativeTeachingOrigins(
   }]));
 }
 
-export function attachNativeTeachingOrigins<T extends Row>(cards: T[], origins: NativeTeachingOrigins): T[] {
+export function attachNativeTeachingOrigins<T extends Row>(cards: T[], origins: NativeTeachingOrigins,
+  historicalDocuments: ReadonlyMap<string, string[]>): T[] {
   return cards.map(card => {
+    if (card.originObservationRootId == null) return card;
     const origin = origins.get(String(card.originObservationRootId).toLowerCase());
     const archived = Array.isArray(card.originTeachingDocumentIds) ? card.originTeachingDocumentIds : [];
-    const documentIds = [...new Set([...archived, ...(origin?.documentIds ?? [])])];
+    const documentIds = [...new Set([...archived, ...(origin?.documentIds ?? []),
+      ...(historicalDocuments.get(String(card.id).toLowerCase()) ?? [])])];
     return documentIds.length ? { ...card, originTeachingDocumentIds: documentIds } : card;
   });
 }
@@ -77,8 +44,9 @@ export function attachNativeCardPublicationSources<T extends Row>(
   cards: T[], publications: ReadonlyMap<string, readonly BackupSourceRef[]>,
 ): T[] {
   return cards.map(card => {
-    if (card.originObservationRootId == null || !Array.isArray(card.originTeachingDocumentIds)) return card;
-    const sourceIds = card.originTeachingDocumentIds.flatMap(id =>
+    if (card.originObservationRootId == null) return card;
+    const documents = [...(Array.isArray(card.originTeachingDocumentIds) ? card.originTeachingDocumentIds : []), card.sourceDocumentId];
+    const sourceIds = documents.flatMap(id =>
       (publications.get(String(id).toLowerCase()) ?? []).filter(ref => ref.publication).map(ref => ref.sourceId));
     return { ...card, sourceIds: withPublicationCardSourceIds(card.sourceIds, sourceIds) };
   });

@@ -95,6 +95,18 @@ function parseCitations(value: unknown): string[] | null {
   return refs;
 }
 
+/** Note provenance can carry publication metadata alongside its versioned source refs. */
+export function notePublicationMetadata(value: unknown) {
+  if (!isRecord(value) || Object.keys(value).length !== 1) return null;
+  if (Array.isArray(value.answerKeyBlockIds) && value.answerKeyBlockIds.every(isUuid)) {
+    return { answerKeyBlockIds: value.answerKeyBlockIds.map(id => id.toLowerCase()) };
+  }
+  if (Array.isArray(value.publicationCardIds) && value.publicationCardIds.every(isUuid)) {
+    return { publicationCardIds: value.publicationCardIds.map(id => id.toLowerCase()) };
+  }
+  return null;
+}
+
 const openingCitationRoles = new Set(["teach", "prompt", "example", "answer_key"]);
 const openingCitationStatuses = new Set(["bound", "missing", "mismatch"]);
 
@@ -188,4 +200,9 @@ export function sourceReferences(row: Record<string, unknown>, allowSourceFreeQu
   if (!opaque) return null;
   refs.push(...opaque);
   return refs.map((id) => id.toLowerCase());
+}
+
+export function noteProvenanceSourceReferences(row: Record<string, unknown>): string[] | null {
+  if (!Array.isArray(row.context_source_refs)) return null;
+  return sourceReferences({ ...row, context_source_refs: row.context_source_refs.filter(ref => !notePublicationMetadata(ref)) });
 }

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { issueOpeningReservedQuestion, type OpeningReservedPorts } from "./opening-course-reserved-selection";
 import { assertReferenceTextRevision } from "./opening-teaching-reference-revision";
+import { answerKeyBlockIds, mergeNotePublicationProvenance, publicationSourceRefsByDocument } from "./backup-publication-provenance";
 
 type ReferenceRevisionInput = { expectedContentVersion: number; expectedRevisionNumber: number; revisionNumber: number };
 import { assertOpeningCourseRouteCurrent } from "./opening-course-route-origin";
@@ -66,23 +67,23 @@ function asGenerationConfig(value: unknown): TeachingGenerationConfig {
     : {}) as TeachingGenerationConfig;
 }
 
-/** Keep the replaced spec's citations with the document whose revisions still contain that material. */
-async function retainTeachingPublicationSources(tx: TransactionSql, workspaceId: string, spec: ActivitySpec) {
-  if (!spec.sourceRefs.length) return;
-  const ids = [...new Set(spec.sourceRefs.map(ref => ref.sourceId.toLowerCase()))];
-  const sources = await tx`SELECT id,version FROM opening_sources
-    WHERE workspace_id=${workspaceId} AND id=ANY(${ids}::uuid[])`;
-  const versions = new Map(sources.map(row => [String(row.id), Number(row.version)]));
-  const refs = spec.sourceRefs.map(ref => {
-    const sourceId = ref.sourceId.toLowerCase();
-    return { sourceId, sourceVersion: Number(ref.version ?? versions.get(sourceId) ?? 0), publication: true };
-  });
-  await tx`INSERT INTO opening_note_provenance AS p(document_id,workspace_id,context_source_refs)
-    VALUES(${spec.documentId},${workspaceId},${tx.json(refs)})
-    ON CONFLICT(document_id) DO UPDATE SET context_source_refs =
-      CASE WHEN p.context_source_refs IS NULL THEN NULL ELSE (
-        SELECT jsonb_agg(DISTINCT ref) FROM jsonb_array_elements(p.context_source_refs || EXCLUDED.context_source_refs) ref
-      ) END`;
+async function retainTeachingPublication(tx: TransactionSql, scope: Scope,
+  spec: Pick<ActivitySpec, "activityId" | "documentId" | "sourceRefs" | "blockOrder">, superseded = false) {
+  const sourceIds = [...new Set(spec.sourceRefs.map(ref => ref.sourceId.toLowerCase()))];
+  const answerIds = answerKeyBlockIds(spec.blockOrder);
+  const sources = sourceIds.length ? await tx`SELECT id,version FROM opening_sources
+    WHERE workspace_id=${scope.workspaceId} AND id=ANY(${sourceIds}::uuid[])` : [];
+  const refs = publicationSourceRefsByDocument([{ document_id: spec.documentId, source_refs: spec.sourceRefs }],
+    new Map(sources.map(row => [String(row.id), Number(row.version)]))).get(spec.documentId.toLowerCase()) ?? [];
+  const cards = superseded ? await tx`UPDATE cards c SET source_ids=ARRAY(
+    SELECT DISTINCT source.id FROM unnest(c.source_ids || ${sourceIds}::uuid[]) AS source(id) ORDER BY source.id)
+    FROM opening_learning_observations o WHERE o.id=c.origin_observation_root_id AND o.activity_id=${spec.activityId}
+      AND o.workspace_id=c.workspace_id AND o.owner_user_id=c.owner_user_id
+      AND c.workspace_id=${scope.workspaceId} AND c.owner_user_id=${scope.ownerUserId}
+    RETURNING c.id` : [];
+  if (refs.length || answerIds.length || cards.length) {
+    await mergeNotePublicationProvenance(tx, scope.workspaceId, spec.documentId, refs, answerIds, cards.map(row => String(row.id)));
+  }
 }
 
 function mapUnit(row: Record<string, unknown>): TeachingUnit {
@@ -583,7 +584,8 @@ export function createOpeningTeachingContentRepository(sql: Sql, reservedPorts?:
           }, compiled.revisionId);
         }
 
-        if (existingSpec) await retainTeachingPublicationSources(tx, scope.workspaceId, existingSpec);
+        if (existingSpec) await retainTeachingPublication(tx, scope, existingSpec,
+          existingSpec.documentId !== desiredGraph.documentId || !isDeepStrictEqual(existingSpec.sourceRefs, sourceRefs));
         const specId = existingSpec?.id ?? randomUUID();
         const upserted = await tx`
           INSERT INTO opening_teaching_activity_specs (
@@ -631,7 +633,9 @@ export function createOpeningTeachingContentRepository(sql: Sql, reservedPorts?:
           WHERE id = ${input.teachingUnitId}
             AND workspace_id = ${scope.workspaceId}`;
 
-        return mapSpec(upserted[0] as Record<string, unknown>);
+        const spec = mapSpec(upserted[0] as Record<string, unknown>);
+        await retainTeachingPublication(tx, scope, spec);
+        return spec;
   }
 
   return {

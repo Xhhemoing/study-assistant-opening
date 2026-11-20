@@ -308,7 +308,7 @@ export {
   type OpeningBackupComposeRecords,
   type OpeningBackupComposeStaging,
 } from "./opening/backup-compose";
-export { libraryBlockSourceReferences } from "./opening/backup-validation";
+export { libraryBlockSourceReferences, notePublicationMetadata } from "./opening/backup-validation";
 export {
   validateOpeningRestore,
   normalizeOpeningRestoreHistory,
