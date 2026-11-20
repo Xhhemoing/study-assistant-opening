@@ -60,7 +60,7 @@ describe("opening import receipts", () => {
       connectionVersion: c.version,
       identity,
       sourceId,
-      cursor: { generation: "1", cursor: { folder: "INBOX", uidValidity: "1", lastUid: 9 } },
+      cursor: { expected: null, next: { folder: "INBOX", uidValidity: "1", lastUid: 9 } },
     });
     expect(first.duplicate).toBe(false);
     expect(first.sourceIds).toEqual([sourceId]);
@@ -82,6 +82,28 @@ describe("opening import receipts", () => {
       WHERE connection_id=${c.id} AND container='INBOX'`;
     expect(cursors[0]?.generation).toBe("1");
     expect(cursors[0]?.cursor).toEqual({ folder: "INBOX", uidValidity: "1", lastUid: 9 });
+  });
+
+  it("changes UIDVALIDITY only from the exact persisted generation and UID", async () => {
+    const connection = await seedConnection();
+    const sourceId = await seedSource();
+    const repo = createOpeningImportsRepository(f.sql);
+    const folder = "INBOX";
+    const original = { folder, uidValidity: "42", lastUid: 99 };
+    const next = { folder, uidValidity: "43", lastUid: 1 };
+    function commit(expected: typeof original | null, target: typeof original) {
+      return repo.commit(f.scope, {
+        connectionVersion: connection.version, sourceId,
+        identity: { connectionId: connection.id, container: folder, generation: target.uidValidity, remoteId: String(target.lastUid) },
+        cursor: { expected, next: target },
+      });
+    }
+    await commit(null, original);
+    await expect(commit({ ...original, lastUid: 98 }, next)).rejects.toMatchObject({ code: "CONFLICT" });
+    await commit(original, next);
+    await expect(commit(original, { ...original, lastUid: 100 })).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(repo.readImapCursor(f.scope, connection.id, folder)).resolves.toEqual(next);
+    expect(await f.sql`SELECT id FROM opening_import_receipts WHERE connection_id=${connection.id}`).toHaveLength(2);
   });
 });
 

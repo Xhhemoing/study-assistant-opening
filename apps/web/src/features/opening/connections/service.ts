@@ -1,4 +1,4 @@
-import { connectionCredentialInputSchema, imapSetupInputSchema, uuidSchema, type Scope } from "@aistudy/contracts";
+import { connectionCredentialInputSchema, imapSetupInputSchema, isApprovedImapHost, uuidSchema, type Scope } from "@aistudy/contracts";
 import {
   connectionCredentialFingerprint, createOpeningConnectionsRepository, CredentialVaultError,
   encryptConnectionCredential, OpeningConnectionError,
@@ -42,9 +42,7 @@ function mapped(error: unknown): never {
 
 function mapMailAdapterError(error: unknown): never {
   if (error instanceof ApiError) throw error;
-  if (error instanceof CredentialVaultError) {
-    throw new ApiError("CONFIGURATION", "连接凭据加密未配置或密钥不可用。", 503);
-  }
+  if (error instanceof CredentialVaultError || error instanceof OpeningConnectionError) return mapped(error);
   const message = error instanceof Error ? error.message : String(error);
   if (/IMAP host is not authorized/i.test(message)) {
     throw new ApiError("VALIDATION", "IMAP 主机尚未由管理员授权。", 400);
@@ -61,22 +59,15 @@ function mapMailAdapterError(error: unknown): never {
   throw new ApiError("CONFIGURATION", "IMAP 连接检查或同步失败。", 503);
 }
 
-function assertAllowedHost(host: string) {
-  // No sockets are opened here. C02 must also validate DNS/IP and TLS before connecting.
-  if (!/^(?=.{1,253}$)[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/i.test(host) || host.includes("..")) {
-    throw new ApiError("VALIDATION", "IMAP 主机不能包含 URL、凭据或路径。", 400);
-  }
-  const allowed = (process.env.OPENING_IMAP_ALLOWED_HOSTS || "").split(",").map(h => h.trim().toLowerCase()).filter(Boolean);
-  if (!allowed.includes(host.toLowerCase())) throw new ApiError("VALIDATION", "IMAP 主机尚未由管理员授权。", 400);
-}
-
 export function createOpeningConnectionService(sql: Sql, deps: OpeningConnectionServiceDeps = {}) {
   const repo = deps.connections ?? createOpeningConnectionsRepository(sql);
   return {
     list(scope: Scope) { return repo.list(scope); },
     async createImap(scope: Scope, raw: unknown) {
       const input = imapSetupInputSchema.parse(raw);
-      assertAllowedHost(input.host);
+      if (!isApprovedImapHost(input.host, process.env.OPENING_IMAP_ALLOWED_HOSTS)) {
+        throw new ApiError("VALIDATION", "IMAP 主机尚未由管理员授权。", 400);
+      }
       try { return await repo.createImap(scope, input); } catch (error) { return mapped(error); }
     },
     async createDingtalk(scope: Scope, raw: unknown) {

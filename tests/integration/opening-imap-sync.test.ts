@@ -1,10 +1,10 @@
 ﻿import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { ImapFlow } from "imapflow";
+import type { ImapCursor } from "@aistudy/contracts";
 import {
+  createOpeningConnectionsRepository,
   createOpeningImportsRepository,
-  createOpeningPrivacyRepository,
-  createOpeningSourceRepository,
 } from "@aistudy/database";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { startOpeningImapServer, type OpeningImapServer } from "./opening-imap-server";
@@ -55,12 +55,16 @@ function makeClient() {
     host: "127.0.0.1",
     port: server.port,
     secure: false,
+    logger: false,
     auth: { user: "fixture", pass: "fixture" },
     tls: { rejectUnauthorized: true },
   });
 }
 
-async function runSync() {
+async function runSync(options: { cursor?: ImapCursor | null; onUpload?: () => Promise<void> } = {}) {
+  const imports = createOpeningImportsRepository(f.sql);
+  const cursor = options.cursor === undefined
+    ? await imports.readImapCursor(f.scope, fixtureConnection.id, "INBOX") : options.cursor;
   const client = makeClient();
   try {
     await client.connect();
@@ -69,15 +73,17 @@ async function runSync() {
       connectionId: fixtureConnection.id,
       connectionVersion: fixtureConnection.version,
       folder: "INBOX",
-      cursor: { folder: "INBOX", uidValidity: "42", lastUid: 0 },
+      cursor,
       since: new Date("2026-01-01T00:00:00.000Z"),
       client,
-      imports: createOpeningImportsRepository(f.sql),
-      sources: createOpeningSourceRepository(f.sql),
-      privacy: createOpeningPrivacyRepository(f.sql),
-      upload: async ({ key, bytes }) => {
-        if (key.includes("/v") && failFinalUpload) throw new Error("storage unavailable");
-        objectByKey.set(key, bytes);
+      imports,
+      storage: {
+        upload: async ({ key, bytes }) => {
+          objectByKey.set(key, bytes);
+          if (failFinalUpload) throw new Error("storage unavailable");
+          await options.onUpload?.();
+        },
+        remove: async key => { objectByKey.delete(key); },
       },
     });
   } finally {
@@ -139,17 +145,62 @@ describe("isolated standard IMAP sync gate", () => {
     expect(firstSources[0]?.count).toBe(1);
 
     const replay = await runSync();
-    expect(replay).toMatchObject({ imported: 0, skipped: 1, cursor: { lastUid: 11 } });
+    expect(replay).toMatchObject({ imported: 0, cursor: { lastUid: 11 } });
     const secondSources = await f.sql`SELECT count(*)::int AS count FROM opening_sources WHERE workspace_id=${f.scope.workspaceId}`;
     expect(secondSources[0]?.count).toBe(1);
     expect(await f.sql`SELECT 1 FROM opening_import_receipts WHERE connection_id=${fixtureConnection.id}`).toHaveLength(1);
+  });
+
+  it("commits only one source and parse job for concurrent deliveries of the same UID", async () => {
+    const bothStaged = Promise.withResolvers<void>();
+    let staged = 0;
+    const onUpload = async () => {
+      if (++staged === 2) bothStaged.resolve();
+      await bothStaged.promise;
+    };
+    const results = await Promise.all([runSync({ onUpload }), runSync({ onUpload })]);
+    expect(results.map(result => result.imported).sort()).toEqual([0, 1]);
+    const [source] = await f.sql`SELECT id FROM opening_sources WHERE workspace_id=${f.scope.workspaceId}`;
+    expect([...objectByKey.keys()]).toEqual([`opening/sources/${source!.id}/v0`]);
+    expect(await f.sql`SELECT 1 FROM opening_sources WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(1);
+    expect(await f.sql`SELECT 1 FROM opening_jobs`).toHaveLength(1);
+    expect(await f.sql`SELECT 1 FROM opening_outbox`).toHaveLength(1);
+    expect(await f.sql`SELECT 1 FROM opening_import_receipts WHERE connection_id=${fixtureConnection.id}`).toHaveLength(1);
+  });
+
+  it("discards the message and staged object when revocation wins before publication", async () => {
+    await expect(runSync({ onUpload: async () => {
+      await createOpeningConnectionsRepository(f.sql).revoke(f.scope, fixtureConnection.id, fixtureConnection.version, "integration-revoke");
+    } })).rejects.toMatchObject({ code: "CONFLICT", message: "connection is revoked" });
+    expect(await f.sql`SELECT 1 FROM opening_sources WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
+    expect(await f.sql`SELECT 1 FROM opening_jobs`).toHaveLength(0);
+    expect(await f.sql`SELECT 1 FROM opening_outbox`).toHaveLength(0);
+    expect(await f.sql`SELECT 1 FROM opening_import_receipts WHERE connection_id=${fixtureConnection.id}`).toHaveLength(0);
+    expect(await f.sql`SELECT 1 FROM opening_import_cursors WHERE connection_id=${fixtureConnection.id}`).toHaveLength(0);
+    expect(objectByKey.size).toBe(0);
+  });
+
+  it("imports the new generation from UID 1 and persists its cursor even when the old UID was higher", async () => {
+    const imports = createOpeningImportsRepository(f.sql);
+    await imports.advanceImapCursor(f.scope, {
+      connectionId: fixtureConnection.id,
+      connectionVersion: fixtureConnection.version,
+      cursor: { expected: null, next: { folder: "INBOX", uidValidity: "41", lastUid: 90 } },
+    });
+    const next = { folder: "INBOX", uidValidity: "42", lastUid: 11 };
+    await expect(runSync()).resolves.toMatchObject({ imported: 1, cursor: next });
+    await expect(imports.readImapCursor(f.scope, fixtureConnection.id, "INBOX")).resolves.toEqual(next);
+    await expect(runSync()).resolves.toMatchObject({ imported: 0, cursor: next });
   });
 
   it("does not advance a UID cursor or create a receipt when final upload fails", async () => {
     failFinalUpload = true;
     await expect(runSync()).rejects.toThrow("storage unavailable");
     expect(server.activeConnectionCount()).toBe(0);
-    expect(await f.sql`SELECT 1 FROM opening_sources WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(1);
+    expect(await f.sql`SELECT 1 FROM opening_sources WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
+    expect(await f.sql`SELECT 1 FROM opening_jobs`).toHaveLength(0);
+    expect(await f.sql`SELECT 1 FROM opening_outbox`).toHaveLength(0);
+    expect(objectByKey.size).toBe(0);
     expect(await f.sql`SELECT 1 FROM opening_import_receipts WHERE connection_id=${fixtureConnection.id}`).toHaveLength(0);
     expect(await f.sql`SELECT 1 FROM opening_import_cursors WHERE connection_id=${fixtureConnection.id}`).toHaveLength(0);
   });
@@ -163,6 +214,21 @@ describe("isolated standard IMAP sync gate", () => {
     await expect(runSync()).resolves.toMatchObject({ imported: 1, skipped: 0, cursor: { lastUid: 11 } });
     expect(server.activeConnectionCount()).toBe(0);
     expect(await f.sql`SELECT 1 FROM opening_import_receipts WHERE connection_id=${fixtureConnection.id}`).toHaveLength(1);
+  });
+
+  it("rolls back source publication, parse dispatch and the cursor when receipt insertion fails", async () => {
+    await f.sql`ALTER TABLE opening_import_receipts ADD CONSTRAINT integration_reject_import CHECK (false) NOT VALID`;
+    try {
+      await expect(runSync()).rejects.toMatchObject({ code: "23514", constraint_name: "integration_reject_import" });
+      expect(await f.sql`SELECT 1 FROM opening_sources WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
+      expect(await f.sql`SELECT 1 FROM opening_source_versions WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
+      expect(await f.sql`SELECT 1 FROM opening_jobs`).toHaveLength(0);
+      expect(await f.sql`SELECT 1 FROM opening_outbox`).toHaveLength(0);
+      expect(await f.sql`SELECT 1 FROM opening_import_cursors WHERE connection_id=${fixtureConnection.id}`).toHaveLength(0);
+      expect(objectByKey.size).toBe(0);
+    } finally {
+      await f.sql`ALTER TABLE opening_import_receipts DROP CONSTRAINT integration_reject_import`;
+    }
   });
 
   it("isolates mailbox generations and workspace ownership through import receipts", async () => {

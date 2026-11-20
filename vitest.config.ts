@@ -18,6 +18,7 @@ const alias = Object.entries({
     "packages/database/src/migrate.ts",
   ),
   "@aistudy/ai/model-routing": path.resolve(root, "packages/ai/src/model-routing.ts"),
+  "@aistudy/ai/provider-network": path.resolve(root, "packages/ai/src/opening/provider-network.ts"),
   "@aistudy/ai": path.resolve(root, "packages/ai/src/index.ts"),
   "@aistudy/config/public": path.resolve(root, "packages/config/src/public/index.ts"),
   "@aistudy/config": path.resolve(root, "packages/config/src/index.ts"),

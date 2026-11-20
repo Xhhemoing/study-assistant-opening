@@ -1,21 +1,15 @@
 import type { ImapCursor, ImapSetupInput } from "@aistudy/contracts";
+import { loadWorkerEnv } from "@aistudy/config";
 import {
-  createOpeningConnectionsRepository,
   createOpeningImportsRepository,
-  createOpeningPrivacyRepository,
-  createOpeningSourceRepository,
   createSqlClient,
   decryptConnectionCredential,
   OpeningS3,
 } from "@aistudy/database";
-import { PutObjectCommand } from "@aws-sdk/client-s3";
-import { ImapFlow } from "imapflow";
-import { loadOpeningUploadQuota, loadWorkerEnv } from "@aistudy/config";
-import { syncMailbox, type ImapSyncDeps } from "../connectors/imap-sync";
+import { createApprovedImapClient } from "../connectors/imap-endpoint";
+import { syncMailbox } from "../connectors/imap-sync";
 
-export type SyncMailInput = {
-  connectionId: string;
-};
+export type SyncMailInput = { connectionId: string };
 
 export type SyncMailResult = {
   imported: number;
@@ -23,185 +17,76 @@ export type SyncMailResult = {
   cursor: ImapCursor;
 };
 
-function assertAllowedHost(host: string): void {
-  const allowed = (process.env.OPENING_IMAP_ALLOWED_HOSTS || "")
-    .split(",")
-    .map((value) => value.trim().toLowerCase())
-    .filter(Boolean);
-  if (!allowed.includes(host.toLowerCase())) {
-    throw new Error("IMAP host is not authorized");
-  }
-}
-
-function toScope(row: Record<string, unknown>): ImapSyncDeps["scope"] {
-  return {
-    workspaceId: String(row.workspace_id),
-    ownerUserId: String(row.owner_user_id),
-  };
+async function loadMailConnection(sql: ReturnType<typeof createSqlClient>, connectionId: string) {
+  const [row] = await sql`
+    SELECT c.*
+    FROM opening_connections c
+    JOIN workspaces w ON w.id = c.workspace_id AND w.owner_user_id = c.owner_user_id
+    WHERE c.id = ${connectionId} AND c.kind = 'imap' AND c.state <> 'revoked'
+    LIMIT 1
+  `;
+  if (!row) throw new Error("imap connection not found");
+  const scope = { workspaceId: String(row.workspace_id), ownerUserId: String(row.owner_user_id) };
+  const [credential] = await sql`
+    SELECT key_id, nonce, ciphertext, auth_tag, payload_hash
+    FROM opening_connection_credentials
+    WHERE connection_id = ${connectionId} AND workspace_id = ${scope.workspaceId}
+    LIMIT 1
+  `;
+  if (!credential) throw new Error("imap credential is missing");
+  const secret = decryptConnectionCredential({
+    workspaceId: scope.workspaceId,
+    connectionId,
+    keyId: String(credential.key_id),
+    nonce: credential.nonce as Buffer,
+    ciphertext: credential.ciphertext as Buffer,
+    authTag: credential.auth_tag as Buffer,
+    payloadHash: credential.payload_hash as string,
+  });
+  const client = await createApprovedImapClient({
+    host: String(row.host), port: Number(row.port), tlsMode: String(row.tls_mode),
+  }, { user: String(row.username), pass: secret });
+  const folders = (row.folders as ImapSetupInput["folders"]) ?? [];
+  return { client, scope, folder: folders[0], version: Number(row.version), since: new Date(String(row.since_at)) };
 }
 
 export function createSyncMailHandler(sql = createSqlClient(loadWorkerEnv().databaseUrl)) {
-  const connections = createOpeningConnectionsRepository(sql);
   const imports = createOpeningImportsRepository(sql);
-  const privacy = createOpeningPrivacyRepository(sql);
-  const sources = createOpeningSourceRepository(sql, { quota: loadOpeningUploadQuota() });
   const storage = new OpeningS3(loadWorkerEnv().s3);
 
-  return async function syncMail(input: SyncMailInput): Promise<SyncMailResult> {
-    const [row] = await sql`
-      SELECT c.*, w.owner_user_id
-      FROM opening_connections c
-      JOIN workspaces w ON w.id = c.workspace_id
-      WHERE c.id = ${input.connectionId}
-        AND c.kind = 'imap'
-        AND c.state <> 'revoked'
-      LIMIT 1
-    `;
-    if (!row) throw new Error("imap connection not found");
-    assertAllowedHost(String(row.host));
-
-    const [credential] = await sql`
-      SELECT key_id, nonce, ciphertext, auth_tag, payload_hash
-      FROM opening_connection_credentials
-      WHERE connection_id = ${input.connectionId}
-      LIMIT 1
-    `;
-    if (!credential) throw new Error("imap credential is missing");
-    const secret = decryptConnectionCredential({
-      workspaceId: String(row.workspace_id),
-      connectionId: input.connectionId,
-      keyId: String(credential.key_id),
-      nonce: credential.nonce as Buffer,
-      ciphertext: credential.ciphertext as Buffer,
-      authTag: credential.auth_tag as Buffer,
-      payloadHash: credential.payload_hash as string,
-    });
-
-    const client = new ImapFlow({
-      host: String(row.host),
-      port: Number(row.port),
-      secure: String(row.tls_mode) === "implicit",
-      auth: { user: String(row.username), pass: secret },
-      tls: { rejectUnauthorized: true },
-    });
+  return async function syncMail({ connectionId }: SyncMailInput): Promise<SyncMailResult> {
+    const { client, scope, folder, version, since } = await loadMailConnection(sql, connectionId);
     try {
+      if (!folder) throw new Error("imap connection has no selected folder");
+      const cursor = await imports.readImapCursor(scope, connectionId, folder);
       await client.connect();
-    } catch (error) {
-      await client.logout().catch(() => undefined);
-      throw error;
+      return await syncMailbox({
+        scope, connectionId, connectionVersion: version, folder, cursor, since, client, imports,
+        storage: {
+          upload: ({ key, bytes, mime }) => storage.putObject(key, bytes, { mime }),
+          remove: key => storage.deleteObject(key),
+        },
+      });
+    } finally {
+      client.close();
     }
-
-    const folders = (row.folders as ImapSetupInput["folders"]) ?? [];
-    const folder = folders[0];
-    if (!folder) throw new Error("imap connection has no selected folder");
-    const [cursorRow] = await sql`
-      SELECT container, generation, cursor
-      FROM opening_import_cursors
-      WHERE connection_id = ${input.connectionId}
-        AND container = ${folder}
-      LIMIT 1
-    `;
-    const cursor: ImapCursor = cursorRow
-      ? {
-          folder: String(cursorRow.container),
-          uidValidity: String(cursorRow.generation),
-          lastUid: Number((cursorRow.cursor as { lastUid?: number })?.lastUid ?? 0),
-        }
-      : { folder, uidValidity: "pending", lastUid: 0 };
-    const since = new Date(String(row.since_at));
-
-    const result = await syncMailbox({
-      scope: toScope(row),
-      connectionId: input.connectionId,
-      connectionVersion: Number(row.version),
-      folder,
-      cursor,
-      since,
-      client,
-      imports,
-      sources,
-      privacy,
-      upload: async ({ key, bytes, mime }) => {
-        await storage.client.send(
-          new PutObjectCommand({
-            Bucket: storage.bucket,
-            Key: key,
-            Body: bytes,
-            ContentType: mime,
-          }),
-        );
-      },
-    });
-
-    await connections.get(
-      { workspaceId: String(row.workspace_id), ownerUserId: String(row.owner_user_id) },
-      input.connectionId,
-    );
-    await client.logout();
-    return { imported: result.imported, skipped: result.skipped, cursor: result.cursor };
   };
 }
 
-export type CheckMailResult = {
-  ok: true;
-  kind: "imap";
-};
+export type CheckMailResult = { ok: true; kind: "imap" };
 
-/**
- * Minimal read-only IMAP connectivity check: allowlist host, decrypt vaulted
- * credential, connect with rejectUnauthorized TLS, open selected folder or list,
- * then logout. Never STOREs flags, EXPUNGEs, or sends mail.
- */
+/** Read-only connectivity and folder check through the same approved dialer. */
 export function createCheckMailHandler(sql = createSqlClient(loadWorkerEnv().databaseUrl)) {
-  return async function checkMail(input: SyncMailInput): Promise<CheckMailResult> {
-    const [row] = await sql`
-      SELECT c.*, w.owner_user_id
-      FROM opening_connections c
-      JOIN workspaces w ON w.id = c.workspace_id
-      WHERE c.id = ${input.connectionId}
-        AND c.kind = 'imap'
-        AND c.state <> 'revoked'
-      LIMIT 1
-    `;
-    if (!row) throw new Error("imap connection not found");
-    assertAllowedHost(String(row.host));
-
-    const [credential] = await sql`
-      SELECT key_id, nonce, ciphertext, auth_tag, payload_hash
-      FROM opening_connection_credentials
-      WHERE connection_id = ${input.connectionId}
-      LIMIT 1
-    `;
-    if (!credential) throw new Error("imap credential is missing");
-    const secret = decryptConnectionCredential({
-      workspaceId: String(row.workspace_id),
-      connectionId: input.connectionId,
-      keyId: String(credential.key_id),
-      nonce: credential.nonce as Buffer,
-      ciphertext: credential.ciphertext as Buffer,
-      authTag: credential.auth_tag as Buffer,
-      payloadHash: credential.payload_hash as string,
-    });
-
-    const client = new ImapFlow({
-      host: String(row.host),
-      port: Number(row.port),
-      secure: String(row.tls_mode) === "implicit",
-      auth: { user: String(row.username), pass: secret },
-      tls: { rejectUnauthorized: true },
-    });
+  return async function checkMail({ connectionId }: SyncMailInput): Promise<CheckMailResult> {
+    const { client, folder } = await loadMailConnection(sql, connectionId);
     try {
       await client.connect();
-      const folders = (row.folders as ImapSetupInput["folders"]) ?? [];
-      const folder = folders[0];
-      if (folder) {
-        await client.mailboxOpen(folder, { readOnly: true });
-      } else {
-        await client.list();
-      }
+      if (folder) await client.mailboxOpen(folder, { readOnly: true });
+      else await client.list();
+      await client.logout().catch(() => undefined);
       return { ok: true, kind: "imap" };
     } finally {
-      await client.logout().catch(() => undefined);
+      client.close();
     }
   };
 }

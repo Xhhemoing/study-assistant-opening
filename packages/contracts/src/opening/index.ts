@@ -215,7 +215,7 @@ export {
   type TimeConfigSaveInput,
 } from "./planning";
 
-export { connectionKindSchema, connectionStateSchema, connectionViewSchema, imapSetupInputSchema, imapCursorSchema, connectionCredentialInputSchema, type ConnectionKind, type ConnectionState, type ConnectionView, type ImapSetupInput, type ImapCursor } from "./connections";
+export { connectionKindSchema, connectionStateSchema, connectionViewSchema, imapEndpointSchema, isApprovedImapHost, imapSetupInputSchema, imapCursorSchema, connectionCredentialInputSchema, type ConnectionKind, type ConnectionState, type ConnectionView, type ImapSetupInput, type ImapCursor } from "./connections";
 export { importIdentitySchema, importReceiptSchema, emailImportInputSchema, type ImportIdentity, type ImportReceipt, type EmailImportInput } from "./imports";
 export {
   mediaMimeSchema,

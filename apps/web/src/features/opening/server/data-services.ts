@@ -10,7 +10,6 @@
  * Not imported by apps/worker (worker has its own entrypoint and composition).
  */
 import "server-only";
-import { PutObjectCommand } from "@aws-sdk/client-s3";
 import {
   createOpeningActionDigestDecisionsRepository,
   createOpeningAiSettingsRepository,
@@ -97,7 +96,7 @@ export function readAiReadinessInputs(sql: Sql, scope: Scope) {
 }
 
 /** Object-storage writers for the DingTalk callback; credentials stay server-side. */
-export function getOpeningObjectWriter() {
+export function getOpeningConnectorStorage() {
   const storage = new OpeningS3({
     endpoint: process.env.S3_ENDPOINT ?? "http://127.0.0.1:9000",
     region: process.env.S3_REGION ?? "us-east-1",
@@ -106,8 +105,10 @@ export function getOpeningObjectWriter() {
     secretAccessKey: process.env.S3_SECRET_ACCESS_KEY ?? "minioadmin",
     forcePathStyle: process.env.S3_FORCE_PATH_STYLE !== "false",
   });
-  return async (input: { key: string; bytes: Uint8Array; mime: string }) => {
-    await storage.client.send(new PutObjectCommand({ Bucket: storage.bucket, Key: input.key, Body: input.bytes, ContentType: input.mime }));
+  return {
+    upload: (input: { key: string; bytes: Uint8Array; mime: string }) =>
+      storage.putObject(input.key, input.bytes, { mime: input.mime }),
+    remove: (key: string) => storage.deleteObject(key),
   };
 }
 
