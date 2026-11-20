@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -40,7 +40,7 @@ async function seed(mime: "application/pdf" | "image/png") {
   await fixture.sql`INSERT INTO opening_sources
     (id, workspace_id, name, mime, bytes, sha256, version, upload_state, parse_state)
     VALUES (${sourceId}, ${fixture.scope.workspaceId}, 'routing-fixture', ${mime},
-      ${original.length}, ${"a".repeat(64)}, 0, 'uploaded', 'queued')`;
+      ${original.length}, ${createHash("sha256").update(original).digest("hex")}, 0, 'uploaded', 'queued')`;
   const jobs = createOpeningJobRepository(fixture.sql);
   const sources = createOpeningSourceRepository(fixture.sql);
   const chunks = createOpeningSourceChunksRepository(fixture.sql);
@@ -70,7 +70,7 @@ async function seed(mime: "application/pdf" | "image/png") {
 }
 
 describe("parse routing fallback through real repositories and worker receipt", () => {
-  it("persists native and local OCR PDF text, tries only the first visual page, and succeeds", async () => {
+  it("persists native and local OCR PDF text, tries only the first visual page, and records degraded coverage", async () => {
     const d = await seed("application/pdf");
     const recognizePage = vi.fn(async (input: ParseSourceVisualPageInput): Promise<never> => {
       expect(await readFile(input.localFilePath)).toEqual(d.original);
@@ -85,8 +85,13 @@ describe("parse routing fallback through real repositories and worker receipt", 
     expect(rows.map(row => ({ ...row }))).toEqual(mixedPages.map(page => ({
       page: page.page, text: page.text, image_object_key: null, source_version: 0,
     })));
-    expect(await d.sources.get(fixture.scope, d.sourceId)).toMatchObject({ parseState: "ready", uploadState: "uploaded", error: null });
-    expect(await d.jobs.get(fixture.scope, d.job.id)).toMatchObject({ state: "succeeded", result: { pages: 3 } });
+    expect(await d.sources.get(fixture.scope, d.sourceId)).toMatchObject({
+      parseState: "ready", uploadState: "uploaded",
+      error: { code: "PARSE_PARTIAL", message: "第 2–3 页未能识别，可以重新解析", retryable: true },
+    });
+    expect(await d.jobs.get(fixture.scope, d.job.id)).toMatchObject({
+      state: "succeeded", result: { pages: 3, warnings: 2, degraded: true },
+    });
     const [segment] = await fixture.sql`SELECT state, pages FROM opening_pdf_parse_segments WHERE source_id = ${d.sourceId}`;
     expect(segment).toMatchObject({ state: "ready", pages: mixedPages });
   });

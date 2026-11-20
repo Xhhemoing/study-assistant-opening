@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdtemp, readdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -25,7 +26,7 @@ function source(overrides: Partial<SourceRecord> = {}): SourceRecord {
     name: "photo.png",
     mime: "image/png",
     bytes: 8,
-    sha256: "b".repeat(64),
+    sha256: createHash("sha256").update(Buffer.from("iVBORw0KGgo=", "base64")).digest("hex"),
     version: 3,
     uploadState: "uploaded",
     parseState: "not_started",
@@ -54,6 +55,8 @@ async function makeHandler(current: SourceRecord, recognizePage?: Parameters<typ
         states.push("ready");
       },
       listChunks: async () => [],
+      listChunksAtVersion: async () => [],
+      listForSources: async () => [],
     },
     storage: {
       finalKey: (id, version) => `opening/sources/${id}/v${version}`,

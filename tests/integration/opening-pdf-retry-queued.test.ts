@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -20,7 +20,7 @@ async function seedRetry(partial = false) {
   const sources = createOpeningSourceRepository(f.sql), chunks = createOpeningSourceChunksRepository(f.sql);
   const jobs = createOpeningJobRepository(f.sql);
   await f.sql`INSERT INTO opening_sources(id,workspace_id,name,mime,bytes,sha256,version,upload_state,parse_state)
-    VALUES (${sourceId},${f.scope.workspaceId},'retry.pdf','application/pdf',${bytes.length},${"a".repeat(64)},0,'uploaded','failed')`;
+    VALUES (${sourceId},${f.scope.workspaceId},'retry.pdf','application/pdf',${bytes.length},${createHash("sha256").update(bytes).digest("hex")},0,'uploaded','failed')`;
   await chunks.replaceChunks(f.scope, { sourceId, sourceVersion: 0, chunks: [
     { page: 1, slideLabel: null, startMs: null, endMs: null, text: originalText, imageObjectKey: null },
   ] });

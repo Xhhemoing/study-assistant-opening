@@ -1,9 +1,10 @@
+import { createHash } from "node:crypto";
 import { mkdtemp, readdir, readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { OpeningModelRoutingError } from "@aistudy/ai";
-import { sourceRecordSchema, type ApiFailure, type SourceRecord } from "@aistudy/contracts";
+import { sourceRecordSchema, type ApiFailure, type SourceChunk, type SourceRecord } from "@aistudy/contracts";
 import { parseSourceVisualRecognitionOutput } from "@aistudy/ai";
 import type { OpeningJobRecord, OpeningPdfSegmentsRepository } from "@aistudy/database";
 import type { ParserRunner } from "../parsers/types";
@@ -17,12 +18,17 @@ const dirs: string[] = [];
 
 afterEach(async () => { for (const dir of dirs.splice(0)) { expect(await readdir(dir)).toEqual([]); } });
 
+const digest = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+const defaultBytes = Buffer.from("pdf");
+
 function source(overrides: Partial<SourceRecord> = {}): SourceRecord {
-  return { id: sourceId, workspaceId: scope.workspaceId, name: "source.pdf", mime: "application/pdf", bytes: 3, sha256: "a".repeat(64), version: 7, uploadState: "uploaded", parseState: "not_started", error: null, createdAt: new Date().toISOString(), ...overrides };
+  return { id: sourceId, workspaceId: scope.workspaceId, name: "source.pdf", mime: "application/pdf", bytes: 3, sha256: digest(defaultBytes), version: 7, uploadState: "uploaded", parseState: "not_started", error: null, createdAt: new Date().toISOString(), ...overrides };
 }
-async function deps(input: { source?: SourceRecord; exitCode?: number; stdout?: string; pageCount?: number; bytes?: Uint8Array; recognizePage?: Parameters<typeof createParseSourceHandler>[0]["recognizePage"]; assertCurrent?: Parameters<typeof createParseSourceHandler>[0]["assertCurrent"] } = {}) {
-  const current = input.source ?? source({ bytes: input.bytes?.byteLength ?? 3 });
+async function deps(input: { source?: SourceRecord; exitCode?: number; stdout?: string; pageCount?: number; bytes?: Uint8Array; segments?: OpeningPdfSegmentsRepository; published?: SourceChunk[]; recognizePage?: Parameters<typeof createParseSourceHandler>[0]["recognizePage"]; assertCurrent?: Parameters<typeof createParseSourceHandler>[0]["assertCurrent"] } = {}) {
+  const content = input.bytes ?? defaultBytes;
+  const current = input.source ?? source({ bytes: content.byteLength, sha256: digest(content) });
   const states: State[] = [];
+  const warnings: ApiFailure[] = [];
   let replaceInput: unknown;
   let runs = 0;
   const argvs: string[][] = [];
@@ -31,14 +37,14 @@ async function deps(input: { source?: SourceRecord; exitCode?: number; stdout?: 
     tempDir,
     runs: () => runs,
     argvs: () => argvs,
-    states,
+    states, warnings,
     replaceInput: () => replaceInput,
     handler: createParseSourceHandler({
-      sources: { get: async () => current, markParseState: async (_scope, _id, state) => { states.push(state); return current; } },
-      chunks: { replaceChunks: async (_scope, input) => { replaceInput = input; states.push("ready"); }, listChunks: async () => [], listChunksAtVersion: async () => [], listForSources: async () => [] },
-      storage: { finalKey: () => "final", presignGet: async () => `data:application/pdf;base64,${Buffer.from(input.bytes ?? Buffer.from("pdf")).toString("base64")}` },
+      sources: { get: async () => current, markParseState: async (_scope, _id, state, error) => { states.push(state); if (error) warnings.push(error); return current; } },
+      chunks: { replaceChunks: async (_scope, input) => { replaceInput = input; states.push("ready"); }, listChunks: async () => [], listChunksAtVersion: async () => input.published ?? [], listForSources: async () => [] },
+      storage: { finalKey: () => "final", presignGet: async () => `data:application/pdf;base64,${Buffer.from(content).toString("base64")}` },
       runner: async (...args: Parameters<ParserRunner>) => { argvs.push(args[0]); runs += 1; return { exitCode: input.exitCode ?? 0, stdout: args[0].includes("--inspect-pdf") ? JSON.stringify({ pageCount: input.pageCount ?? 2 }) : input.stdout ?? JSON.stringify({ pages: [{ page: 1, text: "Alpha", imagePath: null }, { page: 2, text: "Beta", imagePath: null }] }) }; },
-      tempDir, recognizePage: input.recognizePage, assertCurrent: input.assertCurrent,
+      tempDir, segments: input.segments, recognizePage: input.recognizePage, assertCurrent: input.assertCurrent,
     }),
   }));
   dirs.push(await dirPromise);
@@ -104,13 +110,33 @@ describe("parse source handler", () => {
     });
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(body));
     try {
-      const d = await deps({ source: source({ mime, bytes: bytes.byteLength }) });
+      const d = await deps({ source: source({ mime, bytes: bytes.byteLength, sha256: digest(bytes).toUpperCase() }) });
       await expect(d.handler(job, { sourceId })).resolves.toEqual({ pages: 1 });
       expect(d.replaceInput()).toMatchObject({ chunks: [{ page: 1, text: "第一行\n第二行", imageObjectKey: null }] });
       expect(d.states).toEqual(["ready"]);
       expect(d.runs()).toBe(0);
     } finally { fetchMock.mockRestore(); }
   });
+  it.each(["text/plain", "text/markdown", "text/html", "application/pdf", "image/png", "application/vnd.openxmlformats-officedocument.presentationml.presentation"])(
+    "rejects a clean early EOF on %s before parsing or replacing chunks", async mime => {
+      const d = await deps({ source: source({ mime }), bytes: Buffer.from("pd") });
+      await expect(d.handler(job, { sourceId })).rejects.toThrow(/download integrity.*expected 3 bytes.*received 2/i);
+      expect(d.runs()).toBe(0);
+      expect(d.replaceInput()).toBeUndefined();
+      expect(d.states).toEqual([]);
+    },
+  );
+
+  it.each(["text/markdown", "application/pdf"])(
+    "rejects a same-length %s download with a mismatched SHA-256", async mime => {
+      const d = await deps({ source: source({ mime }), bytes: Buffer.from("bad") });
+      await expect(d.handler(job, { sourceId })).rejects.toThrow(/download integrity.*SHA-256/i);
+      expect(d.runs()).toBe(0);
+      expect(d.replaceInput()).toBeUndefined();
+      expect(d.states).toEqual([]);
+    },
+  );
+
   it("recognizes only visual PDF pages and preserves native text, physical page and original file", async () => {
     const recognizePage = vi.fn(async (input: ParseSourceVisualPageInput) => {
       expect(await readFile(input.localFilePath, "utf8")).toBe("pdf");
@@ -151,13 +177,62 @@ describe("parse source handler", () => {
     ] });
     expect(d.states).toEqual(["ready"]);
   });
-  it("fails closed on a visual or blank PDF page without recognition", async () => {
-    for (const page of [{page:1,text:"caption",imagePath:null,visualKinds:["table"]}, {page:1,text:"",imagePath:null}]) {
-      const d = await deps({stdout:JSON.stringify({pages:[page,{page:2,text:"native",imagePath:null}]})});
-      await expect(d.handler(job, {sourceId})).rejects.toThrow("visual recognition");
-      expect(d.replaceInput()).toBeUndefined();
-    }
+  it("publishes readable text with partial metadata when PDF vision is unconfigured", async () => {
+    const d = await deps({ pageCount: 3, stdout: JSON.stringify({ pages: [
+      { page: 1, text: "Native table caption", imagePath: null, visualKinds: ["table"] },
+      { page: 2, text: "  ", imagePath: null },
+      { page: 3, text: "Readable native page", imagePath: null },
+    ] }) });
+    await expect(d.handler(job, { sourceId })).resolves.toEqual({ pages: 3, warnings: 2, degraded: true });
+    expect(d.replaceInput()).toMatchObject({ chunks: [
+      { page: 1, text: "Native table caption", imageObjectKey: null },
+      { page: 3, text: "Readable native page", imageObjectKey: null },
+    ] });
+    expect(d.warnings).toEqual([{ code: "PARSE_PARTIAL", message: "第 1–2 页未能识别，可以重新解析", retryable: true }]);
   });
+
+  it("reports missing recognition for a scan with no readable pages without publishing it", async () => {
+    const d = await deps({ pageCount: 1, stdout: JSON.stringify({ pages: [
+      { page: 1, text: "", imagePath: null, visualKinds: ["scan"] },
+    ] }) });
+    await expect(d.handler(job, { sourceId })).rejects.toThrow("第 1 页未能识别，可以重新解析");
+    expect(d.replaceInput()).toBeUndefined();
+    expect(d.states).toEqual([]);
+  });
+  it("publishes an all-scan PDF when vision recovers its text", async () => {
+    const d = await deps({ pageCount: 1, stdout: JSON.stringify({ pages: [
+      { page: 1, text: "", imagePath: null, visualKinds: ["scan"] },
+    ] }), recognizePage: async () => ({ text: "Recognized scan text", imageObjectKey: "trusted/page-1" }) });
+    await expect(d.handler(job, { sourceId })).resolves.toEqual({ pages: 1 });
+    expect(d.replaceInput()).toMatchObject({ chunks: [
+      { page: 1, text: "[视觉转写与描述]\nRecognized scan text", imageObjectKey: "trusted/page-1" },
+    ] });
+    expect(d.warnings).toEqual([]);
+  });
+
+  it("retries vision for a cached fallback page and reuses a page with a saved transcription", async () => {
+    const pages = [
+      { page: 1, text: "Local OCR text", imagePath: null, visualKinds: ["scan" as const] },
+      { page: 2, text: "", imagePath: null, visualKinds: ["scan" as const] },
+    ];
+    const recognizePage = vi.fn(async () => ({ text: "Recovered scan text", imageObjectKey: "trusted/page-1" }));
+    const d = await deps({
+      recognizePage,
+      segments: { assertCurrent: async () => {}, read: async () => ({ state: "ready", pages }), save: async () => {} },
+      published: [
+        { id: "old-1", sourceId, sourceVersion: 7, page: 1, slideLabel: null, startMs: null, endMs: null, text: "Local OCR text", imageObjectKey: null },
+        { id: "old-2", sourceId, sourceVersion: 7, page: 2, slideLabel: null, startMs: null, endMs: null, text: "Previously recognized scan", imageObjectKey: "trusted/page-2" },
+      ],
+    });
+    await expect(d.handler(job, { sourceId })).resolves.toEqual({ pages: 2 });
+    expect(recognizePage).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ physicalPage: 1 }));
+    expect(d.replaceInput()).toMatchObject({ chunks: [
+      { page: 1, text: expect.stringContaining("Recovered scan text"), imageObjectKey: "trusted/page-1" },
+      { page: 2, text: "Previously recognized scan", imageObjectKey: "trusted/page-2" },
+    ] });
+    expect(d.warnings).toEqual([]);
+  });
+
   it("preserves local PDF text and skips remaining recognition after a routing error", async () => {
     const recognizePage = vi.fn(async () => { throw new OpeningModelRoutingError("请先配置 gpt-6-luna"); });
     const d = await deps({ recognizePage, pageCount: 3, stdout: JSON.stringify({ pages: [
@@ -165,7 +240,8 @@ describe("parse source handler", () => {
       { page: 2, text: "local formula", imagePath: null, visualKinds: ["formula"] },
       { page: 3, text: "local OCR", imagePath: null, visualKinds: ["scan"] },
     ] }) });
-    await expect(d.handler(job, { sourceId })).resolves.toEqual({ pages: 3 });
+    await expect(d.handler(job, { sourceId })).resolves.toEqual({ pages: 3, warnings: 2, degraded: true });
+    expect(d.warnings).toEqual([{ code: "PARSE_PARTIAL", message: "第 2–3 页未能识别，可以重新解析", retryable: true }]);
     expect(d.replaceInput()).toEqual({ sourceId, sourceVersion: 7, chunks: [
       { page: 1, slideLabel: null, startMs: null, endMs: null, text: "native prose", imageObjectKey: null },
       { page: 2, slideLabel: null, startMs: null, endMs: null, text: "local formula", imageObjectKey: null },
@@ -187,11 +263,11 @@ describe("parse source handler", () => {
       { page: 1, text: "native prose", imagePath: null },
       { page: 2, text: "", imagePath: null, visualKinds: ["scan"] },
     ] }) });
-    await expect(d.handler(job, { sourceId })).resolves.toEqual({ pages: 2 });
+    await expect(d.handler(job, { sourceId })).resolves.toEqual({ pages: 2, warnings: 1, degraded: true });
     expect(d.replaceInput()).toEqual({ sourceId, sourceVersion: 7, chunks: [
       { page: 1, slideLabel: null, startMs: null, endMs: null, text: "native prose", imageObjectKey: null },
     ] });
-    expect(d.states).toEqual(["ready"]);
+    expect(d.warnings).toEqual([{ code: "PARSE_PARTIAL", message: "第 2 页未能识别，可以重新解析", retryable: true }]);
   });
   it("propagates provider errors without replacing chunks", async () => {
     const recognizePage = vi.fn(async () => { throw new Error("provider timeout"); });

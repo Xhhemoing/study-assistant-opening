@@ -1,5 +1,6 @@
 import { OpeningModelRoutingError } from "@aistudy/ai";
 import { openingJobScope } from "@aistudy/database";
+import { createHash } from "node:crypto";
 import { createWriteStream } from "node:fs";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import path from "node:path";
@@ -12,7 +13,7 @@ import { markdownChunks } from "./markdown-chunks";
 import { htmlChunks } from "./html-chunks";
 import type { ParserRunner, ParsedPage, VisualPageKind } from "../parsers/types";
 import type { OpeningScope } from "@aistudy/database";
-import type { OpeningSourceChunksRepository } from "@aistudy/database";
+import type { NewSourceChunk, OpeningSourceChunksRepository } from "@aistudy/database";
 import type { OpeningPdfSegmentsRepository } from "@aistudy/database";
 import { parsePdfSegments, watchPdfExecution } from "../parsers/pdf-segments";
 import { checkPdfPageQuality } from "../parsers/pdf-page-quality";
@@ -22,6 +23,27 @@ export class UnsupportedSourceError extends Error { readonly code = "UNSUPPORTED
 const IMAGE_SOURCE_MIMES = new Set(["image/jpeg", "image/png", "image/webp"]);
 type Storage = { presignGet(key: string, input: { expiresInSeconds: number; responseContentDisposition: string; responseCacheControl: string }): Promise<string>; finalKey(id: string, version: number): string };
 type SourceRepo = Pick<OpeningSourceRepository, "get" | "markParseState">;
+
+function trackSourceDownload(source: { bytes: number; sha256?: string | null }) {
+  const digest = createHash("sha256");
+  let bytes = 0;
+  return {
+    add(chunk: Uint8Array) {
+      bytes += chunk.byteLength;
+      if (bytes > source.bytes) throw new Error("source download exceeds declared bytes");
+      digest.update(chunk);
+    },
+    finish() {
+      if (bytes !== source.bytes) {
+        throw new Error(`source download integrity check failed: expected ${source.bytes} bytes, received ${bytes}`);
+      }
+      const sha256 = digest.digest("hex");
+      if (source.sha256 && sha256 !== source.sha256.toLowerCase()) {
+        throw new Error("source download integrity check failed: SHA-256 mismatch");
+      }
+    },
+  };
+}
 
 export type ParseSourceVisualPageInput = {
   scope: OpeningScope; job: OpeningJobRecord; sourceId: string; sourceVersion: number;
@@ -56,22 +78,22 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Op
       const response = await fetch(url);
       if (!response.ok) throw new Error("source download failed");
       const parts: Uint8Array[] = [];
-      let bytes = 0;
+      const download = trackSourceDownload(source);
       if (response.body) {
         const reader = response.body.getReader();
         try {
           while (true) {
             const { done, value } = await reader.read();
             if (done) break;
-            bytes += value.byteLength;
-            if (bytes > source.bytes) {
-              void reader.cancel().catch(() => undefined);
-              throw new Error("source download exceeds declared bytes");
-            }
+            download.add(value);
             parts.push(value);
           }
+        } catch (error) {
+          void reader.cancel().catch(() => undefined);
+          throw error;
         } finally { reader.releaseLock(); }
       }
+      download.finish();
       const text = new TextDecoder().decode(Buffer.concat(parts));
       const chunks = source.mime === "text/html" ? htmlChunks(text) : markdownChunks(text); // plain text uses markdown chunker
       await deps.chunks.replaceChunks(scope, { sourceId: source.id, sourceVersion: source.version, chunks: chunks.map((chunk) => ({ page: chunk.page, slideLabel: null, startMs: null, endMs: null, text: chunk.text, imageObjectKey: null })) });
@@ -106,34 +128,46 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Op
       signal.throwIfAborted();
       const response = await fetch(url, { signal });
       if (!response.ok || !response.body) throw new Error("source download failed");
-      let bytes = 0;
-      const limited = new Transform({ transform(chunk, _encoding, callback) { bytes += chunk.length; if (bytes > source.bytes) callback(new Error("source download exceeds declared bytes")); else { callback(null, chunk); } } });
+      const download = trackSourceDownload(source);
+      const limited = new Transform({
+        transform(chunk: Buffer, _encoding, callback) {
+          try { download.add(chunk); }
+          catch (error) { callback(error as Error); return; }
+          callback(null, chunk);
+        },
+      });
       await pipeline(Readable.fromWeb(response.body as Parameters<typeof Readable.fromWeb>[0]), limited, createWriteStream(temp), { signal });
-      const pdfResult = source.mime === "application/pdf" ? await parsePdfSegments({ path: temp, sourceId: source.id, sourceVersion: source.version, scope, runner: deps.runner,
-        segments: deps.segments, signal, segmentPages: deps.segmentPages, timeoutSeconds: deps.segmentTimeoutSeconds }) : undefined;
-      const pages: ParsedPage[] = isImage ? [{ page: 1, text: "", imagePath: null, visualKinds: ["scan"] }] : source.mime === "application/pdf"
-        ? pdfResult!
-        : await parser.parseDocument({ path: temp, mime: source.mime, maxPages: 2000 }, signal);
+      download.finish();
       signal.throwIfAborted();
-      const chunks = [];
+      const isPdf = source.mime === "application/pdf";
+      const chunks: NewSourceChunk[] = [];
       // Durable PDF pages already published at this version include any visual
       // transcription. Reuse them rather than recognizing successful pages again.
-      const published = source.mime === "application/pdf" && deps.segments
-        ? await deps.chunks.listChunksAtVersion(scope, source.id, source.version) : [];
-      let visualRecognitionUnavailable = false;
-      for (const page of pages) {
-        signal.throwIfAborted();
-        const saved = published.filter(chunk => chunk.page === page.page);
-        if (saved.length) {
-          chunks.push(...saved.map(chunk => ({ page: chunk.page, slideLabel: chunk.slideLabel ?? null,
-            startMs: chunk.startMs, endMs: chunk.endMs, text: chunk.text, imageObjectKey: chunk.imageObjectKey })));
-          continue;
+      const published = new Map<number, NewSourceChunk[]>();
+      if (isPdf && deps.segments) {
+        for (const chunk of await deps.chunks.listChunksAtVersion(scope, source.id, source.version)) {
+          if (chunk.page == null) continue;
+          const saved = published.get(chunk.page) ?? [];
+          saved.push({ page: chunk.page, slideLabel: chunk.slideLabel ?? null,
+            startMs: chunk.startMs, endMs: chunk.endMs, text: chunk.text, imageObjectKey: chunk.imageObjectKey });
+          published.set(chunk.page, saved);
         }
-        const visualKinds = page.visualKinds?.length ? page.visualKinds : !page.text.trim() && (isImage || source.mime === "application/pdf") ? ["scan" as const] : [];
+      }
+      let visualRecognitionUnavailable = !deps.recognizePage;
+      const skippedVisionPages: number[] = [];
+      const consumePage = async (page: ParsedPage) => {
+        signal.throwIfAborted();
+        const visualKinds = page.visualKinds?.length ? page.visualKinds : !page.text.trim() && (isImage || isPdf) ? ["scan" as const] : [];
+        const needsVision = (isPdf || isImage) && visualKinds.length > 0;
+        const saved = published.get(page.page);
+        if (saved && (!needsVision || saved.some(chunk => chunk.imageObjectKey))) {
+          chunks.push(...saved);
+          return;
+        }
         let text = page.text;
         let imageObjectKey: string | null = null;
-        if (!visualRecognitionUnavailable && (isImage || source.mime === "application/pdf") && visualKinds.length) {
-          if (!deps.recognizePage) throw new Error(`visual recognition is required for physical page ${page.page}`);
+        if (isImage && !deps.recognizePage) throw new Error(`visual recognition is required for physical page ${page.page}`);
+        if (needsVision && !visualRecognitionUnavailable && deps.recognizePage) {
           await assertCurrent?.();
           let result: ParseSourceVisualPageResult | undefined;
           try {
@@ -152,21 +186,41 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Op
             imageObjectKey = result.imageObjectKey;
           }
         }
+        if (isPdf && needsVision && visualRecognitionUnavailable) {
+          skippedVisionPages.push(page.page);
+          if (saved) { chunks.push(...saved); return; }
+        }
         if (isImage && visualRecognitionUnavailable) imageObjectKey = deps.storage.finalKey(source.id, source.version);
         if (text.trim() || imageObjectKey) chunks.push({ page: page.page, slideLabel: null, startMs: null, endMs: null, text, imageObjectKey });
+      };
+
+      let pageCount: number;
+      const failedRanges: string[] = [];
+      if (isPdf) {
+        const result = await parsePdfSegments({ path: temp, sourceId: source.id, sourceVersion: source.version, scope, runner: deps.runner,
+          segments: deps.segments, signal, segmentPages: deps.segmentPages, timeoutSeconds: deps.segmentTimeoutSeconds,
+          onPages: async pages => { for (const page of pages) await consumePage(page); } });
+        pageCount = result.pageCount;
+        failedRanges.push(...result.failedRanges, ...skippedVisionPages.map(String));
+      } else {
+        const pages: ParsedPage[] = isImage ? [{ page: 1, text: "", imagePath: null, visualKinds: ["scan"] }]
+          : await parser.parseDocument({ path: temp, mime: source.mime, maxPages: 2000 }, signal);
+        pageCount = pages.length;
+        for (const page of pages) await consumePage(page);
       }
+
+      const lowQualityPages = isPdf ? chunks.filter(chunk => checkPdfPageQuality(chunk.text).quality === "low_quality").map(chunk => chunk.page).filter((page): page is number => page != null) : [];
+      const warning = failedRanges.length || lowQualityPages.length ? createPdfPartialError(failedRanges, lowQualityPages) : null;
       signal.throwIfAborted();
       await assertCurrent?.();
+      if (warning && !chunks.length) throw new Error(warning.message);
       await deps.chunks.replaceChunks(scope, { sourceId: source.id, sourceVersion: source.version, chunks });
-      const lowQualityPages = source.mime === "application/pdf" ? chunks.filter(chunk => checkPdfPageQuality(chunk.text).quality === "low_quality").map(chunk => chunk.page).filter((page): page is number => page != null) : [];
-      const failedRanges = pdfResult?.failedRanges ?? [];
-      if (failedRanges.length || lowQualityPages.length) {
-        await deps.sources.markParseState(scope, source.id, "ready", createPdfPartialError(failedRanges, lowQualityPages));
-      }
+      if (warning) await deps.sources.markParseState(scope, source.id, "ready", warning);
       if (deps.onSourceReady) {
         try { await deps.onSourceReady(scope, { sourceId: source.id, sourceVersion: source.version }); } catch { /* best-effort */ }
       }
-      return isImage ? { pages: 1, imageOnly: visualRecognitionUnavailable } : { pages: pages.length };
+      if (isImage) return { pages: 1, imageOnly: visualRecognitionUnavailable };
+      return { pages: pageCount, ...(skippedVisionPages.length ? { warnings: skippedVisionPages.length, degraded: true } : {}) };
     } catch (error) {
       if (error instanceof UnsupportedMimeError) throw new UnsupportedSourceError("unsupported source MIME");
       if (error instanceof ConversionFailedError) throw new Error(`document conversion failed: ${error.message}`);

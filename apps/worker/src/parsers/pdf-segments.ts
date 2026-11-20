@@ -7,7 +7,7 @@ export const DEFAULT_PDF_SEGMENT_PAGES = 10;
 export const DEFAULT_PDF_SEGMENT_TIMEOUT_SECONDS = 240;
 export const PDF_EXECUTION_POLL_MS = 1_000;
 
-export type PdfSegmentParseResult = PdfSegmentPage[] & { failedRanges: string[] };
+export type PdfSegmentParseResult = { pageCount: number; failedRanges: string[] };
 
 /** Serial polling is only a prompt cancellation signal. Each cache/chunk write
  * still locks and checks the execution transactionally, including the last gap. */
@@ -33,6 +33,7 @@ export async function watchPdfExecution(assertCurrent: () => Promise<void>, poll
 export async function parsePdfSegments(input: {
   path: string; sourceId: string; sourceVersion: number; scope: OpeningScope;
   runner: ParserRunner; segments?: OpeningPdfSegmentsRepository; signal: AbortSignal;
+  onPages: (pages: PdfSegmentPage[]) => void | Promise<void>;
   segmentPages?: number; timeoutSeconds?: number; parserProfile?: string;
 }): Promise<PdfSegmentParseResult> {
   const size = input.segmentPages ?? DEFAULT_PDF_SEGMENT_PAGES;
@@ -47,13 +48,10 @@ export async function parsePdfSegments(input: {
   const { pageCount } = JSON.parse(inspected.stdout) as { pageCount?: unknown };
   if (!Number.isInteger(pageCount) || Number(pageCount) < 1 || Number(pageCount) > 2000) throw new RangeError("invalid PDF page count");
   const parser = createDoclingProcess({ run: input.runner });
-  const pages: PdfSegmentPage[] = [];
-  let outputBytes = 0;
-  const append = (segment: PdfSegmentPage[]) => {
-    outputBytes += Buffer.byteLength(JSON.stringify(segment));
-    if (outputBytes > 8 * 1024 * 1024) throw new BoundsExceededError("combined PDF output exceeds capture bound");
-    pages.push(...segment);
-  };
+  // The runner bounds stdout for each segment and validation bounds each page.
+  // Consume each batch before fetching the next so cached pages do not count
+  // against the runner's capture budget or require a second document-sized buffer.
+  let parsedPageCount = 0;
   const failed: string[] = [];
   for (let start = 1; start <= Number(pageCount); start += size) {
     input.signal.throwIfAborted();
@@ -63,7 +61,8 @@ export async function parsePdfSegments(input: {
     const cached = await input.segments?.read(input.scope, identity);
     input.signal.throwIfAborted();
     if (cached?.state === "ready") {
-      append(validatePdfSegmentPages(cached.pages, start, end));
+      await input.onPages(validatePdfSegmentPages(cached.pages, start, end));
+      parsedPageCount += cached.pages.length;
       continue;
     }
     let parsed: PdfSegmentPage[] | undefined;
@@ -85,10 +84,11 @@ export async function parsePdfSegments(input: {
     }
     input.signal.throwIfAborted();
     await input.segments?.save(input.scope, identity, { state: "ready", pages: parsed }, input.signal);
-    append(parsed);
+    input.signal.throwIfAborted();
+    await input.onPages(parsed);
+    parsedPageCount += parsed.length;
   }
   input.signal.throwIfAborted();
-  if (failed.length && pages.length === 0) throw new ConversionFailedError(`PDF segments failed (${failed.join(", ")})`);
-  Object.defineProperty(pages, "failedRanges", { value: failed, enumerable: false });
-  return pages as PdfSegmentParseResult;
+  if (!parsedPageCount) throw new ConversionFailedError(`PDF segments failed (${failed.join(", ")})`);
+  return { pageCount: parsedPageCount, failedRanges: failed };
 }
