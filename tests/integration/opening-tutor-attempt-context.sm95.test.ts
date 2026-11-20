@@ -6,7 +6,7 @@ import { createTutorService } from "../../apps/web/src/features/opening/tutor/tu
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createOpeningAiGradingRepository, createOpeningBudgetRepository, createOpeningConversationRepository,
-  createOpeningPrivacyRepository, createOpeningSourceChunksRepository, createOpeningTutorJobsRepository, tutorAttemptFence,
+  createOpeningPrivacyRepository, createOpeningSourceChunksRepository, createOpeningTutorJobsRepository, tutorAttemptFence, tutorStreamEpochKey,
 } from "@aistudy/database";
 import type { ProviderInput } from "@aistudy/contracts";
 import { reviseOpeningLearningObservation } from "../../packages/database/src/repositories/opening-observation-revisions";
@@ -44,7 +44,7 @@ async function seed(photo = false) {
   const jobs = createOpeningTutorJobsRepository(fixture.sql);
   const claim = async () => {
     const claimed = await jobs.claim(saved.jobId);
-    return { userTurnId: saved.turnId, jobId: saved.jobId, claimToken: claimed!.claimToken };
+    return { userTurnId: saved.turnId, jobId: saved.jobId, claimToken: claimed!.claimToken, executionId: claimed!.executionId };
   };
   const correct = () => reviseOpeningLearningObservation(fixture.sql, fixture.scope, {
     rootObservationId: original.id, revisesObservationId: graded.id, expectedHead: graded.id, revisionKind: "replace",
@@ -97,17 +97,37 @@ describe("sm95 same-attempt explain context", () => {
     expect(h.provider.complete).toHaveBeenCalledOnce();
   });
 
+  it("rejects H1 Redis publication when H2 commits between the attempt check and publication", async () => {
+    const f = await seed(), target = await f.claim();
+    const snapshot = (await f.jobs.readAttemptContext(fixture.scope, target))!;
+    const context = { privacyEpoch: snapshot.privacyEpoch, contextSourceRefs: snapshot.sourceRefs,
+      claimToken: target.claimToken, executionId: target.executionId, attemptContext: snapshot };
+    await f.jobs.assertAttemptContext(fixture.scope, target, snapshot);
+    const revised = await f.correct();
+    const publish = vi.fn(async () => {});
+
+    await expect(f.jobs.withStreamPublication(fixture.scope, f.saved.jobId, context, publish))
+      .rejects.toMatchObject({ code: "CONFLICT" });
+    expect(publish).not.toHaveBeenCalled();
+
+    const latest = (await f.jobs.readAttemptContext(fixture.scope, target))!;
+    expect(latest.headObservationId).toBe(revised.headObservationId);
+    await f.jobs.withStreamPublication(fixture.scope, f.saved.jobId, { ...context, attemptContext: latest }, publish);
+    expect(publish).toHaveBeenCalledOnce();
+  });
+
   it("sm95 P1b denies H1 cached bytes after H2 edit on reconnect and delayed flush", async () => {
     const f = await seed(), target = await f.claim();
     const snapshot = (await f.jobs.readAttemptContext(fixture.scope, target))!;
     const context = { privacyEpoch: snapshot.privacyEpoch, contextSourceRefs: snapshot.sourceRefs, exposureReceiptId: null, claimToken: target.claimToken,
-      attemptFence: tutorAttemptFence(snapshot) };
+      attemptFence: tutorAttemptFence(snapshot), executionId: target.executionId };
     const redis = new Redis(process.env.REDIS_URL!, { maxRetriesPerRequest: 0 });
     const key = `opening:tutor-stream:${fixture.scope.workspaceId}:${f.saved.jobId}`;
     try {
       const writer = createTutorStreamWriter(redis), reader = createTutorStreamReader(redis);
       await writer.begin(fixture.scope.workspaceId, f.saved.jobId, context);
-      await writer.append(fixture.scope.workspaceId, f.saved.jobId, "sm95 H1 cached secret bytes");
+      expect(await writer.append(fixture.scope.workspaceId, f.saved.jobId, "sm95 H1 cached secret bytes",
+        context.executionId, snapshot.privacyEpoch)).toBe(1);
       const cached = (await reader.read(fixture.scope.workspaceId, f.saved.jobId))!;
       expect(cached.attemptFence).toEqual(context.attemptFence);
       const job = (await f.jobs.readStream(fixture.scope, f.saved.jobId, cached))!;
@@ -131,7 +151,10 @@ describe("sm95 same-attempt explain context", () => {
         expect(await response.text()).toBe("");
       }
       await expect(f.jobs.readStream(fixture.scope, f.saved.jobId, cached)).rejects.toThrow();
-    } finally { await redis.del(key); redis.disconnect(); }
+    } finally {
+      try { await redis.del(key, tutorStreamEpochKey(fixture.scope.workspaceId)); }
+      finally { redis.disconnect(); }
+    }
     const turns = await f.conversations.listTurns(fixture.scope, f.conversation.id);
     expect(turns.find(turn => turn.id===f.saved.assistantTurnId)?.text).not.toContain("sm95 H1 cached secret bytes");
     const continuity = await f.conversations.loadContinuityTurns(fixture.scope, f.conversation.id);

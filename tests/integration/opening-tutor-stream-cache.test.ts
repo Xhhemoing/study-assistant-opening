@@ -174,12 +174,19 @@ it.each(["cancellation", "privacy epoch"])("fences a timed-out append before %s 
   const { fixture, scope, reader, writer, jobs, jobId, key } = await streamFixture();
   const publication = openRaceSession(), revocationSession = openRaceSession();
   const [appendTransport, controlTransport] = await Promise.all([openRedisTransport(), openRedisTransport()]);
+  const producer = redis.duplicate();
   const control = redis.duplicate({ host: "127.0.0.1", port: controlTransport.port, commandTimeout: 200 });
-  control.on("error", () => undefined);
-  const duplicate = vi.spyOn(control, "duplicate").mockImplementation(options =>
-    redis.duplicate({ ...options, host: "127.0.0.1", port: appendTransport.port, commandTimeout: 200 }));
-  const appendWriter = createWorkerTutorStreamWriter(control, vi.fn());
-  const controlEval = vi.spyOn(control, "eval");
+  const replacement = redis.duplicate();
+  const allowReplacement = deferred();
+  const connectReplacement = replacement.connect.bind(replacement);
+  vi.spyOn(replacement, "connect").mockImplementationOnce(async () => {
+    await allowReplacement.promise;
+    return connectReplacement();
+  });
+  const duplicate = vi.spyOn(producer, "duplicate")
+    .mockImplementationOnce(options => redis.duplicate({ ...options, host: "127.0.0.1", port: appendTransport.port, commandTimeout: 200 }))
+    .mockReturnValueOnce(control).mockReturnValueOnce(replacement);
+  const appendWriter = createWorkerTutorStreamWriter(producer, vi.fn());
   const observed: TutorStreamDelta[] = [];
   const checkpoint = deferred();
   const unsubscribe = await reader.subscribe(scope.workspaceId, jobId, delta => {
@@ -187,7 +194,7 @@ it.each(["cancellation", "privacy epoch"])("fences a timed-out append before %s 
     else observed.push(delta);
   });
   try {
-    await Promise.all([publication.ready, revocationSession.ready, control.connect()]);
+    await Promise.all([publication.ready, revocationSession.ready]);
     const job = (await jobs.claim(jobId))!;
     const context = { privacyEpoch: 0, contextSourceRefs: [], exposureReceiptId: null,
       claimToken: job.claimToken, executionId: job.executionId };
@@ -196,6 +203,9 @@ it.each(["cancellation", "privacy epoch"])("fences a timed-out append before %s 
     const before = await reader.read(scope.workspaceId, jobId);
     expect(before).toMatchObject({ text: "First", sequence: 1 });
     const stalledAppend = appendTransport.holdWrites();
+    // Open the first control socket without modifying the active execution.
+    await appendWriter.seal(scope.workspaceId, jobId, randomUUID());
+    const controlEval = vi.spyOn(control, "eval");
     const stalledControl = controlTransport.holdWrites();
     const publishing = track(createOpeningTutorJobsRepository(publication.sql).withStreamPublication(scope, jobId, context, async () => {
       await appendWriter.append(scope.workspaceId, jobId, " unsafe tail", job.executionId, 0);
@@ -204,7 +214,7 @@ it.each(["cancellation", "privacy epoch"])("fences a timed-out append before %s 
       await Promise.race([stalledAppend.received, publishing.then(() => { throw new Error("append settled before reaching TCP"); })]);
       const revoking = revocation === "cancellation"
         ? track(createOpeningTutorJobsRepository(revocationSession.sql).cancel(scope, jobId))
-        : track(revocationSession.sql.begin(tx => advanceOpeningWorkspacePrivacyEpoch(tx, scope)));
+        : track(revocationSession.sql.begin(tx => advanceOpeningWorkspacePrivacyEpoch(tx, scope, redisUrl)));
       const first = await Promise.race([
         stalledControl.received.then(async () => {
           await expect(controlEval.mock.results[0]?.value).rejects.toThrow("Command timed out");
@@ -217,7 +227,8 @@ it.each(["cancellation", "privacy epoch"])("fences a timed-out append before %s 
       }
       const appendRedis = duplicate.mock.results[0]?.value as Redis;
       expect(appendRedis.stream.destroyed).toBe(true);
-      stalledControl.release();
+      expect(control.stream.destroyed).toBe(true);
+      allowReplacement.resolve();
       await expect(publishing).rejects.toThrow("Command timed out");
       const result = await revoking;
       if (revocation === "cancellation") expect(result).toMatchObject({ status: "cancelled" });
@@ -238,8 +249,9 @@ it.each(["cancellation", "privacy epoch"])("fences a timed-out append before %s 
       const privacyEpoch = revocation === "privacy epoch" ? 1 : 0;
       await appendWriter.begin(scope.workspaceId, newJobId, { ...context, privacyEpoch, executionId: newExecutionId });
       expect(await appendWriter.append(scope.workspaceId, newJobId, "New turn", newExecutionId, privacyEpoch)).toBe(1);
-      expect(duplicate).toHaveBeenCalledTimes(2);
+      expect(duplicate).toHaveBeenCalledTimes(4);
     } finally {
+      allowReplacement.resolve();
       stalledControl.release();
       stalledAppend.release();
       await Promise.allSettled([publishing]);
@@ -247,7 +259,7 @@ it.each(["cancellation", "privacy epoch"])("fences a timed-out append before %s 
   } finally {
     await unsubscribe();
     appendWriter.disconnect();
-    control.disconnect();
+    producer.disconnect();
     await Promise.all([appendTransport.close(), controlTransport.close(), closeRace(publication.sql),
       closeRace(revocationSession.sql), fixture.close()]);
   }

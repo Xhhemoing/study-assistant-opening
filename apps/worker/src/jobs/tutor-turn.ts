@@ -404,24 +404,22 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
         ? await deps.streamExposures!.generate(scope, streamExposure) : null;
       const streamContext = { privacyEpoch: jobEpoch ?? 0, contextSourceRefs, claimToken: claimed.claimToken,
         executionId: claimed.executionId };
+      const publicationContext = { ...streamContext, attemptContext: attemptContext ?? undefined };
       let streamAvailable = Boolean(deps.stream);
       if (deps.stream) {
-        try {
-          await deps.tutorJobs.withStreamPublication(scope, claimed.id, streamContext, () =>
-            deps.stream!.begin(scope.workspaceId, claimed.id, { ...streamContext,
-              exposureReceiptId: exposureReceipt?.id ?? null,
-              ...(attemptContext ? { attemptFence: tutorAttemptFence(attemptContext) } : {}) }));
-        } catch (error) {
-          streamAvailable = false;
-          deps.onStreamUnavailable?.(error);
-        }
+        const stream = deps.stream;
+        const cacheContext = { ...streamContext, exposureReceiptId: exposureReceipt?.id ?? null,
+          ...(attemptContext ? { attemptFence: tutorAttemptFence(attemptContext) } : {}) };
+        await deps.tutorJobs.withStreamPublication(scope, claimed.id, publicationContext, async () => {
+          try { await stream.begin(scope.workspaceId, claimed.id, cacheContext); }
+          catch (error) { streamAvailable = false; deps.onStreamUnavailable?.(error); }
+        });
       }
       let firstTextAt: number | null = null;
       const authorizeAndPublish = async (text: string) => {
         try {
           await assertMaterialsCurrent();
-          await assertAttemptCurrent();
-          await deps.tutorJobs.withStreamPublication(scope, claimed.id, streamContext, async () => {
+          await deps.tutorJobs.withStreamPublication(scope, claimed.id, publicationContext, async () => {
             if (firstTextAt === null) {
               const observedAt = new Date();
               firstTextAt = performance.now();
@@ -485,6 +483,10 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
             if (learnerContext) await deps.learnerContext!.assertCurrent(scope, learnerContext);
             if (deps.privacy && jobEpoch !== null) assertCurrentEpoch(jobEpoch, await deps.privacy.getWorkspaceEpoch(scope));
             await assertMaterialsCurrent();
+            const current = await deps.tutorJobs.get(scope, claimed.id);
+            if (current?.status !== "running" || current.claimToken !== claimed.claimToken) {
+              throw Object.assign(new Error("tutor job claim is no longer current"), { code: "CONFLICT" });
+            }
           },
         });
         // Settle confirmed provider usage before a refused tail can end the job.

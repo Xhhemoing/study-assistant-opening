@@ -67,6 +67,23 @@ function setup(_input: { sourceIds: string[]; chunks: [] }) {
 }
 
 describe("sm95 typed attempt context", () => {
+  it("rechecks the claim after attempt and material checks, before the paid send", async () => {
+    const { deps, tutorJobs, budget, provider } = setup({ sourceIds: [], chunks: [] });
+    const claimToken = "00000000-0000-4000-8000-000000000007";
+    const current = { ...claimedJob, claimToken };
+    tutorJobs.claim.mockResolvedValue(current);
+    tutorJobs.get.mockResolvedValue(current);
+    tutorJobs.heartbeat.mockResolvedValue(true);
+    tutorJobs.getUserTurn.mockResolvedValueOnce({ ...turn, attemptId: claimedJob.userTurnId });
+    tutorJobs.assertAttemptContext.mockImplementationOnce(async () => {
+      tutorJobs.get.mockResolvedValue({ ...current, claimToken: "00000000-0000-4000-8000-000000000008" });
+    });
+
+    await expect(createTutorTurnHandler(deps)(claimedJob.id)).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(budget.release).toHaveBeenCalledWith(expect.anything(), `tutor:${claimedJob.id}`, "not_sent");
+    expect(provider.complete).not.toHaveBeenCalled();
+  });
+
   it("sm95 binds saved question, original/current answer and effective grade without pasting them into the request", async () => {
     const { deps, tutorJobs, provider } = setup({ sourceIds: [], chunks: [] });
     const snapshot = { privacyEpoch: 0, anchor: { purpose: "learning_help" as const, attemptId: claimedJob.userTurnId },
@@ -148,9 +165,14 @@ describe("sm95 typed attempt context", () => {
     const { deps, tutorJobs, provider } = setup({ sourceIds: [], chunks: [] });
     tutorJobs.getUserTurn.mockResolvedValueOnce({ ...turn, sourceIds: [], sourceVersions: {}, attemptId: claimedJob.userTurnId });
     const drift = Object.assign(new Error("bound attempt context is unavailable or changed"), { code: "CONFLICT" });
-    tutorJobs.assertAttemptContext.mockResolvedValueOnce(undefined);
-    if (buffered) tutorJobs.assertAttemptContext.mockResolvedValueOnce(undefined);
-    tutorJobs.assertAttemptContext.mockRejectedValueOnce(drift);
+    const publish = async (_scope: unknown, _job: string, context: Parameters<OpeningTutorJobsRepository["withStreamPublication"]>[2],
+      callback: () => Promise<void>) => {
+      expect(context.attemptContext?.anchor.attemptId).toBe(claimedJob.userTurnId);
+      await callback();
+    };
+    tutorJobs.withStreamPublication.mockImplementationOnce(publish); // Cache initialization.
+    if (buffered) tutorJobs.withStreamPublication.mockImplementationOnce(publish); // First batch.
+    tutorJobs.withStreamPublication.mockRejectedValueOnce(drift);
     const stream = { begin: vi.fn(async () => {}), append: vi.fn(async (_workspace: string, _job: string, _text: string) => {}) };
     const streamExposures = { generate: vi.fn(async () => ({ id: chunkB.id })) };
     provider.complete.mockImplementationOnce(async (_input, _signal, onTextDelta) => {

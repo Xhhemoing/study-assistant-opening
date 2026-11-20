@@ -69,37 +69,64 @@ it.each(["Done.", "Done!", "Done?", "好。", "好！", "什么？", "Line\nNext
 it("confirms an unknown append on a replacement control connection after an outage", async () => {
   const transportError = new Error("Command timed out");
   const connectionClosed = new Error("Connection is closed.");
-  const endedControl = {
-    status: "ready", options: { retryStrategy: () => null }, disconnect: vi.fn(),
-    eval: vi.fn<() => Promise<void>>().mockRejectedValue(connectionClosed),
-    duplicate: vi.fn(),
-  };
+  const producer = { duplicate: vi.fn() };
   const appendConnection = {
     status: "ready", on: vi.fn(), connect: vi.fn().mockResolvedValue(undefined), disconnect: vi.fn(),
-    eval: vi.fn(async () => { endedControl.status = "end"; throw transportError; }),
+    eval: vi.fn().mockRejectedValue(transportError),
   };
   const unreachable = {
     status: "end", on: vi.fn(), disconnect: vi.fn(), connect: vi.fn().mockRejectedValue(connectionClosed),
   };
+  const confirmation = deferred();
   const replacement = {
     status: "ready", on: vi.fn(), disconnect: vi.fn(),
-    eval: vi.fn().mockResolvedValue(undefined), connect: vi.fn().mockResolvedValue(undefined),
+    eval: vi.fn(() => confirmation.promise), connect: vi.fn().mockResolvedValue(undefined),
   };
-  endedControl.duplicate.mockReturnValueOnce(appendConnection).mockReturnValueOnce(unreachable).mockReturnValue(replacement);
-  const writer = createWorkerTutorStreamWriter(endedControl as unknown as IORedis, vi.fn());
+  producer.duplicate.mockReturnValueOnce(appendConnection).mockReturnValueOnce(unreachable).mockReturnValue(replacement);
+  const writer = createWorkerTutorStreamWriter(producer as unknown as IORedis, vi.fn());
   let failure: unknown;
   const result = writer.append("workspace", "job", "tail", "execution", 0).catch(error => { failure = error; });
   try {
     await vi.waitFor(() => expect(unreachable.disconnect).toHaveBeenCalled());
     expect(failure).toBeUndefined();
-    await vi.waitFor(() => expect(failure).toBe(transportError), { timeout: 1500 });
     expect(replacement.eval).toHaveBeenCalledTimes(1);
   } finally {
-    endedControl.eval.mockResolvedValue(undefined); // Let a failing candidate finish cleanup.
+    confirmation.resolve();
     await result;
     writer.disconnect();
   }
+  expect(failure).toBe(transportError);
   expect(replacement.disconnect).toHaveBeenCalledOnce();
+});
+
+it("retries a timed-out ready control on a fresh connection before releasing the append failure", async () => {
+  const appendError = new Error("Append timed out");
+  const sealError = new Error("Command timed out");
+  const append = { status: "ready", on: vi.fn(), connect: vi.fn().mockResolvedValue(undefined),
+    disconnect: vi.fn(), eval: vi.fn().mockRejectedValue(appendError) };
+  const stuckControl = { status: "ready", on: vi.fn(), connect: vi.fn().mockResolvedValue(undefined),
+    disconnect: vi.fn(), stream: { destroy: vi.fn() }, eval: vi.fn().mockRejectedValue(sealError) };
+  const confirmation = deferred();
+  const freshControl = { on: vi.fn(), connect: vi.fn().mockResolvedValue(undefined), disconnect: vi.fn(),
+    eval: vi.fn(() => confirmation.promise) };
+  const producer = { status: "ready", eval: vi.fn().mockResolvedValue(undefined), duplicate: vi.fn()
+    .mockReturnValueOnce(append).mockReturnValueOnce(stuckControl).mockReturnValue(freshControl) };
+  const writer = createWorkerTutorStreamWriter(producer as unknown as IORedis, vi.fn());
+  let failure: unknown;
+  const result = writer.append("workspace", "job", "tail", "execution", 0).catch(error => { failure = error; });
+  try {
+    // Let the failed seal and its immediate retry drain without advancing any timer.
+    await new Promise<void>(resolve => { setImmediate(resolve); });
+    expect(stuckControl.disconnect).toHaveBeenCalledOnce();
+    expect(stuckControl.stream.destroy).toHaveBeenCalledOnce();
+    expect(freshControl.eval).toHaveBeenCalledOnce();
+    expect(failure).toBeUndefined();
+  } finally {
+    confirmation.resolve();
+    await result;
+    writer.disconnect();
+  }
+  expect(failure).toBe(appendError);
 });
 
 it("drains overlapping callbacks accepted before close in arrival order", async () => {

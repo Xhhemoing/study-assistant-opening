@@ -410,6 +410,33 @@ describe("tutor turn handler", () => {
     } finally { vi.useRealTimers(); }
   });
 
+  it("propagates a publication claim rejection before reserving tutor budget", async () => {
+    const { deps, tutorJobs, budget, provider } = setup();
+    const cancelled = Object.assign(new Error("tutor job cancelled"), { code: "CONFLICT" });
+    tutorJobs.withStreamPublication.mockRejectedValueOnce(cancelled);
+    const stream = { begin: vi.fn(), append: vi.fn() };
+
+    await expect(createTutorTurnHandler({ ...deps, stream })(claimedJob.id)).rejects.toBe(cancelled);
+    expect(stream.begin).not.toHaveBeenCalled();
+    expect(budget.reserve).not.toHaveBeenCalled();
+    expect(provider.complete).not.toHaveBeenCalled();
+  });
+
+  it.each(["without streaming", "after Redis begin fails"])("rechecks an unbound claim before sending %s", async mode => {
+    const { deps, tutorJobs, budget, provider } = setup();
+    const stream = mode === "after Redis begin fails"
+      ? { begin: vi.fn().mockRejectedValue(new Error("Redis unavailable")), append: vi.fn() }
+      : undefined;
+    budget.claimExecution.mockImplementationOnce(async () => {
+      tutorJobs.get.mockResolvedValue({ ...claimedJob, status: "cancelled" });
+      return true;
+    });
+
+    await expect(createTutorTurnHandler({ ...deps, stream })(claimedJob.id)).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(budget.release).toHaveBeenCalledWith(expect.anything(), `tutor:${claimedJob.id}`, "not_sent");
+    expect(provider.complete).not.toHaveBeenCalled();
+  });
+
   it("settles confirmed provider usage when cancellation blocks only the final buffered batch", async () => {
     const { deps, provider, tutorJobs, budget } = setup();
     const cancelled = Object.assign(new Error("tutor job cancelled"), { code: "CONFLICT" });

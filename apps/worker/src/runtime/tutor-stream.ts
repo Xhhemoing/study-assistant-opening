@@ -142,8 +142,7 @@ export type TutorStreamWriter = ReturnType<typeof createTutorStreamWriter>;
 
 /** The worker holds PostgreSQL publication locks until this append settles. */
 export function createWorkerTutorStreamWriter(producer: IORedis, reportError: (error: unknown) => void) {
-  const sharedControl = { redis: producer, writer: createTutorStreamWriter(producer), ready: undefined };
-  let useSharedControl = true;
+  // Control and append both own their sockets so a timeout never closes the queue producer.
   let controlConnection: ReturnType<typeof openConnection> | undefined;
   let appendConnection: ReturnType<typeof openConnection> | undefined;
 
@@ -166,27 +165,21 @@ export function createWorkerTutorStreamWriter(producer: IORedis, reportError: (e
     closeConnection(connection.redis);
   }
 
-  function retireControl(connection: typeof sharedControl | ReturnType<typeof openConnection>) {
-    if (connection === sharedControl) {
-      // The borrowed producer also serves the worker queues.
-      useSharedControl = false;
-    } else if (connection === controlConnection) {
-      controlConnection = undefined;
-      closeConnection(connection.redis);
-    }
+  function retireControl(connection = controlConnection) {
+    if (!connection || connection !== controlConnection) return;
+    controlConnection = undefined;
+    closeConnection(connection.redis);
   }
 
   const isClosed = (redis: IORedis) => redis.status === "end" || redis.status === "close";
   async function seal(workspaceId: string, jobId: string, executionId: string) {
-    const previous = useSharedControl ? sharedControl : controlConnection;
-    if (previous && isClosed(previous.redis)) retireControl(previous);
-    const connection = useSharedControl ? sharedControl : controlConnection ??= openConnection();
+    if (controlConnection && isClosed(controlConnection.redis)) retireControl();
+    const connection = controlConnection ??= openConnection();
     try {
       await connection.ready;
       await connection.writer.seal(workspaceId, jobId, executionId);
     } catch (error) {
-      if (isClosed(connection.redis) || (connection !== sharedControl && connection.redis.status !== "ready")
-        || (error instanceof Error && error.message === "Connection is closed.")) retireControl(connection);
+      retireControl(connection);
       throw error;
     }
   }
@@ -211,9 +204,9 @@ export function createWorkerTutorStreamWriter(producer: IORedis, reportError: (e
         await seal(workspaceId, jobId, executionId);
         return;
       } catch (error) {
-        if (!reported) reportError(error);
+        if (reported) await delay(500);
+        else reportError(error);
         reported = true;
-        await delay(500);
       }
     }
   }
@@ -227,7 +220,7 @@ export function createWorkerTutorStreamWriter(producer: IORedis, reportError: (e
     seal,
     disconnect() {
       disconnectAppend();
-      if (controlConnection) retireControl(controlConnection);
+      retireControl();
     },
     async append(workspaceId: string, jobId: string, text: string, executionId: string | undefined, privacyEpoch: number) {
       if (!text) return 0;

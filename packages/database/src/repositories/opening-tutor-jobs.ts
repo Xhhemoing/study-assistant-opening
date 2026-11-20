@@ -497,23 +497,30 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
       return job;
     },
 
-    /** Authorize Redis initialization or append against current job and workspace privacy. */
-    async withStreamPublication(scope: OpeningScope, id: string, context: StreamPublicationContext,
-      publish: () => Promise<void>): Promise<void> {
+    /** Hold current job, privacy and attempt authorization through the Redis write. */
+    async withStreamPublication(scope: OpeningScope, id: string,
+      context: StreamPublicationContext & { attemptContext?: TutorAttemptContext }, publish: () => Promise<void>): Promise<void> {
       let transactionClosed = false;
       await sql.begin(async tx => {
-        // Acquire locks in the same order as cancellation and other terminal writes.
+        // Attempt revisions take the history lock before workspace and observation locks.
+        if (context.attemptContext) await lockWorkspaceLearningHistory(tx, scope);
         const [workspace] = await tx`SELECT privacy_epoch FROM workspaces
           WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR SHARE`;
         if (!workspace || Number(workspace.privacy_epoch) !== context.privacyEpoch) {
           throw Object.assign(new Error("stream authorization changed"), { code: "PRIVACY_EPOCH_MISMATCH" });
         }
-        const [job] = await tx`SELECT j.id FROM opening_tutor_jobs j
+        const [job] = await tx`SELECT j.user_turn_id,t.attempt_id,t.context_anchor FROM opening_tutor_jobs j
           JOIN opening_conversations c ON c.id=j.conversation_id AND c.workspace_id=j.workspace_id
+          JOIN opening_turns t ON t.id=j.user_turn_id AND t.workspace_id=j.workspace_id AND t.conversation_id=j.conversation_id
           WHERE j.id=${id} AND j.workspace_id=${scope.workspaceId} AND c.owner_user_id=${scope.ownerUserId}
             AND j.status='running' AND j.claim_token IS NOT DISTINCT FROM ${context.claimToken ?? null}::uuid
             AND j.timing_execution_id IS NOT DISTINCT FROM ${context.executionId ?? null}::uuid FOR SHARE OF j`;
         if (!job) throw Object.assign(new Error("tutor stream execution is no longer current"), { code: "CONFLICT" });
+        if (job.attempt_id || (job.context_anchor as StudyContextAnchor | null)?.attemptId || context.attemptContext) {
+          if (!context.attemptContext) throw Object.assign(new Error("stream attempt context missing"), { code: "CONFLICT" });
+          await assertTutorAttemptContext(tx, scope,
+            { jobId: id, userTurnId: String(job.user_turn_id), claimToken: context.claimToken }, context.attemptContext);
+        }
         if (context.contextSourceRefs.length) await assertStreamSources(tx, scope, context.contextSourceRefs);
         try {
           await publish();
