@@ -90,7 +90,8 @@ flowchart LR
 - **只读仓储重验与游标指纹**（[opening-asset-graph.ts](../../packages/database/src/repositories/opening-asset-graph.ts)）：
   - 去重优先级固定为：`supported > needs_check > suggested`。
   - 解析 `edge.evidenceChunkIds` 时，必须核对对应 chunk 所属 `source_id` 当前仍绑定于该课程、处于当前工作区可读版本且未被隐私设置排除；若 `chunk.page` 为 `null` 或非正整数，只允许携带经重验的 `sourceNodeId` / `sourceVersion`，**严禁用 `chunk_index` 伪充页码**；若全部引用资料已撤权或不可读，则不返回任何出处字段，且若原状态为 `supported` 则在投影层按只读降级提示为 `needs_check`（不静默改写底层快照表）。
-  - 将可见课程知识快照版本、边状态摘要、可读资料纪元与边详情协商位一并纳入 `scopeFingerprint`，确保资料撤权、重新构图或隐私变更后旧分页游标确定性返回 `CURSOR_STALE`。
+  - 将可见课程知识快照版本、边状态摘要、可读资料纪元与**实际生效**的边详情投影位一并纳入 `scopeFingerprint`，确保资料撤权、重新构图、隐私变更或投影开关切换后旧分页游标确定性返回 `CURSOR_STALE`。
+  - **在途新标签页无 `400` 回退规则**：由于 [query/route.ts](../../apps/web/src/app/api/opening/asset-graph/query/route.ts) 同样使用 `.strict()` 解析请求体，回退时禁止直接移除请求契约中的可选 `includeKnowledgeEdgeDetails` 字段（否则已打开的新标签页发起请求会收到 HTTP `400`），而应通过前端停发或服务端关闭边详情投影并继续接受 `includeKnowledgeEdgeDetails?: boolean` 作为无副作用 no-op，保证新旧已打开标签页均平滑可用。
 
 ### 2.4 续学首屏故障隔离与活动小结衔接
 
