@@ -90,15 +90,17 @@ describe("CartridgeRegistry", () => {
     expect(qualifyCartridgeEmission(registry, emission)).toMatchObject({ qualified: true });
   });
 
-  it("rejects a manifest whose field getter throws during schema parsing", () => {
+  it("rejects a manifest accessor before schema parsing", () => {
+    let reads = 0;
     const candidate = {
       ...continuityOnly,
-      manifest: { ...continuityOnly.manifest, get version(): string { throw new Error("version unavailable"); } },
+      manifest: { ...continuityOnly.manifest, get version() { reads += 1; return "0.1.0"; } },
     };
     const registry = createCartridgeRegistry();
     expect(registry.registerCartridge(candidate)).toMatchObject({
-      ok: false, issues: [{ code: "manifest_invalid", detail: "version unavailable" }],
+      ok: false, issues: [{ code: "manifest_invalid" }],
     });
+    expect(reads).toBe(0);
     expect(registry.listCartridges()).toEqual([]);
   });
 
@@ -124,6 +126,30 @@ describe("CartridgeRegistry", () => {
     }));
   });
 
+  it.each(["raw state", "restore result", "restored state", "summary"] as const)(
+    "rejects a Proxy-backed %s before reading it during resume",
+    boundary => {
+      let reads = 0;
+      const get = (target: object, key: PropertyKey) => { reads += 1; return Reflect.get(target, key); };
+      const state = { step: 2 };
+      const candidate = {
+        ...continuityOnly,
+        parseContinuityState(raw: unknown) {
+          const result = continuityOnly.parseContinuityState(raw);
+          if (boundary === "restore result") return new Proxy(result, { get });
+          return boundary === "restored state" ? { ok: true as const, value: new Proxy(state, { get }) } : result;
+        },
+        buildResumeSummary(value: typeof state) {
+          const result = continuityOnly.buildResumeSummary(value);
+          return boundary === "summary" ? new Proxy(result, { get }) : result;
+        },
+      };
+      const registered = createCartridgeRegistry([candidate]).getCartridge(candidate.manifest.id)!;
+      expect(() => registered.buildResumeSummary(boundary === "raw state" ? new Proxy(state, { get }) : state)).toThrow();
+      expect(reads).toBe(0);
+    },
+  );
+
   it.each(["evaluatorVersion", "specVersion"] as const)("requires a readable non-blank string for %s", field => {
     const registry = createCartridgeRegistry();
     for (const value of [true, 1, {}, " \t\n"]) {
@@ -131,14 +157,16 @@ describe("CartridgeRegistry", () => {
       expect(registry.registerCartridge(candidate)).toMatchObject({ ok: false, issues: [{ code: "evidence_contract_missing" }] });
       expect(hasEvidenceCapability(candidate)).toBe(false);
     }
+    let reads = 0;
     const evidenceContract = Object.defineProperty({ ...stack408Cartridge.evidenceContract }, field, {
-      get() { throw new Error(`${field} read failed`); },
+      get() { reads += 1; return "valid"; },
     });
     const candidate = { ...stack408Cartridge, evidenceContract };
     expect(registry.registerCartridge(candidate)).toMatchObject({
-      ok: false, issues: [{ code: "evidence_contract_missing", detail: `${field} read failed` }],
+      ok: false, issues: [{ code: "evidence_contract_missing" }],
     });
     expect(hasEvidenceCapability(candidate)).toBe(false);
+    expect(reads).toBe(0);
   });
 
   it("rejects duplicate ids and invalid manifests", () => {
@@ -382,7 +410,7 @@ describe("CartridgeRegistry", () => {
       });
       expect(validateCartridge(badManifest)).toMatchObject({
         ok: false,
-        issues: [{ code: "manifest_invalid", detail: "unprintable thrown value" }],
+        issues: [{ code: "manifest_invalid" }],
       });
     }
   });

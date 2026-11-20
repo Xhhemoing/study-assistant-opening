@@ -5,6 +5,10 @@ export function isInspectableCartridgeObject(value: unknown): value is object {
   return value !== null && typeof value === "object" && isProxy?.(value) === false;
 }
 
+export function isInspectableCartridgeFunction(value: unknown): value is (...args: never[]) => unknown {
+  return typeof value === "function" && isProxy?.(value) === false;
+}
+
 const typedArrayPrototype = Object.getPrototypeOf(Uint8Array.prototype) as object;
 const typedArrayPrototypes = new Set<object>([
   Int8Array.prototype, Uint8Array.prototype, Uint8ClampedArray.prototype,
@@ -26,6 +30,14 @@ function readEnumerableDataProperty(value: object, key: string | symbol): unknow
     throw new TypeError("Cartridge data requires enumerable own string data properties");
   }
   return descriptor.value;
+}
+
+/** Read a descriptor member without invoking property access on cartridge definitions. */
+export function readCartridgeDataProperty<T extends object, K extends keyof T & string>(value: T, key: K): T[K];
+export function readCartridgeDataProperty(value: unknown, key: string): unknown;
+export function readCartridgeDataProperty(value: unknown, key: string): unknown {
+  if (!isInspectableCartridgeObject(value)) throw new TypeError("Cartridge definition requires an inspectable non-Proxy object");
+  return readEnumerableDataProperty(value, key);
 }
 
 function isElementIndex(key: string | symbol, length: number): boolean {

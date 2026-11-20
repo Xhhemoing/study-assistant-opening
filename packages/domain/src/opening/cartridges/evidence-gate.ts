@@ -1,11 +1,11 @@
 import { evaluateProbeWithSnapshot } from "./capability-helpers";
-import { cloneCartridgeData } from "./clone-cartridge-data";
+import { cloneCartridgeData, isInspectableCartridgeObject, readCartridgeDataProperty } from "./clone-cartridge-data";
 import {
   snapshotAndVerifyProbe,
   type DistinguishableProbeSpec,
   type ProbeDistinguishabilityReport,
 } from "./probe-protocol";
-import type { CartridgeRegistry } from "./registry";
+import { getCartridge, type CartridgeRegistry } from "./registry";
 import { hasEvidenceCapability, type CartridgeCapabilityLevel, type CartridgeProbeEvaluation } from "./types";
 
 /**
@@ -54,10 +54,10 @@ export interface CartridgeEvidenceObservationFacts {
 function evaluationsMatch(
   expected: CartridgeProbeEvaluation,
   actual: unknown,
-): actual is CartridgeProbeEvaluation {
-  if (!actual || typeof actual !== "object") return false;
+): boolean {
+  if (!isInspectableCartridgeObject(actual)) return false;
   try {
-    const candidate = actual as Partial<CartridgeProbeEvaluation>;
+    const candidate = cloneCartridgeData(actual) as Partial<CartridgeProbeEvaluation>;
     return candidate.probeId === expected.probeId
       && candidate.requirementKey === expected.requirementKey
       && candidate.outcome === expected.outcome
@@ -150,15 +150,16 @@ export function qualifyCartridgeEmission(
 
   let cartridge: ReturnType<CartridgeRegistry["getCartridge"]>;
   try {
-    cartridge = registry.getCartridge(capturedEmission.cartridgeId);
+    cartridge = getCartridge(registry, capturedEmission.cartridgeId);
   } catch {
     return reject("cartridge_evaluation_failed");
   }
   if (!cartridge) return reject("cartridge_unregistered");
   let manifestVersion: string;
   try {
-    result.level = cartridge.manifest.level;
-    manifestVersion = cartridge.manifest.version;
+    const manifest = cloneCartridgeData(readCartridgeDataProperty(cartridge, "manifest"));
+    result.level = manifest.level;
+    manifestVersion = manifest.version;
   } catch {
     return reject("cartridge_evaluation_failed");
   }

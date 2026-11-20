@@ -1,5 +1,7 @@
+import { cloneCartridgeData } from "./clone-cartridge-data";
 import {
   classifyProbeResponseWithSnapshot,
+  isVerifiedProbeSnapshot,
   snapshotAndVerifyProbe,
   type DistinguishableProbeSpec,
   type VerifiedProbeSnapshot,
@@ -27,10 +29,12 @@ function windowContains(window: CartridgeActiveRetestWindow, at: number): boolea
  * future window are deferred to its close (or suppressed when it has no close).
  */
 export function respectActiveRetestWindows(
-  candidates: readonly CartridgeTaskCandidate[],
-  windows: readonly CartridgeActiveRetestWindow[],
+  rawCandidates: readonly CartridgeTaskCandidate[],
+  rawWindows: readonly CartridgeActiveRetestWindow[],
   now: string,
 ): CartridgeTaskCandidate[] {
+  const candidates = cloneCartridgeData(rawCandidates);
+  const windows = cloneCartridgeData(rawWindows);
   const nowMs = Date.parse(now);
   const result: CartridgeTaskCandidate[] = [];
   for (const candidate of candidates) {
@@ -53,7 +57,7 @@ export function respectActiveRetestWindows(
 
 /** Stable order: priority desc, earliest asc, id asc. */
 export function sortTaskCandidates(candidates: readonly CartridgeTaskCandidate[]): CartridgeTaskCandidate[] {
-  return [...candidates].sort((a, b) => b.priority - a.priority
+  return [...cloneCartridgeData(candidates)].sort((a, b) => b.priority - a.priority
     || Date.parse(a.earliestAt) - Date.parse(b.earliestAt)
     || a.candidateId.localeCompare(b.candidateId));
 }
@@ -61,17 +65,26 @@ export function sortTaskCandidates(candidates: readonly CartridgeTaskCandidate[]
 /* ------------------------------------------------------------ L3 helpers -- */
 
 /** A citation is grounded only when its quote is an exact substring of the cited chunk version. */
-export function isCitationGrounded(citation: CartridgeCitation, chunks: readonly CartridgeMaterialChunk[]): boolean {
+function citationMatchesChunk(citation: CartridgeCitation, chunks: readonly CartridgeMaterialChunk[]): boolean {
   if (!citation.quote.trim()) return false;
   return chunks.some(chunk => chunk.sourceId === citation.sourceId && chunk.sourceVersion === citation.sourceVersion
     && chunk.chunkId === citation.chunkId && chunk.page === citation.page && chunk.text.includes(citation.quote));
+}
+
+export function isCitationGrounded(citation: CartridgeCitation, chunks: readonly CartridgeMaterialChunk[]): boolean {
+  try {
+    return citationMatchesChunk(cloneCartridgeData(citation), cloneCartridgeData(chunks));
+  } catch {
+    return false;
+  }
 }
 
 export function keepGroundedSeeds(
   seeds: readonly CartridgeExerciseSeed[],
   chunks: readonly CartridgeMaterialChunk[],
 ): CartridgeExerciseSeed[] {
-  return seeds.filter(seed => isCitationGrounded(seed.citation, chunks));
+  const capturedChunks = cloneCartridgeData(chunks);
+  return cloneCartridgeData(seeds).filter(seed => citationMatchesChunk(seed.citation, capturedChunks));
 }
 
 /* ------------------------------------------------------------ L4 helpers -- */
@@ -91,6 +104,12 @@ export function evaluateProbeWithSnapshot<TObservable>(
   snapshot: VerifiedProbeSnapshot<TObservable>,
   response: unknown,
 ): SnapshotProbeEvaluationResult {
+  if (!isVerifiedProbeSnapshot(snapshot)) {
+    return {
+      evaluation: { probeId: "", requirementKey: "", outcome: "unverified", diagnosis: "unclassified", matchedHypothesisId: null, observableKey: null },
+      encodingFailed: true,
+    };
+  }
   const base = { probeId: snapshot.probeId, requirementKey: snapshot.requirementKey };
   if (!snapshot.report.distinguishable || snapshot.correctObservableKey === null) {
     return {

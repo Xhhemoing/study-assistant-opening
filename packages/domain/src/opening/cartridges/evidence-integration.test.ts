@@ -41,6 +41,28 @@ describe("qualifyCartridgeEmission", () => {
       qualified: true, evaluation: { outcome: "incorrect", matchedHypothesisId: "H_FIFO_QUEUE_CONFUSION" } });
   });
 
+  it.each(["Proxy", "getter"] as const)("withholds a matching evaluator result backed by a %s", kind => {
+    let reads = 0;
+    const candidate = {
+      ...stack408Cartridge,
+      evaluateProbeResponse(id: string, response: unknown) {
+        const result = stack408Cartridge.evaluateProbeResponse(id, response);
+        return kind === "Proxy"
+          ? new Proxy(result, { get(target, key) { reads += 1; return Reflect.get(target, key); } })
+          : { ...result, get outcome() { reads += 1; return result.outcome; } };
+      },
+    };
+    const localRegistry = createCartridgeRegistry([candidate]);
+    expect(qualifyCartridgeEmission(localRegistry, emit())).toMatchObject({
+      qualified: false, evaluation: null, reasonCodes: ["cartridge_evaluation_failed"],
+    });
+    const registryWithoutFacade = { ...localRegistry, getCartridge: () => candidate };
+    expect(qualifyCartridgeEmission(registryWithoutFacade, emit())).toMatchObject({
+      qualified: false, evaluation: null, reasonCodes: ["cartridge_evaluation_mismatch"],
+    });
+    expect(reads).toBe(0);
+  });
+
   it.each([
     ["unsafe numeric", 1e21, false],
     ["exact decimal", "1000000000000000000000", true],

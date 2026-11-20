@@ -35,6 +35,60 @@ function permutations(values: number[]): number[][] {
 }
 
 describe("408.stack.v1 simulators", () => {
+  it.each([
+    ["correct", simulateCorrectStackTrace], ["FIFO", simulateFifoQueueConfusionTrace], ["off-by-one", simulateTopPointerOffByOneTrace],
+  ] as const)(
+    "%s trace simulation rejects uninspectable data before reading it",
+    (_model, simulate) => {
+      let reads = 0;
+      const get = (target: object, key: PropertyKey) => { reads += 1; return Reflect.get(target, key); };
+      const sparseOps = [...interleaved.ops];
+      delete sparseOps[0];
+      for (const input of [
+        new Proxy(interleaved, { get }),
+        { ...interleaved, ops: new Proxy(interleaved.ops, { get }) },
+        { ...interleaved, ops: [new Proxy({ op: "pop" } as const, { get })] },
+        { ...interleaved, ops: [{ get op() { reads += 1; return "pop" as const; } }] },
+        { ...interleaved, ops: sparseOps },
+      ]) {
+        expect(() => simulate(input)).toThrow(/Cartridge data/);
+        expect(reads).toBe(0);
+      }
+    },
+  );
+
+  it.each([
+    ["correct", simulateCorrectFeasibility], ["FIFO", simulateFifoQueueConfusionFeasibility],
+    ["off-by-one", simulateTopPointerOffByOneFeasibility], ["bypass", simulateBypassLifoFeasibility],
+  ] as const)("%s feasibility simulation rejects uninspectable data before reading it", (_model, simulate) => {
+    let reads = 0;
+    const get = (target: object, key: PropertyKey) => { reads += 1; return Reflect.get(target, key); };
+    const input = { pushOrder: [1, 2, 3], candidatePops: [2, 3, 1] };
+    const sparse = [1, 2, 3];
+    delete sparse[1];
+    for (const value of [
+      new Proxy(input, { get }),
+      { ...input, pushOrder: new Proxy(input.pushOrder, { get }) },
+      { ...input, candidatePops: new Proxy(input.candidatePops, { get }) },
+      { ...input, candidatePops: Object.defineProperty([2, 3, 1], "0", { get: () => { reads += 1; return 2; } }) },
+      { ...input, pushOrder: sparse },
+      { ...input, candidatePops: sparse },
+    ]) {
+      expect(() => simulate(value)).toThrow(/Cartridge data/);
+      expect(reads).toBe(0);
+    }
+  });
+
+  it("rejects a Proxy or sparse push order in direct enumeration", () => {
+    let reads = 0;
+    const order = [1, 2, 3];
+    const wrapped = new Proxy(order, { get(target, key) { reads += 1; return Reflect.get(target, key); } });
+    expect(() => enumerateFeasiblePopSequences(wrapped)).toThrow(TypeError);
+    expect(reads).toBe(0);
+    delete order[1];
+    expect(() => enumerateFeasiblePopSequences(order)).toThrow(TypeError);
+  });
+
   it("traces the correct model and each competing misconception deterministically", () => {
     expect(simulateCorrectStackTrace(interleaved)).toEqual({ outputs: ["2", "3", "1", "UNDERFLOW"], finalTop: -1 });
     expect(simulateFifoQueueConfusionTrace(interleaved)).toEqual({ outputs: ["1", "2", "3", "UNDERFLOW"], finalTop: -1 });
@@ -168,6 +222,53 @@ describe("408.stack.v1 probes", () => {
   it("rejects unsafe numeric response tokens", () => {
     expect(parseStackTraceResponse({ outputs: [9007199254740992], finalTop: 0 })).toBeNull();
   });
+
+  it("rejects uninspectable direct trace responses without invoking getters or Proxy traps", () => {
+    let reads = 0;
+    const get = (target: object, key: PropertyKey) => { reads += 1; return Reflect.get(target, key); };
+    const response = { outputs: [2, 3], finalTop: -1 };
+    const sparse = [2, 3];
+    delete sparse[0];
+    for (const value of [
+      new Proxy(response, { get }),
+      { ...response, outputs: new Proxy(response.outputs, { get }) },
+      { ...response, get finalTop() { reads += 1; return -1; } },
+      { ...response, outputs: Object.defineProperty([2, 3], "0", { get: () => { reads += 1; return 2; } }) },
+      { ...response, outputs: sparse },
+    ]) {
+      expect(parseStackTraceResponse(value)).toBeNull();
+      expect(reads).toBe(0);
+    }
+  });
+
+  it("rejects uninspectable direct feasibility responses without invoking getters or Proxy traps", () => {
+    let reads = 0;
+    const get = (target: object, key: PropertyKey) => { reads += 1; return Reflect.get(target, key); };
+    const probe = stack408Cartridge.getProbe(FEASIBILITY_PROBE)!;
+    const response = { verdict: "infeasible", firstViolationIndex: 2 };
+    const sparse = [2, 3];
+    delete sparse[0];
+    for (const value of [
+      new Proxy(response, { get }),
+      { ...response, firstViolationIndex: new Proxy([2], { get }) },
+      { ...response, get firstViolationIndex() { reads += 1; return 2; } },
+      { ...response, candidatePops: new Proxy([2, 3], { get }) },
+      { ...response, candidatePops: sparse },
+    ]) {
+      expect(probe.parseResponse(value)).toBeNull();
+      expect(reads).toBe(0);
+    }
+  });
+
+  it("rejects a Proxy-backed candidate sequence when directly parsing feasibility", () => {
+    let reads = 0;
+    const candidatePops = new Proxy([2, 4, 1, 3], {
+      get(target, key) { reads += 1; return Reflect.get(target, key); },
+    });
+    const probe = createStackFeasibilityProbe("proxy-sequence", { pushOrder: [1, 2, 3, 4], candidatePops }, "判断。");
+    expect(probe.parseResponse({ verdict: "infeasible", firstViolationIndex: 2 })).toBeNull();
+    expect(reads).toBe(0);
+  });
 });
 
 describe("408.stack.v1 continuity (L1)", () => {
@@ -239,10 +340,12 @@ describe("408.stack.v1 continuity (L1)", () => {
     expect(() => cartridge.buildResumeSummary({})).toThrow(expect.objectContaining({
       name: "CartridgeContinuityStateError", issues: expect.any(Array),
     }));
-    const unreadable = { get probeHistory() { throw new Error("history unavailable"); } };
+    let reads = 0;
+    const unreadable = { get probeHistory() { reads += 1; return []; } };
     expect(() => cartridge.buildResumeSummary(unreadable)).toThrow(expect.objectContaining({
-      name: "CartridgeContinuityStateError", issues: ["history unavailable"],
+      name: "CartridgeContinuityStateError", issues: expect.any(Array),
     }));
+    expect(reads).toBe(0);
   });
 });
 
@@ -303,5 +406,19 @@ describe("408.stack.v1 material binding (L3)", () => {
 
   it("emits no seeds without bindings", () => {
     expect(stack408Cartridge.extractExerciseSeeds(chunks, [])).toEqual([]);
+  });
+
+  it("preserves exact trace integers in material seeds", () => {
+    const material = [{ ...chunks[0]!, text: "Stack trace: push(007), push(9007199254740993), pop()" }];
+    const seeds = stack408Cartridge.extractExerciseSeeds(material, stack408Cartridge.bindMaterialChunks(material));
+    expect(seeds).toMatchObject([{ requirementKey: "408.ds.stack.lifo-trace",
+      parameters: { ops: "push 7, push 9007199254740993, pop" }, prompt: expect.stringContaining("push 9007199254740993") }]);
+  });
+
+  it("skips material feasibility seeds with unsafe symbols", () => {
+    const material = [{ ...chunks[0]!, text: "栈示例。入栈序列为 1, 9007199254740993, 3。入栈序列为 1, 9007199254740991, 3。" }];
+    const seeds = stack408Cartridge.extractExerciseSeeds(material, stack408Cartridge.bindMaterialChunks(material));
+    expect(seeds).toMatchObject([{ requirementKey: "408.ds.stack.pop-sequence-feasibility",
+      parameters: { pushOrder: "1,9007199254740991,3" } }]);
   });
 });

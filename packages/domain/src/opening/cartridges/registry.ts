@@ -1,4 +1,7 @@
-import { copyCartridgeArray } from "./clone-cartridge-data";
+import {
+  cloneCartridgeData, copyCartridgeArray, isInspectableCartridgeFunction, isInspectableCartridgeObject,
+  readCartridgeDataProperty,
+} from "./clone-cartridge-data";
 import { verifyProbeDistinguishability, type DistinguishableProbeSpec, type ProbeDistinguishabilityReport } from "./probe-protocol";
 import {
   CARTRIDGE_LEVEL_METHODS,
@@ -40,9 +43,10 @@ export type CartridgeRegistrationResult = CartridgeValidationReport;
 export class CartridgeRegistrationError extends Error {
   readonly issues: CartridgeRegistrationIssue[];
   constructor(issues: CartridgeRegistrationIssue[]) {
-    super(`cartridge registration rejected: ${issues.map(issue => issue.code).join(", ")}`);
+    const captured = cloneCartridgeData(issues);
+    super(`cartridge registration rejected: ${captured.map(issue => issue.code).join(", ")}`);
     this.name = "CartridgeRegistrationError";
-    this.issues = issues;
+    this.issues = captured;
   }
 }
 
@@ -51,7 +55,7 @@ function validateEvidenceContracts(
   issues: CartridgeRegistrationIssue[],
 ): ProbeDistinguishabilityReport[] {
   try {
-    if (!hasValidEvidenceContract(cartridge.evidenceContract)) {
+    if (!hasValidEvidenceContract(readCartridgeDataProperty(cartridge, "evidenceContract"))) {
       issues.push({ code: "evidence_contract_missing", detail: "evidenceContract.evaluatorVersion/specVersion must be non-blank strings" });
     }
   } catch (error) {
@@ -59,7 +63,7 @@ function validateEvidenceContracts(
   }
   let probes: DistinguishableProbeSpec<unknown, unknown>[];
   try {
-    probes = copyCartridgeArray(cartridge.listProbes());
+    probes = copyCartridgeArray(callDefinitionMethod(cartridge, "listProbes", []));
   } catch (error) {
     issues.push({ code: "evidence_probe_listing_failed", detail: safeErrorDetail(error) });
     return [];
@@ -79,7 +83,7 @@ function validateEvidenceContracts(
     let lookedUp: unknown;
     let lookupFailed = false;
     try {
-      lookedUp = cartridge.getProbe(probeId);
+      lookedUp = callDefinitionMethod(cartridge, "getProbe", [probeId]);
     } catch (error) {
       lookupFailed = true;
       issues.push({ code: "evidence_probe_lookup_failed", detail: `${probeId}: ${safeErrorDetail(error)}` });
@@ -100,12 +104,12 @@ function validateEvidenceContracts(
  * to pass the distinguishability pre-check.
  */
 export function validateCartridge(candidate: unknown): CartridgeValidationReport {
-  if (!candidate || typeof candidate !== "object") {
+  if (!isInspectableCartridgeObject(candidate)) {
     return { ok: false, issues: [{ code: "cartridge_not_object", detail: typeof candidate }], probeReports: [] };
   }
   let parsed: ReturnType<typeof cartridgeManifestSchema.safeParse>;
   try {
-    parsed = cartridgeManifestSchema.safeParse((candidate as { manifest?: unknown }).manifest);
+    parsed = cartridgeManifestSchema.safeParse(cloneCartridgeData(readCartridgeDataProperty(candidate, "manifest")));
   } catch (error) {
     return { ok: false, probeReports: [], issues: [{ code: "manifest_invalid", detail: safeErrorDetail(error) }] };
   }
@@ -118,7 +122,7 @@ export function validateCartridge(candidate: unknown): CartridgeValidationReport
   for (const method of CARTRIDGE_LEVEL_METHODS[manifest.level]) {
     let hasMethod = false;
     try {
-      hasMethod = typeof (candidate as Record<string, unknown>)[method] === "function";
+      hasMethod = isInspectableCartridgeFunction(readCartridgeDataProperty(candidate, method));
     } catch {
       hasMethod = false;
     }
@@ -141,34 +145,59 @@ export interface CartridgeRegistry {
   listCartridgesByCapability(level: CartridgeCapabilityLevel): AnyTeachingCartridge[];
 }
 
+function callDefinitionMethod<T extends object, K extends keyof T & string>(definition: T, key: K, args: unknown[]):
+  T[K] extends (...args: never[]) => infer TResult ? TResult : never;
+function callDefinitionMethod(definition: object, key: string, args: unknown[]): unknown;
+function callDefinitionMethod(definition: object, key: string, args: unknown[]): unknown {
+  const method = readCartridgeDataProperty(definition, key);
+  if (!isInspectableCartridgeFunction(method)) throw new TypeError(`Cartridge definition requires ${key}()`);
+  return Reflect.apply(method, definition, args);
+}
+
 function wrapCartridge(cartridge: AnyTeachingCartridge, pinnedManifest: Readonly<CartridgeManifest>): AnyTeachingCartridge {
   const { level } = pinnedManifest;
   const facade: AnyTeachingCartridge = {
     manifest: pinnedManifest,
-    serializeContinuityState(state) { return cartridge.serializeContinuityState(state); },
-    parseContinuityState(raw) { return cartridge.parseContinuityState(raw); },
+    serializeContinuityState(state) {
+      const serialized = callDefinitionMethod(cartridge, "serializeContinuityState", [cloneCartridgeData(state)]);
+      if (typeof serialized !== "string") throw new TypeError("Cartridge serialization must return a string");
+      return serialized;
+    },
+    parseContinuityState(raw) {
+      return cloneCartridgeData(callDefinitionMethod(cartridge, "parseContinuityState", [cloneCartridgeData(raw)]));
+    },
     buildResumeSummary(raw) {
-      const state = restoreContinuityState(value => cartridge.parseContinuityState(value), raw);
-      return cartridge.buildResumeSummary(state);
+      const state = restoreContinuityState(value => callDefinitionMethod(cartridge, "parseContinuityState", [value]), raw);
+      return cloneCartridgeData(callDefinitionMethod(cartridge, "buildResumeSummary", [state]));
     },
   };
-  const properties = level === "L4_EVIDENCE"
-    ? [...CARTRIDGE_LEVEL_METHODS[level], "evidenceContract"]
-    : CARTRIDGE_LEVEL_METHODS[level];
-  for (const property of properties) {
-    if (Object.hasOwn(facade, property)) continue;
-    Object.defineProperty(facade, property, {
+  if (level === "L4_EVIDENCE") {
+    Object.defineProperty(facade, "evidenceContract", {
+      enumerable: true, value: readCartridgeDataProperty(cartridge, "evidenceContract"),
+    });
+  }
+  for (const method of CARTRIDGE_LEVEL_METHODS[level]) {
+    if (Object.hasOwn(facade, method)) continue;
+    Object.defineProperty(facade, method, {
       enumerable: true,
-      get() {
-        const member: unknown = Reflect.get(cartridge, property);
-        return typeof member === "function" ? member.bind(cartridge) : member;
+      value(...args: unknown[]): unknown {
+        const result = callDefinitionMethod(cartridge, method, cloneCartridgeData(args));
+        // Probe definitions contain executable callbacks and retain identity for registry checks.
+        if (method === "getProbe") {
+          if (result !== null && !isInspectableCartridgeObject(result)) {
+            throw new TypeError("Cartridge lookup must return an inspectable probe or null");
+          }
+          return result;
+        }
+        if (method === "listProbes") return copyCartridgeArray(result as readonly unknown[]);
+        return cloneCartridgeData(result);
       },
     });
   }
   return Object.freeze(facade);
 }
 
-export function createCartridgeRegistry(initial: readonly unknown[] = []): CartridgeRegistry {
+export function createCartridgeRegistry(initial?: readonly unknown[]): CartridgeRegistry {
   const entries = new Map<string, AnyTeachingCartridge>();
   const registry: CartridgeRegistry = {
     registerCartridge(cartridge) {
@@ -193,7 +222,7 @@ export function createCartridgeRegistry(initial: readonly unknown[] = []): Cartr
       return registry.listCartridges().filter(cartridge => meetsCapabilityLevel(cartridge.manifest.level, level));
     },
   };
-  for (const cartridge of initial) {
+  for (const cartridge of initial === undefined ? [] : copyCartridgeArray(initial)) {
     const result = registry.registerCartridge(cartridge);
     if (!result.ok) throw new CartridgeRegistrationError(result.issues);
   }
@@ -201,16 +230,16 @@ export function createCartridgeRegistry(initial: readonly unknown[] = []): Cartr
 }
 
 export function registerCartridge(registry: CartridgeRegistry, cartridge: unknown): CartridgeRegistrationResult {
-  return registry.registerCartridge(cartridge);
+  return cloneCartridgeData(callDefinitionMethod(registry, "registerCartridge", [cartridge]));
 }
 
 export function getCartridge(registry: CartridgeRegistry, id: string): AnyTeachingCartridge | null {
-  return registry.getCartridge(id);
+  return callDefinitionMethod(registry, "getCartridge", [id]);
 }
 
 export function listCartridgesByCapability(
   registry: CartridgeRegistry,
   level: CartridgeCapabilityLevel,
 ): AnyTeachingCartridge[] {
-  return registry.listCartridgesByCapability(level);
+  return copyCartridgeArray(callDefinitionMethod(registry, "listCartridgesByCapability", [level]));
 }

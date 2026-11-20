@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { cloneCartridgeData, isInspectableCartridgeFunction, readCartridgeDataProperty } from "./clone-cartridge-data";
 import type { DistinguishableProbeSpec } from "./probe-protocol";
 
 /**
@@ -74,9 +75,11 @@ export function restoreContinuityState<TState>(
 ): TState {
   let issues: string[];
   try {
-    const restored = parse(raw);
-    if (restored.ok) return restored.value;
-    issues = restored.issues;
+    if (!isInspectableCartridgeFunction(parse)) throw new TypeError("Cartridge parser requires an inspectable function");
+    const restored = cloneCartridgeData(parse(cloneCartridgeData(raw)));
+    if (restored?.ok === true && Object.hasOwn(restored, "value")) return restored.value;
+    issues = restored?.ok === false && Array.isArray(restored.issues) && restored.issues.every(issue => typeof issue === "string")
+      ? restored.issues : ["invalid_state_restore_result"];
   } catch (error) {
     issues = [safeErrorDetail(error)];
   }
@@ -184,11 +187,14 @@ function isNonBlankString(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
 }
 
-/** Call within the guard that owns the contract's property reads. */
 export function hasValidEvidenceContract(contract: unknown): contract is CartridgeEvidenceContract {
-  if (!contract || typeof contract !== "object") return false;
-  const { evaluatorVersion, specVersion } = contract as Partial<CartridgeEvidenceContract>;
-  return isNonBlankString(evaluatorVersion) && isNonBlankString(specVersion);
+  try {
+    const captured = cloneCartridgeData(contract);
+    return isNonBlankString(readCartridgeDataProperty(captured, "evaluatorVersion"))
+      && isNonBlankString(readCartridgeDataProperty(captured, "specVersion"));
+  } catch {
+    return false;
+  }
 }
 
 /** L4: distinguishable misconception probes and formal evidence gating. */
@@ -204,7 +210,7 @@ export type AnyTeachingCartridge = ContinuityCartridge<unknown>;
 /* ------------------------------------------------------- type guards ---- */
 
 function hasMethods(value: object, names: readonly string[]): boolean {
-  return names.every(name => typeof (value as Record<string, unknown>)[name] === "function");
+  return names.every(name => isInspectableCartridgeFunction(readCartridgeDataProperty(value, name)));
 }
 
 const L1_METHODS = ["serializeContinuityState", "parseContinuityState", "buildResumeSummary"] as const;
@@ -221,7 +227,7 @@ export const CARTRIDGE_LEVEL_METHODS: Readonly<Record<CartridgeCapabilityLevel, 
 
 function declares(cartridge: AnyTeachingCartridge, level: CartridgeCapabilityLevel): boolean {
   try {
-    const parsed = cartridgeManifestSchema.safeParse(cartridge.manifest);
+    const parsed = cartridgeManifestSchema.safeParse(cloneCartridgeData(readCartridgeDataProperty(cartridge, "manifest")));
     return parsed.success && meetsCapabilityLevel(parsed.data.level, level)
       && hasMethods(cartridge, CARTRIDGE_LEVEL_METHODS[level]);
   } catch {
@@ -246,7 +252,7 @@ export function hasEvidenceCapability<TState>(
 ): cartridge is EvidenceCartridge<TState> {
   try {
     return declares(cartridge as AnyTeachingCartridge, "L4_EVIDENCE")
-      && hasValidEvidenceContract((cartridge as Partial<EvidenceCartridge<TState>>).evidenceContract);
+      && hasValidEvidenceContract(readCartridgeDataProperty(cartridge, "evidenceContract"));
   } catch {
     return false;
   }

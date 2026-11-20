@@ -5,6 +5,7 @@ import {
   respectActiveRetestWindows,
   sortTaskCandidates,
 } from "./capability-helpers";
+import { cloneCartridgeData, copyCartridgeArray } from "./clone-cartridge-data";
 import type { CartridgeObservationEmission } from "./evidence-gate";
 import type { DistinguishableProbeSpec, MisconceptionHypothesis } from "./probe-protocol";
 import { restoreContinuityState } from "./types";
@@ -60,13 +61,14 @@ function requireStackInteger(value: number | string): string {
 
 /** M*: correct sequential stack with `data[++top] = x` / `x = data[top--]`. */
 export function simulateCorrectStackTrace(input: StackTraceInput): StackTraceObservable {
+  const { capacity, ops } = cloneCartridgeData(input);
   const data = new Map<number, string>();
   const outputs: string[] = [];
   let top = -1;
-  for (const op of input.ops) {
+  for (const op of ops) {
     if (op.op === "push") {
       const value = requireStackInteger(op.value);
-      if (top >= input.capacity - 1) { outputs.push(OVERFLOW); continue; }
+      if (top >= capacity - 1) { outputs.push(OVERFLOW); continue; }
       top += 1;
       data.set(top, value);
     } else {
@@ -80,12 +82,13 @@ export function simulateCorrectStackTrace(input: StackTraceInput): StackTraceObs
 
 /** H_FIFO_QUEUE_CONFUSION: pop removes the oldest element, as in a queue. */
 export function simulateFifoQueueConfusionTrace(input: StackTraceInput): StackTraceObservable {
+  const { capacity, ops } = cloneCartridgeData(input);
   const queue: string[] = [];
   const outputs: string[] = [];
-  for (const op of input.ops) {
+  for (const op of ops) {
     if (op.op === "push") {
       const value = requireStackInteger(op.value);
-      if (queue.length >= input.capacity) { outputs.push(OVERFLOW); continue; }
+      if (queue.length >= capacity) { outputs.push(OVERFLOW); continue; }
       queue.push(value);
     } else {
       outputs.push(queue.shift() ?? UNDERFLOW);
@@ -96,13 +99,14 @@ export function simulateFifoQueueConfusionTrace(input: StackTraceInput): StackTr
 
 /** H_TOP_POINTER_OFF_BY_ONE: writes `data[top++] = x` while keeping the `top = -1` convention. */
 export function simulateTopPointerOffByOneTrace(input: StackTraceInput): StackTraceObservable {
+  const { capacity, ops } = cloneCartridgeData(input);
   const data = new Map<number, string>();
   const outputs: string[] = [];
   let top = -1;
-  for (const op of input.ops) {
+  for (const op of ops) {
     if (op.op === "push") {
       const value = requireStackInteger(op.value);
-      if (top >= input.capacity - 1) { outputs.push(OVERFLOW); continue; }
+      if (top >= capacity - 1) { outputs.push(OVERFLOW); continue; }
       data.set(top, value);
       top += 1;
     } else {
@@ -129,13 +133,13 @@ function requireSafeStackSymbols(sequence: readonly number[]): void {
 }
 
 /** Index of the first pop that exceeds the remaining multiplicity of that value in pushOrder. */
-function firstMembershipViolation(input: StackFeasibilityInput): number | null {
-  requireSafeStackSymbols(input.pushOrder);
-  requireSafeStackSymbols(input.candidatePops);
+function firstMembershipViolation({ pushOrder, candidatePops }: StackFeasibilityInput): number | null {
+  requireSafeStackSymbols(pushOrder);
+  requireSafeStackSymbols(candidatePops);
   const available = new Map<number, number>();
-  for (const value of input.pushOrder) available.set(value, (available.get(value) ?? 0) + 1);
-  for (let i = 0; i < input.candidatePops.length; i += 1) {
-    const value = input.candidatePops[i]!;
+  for (const value of pushOrder) available.set(value, (available.get(value) ?? 0) + 1);
+  for (let i = 0; i < candidatePops.length; i += 1) {
+    const value = candidatePops[i]!;
     const remaining = available.get(value) ?? 0;
     if (remaining === 0) return i;
     available.set(value, remaining - 1);
@@ -198,31 +202,33 @@ function simulateStackFeasibility(
 
 /** M*: exact LIFO simulation of the candidate pop sequence (supports repeated symbols). */
 export function simulateCorrectFeasibility(input: StackFeasibilityInput): StackFeasibilityObservable {
-  return simulateStackFeasibility(input, length => length - 1);
+  return simulateStackFeasibility(cloneCartridgeData(input), length => length - 1);
 }
 
 /** H_FIFO_QUEUE_CONFUSION: only the push order itself is accepted. */
 export function simulateFifoQueueConfusionFeasibility(input: StackFeasibilityInput): StackFeasibilityObservable {
-  const membership = firstMembershipViolation(input);
-  for (let i = 0; i < input.candidatePops.length; i += 1) {
-    if (membership === i || input.candidatePops[i] !== input.pushOrder[i]) return infeasibleAt(i);
+  const captured = cloneCartridgeData(input);
+  const membership = firstMembershipViolation(captured);
+  for (let i = 0; i < captured.candidatePops.length; i += 1) {
+    if (membership === i || captured.candidatePops[i] !== captured.pushOrder[i]) return infeasibleAt(i);
   }
   return feasible();
 }
 
 /** H_TOP_POINTER_OFF_BY_ONE: reads the element at `top - 1` as the current stack top. */
 export function simulateTopPointerOffByOneFeasibility(input: StackFeasibilityInput): StackFeasibilityObservable {
-  return simulateStackFeasibility(input, length => length - 2);
+  return simulateStackFeasibility(cloneCartridgeData(input), length => length - 2);
 }
 
 /** H_BYPASS_LIFO_ORDER: believes any element already pushed may be popped, so every permutation works. */
 export function simulateBypassLifoFeasibility(input: StackFeasibilityInput): StackFeasibilityObservable {
-  const membership = firstMembershipViolation(input);
+  const membership = firstMembershipViolation(cloneCartridgeData(input));
   return membership === null ? feasible() : infeasibleAt(membership);
 }
 
 /** All unique pop orders reachable from `pushOrder` by a correct stack (Catalan-many for distinct values). */
-export function enumerateFeasiblePopSequences(pushOrder: readonly number[]): number[][] {
+export function enumerateFeasiblePopSequences(order: readonly number[]): number[][] {
+  const pushOrder = copyCartridgeArray(order);
   requireSafeStackSymbols(pushOrder);
   const results: number[][] = [];
   const seen = new Set<string>();
@@ -247,9 +253,15 @@ export function enumerateFeasiblePopSequences(pushOrder: readonly number[]): num
 
 /* ---------------------------------------------------------------- probes -- */
 
-const traceKey = (observable: StackTraceObservable) => JSON.stringify(["trace", observable.outputs, observable.finalTop]);
-const feasibilityKey = (observable: StackFeasibilityObservable) =>
-  JSON.stringify(["feasibility", observable.verdict, observable.firstViolationIndex]);
+function traceKey(observable: StackTraceObservable): string {
+  const { outputs, finalTop } = cloneCartridgeData(observable);
+  return JSON.stringify(["trace", outputs, finalTop]);
+}
+
+function feasibilityKey(observable: StackFeasibilityObservable): string {
+  const { verdict, firstViolationIndex } = cloneCartridgeData(observable);
+  return JSON.stringify(["feasibility", verdict, firstViolationIndex]);
+}
 
 const TOKEN_ALIASES: Readonly<Record<string, string>> = {
   UNDERFLOW, 下溢: UNDERFLOW, 栈空: UNDERFLOW,
@@ -264,30 +276,39 @@ function normalizeTraceToken(token: unknown): string | null {
   return Object.hasOwn(TOKEN_ALIASES, alias) ? TOKEN_ALIASES[alias]! : null;
 }
 
-export function parseStackTraceResponse(response: unknown): StackTraceObservable | null {
+function captureResponse(response: unknown): Record<string, unknown> | null {
   if (!response || typeof response !== "object") return null;
-  const { outputs, finalTop } = response as { outputs?: unknown; finalTop?: unknown };
+  try {
+    return cloneCartridgeData(response) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+export function parseStackTraceResponse(response: unknown): StackTraceObservable | null {
+  const captured = captureResponse(response);
+  if (!captured) return null;
+  const { outputs, finalTop } = captured;
   const raw = typeof outputs === "string" ? (outputs.trim() ? outputs.split(/[,，\s]+/).filter(Boolean) : []) : outputs;
   if (!Array.isArray(raw) || typeof finalTop !== "number" || !Number.isInteger(finalTop) || finalTop < -1) return null;
   const tokens: string[] = [];
-  for (let index = 0; index < raw.length; index += 1) {
-    if (!Object.hasOwn(raw, index)) return null;
-    const token = normalizeTraceToken(raw[index]);
+  for (const value of raw) {
+    const token = normalizeTraceToken(value);
     if (token === null) return null;
     tokens.push(token);
   }
   return { outputs: tokens, finalTop };
 }
 
-function feasibilityParser(input: StackFeasibilityInput) {
-  return (response: unknown): StackFeasibilityObservable | null => {
-    if (!response || typeof response !== "object") return null;
-    const { verdict, firstViolationIndex } = response as { verdict?: unknown; firstViolationIndex?: unknown };
-    if (verdict === "feasible") return firstViolationIndex == null ? feasible() : null;
-    if (verdict !== "infeasible" || typeof firstViolationIndex !== "number" || !Number.isInteger(firstViolationIndex)
-      || firstViolationIndex < 0 || firstViolationIndex >= input.candidatePops.length) return null;
-    return infeasibleAt(firstViolationIndex);
-  };
+function parseStackFeasibilityResponse(response: unknown, input: StackFeasibilityInput): StackFeasibilityObservable | null {
+  const captured = captureResponse(response);
+  const candidatePops = captureResponse(input)?.candidatePops;
+  if (!captured || !Array.isArray(candidatePops)) return null;
+  const { verdict, firstViolationIndex } = captured;
+  if (verdict === "feasible") return firstViolationIndex == null ? feasible() : null;
+  if (verdict !== "infeasible" || typeof firstViolationIndex !== "number" || !Number.isInteger(firstViolationIndex)
+    || firstViolationIndex < 0 || firstViolationIndex >= candidatePops.length) return null;
+  return infeasibleAt(firstViolationIndex);
 }
 
 const H_FIFO_QUEUE_CONFUSION = "H_FIFO_QUEUE_CONFUSION";
@@ -333,7 +354,8 @@ export function createStackFeasibilityProbe(
 ): DistinguishableProbeSpec<StackFeasibilityInput, StackFeasibilityObservable> {
   return { probeId, requirementKey: "408.ds.stack.pop-sequence-feasibility", prompt, input,
     correctModel: { id: "M_CORRECT_LIFO", role: "correct", label: "正确 LIFO 栈", predict: simulateCorrectFeasibility },
-    hypotheses: stackFeasibilityHypotheses, observableKey: feasibilityKey, parseResponse: feasibilityParser(input) };
+    hypotheses: stackFeasibilityHypotheses, observableKey: feasibilityKey,
+    parseResponse: response => parseStackFeasibilityResponse(response, input) };
 }
 
 const push = (value: number): StackOp => ({ op: "push", value });
@@ -391,9 +413,11 @@ export function createInitialStack408State(): Stack408State {
 }
 
 /** Append a deterministic probe evaluation to continuity state; host supplies the timestamp. */
-export function recordStack408ProbeAttempt(state: Stack408State, evaluation: CartridgeProbeEvaluation, at: string): Stack408State {
+export function recordStack408ProbeAttempt(rawState: Stack408State, rawEvaluation: CartridgeProbeEvaluation, at: string): Stack408State {
+  const state = cloneCartridgeData(rawState);
+  const evaluation = cloneCartridgeData(rawEvaluation);
   const requirementKey = STACK_408_REQUIREMENTS.find(key => key === evaluation.requirementKey);
-  if (!requirementKey) return state;
+  if (!requirementKey) return rawState;
   const probeHistory = [...state.probeHistory, { probeId: evaluation.probeId, requirementKey, outcome: evaluation.outcome,
     diagnosis: evaluation.diagnosis, matchedHypothesisId: evaluation.matchedHypothesisId, at }].slice(-500);
   const next = { ...state, probeHistory };
@@ -418,6 +442,11 @@ function parseState(raw: unknown): CartridgeValidationResult<Stack408State> {
   if (typeof raw === "string") {
     try { value = JSON.parse(raw); } catch { return { ok: false, issues: ["state_not_json"] }; }
   }
+  try {
+    value = cloneCartridgeData(value);
+  } catch {
+    return { ok: false, issues: ["state_not_inspectable"] };
+  }
   const parsed = stack408StateSchema.safeParse(value);
   if (!parsed.success) return { ok: false, issues: parsed.error.issues.map(issue => `${issue.path.join(".")}: ${issue.message}`) };
   return { ok: true, value: parsed.data };
@@ -432,7 +461,8 @@ const REQUIREMENT_TERMS: Readonly<Record<Stack408RequirementKey, readonly string
   "408.ds.stack.pop-sequence-feasibility": ["出栈序列", "入栈序列", "进栈序列", "pop sequence", "push sequence", "卡特兰", "catalan"],
 };
 
-function bindChunks(chunks: readonly CartridgeMaterialChunk[]): CartridgeChunkBinding[] {
+function bindChunks(rawChunks: readonly CartridgeMaterialChunk[]): CartridgeChunkBinding[] {
+  const chunks = cloneCartridgeData(rawChunks);
   const bindings: CartridgeChunkBinding[] = [];
   for (const chunk of chunks) {
     const text = chunk.text.toLowerCase();
@@ -457,15 +487,17 @@ function parseOps(quote: string): StackOp[] {
   const ops: StackOp[] = [];
   for (const match of quote.matchAll(new RegExp(OP_TOKEN, "gi"))) {
     const value = /-?\d+/.exec(match[0]);
-    ops.push(value ? { op: "push", value: Number(value[0]) } : { op: "pop" });
+    ops.push(value ? { op: "push", value: requireStackInteger(value[0]) } : { op: "pop" });
   }
   return ops;
 }
 
 function extractSeeds(
-  chunks: readonly CartridgeMaterialChunk[],
-  bindings: readonly CartridgeChunkBinding[],
+  rawChunks: readonly CartridgeMaterialChunk[],
+  rawBindings: readonly CartridgeChunkBinding[],
 ): CartridgeExerciseSeed[] {
+  const chunks = cloneCartridgeData(rawChunks);
+  const bindings = cloneCartridgeData(rawBindings);
   const seeds: CartridgeExerciseSeed[] = [];
   const bound = (chunk: CartridgeMaterialChunk, key: Stack408RequirementKey) => bindings.some(binding =>
     binding.requirementKey === key && binding.sourceId === chunk.sourceId
@@ -475,7 +507,8 @@ function extractSeeds(
     const seedBase = `${STACK_408_CARTRIDGE_ID}:${chunk.sourceId}@${chunk.sourceVersion}#${chunk.chunkId}`;
     if (bound(chunk, "408.ds.stack.pop-sequence-feasibility")) {
       for (const match of chunk.text.matchAll(PUSH_ORDER_PATTERN)) {
-        const order = match[1]!.split(/[,，、]/).map(part => Number(part.trim()));
+        const order = match[1]!.split(/[,，、]/).map(normalizeStackInteger);
+        if (order.some(token => token === null || normalizeStackInteger(Number(token)) !== token)) continue;
         if (new Set(order).size !== order.length) continue;
         const pushOrder = order.join(",");
         seeds.push({ seedId: `${seedBase}:feasibility:${match.index}`, requirementKey: "408.ds.stack.pop-sequence-feasibility",
@@ -501,7 +534,8 @@ function extractSeeds(
 
 const DAY_MS = 86_400_000;
 
-function projectCandidates(input: CartridgeScheduleInput<Stack408State>): CartridgeTaskCandidate[] {
+function projectCandidates(rawInput: CartridgeScheduleInput<Stack408State>): CartridgeTaskCandidate[] {
+  const input = cloneCartridgeData(rawInput);
   const nowMs = Date.parse(input.now);
   const candidates = STACK_408_REQUIREMENTS.map((requirementKey, index): CartridgeTaskCandidate => {
     const latest = latestAttempt(input.state, requirementKey);
@@ -533,7 +567,7 @@ export const stack408Cartridge: EvidenceCartridge<Stack408State> = {
     title: "408 数据结构：栈的状态追踪", level: "L4_EVIDENCE" },
   evidenceContract: { evaluatorVersion: "stack-trace-exact-v1", specVersion: "408-stack-v1" },
   serializeContinuityState(state) {
-    return JSON.stringify(stack408StateSchema.parse(state));
+    return JSON.stringify(stack408StateSchema.parse(cloneCartridgeData(state)));
   },
   parseContinuityState: parseState,
   buildResumeSummary: resumeSummary,

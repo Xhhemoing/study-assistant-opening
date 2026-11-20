@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { evaluateProbeWithSpec } from "./capability-helpers";
+import { evaluateProbeWithSnapshot, evaluateProbeWithSpec } from "./capability-helpers";
 import {
   classifyProbeResponse,
   classifyProbeResponseWithSnapshot,
@@ -146,6 +146,26 @@ describe("verifyProbeDistinguishability", () => {
     let calls = 0;
     const flaky = hypothesis("H_FLAKY", x => x + (calls++ % 2));
     expect(verifyProbeDistinguishability(spec(3, [H_ADD, flaky])).issues).toEqual(["nondeterministic_prediction"]);
+  });
+
+  it("rejects probe and model accessors before reading them", () => {
+    const probe = spec(3);
+    let reads = 0;
+    const probeWithAccessor = { ...probe, get input() { reads += 1; return 3; } };
+    const modelWithAccessor = { ...probe.correctModel, get predict() { reads += 1; return probe.correctModel.predict; } };
+    expect(verifyProbeDistinguishability(probeWithAccessor).distinguishable).toBe(false);
+    expect(verifyProbeDistinguishability({ ...probe, correctModel: modelWithAccessor }).distinguishable).toBe(false);
+    expect(reads).toBe(0);
+  });
+
+  it("rejects a Proxy-backed snapshot before reading it during evaluation", () => {
+    const snapshot = snapshotAndVerifyProbe(spec(3));
+    let reads = 0;
+    const wrapped = new Proxy(snapshot, { get(target, key) { reads += 1; return Reflect.get(target, key); } });
+    expect(evaluateProbeWithSnapshot(wrapped, 6)).toMatchObject({
+      evaluation: { outcome: "unverified" }, encodingFailed: true,
+    });
+    expect(reads).toBe(0);
   });
 
   it.each([
