@@ -214,6 +214,10 @@ export const teachingActivitySummarySchema = z.object({
   }).strict(),
   openQuestions: z.array(z.string().max(2000)),
   taskId: uuidSchema.nullable(),
+  nextStep: z.object({
+    kind: z.enum(["assisted_check", "schedule_retest"]),
+    observationId: uuidSchema,
+  }).strict().optional(),
 }).strict();
 export type TeachingActivitySummary = z.infer<typeof teachingActivitySummarySchema>;
 

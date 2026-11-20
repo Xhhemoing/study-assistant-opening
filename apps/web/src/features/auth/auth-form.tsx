@@ -99,9 +99,9 @@ export function AuthForm({ mode, returnTo, registrationClosed = false }: {
   return (
     <form onSubmit={handleSubmit} aria-busy={submitting && !navigationTarget} noValidate>
       {closed ? (
-        <div id="registration-status" className="mb-6 rounded-md border border-zinc-200 bg-zinc-50 p-4">
-          <p className="text-sm font-medium text-zinc-900">注册暂未开放</p>
-          <p className="mt-1 text-sm leading-6 text-zinc-600">当前版本仅对已有账户开放。</p>
+        <div id="registration-status" className="well-recessed mb-6 rounded-card p-4">
+          <p className="text-sm font-medium text-text">注册暂未开放</p>
+          <p className="mt-1 text-sm leading-6 text-text-2">当前版本仅对已有账户开放。</p>
         </div>
       ) : null}
       <fieldset className="min-w-0 space-y-4" disabled={closed || submitting} aria-describedby={closed ? "registration-status" : undefined}>
@@ -123,9 +123,9 @@ export function AuthForm({ mode, returnTo, registrationClosed = false }: {
         {mode === "register" ? (
           <Field label="确认密码" name="confirmPassword" type="password" error={errors.confirmPassword} autoComplete="new-password" maxLength={200} />
         ) : null}
-        {serverError ? <p className="rounded-md border border-red-200 bg-red-50 p-3 text-sm leading-6 text-red-700" role="alert">{serverError}</p> : null}
+        {serverError ? <p className="rounded-ctl border border-danger/30 bg-danger-soft p-3 text-sm leading-6 text-danger" role="alert">{serverError}</p> : null}
         <button
-          className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-md bg-zinc-900 px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-zinc-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-700 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:bg-zinc-200 disabled:text-zinc-600 motion-reduce:transition-none"
+          className="keycap-ink inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-ctl px-4 py-2.5 text-sm font-medium transition-[background-color,box-shadow,transform] duration-150 ease-out-strong hover:bg-ink/92 active:translate-y-px focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:border-line disabled:bg-surface-2 disabled:text-text-3 disabled:[box-shadow:none] motion-reduce:transition-none"
           type="submit"
           disabled={closed || submitting}
         >
@@ -134,9 +134,9 @@ export function AuthForm({ mode, returnTo, registrationClosed = false }: {
           {!submitting && !closed ? <ArrowRight aria-hidden="true" size={18} /> : null}
         </button>
       </fieldset>
-      {navigationTarget ? <div className="mt-4 text-sm leading-6 text-zinc-600">
+      {navigationTarget ? <div className="mt-4 text-sm leading-6 text-text-2">
         <p role="status">{mode === "register" ? "账户已创建，正在进入设置。" : "登录成功，正在进入学习空间。"}</p>
-        <a className="inline-flex min-h-11 items-center text-emerald-800 underline underline-offset-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-700" href={navigationTarget}>若页面未跳转，点此继续</a>
+        <a className="inline-flex min-h-11 items-center font-medium text-accent underline underline-offset-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent" href={navigationTarget}>若页面未跳转，点此继续</a>
       </div> : null}
     </form>
   );
@@ -159,10 +159,10 @@ function Field({ label, name, type = "text", error, autoComplete, maxLength, min
   const isPassword = type === "password";
   return (
     <div className="grid gap-1.5">
-      <label htmlFor={inputId} className="text-sm font-medium text-zinc-700">{label}</label>
+      <label htmlFor={inputId} className="text-sm font-medium text-text">{label}</label>
       <div className="relative">
         <input
-          className={`min-h-11 w-full min-w-0 rounded-md border bg-white px-3 py-2.5 text-base text-zinc-900 focus:border-emerald-700 focus:outline-none focus:ring-1 focus:ring-emerald-700 disabled:cursor-not-allowed disabled:bg-zinc-50 disabled:text-zinc-500 md:text-sm ${isPassword ? "pr-12" : ""} ${error ? "border-red-500" : "border-zinc-300"}`}
+          className={`min-h-11 w-full min-w-0 rounded-ctl border bg-surface px-3.5 py-2.5 text-base text-text [box-shadow:var(--field-shadow)] transition-[border-color,box-shadow] duration-150 ease-out-strong focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/25 disabled:cursor-not-allowed disabled:bg-surface-2 disabled:text-text-3 md:text-sm ${isPassword ? "pr-12" : ""} ${error ? "border-danger" : "border-line-strong"}`}
           id={inputId}
           name={name}
           type={isPassword && visible ? "text" : type}
@@ -175,7 +175,7 @@ function Field({ label, name, type = "text", error, autoComplete, maxLength, min
         />
         {isPassword ? (
           <button
-            className="absolute inset-y-0 right-0 flex min-h-11 w-11 items-center justify-center rounded-r-md text-zinc-600 hover:text-zinc-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-700 disabled:cursor-not-allowed disabled:text-zinc-400"
+            className="absolute inset-y-0 right-0 flex min-h-11 w-11 items-center justify-center rounded-r-ctl text-text-2 transition-colors hover:text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:cursor-not-allowed disabled:text-text-3"
             type="button"
             aria-label={`${visible ? "隐藏" : "显示"}${label}`}
             aria-pressed={visible}
@@ -186,8 +186,8 @@ function Field({ label, name, type = "text", error, autoComplete, maxLength, min
           </button>
         ) : null}
       </div>
-      {hint ? <p id={hintId} className="text-xs leading-5 text-zinc-600">{hint}</p> : null}
-      {error ? <p id={errorId} className="text-sm leading-5 text-red-700">{error}</p> : null}
+      {hint ? <p id={hintId} className="text-xs leading-5 text-text-3">{hint}</p> : null}
+      {error ? <p id={errorId} className="text-sm leading-5 text-danger">{error}</p> : null}
     </div>
   );
 }

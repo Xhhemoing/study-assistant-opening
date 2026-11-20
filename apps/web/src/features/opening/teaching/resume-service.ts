@@ -18,6 +18,7 @@ import {
   listDeliveredHelpByActivity,
   listObservationHeadsByActivity,
   probeLearningSourcesAvailability,
+  readOpeningCourseEvidence,
   reconcileTeachingGenerate,
   sanitizeCheckpointForRestore,
 } from "@aistudy/database";
@@ -35,9 +36,11 @@ import {
   readOpenProblemIds,
   resumeSummarySkipped,
   summarizeTeachingBlockCoverage,
+  toSnapshotEvidence,
 } from "@aistudy/domain";
 import type { Sql } from "postgres";
 import { ApiError } from "../../auth/service";
+import { activitySummaryNextStep } from "./activity-summary-next-step";
 
 function mapError(error: unknown): never {
   if (error && typeof error === "object" && "code" in error) {
@@ -63,14 +66,27 @@ export function createOpeningTeachingResumeService(
   const content = createOpeningTeachingContentRepository(sql);
   const attemptsRepo = createOpeningLearningAttemptRepository(sql);
 
+  async function readSummaryNextStep(scope: Scope, activity: TeachingActivity) {
+    if (!activity.courseId || activity.status !== "completed") return undefined;
+    const attempts = await attemptsRepo.listByActivity(scope, activity.id);
+    const attemptIds = new Set(attempts.filter(attempt => attempt.contextAnchor?.contentVersion === activity.contentVersion).map(attempt => attempt.id));
+    if (!attemptIds.size) return undefined;
+    const evidence = await readOpeningCourseEvidence(sql, scope, activity.courseId);
+    const observations = evidence.observations.filter(row => row.attemptId && attemptIds.has(row.attemptId));
+    const requirement = activity.learnerFocus?.requirementKey;
+    return activitySummaryNextStep(toSnapshotEvidence({ ...evidence, observations }, new Date()).observations
+      .filter(row => requirement === undefined || row.requirementKey === requirement));
+  }
+
   return {
     async getSummary(scope: Scope, activityIdRaw: string) {
       const activityId = uuidSchema.parse(activityIdRaw);
       try {
         const activity = await assertOwnedActivity(sql, scope, activityId);
-        const [init, facts] = await Promise.all([
+        const [init, facts, nextStep] = await Promise.all([
           content.getClientInit(scope, activityId),
           activities.readSummaryFacts(scope, activityId),
+          readSummaryNextStep(scope, activity),
         ]);
         const taskId = uuidSchema.safeParse(facts.taskId);
         return teachingActivitySummarySchema.parse({
@@ -78,6 +94,7 @@ export function createOpeningTeachingResumeService(
           attempts: facts.attempts,
           openQuestions: facts.openQuestions,
           taskId: taskId.success ? taskId.data : null,
+          ...(nextStep ? { nextStep } : {}),
         });
       } catch (error) { mapError(error); }
     },

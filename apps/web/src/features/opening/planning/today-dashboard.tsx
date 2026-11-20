@@ -9,6 +9,9 @@ import { useDueReviewCount } from "../shell/review-count";
 import { TodayProgress } from "./today-progress";
 import { LongTermLearningCard } from "./long-term-learning-card";
 import { TodayDayAdjustment } from "./today-day-adjustment";
+import { ActionDigest } from "./action-digest";
+import { CoachPlanControl } from "./coach-plan-control";
+import { LocalReplanCard } from "./local-replan-card";
 import { currentTodayCourse, hasNoTodayCourses, type TodayResumeState } from "./today-read";
 import { TodayNoCourses, TodayResumeBody } from "./today-resume-view";
 import { localDateKey, resolveTodayTimeZone, TodayPlanView } from "./today-view";
@@ -34,6 +37,8 @@ import { PageHeader as V3PageHeader } from "../v3/shell/page-header";
 import { openAssistantDrawer } from "../assistant/assistant-entry";
 import { TodayCourseList } from "./today-course-list";
 import { Sparkles } from "lucide-react";
+import { ThinkingLine } from "../v3/motion/feedback";
+import { motion } from "../v3/motion";
 import { finishedTodayActivity } from "./today-finished";
 import { userFacingMessage } from "../../../lib/user-facing-error";
 
@@ -51,24 +56,42 @@ export function friendlyTodayLabel(date: Date, timeZone?: string): string {
   }
 }
 
+const TODAY_QUICK_INTENTS = [
+  "梳理这章核心概念",
+  "出一道变式题自测",
+  "今晚只有 15 分钟怎么学",
+] as const;
+
 /** 用户在学习页起草，继续到助手确认后发送。 */
 export function TodayAskBar() {
   const [draft, setDraft] = useState("");
   const composing = useRef(false);
-  return <div className="px-4 pb-2 sm:px-5" data-today-ask="true">
-    <form className="flex flex-wrap items-center gap-2 rounded-panel border border-line bg-surface px-3 py-2" onSubmit={event => {
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  return <div className="space-y-2 group-data-[focus=true]/workspace:hidden" data-today-ask="true">
+    <form className="flex flex-wrap items-center gap-2.5 rounded-panel border border-line bg-surface p-2 pl-3 shadow-card transition-[border-color,box-shadow] duration-150 ease-out-strong focus-within:border-accent focus-within:ring-2 focus-within:ring-accent/20" onSubmit={event => {
       event.preventDefault();
       const text = draft.trim();
       if (!text || composing.current) return;
       openAssistantDrawer("/opening/assistant", text);
       setDraft("");
     }}>
-      <Sparkles aria-hidden="true" size={16} className="shrink-0 text-ai-2" />
-      <input aria-label="向 AI 提问" placeholder="问 AI：概念、题目或资料里的任何一段" value={draft} onChange={event => setDraft(event.target.value)} onCompositionStart={() => { composing.current = true; }} onCompositionEnd={() => { composing.current = false; }} onKeyDown={event => {
+      <span className="flex size-8 shrink-0 items-center justify-center rounded-xl bg-ai-soft text-ai-2 shadow-[inset_0_1px_0_rgb(255_255_255/0.35)]" aria-hidden="true">
+        <Sparkles aria-hidden="true" size={16} />
+      </span>
+      <input ref={inputRef} aria-label="向 AI 提问" placeholder="说一句想法、贴一道题，或直接问资料里的任何一段…" value={draft} onChange={event => setDraft(event.target.value)} onCompositionStart={() => { composing.current = true; }} onCompositionEnd={() => { composing.current = false; }} onKeyDown={event => {
         if (event.key === "Enter" && (event.nativeEvent.isComposing || event.keyCode === 229)) event.preventDefault();
-      }} className="min-h-10 min-w-0 flex-1 bg-transparent text-ui text-text placeholder:text-text-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent" />
+      }} className="min-h-10 min-w-0 flex-1 bg-transparent text-ui text-text placeholder:text-text-3 focus-visible:outline-none" />
+      <kbd aria-hidden="true" className="kbd-cap hidden sm:inline-flex">⌘J</kbd>
       <button type="submit" className={ui.secondary} disabled={!draft.trim()}>继续提问</button>
     </form>
+    <div className="flex flex-wrap items-center gap-1.5 px-1" aria-label="快捷提问灵感">
+      {TODAY_QUICK_INTENTS.map(prompt => (
+        <button key={prompt} type="button" onClick={() => { setDraft(prompt); inputRef.current?.focus(); }}
+          className={`inline-flex min-h-8 items-center rounded-pill border border-line bg-surface/80 px-3 text-xs text-text-2 transition-colors hover:border-line-strong hover:bg-surface hover:text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 ${motion.press}`}>
+          {prompt}
+        </button>
+      ))}
+    </div>
   </div>;
 }
 
@@ -382,72 +405,113 @@ export function TodayDashboard({
     ? <Link className={buttonClass} data-today-primary-cta="true" data-today-session="true" href={todaySessionHref(sessionStudy)}>{finishedToday ? `先复习 ${dueCardCount} 张卡，再学下一节` : `开始学习 · 先复习 ${dueCardCount} 张卡`}</Link>
     : null;
   const heading = <div className="group-data-[focus=true]/workspace:hidden"><V3PageHeader title={planning ? "学习安排" : "今日学习"} fact={<time dateTime={localDateKey(new Date(), timeZone)}>{friendlyTodayLabel(new Date(), timeZone)}</time>} /></div>;
-  if (noCourses && !planning && !writingTarget) return <div className="min-h-full bg-bg text-text">{heading}<TodayNoCourses /><TodayAskBar /><TodayCourseList courses={[]} /><nav aria-label="今日其他安排" className="px-5 pb-4"><Link href="/opening/review" className={ui.quiet}>复习</Link></nav></div>;
+  if (noCourses && !planning && !writingTarget) {
+    return (
+      <div className="min-h-full bg-bg text-text">
+        {heading}
+        <div className="mx-auto flex w-full max-w-[1040px] flex-col gap-6 px-4 py-6 sm:px-6">
+          <TodayNoCourses />
+          <TodayAskBar />
+          <TodayCourseList courses={[]} />
+          <nav aria-label="今日其他安排" className="flex flex-wrap items-center gap-2"><Link href="/opening/review" className={ui.quiet}>复习</Link></nav>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <TaskQueueRefreshContext.Provider value={rereadQueue}>
       <TaskLearningActionContext.Provider value={teachingLoopTrialEnabled ? { start: (selected) => { void startTaskLearning(selected); }, busy: ctaBusy } : null}>
       <div className="flex min-h-full flex-col bg-bg text-text">
         {heading}
-        {state.courses?.status === "error" ? <p role="status" className="px-5 pt-3 text-xs text-warn">课程暂时无法读取。<Link className={ui.quiet} href="/opening/today">重新读取</Link></p> : null}
-        {!planning ? <div ref={nextStepMetrics.ref} onClickCapture={event => {
-          if ((event.target as Element).closest('[data-today-primary-cta="true"]')) nextStepMetrics.clicked();
-        }} className={`shrink-0 ${ctaFocusNonce > 0 && !currentActivity?.courseId ? "group-data-[focus=true]/workspace:hidden" : ""}`}>
-          {currentActivity || state.continueItem || currentCourse ? <TodayLearningContext
-            estimateMinutes={activityEstimate?.activityId === currentActivity?.id ? activityEstimate?.minutes : null}
-            item={state.continueItem}
-            courseTitle={courseTitle}
-            course={currentCourse}
-            timeZone={timeZone}
-            finished={finishedToday}
-            activity={currentActivity ? { title: currentActivity.intentSummary, courseId: currentActivity.courseId, id: currentActivity.id, contentVersion: currentActivity.contentVersion } : null}
-            resume={learningResume}
-            primaryAction={writingTarget ? (
-              <button
-                type="button"
-                className={buttonClass}
-                data-today-primary-cta="true"
-                onClick={() => void runPrimaryCta()}
-                disabled={ctaBusy || activityLoad === "loading"}
-              >
-                {ctaLabel}
-              </button>
-            ) : sessionPrimary ?? (currentActivity?.courseId ? <Link className={buttonClass} href={`/opening/courses/${encodeURIComponent(currentActivity.courseId)}/study?activity=${encodeURIComponent(currentActivity.id)}`} data-today-primary-cta="true">继续：{currentActivity.intentSummary}</Link> : currentActivity ? (
-              <button
-                type="button"
-                className={buttonClass}
-                data-today-primary-cta="true"
-                onClick={() => void runPrimaryCta()}
-                disabled={ctaBusy || activityLoad === "loading"}
-              >
-                {ctaBusy ? "处理中…" : ctaLabel}
-              </button>
-            ) : state.continueItem ? <button type="button" className={buttonClass} data-today-primary-cta="true" disabled={ctaBusy || activityLoad === "loading"} onClick={() => void runPrimaryCta()}>{ctaBusy ? "处理中…" : "开始学习"}</button> : currentCourse ? <Link className={buttonClass} href={courseStudyHref} data-today-primary-cta="true">{finishedToday ? "学下一节" : "开始学习"}</Link> : null)}
-            secondaryAction={
-              <Link href={assistantHref} className={ui.quiet}>
-                自由对话
-              </Link>
-            }
-          /> : activityLoad === "loading" ? <p role="status" className="px-5 py-8 text-sm text-text-2">正在读取…</p> : activityLoad === "ready" ? <EmptyState title="从课程继续学习" description="选择一门课程，开始阅读或练习。" action={<Link className={buttonClass} href="/opening/courses">选择课程</Link>} /> : null}
-          <TodayAskBar />
-          {ctaError ? (
-            <p className="px-4 text-xs text-danger sm:px-5" role="alert">{ctaError}</p>
-          ) : null}
-          {activityLoad === "error" ? (
-            <p className="px-4 text-xs text-warn sm:px-5" role="status">
-              学习记录暂时无法读取。<button type="button" className={ui.quiet} onClick={rereadQueue}>重新读取</button>
-            </p>
-          ) : null}
-        </div> : ctaError ? <p role="alert" className="px-5 pt-3 text-sm text-danger">{ctaError}</p> : null}
-        {!planning ? <TodayProgress api={api} timeZone={timeZone} reloadToken={reloadToken} /> : null}
-        {!planning ? <TodayDayAdjustment date={localDateKey(new Date(), timeZone)} timeZone={timeZone} onChanged={rereadQueue} /> : null}
-        {!planning ? <LongTermLearningCard date={localDateKey(new Date(), timeZone)} onChanged={rereadQueue} /> : null}
-        {!planning && state.courses?.status === "ready" ? <TodayCourseList courses={state.courses.items} /> : null}
+        {!planning ? (
+          <div className="mx-auto flex w-full max-w-[1040px] shrink-0 flex-col gap-6 px-4 py-6 sm:px-6">
+            {state.courses?.status === "error" ? <p role="status" className="text-xs text-warn">课程暂时无法读取。<Link className={ui.quiet} href="/opening/today">重新读取</Link></p> : null}
+            <div ref={nextStepMetrics.ref} onClickCapture={event => {
+              if ((event.target as Element).closest('[data-today-primary-cta="true"]')) nextStepMetrics.clicked();
+            }} className={`flex flex-col gap-4 ${ctaFocusNonce > 0 && !currentActivity?.courseId ? "group-data-[focus=true]/workspace:hidden" : ""}`}>
+              {currentActivity || state.continueItem || currentCourse ? <TodayLearningContext
+                estimateMinutes={activityEstimate?.activityId === currentActivity?.id ? activityEstimate?.minutes : null}
+                item={state.continueItem}
+                courseTitle={courseTitle}
+                course={currentCourse}
+                timeZone={timeZone}
+                finished={finishedToday}
+                activity={currentActivity ? { title: currentActivity.intentSummary, courseId: currentActivity.courseId, id: currentActivity.id, contentVersion: currentActivity.contentVersion } : null}
+                resume={learningResume}
+                primaryAction={writingTarget ? (
+                  <button
+                    type="button"
+                    className={buttonClass}
+                    data-today-primary-cta="true"
+                    onClick={() => void runPrimaryCta()}
+                    disabled={ctaBusy || activityLoad === "loading"}
+                  >
+                    {ctaLabel}
+                  </button>
+                ) : sessionPrimary ?? (currentActivity?.courseId ? <Link className={buttonClass} href={`/opening/courses/${encodeURIComponent(currentActivity.courseId)}/study?activity=${encodeURIComponent(currentActivity.id)}`} data-today-primary-cta="true">继续：{currentActivity.intentSummary}</Link> : currentActivity ? (
+                  <button
+                    type="button"
+                    className={buttonClass}
+                    data-today-primary-cta="true"
+                    onClick={() => void runPrimaryCta()}
+                    disabled={ctaBusy || activityLoad === "loading"}
+                  >
+                    {ctaBusy ? "处理中…" : ctaLabel}
+                  </button>
+                ) : state.continueItem ? <button type="button" className={buttonClass} data-today-primary-cta="true" disabled={ctaBusy || activityLoad === "loading"} onClick={() => void runPrimaryCta()}>{ctaBusy ? "处理中…" : "开始学习"}</button> : currentCourse ? <Link className={buttonClass} href={courseStudyHref} data-today-primary-cta="true">{finishedToday ? "学下一节" : "开始学习"}</Link> : null)}
+                secondaryAction={
+                  <Link href={assistantHref} className={ui.quiet}>
+                    自由对话
+                  </Link>
+                }
+              /> : activityLoad === "loading" ? <div className="py-5"><ThinkingLine label="正在读取今日学习…" /></div> : activityLoad === "ready" ? <EmptyState title="从课程继续学习" description="选择一门课程，开始阅读或练习。" action={<Link className={buttonClass} href="/opening/courses">选择课程</Link>} /> : null}
+              <TodayAskBar />
+              {ctaError ? (
+                <p className="text-xs text-danger" role="alert">{ctaError}</p>
+              ) : null}
+              {activityLoad === "error" ? (
+                <p className="text-xs text-warn" role="status">
+                  学习记录暂时无法读取。<button type="button" className={ui.quiet} onClick={rereadQueue}>重新读取</button>
+                </p>
+              ) : null}
+            </div>
+            <TodayProgress api={api} timeZone={timeZone} reloadToken={reloadToken} decision={capabilities.adaptivePlanning ? (plan, tasks) => (
+              <div className="space-y-3 group-data-[focus=true]/workspace:hidden">
+                {plan.replanOffer?.offer ? <LocalReplanCard key={plan.replanOffer.dismissalKey} api={api} date={plan.date}
+                  acceptedVersion={plan.acceptedVersion} blocks={plan.blocks} tasks={tasks} reason={plan.replanOffer.reason}
+                  dismissalKey={plan.replanOffer.dismissalKey} timeZone={timeZone} onChanged={rereadQueue} />
+                  : <ActionDigest api={api} onChanged={rereadQueue} onAdjust={() => window.location.assign("/opening/settings/learning?planning=1#planning")} />}
+                <CoachPlanControl key={plan.date} api={api} date={plan.date} draft={plan.dailyDraft ?? null} onChanged={rereadQueue}
+                  onPrepare={!plan.acceptedVersion && !plan.dailyDraft && !plan.dailyDraftSkippedReason ? async () => {
+                    const prepared = await api.getToday(plan.date, { prepareDraft: true });
+                    if (prepared.dailyDraftSkippedReason === "no_settings") throw new Error("请先在学习安排中设置可用时间。");
+                    rereadQueue();
+                  } : undefined} />
+              </div>
+            ) : undefined} />
+            <TodayDayAdjustment date={localDateKey(new Date(), timeZone)} timeZone={timeZone} onChanged={rereadQueue} />
+            <LongTermLearningCard date={localDateKey(new Date(), timeZone)} onChanged={rereadQueue} />
+            {state.courses?.status === "ready" ? <TodayCourseList courses={state.courses.items} /> : null}
+            <nav aria-label="今日其他安排" className="flex flex-wrap items-center gap-2 border-t border-line/60 pt-2 group-data-[focus=true]/workspace:hidden">
+              <Link href="/opening/settings/planning" className={ui.quiet}>学习安排</Link>
+              {(state.pendingReviews?.count ?? 0) > 0 && state.pendingReviews?.href ? (
+                <Link href={state.pendingReviews.href} className={`${ui.quiet} tabular-nums`}>待审核建议 · {state.pendingReviews.count}</Link>
+              ) : null}
+            </nav>
+          </div>
+        ) : (
+          <>
+            {state.courses?.status === "error" ? <p role="status" className="px-5 pt-3 text-xs text-warn">课程暂时无法读取。<Link className={ui.quiet} href="/opening/today">重新读取</Link></p> : null}
+            {ctaError ? <p role="alert" className="px-5 pt-3 text-sm text-danger">{ctaError}</p> : null}
+          </>
+        )}
         <div className="flex min-h-0 flex-1 flex-col">
-          <nav aria-label="今日其他安排" className={`flex flex-wrap items-center gap-2 px-5 py-3 ${queueOpen ? "" : "group-data-[focus=true]/workspace:hidden"}`}>
-            {planning ? <button type="button" className={ui.quiet} aria-expanded={queueOpen} aria-controls="today-queue" onClick={() => setQueueOpen(open => !open)}>{queueOpen ? "收起任务列表" : "查看任务列表"}</button> : <Link href="/opening/settings/planning" className={ui.quiet}>学习安排</Link>}
-            {planning ? <><Link href="/opening/today" className={ui.quiet}>返回今天</Link><Link href="/opening/review" className={ui.quiet}>复习</Link></> : null}
-          </nav>
+          {planning ? <nav aria-label="今日其他安排" className={`flex flex-wrap items-center gap-2 px-5 py-3 ${queueOpen ? "" : "group-data-[focus=true]/workspace:hidden"}`}>
+            <button type="button" className={ui.quiet} aria-expanded={queueOpen} aria-controls="today-queue" onClick={() => setQueueOpen(open => !open)}>{queueOpen ? "收起任务列表" : "查看任务列表"}</button>
+            <Link href="/opening/today" className={ui.quiet}>返回今天</Link>
+            <Link href="/opening/review" className={ui.quiet}>复习</Link>
+          </nav> : null}
           {planning ? <div
             id="today-queue"
             hidden={!queueOpen}

@@ -2,10 +2,15 @@
 import { act, createElement, useContext } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import type { TaskItem, TeachingActivitySummary } from "@aistudy/contracts";
+import type { TaskItem, TeachingActivity, TeachingActivitySummary } from "@aistudy/contracts";
 import type { OpeningApi } from "../client/api";
 
 const { getSummary } = vi.hoisted(() => ({ getSummary: vi.fn() }));
+const routeClient = vi.hoisted(() => ({ read: vi.fn(), next: vi.fn(), scheduleRetest: vi.fn() }));
+vi.mock("../courses/course-route-client", async importOriginal => ({
+  ...await importOriginal<typeof import("../courses/course-route-client")>(),
+  createCourseRouteClient: () => routeClient,
+}));
 vi.mock("./activity-client", () => ({ createTeachingActivityClient: () => ({ getSummary }) }));
 vi.mock("../planning/task-status-control", async () => {
   const { createContext } = await import("react");
@@ -31,6 +36,31 @@ beforeEach(() => {
 });
 afterEach(async () => { await act(async () => root.unmount()); container.remove(); });
 async function render(activityId: string) { await act(async () => root.render(createElement(ActivitySummaryCard, { activityId, api }))); }
+
+it.each([
+  ["assisted_check", "独立试做同类题", "next"],
+  ["schedule_retest", "确认延迟复测安排", "scheduleRetest"],
+] as const)("offers only the %s action and submits it on confirmation", async (kind, label, action) => {
+  sessionStorage.clear();
+  vi.clearAllMocks();
+  const activityId = "11111111-1111-4111-8111-111111111111";
+  const courseId = "22222222-2222-4222-8222-222222222222";
+  const observationId = "33333333-3333-4333-8333-333333333333";
+  const activity = { id: activityId, courseId, routeManaged: true, status: "completed", pathVersion: 2 } as TeachingActivity;
+  getSummary.mockResolvedValue({ ...summary("已完成"), nextStep: { kind, observationId } });
+  routeClient.read.mockResolvedValue({ currentActivity: activity, currentRoute: { goalId: courseId, goalRevision: 1 }, observationId });
+  routeClient.next.mockResolvedValue({ kind: "choice", href: "/opening/courses", message: "请确认课程路线" });
+  routeClient.scheduleRetest.mockResolvedValue({ href: "/opening/review", notBeforeAt: "2026-11-23T00:00:00Z", taskStatus: "pending", retestStatus: "accepted" });
+  await act(async () => root.render(createElement(ActivitySummaryCard, { activityId, activity, api })));
+  const buttons = [...container.querySelectorAll("button")];
+  expect(buttons.map(button => button.textContent)).toEqual([label]);
+  expect(routeClient.read).not.toHaveBeenCalled();
+  expect(routeClient.next).not.toHaveBeenCalled();
+  expect(routeClient.scheduleRetest).not.toHaveBeenCalled();
+  await act(async () => buttons[0]!.click());
+  expect(routeClient[action]).toHaveBeenCalledExactlyOnceWith(courseId, expect.objectContaining({ activityId, observationId }));
+  expect(routeClient[action === "next" ? "scheduleRetest" : "next"]).not.toHaveBeenCalled();
+});
 
 it("hides the previous activity immediately and ignores its late summary", async () => {
   const old = deferred<TeachingActivitySummary>(); getSummary.mockReturnValueOnce(old.promise).mockResolvedValueOnce(summary("当前活动"));

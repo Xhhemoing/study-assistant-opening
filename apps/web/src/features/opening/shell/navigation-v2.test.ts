@@ -4,10 +4,11 @@ import { navigationIsActive, openingNavigation } from "./navigation";
 const options = { studySessionV2: true };
 
 describe("study session V2 navigation", () => {
-  it("exposes today, courses and library in order", () => {
+  it("exposes today, courses, explore and library in order", () => {
     expect(openingNavigation(options).map(item => [item.href, item.label, item.icon, item.group])).toEqual([
       ["/opening/today", "今日", "start", "core"],
       ["/opening/courses", "课程", "courses", "core"],
+      ["/opening/agent", "探索", "assistant", "core"],
       ["/opening/library", "资料", "library", "core"],
     ]);
   });
@@ -18,8 +19,8 @@ describe("study session V2 navigation", () => {
     ["/opening/review/session?tab=cards", "/opening/today"],
     ["/opening/cards", "/opening/today"],
     ["/opening/cards/session", "/opening/today"],
-    ["/opening/agent", "/opening/today"],
-    ["/opening/assistant", "/opening/today"],
+    ["/opening/agent", "/opening/agent"],
+    ["/opening/assistant", "/opening/agent"],
     ["/opening/sprint", "/opening/today"],
     ["/opening/suggestions", "/opening/today"],
     ["/opening/courses", "/opening/courses"],

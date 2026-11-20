@@ -10,13 +10,13 @@ type Observer = {
 };
 
 /** Tasks render independently of the plan. Optional reminder tools are not read here. */
-export async function readTodayData(api: TodayApi, date: string, observer: Observer, options?: { refreshSuggestions?: boolean }): Promise<void> {
+export async function readTodayData(api: TodayApi, date: string, observer: Observer, options?: Parameters<TodayApi["getToday"]>[1]): Promise<void> {
   await Promise.all([
     api.listTasks().then(
       result => { if (observer.isCurrent()) observer.tasks(result.tasks); },
       reason => { if (observer.isCurrent()) observer.taskError(reason); },
     ),
-    (options?.refreshSuggestions ? api.getToday(date, options) : api.getToday(date)).then(
+    (options?.prepareDraft || options?.refreshSuggestions ? api.getToday(date, options) : api.getToday(date)).then(
       result => { if (observer.isCurrent()) observer.plan(result); },
       reason => { if (observer.isCurrent()) observer.planError(reason); },
     ),

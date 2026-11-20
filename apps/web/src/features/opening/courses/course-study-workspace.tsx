@@ -1,7 +1,7 @@
 "use client";
 
 import { TransitionLink as Link } from "../v3/motion/view-transition";
-import { ArrowLeft, FolderOpen, NotebookPen, Sparkles } from "lucide-react";
+import { ArrowLeft, ChevronDown, FolderOpen, NotebookPen, Sparkles } from "lucide-react";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import type { LearningResume, MatrixExerciseSpec } from "@aistudy/contracts";
@@ -10,6 +10,7 @@ import { LearningAttemptForm } from "../learning/attempt-form";
 import { retestPrefillFromProjection } from "../learning/retest-attempt";
 import { ContentBlock, LoadError, LoadingRows, ui } from "../design/ui";
 import { TeachingContinueEntry } from "../teaching/teaching-workspace";
+import { ActivitySummaryCard } from "../teaching/activity-summary-card";
 import { openCourseStudy, type CompletedRetestTask, type CourseStudyEntry } from "./course-study-entry";
 import { useCourseBundle } from "./course-detail";
 import { CourseStudyMaterials } from "./course-study-materials";
@@ -53,7 +54,7 @@ export function CourseStudyWorkspace({ courseId, activityId, taskId, retestId, t
   initialFocus?: { skillLabel: string; requirementKey: string | null };
   initialMode?: "practice" | "matrix"; initialMatrixKey?: MatrixExerciseSpec["exerciseKey"]; initialMatrixVariant?: number; practiceEntryError?: string;
 }) {
-  const { course, loading, error, reload } = useCourseBundle(courseId);
+  const { course, loading, error, reload } = useCourseBundle(courseId, { includeAssets: false });
   const router = useRouter();
   const api = useMemo(() => suppliedApi ?? createOpeningApi(), [suppliedApi]);
   const routeApi = useMemo(() => createCourseRouteClient(), []);
@@ -133,7 +134,7 @@ export function CourseStudyWorkspace({ courseId, activityId, taskId, retestId, t
   const anchorProblem = historicalAnchorError || (historicalAnchor && resume && (historicalAnchor.contentVersion !== resume.contentVersion || resume.clientInit?.checkpointJson?.currentBlockId !== historicalAnchor.blockId) ? "这条笔记对应的是这节课的旧内容或别的位置。笔记仍保留；可以回到笔记看看，或继续当前位置学习。" : "");
   const readyTeaching = workspaceReady && !practice && !busy && !archived && !resumeError
     && (!anchorProblem || allowCurrentAnchor) && (resume?.gates.materials === "available" || resume?.gates.materials === "partial");
-  return <section aria-label="课程学习台" className="flex h-full min-h-0 flex-col bg-surface text-text" data-course-study={courseId}>
+  return <section aria-label="课程学习台" className="flex h-full min-h-0 flex-col bg-bg text-text" data-course-study={courseId}>
     {!readyTeaching ? <TopBar label="课程学习顶栏"
       leading={<Link className={v3ui.icon} href={courseHref} aria-label="返回课程"><ArrowLeft aria-hidden="true" size={18} /></Link>}
       title={<h1 className="truncate text-title font-semibold tracking-[-0.01em]">{course.title}</h1>}
@@ -148,7 +149,11 @@ export function CourseStudyWorkspace({ courseId, activityId, taskId, retestId, t
       {entryError ? <div className="p-5"><LoadError message={entryError} onRetry={() => setRevision(value => value + 1)} /><button className={`${ui.secondary} mt-3`} onClick={openPractice} type="button">先独立练习</button></div> : null}
       {!busy && activity && !archived ? <div hidden={practice} className={practice ? "hidden" : "flex min-h-0 flex-1 flex-col"}>
         {anchorProblem && !allowCurrentAnchor ? <div className="space-y-3 p-5" role="status"><p className="text-sm leading-7 text-warn">{anchorProblem}</p><button type="button" className={ui.secondary} onClick={() => setAllowCurrentAnchor(true)}>继续当前断点</button></div> : resumeError ? <div className="p-5"><LoadError message={resumeError} onRetry={() => setRevision(value => value + 1)} /></div> : <CourseStudyMaterials gate={resume?.gates.materials ?? "unavailable"} materialsHref={conversationObjectHref(`/opening/library?tab=materials&courseId=${encodeURIComponent(courseId)}`, originalConversationId)} onRetry={() => setRevision(value => value + 1)}><TeachingContinueEntry key={`${activity.id}:${revision}`} activity={activity} resume={resume} initialClientInit={resume?.clientInit} startInWorkspace={Boolean(resume?.clientInit)} teachingCompileEnabled={teachingCompileEnabled && !archived} api={api} timeZone={timeZone} originalConversationId={originalConversationId} onWorkspaceVisibilityChange={setWorkspaceReady} previousToolsAction={previousToolsAvailable ? <button type="button" className={ui.secondary} onClick={() => setRestoringPreviousTools(true)}>返回课前工具</button> : null} headerLeading={<Link className={v3ui.icon} href={courseHref} aria-label="返回课程"><ArrowLeft aria-hidden="true" size={18} /></Link>} contextualTools={context => <CourseStudyContextTools key={`${context.activity.id}:${context.contentVersion}:${context.blockId}`} context={context} />} onActivityUpdated={updated => setEntry({ kind: "activity", activity: updated })} onResumeUpdated={setResume} /></CourseStudyMaterials>}
-        {activity.routeManaged ? <div className="shrink-0 px-5 pb-4"><CourseRouteNextControl activity={activity} originalConversationId={originalConversationId} /></div> : activity.status === "completed" || activity.status === "skipped" ? <div className="shrink-0 px-5 pb-4"><Link className={ui.secondary} href={conversationObjectHref(`/opening/courses/${encodeURIComponent(courseId)}/study?after=${encodeURIComponent(activity.id)}`, originalConversationId)}>开始下一次学习</Link></div> : null}
+        {activity.status === "completed" && resume?.gates.materials === "unavailable" ? <div className="px-5 py-4">
+          <ActivitySummaryCard activityId={activity.id} activity={activity} api={api} originalConversationId={originalConversationId} />
+        </div> : null}
+        {activity.status !== "completed" && activity.routeManaged ? <div className="shrink-0 px-5 pb-4"><CourseRouteNextControl activity={activity} originalConversationId={originalConversationId} /></div>
+          : !activity.routeManaged && (activity.status === "completed" || activity.status === "skipped") ? <div className="shrink-0 px-5 pb-4"><Link className={ui.secondary} href={conversationObjectHref(`/opening/courses/${encodeURIComponent(courseId)}/study?after=${encodeURIComponent(activity.id)}`, originalConversationId)}>开始下一次学习</Link></div> : null}
       </div> : null}
       {!busy && entry?.kind === "continuation-choice" && !archived ? <section className="space-y-3 p-5"><p className="text-sm text-text-2">上一节已完成，任务仍保留。确认后开始新一节。</p><button type="button" className={ui.primary} disabled={!teachingCompileEnabled || sourceLoadError} onClick={() => setContinuationTail(entry.tailActivityId)}>开始新一节</button></section> : null}
       {!busy && entry?.kind === "static-lesson" && !archived ? <p className="p-5 text-sm text-text-2" role="status">正在恢复原学习会话…<Link className={ui.quiet} href={conversationObjectHref(entry.href, originalConversationId)}>继续原课程学习</Link></p> : null}
@@ -173,7 +178,7 @@ export function CourseStudyWorkspace({ courseId, activityId, taskId, retestId, t
             : compileDisabled
               ? "当前未开启自动生成讲解，可以先做这些"
               : "尚未生成讲解，也可以先做这些";
-        return <details key="waiting" open className="mx-5 mt-2 shrink-0 border-t border-line pb-3 pt-2" data-study-alternatives={alternativeState}><summary className="cursor-pointer py-1 text-xs text-text-3 focus-visible:ring-2 focus-visible:ring-focus-ring">{summaryCopy}</summary><div className="mt-3 flex flex-wrap gap-2">{spanLesson ? <Link className={ui.primary} href={conversationObjectHref(spanLesson.href, originalConversationId)}>学现成的一节：{spanLesson.label}</Link> : <Link className={ui.primary} href={conversationObjectHref(`/opening/library?tab=materials&courseId=${encodeURIComponent(courseId)}`, originalConversationId)}>先读课程材料</Link>}<button type="button" className={ui.secondary} onClick={openPractice}>独立练习</button><Link className={ui.quiet} href={conversationObjectHref(`/opening/assistant?courseId=${encodeURIComponent(courseId)}`, originalConversationId)}>问 AI</Link></div></details>;
+        return <details key="waiting" open className="group mx-5 mt-3 shrink-0 rounded-card border border-line bg-surface p-4 shadow-card" data-study-alternatives={alternativeState}><summary className="flex cursor-pointer list-none items-center justify-between gap-2 py-0.5 text-xs font-medium text-text-2 focus-visible:ring-2 focus-visible:ring-focus-ring [&::-webkit-details-marker]:hidden"><span>{summaryCopy}</span><ChevronDown size={14} aria-hidden="true" className="shrink-0 text-text-3 transition-transform duration-200 ease-out-strong group-open:rotate-180" /></summary><div className="mt-3 flex flex-wrap gap-2">{spanLesson ? <Link className={ui.primary} href={conversationObjectHref(spanLesson.href, originalConversationId)}>学现成的一节：{spanLesson.label}</Link> : <Link className={ui.primary} href={conversationObjectHref(`/opening/library?tab=materials&courseId=${encodeURIComponent(courseId)}`, originalConversationId)}>先读课程材料</Link>}<button type="button" className={ui.secondary} onClick={openPractice}>独立练习</button><Link className={ui.quiet} href={conversationObjectHref(`/opening/assistant?courseId=${encodeURIComponent(courseId)}`, originalConversationId)}>问 AI</Link></div></details>;
       })() : null}
     </div></div></SplitView></div>
   </section>;

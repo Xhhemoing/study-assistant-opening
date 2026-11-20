@@ -93,7 +93,7 @@ export function ActionDigest({
   const confirmations = confirmationCandidates(digest);
 
   return (
-    <section className="space-y-3 border-b border-line bg-surface-2 px-4 py-4" aria-labelledby="action-digest-heading">
+    <section className="mx-4 my-3 space-y-3 rounded-card border border-line bg-surface-2/60 p-4 shadow-card" aria-labelledby="action-digest-heading">
       <div>
         <h3 className="text-xs font-semibold text-text" id="action-digest-heading">今日优先行动</h3>
         <p className="mt-1 text-xs leading-5 text-text-3">
@@ -101,15 +101,15 @@ export function ActionDigest({
         </p>
       </div>
       {digest.pendingConfirmationCount > digest.primary.length ? (
-        <p className="text-xs leading-5 text-warn" role="status">
+        <p className="text-xs leading-5 tabular-nums text-warn" role="status">
           另有 {digest.pendingConfirmationCount - digest.primary.length} 项待确认（已集中，未全部展开）
         </p>
       ) : null}
       <ul className="space-y-2 text-xs leading-5 text-text-2" aria-label="优先行动">
         {digest.primary.map((item) => (
-          <li key={item.id} className="rounded-md border border-line bg-surface p-3">
+          <li key={item.id} className="rounded-xl border border-line bg-surface p-3 shadow-card">
             <span className="font-medium text-text">{item.title}</span>
-            <p className="text-text-3">
+            <p className="mt-0.5 tabular-nums text-text-3">
               {item.minutes} 分钟
               {item.needsConfirmation ? " · 需确认" : ""}
               {item.dueAt ? ` · 截止 ${new Date(item.dueAt).toLocaleString("zh-CN", { hour12: false })}` : ""}
@@ -118,12 +118,12 @@ export function ActionDigest({
         ))}
       </ul>
       {confirmations.length > 0 ? (
-        <div className="rounded-md border border-warn/30 bg-warn-soft p-3" aria-labelledby="action-confirm-heading">
+        <div className="rounded-xl border border-warn/25 bg-warn-soft p-3.5" aria-labelledby="action-confirm-heading">
           <h4 className="text-xs font-semibold text-text" id="action-confirm-heading">集中确认</h4>
           <p className="mt-1 text-xs leading-5 text-text-2">接受 / 修改 / 拒绝 / 查看依据。修改会打开今日安排，不另开计划器。</p>
-          <ul className="mt-2 space-y-3">
+          <ul className="mt-2.5 space-y-3">
             {confirmations.map((item) => (
-              <li key={`confirm-${item.id}`} className="space-y-2">
+              <li key={`confirm-${item.id}`} className="space-y-2 rounded-lg bg-surface/80 p-2.5">
                 <p className="text-xs font-medium text-text">{item.title}</p>
                 <div className="flex flex-wrap gap-2">
                   <button type="button" className={buttonClass} disabled={pendingId != null} onClick={() => void decide(item, "accept")}>
@@ -140,7 +140,7 @@ export function ActionDigest({
                   </button>
                 </div>
                 {basisId === item.id ? (
-                  <p className="text-xs leading-5 text-text-2" role="status">
+                  <p className="text-xs leading-5 font-mono text-text-2" role="status">
                     来源 {item.sourceIds.length ? item.sourceIds.map((id) => id.slice(0, 8)).join("、") : "无"} · dedupe {item.dedupeKey}
                   </p>
                 ) : null}

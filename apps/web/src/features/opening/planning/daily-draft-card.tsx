@@ -220,13 +220,13 @@ export function DailyDraftCard({
   if (dailyDraftSkippedReason) {
     return (
       <section
-        className="space-y-2 border-b border-line bg-warn-soft px-4 py-3"
+        className="mx-4 my-3 space-y-2 rounded-card border border-warn/25 bg-warn-soft p-4 shadow-card"
         aria-labelledby="daily-draft-skipped-heading"
       >
         <h3 className="text-xs font-semibold text-text" id="daily-draft-skipped-heading">
           今日推荐草案
         </h3>
-        <p className="text-xs leading-5 text-text-2" role="status">
+        <p className="text-xs leading-5 tabular-nums text-text-2" role="status">
           {dailyDraftSkippedCopy(dailyDraftSkippedReason, unplannedPendingCount)}
         </p>
         {dailyDraftSkippedReason === "no_settings" ? (
@@ -347,7 +347,7 @@ export function DailyDraftCard({
 
   return (
     <section
-      className="space-y-3 border-b border-line bg-surface-2 px-4 py-4"
+      className="mx-4 my-3 space-y-3 rounded-card border border-line bg-surface-2/60 p-4 shadow-card"
       aria-labelledby="daily-draft-heading"
     >
       <div>
@@ -356,7 +356,7 @@ export function DailyDraftCard({
           基于待办、到期补测、课表空闲与昨日顺延生成；确认后才改变正式计划。
         </p>
       </div>
-      {adaptivePlanning && hasNewerSuggestion && onRefreshSuggestions ? <button type="button" className={secondaryButtonClass} disabled={pending} onClick={() => void refreshSuggestions()}>有新建议 · 点击更新</button> : null}
+      {adaptivePlanning && onRefreshSuggestions ? <button type="button" className={secondaryButtonClass} disabled={pending} onClick={() => void refreshSuggestions()}>{hasNewerSuggestion ? "有新建议 · 点击更新" : "检查并更新建议"}</button> : null}
       {draft.blocks.some((block) => draft.reasons?.[block.taskId]?.code === "carry_over") ? (
         <p className="text-xs leading-5 text-warn" role="status">含顺延自昨天的任务</p>
       ) : null}
@@ -364,15 +364,15 @@ export function DailyDraftCard({
         onRejectSuggestion={api.submitSuggestionFeedback && draft.origin !== "agent" ? rejectSuggestion : undefined}
         onSelectionChange={(keys) => { if (!action.current && !feedbackBlocked) setModel((prev) => reduceDailyDraftCard(prev, { type: "select", keys })); }} /> : <ul className="space-y-2 text-xs leading-5 text-text-2" aria-label="推荐安排">
         {draft.blocks.map((block) => (
-          <li key={`${block.taskId}-${block.start}`}>
+          <li key={`${block.taskId}-${block.start}`} className="rounded-xl border border-line bg-surface p-2.5">
             <span className="font-medium text-text">{taskTitle(tasks, block.taskId)}</span>
-            <p>{timeLabel(block.start)}–{timeLabel(block.end)}</p>
+            <p className="tabular-nums text-text-3">{timeLabel(block.start)}–{timeLabel(block.end)}</p>
             {(draft.reasons?.[block.taskId]?.label ?? block.reason) ? <p className="text-text-3">{draft.reasons?.[block.taskId]?.label ?? block.reason}</p> : null}
           </li>
         ))}
       </ul>}
       {draft.unscheduledTaskIds.length ? (
-        <p className="text-xs text-warn">
+        <p className="text-xs tabular-nums text-warn">
           未安排 {draft.unscheduledTaskIds.length} 项；可确认后改用「按建议安排」或缩短时长。
         </p>
       ) : null}

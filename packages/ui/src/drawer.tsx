@@ -49,11 +49,11 @@ export function Drawer({ open, onClose, title = "详情", description, children,
       <div className="pointer-events-none fixed inset-0 z-50 overflow-hidden" aria-hidden={open ? undefined : true} inert={!open}>
         {/* Keep backdrop and frame in one portal: a newly mounted sibling
             portal would otherwise sit above the retained frame and eat clicks. */}
-        {open ? <Dialog.Overlay data-drawer-backdrop="true" className="pointer-events-auto absolute inset-0 bg-black/20" /> : null}
+        {open ? <Dialog.Overlay data-drawer-backdrop="true" className="pointer-events-auto absolute inset-0 bg-ink/25 backdrop-blur-[2px]" /> : null}
         <div
           data-drawer-frame="true"
           data-state={open ? "open" : "closed"}
-          className={`glass pointer-events-auto absolute inset-x-0 bottom-0 h-[85dvh] overflow-hidden rounded-t-[var(--radius-sheet,var(--radius-card))] text-text transition-[transform,opacity] duration-[250ms] ease-out-expo data-[state=closed]:pointer-events-none data-[state=closed]:translate-y-full data-[state=closed]:opacity-0 data-[state=closed]:duration-150 data-[state=open]:translate-y-0 data-[state=open]:opacity-100 motion-reduce:transition-none sm:inset-y-2 sm:left-auto sm:right-2 sm:h-auto sm:w-[var(--layout-side,400px)] sm:rounded-[var(--radius-panel,var(--radius-card))] sm:data-[state=closed]:translate-x-[calc(100%+16px)] sm:data-[state=closed]:translate-y-0 sm:data-[state=open]:translate-x-0 ${className}`}
+          className={`glass pointer-events-auto absolute inset-x-0 bottom-0 h-[85dvh] overflow-hidden rounded-t-[var(--radius-sheet,var(--radius-card))] text-text transition-[transform,opacity,width] duration-[250ms] ease-out-expo data-[state=closed]:pointer-events-none data-[state=closed]:translate-y-full data-[state=closed]:opacity-0 data-[state=closed]:duration-150 data-[state=open]:translate-y-0 data-[state=open]:opacity-100 motion-reduce:transition-none sm:inset-y-2 sm:left-auto sm:right-2 sm:h-auto sm:w-[var(--layout-side,400px)] sm:rounded-[var(--radius-panel,var(--radius-card))] sm:data-[state=closed]:translate-x-[calc(100%+16px)] sm:data-[state=closed]:translate-y-0 sm:data-[state=open]:translate-x-0 ${className}`}
         >
           {open ? <Dialog.Content
             aria-modal="true"
@@ -79,14 +79,14 @@ export function Drawer({ open, onClose, title = "详情", description, children,
                 if (down >= 64 && down > across * 1.5 && window.matchMedia?.("(max-width: 639px)").matches) onClose();
               }}
               onPointerCancel={() => { drag.current = null; }} onLostPointerCapture={() => { drag.current = null; }}>
-              <span className="h-1 w-10 rounded-full bg-text-3/50" />
+              <span className="h-1 w-10 rounded-full bg-text-3/45" />
             </div>
-            <header className="flex shrink-0 items-center justify-between gap-3 py-2 pl-5 pr-2">
+            <header className="flex shrink-0 items-center justify-between gap-3 border-b border-line/70 py-2.5 pl-5 pr-2">
               <div className="min-w-0">
-                <Dialog.Title className="text-base font-semibold">{title}</Dialog.Title>
+                <Dialog.Title className="truncate text-base font-semibold tracking-tight">{title}</Dialog.Title>
                 {description ? <Dialog.Description className="text-xs text-text-2">{description}</Dialog.Description> : null}
               </div>
-              <Dialog.Close asChild><button type="button" aria-label="关闭抽屉" className={ui.icon}><X aria-hidden="true" size={20} /></button></Dialog.Close>
+              <Dialog.Close asChild><button type="button" aria-label="关闭抽屉" className={ui.icon}><X aria-hidden="true" size={18} /></button></Dialog.Close>
             </header>
             {keepMounted
               ? <div className={contentClassName} ref={node => { if (node && retainedHost) { retainedHost.hidden = false; retainedHost.inert = false; node.appendChild(retainedHost); } }} />

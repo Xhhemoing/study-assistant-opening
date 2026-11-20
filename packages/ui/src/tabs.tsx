@@ -29,7 +29,7 @@ export const TabsList = forwardRef<ComponentRef<typeof TabsPrimitive.List>, Comp
       const immediate = snap || !previous || reduced?.matches || Boolean(element.closest('[data-motion="reduce"]'));
       animation?.cancel();
       animation = line.animate([{ transform: immediate ? next : from, opacity: 1 }, { transform: next, opacity: 1 }], {
-        duration: immediate ? 0 : 220, easing: "cubic-bezier(.2, 0, 0, 1)", fill: "forwards",
+        duration: immediate ? 0 : 220, easing: "cubic-bezier(.22, 1, .36, 1)", fill: "forwards",
       });
       previous = next; setIndicatorReady(true);
       element.querySelectorAll('[role="tab"]').forEach(tab => { if (!observed.has(tab)) { observed.add(tab); resize?.observe(tab); } });
@@ -47,12 +47,12 @@ export const TabsList = forwardRef<ComponentRef<typeof TabsPrimitive.List>, Comp
     update(true);
     return () => { animation?.cancel(); selection.disconnect(); preference.disconnect(); resize?.disconnect(); reduced?.removeEventListener("change", preferenceChanged); window.removeEventListener("resize", preferenceChanged); };
   }, []);
-  return <TabsPrimitive.List ref={node => { list.current = node; if (typeof ref === "function") ref(node); else if (ref) ref.current = node; }} data-indicator={indicatorReady ? "ready" : undefined} className={`group/tabs relative flex min-h-11 gap-1 overflow-x-auto border-b border-line ${className}`} {...props}>
+  return <TabsPrimitive.List ref={node => { list.current = node; if (typeof ref === "function") ref(node); else if (ref) ref.current = node; }} data-indicator={indicatorReady ? "ready" : undefined} className={`group/tabs no-scrollbar relative flex min-h-11 gap-1 overflow-x-auto border-b border-line ${className}`} {...props}>
     {children}<span ref={indicator} aria-hidden="true" data-tabs-indicator="true" className="pointer-events-none absolute bottom-0 left-0 h-0.5 w-px origin-left rounded-full bg-ink opacity-0" />
   </TabsPrimitive.List>;
 });
 export const TabsTrigger = forwardRef<ComponentRef<typeof TabsPrimitive.Trigger>, ComponentPropsWithoutRef<typeof TabsPrimitive.Trigger>>(function TabsTrigger({ className = "", ...props }, ref) {
-  return <TabsPrimitive.Trigger ref={ref} className={`relative min-h-11 shrink-0 border-b-2 border-transparent px-4 text-sm text-text-2 hover:text-text data-[state=active]:font-medium data-[state=active]:text-text disabled:opacity-50 after:pointer-events-none after:absolute after:inset-x-0 after:-bottom-0.5 after:h-0.5 after:origin-left after:scale-x-0 after:rounded-full after:bg-ink after:opacity-0 after:transition-[transform,opacity] after:duration-[220ms] after:ease-standard data-[state=active]:after:scale-x-100 data-[state=active]:after:opacity-100 group-data-[indicator=ready]/tabs:after:hidden motion-reduce:after:transition-none ${focusRing} ${className}`} {...props} />;
+  return <TabsPrimitive.Trigger ref={ref} className={`relative inline-flex min-h-11 shrink-0 items-center justify-center gap-1.5 whitespace-nowrap px-4 text-sm text-text-2 transition-colors duration-150 hover:text-text data-[state=active]:font-medium data-[state=active]:text-text disabled:opacity-50 after:pointer-events-none after:absolute after:inset-x-0 after:bottom-0 after:h-0.5 after:origin-left after:scale-x-0 after:rounded-full after:bg-ink after:opacity-0 after:transition-[transform,opacity] after:duration-[220ms] after:ease-out-strong data-[state=active]:after:scale-x-100 data-[state=active]:after:opacity-100 group-data-[indicator=ready]/tabs:after:hidden motion-reduce:transition-none motion-reduce:after:transition-none ${focusRing} ${className}`} {...props} />;
 });
 export const TabsContent = forwardRef<ComponentRef<typeof TabsPrimitive.Content>, ComponentPropsWithoutRef<typeof TabsPrimitive.Content>>(function TabsContent({ className = "", ...props }, ref) {
   // forceMount callers retain state without exposing inactive controls to Tab/AT.
