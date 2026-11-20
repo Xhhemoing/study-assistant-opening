@@ -26,10 +26,12 @@ export async function saveCaptureSource(
   markdown: string,
   clientKey?: string,
   scheduleNextDayRetell = true,
+  courseId: string | null = null,
 ) {
   const bytes = new TextEncoder().encode(markdown);
   const uploadId = clientKey ? uploadIdFor(principal, clientKey, scheduleNextDayRetell) : undefined;
   const oppositeUploadId = clientKey ? uploadIdFor(principal, clientKey, !scheduleNextDayRetell) : undefined;
+  const capture = oppositeUploadId ? { oppositeUploadId, intent: { courseId, scheduleNextDayRetell } } : undefined;
   const input = uploadInputSchema.parse({
     name,
     mime: "text/markdown",
@@ -38,22 +40,21 @@ export async function saveCaptureSource(
     uploadId,
   });
   const sources = createOpeningSourceService(sql);
+  const source = capture
+    ? await sources.captureSource(principal, input, capture)
+    : (await sources.beginUpload(principal, input)).source;
+  if (source.uploadState === "uploaded") {
+    return { sourceId: source.id, name: source.name, bytes: source.bytes, replayed: true };
+  }
   try {
-    const { source } = await sources.beginUpload(principal, input, oppositeUploadId);
+    if (capture) await sources.reissueUploadTicket(principal, source.id);
     await sources.putStaging(principal, source.id, { bytes, contentType: input.mime });
     const saved = await sources.completeUpload(principal, source.id);
     return { sourceId: saved.id, name: saved.name, bytes: saved.bytes, replayed: false };
   } catch (error) {
-    if (!uploadId || !isOpeningDataError(error, "source") || !["CONFLICT", "NOT_FOUND"].includes(error.code)) throw error;
-    // Completed uploads cannot receive another staging ticket. Only recover a
-    // matching, still-available upload (including a retry after task creation failed).
-    const savedRows = await sql`SELECT s.id FROM opening_sources s
-      JOIN workspaces w ON w.id = s.workspace_id
-      WHERE s.id = ${uploadId} AND s.workspace_id = ${principal.workspaceId} AND w.owner_user_id = ${principal.userId}
-        AND s.version = 0 AND s.upload_state = 'uploaded' AND s.name = ${name} AND s.mime = ${input.mime}
-        AND s.bytes = ${input.bytes} AND s.sha256 = ${input.sha256}
-        AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e WHERE e.source_id = s.id)`;
-    if (!Array.isArray(savedRows) || !savedRows[0]) throw error;
-    return { sourceId: uploadId, name, bytes: input.bytes, replayed: true };
+    if (!capture || !isOpeningDataError(error, "source") || !["CONFLICT", "NOT_FOUND"].includes(error.code)) throw error;
+    // Another exact replay may have completed after this request reserved the pending row.
+    const saved = await sources.captureSource(principal, input, { ...capture, completedOnly: true });
+    return { sourceId: saved.id, name: saved.name, bytes: saved.bytes, replayed: true };
   }
 }

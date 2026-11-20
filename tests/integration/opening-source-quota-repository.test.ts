@@ -72,12 +72,29 @@ describe("workspace upload quota with real SQL", () => {
   it("reserves one of two competing capture intents and lets the winner retry", async () => {
     const repo = createOpeningSourceRepository(f.sql);
     const ids = [randomUUID(), randomUUID()] as const;
-    const reserve = (index: 0 | 1) => repo.create(f.scope, { ...upload(4), uploadId: ids[index] }, ids[index === 0 ? 1 : 0]);
+    const reserve = (index: 0 | 1) => repo.create(f.scope, { ...upload(4), uploadId: ids[index] }, {
+      oppositeUploadId: ids[index === 0 ? 1 : 0], intent: { courseId: null, scheduleNextDayRetell: index === 1 },
+    });
     const results = await Promise.allSettled([reserve(0), reserve(1)]);
     expect(results.filter(result => result.status === "rejected")).toMatchObject([{ reason: { code: "CONFLICT" } }]);
     const winner = results[0].status === "fulfilled" ? 0 : 1;
     await expect(reserve(winner)).resolves.toMatchObject({ id: ids[winner] });
     expect(await f.sql`SELECT id FROM opening_sources WHERE workspace_id=${f.scope.workspaceId}`).toEqual([{ id: ids[winner] }]);
+  });
+
+  it("blocks both capture IDs using the deletion receipt alone after a pending upload is deleted", async () => {
+    const repo = createOpeningSourceRepository(f.sql);
+    const ids = [randomUUID(), randomUUID()] as const;
+    const reserve = (index: 0 | 1) => repo.create(f.scope, { ...upload(4), uploadId: ids[index] }, {
+      oppositeUploadId: ids[index === 0 ? 1 : 0], intent: { courseId: null, scheduleNextDayRetell: index === 1 },
+    });
+    const pending = await reserve(1);
+    await createOpeningSourceActionsRepository(f.sql).apply(f.scope, pending.id,
+      { action: "delete", expectedMembershipIds: [], expectedVersion: 0 },
+      { stagingKey: id => `staging/${id}`, finalKey: (id, version) => `opening/sources/${id}/v${version}` }, new Date());
+    expect(await f.sql`SELECT version FROM opening_source_versions WHERE source_id=${pending.id}`).toEqual([]);
+    for (const index of [0, 1] as const) await expect(reserve(index)).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(await f.sql`SELECT id FROM opening_sources WHERE workspace_id=${f.scope.workspaceId}`).toEqual([]);
   });
 
   it.each(["create", "createWithParseJob"] as const)("serializes concurrent %s reservations under the byte limit", async method => {

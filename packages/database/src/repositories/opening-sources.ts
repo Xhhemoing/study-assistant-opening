@@ -18,6 +18,12 @@ export type OpeningSourceRepositoryOptions = {
 
 export type OpeningScope = OpeningJobScope;
 
+export type OpeningTextCapture = {
+  oppositeUploadId: string;
+  completedOnly?: boolean;
+  intent: { courseId: string | null; scheduleNextDayRetell: boolean };
+};
+
 /**
  * Null-lease fallback for pending rows that never got `upload_url_expires_at`
  * (create without ticket, or legacy pre-0034). Aligns with staging upload lease
@@ -46,7 +52,7 @@ export type SweepExpiredPendingUploadsOptions = {
 };
 
 export type OpeningSourceRepository = {
-  create(scope: OpeningScope, input: UploadInput, oppositeUploadId?: string): Promise<SourceRecord>;
+  create(scope: OpeningScope, input: UploadInput, capture?: OpeningTextCapture): Promise<SourceRecord>;
   get(scope: OpeningScope, id: string): Promise<SourceRecord>;
   getPendingUpload(scope: OpeningScope, id: string): Promise<{ source: SourceRecord; expiresAt: string }>;
   issueUploadTicket(scope: OpeningScope, id: string, sign: (source: SourceRecord) => Promise<Omit<UploadTicket, "source">>): Promise<UploadTicket>;
@@ -198,7 +204,7 @@ export function createOpeningSourceRepository(sql: Sql, options: OpeningSourceRe
   const quota = options.quota ?? DEFAULT_OPENING_SOURCE_QUOTA;
   const now = options.now ?? (() => new Date());
   return {
-    async create(scope, input, oppositeUploadId) {
+    async create(scope, input, capture) {
       return sql.begin(async tx => {
         const unavailable = input.uploadId ? "Upload operation unavailable" : "Workspace not found";
         // Preserve the original owner/UUID boundary before history SQL, without
@@ -223,10 +229,17 @@ export function createOpeningSourceRepository(sql: Sql, options: OpeningSourceRe
           const owner = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId}
             AND owner_user_id=${scope.ownerUserId} FOR NO KEY UPDATE`;
           if (!owner.length) throw new OpeningSourceError("NOT_FOUND", "Upload operation unavailable");
-          if (oppositeUploadId) {
-            const opposite = await tx`SELECT id FROM opening_sources
-              WHERE id=${oppositeUploadId} AND workspace_id=${scope.workspaceId}`;
-            if (opposite.length) throw new OpeningSourceError("CONFLICT", "这次保存请求与已有记录的复述设置不一致。");
+          if (capture) {
+            const ids = [input.uploadId, capture.oppositeUploadId];
+            const unavailable = await tx`SELECT id FROM opening_sources
+              WHERE workspace_id=${scope.workspaceId} AND id=${capture.oppositeUploadId}
+              UNION ALL SELECT source_id FROM opening_privacy_exclusions
+              WHERE workspace_id=${scope.workspaceId} AND source_id IN ${tx(ids)}
+              UNION ALL SELECT v.source_id FROM opening_source_versions v
+              WHERE v.workspace_id=${scope.workspaceId} AND v.source_id IN ${tx(ids)}
+                AND NOT EXISTS (SELECT 1 FROM opening_sources s WHERE s.id=v.source_id)
+              LIMIT 1`;
+            if (unavailable.length) throw new OpeningSourceError("CONFLICT", "这次保存请求已被使用。");
           }
           const excluded = await tx`SELECT source_id FROM opening_privacy_exclusions
             WHERE source_id=${input.uploadId} LIMIT 1`;
@@ -235,23 +248,36 @@ export function createOpeningSourceRepository(sql: Sql, options: OpeningSourceRe
             WHERE id=${input.uploadId} AND workspace_id=${scope.workspaceId} FOR UPDATE`;
           if (existing.length) {
             const source = mapSource(existing[0] as Record<string, unknown>);
+            const binding = existing[0]!.text_capture_intent;
+            if (capture && (binding?.courseId !== capture.intent.courseId
+              || binding?.scheduleNextDayRetell !== capture.intent.scheduleNextDayRetell)) {
+              throw new OpeningSourceError("CONFLICT", "这次保存请求与原来的设置不一致。");
+            }
+            const canResume = source.uploadState === "pending" && !capture?.completedOnly;
+            const canReplay = capture && source.uploadState === "uploaded";
             if (source.name !== input.name || source.mime !== input.mime || source.bytes !== input.bytes
               || source.sha256.toLowerCase() !== input.sha256.toLowerCase()
-              || source.version !== 0 || source.uploadState !== "pending") {
+              || source.version !== 0 || !(canResume || canReplay)) {
               throw new OpeningSourceError("CONFLICT", "上传请求已变化或结束，请重新选择文件。");
             }
             return source;
           }
+        }
+        if (capture?.completedOnly) throw new OpeningSourceError("CONFLICT", "找不到这次保存的资料。");
+        if (capture?.intent.courseId) {
+          const course = await tx`SELECT id FROM courses WHERE id=${capture.intent.courseId}
+            AND workspace_id=${scope.workspaceId} AND archived_at IS NULL FOR SHARE`;
+          if (!course.length) throw new OpeningSourceError("NOT_FOUND", "找不到这门课程。");
         }
         await reserveOpeningSourceQuota(tx, scope, input.bytes, quota);
         const id = input.uploadId ?? randomUUID();
         const rows = await tx`
           INSERT INTO opening_sources (
             id, workspace_id, name, mime, bytes, sha256, version,
-            upload_state, parse_state, error
+            upload_state, parse_state, error, text_capture_intent
           ) VALUES (
             ${id}, ${scope.workspaceId}, ${input.name}, ${input.mime}, ${input.bytes},
-            ${input.sha256}, 0, 'pending', 'not_started', NULL
+            ${input.sha256}, 0, 'pending', 'not_started', NULL, ${capture ? tx.json(capture.intent) : null}
           )
           ON CONFLICT (id) DO NOTHING
           RETURNING *

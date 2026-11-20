@@ -5,7 +5,7 @@ import { POST } from "./route";
 
 const deps = vi.hoisted(() => ({
   scope: { workspaceId: "5d884393-cdef-43a0-9004-f3fc6f48bada", ownerUserId: "a0ec7242-238a-42fb-97f7-44a97ffef6de" },
-  sql: vi.fn(), beginUpload: vi.fn(), putStaging: vi.fn(), completeUpload: vi.fn(), schedule: vi.fn(), course: vi.fn(),
+  sql: vi.fn(), captureSource: vi.fn(), reissueUploadTicket: vi.fn(), beginUpload: vi.fn(), putStaging: vi.fn(), completeUpload: vi.fn(), schedule: vi.fn(), course: vi.fn(),
 }));
 vi.mock("../../../../../features/opening/runtime", () => ({
   requireOpeningScope: vi.fn(async () => ({ scope: deps.scope, sql: deps.sql,
@@ -21,6 +21,7 @@ const post = (body: string, headers?: HeadersInit) => POST(new Request("http://l
 }));
 beforeEach(() => {
   vi.resetAllMocks();
+  deps.captureSource.mockResolvedValue({ id: "source", uploadState: "pending" });
   deps.beginUpload.mockResolvedValue({ source: { id: "source" } });
   deps.completeUpload.mockResolvedValue({ id: "source", name: "归纳.md", bytes: 24 });
   deps.schedule.mockResolvedValue({ taskId: "task", notBefore: "2026-11-22T00:00:01Z", deferredBehindActiveRetest: true });
@@ -37,6 +38,7 @@ describe("POST /api/opening/imports/text", () => {
   ] as const)("rejects invalid input (%#)", async (body, headers, status) => {
     expect((await post(body, headers)).status).toBe(status);
     expect(deps.beginUpload).not.toHaveBeenCalled();
+    expect(deps.captureSource).not.toHaveBeenCalled();
     expect(deps.schedule).not.toHaveBeenCalled();
   });
 
@@ -46,13 +48,14 @@ describe("POST /api/opening/imports/text", () => {
     const bytes = new TextEncoder().encode("# 归纳\n1. 验证起点\n");
     expect(response.status).toBe(201);
     expect(await response.json()).toMatchObject({ sourceId: "source", keySteps: ["验证起点"], taskId: "task", deferredBehindActiveRetest: true });
-    const [principal, input] = deps.beginUpload.mock.calls[0]!;
+    const [principal, input, capture] = deps.captureSource.mock.calls[0]!;
+    expect(capture.intent).toEqual({ courseId: null, scheduleNextDayRetell: true });
     expect(principal.userId).toBe(deps.scope.ownerUserId);
     expect(input).toMatchObject({ name: "归纳.md", mime: "text/markdown", bytes: bytes.length,
       sha256: createHash("sha256").update(bytes).digest("hex") });
     expect(deps.putStaging).toHaveBeenCalledWith(principal, "source", { contentType: input.mime, bytes });
     expect(deps.completeUpload).toHaveBeenCalledWith(principal, "source");
-    expect(deps.beginUpload).toHaveBeenCalledBefore(deps.putStaging);
+    expect(deps.reissueUploadTicket).toHaveBeenCalledBefore(deps.putStaging);
     expect(deps.putStaging).toHaveBeenCalledBefore(deps.completeUpload);
     expect(deps.completeUpload).toHaveBeenCalledBefore(deps.schedule);
     expect(deps.schedule).toHaveBeenCalledWith(deps.sql, deps.scope, expect.objectContaining({ timeZone: body.timeZone }));
@@ -69,45 +72,41 @@ describe("POST /api/opening/imports/text", () => {
   it("recovers the same uploaded source after a lost response; rejects a nonmatching replay", async () => {
     const body = JSON.stringify({ content: "资料", clientKey: "arbitrary-key" });
     await post(body);
-    const uploadId = deps.beginUpload.mock.calls[0]![1].uploadId;
-    deps.beginUpload.mockRejectedValue(new OpeningSourceError("CONFLICT", "completed upload"));
-    deps.sql
-      .mockResolvedValueOnce([{ id: uploadId }]) // savedRows recovery
-      .mockResolvedValueOnce([]); // savedRows miss on mismatched content
+    const uploadId = deps.captureSource.mock.calls[0]![1].uploadId;
+    deps.captureSource
+      .mockResolvedValueOnce({ id: uploadId, uploadState: "uploaded", name: "资料.md", bytes: 7 })
+      .mockRejectedValueOnce(new OpeningSourceError("CONFLICT", "capture changed"));
     deps.schedule.mockResolvedValue({ taskId: uploadId, replayed: true, deferredBehindActiveRetest: true });
     const replay = await post(body);
     expect(replay.status).toBe(200);
     expect(await replay.json()).toMatchObject({ sourceId: uploadId, taskId: uploadId, deferredBehindActiveRetest: true });
-    expect(deps.beginUpload.mock.calls[1]![1].uploadId).toBe(uploadId);
+    expect(deps.captureSource.mock.calls[1]![1].uploadId).toBe(uploadId);
     expect((await post(JSON.stringify({ content: "不同资料", clientKey: "arbitrary-key" }))).status).toBe(409);
     expect(deps.putStaging).toHaveBeenCalledTimes(1);
     expect(deps.schedule).toHaveBeenCalledTimes(2);
   });
 
-  it.each([true, false])("reserves one upload when opposite intents reach beginUpload together (first=%s)", async firstFlag => {
+  it.each([true, false])("reserves one upload when opposite intents reach reservation together (first=%s)", async firstFlag => {
     const body = (flag: boolean) => JSON.stringify({ content: "资料", clientKey: "intent-key", scheduleNextDayRetell: flag });
     const uploads = new Map<string, "pending" | "uploaded">();
     // Let both requests finish any pre-checks before either reservation returns.
     let release!: () => void;
     const bothEntered = new Promise<void>(resolve => { release = resolve; });
     let arrivals = 0;
-    deps.beginUpload.mockImplementation(async (_principal, input, oppositeId: string) => {
+    deps.captureSource.mockImplementation(async (_principal, input, capture) => {
       if (++arrivals === 2) release();
       await bothEntered;
-      if (uploads.has(oppositeId) || uploads.get(input.uploadId) === "uploaded") {
+      if (uploads.has(capture.oppositeUploadId)) {
         throw new OpeningSourceError("CONFLICT", "upload intent unavailable");
       }
-      uploads.set(input.uploadId, "pending");
-      return { source: { id: input.uploadId } };
+      if (!uploads.has(input.uploadId)) uploads.set(input.uploadId, "pending");
+      return { id: input.uploadId, uploadState: uploads.get(input.uploadId) };
     });
     deps.completeUpload.mockImplementation(async (_principal, id: string) => {
       uploads.set(id, "uploaded");
       return { id, name: "资料.md", bytes: 7 };
     });
-    deps.sql.mockImplementation((parts: TemplateStringsArray, id: string) => {
-      const exists = parts.join("").includes("upload_state = 'uploaded'") ? uploads.get(id) === "uploaded" : uploads.has(id);
-      return exists ? [{ id }] : [];
-    });
+
     deps.schedule.mockImplementation(async (_sql, _scope, input) => input.scheduleNextDayRetell
       ? { taskId: input.sourceId, replayed: true } : null);
 
@@ -121,6 +120,25 @@ describe("POST /api/opening/imports/text", () => {
     expect(retry.status).toBe(200);
     expect(await retry.json()).toMatchObject({ sourceId: first.sourceId, taskId: first.taskId });
     expect(deps.completeUpload).toHaveBeenCalledTimes(1);
+  });
+
+  it("passes the normalized course into the locked reservation and stops on conflict", async () => {
+    const courseId = "9A445539-4069-40EA-A981-EEAFC28B6553";
+    deps.captureSource.mockRejectedValue(new OpeningSourceError("CONFLICT", "capture key unavailable"));
+    const response = await post(JSON.stringify({ clientKey: "same-key", content: "资料", courseId, scheduleNextDayRetell: false }));
+    expect(response.status).toBe(409);
+    expect(deps.captureSource.mock.calls[0]![2].intent).toEqual({ courseId: courseId.toLowerCase(), scheduleNextDayRetell: false });
+    expect(deps.putStaging).not.toHaveBeenCalled();
+    expect(deps.schedule).not.toHaveBeenCalled();
+  });
+
+  it("propagates a deletion conflict without staging or retrying the reservation", async () => {
+    deps.captureSource.mockRejectedValue(new OpeningSourceError("CONFLICT", "deleted capture"));
+    expect((await post('{"content":"x","clientKey":"deleted-key"}')).status).toBe(409);
+    expect(deps.captureSource).toHaveBeenCalledTimes(1);
+    expect(deps.reissueUploadTicket).not.toHaveBeenCalled();
+    expect(deps.putStaging).not.toHaveBeenCalled();
+    expect(deps.schedule).not.toHaveBeenCalled();
   });
 
   it("does not schedule after an incomplete upload", async () => {

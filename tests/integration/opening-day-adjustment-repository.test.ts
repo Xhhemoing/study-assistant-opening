@@ -95,12 +95,20 @@ describe("opening-day-adjustment repository (kernel-v2 Phase 2)", () => {
     expect(held.sourceAddedBlocks).toEqual([]);
 
     const plans = createOpeningPlansRepository(f.sql);
+    const manual = { title: "Manual", minutes: 5, priority: 1 as const, dueAt: null, candidateId: null };
+    for (const clientKey of [key, key + ":deferred"]) {
+      await expect(plans.createTask(f.scope, { ...manual, clientKey })).rejects.toMatchObject({ code: "VALIDATION" });
+    }
+    // A task created by the old quick-add endpoint still exists when its capture resumes.
+    const legacy = await plans.createTask(f.scope, manual);
+    await f.sql`UPDATE opening_tasks SET client_key=${key} WHERE id=${legacy.id}`;
     const resume = () => plans.deferTask(f.scope, taskId, { expectedVersion: 1, notBefore: null });
     await expect(resume()).rejects.toMatchObject({ code: "CONFLICT" });
     await f.sql`UPDATE opening_retest_activities SET status='cancelled', cancelled_at=statement_timestamp() WHERE id=${retestId}`;
     await expect(resume()).rejects.toMatchObject({ code: "CONFLICT" });
     await f.sql`UPDATE opening_retest_activities SET cancelled_at=statement_timestamp() - interval '2 seconds' WHERE id=${retestId}`;
     expect((await resume()).notBefore).toBeUndefined();
+    expect(await f.sql`SELECT title, client_key FROM opening_tasks WHERE id=${legacy.id}`).toEqual([{ title: "Manual", client_key: null }]);
     expect((await plans.listTasks(f.scope)).find(task => task.id === taskId)?.notBefore).toBeUndefined();
     expect(await f.sql`SELECT client_key, not_before FROM opening_tasks WHERE id=${taskId}`).toEqual([{ client_key: key, not_before: null }]);
     expect((await preview()).quickCandidates.find(c => c.taskId === taskId)).toMatchObject({ fits: true });

@@ -19,7 +19,7 @@ export async function POST(request: Request): Promise<Response> {
     const input = captureInputSchema.parse(json);
     const capture = prepareCapture(input);
     if (!capture.content) throw new ApiError("VALIDATION", "请先粘贴讲解内容。", 400);
-    await requireCaptureCourse(sql, scope, input.courseId);
+    if (!input.clientKey) await requireCaptureCourse(sql, scope, input.courseId);
     const source = await saveCaptureSource(
       sql,
       principal,
@@ -27,6 +27,7 @@ export async function POST(request: Request): Promise<Response> {
       capture.markdown,
       input.clientKey,
       input.scheduleNextDayRetell,
+      input.courseId ?? null,
     );
     const task = await finishCapture(sql, scope, {
       scheduleNextDayRetell: input.scheduleNextDayRetell,

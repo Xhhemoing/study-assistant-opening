@@ -386,6 +386,13 @@ export function createOpeningPlansRepository(sql: Sql, options: { now?: () => Da
         }
         const clearHold = deferredRetell && input.notBefore === null;
         if (before === after && !clearHold) return readTask();
+        if (clearHold) {
+          // A manual task saved before the namespace was reserved may own the resume key.
+          // Its task remains intact. Only that obsolete quick-add key can be released.
+          await tx`UPDATE opening_tasks SET client_key=NULL WHERE workspace_id=${scope.workspaceId}
+            AND owner_user_id=${scope.ownerUserId} AND client_key=${String(current.client_key).slice(0, -":deferred".length)}
+            AND origin IN ('manual', 'course_seed')`;
+        }
         const updated = await tx`UPDATE opening_tasks
           SET not_before=${input.notBefore}, version=version + 1, updated_at=now(),
             client_key=CASE WHEN ${clearHold} THEN left(client_key, -length(':deferred')) ELSE client_key END

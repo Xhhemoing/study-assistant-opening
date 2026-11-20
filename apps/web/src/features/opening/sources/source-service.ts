@@ -11,6 +11,7 @@ import {
   magicMatchesMime,
   type OpeningStorage,
   type OpeningSourceRepository,
+  type OpeningTextCapture,
 } from "@aistudy/database";
 import { sourceActionInputSchema, uploadInputSchema, type SourceActionInput, type SourceActionResult, type SourceRecord, type UploadInput, type UploadTicket } from "@aistudy/contracts";
 import type { Sql } from "postgres";
@@ -73,13 +74,17 @@ export function createOpeningSourceService(sql: Sql, storage: OpeningStorage = n
   const auth = (p: Principal, action: string) => assertAuthorized(p, action as never, { type: "workspace", workspaceId: boundWorkspaceId(p) });
   return {
     async listSources(p: Principal): Promise<SourceRecord[]> { auth(p, "source.list"); return sources.list(scopeOf(p)); },
-    async beginUpload(p: Principal, input: UploadInput, oppositeUploadId?: string): Promise<UploadTicket> {
+    async beginUpload(p: Principal, input: UploadInput): Promise<UploadTicket> {
       auth(p, "source.create");
-      const scope = scopeOf(p), source = await sources.create(scope, uploadInputSchema.parse(input), oppositeUploadId);
+      const scope = scopeOf(p), source = await sources.create(scope, uploadInputSchema.parse(input));
       return sources.issueUploadTicket(scope, source.id, async current => {
         const uploadUrl = stagingUploadUrl(current.id);
         return { uploadUrl, expiresAt: new Date(now().getTime() + STAGING_UPLOAD_LEASE_MS).toISOString() };
       });
+    },
+    async captureSource(p: Principal, input: UploadInput, capture: OpeningTextCapture) {
+      auth(p, "source.create");
+      return sources.create(scopeOf(p), input, capture);
     },
     /**
      * Same-origin staging PUT target metadata (bytes/mime) for request size guards.
