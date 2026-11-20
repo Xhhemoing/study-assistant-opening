@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
+import { allowsPublicTryChallenge } from "../../../features/opening/access-policy";
 import { toDisplayShareCard } from "../../../features/opening/share/schema";
 import { PitfallShareCard } from "../../../features/opening/share/share-card";
 import { verifyPitfallShareToken } from "../../../features/opening/share/token-codec";
@@ -43,5 +44,5 @@ export default async function SharePitfallPage({ params }: SharePageProps) {
   }
 
   const card = toDisplayShareCard(verified.payload);
-  return <PitfallShareCard card={card} />;
+  return <PitfallShareCard card={card} tryAvailable={allowsPublicTryChallenge()} />;
 }

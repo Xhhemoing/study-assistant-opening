@@ -7,9 +7,10 @@ import { toDisplayShareCard, type ShareCardData } from "./schema";
 
 export type PitfallShareCardProps = {
   card: ShareCardData;
+  tryAvailable?: boolean;
 };
 
-export function PitfallShareCard({ card }: PitfallShareCardProps) {
+export function PitfallShareCard({ card, tryAvailable = true }: PitfallShareCardProps) {
   const safeCard = toDisplayShareCard(card);
   const [downloadStatus, setDownloadStatus] = useState<"idle" | "saved" | "error">("idle");
 
@@ -33,6 +34,8 @@ export function PitfallShareCard({ card }: PitfallShareCardProps) {
   }, [safeCard]);
 
   const showCohortBadge = safeCard.cohortTrapRate !== null;
+  const primaryHref = tryAvailable ? "/try" : "/login";
+  const primaryLabel = tryAvailable ? "90 秒亲自排雷挑战" : "登录后开启完整诊断";
 
   return (
     <main className="min-h-screen bg-bg text-text">
@@ -108,16 +111,16 @@ export function PitfallShareCard({ card }: PitfallShareCardProps) {
           <footer className="flex flex-wrap items-center justify-between gap-3 border-t border-line bg-surface-2/60 px-6 py-4 sm:px-8">
             <div className="flex flex-wrap items-center gap-3">
               <TransitionLink
-                href="/try"
-                className="inline-flex items-center justify-center rounded-md bg-ink px-5 py-2.5 text-ui-lg font-medium text-on-ink transition-opacity hover:opacity-90"
+                href={primaryHref}
+                className="inline-flex min-h-11 items-center justify-center rounded-md bg-ink px-5 py-2.5 text-ui-lg font-medium text-on-ink transition-opacity hover:opacity-90 focus-visible:outline-focus-ring"
               >
-                90 秒亲自排雷挑战
+                {primaryLabel}
               </TransitionLink>
 
               <button
                 type="button"
                 onClick={handleDownloadPoster}
-                className="inline-flex items-center justify-center rounded-md border border-line-strong bg-surface px-4 py-2.5 text-ui-lg font-medium text-text transition-colors hover:bg-surface-2"
+                className="inline-flex min-h-11 items-center justify-center rounded-md border border-line-strong bg-surface px-4 py-2.5 text-ui-lg font-medium text-text transition-colors hover:bg-surface-2 focus-visible:outline-focus-ring"
               >
                 保存 SVG 海报
               </button>
@@ -141,7 +144,17 @@ export function PitfallShareCard({ card }: PitfallShareCardProps) {
   );
 }
 
-export function InvalidShareCard() {
+export type InvalidShareCardProps = {
+  tryAvailable?: boolean;
+};
+
+export function InvalidShareCard({ tryAvailable = true }: InvalidShareCardProps) {
+  const primaryHref = tryAvailable ? "/try" : "/login";
+  const primaryLabel = tryAvailable ? "90 秒亲自排雷挑战" : "登录后开启完整诊断";
+  const bodyCopy = tryAvailable
+    ? "分享链接可能已过期，或复制时缺少了部分字符。你可以直接前往挑战页，亲自做一题热身。"
+    : "分享链接可能已过期，或复制时缺少了部分字符。你可以直接登录进入完整学习空间。";
+
   return (
     <main className="min-h-screen bg-bg text-text">
       <div className="mx-auto flex min-h-screen max-w-xl flex-col justify-center px-4 py-12 sm:px-6">
@@ -155,15 +168,13 @@ export function InvalidShareCard() {
             >
               这张避雷卡已失效或链接不完整
             </h1>
-            <p className="text-read leading-relaxed text-text-2">
-              分享链接可能已过期，或复制时缺少了部分字符。你可以直接前往挑战页，亲自做一题热身。
-            </p>
+            <p className="text-read leading-relaxed text-text-2">{bodyCopy}</p>
             <div className="pt-2">
               <TransitionLink
-                href="/try"
-                className="inline-flex items-center justify-center rounded-md bg-ink px-5 py-2.5 text-ui-lg font-medium text-on-ink transition-opacity hover:opacity-90"
+                href={primaryHref}
+                className="inline-flex min-h-11 items-center justify-center rounded-md bg-ink px-5 py-2.5 text-ui-lg font-medium text-on-ink transition-opacity hover:opacity-90 focus-visible:outline-focus-ring"
               >
-                90 秒亲自排雷挑战
+                {primaryLabel}
               </TransitionLink>
             </div>
           </div>

@@ -64,6 +64,7 @@ describe("PitfallShareCard, /s/[token] page, and opengraph-image", () => {
     });
     host.remove();
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
     if (originalSecret === undefined) {
       delete process.env.AUTH_SECRET;
     } else {
@@ -248,5 +249,56 @@ describe("PitfallShareCard, /s/[token] page, and opengraph-image", () => {
     });
     expect(JSON.stringify(navMocks.ogCalls[2]?.element)).toContain("把容易做错的题，变成清晰的避坑口诀");
     expect(JSON.stringify(navMocks.ogCalls[2]?.element)).not.toMatch(/signature|hmac|secret/i);
+  });
+
+  it("routes share card CTAs to /login when tryAvailable is false or OPENING_PUBLIC_TRY=0", async () => {
+    await act(async () => {
+      root.render(
+        <PitfallShareCard
+          card={{
+            subjectLabel: "高等数学",
+            pitfallTitle: "洛必达法则别忘先验型",
+            trapSummary: "非 0/0 或 ∞/∞ 型直接求导会导致错误结论。",
+            takeawayRule: "先代入判型，再决定是否使用洛必达。",
+            cohortSampleSize: 0,
+            cohortTrapRate: null,
+          }}
+          tryAvailable={false}
+        />,
+      );
+    });
+
+    expect(host.querySelector('a[href="/try"]')).toBeNull();
+    const directLoginCta = host.querySelector('a[href="/login"]');
+    expect(directLoginCta?.textContent).toContain("登录后开启完整诊断");
+
+    vi.stubEnv("OPENING_PUBLIC_TRY", "0");
+
+    const signed = signPitfallShareToken(
+      {
+        subjectLabel: "数据结构",
+        pitfallTitle: "BFS 入队时就该标记已访问",
+        trapSummary: "等出队才标记，同一节点会被重复压入队列。",
+        takeawayRule: "BFS 标访问一定在入队那一刻完成。",
+        cohortSampleSize: 0,
+        cohortTrapRate: null,
+      },
+      { authSecret: TEST_SECRET },
+    );
+
+    const pageElement = await SharePitfallPage({
+      params: Promise.resolve({ token: signed.token }),
+    });
+    await act(async () => {
+      root.render(pageElement);
+    });
+    expect(host.querySelector('a[href="/try"]')).toBeNull();
+    expect(host.querySelector('a[href="/login"]')?.textContent).toContain("登录后开启完整诊断");
+
+    await act(async () => {
+      root.render(<SharePitfallNotFound />);
+    });
+    expect(host.querySelector('a[href="/try"]')).toBeNull();
+    expect(host.querySelector('a[href="/login"]')?.textContent).toContain("登录后开启完整诊断");
   });
 });
