@@ -57,6 +57,25 @@ function splitSentences(paragraph: string): string[] {
   return parts.length > 0 ? parts : paragraph.trim() ? [paragraph.trim()] : [];
 }
 
+/**
+ * Splits text into elementary clauses along sentence boundaries, colons,
+ * semicolons, em/en dashes, double hyphens, spaced hyphens, and parentheticals
+ * (preserving intra-word hyphens like "per-capita" or "long-term").
+ * Ensures appended noun lists after ":", ";", "—", "--", or "(...)" are
+ * isolated from the preceding clause rather than borrowing its verb or
+ * distorting its similarity score.
+ */
+export function splitElementaryClauses(text: string): string[] {
+  const normalizedParentheticals = text
+    .replace(/\(([^()]*)\)/gu, "; $1 ;")
+    .replace(/\[([^[\]]*)\]/gu, "; $1 ;");
+
+  return normalizedParentheticals
+    .split(/(?:[.!?]+|[;:\n]+|[\u2014\u2013]+|--+|\s+-\s+)/u)
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
 function matchesPattern(text: string, pattern: string): boolean {
   const trimmed = pattern.trim();
   if (!trimmed) return false;
@@ -219,31 +238,132 @@ function tokenJaccardSimilarity(a: readonly string[], b: readonly string[]): num
   return union > 0 ? intersection / union : 0;
 }
 
-function isSubstantiveClauseSentence(sentence: string): boolean {
-  const words = tokenizeWords(sentence);
+function longestContiguousCommonRun(a: readonly string[], b: readonly string[]): number {
+  if (a.length === 0 || b.length === 0) return 0;
+  let best = 0;
+  let prev = new Array<number>(b.length + 1).fill(0);
+  for (let i = 1; i <= a.length; i += 1) {
+    const curr = new Array<number>(b.length + 1).fill(0);
+    for (let j = 1; j <= b.length; j += 1) {
+      if (a[i - 1] === b[j - 1]) {
+        const len = (prev[j - 1] ?? 0) + 1;
+        curr[j] = len;
+        if (len > best) best = len;
+      }
+    }
+    prev = curr;
+  }
+  return best;
+}
+
+function isSubstantiveElementaryClause(clause: string): boolean {
+  const words = tokenizeWords(clause);
   return (
     words.length >= 7 &&
-    CLAUSE_VERB_CUE.test(sentence) &&
-    !isLowEntropySentence(sentence)
+    CLAUSE_VERB_CUE.test(clause) &&
+    !isLowEntropySentence(clause)
   );
 }
 
-function isSentenceSubstantivelyChangedFromBaseline(
-  sentence: string,
-  baselineSentenceKeys: ReadonlySet<string>,
-  baselineSentenceTokens: readonly (readonly string[])[],
+/**
+ * Checks whether an elementary clause is substantively changed from every
+ * baseline elementary clause. Blocks verbatim copies, punctuation-only swaps,
+ * and baseline clauses with appended/prepended noun lists (whether colon-,
+ * semicolon-, dash-, parenthetical-, or comma-attached).
+ */
+function isClauseSubstantivelyChangedFromBaseline(
+  clause: string,
+  baselineClauseKeys: ReadonlySet<string>,
+  baselineClauseTokens: readonly (readonly string[])[],
 ): boolean {
-  const key = normalizeSentenceTokenKey(sentence);
-  if (!key || baselineSentenceKeys.has(key)) {
+  const key = normalizeSentenceTokenKey(clause);
+  if (!key || baselineClauseKeys.has(key)) {
     return false;
   }
-  const words = tokenizeWords(sentence);
-  for (const baseWords of baselineSentenceTokens) {
-    if (tokenJaccardSimilarity(words, baseWords) >= 0.85) {
+  const words = tokenizeWords(clause);
+  const wordSet = new Set(words);
+
+  for (const baseWords of baselineClauseTokens) {
+    if (baseWords.length === 0) continue;
+    if (tokenJaccardSimilarity(words, baseWords) >= 0.80) {
       return false;
+    }
+
+    // If nearly the entire baseline clause appears verbatim inside this clause
+    // (e.g. copied baseline clause + appended noun tail), reject as unchanged.
+    if (baseWords.length >= 6) {
+      let containedCount = 0;
+      for (const bw of baseWords) {
+        if (wordSet.has(bw)) containedCount += 1;
+      }
+      const containment = containedCount / baseWords.length;
+      const minRun = Math.min(6, Math.ceil(baseWords.length * 0.6));
+      if (containment >= 0.85 && longestContiguousCommonRun(words, baseWords) >= minRun) {
+        return false;
+      }
     }
   }
   return true;
+}
+
+function extractPatternLocalWindows(
+  clauseTokens: readonly string[],
+  patternTokens: readonly string[],
+  radius = 4,
+): string[][] {
+  if (patternTokens.length === 0 || clauseTokens.length < patternTokens.length) {
+    return [];
+  }
+  const windows: string[][] = [];
+  for (let i = 0; i <= clauseTokens.length - patternTokens.length; i += 1) {
+    let matched = true;
+    for (let k = 0; k < patternTokens.length; k += 1) {
+      if (clauseTokens[i + k] !== patternTokens[k]) {
+        matched = false;
+        break;
+      }
+    }
+    if (!matched) continue;
+    const left = clauseTokens.slice(Math.max(0, i - radius), i);
+    const right = clauseTokens.slice(
+      i + patternTokens.length,
+      Math.min(clauseTokens.length, i + patternTokens.length + radius),
+    );
+    windows.push([...left, ...right]);
+  }
+  return windows;
+}
+
+/**
+ * Checks whether EVERY occurrence of `pattern` in `clause` sits inside the same
+ * local `[phrase - 4 words, phrase + 4 words]` lexical neighborhood as an
+ * occurrence of `pattern` in the baseline draft's elementary clauses.
+ */
+function isPatternLocalContextCopiedFromBaseline(
+  clause: string,
+  pattern: string,
+  baselineClauseTokens: readonly (readonly string[])[],
+): boolean {
+  const patternTokens = tokenizeWords(pattern);
+  const candTokens = tokenizeWords(clause);
+  const candWindows = extractPatternLocalWindows(candTokens, patternTokens, 4);
+  if (candWindows.length === 0) return false;
+
+  const baseWindows: string[][] = [];
+  for (const baseTokens of baselineClauseTokens) {
+    baseWindows.push(...extractPatternLocalWindows(baseTokens, patternTokens, 4));
+  }
+  if (baseWindows.length === 0) return false;
+
+  return candWindows.every((cw) =>
+    baseWindows.some((bw) => {
+      if (tokenJaccardSimilarity(cw, bw) >= 0.75) return true;
+      if (cw.length >= 3 && longestContiguousCommonRun(cw, bw) >= Math.min(4, cw.length)) {
+        return true;
+      }
+      return false;
+    }),
+  );
 }
 
 function assessSubstantiveRevision(
@@ -264,37 +384,38 @@ function assessSubstantiveRevision(
   }
   if (changedParagraphs === 0) return false;
 
-  const baselineSentences = draft1.paragraphs.flatMap(splitSentences);
-  const baselineSentenceKeys = new Set(
-    baselineSentences.map(normalizeSentenceTokenKey).filter(Boolean),
+  const baselineClauses = draft1.paragraphs.flatMap(splitElementaryClauses);
+  const baselineClauseKeys = new Set(
+    baselineClauses.map(normalizeSentenceTokenKey).filter(Boolean),
   );
-  const baselineSentenceTokens = baselineSentences.map(tokenizeWords);
+  const baselineClauseTokens = baselineClauses.map(tokenizeWords);
 
-  const revisedSentences = draft2.paragraphs.flatMap(splitSentences);
-  const rewrittenSubstantiveSentences = revisedSentences.filter(
-    (s) =>
-      isSubstantiveClauseSentence(s) &&
-      isSentenceSubstantivelyChangedFromBaseline(
-        s,
-        baselineSentenceKeys,
-        baselineSentenceTokens,
+  const revisedClauses = draft2.paragraphs.flatMap(splitElementaryClauses);
+  const rewrittenSubstantiveClauses = revisedClauses.filter(
+    (c) =>
+      isSubstantiveElementaryClause(c) &&
+      isClauseSubstantivelyChangedFromBaseline(
+        c,
+        baselineClauseKeys,
+        baselineClauseTokens,
       ),
   );
   const rewrittenRatio =
-    revisedSentences.length > 0
-      ? rewrittenSubstantiveSentences.length / revisedSentences.length
+    revisedClauses.length > 0
+      ? rewrittenSubstantiveClauses.length / revisedClauses.length
       : 0;
 
-  // Only count new vocabulary that lives inside genuine grammatical sentences (not appended bare noun lists).
+  // Only count new vocabulary that lives inside genuinely rewritten grammatical clauses
+  // (never appended colon/semicolon/dash/comma bare noun lists).
   const terms1 = extractMeaningfulTerms(draft1.paragraphs.join(" "));
-  const substantiveRevisedText = rewrittenSubstantiveSentences.join(" ");
+  const substantiveRevisedText = rewrittenSubstantiveClauses.join(" ");
   const substantiveTerms2 = extractMeaningfulTerms(substantiveRevisedText);
   const newlyAddedSubstantiveTerms = [...substantiveTerms2].filter(
     (t) => !terms1.has(t),
   );
 
   const allClauseTerms2 = extractMeaningfulTerms(
-    revisedSentences.filter(isSubstantiveClauseSentence).join(" "),
+    revisedClauses.filter(isSubstantiveElementaryClause).join(" "),
   );
   const removedTerms = [...terms1].filter((t) => !allClauseTerms2.has(t));
   const unionSize = new Set([...terms1, ...allClauseTerms2]).size;
@@ -304,7 +425,7 @@ function assessSubstantiveRevision(
       : 0;
 
   return (
-    rewrittenSubstantiveSentences.length >= 2 &&
+    rewrittenSubstantiveClauses.length >= 2 &&
     rewrittenRatio >= 0.25 &&
     newlyAddedSubstantiveTerms.length >= 12 &&
     (jaccardDistance >= 0.18 || changedParagraphs >= 2)
@@ -381,11 +502,11 @@ export function analyzeCrossDraftTransfer(
     input.draft2,
   );
 
-  const baselineSentences = input.draft1.paragraphs.flatMap(splitSentences);
-  const baselineSentenceKeys = new Set(
-    baselineSentences.map(normalizeSentenceTokenKey).filter(Boolean),
+  const baselineClauses = input.draft1.paragraphs.flatMap(splitElementaryClauses);
+  const baselineClauseKeys = new Set(
+    baselineClauses.map(normalizeSentenceTokenKey).filter(Boolean),
   );
-  const baselineSentenceTokens = baselineSentences.map(tokenizeWords);
+  const baselineClauseTokens = baselineClauses.map(tokenizeWords);
 
   const allTargetPatterns = input.targets.flatMap((t) => t.targetPatterns);
   let hasMechanicalKeywordPaste = false;
@@ -406,7 +527,8 @@ export function analyzeCrossDraftTransfer(
       target.clichePatterns,
     );
 
-    // Verify each revised match appears in a real, non-filler, substantively revised or newly written sentence.
+    // Verify each revised match appears in a real, non-filler, substantively revised elementary clause
+    // whose local [phrase - 4 words, phrase + 4 words] context was not copied verbatim from Draft 1.
     const contextualMatched = new Set<string>();
     const contextualParagraphs = new Set<number>();
     let matchedOnlyInMechanicalPaste = false;
@@ -417,20 +539,25 @@ export function analyzeCrossDraftTransfer(
       let sawUnchanged = false;
 
       input.draft2.paragraphs.forEach((paragraph, paragraphIndex) => {
-        const sentences = splitSentences(paragraph);
+        const clauses = splitElementaryClauses(paragraph);
         for (const pattern of target.targetPatterns) {
-          for (const sentence of sentences) {
-            if (!matchesPattern(sentence, pattern)) continue;
-            if (isMechanicalKeywordSentence(sentence, allTargetPatterns)) {
+          for (const clause of clauses) {
+            if (!matchesPattern(clause, pattern)) continue;
+            if (isMechanicalKeywordSentence(clause, allTargetPatterns)) {
               hasMechanicalKeywordPaste = true;
               sawMechanical = true;
               continue;
             }
             if (
-              !isSentenceSubstantivelyChangedFromBaseline(
-                sentence,
-                baselineSentenceKeys,
-                baselineSentenceTokens,
+              !isClauseSubstantivelyChangedFromBaseline(
+                clause,
+                baselineClauseKeys,
+                baselineClauseTokens,
+              ) ||
+              isPatternLocalContextCopiedFromBaseline(
+                clause,
+                pattern,
+                baselineClauseTokens,
               )
             ) {
               sawUnchanged = true;

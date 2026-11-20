@@ -3,7 +3,10 @@ import {
   detectMemorizedTemplates,
   hasMemorizedTemplateStuffing,
 } from "./rubric";
-import { detectLowEntropyStuffing } from "./transfer";
+import {
+  detectLowEntropyStuffing,
+  splitElementaryClauses,
+} from "./transfer";
 import {
   IELTS_CARTRIDGE_ID,
   type IeltsSpeakingEvidenceQuote,
@@ -62,27 +65,38 @@ function tokenizeWords(text: string): string[] {
 }
 
 /**
- * Ensures a matched target phrase in Speaking sits inside a genuine contextual
- * clause (not a bare pasted fragment like "Alleviate chronic congestion. Per-capita emissions.").
+ * Ensures a matched target phrase in Speaking sits inside its OWN elementary
+ * clause (split on `.`, `!`, `?`, `:`, `;`, `—`, `--`, parentheticals) with a
+ * valid predicate verb cue, sufficient non-target grammatical context, and no
+ * bare comma/enumeration stacking of target phrases.
  */
-function isContextualSpokenSentence(
-  sentence: string,
+function isContextualSpokenClause(
+  clause: string,
+  targetCollocation: string,
   allTargetCollocations: readonly string[],
 ): boolean {
-  const words = tokenizeWords(sentence);
+  const words = tokenizeWords(clause);
   if (words.length < 7) return false;
-  if (!SPEAKING_CLAUSE_VERB_CUE.test(sentence)) return false;
+  if (!SPEAKING_CLAUSE_VERB_CUE.test(clause)) return false;
 
-  // Strip matched target phrases from a copy to verify surrounding non-target content words.
-  let residual = sentence;
+  // Strip matched target phrases from this elementary clause to verify surrounding non-target context.
+  let residual = clause;
   let matchedWordCount = 0;
   let matchedTargetCount = 0;
+  const matchedSpans: Array<{ start: number; end: number }> = [];
+
   for (const phrase of allTargetCollocations) {
     const regex = buildPhraseRegex(phrase);
-    if (regex.test(sentence)) {
+    const globalRegex = new RegExp(regex.source, "giu");
+    let found = false;
+    for (const match of clause.matchAll(globalRegex)) {
+      found = true;
+      const start = match.index ?? 0;
+      matchedSpans.push({ start, end: start + match[0].length });
+    }
+    if (found) {
       matchedTargetCount += 1;
       matchedWordCount += tokenizeWords(phrase).length;
-      const globalRegex = new RegExp(regex.source, "giu");
       residual = residual.replace(globalRegex, " ");
     }
   }
@@ -96,12 +110,52 @@ function isContextualSpokenSentence(
     return false;
   }
 
-  // Reject dense target-list sentences where pasted phrases dominate the sentence.
-  if (matchedTargetCount >= 3 && matchedWordCount / words.length >= 0.5) {
+  // Reject dense target-stacking clauses where pasted phrases crowd out surrounding syntax.
+  if (
+    matchedTargetCount >= 2 &&
+    (residualWords.length < 4 * matchedTargetCount - 2 ||
+      matchedWordCount / words.length >= 0.48)
+  ) {
     return false;
   }
 
-  return true;
+  // Reject back-to-back bare target enumerations separated only by punctuation/coordinators
+  // (e.g. "alleviate chronic congestion, per-capita emissions" or "X and Y" without a predicate link).
+  if (matchedSpans.length >= 2) {
+    matchedSpans.sort((a, b) => a.start - b.start);
+    for (let i = 0; i < matchedSpans.length - 1; i += 1) {
+      const between = clause.slice(matchedSpans[i]!.end, matchedSpans[i + 1]!.start);
+      if (/^\s*(?:,|、|\/|&|\band\b|\bor\b)*\s*$/iu.test(between)) {
+        return false;
+      }
+    }
+  }
+
+  // Verify the specific comma/enumeration segment containing `targetCollocation` is not
+  // a bare pasted noun/verb phrase tacked onto an unrelated preceding clause.
+  const targetRegex = buildPhraseRegex(targetCollocation);
+  const targetWordLen = tokenizeWords(targetCollocation).length;
+  const segments = clause
+    .split(/[,、/]+/u)
+    .map((seg) => seg.trim())
+    .filter(Boolean);
+  const matchingSegments = segments.filter((seg) => targetRegex.test(seg));
+  if (matchingSegments.length === 0) return false;
+
+  const hasIntegratedSegment = matchingSegments.some((seg) => {
+    let segResidual = seg;
+    for (const phrase of allTargetCollocations) {
+      const globalRegex = new RegExp(buildPhraseRegex(phrase).source, "giu");
+      segResidual = segResidual.replace(globalRegex, " ");
+    }
+    const segResidualWords = tokenizeWords(segResidual);
+    if (targetWordLen >= 2 && segResidualWords.length < 2) {
+      return false;
+    }
+    return true;
+  });
+
+  return hasIntegratedSegment;
 }
 
 function cleanSpokenCollocations(rawCollocations: readonly string[]): string[] {
@@ -239,9 +293,14 @@ export function evaluateSpeakingRetelling(
       regex.test(sentence.text),
     );
     const contextualSentence = matchingSentences.find((sentence) =>
-      isContextualSpokenSentence(
-        sentence.text,
-        input.seed.targetSpokenCollocations,
+      splitElementaryClauses(sentence.text).some(
+        (clause) =>
+          regex.test(clause) &&
+          isContextualSpokenClause(
+            clause,
+            collocation,
+            input.seed.targetSpokenCollocations,
+          ),
       ),
     );
 

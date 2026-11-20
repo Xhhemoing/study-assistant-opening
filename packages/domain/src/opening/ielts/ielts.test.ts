@@ -215,14 +215,26 @@ describe("IELTS rubric validation & band scoring", () => {
     }
   });
 
-  it("preserves exact UTF-16 slice offsets after Unicode case-expanding characters like İstanbul and surrogate pairs like 😀", () => {
+  it("preserves exact UTF-16 slice offsets across Unicode case-expanding characters (İstanbul), surrogate pairs (😀), and Greek final sigma (ΟΔΥΣΣΕΎΣ <-> οδυσσεύς)", () => {
     const emojiIstanbul = "😀 İstanbul";
     const emojiLoc = locateGroundedExcerpt(emojiIstanbul, "i\u0307stanbul");
     expect(emojiLoc).not.toBeNull();
+    expect(emojiLoc!.startOffset).toBe(3);
+    expect(emojiLoc!.endOffset).toBe(11);
     expect(emojiIstanbul.slice(emojiLoc!.startOffset, emojiLoc!.endOffset)).toBe(
       "İstanbul",
     );
     expect(emojiLoc!.matchedText).toBe("İstanbul");
+
+    const greekUpper = "ΟΔΥΣΣΕΎΣ";
+    const greekLoc = locateGroundedExcerpt(greekUpper, "οδυσσεύς");
+    expect(greekLoc).not.toBeNull();
+    expect(greekLoc!.startOffset).toBe(0);
+    expect(greekLoc!.endOffset).toBe(8);
+    expect(greekUpper.slice(greekLoc!.startOffset, greekLoc!.endOffset)).toBe(
+      "ΟΔΥΣΣΕΎΣ",
+    );
+    expect(greekLoc!.matchedText).toBe("ΟΔΥΣΣΕΎΣ");
 
     const paragraph =
       "İstanbul planners expanded rail corridors to ALLEVIATE CHRONIC CONGESTION across dense districts.";
@@ -394,6 +406,77 @@ describe("Honest evidence epistemology & Writing anti-gaming transfer guards", (
     expect(evaluated.receipt.masteryQualified).toBe(false);
     expect(evaluated.receipt.countsTowardMastery).toBe(false);
     expect(evaluated.receipt.epistemicStatus).toBe("practice_feedback");
+  });
+
+  it("blocks colon-appended 4-noun suffixes on unchanged DRAFT_2 sentences (and comma-attached variants) from earning transfer credit or mastery", () => {
+    const colonSuffixDraft: IeltsEssayDraft = {
+      ...DRAFT_2,
+      draftId: "draft-2-colon-suffix",
+      version: 2,
+      paragraphs: [
+        DRAFT_2.paragraphs[0]!,
+        DRAFT_2.paragraphs[1]!.replace(
+          "densely populated districts.",
+          "densely populated districts: orchard, lantern, glacier, compass.",
+        ),
+        DRAFT_2.paragraphs[2]!.replace(
+          "reliable evening services.",
+          "reliable evening services: apricot, marble, pelican, velvet.",
+        ),
+        DRAFT_2.paragraphs[3]!.replace(
+          "short-term highway widening.",
+          "short-term highway widening: walnut, cactus, harbor, mineral.",
+        ),
+      ],
+    };
+
+    const colonResult = evaluateRevisedDraftDeterministically({
+      baselineDraft: DRAFT_2,
+      revisedDraft: colonSuffixDraft,
+      targets: TARGETS,
+      receiptId: "r-colon-suffix",
+    });
+    expect(colonResult.transferReport.summary.hasSubstantiveRevision).toBe(false);
+    expect(colonResult.transferReport.summary.transferredCount).toBe(0);
+    expect(colonResult.transferReport.summary.meetsCrossDraftVerification).toBe(false);
+    expect(colonResult.transferReport.summary.masteryQualified).toBe(false);
+    expect(colonResult.receipt.masteryQualified).toBe(false);
+    expect(colonResult.receipt.countsTowardMastery).toBe(false);
+    expect(colonResult.receipt.epistemicStatus).toBe("practice_feedback");
+
+    // Comma-attached noun tail variant on unchanged sentences must also be blocked.
+    const commaSuffixDraft: IeltsEssayDraft = {
+      ...DRAFT_2,
+      draftId: "draft-2-comma-suffix",
+      version: 2,
+      paragraphs: [
+        DRAFT_2.paragraphs[0]!,
+        DRAFT_2.paragraphs[1]!.replace(
+          "densely populated districts.",
+          "densely populated districts, orchard, lantern, glacier, compass.",
+        ),
+        DRAFT_2.paragraphs[2]!.replace(
+          "reliable evening services.",
+          "reliable evening services, apricot, marble, pelican, velvet.",
+        ),
+        DRAFT_2.paragraphs[3]!.replace(
+          "short-term highway widening.",
+          "short-term highway widening, walnut, cactus, harbor, mineral.",
+        ),
+      ],
+    };
+
+    const commaResult = evaluateRevisedDraftDeterministically({
+      baselineDraft: DRAFT_2,
+      revisedDraft: commaSuffixDraft,
+      targets: TARGETS,
+      receiptId: "r-comma-suffix",
+    });
+    expect(commaResult.transferReport.summary.hasSubstantiveRevision).toBe(false);
+    expect(commaResult.transferReport.summary.transferredCount).toBe(0);
+    expect(commaResult.transferReport.summary.masteryQualified).toBe(false);
+    expect(commaResult.receipt.masteryQualified).toBe(false);
+    expect(commaResult.receipt.countsTowardMastery).toBe(false);
   });
 
   it("blocks empty targetExpressions list from qualifying as verified transfer", () => {
@@ -618,6 +701,43 @@ describe("Speaking Part 3 oral transfer seed, strict verification gates & Unicod
     expect(receipt.masteryQualified).toBe(false);
     expect(receipt.countsTowardMastery).toBe(false);
     expect(receipt.epistemicStatus).toBe("practice_feedback");
+  });
+
+  it("blocks bare target phrases tacked onto a complete sentence via colon or comma (': alleviate chronic congestion, per-capita emissions.') at 75s", () => {
+    const colonAttachedTranscript =
+      "Personally, I think municipal leaders often prefer highway projects because impatient drivers notice wider asphalt roads immediately before the next election. " +
+      "However, building large rail systems takes many years of careful planning and disruptive construction noise across local neighbourhoods. " +
+      "Admittedly, families in outer suburban districts still need private cars when local bus routes run infrequently during late evenings. " +
+      "In the long run, cities should coordinate feeder routes with reliable trains so daily residents choose shared transit: alleviate chronic congestion, per-capita emissions.";
+
+    const colonReceipt = evaluateSpeakingRetelling({
+      seed: baseSeed,
+      transcript: colonAttachedTranscript,
+      durationSeconds: 75,
+      assisted: false,
+      freshPromptTransfer: true,
+    });
+    expect(colonReceipt.wordCount).toBeGreaterThanOrEqual(75);
+    expect(colonReceipt.transferredCollocations).toHaveLength(0);
+    expect(colonReceipt.masteryQualified).toBe(false);
+    expect(colonReceipt.countsTowardMastery).toBe(false);
+    expect(colonReceipt.epistemicStatus).toBe("practice_feedback");
+
+    const commaAttachedTranscript = colonAttachedTranscript.replace(
+      ": alleviate chronic congestion, per-capita emissions.",
+      ", alleviate chronic congestion, per-capita emissions.",
+    );
+    const commaReceipt = evaluateSpeakingRetelling({
+      seed: baseSeed,
+      transcript: commaAttachedTranscript,
+      durationSeconds: 75,
+      assisted: false,
+      freshPromptTransfer: true,
+    });
+    expect(commaReceipt.transferredCollocations).toHaveLength(0);
+    expect(commaReceipt.masteryQualified).toBe(false);
+    expect(commaReceipt.countsTowardMastery).toBe(false);
+    expect(commaReceipt.epistemicStatus).toBe("practice_feedback");
   });
 
   it("emits one grounded citation per credited target hit with exact untrimmed offsets when transcript has leading spaces", () => {

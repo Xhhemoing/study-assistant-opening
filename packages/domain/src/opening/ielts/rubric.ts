@@ -168,10 +168,18 @@ export function hasMemorizedTemplateStuffing(
 }
 
 type FoldedOffsetEntry = {
-  readonly origStart: number;
-  readonly origEnd: number;
+  origStart: number;
+  origEnd: number;
 };
 
+/**
+ * Per-code-point Unicode case-folding with exact UTF-16 `[origStart, origEnd]`
+ * reverse offset mapping. Handles:
+ * - Surrogate pairs (e.g. "😀")
+ * - Case-expanding dotted capital I ("İ" -> "i\u0307" -> "i") and decomposed "i\u0307"
+ * - Greek final sigma equivalence ("Σ" / "σ" / "ς" -> "σ")
+ * - German capital sharp S ("ẞ" -> "ß")
+ */
 function foldWithUtf16Offsets(text: string): {
   readonly folded: string;
   readonly map: readonly FoldedOffsetEntry[];
@@ -185,7 +193,19 @@ function foldWithUtf16Offsets(text: string): {
     const origEnd = utf16Offset + ch.length;
     utf16Offset = origEnd;
 
-    const lowered = ch.toLowerCase();
+    // Strip combining dot above (\u0307) when immediately following 'i' (e.g. decomposed "i\u0307")
+    // while extending the preceding 'i' span so slicing original text includes the combining mark.
+    if (ch === "\u0307" && folded.endsWith("i") && map.length > 0) {
+      map[map.length - 1]!.origEnd = origEnd;
+      continue;
+    }
+
+    const lowered = ch
+      .toLowerCase()
+      .replace(/i\u0307/gu, "i")
+      .replace(/\u03c2/gu, "\u03c3")
+      .replace(/\u1e9e/gu, "\u00df");
+
     for (let i = 0; i < lowered.length; i += 1) {
       folded += lowered[i];
       map.push({ origStart, origEnd });
@@ -198,7 +218,8 @@ function foldWithUtf16Offsets(text: string): {
 /**
  * Unicode-safe excerpt locator: folds both text and query per Unicode code point
  * while tracking exact UTF-16 `[origStart, origEnd]` reverse mappings (handling
- * surrogate pairs like "😀" and length-expanding case folds like "İ" -> "i\u0307").
+ * surrogate pairs like "😀", length-expanding case folds like "İ" -> "i\u0307",
+ * and Greek final sigma equivalence "ΟΔΥΣΣΕΎΣ" <-> "οδυσσεύς").
  * Guarantees `paragraph.slice(startOffset, endOffset) === matchedText`.
  */
 export function locateGroundedExcerpt(
@@ -220,7 +241,10 @@ export function locateGroundedExcerpt(
   const { folded: foldedParagraph, map } = foldWithUtf16Offsets(paragraph);
   const foldedNeedleTokens = trimmed
     .split(/\s+/)
-    .map((token) => escapeRegExp(token.toLowerCase()));
+    .map((token) => escapeRegExp(foldWithUtf16Offsets(token).folded))
+    .filter(Boolean);
+  if (foldedNeedleTokens.length === 0) return null;
+
   const regex = new RegExp(foldedNeedleTokens.join("\\s+"), "u");
   const match = regex.exec(foldedParagraph);
   if (!match || typeof match.index !== "number" || match[0].length === 0) {
