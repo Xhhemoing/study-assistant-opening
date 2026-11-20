@@ -548,7 +548,7 @@ export async function executeOpeningRestoreApply(
       const history = historyRows.find(row => String(row.owner_user_id).toLowerCase() === owner
         && String(row.workspace_id).toLowerCase() === workspaceId.toLowerCase());
       for (const row of (backup.tables.opening_source_versions as Record<string, unknown>[] | undefined) ?? []) {
-        const manifest = validateRetainedMaterialImportState({ material_manifest_revision: 0, ...row },
+        const manifest = validateRetainedMaterialImportState(row,
           String(row.source_id), Number(row.version), Number(history?.revision ?? 0));
         if (manifest) importedVersions.set(row, { ...row, material_manifest: { ...manifest, restoredFromBackup: true } });
       }

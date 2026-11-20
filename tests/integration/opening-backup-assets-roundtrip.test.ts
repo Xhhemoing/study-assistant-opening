@@ -26,6 +26,7 @@ it.each([
   { mode: "practice", linkage: "forged spec" },
   { mode: "diagnostic", linkage: "mismatched stem" },
   { mode: "diagnostic", linkage: "missing link" },
+  { mode: "diagnostic", linkage: "missing binding and link" },
 ] as const)(
   "restores a course-bound $mode with a $linkage pending attempt", async ({ mode, linkage }) => {
     const url = assertOpeningTestDatabase(process.env.OPENING_TEST_DATABASE_URL!, process.env.OPENING_TEST_DB);
@@ -88,7 +89,12 @@ it.each([
           item.evaluation_spec = forged;
         }
         if (linkage === "mismatched stem") item.stem_snapshot = "Different question";
-        if (linkage === "missing link") wire.tables.opening_exam_attempt_links = [];
+        if (linkage === "missing link" || linkage === "missing binding and link") wire.tables.opening_exam_attempt_links = [];
+        if (linkage === "missing binding and link") {
+          wire.tables.opening_exam_bindings = [];
+          expect(wire.tables.opening_learning_attempts).toMatchObject([{ create_intent: { examSprint: { examAttemptId: pendingId } } }]);
+          expect(wire.tables.opening_teaching_activities).toMatchObject([{ create_intent: { identity: pendingId } }]);
+        }
         const db = transactionClient(outer);
         const result = await executeOpeningRestoreApply(db, { confirmLocalRestore: true, backup: wire,
           currentMemoryDeletions: wire.memoryDeletions, currentLearningState: { workspacePreferences: null, courses: [] },
@@ -111,7 +117,8 @@ it.each([
           expect(version?.evaluation_spec).toEqual(spec);
         } else {
           const historical = await sprint.read(scope);
-          expect(historical).toMatchObject({ activeRun: null, currentAttempt: null, attempts: [{ id: pendingId, answer: null }] });
+          expect(historical).toMatchObject({ activeRun: null, currentAttempt: null,
+            attempts: [{ id: pendingId, answer: null, answeredAt: null, correct: null, feedback: null }] });
           await expect(submit(pendingId, question.answer)).rejects.toMatchObject({ code: "CONFLICT" });
           const [activity] = await outer`SELECT status FROM opening_teaching_activities WHERE workspace_id=${scope.workspaceId}`;
           expect(activity?.status).toBe("completed");
@@ -543,6 +550,9 @@ it("keeps unanswered mock conversion receipts while removing the catalog solutio
       const result = await executeOpeningRestoreApply(transactionClient(outer), { confirmLocalRestore: true,
         backup: wire, currentMemoryDeletions: wire.memoryDeletions, currentLearningState: { workspacePreferences: null, courses: [] } });
       expect(result, result.errors.join(", ")).toMatchObject({ ok: true });
+      const restored = await createOpeningExamSprintRepository(transactionClient(outer), pack).read(scope);
+      expect(restored).toMatchObject({ activeRun: null, currentAttempt: null,
+        attempts: [{ answer: null, answeredAt: null, correct: null, feedback: null }] });
       const [receipt] = await outer`SELECT * FROM opening_exam_help_receipts WHERE id=${String(archivedReceipt.id)}`;
       expect(receipt).toMatchObject({ id: archivedReceipt.id, attempt_link_id: archivedReceipt.attempt_link_id, kind: "solution",
         delivered_at: new Date(String(archivedReceipt.delivered_at)), history_revision: archivedReceipt.history_revision,

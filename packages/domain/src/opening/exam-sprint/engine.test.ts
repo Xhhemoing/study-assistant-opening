@@ -411,7 +411,10 @@ describe("exam sprint answer isolation and evidence", () => {
     expect(() => answer(state, "A", "2026-10-17T08:06:00.000Z")).toThrow("时间已到");
     const closed = finish(state, "2026-10-17T08:07:00.000Z");
     expect(closed.attempts[0]!.correct).toBeNull();
-    expect(examSprintOverview(closed, pack, NOW).attempts[0]!.feedback).toBeNull();
+    expect(examSprintOverview(closed, pack, NOW).attempts[0]).toMatchObject({
+      answer: null, answeredAt: null, correct: null,
+      feedback: { answer: "A", explanation: "SECRET-EXPLANATION-mock-a-1" },
+    });
     expect(() => start(closed, "mock-a", LATER)).toThrow("已经开启过");
     expect(start(closed, "mock-b", LATER).runs.at(-1)!.mode).toBe("mock-b");
   });

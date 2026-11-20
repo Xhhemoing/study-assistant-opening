@@ -37,7 +37,7 @@ const stateSchema: z.ZodType<ExamSprintState> = z.object({
   version: z.literal(1), startedAt: timestamp, examDate: date.nullable(), dailyMinutes: z.number().int().min(15).max(720),
   runs: z.array(z.object({ id, mode, questionIds: z.array(id), startedAt: timestamp,
     deadlineAt: timestamp.nullable(), completedAt: timestamp.nullable(),
-    conversion: examRunConversionSchema.optional() }).strict()),
+    conversion: examRunConversionSchema.optional(), restoredUngraded: z.literal(true).optional() }).strict()),
   attempts: z.array(z.object({ id, questionId: id, runId: id, presentedAt: timestamp,
     answeredAt: timestamp.nullable(), answer: z.string().nullable(), correct: z.boolean().nullable(),
     confidence: z.number().int().min(1).max(5).nullable(), durationSeconds: z.number().nonnegative().nullable(),
@@ -138,6 +138,7 @@ export function parseExamSprintSnapshot(rawPack: unknown, rawState: unknown): { 
     })
     || state.runs.some(run => new Set(run.questionIds).size !== run.questionIds.length
       || run.questionIds.some(questionId => questions.get(questionId)?.pool !== (run.mode === "mock-a" || run.mode === "mock-b" ? run.mode : "training"))
+      || run.restoredUngraded && (run.completedAt === null || run.mode !== "mock-a" && run.mode !== "mock-b")
       || (run.completedAt !== null && Date.parse(run.completedAt) < Date.parse(run.startedAt)))
     || state.attempts.some(attempt => {
       const question = questions.get(attempt.questionId), run = runs.get(attempt.runId);

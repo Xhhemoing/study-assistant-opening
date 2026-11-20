@@ -63,7 +63,9 @@ export function restoreSprintPack(row: Row): Row {
   }
   const { pack, state } = parseExamSprintSnapshot(EXAM_SPRINT_PACK, incoming);
   for (const run of state.runs) {
-    if (mocks.has(run.id) && run.completedAt === null) {
+    if (!mocks.has(run.id)) continue;
+    run.restoredUngraded = true;
+    if (run.completedAt === null) {
       run.completedAt = state.attempts.filter(attempt => attempt.runId === run.id).reduce(
         (last, attempt) => Date.parse(attempt.presentedAt) > Date.parse(last) ? attempt.presentedAt : last, run.startedAt);
     }
@@ -110,17 +112,32 @@ async function restorePendingChoice(tx: TransactionSql, scope: Scope, sprintId: 
 
 /** All raw specs have been cleared and the linked rows are now present in the restore transaction. */
 export async function restorePendingSprintAttempts(tx: TransactionSql, scope: Scope): Promise<void> {
-  const rows = await tx`SELECT s.id,s.state,b.course_id,b.binding FROM opening_exam_sprints s
+  const rows = await tx`SELECT s.id,s.state,b.course_id,b.binding,linked.present AS has_attempt_links FROM opening_exam_sprints s
     LEFT JOIN opening_exam_bindings b ON b.sprint_id=s.id
+    CROSS JOIN LATERAL (
+      SELECT EXISTS (SELECT 1 FROM opening_exam_attempt_links l WHERE l.sprint_id=s.id) AS present
+    ) linked
     WHERE s.course_id IS NULL AND s.workspace_id=${scope.workspaceId} AND s.owner_user_id=${scope.ownerUserId}
-      AND (b.sprint_id IS NOT NULL OR EXISTS (SELECT 1 FROM opening_exam_attempt_links l WHERE l.sprint_id=s.id))`;
+      AND (b.sprint_id IS NOT NULL OR linked.present OR EXISTS (
+        SELECT 1 FROM jsonb_array_elements(s.state->'runs') run
+        JOIN jsonb_array_elements(s.state->'attempts') attempt ON attempt->>'runId'=run->>'id'
+        WHERE run->>'completedAt' IS NULL AND (
+          EXISTS (SELECT 1 FROM opening_learning_attempts a
+            WHERE a.workspace_id=s.workspace_id AND a.owner_user_id=s.owner_user_id
+              AND a.create_intent #>> '{examSprint,sprintId}'=s.id::text
+              AND a.create_intent #>> '{examSprint,examAttemptId}'=attempt->>'id')
+          OR EXISTS (SELECT 1 FROM opening_teaching_activities a
+            WHERE a.workspace_id=s.workspace_id AND a.owner_user_id=s.owner_user_id
+              AND a.client_key=left('exam-activity:' || s.id::text || ':' || (attempt->>'id'),200))
+        )
+      ))`;
   for (const row of rows) {
     const { pack, state } = parseExamSprintSnapshot(EXAM_SPRINT_PACK, row.state);
     const run = state.runs.find(entry => entry.completedAt === null);
     if (!run || run.mode === "mock-a" || run.mode === "mock-b") continue;
     const attempts = state.attempts.filter(entry => entry.runId === run.id);
     const pending = attempts.at(-1);
-    if (pending?.answeredAt) continue;
+    if (pending?.answeredAt && (row.binding != null || row.has_attempt_links)) continue;
     const sprintId = String(row.id), activityKey = (id: string) => `exam-activity:${sprintId}:${id}`.slice(0, 200);
     const binding = row.binding == null ? null : parseExamBinding(row.binding);
     const question = pack.questions.find(entry => entry.id === pending?.questionId);
