@@ -231,6 +231,139 @@ it("refuses a second same-tick switch from stale controls rather than discarding
   expect(readPracticeDraft(scope, null)?.id).toBe(next.id);
 });
 
+async function moveIntoCachedCollection() {
+  const source = newScope();
+  const target = newScope();
+  const disk = { ...storage(), removeItem: (key: string) => { disk.data.delete(key); } };
+  const archived = emptyPracticeDraft(source, { answer: "moved answer" });
+  const sourceActive = emptyPracticeDraft(source);
+  const targetArchive = emptyPracticeDraft(target, { answer: "previous archive" });
+  const targetActive = emptyPracticeDraft(target, { answer: "open answer" });
+  expect(writePracticeDraft(archived, disk)).toBe(true);
+  switchPracticeDraft(source, archived.id, sourceActive, disk);
+  expect(writePracticeDraft(targetArchive, disk)).toBe(true);
+  switchPracticeDraft(target, targetArchive.id, targetActive, disk);
+
+  vi.resetModules();
+  const sibling = await import("./practice-draft-storage");
+  sibling.readPracticeDraftCollection(source, disk);
+  sibling.moveArchivedPracticeDraft(source, sourceActive.id, archived.id, target, disk);
+  expect(readPracticeDraft(target, null)).toEqual(targetActive);
+  return { disk, source, target, targetActive, targetArchive, moved: { ...archived, scope: target } };
+}
+
+it.each(["edit", "switch"] as const)("keeps an archive moved by another editor during a clean cached %s", async action => {
+  const { disk, source, target, targetActive, targetArchive, moved } = await moveIntoCachedCollection();
+  const activeId = action === "edit" ? targetActive.id : targetArchive.id;
+  let expectedActive = targetActive;
+  if (action === "edit") {
+    const edit = patchPracticeDraft(target, {}, { fields: { answer: "edited open answer" } }, disk, targetActive.id);
+    expect(edit.persisted).toBe(true);
+    expectedActive = edit.draft;
+  } else {
+    expect(switchPracticeDraft(target, targetActive.id, targetArchive.id, disk).activeId).toBe(activeId);
+  }
+
+  vi.resetModules();
+  const cold = await import("./practice-draft-storage");
+  expect(cold.readPracticeDraft(source, disk, moved.id)).toBeNull();
+  expect(cold.readPracticeDraftCollection(target, disk)).toMatchObject({
+    activeId, drafts: [targetArchive, expectedActive, moved],
+  });
+});
+
+it.each(["edit", "new draft", "switch", "move out"] as const)(
+  "keeps a concurrently migrated draft during a clean cached %s",
+  async action => {
+    const course = crypto.randomUUID();
+    const ordinary = practiceScope(course, "ordinary");
+    const manual = practiceScope(course, "manual");
+    const target = newScope();
+    const disk = { ...storage(), removeItem: (key: string) => { disk.data.delete(key); } };
+    const original = emptyPracticeDraft(ordinary, { answer: "answer to migrate" });
+    const archived = emptyPracticeDraft(manual, { answer: "archived manual answer" });
+    const current = emptyPracticeDraft(manual, { answer: "open manual answer" });
+    expect(writePracticeDraft(original, disk)).toBe(true);
+    expect(writePracticeDraft(archived, disk)).toBe(true);
+    switchPracticeDraft(manual, archived.id, current, disk);
+
+    vi.resetModules();
+    const sibling = await import("./practice-draft-storage");
+    sibling.readPartitionedPracticeDraftCollection({ ordinary, manual }, current, disk);
+    expect(disk.data.has(`opening-practice:v2:${ordinary}`)).toBe(false);
+
+    const migrated = { ...original, scope: manual };
+    let expected = { activeId: current.id, drafts: [archived, current, migrated] };
+    if (action === "edit") {
+      const edit = patchPracticeDraft(manual, {}, { fields: { answer: "edited manual answer" } }, disk, current.id);
+      expect(edit.persisted).toBe(true);
+      expected = { ...expected, drafts: [archived, edit.draft, migrated] };
+    } else if (action === "new draft") {
+      const next = emptyPracticeDraft(manual, { answer: "new manual answer" });
+      switchPracticeDraft(manual, current.id, next, disk);
+      expected = { activeId: next.id, drafts: [...expected.drafts, next] };
+    } else if (action === "switch") {
+      switchPracticeDraft(manual, current.id, archived.id, disk);
+      expected.activeId = archived.id;
+    } else {
+      moveArchivedPracticeDraft(manual, current.id, archived.id, target, disk);
+      expect(readPracticeDraft(target, disk)).toEqual({ ...archived, scope: target });
+      expected.drafts = [current, migrated];
+    }
+
+    vi.resetModules();
+    const cold = await import("./practice-draft-storage");
+    expect(cold.readPracticeDraftCollection(manual, disk)).toMatchObject(expected);
+  },
+);
+
+it("rejects a cached selection that another editor moved out of the collection", async () => {
+  const { disk, source, target, targetActive, targetArchive, moved } = await moveIntoCachedCollection();
+  vi.resetModules();
+  const sibling = await import("./practice-draft-storage");
+  sibling.readPracticeDraftCollection(target, disk);
+  sibling.moveArchivedPracticeDraft(target, moved.id, targetArchive.id, source, disk);
+  const durable = disk.data.get(`opening-practice:v2:${target}`);
+
+  expect(() => switchPracticeDraft(target, targetActive.id, targetArchive.id, disk)).toThrow("找不到这份保留的草稿");
+  expect(readPracticeDraft(target, null)).toEqual(targetActive);
+  expect(disk.data.get(`opening-practice:v2:${target}`)).toBe(durable);
+  expect(sibling.readPracticeDraft(source, disk, targetArchive.id)).toEqual({ ...targetArchive, scope: source });
+});
+
+it.each([
+  ["edit", "read denied"],
+  ["edit", "invalid JSON"],
+  ["switch", "read denied"],
+  ["new draft", "invalid JSON"],
+] as const)("keeps cached answers recoverable after %s encounters %s", async (action, failure) => {
+  const { disk, target, targetActive, targetArchive, moved } = await moveIntoCachedCollection();
+  const key = `opening-practice:v2:${target}`;
+  const durable = disk.data.get(key)!;
+  disk.getItem.mockImplementation(storageKey => {
+    if (storageKey !== key) return disk.data.get(storageKey) ?? null;
+    if (failure === "invalid JSON") return "{broken";
+    throw new Error("read denied");
+  });
+
+  if (action !== "edit") {
+    const selection = action === "switch" ? targetArchive.id : emptyPracticeDraft(target);
+    expect(() => switchPracticeDraft(target, targetActive.id, selection, disk)).toThrow("已取消切换");
+  }
+  const edit = patchPracticeDraft(target, {}, { fields: { answer: "typed during read failure" } }, disk, targetActive.id);
+  expect(edit.persisted).toBe(false);
+  expect(readPracticeDraft(target, null)).toEqual(edit.draft);
+  expect(disk.data.get(key)).toBe(durable);
+
+  disk.getItem.mockImplementation(k => disk.data.get(k) ?? null);
+  if (action === "edit") expect(writePracticeDraft(edit.draft, disk)).toBe(true);
+  else {
+    expect(switchPracticeDraft(target, targetActive.id, targetArchive.id, disk).activeId).toBe(targetArchive.id);
+  }
+  expect(parsePracticeDraftCollection(JSON.parse(disk.data.get(key)!), target)?.drafts)
+    .toEqual([targetArchive, edit.draft, moved]);
+});
+
 it("keeps late start/submit/help callbacks attached to the archived draft", async () => {
   const { scope, saved, disk } = setup();
   let resolve!: (value: string) => void;

@@ -29,6 +29,7 @@ export type PracticeDraft = z.infer<typeof draftSchema> & { id: string };
 export type PracticeStart = NonNullable<PracticeDraft["start"]>;
 export type PracticeDraftCollection = { version: 2; scope: string; activeId: string; drafts: PracticeDraft[] };
 const memory = new Map<string, PracticeDraftCollection>();
+const initializedCollections = new WeakSet<PracticeDraftCollection>();
 const dirty = new Set<string>();
 const dirtyDraftIds = new Map<string, Set<string>>();
 const legacySnapshots = new Map<string, { raw: string; id: string; destination?: string }>();
@@ -184,8 +185,11 @@ export function readPracticeDraftCollection(scope: string, storage: ReadStorage 
 export function initializePracticeDraft(draft: PracticeDraft): PracticeDraftCollection {
   const error = blocked.get(draft.scope);
   if (error) throw new Error(error);
-  const collection = memory.get(draft.scope) ?? { version: 2 as const, scope: draft.scope, activeId: draft.id, drafts: [draft] };
+  const cached = memory.get(draft.scope);
+  if (cached) return cached;
+  const collection = { version: 2 as const, scope: draft.scope, activeId: draft.id, drafts: [draft] };
   memory.set(draft.scope, collection);
+  initializedCollections.add(collection);
   return collection;
 }
 
@@ -435,7 +439,7 @@ function mergeWithStoredCollection(
   stored: StoredPracticeDraftCollection | null,
   extraEditedIds?: ReadonlySet<string>,
   explicitActiveId?: string,
-): PracticeDraftCollection {
+): PracticeDraftCollection | null {
   const editedIds = dirtyDraftIds.get(scope);
   const isEdited = (id: string) => Boolean(editedIds?.has(id) || extraEditedIds?.has(id));
   const cachedById = new Map(cached.drafts.map(value => [value.id, value]));
@@ -445,20 +449,20 @@ function mergeWithStoredCollection(
     ...storedDrafts.map(value => (isEdited(value.id) ? cachedById.get(value.id) : undefined) ?? value),
     ...cached.drafts.filter(value => !storedIds.has(value.id) && isEdited(value.id)),
   ];
-  const activeId = explicitActiveId && mergedDrafts.some(value => value.id === explicitActiveId)
+  const first = mergedDrafts[0];
+  if (!first) return null;
+  const includes = (id: string) => mergedDrafts.some(value => value.id === id);
+  const activeId = explicitActiveId && includes(explicitActiveId)
     ? explicitActiveId
-    : (isEdited(cached.activeId) && mergedDrafts.some(value => value.id === cached.activeId)
+    : (isEdited(cached.activeId) && includes(cached.activeId)
       ? cached.activeId
-      : (stored?.collection.activeId && mergedDrafts.some(value => value.id === stored.collection.activeId)
-        ? stored.collection.activeId
-        : (mergedDrafts.some(value => value.id === cached.activeId) ? cached.activeId : mergedDrafts[0]!.id)));
+      : stored?.collection.activeId ?? first.id);
   return { version: 2, scope, activeId, drafts: mergedDrafts };
 }
 
 export function writePracticeDraft(draft: PracticeDraft, storage: WriteStorage | null): boolean {
   const error = blocked.get(draft.scope);
   if (error) throw new Error(error);
-  const wasDirty = dirty.has(draft.scope);
   const collection = memory.get(draft.scope) ?? { version: 2 as const, scope: draft.scope, activeId: draft.id, drafts: [] };
   const found = collection.drafts.some(value => value.id === draft.id);
   let next: PracticeDraftCollection = {
@@ -468,20 +472,20 @@ export function writePracticeDraft(draft: PracticeDraft, storage: WriteStorage |
   // Keep the latest inputs in this document even if the browser refuses persistence.
   memory.set(draft.scope, next);
   markDirtyDraft(draft.scope, draft.id);
-  if (wasDirty && isReadStorage(storage)) {
+  if (isReadStorage(storage)) {
     const previousBlocked = blocked.get(draft.scope);
+    // This edit already has a local identity. A fresh v1 read must not replace its snapshot.
+    dirty.add(draft.scope);
     try {
       const stored = readStoredPracticeDraftCollection(draft.scope, storage);
-      next = mergeWithStoredCollection(draft.scope, next, stored);
-      memory.set(draft.scope, next);
-      unreconciled.delete(draft.scope);
+      // The locally edited draft is always included in the merge.
+      next = mergeWithStoredCollection(draft.scope, next, stored)!;
     } catch {
-      if (previousBlocked === undefined) blocked.delete(draft.scope);
-      else blocked.set(draft.scope, previousBlocked);
-      unreconciled.add(draft.scope);
-      dirty.add(draft.scope);
+      restoreCachedReadFailure(draft.scope, previousBlocked);
       return false;
     }
+    memory.set(draft.scope, next);
+    unreconciled.delete(draft.scope);
   }
   return persistCollection(next, storage);
 }
@@ -502,34 +506,36 @@ export function patchPracticeDraft(scope: string, initial: Partial<PracticeField
 export function switchPracticeDraft(scope: string, expectedActiveId: string, target: PracticeDraft | string, storage: WriteStorage | null): PracticeDraftCollection {
   const current = memory.get(scope);
   if (!current || current.activeId !== expectedActiveId) throw new Error("当前草稿已切换，请使用当前页面的操作。");
-  let drafts = current.drafts;
-  let targetId: string;
-  if (typeof target === "string") {
-    if (!drafts.some(value => value.id === target)) throw new Error("找不到这份保留的草稿，当前答案未改动。");
-    targetId = target;
-  } else {
-    if (target.scope !== scope || drafts.some(value => value.id === target.id)) throw new Error("新草稿身份无效，当前答案未改动。");
-    drafts = [...drafts, target]; targetId = target.id;
+  const newDraft = typeof target === "string" ? null : target;
+  const targetId = typeof target === "string" ? target : target.id;
+  const invalidDraft = "新草稿身份无效，当前答案未改动。";
+  const switchError = "未能保存全部草稿，已取消切换；当前原答案和请求仍保留。请先复制答案或释放浏览器存储后重试。";
+  if (newDraft && (newDraft.scope !== scope || current.drafts.some(value => value.id === targetId))) {
+    throw new Error(invalidDraft);
   }
-  let next: PracticeDraftCollection = { ...current, activeId: targetId, drafts };
-  if (dirty.has(scope) && isReadStorage(storage)) {
+  const drafts = newDraft ? [...current.drafts, newDraft] : current.drafts;
+  let next: PracticeDraftCollection | null = { ...current, activeId: targetId, drafts };
+  if (isReadStorage(storage)) {
     const previousBlocked = blocked.get(scope);
+    let stored: StoredPracticeDraftCollection | null;
     try {
-      const stored = readStoredPracticeDraftCollection(scope, storage);
-      const extraIds = typeof target === "string" ? undefined : new Set([target.id]);
-      next = mergeWithStoredCollection(scope, next, stored, extraIds, targetId);
-      if (!next.drafts.some(value => value.id === targetId)) throw new Error("找不到这份保留的草稿，当前答案未改动。");
-      unreconciled.delete(scope);
-    } catch (reason) {
-      if (previousBlocked === undefined) blocked.delete(scope);
-      else blocked.set(scope, previousBlocked);
-      unreconciled.add(scope);
-      dirty.add(scope);
-      if (reason instanceof Error && reason.message.includes("找不到这份保留的草稿")) throw reason;
-      throw new Error("未能保存全部草稿，已取消切换；当前原答案和请求仍保留。请先复制答案或释放浏览器存储后重试。");
+      stored = readStoredPracticeDraftCollection(scope, storage);
+    } catch {
+      restoreCachedReadFailure(scope, previousBlocked);
+      throw new Error(switchError);
     }
+    unreconciled.delete(scope);
+    if (newDraft && stored?.collection.drafts.some(value => value.id === targetId)) throw new Error(invalidDraft);
+    const extraIds = new Set<string>();
+    if (newDraft) extraIds.add(targetId);
+    // The first switch can archive an initialized draft that has never been written.
+    if (initializedCollections.has(current) && !stored?.collection.drafts.some(value => value.id === current.activeId)) {
+      extraIds.add(current.activeId);
+    }
+    next = mergeWithStoredCollection(scope, next, stored, extraIds, targetId);
   }
-  if (!persistCollection(next, storage)) throw new Error("未能保存全部草稿，已取消切换；当前原答案和请求仍保留。请先复制答案或释放浏览器存储后重试。");
+  if (!next?.drafts.some(value => value.id === targetId)) throw new Error("找不到这份保留的草稿，当前答案未改动。");
+  if (!persistCollection(next, storage)) throw new Error(switchError);
   memory.set(scope, next);
   return next;
 }
@@ -595,10 +601,10 @@ export function moveArchivedPracticeDraft(
     restoreCachedReadFailure(scope, previousSourceBlocked);
     throw new Error(moveError);
   }
-  if (!storedSource && !dirtyDraftIds.get(scope)?.size) throw new Error(moveError);
   const source = mergeWithStoredCollection(scope, current, storedSource);
+  if (!source || source.activeId !== expectedActiveId) throw new Error(moveError);
   const archived = source.drafts.find(draft => draft.id === draftId);
-  if (!archived || source.activeId !== expectedActiveId) throw new Error(moveError);
+  if (!archived) throw new Error(moveError);
   const moved = parsePracticeDraft({ ...archived, scope: targetScope }, targetScope);
   if (!moved) throw new Error(moveError);
 

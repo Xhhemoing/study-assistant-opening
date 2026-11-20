@@ -51,11 +51,11 @@ it("rejects a matrix request changed to a different variant or material", () => 
 it("keeps the newest document checkpoint when storage writes fail but old reads still succeed", () => {
   const scope = practiceScope(courseId, "ordinary", { retestId, skillLabel: "quota-test", prompt: crypto.randomUUID() });
   const stale = emptyPracticeDraft(scope, { answer: "old" });
-  const current = emptyPracticeDraft(scope, { answer: "latest unsent answer" });
-  const storage = { getItem: vi.fn(() => JSON.stringify(stale)), setItem: vi.fn(() => { throw new Error("quota"); }) };
+  const current = { ...stale, fields: { ...stale.fields, answer: "latest unsent answer" } };
+  const bytes = JSON.stringify({ version: 2, scope, activeId: stale.id, drafts: [stale] });
+  const storage = { getItem: () => bytes, setItem: () => { throw new Error("quota"); } };
   expect(writePracticeDraft(current, storage)).toBe(false);
   expect(readPracticeDraft(scope, storage)?.fields.answer).toBe("latest unsent answer");
-  expect(storage.getItem).not.toHaveBeenCalled();
 });
 
 it("keeps the newer manual selection and moves legacy answers in shelf order on a matrix-first read", () => {
