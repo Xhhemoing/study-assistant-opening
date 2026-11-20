@@ -157,6 +157,15 @@ function readStoredPracticeDraftCollection(scope: string, storage: ReadStorage):
   return { collection, legacy };
 }
 
+function restoreCachedReadFailure(scope: string, previousBlocked: string | undefined): void {
+  if (!memory.has(scope)) return;
+  if (previousBlocked === undefined) blocked.delete(scope);
+  else blocked.set(scope, previousBlocked);
+  // Keep the form editable, and require a fresh read before saving its next edit.
+  unreconciled.add(scope);
+  dirty.add(scope);
+}
+
 /** A bad stored checkpoint blocks new writes; it is never silently replaced by an empty draft. */
 export function readPracticeDraftCollection(scope: string, storage: ReadStorage | null): PracticeDraftCollection | null {
   const cached = memory.get(scope);
@@ -266,14 +275,29 @@ export function isRecoverableManualDraft(draft: PracticeDraft): boolean {
 
 function migrateOrdinaryManualDrafts(scopes: PracticeDraftScopes, source: StoredPracticeDraftCollection, fallback: PracticeDraft, storage: PartitionStorage): void {
   const { collection: ordinary, legacy } = source;
-  const manualEntry = fallback.scope === scopes.manual;
-  const manual = readPracticeDraftCollection(scopes.manual, storage);
+  const manualScope = scopes.manual;
+  const manualEntry = fallback.scope === manualScope;
+  const previousBlocked = blocked.get(manualScope);
+  let storedManual: StoredPracticeDraftCollection | null;
+  try {
+    storedManual = readStoredPracticeDraftCollection(manualScope, storage);
+  } catch (reason) {
+    restoreCachedReadFailure(manualScope, previousBlocked);
+    throw reason;
+  }
+  const cachedManual = memory.get(manualScope);
+  const manual = cachedManual && dirtyDraftIds.get(manualScope)?.size
+    ? mergeWithStoredCollection(manualScope, cachedManual, storedManual)
+    : storedManual?.collection;
+  unreconciled.delete(manualScope);
+  if (manual) memory.set(manualScope, manual);
+  else memory.delete(manualScope);
   const moved = ordinary.drafts.filter(draft => draft.fields.matrixMode !== true);
   const existingIds = new Set(manual?.drafts.map(draft => draft.id));
-  const added = moved.filter(draft => !existingIds.has(draft.id)).map(draft => ({ ...draft, scope: scopes.manual }));
+  const added = moved.filter(draft => !existingIds.has(draft.id)).map(draft => ({ ...draft, scope: manualScope }));
   const drafts = [...(manual?.drafts ?? []), ...added];
   const legacyActive = added.find(draft => draft.id === ordinary.activeId && isRecoverableManualDraft(draft));
-  const manualFallback = manualEntry ? fallback : emptyPracticeDraft(scopes.manual);
+  const manualFallback = manualEntry ? fallback : emptyPracticeDraft(manualScope);
   const activeId = manual?.activeId ?? legacyActive?.id ?? manualFallback.id;
   if (activeId === manualFallback.id && !drafts.some(draft => draft.id === activeId)) drafts.push(manualFallback);
   const migrationError = "无法迁移练习草稿，原答案已保留。请释放浏览器存储后重试。";
@@ -288,10 +312,10 @@ function migrateOrdinaryManualDrafts(scopes: PracticeDraftScopes, source: Stored
       throw new Error(migrationError);
     }
   }
-  if (!manual || added.length || dirty.has(scopes.manual)) {
-    const next = { version: 2 as const, scope: scopes.manual, activeId, drafts };
+  if (!storedManual || added.length || dirty.has(manualScope)) {
+    const next = { version: 2 as const, scope: manualScope, activeId, drafts };
     if (!persistCollection(next, storage)) throw new Error(migrationError);
-    memory.set(scopes.manual, next);
+    memory.set(manualScope, next);
   }
 
   // Leave ordinary v2 in place if cleanup is pending, so reads won't fall
@@ -563,7 +587,14 @@ export function moveArchivedPracticeDraft(
     throw new Error(moveError);
   }
 
-  const storedSource = readStoredPracticeDraftCollection(scope, storage);
+  const previousSourceBlocked = blocked.get(scope);
+  let storedSource: StoredPracticeDraftCollection | null;
+  try {
+    storedSource = readStoredPracticeDraftCollection(scope, storage);
+  } catch {
+    restoreCachedReadFailure(scope, previousSourceBlocked);
+    throw new Error(moveError);
+  }
   if (!storedSource && !dirtyDraftIds.get(scope)?.size) throw new Error(moveError);
   const source = mergeWithStoredCollection(scope, current, storedSource);
   const archived = source.drafts.find(draft => draft.id === draftId);
@@ -572,8 +603,16 @@ export function moveArchivedPracticeDraft(
   if (!moved) throw new Error(moveError);
 
   const targetKey = storageKey(targetScope);
-  const previousTarget = storage.getItem(targetKey);
-  const storedTarget = readStoredPracticeDraftCollection(targetScope, storage);
+  const previousTargetBlocked = blocked.get(targetScope);
+  let previousTarget: string | null;
+  let storedTarget: StoredPracticeDraftCollection | null;
+  try {
+    previousTarget = storage.getItem(targetKey);
+    storedTarget = readStoredPracticeDraftCollection(targetScope, storage);
+  } catch {
+    restoreCachedReadFailure(targetScope, previousTargetBlocked);
+    throw new Error(moveError);
+  }
   const cachedTarget = memory.get(targetScope);
   const target = cachedTarget && dirtyDraftIds.get(targetScope)?.size
     ? mergeWithStoredCollection(targetScope, cachedTarget, storedTarget)
