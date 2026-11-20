@@ -78,7 +78,18 @@ it.each(["all", "learning", "parser", "logistics", "teaching", "tutor"])(
     } finally { rmSync(directory, { recursive: true, force: true }); }
   });
 
-it("samples Date.now() once per publish so clock ticks cannot exceed 15,000 ms receipt lifetime", () => {
+it("samples Date.now() once per publish so clock ticks cannot exceed 15,000 ms receipt lifetime", async () => {
+  const configured = { WORKER_ROLE: "tutor" };
+  const { workerRole } = loadWorkerEnv(configured);
+  const { queueKinds } = await prepareWorkerRole(workerRole, async () => async () => ({ exitCode: 0, stdout: "" }), {
+    probe: async () => ({
+      status: "not_configured",
+      directoryConfigured: false,
+      directoryExists: false,
+      missingFiles: [],
+      inferenceMs: null,
+    }),
+  });
   const directory = mkdtempSync(path.join(tmpdir(), "worker-ready-clock-"));
   const file = path.join(directory, "ready.json");
   let tick = 1_700_000_000_000;
@@ -87,8 +98,7 @@ it("samples Date.now() once per publish so clock ticks cannot exceed 15,000 ms r
     return tick;
   });
   try {
-    const configured = { WORKER_ROLE: "tutor" };
-    createWorkerReadiness(file, { release: directory, role: "teaching", queueKinds: ["tutor"] }).publish();
+    createWorkerReadiness(file, { release: directory, role: workerRole, queueKinds: [...queueKinds] }).publish();
     const receipt = JSON.parse(readFileSync(file, "utf8"));
     expect(receipt.expiresAt - receipt.checkedAt).toBe(15_000);
     const snapshot = {
