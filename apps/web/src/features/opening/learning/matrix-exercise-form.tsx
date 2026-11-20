@@ -47,7 +47,7 @@ function replaceMatrixVariant(variant: number) {
 
 function BoundMatrixEntry(props: Extract<Props, { boundExercise: MatrixExerciseInput }>) {
   const [variant, setVariant] = useState(props.boundExercise.variant);
-  const exercise = { ...props.boundExercise, variant };
+  const exercise = useMemo(() => ({ ...props.boundExercise, variant }), [props.boundExercise, variant]);
   const scope = matrixScope(props.courseId, exercise);
   function switchVariant(nextVariant: number) {
     replaceMatrixVariant(nextVariant);

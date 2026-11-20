@@ -91,6 +91,86 @@ it.each([
   else expect(moveFailure).toEqual(new Error("草稿未切换，原答案已保留。请允许使用浏览器存储或释放空间后重试。"));
 });
 
+it.each([
+  "source flush",
+  "destination write",
+  "source cleanup",
+  "source cleanup and destination rollback",
+] as const)("protects a dirty source when %s fails during a matrix restore", async failure => {
+  const courseId = crypto.randomUUID();
+  const sourceId = crypto.randomUUID();
+  const exercise = { sourceId, exerciseKey: "addition", variant: 2 } as const;
+  const source = practiceScope(courseId, "matrix", null, undefined, undefined, exercise);
+  const target = practiceScope(courseId, "matrix", null, undefined, undefined, { ...exercise, variant: 3 });
+  const sourceKey = `opening-practice:v2:${source}`;
+  const targetKey = `opening-practice:v2:${target}`;
+  const fields = { sourceId, matrixKey: "addition" as const, matrixVariant: 2 };
+  const original = emptyPracticeDraft(source, { ...fields, answer: "[[1]]" });
+  const archived = emptyPracticeDraft(source, { ...fields, matrixVariant: 3, answer: "[[2]]" });
+  const existing = emptyPracticeDraft(target, { ...fields, matrixVariant: 3, answer: "[[99]]" });
+  const disk = { ...storage(), removeItem: vi.fn((key: string) => { disk.data.delete(key); }) };
+  writePracticeDraft(archived, disk);
+  switchPracticeDraft(source, archived.id, original, disk);
+  writePracticeDraft(existing, disk);
+  const previousTarget = disk.data.get(targetKey);
+
+  disk.setItem.mockImplementationOnce(() => { throw new Error("edit save denied"); });
+  const edit = patchPracticeDraft(source, {}, { fields: { answer: "[[8]]" } }, disk, original.id);
+  expect(edit.persisted).toBe(false);
+  expect(disk.data.get(sourceKey)).toContain('"answer":"[[1]]"');
+
+  const flushDenied = failure === "source flush";
+  const committed = failure === "source cleanup and destination rollback";
+  disk.setItem.mockClear();
+  disk.setItem.mockImplementation((key, value) => {
+    if ((key === sourceKey && (flushDenied || !value.includes(archived.id)))
+      || (key === targetKey && (failure === "destination write" || (committed && value === previousTarget)))) {
+      throw new Error("restore write denied");
+    }
+    disk.data.set(key, value);
+  });
+
+  const move = () => moveArchivedPracticeDraft(source, original.id, archived.id, target, disk);
+  if (committed) expect(move().activeId).toBe(archived.id);
+  else expect(move).toThrow("草稿未切换");
+  if (!committed) expect(disk.data.get(targetKey)).toBe(previousTarget);
+  if (flushDenied) expect(disk.setItem.mock.calls.some(([key]) => key === targetKey)).toBe(false);
+  else expect(() => assertPracticeDraftSaved(source)).not.toThrow();
+
+  const hotSource = readPracticeDraft(source, disk);
+  const hotTarget = readPracticeDraft(target, disk);
+  expect(hotSource).toEqual(edit.draft);
+  expect(hotTarget).toEqual(committed ? { ...archived, scope: target } : existing);
+  expect(readPracticeDraft(source, disk, archived.id)).toEqual(archived);
+
+  vi.resetModules();
+  const cold = await import("./practice-draft-storage");
+  expect(cold.readPracticeDraft(source, disk)).toEqual(flushDenied ? original : hotSource);
+  expect(cold.readPracticeDraft(target, disk)).toEqual(hotTarget);
+  expect(cold.readPracticeDraft(source, disk, archived.id)).toEqual(archived);
+
+  if (flushDenied) {
+    // A denied flush keeps the edit in memory. Once storage recovers, retry makes it durable.
+    disk.setItem.mockImplementation((key, value) => { disk.data.set(key, value); });
+    expect(move().activeId).toBe(archived.id);
+    vi.resetModules();
+    const retried = await import("./practice-draft-storage");
+    expect(retried.readPracticeDraft(source, disk)).toEqual(hotSource);
+    expect(retried.readPracticeDraft(target, disk)).toEqual({ ...archived, scope: target });
+  }
+
+  if (committed) {
+    const coldSource = cold.readPracticeDraftCollection(source, disk)!;
+    expect(cold.reconcileMovedPracticeArchives(coldSource, () => target, disk)).toEqual(new Set([archived.id]));
+    expect(cold.readPracticeDraft(source, disk, archived.id)).toEqual(archived);
+    disk.setItem.mockImplementation((key, value) => { disk.data.set(key, value); });
+    expect(cold.reconcileMovedPracticeArchives(coldSource, () => target, disk)).toEqual(new Set([archived.id]));
+    expect(cold.readPracticeDraft(source, disk, archived.id)).toBeNull();
+    expect(cold.readPracticeDraft(source, disk)).toEqual(hotSource);
+    expect(cold.readPracticeDraft(target, disk)).toEqual(hotTarget);
+  }
+});
+
 it("refuses a second same-tick switch from stale controls rather than discarding the new active draft", () => {
   const { scope, saved, disk } = setup();
   const next = emptyPracticeDraft(scope);

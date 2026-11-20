@@ -347,6 +347,117 @@ it.each(["setItem", "removeItem"] as const)("switches to the durable bound varia
   }
 });
 
+it.each([
+  "source flush",
+  "destination write",
+  "source cleanup",
+  "source cleanup and destination rollback",
+] as const)("handles a dirty source in the study page when %s fails during restore", async failure => {
+  const courseId = crypto.randomUUID(), sourceId = crypto.randomUUID();
+  const exercise = { sourceId, exerciseKey: "addition", variant: 2 } as const;
+  const scope = boundScope(courseId, exercise), targetScope = boundScope(courseId, { ...exercise, variant: 3 });
+  const sourceKey = storageKey(scope), targetKey = storageKey(targetScope);
+  const fields = { sourceId, matrixKey: exercise.exerciseKey, matrixVariant: 2 };
+  const original = emptyPracticeDraft(scope, { ...fields, answer: "[[1]]" });
+  const archived = emptyPracticeDraft(scope, { ...fields, matrixVariant: 3, answer: "[[2]]" });
+  const existing = emptyPracticeDraft(targetScope, { ...fields, matrixVariant: 3, answer: "[[99]]" });
+  for (const draft of [original, archived, existing]) {
+    draft.start = { sessionId: null, clientKey: `matrix-start:${draft.id}`, createInput: null,
+      sessionInput: { courseId, sourceIds: [sourceId], skillLabel: "矩阵加法" } };
+  }
+  writePracticeDraft(archived, sessionStorage);
+  switchPracticeDraft(scope, archived.id, original, sessionStorage);
+  writePracticeDraft(existing, sessionStorage);
+  const previousTarget = sessionStorage.getItem(targetKey);
+
+  const sessionId = crypto.randomUUID(), attemptId = crypto.randomUUID();
+  client.createSession.mockResolvedValue({ id: sessionId });
+  client.createAttempt.mockResolvedValue({
+    id: attemptId, courseId, sessionId, sourceIds: [sourceId],
+    matrixExercise: createMatrixExerciseSpec(exercise.exerciseKey, exercise.variant),
+  });
+  client.getAttempt.mockResolvedValue({ attemptId, sessionId, deliveredAssistance: "none" });
+  client.listObservations.mockResolvedValue([]);
+
+  const view = studyEntry(courseId);
+  const sourceUrl = `/opening/courses/${courseId}/study?mode=matrix&exercise=addition&variant=2&sourceId=${sourceId}#practice`;
+  const targetUrl = sourceUrl.replace("variant=2", "variant=3");
+  const flushDenied = failure === "source flush";
+  const committed = failure === "source cleanup and destination rollback";
+  const setItem = Storage.prototype.setItem;
+  const save = vi.spyOn(Storage.prototype, "setItem");
+  try {
+    window.history.replaceState(null, "", sourceUrl);
+    await view.open();
+    await view.click("继续此练习");
+    expect(view.answer()).toBe("[[1]]");
+
+    save.mockImplementationOnce(() => { throw new Error("edit save denied"); });
+    await act(async () => {
+      const input = view.host.querySelector<HTMLTextAreaElement>("fieldset textarea:not([readonly])")!;
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(input, "[[8]]");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(view.answer()).toBe("[[8]]");
+    expect(view.host.textContent).toContain("答案暂时只在当前页面保留");
+    expect(storedCollection(scope)?.drafts.find(draft => draft.id === original.id)?.fields.answer).toBe("[[1]]");
+
+    save.mockClear();
+    save.mockImplementation(function (this: Storage, key, value) {
+      if ((key === sourceKey && (flushDenied || !value.includes(archived.id)))
+        || (key === targetKey && (failure === "destination write" || (committed && value === previousTarget)))) {
+        throw new Error("restore write denied");
+      }
+      setItem.call(this, key, value);
+    });
+    await view.click("继续这次练习");
+    expect(`${location.pathname}${location.search}${location.hash}`).toBe(committed ? targetUrl : sourceUrl);
+    expect(view.answer()).toBe(committed ? "[[2]]" : "[[8]]");
+    const alerts = [...view.host.querySelectorAll('[role="alert"]')].map(element => element.textContent);
+    if (committed) expect(alerts.join(" ")).not.toContain("草稿未切换");
+    else expect(alerts.join(" ")).toContain("草稿未切换");
+    expect(view.host.textContent?.includes("答案暂时只在当前页面保留")).toBe(flushDenied);
+    if (!committed) expect(sessionStorage.getItem(targetKey)).toBe(previousTarget);
+    if (flushDenied) expect(save.mock.calls.some(([key]) => key === targetKey)).toBe(false);
+
+    for (const cold of [false, true]) {
+      for (const [url, openedScope, id, answer] of [
+        [sourceUrl, scope, original.id, cold && flushDenied ? "[[1]]" : "[[8]]"],
+        [targetUrl, targetScope, committed ? archived.id : existing.id, committed ? "[[2]]" : "[[99]]"],
+      ] as const) {
+        window.history.replaceState(null, "", url);
+        await view.open(cold);
+        const storage = cold ? await import("./practice-draft-storage") : { readPracticeDraft };
+        expect(view.answer()).toBe(answer);
+        expect(storage.readPracticeDraft(openedScope, null)).toMatchObject({ id, fields: { answer } });
+        if (openedScope === scope) {
+          const shelf = view.host.querySelector("details");
+          if (committed) expect(shelf?.textContent ?? "").not.toContain("继续这次练习");
+          else expect(shelf?.textContent).toContain("继续这次练习");
+        }
+      }
+    }
+
+    save.mockRestore();
+    window.history.replaceState(null, "", sourceUrl);
+    if (flushDenied) {
+      await view.open();
+      await view.click("继续这次练习");
+      expect(view.answer()).toBe("[[2]]");
+      window.history.replaceState(null, "", sourceUrl);
+    }
+    if (flushDenied || committed) {
+      await view.open(true);
+      expect(view.answer()).toBe("[[8]]");
+      expect(storedCollection(scope)?.drafts.map(draft => draft.id)).toEqual([original.id]);
+      expect(storedCollection(targetScope)?.activeId).toBe(archived.id);
+    }
+  } finally {
+    save.mockRestore();
+    await view.cleanUp();
+  }
+});
+
 it("restores a variant from the course matrix lesson URL and reopens the same draft", async () => {
   const courseId = crypto.randomUUID(), sourceId = crypto.randomUUID();
   const scope = practiceScope(courseId, "matrix");

@@ -80,10 +80,10 @@ export function usePracticeDraft(scope: string, initial: Partial<PracticeFields>
       const selected = switchDraft(browserStorage());
       setCollection(selected.scope === scope ? selected : readPracticeDraftCollection(scope, null)!);
       setSwitchError("");
-      setStorageWarning(practiceDraftHasUnsavedStorage(scope));
       return true;
     }
     catch (reason) { setSwitchError(userFacingMessage(reason, "草稿未切换，原答案已保留")); return false; }
+    finally { setStorageWarning(practiceDraftHasUnsavedStorage(scope)); }
   }
   return { draft, drafts, patch, ready, storageWarning, loadError, switchError,
     requireSaved: () => assertPracticeDraftSaved(scope),

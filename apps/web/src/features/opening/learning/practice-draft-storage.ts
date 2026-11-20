@@ -588,6 +588,14 @@ export function moveArchivedPracticeDraft(
   };
   const nextSource = { ...source, drafts: source.drafts.filter(draft => draft.id !== draftId) };
 
+  // Rollback can fail after the destination is saved. First make the source
+  // answer durable with the archive still in place, so either outcome can reopen.
+  if (dirty.has(scope) || JSON.stringify(source) !== JSON.stringify(storedSource?.collection)) {
+    unreconciled.delete(scope);
+    if (!persistCollection(source, storage)) throw new Error(moveError);
+  }
+  memory.set(scope, source);
+
   try {
     storage.setItem(targetKey, JSON.stringify(nextTarget));
   } catch { throw new Error(moveError); }
@@ -605,8 +613,7 @@ export function moveArchivedPracticeDraft(
       rolledBack = true;
     } catch {
       // The destination is durable. Leave the source selection and archive intact for cleanup on reopen.
-      const sourceCopy = storedSource?.collection.drafts.find(draft => draft.id === draftId);
-      if (sourceCopy) pendingArchiveCleanup.set(draftId, { source: sourceCopy, targetScope });
+      pendingArchiveCleanup.set(draftId, { source: archived, targetScope });
     }
     if (rolledBack) throw new Error(moveError);
   }
