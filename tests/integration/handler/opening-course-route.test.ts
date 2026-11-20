@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { courseRouteSnapshotSchema } from "@aistudy/contracts";
+import { courseRouteLegacyTaskContextSchema, courseRouteSnapshotSchema, courseRouteTaskContextSchema } from "@aistudy/contracts";
 import { createOpeningLearningGoalRepository, createOpeningTeachingContentRepository } from "@aistudy/database";
 import { createOpeningCourseRouteRepository } from "../../../packages/database/src/repositories/opening-course-route";
 import { backupRows } from "../opening-backup-records-fixture";
@@ -130,4 +130,44 @@ it("rejects foreign course/task identity and client-invented delayed evidence wi
   expect(response.status).toBe(404);
   const [count] = await f.sql`SELECT count(*)::int AS count FROM opening_retest_activities WHERE workspace_id=${f.scope.workspaceId}`;
   expect(count!.count).toBe(0);
+});
+
+it("keeps the legacy task payload strict and includes the retest id only when requested", async () => {
+  const courseId = randomUUID(), taskId = randomUUID(), retestId = randomUUID();
+  const requirementId = randomUUID(), stableSkillId = randomUUID();
+  const { sql, scope } = f;
+  await sql`INSERT INTO courses(id,workspace_id,title,slug) VALUES(${courseId},${scope.workspaceId},'Task context',${courseId})`;
+  const goal = await createOpeningLearningGoalRepository(sql).create(scope, {
+    clientKey: randomUUID(), courseIds: [courseId], title: "Managed retest", kind: "custom",
+    targetDate: null, examDate: null, weeklyMinutes: 120, priority: 1, learningMode: "understand",
+    successCriteria: "Independent verification",
+  });
+  await createOpeningCourseRouteRepository(sql, { compilerEnabled: true }).confirm(scope, courseId, {
+    expectedRevisions: [], confirmScope: true,
+    requirements: [{ id: requirementId, stableSkillId, knowledgeNodeId: null, requirementKey: "task-context",
+      title: "Task context", position: 0, mandatory: true, goalIds: [goal.id], prerequisiteIds: [], sourceRefs: [],
+      origin: "confirmed", verification: { kind: "unavailable", status: "missing", exerciseKeys: [], rubric: null, missingReasons: [] } }],
+  });
+  await sql`INSERT INTO opening_tasks (id,workspace_id,owner_user_id,course_id,title,minutes,requirement_key)
+    VALUES (${taskId},${scope.workspaceId},${scope.ownerUserId},${courseId},'Independent retest',20,'task-context')`;
+  const protocol = { protocolId: "course-route-delayed-v1", goalId: goal.id, goalRevision: goal.revision,
+    requirementId, requirementRevision: 1, stableSkillId, baselineObservationId: randomUUID(),
+    baselineRootId: randomUUID(), originActivityId: randomUUID(), minutes: 20 };
+  await sql`INSERT INTO opening_retest_activities (id,workspace_id,owner_user_id,course_id,skill_label,
+    requirement_key,evidence_cycle_id,task_id,status,learning_protocol)
+    VALUES (${retestId},${scope.workspaceId},${scope.ownerUserId},${courseId},'Task context',
+      'task-context',${randomUUID()},${taskId},'accepted',${sql.json(protocol)})`;
+
+  const read = async (optIn = "") => {
+    const response = await task(request(courseId, "GET", `/task?taskId=${taskId}${optIn}`), context(courseId));
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+    return response.json();
+  };
+  const legacy = await read();
+  expect(courseRouteLegacyTaskContextSchema.parse(legacy)).toMatchObject({ managed: true, courseId, taskId });
+  expect(await read("&includeRetestId=false")).toEqual(legacy);
+  const enriched = await read("&includeRetestId=true");
+  expect(courseRouteTaskContextSchema.parse(enriched)).toEqual({ ...legacy, retestId });
+  expect(courseRouteLegacyTaskContextSchema.safeParse(enriched).success).toBe(false);
 });

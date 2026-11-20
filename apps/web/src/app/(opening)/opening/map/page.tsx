@@ -36,15 +36,26 @@ function resolveFocus(rawFocus?: string): AssetGraphNodeId | null {
   return parsed.success ? parsed.data : null;
 }
 
+function resolveSandbox(rawSandbox?: string): "series" | null {
+  return rawSandbox === "series" ? "series" : null;
+}
+
 export default async function OpeningMapPage({
   searchParams,
 }: {
-  searchParams: Promise<{ context?: string; id?: string; focus?: string; lens?: string }>;
+  searchParams: Promise<{
+    context?: string;
+    id?: string;
+    focus?: string;
+    lens?: string;
+    sandbox?: string;
+  }>;
 }) {
   const params = await searchParams;
   const initialContext = resolveContext(params.context, params.id);
   const initialLens = resolveLens(params.lens);
   const initialFocus = resolveFocus(params.focus);
+  const initialSandbox = resolveSandbox(params.sandbox);
 
   return (
     <AssetGraphWorkspace
@@ -52,6 +63,7 @@ export default async function OpeningMapPage({
       initialContext={initialContext}
       initialLens={initialLens}
       initialFocus={initialFocus}
+      initialSandbox={initialSandbox}
     />
   );
 }

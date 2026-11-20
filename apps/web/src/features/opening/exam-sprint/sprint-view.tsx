@@ -18,6 +18,7 @@ import { useExamResources } from "./use-exam-resources";
 import { LearnerStateCard } from "../teaching/learner-state-card";
 import { SourceTracker } from "./source-tracker";
 import { sprintCourseScope } from "./sprint-course-route";
+import { SprintPaperReviewPanel } from "./sprint-paper-review";
 import { sprintSkillSupport } from "./skill-priorities";
 
 import { LessonButton } from "./lesson-button";
@@ -197,6 +198,7 @@ export function ExamSprintView({ courseId, embedded = false, onCourseBound }: { 
         <SprintSummary overview={overview} />
         {integration?.binding ? <details className="text-xs text-text-2"><summary className="min-h-11 cursor-pointer py-1">查看课程的共同学习证据</summary><LearnerStateCard courseId={integration.binding.courseId} revision={overview.attempts.filter(item => item.answeredAt).length} /></details> : null}
         {integration === null ? <p className="text-xs text-text-3">正在确认课程关联，目标设置暂不可编辑。</p> : integration.binding ? <section className={`${ui.panel} p-4 text-xs leading-6 text-text-2`}><p>当前使用课程目标：{integration.courseGoal?.targetDate ?? "未设日期"} · 每周 {integration.courseGoal?.weeklyMinutes ?? "未设"} 分钟{integration.courseGoal?.milestoneTitle ? ` · ${integration.courseGoal.milestoneTitle}` : ""}</p><p>冲刺与其他学习任务共用课程规划的时间预算。</p><Link className={`${ui.quiet} mt-2`} href={objectHref(`/opening/courses/${integration.binding.courseId}`)}>查看课程并调整目标</Link></section> : <SprintSettings key={`${overview.state.examDate}-${overview.state.dailyMinutes}`} overview={overview} disabled={disabled} send={send} />}
+        {!embedded && integration?.binding ? <SprintPaperReviewPanel courseId={integration.binding.courseId} /> : null}
         <div role="tablist" aria-label="冲刺工具" className={`${ui.segment} overflow-x-auto`}>{tabs.filter(item => diagnostics || item.id !== "estimates").map(item => <button key={item.id} type="button" role="tab" id={`sprint-tab-${item.id}`} aria-selected={tab === item.id} aria-controls={`sprint-panel-${item.id}`} aria-pressed={tab === item.id} disabled={busy} className={`${ui.segmentItem} whitespace-nowrap`} onClick={() => selectTab(item.id)}>{item.label}</button>)}</div>
         <div role="tabpanel" id="sprint-panel-practice" aria-labelledby="sprint-tab-practice" hidden={tab !== "practice"} className="space-y-5">
           <CompletedRun overview={overview} disabled={disabled} send={send} onOpenLesson={openLesson} />{recommendations.length ? <section className={`${ui.panel} p-5`}><h2 className="font-semibold">下一步建议</h2><div className="mt-3 space-y-3">{recommendations.slice(0, 3).map((item, index) => {

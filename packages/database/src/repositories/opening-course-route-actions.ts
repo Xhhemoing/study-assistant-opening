@@ -30,7 +30,7 @@ const messages={authorization_required:"导师工具尚未授权；未创建课�
   verification_unavailable:"本要求尚缺可用习题或判定标准；保留已有学习与答案，请补充验证材料。",evidence_unknown:"当前答案尚无可靠判定，请先核对评价；不会把缺少证据当作不会。",
   evidence_changed:"原活动的要求、材料或评价已变化，请读取当前课程路线再选择；已有活动和答案保留。",configuration:"教学内容生成尚未开启，未创建空白活动。",
   course_complete:"已完成当前确认范围的当前检查与逐项综合收尾；延迟验证单独记录。可回看课程记录，或明确安排延迟复测与维护。",
-  retest_waiting:"尚未到达本次复测的最早开始时间。原任务与学习位置保留。",retest_expired:"原延迟复测已过期，未降低能力记录或重新安排；可明确选择新的普通学习。",
+  retest_pending:"这项要求已有待进行的独立复测，请前往今日任务。",retest_waiting:"尚未到达本次复测的最早开始时间。原任务与学习位置保留。",retest_expired:"原延迟复测已过期，未降低能力记录或重新安排；可明确选择新的普通学习。",
   retest_cancelled:"原延迟复测已取消或失效，未重新开始；原答案保留，可明确选择新的普通学习。"};
 function choice(courseId:string,reason:keyof typeof messages,ids:string[]=[]):CourseRouteActionResult{
   return {kind:"choice",reason,message:messages[reason],courseId,href:href(courseId),requirementIds:ids};
@@ -97,7 +97,34 @@ export function createOpeningCourseRouteActions(sql:Sql,options:{compilerEnabled
       :"taskId" in input&&input.taskId?`course-route-task:${input.taskId.toLowerCase()}`:`course-route-start:${courseId}:${input.clientKey}`;
     const [receipt]=await tx`SELECT * FROM opening_teaching_activities WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND client_key=${key}`;
     const snapshot=await readOpeningCourseRoute(tx,scope,courseId,undefined,options.exactVerificationEnabled);
+    const start = "requirementId" in input ? input : undefined;
+    if (start?.expectedRetestId || start?.protectPendingRetest) {
+      const current = snapshot.requirements.find(row => row.requirement.id === start.requirementId);
+      const delayed = current?.delayedCheck;
+      if (start.expectedRetestId) {
+        if (current?.status === "blocked" || current?.requirement.revision !== start.expectedRequirementRevision ||
+          delayed?.status !== "pending" || delayed.retestId !== start.expectedRetestId ||
+          delayed.taskId !== start.taskId) {
+          return choice(courseId, "retest_cancelled", [start.requirementId]);
+        }
+        if (!delayed.notBeforeAt || Date.parse(delayed.notBeforeAt) > Date.now()) {
+          return choice(courseId, "retest_waiting", [start.requirementId]);
+        }
+      } else if (delayed?.status === "pending") {
+        return choice(courseId, "retest_pending", [start.requirementId]);
+      }
+    }
     if(receipt){
+      if (start?.expectedRetestId) {
+        const context = courseRouteActivityContextSchema.safeParse((receipt.goal_json as {courseRoute?: unknown})?.courseRoute);
+        const [task] = await tx`SELECT status,version FROM opening_tasks WHERE id=${start.taskId ?? null}
+          AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+        if (!context.success || context.data.retestId !== start.expectedRetestId ||
+          context.data.goalRevision !== start.expectedGoalRevision || task?.status !== "pending" ||
+          Number(task.version) !== start.expectedTaskVersion) {
+          return choice(courseId, "retest_cancelled", [start.requirementId]);
+        }
+      }
       if (prerequisiteReturn) await assertPrerequisiteReturnReceipt(tx, scope, receipt, input, prerequisiteReturn);
       if (hasOpeningSpanCourseBinding(receipt.goal_json, receipt.create_intent)) {
         if (Object.hasOwn((receipt.goal_json ?? {}) as object, "spanPrerequisiteRepair")) {
@@ -204,6 +231,8 @@ export function createOpeningCourseRouteActions(sql:Sql,options:{compilerEnabled
       if(!task||task.status!=="pending"||Number(task.version)!==input.expectedTaskVersion||task.course_id!==courseId||task.requirement_key!==current.requirement.requirementKey)
         throw learningError("CONFLICT","维护抽查任务已变化或不属于此目标与课程要求，请重新读取。");
       const [retest]=await tx`SELECT id,learning_protocol,status,deadline_at,not_before_at FROM opening_retest_activities WHERE task_id=${input.taskId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+      if(input.expectedRetestId && input.expectedRetestId !== retest?.id)
+        return choice(courseId,"retest_cancelled",[current.requirement.id]);
       if(retest){const protocol=courseRouteDelayedProtocolSchema.safeParse(retest.learning_protocol);
         if(!protocol.success||protocol.data.goalId!==goal.id||protocol.data.requirementId!==current.requirement.id)throw learningError("CONFLICT","复测任务不属于本目标与要求。");
         if(["cancelled","declined","invalidated","superseded","completed"].includes(String(retest.status)))return choice(courseId,"retest_cancelled",[current.requirement.id]);

@@ -17,6 +17,7 @@ import { ConnectionNotice } from "./connection-notice";
 import { useRecentConversations } from "./recent-conversations";
 import { useDueReviewCount } from "./review-count";
 import { NavigationShortcutsHint } from "./navigation-shortcuts-hint";
+import { subscribeOpeningPrivacyChange } from "../client/privacy-change";
 import { WorkspaceLayoutContext } from "./workspace-layout-context";
 
 const navigationFeature = (href: string, label: string, placement: "core" | "tool"): Feature => ({
@@ -29,6 +30,7 @@ const navigationFeature = (href: string, label: string, placement: "core" | "too
  * 专注由用户主动进入（账户菜单），不再进入学习页时自动隐藏导航。
  */
 export function OpeningShellV3({ children }: { children: ReactNode }) {
+  useEffect(() => subscribeOpeningPrivacyChange(() => undefined), []);
   const pathname = usePathname();
   const search = useSearchParams().toString();
   const router = useRouter();

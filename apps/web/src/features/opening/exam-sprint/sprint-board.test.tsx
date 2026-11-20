@@ -54,6 +54,11 @@ describe("sprint plan confirmation", () => {
     const api = client(); await render(api);
     expect(button("调整安排").getAttribute("aria-expanded")).toBe("false");
     expect(host.querySelector('input[type="radio"]')).toBeNull();
+    const mapLinks = [...host.querySelectorAll<HTMLAnchorElement>('a[href^="/opening/map"]')];
+    expect(mapLinks).toHaveLength(2);
+    for (const link of mapLinks) {
+      expect(link.search).toBe(`?context=course&id=${encodeURIComponent(`course/${course}`)}`);
+    }
     expect(host.textContent).toContain("现有任务");
     expect(host.textContent).not.toContain("候选任务");
     expect(host.textContent).not.toContain("另一门课的任务");
