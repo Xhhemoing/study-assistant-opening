@@ -38,6 +38,7 @@ export async function readOpeningProviderStream(body: ReadableStream<Uint8Array>
   let buffer = "", data: string[] = [], text = "", bytes = 0, done = false, stopped = false;
   let requestId: string | null = null;
   let latestUsage: ParsedProviderUsage | null = null;
+  let hasTerminalOutputUsage = false;
   let answerFailure: OpeningProviderStreamError | undefined;
   function invalid(message: string): never { throw new OpeningProviderStreamError("PROVIDER_RESPONSE", message); }
   const abort = () => { void reader.cancel(options.signal.reason).catch(() => undefined); };
@@ -52,7 +53,10 @@ export async function readOpeningProviderStream(body: ReadableStream<Uint8Array>
     const value = parsed as Record<string, unknown>;
     // Usage preceding any later generated delta describes only partial output.
     // Usage in this same frame can describe the output it carries.
-    if (Array.isArray(value.choices) && value.choices.some(hasGeneratedDelta)) latestUsage = null;
+    if (Array.isArray(value.choices) && value.choices.some(hasGeneratedDelta)) {
+      latestUsage = null;
+      hasTerminalOutputUsage = false;
+    }
     // Even an embedded rate-limit error follows a sent request; never release its reservation.
     if (value.error) invalid("provider stream failed");
     if (typeof value.id === "string") requestId = value.id;
@@ -60,11 +64,18 @@ export async function readOpeningProviderStream(body: ReadableStream<Uint8Array>
     if (value.usage != null) {
       const parsedUsage = parseProviderUsage(value.usage, { clamp: false });
       if (!parsedUsage) invalid("invalid provider stream usage");
-      latestUsage = {
-        inputTokens: parsedUsage.inputTokens ?? latestUsage?.inputTokens ?? null,
-        outputTokens: parsedUsage.outputTokens ?? latestUsage?.outputTokens ?? null,
-        cachedInputTokens: parsedUsage.cachedInputTokens ?? latestUsage?.cachedInputTokens ?? null,
-      };
+      const [choice] = value.choices;
+      const terminal = !stopped && value.choices.length === 1 && choice?.index === 0
+        && typeof choice.finish_reason === "string" && choice.finish_reason.length > 0;
+      const trailer = stopped && value.choices.length === 0;
+      if (!stopped || trailer) {
+        latestUsage = {
+          inputTokens: parsedUsage.inputTokens ?? latestUsage?.inputTokens ?? null,
+          outputTokens: parsedUsage.outputTokens ?? latestUsage?.outputTokens ?? null,
+          cachedInputTokens: parsedUsage.cachedInputTokens ?? latestUsage?.cachedInputTokens ?? null,
+        };
+        if ((terminal || trailer) && parsedUsage.outputTokens !== null) hasTerminalOutputUsage = true;
+      }
     }
     for (const raw of value.choices) {
       if (answerFailure) break;
@@ -141,7 +152,7 @@ export async function readOpeningProviderStream(body: ReadableStream<Uint8Array>
     // The provider adapter classifies transport errors after parsing returns.
     // Deliver validated usage separately so the wrapping cannot lose it.
     const { inputTokens, outputTokens, cachedInputTokens } = usageSnapshot();
-    if (inputTokens !== null && outputTokens !== null) {
+    if (hasTerminalOutputUsage && inputTokens !== null && outputTokens !== null) {
       options.onTextDelta?.[onFailedResponseUsage]?.({ requestId, inputTokens, outputTokens, cachedInputTokens });
     }
     throw error;

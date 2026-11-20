@@ -60,15 +60,27 @@ export function createOpeningTranscriptionCheckpointsRepository(sql: Sql) {
       }
       const [same] = await tx`SELECT (${tx.json(rows[0]!.payload)}::jsonb - 'jobId' - 'receiptKind') = (${tx.json(chunk)}::jsonb - 'jobId') AS matches`;
       if (!same?.matches) throw new Error("transcription chunk identity changed");
-      return { receipt: receiptSchema.parse(rows[0]!.result), key: String(rows[0]!.key) };
+      const receipt = receiptSchema.parse(rows[0]!.result), key = String(rows[0]!.key);
+      // A lost save acknowledgement can leave an already-charged reservation
+      // without its result reference. Repair it while the checkpoint is validated.
+      const attached = receipt.settledCents === null ? [] : await tx`UPDATE opening_budget_reservations b
+        SET result_ref=${key}, updated_at=now()
+        WHERE ${ledgerIdentity(tx, scope, receipt, key)}
+          AND b.state='completed' AND b.pending_reconcile_cents=0 AND b.outcome_unknown_at IS NULL
+          AND b.amount_cents=${receipt.settledCents} AND b.result_ref IS NULL
+          AND (b.reconciled_at IS NULL OR b.settlement_cost_basis IS NOT NULL)
+        RETURNING b.id`;
+      return { receipt, key, attached: attached.length > 0 };
     });
+  }
+  function ledgerIdentity(db: Sql | TransactionSql, scope: Scope, receipt: TranscriptionChunkReceipt, key: string) {
+    return db`b.id=${receipt.reservationId} AND b.workspace_id=${scope.workspaceId} AND b.purpose='transcribe'
+      AND b.request_id IN (${key}, ${`${key}:fallback`})
+      AND EXISTS (SELECT 1 FROM workspaces w WHERE w.id=b.workspace_id AND w.owner_user_id=${scope.ownerUserId})`;
   }
   async function ledgerState(scope: Scope, receipt: TranscriptionChunkReceipt, key: string) {
     const rows = await sql`SELECT state, pending_reconcile_cents, amount_cents, result_ref
-      FROM opening_budget_reservations b JOIN workspaces w ON w.id=b.workspace_id
-      WHERE b.id=${receipt.reservationId} AND b.workspace_id=${scope.workspaceId}
-        AND w.owner_user_id=${scope.ownerUserId} AND b.purpose='transcribe'
-        AND b.request_id IN (${key}, ${`${key}:fallback`})`;
+      FROM opening_budget_reservations b WHERE ${ledgerIdentity(sql, scope, receipt, key)}`;
     if (!rows.length) throw new Error("transcription receipt has no matching reservation");
     return rows[0]!;
   }
@@ -94,16 +106,20 @@ export function createOpeningTranscriptionCheckpointsRepository(sql: Sql) {
       const saved = await load(scope, chunk);
       if (!saved) return null;
       const { receipt, key } = saved;
+      if (saved.attached) return receipt.output;
       const row = await ledgerState(scope, receipt, key);
       if (receipt.settledCents !== null) {
         const matches = (r: typeof row) => r.state === 'completed' && Number(r.pending_reconcile_cents) === 0
           && Number(r.amount_cents) === receipt.settledCents && r.result_ref === key;
         if (!matches(row)) {
+          if (row.result_ref !== null && row.result_ref !== key) throw new Error("transcription reservation has a different result reference");
           try {
             await budget.settle(scope, receipt.reservationId, receipt.settledCents, { resultRef: key });
           } catch (error) {
-            // Another delivery may have settled this exact saved receipt concurrently.
-            if (!matches(await ledgerState(scope, receipt, key))) throw error;
+            // Settlement may have raced the first read or lost its acknowledgement.
+            const retried = await load(scope, chunk);
+            const attached = retried?.attached && retried.key === key && retried.receipt.reservationId === receipt.reservationId;
+            if (!attached && !matches(await ledgerState(scope, receipt, key))) throw error;
           }
         }
       } else if (row.state === 'reserved') {

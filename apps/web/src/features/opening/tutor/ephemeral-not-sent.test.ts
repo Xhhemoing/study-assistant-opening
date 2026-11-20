@@ -45,8 +45,8 @@ describe("ephemeral explicit not-sent retry", () => {
     const [, replay, next] = f.reserve.mock.calls.map(([request]) => request);
     expect(replay?.requestId).toBe(original.requestId);
     expect(next?.requestId).not.toBe(original.requestId);
-    expect(original.legacyRequestFamily).toBe("eph:original");
-    expect(next?.legacyRequestFamily).toBe("eph:explicit-next");
+    expect(original.requestFamily).toBe("eph:original");
+    expect(next?.requestFamily).toBe("eph:explicit-next");
   });
 
   it.each(["not_sent", "cancelled"])("identifies only confirmed released/%s as eligible for a later explicit attempt", async releaseReason => {

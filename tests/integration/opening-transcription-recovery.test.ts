@@ -30,7 +30,9 @@ async function setup({ freeTier = false }: { freeTier?: boolean } = {}) {
   const input = { path: '/tmp/input.wav', mime: 'audio/wav', sourceId, sourceVersion: 1, hasAudio: true, durationMs: 601_000 };
   let failThirdConversion = false;
   let failSettlement = false;
+  let loseSaveAcknowledgement = false;
   const bound = scopeBudget(budget, f.scope);
+  const settle = vi.spyOn(budget, 'settle');
   const run = vi.fn(async (_binary: string, argv: string[]) => {
     if (failThirdConversion && argv.includes('600')) throw new Error('third conversion failed');
     await writeFile(argv.at(-1)!, 'RIFF-audio');
@@ -44,7 +46,10 @@ async function setup({ freeTier = false }: { freeTier?: boolean } = {}) {
     ...(freeTier ? { modelSnapshot: freeTierModel, requestCapPerDay: 10 } : {}),
   }) }, checkpoints: {
     load: chunk => repo.recover(f.scope, { ...chunk, jobId, privacyEpoch: 0 }, budget),
-    save: (chunk, output, receipt) => repo.save(f.scope, { ...chunk, jobId, privacyEpoch: 0 }, { output, ...receipt }),
+    save: async (chunk, output, receipt) => {
+      await repo.save(f.scope, { ...chunk, jobId, privacyEpoch: 0 }, { output, ...receipt });
+      if (loseSaveAcknowledgement) throw new Error('checkpoint save acknowledgement lost');
+    },
   } });
   const adapter = makeAdapter(job.id);
   async function manualRetry() {
@@ -57,12 +62,37 @@ async function setup({ freeTier = false }: { freeTier?: boolean } = {}) {
     await jobs.claim(retried!.id);
     return makeAdapter(retried!.id);
   }
-  return { sourceId, job, jobs, repo, budget, provider, input, adapter, run,
+  return { sourceId, job, jobs, repo, budget, provider, input, adapter, run, settle,
     manualRetry,
+    loseSaveAcknowledgement: () => { loseSaveAcknowledgement = true; },
     setFailThird: (value: boolean) => { failThirdConversion = value; },
     setFailSettlement: (value: boolean) => { failSettlement = value; } };
 }
 const signal = new AbortController().signal;
+
+it('attaches a durably saved checkpoint after its acknowledgement is lost and the call is already charged', async () => {
+  const s = await setup();
+  const input = { ...s.input, durationMs: 1000 };
+  const key = `transcribe:${s.job.id}:0`;
+  s.loseSaveAcknowledgement();
+  await expect(s.adapter(input, signal)).rejects.toThrow('checkpoint save acknowledgement lost');
+  const ledger = () => f.sql`SELECT state, amount_cents, result_ref FROM opening_budget_reservations
+    WHERE workspace_id=${f.scope.workspaceId}`;
+  expect(await ledger()).toEqual([{ state: 'completed', amount_cents: 1, result_ref: null }]);
+  const [checkpoint] = await f.sql`SELECT state FROM opening_jobs WHERE workspace_id=${f.scope.workspaceId} AND key=${key}`;
+  expect(checkpoint?.state).toBe('succeeded');
+  expect(s.settle).toHaveBeenCalledOnce();
+
+  const retry = await s.manualRetry();
+  s.run.mockClear();
+  const expected = [expect.objectContaining({ startMs: 0, endMs: 900, text: 'spoken' })];
+  const recovered = await Promise.all([retry(input, signal), retry(input, signal)]);
+  expect(recovered).toEqual([expected, expected]);
+  expect(await ledger()).toEqual([{ state: 'completed', amount_cents: 1, result_ref: key }]);
+  expect(s.settle).toHaveBeenCalledOnce();
+  expect(s.provider).toHaveBeenCalledOnce();
+  expect(s.run).not.toHaveBeenCalled();
+});
 
 it('restarts at the missing third chunk and never settles completed chunks twice', async () => {
   const s = await setup(); s.setFailThird(true);

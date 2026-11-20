@@ -22,7 +22,7 @@ export type BudgetedRepository = {
     amountCents: number;
     requestId: string;
     requestFamily?: string | null;
-    legacyRequestFamily?: string;
+    alternateRequestFamily?: string;
     requestCapPerDay?: number;
   }): Promise<BudgetedReservation>;
   release(requestId: string, reason?: "not_sent" | "cancelled"): Promise<unknown>;
@@ -126,10 +126,10 @@ export type BudgetedCallOptions = {
    * Additive; not yet in shared contracts — flag Integrator if promoting.
    */
   operationId?: string;
-  /** Base ledger key before attempt suffixes. Encode opaque client keys before deriving attempts. Null means no siblings. */
+  /** Base ledger key before attempt suffixes. Null means no siblings. */
   requestFamily?: string | null;
-  /** Previous key format, looked up only under the same persisted parent. */
-  legacyRequestFamily?: string;
+  /** Parent-scoped family used for keys that collide with another interaction. */
+  alternateRequestFamily?: string;
   /**
    * Ledger purpose string. Defaults to "tutor" for back-compat with tutor-turn.
    * Teaching generation passes "compile-teaching-unit".
@@ -213,6 +213,13 @@ export function settleCentsForActual(reservedCents: number, actualCents: number)
 }
 
 export async function runBudgetedCall(options: BudgetedCallOptions): Promise<ProviderOutput> {
+  return (await runBudgetedCallWithReceipt(options)).output;
+}
+
+export async function runBudgetedCallWithReceipt(options: BudgetedCallOptions): Promise<{
+  output: ProviderOutput;
+  reservation: { id: string; requestId: string };
+}> {
   if (!options.provider) {
     throw new BudgetedCallError("PROVIDER_DISABLED", "opening provider is disabled");
   }
@@ -242,7 +249,7 @@ export async function runBudgetedCall(options: BudgetedCallOptions): Promise<Pro
     amountCents: options.reservedCents,
     requestId: ledgerRequestId,
     ...(options.requestFamily !== undefined ? { requestFamily: options.requestFamily } : {}),
-    ...(options.legacyRequestFamily !== undefined ? { legacyRequestFamily: options.legacyRequestFamily } : {}),
+    ...(options.alternateRequestFamily !== undefined ? { alternateRequestFamily: options.alternateRequestFamily } : {}),
     ...(freeTier ? { requestCapPerDay: options.requestCapPerDay } : {}),
   });
   const reservedRequestId = reservation.requestId ?? ledgerRequestId;
@@ -370,7 +377,7 @@ export async function runBudgetedCall(options: BudgetedCallOptions): Promise<Pro
       recordGradingDiagnostic(missingUsage, phase, transport, "USAGE_MISSING");
       copyGradingDiagnostic(missingUsage, output);
     }
-    return output;
+    return { output, reservation: { id: reservation.id, requestId: reservedRequestId } };
   } catch (error) {
     if (phase !== "provider" && error !== null && typeof error === "object") {
       postProviderFailures.add(error);

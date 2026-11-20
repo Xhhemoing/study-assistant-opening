@@ -84,7 +84,7 @@ describe("durable provider receipts", () => {
   it.each(["interrupted", "aborted", "delivery failed"])("keeps a partial stream %s unknown and refuses the same ledger key on replay", async failure => {
     const b = fakeBudget(), persistResult = vi.fn();
     const caller = new AbortController(), deltas: string[] = [];
-    const stream = 'data: {"choices":[{"index":0,"delta":{"content":"partial"}}]}\n\n';
+    const stream = 'data: {"choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}],"usage":{"prompt_tokens":37,"completion_tokens":1}}\n\n';
     const fetchImpl = vi.fn().mockResolvedValue(new Response(stream));
     const provider = createOpeningProvider({ baseUrl: "https://model.example", apiKey: "key", model: "model", fetchImpl });
     const input: ProviderInput = { instruction: "teach", text: "question", mode: "explain", chunks: [], maxOutputTokens: 100,

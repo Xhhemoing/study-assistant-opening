@@ -215,6 +215,7 @@ describe("opening budget races (two independent connections, deterministic barri
     expect(otherPrimary).toHaveBeenCalledTimes(2);
     const rows = await fixture.sql`SELECT DISTINCT request_id FROM opening_budget_reservations WHERE workspace_id=${scope.workspaceId}`;
     expect(rows).toHaveLength(4);
+    expect(rows.map(row => row.request_id)).toEqual(expect.arrayContaining(["eph:lesson-123:retry", "eph:lesson-123:fallback", "eph:lesson-123:retry:bar"]));
   });
 
   it("replays a legacy exact key for its parent even when it looks like another client's fallback", async () => {
@@ -227,13 +228,13 @@ describe("opening budget races (two independent connections, deterministic barri
     const legacy = await budgetA.reserve(scope, { purpose: "tutor", requestId: legacyFallback, amountCents: 1, parentBudget });
     await budgetA.settle(scope, legacy.id, 1, { resultRef: "ephemeral:old" });
     const family = "eph-v2:original";
-    const terms = { purpose: "tutor", amountCents: 1, parentBudget, requestFamily: family, legacyRequestFamily: base };
+    const terms = { purpose: "tutor", amountCents: 1, parentBudget, requestFamily: family, alternateRequestFamily: base };
     await expect(budgetB.reserve(scope, { ...terms, requestId: `${family}:fallback` }))
       .resolves.toMatchObject({ id: legacy.id, requestId: legacyFallback, state: "completed", resultRef: "ephemeral:old" });
     await expect(budgetB.reserve(scope, { ...terms, requestId: family }))
       .rejects.toMatchObject({ code: "BUDGET_REPLAY_COMPLETED", disposition: { reservationId: legacy.id } });
     await expect(budgetB.reserve(scope, { ...terms, requestId: "eph-v2:distinct", requestFamily: "eph-v2:distinct",
-      legacyRequestFamily: legacyFallback, parentBudget: { id: `${parentBudget.id}:fallback` },
+      alternateRequestFamily: legacyFallback, parentBudget: { id: `${parentBudget.id}:fallback` },
     })).resolves.toMatchObject({ state: "reserved" });
   });
 
@@ -256,6 +257,26 @@ describe("opening budget races (two independent connections, deterministic barri
     const rows = await fixture.sql`SELECT state, amount_cents, outcome_unknown_at, result_ref FROM opening_budget_reservations
       WHERE workspace_id=${scope.workspaceId}`;
     expect(rows).toEqual([{ state: "completed", amount_cents: 2, outcome_unknown_at: null, result_ref: null }]);
+  });
+
+  it("keeps the reservation unknown when an SSE stream closes after a nonterminal usage snapshot", async () => {
+    const scope = fixture.scope;
+    const repo = createOpeningBudgetRepository(a.sql, { envCapCents: 100 });
+    const frames = 'data: {"choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}],"usage":{"prompt_tokens":37,"completion_tokens":1}}\n\n';
+    const fetchImpl = vi.fn(async () => new Response(frames));
+    const provider = createOpeningProvider({ baseUrl: "https://model.example", apiKey: "key", model: "model", fetchImpl });
+    const gateway = createModelGateway({ resolve: async () => ({ ...model("stream", 1000, provider.complete), provider }) });
+    const budget = gatewayBudget(repo);
+    const settle = vi.spyOn(budget, "settle"), markUnknown = vi.spyOn(budget, "markUnknown");
+    const settings = { input: { ...input, outputFormat: "markdown" as const }, operationId: "stream-interim-eof", budget };
+    await expect(gateway.call(scope, "tutor.explain", settings)).rejects.toMatchObject({ code: "PROVIDER_RESPONSE" });
+    const [row] = await fixture.sql`SELECT id, state, outcome_unknown_at, result_ref FROM opening_budget_reservations
+      WHERE workspace_id=${scope.workspaceId} AND request_id='stream-interim-eof'`;
+    expect(row).toMatchObject({ state: "reserved", outcome_unknown_at: expect.any(Date), result_ref: null });
+    expect(markUnknown).toHaveBeenCalledExactlyOnceWith(row!.id);
+    expect(settle).not.toHaveBeenCalled();
+    await expect(gateway.call(scope, "tutor.explain", settings)).rejects.toMatchObject({ code: "BUDGET_OUTCOME_UNKNOWN" });
+    expect(fetchImpl).toHaveBeenCalledOnce();
   });
 
   it("uses the post-lock clock for today's admission and both inserted timestamps across midnight", async () => {

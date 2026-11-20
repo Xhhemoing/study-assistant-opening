@@ -96,7 +96,7 @@ export type ReserveInput = {
   amountCents: number;
   requestId: string;
   requestFamily?: string | null;
-  legacyRequestFamily?: string;
+  alternateRequestFamily?: string;
   /**
    * Free-tier models: at most this many non-released reservations for the snapshot's
    * model on the local budget day. Required for (and only meaningful with) amountCents 0.
@@ -323,16 +323,15 @@ async function assertRequestFamilyAvailable(tx: TransactionSql, workspaceId: str
     ? tx`(request_id = ${root} OR starts_with(request_id, ${root + ":"}))
       AND regexp_replace(request_id, ${attemptSuffix.source}, '') = ${root}`
     : attemptsOf(tx, family);
-  // The former client-key format could alias another client's fallback.
-  // Only its original parent can identify ownership of an older attempt.
-  const legacyMatch = parentId && input.legacyRequestFamily
-    ? tx`OR (parent_interaction_id = ${parentId} AND ${attemptsOf(tx, input.legacyRequestFamily)})`
-    : tx``;
+  // An opaque client key can also look like another parent's attempt suffix.
+  const siblingMatch = parentId && input.alternateRequestFamily
+    ? tx`parent_interaction_id = ${parentId} AND ((${familyMatch}) OR ${attemptsOf(tx, input.alternateRequestFamily)})`
+    : familyMatch;
   const [sibling] = await tx`
     SELECT id, state, purpose, result_ref, outcome_unknown_at, reconciled_at, pending_reconcile_cents
     FROM opening_budget_reservations
     WHERE workspace_id = ${workspaceId} AND request_id <> ${excludedRequestId}
-      AND ((${familyMatch}) ${legacyMatch})
+      AND (${siblingMatch})
       AND NOT (state = 'released' AND COALESCE(release_reason IN ('not_sent', 'cancelled'), false)
         AND outcome_unknown_at IS NULL AND COALESCE(pending_reconcile_cents, 0) = 0)
     ORDER BY (state = 'reserved') DESC, id
@@ -526,14 +525,21 @@ export function createOpeningBudgetRepository(
 
         const { capCents, budgetDay, unlimited, parentCapCents } = await capAndDay(tx, scope.workspaceId, options, instant);
 
-        const legacyExact = parentBudget && input.legacyRequestFamily && input.requestFamily
-          ? tx`OR (workspace_id = ${scope.workspaceId} AND parent_interaction_id = ${parentBudget.id}
-            AND request_id = ${input.legacyRequestFamily + input.requestId.slice(input.requestFamily.length)})`
-          : tx``;
-        const existing = await tx`SELECT * FROM opening_budget_reservations
-          WHERE request_id = ${input.requestId} ${legacyExact}
-          ORDER BY (request_id = ${input.requestId}) DESC LIMIT 1`;
-        const existingRow = existing[0] ? mapReservation(existing[0] as Record<string, unknown>) : null;
+        const alternateId = parentBudget && input.alternateRequestFamily && input.requestFamily
+          ? input.alternateRequestFamily + input.requestId.slice(input.requestFamily.length)
+          : null;
+        const exactRows = await tx`SELECT * FROM opening_budget_reservations
+          WHERE request_id = ${input.requestId} OR (request_id = ${alternateId}
+            AND workspace_id = ${scope.workspaceId} AND parent_interaction_id = ${parentBudget?.id ?? null})`;
+        const primary = exactRows.find(row => row.request_id === input.requestId);
+        const alternate = exactRows.find(row => row.request_id === alternateId);
+        // Prefer the old reader's exact key whenever it belongs to this interaction.
+        // Only an occupied exact key or an existing alternate justifies changing keys.
+        const primaryOccupied = primary && (primary.workspace_id !== scope.workspaceId
+          || (primary.parent_interaction_id !== null && primary.parent_interaction_id !== parentBudget?.id));
+        const requestId = alternateId && (primaryOccupied || (!primary && alternate)) ? alternateId : input.requestId;
+        const existing = requestId === input.requestId ? primary : alternate;
+        const existingRow = existing ? mapReservation(existing as Record<string, unknown>) : null;
         // An operator switching back to a finite day must not invalidate an already
         // recorded implicit parent's replay. This never moves a request to a new parent.
         if (!parentBudget && existingRow?.parentInteractionId === input.requestId) parentBudget = { id: input.requestId };
@@ -552,12 +558,12 @@ export function createOpeningBudgetRepository(
         // Check siblings before admitting any new attempt or replaying a release.
         if (!existingRow || existingRow.state === "released"
           || (existingRow.state === "reserved" && !existingRow.executionClaimedAt && !existingRow.outcomeUnknownAt)) {
-          await assertRequestFamilyAvailable(tx, scope.workspaceId, input, existingRow?.requestId ?? input.requestId, parentBudget?.id);
+          await assertRequestFamilyAvailable(tx, scope.workspaceId, input, requestId, parentBudget?.id);
         }
         // An existing attributed key always replays, including a frozen/unknown
         // parent: replay never authorizes a second provider request.
         if (existingRow && (!parentBudget || existingRow.parentInteractionId !== null)) {
-          return mapReservation(existing[0] as Record<string, unknown>, true);
+          return { ...existingRow, replayed: true };
         }
 
         if (parentBudget) {
@@ -610,7 +616,7 @@ export function createOpeningBudgetRepository(
         // A zero-cost (free-tier) row adds no spend, so the cents cap does not gate it.
         const rows = await tx`
           INSERT INTO opening_budget_reservations (id, workspace_id, purpose, amount_cents, reserved_amount_cents, request_id, model_snapshot, parent_interaction_id, created_at, updated_at)
-          SELECT ${randomUUID()}, ${scope.workspaceId}, ${input.purpose}, ${input.amountCents}, ${input.amountCents}, ${input.requestId}, ${modelSnapshot === null ? null : tx.json(modelSnapshot)}, ${parentBudget?.id ?? null}, ${instant}, ${instant}
+          SELECT ${randomUUID()}, ${scope.workspaceId}, ${input.purpose}, ${input.amountCents}, ${input.amountCents}, ${requestId}, ${modelSnapshot === null ? null : tx.json(modelSnapshot)}, ${parentBudget?.id ?? null}, ${instant}, ${instant}
           WHERE ${zeroCost || unlimited} OR ${input.amountCents} + COALESCE((
             SELECT sum(amount_cents) FROM opening_budget_reservations
             WHERE ${chargedBudgetRows(tx, scope.workspaceId, budgetDay)}
