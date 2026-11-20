@@ -496,7 +496,7 @@ export function TodayDashboard({
             <nav aria-label="今日其他安排" className="flex flex-wrap items-center gap-2 border-t border-line/60 pt-2 group-data-[focus=true]/workspace:hidden">
               <Link href="/opening/settings/planning" className={ui.quiet}>学习安排</Link>
               {(state.pendingReviews?.count ?? 0) > 0 && state.pendingReviews?.href ? (
-                <Link href={state.pendingReviews.href} className={`${ui.quiet} tabular-nums`}>待审核建议 · {state.pendingReviews.count}</Link>
+                <Link href={state.pendingReviews.href} className={ui.quiet}>待审核建议</Link>
               ) : null}
             </nav>
           </div>

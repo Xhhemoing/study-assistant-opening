@@ -35,7 +35,7 @@ const storageKey = (scope: string) => `opening-practice:v2:${scope}`;
 type ReadStorage = Pick<Storage, "getItem">;
 type WriteStorage = Pick<Storage, "setItem">;
 
-export function practiceScope(courseId: string, mode: "ordinary" | "matrix" | "span", retest?: { retestId: string; prompt: string; skillLabel: string; requirementKey?: string | null; retestActivityId?: string } | null, focus?: { skillLabel: string; requirementKey: string | null }, problem?: { sourceId: string; sourceVersion: number }, matrixExercise?: MatrixExerciseInput): string {
+export function practiceScope(courseId: string, mode: "ordinary" | "manual" | "matrix" | "span", retest?: { retestId: string; prompt: string; skillLabel: string; requirementKey?: string | null; retestActivityId?: string } | null, focus?: { skillLabel: string; requirementKey: string | null }, problem?: { sourceId: string; sourceVersion: number }, matrixExercise?: MatrixExerciseInput): string {
   // Retest content/requirement changes never attach an older frozen request to a newer task.
   return JSON.stringify([courseId, mode, retest?.retestId ?? null, retest?.retestActivityId ?? null, retest?.requirementKey ?? null, retest?.skillLabel ?? null, retest?.prompt ?? null,
     ...(!retest && focus ? [focus.skillLabel, focus.requirementKey] : []),
@@ -79,7 +79,7 @@ export function parsePracticeDraft(raw: unknown, scope: string): PracticeDraft |
       if (context[3] !== null && (!z.string().uuid().safeParse(context[3]).success || start.sessionInput?.activityId !== context[3])) return null;
       if (input && (!input.spanExercise || input.spanExercise.sourceId !== draft.fields.sourceId || input.spanExercise.problemId !== draft.fields.spanProblemId || input.spanExercise.version !== draft.fields.spanVersion)) return null;
       if (start.sessionInput && JSON.stringify(start.sessionInput.sourceIds) !== JSON.stringify([draft.fields.sourceId])) return null;
-    } else if (mode === "ordinary") {
+    } else if (mode === "ordinary" || mode === "manual") {
       if (input?.matrixExercise || input?.spanExercise || input?.teachingBlock) return null;
       if (start.sessionInput && start.sessionInput.skillLabel !== draft.fields.skillLabel.trim()) return null;
       if (input?.problem && ((input.problem.sourceId ?? "") !== draft.fields.sourceId || input.problem.stemSnapshot !== draft.fields.stem.trim())) return null;

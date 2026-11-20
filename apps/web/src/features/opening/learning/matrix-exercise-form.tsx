@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useRef, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import type { LearningAttempt, LearningObservation, MatrixExerciseInput, MatrixExerciseSpec, SourceRecord } from "@aistudy/contracts";
 import { matrixExerciseSkillLabel, matrixExerciseStem } from "@aistudy/domain";
 import { createOpeningLearningClient } from "../client/learning-client";
@@ -28,18 +28,43 @@ type Props = { courseId: string; initialKey?: Key; initialVariant?: number; onRe
   | { boundExercise: MatrixExerciseInput; boundSourceAvailable: boolean; sources?: undefined; onBack?: undefined }
 );
 export function MatrixExerciseForm(props: Props) {
-  const scope = practiceScope(props.courseId, "matrix", undefined, undefined, undefined, props.boundExercise);
+  const scope = matrixScope(props.courseId, props.boundExercise);
+  if (props.boundExercise) return <BoundMatrixEntry key={scope} {...props} />;
   return <MatrixController key={scope} scope={scope} {...props} />;
 }
-function MatrixController(props: Props & { scope: string }) {
+
+function matrixScope(courseId: string, exercise?: MatrixExerciseInput) {
+  return practiceScope(courseId, "matrix", undefined, undefined, undefined, exercise);
+}
+
+function BoundMatrixEntry(props: Extract<Props, { boundExercise: MatrixExerciseInput }>) {
+  const [variant, setVariant] = useState(props.boundExercise.variant);
+  const exercise = { ...props.boundExercise, variant };
+  const scope = matrixScope(props.courseId, exercise);
+  return <MatrixController key={scope} {...props} boundExercise={exercise} scope={scope} onSwitchVariant={setVariant} />;
+}
+
+type ControllerProps = Props & { scope: string; onSwitchVariant?: (variant: number) => void };
+
+function MatrixController(props: ControllerProps) {
   const continuity = usePracticeDraft(props.scope, {
     matrixKey: props.boundExercise?.exerciseKey ?? props.initialKey ?? "multiplication",
     matrixVariant: props.boundExercise?.variant ?? props.initialVariant ?? 0,
     sourceId: props.boundExercise?.sourceId ?? "",
   });
+  const checkedLinkedDraft = useRef(false);
+  useEffect(() => {
+    if (!props.boundExercise || !continuity.ready || checkedLinkedDraft.current) return;
+    checkedLinkedDraft.current = true;
+    const variant = props.boundExercise.variant;
+    if (continuity.draft.fields.matrixVariant === variant) return;
+    // Older linked collections kept follow-up variants alongside the original.
+    const linked = continuity.drafts.find(draft => draft.fields.matrixVariant === variant);
+    if (linked) continuity.restore(linked.id);
+  }, [props.boundExercise, continuity]);
   return <div className="space-y-3"><MatrixForm key={continuity.draft.id} {...props} continuity={continuity} /><PracticeDraftShelf continuity={continuity} allowAnother={!props.boundExercise} /></div>;
 }
-function MatrixForm({ courseId, sources, onRecorded, onBack, initialKey, initialVariant, boundExercise, boundSourceAvailable, scope, continuity }: Props & { scope: string; continuity: PracticeContinuity }) {
+function MatrixForm({ courseId, sources, onRecorded, onBack, initialKey, initialVariant, boundExercise, boundSourceAvailable, scope, continuity, onSwitchVariant }: ControllerProps & { continuity: PracticeContinuity }) {
   const diagnostics = useDiagnosticsEnabled();
   const client = useMemo(() => createOpeningLearningClient(), []);
   const { draft, patch, ready, storageWarning, requireSaved } = continuity;
@@ -145,7 +170,13 @@ function MatrixForm({ courseId, sources, onRecorded, onBack, initialKey, initial
     finally { pendingRef.current = false; setPending(false); }
   }
   function nextQuestion() {
-    continuity.startAnother({ sourceId, matrixKey: key, matrixVariant: (variant + 1) % 9 });
+    const nextVariant = (variant + 1) % 9;
+    if (!onSwitchVariant) {
+      continuity.startAnother({ sourceId, matrixKey: key, matrixVariant: nextVariant });
+      return;
+    }
+    try { requireSaved(); onSwitchVariant(nextVariant); }
+    catch (reason) { setError(userFacingMessage(reason, "草稿未切换，原答案已保留")); }
   }
   return <fieldset disabled={!ready} aria-busy={!ready} className="space-y-3 border-t border-line pt-4">
     {!ready ? <p className="text-sm text-text-3" role="status">正在恢复矩阵练习…</p> : null}
