@@ -40,6 +40,73 @@ describe("qualifyCartridgeEmission", () => {
       qualified: true, evaluation: { outcome: "incorrect", matchedHypothesisId: "H_FIFO_QUEUE_CONFUSION" } });
   });
 
+  it.each(["constructor", "__proto__", "toString", "valueOf"])("withholds prototype alias %s", token => {
+    expect(qualifyCartridgeEmission(registry, emit({ response: { outputs: [token], finalTop: -1 } })))
+      .toMatchObject({ qualified: false, reasonCodes: ["cartridge_response_invalid"] });
+  });
+
+  it("withholds sparse trace outputs", () => {
+    const outputs: number[] = [];
+    outputs[1] = 1;
+    expect(qualifyCartridgeEmission(registry, emit({ response: { outputs, finalTop: -1 } })))
+      .toMatchObject({ qualified: false, reasonCodes: ["cartridge_response_invalid"] });
+  });
+
+  const shared = new SharedArrayBuffer(8);
+  it.each([
+    ["direct shared buffer", shared],
+    ["shared typed array in a Map key", new Map([[new Uint8Array(shared), 1]])],
+    ["shared DataView in a Set", new Set([new DataView(shared)])],
+    ["shared buffer in a non-enumerable Error cause", new Error("nested", { cause: shared })],
+    ["shared WebAssembly memory", new WebAssembly.Memory({ initial: 1, maximum: 1, shared: true })],
+  ] as const)("rejects a response containing a %s", (_label, data) => {
+    const metadata: { self?: unknown; data: unknown } = { data };
+    metadata.self = metadata;
+    expect(qualifyCartridgeEmission(registry, emit({ response: { ...CORRECT, metadata } })))
+      .toMatchObject({ qualified: false, reasonCodes: ["cartridge_response_invalid"] });
+  });
+
+  it("captures the response once and isolates private bytes from lookup and both scorers", () => {
+    const bytes = new Uint8Array([2]);
+    let responseReads = 0;
+    const base = stack408Cartridge.getProbe(TRACE_PROBE)!;
+    const probe = {
+      ...base,
+      parseResponse(raw: unknown) {
+        const { bytes, view, buffer } = raw as { bytes: Uint8Array; view: DataView; buffer: ArrayBuffer };
+        if (bytes.buffer !== buffer || view.buffer !== buffer) return null;
+        const outputs = [view.getUint8(0), 3, 1, "UNDERFLOW"];
+        bytes[0] = 99;
+        return base.parseResponse({ outputs, finalTop: -1 });
+      },
+    };
+    const localRegistry = createCartridgeRegistry([{
+      ...stack408Cartridge,
+      listProbes: () => [probe],
+      getProbe: () => {
+        if (responseReads > 0) bytes[0] = 88;
+        return probe;
+      },
+      evaluateProbeResponse: (_id: string, response: unknown) => evaluateProbeWithSpec(probe, response),
+    }]);
+    const emission = {
+      ...emit(),
+      get response() {
+        responseReads += 1;
+        const payload: { bytes: Uint8Array; view: DataView; buffer: ArrayBufferLike; self?: unknown } = {
+          bytes, view: new DataView(bytes.buffer), buffer: bytes.buffer,
+        };
+        payload.self = payload;
+        return payload;
+      },
+    };
+    expect(qualifyCartridgeEmission(localRegistry, emission)).toMatchObject({
+      qualified: true, evaluation: { outcome: "correct", diagnosis: "correct_model" },
+    });
+    expect(responseReads).toBe(1);
+    expect(bytes[0]).toBe(88);
+  });
+
   it.each([
     ["unregistered cartridge", emit({ cartridgeId: "408.queue.v1" }), {}, "cartridge_unregistered"],
     ["version drift", emit({ cartridgeVersion: "0.9.0" }), {}, "cartridge_version_mismatch"],

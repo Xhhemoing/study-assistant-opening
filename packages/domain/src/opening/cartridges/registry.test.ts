@@ -50,11 +50,50 @@ describe("CartridgeRegistry", () => {
     const registry = createCartridgeRegistry([continuityOnly, stack408Cartridge]);
     const l2 = asLevel("L2_SCHEDULABLE", "408.stack.l2");
     expect(registerCartridge(registry, l2)).toMatchObject({ ok: true, manifest: { id: "408.stack.l2" } });
-    expect(getCartridge(registry, "408.stack.v1")).toBe(stack408Cartridge);
+    expect(getCartridge(registry, "408.stack.v1")?.manifest).toEqual(stack408Cartridge.manifest);
     expect(getCartridge(registry, "missing")).toBeNull();
     expect(registry.listCartridges().map(row => row.manifest.id)).toEqual(["408.stack.l2", "408.stack.v1", "demo.notes.v1"]);
     expect(listCartridgesByCapability(registry, "L2_SCHEDULABLE").map(row => row.manifest.id)).toEqual(["408.stack.l2", "408.stack.v1"]);
     expect(listCartridgesByCapability(registry, "L4_EVIDENCE").map(row => row.manifest.id)).toEqual(["408.stack.v1"]);
+  });
+
+  it("validates and restores unknown state before building a registered cartridge's resume summary", () => {
+    const candidate = {
+      ...continuityOnly,
+      parseContinuityState(raw: unknown) {
+        if (raw === "stored") return { ok: true as const, value: { step: 2 } };
+        if (raw === "throws") throw new Error("could not restore state");
+        return continuityOnly.parseContinuityState(raw);
+      },
+    };
+    const registry = createCartridgeRegistry([candidate, stack408Cartridge]);
+    const continuity = getCartridge(registry, "demo.notes.v1")!;
+    expect(continuity.buildResumeSummary("stored")).toMatchObject({ completedSteps: 2 });
+    for (const [raw, issue] of [[{}, "step required"], ["throws", "could not restore state"]] as const) {
+      expect(() => continuity.buildResumeSummary(raw)).toThrow(expect.objectContaining({
+        name: "CartridgeContinuityStateError", issues: [issue],
+      }));
+    }
+    expect(() => getCartridge(registry, "408.stack.v1")!.buildResumeSummary({})).toThrow(expect.objectContaining({
+      name: "CartridgeContinuityStateError", issues: expect.any(Array),
+    }));
+  });
+
+  it.each(["evaluatorVersion", "specVersion"] as const)("requires a readable non-blank string for %s", field => {
+    const registry = createCartridgeRegistry();
+    for (const value of [true, 1, {}, " \t\n"]) {
+      const candidate = { ...stack408Cartridge, evidenceContract: { ...stack408Cartridge.evidenceContract, [field]: value } };
+      expect(registry.registerCartridge(candidate)).toMatchObject({ ok: false, issues: [{ code: "evidence_contract_missing" }] });
+      expect(hasEvidenceCapability(candidate)).toBe(false);
+    }
+    const evidenceContract = Object.defineProperty({ ...stack408Cartridge.evidenceContract }, field, {
+      get() { throw new Error(`${field} read failed`); },
+    });
+    const candidate = { ...stack408Cartridge, evidenceContract };
+    expect(registry.registerCartridge(candidate)).toMatchObject({
+      ok: false, issues: [{ code: "evidence_contract_missing", detail: `${field} read failed` }],
+    });
+    expect(hasEvidenceCapability(candidate)).toBe(false);
   });
 
   it("rejects duplicate ids and invalid manifests", () => {

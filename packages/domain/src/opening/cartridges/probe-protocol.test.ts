@@ -58,6 +58,17 @@ describe("verifyProbeDistinguishability", () => {
     expect(report.ambiguousPairs).toEqual([{ a: "H_ADD_INSTEAD_OF_DOUBLE", b: "H_PLUS_ONE_TWICE", observableKey: "7" }]);
   });
 
+  it("reports every colliding pair even when predictions are interleaved", () => {
+    const report = verifyProbeDistinguishability(spec(5, [
+      hypothesis("H_C", () => 7), H_SQUARE, hypothesis("H_A", () => 7), hypothesis("H_B", () => 7),
+    ]));
+    expect(report.ambiguousPairs).toEqual([
+      { a: "H_A", b: "H_B", observableKey: "7" },
+      { a: "H_A", b: "H_C", observableKey: "7" },
+      { a: "H_B", b: "H_C", observableKey: "7" },
+    ]);
+  });
+
   it("requires competing hypotheses, unique model ids and complete identity", () => {
     expect(verifyProbeDistinguishability(spec(3, [])).issues).toEqual(["no_competing_hypotheses"]);
     expect(verifyProbeDistinguishability(spec(3, [H_ADD, H_ADD])).issues).toContain("duplicate_model_id");
@@ -87,6 +98,52 @@ describe("verifyProbeDistinguishability", () => {
     const report = verifyProbeDistinguishability(broken);
     expect(report.distinguishable).toBe(false);
     expect(report.issues).toContain("invalid_observable_key");
+  });
+});
+
+describe("probe input isolation", () => {
+  const listModel = (id: string, predict: (input: number[]) => number): MisconceptionHypothesis<number[], number> =>
+    ({ id, role: "misconception", label: id, description: id, predict });
+
+  it.each(["correct model", "first hypothesis"] as const)("isolates mutations by the %s from later predictors", mutator => {
+    const input = [2, 1];
+    const sort = (arr: number[]) => arr.sort()[0]!;
+    const read = (arr: number[]) => arr[0]! + 1;
+    const probe: DistinguishableProbeSpec<number[], number> = {
+      ...spec(3), input,
+      correctModel: { id: "M", role: "correct", label: "correct", predict: mutator === "correct model" ? sort : () => 3 },
+      hypotheses: mutator === "correct model" ? [listModel("H_READ", read), listModel("H_OTHER", () => 3)]
+        : [listModel("H_SORT", sort), listModel("H_READ", read)],
+    };
+    const report = verifyProbeDistinguishability(probe);
+    expect(report.distinguishable).toBe(false);
+    expect(report.issues).toContain(mutator === "correct model" ? "ambiguous_hypothesis_pair" : "degenerate_against_correct_model");
+    expect(input).toEqual([2, 1]);
+    expect(evaluateProbeWithSpec(probe, 3)).toMatchObject({ outcome: "unverified", matchedHypothesisId: null });
+  });
+
+  it("starts each determinism check with the same private input", () => {
+    const input = [2, 1];
+    const probe: DistinguishableProbeSpec<number[], number> = {
+      ...spec(3), input, hypotheses: [listModel("H_SHIFT", arr => arr.shift()!)],
+      correctModel: { id: "M", role: "correct", label: "correct", predict: () => 3 },
+    };
+    expect(evaluateProbeWithSpec(probe, 2)).toMatchObject({ outcome: "incorrect", matchedHypothesisId: "H_SHIFT" });
+    expect(input).toEqual([2, 1]);
+  });
+
+  it("rejects nested shared input before any model is invoked", () => {
+    let calls = 0;
+    const input = { view: new DataView(new SharedArrayBuffer(1)) };
+    const base = spec(3);
+    const probe: DistinguishableProbeSpec<typeof input, number> = {
+      ...base, input,
+      correctModel: { ...base.correctModel, predict: () => { calls += 1; return 6; } },
+      hypotheses: [{ ...H_ADD, predict: () => { calls += 1; return 5; } }],
+    };
+    expect(verifyProbeDistinguishability(probe)).toMatchObject({ distinguishable: false, issues: ["prediction_failed"] });
+    expect(evaluateProbeWithSpec(probe, 6)).toMatchObject({ outcome: "unverified" });
+    expect(calls).toBe(0);
   });
 });
 
@@ -120,6 +177,46 @@ describe("classifyProbeResponse", () => {
       observableKey: value => (value === 7 ? (null as unknown as string) : String(value)),
     });
     expect(classifyProbeResponse(nullEncoder, 7)).toEqual({ observableKey: null, wellFormed: false, match: null });
+  });
+
+  it("rejects a learner response whose key encoding changes between calls", () => {
+    let responses = 0;
+    const probe = spec(3, [H_ADD, H_SQUARE], {
+      observableKey: value => value === 7 ? String(6 + responses++) : String(value),
+    });
+    expect(evaluateProbeWithSpec(probe, 7)).toMatchObject({ outcome: "unverified", observableKey: null });
+  });
+
+  it("isolates responses and normalized observables from mutating callbacks", () => {
+    const response = { outputs: [6, 5] };
+    const probe: DistinguishableProbeSpec<number, number[]> = {
+      ...spec(3),
+      correctModel: { id: "M", role: "correct", label: "correct", predict: () => [6] },
+      hypotheses: [{ ...H_ADD, predict: () => [5] }],
+      parseResponse(raw) {
+        const { outputs } = raw as typeof response;
+        outputs.pop();
+        return outputs;
+      },
+      observableKey: observable => String(observable.shift()),
+    };
+    expect(evaluateProbeWithSpec(probe, response)).toMatchObject({ outcome: "correct", observableKey: "6" });
+    expect(response).toEqual({ outputs: [6, 5] });
+  });
+
+  it("withholds grading when the parser returns an observable with shared backing memory", () => {
+    const probe: DistinguishableProbeSpec<number, Uint8Array> = {
+      ...spec(3),
+      correctModel: { id: "M", role: "correct", label: "correct", predict: () => Uint8Array.of(6) },
+      hypotheses: [{ ...H_ADD, predict: () => Uint8Array.of(5) }],
+      parseResponse() {
+        const observable = new Uint8Array(new SharedArrayBuffer(1));
+        observable[0] = 6;
+        return observable;
+      },
+      observableKey: observable => String(observable[0]),
+    };
+    expect(evaluateProbeWithSpec(probe, 6)).toMatchObject({ outcome: "unverified", observableKey: null });
   });
 });
 

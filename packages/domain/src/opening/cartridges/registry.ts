@@ -2,7 +2,9 @@ import { verifyProbeDistinguishability, type ProbeDistinguishabilityReport } fro
 import {
   CARTRIDGE_LEVEL_METHODS,
   cartridgeManifestSchema,
+  hasValidEvidenceContract,
   meetsCapabilityLevel,
+  restoreContinuityState,
   safeErrorDetail,
   type AnyTeachingCartridge,
   type CartridgeCapabilityLevel,
@@ -47,15 +49,12 @@ function validateEvidenceContracts(
   cartridge: EvidenceCartridge<unknown>,
   issues: CartridgeRegistrationIssue[],
 ): ProbeDistinguishabilityReport[] {
-  let contract: EvidenceCartridge<unknown>["evidenceContract"] | undefined;
   try {
-    contract = cartridge.evidenceContract;
+    if (!hasValidEvidenceContract(cartridge.evidenceContract)) {
+      issues.push({ code: "evidence_contract_missing", detail: "evidenceContract.evaluatorVersion/specVersion must be non-blank strings" });
+    }
   } catch (error) {
     issues.push({ code: "evidence_contract_missing", detail: safeErrorDetail(error) });
-    contract = undefined;
-  }
-  if (!contract?.evaluatorVersion || !contract.specVersion) {
-    issues.push({ code: "evidence_contract_missing", detail: "evidenceContract.evaluatorVersion/specVersion required" });
   }
   let probes: ReturnType<EvidenceCartridge<unknown>["listProbes"]>;
   try {
@@ -142,6 +141,32 @@ export interface CartridgeRegistry {
   listCartridgesByCapability(level: CartridgeCapabilityLevel): AnyTeachingCartridge[];
 }
 
+function wrapCartridge(cartridge: AnyTeachingCartridge, level: CartridgeCapabilityLevel): AnyTeachingCartridge {
+  const facade: AnyTeachingCartridge = {
+    get manifest() { return cartridge.manifest; },
+    serializeContinuityState(state) { return cartridge.serializeContinuityState(state); },
+    parseContinuityState(raw) { return cartridge.parseContinuityState(raw); },
+    buildResumeSummary(raw) {
+      const state = restoreContinuityState(value => cartridge.parseContinuityState(value), raw);
+      return cartridge.buildResumeSummary(state);
+    },
+  };
+  const properties = level === "L4_EVIDENCE"
+    ? [...CARTRIDGE_LEVEL_METHODS[level], "evidenceContract"]
+    : CARTRIDGE_LEVEL_METHODS[level];
+  for (const property of properties) {
+    if (Object.hasOwn(facade, property)) continue;
+    Object.defineProperty(facade, property, {
+      enumerable: true,
+      get() {
+        const member: unknown = Reflect.get(cartridge, property);
+        return typeof member === "function" ? member.bind(cartridge) : member;
+      },
+    });
+  }
+  return Object.freeze(facade);
+}
+
 export function createCartridgeRegistry(initial: readonly unknown[] = []): CartridgeRegistry {
   const entries = new Map<string, AnyTeachingCartridge>();
   const registry: CartridgeRegistry = {
@@ -152,7 +177,7 @@ export function createCartridgeRegistry(initial: readonly unknown[] = []): Cartr
         return { ok: false, probeReports: report.probeReports,
           issues: [{ code: "duplicate_cartridge_id", detail: report.manifest.id }] };
       }
-      entries.set(report.manifest.id, cartridge as AnyTeachingCartridge);
+      entries.set(report.manifest.id, wrapCartridge(cartridge as AnyTeachingCartridge, report.manifest.level));
       return report;
     },
     getCartridge(id) {

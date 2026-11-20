@@ -78,7 +78,7 @@ export function keepGroundedSeeds(
 
 export interface SnapshotProbeEvaluationResult {
   evaluation: CartridgeProbeEvaluation;
-  /** True when response encoding threw or produced an invalid observable key. */
+  /** True when a parsed observable cannot be isolated or encoded to a stable, valid key. */
   encodingFailed: boolean;
 }
 

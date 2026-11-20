@@ -1,4 +1,5 @@
 import { evaluateProbeWithSnapshot } from "./capability-helpers";
+import { cloneCartridgeData } from "./clone-cartridge-data";
 import {
   snapshotAndVerifyProbe,
   type DistinguishableProbeSpec,
@@ -68,13 +69,14 @@ function evaluationsMatch(
   }
 }
 
-function snapshotResponse(value: unknown): { ok: true; value: unknown } | { ok: false } {
-  if (typeof value === "function" || typeof value === "symbol") return { ok: false };
-  if (value === null || typeof value !== "object") return { ok: true, value };
+function snapshotResponse(value: unknown) {
   try {
-    return { ok: true, value: structuredClone(value) };
+    const verifiedResponseCopy = cloneCartridgeData(value);
+    // Clone the captured data so live getters run only once and both scorers start with the same response.
+    const cartridgeResponseCopy = structuredClone(verifiedResponseCopy);
+    return { verifiedResponseCopy, cartridgeResponseCopy };
   } catch {
-    return { ok: false };
+    return null;
   }
 }
 
@@ -92,8 +94,7 @@ export function qualifyCartridgeEmission(
     cartridgeId: string;
     cartridgeVersion: string;
     probeId: string;
-    response: unknown;
-    responseCloneFailed: boolean;
+    response: ReturnType<typeof snapshotResponse>;
   }>;
   let capturedObservation: Readonly<{
     outcome: string | null;
@@ -125,8 +126,7 @@ export function qualifyCartridgeEmission(
       cartridgeId,
       cartridgeVersion,
       probeId,
-      response: cloned.ok ? cloned.value : undefined,
-      responseCloneFailed: !cloned.ok,
+      response: cloned,
     });
     const rawOutcome = observation && typeof observation === "object" ? observation.outcome : null;
     const rawRequirementKey = observation && typeof observation === "object" ? observation.requirementKey : null;
@@ -163,6 +163,7 @@ export function qualifyCartridgeEmission(
   }
   if (manifestVersion !== capturedEmission.cartridgeVersion) return reject("cartridge_version_mismatch");
   if (!hasEvidenceCapability(cartridge)) return reject("cartridge_level_below_evidence");
+  if (!capturedEmission.response) return reject("cartridge_response_invalid");
 
   let probe: DistinguishableProbeSpec<unknown, unknown> | null;
   try {
@@ -180,19 +181,14 @@ export function qualifyCartridgeEmission(
     return reject("cartridge_probe_requirement_mismatch");
   }
 
-  if (capturedEmission.responseCloneFailed) return reject("cartridge_response_invalid");
-
-  const verified = evaluateProbeWithSnapshot(snapshot, capturedEmission.response);
+  const verified = evaluateProbeWithSnapshot(snapshot, capturedEmission.response.verifiedResponseCopy);
   if (verified.encodingFailed) return reject("cartridge_evaluation_failed");
-
-  const cartridgeCopy = snapshotResponse(capturedEmission.response);
-  if (!cartridgeCopy.ok) return reject("cartridge_response_invalid");
 
   let cartridgeEvaluation: unknown;
   try {
     cartridgeEvaluation = cartridge.evaluateProbeResponse(
       capturedEmission.probeId,
-      cartridgeCopy.value,
+      capturedEmission.response.cartridgeResponseCopy,
     );
   } catch {
     return reject("cartridge_evaluation_failed");

@@ -57,7 +57,30 @@ export interface ContinuityCartridge<TState = unknown> {
   serializeContinuityState(state: TState): string;
   /** Accepts serialized strings or plain values; never trusts unvalidated input. */
   parseContinuityState(raw: unknown): CartridgeValidationResult<TState>;
+  /** Registry lookups restore unknown input and throw CartridgeContinuityStateError on invalid state. */
   buildResumeSummary(state: TState): CartridgeResumeSummary;
+}
+
+export class CartridgeContinuityStateError extends Error {
+  constructor(readonly issues: readonly string[]) {
+    super("Cartridge continuity state could not be restored");
+    this.name = "CartridgeContinuityStateError";
+  }
+}
+
+export function restoreContinuityState<TState>(
+  parse: ContinuityCartridge<TState>["parseContinuityState"],
+  raw: unknown,
+): TState {
+  let issues: string[];
+  try {
+    const restored = parse(raw);
+    if (restored.ok) return restored.value;
+    issues = restored.issues;
+  } catch (error) {
+    issues = [safeErrorDetail(error)];
+  }
+  throw new CartridgeContinuityStateError(issues);
 }
 
 /* ---------------------------------------------------------------- L2 ---- */
@@ -157,6 +180,17 @@ export interface CartridgeEvidenceContract {
   specVersion: string;
 }
 
+function isNonBlankString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+/** Call within the guard that owns the contract's property reads. */
+export function hasValidEvidenceContract(contract: unknown): contract is CartridgeEvidenceContract {
+  if (!contract || typeof contract !== "object") return false;
+  const { evaluatorVersion, specVersion } = contract as Partial<CartridgeEvidenceContract>;
+  return isNonBlankString(evaluatorVersion) && isNonBlankString(specVersion);
+}
+
 /** L4: distinguishable misconception probes and formal evidence gating. */
 export interface EvidenceCartridge<TState = unknown> extends MaterialReactiveCartridge<TState> {
   readonly evidenceContract: CartridgeEvidenceContract;
@@ -211,9 +245,8 @@ export function hasEvidenceCapability<TState>(
   cartridge: ContinuityCartridge<TState>,
 ): cartridge is EvidenceCartridge<TState> {
   try {
-    const evidence = (cartridge as Partial<EvidenceCartridge<TState>>).evidenceContract;
     return declares(cartridge as AnyTeachingCartridge, "L4_EVIDENCE")
-      && Boolean(evidence?.evaluatorVersion && evidence.specVersion);
+      && hasValidEvidenceContract((cartridge as Partial<EvidenceCartridge<TState>>).evidenceContract);
   } catch {
     return false;
   }

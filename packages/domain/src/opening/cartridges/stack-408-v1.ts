@@ -7,6 +7,7 @@ import {
 } from "./capability-helpers";
 import type { CartridgeObservationEmission } from "./evidence-gate";
 import type { DistinguishableProbeSpec, MisconceptionHypothesis } from "./probe-protocol";
+import { restoreContinuityState } from "./types";
 import type {
   CartridgeChunkBinding,
   CartridgeExerciseSeed,
@@ -242,7 +243,8 @@ function normalizeTraceToken(token: unknown): string | null {
   if (typeof token !== "string") return null;
   const trimmed = token.trim();
   if (/^-?\d+$/.test(trimmed)) return String(Number(trimmed));
-  return TOKEN_ALIASES[trimmed.toUpperCase()] ?? TOKEN_ALIASES[trimmed] ?? null;
+  const alias = trimmed.toUpperCase();
+  return Object.hasOwn(TOKEN_ALIASES, alias) ? TOKEN_ALIASES[alias]! : null;
 }
 
 export function parseStackTraceResponse(response: unknown): StackTraceObservable | null {
@@ -250,9 +252,14 @@ export function parseStackTraceResponse(response: unknown): StackTraceObservable
   const { outputs, finalTop } = response as { outputs?: unknown; finalTop?: unknown };
   const raw = typeof outputs === "string" ? (outputs.trim() ? outputs.split(/[,，\s]+/).filter(Boolean) : []) : outputs;
   if (!Array.isArray(raw) || typeof finalTop !== "number" || !Number.isInteger(finalTop) || finalTop < -1) return null;
-  const tokens = raw.map(normalizeTraceToken);
-  if (tokens.some(token => token === null)) return null;
-  return { outputs: tokens as string[], finalTop };
+  const tokens: string[] = [];
+  for (let index = 0; index < raw.length; index += 1) {
+    if (!Object.hasOwn(raw, index)) return null;
+    const token = normalizeTraceToken(raw[index]);
+    if (token === null) return null;
+    tokens.push(token);
+  }
+  return { outputs: tokens, finalTop };
 }
 
 function feasibilityParser(input: StackFeasibilityInput) {
@@ -482,7 +489,8 @@ function projectCandidates(input: CartridgeScheduleInput<Stack408State>): Cartri
 
 /* -------------------------------------------------------------- cartridge -- */
 
-function resumeSummary(state: Stack408State): CartridgeResumeSummary {
+function resumeSummary(raw: unknown): CartridgeResumeSummary {
+  const state = restoreContinuityState(parseState, raw);
   const completed = STACK_408_REQUIREMENTS.filter(key => latestAttempt(state, key)?.outcome === "correct").length;
   const next = nextPendingRequirement(state);
   return { cartridgeId: STACK_408_CARTRIDGE_ID, cartridgeVersion: STACK_408_CARTRIDGE_VERSION,

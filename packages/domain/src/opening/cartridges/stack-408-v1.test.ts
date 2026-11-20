@@ -16,7 +16,7 @@ import {
   stack408Cartridge,
   type StackTraceInput,
 } from "./stack-408-v1";
-import type { CartridgeMaterialChunk } from "./types";
+import type { CartridgeMaterialChunk, ContinuityCartridge } from "./types";
 
 const TRACE_PROBE = "408.stack.trace.interleaved-underflow.v1";
 const POINTER_PROBE = "408.stack.pointer.pre-increment.v1";
@@ -153,6 +153,20 @@ describe("408.stack.v1 continuity (L1)", () => {
     const state = recordStack408ProbeAttempt(createInitialStack408State(), evaluation, "2026-11-19T00:00:00.000Z");
     const tampered = { ...state, probeHistory: [{ ...state.probeHistory[0]!, requirementKey: "408.ds.stack.pointer-convention" }] };
     expect(stack408Cartridge.parseContinuityState(tampered)).toMatchObject({ ok: false });
+  });
+
+  it("validates unknown state and accepts serialized state in the direct resume summary", () => {
+    const cartridge: ContinuityCartridge = stack408Cartridge;
+    expect(cartridge.buildResumeSummary(JSON.stringify(createInitialStack408State()))).toMatchObject({
+      completedSteps: 0, totalSteps: 3, nextRequirementKey: "408.ds.stack.lifo-trace",
+    });
+    expect(() => cartridge.buildResumeSummary({})).toThrow(expect.objectContaining({
+      name: "CartridgeContinuityStateError", issues: expect.any(Array),
+    }));
+    const unreadable = { get probeHistory() { throw new Error("history unavailable"); } };
+    expect(() => cartridge.buildResumeSummary(unreadable)).toThrow(expect.objectContaining({
+      name: "CartridgeContinuityStateError", issues: ["history unavailable"],
+    }));
   });
 });
 
