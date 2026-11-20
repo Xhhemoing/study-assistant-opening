@@ -86,7 +86,6 @@ export function IeltsDraftCritiqueWorkbench({
   const activeReceipt = viewMode === "draft1" ? fixture.draft1Receipt : draft2Receipt;
   const epistemicMeta = EPISTEMIC_BADGE_META[activeReceipt.epistemicStatus];
 
-  const activeSpans = useMemo(() => collectAllSpans(activeReceipt), [activeReceipt]);
   const activeWordCount = useMemo(
     () => countDraftWords(activeDraft.paragraphs),
     [activeDraft.paragraphs],
@@ -331,147 +330,158 @@ export function IeltsDraftCritiqueWorkbench({
             </div>
           )}
 
-          {/* Manuscript Paper Sheet / Comparison Tabpanel */}
-          {viewMode !== "compare" ? (
-            <article
-              id={panelDomId(viewMode)}
-              role="tabpanel"
-              aria-labelledby={tabDomId(viewMode)}
-              tabIndex={0}
-              className="rounded-panel border border-line bg-surface p-6 shadow-card focus-visible:outline-2 focus-visible:outline-focus-ring"
-            >
-              <div className="mb-4 flex items-center justify-between border-b border-line pb-3">
-                <div className="flex items-center gap-2">
-                  <span className="rounded-pill bg-surface-2 px-2.5 py-0.5 text-cap font-medium text-text">
-                    {activeDraft.label}
-                  </span>
-                  <span className="text-meta text-text-2">
-                    {activeDraft.assisted ? "含提示辅助" : "独立作答"}
-                  </span>
+          {/* Manuscript Paper Sheets & Comparison Tabpanels (all 3 mounted for valid aria-controls) */}
+          {(["draft1", "draft2"] as const).map((sheetMode) => {
+            const sheetDraft = sheetMode === "draft1" ? fixture.draft1 : draft2;
+            const sheetReceipt =
+              sheetMode === "draft1" ? fixture.draft1Receipt : draft2Receipt;
+            const sheetSpans = collectAllSpans(sheetReceipt);
+            const isActiveSheet = viewMode === sheetMode;
+
+            return (
+              <article
+                key={sheetMode}
+                id={panelDomId(sheetMode)}
+                role="tabpanel"
+                aria-labelledby={tabDomId(sheetMode)}
+                hidden={!isActiveSheet}
+                tabIndex={isActiveSheet ? 0 : -1}
+                className="rounded-panel border border-line bg-surface p-6 shadow-card focus-visible:outline-2 focus-visible:outline-focus-ring"
+              >
+                <div className="mb-4 flex items-center justify-between border-b border-line pb-3">
+                  <div className="flex items-center gap-2">
+                    <span className="rounded-pill bg-surface-2 px-2.5 py-0.5 text-cap font-medium text-text">
+                      {sheetDraft.label}
+                    </span>
+                    <span className="text-meta text-text-2">
+                      {sheetDraft.assisted ? "含提示辅助" : "独立作答"}
+                    </span>
+                  </div>
+                  <span className="text-cap text-text-3">点击高亮句段可联动右侧诊断</span>
                 </div>
-                <span className="text-cap text-text-3">点击高亮句段可联动右侧诊断</span>
-              </div>
 
-              <div className="space-y-5 font-reading text-read leading-7 text-text">
-                {activeDraft.paragraphs.map((paragraph, pIndex) => {
-                  const paragraphSpans = activeSpans.filter(
-                    (span) => span.paragraphIndex === pIndex,
-                  );
-                  const segments = segmentParagraphWithSpans(
-                    paragraph,
-                    paragraphSpans,
-                    criterionFilter,
-                  );
+                <div className="space-y-5 font-reading text-read leading-7 text-text">
+                  {sheetDraft.paragraphs.map((paragraph, pIndex) => {
+                    const paragraphSpans = sheetSpans.filter(
+                      (span) => span.paragraphIndex === pIndex,
+                    );
+                    const segments = segmentParagraphWithSpans(
+                      paragraph,
+                      paragraphSpans,
+                      criterionFilter,
+                    );
 
-                  return (
-                    <div key={`${activeDraft.draftId}-p-${pIndex}`} className="flex gap-3">
-                      <span className="mt-1 shrink-0 font-mono text-cap tabular-nums text-text-3">
-                        P{pIndex + 1}
+                    return (
+                      <div key={`${sheetDraft.draftId}-p-${pIndex}`} className="flex gap-3">
+                        <span className="mt-1 shrink-0 font-mono text-cap tabular-nums text-text-3">
+                          P{pIndex + 1}
+                        </span>
+                        <p className="min-w-0 flex-1">
+                          {segments.map((segment, segIdx) => {
+                            if (segment.kind === "text") {
+                              return <span key={segIdx}>{segment.text}</span>;
+                            }
+                            const style = CRITERION_STYLES[segment.span.criterion];
+                            const isSelected = selectedSpanId === segment.span.id;
+                            return (
+                              <button
+                                key={segment.span.id}
+                                type="button"
+                                data-span-id={segment.span.id}
+                                data-criterion={segment.span.criterion}
+                                aria-pressed={isSelected}
+                                onClick={() =>
+                                  setSelectedSpanId((prev) =>
+                                    prev === segment.span.id ? null : segment.span.id,
+                                  )
+                                }
+                                className={`inline cursor-pointer rounded-sm px-0.5 text-left transition-colors focus-visible:outline-2 focus-visible:outline-focus-ring ${
+                                  isSelected ? style.activeMarkClass : style.markClass
+                                }`}
+                              >
+                                {segment.text}
+                                <sup className="ml-0.5 font-sans text-micro font-semibold">
+                                  {segment.span.criterion}
+                                </sup>
+                              </button>
+                            );
+                          })}
+                        </p>
+                      </div>
+                    );
+                  })}
+                </div>
+              </article>
+            );
+          })}
+
+          <section
+            id={panelDomId("compare")}
+            role="tabpanel"
+            aria-labelledby={tabDomId("compare")}
+            hidden={viewMode !== "compare"}
+            tabIndex={viewMode === "compare" ? 0 : -1}
+            className="space-y-3 rounded-panel border border-line bg-surface p-5 shadow-card focus-visible:outline-2 focus-visible:outline-focus-ring"
+          >
+            <div className="flex items-center justify-between border-b border-line pb-3">
+              <h2 className="text-ui-lg font-semibold text-text">逐段改写对照</h2>
+              <span className="text-meta text-text-2">
+                共 {transferReport.paragraphDiffs.length} 段 · 一稿 → 二稿
+              </span>
+            </div>
+
+            <div className="space-y-4">
+              {transferReport.paragraphDiffs.map((diff) => (
+                <div
+                  key={diff.paragraphIndex}
+                  className="rounded-tile border border-line bg-bg p-4"
+                >
+                  <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <span className="font-mono text-cap font-semibold text-text-2">
+                        P{diff.paragraphIndex + 1}
                       </span>
-                      <p className="min-w-0 flex-1">
-                        {segments.map((segment, segIdx) => {
-                          if (segment.kind === "text") {
-                            return <span key={segIdx}>{segment.text}</span>;
-                          }
-                          const style = CRITERION_STYLES[segment.span.criterion];
-                          const isSelected = selectedSpanId === segment.span.id;
-                          return (
-                            <button
-                              key={segment.span.id}
-                              type="button"
-                              data-span-id={segment.span.id}
-                              data-criterion={segment.span.criterion}
-                              aria-pressed={isSelected}
-                              onClick={() =>
-                                setSelectedSpanId((prev) =>
-                                  prev === segment.span.id ? null : segment.span.id,
-                                )
-                              }
-                              className={`inline cursor-pointer rounded-sm px-0.5 text-left transition-colors focus-visible:outline-2 focus-visible:outline-focus-ring ${
-                                isSelected ? style.activeMarkClass : style.markClass
-                              }`}
-                            >
-                              {segment.text}
-                              <sup className="ml-0.5 font-sans text-micro font-semibold">
-                                {segment.span.criterion}
-                              </sup>
-                            </button>
-                          );
-                        })}
+                      <span className="rounded-pill border border-line bg-surface px-2.5 py-0.5 text-cap text-text-2">
+                        {DIFF_STATUS_LABEL[diff.status]}
+                      </span>
+                    </div>
+                    <span className="text-cap tabular-nums text-text-2">
+                      词数变化：{diff.wordDelta >= 0 ? `+${diff.wordDelta}` : diff.wordDelta} 词
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                    <div className="rounded-ctl border border-line bg-surface p-3">
+                      <p className="mb-1.5 text-cap font-medium text-text-3">一稿原文</p>
+                      <p className="font-reading text-ui-lg leading-6 text-text-2">
+                        {diff.draft1Text || "（该段在一稿中为空）"}
                       </p>
                     </div>
-                  );
-                })}
-              </div>
-            </article>
-          ) : (
-            <section
-              id={panelDomId("compare")}
-              role="tabpanel"
-              aria-labelledby={tabDomId("compare")}
-              tabIndex={0}
-              className="space-y-3 rounded-panel border border-line bg-surface p-5 shadow-card focus-visible:outline-2 focus-visible:outline-focus-ring"
-            >
-              <div className="flex items-center justify-between border-b border-line pb-3">
-                <h2 className="text-ui-lg font-semibold text-text">逐段改写对照</h2>
-                <span className="text-meta text-text-2">
-                  共 {transferReport.paragraphDiffs.length} 段 · 一稿 → 二稿
-                </span>
-              </div>
-
-              <div className="space-y-4">
-                {transferReport.paragraphDiffs.map((diff) => (
-                  <div
-                    key={diff.paragraphIndex}
-                    className="rounded-tile border border-line bg-bg p-4"
-                  >
-                    <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-                      <div className="flex items-center gap-2">
-                        <span className="font-mono text-cap font-semibold text-text-2">
-                          P{diff.paragraphIndex + 1}
-                        </span>
-                        <span className="rounded-pill border border-line bg-surface px-2.5 py-0.5 text-cap text-text-2">
-                          {DIFF_STATUS_LABEL[diff.status]}
-                        </span>
-                      </div>
-                      <span className="text-cap tabular-nums text-text-2">
-                        词数变化：{diff.wordDelta >= 0 ? `+${diff.wordDelta}` : diff.wordDelta} 词
-                      </span>
+                    <div className="rounded-ctl border border-accent/25 bg-surface p-3">
+                      <p className="mb-1.5 text-cap font-medium text-accent">二稿改写</p>
+                      <p className="font-reading text-ui-lg leading-6 text-text">
+                        {diff.draft2Text || "（该段在二稿中已合并或删去）"}
+                      </p>
                     </div>
-
-                    <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                      <div className="rounded-ctl border border-line bg-surface p-3">
-                        <p className="mb-1.5 text-cap font-medium text-text-3">一稿原文</p>
-                        <p className="font-reading text-ui-lg leading-6 text-text-2">
-                          {diff.draft1Text || "（该段在一稿中为空）"}
-                        </p>
-                      </div>
-                      <div className="rounded-ctl border border-accent/25 bg-surface p-3">
-                        <p className="mb-1.5 text-cap font-medium text-accent">二稿改写</p>
-                        <p className="font-reading text-ui-lg leading-6 text-text">
-                          {diff.draft2Text || "（该段在二稿中已合并或删去）"}
-                        </p>
-                      </div>
-                    </div>
-
-                    {diff.addedTerms.length > 0 && (
-                      <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
-                        <span className="text-cap text-text-3">新增核心词：</span>
-                        {diff.addedTerms.slice(0, 6).map((term) => (
-                          <span
-                            key={term}
-                            className="rounded-pill border border-accent/25 bg-accent-soft px-2 py-0.5 text-cap text-accent"
-                          >
-                            {term}
-                          </span>
-                        ))}
-                      </div>
-                    )}
                   </div>
-                ))}
-              </div>
-            </section>
-          )}
+
+                  {diff.addedTerms.length > 0 && (
+                    <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
+                      <span className="text-cap text-text-3">新增核心词：</span>
+                      {diff.addedTerms.slice(0, 6).map((term) => (
+                        <span
+                          key={term}
+                          className="rounded-pill border border-accent/25 bg-accent-soft px-2 py-0.5 text-cap text-accent"
+                        >
+                          {term}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </section>
 
           {/* Inline Revision Composer */}
           <section

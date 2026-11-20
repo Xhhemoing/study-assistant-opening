@@ -2,7 +2,6 @@ import {
   countEnglishWords,
   detectMemorizedTemplates,
   hasMemorizedTemplateStuffing,
-  locateGroundedExcerpt,
 } from "./rubric";
 import { detectLowEntropyStuffing } from "./transfer";
 import {
@@ -32,6 +31,18 @@ const DEFAULT_AVOID_IN_SPEECH = [
   "Every coin has two sides（套话谚语，直接说出具体权衡点）",
 ] as const;
 
+const SPEAKING_STOP_WORDS = new Set([
+  "the", "and", "for", "that", "this", "with", "from", "have", "has", "had",
+  "are", "was", "were", "will", "would", "could", "should", "into", "onto",
+  "about", "more", "most", "some", "many", "such", "very", "also", "than",
+  "then", "they", "them", "their", "there", "these", "those", "only", "just",
+  "can", "not", "but", "all", "one", "two", "its", "our", "you", "your",
+  "too", "now", "how", "why", "who", "what", "when", "where",
+]);
+
+const SPEAKING_CLAUSE_VERB_CUE =
+  /\b(is|are|was|were|be|been|being|am|can|could|may|might|must|shall|should|will|would|do|does|did|have|has|had|think|believe|feel|see|say|says|said|mean|means|meant|make|makes|made|take|takes|took|give|gives|gave|help|helps|helped|cut|cuts|lower|lowers|ease|eases|need|needs|want|wants|rely|relies|build|builds|spend|spends|invest|invests|investing|fund|funds|funding|protect|protects|protecting|back|backs|backing|pair|pairs|pairing|trigger|triggers|grow|grows|matter|matters|require|requires|struggle|struggles|notice|notices|pour|pours|pouring|choose|chooses|avoid|avoids|reduce|reduces|improve|improves|offer|offers|deliver|delivers|encourage|encourages|undermine|undermines|resolve|resolves|support|supports|prefer|prefers|coordinate|coordinates)\b/iu;
+
 const MIN_VERIFIED_SPEAKING_WORDS = 75;
 
 const SPEAKING_SCOPE_NOTE =
@@ -44,6 +55,53 @@ function escapeRegExp(literal: string): string {
 function buildPhraseRegex(phrase: string): RegExp {
   const parts = phrase.trim().split(/\s+/).map(escapeRegExp);
   return new RegExp(`(?<![\\p{L}\\p{N}])${parts.join("\\s+")}(?![\\p{L}\\p{N}])`, "iu");
+}
+
+function tokenizeWords(text: string): string[] {
+  return text.toLowerCase().match(/[\p{L}\p{N}]+(?:['’-][\p{L}\p{N}]+)*/gu) ?? [];
+}
+
+/**
+ * Ensures a matched target phrase in Speaking sits inside a genuine contextual
+ * clause (not a bare pasted fragment like "Alleviate chronic congestion. Per-capita emissions.").
+ */
+function isContextualSpokenSentence(
+  sentence: string,
+  allTargetCollocations: readonly string[],
+): boolean {
+  const words = tokenizeWords(sentence);
+  if (words.length < 7) return false;
+  if (!SPEAKING_CLAUSE_VERB_CUE.test(sentence)) return false;
+
+  // Strip matched target phrases from a copy to verify surrounding non-target content words.
+  let residual = sentence;
+  let matchedWordCount = 0;
+  let matchedTargetCount = 0;
+  for (const phrase of allTargetCollocations) {
+    const regex = buildPhraseRegex(phrase);
+    if (regex.test(sentence)) {
+      matchedTargetCount += 1;
+      matchedWordCount += tokenizeWords(phrase).length;
+      const globalRegex = new RegExp(regex.source, "giu");
+      residual = residual.replace(globalRegex, " ");
+    }
+  }
+
+  const residualWords = tokenizeWords(residual);
+  const residualContentWords = residualWords.filter(
+    (w) => w.length >= 3 && !SPEAKING_STOP_WORDS.has(w),
+  );
+
+  if (residualWords.length < 4 || residualContentWords.length < 3) {
+    return false;
+  }
+
+  // Reject dense target-list sentences where pasted phrases dominate the sentence.
+  if (matchedTargetCount >= 3 && matchedWordCount / words.length >= 0.5) {
+    return false;
+  }
+
+  return true;
 }
 
 function cleanSpokenCollocations(rawCollocations: readonly string[]): string[] {
@@ -118,13 +176,13 @@ type GroundedSentence = {
 };
 
 /**
- * Splits a transcript into sentences while preserving exact UTF-16 offsets
- * into the original transcript string (Unicode-safe, zero index drift).
+ * Splits the ORIGINAL UNTRIMMED transcript into sentences while preserving exact
+ * UTF-16 offsets so `rawTranscript.slice(startOffset, endOffset) === text` always holds.
  */
-function extractGroundedSentences(transcript: string): GroundedSentence[] {
+function extractGroundedSentences(rawTranscript: string): GroundedSentence[] {
   const results: GroundedSentence[] = [];
   const regex = /[^.!?\n]+(?:[.!?]+|$)/gu;
-  for (const match of transcript.matchAll(regex)) {
+  for (const match of rawTranscript.matchAll(regex)) {
     const raw = match[0];
     const startRaw = match.index ?? 0;
     const leadingSpaces = raw.length - raw.trimStart().length;
@@ -133,7 +191,7 @@ function extractGroundedSentences(transcript: string): GroundedSentence[] {
     const startOffset = startRaw + leadingSpaces;
     const endOffset = startOffset + trimmed.length;
     results.push({
-      text: transcript.slice(startOffset, endOffset),
+      text: rawTranscript.slice(startOffset, endOffset),
       startOffset,
       endOffset,
     });
@@ -143,14 +201,15 @@ function extractGroundedSentences(transcript: string): GroundedSentence[] {
 
 /**
  * Evaluates a learner's Speaking Part 3 oral retelling transcript with strict
- * duration/target/transfer verification (no fresh-prompt bypass), Unicode-safe
- * exact sentence citations, and honest transcript-only speaking signals (no fake
- * official Band or Writing Task Response claim).
+ * duration/target/contextual-clause verification (no fresh-prompt or bare-fragment bypass),
+ * untrimmed exact UTF-16 offsets for every credited target citation, and honest
+ * transcript-only speaking signals.
  */
 export function evaluateSpeakingRetelling(
   input: IeltsSpeakingRetellingInput,
 ): IeltsSpeakingFeedbackReceipt {
-  const trimmedTranscript = input.transcript.trim();
+  const rawTranscript = input.transcript;
+  const trimmedTranscript = rawTranscript.trim();
   const wordCount = countEnglishWords(trimmedTranscript);
   const paceStatus = classifySpeakingPace(
     input.durationSeconds,
@@ -165,20 +224,34 @@ export function evaluateSpeakingRetelling(
   const memorizedTemplateHits = detectMemorizedTemplates(paragraphs);
   const hasStuffing = hasMemorizedTemplateStuffing(memorizedTemplateHits);
   const hasLowEntropy = detectLowEntropyStuffing(paragraphs);
-  const sentences = extractGroundedSentences(trimmedTranscript);
+  // Compute offsets directly on the original untrimmed transcript!
+  const sentences = extractGroundedSentences(rawTranscript);
 
-  // Match target collocations strictly via Unicode-safe regex on actual sentences.
+  // Require contextual clause integration before crediting any target collocation hit.
   const transferredCollocations: string[] = [];
   const pendingCollocations: string[] = [];
   const matchedSentenceByCollocation = new Map<string, GroundedSentence>();
+  let hasBareTargetPaste = false;
 
   for (const collocation of input.seed.targetSpokenCollocations) {
     const regex = buildPhraseRegex(collocation);
-    const containingSentence = sentences.find((sentence) => regex.test(sentence.text));
-    if (containingSentence) {
+    const matchingSentences = sentences.filter((sentence) =>
+      regex.test(sentence.text),
+    );
+    const contextualSentence = matchingSentences.find((sentence) =>
+      isContextualSpokenSentence(
+        sentence.text,
+        input.seed.targetSpokenCollocations,
+      ),
+    );
+
+    if (contextualSentence) {
       transferredCollocations.push(collocation);
-      matchedSentenceByCollocation.set(collocation, containingSentence);
+      matchedSentenceByCollocation.set(collocation, contextualSentence);
     } else {
+      if (matchingSentences.length > 0) {
+        hasBareTargetPaste = true;
+      }
       pendingCollocations.push(collocation);
     }
   }
@@ -194,7 +267,7 @@ export function evaluateSpeakingRetelling(
   const hasStiffWrittenConnector =
     /\b(furthermore|moreover|henceforth|in conclusion)\b/iu.test(trimmedTranscript);
 
-  // Build exact, Unicode-safe, sentence-aligned evidence quotes.
+  // Build exact, untrimmed-offset evidence quotes: 1 fluency quote + 1 quote per credited target hit.
   const evidenceQuotes: IeltsSpeakingEvidenceQuote[] = [];
 
   if (sentences.length > 0) {
@@ -219,44 +292,43 @@ export function evaluateSpeakingRetelling(
         "Personally, I think the core tension is that drivers feel highway widening right away, whereas urban rail takes years to pay off.",
     });
 
-    // For lexicalTransfer quote: strictly cite the ACTUAL sentence containing a matched collocation!
     if (transferredCollocations.length > 0) {
-      const firstMatchedExpression = transferredCollocations[0]!;
-      const matchedSentence = matchedSentenceByCollocation.get(firstMatchedExpression)!;
-      const inThisSentence = transferredCollocations.filter((expr) =>
-        buildPhraseRegex(expr).test(matchedSentence.text),
-      );
-      const loc = locateGroundedExcerpt(trimmedTranscript, matchedSentence.text);
-      evidenceQuotes.push({
-        id: `${input.seed.seedId}-sp-lexical`,
-        signal: "lexicalTransfer",
-        quote: matchedSentence.text,
-        matchedExpression: inThisSentence.join(" / "),
-        startOffset: loc?.startOffset ?? matchedSentence.startOffset,
-        endOffset: loc?.endOffset ?? matchedSentence.endOffset,
-        diagnosis: `该句已自然迁移写作目标表达（${inThisSentence.join(" / ")}），使口语论述更具体。`,
-        upgradeRewrite:
-          pendingCollocations.length > 0
-            ? `下一轮可继续把尚未用到的表达带入口语：${pendingCollocations.slice(0, 2).join(", ")}。`
-            : "继续保持这种把精准搭配融入自然口语句式的表达习惯，避免生硬背诵书面语。",
+      // Emit one grounded citation for EVERY credited target hit!
+      transferredCollocations.forEach((expr, idx) => {
+        const matchedSentence = matchedSentenceByCollocation.get(expr)!;
+        evidenceQuotes.push({
+          id: `${input.seed.seedId}-sp-lexical-${idx + 1}`,
+          signal: "lexicalTransfer",
+          quote: matchedSentence.text,
+          matchedExpression: expr,
+          startOffset: matchedSentence.startOffset,
+          endOffset: matchedSentence.endOffset,
+          diagnosis: `该句已自然迁移写作目标表达（${expr}），使口语论述更具体。`,
+          upgradeRewrite:
+            pendingCollocations.length > 0
+              ? `下一轮可继续把尚未用到的表达带入口语：${pendingCollocations.slice(0, 2).join(", ")}。`
+              : "继续保持这种把精准搭配融入自然口语句式的表达习惯，避免生硬背诵书面语。",
+        });
       });
     } else if (input.seed.targetSpokenCollocations.length > 0) {
       const longestSentence = [...sentences].sort(
         (a, b) => b.text.length - a.text.length,
       )[0]!;
       evidenceQuotes.push({
-        id: `${input.seed.seedId}-sp-lexical`,
+        id: `${input.seed.seedId}-sp-lexical-0`,
         signal: "lexicalTransfer",
         quote: longestSentence.text,
         startOffset: longestSentence.startOffset,
         endOffset: longestSentence.endOffset,
-        diagnosis: "本次转写尚未命中任何目标活性搭配，建议结合提示词把写作二稿中的核心搭配自然说出来。",
-        upgradeRewrite: `可尝试自然带出：${input.seed.targetSpokenCollocations.slice(0, 2).join(", ")}。`,
+        diagnosis: hasBareTargetPaste
+          ? "仅检测到孤立拼贴的目标词组片段，尚未融入完整口语句子语境。"
+          : "本次转写尚未命中任何目标活性搭配，建议结合提示词把写作二稿中的核心搭配自然说出来。",
+        upgradeRewrite: `可尝试在完整从句中自然带出：${input.seed.targetSpokenCollocations.slice(0, 2).join(", ")}。`,
       });
     }
   }
 
-  // Airtight mastery / verification gate — NEVER bypassed by freshPromptTransfer!
+  // Airtight mastery / verification gate — NEVER bypassed by freshPromptTransfer or bare fragments!
   const targetCount = input.seed.targetSpokenCollocations.length;
   const requiredTransferred = targetCount > 0 ? Math.min(2, targetCount) : 1;
   const hasEnoughTargets = targetCount > 0;
@@ -271,6 +343,7 @@ export function evaluateSpeakingRetelling(
     hasEnoughTargets &&
     hasEnoughTransfer &&
     hasEnoughWords &&
+    !hasBareTargetPaste &&
     !hasStuffing &&
     !hasLowEntropy &&
     !hasStiffWrittenConnector;
@@ -295,6 +368,8 @@ export function evaluateSpeakingRetelling(
         : `当前作答时长（${safeDurationSeconds} 秒）超出 60–90 秒有效窗口，建议精炼观点后重新复述。`;
   } else if (!hasEnoughTargets) {
     epistemicReason = "当前题卡未配置目标口语迁移表达，无法完成迁移检核，仅作转写练习反馈。";
+  } else if (hasBareTargetPaste) {
+    epistemicReason = "检测到孤立拼贴的目标词组片段，请将目标表达自然融入完整口语句子后再复核。";
   } else if (hasStuffing || hasLowEntropy) {
     epistemicReason = "检测到模板套话或低信息量重复填充，本次仅作转写练习反馈，不计入正式掌握度。";
   } else if (hasStiffWrittenConnector) {
@@ -324,16 +399,19 @@ export function evaluateSpeakingRetelling(
     lexicalTransfer: {
       key: "lexicalTransfer",
       label: "词汇迁移",
-      rating: !hasEnoughTargets || transferredCollocations.length === 0
-        ? "needs_work"
-        : hasEnoughTransfer && !hasStuffing
-          ? "strong"
-          : "developing",
+      rating:
+        !hasEnoughTargets || transferredCollocations.length === 0 || hasBareTargetPaste
+          ? "needs_work"
+          : hasEnoughTransfer && !hasStuffing
+            ? "strong"
+            : "developing",
       note: !hasEnoughTargets
         ? "未设定目标迁移搭配，当前仅记录基础词汇使用。"
-        : transferredCollocations.length > 0
-          ? `已迁移 ${transferredCollocations.length}/${targetCount} 组写作二稿活性搭配。`
-          : `尚未命中目标搭配（0/${targetCount}），建议在下轮口语中自然带出 2 组以上。`,
+        : hasBareTargetPaste
+          ? "检测到脱离完整句子的孤立词组拼贴，需融入自然口语从句才计作迁移。"
+          : transferredCollocations.length > 0
+            ? `已迁移 ${transferredCollocations.length}/${targetCount} 组写作二稿活性搭配。`
+            : `尚未命中目标搭配（0/${targetCount}），建议在下轮口语中自然带出 2 组以上。`,
     },
     syntacticVariety: {
       key: "syntacticVariety",

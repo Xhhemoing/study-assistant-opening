@@ -167,10 +167,39 @@ export function hasMemorizedTemplateStuffing(
   return hits.some((hit) => hit.severity === "blocking") || hits.length >= 2;
 }
 
+type FoldedOffsetEntry = {
+  readonly origStart: number;
+  readonly origEnd: number;
+};
+
+function foldWithUtf16Offsets(text: string): {
+  readonly folded: string;
+  readonly map: readonly FoldedOffsetEntry[];
+} {
+  let folded = "";
+  const map: FoldedOffsetEntry[] = [];
+  let utf16Offset = 0;
+
+  for (const ch of text) {
+    const origStart = utf16Offset;
+    const origEnd = utf16Offset + ch.length;
+    utf16Offset = origEnd;
+
+    const lowered = ch.toLowerCase();
+    for (let i = 0; i < lowered.length; i += 1) {
+      folded += lowered[i];
+      map.push({ origStart, origEnd });
+    }
+  }
+
+  return { folded, map };
+}
+
 /**
- * Unicode-safe excerpt locator: matches directly against the original UTF-16 string
- * using exact search or `/.../iu` regex without `.toLowerCase()` length-drift (e.g. "İ" -> "i\u0307").
- * Guarantees `paragraph.slice(startOffset, endOffset)` aligns 100% with the matched text.
+ * Unicode-safe excerpt locator: folds both text and query per Unicode code point
+ * while tracking exact UTF-16 `[origStart, origEnd]` reverse mappings (handling
+ * surrogate pairs like "😀" and length-expanding case folds like "İ" -> "i\u0307").
+ * Guarantees `paragraph.slice(startOffset, endOffset) === matchedText`.
  */
 export function locateGroundedExcerpt(
   paragraph: string,
@@ -188,22 +217,31 @@ export function locateGroundedExcerpt(
     };
   }
 
-  const escapedTokens = trimmed
+  const { folded: foldedParagraph, map } = foldWithUtf16Offsets(paragraph);
+  const foldedNeedleTokens = trimmed
     .split(/\s+/)
-    .map(escapeRegExp);
-  const regex = new RegExp(escapedTokens.join("\\s+"), "iu");
-  const match = regex.exec(paragraph);
-  if (match && typeof match.index === "number") {
-    const startOffset = match.index;
-    const endOffset = startOffset + match[0].length;
-    return {
-      startOffset,
-      endOffset,
-      matchedText: paragraph.slice(startOffset, endOffset),
-    };
+    .map((token) => escapeRegExp(token.toLowerCase()));
+  const regex = new RegExp(foldedNeedleTokens.join("\\s+"), "u");
+  const match = regex.exec(foldedParagraph);
+  if (!match || typeof match.index !== "number" || match[0].length === 0) {
+    return null;
   }
 
-  return null;
+  const matchStart = match.index;
+  const matchLast = matchStart + match[0].length - 1;
+  const startEntry = map[matchStart];
+  const endEntry = map[matchLast];
+  if (!startEntry || !endEntry) {
+    return null;
+  }
+
+  const startOffset = startEntry.origStart;
+  const endOffset = endEntry.origEnd;
+  return {
+    startOffset,
+    endOffset,
+    matchedText: paragraph.slice(startOffset, endOffset),
+  };
 }
 
 export type EpistemicResolutionInput = {

@@ -112,7 +112,7 @@ describe("IeltsDraftCritiqueWorkbench", () => {
     expect(host.textContent).toContain("二稿改写");
   });
 
-  it("supports WAI-ARIA tablist/tabpanel linkage and ArrowLeft/ArrowRight/Home/End keyboard navigation", async () => {
+  it("keeps all 3 WAI-ARIA tabpanels mounted for valid aria-controls with inactive ones hidden, and supports ArrowLeft/ArrowRight/Home/End keyboard navigation", async () => {
     await act(async () => root.render(createElement(IeltsDraftCritiqueWorkbench)));
 
     const tabs = [...host.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
@@ -123,13 +123,29 @@ describe("IeltsDraftCritiqueWorkbench", () => {
       HTMLButtonElement,
     ];
 
-    // Initial active tab is Draft 2 with linked tabpanel.
+    // All 3 tabpanels must exist simultaneously in DOM so every tab's aria-controls resolves.
+    const panels = [...host.querySelectorAll<HTMLElement>('[role="tabpanel"]')];
+    expect(panels).toHaveLength(3);
+    const panelFor = (tab: HTMLButtonElement) => {
+      const controlsId = tab.getAttribute("aria-controls");
+      expect(controlsId).toBeTruthy();
+      const panel = host.querySelector<HTMLElement>(`[id="${controlsId!}"]`);
+      expect(panel).not.toBeNull();
+      expect(panel!.getAttribute("aria-labelledby")).toBe(tab.id);
+      return panel!;
+    };
+
+    const panelDraft1 = panelFor(tabDraft1);
+    const panelDraft2 = panelFor(tabDraft2);
+    const panelCompare = panelFor(tabCompare);
+
+    // Initial active tab is Draft 2; Draft 1 and Compare panels are mounted and hidden.
     expect(tabDraft2.getAttribute("aria-selected")).toBe("true");
     expect(tabDraft2.tabIndex).toBe(0);
     expect(tabDraft1.tabIndex).toBe(-1);
-    const panelInitial = host.querySelector('[role="tabpanel"]')!;
-    expect(panelInitial.id).toBe(tabDraft2.getAttribute("aria-controls"));
-    expect(panelInitial.getAttribute("aria-labelledby")).toBe(tabDraft2.id);
+    expect(panelDraft2.hidden).toBe(false);
+    expect(panelDraft1.hidden).toBe(true);
+    expect(panelCompare.hidden).toBe(true);
 
     // IME composing events must not hijack tab switching.
     tabDraft2.focus();
@@ -144,8 +160,9 @@ describe("IeltsDraftCritiqueWorkbench", () => {
       );
     });
     expect(tabDraft2.getAttribute("aria-selected")).toBe("true");
+    expect(panelDraft2.hidden).toBe(false);
 
-    // ArrowRight moves to Compare tab and shifts focus + tabpanel linkage.
+    // ArrowRight moves to Compare tab, shifts focus, and toggles hidden cleanly.
     await act(async () => {
       tabDraft2.dispatchEvent(
         new KeyboardEvent("keydown", {
@@ -157,9 +174,9 @@ describe("IeltsDraftCritiqueWorkbench", () => {
     });
     expect(tabCompare.getAttribute("aria-selected")).toBe("true");
     expect(document.activeElement).toBe(tabCompare);
-    const comparePanel = host.querySelector('[role="tabpanel"]')!;
-    expect(comparePanel.id).toBe(tabCompare.getAttribute("aria-controls"));
-    expect(comparePanel.getAttribute("aria-labelledby")).toBe(tabCompare.id);
+    expect(panelCompare.hidden).toBe(false);
+    expect(panelDraft1.hidden).toBe(true);
+    expect(panelDraft2.hidden).toBe(true);
 
     // ArrowRight from last tab wraps to first tab (Draft 1).
     await act(async () => {
@@ -173,6 +190,9 @@ describe("IeltsDraftCritiqueWorkbench", () => {
     });
     expect(tabDraft1.getAttribute("aria-selected")).toBe("true");
     expect(document.activeElement).toBe(tabDraft1);
+    expect(panelDraft1.hidden).toBe(false);
+    expect(panelDraft2.hidden).toBe(true);
+    expect(panelCompare.hidden).toBe(true);
 
     // ArrowLeft from first tab wraps back to Compare tab.
     await act(async () => {
@@ -186,6 +206,7 @@ describe("IeltsDraftCritiqueWorkbench", () => {
     });
     expect(tabCompare.getAttribute("aria-selected")).toBe("true");
     expect(document.activeElement).toBe(tabCompare);
+    expect(panelCompare.hidden).toBe(false);
 
     // Home jumps to first tab, End jumps to last tab.
     await act(async () => {
@@ -199,6 +220,7 @@ describe("IeltsDraftCritiqueWorkbench", () => {
     });
     expect(tabDraft1.getAttribute("aria-selected")).toBe("true");
     expect(document.activeElement).toBe(tabDraft1);
+    expect(panelDraft1.hidden).toBe(false);
 
     await act(async () => {
       tabDraft1.dispatchEvent(
@@ -211,6 +233,7 @@ describe("IeltsDraftCritiqueWorkbench", () => {
     });
     expect(tabCompare.getAttribute("aria-selected")).toBe("true");
     expect(document.activeElement).toBe(tabCompare);
+    expect(panelCompare.hidden).toBe(false);
   });
 
   it("downgrades epistemic status to practice_feedback when inline revision introduces memorized clichés", async () => {

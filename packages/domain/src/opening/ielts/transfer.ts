@@ -203,39 +203,111 @@ function isMechanicalKeywordSentence(
   return false;
 }
 
+function normalizeSentenceTokenKey(sentence: string): string {
+  return tokenizeWords(sentence).join(" ");
+}
+
+function tokenJaccardSimilarity(a: readonly string[], b: readonly string[]): number {
+  const setA = new Set(a);
+  const setB = new Set(b);
+  if (setA.size === 0 && setB.size === 0) return 1;
+  let intersection = 0;
+  for (const item of setA) {
+    if (setB.has(item)) intersection += 1;
+  }
+  const union = setA.size + setB.size - intersection;
+  return union > 0 ? intersection / union : 0;
+}
+
+function isSubstantiveClauseSentence(sentence: string): boolean {
+  const words = tokenizeWords(sentence);
+  return (
+    words.length >= 7 &&
+    CLAUSE_VERB_CUE.test(sentence) &&
+    !isLowEntropySentence(sentence)
+  );
+}
+
+function isSentenceSubstantivelyChangedFromBaseline(
+  sentence: string,
+  baselineSentenceKeys: ReadonlySet<string>,
+  baselineSentenceTokens: readonly (readonly string[])[],
+): boolean {
+  const key = normalizeSentenceTokenKey(sentence);
+  if (!key || baselineSentenceKeys.has(key)) {
+    return false;
+  }
+  const words = tokenizeWords(sentence);
+  for (const baseWords of baselineSentenceTokens) {
+    if (tokenJaccardSimilarity(words, baseWords) >= 0.85) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function assessSubstantiveRevision(
   draft1: IeltsEssayDraft,
   draft2: IeltsEssayDraft,
-  paragraphDiffs: readonly IeltsParagraphDiff[],
 ): boolean {
   const norm1 = normalizeForEquality(draft1.paragraphs);
   const norm2 = normalizeForEquality(draft2.paragraphs);
   if (!norm2 || norm1 === norm2) return false;
 
-  const changedParagraphs = paragraphDiffs.filter((d) => d.status !== "unchanged").length;
+  // Compare paragraphs using punctuation-stripped tokens so "." -> "!" swaps never count.
+  const maxParagraphs = Math.max(draft1.paragraphs.length, draft2.paragraphs.length);
+  let changedParagraphs = 0;
+  for (let i = 0; i < maxParagraphs; i += 1) {
+    const k1 = normalizeSentenceTokenKey(draft1.paragraphs[i] ?? "");
+    const k2 = normalizeSentenceTokenKey(draft2.paragraphs[i] ?? "");
+    if (k1 !== k2) changedParagraphs += 1;
+  }
   if (changedParagraphs === 0) return false;
 
-  const terms1 = extractMeaningfulTerms(draft1.paragraphs.join(" "));
-  const terms2 = extractMeaningfulTerms(draft2.paragraphs.join(" "));
-  const newlyAddedTerms = [...terms2].filter((t) => !terms1.has(t));
-  const removedTerms = [...terms1].filter((t) => !terms2.has(t));
-  const unionSize = new Set([...terms1, ...terms2]).size;
-  const jaccardDistance =
-    unionSize > 0 ? (newlyAddedTerms.length + removedTerms.length) / unionSize : 0;
-
-  const sentences1 = new Set(
-    draft1.paragraphs.flatMap(splitSentences).map((s) => normalizeText(s)),
+  const baselineSentences = draft1.paragraphs.flatMap(splitSentences);
+  const baselineSentenceKeys = new Set(
+    baselineSentences.map(normalizeSentenceTokenKey).filter(Boolean),
   );
-  const sentences2 = draft2.paragraphs.flatMap(splitSentences);
-  const rewrittenSentences = sentences2.filter(
-    (s) => !sentences1.has(normalizeText(s)),
-  ).length;
-  const rewrittenRatio = sentences2.length > 0 ? rewrittenSentences / sentences2.length : 0;
+  const baselineSentenceTokens = baselineSentences.map(tokenizeWords);
 
-  // Require real content/syntactic rewrite, not a tiny 1-2 word tweak or identical resubmission.
+  const revisedSentences = draft2.paragraphs.flatMap(splitSentences);
+  const rewrittenSubstantiveSentences = revisedSentences.filter(
+    (s) =>
+      isSubstantiveClauseSentence(s) &&
+      isSentenceSubstantivelyChangedFromBaseline(
+        s,
+        baselineSentenceKeys,
+        baselineSentenceTokens,
+      ),
+  );
+  const rewrittenRatio =
+    revisedSentences.length > 0
+      ? rewrittenSubstantiveSentences.length / revisedSentences.length
+      : 0;
+
+  // Only count new vocabulary that lives inside genuine grammatical sentences (not appended bare noun lists).
+  const terms1 = extractMeaningfulTerms(draft1.paragraphs.join(" "));
+  const substantiveRevisedText = rewrittenSubstantiveSentences.join(" ");
+  const substantiveTerms2 = extractMeaningfulTerms(substantiveRevisedText);
+  const newlyAddedSubstantiveTerms = [...substantiveTerms2].filter(
+    (t) => !terms1.has(t),
+  );
+
+  const allClauseTerms2 = extractMeaningfulTerms(
+    revisedSentences.filter(isSubstantiveClauseSentence).join(" "),
+  );
+  const removedTerms = [...terms1].filter((t) => !allClauseTerms2.has(t));
+  const unionSize = new Set([...terms1, ...allClauseTerms2]).size;
+  const jaccardDistance =
+    unionSize > 0
+      ? (newlyAddedSubstantiveTerms.length + removedTerms.length) / unionSize
+      : 0;
+
   return (
-    newlyAddedTerms.length >= 12 &&
-    (jaccardDistance >= 0.18 || (changedParagraphs >= 2 && rewrittenRatio >= 0.25))
+    rewrittenSubstantiveSentences.length >= 2 &&
+    rewrittenRatio >= 0.25 &&
+    newlyAddedSubstantiveTerms.length >= 12 &&
+    (jaccardDistance >= 0.18 || changedParagraphs >= 2)
   );
 }
 
@@ -291,8 +363,8 @@ export type AnalyzeCrossDraftTransferInput = {
 /**
  * Deterministic cross-draft analyzer comparing Draft 1 -> Draft 2+ across
  * collocations, syntactic structures, cohesive devices, and counterargument depth.
- * Guards against empty targets, unchanged/trivial resubmissions, low-entropy filler
- * stuffing, and mechanical keyword-list pasting.
+ * Guards against empty targets, unchanged/punctuation-only resubmissions, low-entropy
+ * filler stuffing, and mechanical keyword-list pasting.
  */
 export function analyzeCrossDraftTransfer(
   input: AnalyzeCrossDraftTransferInput,
@@ -307,8 +379,13 @@ export function analyzeCrossDraftTransfer(
   const hasSubstantiveRevision = assessSubstantiveRevision(
     input.draft1,
     input.draft2,
-    paragraphDiffs,
   );
+
+  const baselineSentences = input.draft1.paragraphs.flatMap(splitSentences);
+  const baselineSentenceKeys = new Set(
+    baselineSentences.map(normalizeSentenceTokenKey).filter(Boolean),
+  );
+  const baselineSentenceTokens = baselineSentences.map(tokenizeWords);
 
   const allTargetPatterns = input.targets.flatMap((t) => t.targetPatterns);
   let hasMechanicalKeywordPaste = false;
@@ -329,12 +406,16 @@ export function analyzeCrossDraftTransfer(
       target.clichePatterns,
     );
 
-    // Verify each revised match appears in a real, non-filler complete sentence context.
+    // Verify each revised match appears in a real, non-filler, substantively revised or newly written sentence.
     const contextualMatched = new Set<string>();
     const contextualParagraphs = new Set<number>();
     let matchedOnlyInMechanicalPaste = false;
+    let matchedOnlyInUnchangedSentence = false;
 
     if (rawRevHit.matched.length > 0) {
+      let sawMechanical = false;
+      let sawUnchanged = false;
+
       input.draft2.paragraphs.forEach((paragraph, paragraphIndex) => {
         const sentences = splitSentences(paragraph);
         for (const pattern of target.targetPatterns) {
@@ -342,15 +423,28 @@ export function analyzeCrossDraftTransfer(
             if (!matchesPattern(sentence, pattern)) continue;
             if (isMechanicalKeywordSentence(sentence, allTargetPatterns)) {
               hasMechanicalKeywordPaste = true;
-            } else {
-              contextualMatched.add(pattern);
-              contextualParagraphs.add(paragraphIndex);
+              sawMechanical = true;
+              continue;
             }
+            if (
+              !isSentenceSubstantivelyChangedFromBaseline(
+                sentence,
+                baselineSentenceKeys,
+                baselineSentenceTokens,
+              )
+            ) {
+              sawUnchanged = true;
+              continue;
+            }
+            contextualMatched.add(pattern);
+            contextualParagraphs.add(paragraphIndex);
           }
         }
       });
+
       if (contextualMatched.size === 0) {
-        matchedOnlyInMechanicalPaste = true;
+        if (sawMechanical) matchedOnlyInMechanicalPaste = true;
+        else if (sawUnchanged) matchedOnlyInUnchangedSentence = true;
       }
     }
 
@@ -375,9 +469,9 @@ export function analyzeCrossDraftTransfer(
     } else if (matchedOnlyInMechanicalPaste) {
       status = "pending";
       explanation = `仅检测到目标词组的机械拼贴或重复填充句（${rawRevHit.matched.join(" / ")}），需融入完整论证语境后再复核。`;
-    } else if (revMatchedList.length > 0 && !hasSubstantiveRevision) {
+    } else if (matchedOnlyInUnchangedSentence || (revMatchedList.length > 0 && !hasSubstantiveRevision)) {
       status = "pending";
-      explanation = `当前草稿相对一稿缺少实质性改写，暂不计作有效跨草稿迁移。`;
+      explanation = `目标表达所在句子相对一稿未作实质性改写（或仅调整标点），暂不计作有效跨草稿迁移。`;
     } else if (revMatchedList.length > 0) {
       status = "transferred";
       const clearedWeak =

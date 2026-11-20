@@ -215,7 +215,15 @@ describe("IELTS rubric validation & band scoring", () => {
     }
   });
 
-  it("preserves exact UTF-16 slice offsets after Unicode case-expanding characters like İstanbul", () => {
+  it("preserves exact UTF-16 slice offsets after Unicode case-expanding characters like İstanbul and surrogate pairs like 😀", () => {
+    const emojiIstanbul = "😀 İstanbul";
+    const emojiLoc = locateGroundedExcerpt(emojiIstanbul, "i\u0307stanbul");
+    expect(emojiLoc).not.toBeNull();
+    expect(emojiIstanbul.slice(emojiLoc!.startOffset, emojiLoc!.endOffset)).toBe(
+      "İstanbul",
+    );
+    expect(emojiLoc!.matchedText).toBe("İstanbul");
+
     const paragraph =
       "İstanbul planners expanded rail corridors to ALLEVIATE CHRONIC CONGESTION across dense districts.";
     const loc = locateGroundedExcerpt(paragraph, "alleviate chronic congestion");
@@ -229,7 +237,7 @@ describe("IELTS rubric validation & band scoring", () => {
     const istanbulDraft: IeltsEssayDraft = {
       ...DRAFT_2,
       paragraphs: [
-        `İstanbul and ${DRAFT_2.paragraphs[0]}`,
+        `😀 İstanbul and ${DRAFT_2.paragraphs[0]}`,
         ...DRAFT_2.paragraphs.slice(1),
       ],
     };
@@ -359,6 +367,32 @@ describe("Honest evidence epistemology & Writing anti-gaming transfer guards", (
     expect(evaluated.transferReport.summary.hasSubstantiveRevision).toBe(false);
     expect(evaluated.transferReport.summary.masteryQualified).toBe(false);
     expect(evaluated.receipt.masteryQualified).toBe(false);
+    expect(evaluated.receipt.epistemicStatus).toBe("practice_feedback");
+  });
+
+  it("blocks punctuation-swap plus 12 appended unrelated nouns from bypassing substantive revision or crediting unchanged targets", () => {
+    const punctuationSwappedDraft: IeltsEssayDraft = {
+      ...DRAFT_2,
+      draftId: "draft-2-punct-swap",
+      version: 2,
+      paragraphs: [
+        ...DRAFT_2.paragraphs.slice(0, 3).map((p) => p.replaceAll(".", "!")),
+        `${DRAFT_2.paragraphs[3]!.replaceAll(".", "!")} Orchestra lantern glacier apricot compass velvet harbor mineral lantern walnut marble cactus pelican.`,
+      ],
+    };
+
+    const evaluated = evaluateRevisedDraftDeterministically({
+      baselineDraft: DRAFT_2,
+      revisedDraft: punctuationSwappedDraft,
+      targets: TARGETS,
+      receiptId: "r-punct-swap",
+    });
+    expect(evaluated.transferReport.summary.hasSubstantiveRevision).toBe(false);
+    expect(evaluated.transferReport.summary.transferredCount).toBe(0);
+    expect(evaluated.transferReport.summary.meetsCrossDraftVerification).toBe(false);
+    expect(evaluated.transferReport.summary.masteryQualified).toBe(false);
+    expect(evaluated.receipt.masteryQualified).toBe(false);
+    expect(evaluated.receipt.countsTowardMastery).toBe(false);
     expect(evaluated.receipt.epistemicStatus).toBe("practice_feedback");
   });
 
@@ -563,6 +597,67 @@ describe("Speaking Part 3 oral transfer seed, strict verification gates & Unicod
     expect(receipt.masteryQualified).toBe(false);
     expect(receipt.countsTowardMastery).toBe(false);
     expect(receipt.epistemicStatus).toBe("practice_feedback");
+  });
+
+  it("blocks bare pasted target phrases appended to a zero-target transcript at 75s", () => {
+    const barePastedTranscript =
+      "Personally, I think municipal leaders often prefer highway projects because drivers notice wider roads before the next election. " +
+      "However, building large rail systems takes many years of planning and construction noise across local neighbourhoods. " +
+      "Admittedly, families in outer districts still need cars when local bus routes run infrequently during evenings. " +
+      "In the long run, cities should coordinate buses with reliable trains so residents choose shared transit. " +
+      "Alleviate chronic congestion. Per-capita emissions.";
+
+    const receipt = evaluateSpeakingRetelling({
+      seed: baseSeed,
+      transcript: barePastedTranscript,
+      durationSeconds: 75,
+      assisted: false,
+      freshPromptTransfer: true,
+    });
+    expect(receipt.transferredCollocations).toHaveLength(0);
+    expect(receipt.masteryQualified).toBe(false);
+    expect(receipt.countsTowardMastery).toBe(false);
+    expect(receipt.epistemicStatus).toBe("practice_feedback");
+  });
+
+  it("emits one grounded citation per credited target hit with exact untrimmed offsets when transcript has leading spaces", () => {
+    const untrimmedTranscript =
+      "  Personally, I think municipal leaders face short-term political pressure when impatient voters demand wider roads right away. " +
+      "Investing steadily in urban rail is the clearest way to alleviate chronic congestion across crowded city centres during peak weekday hours. " +
+      "Over time, shifting daily commuters onto electric trains also lowers per-capita emissions in dense neighbourhoods that suffer from poor air quality. " +
+      "Admittedly, outer suburbs still rely on frequent feeder buses to reach stations safely during late evenings.";
+
+    const receipt = evaluateSpeakingRetelling({
+      seed: baseSeed,
+      transcript: untrimmedTranscript,
+      durationSeconds: 75,
+      assisted: false,
+    });
+
+    expect(receipt.transferredCollocations).toEqual([
+      "alleviate chronic congestion",
+      "per-capita emissions",
+    ]);
+    expect(receipt.masteryQualified).toBe(true);
+
+    const lexicalQuotes = receipt.evidenceQuotes.filter(
+      (q) => q.signal === "lexicalTransfer",
+    );
+    expect(lexicalQuotes).toHaveLength(2);
+    expect(lexicalQuotes[0]!.matchedExpression).toBe("alleviate chronic congestion");
+    expect(lexicalQuotes[0]!.quote).toContain("alleviate chronic congestion");
+    expect(lexicalQuotes[1]!.matchedExpression).toBe("per-capita emissions");
+    expect(lexicalQuotes[1]!.quote).toContain("per-capita emissions");
+    expect(lexicalQuotes[0]!.quote).not.toBe(lexicalQuotes[1]!.quote);
+
+    // Every citation (fluency + every lexical target) MUST slice identically from untrimmed transcript!
+    for (const quote of receipt.evidenceQuotes) {
+      expect(
+        untrimmedTranscript.slice(quote.startOffset, quote.endOffset),
+      ).toBe(quote.quote);
+    }
+    // Leading two spaces must not shift the first sentence's startOffset to 0.
+    expect(receipt.evidenceQuotes[0]!.startOffset).toBe(2);
   });
 
   it("blocks NaN or non-finite duration even when freshPromptTransfer is true", () => {
