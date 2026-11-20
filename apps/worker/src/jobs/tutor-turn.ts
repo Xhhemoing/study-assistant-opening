@@ -51,7 +51,7 @@ import {
   type ResolvedTaskModel,
   type ParentInteractionBudget,
 } from "@aistudy/ai";
-import type { TutorStreamWriter } from "../runtime/tutor-stream";
+import { withTutorDeltaBatches, type TutorStreamWriter } from "../runtime/tutor-stream";
 import { chunksAtSnapshots } from "./tutor-chunks";
 import { prepareTutorNextAction, type TutorNextActionService } from "./tutor-next-action";
 import { withJobHeartbeat } from "../runtime/lifecycle";
@@ -414,10 +414,18 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
         }
       }
       let firstTextAt: number | null = null;
-      const onTextDelta = deps.stream ? async (delta: string) => {
-        if (!delta) return;
+      const authorizeAndPublish = async (text: string) => {
         await assertMaterialsCurrent();
-        await assertAttemptCurrent();
+        if (attemptContext) {
+          // The attempt assertion also checks the running job and claim token.
+          await assertAttemptCurrent();
+        } else {
+          const job = await deps.tutorJobs.get(scope, claimed.id);
+          if (job?.status !== "running" || job.claimToken !== claimed.claimToken || job.executionId !== claimed.executionId) {
+            throw Object.assign(new Error("tutor stream execution is no longer current"), { code: "CONFLICT" });
+          }
+        }
+        if (deps.privacy && jobEpoch !== null) assertCurrentEpoch(jobEpoch, await deps.privacy.getWorkspaceEpoch(scope));
         if (firstTextAt === null) {
           const observedAt = new Date();
           firstTextAt = performance.now();
@@ -425,11 +433,11 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
         }
         if (!streamAvailable) return;
         try {
-          const sequence = await deps.stream!.append(scope.workspaceId, claimed.id, delta, claimed.executionId);
+          const sequence = await deps.stream!.append(scope.workspaceId, claimed.id, text, claimed.executionId);
           if (sequence === 1) recordTiming("tutor_first_chunk", new Date(), Math.round(performance.now() - firstTextAt));
         }
         catch (error) { streamAvailable = false; deps.onStreamUnavailable?.(error); }
-      } : undefined;
+      };
       // BC1: operationId = durable tutor job id so BullMQ retries reuse one ledger
       // reservation; a fallback model runs under its own ":fallback" key.
       const callWith = (model: ResolvedTaskModel | undefined, operationId: string) => {
@@ -442,12 +450,20 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
                 actualCents: (settled: ProviderOutput) => actualCentsForOutput(settled, rates),
               } as ReservationTerms;
             })();
+        const provider = model?.provider ?? deps.provider;
+        // Drain within the provider phase so failed publication follows the same
+        // budget error path as a rejected first delta.
+        const streamingProvider = provider && deps.stream && input.outputFormat === "markdown" ? {
+          complete: (providerInput: ProviderInput) => withTutorDeltaBatches(
+            (signal, onTextDelta) => provider.complete(providerInput, signal, onTextDelta),
+            authorizeAndPublish,
+          ),
+        } : provider;
         return runBudgetedCall({
-          provider: model?.provider ?? deps.provider,
+          provider: streamingProvider,
           modelSnapshot: model?.modelSnapshot,
           budget: scopedBudget,
           input,
-          ...(input.outputFormat === "markdown" && onTextDelta ? { onTextDelta } : {}),
           requestId: operationId,
           operationId,
           parentBudget,

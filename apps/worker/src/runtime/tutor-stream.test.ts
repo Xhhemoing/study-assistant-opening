@@ -1,6 +1,6 @@
 import type IORedis from "ioredis";
 import { expect, it, vi } from "vitest";
-import { createTutorStreamReader, createTutorStreamWriter } from "./tutor-stream";
+import { createTutorStreamReader, createTutorStreamWriter, withTutorDeltaBatches } from "./tutor-stream";
 
 it("sm95 parses the cached attempt fence and rejects malformed identities before delivery", async () => {
   const id = "10000000-0000-4000-8000-000000000001";
@@ -21,4 +21,25 @@ it("returns only confirmed publication sequences and includes the expected execu
   expect(evalScript.mock.calls[0]?.at(-1)).toBe("execution");
   expect(await writer.append("workspace", "job", "", "execution")).toBe(0);
   expect(evalScript).toHaveBeenCalledTimes(2);
+});
+
+it("flushes at the monotonic deadline even when the timer callback has not run", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  const now = vi.spyOn(performance, "now").mockReturnValue(0);
+  try {
+    const published: string[] = [];
+    await withTutorDeltaBatches(async (_signal, delta) => {
+      await delta("first");
+      await delta(" second");
+      expect(published).toEqual(["first"]);
+      now.mockReturnValue(41);
+      await delta(" third");
+      expect(published).toEqual(["first", " second"]);
+    }, async text => { published.push(text); });
+    expect(published).toEqual(["first", " second", " third"]);
+    expect(vi.getTimerCount()).toBe(0);
+  } finally {
+    now.mockRestore();
+    vi.useRealTimers();
+  }
 });

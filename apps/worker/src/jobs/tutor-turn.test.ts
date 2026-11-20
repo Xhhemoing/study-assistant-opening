@@ -33,7 +33,7 @@ describe("tutor turn handler", () => {
 
   function setup(overrides: { claim?: unknown; chunks?: SourceChunk[]; provider?: unknown; sourceIds?: string[]; sourceVersions?: Record<string, number>; missingSourceIds?: string[] } = {}) {
     const tutorJobs = {
-      get: vi.fn(async () => claimedJob),
+      get: vi.fn(async () => overrides.claim ?? claimedJob),
       claim: vi.fn(async () => (overrides.claim !== undefined ? overrides.claim : claimedJob)),
       getUserTurn: vi.fn(async () => ({ ...turn, sourceIds: overrides.sourceIds ?? turn.sourceIds, sourceVersions: overrides.sourceVersions ?? { [chunkA.sourceId]: 0 } })),
       readAttemptContext: vi.fn(async () => ({ privacyEpoch: 0, anchor: { purpose: "learning_help" as const, attemptId: claimedJob.userTurnId, itemVersionId: claimedJob.conversationId },
@@ -292,6 +292,174 @@ describe("tutor turn handler", () => {
     expect(provider.complete).toHaveBeenCalledOnce();
   });
 
+  it("batches 200 rapid 50-byte deltas into 35 authorized appends with no text loss", async () => {
+    vi.useFakeTimers();
+    try {
+      const { deps, provider } = setup();
+      const assertCurrent = vi.fn(async () => {});
+      const retrieveContext: typeof deps.retrieveContext = async (...args) =>
+        ({ ...await deps.retrieveContext(...args), assertCurrent });
+      const stream = { begin: async () => {}, append: vi.fn(async (_workspace: string, _job: string, _text: string) => {}) };
+      const deltas = Array.from({ length: 200 }, (_, index) => String(index).padStart(50, "0"));
+      const text = deltas.join("");
+      provider.complete.mockImplementationOnce(async (_input, _signal, delta) => {
+        const beforeStreaming = assertCurrent.mock.calls.length;
+        await delta("");
+        expect(stream.append).not.toHaveBeenCalled();
+        await delta(deltas[0]);
+        expect(stream.append.mock.calls.map(call => call[2])).toEqual([deltas[0]]);
+        expect(assertCurrent.mock.calls.length - beforeStreaming).toBe(1);
+        for (const part of deltas.slice(1)) await delta(part);
+        expect(assertCurrent.mock.calls.length - beforeStreaming).toBe(stream.append.mock.calls.length);
+        return { text, citedChunkIds: [], candidates: [], requestId: null, inputTokens: 10, outputTokens: 10 };
+      });
+      await createTutorTurnHandler({ ...deps, stream, retrieveContext })(claimedJob.id);
+      expect(Buffer.byteLength(text)).toBe(10_000);
+      expect(stream.append).toHaveBeenCalledTimes(35);
+      expect(stream.append.mock.calls.map(call => call[2]).join("")).toBe(text);
+      expect(assertCurrent).toHaveBeenCalledTimes(39); // Includes the four non-publication checks.
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("flushes at 40ms from the first buffered delta even though the provider is paused", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "performance"] });
+    try {
+      const { deps, provider } = setup();
+      const stream = { begin: async () => {}, append: vi.fn(async (_workspace: string, _job: string, _text: string) => {}) };
+      provider.complete.mockImplementationOnce(async (_input, _signal, delta) => {
+        await delta("First");
+        await delta(" second");
+        await new Promise(resolve => setTimeout(resolve, 20));
+        await delta(" third");
+        await new Promise(resolve => setTimeout(resolve, 80));
+        return { text: "First second third", citedChunkIds: [], candidates: [], requestId: null, inputTokens: 10, outputTokens: 10 };
+      });
+      const run = createTutorTurnHandler({ ...deps, stream })(claimedJob.id);
+      await vi.advanceTimersByTimeAsync(39);
+      expect(stream.append.mock.calls.map(call => call[2])).toEqual(["First"]);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(stream.append.mock.calls.map(call => call[2])).toEqual(["First", " second third"]);
+      await vi.advanceTimersByTimeAsync(60);
+      await run;
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("uses UTF-8 bytes for the size threshold", async () => {
+    const { deps, provider } = setup();
+    const stream = { begin: async () => {}, append: vi.fn(async (_workspace: string, _job: string, _text: string) => {}) };
+    const part = "学".repeat(43);
+    provider.complete.mockImplementationOnce(async (_input, _signal, delta) => {
+      await delta("First");
+      await delta(part);
+      expect(stream.append).toHaveBeenCalledTimes(1);
+      await delta(part);
+      expect(stream.append.mock.calls.map(call => call[2])).toEqual(["First", part + part]);
+      return { text: "First" + part + part, citedChunkIds: [], candidates: [], requestId: null, inputTokens: 10, outputTokens: 10 };
+    });
+    await createTutorTurnHandler({ ...deps, stream })(claimedJob.id);
+  });
+
+  it.each(["material", "privacy", "claim"] as const)("aborts a paused provider on %s drift and drops the pending batch", async fence => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "performance"] });
+    try {
+      const { deps, provider, tutorJobs, budget } = setup();
+      const drift = new Error("source revoked");
+      let revoked = false;
+      const retrieveContext: typeof deps.retrieveContext = async (...args) => ({
+        ...await deps.retrieveContext(...args),
+        assertCurrent: async () => { if (revoked && fence === "material") throw drift; },
+      });
+      const privacy = {
+        getWorkspaceEpoch: async () => revoked && fence === "privacy" ? 1 : 0,
+        listExcludedSourceIds: async () => [],
+      };
+      tutorJobs.get.mockImplementation(async () => revoked && fence === "claim" ? { ...claimedJob, claimToken: "successor" } : claimedJob);
+      const stream = { begin: async () => {}, append: vi.fn(async (_workspace: string, _job: string, _text: string) => {}) };
+      const providerAborted = vi.fn();
+      provider.complete.mockImplementationOnce(async (_input, signal, delta) => {
+        await delta("First");
+        await delta(" never publish");
+        return new Promise((_resolve, reject) => {
+          signal?.addEventListener("abort", () => { providerAborted(); reject(signal.reason); }, { once: true });
+        });
+      });
+      const run = createTutorTurnHandler({ ...deps, stream, retrieveContext, privacy })(claimedJob.id);
+      const result = run.catch(error => error);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(stream.append.mock.calls.map(call => call[2])).toEqual(["First"]);
+      revoked = true;
+      await vi.advanceTimersByTimeAsync(40);
+      expect(providerAborted).toHaveBeenCalledOnce();
+      const error = await result;
+      if (fence === "material") expect(error).toBe(drift);
+      else if (fence === "privacy") expect(error).toBeInstanceOf(PrivacyEpochError);
+      else expect(error).toMatchObject({ code: "CONFLICT" });
+      expect(tutorJobs.fail).toHaveBeenCalledOnce();
+      expect(tutorJobs.completeTurn).not.toHaveBeenCalled();
+      expect(budget.markUnknown).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(100);
+      expect(vi.getTimerCount()).toBe(0);
+      expect(stream.append.mock.calls.map(call => call[2])).toEqual(["First"]);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("drains a timer flush racing provider completion before settling or completing the turn", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "performance"] });
+    try {
+      const { deps, provider, tutorJobs, budget } = setup();
+      let authorize!: () => void;
+      const authorization = new Promise<void>(resolve => { authorize = resolve; });
+      let hold = false;
+      const assertCurrent = vi.fn(async () => { if (hold) await authorization; });
+      const retrieveContext: typeof deps.retrieveContext = async (...args) =>
+        ({ ...await deps.retrieveContext(...args), assertCurrent });
+      const stream = { begin: async () => {}, append: vi.fn(async (_workspace: string, _job: string, _text: string) => {}) };
+      provider.complete.mockImplementationOnce(async (_input, _signal, delta) => {
+        await delta("First");
+        hold = true;
+        await delta(" tail");
+        await new Promise(resolve => setTimeout(resolve, 41));
+        return { text: "First tail", citedChunkIds: [], candidates: [], requestId: null, inputTokens: 10, outputTokens: 10 };
+      });
+      const run = createTutorTurnHandler({ ...deps, stream, retrieveContext })(claimedJob.id);
+      await vi.advanceTimersByTimeAsync(40);
+      expect(assertCurrent).toHaveBeenCalledTimes(4);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(budget.settle).not.toHaveBeenCalled();
+      expect(tutorJobs.completeTurn).not.toHaveBeenCalled();
+      expect(stream.append.mock.calls.map(call => call[2])).toEqual(["First"]);
+      authorize();
+      await run;
+      expect(stream.append.mock.calls.map(call => call[2])).toEqual(["First", " tail"]);
+      expect(tutorJobs.completeTurn).toHaveBeenCalledOnce();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("flushes authorized trailing text before recording a provider error and ignores late callbacks", async () => {
+    const { deps, provider, tutorJobs } = setup();
+    const stream = { begin: async () => {}, append: vi.fn(async (_workspace: string, _job: string, _text: string) => {}) };
+    const interrupted = new Error("provider closed prematurely");
+    let late!: (text: string) => Promise<void>;
+    provider.complete.mockImplementationOnce(async (_input, _signal, delta) => {
+      late = delta;
+      await delta("First");
+      await delta(" tail");
+      expect(stream.append.mock.calls.map(call => call[2])).toEqual(["First"]);
+      throw interrupted;
+    });
+    tutorJobs.fail.mockImplementationOnce(async () => {
+      expect(stream.append.mock.calls.map(call => call[2])).toEqual(["First", " tail"]);
+    });
+    await expect(createTutorTurnHandler({ ...deps, stream })(claimedJob.id)).rejects.toBe(interrupted);
+    await late(" after close");
+    expect(stream.append.mock.calls.map(call => call[2])).toEqual(["First", " tail"]);
+    expect(tutorJobs.completeTurn).not.toHaveBeenCalled();
+  });
+
+
   it("records one model/Redis observation per execution without blocking first publication", async () => {
     vi.useFakeTimers();
     try {
@@ -387,11 +555,12 @@ describe("tutor turn handler", () => {
       expect(tutorJobs.completeTurn).not.toHaveBeenCalled();
       await onTextDelta("F = ");
       await onTextDelta("ma [1]");
-      expect(stream.append.mock.calls.map(call => call[2])).toEqual(["F = ", "ma [1]"]);
+      expect(stream.append.mock.calls.map(call => call[2])).toEqual(["F = "]);
       return { text: "F = ma [1]", citedChunkIds: [], requestId: null, candidates: [], inputTokens: 100, outputTokens: 50 };
     });
     tutorJobs.completeTurn.mockImplementationOnce(async () => {
       expect(budget.settle).toHaveBeenCalledOnce();
+      expect(stream.append.mock.calls.map(call => call[2])).toEqual(["F = ", "ma [1]"]);
     });
     await createTutorTurnHandler({ ...deps, stream })(claimedJob.id);
     expect(tutorJobs.completeTurn.mock.calls.map(call => call[0])).toContainEqual(expect.objectContaining({

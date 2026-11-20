@@ -143,20 +143,23 @@ describe("sm95 typed attempt context", () => {
     expect(tutorJobs.completeTurn).not.toHaveBeenCalled();
   });
 
-  it("sm95 blocks a stale stream delta before append without logging the saved context", async () => {
+  it.each([false, true])("sm95 rejects attempt drift before publishing the batch (buffered=%s)", async buffered => {
     const { deps, tutorJobs, provider } = setup({ sourceIds: [], chunks: [] });
     tutorJobs.getUserTurn.mockResolvedValueOnce({ ...turn, sourceIds: [], sourceVersions: {}, attemptId: claimedJob.userTurnId });
     const drift = Object.assign(new Error("bound attempt context is unavailable or changed"), { code: "CONFLICT" });
-    tutorJobs.assertAttemptContext.mockResolvedValueOnce(undefined).mockRejectedValueOnce(drift);
-    const stream = { begin: vi.fn(async () => {}), append: vi.fn(async () => {}) };
+    tutorJobs.assertAttemptContext.mockResolvedValueOnce(undefined);
+    if (buffered) tutorJobs.assertAttemptContext.mockResolvedValueOnce(undefined);
+    tutorJobs.assertAttemptContext.mockRejectedValueOnce(drift);
+    const stream = { begin: vi.fn(async () => {}), append: vi.fn(async (_workspace: string, _job: string, _text: string) => {}) };
     const streamExposures = { generate: vi.fn(async () => ({ id: chunkB.id })) };
     provider.complete.mockImplementationOnce(async (_input, _signal, onTextDelta) => {
       if (!onTextDelta) throw new Error("Expected stream callback");
+      if (buffered) await onTextDelta("first");
       await onTextDelta("must not be released");
       return { text: "must not be released", citedChunkIds: [], candidates: [], requestId: null, inputTokens: 1, outputTokens: 1 };
     });
     await expect(createTutorTurnHandler({ ...deps, stream, streamExposures })(claimedJob.id)).rejects.toBe(drift);
-    expect(stream.append).not.toHaveBeenCalled();
+    expect(stream.append.mock.calls.map(call => call[2])).toEqual(buffered ? ["first"] : []);
     expect(tutorJobs.completeTurn).not.toHaveBeenCalled();
     expect(tutorJobs.fail).toHaveBeenCalledWith(expect.anything(), claimedJob.id, TUTOR_FAILURE_MESSAGE, undefined, undefined);
   });

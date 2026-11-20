@@ -16,6 +16,67 @@ const TTL_SECONDS = 15 * 60;
 const keyFor = (workspaceId: string, jobId: string) => `opening:tutor-stream:${workspaceId}:${jobId}`;
 const channelFor = (workspaceId: string, jobId: string) => `${keyFor(workspaceId, jobId)}:events`;
 
+const DELTA_BATCH_MAX_BYTES = 256;
+const DELTA_BATCH_MAX_MS = 40;
+
+/** Scope the buffer and its timer to one provider execution. */
+export async function withTutorDeltaBatches<T>(
+  produce: (signal: AbortSignal, onTextDelta: (delta: string) => Promise<void>) => Promise<T>,
+  authorizeAndPublish: (text: string) => Promise<void>,
+): Promise<T> {
+  const controller = new AbortController();
+  const signal = controller.signal;
+  let first = true;
+  let closed = false;
+  let buffer = "";
+  let deadline = 0;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let active: Promise<void> | undefined;
+
+  function flush() {
+    clearTimeout(timer);
+    timer = undefined;
+    if (!buffer) return active;
+    const text = buffer;
+    buffer = "";
+    // Keep the timer's promise handled and interrupt a provider stalled in read().
+    active = Promise.resolve().then(() => authorizeAndPublish(text))
+      .catch(error => controller.abort(error))
+      .finally(() => { active = undefined; });
+    return active;
+  }
+
+  const onTextDelta = async (delta: string) => {
+    if (!delta || closed) return;
+    const receivedAt = performance.now();
+    // Drain in order, including an expired batch whose timer has not run yet.
+    while (active || (buffer && performance.now() >= deadline)) {
+      await (active ?? flush());
+    }
+    if (closed) return;
+    signal.throwIfAborted();
+
+    if (!buffer) deadline = receivedAt + DELTA_BATCH_MAX_MS;
+    buffer += delta;
+    if (first || Buffer.byteLength(buffer, "utf8") >= DELTA_BATCH_MAX_BYTES || performance.now() >= deadline) {
+      first = false;
+      await flush();
+      signal.throwIfAborted();
+    } else {
+      timer ??= setTimeout(() => { void flush(); }, Math.max(0, deadline - performance.now()));
+    }
+  };
+
+  try {
+    return await produce(signal, onTextDelta);
+  } finally {
+    // Both EOF and provider errors drain authorized text before the job goes terminal.
+    closed = true;
+    await flush();
+    signal.throwIfAborted();
+  }
+}
+
 /** Redis is temporary presentation state; completed answers and job status remain in PostgreSQL. */
 export function createTutorStreamWriter(redis: IORedis) {
   return {
