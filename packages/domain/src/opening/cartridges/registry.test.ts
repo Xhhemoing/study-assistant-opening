@@ -8,15 +8,20 @@ import {
   registerCartridge,
   validateCartridge,
 } from "./registry";
-import { createStackFeasibilityProbe, stack408Cartridge } from "./stack-408-v1";
+import { createStackFeasibilityProbe, stack408Cartridge, toStack408Emission } from "./stack-408-v1";
 import {
   hasEvidenceCapability,
   hasMaterialReactiveCapability,
   hasSchedulableCapability,
   meetsCapabilityLevel,
   safeErrorDetail,
+  type CartridgeCapabilityLevel,
   type ContinuityCartridge,
 } from "./types";
+
+const unknownLevel = "L4" as CartridgeCapabilityLevel;
+const traceProbeId = "408.stack.trace.interleaved-underflow.v1";
+const traceEmission = toStack408Emission(traceProbeId, { outputs: "2,3,1,UNDERFLOW", finalTop: -1 });
 
 const continuityOnly: ContinuityCartridge<{ step: number }> = {
   manifest: { id: "demo.notes.v1", version: "0.1.0", domain: "demo", title: "笔记续接", level: "L1_CONTINUITY" },
@@ -36,6 +41,12 @@ describe("capability levels and guards", () => {
     expect(meetsCapabilityLevel("L2_SCHEDULABLE", "L3_MATERIAL_REACTIVE")).toBe(false);
   });
 
+  it("rejects unknown declared and required levels", () => {
+    expect(meetsCapabilityLevel(unknownLevel, "L1_CONTINUITY")).toBe(false);
+    expect(meetsCapabilityLevel("L4_EVIDENCE", unknownLevel)).toBe(false);
+    expect(meetsCapabilityLevel(unknownLevel, unknownLevel)).toBe(false);
+  });
+
   it("narrows only when the manifest declares the level and the methods exist", () => {
     expect(hasSchedulableCapability(continuityOnly)).toBe(false);
     expect(hasEvidenceCapability(stack408Cartridge)).toBe(true);
@@ -47,6 +58,131 @@ describe("capability levels and guards", () => {
 });
 
 describe("CartridgeRegistry", () => {
+  it("returns no cartridges for an unknown capability", () => {
+    const registry = createCartridgeRegistry([continuityOnly, stack408Cartridge]);
+    expect(registry.listCartridgesByCapability(unknownLevel)).toEqual([]);
+  });
+
+  it("keeps probe mutations from changing the displayed problem or formal grading across registries", () => {
+    const first = createCartridgeRegistry([stack408Cartridge]);
+    const second = createCartridgeRegistry([stack408Cartridge]);
+    const firstCartridge = first.getCartridge(traceEmission.cartridgeId)!;
+    const secondCartridge = second.getCartridge(traceEmission.cartridgeId)!;
+    if (!hasEvidenceCapability(firstCartridge) || !hasEvidenceCapability(secondCartridge)) {
+      throw new Error("Expected two evidence cartridges");
+    }
+    const probe = firstCartridge.getProbe(traceProbeId)!;
+    const push = (probe.input as { ops: { value: number }[] }).ops[1]!;
+    const mutated = Reflect.set(push, "value", 42);
+    try {
+      for (const registry of [first, second]) {
+        expect(qualifyCartridgeEmission(registry, traceEmission))
+          .toMatchObject({ qualified: true, evaluation: { outcome: "correct" } });
+        const changedAnswer = { ...traceEmission, response: { outputs: "42,3,1,UNDERFLOW", finalTop: -1 } };
+        expect(qualifyCartridgeEmission(registry, changedAnswer))
+          .toMatchObject({ qualified: true, evaluation: { outcome: "incorrect" } });
+      }
+      expect(mutated).toBe(false);
+      for (const registered of [firstCartridge, secondCartridge]) {
+        const listed = registered.listProbes().find(item => item.probeId === traceProbeId)!;
+        expect(registered.getProbe(traceProbeId)).not.toBe(probe);
+        expect(listed).not.toBe(probe);
+        expect(listed.prompt).toContain("push 2");
+        expect(listed.input).toMatchObject({ ops: expect.arrayContaining([{ op: "push", value: 2 }]) });
+        expect(Object.isFrozen(listed.hypotheses[0])).toBe(true);
+      }
+    } finally {
+      if (mutated) Reflect.set(push, "value", 2);
+    }
+  });
+
+  it("publishes deeply frozen snapshots of mutable probe definitions", () => {
+    const original = stack408Cartridge.getProbe(traceProbeId)!;
+    const probe = {
+      ...original,
+      correctModel: { ...original.correctModel },
+      hypotheses: original.hypotheses.map(model => ({ ...model })),
+      input: structuredClone(original.input),
+    };
+    const candidate = { ...stack408Cartridge, listProbes: () => [probe], getProbe: () => probe };
+    const registered = createCartridgeRegistry([candidate]).getCartridge(candidate.manifest.id)!;
+    if (!hasEvidenceCapability(registered)) throw new Error("Expected an evidence cartridge");
+    const lookup = registered.getProbe(traceProbeId)!;
+    const listed = registered.listProbes()[0]!;
+    expect(lookup).not.toBe(probe);
+    expect(listed).not.toBe(probe);
+    expect(listed.input).not.toBe(lookup.input);
+    expect(Reflect.set(listed.correctModel, "id", "rewritten")).toBe(false);
+    expect(Reflect.set(lookup.hypotheses, "length", 0)).toBe(false);
+    expect(Reflect.set(lookup.hypotheses[0]!, "id", "rewritten")).toBe(false);
+    expect(Reflect.set(probe, "prompt", "candidate edited its own prompt")).toBe(true);
+    expect(lookup.prompt).toContain("push 2");
+    expect(listed.prompt).toContain("push 2");
+  });
+
+  it.each(["deleted", "getter", "Proxy", "invalid strings"] as const)(
+    "pins the validated evidence versions when a listing callback leaves the contract %s",
+    kind => {
+      let reads = 0;
+      const original = { evaluatorVersion: "custom-evaluator-v1", specVersion: "custom-spec-v1" };
+      const candidate = {
+        ...stack408Cartridge,
+        evidenceContract: { ...original },
+        listProbes() {
+          switch (kind) {
+            case "deleted": Reflect.deleteProperty(this, "evidenceContract"); break;
+            case "getter":
+              Object.defineProperty(this, "evidenceContract", { get() { reads += 1; return original; } });
+              break;
+            case "Proxy":
+              this.evidenceContract = new Proxy(original, { ownKeys() { reads += 1; return Reflect.ownKeys(original); } });
+              break;
+            case "invalid strings": Object.assign(this.evidenceContract, { evaluatorVersion: "", specVersion: " " }); break;
+          }
+          return stack408Cartridge.listProbes();
+        },
+      };
+      const registry = createCartridgeRegistry([candidate]);
+      const registered = registry.getCartridge(candidate.manifest.id)!;
+      expect(hasEvidenceCapability(registered)).toBe(true);
+      expect(registered).toMatchObject({ evidenceContract: original });
+      expect(qualifyCartridgeEmission(registry, traceEmission)).toMatchObject({ qualified: true });
+      expect(reads).toBe(0);
+    },
+  );
+
+  it("keeps the registered evidence versions immutable after registration", () => {
+    const evidenceContract = { evaluatorVersion: "evaluator-v1", specVersion: "spec-v1" };
+    const candidate = { ...stack408Cartridge, evidenceContract };
+    const registry = createCartridgeRegistry([candidate]);
+    const registered = registry.getCartridge(candidate.manifest.id)!;
+    if (!hasEvidenceCapability(registered)) throw new Error("Expected an evidence cartridge");
+
+    candidate.evidenceContract.evaluatorVersion = "";
+    candidate.evidenceContract = { evaluatorVersion: "", specVersion: "" };
+    expect(Reflect.set(registered.evidenceContract, "specVersion", "")).toBe(false);
+    expect(registered.evidenceContract).toEqual({ evaluatorVersion: "evaluator-v1", specVersion: "spec-v1" });
+    expect(qualifyCartridgeEmission(registry, traceEmission)).toMatchObject({ qualified: true });
+  });
+
+  it.each(["primitive", "Proxy", "nested getter"] as const)(
+    "rejects a runtime probe list containing a %s without reading traps or getters",
+    kind => {
+      let reads = 0;
+      const [original] = stack408Cartridge.listProbes();
+      const invalid = kind === "primitive" ? 42
+        : kind === "Proxy" ? new Proxy(original!, { ownKeys() { reads += 1; return []; } })
+        : { ...original!, input: { get ops() { reads += 1; return []; } } };
+      const candidate = { ...stack408Cartridge };
+      const registered = createCartridgeRegistry([candidate]).getCartridge(candidate.manifest.id)!;
+      if (!hasEvidenceCapability(registered)) throw new Error("Expected an evidence cartridge");
+      const invalidList = [invalid] as ReturnType<typeof candidate.listProbes>;
+      candidate.listProbes = () => invalidList;
+      expect(() => registered.listProbes()).toThrow(TypeError);
+      expect(reads).toBe(0);
+    },
+  );
+
   it("registers cartridges and lists them by minimum capability", () => {
     const registry = createCartridgeRegistry([continuityOnly, stack408Cartridge]);
     const l2 = asLevel("L2_SCHEDULABLE", "408.stack.l2");

@@ -20,7 +20,9 @@ export function cartridgeLevelRank(level: CartridgeCapabilityLevel): 1 | 2 | 3 |
 
 /** True when `level` declares at least the `required` capability. */
 export function meetsCapabilityLevel(level: CartridgeCapabilityLevel, required: CartridgeCapabilityLevel): boolean {
-  return cartridgeLevelRank(level) >= cartridgeLevelRank(required);
+  const levelRank = cartridgeLevelRank(level);
+  const requiredRank = cartridgeLevelRank(required);
+  return levelRank > 0 && requiredRank > 0 && levelRank >= requiredRank;
 }
 
 export const cartridgeManifestSchema = z

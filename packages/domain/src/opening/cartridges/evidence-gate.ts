@@ -1,5 +1,8 @@
 import { evaluateProbeWithSnapshot } from "./capability-helpers";
-import { cloneCartridgeData, isInspectableCartridgeObject, readCartridgeDataProperty } from "./clone-cartridge-data";
+import {
+  callCartridgeDataMethod, cloneCartridgeData, isInspectableCartridgeObject, readCartridgeDataProperty,
+} from "./clone-cartridge-data";
+import { cloneProbeDefinition } from "./probe-definition";
 import {
   snapshotAndVerifyProbe,
   type DistinguishableProbeSpec,
@@ -168,11 +171,12 @@ export function qualifyCartridgeEmission(
 
   let probe: DistinguishableProbeSpec<unknown, unknown> | null;
   try {
-    probe = cartridge.getProbe(capturedEmission.probeId);
+    const lookedUp = callCartridgeDataMethod(cartridge, "getProbe", [capturedEmission.probeId]);
+    probe = lookedUp === null ? null : cloneProbeDefinition(lookedUp);
   } catch {
     return reject("cartridge_probe_lookup_failed");
   }
-  if (!probe || typeof probe !== "object") return reject("cartridge_probe_unknown");
+  if (probe === null) return reject("cartridge_probe_unknown");
 
   const snapshot = snapshotAndVerifyProbe(probe);
   result.distinguishability = snapshot.report;
@@ -187,10 +191,10 @@ export function qualifyCartridgeEmission(
 
   let cartridgeEvaluation: unknown;
   try {
-    cartridgeEvaluation = cartridge.evaluateProbeResponse(
+    cartridgeEvaluation = callCartridgeDataMethod(cartridge, "evaluateProbeResponse", [
       capturedEmission.probeId,
       capturedEmission.response.cartridgeResponseCopy,
-    );
+    ]);
   } catch {
     return reject("cartridge_evaluation_failed");
   }

@@ -40,6 +40,15 @@ export function readCartridgeDataProperty(value: unknown, key: string): unknown 
   return readEnumerableDataProperty(value, key);
 }
 
+export function callCartridgeDataMethod<T extends object, K extends keyof T & string>(definition: T, key: K, args: unknown[]):
+  T[K] extends (...args: never[]) => infer TResult ? TResult : never;
+export function callCartridgeDataMethod(definition: object, key: string, args: unknown[]): unknown;
+export function callCartridgeDataMethod(definition: object, key: string, args: unknown[]): unknown {
+  const method = readCartridgeDataProperty(definition, key);
+  if (!isInspectableCartridgeFunction(method)) throw new TypeError(`Cartridge definition requires ${key}()`);
+  return Reflect.apply(method, definition, args);
+}
+
 function isElementIndex(key: string | symbol, length: number): boolean {
   if (typeof key !== "string") return false;
   const index = Number(key);

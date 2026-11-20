@@ -163,6 +163,18 @@ describe("408.stack.v1 simulators", () => {
 });
 
 describe("408.stack.v1 probes", () => {
+  it("keeps the built-in scoring definitions deeply frozen for direct callers", () => {
+    const probes = stack408Cartridge.listProbes();
+    const probe = stack408Cartridge.getProbe(TRACE_PROBE)!;
+    const { ops } = probe.input as { ops: readonly object[] };
+    expect(Object.isFrozen(probes)).toBe(true);
+    expect(Reflect.set(ops, "length", 0)).toBe(false);
+    expect(Reflect.set(ops[1]!, "value", 42)).toBe(false);
+    expect(Reflect.set(probe.hypotheses[0]!, "id", "rewritten")).toBe(false);
+    expect(stack408Cartridge.evaluateProbeResponse(TRACE_PROBE, { outputs: "2,3,1,UNDERFLOW", finalTop: -1 }))
+      .toMatchObject({ outcome: "correct" });
+  });
+
   it("ships only probes passing the distinguishability pre-check", () => {
     const reports = stack408Cartridge.listProbes().map(verifyProbeDistinguishability);
     expect(reports.map(report => [report.probeId, report.distinguishable])).toEqual([

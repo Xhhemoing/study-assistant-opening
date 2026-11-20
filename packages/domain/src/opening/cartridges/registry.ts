@@ -1,7 +1,8 @@
 import {
-  cloneCartridgeData, copyCartridgeArray, isInspectableCartridgeFunction, isInspectableCartridgeObject,
-  readCartridgeDataProperty,
+  callCartridgeDataMethod, cloneCartridgeData, copyCartridgeArray, isInspectableCartridgeFunction,
+  isInspectableCartridgeObject, readCartridgeDataProperty,
 } from "./clone-cartridge-data";
+import { cloneProbeDefinition, deepFreeze } from "./probe-definition";
 import { verifyProbeDistinguishability, type DistinguishableProbeSpec, type ProbeDistinguishabilityReport } from "./probe-protocol";
 import {
   CARTRIDGE_LEVEL_METHODS,
@@ -12,6 +13,7 @@ import {
   safeErrorDetail,
   type AnyTeachingCartridge,
   type CartridgeCapabilityLevel,
+  type CartridgeEvidenceContract,
   type CartridgeManifest,
   type EvidenceCartridge,
 } from "./types";
@@ -53,9 +55,14 @@ export class CartridgeRegistrationError extends Error {
 function validateEvidenceContracts(
   cartridge: EvidenceCartridge<unknown>,
   issues: CartridgeRegistrationIssue[],
-): ProbeDistinguishabilityReport[] {
+): { pinnedEvidenceContract?: Readonly<CartridgeEvidenceContract>; probeReports: ProbeDistinguishabilityReport[] } {
+  let pinnedEvidenceContract: Readonly<CartridgeEvidenceContract> | undefined;
   try {
-    if (!hasValidEvidenceContract(readCartridgeDataProperty(cartridge, "evidenceContract"))) {
+    const contract = cloneCartridgeData(readCartridgeDataProperty(cartridge, "evidenceContract"));
+    if (hasValidEvidenceContract(contract)) {
+      const { evaluatorVersion, specVersion } = contract;
+      pinnedEvidenceContract = Object.freeze({ evaluatorVersion, specVersion });
+    } else {
       issues.push({ code: "evidence_contract_missing", detail: "evidenceContract.evaluatorVersion/specVersion must be non-blank strings" });
     }
   } catch (error) {
@@ -63,14 +70,14 @@ function validateEvidenceContracts(
   }
   let probes: DistinguishableProbeSpec<unknown, unknown>[];
   try {
-    probes = copyCartridgeArray(callDefinitionMethod(cartridge, "listProbes", []));
+    probes = copyCartridgeArray(callCartridgeDataMethod(cartridge, "listProbes", []));
   } catch (error) {
     issues.push({ code: "evidence_probe_listing_failed", detail: safeErrorDetail(error) });
-    return [];
+    return { pinnedEvidenceContract, probeReports: [] };
   }
   if (probes.length === 0) {
     issues.push({ code: "evidence_probes_missing", detail: "L4_EVIDENCE requires at least one probe" });
-    return [];
+    return { pinnedEvidenceContract, probeReports: [] };
   }
   const seen = new Set<string>();
   const reports: ProbeDistinguishabilityReport[] = [];
@@ -83,7 +90,7 @@ function validateEvidenceContracts(
     let lookedUp: unknown;
     let lookupFailed = false;
     try {
-      lookedUp = callDefinitionMethod(cartridge, "getProbe", [probeId]);
+      lookedUp = callCartridgeDataMethod(cartridge, "getProbe", [probeId]);
     } catch (error) {
       lookupFailed = true;
       issues.push({ code: "evidence_probe_lookup_failed", detail: `${probeId}: ${safeErrorDetail(error)}` });
@@ -95,8 +102,12 @@ function validateEvidenceContracts(
       issues.push({ code: "evidence_probe_not_distinguishable", detail: `${probeId}: ${report.issues.join(", ")}` });
     }
   }
-  return reports;
+  return { pinnedEvidenceContract, probeReports: reports };
 }
+
+type CartridgeDefinitionValidation =
+  | (Extract<CartridgeValidationReport, { ok: true }> & { pinnedEvidenceContract?: Readonly<CartridgeEvidenceContract> })
+  | Extract<CartridgeValidationReport, { ok: false }>;
 
 /**
  * Validate a cartridge against the capability level its manifest declares. A higher
@@ -104,6 +115,11 @@ function validateEvidenceContracts(
  * to pass the distinguishability pre-check.
  */
 export function validateCartridge(candidate: unknown): CartridgeValidationReport {
+  const result = validateCartridgeDefinition(candidate);
+  return result.ok ? { ok: true, manifest: result.manifest, probeReports: result.probeReports } : result;
+}
+
+function validateCartridgeDefinition(candidate: unknown): CartridgeDefinitionValidation {
   if (!isInspectableCartridgeObject(candidate)) {
     return { ok: false, issues: [{ code: "cartridge_not_object", detail: typeof candidate }], probeReports: [] };
   }
@@ -130,11 +146,10 @@ export function validateCartridge(candidate: unknown): CartridgeValidationReport
       issues.push({ code: "missing_capability_method", detail: `${manifest.level} requires ${method}()` });
     }
   }
-  let probeReports: ProbeDistinguishabilityReport[] = [];
-  if (manifest.level === "L4_EVIDENCE" && issues.length === 0) {
-    probeReports = validateEvidenceContracts(candidate as EvidenceCartridge<unknown>, issues);
-  }
-  return issues.length ? { ok: false, issues, probeReports } : { ok: true, manifest, probeReports };
+  const { pinnedEvidenceContract, probeReports } = manifest.level === "L4_EVIDENCE" && issues.length === 0
+    ? validateEvidenceContracts(candidate as EvidenceCartridge<unknown>, issues)
+    : { probeReports: [] };
+  return issues.length ? { ok: false, issues, probeReports } : { ok: true, manifest, probeReports, pinnedEvidenceContract };
 }
 
 export interface CartridgeRegistry {
@@ -145,35 +160,30 @@ export interface CartridgeRegistry {
   listCartridgesByCapability(level: CartridgeCapabilityLevel): AnyTeachingCartridge[];
 }
 
-function callDefinitionMethod<T extends object, K extends keyof T & string>(definition: T, key: K, args: unknown[]):
-  T[K] extends (...args: never[]) => infer TResult ? TResult : never;
-function callDefinitionMethod(definition: object, key: string, args: unknown[]): unknown;
-function callDefinitionMethod(definition: object, key: string, args: unknown[]): unknown {
-  const method = readCartridgeDataProperty(definition, key);
-  if (!isInspectableCartridgeFunction(method)) throw new TypeError(`Cartridge definition requires ${key}()`);
-  return Reflect.apply(method, definition, args);
-}
-
-function wrapCartridge(cartridge: AnyTeachingCartridge, pinnedManifest: Readonly<CartridgeManifest>): AnyTeachingCartridge {
+function wrapCartridge(
+  cartridge: AnyTeachingCartridge,
+  pinnedManifest: Readonly<CartridgeManifest>,
+  pinnedEvidenceContract: Readonly<CartridgeEvidenceContract> | undefined,
+): AnyTeachingCartridge {
   const { level } = pinnedManifest;
   const facade: AnyTeachingCartridge = {
     manifest: pinnedManifest,
     serializeContinuityState(state) {
-      const serialized = callDefinitionMethod(cartridge, "serializeContinuityState", [cloneCartridgeData(state)]);
+      const serialized = callCartridgeDataMethod(cartridge, "serializeContinuityState", [cloneCartridgeData(state)]);
       if (typeof serialized !== "string") throw new TypeError("Cartridge serialization must return a string");
       return serialized;
     },
     parseContinuityState(raw) {
-      return cloneCartridgeData(callDefinitionMethod(cartridge, "parseContinuityState", [cloneCartridgeData(raw)]));
+      return cloneCartridgeData(callCartridgeDataMethod(cartridge, "parseContinuityState", [cloneCartridgeData(raw)]));
     },
     buildResumeSummary(raw) {
-      const state = restoreContinuityState(value => callDefinitionMethod(cartridge, "parseContinuityState", [value]), raw);
-      return cloneCartridgeData(callDefinitionMethod(cartridge, "buildResumeSummary", [state]));
+      const state = restoreContinuityState(value => callCartridgeDataMethod(cartridge, "parseContinuityState", [value]), raw);
+      return cloneCartridgeData(callCartridgeDataMethod(cartridge, "buildResumeSummary", [state]));
     },
   };
-  if (level === "L4_EVIDENCE") {
+  if (pinnedEvidenceContract) {
     Object.defineProperty(facade, "evidenceContract", {
-      enumerable: true, value: readCartridgeDataProperty(cartridge, "evidenceContract"),
+      enumerable: true, value: pinnedEvidenceContract,
     });
   }
   for (const method of CARTRIDGE_LEVEL_METHODS[level]) {
@@ -181,15 +191,15 @@ function wrapCartridge(cartridge: AnyTeachingCartridge, pinnedManifest: Readonly
     Object.defineProperty(facade, method, {
       enumerable: true,
       value(...args: unknown[]): unknown {
-        const result = callDefinitionMethod(cartridge, method, cloneCartridgeData(args));
-        // Probe definitions contain executable callbacks and retain identity for registry checks.
+        const result = callCartridgeDataMethod(cartridge, method, cloneCartridgeData(args));
+        // Raw list/lookup identity is used during validation only.
         if (method === "getProbe") {
-          if (result !== null && !isInspectableCartridgeObject(result)) {
-            throw new TypeError("Cartridge lookup must return an inspectable probe or null");
-          }
-          return result;
+          return result === null ? null : deepFreeze(cloneProbeDefinition(result));
         }
-        if (method === "listProbes") return copyCartridgeArray(result as readonly unknown[]);
+        if (method === "listProbes") {
+          return Object.freeze(copyCartridgeArray(result as readonly unknown[])
+            .map(probe => deepFreeze(cloneProbeDefinition(probe))));
+        }
         return cloneCartridgeData(result);
       },
     });
@@ -201,15 +211,16 @@ export function createCartridgeRegistry(initial?: readonly unknown[]): Cartridge
   const entries = new Map<string, AnyTeachingCartridge>();
   const registry: CartridgeRegistry = {
     registerCartridge(cartridge) {
-      const report = validateCartridge(cartridge);
-      if (!report.ok) return report;
+      const result = validateCartridgeDefinition(cartridge);
+      if (!result.ok) return result;
+      const { pinnedEvidenceContract, ...report } = result;
       if (entries.has(report.manifest.id)) {
         return { ok: false, probeReports: report.probeReports,
           issues: [{ code: "duplicate_cartridge_id", detail: report.manifest.id }] };
       }
       // The validated schema has only scalar fields, so freezing this copy covers the whole manifest.
       const pinnedManifest = Object.freeze({ ...report.manifest });
-      entries.set(pinnedManifest.id, wrapCartridge(cartridge as AnyTeachingCartridge, pinnedManifest));
+      entries.set(pinnedManifest.id, wrapCartridge(cartridge as AnyTeachingCartridge, pinnedManifest, pinnedEvidenceContract));
       return report;
     },
     getCartridge(id) {
@@ -230,16 +241,16 @@ export function createCartridgeRegistry(initial?: readonly unknown[]): Cartridge
 }
 
 export function registerCartridge(registry: CartridgeRegistry, cartridge: unknown): CartridgeRegistrationResult {
-  return cloneCartridgeData(callDefinitionMethod(registry, "registerCartridge", [cartridge]));
+  return cloneCartridgeData(callCartridgeDataMethod(registry, "registerCartridge", [cartridge]));
 }
 
 export function getCartridge(registry: CartridgeRegistry, id: string): AnyTeachingCartridge | null {
-  return callDefinitionMethod(registry, "getCartridge", [id]);
+  return callCartridgeDataMethod(registry, "getCartridge", [id]);
 }
 
 export function listCartridgesByCapability(
   registry: CartridgeRegistry,
   level: CartridgeCapabilityLevel,
 ): AnyTeachingCartridge[] {
-  return copyCartridgeArray(callDefinitionMethod(registry, "listCartridgesByCapability", [level]));
+  return copyCartridgeArray(callCartridgeDataMethod(registry, "listCartridgesByCapability", [level]));
 }

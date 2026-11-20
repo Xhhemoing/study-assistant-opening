@@ -7,6 +7,7 @@ import {
 } from "./capability-helpers";
 import { cloneCartridgeData, copyCartridgeArray } from "./clone-cartridge-data";
 import type { CartridgeObservationEmission } from "./evidence-gate";
+import { deepFreeze } from "./probe-definition";
 import type { DistinguishableProbeSpec, MisconceptionHypothesis } from "./probe-protocol";
 import { restoreContinuityState } from "./types";
 import type {
@@ -320,21 +321,21 @@ const fifoDescription = "把栈当作队列：出栈取最早入栈的元素。"
 const offByOneDescription = "栈顶指针顺序混淆：在 top 初值为 -1 时使用 data[top++] = x。";
 const bypassDescription = "绕过后进先出约束：认为任意已入栈元素都可直接出栈，因此任何排列都是合法出栈序列。";
 
-export const stackTraceHypotheses: readonly MisconceptionHypothesis<StackTraceInput, StackTraceObservable>[] = [
+export const stackTraceHypotheses: readonly MisconceptionHypothesis<StackTraceInput, StackTraceObservable>[] = deepFreeze([
   { id: H_FIFO_QUEUE_CONFUSION, role: "misconception", label: "队列混淆", description: fifoDescription,
     predict: simulateFifoQueueConfusionTrace },
   { id: H_TOP_POINTER_OFF_BY_ONE, role: "misconception", label: "top++ / ++top 混淆", description: offByOneDescription,
     predict: simulateTopPointerOffByOneTrace },
-];
+]);
 
-export const stackFeasibilityHypotheses: readonly MisconceptionHypothesis<StackFeasibilityInput, StackFeasibilityObservable>[] = [
+export const stackFeasibilityHypotheses: readonly MisconceptionHypothesis<StackFeasibilityInput, StackFeasibilityObservable>[] = deepFreeze([
   { id: H_FIFO_QUEUE_CONFUSION, role: "misconception", label: "队列混淆", description: fifoDescription,
     predict: simulateFifoQueueConfusionFeasibility },
   { id: H_TOP_POINTER_OFF_BY_ONE, role: "misconception", label: "栈顶读取错位", description: offByOneDescription,
     predict: simulateTopPointerOffByOneFeasibility },
   { id: H_BYPASS_LIFO_ORDER, role: "misconception", label: "绕过 LIFO", description: bypassDescription,
     predict: simulateBypassLifoFeasibility },
-];
+]);
 
 export function createStackTraceProbe(
   probeId: string,
@@ -361,7 +362,7 @@ export function createStackFeasibilityProbe(
 const push = (value: number): StackOp => ({ op: "push", value });
 const pop: StackOp = { op: "pop" };
 
-const STACK_408_PROBES: readonly DistinguishableProbeSpec<unknown, unknown>[] = [
+const STACK_408_PROBES: readonly DistinguishableProbeSpec<unknown, unknown>[] = deepFreeze([
   createStackTraceProbe("408.stack.trace.interleaved-underflow.v1", "408.ds.stack.lifo-trace",
     { capacity: 4, ops: [push(1), push(2), pop, push(3), pop, pop, pop] },
     "容量为 4 的顺序栈（top 初值 -1）依次执行 push 1, push 2, pop, push 3, pop, pop, pop。写出每次 pop 的结果（空栈写 UNDERFLOW）以及最终 top 值。"),
@@ -371,7 +372,7 @@ const STACK_408_PROBES: readonly DistinguishableProbeSpec<unknown, unknown>[] = 
   createStackFeasibilityProbe("408.stack.pop-sequence.catalan-invalid.v1",
     { pushOrder: [1, 2, 3, 4], candidatePops: [2, 4, 1, 3] },
     "入栈顺序为 1, 2, 3, 4（可随时出栈）。判断出栈序列 2, 4, 1, 3 是否可行；若不可行，给出第一个无法完成的出栈位置（从 0 开始）。"),
-];
+]);
 
 /* ----------------------------------------------------------------- state -- */
 

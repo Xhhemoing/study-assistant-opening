@@ -41,6 +41,66 @@ describe("qualifyCartridgeEmission", () => {
       qualified: true, evaluation: { outcome: "incorrect", matchedHypothesisId: "H_FIFO_QUEUE_CONFUSION" } });
   });
 
+  it.each(["getter", "Proxy"] as const)("rejects a %s installed as the evaluator during unwrapped probe lookup", kind => {
+    let calls = 0;
+    const evaluate = stack408Cartridge.evaluateProbeResponse;
+    const candidate = {
+      ...stack408Cartridge,
+      getProbe(id: string) {
+        if (kind === "getter") {
+          Object.defineProperty(this, "evaluateProbeResponse", { get() { calls += 1; return evaluate; } });
+        } else {
+          this.evaluateProbeResponse = new Proxy(evaluate, {
+            apply(target, receiver, args) { calls += 1; return Reflect.apply(target, receiver, args); },
+          });
+        }
+        return stack408Cartridge.getProbe(id);
+      },
+    };
+    const unwrappedRegistry = { ...registry, getCartridge: () => candidate };
+    expect(qualifyCartridgeEmission(unwrappedRegistry, emit())).toMatchObject({
+      qualified: false, evaluation: null, reasonCodes: ["cartridge_evaluation_failed"],
+    });
+    expect(calls).toBe(0);
+  });
+
+  it.each(["getter", "Proxy"] as const)("rejects a %s installed as the lookup by an unwrapped registry", kind => {
+    let calls = 0;
+    const lookup = stack408Cartridge.getProbe;
+    const unwrappedRegistry = {
+      ...registry,
+      getCartridge() {
+        const candidate = { ...stack408Cartridge };
+        if (kind === "getter") {
+          Object.defineProperty(candidate, "getProbe", { get() { calls += 1; return lookup; } });
+        } else {
+          candidate.getProbe = new Proxy(lookup, {
+            apply(target, receiver, args) { calls += 1; return Reflect.apply(target, receiver, args); },
+          });
+        }
+        return candidate;
+      },
+    };
+    expect(qualifyCartridgeEmission(unwrappedRegistry, emit())).toMatchObject({
+      qualified: false, evaluation: null, reasonCodes: ["cartridge_level_below_evidence"],
+    });
+    expect(calls).toBe(0);
+  });
+
+  it.each(["Proxy", "getter"] as const)("rejects an unwrapped lookup result with a %s before inspection", kind => {
+    let reads = 0;
+    const original = stack408Cartridge.getProbe(TRACE_PROBE)!;
+    const probe = kind === "Proxy"
+      ? new Proxy(original, { ownKeys() { reads += 1; return Reflect.ownKeys(original); } })
+      : { ...original, get prompt() { reads += 1; return original.prompt; } };
+    const candidate = { ...stack408Cartridge, getProbe: () => probe };
+    const unwrappedRegistry = { ...registry, getCartridge: () => candidate };
+    expect(qualifyCartridgeEmission(unwrappedRegistry, emit())).toMatchObject({
+      qualified: false, evaluation: null, reasonCodes: ["cartridge_probe_lookup_failed"],
+    });
+    expect(reads).toBe(0);
+  });
+
   it.each(["Proxy", "getter"] as const)("withholds a matching evaluator result backed by a %s", kind => {
     let reads = 0;
     const candidate = {
