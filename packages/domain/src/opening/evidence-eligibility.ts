@@ -248,7 +248,8 @@ export function gateObservationCartridgeEvidence(
   observation: CartridgeEvidenceObservationFacts,
   input: CartridgeEvidenceInput | null | undefined,
 ): { eligibility: EvidenceEligibility; qualification: CartridgeEvidenceQualification | null } {
-  const emission = input?.emissions[observationId];
+  const emissions = input?.emissions;
+  const emission = emissions && Object.hasOwn(emissions, observationId) ? emissions[observationId] : undefined;
   if (!input || !emission) return { eligibility, qualification: null };
   const qualification = qualifyCartridgeEmission(input.registry, emission, observation);
   return { eligibility: applyCartridgeEvidenceGate(eligibility, qualification), qualification };

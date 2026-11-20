@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { evaluateEvidenceEligibility } from "./evidence-eligibility";
+import { createCartridgeRegistry } from "./cartridges/registry";
+import { evaluateEvidenceEligibility, gateObservationCartridgeEvidence } from "./evidence-eligibility";
 import { observation, context, exposure, withHelp } from "./evidence-eligibility-fixtures";
 
 describe("evaluateEvidenceEligibility", () => {
@@ -36,5 +37,15 @@ describe("evaluateEvidenceEligibility", () => {
     expect(first).toEqual(second);
     expect(new Set(first.reasonCodes).size).toBe(first.reasonCodes.length);
     expect(JSON.stringify({ observation, ctx })).toBe(before);
+  });
+});
+
+describe("gateObservationCartridgeEvidence", () => {
+  it.each(["constructor", "toString", "__proto__"])("ignores the inherited emission with observation ID %s", observationId => {
+    const eligibility = evaluateEvidenceEligibility(observation, context);
+    const input = { registry: createCartridgeRegistry(), emissions: {} };
+    const result = gateObservationCartridgeEvidence(eligibility, observationId, observation, input);
+    expect(result.eligibility).toBe(eligibility);
+    expect(result.qualification).toBeNull();
   });
 });

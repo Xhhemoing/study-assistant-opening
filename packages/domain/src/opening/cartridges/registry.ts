@@ -1,4 +1,4 @@
-import { verifyProbeDistinguishability, type ProbeDistinguishabilityReport } from "./probe-protocol";
+import { verifyProbeDistinguishability, type DistinguishableProbeSpec, type ProbeDistinguishabilityReport } from "./probe-protocol";
 import {
   CARTRIDGE_LEVEL_METHODS,
   cartridgeManifestSchema,
@@ -56,14 +56,24 @@ function validateEvidenceContracts(
   } catch (error) {
     issues.push({ code: "evidence_contract_missing", detail: safeErrorDetail(error) });
   }
-  let probes: ReturnType<EvidenceCartridge<unknown>["listProbes"]>;
+  const probes: DistinguishableProbeSpec<unknown, unknown>[] = [];
   try {
-    probes = cartridge.listProbes();
+    const rawProbes = cartridge.listProbes();
+    if (Array.isArray(rawProbes)) {
+      const length = rawProbes.length;
+      if (!Number.isInteger(length) || length < 0 || length > 0xffff_ffff) {
+        throw new TypeError("listProbes() returned an invalid array length");
+      }
+      for (let index = 0; index < length; index += 1) {
+        if (!Object.hasOwn(rawProbes, index)) throw new TypeError("listProbes() requires a dense array");
+        probes.push(rawProbes[index]);
+      }
+    }
   } catch (error) {
     issues.push({ code: "evidence_probe_listing_failed", detail: safeErrorDetail(error) });
     return [];
   }
-  if (!Array.isArray(probes) || probes.length === 0) {
+  if (probes.length === 0) {
     issues.push({ code: "evidence_probes_missing", detail: "L4_EVIDENCE requires at least one probe" });
     return [];
   }

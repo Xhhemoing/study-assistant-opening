@@ -165,6 +165,27 @@ describe("CartridgeRegistry", () => {
     expect(!report.ok && report.issues.map(issue => issue.code)).toEqual(["evidence_contract_missing", "evidence_probes_missing"]);
   });
 
+  it("rejects a probe list whose element getter throws", () => {
+    const probes = Object.defineProperty([], 0, {
+      get() { throw new Error("probe element unavailable"); },
+    });
+    expect(validateCartridge({ ...stack408Cartridge, listProbes: () => probes })).toMatchObject({
+      ok: false,
+      issues: [{ code: "evidence_probe_listing_failed" }],
+      probeReports: [],
+    });
+  });
+
+  it("rejects a probe list with holes before validating any probes", () => {
+    const probes = [...stack408Cartridge.listProbes()];
+    probes.length += 1;
+    expect(validateCartridge({ ...stack408Cartridge, listProbes: () => probes })).toMatchObject({
+      ok: false,
+      issues: [{ code: "evidence_probe_listing_failed" }],
+      probeReports: [],
+    });
+  });
+
   it("refuses an L4 cartridge carrying a degenerate probe", () => {
     // 3,2,1 is feasible for a real stack and for the bypass misconception alike.
     const degenerate = createStackFeasibilityProbe("408.stack.degenerate", { pushOrder: [1, 2, 3], candidatePops: [3, 2, 1] }, "判断");

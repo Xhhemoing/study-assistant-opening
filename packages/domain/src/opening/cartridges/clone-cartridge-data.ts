@@ -7,12 +7,33 @@ const typedArrayPrototypes = new Set<object>([
 const float16Array = Reflect.get(globalThis, "Float16Array") as { prototype: object } | undefined;
 if (float16Array) typedArrayPrototypes.add(float16Array.prototype);
 
+function requireNoOwnProperties(value: object): void {
+  if (Reflect.ownKeys(value).length !== 0) {
+    throw new TypeError("Cartridge data contains an unexpected own property");
+  }
+}
+
+function readEnumerableDataProperty(value: object, key: string | symbol): unknown {
+  const descriptor = Object.getOwnPropertyDescriptor(value, key);
+  if (typeof key !== "string" || !descriptor?.enumerable || !Object.hasOwn(descriptor, "value")) {
+    throw new TypeError("Cartridge data requires enumerable own string data properties");
+  }
+  return descriptor.value;
+}
+
+function isElementIndex(key: string | symbol, length: number): boolean {
+  if (typeof key !== "string") return false;
+  const index = Number(key);
+  return Number.isInteger(index) && index >= 0 && index < length && String(index) === key;
+}
+
 function requirePrivateArrayBuffer(value: object): void {
   if (Object.getPrototypeOf(value) !== ArrayBuffer.prototype) {
     throw new TypeError("Cartridge data requires an ordinary ArrayBuffer");
   }
   // The intrinsic verifies the backing store's brand even if the prototype was reassigned.
   Reflect.get(ArrayBuffer.prototype, "byteLength", value);
+  requireNoOwnProperties(value);
 }
 
 function projectCartridgeData(value: unknown, seen: WeakMap<object, object>): unknown {
@@ -28,8 +49,20 @@ function projectCartridgeData(value: unknown, seen: WeakMap<object, object>): un
     if (prototype !== DataView.prototype && (!prototype || !typedArrayPrototypes.has(prototype))) {
       throw new TypeError("Cartridge data requires a standard binary view");
     }
-    // Bypass own properties that could shadow the view's actual buffer.
-    const viewPrototype = prototype === DataView.prototype ? DataView.prototype : typedArrayPrototype;
+    const isDataView = prototype === DataView.prototype;
+    if (isDataView) {
+      requireNoOwnProperties(value);
+    } else {
+      const length = Reflect.get(typedArrayPrototype, "length", value) as number;
+      const keys = Reflect.ownKeys(value);
+      if (keys.length !== length) throw new TypeError("Cartridge data requires only typed array elements");
+      for (const key of keys) {
+        if (!isElementIndex(key, length)) throw new TypeError("Cartridge data requires canonical typed array indices");
+        readEnumerableDataProperty(value, key);
+      }
+    }
+    // The backing buffer is part of the clone even when reached only through a view.
+    const viewPrototype = isDataView ? DataView.prototype : typedArrayPrototype;
     requirePrivateArrayBuffer(Reflect.get(viewPrototype, "buffer", value) as object);
     return value;
   }
@@ -38,10 +71,12 @@ function projectCartridgeData(value: unknown, seen: WeakMap<object, object>): un
     return value;
   }
   if (prototype === Date.prototype) {
+    requireNoOwnProperties(value);
     if (!Number.isFinite(Date.prototype.getTime.call(value))) throw new TypeError("Cartridge data requires a valid Date");
     return value;
   }
   if (prototype === Map.prototype) {
+    requireNoOwnProperties(value);
     const copy = new Map<unknown, unknown>();
     seen.set(value, copy);
     Map.prototype.forEach.call(value, (entry: unknown, key: unknown) => {
@@ -50,6 +85,7 @@ function projectCartridgeData(value: unknown, seen: WeakMap<object, object>): un
     return copy;
   }
   if (prototype === Set.prototype) {
+    requireNoOwnProperties(value);
     const copy = new Set<unknown>();
     seen.set(value, copy);
     Set.prototype.forEach.call(value, (entry: unknown) => {
@@ -62,24 +98,19 @@ function projectCartridgeData(value: unknown, seen: WeakMap<object, object>): un
   if (isArray ? prototype !== Array.prototype : prototype !== Object.prototype && prototype !== null) {
     throw new TypeError("Cartridge data contains an unsupported object");
   }
-  const copy: object = isArray ? new Array(value.length) : {};
-  seen.set(value, copy);
-  for (const key of Reflect.ownKeys(value)) {
-    const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    if (typeof key === "symbol" || !descriptor || !("value" in descriptor)) {
-      throw new TypeError("Cartridge data requires own string data properties");
-    }
-    const index = Number(key);
-    const isArrayElement = Array.isArray(copy) && String(index) === key
-      && Number.isInteger(index) && index >= 0 && index < copy.length;
-    if (descriptor.enumerable || isArrayElement) {
-      Object.defineProperty(copy, key, { enumerable: true, value: projectCartridgeData(descriptor.value, seen) });
-    }
+  const keys = Reflect.ownKeys(value);
+  const length: unknown = isArray ? Object.getOwnPropertyDescriptor(value, "length")?.value : 0;
+  // Own keys are unique. Requiring all indices plus length rules out holes.
+  if (typeof length !== "number" || (isArray && keys.length !== length + 1)) {
+    throw new TypeError("Cartridge data requires dense arrays");
   }
-  if (Array.isArray(copy)) {
-    for (let index = 0; index < copy.length; index += 1) {
-      if (!Object.hasOwn(copy, index)) throw new TypeError("Cartridge data requires dense arrays");
-    }
+  const copy: object = isArray ? new Array<unknown>(length) : {};
+  seen.set(value, copy);
+  for (const key of keys) {
+    if (isArray && key === "length") continue;
+    if (isArray && !isElementIndex(key, length)) throw new TypeError("Cartridge data requires canonical array indices");
+    const entry = readEnumerableDataProperty(value, key);
+    Object.defineProperty(copy, key, { enumerable: true, value: projectCartridgeData(entry, seen) });
   }
   return copy;
 }

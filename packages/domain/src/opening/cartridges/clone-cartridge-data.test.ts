@@ -8,8 +8,7 @@ describe("cloneCartridgeData", () => {
     const bytes = new Uint8Array(buffer, 1, 2);
     const view = new DataView(buffer, 1, 2);
     bytes.set([1, 2]);
-    const values = [null, undefined, "stack", 42, true, 1n];
-    Object.defineProperty(values, 0, { enumerable: false });
+    const values = Object.freeze([null, undefined, "stack", 42, true, 1n]);
     const map = new Map<unknown, unknown>([[date, bytes]]);
     const set = new Set([date, view]);
     const payload = Object.assign(Object.create(null), { date, buffer, bytes, view, values, map, set }) as {

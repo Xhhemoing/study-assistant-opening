@@ -67,6 +67,33 @@ describe("qualifyCartridgeEmission", () => {
       .toMatchObject({ qualified: false, reasonCodes: ["cartridge_response_invalid"] });
   });
 
+  it.each([
+    ["Map with a function property", Object.assign(new Map(), { extra: () => 1 })],
+    ["plain object with a hidden shared buffer", Object.defineProperty({}, "extra", { value: shared })],
+    ["array with a named property", Object.assign([1], { extra: 2 })],
+    ["array with a non-enumerable element", Object.defineProperty([1], 0, { enumerable: false })],
+    ["typed array with a noncanonical element key", Object.assign(new Uint8Array([1]), { "01": 2 })],
+    ["Set with a symbol property", Object.assign(new Set(), { [Symbol()]: 1 })],
+    ["Date with a hidden property", Object.defineProperty(new Date(0), "extra", { value: 1 })],
+    ["DataView with a named property", Object.assign(new DataView(new ArrayBuffer(1)), { extra: 1 })],
+    ["typed array backed by an ArrayBuffer with a named property", new Uint8Array(Object.assign(new ArrayBuffer(1), { extra: 1 }))],
+  ] as const)("rejects a response before registry lookup when it contains: %s", (_label, metadata) => {
+    const getCartridge = vi.fn(registry.getCartridge);
+    const result = qualifyCartridgeEmission({ ...registry, getCartridge }, emit({ response: { ...CORRECT, metadata } }));
+    expect(result).toMatchObject({ qualified: false, reasonCodes: ["cartridge_response_invalid"] });
+    expect(getCartridge).not.toHaveBeenCalled();
+  });
+
+  it("rejects a response carrying an accessor without invoking it or looking up the cartridge", () => {
+    const get = vi.fn(() => 1);
+    const metadata = Object.defineProperty(new Map(), "extra", { get });
+    const getCartridge = vi.fn(registry.getCartridge);
+    const result = qualifyCartridgeEmission({ ...registry, getCartridge }, emit({ response: { ...CORRECT, metadata } }));
+    expect(result).toMatchObject({ qualified: false, reasonCodes: ["cartridge_response_invalid"] });
+    expect(getCartridge).not.toHaveBeenCalled();
+    expect(get).not.toHaveBeenCalled();
+  });
+
   it("rejects Node BlockList data before lookup can mutate its backing state", () => {
     const blockList = new BlockList();
     const address = "192.0.2.1";
