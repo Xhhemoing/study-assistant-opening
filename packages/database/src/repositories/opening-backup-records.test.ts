@@ -222,3 +222,61 @@ it("refuses a retained intent chain before reading text when a referenced attemp
   await expect(readOpeningBackupRecords(sql, { workspaceId, ownerUserId })).rejects.toThrow("incomplete after privacy filtering");
   expect(sql.calls.some(call => call.query.includes("payload, resulting_intent, action, created_at FROM opening_study_intent_events"))).toBe(false);
 });
+
+it("cascades observation-chain pruning into dependent sourceTurnId activities within the fixed-point loop", async () => {
+  const courseId = "c0000000-0000-4000-8000-000000000001";
+  const convId = "c0000000-0000-4000-8000-000000000002";
+  const originTurnId = "c0000000-0000-4000-8000-000000000003";
+  const baseActivityId = "c0000000-0000-4000-8000-000000000004";
+  const derivedActivityId = "c0000000-0000-4000-8000-000000000005";
+  const sessionId = "c0000000-0000-4000-8000-000000000006";
+  const attemptId = "c0000000-0000-4000-8000-000000000007";
+  const rootObsId = "c0000000-0000-4000-8000-000000000008";
+  const excludedHeadObsId = "c0000000-0000-4000-8000-000000000009";
+
+  const sql = fakeSql(call => {
+    if (call.query.includes("FROM workspaces")) return [{ privacy_epoch: 0 }];
+    if (call.query.trim().startsWith("SELECT id, workspace_id, owner_user_id, title, course_id")) {
+      return [{ id: convId, workspace_id: workspaceId, owner_user_id: ownerUserId, title: "Course chat", course_id: courseId }];
+    }
+    if (call.query.trim().startsWith("SELECT t.id, t.workspace_id, t.conversation_id")) {
+      return [{ id: originTurnId, workspace_id: workspaceId, conversation_id: convId, role: "user", attempt_id: attemptId, learning_session_id: sessionId, context_anchor: null }];
+    }
+    if (call.query.trim().startsWith("SELECT a.id, a.workspace_id, a.owner_user_id, a.course_id, a.status")) {
+      return [
+        { id: baseActivityId, workspace_id: workspaceId, owner_user_id: ownerUserId, course_id: courseId, create_intent: null },
+        { id: derivedActivityId, workspace_id: workspaceId, owner_user_id: ownerUserId, course_id: courseId, create_intent: { sourceTurnId: originTurnId.toUpperCase() } },
+      ];
+    }
+    if (call.query.trim().startsWith("SELECT l.id, l.workspace_id, l.owner_user_id")) {
+      return [{ id: sessionId, workspace_id: workspaceId, owner_user_id: ownerUserId, activity_id: baseActivityId }];
+    }
+    if (call.query.includes("FROM opening_learning_attempts a")) {
+      return [{
+        id: attemptId, workspace_id: workspaceId, owner_user_id: ownerUserId, session_id: sessionId, course_id: courseId,
+        activity_id: baseActivityId, problem_id: null, item_version_id: null, source_ids: [], source_versions: null,
+        observation_id: rootObsId, context_anchor: null,
+      }];
+    }
+    if (call.query.includes("SELECT id,root_observation_id,revises_observation_id,effective_head_id FROM opening_learning_observations")) {
+      return [
+        { id: rootObsId, root_observation_id: rootObsId, revises_observation_id: null, effective_head_id: excludedHeadObsId },
+        { id: excludedHeadObsId, root_observation_id: rootObsId, revises_observation_id: rootObsId, effective_head_id: excludedHeadObsId },
+      ];
+    }
+    if (call.query.includes("FROM opening_learning_observations o")) {
+      return [{
+        id: rootObsId, workspace_id: workspaceId, owner_user_id: ownerUserId, session_id: sessionId, activity_id: baseActivityId,
+        problem_id: null, workspace_history_revision: "1", source_versions: null, reference_check: null,
+        source_turn_ids: [originTurnId], attempt_id: attemptId, item_version_id: null,
+      }];
+    }
+    return [];
+  });
+
+  const snapshot = await readOpeningBackupRecords(sql, { workspaceId, ownerUserId });
+  expect(snapshot.tables.opening_learning_observations).toEqual([]);
+  expect(snapshot.tables.opening_learning_attempts).toEqual([]);
+  expect(snapshot.tables.opening_turns).toEqual([]);
+  expect(snapshot.tables.opening_teaching_activities.map(row => row.id)).toEqual([baseActivityId]);
+});
