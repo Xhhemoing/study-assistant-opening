@@ -232,3 +232,62 @@ it("restores a pasted question without a source and still rejects changes to its
   expect(parsePracticeDraftCollection({ ...collection, drafts: [{ ...saved, fields: { ...saved.fields, stem: "changed" } }] }, scope)).toBeNull();
   expect(parsePracticeDraftCollection({ ...collection, drafts: [{ ...saved, fields: { ...saved.fields, sourceId: attemptId } }] }, scope)).toBeNull();
 });
+
+it("refreshes a stale ordinary cache when live ordinary storage becomes matrix-only after failed cleanup", () => {
+  const course = crypto.randomUUID();
+  const ordinary = practiceScope(course, "ordinary");
+  const manual = practiceScope(course, "manual");
+  const ordinaryKey = `opening-practice:v2:${ordinary}`;
+  const legacy = emptyPracticeDraft(ordinary, { answer: "legacy manual answer" });
+  const matrix = emptyPracticeDraft(ordinary, { matrixMode: true, answer: "older matrix answer" });
+  const disk = { ...storage(), removeItem: (key: string) => { disk.data.delete(key); } };
+  disk.data.set(ordinaryKey, JSON.stringify({ version: 2, scope: ordinary, activeId: legacy.id, drafts: [legacy, matrix] }));
+  expect(readPracticeDraft(ordinary, disk)).toEqual(legacy);
+  disk.setItem.mockImplementation((key, value) => {
+    if (key === ordinaryKey) throw new Error("cleanup write denied");
+    disk.data.set(key, value);
+  });
+
+  const scopes = { ordinary, manual };
+  expect(readPartitionedPracticeDraftCollection(scopes, emptyPracticeDraft(manual), disk))
+    .toMatchObject({ activeId: legacy.id });
+
+  const newerMatrix = { ...matrix, fields: { ...matrix.fields, answer: "newer matrix answer" } };
+  disk.data.set(ordinaryKey, JSON.stringify({ version: 2, scope: ordinary, activeId: matrix.id, drafts: [newerMatrix] }));
+  disk.setItem.mockImplementation((key, value) => { disk.data.set(key, value); });
+
+  expect(readPartitionedPracticeDraftCollection(scopes, emptyPracticeDraft(ordinary, { matrixMode: true }), disk))
+    .toMatchObject({ activeId: matrix.id, drafts: [newerMatrix] });
+  const edited = patchPracticeDraft(ordinary, { matrixMode: true }, { fields: { answer: "edited newer matrix" } }, disk);
+  expect(edited.persisted).toBe(true);
+  expect(parsePracticeDraftCollection(JSON.parse(disk.data.get(ordinaryKey)!), ordinary))
+    .toMatchObject({ activeId: matrix.id, drafts: [edited.draft] });
+});
+
+it("keeps an unsaved in-memory matrix answer recoverable when the next ordinary storage read throws", () => {
+  const course = crypto.randomUUID();
+  const ordinary = practiceScope(course, "ordinary");
+  const manual = practiceScope(course, "manual");
+  const ordinaryKey = `opening-practice:v2:${ordinary}`;
+  const matrix = emptyPracticeDraft(ordinary, { matrixMode: true, answer: "initial matrix" });
+  const disk = { ...storage(), removeItem: (key: string) => { disk.data.delete(key); } };
+  disk.data.set(ordinaryKey, JSON.stringify({ version: 2, scope: ordinary, activeId: matrix.id, drafts: [matrix] }));
+
+  const scopes = { ordinary, manual };
+  expect(readPartitionedPracticeDraftCollection(scopes, matrix, disk))
+    .toMatchObject({ activeId: matrix.id, drafts: [matrix] });
+
+  disk.setItem.mockImplementation(() => { throw new Error("quota exceeded"); });
+  const unsaved = patchPracticeDraft(ordinary, { matrixMode: true }, { fields: { answer: "unsaved matrix answer" } }, disk);
+  expect(unsaved.persisted).toBe(false);
+
+  disk.getItem.mockImplementation(key => {
+    if (key === ordinaryKey) throw new Error("storage read denied");
+    return disk.data.get(key) ?? null;
+  });
+
+  expect(readPartitionedPracticeDraftCollection(scopes, emptyPracticeDraft(ordinary, { matrixMode: true }), disk))
+    .toMatchObject({ activeId: matrix.id, drafts: [unsaved.draft] });
+  expect(patchPracticeDraft(ordinary, { matrixMode: true }, { fields: { answer: "still editable in memory" } }, disk).draft.fields.answer)
+    .toBe("still editable in memory");
+});

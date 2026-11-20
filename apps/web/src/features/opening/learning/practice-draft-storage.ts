@@ -230,12 +230,25 @@ export function readPartitionedPracticeDraftCollection(scopes: PracticeDraftScop
   if (storage) {
     let ordinary: StoredPracticeDraftCollection | null = null;
     const unsavedOrdinary = dirty.has(scopes.ordinary);
+    const previousBlocked = blocked.get(scopes.ordinary);
     try {
       // Revalidate on every migration attempt, including after an interrupted cleanup.
       ordinary = readStoredPracticeDraftCollection(scopes.ordinary, storage);
+      if (!unsavedOrdinary) {
+        if (ordinary) memory.set(scopes.ordinary, ordinary.collection);
+        else memory.delete(scopes.ordinary);
+      }
     } catch (reason) {
-      if (!unsavedOrdinary) memory.delete(scopes.ordinary);
-      if (fallback.scope !== scopes.manual) throw reason;
+      if (unsavedOrdinary && memory.has(scopes.ordinary)) {
+        if (previousBlocked === undefined) blocked.delete(scopes.ordinary);
+        else blocked.set(scopes.ordinary, previousBlocked);
+        if (fallback.scope !== scopes.manual && memory.get(scopes.ordinary)!.drafts.some(draft => draft.fields.matrixMode !== true)) {
+          throw reason;
+        }
+      } else {
+        memory.delete(scopes.ordinary);
+        if (fallback.scope !== scopes.manual) throw reason;
+      }
     }
     if (!unsavedOrdinary && ordinary?.collection.drafts.some(draft => draft.fields.matrixMode !== true)) {
       migrateOrdinaryManualDrafts(scopes, ordinary, fallback, storage);
