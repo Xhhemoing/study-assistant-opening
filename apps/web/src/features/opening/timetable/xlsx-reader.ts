@@ -18,7 +18,7 @@ const weekRange = /\d+(?:\s*[-－至]\s*\d+)?/.source;
 const weekListPattern = `(${weekRange}(?:\\s*[,，、]\\s*${weekRange})*)`;
 const paritySuffix = /(?:\s*[(（]?([单双])周?[)）]?)?/.source;
 const inlineWeeks = new RegExp(`第?\\s*${weekListPattern}\\s*([单双])?周(?!次|[一二三四五六日天0-9])${paritySuffix}`);
-const labeledWeeks = new RegExp(`周次\\s*[:：]?\\s*第?${weekListPattern}\\s*([单双])?周?${paritySuffix}`);
+const labeledWeeks = new RegExp(`周次\\s*[:：]?\\s*第?\\s*${weekListPattern}\\s*([单双])?周?${paritySuffix}`);
 // A bare 周1 can name a weekday. Require a range or list after the prefix.
 const leadingWeeks = new RegExp(`周\\s*(?=\\d+\\s*[-－至,，、]\\s*\\d)${weekListPattern}\\s*([单双])?周?${paritySuffix}`);
 const columnWeeks = new RegExp(`^第?\\s*${weekListPattern}\\s*([单双])?周?${paritySuffix}$`);
@@ -40,6 +40,10 @@ function address(row: number, column: number): string {
 }
 
 function weekAnnotation(value: string, column = false) {
+  if (column) {
+    const singleWeek = value.match(/^周\s*(\d+)$/);
+    if (singleWeek) return Number(singleWeek[1]) <= 60 ? singleWeek : null;
+  }
   return value.match(labeledWeeks) ?? value.match(leadingWeeks) ?? value.match(column ? columnWeeks : inlineWeeks);
 }
 
@@ -110,9 +114,11 @@ export function parseTimetableSheets(sheets: TimetableSheet[]): ParsedTimetable 
         const lines = value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
         for (const line of lines) {
           const annotation = weekAnnotation(line.replace(periodPattern, ""));
+          const weekText = annotation?.[0].trim() ?? "";
           const courseName = line
-            .replace(/\s*[(（][^)）]*(?:周|节)[^)）]*[)）]/, "")
-            .replace(annotation?.[0].trim() ?? "", "")
+            // Keep a parenthesized parity suffix attached until the whole week annotation is removed.
+            .replace(/\s*[(（][^)）]*(?:周|节)[^)）]*[)）]/, group => weekText.includes(group.trim()) ? group : "")
+            .replace(weekText, "")
             .replace(/\s+[0-9]+\s*[-－至]\s*[0-9]+\s*节\s*$/, "")
             .trim();
           const weekCell = weekColumn >= 0 ? text(rows[r]![weekColumn]!) : "";

@@ -62,11 +62,27 @@ it.each([
   ["物理2（1-16周）", "2,4", "物理2", [2, 4]],
   ["高数1（1-6单周）", null, "高数1", [1, 3, 5]],
   ["物理2", "1-6周（双周）", "物理2", [2, 4, 6]],
+  ["物理2", "1-16周", "物理2", Array.from({ length: 16 }, (_, i) => i + 1)],
+  ["物理2", "周3", "物理2", [3]],
+  ["物理2", "周12", "物理2", [12]],
+  ["物理2", "周60", "物理2", [60]],
+  ["物理2", "周次：第 1-8周", "物理2", [1, 2, 3, 4, 5, 6, 7, 8]],
+  ["物理2", "第 3 周", "物理2", [3]],
+  ["物理2", "第 1, 3, 5 周", "物理2", [1, 3, 5]],
 ] as const)("reads marked weeks or the dedicated weeks column for %s / %s", (title, column, name, expected) => {
   const result = parseTimetableSheets([{ sheet: "课程表", data: [
     ["课程", "星期", "周次", "节次"], [title, "周二", column, "1-2节"],
   ] }]);
   expect(result.sessions).toMatchObject([{ courseName: name, weeks: expected }]);
+  expect(result.warnings).toEqual([]);
+});
+
+it.each(["周一", "周二", "周三", "周四", "周五", "周六", "周日", "周天", "周0", "周61"])("rejects %s in the weeks column", column => {
+  const result = parseTimetableSheets([{ sheet: "课表", data: [
+    ["课程", "星期", "周次", "节次"], ["物理2", "周三", column, "3-4节"],
+  ] }]);
+  expect(result.sessions).toEqual([]);
+  expect(result.warnings).toMatchObject([{ raw: "物理2", address: "A2" }]);
 });
 
 it.each([
@@ -75,6 +91,10 @@ it.each([
   ["物理2 1-4周 3-4节", "物理2", [1, 2, 3, 4], 3, 4],
   ["物理2 周1-16单 3-4节", "物理2", [1, 3, 5, 7, 9, 11, 13, 15], 3, 4],
   ["英语（周1、3、5） 1-2节", "英语", [1, 3, 5], 1, 2],
+  ["物理2（第 1-8 周） 3-4节", "物理2", [1, 2, 3, 4, 5, 6, 7, 8], 3, 4],
+  ["物理2 周次：第 1, 3, 5 周 1-2节", "物理2", [1, 3, 5], 1, 2],
+  ["物理2 1-16周（双周） 1-2节", "物理2", [2, 4, 6, 8, 10, 12, 14, 16], 1, 2],
+  ["物理2 1-8周(单周) 1-2节", "物理2", [1, 3, 5, 7], 1, 2],
 ] as const)("separates the course, weeks and periods in %s", (title, courseName, weeks, startPeriod, endPeriod) => {
   const result = parseTimetableSheets([{ sheet: "课表", data: [["课程", "星期"], [title, "周一"]] }]);
   expect(result.sessions).toMatchObject([{ courseName, weeks, weekday: 1, startPeriod, endPeriod }]);
