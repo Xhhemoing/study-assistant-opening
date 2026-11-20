@@ -494,12 +494,13 @@ function attemptView(attempt: ExamAttempt, state: ExamSprintState, pack: ExamPac
   const { answer, explanation, hint, pool: _pool, partSnapshot: _partSnapshot, ...question } = original;
   const run = state.runs.find(item => item.id === attempt.runId);
   const sealed = Boolean(run && isMock(run.mode) && !run.completedAt);
-  const reveal = !sealed && (attempt.answeredAt !== null || attempt.help.some(help => help.kind === "solution") || Boolean(run && isMock(run.mode) && run.completedAt));
+  const mock = run && isMock(run.mode);
+  const reveal = !sealed && (attempt.answeredAt !== null || !mock && attempt.help.some(help => help.kind === "solution"));
   const { prediction, resultMetadata: _resultMetadata, ...publicAttempt } = structuredClone(attempt);
   return {
     ...publicAttempt, ...(!sealed && prediction ? { prediction } : {}), correct: sealed ? null : attempt.correct, question: structuredClone(question),
     feedback: reveal ? { answer, explanation } : null,
-    hint: !sealed && attempt.help.some(help => help.kind === "hint") ? hint : null,
+    hint: !mock && attempt.help.some(help => help.kind === "hint") ? hint : null,
     independent: !sealed && independent(attempt, state, pack, context),
   };
 }

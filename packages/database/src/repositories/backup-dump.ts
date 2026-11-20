@@ -1,5 +1,5 @@
 import { isForbiddenBackupTable } from "../../../contracts/src/opening/backup-inventory";
-import { privateExamDocumentIds } from "./opening-backup-library";
+import { isPrivateExamActivity, privateExamDocumentIds } from "./opening-backup-library";
 import { applyNativeNoteExportPrivacy, filterNativeNotes } from "./native-note-privacy";
 import { attachNativeLearningLinks } from "./native-learning-links";
 import type { Sql } from "postgres";
@@ -79,28 +79,34 @@ export async function dumpWorkspaceSnapshot(
   if (!latestMigrationId) {
     throw new BackupRestoreError("VALIDATION", "No migrations are registered");
   }
+  const privateExams = await privateExamDocumentIds(sql, workspaceId);
+  // Auto-created cards may carry exam text even when they have no source document.
+  const examCards = new Set((await sql`SELECT c.id FROM cards c
+    JOIN opening_learning_observations o ON o.id=c.origin_observation_root_id AND o.workspace_id=c.workspace_id
+    JOIN opening_teaching_activities a ON a.id=o.activity_id AND a.workspace_id=o.workspace_id
+    WHERE c.workspace_id=${workspaceId} AND ${isPrivateExamActivity(sql, privateExams)}`).map(row => String(row.id)));
   const snapshot: NativeBackupSnapshot = {
     sourceWorkspaceId: workspaceId,
     workspace,
     latestMigrationId,
     courses,
-    memberships,
+    memberships: memberships.filter(row => !examCards.has(String(row.assetId))),
     goals,
     windows,
     documents: await attachNativeLearningLinks(sql, workspaceId, documents),
     blocks,
-    relations,
+    relations: relations.filter(row => !examCards.has(String(row.fromId)) && !examCards.has(String(row.toId))),
     revisions,
     explorations: nestBy(explorations, {
       branches: branches,
       blocks: explorationBlocks,
     }, "explorationId"),
-    promotions: nestBy(promotions, { targets: promotionTargets }, "promotionId"),
-    cards: nestBy(cards, { reviewStates: cardStates }, "cardId"),
-    events,
+    promotions: nestBy(promotions.filter(row => !examCards.has(String(row.targetId))),
+      { targets: promotionTargets.filter(row => !examCards.has(String(row.targetId))) }, "promotionId"),
+    cards: nestBy(cards.filter(row => !examCards.has(row.id)), { reviewStates: cardStates }, "cardId"),
+    events: events.filter(row => !examCards.has(String(row.contentId))),
     files: filesFromBlocks(blocks),
   };
-  const privateExams = await privateExamDocumentIds(sql, workspaceId);
   const learnerSnapshot = privateExams.length
     ? filterNativeNotes(snapshot, new Map(privateExams.map(id => [id, null])))
     : snapshot;

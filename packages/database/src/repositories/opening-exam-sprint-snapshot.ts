@@ -137,7 +137,7 @@ export function parseExamSprintSnapshot(rawPack: unknown, rawState: unknown): { 
         || Date.parse(attempt.presentedAt) > Date.parse(conversion.convertedAt);
     })
     || state.runs.some(run => new Set(run.questionIds).size !== run.questionIds.length
-      || run.questionIds.some(questionId => !questions.has(questionId))
+      || run.questionIds.some(questionId => questions.get(questionId)?.pool !== (run.mode === "mock-a" || run.mode === "mock-b" ? run.mode : "training"))
       || (run.completedAt !== null && Date.parse(run.completedAt) < Date.parse(run.startedAt)))
     || state.attempts.some(attempt => {
       const question = questions.get(attempt.questionId), run = runs.get(attempt.runId);

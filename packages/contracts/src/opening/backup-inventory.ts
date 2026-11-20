@@ -7,7 +7,7 @@ export const BACKUP_FORBIDDEN_TABLES = Object.freeze([
   "opening_parser_health", "opening_pdf_parse_segments", "opening_explicit_regrade_requests",
   "opening_budget_reservations", "opening_budget_reconcile_events", "opening_parent_interaction_budgets",
   "opening_course_reserved_questions", "opening_course_question_exposures", "opening_course_question_exposure_coverage",
-  "opening_ephemeral_provenance", "opening_query_ephemeral_provenance", "opening_assistant_proposals",
+  "opening_teaching_document_revisions", "opening_ephemeral_provenance", "opening_query_ephemeral_provenance", "opening_assistant_proposals",
   "opening_exam_sprint_commands", "opening_exam_integration_commands", "opening_measurement_commands",
   "opening_measurement_trials", "opening_measurement_attempts", "opening_dataset_consents",
   "opening_learning_eligibility", "opening_source_visual_recognitions", "opening_action_digest_decisions",

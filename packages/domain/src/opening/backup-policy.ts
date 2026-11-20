@@ -88,6 +88,19 @@ function validateWorkspaceHistory(
  * preserve pre-restore cursors; the executor still owns scope checks and the target transaction.
  */
 export function normalizeOpeningRestoreHistory(backup: OpeningBackup): OpeningBackup {
+  // Earlier v1 exports carried teaching metadata without the library inventory.
+  // Recreate only the referenced document identities. No body or revision is recoverable.
+  if (backup.tables.library_documents === undefined) {
+    const documents = new Set<string>();
+    for (const table of ["opening_teaching_units", "opening_teaching_activity_specs"]) {
+      for (const row of backup.tables[table] ?? []) {
+        if (isRecord(row) && isUuid(row.document_id)) documents.add(row.document_id.toLowerCase());
+      }
+    }
+    if (documents.size) backup = { ...backup, tables: { ...backup.tables, library_documents: [...documents].sort().map(id => ({
+      id, workspace_id: backup.workspaceId, title: "Recovered teaching document", lifecycle: "scratch", current_revision_number: 0,
+    })) } };
+  }
   if ("opening_workspace_history_revisions" in backup.tables) return backup;
   const observations = backup.tables.opening_learning_observations as Record<string, unknown>[] | undefined;
   if (observations?.some(row => "workspace_history_revision" in row)) return backup;

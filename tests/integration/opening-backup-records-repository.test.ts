@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, expect, it } from "vitest";
+import { COURSE_BACKUP_TABLES, LIBRARY_BACKUP_TABLES } from "../../packages/contracts/src/opening/backup-inventory";
 import { OPENING_BACKUP_TABLES, readOpeningBackupRecords } from "../../packages/database/src/repositories/opening-backup-records";
 import { insertTestTeachingActivity } from "./opening-fixture";
 import { backupRows, createBackupFixture, seedBackupGraph, seedBackupPlanning, sourceBytes, type BackupFixture } from "./opening-backup-records-fixture";
@@ -21,7 +22,7 @@ it("exports durable tables and version metadata with owner isolation and no obje
   // The seed graph creates one teaching activity (sessions require one since 0053) but no units/specs
   // and no K02 skill evidence (that needs a knowledge node), decisions, shadow predictions or intent events.
   // Formal goals, requirements and links are separate facts; seedBackupGraph creates none.
-  const empty = ["course_goals", "course_goal_links", "goal_time_windows", "course_requirements", "course_requirement_evidence_links", "opening_learning_asset_links", "cards", "card_review_states", "learning_events", "workspace_preferences", "courses", "course_asset_memberships", "opening_learning_attempts", "opening_learning_item_versions",
+  const empty = [...LIBRARY_BACKUP_TABLES, ...COURSE_BACKUP_TABLES, "course_goals", "course_goal_links", "goal_time_windows", "course_requirements", "course_requirement_evidence_links", "opening_learning_asset_links", "cards", "card_review_states", "learning_events", "workspace_preferences", "courses", "course_asset_memberships", "opening_learning_attempts", "opening_learning_item_versions",
     "opening_plan_feedback", "opening_suggestion_feedback", "opening_learning_history_revisions", "opening_retest_activities", "opening_teaching_units", "opening_teaching_activity_specs",
     "opening_learning_activity_history_revisions", "opening_skill_evidence",
     "opening_learning_decisions", "opening_learning_shadow_predictions", "opening_study_intent_events"];
@@ -31,6 +32,7 @@ it("exports durable tables and version metadata with owner isolation and no obje
   expect(snapshot.deletionJournal).toHaveLength(1);
   expect(snapshot.tables.opening_sources[0]).toMatchObject({ id: own.source, bytes: sourceBytes.length });
   expect(snapshot.tables.opening_source_chunks[0]).not.toHaveProperty("image_object_key");
+  expect(JSON.stringify(snapshot)).not.toContain("private/locator");
   expect(JSON.stringify(snapshot)).not.toContain(other.source);
   expect(JSON.stringify(snapshot)).not.toContain(fixture.otherScope.ownerUserId);
   await expect(readOpeningBackupRecords(fixture.sql, wrongOwner)).rejects.toMatchObject({ code: "NOT_FOUND" });

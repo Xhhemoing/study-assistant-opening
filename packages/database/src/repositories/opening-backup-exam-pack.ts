@@ -40,18 +40,31 @@ export function restoreSprintPack(row: Row): Row {
     return row;
   }
   if (!isDeepStrictEqual(row.pack_snapshot, catalogReference)) throw new Error("Unrecognized sprint catalog reference");
-  // Recompute sealed correctness from the trusted revision before validating the persisted shape.
+  // Keep mock run and attempt identities for linked history, but an archive cannot
+  // authenticate a graded submission. An imported mock is closed and ungraded.
   const incoming = structuredClone(row.state) as Partial<ExamSprintState> | null;
   if (!incoming || !Array.isArray(incoming.runs) || !Array.isArray(incoming.attempts)) throw new Error("Invalid sprint history");
-  const sealed = new Set(incoming.runs.filter(run => (run.mode === "mock-a" || run.mode === "mock-b") && run.completedAt === null).map(run => run.id));
+  const mocks = new Map(incoming.runs.filter(run => run.mode === "mock-a" || run.mode === "mock-b").map(run => [run.id, run]));
   for (const attempt of incoming.attempts) {
-    if (sealed.has(attempt.runId) && attempt.answer !== null) {
-      if (attempt.correct !== null) throw new Error("Sealed mock result in learner archive");
-      attempt.correct = EXAM_SPRINT_PACK.questions.find(question => question.id === attempt.questionId)?.answer === attempt.answer;
+    const mock = mocks.get(attempt.runId);
+    if (mock) {
+      if (mock.completedAt === null && attempt.correct !== null) throw new Error("Sealed mock result in learner archive");
+      attempt.answer = null;
+      attempt.answeredAt = null;
+      attempt.correct = null;
+      attempt.confidence = null;
+      attempt.durationSeconds = null;
+      delete attempt.prediction;
     }
     attempt.firstFamilyExposure = false;
   }
   const { pack, state } = parseExamSprintSnapshot(EXAM_SPRINT_PACK, incoming);
+  for (const run of state.runs) {
+    if (mocks.has(run.id) && run.completedAt === null) {
+      run.completedAt = state.attempts.filter(attempt => attempt.runId === run.id).reduce(
+        (last, attempt) => Date.parse(attempt.presentedAt) > Date.parse(last) ? attempt.presentedAt : last, run.startedAt);
+    }
+  }
   if (state.attempts.some(attempt => attempt.resultMetadata !== undefined)) throw new Error("Private exam result in learner backup");
   return { ...row, pack_snapshot: pack, state };
 }

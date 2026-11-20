@@ -29,7 +29,8 @@ describe("learner backup inventory", () => {
     }
     const classified = [...OPENING_BACKUP_TABLES, ...BACKUP_FORBIDDEN_TABLES, ...EXPLICIT_NON_EXPORTED_WORKSPACE_TABLES];
     expect(new Set(classified).size).toBe(classified.length);
-    expect(new Set(classified)).toEqual(tables);
+    // The wire also reserves this private namespace, which has no physical table.
+    expect(new Set(classified)).toEqual(new Set([...tables, "opening_teaching_document_revisions"]));
     expect(new Set(OPENING_RESTORE_APPLY_ORDER)).toEqual(new Set(Object.keys(OPENING_RESTORE_ROW_COLUMNS)));
     expect(OPENING_RESTORE_NEVER_TABLES).toEqual(BACKUP_FORBIDDEN_TABLES);
   });
@@ -69,6 +70,7 @@ describe("learner backup inventory", () => {
       counts: Object.fromEntries(["workspaces","courses","memberships","goals","windows","documents","blocks","relations","revisions",
         "explorations","promotions","cards","events","files"].map(key => [key, 0])) };
     expect(nativeBackupPackageSchema.safeParse(packed).success).toBe(true);
+    expect(BACKUP_FORBIDDEN_TABLES).toContain("opening_teaching_document_revisions");
     for (const table of BACKUP_FORBIDDEN_TABLES) {
       expect(validateOpeningRestore({ ...draft, tables: { [table]: [] } }, []).allowed).toBe(false);
       expect(evaluateOpeningRestoreEmptyNamespace({ ...counts, [table]: 0 }).ok).toBe(false);

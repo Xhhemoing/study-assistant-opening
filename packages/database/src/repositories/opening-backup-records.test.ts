@@ -165,8 +165,10 @@ it("exports the owner-scoped workspace counter as an exact safe JSON number", as
 it("retains each observation workspace revision as a portable number", async () => {
   const sql = fakeSql(call => {
     if (call.query.includes("FROM workspaces")) return [{ privacy_epoch: 0 }];
+    if (call.query.trim().startsWith("SELECT a.id, a.workspace_id, a.owner_user_id, a.course_id, a.status")) return [{ id: "activity-1" }];
+    if (call.query.trim().startsWith("SELECT l.id, l.workspace_id, l.owner_user_id")) return [{ id: "session-1", activity_id: "activity-1" }];
     if (call.query.includes("FROM opening_learning_observations o")) return [{
-      id: candidateId, workspace_id: workspaceId, owner_user_id: ownerUserId,
+      id: candidateId, workspace_id: workspaceId, owner_user_id: ownerUserId, session_id: "session-1", activity_id: "activity-1",
       workspace_history_revision: "7", source_versions: null, source_turn_ids: [], attempt_id: null, item_version_id: null,
     }];
     return [];

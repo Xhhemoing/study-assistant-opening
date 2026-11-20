@@ -4,6 +4,14 @@ import type { OpeningBackupRecordSnapshot } from "./opening-backup-records";
 
 type Tables = OpeningBackupRecordSnapshot["tables"];
 
+/** The caller's teaching activity is aliased as a in both inventory queries. */
+function isGeneratedExamActivity(sql: Sql | TransactionSql) {
+  return sql`(a.create_intent->>'kind' IS NOT DISTINCT FROM 'course_exam'
+    OR EXISTS (SELECT 1 FROM opening_exam_sprints s WHERE s.workspace_id=a.workspace_id
+      AND s.owner_user_id=a.owner_user_id AND s.course_id=a.course_id
+      AND s.pack_snapshot @> jsonb_build_object('requests',jsonb_build_array(jsonb_build_object('activityId',a.id::text)))))`;
+}
+
 /** A generated exam cannot be republished without the original private proposal.
  * Exclude its entire document, including old revisions and unlabelled answer text. */
 export async function privateExamDocumentIds(sql: Sql | TransactionSql, workspace: string): Promise<string[]> {
@@ -13,20 +21,23 @@ export async function privateExamDocumentIds(sql: Sql | TransactionSql, workspac
     SELECT spec.document_id FROM opening_teaching_activity_specs spec
     JOIN opening_teaching_activities a ON a.id=spec.activity_id AND a.workspace_id=spec.workspace_id
     WHERE spec.workspace_id=${workspace} AND (spec.generation_config #>> '{extras,kind}'='course_exam'
-      OR a.create_intent->>'kind'='course_exam'
-      OR EXISTS (SELECT 1 FROM opening_exam_sprints s WHERE s.workspace_id=a.workspace_id
-        AND s.owner_user_id=a.owner_user_id AND s.course_id=a.course_id
-        AND s.pack_snapshot @> jsonb_build_object('requests',jsonb_build_array(jsonb_build_object('activityId',a.id::text)))))`;
+      OR ${isGeneratedExamActivity(sql)})`;
   return rows.map(row => String(row.document_id));
+}
+
+export function isPrivateExamActivity(sql: Sql | TransactionSql, privateExams: string[]) {
+  return sql`(${isGeneratedExamActivity(sql)} OR EXISTS (SELECT 1 FROM opening_teaching_activity_specs spec
+    JOIN opening_teaching_units unit ON unit.id=spec.teaching_unit_id
+    WHERE spec.workspace_id=a.workspace_id AND spec.activity_id=a.id
+      AND (spec.document_id=ANY(${privateExams}::uuid[]) OR unit.document_id=ANY(${privateExams}::uuid[]))))`;
 }
 
 /** The same historical lineage predicate used by native note export. Child objects follow
  * admitted document and block identities, including both ends of polymorphic relations. */
-export async function readBackupLibrary(tx: TransactionSql, workspace: string, tables: Tables) {
-  const privateExams = new Set(await privateExamDocumentIds(tx, workspace));
+export async function readBackupLibrary(tx: TransactionSql, workspace: string, tables: Tables, privateExams: string[]) {
   const documents = [...await tx`SELECT d.id,d.workspace_id,d.title,d.lifecycle,d.schema_version,d.current_revision_number,
       d.created_at,d.updated_at,d.deleted_at FROM library_documents d
-    WHERE d.workspace_id=${workspace} AND NOT (d.id=ANY(${[...privateExams]}::uuid[]))
+    WHERE d.workspace_id=${workspace} AND NOT (d.id=ANY(${privateExams}::uuid[]))
       AND NOT EXISTS (SELECT 1 FROM opening_note_provenance p WHERE p.document_id=d.id AND
         (p.workspace_id<>d.workspace_id OR NOT (${contextSourceRefsIncluded(tx, workspace, tx`p.context_source_refs`, true)})))
       AND NOT EXISTS (SELECT 1 FROM opening_teaching_units u WHERE u.document_id=d.id
@@ -74,18 +85,6 @@ export async function readBackupLibrary(tx: TransactionSql, workspace: string, t
   for (const block of blocks) if (teachingDocs.has(block.document_id)) Object.assign(block, projectBlock(block));
   for (const revision of revisions) if (teachingDocs.has(revision.document_id) && Array.isArray(revision.blocks)) {
     revision.blocks = revision.blocks.map(projectBlock);
-  }
-  // An attempt or delivered-help receipt can outlive its private paper. Keep its
-  // activity, attempt and source identities while detaching the omitted block.
-  const examActivities = new Set(tables.opening_teaching_activity_specs
-    .filter(spec => privateExams.has(String(spec.document_id))).map(spec => spec.activity_id));
-  for (const name of ["opening_turns", "opening_learning_attempts", "opening_help_exposures"] as const) {
-    for (const row of tables[name]) {
-      const anchor = row.context_anchor as Record<string, unknown> | null;
-      if (anchor?.blockId && examActivities.has(anchor.activityId)) {
-        row.context_anchor = { ...anchor, blockId: null, contentVersion: null };
-      }
-    }
   }
   const documentsIncluded = new Set(ids);
   tables.opening_teaching_units = tables.opening_teaching_units.filter(row => documentsIncluded.has(String(row.document_id)));

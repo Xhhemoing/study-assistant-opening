@@ -79,19 +79,18 @@ export function backupAssetAdmission(tables: Tables) {
 
 export function validateBackupWorkspaceAssets(tables: Tables, errors: string[], owner?: string) {
   const admitted = backupAssetAdmission(tables);
-  if (owner !== undefined || tables.library_documents !== undefined) {
-    const docs = new Set(tables.library_documents?.map(row => row.id));
-    const examActivities = new Set(tables.opening_teaching_activities
-      ?.filter(row => isRecord(row.create_intent) && row.create_intent.kind === "course_exam").map(row => row.id));
-    const generated = (row: Row) => isRecord(row.generation_config) && isRecord(row.generation_config.extras)
-      && row.generation_config.extras.kind === "course_exam";
-    if (tables.opening_teaching_units?.some(generated)
-      || tables.opening_teaching_activity_specs?.some(spec => generated(spec) || examActivities.has(spec.activity_id))) {
-      errors.push("Private generated exam publications cannot be restored from a learner backup");
+  const generated = (row: Row) => isRecord(row.generation_config) && isRecord(row.generation_config.extras)
+    && row.generation_config.extras.kind === "course_exam";
+  if (tables.opening_teaching_activities?.some(row => isRecord(row.create_intent) && row.create_intent.kind === "course_exam")
+    || tables.opening_teaching_units?.some(generated) || tables.opening_teaching_activity_specs?.some(generated)) {
+    errors.push("Private generated exam publications cannot be restored from a learner backup");
+  }
+  const docs = tables.library_documents && new Set(tables.library_documents.map(row => String(row.id).toLowerCase()));
+  for (const name of ["opening_teaching_units", "opening_teaching_activity_specs"]) {
+    if (tables[name]?.some(row => !isUuid(row.document_id) || (docs && !docs.has(row.document_id.toLowerCase())))) {
+      errors.push(`${name} references a missing library document`);
     }
-    for (const name of ["opening_teaching_units", "opening_teaching_activity_specs"]) {
-      if (tables[name]?.some(row => !docs.has(row.document_id))) errors.push(`${name} references a missing library document`);
-    }
+    if (owner !== undefined && tables[name]?.some(row => row.owner_user_id !== owner)) errors.push(`${name} owner mismatch`);
   }
   for (const name of [...LIBRARY_BACKUP_TABLES, ...COURSE_BACKUP_TABLES]) {
     const identities = new Set<string>();

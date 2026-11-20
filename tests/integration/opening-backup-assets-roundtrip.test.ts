@@ -2,14 +2,15 @@ import { randomUUID } from "node:crypto";
 import { expect, it } from "vitest";
 import type { Sql, TransactionSql } from "postgres";
 import { assertOpeningTestDatabase } from "@aistudy/config";
-import { composeOpeningBackupDraft, createExamSprintState, validateOpeningRestore, type OpeningBackup } from "@aistudy/domain";
+import type { ExamSprintState } from "@aistudy/contracts";
+import { applyExamSprintCommand, examSprintOverview, composeOpeningBackupDraft, createExamSprintState, validateOpeningRestore, type OpeningBackup } from "@aistudy/domain";
 import { EXAM_SPRINT_PACK } from "@aistudy/domain/exam-sprint-catalog";
-import { createSqlClient } from "../migrate";
-import { createMemoryOpeningRestoreObjectPut, executeOpeningRestoreApply, readOpeningBackupRecords, readOpeningRestoreNamespaceCounts } from "./opening-backup";
-import { insertTestTeachingActivity } from "../../../../tests/integration/opening-fixture";
-import { dumpWorkspaceSnapshot } from "./backup-dump";
-import { exportSprintPack, restoreSprintPack } from "./opening-backup-exam-pack";
-import { backupRows, sourceBytes, sourceHash } from "../../../../tests/integration/opening-backup-records-fixture";
+import { createSqlClient } from "../../packages/database/src/migrate";
+import { createMemoryOpeningRestoreObjectPut, executeOpeningRestoreApply, readOpeningBackupRecords, readOpeningRestoreNamespaceCounts } from "../../packages/database/src/repositories/opening-backup";
+import { insertTestTeachingActivity } from "./opening-fixture";
+import { dumpWorkspaceSnapshot } from "../../packages/database/src/repositories/backup-dump";
+import { exportSprintPack, restoreSprintPack } from "../../packages/database/src/repositories/opening-backup-exam-pack";
+import { backupRows, sourceBytes, sourceHash } from "./opening-backup-records-fixture";
 
 function publishedRequest(activityId: string, sourceId: string, chunk: string) {
   const id = randomUUID();
@@ -30,6 +31,28 @@ it("retains generated exam request history without disclosing its unpublished an
   expect(exportSprintPack({ ...row, state: { referenceAnswer: "private" } }).state).toEqual({});
   expect(() => restoreSprintPack({ ...projected, state: { referenceAnswer: "private" } })).toThrow(/private/i);
   expect(() => restoreSprintPack(row)).toThrow(/private/i);
+});
+
+it.each(["mock-a", "mock-b"] as const)("restores %s history without granting catalog feedback", mode => {
+  const now = "2026-11-19T12:00:00Z";
+  const started = applyExamSprintCommand(createExamSprintState(now), { action: "start", clientKey: "start", mode }, EXAM_SPRINT_PACK, now);
+  const attempt = started.attempts[0]!;
+  const question = EXAM_SPRINT_PACK.questions.find(row => row.id === attempt.questionId)!;
+  const answered = applyExamSprintCommand(started, { action: "answer", clientKey: "answer", attemptId: attempt.id,
+    answer: question.options[0]!.id, confidence: 3 }, EXAM_SPRINT_PACK, now);
+  for (const state of [started, answered]) {
+    const archived = exportSprintPack({ course_id: null, pack_snapshot: EXAM_SPRINT_PACK, state });
+    const history = archived.state as ExamSprintState;
+    const interrupted = restoreSprintPack(archived).state as ExamSprintState;
+    expect(examSprintOverview(interrupted, EXAM_SPRINT_PACK, now)).toMatchObject({ activeRun: null, attempts: [{ feedback: null }] });
+    history.runs[0]!.completedAt = now;
+    const restored = restoreSprintPack(archived).state as ExamSprintState;
+    const overview = examSprintOverview(restored, EXAM_SPRINT_PACK, now);
+    expect(overview.attempts[0]).toMatchObject({ feedback: null, correct: null, independent: false });
+    expect(overview.summary.onlineAnswered).toBe(0);
+    history.runs[0]!.mode = "practice";
+    expect(() => restoreSprintPack(archived)).toThrow();
+  }
 });
 
 // Run the real queries and constraints in a rollback-only test transaction. Inside it,
@@ -112,23 +135,43 @@ it.skipIf(process.env.OPENING_TEST_DB !== "1" || !process.env.OPENING_TEST_DATAB
           await tx`INSERT INTO opening_teaching_activity_specs(id,workspace_id,owner_user_id,activity_id,teaching_unit_id,document_id,
             revision_number,version,block_order) VALUES(${randomUUID()},${w},${u},${activity},${unit},${examDoc},1,1,
             ${tx.json([{ blockId: examBlock, position: 0, blockType: "answer_key", role: "answer_key" }])})`;
+          await tx`UPDATE opening_teaching_activities SET intent_summary='private generated exam title' WHERE id=${activity}`;
+          const unpublished = await insertTestTeachingActivity(db, scope, course);
+          await tx`UPDATE opening_teaching_activities SET create_intent='{"kind":"course_exam"}' WHERE id=${unpublished}`;
+          const privateSession = randomUUID();
+          await tx`INSERT INTO opening_learning_sessions(id,workspace_id,owner_user_id,course_id,activity_id,skill_label)
+            VALUES(${privateSession},${w},${u},${course},${activity},'private generated exam title')`;
+          const privateTurn = await rows.turn(await rows.conversation());
+          await tx`UPDATE opening_turns SET learning_session_id=${privateSession} WHERE id=${privateTurn}`;
+          const privateProblem = await rows.problem(privateSession, source);
+          const privateObservation = await rows.observation(privateSession, [], [privateTurn], privateProblem);
+          const privateHelp = await rows.help(privateSession, privateTurn, privateProblem);
+          const evidence = randomUUID(), card = randomUUID();
+          await tx`INSERT INTO opening_skill_evidence(id,workspace_id,owner_user_id,course_id,node_id,observation_id,dimension)
+            VALUES(${evidence},${w},${u},${course},${node},${privateObservation},'recall')`;
+          await tx`INSERT INTO opening_learning_activity_history_revisions(workspace_id,owner_user_id,activity_id,revision)
+            VALUES(${w},${u},${activity},1)`;
+          await tx`INSERT INTO cards(id,workspace_id,owner_user_id,front,back,origin_observation_root_id)
+            VALUES(${card},${w},${u},'private generated exam title','private grading key',${privateObservation})`;
+          const privateAttempt = randomUUID();
+          await tx`INSERT INTO opening_learning_attempts(id,workspace_id,owner_user_id,session_id,course_id,activity_id,skill_label,
+            client_key,create_intent,history_revision) VALUES(${privateAttempt},${w},${u},${privateSession},${course},${activity},'Algebra',${privateAttempt},'{}',0)`;
+          const publicActivity = await insertTestTeachingActivity(db, scope, course);
           const session = randomUUID(), observation = randomUUID(), attempt = randomUUID(), link = randomUUID();
           await tx`INSERT INTO opening_learning_sessions(id,workspace_id,owner_user_id,course_id,activity_id,skill_label)
-            VALUES(${session},${w},${u},${course},${activity},'Algebra')`;
-          await tx`INSERT INTO opening_workspace_history_revisions(workspace_id,owner_user_id,revision) VALUES(${w},${u},0)`;
+            VALUES(${session},${w},${u},${course},${publicActivity},'Algebra')`;
+          await tx`INSERT INTO opening_workspace_history_revisions(workspace_id,owner_user_id,revision) VALUES(${w},${u},0) ON CONFLICT DO NOTHING`;
           await tx`INSERT INTO opening_learning_attempts(id,workspace_id,owner_user_id,session_id,course_id,activity_id,skill_label,
-            client_key,create_intent,history_revision) VALUES(${attempt},${w},${u},${session},${course},${activity},'Algebra',${attempt},'{}',0)`;
+            client_key,create_intent,history_revision) VALUES(${attempt},${w},${u},${session},${course},${publicActivity},'Algebra',${attempt},'{}',0)`;
           await tx`INSERT INTO opening_learning_observations(id,workspace_id,owner_user_id,session_id,course_id,activity_id,skill_label,
             answer,outcome,assistance,client_key,verdict_source,workspace_history_revision)
-            VALUES(${observation},${w},${u},${session},${course},${activity},'Algebra','answer','unverified','unknown',${observation},'unknown',0)`;
+            VALUES(${observation},${w},${u},${session},${course},${publicActivity},'Algebra','answer','unverified','unknown',${observation},'unknown',0)`;
           await tx`INSERT INTO opening_exam_attempt_links(id,sprint_id,exam_attempt_id,learning_attempt_id,node_id,requirement_key,
             first_family_exposure,observation_id,publication) VALUES(${link},${sprint},'attempt-a',${attempt},${node},'req-a',false,${observation},'published')`;
           await tx`INSERT INTO opening_exam_source_observations(sprint_id,source_record_id,skill_ids,observation_id)
             VALUES(${sprint},'record-a',ARRAY['skill-a'],${observation})`;
           await tx`INSERT INTO opening_exam_help_receipts(id,attempt_link_id,kind,delivered_at,history_revision,workspace_history_revision)
             VALUES(${randomUUID()},${link},'hint',now(),0,0)`;
-          await tx`UPDATE opening_learning_attempts SET context_anchor=${tx.json({ purpose: "exam_help", activityId: activity,
-            blockId: examBlock, contentVersion: 1 })} WHERE id=${attempt}`;
           const snapshot = async () => {
             const records = await readOpeningBackupRecords(db, scope);
             const sources = records.tables.opening_sources.map(row => ({ sourceId: String(row.id), version: Number(row.version),
@@ -142,8 +185,10 @@ it.skipIf(process.env.OPENING_TEST_DB !== "1" || !process.env.OPENING_TEST_DATAB
           backup = await snapshot();
           const courseSprint = backup.tables.opening_exam_sprints?.find(row => (row as { id: string }).id === examSprint);
           expect(courseSprint).toMatchObject({ pack_snapshot: { requests: [{ id: request.id, status: "unknown", activityId: null, proposal: null }] } });
-          expect(backup.tables.opening_learning_attempts?.[0]).toMatchObject({ context_anchor: {
-            purpose: "exam_help", activityId: activity, blockId: null, contentVersion: null } });
+          const serialized = JSON.stringify(backup);
+          for (const excluded of [activity, unpublished, unit, examDoc, evidence, card, privateSession, privateProblem, privateObservation, privateHelp,
+            privateAttempt, privateTurn, "private generated exam title"]) expect(serialized).not.toContain(excluded);
+          expect(backup.tables.opening_learning_attempts).toMatchObject([{ id: attempt, activity_id: publicActivity }]);
           // Later edits may replace the unit metadata. The pinned publication still owns the document.
           await tx`UPDATE opening_teaching_units SET generation_config='{}' WHERE id=${unit}`;
           const native = await dumpWorkspaceSnapshot(db, w, u);
