@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { courseRouteDelayedProtocolSchema } from "./opening-course-route-retest-state";
 export { readOpeningCourseRouteRetest,assertOpeningCourseRouteRetestCurrent } from "./opening-course-route-retest-state";
-import { courseRouteRetestScheduleSchema,type CourseRouteRetestSchedule,type CourseRouteRetestReceipt,type CourseRouteTaskContext,type Scope } from "@aistudy/contracts";
+import { courseRouteRetestScheduleSchema,type CourseRouteRetestSchedule,type CourseRouteRetestReceipt,type CourseRouteTaskContext,type CourseRouteTaskReadOptions,type Scope } from "@aistudy/contracts";
 import type { Sql,TransactionSql } from "postgres";
 
 import { assertLearningGoalAction,readLearningGoal } from "./opening-learning-goals";
@@ -68,7 +68,7 @@ export function createOpeningCourseRouteRetestRepository(sql:Sql,options:{exactV
       await nextWorkspaceLearningHistoryRevision(tx,scope);
       return receipt({...scheduled,task_status:"pending"});
     });
-  },async readTask(scope:Scope,courseId:string,taskId:string):Promise<CourseRouteTaskContext>{
+  },async readTask(scope:Scope,courseId:string,taskId:string,options:CourseRouteTaskReadOptions={}):Promise<CourseRouteTaskContext>{
     const [task]=await sql`SELECT * FROM opening_tasks WHERE id=${taskId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
     if(!task||task.course_id!==courseId)throw learningError("NOT_FOUND","本课程任务不存在。");
     const [retest]=await sql`SELECT * FROM opening_retest_activities WHERE task_id=${taskId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
@@ -87,6 +87,6 @@ export function createOpeningCourseRouteRetestRepository(sql:Sql,options:{exactV
     else if(task.not_before&&new Date(task.not_before as Date).getTime()>Date.now())reason="尚未到达本次复测或维护抽查的最早开始时间。";
     return {managed:true,courseId,taskId,expectedTaskVersion:Number(task.version),goalId,expectedGoalRevision:goal.revision,requirementId,expectedRequirementRevision:requirement.revision,
       minutes:Number(task.minutes),notBeforeAt:learningIso(protocol.success ? retest?.not_before_at : task.not_before),available:reason===null,reason,
-      ...(protocol.success && retest ? {retestId:String(retest.id)} : {})};
+      ...(options.includeRetestId && protocol.success && retest ? {retestId:String(retest.id)} : {})};
   }};
 }

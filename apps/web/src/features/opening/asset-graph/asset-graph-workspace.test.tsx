@@ -15,7 +15,7 @@ import type {
 import OpeningMapPage from "../../../app/(opening)/opening/map/page";
 import { publishVerifiedSessionIdentity } from "../../auth/session-identity";
 import { notifyOpeningPrivacyChange } from "../client/privacy-change";
-import type { CourseRouteClient } from "../courses/course-route-client";
+import { CourseRouteRequestError, type CourseRouteClient } from "../courses/course-route-client";
 import {
   bundleCanvasEdges,
   computeHighlightedLineage,
@@ -1981,6 +1981,7 @@ describe("AssetGraphWorkspace", () => {
 
     // Full denominator and separate blocked surfacing
     const examPanel = container.querySelector("[data-exam-picker-panel]")!;
+    expect(taskSpy).toHaveBeenCalledWith(COURSE_ID, TASK_BOUND_UUID, { includeRetestId: true });
     expect(examPanel.textContent).toContain("全课共 4 项要求，已验证 2 项");
     expect(examPanel.querySelector("[data-blocked-requirements-banner]")?.textContent).toContain(
       "另有 1 项要求因材料待补齐暂不可直接开练",
@@ -2039,28 +2040,41 @@ describe("AssetGraphWorkspace", () => {
     expect(container.textContent).toContain("请核对当前活动后继续复测。");
     expect(startSpy.mock.calls[2]?.[1]).toEqual(startSpy.mock.calls[1]?.[1]);
 
+    startSpy.mockRejectedValueOnce(new CourseRouteRequestError("任务版本已更新。", 409));
+    await act(async () => findButton("开始独立复测", boundCard).click());
+    expect(boundCard.querySelector('a[href="/opening/today"]')).not.toBeNull();
+    expect(boundCard.textContent).not.toContain("开始独立复测");
+    expect(container.textContent).not.toContain("重试本次安排");
+
     // Ordinary 1A practice loads detail and starts with 15-min preset and NO taskId
     const unobsCard = examPanel.querySelector<HTMLElement>(
       `[data-exam-picker-item="${REQ_UNOBS_UUID}"]`,
     )!;
     const locateBtn = findButton("在图中定位这项要求", unobsCard);
+    const canvas = container.querySelector<HTMLElement>('section[aria-label="可拖动学习地图"]')!;
+    const scrollIntoView = vi.fn(() => expect(document.activeElement).toBe(locateBtn));
+    canvas.scrollIntoView = scrollIntoView;
     await act(async () => {
+      locateBtn.focus();
       locateBtn.click();
     });
     await flush();
-    expect(container.querySelector(`[data-graph-node="requirement/${REQ_UNOBS_UUID}"]`)).not.toBeNull();
+    const located = canvas.querySelector(`[data-graph-node="requirement/${REQ_UNOBS_UUID}"]`);
+    expect(located).not.toBeNull();
+    expect(scrollIntoView).toHaveBeenCalledExactlyOnceWith({ block: "nearest" });
+    expect(document.activeElement).toBe(located);
 
     const ordinaryBtn = findButton("开始 15 分钟练习", unobsCard);
     await act(async () => {
       ordinaryBtn.click();
     });
     await flush();
-    expect(startSpy).toHaveBeenCalledTimes(4);
-    expect(startSpy.mock.calls[3]?.[1]).toMatchObject({
+    expect(startSpy).toHaveBeenCalledTimes(5);
+    expect(startSpy.mock.calls[4]?.[1]).toMatchObject({
       requirementId: REQ_UNOBS_UUID,
       minutes: 15,
     });
-    expect(startSpy.mock.calls[3]?.[1]).not.toHaveProperty("taskId");
+    expect(startSpy.mock.calls[4]?.[1]).not.toHaveProperty("taskId");
   });
 
   it("enters the direct sandbox without contacting the graph or course route", async () => {

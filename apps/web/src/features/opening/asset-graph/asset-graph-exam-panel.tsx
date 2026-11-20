@@ -59,6 +59,7 @@ export type AssetGraphExamPanelProps = {
   routeClient: Partial<Pick<CourseRouteClient, "read" | "task">>;
   busy?: boolean;
   startingRequirementId?: string | null;
+  conflictedRetestTaskVersions?: ReadonlyMap<string, number>;
   onLocateRequirement: (requirementId: string) => void;
   onStartOrdinaryPractice: (
     courseId: string,
@@ -78,6 +79,7 @@ export function AssetGraphExamPanel({
   routeClient,
   busy = false,
   startingRequirementId = null,
+  conflictedRetestTaskVersions,
   onLocateRequirement,
   onStartOrdinaryPractice,
   onStartBoundRetest,
@@ -203,7 +205,7 @@ export function AssetGraphExamPanel({
     void Promise.all(
       taskIds.map(async taskId => {
         try {
-          const context = await task(courseId, taskId);
+          const context = await task(courseId, taskId, { includeRetestId: true });
           return [taskId, context] as const;
         } catch {
           return [taskId, null] as const;
@@ -398,9 +400,15 @@ export function AssetGraphExamPanel({
                   const isLoadingTask = Boolean(
                     item.dueRetest && item.retestTaskId && loadingTaskIds.has(item.retestTaskId),
                   );
+                  const taskContext = item.retestTaskId ? taskContexts[item.retestTaskId] : null;
+                  const conflictedVersion = item.retestTaskId
+                    ? conflictedRetestTaskVersions?.get(item.retestTaskId)
+                    : undefined;
+                  const stale = taskContext?.managed && conflictedVersion !== undefined &&
+                    taskContext.expectedTaskVersion <= conflictedVersion;
                   const retestBinding = item.dueRetest
                     ? resolveRetestTaskBinding(
-                        item.retestTaskId ? taskContexts[item.retestTaskId] : null,
+                        stale ? null : taskContext,
                         courseId,
                         item.progress,
                         asOfMs,

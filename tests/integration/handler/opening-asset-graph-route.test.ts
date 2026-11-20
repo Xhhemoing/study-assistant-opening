@@ -80,10 +80,17 @@ describe("POST /api/opening/asset-graph/query handler integration", () => {
     const { id: goal } = await goalResponse.json() as { id: string };
     const seeds = backupRows(sql, scope);
     const teaching = await seeds.source();
+    const otherTeaching = await seeds.source();
     const hidden = await seeds.source();
     const visibleChunk = await seeds.chunk(teaching);
+    const otherChunk = await seeds.chunk(otherTeaching);
     const hiddenChunk = await seeds.chunk(hidden);
-    for (const source of [teaching, hidden]) {
+    const expectedRefs = [
+      { sourceId: teaching, sourceVersion: 1, chunkId: visibleChunk, page: 1 },
+      { sourceId: otherTeaching, sourceVersion: 1, chunkId: otherChunk, page: 1 },
+    ].sort((a, b) => a.sourceId.localeCompare(b.sourceId));
+    const primaryRef = expectedRefs[0]!, secondaryRef = expectedRefs[1]!;
+    for (const source of [teaching, otherTeaching, hidden]) {
       await sql`INSERT INTO opening_source_versions (source_id,version,workspace_id,bytes,sha256,availability)
         VALUES (${source},1,${scope.workspaceId},21,${"a".repeat(64)},'available')`;
       await sql`INSERT INTO course_asset_memberships (workspace_id,course_id,asset_type,asset_id,role,visibility,purpose)
@@ -98,16 +105,16 @@ describe("POST /api/opening/asset-graph/query handler integration", () => {
         status: "supported", evidenceChunkIds: [visibleChunk],
       })),
       edges: [
-        { from: start!, to: target!, kind: "prerequisite", status: "supported", evidenceChunkIds: [visibleChunk] },
+        { from: start!, to: target!, kind: "prerequisite", status: "supported", evidenceChunkIds: [secondaryRef.chunkId, primaryRef.chunkId] },
         { from: start!, to: partial!, kind: "contains", status: "supported", evidenceChunkIds: [visibleChunk, hiddenChunk] },
         { from: start!, to: suggestion!, kind: "applies_to", status: "suggested", evidenceChunkIds: [visibleChunk] },
       ],
     };
     await sql`INSERT INTO opening_course_knowledge (workspace_id,owner_user_id,course_id,version,snapshot,source_versions)
-      VALUES (${scope.workspaceId},${scope.ownerUserId},${course},1,${sql.json(snapshot)},${sql.json({ [teaching]: 1, [hidden]: 1 })})`;
+      VALUES (${scope.workspaceId},${scope.ownerUserId},${course},1,${sql.json(snapshot)},${sql.json({ [teaching]: 1, [otherTeaching]: 1, [hidden]: 1 })})`;
     const verification = { kind: "manual", status: "missing", exerciseKeys: [], rubric: null, missingReasons: [] };
     for (const [position, node] of nodeIds.entries()) {
-      const sourceRefs = position === 0 ? [{ sourceId: teaching, sourceVersion: 1, page: 1 }] : [];
+      const sourceRefs = position === 0 ? expectedRefs : [];
       await sql`INSERT INTO course_requirements (
         id,workspace_id,owner_user_id,course_id,stable_skill_id,knowledge_node_id,requirement_key,title,
         position,mandatory,goal_ids,prerequisite_ids,source_refs,verification,revision,lifecycle,origin,approved_at
@@ -141,11 +148,13 @@ describe("POST /api/opening/asset-graph/query handler integration", () => {
       const enriched = await page(optIn);
       const edges = Object.fromEntries(enriched.edges.map(edge => [edge.relation, edge]));
       expect(edges.prerequisite).toMatchObject({
-        knowledgeStatus: "supported", sourceNodeId: `source/${teaching}`, sourceVersion: 1, page: 1,
+        knowledgeStatus: "supported", sourceNodeId: `source/${primaryRef.sourceId}`, sourceVersion: 1, page: 1,
       });
-      expect(edges.contains).toMatchObject({ knowledgeStatus: "needs_check" });
+      expect(edges.prerequisite?.evidenceRefs).toEqual(expectedRefs);
+      expect(edges.prerequisite).not.toHaveProperty("confidence");
+      expect(edges.contains).toMatchObject({ knowledgeStatus: "needs_check", evidenceRefs: [] });
       expect(edges.contains).not.toHaveProperty("sourceNodeId");
-      expect(edges.appliesTo).toMatchObject({ knowledgeStatus: "suggested" });
+      expect(edges.appliesTo).toMatchObject({ knowledgeStatus: "suggested", evidenceRefs: [] });
       expect(edges.appliesTo).not.toHaveProperty("sourceNodeId");
       const hiddenDetail = await postQuery({ op: "detail", context, lens: "all", focus: `source/${hidden}` });
       expect(hiddenDetail.status).toBe(404);
@@ -160,7 +169,7 @@ describe("POST /api/opening/asset-graph/query handler integration", () => {
       await page({ ...paged, cursor });
       await page({ ...evidenceQuery, cursor: evidenceCursor });
 
-      await sql`UPDATE opening_source_chunks SET page=2 WHERE id=${visibleChunk}`;
+      await sql`UPDATE opening_source_chunks SET page=2 WHERE id=${secondaryRef.chunkId}`;
       const changed = await postQuery({ ...paged, cursor });
       expect(changed.status).toBe(409);
       await expect(changed.json()).resolves.toMatchObject({ error: { code: "CURSOR_STALE" } });

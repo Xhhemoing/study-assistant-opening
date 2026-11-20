@@ -352,6 +352,9 @@ function ConnectedAssetGraphWorkspace({
   const [mapMode, setMapMode] = useState<"exam" | "study">("exam");
   const [privacyGeneration, setPrivacyGeneration] = useState(0);
   const [locateRequest, setLocateRequest] = useState<FreeMapLocateRequest | null>(null);
+  const [conflictedRetestTaskVersions, setConflictedRetestTaskVersions] = useState<ReadonlyMap<string, number>>(
+    () => new Map(),
+  );
   const [listSubTab, setListSubTab] = useState<ListSubTab | null>(null);
   const [srAnnouncement, setSrAnnouncement] = useState("");
   const [searchInput, setSearchInput] = useState("");
@@ -844,8 +847,15 @@ function ConnectedAssetGraphWorkspace({
       if (result.reason === "retest_pending") setRetestProtectedRequirementId(action.requirementId);
       else setChoiceResult(result);
     } catch (reason) {
-      if (!mountedRef.current || startGenerationRef.current !== generation) return;
+      if (!mountedRef.current) return;
       const isConflict = reason instanceof CourseRouteRequestError && reason.status === 409;
+      const { taskId, expectedTaskVersion, expectedRetestId } = intent;
+      if (isConflict && requestSent && expectedRetestId && taskId && expectedTaskVersion) {
+        setConflictedRetestTaskVersions(current => new Map(current).set(
+          taskId, Math.max(current.get(taskId) ?? 0, expectedTaskVersion),
+        ));
+      }
+      if (startGenerationRef.current !== generation) return;
       if (isConflict || !requestSent) {
         setPendingStart(null);
         setStartError(userFacingMessage(reason, isConflict
@@ -1282,6 +1292,7 @@ function ConnectedAssetGraphWorkspace({
                 routeClient={examRouteClient}
                 busy={startBusy}
                 startingRequirementId={startingRequirementId}
+                conflictedRetestTaskVersions={conflictedRetestTaskVersions}
                 onLocateRequirement={handleLocateRequirement}
                 onStartOrdinaryPractice={(courseId, progress, minutes) => {
                   void handleStartOrdinaryPractice(courseId, progress, minutes);
@@ -1395,6 +1406,8 @@ function ConnectedAssetGraphWorkspace({
                     layoutKey={canvasLayoutKey}
                     persistKey={canvasPersistKey}
                     locateRequest={locateRequest}
+                    onLocateHandled={sequence => setLocateRequest(current =>
+                      current?.sequence === sequence ? null : current)}
                     expandedCenters={state.expandedCenters}
                     expandingNodeId={state.expandingNodeId}
                     loadingDetailNodeId={state.loadingDetailNodeId}

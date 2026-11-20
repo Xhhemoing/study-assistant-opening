@@ -51,6 +51,7 @@ export type FreeMapCanvasProps = {
   /** Isolated by userId:workspaceId:contextKey (undefined disables localStorage persistence). */
   persistKey?: string;
   locateRequest?: FreeMapLocateRequest | null;
+  onLocateHandled?: (sequence: number) => void;
   highlightedNodeIds?: ReadonlySet<string> | null;
   highlightedEdgeIds?: ReadonlySet<string> | null;
 };
@@ -94,6 +95,7 @@ function FreeMapCanvasSurface({
   onExpand,
   persistKey,
   locateRequest,
+  onLocateHandled,
   highlightedNodeIds,
   highlightedEdgeIds,
 }: FreeMapCanvasProps) {
@@ -111,6 +113,7 @@ function FreeMapCanvasSurface({
   const [folded, setFolded] = useState<Set<string>>(new Set());
   const [solo, setSolo] = useState(false);
   const [storageNotice, setStorageNotice] = useState<string | null>(null);
+  const canvasRef = useRef<HTMLElement>(null);
   const handledLocate = useRef<{ id: string; sequence: number } | null>(null);
   const prefix = useId().replace(/:/g, "");
   const storageKey = freeMapStorageKey(persistKey);
@@ -208,18 +211,27 @@ function FreeMapCanvasSurface({
     ) {
       return;
     }
-    handledLocate.current = { ...locateRequest };
-    setFolded(current => {
-      const next = new Set(current);
-      let parent = layout.parents[locateRequest.id];
-      while (parent != null) {
-        next.delete(parent);
-        parent = layout.parents[parent];
-      }
-      return next.size === current.size ? current : next;
-    });
+    if (!visible.has(locateRequest.id)) {
+      setFolded(current => {
+        const next = new Set(current);
+        let parent = layout.parents[locateRequest.id];
+        while (parent != null) {
+          next.delete(parent);
+          parent = layout.parents[parent];
+        }
+        return next.size === current.size ? current : next;
+      });
+      return;
+    }
+    const canvas = canvasRef.current;
+    const target = canvas?.querySelector<SVGGElement>(`[data-free-map-node="${locateRequest.id}"]`);
+    if (!target) return;
+    handledLocate.current = locateRequest;
     gestures.focus(layout.positions[locateRequest.id]!);
-  }, [geometryReady, locateRequest, nodeById, layout.parents, layout.positions, gestures]);
+    canvas?.scrollIntoView?.({ block: "nearest" });
+    target.focus({ preventScroll: true });
+    onLocateHandled?.(locateRequest.sequence);
+  }, [geometryReady, locateRequest, nodeById, visible, layout.parents, layout.positions, gestures, onLocateHandled]);
 
   const hasOffscreenNodes = points.some(point => {
     const x = point.x * gestures.camera.k + gestures.camera.x;
@@ -299,6 +311,7 @@ function FreeMapCanvasSurface({
 
   return (
     <section
+      ref={canvasRef}
       aria-label="可拖动学习地图"
       className="overflow-hidden rounded-tile border border-line bg-surface text-text"
     >

@@ -297,6 +297,7 @@ export type AssetGraphCanvasProps = {
   layoutKey?: string;
   persistKey?: string;
   locateRequest?: FreeMapLocateRequest | null;
+  onLocateHandled?: (sequence: number) => void;
   expandedCenters: Record<string, ExpandedCenterState>;
   expandingNodeId: string | null;
   loadingDetailNodeId: string | null;
@@ -329,6 +330,7 @@ export function AssetGraphCanvas({
   layoutKey,
   persistKey,
   locateRequest = null,
+  onLocateHandled,
   expandedCenters,
   expandingNodeId,
   loadingDetailNodeId,
@@ -384,6 +386,7 @@ export function AssetGraphCanvas({
         layoutKey={resolvedLayoutKey}
         persistKey={persistKey}
         locateRequest={locateRequest}
+        onLocateHandled={onLocateHandled}
         highlightedNodeIds={selectedNodeId ? activeLineage.nodeSet : null}
         highlightedEdgeIds={selectedNodeId ? activeLineage.edgeSet : null}
       />

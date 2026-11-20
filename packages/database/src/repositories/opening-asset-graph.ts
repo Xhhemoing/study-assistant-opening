@@ -1218,7 +1218,13 @@ export function createOpeningAssetGraphRepository(
               (chunkIds.length === 0 || verifiedChunks.length !== chunkIds.length)
                 ? "needs_check"
                 : edge.status;
-            const primaryChunk = knowledgeStatus === "supported" ? verifiedChunks[0] : undefined;
+            const evidenceRefs = knowledgeStatus === "supported" ? verifiedChunks.map(chunk => ({
+              sourceId: chunk.sourceId,
+              sourceVersion: chunk.sourceVersion,
+              chunkId: chunk.id,
+              ...(chunk.page !== null ? { page: chunk.page } : {}),
+            })) : [];
+            const primaryRef = evidenceRefs[0];
             const basis: "recorded" | "suggested" =
               knowledgeStatus === "suggested" ? "suggested" : "recorded";
 
@@ -1229,14 +1235,15 @@ export function createOpeningAssetGraphRepository(
               relation,
               basis,
               knowledgeStatus,
-              ...(primaryChunk !== undefined
+              evidenceRefs,
+              ...(primaryRef !== undefined
                 ? {
                     sourceNodeId: formatAssetGraphNodeId({
                       kind: "source",
-                      uuid: primaryChunk.sourceId,
+                      uuid: primaryRef.sourceId,
                     }),
-                    sourceVersion: primaryChunk.sourceVersion,
-                    ...(primaryChunk.page !== null ? { page: primaryChunk.page } : {}),
+                    sourceVersion: primaryRef.sourceVersion,
+                    ...(primaryRef.page !== undefined ? { page: primaryRef.page } : {}),
                   }
                 : {}),
             };

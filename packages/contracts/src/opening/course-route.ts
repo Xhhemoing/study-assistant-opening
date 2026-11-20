@@ -117,13 +117,15 @@ export type CourseRouteActivityContext=z.infer<typeof courseRouteActivityContext
 export const courseRouteRetestScheduleSchema=courseRouteNextSchema.extend({observationId:uuidSchema});
 export const courseRouteRetestReceiptSchema=z.object({courseId:uuidSchema,taskId:uuidSchema,retestId:uuidSchema,
   notBeforeAt:isoDateTimeSchema,taskStatus:z.enum(["pending","done","skipped"]),retestStatus:retestActivityStatusSchema,href:z.string()}).strict();
+const unmanagedRouteTaskSchema=z.object({managed:z.literal(false)}).strict();
+const managedRouteTaskSchema=z.object({managed:z.literal(true),courseId:uuidSchema,taskId:uuidSchema,expectedTaskVersion:z.number().int().positive(),
+  goalId:uuidSchema,expectedGoalRevision:z.number().int().positive(),requirementId:uuidSchema,expectedRequirementRevision:z.number().int().positive(),
+  minutes:z.number().int().min(5).max(180),notBeforeAt:isoDateTimeSchema.nullable(),available:z.boolean(),reason:z.string().nullable()}).strict();
+export const courseRouteLegacyTaskContextSchema=z.discriminatedUnion("managed",[unmanagedRouteTaskSchema,managedRouteTaskSchema]);
 export const courseRouteTaskContextSchema=z.discriminatedUnion("managed",[
-  z.object({managed:z.literal(false)}).strict(),
-  z.object({managed:z.literal(true),courseId:uuidSchema,taskId:uuidSchema,expectedTaskVersion:z.number().int().positive(),
-    goalId:uuidSchema,expectedGoalRevision:z.number().int().positive(),requirementId:uuidSchema,expectedRequirementRevision:z.number().int().positive(),
-    minutes:z.number().int().min(5).max(180),notBeforeAt:isoDateTimeSchema.nullable(),available:z.boolean(),reason:z.string().nullable(),
-    retestId:uuidSchema.optional()}).strict(),
+  unmanagedRouteTaskSchema,managedRouteTaskSchema.extend({retestId:uuidSchema.optional()}),
 ]);
+export type CourseRouteTaskReadOptions={includeRetestId?:boolean};
 export type CourseRouteRetestSchedule=z.infer<typeof courseRouteRetestScheduleSchema>;
 export type CourseRouteRetestReceipt=z.infer<typeof courseRouteRetestReceiptSchema>;
 export type CourseRouteTaskContext=z.infer<typeof courseRouteTaskContextSchema>;

@@ -111,6 +111,36 @@ describe("FreeMapCanvas", () => {
       .toBe("translate(5000 0)");
   });
 
+  it("scrolls and focuses a located child after unfolding it", () => {
+    const props = {
+      nodes: [
+        { id: COURSE_NODE, kind: "course" as const, label: "高等数学" },
+        { id: REQ_NODE, kind: "requirement" as const, label: "比较判别" },
+      ],
+      edges: [{ id: "edge", from: COURSE_NODE, to: REQ_NODE, relation: "contains", basis: "recorded" }] satisfies AssetGraphEdge[],
+      onSelect: vi.fn(),
+      selectedId: COURSE_NODE,
+      mode: "exam" as const,
+      layoutKey: "locate",
+    };
+    act(() => root.render(createElement(FreeMapCanvas, props)));
+    const canvas = container.querySelector("section")!;
+    const scrollIntoView = vi.fn(() => {
+      expect(canvas.querySelector(`[data-free-map-node="${REQ_NODE}"]`)).not.toBeNull();
+    });
+    canvas.scrollIntoView = scrollIntoView;
+    const fold = canvas.querySelector<SVGGElement>('[data-map-control="fold"]')!;
+    act(() => fold.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
+    expect(canvas.querySelector(`[data-free-map-node="${REQ_NODE}"]`)).toBeNull();
+
+    act(() => root.render(createElement(FreeMapCanvas, { ...props, locateRequest: { id: REQ_NODE, sequence: 1 } })));
+
+    const located = canvas.querySelector(`[data-free-map-node="${REQ_NODE}"]`);
+    expect(located).not.toBeNull();
+    expect(scrollIntoView).toHaveBeenCalledExactlyOnceWith({ block: "nearest" });
+    expect(document.activeElement).toBe(located);
+  });
+
   it("renders nodes with isolated geometry storage and supports keyboard selection & branch fold", () => {
     const nodes: AssetGraphNode[] = [
       { id: COURSE_NODE, kind: "course", label: "高等数学" },

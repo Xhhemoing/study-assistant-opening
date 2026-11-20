@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { courseRequirementSourceRefSchema } from "./course-route";
 import { isoDateTimeSchema, uuidSchema } from "./foundation";
 
 export const assetGraphNodeKindSchema = z.enum([
@@ -277,6 +278,9 @@ export const assetGraphEdgeSchema = z
     relation: assetGraphRelationSchema,
     basis: z.enum(["recorded", "derived", "suggested"]),
     knowledgeStatus: assetGraphKnowledgeStatusSchema.optional(),
+    // Present only when the knowledge edge has an authoritative stored score.
+    confidence: z.number().optional(),
+    evidenceRefs: z.array(courseRequirementSourceRefSchema.required({ chunkId: true })).optional(),
     sourceNodeId: assetGraphNodeIdSchema.optional(),
     sourceVersion: z.number().int().nonnegative().optional(),
     page: z.number().int().positive().optional(),

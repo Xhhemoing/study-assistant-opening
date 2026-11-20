@@ -26,7 +26,7 @@ const cases = [
   { name: "start", method: methods.start, args: [{ ...base, requirementId: id(4), expectedRequirementRevision: 1 }], call: (s: ReturnType<typeof createCourseRouteService>, scope: {workspaceId:string;ownerUserId:string}, course: string) => s.start(scope, course, { ...base, requirementId: id(4), expectedRequirementRevision: 1 }) },
   { name: "next", method: methods.next, args: [next], call: (s: ReturnType<typeof createCourseRouteService>, scope: {workspaceId:string;ownerUserId:string}, course: string) => s.next(scope, course, next) },
   { name: "scheduleRetest", method: methods.schedule, args: [next], call: (s: ReturnType<typeof createCourseRouteService>, scope: {workspaceId:string;ownerUserId:string}, course: string) => s.scheduleRetest(scope, course, next) },
-  { name: "readTask", method: methods.readTask, args: [id(7)], call: (s: ReturnType<typeof createCourseRouteService>, scope: {workspaceId:string;ownerUserId:string}, course: string) => s.readTask(scope, course, id(7)) },
+  { name: "readTask", method: methods.readTask, args: [id(7), undefined], call: (s: ReturnType<typeof createCourseRouteService>, scope: {workspaceId:string;ownerUserId:string}, course: string) => s.readTask(scope, course, id(7)) },
   { name: "readVerification", method: methods.verificationRead, args: [id(2)], call: (s: ReturnType<typeof createCourseRouteService>, scope: {workspaceId:string;ownerUserId:string}, course: string) => s.readVerification(scope, course, id(2)) },
   { name: "confirmVerification", method: methods.verificationConfirm, args: [verification], call: (s: ReturnType<typeof createCourseRouteService>, scope: {workspaceId:string;ownerUserId:string}, course: string) => s.confirmVerification(scope, course, verification) },
 ];

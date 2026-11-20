@@ -1060,6 +1060,7 @@ describe("createOpeningAssetGraphRepository (unit)", () => {
         relation: "appliesTo",
         basis: "suggested",
         knowledgeStatus: "suggested",
+        evidenceRefs: [],
       },
     ]);
   });
@@ -2719,6 +2720,7 @@ describe("honest knowledgeStatus edge projection and live chunk re-verification"
       sourceNodeId: `source/${SRC_1}`,
       sourceVersion: 2,
       page: 12,
+      evidenceRefs: [{ sourceId: SRC_1, sourceVersion: 2, chunkId: CHUNK_1, page: 12 }],
     });
 
     const contains = out.edges.find(e => e.relation === "contains");
@@ -2731,6 +2733,7 @@ describe("honest knowledgeStatus edge projection and live chunk re-verification"
       knowledgeStatus: "supported",
       sourceNodeId: `source/${SRC_1}`,
       sourceVersion: 2,
+      evidenceRefs: [{ sourceId: SRC_1, sourceVersion: 2, chunkId: CHUNK_ZERO_PAGE }],
     });
     expect("page" in contains!).toBe(false);
 
@@ -2805,6 +2808,7 @@ describe("honest knowledgeStatus edge projection and live chunk re-verification"
       relation: "prerequisite",
       basis: "recorded",
       knowledgeStatus: "needs_check",
+      evidenceRefs: [],
     });
 
     // 3. Unlinked membership -> needs_check without provenance
@@ -2817,6 +2821,7 @@ describe("honest knowledgeStatus edge projection and live chunk re-verification"
       relation: "prerequisite",
       basis: "recorded",
       knowledgeStatus: "needs_check",
+      evidenceRefs: [],
     });
 
     // 4. Unavailable source version -> needs_check without provenance
@@ -2829,6 +2834,7 @@ describe("honest knowledgeStatus edge projection and live chunk re-verification"
       relation: "prerequisite",
       basis: "recorded",
       knowledgeStatus: "needs_check",
+      evidenceRefs: [],
     });
   });
 
@@ -2879,6 +2885,7 @@ describe("honest knowledgeStatus edge projection and live chunk re-verification"
         relation: "contains",
         basis: "recorded",
         knowledgeStatus: "needs_check",
+        evidenceRefs: [],
       },
       {
         id: `recorded:prerequisite:knowledge/${COURSE_1}/${KN_1}:knowledge/${COURSE_1}/${KN_2}`,
@@ -2890,6 +2897,7 @@ describe("honest knowledgeStatus edge projection and live chunk re-verification"
         sourceNodeId: `source/${SRC_1}`,
         sourceVersion: 2,
         page: 5,
+        evidenceRefs: [{ sourceId: SRC_1, sourceVersion: 2, chunkId: CHUNK_1, page: 5 }],
       },
     ]);
   });
