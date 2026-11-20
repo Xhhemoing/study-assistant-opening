@@ -174,6 +174,23 @@ export const KNOWLEDGE_STATUS_LABELS: Record<
   needs_check: "待进一步确认",
 };
 
+export const EDGE_KNOWLEDGE_STATUS_LABELS: Record<
+  NonNullable<AssetGraphEdge["knowledgeStatus"]>,
+  string
+> = {
+  supported: "已佐证",
+  needs_check: "待核对",
+  suggested: "待确认建议",
+};
+
+/** Resolve the honest learner-facing status label for an edge, surfacing knowledgeStatus distinctly. */
+export function describeEdgeStatus(edge: AssetGraphEdge): string {
+  if (edge.knowledgeStatus) {
+    return EDGE_KNOWLEDGE_STATUS_LABELS[edge.knowledgeStatus];
+  }
+  return EDGE_BASIS_LABELS[edge.basis];
+}
+
 export const NOT_FOUND_SAFE_NOTICE = "所选内容不可用或不在当前范围";
 
 export function getOwn<T>(record: Record<string, T>, key: string): T | undefined {

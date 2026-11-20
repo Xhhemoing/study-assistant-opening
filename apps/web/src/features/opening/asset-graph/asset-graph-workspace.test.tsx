@@ -8,8 +8,11 @@ import type {
   AssetGraphEdge,
   AssetGraphPage,
   CourseRouteActionResult,
+  CourseRouteSnapshot,
+  CourseRouteTaskContext,
   TeachingActivity,
 } from "@aistudy/contracts";
+import { publishVerifiedSessionIdentity } from "../../auth/session-identity";
 import { notifyOpeningPrivacyChange } from "../client/privacy-change";
 import type { CourseRouteClient } from "../courses/course-route-client";
 import {
@@ -886,7 +889,7 @@ describe("AssetGraphWorkspace", () => {
     await flush();
 
     // 1) Graph (Canvas) view scoped assertions: SVG canvas, target requirement card, shared observation card, and detail panel
-    const canvasSvg = container.querySelector('svg[role="img"]')!;
+    const canvasSvg = container.querySelector('svg[aria-label^="学习地图："]')!;
     const reqSvgNode = canvasSvg.querySelector(`[data-graph-node="${REQ_2}"]`)!;
     expect(reqSvgNode.textContent).toContain("待独立检验");
     expect(reqSvgNode.textContent).not.toContain("独立完成");
@@ -1750,5 +1753,526 @@ describe("AssetGraphWorkspace", () => {
     expect(container.textContent).toContain("所选内容不可用或不在当前范围");
     expect(document.activeElement).not.toBe(document.body);
     expect((document.activeElement as HTMLElement | null)?.getAttribute("tabindex")).toBe("-1");
+  });
+
+  it("surfaces full-course 1A exam picker, protects verified+due retest task binding, and uses 15-min ordinary practice preset", async () => {
+    const REQ_BOUND_UUID = "30000000-0000-4000-8000-000000000011";
+    const REQ_UNBOUND_UUID = "30000000-0000-4000-8000-000000000012";
+    const REQ_UNOBS_UUID = "30000000-0000-4000-8000-000000000013";
+    const REQ_BLOCKED_UUID = "30000000-0000-4000-8000-000000000014";
+    const TASK_BOUND_UUID = "90000000-0000-4000-8000-000000000011";
+    const TASK_UNBOUND_UUID = "90000000-0000-4000-8000-000000000012";
+    const GOAL_UUID = "20000000-0000-4000-8000-000000000001";
+    const SKILL_1 = "40000000-0000-4000-8000-000000000011";
+    const SKILL_2 = "40000000-0000-4000-8000-000000000012";
+    const SKILL_3 = "40000000-0000-4000-8000-000000000013";
+    const SKILL_4 = "40000000-0000-4000-8000-000000000014";
+    const ACTIVITY_ID = "80000000-0000-4000-8000-000000000099";
+
+    const makeReq = (id: string, skillId: string, title: string, position: number) => ({
+      id,
+      courseId: COURSE_ID,
+      stableSkillId: skillId,
+      knowledgeNodeId: null,
+      requirementKey: `req-${position}`,
+      title,
+      position,
+      mandatory: true,
+      goalIds: [GOAL_UUID],
+      prerequisiteIds: [],
+      sourceRefs: [],
+      verification: {
+        kind: "manual" as const,
+        status: "ready" as const,
+        exerciseKeys: [],
+        rubric: null,
+        missingReasons: [],
+      },
+      origin: "confirmed" as const,
+      revision: 2,
+      lifecycle: "active" as const,
+      approvedAt: "2026-03-01T00:00:00.000Z",
+    });
+
+    const confirmedSnapshot: CourseRouteSnapshot = {
+      courseId: COURSE_ID,
+      scopeState: "confirmed",
+      requirements: [
+        {
+          requirement: makeReq(REQ_BOUND_UUID, SKILL_1, "级数比较判别法", 0),
+          status: "verified",
+          observationId: null,
+          missingReasons: [],
+          sourcesAvailable: true,
+          delayedCheck: {
+            status: "pending",
+            retestId: "70000000-0000-4000-8000-000000000011",
+            taskId: TASK_BOUND_UUID,
+            notBeforeAt: "2026-03-01T00:00:00.000Z",
+          },
+        },
+        {
+          requirement: makeReq(REQ_UNBOUND_UUID, SKILL_2, "比值判别法边界", 1),
+          status: "verified",
+          observationId: null,
+          missingReasons: [],
+          sourcesAvailable: true,
+          delayedCheck: {
+            status: "pending",
+            retestId: "70000000-0000-4000-8000-000000000012",
+            taskId: TASK_UNBOUND_UUID,
+            notBeforeAt: "2026-03-01T00:00:00.000Z",
+          },
+        },
+        {
+          requirement: makeReq(REQ_UNOBS_UUID, SKILL_3, "交错级数莱布尼茨判别", 2),
+          status: "unobserved",
+          observationId: null,
+          missingReasons: [],
+          sourcesAvailable: true,
+        },
+        {
+          requirement: makeReq(REQ_BLOCKED_UUID, SKILL_4, "待补齐材料的幂级数展开", 3),
+          status: "blocked",
+          observationId: null,
+          missingReasons: ["缺少本课对应教材页"],
+          sourcesAvailable: false,
+        },
+      ],
+      suggestions: [],
+      summary: { total: 4, mandatory: 4, verified: 2, blocked: 1 },
+      materials: [],
+      currentActivity: null,
+      currentRoute: null,
+      observationId: null,
+    };
+
+    const startSpy = vi.fn<CourseRouteClient["start"]>(
+      async (): Promise<CourseRouteActionResult> => ({
+        kind: "ready",
+        activity: {
+          id: ACTIVITY_ID,
+          courseId: COURSE_ID,
+          title: "复测活动",
+          status: "active",
+          createdAt: "2026-03-02T00:00:00.000Z",
+          updatedAt: "2026-03-02T00:00:00.000Z",
+        } as unknown as TeachingActivity,
+        href: `/opening/courses/${COURSE_ID}/study?activity=${ACTIVITY_ID}`,
+        resumed: false,
+        requirementId: REQ_BOUND_UUID,
+        action: "transfer_check",
+      }),
+    );
+
+    const readSpy = vi.fn(async () => confirmedSnapshot);
+    const taskSpy = vi.fn(async (_courseId: string, taskId: string): Promise<CourseRouteTaskContext> => {
+      if (taskId === TASK_BOUND_UUID) {
+        return {
+          managed: true,
+          courseId: COURSE_ID,
+          taskId: TASK_BOUND_UUID,
+          expectedTaskVersion: 3,
+          goalId: GOAL_UUID,
+          expectedGoalRevision: 5,
+          requirementId: REQ_BOUND_UUID,
+          expectedRequirementRevision: 2,
+          minutes: 10,
+          notBeforeAt: "2026-03-01T00:00:00.000Z",
+          available: true,
+          reason: null,
+        };
+      }
+      return {
+        managed: true,
+        courseId: COURSE_ID,
+        taskId: TASK_UNBOUND_UUID,
+        expectedTaskVersion: 4,
+        goalId: GOAL_UUID,
+        expectedGoalRevision: 5,
+        requirementId: REQ_UNBOUND_UUID,
+        expectedRequirementRevision: 2,
+        minutes: 10,
+        notBeforeAt: "2026-03-01T00:00:00.000Z",
+        available: false,
+        reason: "请从今日任务进入完成这次独立复测。",
+      };
+    });
+
+    const navigated: string[] = [];
+    const transport: AssetGraphTransport = async query => {
+      if (query.op === "roots") {
+        return {
+          asOf: "2026-03-02T00:00:00.000Z",
+          nodes: [
+            { id: `course/${COURSE_ID}`, kind: "course", label: "高等数学 · 级数" },
+            { id: `requirement/${REQ_BOUND_UUID}`, kind: "requirement", label: "级数比较判别法" },
+          ],
+          edges: [],
+          page: { nextCursor: null },
+          completeness: "complete",
+          warnings: [],
+          detail: null,
+        };
+      }
+      if (query.op === "detail" && query.focus === `requirement/${REQ_UNOBS_UUID}`) {
+        return {
+          asOf: "2026-03-02T00:00:00.000Z",
+          nodes: [
+            { id: `requirement/${REQ_UNOBS_UUID}`, kind: "requirement", label: "交错级数莱布尼茨判别" },
+          ],
+          edges: [],
+          page: { nextCursor: null },
+          completeness: "complete",
+          warnings: [],
+          detail: {
+            id: `requirement/${REQ_UNOBS_UUID}`,
+            kind: "requirement",
+            learnerState: null,
+            requirementStatus: "unobserved",
+            notes: [],
+            actions: [
+              {
+                kind: "startCourseRequirement",
+                label: "开始本项练习",
+                courseId: COURSE_ID,
+                goalId: GOAL_UUID,
+                expectedGoalRevision: 5,
+                requirementId: REQ_UNOBS_UUID,
+                expectedRequirementRevision: 2,
+              },
+            ],
+          },
+        };
+      }
+      throw new Error(`Unexpected query: ${JSON.stringify(query)}`);
+    };
+
+    await renderWorkspace({
+      transport,
+      courseRouteClient: { start: startSpy, read: readSpy, task: taskSpy },
+      initialContext: { kind: "course", id: `course/${COURSE_ID}` },
+      onNavigate: href => navigated.push(href),
+    });
+    await flush();
+
+    // Full denominator and separate blocked surfacing
+    const examPanel = container.querySelector("[data-exam-picker-panel]")!;
+    expect(examPanel.textContent).toContain("全课共 4 项要求，已验证 2 项");
+    expect(examPanel.querySelector("[data-blocked-requirements-banner]")?.textContent).toContain(
+      "另有 1 项要求因材料待补齐暂不可直接开练",
+    );
+    expect(examPanel.querySelector(`[data-exam-picker-item="${REQ_BLOCKED_UUID}"]`)).toBeNull();
+
+    // Bound verified+due retest item renders "开始独立复测" and sends taskId + expectedTaskVersion + taskContext.minutes
+    const boundCard = examPanel.querySelector<HTMLElement>(
+      `[data-exam-picker-item="${REQ_BOUND_UUID}"]`,
+    )!;
+    expect(boundCard.getAttribute("data-exam-bucket")).toBe("due_retest");
+    const boundRetestBtn = findButton("开始独立复测", boundCard);
+    await act(async () => {
+      boundRetestBtn.click();
+    });
+    await flush();
+    expect(startSpy).toHaveBeenCalledTimes(1);
+    expect(startSpy.mock.calls[0]?.[1]).toMatchObject({
+      goalId: GOAL_UUID,
+      expectedGoalRevision: 5,
+      requirementId: REQ_BOUND_UUID,
+      expectedRequirementRevision: 2,
+      taskId: TASK_BOUND_UUID,
+      expectedTaskVersion: 3,
+      minutes: 10,
+    });
+    expect(navigated[0]).toBe(`/opening/courses/${COURSE_ID}/study?activity=${ACTIVITY_ID}`);
+
+    // Unbound verified+due retest MUST NOT be labeled "开始独立复测"
+    const unboundCard = examPanel.querySelector<HTMLElement>(
+      `[data-exam-picker-item="${REQ_UNBOUND_UUID}"]`,
+    )!;
+    expect(unboundCard.textContent).not.toContain("开始独立复测");
+    expect(unboundCard.querySelector('a[href="/opening/today"]')).not.toBeNull();
+    expect(unboundCard.textContent).toContain("按 15 分钟普通练习开始（不替代复测任务）");
+
+    // Ordinary 1A practice loads detail and starts with 15-min preset and NO taskId
+    const unobsCard = examPanel.querySelector<HTMLElement>(
+      `[data-exam-picker-item="${REQ_UNOBS_UUID}"]`,
+    )!;
+    const locateBtn = findButton("在图中定位这项要求", unobsCard);
+    await act(async () => {
+      locateBtn.click();
+    });
+    await flush();
+    expect(container.querySelector(`[data-graph-node="requirement/${REQ_UNOBS_UUID}"]`)).not.toBeNull();
+
+    const ordinaryBtn = findButton("开始 15 分钟练习", unobsCard);
+    await act(async () => {
+      ordinaryBtn.click();
+    });
+    await flush();
+    expect(startSpy).toHaveBeenCalledTimes(2);
+    expect(startSpy.mock.calls[1]?.[1]).toMatchObject({
+      requirementId: REQ_UNOBS_UUID,
+      minutes: 15,
+    });
+    expect(startSpy.mock.calls[1]?.[1]).not.toHaveProperty("taskId");
+  });
+
+  it("persists 2A paper-review checklist in sessionStorage with undo, next round, and privacy-change clearing, and isolates Series Sandbox", async () => {
+    window.sessionStorage.clear();
+    const disposeIdentity = publishVerifiedSessionIdentity({
+      id: "user-map-1",
+      workspaceId: "ws-map-1",
+    });
+    try {
+
+    const REQ_A_UUID = "30000000-0000-4000-8000-000000000021";
+    const SKILL_A = "40000000-0000-4000-8000-000000000021";
+    const GOAL_UUID = "20000000-0000-4000-8000-000000000001";
+
+    const snapshot: CourseRouteSnapshot = {
+      courseId: COURSE_ID,
+      scopeState: "confirmed",
+      requirements: [
+        {
+          requirement: {
+            id: REQ_A_UUID,
+            courseId: COURSE_ID,
+            stableSkillId: SKILL_A,
+            knowledgeNodeId: null,
+            requirementKey: "req-a",
+            title: "收敛必要条件",
+            position: 0,
+            mandatory: true,
+            goalIds: [GOAL_UUID],
+            prerequisiteIds: [],
+            sourceRefs: [],
+            verification: {
+              kind: "manual",
+              status: "ready",
+              exerciseKeys: [],
+              rubric: null,
+              missingReasons: [],
+            },
+            origin: "confirmed",
+            revision: 1,
+            lifecycle: "active",
+            approvedAt: "2026-03-01T00:00:00.000Z",
+          },
+          status: "unobserved",
+          observationId: null,
+          missingReasons: [],
+          sourcesAvailable: true,
+        },
+      ],
+      suggestions: [],
+      summary: { total: 1, mandatory: 1, verified: 0, blocked: 0 },
+      materials: [],
+      currentActivity: null,
+      currentRoute: null,
+      observationId: null,
+    };
+
+    const transportSpy = vi.fn<AssetGraphTransport>(async query => {
+      if (query.op === "roots") {
+        return {
+          asOf: "2026-03-02T00:00:00.000Z",
+          nodes: [{ id: `course/${COURSE_ID}`, kind: "course", label: "高等数学 · 级数" }],
+          edges: [],
+          page: { nextCursor: null },
+          completeness: "complete",
+          warnings: [],
+          detail: null,
+        };
+      }
+      throw new Error(`Unexpected query: ${JSON.stringify(query)}`);
+    });
+
+    await renderWorkspace({
+      transport: transportSpy,
+      courseRouteClient: {
+        start: vi.fn(),
+        read: vi.fn(async () => snapshot),
+      },
+      initialContext: { kind: "course", id: `course/${COURSE_ID}` },
+    });
+    await flush();
+
+    // Toggle 2A paper-review checkbox
+    const itemCard = container.querySelector<HTMLElement>(
+      `[data-exam-picker-item="${REQ_A_UUID}"]`,
+    )!;
+    const checkbox = itemCard.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    expect(checkbox.checked).toBe(false);
+    await act(async () => {
+      checkbox.click();
+    });
+    await flush();
+    expect(checkbox.checked).toBe(true);
+    expect(container.querySelector("[data-paper-review-bar]")?.textContent).toContain(
+      "本轮纸上已复习 1 / 1 项",
+    );
+    const storageKey = `aistudy:paper-review:v1:user-map-1:ws-map-1:course:${COURSE_ID}`;
+    expect(window.sessionStorage.getItem(storageKey)).toContain(REQ_A_UUID);
+
+    // Undo restores unmarked state
+    await act(async () => {
+      findButton("撤销上一步", container.querySelector("[data-paper-review-bar]")!).click();
+    });
+    await flush();
+    expect(checkbox.checked).toBe(false);
+
+    // Re-check then start next round
+    await act(async () => {
+      checkbox.click();
+    });
+    await flush();
+    await act(async () => {
+      findButton("开启新一轮纸上核对", container.querySelector("[data-paper-review-bar]")!).click();
+    });
+    await flush();
+    expect(container.querySelector("[data-paper-review-bar]")?.textContent).toContain(
+      "第 2 轮纸上复习",
+    );
+
+    // Privacy change clears sessionStorage
+    await act(async () => {
+      notifyOpeningPrivacyChange();
+    });
+    await flush();
+    expect(window.sessionStorage.getItem(storageKey)).toBeNull();
+
+    // Enter explicit Series Sandbox: badged, zero server writes, clean exit
+    const callsBeforeSandbox = transportSpy.mock.calls.length;
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>("[data-open-series-sandbox]")!.click();
+    });
+    await flush();
+    expect(container.textContent).toContain("示例沙盒 · 不计入个人课程记录");
+    expect(transportSpy.mock.calls.length).toBe(callsBeforeSandbox);
+
+    await act(async () => {
+      findButton("返回真实地图", container).click();
+    });
+    await flush();
+    expect(container.querySelector("[data-exam-picker-panel]")).not.toBeNull();
+    } finally {
+      disposeIdentity();
+    }
+  });
+
+  it("renders distinct knowledgeStatus (supported, needs_check, suggested) across canvas, list view, and sidebar", async () => {
+    const K1 = `knowledge/${COURSE_ID}/50000000-0000-4000-8000-000000000001` as const;
+    const K2 = `knowledge/${COURSE_ID}/50000000-0000-4000-8000-000000000002` as const;
+    const K3 = `knowledge/${COURSE_ID}/50000000-0000-4000-8000-000000000003` as const;
+    const K4 = `knowledge/${COURSE_ID}/50000000-0000-4000-8000-000000000004` as const;
+    const SRC = "source/60000000-0000-4000-8000-000000000001" as const;
+
+    const transport: AssetGraphTransport = async query => {
+      if (query.op === "roots") {
+        return {
+          asOf: "2026-03-02T00:00:00.000Z",
+          nodes: [{ id: K1, kind: "knowledge", label: "正项级数" }],
+          edges: [],
+          page: { nextCursor: null },
+          completeness: "complete",
+          warnings: [],
+          detail: null,
+        };
+      }
+      if (query.op === "neighbors" && query.focus === K1) {
+        return {
+          asOf: "2026-03-02T00:00:00.000Z",
+          nodes: [
+            { id: K1, kind: "knowledge", label: "正项级数" },
+            { id: K2, kind: "knowledge", label: "比较判别法" },
+            { id: K3, kind: "knowledge", label: "积分判别法" },
+            { id: K4, kind: "knowledge", label: "柯西凝聚判别法" },
+          ],
+          edges: [
+            {
+              id: "e-supported",
+              from: K1,
+              to: K2,
+              relation: "prerequisite",
+              basis: "recorded",
+              knowledgeStatus: "supported",
+              sourceNodeId: SRC,
+              sourceVersion: 2,
+              page: 18,
+            },
+            {
+              id: "e-needs-check",
+              from: K1,
+              to: K3,
+              relation: "appliesTo",
+              basis: "recorded",
+              knowledgeStatus: "needs_check",
+            },
+            {
+              id: "e-suggested",
+              from: K1,
+              to: K4,
+              relation: "prerequisite",
+              basis: "suggested",
+              knowledgeStatus: "suggested",
+            },
+          ],
+          page: { nextCursor: null },
+          completeness: "complete",
+          warnings: [],
+          detail: null,
+        };
+      }
+      throw new Error(`Unexpected query: ${JSON.stringify(query)}`);
+    };
+
+    await renderWorkspace({ transport });
+    await act(async () => {
+      findButton("出边展开", nodeCard(K1)).click();
+    });
+    await flush();
+
+    expect(container.querySelector('[role="alert"]')?.textContent ?? "").toBe("");
+    const supportedPath = container.querySelector(
+      'svg [data-free-map-edge="e-supported"][data-knowledge-status="supported"] path',
+    );
+    expect(supportedPath).not.toBeNull();
+    expect(supportedPath?.getAttribute("stroke-dasharray")).toBeNull();
+    expect(
+      container
+        .querySelector('svg [data-free-map-edge="e-needs-check"][data-knowledge-status="needs_check"] path')
+        ?.getAttribute("stroke-dasharray"),
+    ).toBe("6 4");
+    expect(
+      container
+        .querySelector('svg [data-free-map-edge="e-suggested"][data-knowledge-status="suggested"] path')
+        ?.getAttribute("stroke-dasharray"),
+    ).toBe("3 4");
+
+    // Sidebar ConnectedEdgeItem shows all three statuses distinctly plus verified version/page
+    const sidebar = container.querySelector('aside[aria-label="详情与后续行动面板"]')!;
+    expect(sidebar.textContent).toContain("已佐证");
+    expect(sidebar.textContent).toContain("资料第 2 版");
+    expect(sidebar.textContent).toContain("第 18 页");
+    expect(sidebar.textContent).toContain("待核对");
+    expect(sidebar.textContent).toContain("待确认建议");
+
+    // List View Relations table shows all three statuses distinctly
+    const viewToolbar = container.querySelector('[aria-label="视图模式"]')!;
+    await act(async () => {
+      findButton("列表", viewToolbar).click();
+    });
+    await flush();
+    const relationsTable = container.querySelector('table[aria-label="已展开关联列表"]')!;
+    expect(relationsTable.querySelector('[data-knowledge-status="supported"]')?.textContent).toContain(
+      "已佐证",
+    );
+    expect(relationsTable.querySelector('[data-knowledge-status="needs_check"]')?.textContent).toContain(
+      "待核对",
+    );
+    expect(relationsTable.querySelector('[data-knowledge-status="suggested"]')?.textContent).toContain(
+      "待确认建议",
+    );
   });
 });

@@ -5,6 +5,7 @@ import {
   ArrowRight,
   Compass,
   FileSearch,
+  FlaskConical,
   List,
   Network,
   PinOff,
@@ -28,9 +29,12 @@ import {
   type AssetGraphLens,
   type AssetGraphNodeId,
   type AssetGraphRootKind,
+  type CourseRequirementProgress,
   type CourseRouteActionResult,
+  type CourseRouteTaskContext,
 } from "@aistudy/contracts";
 import { userFacingMessage } from "../../../lib/user-facing-error";
+import { getVerifiedSessionIdentity } from "../../auth/session-identity";
 import { subscribeOpeningPrivacyChange } from "../client/privacy-change";
 import {
   CourseRouteRequestError,
@@ -58,6 +62,7 @@ import {
   createHttpAssetGraphTransport,
   type AssetGraphTransport,
 } from "./asset-graph-client";
+import { AssetGraphExamPanel } from "./asset-graph-exam-panel";
 import { AssetGraphListView, type ListSubTab } from "./asset-graph-list-view";
 import {
   ASSISTANCE_LABELS,
@@ -77,14 +82,25 @@ import {
   resolveEffectiveNodeStates,
   type AssetGraphDirection,
 } from "./asset-graph-model";
+import type { FreeMapLocateRequest } from "./free-map-canvas";
+import { buildFreeMapPersistKey } from "./free-map-canvas-storage";
+import { SeriesMapExample } from "./series-map-example";
 
 type StartAction = Extract<AssetGraphAction, { kind: "startCourseRequirement" }>;
+
+type StartOptions = {
+  minutes?: number;
+  taskId?: string;
+  expectedTaskVersion?: number;
+};
 
 type PendingStartIntent = {
   signature: string;
   action: StartAction;
   clientKey: string;
   minutes: number;
+  taskId?: string;
+  expectedTaskVersion?: number;
 };
 
 type PendingExpandFocusIntent = {
@@ -125,13 +141,15 @@ function createStartIntentKey(): string {
   return `asset-graph-start:${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-function startActionSignature(action: StartAction): string {
+function startActionSignature(action: StartAction, options?: StartOptions): string {
   return [
     action.courseId,
     action.goalId,
     action.requirementId,
     action.expectedGoalRevision,
     action.expectedRequirementRevision,
+    options?.taskId ?? "",
+    options?.expectedTaskVersion ?? "",
   ].join(":");
 }
 
@@ -161,15 +179,19 @@ function formatReadableTime(iso: string): string {
   });
 }
 
+export type AssetGraphCourseRouteClient = Pick<CourseRouteClient, "start"> &
+  Partial<Pick<CourseRouteClient, "read" | "task">>;
+
 export type AssetGraphWorkspaceProps = {
   endpoint?: string;
   transport?: AssetGraphTransport;
-  courseRouteClient?: Pick<CourseRouteClient, "start">;
+  courseRouteClient?: AssetGraphCourseRouteClient;
   initialContext?: AssetGraphContext;
   initialLens?: AssetGraphLens;
   initialFocus?: AssetGraphNodeId | null;
   initialPageLimit?: number;
   initialViewMode?: AssetGraphViewMode;
+  initialSandbox?: "series" | null;
   courses?: readonly { id: string; title: string }[];
   goals?: readonly { id: string; title: string }[];
   onNavigate?: (href: string) => void;
@@ -184,6 +206,7 @@ export function AssetGraphWorkspace({
   initialFocus = null,
   initialPageLimit = ASSET_GRAPH_DEFAULT_LIMIT,
   initialViewMode = "graph",
+  initialSandbox = null,
   courses = [],
   goals = [],
   onNavigate,
@@ -233,11 +256,13 @@ export function AssetGraphWorkspace({
     <ConnectedAssetGraphWorkspace
       transport={resolvedTransport}
       courseRouteClient={courseRouteClient}
+      enableHttpRouteRead={Boolean(endpoint && !courseRouteClient)}
       initialContextKey={serializeContextValue(initialContext)}
       initialLens={initialLens}
       initialFocus={initialFocus}
       initialPageLimit={initialPageLimit}
       initialViewMode={initialViewMode}
+      initialSandbox={initialSandbox}
       courses={courses}
       goals={goals}
       onNavigate={onNavigate}
@@ -248,22 +273,26 @@ export function AssetGraphWorkspace({
 function ConnectedAssetGraphWorkspace({
   transport,
   courseRouteClient,
+  enableHttpRouteRead,
   initialContextKey,
   initialLens,
   initialFocus,
   initialPageLimit,
   initialViewMode,
+  initialSandbox,
   courses,
   goals,
   onNavigate,
 }: {
   transport: AssetGraphTransport;
-  courseRouteClient?: Pick<CourseRouteClient, "start">;
+  courseRouteClient?: AssetGraphCourseRouteClient;
+  enableHttpRouteRead: boolean;
   initialContextKey: string;
   initialLens: AssetGraphLens;
   initialFocus: AssetGraphNodeId | null;
   initialPageLimit: number;
   initialViewMode: AssetGraphViewMode;
+  initialSandbox: "series" | null;
   courses: readonly { id: string; title: string }[];
   goals: readonly { id: string; title: string }[];
   onNavigate?: (href: string) => void;
@@ -273,6 +302,15 @@ function ConnectedAssetGraphWorkspace({
     () => courseRouteClient ?? createCourseRouteClient(),
     [courseRouteClient],
   );
+  const examRouteClient = useMemo<Partial<Pick<CourseRouteClient, "read" | "task">>>(() => {
+    if (courseRouteClient) {
+      return { read: courseRouteClient.read, task: courseRouteClient.task };
+    }
+    if (enableHttpRouteRead) {
+      return { read: routeClient.read, task: routeClient.task };
+    }
+    return {};
+  }, [courseRouteClient, enableHttpRouteRead, routeClient]);
   const graphClient = useMemo(() => createAssetGraphClient(transport), [transport]);
 
   const store = useMemo(() => {
@@ -288,6 +326,10 @@ function ConnectedAssetGraphWorkspace({
   const state = useSyncExternalStore(store.subscribe, store.getState, store.getState);
 
   const [viewMode, setViewMode] = useState<AssetGraphViewMode>(initialViewMode);
+  const [mapMode, setMapMode] = useState<"exam" | "study">("exam");
+  const [sandboxMode, setSandboxMode] = useState<"series" | null>(initialSandbox);
+  const [privacyGeneration, setPrivacyGeneration] = useState(0);
+  const [locateRequest, setLocateRequest] = useState<FreeMapLocateRequest | null>(null);
   const [listSubTab, setListSubTab] = useState<ListSubTab | null>(null);
   const [srAnnouncement, setSrAnnouncement] = useState("");
   const [searchInput, setSearchInput] = useState("");
@@ -295,6 +337,7 @@ function ConnectedAssetGraphWorkspace({
   const [limitInput, setLimitInput] = useState<number>(initialPageLimit);
   const [selectedMinutes, setSelectedMinutes] = useState<number>(20);
   const [startBusy, setStartBusy] = useState(false);
+  const [startingRequirementId, setStartingRequirementId] = useState<string | null>(null);
   const [pendingStart, setPendingStart] = useState<PendingStartIntent | null>(null);
   const [startError, setStartError] = useState("");
   const [choiceResult, setChoiceResult] = useState<
@@ -302,6 +345,7 @@ function ConnectedAssetGraphWorkspace({
   >(null);
   const mountedRef = useRef(true);
   const startBusyRef = useRef(false);
+  const locateSeqRef = useRef(0);
   const workspaceRootRef = useRef<HTMLElement | null>(null);
   const workspaceContentRef = useRef<HTMLDivElement | null>(null);
   const noticeContainerRef = useRef<HTMLDivElement | null>(null);
@@ -332,6 +376,8 @@ function ConnectedAssetGraphWorkspace({
       setChoiceResult(null);
       setListSubTab(null);
       setSrAnnouncement("");
+      setLocateRequest(null);
+      setPrivacyGeneration(prev => prev + 1);
       void store.invalidateByPrivacy();
     });
   }, [store]);
@@ -656,9 +702,13 @@ function ConnectedAssetGraphWorkspace({
     });
   }
 
-  async function executeStartRequirement(action: StartAction, reusePending?: PendingStartIntent) {
+  async function executeStartRequirement(
+    action: StartAction,
+    reusePending?: PendingStartIntent,
+    options?: StartOptions,
+  ) {
     if (startBusyRef.current) return;
-    const signature = startActionSignature(action);
+    const signature = startActionSignature(action, options);
     const intent: PendingStartIntent =
       reusePending && reusePending.signature === signature
         ? reusePending
@@ -668,11 +718,18 @@ function ConnectedAssetGraphWorkspace({
               signature,
               action,
               clientKey: createStartIntentKey(),
-              minutes: selectedMinutes,
+              minutes: options?.minutes ?? selectedMinutes,
+              ...(options?.taskId && options?.expectedTaskVersion
+                ? {
+                    taskId: options.taskId,
+                    expectedTaskVersion: options.expectedTaskVersion,
+                  }
+                : {}),
             };
 
     startBusyRef.current = true;
     setStartBusy(true);
+    setStartingRequirementId(action.requirementId);
     setStartError("");
     setChoiceResult(null);
     setPendingStart(intent);
@@ -685,6 +742,12 @@ function ConnectedAssetGraphWorkspace({
         expectedRequirementRevision: action.expectedRequirementRevision,
         minutes: intent.minutes,
         clientKey: intent.clientKey,
+        ...(intent.taskId && intent.expectedTaskVersion
+          ? {
+              taskId: intent.taskId,
+              expectedTaskVersion: intent.expectedTaskVersion,
+            }
+          : {}),
       });
 
       if (!mountedRef.current) return;
@@ -720,9 +783,117 @@ function ConnectedAssetGraphWorkspace({
       startBusyRef.current = false;
       if (mountedRef.current) {
         setStartBusy(false);
+        setStartingRequirementId(null);
       }
     }
   }
+
+  function handleLocateRequirement(requirementId: string) {
+    const reqNodeId = `requirement/${requirementId}` as AssetGraphNodeId;
+    clearPendingExpandFocus();
+    resetActionTransientState();
+    setViewMode("graph");
+    if (getOwn(state.nodesById, reqNodeId)) {
+      store.focusNode(reqNodeId);
+      setLocateRequest({ id: reqNodeId, sequence: ++locateSeqRef.current });
+      void store.loadDetail(reqNodeId);
+      return;
+    }
+    void store.loadDetail(reqNodeId).then(() => {
+      if (!mountedRef.current) return;
+      if (getOwn(store.getState().nodesById, reqNodeId)) {
+        setLocateRequest({ id: reqNodeId, sequence: ++locateSeqRef.current });
+      }
+    });
+  }
+
+  function handleStartBoundRetest(
+    courseId: string,
+    taskContext: Extract<CourseRouteTaskContext, { managed: true }>,
+  ) {
+    const action: StartAction = {
+      kind: "startCourseRequirement",
+      label: "开始独立复测",
+      courseId,
+      goalId: taskContext.goalId,
+      expectedGoalRevision: taskContext.expectedGoalRevision,
+      requirementId: taskContext.requirementId,
+      expectedRequirementRevision: taskContext.expectedRequirementRevision,
+    };
+    void executeStartRequirement(action, undefined, {
+      minutes: taskContext.minutes,
+      taskId: taskContext.taskId,
+      expectedTaskVersion: taskContext.expectedTaskVersion,
+    });
+  }
+
+  async function handleStartOrdinaryPractice(
+    courseId: string,
+    progress: CourseRequirementProgress,
+    minutes: number,
+  ) {
+    if (startBusyRef.current) return;
+    const reqId = progress.requirement.id;
+    const reqNodeId = `requirement/${reqId}` as AssetGraphNodeId;
+
+    const findMatchingStartAction = (): StartAction | undefined => {
+      const currentDetail = store.getState().detail;
+      if (!currentDetail || currentDetail.id !== reqNodeId) return undefined;
+      return currentDetail.actions.find(
+        (item): item is StartAction =>
+          item.kind === "startCourseRequirement" &&
+          item.courseId === courseId &&
+          item.requirementId === reqId,
+      );
+    };
+
+    let matchedAction = findMatchingStartAction();
+    if (!matchedAction) {
+      setStartError("");
+      setChoiceResult(null);
+      setStartingRequirementId(reqId);
+      await store.loadDetail(reqNodeId);
+      if (!mountedRef.current) return;
+      matchedAction = findMatchingStartAction();
+    }
+
+    if (!matchedAction) {
+      setStartingRequirementId(null);
+      setStartError("这项要求暂未关联活跃学习目标，请先前往课程页面确认目标后再开始。");
+      return;
+    }
+
+    await executeStartRequirement(matchedAction, undefined, { minutes });
+  }
+
+  const resolvedCourse = useMemo<{ id: string; title: string | null } | null>(() => {
+    if (state.context.kind === "course") {
+      const id = state.context.id.startsWith("course/")
+        ? state.context.id.slice("course/".length)
+        : state.context.id;
+      const fromProp = courses.find(course => course.id === id);
+      const fromNode = getOwn(state.nodesById, state.context.id);
+      return { id, title: fromProp?.title ?? fromNode?.label ?? null };
+    }
+    if (state.context.kind === "workspace") {
+      if (courses.length === 1) {
+        return { id: courses[0]!.id, title: courses[0]!.title };
+      }
+      if (courses.length === 0) {
+        const visibleCourseNodes = visibleNodes.filter(node => node.kind === "course");
+        if (visibleCourseNodes.length === 1) {
+          const single = visibleCourseNodes[0]!;
+          const id = single.id.startsWith("course/") ? single.id.slice("course/".length) : single.id;
+          return { id, title: single.label };
+        }
+      }
+    }
+    return null;
+  }, [state.context, courses, state.nodesById, visibleNodes]);
+
+  const contextKey = serializeContextValue(state.context);
+  const canvasLayoutKey = `${contextKey}:${state.lens}:p${privacyGeneration}`;
+  const canvasPersistKey = buildFreeMapPersistKey(getVerifiedSessionIdentity(), contextKey);
 
   const effectiveStates = resolveEffectiveNodeStates(selectedNode, activeDetail);
   const effectiveLearnerState = effectiveStates.learnerState ?? null;
@@ -730,6 +901,17 @@ function ConnectedAssetGraphWorkspace({
   const pinnedStates = state.pinnedComparison
     ? resolveEffectiveNodeStates(state.pinnedComparison.node, state.pinnedComparison.detail)
     : null;
+
+  if (sandboxMode === "series") {
+    return (
+      <SeriesMapExample
+        returnHref="/opening/map"
+        onExit={() => {
+          setSandboxMode(null);
+        }}
+      />
+    );
+  }
 
   return (
     <section
@@ -744,6 +926,15 @@ function ConnectedAssetGraphWorkspace({
         title="知识地图"
         action={
           <div className="flex flex-wrap items-center gap-1.5">
+            <button
+              type="button"
+              data-open-series-sandbox
+              className={ui.secondary}
+              onClick={() => setSandboxMode("series")}
+            >
+              <FlaskConical size={14} aria-hidden="true" />
+              数项级数示例沙盒
+            </button>
             <Link className={ui.quiet} href="/opening/library">
               资料列表
             </Link>
@@ -827,6 +1018,27 @@ function ConnectedAssetGraphWorkspace({
                     列表
                   </button>
                 </div>
+
+                {viewMode === "graph" ? (
+                  <div role="toolbar" aria-label="画布注记模式" className="flex flex-wrap gap-1.5">
+                    <button
+                      type="button"
+                      className={mapMode === "exam" ? ui.primary : ui.secondary}
+                      aria-pressed={mapMode === "exam"}
+                      onClick={() => setMapMode("exam")}
+                    >
+                      备考状态
+                    </button>
+                    <button
+                      type="button"
+                      className={mapMode === "study" ? ui.primary : ui.secondary}
+                      aria-pressed={mapMode === "study"}
+                      onClick={() => setMapMode("study")}
+                    >
+                      结构整理
+                    </button>
+                  </div>
+                ) : null}
 
                 <div role="toolbar" aria-label="观察视角" className="flex flex-wrap gap-1.5">
                   {LENS_OPTIONS.map(lens => (
@@ -983,6 +1195,32 @@ function ConnectedAssetGraphWorkspace({
             </div>
           ) : null}
 
+          {resolvedCourse && typeof examRouteClient.read === "function" ? (
+            <div className="space-y-2">
+              <AssetGraphExamPanel
+                courseId={resolvedCourse.id}
+                courseTitle={resolvedCourse.title}
+                asOf={state.asOf}
+                routeClient={examRouteClient}
+                busy={startBusy}
+                startingRequirementId={startingRequirementId}
+                onLocateRequirement={handleLocateRequirement}
+                onStartOrdinaryPractice={(courseId, progress, minutes) => {
+                  void handleStartOrdinaryPractice(courseId, progress, minutes);
+                }}
+                onStartBoundRetest={handleStartBoundRetest}
+              />
+              {!activeDetail && startError ? (
+                <p
+                  role="alert"
+                  className="rounded-ctl border border-danger/40 bg-surface px-3 py-2 text-xs text-danger"
+                >
+                  {startError}
+                </p>
+              ) : null}
+            </div>
+          ) : null}
+
           <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_var(--layout-companion)]">
             <div
               ref={workspaceContentRef}
@@ -1055,6 +1293,10 @@ function ConnectedAssetGraphWorkspace({
                     pinnedNodeId={state.pinnedComparison?.node.id ?? null}
                     context={state.context}
                     lens={state.lens}
+                    mode={mapMode}
+                    layoutKey={canvasLayoutKey}
+                    persistKey={canvasPersistKey}
+                    locateRequest={locateRequest}
                     expandedCenters={state.expandedCenters}
                     expandingNodeId={state.expandingNodeId}
                     loadingDetailNodeId={state.loadingDetailNodeId}

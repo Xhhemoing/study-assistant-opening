@@ -857,3 +857,116 @@ describe("assetGraphSharedAttributionSchema and shared observation edges", () =>
     ).toBe(false);
   });
 });
+
+describe("assetGraphEdgeSchema knowledgeStatus and sourceNodeId invariants", () => {
+  const knFrom = `knowledge/${uuid1}/${uuid2}`;
+  const knTo = `knowledge/${uuid1}/${uuid3}`;
+  const srcId = `source/${uuid4}`;
+
+  it("accepts valid knowledgeStatus combinations with optional sourceNodeId provenance", () => {
+    for (const relation of ["contains", "prerequisite", "appliesTo"] as const) {
+      expect(
+        assetGraphEdgeSchema.safeParse({
+          id: `recorded:${relation}:${knFrom}:${knTo}`,
+          from: knFrom,
+          to: knTo,
+          relation,
+          basis: "recorded",
+          knowledgeStatus: "supported",
+          sourceNodeId: srcId,
+          sourceVersion: 2,
+          page: 14,
+        }).success,
+      ).toBe(true);
+
+      expect(
+        assetGraphEdgeSchema.safeParse({
+          id: `recorded:${relation}:${knFrom}:${knTo}`,
+          from: knFrom,
+          to: knTo,
+          relation,
+          basis: "recorded",
+          knowledgeStatus: "needs_check",
+        }).success,
+      ).toBe(true);
+
+      expect(
+        assetGraphEdgeSchema.safeParse({
+          id: `suggested:${relation}:${knFrom}:${knTo}`,
+          from: knFrom,
+          to: knTo,
+          relation,
+          basis: "suggested",
+          knowledgeStatus: "suggested",
+        }).success,
+      ).toBe(true);
+    }
+  });
+
+  it("rejects knowledgeStatus on non-knowledge relations", () => {
+    for (const relation of ["scopes", "usesSource", "hasObservation", "mappedTo", "servesGoal"] as const) {
+      const parsed = assetGraphEdgeSchema.safeParse({
+        id: `edge-${relation}`,
+        from: `requirement/${uuid1}`,
+        to: `source/${uuid2}`,
+        relation,
+        basis: "recorded",
+        knowledgeStatus: "supported",
+      });
+      expect(parsed.success).toBe(false);
+      if (!parsed.success) {
+        expect(parsed.error.issues.some(issue => issue.path.join(".") === "relation")).toBe(true);
+      }
+    }
+  });
+
+  it("rejects mismatched knowledgeStatus and basis pairings", () => {
+    const suggestedWithRecorded = assetGraphEdgeSchema.safeParse({
+      id: "edge-bad-1",
+      from: knFrom,
+      to: knTo,
+      relation: "prerequisite",
+      basis: "recorded",
+      knowledgeStatus: "suggested",
+    });
+    expect(suggestedWithRecorded.success).toBe(false);
+
+    const supportedWithSuggested = assetGraphEdgeSchema.safeParse({
+      id: "edge-bad-2",
+      from: knFrom,
+      to: knTo,
+      relation: "prerequisite",
+      basis: "suggested",
+      knowledgeStatus: "supported",
+    });
+    expect(supportedWithSuggested.success).toBe(false);
+
+    const needsCheckWithDerived = assetGraphEdgeSchema.safeParse({
+      id: "edge-bad-3",
+      from: knFrom,
+      to: knTo,
+      relation: "contains",
+      basis: "derived",
+      knowledgeStatus: "needs_check",
+    });
+    expect(needsCheckWithDerived.success).toBe(false);
+  });
+
+  it("rejects non-source sourceNodeId values", () => {
+    for (const badSourceNodeId of [`course/${uuid4}`, `document/${uuid4}`, knFrom]) {
+      const parsed = assetGraphEdgeSchema.safeParse({
+        id: "edge-bad-source-node",
+        from: knFrom,
+        to: knTo,
+        relation: "appliesTo",
+        basis: "recorded",
+        knowledgeStatus: "supported",
+        sourceNodeId: badSourceNodeId,
+      });
+      expect(parsed.success).toBe(false);
+      if (!parsed.success) {
+        expect(parsed.error.issues.some(issue => issue.path.join(".") === "sourceNodeId")).toBe(true);
+      }
+    }
+  });
+});

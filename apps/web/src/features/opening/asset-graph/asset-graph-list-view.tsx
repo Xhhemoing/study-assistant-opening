@@ -25,11 +25,13 @@ import { Segmented } from "../v3/ui/segmented";
 import {
   KIND_BADGE_TONE,
   SharedEdgeAttribution,
+  edgeKnowledgeStatusBadgeTone,
   requirementStatusBadgeTone,
 } from "./asset-graph-canvas";
 import {
   ASSISTANCE_LABELS,
   EDGE_BASIS_LABELS,
+  EDGE_KNOWLEDGE_STATUS_LABELS,
   KNOWLEDGE_STATUS_LABELS,
   LEARNER_STATE_LABELS,
   NODE_KIND_LABELS,
@@ -202,6 +204,8 @@ export function AssetGraphListView({
                   return (
                     <tr
                       key={edge.id}
+                      data-list-edge={edge.id}
+                      data-knowledge-status={edge.knowledgeStatus}
                       className={active ? "bg-accent-soft/35" : "hover:bg-surface-2/40"}
                     >
                       <td className="py-2.5 pr-3 align-top">
@@ -225,9 +229,19 @@ export function AssetGraphListView({
                           <span className={`${ui.badge} ${tone.neutral}`}>
                             {RELATION_LABELS[edge.relation]}
                           </span>
-                          <span className="text-meta text-text-2">
-                            {EDGE_BASIS_LABELS[edge.basis]}
-                          </span>
+                          {edge.knowledgeStatus ? (
+                            <span
+                              className={`${ui.badge} ${edgeKnowledgeStatusBadgeTone(
+                                edge.knowledgeStatus,
+                              )}`}
+                            >
+                              {EDGE_KNOWLEDGE_STATUS_LABELS[edge.knowledgeStatus]}
+                            </span>
+                          ) : (
+                            <span className="text-meta text-text-2">
+                              {EDGE_BASIS_LABELS[edge.basis]}
+                            </span>
+                          )}
                           {edge.sourceVersion !== undefined ? (
                             <span className="text-meta text-text-2">
                               · 资料第 {edge.sourceVersion} 版
@@ -239,6 +253,11 @@ export function AssetGraphListView({
                             </span>
                           ) : null}
                         </div>
+                        {edge.knowledgeStatus === "needs_check" ? (
+                          <p className="mt-1 text-micro text-warn">
+                            原资料依据当前暂不可确认，请对照本课资料重新核对。
+                          </p>
+                        ) : null}
                         {edge.sharedAttribution ? (
                           <SharedEdgeAttribution attribution={edge.sharedAttribution} />
                         ) : null}

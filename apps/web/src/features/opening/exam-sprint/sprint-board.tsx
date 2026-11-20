@@ -10,6 +10,7 @@ import { LoadingRows, PageHeader, ui } from "../design/ui";
 import { planAcceptFailure } from "../planning/plan-accept-errors";
 import { clearSprintCheckpoint, readSprintCheckpoint, resumeSprintAcceptance, saveSprintCheckpoint, sprintAcceptance, type SprintCheckpoint } from "./sprint-checkpoint";
 import { SprintBudgetPreview } from "./sprint-budget-preview";
+import { SprintPaperReviewPanel } from "./sprint-paper-review";
 import { sprintCandidateBlocks, sprintPlanChanges, sprintTaskHref, sprintTaskTitle, sprintTodayTasks } from "./sprint-plan-model";
 import { userFacingMessage } from "../../../lib/user-facing-error";
 
@@ -182,6 +183,7 @@ function SprintBoardContent({ courseId, courseTitle, api: suppliedApi }: Props) 
             <Link className={ui.quiet} href="/opening/settings/planning">时间与完整学习安排</Link>
           </div> : null}
         </section>
+        <SprintPaperReviewPanel courseId={courseId} />
       </> : null}
     </div>
   </section>;
