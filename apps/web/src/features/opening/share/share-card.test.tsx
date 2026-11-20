@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
+import { getShareablePitfallById } from "@aistudy/domain";
 import { resolveImages } from "next/dist/lib/metadata/resolvers/resolve-opengraph";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, assert, beforeEach, describe, expect, it, vi } from "vitest";
 
 const navMocks = vi.hoisted(() => ({
   notFound: vi.fn(() => {
@@ -40,7 +41,7 @@ import SharePitfallNotFound from "../../../app/s/[token]/not-found";
 import OpenGraphImage, { dynamic as ogDynamic } from "../../../app/s/[token]/opengraph-image";
 import SharePitfallPage, { generateMetadata } from "../../../app/s/[token]/page";
 import { InvalidShareCard, PitfallShareCard } from "./share-card";
-import { signPitfallShareToken } from "./token-codec";
+import { mintPitfallShareTokenById, signPitfallShareToken } from "./token-codec";
 
 const TEST_SECRET = "share-ui-test-secret-0123456789abcdef0123";
 const sampleCard = {
@@ -150,6 +151,18 @@ describe("PitfallShareCard, /s/[token] page, and opengraph-image", () => {
     }
     expect(clickSpy).toHaveBeenCalledOnce();
     expect(host.textContent).toContain("已生成 SVG 海报");
+  });
+
+  it("renders the complete TCP recovery rule from a catalog-minted share token", async () => {
+    const pitfallId = "408-cn-tcp-congestion-ssthresh";
+    const entry = getShareablePitfallById(pitfallId);
+    assert.isNotNull(entry);
+    const { token } = mintPitfallShareTokenById({ pitfallId });
+    const page = await SharePitfallPage({ params: Promise.resolve({ token }) });
+    await act(async () => root.render(page));
+
+    expect(host.textContent).toContain(entry.trapSummary);
+    expect(host.textContent).toContain(entry.takeawayRule);
   });
 
   it("hides cohort badge when cohortSampleSize < 30 even if rate is passed directly", async () => {

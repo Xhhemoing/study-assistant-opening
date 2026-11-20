@@ -35,6 +35,15 @@ describe("authoritative shareable pitfall catalog", () => {
     }
   });
 
+  it("distinguishes the temporary fast recovery window from the 408 round-based window", () => {
+    const tcp = getShareablePitfallById("408-cn-tcp-congestion-ssthresh");
+    expect(tcp?.trapSummary).toContain("第 3 个重复 ACK");
+    expect(tcp?.trapSummary).toContain("ssthresh = max(FlightSize / 2, 2 × SMSS)");
+    expect(tcp?.takeawayRule).toMatch(/快恢复.*cwnd = ssthresh \+ 3 × SMSS/);
+    expect(tcp?.takeawayRule).toMatch(/确认新数据后.*cwnd 回落到 ssthresh，进入拥塞避免/);
+    expect(tcp?.takeawayRule).toMatch(/408.*RTT.*FlightSize = cwnd.*从新门限起每轮增加 1 SMSS/);
+  });
+
   it("resolves known IDs and rejects unknown or prototype-property keys", () => {
     const mathEntry = getShareablePitfallById("math-calculus-lhopital-form");
     expect(mathEntry?.subjectLabel).toBe("高等数学");
