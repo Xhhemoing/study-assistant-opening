@@ -17,8 +17,10 @@ const dayMap: Record<string, number> = {
 const weekRange = /\d+(?:\s*[-－至]\s*\d+)?/.source;
 const weekListPattern = `(${weekRange}(?:\\s*[,，、]\\s*${weekRange})*)`;
 const paritySuffix = /(?:\s*[(（]?([单双])周?[)）]?)?/.source;
-const inlineWeeks = new RegExp(`第?\\s*${weekListPattern}\\s*([单双])?周(?!次|[一二三四五六日天])${paritySuffix}`);
+const inlineWeeks = new RegExp(`第?\\s*${weekListPattern}\\s*([单双])?周(?!次|[一二三四五六日天0-9])${paritySuffix}`);
 const labeledWeeks = new RegExp(`周次\\s*[:：]?\\s*第?${weekListPattern}\\s*([单双])?周?${paritySuffix}`);
+// A bare 周1 can name a weekday. Require a range or list after the prefix.
+const leadingWeeks = new RegExp(`周\\s*(?=\\d+\\s*[-－至,，、]\\s*\\d)${weekListPattern}\\s*([单双])?周?${paritySuffix}`);
 const columnWeeks = new RegExp(`^第?\\s*${weekListPattern}\\s*([单双])?周?${paritySuffix}$`);
 const periodPattern = /([0-9]+)\s*[-－至]\s*([0-9]+)\s*节/;
 
@@ -37,8 +39,11 @@ function address(row: number, column: number): string {
   return `${result}${row + 1}`;
 }
 
-function weeks(value: string, column = false): number[] | undefined {
-  const match = value.match(labeledWeeks) ?? value.match(column ? columnWeeks : inlineWeeks);
+function weekAnnotation(value: string, column = false) {
+  return value.match(labeledWeeks) ?? value.match(leadingWeeks) ?? value.match(column ? columnWeeks : inlineWeeks);
+}
+
+function weeks(match: RegExpMatchArray | null): number[] | undefined {
   if (!match) return undefined;
   const parity = match[2] ?? match[3];
   const result = new Set<number>();
@@ -104,12 +109,14 @@ export function parseTimetableSheets(sheets: TimetableSheet[]): ParsedTimetable 
         if (courseColumn >= 0 && c !== courseColumn) continue;
         const lines = value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
         for (const line of lines) {
+          const annotation = weekAnnotation(line.replace(periodPattern, ""));
           const courseName = line
             .replace(/\s*[(（][^)）]*(?:周|节)[^)）]*[)）]/, "")
+            .replace(annotation?.[0].trim() ?? "", "")
             .replace(/\s+[0-9]+\s*[-－至]\s*[0-9]+\s*节\s*$/, "")
             .trim();
           const weekCell = weekColumn >= 0 ? text(rows[r]![weekColumn]!) : "";
-          const weekList = weekCell ? weeks(weekCell, true) : weeks(line);
+          const weekList = weeks(weekCell ? weekAnnotation(weekCell, true) : annotation);
           const weekday = day(dayColumn >= 0 ? text(rows[r]![dayColumn]!) : header[c]!);
           const range = period(line) ?? (periodColumn >= 0 ? period(text(rows[r]![periodColumn]!)) : undefined);
           if (!weekList || weekday === undefined || !range) {

@@ -97,7 +97,7 @@ export function createExamSprintClient(options: { fetcher?: typeof fetch; keyFac
       pending = null;
       const message = describeError(error);
       publish({ error: message, uncertain: false });
-      if (recovering && error.status === 409) {
+      if (recovering && (error.status === 404 || error.status === 409)) {
         // Another tab can finish the run between the recovery read and the replay.
         try {
           const latest = await readState();

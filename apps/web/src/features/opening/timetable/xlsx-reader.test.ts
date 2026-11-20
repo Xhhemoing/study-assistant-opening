@@ -69,7 +69,19 @@ it.each([
   expect(result.sessions).toMatchObject([{ courseName: name, weeks: expected }]);
 });
 
-it.each(["物理2", "英语4", "高数1 1-2节"])("warns about missing weeks for %s", title => {
+it.each([
+  ["线性代数(周1-8) 1-2节", "线性代数", [1, 2, 3, 4, 5, 6, 7, 8], 1, 2],
+  ["物理2（1-16周） 3-4节", "物理2", Array.from({ length: 16 }, (_, i) => i + 1), 3, 4],
+  ["物理2 1-4周 3-4节", "物理2", [1, 2, 3, 4], 3, 4],
+  ["物理2 周1-16单 3-4节", "物理2", [1, 3, 5, 7, 9, 11, 13, 15], 3, 4],
+  ["英语（周1、3、5） 1-2节", "英语", [1, 3, 5], 1, 2],
+] as const)("separates the course, weeks and periods in %s", (title, courseName, weeks, startPeriod, endPeriod) => {
+  const result = parseTimetableSheets([{ sheet: "课表", data: [["课程", "星期"], [title, "周一"]] }]);
+  expect(result.sessions).toMatchObject([{ courseName, weeks, weekday: 1, startPeriod, endPeriod }]);
+  expect(result.warnings).toEqual([]);
+});
+
+it.each(["物理2", "英语4", "高数1 1-2节", "物理2 周三", "物理2 周一", "物理2 周1"])("warns about missing weeks for %s", title => {
   const result = parseTimetableSheets([{ sheet: "课表", data: [
     ["课程", "星期", "节次"], [title, "周三", "3-4节"],
   ] }]);

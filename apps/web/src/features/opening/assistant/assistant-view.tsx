@@ -731,13 +731,16 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
 
   useEffect(() => {
     const guard = gradedGuard.current;
-    const id = guard.receipt?.conversationId;
+    const id = guard.receipt?.phase === "submitted" ? guard.receipt.conversationId : null;
     if (!id || !guard.available) {
       if (guard.receipt && !guard.available) {
         setTurns([]); setResume(null); setConversationId(null); setActiveJobId(null); setPending(false);
       }
       return;
     }
+    // The local submission refreshes after acknowledgement. Reading an empty
+    // conversation during dispatch would clear its pending state and hide Stop.
+    if (savedSubmission.current?.dispatched) return;
     let active = true;
     void refreshConversation(id).then(ok => {
       if (active && ok) setConversationId(id);
@@ -745,7 +748,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
       if (active) { setTurns([]); setResume(null); setConversationId(null); setActiveJobId(null); setPending(false); }
     });
     return () => { active = false; conversationReader.cancel(); };
-  }, [gradedExplanation.receipt?.conversationId, gradedExplanation.available, reload, refreshConversation, setConversationId, conversationReader]);
+  }, [gradedExplanation.receipt?.phase, gradedExplanation.receipt?.conversationId, gradedExplanation.available, reload, refreshConversation, setConversationId, conversationReader]);
 
   useEffect(() => {
     if (!activeJobId || !conversationId) return;
@@ -1046,18 +1049,14 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
         abortRef.current = null;
         return { accepted: true };
       }
+      const id = options?.gradedAttempt
+        ? await gradedExplanation.prepareConversation(input.clientKey, ensureConversation, () => saved.stopRequested)
+        : await ensureConversation();
+      if (!id || saved.stopRequested) return { accepted: false };
       if (options?.gradedAttempt) {
-        await gradedExplanation.authorize();
-        if (saved.stopRequested) return { accepted: false };
-        gradedExplanation.begin(input.clientKey);
+        gradedExplanation.markStarted(id, input.clientKey);
+        setConversationId(id);
       }
-      const id = await ensureConversation();
-      if (options?.gradedAttempt) {
-        await gradedExplanation.authorize();
-        gradedExplanation.bindConversation(id);
-      }
-      if (saved.stopRequested) return { accepted: false };
-      if (options?.gradedAttempt) gradedExplanation.markStarted();
       saved.dispatched = true;
       const submitted = await api.submitTurn({
         ...(input.purpose ? { purpose: input.purpose } : {}),
@@ -1180,12 +1179,13 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
   const gradedExplainKey = useRef<string | null>(null);
   const gradedExplainBusy = useRef(false);
   const [gradedExplainSubmitted, setGradedExplainSubmitted] = useState(false);
+  const gradedReceiptBlocksSend = Boolean(gradedExplanation.receipt && gradedExplanation.receipt.phase !== "ready");
   async function explainGradedAttempt() {
     if (!gradedExplanation.available || pending || loading || recoveryRequired || interactionDisabled
-      || waitingForUnknown || unknownJob || gradedExplanation.receipt || gradedExplainBusy.current || gradedExplainSubmitted || submissionLock.current) return;
+      || waitingForUnknown || unknownJob || gradedReceiptBlocksSend || gradedExplainBusy.current || gradedExplainSubmitted || submissionLock.current) return;
     gradedExplainBusy.current = true;
     // Keep the original key after every uncertain response; terminal retries use the existing reply controls.
-    gradedExplainKey.current ??= nextClientKey({ clientKey: null, fingerprint: null, nextFingerprint: "graded-attempt-explain" }).clientKey;
+    gradedExplainKey.current = gradedExplanation.receipt?.clientKey ?? gradedExplainKey.current ?? nextClientKey({ clientKey: null, fingerprint: null, nextFingerprint: "graded-attempt-explain" }).clientKey;
     try {
       await gradedExplanation.withOperationLock(async () => {
         const result = await handleSubmit({ text: GRADED_ATTEMPT_EXPLANATION_TEXT, mode: "explain", purpose: "answer",
@@ -1313,9 +1313,9 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
       ) : null}
 
       {gradedExplanation.available ? <div className="mx-5 mb-2"><button type="button" className={secondaryButtonClass}
-        disabled={pending || loading || recoveryRequired || interactionDisabled || Boolean(unknownJob) || Boolean(gradedExplanation.receipt) || gradedExplainSubmitted}
+        disabled={pending || loading || recoveryRequired || interactionDisabled || Boolean(unknownJob) || gradedReceiptBlocksSend || gradedExplainSubmitted}
         onClick={() => void explainGradedAttempt()}>讲解这次作答</button>
-        {gradedExplanation.receipt?.conversationId ? <button type="button" className={secondaryButtonClass}
+        {gradedExplanation.receipt?.phase === "submitted" ? <button type="button" className={secondaryButtonClass}
           disabled={pending || loading || interactionDisabled} onClick={() => setReload(value => value + 1)}>重新读取原讲解（不调用 AI）</button> : null}
       </div> : null}
       {gradedExplanation.recoveryMessage ? <p role="status" className="mx-5 mb-2 text-xs text-warn">{gradedExplanation.recoveryMessage}</p> : null}

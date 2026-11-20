@@ -122,9 +122,10 @@ export function ExamSprintView({ courseId, embedded = false, onCourseBound }: { 
     if (!focusSprintTarget(document, returnNavigation.id)) focusSprintTarget(document, `sprint-tab-${tab}`);
     setReturnNavigation(null);
   }, [tab, returnNavigation]);
-  const acceptLesson = (request: LessonRequest, result: ExamSprintOverview) => {
-    const content = confirmedSprintLessonRequest(request, pendingLesson.current, result, client.getSnapshot().overview);
-    if (pendingLesson.current !== request) return;
+  const settleLesson = (request: LessonRequest, result: ExamSprintOverview | null) => {
+    const current = client.getSnapshot();
+    if (pendingLesson.current !== request || current.uncertain) return;
+    const content = result && confirmedSprintLessonRequest(request, pendingLesson.current, result, current.overview);
     pendingLesson.current = null;
     if (!content) return;
     setLessonNavigation({ ...request, exposureId: content.exposureId, open: true });
@@ -138,13 +139,12 @@ export function ExamSprintView({ courseId, embedded = false, onCourseBound }: { 
     pendingLesson.current = request;
     setLessonError(null);
     const result = await client.send(intent);
-    if (result) acceptLesson(request, result);
-    else if (!client.getSnapshot().uncertain && pendingLesson.current === request) pendingLesson.current = null;
+    settleLesson(request, result);
   };
   const recover = async () => {
     const request = pendingLesson.current;
     const result = await client.recover();
-    if (request && result) acceptLesson(request, result);
+    if (request) settleLesson(request, result);
   };
   const selectTab = (next: Tab) => {
     pendingLesson.current = null;

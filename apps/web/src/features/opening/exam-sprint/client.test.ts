@@ -230,6 +230,24 @@ describe("exam sprint client recovery", () => {
     expect(JSON.parse(String(fetcher.mock.calls[3]?.[1]?.body))).toEqual({ ...intent, clientKey: key });
   });
 
+  it("refreshes the replacement run after a stale finish replay returns 404", async () => {
+    const replacement = activeLessonOverview();
+    replacement.activeRun!.id = "run-2";
+    replacement.currentAttempt!.runId = "run-2";
+    const fetcher = vi.fn<Fetcher>()
+      .mockRejectedValueOnce(new Error("lost response"))
+      .mockResolvedValueOnce(Response.json(activeLessonOverview()))
+      .mockResolvedValueOnce(Response.json({ error: { code: "SPRINT_RUN_NOT_FOUND", message: "本轮已更换" } }, { status: 404 }))
+      .mockResolvedValueOnce(Response.json(replacement));
+    const client = createExamSprintClient({ fetcher, keyFactory: () => key });
+    await client.send({ action: "finish", runId: "run-1" });
+    expect(await client.recover()).toBeNull();
+    expect(client.getSnapshot()).toMatchObject({ uncertain: false, busy: false, error: "本轮已更换", overview: { activeRun: { id: "run-2" } } });
+    await client.recover();
+    expect(fetcher.mock.calls.map(([, init]) => init?.method)).toEqual(["POST", "GET", "POST", "GET"]);
+    expect(fetcher.mock.calls[2]![1]?.body).toBe(fetcher.mock.calls[0]![1]?.body);
+  });
+
   it("keeps a read-side 409 recoverable but never replays a rejected write if the final read fails", async () => {
     const fetcher = vi.fn<Fetcher>()
       .mockRejectedValueOnce(new TypeError("disconnected"))
