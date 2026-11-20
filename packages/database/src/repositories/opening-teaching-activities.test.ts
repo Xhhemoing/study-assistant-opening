@@ -400,6 +400,35 @@ describe("create + compile enqueue", () => {
     expect(replay.generateStatus).toBe("needs_check");
     expect(mutations(writes)).toEqual([]);
   });
+
+  it("locks workspaces FOR SHARE via lockLearningOwner without re-entering opening_workspace_history_revisions", async () => {
+    const queries: string[] = [];
+    const { sql } = db((query) => {
+      queries.push(query);
+      if (query.includes("FROM workspaces")) return [{ id: workspaceId }];
+      if (query.includes("INSERT INTO opening_teaching_activities")) return [activityRow()];
+      return [];
+    });
+    await createOpeningTeachingActivitiesRepository(sql).create(scope, input);
+    const workspaceShareIdx = queries.findIndex((q) => q.includes("FROM workspaces") && q.includes("FOR SHARE"));
+    const activityLockIdx = queries.findIndex(
+      (q) => q.includes("FROM opening_teaching_activities") && q.includes("FOR UPDATE"),
+    );
+    expect(workspaceShareIdx).toBeGreaterThanOrEqual(0);
+    expect(activityLockIdx).toBeGreaterThan(workspaceShareIdx);
+    expect(queries.some((q) => q.includes("opening_workspace_history_revisions"))).toBe(false);
+
+    const missingQueries: string[] = [];
+    const missingDb = db((query) => {
+      missingQueries.push(query);
+      return [];
+    });
+    await expect(createOpeningTeachingActivitiesRepository(missingDb.sql).create(scope, input)).rejects.toMatchObject({
+      code: "NOT_FOUND",
+      message: "workspace not found",
+    });
+    expect(missingQueries.some((q) => q.includes("opening_workspace_history_revisions"))).toBe(false);
+  });
 });
 
 describe("requestCompile", () => {

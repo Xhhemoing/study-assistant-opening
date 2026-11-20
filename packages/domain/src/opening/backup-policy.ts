@@ -4,6 +4,7 @@ import { validateBackupRetestProtocols } from "./backup-retest-protocol";
 import { validateOpeningBackupCards } from "./backup-cards";
 import { validateBackupCourseMilestones } from "./backup-course-milestones";
 import { validateBackupPlanControl } from "./backup-plan-control";
+import { validateBackupDayAdjustment } from "./backup-day-adjustment";
 import { validateBackupPlanFeedback } from "./backup-plan-feedback";
 import { validateBackupSystemQuery } from "./backup-system-query";
 import { LEARNING_STATE_TABLES, validateBackupLearningState } from "./backup-learning-state";
@@ -379,6 +380,7 @@ export function validateOpeningRestore(
   validateBackupRetestProtocols(tables, errors);
   validateBackupPlanFeedback(tables, errors);
   validateBackupPlanControl(tables, errors);
+  validateBackupDayAdjustment(tables, errors);
   validateBackupCourseMilestones(tables, errors);
   validateBackupLearningGoals(tables, errors);
   validateBackupLearningState(tables, errors);

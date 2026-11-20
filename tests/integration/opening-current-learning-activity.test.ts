@@ -1,7 +1,24 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { createOpeningPlansRepository, createOpeningSpanSessionRepository, createOpeningTeachingActivitiesRepository, createOpeningLearningRepository, readOpeningCurrentLearningActivity, readOpeningCurrentLearningRecovery, readOpeningLearningAgenda } from "@aistudy/database";
-import { taskItemSchema, teachingActivitySchema, teachingActivityCreateInputSchema, type TeachingActivity } from "@aistudy/contracts";
+import {
+  createLibraryRepository,
+  createOpeningLearningRepository,
+  createOpeningPlansRepository,
+  createOpeningSpanSessionRepository,
+  createOpeningTeachingActivitiesRepository,
+  createOpeningWritingWorkspaceRepository,
+  readOpeningCurrentLearningActivity,
+  readOpeningCurrentLearningRecovery,
+  readOpeningLearningAgenda,
+  readOpeningWorkspaceActivityRecovery,
+} from "@aistudy/database";
+import {
+  WRITING_META_PROPERTY_KEY,
+  taskItemSchema,
+  teachingActivitySchema,
+  teachingActivityCreateInputSchema,
+  type TeachingActivity,
+} from "@aistudy/contracts";
 import { DEFAULT_STUDY_SESSION_INTENT, SPAN_REQUIREMENT_KEY, SPAN_SKILL_LABEL } from "@aistudy/domain";
 import { createSpanLessonSessionService } from "../../apps/web/src/features/opening/teaching/span/lesson-session-service";
 import { openCourseStudy } from "../../apps/web/src/features/opening/courses/course-study-entry";
@@ -335,5 +352,317 @@ it("excludes card-session keys, cardReviewSession checkpoints, and legacy-course
   expect(currentCourseActivity(rows, courseId)?.id).toBe(usable);
   expect(pickCurrentTeachingActivity(rows)?.id).toBe(usable);
   expect(courseStudyActivities(rows, courseId).map(row => row.id)).toEqual([usable]);
+  expect(await readFootprint()).toEqual(before);
+});
+
+it("filters unreadable writing activities across explicit and implicit recovery, course selectors, and teaching activity get/list with zero write side effects", async () => {
+  const usableCourseActivity = await activity({ at: "2026-11-01T00:00:00Z" });
+  const writing = createOpeningWritingWorkspaceRepository(f.sql);
+  const teaching = createOpeningTeachingActivitiesRepository(f.sql);
+  const library = createLibraryRepository(f.sql);
+
+  const secretLabel = `B稿-待隐藏-${randomUUID().slice(0, 8)}`;
+  const secretSentence = `SECRET_WRITING_RECOVERY_SENTENCE_${randomUUID()}`;
+  const secretFeedback = `SECRET_WRITING_RECOVERY_FEEDBACK_${randomUUID()}`;
+
+  const started = await writing.start(f.scope, {
+    clientKey: `writing-recovery-filter-${randomUUID()}`,
+    title: "课程内写作演练",
+    initialText: secretSentence,
+    variantLabel: "初稿",
+    courseId,
+  });
+  const writingActivityId = started.activityId!;
+  const docInit = started.currentDocumentId;
+
+  const derivedA = await writing.command(f.scope, docInit, {
+    action: "derive_variant",
+    expectedRevisionNumber: 1,
+    variantLabel: "A 稿",
+    activityId: writingActivityId,
+  });
+  const docA = derivedA.workspace.currentDocumentId;
+
+  const derivedB = await writing.command(f.scope, docInit, {
+    action: "derive_variant",
+    expectedRevisionNumber: 1,
+    variantLabel: secretLabel,
+    activityId: writingActivityId,
+  });
+  const docB = derivedB.workspace.currentDocumentId;
+  const blockB = derivedB.workspace.currentVariant.focusBlockId!;
+
+  await writing.command(f.scope, docB, {
+    action: "record_feedback",
+    expectedRevisionNumber: 1,
+    targetBlockId: blockB,
+    dimension: "argument",
+    kind: "feedback",
+    suggestionText: secretFeedback,
+  });
+  await writing.command(f.scope, docB, {
+    action: "save_checkpoint",
+    activityId: writingActivityId,
+    focusBlockId: blockB,
+    keptAsPreferred: true,
+  });
+
+  // Make the writing activity strictly newer than usableCourseActivity so implicit recovery would select it when readable
+  await f.sql`UPDATE opening_teaching_activities SET updated_at='2026-11-05T00:00:00Z' WHERE id=${writingActivityId}`;
+  expect(await readOpeningWorkspaceActivityRecovery(f.sql, f.scope)).toMatchObject({
+    kind: "writing",
+    activityId: writingActivityId,
+    courseId,
+    documentId: docB,
+    variantLabel: secretLabel,
+  });
+
+  // Delete pinned target B; surviving A remains readable on its own document entry
+  await library.softDeleteDocument({ workspaceId: f.scope.workspaceId, documentId: docB });
+  const before = await readFootprint();
+
+  // Explicit target references must fail closed (null / NOT_FOUND) and never substitute usableCourseActivity or docA
+  expect(
+    await readOpeningWorkspaceActivityRecovery(f.sql, f.scope, { activityId: writingActivityId }),
+  ).toBeNull();
+  expect(
+    await readOpeningCurrentLearningActivity(f.sql, f.scope, courseId, { activityId: writingActivityId }),
+  ).toBeNull();
+  expect(await teaching.get(f.scope, writingActivityId)).toBeNull();
+  await expect(teaching.assertOwnedActivity(f.scope, writingActivityId)).rejects.toMatchObject({
+    code: "NOT_FOUND",
+  });
+
+  // Implicit recovery & listing omit the unreadable writing activity and fall back to usableCourseActivity
+  const implicitWorkspaceRecovery = await readOpeningWorkspaceActivityRecovery(f.sql, f.scope);
+  expect(implicitWorkspaceRecovery).toEqual({
+    kind: "course",
+    activityId: usableCourseActivity,
+    sessionId: null,
+    courseId,
+  });
+  expect(await readOpeningCurrentLearningActivity(f.sql, f.scope, courseId)).toEqual({
+    activityId: usableCourseActivity,
+    sessionId: null,
+    courseId,
+  });
+  expect(await readOpeningCurrentLearningRecovery(f.sql, f.scope)).toEqual({
+    activityId: usableCourseActivity,
+    sessionId: null,
+    courseId,
+  });
+
+  const listed = (await teaching.listByOwner(f.scope)).map(row => teachingActivitySchema.parse(row));
+  expect(listed.map(row => row.id)).toEqual([usableCourseActivity]);
+  expect(currentCourseActivity(listed, courseId)?.id).toBe(usableCourseActivity);
+  expect(pickCurrentTeachingActivity(listed)?.id).toBe(usableCourseActivity);
+  expect(courseStudyActivities(listed, courseId).map(row => row.id)).toEqual([usableCourseActivity]);
+
+  const serialized = JSON.stringify({ implicitWorkspaceRecovery, listed });
+  for (const forbidden of [writingActivityId, docB, blockB, secretLabel, secretSentence, secretFeedback]) {
+    expect(serialized).not.toContain(forbidden);
+  }
+
+  // Surviving A 稿 still opens via its own document entry
+  const viewA = await writing.getView(f.scope, docA);
+  expect(viewA?.currentDocumentId).toBe(docA);
+  expect(await readFootprint()).toEqual(before);
+});
+
+it("excludes malformed writing checkpoints and partial manuscript metadata across get, listByOwner, and current/Today recovery while keeping ordinary writing-workgroup clientKey activities readable", async () => {
+  const writing = createOpeningWritingWorkspaceRepository(f.sql);
+  const teaching = createOpeningTeachingActivitiesRepository(f.sql);
+
+  // GPT #2: Ordinary teaching activity created with clientKey = "writing-workgroup:..." (non-writing protocol, no writingWorkspace checkpoint)
+  const ordinaryPrefixed = await teaching.create(f.scope, {
+    clientKey: `writing-workgroup:${randomUUID()}`,
+    courseId,
+    intentKind: "topic",
+    intentSummary: "普通主题学习（携带 writing-workgroup 前缀键）",
+    createIntent: { intentKind: "topic" },
+  });
+  await f.sql`UPDATE opening_teaching_activities SET updated_at = '2026-11-01T00:00:00Z' WHERE id = ${ordinaryPrefixed.id}`;
+
+  // GPT #1(a): Writing activity whose checkpoint retains valid activeDocumentId & matching workGroupId, but omits savedRevisionNumber
+  const missingRevWorkspace = await writing.start(f.scope, {
+    clientKey: `writing-malformed-ckpt-${randomUUID()}`,
+    title: "缺版本号的写作活动",
+    initialText: "第一段内容。",
+    variantLabel: "初稿",
+    courseId,
+  });
+  const missingRevActivityId = missingRevWorkspace.activityId!;
+  await f.sql`
+    UPDATE opening_teaching_activities
+    SET checkpoint_json = jsonb_set(
+          checkpoint_json,
+          '{writingWorkspace}',
+          (checkpoint_json->'writingWorkspace') - 'savedRevisionNumber'
+        ),
+        updated_at = '2026-11-06T00:00:00Z'
+    WHERE id = ${missingRevActivityId}
+  `;
+
+  // GPT #1(b): Writing activity with a valid checkpoint, but manuscript metadata in library_properties retains only { workGroupId }
+  const partialMetaWorkspace = await writing.start(f.scope, {
+    clientKey: `writing-malformed-meta-${randomUUID()}`,
+    title: "残缺元数据的写作活动",
+    initialText: "第二篇初稿。",
+    variantLabel: "初稿",
+    courseId,
+  });
+  const partialMetaActivityId = partialMetaWorkspace.activityId!;
+  const partialMetaDocId = partialMetaWorkspace.currentDocumentId;
+  await f.sql`
+    UPDATE library_properties
+    SET value = ${f.sql.json({ workGroupId: partialMetaWorkspace.workGroupId })}
+    WHERE workspace_id = ${f.scope.workspaceId}
+      AND subject_type = 'document'
+      AND subject_id = ${partialMetaDocId}
+      AND key = ${WRITING_META_PROPERTY_KEY}
+  `;
+  await f.sql`
+    UPDATE opening_teaching_activities
+    SET updated_at = '2026-11-05T00:00:00Z'
+    WHERE id = ${partialMetaActivityId}
+  `;
+
+  // P1 #3(a): Writing activity with bad updatedAt timestamp passes SQL jsonb_typeof='string' but must be blocked by TS Zod gate
+  const badTimestampWorkspace = await writing.start(f.scope, {
+    clientKey: `writing-bad-ts-${randomUUID()}`,
+    title: "坏时间戳的写作活动",
+    initialText: "第三篇初稿。",
+    variantLabel: "初稿",
+    courseId,
+  });
+  const badTimestampActivityId = badTimestampWorkspace.activityId!;
+  await f.sql`
+    UPDATE opening_teaching_activities
+    SET checkpoint_json = jsonb_set(
+          checkpoint_json,
+          '{writingWorkspace,updatedAt}',
+          '"bad timestamp"'::jsonb
+        ),
+        updated_at = '2026-11-04T00:00:00Z'
+    WHERE id = ${badTimestampActivityId}
+  `;
+
+  // P1 #3(b): Writing activity with malformed assistanceRecords: [{}] passes SQL jsonb_typeof='array' but must be blocked by TS Zod gate
+  const badAssistWorkspace = await writing.start(f.scope, {
+    clientKey: `writing-bad-assist-${randomUUID()}`,
+    title: "畸形辅助记录的写作活动",
+    initialText: "第四篇初稿。",
+    variantLabel: "初稿",
+    courseId,
+  });
+  const badAssistActivityId = badAssistWorkspace.activityId!;
+  await f.sql`
+    UPDATE library_properties
+    SET value = jsonb_set(value, '{assistanceRecords}', '[{}]'::jsonb)
+    WHERE workspace_id = ${f.scope.workspaceId}
+      AND subject_type = 'document'
+      AND subject_id = ${badAssistWorkspace.currentDocumentId}
+      AND key = ${WRITING_META_PROPERTY_KEY}
+  `;
+  await f.sql`
+    UPDATE opening_teaching_activities
+    SET updated_at = '2026-11-03T00:00:00Z'
+    WHERE id = ${badAssistActivityId}
+  `;
+
+  // P1 #3(c): Valid writing activity whose JSONB savedRevisionNumber is 1.0 stays readable (SQL regex aligns with Zod integer)
+  const decimalZeroWorkspace = await writing.start(f.scope, {
+    clientKey: `writing-decimal-zero-${randomUUID()}`,
+    title: "JSONB小数零版本号稿件",
+    initialText: "第五篇初稿。",
+    variantLabel: "初稿",
+    courseId,
+  });
+  const decimalZeroActivityId = decimalZeroWorkspace.activityId!;
+  await f.sql`
+    UPDATE opening_teaching_activities
+    SET checkpoint_json = jsonb_set(
+          checkpoint_json,
+          '{writingWorkspace,savedRevisionNumber}',
+          '1.0'::jsonb
+        ),
+        updated_at = '2026-10-31T00:00:00Z'
+    WHERE id = ${decimalZeroActivityId}
+  `;
+
+  const before = await readFootprint();
+
+  // Explicit lookups reject all malformed writing rows (missing rev, partial meta, bad timestamp, malformed assistanceRecords)
+  for (const malformedId of [
+    missingRevActivityId,
+    partialMetaActivityId,
+    badTimestampActivityId,
+    badAssistActivityId,
+  ]) {
+    expect(await teaching.get(f.scope, malformedId)).toBeNull();
+    await expect(teaching.assertOwnedActivity(f.scope, malformedId)).rejects.toMatchObject({
+      code: "NOT_FOUND",
+    });
+    expect(
+      await readOpeningCurrentLearningActivity(f.sql, f.scope, courseId, { activityId: malformedId }),
+    ).toBeNull();
+    expect(
+      await readOpeningWorkspaceActivityRecovery(f.sql, f.scope, { activityId: malformedId }),
+    ).toBeNull();
+  }
+
+  // Valid writing activity with JSONB 1.0 remains readable across get, current activity, and workspace recovery
+  expect((await teaching.get(f.scope, decimalZeroActivityId))?.id).toBe(decimalZeroActivityId);
+  expect(
+    await readOpeningCurrentLearningActivity(f.sql, f.scope, courseId, { activityId: decimalZeroActivityId }),
+  ).toEqual({
+    activityId: decimalZeroActivityId,
+    sessionId: null,
+    courseId,
+  });
+  expect(
+    await readOpeningWorkspaceActivityRecovery(f.sql, f.scope, { activityId: decimalZeroActivityId }),
+  ).toMatchObject({
+    kind: "writing",
+    activityId: decimalZeroActivityId,
+    documentId: decimalZeroWorkspace.currentDocumentId,
+    savedRevisionNumber: 1,
+  });
+
+  // Ordinary activity carrying clientKey = "writing-workgroup:..." remains normally readable across get, listByOwner, and current/Today recovery
+  const fetchedOrdinary = await teaching.get(f.scope, ordinaryPrefixed.id);
+  expect(fetchedOrdinary?.id).toBe(ordinaryPrefixed.id);
+  expect(fetchedOrdinary?.clientKey).toBe(ordinaryPrefixed.clientKey);
+
+  const listed = (await teaching.listByOwner(f.scope)).map(row => teachingActivitySchema.parse(row));
+  expect(listed.map(row => row.id)).toEqual([ordinaryPrefixed.id, decimalZeroActivityId]);
+  expect(currentCourseActivity(listed, courseId)?.id).toBe(ordinaryPrefixed.id);
+  expect(pickCurrentTeachingActivity(listed)?.id).toBe(ordinaryPrefixed.id);
+
+  // Implicit candidate selection skips all newer malformed writing activities and falls back to ordinaryPrefixed
+  expect(await readOpeningCurrentLearningActivity(f.sql, f.scope, courseId)).toEqual({
+    activityId: ordinaryPrefixed.id,
+    sessionId: null,
+    courseId,
+  });
+  expect(
+    await readOpeningCurrentLearningActivity(f.sql, f.scope, courseId, { activityId: ordinaryPrefixed.id }),
+  ).toEqual({
+    activityId: ordinaryPrefixed.id,
+    sessionId: null,
+    courseId,
+  });
+  expect(await readOpeningCurrentLearningRecovery(f.sql, f.scope)).toEqual({
+    activityId: ordinaryPrefixed.id,
+    sessionId: null,
+    courseId,
+  });
+  expect(await readOpeningWorkspaceActivityRecovery(f.sql, f.scope)).toEqual({
+    kind: "course",
+    activityId: ordinaryPrefixed.id,
+    sessionId: null,
+    courseId,
+  });
+
   expect(await readFootprint()).toEqual(before);
 });

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { calendarDateSchema, isoDateTimeSchema, uuidSchema } from "./foundation";
+import { calendarDateSchema, isoDateTimeSchema, ordinaryPlanClientKeySchema, uuidSchema } from "./foundation";
 import { plannedBlockSchema, planDraftSchema, timeBlockSchema } from "./planning";
 
 export const localReplanExplicitFreeSchema = z.array(timeBlockSchema).min(1).max(200).superRefine((blocks, ctx) => {
@@ -9,7 +9,7 @@ export const localReplanExplicitFreeSchema = z.array(timeBlockSchema).min(1).max
 export const localReplanInputSchema = z.object({
   date: calendarDateSchema,
   expectedAcceptedVersion: z.number().int().nonnegative(),
-  clientKey: z.string().min(8).max(200),
+  clientKey: ordinaryPlanClientKeySchema,
 }).strict();
 export const localReplanMetadataSchema = z.object({
   kind: z.literal("local_replan_v1"),

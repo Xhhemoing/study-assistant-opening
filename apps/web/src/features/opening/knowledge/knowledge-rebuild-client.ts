@@ -26,6 +26,17 @@ export class KnowledgeRebuildRequestError extends Error {
   }
 }
 
+export type KnowledgeReadOptions = {
+  signal?: AbortSignal;
+  jobId?: string;
+};
+
+function normalizeReadOptions(signalOrOptions?: AbortSignal | KnowledgeReadOptions): KnowledgeReadOptions {
+  if (!signalOrOptions) return {};
+  if ("aborted" in signalOrOptions) return { signal: signalOrOptions };
+  return signalOrOptions;
+}
+
 export function createKnowledgeRebuildClient(transport: typeof fetch = (input, init) => fetch(input, init)) {
   const fetchImpl = createSessionFetch(transport);
   async function request(path: string, init: RequestInit): Promise<unknown> {
@@ -39,8 +50,14 @@ export function createKnowledgeRebuildClient(transport: typeof fetch = (input, i
   }
   const knowledgePath = (courseId: string) => `/api/opening/courses/${encodeURIComponent(courseId)}/knowledge`;
   return {
-    async read(courseId: string, signal?: AbortSignal): Promise<CourseKnowledgeRecord> {
-      return parseOpeningResponse(knowledgeRecordSchema, await request(knowledgePath(courseId), { method: "GET", signal }));
+    async read(courseId: string, signalOrOptions?: AbortSignal | KnowledgeReadOptions): Promise<CourseKnowledgeRecord> {
+      const { signal, jobId } = normalizeReadOptions(signalOrOptions);
+      const params = new URLSearchParams({ syncDetails: "1" });
+      if (jobId) params.set("jobId", jobId);
+      return parseOpeningResponse(
+        knowledgeRecordSchema,
+        await request(`${knowledgePath(courseId)}?${params.toString()}`, { method: "GET", signal }),
+      );
     },
     async rebuild(courseId: string, clientKey: string, signal?: AbortSignal): Promise<KnowledgeRebuildReceipt> {
       return parseOpeningResponse(rebuildReceiptSchema, await request(`${knowledgePath(courseId)}/rebuild`, { method: "POST", body: JSON.stringify({ clientKey }), signal }));
@@ -49,3 +66,43 @@ export function createKnowledgeRebuildClient(transport: typeof fetch = (input, i
 }
 
 export type KnowledgeRebuildClient = ReturnType<typeof createKnowledgeRebuildClient>;
+
+export type KnowledgeRebuildTerminalOutcome = "failed" | "outcome_unknown" | "cancelled";
+export type CourseKnowledgeSyncOutcome = "succeeded" | KnowledgeRebuildTerminalOutcome;
+
+type CourseKnowledgeSyncListener = (
+  record: CourseKnowledgeRecord,
+  outcome: CourseKnowledgeSyncOutcome,
+) => void;
+
+const courseKnowledgeSyncListeners = new Map<string, Set<CourseKnowledgeSyncListener>>();
+
+export function publishCourseKnowledgeSync(
+  courseId: string,
+  record: CourseKnowledgeRecord,
+  outcome: CourseKnowledgeSyncOutcome,
+): void {
+  const listeners = courseKnowledgeSyncListeners.get(courseId);
+  if (!listeners) return;
+  for (const listener of [...listeners]) {
+    listener(record, outcome);
+  }
+}
+
+export function subscribeCourseKnowledgeSync(
+  courseId: string,
+  listener: CourseKnowledgeSyncListener,
+): () => void {
+  let listeners = courseKnowledgeSyncListeners.get(courseId);
+  if (!listeners) {
+    listeners = new Set();
+    courseKnowledgeSyncListeners.set(courseId, listeners);
+  }
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+    if (listeners.size === 0) {
+      courseKnowledgeSyncListeners.delete(courseId);
+    }
+  };
+}

@@ -257,6 +257,20 @@ describe("writing-activity contracts", () => {
         activityId: uuid1,
       },
       {
+        action: "set_preferred_variant",
+        keptAsPreferred: true,
+        activityId: uuid1,
+      },
+      {
+        action: "set_preferred_variant",
+        keptAsPreferred: false,
+      },
+      {
+        action: "save_checkpoint",
+        activityId: uuid1,
+        focusBlockId: "block-3",
+      },
+      {
         action: "save_checkpoint",
         activityId: uuid1,
         focusBlockId: null,
@@ -276,8 +290,44 @@ describe("writing-activity contracts", () => {
       ...commands[2],
       replacementText: "Improved paragraph text.",
     });
-    expect(writingCommandInputSchema.parse(commands[3])).toEqual(commands[3]);
+    expect(barrelCommandInputSchema.parse(commands[3])).toEqual(commands[3]);
+    expect(writingCommandInputSchema.parse(commands[4])).toEqual(commands[4]);
+    expect(writingCommandInputSchema.parse(commands[5])).toEqual(commands[5]);
+    expect(writingCommandInputSchema.parse(commands[6])).toEqual(commands[6]);
 
+    expect(
+      writingCommandInputSchema.safeParse({
+        action: "set_preferred_variant",
+        keptAsPreferred: true,
+        focusBlockId: null,
+      }).success,
+    ).toBe(false);
+    expect(
+      writingCommandInputSchema.safeParse({
+        action: "set_preferred_variant",
+        keptAsPreferred: true,
+        expectedRevisionNumber: 1,
+      }).success,
+    ).toBe(false);
+    expect(
+      writingCommandInputSchema.safeParse({
+        action: "set_preferred_variant",
+        keptAsPreferred: true,
+        extra: "forbidden",
+      }).success,
+    ).toBe(false);
+    expect(
+      writingCommandInputSchema.safeParse({
+        action: "set_preferred_variant",
+        activityId: uuid1,
+      }).success,
+    ).toBe(false);
+    expect(
+      writingCommandInputSchema.safeParse({
+        action: "set_preferred_variant",
+        keptAsPreferred: "yes",
+      }).success,
+    ).toBe(false);
     expect(
       writingCommandInputSchema.safeParse({
         action: "derive_variant",

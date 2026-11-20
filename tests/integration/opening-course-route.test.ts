@@ -5,7 +5,7 @@ import * as courseBindingReader from "../../packages/database/src/repositories/o
 import { createOpeningTeachingActivitiesRepository } from "../../packages/database/src/repositories/opening-teaching-activities";
 import { normalizeOpeningImportedEvaluation } from "../../packages/database/src/repositories/opening-backup-evaluation";
 import { DEFAULT_OPENING_ADAPTIVE_PREFS } from "@aistudy/contracts";
-import { nextLearningStep, solveSpanProblem, SPAN_REQUIREMENT_KEY } from "@aistudy/domain";
+import { nextLearningStep, planDay, solveSpanProblem, SPAN_REQUIREMENT_KEY } from "@aistudy/domain";
 import { readOpeningSpanPrerequisiteRepair } from "../../packages/database/src/repositories/opening-span-prerequisite-runtime";
 import { createOpeningAdaptivePrefsRepository } from "../../packages/database/src/repositories/opening-adaptive-prefs";
 import { createSpanHintService } from "../../apps/web/src/features/opening/teaching/span/hint-service";
@@ -27,9 +27,9 @@ import { createOpeningLearningDecisionsRepository } from "../../packages/databas
 import * as decisionWriter from "../../packages/database/src/repositories/opening-learning-decisions";
 import { readOpeningLearnerState } from "../../packages/database/src/repositories/opening-learner-state-read";
 import { afterEach,beforeEach,expect,it,vi } from "vitest";
-import type { CourseRouteRequirementInput,CourseRouteActionResult,TeachingActivity } from "@aistudy/contracts";
+import type { CourseRouteRequirementInput,CourseRouteActionResult,TeachingActivity,TimeBlock } from "@aistudy/contracts";
 import { createOpeningLearningGoalRepository,createOpeningLearningRepository,createOpeningAiGradingRepository,createOpeningSourceChunksRepository,
-  createOpeningBudgetRepository,createOpeningPrivacyRepository,createOpeningTeachingContentRepository,createOpeningJobRepository,createWorkspacePreferencesRepository,createOpeningRetestActivityRepository,createOpeningTeachingHintRepository,createOpeningSpanSessionRepository } from "@aistudy/database";
+  createOpeningBudgetRepository,createOpeningPrivacyRepository,createOpeningTeachingContentRepository,createOpeningJobRepository,createWorkspacePreferencesRepository,createOpeningRetestActivityRepository,createOpeningTeachingHintRepository,createOpeningSpanSessionRepository,createOpeningPlansRepository,createOpeningPlanningSettingsRepository } from "@aistudy/database";
 import { createOpeningCourseRouteRetestRepository } from "../../packages/database/src/repositories/opening-course-route-retest";
 import { assertOpeningCourseRouteReady } from "../../packages/database/src/repositories/opening-course-route-origin";
 import { createOpeningCourseRouteVerificationRepository } from "../../packages/database/src/repositories/opening-course-route-verification";
@@ -38,6 +38,7 @@ import { validateBackupRetestProtocols } from "../../packages/domain/src/opening
 import { createOpeningAiGradingJobRepository } from "../../packages/database/src/repositories/opening-ai-grading-jobs";
 import { createOpeningCourseRouteRepository } from "../../packages/database/src/repositories/opening-course-route";
 import { createOpeningAttemptService } from "../../apps/web/src/features/opening/learning/attempt-service";
+import { createOpeningPlanService } from "../../apps/web/src/features/opening/planning/plan-service";
 import { createCourseRouteService } from "../../apps/web/src/features/opening/teaching/course-route-service";
 import { createCompileTeachingUnitHandler } from "../../apps/worker/src/jobs/compile-teaching-unit";
 import { createCompileTeachingUnitWorkerDeps } from "../../apps/worker/src/runtime/compile-teaching-unit-wiring";
@@ -1926,3 +1927,357 @@ it.each(['target_revision','prerequisite_revision','source','return_receipt'] as
   else await expect(x.service.start(f.scope,x.courseId,request)).rejects.toMatchObject({code:'CONFLICT'});
   expect(await closureAllWorkspaceRows()).toEqual(before);
 });
+
+async function seedScheduledDelayedRetestAtMonday() {
+  const x = await seed();
+  await createWorkspacePreferencesRepository(f.sql).setLearningPreferences(f.scope, {
+    assessmentEnabled: true,
+    retestSuggestionsEnabled: true,
+    automaticRemindersEnabled: false,
+  });
+  const baseline = ready(await x.start());
+  await compile(baseline.activity);
+  const answered = await answer(baseline.activity);
+  const baselineIso = "2026-10-12T19:00:00.000Z";
+  await f.sql`UPDATE opening_learning_attempts SET started_at=${baselineIso}, submitted_at=${baselineIso}
+    WHERE course_id=${x.courseId} AND workspace_id=${f.scope.workspaceId}`;
+  await f.sql`UPDATE opening_learning_observations
+    SET started_at=${baselineIso}, submitted_at=${baselineIso}, recorded_at=${baselineIso}, occurred_at=${baselineIso}
+    WHERE course_id=${x.courseId} AND workspace_id=${f.scope.workspaceId}`;
+  const retests = createOpeningCourseRouteRetestRepository(f.sql);
+  const snapshot = await x.repo.read(f.scope, x.courseId, baseline.activity.id);
+  const request = {
+    goalId: x.goal.id,
+    expectedGoalRevision: 1,
+    activityId: baseline.activity.id,
+    expectedPathVersion: snapshot.currentActivity!.pathVersion,
+    observationId: answered.observation.id,
+    clientKey: randomUUID(),
+    minutes: 25,
+  };
+  return { ...x, retests, request };
+}
+
+it.each(["new_row", "legacy_miswritten"] as const)(
+  "decouples delayed retest hard deadline from 72h earliest start across all three Counterexample 1 windows (%s)",
+  async (mode) => {
+    const x = await seedScheduledDelayedRetestAtMonday();
+    const receipt = await x.retests.schedule(f.scope, x.courseId, x.request);
+    const earliestAt = "2026-10-15T19:00:00.000Z";
+    const deadline14d = "2026-10-26T19:00:00.000Z";
+    const fridaySlotStart = "2026-10-16T19:15:00.000Z";
+    const fridaySlotEnd = "2026-10-16T19:40:00.000Z";
+    const friday1930 = "2026-10-16T19:30:00.000Z";
+
+    const [persistedTask] = await f.sql`SELECT not_before, due_at FROM opening_tasks WHERE id=${receipt.taskId}`;
+    const [persistedRetest] = await f.sql`SELECT not_before_at, recommended_at, deadline_at FROM opening_retest_activities WHERE id=${receipt.retestId}`;
+    expect(new Date(persistedTask!.not_before as Date).toISOString()).toBe(earliestAt);
+    expect(new Date(persistedTask!.due_at as Date).toISOString()).toBe(deadline14d);
+    expect(new Date(persistedRetest!.not_before_at as Date).toISOString()).toBe(earliestAt);
+    expect(new Date(persistedRetest!.recommended_at as Date).toISOString()).toBe(earliestAt);
+    expect(new Date(persistedRetest!.deadline_at as Date).toISOString()).toBe(deadline14d);
+
+    if (mode === "legacy_miswritten") {
+      // Exact pre-fix storage shape: due_at copied from 72h earliest start with immutable candidate receipt intact.
+      await f.sql`UPDATE opening_tasks SET due_at=not_before WHERE id=${receipt.taskId}`;
+    }
+
+    const fridayNow = new Date("2026-10-16T19:00:00.000Z");
+    const plans = createOpeningPlansRepository(f.sql, { now: () => fridayNow });
+    const fridayFree: TimeBlock[] = [{ start: fridaySlotStart, end: fridaySlotEnd, kind: "free" }];
+
+    // 1) Real 14-day deadline -> Friday 19:15-19:40 UTC schedules full 25m and accepts cleanly.
+    const tasks14d = await plans.listTasks(f.scope);
+    const retestTask = tasks14d.find((item) => item.id === receipt.taskId);
+    expect(retestTask).toMatchObject({
+      dueAt: deadline14d,
+      notBefore: earliestAt,
+      retest: { activityId: receipt.retestId, recommendedAt: earliestAt },
+    });
+    const planned14d = planDay(tasks14d, fridayFree, { planningNow: fridayNow.toISOString() });
+    expect(planned14d.blocks).toEqual([
+      expect.objectContaining({ taskId: receipt.taskId, start: fridaySlotStart, end: fridaySlotEnd }),
+    ]);
+    expect(planned14d.unscheduled).toEqual([]);
+
+    const draft14d = await plans.proposePlan(f.scope, {
+      date: "2026-10-16",
+      tasks: tasks14d,
+      free: fridayFree,
+      blocks: planned14d.blocks,
+      unscheduledTaskIds: planned14d.unscheduledTaskIds,
+      unscheduledReasons: planned14d.unscheduled,
+    });
+    const acceptKey = randomUUID();
+    const accepted = await plans.acceptPlan(f.scope, { draftId: draft14d.id, expectedBaseVersion: 0, clientKey: acceptKey });
+    expect(accepted).toMatchObject({ status: "accepted", version: 1 });
+    // Post-accept same-clientKey replay returns original receipt without bumping accepted_version.
+    const replayed = await plans.acceptPlan(f.scope, { draftId: draft14d.id, expectedBaseVersion: 0, clientKey: acceptKey });
+    expect(replayed).toMatchObject({ id: draft14d.id, status: "accepted", version: 1 });
+    expect((await plans.getToday(f.scope, "2026-10-16"))?.acceptedVersion).toBe(1);
+
+    // 3) Truly past 14-day hard deadline -> deadline_passed.
+    const pastFree: TimeBlock[] = [{ start: "2026-10-27T19:15:00.000Z", end: "2026-10-27T19:40:00.000Z", kind: "free" }];
+    const plannedPast = planDay(tasks14d, pastFree, { planningNow: "2026-10-27T19:00:00.000Z" });
+    expect(plannedPast.blocks).toEqual([]);
+    expect(plannedPast.unscheduled).toEqual([{ taskId: receipt.taskId, reason: "deadline_passed" }]);
+
+    // 2) Confirmed earlier deadline (Friday 19:30 UTC) -> no_slot_before_deadline and rejects forged accept ending at 19:40.
+    await f.sql`UPDATE opening_retest_activities SET deadline_at=${friday1930} WHERE id=${receipt.retestId}`;
+    const tasksEarlier = await plans.listTasks(f.scope);
+    expect(tasksEarlier.find((item) => item.id === receipt.taskId)?.dueAt).toBe(friday1930);
+    const plannedEarlier = planDay(tasksEarlier, fridayFree, { planningNow: fridayNow.toISOString() });
+    expect(plannedEarlier.blocks).toEqual([]);
+    expect(plannedEarlier.unscheduled).toEqual([{ taskId: receipt.taskId, reason: "no_slot_before_deadline" }]);
+
+    const forgedDraft = await plans.proposePlan(f.scope, {
+      date: "2026-10-16",
+      tasks: tasksEarlier,
+      free: fridayFree,
+      blocks: [{ taskId: receipt.taskId, start: fridaySlotStart, end: fridaySlotEnd, reason: "forged" }],
+      unscheduledTaskIds: [],
+    });
+    await expect(
+      plans.acceptPlan(f.scope, { draftId: forgedDraft.id, expectedBaseVersion: 1, clientKey: randomUUID() }),
+    ).rejects.toMatchObject({ code: "CONFLICT", reason: "task_changed" });
+    expect((await plans.getToday(f.scope, "2026-10-16"))?.acceptedVersion).toBe(1);
+  },
+);
+
+it("Counterexample 2: preserves schedule idempotency/conflict and rejects accept after cancel, snooze, or deadline narrowing", async () => {
+  const x = await seedScheduledDelayedRetestAtMonday();
+  const [first, concurrent] = await Promise.all([
+    x.retests.schedule(f.scope, x.courseId, x.request),
+    x.retests.schedule(f.scope, x.courseId, x.request),
+  ]);
+  const replayed = await x.retests.schedule(f.scope, x.courseId, x.request);
+  expect(concurrent).toEqual(first);
+  expect(replayed).toEqual(first);
+  expect(await f.sql`SELECT id FROM opening_retest_activities WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(1);
+  expect(await f.sql`SELECT id FROM opening_tasks WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(1);
+
+  // Same clientKey with modified minutes must conflict.
+  await expect(
+    x.retests.schedule(f.scope, x.courseId, { ...x.request, minutes: 30 }),
+  ).rejects.toMatchObject({ code: "CONFLICT" });
+
+  // Test post-proposal cancel, snooze, and deadline narrowing on fresh plans without changing accepted_version.
+  const fridayNow = new Date("2026-10-16T19:00:00.000Z");
+  const fridayFree: TimeBlock[] = [{ start: "2026-10-16T19:15:00.000Z", end: "2026-10-16T20:15:00.000Z", kind: "free" }];
+  const plans = createOpeningPlansRepository(f.sql, { now: () => fridayNow });
+  const ordinaryTask = await plans.createTask(f.scope, {
+    title: "普通复习任务",
+    minutes: 25,
+    dueAt: null,
+    priority: 1,
+    candidateId: null,
+  });
+
+  for (const mutation of ["snooze", "narrow_deadline", "cancel"] as const) {
+    const tasks = await plans.listTasks(f.scope, { excludeInactiveRetests: true });
+    const planned = planDay(tasks, fridayFree, {
+      localDate: "2026-10-16",
+      timeZone: "UTC",
+      planningNow: fridayNow.toISOString(),
+    });
+    expect(planned.blocks.some((b) => b.taskId === first.taskId), mutation).toBe(true);
+    const draft = await plans.proposePlan(f.scope, {
+      date: "2026-10-16",
+      tasks,
+      free: fridayFree,
+      blocks: planned.blocks,
+      unscheduledTaskIds: planned.unscheduledTaskIds,
+      unscheduledReasons: planned.unscheduled,
+    });
+    const activities = createOpeningRetestActivityRepository(f.sql);
+    if (mutation === "snooze") {
+      await activities.transition(f.scope, first.retestId, { type: "snooze", until: "2026-10-17T19:00:00.000Z" });
+    } else if (mutation === "narrow_deadline") {
+      await f.sql`UPDATE opening_retest_activities SET deadline_at='2026-10-16T19:30:00.000Z' WHERE id=${first.retestId}`;
+    } else {
+      await activities.transition(f.scope, first.retestId, { type: "cancel", at: fridayNow.toISOString() });
+    }
+    await expect(
+      plans.acceptPlan(f.scope, { draftId: draft.id, expectedBaseVersion: 0, clientKey: randomUUID() }),
+      mutation,
+    ).rejects.toMatchObject({ code: "CONFLICT", reason: "task_changed" });
+    expect((await plans.getToday(f.scope, "2026-10-16"))?.acceptedVersion ?? 0, mutation).toBe(0);
+
+    // Restore snooze / deadline before next loop iteration (cancel runs last).
+    if (mutation === "snooze") {
+      await f.sql`UPDATE opening_retest_activities SET snoozed_until=NULL WHERE id=${first.retestId}`;
+    } else if (mutation === "narrow_deadline") {
+      await f.sql`UPDATE opening_retest_activities SET deadline_at='2026-10-26T19:00:00.000Z' WHERE id=${first.retestId}`;
+    }
+  }
+
+  // Blocking Item 1 regression: after cancelling (and also when invalidated), normal draft generation
+  // must exclude the inactive pending retest so the day's plan can be regenerated and confirmed cleanly,
+  // while the unfiltered UI task list still sees the pending task.
+  expect((await plans.listTasks(f.scope)).some((t) => t.id === first.taskId)).toBe(true);
+  await createOpeningPlanningSettingsRepository(f.sql).set(f.scope, {
+    weekOneMonday: "2026-09-07",
+    periodTimes: {},
+    dailyWindow: { start: "19:00", end: "21:00" },
+    lunch: { start: "12:00", end: "13:00" },
+    dinner: { start: "18:00", end: "19:00" },
+    sleep: { start: "23:00", end: "07:00" },
+    timeZone: "UTC",
+  });
+  const service = createOpeningPlanService(f.sql, { now: () => fridayNow });
+  const recoveredDraft = await service.proposePlan(f.scope, {
+    date: "2026-10-16",
+    free: fridayFree,
+  });
+  expect(recoveredDraft.blocks.some((b) => b.taskId === first.taskId)).toBe(false);
+  expect(recoveredDraft.blocks.some((b) => b.taskId === ordinaryTask.id)).toBe(true);
+  const recoveredAccepted = await plans.acceptPlan(f.scope, {
+    draftId: recoveredDraft.id,
+    expectedBaseVersion: 0,
+    clientKey: randomUUID(),
+  });
+  expect(recoveredAccepted).toMatchObject({ status: "accepted", version: 1 });
+  expect(await plans.getToday(f.scope, "2026-10-16")).toMatchObject({
+    acceptedVersion: 1,
+    blocks: recoveredDraft.blocks,
+  });
+
+  // Also verify invalidated status follows the exact same exclusion and confirmation path.
+  await f.sql`UPDATE opening_retest_activities SET status='invalidated' WHERE id=${first.retestId}`;
+  const invalidatedTasks = await plans.listTasks(f.scope, { excludeInactiveRetests: true });
+  expect(invalidatedTasks.some((t) => t.id === first.taskId)).toBe(false);
+  const invalidatedPlanned = planDay(invalidatedTasks, fridayFree, {
+    localDate: "2026-10-16",
+    timeZone: "UTC",
+    planningNow: fridayNow.toISOString(),
+  });
+  expect(invalidatedPlanned.blocks.some((b) => b.taskId === first.taskId)).toBe(false);
+  const invalidatedDraft = await plans.proposePlan(f.scope, {
+    date: "2026-10-16",
+    tasks: invalidatedTasks,
+    free: fridayFree,
+    blocks: invalidatedPlanned.blocks,
+    unscheduledTaskIds: invalidatedPlanned.unscheduledTaskIds,
+    unscheduledReasons: invalidatedPlanned.unscheduled,
+  });
+  const invalidatedAccepted = await plans.acceptPlan(f.scope, {
+    draftId: invalidatedDraft.id,
+    expectedBaseVersion: 1,
+    clientKey: randomUUID(),
+  });
+  expect(invalidatedAccepted).toMatchObject({ status: "accepted", version: 2 });
+  expect((await plans.getToday(f.scope, "2026-10-16"))?.blocks.some((b) => b.taskId === first.taskId)).toBe(false);
+});
+
+it.each([
+  ["thursday", "2026-10-15", "2026-10-15T19:15:00.000Z", "2026-10-15T19:40:00.000Z", "2026-10-15T19:00:00.000Z"],
+  ["saturday", "2026-10-17", "2026-10-17T19:15:00.000Z", "2026-10-17T19:40:00.000Z", "2026-10-17T19:00:00.000Z"],
+] as const)(
+  "pins explicit %s retest reservation to its workspace local day and rejects forged Friday confirmation without altering either day",
+  async (_label, reservedDay, slotStart, slotEnd, reservedNowIso) => {
+    const x = await seedScheduledDelayedRetestAtMonday();
+    const receipt = await x.retests.schedule(f.scope, x.courseId, x.request);
+    await createOpeningPlanningSettingsRepository(f.sql).set(f.scope, {
+      weekOneMonday: "2026-09-07",
+      periodTimes: {},
+      dailyWindow: { start: "19:00", end: "21:00" },
+      lunch: { start: "12:00", end: "13:00" },
+      dinner: { start: "18:00", end: "19:00" },
+      sleep: { start: "23:00", end: "07:00" },
+      timeZone: "UTC",
+    });
+    await f.sql`UPDATE opening_retest_activities SET scheduled_start_at=${slotStart} WHERE id=${receipt.retestId}`;
+
+    // 1) On the reserved day, normal planning schedules and confirms cleanly (v1).
+    const reservedPlans = createOpeningPlansRepository(f.sql, { now: () => new Date(reservedNowIso) });
+    const reservedTasks = await reservedPlans.listTasks(f.scope, { excludeInactiveRetests: true });
+    const reservedFree: TimeBlock[] = [{ start: slotStart, end: slotEnd, kind: "free" }];
+    const reservedPlanned = planDay(reservedTasks, reservedFree, {
+      localDate: reservedDay,
+      timeZone: "UTC",
+      planningNow: reservedNowIso,
+    });
+    expect(reservedPlanned.blocks).toEqual([
+      expect.objectContaining({ taskId: receipt.taskId, start: slotStart, end: slotEnd }),
+    ]);
+    const reservedDraft = await reservedPlans.proposePlan(f.scope, {
+      date: reservedDay,
+      tasks: reservedTasks,
+      free: reservedFree,
+      blocks: reservedPlanned.blocks,
+      unscheduledTaskIds: reservedPlanned.unscheduledTaskIds,
+      unscheduledReasons: reservedPlanned.unscheduled,
+    });
+    expect(await reservedPlans.acceptPlan(f.scope, {
+      draftId: reservedDraft.id,
+      expectedBaseVersion: 0,
+      clientKey: randomUUID(),
+    })).toMatchObject({ status: "accepted", version: 1 });
+    const reservedDayState = await reservedPlans.getToday(f.scope, reservedDay);
+    expect(reservedDayState).toMatchObject({ acceptedVersion: 1, blocks: reservedPlanned.blocks });
+
+    // 2) On Friday, planDay must NOT schedule the task reserved for another day.
+    const friday = "2026-10-16";
+    const fridayNow = new Date("2026-10-16T19:00:00.000Z");
+    const fridayPlans = createOpeningPlansRepository(f.sql, { now: () => fridayNow });
+    const fridayFree: TimeBlock[] = [{ start: "2026-10-16T19:15:00.000Z", end: "2026-10-16T19:40:00.000Z", kind: "free" }];
+    const fridayPlanned = planDay(reservedTasks, fridayFree, {
+      localDate: friday,
+      timeZone: "UTC",
+      planningNow: fridayNow.toISOString(),
+    });
+    expect(fridayPlanned.blocks).toEqual([]);
+    expect(fridayPlanned.unscheduledTaskIds).toEqual([]);
+
+    // 3) Forging a Friday draft containing that cross-day retest must fail acceptPlan with CONFLICT task_changed,
+    // leaving BOTH the reserved day (v1, blocks intact) and Friday (still null) completely unchanged.
+    const fridayStateBefore = await fridayPlans.getToday(f.scope, friday);
+    expect(fridayStateBefore).toBeNull();
+    const forgedFridayDraft = await fridayPlans.proposePlan(f.scope, {
+      date: friday,
+      tasks: reservedTasks,
+      free: fridayFree,
+      blocks: [{
+        taskId: receipt.taskId,
+        start: "2026-10-16T19:15:00.000Z",
+        end: "2026-10-16T19:40:00.000Z",
+        reason: "forged-cross-day",
+      }],
+      unscheduledTaskIds: [],
+    });
+    await expect(fridayPlans.acceptPlan(f.scope, {
+      draftId: forgedFridayDraft.id,
+      expectedBaseVersion: 0,
+      clientKey: randomUUID(),
+    })).rejects.toMatchObject({ code: "CONFLICT", reason: "task_changed" });
+
+    expect(await fridayPlans.getToday(f.scope, friday)).toEqual(fridayStateBefore);
+    expect(await reservedPlans.getToday(f.scope, reservedDay)).toEqual(reservedDayState);
+
+    // 4) Forging a draft ON the reserved day itself whose block lies on a later day (2026-10-18)
+    // must ALSO fail acceptPlan with CONFLICT task_changed without modifying either day.
+    const forgedTargetDay = "2026-10-18";
+    const forgedTargetStateBefore = await reservedPlans.getToday(f.scope, forgedTargetDay);
+    expect(forgedTargetStateBefore).toBeNull();
+    const forgedOutOfDayBlockDraft = await reservedPlans.proposePlan(f.scope, {
+      date: reservedDay,
+      tasks: reservedTasks,
+      free: reservedFree,
+      blocks: [{
+        taskId: receipt.taskId,
+        start: "2026-10-18T19:15:00.000Z",
+        end: "2026-10-18T19:40:00.000Z",
+        reason: "forged-block-outside-reserved-day",
+      }],
+      unscheduledTaskIds: [],
+    });
+    await expect(reservedPlans.acceptPlan(f.scope, {
+      draftId: forgedOutOfDayBlockDraft.id,
+      expectedBaseVersion: 1,
+      clientKey: randomUUID(),
+    })).rejects.toMatchObject({ code: "CONFLICT", reason: "task_changed" });
+
+    expect(await reservedPlans.getToday(f.scope, reservedDay)).toEqual(reservedDayState);
+    expect(await reservedPlans.getToday(f.scope, forgedTargetDay)).toEqual(forgedTargetStateBefore);
+  },
+);

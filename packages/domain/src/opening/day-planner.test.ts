@@ -210,4 +210,190 @@ describe("planDay", () => {
     expect(result.blocks).toEqual([]);
     expect(result.unscheduledTaskIds).toEqual([id(1)]);
   });
+
+  it("handles the 3-way delayed retest window comparison on Friday 19:15-19:40 UTC", () => {
+    const fridaySlot: TimeBlock[] = [
+      { start: "2026-10-16T19:15:00.000Z", end: "2026-10-16T19:40:00.000Z", kind: "free" },
+    ];
+    const thursdayEarliest = "2026-10-15T19:00:00.000Z";
+    const fourteenDayDeadline = "2026-10-26T19:00:00.000Z";
+
+    // 1) True 14-day hard deadline -> schedules the complete 25-minute Friday slot.
+    const realWindow = retest(1, thursdayEarliest, {
+      minutes: 25,
+      notBefore: thursdayEarliest,
+      dueAt: fourteenDayDeadline,
+    });
+    const scheduled = planDay([realWindow], fridaySlot, {
+      localDate: "2026-10-16",
+      timeZone: "UTC",
+      planningNow: "2026-10-16T10:00:00.000Z",
+    });
+    expect(scheduled.unscheduled).toEqual([]);
+    expect(scheduled.blocks).toEqual([{
+      taskId: id(1),
+      start: "2026-10-16T19:15:00.000Z",
+      end: "2026-10-16T19:40:00.000Z",
+      reason: expect.any(String),
+    }]);
+
+    // 2) Confirmed earlier hard deadline (Friday 19:30) -> blocked with no_slot_before_deadline.
+    const earlierRetest = retest(2, thursdayEarliest, {
+      minutes: 25,
+      notBefore: thursdayEarliest,
+      dueAt: "2026-10-16T19:30:00.000Z",
+    });
+    const earlierOrdinary = task(3, {
+      minutes: 25,
+      dueAt: "2026-10-16T19:30:00.000Z",
+    });
+    const blocked = planDay([earlierRetest, earlierOrdinary], fridaySlot, {
+      localDate: "2026-10-16",
+      timeZone: "UTC",
+      planningNow: "2026-10-16T10:00:00.000Z",
+    });
+    expect(blocked.blocks).toEqual([]);
+    expect(blocked.unscheduled).toEqual([
+      { taskId: id(2), reason: "no_slot_before_deadline" },
+      { taskId: id(3), reason: "no_slot_before_deadline" },
+    ]);
+
+    // 3) Truly past the 14-day hard deadline -> still returns deadline_passed.
+    const afterDeadline = planDay(
+      [realWindow],
+      [{ start: "2026-10-27T19:15:00.000Z", end: "2026-10-27T19:40:00.000Z", kind: "free" }],
+      {
+        localDate: "2026-10-27",
+        timeZone: "UTC",
+        planningNow: "2026-10-27T10:00:00.000Z",
+      },
+    );
+    expect(afterDeadline.blocks).toEqual([]);
+    expect(afterDeadline.unscheduled).toEqual([{ taskId: id(1), reason: "deadline_passed" }]);
+  });
+
+  it("uses scheduledStartAt ?? recommendedAt alongside task.notBefore without pulling another day's reservation", () => {
+    const base = retest(1, at("12:00"), { notBefore: at("10:00") });
+    // Explicit scheduledStartAt overrides recommendedAt (earlier than recommendedAt, still >= notBefore).
+    const reservedEarlier: TaskItem = {
+      ...base,
+      retest: { ...base.retest!, scheduledStartAt: at("10:30") },
+    };
+    expect(taskNotBeforeAt(reservedEarlier)).toBe(at("10:30"));
+
+    // Explicit scheduledStartAt earlier than protocol notBefore still honors task.notBefore.
+    const reservedTooEarly: TaskItem = {
+      ...base,
+      retest: { ...base.retest!, scheduledStartAt: at("09:00") },
+    };
+    expect(taskNotBeforeAt(reservedTooEarly)).toBe(at("10:00"));
+
+    // Explicit scheduledStartAt later than recommendedAt delays start and preserves prefix.
+    const reservedLater: TaskItem = {
+      ...base,
+      retest: { ...base.retest!, scheduledStartAt: at("14:00") },
+    };
+    expect(taskNotBeforeAt(reservedLater)).toBe(at("14:00"));
+    const sameDay = planDay([reservedLater, task(2)], [slot("09:00", "16:00")], {
+      localDate: "2026-09-14",
+      timeZone: "UTC",
+    });
+    expect(sameDay.blocks.map(({ taskId, start, end }) => ({ taskId, start, end }))).toEqual([
+      { taskId: id(2), start: at("09:00"), end: at("09:30") },
+      { taskId: id(1), start: at("14:00"), end: at("14:30") },
+    ]);
+
+    // Reservation on a later day is skipped on today's single-day plan (never moved into today).
+    const reservedTomorrow: TaskItem = {
+      ...base,
+      retest: { ...base.retest!, scheduledStartAt: "2026-09-15T10:00:00.000Z" },
+    };
+    const todayOnly = planDay([reservedTomorrow], [slot("09:00", "16:00")], {
+      localDate: "2026-09-14",
+      timeZone: "UTC",
+    });
+    expect(todayOnly).toEqual({ blocks: [], unscheduledTaskIds: [], unscheduled: [] });
+  });
+
+  it("pins explicit scheduledStartAt to its workspace-timezone calendar day (blocks both Thursday-on-Friday and Saturday-on-Friday)", () => {
+    const fridaySlot: TimeBlock[] = [
+      { start: "2026-10-16T19:00:00.000Z", end: "2026-10-16T20:00:00.000Z", kind: "free" },
+    ];
+    const thursdayReserved = retest(1, "2026-10-15T19:00:00.000Z", {
+      minutes: 25,
+      notBefore: "2026-10-15T19:00:00.000Z",
+      dueAt: "2026-10-26T19:00:00.000Z",
+    });
+    thursdayReserved.retest = {
+      ...thursdayReserved.retest!,
+      scheduledStartAt: "2026-10-15T19:15:00.000Z",
+    };
+    const saturdayReserved = retest(2, "2026-10-15T19:00:00.000Z", {
+      minutes: 25,
+      notBefore: "2026-10-15T19:00:00.000Z",
+      dueAt: "2026-10-26T19:00:00.000Z",
+    });
+    saturdayReserved.retest = {
+      ...saturdayReserved.retest!,
+      scheduledStartAt: "2026-10-17T19:15:00.000Z",
+    };
+
+    // Neither Thursday's reservation nor Saturday's reservation may enter Friday.
+    expect(planDay([thursdayReserved, saturdayReserved], fridaySlot, {
+      localDate: "2026-10-16",
+      timeZone: "UTC",
+      planningNow: "2026-10-16T18:00:00.000Z",
+    })).toEqual({ blocks: [], unscheduledTaskIds: [], unscheduled: [] });
+
+    // Thursday's reservation still schedules normally on Thursday.
+    const thursdayPlan = planDay([thursdayReserved], [
+      { start: "2026-10-15T19:00:00.000Z", end: "2026-10-15T20:00:00.000Z", kind: "free" },
+    ], {
+      localDate: "2026-10-15",
+      timeZone: "UTC",
+    });
+    expect(thursdayPlan.blocks).toEqual([
+      expect.objectContaining({
+        taskId: id(1),
+        start: "2026-10-15T19:15:00.000Z",
+        end: "2026-10-15T19:40:00.000Z",
+      }),
+    ]);
+
+    // Workspace timezone boundary (Asia/Shanghai = UTC+8):
+    // 2026-10-15T15:30Z is Thursday 23:30 Shanghai -> excluded on Friday 2026-10-16.
+    // 2026-10-15T16:30Z is Friday   00:30 Shanghai -> included on Friday 2026-10-16, excluded on Thursday & Saturday.
+    const shanghaiThursdayLate = retest(3, "2026-10-15T15:00:00.000Z", {
+      minutes: 25,
+      dueAt: "2026-10-26T19:00:00.000Z",
+    });
+    shanghaiThursdayLate.retest = {
+      ...shanghaiThursdayLate.retest!,
+      scheduledStartAt: "2026-10-15T15:30:00.000Z",
+    };
+    const shanghaiFridayEarly = retest(4, "2026-10-15T15:00:00.000Z", {
+      minutes: 25,
+      dueAt: "2026-10-26T19:00:00.000Z",
+    });
+    shanghaiFridayEarly.retest = {
+      ...shanghaiFridayEarly.retest!,
+      scheduledStartAt: "2026-10-15T16:30:00.000Z",
+    };
+    const shanghaiFridaySlot: TimeBlock[] = [
+      { start: "2026-10-15T16:00:00.000Z", end: "2026-10-15T18:00:00.000Z", kind: "free" },
+    ];
+    const shanghaiFridayPlan = planDay(
+      [shanghaiThursdayLate, shanghaiFridayEarly],
+      shanghaiFridaySlot,
+      { localDate: "2026-10-16", timeZone: "Asia/Shanghai" },
+    );
+    expect(shanghaiFridayPlan.blocks).toEqual([
+      expect.objectContaining({
+        taskId: id(4),
+        start: "2026-10-15T16:30:00.000Z",
+        end: "2026-10-15T16:55:00.000Z",
+      }),
+    ]);
+    expect(shanghaiFridayPlan.unscheduledTaskIds).toEqual([]);
+  });
 });

@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { learningAgendaSchema } from "./learning-agenda";
-import { calendarDateSchema, isoDateTimeSchema, uuidSchema } from "./foundation";
+import { calendarDateSchema, isoDateTimeSchema, ordinaryPlanClientKeySchema, uuidSchema } from "./foundation";
 import { planDraftSchema, plannedBlockSchema } from "./planning";
 import { taskItemSchema } from "./planning-tasks";
 import { learningGoalSchema } from "./learning-goals";
@@ -10,10 +10,10 @@ export const learningActivityBudgetSchema = z.object({ localDate: calendarDateSc
   budgetRevision: z.number().int().positive().optional(), goalId: uuidSchema.optional(), goalIds: z.array(uuidSchema).max(200).optional(), goalRevision: z.number().int().positive().optional() }).strict();
 export const learningManagementCommandSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("settings"), dailyMinutes: z.number().int().min(1).max(600), bufferMinutes: z.number().int().min(0).max(120), expectedRevision: z.number().int().nonnegative() }).strict(),
-  z.object({ action: z.literal("preview"), date: calendarDateSchema, expectedAcceptedVersion: z.number().int().nonnegative(), expectedBudgetRevision: z.number().int().positive(), clientKey: z.string().min(8).max(200) }).strict(),
+  z.object({ action: z.literal("preview"), date: calendarDateSchema, expectedAcceptedVersion: z.number().int().nonnegative(), expectedBudgetRevision: z.number().int().positive(), clientKey: ordinaryPlanClientKeySchema }).strict(),
   z.object({ action: z.literal("confirm"), draftId: uuidSchema, expectedBaseVersion: z.number().int().nonnegative(), clientKey: z.string().min(8).max(200) }).strict(),
 ]);
-export const learningRecoveryCommandSchema = z.object({ action: z.enum(["continue", "shorten", "replan"]), activityId: uuidSchema.nullable(), taskId: uuidSchema.nullable(), minutes: z.number().int().min(5).max(240).optional(), date: calendarDateSchema, expectedAcceptedVersion: z.number().int().nonnegative(), expectedBudgetRevision: z.number().int().nonnegative(), clientKey: z.string().min(8).max(200) }).strict();
+export const learningRecoveryCommandSchema = z.object({ action: z.enum(["continue", "shorten", "replan"]), activityId: uuidSchema.nullable(), taskId: uuidSchema.nullable(), minutes: z.number().int().min(5).max(240).optional(), date: calendarDateSchema, expectedAcceptedVersion: z.number().int().nonnegative(), expectedBudgetRevision: z.number().int().nonnegative(), clientKey: ordinaryPlanClientKeySchema }).strict();
 export const learningLifecycleCommandSchema = z.object({ goalId: uuidSchema, expectedRevision: z.number().int().nonnegative(), lifecycle: z.enum(["active", "maintenance", "reduced", "paused", "archived", "stopped"]), maintenanceIntervalDays: z.number().int().min(1).max(365).nullable().optional(), acceptedPolicy: z.literal("keep") }).strict();
 export const learningCardSessionCommandSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("start"), budgetMinutes: z.number().int().min(1).max(120), cardIds: z.array(uuidSchema).min(1).max(200), goalIds: z.array(uuidSchema).max(40).default([]), clientKey: z.string().min(8).max(200) }).strict(),

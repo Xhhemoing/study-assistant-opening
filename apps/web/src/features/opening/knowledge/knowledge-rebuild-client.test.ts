@@ -20,11 +20,18 @@ it("forwards the abort signal to the rebuild request unchanged", async () => {
   expect(transport.mock.calls[0]?.[1]?.signal).toBe(controller.signal);
 });
 
-it("reads the current knowledge record without the HTTP cache and forwards the abort signal", async () => {
+it("reads the current knowledge record with syncDetails=1 without the HTTP cache and forwards the abort signal", async () => {
   const transport = vi.fn<typeof fetch>(async () => Response.json(record));
   const controller = new AbortController();
   await expect(createKnowledgeRebuildClient(transport).read(courseId, controller.signal)).resolves.toEqual(record);
-  expect(transport).toHaveBeenCalledWith(`/api/opening/courses/${courseId}/knowledge`, expect.objectContaining({ method: "GET", cache: "no-store", signal: controller.signal }));
+  expect(transport).toHaveBeenCalledWith(`/api/opening/courses/${courseId}/knowledge?syncDetails=1`, expect.objectContaining({ method: "GET", cache: "no-store", signal: controller.signal }));
+});
+
+it("passes jobId alongside syncDetails=1 when polling a specific rebuild job", async () => {
+  const transport = vi.fn<typeof fetch>(async () => Response.json(record));
+  const controller = new AbortController();
+  await expect(createKnowledgeRebuildClient(transport).read(courseId, { signal: controller.signal, jobId })).resolves.toEqual(record);
+  expect(transport).toHaveBeenCalledWith(`/api/opening/courses/${courseId}/knowledge?syncDetails=1&jobId=${jobId}`, expect.objectContaining({ method: "GET", cache: "no-store", signal: controller.signal }));
 });
 
 it("keeps the server message and status when the request is rejected", async () => {
@@ -39,8 +46,8 @@ it("does not accept a receipt for another job kind or a malformed knowledge reco
   await expect(createKnowledgeRebuildClient(async () => Response.json({ ...record, version: -1 })).read(courseId)).rejects.toThrow();
 });
 
-it("parses optional sync metadata on read and rejects malformed sync payloads", async () => {
-  const synced = {
+it("parses legacy 6-field and extended 10-field sync metadata on read and rejects malformed payloads or leaked error fields", async () => {
+  const legacySynced = {
     ...record,
     sync: {
       status: "pending" as const,
@@ -51,11 +58,30 @@ it("parses optional sync metadata on read and rejects malformed sync payloads", 
       parsingSourceCount: 1,
     },
   };
-  await expect(createKnowledgeRebuildClient(async () => Response.json(synced)).read(courseId)).resolves.toEqual(synced);
+  await expect(createKnowledgeRebuildClient(async () => Response.json(legacySynced)).read(courseId)).resolves.toEqual(legacySynced);
+
+  const detailedSynced = {
+    ...record,
+    sync: {
+      ...legacySynced.sync,
+      unreadableSourceCount: 2,
+      rebuildBlockedByMaterials: true,
+      lastFailedJob: { jobId, state: "outcome_unknown" as const },
+      requestedJob: { jobId, state: "failed" as const },
+    },
+  };
+  await expect(createKnowledgeRebuildClient(async () => Response.json(detailedSynced)).read(courseId, { jobId })).resolves.toEqual(detailedSynced);
+
   await expect(
-    createKnowledgeRebuildClient(async () => Response.json({ ...synced, sync: { ...synced.sync, status: "stale" } })).read(courseId),
+    createKnowledgeRebuildClient(async () => Response.json({ ...legacySynced, sync: { ...legacySynced.sync, status: "stale" } })).read(courseId),
   ).rejects.toThrow();
   await expect(
-    createKnowledgeRebuildClient(async () => Response.json({ ...synced, sync: { ...synced.sync, parsingSourceCount: -1 } })).read(courseId),
+    createKnowledgeRebuildClient(async () => Response.json({ ...legacySynced, sync: { ...legacySynced.sync, parsingSourceCount: -1 } })).read(courseId),
+  ).rejects.toThrow();
+  await expect(
+    createKnowledgeRebuildClient(async () => Response.json({
+      ...detailedSynced,
+      sync: { ...detailedSynced.sync, lastFailedJob: { jobId, state: "failed", error: "raw stack" } },
+    })).read(courseId),
   ).rejects.toThrow();
 });

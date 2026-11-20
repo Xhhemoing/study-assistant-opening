@@ -6,7 +6,7 @@ import { createOpeningApi, type OpeningApi, type ThinTutorActionView } from "../
 import { LoadError, secondaryButtonClass, ui } from "../design/ui";
 import { TUTOR_ACTION_KIND_LABEL } from "../learning/tutor-action-intents";
 import { KnowledgeEvidence, knowledgeKindLabel, knowledgeStatusLabel } from "./knowledge-evidence";
-import { createKnowledgeRebuildClient } from "./knowledge-rebuild-client";
+import { createKnowledgeRebuildClient, subscribeCourseKnowledgeSync } from "./knowledge-rebuild-client";
 import { userFacingMessage } from "../../../lib/user-facing-error";
 import { ConfirmKnowledgeNode } from "./confirm-knowledge-node";
 
@@ -47,19 +47,63 @@ type KnowledgeRecord = Awaited<ReturnType<OpeningApi["getCourseKnowledge"]>> & {
   sync?: CourseKnowledgeSync;
 };
 
-export function knowledgeSyncNotice(sync: CourseKnowledgeSync | null | undefined): string | null {
+export function knowledgeSyncNotice(
+  sync: CourseKnowledgeSync | null | undefined,
+  hasNodes = false,
+): string | null {
   if (!sync) return null;
-  if (sync.parsingSourceCount > 0 && sync.status === "pending") {
-    return `有 ${sync.parsingSourceCount} 份新材料仍在解析中，同时后台正在整理已可用材料的知识点；全部完成后可刷新查看完整内容。`;
+  const parsingCount = sync.parsingSourceCount;
+  const unreadableCount = sync.unreadableSourceCount ?? 0;
+
+  if (sync.rebuildBlockedByMaterials === true) {
+    const issues: string[] = [];
+    if (parsingCount > 0) issues.push(`${parsingCount} 份资料仍在解析中`);
+    if (unreadableCount > 0) issues.push(`${unreadableCount} 份资料无法读取文字`);
+    const detail = issues.length ? `当前有 ${issues.join("、")}。` : "";
+    return `旧知识点已保留，请先处理新版资料（若您只是移除了旧资料且课内另有未就绪资料，也请先处理）。${detail}请前往资料页等待解析完成，或重试解析、替换、移除无法读取的资料后再重新整理。`;
   }
-  if (sync.parsingSourceCount > 0) {
-    return `有 ${sync.parsingSourceCount} 份新材料仍在解析中，当前知识点尚未覆盖这些新材料。`;
-  }
+
   if (sync.status === "pending") {
+    const notes: string[] = [];
+    if (parsingCount > 0) notes.push(`另有 ${parsingCount} 份资料仍在解析中`);
+    if (unreadableCount > 0) notes.push(`另有 ${unreadableCount} 份资料无法读取文字，本次整理不会包含它们`);
+    if (notes.length) {
+      return `后台正在按当前可读资料整理课程知识点；${notes.join("；")}。完成后可刷新查看。`;
+    }
     return "后台正在按最新材料重新整理课程知识点，完成后可刷新查看。";
+  }
+
+  if (sync.lastFailedJob) {
+    const lead = sync.lastFailedJob.state === "outcome_unknown"
+      ? "上次整理知识点结果暂未确认"
+      : "上次整理知识点未完成";
+    const notes: string[] = [];
+    if (parsingCount > 0) notes.push(`${parsingCount} 份资料仍在解析中`);
+    if (unreadableCount > 0) notes.push(`${unreadableCount} 份资料无法读取文字`);
+    const extra = notes.length ? `，当前另有 ${notes.join("、")}` : "";
+    const nextStep = sync.status === "needs_rebuild"
+      ? "；当前知识点尚未同步最新材料，请前往资料页检查或稍后重新整理。"
+      : "；请稍后刷新查看或重试整理。";
+    return `${lead}${extra}${nextStep}`;
+  }
+
+  if (unreadableCount > 0 && parsingCount > 0) {
+    const drift = sync.status === "needs_rebuild" ? "，且其余已可用材料也尚未同步" : "";
+    return `有 ${unreadableCount} 份资料无法读取文字，另有 ${parsingCount} 份资料仍在解析中${drift}。请前往资料页检查无法读取的资料，等待解析完成后再重新整理。`;
+  }
+  if (unreadableCount > 0) {
+    const drift = sync.status === "needs_rebuild" ? "，且其余材料有更新" : "";
+    return `有 ${unreadableCount} 份资料无法读取文字（如解析失败或仅含图片），当前知识点未包含这些资料${drift}。请前往资料页重试解析、替换含文字版本或移除后再重新整理。`;
+  }
+  if (parsingCount > 0) {
+    const drift = sync.status === "needs_rebuild" ? "，且已有材料等待同步" : "";
+    return `有 ${parsingCount} 份新材料仍在解析中，当前知识点尚未覆盖这些资料${drift}。请等待解析完成后刷新或重新整理。`;
   }
   if (sync.status === "needs_rebuild") {
     return "课程材料已更新，当前知识点尚未同步最新材料，请重新整理知识点。";
+  }
+  if (!hasNodes && sync.status === "up_to_date" && Object.keys(sync.eligibleSourceVersions).length > 0) {
+    return "已检查可读资料，暂未提取到知识点。可以补充课程资料后再重新整理。";
   }
   return null;
 }
@@ -158,13 +202,27 @@ export function CourseKnowledge({
     };
   }, [load, knowledgeRefreshToken]);
 
+  useEffect(() => subscribeCourseKnowledgeSync(courseId, (latest) => {
+    if (!mounted.current) return;
+    const seq = ++requestSeq.current;
+    setLoading(false);
+    setError("");
+    setUnavailable(false);
+    setSnapshot(latest.snapshot);
+    setRecord(latest);
+    setSelected((previous) =>
+      previous ? latest.snapshot.nodes.find((item) => item.id === previous.id) ?? null : null,
+    );
+    void loadActions(latest.snapshot, seq);
+  }), [courseId, loadActions]);
+
   const ordered = useMemo(
     () => (snapshot ? chaptersFirst(snapshot.nodes) : []),
     [snapshot],
   );
   const chapters = ordered.filter((n) => n.kind === "chapter");
   const cta = nextStepCta(actions[0]);
-  const syncNotice = knowledgeSyncNotice(record?.sync);
+  const syncNotice = knowledgeSyncNotice(record?.sync, Boolean(snapshot && snapshot.nodes.length > 0));
 
   if (loading) {
     return <p className="text-xs text-text-3" role="status">正在读取课程知识…</p>;

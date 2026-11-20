@@ -60,6 +60,46 @@ export function assertOpeningTestDatabase(url, enabled) {
   return parsed;
 }
 
+function quoteIdent(id) {
+  return `"${String(id).replaceAll('"', '""')}"`;
+}
+
+export async function configureCiOpeningTestDb(url, enabled, options = {}) {
+  const env = options.env ?? process.env;
+  const validated = assertOpeningTestDatabase(url, enabled);
+  if (env.GITHUB_ACTIONS !== "true") {
+    return { configured: false, tables: 0 };
+  }
+  const connect =
+    options.createClient ??
+    (async (connectionUrl) =>
+      (await import("../packages/database/src/migrate.ts")).createSqlClient(
+        connectionUrl,
+        { max: 1 },
+      ));
+  const sql = await connect(validated.toString());
+  try {
+    const tables = await sql.begin(async (tx) => {
+      const rows = await tx`
+        SELECT c.relname AS name, c.reltoastrelid <> 0 AS has_toast
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public' AND c.relkind = 'r'
+        ORDER BY c.relname`;
+      for (const { name, has_toast } of rows) {
+        const relopts = has_toast
+          ? "autovacuum_enabled = false, toast.autovacuum_enabled = false"
+          : "autovacuum_enabled = false";
+        await tx.unsafe(`ALTER TABLE "public".${quoteIdent(name)} SET (${relopts})`);
+      }
+      return rows.length;
+    });
+    return { configured: true, tables };
+  } finally {
+    await sql.end({ timeout: 5 });
+  }
+}
+
 export default async function setup() {
   const raw = process.env.OPENING_TEST_DATABASE_URL;
   if (!raw?.trim()) {
@@ -71,6 +111,7 @@ export default async function setup() {
   process.env.DATABASE_URL = validated.toString();
   const { migrateFromUrl } = await import("../packages/database/src/migrate.ts");
   await migrateFromUrl(validated.toString());
+  await configureCiOpeningTestDb(raw, process.env.OPENING_TEST_DB);
 }
 
 function main() {

@@ -27,10 +27,34 @@ export type AssetGraphDirection = "in" | "out" | "both";
 export type ExpandedCenterState = {
   direction: AssetGraphDirection;
   relations?: readonly AssetGraphRelation[];
+  nodeIds: string[];
+  edgeIds: string[];
   nextCursor: string | null;
   completeness: "complete" | "partial";
   warnings: string[];
 };
+
+export type PinnedComparisonItem = {
+  node: AssetGraphNode;
+  detail: AssetGraphDetail | null;
+};
+
+export type NodeTraversalLabels = {
+  incomingLabel: string;
+  outgoingLabel: string;
+  handleLabel: string;
+  primaryDirection: AssetGraphDirection;
+};
+
+export type LastGraphOperation =
+  | { op: "roots" }
+  | {
+      op: "neighbors";
+      focus: AssetGraphNodeId;
+      direction: AssetGraphDirection;
+      relations?: readonly AssetGraphRelation[];
+    }
+  | { op: "detail"; focus: AssetGraphNodeId };
 
 export type AssetGraphErrorState = {
   code: AssetGraphClientErrorCode;
@@ -47,16 +71,24 @@ export type AssetGraphState = {
   nodesById: Record<string, AssetGraphNode>;
   edgesById: Record<string, AssetGraphEdge>;
   rootIds: string[];
+  rootEdgeIds: string[];
+  standaloneNodeIds: string[];
   rootsCursor: string | null;
   rootsCompleteness: "complete" | "partial" | null;
   rootsWarnings: string[];
   expandedCenters: Record<string, ExpandedCenterState>;
+  transitionCenter: AssetGraphNode | null;
   selectedNodeId: string | null;
   detail: AssetGraphDetail | null;
+  detailCompleteness: "complete" | "partial" | null;
+  detailWarnings: string[];
+  pinnedComparison: PinnedComparisonItem | null;
+  lastFailedOperation: LastGraphOperation | null;
   asOf: string | null;
   notice: string | null;
   error: AssetGraphErrorState | null;
   requestGeneration: number;
+  activeRequestSeq: number;
   loadingRoots: boolean;
   loadingMoreRoots: boolean;
   expandingNodeId: string | null;
@@ -144,6 +176,184 @@ export const KNOWLEDGE_STATUS_LABELS: Record<
 
 export const NOT_FOUND_SAFE_NOTICE = "所选内容不可用或不在当前范围";
 
+export function getOwn<T>(record: Record<string, T>, key: string): T | undefined {
+  return Object.prototype.hasOwnProperty.call(record, key) ? record[key] : undefined;
+}
+
+/**
+ * Shared resolution of learnerState and requirementStatus:
+ * when `detail` is loaded for this item, its values (including explicit `null`) take precedence over `node.summary`.
+ */
+export function resolveEffectiveNodeStates(
+  node: AssetGraphNode | null | undefined,
+  detail: AssetGraphDetail | null | undefined,
+): {
+  hasDetail: boolean;
+  learnerState: AssetGraphLearnerState | null | undefined;
+  requirementStatus: AssetGraphRequirementStatus | null | undefined;
+} {
+  if (detail && (!node || detail.id === node.id)) {
+    return {
+      hasDetail: true,
+      learnerState: detail.learnerState,
+      requirementStatus: detail.requirementStatus,
+    };
+  }
+  return {
+    hasDetail: false,
+    learnerState: node?.summary ? node.summary.learnerState : undefined,
+    requirementStatus: node?.summary ? node.summary.requirementStatus : undefined,
+  };
+}
+
+export function getNodeTraversalLabels(
+  kind: AssetGraphNodeKind,
+  lens: AssetGraphLens,
+): NodeTraversalLabels {
+  switch (kind) {
+    case "goal":
+      return {
+        incomingLabel: "追溯所属课程",
+        outgoingLabel: "查看适用要求",
+        handleLabel: "适用要求",
+        primaryDirection: "out",
+      };
+    case "course":
+      return {
+        incomingLabel: "查看关联资料",
+        outgoingLabel: "查看课程目标",
+        handleLabel: "课程目标",
+        primaryDirection: "out",
+      };
+    case "requirement": {
+      const outgoingLabel =
+        lens === "assets"
+          ? "查看参考资料"
+          : lens === "evidence"
+            ? "查看练习记录"
+            : lens === "structure"
+              ? "查看对应知识点"
+              : "查看材料与记录";
+      const handleLabel =
+        lens === "assets"
+          ? "资料"
+          : lens === "evidence"
+            ? "练习"
+            : lens === "structure"
+              ? "知识点"
+              : "关联";
+      return {
+        incomingLabel: "追溯所属目标",
+        outgoingLabel,
+        handleLabel,
+        primaryDirection: "out",
+      };
+    }
+    case "document":
+      return {
+        incomingLabel: "追溯来源",
+        outgoingLabel: "查看关联目标",
+        handleLabel: "溯源",
+        primaryDirection: "in",
+      };
+    case "source":
+      return {
+        incomingLabel: "查看引用要求",
+        outgoingLabel: "查看关联范围",
+        handleLabel: "引用处",
+        primaryDirection: "in",
+      };
+    case "exploration":
+      return {
+        incomingLabel: "追溯来源内容",
+        outgoingLabel: "查看产出笔记",
+        handleLabel: "产出笔记",
+        primaryDirection: "out",
+      };
+    case "knowledge":
+      return {
+        incomingLabel: "追溯先修与要求",
+        outgoingLabel: "展开后续知识",
+        handleLabel: "延伸",
+        primaryDirection: "out",
+      };
+    case "observation":
+      return {
+        incomingLabel: "回到对应要求",
+        outgoingLabel: "查看延伸关联",
+        handleLabel: "对应要求",
+        primaryDirection: "in",
+      };
+  }
+}
+
+export function summarizeExpansionForScreenReader(
+  nodes: readonly AssetGraphNode[],
+  focusId: string,
+  addedEdgeCount = 0,
+): string {
+  const added = nodes.filter(node => node.id !== focusId);
+  if (added.length > 0) {
+    const counts = new Map<AssetGraphNodeKind, number>();
+    for (const item of added) {
+      counts.set(item.kind, (counts.get(item.kind) ?? 0) + 1);
+    }
+    const parts = [...counts.entries()].map(
+      ([kind, count]) => `${count} 项${NODE_KIND_LABELS[kind]}`,
+    );
+    return `已展开 ${parts.join("、")}`;
+  }
+  if (addedEdgeCount > 0) {
+    return `已补充 ${addedEdgeCount} 条关联记录`;
+  }
+  return "已更新关联，暂无新增学习资料";
+}
+
+export function isZeroNeighborResult(center: ExpandedCenterState | undefined): boolean {
+  return Boolean(
+    center &&
+      center.edgeIds.length === 0 &&
+      center.completeness === "complete" &&
+      center.nextCursor === null,
+  );
+}
+
+export function describeZeroExpansion(
+  kind: AssetGraphNodeKind,
+  direction: AssetGraphDirection,
+  lens: AssetGraphLens,
+): string {
+  const lensName = LENS_LABELS[lens];
+  if (direction === "in") {
+    if (kind === "document") {
+      return `在「${lensName}」视角下没有找到指向这篇笔记的来源内容；独立笔记本身仍是有效起点。`;
+    }
+    return `在「${lensName}」视角下暂时没有指向这项${NODE_KIND_LABELS[kind]}的来源内容。`;
+  }
+  if (direction === "out") {
+    return `在「${lensName}」视角下这项${NODE_KIND_LABELS[kind]}暂时没有展开的关联内容。`;
+  }
+  return `在「${lensName}」视角下这项${NODE_KIND_LABELS[kind]}暂时没有直接相连的内容。`;
+}
+
+function stripNodeSummary(node: AssetGraphNode): AssetGraphNode {
+  return {
+    id: node.id,
+    kind: node.kind,
+    label: node.label,
+    ...(node.meta ? { meta: node.meta } : {}),
+  };
+}
+
+function combineCompleteness(
+  previous: "complete" | "partial" | null | undefined,
+  incoming: "complete" | "partial",
+  append: boolean,
+): "complete" | "partial" {
+  if (append && previous === "partial") return "partial";
+  return incoming;
+}
+
 export function createInitialAssetGraphState(options?: {
   context?: AssetGraphContext;
   lens?: AssetGraphLens;
@@ -163,16 +373,24 @@ export function createInitialAssetGraphState(options?: {
     nodesById: {},
     edgesById: {},
     rootIds: [],
+    rootEdgeIds: [],
+    standaloneNodeIds: [],
     rootsCursor: null,
     rootsCompleteness: null,
     rootsWarnings: [],
     expandedCenters: {},
+    transitionCenter: null,
     selectedNodeId: options?.selectedNodeId ?? null,
     detail: null,
+    detailCompleteness: null,
+    detailWarnings: [],
+    pinnedComparison: null,
+    lastFailedOperation: null,
     asOf: null,
     notice: null,
     error: null,
     requestGeneration: 0,
+    activeRequestSeq: 0,
     loadingRoots: false,
     loadingMoreRoots: false,
     expandingNodeId: null,
@@ -186,7 +404,7 @@ function mergeNodes(
 ): Record<string, AssetGraphNode> {
   const next: Record<string, AssetGraphNode> = { ...existing };
   for (const node of incoming) {
-    const prev = next[node.id];
+    const prev = getOwn(next, node.id);
     next[node.id] = prev
       ? {
           ...prev,
@@ -214,21 +432,96 @@ function uniqueStrings(items: readonly string[]): string[] {
   return [...new Set(items.filter(item => item.trim().length > 0))];
 }
 
+function reconcileActiveGraphDictionaries(
+  nodesById: Record<string, AssetGraphNode>,
+  edgesById: Record<string, AssetGraphEdge>,
+  rootIds: readonly string[],
+  rootEdgeIds: readonly string[],
+  standaloneNodeIds: readonly string[],
+  expandedCenters: Record<string, ExpandedCenterState>,
+): {
+  nodesById: Record<string, AssetGraphNode>;
+  edgesById: Record<string, AssetGraphEdge>;
+} {
+  const activeNodeSet = new Set<string>();
+  for (const id of rootIds) activeNodeSet.add(id);
+  for (const id of standaloneNodeIds) activeNodeSet.add(id);
+  for (const center of Object.values(expandedCenters)) {
+    for (const id of center.nodeIds) activeNodeSet.add(id);
+  }
+
+  const activeEdgeSet = new Set<string>();
+  for (const id of rootEdgeIds) activeEdgeSet.add(id);
+  for (const center of Object.values(expandedCenters)) {
+    for (const id of center.edgeIds) activeEdgeSet.add(id);
+  }
+
+  const nextNodes: Record<string, AssetGraphNode> = {};
+  for (const id of activeNodeSet) {
+    const node = getOwn(nodesById, id);
+    if (node) nextNodes[id] = node;
+  }
+
+  const nextEdges: Record<string, AssetGraphEdge> = {};
+  for (const id of activeEdgeSet) {
+    const edge = getOwn(edgesById, id);
+    if (edge && getOwn(nextNodes, edge.from) && getOwn(nextNodes, edge.to)) {
+      nextEdges[id] = edge;
+    }
+  }
+
+  return { nodesById: nextNodes, edgesById: nextEdges };
+}
+
+function buildTransitionCenter(state: AssetGraphState): AssetGraphNode | null {
+  if (!state.selectedNodeId) return null;
+  const current =
+    getOwn(state.nodesById, state.selectedNodeId) ??
+    (state.transitionCenter?.id === state.selectedNodeId ? state.transitionCenter : undefined);
+  if (!current) return null;
+  return stripNodeSummary(current);
+}
+
+function sanitizePinnedAcrossLens(
+  pinned: PinnedComparisonItem | null,
+): PinnedComparisonItem | null {
+  if (!pinned) return null;
+  return {
+    node: stripNodeSummary(pinned.node),
+    detail: null,
+  };
+}
+
 function clearGraphCollections(
   state: AssetGraphState,
-  options: { preserveSelectedNodeId: boolean },
+  options: {
+    preserveSelectedNodeId: boolean;
+    preserveSameContextHelpers: boolean;
+  },
 ): AssetGraphState {
+  const preservedSelected = options.preserveSelectedNodeId ? state.selectedNodeId : null;
+  const transitionCenter = options.preserveSameContextHelpers ? buildTransitionCenter(state) : null;
+
   return {
     ...state,
     nodesById: {},
     edgesById: {},
     rootIds: [],
+    rootEdgeIds: [],
+    standaloneNodeIds: [],
     rootsCursor: null,
     rootsCompleteness: null,
     rootsWarnings: [],
     expandedCenters: {},
-    selectedNodeId: options.preserveSelectedNodeId ? state.selectedNodeId : null,
+    transitionCenter,
+    selectedNodeId: preservedSelected,
     detail: null,
+    detailCompleteness: null,
+    detailWarnings: [],
+    pinnedComparison: options.preserveSameContextHelpers
+      ? sanitizePinnedAcrossLens(state.pinnedComparison)
+      : null,
+    lastFailedOperation: null,
     asOf: null,
     error: null,
     loadingRoots: false,
@@ -236,6 +529,7 @@ function clearGraphCollections(
     expandingNodeId: null,
     loadingDetailNodeId: null,
     requestGeneration: state.requestGeneration + 1,
+    activeRequestSeq: state.activeRequestSeq + 1,
   };
 }
 
@@ -243,6 +537,7 @@ export function bumpRequestGeneration(state: AssetGraphState): AssetGraphState {
   return {
     ...state,
     requestGeneration: state.requestGeneration + 1,
+    activeRequestSeq: state.activeRequestSeq + 1,
   };
 }
 
@@ -255,7 +550,10 @@ export function switchContext(
   context: AssetGraphContext,
   options?: { preserveFocusId?: string | null },
 ): AssetGraphState {
-  const cleared = clearGraphCollections(state, { preserveSelectedNodeId: false });
+  const cleared = clearGraphCollections(state, {
+    preserveSelectedNodeId: false,
+    preserveSameContextHelpers: false,
+  });
   return {
     ...cleared,
     context,
@@ -265,7 +563,10 @@ export function switchContext(
 }
 
 export function switchLens(state: AssetGraphState, lens: AssetGraphLens): AssetGraphState {
-  const cleared = clearGraphCollections(state, { preserveSelectedNodeId: true });
+  const cleared = clearGraphCollections(state, {
+    preserveSelectedNodeId: true,
+    preserveSameContextHelpers: true,
+  });
   return {
     ...cleared,
     lens,
@@ -282,7 +583,10 @@ export function updateRootsFilters(
     includeSummary?: boolean;
   },
 ): AssetGraphState {
-  const cleared = clearGraphCollections(state, { preserveSelectedNodeId: false });
+  const cleared = clearGraphCollections(state, {
+    preserveSelectedNodeId: false,
+    preserveSameContextHelpers: false,
+  });
   return {
     ...cleared,
     searchQuery: patch.searchQuery ?? state.searchQuery,
@@ -297,7 +601,10 @@ export function toggleIncludeSummaryKeepFocus(
   state: AssetGraphState,
   includeSummary: boolean,
 ): AssetGraphState {
-  const cleared = clearGraphCollections(state, { preserveSelectedNodeId: true });
+  const cleared = clearGraphCollections(state, {
+    preserveSelectedNodeId: true,
+    preserveSameContextHelpers: true,
+  });
   return {
     ...cleared,
     includeSummary,
@@ -305,11 +612,32 @@ export function toggleIncludeSummaryKeepFocus(
   };
 }
 
+export type ExpandNodeResult =
+  | {
+      applied: true;
+      focusId: AssetGraphNodeId;
+      direction: AssetGraphDirection;
+      addedNodes: AssetGraphNode[];
+      addedNodeCount: number;
+      addedEdgeCount: number;
+      addedCount: number;
+      announcement: string;
+    }
+  | {
+      applied: false;
+      reason: "aborted" | "superseded" | "not_found" | "error";
+    };
+
 export function applyCursorStaleReset(
   state: AssetGraphState,
   notice = "当前内容列表已更新，已从第 1 页重新读取。",
+  _retryTarget?: LastGraphOperation,
 ): AssetGraphState {
-  const cleared = clearGraphCollections(state, { preserveSelectedNodeId: false });
+  void _retryTarget;
+  const cleared = clearGraphCollections(state, {
+    preserveSelectedNodeId: false,
+    preserveSameContextHelpers: false,
+  });
   return {
     ...cleared,
     notice,
@@ -320,7 +648,24 @@ export function applyPrivacyInvalidationReset(
   state: AssetGraphState,
   notice = "可见范围设置已变更，已清空旧视图并重新读取。",
 ): AssetGraphState {
-  const cleared = clearGraphCollections(state, { preserveSelectedNodeId: false });
+  const cleared = clearGraphCollections(state, {
+    preserveSelectedNodeId: false,
+    preserveSameContextHelpers: false,
+  });
+  return {
+    ...cleared,
+    notice,
+  };
+}
+
+export function applyNotFoundReloadReset(
+  state: AssetGraphState,
+  notice = NOT_FOUND_SAFE_NOTICE,
+): AssetGraphState {
+  const cleared = clearGraphCollections(state, {
+    preserveSelectedNodeId: false,
+    preserveSameContextHelpers: false,
+  });
   return {
     ...cleared,
     notice,
@@ -330,24 +675,50 @@ export function applyPrivacyInvalidationReset(
 export function applyRootsPage(
   state: AssetGraphState,
   page: AssetGraphPage,
-  options: { append: boolean; generation: number },
+  options: { append: boolean; generation: number; requestSeq?: number },
 ): AssetGraphState {
   if (!isCurrentGeneration(state, options.generation)) return state;
+  if (options.requestSeq !== undefined && state.activeRequestSeq !== options.requestSeq) {
+    return state;
+  }
+
   const pageNodeIds = page.nodes.map(node => node.id);
+  const pageEdgeIds = page.edges.map(edge => edge.id);
   const nextRootIds = options.append
-    ? [...new Set([...state.rootIds, ...pageNodeIds])]
+    ? uniqueStrings([...state.rootIds, ...pageNodeIds])
     : pageNodeIds;
+  const nextRootEdgeIds = options.append
+    ? uniqueStrings([...state.rootEdgeIds, ...pageEdgeIds])
+    : pageEdgeIds;
+
+  const mergedNodes = mergeNodes(state.nodesById, page.nodes);
+  const mergedEdges = mergeEdges(state.edgesById, page.edges);
+  const reconciled = reconcileActiveGraphDictionaries(
+    mergedNodes,
+    mergedEdges,
+    nextRootIds,
+    nextRootEdgeIds,
+    state.standaloneNodeIds,
+    state.expandedCenters,
+  );
 
   return {
     ...state,
-    nodesById: mergeNodes(state.nodesById, page.nodes),
-    edgesById: mergeEdges(state.edgesById, page.edges),
+    nodesById: reconciled.nodesById,
+    edgesById: reconciled.edgesById,
     rootIds: nextRootIds,
+    rootEdgeIds: nextRootEdgeIds,
     rootsCursor: page.page.nextCursor,
-    rootsCompleteness: page.completeness,
+    rootsCompleteness: combineCompleteness(
+      state.rootsCompleteness,
+      page.completeness,
+      options.append,
+    ),
     rootsWarnings: options.append
       ? uniqueStrings([...state.rootsWarnings, ...page.warnings])
       : uniqueStrings(page.warnings),
+    transitionCenter: null,
+    lastFailedOperation: null,
     asOf: page.asOf,
     error: null,
     loadingRoots: false,
@@ -364,10 +735,26 @@ export function applyNeighborsPage(
     relations?: readonly AssetGraphRelation[];
     append: boolean;
     generation: number;
+    requestSeq?: number;
   },
 ): AssetGraphState {
   if (!isCurrentGeneration(state, options.generation)) return state;
-  const previousCenter = state.expandedCenters[options.focus];
+  if (options.requestSeq !== undefined && state.activeRequestSeq !== options.requestSeq) {
+    return state;
+  }
+
+  const previousCenter = getOwn(state.expandedCenters, options.focus);
+  const pageNodeIds = page.nodes.map(node => node.id);
+  const pageEdgeIds = page.edges.map(edge => edge.id);
+
+  const nextNodeIds =
+    options.append && previousCenter
+      ? uniqueStrings([...previousCenter.nodeIds, ...pageNodeIds])
+      : pageNodeIds;
+  const nextEdgeIds =
+    options.append && previousCenter
+      ? uniqueStrings([...previousCenter.edgeIds, ...pageEdgeIds])
+      : pageEdgeIds;
   const nextWarnings =
     options.append && previousCenter
       ? uniqueStrings([...previousCenter.warnings, ...page.warnings])
@@ -378,36 +765,99 @@ export function applyNeighborsPage(
     [options.focus]: {
       direction: options.direction,
       relations: options.relations,
+      nodeIds: nextNodeIds,
+      edgeIds: nextEdgeIds,
       nextCursor: page.page.nextCursor,
-      completeness: page.completeness,
+      completeness: combineCompleteness(
+        previousCenter?.completeness,
+        page.completeness,
+        options.append,
+      ),
       warnings: nextWarnings,
     },
   };
 
+  const mergedNodes = mergeNodes(state.nodesById, page.nodes);
+  const mergedEdges = mergeEdges(state.edgesById, page.edges);
+  const reconciled = reconcileActiveGraphDictionaries(
+    mergedNodes,
+    mergedEdges,
+    state.rootIds,
+    state.rootEdgeIds,
+    state.standaloneNodeIds,
+    nextExpanded,
+  );
+
+  const updatedPinnedNode = state.pinnedComparison
+    ? getOwn(reconciled.nodesById, state.pinnedComparison.node.id)
+    : undefined;
+
   return {
     ...state,
-    nodesById: mergeNodes(state.nodesById, page.nodes),
-    edgesById: mergeEdges(state.edgesById, page.edges),
+    nodesById: reconciled.nodesById,
+    edgesById: reconciled.edgesById,
     expandedCenters: nextExpanded,
+    transitionCenter: null,
+    pinnedComparison:
+      state.pinnedComparison && updatedPinnedNode
+        ? {
+            ...state.pinnedComparison,
+            node: updatedPinnedNode,
+          }
+        : state.pinnedComparison,
+    lastFailedOperation: null,
     asOf: page.asOf,
     error: null,
-    expandingNodeId: state.expandingNodeId === options.focus ? null : state.expandingNodeId,
+    expandingNodeId: null,
   };
 }
 
 export function applyDetailPage(
   state: AssetGraphState,
   page: AssetGraphPage,
-  options: { generation: number },
+  options: { generation: number; requestSeq?: number },
 ): AssetGraphState {
   if (!isCurrentGeneration(state, options.generation)) return state;
+  if (options.requestSeq !== undefined && state.activeRequestSeq !== options.requestSeq) {
+    return state;
+  }
+
   const focusId = page.detail?.id ?? page.nodes[0]?.id ?? state.selectedNodeId;
+  const nextStandaloneIds = uniqueStrings([
+    ...state.standaloneNodeIds,
+    ...page.nodes.map(node => node.id),
+  ]);
+  const mergedNodes = mergeNodes(state.nodesById, page.nodes);
+  const mergedEdges = mergeEdges(state.edgesById, page.edges);
+  const reconciled = reconcileActiveGraphDictionaries(
+    mergedNodes,
+    mergedEdges,
+    state.rootIds,
+    state.rootEdgeIds,
+    nextStandaloneIds,
+    state.expandedCenters,
+  );
+
+  const updatedPinned =
+    state.pinnedComparison && focusId && state.pinnedComparison.node.id === focusId
+      ? {
+          node: getOwn(reconciled.nodesById, focusId) ?? state.pinnedComparison.node,
+          detail: page.detail,
+        }
+      : state.pinnedComparison;
+
   return {
     ...state,
-    nodesById: mergeNodes(state.nodesById, page.nodes),
-    edgesById: mergeEdges(state.edgesById, page.edges),
+    nodesById: reconciled.nodesById,
+    edgesById: reconciled.edgesById,
+    standaloneNodeIds: nextStandaloneIds,
+    transitionCenter: null,
     selectedNodeId: focusId,
     detail: page.detail,
+    detailCompleteness: page.completeness,
+    detailWarnings: uniqueStrings(page.warnings),
+    pinnedComparison: updatedPinned,
+    lastFailedOperation: null,
     asOf: page.asOf,
     error: null,
     loadingDetailNodeId: null,
@@ -415,25 +865,127 @@ export function applyDetailPage(
 }
 
 export function selectNodeFocus(state: AssetGraphState, nodeId: string | null): AssetGraphState {
+  if (nodeId === state.selectedNodeId) {
+    return state;
+  }
+  const keepDetail = state.detail?.id === nodeId;
   return {
     ...state,
     selectedNodeId: nodeId,
-    detail: state.detail?.id === nodeId ? state.detail : null,
+    detail: keepDetail ? state.detail : null,
+    detailCompleteness: keepDetail ? state.detailCompleteness : null,
+    detailWarnings: keepDetail ? state.detailWarnings : [],
+    transitionCenter: null,
     notice: null,
     error: null,
+    loadingRoots: false,
+    loadingMoreRoots: false,
+    expandingNodeId: null,
+    loadingDetailNodeId: null,
+    activeRequestSeq: state.activeRequestSeq + 1,
+  };
+}
+
+export function collapseExpandedNode(
+  state: AssetGraphState,
+  focusId: AssetGraphNodeId,
+): AssetGraphState {
+  const evicted = getOwn(state.expandedCenters, focusId);
+  if (!evicted) return state;
+
+  const nextExpanded: Record<string, ExpandedCenterState> = {};
+  for (const [key, center] of Object.entries(state.expandedCenters)) {
+    if (key !== focusId) {
+      nextExpanded[key] = center;
+    }
+  }
+
+  const stillAnchored = new Set<string>(state.rootIds);
+  for (const center of Object.values(nextExpanded)) {
+    for (const id of center.nodeIds) {
+      stillAnchored.add(id);
+    }
+  }
+
+  const evictedChildren = new Set(evicted.nodeIds.filter(id => id !== focusId));
+  const nextStandaloneIds = uniqueStrings([
+    ...(stillAnchored.has(focusId) ? [] : [focusId]),
+    ...state.standaloneNodeIds.filter(id => !evictedChildren.has(id) || stillAnchored.has(id)),
+  ]);
+
+  const reconciled = reconcileActiveGraphDictionaries(
+    state.nodesById,
+    state.edgesById,
+    state.rootIds,
+    state.rootEdgeIds,
+    nextStandaloneIds,
+    nextExpanded,
+  );
+
+  const selectedWasCollapsedLeaf =
+    state.selectedNodeId !== null &&
+    state.selectedNodeId !== focusId &&
+    !getOwn(reconciled.nodesById, state.selectedNodeId);
+
+  const nextSelectedId = selectedWasCollapsedLeaf ? focusId : state.selectedNodeId;
+  const keepDetail = state.detail !== null && state.detail.id === nextSelectedId;
+
+  return {
+    ...state,
+    nodesById: reconciled.nodesById,
+    edgesById: reconciled.edgesById,
+    standaloneNodeIds: nextStandaloneIds,
+    expandedCenters: nextExpanded,
+    selectedNodeId: nextSelectedId,
+    detail: keepDetail ? state.detail : null,
+    detailCompleteness: keepDetail ? state.detailCompleteness : null,
+    detailWarnings: keepDetail ? state.detailWarnings : [],
+    expandingNodeId: state.expandingNodeId === focusId ? null : state.expandingNodeId,
+  };
+}
+
+export function togglePinnedComparison(
+  state: AssetGraphState,
+  nodeId: string,
+): AssetGraphState {
+  if (state.pinnedComparison?.node.id === nodeId) {
+    return {
+      ...state,
+      pinnedComparison: null,
+    };
+  }
+  const targetNode = getOwn(state.nodesById, nodeId);
+  if (!targetNode) return state;
+  return {
+    ...state,
+    pinnedComparison: {
+      node: targetNode,
+      detail: state.detail?.id === nodeId ? state.detail : null,
+    },
   };
 }
 
 export function applyNotFoundForFocus(
   state: AssetGraphState,
   focusId: string,
-  options?: { generation?: number; message?: string },
+  options?: { generation?: number; requestSeq?: number; message?: string },
 ): AssetGraphState {
   if (options?.generation !== undefined && !isCurrentGeneration(state, options.generation)) {
     return state;
   }
-  const nextNodes = { ...state.nodesById };
-  delete nextNodes[focusId];
+  if (options?.requestSeq !== undefined && state.activeRequestSeq !== options.requestSeq) {
+    return state;
+  }
+
+  const evictedCenter = getOwn(state.expandedCenters, focusId);
+  const survivingNeighborNodeIds = evictedCenter
+    ? evictedCenter.nodeIds.filter(id => id !== focusId)
+    : [];
+
+  const nextNodes: Record<string, AssetGraphNode> = {};
+  for (const key of Object.keys(state.nodesById)) {
+    if (key !== focusId) nextNodes[key] = state.nodesById[key]!;
+  }
 
   const nextEdges: Record<string, AssetGraphEdge> = {};
   for (const [edgeId, edge] of Object.entries(state.edgesById)) {
@@ -442,41 +994,91 @@ export function applyNotFoundForFocus(
     }
   }
 
-  const nextExpanded = { ...state.expandedCenters };
-  delete nextExpanded[focusId];
+  const nextExpanded: Record<string, ExpandedCenterState> = {};
+  for (const [centerId, center] of Object.entries(state.expandedCenters)) {
+    if (centerId === focusId) continue;
+    nextExpanded[centerId] = {
+      ...center,
+      nodeIds: center.nodeIds.filter(id => id !== focusId),
+      edgeIds: center.edgeIds.filter(id => Boolean(getOwn(nextEdges, id))),
+    };
+  }
+
+  const nextStandaloneIds = uniqueStrings([
+    ...state.standaloneNodeIds.filter(id => id !== focusId),
+    ...survivingNeighborNodeIds,
+  ]);
+  const nextRootIds = state.rootIds.filter(id => id !== focusId);
+  const nextRootEdgeIds = state.rootEdgeIds.filter(id => Boolean(getOwn(nextEdges, id)));
+
+  const reconciled = reconcileActiveGraphDictionaries(
+    nextNodes,
+    nextEdges,
+    nextRootIds,
+    nextRootEdgeIds,
+    nextStandaloneIds,
+    nextExpanded,
+  );
+
+  const isSelectedEvicted = state.selectedNodeId === focusId;
+  const isDetailEvicted = state.detail?.id === focusId;
 
   return {
     ...state,
-    nodesById: nextNodes,
-    edgesById: nextEdges,
-    rootIds: state.rootIds.filter(id => id !== focusId),
+    nodesById: reconciled.nodesById,
+    edgesById: reconciled.edgesById,
+    rootIds: nextRootIds,
+    rootEdgeIds: nextRootEdgeIds,
+    standaloneNodeIds: nextStandaloneIds,
     expandedCenters: nextExpanded,
-    selectedNodeId: state.selectedNodeId === focusId ? null : state.selectedNodeId,
-    detail: state.detail?.id === focusId ? null : state.detail,
+    transitionCenter: state.transitionCenter?.id === focusId ? null : state.transitionCenter,
+    selectedNodeId: isSelectedEvicted ? null : state.selectedNodeId,
+    detail: isDetailEvicted ? null : state.detail,
+    detailCompleteness: isDetailEvicted ? null : state.detailCompleteness,
+    detailWarnings: isDetailEvicted ? [] : state.detailWarnings,
+    pinnedComparison:
+      state.pinnedComparison?.node.id === focusId ? null : state.pinnedComparison,
+    lastFailedOperation: null,
     notice: NOT_FOUND_SAFE_NOTICE,
     error: null,
-    expandingNodeId: state.expandingNodeId === focusId ? null : state.expandingNodeId,
-    loadingDetailNodeId: state.loadingDetailNodeId === focusId ? null : state.loadingDetailNodeId,
+    loadingRoots: false,
+    loadingMoreRoots: false,
+    expandingNodeId: null,
+    loadingDetailNodeId: null,
   };
 }
 
 export function applyRequestError(
   state: AssetGraphState,
   error: unknown,
-  options: { generation: number; fallbackMessage?: string },
+  options: {
+    generation: number;
+    requestSeq?: number;
+    failedOperation?: LastGraphOperation;
+    fallbackMessage?: string;
+  },
 ): AssetGraphState {
   if (!isCurrentGeneration(state, options.generation)) return state;
+  if (options.requestSeq !== undefined && state.activeRequestSeq !== options.requestSeq) {
+    return state;
+  }
+
   const formatted = formatAssetGraphError(error, options.fallbackMessage);
   const shouldClearPrivateView =
     formatted.code === "UNAUTHENTICATED" ||
     formatted.code === "FORBIDDEN" ||
     formatted.code === "WORKSPACE_FORBIDDEN";
   const base = shouldClearPrivateView
-    ? clearGraphCollections(state, { preserveSelectedNodeId: false })
+    ? clearGraphCollections(state, {
+        preserveSelectedNodeId: false,
+        preserveSameContextHelpers: false,
+      })
     : state;
 
   return {
     ...base,
+    transitionCenter: null,
+    lastFailedOperation: shouldClearPrivateView ? null : (options.failedOperation ?? null),
     error: formatted,
     loadingRoots: false,
     loadingMoreRoots: false,
@@ -503,12 +1105,14 @@ export function formatAssetGraphError(
 
 export function isGraphPartial(state: AssetGraphState): boolean {
   if (state.rootsCompleteness === "partial") return true;
+  if (state.detailCompleteness === "partial") return true;
   return Object.values(state.expandedCenters).some(entry => entry.completeness === "partial");
 }
 
 export function collectGraphWarnings(state: AssetGraphState): string[] {
   return uniqueStrings([
     ...state.rootsWarnings,
+    ...state.detailWarnings,
     ...Object.values(state.expandedCenters).flatMap(entry => entry.warnings),
   ]);
 }
@@ -518,7 +1122,7 @@ export function getVisibleNodes(state: AssetGraphState): AssetGraphNode[] {
   const seen = new Set<string>();
 
   for (const id of state.rootIds) {
-    if (state.nodesById[id] && !seen.has(id)) {
+    if (getOwn(state.nodesById, id) && !seen.has(id)) {
       seen.add(id);
       orderedIds.push(id);
     }
@@ -530,12 +1134,16 @@ export function getVisibleNodes(state: AssetGraphState): AssetGraphNode[] {
     }
   }
 
+  if (orderedIds.length === 0 && state.transitionCenter) {
+    return [state.transitionCenter];
+  }
+
   return orderedIds.map(id => state.nodesById[id]!);
 }
 
 export function getVisibleEdges(state: AssetGraphState): AssetGraphEdge[] {
   return Object.values(state.edgesById).filter(
-    edge => Boolean(state.nodesById[edge.from] && state.nodesById[edge.to]),
+    edge => Boolean(getOwn(state.nodesById, edge.from) && getOwn(state.nodesById, edge.to)),
   );
 }
 
@@ -669,7 +1277,8 @@ export type AssetGraphStore = ReturnType<typeof createAssetGraphStore>;
 
 /**
  * Framework-free controller coordinating async queries, request generation tokens,
- * AbortController cancellation, cursor-stale resets, and 404 eviction.
+ * AbortController cancellation, single-shot exact-operation cursor-stale recovery,
+ * and 404 focus eviction.
  */
 export function createAssetGraphStore(
   client: AssetGraphClient,
@@ -686,31 +1295,59 @@ export function createAssetGraphStore(
     }
   }
 
-  function startRequest(): { generation: number; signal: AbortSignal } {
+  function startRequest(): { generation: number; requestSeq: number; signal: AbortSignal } {
     activeController?.abort();
     activeController = new AbortController();
+    const nextSeq = state.activeRequestSeq + 1;
+    state = {
+      ...state,
+      activeRequestSeq: nextSeq,
+      loadingRoots: false,
+      loadingMoreRoots: false,
+      expandingNodeId: null,
+      loadingDetailNodeId: null,
+    };
     return {
       generation: state.requestGeneration,
+      requestSeq: nextSeq,
       signal: activeController.signal,
     };
   }
 
-  async function restartAfterCursorStale() {
-    emit(applyCursorStaleReset(state));
-    if (state.context.kind === "goal") {
-      await expandNode(state.context.id, "out", {
-        relations: defaultNeighborRelations(state.context.id, "out", state.lens),
-        allowCursorStaleRestart: false,
-      });
-      return;
-    }
-    await loadRoots({ allowCursorStaleRestart: false });
+  function isActiveRequest(generation: number, requestSeq: number): boolean {
+    return isCurrentGeneration(state, generation) && state.activeRequestSeq === requestSeq;
   }
 
-  async function loadRoots(options?: { cursor?: string; append?: boolean; allowCursorStaleRestart?: boolean }) {
+  async function restartAfterCursorStaleRoots() {
+    emit(applyCursorStaleReset(state, undefined, { op: "roots" }));
+    await loadRoots({ cursor: undefined, allowCursorStaleRestart: false });
+  }
+
+  async function restartAfterCursorStaleNeighbors(
+    retryTarget: Extract<LastGraphOperation, { op: "neighbors" }>,
+  ): Promise<ExpandNodeResult> {
+    emit(applyCursorStaleReset(state, undefined, retryTarget));
+    return expandNode(retryTarget.focus, retryTarget.direction, {
+      relations: retryTarget.relations,
+      cursor: undefined,
+      allowCursorStaleRestart: false,
+    });
+  }
+
+  async function restartAfterNotFoundNeighbors(): Promise<ExpandNodeResult> {
+    emit(applyNotFoundReloadReset(state));
+    await loadRoots({ cursor: undefined, allowCursorStaleRestart: false });
+    return { applied: false, reason: "not_found" };
+  }
+
+  async function loadRoots(options?: {
+    cursor?: string;
+    append?: boolean;
+    allowCursorStaleRestart?: boolean;
+  }) {
     const append = options?.append ?? false;
     const allowRestart = options?.allowCursorStaleRestart ?? true;
-    const { generation, signal } = startRequest();
+    const { generation, requestSeq, signal } = startRequest();
 
     emit({
       ...state,
@@ -721,15 +1358,21 @@ export function createAssetGraphStore(
 
     try {
       const page = await client.roots(buildRootsQueryParams(state, options?.cursor), signal);
-      if (!isCurrentGeneration(state, generation)) return;
-      emit(applyRootsPage(state, page, { append, generation }));
+      if (!isActiveRequest(generation, requestSeq)) return;
+      emit(applyRootsPage(state, page, { append, generation, requestSeq }));
     } catch (error) {
-      if (isAbortError(error) || !isCurrentGeneration(state, generation)) return;
+      if (isAbortError(error) || !isActiveRequest(generation, requestSeq)) return;
       if (error instanceof AssetGraphRequestError && error.code === "CURSOR_STALE" && allowRestart) {
-        await restartAfterCursorStale();
+        await restartAfterCursorStaleRoots();
         return;
       }
-      emit(applyRequestError(state, error, { generation }));
+      emit(
+        applyRequestError(state, error, {
+          generation,
+          requestSeq,
+          failedOperation: { op: "roots" },
+        }),
+      );
     }
   }
 
@@ -747,16 +1390,20 @@ export function createAssetGraphStore(
       append?: boolean;
       allowCursorStaleRestart?: boolean;
     },
-  ) {
+  ): Promise<ExpandNodeResult> {
     const append = options?.append ?? false;
     const allowRestart = options?.allowCursorStaleRestart ?? true;
     const relations = options?.relations ?? defaultNeighborRelations(focusId, direction, state.lens);
-    const { generation, signal } = startRequest();
+    const { generation, requestSeq, signal } = startRequest();
 
+    const keepDetail = state.detail?.id === focusId;
     emit({
       ...state,
       error: null,
       selectedNodeId: focusId,
+      detail: keepDetail ? state.detail : null,
+      detailCompleteness: keepDetail ? state.detailCompleteness : null,
+      detailWarnings: keepDetail ? state.detailWarnings : [],
       expandingNodeId: focusId,
     });
 
@@ -774,7 +1421,11 @@ export function createAssetGraphStore(
         },
         signal,
       );
-      if (!isCurrentGeneration(state, generation)) return;
+      if (!isActiveRequest(generation, requestSeq)) {
+        return { applied: false, reason: "superseded" };
+      }
+      const previousVisibleNodeIds = new Set(getVisibleNodes(state).map(node => node.id));
+      const previousVisibleEdgeIds = new Set(getVisibleEdges(state).map(edge => edge.id));
       emit(
         applyNeighborsPage(state, page, {
           focus: focusId,
@@ -782,26 +1433,60 @@ export function createAssetGraphStore(
           relations,
           append,
           generation,
+          requestSeq,
         }),
       );
+      const addedNodes = getVisibleNodes(state).filter(
+        node => node.id !== focusId && !previousVisibleNodeIds.has(node.id),
+      );
+      const addedEdgeCount = getVisibleEdges(state).filter(
+        edge => !previousVisibleEdgeIds.has(edge.id),
+      ).length;
+      return {
+        applied: true,
+        focusId,
+        direction,
+        addedNodes,
+        addedNodeCount: addedNodes.length,
+        addedEdgeCount,
+        addedCount: addedNodes.length,
+        announcement: summarizeExpansionForScreenReader(addedNodes, focusId, addedEdgeCount),
+      };
     } catch (error) {
-      if (isAbortError(error) || !isCurrentGeneration(state, generation)) return;
+      if (isAbortError(error)) {
+        return { applied: false, reason: "aborted" };
+      }
+      if (!isActiveRequest(generation, requestSeq)) {
+        return { applied: false, reason: "superseded" };
+      }
       if (error instanceof AssetGraphRequestError && error.code === "NOT_FOUND") {
-        emit(applyNotFoundForFocus(state, focusId, { generation }));
-        return;
+        return restartAfterNotFoundNeighbors();
       }
       if (error instanceof AssetGraphRequestError && error.code === "CURSOR_STALE" && allowRestart) {
-        await restartAfterCursorStale();
-        return;
+        return restartAfterCursorStaleNeighbors({
+          op: "neighbors",
+          focus: focusId,
+          direction,
+          relations,
+        });
       }
-      emit(applyRequestError(state, error, { generation }));
+      emit(
+        applyRequestError(state, error, {
+          generation,
+          requestSeq,
+          failedOperation: { op: "neighbors", focus: focusId, direction, relations },
+        }),
+      );
+      return { applied: false, reason: "error" };
     }
   }
 
-  async function loadMoreNeighbors(focusId: AssetGraphNodeId) {
-    const center = state.expandedCenters[focusId];
-    if (!center?.nextCursor || state.expandingNodeId) return;
-    await expandNode(focusId, center.direction, {
+  async function loadMoreNeighbors(focusId: AssetGraphNodeId): Promise<ExpandNodeResult> {
+    const center = getOwn(state.expandedCenters, focusId);
+    if (!center?.nextCursor || state.expandingNodeId) {
+      return { applied: false, reason: "superseded" };
+    }
+    return expandNode(focusId, center.direction, {
       relations: center.relations,
       cursor: center.nextCursor,
       append: true,
@@ -809,11 +1494,15 @@ export function createAssetGraphStore(
   }
 
   async function loadDetail(focusId: AssetGraphNodeId) {
-    const { generation, signal } = startRequest();
+    const { generation, requestSeq, signal } = startRequest();
+    const keepDetail = state.detail?.id === focusId;
     emit({
       ...state,
       error: null,
       selectedNodeId: focusId,
+      detail: keepDetail ? state.detail : null,
+      detailCompleteness: keepDetail ? state.detailCompleteness : null,
+      detailWarnings: keepDetail ? state.detailWarnings : [],
       loadingDetailNodeId: focusId,
     });
 
@@ -826,15 +1515,21 @@ export function createAssetGraphStore(
         },
         signal,
       );
-      if (!isCurrentGeneration(state, generation)) return;
-      emit(applyDetailPage(state, page, { generation }));
+      if (!isActiveRequest(generation, requestSeq)) return;
+      emit(applyDetailPage(state, page, { generation, requestSeq }));
     } catch (error) {
-      if (isAbortError(error) || !isCurrentGeneration(state, generation)) return;
+      if (isAbortError(error) || !isActiveRequest(generation, requestSeq)) return;
       if (error instanceof AssetGraphRequestError && error.code === "NOT_FOUND") {
-        emit(applyNotFoundForFocus(state, focusId, { generation }));
+        emit(applyNotFoundForFocus(state, focusId, { generation, requestSeq }));
         return;
       }
-      emit(applyRequestError(state, error, { generation }));
+      emit(
+        applyRequestError(state, error, {
+          generation,
+          requestSeq,
+          failedOperation: { op: "detail", focus: focusId },
+        }),
+      );
     }
   }
 
@@ -858,7 +1553,8 @@ export function createAssetGraphStore(
 
     if (preservedFocus) {
       const direction =
-        previousExpanded[preservedFocus]?.direction ?? defaultDirectionForNode(preservedFocus);
+        getOwn(previousExpanded, preservedFocus)?.direction ??
+        defaultDirectionForNode(preservedFocus);
       await expandNode(preservedFocus, direction, {
         relations: defaultNeighborRelations(preservedFocus, direction, lens),
       });
@@ -887,10 +1583,11 @@ export function createAssetGraphStore(
 
     if (preservedFocus) {
       const direction =
-        previousExpanded[preservedFocus]?.direction ?? defaultDirectionForNode(preservedFocus);
+        getOwn(previousExpanded, preservedFocus)?.direction ??
+        defaultDirectionForNode(preservedFocus);
       await expandNode(preservedFocus, direction, {
         relations:
-          previousExpanded[preservedFocus]?.relations ??
+          getOwn(previousExpanded, preservedFocus)?.relations ??
           defaultNeighborRelations(preservedFocus, direction, state.lens),
       });
       return;
@@ -931,6 +1628,20 @@ export function createAssetGraphStore(
   }
 
   async function retryCurrentView() {
+    if (state.lastFailedOperation) {
+      const failed = state.lastFailedOperation;
+      if (failed.op === "detail") {
+        await loadDetail(failed.focus);
+        return;
+      }
+      if (failed.op === "neighbors") {
+        await expandNode(failed.focus, failed.direction, { relations: failed.relations });
+        return;
+      }
+      await loadRoots();
+      return;
+    }
+
     const partialCenterEntry = Object.entries(state.expandedCenters).find(
       ([, center]) => center.completeness === "partial",
     );
@@ -939,7 +1650,17 @@ export function createAssetGraphStore(
       await expandNode(focusId, center.direction, { relations: center.relations });
       return;
     }
-    if (state.context.kind === "goal" && state.rootIds.length === 0) {
+    if (state.detailCompleteness === "partial" && state.selectedNodeId) {
+      await loadDetail(state.selectedNodeId);
+      return;
+    }
+    if (
+      state.context.kind === "goal" &&
+      state.rootIds.length === 0 &&
+      state.rootsCompleteness === null &&
+      !state.searchQuery.trim() &&
+      state.selectedKinds.length === 0
+    ) {
       await expandNode(state.context.id, "out", {
         relations: defaultNeighborRelations(state.context.id, "out", state.lens),
       });
@@ -949,7 +1670,44 @@ export function createAssetGraphStore(
   }
 
   function focusNode(nodeId: string | null) {
+    if (nodeId === state.selectedNodeId) return;
+    activeController?.abort();
+    const wasTransitionOnly =
+      state.transitionCenter !== null && Object.keys(state.nodesById).length === 0;
     emit(selectNodeFocus(state, nodeId));
+    if (wasTransitionOnly && nodeId === null) {
+      if (state.context.kind === "goal") {
+        void expandNode(state.context.id, "out", {
+          relations: defaultNeighborRelations(state.context.id, "out", state.lens),
+        });
+      } else {
+        void loadRoots();
+      }
+    }
+  }
+
+  function collapseNode(focusId: AssetGraphNodeId) {
+    if (!getOwn(state.expandedCenters, focusId) && state.expandingNodeId !== focusId) {
+      return;
+    }
+    if (state.expandingNodeId === focusId) {
+      activeController?.abort();
+      state = {
+        ...state,
+        activeRequestSeq: state.activeRequestSeq + 1,
+        expandingNodeId: null,
+      };
+    }
+    emit(collapseExpandedNode(state, focusId));
+  }
+
+  function togglePinNode(nodeId: string) {
+    emit(togglePinnedComparison(state, nodeId));
+  }
+
+  function clearPinnedNode() {
+    if (!state.pinnedComparison) return;
+    emit({ ...state, pinnedComparison: null });
   }
 
   function clearNotice() {
@@ -985,6 +1743,9 @@ export function createAssetGraphStore(
     invalidateByPrivacy,
     retryCurrentView,
     focusNode,
+    collapseNode,
+    togglePinNode,
+    clearPinnedNode,
     clearNotice,
     dispose,
   };

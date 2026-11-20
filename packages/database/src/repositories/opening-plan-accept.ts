@@ -11,6 +11,11 @@ import { readOpeningLearnerSnapshotCourses } from "./opening-learner-snapshot-re
 import { validateOpeningLocalReplan } from "./opening-local-replan-validation";
 import { assertOpeningPlanConstraints } from "./opening-plan-constraints";
 import { assertOpeningLearningManagementDraft } from "./opening-learning-management-draft";
+import {
+  isBlockAllowedForTaskWindow,
+  readLockedTaskPlanningWindows,
+  readWorkspacePlanningTimeZone,
+} from "./opening-course-route-planning-window";
 
 /** One transaction owns selection, task creation and the accepted plan version. */
 export async function acceptOpeningPlan(sql: Sql, scope: Scope, input: AcceptPlanInput, now: Date, options: { source?: "coach"; expectedDraftVersion?: number } = {}) {
@@ -95,13 +100,26 @@ export async function acceptOpeningPlan(sql: Sql, scope: Scope, input: AcceptPla
     }
     const taskIds = [...new Set(blocks.filter(block => !suggestionIds.has(block.taskId)).map(block => block.taskId))];
     if (!local && taskIds.length) {
-      const tasks = await tx`SELECT id, version, status, not_before FROM opening_tasks
-        WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND id IN ${tx(taskIds)}
-        ORDER BY id FOR UPDATE`;
+      const timeZone = await readWorkspacePlanningTimeZone(tx, scope);
+      const tasks = await readLockedTaskPlanningWindows(tx, scope, taskIds);
       const snapshot = (draft.input_snapshot as { tasks?: TaskItem[] } | null)?.tasks ?? [];
-      if (tasks.length !== taskIds.length || tasks.some(task => task.status !== "pending"
-        || Number(task.version) !== snapshot.find(original => original.id === task.id)?.version
-        || blocks.some(block => block.taskId === task.id && task.not_before && Date.parse(block.start) < new Date(task.not_before as string | Date).getTime()))) {
+      if (tasks.length !== taskIds.length || tasks.some(task => {
+        const original = snapshot.find(item => item.id === task.id);
+        if (!original || task.status !== "pending" || task.version !== original.version || !task.window.retestActive) {
+          return true;
+        }
+        if ((task.window.isCourseRouteRetest || Boolean(original.retest)) && (
+          task.window.notBefore !== (original.notBefore ?? null)
+          || task.window.dueAt !== original.dueAt
+          || task.window.scheduledStartAt !== (original.retest?.scheduledStartAt ?? null)
+          || task.window.recommendedAt !== (original.retest?.recommendedAt ?? null)
+        )) {
+          return true;
+        }
+        return blocks.some(block =>
+          block.taskId === task.id && !isBlockAllowedForTaskWindow(block, task.window, day, timeZone),
+        );
+      })) {
         throw new OpeningPlanError("CONFLICT", "a planned task changed", "task_changed");
       }
     }

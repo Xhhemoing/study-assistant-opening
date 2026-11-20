@@ -96,12 +96,35 @@ function resolveDayEnd(free: readonly TimeBlock[], options: PlanDayOptions): Day
   return { endMs: Date.parse(`${day}T23:59:59.999Z`), exclusive: false };
 }
 
+function resolveReservationDayBounds(
+  free: readonly TimeBlock[],
+  options: PlanDayOptions,
+  dayEnd: DayEndResolution,
+): { startMs: number; endMs: number } | null {
+  if (options.localDate && options.timeZone) {
+    const { dayStart, nextDayStart } = resolveLocalDayBounds(options.localDate, options.timeZone);
+    return { startMs: dayStart.getTime(), endMs: nextDayStart.getTime() };
+  }
+  if (options.dayEnd && Number.isFinite(dayEnd.endMs)) {
+    const utcDay = new Date(dayEnd.endMs).toISOString().slice(0, 10);
+    const { dayStart, nextDayStart } = resolveLocalDayBounds(utcDay, "UTC");
+    return { startMs: dayStart.getTime(), endMs: nextDayStart.getTime() };
+  }
+  const freeStarts = free.filter((block) => block.kind === "free").map((block) => Date.parse(block.start));
+  if (!freeStarts.length) return null;
+  const utcDay = new Date(Math.min(...freeStarts)).toISOString().slice(0, 10);
+  const { dayStart, nextDayStart } = resolveLocalDayBounds(utcDay, "UTC");
+  return { startMs: dayStart.getTime(), endMs: nextDayStart.getTime() };
+}
+
 /**
- * Earliest allowable start: the later of a retest's recommendedAt and a deferral's
- * notBefore. Null when neither is set.
+ * Earliest allowable start: the later of a retest's active start target
+ * (`scheduledStartAt ?? recommendedAt`) and a task's `notBefore`.
+ * Null when neither is set.
  */
 export function taskNotBeforeAt(task: TaskItem): string | null {
-  const candidates = [task.retest?.recommendedAt, task.notBefore].filter(
+  const retestTarget = task.retest?.scheduledStartAt ?? task.retest?.recommendedAt;
+  const candidates = [retestTarget, task.notBefore].filter(
     (value): value is string => typeof value === "string" && value !== "",
   );
   if (!candidates.length) return null;
@@ -113,6 +136,21 @@ function isRetestNotYetDue(task: TaskItem, endMs: number, exclusive: boolean): b
   if (!notBefore) return false;
   const t = Date.parse(notBefore);
   return exclusive ? t >= endMs : t > endMs;
+}
+
+/**
+ * Explicit retest reservations (`scheduledStartAt`) are pinned to their local calendar
+ * day in the workspace timeZone — neither an earlier day nor a later day may schedule them.
+ */
+function isReservedForDifferentDay(
+  task: TaskItem,
+  bounds: { startMs: number; endMs: number } | null,
+): boolean {
+  const scheduled = task.retest?.scheduledStartAt;
+  if (!scheduled || !bounds) return false;
+  const ms = Date.parse(scheduled);
+  if (!Number.isFinite(ms)) return true;
+  return ms < bounds.startMs || ms >= bounds.endMs;
 }
 
 function taskNotBeforeMs(task: TaskItem): number {
@@ -196,7 +234,9 @@ export function planDay(
   free: readonly TimeBlock[],
   options: PlanDayOptions = {},
 ): DayPlanResult {
-  const { startMs: dayStartMs, endMs: dayEndMs, exclusive: dayEndExclusive } = resolveDayEnd(free, options);
+  const dayEnd = resolveDayEnd(free, options);
+  const { startMs: dayStartMs, endMs: dayEndMs, exclusive: dayEndExclusive } = dayEnd;
+  const reservationBounds = resolveReservationDayBounds(free, options, dayEnd);
   const planningNowMs = options.planningNow
     ? Date.parse(options.planningNow)
     : Number.NEGATIVE_INFINITY;
@@ -206,7 +246,11 @@ export function planDay(
     if (ids.has(task.id)) throw new Error(`duplicate task id: ${task.id}`);
     ids.add(task.id);
     return task;
-  }).filter((task) => task.status === "pending" && !isRetestNotYetDue(task, dayEndMs, dayEndExclusive));
+  }).filter((task) =>
+    task.status === "pending"
+    && !isRetestNotYetDue(task, dayEndMs, dayEndExclusive)
+    && !isReservedForDifferentDay(task, reservationBounds),
+  );
   const preferred = options.preferredOrder;
   if (preferred && preferred.length) {
     const rank = new Map(preferred.map((id, index) => [id, index]));
