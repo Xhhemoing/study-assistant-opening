@@ -50,7 +50,7 @@ describe("deterministic XML-escaped SVG poster builder", () => {
     const validPair = "𠮷"; // U+20BB7
 
     const dirtyCard = {
-      subjectLabel: `高数\uFFFE测\uFFFF试`,
+      subjectLabel: `高数\uFFFE\u0080测\u009F\uFFFF试`,
       pitfallTitle: `包含${loneHigh}孤立高代理与${loneLow}孤立低代理以及合法字形${validPair}\uFFFF`,
       trapSummary: `带空字符\u0000与\uFFFE和\uFFFF的易错摘要${loneHigh}`,
       takeawayRule: `口诀\uFFFF保留合法字符${validPair}${loneLow}并保持合法XML`,

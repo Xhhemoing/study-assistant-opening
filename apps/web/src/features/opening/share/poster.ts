@@ -1,36 +1,9 @@
-import { toDisplayShareCard, type ShareCardData } from "./schema";
+import { hasDisallowedXmlOrControlChars, toDisplayShareCard, type ShareCardData } from "./schema";
 
-/**
- * Strip characters disallowed in XML 1.0 (Section 2.2):
- * C0 controls (except TAB/LF/CR), DEL (0x7F), noncharacters U+FFFE/U+FFFF,
- * and unpaired UTF-16 surrogates (U+D800-U+DFFF). Valid surrogate pairs are kept.
- */
 export function stripXmlIllegalChars(value: string): string {
   let result = "";
-  for (let i = 0; i < value.length; i++) {
-    const code = value.charCodeAt(i);
-    if (code >= 0xd800 && code <= 0xdbff) {
-      const next = i + 1 < value.length ? value.charCodeAt(i + 1) : 0;
-      if (next >= 0xdc00 && next <= 0xdfff) {
-        result += value[i]! + value[i + 1]!;
-        i++;
-      }
-      continue;
-    }
-    if (code >= 0xdc00 && code <= 0xdfff) {
-      continue;
-    }
-    const disallowed =
-      (code >= 0x00 && code <= 0x08) ||
-      code === 0x0b ||
-      code === 0x0c ||
-      (code >= 0x0e && code <= 0x1f) ||
-      code === 0x7f ||
-      code === 0xfffe ||
-      code === 0xffff;
-    if (!disallowed) {
-      result += value[i]!;
-    }
+  for (const char of value) {
+    if (!hasDisallowedXmlOrControlChars(char)) result += char;
   }
   return result;
 }
@@ -133,7 +106,7 @@ export function buildPosterFilename(
  * Build a deterministic, pure XML-escaped paper-aesthetic SVG poster.
  * Contains zero scripts, foreignObject nodes, or external URLs.
  */
-export function buildPitfallPosterSvg(input: ShareCardData): string {
+export function buildPitfallPosterSvg(input: ShareCardData, publicTryEnabled = true): string {
   const card = toDisplayShareCard(input);
 
   const width = 900;
@@ -201,10 +174,14 @@ export function buildPitfallPosterSvg(input: ShareCardData): string {
     `  <text x="136" y="${ruleBoxY + 42}" font-family="Inter, PingFang SC, Microsoft YaHei, sans-serif" font-size="18" font-weight="700" fill="#047857">避坑口诀</text>`,
     `  <text x="136" y="${ruleBoxY + 86}" font-family="Inter, PingFang SC, Microsoft YaHei, sans-serif" font-size="23" font-weight="600" fill="#1f1e1b">${renderTspans(ruleLines, 136, 38)}</text>`,
     `  <line x1="108" y1="1028" x2="792" y2="1028" stroke="#e8e5dc" stroke-width="1.5" />`,
-    `  <text x="108" y="1072" font-family="Inter, PingFang SC, Microsoft YaHei, sans-serif" font-size="20" font-weight="600" fill="#1f1e1b">去 AIstudy 体验 90 秒亲自排雷挑战</text>`,
-    `  <text x="108" y="1104" font-family="Inter, PingFang SC, Microsoft YaHei, sans-serif" font-size="16" font-weight="400" fill="#6e6c65">匿名学习避雷卡 · 不含个人账号与成绩信息 · /try</text>`,
+    `  <text x="108" y="1072" font-family="Inter, PingFang SC, Microsoft YaHei, sans-serif" font-size="20" font-weight="600" fill="#1f1e1b">${sharePosterFooter(publicTryEnabled)}</text>`,
+    `  <text x="108" y="1104" font-family="Inter, PingFang SC, Microsoft YaHei, sans-serif" font-size="16" font-weight="400" fill="#6e6c65">匿名学习避雷卡 · 不含个人账号与成绩信息</text>`,
     `</svg>`,
   ]
     .filter(Boolean)
     .join("\n");
+}
+
+export function sharePosterFooter(publicTryEnabled: boolean): string {
+  return publicTryEnabled ? "90 秒亲自排雷挑战 · /try" : "复习时再看一遍避坑口诀";
 }

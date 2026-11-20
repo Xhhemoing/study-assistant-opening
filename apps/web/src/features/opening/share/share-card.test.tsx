@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { resolveImages } from "next/dist/lib/metadata/resolvers/resolve-opengraph";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -42,6 +43,14 @@ import { InvalidShareCard, PitfallShareCard } from "./share-card";
 import { signPitfallShareToken } from "./token-codec";
 
 const TEST_SECRET = "share-ui-test-secret-0123456789abcdef0123";
+const sampleCard = {
+  subjectLabel: "数据结构",
+  pitfallTitle: "BFS 入队时就该标记已访问",
+  trapSummary: "等出队才标记，同一节点会被重复压入队列。",
+  takeawayRule: "BFS 标访问一定在入队那一刻完成。",
+  cohortSampleSize: 36,
+  cohortTrapRate: 52,
+};
 
 describe("PitfallShareCard, /s/[token] page, and opengraph-image", () => {
   const originalSecret = process.env.AUTH_SECRET;
@@ -72,7 +81,8 @@ describe("PitfallShareCard, /s/[token] page, and opengraph-image", () => {
     }
   });
 
-  it("renders valid share card, shows cohort badge only when n >= 30, and downloads escaped SVG poster", async () => {
+  it.each([true, false])("renders the share card and downloads its SVG with public try enabled=%s", async (enabled) => {
+    vi.stubEnv("OPENING_PUBLIC_TRY", enabled ? "1" : "0");
     const createObjectURL = vi.fn(() => "blob:mock-poster-url");
     const revokeObjectURL = vi.fn();
     Object.defineProperty(URL, "createObjectURL", {
@@ -109,8 +119,8 @@ describe("PitfallShareCard, /s/[token] page, and opengraph-image", () => {
     expect(host.textContent).toContain("条件概率分母别代错");
     expect(host.textContent).toContain("约 71% 同学曾在此踩坑 · 55 人样本");
 
-    const cta = host.querySelector('a[href="/try"]');
-    expect(cta?.textContent).toContain("90 秒亲自排雷挑战");
+    const cta = host.querySelector(enabled ? 'a[href="/try"]' : 'a[href="/login"]');
+    expect(cta?.textContent).toContain(enabled ? "90 秒亲自排雷挑战" : "登录后开启完整诊断");
 
     const downloadButton = Array.from(host.querySelectorAll("button")).find((btn) =>
       btn.textContent?.includes("保存 SVG 海报"),
@@ -125,6 +135,19 @@ describe("PitfallShareCard, /s/[token] page, and opengraph-image", () => {
     const blobArg = (createObjectURL.mock.calls[0] as unknown[] | undefined)?.[0];
     expect(blobArg).toBeInstanceOf(Blob);
     expect((blobArg as Blob).type).toBe("image/svg+xml;charset=utf-8");
+    const svg = await act(() => new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result));
+      reader.onerror = () => reject(reader.error);
+      reader.readAsText(blobArg as Blob);
+    }));
+    if (enabled) {
+      expect(svg).toContain("/try");
+      expect(svg).toContain("90 秒亲自排雷挑战");
+    } else {
+      expect(svg).not.toMatch(/\/try|90 秒亲自排雷挑战/);
+      expect(svg).toContain("复习时再看一遍避坑口诀");
+    }
     expect(clickSpy).toHaveBeenCalledOnce();
     expect(host.textContent).toContain("已生成 SVG 海报");
   });
@@ -192,20 +215,48 @@ describe("PitfallShareCard, /s/[token] page, and opengraph-image", () => {
     expect(host.textContent).toContain("这张避雷卡已失效或链接不完整");
   });
 
-  it("generates non-cacheable OpenGraph ImageResponse for valid, small-cohort, and invalid tokens", async () => {
-    expect(ogDynamic).toBe("force-dynamic");
+  it("uses the configured self-hosted origin for the share page metadata", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("VERCEL_ENV", undefined);
+    vi.stubEnv("PUBLIC_BASE_URL", "https://study.example:8443/");
+    const { token } = signPitfallShareToken(sampleCard);
+    const metadata = await generateMetadata({ params: Promise.resolve({ token }) });
+    expect(metadata.metadataBase?.href).toBe("https://study.example:8443/");
+    expect(metadata.openGraph).toMatchObject({
+      title: `${sampleCard.pitfallTitle} · 防踩坑避雷卡`,
+      description: sampleCard.trapSummary,
+      type: "article",
+    });
+    const imagePath = `/s/${token}/opengraph-image`;
+    const images = resolveImages(imagePath, metadata.metadataBase ?? null, true);
+    expect(images).toMatchObject([{ url: { href: `https://study.example:8443${imagePath}` } }]);
+  });
 
-    const signed = signPitfallShareToken(
-      {
-        subjectLabel: "数据结构",
-        pitfallTitle: "BFS 入队时就该标记已访问",
-        trapSummary: "等出队才标记，同一节点会被重复压入队列。",
-        takeawayRule: "BFS 标访问一定在入队那一刻完成。",
-        cohortSampleSize: 36,
-        cohortTrapRate: 52,
-      },
-      { authSecret: TEST_SECRET },
-    );
+  it.each([undefined, "invalid-url", "file:///tmp"])("handles an unavailable public origin (%s)", async (origin) => {
+    vi.stubEnv("PUBLIC_BASE_URL", origin);
+    const { token } = signPitfallShareToken(sampleCard);
+    const metadata = await generateMetadata({ params: Promise.resolve({ token }) });
+    expect(metadata.metadataBase).toBeNull();
+    expect(metadata.openGraph?.description).toBe(sampleCard.trapSummary);
+  });
+
+  it("returns the same non-cacheable plaintext 404 for malformed, expired and mis-signed OG requests", async () => {
+    const expired = signPitfallShareToken({ ...sampleCard, ttlSeconds: 60 }, { nowMs: Date.now() - 120_000 });
+    const misSigned = signPitfallShareToken(sampleCard, { authSecret: `${TEST_SECRET}-other` });
+    for (const token of ["malformed", expired.token, misSigned.token]) {
+      const response = await OpenGraphImage({ params: Promise.resolve({ token }) });
+      expect(response.status).toBe(404);
+      expect(response.headers.get("cache-control")).toBe("no-store");
+      expect(response.headers.get("content-type")).toBe("text/plain; charset=utf-8");
+      expect(await response.text()).toBe("Not Found");
+    }
+    expect(navMocks.ogCalls).toHaveLength(0);
+  });
+
+  it("generates non-cacheable OpenGraph images with the appropriate badge and footer", async () => {
+    expect(ogDynamic).toBe("force-dynamic");
+    vi.stubEnv("OPENING_PUBLIC_TRY", "1");
+    const signed = signPitfallShareToken(sampleCard);
 
     const validOg = await OpenGraphImage({
       params: Promise.resolve({ token: signed.token }),
@@ -220,6 +271,7 @@ describe("PitfallShareCard, /s/[token] page, and opengraph-image", () => {
     });
     expect(JSON.stringify(navMocks.ogCalls[0]?.element)).toContain("BFS 入队时就该标记已访问");
     expect(JSON.stringify(navMocks.ogCalls[0]?.element)).toContain("约 52% 同学曾在此踩坑 · 36 人样本");
+    expect(JSON.stringify(navMocks.ogCalls[0]?.element)).toContain("90 秒亲自排雷挑战 · /try");
 
     const smallCohort = signPitfallShareToken(
       {
@@ -232,23 +284,13 @@ describe("PitfallShareCard, /s/[token] page, and opengraph-image", () => {
       },
       { authSecret: TEST_SECRET },
     );
+    vi.stubEnv("OPENING_PUBLIC_TRY", "0");
     await OpenGraphImage({ params: Promise.resolve({ token: smallCohort.token }) });
     expect(JSON.stringify(navMocks.ogCalls[1]?.element)).not.toContain("90%");
     expect(JSON.stringify(navMocks.ogCalls[1]?.element)).not.toContain("人样本");
 
-    const fallbackOg = await OpenGraphImage({
-      params: Promise.resolve({ token: "invalid.token" }),
-    });
-    expect(fallbackOg).toBeInstanceOf(Response);
-    expect(fallbackOg.status).toBe(200);
-    expect(fallbackOg.headers.get("cache-control")).toBe("no-store");
-    expect(navMocks.ogCalls[2]?.options).toEqual({
-      width: 1200,
-      height: 630,
-      headers: { "Cache-Control": "no-store" },
-    });
-    expect(JSON.stringify(navMocks.ogCalls[2]?.element)).toContain("把容易做错的题，变成清晰的避坑口诀");
-    expect(JSON.stringify(navMocks.ogCalls[2]?.element)).not.toMatch(/signature|hmac|secret/i);
+    expect(JSON.stringify(navMocks.ogCalls[1]?.element)).not.toMatch(/\/try|90 秒亲自排雷挑战/);
+    expect(JSON.stringify(navMocks.ogCalls[1]?.element)).toContain("复习时再看一遍避坑口诀");
   });
 
   it("routes share card CTAs to /login when tryAvailable is false or OPENING_PUBLIC_TRY=0", async () => {

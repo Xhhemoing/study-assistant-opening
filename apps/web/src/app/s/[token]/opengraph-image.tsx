@@ -1,4 +1,6 @@
 import { ImageResponse } from "next/og";
+import { allowsPublicTryChallenge } from "../../../features/opening/access-policy";
+import { sharePosterFooter } from "../../../features/opening/share/poster";
 import { toDisplayShareCard } from "../../../features/opening/share/schema";
 import { verifyPitfallShareToken } from "../../../features/opening/share/token-codec";
 
@@ -28,61 +30,10 @@ export default async function OpenGraphImage({ params }: OpenGraphImageProps) {
   const verified = verifyPitfallShareToken(token);
 
   if (!verified.ok) {
-    return new ImageResponse(
-      (
-        <div
-          style={{
-            width: "100%",
-            height: "100%",
-            display: "flex",
-            flexDirection: "column",
-            justifyContent: "space-between",
-            padding: "56px 64px",
-            backgroundColor: "#faf9f5",
-            color: "#1f1e1b",
-            fontFamily: "sans-serif",
-          }}
-        >
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-            }}
-          >
-            <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
-              <span style={{ fontSize: "28px", fontWeight: 700 }}>AIstudy</span>
-              <span style={{ fontSize: "22px", color: "#5e5d59" }}>· 防踩坑避雷卡</span>
-            </div>
-          </div>
-
-          <div style={{ display: "flex", flexDirection: "column", gap: "18px" }}>
-            <div style={{ fontSize: "52px", fontWeight: 700, lineHeight: 1.25 }}>
-              把容易做错的题，变成清晰的避坑口诀
-            </div>
-            <div style={{ fontSize: "26px", color: "#5e5d59", lineHeight: 1.5 }}>
-              匿名学习卡片分享 · 欢迎前往 AIstudy 体验 90 秒亲自排雷挑战
-            </div>
-          </div>
-
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-              borderTop: "2px solid #e8e5dc",
-              paddingTop: "24px",
-              fontSize: "22px",
-              color: "#6e6c65",
-            }}
-          >
-            <span>AIstudy 学习助手</span>
-            <span style={{ color: "#047857", fontWeight: 600 }}>90 秒亲自排雷挑战 · /try</span>
-          </div>
-        </div>
-      ),
-      OG_RESPONSE_OPTIONS,
-    );
+    return new Response("Not Found", {
+      status: 404,
+      headers: { "Cache-Control": "no-store", "Content-Type": "text/plain; charset=utf-8" },
+    });
   }
 
   const card = toDisplayShareCard(verified.payload);
@@ -231,7 +182,9 @@ export default async function OpenGraphImage({ params }: OpenGraphImageProps) {
             }}
           >
             <span>匿名学习避雷卡 · 不含个人账号与成绩信息</span>
-            <span style={{ color: "#1f1e1b", fontWeight: 600 }}>90 秒亲自排雷挑战 · /try</span>
+            <span style={{ color: "#1f1e1b", fontWeight: 600 }}>
+              {sharePosterFooter(allowsPublicTryChallenge())}
+            </span>
           </div>
         </div>
       </div>

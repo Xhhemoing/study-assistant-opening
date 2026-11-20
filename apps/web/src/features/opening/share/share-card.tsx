@@ -16,7 +16,7 @@ export function PitfallShareCard({ card, tryAvailable = true }: PitfallShareCard
 
   const handleDownloadPoster = useCallback(() => {
     try {
-      const svg = buildPitfallPosterSvg(safeCard);
+      const svg = buildPitfallPosterSvg(safeCard, tryAvailable);
       const blob = new Blob([svg], { type: "image/svg+xml;charset=utf-8" });
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
@@ -31,7 +31,7 @@ export function PitfallShareCard({ card, tryAvailable = true }: PitfallShareCard
     } catch {
       setDownloadStatus("error");
     }
-  }, [safeCard]);
+  }, [safeCard, tryAvailable]);
 
   const showCohortBadge = safeCard.cohortTrapRate !== null;
   const primaryHref = tryAvailable ? "/try" : "/login";

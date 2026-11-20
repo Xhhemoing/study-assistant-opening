@@ -11,11 +11,24 @@ type SharePageProps = {
   params: Promise<{ token: string }>;
 };
 
+function shareMetadataBase(): URL | null {
+  const configured = process.env.PUBLIC_BASE_URL?.trim();
+  if (!configured) return null;
+  try {
+    const url = new URL(configured);
+    return url.protocol === "https:" || url.protocol === "http:" ? new URL(url.origin) : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function generateMetadata({ params }: SharePageProps): Promise<Metadata> {
   const { token } = await params;
   const verified = verifyPitfallShareToken(token);
+  const metadataBase = shareMetadataBase();
   if (!verified.ok) {
     return {
+      metadataBase,
       title: "防踩坑避雷卡 | AIstudy",
       description: "AIstudy 匿名学习避雷卡",
       robots: { index: false, follow: false },
@@ -24,6 +37,7 @@ export async function generateMetadata({ params }: SharePageProps): Promise<Meta
 
   const card = toDisplayShareCard(verified.payload);
   return {
+    metadataBase,
     title: `${card.pitfallTitle} · 防踩坑避雷卡 | AIstudy`,
     description: card.trapSummary,
     robots: { index: false, follow: false },
