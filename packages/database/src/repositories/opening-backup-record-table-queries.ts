@@ -1,4 +1,6 @@
 import { projectBackupFormalGoalReferences, projectBackupCourseMilestoneReferences } from "@aistudy/domain";
+import { readBackupLibrary } from "./opening-backup-library";
+import { readBackupCourseAssets } from "./opening-backup-course-assets";
 import { readOpeningBackupCourseRecords } from "./opening-backup-course-records";
 import { readOpeningBackupLearningLinks } from "./opening-backup-learning-links";
 import { retainCompleteObservationChains } from "./opening-backup-observation-chains";
@@ -235,7 +237,8 @@ export async function readOpeningBackupTableRows(
   tables.opening_learning_attempts = asRows(await tx`
     SELECT a.id,a.workspace_id,a.owner_user_id,a.session_id,a.course_id,a.activity_id,a.skill_label,a.requirement_key,
       a.problem_id,a.item_version_id,a.source_ids,a.source_versions,a.started_at,a.submitted_at,a.observation_id,
-      a.client_key,a.create_intent,a.history_revision,a.context_anchor,a.pre_answer_confidence
+      a.client_key,CASE WHEN jsonb_typeof(a.create_intent->'examSprint')='object' THEN a.create_intent #- '{examSprint,partSnapshot}'
+        ELSE a.create_intent END AS create_intent,a.history_revision,a.context_anchor,a.pre_answer_confidence
     FROM opening_learning_attempts a WHERE a.workspace_id=${id} AND a.owner_user_id=${userId}
       AND ${includedLearningSession(tx,id,userId,tx`a.session_id`)}
       AND ${cleanUuidSources(tx,id,tx`a.source_ids`)} ORDER BY a.id`);
@@ -340,5 +343,7 @@ export async function readOpeningBackupTableRows(
     WHERE workspace_id=${id} AND owner_user_id=${userId} AND id = ANY(${includedEventIds}::uuid[])
     ORDER BY session_id, version, id`);
   Object.assign(tables, await readOpeningBackupLearningLinks(tx, id, userId, tables));
+  Object.assign(tables, await readBackupLibrary(tx, id, tables));
+  await readBackupCourseAssets(tx, id, userId, tables);
   return tables;
 }

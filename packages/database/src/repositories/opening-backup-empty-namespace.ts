@@ -8,19 +8,19 @@
 import type { Sql } from "postgres";
 import { OPENING_BACKUP_TABLES, type OpeningBackupTable } from "./opening-backup-records";
 
-/** Tables that must never appear in an Opening restore apply (secrets / paid queues / auth). */
-export const OPENING_RESTORE_NEVER_TABLES = [
-  "sessions",
-  "opening_jobs",
-  "opening_outbox",
-  "opening_tutor_jobs",
-  "opening_budget_reservations",
-  "opening_parent_interaction_budgets",
-  "opening_assistant_proposals",
-  "opening_connections",
-  "opening_connection_credentials",
-  "opening_model_provider_credentials",
-  "opening_query_ephemeral_provenance",
+import { BACKUP_FORBIDDEN_TABLES as forbiddenTables, isForbiddenBackupTable } from "../../../contracts/src/opening/backup-inventory";
+
+/** Shared with the native wire parser and the domain preflight before any database access. */
+export const BACKUP_FORBIDDEN_TABLES = forbiddenTables;
+export const OPENING_RESTORE_NEVER_TABLES = BACKUP_FORBIDDEN_TABLES;
+
+// Explicitly outside the Opening learner inventory. Adding a migration requires classification.
+export const EXPLICIT_NON_EXPORTED_WORKSPACE_TABLES = [
+  "workspaces", // Restore authenticates the existing namespace.
+  "explorations", "exploration_branches", "exploration_blocks", "promotion_records", "promotion_targets", // Native collections.
+  "content_packages", "syllabus_nodes", // Legacy practice catalog.
+  "opening_source_embeddings", // Rebuilt embedding index.
+  "opening_learning_experience_events", // Operational experience telemetry.
 ] as const;
 
 export type OpeningRestoreNamespaceCounts = Record<OpeningBackupTable, number>;
@@ -48,6 +48,8 @@ export function evaluateOpeningRestoreEmptyNamespace(
       totalRows: -1,
     };
   }
+  const forbidden = [...Object.keys(counts), ...OPENING_BACKUP_TABLES].find(isForbiddenBackupTable);
+  if (forbidden) return { ok: false, code: "TARGET_NOT_EMPTY", errors: [`Forbidden backup table: ${forbidden}`], totalRows: -1 };
   const errors: string[] = [];
   let totalRows = 0;
   for (const table of OPENING_BACKUP_TABLES) {
@@ -78,6 +80,22 @@ export async function readOpeningRestoreNamespaceCounts(
   const id = workspaceId;
   const rows = await sql`
     SELECT 'workspace_preferences'::text AS table_name, count(*)::int AS n FROM workspace_preferences WHERE workspace_id = ${id}
+    UNION ALL SELECT 'library_documents', count(*)::int FROM library_documents WHERE workspace_id = ${id}
+    UNION ALL SELECT 'library_blocks', count(*)::int FROM library_blocks WHERE workspace_id = ${id}
+    UNION ALL SELECT 'library_revisions', count(*)::int FROM library_revisions WHERE workspace_id = ${id}
+    UNION ALL SELECT 'library_relations', count(*)::int FROM library_relations WHERE workspace_id = ${id}
+    UNION ALL SELECT 'library_properties', count(*)::int FROM library_properties WHERE workspace_id = ${id}
+    UNION ALL SELECT 'opening_note_provenance', count(*)::int FROM opening_note_provenance WHERE workspace_id = ${id}
+    UNION ALL SELECT 'opening_course_knowledge', count(*)::int FROM opening_course_knowledge WHERE workspace_id = ${id}
+    UNION ALL SELECT 'opening_knowledge_confirmations', count(*)::int FROM opening_knowledge_confirmations WHERE workspace_id = ${id}
+    UNION ALL SELECT 'opening_exam_sprints', count(*)::int FROM opening_exam_sprints WHERE workspace_id = ${id}
+    UNION ALL SELECT 'opening_exam_papers', count(*)::int FROM opening_exam_papers WHERE workspace_id = ${id}
+    UNION ALL SELECT 'opening_exam_reviews', count(*)::int FROM opening_exam_reviews WHERE workspace_id = ${id}
+    UNION ALL SELECT 'opening_exam_bindings', count(*)::int FROM opening_exam_bindings child JOIN opening_exam_sprints sprint ON sprint.id=child.sprint_id WHERE sprint.workspace_id = ${id}
+    UNION ALL SELECT 'opening_exam_attempt_links', count(*)::int FROM opening_exam_attempt_links child JOIN opening_exam_sprints sprint ON sprint.id=child.sprint_id WHERE sprint.workspace_id = ${id}
+    UNION ALL SELECT 'opening_exam_help_receipts', count(*)::int FROM opening_exam_help_receipts child JOIN opening_exam_attempt_links link ON link.id=child.attempt_link_id JOIN opening_exam_sprints sprint ON sprint.id=link.sprint_id WHERE sprint.workspace_id = ${id}
+    UNION ALL SELECT 'opening_exam_source_mappings', count(*)::int FROM opening_exam_source_mappings child JOIN opening_exam_sprints sprint ON sprint.id=child.sprint_id WHERE sprint.workspace_id = ${id}
+    UNION ALL SELECT 'opening_exam_source_observations', count(*)::int FROM opening_exam_source_observations child JOIN opening_exam_sprints sprint ON sprint.id=child.sprint_id WHERE sprint.workspace_id = ${id}
     UNION ALL SELECT 'courses', count(*)::int FROM courses WHERE workspace_id = ${id}
     UNION ALL SELECT 'course_goals', count(*)::int FROM course_goals WHERE workspace_id = ${id}
     UNION ALL SELECT 'course_goal_links', count(*)::int FROM course_goal_links WHERE workspace_id = ${id}
@@ -130,6 +148,7 @@ export async function readOpeningRestoreNamespaceCounts(
   ) as OpeningRestoreNamespaceCounts;
   for (const row of rows) {
     const name = String((row as { table_name: string }).table_name);
+    if (isForbiddenBackupTable(name)) throw new Error(`Forbidden backup table: ${name}`);
     if ((OPENING_BACKUP_TABLES as readonly string[]).includes(name)) {
       counts[name as OpeningBackupTable] = Number((row as { n: number }).n);
     }
@@ -139,5 +158,5 @@ export async function readOpeningRestoreNamespaceCounts(
 
 /** True when a backup table name is permanently banned from restore apply. */
 export function isOpeningRestoreNeverTable(table: string): boolean {
-  return (OPENING_RESTORE_NEVER_TABLES as readonly string[]).includes(table);
+  return isForbiddenBackupTable(table);
 }

@@ -1,8 +1,9 @@
+import { isForbiddenBackupTable } from "../../../contracts/src/opening/backup-inventory";
 import { applyNativeNoteExportPrivacy } from "./native-note-privacy";
 import { attachNativeLearningLinks } from "./native-learning-links";
 import type { Sql } from "postgres";
 import {
-  buildNativeBackup,
+  buildNativeBackup, NATIVE_BACKUP_TABLES,
   type NativeBackupRecord,
   type NativeBackupSnapshot,
 } from "@aistudy/domain/native";
@@ -33,6 +34,8 @@ export async function dumpWorkspaceSnapshot(
   workspaceId: string,
   ownerUserId: string,
 ): Promise<NativeBackupSnapshot> {
+  const forbidden = NATIVE_BACKUP_TABLES.find(isForbiddenBackupTable);
+  if (forbidden) throw new BackupRestoreError("VALIDATION", `Forbidden backup table: ${forbidden}`);
   const workspace = await assertBackupWorkspaceOwner(sql, workspaceId, ownerUserId);
   const [
     courses,
@@ -103,6 +106,7 @@ export function snapshotToPackage(snapshot: NativeBackupSnapshot) {
 }
 
 async function selectAll(sql: Sql, table: string, workspaceId: string): Promise<NativeBackupRecord[]> {
+  if (isForbiddenBackupTable(table)) throw new BackupRestoreError("VALIDATION", `Forbidden backup table: ${table}`);
   const rows = await sql<Record<string, unknown>[]>`
     SELECT * FROM ${sql(table)} WHERE workspace_id = ${workspaceId}
   `;

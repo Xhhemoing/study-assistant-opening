@@ -1,3 +1,5 @@
+import { findForbiddenBackupTable } from "../../../contracts/src/opening/backup-inventory";
+import { BackupRestoreError } from "./backup-types";
 import { assertNativeCardRestorePrivacy, assertNativeNoteRestorePrivacy } from "./native-note-privacy";
 import type { Sql } from "postgres";
 import { listMigrationFiles } from "../migrate";
@@ -7,6 +9,8 @@ import { applyRestorePlan, loadExistingIds } from "./backup-insert";
 import { wrapBackupError } from "./backup-map";
 import type { BackupRestoreRepository } from "./backup-types";
 
+// This entrypoint is also re-exported by the database package's public barrel.
+export { BACKUP_FORBIDDEN_TABLES, EXPLICIT_NON_EXPORTED_WORKSPACE_TABLES } from "./opening-backup-empty-namespace";
 export {
   BackupRestoreError,
   type BackupRestoreErrorCode,
@@ -16,7 +20,8 @@ export {
 export function createBackupRestoreRepository(sql: Sql): BackupRestoreRepository {
   return {
     async exportWorkspace(input) {
-      return sql.begin(async tx => {
+      // Native privacy writers share this owner lock. A read-only transaction cannot take it.
+      return sql.begin("isolation level repeatable read", async tx => {
         await tx`SELECT id FROM workspaces WHERE id=${input.workspaceId} AND owner_user_id=${input.ownerUserId} FOR UPDATE`;
         const snapshot = await dumpWorkspaceSnapshot(tx as unknown as Sql, input.workspaceId, input.ownerUserId);
         return snapshotToPackage(snapshot);
@@ -24,6 +29,8 @@ export function createBackupRestoreRepository(sql: Sql): BackupRestoreRepository
     },
 
     async restoreWorkspace(input) {
+      const forbidden = findForbiddenBackupTable(input.packed);
+      if (forbidden) throw new BackupRestoreError("VALIDATION", `Forbidden backup table: ${forbidden}`);
       await assertBackupWorkspaceOwner(sql, input.workspaceId, input.ownerUserId);
       try {
         const compatibleMigrationIds = await listMigrationFiles();

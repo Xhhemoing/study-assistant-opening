@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Sql } from "postgres";
-import { readOpeningBackupRecords } from "./opening-backup-records";
+import { OPENING_BACKUP_TABLES, readOpeningBackupRecords } from "./opening-backup-records";
 import { OpeningBackupSourceError } from "./opening-backup-sources";
 
 const workspaceId = "a1000000-0000-4000-8000-000000000001";
@@ -54,7 +54,7 @@ describe("readOpeningBackupRecords", () => {
     expect(sql.option).toMatch(/read only/i);
     expect(sql.calls[0]?.values).toEqual([workspaceId, ownerUserId]);
     expect(snapshot.privacyEpoch).toBe(3);
-    expect(Object.keys(snapshot.tables)).toHaveLength(45);
+    expect(Object.keys(snapshot.tables).sort()).toEqual([...OPENING_BACKUP_TABLES].sort());
     expect(snapshot.tables).toHaveProperty("course_requirement_evidence_links");
     expect(snapshot.tables).toHaveProperty("opening_learning_asset_links");
     expect(snapshot.tables).toHaveProperty("course_goals");

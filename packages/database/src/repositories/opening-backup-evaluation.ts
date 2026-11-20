@@ -26,6 +26,11 @@ export function normalizeOpeningImportedEvaluation(table: string, row: Record<st
   }
   if (table === "opening_learning_attempts" && record(row.create_intent)) {
     const intent = { ...row.create_intent };
+    if (record(intent.examSprint)) {
+      const exam = { ...intent.examSprint };
+      delete exam.partSnapshot;
+      intent.examSprint = exam;
+    }
     delete intent.spanCourseBinding;
     return { ...row, create_intent: intent };
   }
