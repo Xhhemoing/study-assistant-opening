@@ -6,7 +6,7 @@ import { restoreOpeningGradingMetadata } from "./opening-grading-restore";
 import { openingAdaptivePrefsSchema } from "@aistudy/contracts";
 import { cardSourcesIncluded } from "./card-sources";
 import { validateRetainedMaterialImportState } from "./opening-material-import-state";
-import { projectOpeningRestoreLibrary } from "./opening-backup-library";
+import { projectOpeningBackupCardSources, projectOpeningRestoreLibrary } from "./opening-backup-library";
 import { restoreKnowledgeDefinitions } from "./opening-backup-knowledge";
 /**
  * Opening-scoped restore apply executor (Q03).
@@ -474,8 +474,10 @@ export async function executeOpeningRestoreApply(
       errors: forbidden ? [`Forbidden backup table: ${forbidden}`] : preview.errors };
   }
   const normalized = normalizeOpeningRestoreHistory(args.backup as OpeningBackup);
-  const backup: OpeningBackup = { ...normalized,
-    tables: projectOpeningRestoreLibrary(normalized.tables as Record<string, Record<string, unknown>[]>) };
+  const tables = projectOpeningRestoreLibrary(normalized.tables as Record<string, Record<string, unknown>[]>);
+  const backup: OpeningBackup = { ...normalized, tables: {
+    ...tables, ...(tables.cards && { cards: projectOpeningBackupCardSources(tables) }),
+  } };
   const planned = planOpeningRestoreApply(backup, journal, {
     confirmLocalRestore: true,
     availableCourseIds: args.availableCourseIds,

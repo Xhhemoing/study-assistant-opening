@@ -6,7 +6,7 @@ import { retainBackupEventChains, type NativeBackupSnapshot, type NativeBackupRe
 import { contextSourceRefsIncluded, parseContextSourceRefs } from "./opening-context-provenance";
 import { BackupRestoreError } from "./backup-types";
 import { asRecords, filesFromBlocks } from "./backup-map";
-import { parseBackupSourceRefs, type BackupSourceRef } from "./native-backup-teaching";
+import { attachNativeCardPublicationSources, parseBackupSourceRefs, type BackupSourceRef } from "./native-backup-teaching";
 
 export type NoteBackupProvenance = { contextSourceRefs: BackupSourceRef[] };
 
@@ -51,7 +51,9 @@ export async function applyNativeNoteExportPrivacy(sql: Sql, workspaceId: string
   }
   const blockedCards = new Set((await sql`SELECT c.id FROM cards c WHERE c.workspace_id=${workspaceId}
     AND NOT (${cardReadable(sql, workspaceId)})`).map(row => String(row.id)));
-  return filterNativeNotes(snapshot, provenance, blockedCards);
+  const admitted = filterNativeNotes(snapshot, provenance, blockedCards);
+  const sourcesByDocument = new Map([...provenance].map(([id, value]) => [id, value?.contextSourceRefs ?? []]));
+  return { ...admitted, cards: attachNativeCardPublicationSources(admitted.cards, sourcesByDocument) };
 }
 
 /** Null denotes an ordinary note; absent metadata is only compatible with pre-0035 archives. */
@@ -101,7 +103,8 @@ export async function assertNativeCardRestorePrivacy(sql: Sql, workspaceId: stri
   const modern = Number.parseInt(packed.schemaManifest.latestMigrationId.slice(0, 4), 10) >= 64;
   for (const card of asRecords(packed.records.cards)) {
     const ids = card.sourceIds === undefined && !modern ? [] : card.sourceIds;
-    if (!Array.isArray(ids) || ids.length > 32 || !ids.every(id => uuidSchema.safeParse(id).success)) {
+    if (!Array.isArray(ids) || (card.originObservationRootId == null && ids.length > 32)
+      || !ids.every(id => uuidSchema.safeParse(id).success)) {
       throw new BackupRestoreError("VALIDATION", "card source lineage is missing or invalid");
     }
     if (card.originObservationRootId != null) {

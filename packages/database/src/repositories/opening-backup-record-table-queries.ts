@@ -1,6 +1,6 @@
 import { projectBackupFormalGoalReferences, projectBackupCourseMilestoneReferences } from "@aistudy/domain";
 import { retainBackupEventChains } from "@aistudy/domain/native";
-import { isPrivateExamActivity, privateExamDocumentIds, readBackupLibrary } from "./opening-backup-library";
+import { isPrivateExamActivity, privateExamDocumentIds, projectOpeningBackupCardSources, readBackupLibrary } from "./opening-backup-library";
 import { readBackupCourseAssets } from "./opening-backup-course-assets";
 import { readOpeningBackupCourseRecords } from "./opening-backup-course-records";
 import { readOpeningBackupLearningLinks } from "./opening-backup-learning-links";
@@ -474,6 +474,7 @@ export async function readOpeningBackupTableRows(
     ORDER BY session_id, version, id`);
   Object.assign(tables, await readOpeningBackupLearningLinks(tx, id, userId, tables));
   Object.assign(tables, libraryTables);
+  tables.cards = projectOpeningBackupCardSources(tables);
   await readBackupCourseAssets(tx, id, userId, tables);
   return tables;
 }

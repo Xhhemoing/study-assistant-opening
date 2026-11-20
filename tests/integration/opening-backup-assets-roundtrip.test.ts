@@ -4,7 +4,7 @@ import { expect, it } from "vitest";
 import type { Sql, TransactionSql } from "postgres";
 import { assertOpeningTestDatabase } from "@aistudy/config";
 import { nativeBackupPackageSchema } from "@aistudy/contracts";
-import type { ExamSprintState } from "@aistudy/contracts";
+import type { ActivitySpecPublishInput, ExamSprintState } from "@aistudy/contracts";
 import { applyExamSprintCommand, examSprintOverview, composeOpeningBackupDraft, createExamSprintState, validateOpeningRestore, type OpeningBackup } from "@aistudy/domain";
 import { EXAM_SPRINT_PACK } from "@aistudy/domain/exam-sprint-catalog";
 import { createSqlClient } from "../../packages/database/src/migrate";
@@ -15,6 +15,7 @@ import { createBackupRestoreRepository } from "../../packages/database/src/repos
 import { createOpeningKnowledgeRepository } from "../../packages/database/src/repositories/opening-knowledge";
 import { createOpeningSourceChunksRepository } from "../../packages/database/src/repositories/opening-source-chunks";
 import { createOpeningFirstLearningRepository } from "../../packages/database/src/repositories/opening-first-learning";
+import { createOpeningTeachingContentRepository } from "../../packages/database/src/repositories/opening-teaching-content";
 import { lockWorkspaceLearningHistory } from "../../packages/database/src/repositories/opening-learning-facts";
 import { createOpeningExamSprintRepository } from "../../packages/database/src/repositories/opening-exam-sprint";
 import { createOpeningExamIntegrationRepository } from "../../packages/database/src/repositories/opening-exam-integration";
@@ -191,13 +192,13 @@ function transactionClient(tx: TransactionSql): Sql {
   } }) as unknown as Sql;
 }
 
-it("excludes ordinary teaching text when only its publication spec cites the excluded source", async () => {
+it("excludes historical teaching text and dependent records when a superseded publication source is excluded", async () => {
   const url = assertOpeningTestDatabase(process.env.OPENING_TEST_DATABASE_URL!, process.env.OPENING_TEST_DB);
   const sql = createSqlClient(url.toString(), { max: 1 });
   const rollback = new Error("rollback teaching source fixture");
   const w = randomUUID(), u = randomUUID();
   const scope = { workspaceId: w, ownerUserId: u };
-  const doc = randomUUID(), block = randomUUID(), unit = randomUUID(), unrelated = randomUUID();
+  const block = randomUUID(), unrelated = randomUUID();
   const text = "Private material cited only by the teaching spec";
   try {
     await sql.begin("isolation level repeatable read", async tx => {
@@ -208,22 +209,16 @@ it("excludes ordinary teaching text when only its publication spec cites the exc
       const observation = await rows.observation(session, [initialSource]);
       const [origin] = await tx`SELECT activity_id FROM opening_learning_sessions WHERE id=${session}`;
       const activity = String(origin!.activity_id);
+      const teaching = createOpeningTeachingContentRepository(db);
+      const unit = await teaching.createUnit(scope, { title: "Lesson", blocks: [{ id: block, type: "text", content: { text } }] });
+      const doc = unit.documentId;
+      await teaching.publishActivitySpec(scope, { activityId: activity, teachingUnitId: unit.id,
+        revisionNumber: unit.currentRevisionNumber, expectedVersion: 0,
+        blockOrder: [{ blockId: block, blockType: "text", role: "teach" }], sourceRefs: [{ sourceId: source, version: 1 }] });
       await tx`INSERT INTO library_documents(id,workspace_id,title,lifecycle,current_revision_number) VALUES
-        (${doc},${w},'Lesson','published',1),(${unrelated},${w},'Independent essay','confirmed',1)`;
-      await tx`INSERT INTO library_blocks(id,workspace_id,document_id,type,position,content)
-        VALUES(${block},${w},${doc},'text',0,${tx.json({ text })})`;
-      await tx`INSERT INTO library_revisions(workspace_id,document_id,revision_number,title,lifecycle,blocks)
-        VALUES(${w},${doc},1,'Lesson','published',${tx.json([{ id: block, type: "text", position: 0, content: { text } }])})`;
-      await tx`INSERT INTO library_relations(workspace_id,from_type,from_id,to_type,to_id,relation_type)
-        VALUES(${w},'document',${unrelated},'block',${block},'references')`;
+        (${unrelated},${w},'Independent essay','confirmed',1)`;
       await tx`INSERT INTO library_properties(workspace_id,subject_type,subject_id,key,value_type,value)
         VALUES(${w},'document',${doc},'provenance','string','"lesson metadata"')`;
-      await tx`INSERT INTO opening_teaching_units(id,workspace_id,owner_user_id,title,document_id,current_revision_number)
-        VALUES(${unit},${w},${u},'Lesson',${doc},1)`;
-      await tx`INSERT INTO opening_teaching_activity_specs(id,workspace_id,owner_user_id,activity_id,teaching_unit_id,document_id,
-          revision_number,block_order,source_refs,version)
-        VALUES(${randomUUID()},${w},${u},${activity},${unit},${doc},1,
-          ${tx.json([{ blockId: block, blockType: "text", role: "teach" }])},${tx.json([{ sourceId: initialSource, version: 1 }])},1)`;
       const card = randomUUID(), review = randomUUID(), correction = randomUUID();
       await tx`INSERT INTO cards(id,workspace_id,owner_user_id,front,back,origin_observation_root_id,source_ids)
         VALUES(${card},${w},${u},'Automatic error card','Original answer',${observation},${[initialSource]})`;
@@ -234,13 +229,25 @@ it("excludes ordinary teaching text when only its publication spec cites the exc
       const native = () => createBackupRestoreRepository(db).exportWorkspace(scope);
       const opening = () => readOpeningBackupRecords(db, scope);
       expect((await native()).records.cards).toMatchObject([{ id: card, sourceDocumentId: null, originObservationRootId: observation }]);
-      await tx`UPDATE opening_teaching_activity_specs SET version=2,
-        source_refs=${tx.json([{ sourceId: initialSource, version: 1 }, { sourceId: source }])}
-        WHERE activity_id=${activity}`;
-      expect((await native()).records.blocks).toContainEqual(expect.objectContaining({ id: block, content: { text } }));
+      const newBlock = randomUUID();
+      const revised = await teaching.writeUnitBlocks(scope, unit.id, [{ id: newBlock, type: "text", content: { text: "Replacement text" } }]);
+      const currentRefs = [{ sourceId: initialSource, version: 1 }];
+      const input: ActivitySpecPublishInput = { activityId: activity, teachingUnitId: unit.id, revisionNumber: revised.revisionNumber,
+        expectedVersion: 1, blockOrder: [{ blockId: newBlock, blockType: "text", role: "teach" }], sourceRefs: currentRefs };
+      const spec = await teaching.publishActivitySpec(scope, input);
+      expect(spec.sourceRefs).toEqual(currentRefs);
+      expect(await teaching.publishActivitySpec(scope, input)).toEqual(spec);
+      await tx`INSERT INTO library_relations(workspace_id,from_type,from_id,to_type,to_id,relation_type)
+        VALUES(${w},'document',${unrelated},'block',${newBlock},'references')`;
+      expect((await native()).records.revisions).toContainEqual(expect.objectContaining({
+        documentId: doc, revisionNumber: 1, blocks: [expect.objectContaining({ id: block, content: { text } })],
+      }));
       expect((await opening()).tables).toMatchObject({
-        library_blocks: [expect.objectContaining({ id: block, content: { text } })],
-        library_relations: [expect.objectContaining({ to_id: block })],
+        library_blocks: [expect.objectContaining({ id: newBlock })],
+        library_relations: [expect.objectContaining({ to_id: newBlock })],
+        library_revisions: expect.arrayContaining([expect.objectContaining({
+          document_id: doc, revision_number: 1, blocks: [expect.objectContaining({ id: block, content: { text } })],
+        })]),
         library_properties: [expect.objectContaining({ subject_id: doc })],
         cards: [expect.objectContaining({ id: card, source_document_id: null })],
         learning_events: [expect.objectContaining({ id: review })],
@@ -253,6 +260,76 @@ it("excludes ordinary teaching text when only its publication spec cites the exc
         expect(JSON.stringify(artifact)).not.toContain(block);
         expect(JSON.stringify(artifact)).not.toContain(text);
         for (const omitted of [card, review, correction, observation]) {
+          expect(JSON.stringify(artifact)).not.toContain(omitted);
+        }
+      }
+      throw rollback;
+    }).catch(error => { if (error !== rollback) throw error; });
+  } finally { await sql.end(); }
+});
+
+it("retains publication sources on an Opening v2 card after restore and spec removal", async () => {
+  const url = assertOpeningTestDatabase(process.env.OPENING_TEST_DATABASE_URL!, process.env.OPENING_TEST_DB);
+  const sql = createSqlClient(url.toString(), { max: 1 });
+  const rollback = new Error("rollback Opening card restore"), discardSeed = new Error("discard source workspace");
+  const scope = { workspaceId: randomUUID(), ownerUserId: randomUUID() };
+  const { workspaceId: w, ownerUserId: u } = scope;
+  const card = randomUUID(), review = randomUUID(), block = randomUUID();
+  try {
+    await sql.begin("isolation level repeatable read", async outer => {
+      await outer`INSERT INTO users(id,email,display_name,password_hash) VALUES(${u},${u + "@backup.test"},'fixture','test')`;
+      let archive: { backup: OpeningBackup; observation: string; document: string; source: string } | undefined;
+      await outer.savepoint(async tx => {
+        await tx`INSERT INTO workspaces(id,owner_user_id) VALUES(${w},${u})`;
+        const db = transactionClient(tx), rows = backupRows(db, scope), teaching = createOpeningTeachingContentRepository(db);
+        const source = await rows.source(), session = await rows.learning();
+        const observation = await rows.observation(session);
+        const [lesson] = await tx`SELECT activity_id,course_id FROM opening_learning_sessions WHERE id=${session}`;
+        await tx`INSERT INTO courses(id,workspace_id,title,slug) VALUES(${lesson!.course_id},${w},'Course','course')`;
+        await tx`UPDATE opening_teaching_activities SET course_id=${lesson!.course_id} WHERE id=${lesson!.activity_id}`;
+        const unit = await teaching.createUnit(scope, { title: "Lesson",
+          blocks: [{ id: block, type: "text", content: { text: "Publication-derived lesson" } }] });
+        const spec = { activityId: String(lesson!.activity_id), teachingUnitId: unit.id,
+          revisionNumber: unit.currentRevisionNumber, blockOrder: [], sourceRefs: [{ sourceId: source, version: 1 }] };
+        await teaching.publishActivitySpec(scope, { ...spec, expectedVersion: 0 });
+        await teaching.publishActivitySpec(scope, { ...spec, expectedVersion: 1, sourceRefs: [] });
+        await tx`INSERT INTO cards(id,workspace_id,owner_user_id,front,back,origin_observation_root_id)
+          VALUES(${card},${w},${u},'Lesson card','Learner answer',${observation})`;
+        await tx`INSERT INTO learning_events(id,workspace_id,owner_user_id,type,schema_version,idempotency_key,occurred_at,content_id,content_version,payload)
+          VALUES(${review},${w},${u},'review',1,${review},now(),${card},1,'{"grade":"good"}')`;
+        const records = await readOpeningBackupRecords(db, scope);
+        expect(records.tables.cards).toMatchObject([{ id: card, source_ids: [source] }]);
+        const object = { sourceId: source, version: 1, sha256: sourceHash, bytes: sourceBytes.length };
+        const composed = composeOpeningBackupDraft({ records, staging: {
+          snapshot: { workspaceId: w, privacyEpoch: records.privacyEpoch, deletionJournal: records.deletionJournal,
+            memoryDeletions: records.memoryDeletions, sources: [object] },
+          objects: [{ ...object, actualSha256: sourceHash, archivePath: `objects/${source}/v1.bin` }],
+        } });
+        if (!composed.ok) throw new Error(composed.errors.join(", "));
+        const backup = JSON.parse(JSON.stringify(composed.backup)) as OpeningBackup;
+        // Exercise restore's derivation for an archive where the card only named its observation.
+        backup.tables.cards![0]!.source_ids = [];
+        archive = { backup, source, observation, document: unit.documentId };
+        throw discardSeed;
+      }).catch(error => { if (error !== discardSeed) throw error; });
+      if (!archive) throw new Error("Missing publication archive");
+      const { backup, source, observation, document } = archive;
+      await outer`INSERT INTO workspaces(id,owner_user_id) VALUES(${w},${u})`;
+      const db = transactionClient(outer);
+      const result = await executeOpeningRestoreApply(db, { confirmLocalRestore: true, backup,
+        objectBodies: new Map(backup.objects.map(object => [object.archivePath, sourceBytes])),
+        objectPut: createMemoryOpeningRestoreObjectPut(), currentMemoryDeletions: backup.memoryDeletions,
+        currentLearningState: { workspacePreferences: null, courses: [] } });
+      expect(result, result.errors.join(", ")).toMatchObject({ ok: true });
+      expect(await outer`SELECT source_ids FROM cards WHERE id=${card}`).toEqual([{ source_ids: [source] }]);
+      await outer`DELETE FROM opening_teaching_activity_specs WHERE workspace_id=${w}`;
+      await outer`DELETE FROM opening_teaching_units WHERE workspace_id=${w}`;
+      await backupRows(db, scope).exclude(source);
+      const openingAfter = await readOpeningBackupRecords(db, scope);
+      const nativeAfter = await createBackupRestoreRepository(db).exportWorkspace(scope);
+      expect(openingAfter.tables.opening_learning_observations).toMatchObject([{ id: observation }]);
+      for (const artifact of [openingAfter.tables, nativeAfter.records]) {
+        for (const omitted of [document, block, card, review]) {
           expect(JSON.stringify(artifact)).not.toContain(omitted);
         }
       }
@@ -294,6 +371,9 @@ it.each(["excluded", "missing"] as const)("skips native publication lineage on r
         VALUES(${correction},${workspaceId},${ownerUserId},'correction',1,${correction},now(),${review},'{"note":"Lesson correction"}')`;
       const packed = nativeBackupPackageSchema.parse(JSON.parse(JSON.stringify(await backups.exportWorkspace(scope))));
       expect(packed.counts).toMatchObject({ documents: 1, blocks: 1, cards: 1, events: 2 });
+      expect(packed.records.cards).toMatchObject([{ id: card, sourceIds: [source] }]);
+      // Round-14 native archives supplied the publication via the document, without card source IDs.
+      const legacy = { ...packed, records: { ...packed.records, cards: packed.records.cards.map(row => ({ ...row, sourceIds: [] })) } };
       const provenance = { contextSourceRefs: [{ sourceId: source, sourceVersion: 1, publication: true }] };
 
       // Remove the destination spec so the archive must supply the publication lineage.
@@ -304,9 +384,24 @@ it.each(["excluded", "missing"] as const)("skips native publication lineage on r
       await tx`DELETE FROM library_documents WHERE id=${doc}`;
       if (unavailable === "missing") {
         await tx.savepoint(async () => {
-          const admitted = await backups.restoreWorkspace({ ...scope, packed, conflictPolicy: "reject" });
+          const admitted = await backups.restoreWorkspace({ ...scope, packed: legacy, conflictPolicy: "reject" });
           expect(admitted.applied).toMatchObject({ documents: 1, blocks: 1, cards: 1, events: 2 });
-          expect((await backups.exportWorkspace(scope)).records.documents).toMatchObject([{ id: doc, openingProvenance: provenance }]);
+          expect(await tx`SELECT source_ids FROM cards WHERE id=${card}`).toEqual([{ source_ids: [source] }]);
+          const nativeBefore = await backups.exportWorkspace(scope);
+          expect(nativeBefore.records.documents).toMatchObject([{ id: doc, openingProvenance: provenance }]);
+          expect(nativeBefore.records.events.map(row => row.id)).toEqual(expect.arrayContaining([review, correction]));
+          const openingBefore = await readOpeningBackupRecords(db, scope);
+          expect(openingBefore.tables.cards).toMatchObject([{ id: card, origin_observation_root_id: observation }]);
+          expect(openingBefore.tables.learning_events).toMatchObject([{ id: review }]);
+          await rows.exclude(source);
+          const nativeAfter = await backups.exportWorkspace(scope);
+          const openingAfter = await readOpeningBackupRecords(db, scope);
+          expect(openingAfter.tables.opening_learning_observations).toMatchObject([{ id: observation }]);
+          for (const artifact of [nativeAfter.records, openingAfter.tables]) {
+            for (const omitted of [doc, block, card, review, correction]) {
+              expect(JSON.stringify(artifact)).not.toContain(omitted);
+            }
+          }
           throw rollback;
         }).catch(error => { if (error !== rollback) throw error; });
       }

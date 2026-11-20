@@ -1,16 +1,16 @@
 import { findForbiddenBackupTable } from "../../../contracts/src/opening/backup-inventory";
 import { BackupRestoreError } from "./backup-types";
-import { assertNativeCardRestorePrivacy, assertNativeNoteRestorePrivacy } from "./native-note-privacy";
+import { assertNativeCardRestorePrivacy, assertNativeNoteRestorePrivacy, readNoteBackupProvenance } from "./native-note-privacy";
 import type { Sql } from "postgres";
 import { listMigrationFiles } from "../migrate";
 import { assertFileHashes, planNativeRestore } from "@aistudy/domain/native";
 import { dumpWorkspaceSnapshot, snapshotToPackage, assertBackupWorkspaceOwner } from "./backup-dump";
 import { applyRestorePlan, loadExistingIds } from "./backup-insert";
-import { wrapBackupError } from "./backup-map";
+import { asRecords, wrapBackupError } from "./backup-map";
 import type { BackupRestoreRepository } from "./backup-types";
 import { privateExamDocumentIds, readBackupAnswerBlockIds, readBackupLibrarySourceVersions, readBackupTeachingSourceRefs } from "./opening-backup-library";
 import { projectNativeBackupLibrary } from "./backup-native-library";
-import { readNativeTeachingOrigins } from "./native-backup-teaching";
+import { attachNativeCardPublicationSources, attachNativeTeachingOrigins, publicationSourceRefsByDocument, readNativeTeachingOrigins, type BackupSourceRef } from "./native-backup-teaching";
 
 // This entrypoint is also re-exported by the database package's public barrel.
 export { BACKUP_FORBIDDEN_TABLES, EXPLICIT_NON_EXPORTED_WORKSPACE_TABLES } from "./opening-backup-empty-namespace";
@@ -48,11 +48,22 @@ export function createBackupRestoreRepository(sql: Sql): BackupRestoreRepository
             sameWorkspace ? readBackupTeachingSourceRefs(tx, input.workspaceId) : [],
             sameWorkspace ? readNativeTeachingOrigins(tx, input.workspaceId, input.packed.records.cards, privateExams) : undefined,
           ]);
-          const library = projectNativeBackupLibrary(input.packed.records, privateExams, privateBlocks,
+          const inputRecords = input.packed.records;
+          const cards = origins ? attachNativeTeachingOrigins(inputRecords.cards, origins) : inputRecords.cards;
+          const library = projectNativeBackupLibrary({ ...inputRecords, cards }, privateExams, privateBlocks,
             new Set(sourceVersions?.keys()), teachingSpecs, origins);
           const files = input.packed.files.filter(file => library.fileAllowed(file.path));
           if (files.length !== input.packed.files.length) assertFileHashes(input.packed.files);
-          const packed = { ...input.packed, records: { ...input.packed.records, ...library.records }, files };
+          // Older archives only carried the document IDs. Resolve their provenance before the
+          // insert so it survives even when the destination has no teaching spec.
+          const publications: Map<string, BackupSourceRef[]> = publicationSourceRefsByDocument(teachingSpecs, sourceVersions ?? new Map());
+          for (const document of asRecords(library.records.documents)) {
+            const id = document.id.toLowerCase();
+            const refs = readNoteBackupProvenance(document, false)?.contextSourceRefs;
+            if (refs) publications.set(id, [...(publications.get(id) ?? []), ...refs.filter(ref => ref.publication)]);
+          }
+          const restoredCards = attachNativeCardPublicationSources(library.records.cards, publications);
+          const packed = { ...input.packed, records: { ...inputRecords, ...library.records, cards: restoredCards }, files };
           const existingIds = await loadExistingIds(tx as Sql, packed, input.workspaceId);
           const plan = planNativeRestore({
             packed,

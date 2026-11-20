@@ -3,6 +3,7 @@ import type { Sql, TransactionSql } from "postgres";
 import { asObject } from "./backup-map";
 import { parseContextSourceRefs, type ContextSourceRef } from "./opening-context-provenance";
 import { isPrivateExamActivity } from "./opening-backup-library";
+import { withPublicationCardSourceIds } from "./card-sources";
 
 type Row = Record<string, unknown>;
 type PublicationSourceRef = ContextSourceRef & { publication: true };
@@ -65,8 +66,20 @@ export async function readNativeTeachingOrigins(
 
 export function attachNativeTeachingOrigins<T extends Row>(cards: T[], origins: NativeTeachingOrigins): T[] {
   return cards.map(card => {
-    const origin = origins.get(String(card.originObservationRootId));
-    const documentIds = origin ? [...new Set(origin.documentIds)] : [];
+    const origin = origins.get(String(card.originObservationRootId).toLowerCase());
+    const archived = Array.isArray(card.originTeachingDocumentIds) ? card.originTeachingDocumentIds : [];
+    const documentIds = [...new Set([...archived, ...(origin?.documentIds ?? [])])];
     return documentIds.length ? { ...card, originTeachingDocumentIds: documentIds } : card;
+  });
+}
+
+export function attachNativeCardPublicationSources<T extends Row>(
+  cards: T[], publications: ReadonlyMap<string, readonly BackupSourceRef[]>,
+): T[] {
+  return cards.map(card => {
+    if (card.originObservationRootId == null || !Array.isArray(card.originTeachingDocumentIds)) return card;
+    const sourceIds = card.originTeachingDocumentIds.flatMap(id =>
+      (publications.get(String(id).toLowerCase()) ?? []).filter(ref => ref.publication).map(ref => ref.sourceId));
+    return { ...card, sourceIds: withPublicationCardSourceIds(card.sourceIds, sourceIds) };
   });
 }

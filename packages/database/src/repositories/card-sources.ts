@@ -18,6 +18,11 @@ export function cardReadable(db: Db, workspaceId: string) {
       AND (np.workspace_id<>${workspaceId} OR NOT (${contextSourceRefsIncluded(db, workspaceId, db`np.context_source_refs`, true)})))`;
 }
 
+export function withPublicationCardSourceIds(existing: unknown, publicationIds: Iterable<string>) {
+  if (!Array.isArray(existing)) return existing;
+  return [...new Set([...existing, ...publicationIds])];
+}
+
 export type CardEvidenceSkipReason = "skipped_no_course" | "skipped_course_archived" | "skipped_source_unavailable";
 export type CardEvidencePlan =
   | { kind: "record"; courseId: string; sourceIds: string[] }

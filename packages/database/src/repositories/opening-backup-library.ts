@@ -3,6 +3,7 @@ import { contextSourceRefsIncluded } from "./opening-context-provenance";
 import type { OpeningBackupRecordSnapshot } from "./opening-backup-records";
 import { backupPrivateLibrary, isBackupAnswerBlock } from "./backup-private-library";
 import { asObject } from "./backup-map";
+import { withPublicationCardSourceIds } from "./card-sources";
 
 type Tables = OpeningBackupRecordSnapshot["tables"];
 type LibraryTables = Partial<Record<string, Record<string, unknown>[]>>;
@@ -32,6 +33,30 @@ export function readBackupTeachingSourceRefs(sql: Sql | TransactionSql, workspac
   return sql`SELECT spec.document_id,spec.source_refs FROM opening_teaching_activity_specs spec
     JOIN library_documents d ON d.id=spec.document_id
     WHERE spec.workspace_id=${workspace} AND d.workspace_id=${workspace}`;
+}
+
+/** Portable automatic cards retain publication lineage even after the spec is detached. */
+export function projectOpeningBackupCardSources(tables: LibraryTables) {
+  const observations = new Map((tables.opening_learning_observations ?? []).map(row => [row.id, row.activity_id]));
+  const specs = tables.opening_teaching_activity_specs ?? [];
+  const documentByActivity = new Map(specs.map(row => [row.activity_id, row.document_id]));
+  const sourcesByDocument = new Map<string, Set<string>>();
+  function addSources(document: unknown, refs: unknown, historical: boolean) {
+    if (typeof document !== "string" || !Array.isArray(refs)) return;
+    const sources = sourcesByDocument.get(document) ?? new Set<string>();
+    for (const value of refs) {
+      const ref = asObject(value);
+      if (typeof ref?.sourceId === "string" && (!historical || ref.publication === true)) sources.add(ref.sourceId.toLowerCase());
+    }
+    sourcesByDocument.set(document, sources);
+  }
+  for (const row of specs) addSources(row.document_id, row.source_refs, false);
+  for (const row of tables.opening_note_provenance ?? []) addSources(row.document_id, row.context_source_refs, true);
+  return (tables.cards ?? []).map(card => {
+    const document = documentByActivity.get(observations.get(card.origin_observation_root_id));
+    const sourceIds = typeof document === "string" ? sourcesByDocument.get(document) : undefined;
+    return sourceIds?.size ? { ...card, source_ids: withPublicationCardSourceIds(card.source_ids, sourceIds) } : card;
+  });
 }
 
 export async function readBackupLibrarySourceVersions(sql: Sql | TransactionSql, workspace: string): Promise<Map<string, number>> {
