@@ -14,7 +14,12 @@ const dayMap: Record<string, number> = {
   "周四": 4, "星期四": 4, "周五": 5, "星期五": 5, "周六": 6, "星期六": 6,
   "周日": 7, "星期日": 7,
 };
-const weekPattern = /(?:周次?[:：]?\s*)?([0-9]+(?:\s*[-－]\s*[0-9]+)?(?:\s*[,，]\s*[0-9]+(?:\s*[-－]\s*[0-9]+)?)*)周?/;
+const weekRange = /\d+(?:\s*[-－至]\s*\d+)?/.source;
+const weekListPattern = `(${weekRange}(?:\\s*[,，、]\\s*${weekRange})*)`;
+const paritySuffix = /(?:\s*[(（]?([单双])周?[)）]?)?/.source;
+const inlineWeeks = new RegExp(`第?\\s*${weekListPattern}\\s*([单双])?周(?!次|[一二三四五六日天])${paritySuffix}`);
+const labeledWeeks = new RegExp(`周次\\s*[:：]?\\s*第?${weekListPattern}\\s*([单双])?周?${paritySuffix}`);
+const columnWeeks = new RegExp(`^第?\\s*${weekListPattern}\\s*([单双])?周?${paritySuffix}$`);
 const periodPattern = /([0-9]+)\s*[-－至]\s*([0-9]+)\s*节/;
 
 function text(value: CellValue): string {
@@ -32,18 +37,22 @@ function address(row: number, column: number): string {
   return `${result}${row + 1}`;
 }
 
-function weeks(value: string): number[] | undefined {
-  const match = value.match(weekPattern);
+function weeks(value: string, column = false): number[] | undefined {
+  const match = value.match(labeledWeeks) ?? value.match(column ? columnWeeks : inlineWeeks);
   if (!match) return undefined;
-  const result: number[] = [];
-  for (const part of match[1]!.split(/[,，]/)) {
-    const pieces = part.split(/[-－]/).map(Number);
+  const parity = match[2] ?? match[3];
+  const result = new Set<number>();
+  for (const part of match[1]!.split(/[,，、]/)) {
+    const pieces = part.split(/[-－至]/).map(Number);
     const first = pieces[0] ?? NaN;
     const last = pieces[1] ?? first;
-    if (!Number.isInteger(first) || !Number.isInteger(last) || first > last) return undefined;
-    for (let week = first; week <= last; week++) result.push(week);
+    if (!Number.isSafeInteger(last) || first < 1 || first > last) return undefined;
+    for (let week = first; week <= last; week++) {
+      if (!parity || week % 2 === (parity === "单" ? 1 : 0)) result.add(week);
+      if (result.size > 60) return undefined; // WeekSession accepts at most 60 distinct weeks.
+    }
   }
-  return result;
+  return result.size ? [...result] : undefined;
 }
 
 function day(value: string): number | undefined {
@@ -96,10 +105,11 @@ export function parseTimetableSheets(sheets: TimetableSheet[]): ParsedTimetable 
         const lines = value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
         for (const line of lines) {
           const courseName = line
-            .replace(/\s*\([^)]*(?:周|节)[^)]*\)/, "")
+            .replace(/\s*[(（][^)）]*(?:周|节)[^)）]*[)）]/, "")
             .replace(/\s+[0-9]+\s*[-－至]\s*[0-9]+\s*节\s*$/, "")
             .trim();
-          const weekList = weeks(line) ?? (weekColumn >= 0 ? weeks(text(rows[r]![weekColumn]!)) : undefined);
+          const weekCell = weekColumn >= 0 ? text(rows[r]![weekColumn]!) : "";
+          const weekList = weekCell ? weeks(weekCell, true) : weeks(line);
           const weekday = day(dayColumn >= 0 ? text(rows[r]![dayColumn]!) : header[c]!);
           const range = period(line) ?? (periodColumn >= 0 ? period(text(rows[r]![periodColumn]!)) : undefined);
           if (!weekList || weekday === undefined || !range) {

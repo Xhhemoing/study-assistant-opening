@@ -55,3 +55,24 @@ it("rejects DST gaps and ambiguous local times rather than shifting", () => {
   expect(() => expandToTimeBlocks(rows, { weekOneMonday: "2026-03-02", periodTimes, timeZone: "America/New_York" })).toThrow(/nonexistent|DST/i);
   expect(() => expandToTimeBlocks(rows, { weekOneMonday: "2026-10-26", periodTimes: { 1: { start: "01:30", end: "02:30" } }, timeZone: "America/New_York" })).toThrow(/ambiguous|DST/i);
 });
+
+it.each([
+  ["物理2（1-16周）", null, "物理2", Array.from({ length: 16 }, (_, i) => i + 1)],
+  ["英语4（第3,5周）", null, "英语4", [3, 5]],
+  ["物理2（1-16周）", "2,4", "物理2", [2, 4]],
+  ["高数1（1-6单周）", null, "高数1", [1, 3, 5]],
+  ["物理2", "1-6周（双周）", "物理2", [2, 4, 6]],
+] as const)("reads marked weeks or the dedicated weeks column for %s / %s", (title, column, name, expected) => {
+  const result = parseTimetableSheets([{ sheet: "课程表", data: [
+    ["课程", "星期", "周次", "节次"], [title, "周二", column, "1-2节"],
+  ] }]);
+  expect(result.sessions).toMatchObject([{ courseName: name, weeks: expected }]);
+});
+
+it.each(["物理2", "英语4", "高数1 1-2节"])("warns about missing weeks for %s", title => {
+  const result = parseTimetableSheets([{ sheet: "课表", data: [
+    ["课程", "星期", "节次"], [title, "周三", "3-4节"],
+  ] }]);
+  expect(result.sessions).toEqual([]);
+  expect(result.warnings).toMatchObject([{ raw: title, address: "A2" }]);
+});

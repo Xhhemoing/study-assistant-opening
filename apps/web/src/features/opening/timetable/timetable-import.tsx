@@ -1,7 +1,7 @@
 "use client";
 
 import type { WeekSession } from "@aistudy/contracts";
-import { useCallback, useState, type ChangeEvent } from "react";
+import { useCallback, useRef, useState, type ChangeEvent } from "react";
 import { buttonClass, inputClass, secondaryButtonClass } from "../design/ui";
 import { parseTimetableFile, type ParsedTimetable } from "./xlsx-reader";
 import { userFacingMessage } from "../../../lib/user-facing-error";
@@ -110,12 +110,18 @@ export function TimetableImport({ put = defaultPutTimetable }: { put?: Timetable
     }
   }, []);
 
+  const preview = state.phase === "preview" || state.phase === "saving" ? state
+    : state.phase === "error" ? state.preview : undefined;
+  const saving = useRef(false);
+
   async function onConfirm() {
-    if (state.phase !== "preview" || busy) return;
-    const { fileName, parsed } = state;
+    if (!preview || busy || saving.current) return;
+    saving.current = true;
+    const { fileName, parsed } = preview;
     setBusy(true);
     setState({ phase: "saving", fileName, parsed });
     const result = await confirmTimetableImport(parsed.sessions, put);
+    saving.current = false;
     setBusy(false);
     if (result.ok) {
       setState({ phase: "saved", count: result.sessions.length });
@@ -128,13 +134,6 @@ export function TimetableImport({ put = defaultPutTimetable }: { put?: Timetable
     if (busy) return;
     setState(cancelTimetablePreview());
   }
-
-  const preview =
-    state.phase === "preview" || state.phase === "saving"
-      ? state
-      : state.phase === "error" && state.preview
-        ? { phase: "preview" as const, ...state.preview }
-        : null;
 
   return (
     <section className="space-y-3" aria-labelledby="timetable-import-heading">

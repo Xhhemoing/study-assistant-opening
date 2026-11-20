@@ -390,6 +390,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
   const [reload, setReload] = useState(0);
   const [contextOpen, setContextOpen] = useState(false);
   const [error, setError] = useState("");
+  const [stoppingSaved, setStoppingSaved] = useState(false);
   const [pendingHint, setPendingHint] = useState("");
   /** Package C: dismissible / cleared on next submit when server echoes effectiveSourceIds. */
   const [autoSelectNotice, setAutoSelectNotice] = useState<string | null>(null);
@@ -822,26 +823,41 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
   }
 
   const turnStopLock = useRef(false);
+  const savedSubmission = useRef<{ dispatched: boolean; stopRequested: boolean } | null>(null);
+
+  async function stopSavedJob(jobId: string, id: string | null) {
+    if (turnStopLock.current) return;
+    turnStopLock.current = true;
+    try {
+      const job = await api.cancelJob(jobId);
+      setActiveJobId(null);
+      setPending(false);
+      setPendingHint(jobStatusHint(job) || "已停止这次回答。");
+      if (id) await refreshConversation(id);
+    } catch (cancelError) {
+      setPendingHint(`还没确认是否已停止：${userFacingMessage(cancelError, "网络暂时不可用")}`);
+    } finally { turnStopLock.current = false; }
+  }
+
   function cancelCurrentTurn(): void {
     if (activeJobId && turnStopLock.current) return;
     cancelJobStream();
+    if (activeJobId) {
+      void stopSavedJob(activeJobId, conversationId);
+      return;
+    }
+    const saved = savedSubmission.current;
+    if (saved) {
+      saved.stopRequested = true;
+      setStoppingSaved(true);
+      setPendingHint(saved.dispatched ? "提问已发出，正在等待确认后停止回答。" : "已停止，提问尚未发送。");
+      return;
+    }
+    if (privacy !== "ephemeral") return;
     abortRef.current?.abort();
     abortRef.current = null;
     setEphemeralPendingMessages([]);
-    const jobId = activeJobId;
-    if (jobId) {
-      turnStopLock.current = true;
-      void api.cancelJob(jobId).then((job) => {
-        setActiveJobId(null);
-        setPending(false);
-        setPendingHint(jobStatusHint(job) || "已停止这次回答。");
-        if (conversationId) return refreshConversation(conversationId);
-      }).catch((cancelError) => {
-        setPendingHint(`还没确认是否已停止：${userFacingMessage(cancelError, "网络暂时不可用")}`);
-      }).finally(() => { turnStopLock.current = false; });
-      return;
-    }
-    if (privacy === "ephemeral") submissionLock.current = null;
+    submissionLock.current = null;
     setPending(false);
     setPendingHint("已停止。这是临时对话，内容不会保存。");
   }
@@ -857,17 +873,28 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
     submitClocks.current.set(target.clientKey, startedAt);
     setWaitRequestKey(target.clientKey);
     let submitted = false;
+    const saved = { dispatched: true, stopRequested: false };
+    savedSubmission.current = saved;
     try {
       const result = await submitFailedTurnRetry(conversationId, target, input => api.submitTurn(input));
       submitted = true;
       setActiveJobId(result.jobId); setUnknownJob(null);
       setFirstTextTiming({ jobId: result.jobId, clientKey: target.clientKey, startedAt });
-      setPendingHint("已按原提问重试，正在准备回答…");
-      await refreshConversation(conversationId);
+      if (saved.stopRequested) await stopSavedJob(result.jobId, conversationId);
+      else {
+        setPendingHint("已按原提问重试，正在准备回答…");
+        await refreshConversation(conversationId);
+      }
     } catch (error) {
       if (!submitted) setPending(false);
+      if (saved.stopRequested && !submitted) {
+        setPendingHint("尚未确认发送结果，请重新读取对话。");
+        setRecoveryRequired(true);
+      }
       setError(formatTurnError(error));
     } finally {
+      savedSubmission.current = null;
+      setStoppingSaved(false);
       if (submissionLock.current === token) submissionLock.current = null;
     }
   }
@@ -959,8 +986,10 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
     let jobSubmitted = false;
     const abortController = new AbortController();
     abortRef.current = abortController;
+    const saved = input.privacy === "ephemeral" && !learningAttempt ? null : { dispatched: false, stopRequested: false };
+    savedSubmission.current = saved;
     try {
-      if (input.privacy === "ephemeral" && !learningAttempt) {
+      if (!saved) {
         const history = ephemeralHistoryFromMessages(ephemeralMessages);
         let receivedDelta = false;
         setEphemeralPendingMessages([
@@ -1017,11 +1046,19 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
         abortRef.current = null;
         return { accepted: true };
       }
-      if (options?.gradedAttempt) { await gradedExplanation.authorize(); gradedExplanation.begin(input.clientKey); }
+      if (options?.gradedAttempt) {
+        await gradedExplanation.authorize();
+        if (saved.stopRequested) return { accepted: false };
+        gradedExplanation.begin(input.clientKey);
+      }
       const id = await ensureConversation();
       if (options?.gradedAttempt) {
-        await gradedExplanation.authorize(); gradedExplanation.bindConversation(id); gradedExplanation.markStarted();
+        await gradedExplanation.authorize();
+        gradedExplanation.bindConversation(id);
       }
+      if (saved.stopRequested) return { accepted: false };
+      if (options?.gradedAttempt) gradedExplanation.markStarted();
+      saved.dispatched = true;
       const submitted = await api.submitTurn({
         ...(input.purpose ? { purpose: input.purpose } : {}),
         ...(input.querySystem ? { querySystem: true } : {}),
@@ -1045,13 +1082,22 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
       setActiveJobId(submitted.jobId);
       setUnknownJob(null);
       jobSubmitted = true;
-      setPendingHint("已发送，正在准备回答…");
+      if (!saved.stopRequested) setPendingHint("已发送，正在准备回答…");
       abortRef.current = null;
       preserveEntrySelection.current = false;
       if (!options?.preserveDraft) setDraft("");
-      await refreshConversation(id);
+      if (saved.stopRequested) await stopSavedJob(submitted.jobId, id);
+      else await refreshConversation(id);
       return { accepted: true };
     } catch (err) {
+      if (saved?.stopRequested && !jobSubmitted) {
+        if (saved.dispatched) {
+          setPendingHint("尚未确认发送结果，请重新读取对话。");
+          setRecoveryRequired(true);
+        }
+        setPending(false);
+        return { accepted: false };
+      }
       // A cancelled temporary request must not clear a newer request's partial reply.
       if (abortController.signal.aborted && abortRef.current !== abortController) return { accepted: false };
       abortRef.current = null;
@@ -1079,6 +1125,16 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
         return { accepted: false, retryNotSent: true };
       }
       return { accepted: false };
+    } finally {
+      if (saved && savedSubmission.current === saved) {
+        savedSubmission.current = null;
+        setStoppingSaved(false);
+        if (abortRef.current === abortController) abortRef.current = null;
+        if (saved.stopRequested && !saved.dispatched) {
+          setPending(false);
+          setPendingHint("已停止，提问尚未发送。");
+        }
+      }
     }
   }
 
@@ -1233,7 +1289,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
         {savedDisplay.messages.length ? <details><summary className="cursor-pointer py-1">先前保存记录（不参与本轮）· {savedDisplay.messages.length} 条</summary><div className="flex h-48 min-h-0"><MessageList messages={savedDisplay.messages} currentVersions={currentVersions} sourceNames={sourceNames} compact /></div></details> : null}
       </div> : null}
       {startScreen ? loading ? <p role="status" className="mb-2 text-xs text-text-3">正在读取提问背景…</p> : null : loading ? <div className="flex-1 p-5"><LoadingRows label="正在恢复学习上下文…" /></div> : recoveryRequired && !display.messages.length ? <p className="flex-1 px-5 py-6 text-sm text-text-2">学习上下文暂时无法恢复，请重新读取。</p> : <MessageList compact={inset} objectHref={objectHref} studyMode={Boolean(learningAttempt || studyContext?.activityId)} queryAvailable={systemQueryAvailable} onStarter={prepareStarter} disabled={pending || recoveryRequired || waitingForUnknown || interactionDisabled} retryTurnId={retryTarget?.assistantTurnId ?? null} onRetry={() => retryFailedTurn()} pendingLabel={waitPhase === "normal" ? undefined : TURN_WAIT_COPY.slow} messages={display.messages} historyTruncated={display.historyTruncated} currentVersions={currentVersions} sourceNames={sourceNames} onPrompt={setPrompt} onReplyMode={prepareReplyMode} onSaveSnippet={saveSnippet} directSaveApi={embedded && studyContext ? api : undefined} onCreateCard={createCard} />}
-      {unknownJob && unknownRecovery ? <UnknownTurnNotice job={unknownJob} canRetry={unknownRecovery.canRetry} disabled={pending || loading || recoveryRequired || !retryQuestion} onRetry={prepareUnknownQuestion} /> : pending ? (waitPhase === "stalled" ? <section aria-label="回答较慢" className="mx-5 mb-2 rounded-xl border border-warn/25 bg-warn-soft p-3 text-xs leading-6 text-warn">
+      {unknownJob && unknownRecovery ? <UnknownTurnNotice job={unknownJob} canRetry={unknownRecovery.canRetry} disabled={pending || loading || recoveryRequired || !retryQuestion} onRetry={prepareUnknownQuestion} /> : pending && !stoppingSaved ? (waitPhase === "stalled" ? <section aria-label="回答较慢" className="mx-5 mb-2 rounded-xl border border-warn/25 bg-warn-soft p-3 text-xs leading-6 text-warn">
         <p role="status">{privacy === "saved" && activeJobId ? TURN_WAIT_COPY.stalled : TURN_WAIT_COPY.stalledEphemeral}</p>
         <div className="mt-2 flex flex-wrap gap-2">
           {privacy === "saved" && activeJobId ? <button type="button" className={secondaryButtonClass} onClick={() => void retryStalledTurn()}>重试</button> : null}
@@ -1273,7 +1329,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
         contextChips={ordinaryQuestion ? selectedSourceIds.map(id => ({ id, label: sourceNames[id] ?? "所选资料" })) : undefined}
         onRemoveContext={ordinaryQuestion && !studyContext?.sourceId ? id => { const next = selectedSourceIds.filter(sourceId => sourceId !== id); setSelectedSourceIds(next); setSourceSelection(next.length ? "selected" : "none"); if (!next.length) setCurrentPage(""); } : undefined}
         attachments={ordinaryQuestion ? <StartUploads api={api} sources={sources} courseId={boundCourseId} objectHref={objectHref} disabled={pending || loading || recoveryRequired || interactionDisabled} onBusyChange={setUploadPending} onUploaded={handleUploaded} /> : undefined}
-        defaultMode={studyContext?.attemptId || studyContext?.activityId ? "hint" : undefined} compact={inset} key={`${retryDraftVersion}:${supportPurpose}`} draftId={draftId} practiceMode={Boolean(learningAttempt || studyContext?.attemptId)} history={composerHistory} draft={draft} modePrefill={modePrefill} purposePrefill={purposePrefill} onClearIntentOverride={() => { setModePrefill(null); setPurposePrefill(null); }} intent={{ sourceSelection: materialMode, sourceIds: requestSourceIds, currentPage: pageIntentValue(currentPage), chunkId: studyContext?.chunkId }} onContext={() => setContextOpen(true)} contextLabel={materialMode === "none" ? "不用资料 · 不自动补入课程材料" : materialMode === "auto" ? (boundCourseId ? "自动参考本课资料" : "未绑定课程 · 自由交流") : assistantContextHint(selectedSourceIds)} onDraftChange={setDraft} pending={pending} disabled={loading || recoveryRequired || waitingForUnknown || interactionDisabled} contextBlocked={Boolean(contextProblem || studyContextError || (!learningAttempt && aiBlocked))} queryAvailable={systemQueryAvailable} privacy={privacy} onPrivacyChange={learningAttempt || studyContext?.attemptId ? undefined : changePrivacy} onCancel={cancelCurrentTurn} onSubmit={handleSubmit} />
+        defaultMode={studyContext?.attemptId || studyContext?.activityId ? "hint" : undefined} compact={inset} key={`${retryDraftVersion}:${supportPurpose}`} draftId={draftId} practiceMode={Boolean(learningAttempt || studyContext?.attemptId)} history={composerHistory} draft={draft} modePrefill={modePrefill} purposePrefill={purposePrefill} onClearIntentOverride={() => { setModePrefill(null); setPurposePrefill(null); }} intent={{ sourceSelection: materialMode, sourceIds: requestSourceIds, currentPage: pageIntentValue(currentPage), chunkId: studyContext?.chunkId }} onContext={() => setContextOpen(true)} contextLabel={materialMode === "none" ? "不用资料 · 不自动补入课程材料" : materialMode === "auto" ? (boundCourseId ? "自动参考本课资料" : "未绑定课程 · 自由交流") : assistantContextHint(selectedSourceIds)} onDraftChange={setDraft} pending={pending && !stoppingSaved} disabled={stoppingSaved || loading || recoveryRequired || waitingForUnknown || interactionDisabled} contextBlocked={Boolean(contextProblem || studyContextError || (!learningAttempt && aiBlocked))} queryAvailable={systemQueryAvailable} privacy={privacy} onPrivacyChange={learningAttempt || studyContext?.attemptId ? undefined : changePrivacy} onCancel={cancelCurrentTurn} onSubmit={handleSubmit} />
       {startScreen && start ? <StartSuggestions {...start} objectHref={objectHref} onExample={setPrompt} /> : null}
     </div>
     {showProposalRail ? <section aria-label="产出与待确认" className="flex w-full shrink-0 flex-col border-t border-line bg-bg/60 px-4 py-3 xl:w-(--layout-companion) xl:overflow-y-auto xl:border-l xl:border-t-0">

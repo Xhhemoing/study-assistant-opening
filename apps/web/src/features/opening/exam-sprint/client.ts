@@ -68,9 +68,11 @@ export function createExamSprintClient(options: { fetcher?: typeof fetch; keyFac
   }
   async function write(command: Pending, recovering: boolean) {
     const operation = begin(true);
+    const readState = () => request(operation.controller.signal, command.readTarget ?? command.target, command.readPath ?? command.path);
+    let writeAttempted = false;
     try {
       if (recovering) {
-        const result = await request(operation.controller.signal, command.readTarget ?? command.target, command.readPath ?? command.path);
+        const result = await readState();
         if (!isCurrent(operation)) return;
         publish(result);
         if (command.lessonRequest && result.overview && !isCurrentSprintLessonRequest(result.overview, command.lessonRequest)) {
@@ -79,15 +81,31 @@ export function createExamSprintClient(options: { fetcher?: typeof fetch; keyFac
           return result;
         }
       }
+      writeAttempted = true;
       const result = await request(operation.controller.signal, command.target, command.path, command);
       if (!isCurrent(operation)) return;
       pending = null; publish({ ...result, error: null, uncertain: false });
       return result;
     } catch (error) {
       if (!isCurrent(operation)) return;
-      const rejected = !recovering && error instanceof HttpError && error.status >= 400 && error.status < 500 && error.status !== 408;
-      if (rejected) pending = null;
-      publish({ error: rejected ? describeError(error) : `${describeError(error)} ${uncertainMessage}`, uncertain: !rejected });
+      const rejected = writeAttempted && error instanceof HttpError && error.status >= 400 && error.status < 500 && error.status !== 408;
+      if (!rejected) {
+        publish({ error: `${describeError(error)} ${uncertainMessage}`, uncertain: true });
+        return;
+      }
+
+      pending = null;
+      const message = describeError(error);
+      publish({ error: message, uncertain: false });
+      if (recovering && error.status === 409) {
+        // Another tab can finish the run between the recovery read and the replay.
+        try {
+          const latest = await readState();
+          if (isCurrent(operation)) publish(latest);
+        } catch {
+          if (isCurrent(operation)) publish({ error: `${message} 请重新读取最新进度。` });
+        }
+      }
     } finally { finish(operation); }
   }
   async function enqueue(build: (key: string) => Pending) {

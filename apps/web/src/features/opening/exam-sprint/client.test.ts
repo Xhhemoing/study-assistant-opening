@@ -207,12 +207,14 @@ describe("exam sprint client recovery", () => {
     expect(client.getSnapshot()).toMatchObject({ busy: false, uncertain: false, error: null });
   });
 
-  it("does not replay when recovery cannot read, and keeps the original write locked after recovery errors", async () => {
+  it("retains the command on a failed recovery read, then reconciles a cross-tab finish on replay conflict", async () => {
     const fetcher = vi.fn<Fetcher>()
       .mockRejectedValueOnce(new Error("response lost"))
       .mockResolvedValueOnce(Response.json({ error: "服务暂不可用" }, { status: 503 }))
+      .mockResolvedValueOnce(Response.json(activeLessonOverview()))
+      .mockResolvedValueOnce(Response.json({ error: "本轮已经结束" }, { status: 409 }))
       .mockResolvedValueOnce(Response.json(overview(1)))
-      .mockResolvedValueOnce(Response.json({ error: "当前操作无法确认" }, { status: 409 }));
+      .mockResolvedValueOnce(Response.json(overview(2)));
     const client = createExamSprintClient({ fetcher, keyFactory: () => key });
     await client.send(intent);
     await client.recover();
@@ -220,11 +222,32 @@ describe("exam sprint client recovery", () => {
     expect(client.getSnapshot()).toMatchObject({ uncertain: true, busy: false });
     expect(client.getSnapshot().error).toContain("服务暂不可用");
     await client.recover();
-    expect(client.getSnapshot().error).toContain("当前操作无法确认");
-    await client.send({ action: "start", mode: "practice" });
-    expect(fetcher).toHaveBeenCalledTimes(4);
-    expect(client.getSnapshot().uncertain).toBe(true);
+    expect(client.getSnapshot()).toMatchObject({ busy: false, uncertain: false, error: "本轮已经结束",
+      overview: { activeRun: null, summary: { onlineAnswered: 1 } } });
+    await client.recover();
+    expect(fetcher.mock.calls.map(([, init]) => init?.method)).toEqual(["POST", "GET", "GET", "POST", "GET"]);
+    expect((await client.send({ action: "start", mode: "practice" }))?.summary.onlineAnswered).toBe(2);
     expect(JSON.parse(String(fetcher.mock.calls[3]?.[1]?.body))).toEqual({ ...intent, clientKey: key });
+  });
+
+  it("keeps a read-side 409 recoverable but never replays a rejected write if the final read fails", async () => {
+    const fetcher = vi.fn<Fetcher>()
+      .mockRejectedValueOnce(new TypeError("disconnected"))
+      .mockResolvedValueOnce(Response.json({}, { status: 409 }))
+      .mockResolvedValueOnce(Response.json(activeLessonOverview()))
+      .mockResolvedValueOnce(Response.json({ error: "本轮已经结束" }, { status: 409 }))
+      .mockRejectedValueOnce(new TypeError("disconnected again"))
+      .mockResolvedValueOnce(Response.json(overview(1)));
+    const client = createExamSprintClient({ fetcher, keyFactory: () => key });
+    await client.send(intent);
+    await client.recover();
+    expect(client.getSnapshot().uncertain).toBe(true);
+    await client.recover();
+    expect(client.getSnapshot()).toMatchObject({ uncertain: false, busy: false, error: expect.stringContaining("重新读取") });
+    await client.recover();
+    await client.load();
+    expect(fetcher.mock.calls.map(([, init]) => init?.method)).toEqual(["POST", "GET", "GET", "POST", "GET", "GET"]);
+    expect(client.getSnapshot().overview?.activeRun).toBeNull();
   });
 
   it("shows a known rejection and permits a fresh corrected action", async () => {
