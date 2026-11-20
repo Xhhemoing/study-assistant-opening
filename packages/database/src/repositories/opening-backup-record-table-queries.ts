@@ -56,6 +56,20 @@ export async function readOpeningBackupTableRows(
     WHERE a.workspace_id = ${id} AND a.owner_user_id = ${userId}
       AND ${cleanUuidSources(tx, id, tx`a.source_ids`)}
       AND NOT ${isPrivateExamActivity(tx, privateExams)}
+      AND NOT (
+        jsonb_typeof(a.create_intent) = 'object'
+        AND (a.create_intent->>'sourceTurnId') ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+        AND EXISTS (
+          SELECT 1 FROM opening_turns t
+          JOIN opening_conversations c ON c.id = t.conversation_id
+            AND c.workspace_id = ${id} AND c.owner_user_id = ${userId}
+          WHERE t.id = (a.create_intent->>'sourceTurnId')::uuid
+            AND t.workspace_id = ${id}
+            AND t.role = 'user'
+            AND c.course_id IS NOT DISTINCT FROM a.course_id
+        )
+        AND NOT ${includedTurn(tx, id, userId, tx`(a.create_intent->>'sourceTurnId')::uuid`)}
+      )
     ORDER BY a.id`);
   tables.opening_teaching_units = asRows(await tx`
     SELECT u.id, u.workspace_id, u.owner_user_id, u.title, u.document_id, u.current_revision_number,
@@ -249,73 +263,109 @@ export async function readOpeningBackupTableRows(
   const lineage = asRows(await tx`SELECT id,root_observation_id,revises_observation_id,effective_head_id FROM opening_learning_observations WHERE workspace_id=${id} AND owner_user_id=${userId}`);
   // Preserve complete references when a privacy exclusion removes any part of a learning fact.
   const sourceIds = new Set(tables.opening_sources.map(row => row.id));
+  const conversationsById = new Map(tables.opening_conversations.map(row => [row.id, row]));
+  const initialUserTurnCourse = new Map<unknown, unknown>();
+  for (const turn of tables.opening_turns) {
+    const conv = conversationsById.get(turn.conversation_id);
+    if (turn.role === "user" && conv && conv.workspace_id === id && conv.owner_user_id === userId) {
+      initialUserTurnCourse.set(turn.id, conv.course_id ?? null);
+    }
+  }
   const initialActivityIds = new Set(tables.opening_teaching_activities.map(row => row.id));
   const initialAssociatedUnits = new Set(tables.opening_teaching_activity_specs.map(row => row.teaching_unit_id));
   tables.opening_teaching_activity_specs = tables.opening_teaching_activity_specs.filter(row => initialActivityIds.has(row.activity_id));
   const initialKeptUnits = new Set(tables.opening_teaching_activity_specs.map(row => row.teaching_unit_id));
   tables.opening_teaching_units = tables.opening_teaching_units.filter(row => !initialAssociatedUnits.has(row.id) || initialKeptUnits.has(row.id));
-  const specsBeforeLibrary = new Map<unknown, number>();
+  const expectedSpecCounts = new Map<unknown, number>();
   for (const spec of tables.opening_teaching_activity_specs) {
-    specsBeforeLibrary.set(spec.activity_id, (specsBeforeLibrary.get(spec.activity_id) ?? 0) + 1);
+    expectedSpecCounts.set(spec.activity_id, (expectedSpecCounts.get(spec.activity_id) ?? 0) + 1);
   }
-  let libraryTables = await readBackupLibrary(tx, id, tables, privateExams);
-  const specsAfterLibrary = new Map<unknown, number>();
-  for (const spec of tables.opening_teaching_activity_specs) {
-    specsAfterLibrary.set(spec.activity_id, (specsAfterLibrary.get(spec.activity_id) ?? 0) + 1);
-  }
-  const droppedSpecActivities = new Set(
-    [...specsBeforeLibrary.entries()]
-      .filter(([actId, count]) => (specsAfterLibrary.get(actId) ?? 0) < count)
-      .map(([actId]) => actId),
-  );
-  if (droppedSpecActivities.size > 0) {
-    tables.opening_teaching_activities = tables.opening_teaching_activities.filter(row => !droppedSpecActivities.has(row.id));
-    const survivingActivityIds = new Set(tables.opening_teaching_activities.map(row => row.id));
-    if (tables.opening_teaching_activity_specs.some(row => !survivingActivityIds.has(row.activity_id))) {
-      const unitsFromSpecs = new Set(tables.opening_teaching_activity_specs.map(row => row.teaching_unit_id));
-      tables.opening_teaching_activity_specs = tables.opening_teaching_activity_specs.filter(row => survivingActivityIds.has(row.activity_id));
-      const keptUnitsAfterDrop = new Set(tables.opening_teaching_activity_specs.map(row => row.teaching_unit_id));
-      tables.opening_teaching_units = tables.opening_teaching_units.filter(row => !unitsFromSpecs.has(row.id) || keptUnitsAfterDrop.has(row.id));
-      libraryTables = await readBackupLibrary(tx, id, tables, privateExams);
-    }
-  }
-  const admittedRevisionIds = new Set(libraryTables.library_revisions.map(row => row.id));
-  const activityIds = new Set(tables.opening_teaching_activities.map(row => row.id));
-  tables.opening_learning_sessions = tables.opening_learning_sessions.filter(row => activityIds.has(row.activity_id));
-  const sessionIds = new Set(tables.opening_learning_sessions.map(row => row.id));
-  tables.opening_problem_refs = tables.opening_problem_refs.filter(row =>
-    sessionIds.has(row.session_id) && (row.teaching_revision_id == null || admittedRevisionIds.has(row.teaching_revision_id)));
-  const problemIds = new Set(tables.opening_problem_refs.map(row => row.problem_id));
-  tables.opening_learning_item_versions = tables.opening_learning_item_versions.filter(row =>
-    activityIds.has(row.activity_id) && problemIds.has(row.problem_id)
-    && (row.teaching_revision_id == null || admittedRevisionIds.has(row.teaching_revision_id)));
-  const admittedAnchor = (row: Record<string, unknown>) => {
-    const anchor = row.context_anchor as { activityId?: string; contentVersion?: number; blockId?: string } | null;
-    if (anchor?.activityId && !activityIds.has(anchor.activityId)) return false;
-    if (anchor?.blockId != null) {
-      return tables.opening_teaching_activity_specs.some(spec =>
-        spec.activity_id === anchor.activityId
-        && spec.version === anchor.contentVersion
-        && Array.isArray(spec.block_order)
-        && (spec.block_order as Record<string, unknown>[]).some(block => block.blockId === anchor.blockId));
-    }
-    return true;
-  };
-  tables.opening_learning_observations = tables.opening_learning_observations.filter(row =>
-    sessionIds.has(row.session_id) && activityIds.has(row.activity_id) && (row.problem_id == null || problemIds.has(row.problem_id)));
-  const itemIds = new Set(tables.opening_learning_item_versions.map(row => row.id));
-  const observationIds = new Set(tables.opening_learning_observations.map(row => row.id));
   const versionsIncluded = (value: unknown) => value === null || (value !== null && typeof value === "object" && !Array.isArray(value)
     && Object.keys(value).every(source => sourceIds.has(source.toLowerCase())));
-  tables.opening_learning_attempts = tables.opening_learning_attempts.filter(row => versionsIncluded(row.source_versions)
-    && sessionIds.has(row.session_id) && activityIds.has(row.activity_id) && admittedAnchor(row)
-    && (row.item_version_id === null || itemIds.has(row.item_version_id))
-    && (row.problem_id === null || problemIds.has(row.problem_id))
-    && (row.observation_id === null || observationIds.has(row.observation_id)));
-  const attemptIds = new Set(tables.opening_learning_attempts.map(row => row.id));
-  tables.opening_turns = tables.opening_turns.filter(row => (row.attempt_id === null || attemptIds.has(row.attempt_id))
-    && (row.learning_session_id == null || sessionIds.has(row.learning_session_id)) && admittedAnchor(row));
-  const turnIds = new Set(tables.opening_turns.map(row => row.id));
+  let libraryTables!: Awaited<ReturnType<typeof readBackupLibrary>>;
+  let activityIds!: Set<unknown>;
+  let sessionIds!: Set<unknown>;
+  let problemIds!: Set<unknown>;
+  let itemIds!: Set<unknown>;
+  let attemptIds!: Set<unknown>;
+  let turnIds!: Set<unknown>;
+  let admittedAnchor!: (row: Record<string, unknown>) => boolean;
+  for (;;) {
+    const currentActivityIds = new Set(tables.opening_teaching_activities.map(row => row.id));
+    if (tables.opening_teaching_activity_specs.some(row => !currentActivityIds.has(row.activity_id))) {
+      const unitsFromSpecs = new Set(tables.opening_teaching_activity_specs.map(row => row.teaching_unit_id));
+      tables.opening_teaching_activity_specs = tables.opening_teaching_activity_specs.filter(row => currentActivityIds.has(row.activity_id));
+      const keptUnitsAfterDrop = new Set(tables.opening_teaching_activity_specs.map(row => row.teaching_unit_id));
+      tables.opening_teaching_units = tables.opening_teaching_units.filter(row => !unitsFromSpecs.has(row.id) || keptUnitsAfterDrop.has(row.id));
+    }
+    libraryTables = await readBackupLibrary(tx, id, tables, privateExams);
+    const specsAfterLibrary = new Map<unknown, number>();
+    for (const spec of tables.opening_teaching_activity_specs) {
+      specsAfterLibrary.set(spec.activity_id, (specsAfterLibrary.get(spec.activity_id) ?? 0) + 1);
+    }
+    const droppedSpecActivities = new Set(
+      tables.opening_teaching_activities
+        .filter(act => (specsAfterLibrary.get(act.id) ?? 0) < (expectedSpecCounts.get(act.id) ?? 0))
+        .map(act => act.id),
+    );
+    if (droppedSpecActivities.size > 0) {
+      tables.opening_teaching_activities = tables.opening_teaching_activities.filter(row => !droppedSpecActivities.has(row.id));
+      continue;
+    }
+    const admittedRevisionIds = new Set(libraryTables.library_revisions.map(row => row.id));
+    activityIds = new Set(tables.opening_teaching_activities.map(row => row.id));
+    tables.opening_learning_sessions = tables.opening_learning_sessions.filter(row => activityIds.has(row.activity_id));
+    sessionIds = new Set(tables.opening_learning_sessions.map(row => row.id));
+    tables.opening_problem_refs = tables.opening_problem_refs.filter(row =>
+      sessionIds.has(row.session_id) && (row.teaching_revision_id == null || admittedRevisionIds.has(row.teaching_revision_id)));
+    problemIds = new Set(tables.opening_problem_refs.map(row => row.problem_id));
+    tables.opening_learning_item_versions = tables.opening_learning_item_versions.filter(row =>
+      activityIds.has(row.activity_id) && problemIds.has(row.problem_id)
+      && (row.teaching_revision_id == null || admittedRevisionIds.has(row.teaching_revision_id)));
+    admittedAnchor = (row: Record<string, unknown>) => {
+      const anchor = row.context_anchor as { activityId?: string; contentVersion?: number; blockId?: string } | null;
+      if (anchor?.activityId && !activityIds.has(anchor.activityId)) return false;
+      if (anchor?.blockId != null) {
+        return tables.opening_teaching_activity_specs.some(spec =>
+          spec.activity_id === anchor.activityId
+          && spec.version === anchor.contentVersion
+          && Array.isArray(spec.block_order)
+          && (spec.block_order as Record<string, unknown>[]).some(block => block.blockId === anchor.blockId));
+      }
+      return true;
+    };
+    tables.opening_learning_observations = tables.opening_learning_observations.filter(row =>
+      sessionIds.has(row.session_id) && activityIds.has(row.activity_id) && (row.problem_id == null || problemIds.has(row.problem_id)));
+    itemIds = new Set(tables.opening_learning_item_versions.map(row => row.id));
+    const observationIds = new Set(tables.opening_learning_observations.map(row => row.id));
+    tables.opening_learning_attempts = tables.opening_learning_attempts.filter(row => versionsIncluded(row.source_versions)
+      && sessionIds.has(row.session_id) && activityIds.has(row.activity_id) && admittedAnchor(row)
+      && (row.item_version_id === null || itemIds.has(row.item_version_id))
+      && (row.problem_id === null || problemIds.has(row.problem_id))
+      && (row.observation_id === null || observationIds.has(row.observation_id)));
+    attemptIds = new Set(tables.opening_learning_attempts.map(row => row.id));
+    tables.opening_turns = tables.opening_turns.filter(row => (row.attempt_id === null || attemptIds.has(row.attempt_id))
+      && (row.learning_session_id == null || sessionIds.has(row.learning_session_id)) && admittedAnchor(row));
+    turnIds = new Set(tables.opening_turns.map(row => row.id));
+    const droppedOriginTurnActivities = new Set(
+      tables.opening_teaching_activities
+        .filter(row => {
+          const intent = row.create_intent;
+          const sourceTurnId = intent !== null && typeof intent === "object" && !Array.isArray(intent)
+            ? (intent as { sourceTurnId?: unknown }).sourceTurnId
+            : undefined;
+          if (sourceTurnId === undefined || turnIds.has(sourceTurnId)) return false;
+          return initialUserTurnCourse.has(sourceTurnId)
+            && initialUserTurnCourse.get(sourceTurnId) === (row.course_id ?? null);
+        })
+        .map(row => row.id),
+    );
+    if (droppedOriginTurnActivities.size > 0) {
+      tables.opening_teaching_activities = tables.opening_teaching_activities.filter(row => !droppedOriginTurnActivities.has(row.id));
+      continue;
+    }
+    break;
+  }
   tables.opening_help_exposures = tables.opening_help_exposures.filter(row => (row.turn_id == null || turnIds.has(row.turn_id))
     && (row.session_id == null || sessionIds.has(row.session_id)) && (row.activity_id == null || activityIds.has(row.activity_id))
     && (row.problem_id == null || problemIds.has(row.problem_id)) && admittedAnchor(row)

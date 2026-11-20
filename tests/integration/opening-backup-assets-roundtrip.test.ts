@@ -366,8 +366,8 @@ it.skipIf(process.env.OPENING_TEST_DB !== "1" || !process.env.OPENING_TEST_DATAB
             }])}),
             (${w},${historyDoc},2,'Historical citation','published',${tx.json([{ id: historyBlock, type: "text", position: 0,
               content: liveContent }])})`;
-          await tx`INSERT INTO opening_teaching_activities(id,workspace_id,owner_user_id,course_id,status,generate_status,intent_kind,intent_summary,source_ids,client_key)
-            VALUES(${historyActivity},${w},${u},${course},'ready','succeeded','learn_topic','Historical doc lesson',ARRAY[${source}]::uuid[],${"hist-" + historyActivity})`;
+          await tx`INSERT INTO opening_teaching_activities(id,workspace_id,owner_user_id,course_id,status,generate_status,intent_kind,intent_summary,source_ids,client_key,create_intent)
+            VALUES(${historyActivity},${w},${u},${course},'ready','succeeded','learn_topic','Historical doc lesson',ARRAY[${source}]::uuid[],${"hist-" + historyActivity},'{"source":"seed"}'::jsonb)`;
           await tx`INSERT INTO opening_teaching_units(id,workspace_id,owner_user_id,title,document_id,current_revision_number,verification_status)
             VALUES(${historyUnit},${w},${u},'Historical doc lesson',${historyDoc},2,'verified')`;
           await tx`INSERT INTO opening_teaching_activity_specs(id,workspace_id,owner_user_id,activity_id,teaching_unit_id,document_id,revision_number,block_order,source_refs,verification_status,version)
@@ -375,10 +375,21 @@ it.skipIf(process.env.OPENING_TEST_DB !== "1" || !process.env.OPENING_TEST_DATAB
           await tx`INSERT INTO opening_learning_sessions(id,workspace_id,owner_user_id,course_id,activity_id,skill_label,source_ids)
             VALUES(${historySession},${w},${u},${course},${historyActivity},'hist-skill',ARRAY[${source}]::uuid[])`;
           await tx`INSERT INTO opening_learning_attempts(id,workspace_id,owner_user_id,session_id,course_id,activity_id,skill_label,source_ids,source_versions,client_key,context_anchor)
-            VALUES(${historyAttempt},${w},${u},${historySession},${course},${historyActivity},'hist-skill',ARRAY[${source}]::uuid[],${tx.json({ [source]: 1 })},${"att-" + historyAttempt},${tx.json({ courseId: course, activityId: historyActivity, contentVersion: 1, blockId: historyBlock })})`;
+            VALUES(${historyAttempt},${w},${u},${historySession},${course},${historyActivity},'hist-skill',ARRAY[${source}]::uuid[],${tx.json({ [source]: 1 })},${"att-" + historyAttempt},${tx.json({ purpose: "learning_help", courseId: course, activityId: historyActivity, contentVersion: 1, blockId: historyBlock })})`;
+          const historyConv = randomUUID(), historyTurn = randomUUID(), derivedActivity = randomUUID();
+          await tx`INSERT INTO opening_conversations(id,workspace_id,owner_user_id,course_id,title)
+            VALUES(${historyConv},${w},${u},${course},'Historical lesson chat')`;
+          await tx`INSERT INTO opening_turns(id,workspace_id,conversation_id,learning_session_id,role,text,mode,status,source_ids,source_versions,citations)
+            VALUES(${historyTurn},${w},${historyConv},${historySession},'user','Compile follow-up','chat','complete',ARRAY[${source}]::uuid[],${tx.json({ [source]: 1 })},'[]'::jsonb)`;
+          await tx`INSERT INTO opening_teaching_activities(id,workspace_id,owner_user_id,course_id,status,generate_status,intent_kind,intent_summary,source_ids,client_key,create_intent)
+            VALUES(${derivedActivity},${w},${u},${course},'ready','succeeded','learn_topic','Derived lesson',ARRAY[${source}]::uuid[],${'der-' + derivedActivity},${tx.json({ sourceTurnId: historyTurn })})`;
           const beforeExclusion = await snapshot();
           expect(beforeExclusion.tables.library_revisions).toContainEqual(expect.objectContaining({ document_id: historyDoc }));
+          expect(beforeExclusion.tables.opening_teaching_activities).toContainEqual(expect.objectContaining({ id: historyActivity }));
+          expect(beforeExclusion.tables.opening_teaching_activities).toContainEqual(expect.objectContaining({ id: derivedActivity }));
+          expect(beforeExclusion.tables.opening_learning_sessions).toContainEqual(expect.objectContaining({ id: historySession }));
           expect(beforeExclusion.tables.opening_learning_attempts).toContainEqual(expect.objectContaining({ id: historyAttempt }));
+          expect(beforeExclusion.tables.opening_turns).toContainEqual(expect.objectContaining({ id: historyTurn }));
           const nativeBeforeExclusion = await dumpWorkspaceSnapshot(db, w, u);
           expect(nativeBeforeExclusion.revisions).toContainEqual(expect.objectContaining({ documentId: historyDoc }));
           nativeBackup = snapshotToPackage({ ...native, courses: [], memberships: [], documents: [
@@ -397,6 +408,9 @@ it.skipIf(process.env.OPENING_TEST_DB !== "1" || !process.env.OPENING_TEST_DATAB
           for (const artifact of [filtered, filteredNative]) {
             expect(JSON.stringify(artifact)).not.toContain(historyDoc);
             expect(JSON.stringify(artifact)).not.toContain("excluded historical citation");
+          }
+          for (const removedId of [historyActivity, historySession, historyAttempt, historyTurn, derivedActivity]) {
+            expect(JSON.stringify(filtered)).not.toContain(removedId);
           }
           expect(validateOpeningRestore(beforeExclusion, filtered.deletionJournal, filtered.memoryDeletions).errors)
             .toContain("table library_revisions references a deleted source");
