@@ -39,7 +39,7 @@ function browserStorage(): Storage | null {
   try { return typeof window === "undefined" ? null : window.sessionStorage; } catch { return null; }
 }
 
-export function usePracticeDraft(scope: string, initial: Partial<PracticeFields>) {
+export function usePracticeDraft(scope: string, initial: Partial<PracticeFields>, legacyManualScope?: string) {
   const [fallback] = useState(() => emptyPracticeDraft(scope, initial));
   const [collection, setCollection] = useState<PracticeDraftCollection>({ version: 2, scope, activeId: fallback.id, drafts: [fallback] });
   const [ready, setReady] = useState(false);
@@ -50,32 +50,41 @@ export function usePracticeDraft(scope: string, initial: Partial<PracticeFields>
   useEffect(() => {
     try {
       const storage = browserStorage();
-      const stored = readPracticeDraftCollection(scope, storage);
+      let stored = readPracticeDraftCollection(scope, storage);
       if (!stored && !storage) throw new Error("无法读取练习草稿，已停止新建和切换。请允许此页面使用浏览器存储后重试。");
+      if (!stored && legacyManualScope) {
+        const legacy = readPracticeDraftCollection(legacyManualScope, storage);
+        const active = legacy?.drafts.find(value => value.id === legacy.activeId);
+        if (active && !active.fields.matrixMode && !active.observationId) {
+          // Keep the recovered collection as the only copy so edits, switches and submission share its checkpoint.
+          stored = legacy;
+        }
+      }
       setCollection(stored ?? initializePracticeDraft(fallback));
-      setStorageWarning(practiceDraftHasUnsavedStorage(scope));
+      setStorageWarning(practiceDraftHasUnsavedStorage(stored?.scope ?? scope));
       setLoadError(""); setReady(true);
     } catch (reason) { setLoadError(userFacingMessage(reason, "无法读取练习草稿")); setReady(false); }
-  }, [scope, fallback, loadRevision]);
+  }, [scope, fallback, legacyManualScope, loadRevision]);
   const draft = collection.drafts.find(value => value.id === collection.activeId)!;
+  const activeScope = draft.scope;
   const patch = useCallback((change: DraftPatch | ((current: PracticeDraft) => DraftPatch)) => {
     if (!ready) throw new Error("练习草稿尚未读完，未修改已保存的内容。");
-    const result = patchPracticeDraft(scope, initial, change, browserStorage(), draft.id);
+    const result = patchPracticeDraft(activeScope, initial, change, browserStorage(), draft.id);
     setStorageWarning(!result.persisted);
-    setCollection(readPracticeDraftCollection(scope, null)!);
+    setCollection(readPracticeDraftCollection(activeScope, null)!);
     return result.draft;
   // Initial inputs belong to this scope. Each callback captures its own immutable draft identity.
-  }, [scope, draft.id, ready]);
+  }, [activeScope, draft.id, ready]);
   function select(target: PracticeDraft | string): boolean {
     if (!ready) return false;
-    try { setCollection(switchPracticeDraft(scope, draft.id, target, browserStorage())); setSwitchError(""); setStorageWarning(false); return true; }
+    try { setCollection(switchPracticeDraft(activeScope, draft.id, target, browserStorage())); setSwitchError(""); setStorageWarning(false); return true; }
     catch (reason) { setSwitchError(userFacingMessage(reason, "草稿未切换，原答案已保留")); return false; }
   }
   return { draft, drafts: collection.drafts, patch, ready, storageWarning, loadError, switchError,
-    requireSaved: () => assertPracticeDraftSaved(scope),
+    requireSaved: () => assertPracticeDraftSaved(activeScope),
     reload: () => setLoadRevision(value => value + 1),
     restore: (id: string) => select(id),
-    startAnother: (fields: Partial<PracticeFields> = initial) => select(emptyPracticeDraft(scope, fields)),
+    startAnother: (fields: Partial<PracticeFields> = initial) => select(emptyPracticeDraft(activeScope, fields)),
   };
 }
 

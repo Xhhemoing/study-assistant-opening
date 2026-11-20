@@ -1,13 +1,13 @@
 // @vitest-environment jsdom
 
 vi.mock("../settings/appearance-preferences", () => ({ useDiagnosticsEnabled: () => true }));
-import { act, createElement } from "react";
+import { act, createElement, useMemo } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { expect, it, vi } from "vitest";
 import type { LearningAttempt, MatrixExerciseInput } from "@aistudy/contracts";
 import { createMatrixExerciseSpec } from "@aistudy/domain";
-import { parseCourseStudyPracticeEntry } from "../courses/course-study-query";
+import CourseStudyPage from "../../../app/(opening)/opening/courses/[id]/study/page";
 import { MatrixExerciseForm } from "./matrix-exercise-form";
 import { LearningEvidenceEligibilityDetails } from "./eligibility-details";
 import { emptyPracticeDraft, initializePracticeDraft, practiceScope, switchPracticeDraft } from "./practice-draft";
@@ -17,6 +17,17 @@ const client = vi.hoisted(() => ({
   submitAttempt: vi.fn(), getObservationHistory: vi.fn(),
 }));
 vi.mock("../client/learning-client", () => ({ createOpeningLearningClient: () => client }));
+vi.mock("next/headers", () => ({ headers: async () => new Headers() }));
+vi.mock("next/navigation", () => ({ useRouter: () => null, usePathname: () => window.location.pathname }));
+vi.mock("@aistudy/ai", () => ({ isTeachingCompilerEnabled: () => false }));
+vi.mock("../courses/server/course-span-resume", () => ({ loadCourseSpanResume: vi.fn() }));
+vi.mock("../courses/server/course-study-context", () => ({
+  loadCourseStudyContext: async (_request: Request, _courseId: string, sourceId?: string) =>
+    ({ teachingEnabled: false, sourceIds: [sourceId], timeZone: "Asia/Shanghai", boundPracticeSourceAvailable: Boolean(sourceId) }),
+}));
+vi.mock("../courses/course-detail", () => ({
+  useCourseBundle: (courseId: string) => useMemo(() => ({ course: { id: courseId, title: "线性代数" }, loading: false }), [courseId]),
+}));
 
 function boundScope(courseId: string, exercise: MatrixExerciseInput) {
   return practiceScope(courseId, "matrix", undefined, undefined, undefined, exercise);
@@ -51,11 +62,10 @@ it("seeds the exact exercise and variation of a new matrix entry while draft rea
   expect(html).toContain('<fieldset disabled=""');
 });
 
-it("keeps a linked variant and the next question recoverable in their own scopes", async () => {
+it("reopens the switched matrix draft from the updated URL and the original draft from its summary link", async () => {
   const courseId = crypto.randomUUID(), sourceId = crypto.randomUUID();
   const sessionId = crypto.randomUUID(), observationId = crypto.randomUUID();
-  const { initialMatrixExercise: linked } = parseCourseStudyPracticeEntry({ mode: "matrix", exercise: "addition", variant: "2", sourceId });
-  if (!linked) throw new Error("Expected a bound exercise from the summary link");
+  const linked = { sourceId, exerciseKey: "addition", variant: 2 } as const;
   const next = { ...linked, variant: 3 };
   client.createSession.mockResolvedValue({ id: sessionId });
   client.createAttempt.mockImplementation(async ({ matrixExercise }: { matrixExercise: MatrixExerciseInput }): Promise<LearningAttempt> => ({
@@ -76,9 +86,14 @@ it("keeps a linked variant and the next question recoverable in their own scopes
 
   const host = document.createElement("div");
   const root = createRoot(host);
+  const originalUrl = window.location.href;
+  const entryUrl = `/opening/courses/${courseId}/study?mode=matrix&exercise=addition&variant=2&sourceId=${sourceId}#practice`;
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-  const open = (boundExercise: MatrixExerciseInput) => act(async () => root.render(createElement(MatrixExerciseForm, {
-    courseId, boundExercise, boundSourceAvailable: true, onRecorded() {},
+  vi.stubGlobal("matchMedia", () => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
+  vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} });
+  const open = () => act(async () => root.render(await CourseStudyPage({
+    params: Promise.resolve({ id: courseId }),
+    searchParams: Promise.resolve(Object.fromEntries(new URLSearchParams(window.location.search))),
   })));
   const submit = () => act(async () => host.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
   const typeAnswer = (answer: string) => act(async () => {
@@ -88,7 +103,8 @@ it("keeps a linked variant and the next question recoverable in their own scopes
   });
   const stored = (exercise: MatrixExerciseInput) => sessionStorage.getItem(`opening-practice:v2:${boundScope(courseId, exercise)}`);
   try {
-    await open(linked);
+    window.history.replaceState(null, "", entryUrl);
+    await open();
     await submit();
     await typeAnswer("[[1]]");
     await submit();
@@ -104,19 +120,22 @@ it("keeps a linked variant and the next question recoverable in their own scopes
     await typeAnswer("[[2]]");
     expect(client.createAttempt).toHaveBeenLastCalledWith(expect.objectContaining({ matrixExercise: next }));
 
+    expect(`${window.location.pathname}${window.location.search}${window.location.hash}`).toBe(entryUrl.replace("variant=2", "variant=3"));
     await act(async () => root.render(null));
-    await open(linked);
-    expect(host.textContent).toContain("本次题组：3");
-    expect(host.querySelector("textarea")?.value).toBe("[[1]]");
-    expect(stored(linked)).toBe(original);
-
-    await act(async () => root.render(null));
-    await open(next);
+    await open();
     expect(host.textContent).toContain("本次题组：4");
     expect(host.querySelector("textarea")?.value).toBe("[[2]]");
     expect(stored(next)).toBeTruthy();
+
+    await act(async () => root.render(null));
+    window.history.replaceState(null, "", entryUrl);
+    await open();
+    expect(host.textContent).toContain("本次题组：3");
+    expect(host.querySelector("textarea")?.value).toBe("[[1]]");
+    expect(stored(linked)).toBe(original);
   } finally {
     await act(async () => root.unmount());
+    window.history.replaceState(null, "", originalUrl);
     vi.unstubAllGlobals();
     sessionStorage.clear();
   }

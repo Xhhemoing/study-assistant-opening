@@ -69,21 +69,23 @@ export function LearningAttemptForm(props: Props) {
   const initialFocus = props.initialFocus ?? (props.initialProblem ? { skillLabel: "随手练习", requirementKey: null } : undefined);
   const mode = props.initialMode === "practice" && !initialFocus && !props.retest ? "manual" : "ordinary";
   const scope = practiceScope(props.courseId, mode, props.retest, initialFocus, props.initialProblem);
-  return <PracticeController key={scope} {...props} initialFocus={initialFocus} scope={scope} />;
+  const legacyManualScope = mode === "manual" ? practiceScope(props.courseId, "ordinary") : undefined;
+  return <PracticeController key={scope} {...props} initialFocus={initialFocus} scope={scope} legacyManualScope={legacyManualScope} />;
 }
 
-function PracticeController(props: Props & { scope: string }) {
-  const continuity = usePracticeDraft(props.scope, { skillLabel: props.retest?.skillLabel ?? props.initialFocus?.skillLabel ?? readPracticeSkillPrefill(), stem: props.retest?.prompt ?? props.initialProblem?.stem ?? "", sourceId: props.initialProblem?.sourceId ?? "", matrixMode: props.initialMode === "matrix" && !props.retest });
+function PracticeController(props: Props & { scope: string; legacyManualScope?: string }) {
+  const continuity = usePracticeDraft(props.scope, { skillLabel: props.retest?.skillLabel ?? props.initialFocus?.skillLabel ?? readPracticeSkillPrefill(), stem: props.retest?.prompt ?? props.initialProblem?.stem ?? "", sourceId: props.initialProblem?.sourceId ?? "", matrixMode: props.initialMode === "matrix" && !props.retest }, props.legacyManualScope);
   return <div className="space-y-3"><PracticeForm key={continuity.draft.id} {...props} continuity={continuity} /><PracticeDraftShelf continuity={continuity} allowAnother={!props.retest && !props.initialFocus} /></div>;
 }
 
-function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, onRecorded, initialMatrixKey, initialMatrixVariant, initialMode, initialFocus, initialProblem, onAskAttempt, scope, continuity, photoSession }: Props & { scope: string; continuity: PracticeContinuity }) {
+function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, onRecorded, initialMatrixKey, initialMatrixVariant, initialMode, initialFocus, initialProblem, onAskAttempt, continuity, photoSession }: Props & { continuity: PracticeContinuity }) {
   const { studySessionV2 } = useOpeningCapabilities();
   const usePhotoShell = Boolean(photoSession && initialProblem && studySessionV2);
   const answerForm = useRef<HTMLFormElement>(null);
   const client = useMemo(() => createOpeningLearningClient(), []);
   const diagnostics = useDiagnosticsEnabled();
   const { draft, patch, ready, storageWarning, requireSaved } = continuity;
+  const { scope } = draft;
   const [restored, setRestored] = useState(Boolean(draft.start || draft.attemptId || draft.submission));
   const { sourceId, referenceSourceId, skillLabel, stem, answer, outcome, assistance, deliveredAssistance, referenceSkipped, matrixMode } = draft.fields;
   function fieldSetter<K extends keyof PracticeFields>(key: K) {

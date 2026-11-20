@@ -41,7 +41,13 @@ function BoundMatrixEntry(props: Extract<Props, { boundExercise: MatrixExerciseI
   const [variant, setVariant] = useState(props.boundExercise.variant);
   const exercise = { ...props.boundExercise, variant };
   const scope = matrixScope(props.courseId, exercise);
-  return <MatrixController key={scope} {...props} boundExercise={exercise} scope={scope} onSwitchVariant={setVariant} />;
+  function switchVariant(nextVariant: number) {
+    const url = new URL(window.location.href);
+    url.searchParams.set("variant", String(nextVariant));
+    window.history.replaceState(null, "", url);
+    setVariant(nextVariant);
+  }
+  return <MatrixController key={scope} {...props} boundExercise={exercise} scope={scope} onSwitchVariant={switchVariant} />;
 }
 
 type ControllerProps = Props & { scope: string; onSwitchVariant?: (variant: number) => void };
