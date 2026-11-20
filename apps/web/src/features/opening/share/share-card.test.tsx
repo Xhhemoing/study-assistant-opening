@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { resolve } from "node:path";
 import { getShareablePitfallById } from "@aistudy/domain";
 import { resolveImages } from "next/dist/lib/metadata/resolvers/resolve-opengraph";
 import { act } from "react";
@@ -267,6 +268,7 @@ describe("PitfallShareCard, /s/[token] page, and opengraph-image", () => {
   });
 
   it("generates non-cacheable OpenGraph images with the appropriate badge and footer", async () => {
+    vi.spyOn(process, "cwd").mockReturnValue(resolve(__dirname, "../../../.."));
     expect(ogDynamic).toBe("force-dynamic");
     vi.stubEnv("OPENING_PUBLIC_TRY", "1");
     const signed = signPitfallShareToken(sampleCard);
@@ -277,7 +279,7 @@ describe("PitfallShareCard, /s/[token] page, and opengraph-image", () => {
     expect(validOg).toBeInstanceOf(Response);
     expect(validOg.status).toBe(200);
     expect(validOg.headers.get("cache-control")).toBe("no-store");
-    expect(navMocks.ogCalls[0]?.options).toEqual({
+    expect(navMocks.ogCalls[0]?.options).toMatchObject({
       width: 1200,
       height: 630,
       headers: { "Cache-Control": "no-store" },

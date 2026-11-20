@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { ImageResponse } from "next/og";
 import { allowsPublicTryChallenge } from "../../../features/opening/access-policy";
 import { sharePosterFooter } from "../../../features/opening/share/poster";
@@ -9,6 +11,9 @@ export const dynamic = "force-dynamic";
 export const alt = "AIstudy 防踩坑避雷卡";
 export const size = { width: 1200, height: 630 };
 export const contentType = "image/png";
+
+const FONT_FAMILY = "Share Poster";
+let posterFont: Buffer | undefined;
 
 const OG_RESPONSE_OPTIONS = {
   ...size,
@@ -52,7 +57,7 @@ export default async function OpenGraphImage({ params }: OpenGraphImageProps) {
           padding: "36px",
           backgroundColor: "#faf9f5",
           color: "#1f1e1b",
-          fontFamily: "sans-serif",
+          fontFamily: FONT_FAMILY,
         }}
       >
         <div
@@ -189,6 +194,12 @@ export default async function OpenGraphImage({ params }: OpenGraphImageProps) {
         </div>
       </div>
     ),
-    OG_RESPONSE_OPTIONS,
+    {
+      ...OG_RESPONSE_OPTIONS,
+      fonts: [{
+        name: FONT_FAMILY,
+        data: posterFont ??= readFileSync(join(process.cwd(), "src/features/opening/share/assets/share-poster.woff")),
+      }],
+    },
   );
 }
