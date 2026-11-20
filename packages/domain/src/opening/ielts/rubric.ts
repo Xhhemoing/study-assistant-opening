@@ -168,15 +168,16 @@ export function hasMemorizedTemplateStuffing(
 }
 
 type FoldedOffsetEntry = {
-  origStart: number;
-  origEnd: number;
+  readonly origStart: number;
+  readonly origEnd: number;
 };
 
 /**
  * Per-code-point Unicode case-folding with exact UTF-16 `[origStart, origEnd]`
  * reverse offset mapping. Handles:
  * - Surrogate pairs (e.g. "😀")
- * - Case-expanding dotted capital I ("İ" -> "i\u0307" -> "i") and decomposed "i\u0307"
+ * - Case-expanding dotted capital I ("İ" -> "i\u0307" WITHOUT stripping \u0307,
+ *   so "i\u0307stanbul" distinguishes "İstanbul" from ASCII "Istanbul")
  * - Greek final sigma equivalence ("Σ" / "σ" / "ς" -> "σ")
  * - German capital sharp S ("ẞ" -> "ß")
  */
@@ -193,16 +194,8 @@ function foldWithUtf16Offsets(text: string): {
     const origEnd = utf16Offset + ch.length;
     utf16Offset = origEnd;
 
-    // Strip combining dot above (\u0307) when immediately following 'i' (e.g. decomposed "i\u0307")
-    // while extending the preceding 'i' span so slicing original text includes the combining mark.
-    if (ch === "\u0307" && folded.endsWith("i") && map.length > 0) {
-      map[map.length - 1]!.origEnd = origEnd;
-      continue;
-    }
-
     const lowered = ch
       .toLowerCase()
-      .replace(/i\u0307/gu, "i")
       .replace(/\u03c2/gu, "\u03c3")
       .replace(/\u1e9e/gu, "\u00df");
 
@@ -218,8 +211,9 @@ function foldWithUtf16Offsets(text: string): {
 /**
  * Unicode-safe excerpt locator: folds both text and query per Unicode code point
  * while tracking exact UTF-16 `[origStart, origEnd]` reverse mappings (handling
- * surrogate pairs like "😀", length-expanding case folds like "İ" -> "i\u0307",
- * and Greek final sigma equivalence "ΟΔΥΣΣΕΎΣ" <-> "οδυσσεύς").
+ * surrogate pairs like "😀", length-expanding case folds like "İ" -> "i\u0307"
+ * without collapsing dotted/undotted I, and Greek final sigma equivalence
+ * "ΟΔΥΣΣΕΎΣ" <-> "οδυσσεύς").
  * Guarantees `paragraph.slice(startOffset, endOffset) === matchedText`.
  */
 export function locateGroundedExcerpt(
@@ -231,11 +225,15 @@ export function locateGroundedExcerpt(
 
   const exactIndex = paragraph.indexOf(trimmed);
   if (exactIndex !== -1) {
-    return {
-      startOffset: exactIndex,
-      endOffset: exactIndex + trimmed.length,
-      matchedText: paragraph.slice(exactIndex, exactIndex + trimmed.length),
-    };
+    const endIdx = exactIndex + trimmed.length;
+    const nextChar = paragraph.slice(endIdx);
+    if (!/^\p{M}/u.test(nextChar)) {
+      return {
+        startOffset: exactIndex,
+        endOffset: endIdx,
+        matchedText: paragraph.slice(exactIndex, endIdx),
+      };
+    }
   }
 
   const { folded: foldedParagraph, map } = foldWithUtf16Offsets(paragraph);
@@ -245,27 +243,38 @@ export function locateGroundedExcerpt(
     .filter(Boolean);
   if (foldedNeedleTokens.length === 0) return null;
 
-  const regex = new RegExp(foldedNeedleTokens.join("\\s+"), "u");
-  const match = regex.exec(foldedParagraph);
-  if (!match || typeof match.index !== "number" || match[0].length === 0) {
-    return null;
+  const regex = new RegExp(foldedNeedleTokens.join("\\s+"), "gu");
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(foldedParagraph)) !== null) {
+    if (match[0].length === 0) {
+      regex.lastIndex += 1;
+      continue;
+    }
+
+    const matchStart = match.index;
+    const matchEnd = matchStart + match[0].length;
+    // Reject matches that split a base character from its immediately following combining mark.
+    if (matchEnd < foldedParagraph.length && /^\p{M}/u.test(foldedParagraph.slice(matchEnd))) {
+      regex.lastIndex = matchStart + 1;
+      continue;
+    }
+
+    const startEntry = map[matchStart];
+    const endEntry = map[matchEnd - 1];
+    if (!startEntry || !endEntry) {
+      return null;
+    }
+
+    const startOffset = startEntry.origStart;
+    const endOffset = endEntry.origEnd;
+    return {
+      startOffset,
+      endOffset,
+      matchedText: paragraph.slice(startOffset, endOffset),
+    };
   }
 
-  const matchStart = match.index;
-  const matchLast = matchStart + match[0].length - 1;
-  const startEntry = map[matchStart];
-  const endEntry = map[matchLast];
-  if (!startEntry || !endEntry) {
-    return null;
-  }
-
-  const startOffset = startEntry.origStart;
-  const endOffset = endEntry.origEnd;
-  return {
-    startOffset,
-    endOffset,
-    matchedText: paragraph.slice(startOffset, endOffset),
-  };
+  return null;
 }
 
 export type EpistemicResolutionInput = {

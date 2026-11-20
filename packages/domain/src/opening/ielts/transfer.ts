@@ -256,49 +256,92 @@ function longestContiguousCommonRun(a: readonly string[], b: readonly string[]):
   return best;
 }
 
+/**
+ * Strips trailing (and >= 2 consecutive leading) comma-separated segments that
+ * lack a predicate verb cue (e.g. ", orchard, lantern, glacier, compass"),
+ * preserving a single fronted discourse marker/prepositional phrase
+ * ("Consequently,", "Admittedly,", "Over a twenty-year horizon,") and every
+ * segment with its own clause verb.
+ */
+function stripVerblessCommaLists(clause: string): string {
+  const segments = clause
+    .split(/[,，、]+/u)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (segments.length <= 1) return clause.trim();
+
+  let end = segments.length;
+  while (end > 1 && !CLAUSE_VERB_CUE.test(segments[end - 1]!)) {
+    end -= 1;
+  }
+
+  let start = 0;
+  let leadingVerbless = 0;
+  while (
+    start + leadingVerbless < end &&
+    !CLAUSE_VERB_CUE.test(segments[start + leadingVerbless]!)
+  ) {
+    leadingVerbless += 1;
+  }
+  if (leadingVerbless >= 2 && start + leadingVerbless < end) {
+    start += leadingVerbless;
+  }
+
+  return segments.slice(start, end).join(", ");
+}
+
 function isSubstantiveElementaryClause(clause: string): boolean {
-  const words = tokenizeWords(clause);
+  const core = stripVerblessCommaLists(clause);
+  const words = tokenizeWords(core);
   return (
     words.length >= 7 &&
-    CLAUSE_VERB_CUE.test(clause) &&
-    !isLowEntropySentence(clause)
+    CLAUSE_VERB_CUE.test(core) &&
+    !isLowEntropySentence(core)
   );
 }
 
 /**
  * Checks whether an elementary clause is substantively changed from every
- * baseline elementary clause. Blocks verbatim copies, punctuation-only swaps,
- * and baseline clauses with appended/prepended noun lists (whether colon-,
- * semicolon-, dash-, parenthetical-, or comma-attached).
+ * baseline elementary clause (regardless of baseline length, including short
+ * < 6-word baselines). Strips verbless comma-list tails/heads first and blocks
+ * verbatim copies, punctuation-only swaps, and baseline clauses with appended
+ * or prepended noun lists.
  */
 function isClauseSubstantivelyChangedFromBaseline(
   clause: string,
-  baselineClauseKeys: ReadonlySet<string>,
-  baselineClauseTokens: readonly (readonly string[])[],
+  baselineCoreClauseKeys: ReadonlySet<string>,
+  baselineCoreClauseTokens: readonly (readonly string[])[],
 ): boolean {
-  const key = normalizeSentenceTokenKey(clause);
-  if (!key || baselineClauseKeys.has(key)) {
+  const coreClause = stripVerblessCommaLists(clause);
+  const key = normalizeSentenceTokenKey(coreClause);
+  if (!key || baselineCoreClauseKeys.has(key)) {
     return false;
   }
-  const words = tokenizeWords(clause);
+  const words = tokenizeWords(coreClause);
   const wordSet = new Set(words);
 
-  for (const baseWords of baselineClauseTokens) {
+  for (const baseWords of baselineCoreClauseTokens) {
     if (baseWords.length === 0) continue;
     if (tokenJaccardSimilarity(words, baseWords) >= 0.80) {
       return false;
     }
 
-    // If nearly the entire baseline clause appears verbatim inside this clause
-    // (e.g. copied baseline clause + appended noun tail), reject as unchanged.
-    if (baseWords.length >= 6) {
+    // Check containment + contiguous run for ALL baseline clauses >= 3 words
+    // (closing the short-baseline < 6-word padding loophole).
+    if (baseWords.length >= 3) {
       let containedCount = 0;
       for (const bw of baseWords) {
         if (wordSet.has(bw)) containedCount += 1;
       }
       const containment = containedCount / baseWords.length;
-      const minRun = Math.min(6, Math.ceil(baseWords.length * 0.6));
-      if (containment >= 0.85 && longestContiguousCommonRun(words, baseWords) >= minRun) {
+      const minRun =
+        baseWords.length <= 5
+          ? baseWords.length
+          : Math.min(6, Math.ceil(baseWords.length * 0.6));
+      if (
+        containment >= 0.85 &&
+        longestContiguousCommonRun(words, baseWords) >= minRun
+      ) {
         return false;
       }
     }
@@ -306,15 +349,21 @@ function isClauseSubstantivelyChangedFromBaseline(
   return true;
 }
 
+type LocalContextWindow = {
+  readonly pre: readonly string[];
+  readonly post: readonly string[];
+  readonly full: readonly string[];
+};
+
 function extractPatternLocalWindows(
   clauseTokens: readonly string[],
   patternTokens: readonly string[],
   radius = 4,
-): string[][] {
+): LocalContextWindow[] {
   if (patternTokens.length === 0 || clauseTokens.length < patternTokens.length) {
     return [];
   }
-  const windows: string[][] = [];
+  const windows: LocalContextWindow[] = [];
   for (let i = 0; i <= clauseTokens.length - patternTokens.length; i += 1) {
     let matched = true;
     for (let k = 0; k < patternTokens.length; k += 1) {
@@ -324,41 +373,89 @@ function extractPatternLocalWindows(
       }
     }
     if (!matched) continue;
-    const left = clauseTokens.slice(Math.max(0, i - radius), i);
-    const right = clauseTokens.slice(
+    const pre = clauseTokens.slice(Math.max(0, i - radius), i);
+    const post = clauseTokens.slice(
       i + patternTokens.length,
       Math.min(clauseTokens.length, i + patternTokens.length + radius),
     );
-    windows.push([...left, ...right]);
+    windows.push({ pre, post, full: [...pre, ...post] });
   }
   return windows;
 }
 
+function endsWithTokens(
+  haystack: readonly string[],
+  suffix: readonly string[],
+): boolean {
+  if (suffix.length === 0 || haystack.length < suffix.length) return false;
+  const offset = haystack.length - suffix.length;
+  for (let i = 0; i < suffix.length; i += 1) {
+    if (haystack[offset + i] !== suffix[i]) return false;
+  }
+  return true;
+}
+
+function startsWithTokens(
+  haystack: readonly string[],
+  prefix: readonly string[],
+): boolean {
+  if (prefix.length === 0 || haystack.length < prefix.length) return false;
+  for (let i = 0; i < prefix.length; i += 1) {
+    if (haystack[i] !== prefix[i]) return false;
+  }
+  return true;
+}
+
 /**
- * Checks whether EVERY occurrence of `pattern` in `clause` sits inside the same
- * local `[phrase - 4 words, phrase + 4 words]` lexical neighborhood as an
- * occurrence of `pattern` in the baseline draft's elementary clauses.
+ * Checks whether EVERY occurrence of `pattern` in the clause's core (with
+ * verbless comma-list tails stripped) sits inside the same local
+ * `[phrase - 4 words, phrase + 4 words]` neighborhood — or preserves the exact
+ * immediate pre-target / post-target subject+predicate words — as an occurrence
+ * in the baseline draft.
  */
 function isPatternLocalContextCopiedFromBaseline(
   clause: string,
   pattern: string,
-  baselineClauseTokens: readonly (readonly string[])[],
+  baselineCoreClauseTokens: readonly (readonly string[])[],
 ): boolean {
   const patternTokens = tokenizeWords(pattern);
-  const candTokens = tokenizeWords(clause);
+  const candTokens = tokenizeWords(stripVerblessCommaLists(clause));
   const candWindows = extractPatternLocalWindows(candTokens, patternTokens, 4);
   if (candWindows.length === 0) return false;
 
-  const baseWindows: string[][] = [];
-  for (const baseTokens of baselineClauseTokens) {
+  const baseWindows: LocalContextWindow[] = [];
+  for (const baseTokens of baselineCoreClauseTokens) {
     baseWindows.push(...extractPatternLocalWindows(baseTokens, patternTokens, 4));
   }
   if (baseWindows.length === 0) return false;
 
   return candWindows.every((cw) =>
     baseWindows.some((bw) => {
-      if (tokenJaccardSimilarity(cw, bw) >= 0.75) return true;
-      if (cw.length >= 3 && longestContiguousCommonRun(cw, bw) >= Math.min(4, cw.length)) {
+      if (tokenJaccardSimilarity(cw.full, bw.full) >= 0.75) return true;
+      if (
+        cw.full.length >= 2 &&
+        longestContiguousCommonRun(cw.full, bw.full) >= Math.min(4, cw.full.length)
+      ) {
+        return true;
+      }
+      // Exact pre-target subject+verb preserved while post-target only adds verbless tail:
+      if (
+        bw.pre.length >= 2 &&
+        endsWithTokens(cw.pre, bw.pre) &&
+        (bw.post.length === 0
+          ? !CLAUSE_VERB_CUE.test(cw.post.join(" "))
+          : tokenJaccardSimilarity(cw.post, bw.post) >= 0.75)
+      ) {
+        return true;
+      }
+      // Symmetrically, exact post-target predicate preserved while pre-target adds no verb:
+      if (
+        bw.post.length >= 2 &&
+        startsWithTokens(cw.post, bw.post) &&
+        (bw.pre.length === 0
+          ? !CLAUSE_VERB_CUE.test(cw.pre.join(" "))
+          : tokenJaccardSimilarity(cw.pre, bw.pre) >= 0.75)
+      ) {
         return true;
       }
       return false;
@@ -384,38 +481,46 @@ function assessSubstantiveRevision(
   }
   if (changedParagraphs === 0) return false;
 
-  const baselineClauses = draft1.paragraphs.flatMap(splitElementaryClauses);
-  const baselineClauseKeys = new Set(
-    baselineClauses.map(normalizeSentenceTokenKey).filter(Boolean),
+  const baselineCoreClauses = draft1.paragraphs
+    .flatMap(splitElementaryClauses)
+    .map(stripVerblessCommaLists);
+  const baselineCoreClauseKeys = new Set(
+    baselineCoreClauses.map(normalizeSentenceTokenKey).filter(Boolean),
   );
-  const baselineClauseTokens = baselineClauses.map(tokenizeWords);
+  const baselineCoreClauseTokens = baselineCoreClauses.map(tokenizeWords);
 
   const revisedClauses = draft2.paragraphs.flatMap(splitElementaryClauses);
-  const rewrittenSubstantiveClauses = revisedClauses.filter(
-    (c) =>
-      isSubstantiveElementaryClause(c) &&
-      isClauseSubstantivelyChangedFromBaseline(
-        c,
-        baselineClauseKeys,
-        baselineClauseTokens,
-      ),
-  );
+  const rewrittenSubstantiveCoreClauses = revisedClauses
+    .filter(
+      (c) =>
+        isSubstantiveElementaryClause(c) &&
+        isClauseSubstantivelyChangedFromBaseline(
+          c,
+          baselineCoreClauseKeys,
+          baselineCoreClauseTokens,
+        ),
+    )
+    .map(stripVerblessCommaLists);
+
   const rewrittenRatio =
     revisedClauses.length > 0
-      ? rewrittenSubstantiveClauses.length / revisedClauses.length
+      ? rewrittenSubstantiveCoreClauses.length / revisedClauses.length
       : 0;
 
-  // Only count new vocabulary that lives inside genuinely rewritten grammatical clauses
+  // Only count new vocabulary that lives inside genuinely rewritten core clauses
   // (never appended colon/semicolon/dash/comma bare noun lists).
   const terms1 = extractMeaningfulTerms(draft1.paragraphs.join(" "));
-  const substantiveRevisedText = rewrittenSubstantiveClauses.join(" ");
+  const substantiveRevisedText = rewrittenSubstantiveCoreClauses.join(" ");
   const substantiveTerms2 = extractMeaningfulTerms(substantiveRevisedText);
   const newlyAddedSubstantiveTerms = [...substantiveTerms2].filter(
     (t) => !terms1.has(t),
   );
 
   const allClauseTerms2 = extractMeaningfulTerms(
-    revisedClauses.filter(isSubstantiveElementaryClause).join(" "),
+    revisedClauses
+      .filter(isSubstantiveElementaryClause)
+      .map(stripVerblessCommaLists)
+      .join(" "),
   );
   const removedTerms = [...terms1].filter((t) => !allClauseTerms2.has(t));
   const unionSize = new Set([...terms1, ...allClauseTerms2]).size;
@@ -425,7 +530,7 @@ function assessSubstantiveRevision(
       : 0;
 
   return (
-    rewrittenSubstantiveClauses.length >= 2 &&
+    rewrittenSubstantiveCoreClauses.length >= 2 &&
     rewrittenRatio >= 0.25 &&
     newlyAddedSubstantiveTerms.length >= 12 &&
     (jaccardDistance >= 0.18 || changedParagraphs >= 2)
@@ -502,11 +607,13 @@ export function analyzeCrossDraftTransfer(
     input.draft2,
   );
 
-  const baselineClauses = input.draft1.paragraphs.flatMap(splitElementaryClauses);
-  const baselineClauseKeys = new Set(
-    baselineClauses.map(normalizeSentenceTokenKey).filter(Boolean),
+  const baselineCoreClauses = input.draft1.paragraphs
+    .flatMap(splitElementaryClauses)
+    .map(stripVerblessCommaLists);
+  const baselineCoreClauseKeys = new Set(
+    baselineCoreClauses.map(normalizeSentenceTokenKey).filter(Boolean),
   );
-  const baselineClauseTokens = baselineClauses.map(tokenizeWords);
+  const baselineCoreClauseTokens = baselineCoreClauses.map(tokenizeWords);
 
   const allTargetPatterns = input.targets.flatMap((t) => t.targetPatterns);
   let hasMechanicalKeywordPaste = false;
@@ -527,8 +634,8 @@ export function analyzeCrossDraftTransfer(
       target.clichePatterns,
     );
 
-    // Verify each revised match appears in a real, non-filler, substantively revised elementary clause
-    // whose local [phrase - 4 words, phrase + 4 words] context was not copied verbatim from Draft 1.
+    // Verify each revised match appears in a real, non-filler, substantively revised elementary core clause
+    // (after stripping verbless comma-list tails) whose local context was not copied from Draft 1.
     const contextualMatched = new Set<string>();
     const contextualParagraphs = new Set<number>();
     let matchedOnlyInMechanicalPaste = false;
@@ -543,21 +650,25 @@ export function analyzeCrossDraftTransfer(
         for (const pattern of target.targetPatterns) {
           for (const clause of clauses) {
             if (!matchesPattern(clause, pattern)) continue;
-            if (isMechanicalKeywordSentence(clause, allTargetPatterns)) {
+            const coreClause = stripVerblessCommaLists(clause);
+            if (
+              !matchesPattern(coreClause, pattern) ||
+              isMechanicalKeywordSentence(coreClause, allTargetPatterns)
+            ) {
               hasMechanicalKeywordPaste = true;
               sawMechanical = true;
               continue;
             }
             if (
               !isClauseSubstantivelyChangedFromBaseline(
-                clause,
-                baselineClauseKeys,
-                baselineClauseTokens,
+                coreClause,
+                baselineCoreClauseKeys,
+                baselineCoreClauseTokens,
               ) ||
               isPatternLocalContextCopiedFromBaseline(
-                clause,
+                coreClause,
                 pattern,
-                baselineClauseTokens,
+                baselineCoreClauseTokens,
               )
             ) {
               sawUnchanged = true;

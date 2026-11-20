@@ -44,7 +44,7 @@ const SPEAKING_STOP_WORDS = new Set([
 ]);
 
 const SPEAKING_CLAUSE_VERB_CUE =
-  /\b(is|are|was|were|be|been|being|am|can|could|may|might|must|shall|should|will|would|do|does|did|have|has|had|think|believe|feel|see|say|says|said|mean|means|meant|make|makes|made|take|takes|took|give|gives|gave|help|helps|helped|cut|cuts|lower|lowers|ease|eases|need|needs|want|wants|rely|relies|build|builds|spend|spends|invest|invests|investing|fund|funds|funding|protect|protects|protecting|back|backs|backing|pair|pairs|pairing|trigger|triggers|grow|grows|matter|matters|require|requires|struggle|struggles|notice|notices|pour|pours|pouring|choose|chooses|avoid|avoids|reduce|reduces|improve|improves|offer|offers|deliver|delivers|encourage|encourages|undermine|undermines|resolve|resolves|support|supports|prefer|prefers|coordinate|coordinates)\b/iu;
+  /\b(is|are|was|were|be|been|being|am|can|could|may|might|must|shall|should|will|would|do|does|did|have|has|had|think|believe|feel|see|say|says|said|mean|means|meant|make|makes|made|take|takes|took|give|gives|gave|help|helps|helped|cut|cuts|lower|lowers|ease|eases|need|needs|want|wants|rely|relies|build|builds|spend|spends|invest|invests|investing|fund|funds|funding|protect|protects|protecting|back|backs|backing|pair|pairs|pairing|trigger|triggers|grow|grows|matter|matters|require|requires|struggle|struggles|notice|notices|pour|pours|pouring|choose|chooses|avoid|avoids|reduce|reduces|improve|improves|offer|offers|deliver|delivers|encourage|encourages|undermine|undermines|resolve|resolves|support|supports|prefer|prefers|coordinate|coordinates|monitor|monitors|monitoring|approve|approves|approving|track|tracks|tracking|evaluate|evaluates|balance|balances|weigh|weighs|assess|assesses|shift|shifts|shifting|curb|curbs|curbing|maintain|maintains|expand|expands|address|addresses|justify|justifies)\b/iu;
 
 const MIN_VERIFIED_SPEAKING_WORDS = 75;
 
@@ -65,97 +65,94 @@ function tokenizeWords(text: string): string[] {
 }
 
 /**
- * Ensures a matched target phrase in Speaking sits inside its OWN elementary
- * clause (split on `.`, `!`, `?`, `:`, `;`, `—`, `--`, parentheticals) with a
- * valid predicate verb cue, sufficient non-target grammatical context, and no
- * bare comma/enumeration stacking of target phrases.
+ * Ensures a matched target phrase in Speaking sits inside a genuine verbal
+ * sub-clause (split on hard boundaries `.!?;:—--` AND comma/enumeration
+ * boundaries `,，、/`).
+ * - Blocks comma-tacked verbless fragments (e.g. `, per-capita emissions`,
+ *   `, and the per-capita emissions, and the long-term fiscal viability.`)
+ *   because those comma segments lack their own governing verb and content words.
+ * - Preserves legitimate unpunctuated direct coordination sharing a governing
+ *   verb inside the same comma-free clause (e.g. `should monitor long-term
+ *   fiscal viability and per-capita emissions before approving...`).
  */
 function isContextualSpokenClause(
   clause: string,
   targetCollocation: string,
   allTargetCollocations: readonly string[],
 ): boolean {
-  const words = tokenizeWords(clause);
-  if (words.length < 7) return false;
+  const clauseWords = tokenizeWords(clause);
+  if (clauseWords.length < 7) return false;
   if (!SPEAKING_CLAUSE_VERB_CUE.test(clause)) return false;
 
-  // Strip matched target phrases from this elementary clause to verify surrounding non-target context.
-  let residual = clause;
-  let matchedWordCount = 0;
-  let matchedTargetCount = 0;
-  const matchedSpans: Array<{ start: number; end: number }> = [];
-
-  for (const phrase of allTargetCollocations) {
-    const regex = buildPhraseRegex(phrase);
-    const globalRegex = new RegExp(regex.source, "giu");
-    let found = false;
-    for (const match of clause.matchAll(globalRegex)) {
-      found = true;
-      const start = match.index ?? 0;
-      matchedSpans.push({ start, end: start + match[0].length });
-    }
-    if (found) {
-      matchedTargetCount += 1;
-      matchedWordCount += tokenizeWords(phrase).length;
-      residual = residual.replace(globalRegex, " ");
-    }
-  }
-
-  const residualWords = tokenizeWords(residual);
-  const residualContentWords = residualWords.filter(
-    (w) => w.length >= 3 && !SPEAKING_STOP_WORDS.has(w),
-  );
-
-  if (residualWords.length < 4 || residualContentWords.length < 3) {
-    return false;
-  }
-
-  // Reject dense target-stacking clauses where pasted phrases crowd out surrounding syntax.
-  if (
-    matchedTargetCount >= 2 &&
-    (residualWords.length < 4 * matchedTargetCount - 2 ||
-      matchedWordCount / words.length >= 0.48)
-  ) {
-    return false;
-  }
-
-  // Reject back-to-back bare target enumerations separated only by punctuation/coordinators
-  // (e.g. "alleviate chronic congestion, per-capita emissions" or "X and Y" without a predicate link).
-  if (matchedSpans.length >= 2) {
-    matchedSpans.sort((a, b) => a.start - b.start);
-    for (let i = 0; i < matchedSpans.length - 1; i += 1) {
-      const between = clause.slice(matchedSpans[i]!.end, matchedSpans[i + 1]!.start);
-      if (/^\s*(?:,|、|\/|&|\band\b|\bor\b)*\s*$/iu.test(between)) {
-        return false;
-      }
-    }
-  }
-
-  // Verify the specific comma/enumeration segment containing `targetCollocation` is not
-  // a bare pasted noun/verb phrase tacked onto an unrelated preceding clause.
   const targetRegex = buildPhraseRegex(targetCollocation);
-  const targetWordLen = tokenizeWords(targetCollocation).length;
   const segments = clause
-    .split(/[,、/]+/u)
+    .split(/[,，、/]+/u)
     .map((seg) => seg.trim())
     .filter(Boolean);
   const matchingSegments = segments.filter((seg) => targetRegex.test(seg));
   if (matchingSegments.length === 0) return false;
 
-  const hasIntegratedSegment = matchingSegments.some((seg) => {
+  return matchingSegments.some((seg) => {
+    const segWords = tokenizeWords(seg);
+    if (segWords.length < 6) return false;
+
     let segResidual = seg;
+    let segMatchedWordCount = 0;
+    let segMatchedTargetCount = 0;
+    const segMatchedSpans: Array<{ start: number; end: number }> = [];
+
     for (const phrase of allTargetCollocations) {
-      const globalRegex = new RegExp(buildPhraseRegex(phrase).source, "giu");
-      segResidual = segResidual.replace(globalRegex, " ");
+      const regex = buildPhraseRegex(phrase);
+      const globalRegex = new RegExp(regex.source, "giu");
+      let found = false;
+      for (const match of seg.matchAll(globalRegex)) {
+        found = true;
+        const start = match.index ?? 0;
+        segMatchedSpans.push({ start, end: start + match[0].length });
+      }
+      if (found) {
+        segMatchedTargetCount += 1;
+        segMatchedWordCount += tokenizeWords(phrase).length;
+        segResidual = segResidual.replace(globalRegex, " ");
+      }
     }
-    const segResidualWords = tokenizeWords(segResidual);
-    if (targetWordLen >= 2 && segResidualWords.length < 2) {
+
+    // The comma-free segment containing this target MUST carry its own governing
+    // predicate verb outside the target phrases themselves (rejecting verbless
+    // trailing fragments like ", and the per-capita emissions").
+    if (!SPEAKING_CLAUSE_VERB_CUE.test(segResidual)) {
       return false;
     }
+
+    const segResidualWords = tokenizeWords(segResidual);
+    const segResidualContentWords = segResidualWords.filter(
+      (w) => w.length >= 3 && !SPEAKING_STOP_WORDS.has(w),
+    );
+    if (segResidualWords.length < 3 || segResidualContentWords.length < 3) {
+      return false;
+    }
+
+    // When multiple targets share the same comma-free verbal clause (e.g. direct
+    // coordination "should monitor X and Y before approving..."), require rich
+    // surrounding clause syntax and reject zero-word mechanical juxtaposition.
+    if (segMatchedTargetCount >= 2) {
+      if (
+        segResidualWords.length < 4 * segMatchedTargetCount - 2 ||
+        segMatchedWordCount / segWords.length >= 0.48
+      ) {
+        return false;
+      }
+      segMatchedSpans.sort((a, b) => a.start - b.start);
+      for (let i = 0; i < segMatchedSpans.length - 1; i += 1) {
+        const between = seg.slice(segMatchedSpans[i]!.end, segMatchedSpans[i + 1]!.start);
+        if (/^\s*$/u.test(between)) {
+          return false;
+        }
+      }
+    }
+
     return true;
   });
-
-  return hasIntegratedSegment;
 }
 
 function cleanSpokenCollocations(rawCollocations: readonly string[]): string[] {

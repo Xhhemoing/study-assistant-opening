@@ -226,6 +226,16 @@ describe("IELTS rubric validation & band scoring", () => {
     );
     expect(emojiLoc!.matchedText).toBe("İstanbul");
 
+    const dottedVsAscii = "Istanbul and İstanbul";
+    const dottedLoc = locateGroundedExcerpt(dottedVsAscii, "i\u0307stanbul");
+    expect(dottedLoc).not.toBeNull();
+    expect(dottedLoc!.startOffset).toBe(13);
+    expect(dottedLoc!.endOffset).toBe(21);
+    expect(dottedVsAscii.slice(dottedLoc!.startOffset, dottedLoc!.endOffset)).toBe(
+      "İstanbul",
+    );
+    expect(dottedLoc!.matchedText).toBe("İstanbul");
+
     const greekUpper = "ΟΔΥΣΣΕΎΣ";
     const greekLoc = locateGroundedExcerpt(greekUpper, "οδυσσεύς");
     expect(greekLoc).not.toBeNull();
@@ -477,6 +487,45 @@ describe("Honest evidence epistemology & Writing anti-gaming transfer guards", (
     expect(commaResult.transferReport.summary.masteryQualified).toBe(false);
     expect(commaResult.receipt.masteryQualified).toBe(false);
     expect(commaResult.receipt.countsTowardMastery).toBe(false);
+  });
+
+  it("blocks comma-list noun tail padding on unchanged short (<6 word) baseline clauses", () => {
+    const shortBaseline: IeltsEssayDraft = {
+      ...DRAFT_1,
+      draftId: "draft-short-base",
+      version: 1,
+      paragraphs: [
+        "Rail can alleviate chronic congestion.",
+        "Transit lowers per-capita emissions.",
+        "Admittedly, cars remain convenient.",
+        "Governments should therefore fund rail.",
+      ],
+    };
+    const shortPaddedRevision: IeltsEssayDraft = {
+      ...DRAFT_2,
+      draftId: "draft-short-padded",
+      version: 2,
+      paragraphs: [
+        "Rail can alleviate chronic congestion, orchard, lantern, glacier, compass.",
+        "Transit lowers per-capita emissions, apricot, marble, pelican, velvet.",
+        "Admittedly, cars remain convenient, walnut, cactus, harbor, mineral.",
+        "Governments should therefore fund rail, meadow, summit, cedar, pebble.",
+      ],
+    };
+
+    const evaluated = evaluateRevisedDraftDeterministically({
+      baselineDraft: shortBaseline,
+      revisedDraft: shortPaddedRevision,
+      targets: TARGETS,
+      receiptId: "r-short-comma-pad",
+    });
+    expect(evaluated.transferReport.summary.hasSubstantiveRevision).toBe(false);
+    expect(evaluated.transferReport.summary.transferredCount).toBe(0);
+    expect(evaluated.transferReport.summary.meetsCrossDraftVerification).toBe(false);
+    expect(evaluated.transferReport.summary.masteryQualified).toBe(false);
+    expect(evaluated.receipt.masteryQualified).toBe(false);
+    expect(evaluated.receipt.countsTowardMastery).toBe(false);
+    expect(evaluated.receipt.epistemicStatus).toBe("practice_feedback");
   });
 
   it("blocks empty targetExpressions list from qualifying as verified transfer", () => {
@@ -738,6 +787,49 @@ describe("Speaking Part 3 oral transfer seed, strict verification gates & Unicod
     expect(commaReceipt.masteryQualified).toBe(false);
     expect(commaReceipt.countsTowardMastery).toBe(false);
     expect(commaReceipt.epistemicStatus).toBe("practice_feedback");
+  });
+
+  it("blocks comma-tacked ', and the <target>' verbless fragments while crediting valid unpunctuated shared-predicate coordination", () => {
+    const pastedAndTheTranscript =
+      "Personally, I think municipal leaders often prefer highway projects because impatient drivers notice wider asphalt roads immediately before the next election. " +
+      "However, building large rail systems takes many years of careful planning and disruptive construction noise across local neighbourhoods. " +
+      "Admittedly, families in outer suburban districts still need private cars when local bus routes run infrequently during late evenings. " +
+      "In the long run, cities should coordinate feeder routes with reliable trains so daily residents choose shared transit, and the per-capita emissions, and the long-term fiscal viability.";
+
+    const pastedReceipt = evaluateSpeakingRetelling({
+      seed: baseSeed,
+      transcript: pastedAndTheTranscript,
+      durationSeconds: 75,
+      assisted: false,
+      freshPromptTransfer: true,
+    });
+    expect(pastedReceipt.wordCount).toBeGreaterThanOrEqual(75);
+    expect(pastedReceipt.transferredCollocations).toHaveLength(0);
+    expect(pastedReceipt.masteryQualified).toBe(false);
+    expect(pastedReceipt.countsTowardMastery).toBe(false);
+    expect(pastedReceipt.epistemicStatus).toBe("practice_feedback");
+
+    // Valid unpunctuated direct coordination sharing a governing verb ("should monitor X and Y")
+    const coordinatedTranscript =
+      "Personally, I think municipal leaders often prefer highway projects because impatient drivers notice wider asphalt roads right before major municipal elections. " +
+      "However, building large urban rail networks requires years of careful planning and steady political commitment across densely populated districts. " +
+      "Admittedly, families in outer suburban neighbourhoods still rely on cars when local bus routes run infrequently during late evenings. " +
+      "The regional transport board should monitor long-term fiscal viability and per-capita emissions before approving expensive highway projects.";
+
+    const coordinatedReceipt = evaluateSpeakingRetelling({
+      seed: baseSeed,
+      transcript: coordinatedTranscript,
+      durationSeconds: 75,
+      assisted: false,
+    });
+    expect(coordinatedReceipt.wordCount).toBeGreaterThanOrEqual(75);
+    expect(coordinatedReceipt.transferredCollocations).toEqual([
+      "per-capita emissions",
+      "long-term fiscal viability",
+    ]);
+    expect(coordinatedReceipt.masteryQualified).toBe(true);
+    expect(coordinatedReceipt.countsTowardMastery).toBe(true);
+    expect(coordinatedReceipt.epistemicStatus).toBe("rubric_verified_evidence");
   });
 
   it("emits one grounded citation per credited target hit with exact untrimmed offsets when transcript has leading spaces", () => {
