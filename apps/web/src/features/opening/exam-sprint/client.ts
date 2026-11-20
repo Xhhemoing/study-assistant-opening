@@ -8,7 +8,7 @@ export type ExamSprintIntent = WithoutKey<ExamSprintCommand>;
 export type ExamIntegrationIntent = { action: "bind"; input: WithoutKey<ExamBindInput> } | { action: "map"; input: WithoutKey<ExamSourceMappingInput> } | { action: "paper"; input: WithoutKey<ExamPaperInput> } | { action: "review"; input: WithoutKey<ExamWorkReviewInput> };
 export type ExamSprintSnapshot = { overview: ExamSprintOverview | null; integration: ExamIntegrationOverview | null; forecast: ExamForecastOverview | null; review: ExamWorkReview | null; busy: boolean; error: string | null; uncertain: boolean };
 type Target = "overview" | "integration" | "forecast" | "review";
-type Pending = { target: Target; path: string; method: "POST" | "PATCH"; body: unknown; readTarget?: Target; readPath?: string; lessonRequest?: Extract<ExamSprintCommand, { action: "open_lesson" }> };
+type Pending = { target: Target; path: string; method: "POST" | "PATCH"; body: { clientKey: string }; readTarget?: Target; readPath?: string; lessonRequest?: Extract<ExamSprintCommand, { action: "open_lesson" }> };
 const BASE = "/api/opening/exam-sprint";
 
 class HttpError extends Error {
@@ -38,6 +38,12 @@ export function createExamSprintClient(options: { fetcher?: typeof fetch; keyFac
   let generation = 0;
   let active: { generation: number; controller: AbortController; writing: boolean } | null = null;
   let pending: Pending | null = null;
+  // A conflict can hide a committed write. Release the UI lock, retaining the exact input's key.
+  const unresolved = new Map<string, Pending>();
+  function identity(command: Pending) {
+    const { clientKey: _key, ...intent } = command.body;
+    return JSON.stringify([command.path, command.method, intent]);
+  }
   function publish(update: Partial<ExamSprintSnapshot>) { snapshot = { ...snapshot, ...update }; listeners.forEach(listener => listener()); }
   function begin(writing: boolean) {
     active?.controller.abort();
@@ -79,6 +85,7 @@ export function createExamSprintClient(options: { fetcher?: typeof fetch; keyFac
         if (!isCurrent(operation)) return;
         publish(result);
         if (command.lessonRequest && result.overview && !isCurrentSprintLessonRequest(result.overview, command.lessonRequest)) {
+          unresolved.set(identity(command), command);
           pending = null;
           publish({ uncertain: false, error: "题包内容刚更新过，请重新选择串讲。" });
           return result;
@@ -87,6 +94,7 @@ export function createExamSprintClient(options: { fetcher?: typeof fetch; keyFac
       writeAttempted = true;
       const result = await request(operation.controller.signal, command.target, command.path, command);
       if (!isCurrent(operation)) return;
+      unresolved.delete(identity(command));
       pending = null; publish({ ...result, error: null, uncertain: false });
       return result;
     } catch (error) {
@@ -97,6 +105,7 @@ export function createExamSprintClient(options: { fetcher?: typeof fetch; keyFac
         return;
       }
 
+      if (recovering || error.status === 404 || error.status === 409) unresolved.set(identity(command), command);
       pending = null;
       const message = describeError(error);
       publish({ error: message, uncertain: false });
@@ -113,7 +122,11 @@ export function createExamSprintClient(options: { fetcher?: typeof fetch; keyFac
   }
   async function enqueue(build: (key: string) => Pending) {
     if (active || pending) return null;
-    try { pending = build(keyFactory()); } catch { publish({ error: "请检查输入内容，暂未提交。" }); return; }
+    try {
+      // Zod normalizes input and field order. No new key is allocated for a matching retry.
+      const previous = unresolved.size ? unresolved.get(identity(build("compare-intent"))) : undefined;
+      pending = previous ?? build(keyFactory());
+    } catch { publish({ error: "请检查输入内容，暂未提交。" }); return; }
     return await write(pending, false);
   }
   return {

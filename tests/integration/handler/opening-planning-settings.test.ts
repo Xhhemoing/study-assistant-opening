@@ -215,6 +215,29 @@ describe("opening planning-settings handlers (DL9)", () => {
     expect((await snapshot()).sessions).toMatchObject([{ courseName: "数学" }]);
   });
 
+  it("rejects an untouched preview after import and clear, and accepts the post-clear revision", async () => {
+    const path = "/api/opening/timetable", freshCookie = await registerUser("clear-timetable");
+    const snapshot = async () => (await getTimetable(req(path, "GET", undefined, freshCookie))).json();
+    const sessions = [{ courseName: "物理", weekday: 1, weeks: [1], startPeriod: 1, endPeriod: 2 }];
+    const put = (rows: typeof sessions, expectedRevision: string) =>
+      putTimetable(req(path, "PUT", { sessions: rows, expectedRevision }, freshCookie));
+    expect(await snapshot()).toEqual({ sessions: [], revision: "empty" });
+    expect((await put(sessions, "empty")).status).toBe(200);
+    const imported = await snapshot();
+    expect((await put([], imported.revision)).status).toBe(200);
+    const cleared = await snapshot();
+    expect(cleared).toEqual({ sessions: [], revision: expect.stringMatching(/^[\da-f-]{36}$/i) });
+    expect(cleared.revision).not.toBe(imported.revision);
+    const stale = await put(sessions, "empty");
+    expect(stale.status).toBe(409);
+    expect((await stale.json()).error.code).toBe("CONFLICT");
+    expect(await snapshot()).toEqual(cleared);
+    expect((await put([], cleared.revision)).status).toBe(200);
+    const clearedAgain = await snapshot();
+    expect(clearedAgain.revision).not.toBe(cleared.revision);
+    expect((await put(sessions, clearedAgain.revision)).status).toBe(200);
+  });
+
   it("requires authentication", async () => {
     expect((await getPlanningSettings(req("/api/opening/planning-settings", "GET", undefined, ""))).status).toBe(401);
     expect((await putPlanningSettings(req("/api/opening/planning-settings", "PUT", settings, ""))).status).toBe(401);

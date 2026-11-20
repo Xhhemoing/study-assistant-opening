@@ -422,6 +422,25 @@ describe("exam integration shares mutation recovery", () => {
     expect(client.getSnapshot()).toMatchObject({ uncertain: false, review: { id: review.id } });
   });
 
+  it.each([404, 409])("keeps a lost photo receipt across HTTP %i and an unrelated selection", async status => {
+    const fetcher = vi.fn<Fetcher>().mockRejectedValueOnce(new Error("lost committed review"))
+      .mockResolvedValueOnce(Response.json(overview())).mockResolvedValueOnce(Response.json({}, { status }))
+      .mockResolvedValueOnce(Response.json(overview())).mockResolvedValueOnce(Response.json(overview()))
+      .mockResolvedValueOnce(Response.json(review));
+    const keys = vi.fn().mockReturnValueOnce(key).mockReturnValueOnce("unrelated-key");
+    const client = createExamSprintClient({ fetcher, keyFactory: keys });
+    const original = { action: "review", input: reviewInput } as const;
+    await client.sendIntegration(original);
+    await client.recover();
+    expect(client.getSnapshot().uncertain).toBe(false);
+    await client.send(intent);
+    await client.sendIntegration(original);
+    const posts = fetcher.mock.calls.filter(([url, init]) => String(url).endsWith("/reviews") && init?.method === "POST");
+    expect(posts.map(([, init]) => JSON.parse(String(init?.body)).clientKey)).toEqual([key, key, key]);
+    expect(keys).toHaveBeenCalledTimes(2);
+    expect(client.getSnapshot().review?.id).toBe(review.id);
+  });
+
   it("reuses the original image-review request when no review id was received", async () => {
     const fetcher = vi.fn<Fetcher>().mockRejectedValueOnce(new Error("lost review receipt"))
       .mockResolvedValueOnce(Response.json(overview())).mockResolvedValueOnce(Response.json(review))

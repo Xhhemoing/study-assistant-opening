@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { Sql } from "postgres";
 import {
+  DEFAULT_OPENING_INTERVENTION_PREFS,
   isReservedDayAdjustmentProposePrefix,
   type AcceptPlanInput,
   type PlanBlockReason,
@@ -158,10 +159,12 @@ export function mapOpeningPlanDraft(row: Record<string, unknown>): PlanDraft {
 
 async function readTimetableSnapshot(sql: Sql, scope: OpeningScope) {
   const rows = await sql`
-    SELECT * FROM opening_timetable_sessions
-    WHERE workspace_id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}
-    ORDER BY weekday, start_period, id`;
-  const sessions = rows.map((row) => {
+    SELECT s.*, p.intervention_settings->>'timetableRevision' AS revision FROM workspaces w
+    LEFT JOIN workspace_preferences p ON p.workspace_id = w.id
+    LEFT JOIN opening_timetable_sessions s ON s.workspace_id = w.id AND s.owner_user_id = w.owner_user_id
+    WHERE w.id = ${scope.workspaceId} AND w.owner_user_id = ${scope.ownerUserId}
+    ORDER BY s.weekday, s.start_period, s.id`;
+  const sessions = rows.filter(row => row.id != null).map((row) => {
     const r = row as Record<string, unknown>;
     return {
       courseName: r.course_name as string,
@@ -172,8 +175,8 @@ async function readTimetableSnapshot(sql: Sql, scope: OpeningScope) {
       endPeriod: Number(r.end_period),
     };
   });
-  // Full replacement assigns fresh primary keys even when the first course is unchanged.
-  return { sessions, revision: (rows[0]?.id as string | undefined) ?? "empty" };
+  // Use the first ordered row for legacy timetables until their first replacement.
+  return { sessions, revision: (rows[0]?.revision as string | null) ?? (rows[0]?.id as string | null) ?? "empty" };
 }
 
 export function createOpeningPlansRepository(sql: Sql, options: { now?: () => Date } = {}) {
@@ -386,6 +389,11 @@ export function createOpeningPlansRepository(sql: Sql, options: { now?: () => Da
               ${s.courseId ?? null}, ${s.weekday}, ${s.weeks}, ${s.startPeriod}, ${s.endPeriod}
             )`;
         }
+        const timetableRevision = randomUUID();
+        await tx`INSERT INTO workspace_preferences(workspace_id, intervention_settings)
+          VALUES (${scope.workspaceId}, ${tx.json({ ...DEFAULT_OPENING_INTERVENTION_PREFS, timetableRevision })})
+          ON CONFLICT(workspace_id) DO UPDATE SET intervention_settings =
+            jsonb_set(workspace_preferences.intervention_settings, '{timetableRevision}', EXCLUDED.intervention_settings->'timetableRevision')`;
         return (await readTimetableSnapshot(tx, scope)).sessions;
       });
     },

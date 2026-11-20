@@ -51,7 +51,7 @@ function parsePatch(stored: unknown): InterventionPrefsPatch | null {
 export function createOpeningInterventionSettingsRepository(sql: Sql) {
   return {
     async getGlobal(scope: Scope) {
-      const rows = await sql`SELECT p.intervention_settings FROM workspaces w
+      const rows = await sql`SELECT p.intervention_settings - 'timetableRevision' AS intervention_settings FROM workspaces w
         LEFT JOIN workspace_preferences p ON p.workspace_id=w.id
         WHERE w.id=${scope.workspaceId} AND w.owner_user_id=${scope.ownerUserId}`;
       if (!rows.length) throw new WorkspacePreferencesError("NOT_FOUND", "Workspace not found");
@@ -70,7 +70,8 @@ export function createOpeningInterventionSettingsRepository(sql: Sql) {
         await tx`INSERT INTO workspace_preferences (workspace_id, intervention_settings)
           VALUES (${scope.workspaceId}, ${tx.json(parsed)})
           ON CONFLICT(workspace_id) DO UPDATE SET
-            intervention_settings=EXCLUDED.intervention_settings, updated_at=now()`;
+            intervention_settings=EXCLUDED.intervention_settings || jsonb_strip_nulls(jsonb_build_object(
+              'timetableRevision', workspace_preferences.intervention_settings->'timetableRevision')), updated_at=now()`;
       });
     },
 

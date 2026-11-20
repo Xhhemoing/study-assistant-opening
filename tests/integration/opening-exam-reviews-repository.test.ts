@@ -1,6 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ExamCourseBinding, ExamPack, ExamWorkReviewInput, ExamWorkReviewProposal, Scope } from "@aistudy/contracts";
+import type { ModelGateway } from "@aistudy/ai";
+import { createExamPhotoReviewService } from "../../apps/web/src/features/opening/exam-sprint/review-service";
+import { createExamSprintClient } from "../../apps/web/src/features/opening/exam-sprint/client";
+import { examSprintResponse } from "../../apps/web/src/features/opening/exam-sprint/http";
+import { createOpeningExamSprintRepository } from "../../packages/database/src/repositories/opening-exam-sprint";
 import { createOpeningPrivacyRepository } from "@aistudy/database";
 import { createOpeningExamIntegrationRepository } from "../../packages/database/src/repositories/opening-exam-integration";
 import { createOpeningExamReviewsRepository } from "../../packages/database/src/repositories/opening-exam-reviews";
@@ -96,6 +101,52 @@ describe("exam photo review repository integration", () => {
     await repository.begin(f.scope, intent);
     await repository.fail(f.scope, pending.review.id, "failed");
     expect(await facts()).toEqual(before);
+  });
+
+  it("replays the same paid review after a lost response, archive and restoration", async () => {
+    type Options = Parameters<ModelGateway["call"]>[2];
+    const output = { text: JSON.stringify(proposal), inputTokens: 10, outputTokens: 20, citedChunkIds: [], candidates: [], requestId: null };
+    const call = vi.fn(async (_scope: Scope, _task: string, options: Options) => {
+      await options.beforeSend?.();
+      await options.persistResult?.(output, { reservationId: randomUUID(), settledCents: 1 });
+      return output;
+    });
+    const service = createExamPhotoReviewService({ repository, gateway: { call },
+      images: async () => [{ mediaType: "image/png", data: "data:image/png;base64,AAAA" }],
+      budget: () => ({} as Options["budget"]) });
+    const sprint = createOpeningExamSprintRepository(f.sql, pack);
+    const keys = vi.fn(() => randomUUID());
+    const posted: string[] = [];
+    const responses: Response[] = [];
+    const fetcher: typeof fetch = async (_url, init) => {
+      if (init?.method === "GET") return Response.json(await sprint.read(f.scope));
+      const body = JSON.parse(String(init?.body)) as ExamWorkReviewInput;
+      posted.push(body.clientKey);
+      const response = await examSprintResponse(() => service.review(f.scope, body));
+      responses.push(response.clone());
+      if (posted.length === 1) throw new TypeError("response lost after commit");
+      return response;
+    };
+    const client = createExamSprintClient({ fetcher, keyFactory: keys });
+    const { clientKey: _unused, ...photo } = input();
+    const command = { action: "review", input: photo } as const;
+    await client.sendIntegration(command);
+    const receipts = () => f.sql`SELECT id FROM opening_exam_reviews WHERE workspace_id=${f.scope.workspaceId}`;
+    const first = await receipts();
+    expect(first).toHaveLength(1);
+    await f.sql`UPDATE courses SET archived_at=now() WHERE id=${binding.courseId}`;
+    await client.recover();
+    expect(await receipts()).toEqual(first);
+    expect(client.getSnapshot().uncertain).toBe(false);
+    await f.sql`UPDATE courses SET archived_at=NULL WHERE id=${binding.courseId}`;
+    await client.sendIntegration(command);
+    expect(await receipts()).toEqual(first);
+    expect(client.getSnapshot().review).toMatchObject({ id: first[0]!.id, status: "ready" });
+    expect(responses.map(response => response.status)).toEqual([200, 409, 200]);
+    expect(await responses[1]!.json()).toMatchObject({ error: { businessCode: "EXAM_RECEIPT_COMMITTED" } });
+    expect(posted).toEqual(Array(3).fill(posted[0]));
+    expect(keys).toHaveBeenCalledOnce();
+    expect(call).toHaveBeenCalledOnce();
   });
 
   it("checks both workspace and owner for creation, reading, completion and failure updates", async () => {

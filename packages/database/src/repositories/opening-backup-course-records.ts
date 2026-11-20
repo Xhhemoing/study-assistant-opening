@@ -1,5 +1,5 @@
 import { cardReadable } from "./card-sources";
-import { interventionPrefsPatchSchema, interventionPrefsSchema, openingAiSettingsSchema, openingPlanningSettingsSchema } from "@aistudy/contracts";
+import { interventionPrefsPatchSchema, storedWorkspaceInterventionPrefsSchema, openingAiSettingsSchema, openingPlanningSettingsSchema } from "@aistudy/contracts";
 import type { TransactionSql } from "postgres";
 
 type Rows = Record<string, unknown>[];
@@ -15,7 +15,7 @@ export async function readOpeningBackupCourseRecords(tx: TransactionSql, workspa
   for (const row of workspace_preferences) {
     if (row.ai_settings != null) row.ai_settings = openingAiSettingsSchema.parse(row.ai_settings);
     if (row.planning_settings != null) row.planning_settings = openingPlanningSettingsSchema.parse(row.planning_settings);
-    if (row.intervention_settings != null) row.intervention_settings = interventionPrefsSchema.parse(row.intervention_settings);
+    if (row.intervention_settings != null) row.intervention_settings = storedWorkspaceInterventionPrefsSchema.parse(row.intervention_settings);
   }
   const courses: Rows = [...await tx`
     SELECT id, workspace_id, title, slug, description, schema_version, archived_at,

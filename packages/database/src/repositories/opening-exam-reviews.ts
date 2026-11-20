@@ -7,7 +7,7 @@ import {
 } from "@aistudy/contracts";
 import { learningError } from "./opening-learning-facts";
 import { assertExamMaterialAvailable } from "./opening-exam-integration-binding";
-import { parseExamBinding } from "./opening-exam-integration-facts";
+import { parseExamBinding, readCommittedExamReceipt } from "./opening-exam-integration-facts";
 import { parseExamSprintSnapshot } from "./opening-exam-sprint-snapshot";
 
 type Row = Record<string, unknown>;
@@ -79,7 +79,7 @@ export function createOpeningExamReviewsRepository(sql: Sql) {
           AND owner_user_id=${scope.ownerUserId} AND client_key=${input.clientKey}`;
         if (existing) {
           if (!isDeepStrictEqual(existing.intent, input)) throw learningError("CONFLICT", "同一评阅标识不能提交不同作答");
-          return readContext(tx, scope, String(existing.id));
+          return readCommittedExamReceipt(() => readContext(tx, scope, String(existing.id)));
         }
         const checked = await validate(tx, scope, input), id = randomUUID();
         await tx`INSERT INTO opening_exam_reviews(id,sprint_id,workspace_id,owner_user_id,source_item_id,
