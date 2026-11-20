@@ -1,0 +1,204 @@
+// @vitest-environment jsdom
+import { act, createElement } from "react";
+import { createRoot, type Root } from "react-dom/client";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  IELTS_WRITING_SPEAKING_FIXTURE,
+  IeltsDraftCritiqueWorkbench,
+  IeltsSpeakingTransferCard,
+  formatBandScore,
+  formatTimeBox,
+  segmentParagraphWithSpans,
+} from "./index";
+
+let host: HTMLDivElement;
+let root: Root;
+
+beforeEach(() => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  host = document.createElement("div");
+  document.body.append(host);
+  root = createRoot(host);
+});
+
+afterEach(async () => {
+  await act(async () => root.unmount());
+  host.remove();
+  vi.unstubAllGlobals();
+});
+
+function setNativeInputValue(
+  element: HTMLTextAreaElement | HTMLInputElement,
+  value: string,
+) {
+  const proto =
+    element instanceof HTMLTextAreaElement
+      ? HTMLTextAreaElement.prototype
+      : HTMLInputElement.prototype;
+  const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
+  setter?.call(element, value);
+  element.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+describe("workbench-model helpers", () => {
+  it("formats band scores and time-box labels cleanly", () => {
+    expect(formatBandScore(7)).toBe("7.0");
+    expect(formatBandScore(6.5)).toBe("6.5");
+    expect(formatTimeBox(2040, 2400)).toBe("34 / 40 分钟");
+  });
+
+  it("segments a paragraph into plain and highlighted span slices while respecting criterion filters", () => {
+    const paragraph = IELTS_WRITING_SPEAKING_FIXTURE.draft2.paragraphs[1]!;
+    const p1Spans = [
+      ...IELTS_WRITING_SPEAKING_FIXTURE.draft2Receipt.criteria.CC.evidenceSpans,
+      ...IELTS_WRITING_SPEAKING_FIXTURE.draft2Receipt.criteria.LR.evidenceSpans,
+    ].filter((s) => s.paragraphIndex === 1);
+
+    const allSegments = segmentParagraphWithSpans(paragraph, p1Spans, "ALL");
+    expect(allSegments.some((s) => s.kind === "span")).toBe(true);
+    expect(allSegments.map((s) => s.text).join("")).toBe(paragraph);
+
+    const lrOnly = segmentParagraphWithSpans(paragraph, p1Spans, "LR");
+    const spanCriteria = lrOnly
+      .filter((s) => s.kind === "span")
+      .map((s) => s.span.criterion);
+    expect(spanCriteria).toEqual(["LR"]);
+  });
+});
+
+describe("IeltsDraftCritiqueWorkbench", () => {
+  it("renders Draft 2 verified evidence, switches to Draft 1 practice feedback and comparison view", async () => {
+    await act(async () => root.render(createElement(IeltsDraftCritiqueWorkbench)));
+
+    // Default Draft 2 state
+    expect(
+      host.querySelector("[data-epistemic-badge]")?.getAttribute("data-epistemic-badge"),
+    ).toBe("rubric_verified_evidence");
+    expect(host.querySelector("[data-epistemic-badge]")?.textContent).toContain(
+      "量规复核证据 · 跨稿迁移已确认",
+    );
+    expect(host.querySelector("[data-overall-band]")?.textContent).toContain("Band 7.5");
+    expect(host.querySelectorAll("[data-criterion-card]")).toHaveLength(4);
+    expect(host.querySelector("[data-transfer-summary]")?.textContent).toContain(
+      "已迁移 4 / 4",
+    );
+    expect(host.querySelectorAll("[data-span-id]").length).toBeGreaterThan(0);
+
+    // Switch to Draft 1
+    const draft1Tab = [...host.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find(
+      (b) => b.textContent === "一稿",
+    )!;
+    await act(async () => draft1Tab.click());
+
+    expect(
+      host.querySelector("[data-epistemic-badge]")?.getAttribute("data-epistemic-badge"),
+    ).toBe("practice_feedback");
+    expect(host.querySelector("[data-epistemic-badge]")?.textContent).toContain(
+      "练习诊断反馈 · 不计入正式掌握度",
+    );
+    expect(host.querySelector('[role="alert"]')?.textContent).toContain(
+      "with the rapid development of",
+    );
+
+    // Switch to Comparison View
+    const compareTab = [...host.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find(
+      (b) => b.textContent === "对照视图",
+    )!;
+    await act(async () => compareTab.click());
+    expect(host.textContent).toContain("逐段改写对照");
+    expect(host.textContent).toContain("一稿原文");
+    expect(host.textContent).toContain("二稿改写");
+  });
+
+  it("downgrades epistemic status to practice_feedback when inline revision introduces memorized clichés", async () => {
+    const onRevisionEvaluated = vi.fn();
+    await act(async () =>
+      root.render(
+        createElement(IeltsDraftCritiqueWorkbench, { onRevisionEvaluated }),
+      ),
+    );
+
+    const openComposerBtn = [
+      ...host.querySelectorAll<HTMLButtonElement>("button"),
+    ].find((b) => b.textContent === "打开改写编辑区")!;
+    await act(async () => openComposerBtn.click());
+
+    const textarea = host.querySelector<HTMLTextAreaElement>(
+      '[aria-label="二稿改写编辑区"]',
+    )!;
+    const stuffedEssay = `Every coin has two sides when cities debate transport spending.\n\n${IELTS_WRITING_SPEAKING_FIXTURE.draft2.paragraphs.slice(1).join("\n\n")}`;
+
+    await act(async () => setNativeInputValue(textarea, stuffedEssay));
+
+    const analyzeBtn = [...host.querySelectorAll<HTMLButtonElement>("button")].find(
+      (b) => b.textContent === "重新分析改写",
+    )!;
+    await act(async () => analyzeBtn.click());
+
+    expect(onRevisionEvaluated).toHaveBeenCalledOnce();
+    expect(
+      host.querySelector("[data-epistemic-badge]")?.getAttribute("data-epistemic-badge"),
+    ).toBe("practice_feedback");
+    expect(host.querySelector('[role="alert"]')?.textContent).toContain(
+      "every coin has two sides",
+    );
+  });
+});
+
+describe("IeltsSpeakingTransferCard", () => {
+  it("renders Part 3 follow-up prompt and updates feedback honestly when re-evaluating oral response", async () => {
+    const onEvaluated = vi.fn();
+    await act(async () =>
+      root.render(createElement(IeltsSpeakingTransferCard, { onEvaluated })),
+    );
+
+    expect(
+      host
+        .querySelector("[data-speaking-epistemic]")
+        ?.getAttribute("data-speaking-epistemic"),
+    ).toBe("rubric_verified_evidence");
+    expect(
+      host.querySelector("[data-speaking-pace]")?.getAttribute("data-speaking-pace"),
+    ).toBe("on_target");
+    expect(
+      host.querySelectorAll('[data-collocation-state="transferred"]').length,
+    ).toBeGreaterThanOrEqual(4);
+
+    // Edit to a short response and lower duration to 35s
+    const textarea = host.querySelector<HTMLTextAreaElement>(
+      '[aria-label="口语复述记录输入框"]',
+    )!;
+    const durationInput = host.querySelector<HTMLInputElement>(
+      '[aria-label="口语作答时长秒数"]',
+    )!;
+
+    await act(async () => {
+      setNativeInputValue(
+        textarea,
+        "I think trains are better for cities because they alleviate chronic congestion.",
+      );
+      setNativeInputValue(durationInput, "35");
+    });
+
+    const evalBtn = [...host.querySelectorAll<HTMLButtonElement>("button")].find(
+      (b) => b.textContent === "生成口语反馈",
+    )!;
+    await act(async () => evalBtn.click());
+
+    expect(onEvaluated).toHaveBeenCalledOnce();
+    expect(
+      host
+        .querySelector("[data-speaking-epistemic]")
+        ?.getAttribute("data-speaking-epistemic"),
+    ).toBe("practice_feedback");
+    expect(
+      host.querySelector("[data-speaking-pace]")?.getAttribute("data-speaking-pace"),
+    ).toBe("too_short");
+    expect(
+      host.querySelectorAll('[data-collocation-state="transferred"]').length,
+    ).toBe(1);
+    expect(
+      host.querySelectorAll('[data-collocation-state="pending"]').length,
+    ).toBe(4);
+  });
+});

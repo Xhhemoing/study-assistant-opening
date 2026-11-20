@@ -1,0 +1,282 @@
+"use client";
+
+import { useState } from "react";
+import {
+  IELTS_CRITERIA,
+  evaluateSpeakingRetelling,
+  type IeltsSpeakingFeedbackReceipt,
+  type IeltsSpeakingPart3Seed,
+} from "./domain-bridge";
+import { IELTS_WRITING_SPEAKING_FIXTURE } from "./ielts-fixtures";
+import {
+  CRITERION_STYLES,
+  EPISTEMIC_BADGE_META,
+  SPEAKING_PACE_META,
+  formatBandScore,
+} from "./workbench-model";
+
+export type IeltsSpeakingTransferCardProps = {
+  readonly seed?: IeltsSpeakingPart3Seed;
+  readonly initialTranscript?: string;
+  readonly initialDurationSeconds?: number;
+  readonly initialReceipt?: IeltsSpeakingFeedbackReceipt;
+  readonly onEvaluated?: (receipt: IeltsSpeakingFeedbackReceipt) => void;
+};
+
+export function IeltsSpeakingTransferCard({
+  seed = IELTS_WRITING_SPEAKING_FIXTURE.speakingSeed,
+  initialTranscript = IELTS_WRITING_SPEAKING_FIXTURE.initialSpeakingTranscript,
+  initialDurationSeconds = IELTS_WRITING_SPEAKING_FIXTURE.initialSpeakingDurationSeconds,
+  initialReceipt = IELTS_WRITING_SPEAKING_FIXTURE.initialSpeakingReceipt,
+  onEvaluated,
+}: IeltsSpeakingTransferCardProps) {
+  const [transcript, setTranscript] = useState(initialTranscript);
+  const [durationSeconds, setDurationSeconds] = useState(initialDurationSeconds);
+  const [assisted, setAssisted] = useState(false);
+  const [receipt, setReceipt] = useState<IeltsSpeakingFeedbackReceipt>(initialReceipt);
+
+  const epistemicMeta = EPISTEMIC_BADGE_META[receipt.epistemicStatus];
+  const paceMeta = SPEAKING_PACE_META[receipt.paceStatus];
+
+  function handleEvaluate() {
+    if (!transcript.trim()) return;
+    const nextReceipt = evaluateSpeakingRetelling({
+      seed,
+      transcript,
+      durationSeconds,
+      assisted,
+    });
+    setReceipt(nextReceipt);
+    onEvaluated?.(nextReceipt);
+  }
+
+  return (
+    <section
+      aria-label="雅思口语 Part 3 迁移复述卡片"
+      className="mx-auto w-full max-w-4xl space-y-5 rounded-panel border border-line bg-surface p-5 text-text shadow-card sm:p-6"
+    >
+      {/* Header */}
+      <header className="flex flex-wrap items-start justify-between gap-3 border-b border-line pb-4">
+        <div className="space-y-1">
+          <p className="text-cap font-medium text-text-2">
+            Speaking Part 3 · 写作观点口语迁移（{seed.timeWindowSeconds.min}–
+            {seed.timeWindowSeconds.max} 秒）
+          </p>
+          <h2 className="text-title font-semibold text-text">
+            从二稿核心主张出发，完成一轮自然口语追问复述
+          </h2>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <span
+            data-speaking-band
+            className="rounded-tile border border-line bg-surface-2 px-3 py-1 text-ui font-semibold tabular-nums text-text"
+          >
+            Band {formatBandScore(receipt.estimatedBand)}
+          </span>
+          <span
+            data-speaking-epistemic={receipt.epistemicStatus}
+            className={`inline-flex items-center gap-1.5 rounded-pill border px-3 py-1 text-meta font-medium ${epistemicMeta.badgeClass}`}
+          >
+            <span
+              aria-hidden="true"
+              className={`size-2 rounded-pill ${epistemicMeta.dotClass}`}
+            />
+            {epistemicMeta.speakingLabel}
+          </span>
+        </div>
+      </header>
+
+      {/* Examiner Follow-Up Prompt */}
+      <div className="space-y-2 rounded-tile border border-line bg-bg p-4">
+        <p className="text-cap font-medium text-text-3">考官追问（Part 3）</p>
+        <p className="font-reading text-read-lg leading-7 text-text">
+          {seed.followUpQuestion}
+        </p>
+        <p className="text-meta text-text-2">{seed.followUpQuestionZh}</p>
+
+        <ul className="mt-2 space-y-1 border-t border-line pt-2.5 text-meta text-text-2">
+          {seed.argumentBridgeCues.map((cue, idx) => (
+            <li key={idx} className="flex gap-2">
+              <span className="font-mono text-cap text-text-3">{idx + 1}.</span>
+              <span>{cue}</span>
+            </li>
+          ))}
+        </ul>
+      </div>
+
+      {/* Active Target Spoken Expressions */}
+      <div className="space-y-2">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h3 className="text-ui font-semibold text-text">
+            本轮目标活性搭配（来自写作二稿）
+          </h3>
+          <span className="text-meta tabular-nums text-text-2">
+            已迁移 {receipt.transferredCollocations.length} /{" "}
+            {seed.targetSpokenCollocations.length}
+          </span>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {seed.targetSpokenCollocations.map((phrase) => {
+            const matched = receipt.transferredCollocations.includes(phrase);
+            return (
+              <span
+                key={phrase}
+                data-collocation-state={matched ? "transferred" : "pending"}
+                className={`rounded-pill border px-3 py-1 font-reading text-meta transition-colors ${
+                  matched
+                    ? "border-accent/35 bg-accent-soft font-medium text-accent"
+                    : "border-line bg-surface-2 text-text-2"
+                }`}
+              >
+                {matched ? "✓ " : ""}
+                {phrase}
+              </span>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Spoken Transcript & Duration Composer */}
+      <div className="space-y-3 rounded-tile border border-line bg-bg p-4">
+        <label className="block space-y-1.5">
+          <span className="text-meta font-medium text-text-2">
+            口语复述要点 / 语音转写记录
+          </span>
+          <textarea
+            aria-label="口语复述记录输入框"
+            rows={5}
+            value={transcript}
+            onChange={(event) => setTranscript(event.target.value)}
+            placeholder="先口头计时说 60–90 秒，再粘贴转写稿或记录你的关键表达..."
+            className="block w-full rounded-ctl border border-line-strong bg-surface px-3.5 py-2.5 font-reading text-read leading-6 text-text placeholder:text-text-3 focus:border-text focus:outline-none"
+          />
+        </label>
+
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex flex-wrap items-center gap-4">
+            <label className="inline-flex items-center gap-2 text-meta text-text-2">
+              <span>作答时长</span>
+              <input
+                type="number"
+                aria-label="口语作答时长秒数"
+                min={15}
+                max={180}
+                value={durationSeconds}
+                onChange={(event) =>
+                  setDurationSeconds(Math.max(15, Number(event.target.value) || 60))
+                }
+                className="w-20 rounded-ctl border border-line-strong bg-surface px-2.5 py-1 text-center tabular-nums text-text"
+              />
+              <span>秒</span>
+            </label>
+
+            <label className="inline-flex cursor-pointer items-center gap-2 text-meta text-text-2">
+              <input
+                type="checkbox"
+                checked={assisted}
+                onChange={(event) => setAssisted(event.target.checked)}
+                className="size-4 accent-ink"
+              />
+              <span>对照了写作稿件（不计入正式掌握度）</span>
+            </label>
+          </div>
+
+          <button
+            type="button"
+            onClick={handleEvaluate}
+            className="rounded-pill bg-ink px-4 py-1.5 text-meta font-medium text-on-ink hover:bg-ink/90"
+          >
+            生成口语反馈
+          </button>
+        </div>
+      </div>
+
+      {/* Structured Oral Feedback Summary */}
+      <div className="space-y-3 border-t border-line pt-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h3 className="text-ui-lg font-semibold text-text">口语迁移反馈</h3>
+          <div className="flex flex-wrap items-center gap-2">
+            <span
+              data-speaking-pace={receipt.paceStatus}
+              className={`rounded-pill border px-2.5 py-0.5 text-cap font-medium ${paceMeta.badgeClass}`}
+            >
+              {paceMeta.label} · {receipt.durationSeconds} 秒
+            </span>
+            <span className="rounded-pill border border-line bg-surface-2 px-2.5 py-0.5 text-cap tabular-nums text-text-2">
+              {receipt.wordCount} 词
+            </span>
+          </div>
+        </div>
+
+        <p className="text-meta text-text-2">{receipt.epistemicReason}</p>
+
+        {receipt.memorizedTemplateHits.length > 0 && (
+          <div
+            role="alert"
+            className="rounded-ctl border border-danger/30 bg-danger-soft p-3 text-meta text-danger"
+          >
+            检测到口语模板套话：
+            {receipt.memorizedTemplateHits.map((h) => h.phrase).join("、")}
+            。建议改用自然口语过渡，直接给出核心判断与具体例子。
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+          {IELTS_CRITERIA.map((code) => {
+            const note = receipt.criteriaNotes[code];
+            const style = CRITERION_STYLES[code];
+            return (
+              <div
+                key={code}
+                className="rounded-tile border border-line bg-bg p-3"
+              >
+                <div className="flex items-center justify-between">
+                  <span
+                    className={`rounded-pill border px-2 py-0.5 text-cap font-semibold ${style.badgeClass}`}
+                  >
+                    {code} · {style.zhLabel}
+                  </span>
+                  <span className="text-ui font-semibold tabular-nums text-text">
+                    {formatBandScore(note.band)}
+                  </span>
+                </div>
+                <p className="mt-1.5 text-meta text-text-2">{note.note}</p>
+              </div>
+            );
+          })}
+        </div>
+
+        {receipt.evidenceSpans.length > 0 && (
+          <div className="space-y-2">
+            <p className="text-cap font-medium text-text-3">原文引证与口语微调建议</p>
+            {receipt.evidenceSpans.map((span) => (
+              <div
+                key={span.id}
+                className="rounded-ctl border border-line bg-bg p-3 text-meta"
+              >
+                <blockquote className="border-l-2 border-line-strong pl-2.5 font-reading text-ui text-text">
+                  &ldquo;{span.excerpt}&rdquo;
+                </blockquote>
+                <p className="mt-1.5 text-text-2">{span.diagnosis}</p>
+                <p className="mt-1 text-text-2">
+                  <strong className="font-medium text-accent">更自然说法：</strong>
+                  <span className="font-reading text-text">{span.upgradeRewrite}</span>
+                </p>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div className="rounded-ctl border border-line bg-surface-2/60 p-3 text-cap text-text-2">
+          <p className="font-medium text-text">口语中建议避开的生硬书面衔接：</p>
+          <ul className="mt-1 list-disc space-y-0.5 pl-4">
+            {seed.avoidWrittenClunkyPhrases.map((phrase) => (
+              <li key={phrase}>{phrase}</li>
+            ))}
+          </ul>
+        </div>
+      </div>
+    </section>
+  );
+}
