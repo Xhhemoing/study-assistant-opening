@@ -92,6 +92,9 @@ describe("stateless HMAC-SHA256 pitfall share token codec", () => {
       "a".repeat(32),
       "ab".repeat(20),
       "1234567".repeat(5),
+      "REPLACE_ME_auth_secret_long_random",
+      "replace-me-auth-secret-long-random",
+      "changeme-auth-secret-0123456789abc",
       "change-me-0123456789abcdefghijkl",
       "CHANGE_ME_PRODUCTION_SECRET_0123456",
       "please-replace-with-real-key-012345",
@@ -110,6 +113,28 @@ describe("stateless HMAC-SHA256 pitfall share token codec", () => {
         verifyPitfallShareToken(signed.token, { authSecret: badSecret, nowMs: BASE_TIME_MS }),
       ).toEqual({ ok: false, reason: "misconfigured" });
     }
+  });
+
+  it("explicitly rejects the Docker env template placeholder REPLACE_ME_auth_secret_long_random", () => {
+    const dockerTemplateSecret = "REPLACE_ME_auth_secret_long_random";
+    expect(() => deriveShareSigningKey(dockerTemplateSecret)).toThrow(ShareTokenConfigError);
+    expect(() =>
+      signPitfallShareToken(VALID_INPUT, {
+        authSecret: dockerTemplateSecret,
+        nowMs: BASE_TIME_MS,
+      }),
+    ).toThrow(ShareTokenConfigError);
+
+    const signed = signPitfallShareToken(VALID_INPUT, {
+      authSecret: TEST_SECRET,
+      nowMs: BASE_TIME_MS,
+    });
+    expect(
+      verifyPitfallShareToken(signed.token, {
+        authSecret: dockerTemplateSecret,
+        nowMs: BASE_TIME_MS,
+      }),
+    ).toEqual({ ok: false, reason: "misconfigured" });
   });
 
   it("signs and verifies a valid token with default 30-day TTL and bounded URL-safe format", () => {

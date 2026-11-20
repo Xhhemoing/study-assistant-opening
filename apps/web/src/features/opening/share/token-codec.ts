@@ -20,7 +20,7 @@ export const SHARE_AUTH_SECRET_MIN_UNIQUE_CHARS = 8;
 const HMAC_SHA256_BYTES = 32;
 const BASE64URL_SEGMENT = /^[A-Za-z0-9_-]+$/;
 const PLACEHOLDER_SECRET_PATTERN =
-  /(?:change[-_ ]?me|replace[-_ ]?with|your[-_ ]?secret|example|placeholder|default[-_ ]?secret|dummy[-_ ]?secret|insert[-_ ]?secret)/i;
+  /(?:change[-_ ]?me|replace[-_ ]?(?:me|with)|your[-_ ]?secret|example|placeholder|default[-_ ]?secret|dummy[-_ ]?secret|insert[-_ ]?secret)/i;
 
 export class ShareTokenConfigError extends Error {
   constructor(
