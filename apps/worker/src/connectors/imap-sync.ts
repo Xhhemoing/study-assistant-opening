@@ -90,24 +90,23 @@ export async function syncMailbox(deps: ImapSyncDeps): Promise<{
   let cursor = expectedCursor?.uidValidity === uidValidity
     ? expectedCursor : { folder: deps.folder, uidValidity, lastUid: 0 };
 
-  const uids: number[] = [];
+  const eligibleUids = new Set<number>();
   const stream = deps.client.fetch(
     { uid: `${cursor.lastUid + 1}:*` },
     { uid: true, internalDate: true },
   );
   for await (const message of stream) {
-    if (!message.uid || (message.internalDate && message.internalDate < deps.since)) continue;
-    uids.push(message.uid);
-    if (uids.length >= IMAP_BATCH_SIZE) break;
+    if (!Number.isSafeInteger(message.uid) || message.uid <= cursor.lastUid
+      || (message.internalDate && message.internalDate < deps.since)) continue;
+    eligibleUids.add(message.uid);
   }
+  // The server can return UIDs in any order. Apply the batch limit only after
+  // discovery finishes so advancing the cursor never jumps over eligible mail.
+  const uids = [...eligibleUids].sort((a, b) => a - b).slice(0, IMAP_BATCH_SIZE);
 
   let imported = 0;
   let skipped = 0;
   for (const uid of uids) {
-    if (uid <= cursor.lastUid) {
-      skipped += 1;
-      continue;
-    }
     const identity = {
       connectionId: deps.connectionId,
       container: deps.folder,
@@ -118,11 +117,13 @@ export async function syncMailbox(deps: ImapSyncDeps): Promise<{
       String(uid),
       { source: true },
       { uid: true },
-    ) as Exclude<Awaited<ReturnType<ImapClient["fetchOne"]>>, false>;
-    if (!fetched?.source) {
+    );
+    if (fetched === false) {
+      // The message was expunged after discovery.
       skipped += 1;
       continue;
     }
+    if (!fetched?.source || fetched.uid !== uid) throw new Error("IMAP body response did not match the requested UID");
     if (fetched.source.byteLength > MAX_MAIL_BYTES) throw new Error("mail exceeds limit");
     const parsed = await simpleParser(fetched.source, {
       skipImageLinks: true,

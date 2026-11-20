@@ -191,14 +191,9 @@ describe("opening DingTalk callback service", () => {
     expect(replayStorage.upload).not.toHaveBeenCalled();
   });
 
-  it("publishes only once when concurrent redeliveries have both staged their objects", async () => {
+  it("stages and publishes only once for concurrent redeliveries", async () => {
     const event = { eventId: "concurrent-delivery", requiredScope: defaultScope, content };
-    const bothStaged = Promise.withResolvers<void>();
-    let staged = 0;
-    const objectStore = storage(async () => {
-      if (++staged === 2) bothStaged.resolve();
-      await bothStaged.promise;
-    });
+    const objectStore = storage();
     const deps = { sql: f.sql, storage: objectStore };
     const deliveries = await Promise.all([receiveDingTalkCallback(signedCallback(event), deps), receiveDingTalkCallback(signedCallback(event), deps)]);
     const published = deliveries.find(delivery => !delivery.duplicate)!;
@@ -208,7 +203,8 @@ describe("opening DingTalk callback service", () => {
     expect(await f.sql`SELECT 1 FROM opening_jobs WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(1);
     expect(await f.sql`SELECT 1 FROM opening_outbox WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(1);
     expect([...objectStore.objects.keys()]).toEqual([`opening/sources/${published.sourceId}/v0`]);
-    expect(objectStore.remove).toHaveBeenCalledOnce();
+    expect(objectStore.upload).toHaveBeenCalledOnce();
+    expect(objectStore.remove).not.toHaveBeenCalled();
   });
 
   it("rejects submission when the stored connection version changed", async () => {

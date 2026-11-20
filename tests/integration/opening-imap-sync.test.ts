@@ -15,23 +15,22 @@ let f: OpeningFixture;
 let server: OpeningImapServer;
 let objectByKey = new Map<string, Uint8Array>();
 let failFinalUpload = false;
+const initialMail = {
+  uid: 11,
+  source: [
+    "From: teacher@example.edu",
+    "To: student@example.edu",
+    "Subject: Lesson",
+    "Content-Type: text/plain; charset=utf-8",
+    "",
+    "hello lesson",
+    "",
+  ].join("\r\n"),
+};
 
 beforeAll(async () => {
   f = await createOpeningFixture();
-  server = await startOpeningImapServer([
-    {
-      uid: 11,
-      source: [
-        "From: teacher@example.edu",
-        "To: student@example.edu",
-        "Subject: Lesson",
-        "Content-Type: text/plain; charset=utf-8",
-        "",
-        "hello lesson",
-        "",
-      ].join("\r\n"),
-    },
-  ]);
+  server = await startOpeningImapServer([initialMail]);
 });
 
 afterAll(async () => {
@@ -61,7 +60,7 @@ function makeClient() {
   });
 }
 
-async function runSync(options: { cursor?: ImapCursor | null; onUpload?: () => Promise<void> } = {}) {
+async function runSync(options: { cursor?: ImapCursor | null; onUpload?: (bytes: Uint8Array) => Promise<void> } = {}) {
   const imports = createOpeningImportsRepository(f.sql);
   const cursor = options.cursor === undefined
     ? await imports.readImapCursor(f.scope, fixtureConnection.id, "INBOX") : options.cursor;
@@ -81,7 +80,7 @@ async function runSync(options: { cursor?: ImapCursor | null; onUpload?: () => P
         upload: async ({ key, bytes }) => {
           objectByKey.set(key, bytes);
           if (failFinalUpload) throw new Error("storage unavailable");
-          await options.onUpload?.();
+          await options.onUpload?.(bytes);
         },
         remove: async key => { objectByKey.delete(key); },
       },
@@ -99,6 +98,7 @@ let fixtureConnection: { id: string; version: number };
 
 beforeEach(async () => {
   expect(server.activeConnectionCount()).toBe(0);
+  server.mails.splice(0, server.mails.length, initialMail);
   objectByKey = new Map();
   failFinalUpload = false;
   await f.sql`TRUNCATE opening_import_receipts, opening_import_cursors, opening_jobs, opening_outbox, opening_source_versions, opening_sources RESTART IDENTITY CASCADE`;
@@ -152,14 +152,11 @@ describe("isolated standard IMAP sync gate", () => {
   });
 
   it("commits only one source and parse job for concurrent deliveries of the same UID", async () => {
-    const bothStaged = Promise.withResolvers<void>();
-    let staged = 0;
-    const onUpload = async () => {
-      if (++staged === 2) bothStaged.resolve();
-      await bothStaged.promise;
-    };
-    const results = await Promise.all([runSync({ onUpload }), runSync({ onUpload })]);
+    let uploads = 0;
+    const onUpload = async () => { uploads += 1; };
+    const results = await Promise.all([runSync({ cursor: null, onUpload }), runSync({ cursor: null, onUpload })]);
     expect(results.map(result => result.imported).sort()).toEqual([0, 1]);
+    expect(uploads).toBe(1);
     const [source] = await f.sql`SELECT id FROM opening_sources WHERE workspace_id=${f.scope.workspaceId}`;
     expect([...objectByKey.keys()]).toEqual([`opening/sources/${source!.id}/v0`]);
     expect(await f.sql`SELECT 1 FROM opening_sources WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(1);
@@ -180,17 +177,39 @@ describe("isolated standard IMAP sync gate", () => {
     expect(objectByKey.size).toBe(0);
   });
 
-  it("imports the new generation from UID 1 and persists its cursor even when the old UID was higher", async () => {
+  it("imports both unordered UIDs on rollover, starting below the previous generation's cursor", async () => {
+    server.mails.unshift({ ...server.mails[0]!, uid: 12, source: "Subject: UID 12\r\n\r\nnext" });
     const imports = createOpeningImportsRepository(f.sql);
     await imports.advanceImapCursor(f.scope, {
       connectionId: fixtureConnection.id,
       connectionVersion: fixtureConnection.version,
       cursor: { expected: null, next: { folder: "INBOX", uidValidity: "41", lastUid: 90 } },
     });
-    const next = { folder: "INBOX", uidValidity: "42", lastUid: 11 };
-    await expect(runSync()).resolves.toMatchObject({ imported: 1, cursor: next });
+    const next = { folder: "INBOX", uidValidity: "42", lastUid: 12 };
+    const imported: string[] = [];
+    await expect(runSync({ onUpload: async bytes => { imported.push(Buffer.from(bytes).toString("utf8")); } }))
+      .resolves.toMatchObject({ imported: 2, cursor: next });
+    expect(imported).toEqual([server.mails[1]!.source, server.mails[0]!.source]);
     await expect(imports.readImapCursor(f.scope, fixtureConnection.id, "INBOX")).resolves.toEqual(next);
     await expect(runSync()).resolves.toMatchObject({ imported: 0, cursor: next });
+  });
+
+  it("imports the lowest 100 UIDs first and exhausts a descending mailbox on the second sync", async () => {
+    const uids = Array.from({ length: 105 }, (_, index) => index + 11);
+    server.mails.splice(0, 1, ...uids.toReversed().map(uid => ({
+      uid, source: `Subject: UID ${uid}\r\n\r\nmessage`,
+    })));
+    const imported: number[] = [];
+    const onUpload = async (bytes: Uint8Array) => {
+      const raw = Buffer.from(bytes).toString("utf8");
+      imported.push(Number(/^Subject: UID (\d+)/.exec(raw)?.[1]));
+    };
+    await expect(runSync({ onUpload })).resolves.toMatchObject({ imported: 100, cursor: { lastUid: 110 } });
+    expect(imported).toEqual(uids.slice(0, 100));
+    await expect(runSync({ onUpload })).resolves.toMatchObject({ imported: 5, cursor: { lastUid: 115 } });
+    expect(imported).toEqual(uids);
+    expect(await f.sql`SELECT 1 FROM opening_import_receipts WHERE connection_id=${fixtureConnection.id}`)
+      .toHaveLength(uids.length);
   });
 
   it("does not advance a UID cursor or create a receipt when final upload fails", async () => {

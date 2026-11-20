@@ -23,6 +23,13 @@ function identityKey(identity: ImportIdentity): string {
   return JSON.stringify([identity.connectionId, identity.container, identity.generation, identity.remoteId]);
 }
 
+async function lockImportObject(tx: TransactionSql, scope: OpeningScope, identity: ImportIdentity) {
+  // Serialize storage operations for redeliveries across web and worker processes.
+  // Take this before workspace locks so revocation may still win during staging.
+  const key = JSON.stringify(["opening-import-object", scope.workspaceId, identityKey(identity)]);
+  await tx`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))`;
+}
+
 async function lockImportConnection(tx: TransactionSql, scope: OpeningScope, input: ConnectionVersion) {
   // Acquire workspace before connection, in the same order as revocation and
   // credential updates. Source publication also takes the history lock first.
@@ -116,10 +123,21 @@ export function createOpeningImportsRepository(sql: Sql) {
     async publish(
       scope: OpeningScope,
       input: OpeningImportCommit & { source: UploadInput; key: string; quota: OpeningSourceQuota },
+      stage: () => Promise<void>,
     ): Promise<OpeningImportReceiptView> {
       return sql.begin(async tx => {
+        await lockImportObject(tx, scope, input.identity);
+        const existing = await readReceipt(tx, scope, input.identity);
+        if (!existing) {
+          const [reserved] = await tx`SELECT 1 FROM opening_sources WHERE id=${input.sourceId}
+            UNION ALL SELECT 1 FROM opening_privacy_exclusions
+            WHERE workspace_id=${scope.workspaceId} AND source_id=${input.sourceId} AND asset_deleted_at IS NOT NULL`;
+          if (reserved) throw new OpeningConnectionError("CONFLICT", "connector source object is already reserved");
+          await stage();
+        }
         await lockWorkspaceLearningHistory(tx, scope);
         return commitImport(tx, scope, input, async () => {
+          if (existing) throw new OpeningConnectionError("CONFLICT", "import receipt changed; retry the delivery");
           // Reuse the source writer's quota, parse kind, outbox and history logic
           // with savepoints on this same SQL transaction.
           const sourceSql = { begin: (run: (db: TransactionSql) => Promise<unknown>) => tx.savepoint(run) } as Sql;
@@ -128,7 +146,7 @@ export function createOpeningImportsRepository(sql: Sql) {
           const privacyEpoch = await createOpeningPrivacyRepository(tx).getWorkspaceEpoch(scope);
           await sources.completeWithParseJob(scope, source.id, {
             key: input.key,
-            payload: { sourceId: source.id, sourceVersion: source.version },
+            payload: { sourceId: source.id, sourceVersion: source.version, connectionId: input.identity.connectionId },
             privacyEpoch,
             actual: input.source,
           });
@@ -141,13 +159,15 @@ export function createOpeningImportsRepository(sql: Sql) {
         await writeImapCursor(tx, scope, input.connectionId, input.cursor.next.folder, input.cursor);
       });
     },
-    async isSourcePublished(scope: OpeningScope, sourceId: string): Promise<boolean> {
-      return sql.begin(async tx => {
-        // This conflicts with the publisher's workspace lock and settles an
-        // ambiguous COMMIT result before cleanup can remove the staged bytes.
-        await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} FOR SHARE`;
-        const [source] = await tx`SELECT id FROM opening_sources WHERE id=${sourceId} AND workspace_id=${scope.workspaceId}`;
-        return Boolean(source);
+    async removeUnpublishedSource(
+      scope: OpeningScope, identity: ImportIdentity, sourceId: string, remove: () => Promise<void>,
+    ): Promise<void> {
+      await sql.begin(async tx => {
+        // Wait out an ambiguous COMMIT and hold the lock through the delete:
+        // a redelivery can otherwise publish after the check but before deletion.
+        await lockImportObject(tx, scope, identity);
+        const [source] = await tx`SELECT id FROM opening_sources WHERE id=${sourceId}`;
+        if (!source) await remove();
       });
     },
   };

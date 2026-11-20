@@ -22,7 +22,8 @@ export type OpeningImapServer = {
  * through wire-compatible LIST/EXAMINE/FETCH/LOGOUT exchanges.
  */
 export async function startOpeningImapServer(inputMails: OpeningImapMail[]): Promise<OpeningImapServer> {
-  const mails = [...inputMails].sort((a, b) => a.uid - b.uid);
+  // Reply in fixture order while keeping sequence numbers in mailbox order.
+  const mails = [...inputMails];
   let logoutCount = 0;
 
   const sockets = new Map<Socket, Promise<void>>();
@@ -85,15 +86,17 @@ export async function startOpeningImapServer(inputMails: OpeningImapMail[]): Pro
           }
           const start = Number(match[1]);
           const end = match[2] === "*" ? Number.MAX_SAFE_INTEGER : match[2] ? Number(match[2]) : start;
+          const sequenceByUid = new Map([...mails].sort((a, b) => a.uid - b.uid)
+            .map((mail, index) => [mail.uid, index + 1]));
           for (const mail of mails) {
             if (mail.uid < start || mail.uid > end) continue;
-            const sequence = mails.indexOf(mail) + 1;
+            const sequence = sequenceByUid.get(mail.uid);
             const date = (mail.internalDate ?? new Date("2026-01-02T03:04:05.000Z")).toUTCString().replace("GMT", "+0000");
-            send(
-              `* ${sequence} FETCH (UID ${mail.uid} INTERNALDATE "${date}" BODY[] {${Buffer.byteLength(mail.source)}}\r\n` +
-              mail.source +
-              `)`,
-            );
+            const fields = match[3]!;
+            const metadata = `UID ${mail.uid}` + (/\bINTERNALDATE\b/i.test(fields) ? ` INTERNALDATE "${date}"` : "");
+            const body = /BODY(?:\.PEEK)?\[\]/i.test(fields)
+              ? ` BODY[] {${Buffer.byteLength(mail.source)}}\r\n${mail.source}` : "";
+            send(`* ${sequence} FETCH (${metadata}${body})`);
           }
           tagged(tag, "OK FETCH completed");
         } else if (verb === "LOGOUT") {
