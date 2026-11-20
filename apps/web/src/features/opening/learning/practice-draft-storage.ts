@@ -30,6 +30,8 @@ export type PracticeStart = NonNullable<PracticeDraft["start"]>;
 export type PracticeDraftCollection = { version: 2; scope: string; activeId: string; drafts: PracticeDraft[] };
 export type DraftPatch = Partial<Omit<PracticeDraft, "scope" | "version" | "id" | "fields">> & { fields?: Partial<PracticeFields> };
 const memory = new Map<string, PracticeDraftCollection>();
+// Full-snapshot edits are relative to a clean caller snapshot, even after a failed rebase.
+const cleanBase = new Map<string, PracticeDraftCollection>();
 const initializedCollections = new WeakSet<PracticeDraftCollection>();
 const dirtyDrafts = new Map<string, Map<string, DraftPatch>>();
 const legacySnapshots = new Map<string, { raw: string; id: string; destination?: string }>();
@@ -168,30 +170,38 @@ function restoreCachedReadFailure(scope: string, previousBlocked: string | undef
   unreconciled.add(scope);
 }
 
+function rememberCleanCollection(collection: PracticeDraftCollection): PracticeDraftCollection {
+  if (!dirtyDrafts.has(collection.scope)) cleanBase.set(collection.scope, collection);
+  return collection;
+}
+
 /** A bad stored checkpoint blocks new writes; it is never silently replaced by an empty draft. */
 export function readPracticeDraftCollection(scope: string, storage: ReadStorage | null): PracticeDraftCollection | null {
   const cached = memory.get(scope);
-  if (cached) return cached;
+  if (cached) return rememberCleanCollection(cached);
   if (!storage) {
     const error = blocked.get(scope);
     if (error) throw new Error(error);
     return null;
   }
   const stored = readStoredPracticeDraftCollection(scope, storage);
-  if (!stored) return null;
+  if (!stored) {
+    cleanBase.delete(scope);
+    return null;
+  }
   memory.set(scope, stored.collection);
-  return stored.collection;
+  return rememberCleanCollection(stored.collection);
 }
 
 export function initializePracticeDraft(draft: PracticeDraft): PracticeDraftCollection {
   const error = blocked.get(draft.scope);
   if (error) throw new Error(error);
   const cached = memory.get(draft.scope);
-  if (cached) return cached;
+  if (cached) return rememberCleanCollection(cached);
   const collection = { version: 2 as const, scope: draft.scope, activeId: draft.id, drafts: [draft] };
   memory.set(draft.scope, collection);
   initializedCollections.add(collection);
-  return collection;
+  return rememberCleanCollection(collection);
 }
 
 export function readPracticeDraft(scope: string, storage: ReadStorage | null, draftId?: string): PracticeDraft | null {
@@ -274,7 +284,14 @@ export function isRecoverableManualDraft(draft: PracticeDraft): boolean {
   return draft.fields.matrixMode !== true && !draft.observationId;
 }
 
+function withoutDrafts(collection: PracticeDraftCollection, removedIds: ReadonlySet<string>): PracticeDraftCollection | null {
+  const drafts = collection.drafts.filter(draft => !removedIds.has(draft.id));
+  const active = drafts.find(draft => draft.id === collection.activeId) ?? drafts[0];
+  return active ? { ...collection, activeId: active.id, drafts } : null;
+}
+
 function migrateOrdinaryManualDrafts(scopes: PracticeDraftScopes, ordinary: PracticeDraftCollection, source: StoredPracticeDraftCollection | null, fallback: PracticeDraft, storage: PartitionStorage): void {
+  const migrationError = "无法迁移练习草稿，原答案已保留。请释放浏览器存储后重试。";
   const manualScope = scopes.manual;
   const manualEntry = fallback.scope === manualScope;
   const previousBlocked = blocked.get(manualScope);
@@ -295,24 +312,26 @@ function migrateOrdinaryManualDrafts(scopes: PracticeDraftScopes, ordinary: Prac
   const moved = ordinary.drafts.filter(draft => draft.fields.matrixMode !== true);
   const added: PracticeDraft[] = [];
   for (const draft of moved) {
-    const copy = { ...draft, scope: manualScope };
+    const copy = parsePracticeDraft({ ...draft, scope: manualScope }, manualScope);
+    if (!copy) throw new Error(migrationError);
     const existing = manual?.drafts.find(value => value.id === copy.id);
     if (!existing) {
       added.push(copy);
-    } else if (JSON.stringify(existing) !== JSON.stringify(copy)) {
-      // Keep the active destination identity and preserve the complete source checkpoint.
-      // An identical recovered copy can already be durable after a failed source cleanup.
-      const recovered = [...(manual?.drafts ?? []), ...added].some(value =>
-        JSON.stringify(value) === JSON.stringify({ ...copy, id: value.id }));
-      if (!recovered) added.push({ ...copy, id: crypto.randomUUID() });
+      continue;
     }
+    const comparable = parsePracticeDraft(existing, manualScope);
+    if (!comparable) throw new Error(migrationError);
+    if (JSON.stringify(comparable) === JSON.stringify(copy)) continue;
+    // Keep the active destination identity and reuse any recovered copy from a failed cleanup.
+    const recovered = [...(manual?.drafts ?? []), ...added].some(value =>
+      JSON.stringify(parsePracticeDraft(value, manualScope)) === JSON.stringify({ ...copy, id: value.id }));
+    if (!recovered) added.push({ ...copy, id: crypto.randomUUID() });
   }
   const drafts = [...(manual?.drafts ?? []), ...added];
   const legacyActive = added.find(draft => draft.id === ordinary.activeId && isRecoverableManualDraft(draft));
   const manualFallback = manualEntry ? fallback : emptyPracticeDraft(manualScope);
   const activeId = manual?.activeId ?? legacyActive?.id ?? manualFallback.id;
   if (activeId === manualFallback.id && !drafts.some(draft => draft.id === activeId)) drafts.push(manualFallback);
-  const migrationError = "无法迁移练习草稿，原答案已保留。请释放浏览器存储后重试。";
   const ordinaryKey = storageKey(scopes.ordinary);
   const manualKey = storageKey(manualScope);
   let expectedOrdinary = source?.raw ?? null;
@@ -340,26 +359,33 @@ function migrateOrdinaryManualDrafts(scopes: PracticeDraftScopes, ordinary: Prac
 
   // Leave ordinary v2 in place if cleanup is pending, so reads won't fall
   // back to an unresolved v1 while the migrated drafts remain available.
-  const matrixDrafts = ordinary.drafts.filter(draft => draft.fields.matrixMode === true);
+  const migratedIds = new Set(moved.map(draft => draft.id));
+  const remaining = withoutDrafts(ordinary, migratedIds);
   try {
     if (storage.getItem(manualKey) !== expectedManual || storage.getItem(ordinaryKey) !== expectedOrdinary) return;
-    if (!cleanupLegacyDraft(scopes.ordinary, storage, [...added, ...matrixDrafts], scopes.manual)) return;
+    if (!cleanupLegacyDraft(scopes.ordinary, storage, [...added, ...(remaining?.drafts ?? [])], scopes.manual)) return;
     if (storage.getItem(ordinaryKey) !== expectedOrdinary) return;
   } catch { return; }
   try {
-    if (matrixDrafts.length) {
-      const active = matrixDrafts.find(draft => draft.id === ordinary.activeId) ?? matrixDrafts[0]!;
-      const remaining = { ...ordinary, activeId: active.id, drafts: matrixDrafts };
-      storage.setItem(ordinaryKey, JSON.stringify(remaining));
-      memory.set(scopes.ordinary, remaining);
-      dirtyDrafts.delete(scopes.ordinary);
-      unreconciled.delete(scopes.ordinary);
-    } else {
-      storage.removeItem(ordinaryKey);
-      memory.delete(scopes.ordinary);
-      dirtyDrafts.delete(scopes.ordinary);
-      unreconciled.delete(scopes.ordinary);
+    const canSaveRemaining = !remaining || parsePracticeDraftCollection(remaining, scopes.ordinary) !== null;
+    let durableRemaining = remaining;
+    if (!canSaveRemaining) {
+      // A conflicting edit stays in memory. Remove only the migrated IDs from the stored source.
+      durableRemaining = source ? withoutDrafts(source.collection, migratedIds) : null;
+      if (durableRemaining && !parsePracticeDraftCollection(durableRemaining, scopes.ordinary)) throw new Error(migrationError);
     }
+    if (durableRemaining) storage.setItem(ordinaryKey, JSON.stringify(durableRemaining));
+    else storage.removeItem(ordinaryKey);
+
+    if (remaining) memory.set(scopes.ordinary, remaining);
+    else memory.delete(scopes.ordinary);
+
+    const pending = dirtyDrafts.get(scopes.ordinary);
+    if (!canSaveRemaining) {
+      for (const id of migratedIds) pending?.delete(id);
+    }
+    if (canSaveRemaining || !pending?.size) dirtyDrafts.delete(scopes.ordinary);
+    unreconciled.delete(scopes.ordinary);
   } catch (reason) {
     if (!manualEntry) throw reason;
   }
@@ -511,11 +537,13 @@ function changedProperties<T extends object>(previous: T, next: T): Partial<T> {
   return patch;
 }
 
-export function writePracticeDraft(draft: PracticeDraft, storage: WriteStorage | null): boolean {
+export function writePracticeDraft(draft: PracticeDraft, storage: WriteStorage | null, base = cleanBase.get(draft.scope)?.drafts.find(value => value.id === draft.id) ?? null): boolean {
   const cached = memory.get(draft.scope)?.drafts.find(value => value.id === draft.id);
   const { fields, ...checkpoint } = draft;
-  const patch = cached ? { ...changedProperties(cached, checkpoint), fields: changedProperties(cached.fields, fields) } : { ...checkpoint, fields };
-  return saveDraftEdit(cached ?? draft, () => patch, storage).persisted;
+  const patch = base ? { ...changedProperties(base, checkpoint), fields: changedProperties(base.fields, fields) } : { ...checkpoint, fields };
+  const { persisted } = saveDraftEdit(cached ?? draft, () => patch, storage);
+  if (persisted) rememberCleanCollection(memory.get(draft.scope)!);
+  return persisted;
 }
 
 /** Every callback uses its captured draftId, including after another draft becomes active. */
@@ -561,7 +589,7 @@ export function switchPracticeDraft(scope: string, expectedActiveId: string, tar
   if (!next?.drafts.some(value => value.id === targetId)) throw new Error("找不到这份保留的草稿，当前答案未改动。");
   if (!persistCollection(next, storage)) throw new Error(switchError);
   memory.set(scope, next);
-  return next;
+  return rememberCleanCollection(next);
 }
 
 /** Hide a moved archive while its destination owns the active draft, and retry safe cleanup. */
@@ -693,5 +721,5 @@ export function moveArchivedPracticeDraft(
     unreconciled.delete(saved.scope);
     finishCollectionSave(saved, storage);
   }
-  return nextTarget;
+  return rememberCleanCollection(nextTarget);
 }
