@@ -1111,7 +1111,7 @@ describe("Speaking contextual transfer regressions", () => {
   });
 });
 
-describe("round-six Writing transfer regressions", () => {
+describe("Writing lineage and evidence regressions", () => {
   const input = {
     baselineDraft: DRAFT_1,
     revisedDraft: DRAFT_2,
@@ -1145,6 +1145,75 @@ describe("round-six Writing transfer regressions", () => {
       revisedDraft: { ...DRAFT_2, version: 4, basedOnVersion: 1 },
     });
     expect(result.receipt?.evidenceSource).toBe("unassisted_cross_draft_transfer");
+  });
+
+  it.each([[3, false], [1, true]])(
+    "requires the explicit fresh-prompt parent %i to match the supplied baseline",
+    (basedOnVersion, verified) => {
+      const revisedDraft = { ...DRAFT_2, promptId: "another-transport-prompt", version: 4, basedOnVersion };
+      const evaluated = evaluateNonEmptyRevision({ ...input, revisedDraft, freshPromptTransfer: true });
+      expect(evaluated.transferReport.summary.masteryQualified).toBe(verified);
+      expect(evaluated.receipt.countsTowardMastery).toBe(verified);
+      const direct = createValidatedRubricReceipt({
+        taskMode: "writing_task2",
+        receiptId: input.receiptId,
+        baselineDraft: DRAFT_1,
+        draft: revisedDraft,
+        assessments: buildValidDraft2Assessments(),
+        crossDraftTransferVerified: false,
+        freshPromptTransfer: true,
+      });
+      expect(direct.ok && direct.receipt.countsTowardMastery).toBe(verified);
+    },
+  );
+
+  it("counts a repeated Writing target ID once for allocation and mastery", () => {
+    const single = evaluateNonEmptyRevision({ ...input, targets: [TARGETS[0]!] });
+    const repeated = evaluateNonEmptyRevision({ ...input, targets: Array(3).fill(TARGETS[0]!) });
+    expect(single.receipt.masteryQualified).toBe(true);
+    expect(repeated.transferReport).toEqual(single.transferReport);
+    expect(repeated.receipt.masteryQualified).toBe(true);
+  });
+
+  it("includes the diagnosed phrase in a bounded, grapheme-aligned Writing excerpt", () => {
+    const phrase = "every coin has two sides";
+    const paragraph =
+      "  The consultation covered bus routes serving remote communities and asked the council about maintenance costs across the region before someone said that " +
+      phrase + " during an otherwise detailed debate on whether to increase fares for late trains and buses. 👩🏾‍💻";
+    const evaluated = evaluateNonEmptyRevision({
+      ...input,
+      revisedDraft: { ...DRAFT_2, paragraphs: [paragraph] },
+    });
+    const span = evaluated.receipt.criteria.LR.evidenceSpans[0]!;
+    expect(span.diagnosis).toContain(phrase);
+    expect(span.excerpt).toContain(phrase);
+    expect(span.excerpt.length).toBeLessThanOrEqual(130);
+    expect(span.startOffset).toBeLessThanOrEqual(paragraph.indexOf(phrase));
+    expect(span.endOffset).toBeGreaterThanOrEqual(paragraph.indexOf(phrase) + phrase.length);
+    expect(paragraph.slice(span.startOffset, span.endOffset)).toBe(span.excerpt);
+    const boundaries = [...new Intl.Segmenter("en").segment(paragraph)].map(({ index }) => index).concat(paragraph.length);
+    expect(boundaries).toContain(span.startOffset);
+    expect(boundaries).toContain(span.endOffset);
+  });
+
+  it.each(["...", "？！ 👋"])("rejects zero-word Writing submissions (%s)", (paragraph) => {
+    const revisedDraft = { ...DRAFT_2, paragraphs: [paragraph] };
+    expect(evaluateRevisedDraftDeterministically({ ...input, revisedDraft })).toMatchObject({
+      ok: false,
+      reason: "empty_draft",
+      receipt: null,
+    });
+    const direct = createValidatedRubricReceipt({
+      taskMode: "writing_task2",
+      receiptId: input.receiptId,
+      draft: revisedDraft,
+      assessments: buildValidDraft2Assessments().map((assessment) => ({
+        ...assessment,
+        evidenceSpans: [{ ...assessment.evidenceSpans[0]!, paragraphIndex: 0, excerpt: paragraph }],
+      })),
+      crossDraftTransferVerified: false,
+    });
+    expect(direct).toMatchObject({ ok: false, errors: expect.arrayContaining([expect.objectContaining({ code: "EMPTY_DRAFT" })]) });
   });
 
   it("uses the receipt's mastery decision for assisted transfer", () => {
@@ -1219,7 +1288,7 @@ describe("round-six Writing transfer regressions", () => {
   });
 });
 
-describe("round-six Speaking transfer regressions", () => {
+describe("Speaking clause and evidence regressions", () => {
   const seed = buildSpeakingPart3Seed({
     promptId: DRAFT_2.promptId,
     topic: "urban transit",
@@ -1231,7 +1300,8 @@ describe("round-six Speaking transfer regressions", () => {
     "Personally, I think municipal leaders often prefer highway projects because impatient drivers notice wider asphalt roads right before major municipal elections. " +
     "Building large urban rail networks requires years of careful planning and steady political commitment across densely populated districts. " +
     "Admittedly, families in outer suburban neighbourhoods still rely on cars when local bus routes run infrequently during late evenings. " +
-    "Local officials also face annual budget reviews in spring. ";
+    "Local officials also face annual budget reviews in spring. " +
+    "That debate affects riders as well as taxpayers. ";
 
   it.each([
     ["Yesterday in our neighborhood library per-capita emissions support package.", false],
@@ -1249,6 +1319,74 @@ describe("round-six Speaking transfer regressions", () => {
         endOffset: transcript.length,
       });
     }
+  });
+
+  it.each([
+    ["A table of seasonal shifts in per-capita emissions across districts.", false],
+    ["A report on sharp cuts in per-capita emissions across districts.", false],
+    ["A newly revised plan for lowering per-capita emissions downtown.", false],
+    ["A summary about recent shifts toward lower per-capita emissions.", false],
+    ["A table of sharp cuts in old per-capita emissions records.", false],
+    ["The regional transport funding strategy for reducing per-capita emissions.", false],
+    ["A strategy to consistently cut harmful per-capita emissions across the region.", false],
+    ["A strategy to help lower harmful per-capita emissions across the region.", false],
+    ["A table of travel times and seasonal shifts in per-capita emissions.", false],
+    ["Reliable trains cut harmful per-capita emissions across the entire city.", true],
+    ["Trains cut harmful per-capita emissions.", true],
+    ["Per-capita emissions rise.", true],
+    ["The council sets tighter limits on per-capita emissions across the city.", true],
+    ["Reliable trains cut those unusually high local per-capita emissions during rush hour.", true],
+    ["The transport office offers local residents detailed per-capita emissions data.", true],
+    ["The council in nearby towns monitors per-capita emissions every week.", true],
+    ["Per-capita emissions shift with the seasonal demand for fuel.", true],
+    ["Longer journeys cost households more as per-capita emissions rise.", true],
+    ["The rail programme cost every household a small per-capita emissions levy.", true],
+    ["The research team put regional per-capita emissions on the agenda.", true],
+    ["Public reports let local residents compare per-capita emissions each month.", true],
+    ["The city spread annual per-capita emissions across several accounting periods.", true],
+    ["The local economy hit a new per-capita emissions record this year.", true],
+    ["A longer shutdown hurt those already demanding lower per-capita emissions.", true],
+    ["The agency shut outdated per-capita emissions databases throughout the country.", true],
+    ["The agency split reported per-capita emissions into distinct categories.", true],
+    ["Local planners should invest in rail across the U.S. Per-capita emissions data from the annual report.", false],
+    ["Local planners should invest in rail across the U.S. Canada.", false],
+    ["Local planners should monitor U.S. per-capita emissions across the district.", true],
+  ])("verifies contextual Speaking transfer in %s", (sentence, credited) => {
+    const receipt = evaluateSpeakingRetelling({
+      seed,
+      transcript: setup + sentence,
+      durationSeconds: 75,
+      assisted: false,
+    });
+    expect(receipt.transferredCollocations).toEqual(credited ? ["per-capita emissions"] : []);
+    expect(receipt.masteryQualified).toBe(credited);
+  });
+
+  it("counts equivalent Speaking targets once for transfer and mastery", () => {
+    const receipt = evaluateSpeakingRetelling({
+      seed: {
+        ...seed,
+        targetSpokenCollocations: ["per-capita emissions", "per-capita emissions", " per-capita  emissions "],
+      },
+      transcript: setup + "Local planners should monitor per-capita emissions across the district.",
+      durationSeconds: 75,
+      assisted: false,
+    });
+    expect(receipt.transferredCollocations).toHaveLength(1);
+    expect(receipt.pendingCollocations).toEqual([]);
+    expect(receipt.transcriptSignals.lexicalTransfer.note).toContain("1/1");
+    expect(receipt.masteryQualified).toBe(true);
+  });
+
+  it("provides input guidance without citing punctuation-only Speaking transcripts", () => {
+    const receipt = evaluateSpeakingRetelling({ seed, transcript: "...", durationSeconds: 75, assisted: false });
+    expect(receipt).toMatchObject({
+      wordCount: 0,
+      countsTowardMastery: false,
+      epistemicStatus: "practice_feedback",
+      evidenceQuotes: [],
+    });
+    expect(receipt.epistemicReason).toContain("英文单词");
   });
 
   it("requires an eligible Writing receipt for the source draft when the seed opts in", () => {
@@ -1324,6 +1462,26 @@ describe("IELTS source boundaries", () => {
       "The board met again.",
     ];
     const source = "  " + expected.join("\r\n ") + "  ";
+    const sentences = segmentIeltsText(source);
+    expect(sentences.map(({ text }) => text)).toEqual(expected);
+    for (const sentence of sentences) {
+      expect(source.slice(sentence.startOffset, sentence.endOffset)).toBe(sentence.text);
+    }
+  });
+
+  it("splits sentence-final abbreviations and keeps abbreviations within a sentence", () => {
+    const expected = [
+      "Local planners should invest in rail across the U.S.",
+      "Per-capita emissions data from the annual report.",
+      "I have transported similar records to the U.K.",
+      "Canada.",
+      "Records came from the U.S. Senate and U.K. federal agencies.",
+      "We compared U.S. emissions, e.g., freight and bus emissions, i.e., common types of road emissions, etc.",
+      "“New records arrived this summer.”",
+      "We also contacted the E.U.",
+      "Eventually, they replied.",
+    ];
+    const source = " " + expected.join(" ") + " ";
     const sentences = segmentIeltsText(source);
     expect(sentences.map(({ text }) => text)).toEqual(expected);
     for (const sentence of sentences) {

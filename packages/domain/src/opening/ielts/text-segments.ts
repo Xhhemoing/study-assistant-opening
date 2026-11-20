@@ -16,7 +16,10 @@ export type GroundedSentence = GroundedTextSpan & {
 };
 
 const PREFIX_ABBREVIATIONS = new Set(["dr", "mr", "mrs", "ms", "prof", "st", "vs"]);
-const SENTENCE_START = /^(?:I|He|She|It|They|We|This|That|The|However|Then|Next)\b/u;
+const DOTTED_ACRONYM = /(?:^|[^\p{L}])(?:\p{L}\.)+\p{L}$/u;
+const COUNTRY_INSTITUTION = /(?:^|[^\p{L}])(?:U\.S|U\.K)$/u;
+const INSTITUTION_NAME = /^(?:Senate|Congress|House of (?:Commons|Lords|Representatives)|Parliament|Supreme Court)\b/u;
+const INITIAL_NAME = /^(?:\p{Lu}\.|\p{Lu}[\p{Ll}\p{M}]+)(?=[\s.,]|$)/u;
 const WORD_CHARACTER = /[\p{L}\p{M}\p{N}]/u;
 const CLOSING_QUOTES = new Map([['"', '"'], ["“", "”"], ["'", "'"], ["‘", "’"]]);
 
@@ -24,19 +27,19 @@ function isAbbreviationPeriod(text: string, index: number): boolean {
   const preceding = text.slice(Math.max(0, index - 8), index);
   const following = text.slice(index + 1);
   if (/\d$/u.test(preceding) && /^\d/u.test(following)) return true;
-  if (/[\p{L}]$/u.test(preceding) && /^[\p{L}]\./u.test(following)) return true;
+  if (/(?:^|[^\p{L}])\p{L}$/u.test(preceding) && /^\p{L}\./u.test(following)) return true;
 
   const word = preceding.match(/[\p{L}]+$/u)?.[0] ?? "";
   const nextWord = following.trimStart();
-  if (!/^[\p{L}\p{N}]/u.test(nextWord)) return false;
+  if (/(?<![\p{L}])(?:e\.g|i\.e)$/iu.test(preceding)) return /^[\p{L}\p{N},“"'‘]/u.test(nextWord);
   if (word.toLowerCase() === "no") return /^\d/u.test(nextWord);
-  if (PREFIX_ABBREVIATIONS.has(word.toLowerCase())) return true;
-  if (/(?<![\p{L}])(?:e\.g|i\.e)$/iu.test(preceding)) return true;
-  if (word.toLowerCase() === "etc") return !/^\p{Lu}/u.test(nextWord);
-  if (/(?<![\p{L}])(?:U\.S|U\.K)$/iu.test(preceding)) {
-    return !SENTENCE_START.test(nextWord);
+  if (PREFIX_ABBREVIATIONS.has(word.toLowerCase())) return /^[\p{L}\p{N}]/u.test(nextWord);
+
+  if (DOTTED_ACRONYM.test(preceding) || word.toLowerCase() === "etc") {
+    if (COUNTRY_INSTITUTION.test(preceding) && INSTITUTION_NAME.test(nextWord)) return true;
+    return /^[\p{Ll}\p{N},;:]/u.test(nextWord);
   }
-  return /^[A-Z]$/u.test(word) && /^[A-Z]/u.test(nextWord);
+  return /^\p{Lu}$/u.test(word) && INITIAL_NAME.test(nextWord);
 }
 
 /** Splits once on the original UTF-16 text. All spans can be sliced directly from that text. */

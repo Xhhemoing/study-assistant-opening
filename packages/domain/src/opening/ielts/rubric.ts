@@ -133,14 +133,17 @@ function buildFlexiblePhraseRegex(phrase: string, flags: string): RegExp {
   return new RegExp(`${prefix}${pattern}${suffix}`, flags);
 }
 
+type GroundedTemplateHit = IeltsMemorizedTemplateHit &
+  Required<Pick<IeltsMemorizedTemplateHit, "startOffset" | "endOffset">>;
+
 /**
  * Counts EVERY occurrence of memorized templates across every paragraph (global
  * match per paragraph so repeated boilerplate in the same paragraph is never missed).
  */
 export function detectMemorizedTemplates(
   paragraphs: readonly string[],
-): IeltsMemorizedTemplateHit[] {
-  const hits: IeltsMemorizedTemplateHit[] = [];
+): GroundedTemplateHit[] {
+  const hits: GroundedTemplateHit[] = [];
   paragraphs.forEach((paragraph, paragraphIndex) => {
     if (!paragraph.trim()) return;
     for (const entry of IELTS_MEMORIZED_TEMPLATE_CATALOG) {
@@ -393,13 +396,12 @@ export function getWritingTransferLineage(
     return null;
   }
   const parent = revised.basedOnVersion;
-  if (parent !== undefined && (!Number.isSafeInteger(parent) || parent < 1 || parent >= revised.version)) {
+  // The supplied baseline is the only draft available to verify an explicit parent.
+  if (parent !== undefined && (parent !== baseline.version || parent >= revised.version)) {
     return null;
   }
   if (revised.promptId !== baseline.promptId) return "fresh_prompt";
-  const followsBaseline = parent === undefined
-    ? revised.version === baseline.version + 1
-    : parent === baseline.version;
+  const followsBaseline = parent !== undefined || revised.version === baseline.version + 1;
   return followsBaseline ? "advancing_revision" : null;
 }
 
@@ -425,11 +427,12 @@ export function createValidatedRubricReceipt(
 ): IeltsRubricValidationResult {
   const errors: IeltsRubricValidationError[] = [];
   const paragraphs = input.draft.paragraphs;
+  const wordCount = countDraftWords(paragraphs);
 
-  if (!paragraphs.length || paragraphs.every((p) => p.trim().length === 0)) {
+  if (wordCount === 0) {
     errors.push({
       code: "EMPTY_DRAFT",
-      message: "Draft must contain at least one non-empty paragraph.",
+      message: "Draft must contain at least one word.",
     });
   }
 
@@ -557,7 +560,6 @@ export function createValidatedRubricReceipt(
     return { ok: false, errors };
   }
 
-  const wordCount = countDraftWords(paragraphs);
   const memorizedTemplateFlags = detectMemorizedTemplates(paragraphs);
   const lineage = getWritingTransferLineage(input.baselineDraft, input.draft);
   const epistemic = resolveIeltsEpistemicStatus({

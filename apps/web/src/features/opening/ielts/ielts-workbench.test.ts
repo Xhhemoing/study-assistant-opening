@@ -72,6 +72,23 @@ describe("workbench-model helpers", () => {
 });
 
 describe("IeltsDraftCritiqueWorkbench", () => {
+  it("asks for English text when a punctuation-only revision is submitted", async () => {
+    const onRevisionEvaluated = vi.fn();
+    await act(async () => root.render(createElement(IeltsDraftCritiqueWorkbench, { onRevisionEvaluated })));
+    const findButton = (label: string) => [...host.querySelectorAll("button")].find((button) => button.textContent === label)!;
+    await act(async () => findButton("打开改写编辑区").click());
+    const textarea = host.querySelector<HTMLTextAreaElement>('[aria-label="二稿改写编辑区"]')!;
+    await act(async () => setNativeInputValue(textarea, "..."));
+    await act(async () => findButton("重新分析改写").click());
+    expect(onRevisionEvaluated).not.toHaveBeenCalled();
+    expect(textarea.getAttribute("aria-invalid")).toBe("true");
+    expect(document.getElementById(textarea.getAttribute("aria-describedby")!)?.textContent).toContain("英文单词");
+
+    await act(async () => setNativeInputValue(textarea, "The council plans to extend rail service."));
+    await act(async () => findButton("重新分析改写").click());
+    expect(onRevisionEvaluated).toHaveBeenCalledOnce();
+    expect(textarea.getAttribute("aria-invalid")).not.toBe("true");
+  });
   it("renders Draft 2 verified evidence, switches to Draft 1 practice feedback and comparison view", async () => {
     await act(async () => root.render(createElement(IeltsDraftCritiqueWorkbench)));
 
@@ -272,6 +289,23 @@ describe("IeltsDraftCritiqueWorkbench", () => {
 });
 
 describe("IeltsSpeakingTransferCard", () => {
+  it("shows each Speaking target once and guides a learner who submits only punctuation", async () => {
+    const fixture = IELTS_WRITING_SPEAKING_FIXTURE;
+    const onEvaluated = vi.fn();
+    await act(async () => root.render(createElement(IeltsSpeakingTransferCard, {
+      seed: { ...fixture.speakingSeed, targetSpokenCollocations: ["per-capita emissions", " per-capita  emissions "] },
+      initialTranscript: "...",
+      initialDurationSeconds: 75,
+      onEvaluated,
+    })));
+    expect(host.textContent).toContain("已迁移 0 / 1");
+    expect(host.querySelectorAll("[data-collocation-state]")).toHaveLength(1);
+    await act(async () => host.querySelector<HTMLButtonElement>("button")!.click());
+    expect(onEvaluated).toHaveBeenCalledWith(expect.objectContaining({ wordCount: 0, countsTowardMastery: false }));
+    expect(host.textContent).toContain("英文单词");
+    expect(host.querySelectorAll("[data-speaking-quote]")).toHaveLength(0);
+  });
+
   it("presents honest transcript practice feedback without fake official Band or Writing Task Response, and enforces strict pace & transfer gates", async () => {
     const onEvaluated = vi.fn();
     await act(async () =>
@@ -391,6 +425,29 @@ it("shows an explicitly matched Speaking receipt", async () => {
   })));
   expect(host.querySelector("[data-speaking-epistemic]")?.getAttribute("data-speaking-epistemic"))
     .toBe("rubric_verified_evidence");
+});
+
+it.each(["removed", "invalidated"])("withholds restored Speaking mastery when the Writing receipt is %s", async (change) => {
+  const fixture = IELTS_WRITING_SPEAKING_FIXTURE;
+  const initialProps = {
+    seed: fixture.speakingSeed,
+    initialTranscript: fixture.initialSpeakingTranscript,
+    initialDurationSeconds: fixture.initialSpeakingDurationSeconds,
+    initialReceipt: fixture.initialSpeakingReceipt,
+  };
+  const invalidSeed = {
+    ...initialProps.seed,
+    verifiedWritingReceipt: change === "removed" ? undefined : { ...fixture.draft2Receipt, masteryQualified: false },
+  };
+  const render = async (seed: typeof initialProps.seed, key: string) =>
+    act(async () => root.render(createElement(IeltsSpeakingTransferCard, { ...initialProps, seed, key })));
+  const badge = () => host.querySelector('[data-speaking-epistemic="rubric_verified_evidence"]');
+  await render(initialProps.seed, "existing");
+  expect(badge()).not.toBeNull();
+  await render(invalidSeed, "existing");
+  expect(badge()).toBeNull();
+  await render(invalidSeed, "restored");
+  expect(badge()).toBeNull();
 });
 
 it("restores a matching assisted Speaking receipt and preserves assistance on reevaluation", async () => {

@@ -43,7 +43,7 @@ const SPEAKING_STOP_WORDS = new Set([
 ]);
 
 const SPEAKING_CLAUSE_VERB_CUE =
-  /\b(is|are|was|were|be|been|being|am|can|could|may|might|must|shall|should|will|would|do|does|did|have|has|had|think|believe|feel|see|say|says|said|mean|means|meant|make|makes|made|take|takes|took|give|gives|gave|help|helps|helped|cut|cuts|lower|lowers|ease|eases|need|needs|want|wants|rely|relies|build|builds|spend|spends|invest|invests|investing|fund|funds|funding|protect|protects|protecting|back|backs|backing|pair|pairs|pairing|trigger|triggers|grow|grows|matter|matters|require|requires|struggle|struggles|notice|notices|pour|pours|pouring|choose|chooses|avoid|avoids|reduce|reduces|improve|improves|offer|offers|deliver|delivers|encourage|encourages|undermine|undermines|resolve|resolves|support|supports|prefer|prefers|coordinate|coordinates|monitor|monitors|monitoring|approve|approves|approving|track|tracks|tracking|evaluate|evaluates|balance|balances|weigh|weighs|assess|assesses|shift|shifts|shifting|curb|curbs|curbing|maintain|maintains|expand|expands|address|addresses|justify|justifies)\b/iu;
+  /^(?:be|think|believe|feel|see|say|says|said|mean|means|meant|make|makes|made|take|takes|took|help|helps|helped|lower|lowers|ease|eases|need|needs|want|wants|rely|relies|build|builds|spend|spends|invest|invests|fund|funds|protect|protects|back|backs|pair|pairs|trigger|triggers|grow|grows|matter|matters|require|requires|struggle|struggles|notice|notices|pour|pours|choose|chooses|avoid|avoids|reduce|reduces|improve|improves|deliver|delivers|encourage|encourages|undermine|undermines|resolve|resolves|support|supports|prefer|prefers|coordinate|coordinates|monitor|monitors|approve|approves|track|tracks|evaluate|evaluates|balance|balances|weigh|weighs|assess|assesses|shift|shifts|curb|curbs|maintain|maintains|expand|expands|address|addresses|justify|justifies)$/u;
 
 const MIN_VERIFIED_SPEAKING_WORDS = 75;
 
@@ -62,13 +62,45 @@ function buildPhraseRegex(phrase: string): RegExp {
 const SPEAKING_MODAL = /^(?:can|could|may|might|must|shall|should|will|would)$/u;
 const SPEAKING_FINITE_AUXILIARY = /^(?:is|are|was|were|am|do|does|did|have|has|had)$/u;
 const SPEAKING_DETERMINER = /^(?:the|a|an|this|that|these|those|its|their|our|your|his|her|my)$/u;
-const SPEAKING_AMBIGUOUS_VERB = /^(?:cut|cuts|help|helps|need|needs|fund|funds|back|backs|pair|pairs|support|supports|monitor|monitors|track|tracks|balance|balances|shift|shifts|address|addresses|offer|offers)$/u;
+const SPEAKING_UNINFLECTED_VERB = /^(?:cut|set|put|cost|let|spread|hit|hurt|shut|split)s?$/u;
+const SPEAKING_AMBIGUOUS_VERB = /^(?:help|helps|need|needs|fund|funds|back|backs|pair|pairs|support|supports|monitor|monitors|track|tracks|balance|balances|shift|shifts|address|addresses|offer|offers|trigger|triggers|notice|notices|curb|curbs)$/u;
 const SPEAKING_SUBJECT_PRONOUN = /^(?:i|you|he|she|it|we|they)$/u;
-const SPEAKING_VERB_COMPLEMENT = /^(?:to|for|with|on|at|from|by|in|them|him|her|us|it)$/u;
+const SPEAKING_OBJECT_PRONOUN = /^(?:me|you|him|her|it|us|them)$/u;
 const SPEAKING_DITRANSITIVE = /^(?:give|gives|gave|offer|offers|offered|show|shows|showed|send|sends|sent|tell|tells|told)$/u;
-const SPEAKING_PREPOSITION = /^(?:to|for|with|on|at|from|by|in|near|under|over)$/u;
+const SPEAKING_PREPOSITION = /^(?:of|to|for|with|on|at|from|by|in|near|under|over|about|across|through|throughout|between|among|into|onto|within|outside|against|towards?|without|after|before|during)$/u;
+const SPEAKING_COORDINATOR = /^(?:and|or)$/u;
+const SPEAKING_CLAUSE_LINK = /^(?:as|but|because|although|while|whereas|if|unless|when|which)$/u;
+const SPEAKING_ADVERB = /^(?:not|never|often|sometimes|always|already|still|also|only|just|really|rather|then|today|yesterday|tomorrow)$/u;
+const SPEAKING_INTRANSITIVE_END = /^(?:rise|rises|rose|fall|falls|fell|grow|grows|grew|vary|varies|varied|matter|matters|mattered)$/u;
+
+function isSpokenVerb(word: string): boolean {
+  return SPEAKING_CLAUSE_VERB_CUE.test(word) || SPEAKING_FINITE_AUXILIARY.test(word) ||
+    SPEAKING_UNINFLECTED_VERB.test(word) || SPEAKING_DITRANSITIVE.test(word);
+}
 
 type SpokenTargetSpan = MatchRange & { readonly target: string };
+type SpokenWord = { readonly text: string; readonly index: number };
+
+function hasTargetInVerbObject(
+  words: readonly SpokenWord[],
+  targetStarts: ReadonlySet<number>,
+  allowObjectComplement: boolean,
+): boolean {
+  let hasObjectHead = false;
+  let inObjectComplement = false;
+  for (const { text, index } of words) {
+    if (targetStarts.has(index)) return true;
+    if (SPEAKING_CLAUSE_LINK.test(text) || SPEAKING_COORDINATOR.test(text) ||
+      SPEAKING_MODAL.test(text) || SPEAKING_FINITE_AUXILIARY.test(text)) return false;
+    if (SPEAKING_PREPOSITION.test(text)) {
+      if (!allowObjectComplement || !hasObjectHead || inObjectComplement) return false;
+      inObjectComplement = true;
+    } else if (!SPEAKING_DETERMINER.test(text) && !SPEAKING_ADVERB.test(text)) {
+      hasObjectHead = true;
+    }
+  }
+  return false;
+}
 
 function hasSpokenSubjectAndPredicate(
   segment: string,
@@ -78,55 +110,71 @@ function hasSpokenSubjectAndPredicate(
     segment.matchAll(/[\p{L}\p{N}]+(?:['’-][\p{L}\p{N}]+)*/gu),
     (word) => ({ text: word[0].toLowerCase(), index: word.index }),
   );
-  const subjectStart = /^(?:and|or)$/u.test(words[0]?.text ?? "") ? 1 : 0;
-  let hasSubject = false;
-  let hasSubjectPronoun = false;
+  const targetStarts = new Set(targetSpans.map(({ start }) => start));
+  let subjectHead: string | undefined;
+  let subjectPreposition: string | undefined;
+  let complementHead: string | undefined;
+  let infinitiveComplement = false;
 
-  if (words.length < 6) return false;
-
-  for (let i = subjectStart; i < words.length; i += 1) {
+  for (let i = 0; i < words.length; i += 1) {
     const word = words[i]!;
     const { text } = word;
-    const previous = words[i - 1]?.text;
-    const next = words[i + 1];
+    if (SPEAKING_COORDINATOR.test(text)) continue;
+    if (SPEAKING_CLAUSE_LINK.test(text)) {
+      subjectHead = undefined;
+      subjectPreposition = undefined;
+      complementHead = undefined;
+      infinitiveComplement = false;
+      continue;
+    }
+    if (SPEAKING_PREPOSITION.test(text)) {
+      subjectPreposition = text;
+      complementHead = undefined;
+      infinitiveComplement = false;
+      continue;
+    }
+
+    const previous = words[i - 1]?.text ?? "";
+    const next = words[i + 1]?.text;
+    const inSubjectComplement = subjectPreposition !== undefined;
+    if (subjectPreposition === "to" && !complementHead && !SPEAKING_DETERMINER.test(previous)) {
+      if (SPEAKING_ADVERB.test(text) || text.endsWith("ly")) continue;
+      infinitiveComplement = isSpokenVerb(text);
+    }
     const insideTarget = targetSpans.some(({ start, end }) => word.index >= start && word.index < end);
-    if (hasSubject && !insideTarget && next && previous !== "to") {
-      if (SPEAKING_MODAL.test(text)) {
-        // A modal must govern an overt verb. "Can funding" can be a noun phrase.
-        if (SPEAKING_CLAUSE_VERB_CUE.test(next.text) && !next.text.endsWith("ing")) return true;
+    if (subjectHead && (!inSubjectComplement || complementHead) &&
+      !insideTarget && !SPEAKING_DETERMINER.test(previous)
+    ) {
+      if (!next) {
+        return !inSubjectComplement && SPEAKING_INTRANSITIVE_END.test(text);
+      } else if (SPEAKING_MODAL.test(text)) {
+        const complement = words.slice(i + 1).find(({ text: part }) =>
+          !SPEAKING_ADVERB.test(part) && !part.endsWith("ly"),
+        );
+        if (complement && isSpokenVerb(complement.text)) return true;
       } else if (SPEAKING_FINITE_AUXILIARY.test(text)) {
         return true;
-      } else if (
-        (SPEAKING_CLAUSE_VERB_CUE.test(text) || SPEAKING_DITRANSITIVE.test(text)) &&
-        !/^(?:be|been|being)$/u.test(text) &&
-        !text.endsWith("ing") &&
-        !SPEAKING_DETERMINER.test(previous ?? "")
-      ) {
-        // A bare noun after a verb-shaped word can be part of the same noun
-        // phrase. A ditransitive can instead take a recipient before the target.
-        const takesTarget = targetSpans.some(({ start }) => start === next.index);
-        const takesRecipient = SPEAKING_DITRANSITIVE.test(text) &&
-          [2, 3, 4].some((distance) => {
-            const target = words[i + distance];
-            if (!target || !targetSpans.some(({ start }) => start === target.index)) return false;
-            const recipient = words.slice(i + 1, i + distance);
-            return !recipient.some((part) => SPEAKING_PREPOSITION.test(part.text)) &&
-              !SPEAKING_DETERMINER.test(recipient.at(-1)!.text);
-          });
-        if (
-          !SPEAKING_AMBIGUOUS_VERB.test(text) || hasSubjectPronoun || takesTarget || takesRecipient ||
-          SPEAKING_DETERMINER.test(next.text) || SPEAKING_VERB_COMPLEMENT.test(next.text)
-        ) {
-          return true;
-        }
+      } else if (!infinitiveComplement && text !== "be" && isSpokenVerb(text)) {
+        // A nominal object can start with modifiers or a ditransitive recipient.
+        const takesTarget = hasTargetInVerbObject(words.slice(i + 1, i + 6), targetStarts, !inSubjectComplement);
+        if (takesTarget || SPEAKING_DETERMINER.test(next) || SPEAKING_OBJECT_PRONOUN.test(next)) return true;
+
+        // Within a subject's prepositional complement, a noun can govern
+        // another preposition, as in "a table of seasonal shifts in emissions".
+        if (!inSubjectComplement && (
+          SPEAKING_SUBJECT_PRONOUN.test(subjectHead) ||
+          (!SPEAKING_AMBIGUOUS_VERB.test(text) && !SPEAKING_UNINFLECTED_VERB.test(text)) ||
+          (SPEAKING_PREPOSITION.test(next) && /[^s]s$/u.test(subjectHead))
+        )) return true;
       }
     }
-    hasSubjectPronoun ||= SPEAKING_SUBJECT_PRONOUN.test(text);
-    if (
-      SPEAKING_SUBJECT_PRONOUN.test(text) ||
-      (text.length >= 2 && !SPEAKING_STOP_WORDS.has(text) && !SPEAKING_DETERMINER.test(text))
-    ) {
-      hasSubject = true;
+
+    const canHeadNounPhrase = SPEAKING_SUBJECT_PRONOUN.test(text) ||
+      (text.length >= 2 && !SPEAKING_STOP_WORDS.has(text) && !SPEAKING_DETERMINER.test(text) &&
+        !SPEAKING_ADVERB.test(text) && !SPEAKING_MODAL.test(text) && !SPEAKING_FINITE_AUXILIARY.test(text));
+    if (canHeadNounPhrase) {
+      if (inSubjectComplement) complementHead = text;
+      else subjectHead = text;
     }
   }
   return false;
@@ -212,7 +260,7 @@ function classifySpeakingPace(
   return "on_target";
 }
 
-function getSpeakingTargets(collocations: readonly string[]): Map<string, string> {
+export function getSpeakingTargets(collocations: readonly string[]): ReadonlyMap<string, string> {
   const targets = new Map<string, string>();
   for (const collocation of collocations) {
     const phrase = collocation.trim();
@@ -265,7 +313,7 @@ function allocateSpeakingEvidence(sentences: readonly GroundedSentence[], target
   };
 }
 
-function hasRequiredWritingReceipt(seed: IeltsSpeakingPart3Seed): boolean {
+export function hasRequiredWritingReceipt(seed: IeltsSpeakingPart3Seed): boolean {
   if (!seed.requiresVerifiedReceipt) return true;
   const receipt = seed.verifiedWritingReceipt;
   if (!receipt?.receiptId) return false;
@@ -302,7 +350,7 @@ export function evaluateSpeakingRetelling(
       ? input.durationSeconds
       : null;
 
-  const sentences = segmentIeltsText(rawTranscript);
+  const sentences = wordCount > 0 ? segmentIeltsText(rawTranscript) : [];
   const paragraphs = [rawTranscript];
   const memorizedTemplateHits = detectMemorizedTemplates(paragraphs);
   const hasStuffing = hasMemorizedTemplateStuffing(memorizedTemplateHits);
@@ -426,6 +474,8 @@ export function evaluateSpeakingRetelling(
     epistemicReason = input.freshPromptTransfer
       ? `独立在 ${input.seed.timeWindowSeconds.min}–${input.seed.timeWindowSeconds.max} 秒内完成新题口语迁移并命中 ${transferredCollocations.length} 组目标搭配，已确认为口语转写迁移证据（不含语音发音评分）。`
       : `独立在 ${input.seed.timeWindowSeconds.min}–${input.seed.timeWindowSeconds.max} 秒内完成 Part 3 追问复述并命中 ${transferredCollocations.length} 组目标搭配，已确认为口语转写迁移证据（不含语音发音评分）。`;
+  } else if (wordCount === 0) {
+    epistemicReason = "请先输入包含英文单词的口语复述或转写，再生成反馈。";
   } else if (input.assisted) {
     epistemicReason = "本次口语复述参照了写作稿件或提示，仅作转写练习反馈，不计入正式掌握度。";
   } else if (!hasWritingReceipt) {

@@ -559,8 +559,9 @@ export type AnalyzeCrossDraftTransferInput = {
   readonly targets: readonly IeltsUpgradeTarget[];
 };
 
-type TransferAnalysis = Omit<IeltsCrossDraftTransferReport, "summary"> & {
+type TransferAnalysis = Omit<IeltsCrossDraftTransferReport, "summary" | "memorizedTemplateHits"> & {
   readonly summary: Omit<IeltsCrossDraftTransferReport["summary"], "masteryQualified">;
+  readonly memorizedTemplateHits: ReturnType<typeof detectMemorizedTemplates>;
 };
 
 function finalizeTransferReport(
@@ -574,13 +575,14 @@ function finalizeTransferReport(
 export function analyzeCrossDraftTransfer(
   input: AnalyzeCrossDraftTransferInput,
 ): IeltsCrossDraftTransferReport {
-  const analysis = analyzeTransfer(input, false, input.draft2.paragraphs.map(segmentIeltsText));
+  const wordCount = countDraftWords(input.draft2.paragraphs);
+  const analysis = analyzeTransfer(input, false, input.draft2.paragraphs.map(segmentIeltsText), wordCount);
   const { masteryQualified } = resolveIeltsEpistemicStatus({
     draftVersion: input.draft2.version,
     assisted: input.draft2.assisted,
     crossDraftTransferVerified: analysis.summary.meetsCrossDraftVerification,
     memorizedTemplateHits: analysis.memorizedTemplateHits,
-    wordCount: countDraftWords(input.draft2.paragraphs),
+    wordCount,
     disqualificationReason: analysis.summary.disqualificationReason,
   });
   return finalizeTransferReport(analysis, masteryQualified);
@@ -596,12 +598,18 @@ function analyzeTransfer(
   input: AnalyzeCrossDraftTransferInput,
   freshPromptConfirmed: boolean,
   revisedParagraphs: readonly (readonly GroundedSentence[])[],
+  revisedWordCount: number,
 ): TransferAnalysis {
   const samePrompt = input.draft1.promptId === input.draft2.promptId;
   const lineage = getWritingTransferLineage(input.draft1, input.draft2);
   const advancingLineage = lineage === "advancing_revision";
   const freshPrompt = lineage === "fresh_prompt" && freshPromptConfirmed;
   const canEvaluateTransfer = advancingLineage || freshPrompt;
+  const targetsById = new Map<string, IeltsUpgradeTarget>();
+  for (const target of input.targets) {
+    if (!targetsById.has(target.id)) targetsById.set(target.id, target);
+  }
+  const targets = [...targetsById.values()];
 
   const paragraphDiffs = diffEssayParagraphs(
     input.draft1.paragraphs,
@@ -617,7 +625,7 @@ function analyzeTransfer(
     baselineCoreClauseTokens.map((tokens) => tokens.join(" ")).filter(Boolean),
   );
   const allTargetPatterns = [...new Set(
-    input.targets.flatMap((target) => target.targetPatterns.map(normalizeText)).filter(Boolean),
+    targets.flatMap((target) => target.targetPatterns.map(normalizeText)).filter(Boolean),
   )].sort();
   const baselineContexts = new Map(allTargetPatterns.map((pattern) => {
     const tokens = tokenizeWords(pattern);
@@ -646,7 +654,7 @@ function analyzeTransfer(
   const hasSubstantiveRevision = assessSubstantiveRevision(input.draft1, input.draft2, revisedClauses);
   let hasMechanicalKeywordPaste = false;
 
-  const targetMatches = input.targets.map((target) => {
+  const targetMatches = targets.map((target) => {
     const baseHit = findMatchedPatterns(input.draft1.paragraphs, target.targetPatterns);
     const rawRevHit = findMatchedPatterns(input.draft2.paragraphs, target.targetPatterns);
     const baseWeak = findMatchedPatterns(
@@ -708,12 +716,7 @@ function analyzeTransfer(
   const eligibleTargets = targetMatches
     .filter(({ revCliche }) => canAllocate && revCliche.matched.length === 0)
     .sort((a, b) => compareText(a.target.criterion, b.target.criterion) || compareText(a.target.label, b.target.label));
-  const candidatesById = new Map<string, WritingCandidate[]>();
-  for (const { target, candidates } of eligibleTargets) {
-    const existing = candidatesById.get(target.id);
-    if (existing) existing.push(...candidates);
-    else candidatesById.set(target.id, [...candidates]);
-  }
+  const candidatesById = new Map(eligibleTargets.map(({ target, candidates }) => [target.id, candidates]));
   const allocated = new Set(allocateIeltsSpans(candidatesById).values());
 
   const items: IeltsUpgradeTransferItem[] = targetMatches.map((match) => {
@@ -790,7 +793,7 @@ function analyzeTransfer(
   const transferRate = totalTargets > 0 ? transferredCount / totalTargets : 0;
 
   let disqualificationReason: string | undefined;
-  if (revisedParagraphs.every((sentences) => sentences.length === 0)) {
+  if (revisedWordCount === 0) {
     disqualificationReason = "请先提交至少一段写作正文，再复核改写。";
   } else if (!canEvaluateTransfer) {
     disqualificationReason = samePrompt
@@ -844,16 +847,38 @@ type ParagraphEvidence = {
   readonly endOffset: number;
 };
 
-function sentenceSnippet(sentence: GroundedSentence, paragraphIndex: number): ParagraphEvidence {
-  const { text, startOffset } = sentence;
-  let length = text.length;
-  if (length > 130) {
-    const boundaries = graphemeBoundaries(text);
-    const limit = boundaries.floor(130) || boundaries.ceil(130);
-    const lastSpace = text.lastIndexOf(" ", limit - 1);
-    length = lastSpace > 40 ? boundaries.floor(lastSpace) : limit;
+function evidenceSnippet(
+  source: Pick<GroundedTextSpan, "text" | "startOffset">,
+  paragraphIndex: number,
+  match?: MatchRange,
+): ParagraphEvidence {
+  const { text, startOffset } = source;
+  const boundaries = graphemeBoundaries(text);
+  const requiredStart = boundaries.floor(match?.start ?? 0);
+  const requiredEnd = boundaries.ceil(match?.end ?? 0);
+  const width = Math.max(130, requiredEnd - requiredStart);
+  const contextBefore = Math.floor((width - (requiredEnd - requiredStart)) / 2);
+  const windowStart = Math.max(0, Math.min(requiredStart - contextBefore, text.length - width));
+  let start = boundaries.ceil(windowStart);
+  const windowEnd = Math.min(text.length, windowStart + width);
+  let end = boundaries.floor(windowEnd);
+  if (end === start) end = boundaries.ceil(windowEnd);
+
+  // Prefer word edges if they leave the matched occurrence intact.
+  if (start > 0 && !/\s/u.test(text[start - 1]!)) {
+    const firstSpace = text.indexOf(" ", start);
+    if (firstSpace >= start && firstSpace < requiredStart) start = boundaries.ceil(firstSpace + 1);
   }
-  return { paragraphIndex, excerpt: text.slice(0, length), startOffset, endOffset: startOffset + length };
+  if (end < text.length) {
+    const lastSpace = text.lastIndexOf(" ", end - 1);
+    if (lastSpace > start + 40 && lastSpace >= requiredEnd) end = boundaries.floor(lastSpace);
+  }
+  return {
+    paragraphIndex,
+    excerpt: text.slice(start, end),
+    startOffset: startOffset + start,
+    endOffset: startOffset + end,
+  };
 }
 
 function findParagraphEvidence(
@@ -865,11 +890,15 @@ function findParagraphEvidence(
     sentences.length > 0 ? [{ sentences, paragraphIndex }] : [],
   );
   for (const { sentences, paragraphIndex } of nonEmpty) {
-    const match = sentences.find((sentence) => patterns.some((pattern) => matchesPattern(sentence.text, pattern)));
-    if (match) return sentenceSnippet(match, paragraphIndex);
+    for (const sentence of sentences) {
+      for (const pattern of patterns) {
+        const [match] = findPatternRanges(sentence.text, pattern);
+        if (match) return evidenceSnippet(sentence, paragraphIndex, match);
+      }
+    }
   }
   const fallback = nonEmpty[Math.min(fallbackPosition, nonEmpty.length - 1)]!;
-  return sentenceSnippet(fallback.sentences[0]!, fallback.paragraphIndex);
+  return evidenceSnippet(fallback.sentences[0]!, fallback.paragraphIndex);
 }
 
 export type EvaluateRevisedDraftInput = {
@@ -896,13 +925,14 @@ export function evaluateRevisedDraftDeterministically(
     input.freshPromptTransfer === true;
   const paragraphs = input.revisedDraft.paragraphs;
   const segmentedParagraphs = paragraphs.map(segmentIeltsText);
+  const wordCount = countDraftWords(paragraphs);
   const transferReport = analyzeTransfer({
     draft1: input.baselineDraft,
     draft2: input.revisedDraft,
     targets: input.targets,
-  }, freshPrompt, segmentedParagraphs);
+  }, freshPrompt, segmentedParagraphs, wordCount);
 
-  if (segmentedParagraphs.every((sentences) => sentences.length === 0)) {
+  if (wordCount === 0) {
     return {
       ok: false,
       reason: "empty_draft",
@@ -910,7 +940,6 @@ export function evaluateRevisedDraftDeterministically(
       transferReport: finalizeTransferReport(transferReport, false),
     };
   }
-  const wordCount = countDraftWords(paragraphs);
   const templateHits = transferReport.memorizedTemplateHits;
   const templatePenalty =
     templateHits.some((h) => h.severity === "blocking") || templateHits.length >= 2
@@ -962,13 +991,20 @@ export function evaluateRevisedDraftDeterministically(
     ["consequently", "by contrast", "moreover", "this shift", "such investment", "in turn"],
     1,
   );
-  const lrLoc = findParagraphEvidence(
-    segmentedParagraphs,
-    templateHits.length > 0
-      ? templateHits.map((h) => h.phrase)
-      : ["alleviate", "viability", "emissions", "congestion", "infrastructure"],
-    0,
-  );
+  const diagnosedTemplate = templateHits[0];
+  let lrLoc: ParagraphEvidence;
+  if (diagnosedTemplate) {
+    const { paragraphIndex, startOffset, endOffset } = diagnosedTemplate;
+    const source = segmentedParagraphs[paragraphIndex]!.find(
+      (sentence) => sentence.startOffset <= startOffset && sentence.endOffset >= endOffset,
+    ) ?? { text: paragraphs[paragraphIndex]!, startOffset: 0 };
+    lrLoc = evidenceSnippet(source, paragraphIndex, {
+      start: startOffset - source.startOffset,
+      end: endOffset - source.startOffset,
+    });
+  } else {
+    lrLoc = findParagraphEvidence(segmentedParagraphs, ["alleviate", "viability", "emissions", "congestion", "infrastructure"], 0);
+  }
   const graLoc = findParagraphEvidence(
     segmentedParagraphs,
     ["while", "although", "whereas", "which", "whereby", "rather than"],
@@ -1009,8 +1045,8 @@ export function evaluateRevisedDraftDeterministically(
     ...lrLoc,
     criterion: "LR",
     diagnosis:
-      templateHits.length > 0
-        ? `检测到高频模板表达（${templateHits[0]?.phrase}），拉低词汇原创度与语域自然度。`
+      diagnosedTemplate
+        ? `检测到高频模板表达（${diagnosedTemplate.phrase}），拉低词汇原创度与语域自然度。`
         : criterionTransfers("LR").some((i) => i.status === "transferred")
           ? "已有效迁移精准学术搭配，用词具体且语域得体。"
           : "建议将笼统形容词替换为具体城市交通学术搭配（如 alleviate chronic congestion / per-capita emissions）。",

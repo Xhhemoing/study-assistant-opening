@@ -3,6 +3,8 @@
 import { useState } from "react";
 import {
   evaluateSpeakingRetelling,
+  getSpeakingTargets,
+  hasRequiredWritingReceipt,
   type IeltsSpeakingFeedbackReceipt,
   type IeltsSpeakingPart3Seed,
 } from "./domain-bridge";
@@ -47,12 +49,15 @@ export function IeltsSpeakingTransferCard({
   );
   const [assisted, setAssisted] = useState(matchingReceipt?.assisted ?? false);
   const [evaluatedReceipt, setReceipt] = useState<IeltsSpeakingFeedbackReceipt | null>(matchingReceipt);
-  const receipt = evaluatedReceipt?.seedId === seed.seedId ? evaluatedReceipt : null;
+  const receipt = evaluatedReceipt?.seedId === seed.seedId &&
+    (evaluatedReceipt.epistemicStatus !== "rubric_verified_evidence" || hasRequiredWritingReceipt(seed))
+    ? evaluatedReceipt
+    : null;
+  const targets = [...getSpeakingTargets(seed.targetSpokenCollocations).values()];
   const epistemicMeta = receipt ? EPISTEMIC_BADGE_META[receipt.epistemicStatus] : null;
   const paceMeta = receipt ? SPEAKING_PACE_META[receipt.paceStatus] : null;
 
   function handleEvaluate() {
-    if (!transcript.trim()) return;
     const parsedDuration =
       durationInput.trim() === "" ? Number.NaN : Number(durationInput);
     const nextReceipt = evaluateSpeakingRetelling({
@@ -136,11 +141,11 @@ export function IeltsSpeakingTransferCard({
           </h3>
           <span className="text-meta tabular-nums text-text-2">
             已迁移 {receipt?.transferredCollocations.length ?? 0} /{" "}
-            {seed.targetSpokenCollocations.length}
+            {targets.length}
           </span>
         </div>
         <div className="flex flex-wrap gap-2">
-          {seed.targetSpokenCollocations.map((phrase) => {
+          {targets.map((phrase) => {
             const matched = receipt?.transferredCollocations.includes(phrase) ?? false;
             return (
               <span

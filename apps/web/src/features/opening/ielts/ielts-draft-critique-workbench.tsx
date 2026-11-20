@@ -80,6 +80,8 @@ export function IeltsDraftCritiqueWorkbench({
     fixture.draft2.paragraphs.join("\n\n"),
   );
   const [composerAssisted, setComposerAssisted] = useState(fixture.draft2.assisted);
+  const [composerNeedsText, setComposerNeedsText] = useState(false);
+  const composerGuidanceId = `${tabsIdPrefix}-revision-guidance`;
   const [revisionCount, setRevisionCount] = useState(0);
 
   const activeDraft = viewMode === "draft1" ? fixture.draft1 : draft2;
@@ -156,8 +158,12 @@ export function IeltsDraftCritiqueWorkbench({
       receiptId: `receipt-live-${nextCount}`,
     });
 
-    if (!evaluated.ok) return;
+    if (!evaluated.ok) {
+      setComposerNeedsText(true);
+      return;
+    }
 
+    setComposerNeedsText(false);
     setRevisionCount(nextCount);
     setDraft2(updatedDraft);
     setDraft2Receipt(evaluated.receipt);
@@ -177,6 +183,7 @@ export function IeltsDraftCritiqueWorkbench({
     setTransferReport(fixture.transferReport);
     setComposerText(fixture.draft2.paragraphs.join("\n\n"));
     setComposerAssisted(fixture.draft2.assisted);
+    setComposerNeedsText(false);
     setSelectedSpanId(null);
   }
 
@@ -511,12 +518,22 @@ export function IeltsDraftCritiqueWorkbench({
                   </span>
                   <textarea
                     aria-label="二稿改写编辑区"
+                    aria-invalid={composerNeedsText || undefined}
+                    aria-describedby={composerNeedsText ? composerGuidanceId : undefined}
                     rows={8}
                     value={composerText}
-                    onChange={(event) => setComposerText(event.target.value)}
+                    onChange={(event) => {
+                      setComposerText(event.target.value);
+                      setComposerNeedsText(false);
+                    }}
                     className="block w-full rounded-ctl border border-line-strong bg-bg px-3.5 py-2.5 font-reading text-read leading-6 text-text focus:border-text focus:outline-none"
                   />
                 </label>
+                {composerNeedsText && (
+                  <p id={composerGuidanceId} role="alert" className="text-meta text-danger">
+                    请先写几句英文再重新分析。只有标点或没有英文单词的内容无法分析。
+                  </p>
+                )}
 
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <label className="inline-flex cursor-pointer items-center gap-2 text-meta text-text-2">

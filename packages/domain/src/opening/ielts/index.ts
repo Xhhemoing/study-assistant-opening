@@ -73,4 +73,6 @@ export type {
 export {
   buildSpeakingPart3Seed,
   evaluateSpeakingRetelling,
+  getSpeakingTargets,
+  hasRequiredWritingReceipt,
 } from "./speaking";
