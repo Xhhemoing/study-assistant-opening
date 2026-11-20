@@ -1,5 +1,5 @@
 import { validateBackupWorkspaceAssets } from "../../../domain/src/opening/backup-workspace-assets";
-import { restoreSprintPack } from "./opening-backup-exam-pack";
+import { restorePendingSprintAttempts, restoreSprintPack } from "./opening-backup-exam-pack";
 import { OpeningStorageError } from "../storage/opening-s3";
 import { normalizeOpeningImportedEvaluation } from "./opening-backup-evaluation";
 import { restoreOpeningGradingMetadata } from "./opening-grading-restore";
@@ -19,7 +19,7 @@ import { restoreKnowledgeDefinitions } from "./opening-backup-knowledge";
  */
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import type { Sql } from "postgres";
+import type { Sql, TransactionSql } from "postgres";
 import {
   normalizeOpeningRestoreHistory,
   OPENING_RESTORE_APPLY_ORDER,
@@ -402,7 +402,6 @@ function filterPayload(
   row: Record<string, unknown>,
   workspaceId: string,
 ): Record<string, unknown> | null {
-  if (table === "opening_exam_sprints") row = restoreSprintPack(row);
   if (table === "opening_exam_attempt_links") row = { ...row, first_family_exposure: false };
   if (table === "opening_exam_reviews" && row.status === "pending") row = { ...row, status: "unknown" };
   row = normalizeOpeningImportedEvaluation(table, row);
@@ -428,6 +427,24 @@ function filterPayload(
     payload[col] = value;
   }
   return Object.keys(payload).length ? payload : null;
+}
+
+async function assertOpeningRestoreTarget(tx: TransactionSql, backup: OpeningBackup, owner: string, seeded = false) {
+  const workspaceId = backup.workspaceId;
+  const facts = await readOpeningRestoreCurrentFacts(tx, workspaceId, owner);
+  const livePlan = planOpeningRestoreApply(backup, facts.currentDeletionJournal, {
+    confirmLocalRestore: true,
+    availableCourseIds: facts.availableCourseIds,
+    currentMemoryDeletions: facts.currentMemoryDeletions,
+    currentLearningState: facts.currentLearningState,
+  });
+  if (!livePlan.ok) {
+    throw Object.assign(new Error(livePlan.errors.join("; ")), { restoreCode: livePlan.code });
+  }
+  const liveCounts = await readOpeningRestoreNamespaceCounts(tx as unknown as Sql, workspaceId);
+  if (seeded) liveCounts.opening_workspace_history_revisions -= 1;
+  const empty = evaluateOpeningRestoreEmptyNamespace(liveCounts);
+  if (!empty.ok) throw Object.assign(new Error(`TARGET_NOT_EMPTY:${empty.errors.join("|")}`), { code: "TARGET_NOT_EMPTY" });
 }
 
 /**
@@ -512,27 +529,9 @@ export async function executeOpeningRestoreApply(
       const [workspace] = await tx`SELECT owner_user_id FROM workspaces WHERE id=${workspaceId}`;
       if (!workspace) throw new Error("restore workspace owner is missing");
       const owner = String(workspace.owner_user_id);
-      // Match lockWorkspaceLearningHistory before locking the workspace. Track
-      // our provisional row so the empty-target check still sees all prior rows.
-      const seeded = await tx`INSERT INTO opening_workspace_history_revisions(workspace_id,owner_user_id,revision)
-        VALUES(${workspaceId},${owner},0) ON CONFLICT DO NOTHING RETURNING workspace_id`;
-      await tx`SELECT revision FROM opening_workspace_history_revisions
-        WHERE workspace_id=${workspaceId} AND owner_user_id=${owner} FOR UPDATE`;
-      const [lockedWorkspace] = await tx`SELECT id FROM workspaces WHERE id=${workspaceId} AND owner_user_id=${owner} FOR UPDATE`;
-      if (!lockedWorkspace) throw new Error("restore workspace owner changed");
       const assetErrors: string[] = [];
-      validateBackupWorkspaceAssets(backup.tables as Record<string, Record<string, unknown>[]>, assetErrors, String(workspace.owner_user_id));
+      validateBackupWorkspaceAssets(backup.tables as Record<string, Record<string, unknown>[]>, assetErrors, owner);
       if (assetErrors.length) throw new Error(assetErrors.join("; "));
-      const facts = await readOpeningRestoreCurrentFacts(tx, workspaceId, String(workspace.owner_user_id));
-      const livePlan = planOpeningRestoreApply(backup, facts.currentDeletionJournal, {
-        confirmLocalRestore: true,
-        availableCourseIds: facts.availableCourseIds,
-        currentMemoryDeletions: facts.currentMemoryDeletions,
-        currentLearningState: facts.currentLearningState,
-      });
-      if (!livePlan.ok) {
-        throw Object.assign(new Error(livePlan.errors.join("; ")), { restoreCode: livePlan.code });
-      }
       const linkedMilestones = (backup.tables.workspace_preferences as Record<string, unknown>[] | undefined)?.some(row => {
         const parsed = openingAdaptivePrefsSchema.safeParse(row.adaptive_planning);
         return parsed.success && Object.values(parsed.data.courseGoals).some(goal => goal.milestones?.some(milestone =>
@@ -540,19 +539,10 @@ export async function executeOpeningRestoreApply(
       });
       if (linkedMilestones || backup.tables.course_goals?.length || backup.tables.course_requirements?.length) {
         const linkErrors: string[] = [];
-        validateBackupCourseMilestones(backup.tables as Record<string, Record<string, unknown>[]>, linkErrors, String(workspace.owner_user_id));
-        validateBackupLearningGoals(backup.tables as Record<string, Record<string, unknown>[]>, linkErrors, String(workspace.owner_user_id));
+        validateBackupCourseMilestones(backup.tables as Record<string, Record<string, unknown>[]>, linkErrors, owner);
+        validateBackupLearningGoals(backup.tables as Record<string, Record<string, unknown>[]>, linkErrors, owner);
         if (linkErrors.length) throw new Error(linkErrors.join("; "));
       }
-      const liveCounts = await readOpeningRestoreNamespaceCounts(tx as unknown as Sql, workspaceId);
-      if (seeded.length) liveCounts.opening_workspace_history_revisions -= 1;
-      const emptyLive = evaluateOpeningRestoreEmptyNamespace(liveCounts);
-      if (!emptyLive.ok) {
-        const err = new Error(`TARGET_NOT_EMPTY:${emptyLive.errors.join("|")}`);
-        (err as Error & { code?: string }).code = "TARGET_NOT_EMPTY";
-        throw err;
-      }
-
       const importedVersions = new Map<Record<string, unknown>, Record<string, unknown>>();
       const historyRows = (backup.tables.opening_workspace_history_revisions as Record<string, unknown>[] | undefined) ?? [];
       const history = historyRows.find(row => String(row.owner_user_id).toLowerCase() === owner
@@ -560,19 +550,30 @@ export async function executeOpeningRestoreApply(
       for (const row of (backup.tables.opening_source_versions as Record<string, unknown>[] | undefined) ?? []) {
         const manifest = validateRetainedMaterialImportState({ material_manifest_revision: 0, ...row },
           String(row.source_id), Number(row.version), Number(history?.revision ?? 0));
-        if (!manifest) continue;
+        if (manifest) importedVersions.set(row, { ...row, material_manifest: { ...manifest, restoredFromBackup: true } });
+      }
+      const observations = (backup.tables.opening_learning_observations as Record<string, unknown>[] | undefined) ?? [];
+      const restoredObservations = observations.length ? restoreOpeningGradingMetadata(observations, workspaceId, owner) : observations;
+      const restoredSprints = (backup.tables.opening_exam_sprints as Record<string, unknown>[] | undefined)?.map(restoreSprintPack) ?? [];
+
+      // Reject known invalid archives or target drift before trying to seed the history lock.
+      await assertOpeningRestoreTarget(tx, backup, owner);
+      // Match live history writers, including first initialization, before locking the workspace.
+      const seeded = await tx`INSERT INTO opening_workspace_history_revisions(workspace_id,owner_user_id,revision)
+        VALUES(${workspaceId},${owner},0) ON CONFLICT DO NOTHING RETURNING workspace_id`;
+      await tx`SELECT revision FROM opening_workspace_history_revisions
+        WHERE workspace_id=${workspaceId} AND owner_user_id=${owner} FOR UPDATE`;
+      const [lockedWorkspace] = await tx`SELECT id FROM workspaces WHERE id=${workspaceId} AND owner_user_id=${owner} FOR UPDATE`;
+      if (!lockedWorkspace) throw new Error("restore workspace owner changed");
+      // Drift can commit while we wait for either lock, so only this read authorizes apply.
+      await assertOpeningRestoreTarget(tx, backup, owner, seeded.length > 0);
+
+      for (const [row, imported] of importedVersions) {
         // Archive contents cannot authenticate a reviewer, even if the UUID still
         // exists locally. Keep original audit/pins, but never activate it as a
         // current acceptance. Missing user pointers follow 0097's nullable FK.
         const users = row.material_reviewed_by == null ? [] : await tx`SELECT id FROM users WHERE id=${String(row.material_reviewed_by)} FOR KEY SHARE`;
-        importedVersions.set(row, { ...row, material_manifest: { ...manifest, restoredFromBackup: true },
-          material_reviewed_by: users.length ? row.material_reviewed_by : null });
-      }
-
-      const observations = (backup.tables.opening_learning_observations as Record<string, unknown>[] | undefined) ?? [];
-      let restoredObservations = observations;
-      if (observations.length) {
-        restoredObservations = restoreOpeningGradingMetadata(observations, workspaceId, String(workspace.owner_user_id));
+        imported.material_reviewed_by = users.length ? row.material_reviewed_by : null;
       }
 
       const cancelled = await tx`
@@ -591,7 +592,8 @@ export async function executeOpeningRestoreApply(
         const rows = (backup.tables[table] as Record<string, unknown>[] | undefined) ?? [];
         const orderedRows = table === "opening_learning_decisions"
           ? [...rows].sort((a, b) => ["plan", "session", "activity"].indexOf(String(a.layer)) - ["plan", "session", "activity"].indexOf(String(b.layer)))
-          : table === "opening_learning_observations" ? restoredObservations : rows;
+          : table === "opening_learning_observations" ? restoredObservations
+          : table === "opening_exam_sprints" ? restoredSprints : rows;
         for (const row of orderedRows) {
           if (!row || typeof row !== "object") continue;
           // Observation root/head references are cyclic and immediate FKs.
@@ -627,6 +629,7 @@ export async function executeOpeningRestoreApply(
           }
         }
       }
+      if (restoredSprints.length) await restorePendingSprintAttempts(tx, { workspaceId, ownerUserId: owner });
       if (!history) await tx`DELETE FROM opening_workspace_history_revisions
         WHERE workspace_id=${workspaceId} AND owner_user_id=${owner}`;
 

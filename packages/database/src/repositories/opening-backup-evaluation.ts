@@ -30,6 +30,7 @@ export function normalizeOpeningImportedEvaluation(table: string, row: Record<st
     if (record(intent.examSprint)) {
       const exam = { ...intent.examSprint };
       delete exam.partSnapshot;
+      delete exam.spec;
       intent.examSprint = exam;
     }
     delete intent.spanCourseBinding;

@@ -15,10 +15,119 @@ import { createOpeningKnowledgeRepository } from "../../packages/database/src/re
 import { createOpeningFirstLearningRepository } from "../../packages/database/src/repositories/opening-first-learning";
 import { lockWorkspaceLearningHistory } from "../../packages/database/src/repositories/opening-learning-facts";
 import { createOpeningExamSprintRepository } from "../../packages/database/src/repositories/opening-exam-sprint";
+import { createOpeningExamIntegrationRepository } from "../../packages/database/src/repositories/opening-exam-integration";
 import { examPackDirectorySections } from "../../packages/database/src/repositories/opening-exam-source-format";
 import { validExamLessonExposure } from "../../packages/domain/src/opening/exam-sprint/lesson-exposure-mapping";
 import { exportSprintPack, restoreSprintPack } from "../../packages/database/src/repositories/opening-backup-exam-pack";
 import { backupRows, sourceBytes, sourceHash } from "./opening-backup-records-fixture";
+
+it.each([
+  { mode: "diagnostic", linkage: "current" },
+  { mode: "practice", linkage: "forged spec" },
+  { mode: "diagnostic", linkage: "mismatched stem" },
+  { mode: "diagnostic", linkage: "missing link" },
+] as const)(
+  "restores a course-bound $mode with a $linkage pending attempt", async ({ mode, linkage }) => {
+    const url = assertOpeningTestDatabase(process.env.OPENING_TEST_DATABASE_URL!, process.env.OPENING_TEST_DB);
+    const sql = createSqlClient(url.toString(), { max: 1 });
+    const rollback = new Error("rollback restored diagnostic"), discardSeed = new Error("discard source diagnostic");
+    const scope = { workspaceId: randomUUID(), ownerUserId: randomUUID() }, courseId = randomUUID();
+    const pack = EXAM_SPRINT_PACK;
+    const createWorkspace = async (tx: TransactionSql) => {
+      await tx`INSERT INTO workspaces(id,owner_user_id) VALUES(${scope.workspaceId},${scope.ownerUserId})`;
+    };
+    try {
+      await sql.begin(async outer => {
+        await outer`INSERT INTO users(id,email,display_name,password_hash)
+          VALUES(${scope.ownerUserId},${scope.ownerUserId + "@backup.test"},'fixture','test')`;
+        const bodies = new Map<string, Uint8Array>();
+        let backup: OpeningBackup | undefined;
+        let pendingId: string | undefined;
+        let questionId: string | undefined;
+        await outer.savepoint(async tx => {
+          await createWorkspace(tx);
+          await tx`INSERT INTO courses(id,workspace_id,title,slug) VALUES(${courseId},${scope.workspaceId},'Course','course')`;
+          const db = transactionClient(tx);
+          const integration = createOpeningExamIntegrationRepository(db, pack, { writePublicSource: async source => {
+            bodies.set(`objects/${source.sourceId}/v${source.version}.bin`, source.body);
+          } });
+          const bound = await integration.bind(scope, { clientKey: randomUUID(), courseId, milestoneId: null,
+            expectedPackVersion: pack.version, createKnowledgeNodes: true, skills: [], materials: [] });
+          const sprint = createOpeningExamSprintRepository(db, pack);
+          const started = await sprint.act(scope, { action: "start", mode, clientKey: randomUUID() });
+          pendingId = started.currentAttempt!.id;
+          questionId = started.currentAttempt!.questionId;
+          const records = await readOpeningBackupRecords(db, scope);
+          expect(records.tables.opening_exam_attempt_links).toMatchObject([{ exam_attempt_id: pendingId, publication: "pending_answer" }]);
+          expect(records.tables.opening_learning_item_versions).toMatchObject([{ evaluation_spec: null }]);
+          const sourceId = bound.binding!.packSourceId, archivePath = `objects/${sourceId}/v0.bin`;
+          const body = bodies.get(archivePath)!;
+          const sha256 = createHash("sha256").update(body).digest("hex");
+          const source = { sourceId, version: 0, bytes: body.byteLength, sha256 };
+          const composed = composeOpeningBackupDraft({ records, staging: {
+            snapshot: { workspaceId: scope.workspaceId, privacyEpoch: records.privacyEpoch, deletionJournal: records.deletionJournal,
+              memoryDeletions: records.memoryDeletions, sources: [source] },
+            objects: [{ ...source, actualSha256: sha256, archivePath }],
+          } });
+          if (!composed.ok) throw new Error(composed.errors.join(", "));
+          backup = composed.backup;
+          throw discardSeed;
+        }).catch(error => { if (error !== discardSeed) throw error; });
+        if (!backup || !pendingId || !questionId) throw new Error("Missing diagnostic archive");
+        await createWorkspace(outer);
+        const question = pack.questions.find(entry => entry.id === questionId)!;
+        const wire: OpeningBackup = JSON.parse(JSON.stringify(backup));
+        const item = wire.tables.opening_learning_item_versions![0] as Record<string, unknown>;
+        const spec = { kind: "exam_choice", specVersion: "exam-choice-v1", packId: pack.id, packVersion: pack.version,
+          questionId, familyId: question.familyId };
+        if (linkage === "forged spec") {
+          const wrongOption = question.options.find(option => option.id !== question.answer)!.id;
+          const forged = { ...spec, answer: wrongOption };
+          const attempt = wire.tables.opening_learning_attempts![0] as { create_intent: { examSprint: { spec: unknown } } };
+          attempt.create_intent.examSprint.spec = forged;
+          item.evaluation_spec = forged;
+        }
+        if (linkage === "mismatched stem") item.stem_snapshot = "Different question";
+        if (linkage === "missing link") wire.tables.opening_exam_attempt_links = [];
+        const db = transactionClient(outer);
+        const result = await executeOpeningRestoreApply(db, { confirmLocalRestore: true, backup: wire,
+          currentMemoryDeletions: wire.memoryDeletions, currentLearningState: { workspacePreferences: null, courses: [] },
+          objectBodies: bodies, objectPut: createMemoryOpeningRestoreObjectPut() });
+        expect(result, result.errors.join(", ")).toMatchObject({ ok: true, objectsApplied: 1 });
+        const sprint = createOpeningExamSprintRepository(db, pack);
+        const submit = (attemptId: string, answer: string) => sprint.act(scope, { action: "answer", attemptId,
+          answer, confidence: 4, clientKey: randomUUID() });
+        if (linkage === "current" || linkage === "forged spec") {
+          const submitted = await submit(pendingId, question.answer);
+          expect(submitted.currentAttempt).toMatchObject({ id: pendingId, correct: true, firstFamilyExposure: false });
+          const [observation] = await outer`SELECT o.outcome,o.verdict_source,l.publication,l.first_family_exposure,
+              a.create_intent #> '{examSprint,spec}' AS archived_spec
+            FROM opening_exam_attempt_links l JOIN opening_learning_observations o ON o.id=l.observation_id
+            JOIN opening_learning_attempts a ON a.id=l.learning_attempt_id
+            WHERE l.exam_attempt_id=${pendingId} AND o.workspace_id=${scope.workspaceId}`;
+          expect(observation).toEqual({ outcome: "correct", verdict_source: "deterministic", publication: "published",
+            first_family_exposure: false, archived_spec: null });
+          const [version] = await outer`SELECT evaluation_spec FROM opening_learning_item_versions WHERE id=${String(item.id)}`;
+          expect(version?.evaluation_spec).toEqual(spec);
+        } else {
+          const historical = await sprint.read(scope);
+          expect(historical).toMatchObject({ activeRun: null, currentAttempt: null, attempts: [{ id: pendingId, answer: null }] });
+          await expect(submit(pendingId, question.answer)).rejects.toMatchObject({ code: "CONFLICT" });
+          const [activity] = await outer`SELECT status FROM opening_teaching_activities WHERE workspace_id=${scope.workspaceId}`;
+          expect(activity?.status).toBe("completed");
+          const fresh = await sprint.act(scope, { action: "start", mode, clientKey: randomUUID() });
+          const freshAttempt = fresh.currentAttempt!;
+          expect(freshAttempt.id).not.toBe(pendingId);
+          const freshQuestion = pack.questions.find(entry => entry.id === freshAttempt.questionId)!;
+          expect((await submit(freshAttempt.id, freshQuestion.answer)).currentAttempt).toMatchObject({ correct: true });
+          const [version] = await outer`SELECT evaluation_spec FROM opening_learning_item_versions WHERE id=${String(item.id)}`;
+          expect(version?.evaluation_spec).toBeNull();
+        }
+        throw rollback;
+      }).catch(error => { if (error !== rollback) throw error; });
+    } finally { await sql.end(); }
+  }, 30_000,
+);
 
 function publishedRequest(activityId: string, sourceId: string, chunk: string) {
   const id = randomUUID();

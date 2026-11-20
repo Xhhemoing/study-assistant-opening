@@ -1,8 +1,13 @@
 import { isDeepStrictEqual } from "node:util";
 import { examQuestionPartsSchema } from "@aistudy/contracts";
-import type { ExamAttempt, ExamPack, ExamQuestion, ExamSprintState, QuestionPartAssistance, Scope } from "@aistudy/contracts";
+import type { ExamAttempt, ExamChoiceSpec, ExamPack, ExamQuestion, ExamSprintState, QuestionPartAssistance, Scope } from "@aistudy/contracts";
 import { evaluateExamChoice, evaluateExamQuestionParts, parseExamChoiceSpec } from "@aistudy/domain";
 import { readCourseRequirements } from "./opening-course-route-read";
+
+export function buildExamChoiceSpec(pack: ExamPack, question: ExamQuestion): ExamChoiceSpec {
+  return { kind: "exam_choice", specVersion: "exam-choice-v1", packId: pack.id, packVersion: pack.version,
+    questionId: question.id, familyId: question.familyId };
+}
 
 /** Resolve declared keys only inside the owner/course; never infer from labels or positions. */
 export async function captureExamPartRequirements(tx: TransactionSql, scope: Scope, courseId: string, question: ExamQuestion) {
