@@ -690,16 +690,32 @@ async function readSyncStatusInternal(
   };
 }
 
+function readInKnowledgeSnapshot<T>(sql: Sql, read: (tx: TransactionSql) => Promise<T>) {
+  // postgres.js exposes savepoint on a transaction (including savepoint-backed
+  // clients), but not on the pool. A savepoint inherits the caller's snapshot.
+  const transaction = sql as Partial<TransactionSql>;
+  if (typeof transaction.savepoint === "function") {
+    return transaction.savepoint(async tx => {
+      const [settings] = await tx`SHOW transaction_isolation`;
+      if (settings?.transaction_isolation !== "repeatable read" && settings?.transaction_isolation !== "serializable") {
+        throw new Error("Knowledge snapshot reads require a repeatable read or serializable outer transaction");
+      }
+      return read(tx);
+    });
+  }
+  return sql.begin(async tx => {
+    await tx`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY`;
+    return read(tx);
+  });
+}
+
 async function readSyncStatusInSnapshot(
   sql: Sql,
   scope: Scope,
   courseId: string,
   options?: ReadKnowledgeSyncOptions & { computeProtection?: boolean },
 ) {
-  return sql.begin(async (tx) => {
-    await tx`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY`;
-    return readSyncStatusInternal(tx, scope, courseId, options);
-  });
+  return readInKnowledgeSnapshot(sql, tx => readSyncStatusInternal(tx, scope, courseId, options));
 }
 
 async function listAuthorizedChunks(sql: Sql | TransactionSql, scope: Scope, courseId: string): Promise<AuthorizedKnowledgeChunk[]> {
@@ -732,8 +748,7 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
   return {
     /** Definitions contain source text and are only available to the rebuild worker. */
     async getForRebuild(scope: Scope, courseId: string): Promise<(OpeningKnowledgeRecord & { nodeDefinitions: Record<string, string> }) | null> {
-      return sql.begin(async tx => {
-        await tx`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY`;
+      return readInKnowledgeSnapshot(sql, async tx => {
         await assertOwnedCourse(tx, scope, courseId);
         const [row] = await tx`SELECT version,snapshot,source_versions,node_definitions FROM opening_course_knowledge
           WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND course_id=${courseId}`;
@@ -775,8 +790,7 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
       return referencedNodeIds(sql, scope, courseId);
     },
     async get(scope: Scope, courseId: string): Promise<OpeningKnowledgeRecord | null> {
-      return sql.begin(async tx => {
-        await tx`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY`;
+      return readInKnowledgeSnapshot(sql, async tx => {
         await assertOwnedCourse(tx, scope, courseId);
         const [row] = await tx`
           SELECT version, snapshot, source_versions
@@ -798,8 +812,7 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
     },
 
     async getWithSync(scope: Scope, courseId: string, options?: ReadKnowledgeSyncOptions): Promise<CourseKnowledgeRecordResponse> {
-      return sql.begin(async (tx) => {
-        await tx`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY`;
+      return readInKnowledgeSnapshot(sql, async tx => {
         const { sync, record } = await readSyncStatusInternal(tx, scope, courseId, options);
         if (!record) {
           return {

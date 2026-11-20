@@ -38,7 +38,7 @@ it.each([
       await tx`INSERT INTO workspaces(id,owner_user_id) VALUES(${scope.workspaceId},${scope.ownerUserId})`;
     };
     try {
-      await sql.begin(async outer => {
+      await sql.begin("isolation level repeatable read", async outer => {
         await outer`INSERT INTO users(id,email,display_name,password_hash)
           VALUES(${scope.ownerUserId},${scope.ownerUserId + "@backup.test"},'fixture','test')`;
         const bodies = new Map<string, Uint8Array>();
@@ -180,7 +180,8 @@ it.each(["mock-a", "mock-b"] as const)("restores %s history without granting cat
 });
 
 // Run the real queries and constraints in a rollback-only test transaction. Inside it,
-// each repository transaction has its own savepoint. No persistent fixture or object writes.
+// each repository transaction has its own savepoint and inherits the outer snapshot.
+// Keep the outer transaction writable for the fixture and restore.
 function transactionClient(tx: TransactionSql): Sql {
   return new Proxy(tx, { get(target, property, receiver) {
     if (property !== "begin") return Reflect.get(target, property, receiver);
@@ -202,7 +203,7 @@ it.skipIf(process.env.OPENING_TEST_DB !== "1" || !process.env.OPENING_TEST_DATAB
     const oldBlocks = [{ id: block, type: "text", position: 0, content: { ...liveContent, text: "ordinary essay revision", citationBinding: { refs: ["external-reference"] } } },
       { id: historicalKey, type: "answer_key", position: 1, content: { answer: "private old key" } }];
     try {
-      await sql.begin(async outer => {
+      await sql.begin("isolation level repeatable read", async outer => {
         await outer`INSERT INTO users(id,email,display_name,password_hash) VALUES(${u},${u + "@backup.test"},'fixture','test')`;
         await outer`INSERT INTO workspaces(id,owner_user_id) VALUES(${w},${u})`;
         let backup: OpeningBackup | undefined;
@@ -552,7 +553,7 @@ it("keeps unanswered mock conversion receipts while removing the catalog solutio
   const archivedSource = { sourceId: source, version: 0, sha256, bytes: body.length };
   const archivePath = `objects/${source}/v0.bin`;
   try {
-    await sql.begin(async outer => {
+    await sql.begin("isolation level repeatable read", async outer => {
       await outer`INSERT INTO users(id,email,display_name,password_hash) VALUES(${u},${u + "@backup.test"},'fixture','test')`;
       await outer`INSERT INTO workspaces(id,owner_user_id) VALUES(${w},${u})`;
       let backup: OpeningBackup | undefined;
