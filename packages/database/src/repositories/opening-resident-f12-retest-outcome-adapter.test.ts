@@ -13,7 +13,7 @@ function fixture(options:{missing?:boolean;status?:string;protocol?:unknown;reco
   if(q.text.startsWith('SELECT o.submitted_at,a.started_at')){
    if(options.errorAt==='record')throw failure;return options.record===null?[]:[{submitted_at:'2026-01-02T00:10:00.000Z',started_at:'2026-01-02T00:00:00.000Z',baseline_at:'2026-01-01T00:00:00.000Z',baseline_current:true,...options.record}];
   }
-  if(q.text.startsWith('SELECT EXISTS(SELECT 1 FROM opening_help_exposures')){
+  if(q.text.includes('FROM opening_help_exposures h')){
    if(options.errorAt==='interval')throw failure;return options.interval===null?[]:[{helped:false,practiced:false,...options.interval}];
   }
   return unexpected(q);

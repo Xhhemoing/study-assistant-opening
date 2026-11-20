@@ -217,7 +217,7 @@ export function createOpeningTeachingExamplesRepository(sql: Sql) {
           WHERE id=${String(current.row.id)} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
         await tx`UPDATE opening_teaching_units SET current_revision_number=${revision},updated_at=now()
           WHERE id=${String(current.row.teaching_unit_id)} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
-        const changed = await tx`UPDATE opening_teaching_activities SET content_version=${version},updated_at=now()
+        const changed = await tx`UPDATE opening_teaching_activities SET content_version=${version}
           WHERE id=${payload.request.target.activityId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND content_version=${payload.request.target.contentVersion} RETURNING id`;
         if (!changed.length) throw conflict("例题内容版本冲突。");
         // No prompt exposure is fabricated. The appended example is already revealed teaching, not an issued assessment.

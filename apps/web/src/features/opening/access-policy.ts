@@ -2,6 +2,14 @@
 
 export const OPENING_TEST_FIXTURE_ORIGIN = "http://opening-fixture.test";
 
+export function allowsPublicTryChallenge(env: NodeJS.ProcessEnv = process.env): boolean {
+  return !["0", "false", "no"].includes(env.OPENING_PUBLIC_TRY?.trim().toLowerCase() ?? "");
+}
+
+export function publicTryEntry(env: NodeJS.ProcessEnv = process.env): "/register" | "/login" {
+  return allowRegistration({ openingRelease: isOpeningRelease(env) }) ? "/register" : "/login";
+}
+
 export function allowRegistration(input: {
   openingRelease: boolean;
 }): boolean {

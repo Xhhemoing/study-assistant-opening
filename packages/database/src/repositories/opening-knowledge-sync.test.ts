@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import type { Sql } from "postgres";
-import { createOpeningKnowledgeRepository } from "./opening-knowledge";
+import { createOpeningKnowledgeRepository, knowledgeChunkDigests } from "./opening-knowledge";
 
 const W = "00000000-0000-4000-8000-000000000001";
 const U = "00000000-0000-4000-8000-000000000002";
@@ -36,6 +36,7 @@ type KnowledgeRow = {
     version: number;
     nodes: Array<{ id: string; courseId: string; label: string; kind: "concept"; evidenceChunkIds: string[]; status: "supported" | "suggested" | "needs_check" }>;
     edges: Array<{ from: string; to: string; kind: "prerequisite"; evidenceChunkIds: string[]; status: "supported" | "suggested" | "needs_check" }>;
+    coveredSourceVersions?: Record<string, number>;
   };
   source_versions: Record<string, number>;
 };
@@ -92,6 +93,9 @@ function makeFakeSql(init?: {
       if (!Array.isArray(parts) || !("raw" in parts)) {
         return parts;
       }
+      const fragment = parts.join("?").trim();
+      if (fragment === "AND s.id IN ?") return values[0];
+      if (["", "FOR SHARE OF c", "FOR SHARE OF s, v, m"].includes(fragment)) return null;
       return (async () => {
       const q = parts.join("?").replace(/\s+/g, " ").trim();
       txRecord?.statements.push(q);
@@ -269,12 +273,37 @@ function makeFakeSql(init?: {
         return [stored];
       }
 
+      if (q.startsWith("SELECT c.id,c.source_id,c.source_version FROM opening_source_chunks c")) {
+        const requested = values[0] as string[];
+        return [...view.chunks.values()].filter(chunk => requested.includes(chunk.sourceId) && chunk.text.trim())
+          .map(chunk => ({ id: chunk.id, source_id: chunk.sourceId, source_version: chunk.sourceVersion }));
+      }
+
+      if (q.startsWith("WITH live_readable_chunks AS")) {
+        const eligibleIds = values[1] as string[];
+        const evidenceIds = values[6] as string[];
+        return [{ drift: evidenceIds.some(id => {
+          const chunk = view.chunks.get(id);
+          return !chunk || !eligibleIds.includes(chunk.sourceId) || !chunk.text.trim()
+            || view.sources.get(chunk.sourceId)?.version !== chunk.sourceVersion;
+        }) }];
+      }
+
+      if (q.startsWith("SELECT m.asset_id FROM course_asset_memberships m JOIN opening_sources s")) {
+        const ids = values[2] as string[];
+        return [...view.sources.values()].filter(source => ids.includes(source.id)
+          && source.attached !== false && !source.excluded && (source.purpose === null || source.purpose === "teaching"))
+          .map(source => ({ asset_id: source.id }));
+      }
+
       if (q.startsWith("SELECT s.id, s.version FROM opening_sources s") || q.startsWith("SELECT s.id,s.version FROM opening_sources s")) {
         init?.onQuery?.(q);
+        const requested = values[2];
         return [...view.sources.values()]
           .filter(
             (s) =>
-              s.attached !== false
+              (!Array.isArray(requested) || requested.includes(s.id))
+              && s.attached !== false
               && (s.purpose === null || s.purpose === "teaching")
               && s.uploadState === "uploaded"
               && s.parseState === "ready"
@@ -394,6 +423,13 @@ function makeFakeSql(init?: {
           .filter((j) => j.kind === "build-course-knowledge" && j.payload.courseId === courseId && j.state === "succeeded")
           .sort((a, b) => b.updated_at.getTime() - a.updated_at.getTime() || b.created_at.getTime() - a.created_at.getTime() || b.id.localeCompare(a.id));
         return matching.length ? [{ id: matching[0]!.id, result: matching[0]!.result }] : [];
+      }
+
+      if (q.startsWith("SELECT result FROM opening_jobs")) {
+        const [, , courseId, version] = values;
+        return view.jobs
+          .filter(j => j.state === "succeeded" && j.payload.courseId === courseId && j.result?.version === version)
+          .sort((a, b) => b.updated_at.getTime() - a.updated_at.getTime());
       }
 
       if (q.startsWith("SELECT id FROM opening_jobs") && q.includes("state = 'queued'")) {
@@ -552,7 +588,7 @@ describe("opening knowledge sync and coalescing", () => {
     });
   });
 
-  it("reads lastBuiltVersion and coveredSourceVersions from latest succeeded job instead of confirmNode version", async () => {
+  it("reports the last job version but ignores its coverage for a newer legacy snapshot", async () => {
     const jobId = randomUUID();
     const db = makeFakeSql({
       sources: [
@@ -577,12 +613,37 @@ describe("opening knowledge sync and coalescing", () => {
     const repo = createOpeningKnowledgeRepository(db.sql);
     const sync = await repo.readSyncStatus(scope, C);
     expect(sync).toEqual({
-      status: "up_to_date",
+      status: "needs_rebuild",
       activeJobId: null,
       lastBuiltVersion: 2,
-      coveredSourceVersions: { [S1]: 1, [S2]: 2 },
+      coveredSourceVersions: { [S1]: 1 },
       eligibleSourceVersions: { [S1]: 1, [S2]: 2 },
       parsingSourceCount: 0,
+    });
+  });
+
+  it("commits coverage for readable zero-node material before any job receipt and carries it through a manual replacement", async () => {
+    const sources = [
+      { id: S1, version: 2, uploadState: "uploaded", parseState: "ready", available: true, excluded: false, hasChunk: true, purpose: "teaching" },
+      { id: S2, version: 1, uploadState: "uploaded", parseState: "ready", available: true, excluded: false, hasChunk: true, hasTextChunk: false, purpose: "teaching" },
+    ];
+    const chunks = [{ id: CH1, sourceId: S1, sourceVersion: 2, text: "Cover page" }];
+    const db = makeFakeSql({ sources, chunks });
+    const repo = createOpeningKnowledgeRepository(db.sql);
+    const input = { expectedVersion: 0, snapshot: { courseId: C, version: 0, nodes: [], edges: [] }, sourceVersions: {} };
+    await expect(repo.replace(scope, C, { ...input, extractedSourceVersions: { [S1]: 2, [S2]: 1 } }))
+      .rejects.toMatchObject({ code: "CONFLICT" });
+    expect(db.knowledge.has(C)).toBe(false);
+    const saved = await repo.replace(scope, C, {
+      ...input, extractedSourceVersions: { [S1]: 2 }, extractedChunkDigests: knowledgeChunkDigests(chunks),
+    });
+    expect(db.knowledge.get(C)?.snapshot.coveredSourceVersions).toEqual({ [S1]: 2 });
+    expect(db.jobs).toEqual([]);
+    await expect(repo.readSyncStatus(scope, C, { includeDetails: true })).resolves.toMatchObject({
+      status: "up_to_date", lastBuiltVersion: null, coveredSourceVersions: { [S1]: 2 }, unreadableSourceCount: 1,
+    });
+    await expect(repo.replace(scope, C, { ...input, expectedVersion: saved.version })).resolves.toMatchObject({
+      snapshot: { coveredSourceVersions: { [S1]: 2 } },
     });
   });
 
@@ -834,6 +895,7 @@ describe("opening knowledge sync and coalescing", () => {
 
   it("D3: treats C=E={S1,S2} with G={S1} and needs_check nodes as up_to_date without enqueueing on repeated reconciles", async () => {
     const db = makeFakeSql({
+      chunks: [{ id: CH1, sourceId: S1, sourceVersion: 1, text: "极限定义正文" }],
       sources: [
         { id: S1, version: 1, uploadState: "uploaded", parseState: "ready", available: true, excluded: false, hasChunk: true, purpose: "teaching" },
         { id: S2, version: 1, uploadState: "uploaded", parseState: "ready", available: true, excluded: false, hasChunk: true, purpose: "teaching" },
@@ -1044,6 +1106,7 @@ describe("opening knowledge sync and coalescing", () => {
     const replaced = await repo.replace(scope, C, {
       expectedVersion: 1,
       extractedSourceVersions: { [S1]: 2 },
+      extractedChunkDigests: knowledgeChunkDigests([{ id: CH_V2, sourceId: S1 }]),
       snapshot: {
         courseId: C,
         version: 2,
@@ -1178,6 +1241,7 @@ describe("opening knowledge sync and coalescing", () => {
     const legitimate = await repo.replace(scope, C, {
       expectedVersion: 2,
       extractedSourceVersions: { [S1]: 2 },
+      extractedChunkDigests: knowledgeChunkDigests([{ id: CH_V2, sourceId: S1 }]),
       snapshot: { courseId: C, version: 3, nodes: [], edges: [] },
       sourceVersions: {},
     });

@@ -175,6 +175,20 @@ describe("opening-day-adjustment repository (kernel-v2 Phase 2)", () => {
         addedBlocks: preview.targetAddedBlocks,
       },
     };
+    const afterMidnightRepo = createOpeningDayAdjustmentRepository(f.sql, { clock: () => FRI_0030 });
+    await expect(afterMidnightRepo.confirm(f.scope, confirmInput)).rejects.toMatchObject({
+      code: "CONFLICT", reason: "stale_version", message: expect.stringContaining("已跨过午夜"),
+    });
+    const expiredBlockRepo = createOpeningDayAdjustmentRepository(f.sql, {
+      clock: () => new Date(preview.removedBlocks[0]!.end),
+    });
+    await expect(expiredBlockRepo.confirm(f.scope, confirmInput)).rejects.toMatchObject({
+      code: "CONFLICT", reason: "slot_expired",
+    });
+    await expect(expiredBlockRepo.preview(f.scope, { date: THU, moveTaskIds: [math.id] })).resolves.toMatchObject({
+      canConfirm: false,
+      removedBlocks: [],
+    });
     const receipt = await repo.confirm(f.scope, confirmInput);
     expect(receipt).toMatchObject({
       sourceDate: THU,
@@ -199,7 +213,6 @@ describe("opening-day-adjustment repository (kernel-v2 Phase 2)", () => {
     expect((states[1]!.accepted_blocks as Array<{ taskId: string }>).map((b) => b.taskId)).toEqual([math.id]);
 
     // After midnight, same-key replay succeeds for BOTH Tx1 and Tx2, and different intent returns selection_mismatch.
-    const afterMidnightRepo = createOpeningDayAdjustmentRepository(f.sql, { clock: () => FRI_0030 });
     const replayedExc = await afterMidnightRepo.declareToday(f.scope, {
       clientKey: declareKey,
       localDate: THU,
