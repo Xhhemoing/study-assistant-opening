@@ -146,6 +146,15 @@ describe("retention ordering", () => {
     ]);
   });
 
+  it("prioritizes review when its half-life is below one millisecond", () => {
+    const observedAt = "2026-09-14T09:59:59.999Z";
+    const check = summary("a-check", "needs_check", observedAt);
+    const review = summary("z-review", "needs_review", observedAt);
+    expect(select([check, review], 1, 1 / 86_400_000)).toMatchObject([
+      { skillLabel: "z-review", dueAt: now },
+    ]);
+  });
+
   it("clamps missing and future observations to zero elapsed time and breaks ties by skill label", () => {
     const future = summary("future", "needs_review", "2026-09-15T10:00:00.000Z");
     const missing = summary("absent", "needs_check", null);

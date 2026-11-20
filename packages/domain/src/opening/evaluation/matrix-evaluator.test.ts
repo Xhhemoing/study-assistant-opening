@@ -61,6 +61,16 @@ it("keeps equivalent integer exponents valid in dimensions", () => {
   expect(evaluateMatrixAnswer(createMatrixExerciseSpec("dimensions"), "[200e-2,0.3e1]").decision).toBe("correct");
 });
 
+it.each([
+  ["[1e999,", "ambiguous_input"],
+  ["[1e999]", "unsupported_number"],
+  ["[[1.99999999999999999999]]", "unsupported_number"],
+])("classifies JSON syntax before numeric precision for %s", (answer, reason) => {
+  expect(evaluateMatrixAnswer(createMatrixExerciseSpec("scalar"), answer)).toMatchObject({
+    decision: "abstain", reasonCodes: [reason],
+  });
+});
+
 it("does not lex numeric text inside quoted or escaped JSON tokens", () => {
   expect(evaluateMatrixAnswer(createMatrixExerciseSpec("scalar"), String.raw`[["\u0032/4","1/-1"],["-3/-2",0]]`).decision).toBe("correct");
   expect(evaluateMatrixAnswer(createMatrixExerciseSpec("dimensions"), String.raw`["\"1e-400",3]`).reasonCodes).toEqual(["ambiguous_input"]);

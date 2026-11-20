@@ -399,6 +399,64 @@ describe("planDay", () => {
 });
 
 describe("bounded feasibility repair", () => {
+  it.each([
+    ["in deadline order", undefined],
+    ["after the longer task was already placed", [id(2), id(1), id(3), id(4)]],
+  ] as const)("preserves today's three deadlines amid a 40-minute carry-over %s", (_, preferredOrder) => {
+    const result = planDay([
+      task(1, { minutes: 10, notBefore: at("09:30"), dueAt: at("09:40") }),
+      task(2, { minutes: 30, dueAt: at("10:30") }),
+      task(3, { minutes: 20, notBefore: at("09:20"), dueAt: at("10:40") }),
+      task(4, { minutes: 40, dueAt: "2026-09-15T10:30:00.000Z" }),
+    ], [slot("09:00", "09:40"), slot("10:00", "10:30")], { preferredOrder });
+    expect(result.blocks.map(({ taskId, start, end }) => [taskId, start, end])).toEqual([
+      [id(2), at("09:00"), at("09:30")],
+      [id(1), at("09:30"), at("09:40")],
+      [id(3), at("10:00"), at("10:20")],
+    ]);
+    expect(result.unscheduledTaskIds).toEqual([id(4)]);
+  });
+
+  it("releases a reservation as soon as a placement makes it unusable", () => {
+    const result = planDay([
+      task(1, { minutes: 10, notBefore: at("09:30"), dueAt: at("09:40") }),
+      task(2, { minutes: 30, dueAt: at("10:30") }),
+      task(3, { minutes: 40, dueAt: "2026-09-15T10:30:00.000Z" }),
+    ], [slot("09:00", "09:40"), slot("10:00", "10:30")]);
+    expect(result.blocks.map(({ taskId, start }) => [taskId, start])).toEqual([
+      [id(2), at("09:00")],
+      [id(1), at("09:30")],
+    ]);
+    expect(result.unscheduledTaskIds).toEqual([id(3)]);
+  });
+
+  it("places a preferred carry-over in the earliest shortest feasible gap", () => {
+    const result = planDay([
+      task(1, { minutes: 30 }), task(2, { minutes: 60 }),
+    ], [
+      slot("09:00", "10:00"), slot("11:00", "11:35"),
+      slot("12:00", "12:30"), slot("13:00", "13:30"),
+    ], { preferredOrder: [id(1), id(2)] });
+    expect(result.blocks.map(({ taskId, start, end }) => [taskId, start, end])).toEqual([
+      [id(2), at("09:00"), at("10:00")],
+      [id(1), at("12:00"), at("12:30")],
+    ]);
+    expect(result.unscheduled).toEqual([]);
+  });
+
+  it("protects a sole feasible gap before applying the carry-over best fit", () => {
+    const result = planDay([
+      task(1, { minutes: 30 }),
+      task(2, { minutes: 30, notBefore: at("11:00"), dueAt: "2026-09-15T10:30:00.000Z" }),
+    ], [slot("09:00", "10:00"), slot("11:00", "11:30")], {
+      preferredOrder: [id(1), id(2)],
+    });
+    expect(result.blocks.map(({ taskId, start }) => [taskId, start])).toEqual([
+      [id(1), at("09:00")], [id(2), at("11:00")],
+    ]);
+    expect(result.unscheduled).toEqual([]);
+  });
+
   it("saves the only long pre-deadline slot for the task that needs it", () => {
     const tasks = [
       task(1, { minutes: 20, dueAt: at("10:30") }),

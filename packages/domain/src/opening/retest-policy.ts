@@ -56,20 +56,18 @@ export function buildRetestCandidates(
   const delayDays = input.delayDays ?? DEFAULT_RETEST_DELAY_DAYS;
   const limit = input.limit ?? DEFAULT_RETEST_BATCH_LIMIT;
   const nowMs = Date.parse(input.now);
-  const baseHalfLife = delayDays > 0 ? delayDays : DEFAULT_RETEST_DELAY_DAYS;
   const eligible = input.summaries
     .filter((summary) => summary.status === "needs_check" || summary.status === "needs_review")
     .map((summary) => {
       const occurredAt = summary.lastObservedAt ?? input.now;
       const ageMs = nowMs - Date.parse(occurredAt);
-      const elapsedDays = Number.isFinite(ageMs) ? Math.max(0, ageMs) / DAY_MS : 0;
-      // Use half the policy delay for known review gaps and the full delay for
-      // skills awaiting a check. Compare -log2(retention) to avoid underflow.
-      const stageHalfLife = summary.status === "needs_review" ? baseHalfLife / 2 : baseHalfLife;
-      const halfLife = Math.max(1 / DAY_MS, stageHalfLife);
-      return { summary, occurredAt, forgettingRisk: elapsedDays / halfLife };
+      const elapsedMs = Number.isFinite(ageMs) ? Math.max(0, ageMs) : 0;
+      // Review gaps have half the base half-life. The common base cancels
+      // when comparing elapsed half-lives, even for sub-millisecond delays.
+      const weightedElapsedMs = elapsedMs * (summary.status === "needs_review" ? 2 : 1);
+      return { summary, occurredAt, weightedElapsedMs };
     })
-    .sort((a, b) => b.forgettingRisk - a.forgettingRisk
+    .sort((a, b) => b.weightedElapsedMs - a.weightedElapsedMs
       || compareText(a.summary.skillLabel, b.summary.skillLabel)
       || compareText(a.occurredAt, b.occurredAt));
 

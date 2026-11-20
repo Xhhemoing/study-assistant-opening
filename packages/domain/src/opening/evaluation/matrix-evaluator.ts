@@ -96,9 +96,9 @@ export function evaluateMatrixAnswer(rawSpec: unknown, answer: string): MatrixEv
   const spec = parseCanonicalMatrixExercise(rawSpec);
   if (!spec) return result("abstain", "missing_or_unsupported_spec");
   if (answer.length > 2000) return result("abstain", "resource_limit");
-  if (!preservesNumericLiterals(answer)) return result("abstain", "unsupported_number");
   let decoded: unknown;
   try { decoded = JSON.parse(answer); } catch { return result("abstain", "ambiguous_input"); }
+  if (!preservesNumericLiterals(answer)) return result("abstain", "unsupported_number");
   if (spec.exerciseKey === "dimensions") {
     if (!Array.isArray(decoded) || decoded.length !== 2 || !decoded.every(Number.isSafeInteger)) return result("abstain", "ambiguous_input");
     return result(decoded[0] === spec.matrixA.length && decoded[1] === spec.matrixA[0]!.length ? "correct" : "incorrect", "dimensions_compared");

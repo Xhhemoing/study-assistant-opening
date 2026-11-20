@@ -1,6 +1,6 @@
 import type { CourseGoal, PlanBlockReason, PlannedBlock, SuggestedTask, TaskItem } from "@aistudy/contracts";
 import { localDateKeyInZone } from "../daily-draft";
-import { taskNotBeforeAt } from "../day-planner";
+import { carryOverTaskIds, taskNotBeforeAt } from "../day-planner";
 import { resolveLocalDayBounds } from "../local-day-bounds";
 import { taskCourseId } from "./types";
 import { goalPlanningPriority, goalPlanningReason, resolveGoalLearningContext } from "./goal-policy";
@@ -140,8 +140,14 @@ export function rankForPlan(input: RankForPlanInput): RankForPlanResult {
     ...ordinary(own),
     ...ordinary(suggested),
   ];
+  const orderedTaskIds = ordered.map((item) => item.id);
+  // The planner receives the order separately from the reasons. Keep the
+  // carry-over hint on that list without changing its array contents.
+  Object.defineProperty(orderedTaskIds, carryOverTaskIds, {
+    value: new Set(carry.map((item) => item.id)),
+  });
   return {
-    orderedTaskIds: ordered.map((item) => item.id),
+    orderedTaskIds,
     reasons: Object.fromEntries(ordered.map((item) => [item.id, item.reason])),
   };
 }
