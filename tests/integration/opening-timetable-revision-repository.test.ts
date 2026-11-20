@@ -23,7 +23,7 @@ it("preserves the revision of a cleared legacy timetable through preference edit
     await prefs.setGlobal(scope, { ...settings, quietMode: true });
     expect(await prefs.getGlobal(scope)).toMatchObject({ settings: { quietMode: true }, invalidStoredSettings: false });
     expect(await plans.timetableSnapshot(scope)).toEqual(cleared);
-    expect(await plans.timetableSnapshot(otherScope)).toEqual({ revision: "empty", sessions: [] });
+    expect(await plans.timetableSnapshot(otherScope)).toEqual({ revision: `empty:${otherScope.workspaceId}`, sessions: [] });
 
     const snapshot = await readOpeningBackupRecords(sql, scope);
     await sql`DELETE FROM workspace_preferences WHERE workspace_id=${scope.workspaceId}`;

@@ -112,7 +112,7 @@ describe("exam sprint lesson confirmation", () => {
     const first = client.send(openLesson);
     expect(client.getSnapshot().overview?.lessonContents).toEqual([]);
     expect(await client.send(openLesson)).toBeNull();
-    expect(fetcher).toHaveBeenCalledTimes(2);
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(2));
     response.resolve(Response.json(lessonOverview(true)));
     expect((await first)?.lessonContents[0]!.lesson.workedExample).toBe(lesson.workedExample);
     await client.send(openLesson);
@@ -152,6 +152,7 @@ describe("exam sprint lesson confirmation", () => {
     const fetcher = vi.fn<Fetcher>().mockReturnValueOnce(response.promise).mockResolvedValueOnce(Response.json(lessonOverview()));
     const client = createExamSprintClient({ fetcher, keyFactory: () => key });
     const pending = client.send(openLesson);
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledOnce());
     client.dispose();
     await client.load();
     response.resolve(Response.json(lessonOverview(true)));
@@ -170,7 +171,7 @@ describe("exam sprint client recovery", () => {
     const first = client.send(intent);
     const second = client.send(intent);
     expect(client.getSnapshot().busy).toBe(true);
-    expect(fetcher).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(1));
     expect(keyFactory).toHaveBeenCalledTimes(1);
     response.resolve(Response.json(overview(1)));
     await Promise.all([first, second]);
@@ -285,6 +286,7 @@ describe("exam sprint client recovery", () => {
   it.each([
     ["invalid JSON", () => new Response("not json")],
     ["incomplete data", () => Response.json({ state: {} })],
+    ["unconfirmed acceptance", () => Response.json(overview(), { status: 202 })],
     ["malformed nested data", () => Response.json({ ...overview(), pack: { ...overview().pack, lessons: [{ title: "missing content" }] } })],
     ["server error", () => new Response("upstream unavailable", { status: 502 })],
   ])("keeps the original command after %s instead of treating it as a successful save", async (_label, response) => {
@@ -335,6 +337,7 @@ describe("exam sprint read lifecycle", () => {
       .mockResolvedValueOnce(Response.json(overview(1)));
     const client = createExamSprintClient({ fetcher, keyFactory: () => key });
     const first = client.send(intent);
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledOnce());
     client.dispose();
     await client.load();
     older.resolve(Response.json(overview(0)));
@@ -368,6 +371,58 @@ const reviewInput = { sourceItemId: "source-item-1", workSourceId: "22222222-222
 const review = { id: "44444444-4444-4444-8444-444444444444", sourceItemId: reviewInput.sourceItemId, workSourceId: reviewInput.workSourceId, referenceSourceId: reviewInput.referenceSourceId, workSourceVersion: reviewInput.workSourceVersion, referenceSourceVersion: reviewInput.referenceSourceVersion, answerText: reviewInput.answerText, createdAt: "2026-10-17T12:00:00Z", status: "pending", proposal: null, modelLabel: null };
 
 describe("exam integration shares mutation recovery", () => {
+  it.each(["refresh", "storage unavailable"] as const)("deduplicates a committed photo review after %s within its workspace and course", async mode => {
+    const storage = new Map<string, string>();
+    const sessionStorage = {
+      getItem: (name: string) => storage.get(name) ?? null,
+      setItem(name: string, value: string) {
+        if (mode === "storage unavailable") throw new Error("quota exceeded");
+        storage.set(name, value);
+      },
+      removeItem: (name: string) => storage.delete(name),
+    };
+    vi.stubGlobal("window", { sessionStorage });
+    try {
+      const charged = new Set<string>();
+      const fetcher = vi.fn<Fetcher>(async (_url, init) => {
+        const { clientKey } = JSON.parse(String(init?.body));
+        if (!charged.has(clientKey)) {
+          charged.add(clientKey);
+          throw new TypeError("response lost after model review committed");
+        }
+        return Response.json(review);
+      });
+      const command = { action: "review", input: { ...reviewInput, answerText: "x".repeat(20000) } } as const;
+      const options = { workspaceId: "workspace-A", courseId: mode, fetcher };
+      const first = createExamSprintClient({ ...options, keyFactory: () => key });
+      await first.sendIntegration(command);
+      expect(first.getSnapshot().uncertain).toBe(true);
+      first.dispose();
+
+      if (mode === "refresh") {
+        expect(storage.size).toBe(1);
+        expect(JSON.parse([...storage.values()][0]!)).toEqual([[expect.stringMatching(/^[a-f0-9]{64}$/), key]]);
+      }
+      const other = createExamSprintClient({ ...options, workspaceId: "workspace-B", keyFactory: () => "other-workspace-key",
+        fetcher: async (_url, init) => {
+          expect(JSON.parse(String(init?.body)).clientKey).toBe("other-workspace-key");
+          return Response.json(review);
+        } });
+      await other.sendIntegration(command);
+      expect(other.getSnapshot().review?.id).toBe(review.id);
+
+      // A refresh discards the module cache. A remount with blocked storage keeps it.
+      if (mode === "refresh") vi.resetModules();
+      const create = mode === "refresh" ? (await import("./client")).createExamSprintClient : createExamSprintClient;
+      const restored = create({ ...options, keyFactory: () => "unexpected-new-key" });
+      await restored.sendIntegration(command);
+      expect(fetcher.mock.calls.map(([, init]) => JSON.parse(String(init?.body)).clientKey)).toEqual([key, key]);
+      expect(charged.size).toBe(1);
+      expect(restored.getSnapshot().review?.id).toBe(review.id);
+      expect(storage.size).toBe(0);
+    } finally { vi.unstubAllGlobals(); }
+  });
+
   it("blocks all write types after a lost binding response and replays the same binding key", async () => {
     const fetcher = vi.fn<Fetcher>().mockRejectedValueOnce(new Error("lost binding response"))
       .mockResolvedValueOnce(Response.json(integration)).mockResolvedValueOnce(Response.json(integration)).mockResolvedValueOnce(Response.json(integration));

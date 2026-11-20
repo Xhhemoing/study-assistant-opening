@@ -157,6 +157,17 @@ export function mapOpeningPlanDraft(row: Record<string, unknown>): PlanDraft {
   return draft;
 }
 
+function toWeekSession(row: Record<string, unknown>): WeekSession {
+  return {
+    courseName: row.course_name as string,
+    courseId: (row.course_id as string | null) ?? null,
+    weekday: Number(row.weekday),
+    weeks: (row.weeks as number[]) ?? [],
+    startPeriod: Number(row.start_period),
+    endPeriod: Number(row.end_period),
+  };
+}
+
 async function readTimetableSnapshot(sql: Sql, scope: OpeningScope) {
   const rows = await sql`
     SELECT s.*, p.intervention_settings->>'timetableRevision' AS revision FROM workspaces w
@@ -164,19 +175,9 @@ async function readTimetableSnapshot(sql: Sql, scope: OpeningScope) {
     LEFT JOIN opening_timetable_sessions s ON s.workspace_id = w.id AND s.owner_user_id = w.owner_user_id
     WHERE w.id = ${scope.workspaceId} AND w.owner_user_id = ${scope.ownerUserId}
     ORDER BY s.weekday, s.start_period, s.id`;
-  const sessions = rows.filter(row => row.id != null).map((row) => {
-    const r = row as Record<string, unknown>;
-    return {
-      courseName: r.course_name as string,
-      courseId: (r.course_id as string | null) ?? null,
-      weekday: Number(r.weekday),
-      weeks: (r.weeks as number[]) ?? [],
-      startPeriod: Number(r.start_period),
-      endPeriod: Number(r.end_period),
-    };
-  });
+  const sessions = rows.filter(row => row.id != null).map(toWeekSession);
   // Use the first ordered row for legacy timetables until their first replacement.
-  return { sessions, revision: (rows[0]?.revision as string | null) ?? (rows[0]?.id as string | null) ?? "empty" };
+  return { sessions, revision: (rows[0]?.revision as string | null) ?? (rows[0]?.id as string | null) ?? `empty:${scope.workspaceId}` };
 }
 
 export function createOpeningPlansRepository(sql: Sql, options: { now?: () => Date } = {}) {
@@ -367,7 +368,11 @@ export function createOpeningPlansRepository(sql: Sql, options: { now?: () => Da
     },
 
     async listTimetable(scope: OpeningScope): Promise<WeekSession[]> {
-      return (await readTimetableSnapshot(sql, scope)).sessions;
+      const rows = await sql`
+        SELECT course_name, course_id, weekday, weeks, start_period, end_period FROM opening_timetable_sessions
+        WHERE workspace_id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}
+        ORDER BY weekday, start_period, id`;
+      return rows.map(toWeekSession);
     },
 
     async replaceTimetable(scope: OpeningScope, sessions: WeekSession[], expectedRevision?: string): Promise<WeekSession[]> {

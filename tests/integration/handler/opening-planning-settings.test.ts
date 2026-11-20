@@ -221,14 +221,24 @@ describe("opening planning-settings handlers (DL9)", () => {
     const sessions = [{ courseName: "物理", weekday: 1, weeks: [1], startPeriod: 1, endPeriod: 2 }];
     const put = (rows: typeof sessions, expectedRevision: string) =>
       putTimetable(req(path, "PUT", { sessions: rows, expectedRevision }, freshCookie));
-    expect(await snapshot()).toEqual({ sessions: [], revision: "empty" });
-    expect((await put(sessions, "empty")).status).toBe(200);
+    const initial = await snapshot();
+    expect(initial).toEqual({ sessions: [], revision: expect.stringMatching(/^empty:[\da-f-]{36}$/i) });
+    const other = await registerUser("other-untouched-timetable");
+    const otherSnapshot = async () => (await getTimetable(req(path, "GET", undefined, other))).json();
+    const untouched = await otherSnapshot();
+    expect(untouched.sessions).toEqual([]);
+    expect(untouched.revision).not.toBe(initial.revision);
+    const foreign = await putTimetable(req(path, "PUT", { sessions, expectedRevision: initial.revision }, other));
+    expect(foreign.status).toBe(409);
+    expect((await foreign.json()).error.code).toBe("CONFLICT");
+    expect(await otherSnapshot()).toEqual(untouched);
+    expect((await put(sessions, initial.revision)).status).toBe(200);
     const imported = await snapshot();
     expect((await put([], imported.revision)).status).toBe(200);
     const cleared = await snapshot();
     expect(cleared).toEqual({ sessions: [], revision: expect.stringMatching(/^[\da-f-]{36}$/i) });
     expect(cleared.revision).not.toBe(imported.revision);
-    const stale = await put(sessions, "empty");
+    const stale = await put(sessions, initial.revision);
     expect(stale.status).toBe(409);
     expect((await stale.json()).error.code).toBe("CONFLICT");
     expect(await snapshot()).toEqual(cleared);

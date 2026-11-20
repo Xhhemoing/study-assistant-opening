@@ -1,5 +1,6 @@
 import { examSprintCommandSchema, examBindInputSchema, examSourceMappingInputSchema, examPaperInputSchema, examWorkReviewInputSchema, type ExamSprintCommand, type ExamSprintOverview, type ExamIntegrationOverview, type ExamForecastOverview, type ExamBindInput, type ExamSourceMappingInput, type ExamPaperInput, type ExamWorkReview, type ExamWorkReviewInput } from "@aistudy/contracts";
 import { overviewSchema, integrationSchema, forecastSchema, reviewSchema } from "./client-schemas";
+import { sprintRecoveryStore } from "./recovery-store";
 import { isCurrentSprintLessonRequest } from "./lesson-navigation";
 import { userFacingMessage } from "../../../lib/user-facing-error";
 
@@ -30,7 +31,7 @@ const uncertainMessage = "上一操作的保存结果尚未确认。请恢复该
 const describeError = (error: unknown) => userFacingMessage(error, "连接失败，请稍后重试。");
 
 /** All sprint and integration mutations share one lock and one replay envelope. */
-export function createExamSprintClient(options: { fetcher?: typeof fetch; keyFactory?: () => string } = {}) {
+export function createExamSprintClient(options: { workspaceId?: string; courseId?: string; fetcher?: typeof fetch; keyFactory?: () => string } = {}) {
   const fetcher = options.fetcher ?? fetch;
   const keyFactory = options.keyFactory ?? createExamSprintClientKey;
   let snapshot: ExamSprintSnapshot = { overview: null, integration: null, forecast: null, review: null, busy: false, error: null, uncertain: false };
@@ -38,12 +39,8 @@ export function createExamSprintClient(options: { fetcher?: typeof fetch; keyFac
   let generation = 0;
   let active: { generation: number; controller: AbortController; writing: boolean } | null = null;
   let pending: Pending | null = null;
-  // A conflict can hide a committed write. Release the UI lock, retaining the exact input's key.
-  const unresolved = new Map<string, Pending>();
-  function identity(command: Pending) {
-    const { clientKey: _key, ...intent } = command.body;
-    return JSON.stringify([command.path, command.method, intent]);
-  }
+  let fingerprint = "";
+  let recovery: ReturnType<typeof sprintRecoveryStore> | undefined;
   function publish(update: Partial<ExamSprintSnapshot>) { snapshot = { ...snapshot, ...update }; listeners.forEach(listener => listener()); }
   function begin(writing: boolean) {
     active?.controller.abort();
@@ -61,7 +58,7 @@ export function createExamSprintClient(options: { fetcher?: typeof fetch; keyFac
       if (!response.ok) throw new HttpError(response.status, errorMessage(null, response.status));
       throw new Error("服务器返回了无法识别的数据，请重新读取学习进度。");
     }
-    if (!response.ok) throw new HttpError(response.status, errorMessage(body, response.status));
+    if (!response.ok || (command && response.status !== 200)) throw new HttpError(response.status, errorMessage(body, response.status));
     if (target === "overview") { const parsed = overviewSchema.safeParse(body); if (parsed.success) return { overview: parsed.data }; }
     if (target === "integration") { const parsed = integrationSchema.safeParse(body); if (parsed.success) return { integration: parsed.data }; }
     if (target === "forecast") { const parsed = forecastSchema.safeParse(body); if (parsed.success) return { forecast: parsed.data }; }
@@ -75,8 +72,7 @@ export function createExamSprintClient(options: { fetcher?: typeof fetch; keyFac
     catch (error) { if (isCurrent(operation)) publish({ error: describeError(error) }); }
     finally { finish(operation); }
   }
-  async function write(command: Pending, recovering: boolean) {
-    const operation = begin(true);
+  async function write(command: Pending, recovering: boolean, operation = begin(true)) {
     const readState = () => request(operation.controller.signal, command.readTarget ?? command.target, command.readPath ?? command.path);
     let writeAttempted = false;
     try {
@@ -85,7 +81,6 @@ export function createExamSprintClient(options: { fetcher?: typeof fetch; keyFac
         if (!isCurrent(operation)) return;
         publish(result);
         if (command.lessonRequest && result.overview && !isCurrentSprintLessonRequest(result.overview, command.lessonRequest)) {
-          unresolved.set(identity(command), command);
           pending = null;
           publish({ uncertain: false, error: "题包内容刚更新过，请重新选择串讲。" });
           return result;
@@ -94,7 +89,7 @@ export function createExamSprintClient(options: { fetcher?: typeof fetch; keyFac
       writeAttempted = true;
       const result = await request(operation.controller.signal, command.target, command.path, command);
       if (!isCurrent(operation)) return;
-      unresolved.delete(identity(command));
+      recovery?.confirm(fingerprint, command.body.clientKey);
       pending = null; publish({ ...result, error: null, uncertain: false });
       return result;
     } catch (error) {
@@ -105,7 +100,6 @@ export function createExamSprintClient(options: { fetcher?: typeof fetch; keyFac
         return;
       }
 
-      if (recovering || error.status === 404 || error.status === 409) unresolved.set(identity(command), command);
       pending = null;
       const message = describeError(error);
       publish({ error: message, uncertain: false });
@@ -122,12 +116,27 @@ export function createExamSprintClient(options: { fetcher?: typeof fetch; keyFac
   }
   async function enqueue(build: (key: string) => Pending) {
     if (active || pending) return null;
+    const operation = begin(true);
     try {
-      // Zod normalizes input and field order. No new key is allocated for a matching retry.
-      const previous = unresolved.size ? unresolved.get(identity(build("compare-intent"))) : undefined;
-      pending = previous ?? build(keyFactory());
-    } catch { publish({ error: "请检查输入内容，暂未提交。" }); return; }
-    return await write(pending, false);
+      // Fingerprint the normalized wire intent, including the endpoint and method.
+      const command = build("compare-intent");
+      const { clientKey: _key, ...intent } = command.body;
+      const bytes = new TextEncoder().encode(JSON.stringify([command.path, command.method, intent]));
+      const digest = await crypto.subtle.digest("SHA-256", bytes);
+      if (!isCurrent(operation)) return;
+      fingerprint = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
+      recovery ??= sprintRecoveryStore(options.workspaceId, options.courseId);
+      const keySchema = command.target === "review" ? examWorkReviewInputSchema.shape.clientKey : examBindInputSchema.shape.clientKey;
+      command.body.clientKey = keySchema.parse(recovery.get(fingerprint) ?? keyFactory());
+      pending = command;
+      // Persist before dispatch so closing the tab view cannot orphan a committed receipt.
+      recovery.remember(fingerprint, pending.body.clientKey);
+    } catch {
+      if (isCurrent(operation)) publish({ error: "请检查输入内容，暂未提交。" });
+      finish(operation);
+      return;
+    }
+    return await write(pending, false, operation);
   }
   return {
     getSnapshot: () => snapshot,

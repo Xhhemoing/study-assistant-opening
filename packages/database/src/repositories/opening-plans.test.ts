@@ -5,6 +5,21 @@ import { createOpeningPlansRepository } from "./opening-plans";
 const scope = { workspaceId: "workspace", ownerUserId: "owner" };
 const task = { id: "task", title: "Due task", minutes: 25, due_at: null, priority: 1, status: "pending", version: 4 };
 
+it("accepts an untouched timetable revision only in its issuing workspace", async () => {
+  const query = vi.fn(async (parts: TemplateStringsArray, ...values: unknown[]) => {
+    if (parts.join("").includes("FOR UPDATE")) return [{ id: values[0] }];
+    return [];
+  });
+  const sql = Object.assign(query, { json: (value: unknown) => value,
+    begin: (run: (tx: Sql) => unknown) => run(query as unknown as Sql) });
+  const repo = createOpeningPlansRepository(sql as unknown as Sql);
+  const { revision } = await repo.timetableSnapshot(scope);
+  expect(revision).toBe(`empty:${scope.workspaceId}`);
+  await expect(repo.replaceTimetable({ ...scope, workspaceId: "other" }, [], revision)).rejects.toMatchObject({ code: "CONFLICT" });
+  expect(query.mock.calls.some(([parts]) => parts.join("").includes("DELETE"))).toBe(false);
+  await expect(repo.replaceTimetable(scope, [], revision)).resolves.toEqual([]);
+});
+
 describe("opening task response versions", () => {
   it("returns the stored task version from the owner list", async () => {
     const query = vi.fn().mockResolvedValue([task]);
