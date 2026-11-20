@@ -3,7 +3,7 @@ import type { LearningAttempt, LearningObservation } from "@aistudy/contracts";
 import type { createOpeningLearningClient } from "../client/learning-client";
 import { learningObservation } from "../../../../../../packages/domain/src/opening/learning-summary-fixtures";
 import { getSpanProblem } from "@aistudy/domain";
-import { assertPracticeAttempt, emptyPracticeDraft, parsePracticeDraft, patchPracticeDraft, practiceScope, readPracticeDraft, readPracticeRecord, restoredPracticeAssistance, runPracticeRequest, writePracticeDraft } from "./practice-draft";
+import { assertPracticeAttempt, emptyPracticeDraft, parsePracticeDraft, patchPracticeDraft, practiceScope, readPartitionedPracticeDraftCollection, readPracticeDraft, readPracticeRecord, restoredPracticeAssistance, runPracticeRequest, writePracticeDraft } from "./practice-draft";
 
 const courseId = "33333333-3333-4333-8333-333333333333";
 const sessionId = "22222222-2222-4222-8222-222222222222";
@@ -56,6 +56,68 @@ it("keeps the newest document checkpoint when storage writes fail but old reads 
   expect(writePracticeDraft(current, storage)).toBe(false);
   expect(readPracticeDraft(scope, storage)?.fields.answer).toBe("latest unsent answer");
   expect(storage.getItem).not.toHaveBeenCalled();
+});
+
+it("keeps the newer manual selection and moves legacy answers in shelf order on a matrix-first read", () => {
+  const ordinary = practiceScope(courseId, "ordinary");
+  const manual = practiceScope(courseId, "manual");
+  const saved = checkpoint(ordinary);
+  const archived = emptyPracticeDraft(ordinary, { answer: "archived manual answer" });
+  const matrix = emptyPracticeDraft(ordinary, { matrixMode: true, answer: "matrix answer" });
+  const current = emptyPracticeDraft(manual, { answer: "newer manual answer" });
+  const stored = new Map([
+    [`opening-practice:v2:${ordinary}`, JSON.stringify({ version: 2, scope: ordinary, activeId: saved.id, drafts: [archived, matrix, saved] })],
+    [`opening-practice:v2:${manual}`, JSON.stringify({ version: 2, scope: manual, activeId: current.id, drafts: [current] })],
+  ]);
+  const storage = {
+    getItem: (key: string) => stored.get(key) ?? null,
+    setItem: (key: string, value: string) => { stored.set(key, value); },
+    removeItem: (key: string) => { stored.delete(key); },
+  };
+  const scopes = { ordinary, manual };
+  const matrixFallback = emptyPracticeDraft(ordinary, { matrixMode: true });
+  const manualFallback = emptyPracticeDraft(manual);
+
+  expect(readPartitionedPracticeDraftCollection(scopes, matrixFallback, storage)).toMatchObject({ activeId: matrix.id, drafts: [matrix] });
+  expect(readPartitionedPracticeDraftCollection(scopes, manualFallback, storage)).toMatchObject({
+    activeId: current.id, drafts: [current, { ...archived, scope: manual }, { ...saved, scope: manual }],
+  });
+});
+
+it("retries a v1 migration after source cleanup fails without creating a second draft", async () => {
+  const course = crypto.randomUUID();
+  const ordinary = practiceScope(course, "ordinary");
+  const manual = practiceScope(course, "manual");
+  const legacy = { ...emptyPracticeDraft(ordinary, { answer: "original answer" }), id: undefined };
+  const oldKey = `opening-practice:v1:${ordinary}`;
+  const manualKey = `opening-practice:v2:${manual}`;
+  const stored = new Map([[oldKey, JSON.stringify(legacy)]]);
+  let blockCleanup = true;
+  const storage = {
+    getItem: (key: string) => stored.get(key) ?? null,
+    setItem: (key: string, value: string) => { stored.set(key, value); },
+    removeItem: (key: string) => {
+      if (key === oldKey && blockCleanup) throw new Error("cleanup failed");
+      stored.delete(key);
+    },
+  };
+  const scopes = { ordinary, manual };
+  const fallback = emptyPracticeDraft(manual);
+  expect(() => readPartitionedPracticeDraftCollection(scopes, fallback, storage)).toThrow("cleanup failed");
+  const copied = JSON.parse(stored.get(manualKey)!);
+  expect(copied.drafts).toHaveLength(1);
+  expect(copied.drafts[0].fields.answer).toBe("original answer");
+
+  blockCleanup = false;
+  vi.resetModules();
+  const reloaded = await import("./practice-draft-storage");
+  expect(reloaded.readPartitionedPracticeDraftCollection(scopes, fallback, storage)).toEqual(copied);
+  expect([...stored.keys()]).toEqual([manualKey]);
+  stored.delete(manualKey);
+
+  vi.resetModules();
+  const afterDeletion = await import("./practice-draft-storage");
+  expect(afterDeletion.readPartitionedPracticeDraftCollection(scopes, fallback, storage)).toBeNull();
 });
 
 it("joins an existing in-flight request during route remount and retains its identity", async () => {

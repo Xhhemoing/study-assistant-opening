@@ -20,7 +20,7 @@ import {
 } from "./reference-check";
 import { collectSkillLabelOptions, findSkillLabelReuseHint } from "./skill-label-options";
 import { MatrixExerciseForm } from "./matrix-exercise-form";
-import { assertPracticeAttempt, practiceScope, readPracticeDraft, readPracticeRecord, restoredPracticeAssistance, runPracticeRequest, usePracticeDraft, type PracticeContinuity, type PracticeFields, type PracticeStart } from "./practice-draft";
+import { assertPracticeAttempt, practiceScope, readPracticeDraft, readPracticeRecord, restoredPracticeAssistance, runPracticeRequest, usePracticeDraft, type PracticeContinuity, type PracticeDraftScopes, type PracticeFields, type PracticeStart } from "./practice-draft";
 import { userFacingMessage } from "../../../lib/user-facing-error";
 import { useOpeningCapabilities } from "../capabilities/capabilities-provider";
 import { StudySessionShell } from "../study-session/study-session-shell";
@@ -66,19 +66,32 @@ type Props = {
 
 /** A fresh attempt captures server identity/version before any answer or help. */
 export function LearningAttemptForm(props: Props) {
-  const initialFocus = props.initialFocus ?? (props.initialProblem ? { skillLabel: "随手练习", requirementKey: null } : undefined);
-  const mode = props.initialMode === "practice" && !initialFocus && !props.retest ? "manual" : "ordinary";
-  const scope = practiceScope(props.courseId, mode, props.retest, initialFocus, props.initialProblem);
-  const legacyManualScope = mode === "manual" ? practiceScope(props.courseId, "ordinary") : undefined;
-  return <PracticeController key={scope} {...props} initialFocus={initialFocus} scope={scope} legacyManualScope={legacyManualScope} />;
+  return <PracticeEntry key={`${props.courseId}:${props.initialMode ?? ""}`} {...props} />;
 }
 
-function PracticeController(props: Props & { scope: string; legacyManualScope?: string }) {
-  const continuity = usePracticeDraft(props.scope, { skillLabel: props.retest?.skillLabel ?? props.initialFocus?.skillLabel ?? readPracticeSkillPrefill(), stem: props.retest?.prompt ?? props.initialProblem?.stem ?? "", sourceId: props.initialProblem?.sourceId ?? "", matrixMode: props.initialMode === "matrix" && !props.retest }, props.legacyManualScope);
+function PracticeEntry(props: Props) {
+  const { courseId, initialMode, initialProblem, retest } = props;
+  const initialFocus = props.initialFocus ?? (initialProblem ? { skillLabel: "随手练习", requirementKey: null } : undefined);
+  const [showMatrix, setShowMatrix] = useState(initialMode === "matrix");
+  const matrixMode = showMatrix && !retest && !initialFocus;
+  const partition = !retest && !initialProblem;
+  const ordinary = practiceScope(courseId, "ordinary", retest, initialFocus, initialProblem);
+  const manual = partition ? practiceScope(courseId, "manual", null, initialFocus) : undefined;
+  const scopes = useMemo(() => manual ? { ordinary, manual } : undefined, [ordinary, manual]);
+  const scope = !matrixMode && manual ? manual : ordinary;
+  const onShowMatrix = !retest && !initialFocus && initialMode !== "practice" ? () => setShowMatrix(true) : undefined;
+  return <PracticeController key={scope} {...props} initialFocus={initialFocus} scope={scope} scopes={scopes}
+    onShowMatrix={onShowMatrix} onBackToManual={matrixMode ? () => setShowMatrix(false) : undefined} />;
+}
+
+type ModeActions = { onShowMatrix?: () => void; onBackToManual?: () => void };
+
+function PracticeController(props: Props & ModeActions & { scope: string; scopes?: PracticeDraftScopes }) {
+  const continuity = usePracticeDraft(props.scope, { skillLabel: props.retest?.skillLabel ?? props.initialFocus?.skillLabel ?? readPracticeSkillPrefill(), stem: props.retest?.prompt ?? props.initialProblem?.stem ?? "", sourceId: props.initialProblem?.sourceId ?? "", matrixMode: Boolean(props.onBackToManual) }, props.scopes);
   return <div className="space-y-3"><PracticeForm key={continuity.draft.id} {...props} continuity={continuity} /><PracticeDraftShelf continuity={continuity} allowAnother={!props.retest && !props.initialFocus} /></div>;
 }
 
-function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, onRecorded, initialMatrixKey, initialMatrixVariant, initialMode, initialFocus, initialProblem, onAskAttempt, continuity, photoSession }: Props & { continuity: PracticeContinuity }) {
+function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, onRecorded, initialMatrixKey, initialMatrixVariant, initialFocus, initialProblem, onAskAttempt, continuity, photoSession, onShowMatrix, onBackToManual }: Props & ModeActions & { continuity: PracticeContinuity }) {
   const { studySessionV2 } = useOpeningCapabilities();
   const usePhotoShell = Boolean(photoSession && initialProblem && studySessionV2);
   const answerForm = useRef<HTMLFormElement>(null);
@@ -87,13 +100,12 @@ function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, o
   const { draft, patch, ready, storageWarning, requireSaved } = continuity;
   const { scope } = draft;
   const [restored, setRestored] = useState(Boolean(draft.start || draft.attemptId || draft.submission));
-  const { sourceId, referenceSourceId, skillLabel, stem, answer, outcome, assistance, deliveredAssistance, referenceSkipped, matrixMode } = draft.fields;
+  const { sourceId, referenceSourceId, skillLabel, stem, answer, outcome, assistance, deliveredAssistance, referenceSkipped } = draft.fields;
   function fieldSetter<K extends keyof PracticeFields>(key: K) {
     return (next: SetStateAction<PracticeFields[K]>) => {
       patch(current => ({ fields: { [key]: typeof next === "function" ? (next as (value: PracticeFields[K]) => PracticeFields[K])(current.fields[key]) : next } }));
     };
   }
-  const setMatrixMode = fieldSetter("matrixMode");
   const setSourceId = fieldSetter("sourceId");
   const setReferenceSourceId = fieldSetter("referenceSourceId");
   const setSkillLabel = fieldSetter("skillLabel");
@@ -280,14 +292,13 @@ function PracticeForm({ courseId, retest = null, skillLabels: skillLabelsProp, o
     catch (reason) { setError(userFacingMessage(reason, "文件暂时无法读取，请重试。")); }
   }
 
-  if (ready && matrixMode && !retest && initialMode !== "practice") return <MatrixExerciseForm courseId={courseId} initialKey={initialMatrixKey} initialVariant={initialMatrixVariant} sources={readySources} onRecorded={onRecorded} onBack={() => setMatrixMode(false)} />;
+  if (ready && onBackToManual) return <MatrixExerciseForm courseId={courseId} initialKey={initialMatrixKey} initialVariant={initialMatrixVariant} sources={readySources} onRecorded={onRecorded} onBack={onBackToManual} />;
   const content = (
     <fieldset disabled={!ready} aria-busy={!ready} className="space-y-3 border-t border-line pt-4">
       {!ready ? <p className="text-sm text-text-3" role="status">正在恢复练习…</p> : null}
       {attempt || recorded ? <h3 className="text-sm font-semibold text-text">{recorded ? "已保存的作答" : "完成自己的尝试"}</h3> : null}
-      {ready && initialMode === "matrix" && !matrixMode && draft.start ? <p className="text-xs text-text-2" role="status">已恢复未完成的练习。也可以保留答案，开始其他练习。</p> : null}
       {storageWarning ? <p className="text-xs text-warn" role="status">答案暂时只在当前页面保留，刷新前请先复制。</p> : null}
-      {!attempt && !draft.start && !retest && !initialFocus && initialMode !== "practice" ? <button type="button" onClick={() => setMatrixMode(true)} className="rounded border border-line px-3 py-2 text-sm text-text">练习内置矩阵题（自动核算）</button> : null}
+      {!attempt && !draft.start && onShowMatrix ? <button type="button" onClick={onShowMatrix} className="rounded border border-line px-3 py-2 text-sm text-text">练习内置矩阵题（自动核算）</button> : null}
       {restored ? (
         <PracticeDraftRecovery courseId={courseId} answer={answer} pending={pending} onResume={() => void start()} />
       ) : !attempt ? (

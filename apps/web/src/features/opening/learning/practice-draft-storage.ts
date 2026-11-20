@@ -34,6 +34,7 @@ const blocked = new Map<string, string>();
 const storageKey = (scope: string) => `opening-practice:v2:${scope}`;
 type ReadStorage = Pick<Storage, "getItem">;
 type WriteStorage = Pick<Storage, "setItem">;
+type PartitionStorage = ReadStorage & WriteStorage & Pick<Storage, "removeItem">;
 
 export function practiceScope(courseId: string, mode: "ordinary" | "manual" | "matrix" | "span", retest?: { retestId: string; prompt: string; skillLabel: string; requirementKey?: string | null; retestActivityId?: string } | null, focus?: { skillLabel: string; requirementKey: string | null }, problem?: { sourceId: string; sourceVersion: number }, matrixExercise?: MatrixExerciseInput): string {
   // Retest content/requirement changes never attach an older frozen request to a newer task.
@@ -153,6 +154,62 @@ function persistCollection(collection: PracticeDraftCollection, storage: WriteSt
     dirty.delete(collection.scope);
     return true;
   } catch { dirty.add(collection.scope); return false; }
+}
+
+export type PracticeDraftScopes = { ordinary: string; manual: string };
+
+export function isRecoverableManualDraft(draft: PracticeDraft): boolean {
+  return draft.fields.matrixMode !== true && !draft.observationId;
+}
+
+function migrateOrdinaryManualDrafts(scopes: PracticeDraftScopes, ordinary: PracticeDraftCollection, fallback: PracticeDraft, storage: PartitionStorage): void {
+  const manual = readPracticeDraftCollection(scopes.manual, storage);
+  const moved = ordinary.drafts.filter(draft => draft.fields.matrixMode !== true);
+  const existingIds = new Set(manual?.drafts.map(draft => draft.id));
+  const added = moved.filter(draft => !existingIds.has(draft.id)).map(draft => ({ ...draft, scope: scopes.manual }));
+  const drafts = [...(manual?.drafts ?? []), ...added];
+  const legacyActive = added.find(draft => draft.id === ordinary.activeId && isRecoverableManualDraft(draft));
+  const activeId = manual?.activeId ?? legacyActive?.id ?? fallback.id;
+  if (activeId === fallback.id && !drafts.some(draft => draft.id === activeId)) drafts.push(fallback);
+
+  function save(collection: PracticeDraftCollection) {
+    if (!persistCollection(collection, storage)) throw new Error("无法迁移练习草稿，原答案已保留。请释放浏览器存储后重试。");
+    memory.set(collection.scope, collection);
+  }
+
+  // A v1 draft can lack an ID. Save the assigned ID before copying so a retry can recognize it.
+  if (storage.getItem(storageKey(scopes.ordinary)) === null) save(ordinary);
+  if (!manual || added.length || dirty.has(scopes.manual)) {
+    save({ version: 2, scope: scopes.manual, activeId, drafts });
+  }
+
+  // Remove the source only after the destination is durable. A retry keeps the existing copy by ID.
+  storage.removeItem(`opening-practice:v1:${scopes.ordinary}`);
+  const matrixDrafts = ordinary.drafts.filter(draft => draft.fields.matrixMode === true);
+  if (matrixDrafts.length) {
+    const active = matrixDrafts.find(draft => draft.id === ordinary.activeId) ?? matrixDrafts[0]!;
+    save({ ...ordinary, activeId: active.id, drafts: matrixDrafts });
+  } else {
+    storage.removeItem(storageKey(scopes.ordinary));
+    memory.delete(scopes.ordinary);
+    dirty.delete(scopes.ordinary);
+  }
+}
+
+export function readPartitionedPracticeDraftCollection(scopes: PracticeDraftScopes, fallback: PracticeDraft, storage: PartitionStorage | null): PracticeDraftCollection | null {
+  const ordinary = readPracticeDraftCollection(scopes.ordinary, storage);
+  if (ordinary?.drafts.some(draft => draft.fields.matrixMode !== true)) {
+    if (!storage) throw new Error("无法迁移练习草稿，原答案已保留。请允许此页面使用浏览器存储后重试。");
+    const manualFallback = fallback.scope === scopes.manual ? fallback : emptyPracticeDraft(scopes.manual);
+    migrateOrdinaryManualDrafts(scopes, ordinary, manualFallback, storage);
+  }
+  const collection = readPracticeDraftCollection(fallback.scope, storage);
+  if (fallback.scope !== scopes.manual || !collection) return collection;
+
+  const active = collection.drafts.find(draft => draft.id === collection.activeId)!;
+  if (isRecoverableManualDraft(active)) return collection;
+  // Saved answers belong to course history. Keep unfinished archives available on the shelf.
+  return switchPracticeDraft(scopes.manual, active.id, emptyPracticeDraft(scopes.manual, fallback.fields), storage);
 }
 
 export function practiceDraftHasUnsavedStorage(scope: string): boolean { return dirty.has(scope); }

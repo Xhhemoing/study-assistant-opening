@@ -7,10 +7,10 @@ import { expect, it, vi } from "vitest";
 import type { LearningAttempt, LearningObservation } from "@aistudy/contracts";
 import { parseCourseStudyPracticeEntry } from "../courses/course-study-query";
 import { LearningAttemptForm } from "./attempt-form";
-import { emptyPracticeDraft, practiceScope, writePracticeDraft } from "./practice-draft";
+import { emptyPracticeDraft, parsePracticeDraftCollection, practiceScope, writePracticeDraft } from "./practice-draft";
 
 const client = vi.hoisted(() => ({
-  getSummary: async () => [], createAttempt: vi.fn(), getAttempt: vi.fn(), listObservations: vi.fn(),
+  getSummary: async () => [], createSession: vi.fn(), createAttempt: vi.fn(), getAttempt: vi.fn(), listObservations: vi.fn(),
   submitAttempt: vi.fn(), getObservationHistory: vi.fn(),
 }));
 vi.mock("../client/learning-client", () => ({ createOpeningLearningClient: () => client }));
@@ -30,7 +30,7 @@ it("starts pasted questions with a saved problem even when no source is selected
   expect(practiceQuestionInput(" ", "")).toBeUndefined();
 });
 
-it.each(["submit", "start another"] as const)("recovers a legacy manual answer and keeps it out of the active form after %s", async action => {
+it.each(["submit", "archive then submit another"] as const)("recovers a legacy manual answer and keeps it out of the active form after %s", async action => {
   const courseId = crypto.randomUUID(), sessionId = crypto.randomUUID(), attemptId = crypto.randomUUID();
   const scope = practiceScope(courseId, "ordinary");
   const clientKey = "legacy-manual-attempt";
@@ -40,7 +40,9 @@ it.each(["submit", "start another"] as const)("recovers a legacy manual answer a
     start: { clientKey, sessionId, sessionInput: { courseId, sourceIds: [], skillLabel }, createInput: { sessionId, clientKey } },
     attemptId,
   };
-  sessionStorage.setItem(`opening-practice:v2:${scope}`, JSON.stringify({ version: 2, scope, activeId: draft.id, drafts: [draft] }));
+  const matrix = emptyPracticeDraft(scope, { matrixMode: true, skillLabel: "已归档的矩阵题", answer: "矩阵原答案" });
+  const storageKey = `opening-practice:v2:${scope}`;
+  sessionStorage.setItem(storageKey, JSON.stringify({ version: 2, scope, activeId: draft.id, drafts: action === "submit" ? [matrix, draft] : [draft] }));
   const attempt: LearningAttempt = {
     id: attemptId, workspaceId: courseId, courseId, sessionId, skillLabel, requirementKey: null,
     sourceIds: [], sourceVersions: {}, problemId: null, itemVersionId: null, observationId: null,
@@ -69,31 +71,62 @@ it.each(["submit", "start another"] as const)("recovers a legacy manual answer a
   })));
   const answerField = () => host.querySelector<HTMLTextAreaElement>("fieldset textarea");
   const click = (label: string) => act(async () => [...host.querySelectorAll("button")].find(button => button.textContent === label)!.click());
+  const enter = (input: HTMLInputElement | HTMLTextAreaElement, value: string) => act(async () => {
+    Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), "value")!.set!.call(input, value);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  const submit = () => act(async () => host.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+  const reopen = async () => { await act(async () => root.render(null)); await open(); };
   try {
     await open();
     expect(answerField()?.value).toBe("升级前的答案");
+    if (action === "submit") {
+      expect(host.textContent).not.toContain("未完成的练习（");
+      expect([...host.querySelectorAll("textarea")].map(input => input.value)).not.toContain("矩阵原答案");
+      expect(parsePracticeDraftCollection(JSON.parse(sessionStorage.getItem(storageKey)!), scope))
+        .toMatchObject({ activeId: matrix.id, drafts: [matrix] });
+    }
     await click("继续此练习");
-    await act(async () => {
-      const input = answerField()!;
-      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(input, observation.answer);
-      input.dispatchEvent(new Event("input", { bubbles: true }));
-    });
-    await act(async () => root.render(null));
-    await open();
+    await enter(answerField()!, observation.answer!);
+    await reopen();
     expect(answerField()?.value).toBe("修改后的答案");
 
-    if (action === "submit") {
-      await click("继续此练习");
-      await act(async () => host.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
-      expect(host.textContent).toContain("原答案已保存");
-      expect(client.submitAttempt).toHaveBeenLastCalledWith(attemptId, expect.objectContaining({ answer: observation.answer }));
-    } else {
+    if (action === "archive then submit another") {
       await click("保留答案，开始其他练习");
+      const newAttempt = { ...attempt, id: crypto.randomUUID(), sessionId: crypto.randomUUID(), skillLabel: "新练习" };
+      const newObservation = { ...observation, id: crypto.randomUUID(), attemptId: newAttempt.id, sessionId: newAttempt.sessionId, skillLabel: newAttempt.skillLabel, answer: "新练习答案" };
+      client.createSession.mockResolvedValueOnce({ id: newAttempt.sessionId });
+      client.createAttempt.mockResolvedValueOnce(newAttempt);
+      client.getAttempt.mockResolvedValueOnce({ attemptId: newAttempt.id, sessionId: newAttempt.sessionId, deliveredAssistance: "none" });
+      client.getAttempt.mockResolvedValueOnce({ attemptId: newAttempt.id, sessionId: newAttempt.sessionId, deliveredAssistance: "none" });
+      client.submitAttempt.mockResolvedValueOnce(newObservation);
+      client.getObservationHistory.mockResolvedValueOnce({ rootObservationId: newObservation.id, headObservationId: newObservation.id, revisions: [newObservation] });
+      await enter(host.querySelector('fieldset input[list^="opening-skill-labels-"]')!, newAttempt.skillLabel);
+      await submit();
+      await enter(answerField()!, newObservation.answer);
+      await submit();
+      expect(client.submitAttempt).toHaveBeenLastCalledWith(newAttempt.id, expect.objectContaining({ answer: "新练习答案" }));
+      await reopen();
+      expect(host.querySelector("details textarea[readonly]")).not.toBeNull();
+      expect(host.querySelector<HTMLTextAreaElement>("details textarea")?.value).toBe("修改后的答案");
+      await click("继续这次练习");
+      expect(answerField()?.value).toBe("修改后的答案");
     }
-    await act(async () => root.render(null));
-    await open();
+
+    await click("继续此练习");
+    await submit();
+    expect(host.textContent).toContain("原答案已保存");
+    expect(client.submitAttempt).toHaveBeenLastCalledWith(attemptId, expect.objectContaining({ answer: observation.answer }));
+    await reopen();
     expect(host.querySelector('fieldset input[list^="opening-skill-labels-"]')).not.toBeNull();
-    expect(host.querySelector("fieldset")?.textContent).not.toContain("已找回未完成的练习");
+    expect(host.textContent).not.toContain("已找回未完成的练习");
+    expect([...host.querySelectorAll("textarea")].map(input => input.value)).not.toContain("修改后的答案");
+    if (action === "submit") {
+      expect(parsePracticeDraftCollection(JSON.parse(sessionStorage.getItem(storageKey)!), scope))
+        .toMatchObject({ activeId: matrix.id, drafts: [matrix] });
+    } else {
+      expect(sessionStorage.getItem(storageKey)).toBeNull();
+    }
   } finally {
     await act(async () => root.unmount());
     window.history.replaceState(null, "", originalUrl);
@@ -128,6 +161,34 @@ it("opens explicit manual practice and preserves the saved ordinary matrix mode 
     await open();
     expect(topic()?.value).toBe("自选练习主题");
     expect(sessionStorage.getItem(storageKey)).toBe(original);
+  } finally {
+    await act(async () => root.unmount());
+    vi.unstubAllGlobals();
+    sessionStorage.clear();
+  }
+});
+
+it("shares manual inputs between the default entry and explicit practice while keeping the matrix entry available", async () => {
+  const courseId = crypto.randomUUID();
+  const host = document.createElement("div");
+  const root = createRoot(host);
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  const open = (initialMode?: "practice") => act(async () => root.render(createElement(LearningAttemptForm, { courseId, initialMode, onRecorded() {} })));
+  const topic = () => host.querySelector<HTMLInputElement>('input[list^="opening-skill-labels-"]')!;
+  const click = (label: string) => act(async () => [...host.querySelectorAll("button")].find(button => button.textContent === label)!.click());
+  try {
+    await open();
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(topic(), "普通入口的主题");
+      topic().dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await click("练习内置矩阵题（自动核算）");
+    expect(host.textContent).toContain("内置矩阵练习");
+    await click("返回普通练习");
+    expect(topic().value).toBe("普通入口的主题");
+    await open("practice");
+    expect(topic().value).toBe("普通入口的主题");
+    expect(host.textContent).not.toContain("练习内置矩阵题（自动核算）");
   } finally {
     await act(async () => root.unmount());
     vi.unstubAllGlobals();
