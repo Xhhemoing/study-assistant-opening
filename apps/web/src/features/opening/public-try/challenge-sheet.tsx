@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { challenges, gradeTry, readTryReceipt, storageKey, type TryChallenge, type TryReceipt } from "./challenges";
 import { useChallengeClock } from "./challenge-clock";
+import { tryAuthHref } from "./continuation";
 
 type Entry = "/login" | "/register";
 const buttonClass = "min-h-11 rounded-ctl px-4 py-2 font-medium focus-visible:outline-2 focus-visible:outline-focus-ring";
@@ -128,7 +129,7 @@ function Attempt({ question, previous, entry, restart, focusStart }: {
           <Diagnosis question={question} receipt={receipt} />
           {!stored && <p className="mt-2 text-ui-lg text-text-2">本次诊断仅在当前页面显示。</p>}
           <div className="mt-5 flex flex-wrap items-center gap-2">
-            <a className={primary} href={entry + "?" + new URLSearchParams({ from: "try", challenge: question.id, step: String(receipt.step) })}>
+            <a className={primary} href={tryAuthHref(entry, receipt)}>
               {entry === "/login" ? "使用已有账号登录" : "注册并继续学习"}
             </a>
             <button className={secondary} onClick={restart}>重新作答</button>
