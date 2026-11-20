@@ -1,4 +1,9 @@
-import { classifyProbeResponse, verifyProbeDistinguishability, type DistinguishableProbeSpec } from "./probe-protocol";
+import {
+  classifyProbeResponseWithSnapshot,
+  snapshotAndVerifyProbe,
+  type DistinguishableProbeSpec,
+  type VerifiedProbeSnapshot,
+} from "./probe-protocol";
 import type {
   CartridgeActiveRetestWindow,
   CartridgeCitation,
@@ -71,29 +76,68 @@ export function keepGroundedSeeds(
 
 /* ------------------------------------------------------------ L4 helpers -- */
 
+export interface SnapshotProbeEvaluationResult {
+  evaluation: CartridgeProbeEvaluation;
+  /** True when response encoding threw or produced an invalid observable key. */
+  encodingFailed: boolean;
+}
+
 /**
- * Deterministic response evaluation for a probe spec. Correctness is decided against the
- * correct model alone; misconception attribution requires a unique matching hypothesis.
+ * Deterministic response evaluation strictly against a single immutable verified probe
+ * snapshot. Withholds graded outcomes (`outcome: "unverified"`) whenever probe
+ * verification failed or response encoding failed.
+ */
+export function evaluateProbeWithSnapshot<TObservable>(
+  snapshot: VerifiedProbeSnapshot<TObservable>,
+  response: unknown,
+): SnapshotProbeEvaluationResult {
+  const base = { probeId: snapshot.probeId, requirementKey: snapshot.requirementKey };
+  if (!snapshot.report.distinguishable || snapshot.correctObservableKey === null) {
+    return {
+      evaluation: { ...base, outcome: "unverified", diagnosis: "unclassified", matchedHypothesisId: null, observableKey: null },
+      encodingFailed: false,
+    };
+  }
+  const { classification, encodingFailed } = classifyProbeResponseWithSnapshot(snapshot, response);
+  if (encodingFailed) {
+    return {
+      evaluation: { ...base, outcome: "unverified", diagnosis: "unclassified", matchedHypothesisId: null, observableKey: null },
+      encodingFailed: true,
+    };
+  }
+  if (!classification.wellFormed || classification.observableKey === null) {
+    return {
+      evaluation: { ...base, outcome: "unverified", diagnosis: "invalid_response", matchedHypothesisId: null, observableKey: null },
+      encodingFailed: false,
+    };
+  }
+  if (classification.observableKey === snapshot.correctObservableKey) {
+    return {
+      evaluation: { ...base, outcome: "correct", diagnosis: "correct_model", matchedHypothesisId: null, observableKey: classification.observableKey },
+      encodingFailed: false,
+    };
+  }
+  const misconception = classification.match?.role === "misconception" ? classification.match.modelId : null;
+  return {
+    evaluation: {
+      ...base,
+      outcome: "incorrect",
+      diagnosis: misconception ? "misconception" : "unclassified",
+      matchedHypothesisId: misconception,
+      observableKey: classification.observableKey,
+    },
+    encodingFailed: false,
+  };
+}
+
+/**
+ * Deterministic response evaluation for a probe spec. Captures a single immutable
+ * prediction snapshot and runs both distinguishability verification and response
+ * scoring against that exact snapshot.
  */
 export function evaluateProbeWithSpec<TInput, TObservable>(
   spec: DistinguishableProbeSpec<TInput, TObservable>,
   response: unknown,
 ): CartridgeProbeEvaluation {
-  const base = { probeId: spec.probeId, requirementKey: spec.requirementKey };
-  const classification = classifyProbeResponse(spec, response);
-  if (!classification.wellFormed) {
-    return { ...base, outcome: "unverified", diagnosis: "invalid_response", matchedHypothesisId: null, observableKey: null };
-  }
-  const report = verifyProbeDistinguishability(spec);
-  const correctKey = report.predictions[0]?.observableKey ?? null;
-  if (correctKey === null) {
-    return { ...base, outcome: "unverified", diagnosis: "unclassified", matchedHypothesisId: null,
-      observableKey: classification.observableKey };
-  }
-  if (classification.observableKey === correctKey) {
-    return { ...base, outcome: "correct", diagnosis: "correct_model", matchedHypothesisId: null, observableKey: correctKey };
-  }
-  const misconception = classification.match?.role === "misconception" ? classification.match.modelId : null;
-  return { ...base, outcome: "incorrect", diagnosis: misconception ? "misconception" : "unclassified",
-    matchedHypothesisId: misconception, observableKey: classification.observableKey };
+  return evaluateProbeWithSnapshot(snapshotAndVerifyProbe(spec), response).evaluation;
 }

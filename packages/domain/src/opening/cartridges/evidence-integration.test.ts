@@ -55,6 +55,145 @@ describe("qualifyCartridgeEmission", () => {
     expect(result.qualified).toBe(false);
     expect(result.reasonCodes).toEqual([code]);
   });
+
+  it("rejects a cartridge whose evaluateProbeResponse scores against a different probe or spoofs the verdict", () => {
+    const pointerProbeId = "408.stack.pointer.pre-increment.v1";
+    const spoofingCartridge = {
+      ...stack408Cartridge,
+      manifest: { ...stack408Cartridge.manifest, id: "408.stack.spoof" },
+      evaluateProbeResponse: () => stack408Cartridge.evaluateProbeResponse(pointerProbeId, { outputs: ["OVERFLOW", 9], finalTop: 1 }),
+    };
+    const forgedOutcomeCartridge = {
+      ...stack408Cartridge,
+      manifest: { ...stack408Cartridge.manifest, id: "408.stack.forged" },
+      evaluateProbeResponse: (probeId: string) => ({
+        probeId,
+        requirementKey: "408.ds.stack.lifo-trace",
+        outcome: "correct" as const,
+        diagnosis: "correct_model" as const,
+        matchedHypothesisId: null,
+        observableKey: JSON.stringify(["trace", ["2", "3", "1", "UNDERFLOW"], -1]),
+      }),
+    };
+    const localRegistry = createCartridgeRegistry([spoofingCartridge, forgedOutcomeCartridge]);
+
+    const crossProbe = qualifyCartridgeEmission(
+      localRegistry,
+      emit({ cartridgeId: "408.stack.spoof", response: CORRECT }),
+      { outcome: "correct" },
+    );
+    expect(crossProbe.qualified).toBe(false);
+    expect(crossProbe.reasonCodes).toEqual(["cartridge_evaluation_mismatch"]);
+
+    // Raw response is FIFO (incorrect), yet the cartridge returns "correct" with the correct observableKey.
+    const forged = qualifyCartridgeEmission(
+      localRegistry,
+      emit({ cartridgeId: "408.stack.forged", response: FIFO }),
+      { outcome: "correct" },
+    );
+    expect(forged.qualified).toBe(false);
+    expect(forged.reasonCodes).toEqual(["cartridge_evaluation_mismatch"]);
+  });
+
+  it("rejects when getProbe returns a probe with a mismatched probeId", () => {
+    const pointerProbe = stack408Cartridge.getProbe("408.stack.pointer.pre-increment.v1")!;
+    const mismatchedLookup = {
+      ...stack408Cartridge,
+      manifest: { ...stack408Cartridge.manifest, id: "408.stack.mismatch-id" },
+      getProbe: (id: string) => id === "spoofed-probe-id" ? pointerProbe : stack408Cartridge.getProbe(id),
+    };
+    const localRegistry = createCartridgeRegistry([mismatchedLookup]);
+    const result = qualifyCartridgeEmission(
+      localRegistry,
+      emit({ cartridgeId: "408.stack.mismatch-id", probeId: "spoofed-probe-id", response: { outputs: ["OVERFLOW", 9], finalTop: 1 } }),
+    );
+    expect(result.qualified).toBe(false);
+    expect(result.reasonCodes).toEqual(["cartridge_probe_identity_mismatch"]);
+  });
+
+  it("catches exceptions from getProbe, observableKey, and evaluateProbeResponse cleanly", () => {
+    let shouldThrowLookup = false;
+    const throwingLookup = {
+      ...stack408Cartridge,
+      manifest: { ...stack408Cartridge.manifest, id: "408.stack.throw-lookup" },
+      getProbe: (id: string) => {
+        if (shouldThrowLookup) throw new Error("getProbe crash");
+        return stack408Cartridge.getProbe(id);
+      },
+    };
+    const throwingEval = {
+      ...stack408Cartridge,
+      manifest: { ...stack408Cartridge.manifest, id: "408.stack.throw-eval" },
+      evaluateProbeResponse: () => { throw new Error("evaluateProbeResponse crash"); },
+    };
+    const baseProbe = stack408Cartridge.getProbe(TRACE_PROBE)!;
+    const throwingEncoderProbe = {
+      ...baseProbe,
+      observableKey: (obs: unknown) => {
+        const record = obs as { outputs?: string[] };
+        if (record.outputs?.[0] === "99") throw new Error("encode crash");
+        if (record.outputs?.[0] === "98") return "   ";
+        if (record.outputs?.[0] === "97") return null as unknown as string;
+        return baseProbe.observableKey(obs);
+      },
+    };
+    const throwingEncoderCartridge = {
+      ...stack408Cartridge,
+      manifest: { ...stack408Cartridge.manifest, id: "408.stack.throw-encode" },
+      listProbes: () => [throwingEncoderProbe],
+      getProbe: (id: string) => id === TRACE_PROBE ? throwingEncoderProbe : null,
+      evaluateProbeResponse: (id: string, response: unknown) =>
+        id === TRACE_PROBE ? evaluateProbeWithSpec(throwingEncoderProbe, response) : stack408Cartridge.evaluateProbeResponse(id, response),
+    };
+    const localRegistry = createCartridgeRegistry([throwingLookup, throwingEval, throwingEncoderCartridge]);
+
+    shouldThrowLookup = true;
+    const lookupRes = qualifyCartridgeEmission(localRegistry, emit({ cartridgeId: "408.stack.throw-lookup" }));
+    expect(lookupRes.qualified).toBe(false);
+    expect(lookupRes.reasonCodes).toEqual(["cartridge_probe_lookup_failed"]);
+
+    const evalRes = qualifyCartridgeEmission(localRegistry, emit({ cartridgeId: "408.stack.throw-eval" }));
+    expect(evalRes.qualified).toBe(false);
+    expect(evalRes.reasonCodes).toEqual(["cartridge_evaluation_failed"]);
+
+    for (const badResponse of [{ outputs: "99", finalTop: -1 }, { outputs: "98", finalTop: -1 }, { outputs: "97", finalTop: -1 }]) {
+      const encodeRes = qualifyCartridgeEmission(
+        localRegistry,
+        emit({ cartridgeId: "408.stack.throw-encode", response: badResponse }),
+      );
+      expect(encodeRes.qualified).toBe(false);
+      expect(encodeRes.reasonCodes).toEqual(["cartridge_evaluation_failed"]);
+    }
+  });
+
+  it("rejects when a stateful probe drifts between verification snapshot and cartridge evaluation", () => {
+    const baseProbe = stack408Cartridge.getProbe(TRACE_PROBE)!;
+    let predictCount = 0;
+    const driftingProbe = {
+      ...baseProbe,
+      correctModel: {
+        ...baseProbe.correctModel,
+        predict: (input: unknown) => {
+          predictCount += 1;
+          // Passes registration (calls 1-2) and gate snapshot (calls 3-4), then drifts on cartridge evaluateProbeResponse (calls 5-6).
+          if (predictCount <= 4) return baseProbe.correctModel.predict(input);
+          return { outputs: ["999"], finalTop: 0 };
+        },
+      },
+    };
+    const driftingCartridge = {
+      ...stack408Cartridge,
+      manifest: { ...stack408Cartridge.manifest, id: "408.stack.drift" },
+      listProbes: () => [driftingProbe],
+      getProbe: (id: string) => id === TRACE_PROBE ? driftingProbe : null,
+      evaluateProbeResponse: (id: string, response: unknown) =>
+        id === TRACE_PROBE ? evaluateProbeWithSpec(driftingProbe, response) : stack408Cartridge.evaluateProbeResponse(id, response),
+    };
+    const localRegistry = createCartridgeRegistry([driftingCartridge]);
+    const result = qualifyCartridgeEmission(localRegistry, emit({ cartridgeId: "408.stack.drift", response: CORRECT }));
+    expect(result.qualified).toBe(false);
+    expect(result.reasonCodes).toEqual(["cartridge_evaluation_mismatch"]);
+  });
 });
 
 describe("applyCartridgeEvidenceGate", () => {

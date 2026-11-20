@@ -111,38 +111,75 @@ export interface StackFeasibilityObservable { verdict: "feasible" | "infeasible"
 const feasible = (): StackFeasibilityObservable => ({ verdict: "feasible", firstViolationIndex: null });
 const infeasibleAt = (index: number): StackFeasibilityObservable => ({ verdict: "infeasible", firstViolationIndex: index });
 
-/** Index of the first pop that is not a not-yet-popped member of the push order. */
+/** Index of the first pop that exceeds the remaining multiplicity of that value in pushOrder. */
 function firstMembershipViolation(input: StackFeasibilityInput): number | null {
-  const available = new Set(input.pushOrder);
+  const available = new Map<number, number>();
+  for (const value of input.pushOrder) available.set(value, (available.get(value) ?? 0) + 1);
   for (let i = 0; i < input.candidatePops.length; i += 1) {
     const value = input.candidatePops[i]!;
-    if (!available.has(value)) return i;
-    available.delete(value);
+    const remaining = available.get(value) ?? 0;
+    if (remaining === 0) return i;
+    available.set(value, remaining - 1);
   }
   return null;
 }
 
-function greedyStackFeasibility(
+function simulateStackFeasibility(
   input: StackFeasibilityInput,
   peekIndex: (length: number) => number,
 ): StackFeasibilityObservable {
+  const { pushOrder, candidatePops } = input;
+  if (candidatePops.length === 0) return feasible();
   const membership = firstMembershipViolation(input);
-  const stack: number[] = [];
-  let next = 0;
-  for (let i = 0; i < input.candidatePops.length; i += 1) {
-    if (membership === i) return infeasibleAt(i);
-    const target = input.candidatePops[i]!;
-    const peek = () => stack[peekIndex(stack.length)];
-    while (peek() !== target && next < input.pushOrder.length) stack.push(input.pushOrder[next++]!);
-    if (peek() !== target) return infeasibleAt(i);
-    stack.splice(peekIndex(stack.length), 1);
+  const limit = membership === null ? candidatePops.length : membership;
+  const suffixCounts: Array<Map<number, number>> = new Array(pushOrder.length + 1);
+  suffixCounts[pushOrder.length] = new Map();
+  for (let i = pushOrder.length - 1; i >= 0; i -= 1) {
+    const nextMap = new Map(suffixCounts[i + 1]);
+    const value = pushOrder[i]!;
+    nextMap.set(value, (nextMap.get(value) ?? 0) + 1);
+    suffixCounts[i] = nextMap;
   }
-  return feasible();
+
+  let maxMatched = 0;
+  const visited = new Set<string>();
+  const search = (next: number, outIdx: number, stack: readonly number[]): boolean => {
+    if (outIdx > maxMatched) maxMatched = outIdx;
+    if (outIdx === limit) return true;
+    const target = candidatePops[outIdx]!;
+    let curNext = next;
+    const curStack = [...stack];
+    while (curNext < pushOrder.length) {
+      const idx = peekIndex(curStack.length);
+      if (idx >= 0 && idx < curStack.length && curStack[idx] === target) break;
+      curStack.push(pushOrder[curNext]!);
+      curNext += 1;
+    }
+    const idx = peekIndex(curStack.length);
+    if (idx < 0 || idx >= curStack.length || curStack[idx] !== target) return false;
+    const stateKey = `${curNext}|${outIdx}|${curStack.join(",")}`;
+    if (visited.has(stateKey)) return false;
+    visited.add(stateKey);
+
+    const afterPop = [...curStack.slice(0, idx), ...curStack.slice(idx + 1)];
+    if (search(curNext, outIdx + 1, afterPop)) return true;
+
+    // Duplicate-symbol backtracking: when another copy of `target` still lies ahead in
+    // pushOrder, pushing past the current match can preserve a feasible stack order.
+    if (curNext < pushOrder.length && (suffixCounts[curNext]!.get(target) ?? 0) > 0) {
+      if (search(curNext + 1, outIdx, [...curStack, pushOrder[curNext]!])) return true;
+    }
+    return false;
+  };
+
+  const reachedLimit = search(0, 0, []);
+  if (reachedLimit && membership === null) return feasible();
+  return infeasibleAt(maxMatched);
 }
 
-/** M*: greedy LIFO simulation of the candidate pop sequence. */
+/** M*: exact LIFO simulation of the candidate pop sequence (supports repeated symbols). */
 export function simulateCorrectFeasibility(input: StackFeasibilityInput): StackFeasibilityObservable {
-  return greedyStackFeasibility(input, length => length - 1);
+  return simulateStackFeasibility(input, length => length - 1);
 }
 
 /** H_FIFO_QUEUE_CONFUSION: only the push order itself is accepted. */
@@ -156,7 +193,7 @@ export function simulateFifoQueueConfusionFeasibility(input: StackFeasibilityInp
 
 /** H_TOP_POINTER_OFF_BY_ONE: reads the element at `top - 1` as the current stack top. */
 export function simulateTopPointerOffByOneFeasibility(input: StackFeasibilityInput): StackFeasibilityObservable {
-  return greedyStackFeasibility(input, length => length - 2);
+  return simulateStackFeasibility(input, length => length - 2);
 }
 
 /** H_BYPASS_LIFO_ORDER: believes any element already pushed may be popped, so every permutation works. */
@@ -165,11 +202,19 @@ export function simulateBypassLifoFeasibility(input: StackFeasibilityInput): Sta
   return membership === null ? feasible() : infeasibleAt(membership);
 }
 
-/** All pop orders reachable from `pushOrder` by a correct stack (Catalan-many for distinct values). */
+/** All unique pop orders reachable from `pushOrder` by a correct stack (Catalan-many for distinct values). */
 export function enumerateFeasiblePopSequences(pushOrder: readonly number[]): number[][] {
   const results: number[][] = [];
+  const seen = new Set<string>();
   const walk = (next: number, stack: number[], output: number[]) => {
-    if (output.length === pushOrder.length) { results.push([...output]); return; }
+    if (output.length === pushOrder.length) {
+      const key = output.join(",");
+      if (!seen.has(key)) {
+        seen.add(key);
+        results.push([...output]);
+      }
+      return;
+    }
     if (stack.length) {
       const value = stack[stack.length - 1]!;
       walk(next, stack.slice(0, -1), [...output, value]);

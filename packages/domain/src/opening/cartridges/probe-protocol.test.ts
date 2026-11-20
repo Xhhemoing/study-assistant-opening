@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { evaluateProbeWithSpec } from "./capability-helpers";
 import {
   classifyProbeResponse,
   verifyProbeDistinguishability,
@@ -68,6 +69,22 @@ describe("verifyProbeDistinguishability", () => {
     const flaky = hypothesis("H_FLAKY", x => x + (calls++ % 2));
     expect(verifyProbeDistinguishability(spec(3, [H_ADD, flaky])).issues).toEqual(["nondeterministic_prediction"]);
   });
+
+  it.each([
+    ["null", null],
+    ["undefined", undefined],
+    ["number", 42],
+    ["object", { k: "v" }],
+    ["empty string", ""],
+    ["whitespace-only string", "   \t\n "],
+  ])("rejects invalid (%s) observable keys returned at runtime", (_label, badKey) => {
+    const broken = spec(3, [H_ADD, H_SQUARE], {
+      observableKey: value => (value === 5 ? (badKey as unknown as string) : String(value)),
+    });
+    const report = verifyProbeDistinguishability(broken);
+    expect(report.distinguishable).toBe(false);
+    expect(report.issues).toContain("invalid_observable_key");
+  });
 });
 
 describe("classifyProbeResponse", () => {
@@ -80,5 +97,71 @@ describe("classifyProbeResponse", () => {
 
   it("never attributes a response on an ambiguous probe", () => {
     expect(classifyProbeResponse(spec(2), 4).match).toBeNull();
+  });
+
+  it("rejects non-string, empty, or throwing observable keys on learner responses without crashing", () => {
+    const throwingEncoder = spec(3, [H_ADD, H_SQUARE], {
+      observableKey: value => {
+        if (value === 7) throw new Error("encode crash");
+        return String(value);
+      },
+    });
+    expect(classifyProbeResponse(throwingEncoder, 7)).toEqual({ observableKey: null, wellFormed: false, match: null });
+
+    const blankEncoder = spec(3, [H_ADD, H_SQUARE], {
+      observableKey: value => (value === 7 ? "   " : String(value)),
+    });
+    expect(classifyProbeResponse(blankEncoder, 7)).toEqual({ observableKey: null, wellFormed: false, match: null });
+
+    const nullEncoder = spec(3, [H_ADD, H_SQUARE], {
+      observableKey: value => (value === 7 ? (null as unknown as string) : String(value)),
+    });
+    expect(classifyProbeResponse(nullEncoder, 7)).toEqual({ observableKey: null, wellFormed: false, match: null });
+  });
+});
+
+describe("evaluateProbeWithSpec single-snapshot hardening", () => {
+  it("evaluates verification and scoring against a single immutable prediction snapshot", () => {
+    let correctCalls = 0;
+    const statefulSpec = spec(3, [H_ADD, H_SQUARE], {
+      correctModel: {
+        id: "M_DOUBLE",
+        role: "correct",
+        label: "double",
+        predict: x => {
+          correctCalls += 1;
+          // Calls 1-2 happen during the single snapshot determinism check; any later re-evaluation would drift.
+          return correctCalls <= 2 ? x * 2 : x * 100;
+        },
+      },
+    });
+    const evaluation = evaluateProbeWithSpec(statefulSpec, 6);
+    expect(correctCalls).toBe(2);
+    expect(evaluation).toEqual({
+      probeId: "double-3",
+      requirementKey: "toy.double",
+      outcome: "correct",
+      diagnosis: "correct_model",
+      matchedHypothesisId: null,
+      observableKey: "6",
+    });
+  });
+
+  it("always withholds graded outcomes when probe verification fails", () => {
+    // Degenerate probe (H_i(2) == M*(2) == 4)
+    expect(evaluateProbeWithSpec(spec(2), 4)).toMatchObject({
+      outcome: "unverified",
+      diagnosis: "unclassified",
+      matchedHypothesisId: null,
+      observableKey: null,
+    });
+    // Ambiguous hypothesis pair (H_ADD(5) == H_PLUS_ONE_TWICE(5) == 7) even if response equals M*(5) == 10
+    const H_PLUS_ONE_TWICE = hypothesis("H_PLUS_ONE_TWICE", x => x + 1 + 1);
+    expect(evaluateProbeWithSpec(spec(5, [H_ADD, H_PLUS_ONE_TWICE]), 10)).toMatchObject({
+      outcome: "unverified",
+      diagnosis: "unclassified",
+      matchedHypothesisId: null,
+      observableKey: null,
+    });
   });
 });

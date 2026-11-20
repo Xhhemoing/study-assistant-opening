@@ -103,4 +103,38 @@ describe("CartridgeRegistry", () => {
     expect(!report.ok && report.issues.map(issue => issue.code)).toEqual([
       "evidence_probe_lookup_mismatch", "evidence_probe_id_duplicate", "evidence_probe_lookup_mismatch"]);
   });
+
+  it("converts exceptions from getProbe and getters into structured registration rejections", () => {
+    const throwingLookup = {
+      ...stack408Cartridge,
+      manifest: { ...stack408Cartridge.manifest, id: "408.stack.throwing-lookup" },
+      getProbe: () => { throw new Error("lookup boom"); },
+    };
+    const report = validateCartridge(throwingLookup);
+    expect(report.ok).toBe(false);
+    expect(!report.ok && report.issues.every(issue => issue.code === "evidence_probe_lookup_failed")).toBe(true);
+    expect(createCartridgeRegistry().registerCartridge(throwingLookup).ok).toBe(false);
+
+    const throwingManifest = Object.defineProperty({}, "manifest", {
+      get() { throw new Error("manifest boom"); },
+      enumerable: true,
+    });
+    expect(validateCartridge(throwingManifest)).toMatchObject({
+      ok: false,
+      issues: [{ code: "manifest_invalid" }],
+    });
+
+    const [first] = stack408Cartridge.listProbes();
+    const badEncoderProbe = { ...first!, observableKey: () => "   " };
+    const badEncoderCartridge = {
+      ...stack408Cartridge,
+      manifest: { ...stack408Cartridge.manifest, id: "408.stack.blank-key" },
+      listProbes: () => [badEncoderProbe],
+      getProbe: (id: string) => id === badEncoderProbe.probeId ? badEncoderProbe : null,
+    };
+    const badEncoderReport = validateCartridge(badEncoderCartridge);
+    expect(badEncoderReport.ok).toBe(false);
+    expect(!badEncoderReport.ok && badEncoderReport.issues[0]?.code).toBe("evidence_probe_not_distinguishable");
+    expect(badEncoderReport.probeReports[0]?.issues).toContain("invalid_observable_key");
+  });
 });

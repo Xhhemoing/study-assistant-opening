@@ -41,6 +41,7 @@ export type ProbeDistinguishabilityIssue =
   | "no_competing_hypotheses"
   | "duplicate_model_id"
   | "prediction_failed"
+  | "invalid_observable_key"
   | "nondeterministic_prediction"
   | "ambiguous_hypothesis_pair"
   | "degenerate_against_correct_model";
@@ -62,14 +63,49 @@ export interface ProbeDistinguishabilityReport {
   issues: ProbeDistinguishabilityIssue[];
 }
 
+export interface VerifiedProbeSnapshot<TObservable = unknown> {
+  readonly probeId: string;
+  readonly requirementKey: string;
+  readonly report: ProbeDistinguishabilityReport;
+  /** Populated only when `report.distinguishable` is true. */
+  readonly correctObservableKey: string | null;
+  /** Populated only when `report.distinguishable` is true. */
+  readonly hypothesisByObservableKey: ReadonlyMap<string, string>;
+  readonly observableKey: ((observable: TObservable) => string) | null;
+  readonly parseResponse: ((response: unknown) => TObservable | null) | null;
+}
+
+/** Runtime guard: observable keys must be non-empty, non-whitespace strings. */
+export function isValidObservableKey(key: unknown): key is string {
+  return typeof key === "string" && key.trim().length > 0;
+}
+
+function safeRead<T>(getter: () => T): { ok: true; value: T } | { ok: false } {
+  try {
+    return { ok: true, value: getter() };
+  } catch {
+    return { ok: false };
+  }
+}
+
 function predictKey<TInput, TObservable>(
-  spec: DistinguishableProbeSpec<TInput, TObservable>,
-  model: ObservableModel<TInput, TObservable>,
+  inputReady: boolean,
+  input: TInput,
+  encodeObservable: ((observable: TObservable) => string) | null,
+  predict: ((value: TInput) => TObservable) | null,
   issues: Set<ProbeDistinguishabilityIssue>,
 ): string | null {
+  if (!inputReady || !encodeObservable || !predict) {
+    issues.add("prediction_failed");
+    return null;
+  }
   try {
-    const first = spec.observableKey(model.predict(spec.input));
-    const second = spec.observableKey(model.predict(spec.input));
+    const first: unknown = encodeObservable(predict(input));
+    const second: unknown = encodeObservable(predict(input));
+    if (!isValidObservableKey(first) || !isValidObservableKey(second)) {
+      issues.add("invalid_observable_key");
+      return null;
+    }
     if (first !== second) {
       issues.add("nondeterministic_prediction");
       return null;
@@ -81,24 +117,105 @@ function predictKey<TInput, TObservable>(
   }
 }
 
-/** Deterministic H_A != H_B and H_i != M* pre-check for a single probe input. */
-export function verifyProbeDistinguishability<TInput, TObservable>(
-  spec: DistinguishableProbeSpec<TInput, TObservable>,
-): ProbeDistinguishabilityReport {
-  const issues = new Set<ProbeDistinguishabilityIssue>();
-  if (!spec.probeId || !spec.requirementKey || !spec.correctModel?.id) issues.add("probe_identity_incomplete");
-  const hypotheses = spec.hypotheses ?? [];
-  if (hypotheses.length === 0) issues.add("no_competing_hypotheses");
-  const ids = [spec.correctModel?.id, ...hypotheses.map(row => row.id)];
-  if (new Set(ids).size !== ids.length || ids.some(id => !id)) issues.add("duplicate_model_id");
+interface CapturedModel<TInput, TObservable> {
+  id: string;
+  predict: ((input: TInput) => TObservable) | null;
+}
 
-  const correctKey = spec.correctModel ? predictKey(spec, spec.correctModel, issues) : null;
+function captureModel<TInput, TObservable>(raw: unknown): CapturedModel<TInput, TObservable> {
+  if (!raw || typeof raw !== "object") return { id: "", predict: null };
+  const candidate = raw as Partial<ObservableModel<TInput, TObservable>>;
+  const idRead = safeRead(() => candidate.id);
+  const predictRead = safeRead(() => candidate.predict);
+  return {
+    id: idRead.ok && typeof idRead.value === "string" ? idRead.value : "",
+    predict: predictRead.ok && typeof predictRead.value === "function"
+      ? (value: TInput) => predictRead.value!.call(raw, value)
+      : null,
+  };
+}
+
+/**
+ * Capture a single immutable snapshot of a probe's identity, predictions and encoded
+ * observable keys, then run the H_i != H_j / H_i != M* distinguishability pre-check
+ * strictly against that snapshot.
+ */
+export function snapshotAndVerifyProbe<TInput, TObservable>(
+  spec: DistinguishableProbeSpec<TInput, TObservable>,
+): VerifiedProbeSnapshot<TObservable> {
+  const issues = new Set<ProbeDistinguishabilityIssue>();
+  if (!spec || typeof spec !== "object") {
+    issues.add("probe_identity_incomplete");
+    issues.add("no_competing_hypotheses");
+    const report: ProbeDistinguishabilityReport = Object.freeze({
+      probeId: "",
+      distinguishable: false,
+      predictions: [],
+      ambiguousPairs: [],
+      degenerateAgainstCorrectModel: [],
+      issues: [...issues].sort(),
+    });
+    return Object.freeze({
+      probeId: "",
+      requirementKey: "",
+      report,
+      correctObservableKey: null,
+      hypothesisByObservableKey: new Map<string, string>(),
+      observableKey: null,
+      parseResponse: null,
+    });
+  }
+
+  const probeIdRead = safeRead(() => spec.probeId);
+  const requirementKeyRead = safeRead(() => spec.requirementKey);
+  const inputRead = safeRead(() => spec.input);
+  const correctRead = safeRead(() => spec.correctModel);
+  const hypothesesRead = safeRead(() => spec.hypotheses);
+  const encodeRead = safeRead(() => spec.observableKey);
+  const parseRead = safeRead(() => spec.parseResponse);
+
+  const probeId = probeIdRead.ok && typeof probeIdRead.value === "string" ? probeIdRead.value : "";
+  const requirementKey = requirementKeyRead.ok && typeof requirementKeyRead.value === "string" ? requirementKeyRead.value : "";
+  const encodeObservable = encodeRead.ok && typeof encodeRead.value === "function"
+    ? (observable: TObservable) => encodeRead.value!.call(spec, observable)
+    : null;
+  const parseResponse = parseRead.ok && typeof parseRead.value === "function"
+    ? (response: unknown) => parseRead.value!.call(spec, response)
+    : null;
+
+  const correctModel = correctRead.ok ? captureModel<TInput, TObservable>(correctRead.value) : { id: "", predict: null };
+  if (!isValidObservableKey(probeId) || !isValidObservableKey(requirementKey) || !isValidObservableKey(correctModel.id)) {
+    issues.add("probe_identity_incomplete");
+  }
+  if (!parseResponse) issues.add("probe_identity_incomplete");
+  if (!inputRead.ok || !encodeObservable) issues.add("prediction_failed");
+
+  let rawHypotheses: unknown[] = [];
+  if (hypothesesRead.ok && Array.isArray(hypothesesRead.value)) {
+    const copyRead = safeRead(() => [...hypothesesRead.value]);
+    if (copyRead.ok) rawHypotheses = copyRead.value;
+    else issues.add("prediction_failed");
+  } else if (!hypothesesRead.ok) {
+    issues.add("prediction_failed");
+  }
+  const hypotheses = rawHypotheses.map(item => captureModel<TInput, TObservable>(item));
+  if (hypotheses.length === 0) issues.add("no_competing_hypotheses");
+
+  const ids = [correctModel.id, ...hypotheses.map(row => row.id)];
+  if (new Set(ids).size !== ids.length || ids.some(id => !isValidObservableKey(id))) {
+    issues.add("duplicate_model_id");
+  }
+
+  const inputValue = inputRead.ok ? inputRead.value : (undefined as TInput);
+  const correctKey = correctRead.ok && correctRead.value
+    ? predictKey(inputRead.ok, inputValue, encodeObservable, correctModel.predict, issues)
+    : (issues.add("prediction_failed"), null);
   const predictions: ProbeModelPrediction[] = [
-    { modelId: spec.correctModel?.id ?? "", role: "correct", observableKey: correctKey },
-    ...hypotheses.map(hypothesis => ({
+    Object.freeze({ modelId: correctModel.id, role: "correct" as const, observableKey: correctKey }),
+    ...hypotheses.map(hypothesis => Object.freeze({
       modelId: hypothesis.id,
       role: "misconception" as const,
-      observableKey: predictKey(spec, hypothesis, issues),
+      observableKey: predictKey(inputRead.ok, inputValue, encodeObservable, hypothesis.predict, issues),
     })),
   ];
 
@@ -122,20 +239,106 @@ export function verifyProbeDistinguishability<TInput, TObservable>(
   if (ambiguousPairs.length) issues.add("ambiguous_hypothesis_pair");
   if (degenerateAgainstCorrectModel.length) issues.add("degenerate_against_correct_model");
 
-  return {
-    probeId: spec.probeId,
-    distinguishable: issues.size === 0,
-    predictions,
-    ambiguousPairs: ambiguousPairs.sort((x, y) => x.a.localeCompare(y.a) || x.b.localeCompare(y.b)),
-    degenerateAgainstCorrectModel: degenerateAgainstCorrectModel.sort((x, y) => x.hypothesisId.localeCompare(y.hypothesisId)),
-    issues: [...issues].sort(),
-  };
+  const distinguishable = issues.size === 0;
+  const report: ProbeDistinguishabilityReport = Object.freeze({
+    probeId,
+    distinguishable,
+    predictions: Object.freeze(predictions) as ProbeModelPrediction[],
+    ambiguousPairs: Object.freeze(
+      ambiguousPairs.sort((x, y) => x.a.localeCompare(y.a) || x.b.localeCompare(y.b)),
+    ) as ProbeDistinguishabilityReport["ambiguousPairs"],
+    degenerateAgainstCorrectModel: Object.freeze(
+      degenerateAgainstCorrectModel.sort((x, y) => x.hypothesisId.localeCompare(y.hypothesisId)),
+    ) as ProbeDistinguishabilityReport["degenerateAgainstCorrectModel"],
+    issues: Object.freeze([...issues].sort()) as ProbeDistinguishabilityIssue[],
+  });
+
+  const hypothesisByObservableKey = new Map<string, string>();
+  if (distinguishable) {
+    for (const row of misconceptions) {
+      if (row.observableKey !== null) hypothesisByObservableKey.set(row.observableKey, row.modelId);
+    }
+  }
+
+  return Object.freeze({
+    probeId,
+    requirementKey,
+    report,
+    correctObservableKey: distinguishable ? correctKey : null,
+    hypothesisByObservableKey,
+    observableKey: encodeObservable,
+    parseResponse,
+  });
+}
+
+/** Deterministic H_A != H_B and H_i != M* pre-check for a single probe input. */
+export function verifyProbeDistinguishability<TInput, TObservable>(
+  spec: DistinguishableProbeSpec<TInput, TObservable>,
+): ProbeDistinguishabilityReport {
+  return snapshotAndVerifyProbe(spec).report;
 }
 
 export interface ProbeResponseClassification {
   observableKey: string | null;
   match: { role: "correct" | "misconception"; modelId: string } | null;
   wellFormed: boolean;
+}
+
+export interface SnapshotResponseClassification {
+  classification: ProbeResponseClassification;
+  /** True when `parseResponse` produced a value but `observableKey` threw or returned an invalid key. */
+  encodingFailed: boolean;
+}
+
+/**
+ * Attribute a learner response against an already-captured immutable probe snapshot.
+ * Never re-invokes model predictors; rejects non-string/empty observable keys and
+ * never attributes a match when the snapshot failed distinguishability verification.
+ */
+export function classifyProbeResponseWithSnapshot<TObservable>(
+  snapshot: VerifiedProbeSnapshot<TObservable>,
+  response: unknown,
+): SnapshotResponseClassification {
+  if (!snapshot.parseResponse || !snapshot.observableKey) {
+    return { classification: { observableKey: null, match: null, wellFormed: false }, encodingFailed: true };
+  }
+  let observable: TObservable | null | undefined;
+  try {
+    observable = snapshot.parseResponse(response);
+  } catch {
+    observable = null;
+  }
+  if (observable === null || observable === undefined) {
+    return { classification: { observableKey: null, match: null, wellFormed: false }, encodingFailed: false };
+  }
+  let key: unknown;
+  try {
+    key = snapshot.observableKey(observable);
+  } catch {
+    return { classification: { observableKey: null, match: null, wellFormed: false }, encodingFailed: true };
+  }
+  if (!isValidObservableKey(key)) {
+    return { classification: { observableKey: null, match: null, wellFormed: false }, encodingFailed: true };
+  }
+  if (!snapshot.report.distinguishable || snapshot.correctObservableKey === null) {
+    return { classification: { observableKey: key, wellFormed: true, match: null }, encodingFailed: false };
+  }
+  if (key === snapshot.correctObservableKey) {
+    const correctModelId = snapshot.report.predictions[0]!.modelId;
+    return {
+      classification: { observableKey: key, wellFormed: true, match: { role: "correct", modelId: correctModelId } },
+      encodingFailed: false,
+    };
+  }
+  const matchedHypothesisId = snapshot.hypothesisByObservableKey.get(key) ?? null;
+  return {
+    classification: {
+      observableKey: key,
+      wellFormed: true,
+      match: matchedHypothesisId ? { role: "misconception", modelId: matchedHypothesisId } : null,
+    },
+    encodingFailed: false,
+  };
 }
 
 /**
@@ -146,16 +349,5 @@ export function classifyProbeResponse<TInput, TObservable>(
   spec: DistinguishableProbeSpec<TInput, TObservable>,
   response: unknown,
 ): ProbeResponseClassification {
-  let observable: TObservable | null;
-  try {
-    observable = spec.parseResponse(response);
-  } catch {
-    observable = null;
-  }
-  if (observable === null) return { observableKey: null, match: null, wellFormed: false };
-  const key = spec.observableKey(observable);
-  const report = verifyProbeDistinguishability(spec);
-  const matches = report.predictions.filter(row => row.observableKey === key);
-  const only = matches.length === 1 ? matches[0]! : null;
-  return { observableKey: key, wellFormed: true, match: only ? { role: only.role, modelId: only.modelId } : null };
+  return classifyProbeResponseWithSnapshot(snapshotAndVerifyProbe(spec), response).classification;
 }

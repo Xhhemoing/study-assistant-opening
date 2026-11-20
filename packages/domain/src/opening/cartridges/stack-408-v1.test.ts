@@ -60,6 +60,48 @@ describe("408.stack.v1 simulators", () => {
       expect(verdict === "feasible").toBe(valid.has(candidatePops.join(",")));
     }
   });
+
+  it("handles repeated push symbols consistently between feasibility checking and sequence enumeration", () => {
+    const uniquePermutations = (values: number[]): number[][] => {
+      const seen = new Set<string>();
+      const out: number[][] = [];
+      for (const perm of permutations(values)) {
+        const key = perm.join(",");
+        if (!seen.has(key)) { seen.add(key); out.push(perm); }
+      }
+      return out;
+    };
+
+    for (const pushOrder of [[1, 2, 1], [1, 2, 1, 3], [1, 1, 2, 2], [1, 2, 1, 3, 4]]) {
+      const enumerated = enumerateFeasiblePopSequences(pushOrder);
+      const enumeratedKeys = enumerated.map(row => row.join(","));
+      // Enumeration must not emit duplicate sequences.
+      expect(new Set(enumeratedKeys).size).toBe(enumeratedKeys.length);
+      const valid = new Set(enumeratedKeys);
+      for (const candidatePops of uniquePermutations(pushOrder)) {
+        const verdict = simulateCorrectFeasibility({ pushOrder, candidatePops }).verdict;
+        expect(verdict === "feasible").toBe(valid.has(candidatePops.join(",")));
+      }
+    }
+
+    // Backtracking required: popping the first 1 immediately dead-ends, whereas pushing past it succeeds.
+    expect(simulateCorrectFeasibility({ pushOrder: [1, 2, 1, 3], candidatePops: [1, 3, 2, 1] }))
+      .toEqual({ verdict: "feasible", firstViolationIndex: null });
+    expect(simulateCorrectFeasibility({ pushOrder: [1, 2, 1, 3, 4], candidatePops: [1, 4, 3, 2, 1] }))
+      .toEqual({ verdict: "feasible", firstViolationIndex: null });
+
+    // Exact violation index on repeated-symbol LIFO and multiplicity violations.
+    expect(simulateCorrectFeasibility({ pushOrder: [1, 2, 1, 3], candidatePops: [3, 1, 1, 2] }))
+      .toEqual({ verdict: "infeasible", firstViolationIndex: 2 });
+    expect(simulateCorrectFeasibility({ pushOrder: [1, 2, 1], candidatePops: [1, 1, 1] }))
+      .toEqual({ verdict: "infeasible", firstViolationIndex: 2 });
+    expect(simulateBypassLifoFeasibility({ pushOrder: [1, 2, 1], candidatePops: [1, 1, 2] }))
+      .toEqual({ verdict: "feasible", firstViolationIndex: null });
+    expect(simulateBypassLifoFeasibility({ pushOrder: [1, 2, 1], candidatePops: [1, 1, 1] }))
+      .toEqual({ verdict: "infeasible", firstViolationIndex: 2 });
+    expect(simulateFifoQueueConfusionFeasibility({ pushOrder: [1, 2, 1], candidatePops: [1, 2, 1] }))
+      .toEqual({ verdict: "feasible", firstViolationIndex: null });
+  });
 });
 
 describe("408.stack.v1 probes", () => {

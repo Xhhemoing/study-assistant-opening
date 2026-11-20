@@ -186,9 +186,13 @@ export const CARTRIDGE_LEVEL_METHODS: Readonly<Record<CartridgeCapabilityLevel, 
 };
 
 function declares(cartridge: AnyTeachingCartridge, level: CartridgeCapabilityLevel): boolean {
-  const parsed = cartridgeManifestSchema.safeParse(cartridge.manifest);
-  return parsed.success && meetsCapabilityLevel(parsed.data.level, level)
-    && hasMethods(cartridge, CARTRIDGE_LEVEL_METHODS[level]);
+  try {
+    const parsed = cartridgeManifestSchema.safeParse(cartridge.manifest);
+    return parsed.success && meetsCapabilityLevel(parsed.data.level, level)
+      && hasMethods(cartridge, CARTRIDGE_LEVEL_METHODS[level]);
+  } catch {
+    return false;
+  }
 }
 
 export function hasSchedulableCapability<TState>(
@@ -206,7 +210,11 @@ export function hasMaterialReactiveCapability<TState>(
 export function hasEvidenceCapability<TState>(
   cartridge: ContinuityCartridge<TState>,
 ): cartridge is EvidenceCartridge<TState> {
-  const evidence = (cartridge as Partial<EvidenceCartridge<TState>>).evidenceContract;
-  return declares(cartridge as AnyTeachingCartridge, "L4_EVIDENCE")
-    && Boolean(evidence?.evaluatorVersion && evidence.specVersion);
+  try {
+    const evidence = (cartridge as Partial<EvidenceCartridge<TState>>).evidenceContract;
+    return declares(cartridge as AnyTeachingCartridge, "L4_EVIDENCE")
+      && Boolean(evidence?.evaluatorVersion && evidence.specVersion);
+  } catch {
+    return false;
+  }
 }

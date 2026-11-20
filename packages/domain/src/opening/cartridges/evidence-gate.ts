@@ -1,4 +1,9 @@
-import { verifyProbeDistinguishability, type ProbeDistinguishabilityReport } from "./probe-protocol";
+import { evaluateProbeWithSnapshot } from "./capability-helpers";
+import {
+  snapshotAndVerifyProbe,
+  type DistinguishableProbeSpec,
+  type ProbeDistinguishabilityReport,
+} from "./probe-protocol";
 import type { CartridgeRegistry } from "./registry";
 import { hasEvidenceCapability, type CartridgeCapabilityLevel, type CartridgeProbeEvaluation } from "./types";
 
@@ -18,12 +23,15 @@ export type CartridgeEvidenceGateReasonCode =
   | "cartridge_version_mismatch"
   | "cartridge_level_below_evidence"
   | "cartridge_probe_unknown"
+  | "cartridge_probe_lookup_failed"
+  | "cartridge_probe_identity_mismatch"
   | "cartridge_probe_not_distinguishable"
   | "cartridge_probe_requirement_mismatch"
   | "cartridge_response_invalid"
   | "cartridge_outcome_unverified"
   | "cartridge_outcome_conflict"
   | "cartridge_evaluation_failed"
+  | "cartridge_evaluation_mismatch"
   | "cartridge_evidence_qualified";
 
 export interface CartridgeEvidenceQualification {
@@ -40,6 +48,24 @@ export interface CartridgeEvidenceQualification {
 export interface CartridgeEvidenceObservationFacts {
   outcome?: string | null;
   requirementKey?: string | null;
+}
+
+function evaluationsMatch(
+  expected: CartridgeProbeEvaluation,
+  actual: unknown,
+): actual is CartridgeProbeEvaluation {
+  if (!actual || typeof actual !== "object") return false;
+  try {
+    const candidate = actual as Partial<CartridgeProbeEvaluation>;
+    return candidate.probeId === expected.probeId
+      && candidate.requirementKey === expected.requirementKey
+      && candidate.outcome === expected.outcome
+      && candidate.diagnosis === expected.diagnosis
+      && candidate.matchedHypothesisId === expected.matchedHypothesisId
+      && candidate.observableKey === expected.observableKey;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -59,21 +85,46 @@ export function qualifyCartridgeEmission(
   const reject = (code: CartridgeEvidenceGateReasonCode) => ({ ...result, reasonCodes: [code] });
   const cartridge = registry.getCartridge(emission.cartridgeId);
   if (!cartridge) return reject("cartridge_unregistered");
-  result.level = cartridge.manifest.level;
-  if (cartridge.manifest.version !== emission.cartridgeVersion) return reject("cartridge_version_mismatch");
-  if (!hasEvidenceCapability(cartridge)) return reject("cartridge_level_below_evidence");
-  const probe = cartridge.getProbe(emission.probeId);
-  if (!probe) return reject("cartridge_probe_unknown");
-  result.distinguishability = verifyProbeDistinguishability(probe);
-  if (!result.distinguishability.distinguishable) return reject("cartridge_probe_not_distinguishable");
-  if (observation.requirementKey && observation.requirementKey !== probe.requirementKey) {
-    return reject("cartridge_probe_requirement_mismatch");
-  }
+  let manifestVersion: string;
   try {
-    result.evaluation = cartridge.evaluateProbeResponse(emission.probeId, emission.response);
+    result.level = cartridge.manifest.level;
+    manifestVersion = cartridge.manifest.version;
   } catch {
     return reject("cartridge_evaluation_failed");
   }
+  if (manifestVersion !== emission.cartridgeVersion) return reject("cartridge_version_mismatch");
+  if (!hasEvidenceCapability(cartridge)) return reject("cartridge_level_below_evidence");
+
+  let probe: DistinguishableProbeSpec<unknown, unknown> | null;
+  try {
+    probe = cartridge.getProbe(emission.probeId);
+  } catch {
+    return reject("cartridge_probe_lookup_failed");
+  }
+  if (!probe || typeof probe !== "object") return reject("cartridge_probe_unknown");
+
+  const snapshot = snapshotAndVerifyProbe(probe);
+  result.distinguishability = snapshot.report;
+  if (snapshot.probeId !== emission.probeId) return reject("cartridge_probe_identity_mismatch");
+  if (!snapshot.report.distinguishable) return reject("cartridge_probe_not_distinguishable");
+  if (observation.requirementKey && observation.requirementKey !== snapshot.requirementKey) {
+    return reject("cartridge_probe_requirement_mismatch");
+  }
+
+  const verified = evaluateProbeWithSnapshot(snapshot, emission.response);
+  if (verified.encodingFailed) return reject("cartridge_evaluation_failed");
+
+  let cartridgeEvaluation: unknown;
+  try {
+    cartridgeEvaluation = cartridge.evaluateProbeResponse(emission.probeId, emission.response);
+  } catch {
+    return reject("cartridge_evaluation_failed");
+  }
+  if (!evaluationsMatch(verified.evaluation, cartridgeEvaluation)) {
+    return reject("cartridge_evaluation_mismatch");
+  }
+
+  result.evaluation = verified.evaluation;
   if (result.evaluation.diagnosis === "invalid_response") return reject("cartridge_response_invalid");
   if (result.evaluation.outcome === "unverified") return reject("cartridge_outcome_unverified");
   if (observation.outcome != null && observation.outcome !== result.evaluation.outcome) {

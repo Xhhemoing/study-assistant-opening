@@ -18,6 +18,7 @@ export type CartridgeRegistrationIssueCode =
   | "evidence_probes_missing"
   | "evidence_probe_id_duplicate"
   | "evidence_probe_lookup_mismatch"
+  | "evidence_probe_lookup_failed"
   | "evidence_probe_not_distinguishable"
   | "evidence_probe_listing_failed";
 
@@ -45,7 +46,13 @@ function validateEvidenceContracts(
   cartridge: EvidenceCartridge<unknown>,
   issues: CartridgeRegistrationIssue[],
 ): ProbeDistinguishabilityReport[] {
-  const contract = cartridge.evidenceContract;
+  let contract: EvidenceCartridge<unknown>["evidenceContract"] | undefined;
+  try {
+    contract = cartridge.evidenceContract;
+  } catch (error) {
+    issues.push({ code: "evidence_contract_missing", detail: String(error) });
+    contract = undefined;
+  }
   if (!contract?.evaluatorVersion || !contract.specVersion) {
     issues.push({ code: "evidence_contract_missing", detail: "evidenceContract.evaluatorVersion/specVersion required" });
   }
@@ -63,15 +70,24 @@ function validateEvidenceContracts(
   const seen = new Set<string>();
   const reports: ProbeDistinguishabilityReport[] = [];
   for (const probe of probes) {
-    if (seen.has(probe.probeId)) issues.push({ code: "evidence_probe_id_duplicate", detail: probe.probeId });
-    seen.add(probe.probeId);
-    if (cartridge.getProbe(probe.probeId) !== probe) {
-      issues.push({ code: "evidence_probe_lookup_mismatch", detail: probe.probeId });
-    }
     const report = verifyProbeDistinguishability(probe);
     reports.push(report);
+    const probeId = report.probeId;
+    if (probeId && seen.has(probeId)) issues.push({ code: "evidence_probe_id_duplicate", detail: probeId });
+    if (probeId) seen.add(probeId);
+    let lookedUp: unknown;
+    let lookupFailed = false;
+    try {
+      lookedUp = cartridge.getProbe(probeId);
+    } catch (error) {
+      lookupFailed = true;
+      issues.push({ code: "evidence_probe_lookup_failed", detail: `${probeId}: ${String(error)}` });
+    }
+    if (!lookupFailed && lookedUp !== probe) {
+      issues.push({ code: "evidence_probe_lookup_mismatch", detail: probeId });
+    }
     if (!report.distinguishable) {
-      issues.push({ code: "evidence_probe_not_distinguishable", detail: `${probe.probeId}: ${report.issues.join(", ")}` });
+      issues.push({ code: "evidence_probe_not_distinguishable", detail: `${probeId}: ${report.issues.join(", ")}` });
     }
   }
   return reports;
@@ -86,7 +102,13 @@ export function validateCartridge(candidate: unknown): CartridgeValidationReport
   if (!candidate || typeof candidate !== "object") {
     return { ok: false, issues: [{ code: "cartridge_not_object", detail: typeof candidate }], probeReports: [] };
   }
-  const parsed = cartridgeManifestSchema.safeParse((candidate as { manifest?: unknown }).manifest);
+  let rawManifest: unknown;
+  try {
+    rawManifest = (candidate as { manifest?: unknown }).manifest;
+  } catch (error) {
+    return { ok: false, probeReports: [], issues: [{ code: "manifest_invalid", detail: String(error) }] };
+  }
+  const parsed = cartridgeManifestSchema.safeParse(rawManifest);
   if (!parsed.success) {
     return { ok: false, probeReports: [],
       issues: parsed.error.issues.map(issue => ({ code: "manifest_invalid" as const, detail: `${issue.path.join(".")}: ${issue.message}` })) };
@@ -94,7 +116,13 @@ export function validateCartridge(candidate: unknown): CartridgeValidationReport
   const manifest = parsed.data;
   const issues: CartridgeRegistrationIssue[] = [];
   for (const method of CARTRIDGE_LEVEL_METHODS[manifest.level]) {
-    if (typeof (candidate as Record<string, unknown>)[method] !== "function") {
+    let hasMethod = false;
+    try {
+      hasMethod = typeof (candidate as Record<string, unknown>)[method] === "function";
+    } catch {
+      hasMethod = false;
+    }
+    if (!hasMethod) {
       issues.push({ code: "missing_capability_method", detail: `${manifest.level} requires ${method}()` });
     }
   }
