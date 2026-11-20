@@ -18,10 +18,17 @@ const weekRange = /\d+(?:\s*[-－至]\s*\d+)?/.source;
 const weekListPattern = `(${weekRange}(?:\\s*[,，、]\\s*${weekRange})*)`;
 const paritySuffix = /(?:\s*[(（]?([单双])周?[)）]?)?/.source;
 const inlineWeeks = new RegExp(`第?\\s*${weekListPattern}\\s*([单双])?周(?!次|[一二三四五六日天0-9])${paritySuffix}`);
-const labeledWeeks = new RegExp(`周次\\s*[:：]?\\s*第?\\s*${weekListPattern}\\s*([单双])?周?${paritySuffix}`);
+const labeledWeeks = new RegExp(`(?:周次\\s*[:：]?|周\\s*[:：])\\s*第?\\s*${weekListPattern}\\s*([单双])?周?${paritySuffix}`);
 // A bare 周1 can name a weekday. Require a range or list after the prefix.
 const leadingWeeks = new RegExp(`周\\s*(?=\\d+\\s*[-－至,，、]\\s*\\d)${weekListPattern}\\s*([单双])?周?${paritySuffix}`);
-const columnWeeks = new RegExp(`^第?\\s*${weekListPattern}\\s*([单双])?周?${paritySuffix}$`);
+// Consume one complete list and its delimiter so a parity suffix applies to the whole list.
+const columnSegment = new RegExp(
+  /((?:\s*[[（【(])*)(?:\s*(周次|周)\s*[:：]?)?\s*第?\s*/.source + weekListPattern
+  + /\s*([单双])?周?(?:\s*([单双])周?)?/.source
+  + /((?:\s*[)）】\]])*)\s*([,，、;；]|$)/.source,
+  "y",
+);
+const matchingClose: Record<string, string> = { "(": ")", "（": "）", "[": "]", "【": "】" };
 const periodPattern = /([0-9]+)\s*[-－至]\s*([0-9]+)\s*节/;
 
 function text(value: CellValue): string {
@@ -39,29 +46,46 @@ function address(row: number, column: number): string {
   return `${result}${row + 1}`;
 }
 
-function weekAnnotation(value: string, column = false) {
-  if (column) {
-    const singleWeek = value.match(/^周\s*(\d+)$/);
-    if (singleWeek) return Number(singleWeek[1]) <= 60 ? singleWeek : null;
-  }
-  return value.match(labeledWeeks) ?? value.match(leadingWeeks) ?? value.match(column ? columnWeeks : inlineWeeks);
-}
-
-function weeks(match: RegExpMatchArray | null): number[] | undefined {
-  if (!match) return undefined;
-  const parity = match[2] ?? match[3];
-  const result = new Set<number>();
-  for (const part of match[1]!.split(/[,，、]/)) {
+function addWeeks(result: Set<number>, list: string, parity?: string): boolean {
+  for (const part of list.split(/[,，、]/)) {
     const pieces = part.split(/[-－至]/).map(Number);
     const first = pieces[0] ?? NaN;
     const last = pieces[1] ?? first;
-    if (!Number.isSafeInteger(last) || first < 1 || first > last) return undefined;
+    if (!Number.isSafeInteger(last) || first < 1 || first > last) return false;
     for (let week = first; week <= last; week++) {
       if (!parity || week % 2 === (parity === "单" ? 1 : 0)) result.add(week);
-      if (result.size > 60) return undefined; // WeekSession accepts at most 60 distinct weeks.
+      if (result.size > 60) return false; // WeekSession accepts at most 60 distinct weeks.
     }
   }
-  return result.size ? [...result] : undefined;
+  return true;
+}
+
+function columnWeekList(value: string): number[] | undefined {
+  // Resolve parenthesized parity suffixes before matching wrappers around week lists.
+  const source = value.replace(/\s+/g, " ").replace(/^周次\s*[:：]?\s*/, "")
+    .replace(/\(\s*([单双]周?)\s*\)|（\s*([单双]周?)\s*）/g, "$1$2");
+  const result = new Set<number>();
+  const closers: string[] = [];
+  const segments = new RegExp(columnSegment);
+  while (true) {
+    const match = segments.exec(source);
+    if (!match) return undefined;
+    const [, open, prefix, list, beforeWeek, afterWeek, close, separator] = match;
+    for (const char of open!.replace(/\s/g, "")) closers.push(matchingClose[char]!);
+    for (const char of close!.replace(/\s/g, "")) {
+      if (closers.pop() !== char) return undefined;
+    }
+    if (prefix === "周" && Number(list) > 60) return undefined;
+    if (!addWeeks(result, list!, beforeWeek ?? afterWeek)) return undefined;
+    if (!separator) break;
+  }
+  return !closers.length && result.size ? [...result] : undefined;
+}
+
+function inlineWeekList(match: RegExpMatchArray | null): number[] | undefined {
+  if (!match) return undefined;
+  const result = new Set<number>();
+  return addWeeks(result, match[1]!, match[2] ?? match[3]) && result.size ? [...result] : undefined;
 }
 
 function day(value: string): number | undefined {
@@ -113,7 +137,8 @@ export function parseTimetableSheets(sheets: TimetableSheet[]): ParsedTimetable 
         if (courseColumn >= 0 && c !== courseColumn) continue;
         const lines = value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
         for (const line of lines) {
-          const annotation = weekAnnotation(line.replace(periodPattern, ""));
+          const withoutPeriods = line.replace(periodPattern, "");
+          const annotation = withoutPeriods.match(labeledWeeks) ?? withoutPeriods.match(leadingWeeks) ?? withoutPeriods.match(inlineWeeks);
           const weekText = annotation?.[0].trim() ?? "";
           const courseName = line
             // Keep a parenthesized parity suffix attached until the whole week annotation is removed.
@@ -122,7 +147,7 @@ export function parseTimetableSheets(sheets: TimetableSheet[]): ParsedTimetable 
             .replace(/\s+[0-9]+\s*[-－至]\s*[0-9]+\s*节\s*$/, "")
             .trim();
           const weekCell = weekColumn >= 0 ? text(rows[r]![weekColumn]!) : "";
-          const weekList = weeks(weekCell ? weekAnnotation(weekCell, true) : annotation);
+          const weekList = weekCell ? columnWeekList(weekCell) : inlineWeekList(annotation);
           const weekday = day(dayColumn >= 0 ? text(rows[r]![dayColumn]!) : header[c]!);
           const range = period(line) ?? (periodColumn >= 0 ? period(text(rows[r]![periodColumn]!)) : undefined);
           if (!weekList || weekday === undefined || !range) {

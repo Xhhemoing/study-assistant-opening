@@ -87,6 +87,7 @@ it.each(["周一", "周二", "周三", "周四", "周五", "周六", "周日", "
 
 it.each([
   ["线性代数(周1-8) 1-2节", "线性代数", [1, 2, 3, 4, 5, 6, 7, 8], 1, 2],
+  ["线性代数(周：1－3，5) 1-2节", "线性代数", [1, 2, 3, 5], 1, 2],
   ["物理2（1-16周） 3-4节", "物理2", Array.from({ length: 16 }, (_, i) => i + 1), 3, 4],
   ["物理2 1-4周 3-4节", "物理2", [1, 2, 3, 4], 3, 4],
   ["物理2 周1-16单 3-4节", "物理2", [1, 3, 5, 7, 9, 11, 13, 15], 3, 4],
@@ -107,4 +108,54 @@ it.each(["物理2", "英语4", "高数1 1-2节", "物理2 周三", "物理2 周�
   ] }]);
   expect(result.sessions).toEqual([]);
   expect(result.warnings).toMatchObject([{ raw: title, address: "A2" }]);
+});
+
+const semesterWeeks = Array.from({ length: 16 }, (_, i) => i + 1);
+
+it.each([
+  ["(1-16周)", semesterWeeks],
+  ["（1-16周）", semesterWeeks],
+  ["[1-16周]", semesterWeeks],
+  ["【1-16周】", semesterWeeks],
+  [" 【 （ [ ( 1-16周 ) ] ） 】 ", semesterWeeks],
+  ["(第1-8周单)", [1, 3, 5, 7]],
+  ["(周3)", [3]],
+  ["(周：1－3)", [1, 2, 3]],
+  ["周次：(1-3周)", [1, 2, 3]],
+  ["(1-8周), (10-16双周)", [1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 16]],
+  ["【(1-4周)、[6周]；（8周）】; (10周)，12周", [1, 2, 3, 4, 6, 8, 10, 12]],
+  ["1-8周(单)", [1, 3, 5, 7]],
+  ["(1-16周单)", [1, 3, 5, 7, 9, 11, 13, 15]],
+  ["(1-4,7-10周（双周）)", [2, 4, 8, 10]],
+] as const)("imports the entire wrapped weeks expression %s", (column, weeks) => {
+  const result = parseTimetableSheets([{ sheet: "课表", data: [
+    ["课程", "星期", "周次", "节次"], ["物理", "周三", column, "1-2节"],
+  ] }]);
+  expect(result.sessions).toMatchObject([{ courseName: "物理", weeks }]);
+  expect(result.warnings).toEqual([]);
+});
+
+it("preserves both courses in a workbook mixing plain and wrapped week columns", () => {
+  const result = parseTimetableSheets([{ sheet: "课表", data: [
+    ["课程", "星期", "周次", "节次"],
+    ["数学", "周一", "1-16周", "1-2节"],
+    ["物理", "周三", "(1-16周)", "1-2节"],
+  ] }]);
+  expect(result.warnings).toEqual([]);
+  expect(result.sessions).toEqual([
+    { courseName: "数学", weekday: 1, weeks: semesterWeeks, startPeriod: 1, endPeriod: 2 },
+    { courseName: "物理", weekday: 3, weeks: semesterWeeks, startPeriod: 1, endPeriod: 2 },
+  ]);
+});
+
+it.each([
+  "(1-16周", "1-16周)", "（1-16周)", "【(1-16周】)", "(周1-8", "周次：1周）",
+  "1-8周(单", "1-8周(单）", "1-8周单)", "(1-8周), (周三)", "星期三", "(星期三)",
+  "(1周)(2周)", "(1周),", "(1周);()", "(1周);(2-61周)",
+])("warns and drops the entire row for invalid week expression %s", column => {
+  const result = parseTimetableSheets([{ sheet: "课表", data: [
+    ["课程", "星期", "周次", "节次"], ["物理", "周三", column, "1-2节"],
+  ] }]);
+  expect(result.warnings).toMatchObject([{ raw: "物理", address: "A2" }]);
+  expect(result.sessions).toEqual([]);
 });
