@@ -34,6 +34,8 @@ export type ModelGatewayCallOptions = {
   input: ProviderInput;
   /** Durable ledger key: retries of one logical operation reuse one reservation. */
   operationId: string;
+  /** Stable base for caller-derived retries. Null opts out for a single-model call. */
+  requestFamily?: BudgetedCallOptions["requestFamily"];
   resultRef?: string;
   persistResult?: BudgetedCallOptions["persistResult"];
   /** Reservation floor for paid models, e.g. a configured per-call minimum. */
@@ -146,6 +148,7 @@ export function createModelGateway(deps: {
           input: options.input,
           requestId: operationId,
           operationId,
+          requestFamily: options.requestFamily === undefined ? options.operationId : options.requestFamily,
           purpose: modelTaskSpec(task).purpose,
           parentBudget: options.parentBudget ?? { id: options.operationId },
           ...(options.resultRef ? { resultRef: options.resultRef } : {}),

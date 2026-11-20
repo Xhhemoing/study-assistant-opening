@@ -35,13 +35,18 @@ describe("ephemeral explicit not-sent retry", () => {
     await expect(f.service.replyEphemeral(scope, input("original"))).rejects.toMatchObject({
       code: "EPHEMERAL_REQUEST_NOT_SENT", status: 409,
     });
-    expect(f.release).toHaveBeenCalledExactlyOnceWith("eph:original", "not_sent");
+    const original = f.reserve.mock.calls[0]![0];
+    expect(f.release).toHaveBeenCalledExactlyOnceWith(original.requestId, "not_sent");
     await expect(f.service.replyEphemeral(scope, input("original"))).rejects.toMatchObject({ code: "EPHEMERAL_REQUEST_NOT_SENT" });
     expect(f.complete).toHaveBeenCalledOnce();
     const result = await f.service.replyEphemeral(scope, input("explicit-next"));
     expect(result.text).toBe(output.text);
     expect(f.complete).toHaveBeenCalledTimes(2);
-    expect(f.reserve.mock.calls.map(([request]) => request.requestId)).toEqual(["eph:original", "eph:original", "eph:explicit-next"]);
+    const [, replay, next] = f.reserve.mock.calls.map(([request]) => request);
+    expect(replay?.requestId).toBe(original.requestId);
+    expect(next?.requestId).not.toBe(original.requestId);
+    expect(original.legacyRequestFamily).toBe("eph:original");
+    expect(next?.legacyRequestFamily).toBe("eph:explicit-next");
   });
 
   it.each(["not_sent", "cancelled"])("identifies only confirmed released/%s as eligible for a later explicit attempt", async releaseReason => {

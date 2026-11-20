@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ProviderInput } from "@aistudy/contracts";
 import { createOpeningProvider, openingProviderRequestBody } from "./provider";
+import { onFailedResponseUsage } from "./provider-stream";
 
 const input: ProviderInput = { instruction: "Teach", text: "Explain", chunks: [], mode: "explain", maxOutputTokens: 100,
   mediaCapability: "text_only", imageParts: [], outputFormat: "markdown" };
@@ -61,6 +62,28 @@ describe("direct Markdown streaming", () => {
     const h = harness(); h.write(event({ choices: [{ index: 0, delta: { refusal: "refused" } }] }));
     await expect(h.provider.complete(input)).rejects.toMatchObject({ code: "PROVIDER_REFUSAL", requestSent: true });
     expect(h.cancel).toHaveBeenCalledOnce();
+  });
+
+  it.each(["one chunk", "two chunks"])("collects terminal usage after length (%s)", async chunks => {
+    const h = harness(), receipt = vi.fn();
+    const truncated = delta("partial") + event({ choices: [{ index: 0, delta: { content: "truncated" }, finish_reason: "length" }] });
+    const trailer = event({ choices: [], usage: { prompt_tokens: 37, completion_tokens: 11 } }) + done;
+    if (chunks === "one chunk") h.write(truncated + trailer);
+    else { h.write(truncated); h.write(trailer); }
+    h.close();
+    const deliver = Object.assign(vi.fn(), { [onFailedResponseUsage]: receipt });
+    await expect(h.provider.complete(input, undefined, deliver)).rejects.toMatchObject({ code: "PROVIDER_RESPONSE" });
+    expect(receipt).toHaveBeenCalledExactlyOnceWith({ requestId: "stream-1", inputTokens: 37, outputTokens: 11, cachedInputTokens: null });
+    expect(deliver).toHaveBeenCalledExactlyOnceWith("partial");
+  });
+
+  it("discards interim usage when the stream produces more text before EOF", async () => {
+    const h = harness(), receipt = vi.fn();
+    h.write(delta("partial") + event({ choices: [], usage: { prompt_tokens: 37, completion_tokens: 1 } }) + delta(" additional output"));
+    h.close();
+    const deliver = Object.assign(vi.fn(), { [onFailedResponseUsage]: receipt });
+    await expect(h.provider.complete(input, undefined, deliver)).rejects.toMatchObject({ code: "PROVIDER_RESPONSE" });
+    expect(receipt).not.toHaveBeenCalled();
   });
 
   it("cancels the body when delivering a delta fails", async () => {

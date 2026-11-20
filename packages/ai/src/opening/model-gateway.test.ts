@@ -3,6 +3,7 @@ import type { ProviderInput, ProviderOutput } from "@aistudy/contracts";
 import type { BudgetedRepository } from "./budgeted-call";
 import { createModelGateway, isNotSentFailure, reservationTerms, type ResolvedTaskModel } from "./model-gateway";
 import { OpeningModelRoutingError } from "./model-routing";
+import { createOpeningProvider } from "./provider";
 
 const scope = { workspaceId: "w", ownerUserId: "u" };
 const output: ProviderOutput = { text: "{}", citedChunkIds: [], requestId: null, candidates: [], inputTokens: 1_000_000, outputTokens: 1_000_000 };
@@ -84,6 +85,29 @@ describe("model gateway", () => {
     expect(onTextDelta).toHaveBeenCalledExactlyOnceWith("partial"); expect(unknown).toHaveBeenCalledOnce(); expect(fallback).not.toHaveBeenCalled();
   });
 
+  it.each([
+    { kind: "refusal", choice: { message: { refusal: "no" } }, code: "PROVIDER_REFUSAL" },
+    { kind: "malformed JSON", choice: { message: { content: "{broken" } }, code: "PROVIDER_RESPONSE" },
+    { kind: "length", choice: { message: { content: "{}" }, finish_reason: "length" }, code: "PROVIDER_RESPONSE" },
+  ])("settles a charged HTTP 200 $kind without fallback or publication", async ({ choice, code }) => {
+    const { repo } = budget();
+    const settle = vi.fn(repo.settle), markUnknown = vi.fn(), persistResult = vi.fn(), resolveFallback = vi.fn();
+    const fetchImpl = vi.fn(async () => Response.json({
+      choices: [choice], usage: { prompt_tokens: 37, completion_tokens: 11 },
+    }));
+    const provider = createOpeningProvider({ baseUrl: "https://model.example", apiKey: "key", model: "model", fetchImpl });
+    const gateway = createModelGateway({ resolve: async () => ({ ...model(), provider, inputCentsPerMillion: 1_000_000,
+      outputCentsPerMillion: 2_000_000 }), resolveFallback });
+    await expect(gateway.call(scope, "knowledge.extract", { input: { ...input, outputFormat: "json" },
+      budget: { ...repo, settle, markUnknown }, operationId: "charged-failure", resultRef: "invalid-answer", persistResult,
+    })).rejects.toMatchObject({ code });
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    expect(settle).toHaveBeenCalledExactlyOnceWith("res-1", 59);
+    expect(markUnknown).not.toHaveBeenCalled();
+    expect(resolveFallback).not.toHaveBeenCalled();
+    expect(persistResult).not.toHaveBeenCalled();
+  });
+
   it("fails before reserving when the route cannot be resolved", async () => {
     const { calls, repo } = budget();
     const gateway = createModelGateway({ resolve: async () => { throw new OpeningModelRoutingError("所选模型已移除"); } });
@@ -100,6 +124,21 @@ describe("model gateway fallback and free tier", () => {
     outputCentsPerMillion: 0,
     billing: "free_tier",
     dailyRequestCap: 200,
+  });
+
+  it("keeps a failed release acknowledgement from authorizing another send", async () => {
+    const { OpeningProviderError } = await import("./provider");
+    const { repo } = budget();
+    const ledgerError = Object.assign(new Error("release acknowledgement lost"), { code: "BUDGET_EXCEEDED" });
+    const release = vi.fn(async () => { throw ledgerError; });
+    const complete = vi.fn(async () => { throw new OpeningProviderError("PROVIDER_RATE_LIMIT", "429", true, true); });
+    const resolveFallback = vi.fn(async () => fallbackModel());
+    const gateway = createModelGateway({ resolve: async () => model(complete), resolveFallback });
+    await expect(gateway.call(scope, "practice.exam", { budget: { ...repo, release }, input, operationId: "release-unknown" }))
+      .rejects.toBe(ledgerError);
+    expect(complete).toHaveBeenCalledOnce();
+    expect(release).toHaveBeenCalledExactlyOnceWith("release-unknown", "not_sent");
+    expect(resolveFallback).not.toHaveBeenCalled();
   });
 
   it("uses the explicit fallback under its own ledger key when the primary was rate limited (not sent)", async () => {

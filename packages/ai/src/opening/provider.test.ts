@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { createOpeningProvider, openingProviderRequestBody } from "./provider";
+import { onFailedResponseUsage } from "./provider-stream";
 
 const input = {
   instruction: "answer",
@@ -65,6 +66,23 @@ describe("opening provider", () => {
       model: "model",
       fetchImpl: refused,
     }).complete(input)).rejects.toMatchObject({ code: "PROVIDER_REFUSAL" });
+  });
+
+  it.each([
+    { kind: "refusal", choice: { message: { refusal: "no" } }, code: "PROVIDER_REFUSAL" },
+    { kind: "malformed task JSON", choice: { message: { content: "{broken" } }, code: "PROVIDER_RESPONSE" },
+    { kind: "length", choice: { message: { content: '{"answer":1}' }, finish_reason: "length" }, code: "PROVIDER_RESPONSE" },
+  ])("reports HTTP 200 usage even when the answer fails with $kind", async ({ choice, code }) => {
+    const provider = createOpeningProvider({ baseUrl: "https://model.example", apiKey: "key", model: "model",
+      fetchImpl: vi.fn().mockResolvedValue(response({
+        id: "charged", choices: [choice], usage: { prompt_tokens: 37, completion_tokens: 11, prompt_cache_hit_tokens: 13 },
+      })),
+    });
+    const receipt = vi.fn();
+    const deliver = Object.assign(vi.fn(), { [onFailedResponseUsage]: receipt });
+    await expect(provider.complete({ ...input, outputFormat: "json" }, undefined, deliver)).rejects.toMatchObject({ code });
+    expect(receipt).toHaveBeenCalledExactlyOnceWith({ requestId: "charged", inputTokens: 37, outputTokens: 11, cachedInputTokens: 13 });
+    expect(deliver).not.toHaveBeenCalled();
   });
 
   it("preserves structured citations and pending candidates", async () => {

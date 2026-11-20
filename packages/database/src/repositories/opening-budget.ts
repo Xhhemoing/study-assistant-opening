@@ -95,6 +95,8 @@ export type ReserveInput = {
   purpose: string;
   amountCents: number;
   requestId: string;
+  requestFamily?: string | null;
+  legacyRequestFamily?: string;
   /**
    * Free-tier models: at most this many non-released reservations for the snapshot's
    * model on the local budget day. Required for (and only meaningful with) amountCents 0.
@@ -302,17 +304,35 @@ async function capAndDay(tx: BudgetSql, workspaceId: string, options: OpeningBud
   return { capCents: effective.capCents, budgetDay, unlimited, parentCapCents: unlimited ? options.parentCapCents! : effective.capCents };
 }
 
-// Gateway fallback and deterministic retries reuse the root, including a fallback of a retry.
+// Older callers omitted the root. Keep their legacy key interpretation.
 const attemptSuffix = /(?::fallback|:retry:[^:]+)+$/;
 
-async function assertRequestFamilyAvailable(tx: TransactionSql, workspaceId: string, input: ReserveInput) {
-  const root = input.requestId.replace(attemptSuffix, "");
+function attemptsOf(tx: TransactionSql, family: string) {
+  return tx`(request_id = ${family} OR (
+    starts_with(request_id, ${family + ":"})
+    AND substring(request_id FROM char_length(${family}::text) + 1) ~ ${"^" + attemptSuffix.source}
+  ))`;
+}
+
+async function assertRequestFamilyAvailable(tx: TransactionSql, workspaceId: string, input: ReserveInput,
+  excludedRequestId: string, parentId: string | undefined) {
+  if (input.requestFamily === null) return;
+  const family = input.requestFamily;
+  const root = family ?? input.requestId.replace(attemptSuffix, "");
+  const familyMatch = family === undefined
+    ? tx`(request_id = ${root} OR starts_with(request_id, ${root + ":"}))
+      AND regexp_replace(request_id, ${attemptSuffix.source}, '') = ${root}`
+    : attemptsOf(tx, family);
+  // The former client-key format could alias another client's fallback.
+  // Only its original parent can identify ownership of an older attempt.
+  const legacyMatch = parentId && input.legacyRequestFamily
+    ? tx`OR (parent_interaction_id = ${parentId} AND ${attemptsOf(tx, input.legacyRequestFamily)})`
+    : tx``;
   const [sibling] = await tx`
     SELECT id, state, purpose, result_ref, outcome_unknown_at, reconciled_at, pending_reconcile_cents
     FROM opening_budget_reservations
-    WHERE workspace_id = ${workspaceId} AND request_id <> ${input.requestId}
-      AND (request_id = ${root} OR starts_with(request_id, ${root + ":"}))
-      AND regexp_replace(request_id, ${attemptSuffix.source}, '') = ${root}
+    WHERE workspace_id = ${workspaceId} AND request_id <> ${excludedRequestId}
+      AND ((${familyMatch}) ${legacyMatch})
       AND NOT (state = 'released' AND COALESCE(release_reason IN ('not_sent', 'cancelled'), false)
         AND outcome_unknown_at IS NULL AND COALESCE(pending_reconcile_cents, 0) = 0)
     ORDER BY (state = 'reserved') DESC, id
@@ -506,7 +526,13 @@ export function createOpeningBudgetRepository(
 
         const { capCents, budgetDay, unlimited, parentCapCents } = await capAndDay(tx, scope.workspaceId, options, instant);
 
-        const existing = await tx`SELECT * FROM opening_budget_reservations WHERE request_id=${input.requestId}`;
+        const legacyExact = parentBudget && input.legacyRequestFamily && input.requestFamily
+          ? tx`OR (workspace_id = ${scope.workspaceId} AND parent_interaction_id = ${parentBudget.id}
+            AND request_id = ${input.legacyRequestFamily + input.requestId.slice(input.requestFamily.length)})`
+          : tx``;
+        const existing = await tx`SELECT * FROM opening_budget_reservations
+          WHERE request_id = ${input.requestId} ${legacyExact}
+          ORDER BY (request_id = ${input.requestId}) DESC LIMIT 1`;
         const existingRow = existing[0] ? mapReservation(existing[0] as Record<string, unknown>) : null;
         // An operator switching back to a finite day must not invalidate an already
         // recorded implicit parent's replay. This never moves a request to a new parent.
@@ -526,7 +552,7 @@ export function createOpeningBudgetRepository(
         // Check siblings before admitting any new attempt or replaying a release.
         if (!existingRow || existingRow.state === "released"
           || (existingRow.state === "reserved" && !existingRow.executionClaimedAt && !existingRow.outcomeUnknownAt)) {
-          await assertRequestFamilyAvailable(tx, scope.workspaceId, input);
+          await assertRequestFamilyAvailable(tx, scope.workspaceId, input, existingRow?.requestId ?? input.requestId, parentBudget?.id);
         }
         // An existing attributed key always replays, including a frozen/unknown
         // parent: replay never authorizes a second provider request.

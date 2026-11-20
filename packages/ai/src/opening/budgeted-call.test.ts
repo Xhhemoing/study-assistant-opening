@@ -3,6 +3,7 @@ import {
   ledgerActionForProviderError,
   runBudgetedCall,
   settleCentsForActual,
+  isPostProviderFailure,
 } from "./budgeted-call";
 import { createOpeningProvider, OpeningProviderError } from "./provider";
 import type { ProviderInput, ProviderOutput } from "@aistudy/contracts";
@@ -172,6 +173,43 @@ describe("durable provider receipts", () => {
       }));
       expect(b.repo.settled).toEqual([{ reservationId: "res-1", actualCents: 35 }]);
       expect(b.repo.unknowns).toEqual([]);
+    }
+  });
+
+  it.each([
+    { failure: "truncated stream", format: "markdown", code: "PROVIDER_RESPONSE", billed: true,
+      body: 'data: {"choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":"length"}]}\n\ndata: {"choices":[],"usage":{"prompt_tokens":37,"completion_tokens":11}}\n\ndata: [DONE]\n\n' },
+    { failure: "interim stream usage", format: "markdown", code: "PROVIDER_RESPONSE", billed: false,
+      body: 'data: {"choices":[{"index":0,"delta":{"content":"partial"}}]}\n\ndata: {"choices":[],"usage":{"prompt_tokens":37,"completion_tokens":1}}\n\ndata: {"choices":[{"index":0,"delta":{"content":" more"}}]}\n\n' },
+    { failure: "HTTP refusal", format: "json", code: "PROVIDER_REFUSAL", billed: true,
+      body: '{"choices":[{"message":{"refusal":"no"}}],"usage":{"prompt_tokens":37,"completion_tokens":11}}' },
+    { failure: "malformed HTTP task JSON", format: "json", code: "PROVIDER_RESPONSE", billed: true,
+      body: '{"choices":[{"message":{"content":"{broken"}}],"usage":{"prompt_tokens":37,"completion_tokens":11}}' },
+    { failure: "HTTP length finish", format: "json", code: "PROVIDER_RESPONSE", billed: true,
+      body: '{"choices":[{"finish_reason":"length","message":{"content":"{}"}}],"usage":{"prompt_tokens":37,"completion_tokens":11}}' },
+  ] as const)("accounts for $failure without persisting an answer", async ({ format, code, billed, body }) => {
+    const b = fakeBudget(), persistResult = vi.fn();
+    const settle = vi.fn(b.api.settle);
+    const actualCents = vi.fn((receipt: ProviderOutput) => receipt.inputTokens! + receipt.outputTokens!);
+    const provider = createOpeningProvider({ baseUrl: "https://model.example", apiKey: "key", model: "model",
+      fetchImpl: vi.fn(async () => new Response(body)),
+    });
+    const failed = runBudgetedCall({ ...options, provider, budget: { ...b.api, settle }, actualCents, persistResult,
+      resultRef: "must-not-publish", input: { instruction: options.input.instruction, text: options.input.text,
+        maxOutputTokens: 64, chunks: [], mode: "explain", mediaCapability: "text_only", imageParts: [], outputFormat: format },
+    });
+    await expect(failed).rejects.toMatchObject({ code });
+    expect(isPostProviderFailure(await failed.catch(error => error))).toBe(billed);
+    expect(persistResult).not.toHaveBeenCalled();
+    expect(b.repo.released).toEqual([]);
+    if (billed) {
+      expect(actualCents).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ inputTokens: 37, outputTokens: 11 }));
+      expect(settle).toHaveBeenCalledExactlyOnceWith("res-1", 48);
+      expect(b.repo.unknowns).toEqual([]);
+    } else {
+      expect(actualCents).not.toHaveBeenCalled();
+      expect(settle).not.toHaveBeenCalled();
+      expect(b.repo.unknowns).toEqual(["res-1"]);
     }
   });
 
@@ -413,7 +451,7 @@ describe("parent interaction budget boundary", () => {
     await expect(runBudgetedCall({ ...options, budget: api, provider: { complete: async () => output }, actualCents: () => Number.NaN,
       parentBudget: { id: "study-turn:1" },
     })).rejects.toMatchObject({ code: "BUDGET_INVALID_ACTUAL" });
-    expect(repo.unknowns).toEqual([]);
+    expect(repo.unknowns).toEqual(["res-1"]);
     expect(repo.released).toEqual([]);
     expect(repo.settled).toHaveLength(0);
   });

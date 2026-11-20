@@ -1,10 +1,11 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { createModelGateway, createOpeningProvider, OpeningProviderError, type ModelGateway } from "@aistudy/ai";
+import { createModelGateway, createOpeningProvider, OpeningModelRoutingError, OpeningProviderError, type ModelGateway } from "@aistudy/ai";
 import type { ProviderInput, ProviderOutput } from "@aistudy/contracts";
 import { createOpeningBudgetRepository, readOpeningDailyBudgetUsage } from "@aistudy/database";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import type { Sql } from "postgres";
 import { closeRace, openRaceSession, track, waitUntilBlocked, type RaceSession } from "./opening-race-helpers";
+import { createEphemeralTutorService } from "../../apps/web/src/features/opening/tutor/ephemeral-service";
 
 /** Deterministic condition (not elapsed time): pid has an ungranted lock request. */
 async function waitUntilWaiting(observer: Sql, pid: number, label: string): Promise<void> {
@@ -101,7 +102,7 @@ describe("opening budget races (two independent connections, deterministic barri
     });
     const settings = { input, operationId: "exam:not-sent", budget: gatewayBudget(repo) };
     await expect(gateway.call(scope, "practice.exam", settings)).resolves.toEqual(output);
-    await expect(gateway.call(scope, "practice.exam", { ...settings, operationId: "exam:not-sent:retry:released-id" }))
+    await expect(gateway.call(scope, "practice.exam", { ...settings, operationId: "exam:not-sent:retry:released-id", requestFamily: settings.operationId }))
       .rejects.toMatchObject({ code: "BUDGET_REPLAY_COMPLETED" });
     expect(complete).toHaveBeenCalledOnce();
     const rows = await fixture.sql`SELECT request_id,state,release_reason FROM opening_budget_reservations
@@ -125,6 +126,115 @@ describe("opening budget races (two independent connections, deterministic barri
     await expect(budgetB.reserve(scope, { ...primary, requestId: "family:retry:prior:fallback" }))
       .rejects.toMatchObject({ code: "BUDGET_OUTCOME_UNKNOWN", disposition: { reservationId: reservation.id } });
     await expect(budgetB.reserve(scope, { ...primary, requestId: "family:independent:1" })).resolves.toMatchObject({ state: "reserved" });
+  });
+
+  it.each([
+    { clientKey: "lesson-123:retry", reason: "not_sent" },
+    { clientKey: "lesson-123:fallback", reason: "cancelled" },
+  ] as const)("serializes fallback and retry against the primary for $clientKey", async ({ clientKey, reason }) => {
+    const scope = fixture.scope;
+    const budgetA = createOpeningBudgetRepository(a.sql, { envCapCents: 100 });
+    const budgetB = createOpeningBudgetRepository(b.sql, { envCapCents: 100 });
+    const requestFamily = `eph:${clientKey}`;
+    const terms = { purpose: "tutor", amountCents: 1, requestFamily };
+    const primary = await budgetA.reserve(scope, { ...terms, requestId: requestFamily });
+    const fallback = { ...terms, requestId: `${requestFamily}:fallback` };
+    const retry = { ...terms, requestId: `${requestFamily}:retry:${primary.id}:fallback` };
+    const locked = latch(), unlock = latch();
+    const hold = track(a.sql.begin(async tx => {
+      await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} FOR UPDATE`;
+      locked.open();
+      await unlock.wait;
+    }));
+    await locked.wait;
+    const pending = track(budgetB.reserve(scope, fallback));
+    try {
+      await waitUntilBlocked(fixture.sql, b.pid, a.pid, "fallback reserve", /FOR UPDATE/);
+    } finally {
+      unlock.open();
+      await hold;
+    }
+    await expect(pending).rejects.toMatchObject({ code: "BUDGET_EXECUTION_CLAIMED", disposition: { reservationId: primary.id } });
+    expect(await budgetA.claimExecution(scope, primary.id)).toBe(true);
+    await budgetA.markUnknown(scope, primary.id);
+    for (const attempt of [fallback, retry]) {
+      await expect(budgetB.reserve(scope, attempt))
+        .rejects.toMatchObject({ code: "BUDGET_OUTCOME_UNKNOWN", disposition: { reservationId: primary.id } });
+    }
+    // Unknown charges cannot be released. Use a fresh operation with the same suffix
+    // to verify the separate path where the primary is confirmed unsent.
+    const releasedFamily = `fresh-${requestFamily}`;
+    await budgetA.reserve(scope, { ...terms, requestFamily: releasedFamily, requestId: releasedFamily });
+    await budgetA.release(scope, releasedFamily, reason);
+    await expect(budgetB.reserve(scope, { ...terms, requestFamily: releasedFamily, requestId: `${releasedFamily}:fallback` }))
+      .resolves.toMatchObject({ state: "reserved" });
+  });
+
+  it("uses one ephemeral family across connections and keeps suffix-shaped client keys independent", async () => {
+    const scope = fixture.scope;
+    const budgetA = createOpeningBudgetRepository(a.sql, { envCapCents: 100 });
+    const budgetB = createOpeningBudgetRepository(b.sql, { envCapCents: 100 });
+    const primaryStarted = latch(), finishPrimary = latch();
+    const primary = vi.fn(async () => { primaryStarted.open(); await finishPrimary.wait; return output; });
+    const fallback = vi.fn(async () => output);
+    const otherPrimary = vi.fn(async () => output);
+    let primaryAvailable = false;
+    const defaults = {
+      sources: { listOwnedIds: async () => [] },
+      chunks: { listForSources: async () => [] },
+      privacy: { snapshot: async () => ({ epoch: 0, excludedSourceIds: [] }), currentEpoch: async () => 0 },
+      config: { maxContextCharacters: 1000, maxOutputTokens: 32, reservedCents: 1, inputCentsPerMillion: 1, outputCentsPerMillion: 1 },
+    };
+    const serviceA = createEphemeralTutorService({ ...defaults, budget: gatewayBudget(budgetA), provider: { complete: primary } });
+    const serviceB = createEphemeralTutorService({ ...defaults, budget: gatewayBudget(budgetB), provider: null,
+      resolveModel: async () => {
+        if (!primaryAvailable) throw new OpeningModelRoutingError("primary unavailable");
+        return model("other-primary", 1, otherPrimary);
+      },
+      resolveFallbackModel: async () => model("fallback", 1, fallback),
+    });
+    const turn = (clientKey: string) => ({ text: "Explain the derivation", sourceIds: [], history: [], clientKey });
+    const inFlight = track(serviceA.replyEphemeral(scope, turn("lesson-123:retry")));
+    try {
+      await Promise.race([primaryStarted.wait, inFlight]);
+      await expect(serviceB.replyEphemeral(scope, turn("lesson-123:retry"))).rejects.toMatchObject({ code: "BUDGET_EXECUTION_CLAIMED" });
+      expect(fallback).not.toHaveBeenCalled();
+      await expect(serviceB.replyEphemeral(scope, turn("lesson-123"))).resolves.toMatchObject({ text: "answer" });
+      primaryAvailable = true;
+      for (const other of ["lesson-123:fallback", "lesson-123:retry:bar"]) {
+        await expect(serviceB.replyEphemeral(scope, turn(other))).resolves.toMatchObject({ text: "answer" });
+      }
+    } finally {
+      finishPrimary.open();
+      await inFlight;
+    }
+    // A completed fallback replays when the primary route returns.
+    await expect(serviceA.replyEphemeral(scope, turn("lesson-123"))).rejects.toMatchObject({ code: "BUDGET_REPLAY_COMPLETED" });
+    expect(primary).toHaveBeenCalledOnce();
+    expect(fallback).toHaveBeenCalledOnce();
+    expect(otherPrimary).toHaveBeenCalledTimes(2);
+    const rows = await fixture.sql`SELECT DISTINCT request_id FROM opening_budget_reservations WHERE workspace_id=${scope.workspaceId}`;
+    expect(rows).toHaveLength(4);
+  });
+
+  it("replays a legacy exact key for its parent even when it looks like another client's fallback", async () => {
+    const scope = fixture.scope;
+    const budgetA = createOpeningBudgetRepository(a.sql, { envCapCents: 100 });
+    const budgetB = createOpeningBudgetRepository(b.sql, { envCapCents: 100 });
+    const base = "eph:lesson-123";
+    const legacyFallback = `${base}:fallback`;
+    const parentBudget = { id: `study-ephemeral:${scope.workspaceId}:lesson-123` };
+    const legacy = await budgetA.reserve(scope, { purpose: "tutor", requestId: legacyFallback, amountCents: 1, parentBudget });
+    await budgetA.settle(scope, legacy.id, 1, { resultRef: "ephemeral:old" });
+    const family = "eph-v2:original";
+    const terms = { purpose: "tutor", amountCents: 1, parentBudget, requestFamily: family, legacyRequestFamily: base };
+    await expect(budgetB.reserve(scope, { ...terms, requestId: `${family}:fallback` }))
+      .resolves.toMatchObject({ id: legacy.id, requestId: legacyFallback, state: "completed", resultRef: "ephemeral:old" });
+    await expect(budgetB.reserve(scope, { ...terms, requestId: family }))
+      .rejects.toMatchObject({ code: "BUDGET_REPLAY_COMPLETED", disposition: { reservationId: legacy.id } });
+    await expect(budgetB.reserve(scope, { ...terms, requestId: "eph-v2:distinct", requestFamily: "eph-v2:distinct",
+      legacyRequestFamily: legacyFallback, parentBudget: { id: `${parentBudget.id}:fallback` },
+    })).resolves.toMatchObject({ state: "reserved" });
   });
 
   it("records actual cost for an interrupted SSE response without persisting or replaying partial text", async () => {

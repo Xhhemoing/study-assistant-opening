@@ -1,17 +1,23 @@
 import { providerOutputSchema, type ProviderOutput } from "@aistudy/contracts";
-import { parseProviderUsage } from "./usage";
+import { parseProviderUsage, type ParsedProviderUsage } from "./usage";
 
-export const onInterruptedStreamUsage = Symbol("onInterruptedStreamUsage");
-export type InterruptedStreamUsage = Pick<ProviderOutput, "requestId" | "cachedInputTokens"> & {
+export const onFailedResponseUsage = Symbol("onFailedResponseUsage");
+export type FailedResponseUsage = Pick<ProviderOutput, "requestId" | "cachedInputTokens"> & {
   inputTokens: number;
   outputTokens: number;
 };
 export type ProviderTextDelta = ((delta: string) => void | Promise<void>) & {
-  [onInterruptedStreamUsage]?: (usage: InterruptedStreamUsage) => void;
+  [onFailedResponseUsage]?: (usage: FailedResponseUsage) => void;
 };
 
 export class OpeningProviderStreamError extends Error {
   constructor(readonly code: "PROVIDER_RESPONSE" | "PROVIDER_REFUSAL", message: string) { super(message); }
+}
+
+function hasGeneratedDelta(raw: unknown): boolean {
+  if (!raw || typeof raw !== "object" || !("delta" in raw) || !raw.delta || typeof raw.delta !== "object") return false;
+  return Object.entries(raw.delta).some(([key, value]) =>
+    key !== "role" && value != null && value !== "" && (!Array.isArray(value) || value.length > 0));
 }
 
 async function deliverDelta(callback: ProviderTextDelta, delta: string, signal: AbortSignal) {
@@ -30,7 +36,9 @@ export async function readOpeningProviderStream(body: ReadableStream<Uint8Array>
 }): Promise<ProviderOutput> {
   const reader = body.getReader(), decoder = new TextDecoder("utf-8", { fatal: true });
   let buffer = "", data: string[] = [], text = "", bytes = 0, done = false, stopped = false;
-  let requestId: string | null = null, inputTokens: number | null = null, outputTokens: number | null = null, rawCachedInputTokens: number | null = null;
+  let requestId: string | null = null;
+  let latestUsage: ParsedProviderUsage | null = null;
+  let answerFailure: OpeningProviderStreamError | undefined;
   function invalid(message: string): never { throw new OpeningProviderStreamError("PROVIDER_RESPONSE", message); }
   const abort = () => { void reader.cancel(options.signal.reason).catch(() => undefined); };
   options.signal.addEventListener("abort", abort, { once: true });
@@ -42,24 +50,36 @@ export async function readOpeningProviderStream(body: ReadableStream<Uint8Array>
     try { parsed = JSON.parse(payload); } catch { invalid("provider returned malformed stream JSON"); }
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) invalid("invalid provider stream event");
     const value = parsed as Record<string, unknown>;
+    // Usage preceding any later generated delta describes only partial output.
+    // Usage in this same frame can describe the output it carries.
+    if (Array.isArray(value.choices) && value.choices.some(hasGeneratedDelta)) latestUsage = null;
     // Even an embedded rate-limit error follows a sent request; never release its reservation.
     if (value.error) invalid("provider stream failed");
     if (typeof value.id === "string") requestId = value.id;
+    if (!Array.isArray(value.choices)) invalid("invalid provider stream choices");
     if (value.usage != null) {
       const parsedUsage = parseProviderUsage(value.usage, { clamp: false });
       if (!parsedUsage) invalid("invalid provider stream usage");
-      if (parsedUsage.inputTokens !== null) inputTokens = parsedUsage.inputTokens;
-      if (parsedUsage.outputTokens !== null) outputTokens = parsedUsage.outputTokens;
-      if (parsedUsage.cachedInputTokens !== null) rawCachedInputTokens = parsedUsage.cachedInputTokens;
+      latestUsage = {
+        inputTokens: parsedUsage.inputTokens ?? latestUsage?.inputTokens ?? null,
+        outputTokens: parsedUsage.outputTokens ?? latestUsage?.outputTokens ?? null,
+        cachedInputTokens: parsedUsage.cachedInputTokens ?? latestUsage?.cachedInputTokens ?? null,
+      };
     }
-    if (!Array.isArray(value.choices)) invalid("invalid provider stream choices");
     for (const raw of value.choices) {
+      if (answerFailure) break;
       if (!raw || typeof raw !== "object") invalid("invalid provider stream choice");
       const choice = raw as Record<string, unknown>;
       if (choice.index !== 0) invalid("unexpected provider stream choice");
       const delta = choice.delta as Record<string, unknown> | undefined;
+      if (delta?.refusal) throw new OpeningProviderStreamError("PROVIDER_REFUSAL", "provider refused the request");
+      if (choice.finish_reason != null && choice.finish_reason !== "stop") {
+        // Keep consuming the bounded stream so a trailing accounting frame is retained.
+        answerFailure = new OpeningProviderStreamError("PROVIDER_RESPONSE", "provider did not finish the answer");
+        stopped = true;
+        break;
+      }
       if (!delta || typeof delta !== "object") invalid("invalid provider stream delta");
-      if (delta.refusal) throw new OpeningProviderStreamError("PROVIDER_REFUSAL", "provider refused the request");
       if (delta.tool_calls || delta.function_call) invalid("unexpected streamed tool call");
       if (delta.content != null && typeof delta.content !== "string") invalid("invalid provider stream content");
       if (typeof delta.content === "string" && delta.content.length) {
@@ -76,10 +96,7 @@ export async function readOpeningProviderStream(body: ReadableStream<Uint8Array>
         }
         options.signal.throwIfAborted();
       }
-      if (choice.finish_reason != null) {
-        if (choice.finish_reason !== "stop") invalid("provider did not finish the answer");
-        stopped = true;
-      }
+      if (choice.finish_reason === "stop") stopped = true;
     }
   }
   async function consume() {
@@ -94,10 +111,10 @@ export async function readOpeningProviderStream(body: ReadableStream<Uint8Array>
       else if (line.startsWith("data:")) data.push(line.slice(5).replace(/^ /, ""));
     }
   }
-  function cachedInputTokens() {
-    return rawCachedInputTokens === null || inputTokens === null
-      ? rawCachedInputTokens
-      : Math.min(rawCachedInputTokens, inputTokens);
+  function usageSnapshot(): ParsedProviderUsage {
+    const { inputTokens = null, outputTokens = null, cachedInputTokens = null } = latestUsage ?? {};
+    return { inputTokens, outputTokens, cachedInputTokens: cachedInputTokens === null || inputTokens === null
+      ? cachedInputTokens : Math.min(cachedInputTokens, inputTokens) };
   }
   try {
     options.signal.throwIfAborted();
@@ -112,18 +129,20 @@ export async function readOpeningProviderStream(body: ReadableStream<Uint8Array>
       buffer += decoder.decode(chunk.value, { stream: true });
       await consume();
     }
+    if (answerFailure) throw answerFailure;
     if (!done) invalid("provider stream was interrupted");
     if (!text.trim()) invalid("provider returned an empty answer");
     const output = providerOutputSchema.safeParse({
-      text, citedChunkIds: [], candidates: [], requestId, inputTokens, outputTokens, cachedInputTokens: cachedInputTokens(),
+      text, citedChunkIds: [], candidates: [], requestId, ...usageSnapshot(),
     });
     if (!output.success) invalid("invalid provider stream output");
     return output.data;
   } catch (error) {
     // The provider adapter classifies transport errors after parsing returns.
     // Deliver validated usage separately so the wrapping cannot lose it.
+    const { inputTokens, outputTokens, cachedInputTokens } = usageSnapshot();
     if (inputTokens !== null && outputTokens !== null) {
-      options.onTextDelta?.[onInterruptedStreamUsage]?.({ requestId, inputTokens, outputTokens, cachedInputTokens: cachedInputTokens() });
+      options.onTextDelta?.[onFailedResponseUsage]?.({ requestId, inputTokens, outputTokens, cachedInputTokens });
     }
     throw error;
   } finally {

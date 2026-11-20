@@ -220,7 +220,12 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
       }
       const imageOnlySources = isImageOnlySourceChunks(chunks);
       const preferPage = selectedPage ?? (imageOnlySources ? 1 : undefined);
-      const requestId = input.clientKey ? `eph:${input.clientKey}` : deps.requestKey?.() ?? `eph:${randomUUID()}`;
+      const legacyRequestFamily = input.clientKey ? `eph:${input.clientKey}` : undefined;
+      // Encode the entire opaque client key before adding any attempt suffixes.
+      // The workspace is part of the identity because ledger keys are globally unique.
+      const requestId = input.clientKey
+        ? `eph-v2:${scope.workspaceId}:${Buffer.from(input.clientKey, "utf16le").toString("base64url")}`
+        : deps.requestKey?.() ?? `eph:${randomUUID()}`;
       const parentBudget: ParentInteractionBudget = { id: `study-ephemeral:${scope.workspaceId}:${input.clientKey ?? requestId}` };
       const retrievalInput = {
         // The repository validates ownership for this selected course; materialUse
@@ -233,7 +238,8 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
         maxCharacters: deps.config.maxContextCharacters,
         preferChunkId: selectedChunk ?? undefined,
         preferPage,
-        operationId: requestId,
+        // Embedding has one exact attempt and keeps its original replay key.
+        operationId: legacyRequestFamily ?? requestId,
         parentBudget,
         signal,
       };
@@ -329,6 +335,8 @@ export function createEphemeralTutorService(deps: EphemeralTutorDeps) {
           input: providerInput,
           parentBudget,
           requestId: callRequestId,
+          requestFamily: requestId,
+          legacyRequestFamily,
           // Ephemeral turns persist provenance keyed by requestId.
           resultRef: `ephemeral:${requestId}`,
           reservedCents: terms.reservedCents,

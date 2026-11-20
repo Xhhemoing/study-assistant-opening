@@ -1,7 +1,7 @@
 import type { OpeningModelSnapshot, ProviderInput, ProviderOutput } from "@aistudy/contracts";
 import { OpeningProviderError, copyGradingDiagnostic, readGradingDiagnostic, recordGradingDiagnostic, type GradingDiagnosticPhase, type ProviderTextDelta } from "./provider";
 import { assertParentInteractionBudget, hasMediaInput, mediaInputCostBound, mediaInputBytes, type ParentInteractionBudget } from "./parent-interaction-budget";
-import { onInterruptedStreamUsage, type InterruptedStreamUsage } from "./provider-stream";
+import { onFailedResponseUsage, type FailedResponseUsage } from "./provider-stream";
 
 export type BudgetedProvider = {
   complete(input: ProviderInput, signal?: AbortSignal, onTextDelta?: ProviderTextDelta): Promise<ProviderOutput>;
@@ -21,6 +21,8 @@ export type BudgetedRepository = {
     modelSnapshot?: OpeningModelSnapshot;
     amountCents: number;
     requestId: string;
+    requestFamily?: string | null;
+    legacyRequestFamily?: string;
     requestCapPerDay?: number;
   }): Promise<BudgetedReservation>;
   release(requestId: string, reason?: "not_sent" | "cancelled"): Promise<unknown>;
@@ -40,6 +42,7 @@ export type BudgetedRepository = {
 /** Minimal reservation view; extra fields come from the real ledger. */
 export type BudgetedReservation = {
   id: string;
+  requestId?: string;
   state?: string;
   replayed?: boolean;
   outcomeUnknownAt?: Date | null;
@@ -123,6 +126,10 @@ export type BudgetedCallOptions = {
    * Additive; not yet in shared contracts — flag Integrator if promoting.
    */
   operationId?: string;
+  /** Base ledger key before attempt suffixes. Encode opaque client keys before deriving attempts. Null means no siblings. */
+  requestFamily?: string | null;
+  /** Previous key format, looked up only under the same persisted parent. */
+  legacyRequestFamily?: string;
   /**
    * Ledger purpose string. Defaults to "tutor" for back-compat with tutor-turn.
    * Teaching generation passes "compile-teaching-unit".
@@ -234,8 +241,11 @@ export async function runBudgetedCall(options: BudgetedCallOptions): Promise<Pro
     ...(options.modelSnapshot ? { modelSnapshot: options.modelSnapshot } : {}),
     amountCents: options.reservedCents,
     requestId: ledgerRequestId,
+    ...(options.requestFamily !== undefined ? { requestFamily: options.requestFamily } : {}),
+    ...(options.legacyRequestFamily !== undefined ? { legacyRequestFamily: options.legacyRequestFamily } : {}),
     ...(freeTier ? { requestCapPerDay: options.requestCapPerDay } : {}),
   });
+  const reservedRequestId = reservation.requestId ?? ledgerRequestId;
   const disposition = replayDisposition(reservation);
   if (disposition) throw new BudgetReplayError(disposition);
   // Execution eligibility is claimed independently and atomically: a replayed
@@ -243,32 +253,45 @@ export async function runBudgetedCall(options: BudgetedCallOptions): Promise<Pro
   if (!(await options.budget.claimExecution(reservation.id))) {
     throw new BudgetReplayError({ kind: "in_flight", reservationId: reservation.id });
   }
+  async function releaseUnsent(original: unknown) {
+    try { await options.budget.release(reservedRequestId, "not_sent"); }
+    catch (error) {
+      // Release acknowledgement failed. Surface the ledger error itself and
+      // prevent its code from authorizing fallback.
+      if (error !== null && typeof error === "object") {
+        postProviderFailures.add(error);
+        copyGradingDiagnostic(original, error);
+      }
+      throw error;
+    }
+  }
   try {
     await options.beforeSend?.();
   } catch (error) {
     // No Provider call has started: this reservation cannot have incurred usage.
-    await options.budget.release(ledgerRequestId, "not_sent");
+    await releaseUnsent(error);
     throw error;
   }
   let phase: GradingDiagnosticPhase = "provider";
   let transport: { attemptedFetch: boolean; httpStatus?: number } | undefined;
-  let interruptedUsage: InterruptedStreamUsage | undefined;
-  let onTextDelta = options.onTextDelta;
-  if (options.input.outputFormat === "markdown" && !options.input.tools?.length) {
-    // Keep accounting receipts on this call's callback, separate from text delivery.
-    onTextDelta = Object.assign(
-      (delta: string) => options.onTextDelta?.(delta),
-      { [onInterruptedStreamUsage]: (usage: InterruptedStreamUsage) => { interruptedUsage = usage; } },
-    );
-  }
+  let failedResponseUsage: FailedResponseUsage | undefined;
+  // Both response formats report validated charges for unusable answers here.
+  const onTextDelta = Object.assign(
+    (delta: string) => options.onTextDelta?.(delta),
+    { [onFailedResponseUsage]: (usage: FailedResponseUsage) => { failedResponseUsage = usage; } },
+  );
 
-  function price(receipt: ProviderOutput) {
-    const actual = options.actualCents(receipt);
-    if (!Number.isSafeInteger(actual) || actual < 0 || (actual === 0 && !freeTier)) {
-      // The receipt exists. Keep the execution claim and its hold if pricing fails.
-      throw new BudgetedCallError("BUDGET_INVALID_ACTUAL", "provider usage cannot be priced safely");
+  async function price(receipt: ProviderOutput) {
+    try {
+      const actual = options.actualCents(receipt);
+      if (!Number.isSafeInteger(actual) || actual < 0 || (actual === 0 && !freeTier)) {
+        throw new BudgetedCallError("BUDGET_INVALID_ACTUAL", "provider usage cannot be priced safely");
+      }
+      return { actual, ...settleCentsForActual(options.reservedCents, actual) };
+    } catch (error) {
+      // The request was sent. Keep the original hold and make it reconcilable.
+      return await accountFailure(error, () => options.budget.markUnknown(reservation.id));
     }
-    return { actual, ...settleCentsForActual(options.reservedCents, actual) };
   }
 
   async function settle(settlement: { actual: number; settledCents: number; overage: boolean }, resultRef?: string) {
@@ -304,27 +327,29 @@ export async function runBudgetedCall(options: BudgetedCallOptions): Promise<Pro
   try {
     let output: ProviderOutput;
     try {
-      output = onTextDelta
-        ? await options.provider.complete(options.input, options.signal, onTextDelta)
-        : await options.provider.complete(options.input, options.signal);
+      output = await options.provider.complete(options.input, options.signal, onTextDelta);
     } catch (error) {
-      const usage = interruptedUsage;
+      const usage = failedResponseUsage;
       if (usage) {
+        phase = "usage";
         return await accountFailure(error, async () => {
-          await settle(price({ ...usage, text: "", candidates: [], citedChunkIds: [] }));
+          await settle(await price({ ...usage, text: "", candidates: [], citedChunkIds: [] }));
         });
       }
       const notSent = error instanceof OpeningProviderError
         && (readGradingDiagnostic(error)?.attemptedFetch === false
           || ledgerActionForProviderError(error.code, { requestSent: error.requestSent }) === "release");
-      return await accountFailure(error, () => notSent
-        ? options.budget.release(ledgerRequestId, "not_sent")
-        : options.budget.markUnknown(reservation.id));
+      if (notSent) {
+        recordGradingDiagnostic(error, phase, transport);
+        await releaseUnsent(error);
+        throw error;
+      }
+      return await accountFailure(error, () => options.budget.markUnknown(reservation.id));
     }
     const diagnostic = readGradingDiagnostic(output);
     if (diagnostic?.attemptedFetch != null) transport = { attemptedFetch: diagnostic.attemptedFetch, httpStatus: diagnostic.httpStatus };
     phase = "usage";
-    const settlement = output.inputTokens === null || output.outputTokens === null ? null : price(output);
+    const settlement = output.inputTokens === null || output.outputTokens === null ? null : await price(output);
     phase = "persist";
     try {
       await options.persistResult?.(output, { reservationId: reservation.id, settledCents: settlement?.settledCents ?? null });
@@ -347,7 +372,7 @@ export async function runBudgetedCall(options: BudgetedCallOptions): Promise<Pro
     }
     return output;
   } catch (error) {
-    if ((phase !== "provider" || interruptedUsage) && error !== null && typeof error === "object") {
+    if (phase !== "provider" && error !== null && typeof error === "object") {
       postProviderFailures.add(error);
     }
     recordGradingDiagnostic(error, phase, transport);
