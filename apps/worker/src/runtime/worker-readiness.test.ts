@@ -77,3 +77,30 @@ it.each(["all", "learning", "parser", "logistics", "teaching", "tutor"])(
       expect(() => verify({}, { WORKER_ROLE: role === "teaching" ? "tutor" : "teaching" })).toThrow(/not ready/);
     } finally { rmSync(directory, { recursive: true, force: true }); }
   });
+
+it("samples Date.now() once per publish so clock ticks cannot exceed 15,000 ms receipt lifetime", () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "worker-ready-clock-"));
+  const file = path.join(directory, "ready.json");
+  let tick = 1_700_000_000_000;
+  const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => {
+    tick += 1;
+    return tick;
+  });
+  try {
+    const configured = { WORKER_ROLE: "tutor" };
+    createWorkerReadiness(file, { release: directory, role: "teaching", queueKinds: ["tutor"] }).publish();
+    const receipt = JSON.parse(readFileSync(file, "utf8"));
+    expect(receipt.expiresAt - receipt.checkedAt).toBe(15_000);
+    const snapshot = {
+      pid: process.pid,
+      consumerPid: process.pid,
+      consumerCwd: directory,
+      consumerArgumentPaths: [`${directory}/apps/worker/src/index.ts`],
+      environment: configured,
+    };
+    expect(() => verifyWorkerReadiness(receipt, snapshot, directory, configured, receipt.checkedAt)).not.toThrow();
+  } finally {
+    nowSpy.mockRestore();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
