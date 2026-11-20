@@ -18,7 +18,7 @@ it.each(["library_blocks", "library_revisions"])("checks only typed block citati
   const addBlock = (content: Record<string, unknown>) => {
     archive.tables[table] = [table === "library_blocks" ? { ...row, content } : { ...row, blocks: [{ ...block, content }] }];
   };
-  addBlock(block.content);
+  addBlock({ ...block.content, citationBinding: { refs: ["external-reference"] } });
   expect(validateOpeningRestore(archive, currentJournal)).toMatchObject({ allowed: true, errors: [] });
 
   const citationBinding = { blockId: id, role: "teach", status: "bound", factualSupport: "unverified",

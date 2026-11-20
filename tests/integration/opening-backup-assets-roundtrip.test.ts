@@ -199,7 +199,7 @@ it.skipIf(process.env.OPENING_TEST_DB !== "1" || !process.env.OPENING_TEST_DATAB
     const answerBlock = randomUUID(), historicalKey = randomUUID(), legacyExam = randomUUID(), attachment = randomUUID();
     const keyContent = { answer: "private standalone answer", href: "private-key.txt", bytesBase64: "YWJj" };
     const liveContent = { text: "ordinary essay", meta: { sourceId: "external-reference" } };
-    const oldBlocks = [{ id: block, type: "text", position: 0, content: { ...liveContent, text: "ordinary essay revision" } },
+    const oldBlocks = [{ id: block, type: "text", position: 0, content: { ...liveContent, text: "ordinary essay revision", citationBinding: { refs: ["external-reference"] } } },
       { id: historicalKey, type: "answer_key", position: 1, content: { answer: "private old key" } }];
     try {
       await sql.begin(async outer => {
@@ -353,17 +353,32 @@ it.skipIf(process.env.OPENING_TEST_DB !== "1" || !process.env.OPENING_TEST_DATAB
           for (const name of ["opening_exam_bindings","opening_exam_attempt_links","opening_exam_source_observations",
             "opening_exam_help_receipts"]) expect(backup.tables[name], name).toHaveLength(1);
           const historyDoc = randomUUID(), historyBlock = randomUUID(), deniedChunk = await rows.chunk(denied);
-          await tx`INSERT INTO library_documents(id,workspace_id,title,lifecycle)
-            VALUES(${historyDoc},${w},'Historical citation','confirmed')`;
+          const historyUnit = randomUUID(), historyActivity = randomUUID(), historySpec = randomUUID();
+          const historySession = randomUUID(), historyAttempt = randomUUID();
+          await tx`INSERT INTO library_documents(id,workspace_id,title,lifecycle,current_revision_number)
+            VALUES(${historyDoc},${w},'Historical citation','published',2)`;
           await tx`INSERT INTO library_blocks(id,workspace_id,document_id,type,position,content)
             VALUES(${historyBlock},${w},${historyDoc},'text',0,${tx.json(liveContent)})`;
           await tx`INSERT INTO library_revisions(workspace_id,document_id,revision_number,title,lifecycle,blocks)
             VALUES(${w},${historyDoc},1,'Historical citation','confirmed',${tx.json([{ id: historyBlock, type: "text", position: 0,
               content: { text: "excluded historical citation", citationBinding: { blockId: historyBlock, role: "teach",
                 status: "bound", factualSupport: "unverified", refs: [{ sourceId: denied, sourceVersion: 1, chunkId: deniedChunk, page: null }] } },
-            }])})`;
+            }])}),
+            (${w},${historyDoc},2,'Historical citation','published',${tx.json([{ id: historyBlock, type: "text", position: 0,
+              content: liveContent }])})`;
+          await tx`INSERT INTO opening_teaching_activities(id,workspace_id,owner_user_id,course_id,status,generate_status,intent_kind,intent_summary,source_ids,client_key)
+            VALUES(${historyActivity},${w},${u},${course},'ready','succeeded','learn_topic','Historical doc lesson',ARRAY[${source}]::uuid[],${"hist-" + historyActivity})`;
+          await tx`INSERT INTO opening_teaching_units(id,workspace_id,owner_user_id,title,document_id,current_revision_number,verification_status)
+            VALUES(${historyUnit},${w},${u},'Historical doc lesson',${historyDoc},2,'verified')`;
+          await tx`INSERT INTO opening_teaching_activity_specs(id,workspace_id,owner_user_id,activity_id,teaching_unit_id,document_id,revision_number,block_order,source_refs,verification_status,version)
+            VALUES(${historySpec},${w},${u},${historyActivity},${historyUnit},${historyDoc},2,${tx.json([{ blockId: historyBlock, blockType: "text", role: "teach" }])},${tx.json([{ sourceId: source, sourceVersion: 1 }])},'verified',1)`;
+          await tx`INSERT INTO opening_learning_sessions(id,workspace_id,owner_user_id,course_id,activity_id,skill_label,source_ids)
+            VALUES(${historySession},${w},${u},${course},${historyActivity},'hist-skill',ARRAY[${source}]::uuid[])`;
+          await tx`INSERT INTO opening_learning_attempts(id,workspace_id,owner_user_id,session_id,course_id,activity_id,skill_label,source_ids,source_versions,client_key,context_anchor)
+            VALUES(${historyAttempt},${w},${u},${historySession},${course},${historyActivity},'hist-skill',ARRAY[${source}]::uuid[],${tx.json({ [source]: 1 })},${"att-" + historyAttempt},${tx.json({ courseId: course, activityId: historyActivity, contentVersion: 1, blockId: historyBlock })})`;
           const beforeExclusion = await snapshot();
           expect(beforeExclusion.tables.library_revisions).toContainEqual(expect.objectContaining({ document_id: historyDoc }));
+          expect(beforeExclusion.tables.opening_learning_attempts).toContainEqual(expect.objectContaining({ id: historyAttempt }));
           const nativeBeforeExclusion = await dumpWorkspaceSnapshot(db, w, u);
           expect(nativeBeforeExclusion.revisions).toContainEqual(expect.objectContaining({ documentId: historyDoc }));
           nativeBackup = snapshotToPackage({ ...native, courses: [], memberships: [], documents: [

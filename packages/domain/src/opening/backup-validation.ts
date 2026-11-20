@@ -95,10 +95,20 @@ function parseCitations(value: unknown): string[] | null {
   return refs;
 }
 
+const openingCitationRoles = new Set(["teach", "prompt", "example", "answer_key"]);
+const openingCitationStatuses = new Set(["bound", "missing", "mismatch"]);
+
+function isOpeningCitationBindingEnvelope(binding: Record<string, unknown>): boolean {
+  return isUuid(binding.blockId)
+    && typeof binding.role === "string" && openingCitationRoles.has(binding.role)
+    && typeof binding.status === "string" && openingCitationStatuses.has(binding.status)
+    && binding.factualSupport === "unverified";
+}
+
 /** Both the live projection and saved revision blocks persist compiler citation lineage here. */
 export function libraryBlockSourceReferences(block: Record<string, unknown>): string[] | null {
   const binding = isRecord(block.content) ? block.content.citationBinding : undefined;
-  if (!isRecord(binding) || binding.refs === undefined) return [];
+  if (!isRecord(binding) || !isOpeningCitationBindingEnvelope(binding)) return [];
   if (!Array.isArray(binding.refs)) return null;
   return parseCitations(binding.refs)?.map(id => id.toLowerCase()) ?? null;
 }

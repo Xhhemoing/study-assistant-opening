@@ -111,7 +111,7 @@ describe("composeOpeningBackupDraft", () => {
     const value = input();
     const documentId = "33333333-3333-4333-8333-333333333333";
     const block = { id: "44444444-4444-4444-8444-444444444444", type: "text", position: 0,
-      content: { text: "Saved note", meta: { sourceId: "external-reference" } } };
+      content: { text: "Saved note", meta: { sourceId: "external-reference" }, citationBinding: { refs: ["external-reference"] } } };
     const live = { ...block, document_id: documentId, workspace_id: workspaceId };
     const revision = { id: "55555555-5555-4555-8555-555555555555", document_id: documentId,
       workspace_id: workspaceId, blocks: [block] };

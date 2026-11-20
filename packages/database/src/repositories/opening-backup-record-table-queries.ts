@@ -249,16 +249,57 @@ export async function readOpeningBackupTableRows(
   const lineage = asRows(await tx`SELECT id,root_observation_id,revises_observation_id,effective_head_id FROM opening_learning_observations WHERE workspace_id=${id} AND owner_user_id=${userId}`);
   // Preserve complete references when a privacy exclusion removes any part of a learning fact.
   const sourceIds = new Set(tables.opening_sources.map(row => row.id));
+  const initialActivityIds = new Set(tables.opening_teaching_activities.map(row => row.id));
+  const initialAssociatedUnits = new Set(tables.opening_teaching_activity_specs.map(row => row.teaching_unit_id));
+  tables.opening_teaching_activity_specs = tables.opening_teaching_activity_specs.filter(row => initialActivityIds.has(row.activity_id));
+  const initialKeptUnits = new Set(tables.opening_teaching_activity_specs.map(row => row.teaching_unit_id));
+  tables.opening_teaching_units = tables.opening_teaching_units.filter(row => !initialAssociatedUnits.has(row.id) || initialKeptUnits.has(row.id));
+  const specsBeforeLibrary = new Map<unknown, number>();
+  for (const spec of tables.opening_teaching_activity_specs) {
+    specsBeforeLibrary.set(spec.activity_id, (specsBeforeLibrary.get(spec.activity_id) ?? 0) + 1);
+  }
+  let libraryTables = await readBackupLibrary(tx, id, tables, privateExams);
+  const specsAfterLibrary = new Map<unknown, number>();
+  for (const spec of tables.opening_teaching_activity_specs) {
+    specsAfterLibrary.set(spec.activity_id, (specsAfterLibrary.get(spec.activity_id) ?? 0) + 1);
+  }
+  const droppedSpecActivities = new Set(
+    [...specsBeforeLibrary.entries()]
+      .filter(([actId, count]) => (specsAfterLibrary.get(actId) ?? 0) < count)
+      .map(([actId]) => actId),
+  );
+  if (droppedSpecActivities.size > 0) {
+    tables.opening_teaching_activities = tables.opening_teaching_activities.filter(row => !droppedSpecActivities.has(row.id));
+    const survivingActivityIds = new Set(tables.opening_teaching_activities.map(row => row.id));
+    if (tables.opening_teaching_activity_specs.some(row => !survivingActivityIds.has(row.activity_id))) {
+      const unitsFromSpecs = new Set(tables.opening_teaching_activity_specs.map(row => row.teaching_unit_id));
+      tables.opening_teaching_activity_specs = tables.opening_teaching_activity_specs.filter(row => survivingActivityIds.has(row.activity_id));
+      const keptUnitsAfterDrop = new Set(tables.opening_teaching_activity_specs.map(row => row.teaching_unit_id));
+      tables.opening_teaching_units = tables.opening_teaching_units.filter(row => !unitsFromSpecs.has(row.id) || keptUnitsAfterDrop.has(row.id));
+      libraryTables = await readBackupLibrary(tx, id, tables, privateExams);
+    }
+  }
+  const admittedRevisionIds = new Set(libraryTables.library_revisions.map(row => row.id));
   const activityIds = new Set(tables.opening_teaching_activities.map(row => row.id));
   tables.opening_learning_sessions = tables.opening_learning_sessions.filter(row => activityIds.has(row.activity_id));
   const sessionIds = new Set(tables.opening_learning_sessions.map(row => row.id));
-  tables.opening_problem_refs = tables.opening_problem_refs.filter(row => sessionIds.has(row.session_id));
+  tables.opening_problem_refs = tables.opening_problem_refs.filter(row =>
+    sessionIds.has(row.session_id) && (row.teaching_revision_id == null || admittedRevisionIds.has(row.teaching_revision_id)));
   const problemIds = new Set(tables.opening_problem_refs.map(row => row.problem_id));
   tables.opening_learning_item_versions = tables.opening_learning_item_versions.filter(row =>
-    activityIds.has(row.activity_id) && problemIds.has(row.problem_id));
+    activityIds.has(row.activity_id) && problemIds.has(row.problem_id)
+    && (row.teaching_revision_id == null || admittedRevisionIds.has(row.teaching_revision_id)));
   const admittedAnchor = (row: Record<string, unknown>) => {
-    const anchor = row.context_anchor as { activityId?: string } | null;
-    return !anchor?.activityId || activityIds.has(anchor.activityId);
+    const anchor = row.context_anchor as { activityId?: string; contentVersion?: number; blockId?: string } | null;
+    if (anchor?.activityId && !activityIds.has(anchor.activityId)) return false;
+    if (anchor?.blockId != null) {
+      return tables.opening_teaching_activity_specs.some(spec =>
+        spec.activity_id === anchor.activityId
+        && spec.version === anchor.contentVersion
+        && Array.isArray(spec.block_order)
+        && (spec.block_order as Record<string, unknown>[]).some(block => block.blockId === anchor.blockId));
+    }
+    return true;
   };
   tables.opening_learning_observations = tables.opening_learning_observations.filter(row =>
     sessionIds.has(row.session_id) && activityIds.has(row.activity_id) && (row.problem_id == null || problemIds.has(row.problem_id)));
@@ -366,7 +407,7 @@ export async function readOpeningBackupTableRows(
     WHERE workspace_id=${id} AND owner_user_id=${userId} AND id = ANY(${includedEventIds}::uuid[])
     ORDER BY session_id, version, id`);
   Object.assign(tables, await readOpeningBackupLearningLinks(tx, id, userId, tables));
-  Object.assign(tables, await readBackupLibrary(tx, id, tables, privateExams));
+  Object.assign(tables, libraryTables);
   await readBackupCourseAssets(tx, id, userId, tables);
   return tables;
 }
