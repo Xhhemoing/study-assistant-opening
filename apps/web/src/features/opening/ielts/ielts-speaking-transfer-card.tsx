@@ -42,11 +42,39 @@ export function IeltsSpeakingTransferCard({
     (initialDurationSeconds === undefined || initialDurationSeconds === candidateReceipt.durationSeconds)
       ? candidateReceipt
       : null;
-
-  const [transcript, setTranscript] = useState(startingTranscript);
-  const [durationInput, setDurationInput] = useState(
-    String(initialDurationSeconds ?? matchingReceipt?.durationSeconds ?? ""),
+  const startingDuration = String(initialDurationSeconds ?? matchingReceipt?.durationSeconds ?? "");
+  const attemptKey = JSON.stringify([
+    seed.seedId, seed.cartridgeId, seed.sourcePromptId, seed.sourceDraftId,
+    startingTranscript, startingDuration,
+    matchingReceipt?.receiptId, matchingReceipt?.createdAt, matchingReceipt?.assisted,
+  ]);
+  return (
+    <SpeakingAttempt
+      key={attemptKey}
+      seed={seed}
+      startingTranscript={startingTranscript}
+      startingDuration={startingDuration}
+      matchingReceipt={matchingReceipt}
+      onEvaluated={onEvaluated}
+    />
   );
+}
+
+function SpeakingAttempt({
+  seed,
+  startingTranscript,
+  startingDuration,
+  matchingReceipt,
+  onEvaluated,
+}: {
+  readonly seed: IeltsSpeakingPart3Seed;
+  readonly startingTranscript: string;
+  readonly startingDuration: string;
+  readonly matchingReceipt: IeltsSpeakingFeedbackReceipt | null;
+  readonly onEvaluated: IeltsSpeakingTransferCardProps["onEvaluated"];
+}) {
+  const [transcript, setTranscript] = useState(startingTranscript);
+  const [durationInput, setDurationInput] = useState(startingDuration);
   const [assisted, setAssisted] = useState(matchingReceipt?.assisted ?? false);
   const [evaluatedReceipt, setReceipt] = useState<IeltsSpeakingFeedbackReceipt | null>(matchingReceipt);
   const targets = [...getSpeakingTargets(seed.targetSpokenCollocations).values()];

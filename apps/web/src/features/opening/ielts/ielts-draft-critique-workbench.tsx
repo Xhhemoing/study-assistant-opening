@@ -55,11 +55,43 @@ function collectAllSpans(receipt: IeltsRubricReceipt): IeltsSpanEvidence[] {
   return IELTS_CRITERIA.flatMap((code) => receipt.criteria[code].evidenceSpans);
 }
 
+function draftIdentity(draft: IeltsEssayDraft) {
+  return [draft.promptId, draft.draftId, draft.version, draft.basedOnVersion, draft.assisted, draft.paragraphs];
+}
+
+function draftEditorText(draft: IeltsEssayDraft): string {
+  return draft.paragraphs.join("\n\n").replace(/\r\n?/gu, "\n");
+}
+
+const PARAGRAPH_BREAK = /\n\s*\n+/u;
+
 export function IeltsDraftCritiqueWorkbench({
   fixture = IELTS_WRITING_SPEAKING_FIXTURE,
   initialView = "draft2",
   onRevisionEvaluated,
 }: IeltsDraftCritiqueWorkbenchProps) {
+  const attemptKey = JSON.stringify([
+    fixture.promptId,
+    draftIdentity(fixture.draft1),
+    fixture.draft1Receipt.receiptId,
+    draftIdentity(fixture.draft2),
+    fixture.draft2Receipt.receiptId,
+  ]);
+  return (
+    <WritingAttempt
+      key={attemptKey}
+      fixture={fixture}
+      initialView={initialView}
+      onRevisionEvaluated={onRevisionEvaluated}
+    />
+  );
+}
+
+function WritingAttempt({
+  fixture,
+  initialView,
+  onRevisionEvaluated,
+}: IeltsDraftCritiqueWorkbenchProps & { fixture: IeltsWorkbenchFixture; initialView: DraftViewMode }) {
   const tabsIdPrefix = useId();
   const tabRefs = useRef<Partial<Record<DraftViewMode, HTMLButtonElement | null>>>({});
 
@@ -76,9 +108,7 @@ export function IeltsDraftCritiqueWorkbench({
   );
 
   const [composerOpen, setComposerOpen] = useState(false);
-  const [composerText, setComposerText] = useState(() =>
-    fixture.draft2.paragraphs.join("\n\n"),
-  );
+  const [composerText, setComposerText] = useState(() => draftEditorText(fixture.draft2));
   const [composerAssisted, setComposerAssisted] = useState(fixture.draft2.assisted);
   const [composerNeedsText, setComposerNeedsText] = useState(false);
   const composerGuidanceId = `${tabsIdPrefix}-revision-guidance`;
@@ -139,7 +169,15 @@ export function IeltsDraftCritiqueWorkbench({
   }
 
   function handleAnalyzeRevision() {
-    const paragraphs = composerText.split(/\n\s*\n+/);
+    const paragraphs = composerText.split(PARAGRAPH_BREAK);
+    const evaluatedParagraphs = draftEditorText(draft2).split(PARAGRAPH_BREAK);
+    if (composerAssisted === draft2.assisted &&
+      paragraphs.join("\n\n") === evaluatedParagraphs.join("\n\n")
+    ) {
+      setComposerNeedsText(false);
+      activateTab("draft2");
+      return;
+    }
 
     const nextCount = revisionCount + 1;
     const updatedDraft: IeltsEssayDraft = {
@@ -168,8 +206,7 @@ export function IeltsDraftCritiqueWorkbench({
     setDraft2(updatedDraft);
     setDraft2Receipt(evaluated.receipt);
     setTransferReport(evaluated.transferReport);
-    setViewMode("draft2");
-    setSelectedSpanId(null);
+    activateTab("draft2");
     onRevisionEvaluated?.({
       revisedDraft: updatedDraft,
       receipt: evaluated.receipt,
@@ -181,7 +218,7 @@ export function IeltsDraftCritiqueWorkbench({
     setDraft2(fixture.draft2);
     setDraft2Receipt(fixture.draft2Receipt);
     setTransferReport(fixture.transferReport);
-    setComposerText(fixture.draft2.paragraphs.join("\n\n"));
+    setComposerText(draftEditorText(fixture.draft2));
     setComposerAssisted(fixture.draft2.assisted);
     setComposerNeedsText(false);
     setSelectedSpanId(null);

@@ -1119,6 +1119,27 @@ describe("Writing lineage and evidence regressions", () => {
     receiptId: "r-round-six",
   };
 
+  it("cites the allocated Task Response occurrence after an unrelated funding sentence", () => {
+    const paragraphs = ["The funding table appears in Appendix B.", ...DRAFT_2.paragraphs];
+    const { receipt, transferReport } = evaluateNonEmptyRevision({
+      ...input,
+      revisedDraft: { ...DRAFT_2, paragraphs },
+    });
+    expect(receipt.epistemicStatus).toBe("rubric_verified_evidence");
+    expect(transferReport.items.find(({ criterion }) => criterion === "TR")).toMatchObject({
+      status: "transferred",
+      matchedParagraphIndices: [3],
+    });
+    expect(receipt.criteria.TR.evidenceSpans[0]?.excerpt).toMatch(/Admittedly, widening arterial roads|induced traffic demand/u);
+    for (const { criterion, status, matchedParagraphIndices, revisedMatched } of transferReport.items) {
+      expect(status).toBe("transferred");
+      const span = receipt.criteria[criterion].evidenceSpans[0]!;
+      expect(matchedParagraphIndices).toEqual([span.paragraphIndex]);
+      expect(span.excerpt.toLowerCase()).toContain(revisedMatched[0]);
+      expect(paragraphs[span.paragraphIndex]!.slice(span.startOffset, span.endOffset)).toBe(span.excerpt);
+    }
+  });
+
   it.each([undefined, 0, -1, 1.5, Number.NaN, 3])(
     "rejects a disconnected version 4 revision with parent %s",
     (basedOnVersion) => {
@@ -1302,6 +1323,46 @@ describe("Speaking clause and evidence regressions", () => {
     "Admittedly, families in outer suburban neighbourhoods still rely on cars when local bus routes run infrequently during late evenings. " +
     "Local officials also face annual budget reviews in spring. " +
     "That debate affects riders as well as taxpayers. ";
+
+  it.each([
+    ["The city's reported per-capita emissions for last year.", false],
+    ["The cities’ reported per-capita emissions for last year.", false],
+    ["Our sharply revised local per-capita emissions plan.", false],
+    ["A rapidly revised per-capita emissions plan.", false],
+    ["A preliminary revised per-capita emissions plan.", false],
+    ["A table of reduced per-capita emissions across districts.", false],
+    ["A report on sharply reduced per-capita emissions.", false],
+    ["A report on traffic and reduced per-capita emissions.", false],
+    ["The city's trains reduced harmful per-capita emissions across the entire city.", true],
+    ["The switch to trains reduced harmful per-capita emissions across the entire city.", true],
+    ["The council in our city reduced harmful per-capita emissions throughout spring.", true],
+    ["The shift from cars to buses reduced harmful per-capita emissions in the region.", true],
+    ["The council in our city reported detailed per-capita emissions figures.", true],
+    ["The initiative reduced harmful per-capita emissions across the entire city.", true],
+    ["The council in our city guaranteed lower per-capita emissions.", true],
+    ["The council in our city made per-capita emissions a priority.", true],
+    ["The council in our city monitors per-capita emissions each week.", true],
+    ["Councils in our region monitor per-capita emissions each week.", true],
+    ["The council in our city has reduced per-capita emissions.", true],
+  ])("checks subject noun phrases with a verified Writing receipt in %s", (sentence, credited) => {
+    const { receipt: verifiedWritingReceipt } = evaluateNonEmptyRevision({
+      baselineDraft: DRAFT_1,
+      revisedDraft: DRAFT_2,
+      targets: TARGETS,
+      receiptId: "r-speaking-subject-source",
+    });
+    expect(verifiedWritingReceipt.countsTowardMastery).toBe(true);
+    const receipt = evaluateSpeakingRetelling({
+      seed: { ...seed, requiresVerifiedReceipt: true, verifiedWritingReceipt },
+      transcript: setup + sentence,
+      durationSeconds: 75,
+      assisted: false,
+    });
+    expect(receipt.wordCount).toBeGreaterThanOrEqual(75);
+    expect(receipt.transferredCollocations).toEqual(credited ? ["per-capita emissions"] : []);
+    expect(receipt.countsTowardMastery).toBe(credited);
+    expect(receipt.epistemicStatus).toBe(credited ? "rubric_verified_evidence" : "practice_feedback");
+  });
 
   it.each([
     ["Yesterday in our neighborhood library per-capita emissions support package.", false],

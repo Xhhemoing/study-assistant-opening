@@ -13,6 +13,7 @@ import {
 } from "./rubric";
 import type {
   IeltsBandScore,
+  IeltsCriterion,
   IeltsCriterionAssessment,
   IeltsCrossDraftTransferReport,
   IeltsEssayDraft,
@@ -576,20 +577,21 @@ export function analyzeCrossDraftTransfer(
   input: AnalyzeCrossDraftTransferInput,
 ): IeltsCrossDraftTransferReport {
   const wordCount = countDraftWords(input.draft2.paragraphs);
-  const analysis = analyzeTransfer(input, false, input.draft2.paragraphs.map(segmentIeltsText), wordCount);
+  const { report } = analyzeTransfer(input, false, input.draft2.paragraphs.map(segmentIeltsText), wordCount);
   const { masteryQualified } = resolveIeltsEpistemicStatus({
     draftVersion: input.draft2.version,
     assisted: input.draft2.assisted,
-    crossDraftTransferVerified: analysis.summary.meetsCrossDraftVerification,
-    memorizedTemplateHits: analysis.memorizedTemplateHits,
+    crossDraftTransferVerified: report.summary.meetsCrossDraftVerification,
+    memorizedTemplateHits: report.memorizedTemplateHits,
     wordCount,
-    disqualificationReason: analysis.summary.disqualificationReason,
+    disqualificationReason: report.summary.disqualificationReason,
   });
-  return finalizeTransferReport(analysis, masteryQualified);
+  return finalizeTransferReport(report, masteryQualified);
 }
 
 type WritingCandidate = MatchRange & {
   readonly paragraphIndex: number;
+  readonly sentence: GroundedSentence;
   readonly pattern: string;
   readonly exclusiveKey: string;
 };
@@ -599,7 +601,7 @@ function analyzeTransfer(
   freshPromptConfirmed: boolean,
   revisedParagraphs: readonly (readonly GroundedSentence[])[],
   revisedWordCount: number,
-): TransferAnalysis {
+): { report: TransferAnalysis; creditedOccurrences: ReadonlyMap<IeltsCriterion, WritingCandidate> } {
   const samePrompt = input.draft1.promptId === input.draft2.promptId;
   const lineage = getWritingTransferLineage(input.draft1, input.draft2);
   const advancingLineage = lineage === "advancing_revision";
@@ -640,6 +642,7 @@ function analyzeTransfer(
       return {
         ...core,
         raw,
+        sentence,
         paragraphIndex,
         changed: core.substantive && isClauseSubstantivelyChangedFromBaseline(
           core.tokens,
@@ -705,7 +708,13 @@ function analyzeTransfer(
           continue;
         }
         for (const range of ranges) {
-          candidates.push({ ...range, paragraphIndex: clause.paragraphIndex, pattern, exclusiveKey: patternKey });
+          candidates.push({
+            ...range,
+            paragraphIndex: clause.paragraphIndex,
+            sentence: clause.sentence,
+            pattern,
+            exclusiveKey: patternKey,
+          });
         }
       }
     }
@@ -718,6 +727,7 @@ function analyzeTransfer(
     .sort((a, b) => compareText(a.target.criterion, b.target.criterion) || compareText(a.target.label, b.target.label));
   const candidatesById = new Map(eligibleTargets.map(({ target, candidates }) => [target.id, candidates]));
   const allocated = new Set(allocateIeltsSpans(candidatesById).values());
+  const creditedOccurrences = new Map<IeltsCriterion, WritingCandidate>();
 
   const items: IeltsUpgradeTransferItem[] = targetMatches.map((match) => {
     const { target, baseHit, rawRevHit, baseWeak, revWeak, revCliche, candidates, sawMechanical, sawUnchanged } = match;
@@ -753,8 +763,9 @@ function analyzeTransfer(
     } else if (matchedOnlyInUnchangedSentence || (revMatchedList.length > 0 && !hasSubstantiveRevision)) {
       status = "pending";
       explanation = `目标表达所在句子相对一稿未作实质性改写（或仅调整标点），暂不计作有效跨草稿迁移。`;
-    } else if (revMatchedList.length > 0) {
+    } else if (winner) {
       status = "transferred";
+      if (!creditedOccurrences.has(target.criterion)) creditedOccurrences.set(target.criterion, winner);
       const clearedWeak =
         baseWeak.matched.length > 0 && revWeak.matched.length < baseWeak.matched.length;
       explanation = clearedWeak
@@ -817,7 +828,7 @@ function analyzeTransfer(
   const meetsCrossDraftVerification =
     advancingLineage && !disqualificationReason && transferredCount >= minimumTransferred;
 
-  return {
+  const report: TransferAnalysis = {
     fromDraftId: input.draft1.draftId,
     toDraftId: input.draft2.draftId,
     items,
@@ -838,6 +849,7 @@ function analyzeTransfer(
       disqualificationReason,
     },
   };
+  return { report, creditedOccurrences };
 }
 
 type ParagraphEvidence = {
@@ -926,7 +938,7 @@ export function evaluateRevisedDraftDeterministically(
   const paragraphs = input.revisedDraft.paragraphs;
   const segmentedParagraphs = paragraphs.map(segmentIeltsText);
   const wordCount = countDraftWords(paragraphs);
-  const transferReport = analyzeTransfer({
+  const { report: transferReport, creditedOccurrences } = analyzeTransfer({
     draft1: input.baselineDraft,
     draft2: input.revisedDraft,
     targets: input.targets,
@@ -953,10 +965,10 @@ export function evaluateRevisedDraftDeterministically(
       ? 1.0
       : 0;
 
-  const criterionTransfers = (criterion: "TR" | "CC" | "LR" | "GRA") =>
+  const criterionTransfers = (criterion: IeltsCriterion) =>
     transferReport.items.filter((item) => item.criterion === criterion);
 
-  const scoreCriterion = (criterion: "TR" | "CC" | "LR" | "GRA"): IeltsBandScore => {
+  const scoreCriterion = (criterion: IeltsCriterion): IeltsBandScore => {
     const related = criterionTransfers(criterion);
     const transferred = related.filter((r) => r.status === "transferred").length;
     const regressed = related.filter((r) => r.status === "regressed").length;
@@ -981,13 +993,27 @@ export function evaluateRevisedDraftDeterministically(
     return clampToIeltsBand(penalized);
   };
 
-  const trLoc = findParagraphEvidence(
-    segmentedParagraphs,
+  function findCriterionEvidence(
+    criterion: IeltsCriterion,
+    patterns: readonly string[],
+    fallbackPosition: number,
+  ): ParagraphEvidence {
+    const occurrence = creditedOccurrences.get(criterion);
+    if (!occurrence) return findParagraphEvidence(segmentedParagraphs, patterns, fallbackPosition);
+    const { sentence, paragraphIndex, start, end } = occurrence;
+    return evidenceSnippet(sentence, paragraphIndex, {
+      start: start - sentence.startOffset,
+      end: end - sentence.startOffset,
+    });
+  }
+
+  const trLoc = findCriterionEvidence(
+    "TR",
     ["admittedly", "critics", "while", "counter", "public transit", "funding"],
     2,
   );
-  const ccLoc = findParagraphEvidence(
-    segmentedParagraphs,
+  const ccLoc = findCriterionEvidence(
+    "CC",
     ["consequently", "by contrast", "moreover", "this shift", "such investment", "in turn"],
     1,
   );
@@ -1003,10 +1029,10 @@ export function evaluateRevisedDraftDeterministically(
       end: endOffset - source.startOffset,
     });
   } else {
-    lrLoc = findParagraphEvidence(segmentedParagraphs, ["alleviate", "viability", "emissions", "congestion", "infrastructure"], 0);
+    lrLoc = findCriterionEvidence("LR", ["alleviate", "viability", "emissions", "congestion", "infrastructure"], 0);
   }
-  const graLoc = findParagraphEvidence(
-    segmentedParagraphs,
+  const graLoc = findCriterionEvidence(
+    "GRA",
     ["while", "although", "whereas", "which", "whereby", "rather than"],
     1,
   );
@@ -1021,7 +1047,7 @@ export function evaluateRevisedDraftDeterministically(
     ...trLoc,
     criterion: "TR",
     diagnosis:
-      criterionTransfers("TR").some((i) => i.status === "transferred")
+      creditedOccurrences.has("TR")
         ? "核心立场与反方权衡已落地，论证不再停留在单边泛谈。"
         : "该段论证可进一步回应反方前提（如短期道路扩容的边际效益递减），增强立场深度。",
     upgradeRewrite:
@@ -1033,7 +1059,7 @@ export function evaluateRevisedDraftDeterministically(
     ...ccLoc,
     criterion: "CC",
     diagnosis:
-      criterionTransfers("CC").some((i) => i.status === "transferred")
+      creditedOccurrences.has("CC")
         ? "段内因果与对照指代衔接自然，推进节奏清晰。"
         : "句间逻辑过渡偏依赖平铺连接，可用指代回指（this shift / consequently）收紧段落主线。",
     upgradeRewrite:
@@ -1047,7 +1073,7 @@ export function evaluateRevisedDraftDeterministically(
     diagnosis:
       diagnosedTemplate
         ? `检测到高频模板表达（${diagnosedTemplate.phrase}），拉低词汇原创度与语域自然度。`
-        : criterionTransfers("LR").some((i) => i.status === "transferred")
+        : creditedOccurrences.has("LR")
           ? "已有效迁移精准学术搭配，用词具体且语域得体。"
           : "建议将笼统形容词替换为具体城市交通学术搭配（如 alleviate chronic congestion / per-capita emissions）。",
     upgradeRewrite:
@@ -1059,7 +1085,7 @@ export function evaluateRevisedDraftDeterministically(
     ...graLoc,
     criterion: "GRA",
     diagnosis:
-      criterionTransfers("GRA").some((i) => i.status === "transferred")
+      creditedOccurrences.has("GRA")
         ? "让步从句与非限定修饰结构运用准确，句式层次更丰富。"
         : "简单句与并列句偏多，建议加入 While/Although 让步结构或非限定定语从句提升句法控制。",
     upgradeRewrite:

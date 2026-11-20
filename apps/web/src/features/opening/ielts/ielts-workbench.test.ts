@@ -2,6 +2,7 @@
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { evaluateRevisedDraftDeterministically, evaluateSpeakingRetelling } from "./domain-bridge";
 import {
   IELTS_WRITING_SPEAKING_FIXTURE,
   IeltsDraftCritiqueWorkbench,
@@ -40,6 +41,10 @@ function setNativeInputValue(
   element.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
+function writingButton(label: string): HTMLButtonElement {
+  return [...host.querySelectorAll("button")].find((button) => button.textContent === label)!;
+}
+
 describe("workbench-model helpers", () => {
   it("formats band scores and time-box labels cleanly", () => {
     expect(formatBandScore(7)).toBe("7.0");
@@ -72,6 +77,64 @@ describe("workbench-model helpers", () => {
 });
 
 describe("IeltsDraftCritiqueWorkbench", () => {
+  it("reuses the current Writing receipt until the revision changes", async () => {
+    const fixture = IELTS_WRITING_SPEAKING_FIXTURE;
+    const onRevisionEvaluated = vi.fn();
+    await act(async () => root.render(createElement(IeltsDraftCritiqueWorkbench, { onRevisionEvaluated })));
+    await act(async () => writingButton("打开改写编辑区").click());
+    await act(async () => writingButton("重新分析改写").click());
+    await act(async () => writingButton("重新分析改写").click());
+    expect(onRevisionEvaluated).not.toHaveBeenCalled();
+    expect(host.querySelector('[data-epistemic-badge="rubric_verified_evidence"]')).not.toBeNull();
+
+    const textarea = host.querySelector<HTMLTextAreaElement>("textarea")!;
+    const editedText = `${textarea.value} Rail operators can then use the savings to extend late-night services.`;
+    await act(async () => setNativeInputValue(textarea, editedText));
+    await act(async () => writingButton("重新分析改写").click());
+    await act(async () => writingButton("重新分析改写").click());
+    expect(onRevisionEvaluated).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      revisedDraft: expect.objectContaining({
+        draftId: `${fixture.draft2.draftId}-rev-1`,
+        paragraphs: editedText.split("\n\n"),
+      }),
+      receipt: expect.objectContaining({ receiptId: "receipt-live-1", countsTowardMastery: true }),
+    }));
+  });
+
+  it("resets a mounted Writing workbench to the next assisted attempt", async () => {
+    const fixture = IELTS_WRITING_SPEAKING_FIXTURE;
+    const paragraph = "My local council should invest in electric buses.";
+    const draft2 = { ...fixture.draft2, draftId: "second-writing-attempt", paragraphs: [paragraph], assisted: true };
+    const next = evaluateRevisedDraftDeterministically({
+      baselineDraft: fixture.draft1,
+      revisedDraft: draft2,
+      targets: fixture.targets,
+      receiptId: "second-writing-receipt",
+    });
+    if (!next.ok) throw new Error("Expected a practice receipt for an assisted Writing attempt");
+    const nextFixture = { ...fixture, draft2, draft2Receipt: next.receipt, transferReport: next.transferReport };
+
+    await act(async () => root.render(createElement(IeltsDraftCritiqueWorkbench, { fixture })));
+    await act(async () => writingButton("打开改写编辑区").click());
+    await act(async () => setNativeInputValue(host.querySelector<HTMLTextAreaElement>("textarea")!, "..."));
+    await act(async () => writingButton("重新分析改写").click());
+    await act(async () => host.querySelector<HTMLButtonElement>('button[aria-pressed="false"]')!.click());
+    await act(async () => writingButton("对照视图").click());
+
+    await act(async () => root.render(createElement(IeltsDraftCritiqueWorkbench, { fixture: nextFixture })));
+    expect(host.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toBe("二稿");
+    expect(host.querySelector("[data-word-count]")?.textContent).toMatch(/^8 词/u);
+    expect(host.querySelector('[role="tabpanel"]:not([hidden])')?.textContent).toContain(paragraph);
+    expect(host.querySelector('[data-epistemic-badge="practice_feedback"]')).not.toBeNull();
+    expect(host.querySelector("[data-transfer-summary]")?.textContent).toContain("已迁移 0 / 4");
+    expect(writingButton("全部维度").getAttribute("aria-pressed")).toBe("true");
+    expect(host.querySelector("textarea")).toBeNull();
+    await act(async () => writingButton("打开改写编辑区").click());
+    expect(host.querySelector<HTMLTextAreaElement>("textarea")?.value).toBe(paragraph);
+    expect(host.querySelector<HTMLInputElement>('input[type="checkbox"]')?.checked).toBe(true);
+    expect(host.querySelector("textarea")?.hasAttribute("aria-invalid")).toBe(false);
+  });
+
   it("asks for English text when a punctuation-only revision is submitted", async () => {
     const onRevisionEvaluated = vi.fn();
     await act(async () => root.render(createElement(IeltsDraftCritiqueWorkbench, { onRevisionEvaluated })));
@@ -289,6 +352,26 @@ describe("IeltsDraftCritiqueWorkbench", () => {
 });
 
 describe("IeltsSpeakingTransferCard", () => {
+  it.each(["seed", "receipt"] as const)("restores Speaking inputs when the external %s changes", async (change) => {
+    const fixture = IELTS_WRITING_SPEAKING_FIXTURE;
+    const seed = change === "seed" ? { ...fixture.speakingSeed, seedId: "second-speaking-attempt" } : fixture.speakingSeed;
+    const transcript = change === "seed" ? "My local council should invest in electric buses." : fixture.initialSpeakingTranscript;
+    const initialReceipt = evaluateSpeakingRetelling({ seed, transcript, durationSeconds: 36, assisted: true });
+    const onEvaluated = vi.fn();
+    await act(async () => root.render(createElement(IeltsSpeakingTransferCard, { onEvaluated })));
+    await act(async () => root.render(createElement(IeltsSpeakingTransferCard, {
+      seed, initialTranscript: transcript, initialReceipt, onEvaluated,
+    })));
+    expect(host.querySelector<HTMLTextAreaElement>("textarea")?.value).toBe(transcript);
+    expect(host.querySelector<HTMLInputElement>('input[type="number"]')?.value).toBe("36");
+    expect(host.querySelector<HTMLInputElement>('input[type="checkbox"]')?.checked).toBe(true);
+    expect(host.querySelector('[data-speaking-epistemic="practice_feedback"]')).not.toBeNull();
+    await act(async () => host.querySelector<HTMLButtonElement>("button")!.click());
+    expect(onEvaluated).toHaveBeenCalledWith(expect.objectContaining({
+      seedId: seed.seedId, sourceTranscript: transcript, durationSeconds: 36, assisted: true,
+    }));
+  });
+
   it("shows each Speaking target once and guides a learner who submits only punctuation", async () => {
     const fixture = IELTS_WRITING_SPEAKING_FIXTURE;
     const onEvaluated = vi.fn();
@@ -412,7 +495,6 @@ it.each(["custom seed", "custom transcript", "mismatched receipt"])(
 
 it("shows an explicitly matched Speaking receipt", async () => {
   const fixture = IELTS_WRITING_SPEAKING_FIXTURE;
-  const { evaluateSpeakingRetelling } = await import("./domain-bridge");
   const seed = { ...fixture.speakingSeed, seedId: "custom-speaking-seed" };
   const transcript = fixture.initialSpeakingTranscript;
   const durationSeconds = fixture.initialSpeakingDurationSeconds;
@@ -481,7 +563,6 @@ it.each(["removed", "invalidated"])("withholds restored Speaking mastery when th
 
 it("restores a matching assisted Speaking receipt and preserves assistance on reevaluation", async () => {
   const fixture = IELTS_WRITING_SPEAKING_FIXTURE;
-  const { evaluateSpeakingRetelling } = await import("./domain-bridge");
   const seed = { ...fixture.speakingSeed, seedId: "assisted-speaking-seed" };
   const transcript = fixture.initialSpeakingTranscript;
   const durationSeconds = fixture.initialSpeakingDurationSeconds;

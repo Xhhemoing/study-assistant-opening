@@ -61,7 +61,10 @@ function buildPhraseRegex(phrase: string): RegExp {
 
 const SPEAKING_MODAL = /^(?:can|could|may|might|must|shall|should|will|would)$/u;
 const SPEAKING_FINITE_AUXILIARY = /^(?:is|are|was|were|am|do|does|did|have|has|had)$/u;
-const SPEAKING_DETERMINER = /^(?:the|a|an|this|that|these|those|its|their|our|your|his|her|my)$/u;
+const SPEAKING_DETERMINER = /^(?:the|a|an|this|that|these|those|whose|my|our|your|his|her|its|their)$/u;
+const SPEAKING_POSSESSIVE_END = /(?:['’]s|s['’])$/u;
+const SPEAKING_PRENOMINAL_ADJECTIVE =
+  /^(?:new|old|recent|latest|last|first|final|initial|preliminary|local|regional|annual|seasonal|comprehensive)$/u;
 const SPEAKING_UNINFLECTED_VERB = /^(?:cut|set|put|cost|let|spread|hit|hurt|shut|split)s?$/u;
 const SPEAKING_AMBIGUOUS_VERB = /^(?:help|helps|need|needs|fund|funds|back|backs|pair|pairs|support|supports|monitor|monitors|track|tracks|balance|balances|shift|shifts|address|addresses|offer|offers|trigger|triggers|notice|notices|curb|curbs)$/u;
 const SPEAKING_SUBJECT_PRONOUN = /^(?:i|you|he|she|it|we|they)$/u;
@@ -71,12 +74,13 @@ const SPEAKING_PREPOSITION = /^(?:of|to|for|with|on|at|from|by|in|near|under|ove
 const SPEAKING_COORDINATOR = /^(?:and|or)$/u;
 const SPEAKING_CLAUSE_LINK = /^(?:as|but|because|although|while|whereas|if|unless|when|which)$/u;
 const SPEAKING_ADVERB = /^(?:not|never|often|sometimes|always|already|still|also|only|just|really|rather|then|today|yesterday|tomorrow|newly|recently|previously|sharply|slightly|significantly)$/u;
+const SPEAKING_LY_NOUN = /^(?:ally|assembly|family|fly|italy|july|reply|supply)$/u;
 const SPEAKING_INTRANSITIVE_END = /^(?:rise|rises|rose|fall|falls|fell|grow|grows|grew|vary|varies|varied|matter|matters|mattered)$/u;
 const SPEAKING_PRESENT_PARTICIPLE = /^[a-z]{2,}ing$/u;
 const SPEAKING_REGULAR_PAST = /^[a-z]{2,}ed$/u;
 
 function isSpokenAdverbCue(word: string): boolean {
-  return SPEAKING_ADVERB.test(word) || word.endsWith("ly");
+  return SPEAKING_ADVERB.test(word) || (word.endsWith("ly") && !SPEAKING_LY_NOUN.test(word));
 }
 
 function isSpokenVerb(word: string): boolean {
@@ -113,46 +117,54 @@ function hasSpokenSubjectAndPredicate(
   targetSpans: readonly SpokenTargetSpan[],
 ): boolean {
   const words = Array.from(
-    segment.matchAll(/[\p{L}\p{N}]+(?:['’-][\p{L}\p{N}]+)*/gu),
+    segment.matchAll(/[\p{L}\p{N}]+(?:['’-][\p{L}\p{N}]+)*(?:(?<=s)['’](?![\p{L}\p{N}]))?/giu),
     (word) => ({ text: word[0].toLowerCase(), index: word.index }),
   );
   const targetStarts = new Set(targetSpans.map(({ start }) => start));
   let subjectHead: string | undefined;
-  let subjectPreposition: string | undefined;
+  let inSubjectComplement = false;
   let complementHead: string | undefined;
+  let canStartInfinitive = false;
   let infinitiveComplement = false;
 
   for (let i = 0; i < words.length; i += 1) {
     const word = words[i]!;
     const { text } = word;
-    if (SPEAKING_COORDINATOR.test(text)) continue;
     if (SPEAKING_CLAUSE_LINK.test(text)) {
       subjectHead = undefined;
-      subjectPreposition = undefined;
+      inSubjectComplement = false;
       complementHead = undefined;
+      canStartInfinitive = false;
       infinitiveComplement = false;
       continue;
     }
     if (SPEAKING_PREPOSITION.test(text)) {
-      subjectPreposition = text;
+      inSubjectComplement = true;
       complementHead = undefined;
+      canStartInfinitive = text === "to";
       infinitiveComplement = false;
       continue;
     }
 
-    const previous = words[i - 1]?.text ?? "";
     const next = words[i + 1]?.text;
-    const inSubjectComplement = subjectPreposition !== undefined;
-    if (subjectPreposition === "to" && !complementHead && !SPEAKING_DETERMINER.test(previous)) {
-      if (isSpokenAdverbCue(text)) continue;
-      infinitiveComplement = isSpokenVerb(text);
+    if (isSpokenAdverbCue(text)) continue;
+    if (SPEAKING_DETERMINER.test(text) || SPEAKING_POSSESSIVE_END.test(text) || SPEAKING_COORDINATOR.test(text)) {
+      // Open a new nominal slot for a modifier or the next coordinated noun.
+      if (inSubjectComplement) complementHead = undefined;
+      else subjectHead = undefined;
+      canStartInfinitive = false;
+      continue;
     }
+    if (canStartInfinitive) {
+      infinitiveComplement = isSpokenVerb(text);
+      canStartInfinitive = false;
+    }
+    const nominalHead = inSubjectComplement ? complementHead : subjectHead;
+    const regularPast = SPEAKING_REGULAR_PAST.test(text);
     const insideTarget = targetSpans.some(({ start, end }) => word.index >= start && word.index < end);
-    if (subjectHead && (!inSubjectComplement || complementHead) &&
-      !insideTarget && !SPEAKING_DETERMINER.test(previous)
-    ) {
+    if (subjectHead && nominalHead && !insideTarget) {
       if (!next) {
-        return !inSubjectComplement && SPEAKING_INTRANSITIVE_END.test(text);
+        return !infinitiveComplement && SPEAKING_INTRANSITIVE_END.test(text);
       } else if (SPEAKING_MODAL.test(text)) {
         const complement = words.slice(i + 1).find(({ text: part }) => !isSpokenAdverbCue(part));
         if (complement && isSpokenVerb(complement.text)) return true;
@@ -160,17 +172,15 @@ function hasSpokenSubjectAndPredicate(
         return true;
       } else if (!infinitiveComplement && text !== "be") {
         const knownVerb = isSpokenVerb(text);
-        // An -ed ending alone is ambiguous in a subject's prepositional phrase.
-        const regularPast = !inSubjectComplement && SPEAKING_REGULAR_PAST.test(text);
         if (knownVerb || regularPast) {
           const ambiguousVerb = SPEAKING_AMBIGUOUS_VERB.test(text) || SPEAKING_UNINFLECTED_VERB.test(text);
           const object = words.slice(i + 1, i + 6);
           const objectStart = object.find(({ text: part }) => !isSpokenAdverbCue(part));
           // A bare participle can modify the preceding noun, as in "shifts affecting emissions".
-          const possiblyNounModifier = (ambiguousVerb || inSubjectComplement) &&
+          const possiblyNounModifier = (ambiguousVerb || (inSubjectComplement && !regularPast)) &&
             SPEAKING_PRESENT_PARTICIPLE.test(objectStart?.text ?? "");
           const takesTarget = !possiblyNounModifier &&
-            hasTargetInVerbObject(object, targetStarts, !inSubjectComplement);
+            hasTargetInVerbObject(object, targetStarts, regularPast || !inSubjectComplement);
           if (takesTarget || SPEAKING_DETERMINER.test(next) || SPEAKING_OBJECT_PRONOUN.test(next)) return true;
 
           if (knownVerb && !inSubjectComplement && (
@@ -181,9 +191,12 @@ function hasSpokenSubjectAndPredicate(
       }
     }
 
+    // Without a noun head, a participle or adjective can introduce the noun phrase.
+    const prenominalModifier = SPEAKING_PRENOMINAL_ADJECTIVE.test(text) || (regularPast && !text.endsWith("eed"));
+    if (!nominalHead && prenominalModifier) continue;
     const canHeadNounPhrase = SPEAKING_SUBJECT_PRONOUN.test(text) ||
-      (text.length >= 2 && !SPEAKING_STOP_WORDS.has(text) && !SPEAKING_DETERMINER.test(text) &&
-        !SPEAKING_ADVERB.test(text) && !SPEAKING_MODAL.test(text) && !SPEAKING_FINITE_AUXILIARY.test(text));
+      (text.length >= 2 && !SPEAKING_STOP_WORDS.has(text) &&
+        !SPEAKING_MODAL.test(text) && !SPEAKING_FINITE_AUXILIARY.test(text));
     if (canHeadNounPhrase) {
       if (inSubjectComplement) complementHead = text;
       else subjectHead = text;
