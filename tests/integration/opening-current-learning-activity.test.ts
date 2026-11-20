@@ -62,7 +62,7 @@ async function readFootprint() {
   };
 }
 
-it("keeps learner activity ahead of background publish, then ranks an actual bound document revision first", async () => {
+it.each(["active", "sibling"] as const)("keeps learner activity ahead of background publish, then ranks an edit to the %s writing variant first", async variant => {
   const older = await activity({ at: "2026-01-01T00:00:00Z", placeholder: true });
   const current = await activity({ at: "2026-01-02T00:00:00Z" });
   const content = createOpeningTeachingContentRepository(f.sql), blockId = randomUUID();
@@ -73,6 +73,13 @@ it("keeps learner activity ahead of background publish, then ranks an actual bou
     activityId: older, teachingUnitId: unit.id, expectedVersion: 0, revisionNumber: 1,
     blockOrder: [{ blockId, blockType: "text", role: "teach", position: 0 }],
   });
+  const sessionId = randomUUID();
+  await f.sql`INSERT INTO opening_learning_sessions(id,workspace_id,owner_user_id,course_id,activity_id,skill_label)
+    VALUES(${sessionId},${f.scope.workspaceId},${f.scope.ownerUserId},${courseId},${current},'Current')`;
+  await f.sql`INSERT INTO opening_study_intent_events(id,workspace_id,owner_user_id,session_id,activity_id,client_key,
+    version,event_kind,payload,resulting_intent,action,created_at)
+    VALUES(${randomUUID()},${f.scope.workspaceId},${f.scope.ownerUserId},${sessionId},${current},
+      ${randomUUID()},1,'signal','{}','{}','continue','2026-01-02T00:00:00Z')`;
   await expect(readOpeningCurrentLearningRecovery(f.sql, f.scope)).resolves.toMatchObject({ activityId: current });
   await expect(readOpeningWorkspaceActivityRecovery(f.sql, f.scope)).resolves.toMatchObject({ kind: "course", activityId: current });
 
@@ -96,21 +103,34 @@ it("keeps learner activity ahead of background publish, then ranks an actual bou
       ${f.sql.json({ workGroupId: docId, variantLabel: "Draft", parentDocumentId: null, parentRevisionNumber: null,
         keptAsPreferred: false, focusBlockId: null, assistanceRecords: [] })})`;
   const coverage = () => f.sql`SELECT * FROM opening_course_question_exposure_coverage WHERE workspace_id=${f.scope.workspaceId}`;
-  const before = await coverage();
-  expect(before).toMatchObject([{ invalidated: false }]);
+  expect(await coverage()).toMatchObject([{ invalidated: false }]);
   await expect(readOpeningWorkspaceActivityRecovery(f.sql, f.scope)).resolves.toMatchObject({ activityId: current });
+  let editDocumentId = docId;
+  if (variant === "sibling") {
+    const sibling = await library.createDocument({ workspaceId: f.scope.workspaceId, title: "Alternate draft",
+      blocks: [{ id: randomUUID(), type: "paragraph", content: { text: "Original alternate draft" } }] });
+    editDocumentId = sibling.id;
+    await f.sql`INSERT INTO library_properties(workspace_id,subject_type,subject_id,key,value_type,value)
+      VALUES(${f.scope.workspaceId},'document',${editDocumentId},${WRITING_META_PROPERTY_KEY},'json',
+        ${f.sql.json({ workGroupId: docId, variantLabel: "Alternate", parentDocumentId: docId, parentRevisionNumber: 1,
+          keptAsPreferred: false, focusBlockId: null, assistanceRecords: [] })})`;
+  }
+  const beforeEdit = await coverage();
   await library.updateDocument({
-    workspaceId: f.scope.workspaceId, documentId: docId, expectedRevisionNumber: 1,
+    workspaceId: f.scope.workspaceId, documentId: editDocumentId, expectedRevisionNumber: 1,
     blocks: [{ id: randomUUID(), type: "paragraph", content: { text: "New draft paragraph" } }],
   });
+  const beforeRecovery = await coverage();
+  if (variant === "active") expect(beforeRecovery).toEqual(beforeEdit);
   await expect(readOpeningWorkspaceActivityRecovery(f.sql, f.scope)).resolves.toMatchObject({
-    kind: "writing", activityId: writingActivity, documentId: docId, savedRevisionNumber: 1, currentRevisionNumber: 2,
+    kind: "writing", activityId: writingActivity, documentId: docId, savedRevisionNumber: 1,
+    currentRevisionNumber: variant === "active" ? 2 : 1,
   });
   await expect(readOpeningCurrentLearningRecovery(f.sql, f.scope)).resolves.toMatchObject({ activityId: writingActivity });
   const [stored] = await f.sql`SELECT checkpoint_json,updated_at FROM opening_teaching_activities WHERE id=${writingActivity}`;
   expect(stored!.checkpoint_json).toEqual(checkpoint);
   expect(new Date(stored!.updated_at).toISOString()).toBe("2026-01-01T00:00:00.000Z");
-  expect(await coverage()).toEqual(before);
+  expect(await coverage()).toEqual(beforeRecovery);
 });
 it("recovers the newer learner action past a later pre-upgrade background publication", async () => {
   const older = await staticLesson();
@@ -706,9 +726,10 @@ it("excludes malformed writing checkpoints and partial manuscript metadata acros
   expect(currentCourseActivity(listed, courseId)?.id).toBe(ordinaryPrefixed.id);
   expect(pickCurrentTeachingActivity(listed)?.id).toBe(ordinaryPrefixed.id);
 
-  // Implicit candidate selection skips all newer malformed writing activities and falls back to ordinaryPrefixed
+  // Implicit recovery skips the malformed writing activities and prefers the valid writing start
+  // over the ordinary activity that has no persisted learner engagement.
   expect(await readOpeningCurrentLearningActivity(f.sql, f.scope, courseId)).toEqual({
-    activityId: ordinaryPrefixed.id,
+    activityId: decimalZeroActivityId,
     sessionId: null,
     courseId,
   });
@@ -720,14 +741,14 @@ it("excludes malformed writing checkpoints and partial manuscript metadata acros
     courseId,
   });
   expect(await readOpeningCurrentLearningRecovery(f.sql, f.scope)).toEqual({
-    activityId: ordinaryPrefixed.id,
+    activityId: decimalZeroActivityId,
     sessionId: null,
     courseId,
   });
-  expect(await readOpeningWorkspaceActivityRecovery(f.sql, f.scope)).toEqual({
-    kind: "course",
-    activityId: ordinaryPrefixed.id,
-    sessionId: null,
+  expect(await readOpeningWorkspaceActivityRecovery(f.sql, f.scope)).toMatchObject({
+    kind: "writing",
+    activityId: decimalZeroActivityId,
+    documentId: decimalZeroWorkspace.currentDocumentId,
     courseId,
   });
 

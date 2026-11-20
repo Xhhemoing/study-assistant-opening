@@ -18,8 +18,8 @@ export function coverageFields(versions: Record<string, number>, digests?: Recor
 }
 
 /** Strip storage metadata before returning a strict API snapshot. */
-export function readPublicKnowledgeSnapshot(raw: unknown, eligible?: Record<string, number>): KnowledgeSnapshot {
+export function readPublicKnowledgeSnapshot(raw: unknown, allowedCoverage?: Record<string, unknown>): KnowledgeSnapshot {
   const { coveredSourceChunkDigests: _digests, coveredSourceVersions, ...snapshot } = storedKnowledgeSnapshotSchema.parse(raw);
-  const coverage = eligible ? filteredCoverage(coveredSourceVersions, eligible) : coveredSourceVersions ?? {};
+  const coverage = allowedCoverage ? filteredCoverage(coveredSourceVersions, allowedCoverage) : coveredSourceVersions ?? {};
   return Object.keys(coverage).length ? { ...snapshot, coveredSourceVersions: coverage } : snapshot;
 }

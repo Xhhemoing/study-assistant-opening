@@ -279,6 +279,23 @@ function makeFakeSql(init?: {
           .map(chunk => ({ id: chunk.id, source_id: chunk.sourceId, source_version: chunk.sourceVersion }));
       }
 
+      if (q.startsWith("WITH live_readable_chunks AS")) {
+        const eligibleIds = values[1] as string[];
+        const evidenceIds = values[6] as string[];
+        return [{ drift: evidenceIds.some(id => {
+          const chunk = view.chunks.get(id);
+          return !chunk || !eligibleIds.includes(chunk.sourceId) || !chunk.text.trim()
+            || view.sources.get(chunk.sourceId)?.version !== chunk.sourceVersion;
+        }) }];
+      }
+
+      if (q.startsWith("SELECT m.asset_id FROM course_asset_memberships m JOIN opening_sources s")) {
+        const ids = values[2] as string[];
+        return [...view.sources.values()].filter(source => ids.includes(source.id)
+          && source.attached !== false && !source.excluded && (source.purpose === null || source.purpose === "teaching"))
+          .map(source => ({ asset_id: source.id }));
+      }
+
       if (q.startsWith("SELECT s.id, s.version FROM opening_sources s") || q.startsWith("SELECT s.id,s.version FROM opening_sources s")) {
         init?.onQuery?.(q);
         const requested = values[2];
@@ -878,6 +895,7 @@ describe("opening knowledge sync and coalescing", () => {
 
   it("D3: treats C=E={S1,S2} with G={S1} and needs_check nodes as up_to_date without enqueueing on repeated reconciles", async () => {
     const db = makeFakeSql({
+      chunks: [{ id: CH1, sourceId: S1, sourceVersion: 1, text: "极限定义正文" }],
       sources: [
         { id: S1, version: 1, uploadState: "uploaded", parseState: "ready", available: true, excluded: false, hasChunk: true, purpose: "teaching" },
         { id: S2, version: 1, uploadState: "uploaded", parseState: "ready", available: true, excluded: false, hasChunk: true, purpose: "teaching" },

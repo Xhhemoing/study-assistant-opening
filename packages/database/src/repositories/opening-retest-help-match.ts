@@ -8,6 +8,10 @@ export function openingRetestAnswerAt(db: Sql | TransactionSql) {
 export function openingRetestHelpMatches(db: Sql | TransactionSql) {
   const requirement = db`r.learning_protocol->>'requirementId'`;
   const reference = db`h.release_intent->'originReference'`;
+  const referenceSources = db`CASE WHEN jsonb_typeof(${reference}->'sourceRefs')='array'
+    THEN ${reference}->'sourceRefs' ELSE '[]'::jsonb END`;
+  const matchesReferenceSource = db`EXISTS (SELECT 1 FROM jsonb_array_elements(${referenceSources}) ref
+    WHERE lower(ref->>'sourceId')=ANY(o.source_ids::text[]))`;
   return db`
     h.workspace_id=o.workspace_id
     AND COALESCE(h.owner_user_id,l.owner_user_id)=o.owner_user_id
@@ -22,12 +26,16 @@ export function openingRetestHelpMatches(db: Sql | TransactionSql) {
         h.attempt_id IS NULL
         AND COALESCE(h.release_intent->>'possibleOpenAttemptOnly','')<>'true'
         AND COALESCE(${reference}->>'possibleOpenAttemptOnly','')<>'true'
+        AND (h.context_anchor->>'sourceId' IS NULL OR lower(h.context_anchor->>'sourceId')=ANY(o.source_ids::text[]))
+        AND (jsonb_array_length(${referenceSources})=0 OR ${matchesReferenceSource})
+        AND (${reference}->>'skillLabel' IS NULL OR ${reference}->>'skillLabel'=o.skill_label)
+        AND (${reference}->>'requirementKey' IS NULL OR ${reference}->>'requirementKey'=o.requirement_key)
         AND (
           h.item_version_id=a.item_version_id OR h.problem_id=a.problem_id
           OR h.activity_id=a.activity_id OR h.session_id=o.session_id
-          OR h.context_anchor->>'sourceId'=ANY(o.source_ids::text[])
-          OR (${reference}->>'skillLabel'=o.skill_label
-            AND (${reference}->>'requirementKey' IS NULL OR ${reference}->>'requirementKey'=o.requirement_key))
+          OR lower(h.context_anchor->>'sourceId')=ANY(o.source_ids::text[])
+          OR ${matchesReferenceSource}
+          OR ${reference}->>'skillLabel'=o.skill_label
           OR (l.course_id=o.course_id AND l.skill_label=o.skill_label)
           OR EXISTS (SELECT 1 FROM opening_teaching_activities activity
             WHERE activity.workspace_id=o.workspace_id AND activity.owner_user_id=o.owner_user_id

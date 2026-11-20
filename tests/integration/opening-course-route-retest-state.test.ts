@@ -17,7 +17,7 @@ it("attributes released interval help by scoped item, problem and activity when 
     const baselineAt = "2026-11-18T10:00:00Z", startedAt = "2026-11-18T11:00:00Z";
     const releaseAt = "2026-11-18T10:30:00Z";
     const { workspaceId, ownerUserId } = f.scope;
-    const { courseId, sessionId } = base;
+    const { courseId, sessionId, sourceId } = base;
     const attempt = await base.start({ requirementKey });
     const priorAttempt = await base.attempts.create(f.scope, { clientKey: randomUUID(), sessionId, problemId: attempt.problemId!, requirementKey });
     expect(priorAttempt.itemVersionId).toBe(attempt.itemVersionId);
@@ -36,10 +36,10 @@ it("attributes released interval help by scoped item, problem and activity when 
       { id: observationId, attemptId: attempt.id, retestId, recordedAt: "2026-11-18T11:05:00Z" },
     ]) {
       await f.sql`INSERT INTO opening_learning_observations
-        (id,workspace_id,owner_user_id,course_id,session_id,activity_id,skill_label,requirement_key,attempt_id,retest_id,
+        (id,workspace_id,owner_user_id,course_id,session_id,activity_id,skill_label,requirement_key,attempt_id,retest_id,source_ids,
           answer,outcome,assistance,client_key,verdict_source,recorded_at,submitted_at,workspace_history_revision)
         VALUES(${entry.id},${workspaceId},${ownerUserId},${courseId},${sessionId},${activityId},'fractions',${requirementKey},
-          ${entry.attemptId},${entry.retestId},'1','correct','independent',${entry.id},'reference_checked',${entry.recordedAt},${entry.recordedAt},0)`;
+          ${entry.attemptId},${entry.retestId},${[sourceId]},'1','correct','independent',${entry.id},'reference_checked',${entry.recordedAt},${entry.recordedAt},0)`;
     }
     const observation: CourseRouteObservation = {
       id: observationId, skillLabel: "fractions", requirementKey, attemptedAt: startedAt,
@@ -51,13 +51,17 @@ it("attributes released interval help by scoped item, problem and activity when 
     async function exposure(input: {
       domain: string; at?: string; itemVersionId?: string | null; problemId?: string | null;
       activityId?: string; released?: boolean; ownerId?: string; attemptId?: string; attemptOnly?: boolean; course?: string;
+      sourceId?: string; sourceRefs?: string[]; skillLabel?: string; requirementKey?: string;
     }) {
       const id = randomUUID(), released = input.released ?? true;
+      const deliveredAt = released ? input.at ?? releaseAt : null;
       await f.sql`INSERT INTO opening_help_exposures
-        (id,workspace_id,owner_user_id,course_id,session_id,kind,level,delivered,release_key,released_at,support_domain,item_version_id,problem_id,activity_id,attempt_id,release_intent)
+        (id,workspace_id,owner_user_id,course_id,session_id,kind,level,delivered,release_key,released_at,delivered_at,support_domain,item_version_id,problem_id,activity_id,attempt_id,context_anchor,release_intent)
         VALUES(${id},${workspaceId},${input.ownerId ?? ownerUserId},${input.course ?? courseId},NULL,'hint','hinted',${released},${id},
-          ${released ? input.at ?? releaseAt : null},${input.domain},${input.itemVersionId ?? null},${input.problemId ?? null},${input.activityId ?? null},
-          ${input.attemptId ?? null},${input.attemptOnly ? f.sql.json({ originReference: { possibleOpenAttemptOnly: true } }) : null})`;
+          ${deliveredAt},${deliveredAt},${input.domain},${input.itemVersionId ?? null},${input.problemId ?? null},${input.activityId ?? null},
+          ${input.attemptId ?? null},${input.sourceId ? f.sql.json({ sourceId: input.sourceId }) : null},
+          ${f.sql.json({ originReference: { possibleOpenAttemptOnly: input.attemptOnly ?? false, skillLabel: input.skillLabel ?? null,
+            requirementKey: input.requirementKey ?? null, sourceRefs: (input.sourceRefs ?? []).map(sourceId => ({ sourceId, sourceVersion: 1 })) } })})`;
       return id;
     }
     await exposure({ domain: "language", itemVersionId: attempt.itemVersionId });
@@ -67,6 +71,11 @@ it("attributes released interval help by scoped item, problem and activity when 
     await exposure({ domain: "math", itemVersionId: attempt.itemVersionId, course: randomUUID() });
     await exposure({ domain: "math", itemVersionId: attempt.itemVersionId, problemId: attempt.problemId, attemptId: priorAttempt.id });
     await exposure({ domain: "math", itemVersionId: attempt.itemVersionId, problemId: attempt.problemId, attemptOnly: true });
+    await exposure({ domain: "math", activityId, sourceId: randomUUID() });
+    await exposure({ domain: "math", activityId, sourceRefs: [randomUUID()] });
+    await exposure({ domain: "math", activityId, skillLabel: "unrelated" });
+    await exposure({ domain: "math", activityId, requirementKey: "unrelated" });
+    await exposure({ domain: "math", attemptId: attempt.id, at: "2026-11-18T11:06:00Z" });
     expect(await outcome()).toBe("passed");
     const projected = async () => {
       const [row] = await f.sql`SELECT * FROM opening_learning_observations WHERE id=${observationId}`;
@@ -81,6 +90,7 @@ it("attributes released interval help by scoped item, problem and activity when 
       { domain: "math", itemVersionId: attempt.itemVersionId },
       { domain: "unknown", problemId: attempt.problemId },
       { domain: "unknown", activityId },
+      { domain: "math", sourceRefs: [sourceId] },
     ]) {
       const helpId = await exposure({ ...input, at: startedAt });
       expect(await outcome()).toBe("assisted");

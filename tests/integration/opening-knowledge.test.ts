@@ -247,7 +247,10 @@ describe("opening knowledge manual confirmation", () => {
     const confirming = repo.confirmNode(f.scope, courseId, nodeId, { expectedVersion: 1, sourceVersions: record.sourceVersions });
     release(); await bump;
     await expect(confirming).rejects.toMatchObject({ code: "CONFLICT" });
-    expect(await repo.get(f.scope, courseId)).toEqual(record);
+    const [stored] = await f.sql`SELECT version, snapshot, source_versions FROM opening_course_knowledge WHERE course_id=${courseId}`;
+    expect(stored).toEqual({ version: record.version, snapshot: record.snapshot, source_versions: record.sourceVersions });
+    await expect(repo.get(f.scope, courseId)).resolves.toEqual(record);
+    await expect(repo.getWithSync(f.scope, courseId)).resolves.toMatchObject(record);
     expect(await f.sql`SELECT id FROM opening_knowledge_confirmations WHERE course_id=${courseId}`).toHaveLength(0);
   });
 

@@ -108,8 +108,8 @@ function nodeSourceVersions(chunkIds: readonly string[], chunks: readonly Source
 
 type StoredKnowledgeRecord = OpeningKnowledgeRecord & { snapshot: StoredKnowledgeSnapshot };
 
-function publicRecord(record: StoredKnowledgeRecord, eligible?: Record<string, number>): OpeningKnowledgeRecord {
-  return { ...record, snapshot: readPublicKnowledgeSnapshot(record.snapshot, eligible) };
+function publicRecord(record: StoredKnowledgeRecord, allowedCoverage?: Record<string, unknown>): OpeningKnowledgeRecord {
+  return { ...record, snapshot: readPublicKnowledgeSnapshot(record.snapshot, allowedCoverage) };
 }
 
 function mapRecord(row: Record<string, unknown>): StoredKnowledgeRecord {
@@ -227,6 +227,20 @@ async function hasRestrictedGraphSources(db: Sql | TransactionSql, scope: Scope,
   return restricted.length > 0;
 }
 
+async function readHistoricalKnowledgeRecord(db: Sql | TransactionSql, scope: Scope, record: StoredKnowledgeRecord) {
+  const ids = Object.keys(record.snapshot.coveredSourceVersions ?? {});
+  if (!ids.length) return publicRecord(record);
+  // A historical coverage entry can be authorized while its current material is
+  // unreadable or has a different version. Sync and extraction check those separately.
+  const visible = await db`SELECT m.asset_id FROM course_asset_memberships m
+    JOIN opening_sources s ON s.id=m.asset_id AND s.workspace_id=m.workspace_id
+    WHERE m.workspace_id=${scope.workspaceId} AND m.course_id=${record.snapshot.courseId}
+      AND m.asset_type='source' AND (m.purpose IS NULL OR m.purpose='teaching')
+      AND m.asset_id::text=ANY(${ids}::text[])
+      AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=m.workspace_id AND e.source_id=m.asset_id)`;
+  return publicRecord(record, Object.fromEntries(visible.map(row => [String(row.asset_id), true])));
+}
+
 const REQUESTED_JOB_STATES = new Set<CourseKnowledgeRequestedJob["state"]>([
   "queued",
   "running",
@@ -283,8 +297,9 @@ async function readEligibleSourceVersions(
   db: Sql | TransactionSql,
   scope: Scope,
   courseId: string,
-  lockIds?: string[],
+  lock?: { sourceIds?: string[] },
 ): Promise<Record<string, number>> {
+  const lockIds = lock?.sourceIds;
   if (lockIds?.length === 0) return {};
   const eligibleRows = await db`
     SELECT s.id, s.version
@@ -312,7 +327,7 @@ async function readEligibleSourceVersions(
           AND c.source_version = s.version
           AND c.text ~ '[^[:space:]]'
       )
-    ORDER BY s.id ${lockIds ? db`FOR SHARE OF s, v, m` : db``}`;
+    ORDER BY s.id ${lock ? db`FOR SHARE OF s, v, m` : db``}`;
   return Object.fromEntries(eligibleRows.map(row => [String(row.id), Number(row.version)]));
 }
 
@@ -339,6 +354,40 @@ async function readChunkDigests(db: Sql | TransactionSql, versions: Record<strin
     ORDER BY c.id ${lock ? db`FOR SHARE OF c` : db``}`;
   return knowledgeChunkDigests(rows.filter(row => versions[String(row.source_id)] === Number(row.source_version))
     .map(row => ({ id: String(row.id), sourceId: String(row.source_id) })));
+}
+
+async function hasLegacyChunkDrift(
+  db: Sql | TransactionSql,
+  scope: Scope,
+  record: StoredKnowledgeRecord,
+  covered: Record<string, number>,
+  eligible: Record<string, number>,
+): Promise<boolean> {
+  const legacyIds = Object.keys(covered).filter(id =>
+    covered[id] === eligible[id] && !record.snapshot.coveredSourceChunkDigests?.[id]);
+  if (!legacyIds.length) return false;
+  const evidenceIds = evidenceSet([...record.snapshot.nodes, ...record.snapshot.edges].flatMap(item => item.evidenceChunkIds));
+  // Chunks are immutable. An identical retry preserves their IDs and creation times,
+  // even though the parser touches the source row's updated_at.
+  const [row] = await db`
+    WITH live_readable_chunks AS (
+      SELECT c.id, c.source_id, c.created_at
+      FROM opening_source_chunks c
+      JOIN opening_sources s ON s.id = c.source_id AND s.version = c.source_version
+      WHERE s.workspace_id = ${scope.workspaceId}
+        AND c.source_id = ANY(${Object.keys(eligible)}::uuid[]) AND c.text ~ '[^[:space:]]'
+    )
+    SELECT EXISTS (
+      SELECT 1 FROM live_readable_chunks c
+      JOIN opening_course_knowledge graph
+        ON graph.workspace_id = ${scope.workspaceId} AND graph.owner_user_id = ${scope.ownerUserId}
+        AND graph.course_id = ${record.snapshot.courseId}
+      WHERE c.source_id = ANY(${legacyIds}::uuid[]) AND c.created_at > graph.updated_at
+    ) OR EXISTS (
+      SELECT 1 FROM unnest(${evidenceIds}::uuid[]) AS evidence(id)
+      WHERE NOT EXISTS (SELECT 1 FROM live_readable_chunks c WHERE c.id = evidence.id)
+    ) AS drift`;
+  return Boolean(row?.drift);
 }
 
 async function readEligibleAndParsingMaterials(
@@ -469,7 +518,10 @@ async function coverageForEdit(
     previousCoverage = receiptCoverage(previous, job?.result ?? null);
   }
   const proposed = extracted ?? { ...previousCoverage, ...sourceVersions };
-  const live = await readEligibleSourceVersions(tx, scope, courseId, Object.keys(proposed).sort());
+  // Publication holds the workspace lock shared by parser, membership and privacy
+  // writers. Lock and compare every eligible source, including those absent at extraction.
+  const live = await readEligibleSourceVersions(tx, scope, courseId,
+    extracted === undefined ? { sourceIds: Object.keys(proposed).sort() } : {});
   if (extracted !== undefined && (!sameVersions(extracted, live)
     || Object.entries(sourceVersions).some(([id, version]) => extracted[id] !== version)
     || !sameVersions(extractedChunkDigests ?? {}, await readChunkDigests(tx, live, true)))) {
@@ -556,7 +608,8 @@ async function readSyncStatusInternal(
     : {};
   const recordedDigests = record?.snapshot.coveredSourceChunkDigests ?? {};
   const liveDigests = await readChunkDigests(db, filteredCoverage(eligibleSourceVersions, recordedDigests));
-  const chunkDrift = !sameVersions(recordedDigests, liveDigests);
+  const chunkDrift = !sameVersions(recordedDigests, liveDigests)
+    || (record !== null && await hasLegacyChunkDrift(db, scope, record, coveredSourceVersions, eligibleSourceVersions));
 
   let status: CourseKnowledgeSyncStatus;
   if (activeJobId !== null) {
@@ -740,8 +793,7 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
         const record = mapRecord(row);
         // Preserve historical graphs after unlink. Explicit restricted purposes hide graph evidence.
         if (await hasRestrictedGraphSources(tx, scope, courseId, record.sourceVersions)) return null;
-        const eligible = record.snapshot.coveredSourceVersions ? await readEligibleSourceVersions(tx, scope, courseId) : {};
-        return publicRecord(record, eligible);
+        return readHistoricalKnowledgeRecord(tx, scope, record);
       });
     },
 
@@ -771,7 +823,7 @@ export function createOpeningKnowledgeRepository(sql: Sql) {
           };
         }
         return {
-          ...publicRecord(record, sync.eligibleSourceVersions),
+          ...await readHistoricalKnowledgeRecord(tx, scope, record),
           sync,
         };
       });

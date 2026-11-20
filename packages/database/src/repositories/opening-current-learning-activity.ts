@@ -1,4 +1,6 @@
 import {
+  WRITING_META_PROPERTY_KEY,
+  WRITING_WORKSPACE_PROTOCOL,
   uuidSchema,
   type Scope,
   type WritingActivityCheckpoint,
@@ -6,6 +8,7 @@ import {
 import { isDeepStrictEqual } from "node:util";
 import { compareCurrentLearningActivities, selectCurrentLearningActivity, selectCurrentWorkspaceActivity } from "@aistudy/domain";
 import type { Sql, TransactionSql } from "postgres";
+import { openingNoteReadable } from "./opening-note-provenance";
 import {
   openingWritingActivityReadableSql,
   parseAuthorizedWritingActivityCheckpoint,
@@ -32,15 +35,24 @@ function normalizeReferenceId(value: string): string {
   return uuidSchema.safeParse(value).success ? value.toLowerCase() : value;
 }
 
-// Persisted engagement outranks the legacy activity timestamp, which may contain a background publish.
-function learnerEngagementAt(db: Db) {
-  const documentId = db`a.checkpoint_json->'writingWorkspace'->>'activeDocumentId'`;
+// Teaching activity timestamps can reflect background publication. Writing workspace
+// starts and checkpoint updates are learner actions, as are edits to its saved variants.
+function learnerEngagementAt(db: Db, scope: Scope) {
+  const writing = db`a.create_intent->>'protocol'=${WRITING_WORKSPACE_PROTOCOL}`;
   return db`GREATEST(
+    CASE WHEN ${writing} THEN a.updated_at END,
     (SELECT max(GREATEST(attempt.started_at,attempt.submitted_at)) FROM opening_learning_attempts attempt
       WHERE attempt.activity_id=a.id AND attempt.workspace_id=a.workspace_id AND attempt.owner_user_id=a.owner_user_id
         AND attempt.course_id=a.course_id),
     (SELECT max(event.created_at) FROM opening_study_intent_events event
       WHERE event.activity_id=a.id AND event.workspace_id=a.workspace_id AND event.owner_user_id=a.owner_user_id),
+    CASE WHEN a.create_intent->>'protocol'='span-lesson-v1' THEN (
+      SELECT max(decision.created_at) FROM opening_learning_decisions decision
+      WHERE decision.workspace_id=a.workspace_id AND decision.owner_user_id=a.owner_user_id
+        AND decision.layer='activity' AND decision.target_id=a.id
+        AND decision.receipt->'reasonCodes' ? 'entry:span-next'
+        AND decision.receipt->>'selectedAction' LIKE 'create:%'
+    ) END,
     (SELECT max(turn.created_at) FROM opening_turns turn
       JOIN opening_conversations conversation ON conversation.id=turn.conversation_id
         AND conversation.workspace_id=turn.workspace_id AND conversation.owner_user_id=a.owner_user_id
@@ -50,20 +62,21 @@ function learnerEngagementAt(db: Db) {
             WHERE session.id=turn.learning_session_id AND session.activity_id=a.id
               AND session.workspace_id=a.workspace_id AND session.owner_user_id=a.owner_user_id
               AND session.course_id IS NOT DISTINCT FROM a.course_id))),
-    (SELECT revision.created_at FROM library_revisions revision
-      WHERE a.create_intent->>'protocol'='writing-workspace-v1'
-        AND revision.workspace_id=a.workspace_id
-        AND revision.document_id=CASE
-          WHEN (${documentId}) ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-          THEN (${documentId})::uuid END
+    CASE WHEN ${writing} THEN (
+      SELECT max(revision.created_at) FROM library_properties p
+      JOIN library_documents d ON d.id=p.subject_id AND d.workspace_id=p.workspace_id
+      JOIN library_revisions revision ON revision.document_id=d.id AND revision.workspace_id=d.workspace_id
+      WHERE p.workspace_id=a.workspace_id AND p.subject_type='document' AND p.key=${WRITING_META_PROPERTY_KEY}
+        AND lower(p.value->>'workGroupId')=lower(a.create_intent->>'workGroupId')
+        AND d.deleted_at IS NULL AND ${openingNoteReadable(db, scope.workspaceId, db`d.id`)}
         AND revision.revision_number>1
-      ORDER BY revision.revision_number DESC LIMIT 1)
+    ) END
   )`;
 }
 
 async function candidates(db: Db, scope: Scope, courseId: string | null, options: CandidateOptions = {}): Promise<CourseCandidateRow[]> {
   const normalizedRefs = options.references?.map(id => id.toLowerCase());
-  const engagement = options.rankByEngagement ? db`,${learnerEngagementAt(db)} AS learner_engaged_at` : db``;
+  const engagement = options.rankByEngagement ? db`,${learnerEngagementAt(db, scope)} AS learner_engaged_at` : db``;
   const rows = await db`SELECT a.id,a.course_id,a.status,a.updated_at,a.content_version,a.intent_kind,a.create_intent,a.checkpoint_json,s.id AS session_id${engagement}
     FROM opening_teaching_activities a
     JOIN workspaces w ON w.id=a.workspace_id AND w.owner_user_id=a.owner_user_id
@@ -306,7 +319,7 @@ async function workspaceCandidates(
   options: { recoveryOnly?: boolean; references?: string[]; sessionId?: string | null } = {},
 ): Promise<WorkspaceCandidateRow[]> {
   const normalizedRefs = options.references?.map(id => id.toLowerCase());
-  const engagement = options.recoveryOnly ? db`,${learnerEngagementAt(db)} AS learner_engaged_at` : db``;
+  const engagement = options.recoveryOnly ? db`,${learnerEngagementAt(db, scope)} AS learner_engaged_at` : db``;
   const rows = await db`SELECT a.id,a.course_id,a.status,a.updated_at,a.content_version,a.intent_kind,a.create_intent,a.checkpoint_json${engagement},
       s.id AS session_id, (c.id IS NOT NULL) AS course_present
     FROM opening_teaching_activities a
