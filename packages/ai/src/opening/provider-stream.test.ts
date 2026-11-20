@@ -179,6 +179,37 @@ describe("direct Markdown streaming", () => {
       outputTokens: 10,
       cachedInputTokens: 50,
     });
+
+    const h3 = harness();
+    h3.write(
+      delta("answer")
+      + event({ choices: [], usage: { prompt_tokens: 50 } })
+      + event({ choices: [], usage: { prompt_tokens_details: { cached_tokens: 90 } } })
+      + stop
+      + event({ choices: [], usage: { prompt_tokens: 120, completion_tokens: 10 } })
+      + done,
+    );
+    await expect(h3.provider.complete(input)).resolves.toMatchObject({
+      text: "answer",
+      inputTokens: 120,
+      outputTokens: 10,
+      cachedInputTokens: 90,
+    });
+
+    const h4 = harness();
+    h4.write(
+      delta("answer")
+      + event({ choices: [], usage: { prompt_tokens: 50, prompt_tokens_details: { cached_tokens: 90 } } })
+      + stop
+      + event({ choices: [], usage: { prompt_tokens: 120, completion_tokens: 10 } })
+      + done,
+    );
+    await expect(h4.provider.complete(input)).resolves.toMatchObject({
+      text: "answer",
+      inputTokens: 120,
+      outputTokens: 10,
+      cachedInputTokens: 90,
+    });
   });
 
   it.each([

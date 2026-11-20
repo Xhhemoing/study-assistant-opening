@@ -28,10 +28,13 @@ function parseOptionalNonNegativeSafeInt(value: unknown): { ok: true; value: num
 /**
  * Strictly parse OpenAI-compatible usage payloads, extracting cached prompt tokens from
  * `prompt_tokens_details.cached_tokens`, `prompt_cache_hit_tokens`, or `cache_read_input_tokens`.
- * Clamps cached tokens to `<= inputTokens` when `inputTokens` is present.
+ * Clamps cached tokens to `<= inputTokens` when `inputTokens` is present unless `options.clamp === false`.
  * Returns `null` when any present usage field is malformed.
  */
-export function parseProviderUsage(rawUsage: unknown): ParsedProviderUsage | null {
+export function parseProviderUsage(
+  rawUsage: unknown,
+  options?: { clamp?: boolean },
+): ParsedProviderUsage | null {
   if (rawUsage == null) {
     return { inputTokens: null, outputTokens: null, cachedInputTokens: null };
   }
@@ -53,10 +56,11 @@ export function parseProviderUsage(rawUsage: unknown): ParsedProviderUsage | nul
   const readCached = parseOptionalNonNegativeSafeInt(usage.cache_read_input_tokens);
   if (!detailsCached.ok || !hitCached.ok || !readCached.ok) return null;
 
+  const shouldClamp = options?.clamp !== false;
   const rawCached = detailsCached.value ?? hitCached.value ?? readCached.value;
   const cachedInputTokens = rawCached === null
     ? null
-    : input.value !== null
+    : shouldClamp && input.value !== null
       ? Math.min(rawCached, input.value)
       : rawCached;
 

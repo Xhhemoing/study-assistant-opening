@@ -23,7 +23,7 @@ export async function readOpeningProviderStream(body: ReadableStream<Uint8Array>
 }): Promise<ProviderOutput> {
   const reader = body.getReader(), decoder = new TextDecoder("utf-8", { fatal: true });
   let buffer = "", data: string[] = [], text = "", bytes = 0, done = false, stopped = false;
-  let requestId: string | null = null, inputTokens: number | null = null, outputTokens: number | null = null, cachedInputTokens: number | null = null;
+  let requestId: string | null = null, inputTokens: number | null = null, outputTokens: number | null = null, rawCachedInputTokens: number | null = null;
   function invalid(message: string): never { throw new OpeningProviderStreamError("PROVIDER_RESPONSE", message); }
   const abort = () => { void reader.cancel(options.signal.reason).catch(() => undefined); };
   options.signal.addEventListener("abort", abort, { once: true });
@@ -39,14 +39,11 @@ export async function readOpeningProviderStream(body: ReadableStream<Uint8Array>
     if (value.error) invalid("provider stream failed");
     if (typeof value.id === "string") requestId = value.id;
     if (value.usage != null) {
-      const parsedUsage = parseProviderUsage(value.usage);
+      const parsedUsage = parseProviderUsage(value.usage, { clamp: false });
       if (!parsedUsage) invalid("invalid provider stream usage");
       if (parsedUsage.inputTokens !== null) inputTokens = parsedUsage.inputTokens;
       if (parsedUsage.outputTokens !== null) outputTokens = parsedUsage.outputTokens;
-      if (parsedUsage.cachedInputTokens !== null) cachedInputTokens = parsedUsage.cachedInputTokens;
-      if (cachedInputTokens !== null && inputTokens !== null) {
-        cachedInputTokens = Math.min(cachedInputTokens, inputTokens);
-      }
+      if (parsedUsage.cachedInputTokens !== null) rawCachedInputTokens = parsedUsage.cachedInputTokens;
     }
     if (!Array.isArray(value.choices)) invalid("invalid provider stream choices");
     for (const raw of value.choices) {
@@ -105,6 +102,11 @@ export async function readOpeningProviderStream(body: ReadableStream<Uint8Array>
     }
     if (!done) invalid("provider stream was interrupted");
     if (!text.trim()) invalid("provider returned an empty answer");
+    const cachedInputTokens = rawCachedInputTokens === null
+      ? null
+      : inputTokens !== null
+        ? Math.min(rawCachedInputTokens, inputTokens)
+        : rawCachedInputTokens;
     const output = providerOutputSchema.safeParse({ text, citedChunkIds: [], candidates: [], requestId, inputTokens, outputTokens, cachedInputTokens });
     if (!output.success) invalid("invalid provider stream output");
     return output.data;
