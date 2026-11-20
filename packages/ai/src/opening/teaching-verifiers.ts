@@ -446,20 +446,27 @@ function verifyClaimSupport(input: VerifyTeachingInput): LayerResult {
 
 async function verifyToolResult(input: VerifyTeachingInput): Promise<LayerResult> {
   const latexSnippets: string[] = [];
+  let unknown: LayerResult | undefined;
   for (const block of input.blocks) {
-    const latex =
-      (typeof block.content.latex === "string" && block.content.latex) ||
-      (typeof block.content.formula === "string" && block.content.formula) ||
-      null;
-    if (latex) latexSnippets.push(latex);
+    const fields = [block.content.latex, block.content.formula];
+    if (block.type === "steps" && Array.isArray(block.content.steps)) {
+      fields.push(...block.content.steps.filter(step => typeof step === "string" && step.includes("=")));
+    }
+    const formulas = fields.filter((field): field is string => typeof field === "string" && !!field.trim());
+    if (!formulas.length && (block.type === "formula" || block.type === "math")) {
+      unknown ??= { layer: "tool_result", outcome: "unknown", reason: "formula block has no checkable latex" };
+    }
+    for (const formula of new Set(formulas)) {
+      const lines = formula.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+      latexSnippets.push(...(lines.every(line => line.includes("=")) ? lines : [formula]));
+    }
   }
 
   if (latexSnippets.length === 0) {
-    const hasFormulaBlock = input.blocks.some((block) => block.type === "formula" || block.type === "math");
-    return {
+    return unknown ?? {
       layer: "tool_result",
-      outcome: hasFormulaBlock ? "unknown" : "skipped",
-      reason: hasFormulaBlock ? "formula block has no checkable latex" : "no formula latex to check",
+      outcome: "skipped",
+      reason: "no formula latex to check",
     };
   }
 
@@ -478,14 +485,8 @@ async function verifyToolResult(input: VerifyTeachingInput): Promise<LayerResult
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (/timeout|timed\s*out|ETIMEDOUT|abort/i.test(msg)) {
-        return {
-          layer: "tool_result",
-          outcome: "unknown",
-          reason: `formula tool timeout: ${msg}`,
-          details: { latex },
-        };
-      }
-      return {
+        result = { unknown: true, reason: `formula tool timeout: ${msg}` };
+      } else return {
         layer: "tool_result",
         outcome: "fail",
         reason: `formula tool error: ${msg}`,
@@ -494,7 +495,7 @@ async function verifyToolResult(input: VerifyTeachingInput): Promise<LayerResult
     }
 
     if ("unknown" in result && result.unknown) {
-      return {
+      unknown ??= {
         layer: "tool_result",
         outcome: "unknown",
         reason: result.reason || "formula tool returned unknown",
@@ -511,7 +512,7 @@ async function verifyToolResult(input: VerifyTeachingInput): Promise<LayerResult
     }
   }
 
-  return {
+  return unknown ?? {
     layer: "tool_result",
     outcome: "pass",
     reason: "formula tool checks passed",

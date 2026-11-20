@@ -1,6 +1,6 @@
 import { rankMaterialContext, runBudgetedEmbedding, type MaterialRetriever } from "@aistudy/ai";
 import { loadOpeningEmbeddingConfig } from "@aistudy/config";
-import { createOpeningCourseReadySourcesRepository, createOpeningSourceEmbeddingsRepository, type OpeningBudgetRepository } from "@aistudy/database";
+import { createOpeningCourseReadySourcesRepository, createOpeningSourceEmbeddingsRepository, OpeningBudgetError, type OpeningBudgetRepository } from "@aistudy/database";
 import type { Sql } from "postgres";
 import type { CourseSourceUse } from "@aistudy/contracts";
 
@@ -9,6 +9,8 @@ type ScopedMaterialRetriever = (scope: Parameters<MaterialRetriever>[0],
   input: Parameters<MaterialRetriever>[1] & { courseContext?: CourseMaterialContext }) =>
     Promise<Awaited<ReturnType<MaterialRetriever>> & { assertCurrent(): Promise<void> }>;
 import { scopeBudget } from "./model-gateway";
+
+export const retrievalBudgetId = (parentId: string) => `retrieval:${parentId}`;
 
 /** One material path for saved chat, temporary chat and the teaching compiler. */
 export function createOpeningMaterialRetriever(
@@ -33,7 +35,8 @@ export function createOpeningMaterialRetriever(
     let mode: "hybrid" | "lexical" = "lexical";
     try {
       const sourceIds = [...new Set(before.chunks.map(chunk => chunk.sourceId))];
-      if (config && input.query.trim() && sourceIds.length && await repository.hasIndex(scope, { ...config, sourceIds })) {
+      const route = { sourceIds, chunkIds: before.chunks.map(chunk => chunk.id), privacyEpoch: before.privacyEpoch };
+      if (config && input.query.trim() && sourceIds.length && await repository.hasIndex(scope, { ...config, ...route })) {
         const query = Array.from(input.query).reduce((state, character) => {
           if (state.full) return state;
           const bytes = new TextEncoder().encode(character).length;
@@ -42,18 +45,23 @@ export function createOpeningMaterialRetriever(
         }, { text: "", bytes: 0, full: false }).text;
         const result = await runBudgetedEmbedding({ config, inputs: [query], budget: scopeBudget(budget, scope),
           operationId: `material-query:${input.operationId}`, signal: input.signal,
-          parentBudget: input.parentBudget, timeoutMs: 2_000,
+          // A post-send embedding timeout holds workspace spend and blocks embedding retries.
+          // Give it its own interaction so lexical fallback can still fund the tutor response.
+          parentBudget: input.parentBudget && { ...input.parentBudget, id: retrievalBudgetId(input.parentBudget.id) },
+          timeoutMs: 2_000,
           beforeSend: async () => {
             await purposes.assertMaterialPurposePin(scope, purposePin);
             const now = await repository.authorizeChunks(scope, before.chunks);
             if (now.privacyEpoch !== before.privacyEpoch || now.chunks.length !== before.chunks.length) throw new Error("material privacy changed");
           },
         });
-        dense = await repository.search(scope, { ...config, sourceIds, vector: result.vectors[0]! });
+        dense = await repository.search(scope, { ...config, ...route, vector: result.vectors[0]! });
         if (dense.length) mode = "hybrid";
       }
     } catch (error) {
-      if (input.signal?.aborted || (error as { code?: string } | null)?.code === "CONFLICT") throw error;
+      // A legacy embedding key can already belong to the tutor parent. The ledger
+      // refuses reassignment. Keep lexical fallback, but propagate material conflicts.
+      if (input.signal?.aborted || ((error as { code?: string } | null)?.code === "CONFLICT" && !(error instanceof OpeningBudgetError))) throw error;
       // A missing index/provider/quota affects ranking only; authorized lexical material remains usable.
     }
     await purposes.assertMaterialPurposePin(scope, purposePin);

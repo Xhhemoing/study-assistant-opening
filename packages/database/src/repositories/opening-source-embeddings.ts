@@ -8,9 +8,13 @@ import { enqueueOpeningSourceIndex } from "./opening-source-index-jobs";
 export { enqueueOpeningSourceIndex } from "./opening-source-index-jobs";
 
 type ModelIdentity = { modelKey: string; dimensions: number };
+type SearchScope = { sourceIds: string[]; chunkIds?: string[]; privacyEpoch?: number };
 export type SourceIndexSnapshot = { sourceId: string; sourceVersion: number; privacyEpoch: number; chunks: SourceChunk[] };
 
 export function createOpeningSourceEmbeddingsRepository(sql: Sql) {
+  const routeFilter = ({ chunkIds, privacyEpoch }: SearchScope) => sql`
+    ${chunkIds === undefined ? sql`` : sql`AND e.chunk_id = ANY(${sql.array(chunkIds)}::uuid[])`}
+    ${privacyEpoch === undefined ? sql`` : sql`AND w.privacy_epoch=${privacyEpoch}`}`;
   const readSnapshot = async (db: Sql | TransactionSql, scope: OpeningScope, sourceId: string, sourceVersion?: number): Promise<SourceIndexSnapshot | null> => {
     const [source] = await db`SELECT s.id,s.version,w.privacy_epoch FROM opening_sources s JOIN workspaces w ON w.id=s.workspace_id
       WHERE w.id=${scope.workspaceId} AND w.owner_user_id=${scope.ownerUserId} AND s.id=${sourceId}
@@ -23,6 +27,20 @@ export function createOpeningSourceEmbeddingsRepository(sql: Sql) {
     return { sourceId, sourceVersion: Number(source.version), privacyEpoch: Number(source.privacy_epoch), chunks: rows.map(row => mapChunk(row)) };
   };
   return {
+    async isTurnWithRetrievalNotSent(scope: OpeningScope, tutorId: string, retrievalId: string): Promise<boolean> {
+      return sql.begin(async tx => {
+        // Serialize the retry decision with admission under either interaction.
+        const owner = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId}
+          AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
+        if (!owner.length) return false;
+        const [proof] = await tx`SELECT bool_or(parent_interaction_id=${tutorId}) AND
+          bool_and(state='released' AND outcome_unknown_at IS NULL
+            AND COALESCE(release_reason IN ('not_sent','cancelled'), false)) AS not_sent
+          FROM opening_budget_reservations WHERE workspace_id=${scope.workspaceId}
+            AND parent_interaction_id IN (${tutorId},${retrievalId})`;
+        return proof?.not_sent === true;
+      });
+    },
     async authorizeChunks(scope: OpeningScope, chunks: SourceChunk[]): Promise<{ chunks: SourceChunk[]; privacyEpoch: number }> {
       const [owner] = await sql`SELECT privacy_epoch FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
       if (!owner) throw Object.assign(new Error("workspace not found"), { code: "NOT_FOUND" });
@@ -83,8 +101,8 @@ export function createOpeningSourceEmbeddingsRepository(sql: Sql) {
         }
       });
     },
-    async search(scope: OpeningScope, input: ModelIdentity & { sourceIds: string[]; vector: number[] }): Promise<MaterialSegment[]> {
-      if (!input.sourceIds.length) return [];
+    async search(scope: OpeningScope, input: ModelIdentity & SearchScope & { vector: number[] }): Promise<MaterialSegment[]> {
+      if (!input.sourceIds.length || input.chunkIds?.length === 0) return [];
       // MATERIALIZED puts authorization, version, privacy and dimensions before the distance operation.
       const rows = await sql`WITH authorized AS MATERIALIZED (
         SELECT c.id,c.source_id,c.source_version,c.page,c.slide_label,c.start_ms,c.end_ms,c.image_object_key,
@@ -95,17 +113,19 @@ export function createOpeningSourceEmbeddingsRepository(sql: Sql) {
         WHERE w.id=${scope.workspaceId} AND w.owner_user_id=${scope.ownerUserId}
           AND s.id IN ${sql(input.sourceIds)} AND s.version=c.source_version AND s.upload_state='uploaded' AND s.parse_state='ready'
           AND e.model_key=${input.modelKey} AND e.dimensions=${input.dimensions}
+          ${routeFilter(input)}
           AND NOT EXISTS(SELECT 1 FROM opening_privacy_exclusions x WHERE x.workspace_id=w.id AND x.source_id=s.id)
       ) SELECT *,embedding <=> ${JSON.stringify(input.vector)}::vector AS distance FROM authorized
         ORDER BY distance,id,segment_index LIMIT 48`;
       return rows.map(row => ({ chunk: mapChunk(row), segmentIndex: Number(row.segment_index) }));
     },
-    async hasIndex(scope: OpeningScope, input: ModelIdentity & { sourceIds: string[] }): Promise<boolean> {
-      if (!input.sourceIds.length) return false;
+    async hasIndex(scope: OpeningScope, input: ModelIdentity & SearchScope): Promise<boolean> {
+      if (!input.sourceIds.length || input.chunkIds?.length === 0) return false;
       const rows = await sql`SELECT 1 FROM opening_source_embeddings e JOIN opening_sources s ON s.id=e.source_id
         JOIN workspaces w ON w.id=s.workspace_id WHERE w.id=${scope.workspaceId} AND w.owner_user_id=${scope.ownerUserId}
           AND s.id IN ${sql(input.sourceIds)} AND s.version=e.source_version AND s.upload_state='uploaded' AND s.parse_state='ready'
           AND e.model_key=${input.modelKey} AND e.dimensions=${input.dimensions}
+          ${routeFilter(input)}
           AND NOT EXISTS(SELECT 1 FROM opening_privacy_exclusions x WHERE x.workspace_id=w.id AND x.source_id=s.id) LIMIT 1`;
       return rows.length > 0;
     },

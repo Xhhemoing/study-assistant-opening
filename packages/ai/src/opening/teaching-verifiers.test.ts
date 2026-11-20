@@ -296,6 +296,42 @@ describe("teaching-verifiers", () => {
     );
   });
 
+  const symbolic = String.raw`\frac{d}{dx} f(x) = g(x)`;
+  it.each([
+    [[symbolic, "2 + 2 = 5"], "fail", "2 + 2 = 5"],
+    [["2 + 2 = 5", symbolic], "fail", "2 + 2 = 5"],
+    [[symbolic, "2 + 2 = 4"], "unknown", symbolic],
+    [["2 + 2 = 4", "1 + 1 = 2"], "pass", undefined],
+    [["timeout", "2 + 2 = 5"], "fail", "2 + 2 = 5"],
+  ] as const)("aggregates formula checks for %j as %s", async (formulas, outcome, diagnostic) => {
+    const report = await verifyTeachingContent({
+      activityId: ACT, publishInput: basePublish(), pack: packWithSupport(), keyClaims: [],
+      blocks: formulas.map((latex, i) => ({ id: String(i), role: "teach", type: "formula", content: { latex } })),
+      tools: { async checkFormula(latex) {
+        if (latex === "timeout") throw new Error("tool timed out");
+        if (latex === symbolic) return { unknown: true, reason: "symbolic expression" };
+        return { ok: latex !== "2 + 2 = 5" };
+      } },
+    });
+    expect(report.layers.find(layer => layer.layer === "tool_result")).toMatchObject({
+      outcome, ...(diagnostic ? { details: { latex: diagnostic } } : {}),
+    });
+  });
+
+  it.each([
+    { type: "formula", content: { latex: `${symbolic}\n2 + 2 = 5` } },
+    { type: "steps", content: { steps: [symbolic, "2 + 2 = 5"] } },
+  ])("checks later equalities within one $type block", async block => {
+    const report = await verifyTeachingContent({
+      activityId: ACT, publishInput: basePublish(), pack: packWithSupport(), keyClaims: [],
+      blocks: [{ ...block, id: BLOCK, role: "teach" }],
+      tools: { checkFormula: async latex => latex === "2 + 2 = 5" ? { ok: false } : { unknown: true, reason: "symbolic" } },
+    });
+    expect(report.layers.find(layer => layer.layer === "tool_result")).toMatchObject({
+      outcome: "fail", details: { latex: "2 + 2 = 5" },
+    });
+  });
+
   it("C7: peer-model upvote rejected as independent proof", () => {
     const r = detectAuthoritySpoof("second llm looks good / peer-model-upvote");
     expect(r.outcome).toBe("fail");
