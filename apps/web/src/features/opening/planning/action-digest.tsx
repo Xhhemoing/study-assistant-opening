@@ -64,7 +64,7 @@ export function ActionDigest({
       </section>
     );
   }
-  if (!digest || (digest.primary.length === 0 && digest.pendingConfirmationCount === 0)) {
+  if (!digest?.primary.length) {
     return null;
   }
 
@@ -94,17 +94,7 @@ export function ActionDigest({
 
   return (
     <section className="mx-4 my-3 space-y-3 rounded-card border border-line bg-surface-2/60 p-4 shadow-card" aria-labelledby="action-digest-heading">
-      <div>
-        <h3 className="text-xs font-semibold text-text" id="action-digest-heading">今日优先行动</h3>
-        <p className="mt-1 text-xs leading-5 text-text-3">
-          至多 3 项优先行动；需确认项集中在一张确认卡。复用多源摘要，不另建第二套计划。
-        </p>
-      </div>
-      {digest.pendingConfirmationCount > digest.primary.length ? (
-        <p className="text-xs leading-5 tabular-nums text-warn" role="status">
-          另有 {digest.pendingConfirmationCount - digest.primary.length} 项待确认（已集中，未全部展开）
-        </p>
-      ) : null}
+      <h3 className="text-xs font-semibold text-text" id="action-digest-heading">今日优先行动</h3>
       <ul className="space-y-2 text-xs leading-5 text-text-2" aria-label="优先行动">
         {digest.primary.map((item) => (
           <li key={item.id} className="rounded-xl border border-line bg-surface p-3 shadow-card">

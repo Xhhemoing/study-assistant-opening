@@ -4,9 +4,10 @@ import { TransitionLink as Link } from "../v3/motion/view-transition";
 import { ArrowLeft, ChevronDown, FolderOpen, NotebookPen, Sparkles } from "lucide-react";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
-import type { LearningResume, MatrixExerciseSpec } from "@aistudy/contracts";
+import type { LearningResume, MatrixExerciseInput, MatrixExerciseSpec } from "@aistudy/contracts";
 import { createOpeningApi, type OpeningApi } from "../client/api";
 import { LearningAttemptForm } from "../learning/attempt-form";
+import { MatrixExerciseForm } from "../learning/matrix-exercise-form";
 import { retestPrefillFromProjection } from "../learning/retest-attempt";
 import { ContentBlock, LoadError, LoadingRows, ui } from "../design/ui";
 import { TeachingContinueEntry } from "../teaching/teaching-workspace";
@@ -47,12 +48,13 @@ export function CourseRetestReview({ courseId, task, originalConversationId }: {
   </section>;
 }
 
-export function CourseStudyWorkspace({ courseId, activityId, taskId, retestId, teachingEnabled, teachingCompileEnabled, sourceIds, sourceLoadError = false, timeZone, api: suppliedApi, initialMode, initialMatrixKey, initialMatrixVariant, practiceEntryError, initialFocus, historicalAnchor, historicalAnchorError, originalConversationId }: {
+export function CourseStudyWorkspace({ courseId, activityId, taskId, retestId, teachingEnabled, teachingCompileEnabled, sourceIds, sourceLoadError = false, timeZone, api: suppliedApi, initialMode, initialMatrixKey, initialMatrixVariant, initialMatrixExercise, boundPracticeSourceAvailable = false, practiceEntryError, initialFocus, historicalAnchor, historicalAnchorError, originalConversationId }: {
   historicalAnchor?: { blockId: string; contentVersion: number }; historicalAnchorError?: string; originalConversationId?: string | null;
   courseId: string; activityId?: string; taskId?: string; retestId?: string; teachingEnabled: boolean; teachingCompileEnabled: boolean;
   sourceIds: string[]; sourceLoadError?: boolean; timeZone: string; api?: OpeningApi;
   initialFocus?: { skillLabel: string; requirementKey: string | null };
-  initialMode?: "practice" | "matrix"; initialMatrixKey?: MatrixExerciseSpec["exerciseKey"]; initialMatrixVariant?: number; practiceEntryError?: string;
+  initialMode?: "practice" | "matrix"; initialMatrixKey?: MatrixExerciseSpec["exerciseKey"]; initialMatrixVariant?: number;
+  initialMatrixExercise?: MatrixExerciseInput; boundPracticeSourceAvailable?: boolean; practiceEntryError?: string;
 }) {
   const { course, loading, error, reload } = useCourseBundle(courseId, { includeAssets: false });
   const router = useRouter();
@@ -162,7 +164,27 @@ export function CourseStudyWorkspace({ courseId, activityId, taskId, retestId, t
       {!busy && entry?.kind === "retest-review" ? <CourseRetestReview courseId={courseId} task={entry.task} originalConversationId={originalConversationId} /> : null}
       {!busy && entry?.kind === "route-choice" ? <div className="space-y-3 p-5"><p role="status" className="text-sm text-text-2">{entry.choice.message}</p><Link className={ui.secondary} href={conversationObjectHref(entry.choice.href, originalConversationId)}>核对课程路线</Link></div> : null}
 
-      {!busy && !archived && entry?.kind !== "retest-review" && practiceVisited ? <section hidden={!practice && teachingEnabled} id="course-practice" className={!practice && teachingEnabled ? "hidden" : "space-y-4 px-5 py-6"} aria-labelledby="course-practice-heading"><ContentBlock width={initialMode === "matrix" ? "wide" : "prose"}><div className="flex items-center justify-between gap-3"><h2 className="text-ui-lg font-semibold" id="course-practice-heading">{retestPrefill ? "独立补测" : "独立练习"}</h2>{activity ? <button type="button" className={ui.quiet} onClick={() => setPractice(false)}>返回讲解</button> : null}</div>{retest?.requirementKey === "span:linear-combination:v1" ? <Link className={ui.primary} href={conversationObjectHref(`/opening/courses/${courseId}/study/span?retest=${retest.candidateId}`, originalConversationId)}>开始 span 正式延迟复测</Link> : <LearningAttemptForm key={retestPrefill?.retestId ?? courseId} courseId={courseId} retest={retestPrefill} initialFocus={practiceFocus} initialMode={initialMode} initialMatrixKey={initialMatrixKey} initialMatrixVariant={initialMatrixVariant} onRecorded={() => undefined} />}</ContentBlock></section> : null}
+      {!busy && !archived && entry?.kind !== "retest-review" && practiceVisited ? (
+        <section hidden={!practice && teachingEnabled} id="course-practice" className={!practice && teachingEnabled ? "hidden" : "space-y-4 px-5 py-6"} aria-labelledby="course-practice-heading">
+          <ContentBlock width={initialMode === "matrix" ? "wide" : "prose"}>
+            <div className="flex items-center justify-between gap-3">
+              <h2 className="text-ui-lg font-semibold" id="course-practice-heading">{retestPrefill ? "独立补测" : "独立练习"}</h2>
+              {activity ? <button type="button" className={ui.quiet} onClick={() => setPractice(false)}>返回讲解</button> : null}
+            </div>
+            {retest?.requirementKey === "span:linear-combination:v1" ? (
+              <Link className={ui.primary} href={conversationObjectHref(`/opening/courses/${courseId}/study/span?retest=${retest.candidateId}`, originalConversationId)}>开始 span 正式延迟复测</Link>
+            ) : initialMatrixExercise ? (
+              <MatrixExerciseForm courseId={courseId} boundExercise={initialMatrixExercise}
+                boundSourceAvailable={boundPracticeSourceAvailable}
+                onRecorded={() => undefined} />
+            ) : (
+              <LearningAttemptForm key={retestPrefill?.retestId ?? courseId} courseId={courseId} retest={retestPrefill}
+                initialFocus={practiceFocus} initialMode={initialMode} initialMatrixKey={initialMatrixKey}
+                initialMatrixVariant={initialMatrixVariant} onRecorded={() => undefined} />
+            )}
+          </ContentBlock>
+        </section>
+      ) : null}
       {!practice && teachingEnabled && !archived && entry?.kind !== "retest-review" && entry?.kind !== "static-lesson" && entry?.kind !== "exam-sprint" && entry?.kind !== "continuation-choice" && entry?.kind !== "route-choice" && entry?.kind !== "cards" && activity?.status !== "completed" && activity?.status !== "skipped" ? (() => {
         // 讲解还没准备好（排队、生成中、未开启或失败）时，不让学习者对着状态卡干等：把能马上开始的事直接摆出来，并区分状态。
         const waiting = !busy && !entryError && !resumeError && !resume?.clientInit && !workspaceReady;

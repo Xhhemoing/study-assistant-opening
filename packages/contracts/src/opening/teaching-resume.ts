@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { helpExposureKindSchema, assistanceLevelSchema } from "./learning";
 import { isoDateTimeSchema, uuidSchema } from "./foundation";
+import { matrixExerciseInputSchema } from "./matrix-evaluation";
 import {
   teachingActivityGenerateStatusSchema,
   teachingActivityStatusSchema,
@@ -214,10 +215,14 @@ export const teachingActivitySummarySchema = z.object({
   }).strict(),
   openQuestions: z.array(z.string().max(2000)),
   taskId: uuidSchema.nullable(),
-  nextStep: z.object({
-    kind: z.enum(["assisted_check", "schedule_retest"]),
-    observationId: uuidSchema,
-  }).strict().optional(),
+  nextStep: z.discriminatedUnion("kind", [
+    z.object({
+      kind: z.literal("assisted_check"),
+      observationId: uuidSchema,
+      matrixPractice: matrixExerciseInputSchema.optional(),
+    }).strict(),
+    z.object({ kind: z.literal("schedule_retest"), observationId: uuidSchema }).strict(),
+  ]).optional(),
 }).strict();
 export type TeachingActivitySummary = z.infer<typeof teachingActivitySummarySchema>;
 

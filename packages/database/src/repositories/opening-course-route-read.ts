@@ -31,8 +31,8 @@ export async function readCourseRequirements(db:CourseRouteDb,scope:Scope,course
   return (await db`SELECT * FROM course_requirements WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
     AND course_id=${courseId} AND lifecycle='active' ORDER BY position,id`).map(mapCourseRequirement);
 }
-export async function readCourseRouteObservations(db:CourseRouteDb,scope:Scope,courseId:string,includeShared=true){
-  const rows=await db`SELECT o.*,s.activity_id AS route_activity_id,v.evaluation_spec,a.goal_json AS route_goal FROM opening_learning_observations o
+function readCourseRouteObservationRows(db: CourseRouteDb, scope: Scope, courseId: string, activityId?: string) {
+  return db`SELECT o.*,s.activity_id AS route_activity_id,v.evaluation_spec,a.goal_json AS route_goal FROM opening_learning_observations o
     JOIN opening_learning_sessions s ON s.id=o.session_id AND s.workspace_id=o.workspace_id AND s.owner_user_id=o.owner_user_id
     LEFT JOIN opening_learning_item_versions v ON v.id=o.item_version_id AND v.workspace_id=o.workspace_id AND v.owner_user_id=o.owner_user_id
     LEFT JOIN opening_teaching_activities a ON a.id=s.activity_id AND a.workspace_id=s.workspace_id AND a.owner_user_id=s.owner_user_id
@@ -40,7 +40,30 @@ export async function readCourseRouteObservations(db:CourseRouteDb,scope:Scope,c
     ON root.id=COALESCE(o.root_observation_id,o.id) AND root.workspace_id=o.workspace_id AND root.owner_user_id=o.owner_user_id
       AND COALESCE(root.effective_head_id,root.id)=o.id
     WHERE o.workspace_id=${scope.workspaceId} AND o.owner_user_id=${scope.ownerUserId} AND o.course_id=${courseId}
+      ${activityId === undefined ? db`` : db`AND s.activity_id=${activityId}`}
       AND COALESCE(o.revision_kind,'original')<>'retract' ORDER BY o.occurred_at DESC,o.id DESC`;
+}
+
+function courseRouteActivityObservationId(
+  observations: readonly { id: string; activityId: string; submittedAt?: string | null; occurredAt: string }[],
+  activityId: string,
+) {
+  // Match the next/retest commands' effective-head ordering, including the ID tiebreaker.
+  return observations.filter(row => row.activityId === activityId)
+    .sort((a, b) => Date.parse(b.submittedAt ?? b.occurredAt) - Date.parse(a.submittedAt ?? a.occurredAt)
+      || b.id.localeCompare(a.id))[0]?.id ?? null;
+}
+
+export async function readOpeningCourseRouteActivityObservationId(db: CourseRouteDb, scope: Scope, courseId: string, activityId: string) {
+  const rows = await readCourseRouteObservationRows(db, scope, courseId, activityId);
+  return courseRouteActivityObservationId(rows.map(row => ({
+    id: String(row.id), activityId: String(row.route_activity_id),
+    submittedAt: learningIso(row.submitted_at), occurredAt: learningIso(row.occurred_at)!,
+  })), activityId);
+}
+
+export async function readCourseRouteObservations(db:CourseRouteDb,scope:Scope,courseId:string,includeShared=true){
+  const rows=await readCourseRouteObservationRows(db,scope,courseId);
   const observations=rows.map(row=>({...mapLearningObservation(row),activityId:String(row.route_activity_id)}));
   const evidenceContexts=await readOpeningLearningEvidenceContexts(db,scope,observations);
   const history=await db`SELECT a.id,a.started_at,a.submitted_at,v.stem_snapshot,v.teaching_block_id,r.blocks FROM opening_learning_attempts a JOIN opening_learning_item_versions v ON v.id=a.item_version_id
@@ -148,12 +171,11 @@ export async function readOpeningCourseRoute(db:CourseRouteDb,scope:Scope,course
     AND goal_json ? 'courseRoute' ORDER BY updated_at DESC,id DESC LIMIT 1`;
   if(activityId&&!current)throw learningError("NOT_FOUND","本课程路线活动不存在。");
   const currentRoute=current?courseRouteActivityContextSchema.parse((current.goal_json as {courseRoute:unknown}).courseRoute):null;
-  const currentHead=current?observations.raw.filter(row=>row.activityId===String(current.id))
-    .sort((a,b)=>Date.parse(b.submittedAt??b.occurredAt)-Date.parse(a.submittedAt??a.occurredAt)||b.id.localeCompare(a.id))[0]:null;
+  const observationId = current ? courseRouteActivityObservationId(observations.raw, String(current.id)) : null;
   return {courseId,scopeState:!requirements.length?"missing":requirements.every(row=>row.approvedAt!==null)?"confirmed":"unconfirmed",requirements:progress,
     ...(exactVerificationEnabled ? { spanBindingOptions: readCourseSpanBindingOptions() } : {}),
     suggestions:await suggestions(db,scope,courseId,requirements,exactVerificationEnabled),materials,currentActivity:current?((current.create_intent as {courseSpanRequest?:unknown})?.courseSpanRequest
-      ?await assertOwnedActivity(db as Sql,scope,String(current.id)):mapTeachingActivity(current)):null,currentRoute,observationId:currentHead?.id??null,
+      ?await assertOwnedActivity(db as Sql,scope,String(current.id)):mapTeachingActivity(current)):null,currentRoute,observationId,
     summary:{total:progress.length,mandatory:progress.filter(row=>row.requirement.mandatory).length,
       verified:progress.filter(row=>row.status==="verified").length,blocked:progress.filter(row=>row.status==="blocked").length}};
 }

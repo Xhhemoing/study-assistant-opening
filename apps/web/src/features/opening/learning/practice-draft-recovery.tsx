@@ -4,8 +4,8 @@ import { TransitionLink as Link } from "../v3/motion/view-transition";
 import { useRef, useState } from "react";
 
 /** Keep the raw answer accessible even when the old material can no longer be resumed. */
-export function PracticeDraftRecovery({ courseId, answer, pending, onResume }: {
-  courseId: string; answer: string; pending: boolean; onResume: () => void;
+export function PracticeDraftRecovery({ courseId, answer, pending, resumeDisabled = false, onResume }: {
+  courseId: string; answer: string; pending: boolean; resumeDisabled?: boolean; onResume: () => void;
 }) {
   const answerRef = useRef<HTMLTextAreaElement>(null);
   const [copyNotice, setCopyNotice] = useState("");
@@ -23,7 +23,7 @@ export function PracticeDraftRecovery({ courseId, answer, pending, onResume }: {
       <textarea ref={answerRef} readOnly value={answer} rows={4} className="mt-1 w-full rounded border border-text-3 bg-bg px-3 py-2" />
     </label> : null}
     <div className="flex flex-wrap items-center gap-3">
-      <button type="button" disabled={pending} onClick={onResume} className="rounded bg-ink px-3 py-2 text-sm text-on-ink disabled:opacity-50">{pending ? "正在读取…" : "继续此练习"}</button>
+      <button type="button" disabled={pending || resumeDisabled} onClick={onResume} className="rounded bg-ink px-3 py-2 text-sm text-on-ink disabled:opacity-50">{pending ? "正在读取…" : "继续此练习"}</button>
       {answer ? <button type="button" onClick={() => void copyAnswer()} className="rounded border border-line px-3 py-2 text-sm text-text">复制原答案</button> : null}
       <Link href={`/opening/courses/${courseId}#course-learning-records`} className="text-sm text-accent underline underline-offset-4">查看课程历史</Link>
     </div>

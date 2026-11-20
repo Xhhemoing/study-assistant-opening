@@ -22,8 +22,11 @@ export function ActivitySummaryContent({ summary, task, api, onReread, activity,
   const courseId = activity?.courseId;
   const focus = activity?.learnerFocus;
   const step = summary.nextStep;
+  const matrixPractice = step?.kind === "assisted_check" ? step.matrixPractice : undefined;
   const practiceHref = courseId && step?.kind === "assisted_check" ? conversationObjectHref(
-    `/opening/courses/${encodeURIComponent(courseId)}/study?${new URLSearchParams({
+    `/opening/courses/${encodeURIComponent(courseId)}/study?${new URLSearchParams(matrixPractice ? {
+      mode: "matrix", exercise: matrixPractice.exerciseKey, variant: String(matrixPractice.variant), sourceId: matrixPractice.sourceId,
+    } : {
       mode: "practice",
       ...(focus ? { skillLabel: focus.skillLabel } : {}),
       ...(focus?.requirementKey ? { requirementKey: focus.requirementKey } : {}),
@@ -47,8 +50,10 @@ export function ActivitySummaryContent({ summary, task, api, onReread, activity,
     {activity?.routeManaged ? <CourseRouteNextControl activity={activity} originalConversationId={originalConversationId}
       summaryStep={step ?? null} onEvidenceChanged={onReread} />
       : practiceHref ? <div className="space-y-2 border-t border-line pt-3">
-        <p className="text-xs leading-6 text-text-2">这次借助了帮助，可以选一道同类题独立作答。</p>
-        <Link className={ui.primary} href={practiceHref}>独立试做同类题</Link>
+        <p className="text-xs leading-6 text-text-2">{matrixPractice
+          ? "这次借助了帮助，可以用同一份材料独立试做一道同类题，提交后自动核算。"
+          : "这次借助了帮助。你可以自选一道同类题，自己填写题目和作答结果。"}</p>
+        <Link className={ui.primary} href={practiceHref}>{matrixPractice ? "独立试做同类题" : "记录自选练习"}</Link>
       </div> : courseId && step?.kind === "schedule_retest" ? <div className="space-y-2 border-t border-line pt-3">
         <p className="text-xs leading-6 text-text-2">本次已独立答对，可以查看后续复测建议。</p>
         <Link className={ui.primary} href="/opening/suggestions">查看延迟复测建议</Link>

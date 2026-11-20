@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useRef, useState, type FormEvent } from "react";
-import type { LearningAttempt, LearningObservation, MatrixExerciseSpec, SourceRecord } from "@aistudy/contracts";
+import type { LearningAttempt, LearningObservation, MatrixExerciseInput, MatrixExerciseSpec, SourceRecord } from "@aistudy/contracts";
 import { matrixExerciseSkillLabel, matrixExerciseStem } from "@aistudy/domain";
 import { createOpeningLearningClient } from "../client/learning-client";
 import { useDiagnosticsEnabled } from "../settings/appearance-preferences";
@@ -23,18 +23,25 @@ const reasonText: Record<string, string> = {
 };
 
 /** Built-in deterministic questions use the same session/attempt/observation history as ordinary work. */
-type Props = { courseId: string; initialKey?: Key; initialVariant?: number; sources: SourceRecord[]; onRecorded: () => void; onBack: () => void };
+type Props = { courseId: string; initialKey?: Key; initialVariant?: number; onRecorded: () => void } & (
+  | { sources: SourceRecord[]; onBack: () => void; boundExercise?: undefined; boundSourceAvailable?: undefined }
+  | { boundExercise: MatrixExerciseInput; boundSourceAvailable: boolean; sources?: undefined; onBack?: undefined }
+);
 export function MatrixExerciseForm(props: Props) {
-  return <MatrixController key={practiceScope(props.courseId, "matrix")} {...props} />;
+  const scope = practiceScope(props.courseId, "matrix", undefined, undefined, undefined, props.boundExercise);
+  return <MatrixController key={scope} scope={scope} {...props} />;
 }
-function MatrixController(props: Props) {
-  const continuity = usePracticeDraft(practiceScope(props.courseId, "matrix"), { matrixKey: props.initialKey ?? "multiplication", matrixVariant: props.initialVariant ?? 0 });
-  return <div className="space-y-3"><MatrixForm key={continuity.draft.id} {...props} continuity={continuity} /><PracticeDraftShelf continuity={continuity} /></div>;
+function MatrixController(props: Props & { scope: string }) {
+  const continuity = usePracticeDraft(props.scope, {
+    matrixKey: props.boundExercise?.exerciseKey ?? props.initialKey ?? "multiplication",
+    matrixVariant: props.boundExercise?.variant ?? props.initialVariant ?? 0,
+    sourceId: props.boundExercise?.sourceId ?? "",
+  });
+  return <div className="space-y-3"><MatrixForm key={continuity.draft.id} {...props} continuity={continuity} /><PracticeDraftShelf continuity={continuity} allowAnother={!props.boundExercise} /></div>;
 }
-function MatrixForm({ courseId, sources, onRecorded, onBack, initialKey, initialVariant, continuity }: Props & { continuity: PracticeContinuity }) {
+function MatrixForm({ courseId, sources, onRecorded, onBack, initialKey, initialVariant, boundExercise, boundSourceAvailable, scope, continuity }: Props & { scope: string; continuity: PracticeContinuity }) {
   const diagnostics = useDiagnosticsEnabled();
   const client = useMemo(() => createOpeningLearningClient(), []);
-  const scope = practiceScope(courseId, "matrix");
   const { draft, patch, ready, storageWarning, requireSaved } = continuity;
   const [restored, setRestored] = useState(Boolean(draft.start || draft.attemptId || draft.submission));
   const { matrixKey: key, matrixVariant: variant, sourceId, answer, assistance, deliveredAssistance } = draft.fields;
@@ -48,6 +55,7 @@ function MatrixForm({ courseId, sources, onRecorded, onBack, initialKey, initial
   const pendingRef = useRef(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
+  const sourceUnavailable = boundExercise !== undefined && !boundSourceAvailable;
 
   async function acceptAttempt(next: LearningAttempt, expectedRequestKey: string) {
     if (!next.matrixExercise) throw new Error("矩阵题目暂不可用，答案已保留。");
@@ -63,7 +71,7 @@ function MatrixForm({ courseId, sources, onRecorded, onBack, initialKey, initial
   }
   async function start(event?: FormEvent) {
     event?.preventDefault();
-    if (pendingRef.current || !ready || (!draft.start && !sourceId)) return;
+    if (pendingRef.current || !ready || sourceUnavailable || (!draft.start && !sourceId)) return;
     pendingRef.current = true;
     const request = patch(current => ({ start: current.start ?? { sessionId: null, clientKey: `matrix-start:${crypto.randomUUID()}`, createInput: null,
       sessionInput: { courseId, sourceIds: [sourceId], skillLabel: matrixExerciseSkillLabel(key) } } })).start!;
@@ -142,18 +150,21 @@ function MatrixForm({ courseId, sources, onRecorded, onBack, initialKey, initial
   return <fieldset disabled={!ready} aria-busy={!ready} className="space-y-3 border-t border-line pt-4">
     {!ready ? <p className="text-sm text-text-3" role="status">正在恢复矩阵练习…</p> : null}
     <div className="flex flex-wrap items-center justify-between gap-2"><h3 className="text-sm font-semibold text-text">内置矩阵练习</h3>
-      <button type="button" disabled={pending} onClick={onBack} className="rounded border border-line px-3 py-2 text-sm">返回普通练习</button></div>
+      {onBack ? <button type="button" disabled={pending} onClick={onBack} className="rounded border border-line px-3 py-2 text-sm">返回普通练习</button> : null}</div>
     {ready && ((initialKey && key !== initialKey) || (initialVariant !== undefined && variant !== initialVariant)) ? <p className="text-xs text-text-2" role="status">已恢复此前的{matrixExerciseSkillLabel(key)}第 {variant + 1} 组练习，可以接着作答。</p> : null}
     <p className="text-xs text-text-3">本次题组：{variant + 1}</p>
     <p className="text-xs leading-6 text-text-3">这是内置矩阵练习，提交后会自动计算并批改。</p>
     {storageWarning ? <p className="text-xs text-warn" role="status">答案暂时只在当前页面保留，刷新前请先复制。</p> : null}
-    {restored ? <PracticeDraftRecovery courseId={courseId} answer={answer} pending={pending} onResume={() => void start()} /> : !attempt ? <form onSubmit={start} className="space-y-3">
-      <label className="block text-sm">题型<select value={key} disabled={pending} onChange={event => setKey(event.target.value as Key)} className="ml-2 rounded border border-line bg-surface px-3 py-2">
+    {sourceUnavailable ? <p className="text-sm text-danger" role="alert">原课程材料暂不可用。可以返回课程核对材料，已有答案仍保留。</p> : null}
+    {restored ? <PracticeDraftRecovery courseId={courseId} answer={answer} pending={pending} resumeDisabled={sourceUnavailable} onResume={() => void start()} /> : !attempt ? <form onSubmit={start} className="space-y-3">
+      {boundExercise ? <p className="text-sm text-text-2">{matrixExerciseSkillLabel(key)}</p> : <>
+        <label className="block text-sm">题型<select value={key} disabled={pending} onChange={event => setKey(event.target.value as Key)} className="ml-2 rounded border border-line bg-surface px-3 py-2">
         {KEYS.map(value => <option key={value} value={value}>{matrixExerciseSkillLabel(value)}</option>)}</select></label>
-      <label className="block text-sm">关联材料<select required value={sourceId} disabled={pending} onChange={event => setSourceId(event.target.value)} className="ml-2 max-w-full rounded border border-line bg-surface px-3 py-2">
-        <option value="">选择可用课程材料</option>{sources.map(source => <option key={source.id} value={source.id}>{source.name}</option>)}</select></label>
-      {sources.length === 0 ? <p className="text-xs text-warn">请先添加并完成解析一份材料，再开始内置练习。</p> : null}
-      <button disabled={pending || !sourceId} className="rounded bg-ink px-3 py-2 text-sm text-on-ink disabled:opacity-50">{pending ? "正在开始…" : "开始矩阵练习"}</button>
+        <label className="block text-sm">关联材料<select required value={sourceId} disabled={pending} onChange={event => setSourceId(event.target.value)} className="ml-2 max-w-full rounded border border-line bg-surface px-3 py-2">
+          <option value="">选择可用课程材料</option>{sources?.map(source => <option key={source.id} value={source.id}>{source.name}</option>)}</select></label>
+        {sources?.length === 0 ? <p className="text-xs text-warn">请先添加并完成解析一份材料，再开始内置练习。</p> : null}
+      </>}
+      <button disabled={pending || sourceUnavailable || !sourceId} className="rounded bg-ink px-3 py-2 text-sm text-on-ink disabled:opacity-50">{pending ? "正在开始…" : "开始矩阵练习"}</button>
     </form> : record ? <div className="space-y-3" role="status">
       <p className="text-sm font-medium">{record.serverEvaluation
         ? record.serverEvaluation.decision === "correct" ? "精确核算：本次答案正确" : record.serverEvaluation.decision === "incorrect" ? "精确核算：本次答案有误" : "本次未能自动判定"

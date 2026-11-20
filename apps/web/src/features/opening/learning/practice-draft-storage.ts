@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { learningAttemptCreateInputSchema, learningAttemptSubmitInputSchema, learningSessionCreateInputSchema } from "@aistudy/contracts";
+import { learningAttemptCreateInputSchema, learningAttemptSubmitInputSchema, learningSessionCreateInputSchema, matrixExerciseInputSchema, type MatrixExerciseInput } from "@aistudy/contracts";
 
 const fieldsSchema = z.object({
   sourceId: z.string().max(200), referenceSourceId: z.string().max(200), skillLabel: z.string().max(200),
@@ -35,9 +35,12 @@ const storageKey = (scope: string) => `opening-practice:v2:${scope}`;
 type ReadStorage = Pick<Storage, "getItem">;
 type WriteStorage = Pick<Storage, "setItem">;
 
-export function practiceScope(courseId: string, mode: "ordinary" | "matrix" | "span", retest?: { retestId: string; prompt: string; skillLabel: string; requirementKey?: string | null; retestActivityId?: string } | null, focus?: { skillLabel: string; requirementKey: string | null }, problem?: { sourceId: string; sourceVersion: number }): string {
+export function practiceScope(courseId: string, mode: "ordinary" | "matrix" | "span", retest?: { retestId: string; prompt: string; skillLabel: string; requirementKey?: string | null; retestActivityId?: string } | null, focus?: { skillLabel: string; requirementKey: string | null }, problem?: { sourceId: string; sourceVersion: number }, matrixExercise?: MatrixExerciseInput): string {
   // Retest content/requirement changes never attach an older frozen request to a newer task.
-  return JSON.stringify([courseId, mode, retest?.retestId ?? null, retest?.retestActivityId ?? null, retest?.requirementKey ?? null, retest?.skillLabel ?? null, retest?.prompt ?? null, ...(!retest && focus ? [focus.skillLabel, focus.requirementKey] : []), ...(!retest && problem ? [{ sourceId: problem.sourceId, sourceVersion: problem.sourceVersion }] : [])]);
+  return JSON.stringify([courseId, mode, retest?.retestId ?? null, retest?.retestActivityId ?? null, retest?.requirementKey ?? null, retest?.skillLabel ?? null, retest?.prompt ?? null,
+    ...(!retest && focus ? [focus.skillLabel, focus.requirementKey] : []),
+    ...(!retest && problem ? [{ sourceId: problem.sourceId, sourceVersion: problem.sourceVersion }] : []),
+    ...(matrixExercise ? [matrixExercise] : [])]);
 }
 
 export function emptyPracticeDraft(scope: string, fields: Partial<PracticeFields> = {}): PracticeDraft {
@@ -51,10 +54,13 @@ export function parsePracticeDraft(raw: unknown, scope: string): PracticeDraft |
   let context: unknown;
   try { context = JSON.parse(scope); } catch { return null; }
   if (!Array.isArray(context) || ![7, 8, 9, 10].includes(context.length)) return null;
-  // The eighth span element identifies a new-evidence request. It is not the
-  // ordinary practice focus pair (elements eight and nine).
-  if (context.length === 8 && (context[1] !== "span" || !z.string().uuid().safeParse(context[7]).success)) return null;
   const [courseId, mode, retestId, , requirementKey] = context;
+  if (context.length === 8) {
+    if (mode === "matrix") {
+      const exercise = matrixExerciseInputSchema.safeParse(context[7]);
+      if (!exercise.success || draft.fields.sourceId !== exercise.data.sourceId || draft.fields.matrixKey !== exercise.data.exerciseKey) return null;
+    } else if (mode !== "span" || !z.string().uuid().safeParse(context[7]).success) return null;
+  }
   if (context.length === 10) {
     const question = z.object({ sourceId: z.string().uuid(), sourceVersion: z.number().int().positive() }).strict().safeParse(context[9]);
     if (!question.success || mode !== "ordinary" || draft.fields.sourceId !== question.data.sourceId) return null;

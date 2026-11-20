@@ -12,6 +12,7 @@ import {
 } from "@aistudy/contracts";
 import {
   assertOwnedActivity,
+  createOpeningCourseReadySourcesRepository,
   createOpeningLearningAttemptRepository,
   createOpeningTeachingActivitiesRepository,
   createOpeningTeachingContentRepository,
@@ -19,6 +20,7 @@ import {
   listObservationHeadsByActivity,
   probeLearningSourcesAvailability,
   readOpeningCourseEvidence,
+  readOpeningCourseRouteActivityObservationId,
   reconcileTeachingGenerate,
   sanitizeCheckpointForRestore,
 } from "@aistudy/database";
@@ -69,13 +71,33 @@ export function createOpeningTeachingResumeService(
   async function readSummaryNextStep(scope: Scope, activity: TeachingActivity) {
     if (!activity.courseId || activity.status !== "completed") return undefined;
     const attempts = await attemptsRepo.listByActivity(scope, activity.id);
-    const attemptIds = new Set(attempts.filter(attempt => attempt.contextAnchor?.contentVersion === activity.contentVersion).map(attempt => attempt.id));
-    if (!attemptIds.size) return undefined;
+    const currentAttempts = new Map(attempts.filter(attempt =>
+      attempt.contextAnchor?.contentVersion === activity.contentVersion
+      || (!activity.routeManaged && activity.contentVersion === 0 && attempt.matrixExercise && attempt.contextAnchor?.contentVersion == null),
+    ).map(attempt => [attempt.id, attempt]));
+    if (!currentAttempts.size) return undefined;
     const evidence = await readOpeningCourseEvidence(sql, scope, activity.courseId);
-    const observations = evidence.observations.filter(row => row.attemptId && attemptIds.has(row.attemptId));
+    const observations = evidence.observations.filter(row => row.attemptId && currentAttempts.has(row.attemptId));
     const requirement = activity.learnerFocus?.requirementKey;
-    return activitySummaryNextStep(toSnapshotEvidence({ ...evidence, observations }, new Date()).observations
+    const step = activitySummaryNextStep(toSnapshotEvidence({ ...evidence, observations }, new Date()).observations
       .filter(row => requirement === undefined || row.requirementKey === requirement));
+    if (!step) return undefined;
+    if (activity.routeManaged) {
+      // Route commands bind to the latest effective head. Keep the general
+      // route action available when a newer answer supersedes this recommendation.
+      const routeHead = await readOpeningCourseRouteActivityObservationId(sql, scope, activity.courseId, activity.id);
+      return routeHead === step.observationId ? step : undefined;
+    }
+    if (step.kind !== "assisted_check") return step;
+    const attemptId = observations.find(row => row.id === step.observationId)?.attemptId;
+    const attempt = attemptId ? currentAttempts.get(attemptId) : undefined;
+    const sourceId = attempt?.contextAnchor?.sourceId;
+    if (!attempt?.matrixExercise || !sourceId) return step;
+    const [readySource] = await createOpeningCourseReadySourcesRepository(sql)
+      .admitSourceIds(scope, activity.courseId, [sourceId], "practice");
+    if (!readySource) return step;
+    const { exerciseKey, variant } = attempt.matrixExercise;
+    return { ...step, matrixPractice: { sourceId, exerciseKey, variant: (variant + 1) % 9 } };
   }
 
   return {
