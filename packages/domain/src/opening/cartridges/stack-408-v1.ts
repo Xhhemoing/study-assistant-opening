@@ -36,7 +36,7 @@ export type Stack408RequirementKey = (typeof STACK_408_REQUIREMENTS)[number];
 
 /* ----------------------------------------------------------- trace model -- */
 
-export type StackOp = { op: "push"; value: number } | { op: "pop" };
+export type StackOp = { op: "push"; value: number | string } | { op: "pop" };
 export interface StackTraceInput { capacity: number; ops: readonly StackOp[] }
 /** Pop outputs in order; tokens are integers, `UNDERFLOW`, `OVERFLOW` or `UNINITIALIZED`. */
 export interface StackTraceObservable { outputs: string[]; finalTop: number }
@@ -45,24 +45,33 @@ const UNDERFLOW = "UNDERFLOW";
 const OVERFLOW = "OVERFLOW";
 const UNINITIALIZED = "UNINITIALIZED";
 
-function readSlot(data: ReadonlyMap<number, number>, index: number): string {
-  const value = data.get(index);
-  return value === undefined ? UNINITIALIZED : String(value);
+function normalizeStackInteger(value: unknown): string | null {
+  if (typeof value === "number") return Number.isSafeInteger(value) ? BigInt(value).toString() : null;
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return /^[+-]?\d+$/.test(trimmed) ? BigInt(trimmed).toString() : null;
+}
+
+function requireStackInteger(value: number | string): string {
+  const token = normalizeStackInteger(value);
+  if (token === null) throw new TypeError("Stack trace push values must be safe integers or decimal integer strings");
+  return token;
 }
 
 /** M*: correct sequential stack with `data[++top] = x` / `x = data[top--]`. */
 export function simulateCorrectStackTrace(input: StackTraceInput): StackTraceObservable {
-  const data = new Map<number, number>();
+  const data = new Map<number, string>();
   const outputs: string[] = [];
   let top = -1;
   for (const op of input.ops) {
     if (op.op === "push") {
+      const value = requireStackInteger(op.value);
       if (top >= input.capacity - 1) { outputs.push(OVERFLOW); continue; }
       top += 1;
-      data.set(top, op.value);
+      data.set(top, value);
     } else {
       if (top === -1) { outputs.push(UNDERFLOW); continue; }
-      outputs.push(readSlot(data, top));
+      outputs.push(data.get(top) ?? UNINITIALIZED);
       top -= 1;
     }
   }
@@ -71,15 +80,15 @@ export function simulateCorrectStackTrace(input: StackTraceInput): StackTraceObs
 
 /** H_FIFO_QUEUE_CONFUSION: pop removes the oldest element, as in a queue. */
 export function simulateFifoQueueConfusionTrace(input: StackTraceInput): StackTraceObservable {
-  const queue: number[] = [];
+  const queue: string[] = [];
   const outputs: string[] = [];
   for (const op of input.ops) {
     if (op.op === "push") {
+      const value = requireStackInteger(op.value);
       if (queue.length >= input.capacity) { outputs.push(OVERFLOW); continue; }
-      queue.push(op.value);
+      queue.push(value);
     } else {
-      const head = queue.shift();
-      outputs.push(head === undefined ? UNDERFLOW : String(head));
+      outputs.push(queue.shift() ?? UNDERFLOW);
     }
   }
   return { outputs, finalTop: queue.length - 1 };
@@ -87,17 +96,18 @@ export function simulateFifoQueueConfusionTrace(input: StackTraceInput): StackTr
 
 /** H_TOP_POINTER_OFF_BY_ONE: writes `data[top++] = x` while keeping the `top = -1` convention. */
 export function simulateTopPointerOffByOneTrace(input: StackTraceInput): StackTraceObservable {
-  const data = new Map<number, number>();
+  const data = new Map<number, string>();
   const outputs: string[] = [];
   let top = -1;
   for (const op of input.ops) {
     if (op.op === "push") {
+      const value = requireStackInteger(op.value);
       if (top >= input.capacity - 1) { outputs.push(OVERFLOW); continue; }
-      data.set(top, op.value);
+      data.set(top, value);
       top += 1;
     } else {
       if (top === -1) { outputs.push(UNDERFLOW); continue; }
-      outputs.push(readSlot(data, top));
+      outputs.push(data.get(top) ?? UNINITIALIZED);
       top -= 1;
     }
   }
@@ -112,8 +122,16 @@ export interface StackFeasibilityObservable { verdict: "feasible" | "infeasible"
 const feasible = (): StackFeasibilityObservable => ({ verdict: "feasible", firstViolationIndex: null });
 const infeasibleAt = (index: number): StackFeasibilityObservable => ({ verdict: "infeasible", firstViolationIndex: index });
 
+function requireSafeStackSymbols(sequence: readonly number[]): void {
+  if (!sequence.every(Number.isSafeInteger)) {
+    throw new TypeError("Stack sequence symbols must be safe integers");
+  }
+}
+
 /** Index of the first pop that exceeds the remaining multiplicity of that value in pushOrder. */
 function firstMembershipViolation(input: StackFeasibilityInput): number | null {
+  requireSafeStackSymbols(input.pushOrder);
+  requireSafeStackSymbols(input.candidatePops);
   const available = new Map<number, number>();
   for (const value of input.pushOrder) available.set(value, (available.get(value) ?? 0) + 1);
   for (let i = 0; i < input.candidatePops.length; i += 1) {
@@ -130,8 +148,8 @@ function simulateStackFeasibility(
   peekIndex: (length: number) => number,
 ): StackFeasibilityObservable {
   const { pushOrder, candidatePops } = input;
-  if (candidatePops.length === 0) return feasible();
   const membership = firstMembershipViolation(input);
+  if (candidatePops.length === 0) return feasible();
   const limit = membership === null ? candidatePops.length : membership;
   const suffixCounts: Array<Map<number, number>> = new Array(pushOrder.length + 1);
   suffixCounts[pushOrder.length] = new Map();
@@ -205,6 +223,7 @@ export function simulateBypassLifoFeasibility(input: StackFeasibilityInput): Sta
 
 /** All unique pop orders reachable from `pushOrder` by a correct stack (Catalan-many for distinct values). */
 export function enumerateFeasiblePopSequences(pushOrder: readonly number[]): number[][] {
+  requireSafeStackSymbols(pushOrder);
   const results: number[][] = [];
   const seen = new Set<string>();
   const walk = (next: number, stack: number[], output: number[]) => {
@@ -239,11 +258,9 @@ const TOKEN_ALIASES: Readonly<Record<string, string>> = {
 };
 
 function normalizeTraceToken(token: unknown): string | null {
-  if (typeof token === "number") return Number.isSafeInteger(token) ? String(token) : null;
-  if (typeof token !== "string") return null;
-  const trimmed = token.trim();
-  if (/^[+-]?\d+$/.test(trimmed)) return BigInt(trimmed).toString();
-  const alias = trimmed.toUpperCase();
+  const integer = normalizeStackInteger(token);
+  if (integer !== null || typeof token !== "string") return integer;
+  const alias = token.trim().toUpperCase();
   return Object.hasOwn(TOKEN_ALIASES, alias) ? TOKEN_ALIASES[alias]! : null;
 }
 

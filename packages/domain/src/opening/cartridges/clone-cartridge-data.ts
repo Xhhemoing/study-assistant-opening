@@ -1,6 +1,4 @@
-// Domain also has browser consumers. Resolve the Node detector without a static runtime import.
-const isProxy = (globalThis.process?.getBuiltinModule?.("node:util") as typeof import("node:util") | undefined)
-  ?.types.isProxy;
+import { isProxy } from "#cartridge-is-proxy";
 
 export function isInspectableCartridgeObject(value: unknown): value is object {
   // A runtime without the detector cannot safely trust a descriptor snapshot.

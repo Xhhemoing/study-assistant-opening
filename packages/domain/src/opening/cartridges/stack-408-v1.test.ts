@@ -5,6 +5,7 @@ import { createCartridgeRegistry } from "./registry";
 import {
   STACK_408_REQUIREMENTS,
   createInitialStack408State,
+  createStackFeasibilityProbe,
   createStackTraceProbe,
   enumerateFeasiblePopSequences,
   parseStackTraceResponse,
@@ -138,10 +139,21 @@ describe("408.stack.v1 probes", () => {
     expect(stack408Cartridge.evaluateProbeResponse("missing", {})).toMatchObject({ outcome: "unverified", diagnosis: "invalid_response" });
   });
 
+  it.each([
+    { pushOrder: [1, 2, 3, 4, 1e21], candidatePops: [2, 4, 1, 3] },
+    { pushOrder: [1, 2, 3, 4], candidatePops: [2, 4, 1, 1e21] },
+    { pushOrder: [1e21], candidatePops: [] },
+  ])("fails probe prediction for unsafe numeric sequence symbols: %j", input => {
+    const probe = createStackFeasibilityProbe("unsafe-sequence-symbol", input, "判断。");
+    expect(verifyProbeDistinguishability(probe)).toMatchObject({
+      distinguishable: false, issues: expect.arrayContaining(["prediction_failed"]),
+    });
+  });
+
   it("grades adjacent integer strings beyond the safe number range distinctly", () => {
     const probe = createStackTraceProbe("large-integer-trace", "408.ds.stack.lifo-trace", {
       capacity: 2,
-      ops: [{ op: "push", value: 7 }, { op: "push", value: 9007199254740992 }, { op: "pop" }],
+      ops: [{ op: "push", value: 7 }, { op: "push", value: "9007199254740992" }, { op: "pop" }],
     }, "写出出栈结果。");
 
     expect(evaluateProbeWithSpec(probe, { outputs: "9007199254740992", finalTop: 0 })).toMatchObject({ outcome: "correct" });

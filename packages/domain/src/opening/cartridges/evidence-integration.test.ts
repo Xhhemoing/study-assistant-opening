@@ -12,7 +12,7 @@ import { courseEvidence, learningObservation, qualifiedInput } from "../learning
 import { evaluateProbeWithSpec } from "./capability-helpers";
 import { qualifyCartridgeEmission, type CartridgeObservationEmission } from "./evidence-gate";
 import { createCartridgeRegistry } from "./registry";
-import { createStackFeasibilityProbe, stack408Cartridge, toStack408Emission } from "./stack-408-v1";
+import { createStackFeasibilityProbe, createStackTraceProbe, stack408Cartridge, toStack408Emission } from "./stack-408-v1";
 
 const TRACE_PROBE = "408.stack.trace.interleaved-underflow.v1";
 const CORRECT = { outputs: "2,3,1,UNDERFLOW", finalTop: -1 };
@@ -39,6 +39,34 @@ describe("qualifyCartridgeEmission", () => {
   it("qualifies a deterministic misconception diagnosis as formal incorrect evidence", () => {
     expect(qualifyCartridgeEmission(registry, emit({ response: FIFO }), { outcome: "incorrect" })).toMatchObject({
       qualified: true, evaluation: { outcome: "incorrect", matchedHypothesisId: "H_FIFO_QUEUE_CONFUSION" } });
+  });
+
+  it.each([
+    ["unsafe numeric", 1e21, false],
+    ["exact decimal", "1000000000000000000000", true],
+    ["signed and zero-padded decimal", "+01000000000000000000000", true],
+  ] as const)("handles %s push values when qualifying formal evidence", (_label, value, qualified) => {
+    const probe = createStackTraceProbe("408.stack.large-integer", "408.ds.stack.lifo-trace", {
+      capacity: 2,
+      ops: [{ op: "push", value: 7 }, { op: "push", value }, { op: "pop" }],
+    }, "写出出栈结果。");
+    const localRegistry = createCartridgeRegistry();
+    const registration = localRegistry.registerCartridge({
+      ...stack408Cartridge,
+      listProbes: () => [probe],
+      getProbe: () => probe,
+      evaluateProbeResponse: (_id: string, response: unknown) => evaluateProbeWithSpec(probe, response),
+    });
+
+    const result = qualifyCartridgeEmission(localRegistry, emit({
+      probeId: probe.probeId, response: { outputs: ["1000000000000000000000"], finalTop: 0 },
+    }));
+    expect(result).toMatchObject(qualified
+      ? { qualified: true, evaluation: { outcome: "correct", diagnosis: "correct_model" } }
+      : { qualified: false, evaluation: null, reasonCodes: ["cartridge_unregistered"] });
+    expect(registration).toMatchObject(qualified
+      ? { ok: true }
+      : { ok: false, probeReports: [{ distinguishable: false, issues: ["prediction_failed"] }] });
   });
 
   it.each(["constructor", "__proto__", "toString", "valueOf"])("withholds prototype alias %s", token => {
