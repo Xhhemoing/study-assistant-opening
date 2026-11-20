@@ -111,7 +111,7 @@ describe("FreeMapCanvas", () => {
       .toBe("translate(5000 0)");
   });
 
-  it("scrolls and focuses a located child after unfolding it", () => {
+  it("scrolls and focuses the located child after the centered camera commits", () => {
     const props = {
       nodes: [
         { id: COURSE_NODE, kind: "course" as const, label: "高等数学" },
@@ -125,20 +125,36 @@ describe("FreeMapCanvas", () => {
     };
     act(() => root.render(createElement(FreeMapCanvas, props)));
     const canvas = container.querySelector("section")!;
-    const scrollIntoView = vi.fn(() => {
-      expect(canvas.querySelector(`[data-free-map-node="${REQ_NODE}"]`)).not.toBeNull();
-    });
-    canvas.scrollIntoView = scrollIntoView;
     const fold = canvas.querySelector<SVGGElement>('[data-map-control="fold"]')!;
     act(() => fold.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
     expect(canvas.querySelector(`[data-free-map-node="${REQ_NODE}"]`)).toBeNull();
 
-    act(() => root.render(createElement(FreeMapCanvas, { ...props, locateRequest: { id: REQ_NODE, sequence: 1 } })));
+    const scrollIntoView = vi.fn(function (this: SVGGElement) {
+      const viewport = this.closest("svg")!.querySelector("g[transform]")!;
+      const [, cameraX, cameraY, scale] = viewport.getAttribute("transform")!
+        .match(/^translate\(([^ ]+) ([^)]+)\) scale\(([^)]+)\)$/)!.map(Number);
+      const [, nodeX, nodeY] = this.getAttribute("transform")!
+        .match(/^translate\(([^ ]+) ([^)]+)\)$/)!.map(Number);
+      expect(cameraX! + nodeX! * scale!).toBeCloseTo(450);
+      expect(cameraY! + nodeY! * scale!).toBeCloseTo(280);
+    });
+    Object.defineProperty(SVGElement.prototype, "scrollIntoView", { configurable: true, value: scrollIntoView });
+    const focus = vi.spyOn(SVGElement.prototype, "focus");
+    try {
+      act(() => root.render(createElement(FreeMapCanvas, { ...props, locateRequest: { id: REQ_NODE, sequence: 1 } })));
 
-    const located = canvas.querySelector(`[data-free-map-node="${REQ_NODE}"]`);
-    expect(located).not.toBeNull();
-    expect(scrollIntoView).toHaveBeenCalledExactlyOnceWith({ block: "nearest" });
-    expect(document.activeElement).toBe(located);
+      const located = canvas.querySelector(`[data-free-map-node="${REQ_NODE}"]`);
+      expect(located).not.toBeNull();
+      expect(scrollIntoView).toHaveBeenCalledExactlyOnceWith({ block: "center", inline: "nearest" });
+      expect(scrollIntoView.mock.contexts).toEqual([located]);
+      expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+      expect(focus.mock.contexts).toEqual([located]);
+      expect(scrollIntoView).toHaveBeenCalledBefore(focus);
+      expect(document.activeElement).toBe(located);
+    } finally {
+      focus.mockRestore();
+      Reflect.deleteProperty(SVGElement.prototype, "scrollIntoView");
+    }
   });
 
   it("renders nodes with isolated geometry storage and supports keyboard selection & branch fold", () => {

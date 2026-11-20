@@ -2053,16 +2053,21 @@ describe("AssetGraphWorkspace", () => {
     const locateBtn = findButton("在图中定位这项要求", unobsCard);
     const canvas = container.querySelector<HTMLElement>('section[aria-label="可拖动学习地图"]')!;
     const scrollIntoView = vi.fn(() => expect(document.activeElement).toBe(locateBtn));
-    canvas.scrollIntoView = scrollIntoView;
-    await act(async () => {
-      locateBtn.focus();
-      locateBtn.click();
-    });
-    await flush();
-    const located = canvas.querySelector(`[data-graph-node="requirement/${REQ_UNOBS_UUID}"]`);
-    expect(located).not.toBeNull();
-    expect(scrollIntoView).toHaveBeenCalledExactlyOnceWith({ block: "nearest" });
-    expect(document.activeElement).toBe(located);
+    Object.defineProperty(SVGElement.prototype, "scrollIntoView", { configurable: true, value: scrollIntoView });
+    try {
+      await act(async () => {
+        locateBtn.focus();
+        locateBtn.click();
+      });
+      await flush();
+      const located = canvas.querySelector(`[data-graph-node="requirement/${REQ_UNOBS_UUID}"]`);
+      expect(located).not.toBeNull();
+      expect(scrollIntoView).toHaveBeenCalledExactlyOnceWith({ block: "center", inline: "nearest" });
+      expect(scrollIntoView.mock.contexts).toEqual([located]);
+      expect(document.activeElement).toBe(located);
+    } finally {
+      Reflect.deleteProperty(SVGElement.prototype, "scrollIntoView");
+    }
 
     const ordinaryBtn = findButton("开始 15 分钟练习", unobsCard);
     await act(async () => {

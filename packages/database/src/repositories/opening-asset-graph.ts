@@ -223,26 +223,6 @@ function compareVerifiedKnowledgeChunks(a: VerifiedKnowledgeChunk, b: VerifiedKn
   return compareStrings(a.id, b.id);
 }
 
-function compareKnowledgeEdgesForDedupe(next: AssetGraphEdge, existing: AssetGraphEdge): number {
-  const nextRank = KNOWLEDGE_STATUS_RANK[next.knowledgeStatus ?? "suggested"];
-  const existingRank = KNOWLEDGE_STATUS_RANK[existing.knowledgeStatus ?? "suggested"];
-  if (nextRank !== existingRank) return nextRank - existingRank;
-  const nextHasSource = next.sourceNodeId !== undefined ? 1 : 0;
-  const existingHasSource = existing.sourceNodeId !== undefined ? 1 : 0;
-  if (nextHasSource !== existingHasSource) return nextHasSource - existingHasSource;
-  if (next.sourceNodeId !== undefined && existing.sourceNodeId !== undefined) {
-    const srcCmp = compareStrings(existing.sourceNodeId, next.sourceNodeId);
-    if (srcCmp !== 0) return srcCmp;
-    const nextVer = next.sourceVersion ?? Number.MAX_SAFE_INTEGER;
-    const existingVer = existing.sourceVersion ?? Number.MAX_SAFE_INTEGER;
-    if (nextVer !== existingVer) return existingVer - nextVer;
-    const nextPage = next.page ?? Number.MAX_SAFE_INTEGER;
-    const existingPage = existing.page ?? Number.MAX_SAFE_INTEGER;
-    if (nextPage !== existingPage) return existingPage - nextPage;
-  }
-  return 0;
-}
-
 function compareStrings(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
@@ -1193,7 +1173,10 @@ export function createOpeningAssetGraphRepository(
           const knEntry = knowledgeSnapshotsByCourse.get(cid);
           if (!knEntry) continue;
           const courseChunks = verifiedKnowledgeChunksByCourse.get(cid);
-          const courseDedupe = new Map<string, AssetGraphEdge>();
+          const courseDedupe = new Map<string, AssetGraphEdge & {
+            knowledgeStatus: AssetGraphKnowledgeStatus;
+            chunks: Map<string, VerifiedKnowledgeChunk>;
+          }>();
           for (const edge of knEntry.snapshot.edges) {
             const relation: AssetGraphRelation =
               edge.kind === "applies_to" ? "appliesTo" : edge.kind;
@@ -1212,56 +1195,58 @@ export function createOpeningAssetGraphRepository(
             const chunkIds = [...new Set(edge.evidenceChunkIds)];
             const verifiedChunks = chunkIds
               .map(id => courseChunks?.get(id))
-              .filter((chunk): chunk is VerifiedKnowledgeChunk => chunk !== undefined)
-              .sort(compareVerifiedKnowledgeChunks);
+              .filter((chunk): chunk is VerifiedKnowledgeChunk => chunk !== undefined);
             const knowledgeStatus = edge.status === "supported" &&
               (chunkIds.length === 0 || verifiedChunks.length !== chunkIds.length)
                 ? "needs_check"
                 : edge.status;
-            const evidenceRefs = knowledgeStatus === "supported" ? verifiedChunks.map(chunk => ({
+            const basis = knowledgeStatus === "suggested" ? "suggested" : "recorded";
+            const dedupeKey = `${relation}:${fromNodeId}:${toNodeId}`;
+            let winner = courseDedupe.get(dedupeKey);
+            if (!winner || (effectiveIncludeKnowledgeEdgeDetails
+              ? KNOWLEDGE_STATUS_RANK[knowledgeStatus] > KNOWLEDGE_STATUS_RANK[winner.knowledgeStatus]
+              : basis === "recorded" && winner.basis === "suggested")) {
+              winner = {
+                id: `${basis}:${dedupeKey}`,
+                from: fromNodeId,
+                to: toNodeId,
+                relation,
+                basis,
+                knowledgeStatus,
+                chunks: new Map(),
+              };
+              courseDedupe.set(dedupeKey, winner);
+            }
+
+            if (knowledgeStatus === "supported" && winner.knowledgeStatus === knowledgeStatus) {
+              for (const chunk of verifiedChunks) winner.chunks.set(chunk.id, chunk);
+            }
+          }
+          const projected = [...courseDedupe.values()].map<AssetGraphEdge>(winner => {
+            const { id, from, to, relation, basis, knowledgeStatus, chunks } = winner;
+            const legacy = { id, from, to, relation, basis };
+            if (!effectiveIncludeKnowledgeEdgeDetails) return legacy;
+
+            const evidenceRefs = [...chunks.values()].sort(compareVerifiedKnowledgeChunks).map(chunk => ({
               sourceId: chunk.sourceId,
               sourceVersion: chunk.sourceVersion,
               chunkId: chunk.id,
               ...(chunk.page !== null ? { page: chunk.page } : {}),
-            })) : [];
+            }));
             const primaryRef = evidenceRefs[0];
-            const basis: "recorded" | "suggested" =
-              knowledgeStatus === "suggested" ? "suggested" : "recorded";
-
-            const candidateEdge: AssetGraphEdge = {
-              id: `${basis}:${relation}:${fromNodeId}:${toNodeId}`,
-              from: fromNodeId,
-              to: toNodeId,
-              relation,
-              basis,
+            return {
+              ...legacy,
               knowledgeStatus,
               evidenceRefs,
               ...(primaryRef !== undefined
                 ? {
-                    sourceNodeId: formatAssetGraphNodeId({
-                      kind: "source",
-                      uuid: primaryRef.sourceId,
-                    }),
+                    sourceNodeId: formatAssetGraphNodeId({ kind: "source", uuid: primaryRef.sourceId }),
                     sourceVersion: primaryRef.sourceVersion,
                     ...(primaryRef.page !== undefined ? { page: primaryRef.page } : {}),
                   }
                 : {}),
             };
-
-            const dedupeKey = `${relation}:${fromNodeId}:${toNodeId}`;
-            const existing = courseDedupe.get(dedupeKey);
-            if (!existing || (effectiveIncludeKnowledgeEdgeDetails
-              ? compareKnowledgeEdgesForDedupe(candidateEdge, existing) > 0
-              : candidateEdge.basis === "recorded" && existing.basis === "suggested")) {
-              courseDedupe.set(dedupeKey, candidateEdge);
-            }
-          }
-          const courseEdges = [...courseDedupe.values()].sort(
-            (a, b) => compareStrings(a.relation, b.relation) || compareStrings(a.id, b.id),
-          );
-          const projected = effectiveIncludeKnowledgeEdgeDetails ? courseEdges : courseEdges.map(
-            ({ id, from, to, relation, basis }) => ({ id, from, to, relation, basis }),
-          );
+          }).sort((a, b) => compareStrings(a.relation, b.relation) || compareStrings(a.id, b.id));
           resolvedKnowledgeEdgesByCourse.set(cid, projected);
           resolvedKnowledgeEdges.push(...projected);
         }

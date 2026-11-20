@@ -113,8 +113,8 @@ function FreeMapCanvasSurface({
   const [folded, setFolded] = useState<Set<string>>(new Set());
   const [solo, setSolo] = useState(false);
   const [storageNotice, setStorageNotice] = useState<string | null>(null);
-  const canvasRef = useRef<HTMLElement>(null);
-  const handledLocate = useRef<{ id: string; sequence: number } | null>(null);
+  const [centeringLocate, setCenteringLocate] = useState<FreeMapLocateRequest | null>(null);
+  const handledLocate = useRef<FreeMapLocateRequest | null>(null);
   const prefix = useId().replace(/:/g, "");
   const storageKey = freeMapStorageKey(persistKey);
   const [geometryReady, setGeometryReady] = useState(!storageKey);
@@ -223,15 +223,20 @@ function FreeMapCanvasSurface({
       });
       return;
     }
-    const canvas = canvasRef.current;
-    const target = canvas?.querySelector<SVGGElement>(`[data-free-map-node="${locateRequest.id}"]`);
-    if (!target) return;
+    const targetNodeEl = gestures.svgRef.current?.querySelector<SVGGElement>(
+      `[data-free-map-node="${locateRequest.id}"]`,
+    );
+    if (!targetNodeEl) return;
+    if (centeringLocate?.id !== locateRequest.id || centeringLocate.sequence !== locateRequest.sequence) {
+      gestures.focus(layout.positions[locateRequest.id]!);
+      setCenteringLocate(locateRequest);
+      return;
+    }
     handledLocate.current = locateRequest;
-    gestures.focus(layout.positions[locateRequest.id]!);
-    canvas?.scrollIntoView?.({ block: "nearest" });
-    target.focus({ preventScroll: true });
+    targetNodeEl.scrollIntoView?.({ block: "center", inline: "nearest" });
+    targetNodeEl.focus({ preventScroll: true });
     onLocateHandled?.(locateRequest.sequence);
-  }, [geometryReady, locateRequest, nodeById, visible, layout.parents, layout.positions, gestures, onLocateHandled]);
+  }, [geometryReady, locateRequest, nodeById, visible, layout.parents, layout.positions, gestures, centeringLocate, onLocateHandled]);
 
   const hasOffscreenNodes = points.some(point => {
     const x = point.x * gestures.camera.k + gestures.camera.x;
@@ -311,7 +316,6 @@ function FreeMapCanvasSurface({
 
   return (
     <section
-      ref={canvasRef}
       aria-label="可拖动学习地图"
       className="overflow-hidden rounded-tile border border-line bg-surface text-text"
     >

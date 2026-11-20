@@ -105,7 +105,8 @@ describe("POST /api/opening/asset-graph/query handler integration", () => {
         status: "supported", evidenceChunkIds: [visibleChunk],
       })),
       edges: [
-        { from: start!, to: target!, kind: "prerequisite", status: "supported", evidenceChunkIds: [secondaryRef.chunkId, primaryRef.chunkId] },
+        { from: start!, to: target!, kind: "prerequisite", status: "supported", evidenceChunkIds: [secondaryRef.chunkId] },
+        { from: start!, to: target!, kind: "prerequisite", status: "supported", evidenceChunkIds: [primaryRef.chunkId] },
         { from: start!, to: partial!, kind: "contains", status: "supported", evidenceChunkIds: [visibleChunk, hiddenChunk] },
         { from: start!, to: suggestion!, kind: "applies_to", status: "suggested", evidenceChunkIds: [visibleChunk] },
       ],
@@ -175,13 +176,18 @@ describe("POST /api/opening/asset-graph/query handler integration", () => {
       await expect(changed.json()).resolves.toMatchObject({ error: { code: "CURSOR_STALE" } });
       await page({ ...evidenceQuery, cursor: evidenceCursor });
 
-      await sql`UPDATE opening_sources SET upload_state='pending' WHERE id=${teaching}`;
-      expect((await page(optIn)).edges.find(edge => edge.relation === "prerequisite"))
-        .toMatchObject({ knowledgeStatus: "needs_check" });
-      await sql`UPDATE opening_sources SET upload_state='uploaded', parse_state='queued' WHERE id=${teaching}`;
-      expect((await page(optIn)).edges.find(edge => edge.relation === "prerequisite"))
-        .toMatchObject({ knowledgeStatus: "needs_check" });
-      await sql`UPDATE opening_sources SET parse_state='ready' WHERE id=${teaching}`;
+      const remainingRef = { ...secondaryRef, page: 2 };
+      const expectRemainingEvidence = async () => {
+        expect((await page(optIn)).edges.find(edge => edge.relation === "prerequisite")).toMatchObject({
+          knowledgeStatus: "supported", sourceNodeId: `source/${remainingRef.sourceId}`, page: 2,
+          evidenceRefs: [remainingRef],
+        });
+      };
+      await sql`UPDATE opening_sources SET upload_state='pending' WHERE id=${primaryRef.sourceId}`;
+      await expectRemainingEvidence();
+      await sql`UPDATE opening_sources SET upload_state='uploaded', parse_state='queued' WHERE id=${primaryRef.sourceId}`;
+      await expectRemainingEvidence();
+      await sql`UPDATE opening_sources SET parse_state='ready' WHERE id=${primaryRef.sourceId}`;
 
       const rollbackCursor = (await page(paged)).page.nextCursor!;
       vi.stubEnv("OPENING_ASSET_GRAPH_KNOWLEDGE_EDGE_DETAILS", "off");

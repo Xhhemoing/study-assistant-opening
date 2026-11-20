@@ -2838,9 +2838,14 @@ describe("honest knowledgeStatus edge projection and live chunk re-verification"
     });
   });
 
-  it("deduplicates duplicate knowledge edges with priority supported > needs_check > suggested", async () => {
+  it("unions verified evidence from duplicate supported edges within the winning status", async () => {
     const state = makeBaseState();
-    state.sourceChunks = [{ id: CHUNK_1, source_id: SRC_1, source_version: 2, page: 5 }];
+    const reviewChunk = "dddddddd-dddd-4ddd-8ddd-ddddddddddd4";
+    state.sourceChunks = [
+      { id: CHUNK_1, source_id: SRC_1, source_version: 2, page: 5 },
+      { id: CHUNK_ZERO_PAGE, source_id: SRC_1, source_version: 2, page: 0 },
+      { id: reviewChunk, source_id: SRC_1, source_version: 2, page: 1 },
+    ];
     state.knowledge = [
       {
         course_id: COURSE_1,
@@ -2857,8 +2862,11 @@ describe("honest knowledgeStatus edge projection and live chunk re-verification"
           edges: [
             // KN_1 -> KN_2: suggested + needs_check + verified supported => supported wins
             { from: KN_1, to: KN_2, kind: "prerequisite", evidenceChunkIds: [], status: "suggested" },
-            { from: KN_1, to: KN_2, kind: "prerequisite", evidenceChunkIds: [], status: "needs_check" },
+            { from: KN_1, to: KN_2, kind: "prerequisite", evidenceChunkIds: [reviewChunk], status: "needs_check" },
+            { from: KN_1, to: KN_2, kind: "prerequisite", evidenceChunkIds: [CHUNK_ZERO_PAGE], status: "supported" },
             { from: KN_1, to: KN_2, kind: "prerequisite", evidenceChunkIds: [CHUNK_1], status: "supported" },
+            { from: KN_1, to: KN_2, kind: "prerequisite", evidenceChunkIds: [CHUNK_1], status: "supported" },
+            { from: KN_1, to: KN_2, kind: "prerequisite", evidenceChunkIds: [reviewChunk, CHUNK_2], status: "supported" },
             // KN_1 -> KN_3: suggested + unverified supported (downgraded to needs_check) => needs_check wins over suggested
             { from: KN_1, to: KN_3, kind: "contains", evidenceChunkIds: [], status: "suggested" },
             { from: KN_1, to: KN_3, kind: "contains", evidenceChunkIds: [CHUNK_2], status: "supported" },
@@ -2897,7 +2905,10 @@ describe("honest knowledgeStatus edge projection and live chunk re-verification"
         sourceNodeId: `source/${SRC_1}`,
         sourceVersion: 2,
         page: 5,
-        evidenceRefs: [{ sourceId: SRC_1, sourceVersion: 2, chunkId: CHUNK_1, page: 5 }],
+        evidenceRefs: [
+          { sourceId: SRC_1, sourceVersion: 2, chunkId: CHUNK_1, page: 5 },
+          { sourceId: SRC_1, sourceVersion: 2, chunkId: CHUNK_ZERO_PAGE },
+        ],
       },
     ]);
   });
