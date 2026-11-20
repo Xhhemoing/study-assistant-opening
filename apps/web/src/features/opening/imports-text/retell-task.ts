@@ -14,11 +14,22 @@ export async function requireCaptureCourse(db: Sql | TransactionSql, scope: Scop
 
 type RetellInput = { sourceId: string; title: string; courseId?: string | null; timeZone?: string };
 
-export async function scheduleRetell(sql: Sql, scope: Scope, input: RetellInput) {
+export async function finishCapture(sql: Sql, scope: Scope, input: RetellInput & { scheduleNextDayRetell: boolean }) {
+  if (!input.courseId && !input.scheduleNextDayRetell) return null;
   return sql.begin(async tx => {
     await lockWorkspaceLearningHistory(tx, scope);
     await requireCaptureCourse(tx, scope, input.courseId);
     const courseId = input.courseId ?? null;
+    const [source] = await tx`SELECT s.id FROM opening_sources s
+      WHERE s.id = ${input.sourceId} AND s.workspace_id = ${scope.workspaceId} AND s.upload_state = 'uploaded'
+        AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e WHERE e.source_id = s.id) FOR SHARE`;
+    if (!source) throw new ApiError("CONFLICT", "讲解资料已不可用。", 409);
+    if (courseId) {
+      await tx`INSERT INTO course_asset_memberships (workspace_id, course_id, asset_type, asset_id, role, visibility, purpose)
+        VALUES (${scope.workspaceId}, ${courseId}, 'source', ${input.sourceId}, 'reference', 'private', 'reference')
+        ON CONFLICT (course_id, asset_type, asset_id) DO NOTHING`;
+    }
+    if (!input.scheduleNextDayRetell) return null;
     // One agent-scheduled retell task per source. The original deferral decision
     // survives task edits, retest completion and retries on subsequent calendar days.
     const key = `text-retell:${input.sourceId}`;
@@ -66,11 +77,6 @@ export async function scheduleRetell(sql: Sql, scope: Scope, input: RetellInput)
         replayed: true,
       };
     }
-
-    const [source] = await tx`SELECT s.id FROM opening_sources s
-      WHERE s.id = ${input.sourceId} AND s.workspace_id = ${scope.workspaceId} AND s.upload_state = 'uploaded'
-        AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e WHERE e.source_id = s.id) FOR SHARE`;
-    if (!source) throw new ApiError("CONFLICT", "讲解资料已不可用。", 409);
 
     const [preferences] = input.timeZone ? [] : await tx`SELECT planning_settings->>'timeZone' AS zone
       FROM workspace_preferences WHERE workspace_id = ${scope.workspaceId}`;

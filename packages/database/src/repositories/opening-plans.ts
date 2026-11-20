@@ -354,24 +354,23 @@ export function createOpeningPlansRepository(sql: Sql, options: { now?: () => Da
         };
         const before = current.not_before ? new Date(current.not_before as string | Date).getTime() : null;
         const after = input.notBefore === null ? null : new Date(input.notBefore).getTime();
-        if (
-          current.origin === "agent"
+        const deferredRetell = current.origin === "agent"
           && typeof current.client_key === "string"
           && current.client_key.startsWith("text-retell:")
-          && current.client_key.endsWith(":deferred")
-        ) {
+          && current.client_key.endsWith(":deferred");
+        if (deferredRetell) {
           const courseId = (current.course_id as string | null) ?? null;
           const createdAt = current.created_at instanceof Date || typeof current.created_at === "string"
             ? current.created_at
             : new Date(0);
-          const [hold] = await tx<{ retest_hold_open_ended: boolean | null; retest_hold_end_at: Date | string | null }[]>`
+          const [hold] = await tx<{ blocked: boolean | null }[]>`
             SELECT
               bool_or(r.status IN ('proposed', 'accepted', 'in_progress')
-                AND (r.deadline_at IS NULL OR r.deadline_at <= statement_timestamp())) AS retest_hold_open_ended,
-              max(CASE
+                AND (r.deadline_at IS NULL OR r.deadline_at <= statement_timestamp()))
+              OR max(CASE
                 WHEN r.status IN ('proposed', 'accepted', 'in_progress') THEN r.deadline_at
                 ELSE COALESCE(r.completed_at, r.declined_at, r.cancelled_at, r.invalidated_at, r.superseded_at, r.updated_at)
-              END) AS retest_hold_end_at
+              END) + interval '1 second' > COALESCE(${input.notBefore}::timestamptz, statement_timestamp()) AS blocked
             FROM (SELECT 1) AS _gate
             JOIN opening_retest_activities r
               ON r.workspace_id = ${scope.workspaceId}
@@ -381,14 +380,15 @@ export function createOpeningPlansRepository(sql: Sql, options: { now?: () => Da
                 r.status IN ('proposed', 'accepted', 'in_progress')
                 OR COALESCE(r.completed_at, r.declined_at, r.cancelled_at, r.invalidated_at, r.superseded_at, r.updated_at) >= ${createdAt}
               )`;
-          const endFloorMs = hold?.retest_hold_end_at ? new Date(hold.retest_hold_end_at).getTime() + 1000 : null;
-          if (hold?.retest_hold_open_ended || (endFloorMs !== null && (after === null || after < endFloorMs))) {
+          if (hold?.blocked) {
             throw new OpeningPlanError("CONFLICT", "retell task remains deferred behind an active retest");
           }
         }
-        if (before === after) return readTask();
+        const clearHold = deferredRetell && input.notBefore === null;
+        if (before === after && !clearHold) return readTask();
         const updated = await tx`UPDATE opening_tasks
-          SET not_before=${input.notBefore}, version=version + 1, updated_at=now()
+          SET not_before=${input.notBefore}, version=version + 1, updated_at=now(),
+            client_key=CASE WHEN ${clearHold} THEN left(client_key, -length(':deferred')) ELSE client_key END
           WHERE id=${taskId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} RETURNING *`;
         await recordOpeningPlanFeedback(tx, scope, updated[0] as Record<string, unknown>,
           input.notBefore === null ? "resumed" : "deferred", input.feedback);

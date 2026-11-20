@@ -1041,7 +1041,7 @@ describe("projectCourseRoutePlanningWindow", () => {
       if (q.includes("FROM workspaces")) return [{ id: SCOPE.workspaceId }];
       if (q.includes("pg_advisory_xact_lock") || q.includes("opening_workspace_history_revisions")) return [];
       if (q.includes("SELECT * FROM opening_tasks")) return [openEndedRow];
-      if (q.includes("retest_hold_open_ended")) return [{ retest_hold_open_ended: true, retest_hold_end_at: null }];
+      if (q.includes("AS blocked")) return [{ blocked: true }];
       throw new Error("Unexpected SQL in deferTask: " + q);
     });
     const deferSql = Object.assign(deferTx, {

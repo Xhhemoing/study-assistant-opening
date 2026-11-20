@@ -3,7 +3,6 @@ import { createHash } from "node:crypto";
 import type { Sql } from "postgres";
 import { uploadInputSchema } from "@aistudy/contracts";
 import type { Principal } from "../../../lib/authorization";
-import { ApiError } from "../../auth/service";
 import { createOpeningSourceService } from "../sources/source-service";
 import { isOpeningDataError } from "../server/data-services";
 
@@ -20,17 +19,6 @@ function uploadIdFor(principal: Principal, key: string, scheduleNextDayRetell: b
   return [hex.slice(0, 8), hex.slice(8, 12), hex.slice(12, 16), hex.slice(16, 20), hex.slice(20, 32)].join("-");
 }
 
-async function rejectConflictingScheduleIntent(sql: Sql, principal: Principal, oppositeUploadId: string | undefined) {
-  if (!oppositeUploadId) return;
-  const rows = await sql`SELECT s.id FROM opening_sources s
-    JOIN workspaces w ON w.id = s.workspace_id
-    WHERE s.id = ${oppositeUploadId} AND s.workspace_id = ${principal.workspaceId}
-      AND w.owner_user_id = ${principal.userId}`;
-  if (Array.isArray(rows) && rows.length > 0) {
-    throw new ApiError("CONFLICT", "这次保存请求与已有记录的复述设置不一致。", 409);
-  }
-}
-
 export async function saveCaptureSource(
   sql: Sql,
   principal: Principal,
@@ -42,7 +30,6 @@ export async function saveCaptureSource(
   const bytes = new TextEncoder().encode(markdown);
   const uploadId = clientKey ? uploadIdFor(principal, clientKey, scheduleNextDayRetell) : undefined;
   const oppositeUploadId = clientKey ? uploadIdFor(principal, clientKey, !scheduleNextDayRetell) : undefined;
-  await rejectConflictingScheduleIntent(sql, principal, oppositeUploadId);
   const input = uploadInputSchema.parse({
     name,
     mime: "text/markdown",
@@ -52,8 +39,7 @@ export async function saveCaptureSource(
   });
   const sources = createOpeningSourceService(sql);
   try {
-    const { source } = await sources.beginUpload(principal, input);
-    await rejectConflictingScheduleIntent(sql, principal, oppositeUploadId);
+    const { source } = await sources.beginUpload(principal, input, oppositeUploadId);
     await sources.putStaging(principal, source.id, { bytes, contentType: input.mime });
     const saved = await sources.completeUpload(principal, source.id);
     return { sourceId: saved.id, name: saved.name, bytes: saved.bytes, replayed: false };

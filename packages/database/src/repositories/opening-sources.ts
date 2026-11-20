@@ -46,7 +46,7 @@ export type SweepExpiredPendingUploadsOptions = {
 };
 
 export type OpeningSourceRepository = {
-  create(scope: OpeningScope, input: UploadInput): Promise<SourceRecord>;
+  create(scope: OpeningScope, input: UploadInput, oppositeUploadId?: string): Promise<SourceRecord>;
   get(scope: OpeningScope, id: string): Promise<SourceRecord>;
   getPendingUpload(scope: OpeningScope, id: string): Promise<{ source: SourceRecord; expiresAt: string }>;
   issueUploadTicket(scope: OpeningScope, id: string, sign: (source: SourceRecord) => Promise<Omit<UploadTicket, "source">>): Promise<UploadTicket>;
@@ -198,7 +198,7 @@ export function createOpeningSourceRepository(sql: Sql, options: OpeningSourceRe
   const quota = options.quota ?? DEFAULT_OPENING_SOURCE_QUOTA;
   const now = options.now ?? (() => new Date());
   return {
-    async create(scope, input) {
+    async create(scope, input, oppositeUploadId) {
       return sql.begin(async tx => {
         const unavailable = input.uploadId ? "Upload operation unavailable" : "Workspace not found";
         // Preserve the original owner/UUID boundary before history SQL, without
@@ -223,6 +223,11 @@ export function createOpeningSourceRepository(sql: Sql, options: OpeningSourceRe
           const owner = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId}
             AND owner_user_id=${scope.ownerUserId} FOR NO KEY UPDATE`;
           if (!owner.length) throw new OpeningSourceError("NOT_FOUND", "Upload operation unavailable");
+          if (oppositeUploadId) {
+            const opposite = await tx`SELECT id FROM opening_sources
+              WHERE id=${oppositeUploadId} AND workspace_id=${scope.workspaceId}`;
+            if (opposite.length) throw new OpeningSourceError("CONFLICT", "这次保存请求与已有记录的复述设置不一致。");
+          }
           const excluded = await tx`SELECT source_id FROM opening_privacy_exclusions
             WHERE source_id=${input.uploadId} LIMIT 1`;
           if (excluded.length) throw new OpeningSourceError("NOT_FOUND", "Upload operation unavailable");

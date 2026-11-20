@@ -4,7 +4,7 @@ import { readOpeningRawBody } from "../../../../../features/opening/request-body
 import { captureInputSchema } from "../../../../../features/opening/imports-text/capture-input";
 import { prepareCapture } from "../../../../../features/opening/imports-text/markdown";
 import { saveCaptureSource } from "../../../../../features/opening/imports-text/capture-source";
-import { requireCaptureCourse, scheduleRetell } from "../../../../../features/opening/imports-text/retell-task";
+import { requireCaptureCourse, finishCapture } from "../../../../../features/opening/imports-text/retell-task";
 
 export async function POST(request: Request): Promise<Response> {
   try {
@@ -28,9 +28,10 @@ export async function POST(request: Request): Promise<Response> {
       input.clientKey,
       input.scheduleNextDayRetell,
     );
-    const task = input.scheduleNextDayRetell ? await scheduleRetell(sql, scope, {
+    const task = await finishCapture(sql, scope, {
+      scheduleNextDayRetell: input.scheduleNextDayRetell,
       sourceId: source.sourceId, title: capture.title, courseId: input.courseId, timeZone: input.timeZone,
-    }) : null;
+    });
     return Response.json({ sourceId: source.sourceId, name: source.name, bytes: source.bytes, keySteps: capture.keySteps,
       taskId: task?.taskId ?? null, notBefore: task?.notBefore ?? null,
       deferredBehindActiveRetest: task?.deferredBehindActiveRetest ?? false },

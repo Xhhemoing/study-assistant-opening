@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createOpeningSourceActionsRepository, createOpeningSourceRepository, OpeningSourceError } from "@aistudy/database";
 import { createOpeningMediaSegmentsService } from "../../apps/web/src/features/opening/media/media-segments-service";
+import { finishCapture } from "../../apps/web/src/features/opening/imports-text/retell-task";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 
 let f: OpeningFixture;
@@ -51,6 +52,32 @@ describe("workspace upload quota with real SQL", () => {
     if (withId) await expect(repo.create(f.scope, { ...operation, uploadId: "invalid" })).rejects.toMatchObject({ code: "22P02" });
     expect(await f.sql`SELECT * FROM opening_workspace_history_revisions WHERE workspace_id=${f.scope.workspaceId}`).toEqual([]);
     expect(await f.sql`SELECT id FROM opening_sources WHERE workspace_id=${f.scope.workspaceId}`).toEqual([]);
+  });
+
+  it.each([false, true])("links the uploaded capture to its course once (retell=%s)", async scheduleNextDayRetell => {
+    const courseId = randomUUID();
+    await f.sql`INSERT INTO courses (id, workspace_id, title, slug) VALUES (${courseId}, ${f.scope.workspaceId}, 'Course', 'course')`;
+    const repo = createOpeningSourceRepository(f.sql);
+    const input = { ...upload(4), mime: "text/markdown" as const, name: "notes.md" };
+    const source = await repo.create(f.scope, input);
+    await repo.complete(f.scope, source.id, input);
+    const capture = { sourceId: source.id, courseId, title: "Notes", scheduleNextDayRetell };
+    await finishCapture(f.sql, f.scope, capture);
+    await finishCapture(f.sql, f.scope, capture);
+    expect(await f.sql`SELECT asset_id FROM course_asset_memberships WHERE workspace_id=${f.scope.workspaceId}
+      AND course_id=${courseId} AND asset_type='source'`).toEqual([{ asset_id: source.id }]);
+    expect(await f.sql`SELECT course_id FROM opening_tasks WHERE id=${source.id}`).toEqual(scheduleNextDayRetell ? [{ course_id: courseId }] : []);
+  });
+
+  it("reserves one of two competing capture intents and lets the winner retry", async () => {
+    const repo = createOpeningSourceRepository(f.sql);
+    const ids = [randomUUID(), randomUUID()] as const;
+    const reserve = (index: 0 | 1) => repo.create(f.scope, { ...upload(4), uploadId: ids[index] }, ids[index === 0 ? 1 : 0]);
+    const results = await Promise.allSettled([reserve(0), reserve(1)]);
+    expect(results.filter(result => result.status === "rejected")).toMatchObject([{ reason: { code: "CONFLICT" } }]);
+    const winner = results[0].status === "fulfilled" ? 0 : 1;
+    await expect(reserve(winner)).resolves.toMatchObject({ id: ids[winner] });
+    expect(await f.sql`SELECT id FROM opening_sources WHERE workspace_id=${f.scope.workspaceId}`).toEqual([{ id: ids[winner] }]);
   });
 
   it.each(["create", "createWithParseJob"] as const)("serializes concurrent %s reservations under the byte limit", async method => {

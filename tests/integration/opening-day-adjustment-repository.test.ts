@@ -76,6 +76,36 @@ async function seedAcceptedPlan(
 }
 
 describe("opening-day-adjustment repository (kernel-v2 Phase 2)", () => {
+  it.each([null, "2026-11-18T00:00:00Z"])("projects the retest hold in quick slots and clears it on resume (stored floor %s)", async stored => {
+    const taskId = randomUUID();
+    const courseId = randomUUID();
+    const retestId = randomUUID();
+    const key = `text-retell:${taskId}`;
+    await f.sql`INSERT INTO courses (id, workspace_id, title, slug) VALUES (${courseId}, ${f.scope.workspaceId}, 'Course', 'course')`;
+    await f.sql`INSERT INTO opening_tasks (id, workspace_id, owner_user_id, title, minutes, origin, client_key, not_before, created_at)
+      VALUES (${taskId}, ${f.scope.workspaceId}, ${f.scope.ownerUserId}, 'Retell', 10, 'agent', ${key + ":deferred"}, ${stored}, now() - interval '1 day')`;
+    await f.sql`INSERT INTO opening_retest_activities (id, workspace_id, owner_user_id, course_id, skill_label, evidence_cycle_id, status)
+      VALUES (${retestId}, ${f.scope.workspaceId}, ${f.scope.ownerUserId}, ${courseId}, 'Skill', ${randomUUID()}, 'accepted')`;
+    const repo = createOpeningDayAdjustmentRepository(f.sql, { clock: () => THU_1855 });
+    await repo.declareToday(f.scope, { clientKey: randomUUID(), localDate: THU, expectedTimeZone: TIME_ZONE,
+      expectedExceptionRevision: 0, remainingMinutes: 15 });
+    const preview = () => repo.preview(f.scope, { date: THU, quickTaskId: taskId });
+    const held = await preview();
+    expect(held.quickCandidates.find(c => c.taskId === taskId)).toMatchObject({ fits: false, suggestedSlot: null });
+    expect(held.sourceAddedBlocks).toEqual([]);
+
+    const plans = createOpeningPlansRepository(f.sql);
+    const resume = () => plans.deferTask(f.scope, taskId, { expectedVersion: 1, notBefore: null });
+    await expect(resume()).rejects.toMatchObject({ code: "CONFLICT" });
+    await f.sql`UPDATE opening_retest_activities SET status='cancelled', cancelled_at=statement_timestamp() WHERE id=${retestId}`;
+    await expect(resume()).rejects.toMatchObject({ code: "CONFLICT" });
+    await f.sql`UPDATE opening_retest_activities SET cancelled_at=statement_timestamp() - interval '2 seconds' WHERE id=${retestId}`;
+    expect((await resume()).notBefore).toBeUndefined();
+    expect((await plans.listTasks(f.scope)).find(task => task.id === taskId)?.notBefore).toBeUndefined();
+    expect(await f.sql`SELECT client_key, not_before FROM opening_tasks WHERE id=${taskId}`).toEqual([{ client_key: key, not_before: null }]);
+    expect((await preview()).quickCandidates.find(c => c.taskId === taskId)).toMatchObject({ fits: true });
+  });
+
   it("declares 15 min on Thu without advancing plan state, then atomically keeps Writing 15m and moves Math 25m to Fri 19:15", async () => {
     const plans = createOpeningPlansRepository(f.sql, { now: () => THU_1855 });
     const writing = await plans.createTask(f.scope, {

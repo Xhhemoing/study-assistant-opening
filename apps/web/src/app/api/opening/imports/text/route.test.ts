@@ -13,7 +13,7 @@ vi.mock("../../../../../features/opening/runtime", () => ({
 }));
 vi.mock("../../../../../features/opening/sources/source-service", () => ({ createOpeningSourceService: () => deps }));
 vi.mock("../../../../../features/opening/imports-text/retell-task", () => ({
-  requireCaptureCourse: deps.course, scheduleRetell: deps.schedule,
+  requireCaptureCourse: deps.course, finishCapture: deps.schedule,
 }));
 
 const post = (body: string, headers?: HeadersInit) => POST(new Request("http://localhost/api/opening/imports/text", {
@@ -59,10 +59,11 @@ describe("POST /api/opening/imports/text", () => {
   });
 
   it("saves only the source when scheduling is disabled", async () => {
+    deps.schedule.mockResolvedValue(null);
     const result = await post(JSON.stringify({ content: "资料", scheduleNextDayRetell: false }));
     expect(result.status).toBe(201);
     expect(await result.json()).toMatchObject({ taskId: null, notBefore: null, deferredBehindActiveRetest: false });
-    expect(deps.schedule).not.toHaveBeenCalled();
+    expect(deps.schedule).toHaveBeenCalledWith(deps.sql, deps.scope, expect.objectContaining({ scheduleNextDayRetell: false }));
   });
 
   it("recovers the same uploaded source after a lost response; rejects a nonmatching replay", async () => {
@@ -71,9 +72,7 @@ describe("POST /api/opening/imports/text", () => {
     const uploadId = deps.beginUpload.mock.calls[0]![1].uploadId;
     deps.beginUpload.mockRejectedValue(new OpeningSourceError("CONFLICT", "completed upload"));
     deps.sql
-      .mockResolvedValueOnce([]) // oppositeUploadId check on valid replay
       .mockResolvedValueOnce([{ id: uploadId }]) // savedRows recovery
-      .mockResolvedValueOnce([]) // oppositeUploadId check on mismatched content replay
       .mockResolvedValueOnce([]); // savedRows miss on mismatched content
     deps.schedule.mockResolvedValue({ taskId: uploadId, replayed: true, deferredBehindActiveRetest: true });
     const replay = await post(body);
@@ -85,14 +84,43 @@ describe("POST /api/opening/imports/text", () => {
     expect(deps.schedule).toHaveBeenCalledTimes(2);
   });
 
-  it("rejects replaying the same clientKey with a changed scheduleNextDayRetell choice", async () => {
-    const first = await post(JSON.stringify({ content: "资料", clientKey: "intent-key", scheduleNextDayRetell: false }));
-    expect(first.status).toBe(201);
-    const sourceOnlyId = deps.beginUpload.mock.calls[0]![1].uploadId;
-    deps.sql.mockResolvedValueOnce([{ id: sourceOnlyId }]);
-    const mutated = await post(JSON.stringify({ content: "资料", clientKey: "intent-key", scheduleNextDayRetell: true }));
-    expect(mutated.status).toBe(409);
-    expect(deps.schedule).not.toHaveBeenCalled();
+  it.each([true, false])("reserves one upload when opposite intents reach beginUpload together (first=%s)", async firstFlag => {
+    const body = (flag: boolean) => JSON.stringify({ content: "资料", clientKey: "intent-key", scheduleNextDayRetell: flag });
+    const uploads = new Map<string, "pending" | "uploaded">();
+    // Let both requests finish any pre-checks before either reservation returns.
+    let release!: () => void;
+    const bothEntered = new Promise<void>(resolve => { release = resolve; });
+    let arrivals = 0;
+    deps.beginUpload.mockImplementation(async (_principal, input, oppositeId: string) => {
+      if (++arrivals === 2) release();
+      await bothEntered;
+      if (uploads.has(oppositeId) || uploads.get(input.uploadId) === "uploaded") {
+        throw new OpeningSourceError("CONFLICT", "upload intent unavailable");
+      }
+      uploads.set(input.uploadId, "pending");
+      return { source: { id: input.uploadId } };
+    });
+    deps.completeUpload.mockImplementation(async (_principal, id: string) => {
+      uploads.set(id, "uploaded");
+      return { id, name: "资料.md", bytes: 7 };
+    });
+    deps.sql.mockImplementation((parts: TemplateStringsArray, id: string) => {
+      const exists = parts.join("").includes("upload_state = 'uploaded'") ? uploads.get(id) === "uploaded" : uploads.has(id);
+      return exists ? [{ id }] : [];
+    });
+    deps.schedule.mockImplementation(async (_sql, _scope, input) => input.scheduleNextDayRetell
+      ? { taskId: input.sourceId, replayed: true } : null);
+
+    const flags = [firstFlag, !firstFlag];
+    const responses = await Promise.all(flags.map(flag => post(body(flag))));
+    expect(responses.map(response => response.status).sort()).toEqual([201, 409]);
+    expect(uploads.size).toBe(1);
+    const winner = responses.findIndex(response => response.status === 201);
+    const first = await responses[winner]!.json();
+    const retry = await post(body(flags[winner]!));
+    expect(retry.status).toBe(200);
+    expect(await retry.json()).toMatchObject({ sourceId: first.sourceId, taskId: first.taskId });
+    expect(deps.completeUpload).toHaveBeenCalledTimes(1);
   });
 
   it("does not schedule after an incomplete upload", async () => {

@@ -1,6 +1,6 @@
 import type { Sql } from "postgres";
 import { expect, it, vi } from "vitest";
-import { scheduleRetell } from "./retell-task";
+import { finishCapture } from "./retell-task";
 
 vi.mock("@aistudy/database", async importOriginal => ({
   ...await importOriginal<typeof import("@aistudy/database")>(), lockWorkspaceLearningHistory: vi.fn(),
@@ -21,6 +21,7 @@ function transaction(active: boolean, openEnded: boolean, lastDeadlineAt: Date |
   });
   const query = vi.fn(async (sql: TemplateStringsArray, ...values: unknown[]) => {
     const text = sql.join("?");
+    if (text.includes("INSERT INTO course_asset_memberships")) return [];
     if (text.includes("FROM courses")) return [{ id: values[0] }];
     if (text.includes("SELECT id, client_key")) return stored ? [stored] : [];
     if (text.includes("FROM workspace_preferences")) return [{ zone: "America/Los_Angeles" }];
@@ -41,11 +42,11 @@ it.each([
   [true, false, new Date("2026-11-03T11:32:51.765Z"), "2026-11-03T11:32:52.765Z"],
 ] as const)("persists origin='agent' and guarded start, holding open-ended retests without a premature timestamp (%#)", async (active, openEnded, deadlineAt, expectedIso) => {
   const db = transaction(active, openEnded, deadlineAt);
-  const input = { sourceId, title: "导数" };
+  const input = { sourceId, scheduleNextDayRetell: true, title: "导数" };
   const expectedNotBefore = expectedIso ? new Date(expectedIso) : null;
-  const first = await scheduleRetell(db.sql, scope, input);
+  const first = await finishCapture(db.sql, scope, input);
   expect(first).toEqual({ taskId: sourceId, replayed: false, notBefore: expectedNotBefore, deferredBehindActiveRetest: active });
-  expect(await scheduleRetell(db.sql, scope, input)).toEqual({ ...first, replayed: true });
+  expect(await finishCapture(db.sql, scope, input)).toEqual({ ...first, replayed: true });
   expect(db.writes).toHaveBeenCalledTimes(1);
   expect(db.windows).toHaveBeenCalledTimes(1);
   expect(db.writes.mock.calls[0]![0][5]).toBe("agent");
@@ -57,10 +58,10 @@ it.each([
 
 it("scopes the retest window to the requested course and rejects rebinding a replay", async () => {
   const db = transaction(true, false, tomorrow);
-  const input = { sourceId, title: "复述", timeZone: "UTC", courseId: "9a445539-4069-40ea-a981-eeafc28b6553" };
-  await scheduleRetell(db.sql, scope, input);
+  const input = { sourceId, scheduleNextDayRetell: true, title: "复述", timeZone: "UTC", courseId: "9a445539-4069-40ea-a981-eeafc28b6553" };
+  await finishCapture(db.sql, scope, input);
   const windowQuery = db.query.mock.calls.find(([parts]) => parts.join("").includes("AS tomorrow"));
   expect(windowQuery?.slice(1)).toEqual(["UTC", "UTC", scope.workspaceId, scope.ownerUserId, input.courseId, input.courseId]);
-  await expect(scheduleRetell(db.sql, scope, { ...input, courseId: null })).rejects.toMatchObject({ status: 409 });
+  await expect(finishCapture(db.sql, scope, { ...input, courseId: null })).rejects.toMatchObject({ status: 409 });
   expect(db.writes).toHaveBeenCalledTimes(1);
 });
