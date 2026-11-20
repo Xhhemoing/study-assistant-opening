@@ -186,6 +186,66 @@ describe("CartridgeRegistry", () => {
     });
   });
 
+  it.each(["iterator", "named property", "accessor"] as const)("rejects a probe list with an own %s", field => {
+    const [probe] = stack408Cartridge.listProbes();
+    const probes = [probe!];
+    if (field === "iterator") {
+      Object.defineProperty(probes, Symbol.iterator, { value: function* () { yield probe; } });
+    } else if (field === "named property") {
+      Object.defineProperty(probes, "extra", { value: true });
+    } else {
+      Object.defineProperty(probes, "0", { get: () => probe });
+    }
+    const registry = createCartridgeRegistry();
+    const candidate = { ...stack408Cartridge, listProbes: () => probes };
+
+    expect(registry.registerCartridge(candidate)).toMatchObject({
+      ok: false, issues: [{ code: "evidence_probe_listing_failed" }], probeReports: [],
+    });
+    expect(registry.getCartridge(candidate.manifest.id)).toBeNull();
+  });
+
+  it("validates all own probe elements even when a property read reports a shorter list", () => {
+    const [first] = stack408Cartridge.listProbes();
+    const invalid = { ...first!, probeId: "invalid", hypotheses: [] };
+    const probes = new Proxy([first!, invalid], {
+      get: (target, key) => key === "length" ? 1 : Reflect.get(target, key),
+    });
+    const registry = createCartridgeRegistry();
+    const candidate = { ...stack408Cartridge, listProbes: () => probes, getProbe: (id: string) => id === "invalid" ? invalid : first! };
+
+    expect(registry.registerCartridge(candidate)).toMatchObject({
+      ok: false,
+      issues: [{ code: "evidence_probe_not_distinguishable" }],
+      probeReports: [{ distinguishable: true }, { probeId: "invalid", distinguishable: false }],
+    });
+    expect(registry.getCartridge(candidate.manifest.id)).toBeNull();
+  });
+
+  it("refuses an L4 cartridge when a hypothesis iterator hides an ambiguous pair", () => {
+    const [first] = stack408Cartridge.listProbes();
+    const [a, b] = first!.hypotheses;
+    const hypotheses = [a!, b!, { ...a!, id: "H_DUPLICATE_PREDICTION" }];
+    const probe = { ...first!, hypotheses };
+    const candidate = {
+      ...stack408Cartridge, listProbes: () => [probe], getProbe: () => probe,
+    };
+    expect(validateCartridge(candidate).probeReports[0]?.ambiguousPairs).toEqual([
+      expect.objectContaining({ a: "H_DUPLICATE_PREDICTION", b: a!.id }),
+    ]);
+    Object.defineProperty(hypotheses, Symbol.iterator, {
+      value: function* () { yield a; yield b; },
+    });
+
+    const registry = createCartridgeRegistry();
+    expect(registry.registerCartridge(candidate)).toMatchObject({
+      ok: false,
+      issues: [{ code: "evidence_probe_not_distinguishable" }],
+      probeReports: [{ distinguishable: false }],
+    });
+    expect(registry.getCartridge(candidate.manifest.id)).toBeNull();
+  });
+
   it("refuses an L4 cartridge carrying a degenerate probe", () => {
     // 3,2,1 is feasible for a real stack and for the bypass misconception alike.
     const degenerate = createStackFeasibilityProbe("408.stack.degenerate", { pushOrder: [1, 2, 3], candidatePops: [3, 2, 1] }, "判断");

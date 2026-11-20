@@ -69,6 +69,50 @@ describe("verifyProbeDistinguishability", () => {
     ]);
   });
 
+  it.each([true, false])("rejects a hypothesis iterator that hides a collision (enumerable: %s)", enumerable => {
+    const hypotheses = [H_ADD, H_SQUARE, hypothesis("H_PLUS_ONE_TWICE", x => x + 1 + 1)];
+    const probe = spec(3, hypotheses);
+    expect(snapshotAndVerifyProbe(probe).report.ambiguousPairs).toEqual([
+      { a: "H_ADD_INSTEAD_OF_DOUBLE", b: "H_PLUS_ONE_TWICE", observableKey: "5" },
+    ]);
+    Object.defineProperty(hypotheses, Symbol.iterator, {
+      enumerable,
+      value: function* () { yield H_ADD; yield H_SQUARE; },
+    });
+
+    expect(snapshotAndVerifyProbe(probe)).toMatchObject({
+      report: { distinguishable: false, issues: expect.arrayContaining(["prediction_failed"]) },
+      correctObservableKey: null,
+    });
+    expect(evaluateProbeWithSpec(probe, 6)).toMatchObject({ outcome: "unverified", matchedHypothesisId: null });
+  });
+
+  it("rejects a sparse hypothesis array even when a hole has an inherited element", () => {
+    const hypotheses = [H_ADD, H_SQUARE];
+    Reflect.deleteProperty(hypotheses, "1");
+    expect(snapshotAndVerifyProbe(spec(3, hypotheses)).report.distinguishable).toBe(false);
+
+    const prototype = Object.create(Array.prototype) as object;
+    Object.defineProperty(prototype, "1", { value: H_SQUARE });
+    Object.setPrototypeOf(hypotheses, prototype);
+    expect(snapshotAndVerifyProbe(spec(3, hypotheses)).report).toMatchObject({
+      distinguishable: false, issues: expect.arrayContaining(["prediction_failed"]),
+    });
+  });
+
+  it("rejects a throwing hypothesis element getter without invoking it", () => {
+    const hypotheses = [H_ADD, H_SQUARE];
+    let reads = 0;
+    Object.defineProperty(hypotheses, "1", {
+      get() { reads += 1; throw new Error("hypothesis unavailable"); },
+    });
+
+    expect(snapshotAndVerifyProbe(spec(3, hypotheses)).report).toMatchObject({
+      distinguishable: false, issues: expect.arrayContaining(["prediction_failed"]),
+    });
+    expect(reads).toBe(0);
+  });
+
   it("requires competing hypotheses, unique model ids and complete identity", () => {
     expect(verifyProbeDistinguishability(spec(3, [])).issues).toEqual(["no_competing_hypotheses"]);
     expect(verifyProbeDistinguishability(spec(3, [H_ADD, H_ADD])).issues).toContain("duplicate_model_id");

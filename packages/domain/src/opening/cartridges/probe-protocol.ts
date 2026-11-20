@@ -1,4 +1,4 @@
-import { cloneCartridgeData } from "./clone-cartridge-data";
+import { cloneCartridgeData, copyCartridgeArray } from "./clone-cartridge-data";
 
 /**
  * Distinguishable competing-misconception probe protocol.
@@ -191,11 +191,11 @@ export function snapshotAndVerifyProbe<TInput, TObservable>(
     return snapshot;
   }
 
+  const hypothesesRead = safeRead(() => copyCartridgeArray(spec.hypotheses));
   const probeIdRead = safeRead(() => spec.probeId);
   const requirementKeyRead = safeRead(() => spec.requirementKey);
   const inputRead = safeRead(() => cloneCartridgeData(spec.input));
   const correctRead = safeRead(() => spec.correctModel);
-  const hypothesesRead = safeRead(() => spec.hypotheses);
   const encodeRead = safeRead(() => spec.observableKey);
   const parseRead = safeRead(() => spec.parseResponse);
 
@@ -215,14 +215,8 @@ export function snapshotAndVerifyProbe<TInput, TObservable>(
   if (!parseResponse) issues.add("probe_identity_incomplete");
   if (!inputRead.ok || !encodeObservable) issues.add("prediction_failed");
 
-  let rawHypotheses: unknown[] = [];
-  if (hypothesesRead.ok && Array.isArray(hypothesesRead.value)) {
-    const copyRead = safeRead(() => [...hypothesesRead.value]);
-    if (copyRead.ok) rawHypotheses = copyRead.value;
-    else issues.add("prediction_failed");
-  } else if (!hypothesesRead.ok) {
-    issues.add("prediction_failed");
-  }
+  if (!hypothesesRead.ok) issues.add("prediction_failed");
+  const rawHypotheses = hypothesesRead.ok ? hypothesesRead.value : [];
   const hypotheses = rawHypotheses.map(item => captureModel<TInput, TObservable>(item));
   if (hypotheses.length === 0) issues.add("no_competing_hypotheses");
 

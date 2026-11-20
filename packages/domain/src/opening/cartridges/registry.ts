@@ -1,3 +1,4 @@
+import { copyCartridgeArray } from "./clone-cartridge-data";
 import { verifyProbeDistinguishability, type DistinguishableProbeSpec, type ProbeDistinguishabilityReport } from "./probe-protocol";
 import {
   CARTRIDGE_LEVEL_METHODS,
@@ -56,19 +57,9 @@ function validateEvidenceContracts(
   } catch (error) {
     issues.push({ code: "evidence_contract_missing", detail: safeErrorDetail(error) });
   }
-  const probes: DistinguishableProbeSpec<unknown, unknown>[] = [];
+  let probes: DistinguishableProbeSpec<unknown, unknown>[];
   try {
-    const rawProbes = cartridge.listProbes();
-    if (Array.isArray(rawProbes)) {
-      const length = rawProbes.length;
-      if (!Number.isInteger(length) || length < 0 || length > 0xffff_ffff) {
-        throw new TypeError("listProbes() returned an invalid array length");
-      }
-      for (let index = 0; index < length; index += 1) {
-        if (!Object.hasOwn(rawProbes, index)) throw new TypeError("listProbes() requires a dense array");
-        probes.push(rawProbes[index]);
-      }
-    }
+    probes = copyCartridgeArray(cartridge.listProbes());
   } catch (error) {
     issues.push({ code: "evidence_probe_listing_failed", detail: safeErrorDetail(error) });
     return [];

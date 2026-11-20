@@ -27,6 +27,25 @@ function isElementIndex(key: string | symbol, length: number): boolean {
   return Number.isInteger(index) && index >= 0 && index < length && String(index) === key;
 }
 
+/** Snapshot a dense list of cartridge definitions while preserving element identity. */
+export function copyCartridgeArray<T>(value: readonly T[]): T[] {
+  if (!Array.isArray(value)) throw new TypeError("Cartridge list requires an array");
+  const length: unknown = Object.getOwnPropertyDescriptor(value, "length")?.value;
+  if (typeof length !== "number" || !Number.isInteger(length) || length < 0 || length > 0xffff_ffff) {
+    throw new TypeError("Cartridge list has an invalid array length");
+  }
+  const keys = Reflect.ownKeys(value);
+  if (keys.length !== length + 1) throw new TypeError("Cartridge list requires only dense array elements");
+
+  const copy = new Array<T>(length);
+  for (const key of keys) {
+    if (key === "length") continue;
+    if (!isElementIndex(key, length)) throw new TypeError("Cartridge list requires canonical array indices");
+    copy[Number(key)] = readEnumerableDataProperty(value, key) as T;
+  }
+  return copy;
+}
+
 function requirePrivateArrayBuffer(value: object): void {
   if (Object.getPrototypeOf(value) !== ArrayBuffer.prototype) {
     throw new TypeError("Cartridge data requires an ordinary ArrayBuffer");
