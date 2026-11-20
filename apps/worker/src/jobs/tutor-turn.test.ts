@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { OpeningProviderError, OpeningModelRoutingError, selectContext } from "@aistudy/ai";
-import { OpeningBudgetError, type OpeningTutorTimingInput } from "@aistudy/database";
+import { OpeningBudgetError, type OpeningTutorJobsRepository, type OpeningTutorTimingInput } from "@aistudy/database";
 import type { ConversationPlanningContext, HelpInputSnapshot, SourceChunk, StudyIntentEvent, TutorMode } from "@aistudy/contracts";
 import { PrivacyEpochError } from "../runtime/privacy-guard";
 import { composerMessageText, studyIntentForMessage, DEFAULT_STRATEGY_TEMPLATE_ID, PAGE_CITATION_CLARIFY_MESSAGE, PageCitationClarifyError, TUTOR_FAILURE_MESSAGE } from "@aistudy/domain";
@@ -34,6 +34,7 @@ describe("tutor turn handler", () => {
   function setup(overrides: { claim?: unknown; chunks?: SourceChunk[]; provider?: unknown; sourceIds?: string[]; sourceVersions?: Record<string, number>; missingSourceIds?: string[] } = {}) {
     const tutorJobs = {
       get: vi.fn(async () => overrides.claim ?? claimedJob),
+      withStreamPublication: vi.fn<OpeningTutorJobsRepository["withStreamPublication"]>(async (_scope, _job, _context, publish) => publish()),
       claim: vi.fn(async () => (overrides.claim !== undefined ? overrides.claim : claimedJob)),
       getUserTurn: vi.fn(async () => ({ ...turn, sourceIds: overrides.sourceIds ?? turn.sourceIds, sourceVersions: overrides.sourceVersions ?? { [chunkA.sourceId]: 0 } })),
       readAttemptContext: vi.fn(async () => ({ privacyEpoch: 0, anchor: { purpose: "learning_help" as const, attemptId: claimedJob.userTurnId, itemVersionId: claimedJob.conversationId },
@@ -375,7 +376,11 @@ describe("tutor turn handler", () => {
         getWorkspaceEpoch: async () => revoked && fence === "privacy" ? 1 : 0,
         listExcludedSourceIds: async () => [],
       };
-      tutorJobs.get.mockImplementation(async () => revoked && fence === "claim" ? { ...claimedJob, claimToken: "successor" } : claimedJob);
+      tutorJobs.withStreamPublication.mockImplementation(async (_scope, _job, _context, publish) => {
+        if (revoked && fence === "claim") throw Object.assign(new Error("claim changed"), { code: "CONFLICT" });
+        if (revoked && fence === "privacy") throw new PrivacyEpochError("privacy changed");
+        await publish();
+      });
       const stream = { begin: async () => {}, append: vi.fn(async (_workspace: string, _job: string, _text: string) => {}) };
       const providerAborted = vi.fn();
       provider.complete.mockImplementationOnce(async (_input, signal, delta) => {
@@ -403,6 +408,27 @@ describe("tutor turn handler", () => {
       expect(vi.getTimerCount()).toBe(0);
       expect(stream.append.mock.calls.map(call => call[2])).toEqual(["First"]);
     } finally { vi.useRealTimers(); }
+  });
+
+  it("settles confirmed provider usage when cancellation blocks only the final buffered batch", async () => {
+    const { deps, provider, tutorJobs, budget } = setup();
+    const cancelled = Object.assign(new Error("tutor job cancelled"), { code: "CONFLICT" });
+    const stream = { begin: async () => {}, append: vi.fn(async (_workspace: string, _job: string, _text: string) => 1) };
+    tutorJobs.withStreamPublication.mockImplementationOnce(async (_scope, _job, _context, publish) => publish())
+      .mockRejectedValueOnce(cancelled);
+    provider.complete.mockImplementationOnce(async (_input, _signal, delta) => {
+      await delta("First");
+      await delta(" tail");
+      expect(stream.append).toHaveBeenCalledOnce();
+      return { text: "First tail", citedChunkIds: [], candidates: [], requestId: null, inputTokens: 10, outputTokens: 10 };
+    });
+
+    await expect(createTutorTurnHandler({ ...deps, stream })(claimedJob.id)).rejects.toBe(cancelled);
+
+    expect(stream.append.mock.calls.map(call => call[2])).toEqual(["First"]);
+    expect(budget.settle).toHaveBeenCalledOnce();
+    expect(budget.markUnknown).not.toHaveBeenCalled();
+    expect(tutorJobs.completeTurn).not.toHaveBeenCalled();
   });
 
   it("drains a timer flush racing provider completion before settling or completing the turn", async () => {

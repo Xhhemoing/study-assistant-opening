@@ -74,7 +74,8 @@ export type TutorTurnDeps = {
   proposals?: { reply(scope: Scope, input: { sourceTurnId: string; purpose: "plan" | "teach"; question: string; courseId?: string | null;
     jobLease?: { jobId: string; claimToken: string }; parentBudget?: ParentInteractionBudget }): Promise<{ text: string; proposal: unknown; privacyEpoch: number; contextSourceRefs: ContextSourceRef[] }> };
   systemQuery?: SystemQueryService;
-  stream?: Pick<TutorStreamWriter, "begin"> & { append: (...args: Parameters<TutorStreamWriter["append"]>) => Promise<number | void> };
+  stream?: Pick<TutorStreamWriter, "begin"> & Partial<Pick<TutorStreamWriter, "seal">>
+    & { append: (...args: Parameters<TutorStreamWriter["append"]>) => Promise<number | void> };
   timing?: { record(scope: Scope, input: OpeningTutorTimingInput): Promise<unknown> };
   onTimingUnavailable?: (error: unknown) => void;
   streamExposures?: { generate(scope: Scope, input: OpeningStudyExposureInput): Promise<{ id: string }> };
@@ -401,13 +402,14 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
         : undefined;
       const exposureReceipt = streamExposure
         ? await deps.streamExposures!.generate(scope, streamExposure) : null;
+      const streamContext = { privacyEpoch: jobEpoch ?? 0, contextSourceRefs, claimToken: claimed.claimToken,
+        executionId: claimed.executionId };
       let streamAvailable = Boolean(deps.stream);
       if (deps.stream) {
         try {
-          await deps.stream.begin(scope.workspaceId, claimed.id, { privacyEpoch: jobEpoch ?? 0,
-            contextSourceRefs, exposureReceiptId: exposureReceipt?.id ?? null, claimToken: claimed.claimToken,
-            ...(attemptContext ? { attemptFence: tutorAttemptFence(attemptContext) } : {}),
-            ...(claimed.executionId ? { executionId: claimed.executionId } : {}) });
+          await deps.stream.begin(scope.workspaceId, claimed.id, { ...streamContext,
+            exposureReceiptId: exposureReceipt?.id ?? null,
+            ...(attemptContext ? { attemptFence: tutorAttemptFence(attemptContext) } : {}) });
         } catch (error) {
           streamAvailable = false;
           deps.onStreamUnavailable?.(error);
@@ -415,32 +417,34 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
       }
       let firstTextAt: number | null = null;
       const authorizeAndPublish = async (text: string) => {
-        await assertMaterialsCurrent();
-        if (attemptContext) {
-          // The attempt assertion also checks the running job and claim token.
-          await assertAttemptCurrent();
-        } else {
-          const job = await deps.tutorJobs.get(scope, claimed.id);
-          if (job?.status !== "running" || job.claimToken !== claimed.claimToken || job.executionId !== claimed.executionId) {
-            throw Object.assign(new Error("tutor stream execution is no longer current"), { code: "CONFLICT" });
-          }
-        }
-        if (deps.privacy && jobEpoch !== null) assertCurrentEpoch(jobEpoch, await deps.privacy.getWorkspaceEpoch(scope));
-        if (firstTextAt === null) {
-          const observedAt = new Date();
-          firstTextAt = performance.now();
-          recordTiming("tutor_first_text", observedAt, Math.round(firstTextAt - claimObservedAt));
-        }
-        if (!streamAvailable) return;
         try {
-          const sequence = await deps.stream!.append(scope.workspaceId, claimed.id, text, claimed.executionId);
-          if (sequence === 1) recordTiming("tutor_first_chunk", new Date(), Math.round(performance.now() - firstTextAt));
+          await assertMaterialsCurrent();
+          await assertAttemptCurrent();
+          await deps.tutorJobs.withStreamPublication(scope, claimed.id, streamContext, async () => {
+            if (firstTextAt === null) {
+              const observedAt = new Date();
+              firstTextAt = performance.now();
+              recordTiming("tutor_first_text", observedAt, Math.round(firstTextAt - claimObservedAt));
+            }
+            if (!streamAvailable) return;
+            try {
+              // Keep this inside the publication transaction: on a transport
+              // error the worker writer settles only after Redis confirms the seal.
+              const sequence = await deps.stream!.append(scope.workspaceId, claimed.id, text, claimed.executionId);
+              if (sequence === 1) recordTiming("tutor_first_chunk", new Date(), Math.round(performance.now() - firstTextAt));
+            } catch (error) { streamAvailable = false; deps.onStreamUnavailable?.(error); }
+          });
+        } catch (error) {
+          if (claimed.executionId && deps.stream?.seal) {
+            try { await deps.stream.seal(scope.workspaceId, claimed.id, claimed.executionId); }
+            catch (sealError) { deps.onStreamUnavailable?.(sealError); }
+          }
+          throw error;
         }
-        catch (error) { streamAvailable = false; deps.onStreamUnavailable?.(error); }
       };
       // BC1: operationId = durable tutor job id so BullMQ retries reuse one ledger
       // reservation; a fallback model runs under its own ":fallback" key.
-      const callWith = (model: ResolvedTaskModel | undefined, operationId: string) => {
+      const callWith = async (model: ResolvedTaskModel | undefined, operationId: string) => {
         const terms = model
           ? reservationTerms(model, input, deps.config.reservedCents)
           : (() => {
@@ -451,15 +455,18 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
               } as ReservationTerms;
             })();
         const provider = model?.provider ?? deps.provider;
-        // Drain within the provider phase so failed publication follows the same
-        // budget error path as a rejected first delta.
+        let publicationFailure: { reason: unknown } | undefined;
         const streamingProvider = provider && deps.stream && input.outputFormat === "markdown" ? {
-          complete: (providerInput: ProviderInput) => withTutorDeltaBatches(
-            (signal, onTextDelta) => provider.complete(providerInput, signal, onTextDelta),
-            authorizeAndPublish,
-          ),
+          complete: async (providerInput: ProviderInput) => {
+            const result = await withTutorDeltaBatches(
+              (signal, onTextDelta) => provider.complete(providerInput, signal, onTextDelta),
+              authorizeAndPublish,
+            );
+            publicationFailure = result.publicationFailure;
+            return result.value;
+          },
         } : provider;
-        return runBudgetedCall({
+        const output = await runBudgetedCall({
           provider: streamingProvider,
           modelSnapshot: model?.modelSnapshot,
           budget: scopedBudget,
@@ -479,6 +486,9 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
             await assertMaterialsCurrent();
           },
         });
+        // Settle confirmed provider usage before a refused tail can end the job.
+        if (publicationFailure) throw publicationFailure.reason;
+        return output;
       };
       let output: ProviderOutput;
       try {

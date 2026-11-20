@@ -2,6 +2,12 @@ import type IORedis from "ioredis";
 import { expect, it, vi } from "vitest";
 import { createTutorStreamReader, createTutorStreamWriter, withTutorDeltaBatches } from "./tutor-stream";
 
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>(done => { resolve = done; });
+  return { promise, resolve };
+}
+
 it("sm95 parses the cached attempt fence and rejects malformed identities before delivery", async () => {
   const id = "10000000-0000-4000-8000-000000000001";
   const context = { privacyEpoch: 0, contextSourceRefs: [], exposureReceiptId: null,
@@ -42,4 +48,32 @@ it("flushes at the monotonic deadline even when the timer callback has not run",
     now.mockRestore();
     vi.useRealTimers();
   }
+});
+
+it("drains overlapping callbacks accepted before close in arrival order", async () => {
+  const firstStarted = deferred();
+  const releaseFirst = deferred();
+  const finishProvider = deferred();
+  const published: string[] = [];
+  let emit!: (text: string) => Promise<void>;
+  const run = withTutorDeltaBatches(async (_signal, delta) => {
+    emit = delta;
+    await finishProvider.promise;
+  }, async text => {
+    if (text === "first") {
+      firstStarted.resolve();
+      await releaseFirst.promise;
+    }
+    published.push(text);
+  });
+  const first = emit("first");
+  await firstStarted.promise;
+  const second = emit(" second");
+  const third = emit(" third");
+  finishProvider.resolve();
+  await new Promise<void>(resolve => { setImmediate(resolve); });
+  await emit(" late");
+  releaseFirst.resolve();
+  await Promise.all([first, second, third, run]);
+  expect(published.join("")).toBe("first second third");
 });

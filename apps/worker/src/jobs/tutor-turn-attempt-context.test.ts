@@ -42,6 +42,7 @@ function setup(_input: { sourceIds: string[]; chunks: [] }) {
     findPendingForConversation: vi.fn<OpeningTutorJobsRepository["findPendingForConversation"]>(unexpected),
     cancel: vi.fn<OpeningTutorJobsRepository["cancel"]>(unexpected),
     readStream: vi.fn<OpeningTutorJobsRepository["readStream"]>(unexpected),
+    withStreamPublication: vi.fn<OpeningTutorJobsRepository["withStreamPublication"]>(async (_scope, _job, _context, publish) => publish()),
     listQueued: vi.fn<OpeningTutorJobsRepository["listQueued"]>(unexpected),
     loadCompletedTurnForMetadata: vi.fn<OpeningTutorJobsRepository["loadCompletedTurnForMetadata"]>(unexpected),
     applyUserTurnIntent: vi.fn<OpeningTutorJobsRepository["applyUserTurnIntent"]>(unexpected),

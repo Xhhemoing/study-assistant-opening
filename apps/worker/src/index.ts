@@ -12,7 +12,7 @@ import { PLATFORM_NAME, resolveWorkspaceTimeZone } from "@aistudy/domain";
 import { createOpeningBudgetRepository, createOpeningJobRepository, createOpeningMemoryRepository, createOpeningPrivacyRepository, createOpeningSourceRepository, createOpeningSourceChunksRepository, createOpeningTutorJobsRepository, createOpeningLearningRepository, readOpeningCourseEvidence, readLearningPreferences, createOpeningRetestRepository, createOpeningKnowledgeRepository, createOpeningImportChunksRepository,
   createOpeningTutorLearnerContextRepository, createOpeningPlanningSettingsRepository, readLatestStemPromptsBySkill, createSqlClient, OpeningS3, sweepExpiredPendingUploadsAll, readOpeningConversationPlanningContext } from "@aistudy/database";
 import { createDbModelGateway, resolveTutorFallbackModel, resolveTutorModel, scopeBudget } from "./runtime/model-gateway";
-import { createTutorStreamWriter } from "./runtime/tutor-stream";
+import { createWorkerTutorStreamWriter } from "./runtime/tutor-stream";
 import { createSourcePageImages } from "./runtime/source-page-images";
 import { createSourceVisualRecognition } from "./runtime/source-visual-recognition";
 import { loadFeatureSwitches, loadOpeningEmbeddingConfig, loadOpeningModelCatalog, loadOpeningTutorConfig, loadOpeningUploadQuota, loadServerConfig } from "@aistudy/config";
@@ -172,6 +172,7 @@ function createParserHandlers(sql: WorkerSql, env: WorkerEnv, runner: ParserRunn
 function createTeachingHandlers(sql: WorkerSql, env: WorkerEnv, producer: ReturnType<typeof createProducerRedisConnection>,
   tutorJobs: ReturnType<typeof createOpeningTutorJobsRepository>, reportError: (error: unknown) => void,
   { budget, models, embeddingConfig }: ReturnType<typeof createModelServices>) {
+  const tutorStream = createWorkerTutorStreamWriter(producer, reportError);
   const privacyRepo = createOpeningPrivacyRepository(sql);
   const learning = createOpeningLearningRepository(sql);
   const retests = createOpeningRetestRepository(sql);
@@ -207,7 +208,7 @@ function createTeachingHandlers(sql: WorkerSql, env: WorkerEnv, producer: Return
     onTimingUnavailable: reportError,
     retrieveContext: createOpeningMaterialRetriever(sql, budget, embeddingConfig),
     learnerContext: createOpeningTutorLearnerContextRepository(sql),
-    stream: createTutorStreamWriter(producer),
+    stream: tutorStream,
     streamExposures: createOpeningStudyExposureRepository(sql),
     onStreamUnavailable: reportError,
     systemQuery: createDbSystemQueryService(sql, "worker", { callModel: (scope, input, options) => models.call(scope, "tutor.listen", {
@@ -242,7 +243,7 @@ function createTeachingHandlers(sql: WorkerSql, env: WorkerEnv, producer: Return
       insertHelpExposure: (scope, exposure) => learning.insertHelpExposure(scope, exposure),
     },
   });
-  return { handlers, tutorTurn };
+  return { handlers, tutorTurn, disconnectStream: tutorStream.disconnect };
 }
 
 export async function main(): Promise<void> {
@@ -280,6 +281,8 @@ export async function main(): Promise<void> {
   const parserHealth = parserHealthSql && createOpeningParserHealthRepository(parserHealthSql);
   const parserWorkerId = randomUUID();
   const workers: Worker[] = [];
+  let tutorWorker: Worker | undefined;
+  let teaching: ReturnType<typeof createTeachingHandlers> | undefined;
   const consumers: ReadyConsumer[] = [];
   const parserConsumers: Array<{ kind: string; pause(): Promise<unknown>; resume(): Promise<unknown> }> = [];
   const learningConsumers: ReadyConsumer[] = [];
@@ -316,7 +319,10 @@ export async function main(): Promise<void> {
     if (started) await closeAll(workers.map((worker) => () => worker.pause(true)));
     if (parserHealthSql) await closeAll([() => parserHealthSql!.end({ timeout: 5 })]);
     await closeAll(tasks.map((task) => () => task.stop()));
-    await closeAll(workers.map((worker) => () => worker.close(!started)));
+    // A tutor consumer can already have an append in flight during startup.
+    // Drain it before closing the control connection or releasing SQL locks.
+    await closeAll(workers.map((worker) => () => worker.close(!started && worker !== tutorWorker)));
+    teaching?.disconnectStream();
     await closeAll(openedQueues.map((queue) => () => queue.close()));
     if (parserStarted) await closeAll([() => createOpeningParserHealthRepository(sql).retire(parserWorkerId)]);
     producer.disconnect();
@@ -370,8 +376,9 @@ export async function main(): Promise<void> {
   const modelServices = createModelServices(sql, openingModel, embeddingConfig);
   // Legacy parser workers also own dispatcher/recovery duties even with no teaching consumers.
   const tutorJobs = env.workerRole === "logistics" ? null : createOpeningTutorJobsRepository(sql);
-  const teaching = queueKinds.has("tutor") && tutorJobs
-    ? createTeachingHandlers(sql, env, producer, tutorJobs, reportError, modelServices) : null;
+  if (queueKinds.has("tutor") && tutorJobs) {
+    teaching = createTeachingHandlers(sql, env, producer, tutorJobs, reportError, modelServices);
+  }
   const handlers: Record<string, JobHandler> = {
     ...(runner && createParserHandlers(sql, env, runner, startup.ocrSegmentTimeoutSeconds, modelServices)),
     ...(queueKinds.has("remind") && createLogisticsHandlers(sql, modelServices)),
@@ -398,6 +405,7 @@ export async function main(): Promise<void> {
       }
     }, { connection: redis, name: `${process.pid}-${parserWorkerId}-${kind}`, concurrency: kind === "parse" || kind === "tutor-metadata" ? 1 : 2 });
     workers.push(worker);
+    if (kind === "tutor") tutorWorker = worker;
     consumers.push({ waitUntilReady: () => worker.waitUntilReady(), isRunning: () => worker.isRunning(),
       isPaused: () => worker.isPaused(), getWorkers: () => queue.getWorkers(), name: worker.opts.name! });
     if (isParserQueue(kind)) {

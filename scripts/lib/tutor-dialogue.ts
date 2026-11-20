@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { Redis } from "ioredis";
-import { createTutorStreamReader, createTutorStreamWriter } from "../../apps/worker/src/runtime/tutor-stream";
+import { createTutorStreamReader, createWorkerTutorStreamWriter } from "../../apps/worker/src/runtime/tutor-stream";
 import { isDeepStrictEqual } from "node:util";
 import { createOpeningProvider, runBudgetedCall, actualCentsForOutput, type OpeningProviderOptions } from "@aistudy/ai";
 import { fetchOpeningProvider } from "../../packages/ai/src/opening/provider-network";
@@ -254,6 +254,7 @@ export async function collectTutorStreamSafety(options: { git: string; redisUrl:
   const redis = new Redis(options.redisUrl, { lazyConnect: true, enableOfflineQueue: false,
     maxRetriesPerRequest: 0, connectTimeout: 3000, commandTimeout: 3000, retryStrategy: () => null });
   redis.on("error", () => undefined);
+  const writer = createWorkerTutorStreamWriter(redis, () => undefined);
   const report: DialogueReport = { synthetic: true, transport: "controlled_provider",
     version: { git: options.git, fixture: "m1-d1-stream-1", model: "controlled_delta_provider" },
     maxRequests: 2, requests: [], cases: [], errors: [], passed: false, fixturePricing: pricing,
@@ -265,7 +266,7 @@ export async function collectTutorStreamSafety(options: { git: string; redisUrl:
     await redis.connect();
     const conversations = createOpeningConversationRepository(sql), jobs = createOpeningTutorJobsRepository(sql);
     const chunks = createOpeningSourceChunksRepository(sql), budget = createOpeningBudgetRepository(sql, { envCapCents: 100_000 });
-    const writer = createTutorStreamWriter(redis), reader = createTutorStreamReader(redis);
+    const reader = createTutorStreamReader(redis);
     for (const caseId of STREAM_SAFETY_CASES) {
       const scope = { workspaceId: randomUUID(), ownerUserId: randomUUID() }, sourceId = randomUUID();
       const record: Record<string, unknown> = { caseId, scope, status: "running" }; report.cases.push(record);
@@ -290,6 +291,13 @@ export async function collectTutorStreamSafety(options: { git: string; redisUrl:
           ledger: Array.from(await sql`SELECT * FROM opening_budget_reservations WHERE workspace_id=${scope.workspaceId} ORDER BY id`),
           activities: Array.from(await sql`SELECT * FROM opening_teaching_activities WHERE workspace_id=${scope.workspaceId} ORDER BY id`),
         });
+        let confirmSecondBatch!: () => void;
+        const secondBatch = new Promise<void>(resolve => { confirmSecondBatch = resolve; });
+        const unsubscribe = caseId === "stream_success"
+          ? await reader.subscribe(scope.workspaceId, saved.jobId, delta => {
+              if (delta.sequence === 2) confirmSecondBatch();
+            })
+          : undefined;
         const handler = createTutorTurnHandler({ tutorJobs: jobs, chunks, budget, stream: writer,
           retrieveContext: createOpeningMaterialRetriever(sql, budget, null),
           streamExposures: createOpeningStudyExposureRepository(sql), privacy: createOpeningPrivacyRepository(sql),
@@ -299,9 +307,21 @@ export async function collectTutorStreamSafety(options: { git: string; redisUrl:
             report.requests.push({ ordinal: report.requests.length + 1, caseId, actor: "tutor", input: value, status: null, raw: null });
             for (const delta of ["先看等式两边。", "再尝试同减一个数。 "]) {
               await onDelta!(delta);
+              if (caseId === "stream_success" && published.length === 1) {
+                // The tail is buffered. Wait for Redis, then authorize the actual snapshot.
+                let timeout: ReturnType<typeof setTimeout> | undefined;
+                try {
+                  await Promise.race([secondBatch, new Promise<never>((_resolve, reject) => {
+                    timeout = setTimeout(() => reject(new Error("STREAM_CHECK_FAILED:second_batch_missing")), 3_000);
+                  })]);
+                } finally { clearTimeout(timeout); }
+              }
               const snapshot = await reader.read(scope.workspaceId, saved.jobId); check(snapshot?.text, "real_cache_snapshot");
               const authorized = await jobs.readStream(scope, saved.jobId, snapshot!);
-              if (authorized?.status === "running") published.push(delta);
+              if (authorized?.status === "running") {
+                check(snapshot!.sequence === published.length + 1 && snapshot!.text === published.join("") + delta, "authorized_actual_batch");
+                published.push(delta);
+              }
               if (caseId === "stream_cancel" && published.length === 1 && !cancelHelp) {
                 await jobs.cancel(scope, saved.jobId); cancelHelp = (await facts()).help;
               }
@@ -311,6 +331,7 @@ export async function collectTutorStreamSafety(options: { git: string; redisUrl:
           } }, config: { maxContextCharacters: 1000, reservedCents: 100, maxOutputTokens: 100, ...pricing } });
         let handlerError: string | undefined;
         try { await handler(saved.jobId); } catch (error) { handlerError = errorName(error); }
+        finally { await unsubscribe?.(); }
         const after = await facts();
         check(calls === 1 && after.ledger.length === 1, "one_provider_and_ledger");
         check(after.help.length === 1 && after.help[0]!.delivered === true, "one_actual_help_delivery");
@@ -319,6 +340,7 @@ export async function collectTutorStreamSafety(options: { git: string; redisUrl:
           check(after.turns.find(turn => turn.id === saved.assistantTurnId)?.status === "complete", "durable_answer");
         } else {
           check(published.length === 1 && after.job?.status === "cancelled", "late_delta_not_authorized");
+          check(after.stream?.sequence === 1 && after.stream.text === published[0], "late_delta_not_cached");
           check(after.turns.find(turn => turn.id === saved.assistantTurnId)?.status === "failed", "cancel_not_completed");
           check(isDeepStrictEqual(cancelHelp, after.help), "no_help_after_cancel");
         }
@@ -326,12 +348,12 @@ export async function collectTutorStreamSafety(options: { git: string; redisUrl:
         const replay = await conversations.appendSavedTurn(input); const replayHandler = await handler(saved.jobId);
         check(isDeepStrictEqual(saved, replay) && replayHandler.skipped && calls === 1 && isDeepStrictEqual(after, await facts()), "replay_no_calls_or_writes");
         Object.assign(record, { status: "passed", saved, published, handlerError, after, replayHandler,
-          cacheBoundary: "Late deltas may remain in Redis; PG terminal authorization prevents delivery. No HTTP transport exercised." });
+          cacheBoundary: "PG orders cache publication and terminal job writes. No HTTP transport exercised." });
       } catch (error) { record.status = "failed"; record.error = errorName(error); report.errors.push(`${caseId}:${errorName(error)}`); }
     }
     report.passed = report.errors.length === 0 && report.cases.length === 2;
     return report;
-  } finally { redis.disconnect(); await sql.end({ timeout: 5 }); }
+  } finally { writer.disconnect(); redis.disconnect(); await sql.end({ timeout: 5 }); }
 }
 
 export function assertDialogueDatabase(fetchImpl?: OpeningProviderOptions["fetchImpl"]): URL {

@@ -11,6 +11,7 @@
  */
 import "server-only";
 import { PutObjectCommand } from "@aws-sdk/client-s3";
+import { Redis } from "ioredis";
 import {
   createOpeningActionDigestDecisionsRepository,
   createOpeningAiSettingsRepository,
@@ -39,6 +40,7 @@ import {
 import type { Sql } from "postgres";
 import { loadOpeningJobStaleConfig } from "@aistudy/config";
 import { createOpeningReminderService } from "../planning/reminder-service";
+import { createTutorStreamWriter } from "../../../../../worker/src/runtime/tutor-stream";
 
 type Tail<F> = F extends (sql: Sql, ...rest: infer R) => infer O ? (...rest: R) => O : never;
 const bind = <F extends (sql: Sql, ...rest: never[]) => unknown>(fn: F, sql: Sql) =>
@@ -69,6 +71,24 @@ export const getActionDigestDecisionStore = (sql: Sql) => createOpeningActionDig
 type Scope = Parameters<ReturnType<typeof createOpeningTutorJobsRepository>["get"]>[0];
 type Job = NonNullable<Awaited<ReturnType<ReturnType<typeof createOpeningTutorJobsRepository>["get"]>>>;
 
+async function sealCancelledTutorStream(job: Job) {
+  if (!job.executionId || !process.env.REDIS_URL) return;
+  const redis = new Redis(process.env.REDIS_URL, {
+    lazyConnect: true, enableOfflineQueue: false, autoResendUnfulfilledCommands: false,
+    maxRetriesPerRequest: 0, connectTimeout: 2_000, commandTimeout: 2_000, retryStrategy: () => null,
+  });
+  redis.on("error", () => undefined);
+  try {
+    await redis.connect();
+    await createTutorStreamWriter(redis).seal(job.workspaceId, job.id, job.executionId);
+  } catch {
+    // Publication still checks the committed cancellation under the PG lock.
+    console.error("Could not seal the cancelled tutor stream");
+  } finally {
+    redis.disconnect();
+  }
+}
+
 /** Tutor job polling/cancel. Cancellation never claims provider termination. */
 export function getTutorJobService(sql: Sql) {
   // Reads end a job whose queue message was lost, so polling reaches a terminal status.
@@ -80,7 +100,10 @@ export function getTutorJobService(sql: Sql) {
     /** `cancelled` null => not found; `conflict` => exists but not cancellable. */
     async cancel(scope: Scope, id: string): Promise<{ job: Job; conflict: boolean } | null> {
       const job = await repo.cancel(scope, id);
-      if (job) return { job, conflict: false };
+      if (job) {
+        await sealCancelledTutorStream(job);
+        return { job, conflict: false };
+      }
       const existing = await repo.get(scope, id);
       return existing ? { job: existing, conflict: true } : null;
     },

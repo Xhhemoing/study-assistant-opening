@@ -56,6 +56,15 @@ function mapJob(row: Record<string, unknown>): OpeningTutorJobRecord {
 
 export type OpeningTutorJobsRepository = ReturnType<typeof createOpeningTutorJobsRepository>;
 
+type StreamPublicationContext = {
+  privacyEpoch: number; contextSourceRefs: ContextSourceRef[]; claimToken?: string; executionId?: string;
+};
+
+async function assertStreamSources(tx: TransactionSql, scope: OpeningScope, refs: ContextSourceRef[]) {
+  const [available] = await tx`SELECT 1 WHERE ${contextSourceRefsIncluded(tx, scope.workspaceId, tx`${tx.json(refs)}::jsonb`)}`;
+  if (!available) throw Object.assign(new Error("stream material unavailable or excluded"), { code: "CONFLICT" });
+}
+
 type UserTurnIntentInput = { userTurnId: string; jobId: string; claimToken?: string };
 async function lockIntentUserTurn(tx: TransactionSql, scope: OpeningScope, input: UserTurnIntentInput) {
   await lockWorkspaceLearningHistory(tx, scope);
@@ -482,9 +491,30 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
       return job;
     },
 
+    /** Order the Redis append against terminal job writes and workspace privacy changes. */
+    async withStreamPublication(scope: OpeningScope, id: string, context: StreamPublicationContext,
+      publish: () => Promise<void>): Promise<void> {
+      await sql.begin(async tx => {
+        // Acquire locks in the same order as cancellation and other terminal writes.
+        const [workspace] = await tx`SELECT privacy_epoch FROM workspaces
+          WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR SHARE`;
+        if (!workspace || Number(workspace.privacy_epoch) !== context.privacyEpoch) {
+          throw Object.assign(new Error("stream authorization changed"), { code: "PRIVACY_EPOCH_MISMATCH" });
+        }
+        const [job] = await tx`SELECT j.id FROM opening_tutor_jobs j
+          JOIN opening_conversations c ON c.id=j.conversation_id AND c.workspace_id=j.workspace_id
+          WHERE j.id=${id} AND j.workspace_id=${scope.workspaceId} AND c.owner_user_id=${scope.ownerUserId}
+            AND j.status='running' AND j.claim_token IS NOT DISTINCT FROM ${context.claimToken ?? null}::uuid
+            AND j.timing_execution_id IS NOT DISTINCT FROM ${context.executionId ?? null}::uuid FOR SHARE OF j`;
+        if (!job) throw Object.assign(new Error("tutor stream execution is no longer current"), { code: "CONFLICT" });
+        if (context.contextSourceRefs.length) await assertStreamSources(tx, scope, context.contextSourceRefs);
+        await publish();
+      });
+    },
+
     /** Authorize every nonempty stream delivery and record help before bytes leave HTTP. */
-    async readStream(scope: OpeningScope, id: string, context: {
-      privacyEpoch: number; contextSourceRefs: ContextSourceRef[]; exposureReceiptId: string | null; claimToken?: string; executionId?: string;
+    async readStream(scope: OpeningScope, id: string, context: StreamPublicationContext & {
+      exposureReceiptId: string | null;
       attemptFence?: TutorAttemptFence;
     }): Promise<OpeningTutorJobRecord | null> {
       return sql.begin(async tx => {
@@ -510,8 +540,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
           const current = await readTutorAttemptContext(tx, scope, { jobId: id, userTurnId: String(row.user_turn_id), claimToken: context.claimToken });
           if (!current || !isDeepStrictEqual(tutorAttemptFence(current), fence.data)) throw new Error("stream attempt context changed");
         }
-        const [available] = await tx`SELECT 1 WHERE ${contextSourceRefsIncluded(tx, scope.workspaceId, tx`${tx.json(context.contextSourceRefs)}::jsonb`)}`;
-        if (!available) throw new Error("stream material unavailable or excluded");
+        await assertStreamSources(tx, scope, context.contextSourceRefs);
         if (context.exposureReceiptId) {
           const [exposure] = await tx`SELECT id FROM opening_help_exposures WHERE id=${context.exposureReceiptId}
             AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
