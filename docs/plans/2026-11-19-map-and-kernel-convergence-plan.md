@@ -91,7 +91,7 @@ flowchart LR
   - 去重优先级固定为：`supported > needs_check > suggested`。
   - 解析 `edge.evidenceChunkIds` 时，必须核对对应 chunk 所属 `source_id` 当前仍绑定于该课程、处于当前工作区可读版本且未被隐私设置排除；若 `chunk.page` 为 `null` 或非正整数，只允许携带经重验的 `sourceNodeId` / `sourceVersion`，**严禁用 `chunk_index` 伪充页码**；若全部引用资料已撤权或不可读，则不返回任何出处字段，且若原状态为 `supported` 则在投影层按只读降级提示为 `needs_check`（不静默改写底层快照表）。
   - 将可见课程知识快照版本、边状态摘要、可读资料纪元与**实际生效**的边详情投影位一并纳入 `scopeFingerprint`，确保资料撤权、重新构图、隐私变更或投影开关切换后旧分页游标确定性返回 `CURSOR_STALE`。
-  - **在途新标签页无 `400` 回退规则**：由于 [query/route.ts](../../apps/web/src/app/api/opening/asset-graph/query/route.ts) 同样使用 `.strict()` 解析请求体，回退时禁止直接移除请求契约中的可选 `includeKnowledgeEdgeDetails` 字段（否则已打开的新标签页发起请求会收到 HTTP `400`），而应通过前端停发或服务端关闭边详情投影并继续接受 `includeKnowledgeEdgeDetails?: boolean` 作为无副作用 no-op，保证新旧已打开标签页均平滑可用。
+  - **在途新标签页无 `400` 服务端回退规则**：由于 [query/route.ts](../../apps/web/src/app/api/opening/asset-graph/query/route.ts) 同样使用 `.strict()` 解析请求体，且已打开标签页在回退后仍可能继续发送 `includeKnowledgeEdgeDetails: true`（仅回滚前端无法覆盖存量已打开标签页），回退时禁止直接移除请求契约中的可选 `includeKnowledgeEdgeDetails` 字段，也不可仅靠前端停发替代服务端关闸；**必须在服务端关闭边详情投影开关**（前端停发仅作为新开标签页的可选配套）并继续接受 `includeKnowledgeEdgeDetails?: boolean` 作为无副作用 no-op，确保回退后继续传 `true` 的请求仍返回 HTTP `200` 旧版边形状，且开启期签发的旧游标因实际生效投影位变化返回 `CURSOR_STALE`。
 
 ### 2.4 续学首屏故障隔离与活动小结衔接
 
@@ -122,8 +122,8 @@ flowchart LR
    - 基于 `feat/opening-release` 最新头整合 `FreeMapCanvas`、`AssetGraphListView`、级数沙盒示例、`learning-route` 全课挑题 + 普通练习 `15` 分钟预填与到期复测优先判定及 `taskId + expectedTaskVersion` 强绑定（1A），以及跨 `/opening/map` 与 `/opening/sprint` 共享的会话级“本轮纸上已复习”（2A）；
    - 验证：相关 `unit` 单测（含视图切换焦点恢复、未确认范围提示、`verified` 项到期复测不被漏筛、**`needs_correction` 与到期 `delayedCheck` 同时成立时优先归为正式复测夹具**、到期复测禁止无 `taskId` 降级启动、`minutes=15` 透传、`sessionStorage` 版本失效与零服务端写入断言）+ `@aistudy/web` 类型检查 + `eslint` + `check-new-fixed-colors` + `check-learner-copy`。
 3. **切片 2（课程知识边 `knowledgeStatus` 与重验出处，H 级主线 PR，可与切片 1 同单原子合流）**：
-   - 扩展 `asset-graph` `.strict()` 契约、客户端显式协商参数（`includeKnowledgeEdgeDetails`）与 `opening-asset-graph.ts` 只读投影，默认向未协商旧标签页保持原严格边形状，协商开启时透出 `suggested / supported / needs_check` 边样式区分、重验页码/资料版本展示与 `scopeFingerprint` 游标失效；
-   - 验证：`packages/contracts`、`packages/database`、`apps/web` 类型检查 + 契约/仓储/handler 测试（**含未传协商参数的旧 `.strict()` 客户端请求新服务端不报未知字段的兼容回归用例**）+ `check-api-contracts --strict` + `check-server-boundary`。
+   - 扩展 `asset-graph` `.strict()` 契约、客户端显式协商参数（`includeKnowledgeEdgeDetails`）、服务端投影关闸开关与 `opening-asset-graph.ts` 只读投影，默认向未协商旧标签页保持原严格边形状，协商且服务端开关开启时透出 `suggested / supported / needs_check` 边样式区分、重验页码/资料版本展示与实际生效投影位 `scopeFingerprint` 游标失效；
+   - 验证：`packages/contracts`、`packages/database`、`apps/web` 类型检查 + 契约/仓储/handler 测试（**含未传协商参数的旧 `.strict()` 客户端请求新服务端不报未知字段，以及服务端回退关闭投影后仍发送 `includeKnowledgeEdgeDetails: true` 的请求返回 HTTP `200` 原边形状且开启期旧游标返回 `CURSOR_STALE` 的回归用例**）+ `check-api-contracts --strict` + `check-server-boundary`。
 4. **切片 3（续学首屏解耦与活动小结单一下一步接线，H 级主线 PR）**：
    - 拆分 `course-study-workspace` 的课程/活动核心加载与资料列表二级加载，接通 `activity-summary-card` 单一下一步动作；
    - 验证：课程工作台故障注入单测（资料列表失败不阻断续学答题）+ 小结动作分支单测 + `@aistudy/web` 类型检查。

@@ -106,7 +106,7 @@ promotion_target:
 | 成本 | 零数据库迁移，零静默模型调用 | 迁移维护、备份恢复预检与测试夹具成本显著上升 | 最低 |
 | 可解释性 | 推荐分母（全课程 `N` 项要求）、排序优先级与“纸上复习不计入掌握”文案完全透明可核对 | 容量扣减、跨日改排与边对齐失败原因较难向学生一眼解释 | 高 |
 | 隐私与安全 | 会话键隔离 `userId + workspaceId`；边出处重验当前可读资料与隐私排除；不预取笔记正文 | 新增持久化表须同步接入删除、导出与隐私纪元递增 | 高 |
-| 可迁移/可回滚 | 零数据库迁移；响应增量字段按 `includeKnowledgeEdgeDetails: true` 显式协商返回，回退时关闭投影并保留请求可选字段为 no-op（新旧已打开标签页均不报 `400`/校验错误） | 含 schema 变更与备份恢复联动，回滚成本高 | 可直接回退 |
+| 可迁移/可回滚 | 零数据库迁移；响应增量字段按 `includeKnowledgeEdgeDetails: true` 显式协商返回，回退时必须在服务端关闭扩展边投影并保留请求可选字段为 no-op（即使已打开标签页继续传 `true` 仍返回 HTTP `200` 原边形状，新旧标签页均不报 `400`/校验错误） | 含 schema 变更与备份恢复联动，回滚成本高 | 可直接回退 |
 | 扩展性 | 预留升级钩子：待 `#454` 浏览器验收与耗时校准稳定后可平滑把 `minutes=15` 升级为容量联动预览 | 提前固化尚未验证的边身份与纸面模型，易形成历史包袱 | 需重新设计考前辅助层 |
 | 失败降级 | `learning-route` 未确认范围时明确提示先确认范围；`sessionStorage` 不可用时仅禁用纸面勾选且不阻断地图与答题 | 任一容量或持久化子链路异常均可能导致主入口报错阻断 | 退化为纯静态图 |
 
@@ -124,17 +124,17 @@ promotion_target:
   1. `#454` 通过真实浏览器走查，且至少 1 个高数专题积累了题目实际耗时分布后，评估将 1A 升级为与当日剩余容量联动的时长预览（1B）；
   2. 真实试用中出现明确高频诉求“跨设备/跨天保留多轮纸面核对清单”，再立项评估轻量服务端轮次记录（2B）；
   3. 课程知识图重建频率与边级纠错样本证明需要跨版本保留人工边批注时，再设计稳定知识边身份与对齐迁移。
-- **回退方案**：前端视图切换与会话级纸面标记零服务端迁移依赖；由于 [query/route.ts](../../apps/web/src/app/api/opening/asset-graph/query/route.ts) 请求契约同样为 `.strict()`，若需回退知识边详情投影，不得直接整包回滚移除请求可选字段 `includeKnowledgeEdgeDetails`（否则浏览器中已打开的新标签页发起查询会触发 HTTP `400`），而应先通过前端关停发送/服务端投影开关停止返回 `knowledgeStatus` 与 `sourceNodeId`、同时在请求契约中继续保留 `includeKnowledgeEdgeDetails?: boolean` 作为无副作用 no-op 兼容在途新标签页（并将实际生效的投影位纳入 `scopeFingerprint` 保证游标一致），无需回滚数据库；若自由画布交互在特定设备出现兼容问题，用户可在同一工作台一键切回列表视图或基础关系图。
+- **回退方案**：前端视图切换与会话级纸面标记零服务端迁移依赖；由于 [query/route.ts](../../apps/web/src/app/api/opening/asset-graph/query/route.ts) 请求契约同样为 `.strict()` 且浏览器中已打开的标签页在回退后仍会继续发送 `includeKnowledgeEdgeDetails: true`（仅做前端回滚无法阻止存量已打开标签页发该参数），若需回退知识边详情投影，不得直接整包回滚移除请求可选字段 `includeKnowledgeEdgeDetails`，也不可仅靠前端停发替代服务端关闸，而**必须在服务端关闭边详情投影开关**以对含 `includeKnowledgeEdgeDetails: true` 在内的所有请求停止返回 `knowledgeStatus` 与 `sourceNodeId`、同时在请求契约中继续保留 `includeKnowledgeEdgeDetails?: boolean` 作为无副作用 no-op（前端回滚仅作新开标签页的可选配套），并将服务端**实际生效**的投影位纳入 `scopeFingerprint` 使回退前开启期签发的旧游标确定性失效，无需回滚数据库；若自由画布交互在特定设备出现兼容问题，用户可在同一工作台一键切回列表视图或基础关系图。
 
 ## 9. 验证计划
 
 - **数据集或测试夹具**：
-  - 既有 [21 条资产图合成夹具](2026-11-18-knowledge-assets-examples.json) 扩展课程知识边 `suggested / supported / needs_check`、缺失页码 chunk、隐私排除重验与旧客户端未协商兼容用例；
+  - 既有 [21 条资产图合成夹具](2026-11-18-knowledge-assets-examples.json) 扩展课程知识边 `suggested / supported / needs_check`、缺失页码 chunk、隐私排除重验、旧客户端未协商兼容以及服务端投影回退关闸后在途标签页继续发送 `includeKnowledgeEdgeDetails: true` 的回归用例；
   - 内置高数无穷级数示例模型（正项级数、比较判别法、比值/根值判别法、莱布尼茨交错级数）用于自由画布与两步沙盒微探针单测；
   - `CourseRouteSnapshot` 多状态要求夹具（覆盖 `needs_correction`、含 `verified` 及与 `needs_correction` 同时成立的到期 `retest`、`assisted`、`needs_verification`、`unobserved`、无到期复测的 `verified`、`blocked` 及 `scopeState !== "confirmed"`）。
 - **当前基线**：`feat/opening-release`（`b1b98a9c`，已含 `#449`–`#456`）单一工作台 + 关系图/列表双视图；76/76 离线教学规则回归通过；批改 `calibrated=false`。
 - **离线指标**：
-  - 契约与单测：知识边状态与出处重验准确率 100%（无越权资料泄露、无 `chunk_index` 伪页码、资料版本或隐私变更后旧游标 100% 返回 `CURSOR_STALE`）；
+  - 契约与单测：知识边状态与出处重验准确率 100%（无越权资料泄露、无 `chunk_index` 伪页码；旧客户端未传协商位不收扩展字段；服务端回退关闭投影后，携带 `includeKnowledgeEdgeDetails: true` 的请求返回 HTTP `200` 原边形状，且资料版本、隐私变更或投影启用期签发的旧游标 100% 返回 `CURSOR_STALE`）；
   - 状态隔离：切换/撤销“本轮纸上已复习”前后，所有 `LearnerState`、`RequirementStatus` 与服务端写请求次数严格为 `0`；到期复测绝不无 `taskId` 误调普通练习；
   - 续学韧性：模拟课程资料列表接口 `500` 时，已有活动续学首屏正常可作答，资料面板独立报错可重试。
 - **线上/产品指标（单专题试点）**：利用 [loop-metrics.ts](../../packages/domain/src/opening/adaptive/loop-metrics.ts) 串联同一高数专题的**首次独立作答率**、**复测到期返回率**与**隔天新题独立正确率**。
