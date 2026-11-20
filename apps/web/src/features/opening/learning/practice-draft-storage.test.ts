@@ -286,8 +286,21 @@ it("keeps an unsaved in-memory matrix answer recoverable when the next ordinary 
     return disk.data.get(key) ?? null;
   });
 
+  const liveManual = emptyPracticeDraft(ordinary, { answer: "newer manual answer in live storage" });
+  disk.data.set(ordinaryKey, JSON.stringify({ version: 2, scope: ordinary, activeId: liveManual.id, drafts: [liveManual, matrix] }));
+  disk.setItem.mockImplementation((key, value) => { disk.data.set(key, value); });
+
   expect(readPartitionedPracticeDraftCollection(scopes, emptyPracticeDraft(ordinary, { matrixMode: true }), disk))
     .toMatchObject({ activeId: matrix.id, drafts: [unsaved.draft] });
-  expect(patchPracticeDraft(ordinary, { matrixMode: true }, { fields: { answer: "still editable in memory" } }, disk).draft.fields.answer)
-    .toBe("still editable in memory");
+  const recoveredEdit = patchPracticeDraft(ordinary, { matrixMode: true }, { fields: { answer: "still editable in memory" } }, disk);
+  expect(recoveredEdit.draft.fields.answer).toBe("still editable in memory");
+  expect(recoveredEdit.persisted).toBe(false);
+  expect(parsePracticeDraftCollection(JSON.parse(disk.data.get(ordinaryKey)!), ordinary)?.drafts.map(d => d.fields.answer))
+    .toContain("newer manual answer in live storage");
+
+  disk.getItem.mockImplementation(key => disk.data.get(key) ?? null);
+  expect(readPartitionedPracticeDraftCollection(scopes, emptyPracticeDraft(manual), disk))
+    .toMatchObject({ activeId: liveManual.id, drafts: [expect.objectContaining({ id: liveManual.id, scope: manual, fields: expect.objectContaining({ answer: "newer manual answer in live storage" }) })] });
+  expect(parsePracticeDraftCollection(JSON.parse(disk.data.get(ordinaryKey)!), ordinary))
+    .toMatchObject({ activeId: matrix.id, drafts: [expect.objectContaining({ id: matrix.id, fields: expect.objectContaining({ answer: "still editable in memory" }) })] });
 });

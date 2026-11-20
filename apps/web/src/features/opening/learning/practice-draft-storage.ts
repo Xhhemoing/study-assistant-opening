@@ -30,6 +30,7 @@ export type PracticeStart = NonNullable<PracticeDraft["start"]>;
 export type PracticeDraftCollection = { version: 2; scope: string; activeId: string; drafts: PracticeDraft[] };
 const memory = new Map<string, PracticeDraftCollection>();
 const dirty = new Set<string>();
+const unreconciled = new Set<string>();
 const blocked = new Map<string, string>();
 const storageKey = (scope: string) => `opening-practice:v2:${scope}`;
 const legacyStorageKey = (scope: string) => `opening-practice:v1:${scope}`;
@@ -156,6 +157,10 @@ export function readPracticeDraft(scope: string, storage: ReadStorage | null, dr
 }
 
 function persistCollection(collection: PracticeDraftCollection, storage: WriteStorage | null): boolean {
+  if (unreconciled.has(collection.scope)) {
+    dirty.add(collection.scope);
+    return false;
+  }
   try {
     if (!storage) throw new Error("storage unavailable");
     storage.setItem(storageKey(collection.scope), JSON.stringify(collection));
@@ -217,9 +222,13 @@ function migrateOrdinaryManualDrafts(scopes: PracticeDraftScopes, source: Stored
       const remaining = { ...ordinary, activeId: active.id, drafts: matrixDrafts };
       storage.setItem(storageKey(scopes.ordinary), JSON.stringify(remaining));
       memory.set(scopes.ordinary, remaining);
+      dirty.delete(scopes.ordinary);
+      unreconciled.delete(scopes.ordinary);
     } else {
       storage.removeItem(storageKey(scopes.ordinary));
       memory.delete(scopes.ordinary);
+      dirty.delete(scopes.ordinary);
+      unreconciled.delete(scopes.ordinary);
     }
   } catch (reason) {
     if (!manualEntry) throw reason;
@@ -231,15 +240,19 @@ export function readPartitionedPracticeDraftCollection(scopes: PracticeDraftScop
     let ordinary: StoredPracticeDraftCollection | null = null;
     const unsavedOrdinary = dirty.has(scopes.ordinary);
     const previousBlocked = blocked.get(scopes.ordinary);
+    let ordinaryReadSucceeded = false;
     try {
       // Revalidate on every migration attempt, including after an interrupted cleanup.
       ordinary = readStoredPracticeDraftCollection(scopes.ordinary, storage);
+      ordinaryReadSucceeded = true;
       if (!unsavedOrdinary) {
+        unreconciled.delete(scopes.ordinary);
         if (ordinary) memory.set(scopes.ordinary, ordinary.collection);
         else memory.delete(scopes.ordinary);
       }
     } catch (reason) {
       if (unsavedOrdinary && memory.has(scopes.ordinary)) {
+        unreconciled.add(scopes.ordinary);
         if (previousBlocked === undefined) blocked.delete(scopes.ordinary);
         else blocked.set(scopes.ordinary, previousBlocked);
         if (fallback.scope !== scopes.manual && memory.get(scopes.ordinary)!.drafts.some(draft => draft.fields.matrixMode !== true)) {
@@ -250,7 +263,26 @@ export function readPartitionedPracticeDraftCollection(scopes: PracticeDraftScop
         if (fallback.scope !== scopes.manual) throw reason;
       }
     }
-    if (!unsavedOrdinary && ordinary?.collection.drafts.some(draft => draft.fields.matrixMode !== true)) {
+    if (ordinaryReadSucceeded && unsavedOrdinary && memory.has(scopes.ordinary)) {
+      const cached = memory.get(scopes.ordinary)!;
+      const cachedById = new Map(cached.drafts.map(draft => [draft.id, draft]));
+      const storedDrafts = ordinary?.collection.drafts ?? [];
+      const storedIds = new Set(storedDrafts.map(draft => draft.id));
+      const mergedDrafts = [
+        ...storedDrafts.map(draft => cachedById.get(draft.id) ?? draft),
+        ...cached.drafts.filter(draft => !storedIds.has(draft.id)),
+      ];
+      const storedManualActive = storedDrafts.find(draft => draft.id === ordinary?.collection.activeId && draft.fields.matrixMode !== true)?.id;
+      const reconciled = { version: 2 as const, scope: scopes.ordinary, activeId: storedManualActive ?? cached.activeId, drafts: mergedDrafts };
+      if (reconciled.drafts.some(draft => draft.fields.matrixMode !== true)) {
+        unreconciled.add(scopes.ordinary);
+        migrateOrdinaryManualDrafts(scopes, { collection: reconciled, legacy: Boolean(ordinary?.legacy) }, fallback, storage);
+      } else {
+        memory.set(scopes.ordinary, reconciled);
+        unreconciled.delete(scopes.ordinary);
+        persistCollection(reconciled, storage);
+      }
+    } else if (!unsavedOrdinary && ordinary?.collection.drafts.some(draft => draft.fields.matrixMode !== true)) {
       migrateOrdinaryManualDrafts(scopes, ordinary, fallback, storage);
     }
   } else if (fallback.scope !== scopes.manual && readPracticeDraftCollection(scopes.ordinary, null)?.drafts.some(draft => draft.fields.matrixMode !== true)) {
