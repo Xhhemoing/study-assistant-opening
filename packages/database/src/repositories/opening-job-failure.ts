@@ -80,7 +80,7 @@ export async function failOpeningJob(sql: Sql, id: string, value: unknown,
       const payload = job.payload as Record<string, unknown>;
       if (typeof payload.activityId === "string" && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(payload.activityId)
         && typeof payload.expectedContentVersion === "number" && Number.isInteger(payload.expectedContentVersion)) {
-        await tx`UPDATE opening_teaching_activities SET generate_status = 'failed', updated_at = now()
+        await tx`UPDATE opening_teaching_activities SET generate_status = 'failed'
           WHERE id = ${payload.activityId} AND workspace_id = ${workspace.id} AND owner_user_id = ${job.owner_user_id}
             AND content_version = ${payload.expectedContentVersion} AND generate_status IN ('queued', 'generating')`;
       }

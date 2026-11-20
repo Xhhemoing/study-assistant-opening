@@ -31,6 +31,7 @@ import type { CourseRouteRequirementInput,CourseRouteActionResult,TeachingActivi
 import { createOpeningLearningGoalRepository,createOpeningLearningRepository,createOpeningAiGradingRepository,createOpeningSourceChunksRepository,
   createOpeningBudgetRepository,createOpeningPrivacyRepository,createOpeningTeachingContentRepository,createOpeningJobRepository,createWorkspacePreferencesRepository,createOpeningRetestActivityRepository,createOpeningTeachingHintRepository,createOpeningSpanSessionRepository,createOpeningPlansRepository,createOpeningPlanningSettingsRepository } from "@aistudy/database";
 import { createOpeningCourseRouteRetestRepository } from "../../packages/database/src/repositories/opening-course-route-retest";
+import { createOpeningStudyExposureRepository } from "../../packages/database/src/repositories/opening-study-exposure";
 import { assertOpeningCourseRouteReady } from "../../packages/database/src/repositories/opening-course-route-origin";
 import { createOpeningCourseRouteVerificationRepository } from "../../packages/database/src/repositories/opening-course-route-verification";
 import { readOpeningBackupRecords } from "../../packages/database/src/repositories/opening-backup-records";
@@ -1490,11 +1491,20 @@ it.each(["cancel","snooze"] as const)("does not restore a %s delayed arrangement
   expect((await readOpeningLearningCapacity(f.sql,f.scope,new Date(until))).usedMinutes).toBe(future.usedMinutes);
   expect(await f.sql`SELECT id FROM opening_teaching_activities WHERE course_id=${x.courseId}`).toHaveLength(2);
 });
-it("uses real interval help to choose reduced-help correction even after two prior independent checks",async()=>{
+it.each(["activity", "different_attempt"] as const)("classifies real interval help bound to %s after two prior independent checks",async binding=>{
   const x=await delayedSeed(true);
-  await createOpeningTeachingHintRepository(f.sql).read(f.scope,{attemptId:x.baselineAnswer.attempt.id,level:1});
+  if(binding==="activity"){
+    const help=await createOpeningStudyExposureRepository(f.sql).deliver(f.scope,{
+      releaseKey:randomUUID(),origin:"assistant",kind:"hint",level:"hinted",supportDomain:"math",
+      contextAnchor:{purpose:"learning_help",courseId:x.courseId,activityId:x.started.activity.id},
+    });
+    expect(help.contextAnchor).toMatchObject({activityId:x.started.activity.id,attemptId:null});
+  }else{
+    await createOpeningTeachingHintRepository(f.sql).read(f.scope,{attemptId:x.baselineAnswer.attempt.id,level:1});
+  }
   const result=await answer(x.started.activity),snapshot=await x.repo.read(f.scope,x.courseId,x.started.activity.id);
-  expect(snapshot.requirements[0]!.delayedCheck?.status).toBe("assisted");
+  expect(snapshot.requirements[0]!.delayedCheck?.status).toBe(binding==="activity"?"assisted":"passed");
+  if(binding==="different_attempt")return;
   expect(ready(await x.repo.next(f.scope,x.courseId,{goalId:x.goal.id,expectedGoalRevision:1,activityId:x.started.activity.id,
     expectedPathVersion:snapshot.currentActivity!.pathVersion,observationId:result.observation.id,clientKey:randomUUID(),minutes:20})).action).toBe("reduced_help_practice");
 });

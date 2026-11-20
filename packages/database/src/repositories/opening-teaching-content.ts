@@ -590,12 +590,13 @@ export function createOpeningTeachingContentRepository(sql: Sql, reservedPorts?:
             updated_at = now()
           RETURNING *`;
 
+        // Merely including checkpoint_json in SET fires the coverage invalidation
+        // trigger. Only explicit revision adoption changes the checkpoint.
         const bumped = await tx`
           UPDATE opening_teaching_activities
-          SET content_version = ${newVersion}, updated_at = now(),
-              checkpoint_json = CASE WHEN ${Boolean(referenceRevision)} THEN
-                COALESCE(checkpoint_json, '{}'::jsonb) || ${tx.json({ referenceRevisionAdoption: referenceRevision ?? null } as never)}
-                ELSE checkpoint_json END
+          SET content_version = ${newVersion}
+              ${referenceRevision ? tx`, updated_at = now(), checkpoint_json =
+                COALESCE(checkpoint_json, '{}'::jsonb) || ${tx.json({ referenceRevisionAdoption: referenceRevision } as never)}` : tx``}
           WHERE id = ${input.activityId}
             AND workspace_id = ${scope.workspaceId}
             AND owner_user_id = ${scope.ownerUserId}

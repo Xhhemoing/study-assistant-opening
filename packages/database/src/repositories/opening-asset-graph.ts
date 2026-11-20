@@ -595,7 +595,7 @@ export function createOpeningAssetGraphRepository(
 
         const knowledgeRows = targetCourseIds.length
           ? await tx`
-              SELECT course_id, version, snapshot, source_versions, updated_at
+              SELECT course_id, version, snapshot - 'coveredSourceChunkDigests' AS snapshot, source_versions, updated_at
               FROM opening_course_knowledge
               WHERE workspace_id = ${validScope.workspaceId}
                 AND owner_user_id = ${validScope.ownerUserId}

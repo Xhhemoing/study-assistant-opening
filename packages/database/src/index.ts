@@ -121,6 +121,7 @@ export { readOpeningCourseLearningSummary } from "./repositories/opening-learnin
 export * from "./schema/opening-knowledge";
 export {
   createOpeningKnowledgeRepository,
+  knowledgeChunkDigests,
   OpeningKnowledgeError,
   type OpeningKnowledgeRepository,
   type OpeningKnowledgeRecord,

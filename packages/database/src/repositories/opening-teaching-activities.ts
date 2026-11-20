@@ -672,7 +672,7 @@ export function createOpeningTeachingActivitiesRepository(sql: Sql) {
           const fromList = [...from];
           const rows = await db`
             UPDATE opening_teaching_activities
-            SET generate_status = ${status}, updated_at = now()
+            SET generate_status = ${status}
             WHERE id = ${activityId}
               AND workspace_id = ${scope.workspaceId}
               AND owner_user_id = ${scope.ownerUserId}
@@ -682,7 +682,7 @@ export function createOpeningTeachingActivitiesRepository(sql: Sql) {
         }
         const rows = await db`
           UPDATE opening_teaching_activities
-          SET generate_status = ${status}, updated_at = now()
+          SET generate_status = ${status}
           WHERE id = ${activityId}
             AND workspace_id = ${scope.workspaceId}
             AND owner_user_id = ${scope.ownerUserId}

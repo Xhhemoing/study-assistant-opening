@@ -1,4 +1,5 @@
-import { spanPrerequisiteRefusalReasonSchema, courseRequirementSchema, courseRouteActivityContextSchema, knowledgeSnapshotSchema, type CourseRequirement, type CourseRouteRequirementInput, type CourseRouteSnapshot, type Scope } from "@aistudy/contracts";
+import { spanPrerequisiteRefusalReasonSchema, courseRequirementSchema, courseRouteActivityContextSchema, type CourseRequirement, type CourseRouteRequirementInput, type CourseRouteSnapshot, type Scope } from "@aistudy/contracts";
+import { readPublicKnowledgeSnapshot } from "./opening-knowledge-snapshot";
 import { courseRequirementProgress, toSnapshotEvidence } from "@aistudy/domain";
 import type { Sql,TransactionSql } from "postgres";
 import { learningError, learningIso, mapLearningObservation } from "./opening-learning-facts";
@@ -103,7 +104,7 @@ export async function readCourseRouteMaterials(db:CourseRouteDb,scope:Scope,cour
 async function suggestions(db:CourseRouteDb,scope:Scope,courseId:string,requirements:CourseRequirement[],exactVerificationEnabled:boolean):Promise<CourseRouteRequirementInput[]>{
   const [row]=await db`SELECT snapshot FROM opening_course_knowledge WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND course_id=${courseId}`;
   if(!row)return [];
-  const graph=knowledgeSnapshotSchema.parse(row.snapshot);
+  const graph=readPublicKnowledgeSnapshot(row.snapshot);
   const nodes=graph.nodes.filter(node=>node.status==="supported"&&node.kind!=="chapter"&&!requirements.some(item=>item.knowledgeNodeId===node.id));
   const chunks=await db`SELECT ch.id,ch.source_id,ch.source_version,ch.page FROM opening_source_chunks ch
     JOIN opening_sources s ON s.id=ch.source_id AND s.version=ch.source_version AND s.workspace_id=${scope.workspaceId}

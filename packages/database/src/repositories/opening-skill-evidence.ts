@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
 import {
-  knowledgeSnapshotSchema,
   skillEvidenceSchema,
   type Scope,
   type SkillEvidence,
@@ -10,6 +9,7 @@ import { evaluateEvidenceEligibility, resolveEvidenceAssistance } from "@aistudy
 import { learningError, mapLearningObservation, type LearningSql } from "./opening-learning-facts";
 import { readOpeningLearningEvidenceContexts } from "./opening-learning-evidence-context";
 import { openingCurrentKnowledgeNodesQuery } from "./opening-exam-skill-identity";
+import { readPublicKnowledgeSnapshot } from "./opening-knowledge-snapshot";
 
 export type SkillEvidenceDimension = SkillEvidence["dimension"];
 
@@ -99,7 +99,7 @@ async function assertNodeInCourseSnapshot(
       AND owner_user_id = ${scope.ownerUserId}
       AND course_id = ${courseId}`;
   if (!rows.length) return;
-  const snapshot = knowledgeSnapshotSchema.parse((rows[0] as Record<string, unknown>).snapshot);
+  const snapshot = readPublicKnowledgeSnapshot((rows[0] as Record<string, unknown>).snapshot);
   if (!snapshot.nodes.some((node) => node.id === nodeId)) {
     throw learningError("VALIDATION", "nodeId is not in the course knowledge snapshot");
   }

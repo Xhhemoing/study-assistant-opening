@@ -1,6 +1,7 @@
-import { knowledgeSnapshotSchema, type Scope, type SourceChunk } from "@aistudy/contracts";
+import type { Scope, SourceChunk } from "@aistudy/contracts";
 import { knowledgeNodeDefinition } from "@aistudy/domain";
 import type { TransactionSql } from "postgres";
+import { storedKnowledgeSnapshotSchema } from "./opening-knowledge-snapshot";
 
 /** Upgrade pre-definition graphs before the parser replaces their evidence UUIDs.
  * Workspace → graph → source/chunks matches graph publication and privacy writes. */
@@ -11,7 +12,7 @@ export async function preserveOpeningKnowledgeDefinitions(tx: TransactionSql, sc
     WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND source_versions ? ${sourceId}
     ORDER BY course_id FOR UPDATE`;
   for (const graph of graphs) {
-    const parsed = knowledgeSnapshotSchema.safeParse(graph.snapshot);
+    const parsed = storedKnowledgeSnapshotSchema.safeParse(graph.snapshot);
     if (!parsed.success || parsed.data.courseId !== graph.course_id) continue;
     const definitions = { ...graph.node_definitions as Record<string, string> };
     const missing = parsed.data.nodes.filter(node => !definitions[node.id] && node.evidenceChunkIds.length);
