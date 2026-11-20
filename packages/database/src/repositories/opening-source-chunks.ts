@@ -1,4 +1,4 @@
-import { controlledLearningTools, type SourceChunk } from "@aistudy/contracts";
+import { controlledLearningTools, type ApiFailure, type SourceChunk } from "@aistudy/contracts";
 import type { Sql, TransactionSql } from "postgres";
 import type { OpeningScope } from "./opening-sources";
 import { lockOpeningJobExecution } from "./opening-job-execution";
@@ -7,7 +7,12 @@ import { enqueueOpeningSourceIndex } from "./opening-source-index-jobs";
 import { preserveOpeningKnowledgeDefinitions } from "./opening-knowledge-definitions";
 import { knowledgeChunkDigests } from "./opening-knowledge-snapshot";
 export type NewSourceChunk = Omit<SourceChunk, "id" | "sourceId" | "sourceVersion">;
-export type OpeningSourceChunksRepository = { replaceChunks(scope: OpeningScope, input: { sourceId: string; sourceVersion: number; chunks: NewSourceChunk[] }): Promise<void>; listChunks(scope: OpeningScope, sourceId: string): Promise<SourceChunk[]>; listChunksAtVersion(scope: OpeningScope, sourceId: string, sourceVersion: number): Promise<SourceChunk[]>; listForSources(scope: OpeningScope, sourceIds: string[]): Promise<SourceChunk[]>; };
+export type OpeningSourceChunksRepository = {
+  replaceChunks(scope: OpeningScope, input: { sourceId: string; sourceVersion: number; chunks: NewSourceChunk[]; warning?: ApiFailure }): Promise<void>;
+  listChunks(scope: OpeningScope, sourceId: string): Promise<SourceChunk[]>;
+  listChunksAtVersion(scope: OpeningScope, sourceId: string, sourceVersion: number): Promise<SourceChunk[]>;
+  listForSources(scope: OpeningScope, sourceIds: string[]): Promise<SourceChunk[]>;
+};
 export function mapChunk(row: Record<string, unknown>): SourceChunk { return { id: row.id as string, sourceId: row.source_id as string, sourceVersion: Number(row.source_version), page: row.page == null ? null : Number(row.page), slideLabel: row.slide_label as string | null, startMs: row.start_ms == null ? null : Number(row.start_ms), endMs: row.end_ms == null ? null : Number(row.end_ms), text: row.text as string, imageObjectKey: row.image_object_key as string | null }; }
 async function fetchChunks(sql: Sql, scope: OpeningScope, sourceId: string, version: number): Promise<SourceChunk[]> { const rows = await sql`SELECT c.* FROM opening_source_chunks c JOIN opening_sources s ON s.id = c.source_id WHERE c.source_id = ${sourceId} AND s.workspace_id = ${scope.workspaceId} AND s.upload_state = 'uploaded' AND c.source_version = ${version} ORDER BY c.page NULLS LAST, c.created_at`; return rows.map((row) => mapChunk(row as Record<string, unknown>)); }
 export function chunksHaveReadableContent(chunks: NewSourceChunk[]): boolean {
@@ -78,7 +83,7 @@ export function createOpeningSourceChunksRepository(sql: Sql): OpeningSourceChun
         for (const chunk of added) await tx`INSERT INTO opening_source_chunks(source_id,source_version,page,slide_label,start_ms,end_ms,text,image_object_key)
           VALUES(${input.sourceId},${input.sourceVersion},${chunk.page},${chunk.slideLabel ?? null},${chunk.startMs ?? null},${chunk.endMs ?? null},${chunk.text},${chunk.imageObjectKey ?? null})`;
       }
-      await tx`UPDATE opening_sources SET parse_state='ready',error=NULL,updated_at=now()
+      await tx`UPDATE opening_sources SET parse_state='ready',error=${input.warning ? tx.json(input.warning) : null}::jsonb,updated_at=now()
         WHERE id=${input.sourceId} AND workspace_id=${scope.workspaceId} AND version=${input.sourceVersion}`;
       await enqueueOpeningSourceIndex(tx, scope, input.sourceId, input.sourceVersion);
     });

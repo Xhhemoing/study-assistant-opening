@@ -16,6 +16,24 @@ async function seed(scope = f.scope) {
   return id;
 }
 const chunk = (text: string, page = 1) => ({ text, page, slideLabel: null, startMs: null, endMs: null, imageObjectKey: null });
+
+it('publishes a retryable partial PDF warning with its ready chunks and clears it on full replacement', async () => {
+  const sourceId = await seed();
+  const repository = createOpeningSourceChunksRepository(f.sql);
+  const warning = { code: 'PARSE_PARTIAL', message: '第 2 页未能识别，可以重新解析', retryable: true };
+  const chunks = [chunk('Readable first page')];
+
+  await repository.replaceChunks(f.scope, { sourceId, sourceVersion: 1, chunks, warning });
+
+  expect(await f.sql`SELECT s.parse_state, s.error, c.text FROM opening_sources s
+    JOIN opening_source_chunks c ON c.source_id=s.id AND c.source_version=s.version WHERE s.id=${sourceId}`)
+    .toEqual([{ parse_state: 'ready', error: warning, text: 'Readable first page' }]);
+
+  await repository.replaceChunks(f.scope, { sourceId, sourceVersion: 1, chunks: [...chunks, chunk('Recovered page', 2)] });
+
+  expect(await f.sql`SELECT parse_state, error, error IS NULL AS cleared FROM opening_sources WHERE id=${sourceId}`)
+    .toEqual([{ parse_state: 'ready', error: null, cleared: true }]);
+});
 function barrier() {
   let release!: () => void;
   const ready = new Promise<void>(resolve => { release = resolve; });

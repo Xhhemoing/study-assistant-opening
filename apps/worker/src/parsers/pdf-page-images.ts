@@ -4,11 +4,12 @@ import { createParserSubprocessEnv } from "./subprocess-env";
 
 const MAX_IMAGE_DATA_LENGTH = 2_800_000;
 const MAX_RENDER_ERROR_BYTES = 64 * 1024;
+export const MAX_PDF_RENDER_PAGES = 3;
 
 type PageRequest = { sourceId: string; physicalPage: number };
 export type PdfPageImage = { sourceId: string; physicalPage: number; mediaType: "image/png"; data: string };
 export async function renderPdfPageImages(bytes: Uint8Array, requests: readonly PageRequest[], config = loadParserConfig()): Promise<PdfPageImage[]> {
-  if (requests.length < 1 || requests.length > 3 || requests.some(item => !Number.isInteger(item.physicalPage) || item.physicalPage < 1)) throw new Error("invalid PDF page selection");
+  if (requests.length < 1 || requests.length > MAX_PDF_RENDER_PAGES || requests.some(item => !Number.isInteger(item.physicalPage) || item.physicalPage < 1)) throw new Error("invalid PDF page selection");
   // The renderer opens one PDF document for this entire ordered batch and
   // closes native page and document handles before the child reports completion.
   const child = spawn(config.pythonExecutable, ["-m", "opening_parser.render_pages", JSON.stringify(requests.map(item => item.physicalPage))], { cwd: config.cwd, windowsHide: true, env: createParserSubprocessEnv("python") });
