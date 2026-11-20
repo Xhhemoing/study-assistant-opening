@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import type { Sql, TransactionSql } from "postgres";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createOpeningMemoryRepository, createOpeningPrivacyRepository, createOpeningSourceChunksRepository } from "@aistudy/database";
+import { knowledgeNodeDefinition } from "@aistudy/domain";
+import type { KnowledgeNode, SourceChunk } from "@aistudy/contracts";
 import { readOpeningSourceContent } from "../../packages/database/src/repositories/opening-source-content";
 import { lockWorkspaceLearningHistory } from "../../packages/database/src/repositories/opening-learning-facts";
 import { openRaceSession } from "./opening-race-helpers";
@@ -111,6 +113,65 @@ async function legacyGraph(sourceId: string, scope = f.scope) {
     VALUES(${scope.workspaceId},${scope.ownerUserId},${courseId},1,${f.sql.json(snapshot)},${f.sql.json({ [sourceId]: 1 })})`;
   return { courseId, nodeId, chunkId };
 }
+
+it("preserves legacy definitions over 128 replaced PDF pages without materializing whole-graph text in the client", async () => {
+  const sourceId = await seed(), { courseId, chunkId } = await legacyGraph(sourceId);
+  const pages = Array.from({ length: 128 }, (_, index) => ({ ...chunk(`${index}\r\ne\u0301 ${"x".repeat(89_990)}`, index + 1),
+    id: index === 0 ? chunkId : randomUUID(), sourceId, sourceVersion: 1 }));
+  await f.sql`UPDATE opening_source_chunks SET text=${pages[0]!.text} WHERE id=${chunkId}`;
+  const rows = pages.slice(1).map(page => ({ id: page.id, source_id: sourceId, source_version: 1, page: page.page, text: page.text }));
+  await f.sql`INSERT INTO opening_source_chunks ${f.sql(rows)}`;
+  const node = (evidence: SourceChunk[]): KnowledgeNode => ({ id: randomUUID(), courseId, label: "Définition",
+    kind: "concept", evidenceChunkIds: evidence.map(page => page.id), status: "supported" });
+  const allPages = node(pages);
+  const nodes = [allPages, ...pages.map(page => node([page]))];
+  const alreadyDefined = nodes[1]!;
+  await f.sql`UPDATE opening_course_knowledge SET snapshot=${f.sql.json({ courseId, version: 1, nodes, edges: [] })},
+    node_definitions=${f.sql.json({ [alreadyDefined.id]: "existing definition" })} WHERE course_id=${courseId}`;
+
+  const textBatches: { rows: number; bytes: number }[] = [];
+  let snapshotsRead = 0;
+  const monitored = new Proxy(f.sql, { get(target, property) {
+    if (property !== "begin") return Reflect.get(target, property);
+    return (callback: (tx: TransactionSql) => Promise<unknown>) => target.begin(tx => callback(new Proxy(tx, {
+      apply(query, thisArg, args) {
+        const pending = Reflect.apply(query, thisArg, args);
+        if (!Array.isArray(args[0]?.raw) || !/^\s*SELECT\b/i.test(args[0][0])) return pending;
+        return pending.then((result: Record<string, unknown>[]) => {
+          snapshotsRead += result.filter(row => Object.hasOwn(row, "snapshot")).length;
+          const texts = result.flatMap(row => typeof row.text === "string" ? [row.text] : []);
+          if (texts.length) textBatches.push({ rows: texts.length, bytes: texts.reduce((sum, text) => sum + Buffer.byteLength(text), 0) });
+          return result;
+        });
+      },
+    })));
+  } });
+  const repository = createOpeningSourceChunksRepository(monitored);
+  async function* replacements() {
+    for (const page of pages) yield chunk(`Replaced page ${page.page}`, page.page);
+  }
+  await repository.replacePdfChunks(f.scope, { sourceId, sourceVersion: 1, chunks: replacements(), preservePages: [] });
+
+  expect(textBatches.every(batch => batch.rows <= 16 && batch.bytes <= 256 * 1024)).toBe(true);
+  const [preserved] = await f.sql`SELECT node_definitions FROM opening_course_knowledge WHERE course_id=${courseId}`;
+  const definitions = preserved!.node_definitions as Record<string, string>;
+  expect(Object.keys(definitions)).toHaveLength(nodes.length);
+  expect(definitions[alreadyDefined.id]).toBe("existing definition");
+  for (const candidate of nodes.filter(candidate => candidate !== alreadyDefined)) {
+    expect(definitions[candidate.id] === knowledgeNodeDefinition(candidate, pages), `definition of ${candidate.id}`).toBe(true);
+  }
+  const published = await repository.listChunks(f.scope, sourceId);
+  expect(published.map(page => page.text)).toEqual(pages.map(page => `Replaced page ${page.page}`));
+
+  // Even when the current citations match the source, a fully defined graph needs no backfill read.
+  await f.sql`UPDATE opening_course_knowledge SET snapshot=${f.sql.json({ courseId, version: 1, edges: [],
+    nodes: [{ ...allPages, evidenceChunkIds: published.map(page => page.id) }] })} WHERE course_id=${courseId}`;
+  textBatches.length = 0;
+  snapshotsRead = 0;
+  await repository.replacePdfChunks(f.scope, { sourceId, sourceVersion: 1, chunks: replacements(), preservePages: [] });
+  expect(snapshotsRead).toBe(0);
+  expect(textBatches).toEqual([]);
+}, 30_000);
 
 async function historyRace(privacy: boolean) {
   const sourceId = await seed(), graph = await legacyGraph(sourceId), scope = await parseJob(sourceId);

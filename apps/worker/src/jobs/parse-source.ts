@@ -21,6 +21,8 @@ import { createPdfPartialError } from "./pdf-partial-error";
 
 export class UnsupportedSourceError extends Error { readonly code = "UNSUPPORTED_SOURCE"; }
 const IMAGE_SOURCE_MIMES = new Set(["image/jpeg", "image/png", "image/webp"]);
+// The database checks code points. Bounding UTF-16 units also bounds code points.
+const PDF_CHUNK_TEXT_LIMIT = 100_000;
 type Storage = { presignGet(key: string, input: { expiresInSeconds: number; responseContentDisposition: string; responseCacheControl: string }): Promise<string>; finalKey(id: string, version: number): string };
 type SourceRepo = Pick<OpeningSourceRepository, "get" | "markParseState">;
 
@@ -159,6 +161,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
       const isPdf = source.mime === "application/pdf";
       let visualRecognitionUnavailable = !deps.recognizePage && !(isPdf && deps.recognizePages);
       const skippedVisionPages: number[] = [];
+      const cappedTextPages = new Set<number>();
       const preparePage = (page: ParsedPage, saved?: NewSourceChunk) => {
         const visualKinds = page.visualKinds?.length ? page.visualKinds : !page.text.trim() && (isImage || isPdf) ? ["scan" as const] : [];
         const visual = (isPdf || isImage) && visualKinds.length > 0
@@ -193,11 +196,23 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
           } else {
             if (!result || typeof result.text !== "string" || !result.text.trim() || typeof result.imageObjectKey !== "string" || !result.imageObjectKey.trim()) throw new Error(`visual recognition returned no readable content or image for physical page ${page.page}`);
             const extractionLabel = visual.visualKinds.includes("scan") ? "本地提取（可能含OCR）" : "原生提取";
-            text = `${page.text ? `[${extractionLabel}]\n${page.text}\n\n` : ""}[视觉转写与描述]\n${result.text}`;
-            imageObjectKey = result.imageObjectKey;
+            const nativeHeader = page.text ? `[${extractionLabel}]\n` : "";
+            const visionHeader = "[视觉转写与描述]\n";
+            const nativeLength = page.text ? nativeHeader.length + page.text.length + 2 : 0;
+            if (isPdf && nativeLength + visionHeader.length + result.text.length > PDF_CHUNK_TEXT_LIMIT) {
+              cappedTextPages.add(page.page);
+              if (saved?.text.trim()) return saved;
+              if (!page.text.trim()) {
+                text = visionHeader + result.text;
+                imageObjectKey = result.imageObjectKey;
+              }
+            } else {
+              text = `${page.text ? `${nativeHeader}${page.text}\n\n` : ""}${visionHeader}${result.text}`;
+              imageObjectKey = result.imageObjectKey;
+            }
           }
         }
-        if (isPdf && visual && imageObjectKey === null) {
+        if (isPdf && visual && imageObjectKey === null && !cappedTextPages.has(page.page)) {
           skippedVisionPages.push(page.page);
           if (saved) return saved;
         }
@@ -209,7 +224,8 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
       const publication = { sourceId: source.id, sourceVersion: source.version };
       if (isPdf) {
         const lowQualityPages: number[] = [];
-        let stagedCount = 0;
+        const preservePages: number[] = [];
+        let usablePages = 0;
         const stagePath = path.join(workDir, "chunks.ndjson");
         const stage = await open(stagePath, "wx", 0o600);
         const result = await parsePdfSegments({ path: temp, ...publication, scope, runner: deps.runner,
@@ -232,20 +248,32 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
             } : undefined;
             try {
               for (const preparedPage of prepared) {
-                const chunk = await consumePage(preparedPage, recognizePage);
+                let chunk = await consumePage(preparedPage, recognizePage);
                 if (!chunk) continue;
+                if (chunk.text.length > PDF_CHUNK_TEXT_LIMIT) {
+                  if (chunk === preparedPage.saved) {
+                    // Existing rows can fit PostgreSQL's code-point limit but exceed the UTF-16 bound.
+                    preservePages.push(preparedPage.page.page);
+                    usablePages++;
+                    continue;
+                  }
+                  cappedTextPages.add(preparedPage.page.page);
+                  const text = chunk.text.slice(0, PDF_CHUNK_TEXT_LIMIT).replace(/[\uD800-\uDBFF]$/u, "");
+                  if (!text.trim() && !chunk.imageObjectKey) continue;
+                  chunk = { ...chunk, text };
+                }
                 if (checkPdfPageQuality(chunk.text).quality === "low_quality") lowQualityPages.push(preparedPage.page.page);
                 await stage.appendFile(`${JSON.stringify(chunk)}\n`, "utf8");
-                stagedCount++;
+                usablePages++;
               }
             } finally { await recognition?.return(); }
           },
         }).finally(() => stage.close());
         pageCount = result.pageCount;
         const failedRanges = [...result.failedRanges, ...skippedVisionPages.map(String)];
-        const warning = failedRanges.length || lowQualityPages.length ? createPdfPartialError(failedRanges, lowQualityPages) : null;
-        if (warning && !stagedCount) throw new Error(warning.message);
-        const preservePages: number[] = [];
+        const warning = failedRanges.length || lowQualityPages.length || cappedTextPages.size
+          ? createPdfPartialError(failedRanges, lowQualityPages, [...cappedTextPages]) : null;
+        if (warning && !usablePages) throw new Error(warning.message);
         for (const range of result.failedRanges) {
           const [start, end] = range.split("-").map(Number) as [number, number];
           for (let page = start; page <= end; page++) preservePages.push(page);

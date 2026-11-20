@@ -59,7 +59,7 @@ async function publishChunks(tx: TransactionSql, scope: OpeningScope, input: Chu
   // Privacy takes history before workspace. A rejected execution rolls back the ensure too.
   await lockWorkspaceLearningHistory(tx, scope);
   await lockOpeningJobExecution(tx, scope);
-  await preserveOpeningKnowledgeDefinitions(tx, scope, input.sourceId);
+  await preserveOpeningKnowledgeDefinitions(tx, scope, input.sourceId, input.sourceVersion);
   const [source] = await tx`SELECT id,version,upload_state FROM opening_sources
     WHERE id=${input.sourceId} AND workspace_id=${scope.workspaceId} FOR UPDATE`;
   if (!source) throw new Error("source not found");
@@ -98,15 +98,21 @@ async function stagePdfChunks(tx: TransactionSql, chunks: AsyncIterable<NewSourc
     readable ||= Boolean(chunk.text.trim() || chunk.imageObjectKey?.trim());
   }
   if (batch.length) await flush();
-  requireReadableContent(readable);
+  return readable;
 }
 
-async function reconcilePdfChunks(tx: TransactionSql, scope: OpeningScope, { sourceId, sourceVersion, preservePages }: ChunkPublication & { preservePages: number[] }) {
+async function reconcilePdfChunks(tx: TransactionSql, scope: OpeningScope, { sourceId, sourceVersion, preservePages }: ChunkPublication & { preservePages: number[] }, stagedReadable: boolean) {
   // Retained pages are references only. PostgreSQL keeps the original rows and citation IDs.
   if (preservePages.length) await tx`INSERT INTO pg_temp.opening_pdf_chunk_stage (page,matched_id)
     SELECT page,id FROM opening_source_chunks
     WHERE source_id=${sourceId} AND source_version=${sourceVersion} AND page=ANY(${preservePages}::int[])
     ON CONFLICT (page) DO NOTHING`;
+  if (!stagedReadable) {
+    const [retained] = await tx`SELECT EXISTS (
+      SELECT 1 FROM pg_temp.opening_pdf_chunk_stage staged JOIN opening_source_chunks c ON c.id=staged.matched_id
+      WHERE c.text ~ '[^[:space:]]' OR c.image_object_key ~ '[^[:space:]]') AS readable`;
+    requireReadableContent(retained?.readable === true);
+  }
   await tx`UPDATE pg_temp.opening_pdf_chunk_stage staged SET matched_id=c.id FROM opening_source_chunks c
     WHERE c.source_id=${sourceId} AND c.source_version=${sourceVersion} AND c.page=staged.page AND staged.matched_id IS NULL
       AND (c.slide_label,c.start_ms,c.end_ms,c.text,c.image_object_key)
@@ -164,8 +170,9 @@ export function createOpeningSourceChunksRepository(sql: Sql): OpeningSourceChun
   async replacePdfChunks(scope, input) {
     await sql.begin(async tx => {
       // Disk staging is complete before this transaction. Hold publication locks only for reconciliation.
-      await stagePdfChunks(tx, input.chunks);
-      await publishChunks(tx, scope, input, sourceId => reconcilePdfChunks(tx, scope, { ...input, sourceId }));
+      const stagedReadable = await stagePdfChunks(tx, input.chunks);
+      if (!input.preservePages.length) requireReadableContent(stagedReadable);
+      await publishChunks(tx, scope, input, sourceId => reconcilePdfChunks(tx, scope, { ...input, sourceId }, stagedReadable));
     });
   },
   async listChunks(scope, sourceId) { sourceId = controlledLearningTools.open_fragment.input.parse(sourceId); const rows = await sql`SELECT version FROM opening_sources WHERE id = ${sourceId} AND workspace_id = ${scope.workspaceId} AND upload_state = 'uploaded'`; const row = rows[0] as Record<string, unknown> | undefined; return row ? fetchChunks(sql, scope, sourceId, Number(row.version)) : []; },

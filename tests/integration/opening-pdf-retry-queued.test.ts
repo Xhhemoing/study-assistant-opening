@@ -15,14 +15,14 @@ let f: OpeningFixture;
 beforeAll(async () => { f = await createOpeningFixture(); });
 afterAll(async () => { await f?.close(); });
 const originalText = "This first page is already readable and its existing citation must remain stable across a retry.";
-async function seedRetry(partial = false) {
+async function seedRetry(partial = false, publishedText = originalText) {
   const sourceId = randomUUID(), bytes = Buffer.from("%PDF synthetic retry");
   const sources = createOpeningSourceRepository(f.sql), chunks = createOpeningSourceChunksRepository(f.sql);
   const jobs = createOpeningJobRepository(f.sql);
   await f.sql`INSERT INTO opening_sources(id,workspace_id,name,mime,bytes,sha256,version,upload_state,parse_state)
     VALUES (${sourceId},${f.scope.workspaceId},'retry.pdf','application/pdf',${bytes.length},${createHash("sha256").update(bytes).digest("hex")},0,'uploaded','failed')`;
   await chunks.replaceChunks(f.scope, { sourceId, sourceVersion: 0, chunks: [
-    { page: 1, slideLabel: null, startMs: null, endMs: null, text: originalText, imageObjectKey: null },
+    { page: 1, slideLabel: null, startMs: null, endMs: null, text: publishedText, imageObjectKey: null },
   ] });
   const original = await chunks.listChunks(f.scope, sourceId);
   await sources.markParseState(f.scope, sourceId, partial ? "ready" : "failed",
@@ -73,6 +73,61 @@ it("runs a normal partial retry through service, outbox target, Worker and both 
     const calls = runner.mock.calls.length;
     expect(await runJob(d.jobs, d.id, handler)).toBe(false);
     expect(runner).toHaveBeenCalledTimes(calls);
+  } finally { await rm(tempDir, { recursive: true, force: true }); }
+});
+
+it("retains an exact citation when retry enrichment exceeds the text limit and publishes recovered pages", async () => {
+  const native = "n".repeat(90_000);
+  const d = await seedRetry(true, native), tempDir = await mkdtemp(path.join(os.tmpdir(), "pdf-retry-text-limit-"));
+  try {
+    const handler = createParseSourceHandler({ sources: d.sources, chunks: d.chunks, tempDir,
+      segments: createOpeningPdfSegmentsRepository(f.sql),
+      storage: { finalKey: () => "synthetic-original", presignGet: async () => `data:application/pdf;base64,${d.bytes.toString("base64")}` },
+      runner: async argv => ({ exitCode: 0, stdout: JSON.stringify(argv.includes("--inspect-pdf")
+        ? { pageCount: 4 } : { pages: [
+          { page: 1, text: native, imagePath: null, visualKinds: ["formula"] },
+          { page: 2, text: `${"n".repeat(99_999)}😀tail`, imagePath: null },
+          { page: 3, text: "", imagePath: null },
+          { page: 4, text: native, imagePath: null, visualKinds: ["formula"] },
+        ] }) }),
+      recognizePage: async ({ physicalPage }) => ({
+        text: "v".repeat(physicalPage === 3 ? 100_001 : 12_000), imageObjectKey: `recognized/${physicalPage}`,
+      }),
+    });
+    expect(await runJob(d.jobs, d.id, handler)).toBe(true);
+    expect(await d.jobs.get(f.scope, d.id)).toMatchObject({ state: "succeeded", result: { pages: 4 } });
+    const saved = await d.chunks.listChunks(f.scope, d.sourceId);
+    expect(saved.map(chunk => chunk.page)).toEqual([1, 2, 3, 4]);
+    expect(saved[0]).toEqual(d.original[0]);
+    expect(saved[1]?.text).toBe("n".repeat(99_999));
+    expect(saved[2]?.imageObjectKey).toBe("recognized/3");
+    expect(saved[2]?.text).toContain("v".repeat(99_000));
+    expect(saved[3]?.text).toContain(native);
+    for (const chunk of saved) {
+      expect(chunk.text.length).toBeLessThanOrEqual(100_000);
+      expect(Array.from(chunk.text)).toHaveLength(chunk.text.length);
+    }
+    expect(await d.sources.get(f.scope, d.sourceId)).toMatchObject({
+      parseState: "ready", error: { code: "PARSE_PARTIAL", message: expect.stringContaining("长度上限"), retryable: false },
+    });
+  } finally { await rm(tempDir, { recursive: true, force: true }); }
+});
+
+it("retains a PostgreSQL-valid legacy citation whose text alone exceeds the UTF-16 staging bound", async () => {
+  const native = "😀".repeat(51_000);
+  const d = await seedRetry(true, native), tempDir = await mkdtemp(path.join(os.tmpdir(), "pdf-retry-legacy-text-"));
+  try {
+    const handler = createParseSourceHandler({ sources: d.sources, chunks: d.chunks, tempDir,
+      segments: createOpeningPdfSegmentsRepository(f.sql),
+      storage: { finalKey: () => "synthetic-original", presignGet: async () => `data:application/pdf;base64,${d.bytes.toString("base64")}` },
+      runner: async argv => ({ exitCode: 0, stdout: JSON.stringify(argv.includes("--inspect-pdf")
+        ? { pageCount: 1 } : { pages: [{ page: 1, text: native, imagePath: null, visualKinds: ["formula"] }] }) }),
+      recognizePage: async () => ({ text: "v".repeat(50_000), imageObjectKey: "recognized/1" }),
+    });
+    expect(await runJob(d.jobs, d.id, handler)).toBe(true);
+    expect(await d.jobs.get(f.scope, d.id)).toMatchObject({ state: "succeeded", result: { pages: 1 } });
+    expect(await d.chunks.listChunks(f.scope, d.sourceId)).toEqual(d.original);
+    expect(await d.sources.get(f.scope, d.sourceId)).toMatchObject({ parseState: "ready", error: { code: "PARSE_PARTIAL" } });
   } finally { await rm(tempDir, { recursive: true, force: true }); }
 });
 
