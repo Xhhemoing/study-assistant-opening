@@ -1,6 +1,7 @@
 import type { OpeningModelSnapshot, ProviderInput, ProviderOutput } from "@aistudy/contracts";
 import {
   isBudgetReplayError,
+  isPostProviderFailure,
   ledgerActionForProviderError,
   runBudgetedCall,
   type BudgetedProvider,
@@ -84,9 +85,12 @@ export function reservationTerms(model: Omit<ResolvedTaskModel, "provider">, inp
  * failures are unknown outcomes and never fall back.
  */
 export function isNotSentFailure(error: unknown): boolean {
+  if (isPostProviderFailure(error)) return false;
   if (error instanceof OpeningModelRoutingError) return true;
   if (error instanceof OpeningProviderError) return ledgerActionForProviderError(error.code, { requestSent: error.requestSent }) === "release";
-  if (isBudgetReplayError(error)) return error.disposition.kind === "released";
+  if (isBudgetReplayError(error)) {
+    return error.disposition.kind === "released" && (error.disposition.reason === "not_sent" || error.disposition.reason === "cancelled");
+  }
   const code = (error as { code?: unknown } | null)?.code;
   return code === "BUDGET_EXCEEDED" || code === "REQUEST_CAP_EXCEEDED" || code === "BUDGET_MEDIA_COST_UNBOUNDED" || code === "BUDGET_MEDIA_INPUT_TOO_LARGE";
 }

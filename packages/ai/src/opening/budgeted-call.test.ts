@@ -119,14 +119,60 @@ describe("durable provider receipts", () => {
     expect(order).toEqual(["persist", "settle"]);
   });
 
-  it("keeps a failed persistence unknown and never releases or settles it", async () => {
+  it("settles the actual receipt even when persistence fails, then rethrows the same error", async () => {
     const b = fakeBudget();
-    await expect(runBudgetedCall({ ...options, input: options.input as never, provider: { complete: async () => output }, budget: b.api,
-      persistResult: async () => { throw new Error("storage failed"); },
-    })).rejects.toThrow("storage failed");
-    expect(b.repo.unknowns).toEqual(["res-1"]);
+    const failure = new Error("storage failed");
+    const settle = vi.fn(b.api.settle);
+    await expect(runBudgetedCall({ ...options, input: options.input as never, provider: { complete: async () => output },
+      budget: { ...b.api, settle }, resultRef: "missing-result",
+      persistResult: async () => { throw failure; },
+    })).rejects.toBe(failure);
+    expect(b.repo.unknowns).toEqual([]);
     expect(b.repo.released).toEqual([]);
-    expect(b.repo.settled).toEqual([]);
+    expect(settle).toHaveBeenCalledExactlyOnceWith("res-1", 120);
+  });
+
+  it.each([
+    { termination: "EOF", code: "PROVIDER_RESPONSE", usageChunk: '{"prompt_tokens":37,"completion_tokens":11,"prompt_cache_hit_tokens":13}' },
+    { termination: "socket error", code: "PROVIDER_NETWORK", usageChunk: '{"prompt_tokens":37,"completion_tokens":11,"prompt_cache_hit_tokens":13}' },
+    { termination: "incomplete usage", code: "PROVIDER_RESPONSE", usageChunk: '{"prompt_tokens":37}' },
+  ])("retains only authoritative stream usage before $termination", async ({ termination, code, usageChunk }) => {
+    const b = fakeBudget(), persistResult = vi.fn();
+    const frames = 'data: {"choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":"stop"}]}\n\n'
+      + `data: {"choices":[],"usage":${usageChunk}}\n\n`;
+    let sentFrames = false;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (!sentFrames) {
+          sentFrames = true;
+          controller.enqueue(new TextEncoder().encode(frames));
+        } else if (termination === "socket error") {
+          controller.error(new Error("socket disconnected"));
+        } else {
+          controller.close();
+        }
+      },
+    });
+    const provider = createOpeningProvider({ baseUrl: "https://model.example", apiKey: "key", model: "model",
+      fetchImpl: async () => new Response(body) });
+    const input: ProviderInput = { instruction: "teach", text: "question", mode: "explain", chunks: [], maxOutputTokens: 100,
+      mediaCapability: "text_only", imageParts: [], outputFormat: "markdown" };
+    const actualCents = vi.fn((receipt: ProviderOutput) => receipt.inputTokens! + receipt.outputTokens! - receipt.cachedInputTokens!);
+    await expect(runBudgetedCall({ ...options, input, provider, budget: b.api, actualCents, persistResult }))
+      .rejects.toMatchObject({ code, requestSent: true });
+    expect(persistResult).not.toHaveBeenCalled();
+    expect(b.repo.released).toEqual([]);
+    if (termination === "incomplete usage") {
+      expect(actualCents).not.toHaveBeenCalled();
+      expect(b.repo.settled).toEqual([]);
+      expect(b.repo.unknowns).toEqual(["res-1"]);
+    } else {
+      expect(actualCents).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+        inputTokens: 37, outputTokens: 11, cachedInputTokens: 13,
+      }));
+      expect(b.repo.settled).toEqual([{ reservationId: "res-1", actualCents: 35 }]);
+      expect(b.repo.unknowns).toEqual([]);
+    }
   });
 
   it("persists usable output without inventing a price when usage is missing", async () => {
@@ -367,7 +413,8 @@ describe("parent interaction budget boundary", () => {
     await expect(runBudgetedCall({ ...options, budget: api, provider: { complete: async () => output }, actualCents: () => Number.NaN,
       parentBudget: { id: "study-turn:1" },
     })).rejects.toMatchObject({ code: "BUDGET_INVALID_ACTUAL" });
-    expect(repo.unknowns).toEqual(["res-1"]);
+    expect(repo.unknowns).toEqual([]);
+    expect(repo.released).toEqual([]);
     expect(repo.settled).toHaveLength(0);
   });
 });

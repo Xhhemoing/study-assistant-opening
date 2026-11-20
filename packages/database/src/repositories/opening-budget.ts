@@ -5,6 +5,8 @@ import {
   OPENING_PERSONAL_DAILY_CAP_CEILING_CENTS,
   DEFAULT_PARENT_INTERACTION_MAX_PROVIDER_CALLS,
   assertParentInteractionBudget,
+  BudgetReplayError,
+  replayDisposition,
   type ParentInteractionBudget,
   resolveBudgetLocalDay,
   resolveBudgetTimeZone,
@@ -103,8 +105,8 @@ export type ReserveInput = {
 export type OpeningBudgetRepository = {
   /**
    * Atomically reserve spend against the workspace cap; idempotent by
-   * requestId (replays the original reservation). Overspend rejects with
-   * BUDGET_EXCEEDED and writes nothing.
+   * requestId (replays the original reservation). A live or billed sibling
+   * attempt rejects with its replay disposition. Overspend writes nothing.
    */
   reserve(scope: OpeningScope, input: ReserveInput): Promise<BudgetReservationRecord>;
   /** True only when every persisted child of the owned parent was certainly not sent. */
@@ -276,7 +278,13 @@ function validateBudgetInput(input: OpeningBudgetCheckInput) {
   return { requestCap, zeroCost, modelSnapshot };
 }
 
-async function capAndDay(tx: BudgetSql, workspaceId: string, options: OpeningBudgetRepositoryOptions) {
+async function readBudgetClock(sql: BudgetSql): Promise<Date> {
+  // Match the precision of Date so the day calculation and SQL writes use the same instant.
+  const [sample] = await sql<{ instant: Date }[]>`SELECT date_trunc('milliseconds', clock_timestamp()) AS instant`;
+  return sample!.instant;
+}
+
+async function capAndDay(tx: BudgetSql, workspaceId: string, options: OpeningBudgetRepositoryOptions, instant: Date) {
   const prefs = await tx`
     SELECT ai_settings, planning_settings FROM workspace_preferences WHERE workspace_id = ${workspaceId}
   `;
@@ -289,12 +297,46 @@ async function capAndDay(tx: BudgetSql, workspaceId: string, options: OpeningBud
     ceilingCents: options.ceilingCents ?? OPENING_PERSONAL_DAILY_CAP_CEILING_CENTS,
   });
   const planningTz = readPlanningTimeZone(prefs[0]?.planning_settings ?? null);
-  const budgetDay = resolveBudgetLocalDay(new Date(), resolveBudgetTimeZone(planningTz ?? options.timeZone));
+  const budgetDay = resolveBudgetLocalDay(instant, resolveBudgetTimeZone(planningTz ?? options.timeZone));
   const unlimited = options.dailyQuotaMode === "unlimited";
   return { capCents: effective.capCents, budgetDay, unlimited, parentCapCents: unlimited ? options.parentCapCents! : effective.capCents };
 }
 
-// One ledger predicate for admission and atomic reserve. Unknown rows remain reserved.
+// Gateway fallback and deterministic retries reuse the root, including a fallback of a retry.
+const attemptSuffix = /(?::fallback|:retry:[^:]+)+$/;
+
+async function assertRequestFamilyAvailable(tx: TransactionSql, workspaceId: string, input: ReserveInput) {
+  const root = input.requestId.replace(attemptSuffix, "");
+  const [sibling] = await tx`
+    SELECT id, state, purpose, result_ref, outcome_unknown_at, reconciled_at, pending_reconcile_cents
+    FROM opening_budget_reservations
+    WHERE workspace_id = ${workspaceId} AND request_id <> ${input.requestId}
+      AND (request_id = ${root} OR starts_with(request_id, ${root + ":"}))
+      AND regexp_replace(request_id, ${attemptSuffix.source}, '') = ${root}
+      AND NOT (state = 'released' AND COALESCE(release_reason IN ('not_sent', 'cancelled'), false)
+        AND outcome_unknown_at IS NULL AND COALESCE(pending_reconcile_cents, 0) = 0)
+    ORDER BY (state = 'reserved') DESC, id
+    LIMIT 1
+  `;
+  if (!sibling) return;
+  if (sibling.purpose !== input.purpose || sibling.state === "released") {
+    throw new OpeningBudgetError("CONFLICT", "request family already consumed");
+  }
+  const reservationId = String(sibling.id);
+  const disposition = replayDisposition({
+    id: reservationId,
+    state: String(sibling.state),
+    resultRef: sibling.result_ref as string | null,
+    outcomeUnknownAt: toDate(sibling.outcome_unknown_at),
+    reconciledAt: toDate(sibling.reconciled_at),
+    pendingReconcileCents: Number(sibling.pending_reconcile_cents ?? 0),
+  });
+  // Even an unclaimed sibling belongs to its own model and request key.
+  throw new BudgetReplayError(disposition ?? { kind: "in_flight", reservationId });
+}
+
+// Completed charges belong to their immutable reservation day. Active holds
+// count across midnight until release, settlement or TTL reconciliation.
 function chargedBudgetRows(tx: BudgetSql, workspaceId: string, day: ReturnType<typeof resolveBudgetLocalDay>) {
   return tx`workspace_id=${workspaceId} AND (
     state='reserved' OR
@@ -330,7 +372,7 @@ export async function checkOpeningBudgetAvailable(
   const { requestCap, zeroCost, modelSnapshot } = validateBudgetInput(input);
   const owners = await sqlOrTx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
   if (!owners.length) throw new OpeningBudgetError("NOT_FOUND", "workspace not found");
-  const { capCents, budgetDay, unlimited } = await capAndDay(sqlOrTx, scope.workspaceId, options);
+  const { capCents, budgetDay, unlimited } = await capAndDay(sqlOrTx, scope.workspaceId, options, await readBudgetClock(sqlOrTx));
   const [usage] = await sqlOrTx`SELECT COALESCE(sum(amount_cents), 0) AS cents
     FROM opening_budget_reservations WHERE ${chargedBudgetRows(sqlOrTx, scope.workspaceId, budgetDay)}`;
   const availableCents = unlimited ? null : Math.max(0, capCents - Number(usage?.cents ?? 0));
@@ -341,13 +383,13 @@ export async function checkOpeningBudgetAvailable(
 }
 
 /** Read-only display snapshot; never reserves, settles or reconciles a pending charge. */
-export async function readOpeningDailyBudgetUsage(sql: Sql, scope: OpeningScope, now = new Date()): Promise<OpeningAiDailyUsage> {
+export async function readOpeningDailyBudgetUsage(sql: Sql, scope: OpeningScope, now?: Date): Promise<OpeningAiDailyUsage> {
   return sql.begin("isolation level repeatable read read only", async tx => {
     const [owner] = await tx`SELECT p.planning_settings FROM workspaces w
       LEFT JOIN workspace_preferences p ON p.workspace_id=w.id
       WHERE w.id=${scope.workspaceId} AND w.owner_user_id=${scope.ownerUserId}`;
     if (!owner) throw new OpeningBudgetError("NOT_FOUND", "workspace not found");
-    const day = resolveBudgetLocalDay(now, resolveBudgetTimeZone(readPlanningTimeZone(owner.planning_settings)));
+    const day = resolveBudgetLocalDay(now ?? await readBudgetClock(tx), resolveBudgetTimeZone(readPlanningTimeZone(owner.planning_settings)));
     // TTL reconciliation and media upper bounds are estimates, even when their
     // ledger state is completed. Keep all such holds visible across local days.
     const pending = tx`(state='reserved' OR (state='completed' AND
@@ -438,16 +480,18 @@ export function createOpeningBudgetRepository(
         const owners = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
         if (!owners.length) throw new OpeningBudgetError("NOT_FOUND", "workspace not found");
 
+        // Sample after the lock: a waiting transaction can cross the local midnight.
+        const instant = await readBudgetClock(tx);
         // Lazy reconcile: stale reserved rows become completed (pessimistic billing).
-        const cutoff = new Date(Date.now() - unknownAgeMs);
+        const cutoff = new Date(instant.getTime() - unknownAgeMs);
         // Full amount stays charged, but the row is observably provisional
         // (reconciled_at + pending_reconcile_cents) with an audit event; it is
         // never released at zero and never re-sent.
         await tx`
           WITH reconciled AS (
             UPDATE opening_budget_reservations
-            SET state = 'completed', updated_at = now(), reconciled_at = now(),
-                outcome_unknown_at = COALESCE(outcome_unknown_at, now()),
+            SET state = 'completed', updated_at = ${instant}, reconciled_at = ${instant},
+                outcome_unknown_at = COALESCE(outcome_unknown_at, ${instant}),
                 pending_reconcile_cents = amount_cents
             WHERE workspace_id = ${scope.workspaceId}
               AND state = 'reserved'
@@ -455,12 +499,12 @@ export function createOpeningBudgetRepository(
             RETURNING id, workspace_id, amount_cents
           )
           INSERT INTO opening_budget_reconcile_events
-            (reservation_id, workspace_id, kind, amount_before_cents, amount_after_cents, state_before)
-          SELECT id, workspace_id, 'ttl_reconciled', amount_cents, amount_cents, 'reserved' FROM reconciled
+            (reservation_id, workspace_id, kind, amount_before_cents, amount_after_cents, state_before, created_at)
+          SELECT id, workspace_id, 'ttl_reconciled', amount_cents, amount_cents, 'reserved', ${instant} FROM reconciled
           ON CONFLICT (reservation_id, kind) DO NOTHING
         `;
 
-        const { capCents, budgetDay, unlimited, parentCapCents } = await capAndDay(tx, scope.workspaceId, options);
+        const { capCents, budgetDay, unlimited, parentCapCents } = await capAndDay(tx, scope.workspaceId, options, instant);
 
         const existing = await tx`SELECT * FROM opening_budget_reservations WHERE request_id=${input.requestId}`;
         const existingRow = existing[0] ? mapReservation(existing[0] as Record<string, unknown>) : null;
@@ -477,6 +521,12 @@ export function createOpeningBudgetRepository(
             || JSON.stringify(existingRow.modelSnapshot) !== JSON.stringify(modelSnapshot)) {
             throw new OpeningBudgetError("CONFLICT", "request already consumed or changed");
           }
+        }
+        // A consumed exact key already replays without acquiring a claim.
+        // Check siblings before admitting any new attempt or replaying a release.
+        if (!existingRow || existingRow.state === "released"
+          || (existingRow.state === "reserved" && !existingRow.executionClaimedAt && !existingRow.outcomeUnknownAt)) {
+          await assertRequestFamilyAvailable(tx, scope.workspaceId, input);
         }
         // An existing attributed key always replays, including a frozen/unknown
         // parent: replay never authorizes a second provider request.
@@ -533,8 +583,8 @@ export function createOpeningBudgetRepository(
         // using half-open [dayStart, nextDayStart) absolute instants (not UTC date).
         // A zero-cost (free-tier) row adds no spend, so the cents cap does not gate it.
         const rows = await tx`
-          INSERT INTO opening_budget_reservations (id, workspace_id, purpose, amount_cents, reserved_amount_cents, request_id, model_snapshot, parent_interaction_id)
-          SELECT ${randomUUID()}, ${scope.workspaceId}, ${input.purpose}, ${input.amountCents}, ${input.amountCents}, ${input.requestId}, ${modelSnapshot === null ? null : tx.json(modelSnapshot)}, ${parentBudget?.id ?? null}
+          INSERT INTO opening_budget_reservations (id, workspace_id, purpose, amount_cents, reserved_amount_cents, request_id, model_snapshot, parent_interaction_id, created_at, updated_at)
+          SELECT ${randomUUID()}, ${scope.workspaceId}, ${input.purpose}, ${input.amountCents}, ${input.amountCents}, ${input.requestId}, ${modelSnapshot === null ? null : tx.json(modelSnapshot)}, ${parentBudget?.id ?? null}, ${instant}, ${instant}
           WHERE ${zeroCost || unlimited} OR ${input.amountCents} + COALESCE((
             SELECT sum(amount_cents) FROM opening_budget_reservations
             WHERE ${chargedBudgetRows(tx, scope.workspaceId, budgetDay)}
@@ -591,6 +641,7 @@ export function createOpeningBudgetRepository(
           throw new OpeningBudgetError("NOT_FOUND", "reservation not found or already settled");
         }
         const row = mapReservation(current[0] as Record<string, unknown>);
+        const instant = await readBudgetClock(tx);
         // Zero only settles a zero-cost (free-tier) reservation; paid calls stay positive.
         if (actualCents === 0 && (row.reservedAmountCents ?? row.amountCents) !== 0) {
           throw new OpeningBudgetError("CONFLICT", "actual amount must be a positive integer");
@@ -598,19 +649,19 @@ export function createOpeningBudgetRepository(
         if (actualCents > (row.reservedAmountCents ?? row.amountCents)) {
           if (row.parentInteractionId) {
             await tx`UPDATE opening_parent_interaction_budgets
-              SET blocked_at = COALESCE(blocked_at, now()), blocked_reason = 'actual_exceeded_conservative_bound'
+              SET blocked_at = COALESCE(blocked_at, ${instant}), blocked_reason = 'actual_exceeded_conservative_bound'
               WHERE workspace_id = ${scope.workspaceId} AND id = ${row.parentInteractionId}`;
           }
           const event = await tx`INSERT INTO opening_budget_reconcile_events
-            (reservation_id, workspace_id, kind, amount_before_cents, amount_after_cents, reported_actual_cents, state_before, cap_cents)
-            VALUES (${row.id}, ${row.workspaceId}, 'cap_overrun', ${row.amountCents}, ${actualCents}, ${actualCents}, ${row.state}, ${row.reservedAmountCents ?? row.amountCents})
+            (reservation_id, workspace_id, kind, amount_before_cents, amount_after_cents, reported_actual_cents, state_before, cap_cents, created_at)
+            VALUES (${row.id}, ${row.workspaceId}, 'cap_overrun', ${row.amountCents}, ${actualCents}, ${actualCents}, ${row.state}, ${row.reservedAmountCents ?? row.amountCents}, ${instant})
             ON CONFLICT (reservation_id, kind) DO NOTHING RETURNING *`;
           if (event.length) alerts.push(mapEvent(event[0] as Record<string, unknown>));
         }
         if (row.state === "reserved") {
           const rows = await tx`
             UPDATE opening_budget_reservations
-            SET amount_cents = ${actualCents}, state = 'completed', updated_at = now(),
+            SET amount_cents = ${actualCents}, state = 'completed', updated_at = ${instant},
                 result_ref = COALESCE(${resultRef}, result_ref), outcome_unknown_at = NULL,
                 settlement_cost_basis = ${options.costBasis ?? "usage_pricing"}
             WHERE id = ${reservationId}
@@ -632,8 +683,8 @@ export function createOpeningBudgetRepository(
         // cost is recorded (no loss), pending reconcile cleared exactly once.
         const events = await tx`
           INSERT INTO opening_budget_reconcile_events
-            (reservation_id, workspace_id, kind, amount_before_cents, amount_after_cents, reported_actual_cents, state_before)
-          VALUES (${row.id}, ${row.workspaceId}, 'late_receipt', ${lateAfterRelease ? 0 : row.amountCents}, ${actualCents}, ${actualCents}, ${row.state})
+            (reservation_id, workspace_id, kind, amount_before_cents, amount_after_cents, reported_actual_cents, state_before, created_at)
+          VALUES (${row.id}, ${row.workspaceId}, 'late_receipt', ${lateAfterRelease ? 0 : row.amountCents}, ${actualCents}, ${actualCents}, ${row.state}, ${instant})
           ON CONFLICT (reservation_id, kind) DO NOTHING
           RETURNING id
         `;
@@ -643,7 +694,7 @@ export function createOpeningBudgetRepository(
         const rows = await tx`
           UPDATE opening_budget_reservations
           SET amount_cents = ${actualCents}, state = 'completed', pending_reconcile_cents = 0,
-              reconciled_at = COALESCE(reconciled_at, now()), updated_at = now(),
+              reconciled_at = COALESCE(reconciled_at, ${instant}), updated_at = ${instant},
               result_ref = COALESCE(${resultRef}, result_ref), outcome_unknown_at = NULL,
               settlement_cost_basis = ${options.costBasis ?? "usage_pricing"}
           WHERE id = ${reservationId}
@@ -652,20 +703,17 @@ export function createOpeningBudgetRepository(
         // A late receipt is real spend that bypassed the reserve-time cap
         // check. If it pushes local-day usage over the cap, record an audited
         // cap_overrun event and raise the alert hook: never silent.
-        const { capCents, budgetDay, unlimited } = await capAndDay(tx, row.workspaceId, budgetOptions);
+        const { capCents, budgetDay, unlimited } = await capAndDay(tx, row.workspaceId, budgetOptions, instant);
         const usage = await tx`
           SELECT COALESCE(sum(amount_cents), 0) AS used FROM opening_budget_reservations
-          WHERE workspace_id = ${row.workspaceId} AND (
-            state = 'reserved' OR
-            (state = 'completed' AND created_at >= ${budgetDay.dayStart} AND created_at < ${budgetDay.nextDayStart})
-          )
+          WHERE ${chargedBudgetRows(tx, row.workspaceId, budgetDay)}
         `;
         const usageAfter = Number(usage[0]?.used ?? 0);
         if (!unlimited && usageAfter > capCents) {
           const overrun = await tx`
             INSERT INTO opening_budget_reconcile_events
-              (reservation_id, workspace_id, kind, amount_before_cents, amount_after_cents, reported_actual_cents, state_before, cap_cents, usage_after_cents)
-            VALUES (${row.id}, ${row.workspaceId}, 'cap_overrun', ${usageAfter - actualCents}, ${usageAfter}, ${actualCents}, ${row.state}, ${capCents}, ${usageAfter})
+              (reservation_id, workspace_id, kind, amount_before_cents, amount_after_cents, reported_actual_cents, state_before, cap_cents, usage_after_cents, created_at)
+            VALUES (${row.id}, ${row.workspaceId}, 'cap_overrun', ${usageAfter - actualCents}, ${usageAfter}, ${actualCents}, ${row.state}, ${capCents}, ${usageAfter}, ${instant})
             ON CONFLICT (reservation_id, kind) DO NOTHING
             RETURNING *
           `;

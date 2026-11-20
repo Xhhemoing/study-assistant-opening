@@ -1,6 +1,7 @@
 import type { OpeningModelSnapshot, ProviderInput, ProviderOutput } from "@aistudy/contracts";
 import { OpeningProviderError, copyGradingDiagnostic, readGradingDiagnostic, recordGradingDiagnostic, type GradingDiagnosticPhase, type ProviderTextDelta } from "./provider";
 import { assertParentInteractionBudget, hasMediaInput, mediaInputCostBound, mediaInputBytes, type ParentInteractionBudget } from "./parent-interaction-budget";
+import { onInterruptedStreamUsage, type InterruptedStreamUsage } from "./provider-stream";
 
 export type BudgetedProvider = {
   complete(input: ProviderInput, signal?: AbortSignal, onTextDelta?: ProviderTextDelta): Promise<ProviderOutput>;
@@ -129,7 +130,7 @@ export type BudgetedCallOptions = {
   purpose?: string;
   /** Optional persisted result reference stored on settle and replayed later. */
   resultRef?: string;
-  /** Save a recoverable response before settlement; failure keeps the spend unknown. */
+  /** Save a recoverable response. Authoritative usage is settled even if this fails. */
   persistResult?: (output: ProviderOutput, receipt: { reservationId: string; settledCents: number | null }) => Promise<void>;
   /**
    * Free-tier model: reserve at zero cost under this per-day request cap
@@ -149,6 +150,13 @@ export class BudgetedCallError extends Error {
 }
 
 export type LedgerAction = "release" | "markUnknown";
+
+const postProviderFailures = new WeakSet<object>();
+
+/** A persistence or accounting error may have a code normally used before sending. */
+export function isPostProviderFailure(error: unknown): boolean {
+  return error !== null && typeof error === "object" && postProviderFailures.has(error);
+}
 
 /**
  * BC1 v1 code→ledger action table (Integrator Accept).
@@ -244,72 +252,104 @@ export async function runBudgetedCall(options: BudgetedCallOptions): Promise<Pro
   }
   let phase: GradingDiagnosticPhase = "provider";
   let transport: { attemptedFetch: boolean; httpStatus?: number } | undefined;
+  let interruptedUsage: InterruptedStreamUsage | undefined;
+  let onTextDelta = options.onTextDelta;
+  if (options.input.outputFormat === "markdown" && !options.input.tools?.length) {
+    // Keep accounting receipts on this call's callback, separate from text delivery.
+    onTextDelta = Object.assign(
+      (delta: string) => options.onTextDelta?.(delta),
+      { [onInterruptedStreamUsage]: (usage: InterruptedStreamUsage) => { interruptedUsage = usage; } },
+    );
+  }
+
+  function price(receipt: ProviderOutput) {
+    const actual = options.actualCents(receipt);
+    if (!Number.isSafeInteger(actual) || actual < 0 || (actual === 0 && !freeTier)) {
+      // The receipt exists. Keep the execution claim and its hold if pricing fails.
+      throw new BudgetedCallError("BUDGET_INVALID_ACTUAL", "provider usage cannot be priced safely");
+    }
+    return { actual, ...settleCentsForActual(options.reservedCents, actual) };
+  }
+
+  async function settle(settlement: { actual: number; settledCents: number; overage: boolean }, resultRef?: string) {
+    const { actual, settledCents, overage } = settlement;
+    const media = hasMediaInput(options.input);
+    // Settlement failures leave the reservation intact.
+    await options.budget.settle(
+      reservation.id,
+      settledCents,
+      ...(resultRef || media ? [{
+        ...(resultRef ? { resultRef } : {}),
+        ...(media ? { costBasis: "media_usage_upper_bound" as const } : {}),
+      }] : []),
+    );
+    if (overage) {
+      await options.budget.noteOverage?.({
+        reservationId: reservation.id, reservedCents: options.reservedCents, actualCents: actual, settledCents,
+      });
+    }
+  }
+
+  async function accountFailure(error: unknown, account: () => Promise<unknown>): Promise<never> {
+    recordGradingDiagnostic(error, phase, transport);
+    try { await account(); }
+    catch (ledgerError) {
+      const failure = new AggregateError([error, ledgerError], "provider call and budget accounting failed", { cause: error });
+      copyGradingDiagnostic(error, failure);
+      throw failure;
+    }
+    throw error;
+  }
+
   try {
     let output: ProviderOutput;
     try {
-      output = options.onTextDelta
-        ? await options.provider.complete(options.input, options.signal, options.onTextDelta)
+      output = onTextDelta
+        ? await options.provider.complete(options.input, options.signal, onTextDelta)
         : await options.provider.complete(options.input, options.signal);
     } catch (error) {
-      if (error instanceof OpeningProviderError) {
-        const action = ledgerActionForProviderError(error.code, { requestSent: error.requestSent });
-        if (action === "release") {
-          await options.budget.release(ledgerRequestId, "not_sent");
-        } else {
-          await options.budget.markUnknown(reservation.id);
-        }
-      } else {
-        await options.budget.markUnknown(reservation.id);
+      const usage = interruptedUsage;
+      if (usage) {
+        return await accountFailure(error, async () => {
+          await settle(price({ ...usage, text: "", candidates: [], citedChunkIds: [] }));
+        });
       }
-      throw error;
+      const notSent = error instanceof OpeningProviderError
+        && (readGradingDiagnostic(error)?.attemptedFetch === false
+          || ledgerActionForProviderError(error.code, { requestSent: error.requestSent }) === "release");
+      return await accountFailure(error, () => notSent
+        ? options.budget.release(ledgerRequestId, "not_sent")
+        : options.budget.markUnknown(reservation.id));
     }
-    const receipt = readGradingDiagnostic(output);
-    if (receipt?.attemptedFetch !== null && receipt?.attemptedFetch !== undefined) transport = { attemptedFetch: receipt.attemptedFetch, httpStatus: receipt.httpStatus };
+    const diagnostic = readGradingDiagnostic(output);
+    if (diagnostic?.attemptedFetch != null) transport = { attemptedFetch: diagnostic.attemptedFetch, httpStatus: diagnostic.httpStatus };
     phase = "usage";
-    const actual = output.inputTokens === null || output.outputTokens === null ? null : options.actualCents(output);
-    if (actual !== null && (!Number.isSafeInteger(actual) || actual < 0 || (actual === 0 && !freeTier))) {
-      await options.budget.markUnknown(reservation.id);
-      throw new BudgetedCallError("BUDGET_INVALID_ACTUAL", "provider usage cannot be priced safely");
-    }
-    const settlement = actual === null ? null : settleCentsForActual(options.reservedCents, actual);
+    const settlement = output.inputTokens === null || output.outputTokens === null ? null : price(output);
     phase = "persist";
     try {
       await options.persistResult?.(output, { reservationId: reservation.id, settledCents: settlement?.settledCents ?? null });
     } catch (error) {
-      // The provider already ran. Never release or retry it when durable storage failed.
-      await options.budget.markUnknown(reservation.id);
-      throw error;
+      // The charge belongs in the ledger even when no result reference is safe to publish.
+      return await accountFailure(error, () => settlement
+        ? settle(settlement)
+        : options.budget.markUnknown(reservation.id));
     }
-    // Missing usage is not a zero-cost call. Keep the pessimistic reservation.
-    if (output.inputTokens === null || output.outputTokens === null) {
+    if (settlement) {
+      phase = "settle";
+      await settle(settlement, options.resultRef);
+    } else {
+      // Missing usage is not a zero-cost call. Keep the pessimistic reservation.
       phase = "usage";
       await options.budget.markUnknown(reservation.id);
       const missingUsage = new BudgetedCallError("USAGE_MISSING", "provider usage missing");
       recordGradingDiagnostic(missingUsage, phase, transport, "USAGE_MISSING");
       copyGradingDiagnostic(missingUsage, output);
-    } else {
-      phase = "settle";
-      const { settledCents, overage } = settlement!;
-      // Settlement failures must leave the reservation intact, never release it.
-      await options.budget.settle(
-        reservation.id,
-        settledCents,
-        ...(options.resultRef || hasMediaInput(options.input) ? [{
-          ...(options.resultRef ? { resultRef: options.resultRef } : {}),
-          ...(hasMediaInput(options.input) ? { costBasis: "media_usage_upper_bound" as const } : {}),
-        }] : []),
-      );
-      if (overage) {
-        await options.budget.noteOverage?.({
-          reservationId: reservation.id,
-          reservedCents: options.reservedCents,
-          actualCents: actual!,
-          settledCents,
-        });
-      }
     }
     return output;
   } catch (error) {
+    if ((phase !== "provider" || interruptedUsage) && error !== null && typeof error === "object") {
+      postProviderFailures.add(error);
+    }
     recordGradingDiagnostic(error, phase, transport);
     throw error;
   }

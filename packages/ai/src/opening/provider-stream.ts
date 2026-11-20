@@ -1,7 +1,14 @@
 import { providerOutputSchema, type ProviderOutput } from "@aistudy/contracts";
 import { parseProviderUsage } from "./usage";
 
-export type ProviderTextDelta = (delta: string) => void | Promise<void>;
+export const onInterruptedStreamUsage = Symbol("onInterruptedStreamUsage");
+export type InterruptedStreamUsage = Pick<ProviderOutput, "requestId" | "cachedInputTokens"> & {
+  inputTokens: number;
+  outputTokens: number;
+};
+export type ProviderTextDelta = ((delta: string) => void | Promise<void>) & {
+  [onInterruptedStreamUsage]?: (usage: InterruptedStreamUsage) => void;
+};
 
 export class OpeningProviderStreamError extends Error {
   constructor(readonly code: "PROVIDER_RESPONSE" | "PROVIDER_REFUSAL", message: string) { super(message); }
@@ -87,6 +94,11 @@ export async function readOpeningProviderStream(body: ReadableStream<Uint8Array>
       else if (line.startsWith("data:")) data.push(line.slice(5).replace(/^ /, ""));
     }
   }
+  function cachedInputTokens() {
+    return rawCachedInputTokens === null || inputTokens === null
+      ? rawCachedInputTokens
+      : Math.min(rawCachedInputTokens, inputTokens);
+  }
   try {
     options.signal.throwIfAborted();
     while (!done) {
@@ -102,14 +114,18 @@ export async function readOpeningProviderStream(body: ReadableStream<Uint8Array>
     }
     if (!done) invalid("provider stream was interrupted");
     if (!text.trim()) invalid("provider returned an empty answer");
-    const cachedInputTokens = rawCachedInputTokens === null
-      ? null
-      : inputTokens !== null
-        ? Math.min(rawCachedInputTokens, inputTokens)
-        : rawCachedInputTokens;
-    const output = providerOutputSchema.safeParse({ text, citedChunkIds: [], candidates: [], requestId, inputTokens, outputTokens, cachedInputTokens });
+    const output = providerOutputSchema.safeParse({
+      text, citedChunkIds: [], candidates: [], requestId, inputTokens, outputTokens, cachedInputTokens: cachedInputTokens(),
+    });
     if (!output.success) invalid("invalid provider stream output");
     return output.data;
+  } catch (error) {
+    // The provider adapter classifies transport errors after parsing returns.
+    // Deliver validated usage separately so the wrapping cannot lose it.
+    if (inputTokens !== null && outputTokens !== null) {
+      options.onTextDelta?.[onInterruptedStreamUsage]?.({ requestId, inputTokens, outputTokens, cachedInputTokens: cachedInputTokens() });
+    }
+    throw error;
   } finally {
     options.signal.removeEventListener("abort", abort);
     await reader.cancel().catch(() => undefined);

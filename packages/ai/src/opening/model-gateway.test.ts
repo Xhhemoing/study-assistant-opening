@@ -121,6 +121,19 @@ describe("model gateway fallback and free tier", () => {
     expect(calls.settle).toEqual([0]);
   });
 
+  it("propagates a post-send persistence error even when its code would normally allow fallback", async () => {
+    const { calls, repo } = budget();
+    const complete = vi.fn(async () => output);
+    const resolveFallback = vi.fn(async () => fallbackModel());
+    const gateway = createModelGateway({ resolve: async () => model(complete), resolveFallback });
+    const failure = Object.assign(new Error("storage cap"), { code: "BUDGET_EXCEEDED" });
+    await expect(gateway.call(scope, "practice.exam", {
+      budget: repo, input, operationId: "exam", persistResult: async () => { throw failure; },
+    })).rejects.toBe(failure);
+    expect(resolveFallback).not.toHaveBeenCalled();
+    expect(calls.settle).toHaveLength(1);
+  });
+
   it("never falls back after an unknown outcome (timeout) to avoid a double send", async () => {
     const { OpeningProviderError } = await import("./provider");
     const backupComplete = vi.fn(async () => output);
