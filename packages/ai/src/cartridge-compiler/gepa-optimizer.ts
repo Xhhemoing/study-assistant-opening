@@ -197,13 +197,24 @@ function validateRubricAnchorExampleShape(
   checkNonEmptyStringField(value, "normalizedAstEdit", path, issues);
   checkNonEmptyStringField(value, "expression", path, issues);
   checkNonEmptyStringField(value, "rationale", path, issues);
-  if (
-    !Array.isArray(value.establishedPremises) ||
-    !value.establishedPremises.every(
-      (p) => typeof p === "string" && p.length <= MAX_PATCH_STRING_LENGTH,
-    )
-  ) {
+  if (!Array.isArray(value.establishedPremises)) {
     issues.push(`${path}.establishedPremises:must_be_string_array`);
+  } else {
+    let validPremises = true;
+    for (let pIdx = 0; pIdx < value.establishedPremises.length; pIdx += 1) {
+      if (!Object.prototype.hasOwnProperty.call(value.establishedPremises, pIdx)) {
+        issues.push(`${path}.establishedPremises[${pIdx}]:sparse_array_hole`);
+        validPremises = false;
+        continue;
+      }
+      const p = value.establishedPremises[pIdx];
+      if (typeof p !== "string" || p.length > MAX_PATCH_STRING_LENGTH) {
+        validPremises = false;
+      }
+    }
+    if (!validPremises) {
+      issues.push(`${path}.establishedPremises:must_be_string_array`);
+    }
   }
 }
 
@@ -216,11 +227,16 @@ function validateSurfacePayloadSchema(surface: string, payload: unknown): void {
         issues.push("moveRules.payload:must_be_array");
         break;
       }
-      payload.forEach((item, index) => {
+      for (let index = 0; index < payload.length; index += 1) {
         const path = `moveRules[${index}]`;
+        if (!Object.prototype.hasOwnProperty.call(payload, index)) {
+          issues.push(`${path}:sparse_array_hole`);
+          continue;
+        }
+        const item = payload[index];
         if (!isPlainObject(item)) {
           issues.push(`${path}:must_be_plain_object`);
-          return;
+          continue;
         }
         checkPrototypePollutionKeys(item, path, issues);
         checkStrictPlainObjectOwnProperties(item, path, issues);
@@ -233,7 +249,7 @@ function validateSurfacePayloadSchema(surface: string, payload: unknown): void {
         if (typeof item.priority !== "number" || !Number.isFinite(item.priority)) {
           issues.push(`${path}.priority:must_be_finite_number`);
         }
-      });
+      }
       break;
     }
 
@@ -242,11 +258,16 @@ function validateSurfacePayloadSchema(surface: string, payload: unknown): void {
         issues.push("hintLadder.payload:must_be_array");
         break;
       }
-      payload.forEach((item, index) => {
+      for (let index = 0; index < payload.length; index += 1) {
         const path = `hintLadder[${index}]`;
+        if (!Object.prototype.hasOwnProperty.call(payload, index)) {
+          issues.push(`${path}:sparse_array_hole`);
+          continue;
+        }
+        const item = payload[index];
         if (!isPlainObject(item)) {
           issues.push(`${path}:must_be_plain_object`);
-          return;
+          continue;
         }
         checkPrototypePollutionKeys(item, path, issues);
         checkStrictPlainObjectOwnProperties(item, path, issues);
@@ -264,7 +285,7 @@ function validateSurfacePayloadSchema(surface: string, payload: unknown): void {
         if (typeof item.revealsPremiseCheck !== "boolean") {
           issues.push(`${path}.revealsPremiseCheck:must_be_boolean`);
         }
-      });
+      }
       break;
     }
 
@@ -273,11 +294,16 @@ function validateSurfacePayloadSchema(surface: string, payload: unknown): void {
         issues.push("rubricAnchors.payload:must_be_array");
         break;
       }
-      payload.forEach((item, index) => {
+      for (let index = 0; index < payload.length; index += 1) {
         const path = `rubricAnchors[${index}]`;
+        if (!Object.prototype.hasOwnProperty.call(payload, index)) {
+          issues.push(`${path}:sparse_array_hole`);
+          continue;
+        }
+        const item = payload[index];
         if (!isPlainObject(item)) {
           issues.push(`${path}:must_be_plain_object`);
-          return;
+          continue;
         }
         checkPrototypePollutionKeys(item, path, issues);
         checkStrictPlainObjectOwnProperties(item, path, issues);
@@ -286,32 +312,56 @@ function validateSurfacePayloadSchema(surface: string, payload: unknown): void {
         checkNonEmptyStringField(item, "conceptId", path, issues);
         checkNonEmptyStringField(item, "firstErrorRuleId", path, issues);
         checkNonEmptyStringField(item, "requiredMissingPremise", path, issues);
-        if (
-          !Array.isArray(item.requiredAstTokens) ||
-          !item.requiredAstTokens.every(
-            (t) =>
-              typeof t === "string" &&
-              t.trim().length > 0 &&
-              t.length <= MAX_PATCH_STRING_LENGTH,
-          )
-        ) {
+        if (!Array.isArray(item.requiredAstTokens)) {
           issues.push(`${path}.requiredAstTokens:must_be_nonempty_string_array`);
+        } else {
+          let validAstTokens = true;
+          for (let tIdx = 0; tIdx < item.requiredAstTokens.length; tIdx += 1) {
+            if (!Object.prototype.hasOwnProperty.call(item.requiredAstTokens, tIdx)) {
+              issues.push(`${path}.requiredAstTokens[${tIdx}]:sparse_array_hole`);
+              validAstTokens = false;
+              continue;
+            }
+            const t = item.requiredAstTokens[tIdx];
+            if (typeof t !== "string" || t.trim().length === 0 || t.length > MAX_PATCH_STRING_LENGTH) {
+              validAstTokens = false;
+            }
+          }
+          if (!validAstTokens) {
+            issues.push(`${path}.requiredAstTokens:must_be_nonempty_string_array`);
+          }
         }
         if (!Array.isArray(item.positiveAnchors)) {
           issues.push(`${path}.positiveAnchors:must_be_array`);
         } else {
-          item.positiveAnchors.forEach((anchor, aIdx) =>
-            validateRubricAnchorExampleShape(anchor, `${path}.positiveAnchors[${aIdx}]`, issues),
-          );
+          for (let aIdx = 0; aIdx < item.positiveAnchors.length; aIdx += 1) {
+            if (!Object.prototype.hasOwnProperty.call(item.positiveAnchors, aIdx)) {
+              issues.push(`${path}.positiveAnchors[${aIdx}]:sparse_array_hole`);
+              continue;
+            }
+            validateRubricAnchorExampleShape(
+              item.positiveAnchors[aIdx],
+              `${path}.positiveAnchors[${aIdx}]`,
+              issues,
+            );
+          }
         }
         if (!Array.isArray(item.negativeAnchors)) {
           issues.push(`${path}.negativeAnchors:must_be_array`);
         } else {
-          item.negativeAnchors.forEach((anchor, aIdx) =>
-            validateRubricAnchorExampleShape(anchor, `${path}.negativeAnchors[${aIdx}]`, issues),
-          );
+          for (let aIdx = 0; aIdx < item.negativeAnchors.length; aIdx += 1) {
+            if (!Object.prototype.hasOwnProperty.call(item.negativeAnchors, aIdx)) {
+              issues.push(`${path}.negativeAnchors[${aIdx}]:sparse_array_hole`);
+              continue;
+            }
+            validateRubricAnchorExampleShape(
+              item.negativeAnchors[aIdx],
+              `${path}.negativeAnchors[${aIdx}]`,
+              issues,
+            );
+          }
         }
-      });
+      }
       break;
     }
 
@@ -447,7 +497,19 @@ export function createDisjointTrajectorySplit(
   trajectories: readonly ErrorTrajectoryRecord[],
   options: DisjointSplitOptions = {},
 ): DisjointDatasetSplit {
-  const canonical = trajectories.map((t) => canonicalizeTrajectoryRecord(t));
+  assertNoRawPiiInValue(options, "disjoint_split_options");
+  assertNoRawPiiInValue(trajectories, "disjoint_split_trajectories");
+  const canonical: ErrorTrajectoryRecord[] = [];
+  for (let i = 0; i < trajectories.length; i += 1) {
+    if (!Object.prototype.hasOwnProperty.call(trajectories, i)) {
+      throw new GepaInvalidPatchPayloadError(
+        `Trajectory list contains sparse array hole at index ${i}`,
+        "disjointSplit",
+        [`trajectories[${i}]:sparse_array_hole`],
+      );
+    }
+    canonical.push(canonicalizeTrajectoryRecord(trajectories[i]!));
+  }
 
   const seed = options.seed ?? 20261121;
   const holdoutRatio = Math.min(0.5, Math.max(0.1, options.holdoutRatio ?? 0.25));
@@ -1016,13 +1078,21 @@ export interface BuildGepaReflectionInput {
 export function buildGepaReflectionContext(
   input: BuildGepaReflectionInput,
 ): GepaReflectionContext {
+  // Scan ALL reflection inputs FIRST before dot-accessing or spreading any properties so getters never run.
+  assertNoRawPiiInValue(input.policy, "reflection_base_policy");
+  assertNoRawPiiInValue(input.holdoutFirewall, "reflection_holdout_firewall");
+  assertNoRawPiiInValue(input.trainTrajectories, "reflection_train_trajectories");
+  assertNoRawPiiInValue(input.devTrajectories, "reflection_dev_trajectories");
+  if (input.clusteringOptions !== undefined) {
+    assertNoRawPiiInValue(input.clusteringOptions, "reflection_clustering_options");
+  }
+
   const canonicalPolicyId = canonicalizeIdentifier(input.policy.policyId, "policyId");
   assertNoRawPiiInText(canonicalPolicyId, "reflection_base_policy.policyId");
   const sanitizedPolicy: CartridgeDeclarativePolicy = {
     ...input.policy,
     policyId: canonicalPolicyId,
   };
-  assertNoRawPiiInValue(sanitizedPolicy, "reflection_base_policy");
   assertNoHoldoutLeakage(input.trainTrajectories, input.holdoutFirewall);
   assertNoHoldoutLeakage(input.devTrajectories, input.holdoutFirewall);
 
@@ -1193,10 +1263,13 @@ export function runGepaOptimizationRound(
   input: RunGepaOptimizationRoundInput,
 ): GepaOptimizationRoundResult {
   // Scan ALL static inputs for raw PII strictly BEFORE disjoint-split / holdout / ID checks
-  // so raw PII learner IDs or fields can never echo into HoldoutFirewallError or RangeError.
+  // so raw PII learner IDs, boxed primitives, or fields can never echo into HoldoutFirewallError or RangeError.
   assertNoRawPiiInValue(input.split, "gepa_round.split");
   assertNoRawPiiInValue(input.basePolicy, "gepa_round.basePolicy");
   assertNoRawPiiInValue(input.paretoOptions, "gepa_round.paretoOptions");
+  if (input.clusteringOptions !== undefined) {
+    assertNoRawPiiInValue(input.clusteringOptions, "gepa_round.clusteringOptions");
+  }
   if (input.extraCandidatePatches !== undefined) {
     assertNoRawPiiInValue(input.extraCandidatePatches, "gepa_round.extraCandidatePatches");
   }

@@ -69,6 +69,37 @@ function normalizeCompactForLeakScan(text: string): string {
   );
 }
 
+/**
+ * Preserves whitespace around `-`/`+` (so prose words like `"Use -7.5e-1."` keep
+ * their boundary before unary `-`) while compacting `*`, `/`, `^`, and exponent brackets.
+ */
+function normalizeNumericScanText(text: string): string {
+  return normalizeForLeakScan(text)
+    .replace(/\s*([*/^])\s*/g, "$1")
+    .replace(/10\^\{\s*([+-]?)\s*(\d+)\s*\}/g, "10^{$1$2}")
+    .replace(/10\^\(\s*([+-]?)\s*(\d+)\s*\)/g, "10^($1$2)")
+    .replace(/10\^([+-])\s+(\d+)/g, "10^$1$2");
+}
+
+/**
+ * Returns true iff the token immediately before a `-` at `signIndex` is a math
+ * operand (number, closing bracket, or single-letter math variable like `x` or `2x`),
+ * meaning `-` is binary subtraction rather than a unary negative sign on the literal.
+ */
+function isBinaryOperandBefore(text: string, signIndex: number): boolean {
+  const trimmedBefore = text.slice(0, signIndex).trimEnd();
+  if (trimmedBefore.length === 0) return false;
+  return /(?:\d|[)\]}]|(?:^|[^a-z])[a-z])$/.test(trimmedBefore);
+}
+
+function hasUnaryMinusBefore(text: string, matchStart: number): boolean {
+  const before = text.slice(0, matchStart);
+  const minusMatch = /-\s*$/.exec(before);
+  if (!minusMatch) return false;
+  const signIndex = matchStart - minusMatch[0].length;
+  return !isBinaryOperandBefore(text, signIndex);
+}
+
 function gcdInt(a: number, b: number): number {
   let x = Math.abs(a);
   let y = Math.abs(b);
@@ -177,39 +208,54 @@ function parseScientificToExactRational(
 }
 
 /**
- * Extracts exact reduced `BigInt` rationals from E-notation (`7.50e-1`, `75e-2`, `0.075e+1`)
- * and base-10 scientific notation (`7.5 * 10^{-1}`, `7.5 × 10^-1`) on compact normalized text.
+ * Extracts exact reduced `BigInt` rationals from E-notation (`7.50e-1`, `-7.5e-1`, `75e-2`)
+ * and base-10 scientific notation (`7.5 * 10^{-1}`, `-7.5 × 10^-1`) on whitespace-preserving
+ * numeric-scan text so unary negative signs after prose words (`"Use -7.5e-1."`) stay negative.
  */
-function extractScientificRationals(compactText: string): readonly ExactRational[] {
+function extractScientificRationals(numericText: string): readonly ExactRational[] {
   const out: ExactRational[] = [];
 
   // 1) E-notation: e.g. 7.50e-1, 75e-2, 0.075e+1, -7.5e-1
   const eNotationPattern =
-    /(?<![\d.])((?:(?<![0-9a-z)\]}])[+-])?(?:\d+(?:\.\d*)?|\.\d+))[eE]([+-]?\d+)(?!\d|\.\d|[eE][+-]?\d)/g;
-  for (const m of compactText.matchAll(eNotationPattern)) {
-    const rat = parseScientificToExactRational(m[1]!, m[2]!);
+    /(?<![\d.])(\d+(?:\.\d*)?|\.\d+)[eE]([+-]?\d+)(?!\d|\.\d|[eE][+-]?\d)/g;
+  for (const m of numericText.matchAll(eNotationPattern)) {
+    const startIdx = m.index ?? 0;
+    const isNeg = hasUnaryMinusBefore(numericText, startIdx);
+    const rat = parseScientificToExactRational(`${isNeg ? "-" : ""}${m[1]!}`, m[2]!);
     if (rat) out.push(rat);
   }
 
   // 2) Base-10 scientific notation (post-Unicode/LaTeX normalization: \times/\cdot/×/· -> *):
-  //    e.g. 7.5*10^{-1}, 7.5*10^-1, 7.5*10^(-1)
+  //    e.g. 7.5*10^{-1}, -7.5*10^-1, 7.5*10^(-1)
   const pow10Pattern =
-    /(?<![\d.])((?:(?<![0-9a-z)\]}])[+-])?(?:\d+(?:\.\d*)?|\.\d+))\*10\^(?:\{([+-]?\d+)\}|\(([+-]?\d+)\)|([+-]?\d+))(?!\d|\.\d|[eE][+-]?\d)/g;
-  for (const m of compactText.matchAll(pow10Pattern)) {
+    /(?<![\d.])(\d+(?:\.\d*)?|\.\d+)\*10\^(?:\{([+-]?\d+)\}|\(([+-]?\d+)\)|([+-]?\d+))(?!\d|\.\d|[eE][+-]?\d)/g;
+  for (const m of numericText.matchAll(pow10Pattern)) {
+    const startIdx = m.index ?? 0;
+    const isNeg = hasUnaryMinusBefore(numericText, startIdx);
     const expStr = m[2] ?? m[3] ?? m[4]!;
-    const rat = parseScientificToExactRational(m[1]!, expStr);
+    const rat = parseScientificToExactRational(`${isNeg ? "-" : ""}${m[1]!}`, expStr);
     if (rat) out.push(rat);
   }
 
   return out;
 }
 
-function matchesWithNumericBoundaries(haystack: string, numericLiteral: string): boolean {
-  const trailingZeros = numericLiteral.includes(".") ? "0*" : "";
+function matchesWithNumericBoundaries(numericText: string, numericLiteral: string): boolean {
+  const expectNegative = numericLiteral.startsWith("-");
+  const absLiteral = expectNegative ? numericLiteral.slice(1) : numericLiteral;
+  const trailingZeros = absLiteral.includes(".") ? "0*" : "";
   const re = new RegExp(
-    `(?<![\\d.]|\\d[eE][+-]?)${escapeRegExp(numericLiteral)}${trailingZeros}(?!\\d|\\.\\d|[eE][+-]?\\d|\\*10\\^(?:\\{[+-]?\\d+\\}|\\([+-]?\\d+\\)|[+-]?\\d+))`,
+    `(?<![\\d.]|\\d[eE][+-]?)${escapeRegExp(absLiteral)}${trailingZeros}(?!\\d|\\.\\d|[eE][+-]?\\d|\\*10\\^(?:\\{[+-]?\\d+\\}|\\([+-]?\\d+\\)|[+-]?\\d+))`,
+    "g",
   );
-  return re.test(haystack);
+  for (const m of numericText.matchAll(re)) {
+    const startIdx = m.index ?? 0;
+    const isNeg = hasUnaryMinusBefore(numericText, startIdx);
+    if (isNeg === expectNegative) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -269,7 +315,8 @@ export function detectProtectedLeakage(
   const normalizedText = normalizeForLeakScan(releasedHintText);
   if (!normalizedText) return [];
   const compactText = normalizeCompactForLeakScan(releasedHintText);
-  const scientificRationals = extractScientificRationals(compactText);
+  const numericText = normalizeNumericScanText(releasedHintText);
+  const scientificRationals = extractScientificRationals(numericText);
   const hits: string[] = [];
   const seen = new Set<string>();
   const allProtected = [...protectedAnswerTokens, ...protectedStepTokens];
@@ -287,9 +334,9 @@ export function detectProtectedLeakage(
     let matched = false;
     if (isPureRational) {
       matched =
-        matchesWithNumericBoundaries(compactText, compactToken) ||
+        matchesWithNumericBoundaries(numericText, compactToken) ||
         exactDecimalVariantsForRationalToken(compactToken).some((dec) =>
-          matchesWithNumericBoundaries(compactText, dec),
+          matchesWithNumericBoundaries(numericText, dec),
         ) ||
         (targetRational !== null &&
           scientificRationals.some((sci) => rationalsEqual(sci, targetRational)));
@@ -302,7 +349,7 @@ export function detectProtectedLeakage(
         decVariants.push(`-${canonicalDec.slice(2)}`);
       }
       matched =
-        decVariants.some((dec) => matchesWithNumericBoundaries(compactText, dec)) ||
+        decVariants.some((dec) => matchesWithNumericBoundaries(numericText, dec)) ||
         (targetRational !== null &&
           scientificRationals.some((sci) => rationalsEqual(sci, targetRational)));
     } else {

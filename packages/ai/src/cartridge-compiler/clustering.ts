@@ -414,9 +414,101 @@ function collectRawPiiViolations(
     }
     return;
   }
+  if (typeof value === "function") {
+    out.push(`${pathLabel}:forbidden_function_value`);
+    return;
+  }
   if (!value || typeof value !== "object") return;
   if (seen.has(value)) return;
   seen.add(value);
+
+  if (!Array.isArray(value)) {
+    const tag = Object.prototype.toString.call(value);
+    if (tag === "[object String]") {
+      const unboxed = String.prototype.valueOf.call(value);
+      out.push(`${pathLabel}:forbidden_boxed_primitive`);
+      for (const reason of detectRawPiiReasonsInText(unboxed)) {
+        out.push(`${pathLabel}:${reason}`);
+      }
+      return;
+    }
+    if (tag === "[object Number]") {
+      const unboxed = Number.prototype.valueOf.call(value);
+      out.push(`${pathLabel}:forbidden_boxed_primitive`);
+      collectRawPiiViolations(
+        unboxed,
+        pathLabel,
+        out,
+        seen,
+        undefined,
+        allowedNumericMetadataPaths,
+        allowedDiagnosticKeys,
+        rawPathLabel,
+      );
+      return;
+    }
+    if (tag === "[object BigInt]") {
+      const unboxed = BigInt.prototype.valueOf.call(value);
+      out.push(`${pathLabel}:forbidden_boxed_primitive`);
+      collectRawPiiViolations(
+        unboxed,
+        pathLabel,
+        out,
+        seen,
+        undefined,
+        allowedNumericMetadataPaths,
+        allowedDiagnosticKeys,
+        rawPathLabel,
+      );
+      return;
+    }
+    if (tag === "[object Boolean]") {
+      out.push(`${pathLabel}:forbidden_boxed_primitive`);
+      return;
+    }
+    if (tag === "[object RegExp]") {
+      const source = RegExp.prototype.toString.call(value);
+      out.push(`${pathLabel}:forbidden_non_plain_object`);
+      for (const reason of detectRawPiiReasonsInText(source)) {
+        out.push(`${pathLabel}:${reason}`);
+      }
+      return;
+    }
+    if (tag === "[object URL]" || (typeof URL !== "undefined" && value instanceof URL)) {
+      out.push(`${pathLabel}:forbidden_non_plain_object`);
+      for (const reason of detectRawPiiReasonsInText(URL.prototype.toString.call(value))) {
+        out.push(`${pathLabel}:${reason}`);
+      }
+      return;
+    }
+    if (
+      tag === "[object Date]" ||
+      value instanceof Date ||
+      ArrayBuffer.isView(value) ||
+      value instanceof ArrayBuffer
+    ) {
+      out.push(`${pathLabel}:forbidden_non_plain_object`);
+      return;
+    }
+    const proto = Object.getPrototypeOf(value);
+    if (proto !== Object.prototype && proto !== null) {
+      out.push(`${pathLabel}:forbidden_non_plain_object`);
+      for (const rawKey of Reflect.ownKeys(value)) {
+        scanOwnPropertyForPii(
+          value,
+          rawKey,
+          pathLabel,
+          rawPathLabel,
+          out,
+          seen,
+          skipKeys,
+          allowedNumericMetadataPaths,
+          allowedDiagnosticKeys,
+        );
+      }
+      return;
+    }
+  }
 
   if (Array.isArray(value)) {
     const visitedIndices = new Set<string>();
@@ -542,8 +634,33 @@ function tokenizeNormalizedAst(normalizedAstEdit: string): string[] {
  * every field (`normalizedAstEdit`, `missingPremise`, `snippet`, and nested leaves).
  */
 export function assertPseudonymizedTrajectory(record: ErrorTrajectoryRecord): void {
+  if (!record || typeof record !== "object" || Array.isArray(record)) {
+    throw new CartridgePiiViolationError(
+      "Trajectory record must be a plain non-null object",
+      ["trajectory:must_be_plain_object"],
+    );
+  }
   const offendingFields: string[] = [];
   const rawObject = record as unknown as Record<string, unknown>;
+
+  // Run descriptor-based raw PII, accessor, symbol, and non-plain-object scan FIRST
+  // before reading ANY property via dot access so malicious getters are NEVER invoked.
+  collectRawPiiViolations(rawObject, "trajectory", offendingFields, new WeakSet());
+  if (offendingFields.length > 0) {
+    const trajIdDesc = Object.getOwnPropertyDescriptor(rawObject, "trajectoryId");
+    const safeRawId =
+      trajIdDesc && !trajIdDesc.get && !trajIdDesc.set && typeof trajIdDesc.value === "string"
+        ? trajIdDesc.value
+        : undefined;
+    const safeTrajectoryId = sanitizeTrajectoryIdForError(safeRawId);
+    const deduped = [...new Set(offendingFields)];
+    throw new CartridgePiiViolationError(
+      `Trajectory ${safeTrajectoryId ?? "[unknown]"} violated pseudonymization boundary: ${deduped.join(", ")}`,
+      deduped,
+      safeTrajectoryId,
+    );
+  }
+
   const rawTrajectoryId = typeof record.trajectoryId === "string" ? record.trajectoryId : undefined;
 
   let canonicalPseudo = "";
@@ -599,9 +716,6 @@ export function assertPseudonymizedTrajectory(record: ErrorTrajectoryRecord): vo
       }
     }
   }
-
-  // Scan ALL keys and string leaves (including learnerPseudoId, normalizedAstEdit, missingPremise, snippet, and any extra/nested steps).
-  collectRawPiiViolations(rawObject, "trajectory", offendingFields, new WeakSet());
 
   // Also scan post-normalization forms so whitespace-obfuscated tokens/URLs cannot emerge after normalization.
   if (typeof record.normalizedAstEdit === "string") {
@@ -741,10 +855,20 @@ export function clusterErrorTrajectories(
   options: ClusteringOptions = {},
 ): ClusteringSummary {
   assertNoRawPiiInValue(options, "clustering_options");
+  assertNoRawPiiInValue(trajectories, "clustering_trajectories");
   const minSupport = options.minSupport ?? 5;
   const similarityThreshold = options.similarityThreshold ?? 0.72;
 
-  const features = trajectories.map((t) => extractTrajectoryFeatures(t));
+  const features: ExtractedTrajectoryFeatures[] = [];
+  for (let i = 0; i < trajectories.length; i += 1) {
+    if (!Object.prototype.hasOwnProperty.call(trajectories, i)) {
+      throw new CartridgePiiViolationError(
+        `Trajectory input contains sparse array hole at index ${i}`,
+        [`trajectories[${i}]:sparse_array_hole`],
+      );
+    }
+    features.push(extractTrajectoryFeatures(trajectories[i]!));
+  }
   const buckets = new Map<string, ExtractedTrajectoryFeatures[]>();
 
   for (const feat of features) {

@@ -244,13 +244,13 @@ export function computeCandidateMetrics(
   const confidenceZ = options.confidenceZ ?? DEFAULT_ONE_SIDED_95_Z;
   if (!Number.isFinite(confidenceZ) || confidenceZ < DEFAULT_ONE_SIDED_95_Z - 1e-6) {
     throw new RangeError(
-      `computeCandidateMetrics requires one-sided confidenceZ >= ${DEFAULT_ONE_SIDED_95_Z} (alpha <= ${MAX_PROMOTION_ALPHA}); received ${String(confidenceZ)}.`,
+      `computeCandidateMetrics requires one-sided confidenceZ >= ${DEFAULT_ONE_SIDED_95_Z} (alpha <= ${MAX_PROMOTION_ALPHA}); received invalid ${typeof confidenceZ}.`,
     );
   }
   const alpha = options.alpha ?? oneSidedAlphaFromZ(confidenceZ);
   if (!Number.isFinite(alpha) || alpha <= 0 || alpha > MAX_PROMOTION_ALPHA + 1e-9) {
     throw new RangeError(
-      `computeCandidateMetrics requires one-sided alpha in (0, ${MAX_PROMOTION_ALPHA}] (at least 95% confidence); received ${String(alpha)}.`,
+      `computeCandidateMetrics requires one-sided alpha in (0, ${MAX_PROMOTION_ALPHA}] (at least 95% confidence); received invalid ${typeof alpha}.`,
     );
   }
   const effectiveAlpha = Math.min(alpha, MAX_PROMOTION_ALPHA);
@@ -531,8 +531,17 @@ function validateLeakageTelemetryFailClosed(
     if (!Array.isArray(l.telemetryIssues)) {
       vetoReasons.push("telemetry_integrity:telemetryIssues_must_be_string_array");
     } else if (l.telemetryIssues.length > 0) {
-      const hasNonString = l.telemetryIssues.some((entry) => typeof entry !== "string");
-      if (hasNonString) {
+      let hasNonStringOrHole = false;
+      for (let i = 0; i < l.telemetryIssues.length; i += 1) {
+        if (
+          !Object.prototype.hasOwnProperty.call(l.telemetryIssues, i) ||
+          typeof l.telemetryIssues[i] !== "string"
+        ) {
+          hasNonStringOrHole = true;
+          break;
+        }
+      }
+      if (hasNonStringOrHole) {
         vetoReasons.push("telemetry_integrity:non_string_telemetryIssue");
       } else {
         vetoReasons.push("telemetry_integrity:reported_issues");
@@ -1019,7 +1028,7 @@ function validateParetoEvaluationOptions(options: ParetoEvaluationOptions): {
   ] as const) {
     if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 1) {
       throw new RangeError(
-        `${name} must be a finite number in [0, 1] (received ${String(value)}).`,
+        `${name} must be a finite number in [0, 1] (received invalid ${typeof value}).`,
       );
     }
   }
@@ -1031,7 +1040,7 @@ function validateParetoEvaluationOptions(options: ParetoEvaluationOptions): {
     minClusterCount < 1
   ) {
     throw new RangeError(
-      `minClusterCount must be a positive integer >= 1 (received ${String(minClusterCount)}).`,
+      `minClusterCount must be a positive integer >= 1 (received invalid ${typeof minClusterCount}).`,
     );
   }
 
@@ -1101,20 +1110,24 @@ export function evaluateParetoFrontierAndPromotion(
   };
 
   // Canonicalize, scan ENTIRE candidate receipt for raw PII, and enforce strict candidateId uniqueness upfront.
-  // Malformed non-object or missing-ID elements are isolated under collision-free synthetic IDs so valid siblings still evaluate.
+  // Malformed non-object, sparse-hole, or missing-ID elements are isolated under collision-free synthetic IDs so valid siblings still evaluate.
   const seenCandidateIds = new Set<string>();
   const malformedEntryIds = new Set<string>();
-  const canonicalCandidates: CartridgeCandidateMetrics[] = candidates.map((rawCandidate, idx) => {
-    if (!isNonNullRecord(rawCandidate)) {
+  const canonicalCandidates: CartridgeCandidateMetrics[] = [];
+  for (let idx = 0; idx < candidates.length; idx += 1) {
+    const hasOwn = Object.prototype.hasOwnProperty.call(candidates, idx);
+    const rawCandidate = hasOwn ? candidates[idx] : undefined;
+    if (!hasOwn || !isNonNullRecord(rawCandidate)) {
       const placeholderId = allocateSyntheticMalformedId(idx);
       malformedEntryIds.add(placeholderId);
       seenCandidateIds.add(placeholderId);
-      return {
+      canonicalCandidates.push({
         candidateId: placeholderId,
         c: null as unknown as CartridgeCandidateMetrics["c"],
         l: null as unknown as CartridgeCandidateMetrics["l"],
         t7: null as unknown as CartridgeCandidateMetrics["t7"],
-      };
+      });
+      continue;
     }
     // Always scan the entire receipt for raw PII first before isolating missing/non-string candidateId.
     assertNoRawPiiInValue(rawCandidate, `pareto_candidate[${idx}]`);
@@ -1123,12 +1136,13 @@ export function evaluateParetoFrontierAndPromotion(
       const placeholderId = allocateSyntheticMalformedId(idx);
       malformedEntryIds.add(placeholderId);
       seenCandidateIds.add(placeholderId);
-      return {
+      canonicalCandidates.push({
         candidateId: placeholderId,
         c: null as unknown as CartridgeCandidateMetrics["c"],
         l: null as unknown as CartridgeCandidateMetrics["l"],
         t7: null as unknown as CartridgeCandidateMetrics["t7"],
-      };
+      });
+      continue;
     }
     const candidate = rawCandidate as unknown as CartridgeCandidateMetrics;
     const canonicalId = canonicalizeIdentifier(rawId, "candidateId");
@@ -1141,10 +1155,10 @@ export function evaluateParetoFrontierAndPromotion(
       );
     }
     seenCandidateIds.add(canonicalId);
-    return canonicalId === candidate.candidateId
-      ? candidate
-      : { ...candidate, candidateId: canonicalId };
-  });
+    canonicalCandidates.push(
+      canonicalId === candidate.candidateId ? candidate : { ...candidate, candidateId: canonicalId },
+    );
+  }
 
   const vetoMap = new Map<
     string,

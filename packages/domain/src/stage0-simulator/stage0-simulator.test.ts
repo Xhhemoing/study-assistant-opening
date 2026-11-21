@@ -657,4 +657,37 @@ describe("Stage-0 768-episode deterministic student simulator", () => {
     expect(compliantReport.promotable).toBe(true);
     expect(compliantReport.metrics.answerLeakageRate).toBe(0);
   });
+
+  it("preserves unary negative sign after prose words ('Use -7.5e-1.', 'Use -7.5 \\times 10^{-1}.', 'Use -0.75.') so negative literals match '-3/4' and NOT positive '3/4' (Round-13 P1-2)", () => {
+    // Negative signed literals after prose words MUST NOT falsely trigger positive sealed "3/4" / "0.75".
+    for (const negHint of [
+      "Use -7.5e-1.",
+      "Use -7.5 \\times 10^{-1}.",
+      "The value is -7.5 × 10^-1.",
+      "Use -0.75.",
+      "Use -3/4.",
+    ]) {
+      expect(detectProtectedLeakage(negHint, ["3/4", "0.75"], [])).toEqual([]);
+      expect(detectProtectedLeakage(negHint, ["-3/4"], [])).toEqual(["-3/4"]);
+    }
+
+    // Positive literals and binary subtraction (`x - 7.5e-1 = 0`) match positive sealed "3/4" and NOT "-3/4".
+    for (const posHint of [
+      "Use 7.5e-1.",
+      "Use 7.5 \\times 10^{-1}.",
+      "Solve x - 7.5e-1 = 0.",
+      "Solve x - 0.75 = 0.",
+      "Check 2 - 7.5e-1.",
+    ]) {
+      expect(detectProtectedLeakage(posHint, ["3/4"], [])).toEqual(["3/4"]);
+      expect(detectProtectedLeakage(posHint, ["-3/4"], [])).toEqual([]);
+    }
+
+    // Compliant 768-episode reference policy remains 0-leak promotable.
+    const compliantReport = evaluateStage0Gate(createCompliantReferencePolicy(), {
+      seed: 20261121,
+    });
+    expect(compliantReport.promotable).toBe(true);
+    expect(compliantReport.metrics.answerLeakageRate).toBe(0);
+  });
 });

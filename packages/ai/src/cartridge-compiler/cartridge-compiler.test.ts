@@ -2596,4 +2596,197 @@ describe("Exact (C, -L, T7) Pareto frontier, Hard Pre-Pareto Veto, and Promotion
     expect((fwErr as CartridgePiiViolationError).message).not.toContain("alice@example.com");
     expect(JSON.stringify(fwErr)).not.toContain("alice@example.com");
   });
+
+  it("never invokes getters on trajectory identity or AST/premise fields in assertPseudonymizedTrajectory (Round-13 P1-1)", () => {
+    let learnerGetterCalled = false;
+    const trajLearnerGetter = makeTrajectory({ trajectoryId: "r13_getter_learner" });
+    Object.defineProperty(trajLearnerGetter, "learnerPseudoId", {
+      enumerable: true,
+      configurable: true,
+      get() {
+        learnerGetterCalled = true;
+        return "pseudo_clean_1";
+      },
+    });
+    expect(() => clusterErrorTrajectories([trajLearnerGetter])).toThrow(CartridgePiiViolationError);
+    expect(learnerGetterCalled).toBe(false);
+
+    let astGetterCalled = false;
+    let premiseGetterCalled = false;
+    const trajAstGetter = makeTrajectory({ trajectoryId: "r13_getter_ast" });
+    Object.defineProperty(trajAstGetter, "normalizedAstEdit", {
+      enumerable: true,
+      configurable: true,
+      get() {
+        astGetterCalled = true;
+        return "DIVIDE_BY_VAR";
+      },
+    });
+    Object.defineProperty(trajAstGetter, "missingPremise", {
+      enumerable: true,
+      configurable: true,
+      get() {
+        premiseGetterCalled = true;
+        return "x != 0";
+      },
+    });
+    expect(() => clusterErrorTrajectories([trajAstGetter])).toThrow(CartridgePiiViolationError);
+    expect(astGetterCalled).toBe(false);
+    expect(premiseGetterCalled).toBe(false);
+  });
+
+  it("blocks boxed primitives like new String('alice@example.com') in PII scans and never interpolates raw values in RangeError (Round-13 P1-3)", () => {
+    const clean = buildMatureCohort("cand_r13_boxed", {
+      learnerCount: 25,
+      repairedCount: 23,
+      t7PassedCount: 24,
+    });
+    const boxedEmail = new String("alice@example.com") as unknown as number;
+
+    // 1) evaluateParetoFrontierAndPromotion option with boxed String PII -> throws CartridgePiiViolationError, zero raw email echo!
+    let paretoErr: unknown;
+    try {
+      evaluateParetoFrontierAndPromotion([clean], {
+        baseline: { cRate: boxedEmail, t7Rate: 0.72 },
+      });
+    } catch (err) {
+      paretoErr = err;
+    }
+    expect(paretoErr).toBeInstanceOf(CartridgePiiViolationError);
+    expect((paretoErr as Error).message).not.toContain("alice@example.com");
+    expect(JSON.stringify(paretoErr)).not.toContain("alice@example.com");
+
+    // 2) runGepaOptimizationRound option with boxed String PII -> throws CartridgePiiViolationError, zero raw email echo!
+    const records: ErrorTrajectoryRecord[] = [];
+    for (let comp = 0; comp < 4; comp += 1) {
+      for (let i = 0; i < 6; i += 1) {
+        records.push(
+          makeTrajectory({
+            trajectoryId: `r13_box_c${comp}_t${i}`,
+            learnerPseudoId: `pseudo_r13_c${comp}_u${i}`,
+            itemFamilyId: `fam_r13_c${comp}`,
+          }),
+        );
+      }
+    }
+    const split = createDisjointTrajectorySplit(records, { seed: 2028 });
+    let roundErr: unknown;
+    try {
+      runGepaOptimizationRound({
+        basePolicy: makeBasePolicy(),
+        split,
+        scoreCandidate: (c) =>
+          buildMatureCohort(c.candidateId, {
+            learnerCount: 25,
+            repairedCount: 23,
+            t7PassedCount: 24,
+          }),
+        paretoOptions: {
+          baseline: { cRate: 0.85, t7Rate: 0.72 },
+          minClusterCount: boxedEmail,
+        },
+      });
+    } catch (err) {
+      roundErr = err;
+    }
+    expect(roundErr).toBeInstanceOf(CartridgePiiViolationError);
+    expect((roundErr as Error).message).not.toContain("alice@example.com");
+    expect(JSON.stringify(roundErr)).not.toContain("alice@example.com");
+
+    // 3) clusterErrorTrajectories option with boxed String PII -> throws CartridgePiiViolationError, zero raw email echo!
+    let clusterErr: unknown;
+    try {
+      clusterErrorTrajectories([makeTrajectory({ trajectoryId: "r13_box_clust" })], {
+        minSupport: boxedEmail,
+      });
+    } catch (err) {
+      clusterErr = err;
+    }
+    expect(clusterErr).toBeInstanceOf(CartridgePiiViolationError);
+    expect((clusterErr as Error).message).not.toContain("alice@example.com");
+
+    // 4) Non-PII invalid string option in RangeError MUST NOT echo raw value either!
+    let rangeErr: unknown;
+    try {
+      evaluateParetoFrontierAndPromotion([clean], {
+        baseline: { cRate: "secret_custom_token_value" as unknown as number, t7Rate: 0.72 },
+      });
+    } catch (err) {
+      rangeErr = err;
+    }
+    expect(rangeErr).toBeInstanceOf(RangeError);
+    expect((rangeErr as Error).message).not.toContain("secret_custom_token_value");
+  });
+
+  it("rejects sparse array holes cleanly in GEPA patch validation and compiler array inputs without TypeError crashes (Round-13 P2)", () => {
+    const base = makeBasePolicy();
+    const validRule = {
+      id: "r13_rule_1",
+      conceptId: "alg.zero_product_property",
+      triggerRuleId: "err.divide_by_variable",
+      missingPremise: "x != 0",
+      move: "targeted_scaffold",
+      priority: 10,
+    };
+    const validStep = {
+      stage: 1,
+      conceptId: "alg.zero_product_property",
+      cueTemplate: "Check when the factor can equal zero.",
+      revealsPremiseCheck: true,
+    };
+
+    // 1) Sparse moveRules array [rule0, , rule2] -> GepaInvalidPatchPayloadError (not TypeError!)
+    // eslint-disable-next-line no-sparse-arrays
+    const sparseMoveRules = [validRule, , { ...validRule, id: "r13_rule_2" }];
+    expect(() =>
+      validateAndApplyGepaPatch(base, {
+        surface: "moveRules",
+        summary: "Sparse move rules",
+        payload: sparseMoveRules,
+      }),
+    ).toThrow(GepaInvalidPatchPayloadError);
+
+    // 2) Sparse hintLadder array [step0, , step2] -> GepaInvalidPatchPayloadError (not TypeError!)
+    // eslint-disable-next-line no-sparse-arrays
+    const sparseHintLadder = [validStep, , { ...validStep, stage: 2 }];
+    expect(() =>
+      validateAndApplyGepaPatch(base, {
+        surface: "hintLadder",
+        summary: "Sparse hint ladder",
+        payload: sparseHintLadder,
+      }),
+    ).toThrow(GepaInvalidPatchPayloadError);
+
+    // 3) Sparse rubricAnchors & establishedPremises arrays -> GepaInvalidPatchPayloadError!
+    const sparseRubric = new Array(2);
+    expect(() =>
+      validateAndApplyGepaPatch(base, {
+        surface: "rubricAnchors",
+        summary: "Sparse rubrics",
+        payload: sparseRubric,
+      }),
+    ).toThrow(GepaInvalidPatchPayloadError);
+
+    // 4) Sparse trajectories in clusterErrorTrajectories -> CartridgePiiViolationError (not TypeError!)
+    // eslint-disable-next-line no-sparse-arrays
+    const sparseTrajs = [makeTrajectory({ trajectoryId: "r13_sp_1" }), , makeTrajectory({ trajectoryId: "r13_sp_2" })] as unknown as ErrorTrajectoryRecord[];
+    expect(() => clusterErrorTrajectories(sparseTrajs)).toThrow(CartridgePiiViolationError);
+
+    // 5) Sparse candidates in evaluateParetoFrontierAndPromotion -> isolates hole cleanly while valid sibling promotes!
+    const validCand = buildMatureCohort("cand_r13_sparse_valid", {
+      learnerCount: 25,
+      repairedCount: 23,
+      t7PassedCount: 24,
+    });
+    // eslint-disable-next-line no-sparse-arrays
+    const sparseCands = [, validCand] as unknown as CartridgeCandidateMetrics[];
+    const sparseRes = evaluateParetoFrontierAndPromotion(sparseCands, {
+      baseline: { cRate: 0.85, t7Rate: 0.72 },
+      minT7Gain: 0.05,
+      nonInferiorityMargin: 0.02,
+      minClusterCount: 5,
+    });
+    expect(sparseRes.promotedCandidateIds).toEqual(["cand_r13_sparse_valid"]);
+    expect(sparseRes.vetoedCandidateIds).toHaveLength(1);
+  });
 });
