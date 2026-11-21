@@ -3,6 +3,7 @@ import { act, createElement, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  analyzeCrossDraftTransfer,
   buildSpeakingPart3Seed,
   evaluateRevisedDraftDeterministically,
   evaluateSpeakingRetelling,
@@ -1240,6 +1241,160 @@ describe("IeltsDraftCritiqueWorkbench", () => {
         epistemicStatus: "practice_feedback",
         masteryQualified: false,
         countsTowardMastery: false,
+      }),
+    });
+  });
+
+  it("resets exposed guidance cleanly on cross-prompt fixture switch without leaking Prompt A or unsubmitted Prompt B draft1 into Prompt B", async () => {
+    const promptAFixture = IELTS_WRITING_SPEAKING_FIXTURE;
+    const promptBTargets = [
+      {
+        id: "museum-target-collocations",
+        category: "targetCollocations" as const,
+        criterion: "LR" as const,
+        label: "博物馆公共财政搭配",
+        targetPatterns: ["tiered entrance fees", "heritage conservation"],
+        weakBaselinePatterns: ["very costly"],
+        guidance: "使用贴合文化公共预算的学术搭配。",
+      },
+      {
+        id: "museum-target-counter",
+        category: "counterargumentDepth" as const,
+        criterion: "TR" as const,
+        label: "反方让步与减免机制",
+        targetPatterns: ["admittedly", "free admission"],
+        guidance: "先让步免费开放的价值，再给出学生与居民减免方案。",
+      },
+    ];
+    const promptBDraft1 = {
+      ...promptAFixture.draft1,
+      draftId: "museum-admission-draft-1",
+      promptId: "ielts-task2-museum-admission-fees",
+      version: 1,
+      paragraphs: [
+        "National museums are very costly to run, so some people think overseas tourists should buy tickets instead of entering for free.",
+        "Tourists already spend money on flights and hotels, so a small fee helps museums repair old buildings and protect ancient collections.",
+        "On the other hand, poor travellers and young students may skip museums if ticket prices rise too high.",
+        "Overall, charging foreign adults while keeping free days for students seems fair.",
+      ],
+    };
+    const promptBDraft1Eval = evaluateRevisedDraftDeterministically({
+      baselineDraft: promptBDraft1,
+      revisedDraft: promptBDraft1,
+      targets: promptBTargets,
+      promptStatement:
+        "Should national museums charge entrance fees to international visitors instead of offering free admission to everyone?",
+      receiptId: "museum-draft1-receipt",
+    });
+    if (!promptBDraft1Eval.ok) throw new Error("Expected valid Prompt B draft1 receipt");
+
+    const promptBEmptyDraft2 = {
+      ...promptAFixture.draft2,
+      draftId: "museum-admission-draft-2",
+      promptId: "ielts-task2-museum-admission-fees",
+      version: 2,
+      basedOnVersion: 1,
+      paragraphs: [] as string[],
+      assisted: false,
+    };
+    const promptBFixture = {
+      ...promptAFixture,
+      promptId: "ielts-task2-museum-admission-fees",
+      promptTitleZh: "国家博物馆：应对国际游客收取门票，还是面向所有人免费开放？",
+      promptStatementEn:
+        "Should national museums charge entrance fees to international visitors instead of offering free admission to everyone?",
+      draft1: promptBDraft1,
+      draft2: promptBEmptyDraft2,
+      draft1Receipt: promptBDraft1Eval.receipt,
+      draft2Receipt: promptBDraft1Eval.receipt,
+      targets: promptBTargets,
+      transferReport: analyzeCrossDraftTransfer({
+        draft1: promptBDraft1,
+        draft2: promptBEmptyDraft2,
+        targets: promptBTargets,
+      }),
+    };
+
+    const onRevisionEvaluated = vi.fn();
+    // Mount Prompt A (preloaded submitted) and submit a revision so Prompt A has latched exposedGuidanceSources.
+    await act(async () =>
+      root.render(
+        createElement(IeltsDraftCritiqueWorkbench, {
+          fixture: promptAFixture,
+          onRevisionEvaluated,
+        }),
+      ),
+    );
+    await act(async () => writingButton("打开改写编辑区").click());
+    const promptATextarea = host.querySelector<HTMLTextAreaElement>('[aria-label="二稿改写编辑区"]')!;
+    await act(async () =>
+      setNativeInputValue(
+        promptATextarea,
+        `${promptATextarea.value} Regional rail networks also stabilise long-run municipal operating costs.`,
+      ),
+    );
+    await act(async () => writingButton("重新分析改写").click());
+    expect(onRevisionEvaluated).toHaveBeenCalledTimes(1);
+    expect(host.querySelector('[data-epistemic-badge="rubric_verified_evidence"]')).not.toBeNull();
+
+    // Re-render the SAME mounted IeltsDraftCritiqueWorkbench instance with fresh unsubmitted Prompt B.
+    await act(async () =>
+      root.render(
+        createElement(IeltsDraftCritiqueWorkbench, {
+          fixture: promptBFixture,
+          onRevisionEvaluated,
+        }),
+      ),
+    );
+
+    expect(host.querySelector('[data-submission-state="unsubmitted"]')).not.toBeNull();
+    expect(host.querySelector("[data-epistemic-badge]")).toBeNull();
+    expect(host.textContent).not.toContain(promptBDraft1.paragraphs[0]!);
+
+    const promptBTextarea = host.querySelector<HTMLTextAreaElement>('[aria-label="二稿改写编辑区"]')!;
+    const promptBCheckbox = host.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    expect(promptBTextarea.value).toBe("");
+    expect(promptBCheckbox.checked).toBe(false);
+    expect(promptBCheckbox.disabled).toBe(false);
+
+    // Clicking Reset on unsubmitted Prompt B MUST NOT carry Prompt A's guidance or unexposed Prompt B draft1 into localAssistedSources.
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-reset-attempt]")!.click());
+    const postResetTextarea = host.querySelector<HTMLTextAreaElement>('[aria-label="二稿改写编辑区"]')!;
+    const postResetCheckbox = host.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    expect(postResetCheckbox.checked).toBe(false);
+    expect(postResetCheckbox.disabled).toBe(false);
+
+    // Verify neither Prompt A's exposed rewrite nor unexposed Prompt B draft1 triggers sticky assistance before submission.
+    await act(async () =>
+      setNativeInputValue(
+        postResetTextarea,
+        `${promptAFixture.draft2Receipt.criteria.TR.evidenceSpans[0]!.upgradeRewrite} ${promptBDraft1.paragraphs[1]!}`,
+      ),
+    );
+    expect(postResetCheckbox.checked).toBe(false);
+    expect(postResetCheckbox.disabled).toBe(false);
+
+    // Now type a genuinely independent Prompt B museum essay (180+ words) and submit -> MUST earn independent verified mastery (assisted: false)!
+    const independentMuseumEssay = [
+      "Cultural ministries regularly debate whether national museums should adopt tiered entrance fees for international visitors instead of preserving universal free admission for everyone. While open doors encourage shared cultural curiosity across borders, modest overseas visitor charges support heritage conservation and maintain fair domestic taxation across crowded metropolitan institutions.",
+      "Operating climate-controlled galleries, scholarly restoration laboratories, security systems, and archival vaults demands substantial annual public budgets. Asking foreign tourists who already fund international flights, local transit, and hotel rooms to pay tiered entrance fees directly supports heritage conservation and exhibition upgrades without increasing payroll burdens on local taxpayers who finance national museums year-round.",
+      "Admittedly, universal free admission encourages visiting students, independent backpackers, and lower-income international travellers to explore landmark world collections without financial anxiety. Museum boards can resolve this barrier cleanly by preserving free admission for domestic residents, children, accredited students, and scheduled weekly community evenings while charging adult overseas tourists during peak hours.",
+      "Overall, pairing tiered entrance fees for international visitors with targeted concessions sustains heritage conservation while protecting broad public access to national galleries. Policymakers should therefore adopt balanced ticketing policies rather than relying solely on strained general cultural grants.",
+    ].join("\n\n");
+    await act(async () => setNativeInputValue(postResetTextarea, independentMuseumEssay));
+    expect(postResetCheckbox.checked).toBe(false);
+    expect(postResetCheckbox.disabled).toBe(false);
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-submit-writing]")!.click());
+    expect(onRevisionEvaluated).toHaveBeenCalledTimes(2);
+    expect(onRevisionEvaluated.mock.lastCall?.[0]).toMatchObject({
+      revisedDraft: expect.objectContaining({
+        promptId: "ielts-task2-museum-admission-fees",
+        assisted: false,
+      }),
+      receipt: expect.objectContaining({
+        epistemicStatus: "rubric_verified_evidence",
+        masteryQualified: true,
+        countsTowardMastery: true,
       }),
     });
   });

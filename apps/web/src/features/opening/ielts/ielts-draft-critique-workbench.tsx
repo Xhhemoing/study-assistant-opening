@@ -144,7 +144,16 @@ function evaluationFingerprint(
 
 const PARAGRAPH_BREAK = /\n\s*\n+/u;
 
-export function IeltsDraftCritiqueWorkbench({
+export function IeltsDraftCritiqueWorkbench(props: IeltsDraftCritiqueWorkbenchProps) {
+  const hasExternalFixture = props.fixture !== undefined;
+  const fixture = props.fixture ?? IELTS_WRITING_SPEAKING_FIXTURE;
+  const isDemoPreview = props.demoFixtureMode === true;
+  const promptBoundaryKey = JSON.stringify([isDemoPreview, hasExternalFixture, fixture.promptId]);
+
+  return <WritingWorkbenchPromptSession key={promptBoundaryKey} {...props} />;
+}
+
+function WritingWorkbenchPromptSession({
   fixture: providedFixture,
   initialView = "draft2",
   initialDraft,
@@ -254,13 +263,15 @@ export function IeltsDraftCritiqueWorkbench({
       : [],
   );
 
-  if (evaluation.authorityFingerprint !== authorityFingerprint) {
+  const isSyncedAuthority = evaluation.authorityFingerprint === authorityFingerprint;
+  if (!isSyncedAuthority) {
     const samePrompt = evaluation.promptId === fixture.promptId;
     setEvaluation({ ...authoritative, cachedFingerprint: null });
     setComposerNeedsText(false);
     setSelectedSpanId(null);
     if (evaluation.attemptKey !== attemptKey) {
       const isOwnWriteBack =
+        samePrompt &&
         revisionCount > 0 &&
         hasExternalFixture &&
         (fixture.draft2.draftId === evaluation.draft2.draftId ||
@@ -328,10 +339,13 @@ export function IeltsDraftCritiqueWorkbench({
   }
 
   const currentlyVisibleGuidance = useMemo(
-    () => (hasSubmitted ? collectVisibleWritingGuidanceSources(fixture, draft2Receipt) : []),
-    [hasSubmitted, fixture, draft2Receipt],
+    () =>
+      isSyncedAuthority && hasSubmitted
+        ? collectVisibleWritingGuidanceSources(fixture, draft2Receipt)
+        : [],
+    [isSyncedAuthority, hasSubmitted, fixture, draft2Receipt],
   );
-  if (hasSubmitted && currentlyVisibleGuidance.length > 0) {
+  if (isSyncedAuthority && hasSubmitted && currentlyVisibleGuidance.length > 0) {
     const missingGuidance = currentlyVisibleGuidance.filter(
       (source) => !exposedGuidanceSources.includes(source),
     );
