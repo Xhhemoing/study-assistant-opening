@@ -282,55 +282,76 @@ export const IELTS_ACADEMIC_V1_BLUEPRINT: ExamBlueprintV1 = {
   ],
 };
 
+export function defineRecordEntry<T>(target: Record<string, T>, key: string, value: T): void {
+  Object.defineProperty(target, key, {
+    value,
+    enumerable: true,
+    writable: true,
+    configurable: true,
+  });
+}
+
 function hasCompleteRawTable(section: ExamSectionBlueprint): boolean {
   const table = section.rawToBandTable;
   const items = section.items;
   if (!table || table.length === 0 || !items || items.length === 0) return false;
+  if (!isValidScoreRange(section.scoreRange)) return false;
   const [minScore, maxScore] = section.scoreRange;
-  const rangeValid = Number.isFinite(minScore) && Number.isFinite(maxScore);
-  for (const row of table) {
-    if (!Number.isFinite(row.score)) return false;
-    if (rangeValid && (row.score < minScore - 1e-9 || row.score > maxScore + 1e-9)) return false;
-  }
   let maxRaw = 0;
   for (const item of items) {
     const pts = item.points ?? 1;
-    if (!Number.isFinite(pts) || !Number.isInteger(pts) || pts <= 0) return false;
+    if (!Number.isSafeInteger(pts) || pts < 1 || pts > 10_000) return false;
     maxRaw += pts;
+    if (!Number.isSafeInteger(maxRaw) || maxRaw > 100_000) return false;
   }
-  for (let raw = 0; raw <= maxRaw; raw++) {
-    if (!table.some((row) => raw >= row.rawMin && raw <= row.rawMax)) return false;
+  const normalizedRows: Array<{ readonly rawMin: number; readonly rawMax: number }> = [];
+  for (const row of table) {
+    if (!Number.isSafeInteger(row.rawMin) || !Number.isSafeInteger(row.rawMax) || row.rawMin > row.rawMax) {
+      return false;
+    }
+    if (!Number.isFinite(row.score) || row.score < minScore || row.score > maxScore) return false;
+    normalizedRows.push({ rawMin: row.rawMin, rawMax: row.rawMax });
   }
-  return true;
+  normalizedRows.sort((a, b) => a.rawMin - b.rawMin || a.rawMax - b.rawMax);
+  if (normalizedRows[0]!.rawMin !== 0) return false;
+  for (let i = 1; i < normalizedRows.length; i++) {
+    if (normalizedRows[i]!.rawMin !== normalizedRows[i - 1]!.rawMax + 1) return false;
+  }
+  return normalizedRows[normalizedRows.length - 1]!.rawMax === maxRaw;
 }
 
 /** Cholesky factor L such that L * L^T ≈ matrix. Rejects asymmetric or non-PSD matrices. */
 export function choleskyDecompose(matrix: readonly (readonly number[])[]): number[][] {
   const n = matrix.length;
-  const lower: number[][] = Array.from({ length: n }, () => Array<number>(n).fill(0));
   for (let i = 0; i < n; i++) {
     const row = matrix[i];
     if (!row || row.length !== n) throw new RangeError("thetaCovariance must be square");
-    const diagEntry = row[i];
-    if (diagEntry === undefined || !Number.isFinite(diagEntry)) {
-      throw new RangeError("thetaCovariance must be finite and symmetric");
-    }
-    for (let j = 0; j <= i; j++) {
+    for (let j = 0; j < n; j++) {
       const entry = row[j];
-      const mirror = matrix[j]?.[i];
-      if (
-        entry === undefined ||
-        mirror === undefined ||
-        !Number.isFinite(entry) ||
-        !Number.isFinite(mirror) ||
-        Math.abs(entry - mirror) > 1e-8 * Math.max(1, Math.abs(entry), Math.abs(mirror))
-      ) {
+      if (entry === undefined || !Number.isFinite(entry)) {
         throw new RangeError("thetaCovariance must be finite and symmetric");
       }
-      let sum = entry;
+    }
+  }
+  for (let i = 0; i < n; i++) {
+    for (let j = 0; j < i; j++) {
+      const a = matrix[i]![j]!;
+      const b = matrix[j]![i]!;
+      const symTol = 1e-10 * Math.sqrt(Math.max(0, matrix[i]![i]!)) * Math.sqrt(Math.max(0, matrix[j]![j]!));
+      if (!Number.isFinite(symTol) || Math.abs(a - b) > symTol) {
+        throw new RangeError("thetaCovariance must be finite and symmetric");
+      }
+    }
+  }
+  const lower: number[][] = Array.from({ length: n }, () => Array<number>(n).fill(0));
+  for (let i = 0; i < n; i++) {
+    const diagEntry = matrix[i]![i]!;
+    for (let j = 0; j <= i; j++) {
+      const symEntry = i === j ? diagEntry : 0.5 * (matrix[i]![j]! + matrix[j]![i]!);
+      let sum = symEntry;
       for (let k = 0; k < j; k++) sum -= lower[i]![k]! * lower[j]![k]!;
       if (i === j) {
-        const localPivotTol = 1e-12 * Math.max(0, entry);
+        const localPivotTol = 1e-12 * Math.max(0, diagEntry);
         if (sum > 0) {
           lower[i]![j] = Math.sqrt(sum);
         } else if (sum >= -localPivotTol) {
@@ -377,6 +398,13 @@ function isValidTimeModel(tm: ExamTimeModel): boolean {
   return true;
 }
 
+const CANONICAL_IELTS_SECTIONS = [
+  { sectionId: "listening", scoringKind: "item_raw_table" },
+  { sectionId: "reading", scoringKind: "item_raw_table" },
+  { sectionId: "writing", scoringKind: "rubric_band" },
+  { sectionId: "speaking", scoringKind: "rubric_band" },
+] as const;
+
 export function validateExamBlueprint(blueprint: ExamBlueprintV1): string[] {
   const missing: string[] = [];
   if (blueprint.schemaVersion !== 1 || !blueprint.blueprintId.trim()) missing.push("blueprintId");
@@ -397,8 +425,49 @@ export function validateExamBlueprint(blueprint: ExamBlueprintV1): string[] {
   ) {
     missing.push("thetaCovariance");
   }
+  const isCanonicalIelts =
+    blueprint.aggregationMode === "ielts_overall_half_up" ||
+    blueprint.blueprintId === "ielts-academic-v1" ||
+    blueprint.blueprintId === "ielts_academic_v1";
+  if (isCanonicalIelts) {
+    if (blueprint.aggregationMode !== "ielts_overall_half_up") missing.push("aggregationMode");
+    if (blueprint.scoreRange[0] !== 0 || blueprint.scoreRange[1] !== 9) missing.push("scoreRange");
+    if (blueprint.scoreStep !== 0.5) missing.push("scoreStep");
+    const byId = new Map<string, ExamSectionBlueprint>();
+    for (const sec of blueprint.sections) {
+      if (byId.has(sec.sectionId)) {
+        missing.push(`sections.${sec.sectionId}.duplicate`);
+      } else {
+        byId.set(sec.sectionId, sec);
+      }
+    }
+    if (blueprint.sections.length !== CANONICAL_IELTS_SECTIONS.length) {
+      missing.push("sections.ieltsCanonicalCount");
+    }
+    for (const expected of CANONICAL_IELTS_SECTIONS) {
+      const found = byId.get(expected.sectionId);
+      if (!found) {
+        missing.push(`sections.${expected.sectionId}`);
+        continue;
+      }
+      if (found.scoringKind !== expected.scoringKind) {
+        missing.push(`sections.${expected.sectionId}.scoringKind`);
+      }
+      if (found.scoreRange[0] !== 0 || found.scoreRange[1] !== 9) {
+        missing.push(`sections.${expected.sectionId}.scoreRange`);
+      }
+      if (found.scoreStep !== 0.5) {
+        missing.push(`sections.${expected.sectionId}.scoreStep`);
+      }
+    }
+  }
+  const seenSectionIds = new Set<string>();
   const skillSet = new Set(blueprint.skillIds);
   for (const section of blueprint.sections) {
+    if (seenSectionIds.has(section.sectionId)) {
+      missing.push(`sections.${section.sectionId}.duplicate`);
+    }
+    seenSectionIds.add(section.sectionId);
     if (blueprint.clockMode === "section_independent") {
       if (section.timeLimitMinutes == null || !Number.isFinite(section.timeLimitMinutes) || section.timeLimitMinutes <= 0) {
         missing.push(`sections.${section.sectionId}.timeLimitMinutes`);
@@ -412,6 +481,7 @@ export function validateExamBlueprint(blueprint: ExamBlueprintV1): string[] {
       if (!section.items || section.items.length === 0) {
         missing.push(`sections.${section.sectionId}.items`);
       } else {
+        let totalRawPoints = 0;
         for (const item of section.items) {
           if (item.skillIds.length === 0 || item.skillIds.some((id) => !skillSet.has(id))) {
             missing.push(`sections.${section.sectionId}.items.${item.itemId}.qMatrix`);
@@ -421,8 +491,14 @@ export function validateExamBlueprint(blueprint: ExamBlueprintV1): string[] {
             missing.push(`sections.${section.sectionId}.items.${item.itemId}.guessLapse`);
             break;
           }
-          if (item.points !== undefined && (!Number.isFinite(item.points) || !Number.isInteger(item.points) || item.points <= 0)) {
+          const pts = item.points ?? 1;
+          if (!Number.isSafeInteger(pts) || pts < 1 || pts > 10_000) {
             missing.push(`sections.${section.sectionId}.items.${item.itemId}.points`);
+            break;
+          }
+          totalRawPoints += pts;
+          if (!Number.isSafeInteger(totalRawPoints) || totalRawPoints > 100_000) {
+            missing.push(`sections.${section.sectionId}.items.totalPoints`);
             break;
           }
           if (!isValidTimeModel(item.timeModel)) {

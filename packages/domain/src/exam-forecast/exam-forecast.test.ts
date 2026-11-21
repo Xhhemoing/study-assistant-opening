@@ -2085,4 +2085,428 @@ describe("CRN marginal ROI sandbox & UnifiedDecisionSnapshotV1", () => {
       expect(outOfRangeForecast.calibrationCount).toBe(2);
     }
   });
+
+  it("enforces all Round-7 5 P1 & 6 P2 invariants", () => {
+    const beliefs = makeIeltsBeliefs({ abilityMean: 0.4, logStability: Math.log(14), lastDirectRecallAtMs: 0 });
+    const evidence = makeIndependentSectionEvidence(1_000);
+
+    // [R7 P1-1] Missing canonical IELTS section fails validateExamBlueprint, evaluateExamForecast, and simulateExamPaper.
+    const noListeningBp = {
+      ...IELTS_ACADEMIC_V1_BLUEPRINT,
+      sections: IELTS_ACADEMIC_V1_BLUEPRINT.sections.filter((sec) => sec.sectionId !== "listening"),
+    };
+    expect(validateExamBlueprint(noListeningBp)).toContain("sections.listening");
+    const noListeningForecast = evaluateExamForecast({
+      blueprint: noListeningBp,
+      learnerId: "learner-target",
+      beliefs,
+      evidence: evidence.filter((e) => e.sectionId !== "listening"),
+      calibrationRecords: makeCalibrationRecords(4),
+      examAtMs: DAY_MS,
+    });
+    expect(noListeningForecast.status).toBe("insufficient_blueprint");
+    expect(() =>
+      simulateExamPaper({ blueprint: noListeningBp, learnerId: "learner-target", beliefs, evidence, examAtMs: DAY_MS }),
+    ).toThrow(RangeError);
+
+    // [R7 P1-2] Prototype-safe dictionaries for sectionId/partId "__proto__".
+    const protoSectionBp = createSharedFullPaperBlueprint({
+      blueprintId: "proto-section-bp",
+      title: "Prototype-Safe Section Key",
+      totalTimeLimitMinutes: 60,
+      totalPoints: 9,
+      skillIds: ["__proto__"],
+      sections: [
+        {
+          sectionId: "__proto__",
+          label: "Proto Section",
+          scoringKind: "rubric_band",
+          timeLimitMinutes: null,
+          weight: 1,
+          scoreRange: [0, 9],
+          scoreStep: 0.5,
+          parts: [
+            {
+              partId: "__proto__",
+              label: "Proto Part",
+              weight: 1,
+              skillIds: ["__proto__"],
+              timeModel: { mu: Math.log(60), speedLoading: 0, skillLoading: {}, sigma: 0.01 },
+            },
+          ],
+        },
+      ],
+      thetaCovariance: [[0]],
+    });
+    const protoAnchoredSim = simulateExamPaper({
+      blueprint: protoSectionBp,
+      learnerId: "learner-target",
+      beliefs: {
+        ["__proto__"]: createSkillBelief({
+          workspaceId: "w",
+          learnerId: "learner-target",
+          courseId: "c",
+          confirmedSkillVersion: 1,
+          abilityMean: 0,
+          abilityVariance: 0,
+          lastDirectRecallAtMs: 0,
+        }),
+      },
+      evidence: [
+        {
+          evidenceId: "ev-proto",
+          learnerId: "learner-target",
+          sectionId: "__proto__",
+          partId: "__proto__",
+          countsTowardMastery: true,
+          assisted: false,
+          evidenceKind: "rubric_assessment",
+          observedAtMs: 1_000,
+          rubricScore: { kind: "exact", score: 7 },
+        },
+      ],
+      examAtMs: 1_000,
+      numDraws: 12,
+      seed: 19,
+    });
+    expect(protoAnchoredSim.timedExpectedScore).toBe(7);
+    expect(Object.getPrototypeOf(protoAnchoredSim.sectionSummaries)).toBe(Object.prototype);
+    expect(Object.hasOwn(protoAnchoredSim.sectionSummaries, "__proto__")).toBe(true);
+    expect(Object.getOwnPropertyDescriptor(protoAnchoredSim.sectionSummaries, "__proto__")?.value.timedMeanScore).toBe(7);
+    expect(Object.hasOwn(protoAnchoredSim.rightCensoringRateBySection, "__proto__")).toBe(true);
+    expect(({} as Record<string, unknown>)["timedMeanScore"]).toBeUndefined();
+
+    // [R7 P1-3] Reject huge item points (2 ** 53) immediately without hanging hasCompleteRawTable.
+    const hugePointsBp = {
+      ...IELTS_ACADEMIC_V1_BLUEPRINT,
+      sections: IELTS_ACADEMIC_V1_BLUEPRINT.sections.map((sec) =>
+        sec.sectionId === "listening" && sec.items
+          ? {
+              ...sec,
+              items: [{ ...sec.items[0]!, points: 2 ** 53 }, ...sec.items.slice(1)],
+            }
+          : sec,
+      ),
+    };
+    const hugeStart = performance.now();
+    const hugeErrors = validateExamBlueprint(hugePointsBp);
+    expect(performance.now() - hugeStart).toBeLessThan(100);
+    expect(hugeErrors).toContain("sections.listening.items.ielts-l-1.points");
+    expect(hugeErrors).toContain("sections.listening.rawToBandTable");
+
+    // [R7 P1-4] Reject post-exam / future calibration records (recordedAtMs > examAtMs).
+    const futureCal = makeCalibrationRecords(4).map((rec) => ({
+      ...rec,
+      recordedAtMs: DAY_MS + 1,
+    }));
+    expect(
+      filterIndependentCalibrationRecords({
+        records: futureCal,
+        blueprintId: IELTS_ACADEMIC_V1_BLUEPRINT.blueprintId,
+        targetKind: "same_blueprint_mock",
+        scoreRange: IELTS_ACADEMIC_V1_BLUEPRINT.scoreRange,
+        sectionRanges: new Map(IELTS_ACADEMIC_V1_BLUEPRINT.sections.map((s) => [s.sectionId, s.scoreRange] as const)),
+        examAtMs: DAY_MS,
+      }),
+    ).toEqual([]);
+    const simDefault = simulateExamPaper({
+      blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+      learnerId: "learner-target",
+      beliefs,
+      evidence,
+      examAtMs: DAY_MS,
+      seed: 42,
+    });
+    const futureJoint = calibrateJointPassTargets({
+      simulation: simDefault,
+      blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+      calibrationRecords: futureCal,
+      targets: [{ targetOverall: 7.0, targetMinSection: 6.5 }],
+      examAtMs: DAY_MS,
+    });
+    expect(futureJoint[0]!.calibrationSampleCount).toBe(0);
+    expect(futureJoint[0]!.isCalibrated).toBe(false);
+    const futureForecast = evaluateExamForecast({
+      blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+      learnerId: "learner-target",
+      beliefs,
+      evidence,
+      calibrationRecords: futureCal,
+      examAtMs: DAY_MS,
+    });
+    expect(futureForecast.status).toBe("insufficient_independent_evidence");
+    if (futureForecast.status === "insufficient_independent_evidence") {
+      expect(futureForecast.calibrationCount).toBe(0);
+    }
+
+    // [R7 P1-5] Section floor checks each section's scoreRange[0], never blueprint.scoreRange[0].
+    const signedSplitBp = createSharedFullPaperBlueprint({
+      blueprintId: "signed-split-bp",
+      title: "Signed Split Sections",
+      totalTimeLimitMinutes: 60,
+      totalPoints: 20,
+      skillIds: ["s1", "s2"],
+      sections: [
+        {
+          sectionId: "sec1",
+          label: "Sec 1",
+          scoringKind: "rubric_band",
+          timeLimitMinutes: null,
+          weight: 0.5,
+          scoreRange: [-5, 5],
+          scoreStep: 1,
+          parts: [{ partId: "p1", label: "P1", weight: 1, skillIds: ["s1"], timeModel: { mu: Math.log(120), speedLoading: 0, skillLoading: {}, sigma: 0.01 } }],
+        },
+        {
+          sectionId: "sec2",
+          label: "Sec 2",
+          scoringKind: "rubric_band",
+          timeLimitMinutes: null,
+          weight: 0.5,
+          scoreRange: [0, 10],
+          scoreStep: 1,
+          parts: [{ partId: "p2", label: "P2", weight: 1, skillIds: ["s2"], timeModel: { mu: Math.log(120), speedLoading: 0, skillLoading: {}, sigma: 0.01 } }],
+        },
+      ],
+    });
+    const signedSim = simulateExamPaper({ blueprint: signedSplitBp, learnerId: "l", beliefs: {}, evidence: [], examAtMs: DAY_MS, numDraws: 20, seed: 3 });
+    const signedOmittedSec = calibrateJointPassTargets({
+      simulation: signedSim,
+      blueprint: signedSplitBp,
+      calibrationRecords: [
+        {
+          recordId: "signed-1",
+          learnerId: "cal-u1",
+          paperFamilyId: "fam-1",
+          blueprintId: "signed-split-bp",
+          targetKind: "same_blueprint_mock",
+          evidenceKind: "independent_mock",
+          assisted: false,
+          countsTowardMastery: true,
+          predictedQuantiles: { q10: 2, q50: 5, q90: 8 },
+          predictedTargetPassProbs: [{ targetOverall: 5, targetMinSection: 0, rawProbability: 0.6 }],
+          observedScore: { kind: "exact", score: 5 },
+          recordedAtMs: 1_000,
+        },
+      ],
+      targets: [{ targetOverall: 5, targetMinSection: 0 }],
+      minCalibrationSamples: 1,
+    });
+    expect(signedOmittedSec[0]!.calibratedProbability).toBe(0);
+
+    const greBp = {
+      ...createSharedFullPaperBlueprint({
+        blueprintId: "gre-like-bp",
+        title: "GRE Scale",
+        totalTimeLimitMinutes: 120,
+        totalPoints: 340,
+        skillIds: ["v", "q"],
+        sections: [
+          {
+            sectionId: "verbal",
+            label: "Verbal",
+            scoringKind: "rubric_band",
+            timeLimitMinutes: null,
+            weight: 1,
+            scoreRange: [130, 170],
+            scoreStep: 1,
+            parts: [{ partId: "vp", label: "VP", weight: 1, skillIds: ["v"], timeModel: { mu: Math.log(120), speedLoading: 0, skillLoading: {}, sigma: 0.01 } }],
+          },
+          {
+            sectionId: "quant",
+            label: "Quant",
+            scoringKind: "rubric_band",
+            timeLimitMinutes: null,
+            weight: 1,
+            scoreRange: [130, 170],
+            scoreStep: 1,
+            parts: [{ partId: "qp", label: "QP", weight: 1, skillIds: ["q"], timeModel: { mu: Math.log(120), speedLoading: 0, skillLoading: {}, sigma: 0.01 } }],
+          },
+        ],
+      }),
+      scoreRange: [260, 340] as const,
+    };
+    const greSim = simulateExamPaper({ blueprint: greBp, learnerId: "l", beliefs: {}, evidence: [], examAtMs: DAY_MS, numDraws: 20, seed: 5 });
+    const greOmittedSec = calibrateJointPassTargets({
+      simulation: greSim,
+      blueprint: greBp,
+      calibrationRecords: [
+        {
+          recordId: "gre-1",
+          learnerId: "cal-u2",
+          paperFamilyId: "fam-gre",
+          blueprintId: "gre-like-bp",
+          targetKind: "same_blueprint_mock",
+          evidenceKind: "independent_mock",
+          assisted: false,
+          countsTowardMastery: true,
+          predictedQuantiles: { q10: 310, q50: 325, q90: 335 },
+          predictedTargetPassProbs: [{ targetOverall: 320, targetMinSection: 160, rawProbability: 0.8 }],
+          observedScore: { kind: "exact", score: 325 },
+          recordedAtMs: 1_000,
+        },
+      ],
+      targets: [{ targetOverall: 320, targetMinSection: 160 }],
+      minCalibrationSamples: 1,
+    });
+    expect(greOmittedSec[0]!.calibratedProbability).toBe(0);
+
+    // [R7 P2-1 + P2-2] Zero 1e-9 boundary slack: 9 + 5e-10 strictly rejected.
+    const tinyOver = 9 + 5e-10;
+    const slackTableBp = {
+      ...IELTS_ACADEMIC_V1_BLUEPRINT,
+      sections: IELTS_ACADEMIC_V1_BLUEPRINT.sections.map((sec) =>
+        sec.sectionId === "listening" && sec.rawToBandTable
+          ? {
+              ...sec,
+              rawToBandTable: sec.rawToBandTable.map((row, idx) =>
+                idx === sec.rawToBandTable!.length - 1 ? { ...row, score: tinyOver } : row,
+              ),
+            }
+          : sec,
+      ),
+    };
+    expect(validateExamBlueprint(slackTableBp)).toContain("sections.listening.rawToBandTable");
+    const slackCal = makeCalibrationRecords(4).map((rec, idx) =>
+      idx === 0
+        ? { ...rec, observedScore: { kind: "exact" as const, score: tinyOver } }
+        : idx === 1
+          ? { ...rec, observedSectionScores: { listening: tinyOver, reading: 7, writing: 7, speaking: 7 } }
+          : rec,
+    );
+    expect(
+      filterIndependentCalibrationRecords({
+        records: slackCal,
+        blueprintId: IELTS_ACADEMIC_V1_BLUEPRINT.blueprintId,
+        targetKind: "same_blueprint_mock",
+        scoreRange: IELTS_ACADEMIC_V1_BLUEPRINT.scoreRange,
+        sectionRanges: new Map(IELTS_ACADEMIC_V1_BLUEPRINT.sections.map((s) => [s.sectionId, s.scoreRange] as const)),
+      }).length,
+    ).toBe(2);
+    expect(
+      calibrateJointPassTargets({
+        simulation: simDefault,
+        blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+        calibrationRecords: slackCal,
+        targets: [{ targetOverall: 7.0, targetMinSection: 6.5 }],
+      })[0]!.calibrationSampleCount,
+    ).toBe(2);
+
+    // [R7 P2-3] Default simulation draw count is 512 across all entry points.
+    expect(simDefault.numDraws).toBe(512);
+    const cal5 = makeCalibrationRecords(5);
+    const forecastOmitted = evaluateExamForecast({
+      blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+      learnerId: "learner-target",
+      beliefs,
+      evidence,
+      calibrationRecords: cal5,
+      examAtMs: DAY_MS,
+      seed: 42,
+    });
+    const forecastExplicit512 = evaluateExamForecast({
+      blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+      learnerId: "learner-target",
+      beliefs,
+      evidence,
+      calibrationRecords: cal5,
+      examAtMs: DAY_MS,
+      numDraws: 512,
+      seed: 42,
+    });
+    expect(forecastOmitted).toEqual(forecastExplicit512);
+    const roiOmitted = evaluateCrnActionRoi({
+      blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+      learnerId: "learner-target",
+      beliefs,
+      evidence,
+      examAtMs: DAY_MS,
+      baselineActions: [],
+      candidateAction: { actionId: "drill", title: "Drill", durationHours: 1, kind: "speed_drill", expectedSpeedShift: 0.5 },
+      crnSeed: 42,
+    });
+    const roiExplicit512 = evaluateCrnActionRoi({
+      blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+      learnerId: "learner-target",
+      beliefs,
+      evidence,
+      examAtMs: DAY_MS,
+      baselineActions: [],
+      candidateAction: { actionId: "drill", title: "Drill", durationHours: 1, kind: "speed_drill", expectedSpeedShift: 0.5 },
+      crnSeed: 42,
+      numDraws: 512,
+    });
+    expect(roiOmitted).toEqual(roiExplicit512);
+
+    // [R7 P2-4] Scale-relative & permutation-invariant symmetry check rejects tiny-diagonal asymmetry.
+    expect(() =>
+      choleskyDecompose([
+        [1e-12, 5e-9],
+        [0, 1e-12],
+      ]),
+    ).toThrow(/symmetric/);
+    expect(() =>
+      choleskyDecompose([
+        [1e-12, 0],
+        [5e-9, 1e-12],
+      ]),
+    ).toThrow(/symmetric/);
+
+    // [R7 P2-5] Partially completed rubric clock-overrun items are captured in sampleRightCensoredItems.
+    const overrunRubricBp = createSharedFullPaperBlueprint({
+      blueprintId: "overrun-rubric-bp",
+      title: "Overrun Rubric Capture",
+      totalTimeLimitMinutes: 1,
+      totalPoints: 10,
+      skillIds: ["s1"],
+      sections: [
+        {
+          sectionId: "essay",
+          label: "Essay",
+          scoringKind: "rubric_band",
+          timeLimitMinutes: null,
+          weight: 1,
+          scoreRange: [0, 10],
+          scoreStep: 1,
+          parts: [
+            {
+              partId: "essay-overrun",
+              label: "Essay",
+              weight: 1,
+              skillIds: ["s1"],
+              timeModel: { mu: Math.log(120), speedLoading: 0, skillLoading: {}, sigma: 0.001 },
+            },
+          ],
+        },
+      ],
+    });
+    const overrunSim = simulateExamPaper({
+      blueprint: overrunRubricBp,
+      learnerId: "l",
+      beliefs: {},
+      evidence: [],
+      examAtMs: DAY_MS,
+      numDraws: 10,
+      seed: 7,
+    });
+    expect(overrunSim.rightCensoringRateBySection["essay"]).toBe(1);
+    expect(overrunSim.sampleRightCensoredItems.length).toBeGreaterThan(0);
+    expect(overrunSim.sampleRightCensoredItems[0]).toMatchObject({
+      sectionId: "essay",
+      partId: "essay-overrun",
+      attempted: true,
+      rightCensored: true,
+      observedTimeSeconds: 60,
+    });
+
+    // [R7 Neon P2-3] Reject non-finite JointPassTarget thresholds up front.
+    expect(() =>
+      calibrateJointPassTargets({
+        simulation: simDefault,
+        blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+        calibrationRecords: cal5,
+        targets: [{ targetOverall: Number.NaN, targetMinSection: 6.5 }],
+      }),
+    ).toThrow(RangeError);
+  });
 });

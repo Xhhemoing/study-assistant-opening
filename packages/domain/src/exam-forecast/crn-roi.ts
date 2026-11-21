@@ -1,6 +1,7 @@
 import { evaluateExamForecast } from "./cqr-calibration";
 import { validateExamBlueprint } from "./ielts-blueprint";
 import {
+  DEFAULT_EXAM_SIMULATION_DRAWS,
   generatePaperRandomDraws,
   partitionExamEvidence,
   resolveDrawsCount,
@@ -77,7 +78,7 @@ export function evaluateCrnActionRoi(input: EvaluateCrnActionRoiInput): CrnActio
   if (!(input.candidateAction.durationHours > 0) || !Number.isFinite(input.candidateAction.durationHours)) {
     throw new RangeError("candidateAction.durationHours must be positive and finite");
   }
-  const numDraws = resolveDrawsCount(input.numDraws, input.precomputedDraws, 400);
+  const numDraws = resolveDrawsCount(input.numDraws, input.precomputedDraws, DEFAULT_EXAM_SIMULATION_DRAWS);
   const draws =
     input.precomputedDraws ?? generatePaperRandomDraws(input.blueprint, numDraws, input.crnSeed);
 
@@ -206,7 +207,7 @@ export function buildUnifiedDecisionSnapshot(input: {
   if (!Number.isFinite(input.horizonHours) || input.horizonHours < 0) {
     throw new RangeError("horizonHours must be finite and non-negative");
   }
-  const numDraws = validateNumDraws(input.numDraws, 400);
+  const numDraws = validateNumDraws(input.numDraws, DEFAULT_EXAM_SIMULATION_DRAWS);
   const rawExec = input.executableMinutes ?? input.horizonHours * 60;
   const executableMinutes = Number.isFinite(rawExec) ? Math.max(0, Math.floor(rawExec)) : 0;
   const policyMode: PolicyMode = input.horizonHours <= 72 ? "sprint_72h" : "cycle_90d";

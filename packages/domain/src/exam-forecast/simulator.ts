@@ -2,7 +2,7 @@ import { retrievability, type SkillBeliefV1 } from "../epistemic/belief";
 import {
   choleskyDecompose,
   computeIeltsOverallBand,
-  computeWritingBand,
+  defineRecordEntry,
   rawScoreToBand,
   snapToScoreGrid,
   validateExamBlueprint,
@@ -22,11 +22,12 @@ import type {
 } from "./types";
 
 export const MAX_SIMULATION_DRAWS = 50_000;
+export const DEFAULT_EXAM_SIMULATION_DRAWS = 512;
 
 const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value));
 const sigmoid = (x: number): number => (x >= 0 ? 1 / (1 + Math.exp(-x)) : Math.exp(x) / (1 + Math.exp(x)));
 
-export function validateNumDraws(numDraws: number | undefined, fallback = 400): number {
+export function validateNumDraws(numDraws: number | undefined, fallback = DEFAULT_EXAM_SIMULATION_DRAWS): number {
   const n = numDraws ?? fallback;
   if (!Number.isInteger(n) || n < 1 || n > MAX_SIMULATION_DRAWS) {
     throw new RangeError(`numDraws must be an integer in [1, ${MAX_SIMULATION_DRAWS}]`);
@@ -37,7 +38,7 @@ export function validateNumDraws(numDraws: number | undefined, fallback = 400): 
 export function resolveDrawsCount(
   numDraws: number | undefined,
   precomputedDraws?: readonly PaperRandomDraw[],
-  fallback = 400,
+  fallback = DEFAULT_EXAM_SIMULATION_DRAWS,
 ): number {
   const explicitCount = numDraws !== undefined ? validateNumDraws(numDraws, fallback) : undefined;
   if (precomputedDraws !== undefined) {
@@ -700,6 +701,18 @@ function simulateRubricSectionDraw(input: {
           usedSec = input.sectionLimitSec;
           const completionRatio = clamp(remaining / partDuration, 0.35, 1);
           timedPartScore = clamp(minB + (untimedPartScore - minB) * completionRatio, minB, maxB);
+          if (input.captureCensored) {
+            censoredItems.push({
+              itemId: part.partId,
+              sectionId: input.section.sectionId,
+              partId: part.partId,
+              attempted: true,
+              correct: false,
+              rightCensored: true,
+              observedTimeSeconds: remaining,
+              successProbability: 0,
+            });
+          }
         } else {
           usedSec += partDuration;
         }
@@ -782,7 +795,7 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
   if (!trimmedLearnerId) {
     throw new RangeError("learnerId must be a non-empty string");
   }
-  const numDraws = resolveDrawsCount(input.numDraws, input.precomputedDraws, 400);
+  const numDraws = resolveDrawsCount(input.numDraws, input.precomputedDraws, DEFAULT_EXAM_SIMULATION_DRAWS);
   const draws = input.precomputedDraws ?? generatePaperRandomDraws(blueprint, numDraws, input.seed ?? 20261121);
   const ranges = sectionRangesMap(blueprint);
   const partIds = sectionPartIdsMap(blueprint);
@@ -862,11 +875,26 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
     drawCensoredItems.push(...res.censoredItems);
   };
 
+  const readRequiredOwnScore = (map: Readonly<Record<string, number>>, sectionId: string): number => {
+    if (!Object.hasOwn(map, sectionId)) {
+      throw new RangeError(`Missing IELTS section score for "${sectionId}"`);
+    }
+    const value = map[sectionId]!;
+    if (!Number.isFinite(value)) {
+      throw new RangeError(`Non-finite IELTS section score for "${sectionId}"`);
+    }
+    return value;
+  };
+
   for (const draw of draws) {
     const mBySkill: Record<string, number> = Object.create(null) as Record<string, number>;
     for (let k = 0; k < blueprint.skillIds.length; k++) {
       const z = draw.zLatent[k] ?? 0;
-      mBySkill[blueprint.skillIds[k]!] = clamp(skillParams.rd[k]! * sigmoid(skillParams.mu[k]! + skillParams.sd[k]! * z), 0, 1);
+      defineRecordEntry(
+        mBySkill,
+        blueprint.skillIds[k]!,
+        clamp(skillParams.rd[k]! * sigmoid(skillParams.mu[k]! + skillParams.sd[k]! * z), 0, 1),
+      );
     }
 
     const nu = draw.nuSpeed + speedShift;
@@ -879,7 +907,7 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
         : Infinity;
 
     const timedSectionBand: Record<string, number> = {};
-    const matchedUntimedSectionBand: Record<string, number> = {};
+    const matchedUntimedSectionBand: Record<string, number> = Object.create(null) as Record<string, number>;
     const untimedSectionDistributions = new Map<string, ReadonlyMap<number, number>>();
     const untimedContinuousSections = new Map<string, number>();
     const drawCensoredItems: SimulatedItemOutcome[] = [];
@@ -905,8 +933,8 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
         itemCursor = res.nextItemCursor;
         if (blueprint.clockMode === "shared_full_paper") sharedClockUsedSec = res.finalClockUsedSec;
         recordCensoringStats(section.sectionId, drawCensoredItems, res);
-        timedSectionBand[section.sectionId] = res.timedScore;
-        matchedUntimedSectionBand[section.sectionId] = res.matchedUntimedScore;
+        defineRecordEntry(timedSectionBand, section.sectionId, res.timedScore);
+        defineRecordEntry(matchedUntimedSectionBand, section.sectionId, res.matchedUntimedScore);
         sectionTimedTotal.set(section.sectionId, (sectionTimedTotal.get(section.sectionId) ?? 0) + res.timedScore);
         untimedSectionDistributions.set(section.sectionId, res.untimedDist);
         sectionUntimedTotal.set(section.sectionId, (sectionUntimedTotal.get(section.sectionId) ?? 0) + res.untimedMean);
@@ -927,8 +955,8 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
         rubricCursor = res.nextRubricCursor;
         if (blueprint.clockMode === "shared_full_paper") sharedClockUsedSec = res.finalClockUsedSec;
         recordCensoringStats(section.sectionId, drawCensoredItems, res);
-        timedSectionBand[section.sectionId] = res.timedScore;
-        matchedUntimedSectionBand[section.sectionId] = res.untimedScore;
+        defineRecordEntry(timedSectionBand, section.sectionId, res.timedScore);
+        defineRecordEntry(matchedUntimedSectionBand, section.sectionId, res.untimedScore);
         untimedContinuousSections.set(section.sectionId, res.untimedScore);
         sectionTimedTotal.set(section.sectionId, (sectionTimedTotal.get(section.sectionId) ?? 0) + res.timedScore);
         sectionUntimedTotal.set(section.sectionId, (sectionUntimedTotal.get(section.sectionId) ?? 0) + res.untimedScore);
@@ -940,20 +968,26 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
 
     const drawWeight = 1 / draws.length;
     if (blueprint.aggregationMode === "ielts_overall_half_up") {
-      const listening = timedSectionBand["listening"] ?? 0;
-      const reading = timedSectionBand["reading"] ?? 0;
-      const writing = timedSectionBand["writing"] ?? computeWritingBand(0, 0);
-      const speaking = timedSectionBand["speaking"] ?? 0;
+      const listening = readRequiredOwnScore(timedSectionBand, "listening");
+      const reading = readRequiredOwnScore(timedSectionBand, "reading");
+      const writing = readRequiredOwnScore(timedSectionBand, "writing");
+      const speaking = readRequiredOwnScore(timedSectionBand, "speaking");
       timedScores.push(computeIeltsOverallBand({ listening, reading, writing, speaking }));
 
-      const uL = matchedUntimedSectionBand["listening"] ?? 0;
-      const uR = matchedUntimedSectionBand["reading"] ?? 0;
-      const uW = untimedContinuousSections.get("writing") ?? writing;
-      const uS = untimedContinuousSections.get("speaking") ?? speaking;
+      const uL = readRequiredOwnScore(matchedUntimedSectionBand, "listening");
+      const uR = readRequiredOwnScore(matchedUntimedSectionBand, "reading");
+      const uW = untimedContinuousSections.get("writing");
+      const uS = untimedContinuousSections.get("speaking");
+      if (uW === undefined || uS === undefined || !Number.isFinite(uW) || !Number.isFinite(uS)) {
+        throw new RangeError("Missing continuous IELTS rubric section score");
+      }
       untimedScores.push(computeIeltsOverallBand({ listening: uL, reading: uR, writing: uW, speaking: uS }));
 
-      const lDist = untimedSectionDistributions.get("listening") ?? new Map([[listening, 1]]);
-      const rDist = untimedSectionDistributions.get("reading") ?? new Map([[reading, 1]]);
+      const lDist = untimedSectionDistributions.get("listening");
+      const rDist = untimedSectionDistributions.get("reading");
+      if (!lDist || !rDist) {
+        throw new RangeError("Missing IELTS untimed section distribution");
+      }
       for (const [bL, pL] of lDist.entries()) {
         for (const [bR, pR] of rDist.entries()) {
           const prob = pL * pR * drawWeight;
@@ -964,10 +998,16 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
         }
       }
     } else {
-      const totalTimed = blueprint.sections.reduce((s, sec) => s + sec.weight * (timedSectionBand[sec.sectionId] ?? 0), 0);
+      const totalTimed = blueprint.sections.reduce(
+        (s, sec) => s + sec.weight * (Object.hasOwn(timedSectionBand, sec.sectionId) ? timedSectionBand[sec.sectionId]! : 0),
+        0,
+      );
       timedScores.push(snapToScoreGrid(totalTimed, blueprint.scoreRange, blueprint.scoreStep, "nearest"));
       const totalMatchedUntimed = blueprint.sections.reduce(
-        (s, sec) => s + sec.weight * (matchedUntimedSectionBand[sec.sectionId] ?? 0),
+        (s, sec) =>
+          s +
+          sec.weight *
+            (Object.hasOwn(matchedUntimedSectionBand, sec.sectionId) ? matchedUntimedSectionBand[sec.sectionId]! : 0),
         0,
       );
       untimedScores.push(snapToScoreGrid(totalMatchedUntimed, blueprint.scoreRange, blueprint.scoreStep, "nearest"));
@@ -993,22 +1033,17 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
     for (const part of section.parts) {
       const pTotal = secTotalParts?.get(part.partId) ?? 0;
       const rateValue = pTotal > 0 ? (secCensoredParts?.get(part.partId) ?? 0) / pTotal : 0;
-      Object.defineProperty(partRates, part.partId, {
-        value: rateValue,
-        enumerable: true,
-        configurable: true,
-        writable: true,
-      });
+      defineRecordEntry(partRates, part.partId, rateValue);
     }
-    rightCensoringRateBySection[sid] = rate;
-    sectionSummaries[sid] = {
+    defineRecordEntry(rightCensoringRateBySection, sid, rate);
+    defineRecordEntry(sectionSummaries, sid, {
       sectionId: sid,
       timedMeanScore: (sectionTimedTotal.get(sid) ?? 0) / draws.length,
       untimedMeanScore: (sectionUntimedTotal.get(sid) ?? 0) / draws.length,
       rightCensoringRate: rate,
       censoredItemFraction: totalSecItems > 0 ? censoredSecItems / totalSecItems : 0,
       partCensoringRates: partRates,
-    };
+    });
   }
 
   const untimedScoreDistribution: ScoreBucketProbability[] = [...untimedOverallPmf.entries()]

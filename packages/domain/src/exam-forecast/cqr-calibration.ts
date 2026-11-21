@@ -1,6 +1,13 @@
 import { IELTS_ACADEMIC_V1_BLUEPRINT, snapToScoreGrid, validateExamBlueprint } from "./ielts-blueprint";
 import { IELTS_ACADEMIC_DIAGNOSTIC_SEEDS } from "./ielts-diagnostic-seeds";
-import { partitionExamEvidence, sectionPartIdsMap, sectionRangesMap, simulateExamPaper, validateNumDraws } from "./simulator";
+import {
+  DEFAULT_EXAM_SIMULATION_DRAWS,
+  partitionExamEvidence,
+  sectionPartIdsMap,
+  sectionRangesMap,
+  simulateExamPaper,
+  validateNumDraws,
+} from "./simulator";
 import type {
   ExamBlueprintV1,
   ExamEvidenceRecord,
@@ -100,6 +107,12 @@ export function cqrWorstCaseNonconformity(record: WholePaperCalibrationRecord): 
 
 type NumericBounds = { readonly low: number; readonly high: number };
 
+function assertFiniteJointPassTarget(target: JointPassTarget): void {
+  if (!Number.isFinite(target.targetOverall) || !Number.isFinite(target.targetMinSection)) {
+    throw new RangeError("JointPassTarget thresholds must be finite numbers");
+  }
+}
+
 function parseObservedOverallBounds(
   observedScore: WholePaperCalibrationRecord["observedScore"],
   scoreRange?: readonly [number, number],
@@ -117,7 +130,7 @@ function parseObservedOverallBounds(
     low = observedScore.low;
     high = observedScore.high;
   }
-  if (scoreRange && (low < scoreRange[0] - 1e-9 || high > scoreRange[1] + 1e-9)) {
+  if (scoreRange && (low < scoreRange[0] || high > scoreRange[1])) {
     return null;
   }
   return { low, high };
@@ -144,7 +157,7 @@ function parseObservedSectionBounds(
       low = val.low;
       high = val.high;
     }
-    if (secRange && (low < secRange[0] - 1e-9 || high > secRange[1] + 1e-9)) return null;
+    if (secRange && (low < secRange[0] || high > secRange[1])) return null;
     parsedSections.set(secId, { low, high });
   }
   return parsedSections;
@@ -169,6 +182,7 @@ export function filterIndependentCalibrationRecords(input: {
   readonly targetKind: ForecastTargetKind;
   readonly scoreRange?: readonly [number, number];
   readonly sectionRanges?: ReadonlyMap<string, readonly [number, number]>;
+  readonly examAtMs?: number;
   readonly excludeLearnerId?: string;
   readonly excludePaperFamilyIds?: ReadonlySet<string>;
 }): WholePaperCalibrationRecord[] {
@@ -185,6 +199,10 @@ export function filterIndependentCalibrationRecords(input: {
     if (rec.targetKind !== input.targetKind) return false;
     if (rec.evidenceKind !== requiredEvidenceKind) return false;
     if (!rec.countsTowardMastery || rec.assisted || rec.exposed === true) return false;
+    if (!Number.isFinite(rec.recordedAtMs)) return false;
+    if (input.examAtMs !== undefined && (!Number.isFinite(input.examAtMs) || rec.recordedAtMs > input.examAtMs)) {
+      return false;
+    }
 
     const recId = rec.recordId?.trim() ?? "";
     const recLearner = rec.learnerId?.trim() ?? "";
@@ -216,6 +234,7 @@ function observedPassesJointTarget(
   blueprint: ExamBlueprintV1,
   sectionRanges: ReadonlyMap<string, readonly [number, number]>,
 ): number | null {
+  assertFiniteJointPassTarget(target);
   const overallBounds = parseObservedOverallBounds(record.observedScore, blueprint.scoreRange);
   if (!overallBounds) return null;
   const parsedSections = parseObservedSectionBounds(record.observedSectionScores, sectionRanges);
@@ -228,10 +247,9 @@ function observedPassesJointTarget(
     if (secBounds !== undefined && secBounds.high < target.targetMinSection) return 0;
   }
 
-  const needsAllSections = target.targetMinSection > blueprint.scoreRange[0];
   if (overallBounds.low >= target.targetOverall) {
-    if (!needsAllSections) return 1;
     const allPass = blueprint.sections.every((section) => {
+      if (target.targetMinSection <= section.scoreRange[0]) return true;
       const secBounds = parsedSections.get(section.sectionId);
       return secBounds !== undefined && secBounds.low >= target.targetMinSection;
     });
@@ -247,6 +265,7 @@ function rawJointPassFromSimulation(
   blueprint: ExamBlueprintV1,
   target: JointPassTarget,
 ): number {
+  assertFiniteJointPassTarget(target);
   const n = simulation.timedScores.length;
   if (n === 0 || simulation.drawSectionScores.length !== n) {
     throw new RangeError("simulation must contain non-empty matching draws");
@@ -305,10 +324,12 @@ export function calibrateJointPassTargets(input: {
   readonly calibrationRecords: readonly WholePaperCalibrationRecord[];
   readonly targets: readonly JointPassTarget[];
   readonly minCalibrationSamples?: number;
+  readonly examAtMs?: number;
   readonly excludeLearnerId?: string;
   readonly excludePaperFamilyIds?: ReadonlySet<string>;
   readonly targetKind?: ForecastTargetKind;
 }): JointPassProbabilityEstimate[] {
+  input.targets.forEach(assertFiniteJointPassTarget);
   const minSamples = Math.max(1, Math.round(input.minCalibrationSamples ?? 4));
   const excludedLearner = input.excludeLearnerId?.trim();
   const excludedFamilies = input.excludePaperFamilyIds
@@ -326,6 +347,10 @@ export function calibrateJointPassTargets(input: {
     for (const rec of input.calibrationRecords) {
       if (rec.blueprintId !== input.blueprint.blueprintId) continue;
       if (!rec.countsTowardMastery || rec.assisted || rec.exposed === true) continue;
+      if (!Number.isFinite(rec.recordedAtMs)) continue;
+      if (input.examAtMs !== undefined && (!Number.isFinite(input.examAtMs) || rec.recordedAtMs > input.examAtMs)) {
+        continue;
+      }
       if (rec.targetKind !== effectiveTargetKind || rec.evidenceKind !== requiredEvidenceKind) continue;
       const recId = rec.recordId?.trim() ?? "";
       const recLearner = rec.learnerId?.trim() ?? "";
@@ -417,7 +442,9 @@ export function evaluateExamForecast(input: {
   if (!Number.isFinite(maxInformativeWidth) || maxInformativeWidth <= 0) {
     throw new RangeError("maxInformativeWidth must be finite and positive");
   }
-  const numDraws = validateNumDraws(input.numDraws, 400);
+  const numDraws = validateNumDraws(input.numDraws, DEFAULT_EXAM_SIMULATION_DRAWS);
+  if (input.jointPassTarget) assertFiniteJointPassTarget(input.jointPassTarget);
+  if (input.jointPassLadder) input.jointPassLadder.forEach(assertFiniteJointPassTarget);
 
   const trimmedLearnerId = input.learnerId.trim();
   const isIeltsBlueprint = input.blueprint.blueprintId === IELTS_ACADEMIC_V1_BLUEPRINT.blueprintId;
@@ -470,6 +497,7 @@ export function evaluateExamForecast(input: {
     targetKind,
     scoreRange: input.blueprint.scoreRange,
     sectionRanges: sectionRangesMap(input.blueprint),
+    examAtMs: input.examAtMs,
     excludeLearnerId: trimmedLearnerId,
     excludePaperFamilyIds: excludeFamilies,
   });
@@ -571,6 +599,7 @@ export function evaluateExamForecast(input: {
           blueprint: input.blueprint,
           calibrationRecords: validCalibrations,
           targets: combinedTargets,
+          examAtMs: input.examAtMs,
           excludeLearnerId: trimmedLearnerId,
           excludePaperFamilyIds: excludeFamilies,
           targetKind,
