@@ -1568,7 +1568,7 @@ const ARTICLE_STOP_WORD_RE = new RegExp("^(?:" +
   "for|in|on|at|to|of|by|with|from|into|onto|upon|over|under|after|before|between|among|through|during|" +
   "without|within|about|against|per|via|as|up|off|out|across|along|past|around|inside|outside|despite|except|towards?|" +
   "like|unlike|besides|beside|beyond|behind|above|below|beneath|amid|amidst|amongst|throughout|concerning|regarding|" +
-  "including|excluding|following|barring|pending|worth|provided|assuming|supposing|considering|granted|seeing|" +
+  "including|excluding|following|barring|pending|worth|assuming|supposing|considering|granted|seeing|" +
   "is|was|are|were|be|been|being|has|have|had|do|does|did|can|could|will|would|shall|should|may|might|must|equals?|" +
   "and|or|but|nor|yet|so|if|then|else|when|while|where|whereas|because|since|unless|until|till|although|though|than|whether|" +
   "that|which|who|whom|whose|what|i|he|him|his|she|her|hers|it|its|we|us|our|ours|you|your|yours|they|them|their|theirs|" +
@@ -1584,7 +1584,7 @@ const ARTICLE_MODIFIER_WORD_RE = new RegExp("^(?:" +
   "zeroth|first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth|" +
   "[a-z]+(?:teenth|tieth|illionth)|hundredth|thousandth|next|last|[a-z]+ly|almost|pairwise|" +
   "right|left|single|double|triple|fast|hard|early|late|soon|far|near|close|very|quite|pretty|rather|well|ill|more|less|most|least|" +
-  "still|given)$");
+  "still|given|provided)$");
 const ARTICLE_LY_NOUN_RE =
   /^(?:family|anomaly|assembly|monopoly|supply|reply|ally|tally|rally|valley|pulley|belly|jelly|lily|(?:butter|dragon|fire|may)?fly|bully|folly|gully|holly)$/;
 const ARTICLE_QUANTITY_TOKEN = /\d(?:[^\s.,;:!?()[\]{}<>]|\.(?=\d))*/u.source;
@@ -1598,20 +1598,82 @@ const ARTICLE_DIMENSION_SEPARATOR = /(?:[ \t]+(?:by|[x×*])[ \t]+|-by-)/.source;
 const ARTICLE_DIMENSION_TOKEN =
   `${ARTICLE_DIMENSION}(?:${ARTICLE_DIMENSION_SEPARATOR}${ARTICLE_DIMENSION})+(?![\\w-])`;
 const ARTICLE_REPETITION_NOUN_RE = /^(?:times?|way|turn|round|try|chance)$/;
-const ARTICLE_SINGULAR_S_RE = /(?:[suio]s|^(?:series|species|lens|canvas|atlas|bias|gas|bus|alias|news|means))$/;
+const ARTICLE_SINGULAR_S_RE = /(?:[suio]s|ics|^(?:series|species|lens|canvas|atlas|bias|gas|bus|alias|news|means|corps))$/;
 const ARTICLE_IRREGULAR_PLURAL_RE = /^(?:children|people|men|women|teeth|feet|mice|geese|criteria|phenomena)$/;
-const ARTICLE_GIVEN_NOUN_COMPLEMENT_RE =
-  /^[ \t]+(?:that|which|who|whom|whose|where|when|of|in|on|from|at|for|with|to|under|over|between|among|within|across|along|through|near|above|below|into|onto)\b/i;
-const ARTICLE_GIVEN_LABEL = /(?:[a-z]|[ivx]{2,4}|\d+|[a-z]+[\d_]\w*)/.source;
-const ARTICLE_GIVEN_PREDICATE = `(?:${RELATION_OP_RE.source}|(?:` +
-  "is|are|was|were|be|been|has|have|had|do|does|did|can|could|will|would|shall|should|may|might|must|" +
-  "holds|fails|equals|exceeds|vanishes|converges|diverges|exists|implies|satisfies|violates|remains|stays|" +
-  "becomes|appears|occurs|works|gives|yields|makes|means|shows|states|requires|matches|differs|contains|includes)\\b)";
-const ARTICLE_GIVEN_CLAUSE_RE = new RegExp(
-  `^[ \\t]*(?:(?:[\\p{L}_][\\p{L}\\p{N}_]*[ \\t]+)?${ARTICLE_GIVEN_PREDICATE}|` +
-  `${ARTICLE_GIVEN_LABEL}\\b|${OPTION_WRAPPER_OPEN}[ \\t]*${ARTICLE_GIVEN_LABEL}[ \\t]*${OPTION_WRAPPER_CLOSE})`,
-  "iu",
+const ARTICLE_CLAUSE_PUNCTUATION = /[.!?。！？;；,，:：\r\n\u2028\u2029]/u.source;
+const ARTICLE_CLAUSE_BOUNDARY_RE = new RegExp(
+  `^(?:${ARTICLE_CLAUSE_PUNCTUATION}|that|which|who|whom|whose|where|when|while|if|unless|because|since|although|though|whether)$`,
 );
+const ARTICLE_CLAUSE_TOKEN_RE = new RegExp(
+  `${RELATION_OP_RE.source}|${UNGROUPED_DECIMAL}|[\\p{L}_][\\p{L}\\p{M}\\p{N}_]*(?:-[\\p{L}\\p{M}\\p{N}_]+)*|` +
+  `${/[()[\]{}]/u.source}|${ARTICLE_CLAUSE_PUNCTUATION}`,
+  "gu",
+);
+const ARTICLE_RELATION_COMPLEMENT_RE = /^(?:in|on|at|with|for|from|over|under|within|between|among|through|near|around|across|along|into|onto)$/;
+const ARTICLE_NOUN_SLOT_RE = /^(?:the|a|an|this|these|those|each|every|all|both|any|some|no|its|their|our|your|my|his|her|of|by)$/;
+const ARTICLE_FINITE_AUXILIARY_RE = /^(?:is|are|was|were|am|be|been|being|has|have|had|do|does|did|can|could|will|would|shall|should|may|might|must)$/;
+const ARTICLE_INFINITIVE_AUXILIARY_RE = /^(?:be|have|do)$/;
+const ARTICLE_FINITE_VERB_RE = new RegExp("^(?:" +
+  "fails|failed|converges|converged|diverges|diverged|vanishes|vanished|exceeds|exceeded|implies|implied|" +
+  "satisfies|satisfied|violates|violated|occurs|occurred|appears|appeared|exists|existed|becomes|became|" +
+  "differs|differed|succeeds|succeeded|commutes|commuted|terminates|terminated|contradicts|contradicted|" +
+  "guarantees|guaranteed|ensures|ensured)$");
+const ARTICLE_HOMOGRAPH_VERB_RE = new RegExp("^(?:" +
+  "holds|held|equals|equaled|remains|remained|stays|stayed|works|worked|means|meant|states|stated|shows|showed|" +
+  "gives|gave|yields|yielded|makes|made|takes|took|uses|used|needs|needed|lacks|lacked|contains|contained|" +
+  "includes|included|excludes|excluded|requires|required|matches|matched|applies|applied|follows|followed|" +
+  "depends|depended|lies|lay|falls|fell|rises|rose|grows|grew|decays|decayed|reduces|reduced|simplifies|simplified|" +
+  "cancels|cancelled|persists|persisted|forces|forced|determines|determined|reaches|reached|attains|attained|" +
+  "intersects|intersected|crosses|crossed|starts|started|begins|began|ends|ended|stops|stopped|continues|continued|" +
+  "produces|produced|returns|returned)$");
+const ARTICLE_PLURAL_VERB_RE = /^(?:fail|hold|equal|vanish|converge|diverge|commute|differ|match|satisfy|violate|exist)$/;
+const ARTICLE_IMPERATIVE_RE = /^(?:compute|find|show|prove|check|explain|determine|evaluate|verify|state|give|write|list|sketch|plot)$/;
+
+function hasConditionalClausePredicate(remainder: string): boolean {
+  let depth = 0;
+  let previous = "";
+  let afterQuantifier = false;
+  let hasRelationComplement = false;
+  let hasConjoinedSubject = false;
+  for (const [token] of remainder.toLowerCase().matchAll(ARTICLE_CLAUSE_TOKEN_RE)) {
+    if ("([{".includes(token)) {
+      depth += 1;
+      continue;
+    }
+    if (")]}".includes(token)) {
+      depth = Math.max(0, depth - 1);
+      if (depth === 0) {
+        previous = "";
+        afterQuantifier = false;
+      }
+      continue;
+    }
+    if (depth > 0) continue;
+    if (ARTICLE_CLAUSE_BOUNDARY_RE.test(token)) break;
+    const afterConjunction = previous === "and" || previous === "or";
+    // "Choose a given value and compute its square" joins instructions.
+    if (afterConjunction && ARTICLE_IMPERATIVE_RE.test(token)) break;
+
+    if (!hasRelationComplement && RELATION_OP_RE.test(token)) return true;
+    if (ARTICLE_FINITE_AUXILIARY_RE.test(token) &&
+      !(previous === "to" && ARTICLE_INFINITIVE_AUXILIARY_RE.test(token))) return true;
+    if (ARTICLE_FINITE_VERB_RE.test(token)) return true;
+
+    const nounSlot: boolean = afterConjunction || afterQuantifier || ARTICLE_NOUN_SLOT_RE.test(previous) ||
+      ARTICLE_RELATION_COMPLEMENT_RE.test(previous);
+    if (!nounSlot &&
+      (ARTICLE_HOMOGRAPH_VERB_RE.test(token) || (hasConjoinedSubject && ARTICLE_PLURAL_VERB_RE.test(token)))) {
+      return true;
+    }
+    // A number opens a noun slot after "among the", but is a label in "theorem 1".
+    afterQuantifier = nounSlot && (ARTICLE_CARDINAL_RE.test(token) || DECIMAL_LITERAL_RE.test(token));
+    hasConjoinedSubject ||= afterConjunction;
+    // "Rank of A = 2" has a predicate. "Point on y = x^2" has a complement.
+    hasRelationComplement ||= ARTICLE_RELATION_COMPLEMENT_RE.test(token);
+    previous = token;
+  }
+  return false;
+}
 
 function startsArticleNounPhrase(text: string): boolean {
   const tokens = new RegExp(
@@ -1620,12 +1682,14 @@ function startsArticleNounPhrase(text: string): boolean {
   );
   let modifiers = 0;
   let afterTemporalModifier = false;
-  let afterGiven = false;
+  let afterParticipialConditional = false;
   for (let match = tokens.exec(text); match !== null; match = tokens.exec(text)) {
     const token = match[0].trim().toLowerCase();
     const remainder = text.slice(tokens.lastIndex);
     const cardinal = ARTICLE_CARDINAL_RE.test(token);
-    if (cardinal && ARTICLE_CARDINAL_ADJUNCT_RE.test(remainder)) return false;
+    if (cardinal && ((token !== "one" && token !== "1") || ARTICLE_CARDINAL_ADJUNCT_RE.test(remainder))) {
+      return false;
+    }
 
     const word = match[1]?.toLowerCase();
     // A repetition word after "next" or "last" needs a head, as in "next time step".
@@ -1634,22 +1698,26 @@ function startsArticleNounPhrase(text: string): boolean {
       if (token.length < 2 || ARTICLE_STOP_WORD_RE.test(word)) return false;
       if (!cardinal && (!ARTICLE_MODIFIER_WORD_RE.test(word) || ARTICLE_LY_NOUN_RE.test(word))) {
         const head = token.slice(token.lastIndexOf("-") + 1);
-        if (ARTICLE_IRREGULAR_PLURAL_RE.test(head) ||
-          (head.endsWith("s") && !ARTICLE_SINGULAR_S_RE.test(head))) return false;
-        // A predicate after "given option" can make "given" introduce a condition.
-        return !afterGiven || ARTICLE_GIVEN_NOUN_COMPLEMENT_RE.test(remainder) ||
-          !ARTICLE_GIVEN_CLAUSE_RE.test(remainder);
+        if (ARTICLE_IRREGULAR_PLURAL_RE.test(head)) return false;
+        if (!head.endsWith("s") || ARTICLE_SINGULAR_S_RE.test(head)) {
+          return !afterParticipialConditional || !hasConditionalClausePredicate(remainder);
+        }
+        // A regular plural can modify a singular head, as in "systems engineer".
+        if (afterParticipialConditional) return false;
       }
     }
     if (modifiers === 3) return false;
     modifiers += 1;
     afterTemporalModifier = token === "next" || token === "last";
-    afterGiven ||= token === "given";
+    afterParticipialConditional ||= token === "given" || token === "provided";
   }
   return false;
 }
 
-function containsSingleChoiceReveal(syntax: string, optionText: string, choiceLetter: string): boolean {
+const ARTICLE_SUPERSCRIPT_EXPONENT_RE = /(?<=\p{Nd})[⁰¹²³⁴⁵⁶⁷⁸⁹]+/gu;
+
+function containsSingleChoiceReveal(syntax: string, choiceLetter: string, rawText: string): boolean {
+  const optionText = syntax.replace(/\s+/g, " ");
   const escaped = escapeRegExp(choiceLetter);
   const option = `${OPTION_WRAPPER_OPEN}?\\s*${escaped}(?:\\s*${OPTION_WRAPPER_CLOSE})?(?!${ALPHA_NUM_IDENT_CHAR})`;
   const separator = /(?:-{1,2}>|={1,2}>|[-–—―→⇒⟶⟹:：=])/.source;
@@ -1664,8 +1732,11 @@ function containsSingleChoiceReveal(syntax: string, optionText: string, choiceLe
   if (patterns.some(pattern => pattern.test(optionText))) return true;
 
   const bareChoice = new RegExp(`${BARE_CHOICE_VERB}\\s*${copula}(${option})`, "giu");
-  for (const match of syntax.matchAll(bareChoice)) {
-    const remainder = syntax.slice(match.index + match[0].length);
+  // NFKC collapses "10²" to "102". Keep the exponent explicit when parsing modifiers.
+  const withExponents = rawText.replace(ARTICLE_SUPERSCRIPT_EXPONENT_RE, "^$&");
+  const articleSyntax = withExponents === rawText ? syntax : normalizeOptionSyntax(normalizeLeakSyntax(withExponents));
+  for (const match of articleSyntax.matchAll(bareChoice)) {
+    const remainder = articleSyntax.slice(match.index + match[0].length);
     // "Correct a mistake" uses an article. Case, wrappers and line breaks
     // distinguish it from a choice label in the same position.
     if (match[1]?.trim() !== "a" || !startsArticleNounPhrase(remainder)) return true;
@@ -1892,7 +1963,6 @@ export function containsAnswerLeak(
 ): boolean {
   const stemSyntax = normalizeLeakSyntax(rawText);
   const optionSyntax = normalizeOptionSyntax(stemSyntax);
-  const optionText = optionSyntax.replace(/\s+/g, " ");
   const casedStem = canonicalizeMathNotationPreserveCase(stemSyntax);
   const normalizedStem = casedStem.toLowerCase();
   const normalizedSecret = normalizeComparableText(secretText);
@@ -1913,7 +1983,7 @@ export function containsAnswerLeak(
 
   const includeShortTokens = options.includeShortTokens ?? true;
   if (includeShortTokens) {
-    if (SINGLE_CHOICE_LETTER_RE.test(optionSecret) && containsSingleChoiceReveal(optionSyntax, optionText, optionSecret)) {
+    if (SINGLE_CHOICE_LETTER_RE.test(optionSecret) && containsSingleChoiceReveal(optionSyntax, optionSecret, rawText)) {
       return true;
     }
     if (UNSIGNED_OPTION_SCALAR_RE.test(optionSecret) && containsStandaloneNumericOrSymbolicToken(optionSyntax, optionSecret)) {
