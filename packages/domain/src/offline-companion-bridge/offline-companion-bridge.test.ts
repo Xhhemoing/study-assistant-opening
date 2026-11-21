@@ -712,6 +712,191 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
     expect(Object.getPrototypeOf(safeSettle.updatedServerCards)).toBeNull();
     expect(Object.getPrototypeOf(safeSettle.nextProcessedLedger)).toBeNull();
 
+    // [Round-10 P1-1] Binary `+`/`-` operand boundaries MUST include `}`, `{`, `|`, and `'`/`′`
+    // so LaTeX fraction sums (`\frac{1}{2} + \frac{1}{3}` <-> `\frac{1}{2}+\frac{1}{3}`),
+    // brace-grouped terms (`{x}^2 + {y}^2` <-> `{x}^2+{y}^2`), absolute values (`|x| + |y|` <-> `|x|+|y|`),
+    // and primed derivatives (`f'(x) + g'(x)` / `x' + y'`) are blocked in BOTH directions while keeping
+    // standalone signed literals (`"-4"`) non-false-positive on binary subtraction.
+    expect(containsAnswerLeak("Compute \\frac{1}{2}+\\frac{1}{3} exactly.", "\\frac{1}{2} + \\frac{1}{3}")).toBe(true);
+    expect(containsAnswerLeak("Compute \\frac{1}{2} + \\frac{1}{3} exactly.", "\\frac{1}{2}+\\frac{1}{3}")).toBe(true);
+    expect(containsAnswerLeak("Evaluate \\frac{1}{2}-\\frac{1}{3} here.", "\\frac{1}{2} - \\frac{1}{3}")).toBe(true);
+    expect(containsAnswerLeak("Evaluate \\frac{1}{2} - \\frac{1}{3} here.", "\\frac{1}{2}-\\frac{1}{3}")).toBe(true);
+    expect(containsAnswerLeak("其值为\\frac{1}{2}+\\frac{1}{3}。", "\\frac{1}{2} + \\frac{1}{3}")).toBe(true);
+    expect(containsAnswerLeak("Simplify {x}^2+{y}^2 first.", "{x}^2 + {y}^2")).toBe(true);
+    expect(containsAnswerLeak("Simplify {x}^2 + {y}^2 first.", "{x}^2+{y}^2")).toBe(true);
+    expect(containsAnswerLeak("Bound |x|+|y| tightly.", "|x| + |y|")).toBe(true);
+    expect(containsAnswerLeak("Bound |x| + |y| tightly.", "|x|+|y|")).toBe(true);
+    expect(containsAnswerLeak("Check f'(x)+g'(x) at x=0.", "f'(x) + g'(x)")).toBe(true);
+    expect(containsAnswerLeak("Check f'(x) + g'(x) at x=0.", "f'(x)+g'(x)")).toBe(true);
+    expect(containsAnswerLeak("Recall x'+y' holds.", "x' + y'")).toBe(true);
+    expect(containsAnswerLeak("Recall x' + y' holds.", "x'+y'")).toBe(true);
+    expect(containsAnswerLeak("Solve x^2 - 4 = 0", "-4")).toBe(false);
+    expect(containsAnswerLeak("Solve {x}^2 - 4 = 0", "-4")).toBe(false);
+    expect(containsAnswerLeak("Solve |x| - 4 = 0", "-4")).toBe(false);
+    expect(containsAnswerLeak("Solve {x} \u2212 4 = 0", "-4")).toBe(false);
+
+    for (const [idx, braceCase] of [
+      { answerKey: "\\frac{1}{2} + \\frac{1}{3}", stem: "Evaluate \\frac{1}{2}+\\frac{1}{3} directly." },
+      { answerKey: "\\frac{1}{2}+\\frac{1}{3}", stem: "Evaluate \\frac{1}{2} + \\frac{1}{3} directly." },
+      { answerKey: "{x}^2 + {y}^2", stem: "Expand {x}^2+{y}^2 cleanly." },
+      { answerKey: "{x}^2+{y}^2", stem: "Expand {x}^2 + {y}^2 cleanly." },
+      { answerKey: "|x| + |y|", stem: "By triangle inequality, bound |x|+|y|." },
+      { answerKey: "|x|+|y|", stem: "By triangle inequality, bound |x| + |y|." },
+    ].entries()) {
+      const rejectedBraceMiss = issueOfflineFlashcardLease({
+        leaseId: `lease-r10-brace-miss-${idx}`,
+        workspaceId: "ws-1",
+        learnerId: "learner-1",
+        issuedAtMs: T0,
+        candidates: [
+          makeMissVariantCandidate({
+            answerKey: braceCase.answerKey,
+            freshVariantStem: braceCase.stem,
+          }),
+        ],
+      });
+      expect(rejectedBraceMiss.ok).toBe(false);
+      if (!rejectedBraceMiss.ok) {
+        expect(rejectedBraceMiss.httpStatus).toBe(422);
+        expect(rejectedBraceMiss.code).toBe("miss_variant_answer_leak");
+      }
+
+      const rejectedBraceFlashcard = issueOfflineFlashcardLease({
+        leaseId: `lease-r10-brace-fc-${idx}`,
+        workspaceId: "ws-1",
+        learnerId: "learner-1",
+        issuedAtMs: T0,
+        candidates: [
+          makeMissVariantCandidate({ answerKey: braceCase.answerKey }),
+          {
+            ...makeFlashcardCandidate(600 + idx),
+            prompt: "Review LaTeX sum identity.",
+            backSummary: braceCase.stem,
+          },
+        ],
+      });
+      expect(rejectedBraceFlashcard.ok).toBe(false);
+      if (!rejectedBraceFlashcard.ok) {
+        expect(rejectedBraceFlashcard.httpStatus).toBe(422);
+        expect(rejectedBraceFlashcard.code).toBe("miss_variant_answer_leak");
+      }
+    }
+
+    // [Round-10 P1-2] Pre-existing legacy own-property snapshots (`constructor`, `prototype`, and own
+    // enumerable `__proto__`) on `serverCards` and `processedLedger` MUST be preserved intact on the
+    // `Object.create(null)` output maps during reconciliation (both when 0 entries settle and when valid
+    // sibling cards settle), while incoming outbox entries targeting reserved keys STILL fail closed with
+    // `400 invalid_entry` and `Object.prototype` is never mutated!
+    const validCard1Snap = createInitialOfflineFsrsSnapshot("card-1", T0 - 3_600_000, 1);
+    const legacyCtorSnap: ServerFlashcardSnapshot = { ...validCard1Snap, cardId: "constructor", revision: 4 };
+    const legacyProtoSnap: ServerFlashcardSnapshot = { ...validCard1Snap, cardId: "prototype", revision: 7 };
+    const legacyDunderSnap: ServerFlashcardSnapshot = { ...validCard1Snap, cardId: "__proto__", revision: 9 };
+    const legacyServerCards: Record<string, ServerFlashcardSnapshot> = {
+      "card-1": validCard1Snap,
+      constructor: legacyCtorSnap,
+      prototype: legacyProtoSnap,
+    };
+    Object.defineProperty(legacyServerCards, "__proto__", {
+      value: legacyDunderSnap,
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
+
+    const legacyCtorLedgerEntry = {
+      leaseId: "constructor",
+      seq: 1,
+      payloadFingerprint: "a".repeat(64),
+      receipt: {
+        leaseId: "constructor",
+        seq: 1,
+        cardId: "constructor",
+        rawRating: "good" as const,
+        effectiveRating: "good" as const,
+        clampedFromEasy: false,
+        authorityClock: "server_receipt" as const,
+        effectiveReviewedAtMs: T0 - 60_000,
+        delayedCheckMinted: false as const,
+        allowMasteryPromotion: false as const,
+        transferVerified: false as const,
+        strippedClientFlags: [],
+        previousRevision: 3,
+        newRevision: 4,
+        nextSnapshot: legacyCtorSnap,
+      },
+    };
+    const legacyProcessedLedger = {
+      "constructor:1": legacyCtorLedgerEntry,
+    };
+
+    // Case 1: 0 entries settle (empty batch) -> all pre-existing own-property snapshots preserved verbatim.
+    const zeroSettleLegacy = reconcileOfflineLeaseOutbox({
+      lease: safeLease.lease,
+      serverCards: legacyServerCards,
+      processedLedger: legacyProcessedLedger,
+      serverReceiptAtMs: T0 + 60_000,
+      entries: [],
+    });
+    expect(zeroSettleLegacy.ok).toBe(true);
+    if (!zeroSettleLegacy.ok) throw new Error("expected zero-settle legacy reconcile");
+    expect(zeroSettleLegacy.settledCount).toBe(0);
+    expect(Object.getPrototypeOf(zeroSettleLegacy.updatedServerCards)).toBeNull();
+    expect(Object.getPrototypeOf(zeroSettleLegacy.nextProcessedLedger)).toBeNull();
+    expect(Object.prototype.hasOwnProperty.call(zeroSettleLegacy.updatedServerCards, "constructor")).toBe(true);
+    expect(Object.prototype.hasOwnProperty.call(zeroSettleLegacy.updatedServerCards, "prototype")).toBe(true);
+    expect(Object.prototype.hasOwnProperty.call(zeroSettleLegacy.updatedServerCards, "__proto__")).toBe(true);
+    expect(zeroSettleLegacy.updatedServerCards["constructor"]).toEqual(legacyCtorSnap);
+    expect(zeroSettleLegacy.updatedServerCards["prototype"]).toEqual(legacyProtoSnap);
+    expect(zeroSettleLegacy.updatedServerCards["__proto__"]).toEqual(legacyDunderSnap);
+    expect(Object.prototype.hasOwnProperty.call(zeroSettleLegacy.nextProcessedLedger, "constructor:1")).toBe(true);
+    expect(zeroSettleLegacy.nextProcessedLedger["constructor:1"]).toEqual(legacyCtorLedgerEntry);
+
+    // Case 2: Valid sibling "card-1" settles alongside rejected reserved-key outbox entries ->
+    // "card-1" advances, reserved-key entries fail closed with 400 invalid_entry, and pre-existing
+    // own-property "constructor"/"prototype"/"__proto__" snapshots stay intact with zero Object.prototype mutation.
+    const mixedSettleLegacy = reconcileOfflineLeaseOutbox({
+      lease: safeLease.lease,
+      serverCards: legacyServerCards,
+      processedLedger: legacyProcessedLedger,
+      serverReceiptAtMs: T0 + 60_000,
+      entries: [
+        { leaseId: "lease-r9-settle-guard", seq: 1, cardId: "card-1", expectedCardRevision: 1, rating: "good" },
+        { leaseId: "lease-r9-settle-guard", seq: 2, cardId: "__proto__", expectedCardRevision: 9, rating: "good" },
+        { leaseId: "lease-r9-settle-guard", seq: 3, cardId: "constructor", expectedCardRevision: 4, rating: "good" },
+        { leaseId: "lease-r9-settle-guard", seq: 4, cardId: "prototype", expectedCardRevision: 7, rating: "good" },
+      ],
+    });
+    expect(mixedSettleLegacy.ok).toBe(true);
+    if (!mixedSettleLegacy.ok) throw new Error("expected mixed-settle legacy reconcile");
+    expect(mixedSettleLegacy.settledCount).toBe(1);
+    expect(mixedSettleLegacy.results[0]).toMatchObject({ cardId: "card-1", outcome: "settled", httpStatus: 200 });
+    expect(mixedSettleLegacy.results.slice(1).every(r => r.outcome === "invalid_entry" && r.httpStatus === 400)).toBe(true);
+    expect(mixedSettleLegacy.updatedServerCards["card-1"]?.revision).toBe(2);
+    expect(Object.prototype.hasOwnProperty.call(mixedSettleLegacy.updatedServerCards, "constructor")).toBe(true);
+    expect(Object.prototype.hasOwnProperty.call(mixedSettleLegacy.updatedServerCards, "prototype")).toBe(true);
+    expect(Object.prototype.hasOwnProperty.call(mixedSettleLegacy.updatedServerCards, "__proto__")).toBe(true);
+    expect(mixedSettleLegacy.updatedServerCards["constructor"]).toEqual(legacyCtorSnap);
+    expect(mixedSettleLegacy.updatedServerCards["prototype"]).toEqual(legacyProtoSnap);
+    expect(mixedSettleLegacy.updatedServerCards["__proto__"]).toEqual(legacyDunderSnap);
+    expect(Object.prototype.hasOwnProperty.call(mixedSettleLegacy.nextProcessedLedger, "constructor:1")).toBe(true);
+    expect(Object.prototype.hasOwnProperty.call(mixedSettleLegacy.nextProcessedLedger, "lease-r9-settle-guard:1")).toBe(true);
+    expect(Object.getPrototypeOf(mixedSettleLegacy.updatedServerCards)).toBeNull();
+    expect(Object.prototype.constructor).toBe(Object);
+    expect(Object.prototype.hasOwnProperty.call(Object.prototype, "prototype")).toBe(false);
+
+    // Case 3: Structurally invalid pre-existing snapshot fails closed (throws TypeError) instead of silently dropping!
+    expect(() =>
+      reconcileOfflineLeaseOutbox({
+        lease: safeLease.lease,
+        serverCards: {
+          "card-1": validCard1Snap,
+          constructor: { broken: true } as unknown as ServerFlashcardSnapshot,
+        },
+        serverReceiptAtMs: T0 + 60_000,
+        entries: [],
+      }),
+    ).toThrow(TypeError);
+
     for (const [idx, spacedOrCjk] of [
       { answerKey: "π/2", prompt: "Right-angle measure.", backSummary: "The angle is π / 2 radians" },
       { answerKey: "π/2", prompt: "直角弧度。", backSummary: "其值为π/2弧度。" },

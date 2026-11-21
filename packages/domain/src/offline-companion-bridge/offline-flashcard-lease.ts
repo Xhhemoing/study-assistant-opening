@@ -157,7 +157,7 @@ const SPACED_UNARY_SIGN_RE = new RegExp(
 );
 
 const SPACED_UNICODE_MINUS_UNARY_RE = new RegExp(
-  `(?<![\\d)\\]]\\s*)\u2212\\s+(?=\\d|\\.|\\u221A|\\p{Script=Greek}|sqrt\\()`,
+  `(?<![\\d)\\]}|]\\s*)\u2212\\s+(?=\\d|\\.|\\u221A|\\p{Script=Greek}|sqrt\\()`,
   "giu",
 );
 
@@ -209,9 +209,9 @@ function containsSingleChoiceReveal(rawText: string, choiceLetter: string): bool
 }
 
 const COMPOUND_BINARY_ADD_SUB_RE =
-  /(?<=[0-9a-zA-Z\p{Script=Greek})\]!%])\s*([+-])\s*(?=[0-9a-zA-Z\p{Script=Greek}([\u221A\\])/gu;
+  /(?<=[0-9a-zA-Z\p{Script=Greek})\]}|'\u2032!%])\s*([+-])\s*(?=[0-9a-zA-Z\p{Script=Greek}([{|\u221A\\])/gu;
 
-const MATH_EXPR_ATOM_CHARS = "[\\p{N}a-z\\p{Script=Greek}()\\[\\].,_!%\\\\\\u221A]";
+const MATH_EXPR_ATOM_CHARS = "[\\p{N}a-z\\p{Script=Greek}()\\[\\]{}|'\\u2032.,_!%\\\\\\u221A]";
 
 const COMPOUND_MATH_EXPR_RE = new RegExp(
   `^(?:[+-]|\\+-|-\\+)?${MATH_EXPR_ATOM_CHARS}+(?:[+\\-*\\/^]${MATH_EXPR_ATOM_CHARS}+)+$`,
@@ -536,22 +536,123 @@ function getOwnRecordProperty<T>(
   return Object.prototype.hasOwnProperty.call(record, key) ? record[key] : undefined;
 }
 
+function isValidFsrsMemoryState(value: unknown): value is OfflineFsrsMemoryState {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const fsrsState = value as Partial<OfflineFsrsMemoryState>;
+  return (
+    typeof fsrsState.stability === "number" &&
+    Number.isFinite(fsrsState.stability) &&
+    typeof fsrsState.difficulty === "number" &&
+    Number.isFinite(fsrsState.difficulty) &&
+    typeof fsrsState.elapsedDays === "number" &&
+    Number.isFinite(fsrsState.elapsedDays) &&
+    typeof fsrsState.scheduledDays === "number" &&
+    Number.isFinite(fsrsState.scheduledDays) &&
+    isNonNegativeSafeInteger(fsrsState.learningSteps) &&
+    isNonNegativeSafeInteger(fsrsState.reps) &&
+    isNonNegativeSafeInteger(fsrsState.lapses) &&
+    typeof fsrsState.state === "number" &&
+    Number.isFinite(fsrsState.state) &&
+    (fsrsState.lastReviewAtMs === null || isValidTimestamp(fsrsState.lastReviewAtMs))
+  );
+}
+
+function isValidServerFlashcardSnapshot(value: unknown): value is ServerFlashcardSnapshot {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const snapshot = value as Partial<ServerFlashcardSnapshot>;
+  return (
+    isNonEmptyString(snapshot.cardId) &&
+    isNonNegativeSafeInteger(snapshot.revision) &&
+    (snapshot.lastServerReviewedAtMs === null || isValidTimestamp(snapshot.lastServerReviewedAtMs)) &&
+    isValidTimestamp(snapshot.dueAtMs) &&
+    typeof snapshot.intervalDays === "number" &&
+    Number.isFinite(snapshot.intervalDays) &&
+    snapshot.intervalDays >= 0 &&
+    isNonNegativeSafeInteger(snapshot.reps) &&
+    isNonNegativeSafeInteger(snapshot.lapses) &&
+    (snapshot.lastGrade === null ||
+      (typeof snapshot.lastGrade === "string" && VALID_RAW_RATINGS.has(snapshot.lastGrade))) &&
+    isValidTimestamp(snapshot.updatedAtMs) &&
+    (snapshot.fsrs === null || isValidFsrsMemoryState(snapshot.fsrs))
+  );
+}
+
+function isValidLedgerEntry(value: unknown): value is OfflineOutboxLedgerEntry {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const entry = value as Partial<OfflineOutboxLedgerEntry>;
+  if (
+    !isNonEmptyString(entry.leaseId) ||
+    typeof entry.seq !== "number" ||
+    !Number.isSafeInteger(entry.seq) ||
+    entry.seq < 1 ||
+    !isNonEmptyString(entry.payloadFingerprint)
+  ) {
+    return false;
+  }
+  if (entry.payloadSummary !== undefined) {
+    if (
+      typeof entry.payloadSummary !== "object" ||
+      entry.payloadSummary === null ||
+      Array.isArray(entry.payloadSummary)
+    ) {
+      return false;
+    }
+    const summary = entry.payloadSummary as Partial<OfflineOutboxPayloadSummary>;
+    if (
+      !isNonEmptyString(summary.cardId) ||
+      typeof summary.rating !== "string" ||
+      !VALID_RAW_RATINGS.has(summary.rating) ||
+      !isNonNegativeSafeInteger(summary.expectedCardRevision) ||
+      (summary.clientReviewedAtMs !== null &&
+        (typeof summary.clientReviewedAtMs !== "number" || !Number.isFinite(summary.clientReviewedAtMs)))
+    ) {
+      return false;
+    }
+  }
+  const receipt = entry.receipt as Partial<OfflineSettledReceipt> | undefined;
+  if (typeof receipt !== "object" || receipt === null || Array.isArray(receipt)) return false;
+  return (
+    isNonEmptyString(receipt.leaseId) &&
+    typeof receipt.seq === "number" &&
+    Number.isSafeInteger(receipt.seq) &&
+    receipt.seq >= 1 &&
+    isNonEmptyString(receipt.cardId) &&
+    typeof receipt.rawRating === "string" &&
+    VALID_RAW_RATINGS.has(receipt.rawRating) &&
+    (receipt.effectiveRating === "again" ||
+      receipt.effectiveRating === "hard" ||
+      receipt.effectiveRating === "good") &&
+    typeof receipt.clampedFromEasy === "boolean" &&
+    receipt.authorityClock === "server_receipt" &&
+    isValidTimestamp(receipt.effectiveReviewedAtMs) &&
+    receipt.delayedCheckMinted === false &&
+    receipt.allowMasteryPromotion === false &&
+    receipt.transferVerified === false &&
+    Array.isArray(receipt.strippedClientFlags) &&
+    receipt.strippedClientFlags.every(flag => typeof flag === "string") &&
+    isNonNegativeSafeInteger(receipt.previousRevision) &&
+    isNonNegativeSafeInteger(receipt.newRevision) &&
+    isValidServerFlashcardSnapshot(receipt.nextSnapshot)
+  );
+}
+
 function toServerCardRecord(
   cards:
     | Readonly<Record<string, ServerFlashcardSnapshot>>
     | ReadonlyMap<string, ServerFlashcardSnapshot>,
 ): Record<string, ServerFlashcardSnapshot> {
-  const out = createNullProtoRecord<ServerFlashcardSnapshot>();
-  if (cards instanceof Map) {
-    for (const [cardId, snapshot] of cards.entries()) {
-      if (!isSafeIdentifier(cardId)) continue;
-      const canonicalId = canonicalizeIdentifier(cardId);
-      setOwnRecordProperty(out, canonicalId, cloneServerSnapshot({ ...snapshot, cardId: canonicalId }));
-    }
-    return out;
+  if (typeof cards !== "object" || cards === null || Array.isArray(cards)) {
+    throw new TypeError("serverCards must be a record or Map of ServerFlashcardSnapshot entries.");
   }
-  for (const [cardId, snapshot] of Object.entries(cards)) {
-    if (!isSafeIdentifier(cardId)) continue;
+  const out = createNullProtoRecord<ServerFlashcardSnapshot>();
+  const entries = cards instanceof Map ? cards.entries() : Object.entries(cards);
+  for (const [cardId, snapshot] of entries) {
+    if (!isNonEmptyString(cardId)) {
+      throw new TypeError("serverCards contains an empty or non-string cardId key.");
+    }
+    if (!isValidServerFlashcardSnapshot(snapshot)) {
+      throw new TypeError(`serverCards entry for cardId "${cardId}" is structurally invalid.`);
+    }
     const canonicalId = canonicalizeIdentifier(cardId);
     setOwnRecordProperty(out, canonicalId, cloneServerSnapshot({ ...snapshot, cardId: canonicalId }));
   }
@@ -565,17 +666,18 @@ function toLedgerRecord(
     | undefined,
 ): Record<string, OfflineOutboxLedgerEntry> {
   const out = createNullProtoRecord<OfflineOutboxLedgerEntry>();
-  if (!ledger) return out;
-  if (ledger instanceof Map) {
-    for (const [, entry] of ledger.entries()) {
-      if (!isSafeIdentifier(entry.leaseId)) continue;
-      const canonicalKey = offlineOutboxIdempotencyKey(entry.leaseId, entry.seq);
-      setOwnRecordProperty(out, canonicalKey, cloneLedgerEntry(entry));
-    }
-    return out;
+  if (ledger === undefined) return out;
+  if (typeof ledger !== "object" || ledger === null || Array.isArray(ledger)) {
+    throw new TypeError("processedLedger must be a record or Map of OfflineOutboxLedgerEntry entries.");
   }
-  for (const [, entry] of Object.entries(ledger)) {
-    if (!isSafeIdentifier(entry.leaseId)) continue;
+  const entries = ledger instanceof Map ? ledger.entries() : Object.entries(ledger);
+  for (const [ledgerKey, entry] of entries) {
+    if (!isNonEmptyString(ledgerKey)) {
+      throw new TypeError("processedLedger contains an empty or non-string key.");
+    }
+    if (!isValidLedgerEntry(entry)) {
+      throw new TypeError(`processedLedger entry for key "${ledgerKey}" is structurally invalid.`);
+    }
     const canonicalKey = offlineOutboxIdempotencyKey(entry.leaseId, entry.seq);
     setOwnRecordProperty(out, canonicalKey, cloneLedgerEntry(entry));
   }
