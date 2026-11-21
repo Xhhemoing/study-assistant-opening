@@ -205,7 +205,7 @@ export class PrerequisiteDrilldownStateMachine {
 
   private transitionToRepairPlan(): void {
     let bestDeficit: string | null = null;
-    let bestWeight = -1;
+    let bestWeight = 0;
     for (let i = 0; i < this.hypotheses.length; i++) {
       const h = this.hypotheses[i]!;
       if (

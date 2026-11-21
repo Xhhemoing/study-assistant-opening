@@ -942,3 +942,68 @@ describe("Round-4 multi-step completion DFS, component partition & evidence inte
     expect(ddReplay.probesAdministered).toBe(dd1.probesAdministered);
   });
 });
+
+describe("Round-5 falsified-posterior drilldown guard & sparse snapshot validation", () => {
+  it("[P1-1] refuses to confirm a deterministically falsified (posterior === 0) prerequisite across forward and reverse probe orders", () => {
+    const chain: DiagnosticSkillNode[] = [
+      { skillId: "L0", chapterId: "c1" },
+      { skillId: "L1", chapterId: "c1", prerequisiteIds: ["L0"] },
+      { skillId: "TARGET", chapterId: "c1", prerequisiteIds: ["L1"] },
+    ];
+    const orig = { originalAttemptId: "a-r5", originalItemId: "i-r5", frozenDraftText: "", frozenCursorOffset: 0, startedAtMs: 1 };
+    const probeL0: DiagnosticProbeItem = { itemId: "p-l0", familyId: "f-l0", chapterId: "c1", requiredSkillIds: ["L0"], slip: 0.1, guess: 0.1, estimatedSeconds: 20 };
+    const probeL1Exact: DiagnosticProbeItem = { itemId: "p-l1", familyId: "f-l1", chapterId: "c1", requiredSkillIds: ["L1"], slip: 0, guess: 0, estimatedSeconds: 20 };
+
+    // Forward: pL0(0.1, 0.1) fails first, then pL1(0, 0) passes -> posterior(L0) becomes 0 -> must not confirm L0
+    const forward = new PrerequisiteDrilldownStateMachine({
+      skills: chain,
+      targetSkillId: "TARGET",
+      probePool: [probeL0, probeL1Exact],
+      originalContext: orig,
+      maxProbes: 2,
+    });
+    forward.recordProbeResponse({ observationId: "r5-f1", itemId: "p-l0", correct: false });
+    const forwardDone = forward.recordProbeResponse({ observationId: "r5-f2", itemId: "p-l1", correct: true });
+    expect(forwardDone.posteriors.find(p => p.skillId === "L0")?.probability).toBe(0);
+    expect(forwardDone.rootCause).toBe("insufficient_diagnostic_evidence");
+    expect(forwardDone.confirmedDeficitSkillIds).toEqual([]);
+    expect(forwardDone.repairPlan.map(s => s.kind)).toEqual(["restore_original_attempt"]);
+
+    // Reverse: pL1(0, 0) passes first -> drives L0 & L1 posteriors to 0 immediately, finalizing without confirming 0-posterior skills
+    const reverse = new PrerequisiteDrilldownStateMachine({
+      skills: chain,
+      targetSkillId: "TARGET",
+      probePool: [probeL0, probeL1Exact],
+      originalContext: orig,
+      maxProbes: 2,
+    });
+    const reverseDone = reverse.recordProbeResponse({ observationId: "r5-r1", itemId: "p-l1", correct: true });
+    expect(reverseDone.posteriors.find(p => p.skillId === "L0")?.probability).toBe(0);
+    expect(reverseDone.posteriors.find(p => p.skillId === "L1")?.probability).toBe(0);
+    expect(reverseDone.confirmedDeficitSkillIds).toEqual([]);
+  });
+
+  it("[P2-1] rejects sparse-array holes in componentJointWeights and consumedProbeObservationIds with VALIDATION", () => {
+    const snap = buildKstPriorSnapshot(createKstStateSpace([{ skillId: "A", chapterId: "c1" }]));
+
+    const sparseComponents = new Array<typeof snap.componentJointWeights[number]>(2);
+    sparseComponents[1] = snap.componentJointWeights[0]!;
+    try {
+      validateKstSnapshot({ ...snap, componentJointWeights: sparseComponents });
+      expect.unreachable("should reject sparse componentJointWeights");
+    } catch (err) {
+      expect(err).toBeInstanceOf(DiagnosticPlacementError);
+      expect((err as DiagnosticPlacementError).code).toBe("VALIDATION");
+    }
+
+    const sparseConsumed = new Array<string>(2);
+    sparseConsumed[1] = "obs-1";
+    try {
+      validateKstSnapshot({ ...snap, consumedProbeObservationIds: sparseConsumed });
+      expect.unreachable("should reject sparse consumedProbeObservationIds");
+    } catch (err) {
+      expect(err).toBeInstanceOf(DiagnosticPlacementError);
+      expect((err as DiagnosticPlacementError).code).toBe("VALIDATION");
+    }
+  });
+});

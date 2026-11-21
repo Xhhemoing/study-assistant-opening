@@ -389,7 +389,11 @@ export function validateKstSnapshot(snapshot: KstSnapshotV1): void {
     throw new DiagnosticPlacementError("VALIDATION", "KstSnapshotV1 componentJointWeights must be an array");
   }
   const seenCompSkills = new Set<string>();
-  snapshot.componentJointWeights.forEach((comp, idx) => {
+  for (let idx = 0; idx < snapshot.componentJointWeights.length; idx++) {
+    if (!Object.hasOwn(snapshot.componentJointWeights, idx)) {
+      throw new DiagnosticPlacementError("VALIDATION", `componentJointWeights[${idx}] must not be a sparse hole`);
+    }
+    const comp = snapshot.componentJointWeights[idx]!;
     if (!comp || typeof comp !== "object") {
       throw new DiagnosticPlacementError("VALIDATION", `componentJointWeights[${idx}] must be an object`);
     }
@@ -400,7 +404,7 @@ export function validateKstSnapshot(snapshot: KstSnapshotV1): void {
       throw new DiagnosticPlacementError("VALIDATION", `componentJointWeights[${idx}].skillIds must be a non-empty array`);
     }
     for (let sIdx = 0; sIdx < comp.skillIds.length; sIdx++) {
-      if (!(sIdx in comp.skillIds) || typeof comp.skillIds[sIdx] !== "string" || !comp.skillIds[sIdx]!.trim()) {
+      if (!Object.hasOwn(comp.skillIds, sIdx) || typeof comp.skillIds[sIdx] !== "string" || !comp.skillIds[sIdx]!.trim()) {
         throw new DiagnosticPlacementError("VALIDATION", `componentJointWeights[${idx}].skillIds[${sIdx}] must be a non-empty string`);
       }
       const skillId = comp.skillIds[sIdx]!;
@@ -413,7 +417,7 @@ export function validateKstSnapshot(snapshot: KstSnapshotV1): void {
       seenCompSkills.add(skillId);
     }
     validateProbabilityRecord(comp.wByState, `componentJointWeights[${idx}].wByState`, { requireSumOne: true, requireNonEmpty: true });
-  });
+  }
   if (snapshot.componentJointWeights.length > 0 && seenCompSkills.size !== knownSkills.size) {
     throw new DiagnosticPlacementError("VALIDATION", "componentJointWeights must partition snapshot skills");
   }
@@ -423,8 +427,13 @@ export function validateKstSnapshot(snapshot: KstSnapshotV1): void {
   for (const [skillId, row] of Object.entries(snapshot.skillCovariance)) {
     validateProbabilityRecord(row, `skillCovariance[${skillId}]`, { min: -0.25 - 1e-6, max: 0.25 + 1e-6 });
   }
-  if (!Array.isArray(snapshot.consumedProbeObservationIds) || snapshot.consumedProbeObservationIds.some(id => typeof id !== "string")) {
+  if (!Array.isArray(snapshot.consumedProbeObservationIds)) {
     throw new DiagnosticPlacementError("VALIDATION", "KstSnapshotV1 consumedProbeObservationIds must be string[]");
+  }
+  for (let idx = 0; idx < snapshot.consumedProbeObservationIds.length; idx++) {
+    if (!Object.hasOwn(snapshot.consumedProbeObservationIds, idx) || typeof snapshot.consumedProbeObservationIds[idx] !== "string") {
+      throw new DiagnosticPlacementError("VALIDATION", `KstSnapshotV1 consumedProbeObservationIds[${idx}] must be a string`);
+    }
   }
 }
 
