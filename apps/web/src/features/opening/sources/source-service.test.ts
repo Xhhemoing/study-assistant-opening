@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import type { Sql } from "postgres";
 import { createOpeningSourceService } from "./source-service";
@@ -1698,6 +1698,69 @@ describe("opening signed upload service", () => {
     expect(await svcWithoutDiscovery.listSourceDeletions(principal)).toEqual([
       { sourceId, cleanupPending: 1, retryAfter: null },
     ]);
+  });
+
+  it("does not scan listMatchingStagingKeys for nonexistent or foreign-workspace targets on delete or retry_cleanup", async () => {
+    const baseSql = makeFakeSql();
+    const s3 = makeFakeStorage();
+    const listMatchingStagingKeys = vi.fn(async () => []);
+    const storage: OpeningStorage = {
+      ...s3.storage,
+      stagingKey: (id) => `opening/staging/${id}`,
+      finalKey: (id, version) => `opening/sources/${id}/v${version}`,
+      listMatchingStagingKeys,
+    };
+
+    const ownedSourceId = "00000000-0000-4000-8000-0000000000d1";
+    const missingSourceId = "00000000-0000-4000-8000-0000000000d2";
+    const foreignReceiptId = "00000000-0000-4000-8000-0000000000d3";
+
+    const wrappedSql = Object.assign(((parts: TemplateStringsArray, ...values: unknown[]) => {
+      const query = parts.join("?").replace(/\s+/g, " ").trim();
+      if (query === "" || query === "FOR UPDATE") return query;
+      if (query.startsWith("SELECT id FROM workspaces")) {
+        return values[0] === principal.workspaceId && values[1] === principal.userId ? [{ id: principal.workspaceId }] : [];
+      }
+      if (query.startsWith("SELECT version, upload_url_expires_at FROM opening_sources")) {
+        return values[0] === ownedSourceId && values[1] === principal.workspaceId
+          ? [{ version: 0, upload_url_expires_at: null }]
+          : [];
+      }
+      if (query.startsWith("SELECT * FROM opening_privacy_exclusions")) return [];
+      if (query.startsWith("SELECT id, source_id, pending_object_keys, cleanup_not_before FROM opening_privacy_exclusions")) {
+        return values[0] === principal.workspaceId && values[1] === foreignReceiptId
+          ? []
+          : [];
+      }
+      return (baseSql as unknown as (p: TemplateStringsArray, ...v: unknown[]) => unknown)(parts, ...values);
+    }) as unknown as typeof baseSql, {
+      json: baseSql.json,
+      begin: (cb: (tx: Sql) => Promise<unknown>) => cb(wrappedSql as unknown as Sql),
+    });
+
+    const svc = createOpeningSourceService(wrappedSql as unknown as Sql, storage);
+
+    await expect(svc.actOnSource(principal, missingSourceId, {
+      action: "delete",
+      expectedVersion: 0,
+      expectedMembershipIds: [],
+    })).rejects.toMatchObject({ code: "NOT_FOUND" });
+
+    await expect(svc.actOnSource(principal, missingSourceId, {
+      action: "retry_cleanup",
+    })).rejects.toMatchObject({ code: "NOT_FOUND" });
+
+    await expect(svc.actOnSource(otherPrincipal, ownedSourceId, {
+      action: "delete",
+      expectedVersion: 0,
+      expectedMembershipIds: [],
+    })).rejects.toMatchObject({ code: "NOT_FOUND" });
+
+    await expect(svc.actOnSource(otherPrincipal, foreignReceiptId, {
+      action: "retry_cleanup",
+    })).rejects.toMatchObject({ code: "NOT_FOUND" });
+
+    expect(listMatchingStagingKeys).not.toHaveBeenCalled();
   });
 
 });

@@ -87,4 +87,28 @@ describe("opening source actions cleanup extra key persistence", () => {
     expect(db.updates).toEqual([]);
     expect(cleanup).toMatchObject({ keys: [key], connectorReservation: true });
   });
+
+  it("verifies ownership and connector reservation status in shouldDiscoverStaging before touching storage", async () => {
+    const db = fakeActionsSql({ id: "00000000-0000-4000-8000-000000000044", pendingKeys: [] });
+    const repo = createOpeningSourceActionsRepository(db.sql);
+    await expect(repo.shouldDiscoverStaging(scope, sourceId, { action: "retry_cleanup" })).resolves.toBe(true);
+
+    const connDb = fakeActionsSql({ id: connectorReservationId(sourceId), pendingKeys: [`opening/sources/${sourceId}/v0`] });
+    const connRepo = createOpeningSourceActionsRepository(connDb.sql);
+    await expect(connRepo.shouldDiscoverStaging(scope, sourceId, { action: "retry_cleanup" })).resolves.toBe(false);
+
+    const emptySql = Object.assign(((parts: TemplateStringsArray) => {
+      const query = parts.join("?").replace(/\s+/g, " ").trim();
+      if (query === "" || query === "FOR UPDATE") return query;
+      if (query.startsWith("SELECT id FROM workspaces")) return Promise.resolve([{ id: workspaceId }]);
+      return Promise.resolve([]);
+    }) as unknown as Sql, { begin: db.sql.begin });
+    const emptyRepo = createOpeningSourceActionsRepository(emptySql);
+    await expect(emptyRepo.shouldDiscoverStaging(scope, sourceId, { action: "delete", expectedVersion: 0 })).rejects.toMatchObject({
+      code: "NOT_FOUND",
+    });
+    await expect(emptyRepo.shouldDiscoverStaging(scope, sourceId, { action: "retry_cleanup" })).rejects.toMatchObject({
+      code: "NOT_FOUND",
+    });
+  });
 });

@@ -165,6 +165,40 @@ export function createOpeningSourceActionsRepository(sql: Sql) {
       return { sourceId: canonicalId, version: Number(rows[0]!.version), aiExcluded: Boolean(rows[0]!.excluded), courses: await courses(sql, scope, canonicalId) };
     },
 
+    /**
+     * Read-only ownership preflight before scanning shared staging storage, so
+     * missing or foreign-tenant targets fail with 404 without holding a DB lock
+     * or listing S3 objects.
+     */
+    async shouldDiscoverStaging(
+      scope: OpeningScope,
+      id: string,
+      input: { action: "delete"; expectedVersion: number } | { action: "retry_cleanup" },
+    ): Promise<boolean> {
+      const canonicalId = id.toLowerCase();
+      await owner(sql, scope);
+      if (input.action === "retry_cleanup") {
+        const [row] = await sql`SELECT id, source_id, pending_object_keys, cleanup_not_before FROM opening_privacy_exclusions
+          WHERE workspace_id=${scope.workspaceId} AND source_id=${canonicalId} AND asset_deleted_at IS NOT NULL`;
+        if (!row) throw new OpeningSourceError("NOT_FOUND", "Deletion receipt not found");
+        return !isConnectorReservationRow(row);
+      }
+      const sourceRows = await sql`SELECT version, upload_url_expires_at FROM opening_sources
+        WHERE id=${canonicalId} AND workspace_id=${scope.workspaceId}`;
+      if (sourceRows.length) {
+        if (Number(sourceRows[0]!.version) !== input.expectedVersion) {
+          throw new OpeningSourceError("CONFLICT", "Source changed; review its impact again");
+        }
+        return true;
+      }
+      const existing = await sql`SELECT * FROM opening_privacy_exclusions
+        WHERE workspace_id=${scope.workspaceId} AND source_id=${canonicalId}`;
+      if (existing[0]?.asset_deleted_at) {
+        return !isConnectorReservationRow(existing[0]);
+      }
+      throw new OpeningSourceError("NOT_FOUND", "Source not found");
+    },
+
     async apply(
       scope: OpeningScope,
       id: string,

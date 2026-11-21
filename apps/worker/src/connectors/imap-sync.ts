@@ -4,7 +4,18 @@ import type {
 } from "@aistudy/database";
 import type { ImapFlow } from "imapflow";
 import { simpleParser } from "mailparser";
+import {
+  attachImapClientErrorGuard,
+  getClientErrorState,
+  installImapCommandGuard,
+  MAX_IMAP_FETCH_COMMAND_BYTES,
+  MAX_IMAP_PROBE_COMMAND_BYTES,
+  partialBodyOffsetKey,
+  runGuardedImapFetch,
+} from "./imap-command-guard";
 import { publishConnectorSource, type ConnectorSourceStorage } from "./publish-source";
+
+export { attachImapClientErrorGuard };
 
 export const IMAP_BATCH_SIZE = 100;
 export const DEFAULT_IMAP_SYNC_DURATION_MS = 120_000;
@@ -85,40 +96,6 @@ export type ImapSyncDeps = {
   onDeadlineAbort?: () => void;
 };
 
-type ErrorEventClient = {
-  on?: (event: string, listener: (error: unknown) => void) => unknown;
-  close?: () => void;
-};
-
-type ClientErrorState = {
-  firstError: Error | null;
-  waiters: Set<(error: Error) => void>;
-};
-
-const clientErrorStates = new WeakMap<object, ClientErrorState>();
-
-/** Attach a persistent 'error' listener once per client so wire/socket errors never crash Node. */
-export function attachImapClientErrorGuard<T extends object>(client: T): T {
-  if (clientErrorStates.has(client)) return client;
-  const state: ClientErrorState = { firstError: null, waiters: new Set() };
-  clientErrorStates.set(client, state);
-  const emitter = client as ErrorEventClient;
-  if (typeof emitter.on === "function") {
-    emitter.on("error", (err: unknown) => {
-      const normalized = err instanceof Error ? err : new Error(String(err));
-      if (!state.firstError) state.firstError = normalized;
-      try {
-        emitter.close?.();
-      } catch {
-        // Ignore socket teardown errors after recording the original client failure.
-      }
-      for (const reject of state.waiters) reject(state.firstError);
-      state.waiters.clear();
-    });
-  }
-  return client;
-}
-
 export async function runWithSyncDeadline<T>(
   operation: () => Promise<T>,
   options: {
@@ -131,7 +108,7 @@ export async function runWithSyncDeadline<T>(
   },
 ): Promise<T> {
   const { phase, deadlineMs, now, signal, client, onDeadlineAbort } = options;
-  const errorState = client ? clientErrorStates.get(attachImapClientErrorGuard(client)) : undefined;
+  const errorState = client ? getClientErrorState(attachImapClientErrorGuard(client)) : undefined;
   if (errorState?.firstError) {
     onDeadlineAbort();
     throw errorState.firstError;
@@ -202,7 +179,7 @@ export async function syncMailbox(deps: ImapSyncDeps): Promise<{
   skipped: number;
   cursor: ImapCursor;
 }> {
-  attachImapClientErrorGuard(deps.client);
+  installImapCommandGuard(deps.client);
   const clock = deps.now ?? (() => Date.now());
   const maxDurationMs = deps.maxSyncDurationMs ?? DEFAULT_IMAP_SYNC_DURATION_MS;
   if (!Number.isFinite(maxDurationMs) || maxDurationMs <= 0) {
@@ -318,10 +295,14 @@ export async function syncMailbox(deps: ImapSyncDeps): Promise<{
       generation: cursor.uidValidity,
       remoteId: String(uid),
     };
-    const fetched = await withDeadline("fetch", () => deps.client.fetchOne(
-      String(uid),
-      { source: { start: 0, maxLength: MAX_MAIL_BYTES + 1 }, size: true },
-      { uid: true },
+    const fetched = await withDeadline("fetch", () => runGuardedImapFetch(
+      deps.client,
+      { maxBytes: MAX_IMAP_FETCH_COMMAND_BYTES, maxFetchResponses: 1, expectedUid: uid },
+      () => deps.client.fetchOne(
+        String(uid),
+        { source: { start: 0, maxLength: MAX_MAIL_BYTES + 1 }, size: true },
+        { uid: true },
+      ),
     ));
     if (fetched === false) {
       // The message was expunged after discovery.
@@ -344,19 +325,33 @@ export async function syncMailbox(deps: ImapSyncDeps): Promise<{
         throw new Error("IMAP message body was truncated before reaching reported size");
       }
       // Exchange / Office 365 / Maildir can over-report RFC822.SIZE relative to BODY[].
-      // Probe 1 byte at receivedBytes: RFC 3501 s.6.4.5 returns an empty buffer at
-      // true EOF, whereas any non-empty or invalid response proves truncation.
-      const probe = await withDeadline("fetch", () => deps.client.fetchOne(
-        String(uid),
-        { source: { start: receivedBytes, maxLength: 1 } },
-        { uid: true },
+      // Probe the trailing overlap window plus 1 byte: require the exact server-returned
+      // BODY[]<overlapStart> offset and matching tail bytes terminating at EOF.
+      const overlapStart = Math.max(0, receivedBytes - 64);
+      const expectedOverlapLen = receivedBytes - overlapStart;
+      const expectedOffsetKey = partialBodyOffsetKey(overlapStart);
+      const probe = await withDeadline("fetch", () => runGuardedImapFetch(
+        deps.client,
+        { maxBytes: MAX_IMAP_PROBE_COMMAND_BYTES, maxFetchResponses: 1, expectedUid: uid, isProbe: true },
+        () => deps.client.fetchOne(
+          String(uid),
+          { source: { start: overlapStart, maxLength: expectedOverlapLen + 1 } },
+          { uid: true },
+        ),
       ));
       if (probe === false) {
         // The message was expunged after the initial fetch.
         skipped += 1;
         continue;
       }
-      if (!probe || probe.uid !== uid || !Buffer.isBuffer(probe.source) || probe.source.byteLength !== 0) {
+      const probeSlice = probe?.bodyParts?.get(expectedOffsetKey);
+      if (
+        !probe
+        || probe.uid !== uid
+        || !Buffer.isBuffer(probeSlice)
+        || probeSlice.byteLength !== expectedOverlapLen
+        || !probeSlice.equals(fetchedSource.subarray(overlapStart, receivedBytes))
+      ) {
         throw new Error("IMAP message body was truncated before reaching reported size");
       }
     }

@@ -4,11 +4,28 @@ import { isIP } from "node:net";
 import { ImapFlow } from "imapflow";
 import { isPublicProviderAddress } from "@aistudy/ai/provider-network";
 import { imapEndpointSchema, isApprovedImapHost } from "@aistudy/contracts";
-import { attachImapClientErrorGuard } from "./imap-sync";
+import {
+  attachImapClientErrorGuard,
+  installImapCommandGuard,
+  MAX_IMAP_CONTROL_COMMAND_BYTES,
+  MAX_IMAP_FETCH_COMMAND_BYTES,
+  MAX_IMAP_LINE_BYTES,
+  MAX_IMAP_LITERAL_BYTES,
+  MAX_IMAP_PROBE_COMMAND_BYTES,
+  MAX_IMAP_RESPONSE_BYTES,
+  type ImapCommandGuardLimits,
+} from "./imap-command-guard";
 
-export const MAX_IMAP_LINE_BYTES = 2 * 1024 * 1024;
-export const MAX_IMAP_LITERAL_BYTES = 26 * 1024 * 1024;
-export const MAX_IMAP_RESPONSE_BYTES = 28 * 1024 * 1024;
+export {
+  installImapCommandGuard,
+  MAX_IMAP_CONTROL_COMMAND_BYTES,
+  MAX_IMAP_FETCH_COMMAND_BYTES,
+  MAX_IMAP_LINE_BYTES,
+  MAX_IMAP_LITERAL_BYTES,
+  MAX_IMAP_PROBE_COMMAND_BYTES,
+  MAX_IMAP_RESPONSE_BYTES,
+  type ImapCommandGuardLimits,
+};
 
 export async function createApprovedImapClient(
   endpoint: { host: string; port: number; tlsMode: string },
@@ -40,5 +57,5 @@ export async function createApprovedImapClient(
     maxResponseSize: MAX_IMAP_RESPONSE_BYTES,
     logger: false,
   });
-  return attachImapClientErrorGuard(client);
+  return installImapCommandGuard(attachImapClientErrorGuard(client));
 }

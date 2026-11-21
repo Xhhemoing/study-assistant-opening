@@ -269,10 +269,15 @@ export function createOpeningSourceService(sql: Sql, storage: OpeningStorage = n
       const discoveryPendingKey = stagingDiscoveryPendingKey(sourceId);
       const listMatchingStagingKeys = storage.listMatchingStagingKeys;
       if (input.action !== "exclude" && typeof listMatchingStagingKeys === "function") {
-        try {
-          discoveredStagingKeys = await listMatchingStagingKeys.call(storage, sourceId);
-        } catch {
-          stagingDiscoveryFailed = true;
+        const shouldDiscover = typeof actions.shouldDiscoverStaging === "function"
+          ? await actions.shouldDiscoverStaging(scope, id, input)
+          : true;
+        if (shouldDiscover) {
+          try {
+            discoveredStagingKeys = await listMatchingStagingKeys.call(storage, sourceId);
+          } catch {
+            stagingDiscoveryFailed = true;
+          }
         }
       }
       const extraKeysForReceipt = stagingDiscoveryFailed ? [discoveryPendingKey] : discoveredStagingKeys;
