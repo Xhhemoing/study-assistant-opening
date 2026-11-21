@@ -562,6 +562,8 @@ export function createCompanionPairingOffer(
   const pairingPath = input.pairingPath ?? DEFAULT_COMPANION_PAIRING_PATH;
   if (
     !pairingPath.startsWith("/") ||
+    pairingPath.startsWith("//") ||
+    pairingPath.includes("\\") ||
     pairingPath.includes("?") ||
     pairingPath.includes("#") ||
     pairingPath.includes(input.fragmentSecret)
@@ -578,6 +580,24 @@ export function createCompanionPairingOffer(
   const fragmentSecret = input.fragmentSecret.trim();
   const expiresAtMs = input.issuedAtMs + COMPANION_PAIRING_TTL_MS;
   const qrUrl = `${normalizedCompanionOrigin}${pairingPath}#k=${encodeURIComponent(fragmentSecret)}`;
+
+  // Validate the assembled QR URL through parseCompanionQrUrl so encoded secret copies
+  // (percent-encoded, base64/base64url, hex), malformed `%` escapes, or origin drift fail closed.
+  const parsedQr = parseCompanionQrUrl(qrUrl);
+  if (
+    !parsedQr.ok ||
+    parsedQr.origin !== normalizedCompanionOrigin ||
+    parsedQr.fragmentSecret !== fragmentSecret
+  ) {
+    return {
+      ok: false,
+      code: "invalid_pairing_path",
+      httpStatus: 400,
+      message: !parsedQr.ok
+        ? parsedQr.message
+        : "Assembled QR URL failed fragment-secret and origin integrity verification.",
+    };
+  }
 
   const offer: CompanionPairingOffer = {
     schemaVersion: 1,

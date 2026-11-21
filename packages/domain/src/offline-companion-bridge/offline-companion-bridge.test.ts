@@ -387,6 +387,54 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
       expect(backSummarySiblingLeak.code).toBe("miss_variant_answer_leak");
     }
 
+    // [Round-5 P1-1] Short-token sibling miss_variant answers ("42", "-7", "0.5", "pi/2", "x=5", choice "B")
+    // embedded in a sibling flashcard's prompt OR backSummary MUST fail closed with 422 miss_variant_answer_leak.
+    for (const [idx, siblingLeak] of [
+      { answerKey: "42", prompt: "Define trace of M.", backSummary: "For the exam matrix it equals 42." },
+      { answerKey: "-7", prompt: "Recall why f(2) gives -7.", backSummary: "Apply the linear formula." },
+      { answerKey: "0.5", prompt: "Define Bernoulli variance.", backSummary: "At p = 0.5 variance peaks." },
+      { answerKey: "pi/2", prompt: "Orthogonal angle reminder.", backSummary: "Right angles measure pi/2." },
+      { answerKey: "x=5", prompt: "Verify x = 5 on linear systems.", backSummary: "Check substitution." },
+      { answerKey: "B", prompt: "Review orthogonal basis criteria.", backSummary: "Correct option is B." },
+    ].entries()) {
+      const rejectedSiblingShort = issueOfflineFlashcardLease({
+        leaseId: `lease-fc-sibling-short-${idx}`,
+        workspaceId: "ws-1",
+        learnerId: "learner-1",
+        issuedAtMs: T0,
+        candidates: [
+          makeMissVariantCandidate({ answerKey: siblingLeak.answerKey }),
+          {
+            ...makeFlashcardCandidate(10 + idx),
+            prompt: siblingLeak.prompt,
+            backSummary: siblingLeak.backSummary,
+          },
+        ],
+      });
+      expect(rejectedSiblingShort.ok).toBe(false);
+      if (!rejectedSiblingShort.ok) {
+        expect(rejectedSiblingShort.httpStatus).toBe(422);
+        expect(rejectedSiblingShort.code).toBe("miss_variant_answer_leak");
+      }
+    }
+
+    // Clean flashcard alongside a sibling miss_variant with short answerKey "42" still succeeds.
+    const cleanSiblingLease = issueOfflineFlashcardLease({
+      leaseId: "lease-fc-sibling-clean",
+      workspaceId: "ws-1",
+      learnerId: "learner-1",
+      issuedAtMs: T0,
+      candidates: [
+        makeMissVariantCandidate({ answerKey: "42" }),
+        {
+          ...makeFlashcardCandidate(99),
+          prompt: "Define orthogonality of two vectors.",
+          backSummary: "Their inner product equals zero.",
+        },
+      ],
+    });
+    expect(cleanSiblingLease.ok).toBe(true);
+
     expect(containsAnswerLeak("Compute the trace of M (result 42).", "42")).toBe(true);
     expect(containsAnswerLeak("Evaluate f(2), expected -7.", "-7")).toBe(true);
     expect(containsAnswerLeak("Compute probability (0.5).", "0.5")).toBe(true);
@@ -991,6 +1039,36 @@ describe("RFC 8628 90s Companion Scratchpad Pairing & Atomic Freeze (Wave R / La
     expect(
       parseCompanionQrUrl(`${COMPANION_ORIGIN}/companion/pair/%E0%A4%A#k=${FRAGMENT_SECRET}`),
     ).toMatchObject({ ok: false, code: "invalid_qr_url" });
+
+    // [Round-5 P1-2] createCompanionPairingOffer MUST validate the assembled QR URL via parseCompanionQrUrl,
+    // failing closed when pairingPath carries percent-encoded, hex-encoded, base64url-encoded, or malformed `%` data.
+    const base64UrlSecret = btoa(FRAGMENT_SECRET)
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=+$/, "");
+    for (const badPath of [
+      `/companion/pair/${percentEncodedSecret}`,
+      `/companion/pair/${hexEncodedSecret}`,
+      `/companion/pair/${base64UrlSecret}`,
+      `/companion/pair/%E0%A4%A`,
+      `//evil.other-domain.example/companion/pair`,
+    ]) {
+      const rejectedOffer = createCompanionPairingOffer({
+        offerId: "offer-bad-path",
+        workspaceId: "ws-1",
+        learnerId: "learner-1",
+        attemptId: "attempt-1",
+        primaryOrigin: PRIMARY_ORIGIN,
+        allowedCompanionOrigin: COMPANION_ORIGIN,
+        issuedAtMs: T0,
+        deviceCode: DEVICE_CODE,
+        userCode: RAW_USER_CODE,
+        fragmentSecret: FRAGMENT_SECRET,
+        pairingPath: badPath,
+      });
+      expect(rejectedOffer.ok).toBe(false);
+      if (!rejectedOffer.ok) expect(rejectedOffer.code).toBe("invalid_pairing_path");
+    }
 
     const proof = deriveCompanionFragmentSecretProof(FRAGMENT_SECRET, DEVICE_CODE);
 

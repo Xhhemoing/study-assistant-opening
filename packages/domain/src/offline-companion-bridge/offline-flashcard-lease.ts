@@ -457,8 +457,8 @@ function sanitizeLeaseCandidate(
     }
     for (const siblingSecret of siblingSecretTexts) {
       if (
-        containsAnswerLeak(candidate.prompt, siblingSecret, { includeShortTokens: false }) ||
-        containsAnswerLeak(candidate.backSummary, siblingSecret, { includeShortTokens: false })
+        containsAnswerLeak(candidate.prompt, siblingSecret, { includeShortTokens: true }) ||
+        containsAnswerLeak(candidate.backSummary, siblingSecret, { includeShortTokens: true })
       ) {
         return {
           ok: false,
