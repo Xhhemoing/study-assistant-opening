@@ -248,7 +248,11 @@ const LATEX_SKIP_DIM_COMMANDS: ReadonlySet<string> = new Set([
 ]);
 
 const LATEX_CONTROL_SPACE_CHARS = new Set([",", ";", ":", "!", " "]);
-const LATEX_OPTION_FORMATTING_COMMANDS = new Set(["text", "mathrm", "mathbf"]);
+const LATEX_OPTION_FORMATTING_COMMANDS = new Set([
+  "text", "textbf", "textit", "texttt", "textsf", "textsc", "textsl", "textmd", "textrm",
+  "textnormal", "textup", "emph", "mathrm", "mathbf", "mathit", "mathsf", "mathtt",
+  "mathcal", "mathbb", "mathfrak", "mathscr", "mathnormal", "boldsymbol", "bm",
+]);
 
 const LATEX_DIM_PREFIX_RE =
   /^\s*[+-]?\d+(?:\.\d+)?\s*(?:em|ex|pt|px|mu|cm|mm|in|pc|bp|dd|cc|sp)\b/i;
@@ -282,11 +286,14 @@ function skipBalancedGroup(text: string, start: number, openChar: string, closeC
  * to single spaces so their closing braces never masquerade as binary left operands.
  */
 function stripLatexNonOperandCommands(text: string, unwrapOptionFormatting = false): string {
-  const formattingClosers = unwrapOptionFormatting ? new Set<number>() : undefined;
+  const formattingClosers = unwrapOptionFormatting ? new Map<number, number>() : undefined;
   let out = "";
   let i = 0;
   while (i < text.length) {
-    if (formattingClosers?.delete(i)) {
+    const bodyStart = formattingClosers?.get(i);
+    if (bodyStart !== undefined) {
+      const before = out.slice(0, bodyStart);
+      out = before + preserveFormattedChoice(out.slice(bodyStart), before, text.slice(i + 1));
       i += 1;
       continue;
     }
@@ -324,7 +331,7 @@ function stripLatexNonOperandCommands(text: string, unwrapOptionFormatting = fal
     if (formattingClosers && LATEX_OPTION_FORMATTING_COMMANDS.has(cmdLower)) {
       const argEnd = skipBalancedGroup(text, nameEnd, "{", "}");
       if (argEnd !== -1) {
-        formattingClosers.add(argEnd - 1);
+        formattingClosers.set(argEnd - 1, out.length);
         i = text.indexOf("{", nameEnd) + 1;
         continue;
       }
@@ -1158,8 +1165,20 @@ function normalizeMathSymbols(text: string): string {
 
 function normalizeOptionSyntax(syntax: string): string {
   const mathSyntax = stripOptionMarkdown(normalizeMathSymbols(stripLatexNonOperandCommands(syntax, true)))
-    .replace(/(?<!\\)\\\(([\s\S]*?)(?<!\\)\\\)|(?<!\\)\\\[([\s\S]*?)(?<!\\)\\\]/g, "$1$2");
+    .replace(
+      /(?<!\\)\\\(([\s\S]*?)(?<!\\)\\\)|(?<!\\)\\\[([\s\S]*?)(?<!\\)\\\]/g,
+      (span, inline: string | undefined, display: string, offset: number, text: string) =>
+        preserveFormattedChoice(inline ?? display, text.slice(0, offset), text.slice(offset + span.length)),
+    );
   return stripOptionMarkdown(stripOptionDollarMath(mathSyntax));
+}
+
+function preserveFormattedChoice(body: string, before: string, after: string): string {
+  if (SINGLE_CHOICE_LETTER_RE.test(body.trim()) &&
+    !(OPTION_WRAPPER_BEFORE_RE.test(before) && OPTION_WRAPPER_AFTER_RE.test(after))) {
+    return "[" + body + "]";
+  }
+  return body;
 }
 
 function stripOptionDollarMath(text: string): string {
@@ -1174,7 +1193,7 @@ function stripOptionDollarMath(text: string): string {
     const body = text.slice(open.index + open[0].length, close.index);
     if (!body.trim() || body.includes("$") || /^[$\p{L}\p{N}]/u.test(text.slice(end))) continue;
     if (open[0] === "$") {
-      const amount = /^\d+(?:,\d{3})*(?:\.\d+)?/.exec(body)?.[0];
+      const amount = /^\s*(?:\d+(?:,\d{3})*(?:\.\d+)?|\.\d+)/.exec(body)?.[0];
       const rest = amount ? body.slice(amount.length) : "";
       // An amount followed by prose, punctuation or an incomplete math term
       // is a currency token. Leave the next dollar available as an opener.
@@ -1184,11 +1203,7 @@ function stripOptionDollarMath(text: string): string {
       }
     }
     const before = text.slice(copiedThrough, open.index);
-    const alreadyWrapped = OPTION_WRAPPER_BEFORE_RE.test(before) &&
-      OPTION_WRAPPER_AFTER_RE.test(text.slice(end));
-    parts.push(before, SINGLE_CHOICE_LETTER_RE.test(body.trim()) && !alreadyWrapped
-      ? "[" + body + "]"
-      : body);
+    parts.push(before, preserveFormattedChoice(body, before, text.slice(end)));
     copiedThrough = end;
     index += 1;
   }
@@ -1196,13 +1211,16 @@ function stripOptionDollarMath(text: string): string {
 }
 
 function stripOptionMarkdown(text: string): string {
+  const unwrapEmphasis = (span: string, _markers: string, body: string, offset: number, source: string): string =>
+    preserveFormattedChoice(body, source.slice(0, offset), source.slice(offset + span.length));
   let previous: string;
   do {
     previous = text;
     text = text
-      .replace(/(?<![\\\p{L}\p{M}\p{N}*])(\*+)(?!\*)([^*\r\n]+)\1(?![\p{L}\p{M}\p{N}*])/gu, "$2")
-      .replace(/(?<![\\\p{L}\p{M}\p{N}_])(_+)(?!_)([^_\r\n]+)\1(?![\p{L}\p{M}\p{N}_])/gu, "$2")
-      .replace(/(?<![\\\p{L}\p{M}\p{N}~])(~+)(?!~)([^~\r\n]+)\1(?![\p{L}\p{M}\p{N}~])/gu, "$2")
+      .replace(/(?<![\\\p{L}\p{M}\p{N}*])(\*+)(?!\*)([^*\r\n]+)\1(?![\p{L}\p{M}\p{N}*])/gu, unwrapEmphasis)
+      .replace(/(?<![\\\p{L}\p{M}\p{N}_])(_+)(?!_)([^_\r\n]+)\1(?![\p{L}\p{M}\p{N}_])/gu, unwrapEmphasis)
+      .replace(/(?<![\\\p{L}\p{M}\p{N}~])(~+)(?!~)([^~\r\n]+)\1(?![\p{L}\p{M}\p{N}~])/gu, unwrapEmphasis)
+      .replace(REDUNDANT_CHOICE_WRAPPER_RE, "$1$2")
       .replace(OPTION_WRAPPED_CODE_RE, "$1$3")
       // An unenclosed code span still acts as a choice wrapper.
       .replace(/(?<![\\\x60])(\x60{2,})(?!\x60)([^\x60]+)\1(?!\x60)/g, "\x60$2\x60");
@@ -1314,6 +1332,10 @@ const OPTION_WORD_CONNECTOR = /\b(?:and|or|then)\b/.source;
 const OPTION_END_PUNCTUATION = /[\s.!?。！？;；:：,，、…—–-]*/u.source;
 const OPTION_WRAPPER_BEFORE_RE = new RegExp(OPTION_WRAPPER_OPEN + "\\s*$", "u");
 const OPTION_WRAPPER_AFTER_RE = new RegExp("^" + OPTION_END_PUNCTUATION + OPTION_WRAPPER_CLOSE, "u");
+const REDUNDANT_CHOICE_WRAPPER_RE = new RegExp(
+  "(" + OPTION_WRAPPER_OPEN + "\\s*)\\[(\\s*[a-z]\\s*)\\](?=" + OPTION_END_PUNCTUATION + OPTION_WRAPPER_CLOSE + ")",
+  "giu",
+);
 const OPTION_WRAPPED_CODE_RE = new RegExp(
   "(" + OPTION_WRAPPER_OPEN + "\\s*)(?<!\\x60)(\\x60+)(?!\\x60)" +
   "((?:(?!(?<!\\x60)\\2(?!\\x60))[\\s\\S])+)(?<!\\x60)\\2(?!\\x60)" +
@@ -1438,10 +1460,21 @@ function protectedPrimitiveText(value: unknown): string | null {
     : null;
 }
 
+function protectedArrayMemberText(value: unknown, remainingDecodes = MAX_PROTECTED_JSON_DECODES): string | null {
+  for (let depth = 0; depth < remainingDecodes && typeof value === "string"; depth += 1) {
+    const trimmed = value.trim();
+    if (!trimmed.startsWith('"')) break;
+    const decoded = parseSerializedProtectedValue(trimmed);
+    if (typeof decoded?.value !== "string") break;
+    value = decoded.value;
+  }
+  return value === null ? "null" : protectedPrimitiveText(value);
+}
+
 function normalizeOptionLabels(values: readonly unknown[]): string[] | null {
   const labels: string[] = [];
   for (const value of values) {
-    const text = protectedPrimitiveText(value);
+    const text = protectedArrayMemberText(value);
     if (text === null) return null;
     const label = normalizeOptionLabel(text);
     if (!label) return null;
@@ -1450,20 +1483,41 @@ function normalizeOptionLabels(values: readonly unknown[]): string[] | null {
   return labels;
 }
 
-function optionSequenceSource(labels: readonly string[]): string {
-  const sequence = labels.map(label => escapeRegExp(label).replace(/ /g, "\\s+")).join(OPTION_SEQUENCE_SEPARATOR);
+function optionSequenceSource(labels: readonly string[], aliases?: readonly unknown[]): string {
+  const sequence = labels.map((label, index) => {
+    const pattern = escapeRegExp(label).replace(/ /g, "\\s+");
+    const alias = aliases?.[index];
+    return typeof alias === "string" && alias !== label
+      ? "(?:" + pattern + "|" + escapeRegExp(alias) + ")"
+      : pattern;
+  }).join(OPTION_SEQUENCE_SEPARATOR);
   return `(?<!${NON_CJK_WORD_CHAR})${sequence}(?!${NON_CJK_WORD_CHAR})`;
 }
 
-function parseSerializedProtectedValue(rawSecret: string): string | object | null {
+interface DecodedProtectedValue {
+  readonly value: string | object;
+  readonly numberSpellings?: unknown;
+}
+
+function parseSerializedProtectedValue(rawSecret: string): DecodedProtectedValue | null {
   // Preserve JSON quoting and escapes when the protected value is already serialized.
   const serialized = rawSecret.trim();
   const startsJson = /^[[{"]/;
   const json = startsJson.test(serialized) ? serialized : normalizeLeakSyntax(serialized).trim();
   if (!startsJson.test(json)) return null;
   try {
-    const values: unknown = JSON.parse(json);
-    return typeof values === "string" || (typeof values === "object" && values !== null) ? values : null;
+    const value: unknown = JSON.parse(json);
+    if (typeof value === "string") return { value };
+    if (typeof value !== "object" || value === null) return null;
+
+    // Parse a parallel tree with only noncanonical numeric literals quoted.
+    // JSON strings are consumed as whole tokens, and object keys stay aligned
+    // even when parsing reorders integer keys or replaces duplicate keys.
+    const spellingJson = json.replace(
+      /"(?:[^"\\]|\\[\s\S])*"|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/g,
+      token => token.startsWith('"') || String(Number(token)) === token ? token : JSON.stringify(token),
+    );
+    return spellingJson === json ? { value } : { value, numberSpellings: JSON.parse(spellingJson) };
   } catch {
     return null;
   }
@@ -1476,7 +1530,8 @@ function containsArrayAnswerLeak(
   rawSecret: string,
 ): boolean {
   if (!normalizedSecret.startsWith("[")) return false;
-  const values = parseSerializedProtectedValue(rawSecret);
+  const decoded = parseSerializedProtectedValue(rawSecret);
+  const values = decoded?.value;
   if (!Array.isArray(values) || values.length === 0) return false;
 
   const compactStem = compactJsonPunctuation(normalizedStem);
@@ -1485,9 +1540,13 @@ function containsArrayAnswerLeak(
   // Normalize each decoded label before building the ordered sequence.
   if (values.length < 2) return false;
   const labels = normalizeOptionLabels(values);
+  const spellings = decoded?.numberSpellings;
+  const aliases = Array.isArray(spellings)
+    ? values.map((value, index) => typeof value === "number" ? spellings[index] : undefined)
+    : undefined;
   return labels !== null && (
-    new RegExp(optionSequenceSource(labels), "iu").test(optionText) ||
-    new RegExp(optionSequenceSource(labels.map(normalizeComparableText)), "iu").test(normalizedStem)
+    new RegExp(optionSequenceSource(labels, aliases), "iu").test(optionText) ||
+    new RegExp(optionSequenceSource(labels.map(normalizeComparableText), aliases), "iu").test(normalizedStem)
   );
 }
 
@@ -1541,10 +1600,10 @@ export function containsAnswerLeak(
       ? segment
       : collapseBinaryAddSubWhitespace(segment);
 
-    if (segment.length >= 6 && normalizedStem.includes(segment)) {
+    if (segment.length >= 6 && containsCjkBoundedSubstring(normalizedStem, segment)) {
       return true;
     }
-    if (!isStandaloneSigned && compactSegment.length >= 6 && compactStem.includes(compactSegment)) {
+    if (!isStandaloneSigned && compactSegment.length >= 6 && containsCjkBoundedSubstring(compactStem, compactSegment)) {
       return true;
     }
     const tokenCount = segment.split(/\s+/).filter(Boolean).length;
@@ -1750,7 +1809,13 @@ function collectSecretTexts(value: unknown): ProtectedAnswerTexts | null {
 
   // Build JSON text from the inspected properties so serialization cannot
   // traverse unchecked values or execute getters and toJSON hooks.
-  function inspect(current: unknown, depth: number, jsonDepth = 0, collectText = true): string | undefined {
+  function inspect(
+    current: unknown,
+    depth: number,
+    jsonDepth = 0,
+    collectText = true,
+    numberSpelling?: unknown,
+  ): string | undefined {
     remainingNodes -= 1;
     if (depth > MAX_PROTECTED_PAYLOAD_DEPTH || remainingNodes < 0) {
       throw new RangeError("Protected payload exceeds inspection bounds");
@@ -1760,13 +1825,18 @@ function collectSecretTexts(value: unknown): ProtectedAnswerTexts | null {
     if (typeof current === "string" || typeof current === "number" || typeof current === "boolean") {
       const text = String(current).trim();
       if (text && collectText) texts.add(text);
+      if (typeof current === "number" && typeof numberSpelling === "string") {
+        texts.add(numberSpelling);
+        if (!collectText) arrayOptionLabels.add(numberSpelling);
+        return numberSpelling;
+      }
       if (typeof current === "string") {
         const decoded = parseSerializedProtectedValue(current);
         if (decoded !== null) {
           if (jsonDepth >= MAX_PROTECTED_JSON_DECODES) {
             throw new RangeError("Protected payload exceeds the JSON decoding bound");
           }
-          inspect(decoded, depth + 1, jsonDepth + 1, collectText);
+          inspect(decoded.value, depth + 1, jsonDepth + 1, collectText, decoded.numberSpellings);
         }
       }
       return JSON.stringify(current);
@@ -1802,9 +1872,14 @@ function collectSecretTexts(value: unknown): ProtectedAnswerTexts | null {
       if (!property || !Object.hasOwn(property, "value")) {
         throw new TypeError("Protected payload properties must be inspectable data");
       }
-      const member = arrayMembers ? protectedPrimitiveText(property.value) : null;
+      const member = arrayMembers
+        ? protectedArrayMemberText(property.value, MAX_PROTECTED_JSON_DECODES - jsonDepth)
+        : null;
       if (arrayMembers && member !== null) arrayMembers[Number(key)] = member;
-      const json = inspect(property.value, depth + 1, jsonDepth, member === null);
+      const childSpelling: unknown = typeof numberSpelling === "object" && numberSpelling !== null
+        ? Object.getOwnPropertyDescriptor(numberSpelling, key)?.value
+        : undefined;
+      const json = inspect(property.value, depth + 1, jsonDepth, member === null, childSpelling);
       if (typeof key !== "string") continue;
       if (arrayLength !== null) {
         parts[Number(key)] = json ?? "null";

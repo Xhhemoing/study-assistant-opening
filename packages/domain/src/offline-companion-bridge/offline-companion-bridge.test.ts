@@ -2427,6 +2427,84 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
     });
   });
 
+  it.each([
+    { answerKey: "[17,0.50]", text: "Use 17 and 0.50.", leaks: true },
+    { answerKey: "[1e3,9007199254740993]", text: "Use 1000 and 9007199254740993.", leaks: true },
+    { answerKey: "[1e3,9007199254740993]", text: "Use 9007199254740993 and 1000.", leaks: false },
+    { answerKey: JSON.stringify([JSON.stringify("red"), 42]), text: "Use red and 42.", leaks: true },
+    { answerKey: "[17,null]", text: "Use 17 and null.", leaks: true },
+  ])("checks the decoded sequence $answerKey in $text", ({ answerKey, text, leaks }) => {
+    expect(containsAnswerLeak(text, answerKey)).toBe(leaks);
+  });
+
+  describe.each(["variant stem", "backSummary", "prompt"] as const)("formatted choices and JSON literals in a %s", surface => {
+    const encodedRed = JSON.stringify("red");
+    const encodedLambda = JSON.stringify("λ");
+    it.each([
+      ...["**B**", "___B___", "~~B~~", "\\(B\\)", "\\[B\\]", "\\mathbf{B}", "\\textbf{B}", "\\mathrm{B}", "[**\\mathbf{B}**]"]
+        .map(choice => ({ secret: { answerKey: "B" }, text: `The marked response ${choice}.`, ok: false })),
+      { secret: { answerKey: "A" }, text: "This is *a* book.", ok: true },
+      { secret: { answerKey: "B" }, text: "Read **B** before moving on.", ok: true },
+      ...["$.50", "$ 5", "$ .50", "$1,250.50"].flatMap(amount => [
+        { secret: { answerKey: "B" }, text: `A ticket costs ${amount}. The marked response [*$ B $*].`, ok: false },
+        { secret: { answerKey: "B" }, text: `A ticket costs ${amount}. Read the instructions.`, ok: true },
+      ]),
+      ...[
+        { sealedPayload: { order: [encodedRed, 42] } },
+        { answerKey: JSON.stringify([encodedRed, 42]) },
+        { sealedPayload: { order: [JSON.stringify(encodedRed), 42] } },
+      ].flatMap(secret => [
+        { secret, text: "The selected value is red.", ok: false },
+        { secret, text: "Use red and 42.", ok: false },
+        { secret, text: "Read the redwood example.", ok: true },
+      ]),
+      { secret: { sealedPayload: { order: [encodedLambda, JSON.stringify("θ")] } }, text: "Compare theta and lambda.", ok: true },
+      { secret: { answerKey: "[17,0.50]" }, text: "The selected value is 0.50.", ok: false },
+      { secret: { answerKey: "[17,0.50]" }, text: "The selected value is 0.5.", ok: false },
+      { secret: { answerKey: "[17,0.50]" }, text: "Use 17 and 0.50.", ok: false },
+      { secret: { answerKey: "[17,0.50]" }, text: "Compare 170 with 0.501.", ok: true },
+      { secret: { answerKey: "[1e3,9007199254740993]" }, text: "The selected value is 1e3.", ok: false },
+      { secret: { answerKey: "[1e3,9007199254740993]" }, text: "The selected value is 1000.", ok: false },
+      { secret: { answerKey: "[1e3,9007199254740993]" }, text: "The selected value is 9007199254740993.", ok: false },
+      { secret: { answerKey: "[1e3,9007199254740993]" }, text: "Use 1000 and 9007199254740993.", ok: false },
+      { secret: { sealedPayload: { order: '{"nested":[17,0.50]}' } }, text: "The selected value is 0.50.", ok: false },
+      ...[{ sealedPayload: { order: [null] } }, { answerKey: "[null]" }, { answerKey: "[17,null]" }].map(secret => ({
+        secret, text: "The selected value is null.", ok: false,
+      })),
+      { secret: { answerKey: "[17,null]" }, text: "Use 17 and null.", ok: false },
+      { secret: { gradingRubric: null }, text: "Explain what null means.", ok: true },
+      ...["Compute lambda_1.", "Compute my_lambda.", "Compute \\lambda_1."].map(text => ({
+        secret: { answerKey: "\\lambda" }, text, ok: true,
+      })),
+      ...["The eigenvalue is lambda.", "Compute lambda.", "Compute $\\lambda$.", "Compute λ.", "See [lambda].", "Recall lambda = 2."]
+        .map(text => ({ secret: { answerKey: "\\lambda" }, text, ok: false })),
+      { secret: { answerKey: "\\epsilon" }, text: "Compute epsilon_0.", ok: true },
+      { secret: { answerKey: "variable" }, text: "Compute my_variable.", ok: true },
+      { secret: { answerKey: "variable" }, text: "Read the variable before continuing.", ok: false },
+    ])("sets ok=$ok for $text with $secret", ({ secret, text, ok }) => {
+      const variant = makeMissVariantCandidate({
+        answerKey: undefined,
+        canonicalSolution: undefined,
+        gradingRubric: undefined,
+        referenceAnswer: undefined,
+        sealedPayload: {},
+        ...secret,
+        freshVariantStem: surface === "variant stem" ? text : "Which ordering is correct?",
+      });
+      const candidates = surface === "variant stem" ? [variant] : [
+        variant,
+        { ...makeFlashcardCandidate(900), [surface]: text },
+      ];
+      expect(issueOfflineFlashcardLease({
+        leaseId: "lease-formatted-choice-and-json-literal",
+        workspaceId: "ws-1",
+        learnerId: "learner-1",
+        issuedAtMs: T0,
+        candidates,
+      })).toMatchObject(ok ? { ok: true } : { ok: false, httpStatus: 422, code: "miss_variant_answer_leak" });
+    });
+  });
+
   it("rejects a candidate with an inherited protected getter without invoking it", () => {
     let getterCalled = false;
     const candidate = makeMissVariantCandidate({ freshVariantStem: "The indicator turns violet." });
