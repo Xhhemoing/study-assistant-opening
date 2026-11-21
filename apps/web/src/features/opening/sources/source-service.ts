@@ -98,11 +98,17 @@ export function createOpeningSourceService(sql: Sql, storage: OpeningStorage = n
     rawId: string,
     sourceId: string,
     version: number,
-    requireExisting: boolean,
+    purpose: "retry" | "downloadUrl" | "downloadStream",
   ): Promise<string> {
     const canonicalKey = storage.finalKey(sourceId, version);
     if (typeof storage.objectExists !== "function") {
       return canonicalKey;
+    }
+    let recordedKey: string | null = null;
+    if (purpose === "retry" && rawId === sourceId) {
+      recordedKey = await resolveRecordedLegacyFinalKey(scope, sourceId, canonicalKey);
+      // The worker fetches the canonical object. Only probe storage here to choose between key spellings.
+      if (!recordedKey) return canonicalKey;
     }
     if (await storage.objectExists(canonicalKey)) {
       return canonicalKey;
@@ -111,11 +117,11 @@ export function createOpeningSourceService(sql: Sql, storage: OpeningStorage = n
       const rawKey = storage.finalKey(rawId, version);
       if (await storage.objectExists(rawKey)) return rawKey;
     }
-    const recordedKey = await resolveRecordedLegacyFinalKey(scope, sourceId, canonicalKey);
+    recordedKey ??= await resolveRecordedLegacyFinalKey(scope, sourceId, canonicalKey);
     if (recordedKey && await storage.objectExists(recordedKey)) {
       return recordedKey;
     }
-    if (requireExisting) {
+    if (purpose === "downloadUrl") {
       throw new OpeningSourceError("NOT_FOUND", "cited source version is unavailable");
     }
     return canonicalKey;
@@ -246,7 +252,7 @@ export function createOpeningSourceService(sql: Sql, storage: OpeningStorage = n
       const sourceId = id.toLowerCase();
       const source = await sources.get(scope, sourceId);
       const canonicalFinalKey = storage.finalKey(sourceId, source.version);
-      const objectKey = await resolveReadableFinalKey(scope, id, sourceId, source.version, false);
+      const objectKey = await resolveReadableFinalKey(scope, id, sourceId, source.version, "retry");
       return sources.retryParseWithJob(scope, sourceId, {
         key: `parse:${sourceId}:v${source.version}:retry:${randomUUID()}`,
         payload: {
@@ -380,7 +386,7 @@ export function createOpeningSourceService(sql: Sql, storage: OpeningStorage = n
       if (!Number.isInteger(requested) || requested < 0 || requested > source.version) {
         throw new OpeningSourceError("NOT_FOUND", "cited source version is unavailable");
       }
-      const key = await resolveReadableFinalKey(scope, id, sourceId, requested, true);
+      const key = await resolveReadableFinalKey(scope, id, sourceId, requested, "downloadUrl");
       return {
         url: await storage.presignGet(key, { expiresInSeconds: 900, responseContentDisposition: contentDispositionAttachment(source.name), responseCacheControl: "private, no-store" }),
         expiresAt: new Date(Date.now() + 900000).toISOString(),
@@ -410,7 +416,7 @@ export function createOpeningSourceService(sql: Sql, storage: OpeningStorage = n
       const publicSource = source.mime === "text/plain" && requested === 0
         ? await readOpeningExamPublicSource(sql, scope, sourceId, requested) : null;
       const downloadKey = !publicSource
-        ? await resolveReadableFinalKey(scope, id, sourceId, requested, false)
+        ? await resolveReadableFinalKey(scope, id, sourceId, requested, "downloadStream")
         : "";
       const object = publicSource ? {
         body: new ReadableStream<Uint8Array>({ start(controller) {

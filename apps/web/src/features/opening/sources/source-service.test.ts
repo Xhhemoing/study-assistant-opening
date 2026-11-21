@@ -220,7 +220,7 @@ function setup() {
   const sql = makeFakeSql();
   const { storage, put, has } = makeFakeStorage();
   const svc = createOpeningSourceService(sql, storage);
-  return { svc, sql, put, has };
+  return { svc, sql, storage, put, has };
 }
 
 describe("opening signed upload service", () => {
@@ -361,7 +361,7 @@ describe("opening signed upload service", () => {
   });
 
   it("requeues a failed uploaded source without creating a second source", async () => {
-    const { svc, sql, put } = setup();
+    const { svc, sql, storage, put } = setup();
     const ticket = await svc.beginUpload(principal, {
       name: "failed.pdf",
       mime: "application/pdf",
@@ -374,8 +374,10 @@ describe("opening signed upload service", () => {
     if (!stored) throw new Error("missing source");
     stored.parse_state = "failed";
 
+    const objectExists = vi.spyOn(storage, "objectExists").mockRejectedValue(new Error("unexpected storage call"));
     const retried = await svc.retryParse(principal, ticket.source.id);
 
+    expect(objectExists).not.toHaveBeenCalled();
     expect(retried.id).toBe(ticket.source.id);
     expect(retried.parseState).toBe("queued");
     expect(sql.counts()).toEqual({ jobInserts: 2, outboxInserts: 2 });
