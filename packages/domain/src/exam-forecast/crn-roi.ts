@@ -95,12 +95,30 @@ export type EvaluateCrnActionRoiInput = {
   readonly precomputedDraws?: readonly PaperRandomDraw[];
 };
 
+type CrnActionResult = {
+  readonly evaluation: CrnActionEvaluation;
+  readonly gainSum: bigint;
+  readonly durationUnits: bigint;
+};
+
+function compareCrnRoi(a: CrnActionResult, b: CrnActionResult): number {
+  // Snapshot candidates share a draw count, which cancels from the cross-products.
+  const left = a.gainSum * b.durationUnits;
+  const right = b.gainSum * a.durationUnits;
+  if (left !== right) return left > right ? -1 : 1;
+  return compareCodeUnits(a.evaluation.actionId, b.evaluation.actionId);
+}
+
 /**
  * Paired Common Random Numbers (CRN) marginal ROI evaluation:
  * ROI(a | A) = E[S(A U {a}) - S(A) | D] / durationHours(a).
  * Explicitly forbids CQR interval subtraction.
  */
 export function evaluateCrnActionRoi(input: EvaluateCrnActionRoiInput): CrnActionEvaluation {
+  return evaluateCrnAction(input).evaluation;
+}
+
+function evaluateCrnAction(input: EvaluateCrnActionRoiInput): CrnActionResult {
   const blueprintIssues = validateExamBlueprint(input.blueprint);
   if (blueprintIssues.length > 0) {
     throw new RangeError(`Invalid exam blueprint: ${blueprintIssues.join(", ")}`);
@@ -168,7 +186,8 @@ export function evaluateCrnActionRoi(input: EvaluateCrnActionRoiInput): CrnActio
   }
   const pairedMeanGain = exactRationalPow2ToNumber(gainSum, count, MIN_BINARY64_UNIT_EXPONENT);
   const monteCarloSe = pairedStandardError(diffs, gainSum, count);
-  const roiBandPerHour = exactRationalPow2ToNumber(gainSum, count * toBinary64Units(input.candidateAction.durationHours), 0);
+  const durationUnits = toBinary64Units(input.candidateAction.durationHours);
+  const roiBandPerHour = exactRationalPow2ToNumber(gainSum, count * durationUnits, 0);
   const timeSqueezeReduction = exactRationalPow2ToNumber(squeezeReductionSum, count, MIN_BINARY64_UNIT_EXPONENT);
 
   let superlinearSynergy = Math.max(0, timeSqueezeReduction);
@@ -201,15 +220,19 @@ export function evaluateCrnActionRoi(input: EvaluateCrnActionRoiInput): CrnActio
   }
 
   return {
-    actionId: input.candidateAction.actionId,
-    durationHours: input.candidateAction.durationHours,
-    baselineMeanScore: baseSim.timedExpectedScore,
-    withActionMeanScore: plusSim.timedExpectedScore,
-    pairedMeanGain,
-    monteCarloSe,
-    roiBandPerHour,
-    timeSqueezeReduction,
-    superlinearSynergy,
+    gainSum,
+    durationUnits,
+    evaluation: {
+      actionId: input.candidateAction.actionId,
+      durationHours: input.candidateAction.durationHours,
+      baselineMeanScore: baseSim.timedExpectedScore,
+      withActionMeanScore: plusSim.timedExpectedScore,
+      pairedMeanGain,
+      monteCarloSe,
+      roiBandPerHour,
+      timeSqueezeReduction,
+      superlinearSynergy,
+    },
   };
 }
 
@@ -305,9 +328,9 @@ export function buildUnifiedDecisionSnapshot(input: {
 
   if (blueprintValid && learnerId.length > 0 && studyCandidates.length > 0) {
     const draws = generatePaperRandomDraws(input.blueprint, numDraws, input.crnSeed);
-    rankedActions = studyCandidates
+    const evaluatedActions = studyCandidates
       .map((candidateAction) =>
-        evaluateCrnActionRoi({
+        evaluateCrnAction({
           blueprint: input.blueprint,
           learnerId,
           beliefs: input.beliefs,
@@ -320,16 +343,17 @@ export function buildUnifiedDecisionSnapshot(input: {
           precomputedDraws: draws,
         }),
       )
-      .sort((a, b) => b.roiBandPerHour - a.roiBandPerHour || compareCodeUnits(a.actionId, b.actionId));
+      .sort(compareCrnRoi);
+    rankedActions = evaluatedActions.map(({ evaluation }) => evaluation);
 
     if (forecast.status === "calibrated_forecast_ready") {
       let remainingStudyMinutes = executableMinutes - allocatedRecoveryMinutes;
-      for (const evalItem of rankedActions) {
-        if (evalItem.pairedMeanGain <= 0) continue;
-        const mins = Math.ceil(evalItem.durationHours * 60);
+      for (const { evaluation, gainSum } of evaluatedActions) {
+        if (gainSum <= 0n) continue;
+        const mins = Math.ceil(evaluation.durationHours * 60);
         if (mins <= remainingStudyMinutes) {
           remainingStudyMinutes -= mins;
-          selectedActionIds.push(evalItem.actionId);
+          selectedActionIds.push(evaluation.actionId);
         }
       }
     }

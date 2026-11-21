@@ -5221,4 +5221,52 @@ describe("Round-18 extreme scores and forecast width gates", () => {
     });
     expect.soft(evaluate(step)).toMatchObject({ status: "calibrated_forecast_ready", interval80: { low: 0, high: step } });
   });
+
+  const tiny = Number.MIN_VALUE;
+  const tinySnapshotInput = {
+    decisionId: "r19-action-selection",
+    blueprint: blueprintFor([0, 2 * tiny], tiny, [0, tiny]),
+    learnerId,
+    beliefs,
+    evidence: itemEvidence,
+    calibrationRecords: calibrations(0, 0),
+    examAtMs: DAY_MS,
+    crnSeed: 1,
+    horizonHours: 1,
+    numDraws: 2,
+  };
+  const tinyGainAction: CandidateStudyAction = {
+    actionId: "repair", title: "Repair", durationHours: tiny, kind: "skill_repair",
+    skillEffects: { k: { abilityDelta: 6 } },
+  };
+
+  it("Round-19 selects a positive exact gain whose public paired mean rounds to zero", () => {
+    const input = { ...tinySnapshotInput, executableMinutes: 60, candidateActions: [tinyGainAction] };
+    const simulation = { ...input, seed: input.crnSeed };
+    expect(simulateExamPaper(simulation).timedScores).toEqual([0, tiny]);
+    expect(simulateExamPaper({
+      ...simulation, skillOverrides: tinyGainAction.skillEffects,
+    }).timedScores).toEqual([tiny, tiny]);
+    const snapshot = buildUnifiedDecisionSnapshot(input);
+    expect(snapshot.forecast.status).toBe("calibrated_forecast_ready");
+    expect(snapshot.rankedActions).toMatchObject([{ pairedMeanGain: 0, roiBandPerHour: 0.5 }]);
+    expect(snapshot.selectedActionIds).toEqual(["repair"]);
+  });
+
+  it("Round-19 orders rounded ROI ties by exact gain per hour before action ID", () => {
+    const snapshot = buildUnifiedDecisionSnapshot({
+      ...tinySnapshotInput,
+      executableMinutes: 120,
+      candidateActions: [
+        { ...tinyGainAction, actionId: "0-slower", durationHours: 2 },
+        { ...tinyGainAction, actionId: "a-faster", durationHours: 1 },
+        { ...tinyGainAction, actionId: "B-faster", durationHours: 1 },
+        { ...tinyGainAction, actionId: "-zero", durationHours: 1, skillEffects: {} },
+      ],
+    });
+    expect(snapshot.forecast.status).toBe("calibrated_forecast_ready");
+    expect(snapshot.rankedActions.map((action) => action.roiBandPerHour)).toEqual([0, 0, 0, 0]);
+    expect.soft(snapshot.rankedActions.map((action) => action.actionId)).toEqual(["B-faster", "a-faster", "0-slower", "-zero"]);
+    expect.soft(snapshot.selectedActionIds).toEqual(["B-faster", "a-faster"]);
+  });
 });
