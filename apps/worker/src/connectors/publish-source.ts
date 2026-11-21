@@ -59,10 +59,15 @@ export async function publishConnectorSource(
     receipt = await imports.publish(scope, {
       identity: input.identity, connectionVersion: input.connectionVersion, cursor: input.cursor,
       sourceId, source, key, quota,
-    }, async () => {
+    }, async (stageContext) => {
       enteredStage = true;
       try {
-        await imports.refreshConnectorReservationCutoff(scope, sourceId, key);
+        await imports.refreshConnectorReservationCutoff(
+          scope,
+          sourceId,
+          key,
+          ...(stageContext?.session ? [{ session: stageContext.session }] : []),
+        );
       } catch (error) {
         prePutError = error;
         throw error;

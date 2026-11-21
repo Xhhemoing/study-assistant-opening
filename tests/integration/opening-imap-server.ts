@@ -6,7 +6,20 @@ export type OpeningImapMail = {
   internalDate?: Date;
   source: string;
   advertisedSize?: number;
+  omitSize?: boolean;
 };
+
+const IMAP_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"] as const;
+
+function formatImapInternalDate(date: Date): string {
+  const day = String(date.getUTCDate()).padStart(2, "0");
+  const month = IMAP_MONTHS[date.getUTCMonth()] ?? "Jan";
+  const year = date.getUTCFullYear();
+  const hh = String(date.getUTCHours()).padStart(2, "0");
+  const mm = String(date.getUTCMinutes()).padStart(2, "0");
+  const ss = String(date.getUTCSeconds()).padStart(2, "0");
+  return `${day}-${month}-${year} ${hh}:${mm}:${ss} +0000`;
+}
 
 export type OpeningImapServer = {
   port: number;
@@ -78,45 +91,60 @@ export async function startOpeningImapServer(inputMails: OpeningImapMail[]): Pro
           send(`* OK [PERMANENTFLAGS ()] read-only`);
           tagged(tag, "OK [READ-ONLY] EXAMINE completed");
         } else if (verb === "FETCH" || (verb === "UID" && /^FETCH\b/i.test(args))) {
-          const fetchArgs = verb === "UID" ? args.replace(/^FETCH\s+/i, "") : args;
-          // ImapFlow uses UID FETCH with ranges like 1:* and quoted atoms.
-          const match = /^(\d+)(?::(\d+|\*))?\s+\((.*)\)\s*$/i.exec(fetchArgs);
+          const isUidFetch = verb === "UID";
+          const fetchArgs = isUidFetch ? args.replace(/^FETCH\s+/i, "") : args;
+          // ImapFlow uses FETCH / UID FETCH with ranges like 1:* and quoted or parenthesized items.
+          const match = /^(\d+)(?::(\d+|\*))?\s+(?:\((.*)\)|(\S+))\s*$/i.exec(fetchArgs);
           if (!match) {
             tagged(tag, "BAD FETCH syntax");
             return;
           }
           const start = Number(match[1]);
           const end = match[2] === "*" ? Number.MAX_SAFE_INTEGER : match[2] ? Number(match[2]) : start;
+          const fields = match[3] ?? match[4] ?? "";
           const sequenceByUid = new Map([...mails].sort((a, b) => a.uid - b.uid)
             .map((mail, index) => [mail.uid, index + 1]));
           for (const mail of mails) {
-            if (mail.uid < start || mail.uid > end) continue;
-            const sequence = sequenceByUid.get(mail.uid);
-            const date = (mail.internalDate ?? new Date("2026-01-02T03:04:05.000Z")).toUTCString().replace("GMT", "+0000");
-            const fields = match[3]!;
+            const sequence = sequenceByUid.get(mail.uid)!;
+            const selector = isUidFetch ? mail.uid : sequence;
+            if (selector < start || selector > end) continue;
+            const date = formatImapInternalDate(mail.internalDate ?? new Date("2026-01-02T03:04:05.000Z"));
             const rawSource = Buffer.from(mail.source, "utf8");
             const advertisedSize = mail.advertisedSize ?? rawSource.byteLength;
-            const metadata = `UID ${mail.uid}`
-              + (/\bINTERNALDATE\b/i.test(fields) ? ` INTERNALDATE "${date}"` : "")
-              + (/\bRFC822\.SIZE\b/i.test(fields) ? ` RFC822.SIZE ${advertisedSize}` : "");
-            const partialMatch = /BODY(?:\.PEEK)?\[\]<(\d+)\.(\d+)>/i.exec(fields);
+            const metadataParts: string[] = [];
+            if (isUidFetch || /\bUID\b/i.test(fields)) {
+              metadataParts.push(`UID ${mail.uid}`);
+            }
+            if (/\bINTERNALDATE\b/i.test(fields)) {
+              metadataParts.push(`INTERNALDATE "${date}"`);
+            }
+            if (/\bRFC822\.SIZE\b/i.test(fields) && !mail.omitSize) {
+              metadataParts.push(`RFC822.SIZE ${advertisedSize}`);
+            }
+            const partialMatch = /BODY(?:\.PEEK)?\[\]<(\d+)(?:\.(\d+))?>/i.exec(fields);
             if (partialMatch) {
               const startByte = Number(partialMatch[1]);
-              const maxLength = Number(partialMatch[2]);
-              const slice = rawSource.subarray(startByte, startByte + maxLength);
+              const maxLength = partialMatch[2] !== undefined ? Number(partialMatch[2]) : undefined;
+              const sliceStart = Math.min(startByte, rawSource.byteLength);
+              const sliceEnd = maxLength !== undefined
+                ? Math.min(sliceStart + maxLength, rawSource.byteLength)
+                : rawSource.byteLength;
+              const slice = rawSource.subarray(sliceStart, sliceEnd);
+              const prefix = [...metadataParts, `BODY[]<${startByte}> {${slice.byteLength}}`].join(" ");
               socket.write(Buffer.concat([
-                Buffer.from(`* ${sequence} FETCH (${metadata} BODY[]<${startByte}> {${slice.byteLength}}\r\n`, "utf8"),
+                Buffer.from(`* ${sequence} FETCH (${prefix}\r\n`, "utf8"),
                 slice,
                 Buffer.from(")\r\n", "utf8"),
               ]));
-            } else if (/BODY(?:\.PEEK)?\[\]/i.test(fields)) {
+            } else if (/BODY(?:\.PEEK)?\[\](?!<)/i.test(fields)) {
+              const prefix = [...metadataParts, `BODY[] {${rawSource.byteLength}}`].join(" ");
               socket.write(Buffer.concat([
-                Buffer.from(`* ${sequence} FETCH (${metadata} BODY[] {${rawSource.byteLength}}\r\n`, "utf8"),
+                Buffer.from(`* ${sequence} FETCH (${prefix}\r\n`, "utf8"),
                 rawSource,
                 Buffer.from(")\r\n", "utf8"),
               ]));
             } else {
-              send(`* ${sequence} FETCH (${metadata})`);
+              send(`* ${sequence} FETCH (${metadataParts.join(" ")})`);
             }
           }
           tagged(tag, "OK FETCH completed");

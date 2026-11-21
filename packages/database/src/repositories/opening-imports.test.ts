@@ -1,6 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Sql } from "postgres";
 import { createOpeningImportsRepository } from "./opening-imports";
+
+const postgresMock = vi.hoisted(() => ({
+  nextSession: null as unknown,
+}));
+
+vi.mock("postgres", () => ({
+  default: vi.fn(() => postgresMock.nextSession),
+}));
 import {
   CONNECTOR_PUT_TIMEOUT_MS,
   CONNECTOR_RESERVATION_GRACE_MS,
@@ -150,5 +158,130 @@ describe("opening imports reservation cutoff and removeUnpublishedSource grace w
       scope, identity, sourceId, key, 128, remove, { putUncertain: false },
     );
     expect(remove).not.toHaveBeenCalled();
+  });
+
+  it("runs refreshConnectorReservationCutoff on the lock-holding session inside publish without deadlocking a saturated shared pool", async () => {
+    const initialCutoff = new Date("2030-01-01T00:00:00.000Z");
+    let reservationPresent = false;
+    let cutoff = initialCutoff;
+    let lockHeld = false;
+    let releaseLockWaiter: (() => void) | null = null;
+    let poolInFlight = 0;
+    const poolWaiters: (() => void)[] = [];
+
+    const acquirePoolSlot = async () => {
+      if (poolInFlight >= 1) {
+        await new Promise<void>(resolve => poolWaiters.push(resolve));
+      }
+      poolInFlight += 1;
+    };
+    const releasePoolSlot = () => {
+      poolInFlight -= 1;
+      const next = poolWaiters.shift();
+      next?.();
+    };
+
+    let cleanupWaitingResolve!: () => void;
+    const cleanupWaitingOnLock = new Promise<void>(resolve => { cleanupWaitingResolve = resolve; });
+
+    const makeConn = (isDedicated: boolean) => {
+      const fn = (async (parts: TemplateStringsArray, ...values: unknown[]) => {
+        const query = parts.join("?").replace(/\s+/g, " ").trim();
+        if (query === "" || query === "FOR UPDATE" || query === "FOR NO KEY UPDATE") return query;
+        if (query.startsWith("SELECT pg_advisory_lock")) {
+          lockHeld = true;
+          return [];
+        }
+        if (query.startsWith("SELECT pg_advisory_xact_lock")) {
+          if (lockHeld) {
+            await new Promise<void>(resolve => {
+              releaseLockWaiter = resolve;
+              cleanupWaitingResolve();
+            });
+          }
+          return [];
+        }
+        if (query.startsWith("SELECT id, source_id, connection_version FROM opening_import_receipts")) return [];
+        if (query.startsWith("SELECT version, state FROM opening_connections")) return [{ version: 1, state: "ready" }];
+        if (query.startsWith("SELECT id FROM workspaces")) return [{ id: workspaceId }];
+        if (query.startsWith("WITH quota_objects AS")) return [{ bytes: "0", objects: "0" }];
+        if (query.startsWith("SELECT 1 FROM opening_sources")) return [];
+        if (query.startsWith("INSERT INTO opening_source_versions")) return [];
+        if (query.startsWith("INSERT INTO opening_privacy_exclusions")) {
+          reservationPresent = true;
+          return [];
+        }
+        if (query.startsWith("UPDATE opening_privacy_exclusions SET cleanup_not_before = GREATEST")) {
+          expect(isDedicated).toBe(true);
+          if (!reservationPresent) return [];
+          const candidate = values[1] instanceof Date ? values[1] : new Date(Date.now() + CONNECTOR_PUT_TIMEOUT_MS + CONNECTOR_RESERVATION_GRACE_MS);
+          if (candidate > cutoff) cutoff = candidate;
+          return [{ id: reservationId }];
+        }
+        if (query.startsWith("SELECT id, cleanup_not_before FROM opening_privacy_exclusions")) {
+          return reservationPresent ? [{ id: reservationId, cleanup_not_before: cutoff }] : [];
+        }
+        if (query.startsWith("DELETE FROM opening_source_versions")) return [{ source_id: sourceId }];
+        if (query.startsWith("DELETE FROM opening_privacy_exclusions")) {
+          reservationPresent = false;
+          return [];
+        }
+        if (query.startsWith("SELECT 1 FROM opening_source_versions")) return reservationPresent ? [{ "?column?": 1 }] : [];
+        if (query.startsWith("SELECT id FROM opening_privacy_exclusions")) return reservationPresent ? [{ id: reservationId }] : [];
+        throw new Error(`unexpected sql: ${query}`);
+      }) as unknown as Sql & { options: { max: number }; end: () => Promise<void> };
+      fn.options = { max: 1 };
+      fn.end = async () => {
+        if (isDedicated) {
+          lockHeld = false;
+          releaseLockWaiter?.();
+          releaseLockWaiter = null;
+        }
+      };
+      fn.begin = (async (cb: (tx: Sql) => Promise<unknown>) => {
+        if (!isDedicated) await acquirePoolSlot();
+        try {
+          return await cb(fn);
+        } finally {
+          if (!isDedicated) releasePoolSlot();
+        }
+      }) as unknown as Sql["begin"];
+      return fn;
+    };
+
+    const sharedPoolSql = makeConn(false);
+    const dedicatedSessionSql = makeConn(true);
+    postgresMock.nextSession = dedicatedSessionSql;
+    const repo = createOpeningImportsRepository(sharedPoolSql);
+
+    let markStageEntered!: () => void;
+    const stageEntered = new Promise<void>(resolve => { markStageEntered = resolve; });
+    const refreshTime = new Date("2030-01-01T00:05:00.000Z");
+
+    const publishPromise = expect(repo.publish(scope, {
+      connectionVersion: 1,
+      identity,
+      sourceId,
+      key,
+      quota: { maxBytes: 1024 * 1024, maxObjects: 10 },
+      source: { name: "mail.eml", mime: "message/rfc822", bytes: 128, sha256: "a".repeat(64) },
+    }, async (ctx) => {
+      markStageEntered();
+      // Wait until removeUnpublishedSource occupies the 1-connection shared pool on pg_advisory_xact_lock.
+      await cleanupWaitingOnLock;
+      expect(ctx?.session).toBe(dedicatedSessionSql);
+      await repo.refreshConnectorReservationCutoff(scope, sourceId, key, { now: refreshTime, session: ctx?.session });
+      throw new Error("simulated PUT error after refresh");
+    })).rejects.toThrow("simulated PUT error after refresh");
+
+    await stageEntered;
+    const cleanupPromise = repo.removeUnpublishedSource(scope, identity, sourceId, key, 128, async () => undefined, {
+      putUncertain: false,
+      now: refreshTime,
+    });
+
+    await Promise.all([publishPromise, cleanupPromise]);
+    expect(cutoff).toEqual(new Date(refreshTime.getTime() + CONNECTOR_PUT_TIMEOUT_MS + CONNECTOR_RESERVATION_GRACE_MS));
+    expect(reservationPresent).toBe(false);
   });
 });

@@ -16,6 +16,7 @@ import {
 } from "./imap-endpoint";
 import { partialBodyOffsetKey } from "./imap-command-guard";
 import { runWithSyncDeadline, syncMailbox, type ImapSyncDeps } from "./imap-sync";
+import { startOpeningImapServer } from "../../../../tests/integration/opening-imap-server";
 
 vi.mock("./publish-source", () => ({ publishConnectorSource: vi.fn(async () => ({ id: "receipt", sourceIds: ["src"], duplicate: false, connectionVersion: 1 })) }));
 
@@ -700,6 +701,70 @@ describe("approved IMAP dialer", () => {
       client.close();
       for (const s of sockets) s.destroy();
       await new Promise<void>((resolve, reject) => server.close(error => (error ? reject(error) : resolve())));
+    }
+  });
+
+  it("interoperates with tests/integration/opening-imap-server across metadata discovery, date filtering, omitted/inflated size probes, concurrent sessions, and descending batches", { timeout: 15_000 }, async () => {
+    const body180 = "Subject: Overlap Probe\r\n\r\n" + "z".repeat(180 - "Subject: Overlap Probe\r\n\r\n".length);
+    const body180Omit = "Subject: Omitted Size\r\n\r\n" + "w".repeat(180 - "Subject: Omitted Size\r\n\r\n".length);
+    expect(Buffer.byteLength(body180, "utf8")).toBe(180);
+    expect(Buffer.byteLength(body180Omit, "utf8")).toBe(180);
+    const server = await startOpeningImapServer([
+      { uid: 13, source: "Subject: Old UID 13\r\n\r\nold", internalDate: new Date("2025-12-01T00:00:00.000Z") },
+      { uid: 12, source: body180Omit, omitSize: true, internalDate: new Date("2026-02-01T00:00:00.000Z") },
+      { uid: 11, source: body180, advertisedSize: 220, internalDate: new Date("2026-02-01T00:00:00.000Z") },
+    ]);
+    const syncOnce = async (cursor: { folder: string; uidValidity: string; lastUid: number } | null) => {
+      const client = installImapCommandGuard(
+        new ImapFlow({ host: "127.0.0.1", port: server.port, secure: false, logger: false, auth }),
+      );
+      try {
+        await client.connect();
+        return await syncMailbox({
+          scope: { workspaceId: "workspace", ownerUserId: "owner" },
+          connectionId: "connection",
+          connectionVersion: 1,
+          folder: "INBOX",
+          cursor,
+          since: new Date("2026-01-01T00:00:00.000Z"),
+          client,
+          imports: { advanceImapCursor: vi.fn() },
+          storage: { upload: vi.fn(), remove: vi.fn() },
+        } as unknown as ImapSyncDeps);
+      } finally {
+        client.close();
+      }
+    };
+    try {
+      // UID 13 is filtered out by INTERNALDATE (< since), UID 12 exercises BODY[]<0> with omitted RFC822.SIZE,
+      // and UID 11 exercises both RFC822.SIZE mismatch and the follow-up BODY.PEEK[]<116.65> EOF probe.
+      expect(await syncOnce(null)).toMatchObject({ imported: 2, skipped: 0, cursor: { uidValidity: "42", lastUid: 13 } });
+      await server.waitForConnectionsClosed();
+
+      // Oversized message reported via RFC822.SIZE rejects cleanly without leaving active connections.
+      server.mails.splice(0, server.mails.length, {
+        uid: 20,
+        source: body180,
+        advertisedSize: 26 * 1024 * 1024,
+      });
+      await expect(syncOnce(null)).rejects.toThrow("mail exceeds limit");
+      await server.waitForConnectionsClosed();
+
+      const uids = Array.from({ length: 105 }, (_, index) => index + 11);
+      server.mails.splice(0, server.mails.length, ...uids.toReversed().map(uid => ({
+        uid, source: `Subject: UID ${uid}\r\n\r\nmessage`,
+      })));
+      const [c1, c2] = await Promise.all([syncOnce(null), syncOnce(null)]);
+      expect(c1.imported).toBe(100);
+      expect(c2.imported).toBe(100);
+      await server.waitForConnectionsClosed();
+      const batch2 = await syncOnce(c1.cursor);
+      expect(batch2).toMatchObject({ imported: 5, skipped: 0, cursor: { lastUid: 115 } });
+      await server.waitForConnectionsClosed();
+      await expect(syncOnce(batch2.cursor)).resolves.toMatchObject({ imported: 0, cursor: { lastUid: 115 } });
+      await server.waitForConnectionsClosed();
+    } finally {
+      await server.close();
     }
   });
 });

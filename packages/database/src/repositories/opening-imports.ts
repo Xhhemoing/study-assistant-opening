@@ -138,6 +138,45 @@ async function commitImport(
   return { id: receiptId, sourceIds: [input.sourceId], duplicate: false, connectionVersion: input.connectionVersion };
 }
 
+export type OpeningPublishStageContext = { session?: Sql };
+
+async function updateConnectorReservationCutoff(
+  db: Sql,
+  scope: OpeningScope,
+  sourceId: string,
+  key: string,
+  options?: { now?: Date },
+): Promise<void> {
+  const canonicalId = sourceId.toLowerCase();
+  const cutoffSeconds = Math.ceil((CONNECTOR_PUT_TIMEOUT_MS + CONNECTOR_RESERVATION_GRACE_MS) / 1000);
+  await db.begin(async tx => {
+    const [owner] = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+    if (!owner) throw new OpeningConnectionError("NOT_FOUND", "workspace not found");
+    const explicitCutoff = options?.now
+      ? new Date(options.now.getTime() + CONNECTOR_PUT_TIMEOUT_MS + CONNECTOR_RESERVATION_GRACE_MS)
+      : null;
+    const [updated] = explicitCutoff
+      ? await tx`UPDATE opening_privacy_exclusions
+          SET cleanup_not_before = GREATEST(COALESCE(cleanup_not_before, ${explicitCutoff}), ${explicitCutoff})
+          WHERE workspace_id=${scope.workspaceId} AND source_id=${canonicalId}
+            AND id=${connectorReservationId(canonicalId)} AND asset_deleted_at IS NOT NULL
+            AND pending_object_keys=ARRAY[${key}]::text[]
+            AND NOT EXISTS (SELECT 1 FROM opening_sources WHERE id=${canonicalId})
+          RETURNING id`
+      : await tx`UPDATE opening_privacy_exclusions
+          SET cleanup_not_before = GREATEST(
+            COALESCE(cleanup_not_before, now() + make_interval(secs => ${cutoffSeconds})),
+            now() + make_interval(secs => ${cutoffSeconds})
+          )
+          WHERE workspace_id=${scope.workspaceId} AND source_id=${canonicalId}
+            AND id=${connectorReservationId(canonicalId)} AND asset_deleted_at IS NOT NULL
+            AND pending_object_keys=ARRAY[${key}]::text[]
+            AND NOT EXISTS (SELECT 1 FROM opening_sources WHERE id=${canonicalId})
+          RETURNING id`;
+    if (!updated) throw new OpeningConnectionError("CONFLICT", "connector staging reservation changed");
+  });
+}
+
 export function createOpeningImportsRepository(sql: Sql) {
   return {
     async findByIdentity(scope: OpeningScope, identity: ImportIdentity): Promise<{ id: string; sourceId: string } | null> {
@@ -153,7 +192,7 @@ export function createOpeningImportsRepository(sql: Sql) {
     async publish(
       scope: OpeningScope,
       input: OpeningImportCommit & { source: UploadInput; key: string; quota: OpeningSourceQuota },
-      stage: () => Promise<void>,
+      stage: (context?: OpeningPublishStageContext) => Promise<void>,
     ): Promise<OpeningImportReceiptView> {
       const deliveryLock = importLock(scope, input.identity);
       const canonicalSourceId = input.sourceId.toLowerCase();
@@ -190,7 +229,7 @@ export function createOpeningImportsRepository(sql: Sql) {
           await sql.begin(tx => releaseConnectorReservation(tx, scope, canonicalSourceId, input.key));
           throw new OpeningConnectionError("CONFLICT", "connector staging session disconnected");
         }
-        await stage();
+        await stage({ session });
         if (lost()) throw new OpeningConnectionError("CONFLICT", "connector staging session disconnected");
         return session.begin(async tx => {
           if (lost()) throw new OpeningConnectionError("CONFLICT", "connector staging session disconnected");
@@ -222,36 +261,11 @@ export function createOpeningImportsRepository(sql: Sql) {
       scope: OpeningScope,
       sourceId: string,
       key: string,
-      options?: { now?: Date },
+      options?: { now?: Date; session?: Sql },
     ): Promise<void> {
-      const canonicalId = sourceId.toLowerCase();
-      const cutoffSeconds = Math.ceil((CONNECTOR_PUT_TIMEOUT_MS + CONNECTOR_RESERVATION_GRACE_MS) / 1000);
-      await sql.begin(async tx => {
-        const [owner] = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
-        if (!owner) throw new OpeningConnectionError("NOT_FOUND", "workspace not found");
-        const explicitCutoff = options?.now
-          ? new Date(options.now.getTime() + CONNECTOR_PUT_TIMEOUT_MS + CONNECTOR_RESERVATION_GRACE_MS)
-          : null;
-        const [updated] = explicitCutoff
-          ? await tx`UPDATE opening_privacy_exclusions
-              SET cleanup_not_before = GREATEST(COALESCE(cleanup_not_before, ${explicitCutoff}), ${explicitCutoff})
-              WHERE workspace_id=${scope.workspaceId} AND source_id=${canonicalId}
-                AND id=${connectorReservationId(canonicalId)} AND asset_deleted_at IS NOT NULL
-                AND pending_object_keys=ARRAY[${key}]::text[]
-                AND NOT EXISTS (SELECT 1 FROM opening_sources WHERE id=${canonicalId})
-              RETURNING id`
-          : await tx`UPDATE opening_privacy_exclusions
-              SET cleanup_not_before = GREATEST(
-                COALESCE(cleanup_not_before, now() + make_interval(secs => ${cutoffSeconds})),
-                now() + make_interval(secs => ${cutoffSeconds})
-              )
-              WHERE workspace_id=${scope.workspaceId} AND source_id=${canonicalId}
-                AND id=${connectorReservationId(canonicalId)} AND asset_deleted_at IS NOT NULL
-                AND pending_object_keys=ARRAY[${key}]::text[]
-                AND NOT EXISTS (SELECT 1 FROM opening_sources WHERE id=${canonicalId})
-              RETURNING id`;
-        if (!updated) throw new OpeningConnectionError("CONFLICT", "connector staging reservation changed");
-      });
+      // Execute on the lock-holding dedicated session when supplied so active deliveries
+      // cannot deadlock against shared-pool waiters blocked on cleanup advisory locks.
+      await updateConnectorReservationCutoff(options?.session ?? sql, scope, sourceId, key, options);
     },
     async removeUnpublishedSource(
       scope: OpeningScope, identity: ImportIdentity, sourceId: string, key: string, _byteSize: number,

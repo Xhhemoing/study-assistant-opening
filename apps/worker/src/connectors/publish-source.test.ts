@@ -152,3 +152,36 @@ it("forwards putUncertain accurately across pre-PUT, upload failure, and post-up
     { putUncertain: false },
   );
 });
+
+it("forwards the lock-holding publish session to refreshConnectorReservationCutoff without waiting on shared pool", async () => {
+  const scope = { workspaceId: "workspace", ownerUserId: "owner" };
+  const delivery = {
+    connectionVersion: 1,
+    identity: { connectionId: "connection", container: "INBOX", generation: "42", remoteId: "11" },
+    name: "message.eml",
+    mime: "message/rfc822" as const,
+    bytes: Buffer.from("Subject: Session\r\n\r\nBody"),
+  };
+  const lockSession = { fakeSession: true } as unknown as NonNullable<Parameters<Imports["refreshConnectorReservationCutoff"]>[3]>["session"];
+  const refreshConnectorReservationCutoff = vi.fn<Imports["refreshConnectorReservationCutoff"]>(async () => undefined);
+  const imports: Imports = {
+    publish: vi.fn<Imports["publish"]>(async (_scope, _input, stage) => {
+      await stage({ session: lockSession });
+      return { id: "receipt", sourceIds: ["source-1"], duplicate: false, connectionVersion: 1 };
+    }),
+    refreshConnectorReservationCutoff,
+    removeUnpublishedSource: vi.fn<Imports["removeUnpublishedSource"]>(),
+  };
+
+  await expect(publishConnectorSource(imports, {
+    upload: vi.fn(async () => undefined),
+    remove: vi.fn(async () => undefined),
+  }, scope, delivery)).resolves.toMatchObject({ id: "receipt", duplicate: false });
+
+  expect(refreshConnectorReservationCutoff).toHaveBeenCalledWith(
+    scope,
+    expect.any(String),
+    expect.stringMatching(/^opening\/sources\/.+\/v0$/),
+    { session: lockSession },
+  );
+});
