@@ -127,21 +127,31 @@ function findUnescapedToken(text: string, token: string, fromIndex: number): num
   return -1;
 }
 
+const VISIBILITY_RANK: Readonly<Record<PedagogicalVisibility, number>> = {
+  public: 0,
+  hint_gated: 1,
+  sealed: 2,
+};
+
+function maxVisibility(
+  a: PedagogicalVisibility,
+  b: PedagogicalVisibility,
+): PedagogicalVisibility {
+  return VISIBILITY_RANK[a] >= VISIBILITY_RANK[b] ? a : b;
+}
+
 function classifyLabel(
   rawLabel: string | undefined,
   fallbackVisibility: PedagogicalVisibility,
+  sealProofs = false,
 ): { readonly kind: PedagogicalBlockKind; readonly visibility: PedagogicalVisibility } | null {
   if (!rawLabel) return null;
   const normalized = rawLabel.trim().replace(/\*$/, "").toLowerCase();
   const entry = PEDAGOGICAL_LABELS[normalized];
   if (!entry) return null;
-  if (entry.visibility === "sealed" || fallbackVisibility === "sealed") {
-    return { kind: entry.kind, visibility: "sealed" };
-  }
-  if (entry.visibility === "hint_gated" || fallbackVisibility === "hint_gated") {
-    return { kind: entry.kind, visibility: "hint_gated" };
-  }
-  return entry;
+  const baseVisibility: PedagogicalVisibility =
+    sealProofs && entry.kind === "proof" ? "sealed" : entry.visibility;
+  return { kind: entry.kind, visibility: maxVisibility(baseVisibility, fallbackVisibility) };
 }
 
 function isTableDelimiterRow(line: string): boolean {
@@ -216,8 +226,12 @@ function resolvePageRange(
   return { pageStart, pageEnd };
 }
 
-function findMatchingLatexEnvEnd(text: string, envName: string, searchFrom: number): number {
-  const tokenRe = /\\(begin|end)\{([a-zA-Z]+\*?)\}/g;
+function findMatchingLatexEnvBounds(
+  text: string,
+  envName: string,
+  searchFrom: number,
+): { readonly closeStart: number; readonly closeEnd: number } {
+  const tokenRe = /\\(begin|end)\{([a-zA-Z][\w-]*\*?)\}/g;
   tokenRe.lastIndex = searchFrom;
   const stack: string[] = [envName];
   let match: RegExpExecArray | null;
@@ -229,10 +243,12 @@ function findMatchingLatexEnvEnd(text: string, envName: string, searchFrom: numb
       stack.push(name);
     } else if (stack.length > 0 && stack[stack.length - 1] === name) {
       stack.pop();
-      if (stack.length === 0) return match.index + match[0].length;
+      if (stack.length === 0) {
+        return { closeStart: match.index, closeEnd: match.index + match[0].length };
+      }
     }
   }
-  return text.length;
+  return { closeStart: text.length, closeEnd: text.length };
 }
 
 function lineIndexContaining(lines: readonly SourceLine[], offset: number, startHint: number): number {
@@ -246,16 +262,14 @@ function startsSpecialBlock(lines: readonly SourceLine[], index: number): boolea
   if (/^\s*$/.test(raw)) return true;
   if (/^[ \t]{0,3}(`{3,}|~{3,})/.test(raw)) return true;
   if (/^[ \t]{0,3}:{3,}[ \t]*[a-zA-Z]/.test(raw)) return true;
-  if (/^[ \t]*\\begin\{([a-zA-Z]+\*?)\}/.test(raw)) {
-    const env = /^[ \t]*\\begin\{([a-zA-Z]+\*?)\}/.exec(raw)![1]!;
+  const latexEnv = /^[ \t]*\\begin\{([a-zA-Z][\w-]*\*?)\}/.exec(raw);
+  if (latexEnv) {
+    const env = latexEnv[1]!;
     if (MATH_ENVS.has(env) || classifyLabel(env, "public") !== null) return true;
   }
   if (/^[ \t]*\$\$/.test(raw) && !isEscaped(raw, raw.indexOf("$$"))) return true;
   if (/^[ \t]*\\\[/.test(raw)) return true;
-  if (/^[ \t]*>[ \t]*\[!([a-zA-Z_-]+)\]/.test(raw)) {
-    const label = /^[ \t]*>[ \t]*\[!([a-zA-Z_-]+)\]/.exec(raw)![1]!;
-    if (classifyLabel(label, "public") !== null) return true;
-  }
+  if (/^[ \t]*>/.test(raw)) return true;
   if (/^[ \t]{0,3}#{1,6}[ \t]+/.test(raw)) return true;
   if (raw.includes("|") && index + 1 < lines.length && isTableDelimiterRow(lines[index + 1]!.raw)) {
     return true;
@@ -264,42 +278,187 @@ function startsSpecialBlock(lines: readonly SourceLine[], index: number): boolea
   return false;
 }
 
-function findInlineDisplayMathSpans(text: string): Array<{ start: number; end: number }> {
-  const spans: Array<{ start: number; end: number }> = [];
-  let i = 0;
-  while (i < text.length) {
+interface InlineConstructSpan {
+  readonly start: number;
+  readonly end: number;
+  readonly kind: PedagogicalBlockKind;
+  readonly visibility: PedagogicalVisibility;
+  readonly label?: string;
+  readonly openEnd?: number;
+  readonly closeStart?: number;
+}
+
+function findInlineDisplayMathSpans(
+  text: string,
+  rangeStart: number,
+  rangeEnd: number,
+  activeVisibility: PedagogicalVisibility,
+  sealProofs: boolean,
+): InlineConstructSpan[] {
+  const spans: InlineConstructSpan[] = [];
+  let i = rangeStart;
+  while (i < rangeEnd) {
     if (text.startsWith("$$", i) && !isEscaped(text, i)) {
       const close = findUnescapedToken(text, "$$", i + 2);
-      if (close !== -1) {
-        spans.push({ start: i, end: close + 2 });
-        i = close + 2;
-        continue;
-      }
-      spans.push({ start: i, end: text.length });
-      break;
+      const end = close !== -1 ? close + 2 : text.length;
+      spans.push({ start: i, end, kind: "display_math", visibility: activeVisibility });
+      i = end;
+      continue;
     }
     if (text.startsWith("\\[", i) && !isEscaped(text, i)) {
       const close = findUnescapedToken(text, "\\]", i + 2);
-      if (close !== -1) {
-        spans.push({ start: i, end: close + 2 });
-        i = close + 2;
-        continue;
-      }
-      spans.push({ start: i, end: text.length });
-      break;
+      const end = close !== -1 ? close + 2 : text.length;
+      spans.push({ start: i, end, kind: "display_math", visibility: activeVisibility });
+      i = end;
+      continue;
     }
     if (text.startsWith("\\begin{", i) && !isEscaped(text, i)) {
-      const m = /^\\begin\{([a-zA-Z]+\*?)\}/.exec(text.slice(i));
-      if (m && (MATH_ENVS.has(m[1]!) || classifyLabel(m[1]!, "public") !== null)) {
-        const end = findMatchingLatexEnvEnd(text, m[1]!, i + m[0].length);
-        spans.push({ start: i, end });
-        i = end;
-        continue;
+      const m = /^\\begin\{([a-zA-Z][\w-]*\*?)\}/.exec(text.slice(i));
+      if (m) {
+        const envName = m[1]!;
+        const isMath = MATH_ENVS.has(envName);
+        const classified = isMath
+          ? { kind: "display_math" as const, visibility: activeVisibility }
+          : classifyLabel(envName, activeVisibility, sealProofs);
+        if (classified) {
+          const openEnd = i + m[0].length;
+          const bounds = findMatchingLatexEnvBounds(text, envName, openEnd);
+          spans.push({
+            start: i,
+            end: bounds.closeEnd,
+            kind: classified.kind,
+            visibility: classified.visibility,
+            label: envName,
+            ...(isMath ? {} : { openEnd, closeStart: bounds.closeStart }),
+          });
+          i = bounds.closeEnd;
+          continue;
+        }
       }
     }
     i++;
   }
   return spans;
+}
+
+interface MappedInnerBlock {
+  readonly kind: PedagogicalBlockKind;
+  readonly visibility: PedagogicalVisibility;
+  readonly atomicConstruct: boolean;
+  readonly startOffset: number;
+  readonly endOffset: number;
+  readonly startMs: number | null;
+  readonly endMs: number | null;
+  readonly label?: string;
+}
+
+function trimWhitespaceBounds(
+  text: string,
+  start: number,
+  end: number,
+  isBlockquote: boolean,
+): { readonly start: number; readonly end: number } | null {
+  let s = start;
+  let e = end;
+  if (isBlockquote) {
+    while (s < e) {
+      const nl = text.indexOf("\n", s);
+      const lineContentEnd = nl === -1 || nl >= e ? e : nl;
+      const lineNext = nl === -1 || nl >= e ? e : nl + 1;
+      const lineSlice = text.slice(s, lineContentEnd).replace(/\r$/, "");
+      if (/^[ \t]*(?:>[ \t]*)*$/.test(lineSlice)) {
+        s = lineNext;
+      } else {
+        break;
+      }
+    }
+    while (e > s) {
+      const prevNl = text.lastIndexOf("\n", e - 1);
+      const lineStart = prevNl < s ? s : prevNl + 1;
+      const lineSlice = text.slice(lineStart, e).replace(/\r$/, "");
+      if (/^[ \t]*(?:>[ \t]*)*$/.test(lineSlice)) {
+        e = prevNl < s ? s : prevNl;
+        if (e > s && text.charCodeAt(e - 1) === 13) e--;
+      } else {
+        break;
+      }
+    }
+  }
+  while (s < e && /\s/.test(text[s]!)) s++;
+  while (e > s && /\s/.test(text[e - 1]!)) e--;
+  return s < e ? { start: s, end: e } : null;
+}
+
+function parseBlockquoteInnerBlocks(
+  lines: readonly SourceLine[],
+  startLineIdx: number,
+  endLineIdx: number,
+  firstLineSliceStart: number | null,
+  outerVisibility: PedagogicalVisibility,
+  propagateSectionVisibility: boolean,
+  innerSealProofs: boolean,
+): MappedInnerBlock[] {
+  const bodyParts: string[] = [];
+  const charOrigStart: number[] = [];
+  const charOrigEnd: number[] = [];
+  const vLineToOrigLine = new Map<number, SourceLine>();
+  let vCursor = 0;
+
+  for (let idx = startLineIdx; idx <= endLineIdx; idx++) {
+    const curLine = lines[idx]!;
+    let prefixLen: number;
+    if (idx === startLineIdx && firstLineSliceStart !== null) {
+      prefixLen = firstLineSliceStart - curLine.start;
+    } else {
+      const stripMatch = /^[ \t]*>[ \t]?/.exec(curLine.raw);
+      prefixLen = stripMatch ? stripMatch[0].length : 0;
+    }
+    const stripped = curLine.raw.slice(prefixLen);
+    if (!(idx === startLineIdx && firstLineSliceStart !== null)) {
+      vLineToOrigLine.set(vCursor, curLine);
+    }
+    for (let c = 0; c < stripped.length; c++) {
+      charOrigStart.push(curLine.start + prefixLen + c);
+      charOrigEnd.push(curLine.start + prefixLen + c + 1);
+    }
+    bodyParts.push(stripped);
+    vCursor += stripped.length;
+
+    if (idx < endLineIdx) {
+      bodyParts.push("\n");
+      charOrigStart.push(curLine.contentEnd);
+      charOrigEnd.push(curLine.end);
+      vCursor += 1;
+    }
+  }
+
+  const virtualText = bodyParts.join("");
+  if (!virtualText.trim()) return [];
+
+  const innerAst = parsePedagogicalAstInternal(
+    virtualText,
+    {
+      defaultVisibility: outerVisibility,
+      propagateSectionVisibility,
+    },
+    innerSealProofs,
+  );
+
+  return innerAst.map(b => {
+    const snappedLine = vLineToOrigLine.get(b.startOffset);
+    const startOffset = snappedLine ? snappedLine.start : charOrigStart[b.startOffset]!;
+    const endOffset = charOrigEnd[b.endOffset - 1]!;
+    return {
+      kind: b.kind,
+      visibility: b.visibility,
+      atomicConstruct: b.atomicConstruct,
+      startOffset,
+      endOffset,
+      startMs: b.startMs,
+      endMs: b.endMs,
+      ...(b.label ? { label: b.label } : {}),
+    };
+  });
 }
 
 /**
@@ -316,13 +475,26 @@ export function parsePedagogicalAst(
     readonly propagateSectionVisibility?: boolean;
   } = {},
 ): PedagogicalAstBlock[] {
+  return parsePedagogicalAstInternal(text, options, false);
+}
+
+function parsePedagogicalAstInternal(
+  text: string,
+  options: {
+    readonly pageSpans?: readonly PageSpan[];
+    readonly defaultVisibility?: PedagogicalVisibility;
+    readonly propagateSectionVisibility?: boolean;
+  },
+  sealProofs: boolean,
+): PedagogicalAstBlock[] {
   if (!text) return [];
   const defaultVisibility = options.defaultVisibility ?? "public";
   const propagateSectionVisibility = options.propagateSectionVisibility ?? true;
   const lines = splitLinesWithOffsets(text);
   const blocks: PedagogicalAstBlock[] = [];
-  let activeSectionVisibility: PedagogicalVisibility = defaultVisibility;
-  let activeSectionLevel = 0;
+  const headingStack: Array<{ readonly level: number; readonly visibility: PedagogicalVisibility }> = [];
+  const getActiveSectionVisibility = (): PedagogicalVisibility =>
+    headingStack.length > 0 ? headingStack[headingStack.length - 1]!.visibility : defaultVisibility;
 
   const pushBlock = (
     kind: PedagogicalBlockKind,
@@ -350,6 +522,151 @@ export function parsePedagogicalAst(
     });
   };
 
+  const emitContainerWithExtraction = (
+    outerKind: PedagogicalBlockKind,
+    outerVisibility: PedagogicalVisibility,
+    outerAtomic: boolean,
+    outerStart: number,
+    outerEnd: number,
+    bodyEnd: number,
+    outerLabel: string | undefined,
+    isBlockquote: boolean,
+    innerBlocks: readonly MappedInnerBlock[],
+  ) => {
+    const higherBlocks = innerBlocks.filter(
+      b => VISIBILITY_RANK[b.visibility] > VISIBILITY_RANK[outerVisibility],
+    );
+    if (higherBlocks.length === 0) {
+      pushBlock(outerKind, outerVisibility, outerAtomic, outerStart, outerEnd, {
+        ...(outerLabel ? { label: outerLabel } : {}),
+      });
+      return;
+    }
+
+    const firstHigher = higherBlocks[0]!;
+    const prefix = trimWhitespaceBounds(text, outerStart, firstHigher.startOffset, isBlockquote);
+    if (prefix) {
+      pushBlock(outerKind, outerVisibility, outerAtomic, prefix.start, prefix.end, {
+        ...(outerLabel ? { label: outerLabel } : {}),
+      });
+    }
+
+    for (let k = 0; k < higherBlocks.length; k++) {
+      const cur = higherBlocks[k]!;
+      pushBlock(cur.kind, cur.visibility, cur.atomicConstruct, cur.startOffset, cur.endOffset, {
+        startMs: cur.startMs,
+        endMs: cur.endMs,
+        ...(cur.label ? { label: cur.label } : {}),
+      });
+      if (k + 1 < higherBlocks.length) {
+        const next = higherBlocks[k + 1]!;
+        const gap = trimWhitespaceBounds(text, cur.endOffset, next.startOffset, isBlockquote);
+        if (gap) {
+          pushBlock(outerKind, outerVisibility, outerAtomic, gap.start, gap.end, {
+            ...(outerLabel ? { label: outerLabel } : {}),
+          });
+        }
+      }
+    }
+
+    const lastHigher = higherBlocks[higherBlocks.length - 1]!;
+    const bodyTail = trimWhitespaceBounds(text, lastHigher.endOffset, bodyEnd, isBlockquote);
+    if (bodyTail) {
+      const fullTail = trimWhitespaceBounds(text, bodyTail.start, outerEnd, isBlockquote);
+      if (fullTail) {
+        pushBlock(outerKind, outerVisibility, outerAtomic, fullTail.start, fullTail.end, {
+          ...(outerLabel ? { label: outerLabel } : {}),
+        });
+      }
+    }
+  };
+
+  const emitInlineConstructsRange = (
+    rangeStart: number,
+    rangeEnd: number,
+    activeVis: PedagogicalVisibility,
+    startLineIdx: number,
+    defaultNextLineIdx: number,
+  ): number => {
+    const inlineSpans = findInlineDisplayMathSpans(text, rangeStart, rangeEnd, activeVis, sealProofs);
+    if (inlineSpans.length === 0) {
+      const proseBounds = trimWhitespaceBounds(text, rangeStart, rangeEnd, false);
+      if (proseBounds) {
+        pushBlock("prose", activeVis, false, proseBounds.start, proseBounds.end);
+      }
+      return defaultNextLineIdx;
+    }
+
+    let cursor = rangeStart;
+    for (const span of inlineSpans) {
+      if (span.start > cursor) {
+        const proseBounds = trimWhitespaceBounds(text, cursor, span.start, false);
+        if (proseBounds) {
+          pushBlock("prose", activeVis, false, proseBounds.start, proseBounds.end);
+        }
+      }
+      if (
+        span.openEnd !== undefined &&
+        span.closeStart !== undefined &&
+        span.visibility !== "sealed" &&
+        span.closeStart > span.openEnd
+      ) {
+        const innerBlocks = parsePedagogicalAstInternal(
+          text.slice(span.openEnd, span.closeStart),
+          {
+            defaultVisibility: span.visibility,
+            propagateSectionVisibility,
+          },
+          span.kind === "exercise",
+        ).map(b => ({
+          ...b,
+          startOffset: span.openEnd! + b.startOffset,
+          endOffset: span.openEnd! + b.endOffset,
+        }));
+        emitContainerWithExtraction(
+          span.kind,
+          span.visibility,
+          true,
+          span.start,
+          span.end,
+          span.closeStart,
+          span.label,
+          false,
+          innerBlocks,
+        );
+      } else {
+        pushBlock(span.kind, span.visibility, true, span.start, span.end, {
+          ...(span.label ? { label: span.label } : {}),
+        });
+      }
+      cursor = span.end;
+    }
+
+    if (cursor > rangeEnd) {
+      const endLineIdx = lineIndexContaining(lines, Math.max(rangeStart, cursor - 1), startLineIdx);
+      const closeLine = lines[endLineIdx]!;
+      const trailingOnCloseLine = text.slice(cursor, closeLine.contentEnd);
+      if (!/^[ \t]*$/.test(trailingOnCloseLine)) {
+        lines[endLineIdx] = {
+          start: cursor,
+          contentEnd: closeLine.contentEnd,
+          end: closeLine.end,
+          raw: trailingOnCloseLine,
+        };
+        return endLineIdx;
+      }
+      return endLineIdx + 1;
+    }
+
+    if (cursor < rangeEnd) {
+      const tailBounds = trimWhitespaceBounds(text, cursor, rangeEnd, false);
+      if (tailBounds) {
+        pushBlock("prose", activeVis, false, tailBounds.start, tailBounds.end);
+      }
+    }
+    return defaultNextLineIdx;
+  };
+
   let i = 0;
   while (i < lines.length) {
     const line = lines[i]!;
@@ -360,24 +677,28 @@ export function parsePedagogicalAst(
       continue;
     }
 
-    // 1. Heading (and section visibility propagation for Answer Key / Hint sections)
+    // 1. Heading (and monotonic heading-stack section visibility propagation)
     const headingMatch = /^[ \t]{0,3}(#{1,6})[ \t]+(.+?)[ \t]*#*$/.exec(raw);
     if (headingMatch) {
       const level = headingMatch[1]!.length;
       const headingText = headingMatch[2]!.trim();
       if (propagateSectionVisibility) {
-        if (SEALED_HEADING_RE.test(headingText)) {
-          activeSectionVisibility = "sealed";
-          activeSectionLevel = level;
-        } else if (HINT_HEADING_RE.test(headingText)) {
-          activeSectionVisibility = defaultVisibility === "sealed" ? "sealed" : "hint_gated";
-          activeSectionLevel = level;
-        } else if (activeSectionLevel === 0 || level <= activeSectionLevel) {
-          activeSectionVisibility = defaultVisibility;
-          activeSectionLevel = 0;
+        while (headingStack.length > 0 && headingStack[headingStack.length - 1]!.level >= level) {
+          headingStack.pop();
         }
+        const parentVisibility =
+          headingStack.length > 0 ? headingStack[headingStack.length - 1]!.visibility : defaultVisibility;
+        const ownVisibility: PedagogicalVisibility = SEALED_HEADING_RE.test(headingText)
+          ? "sealed"
+          : HINT_HEADING_RE.test(headingText)
+            ? "hint_gated"
+            : defaultVisibility;
+        headingStack.push({
+          level,
+          visibility: maxVisibility(parentVisibility, ownVisibility),
+        });
       }
-      pushBlock("heading", activeSectionVisibility, false, line.start, line.contentEnd, {
+      pushBlock("heading", getActiveSectionVisibility(), false, line.start, line.contentEnd, {
         label: headingText,
       });
       i++;
@@ -393,7 +714,7 @@ export function parsePedagogicalAst(
       let j = i + 1;
       while (j < lines.length && !closeRe.test(lines[j]!.raw)) j++;
       const endLineIdx = j < lines.length ? j : lines.length - 1;
-      pushBlock("code", activeSectionVisibility, true, line.start, lines[endLineIdx]!.contentEnd);
+      pushBlock("code", getActiveSectionVisibility(), true, line.start, lines[endLineIdx]!.contentEnd);
       i = endLineIdx + 1;
       continue;
     }
@@ -401,16 +722,16 @@ export function parsePedagogicalAst(
     // 3. Fenced pedagogical container (:::theorem ... :::)
     const containerMatch = /^[ \t]{0,3}(:{3,})[ \t]*([a-zA-Z][\w-]*)(.*)$/.exec(raw);
     if (containerMatch) {
-      const classified = classifyLabel(containerMatch[2], activeSectionVisibility);
+      const activeVis = getActiveSectionVisibility();
+      const classified = classifyLabel(containerMatch[2], activeVis, sealProofs);
       if (classified) {
-        const minColons = containerMatch[1]!.length;
-        const openRe = /^[ \t]{0,3}:{3,}[ \t]*[a-zA-Z][\w-]*/;
-        const closeRe = new RegExp(`^[ \\t]{0,3}:{${minColons},}[ \\t]*$`);
-        let depth = 1;
+        const colonStack: number[] = [containerMatch[1]!.length];
+        const openRe = /^[ \t]{0,3}(:{3,})[ \t]*[a-zA-Z][\w-]*/;
+        const closeRe = /^[ \t]{0,3}(:{3,})[ \t]*$/;
         let inCodeFenceChar: string | null = null;
         let inCodeFenceLen = 0;
         let j = i + 1;
-        while (j < lines.length && depth > 0) {
+        while (j < lines.length && colonStack.length > 0) {
           const cur = lines[j]!.raw;
           if (inCodeFenceChar) {
             const codeClose = new RegExp(`^[ \\t]{0,3}${inCodeFenceChar}{${inCodeFenceLen},}[ \\t]*$`);
@@ -420,42 +741,126 @@ export function parsePedagogicalAst(
             if (innerCode && !(innerCode[1]![0] === "`" && innerCode[2]!.includes("`"))) {
               inCodeFenceChar = innerCode[1]![0]!;
               inCodeFenceLen = innerCode[1]!.length;
-            } else if (openRe.test(cur)) {
-              depth++;
-            } else if (closeRe.test(cur)) {
-              depth--;
-              if (depth === 0) break;
+            } else {
+              const innerOpen = openRe.exec(cur);
+              if (innerOpen) {
+                colonStack.push(innerOpen[1]!.length);
+              } else {
+                const innerClose = closeRe.exec(cur);
+                if (innerClose && innerClose[1]!.length >= colonStack[colonStack.length - 1]!) {
+                  colonStack.pop();
+                  if (colonStack.length === 0) break;
+                }
+              }
             }
           }
           j++;
         }
-        const endLineIdx = j < lines.length ? j : lines.length - 1;
+        const closed = j < lines.length && colonStack.length === 0;
+        const endLineIdx = closed ? j : lines.length - 1;
         const label = containerMatch[3]!.trim() || containerMatch[2]!;
-        pushBlock(classified.kind, classified.visibility, true, line.start, lines[endLineIdx]!.contentEnd, {
-          label,
-        });
+        const outerStart = line.start;
+        const outerEnd = lines[endLineIdx]!.contentEnd;
+        const headerRestStart = line.start + containerMatch[0].length - containerMatch[3]!.length;
+        const bodyEnd = closed
+          ? endLineIdx > i + 1
+            ? lines[endLineIdx - 1]!.contentEnd
+            : line.contentEnd
+          : outerEnd;
+
+        if (classified.visibility !== "sealed" && bodyEnd > headerRestStart) {
+          const innerBlocks = parsePedagogicalAstInternal(
+            text.slice(headerRestStart, bodyEnd),
+            {
+              defaultVisibility: classified.visibility,
+              propagateSectionVisibility,
+            },
+            classified.kind === "exercise",
+          ).map(b => ({
+            ...b,
+            startOffset: headerRestStart + b.startOffset,
+            endOffset: headerRestStart + b.endOffset,
+          }));
+          emitContainerWithExtraction(
+            classified.kind,
+            classified.visibility,
+            true,
+            outerStart,
+            outerEnd,
+            bodyEnd,
+            label,
+            false,
+            innerBlocks,
+          );
+        } else {
+          pushBlock(classified.kind, classified.visibility, true, outerStart, outerEnd, { label });
+        }
         i = endLineIdx + 1;
         continue;
       }
     }
 
     // 4. LaTeX environment (\begin{equation|align|theorem|lemma|proof|definition|solution}...)
-    const envMatch = /^[ \t]*\\begin\{([a-zA-Z]+\*?)\}/.exec(raw);
+    const envMatch = /^[ \t]*\\begin\{([a-zA-Z][\w-]*\*?)\}/.exec(raw);
     if (envMatch) {
       const envName = envMatch[1]!;
+      const activeVis = getActiveSectionVisibility();
       const isMath = MATH_ENVS.has(envName);
       const classified = isMath
-        ? { kind: "display_math" as const, visibility: activeSectionVisibility }
-        : classifyLabel(envName, activeSectionVisibility);
+        ? { kind: "display_math" as const, visibility: activeVis }
+        : classifyLabel(envName, activeVis, sealProofs);
       if (classified) {
+        const leadingWs = envMatch[0].length - envMatch[0].trimStart().length;
+        const envStart = line.start + leadingWs;
         const openEndOffset = line.start + envMatch[0].length;
-        const closeEndOffset = findMatchingLatexEnvEnd(text, envName, openEndOffset);
-        const endLineIdx = lineIndexContaining(lines, Math.max(line.start, closeEndOffset - 1), i);
-        const endOffset = Math.max(closeEndOffset, lines[endLineIdx]!.contentEnd);
-        pushBlock(classified.kind, classified.visibility, true, line.start, endOffset, {
-          label: envName,
-        });
-        i = endLineIdx + 1;
+        const { closeStart, closeEnd } = findMatchingLatexEnvBounds(text, envName, openEndOffset);
+        const endLineIdx = lineIndexContaining(lines, Math.max(envStart, closeEnd - 1), i);
+        const trailingOnCloseLine = text.slice(closeEnd, lines[endLineIdx]!.contentEnd);
+        const hasTrailingContent = !/^[ \t]*$/.test(trailingOnCloseLine);
+        const outerEnd = hasTrailingContent ? closeEnd : Math.max(closeEnd, lines[endLineIdx]!.contentEnd);
+
+        if (!isMath && classified.visibility !== "sealed" && closeStart > openEndOffset) {
+          const innerBlocks = parsePedagogicalAstInternal(
+            text.slice(openEndOffset, closeStart),
+            {
+              defaultVisibility: classified.visibility,
+              propagateSectionVisibility,
+            },
+            classified.kind === "exercise",
+          ).map(b => ({
+            ...b,
+            startOffset: openEndOffset + b.startOffset,
+            endOffset: openEndOffset + b.endOffset,
+          }));
+          emitContainerWithExtraction(
+            classified.kind,
+            classified.visibility,
+            true,
+            envStart,
+            outerEnd,
+            closeStart,
+            envName,
+            false,
+            innerBlocks,
+          );
+        } else {
+          pushBlock(classified.kind, classified.visibility, true, envStart, outerEnd, {
+            label: envName,
+          });
+        }
+
+        if (hasTrailingContent) {
+          const closeLine = lines[endLineIdx]!;
+          lines[endLineIdx] = {
+            start: closeEnd,
+            contentEnd: closeLine.contentEnd,
+            end: closeLine.end,
+            raw: trailingOnCloseLine,
+          };
+          i = endLineIdx;
+        } else {
+          i = endLineIdx + 1;
+        }
         continue;
       }
     }
@@ -463,16 +868,32 @@ export function parsePedagogicalAst(
     // 5. Display math ($$...$$)
     const ddMatch = /^[ \t]*\$\$/.exec(raw);
     if (ddMatch) {
-      const startOffset = line.start;
+      const leadingWs = ddMatch[0].length - ddMatch[0].trimStart().length;
+      const startOffset = line.start + leadingWs;
       const afterOpen = line.start + ddMatch[0].length;
       const closeOffset = findUnescapedToken(text, "$$", afterOpen);
+      const activeVis = getActiveSectionVisibility();
       if (closeOffset !== -1) {
+        const closeEnd = closeOffset + 2;
         const endLineIdx = lineIndexContaining(lines, closeOffset + 1, i);
-        const endOffset = Math.max(closeOffset + 2, lines[endLineIdx]!.contentEnd);
-        pushBlock("display_math", activeSectionVisibility, true, startOffset, endOffset);
-        i = endLineIdx + 1;
+        const trailingOnCloseLine = text.slice(closeEnd, lines[endLineIdx]!.contentEnd);
+        const hasTrailingContent = !/^[ \t]*$/.test(trailingOnCloseLine);
+        const endOffset = hasTrailingContent ? closeEnd : Math.max(closeEnd, lines[endLineIdx]!.contentEnd);
+        pushBlock("display_math", activeVis, true, startOffset, endOffset);
+        if (hasTrailingContent) {
+          const closeLine = lines[endLineIdx]!;
+          lines[endLineIdx] = {
+            start: closeEnd,
+            contentEnd: closeLine.contentEnd,
+            end: closeLine.end,
+            raw: trailingOnCloseLine,
+          };
+          i = endLineIdx;
+        } else {
+          i = endLineIdx + 1;
+        }
       } else {
-        pushBlock("display_math", activeSectionVisibility, true, startOffset, text.length);
+        pushBlock("display_math", activeVis, true, startOffset, text.length);
         i = lines.length;
       }
       continue;
@@ -481,36 +902,141 @@ export function parsePedagogicalAst(
     // 6. LaTeX bracket display math (\[...\])
     const bracketMatch = /^[ \t]*\\\[/.exec(raw);
     if (bracketMatch) {
-      const startOffset = line.start;
+      const leadingWs = bracketMatch[0].length - bracketMatch[0].trimStart().length;
+      const startOffset = line.start + leadingWs;
       const afterOpen = line.start + bracketMatch[0].length;
       const closeOffset = findUnescapedToken(text, "\\]", afterOpen);
+      const activeVis = getActiveSectionVisibility();
       if (closeOffset !== -1) {
+        const closeEnd = closeOffset + 2;
         const endLineIdx = lineIndexContaining(lines, closeOffset + 1, i);
-        const endOffset = Math.max(closeOffset + 2, lines[endLineIdx]!.contentEnd);
-        pushBlock("display_math", activeSectionVisibility, true, startOffset, endOffset);
-        i = endLineIdx + 1;
+        const trailingOnCloseLine = text.slice(closeEnd, lines[endLineIdx]!.contentEnd);
+        const hasTrailingContent = !/^[ \t]*$/.test(trailingOnCloseLine);
+        const endOffset = hasTrailingContent ? closeEnd : Math.max(closeEnd, lines[endLineIdx]!.contentEnd);
+        pushBlock("display_math", activeVis, true, startOffset, endOffset);
+        if (hasTrailingContent) {
+          const closeLine = lines[endLineIdx]!;
+          lines[endLineIdx] = {
+            start: closeEnd,
+            contentEnd: closeLine.contentEnd,
+            end: closeLine.end,
+            raw: trailingOnCloseLine,
+          };
+          i = endLineIdx;
+        } else {
+          i = endLineIdx + 1;
+        }
       } else {
-        pushBlock("display_math", activeSectionVisibility, true, startOffset, text.length);
+        pushBlock("display_math", activeVis, true, startOffset, text.length);
         i = lines.length;
       }
       continue;
     }
 
-    // 7. Markdown callout (> [!theorem], > [!proof], > [!solution], ...)
-    const calloutMatch = /^[ \t]*>[ \t]*\[!([a-zA-Z_-]+)\][+-]?(.*)$/.exec(raw);
+    // 7. Markdown callout (> [!theorem], > [!proof], > [!solution], ...) and blockquotes
+    const calloutRe = /^[ \t]*>[ \t]*\[!([a-zA-Z_-]+)\][+-]?(.*)$/;
+    const calloutMatch = calloutRe.exec(raw);
     if (calloutMatch) {
-      const classified = classifyLabel(calloutMatch[1], activeSectionVisibility);
+      const activeVis = getActiveSectionVisibility();
+      const classified = classifyLabel(calloutMatch[1], activeVis, sealProofs);
       if (classified) {
         let j = i + 1;
-        while (j < lines.length && /^[ \t]*>/.test(lines[j]!.raw)) j++;
-        const endLineIdx = j - 1;
+        while (j < lines.length && /^[ \t]*>/.test(lines[j]!.raw)) {
+          const nextCallout = calloutRe.exec(lines[j]!.raw);
+          if (nextCallout) {
+            const nextClassified = classifyLabel(nextCallout[1], activeVis, sealProofs);
+            if (
+              nextClassified &&
+              VISIBILITY_RANK[nextClassified.visibility] > VISIBILITY_RANK[classified.visibility]
+            ) {
+              break;
+            }
+          }
+          j++;
+        }
+        let endLineIdx = j - 1;
+        while (endLineIdx > i && /^[ \t]*>[ \t]*$/.test(lines[endLineIdx]!.raw)) {
+          endLineIdx--;
+        }
         const label = calloutMatch[2]!.trim() || calloutMatch[1]!;
-        pushBlock(classified.kind, classified.visibility, true, line.start, lines[endLineIdx]!.contentEnd, {
-          label,
-        });
+        const outerStart = line.start;
+        const outerEnd = lines[endLineIdx]!.contentEnd;
+
+        if (classified.visibility !== "sealed") {
+          const headerRestStart = line.start + calloutMatch[0].length - calloutMatch[2]!.length;
+          const innerBlocks = parseBlockquoteInnerBlocks(
+            lines,
+            i,
+            endLineIdx,
+            headerRestStart,
+            classified.visibility,
+            propagateSectionVisibility,
+            classified.kind === "exercise",
+          );
+          emitContainerWithExtraction(
+            classified.kind,
+            classified.visibility,
+            true,
+            outerStart,
+            outerEnd,
+            outerEnd,
+            label,
+            true,
+            innerBlocks,
+          );
+        } else {
+          pushBlock(classified.kind, classified.visibility, true, outerStart, outerEnd, { label });
+        }
         i = j;
         continue;
       }
+    }
+
+    if (/^[ \t]*>/.test(raw)) {
+      const activeVis = getActiveSectionVisibility();
+      let j = i + 1;
+      while (j < lines.length && /^[ \t]*>/.test(lines[j]!.raw)) {
+        const nextCallout = calloutRe.exec(lines[j]!.raw);
+        if (nextCallout && classifyLabel(nextCallout[1], activeVis, sealProofs) !== null) {
+          break;
+        }
+        j++;
+      }
+      let endLineIdx = j - 1;
+      while (endLineIdx > i && /^[ \t]*>[ \t]*$/.test(lines[endLineIdx]!.raw)) {
+        endLineIdx--;
+      }
+      const outerStart = line.start;
+      const outerEnd = lines[endLineIdx]!.contentEnd;
+
+      if (activeVis !== "sealed") {
+        const innerBlocks = parseBlockquoteInnerBlocks(
+          lines,
+          i,
+          endLineIdx,
+          null,
+          activeVis,
+          propagateSectionVisibility,
+          sealProofs,
+        );
+        if (innerBlocks.some(b => VISIBILITY_RANK[b.visibility] > VISIBILITY_RANK[activeVis])) {
+          emitContainerWithExtraction(
+            "prose",
+            activeVis,
+            false,
+            outerStart,
+            outerEnd,
+            outerEnd,
+            undefined,
+            true,
+            innerBlocks,
+          );
+          i = j;
+          continue;
+        }
+      }
+      i = emitInlineConstructsRange(outerStart, outerEnd, activeVis, i, j);
+      continue;
     }
 
     // 8. Markdown / pipe table
@@ -525,7 +1051,7 @@ export function parsePedagogicalAst(
         j++;
       }
       const endLineIdx = j - 1;
-      pushBlock("table", activeSectionVisibility, true, line.start, lines[endLineIdx]!.contentEnd);
+      pushBlock("table", getActiveSectionVisibility(), true, line.start, lines[endLineIdx]!.contentEnd);
       i = j;
       continue;
     }
@@ -533,7 +1059,7 @@ export function parsePedagogicalAst(
     // 9. Inline timestamped transcript cue line
     const cueTiming = parseInlineTranscriptCue(raw);
     if (cueTiming) {
-      pushBlock("transcript_cue", activeSectionVisibility, true, line.start, line.contentEnd, {
+      pushBlock("transcript_cue", getActiveSectionVisibility(), true, line.start, line.contentEnd, {
         startMs: cueTiming.startMs,
         endMs: cueTiming.endMs,
       });
@@ -541,29 +1067,12 @@ export function parsePedagogicalAst(
       continue;
     }
 
-    // 10. Prose paragraph (with embedded inline display-math protection)
+    // 10. Prose paragraph (with embedded inline display-math & pedagogical-env protection)
     let j = i + 1;
     while (j < lines.length && !startsSpecialBlock(lines, j)) j++;
     const paraStart = line.start;
     const paraEnd = lines[j - 1]!.contentEnd;
-    const paraText = text.slice(paraStart, paraEnd);
-    const mathSpans = findInlineDisplayMathSpans(paraText);
-    if (mathSpans.length === 0) {
-      pushBlock("prose", activeSectionVisibility, false, paraStart, paraEnd);
-    } else {
-      let cursor = 0;
-      for (const span of mathSpans) {
-        if (span.start > cursor) {
-          pushBlock("prose", activeSectionVisibility, false, paraStart + cursor, paraStart + span.start);
-        }
-        pushBlock("display_math", activeSectionVisibility, true, paraStart + span.start, paraStart + span.end);
-        cursor = span.end;
-      }
-      if (cursor < paraText.length) {
-        pushBlock("prose", activeSectionVisibility, false, paraStart + cursor, paraEnd);
-      }
-    }
-    i = j;
+    i = emitInlineConstructsRange(paraStart, paraEnd, getActiveSectionVisibility(), i, j);
   }
 
   return blocks;

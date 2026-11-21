@@ -268,6 +268,12 @@ function orderFoundationsBeforeDependents(
         continue;
       }
 
+      // Guard reverse direction: never add a shared-concept tier edge A -> B when an
+      // explicit prerequisite already requires B -> A (prevents spurious 2-cycles).
+      if (prereqBeforePairs.has(`${chunkB.id}\0${chunkA.id}`)) {
+        continue;
+      }
+
       // 2. Shared concept foundational tier: e.g. Definition precedes Theorem/Proof/Example
       //    for the same concept, without letting unrelated low-scoring definitions hijack rank 1.
       const conceptsA = conceptsByChunkId.get(chunkA.id);

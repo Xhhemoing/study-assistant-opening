@@ -289,6 +289,280 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     expect(ast[0]!.kind).toBe("example");
     expect(ast[0]!.text).toContain("Still inside example!");
   });
+
+  it("isolates inline \\begin{solution} and \\begin{hint} inside prose and after display math without leaking as public display_math", () => {
+    const doc = [
+      "Problem 1. Evaluate $x$. \\begin{solution} SECRET_42 \\end{solution}",
+      "",
+      "Problem 2. Factor $x^2 - 1$. \\begin{hint} HINT_99 \\end{hint}",
+      "",
+      "Problem 3. Solve with steps. \\begin{solution}",
+      "Step 1: isolate $x$.",
+      "",
+      "Step 2: SECRET_MULTILINE_77.",
+      "\\end{solution} Public follow-up note.",
+      "",
+      "$$x + 1 = 2$$ \\begin{solution} SECRET_AFTER_MATH \\end{solution}",
+      "",
+      "Warmup: \\begin{exercise} Compute $3 \\times 4$. \\begin{solution} SECRET_INLINE_EX \\end{solution} \\end{exercise} Done.",
+    ].join("\n");
+
+    const chunks = chunkPedagogicalDocument({
+      sourceId: "src-inline-leak",
+      sourceVersion: 1,
+      privacyEpoch: 11,
+      text: doc,
+    });
+
+    for (let idx = 0; idx < chunks.length; idx++) {
+      const c = chunks[idx]!;
+      expect(doc.slice(c.startOffset, c.endOffset)).toBe(c.text);
+      if (idx > 0) expect(c.startOffset).toBeGreaterThanOrEqual(chunks[idx - 1]!.endOffset);
+    }
+
+    const partitioned = partitionPedagogicalChunks(chunks);
+    const withHints = partitionPedagogicalChunks(chunks, { allowHintGated: true });
+
+    const secrets = ["SECRET_42", "SECRET_MULTILINE_77", "SECRET_AFTER_MATH", "SECRET_INLINE_EX"];
+    for (const secret of secrets) {
+      expect(partitioned.publicChunks.some(c => c.text.includes(secret))).toBe(false);
+      expect(partitioned.indexableChunks.some(c => c.text.includes(secret))).toBe(false);
+      expect(withHints.indexableChunks.some(c => c.text.includes(secret))).toBe(false);
+      expect(partitioned.sealedChunks.some(c => c.text.includes(secret) && c.kind === "solution")).toBe(true);
+    }
+
+    // Inline hint is hint_gated: excluded by default, allowed only with allowHintGated=true.
+    expect(partitioned.publicChunks.some(c => c.text.includes("HINT_99"))).toBe(false);
+    expect(partitioned.indexableChunks.some(c => c.text.includes("HINT_99"))).toBe(false);
+    expect(partitioned.hintGatedChunks.some(c => c.text.includes("HINT_99") && c.kind === "hint")).toBe(true);
+    expect(withHints.indexableChunks.some(c => c.text.includes("HINT_99"))).toBe(true);
+
+    // Public prose and follow-up text remain retrievable.
+    expect(partitioned.publicChunks.some(c => c.text.includes("Problem 1. Evaluate $x$."))).toBe(true);
+    expect(partitioned.publicChunks.some(c => c.text.includes("Public follow-up note."))).toBe(true);
+    expect(partitioned.publicChunks.some(c => c.text.includes("Compute $3 \\times 4$."))).toBe(true);
+
+    // End-to-end ranker guarantees 0.0 leakage even when every chunk gets high lexical score.
+    const rankedNoHints = rankPedagogicalEvidence({
+      chunks,
+      lexicalRanking: chunks.map(c => ({ id: c.id, score: 10 })),
+      authorization: { admissibleSourceIds: ["src-inline-leak"], expectedPrivacyEpoch: 11 },
+    });
+    const rankedTextNoHints = rankedNoHints.ranked.map(r => r.chunk.text).join("\n");
+    for (const secret of secrets) {
+      expect(rankedTextNoHints).not.toContain(secret);
+    }
+    expect(rankedTextNoHints).not.toContain("HINT_99");
+    expect(rankedNoHints.diagnostics.filteredSealedChunks).toBe(partitioned.sealedChunks.length);
+    expect(rankedNoHints.diagnostics.filteredHintGatedChunks).toBe(partitioned.hintGatedChunks.length);
+  });
+
+  it("maintains a monotonic heading visibility stack so nested Hints never downgrade Answer Key and nested Solutions never corrupt sibling Hints", () => {
+    const doc = [
+      "## Answer Key",
+      "### Hints",
+      "Hint A inside answer key.",
+      "### Problem 2",
+      "SECRET_P2 inside answer key.",
+      "## Next Public Section",
+      "Public prose resumes here.",
+      "## Hints",
+      "### Full Solution",
+      "SECRET_SOL inside hints section.",
+      "### Hint 2",
+      "HINT_TWO stays hint gated.",
+      "## Final Public Chapter",
+      "Public epilogue.",
+    ].join("\n");
+
+    const ast = parsePedagogicalAst(doc);
+    const byExact = (exact: string) => ast.find(b => b.text === exact);
+
+    expect(byExact("## Answer Key")?.visibility).toBe("sealed");
+    expect(byExact("### Hints")?.visibility).toBe("sealed");
+    expect(byExact("Hint A inside answer key.")?.visibility).toBe("sealed");
+    expect(byExact("### Problem 2")?.visibility).toBe("sealed");
+    expect(byExact("SECRET_P2 inside answer key.")?.visibility).toBe("sealed");
+    expect(byExact("## Next Public Section")?.visibility).toBe("public");
+    expect(byExact("Public prose resumes here.")?.visibility).toBe("public");
+    expect(byExact("## Hints")?.visibility).toBe("hint_gated");
+    expect(byExact("### Full Solution")?.visibility).toBe("sealed");
+    expect(byExact("SECRET_SOL inside hints section.")?.visibility).toBe("sealed");
+    expect(byExact("### Hint 2")?.visibility).toBe("hint_gated");
+    expect(byExact("HINT_TWO stays hint gated.")?.visibility).toBe("hint_gated");
+    expect(byExact("## Final Public Chapter")?.visibility).toBe("public");
+    expect(byExact("Public epilogue.")?.visibility).toBe("public");
+
+    const chunks = chunkPedagogicalDocument({
+      sourceId: "src-headings",
+      sourceVersion: 1,
+      privacyEpoch: 4,
+      text: doc,
+    });
+    for (const chunk of chunks) {
+      expect(doc.slice(chunk.startOffset, chunk.endOffset)).toBe(chunk.text);
+    }
+
+    const partitioned = partitionPedagogicalChunks(chunks);
+    const withHints = partitionPedagogicalChunks(chunks, { allowHintGated: true });
+
+    // Neither Hint A (under Answer Key) nor SECRET_P2 nor SECRET_SOL may leak even with allowHintGated=true.
+    for (const sealedToken of ["Hint A", "SECRET_P2", "SECRET_SOL"]) {
+      expect(partitioned.publicChunks.some(c => c.text.includes(sealedToken))).toBe(false);
+      expect(withHints.indexableChunks.some(c => c.text.includes(sealedToken))).toBe(false);
+      expect(partitioned.sealedChunks.some(c => c.text.includes(sealedToken))).toBe(true);
+    }
+    // HINT_TWO is strictly hint_gated.
+    expect(partitioned.publicChunks.some(c => c.text.includes("HINT_TWO"))).toBe(false);
+    expect(partitioned.hintGatedChunks.some(c => c.text.includes("HINT_TWO"))).toBe(true);
+    expect(withHints.indexableChunks.some(c => c.text.includes("HINT_TWO"))).toBe(true);
+    // Public sections remain public.
+    expect(partitioned.publicChunks.some(c => c.text.includes("Public prose resumes here."))).toBe(true);
+    expect(partitioned.publicChunks.some(c => c.text.includes("Public epilogue."))).toBe(true);
+  });
+
+  it("recursively extracts nested hints and sealed solutions out of public :::exercise, \\begin{exercise}, and callout containers with 0.0 ranker leakage", () => {
+    const doc = [
+      "::::exercise Problem 1",
+      "Compute $\\int_0^1 x^2\\,dx$.",
+      "",
+      ":::hint",
+      "HINT_FENCED_1: Use the power rule.",
+      "",
+      ":::solution",
+      "SECRET_IN_HINT_1: $1/3$.",
+      ":::",
+      ":::",
+      "",
+      ":::solution",
+      "SECRET_FENCED_1: Exact value is $1/3$.",
+      ":::",
+      "",
+      "Part (b): Verify by differentiation.",
+      "::::",
+      "",
+      "\\begin{exercise}",
+      "Solve $2x = 14$ and prove uniqueness.",
+      "\\begin{hint}",
+      "HINT_LATEX_2: Divide both sides by 2.",
+      "\\end{hint}",
+      "\\begin{solution}",
+      "SECRET_LATEX_2: $x = 7$.",
+      "\\end{solution}",
+      "\\begin{proof}",
+      "SECRET_EXERCISE_PROOF_2: If $2x = 2y$ then $x = y$.",
+      "\\end{proof}",
+      "\\end{exercise}",
+      "",
+      "\\begin{exercise} Quick check $1+1$. \\end{exercise} \\begin{solution} SECRET_SAME_LINE_EX \\end{solution}",
+      "",
+      "> [!question] Callout Problem 3",
+      "> Find the derivative of $\\sin x$.",
+      ">",
+      "> > [!hint]",
+      "> > HINT_CALLOUT_3: Recall trig limits.",
+      ">",
+      "> > [!solution]",
+      "> > SECRET_CALLOUT_3: $\\cos x$.",
+      "",
+      "> [!question] Callout Problem 4",
+      "> Evaluate $5!$.",
+      ">",
+      "> [!solution]",
+      "> SECRET_CALLOUT_SIBLING_4: $120$.",
+      "",
+      "> [!question] Callout Problem 5",
+      "> Compute $\\log_2 8$. \\begin{solution} SECRET_CALLOUT_INLINE_5: 3 \\end{solution}",
+      ">",
+      "> ### Answer Key",
+      "> SECRET_CALLOUT_HEADING_5: $2^3 = 8$.",
+      "",
+      "> Plain quote prompt.",
+      "> > [!solution]",
+      "> > SECRET_PLAIN_QUOTE_6",
+      "",
+      "\\begin{theorem}",
+      "Public theorem statement.",
+      "\\begin{proof}",
+      "PUBLIC_THEOREM_PROOF remains visible.",
+      "\\end{proof}",
+      "\\end{theorem}",
+    ].join("\n");
+
+    const chunks = chunkPedagogicalDocument({
+      sourceId: "src-nested",
+      sourceVersion: 1,
+      privacyEpoch: 12,
+      text: doc,
+    });
+
+    // Exact non-overlapping substring offsets for every chunk.
+    for (let idx = 0; idx < chunks.length; idx++) {
+      const c = chunks[idx]!;
+      expect(doc.slice(c.startOffset, c.endOffset)).toBe(c.text);
+      if (idx > 0) expect(c.startOffset).toBeGreaterThanOrEqual(chunks[idx - 1]!.endOffset);
+    }
+
+    const partitioned = partitionPedagogicalChunks(chunks);
+    const withHints = partitionPedagogicalChunks(chunks, { allowHintGated: true });
+
+    const sealedSecrets = [
+      "SECRET_IN_HINT_1",
+      "SECRET_FENCED_1",
+      "SECRET_LATEX_2",
+      "SECRET_EXERCISE_PROOF_2",
+      "SECRET_SAME_LINE_EX",
+      "SECRET_CALLOUT_3",
+      "SECRET_CALLOUT_SIBLING_4",
+      "SECRET_CALLOUT_INLINE_5",
+      "SECRET_CALLOUT_HEADING_5",
+      "SECRET_PLAIN_QUOTE_6",
+    ];
+    for (const secret of sealedSecrets) {
+      expect(partitioned.publicChunks.some(c => c.text.includes(secret))).toBe(false);
+      expect(partitioned.indexableChunks.some(c => c.text.includes(secret))).toBe(false);
+      expect(withHints.indexableChunks.some(c => c.text.includes(secret))).toBe(false);
+      expect(partitioned.sealedChunks.some(c => c.text.includes(secret))).toBe(true);
+    }
+
+    const hintTokens = ["HINT_FENCED_1", "HINT_LATEX_2", "HINT_CALLOUT_3"];
+    for (const hint of hintTokens) {
+      expect(partitioned.publicChunks.some(c => c.text.includes(hint))).toBe(false);
+      expect(partitioned.indexableChunks.some(c => c.text.includes(hint))).toBe(false);
+      expect(partitioned.hintGatedChunks.some(c => c.text.includes(hint) && c.kind === "hint")).toBe(true);
+      expect(withHints.indexableChunks.some(c => c.text.includes(hint))).toBe(true);
+    }
+
+    // Outer exercise prompts and trailing public parts stay public with kind "exercise".
+    expect(partitioned.publicChunks.some(c => c.kind === "exercise" && c.text.includes("Compute $\\int_0^1 x^2\\,dx$."))).toBe(true);
+    expect(partitioned.publicChunks.some(c => c.kind === "exercise" && c.text.includes("Part (b): Verify by differentiation."))).toBe(true);
+    expect(partitioned.publicChunks.some(c => c.kind === "exercise" && c.text.includes("Solve $2x = 14$"))).toBe(true);
+    expect(partitioned.publicChunks.some(c => c.kind === "exercise" && c.text.includes("Quick check $1+1$."))).toBe(true);
+    expect(partitioned.publicChunks.some(c => c.kind === "exercise" && c.text.includes("Find the derivative of $\\sin x$."))).toBe(true);
+    expect(partitioned.publicChunks.some(c => c.kind === "exercise" && c.text.includes("Evaluate $5!$."))).toBe(true);
+    // Proof nested inside a public theorem remains public.
+    expect(partitioned.publicChunks.some(c => c.kind === "theorem" && c.text.includes("PUBLIC_THEOREM_PROOF"))).toBe(true);
+
+    // End-to-end rankPedagogicalEvidence guarantees 0.0 answer leakage.
+    const ranked = rankPedagogicalEvidence({
+      chunks,
+      lexicalRanking: chunks.map(c => ({ id: c.id, score: 5 })),
+      authorization: {
+        admissibleSourceIds: ["src-nested"],
+        expectedPrivacyEpoch: 12,
+        allowHintGated: false,
+      },
+    });
+    const rankedText = ranked.ranked.map(r => r.chunk.text).join("\n");
+    for (const secret of sealedSecrets) {
+      expect(rankedText).not.toContain(secret);
+    }
+    for (const hint of hintTokens) {
+      expect(rankedText).not.toContain(hint);
+    }
+    expect(ranked.diagnostics.filteredSealedChunks).toBe(partitioned.sealedChunks.length);
+    expect(ranked.diagnostics.filteredHintGatedChunks).toBe(partitioned.hintGatedChunks.length);
+  });
 });
 
 describe("sparsePpr exactness, dangling-node mass conservation, and validation", () => {
@@ -642,5 +916,51 @@ describe("rankPedagogicalEvidence security isolation, prerequisite recall, and f
     expect(rootDomain).not.toHaveProperty("sparsePpr");
     expect(rootDomain).not.toHaveProperty("chunkPedagogicalDocument");
     expect(rootDomain).not.toHaveProperty("rankPedagogicalEvidence");
+  });
+
+  it("guards shared-concept tier ordering against reverse explicit prereqBeforePairs to avoid spurious 2-cycles", () => {
+    const cMotivatingExample = makeChunk({
+      id: "chunk-example-motivating",
+      kind: "example",
+      conceptIds: ["concept-shared"],
+      pageStart: 1,
+      pageEnd: 1,
+    });
+    const cFormalDef = makeChunk({
+      id: "chunk-def-formal",
+      kind: "definition",
+      conceptIds: ["concept-shared"],
+      pageStart: 2,
+      pageEnd: 2,
+    });
+
+    const result = rankPedagogicalEvidence({
+      chunks: [cMotivatingExample, cFormalDef],
+      concepts: [
+        { id: "concept-shared", label: "Shared Concept", supportingSourceIds: ["src-notes"], privacyEpoch: 7 },
+      ],
+      edges: [
+        // Explicit prerequisite requires the higher-tier motivating example BEFORE the lower-tier definition.
+        {
+          from: "chunk-example-motivating",
+          to: "chunk-def-formal",
+          kind: "prerequisite",
+          supportingSourceIds: ["src-notes"],
+          privacyEpoch: 7,
+        },
+      ],
+      lexicalRanking: [
+        // Give the formal definition a higher lexical score so a spurious 2-cycle would emit it first.
+        { id: "chunk-def-formal", score: 1.0 },
+        { id: "chunk-example-motivating", score: 0.4 },
+      ],
+      authorization: {
+        admissibleSourceIds: ["src-notes"],
+        expectedPrivacyEpoch: 7,
+      },
+    });
+
+    const ids = result.ranked.map(r => r.chunk.id);
+    expect(ids).toEqual(["chunk-example-motivating", "chunk-def-formal"]);
   });
 });
