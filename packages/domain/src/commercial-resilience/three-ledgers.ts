@@ -652,6 +652,8 @@ export interface CreatorRoyaltyEntry {
   readonly excludedReason: CreatorRoyaltyExclusionReason | null;
   readonly settledPurchaseAtMs: number;
   readonly escrowReleaseAtMs: number;
+  /** Refund/chargeback occurrence UTC ms on refund & post_release_clawback entries; null otherwise. */
+  readonly refundOccurredAtMs: number | null;
   readonly recordedAtMs: number;
   readonly grossReceiptsMicros: MicroCurrency;
   readonly channelFeeMicros: MicroCurrency;
@@ -920,6 +922,7 @@ function royaltyEntriesEqual(
     a.excludedReason === b.excludedReason &&
     a.settledPurchaseAtMs === b.settledPurchaseAtMs &&
     a.escrowReleaseAtMs === b.escrowReleaseAtMs &&
+    a.refundOccurredAtMs === b.refundOccurredAtMs &&
     a.recordedAtMs === b.recordedAtMs &&
     a.grossReceiptsMicros === b.grossReceiptsMicros &&
     a.channelFeeMicros === b.channelFeeMicros &&
@@ -1089,6 +1092,7 @@ export function appendCreatorRoyaltyAccrual(
     excludedReason: calculation.excludedReason,
     settledPurchaseAtMs,
     escrowReleaseAtMs: settledPurchaseAtMs + ROYALTY_ESCROW_WINDOW_MS,
+    refundOccurredAtMs: null,
     recordedAtMs: settledPurchaseAtMs,
     grossReceiptsMicros,
     channelFeeMicros,
@@ -1323,6 +1327,7 @@ export function recordPostReleaseRoyaltyClawback(
       existingByKey.purchaseId === purchaseId &&
       existingByKey.eventType === "post_release_clawback" &&
       existingByKey.eventRefundMicros === additionalRefundMicros &&
+      existingByKey.refundOccurredAtMs === refundOccurredAtMs &&
       (explicitRecordedAtMs === null ||
         existingByKey.recordedAtMs === explicitRecordedAtMs)
     ) {
@@ -1362,6 +1367,12 @@ export function recordPostReleaseRoyaltyClawback(
       releaseEntry.recordedAtMs,
       maxExistingRecordedAtMs ?? releaseEntry.recordedAtMs,
     );
+  if (effectiveRecordedAtMs < refundOccurredAtMs) {
+    throw new CommercialResilienceError(
+      "INVALID_TIMESTAMP",
+      "Post-release clawback recordedAtMs cannot precede refundOccurredAtMs",
+    );
+  }
   if (effectiveRecordedAtMs < releaseEntry.recordedAtMs) {
     throw new CommercialResilienceError(
       "INVALID_TIMESTAMP",
@@ -1428,6 +1439,7 @@ export function recordPostReleaseRoyaltyClawback(
     excludedReason: null,
     settledPurchaseAtMs: current.settledPurchaseAtMs,
     escrowReleaseAtMs: current.escrowReleaseAtMs,
+    refundOccurredAtMs,
     recordedAtMs: effectiveRecordedAtMs,
     grossReceiptsMicros: current.grossReceiptsMicros,
     channelFeeMicros: current.channelFeeMicros,
@@ -1486,6 +1498,7 @@ export function appendCreatorRoyaltyRefund(
       existingByKey.purchaseId === purchaseId &&
       existingByKey.eventType === "escrow_refund_adjustment" &&
       existingByKey.eventRefundMicros === additionalRefundMicros &&
+      existingByKey.refundOccurredAtMs === refundOccurredAtMs &&
       existingByKey.recordedAtMs === effectiveEscrowRecordedAtMs
     ) {
       return { ledger, entry: existingByKey, idempotentReplay: true };
@@ -1507,6 +1520,12 @@ export function appendCreatorRoyaltyRefund(
     throw new CommercialResilienceError(
       "INVALID_TIMESTAMP",
       "refundOccurredAtMs cannot precede settledPurchaseAtMs",
+    );
+  }
+  if (effectiveEscrowRecordedAtMs < refundOccurredAtMs) {
+    throw new CommercialResilienceError(
+      "INVALID_TIMESTAMP",
+      "Refund recordedAtMs cannot precede refundOccurredAtMs",
     );
   }
   if (
@@ -1560,6 +1579,7 @@ export function appendCreatorRoyaltyRefund(
     excludedReason: null,
     settledPurchaseAtMs: current.settledPurchaseAtMs,
     escrowReleaseAtMs: current.escrowReleaseAtMs,
+    refundOccurredAtMs,
     recordedAtMs: effectiveEscrowRecordedAtMs,
     grossReceiptsMicros: current.grossReceiptsMicros,
     channelFeeMicros: current.channelFeeMicros,
@@ -1663,6 +1683,7 @@ export function appendCreatorRoyaltyRelease(
     excludedReason: null,
     settledPurchaseAtMs: current.settledPurchaseAtMs,
     escrowReleaseAtMs: current.escrowReleaseAtMs,
+    refundOccurredAtMs: null,
     recordedAtMs: nowMs,
     grossReceiptsMicros: current.grossReceiptsMicros,
     channelFeeMicros: current.channelFeeMicros,

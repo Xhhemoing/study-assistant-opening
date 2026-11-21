@@ -958,7 +958,11 @@ describe("commercial-resilience: micro-unit three-ledger accounting & creator ro
       ledger.entries.find((item) => item.entryId === "cr-a-rel"),
     ).toEqual(releaseEntryBefore);
 
-    // Exact idempotent replay of post-release clawback does NOT double-claw back
+    // Exact idempotent replay of post-release clawback does NOT double-claw back;
+    // altering refundOccurredAtMs on the same idempotencyKey fails closed with IDEMPOTENCY_CONFLICT!
+    expect(partialClawback.entry.refundOccurredAtMs).toBe(
+      settledAt + 13 * DAY_MS,
+    );
     const clawbackReplay = recordPostReleaseRoyaltyClawback(ledger, {
       entryId: "cr-a-claw-1",
       idempotencyKey: "refund-a-day13-delayed",
@@ -969,6 +973,39 @@ describe("commercial-resilience: micro-unit three-ledger accounting & creator ro
     });
     expect(clawbackReplay.idempotentReplay).toBe(true);
     expect(clawbackReplay.ledger.entries).toHaveLength(ledger.entries.length);
+
+    try {
+      recordPostReleaseRoyaltyClawback(ledger, {
+        entryId: "cr-a-claw-1",
+        idempotencyKey: "refund-a-day13-delayed",
+        purchaseId: "order-a",
+        additionalRefundMicros: 20_000_000n,
+        refundOccurredAtMs: settledAt + 12 * DAY_MS, // altered occurrence timestamp!
+        recordedAtMs: exactMaturity + DAY_MS,
+      });
+      expect.unreachable("Expected IDEMPOTENCY_CONFLICT");
+    } catch (err) {
+      expect(err).toBeInstanceOf(CommercialResilienceError);
+      expect((err as CommercialResilienceError).code).toBe(
+        "IDEMPOTENCY_CONFLICT",
+      );
+    }
+
+    // Post-release clawback with explicit recordedAtMs < refundOccurredAtMs MUST fail closed
+    try {
+      recordPostReleaseRoyaltyClawback(ledger, {
+        entryId: "cr-a-claw-backbooked",
+        idempotencyKey: "refund-a-backbooked",
+        purchaseId: "order-a",
+        additionalRefundMicros: 5_000_000n,
+        refundOccurredAtMs: exactMaturity + 5 * DAY_MS,
+        recordedAtMs: exactMaturity + 2 * DAY_MS,
+      });
+      expect.unreachable("Expected INVALID_TIMESTAMP");
+    } catch (err) {
+      expect(err).toBeInstanceOf(CommercialResilienceError);
+      expect((err as CommercialResilienceError).code).toBe("INVALID_TIMESTAMP");
+    }
 
     const afterPartialClawback = projectCreatorRoyaltyPosition(
       ledger,
@@ -1311,6 +1348,22 @@ describe("commercial-resilience: micro-unit three-ledger accounting & creator ro
         severeLeakCount: 0,
       },
     }).ledger;
+
+    // Pre-release refund booked BEFORE it occurred (recordedAtMs < refundOccurredAtMs) MUST fail closed
+    try {
+      appendCreatorRoyaltyRefund(chronoLedger, {
+        entryId: "cr-chrono-ref-backbooked",
+        idempotencyKey: "ref-chrono-backbooked",
+        purchaseId: "order-chrono",
+        additionalRefundMicros: 10_000_000n,
+        refundOccurredAtMs: settledAt + 16 * DAY_MS,
+        recordedAtMs: settledAt + 13 * DAY_MS,
+      });
+      expect.unreachable("Expected INVALID_TIMESTAMP");
+    } catch (err) {
+      expect(err).toBeInstanceOf(CommercialResilienceError);
+      expect((err as CommercialResilienceError).code).toBe("INVALID_TIMESTAMP");
+    }
 
     chronoLedger = appendCreatorRoyaltyRefund(chronoLedger, {
       entryId: "cr-chrono-ref-d10",
@@ -1868,9 +1921,18 @@ describe("commercial-resilience: bilateral-privacy cohort heatmap & LTI 1.3 vali
     expect(Object.isFrozen(firstSeal.snapshot.cells[1])).toBe(true);
 
     // Mutating caller's original object in-place MUST NOT corrupt stored ledger entry and MUST fail replay as altered
-    (
-      mutableBeforeSeal.cells[1] as { eventLearnerCount: number }
-    ).eventLearnerCount = 9;
+    const mutatedValidCell = mutableBeforeSeal.cells[1] as {
+      enrolledActiveCount: number;
+      eventLearnerCount: number;
+      complementLearnerCount: number;
+      eventRate: number;
+      eventRateBps: number;
+    };
+    mutatedValidCell.enrolledActiveCount = 12;
+    mutatedValidCell.eventLearnerCount = 6;
+    mutatedValidCell.complementLearnerCount = 6;
+    mutatedValidCell.eventRate = 0.5;
+    mutatedValidCell.eventRateBps = 5000;
     expect(
       pubLedger.snapshotsByKey.get(firstSeal.snapshot.publicationKey!)
         ?.cells[1]?.eventLearnerCount,
@@ -1919,7 +1981,98 @@ describe("commercial-resilience: bilateral-privacy cohort heatmap & LTI 1.3 vali
     expect(Object.isFrozen(replayViaAggregate.cells[1])).toBe(true);
     expect(replayViaAggregate.finalizedAtMs).toBe(validWeek.weekEndUtcMs); // original sealed timestamp preserved
 
-    // Incomplete or asymmetric (snapshot, digest) ledger states fail closed with COHORT_PUBLICATION_LEDGER_CORRUPTED
+    // Manually constructed CohortHeatmapResult violating bilateral privacy (e.g. N=10, E=1, suppressed: false)
+    // OR leaking counts on a suppressed cell OR mixing cohort sizes MUST fail closed inside sealCohortWeeklySnapshot!
+    const privacyViolatingSnapshots = [
+      // Violates E >= 5 (N=10, E=1 disclosed)
+      {
+        ...heatmap,
+        disclosedCellCount: 1,
+        suppressedCellCount: 0,
+        cells: [
+          {
+            skillId: "leaked-cell",
+            suppressed: false as const,
+            enrolledActiveCount: 10,
+            eventLearnerCount: 1,
+            complementLearnerCount: 9,
+            eventRate: 0.1,
+            eventRateBps: 1000,
+            suppressionReason: null,
+          },
+        ],
+      },
+      // Suppressed cell leaking numeric counts
+      {
+        ...heatmap,
+        disclosedCellCount: 0,
+        suppressedCellCount: 1,
+        cells: [
+          {
+            skillId: "leaked-suppressed",
+            suppressed: true as const,
+            enrolledActiveCount: 10 as unknown as null,
+            eventLearnerCount: 1 as unknown as null,
+            complementLearnerCount: null,
+            eventRate: null,
+            eventRateBps: null,
+            suppressionReason: "bilateral_privacy_threshold" as const,
+          },
+        ],
+      },
+      // Inconsistent enrolledActiveCount across disclosed cells in the same frozen roster snapshot
+      {
+        ...heatmap,
+        disclosedCellCount: 2,
+        suppressedCellCount: 0,
+        cells: [
+          {
+            skillId: "skill-a",
+            suppressed: false as const,
+            enrolledActiveCount: 10,
+            eventLearnerCount: 5,
+            complementLearnerCount: 5,
+            eventRate: 0.5,
+            eventRateBps: 5000,
+            suppressionReason: null,
+          },
+          {
+            skillId: "skill-b",
+            suppressed: false as const,
+            enrolledActiveCount: 12,
+            eventLearnerCount: 6,
+            complementLearnerCount: 6,
+            eventRate: 0.5,
+            eventRateBps: 5000,
+            suppressionReason: null,
+          },
+        ],
+      },
+      // Duplicate skillId keys
+      {
+        ...heatmap,
+        disclosedCellCount: 2,
+        suppressedCellCount: 0,
+        cells: [heatmap.cells[1]!, heatmap.cells[1]!],
+      },
+    ];
+
+    for (const invalidSnapshot of privacyViolatingSnapshots) {
+      try {
+        sealCohortWeeklySnapshot(
+          createCohortSnapshotPublicationLedger(),
+          invalidSnapshot,
+        );
+        expect.unreachable("Expected COHORT_PRIVACY_VIOLATION");
+      } catch (err) {
+        expect(err).toBeInstanceOf(CommercialResilienceError);
+        expect((err as CommercialResilienceError).code).toBe(
+          "COHORT_PRIVACY_VIOLATION",
+        );
+      }
+    }
+
+    // Incomplete, malformed-shape, or tampered-finalizedAtMs ledger states fail closed with COHORT_PUBLICATION_LEDGER_CORRUPTED (never raw TypeError)
     const missingDigestLedger = {
       ledgerKind: "cohort_snapshot_publication" as const,
       snapshotsByKey: new Map(pubLedger.snapshotsByKey),
@@ -1937,11 +2090,36 @@ describe("commercial-resilience: bilateral-privacy cohort heatmap & LTI 1.3 vali
         [firstSeal.snapshot.publicationKey!, "not-a-valid-digest"],
       ]),
     };
+    const malformedShapeLedger = {
+      ledgerKind: "cohort_snapshot_publication" as const,
+      snapshotsByKey: new Map([
+        [
+          firstSeal.snapshot.publicationKey!,
+          { cohortSurfaceVisible: true, cells: "not-an-array" } as unknown as typeof firstSeal.snapshot,
+        ],
+      ]),
+      snapshotDigestsByKey: new Map(pubLedger.snapshotDigestsByKey),
+    };
+    const tamperedFinalizedAtLedger = {
+      ledgerKind: "cohort_snapshot_publication" as const,
+      snapshotsByKey: new Map([
+        [
+          firstSeal.snapshot.publicationKey!,
+          {
+            ...firstSeal.snapshot,
+            finalizedAtMs: validWeek.weekEndUtcMs + 999_000, // tampered timestamp vs stored digest!
+          },
+        ],
+      ]),
+      snapshotDigestsByKey: new Map(pubLedger.snapshotDigestsByKey),
+    };
 
     for (const corruptedLedger of [
       missingDigestLedger,
       missingSnapshotLedger,
       malformedDigestLedger,
+      malformedShapeLedger,
+      tamperedFinalizedAtLedger,
     ]) {
       for (const action of [
         () => sealCohortWeeklySnapshot(corruptedLedger, heatmap),

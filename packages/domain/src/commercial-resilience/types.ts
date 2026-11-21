@@ -44,6 +44,7 @@ export type CommercialResilienceErrorCode =
   | "COHORT_WEEK_NOT_FINALIZED"
   | "COHORT_WEEK_ALREADY_PUBLISHED"
   | "COHORT_PUBLICATION_LEDGER_CORRUPTED"
+  | "COHORT_PRIVACY_VIOLATION"
   | "INVALID_COHORT_COUNTS";
 
 export class CommercialResilienceError extends Error {

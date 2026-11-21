@@ -487,6 +487,7 @@ function computeCohortSnapshotStructuralDigest(
     snapshot.window?.isoWeekKey ?? "null",
     String(snapshot.window?.weekStartUtcMs ?? "null"),
     String(snapshot.window?.weekEndUtcMs ?? "null"),
+    String(snapshot.finalizedAtMs ?? "null"),
     snapshot.frozenRosterDigest ?? "null",
     String(snapshot.disclosedCellCount),
     String(snapshot.suppressedCellCount),
@@ -551,8 +552,238 @@ function cohortSnapshotsEquivalent(
 
 const SHA256_DIGEST_PATTERN = /^sha256:[0-9a-f]{64}$/;
 
-function isValidSha256Digest(value: string | undefined): value is string {
+function isValidSha256Digest(value: unknown): value is string {
   return typeof value === "string" && SHA256_DIGEST_PATTERN.test(value);
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function validatePublishedSnapshotInvariants(
+  rawSnapshot: unknown,
+  mode: "seal" | "ledger_read",
+): {
+  readonly snapshot: CohortHeatmapResult;
+  readonly validatedWindow: IsoWeekWindow;
+  readonly cohortId: string;
+} {
+  function fail(
+    sealCode: "COHORT_WEEK_NOT_FINALIZED" | "COHORT_PRIVACY_VIOLATION",
+    message: string,
+  ): never {
+    throw new CommercialResilienceError(
+      mode === "ledger_read" ? "COHORT_PUBLICATION_LEDGER_CORRUPTED" : sealCode,
+      message,
+    );
+  }
+
+  if (!isPlainRecord(rawSnapshot)) {
+    fail("COHORT_PRIVACY_VIOLATION", "Cohort snapshot must be a plain object");
+  }
+  const snap = rawSnapshot as unknown as CohortHeatmapResult;
+
+  if (
+    snap.cohortSurfaceVisible !== true ||
+    snap.cohortId === null ||
+    snap.window === null ||
+    snap.frozenRosterDigest === null ||
+    snap.finalizedAtMs === null
+  ) {
+    fail(
+      "COHORT_WEEK_NOT_FINALIZED",
+      "Only a visible, finalized cohort weekly snapshot can be sealed for publication",
+    );
+  }
+
+  const rawCohortId = snap.cohortId;
+  if (
+    typeof rawCohortId !== "string" ||
+    rawCohortId.trim().length === 0 ||
+    rawCohortId.trim() !== rawCohortId
+  ) {
+    fail(
+      "COHORT_PRIVACY_VIOLATION",
+      "Cohort snapshot cohortId must be a canonical non-empty identifier",
+    );
+  }
+  const cohortId: string = rawCohortId;
+
+  const rawWindow = snap.window;
+  if (!isPlainRecord(rawWindow)) {
+    fail("COHORT_PRIVACY_VIOLATION", "Cohort snapshot window must be an object");
+  }
+  let validatedWindow: IsoWeekWindow;
+  try {
+    validatedWindow = validateFixedIsoWeekWindow({
+      weekStartUtcMs: rawWindow.weekStartUtcMs as number,
+      weekEndUtcMs: rawWindow.weekEndUtcMs as number,
+    });
+  } catch (err) {
+    if (mode === "ledger_read") {
+      throw new CommercialResilienceError(
+        "COHORT_PUBLICATION_LEDGER_CORRUPTED",
+        `Stored cohort snapshot has invalid ISO week window: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    throw err;
+  }
+  if (
+    rawWindow.isoWeekKey !== validatedWindow.isoWeekKey ||
+    rawWindow.isoYear !== validatedWindow.isoYear ||
+    rawWindow.isoWeek !== validatedWindow.isoWeek
+  ) {
+    fail(
+      "COHORT_PRIVACY_VIOLATION",
+      "Cohort snapshot window metadata does not match its UTC boundaries",
+    );
+  }
+
+  const rawFinalizedAtMs = snap.finalizedAtMs;
+  if (
+    typeof rawFinalizedAtMs !== "number" ||
+    !Number.isSafeInteger(rawFinalizedAtMs) ||
+    rawFinalizedAtMs < 0
+  ) {
+    fail(
+      "COHORT_WEEK_NOT_FINALIZED",
+      "Cohort snapshot finalizedAtMs must be a non-negative safe integer",
+    );
+  }
+  if (rawFinalizedAtMs < validatedWindow.weekEndUtcMs) {
+    fail(
+      "COHORT_WEEK_NOT_FINALIZED",
+      `Cohort snapshot for ${validatedWindow.isoWeekKey} cannot be sealed before week close (${validatedWindow.weekEndUtcMs})`,
+    );
+  }
+
+  if (!isValidSha256Digest(snap.frozenRosterDigest)) {
+    fail(
+      "COHORT_PRIVACY_VIOLATION",
+      "Cohort snapshot frozenRosterDigest must be a valid sha256 digest",
+    );
+  }
+
+  if (!Array.isArray(snap.cells)) {
+    fail("COHORT_PRIVACY_VIOLATION", "Cohort snapshot cells must be an array");
+  }
+
+  const seenSkillIds = new Set<string>();
+  let expectedEnrolledCount: number | null = null;
+  let disclosedCount = 0;
+  let suppressedCount = 0;
+
+  for (let i = 0; i < snap.cells.length; i += 1) {
+    const rawCell: unknown = snap.cells[i];
+    if (!isPlainRecord(rawCell)) {
+      fail(
+        "COHORT_PRIVACY_VIOLATION",
+        `Cohort snapshot cell[${i}] must be a plain object`,
+      );
+    }
+    const rawSkillId = rawCell["skillId"];
+    if (
+      typeof rawSkillId !== "string" ||
+      rawSkillId.trim().length === 0 ||
+      rawSkillId.trim() !== rawSkillId
+    ) {
+      fail(
+        "COHORT_PRIVACY_VIOLATION",
+        `Cohort snapshot cell[${i}] has invalid skillId`,
+      );
+    }
+    const skillId: string = rawSkillId;
+    if (seenSkillIds.has(skillId)) {
+      fail(
+        "COHORT_PRIVACY_VIOLATION",
+        `Cohort snapshot contains duplicate skillId "${skillId}"`,
+      );
+    }
+    seenSkillIds.add(skillId);
+
+    const suppressed = rawCell["suppressed"];
+    if (suppressed === true) {
+      if (
+        rawCell["enrolledActiveCount"] !== null ||
+        rawCell["eventLearnerCount"] !== null ||
+        rawCell["complementLearnerCount"] !== null ||
+        rawCell["eventRate"] !== null ||
+        rawCell["eventRateBps"] !== null ||
+        rawCell["suppressionReason"] !== "bilateral_privacy_threshold"
+      ) {
+        fail(
+          "COHORT_PRIVACY_VIOLATION",
+          `Suppressed cell "${skillId}" must redact all counts/rates to null with uniform suppressionReason`,
+        );
+      }
+      suppressedCount += 1;
+    } else if (suppressed === false) {
+      const n = rawCell["enrolledActiveCount"];
+      const e = rawCell["eventLearnerCount"];
+      const c = rawCell["complementLearnerCount"];
+      if (
+        typeof n !== "number" ||
+        !Number.isSafeInteger(n) ||
+        typeof e !== "number" ||
+        !Number.isSafeInteger(e) ||
+        typeof c !== "number" ||
+        !Number.isSafeInteger(c) ||
+        n < MIN_COHORT_ACTIVE_SIZE ||
+        e < MIN_BILATERAL_CLASS_COUNT ||
+        c < MIN_BILATERAL_CLASS_COUNT ||
+        e + c !== n
+      ) {
+        fail(
+          "COHORT_PRIVACY_VIOLATION",
+          `Disclosed cell "${skillId}" violates bilateral privacy threshold (N >= 10 && E >= 5 && N - E >= 5)`,
+        );
+      }
+      const eventRate = rawCell["eventRate"];
+      const eventRateBps = rawCell["eventRateBps"];
+      if (
+        typeof eventRate !== "number" ||
+        !Number.isFinite(eventRate) ||
+        eventRate !== e / n ||
+        eventRateBps !== Math.round((e * 10_000) / n) ||
+        rawCell["suppressionReason"] !== null
+      ) {
+        fail(
+          "COHORT_PRIVACY_VIOLATION",
+          `Disclosed cell "${skillId}" has inconsistent rate or suppression metadata`,
+        );
+      }
+      if (expectedEnrolledCount === null) {
+        expectedEnrolledCount = n;
+      } else if (expectedEnrolledCount !== n) {
+        fail(
+          "COHORT_PRIVACY_VIOLATION",
+          `Disclosed cell "${skillId}" enrolledActiveCount (${n}) disagrees with frozen cohort size (${expectedEnrolledCount})`,
+        );
+      }
+      disclosedCount += 1;
+    } else {
+      fail(
+        "COHORT_PRIVACY_VIOLATION",
+        `Cohort snapshot cell "${skillId}" has non-boolean suppressed flag`,
+      );
+    }
+  }
+
+  if (
+    snap.disclosedCellCount !== disclosedCount ||
+    snap.suppressedCellCount !== suppressedCount
+  ) {
+    fail(
+      "COHORT_PRIVACY_VIOLATION",
+      "Cohort snapshot disclosedCellCount/suppressedCellCount do not match evaluated cells",
+    );
+  }
+
+  return {
+    snapshot: snap,
+    validatedWindow,
+    cohortId,
+  };
 }
 
 function readVerifiedPublicationLedgerEntry(
@@ -575,14 +806,26 @@ function readVerifiedPublicationLedgerEntry(
     return undefined;
   }
 
-  const snapshot = ledger.snapshotsByKey.get(publicationKey);
+  const rawSnapshot: unknown = ledger.snapshotsByKey.get(publicationKey);
   const storedDigest = ledger.snapshotDigestsByKey.get(publicationKey);
-  if (!snapshot || !isValidSha256Digest(storedDigest)) {
+  if (!isValidSha256Digest(storedDigest)) {
     throw new CommercialResilienceError(
       "COHORT_PUBLICATION_LEDGER_CORRUPTED",
       `Cohort publication ledger has missing or malformed digest for "${publicationKey}"`,
     );
   }
+  const { snapshot, validatedWindow, cohortId } =
+    validatePublishedSnapshotInvariants(rawSnapshot, "ledger_read");
+  if (
+    cohortSnapshotPublicationKey(cohortId, validatedWindow.isoWeekKey) !==
+    publicationKey
+  ) {
+    throw new CommercialResilienceError(
+      "COHORT_PUBLICATION_LEDGER_CORRUPTED",
+      `Cohort publication ledger key "${publicationKey}" does not match stored snapshot metadata`,
+    );
+  }
+
   const actualDigest = computeCohortSnapshotStructuralDigest(snapshot);
   if (actualDigest !== storedDigest) {
     throw new CommercialResilienceError(
@@ -613,15 +856,20 @@ function lookupPublishedSnapshot(
   if ("ledgerKind" in source) {
     return readVerifiedPublicationLedgerEntry(source, publicationKey);
   }
-  const snapshot = source.get(publicationKey);
-  if (!snapshot) {
+  const rawSnapshot: unknown = source.get(publicationKey);
+  if (rawSnapshot === undefined) {
     return undefined;
   }
+  const { snapshot } = validatePublishedSnapshotInvariants(
+    rawSnapshot,
+    "ledger_read",
+  );
   return { snapshot, expectedDigest: null };
 }
 
 /**
  * Seals at most ONE deeply-frozen immutable finalized snapshot per `(cohortId, isoWeekKey)`.
+ * Re-verifies full bilateral privacy and roster consistency invariants before sealing.
  * Replaying an identical snapshot returns a deeply frozen copy of the original sealed snapshot;
  * attempting to publish any altered count/cell/digest for an already-published
  * `(cohortId, isoWeekKey)` throws `COHORT_WEEK_ALREADY_PUBLISHED`.
@@ -636,36 +884,17 @@ export function sealCohortWeeklySnapshot(
   readonly snapshot: CohortHeatmapResult;
   readonly idempotentReplay: boolean;
 } {
-  if (
-    !snapshot.cohortSurfaceVisible ||
-    snapshot.cohortId === null ||
-    snapshot.window === null ||
-    snapshot.frozenRosterDigest === null ||
-    snapshot.finalizedAtMs === null
-  ) {
-    throw new CommercialResilienceError(
-      "COHORT_WEEK_NOT_FINALIZED",
-      "Only a visible, finalized cohort weekly snapshot can be sealed for publication",
-    );
-  }
-
-  const validatedWindow = validateFixedIsoWeekWindow(snapshot.window);
-  const finalizedAtMs = assertSafeTimestampMs(
-    snapshot.finalizedAtMs,
-    "snapshot.finalizedAtMs",
-  );
-  if (finalizedAtMs < validatedWindow.weekEndUtcMs) {
-    throw new CommercialResilienceError(
-      "COHORT_WEEK_NOT_FINALIZED",
-      `Cohort snapshot for ${validatedWindow.isoWeekKey} cannot be sealed before week close (${validatedWindow.weekEndUtcMs})`,
-    );
-  }
+  const {
+    snapshot: validatedSnapshot,
+    validatedWindow,
+    cohortId,
+  } = validatePublishedSnapshotInvariants(snapshot, "seal");
 
   const key = cohortSnapshotPublicationKey(
-    snapshot.cohortId,
+    cohortId,
     validatedWindow.isoWeekKey,
   );
-  const candidateFrozen = cloneAndFreezeCohortSnapshot(snapshot, {
+  const candidateFrozen = cloneAndFreezeCohortSnapshot(validatedSnapshot, {
     publicationKey: key,
     sealed: true,
     idempotentReplay: false,
@@ -674,8 +903,12 @@ export function sealCohortWeeklySnapshot(
 
   const existingRecord = readVerifiedPublicationLedgerEntry(ledger, key);
   if (existingRecord) {
+    const replayDigestAligned = computeCohortSnapshotStructuralDigest({
+      ...candidateFrozen,
+      finalizedAtMs: existingRecord.snapshot.finalizedAtMs,
+    });
     if (
-      candidateDigest === existingRecord.expectedDigest &&
+      replayDigestAligned === existingRecord.expectedDigest &&
       cohortSnapshotsEquivalent(existingRecord.snapshot, candidateFrozen)
     ) {
       return {
@@ -689,7 +922,7 @@ export function sealCohortWeeklySnapshot(
     }
     throw new CommercialResilienceError(
       "COHORT_WEEK_ALREADY_PUBLISHED",
-      `Cohort snapshot for (${snapshot.cohortId}, ${validatedWindow.isoWeekKey}) was already published and cannot be mutated`,
+      `Cohort snapshot for (${cohortId}, ${validatedWindow.isoWeekKey}) was already published and cannot be mutated`,
     );
   }
 
@@ -829,13 +1062,16 @@ export function buildCohortHeatmap(
     const existingDigest = computeCohortSnapshotStructuralDigest(
       existingRecord.snapshot,
     );
-    const candidateDigest = computeCohortSnapshotStructuralDigest(candidate);
+    const replayDigestAligned = computeCohortSnapshotStructuralDigest({
+      ...candidate,
+      finalizedAtMs: existingRecord.snapshot.finalizedAtMs,
+    });
     const digestIntact =
       existingRecord.expectedDigest === null ||
       existingDigest === existingRecord.expectedDigest;
     if (
       digestIntact &&
-      existingDigest === candidateDigest &&
+      existingDigest === replayDigestAligned &&
       cohortSnapshotsEquivalent(existingRecord.snapshot, candidate)
     ) {
       return cloneAndFreezeCohortSnapshot(existingRecord.snapshot, {
