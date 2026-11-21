@@ -1038,5 +1038,233 @@ describe("revalidateRemedyClinic privacy_epoch and source-revocation read guard"
     });
     expect(graphRes.status).toBe("active");
     expect(graphRes.clinic!.steps[2].probes).toHaveLength(2);
+
+    // Round-7 [P1-1]: Reassigned-prototype Map with getter entry must be rejected without running the getter.
+    let exoticMapGetterRan = false;
+    const exoticMap = new Map<string, unknown>();
+    const mapEntryVal = Object.defineProperty({}, "trap", {
+      enumerable: true,
+      get() {
+        exoticMapGetterRan = true;
+        return "mutated";
+      },
+    });
+    exoticMap.set("k", mapEntryVal);
+    Object.setPrototypeOf(exoticMap, Object.prototype);
+    const exoticMapProbe = {
+      ...makeProbe({ probeId: "probe-exotic-map", input: { a: -2, b: 8 } }),
+      input: { a: -2, b: 8, hidden: exoticMap } as unknown as InequalityInput,
+    };
+    const exoticRes = generateRemedyClinic({
+      learnerId: "learner-1",
+      courseId: "course-alg-1",
+      ruleId: RULE_ID,
+      currentPrivacyEpoch: 5,
+      activeSourcesMap: allSources,
+      verifyRuleViolation: verifyNegativeSignFlip,
+      attempts,
+      candidateProbes: [exoticMapProbe, probe2],
+    });
+    expect(exoticMapGetterRan).toBe(false);
+    expect(exoticRes.status).toBe("insufficient_distinguishable_probes");
+    expect(exoticRes.rejectedProbes[0]!.reason).toBe("invalid_probe_descriptor");
+
+    // Round-7 [P1-2]: Own enumerable "__proto__" data property on hypothesis receiver is preserved via defineProperty.
+    const protoHyp = {
+      id: RULE_ID,
+      label: "Own __proto__ fallback hypothesis",
+      role: "misconception" as const,
+      description: "Reads own __proto__ data property to match correct model (degenerate).",
+      predict(this: Record<string, unknown>) {
+        const ownProto = Object.getOwnPropertyDescriptor(this, "__proto__")?.value as
+          | { fallback?: string }
+          | undefined;
+        return ownProto?.fallback ?? "distinct-misconception";
+      },
+    };
+    Object.defineProperty(protoHyp, "__proto__", {
+      value: { fallback: "x >= -4" },
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    });
+    const protoProbeBase = makeProbe({ probeId: "probe-own-proto", input: { a: -2, b: 8 } });
+    const protoDegenerateProbe: DistinguishableProbeSpec<InequalityInput, string> = {
+      ...protoProbeBase,
+      hypotheses: [protoHyp, protoProbeBase.hypotheses[1]!],
+    };
+    const protoRes = generateRemedyClinic({
+      learnerId: "learner-1",
+      courseId: "course-alg-1",
+      ruleId: RULE_ID,
+      currentPrivacyEpoch: 5,
+      activeSourcesMap: allSources,
+      verifyRuleViolation: verifyNegativeSignFlip,
+      attempts,
+      candidateProbes: [protoDegenerateProbe, probe2],
+    });
+    expect(protoRes.status).toBe("insufficient_distinguishable_probes");
+    expect(protoRes.rejectedProbes[0]!.reason).toBe("not_distinguishable");
+
+    // Round-7 [P1-3]: observableKey receives the canonical frozen probe as `this` (reads this.requirementKey).
+    const roundingProbe: DistinguishableProbeSpec<InequalityInput, number> = {
+      probeId: "probe-receiver-observable-key",
+      requirementKey: "round.int",
+      prompt: "Round-based collision probe",
+      input: { a: -2, b: 8 },
+      correctModel: { id: "M_star", label: "Correct", role: "correct", predict: () => 1.1 },
+      hypotheses: [
+        { id: RULE_ID, label: "Collides when rounded", role: "misconception", description: "1.2 rounds to 1", predict: () => 1.2 },
+        { id: "other_hyp", label: "Distinct", role: "misconception", description: "Distinct", predict: () => 3.0 },
+      ],
+      observableKey(this: { requirementKey?: string }, obs: number) {
+        return this?.requirementKey === "round.int" ? String(Math.round(obs)) : String(obs);
+      },
+      parseResponse: (r) => (typeof r === "number" ? r : null),
+    };
+    const receiverKeyRes = generateRemedyClinic({
+      learnerId: "learner-1",
+      courseId: "course-alg-1",
+      ruleId: RULE_ID,
+      currentPrivacyEpoch: 5,
+      activeSourcesMap: allSources,
+      verifyRuleViolation: verifyNegativeSignFlip,
+      attempts,
+      candidateProbes: [
+        roundingProbe,
+        {
+          ...roundingProbe,
+          probeId: "probe-receiver-distinct",
+          prompt: "Distinct rounding probe",
+          hypotheses: [
+            { id: RULE_ID, label: "Distinct 2.0", role: "misconception", description: "2.0", predict: () => 2.0 },
+            { id: "other_hyp", label: "Distinct 3.0", role: "misconception", description: "3.0", predict: () => 3.0 },
+          ],
+        },
+      ],
+    });
+    expect(receiverKeyRes.status).toBe("insufficient_distinguishable_probes");
+    expect(receiverKeyRes.rejectedProbes[0]!.reason).toBe("not_distinguishable");
+
+    // Round-7 [P1-4] & [P2-1]: Published clinic/evidenceCases/sourceRefs are deeply frozen, and
+    // revalidateRemedyClinic rejects stateful sourceRefs getters & steps/competingModelIds index getters.
+    expect(Object.isFrozen(clinic)).toBe(true);
+    expect(Object.isFrozen(clinic.evidenceCases)).toBe(true);
+    expect(Object.isFrozen(clinic.evidenceCases[0])).toBe(true);
+    expect(Object.isFrozen(clinic.evidenceCases[0]!.sourceRefs)).toBe(true);
+    expect(Object.isFrozen(clinic.evidenceCases[0]!.sourceRefs[0])).toBe(true);
+
+    let flipGetterReads = 0;
+    const flippingCase = { ...clinic.evidenceCases[0]! };
+    Object.defineProperty(flippingCase, "sourceRefs", {
+      enumerable: true,
+      get() {
+        flipGetterReads++;
+        return flipGetterReads === 1
+          ? [{ sourceId: "src-ch-1", sourceVersion: "v1" }]
+          : [{ sourceId: "src-revoked-secret", sourceVersion: "v1" }];
+      },
+    });
+    const flipClinic = {
+      ...clinic,
+      evidenceCases: [flippingCase, clinic.evidenceCases[1]!, clinic.evidenceCases[2]!],
+    };
+    const flipReval = revalidateRemedyClinic(flipClinic, allSources, 6);
+    expect(flipGetterReads).toBe(0);
+    expect(flipReval.status).toBe("stale_source_revoked");
+
+    let stepIndexGetterCalls = 0;
+    const getterSteps = new Array(3);
+    Object.defineProperty(getterSteps, "0", {
+      enumerable: true,
+      get() {
+        stepIndexGetterCalls++;
+        return clinic.steps[0];
+      },
+    });
+    getterSteps[1] = clinic.steps[1];
+    getterSteps[2] = clinic.steps[2];
+    const stepGetterReval = revalidateRemedyClinic(
+      { ...clinic, steps: getterSteps as unknown as typeof clinic.steps },
+      allSources,
+      6,
+    );
+    expect(stepIndexGetterCalls).toBe(0);
+    expect(stepGetterReval.status).toBe("stale_source_revoked");
+
+    let competingGetterCalls = 0;
+    const getterCompetingIds: string[] = new Array(2);
+    Object.defineProperty(getterCompetingIds, "0", {
+      enumerable: true,
+      get() {
+        competingGetterCalls++;
+        return "M_star";
+      },
+    });
+    getterCompetingIds[1] = RULE_ID;
+    const competingGetterClinic = {
+      ...clinic,
+      steps: [
+        clinic.steps[0],
+        clinic.steps[1],
+        {
+          ...clinic.steps[2],
+          probes: [
+            { ...clinic.steps[2].probes[0]!, competingModelIds: getterCompetingIds },
+            clinic.steps[2].probes[1]!,
+          ],
+        },
+      ] as typeof clinic.steps,
+    };
+    const competingReval = revalidateRemedyClinic(competingGetterClinic, allSources, 6);
+    expect(competingGetterCalls).toBe(0);
+    expect(competingReval.status).toBe("stale_source_revoked");
+
+    // Round-7 [P2-2]: k=20 receiver properties sharing a 35-level diamond DAG complete in O(k+V+E).
+    const multiPropHyp: Record<string, unknown> = {
+      id: RULE_ID,
+      label: "Shared multi-prop DAG hypothesis",
+      role: "misconception",
+      description: "20 properties pointing to one 35-level diamond",
+      predict: (x: InequalityInput) => `x <= ${x.b / x.a}`,
+    };
+    for (let k = 0; k < 20; k += 1) {
+      multiPropHyp[`sharedDag_${k}`] = diamond;
+    }
+    const multiPropProbe: DistinguishableProbeSpec<InequalityInput, string> = {
+      ...makeProbe({ probeId: "probe-20x-diamond", input: { a: -2, b: 8 } }),
+      hypotheses: [
+        multiPropHyp as unknown as DistinguishableProbeSpec<InequalityInput, string>["hypotheses"][number],
+        makeProbe({ probeId: "probe-20x-ref", input: { a: -2, b: 8 } }).hypotheses[1]!,
+      ],
+    };
+    const multiPropRes = generateRemedyClinic({
+      learnerId: "learner-1",
+      courseId: "course-alg-1",
+      ruleId: RULE_ID,
+      currentPrivacyEpoch: 5,
+      activeSourcesMap: allSources,
+      verifyRuleViolation: verifyNegativeSignFlip,
+      attempts,
+      candidateProbes: [multiPropProbe, probe2],
+    });
+    expect(multiPropRes.status).toBe("active");
+
+    // Round-7 [P2-4]: ruleTitle === ruleId must NOT leak raw snake_case identifier into Step 2 prompt.
+    const sameTitleAsIdRes = generateRemedyClinic({
+      learnerId: "learner-1",
+      courseId: "course-alg-1",
+      ruleId: RULE_ID,
+      ruleTitle: RULE_ID,
+      currentPrivacyEpoch: 5,
+      activeSourcesMap: allSources,
+      verifyRuleViolation: verifyNegativeSignFlip,
+      attempts,
+      candidateProbes: [probe2, makeProbe({ probeId: "probe-same-title-2", input: { a: -5, b: 20 } })],
+    });
+    expect(sameTitleAsIdRes.status).toBe("active");
+    expect(sameTitleAsIdRes.clinic!.steps[1].ruleId).toBe(RULE_ID);
+    expect(sameTitleAsIdRes.clinic!.steps[1].prompt).not.toContain(RULE_ID);
+    expect(sameTitleAsIdRes.clinic!.steps[1].prompt).toContain("当前薄弱规则");
   });
 });

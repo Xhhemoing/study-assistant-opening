@@ -152,18 +152,18 @@ export function areSourceRefsActive(
 }
 
 export function cloneSourceRefs(sourceRefs: readonly RemedySourceRef[]): readonly RemedySourceRef[] {
-  if (!Array.isArray(sourceRefs)) return [];
+  if (!Array.isArray(sourceRefs)) return Object.freeze([]);
   const cloned: RemedySourceRef[] = [];
   for (let i = 0; i < sourceRefs.length; i += 1) {
     const slot = readOwnDataIndex(sourceRefs, i);
     if (!slot.ok || !slot.value || typeof slot.value !== "object") continue;
-    cloned.push({ sourceId: slot.value.sourceId, sourceVersion: slot.value.sourceVersion });
+    cloned.push(Object.freeze({ sourceId: slot.value.sourceId, sourceVersion: slot.value.sourceVersion }));
   }
-  return cloned;
+  return Object.freeze(cloned);
 }
 
 export function cloneEvidenceCase(item: ClinicEvidenceCase): ClinicEvidenceCase {
-  return {
+  return Object.freeze({
     attemptId: item.attemptId,
     rootAttemptId: item.rootAttemptId,
     chapterId: item.chapterId,
@@ -173,7 +173,7 @@ export function cloneEvidenceCase(item: ClinicEvidenceCase): ClinicEvidenceCase 
     invariantSummary: item.invariantSummary,
     sourceRefs: cloneSourceRefs(item.sourceRefs),
     privacyEpoch: item.privacyEpoch,
-  };
+  });
 }
 
 export function computeEvidenceCoverage(cases: readonly ClinicEvidenceCase[]): EvidenceCoverage {
@@ -201,15 +201,19 @@ export function meetsClinicThreshold(coverage: EvidenceCoverage): boolean {
 }
 
 export function buildSelfDiffEntries(cases: readonly ClinicEvidenceCase[]): readonly SelfDiffEntry[] {
-  return cases.map((item) => ({
-    rootAttemptId: item.rootAttemptId,
-    chapterId: item.chapterId,
-    localDate: item.localDate,
-    violatedRuleId: item.ruleId,
-    excerpt: item.excerpt,
-    invariantSummary: item.invariantSummary,
-    sourceRefs: cloneSourceRefs(item.sourceRefs),
-  }));
+  return Object.freeze(
+    cases.map((item) =>
+      Object.freeze({
+        rootAttemptId: item.rootAttemptId,
+        chapterId: item.chapterId,
+        localDate: item.localDate,
+        violatedRuleId: item.ruleId,
+        excerpt: item.excerpt,
+        invariantSummary: item.invariantSummary,
+        sourceRefs: cloneSourceRefs(item.sourceRefs),
+      }),
+    ),
+  );
 }
 
 interface TripleScore {

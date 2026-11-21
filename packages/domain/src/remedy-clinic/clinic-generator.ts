@@ -6,8 +6,6 @@ import {
 import {
   areSourceRefsActive,
   buildSelfDiffEntries,
-  cloneEvidenceCase,
-  cloneSourceRefs,
   computeEvidenceCoverage,
   isDenseArray,
   isNonBlankText,
@@ -212,32 +210,107 @@ function safeVerifyRuleViolation(
 
 const REVOKED_CLINIC_STEP2_PLACEHOLDER =
   "This remedy clinic is no longer available because an underlying source was updated or removed.";
+const MACHINE_IDENTIFIER_PATTERN = /^[a-z0-9]+(?:[_:-][a-z0-9]+)+$/i;
+
+function resolveLearnerRuleLabel(ruleId: string, ruleTitle?: string): string {
+  const trimmedTitle = isNonBlankText(ruleTitle) ? ruleTitle.trim() : "";
+  const trimmedId = ruleId.trim();
+  if (
+    !trimmedTitle ||
+    trimmedTitle.toLowerCase() === trimmedId.toLowerCase() ||
+    MACHINE_IDENTIFIER_PATTERN.test(trimmedTitle)
+  ) {
+    return "当前薄弱规则";
+  }
+  return trimmedTitle;
+}
 
 function buildRestatementStep(ruleId: string, ruleTitle?: string): InvariantRuleRestatementStep {
   const trimmedTitle = isNonBlankText(ruleTitle) ? ruleTitle.trim() : "";
-  const subject = trimmedTitle ? `"${trimmedTitle}"` : "this recurring rule";
-  return {
+  const subject = resolveLearnerRuleLabel(ruleId, trimmedTitle);
+  return Object.freeze({
     stepNumber: 2,
     kind: "invariant_rule_restatement",
     durationMinutes: STEP2_INVARIANT_RESTATEMENT_MINUTES,
     ruleId,
     ruleTitle: trimmedTitle,
     prompt:
-      `Compare the 3 side-by-side cases above and restate the core invariant for ${subject} in your own words. ` +
+      `Compare the 3 side-by-side cases above and restate the core invariant for "${subject}" in your own words. ` +
       "Explain what structural condition triggers the rule, why the recurring error fails that condition, " +
       "and what single check you will apply before committing to a step.",
-    checklist: [
+    checklist: Object.freeze([
       "State the exact condition required by the invariant rule.",
       "Identify the shared failure mechanism across the 3 different cases.",
       "Write a concise pre-check you can apply to unseen transfer problems.",
-    ],
-  };
+    ]),
+  });
+}
+
+const NOOP_CALLBACK = (): void => {};
+const REGEXP_SOURCE_GET = Object.getOwnPropertyDescriptor(RegExp.prototype, "source")?.get;
+const ARRAY_BUFFER_BYTE_LENGTH_GET = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, "byteLength")?.get;
+const DATA_VIEW_BYTE_LENGTH_GET = Object.getOwnPropertyDescriptor(DataView.prototype, "byteLength")?.get;
+const SHARED_ARRAY_BUFFER_BYTE_LENGTH_GET =
+  typeof SharedArrayBuffer !== "undefined"
+    ? Object.getOwnPropertyDescriptor(SharedArrayBuffer.prototype, "byteLength")?.get
+    : undefined;
+const WEAK_PROBE_KEY = Object.freeze({});
+
+function matchesBrand(check: () => unknown): boolean {
+  try {
+    check();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Detect exotic built-in internal slots (Map, Set, Date, RegExp, ArrayBuffer, TypedArray,
+ * DataView, WeakMap, WeakSet, Promise, Error, boxed primitives, SharedArrayBuffer) even when
+ * the object's prototype has been reassigned via Object.setPrototypeOf(..., Object.prototype | null).
+ */
+function hasExoticInternalSlots(obj: object): boolean {
+  if (ArrayBuffer.isView(obj)) return true;
+  if (Object.prototype.toString.call(obj) === "[object Error]") return true;
+  if (matchesBrand(() => Reflect.apply(Map.prototype.has, obj, [undefined]))) return true;
+  if (matchesBrand(() => Reflect.apply(Set.prototype.has, obj, [undefined]))) return true;
+  if (matchesBrand(() => Reflect.apply(WeakMap.prototype.has, obj, [WEAK_PROBE_KEY]))) return true;
+  if (matchesBrand(() => Reflect.apply(WeakSet.prototype.has, obj, [WEAK_PROBE_KEY]))) return true;
+  if (matchesBrand(() => Reflect.apply(Date.prototype.getTime, obj, []))) return true;
+  if (
+    REGEXP_SOURCE_GET &&
+    obj !== RegExp.prototype &&
+    matchesBrand(() => Reflect.apply(REGEXP_SOURCE_GET, obj, []))
+  ) {
+    return true;
+  }
+  if (ARRAY_BUFFER_BYTE_LENGTH_GET && matchesBrand(() => Reflect.apply(ARRAY_BUFFER_BYTE_LENGTH_GET, obj, []))) {
+    return true;
+  }
+  if (DATA_VIEW_BYTE_LENGTH_GET && matchesBrand(() => Reflect.apply(DATA_VIEW_BYTE_LENGTH_GET, obj, []))) {
+    return true;
+  }
+  if (
+    SHARED_ARRAY_BUFFER_BYTE_LENGTH_GET &&
+    matchesBrand(() => Reflect.apply(SHARED_ARRAY_BUFFER_BYTE_LENGTH_GET, obj, []))
+  ) {
+    return true;
+  }
+  if (matchesBrand(() => Reflect.apply(Promise.prototype.then, obj, [NOOP_CALLBACK, NOOP_CALLBACK]))) return true;
+  if (matchesBrand(() => Reflect.apply(Number.prototype.valueOf, obj, []))) return true;
+  if (matchesBrand(() => Reflect.apply(String.prototype.valueOf, obj, []))) return true;
+  if (matchesBrand(() => Reflect.apply(Boolean.prototype.valueOf, obj, []))) return true;
+  if (matchesBrand(() => Reflect.apply(Symbol.prototype.valueOf, obj, []))) return true;
+  if (matchesBrand(() => Reflect.apply(BigInt.prototype.valueOf, obj, []))) return true;
+  return false;
 }
 
 function isPlainRecordOwnDataOnly(value: unknown): value is Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
   const proto = Object.getPrototypeOf(value) as object | null;
   if (proto !== Object.prototype && proto !== null) return false;
+  if (hasExoticInternalSlots(value)) return false;
   for (const key of Reflect.ownKeys(value)) {
     if (typeof key !== "string") return false;
     const desc = Object.getOwnPropertyDescriptor(value, key);
@@ -248,25 +321,41 @@ function isPlainRecordOwnDataOnly(value: unknown): value is Record<string, unkno
   return true;
 }
 
-function isPlainDataDescriptorSafe(value: unknown, visited: Set<object> = new Set()): boolean {
-  if (value === null || value === undefined) return true;
+/**
+ * Single-pass, exotic-brand-rejecting, descriptor-materializing plain-data clone & deep-freeze.
+ * Replaces structuredClone completely: zero getter execution, O(V + E) on shared DAGs, cyclic
+ * plain-object safe, and safe for own "__proto__" data properties via Object.defineProperty.
+ */
+function cloneAndFreezePlainData(
+  value: unknown,
+  memo: Map<object, unknown> = new Map(),
+): { readonly ok: true; readonly value: unknown } | { readonly ok: false } {
+  if (value === null || value === undefined) return { ok: true, value };
   const kind = typeof value;
-  if (kind === "boolean" || kind === "number" || kind === "string" || kind === "bigint") return true;
-  if (kind === "symbol" || kind === "function") return false;
-  if (kind !== "object") return false;
+  if (kind === "boolean" || kind === "number" || kind === "string" || kind === "bigint") {
+    return { ok: true, value };
+  }
+  if (kind === "symbol" || kind === "function" || kind !== "object") {
+    return { ok: false };
+  }
 
   const obj = value as object;
-  if (visited.has(obj)) return true;
-  const proto = Object.getPrototypeOf(obj) as object | null;
+  if (memo.has(obj)) return { ok: true, value: memo.get(obj) };
+  if (hasExoticInternalSlots(obj)) return { ok: false };
 
+  const proto = Object.getPrototypeOf(obj) as object | null;
   if (Array.isArray(obj)) {
-    if (proto !== Array.prototype) return false;
+    if (proto !== Array.prototype) return { ok: false };
     const lenDesc = Object.getOwnPropertyDescriptor(obj, "length");
-    if (!lenDesc || typeof lenDesc.value !== "number" || !Number.isInteger(lenDesc.value)) return false;
+    if (!lenDesc || typeof lenDesc.value !== "number" || !Number.isInteger(lenDesc.value)) {
+      return { ok: false };
+    }
     const len = lenDesc.value;
     const keys = Reflect.ownKeys(obj);
-    if (keys.length !== len + 1) return false;
-    visited.add(obj);
+    if (keys.length !== len + 1) return { ok: false };
+
+    const out: unknown[] = new Array(len);
+    memo.set(obj, out);
     for (let i = 0; i < len; i += 1) {
       const desc = Object.getOwnPropertyDescriptor(obj, String(i));
       if (
@@ -274,32 +363,50 @@ function isPlainDataDescriptorSafe(value: unknown, visited: Set<object> = new Se
         !desc.enumerable ||
         !Object.hasOwn(desc, "value") ||
         desc.get !== undefined ||
-        desc.set !== undefined ||
-        !isPlainDataDescriptorSafe(desc.value, visited)
+        desc.set !== undefined
       ) {
-        return false;
+        return { ok: false };
       }
+      const child = cloneAndFreezePlainData(desc.value, memo);
+      if (!child.ok) return { ok: false };
+      Object.defineProperty(out, String(i), {
+        value: child.value,
+        writable: false,
+        enumerable: true,
+        configurable: false,
+      });
     }
-    return true;
+    Object.freeze(out);
+    return { ok: true, value: out };
   }
 
-  if (proto !== Object.prototype && proto !== null) return false;
-  visited.add(obj);
+  if (proto !== Object.prototype && proto !== null) return { ok: false };
+  const out: Record<string, unknown> =
+    proto === null ? (Object.create(null) as Record<string, unknown>) : {};
+  memo.set(obj, out);
   for (const key of Reflect.ownKeys(obj)) {
-    if (typeof key !== "string") return false;
+    if (typeof key !== "string") return { ok: false };
     const desc = Object.getOwnPropertyDescriptor(obj, key);
     if (
       !desc ||
       !desc.enumerable ||
       !Object.hasOwn(desc, "value") ||
       desc.get !== undefined ||
-      desc.set !== undefined ||
-      !isPlainDataDescriptorSafe(desc.value, visited)
+      desc.set !== undefined
     ) {
-      return false;
+      return { ok: false };
     }
+    const child = cloneAndFreezePlainData(desc.value, memo);
+    if (!child.ok) return { ok: false };
+    Object.defineProperty(out, key, {
+      value: child.value,
+      writable: false,
+      enumerable: desc.enumerable,
+      configurable: false,
+    });
   }
-  return true;
+  Object.freeze(out);
+  return { ok: true, value: out };
 }
 
 function readOwnDataProp(obj: object, key: string): unknown {
@@ -308,23 +415,6 @@ function readOwnDataProp(obj: object, key: string): unknown {
     return undefined;
   }
   return desc.value;
-}
-
-function deepFreezePlainData<T>(value: T, seen: Set<object> = new Set()): T {
-  if (value === null || typeof value !== "object") return value;
-  const obj = value as object;
-  if (seen.has(obj)) return value;
-  seen.add(obj);
-  if (Array.isArray(obj)) {
-    for (let i = 0; i < obj.length; i += 1) {
-      deepFreezePlainData(obj[i], seen);
-    }
-  } else {
-    for (const key of Object.keys(obj)) {
-      deepFreezePlainData((obj as Record<string, unknown>)[key], seen);
-    }
-  }
-  return Object.freeze(value);
 }
 
 function snapshotActiveSourcesMap(activeSourcesMap: ActiveSourcesMap): ReadonlyMap<string, ActiveSourceEntry> {
@@ -360,8 +450,10 @@ function snapshotActiveSourcesMap(activeSourcesMap: ActiveSourcesMap): ReadonlyM
   return snapshot;
 }
 
-function freezeSourceRefs(sourceRefs: readonly RemedySourceRef[]): readonly RemedySourceRef[] | null {
+function freezeSourceRefs(sourceRefs: unknown): readonly RemedySourceRef[] | null {
   if (!Array.isArray(sourceRefs) || sourceRefs.length === 0) return null;
+  if (Object.getPrototypeOf(sourceRefs) !== Array.prototype || hasExoticInternalSlots(sourceRefs)) return null;
+  if (Reflect.ownKeys(sourceRefs).length !== sourceRefs.length + 1) return null;
   const frozen: RemedySourceRef[] = [];
   for (let i = 0; i < sourceRefs.length; i += 1) {
     const slot = readOwnDataIndex(sourceRefs, i);
@@ -386,20 +478,29 @@ function isolateProbeModel<TInput, TObservable>(
   const rawPredict = readOwnDataProp(rawModel, "predict");
   if (typeof rawPredict !== "function") return null;
 
-  const receiverData: Record<string, unknown> = {};
-  for (const key of Object.keys(rawModel)) {
-    if (key === "predict") continue;
-    const val = readOwnDataProp(rawModel, key);
-    if (!isPlainDataDescriptorSafe(val)) return null;
-    receiverData[key] = val;
-  }
+  const modelProto = Object.getPrototypeOf(rawModel) as object | null;
+  const frozenReceiver: Record<string, unknown> =
+    modelProto === null ? (Object.create(null) as Record<string, unknown>) : {};
+  const memo = new Map<object, unknown>();
+  memo.set(rawModel, frozenReceiver);
 
-  let frozenReceiver: Record<string, unknown>;
-  try {
-    frozenReceiver = deepFreezePlainData(structuredClone(receiverData));
-  } catch {
-    return null;
+  for (const key of Reflect.ownKeys(rawModel)) {
+    if (typeof key !== "string") return null;
+    if (key === "predict") continue;
+    const desc = Object.getOwnPropertyDescriptor(rawModel, key);
+    if (!desc || !Object.hasOwn(desc, "value") || desc.get !== undefined || desc.set !== undefined) {
+      return null;
+    }
+    const cloned = cloneAndFreezePlainData(desc.value, memo);
+    if (!cloned.ok) return null;
+    Object.defineProperty(frozenReceiver, key, {
+      value: cloned.value,
+      writable: false,
+      enumerable: desc.enumerable,
+      configurable: false,
+    });
   }
+  Object.freeze(frozenReceiver);
 
   const predictFn = rawPredict as (this: unknown, probeInput: TInput) => TObservable;
   const isolatedPredict = (probeInput: TInput): TObservable =>
@@ -452,10 +553,7 @@ function snapshotAttemptCandidate(rawAttempt: unknown): DiagnosedRootAttempt | n
     return null;
   }
 
-  const frozenSourceRefs =
-    isPlainDataDescriptorSafe(rawSourceRefs) && Array.isArray(rawSourceRefs)
-      ? freezeSourceRefs(rawSourceRefs as readonly RemedySourceRef[])
-      : null;
+  const frozenSourceRefs = freezeSourceRefs(rawSourceRefs);
 
   return Object.freeze({
     attemptId,
@@ -474,21 +572,18 @@ function snapshotAttemptCandidate(rawAttempt: unknown): DiagnosedRootAttempt | n
   });
 }
 
-function cloneVerifiedProbe(
-  probe: VerifiedClinicTransferProbe,
-  validatedSourceRefs?: readonly RemedySourceRef[],
-): VerifiedClinicTransferProbe {
-  return Object.freeze({
-    probeId: probe.probeId,
-    requirementKey: probe.requirementKey,
-    prompt: probe.prompt,
-    ...(probe.targetMisconceptionId !== undefined
-      ? { targetMisconceptionId: probe.targetMisconceptionId }
-      : {}),
-    ...(validatedSourceRefs !== undefined ? { sourceRefs: validatedSourceRefs } : {}),
-    competingModelIds: Object.freeze([...probe.competingModelIds]),
-    report: probe.report,
-  });
+function snapshotStringArray(raw: unknown): readonly string[] | null {
+  if (!Array.isArray(raw) || Object.getPrototypeOf(raw) !== Array.prototype || hasExoticInternalSlots(raw)) {
+    return null;
+  }
+  if (Reflect.ownKeys(raw).length !== raw.length + 1) return null;
+  const out: string[] = [];
+  for (let i = 0; i < raw.length; i += 1) {
+    const slot = readOwnDataIndex(raw, i);
+    if (!slot.ok || typeof slot.value !== "string") return null;
+    out.push(slot.value);
+  }
+  return Object.freeze(out);
 }
 
 interface PreparedCandidateProbe<TInput, TObservable> {
@@ -529,12 +624,15 @@ function prepareCandidateProbe<TInput, TObservable>(
   const frozenTargetMisconceptionId =
     typeof rawTargetMisconceptionId === "string" ? rawTargetMisconceptionId : undefined;
 
-  if (!isPlainDataDescriptorSafe(rawInput)) {
+  const clonedInput = cloneAndFreezePlainData(rawInput);
+  if (!clonedInput.ok) {
     return {
       prepared: null,
       rejected: { probeId: frozenProbeId, reason: "invalid_probe_descriptor", report: null },
     };
   }
+  const frozenInput = clonedInput.value as TInput;
+
   if (!isPlainRecordOwnDataOnly(rawCorrectModel) || !isDenseArray(rawHypotheses)) {
     return {
       prepared: null,
@@ -567,24 +665,26 @@ function prepareCandidateProbe<TInput, TObservable>(
     }
     isolatedHypothesesList.push(isolatedHyp);
   }
-  if (hasExplicitSourceRefs && !isPlainDataDescriptorSafe(rawSourceRefs)) {
-    return {
-      prepared: null,
-      rejected: { probeId: frozenProbeId, reason: "invalid_probe_descriptor", report: null },
-    };
-  }
-
-  if (!isNonBlankText(frozenPrompt)) {
-    return {
-      prepared: null,
-      rejected: { probeId: frozenProbeId, reason: "invalid_probe_prompt", report: null },
-    };
-  }
 
   let frozenSourceRefs: readonly RemedySourceRef[] | undefined;
   if (hasExplicitSourceRefs) {
-    const frozen = freezeSourceRefs(rawSourceRefs as readonly RemedySourceRef[]);
-    if (!frozen || !areSourceRefsActive(frozen, activeSources)) {
+    const frozen = freezeSourceRefs(rawSourceRefs);
+    if (!frozen) {
+      return {
+        prepared: null,
+        rejected: {
+          probeId: frozenProbeId,
+          reason:
+            Array.isArray(rawSourceRefs) && rawSourceRefs.length === 0
+              ? "revoked_probe_source"
+              : !Array.isArray(rawSourceRefs)
+                ? "invalid_probe_descriptor"
+                : "revoked_probe_source",
+          report: null,
+        },
+      };
+    }
+    if (!areSourceRefsActive(frozen, activeSources)) {
       return {
         prepared: null,
         rejected: { probeId: frozenProbeId, reason: "revoked_probe_source", report: null },
@@ -593,13 +693,10 @@ function prepareCandidateProbe<TInput, TObservable>(
     frozenSourceRefs = frozen;
   }
 
-  let frozenInput: TInput;
-  try {
-    frozenInput = deepFreezePlainData(structuredClone(rawInput as TInput));
-  } catch {
+  if (!isNonBlankText(frozenPrompt)) {
     return {
       prepared: null,
-      rejected: { probeId: frozenProbeId, reason: "invalid_probe_descriptor", report: null },
+      rejected: { probeId: frozenProbeId, reason: "invalid_probe_prompt", report: null },
     };
   }
 
@@ -611,27 +708,33 @@ function prepareCandidateProbe<TInput, TObservable>(
     TInput,
     TObservable
   >["hypotheses"];
-  const observableKeyFn =
-    typeof rawObservableKey === "function"
-      ? (obs: TObservable): string =>
-          Reflect.apply(rawObservableKey as (obs: TObservable) => string, undefined, [obs])
-      : (rawObservableKey as DistinguishableProbeSpec<TInput, TObservable>["observableKey"]);
-  const parseResponseFn =
-    typeof rawParseResponse === "function"
-      ? (resp: unknown): TObservable | null =>
-          Reflect.apply(rawParseResponse as (resp: unknown) => TObservable | null, undefined, [resp])
-      : (rawParseResponse as DistinguishableProbeSpec<TInput, TObservable>["parseResponse"]);
 
-  const frozenSpec: DistinguishableProbeSpec<TInput, TObservable> = Object.freeze({
+  const canonicalSpec: {
+    probeId: string;
+    requirementKey: string;
+    prompt: string;
+    input: TInput;
+    correctModel: DistinguishableProbeSpec<TInput, TObservable>["correctModel"];
+    hypotheses: DistinguishableProbeSpec<TInput, TObservable>["hypotheses"];
+    observableKey: DistinguishableProbeSpec<TInput, TObservable>["observableKey"];
+    parseResponse: DistinguishableProbeSpec<TInput, TObservable>["parseResponse"];
+  } = {
     probeId: frozenProbeId,
     requirementKey: frozenRequirementKey,
     prompt: frozenPrompt,
     input: frozenInput,
     correctModel: frozenCorrectModel,
     hypotheses: frozenHypotheses,
-    observableKey: observableKeyFn,
-    parseResponse: parseResponseFn,
-  });
+    observableKey: (typeof rawObservableKey === "function"
+      ? (obs: TObservable): string =>
+          Reflect.apply(rawObservableKey as (this: unknown, obs: TObservable) => string, canonicalSpec, [obs])
+      : rawObservableKey) as DistinguishableProbeSpec<TInput, TObservable>["observableKey"],
+    parseResponse: (typeof rawParseResponse === "function"
+      ? (resp: unknown): TObservable | null =>
+          Reflect.apply(rawParseResponse as (this: unknown, resp: unknown) => TObservable | null, canonicalSpec, [resp])
+      : rawParseResponse) as DistinguishableProbeSpec<TInput, TObservable>["parseResponse"],
+  };
+  const frozenSpec: DistinguishableProbeSpec<TInput, TObservable> = Object.freeze(canonicalSpec);
 
   return {
     prepared: {
@@ -662,11 +765,7 @@ export function generateRemedyClinic<TInput = unknown, TObservable = unknown>(
   const frozenClinicIdInput = typeof input.clinicId === "string" ? input.clinicId : undefined;
   const frozenEpoch = input.currentPrivacyEpoch;
   const hasExplicitRuleSourceRefs = input.ruleSourceRefs !== undefined;
-  const frozenRuleSourceRefs = hasExplicitRuleSourceRefs
-    ? isPlainDataDescriptorSafe(input.ruleSourceRefs)
-      ? freezeSourceRefs(input.ruleSourceRefs)
-      : null
-    : undefined;
+  const frozenRuleSourceRefs = hasExplicitRuleSourceRefs ? freezeSourceRefs(input.ruleSourceRefs) : undefined;
 
   if (
     !isNonBlankText(frozenLearnerId) ||
@@ -817,20 +916,23 @@ export function generateRemedyClinic<TInput = unknown, TObservable = unknown>(
       continue;
     }
     seenRoots.add(attempt.rootAttemptId);
-    evidenceCases.push({
-      attemptId: attempt.attemptId,
-      rootAttemptId: attempt.rootAttemptId,
-      chapterId: attempt.chapterId,
-      localDate: attempt.localDate,
-      ruleId: attempt.ruleId,
-      excerpt: attempt.excerpt,
-      invariantSummary: attempt.invariantSummary,
-      sourceRefs: cloneSourceRefs(attempt.sourceRefs),
-      privacyEpoch: attempt.privacyEpoch,
-    });
+    evidenceCases.push(
+      Object.freeze({
+        attemptId: attempt.attemptId,
+        rootAttemptId: attempt.rootAttemptId,
+        chapterId: attempt.chapterId,
+        localDate: attempt.localDate,
+        ruleId: attempt.ruleId,
+        excerpt: attempt.excerpt,
+        invariantSummary: attempt.invariantSummary,
+        sourceRefs: attempt.sourceRefs,
+        privacyEpoch: attempt.privacyEpoch,
+      }),
+    );
   }
+  const frozenEvidenceCases = Object.freeze(evidenceCases);
 
-  const coverage = computeEvidenceCoverage(evidenceCases);
+  const coverage = Object.freeze(computeEvidenceCoverage(frozenEvidenceCases));
   if (!meetsClinicThreshold(coverage)) {
     return {
       status: "threshold_not_met",
@@ -906,8 +1008,8 @@ export function generateRemedyClinic<TInput = unknown, TObservable = unknown>(
     };
   }
 
-  const selectedCases = selectSpreadRepresentativeCases(evidenceCases);
-  const clinic: RemedyClinicSessionV1 = {
+  const selectedCases = Object.freeze(selectSpreadRepresentativeCases(frozenEvidenceCases));
+  const clinic: RemedyClinicSessionV1 = Object.freeze({
     schemaVersion: 1,
     clinicId: frozenClinicId,
     status: "active",
@@ -921,28 +1023,28 @@ export function generateRemedyClinic<TInput = unknown, TObservable = unknown>(
     createdPrivacyEpoch: frozenEpoch,
     validatedPrivacyEpoch: frozenEpoch,
     coverage,
-    evidenceCases: evidenceCases.map(cloneEvidenceCase),
-    steps: [
-      {
-        stepNumber: 1,
-        kind: "side_by_side_self_diff",
+    evidenceCases: frozenEvidenceCases,
+    steps: Object.freeze([
+      Object.freeze({
+        stepNumber: 1 as const,
+        kind: "side_by_side_self_diff" as const,
         durationMinutes: STEP1_SELF_DIFF_MINUTES,
         selectedCases,
         diffs: buildSelfDiffEntries(selectedCases),
-      },
+      }),
       frozenRestatementStep,
-      {
-        stepNumber: 3,
-        kind: "distinguishable_transfer_probes",
+      Object.freeze({
+        stepNumber: 3 as const,
+        kind: "distinguishable_transfer_probes" as const,
         durationMinutes: STEP3_TRANSFER_PROBES_MINUTES,
-        probes: [probe1, probe2],
-      },
-    ],
-    revocationSummary: {
+        probes: Object.freeze([probe1, probe2]),
+      }),
+    ] as const),
+    revocationSummary: Object.freeze({
       strippedCaseCount: 0,
-      reason: "none",
-    },
-  };
+      reason: "none" as const,
+    }),
+  });
 
   return {
     status: "active",
@@ -954,129 +1056,331 @@ export function generateRemedyClinic<TInput = unknown, TObservable = unknown>(
   };
 }
 
-function degradeClinicToRevoked(
-  clinic: RemedyClinicSessionV1,
+interface ClinicSnapshotHeader {
+  readonly clinicId: string;
+  readonly status: "active" | "stale_source_revoked";
+  readonly learnerId: string;
+  readonly courseId: string;
+  readonly ruleId: string;
+  readonly hasRuleSourceRefs: boolean;
+  readonly ruleSourceRefs: readonly RemedySourceRef[] | null;
+  readonly createdPrivacyEpoch: number;
+  readonly validatedPrivacyEpoch: number;
+  readonly priorStrippedCaseCount: number;
+}
+
+function buildRevokedClinicFromHeader(
+  header: ClinicSnapshotHeader,
   validatedPrivacyEpoch: number,
   coverage: EvidenceCoverage,
   strippedCaseCount: number,
   reason: ClinicRevocationReason,
 ): RemedyClinicSessionV1 {
-  const [step1, step2, step3] = clinic.steps;
-  return {
-    ...clinic,
-    ...(clinic.ruleSourceRefs !== undefined ? { ruleSourceRefs: [] } : {}),
-    status: "stale_source_revoked",
+  return Object.freeze({
+    schemaVersion: 1 as const,
+    clinicId: header.clinicId,
+    status: "stale_source_revoked" as const,
+    learnerId: header.learnerId,
+    courseId: header.courseId,
+    ruleId: header.ruleId,
+    ...(header.hasRuleSourceRefs ? { ruleSourceRefs: Object.freeze([]) } : {}),
+    totalMinutes: REMEDY_CLINIC_TOTAL_MINUTES,
+    createdPrivacyEpoch: header.createdPrivacyEpoch,
     validatedPrivacyEpoch,
-    coverage,
-    evidenceCases: [],
-    steps: [
-      {
-        ...step1,
-        selectedCases: [],
-        diffs: [],
-      },
-      {
-        ...step2,
+    coverage: Object.freeze({ ...coverage }),
+    evidenceCases: Object.freeze([]),
+    steps: Object.freeze([
+      Object.freeze({
+        stepNumber: 1 as const,
+        kind: "side_by_side_self_diff" as const,
+        durationMinutes: STEP1_SELF_DIFF_MINUTES,
+        selectedCases: Object.freeze([]),
+        diffs: Object.freeze([]),
+      }),
+      Object.freeze({
+        stepNumber: 2 as const,
+        kind: "invariant_rule_restatement" as const,
+        durationMinutes: STEP2_INVARIANT_RESTATEMENT_MINUTES,
+        ruleId: header.ruleId,
         ruleTitle: "",
         prompt: REVOKED_CLINIC_STEP2_PLACEHOLDER,
-        checklist: [],
-      },
-      {
-        ...step3,
-        probes: [],
-      },
-    ],
-    revocationSummary: {
+        checklist: Object.freeze([]),
+      }),
+      Object.freeze({
+        stepNumber: 3 as const,
+        kind: "distinguishable_transfer_probes" as const,
+        durationMinutes: STEP3_TRANSFER_PROBES_MINUTES,
+        probes: Object.freeze([]),
+      }),
+    ] as const),
+    revocationSummary: Object.freeze({
       strippedCaseCount,
       reason,
-    },
-  };
+    }),
+  });
+}
+
+function snapshotEvidenceCaseForRevalidation(rawCase: unknown): ClinicEvidenceCase | null {
+  if (!isPlainRecordOwnDataOnly(rawCase)) return null;
+  const attemptId = readOwnDataProp(rawCase, "attemptId");
+  const rootAttemptId = readOwnDataProp(rawCase, "rootAttemptId");
+  const chapterId = readOwnDataProp(rawCase, "chapterId");
+  const localDate = readOwnDataProp(rawCase, "localDate");
+  const ruleId = readOwnDataProp(rawCase, "ruleId");
+  const excerpt = readOwnDataProp(rawCase, "excerpt");
+  const invariantSummary = readOwnDataProp(rawCase, "invariantSummary");
+  const privacyEpoch = readOwnDataProp(rawCase, "privacyEpoch");
+  const rawSourceRefs = readOwnDataProp(rawCase, "sourceRefs");
+
+  if (
+    typeof attemptId !== "string" ||
+    typeof rootAttemptId !== "string" ||
+    typeof chapterId !== "string" ||
+    typeof localDate !== "string" ||
+    typeof ruleId !== "string" ||
+    typeof excerpt !== "string" ||
+    typeof invariantSummary !== "string" ||
+    typeof privacyEpoch !== "number"
+  ) {
+    return null;
+  }
+
+  const frozenSourceRefs = freezeSourceRefs(rawSourceRefs);
+  if (!frozenSourceRefs) return null;
+
+  return Object.freeze({
+    attemptId,
+    rootAttemptId,
+    chapterId,
+    localDate,
+    ruleId,
+    excerpt,
+    invariantSummary,
+    sourceRefs: frozenSourceRefs,
+    privacyEpoch,
+  });
+}
+
+function snapshotProbeForRevalidation(
+  rawProbe: unknown,
+  activeSources: ReadonlyMap<string, ActiveSourceEntry>,
+): VerifiedClinicTransferProbe | null {
+  if (!isPlainRecordOwnDataOnly(rawProbe)) return null;
+  const probeId = readOwnDataProp(rawProbe, "probeId");
+  const requirementKey = readOwnDataProp(rawProbe, "requirementKey");
+  const prompt = readOwnDataProp(rawProbe, "prompt");
+  const targetMisconceptionId = readOwnDataProp(rawProbe, "targetMisconceptionId");
+  const hasExplicitSourceRefs =
+    Object.hasOwn(rawProbe, "sourceRefs") && readOwnDataProp(rawProbe, "sourceRefs") !== undefined;
+  const rawSourceRefs = hasExplicitSourceRefs ? readOwnDataProp(rawProbe, "sourceRefs") : undefined;
+  const rawCompetingModelIds = readOwnDataProp(rawProbe, "competingModelIds");
+  const report = readOwnDataProp(rawProbe, "report");
+
+  if (
+    typeof probeId !== "string" ||
+    typeof requirementKey !== "string" ||
+    typeof prompt !== "string" ||
+    (targetMisconceptionId !== undefined && typeof targetMisconceptionId !== "string") ||
+    !isPlainRecordOwnDataOnly(report)
+  ) {
+    return null;
+  }
+
+  const frozenCompetingModelIds = snapshotStringArray(rawCompetingModelIds);
+  if (!frozenCompetingModelIds) return null;
+
+  let validatedSourceRefs: readonly RemedySourceRef[] | undefined;
+  if (hasExplicitSourceRefs) {
+    const frozenRefs = freezeSourceRefs(rawSourceRefs);
+    if (!frozenRefs || !areSourceRefsActive(frozenRefs, activeSources)) return null;
+    validatedSourceRefs = frozenRefs;
+  }
+
+  const clonedReport = cloneAndFreezePlainData(report);
+  if (!clonedReport.ok) return null;
+
+  return Object.freeze({
+    probeId,
+    requirementKey,
+    prompt,
+    ...(targetMisconceptionId !== undefined ? { targetMisconceptionId } : {}),
+    ...(validatedSourceRefs !== undefined ? { sourceRefs: validatedSourceRefs } : {}),
+    competingModelIds: frozenCompetingModelIds,
+    report: clonedReport.value as ProbeDistinguishabilityReport,
+  });
 }
 
 /**
  * Read-time privacy_epoch and source-version guard.
- * Strips any case or probe referencing missing/revoked/version-mismatched sources (scrubbing
- * revoked text across all steps) and degrades to "stale_source_revoked" with empty excerpts,
- * cleared Step 2 title/prompt, and empty Step 3 probes when invariants fail.
+ * Performs single-pass own-data descriptor snapshotting up front (zero getter execution,
+ * zero second reads), strips any case or probe referencing missing/revoked/version-mismatched
+ * sources, and degrades fail-closed to "stale_source_revoked" with all 3 steps scrubbed.
  */
 export function revalidateRemedyClinic(
   clinic: RemedyClinicSessionV1,
   activeSourcesMap: ActiveSourcesMap,
   currentPrivacyEpoch: number,
 ): RemedyClinicSessionV1 {
+  const zeroCoverage: EvidenceCoverage = { rootAttemptCount: 0, chapterCount: 0, localDateCount: 0 };
+  const activeSourcesSnapshot = snapshotActiveSourcesMap(activeSourcesMap);
+
+  const clinicIsPlain = isPlainRecordOwnDataOnly(clinic);
+  const rawClinicId = clinicIsPlain ? readOwnDataProp(clinic, "clinicId") : "";
+  const rawStatus = clinicIsPlain ? readOwnDataProp(clinic, "status") : "stale_source_revoked";
+  const rawLearnerId = clinicIsPlain ? readOwnDataProp(clinic, "learnerId") : "";
+  const rawCourseId = clinicIsPlain ? readOwnDataProp(clinic, "courseId") : "";
+  const rawRuleId = clinicIsPlain ? readOwnDataProp(clinic, "ruleId") : "";
+  const rawCreatedEpoch = clinicIsPlain ? readOwnDataProp(clinic, "createdPrivacyEpoch") : -1;
+  const rawValidatedEpoch = clinicIsPlain ? readOwnDataProp(clinic, "validatedPrivacyEpoch") : -1;
+  const hasRuleSourceRefs =
+    clinicIsPlain && Object.hasOwn(clinic, "ruleSourceRefs") && readOwnDataProp(clinic, "ruleSourceRefs") !== undefined;
+  const rawRuleSourceRefs = hasRuleSourceRefs ? readOwnDataProp(clinic, "ruleSourceRefs") : undefined;
+  const rawEvidenceCases = clinicIsPlain ? readOwnDataProp(clinic, "evidenceCases") : undefined;
+  const rawSteps = clinicIsPlain ? readOwnDataProp(clinic, "steps") : undefined;
+  const rawRevSummary = clinicIsPlain ? readOwnDataProp(clinic, "revocationSummary") : undefined;
+  const priorStrippedCaseCount =
+    isPlainRecordOwnDataOnly(rawRevSummary) && typeof readOwnDataProp(rawRevSummary, "strippedCaseCount") === "number"
+      ? (readOwnDataProp(rawRevSummary, "strippedCaseCount") as number)
+      : 0;
+
+  const header: ClinicSnapshotHeader = {
+    clinicId: typeof rawClinicId === "string" ? rawClinicId : "",
+    status: rawStatus === "active" ? "active" : "stale_source_revoked",
+    learnerId: typeof rawLearnerId === "string" ? rawLearnerId : "",
+    courseId: typeof rawCourseId === "string" ? rawCourseId : "",
+    ruleId: typeof rawRuleId === "string" ? rawRuleId : "",
+    hasRuleSourceRefs,
+    ruleSourceRefs: hasRuleSourceRefs ? freezeSourceRefs(rawRuleSourceRefs) : null,
+    createdPrivacyEpoch: typeof rawCreatedEpoch === "number" ? rawCreatedEpoch : -1,
+    validatedPrivacyEpoch: typeof rawValidatedEpoch === "number" ? rawValidatedEpoch : -1,
+    priorStrippedCaseCount,
+  };
+
+  const totalEvidenceCases = Array.isArray(rawEvidenceCases) ? rawEvidenceCases.length : 0;
+
   if (
+    !clinicIsPlain ||
     !isValidPrivacyEpoch(currentPrivacyEpoch) ||
-    !isValidPrivacyEpoch(clinic.createdPrivacyEpoch) ||
-    !isValidPrivacyEpoch(clinic.validatedPrivacyEpoch) ||
-    clinic.validatedPrivacyEpoch < clinic.createdPrivacyEpoch ||
-    currentPrivacyEpoch < clinic.createdPrivacyEpoch ||
-    currentPrivacyEpoch < clinic.validatedPrivacyEpoch
+    !isValidPrivacyEpoch(header.createdPrivacyEpoch) ||
+    !isValidPrivacyEpoch(header.validatedPrivacyEpoch) ||
+    header.validatedPrivacyEpoch < header.createdPrivacyEpoch ||
+    currentPrivacyEpoch < header.createdPrivacyEpoch ||
+    currentPrivacyEpoch < header.validatedPrivacyEpoch
   ) {
     const validEpochs = [
-      clinic.createdPrivacyEpoch,
-      clinic.validatedPrivacyEpoch,
+      header.createdPrivacyEpoch,
+      header.validatedPrivacyEpoch,
       currentPrivacyEpoch,
     ].filter(isValidPrivacyEpoch);
     const safeEpoch = validEpochs.length > 0 ? Math.max(0, ...validEpochs) : 0;
-    return degradeClinicToRevoked(
-      clinic,
+    return buildRevokedClinicFromHeader(
+      header,
       safeEpoch,
-      { rootAttemptCount: 0, chapterCount: 0, localDateCount: 0 },
-      clinic.evidenceCases.length,
+      zeroCoverage,
+      totalEvidenceCases,
       "invalid_privacy_epoch",
     );
   }
 
-  if (clinic.status === "stale_source_revoked") {
-    return degradeClinicToRevoked(
-      clinic,
+  if (header.status === "stale_source_revoked") {
+    return buildRevokedClinicFromHeader(
+      header,
       currentPrivacyEpoch,
-      { rootAttemptCount: 0, chapterCount: 0, localDateCount: 0 },
-      clinic.revocationSummary.strippedCaseCount,
+      zeroCoverage,
+      header.priorStrippedCaseCount,
       "already_revoked",
     );
   }
 
-  if (clinic.ruleSourceRefs !== undefined) {
-    const frozenRuleRefs = isPlainDataDescriptorSafe(clinic.ruleSourceRefs)
-      ? freezeSourceRefs(clinic.ruleSourceRefs)
-      : null;
-    if (!frozenRuleRefs || !areSourceRefsActive(frozenRuleRefs, activeSourcesMap)) {
-      return degradeClinicToRevoked(
-        clinic,
+  if (header.hasRuleSourceRefs) {
+    if (!header.ruleSourceRefs || !areSourceRefsActive(header.ruleSourceRefs, activeSourcesSnapshot)) {
+      return buildRevokedClinicFromHeader(
+        header,
         currentPrivacyEpoch,
-        { rootAttemptCount: 0, chapterCount: 0, localDateCount: 0 },
-        Array.isArray(clinic.evidenceCases) ? clinic.evidenceCases.length : 0,
+        zeroCoverage,
+        totalEvidenceCases,
         "rule_source_revoked",
       );
     }
   }
 
-  const seenRoots = new Set<string>();
-  const survivingCases: ClinicEvidenceCase[] = [];
-  const totalEvidenceCases = Array.isArray(clinic.evidenceCases) ? clinic.evidenceCases.length : 0;
-  if (Array.isArray(clinic.evidenceCases)) {
-    for (let i = 0; i < clinic.evidenceCases.length; i += 1) {
-      const slot = readOwnDataIndex(clinic.evidenceCases, i);
-      if (!slot.ok) continue;
-      const item = slot.value;
-      if (!item || typeof item !== "object") continue;
-      if (seenRoots.has(item.rootAttemptId)) continue;
-      if (item.ruleId !== clinic.ruleId) continue;
-      if (!isValidPrivacyEpoch(item.privacyEpoch) || item.privacyEpoch > currentPrivacyEpoch) continue;
-      if (!isValidLocalDate(item.localDate)) continue;
-      if (!areSourceRefsActive(item.sourceRefs, activeSourcesMap)) continue;
-      seenRoots.add(item.rootAttemptId);
-      survivingCases.push(cloneEvidenceCase(item));
-    }
+  // Snapshot clinic.steps strictly via own data indices 0, 1, 2 (zero iterator/getter invocation).
+  if (!Array.isArray(rawSteps) || rawSteps.length !== 3) {
+    return buildRevokedClinicFromHeader(
+      header,
+      currentPrivacyEpoch,
+      zeroCoverage,
+      totalEvidenceCases,
+      "insufficient_surviving_evidence",
+    );
+  }
+  const step0Slot = readOwnDataIndex(rawSteps, 0);
+  const step1Slot = readOwnDataIndex(rawSteps, 1);
+  const step2Slot = readOwnDataIndex(rawSteps, 2);
+  if (
+    !step0Slot.ok ||
+    !step1Slot.ok ||
+    !step2Slot.ok ||
+    !isPlainRecordOwnDataOnly(step0Slot.value) ||
+    !isPlainRecordOwnDataOnly(step1Slot.value) ||
+    !isPlainRecordOwnDataOnly(step2Slot.value)
+  ) {
+    return buildRevokedClinicFromHeader(
+      header,
+      currentPrivacyEpoch,
+      zeroCoverage,
+      totalEvidenceCases,
+      "insufficient_surviving_evidence",
+    );
   }
 
-  const strippedCaseCount = totalEvidenceCases - survivingCases.length;
-  const coverage = computeEvidenceCoverage(survivingCases);
+  const rawStep2RuleTitle = readOwnDataProp(step1Slot.value, "ruleTitle");
+  const rawStep2Prompt = readOwnDataProp(step1Slot.value, "prompt");
+  const rawStep2Checklist = snapshotStringArray(readOwnDataProp(step1Slot.value, "checklist"));
+  if (typeof rawStep2RuleTitle !== "string" || typeof rawStep2Prompt !== "string" || !rawStep2Checklist) {
+    return buildRevokedClinicFromHeader(
+      header,
+      currentPrivacyEpoch,
+      zeroCoverage,
+      totalEvidenceCases,
+      "insufficient_surviving_evidence",
+    );
+  }
+  const frozenStep2: InvariantRuleRestatementStep = Object.freeze({
+    stepNumber: 2 as const,
+    kind: "invariant_rule_restatement" as const,
+    durationMinutes: STEP2_INVARIANT_RESTATEMENT_MINUTES,
+    ruleId: header.ruleId,
+    ruleTitle: rawStep2RuleTitle,
+    prompt: rawStep2Prompt,
+    checklist: rawStep2Checklist,
+  });
+
+  // Single-pass snapshot + validation of evidenceCases (never read any case or sourceRefs twice).
+  const seenRoots = new Set<string>();
+  const survivingCases: ClinicEvidenceCase[] = [];
+  if (Array.isArray(rawEvidenceCases)) {
+    for (let i = 0; i < rawEvidenceCases.length; i += 1) {
+      const slot = readOwnDataIndex(rawEvidenceCases, i);
+      if (!slot.ok) continue;
+      const snap = snapshotEvidenceCaseForRevalidation(slot.value);
+      if (!snap) continue;
+      if (seenRoots.has(snap.rootAttemptId)) continue;
+      if (snap.ruleId !== header.ruleId) continue;
+      if (!isValidPrivacyEpoch(snap.privacyEpoch) || snap.privacyEpoch > currentPrivacyEpoch) continue;
+      if (!isValidLocalDate(snap.localDate)) continue;
+      if (!areSourceRefsActive(snap.sourceRefs, activeSourcesSnapshot)) continue;
+      seenRoots.add(snap.rootAttemptId);
+      survivingCases.push(snap);
+    }
+  }
+  const frozenSurvivingCases = Object.freeze(survivingCases);
+  const strippedCaseCount = totalEvidenceCases - frozenSurvivingCases.length;
+  const coverage = Object.freeze(computeEvidenceCoverage(frozenSurvivingCases));
 
   if (!meetsClinicThreshold(coverage)) {
-    return degradeClinicToRevoked(
-      clinic,
+    return buildRevokedClinicFromHeader(
+      header,
       currentPrivacyEpoch,
       coverage,
       strippedCaseCount,
@@ -1084,32 +1388,23 @@ export function revalidateRemedyClinic(
     );
   }
 
-  const [step1, step2, step3] = clinic.steps;
+  // Single-pass snapshot + validation of Step 3 probes (including competingModelIds and sourceRefs).
+  const rawStep3Probes = readOwnDataProp(step2Slot.value, "probes");
+  const totalProbes = Array.isArray(rawStep3Probes) ? rawStep3Probes.length : 0;
   const survivingProbes: VerifiedClinicTransferProbe[] = [];
-  const totalProbes = Array.isArray(step3.probes) ? step3.probes.length : 0;
-  if (Array.isArray(step3.probes)) {
-    for (let i = 0; i < step3.probes.length; i += 1) {
-      const slot = readOwnDataIndex(step3.probes, i);
+  if (Array.isArray(rawStep3Probes)) {
+    for (let i = 0; i < rawStep3Probes.length; i += 1) {
+      const slot = readOwnDataIndex(rawStep3Probes, i);
       if (!slot.ok) continue;
-      const probe = slot.value;
-      if (!probe || typeof probe !== "object") continue;
-      let validatedProbeRefs: readonly RemedySourceRef[] | undefined;
-      if (probe.sourceRefs !== undefined) {
-        const frozenProbeRefs = isPlainDataDescriptorSafe(probe.sourceRefs)
-          ? freezeSourceRefs(probe.sourceRefs)
-          : null;
-        if (!frozenProbeRefs || !areSourceRefsActive(frozenProbeRefs, activeSourcesMap)) {
-          continue;
-        }
-        validatedProbeRefs = frozenProbeRefs;
-      }
-      survivingProbes.push(cloneVerifiedProbe(probe, validatedProbeRefs));
+      const snapProbe = snapshotProbeForRevalidation(slot.value, activeSourcesSnapshot);
+      if (!snapProbe) continue;
+      survivingProbes.push(snapProbe);
     }
   }
   const strippedProbeCount = totalProbes - survivingProbes.length;
   if (survivingProbes.length < REQUIRED_TRANSFER_PROBE_COUNT) {
-    return degradeClinicToRevoked(
-      clinic,
+    return buildRevokedClinicFromHeader(
+      header,
       currentPrivacyEpoch,
       coverage,
       strippedCaseCount,
@@ -1117,32 +1412,43 @@ export function revalidateRemedyClinic(
     );
   }
 
-  const selectedCases = selectSpreadRepresentativeCases(survivingCases);
-  return {
-    ...clinic,
-    status: "active",
+  const selectedCases = Object.freeze(selectSpreadRepresentativeCases(frozenSurvivingCases));
+  return Object.freeze({
+    schemaVersion: 1 as const,
+    clinicId: header.clinicId,
+    status: "active" as const,
+    learnerId: header.learnerId,
+    courseId: header.courseId,
+    ruleId: header.ruleId,
+    ...(header.hasRuleSourceRefs && header.ruleSourceRefs ? { ruleSourceRefs: header.ruleSourceRefs } : {}),
+    totalMinutes: REMEDY_CLINIC_TOTAL_MINUTES,
+    createdPrivacyEpoch: header.createdPrivacyEpoch,
     validatedPrivacyEpoch: currentPrivacyEpoch,
     coverage,
-    evidenceCases: survivingCases,
-    steps: [
-      {
-        ...step1,
+    evidenceCases: frozenSurvivingCases,
+    steps: Object.freeze([
+      Object.freeze({
+        stepNumber: 1 as const,
+        kind: "side_by_side_self_diff" as const,
+        durationMinutes: STEP1_SELF_DIFF_MINUTES,
         selectedCases,
         diffs: buildSelfDiffEntries(selectedCases),
-      },
-      step2,
-      {
-        ...step3,
-        probes: survivingProbes.slice(0, REQUIRED_TRANSFER_PROBE_COUNT),
-      },
-    ],
-    revocationSummary: {
+      }),
+      frozenStep2,
+      Object.freeze({
+        stepNumber: 3 as const,
+        kind: "distinguishable_transfer_probes" as const,
+        durationMinutes: STEP3_TRANSFER_PROBES_MINUTES,
+        probes: Object.freeze(survivingProbes.slice(0, REQUIRED_TRANSFER_PROBE_COUNT)),
+      }),
+    ] as const),
+    revocationSummary: Object.freeze({
       strippedCaseCount,
       ...(strippedProbeCount > 0 ? { strippedProbeCount } : {}),
       reason:
         strippedCaseCount > 0 || strippedProbeCount > 0
-          ? "partial_source_revoked_still_active"
-          : "none",
-    },
-  };
+          ? ("partial_source_revoked_still_active" as const)
+          : ("none" as const),
+    }),
+  });
 }

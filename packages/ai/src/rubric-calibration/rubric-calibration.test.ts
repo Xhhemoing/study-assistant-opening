@@ -329,6 +329,14 @@ describe("AnchorCalibratedRubricV1 pairwise swap, monotonicity & mastery gates",
     expect(ligatureText.totalClicheOccurrences).toBe(0);
     expect(ligatureText.isTemplatePadded).toBe(false);
 
+    // Astral Unicode letter surrogate pairs (Deseret U+10400) must not create false word boundaries.
+    const astralLetterText = detectTemplatePadding(
+      "\uD801\uDC00needless to say\uD801\uDC00 appears inside an astral word token.",
+    );
+    expect(astralLetterText.clicheHits).toEqual([]);
+    expect(astralLetterText.totalClicheOccurrences).toBe(0);
+    expect(astralLetterText.isTemplatePadded).toBe(false);
+
     // Custom [4.10, 4.20] anchors whose snapped band (4.0) escapes [4.10, 4.20] must fail closed to interval_only.
     const narrowEscapeAnchors = [
       { ...baseAnchors[0]!, anchorId: "nar-410", band: 4.10 as unknown as typeof baseAnchors[0]["band"], thetaAnchor: -1 },

@@ -142,8 +142,26 @@ function countWords(text: string): number {
   return trimmed.split(/\s+/).length;
 }
 
-function isWordChar(ch: string | undefined): boolean {
-  return ch !== undefined && /[\p{L}\p{M}\p{N}]/u.test(ch);
+function prevUnicodeChar(str: string, index: number): string {
+  if (index <= 0) return "";
+  const low = str.charCodeAt(index - 1);
+  if (index >= 2 && low >= 0xdc00 && low <= 0xdfff) {
+    const high = str.charCodeAt(index - 2);
+    if (high >= 0xd800 && high <= 0xdbff) {
+      return str.slice(index - 2, index);
+    }
+  }
+  return str.slice(index - 1, index);
+}
+
+function nextUnicodeChar(str: string, index: number): string {
+  if (index < 0 || index >= str.length) return "";
+  const codePoint = str.codePointAt(index);
+  return codePoint === undefined ? "" : String.fromCodePoint(codePoint);
+}
+
+function isWordChar(ch: string): boolean {
+  return ch.length > 0 && /[\p{L}\p{M}\p{N}]/u.test(ch);
 }
 
 function countNonOverlappingOccurrences(haystack: string, needle: string): number {
@@ -153,9 +171,9 @@ function countNonOverlappingOccurrences(haystack: string, needle: string): numbe
   while (fromIndex <= haystack.length - needle.length) {
     const idx = haystack.indexOf(needle, fromIndex);
     if (idx === -1) break;
-    const beforeOk = idx === 0 || !isWordChar(haystack[idx - 1]);
+    const beforeOk = idx === 0 || !isWordChar(prevUnicodeChar(haystack, idx));
     const end = idx + needle.length;
-    const afterOk = end === haystack.length || !isWordChar(haystack[end]);
+    const afterOk = end === haystack.length || !isWordChar(nextUnicodeChar(haystack, end));
     if (beforeOk && afterOk) {
       count++;
       fromIndex = end;
