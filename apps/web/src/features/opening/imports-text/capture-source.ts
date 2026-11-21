@@ -7,6 +7,7 @@ import { createOpeningSourceService } from "../sources/source-service";
 import { UploadPolicyError } from "../sources/upload-policy";
 import { isOpeningDataError } from "../server/data-services";
 import type { prepareCapture } from "./markdown";
+import { finishCaptureInTransaction } from "./retell-task";
 
 function isSourceUnavailable(error: unknown) {
   return isOpeningDataError(error, "source") && (error.code === "CONFLICT" || error.code === "NOT_FOUND");
@@ -32,6 +33,7 @@ export async function saveCaptureSource(
   clientKey?: string,
   scheduleNextDayRetell = true,
   courseId: string | null = null,
+  timeZone?: string,
 ) {
   const bytes = new TextEncoder().encode(prepared.markdown);
   // A one-off course capture still needs a durable binding through completion.
@@ -43,7 +45,9 @@ export async function saveCaptureSource(
     intent: {
       courseId,
       scheduleNextDayRetell,
-      inputDigest: createHash("sha256").update(JSON.stringify(prepared.normalizedInput)).digest("hex"),
+      title: prepared.title,
+      timeZone: scheduleNextDayRetell ? timeZone ?? null : null,
+      inputDigest: createHash("sha256").update(JSON.stringify([prepared.normalizedInput, scheduleNextDayRetell ? timeZone ?? null : null])).digest("hex"),
     },
   } : undefined;
   const input = uploadInputSchema.parse({
@@ -63,8 +67,12 @@ export async function saveCaptureSource(
   try {
     if (capture) await sources.reissueUploadTicket(principal, source.id);
     await sources.putStaging(principal, source.id, { bytes, contentType: input.mime });
-    const saved = await sources.completeUpload(principal, source.id);
-    return { sourceId: saved.id, name: saved.name, bytes: saved.bytes, replayed: false };
+    const completed = await sources.completeCaptureUpload(principal, source.id, async tx => {
+      await finishCaptureInTransaction(tx, { workspaceId: principal.workspaceId, ownerUserId: principal.userId }, {
+        sourceId: source.id, title: prepared.title, courseId, timeZone, scheduleNextDayRetell,
+      });
+    });
+    return { sourceId: completed.source.id, name: completed.source.name, bytes: completed.source.bytes, replayed: completed.replayed };
   } catch (error) {
     const stagingUnavailable = error instanceof UploadPolicyError
       || (isOpeningDataError(error, "storage") && error.code === "NOT_FOUND");

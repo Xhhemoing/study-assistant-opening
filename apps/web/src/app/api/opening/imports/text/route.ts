@@ -26,6 +26,7 @@ export async function POST(request: Request): Promise<Response> {
       input.clientKey,
       input.scheduleNextDayRetell,
       input.courseId ?? null,
+      input.timeZone,
     );
     const task = await finishCapture(sql, scope, {
       scheduleNextDayRetell: input.scheduleNextDayRetell,

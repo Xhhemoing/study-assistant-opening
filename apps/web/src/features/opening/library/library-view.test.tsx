@@ -26,7 +26,7 @@ beforeEach(() => {
   window.history.replaceState({}, "", "/opening/library?tab=notes&source=original&version=3");
   container = document.createElement("div"); document.body.append(container); root = createRoot(container);
 });
-afterEach(async () => { await act(async () => root.unmount()); container.remove(); });
+afterEach(async () => { await act(async () => root.unmount()); container.remove(); vi.unstubAllGlobals(); });
 async function render() { await act(async () => root.render(createElement(LibraryView, { tab: "notes" }))); }
 async function drop(files: File[]) {
   const event = new Event("drop", { bubbles: true, cancelable: true });
@@ -76,4 +76,31 @@ it("opens the existing page picker from the empty action and validates the selec
   await act(async () => picker.dispatchEvent(new Event("change", { bubbles: true })));
   expect(state.batches).toHaveLength(1);
   expect(state.batches[0]?.files).toEqual([file]);
+});
+
+it("opens text capture from notes and saves it to the active course", async () => {
+  const courseId = "9a445539-4069-40ea-a981-eeafc28b6553";
+  const fetcher = vi.fn().mockResolvedValue(Response.json({ sourceId: "source", taskId: "task" }));
+  vi.stubGlobal("fetch", fetcher);
+  await act(async () => root.render(createElement(LibraryView, { tab: "notes", courseId })));
+  const toggle = Array.from(container.querySelectorAll("button")).find(button => button.textContent === "粘贴讲解")!;
+  expect(toggle.getAttribute("aria-expanded")).toBe("false");
+  await act(async () => toggle.click());
+  expect(toggle.getAttribute("aria-expanded")).toBe("true");
+  expect(window.location.search).toContain("tab=materials");
+  const area = container.querySelector("textarea")!;
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(area, "先列出方程");
+    area.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await act(async () => toggle.click());
+  expect(area.closest("[hidden]")).not.toBeNull();
+  await act(async () => toggle.click());
+  expect(area.value).toBe("先列出方程");
+  await act(async () => Array.from(container.querySelectorAll("button")).find(button => button.textContent === "保存讲解")!.click());
+  expect(JSON.parse(fetcher.mock.calls[0]![1].body)).toMatchObject({ courseId, content: "先列出方程" });
+  expect(container.querySelector('[role="status"]')?.textContent).toContain("讲解已保存");
+  await act(async () => toggle.click());
+  expect(toggle.getAttribute("aria-expanded")).toBe("false");
+  expect(area.closest("[hidden]")).not.toBeNull();
 });

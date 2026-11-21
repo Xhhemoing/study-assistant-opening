@@ -14,9 +14,9 @@ vi.mock("../../apps/web/src/features/opening/runtime", async importOriginal => (
 }));
 
 let courseA: string, courseB: string;
-const post = (courseId: string | null, scheduleNextDayRetell = false, content = "Original", providerHint?: string) =>
+const post = (courseId: string | null, scheduleNextDayRetell = false, content = "Original", providerHint?: string, timeZone?: string) =>
   POST(new Request("http://localhost/api/opening/imports/text", { method: "POST",
-    body: JSON.stringify({ clientKey: "one-capture", title: "Notes", content, providerHint, courseId, scheduleNextDayRetell }) }));
+    body: JSON.stringify({ clientKey: "one-capture", title: "Notes", content, providerHint, courseId, scheduleNextDayRetell, timeZone }) }));
 
 beforeEach(async () => {
   f = await createOpeningFixture();
@@ -38,6 +38,102 @@ beforeEach(async () => {
   vi.spyOn(store, "deleteObject").mockImplementation(async key => { objects.delete(key); });
 });
 afterEach(async () => { vi.restoreAllMocks(); await f?.close(); });
+
+it.each([true, false])("cleans a late staging write and reports only the completing request as created (retell=%s)", async retell => {
+  let entered!: () => void, release!: () => void;
+  const paused = new Promise<void>(resolve => { entered = resolve; });
+  const resume = new Promise<void>(resolve => { release = resolve; });
+  const put = vi.mocked(OpeningS3.prototype.putObject);
+  const write = put.getMockImplementation()!;
+  let stagingKey = "";
+  put.mockImplementationOnce(async (key, bytes) => { stagingKey = key; entered(); await resume; await write(key, bytes); });
+  const late = post(courseA, retell);
+  try {
+    await Promise.race([paused, late.then(r => { throw new Error(`Unexpected HTTP ${r.status}`); })]);
+    const winner = await post(courseA, retell);
+    expect(winner.status).toBe(201);
+  } finally { release(); }
+  expect((await late).status).toBe(200);
+  expect((await OpeningS3.prototype.headObject(stagingKey)).exists).toBe(false);
+});
+
+it("recognizes a concurrent completion under the repository lock", async () => {
+  let entered!: () => void, release!: () => void;
+  const paused = new Promise<void>(resolve => { entered = resolve; });
+  const resume = new Promise<void>(resolve => { release = resolve; });
+  const digest = vi.mocked(OpeningS3.prototype.streamDigest);
+  const read = digest.getMockImplementation()!;
+  digest.mockImplementationOnce(async (...args) => { const result = await read(...args); entered(); await resume; return result; });
+  const late = post(courseA, true);
+  try {
+    await Promise.race([paused, late.then(r => { throw new Error(`Unexpected HTTP ${r.status}`); })]);
+    expect((await post(courseA, true)).status).toBe(201);
+  } finally { release(); }
+  expect((await late).status).toBe(200);
+  expect(OpeningS3.prototype.copyStagingToFinal).toHaveBeenCalledTimes(1);
+  expect(await f.sql`SELECT id FROM opening_jobs WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(1);
+});
+
+it("rolls back source completion and its membership when retell creation conflicts", async () => {
+  const digest = vi.mocked(OpeningS3.prototype.streamDigest);
+  const read = digest.getMockImplementation()!;
+  digest.mockImplementationOnce(async (...args) => {
+    const result = await read(...args);
+    const [source] = await f.sql`SELECT id FROM opening_sources WHERE workspace_id=${f.scope.workspaceId}`;
+    await f.sql`INSERT INTO opening_tasks (id, workspace_id, owner_user_id, title, minutes, origin)
+      VALUES (${source!.id}, ${f.scope.workspaceId}, ${f.scope.ownerUserId}, 'existing task', 10, 'manual')`;
+    return result;
+  });
+  expect((await post(courseA, true)).status).toBe(409);
+  expect(await f.sql`SELECT upload_state, parse_state FROM opening_sources WHERE workspace_id=${f.scope.workspaceId}`)
+    .toEqual([{ upload_state: "pending", parse_state: "not_started" }]);
+  expect(await f.sql`SELECT id FROM opening_jobs WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
+  expect(await f.sql`SELECT source_id FROM opening_source_versions WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
+  expect(await f.sql`SELECT asset_id FROM course_asset_memberships WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
+});
+
+it("commits membership and retell before a course is archived immediately after completion", async () => {
+  const remove = vi.mocked(OpeningS3.prototype.deleteObject);
+  const deleteObject = remove.getMockImplementation()!;
+  remove.mockImplementationOnce(async key => {
+    await deleteObject(key);
+    await f.sql`UPDATE courses SET archived_at=now() WHERE id=${courseA}`;
+  });
+  const created = await post(courseA, true);
+  expect(created.status).toBe(201);
+  const result = await created.json();
+  expect(await f.sql`SELECT asset_id FROM course_asset_memberships WHERE course_id=${courseA} AND asset_id=${result.sourceId}`).toHaveLength(1);
+  expect(await f.sql`SELECT id FROM opening_tasks WHERE id=${result.taskId} AND course_id=${courseA}`).toHaveLength(1);
+  const replay = await post(courseA, true);
+  expect(replay.status).toBe(200);
+  expect(await replay.json()).toEqual(result);
+});
+
+it("rejects a changed or omitted timezone for a pending keyed retell", async () => {
+  let entered!: () => void, release!: () => void;
+  const paused = new Promise<void>(resolve => { entered = resolve; });
+  const resume = new Promise<void>(resolve => { release = resolve; });
+  const put = vi.mocked(OpeningS3.prototype.putObject);
+  const write = put.getMockImplementation()!;
+  put.mockImplementationOnce(async (key, bytes) => { entered(); await resume; await write(key, bytes); });
+  const original = post(courseA, true, "Original", undefined, "Etc/GMT+12");
+  try {
+    await Promise.race([paused, original.then(r => { throw new Error(`Unexpected HTTP ${r.status}`); })]);
+    expect((await post(courseA, true, "Original", undefined, "Pacific/Kiritimati")).status).toBe(409);
+    expect((await post(courseA, true)).status).toBe(409);
+  } finally { release(); }
+  const created = await original;
+  expect(created.status).toBe(201);
+  const result = await created.json();
+  const retry = await post(courseA, true, "Original", undefined, "Etc/GMT+12");
+  expect(retry.status).toBe(200);
+  expect(await retry.json()).toEqual(result);
+  expect(await f.sql`SELECT text_capture_intent->>'timeZone' AS zone FROM opening_sources WHERE id=${result.sourceId}`)
+    .toEqual([{ zone: "Etc/GMT+12" }]);
+  expect(await f.sql`SELECT id FROM opening_tasks WHERE workspace_id=${f.scope.workspaceId}
+    AND not_before = ((statement_timestamp() AT TIME ZONE 'Etc/GMT+12')::date + 1)::timestamp AT TIME ZONE 'Etc/GMT+12'`)
+    .toHaveLength(1);
+});
 
 it.each([true, false])("binds a pending and completed source-only capture to its original course (withCourse=%s)", async withCourse => {
   const original = withCourse ? courseA : null;

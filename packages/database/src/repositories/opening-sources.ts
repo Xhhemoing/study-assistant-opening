@@ -21,7 +21,7 @@ export type OpeningScope = OpeningJobScope;
 export type OpeningTextCapture = {
   oppositeUploadId: string;
   completedOnly?: boolean;
-  intent: { courseId: string | null; scheduleNextDayRetell: boolean; inputDigest: string };
+  intent: { courseId: string | null; scheduleNextDayRetell: boolean; inputDigest: string; title: string; timeZone: string | null };
 };
 
 /**
@@ -62,7 +62,7 @@ export type OpeningSourceRepository = {
     id: string,
     actual: { bytes: number; sha256: string; mime: string },
   ): Promise<SourceRecord>;
-  completeWithParseJob(scope: OpeningScope, id: string, input: { key: string; payload: unknown; privacyEpoch: number; actual: { bytes: number; sha256: string; mime: string }; beforeComplete?: (current: SourceRecord) => Promise<void> }): Promise<SourceRecord>;
+  completeWithParseJob(scope: OpeningScope, id: string, input: { key: string; payload: unknown; privacyEpoch: number; actual: { bytes: number; sha256: string; mime: string }; beforeComplete?: (current: SourceRecord) => Promise<void>; afterComplete?: (tx: TransactionSql) => Promise<void>; onAlreadyCompleted?: () => void }): Promise<SourceRecord>;
   retryParseWithJob(scope: OpeningScope, id: string, input: { key: string; payload: unknown; privacyEpoch: number }): Promise<SourceRecord>;
   resolveLegacyFinalKey?(scope: OpeningScope, sourceId: string, canonicalFinalKey: string): Promise<string | null>;
   list(scope: OpeningScope): Promise<SourceRecord[]>;
@@ -308,7 +308,8 @@ export function createOpeningSourceRepository(sql: Sql, options: OpeningSourceRe
             const binding = existing[0]!.text_capture_intent;
             if (capture && (binding?.courseId !== capture.intent.courseId
               || binding?.inputDigest !== capture.intent.inputDigest
-              || binding?.scheduleNextDayRetell !== capture.intent.scheduleNextDayRetell)) {
+              || binding?.scheduleNextDayRetell !== capture.intent.scheduleNextDayRetell
+              || binding?.title !== capture.intent.title || binding?.timeZone !== capture.intent.timeZone)) {
               throw new OpeningSourceError("CONFLICT", "这次保存的讲解内容或设置已变化，请重新保存。");
             }
             const canResume = source.uploadState === "pending" && !capture?.completedOnly;
@@ -461,7 +462,7 @@ export function createOpeningSourceRepository(sql: Sql, options: OpeningSourceRe
         const currentRows = await tx`SELECT * FROM opening_sources WHERE id = ${id} AND workspace_id = ${scope.workspaceId} FOR UPDATE`;
         if (!currentRows.length) throw new OpeningSourceError("NOT_FOUND", `Source not found: ${id}`);
         const current = mapSource(currentRows[0] as Record<string, unknown>);
-        if (current.uploadState === "uploaded") return current;
+        if (current.uploadState === "uploaded") { input.onAlreadyCompleted?.(); return current; }
         if (current.uploadState !== "pending") throw new OpeningSourceError("CONFLICT", "Upload is no longer pending");
         await requireActiveCaptureCourse(tx, scope, currentRows[0]!.text_capture_intent?.courseId);
         assertMatch({ bytes: current.bytes, sha256: current.sha256, mime: current.mime }, input.actual);
@@ -475,6 +476,7 @@ export function createOpeningSourceRepository(sql: Sql, options: OpeningSourceRe
         const jobKind = parseJobKindForMime(current.mime);
         await tx`INSERT INTO opening_jobs (id, workspace_id, owner_user_id, key, kind, payload, privacy_epoch) VALUES (${jobId}, ${scope.workspaceId}, ${scope.ownerUserId}, ${input.key}, ${jobKind}, ${tx.json(input.payload as never)}, ${input.privacyEpoch})`;
         await tx`INSERT INTO opening_outbox (workspace_id, job_id, topic, payload) VALUES (${scope.workspaceId}, ${jobId}, 'opening.job.enqueue', ${tx.json({ jobId, kind: jobKind, sourceId: id } as never)})`;
+        await input.afterComplete?.(tx);
         await nextWorkspaceLearningHistoryRevision(tx, scope);
         await invalidateOpeningLearningEligibility(tx, scope, { sourceIds: [id] });
         return mapSource(sourceRows[0] as Record<string, unknown>);

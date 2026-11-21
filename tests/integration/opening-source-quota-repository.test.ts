@@ -92,7 +92,7 @@ describe("workspace upload quota with real SQL", () => {
     const repo = createOpeningSourceRepository(f.sql);
     const ids = [randomUUID(), randomUUID()] as const;
     const reserve = (index: 0 | 1) => repo.create(f.scope, { ...upload(4), uploadId: ids[index] }, {
-      oppositeUploadId: ids[index === 0 ? 1 : 0], intent: { courseId: null, scheduleNextDayRetell: index === 1, inputDigest: "a".repeat(64) },
+      oppositeUploadId: ids[index === 0 ? 1 : 0], intent: { courseId: null, scheduleNextDayRetell: index === 1, inputDigest: "a".repeat(64), title: "Notes", timeZone: null },
     });
     const results = await Promise.allSettled([reserve(0), reserve(1)]);
     expect(results.filter(result => result.status === "rejected")).toMatchObject([{ reason: { code: "CONFLICT" } }]);
@@ -105,7 +105,7 @@ describe("workspace upload quota with real SQL", () => {
     const repo = createOpeningSourceRepository(f.sql);
     const ids = [randomUUID(), randomUUID()] as const;
     const reserve = (index: 0 | 1) => repo.create(f.scope, { ...upload(4), uploadId: ids[index] }, {
-      oppositeUploadId: ids[index === 0 ? 1 : 0], intent: { courseId: null, scheduleNextDayRetell: index === 1, inputDigest: "a".repeat(64) },
+      oppositeUploadId: ids[index === 0 ? 1 : 0], intent: { courseId: null, scheduleNextDayRetell: index === 1, inputDigest: "a".repeat(64), title: "Notes", timeZone: null },
     });
     const pending = await reserve(1);
     await createOpeningSourceActionsRepository(f.sql).apply(f.scope, pending.id,

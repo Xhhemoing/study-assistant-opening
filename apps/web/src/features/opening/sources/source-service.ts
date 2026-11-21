@@ -17,7 +17,7 @@ import {
   type OpeningTextCapture,
 } from "@aistudy/database";
 import { sourceActionInputSchema, uploadInputSchema, type SourceActionInput, type SourceActionResult, type SourceRecord, type UploadInput, type UploadTicket } from "@aistudy/contracts";
-import type { Sql } from "postgres";
+import type { Sql, TransactionSql } from "postgres";
 import { validatedUploadStream, validateStoredUpload, UploadPolicyError } from "./upload-policy";
 import { isPreviewableMime } from "./preview-mime";
 import type { Principal } from "../../../lib/authorization";
@@ -127,6 +127,48 @@ export function createOpeningSourceService(sql: Sql, storage: OpeningStorage = n
     }
     return canonicalKey;
   }
+  async function completeUpload(p: Principal, id: string, capture?: (tx: TransactionSql) => Promise<void>) {
+    auth(p, "source.complete");
+    const scope = scopeOf(p);
+    const sourceId = id.toLowerCase();
+    const source = await sources.get(scope, sourceId);
+    if (source.uploadState === "uploaded") {
+      if (capture) {
+        await storage.deleteObject(storage.stagingKey(sourceId)).catch(() => undefined);
+        if (id !== sourceId) await storage.deleteObject(storage.stagingKey(id)).catch(() => undefined);
+      }
+      return { source, replayed: true };
+    }
+    let key = storage.stagingKey(sourceId);
+    let head = await storage.headObject(key);
+    if (!head.exists && id !== sourceId) {
+      const legacyKey = storage.stagingKey(id);
+      const legacyHead = await storage.headObject(legacyKey);
+      if (legacyHead.exists) { key = legacyKey; head = legacyHead; }
+    }
+    if (!head.exists) throw new UploadPolicyError("upload not found; PUT to uploadUrl first");
+    const digest = await storage.streamDigest(key, source.bytes + 1);
+    if (!magicMatchesMime(digest.firstBytes, source.mime)) throw new UploadPolicyError("stored object magic bytes do not match declared MIME");
+    const actual = { bytes: digest.bytes, sha256: digest.sha256, mime: source.mime };
+    validateStoredUpload(source, actual);
+    let replayed = false;
+    const done = await sources.completeWithParseJob(scope, sourceId, {
+      key: storage.finalKey(sourceId, source.version),
+      payload: { sourceId, sourceVersion: source.version },
+      privacyEpoch: await privacy.getWorkspaceEpoch(scope),
+      actual,
+      beforeComplete: current => storage.copyStagingToFinal(key, storage.finalKey(sourceId, current.version), { expectedEtag: head.etag }),
+      afterComplete: capture,
+      onAlreadyCompleted: () => { replayed = true; },
+    });
+    if (capture && replayed) {
+      await storage.deleteObject(storage.stagingKey(sourceId)).catch(() => undefined);
+      if (id !== sourceId) await storage.deleteObject(storage.stagingKey(id)).catch(() => undefined);
+    } else {
+      await storage.deleteObject(key);
+    }
+    return { source: done, replayed };
+  }
   return {
     async listSources(p: Principal): Promise<SourceRecord[]> { auth(p, "source.list"); return sources.list(scopeOf(p)); },
     async beginUpload(p: Principal, input: UploadInput): Promise<UploadTicket> {
@@ -220,36 +262,9 @@ export function createOpeningSourceService(sql: Sql, storage: OpeningStorage = n
       await storage.putObject(storage.stagingKey(sourceId), input.bytes, { mime: source.mime });
       return { ok: true };
     },
-    async completeUpload(p: Principal, id: string): Promise<SourceRecord> {
-      auth(p, "source.complete");
-      const scope = scopeOf(p);
-      const sourceId = id.toLowerCase();
-      const source = await sources.get(scope, sourceId);
-      if (source.uploadState === "uploaded") return source;
-      let key = storage.stagingKey(sourceId);
-      let head = await storage.headObject(key);
-      if (!head.exists && id !== sourceId) {
-        const legacyKey = storage.stagingKey(id);
-        const legacyHead = await storage.headObject(legacyKey);
-        if (legacyHead.exists) {
-          key = legacyKey;
-          head = legacyHead;
-        }
-      }
-      if (!head.exists) throw new UploadPolicyError("upload not found; PUT to uploadUrl first");
-      const digest = await storage.streamDigest(key, source.bytes + 1);
-      if (!magicMatchesMime(digest.firstBytes, source.mime)) throw new UploadPolicyError("stored object magic bytes do not match declared MIME");
-      const actual = { bytes: digest.bytes, sha256: digest.sha256, mime: source.mime };
-      validateStoredUpload(source, actual);
-      const done = await sources.completeWithParseJob(scope, sourceId, {
-        key: storage.finalKey(sourceId, source.version),
-        payload: { sourceId, sourceVersion: source.version },
-        privacyEpoch: await privacy.getWorkspaceEpoch(scope),
-        actual,
-        beforeComplete: current => storage.copyStagingToFinal(key, storage.finalKey(sourceId, current.version), { expectedEtag: head.etag }),
-      });
-      await storage.deleteObject(key);
-      return done;
+    async completeUpload(p: Principal, id: string): Promise<SourceRecord> { return (await completeUpload(p, id)).source; },
+    async completeCaptureUpload(p: Principal, id: string, afterComplete: (tx: TransactionSql) => Promise<void>) {
+      return completeUpload(p, id, afterComplete);
     },
     async retryParse(p: Principal, id: string): Promise<SourceRecord> {
       auth(p, "source.complete");
