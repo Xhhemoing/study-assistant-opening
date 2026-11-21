@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  CandidateIdentityError,
   CartridgePiiViolationError,
   GepaForbiddenSurfaceError,
   GepaInvalidPatchPayloadError,
@@ -10,6 +11,7 @@ import {
   assertNoRawPiiInText,
   buildGepaReflectionContext,
   canonicalizeIdentifier,
+  certifyMatureTransferLowerBound,
   clusterErrorTrajectories,
   computeCandidateMetrics,
   createDisjointTrajectorySplit,
@@ -1170,5 +1172,270 @@ describe("Exact (C, -L, T7) Pareto frontier, Hard Pre-Pareto Veto, and Promotion
       "requiredMissingPremise",
       "ruleId",
     ]);
+  });
+
+  it("enforces unique canonical candidateIds and receipt.candidateId matching in Pareto and GEPA rounds (Round-4 P1-2)", () => {
+    const c1 = buildMatureCohort("cand_alpha", {
+      learnerCount: 25,
+      repairedCount: 23,
+      t7PassedCount: 24,
+    });
+    const c1PaddedDup = buildMatureCohort("cand_alpha", {
+      learnerCount: 25,
+      repairedCount: 23,
+      t7PassedCount: 24,
+    });
+    const paddedCopy: CartridgeCandidateMetrics = {
+      ...c1PaddedDup,
+      candidateId: "  cand_alpha  ",
+    };
+
+    // Duplicate canonical candidateId in evaluateParetoFrontierAndPromotion -> throws CandidateIdentityError
+    expect(() =>
+      evaluateParetoFrontierAndPromotion([c1, paddedCopy], {
+        baseline: { cRate: 0.8, t7Rate: 0.72 },
+      }),
+    ).toThrow(CandidateIdentityError);
+
+    const records: ErrorTrajectoryRecord[] = [];
+    for (let comp = 0; comp < 4; comp += 1) {
+      for (let i = 0; i < 6; i += 1) {
+        records.push(
+          makeTrajectory({
+            trajectoryId: `id_chk_c${comp}_t${i}`,
+            learnerPseudoId: `pseudo_id_c${comp}_u${i}`,
+            itemFamilyId: `fam_id_c${comp}`,
+          }),
+        );
+      }
+    }
+    const split = createDisjointTrajectorySplit(records, { seed: 123 });
+
+    // Swapped scorer receipt candidateId -> throws CandidateIdentityError (mismatched_receipt_candidate_id)
+    expect(() =>
+      runGepaOptimizationRound({
+        basePolicy: makeBasePolicy(),
+        split,
+        clusteringOptions: { minSupport: 5 },
+        scoreCandidate: () => ({ ...c1, candidateId: "different_swapped_candidate" }),
+        paretoOptions: { baseline: { cRate: 0.8, t7Rate: 0.72 } },
+      }),
+    ).toThrow(CandidateIdentityError);
+
+    // Duplicate extraCandidatePatches IDs (including whitespace-padded variant) -> throws CandidateIdentityError
+    expect(() =>
+      runGepaOptimizationRound({
+        basePolicy: makeBasePolicy(),
+        split,
+        clusteringOptions: { minSupport: 5 },
+        extraCandidatePatches: [
+          {
+            candidateId: "extra_dup_cand",
+            patches: [
+              {
+                surface: "approvedTemplateSlots",
+                summary: "Slot 1",
+                payload: { k1: "v1" },
+              },
+            ],
+          },
+          {
+            candidateId: "  extra_dup_cand  ",
+            patches: [
+              {
+                surface: "approvedTemplateSlots",
+                summary: "Slot 2",
+                payload: { k2: "v2" },
+              },
+            ],
+          },
+        ],
+        scoreCandidate: (cand) => ({ ...c1, candidateId: cand.candidateId }),
+        paretoOptions: { baseline: { cRate: 0.8, t7Rate: 0.72 } },
+      }),
+    ).toThrow(CandidateIdentityError);
+  });
+
+  it("independently verifies Kish n_eff from learnerOutcomeCounts so 81+19x1 concentrated outcomes cannot clear 0.80 (Round-4 P1-3)", () => {
+    // 100 passes across 20 learners: 1 learner has 81 outcomes, 19 learners have 1 outcome each.
+    // True Kish n_eff = 100^2 / (81^2 + 19) = 10000 / 6580 ≈ 1.5198; CP95 ≈ 0.1394 << 0.80!
+    const concentratedTrajs: ErrorTrajectoryRecord[] = [];
+    for (let i = 0; i < 81; i += 1) {
+      concentratedTrajs.push(
+        makeTrajectory({
+          trajectoryId: `conc_heavy_${i}`,
+          learnerPseudoId: "pseudo_heavy_learner",
+          passedFreshFamilyTransfer: true,
+        }),
+      );
+    }
+    for (let u = 1; u <= 19; u += 1) {
+      concentratedTrajs.push(
+        makeTrajectory({
+          trajectoryId: `conc_single_${u}`,
+          learnerPseudoId: `pseudo_single_${u}`,
+          passedFreshFamilyTransfer: true,
+        }),
+      );
+    }
+
+    const honest = computeCandidateMetrics("cand_concentrated_honest", concentratedTrajs);
+    expect(honest.t7.status).toBe("mature");
+    if (honest.t7.status === "mature") {
+      expect(honest.t7.learnerClusterCount).toBe(20);
+      expect(honest.t7.learnerOutcomeCounts).toHaveLength(20);
+      expect(honest.t7.effectiveClusterSampleSize).toBeCloseTo(10000 / 6580, 6);
+      expect(honest.t7.learnerClusterLowerBound).toBeCloseTo(
+        Math.pow(0.05, 6580 / 10000),
+        4,
+      );
+      expect(honest.t7.learnerClusterLowerBound).toBeLessThan(0.15);
+    }
+
+    // Custom scorer lies about effectiveClusterSampleSize = 20 and LCB = 0.861 while carrying the concentrated counts.
+    const forgedConcentrated: CartridgeCandidateMetrics = {
+      ...honest,
+      candidateId: "cand_concentrated_forged_neff",
+      t7:
+        honest.t7.status === "mature"
+          ? {
+              ...honest.t7,
+              effectiveClusterSampleSize: 20,
+              clopperPearsonLowerBound: 0.86089,
+              learnerClusterLowerBound: 0.86089,
+            }
+          : honest.t7,
+    };
+
+    if (forgedConcentrated.t7.status === "mature") {
+      const cert = certifyMatureTransferLowerBound(forgedConcentrated.t7);
+      expect(cert.validTelemetry).toBe(false);
+      expect(cert.exactKishNEff).toBeCloseTo(10000 / 6580, 6);
+      expect(cert.certifiedCp95Lcb).toBeLessThan(0.15);
+    }
+
+    const evalRes = evaluateParetoFrontierAndPromotion([honest, forgedConcentrated], {
+      baseline: { cRate: 0.8, t7Rate: 0.75 },
+      minT7Gain: 0.05,
+      minClusterCount: 5,
+    });
+    expect(evalRes.promotedCandidateIds).toEqual([]);
+    const forgedEval = evalRes.results.find(
+      (r) => r.candidateId === "cand_concentrated_forged_neff",
+    )!;
+    expect(forgedEval.status).toBe("vetoed_invalid_telemetry");
+    expect(forgedEval.onParetoFrontier).toBe(false);
+  });
+
+  it("canonicalizes and PII-scans all caller-provided candidateIds and extra candidate metadata (Round-4 P1-4)", () => {
+    const safe = buildMatureCohort("cand_clean", {
+      learnerCount: 25,
+      repairedCount: 23,
+      t7PassedCount: 24,
+    });
+
+    // PII in computeCandidateMetrics candidateId -> throws CartridgePiiViolationError
+    expect(() => computeCandidateMetrics("alice@school.edu", [makeTrajectory({ trajectoryId: "t1" })])).toThrow(
+      CartridgePiiViolationError,
+    );
+
+    // PII in evaluateParetoFrontierAndPromotion candidateId -> throws CartridgePiiViolationError
+    expect(() =>
+      evaluateParetoFrontierAndPromotion([{ ...safe, candidateId: "cand_user@example.com" }], {
+        baseline: { cRate: 0.8, t7Rate: 0.72 },
+      }),
+    ).toThrow(CartridgePiiViolationError);
+
+    // PII in extraCandidatePatches candidateId -> throws CartridgePiiViolationError
+    const records: ErrorTrajectoryRecord[] = [];
+    for (let comp = 0; comp < 4; comp += 1) {
+      for (let i = 0; i < 6; i += 1) {
+        records.push(
+          makeTrajectory({
+            trajectoryId: `pii_id_c${comp}_t${i}`,
+            learnerPseudoId: `pseudo_piid_c${comp}_u${i}`,
+            itemFamilyId: `fam_piid_c${comp}`,
+          }),
+        );
+      }
+    }
+    const split = createDisjointTrajectorySplit(records, { seed: 321 });
+
+    expect(() =>
+      runGepaOptimizationRound({
+        basePolicy: makeBasePolicy(),
+        split,
+        clusteringOptions: { minSupport: 5 },
+        extraCandidatePatches: [
+          {
+            candidateId: "cand_555-867-5309",
+            patches: [
+              {
+                surface: "approvedTemplateSlots",
+                summary: "Clean slot",
+                payload: { k: "v" },
+              },
+            ],
+          },
+        ],
+        scoreCandidate: (cand) => ({ ...safe, candidateId: cand.candidateId }),
+        paretoOptions: { baseline: { cRate: 0.8, t7Rate: 0.72 } },
+      }),
+    ).toThrow(CartridgePiiViolationError);
+  });
+
+  it("vetoes malformed C/T7 telemetry BEFORE Pareto dominance so invalid candidates cannot suppress valid ones (Round-4 P2-1)", () => {
+    const validCandidate = buildMatureCohort("cand_valid_honest", {
+      learnerCount: 25,
+      repairedCount: 22, // C = 0.88
+      t7PassedCount: 24, // T7 = 0.96
+    });
+
+    // Leakage-safe candidate claiming T7 rate = 1.0 backed by 0 passes (inconsistent T7 counts!)
+    const bogusT7Candidate: CartridgeCandidateMetrics = {
+      ...validCandidate,
+      candidateId: "cand_bogus_t7_rate",
+      c: { ...validCandidate.c, rate: 1, repairedCount: 25, verifiableFirstErrorCount: 25 },
+      t7:
+        validCandidate.t7.status === "mature"
+          ? {
+              ...validCandidate.t7,
+              rate: 1.0,
+              passedFreshTransferCount: 0,
+            }
+          : validCandidate.t7,
+    };
+
+    // Leakage-safe candidate with inconsistent C rate (rate=1.0 backed by 0 repaired)
+    const bogusCCandidate: CartridgeCandidateMetrics = {
+      ...validCandidate,
+      candidateId: "cand_bogus_c_rate",
+      c: {
+        rate: 1.0,
+        repairedCount: 0,
+        verifiableFirstErrorCount: 25,
+        abandonedCount: 0,
+        abandonmentRate: 0,
+      },
+    };
+
+    const result = evaluateParetoFrontierAndPromotion(
+      [bogusT7Candidate, bogusCCandidate, validCandidate],
+      {
+        baseline: { cRate: 0.85, t7Rate: 0.72 },
+        minT7Gain: 0.05,
+        nonInferiorityMargin: 0.02,
+        minClusterCount: 5,
+      },
+    );
+
+    expect(result.vetoedCandidateIds).toEqual(["cand_bogus_t7_rate", "cand_bogus_c_rate"]);
+    expect(result.frontierCandidateIds).toEqual(["cand_valid_honest"]);
+    expect(result.promotedCandidateIds).toEqual(["cand_valid_honest"]);
+    expect(result.dominatedCandidateIds).toEqual([]);
+
+    const bogusT7Eval = result.results.find((r) => r.candidateId === "cand_bogus_t7_rate")!;
+    expect(bogusT7Eval.status).toBe("vetoed_invalid_telemetry");
+    expect(bogusT7Eval.onParetoFrontier).toBe(false);
   });
 });

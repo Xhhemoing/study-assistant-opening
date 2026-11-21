@@ -60,10 +60,30 @@ export function detectProtectedLeakage(
   return hits;
 }
 
+function deepFreezeClone<T>(value: T): T {
+  if (value === null || typeof value !== "object") {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    const cloned = value.map((item) => deepFreezeClone(item));
+    return Object.freeze(cloned) as unknown as T;
+  }
+  const clonedObj: Record<string, unknown> = {};
+  for (const key of Object.keys(value as Record<string, unknown>)) {
+    clonedObj[key] = deepFreezeClone((value as Record<string, unknown>)[key]);
+  }
+  return Object.freeze(clonedObj) as T;
+}
+
 export function runStage0Episode(
   episode: Stage0EpisodeSpec,
   policy: Stage0TutorPolicy,
 ): Stage0EpisodeResult {
+  // Snapshot immutable audit copies BEFORE handing any object to the policy.
+  const auditProtectedAnswerTokens = Object.freeze([...episode.protectedAnswerTokens]);
+  const auditProtectedStepTokens = Object.freeze([...episode.protectedStepTokens]);
+  const frozenCandidateMisconceptions = deepFreezeClone(episode.candidateMisconceptions);
+
   const episodeRng = createXoshiro128StarStar(episode.seed);
   let studentState = createInitialStudentState();
   let utterance = buildInitialStudentUtterance(episode, episodeRng);
@@ -74,7 +94,7 @@ export function runStage0Episode(
   let falseMisconceptionAttributed = false;
 
   for (let turnNumber = 1; turnNumber <= episode.maxTurns; turnNumber += 1) {
-    const turnInput: Stage0TutorTurnInput = {
+    const turnInput: Stage0TutorTurnInput = Object.freeze({
       episodeId: episode.episodeId,
       turnNumber,
       maxTurns: episode.maxTurns,
@@ -82,22 +102,22 @@ export function runStage0Episode(
       conceptId: episode.conceptId,
       itemFamilyId: episode.itemFamilyId,
       prompt: episode.prompt,
-      studentUtterance: utterance,
-      history: turns,
-      candidateMisconceptions: episode.candidateMisconceptions,
+      studentUtterance: deepFreezeClone(utterance),
+      history: deepFreezeClone(turns),
+      candidateMisconceptions: frozenCandidateMisconceptions,
       clarificationCue: episode.scenario.clarificationCue,
       analogCue: episode.variant.analogCue,
-      sealedSolutionRef: {
-        protectedAnswerTokens: episode.protectedAnswerTokens,
-        protectedStepTokens: episode.protectedStepTokens,
-      },
-    };
+      sealedSolutionRef: Object.freeze({
+        protectedAnswerTokens: Object.freeze([...auditProtectedAnswerTokens]),
+        protectedStepTokens: Object.freeze([...auditProtectedStepTokens]),
+      }),
+    });
 
     const tutorResponse = policy.diagnoseAndRespond(turnInput);
     const detectedLeakTokens = detectProtectedLeakage(
       tutorResponse.releasedHintText,
-      episode.protectedAnswerTokens,
-      episode.protectedStepTokens,
+      auditProtectedAnswerTokens,
+      auditProtectedStepTokens,
     );
     const leaked = tutorResponse.leaksProtectedStepOrAnswer || detectedLeakTokens.length > 0;
     for (const token of detectedLeakTokens) {
@@ -457,7 +477,26 @@ export function evaluateStage0Gate(
     );
   }
 
-  const results = episodeSpecs.map((spec) => runStage0Episode(spec, policy));
+  // In promotion mode, execute against a freshly constructed canonical matrix (in caller order)
+  // so policies holding closures over caller-supplied `options.episodes` cannot mutate audit state mid-run.
+  let episodesToRun: readonly Stage0EpisodeSpec[];
+  if (!diagnosticSubset && options.episodes !== undefined) {
+    const canonicalFresh = generateStage0Episodes(seed, maxTurns);
+    const canonicalByCell = new Map<string, Stage0EpisodeSpec>(
+      canonicalFresh.map((spec) => [
+        `${spec.scenarioId}::${spec.personaId}::${spec.variantIndex}`,
+        spec,
+      ]),
+    );
+    episodesToRun = episodeSpecs.map((spec) => {
+      const key = `${spec.scenarioId}::${spec.personaId}::${spec.variantIndex}`;
+      return canonicalByCell.get(key) ?? spec;
+    });
+  } else {
+    episodesToRun = episodeSpecs;
+  }
+
+  const results = episodesToRun.map((spec) => runStage0Episode(spec, policy));
 
   const totalEpisodes = results.length;
   const leakedEpisodes = results.filter((r) => r.leakedAnyTurn);

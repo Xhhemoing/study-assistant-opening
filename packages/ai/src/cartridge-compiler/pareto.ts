@@ -1,12 +1,13 @@
-import { canonicalizeIdentifier } from "./clustering";
-import type {
-  CartridgeCandidateMetrics,
-  ErrorTrajectoryRecord,
-  ParetoCandidateEvaluation,
-  ParetoCandidateStatus,
-  ParetoEvaluationOptions,
-  ParetoEvaluationResult,
-  T7Metric,
+import { assertNoRawPiiInText, canonicalizeIdentifier } from "./clustering";
+import {
+  CandidateIdentityError,
+  type CartridgeCandidateMetrics,
+  type ErrorTrajectoryRecord,
+  type ParetoCandidateEvaluation,
+  type ParetoCandidateStatus,
+  type ParetoEvaluationOptions,
+  type ParetoEvaluationResult,
+  type T7Metric,
 } from "./types";
 
 const EPSILON = 1e-12;
@@ -181,6 +182,9 @@ export function computeCandidateMetrics(
   trajectories: readonly ErrorTrajectoryRecord[],
   options: ComputeCandidateMetricsOptions = {},
 ): CartridgeCandidateMetrics {
+  const canonicalCandidateId = canonicalizeIdentifier(candidateId, "candidateId");
+  assertNoRawPiiInText(canonicalCandidateId, "candidateId");
+
   const confidenceZ = options.confidenceZ ?? DEFAULT_ONE_SIDED_95_Z;
   if (!Number.isFinite(confidenceZ) || confidenceZ < DEFAULT_ONE_SIDED_95_Z - 1e-6) {
     throw new RangeError(
@@ -326,8 +330,10 @@ export function computeCandidateMetrics(
         ? clusters.reduce((sum, cl) => sum + cl.passed / cl.eligible, 0) / clusterCount
         : 0;
 
+    const learnerOutcomeCounts = clusters.map((cl) => cl.eligible);
+
     // Kish design-effect effective cluster sample size, bounded strictly above by distinct learner count.
-    const sumSqClusterSize = clusters.reduce((sum, cl) => sum + cl.eligible * cl.eligible, 0);
+    const sumSqClusterSize = learnerOutcomeCounts.reduce((sum, size) => sum + size * size, 0);
     const kishClusters =
       sumSqClusterSize > 0
         ? (eligibleMatureCount * eligibleMatureCount) / sumSqClusterSize
@@ -374,6 +380,7 @@ export function computeCandidateMetrics(
       passedFreshTransferCount: passedMatureCount,
       eligibleFollowupCohortCount: eligibleMatureCount,
       learnerClusterCount: clusterCount,
+      learnerOutcomeCounts,
       effectiveClusterSampleSize,
       learnerClusterMean,
       standardError: effectiveSe,
@@ -384,7 +391,7 @@ export function computeCandidateMetrics(
   }
 
   return {
-    candidateId,
+    candidateId: canonicalCandidateId,
     c: {
       rate: cRate,
       repairedCount,
@@ -539,17 +546,251 @@ function validateLeakageTelemetryFailClosed(
   return vetoReasons;
 }
 
+export interface MatureTransferCertification {
+  readonly validTelemetry: boolean;
+  readonly telemetryIssues: readonly string[];
+  readonly exactRate: number;
+  readonly exactKishNEff: number;
+  readonly certifiedCp95Lcb: number;
+}
+
+/**
+ * Independently verifies mature T7 count consistency, per-learner outcome counts,
+ * Kish effective cluster sample size `n_eff = min(M, N^2 / sum(c_i^2))`, and the
+ * exact one-sided 95% (`alpha = 0.05`) Clopper-Pearson lower confidence bound.
+ */
+export function certifyMatureTransferLowerBound(
+  t7: Extract<T7Metric, { status: "mature" }>,
+): MatureTransferCertification {
+  const telemetryIssues: string[] = [];
+
+  const validEligible =
+    isNonNegativeInteger(t7.eligibleFollowupCohortCount) && t7.eligibleFollowupCohortCount > 0;
+  if (!validEligible) {
+    telemetryIssues.push(
+      `invalid_t7_eligibleFollowupCohortCount:${String(t7.eligibleFollowupCohortCount)}`,
+    );
+  }
+
+  const validPassed =
+    isNonNegativeInteger(t7.passedFreshTransferCount) &&
+    validEligible &&
+    t7.passedFreshTransferCount <= t7.eligibleFollowupCohortCount;
+  if (!validPassed) {
+    telemetryIssues.push(
+      `invalid_t7_passedFreshTransferCount:${String(t7.passedFreshTransferCount)}/${String(t7.eligibleFollowupCohortCount)}`,
+    );
+  }
+
+  const validClusters =
+    isNonNegativeInteger(t7.learnerClusterCount) &&
+    t7.learnerClusterCount > 0 &&
+    validEligible &&
+    t7.learnerClusterCount <= t7.eligibleFollowupCohortCount;
+  if (!validClusters) {
+    telemetryIssues.push(
+      `invalid_t7_learnerClusterCount:${String(t7.learnerClusterCount)}/${String(t7.eligibleFollowupCohortCount)}`,
+    );
+  }
+
+  let exactKishNEff = 0;
+  if (!Array.isArray(t7.learnerOutcomeCounts)) {
+    telemetryIssues.push("missing_t7_learnerOutcomeCounts");
+  } else if (validClusters && t7.learnerOutcomeCounts.length !== t7.learnerClusterCount) {
+    telemetryIssues.push(
+      `inconsistent_t7_learnerOutcomeCounts_length:${t7.learnerOutcomeCounts.length}!=${t7.learnerClusterCount}`,
+    );
+  } else {
+    let sumCounts = 0;
+    let sumSq = 0;
+    let allPosInt = true;
+    for (let i = 0; i < t7.learnerOutcomeCounts.length; i += 1) {
+      const c = t7.learnerOutcomeCounts[i];
+      if (!isNonNegativeInteger(c) || c <= 0) {
+        allPosInt = false;
+        telemetryIssues.push(`invalid_t7_learnerOutcomeCounts[${i}]:${String(c)}`);
+        break;
+      }
+      sumCounts += c;
+      sumSq += c * c;
+    }
+    if (allPosInt && validEligible) {
+      if (sumCounts !== t7.eligibleFollowupCohortCount) {
+        telemetryIssues.push(
+          `inconsistent_t7_learnerOutcomeCounts_sum:${sumCounts}!=${t7.eligibleFollowupCohortCount}`,
+        );
+      } else if (validClusters && sumSq > 0) {
+        exactKishNEff = Math.min(
+          t7.learnerClusterCount,
+          (t7.eligibleFollowupCohortCount * t7.eligibleFollowupCohortCount) / sumSq,
+        );
+      }
+    }
+  }
+
+  const exactRate =
+    validEligible && validPassed
+      ? t7.passedFreshTransferCount / t7.eligibleFollowupCohortCount
+      : Number.NaN;
+
+  if (typeof t7.rate !== "number" || !Number.isFinite(t7.rate) || t7.rate < 0 || t7.rate > 1) {
+    telemetryIssues.push(`invalid_t7_rate:${String(t7.rate)}`);
+  } else if (Number.isFinite(exactRate) && Math.abs(t7.rate - exactRate) > 1e-9) {
+    telemetryIssues.push(`inconsistent_t7_rate:reported(${t7.rate})!=derived(${exactRate})`);
+  }
+
+  if (
+    !Number.isFinite(t7.effectiveClusterSampleSize) ||
+    t7.effectiveClusterSampleSize <= 0 ||
+    (exactKishNEff > 0 && t7.effectiveClusterSampleSize > exactKishNEff + 1e-9)
+  ) {
+    telemetryIssues.push(
+      `inflated_or_invalid_effectiveClusterSampleSize:reported(${String(t7.effectiveClusterSampleSize)})>kish(${exactKishNEff.toFixed(6)})`,
+    );
+  }
+
+  if (
+    typeof t7.learnerClusterMean !== "number" ||
+    !Number.isFinite(t7.learnerClusterMean) ||
+    t7.learnerClusterMean < 0 ||
+    t7.learnerClusterMean > 1
+  ) {
+    telemetryIssues.push(`invalid_t7_learnerClusterMean:${String(t7.learnerClusterMean)}`);
+  }
+
+  if (typeof t7.standardError !== "number" || !Number.isFinite(t7.standardError) || t7.standardError < 0) {
+    telemetryIssues.push(`invalid_t7_standardError:${String(t7.standardError)}`);
+  }
+
+  if (
+    typeof t7.clopperPearsonLowerBound !== "number" ||
+    !Number.isFinite(t7.clopperPearsonLowerBound) ||
+    t7.clopperPearsonLowerBound < 0 ||
+    t7.clopperPearsonLowerBound > 1
+  ) {
+    telemetryIssues.push(
+      `invalid_t7_clopperPearsonLowerBound:${String(t7.clopperPearsonLowerBound)}`,
+    );
+  }
+
+  if (
+    typeof t7.learnerClusterLowerBound !== "number" ||
+    !Number.isFinite(t7.learnerClusterLowerBound) ||
+    t7.learnerClusterLowerBound < 0 ||
+    t7.learnerClusterLowerBound > 1
+  ) {
+    telemetryIssues.push(
+      `invalid_t7_learnerClusterLowerBound:${String(t7.learnerClusterLowerBound)}`,
+    );
+  }
+
+  const boundedNEff =
+    exactKishNEff > 0 &&
+    Number.isFinite(t7.effectiveClusterSampleSize) &&
+    t7.effectiveClusterSampleSize > 0
+      ? Math.min(exactKishNEff, t7.effectiveClusterSampleSize)
+      : exactKishNEff;
+  const certifiedCp95Lcb =
+    Number.isFinite(exactRate) && boundedNEff > 0
+      ? exactClopperPearsonLowerBound(exactRate * boundedNEff, boundedNEff, MAX_PROMOTION_ALPHA)
+      : 0;
+
+  return {
+    validTelemetry: telemetryIssues.length === 0,
+    telemetryIssues,
+    exactRate,
+    exactKishNEff,
+    certifiedCp95Lcb,
+  };
+}
+
+function validateObjectiveTelemetryFailClosed(
+  candidate: CartridgeCandidateMetrics,
+): { issues: string[]; matureCert: MatureTransferCertification | null } {
+  const issues: string[] = [];
+  const c = candidate.c;
+
+  const validVerifiable = isNonNegativeInteger(c.verifiableFirstErrorCount);
+  const validRepaired = isNonNegativeInteger(c.repairedCount);
+  if (!validVerifiable) {
+    issues.push(`invalid_c_verifiableFirstErrorCount:${String(c.verifiableFirstErrorCount)}`);
+  }
+  if (!validRepaired) {
+    issues.push(`invalid_c_repairedCount:${String(c.repairedCount)}`);
+  }
+  if (validVerifiable && validRepaired && c.repairedCount > c.verifiableFirstErrorCount) {
+    issues.push(`inconsistent_c_counts:repaired(${c.repairedCount})>verifiable(${c.verifiableFirstErrorCount})`);
+  }
+  if (!isNonNegativeInteger(c.abandonedCount)) {
+    issues.push(`invalid_c_abandonedCount:${String(c.abandonedCount)}`);
+  }
+  if (
+    typeof c.abandonmentRate !== "number" ||
+    !Number.isFinite(c.abandonmentRate) ||
+    c.abandonmentRate < 0 ||
+    c.abandonmentRate > 1
+  ) {
+    issues.push(`invalid_c_abandonmentRate:${String(c.abandonmentRate)}`);
+  }
+  if (typeof c.rate !== "number" || !Number.isFinite(c.rate) || c.rate < 0 || c.rate > 1) {
+    issues.push(`invalid_c_rate:${String(c.rate)}`);
+  } else if (validVerifiable && validRepaired && c.repairedCount <= c.verifiableFirstErrorCount) {
+    const expectedC =
+      c.verifiableFirstErrorCount > 0 ? c.repairedCount / c.verifiableFirstErrorCount : 0;
+    if (Math.abs(c.rate - expectedC) > 1e-9) {
+      issues.push(`inconsistent_c_rate:reported(${c.rate})!=derived(${expectedC})`);
+    }
+  }
+
+  let matureCert: MatureTransferCertification | null = null;
+  if (candidate.t7.status === "mature") {
+    matureCert = certifyMatureTransferLowerBound(candidate.t7);
+    if (!matureCert.validTelemetry) {
+      issues.push(...matureCert.telemetryIssues);
+    }
+  } else {
+    const t7p = candidate.t7;
+    if (!isNonNegativeInteger(t7p.eligibleFollowupCohortCount)) {
+      issues.push(
+        `invalid_pending_t7_eligibleFollowupCohortCount:${String(t7p.eligibleFollowupCohortCount)}`,
+      );
+    }
+    if (!isNonNegativeInteger(t7p.passedFreshTransferCount)) {
+      issues.push(
+        `invalid_pending_t7_passedFreshTransferCount:${String(t7p.passedFreshTransferCount)}`,
+      );
+    }
+    if (
+      isNonNegativeInteger(t7p.eligibleFollowupCohortCount) &&
+      isNonNegativeInteger(t7p.passedFreshTransferCount) &&
+      t7p.passedFreshTransferCount > t7p.eligibleFollowupCohortCount
+    ) {
+      issues.push(
+        `inconsistent_pending_t7_counts:passed(${t7p.passedFreshTransferCount})>eligible(${t7p.eligibleFollowupCohortCount})`,
+      );
+    }
+    if (!isNonNegativeInteger(t7p.pendingCohortCount)) {
+      issues.push(`invalid_pending_t7_pendingCohortCount:${String(t7p.pendingCohortCount)}`);
+    }
+    if (typeof t7p.reason !== "string" || t7p.reason.trim().length === 0) {
+      issues.push("invalid_pending_t7_reason");
+    }
+  }
+
+  return { issues, matureCert };
+}
+
 /**
  * Runs:
- * 1) Fail-closed Hard Pre-Pareto Veto on leakage telemetry (`NaN`/non-finite/negative/
- *    non-integer/zero-turn/inconsistent counts, `severeLeakCount > 0`, or
- *    `L > maxAllowedLeakageRate`) BEFORE any Pareto dominance comparison so high C
- *    or corrupted telemetry can NEVER mask answer leakage,
- * 2) Exact non-dominated Pareto frontier ranking on `(C, -L, T7)` for mature candidates
+ * 1) Canonicalization, PII check, and uniqueness enforcement on all `candidateId`s,
+ * 2) Fail-closed Hard Pre-Pareto Veto on leakage telemetry AND objective (`C`, `T7`)
+ *    telemetry integrity BEFORE any Pareto dominance comparison so neither leakage
+ *    nor malformed `C`/`T7` counts can ever enter the frontier or dominate a valid candidate,
+ * 3) Exact non-dominated Pareto frontier ranking on `(C, -L, T7)` for mature candidates
  *    and `(C, -L)` shadow ranking for pending-T7 candidates,
- * 3) Promotion gate requiring mature T7, exact cluster-level Clopper-Pearson-capped
- *    student-clustered LCB >= baselineT7 + minT7Gain, minimum cluster count, and
- *    C >= baselineC - nonInferiorityMargin.
+ * 4) Promotion gate requiring mature T7, independently certified Kish `n_eff` and
+ *    exact one-sided 95% (`alpha <= 0.05`) Clopper-Pearson LCB >= baselineT7 + minT7Gain,
+ *    minimum cluster count, and C >= baselineC - nonInferiorityMargin.
  */
 export function evaluateParetoFrontierAndPromotion(
   candidates: readonly CartridgeCandidateMetrics[],
@@ -569,16 +810,55 @@ export function evaluateParetoFrontierAndPromotion(
   const nonInferiorityMargin = options.nonInferiorityMargin ?? 0.02;
   const minClusterCount = options.minClusterCount ?? 5;
 
-  const vetoMap = new Map<string, string[]>();
+  // Canonicalize, PII-scan, and enforce strict uniqueness across all candidateIds upfront.
+  const seenCandidateIds = new Set<string>();
+  const canonicalCandidates: CartridgeCandidateMetrics[] = candidates.map((candidate) => {
+    const canonicalId = canonicalizeIdentifier(candidate.candidateId, "candidateId");
+    assertNoRawPiiInText(canonicalId, "candidateId");
+    if (seenCandidateIds.has(canonicalId)) {
+      throw new CandidateIdentityError(
+        `Duplicate candidateId "${canonicalId}" in Pareto evaluation.`,
+        "duplicate_candidate_id",
+        canonicalId,
+      );
+    }
+    seenCandidateIds.add(canonicalId);
+    return canonicalId === candidate.candidateId
+      ? candidate
+      : { ...candidate, candidateId: canonicalId };
+  });
+
+  const vetoMap = new Map<
+    string,
+    { status: "vetoed_leakage" | "vetoed_invalid_telemetry"; reasons: string[] }
+  >();
+  const matureCertMap = new Map<string, MatureTransferCertification>();
   const safeMature: CartridgeCandidateMetrics[] = [];
   const safePending: CartridgeCandidateMetrics[] = [];
 
-  for (const candidate of candidates) {
-    const vetoReasons = validateLeakageTelemetryFailClosed(candidate, maxAllowedLeakageRate);
+  for (const candidate of canonicalCandidates) {
+    const leakVetoReasons = validateLeakageTelemetryFailClosed(candidate, maxAllowedLeakageRate);
+    if (leakVetoReasons.length > 0) {
+      vetoMap.set(candidate.candidateId, {
+        status: "vetoed_leakage",
+        reasons: leakVetoReasons,
+      });
+      continue;
+    }
 
-    if (vetoReasons.length > 0) {
-      vetoMap.set(candidate.candidateId, vetoReasons);
-    } else if (candidate.t7.status === "mature") {
+    const { issues: objectiveIssues, matureCert } = validateObjectiveTelemetryFailClosed(candidate);
+    if (matureCert) {
+      matureCertMap.set(candidate.candidateId, matureCert);
+    }
+    if (objectiveIssues.length > 0) {
+      vetoMap.set(candidate.candidateId, {
+        status: "vetoed_invalid_telemetry",
+        reasons: objectiveIssues,
+      });
+      continue;
+    }
+
+    if (candidate.t7.status === "mature") {
       safeMature.push(candidate);
     } else {
       safePending.push(candidate);
@@ -609,17 +889,17 @@ export function evaluateParetoFrontierAndPromotion(
     dominatedByMap.set(target.candidateId, dominators);
   }
 
-  const results: ParetoCandidateEvaluation[] = candidates.map((candidate) => {
-    const vetoReasons = vetoMap.get(candidate.candidateId);
-    if (vetoReasons) {
+  const results: ParetoCandidateEvaluation[] = canonicalCandidates.map((candidate) => {
+    const veto = vetoMap.get(candidate.candidateId);
+    if (veto) {
       return {
         candidateId: candidate.candidateId,
         metrics: candidate,
-        status: "vetoed_leakage",
+        status: veto.status,
         onParetoFrontier: false,
         dominatedBy: [],
-        vetoReasons,
-        promotionBlockers: vetoReasons,
+        vetoReasons: veto.reasons,
+        promotionBlockers: veto.reasons,
       };
     }
 
@@ -638,96 +918,45 @@ export function evaluateParetoFrontierAndPromotion(
 
     // Non-dominated safe candidate on Pareto frontier: check promotion gate.
     const promotionBlockers: string[] = [];
-    if (!Number.isFinite(candidate.c.rate) || candidate.c.rate < 0 || candidate.c.rate > 1) {
-      promotionBlockers.push(`invalid_c_rate:${String(candidate.c.rate)}`);
-    }
-
     if (candidate.t7.status === "pending") {
       promotionBlockers.push(`t7_pending:${candidate.t7.reason}`);
     } else {
       const t7 = candidate.t7;
-      const validEligible =
-        isNonNegativeInteger(t7.eligibleFollowupCohortCount) &&
-        t7.eligibleFollowupCohortCount > 0;
-      const validPassed =
-        isNonNegativeInteger(t7.passedFreshTransferCount) &&
-        validEligible &&
-        t7.passedFreshTransferCount <= t7.eligibleFollowupCohortCount;
-      const validClusters =
-        isNonNegativeInteger(t7.learnerClusterCount) &&
-        t7.learnerClusterCount > 0 &&
-        validEligible &&
-        t7.learnerClusterCount <= t7.eligibleFollowupCohortCount;
+      const cert = matureCertMap.get(candidate.candidateId) ?? certifyMatureTransferLowerBound(t7);
 
       if (
-        !validEligible ||
-        !validPassed ||
-        !validClusters ||
-        !Number.isFinite(t7.rate) ||
-        !Number.isFinite(t7.learnerClusterLowerBound)
+        t7.alpha !== undefined &&
+        (!Number.isFinite(t7.alpha) || t7.alpha <= 0 || t7.alpha > MAX_PROMOTION_ALPHA + 1e-9)
       ) {
-        promotionBlockers.push("invalid_t7_metrics:non_finite_or_inconsistent_counts");
-      } else {
-        const exactT7Rate = t7.passedFreshTransferCount / t7.eligibleFollowupCohortCount;
-        if (Math.abs(t7.rate - exactT7Rate) > 1e-9) {
-          promotionBlockers.push(
-            `inconsistent_t7_rate:reported(${t7.rate})!=derived(${exactT7Rate})`,
-          );
-        }
-        if (
-          t7.alpha !== undefined &&
-          (!Number.isFinite(t7.alpha) || t7.alpha <= 0 || t7.alpha > MAX_PROMOTION_ALPHA + 1e-9)
-        ) {
-          promotionBlockers.push(
-            `t7_alpha_exceeds_max_0_05:${String(t7.alpha)}>${MAX_PROMOTION_ALPHA}`,
-          );
-        }
-        if (
-          !Number.isFinite(t7.effectiveClusterSampleSize) ||
-          t7.effectiveClusterSampleSize <= 0 ||
-          t7.effectiveClusterSampleSize > t7.learnerClusterCount + EPSILON
-        ) {
-          promotionBlockers.push(
-            `invalid_t7_effective_sample_size:${String(t7.effectiveClusterSampleSize)}/${t7.learnerClusterCount}`,
-          );
-        }
-
-        if (t7.learnerClusterCount < minClusterCount) {
-          promotionBlockers.push(
-            `insufficient_student_clusters:${t7.learnerClusterCount}<${minClusterCount}`,
-          );
-        }
-
-        // Independently recompute the exact one-sided 95% (alpha = 0.05) Clopper-Pearson ceiling
-        // so neither alpha > 0.05 nor a custom/forged scorer LCB can promote 5/5 past 0.80.
-        const boundedNEff =
-          Number.isFinite(t7.effectiveClusterSampleSize) && t7.effectiveClusterSampleSize > 0
-            ? Math.min(t7.learnerClusterCount, t7.effectiveClusterSampleSize)
-            : t7.learnerClusterCount;
-        const certifiedCp95Lcb = exactClopperPearsonLowerBound(
-          exactT7Rate * boundedNEff,
-          boundedNEff,
-          MAX_PROMOTION_ALPHA,
+        promotionBlockers.push(
+          `t7_alpha_exceeds_max_0_05:${String(t7.alpha)}>${MAX_PROMOTION_ALPHA}`,
         );
-        if (t7.learnerClusterLowerBound > certifiedCp95Lcb + 1e-9) {
-          promotionBlockers.push(
-            `t7_lcb_exceeds_certified_cp95:${t7.learnerClusterLowerBound.toFixed(4)}>${certifiedCp95Lcb.toFixed(4)}`,
-          );
-        }
+      }
 
-        const verifiedLcb = Math.min(t7.learnerClusterLowerBound, certifiedCp95Lcb);
-        const requiredT7Lcb = options.baseline.t7Rate + minT7Gain;
-        if (verifiedLcb + EPSILON < requiredT7Lcb) {
-          promotionBlockers.push(
-            `t7_lcb_below_gain_threshold:${verifiedLcb.toFixed(4)}<${requiredT7Lcb.toFixed(4)}`,
-          );
-        }
-        const minAllowedC = options.baseline.cRate - nonInferiorityMargin;
-        if (candidate.c.rate + EPSILON < minAllowedC) {
-          promotionBlockers.push(
-            `c_below_non_inferiority:${candidate.c.rate.toFixed(4)}<${minAllowedC.toFixed(4)}`,
-          );
-        }
+      if (t7.learnerClusterCount < minClusterCount) {
+        promotionBlockers.push(
+          `insufficient_student_clusters:${t7.learnerClusterCount}<${minClusterCount}`,
+        );
+      }
+
+      if (t7.learnerClusterLowerBound > cert.certifiedCp95Lcb + 1e-9) {
+        promotionBlockers.push(
+          `t7_lcb_exceeds_certified_cp95:${t7.learnerClusterLowerBound.toFixed(4)}>${cert.certifiedCp95Lcb.toFixed(4)}`,
+        );
+      }
+
+      const verifiedLcb = Math.min(t7.learnerClusterLowerBound, cert.certifiedCp95Lcb);
+      const requiredT7Lcb = options.baseline.t7Rate + minT7Gain;
+      if (verifiedLcb + EPSILON < requiredT7Lcb) {
+        promotionBlockers.push(
+          `t7_lcb_below_gain_threshold:${verifiedLcb.toFixed(4)}<${requiredT7Lcb.toFixed(4)}`,
+        );
+      }
+      const minAllowedC = options.baseline.cRate - nonInferiorityMargin;
+      if (candidate.c.rate + EPSILON < minAllowedC) {
+        promotionBlockers.push(
+          `c_below_non_inferiority:${candidate.c.rate.toFixed(4)}<${minAllowedC.toFixed(4)}`,
+        );
       }
     }
 
@@ -749,7 +978,7 @@ export function evaluateParetoFrontierAndPromotion(
     results,
     frontierCandidateIds: results.filter((r) => r.onParetoFrontier).map((r) => r.candidateId),
     vetoedCandidateIds: results
-      .filter((r) => r.status === "vetoed_leakage")
+      .filter((r) => r.status === "vetoed_leakage" || r.status === "vetoed_invalid_telemetry")
       .map((r) => r.candidateId),
     shadowCandidateIds: results
       .filter((r) => r.status === "shadow_candidate")

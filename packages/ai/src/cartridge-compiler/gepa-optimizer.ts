@@ -1,5 +1,6 @@
 import {
   ALLOWED_GEPA_MUTATION_SURFACES,
+  CandidateIdentityError,
   FORBIDDEN_GEPA_MUTATION_SURFACES,
   GepaForbiddenSurfaceError,
   GepaInvalidPatchPayloadError,
@@ -877,14 +878,20 @@ export interface BuildGepaReflectionInput {
 export function buildGepaReflectionContext(
   input: BuildGepaReflectionInput,
 ): GepaReflectionContext {
-  assertNoRawPiiInValue(input.policy, "reflection_base_policy");
+  const canonicalPolicyId = canonicalizeIdentifier(input.policy.policyId, "policyId");
+  assertNoRawPiiInText(canonicalPolicyId, "reflection_base_policy.policyId");
+  const sanitizedPolicy: CartridgeDeclarativePolicy = {
+    ...input.policy,
+    policyId: canonicalPolicyId,
+  };
+  assertNoRawPiiInValue(sanitizedPolicy, "reflection_base_policy");
   assertNoHoldoutLeakage(input.trainTrajectories, input.holdoutFirewall);
   assertNoHoldoutLeakage(input.devTrajectories, input.holdoutFirewall);
 
   const summary = clusterErrorTrajectories(input.trainTrajectories, input.clusteringOptions);
   const context: GepaReflectionContext = {
-    policyId: input.policy.policyId,
-    policyVersion: input.policy.version,
+    policyId: sanitizedPolicy.policyId,
+    policyVersion: sanitizedPolicy.version,
     trainTrajectoryCount: input.trainTrajectories.length,
     devTrajectoryCount: input.devTrajectories.length,
     actionableClusters: summary.actionableClusters.map((c) => ({
@@ -899,7 +906,7 @@ export function buildGepaReflectionContext(
     })),
     observationOnlyClusterCount: summary.observationOnlyClusters.length,
     allowedSurfaces: ALLOWED_GEPA_MUTATION_SURFACES,
-    currentPolicy: input.policy,
+    currentPolicy: sanitizedPolicy,
   };
   assertNoRawPiiInValue(context, "gepa_reflection_output");
   return context;
@@ -1006,11 +1013,17 @@ export function proposeGepaReflectivePatches(
     mutated = validateAndApplyGepaPatch(mutated, rubricPatch, `${suffix}_rubric`);
     mutated = validateAndApplyGepaPatch(mutated, slotPatch, `${suffix}_slot`);
 
+    const candidateId = canonicalizeIdentifier(
+      `${basePolicy.policyId}__gepa_${suffix}`,
+      "candidateId",
+    );
+    assertNoRawPiiInText(candidateId, "gepa_proposed_candidate.candidateId");
+
     candidates.push({
-      candidateId: `${basePolicy.policyId}__gepa_${suffix}`,
+      candidateId,
       policy: {
         ...mutated,
-        policyId: `${basePolicy.policyId}__gepa_${suffix}`,
+        policyId: candidateId,
       },
       appliedPatches: [movePatch, hintPatch, rubricPatch, slotPatch],
     });
@@ -1051,12 +1064,37 @@ export function runGepaOptimizationRound(
     clusteringOptions: input.clusteringOptions,
   });
 
-  const proposed: GepaProposedCandidate[] = [
-    ...proposeGepaReflectivePatches(reflectionContext),
-  ];
+  const seenCandidateIds = new Set<string>();
+  const proposed: GepaProposedCandidate[] = [];
+
+  for (const generated of proposeGepaReflectivePatches(reflectionContext)) {
+    const canonicalId = canonicalizeIdentifier(generated.candidateId, "candidateId");
+    assertNoRawPiiInText(canonicalId, "generated_candidate.candidateId");
+    if (seenCandidateIds.has(canonicalId)) {
+      throw new CandidateIdentityError(
+        `Duplicate generated candidateId "${canonicalId}" in GEPA optimization round.`,
+        "duplicate_candidate_id",
+        canonicalId,
+      );
+    }
+    seenCandidateIds.add(canonicalId);
+    proposed.push(generated);
+  }
 
   for (const extra of input.extraCandidatePatches ?? []) {
-    let policy = input.basePolicy;
+    assertNoRawPiiInValue(extra, "extra_candidate");
+    const canonicalExtraId = canonicalizeIdentifier(extra.candidateId, "candidateId");
+    assertNoRawPiiInText(canonicalExtraId, "extra_candidate.candidateId");
+    if (seenCandidateIds.has(canonicalExtraId)) {
+      throw new CandidateIdentityError(
+        `Duplicate candidateId "${canonicalExtraId}" in GEPA optimization round.`,
+        "duplicate_candidate_id",
+        canonicalExtraId,
+      );
+    }
+    seenCandidateIds.add(canonicalExtraId);
+
+    let policy = reflectionContext.currentPolicy;
     const applied: GepaSurfacePatch[] = [];
     for (let i = 0; i < extra.patches.length; i += 1) {
       const rawPatch = extra.patches[i];
@@ -1064,13 +1102,28 @@ export function runGepaOptimizationRound(
       applied.push(rawPatch as GepaSurfacePatch);
     }
     proposed.push({
-      candidateId: extra.candidateId,
-      policy: { ...policy, policyId: extra.candidateId },
+      candidateId: canonicalExtraId,
+      policy: { ...policy, policyId: canonicalExtraId },
       appliedPatches: applied,
     });
   }
 
-  const candidateMetrics = proposed.map((candidate) => input.scoreCandidate(candidate));
+  const candidateMetrics = proposed.map((candidate) => {
+    const receipt = input.scoreCandidate(candidate);
+    const canonicalReceiptId = canonicalizeIdentifier(receipt.candidateId, "receipt.candidateId");
+    assertNoRawPiiInText(canonicalReceiptId, "receipt.candidateId");
+    if (canonicalReceiptId !== candidate.candidateId) {
+      throw new CandidateIdentityError(
+        `Scorer receipt candidateId "${canonicalReceiptId}" does not match evaluated candidate "${candidate.candidateId}".`,
+        "mismatched_receipt_candidate_id",
+        candidate.candidateId,
+      );
+    }
+    return canonicalReceiptId === receipt.candidateId
+      ? receipt
+      : { ...receipt, candidateId: canonicalReceiptId };
+  });
+
   const pareto = evaluateParetoFrontierAndPromotion(candidateMetrics, input.paretoOptions);
 
   return {

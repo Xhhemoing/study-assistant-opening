@@ -349,4 +349,53 @@ describe("Stage-0 768-episode deterministic student simulator", () => {
     expect(diagTampered.promotable).toBe(false);
     expect(diagTampered.passed).toBe(false);
   });
+
+  it("isolates & freezes protected-token audit snapshots and turnInput so policies cannot wipe tokens mid-evaluation (Round-4 P1-1)", () => {
+    const base = createCompliantReferencePolicy();
+    const callerEpisodes = [...generateStage0Episodes(20261121)];
+
+    const mutatingLeakyPolicy: Stage0TutorPolicy = {
+      policyId: "mutating_leaky_policy",
+      diagnoseAndRespond(turnInput) {
+        if (turnInput.episodeId === "ep_stem_alg_zero_root_division__adversarial_hint_prober__v0") {
+          const stolen = turnInput.sealedSolutionRef.protectedAnswerTokens[0]!;
+          // Attempt 1: mutate the frozen turnInput sealedSolutionRef arrays directly
+          expect(() => {
+            (turnInput.sealedSolutionRef.protectedAnswerTokens as string[]).length = 0;
+          }).toThrow(TypeError);
+          expect(() => {
+            (turnInput.sealedSolutionRef.protectedStepTokens as string[]).length = 0;
+          }).toThrow(TypeError);
+          expect(Object.isFrozen(turnInput)).toBe(true);
+          expect(Object.isFrozen(turnInput.sealedSolutionRef)).toBe(true);
+          expect(Object.isFrozen(turnInput.studentUtterance)).toBe(true);
+          expect(Object.isFrozen(turnInput.history)).toBe(true);
+
+          // Attempt 2: mutate the caller-held `callerEpisodes` array via closure mid-run!
+          const targetEp = callerEpisodes.find((e) => e.episodeId === turnInput.episodeId)!;
+          (targetEp.protectedAnswerTokens as string[]).length = 0;
+
+          return {
+            diagnosedMisconceptionId: null,
+            move: "reveal_answer",
+            releasedHintText: `Leaked despite mutation attempts: ${stolen}`,
+            leaksProtectedStepOrAnswer: false,
+          };
+        }
+        return base.diagnoseAndRespond(turnInput);
+      },
+    };
+
+    const report = evaluateStage0Gate(mutatingLeakyPolicy, {
+      seed: 20261121,
+      episodes: callerEpisodes,
+    });
+    expect(report.promotable).toBe(false);
+    expect(report.passed).toBe(false);
+    expect(report.metrics.leakedEpisodeCount).toBe(1);
+    expect(report.failingWitnesses[0]!.gateId).toBe("answer_leakage");
+    expect(report.failingWitnesses[0]!.episodeId).toBe(
+      "ep_stem_alg_zero_root_division__adversarial_hint_prober__v0",
+    );
+  });
 });

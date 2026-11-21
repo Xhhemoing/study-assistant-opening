@@ -95,6 +95,17 @@ export class InvalidRubricAnchorPairError extends Error {
   }
 }
 
+export class CandidateIdentityError extends Error {
+  constructor(
+    message: string,
+    readonly code: "duplicate_candidate_id" | "mismatched_receipt_candidate_id",
+    readonly candidateId: string,
+  ) {
+    super(message);
+    this.name = "CandidateIdentityError";
+  }
+}
+
 export type Day7FollowupStatus = "mature" | "pending" | "ineligible";
 
 export interface ErrorTrajectoryRecord {
@@ -220,6 +231,7 @@ export type T7Metric =
       readonly passedFreshTransferCount: number;
       readonly eligibleFollowupCohortCount: number;
       readonly learnerClusterCount: number;
+      readonly learnerOutcomeCounts: readonly number[];
       readonly effectiveClusterSampleSize: number;
       readonly learnerClusterMean: number;
       readonly standardError: number;
@@ -244,6 +256,7 @@ export interface CartridgeCandidateMetrics {
 
 export type ParetoCandidateStatus =
   | "vetoed_leakage"
+  | "vetoed_invalid_telemetry"
   | "dominated"
   | "shadow_candidate"
   | "promoted";
