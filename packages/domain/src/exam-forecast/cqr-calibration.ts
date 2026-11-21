@@ -491,10 +491,15 @@ function computeIntervalFromCalibrations(
   const residuals = validCalibrations.map(cqrWorstCaseNonconformity).sort((a, b) => a - b);
   const rK = residuals[k - 1] ?? 0;
 
-  const rawLow = simulation.q10 - rK;
-  const rawHigh = simulation.q90 + rK;
-  const safeLow = rawLow <= rawHigh ? rawLow : (rawLow + rawHigh) / 2;
-  const safeHigh = rawLow <= rawHigh ? rawHigh : (rawLow + rawHigh) / 2;
+  const [minScore, maxScore] = blueprint.scoreRange;
+  const clampedLow = Math.min(maxScore, Math.max(minScore, simulation.q10 - rK));
+  const clampedHigh = Math.min(maxScore, Math.max(minScore, simulation.q90 + rK));
+  const safeMid =
+    Math.sign(clampedLow) === Math.sign(clampedHigh)
+      ? clampedLow + 0.5 * (clampedHigh - clampedLow)
+      : 0.5 * clampedLow + 0.5 * clampedHigh;
+  const safeLow = clampedLow <= clampedHigh ? clampedLow : safeMid;
+  const safeHigh = clampedLow <= clampedHigh ? clampedHigh : safeMid;
   const low = snapToScoreGrid(safeLow, blueprint.scoreRange, blueprint.scoreStep, "floor");
   const high = snapToScoreGrid(safeHigh, blueprint.scoreRange, blueprint.scoreStep, "ceil");
   const rawWidth = Math.max(0, high - low);

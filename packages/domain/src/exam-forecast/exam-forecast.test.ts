@@ -3020,4 +3020,296 @@ describe("CRN marginal ROI sandbox & UnifiedDecisionSnapshotV1", () => {
       }),
     ).toThrow(RangeError);
   });
+
+  it("enforces all Round-10 2 P1 & 2 P2 invariants", () => {
+    // [R10 P1-1] Ensure percentileSorted never inverts q10 > q90 on tied draws (e.g. 6.5 / 7.0 with numDraws = 2 or 3).
+    const makeZeroVarBeliefs = (abilityMean: number): SkillBeliefMap => {
+      const map: Record<string, SkillBeliefV1> = {};
+      for (const skillId of IELTS_ACADEMIC_SKILL_IDS) {
+        map[skillId] = createSkillBelief({
+          workspaceId: "ws-1",
+          learnerId: "learner-tied",
+          courseId: "ielts-academic",
+          confirmedSkillVersion: 1,
+          abilityMean,
+          abilityVariance: 0,
+          logStability: Math.log(14),
+          implicitLogCredit: 0,
+          lastDirectRecallAtMs: DAY_MS,
+        });
+      }
+      return map;
+    };
+    const tiedBp = {
+      ...IELTS_ACADEMIC_V1_BLUEPRINT,
+      thetaCovariance: IELTS_ACADEMIC_SKILL_IDS.map(() => IELTS_ACADEMIC_SKILL_IDS.map(() => 0)),
+      sections: IELTS_ACADEMIC_V1_BLUEPRINT.sections.map((sec) =>
+        sec.scoringKind === "item_raw_table" && sec.items
+          ? {
+              ...sec,
+              items: sec.items.map((item) => ({ ...item, guess: 0, lapse: 0 })),
+            }
+          : sec,
+      ),
+    };
+    const tiedBeliefs = makeZeroVarBeliefs(100);
+    const tiedEvidence: ExamEvidenceRecord[] = IELTS_ACADEMIC_V1_BLUEPRINT.sections.map((sec) => ({
+      recordId: `tied-ev-${sec.sectionId}`,
+      learnerId: "learner-tied",
+      sectionId: sec.sectionId,
+      evidenceKind: "rubric_assessment",
+      observedAtMs: DAY_MS,
+      countsTowardMastery: true,
+      assisted: false,
+      exposed: false,
+      rubricScore: { kind: "exact", score: 6.5 },
+    }));
+    const tiedCal5 = makeCalibrationRecords(5).map((r) => ({ ...r, recordedAtMs: DAY_MS - 10 }));
+    for (const [numDraws, band] of [
+      [2, 6.5],
+      [3, 7.0],
+    ] as const) {
+      const targetRaw = band === 6.5 ? 28 : 31;
+      const halfSectionUniforms = Array.from({ length: 40 }, (_, i) => (i < targetRaw ? 0.1 : 0.9));
+      const bandBeliefs = makeZeroVarBeliefs(0);
+      const bandEvidence: ExamEvidenceRecord[] = IELTS_ACADEMIC_V1_BLUEPRINT.sections.map((sec) => ({
+        recordId: `tied-ev-${band}-${sec.sectionId}`,
+        learnerId: "learner-tied",
+        sectionId: sec.sectionId,
+        evidenceKind: "rubric_assessment",
+        observedAtMs: DAY_MS,
+        countsTowardMastery: true,
+        assisted: false,
+        exposed: false,
+        rubricScore: { kind: "exact", score: band },
+      }));
+      const tiedDraw = {
+        zLatent: Array.from({ length: IELTS_ACADEMIC_SKILL_IDS.length }, () => 0),
+        nuSpeed: 0,
+        itemUniforms: [...halfSectionUniforms, ...halfSectionUniforms],
+        itemTimeNormals: Array.from({ length: 80 }, () => 0),
+        rubricScoreNormals: Array.from({ length: 5 }, () => 0),
+        rubricTimeNormals: Array.from({ length: 5 }, () => 0),
+      };
+      const tiedSim = simulateExamPaper({
+        blueprint: tiedBp,
+        learnerId: "learner-tied",
+        beliefs: bandBeliefs,
+        evidence: bandEvidence,
+        examAtMs: DAY_MS,
+        precomputedDraws: Array.from({ length: numDraws }, () => tiedDraw),
+      });
+      expect(tiedSim.timedScores.every((s) => s === band)).toBe(true);
+      expect(tiedSim.q10).toBe(band);
+      expect(tiedSim.q50).toBe(band);
+      expect(tiedSim.q90).toBe(band);
+      const interval = computeConformalBandInterval({
+        simulation: tiedSim,
+        blueprint: tiedBp,
+        calibrationRecords: tiedCal5,
+      });
+      expect(interval.status).toBe("ready");
+      const joint = calibrateJointPassTargets({
+        simulation: tiedSim,
+        blueprint: tiedBp,
+        calibrationRecords: tiedCal5,
+        targets: [{ targetOverall: 7.0, targetMinSection: 6.5 }],
+      });
+      expect(joint[0]!.isCalibrated).toBe(true);
+      const forecast = evaluateExamForecast({
+        blueprint: tiedBp,
+        learnerId: "learner-tied",
+        beliefs: bandBeliefs,
+        evidence: bandEvidence,
+        calibrationRecords: tiedCal5,
+        examAtMs: DAY_MS,
+        numDraws,
+        seed: 1,
+      });
+      expect(forecast.status).toBe("calibrated_forecast_ready");
+    }
+
+    // [R10 P1-2] Charge pmfOpsBudget & cap states across IELTS PMF convolution loops (including 11 binary-weighted items) and hoist all-det 4-section IELTS.
+    const binaryWeights = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 977] as const;
+    const makeBinaryIeltsItemSection = (sectionId: "listening" | "reading", slopeNumerator: number) => ({
+      ...IELTS_ACADEMIC_V1_BLUEPRINT.sections.find((s) => s.sectionId === sectionId)!,
+      parts: [{ partId: `${sectionId}-p1`, label: "P1", weight: 1, skillIds: [IELTS_ACADEMIC_SKILL_IDS[0]!] }],
+      items: binaryWeights.map((pts, idx) => ({
+        itemId: `${sectionId}-bin-${idx}`,
+        sectionId,
+        partId: `${sectionId}-p1`,
+        skillIds: [IELTS_ACADEMIC_SKILL_IDS[0]!],
+        guess: 0.1,
+        lapse: 0.02,
+        points: pts,
+        timeModel: { mu: 3, speedLoading: 0, skillLoading: {}, sigma: 0.01 },
+      })),
+      rawToBandTable: Array.from({ length: 2_001 }, (_, raw) => ({
+        rawMin: raw,
+        rawMax: raw,
+        score: (raw * slopeNumerator) / 2_000,
+      })),
+    });
+    const binaryExplosionIeltsBp = {
+      ...IELTS_ACADEMIC_V1_BLUEPRINT,
+      blueprintId: "binary-explosion-ielts",
+      thetaCovariance: IELTS_ACADEMIC_SKILL_IDS.map(() => IELTS_ACADEMIC_SKILL_IDS.map(() => 0)),
+      sections: [
+        makeBinaryIeltsItemSection("listening", 9),
+        makeBinaryIeltsItemSection("reading", Math.E * 3),
+        ...IELTS_ACADEMIC_V1_BLUEPRINT.sections.filter((s) => s.scoringKind === "rubric_band"),
+      ],
+    };
+    expect(() =>
+      simulateExamPaper({
+        blueprint: binaryExplosionIeltsBp,
+        learnerId: "learner-tied",
+        beliefs: {},
+        evidence: [],
+        examAtMs: DAY_MS,
+        numDraws: 1,
+        seed: 7,
+      }),
+    ).toThrow(RangeError);
+
+    const allDetIeltsSim = simulateExamPaper({
+      blueprint: tiedBp,
+      learnerId: "learner-tied",
+      beliefs: tiedBeliefs,
+      evidence: tiedEvidence,
+      examAtMs: DAY_MS,
+      numDraws: 1_000,
+      seed: 8,
+    });
+    expect(allDetIeltsSim.numDraws).toBe(1_000);
+    expect(allDetIeltsSim.untimedExpectedScore).toBeGreaterThan(0);
+
+    // [R10 P2-1] Overflow-safe clamping before snapToScoreGrid on extreme [0, 1e308] range.
+    const hugeBp = {
+      ...createSharedFullPaperBlueprint({
+        blueprintId: "huge-range-bp",
+        title: "Huge Range",
+        totalTimeLimitMinutes: 60,
+        totalPoints: 1,
+        skillIds: ["s"],
+        sections: [
+          {
+            sectionId: "sec",
+            label: "Sec",
+            scoringKind: "rubric_band",
+            timeLimitMinutes: null,
+            weight: 1,
+            scoreRange: [0, 1e308] as const,
+            scoreStep: 1e308,
+            parts: [
+              {
+                partId: "p",
+                label: "P",
+                weight: 1,
+                skillIds: ["s"],
+                timeModel: { mu: 4, speedLoading: 0, skillLoading: {}, sigma: 0.01 },
+              },
+            ],
+          },
+        ],
+      }),
+      scoreRange: [0, 1e308] as const,
+      scoreStep: 1e308,
+    };
+    const hugeSim: ReturnType<typeof simulateExamPaper> = {
+      ...simulateExamPaper({
+        blueprint: hugeBp,
+        learnerId: "l-huge",
+        beliefs: {},
+        evidence: [],
+        examAtMs: DAY_MS,
+        numDraws: 2,
+        seed: 9,
+      }),
+      q10: 0,
+      q50: 1e308,
+      q90: 1e308,
+      timedExpectedScore: 1e308,
+      timedScores: [0, 1e308],
+      drawSectionScores: [{ sec: 0 }, { sec: 1e308 }],
+    };
+    const hugeCals: WholePaperCalibrationRecord[] = [0, 1, 2, 3, 4].map((idx) => ({
+      recordId: `huge-cal-${idx}`,
+      blueprintId: "huge-range-bp",
+      learnerId: `other-${idx}`,
+      paperFamilyId: `fam-${idx}`,
+      targetKind: "same_blueprint_mock",
+      evidenceKind: "independent_mock",
+      recordedAtMs: DAY_MS - 10,
+      countsTowardMastery: true,
+      assisted: false,
+      exposed: false,
+      predictedQuantiles: { q10: 0, q50: 0, q90: 0 },
+      observedScore: { kind: "exact", score: 1e308 },
+    }));
+    const hugeInterval = computeConformalBandInterval({
+      simulation: hugeSim,
+      blueprint: hugeBp,
+      calibrationRecords: hugeCals,
+      examAtMs: DAY_MS,
+    });
+    expect(hugeInterval.status).toBe("ready");
+    if (hugeInterval.status === "ready") {
+      expect(hugeInterval.high).toBe(1e308);
+    }
+
+    // [R10 P2-2] Clamp untimedExpectedScore strictly within blueprint.scoreRange despite floating-point PMF drift.
+    const driftZeroPt6Bp = createSharedFullPaperBlueprint({
+      blueprintId: "drift-06-bp",
+      title: "Drift 0.6",
+      totalTimeLimitMinutes: 30,
+      totalPoints: 1,
+      skillIds: ["s"],
+      sections: [
+        {
+          sectionId: "sec",
+          label: "Sec",
+          scoringKind: "item_raw_table",
+          timeLimitMinutes: null,
+          weight: 1,
+          scoreRange: [0, 0.6] as const,
+          scoreStep: 0.6,
+          parts: [{ partId: "p", label: "P", weight: 1, skillIds: ["s"] }],
+          items: [
+            {
+              itemId: "q1",
+              sectionId: "sec",
+              partId: "p",
+              skillIds: ["s"],
+              guess: 0,
+              lapse: 0,
+              points: 1,
+              timeModel: { mu: 2, speedLoading: 0, skillLoading: {}, sigma: 0.01 },
+            },
+          ],
+          rawToBandTable: [
+            { rawMin: 0, rawMax: 0, score: 0.6 },
+            { rawMin: 1, rawMax: 1, score: 0.6 },
+          ],
+        },
+      ],
+    });
+    const finalDriftBp = {
+      ...driftZeroPt6Bp,
+      scoreRange: [0, 0.6] as const,
+      scoreStep: 0.6,
+    };
+    const driftSim = simulateExamPaper({
+      blueprint: finalDriftBp,
+      learnerId: "l-drift",
+      beliefs: {},
+      evidence: [],
+      examAtMs: DAY_MS,
+      numDraws: 3,
+      seed: 10,
+    });
+    expect(driftSim.untimedExpectedScore).toBeLessThanOrEqual(0.6);
+    expect(driftSim.timedExpectedScore).toBeLessThanOrEqual(0.6);
+    expect(driftSim.q10).toBeLessThanOrEqual(driftSim.q90);
+  });
 });

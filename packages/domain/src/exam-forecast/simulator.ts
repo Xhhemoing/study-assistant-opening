@@ -432,7 +432,12 @@ function percentileSorted(sorted: readonly number[], q: number): number {
   const lo = Math.floor(pos);
   const hi = Math.ceil(pos);
   const frac = pos - lo;
-  return sorted[lo]! * (1 - frac) + sorted[hi]! * frac;
+  const a = sorted[lo]!;
+  const b = sorted[hi]!;
+  if (a === b) return a;
+  const diff = b - a;
+  const interp = Number.isFinite(diff) ? a + diff * frac : a * (1 - frac) + b * frac;
+  return clamp(interp, a, b);
 }
 
 type RubricAnchor = {
@@ -1075,6 +1080,7 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
   let hoistedRemainingWeightedSections: readonly ExamSectionBlueprint[] = blueprint.sections;
   let allUntimedPmfHoisted = false;
   let hoistedIeltsLRDist: ReadonlyMap<number, number> | null = null;
+  let allIeltsUntimedPmfHoisted = false;
 
   if (blueprint.aggregationMode !== "ielts_overall_half_up") {
     while (
@@ -1106,6 +1112,10 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
     const preL = precomputedUntimedSections.get("listening")?.untimedDist;
     const preR = precomputedUntimedSections.get("reading")?.untimedDist;
     if (preL && preR) {
+      pmfOpsBudget.remaining -= preL.size * preR.size;
+      if (pmfOpsBudget.remaining < 0) {
+        throw new RangeError(`Untimed PMF convolution ops exceed limit (${MAX_PMF_CONVOLUTION_OPS})`);
+      }
       const lrMap = new Map<number, number>();
       for (const [bL, pL] of preL.entries()) {
         if (pL <= 0) continue;
@@ -1114,10 +1124,83 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
           const prob = pL * pR;
           if (prob <= 0) continue;
           const sumLR = clampedL + clamp(bR, 0, 9);
-          lrMap.set(sumLR, (lrMap.get(sumLR) ?? 0) + prob);
+          const existing = lrMap.get(sumLR);
+          if (existing === undefined) {
+            if (lrMap.size >= MAX_PMF_CONVOLUTION_STATES) {
+              throw new RangeError(`Untimed PMF convolution states exceed limit (${MAX_PMF_CONVOLUTION_STATES})`);
+            }
+            lrMap.set(sumLR, prob);
+          } else {
+            lrMap.set(sumLR, existing + prob);
+          }
         }
       }
       hoistedIeltsLRDist = lrMap;
+
+      const staticRubricScores = new Map<string, number>();
+      for (const sec of blueprint.sections) {
+        if (sec.scoringKind !== "rubric_band") continue;
+        const [minB, maxB] = sec.scoreRange;
+        const baseOffset = maxB > minB + 3 ? minB + 3 : minB;
+        const bandScale = maxB - baseOffset;
+        const speakingShift = sec.sectionId === "speaking" ? rubricSummary.speakingFluencyShift : 0;
+        const sectionAnchor = rubricSummary.sectionAnchors.get(sec.sectionId);
+        let partWeightedSum = 0;
+        let weightSum = 0;
+        let allPartsDet = sec.parts.length > 0;
+        for (const part of sec.parts) {
+          const partAnchor = rubricSummary.partAnchors.get(sec.sectionId)?.get(part.partId) ?? sectionAnchor;
+          const partSkillsDet = part.skillIds.every((id) => {
+            const idx = skillIndexById.get(id);
+            return idx === undefined || isSkillDeterministic[idx] === true;
+          });
+          if (!partAnchor || partAnchor.high !== partAnchor.low || !partSkillsDet) {
+            allPartsDet = false;
+            break;
+          }
+          const meanMastery =
+            part.skillIds.length > 0
+              ? part.skillIds.reduce((sum, id) => {
+                  const val = Object.hasOwn(staticMasteryBySkill, id) ? staticMasteryBySkill[id]! : 0.5 * sigmoid(0);
+                  return sum + val;
+                }, 0) / part.skillIds.length
+              : 0.5 * sigmoid(0);
+          const refMastery =
+            part.skillIds.length > 0
+              ? part.skillIds.reduce(
+                  (sum, id) => sum + referenceSkillMasteryAt(beliefs, id, partAnchor.observedAtMs, trimmedLearnerId),
+                  0,
+                ) / part.skillIds.length
+              : 0.5 * sigmoid(0);
+          const untimedPartScore = clamp(
+            partAnchor.low + bandScale * (meanMastery - refMastery) + speakingShift * 0.25,
+            minB,
+            maxB,
+          );
+          partWeightedSum += part.weight * untimedPartScore;
+          weightSum += part.weight;
+        }
+        if (allPartsDet) {
+          staticRubricScores.set(sec.sectionId, weightSum > 0 ? partWeightedSum / weightSum : 0);
+        }
+      }
+      const staticW = staticRubricScores.get("writing");
+      const staticS = staticRubricScores.get("speaking");
+      if (staticW !== undefined && staticS !== undefined) {
+        pmfOpsBudget.remaining -= hoistedIeltsLRDist.size;
+        if (pmfOpsBudget.remaining < 0) {
+          throw new RangeError(`Untimed PMF convolution ops exceed limit (${MAX_PMF_CONVOLUTION_OPS})`);
+        }
+        const clampedW = clamp(staticW, 0, 9);
+        const clampedS = clamp(staticS, 0, 9);
+        for (const [sumLR, probLR] of hoistedIeltsLRDist.entries()) {
+          if (probLR <= 0) continue;
+          const overall = roundHalfUp05((sumLR + clampedW + clampedS) / 4);
+          untimedOverallPmf.set(overall, (untimedOverallPmf.get(overall) ?? 0) + probLR);
+          untimedExpectedTotal += overall * probLR;
+        }
+        allIeltsUntimedPmfHoisted = true;
+      }
     }
   }
 
@@ -1265,29 +1348,39 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
       }
       untimedScores.push(computeIeltsOverallBand({ listening: uL, reading: uR, writing: uW, speaking: uS }));
 
-      if (hoistedIeltsLRDist) {
-        const clampedW = clamp(uW, 0, 9);
-        const clampedS = clamp(uS, 0, 9);
-        for (const [sumLR, probLR] of hoistedIeltsLRDist.entries()) {
-          const prob = probLR * drawWeight;
-          if (prob <= 0) continue;
-          const overall = roundHalfUp05((sumLR + clampedW + clampedS) / 4);
-          untimedOverallPmf.set(overall, (untimedOverallPmf.get(overall) ?? 0) + prob);
-          untimedExpectedTotal += overall * prob;
-        }
-      } else {
-        const lDist = untimedSectionDistributions.get("listening");
-        const rDist = untimedSectionDistributions.get("reading");
-        if (!lDist || !rDist) {
-          throw new RangeError("Missing IELTS untimed section distribution");
-        }
-        for (const [bL, pL] of lDist.entries()) {
-          for (const [bR, pR] of rDist.entries()) {
-            const prob = pL * pR * drawWeight;
+      if (!allIeltsUntimedPmfHoisted) {
+        if (hoistedIeltsLRDist) {
+          pmfOpsBudget.remaining -= hoistedIeltsLRDist.size;
+          if (pmfOpsBudget.remaining < 0) {
+            throw new RangeError(`Untimed PMF convolution ops exceed limit (${MAX_PMF_CONVOLUTION_OPS})`);
+          }
+          const clampedW = clamp(uW, 0, 9);
+          const clampedS = clamp(uS, 0, 9);
+          for (const [sumLR, probLR] of hoistedIeltsLRDist.entries()) {
+            const prob = probLR * drawWeight;
             if (prob <= 0) continue;
-            const overall = computeIeltsOverallBand({ listening: bL, reading: bR, writing: uW, speaking: uS });
+            const overall = roundHalfUp05((sumLR + clampedW + clampedS) / 4);
             untimedOverallPmf.set(overall, (untimedOverallPmf.get(overall) ?? 0) + prob);
             untimedExpectedTotal += overall * prob;
+          }
+        } else {
+          const lDist = untimedSectionDistributions.get("listening");
+          const rDist = untimedSectionDistributions.get("reading");
+          if (!lDist || !rDist) {
+            throw new RangeError("Missing IELTS untimed section distribution");
+          }
+          pmfOpsBudget.remaining -= lDist.size * rDist.size;
+          if (pmfOpsBudget.remaining < 0) {
+            throw new RangeError(`Untimed PMF convolution ops exceed limit (${MAX_PMF_CONVOLUTION_OPS})`);
+          }
+          for (const [bL, pL] of lDist.entries()) {
+            for (const [bR, pR] of rDist.entries()) {
+              const prob = pL * pR * drawWeight;
+              if (prob <= 0) continue;
+              const overall = computeIeltsOverallBand({ listening: bL, reading: bR, writing: uW, speaking: uS });
+              untimedOverallPmf.set(overall, (untimedOverallPmf.get(overall) ?? 0) + prob);
+              untimedExpectedTotal += overall * prob;
+            }
           }
         }
       }
@@ -1322,7 +1415,7 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
   const sortedTimed = [...timedScores].sort((a, b) => a - b);
   const timedExpectedScore = clamp(timedScores.reduce((a, b) => a + b, 0) / draws.length, bpMinScore, bpMaxScore);
   const matchedUntimedExpectedScore = clamp(untimedScores.reduce((a, b) => a + b, 0) / draws.length, bpMinScore, bpMaxScore);
-  const untimedExpectedScore = untimedExpectedTotal;
+  const untimedExpectedScore = clamp(untimedExpectedTotal, bpMinScore, bpMaxScore);
   const sectionSummaries: Record<string, SectionSimulationSummary> = {};
   const rightCensoringRateBySection: Record<string, number> = {};
 
@@ -1354,6 +1447,10 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
     .sort(([a], [b]) => a - b)
     .map(([score, probability]) => ({ score, probability }));
 
+  const q10 = clamp(percentileSorted(sortedTimed, 0.1), bpMinScore, bpMaxScore);
+  const q50 = clamp(percentileSorted(sortedTimed, 0.5), q10, bpMaxScore);
+  const q90 = clamp(percentileSorted(sortedTimed, 0.9), q50, bpMaxScore);
+
   return {
     blueprintId: blueprint.blueprintId,
     examAtMs,
@@ -1365,9 +1462,9 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
     untimedExpectedScore,
     timedExpectedScore,
     timeSqueezeDelta: untimedExpectedScore - timedExpectedScore,
-    q10: clamp(percentileSorted(sortedTimed, 0.1), bpMinScore, bpMaxScore),
-    q50: clamp(percentileSorted(sortedTimed, 0.5), bpMinScore, bpMaxScore),
-    q90: clamp(percentileSorted(sortedTimed, 0.9), bpMinScore, bpMaxScore),
+    q10,
+    q50,
+    q90,
     sectionSummaries,
     rightCensoringRateBySection,
     sampleRightCensoredItems,
