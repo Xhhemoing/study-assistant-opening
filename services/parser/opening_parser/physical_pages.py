@@ -5,7 +5,7 @@ without fixing provenance charspans. Neither merged text nor orig is sliceable
 by those spans. ConversionResult.pages still holds the original page elements.
 """
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 import re
 
 ACADEMIC_DISCOURSE_KINDS = (
@@ -159,14 +159,14 @@ _SECTION_BREAK_RE = re.compile(
     re.IGNORECASE,
 )
 _TITLED_CHAPTER_RE = re.compile(
-    r"^(?:(?:Chapter|Part|Section)\s+(?:\d+(?:\.\d+)*|[IVXLCDM]+)|第\s*[一二三四五六七八九十百千\d]+\s*[章节篇部分])(?:\s*[:：.\-—]\s*|\s+)?(?P<title>.*)$",
+    r"^(?:(?:Chapter|Part|Section)\s+(?:\d+(?:\.\d+)*|[IVXLCDM]+)|第\s*[一二三四五六七八九十百千\d]+\s*[章节篇部分讲])(?:\s*[:：.\-—]\s*|\s+)?(?P<title>.*)$",
     re.IGNORECASE,
 )
 _ANSWER_TITLE_WORD_RE = re.compile(r"(?:Answer|Solution|Exercise|Problem|答案|解答|习题|练习)", re.IGNORECASE)
 _TEXTBOOK_NON_ANSWER_HEADING_RE = re.compile(
     r"^(?:"
     r"(?:Definition|Notation|Terminology|Convention|Theorem|Lemma|Proposition|Corollary|Axiom|Conjecture|Claim|Worked\s+Example|Example|Lecture)\b"
-    r"|(?:定义|记号|约定|定理|引理|推论|命题|公理|猜想|例题|例\s*\d+|例\s*[:：])"
+    r"|(?:定义|记号|约定|定理|引理|推论|命题|公理|猜想|例题|例\s*\d+|例\s*[:：]|第\s*[一二三四五六七八九十百千\d]+\s*讲)"
     r")"
 )
 _MAJOR_NON_ANSWER_HEADING_RE = re.compile(
@@ -240,6 +240,7 @@ class PhysicalPagesExtraction:
     sealed_texts_by_page: dict[int, list[str]]
     discourse_blocks_by_page: dict[int, list[DiscourseBlock]]
     visual_kinds_by_page: dict[int, list[str]]
+    section_sealed_by_page: dict[int, bool] = field(default_factory=dict)
 
 
 def _normalized_label(node):
@@ -847,6 +848,21 @@ def _seal_furniture_on_all_sealed_page(blocks: list[DiscourseBlock], entries: li
     return updated
 
 
+def _compute_section_sealed_by_page(page_order, blocks_by_page, entries_by_page) -> dict[int, bool]:
+    result: dict[int, bool] = {}
+    for page_number in page_order:
+        blocks = blocks_by_page[page_number]
+        sealed = False
+        for idx, is_furniture, _explicit, seal_mode, _section_exit in entries_by_page[page_number]:
+            block = blocks[idx]
+            if seal_mode == "section_sealed" and not _SECTION_SEALED_TERMINATOR_RE.search(block.text):
+                sealed = True
+            elif not is_furniture:
+                sealed = False
+        result[page_number] = sealed
+    return result
+
+
 def extract_physical_pages(conversion, *, include_sealed: bool = False) -> PhysicalPagesExtraction:
     page_order, raw_fragments, visual_sets = _collect_page_fragments(conversion)
     blocks_by_page: dict[int, list[DiscourseBlock]] = {}
@@ -867,6 +883,7 @@ def extract_physical_pages(conversion, *, include_sealed: bool = False) -> Physi
         prev_page_number = page_number
 
     _apply_cross_page_continuations(page_order, blocks_by_page, entries_by_page)
+    section_sealed_by_page = _compute_section_sealed_by_page(page_order, blocks_by_page, entries_by_page)
 
     raw_texts = {p: [t for t, _ in raw_fragments[p]] for p in page_order}
     public_texts: dict[int, list[str]] = {}
@@ -891,6 +908,7 @@ def extract_physical_pages(conversion, *, include_sealed: bool = False) -> Physi
         sealed_texts_by_page=sealed_texts,
         discourse_blocks_by_page=blocks_by_page,
         visual_kinds_by_page=visuals,
+        section_sealed_by_page=section_sealed_by_page,
     )
 
 

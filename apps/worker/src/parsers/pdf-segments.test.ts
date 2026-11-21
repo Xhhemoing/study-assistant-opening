@@ -6,7 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { SourceRecord } from "@aistudy/contracts";
 import type { NewSourceChunk, OpeningJobRecord, OpeningPdfSegmentsRepository, PdfSegment, PdfSegmentIdentity, PdfSegmentPage } from "@aistudy/database";
 import { createParseSourceHandler, sealTextWithState, type ParseSourceVisualPageInput, type ParseSourceVisualPageResult } from "../jobs/parse-source";
-import { BoundsExceededError } from "./docling-process";
+import { BoundsExceededError, decodeParserOutput } from "./docling-process";
 import { MAX_PDF_BOOK_PAGES, parsePdfSegments, watchPdfExecution, type PdfSegmentBatch } from "./pdf-segments";
 import { pdfParserProfile } from "./ocr-health";
 import type { ParserRunner, VisualPageKind } from "./types";
@@ -587,6 +587,7 @@ describe("bounded resumable PDF parser", () => {
       text: string;
       visualKinds?: VisualPageKind[];
       discourseBlocks?: Array<Record<string, unknown>>;
+      sectionSealedAtEnd?: boolean;
     }>;
     savedChunks?: NewSourceChunk[];
     recognizePages?: (
@@ -665,7 +666,7 @@ describe("bounded resumable PDF parser", () => {
             stdout: JSON.stringify({
               pages: options.pages
                 .filter(p => p.page >= start && p.page <= end)
-                .map(p => ({ page: p.page, text: p.text, imagePath: null, visualKinds: p.visualKinds ?? [], ...(p.discourseBlocks ? { discourseBlocks: p.discourseBlocks } : {}) })),
+                .map(p => ({ page: p.page, text: p.text, imagePath: null, visualKinds: p.visualKinds ?? [], ...(p.discourseBlocks ? { discourseBlocks: p.discourseBlocks } : {}), ...(p.sectionSealedAtEnd !== undefined ? { sectionSealedAtEnd: p.sectionSealedAtEnd } : {}) })),
             }),
           };
         },
@@ -882,7 +883,7 @@ describe("bounded resumable PDF parser", () => {
     });
     expect(reusedWithAnswerKey.publishedChunks.map(c => c.page)).toEqual([1, 3]);
     expect(reusedWithAnswerKey.publishedChunks[0]?.text).toBe("[视觉转写与描述]\nTheorem 1.");
-    expect(reusedWithAnswerKey.publishedChunks[0]?.imageObjectKey).toBe("vision/p1-public");
+    expect(reusedWithAnswerKey.publishedChunks[0]?.imageObjectKey).toBeNull();
 
     const seenPages: number[] = [];
     const fallbackOnDynamicInvalidation = await runPdfScenario({
@@ -927,7 +928,7 @@ describe("bounded resumable PDF parser", () => {
       },
     });
     expect(inlineBeforeVision.publishedChunks.map(c => c.page)).toEqual([1, 2]);
-    expect(inlineBeforeVision.publishedChunks[0]?.imageObjectKey).toBe("vision/parabola");
+    expect(inlineBeforeVision.publishedChunks[0]?.imageObjectKey).toBeNull();
     expect(inlineBeforeVision.publishedChunks[0]?.text).toContain("A parabola opening upward.");
 
     const boldSectionAndSavedInline = await runPdfScenario({
@@ -949,7 +950,7 @@ describe("bounded resumable PDF parser", () => {
     });
     expect(boldSectionAndSavedInline.publishedChunks.map(c => c.page)).toEqual([2, 3]);
     expect(boldSectionAndSavedInline.publishedChunks[0]?.text).toBe("**Section 1.2**: **Vector Spaces**\nDefinition 1.2: Closure.");
-    expect(boldSectionAndSavedInline.publishedChunks[1]?.imageObjectKey).toBe("vision/saved-parabola");
+    expect(boldSectionAndSavedInline.publishedChunks[1]?.imageObjectKey).toBeNull();
     expect(boldSectionAndSavedInline.publishedChunks[1]?.text).toContain("A parabola opening upward.");
 
     const degradedSavedVisionPropagation = await runPdfScenario({
@@ -998,5 +999,121 @@ describe("bounded resumable PDF parser", () => {
     expect(degradedMixedRedaction.publishedChunks.map(c => c.page)).toEqual([1, 3]);
     expect(degradedMixedRedaction.publishedChunks[0]?.text).toBe("Theorem 1.");
     expect(degradedMixedRedaction.publishedChunks[0]?.imageObjectKey).toBeNull();
+  });
+
+  it("Round-6 [P1-1]: propagates sectionSealedAtEnd across a 10-page PDF segment boundary and roundtrips decodeParserOutput", async () => {
+    const decoded = decodeParserOutput(JSON.stringify({
+      pages: [
+        { page: 10, text: "Public theorem.", imagePath: null, visualKinds: [], sectionSealedAtEnd: true },
+        { page: 11, text: "Next page.", imagePath: null, visualKinds: [] },
+      ],
+    }));
+    expect(decoded).toEqual([
+      { page: 10, text: "Public theorem.", imagePath: null, visualKinds: [], sectionSealedAtEnd: true },
+      { page: 11, text: "Next page.", imagePath: null, visualKinds: [] },
+    ]);
+    expect("sectionSealedAtEnd" in decoded[1]!).toBe(false);
+    expect(() => decodeParserOutput(JSON.stringify({
+      pages: [{ page: 1, text: "x", imagePath: null, sectionSealedAtEnd: "yes" }],
+    }))).toThrow("invalid sectionSealedAtEnd metadata");
+
+    const multiSegmentBoundary = await runPdfScenario({
+      pages: [
+        ...Array.from({ length: 9 }, (_, idx) => ({ page: idx + 1, text: `Topic ${idx + 1}.`, visualKinds: [] as VisualPageKind[] })),
+        { page: 10, text: "Public theorem.", visualKinds: [], sectionSealedAtEnd: true },
+        { page: 11, text: "2. y = 4", visualKinds: [] },
+        { page: 12, text: "Chapter 2: Rings\nDef.", visualKinds: [] },
+      ],
+    });
+    expect(multiSegmentBoundary.outcome).toEqual({ pages: 12 });
+    expect(multiSegmentBoundary.publishedChunks.map(c => c.page)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12]);
+    expect(multiSegmentBoundary.publishedChunks[9]?.text).toBe("Public theorem.");
+    expect(multiSegmentBoundary.publishedChunks[10]?.text).toBe("Chapter 2: Rings\nDef.");
+  });
+
+  it("Round-6 [P1-2]: parses production Vision wrappers, redacts sealed descriptions/images, and keeps clean diagrams", async () => {
+    const liveWrapped = await runPdfScenario({
+      pages: [
+        { page: 1, text: "", visualKinds: ["scan"] },
+        { page: 2, text: "", visualKinds: [] },
+        { page: 3, text: "Chapter 1: Mechanics\nExercise 1.\nAnswer: x = 1.", visualKinds: ["picture"] },
+        { page: 4, text: "Chapter 2: Geometry\nDefinition of triangle.", visualKinds: ["picture"] },
+        { page: 5, text: "", visualKinds: ["scan"] },
+        { page: 6, text: "2. y = 4", visualKinds: [] },
+      ],
+      recognizePages: async function* (inputs) {
+        for (const input of inputs) {
+          if (input.physicalPage === 1) {
+            yield {
+              text: "【原图忠实转写，尚需核对】\nAnswer Key\n1. x = 2\n\n【图表观察描述，非原文或解答】\nPrinted answer grid.\n\n【识别不确定，不能据此判定正确】\nMargin sketch.",
+              imageObjectKey: "vision/p1-wrapped-secret",
+            };
+          } else if (input.physicalPage === 3) {
+            yield {
+              text: "【原图忠实转写，尚需核对】\nFigure 1 caption.",
+              imageObjectKey: "vision/p3-mixed-inline",
+            };
+          } else if (input.physicalPage === 4) {
+            yield {
+              text: "【原图忠实转写，尚需核对】\nTriangle ABC.\n\n【图表观察描述，非原文或解答】\nRight angle at C.",
+              imageObjectKey: "vision/clean-diagram",
+            };
+          } else if (input.physicalPage === 5) {
+            yield {
+              text: "【原图忠实转写，尚需核对】\nPublic stem.\n\nAnswer Key\n1. x = 2\n\n【图表观察描述，非原文或解答】\nAnswer table sketch.",
+              imageObjectKey: "vision/p5-partial-secret",
+            };
+          }
+        }
+      },
+    });
+    expect(liveWrapped.outcome).toEqual({ pages: 6 });
+    expect(liveWrapped.pdfWarning).toBeUndefined();
+    expect(liveWrapped.publishedChunks.map(c => c.page)).toEqual([3, 4, 5]);
+    expect(liveWrapped.publishedChunks[0]?.text).toContain("Exercise 1.");
+    expect(liveWrapped.publishedChunks[0]?.text).toContain("Figure 1 caption.");
+    expect(liveWrapped.publishedChunks[0]?.text).not.toContain("Answer: x = 1.");
+    expect(liveWrapped.publishedChunks[0]?.imageObjectKey).toBeNull();
+    expect(liveWrapped.publishedChunks[1]?.text).toContain("Triangle ABC.");
+    expect(liveWrapped.publishedChunks[1]?.text).toContain("Right angle at C.");
+    expect(liveWrapped.publishedChunks[1]?.imageObjectKey).toBe("vision/clean-diagram");
+    expect(liveWrapped.publishedChunks[2]?.text).toBe("[视觉转写与描述]\n【原图忠实转写，尚需核对】\nPublic stem.");
+    expect(liveWrapped.publishedChunks[2]?.text).not.toContain("Answer table sketch.");
+    expect(liveWrapped.publishedChunks[2]?.imageObjectKey).toBeNull();
+
+    const degradedSavedWrapped = await runPdfScenario({
+      pages: [
+        { page: 1, text: "", visualKinds: ["scan"] },
+        { page: 2, text: "Chapter 2: Public\nIntro.", visualKinds: [] },
+      ],
+      savedChunks: [
+        {
+          page: 1,
+          slideLabel: null,
+          startMs: null,
+          endMs: null,
+          text: "[视觉转写与描述]\n【原图忠实转写，尚需核对】\nAnswer Key\n1. x = 9\n\n【图表观察描述，非原文或解答】\nAnswer layout note.",
+          imageObjectKey: "vision/stale-wrapped",
+        },
+      ],
+      recognizePages: async function* () {
+        yield null;
+      },
+    });
+    expect(degradedSavedWrapped.publishedChunks.map(c => c.page)).toEqual([2]);
+    expect(degradedSavedWrapped.publishedChunks[0]?.text).toBe("Chapter 2: Public\nIntro.");
+  });
+
+  it("Round-6 [P2]: exits section_sealed on 第 3 讲 and stays sealed on Section 1.2: Exercises", async () => {
+    const { publishedChunks } = await runPdfScenario({
+      pages: [
+        { page: 1, text: "Answer Key\n1. x = 1", visualKinds: [] },
+        { page: 2, text: "第 3 讲 特征值\n定义：Ax = λx。", visualKinds: [] },
+        { page: 3, text: "**Solutions to Selected Exercises**\n1. x = 2", visualKinds: [] },
+        { page: 4, text: "Section 1.2: Exercises\n1. Solve y' = y.", visualKinds: [] },
+      ],
+    });
+    expect(publishedChunks.map(c => c.page)).toEqual([2]);
+    expect(publishedChunks[0]?.text).toBe("第 3 讲 特征值\n定义：Ax = λx。");
   });
 });

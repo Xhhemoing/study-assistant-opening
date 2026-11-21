@@ -90,8 +90,8 @@ const PUBLIC_BLOCK_OPENER_RE = /^(?:(?:Definition|DEFINITION|Notation|NOTATION|T
 const NON_ANSWER_AFTER_BLANK_RE = /^(?:(?:Exercises?|EXERCISES?|Practice\s+Problems?|PRACTICE\s+PROBLEMS?|Problems?|PROBLEMS?|Questions?|QUESTIONS?|Proof|PROOF|Figures?|FIGURES?|Fig\.?|Tables?|TABLES?)\b|(?:习题|练习题|练习|问题|思考题|作业题|证明|图\s*\d+|表\s*\d+|第\s*\d+\s*题|题\s*\d+))/u;
 const MAJOR_NON_ANSWER_HEADING_RE = /^(?:(?:Bibliography|BIBLIOGRAPHY|References|REFERENCES|Works\s+Cited|WORKS\s+CITED|Index|INDEX|Subject\s+Index|Author\s+Index|Glossary|GLOSSARY|Notation\s+Index|Acknowledgements?|ACKNOWLEDGEMENTS?|About\s+the\s+Authors?)|(?:参考文献|索引|名词索引|主题索引|符号表|后记|致谢)|(?:Appendix|APPENDIX)\s+[A-Z0-9]+(?:\s*[:.—-]\s*(?!.*(?:Answer|ANSWER|Solution|SOLUTION)).*)?$|附录\s*[A-Z0-9一二三四五六七八九十]+(?:\s*[:：.—-]\s*(?!.*(?:答案|解答)).*)?$)(?:\s*[:：.—-]|$)/u;
 const SECTION_SEALED_SUBHEADER_RE = /^(?:(?:Chapter|CHAPTER|Part|PART|Unit|UNIT|Section|SECTION)\s+(?:\d+(?:\.\d+)*|[IVXLCDM]+)\s*[:：.—-]?$|(?:Exercises?|EXERCISES?|Problems?|PROBLEMS?|Questions?|QUESTIONS?|Review|REVIEW|Practice|PRACTICE|Self-Check|SELF-CHECK)\b|第\s*[一二三四五六七八九十百千\d]+\s*[章节篇部]\s*$|(?:习题|练习题|练习|思考题|作业题|自测题|第\s*[一二三四五六七八九十百千\d]+\s*[题小题])|(?:\d+[.)]|[A-Za-z][.)])(?:\s|$)|(?:\d+(?:\.\d+)*|[A-Za-z])$|[（(]\s*(?:\d+|[a-zA-Z]|[一二三四五六七八九十]+)\s*[)）])/u;
-const TEXTBOOK_STRUCTURAL_OPENER_RE = /^(?:(?:Definition|DEFINITION|Notation|NOTATION|Terminology|TERMINOLOGY|Convention|CONVENTION|Axiom|AXIOM|Theorem|THEOREM|Lemma|LEMMA|Proposition|PROPOSITION|Corollary|COROLLARY|Conjecture|CONJECTURE|Claim|CLAIM)\b|(?:Lecture|LECTURE)\s+(?:\d+|[IVXLCDM]+)\b|(?:Worked\s+Example|WORKED\s+EXAMPLE|Example|EXAMPLE)(?:\s+\d+(?:[.-]\d+)*)?(?:\s*\([^)]+\))?(?:\s*[:：.—-]|\s+\S|$)|(?:定义|记号|术语|约定|公理|定理|引理|推论|命题|猜想|例题)(?:\b|\s*\d|\s*[:：]|$)|例\s*\d+|第\s*[一二三四五六七八九十百千\d]+\s*讲\b)/u;
-const TITLED_NON_ANSWER_CONTAINER_RE = /^(?:(?:Chapter|CHAPTER|Part|PART|Unit|UNIT)\s+(?:\d+(?:\.\d+)*|[IVXLCDM]+)\s*(?:[:：.—-]\s*|\s+)(?!\s*(?:Answers?|Solutions?|Key|Exercises?|Problems?|Questions?|Review|Practice|\(?cont))(?!.*\b(?:Answers?|Solutions?|Answer\s+Key)\b)\S.*$|(?:Section|SECTION)\s+\d+(?:\.\d+)*\s*(?:[:：.—-]\s+|\s+(?!\s*(?:Answers?|Solutions?|Key|Exercises?|Problems?|Questions?|Review|Practice|is\b|are\b|was\b|see\b|\(?cont)))(?!.*\b(?:Answers?|Solutions?|Answer\s+Key)\b)(?=(?:\*\*|__)?[A-Za-z\u4e00-\u9fff])\S.*$|第\s*[一二三四五六七八九十百千\d]+\s*[章节篇部]\s*(?:[:：.—-]\s*)?(?!\s*(?:参考|标准|课后|习题|练习)?(?:答案|解答)|习题|练习|思考题|（续）|\(续\))(?!.*(?:参考答案|标准答案|课后答案|习题答案|练习答案|答案与解析|参考解答))\S.*$)/iu;
+const TEXTBOOK_STRUCTURAL_OPENER_RE = /^(?:(?:Definition|DEFINITION|Notation|NOTATION|Terminology|TERMINOLOGY|Convention|CONVENTION|Axiom|AXIOM|Theorem|THEOREM|Lemma|LEMMA|Proposition|PROPOSITION|Corollary|COROLLARY|Conjecture|CONJECTURE|Claim|CLAIM)\b|(?:Lecture|LECTURE)\s+(?:\d+|[IVXLCDM]+)\b|(?:Worked\s+Example|WORKED\s+EXAMPLE|Example|EXAMPLE)(?:\s+\d+(?:[.-]\d+)*)?(?:\s*\([^)]+\))?(?:\s*[:：.—-]|\s+\S|$)|(?:定义|记号|术语|约定|公理|定理|引理|推论|命题|猜想|例题)(?:\b|\s*\d|\s*[:：]|$)|例\s*\d+|第\s*[一二三四五六七八九十百千\d]+\s*讲(?:\s|$|[:：.—-]))/u;
+const TITLED_NON_ANSWER_CONTAINER_RE = /^(?:(?:Chapter|CHAPTER|Part|PART|Unit|UNIT)\s+(?:\d+(?:\.\d+)*|[IVXLCDM]+)\s*(?:[:：.—-]\s*|\s+)(?!\s*(?:(?:\*\*|__)?(?:Answers?|Solutions?|Key|Exercises?|Problems?|Questions?|Review|Practice|\(?cont)))(?!.*\b(?:Answers?|Solutions?|Answer\s+Key)\b)\S.*$|(?:Section|SECTION)\s+\d+(?:\.\d+)*\s*(?:[:：.—-]\s*|\s+)(?!\s*(?:(?:\*\*|__)?(?:Answers?|Solutions?|Key|Exercises?|Problems?|Questions?|Review|Practice|is\b|are\b|was\b|see\b|\(?cont)))(?!.*\b(?:Answers?|Solutions?|Answer\s+Key)\b)(?=(?:\*\*|__)?[A-Za-z\u4e00-\u9fff])\S.*$|第\s*[一二三四五六七八九十百千\d]+\s*[章节篇部]\s*(?:[:：.—-]\s*)?(?!\s*(?:参考|标准|课后|习题|练习)?(?:答案|解答)|习题|练习|思考题|（续）|\(续\))(?!.*(?:参考答案|标准答案|课后答案|习题答案|练习答案|答案与解析|参考解答))\S.*$)/iu;
 const UNHEADED_ANSWER_CONTINUATION_RE = /^(?:(?:\d+[.)]|\d+(?:\.\d+)+[.)]?|\(\d+\)|\(\s*[a-zA-Z]\s*\)|[a-zA-Z][.)]|第\s*[一二三四五六七八九十百千\d]+\s*[题小题]|[（(]\s*[一二三四五六七八九十]+\s*[)）])(?:\s+|$)|(?:Chapter|CHAPTER|Section|SECTION|Part|PART|Unit|UNIT)\s+(?:\d+(?:\.\d+)*|[IVXLCDM]+)\s*[:：.—-]?$|第\s*[一二三四五六七八九十百千\d]+\s*[章节篇部]\s*$)/u;
 const TITLE_CASE_SECTION_HEADING_RE = /^\d+(?:\.\d+)+\s+(?!True$|False$|Yes$|No$|None$|[A-F](?:\s*,\s*[A-F])*$)[A-Z][A-Za-z0-9]*(?:\s+[A-Za-z0-9,&-]+){0,8}$/u;
 const SECTION_SEALED_TERMINATOR_RE = /(?:End\s+of\s+(?:Answers?|Solutions?)|答案完|解答完)\s*[.。]?\s*$/iu;
@@ -419,17 +419,81 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
       let visualRecognitionUnavailable = !deps.recognizePage && !(isPdf && deps.recognizePages);
       const skippedVisionPages: number[] = [];
       const cappedTextPages = new Set<number>();
-      const sanitizeSavedChunk = (saved: NewSourceChunk, incomingSeal: SealState): { sanitized: NewSourceChunk | undefined; savedSeal: SealState; hasVisionMarker: boolean } => {
+      const VISION_TRANSCRIPTION_HEADER = "【原图忠实转写，尚需核对】";
+      const VISION_DESCRIPTION_HEADER = "【图表观察描述，非原文或解答】";
+      const VISION_UNCERTAINTIES_HEADER = "【识别不确定，不能据此判定正确】";
+      const sealVisionText = (rawVisionText: string, sealState: SealState): { text: string; hadSealedContent: boolean } => {
+        const headerRe = /(?:^|\r?\n)(【(?:原图忠实转写，尚需核对|图表观察描述，非原文或解答|识别不确定，不能据此判定正确)】)(?:\r?\n|$)/gu;
+        const matches = [...rawVisionText.matchAll(headerRe)];
+        if (matches.length === 0) {
+          const enteredSealed = sealState.mode === "section_sealed";
+          const sealed = sealTextWithState(rawVisionText, sealState);
+          return { text: sealed, hadSealedContent: enteredSealed || sealed !== rawVisionText };
+        }
+        let transcription: string | undefined;
+        let description: string | undefined;
+        let uncertainties: string | undefined;
+        for (let i = 0; i < matches.length; i++) {
+          const match = matches[i]!;
+          const header = match[1]!;
+          const bodyStart = (match.index ?? 0) + match[0].length;
+          const bodyEnd = i + 1 < matches.length ? (matches[i + 1]!.index ?? rawVisionText.length) : rawVisionText.length;
+          const body = rawVisionText.slice(bodyStart, bodyEnd).replace(/(?:\r?\n)+$/u, "");
+          if (header === VISION_TRANSCRIPTION_HEADER) transcription = body;
+          else if (header === VISION_DESCRIPTION_HEADER) description = body;
+          else if (header === VISION_UNCERTAINTIES_HEADER) uncertainties = body;
+        }
+        const enteredSealed = sealState.mode === "section_sealed" || sealState.afterAllSealedPage;
+        if (transcription !== undefined) {
+          const sealedTranscription = sealTextWithState(transcription, sealState);
+          const transcriptionRemoved = sealedTranscription !== transcription;
+          const hadSealedContent = enteredSealed || transcriptionRemoved || sealState.mode === "section_sealed";
+          if (!sealedTranscription.trim()) {
+            return { text: "", hadSealedContent: true };
+          }
+          if (sealState.mode === "section_sealed") {
+            return { text: `${VISION_TRANSCRIPTION_HEADER}\n${sealedTranscription}`, hadSealedContent: true };
+          }
+          const parts = [`${VISION_TRANSCRIPTION_HEADER}\n${sealedTranscription}`];
+          if (description?.trim()) parts.push(`${VISION_DESCRIPTION_HEADER}\n${description}`);
+          if (uncertainties?.trim()) parts.push(`${VISION_UNCERTAINTIES_HEADER}\n${uncertainties}`);
+          return { text: parts.join("\n\n"), hadSealedContent };
+        }
+        if (enteredSealed) {
+          return { text: "", hadSealedContent: true };
+        }
+        const parts = [];
+        if (description?.trim()) parts.push(`${VISION_DESCRIPTION_HEADER}\n${description}`);
+        if (uncertainties?.trim()) parts.push(`${VISION_UNCERTAINTIES_HEADER}\n${uncertainties}`);
+        return { text: parts.join("\n\n"), hadSealedContent: false };
+      };
+      const sanitizeSavedChunk = (
+        saved: NewSourceChunk,
+        incomingSeal: SealState,
+        nativeHadSealed: boolean,
+      ): { sanitized: NewSourceChunk | undefined; savedSeal: SealState; hasVisionMarker: boolean; visionPreserved: boolean } => {
         const savedSeal: SealState = { ...incomingSeal };
         const visionMatch = /(?:^|\r?\n)(\[视觉转写与描述\](?:\r?\n|$))/u.exec(saved.text);
         if (!visionMatch || visionMatch.index === undefined) {
-          if (!saved.text.trim()) return { sanitized: saved, savedSeal, hasVisionMarker: false };
+          if (!saved.text.trim()) {
+            return {
+              sanitized: nativeHadSealed && saved.imageObjectKey ? { ...saved, imageObjectKey: null } : saved,
+              savedSeal,
+              hasVisionMarker: false,
+              visionPreserved: false,
+            };
+          }
           const sealedText = sealTextWithState(saved.text, savedSeal);
-          if (!sealedText.trim()) return { sanitized: undefined, savedSeal, hasVisionMarker: false };
+          if (!sealedText.trim()) return { sanitized: undefined, savedSeal, hasVisionMarker: false, visionPreserved: false };
+          const textChanged = sealedText !== saved.text;
+          const nextImageKey = (nativeHadSealed || textChanged || incomingSeal.mode === "section_sealed" || incomingSeal.mode === "inline_sealed")
+            ? null
+            : saved.imageObjectKey;
           return {
-            sanitized: sealedText === saved.text ? saved : { ...saved, text: sealedText },
+            sanitized: !textChanged && nextImageKey === saved.imageObjectKey ? saved : { ...saved, text: sealedText, imageObjectKey: nextImageKey },
             savedSeal,
             hasVisionMarker: false,
+            visionPreserved: false,
           };
         }
         const prefix = saved.text.slice(0, visionMatch.index);
@@ -438,23 +502,29 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
         const nativeHeader = nativeHeaderMatch?.[1] ?? "";
         const nativeBody = (nativeHeader ? prefix.slice(nativeHeader.length) : prefix).replace(/(?:\r?\n)+$/u, "");
         const sealedNativeBody = nativeBody.trim() ? sealTextWithState(nativeBody, savedSeal) : "";
-        if (savedSeal.mode === "inline_sealed") savedSeal.mode = "none";
-        const sealedVisionBody = visionBody.trim() ? sealTextWithState(visionBody, savedSeal) : "";
+        const nativeChanged = sealedNativeBody !== nativeBody;
+        if (nativeBody.trim() && savedSeal.mode === "inline_sealed") savedSeal.mode = "none";
+        const visionSealed = visionBody.trim() ? sealVisionText(visionBody, savedSeal) : { text: "", hadSealedContent: false };
+        const sealedVisionBody = visionSealed.text;
+        const pageHadSealed = nativeHadSealed || nativeChanged || visionSealed.hadSealedContent || incomingSeal.mode === "section_sealed" || incomingSeal.mode === "inline_sealed";
         if (!sealedVisionBody.trim()) {
-          if (!sealedNativeBody.trim()) return { sanitized: undefined, savedSeal, hasVisionMarker: true };
+          if (!sealedNativeBody.trim()) return { sanitized: undefined, savedSeal, hasVisionMarker: true, visionPreserved: false };
           return {
             sanitized: { ...saved, text: sealedNativeBody, imageObjectKey: null },
             savedSeal,
             hasVisionMarker: true,
+            visionPreserved: false,
           };
         }
         const rebuilt = sealedNativeBody.trim()
           ? `${nativeHeader || "[原生提取]\n"}${sealedNativeBody}\n\n[视觉转写与描述]\n${sealedVisionBody}`
           : `[视觉转写与描述]\n${sealedVisionBody}`;
+        const nextImageKey = pageHadSealed ? null : saved.imageObjectKey;
         return {
-          sanitized: rebuilt === saved.text ? saved : { ...saved, text: rebuilt },
+          sanitized: rebuilt === saved.text && nextImageKey === saved.imageObjectKey ? saved : { ...saved, text: rebuilt, imageObjectKey: nextImageKey },
           savedSeal,
           hasVisionMarker: true,
+          visionPreserved: true,
         };
       };
       const preparePage = (rawPage: AnnotatedParsedPage, saved: NewSourceChunk | undefined, sealState: SealState) => {
@@ -468,6 +538,18 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
         const publicText = !isImage
           ? sealTextWithState(rawPage.text, sealState, rawPage.page, rawPage.discourseBlocks)
           : rawPage.text;
+        if (isPdf && rawPage.sectionSealedAtEnd === true) {
+          sealState.mode = "section_sealed";
+          sealState.inWorkedExample = false;
+          sealState.afterAllSealedPage = false;
+        }
+        const nativeHadSealed = !isImage && (
+          doclingSealedBlank
+          || publicText !== rawPage.text
+          || (isPdf && rawPage.sectionSealedAtEnd === true)
+          || incomingSeal.mode === "section_sealed"
+          || incomingSeal.mode === "inline_sealed"
+        );
         const sealedAllText = !isImage && ((hadRawText && !publicText.trim()) || doclingSealedBlank);
         const page: ParsedPage = publicText === rawPage.text ? rawPage : { ...rawPage, text: publicText };
         const visualKinds = sealedAllText
@@ -484,25 +566,27 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
         let sanitizedSaved: NewSourceChunk | undefined;
         let savedSeal: SealState | undefined;
         let savedHasVision = false;
+        let savedVisionPreserved = false;
         if (!sealedAllText && saved) {
           if (!isImage) {
-            const cleaned = sanitizeSavedChunk(saved, incomingSeal);
+            const cleaned = sanitizeSavedChunk(saved, incomingSeal, nativeHadSealed);
             sanitizedSaved = cleaned.sanitized;
             savedSeal = cleaned.savedSeal;
             savedHasVision = cleaned.hasVisionMarker;
+            savedVisionPreserved = cleaned.visionPreserved;
           } else {
             sanitizedSaved = saved;
           }
         }
-        const reusable = sanitizedSaved && (!visual || sanitizedSaved.imageObjectKey) ? sanitizedSaved : undefined;
+        const reusable = sanitizedSaved && (!visual || sanitizedSaved.imageObjectKey || savedVisionPreserved) ? sanitizedSaved : undefined;
         if (reusable && !isImage && savedSeal && savedHasVision) {
           sealState.mode = savedSeal.mode;
           sealState.inWorkedExample = savedSeal.inWorkedExample;
           sealState.afterAllSealedPage = savedSeal.afterAllSealedPage;
         }
-        return { page, visual, originalSaved: saved, saved: sanitizedSaved, reusable, sealedAllText, savedSeal, savedHasVision };
+        return { page, visual, originalSaved: saved, saved: sanitizedSaved, reusable, sealedAllText, savedSeal, savedHasVision, nativeHadSealed };
       };
-      const consumePage = async ({ page, visual, saved, reusable, sealedAllText, savedSeal, savedHasVision }: ReturnType<typeof preparePage>,
+      const consumePage = async ({ page, visual, saved, reusable, sealedAllText, savedSeal, savedHasVision, nativeHadSealed }: ReturnType<typeof preparePage>,
         liveSealState: SealState,
         recognizePage: ((input: ParseSourceVisualPageInput) => Promise<ParseSourceVisualPageResult | null>) | undefined =
           visualRecognitionUnavailable ? undefined : deps.recognizePage,
@@ -533,7 +617,11 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
             if (!isImage && page.text.trim() && liveSealState.mode === "inline_sealed") {
               liveSealState.mode = "none";
             }
-            const sealedVisionText = !isImage ? sealTextWithState(result.text, liveSealState) : result.text;
+            const visionSealed = !isImage
+              ? sealVisionText(result.text, liveSealState)
+              : { text: result.text, hadSealedContent: false };
+            const sealedVisionText = visionSealed.text;
+            const pageHadSealed = nativeHadSealed || visionSealed.hadSealedContent;
             if (!isImage && !sealedVisionText.trim()) {
               if (!page.text.trim()) return undefined;
             } else {
@@ -546,11 +634,11 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
                 if (saved?.text.trim()) return saved;
                 if (!page.text.trim()) {
                   text = visionHeader + sealedVisionText;
-                  imageObjectKey = result.imageObjectKey;
+                  imageObjectKey = pageHadSealed ? null : result.imageObjectKey;
                 }
               } else {
                 text = `${page.text ? `${nativeHeader}${page.text}\n\n` : ""}${visionHeader}${sealedVisionText}`;
-                imageObjectKey = result.imageObjectKey;
+                imageObjectKey = pageHadSealed ? null : result.imageObjectKey;
               }
             }
           }

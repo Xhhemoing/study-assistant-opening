@@ -47,9 +47,8 @@ const MATH_COMMAND_OR_OP_RE = /\\[A-Za-z]+|[=+\-*/^_<>!{}|]/;
 function isBareCurrencyStart(text: string, dollarIndex: number): boolean {
   const first = text[dollarIndex + 1];
   if (!first || first < "0" || first > "9") return false;
-  const limit = Math.min(text.length, dollarIndex + 2048);
   let closeIdx = -1;
-  for (let j = dollarIndex + 1; j < limit; ) {
+  for (let j = dollarIndex + 1; j < text.length; ) {
     const ch = text[j]!;
     if (ch === "\\") {
       j += 2;
@@ -265,52 +264,112 @@ function selectSafeMathSpans(text: string, cpStarts: number[], prefixBytes: Int3
   return topLevel;
 }
 
-/** Split at Unicode code points while keeping closed LaTeX math spans <= maxBytes unbroken. */
-export function segmentMaterialChunks(chunks: SourceChunk[], maxBytes = 6000): MaterialSegment[] {
+const DEFAULT_EMBEDDING_SEGMENT_MAX_BYTES = 6000;
+const SEGMENT_HASH_STRIDE = 262_144;
+
+type SegmentedEntry = {
+  segment: MaterialSegment;
+  startOffset: number;
+  endOffset: number;
+};
+
+function splitChunkOffsets(
+  cpStarts: number[],
+  prefixBytes: Int32Array,
+  maxBytes: number,
+  mathSpans: MathSpan[] | null,
+): number[] {
+  const cpTotal = cpStarts.length - 1;
+  const cuts: number[] = [];
+  let spanIdx = 0;
+  let cpStart = 0;
+
+  while (cpStart < cpTotal) {
+    const baseBytes = prefixBytes[cpStart]!;
+    let lo = cpStart + 1;
+    let hi = cpTotal;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >>> 1;
+      if (prefixBytes[mid]! - baseBytes <= maxBytes) lo = mid;
+      else hi = mid - 1;
+    }
+    let cpSplit = lo;
+
+    if (mathSpans && cpSplit < cpTotal) {
+      const cutOffset = cpStarts[cpSplit]!;
+      const segmentStartOffset = cpStarts[cpStart]!;
+      while (spanIdx < mathSpans.length && mathSpans[spanIdx]!.end <= cutOffset) spanIdx++;
+      const activeSpan = mathSpans[spanIdx];
+      if (activeSpan && activeSpan.start < cutOffset && cutOffset < activeSpan.end && activeSpan.start > segmentStartOffset) {
+        const backedUpCp = findCodePointForOffset(cpStarts, activeSpan.start);
+        if (backedUpCp > cpStart) cpSplit = backedUpCp;
+      }
+    }
+
+    cuts.push(cpSplit);
+    cpStart = cpSplit;
+  }
+
+  return cuts;
+}
+
+function hashSegmentCuts(maxBytes: number, cpStarts: number[], cuts: number[]): number {
+  let hash = 0x811c9dc5;
+  const mix = (value: number) => {
+    hash ^= value & 0xff;
+    hash = Math.imul(hash, 0x01000193);
+    hash ^= (value >>> 8) & 0xff;
+    hash = Math.imul(hash, 0x01000193);
+    hash ^= (value >>> 16) & 0xff;
+    hash = Math.imul(hash, 0x01000193);
+    hash ^= (value >>> 24) & 0xff;
+    hash = Math.imul(hash, 0x01000193);
+  };
+  mix(maxBytes);
+  mix(cuts.length);
+  for (const cut of cuts) mix(cpStarts[cut]!);
+  return ((hash >>> 0) % 4096 + 1) * SEGMENT_HASH_STRIDE;
+}
+
+function segmentChunksWithRanges(chunks: SourceChunk[], maxBytes = DEFAULT_EMBEDDING_SEGMENT_MAX_BYTES): SegmentedEntry[] {
   if (!Number.isInteger(maxBytes) || maxBytes < 4 || maxBytes > 8192) {
     throw new Error("embedding segment byte limit must be 4..8192");
   }
-  const segments: MaterialSegment[] = [];
+  const entries: SegmentedEntry[] = [];
   for (const chunk of chunks) {
     if (!chunk.text.trim()) {
-      if (chunk.imageObjectKey) segments.push({ chunk, segmentIndex: 0 });
+      if (chunk.imageObjectKey) {
+        entries.push({ segment: { chunk, segmentIndex: 0 }, startOffset: 0, endOffset: chunk.text.length });
+      }
       continue;
     }
     const { cpStarts, prefixBytes } = buildCodePointIndex(chunk.text);
-    const cpTotal = cpStarts.length - 1;
+    const blindCuts = splitChunkOffsets(cpStarts, prefixBytes, maxBytes, null);
     const mathSpans = selectSafeMathSpans(chunk.text, cpStarts, prefixBytes, maxBytes);
-    let spanIdx = 0;
+    const mathCuts = splitChunkOffsets(cpStarts, prefixBytes, maxBytes, mathSpans);
+    const cutsDifferFromLegacy = mathCuts.length !== blindCuts.length
+      || mathCuts.some((cut, idx) => cut !== blindCuts[idx]);
+    const baseSegmentIndex = cutsDifferFromLegacy ? hashSegmentCuts(maxBytes, cpStarts, mathCuts) : 0;
+
     let cpStart = 0;
-    let segmentIndex = 0;
-
-    while (cpStart < cpTotal) {
-      const baseBytes = prefixBytes[cpStart]!;
-      let lo = cpStart + 1;
-      let hi = cpTotal;
-      while (lo < hi) {
-        const mid = (lo + hi + 1) >>> 1;
-        if (prefixBytes[mid]! - baseBytes <= maxBytes) lo = mid;
-        else hi = mid - 1;
-      }
-      let cpSplit = lo;
-
-      if (cpSplit < cpTotal) {
-        const cutOffset = cpStarts[cpSplit]!;
-        const segmentStartOffset = cpStarts[cpStart]!;
-        while (spanIdx < mathSpans.length && mathSpans[spanIdx]!.end <= cutOffset) spanIdx++;
-        const activeSpan = mathSpans[spanIdx];
-        if (activeSpan && activeSpan.start < cutOffset && cutOffset < activeSpan.end && activeSpan.start > segmentStartOffset) {
-          const backedUpCp = findCodePointForOffset(cpStarts, activeSpan.start);
-          if (backedUpCp > cpStart) cpSplit = backedUpCp;
-        }
-      }
-
-      const sliceText = chunk.text.slice(cpStarts[cpStart]!, cpStarts[cpSplit]!);
-      segments.push({ chunk: { ...chunk, text: sliceText }, segmentIndex: segmentIndex++ });
+    for (let i = 0; i < mathCuts.length; i++) {
+      const cpSplit = mathCuts[i]!;
+      const startOffset = cpStarts[cpStart]!;
+      const endOffset = cpStarts[cpSplit]!;
+      entries.push({
+        segment: { chunk: { ...chunk, text: chunk.text.slice(startOffset, endOffset) }, segmentIndex: baseSegmentIndex + i },
+        startOffset,
+        endOffset,
+      });
       cpStart = cpSplit;
     }
   }
-  return segments;
+  return entries;
+}
+
+/** Split at Unicode code points while keeping closed LaTeX math spans <= maxBytes unbroken. */
+export function segmentMaterialChunks(chunks: SourceChunk[], maxBytes = DEFAULT_EMBEDDING_SEGMENT_MAX_BYTES): MaterialSegment[] {
+  return segmentChunksWithRanges(chunks, maxBytes).map(entry => entry.segment);
 }
 
 export function materialSegmentKey(segment: MaterialSegment): string {
@@ -354,13 +413,82 @@ export function budgetRankedMaterial(chunks: SourceChunk[], maxCharacters: numbe
 export function rankMaterialContext(input: Omit<MaterialRetrievalInput, "sourceIds" | "operationId" | "signal"> & {
   dense?: MaterialSegment[];
 }): SourceChunk[] {
-  const segments = segmentMaterialChunks(input.chunks);
+  const entries = segmentChunksWithRanges(input.chunks, DEFAULT_EMBEDDING_SEGMENT_MAX_BYTES);
+  const segments = entries.map(entry => entry.segment);
   const all = new Map(segments.map(segment => [materialSegmentKey(segment), segment]));
   // Dense rows must be members of the same source/version/chunk snapshot.
+  const inputDense = input.dense ?? [];
+  const resolvedDirect: Array<MaterialSegment | undefined> = [];
+  const directMatchedChunkIds = new Set<string>();
+  for (const segment of inputDense) {
+    const original = all.get(materialSegmentKey(segment));
+    if (original && original.chunk.sourceVersion === segment.chunk.sourceVersion && original.chunk.text === segment.chunk.text) {
+      resolvedDirect.push(original);
+      directMatchedChunkIds.add(original.chunk.id);
+    } else {
+      resolvedDirect.push(undefined);
+    }
+  }
   const dense: MaterialSegment[] = [];
-  for (const segment of input.dense ?? []) {
-    const key = materialSegmentKey(segment), original = all.get(key);
-    if (original && original.chunk.sourceVersion === segment.chunk.sourceVersion && original.chunk.text === segment.chunk.text) dense.push(original);
+  const seenDenseKeys = new Set<string>();
+  let chunksById: Map<string, SourceChunk> | undefined;
+  let entriesByChunkId: Map<string, SegmentedEntry[]> | undefined;
+  let blindRangesCache: Map<string, Array<{ start: number; end: number }>> | undefined;
+  for (let i = 0; i < inputDense.length; i++) {
+    const direct = resolvedDirect[i];
+    if (direct) {
+      const key = materialSegmentKey(direct);
+      if (!seenDenseKeys.has(key)) {
+        seenDenseKeys.add(key);
+        dense.push(direct);
+      }
+      continue;
+    }
+    const segment = inputDense[i]!;
+    if (directMatchedChunkIds.has(segment.chunk.id) || !Number.isInteger(segment.segmentIndex) || segment.segmentIndex < 0) continue;
+    chunksById ??= new Map(input.chunks.map(chunk => [chunk.id, chunk]));
+    const sourceChunk = chunksById.get(segment.chunk.id);
+    if (!sourceChunk || sourceChunk.sourceVersion !== segment.chunk.sourceVersion || !sourceChunk.text.trim()) continue;
+    blindRangesCache ??= new Map();
+    let legacyRanges = blindRangesCache.get(sourceChunk.id);
+    if (!legacyRanges) {
+      const { cpStarts, prefixBytes } = buildCodePointIndex(sourceChunk.text);
+      const blindCuts = splitChunkOffsets(cpStarts, prefixBytes, DEFAULT_EMBEDDING_SEGMENT_MAX_BYTES, null);
+      legacyRanges = [];
+      let cpStart = 0;
+      for (const cut of blindCuts) {
+        legacyRanges.push({ start: cpStarts[cpStart]!, end: cpStarts[cut]! });
+        cpStart = cut;
+      }
+      blindRangesCache.set(sourceChunk.id, legacyRanges);
+    }
+    const legacyRange = legacyRanges[segment.segmentIndex];
+    if (!legacyRange || sourceChunk.text.slice(legacyRange.start, legacyRange.end) !== segment.chunk.text) continue;
+    if (!entriesByChunkId) {
+      entriesByChunkId = new Map();
+      for (const entry of entries) {
+        const list = entriesByChunkId.get(entry.segment.chunk.id);
+        if (list) list.push(entry);
+        else entriesByChunkId.set(entry.segment.chunk.id, [entry]);
+      }
+    }
+    const chunkEntries = entriesByChunkId.get(sourceChunk.id) ?? [];
+    let bestEntry: SegmentedEntry | undefined;
+    let bestOverlap = 0;
+    for (const candidate of chunkEntries) {
+      const overlap = Math.min(candidate.endOffset, legacyRange.end) - Math.max(candidate.startOffset, legacyRange.start);
+      if (overlap > bestOverlap) {
+        bestOverlap = overlap;
+        bestEntry = candidate;
+      }
+    }
+    if (bestEntry) {
+      const key = materialSegmentKey(bestEntry.segment);
+      if (!seenDenseKeys.has(key)) {
+        seenDenseKeys.add(key);
+        dense.push(bestEntry.segment);
+      }
+    }
   }
   const stable = (a: MaterialSegment, b: MaterialSegment) =>
     a.chunk.sourceId.localeCompare(b.chunk.sourceId) || (a.chunk.page ?? Infinity) - (b.chunk.page ?? Infinity)

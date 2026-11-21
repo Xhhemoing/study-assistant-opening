@@ -21,8 +21,10 @@ export function decodeParserOutput(text: string): ParsedPage[] {
     if (typeof page.text !== "string" || !(page.imagePath === null || typeof page.imagePath === "string")) throw new TypeError("invalid page shape");
     const kinds = page.visualKinds;
     if (kinds !== undefined && (!Array.isArray(kinds) || kinds.some(kind => !["scan", "formula", "table", "picture"].includes(kind)) || new Set(kinds).size !== kinds.length)) throw new TypeError("invalid visual page metadata");
+    if (page.sectionSealedAtEnd !== undefined && typeof page.sectionSealedAtEnd !== "boolean") throw new TypeError("invalid sectionSealedAtEnd metadata");
     return { page: page.page as number, text: page.text, imagePath: page.imagePath as string | null,
-      ...(kinds === undefined ? {} : { visualKinds: kinds as NonNullable<ParsedPage["visualKinds"]> }) };
+      ...(kinds === undefined ? {} : { visualKinds: kinds as NonNullable<ParsedPage["visualKinds"]> }),
+      ...(page.sectionSealedAtEnd === undefined ? {} : { sectionSealedAtEnd: page.sectionSealedAtEnd }) };
   });
   if (new Set(pages.map((page) => page.page)).size !== pages.length) throw new RangeError("duplicate page number");
   return pages;

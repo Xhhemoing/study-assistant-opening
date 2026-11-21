@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { SourceChunk } from "@aistudy/contracts";
-import { budgetRankedMaterial, rankMaterialContext, segmentMaterialChunks } from "./hybrid-retrieval";
+import { budgetRankedMaterial, materialSegmentKey, rankMaterialContext, segmentMaterialChunks } from "./hybrid-retrieval";
 import { renderContext } from "./context";
 
 const chunk = (id: string, text: string, page = 1): SourceChunk => ({ id, text, page, sourceId: id, sourceVersion: 1,
@@ -156,5 +156,60 @@ describe("material hybrid retrieval", () => {
     expect(s1.map(s => s.chunk.text).join("")).toBe(backslashes);
     expect(s2.map(s => s.chunk.text).join("")).toBe(envs);
     expect(elapsedMs).toBeLessThan(1000);
+  });
+
+  it("keeps >2048-char numeric-leading inline math unbroken across segments", () => {
+    const mathBody = "$1+" + "x+".repeat(1100) + "x$";
+    const text = "a".repeat(3000) + mathBody + " tail";
+    const segments = segmentMaterialChunks([chunk("long-num-math", text)], 4096);
+    expect(segments.map(s => s.chunk.text).join("")).toBe(text);
+    expect(segments.every(s => Buffer.byteLength(s.chunk.text, "utf8") <= 4096)).toBe(true);
+    expect(segments.some(s => s.chunk.text.includes(mathBody))).toBe(true);
+  });
+
+  it("namespaces math-shifted segment keys away from legacy 0..k keys and recalls pre-reindex dense hits", () => {
+    const formulaTail = "$$x + y = z$$ eigenvalue theorem tail";
+    const shifted = chunk("formula-doc", "a".repeat(5990) + formulaTail);
+    const segments = segmentMaterialChunks([shifted]);
+    expect(segments).toHaveLength(2);
+    expect(segments.map(s => s.chunk.text).join("")).toBe(shifted.text);
+    expect(segments[0]!.segmentIndex).toBeGreaterThanOrEqual(262_144);
+    expect(segments[1]!.segmentIndex).toBe(segments[0]!.segmentIndex + 1);
+    expect(segments[1]!.segmentIndex).toBeLessThan(2_147_483_647);
+    expect(segmentMaterialChunks([shifted]).map(materialSegmentKey)).toEqual(segments.map(materialSegmentKey));
+
+    const legacyKeys = new Set(["formula-doc:0", "formula-doc:1"]);
+    expect(segments.some(s => legacyKeys.has(materialSegmentKey(s)))).toBe(false);
+
+    const unshifted = chunk("plain-doc", "b".repeat(6010));
+    expect(segmentMaterialChunks([unshifted]).map(s => s.segmentIndex)).toEqual([0, 1]);
+
+    const legacySeg1 = { chunk: { ...shifted, text: shifted.text.slice(6000) }, segmentIndex: 1 };
+    const decoys = Array.from({ length: 8 }, (_, idx) => chunk(`decoy-${idx}`, "unrelated syllabus announcement"));
+
+    const recalled = rankMaterialContext({
+      chunks: [...decoys, shifted],
+      query: "orthogonal projection",
+      maxCharacters: 500,
+      dense: [legacySeg1],
+    });
+    expect(recalled[0]?.id).toBe("formula-doc");
+    expect(recalled[0]?.text).toContain(formulaTail);
+
+    const rejected = rankMaterialContext({
+      chunks: [chunk("chosen", "Selected page", 3), shifted],
+      query: "orthogonal projection",
+      maxCharacters: 7000,
+      preferChunkId: "chosen",
+      dense: [
+        { ...legacySeg1, chunk: { ...legacySeg1.chunk, sourceVersion: 2 } },
+        { ...legacySeg1, chunk: { ...legacySeg1.chunk, text: "tampered slice text" } },
+        { ...legacySeg1, chunk: { ...legacySeg1.chunk, id: "foreign-doc" } },
+        { chunk: { ...shifted, text: shifted.text.slice(0, 5990) }, segmentIndex: segments[0]!.segmentIndex },
+        legacySeg1,
+      ],
+    });
+    expect(rejected.map(row => row.id)).toEqual(["chosen", "formula-doc"]);
+    expect(rejected[1]?.text).toBe("a".repeat(5990));
   });
 });

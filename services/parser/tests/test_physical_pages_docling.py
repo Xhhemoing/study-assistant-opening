@@ -423,6 +423,60 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
         self.assertEqual(pub[13], ["参考文献", "华罗庚《高等数学引论》。"])
         self.assertEqual(pub[15], ["附录 B：符号表", "R denotes real numbers."])
 
+    def test_round6_section_sealed_at_end_cli_and_lecture_heading(self):
+        import io
+        import json
+        import tempfile
+        from contextlib import redirect_stdout
+
+        result = result_for(
+            [
+                text_element(11, "Theorem 1: All norms on R^n are equivalent.", 1),
+                text_element(11, "Answer Key\n1. x = 2", 2),
+            ],
+            [
+                text_element(12, "第 3 讲 特征值\n特征多项式定义如下。", 1),
+            ],
+            [
+                text_element(13, "**Solution**:\nx = 5", 1),
+            ],
+            [
+                text_element(14, "Section 1.2: Exercises\n1. Find x.", 1),
+                text_element(14, "Bibliography\n[1] Strang.", 2),
+            ],
+        )
+        ext = physical_pages.extract_physical_pages(result)
+        self.assertEqual(ext.texts_by_page[11], ["Theorem 1: All norms on R^n are equivalent."])
+        self.assertTrue(ext.section_sealed_by_page[11])
+        self.assertFalse(ext.section_sealed_by_page[12])
+        self.assertIn("特征多项式定义如下。", "\n".join(ext.texts_by_page[12]))
+        self.assertTrue(ext.section_sealed_by_page[13])
+        self.assertNotIn("Exercises", "\n".join(ext.texts_by_page[14]))
+        self.assertIn("Bibliography", "\n".join(ext.texts_by_page[14]))
+        self.assertFalse(ext.section_sealed_by_page[14])
+
+        cli_result = result_for(
+            [
+                text_element(11, "Theorem 1.", 1),
+                text_element(11, "Answer Key\n1. x = 2", 2),
+            ],
+            [
+                text_element(12, "第 3 讲 特征值\n特征多项式定义如下。", 1),
+            ],
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            pdf_path = Path(tmp) / "sample.pdf"
+            pdf_path.write_bytes(b"%PDF-1.4\n")
+            stdout = io.StringIO()
+            with patch.object(cli, "convert", return_value=cli_result), patch.object(cli, "create_converter", return_value=None), redirect_stdout(stdout):
+                code = cli.main(["--input", str(pdf_path), "--mime", "application/pdf", "--max-pages", "20"])
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(len(payload["pages"]), 2)
+        self.assertEqual(payload["pages"][0]["text"], "Theorem 1.")
+        self.assertIs(payload["pages"][0].get("sectionSealedAtEnd"), True)
+        self.assertNotIn("sectionSealedAtEnd", payload["pages"][1])
+
 
 if __name__ == "__main__":
     unittest.main()
