@@ -2925,4 +2925,113 @@ describe("Exact (C, -L, T7) Pareto frontier, Hard Pre-Pareto Veto, and Promotion
       } as unknown as Parameters<typeof createDisjointTrajectorySplit>[1]),
     ).toThrow(CartridgePiiViolationError);
   });
+
+  it("never invokes own flag getters on crafted RegExp/URL instances during PII scanning (Round-15 P1-1)", () => {
+    let globalGetterCalled = false;
+    const craftedRe = /benign/g;
+    Object.defineProperty(craftedRe, "global", {
+      enumerable: true,
+      configurable: true,
+      get() {
+        globalGetterCalled = true;
+        throw new Error("RegExp global getter exploded");
+      },
+    });
+    expect(() => assertNoRawPiiInValue({ bad: craftedRe }, "crafted_re")).toThrow(
+      CartridgePiiViolationError,
+    );
+    expect(globalGetterCalled).toBe(false);
+
+    // Ordinary RegExp carrying PII pattern still fails closed with both forbidden_non_plain_object and email.
+    let reErr: unknown;
+    try {
+      assertNoRawPiiInValue({ bad: /alice@example\.com/i }, "re_pii");
+    } catch (err) {
+      reErr = err;
+    }
+    expect(reErr).toBeInstanceOf(CartridgePiiViolationError);
+    expect((reErr as CartridgePiiViolationError).message).not.toContain("alice@example.com");
+
+    // Crafted URL with own accessor getter MUST fail closed without invoking getter.
+    let urlGetterCalled = false;
+    const craftedUrl = new URL("https://example.edu/path");
+    Object.defineProperty(craftedUrl, "toString", {
+      enumerable: true,
+      configurable: true,
+      get() {
+        urlGetterCalled = true;
+        throw new Error("URL getter exploded");
+      },
+    });
+    expect(() => assertNoRawPiiInValue({ bad: craftedUrl }, "crafted_url")).toThrow(
+      CartridgePiiViolationError,
+    );
+    expect(urlGetterCalled).toBe(false);
+  });
+
+  it("isolates scoreCandidate callback mutations from internal snapshots and returned GEPA round candidates (Round-15 P1-5)", () => {
+    const records: ErrorTrajectoryRecord[] = [];
+    for (let comp = 0; comp < 4; comp += 1) {
+      for (let i = 0; i < 6; i += 1) {
+        records.push(
+          makeTrajectory({
+            trajectoryId: `r15_mut_c${comp}_t${i}`,
+            learnerPseudoId: `pseudo_r15_c${comp}_u${i}`,
+            itemFamilyId: `fam_r15_c${comp}`,
+          }),
+        );
+      }
+    }
+    const split = createDisjointTrajectorySplit(records, { seed: 2029 });
+
+    const round = runGepaOptimizationRound({
+      basePolicy: makeBasePolicy(),
+      split,
+      clusteringOptions: { minSupport: 5 },
+      extraCandidatePatches: [
+        {
+          candidateId: "cand_r15_immutable",
+          patches: [
+            {
+              surface: "approvedTemplateSlots",
+              summary: "Safe premise cue",
+              payload: { safe_slot: "Check denominator before dividing." },
+            },
+          ],
+        },
+      ],
+      scoreCandidate: (candidate) => {
+        const realId = candidate.candidateId;
+        // Malicious in-place mutation of the argument passed to scoreCandidate!
+        (candidate as { candidateId: string }).candidateId = "tampered_id";
+        (candidate.policy.approvedTemplateSlots as Record<string, string>).safe_slot =
+          "TAMPERED_PROMPT_LEAKING_ANSWER";
+        (candidate.policy.moveRules as unknown[]).push({ id: "injected_rule" });
+        (candidate.appliedPatches as unknown[]).length = 0;
+
+        return buildMatureCohort(realId, {
+          learnerCount: 25,
+          repairedCount: 23,
+          t7PassedCount: 24,
+        });
+      },
+      paretoOptions: {
+        baseline: { cRate: 0.85, t7Rate: 0.72 },
+        minT7Gain: 0.05,
+        nonInferiorityMargin: 0.02,
+        minClusterCount: 5,
+      },
+    });
+
+    expect(round.pareto.promotedCandidateIds).toContain("cand_r15_immutable");
+    const returnedCand = round.candidates.find((c) => c.candidateId === "cand_r15_immutable")!;
+    expect(returnedCand).toBeDefined();
+    expect(returnedCand.policy.approvedTemplateSlots.safe_slot).toBe(
+      "Check denominator before dividing.",
+    );
+    expect(returnedCand.policy.moveRules.some((r) => r.id === "injected_rule")).toBe(false);
+    expect(returnedCand.appliedPatches.length).toBe(1);
+    expect(Object.isFrozen(returnedCand)).toBe(true);
+    expect(Object.isFrozen(returnedCand.policy.approvedTemplateSlots)).toBe(true);
+  });
 });

@@ -37,6 +37,12 @@ const RAW_PII_PREFIX_PATTERN =
 
 const VALID_PSEUDO_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{3,127}$/;
 const FORBIDDEN_PSEUDO_PREFIXES = ["raw:", "email:", "mail:", "phone:", "tel:", "ssn:", "name:"];
+// Cache intrinsic getters at module load so crafted instances can never intercept [[Get]].
+const REGEXP_SOURCE_GET = Object.getOwnPropertyDescriptor(RegExp.prototype, "source")?.get;
+const URL_HREF_GET =
+  typeof URL !== "undefined"
+    ? Object.getOwnPropertyDescriptor(URL.prototype, "href")?.get
+    : undefined;
 
 function normalizeFieldKey(key: string): string {
   return key.toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -601,38 +607,57 @@ function collectRawPiiViolations(
 
   if (proto !== Object.prototype && proto !== null) {
     out.push(`${pathLabel}:forbidden_non_plain_object`);
-    // Safely inspect intrinsic RegExp / URL string forms without invoking any own getter.
-    if (
-      proto === RegExp.prototype &&
-      !Object.getOwnPropertyDescriptor(value, "source") &&
-      !Object.getOwnPropertyDescriptor(value, "flags")
-    ) {
-      try {
-        const reStr = RegExp.prototype.toString.call(value);
-        for (const reason of detectRawPiiReasonsInText(reStr)) {
-          out.push(`${pathLabel}:${reason}`);
+    const ownKeys = Reflect.ownKeys(value);
+
+    // Inspect intrinsic RegExp / URL internal slots ONLY via cached intrinsic getters and ONLY
+    // when own keys contain zero accessors or unexpected properties (never call .toString()).
+    if (proto === RegExp.prototype && REGEXP_SOURCE_GET) {
+      let hasOnlyPlainLastIndex = true;
+      for (let i = 0; i < ownKeys.length; i += 1) {
+        const k = ownKeys[i]!;
+        if (k !== "lastIndex") {
+          hasOnlyPlainLastIndex = false;
+          break;
         }
-      } catch {
-        // Non-RegExp exotic prototype; already flagged as forbidden_non_plain_object.
+        const d = Object.getOwnPropertyDescriptor(value, k);
+        if (!d || d.get || d.set) {
+          hasOnlyPlainLastIndex = false;
+          break;
+        }
+      }
+      if (hasOnlyPlainLastIndex) {
+        try {
+          const reSource = REGEXP_SOURCE_GET.call(value);
+          if (typeof reSource === "string") {
+            for (const reason of detectRawPiiReasonsInText(reSource)) {
+              out.push(`${pathLabel}:${reason}`);
+            }
+          }
+        } catch {
+          // Non-RegExp exotic object; already flagged as forbidden_non_plain_object.
+        }
       }
     } else if (
       typeof URL !== "undefined" &&
       proto === URL.prototype &&
-      !Object.getOwnPropertyDescriptor(value, "href")
+      URL_HREF_GET &&
+      ownKeys.length === 0
     ) {
       try {
-        const urlStr = URL.prototype.toString.call(value);
-        for (const reason of detectRawPiiReasonsInText(urlStr)) {
-          out.push(`${pathLabel}:${reason}`);
+        const urlHref = URL_HREF_GET.call(value);
+        if (typeof urlHref === "string") {
+          for (const reason of detectRawPiiReasonsInText(urlHref)) {
+            out.push(`${pathLabel}:${reason}`);
+          }
         }
       } catch {
-        // Non-URL exotic prototype; already flagged as forbidden_non_plain_object.
+        // Non-URL exotic object; already flagged as forbidden_non_plain_object.
       }
     }
-    for (const rawKey of Reflect.ownKeys(value)) {
+    for (let i = 0; i < ownKeys.length; i += 1) {
       scanOwnPropertyForPii(
         value,
-        rawKey,
+        ownKeys[i]!,
         pathLabel,
         rawPathLabel,
         out,

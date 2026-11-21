@@ -31,11 +31,19 @@ import {
 } from "./personas";
 
 function normalizeUnicodeMath(text: string): string {
-  let normalized = text.normalize("NFKC");
+  // Normalize Unicode minus/dashes first so signed LaTeX fractions (e.g. `-\frac{−6}{−8}`) normalize consistently.
+  let normalized = text
+    .normalize("NFKC")
+    .replace(/[\u2212\u2010\u2011\u2012\u2013\u2014]/g, "-");
   // Convert LaTeX \frac{a}{b}, \dfrac{a}{b}, \tfrac{a}{b}, \cfrac{a}{b} -> a/b (up to 3 nested passes).
+  // When an outer `-` precedes a signed numerator (`-\frac{-6}{-8}`), keep inner parens `-(-6)/-8` so both signs survive.
+  const signedPrefixedLatexFrac =
+    /(-)\s*\\(?:d|t|c)?frac\s*\{\s*([+-][^{}]+?)\s*\}\s*\{\s*([^{}]+?)\s*\}/gi;
   const latexFracPattern = /\\(?:d|t|c)?frac\s*\{\s*([^{}]+?)\s*\}\s*\{\s*([^{}]+?)\s*\}/gi;
   for (let pass = 0; pass < 3; pass += 1) {
-    const next = normalized.replace(latexFracPattern, "$1/$2");
+    const next = normalized
+      .replace(signedPrefixedLatexFrac, "$1($2)/$3")
+      .replace(latexFracPattern, "$1/$2");
     if (next === normalized) break;
     normalized = next;
   }
@@ -47,7 +55,6 @@ function normalizeUnicodeMath(text: string): string {
     .replace(/[\u00F7\u2044\u2215]/g, "/")
     .replace(/\\(?:times|cdot)(?![a-z])/gi, "*")
     .replace(/[\u00D7\u00B7\u22C5]/g, "*")
-    .replace(/[\u2212\u2010\u2011\u2012\u2013\u2014]/g, "-")
     .replace(/\\leq?\b|\u2264/gi, "<=")
     .replace(/\\geq?\b|\u2265/gi, ">=")
     .replace(/\\neq?\b|\u2260/gi, "!=")
@@ -265,24 +272,36 @@ function extractScientificRationals(numericText: string): readonly ExactRational
 
 /**
  * Extracts exact reduced `BigInt` rationals from integer fraction tokens (`6/8`, `\frac{6}{8}`,
- * `6 / 8`, `6 ÷ 8`, `-(6/8)`) with slash/digit boundary guards so chained dates/paths (`2026/11/21`)
- * never match while equivalent fractions (`6/8` === `3/4`) are caught accurately.
+ * `6 / 8`, `6 ÷ 8`, `6/-8`, `-6/-8`, `(6)/(-8)`, `\frac{-6}{-8}`, `\frac{6}{-8}`, `-(6/8)`)
+ * with slash/digit boundary guards so chained dates/paths (`2026/11/21`) never match while
+ * signed equivalent fractions reduce accurately.
  */
 function extractFractionRationals(numericText: string): readonly ExactRational[] {
   const out: ExactRational[] = [];
+  const fracText = numericText
+    .replace(/\(\s*([+-]?)\s*(\d+)\s*\)/g, "($1$2)")
+    .replace(/\{\s*([+-]?)\s*(\d+)\s*\}/g, "{$1$2}")
+    .replace(/\/\s*([+-])\s*(\d+)/g, "/$1$2");
   const fractionPattern =
-    /(?<![\d./])(\d+)\/(\d+)(?!\d|\.\d|\/|[eE][+-]?\d|\*10\^(?:\{[+-]?\d+\}|\([+-]?\d+\)|[+-]?\d+))/g;
-  for (const m of numericText.matchAll(fractionPattern)) {
-    const numStr = m[1]!;
-    const denStr = m[2]!;
-    if (numStr.length > MAX_DECIMAL_MANTISSA_DIGITS || denStr.length > MAX_DECIMAL_MANTISSA_DIGITS) {
+    /(?<![\d./])(?:\(([+-]?\d+)\)|\{([+-]?\d+)\}|(\d+))\/(?:\(([+-]?\d+)\)|\{([+-]?\d+)\}|([+-]?\d+))(?!\d|\.\d|\/|[eE][+-]?\d|\*10\^(?:\{[+-]?\d+\}|\([+-]?\d+\)|[+-]?\d+))/g;
+  for (const m of fracText.matchAll(fractionPattern)) {
+    const rawNum = m[1] ?? m[2] ?? m[3]!;
+    const rawDen = m[4] ?? m[5] ?? m[6]!;
+    const numDigits = rawNum.replace(/^[+-]/, "");
+    const denDigits = rawDen.replace(/^[+-]/, "");
+    if (
+      numDigits.length > MAX_DECIMAL_MANTISSA_DIGITS ||
+      denDigits.length > MAX_DECIMAL_MANTISSA_DIGITS
+    ) {
       continue;
     }
     const startIdx = m.index ?? 0;
     const endIdx = startIdx + m[0].length;
-    const isNeg = hasUnaryMinusBefore(numericText, startIdx, endIdx);
-    const num = BigInt(`${isNeg ? "-" : ""}${numStr}`);
-    const den = BigInt(denStr);
+    let num = BigInt(rawNum);
+    if (hasUnaryMinusBefore(fracText, startIdx, endIdx)) {
+      num = -num;
+    }
+    const den = BigInt(rawDen);
     const rat = makeExactRational(num, den);
     if (rat) out.push(rat);
   }
@@ -351,6 +370,34 @@ function exactDecimalVariantsForRationalToken(compactToken: string): readonly st
   return variants;
 }
 
+const STAGE0_FORBIDDEN_PROTO_KEYS: ReadonlySet<string> = new Set([
+  "__proto__",
+  "constructor",
+  "prototype",
+]);
+
+function snapshotProtectedTokenList(rawTokens: unknown, label: string): readonly string[] {
+  if (!Array.isArray(rawTokens)) {
+    throw new Stage0ValidationError(
+      `Stage-0 ${label} must be a plain dense string array.`,
+      "tampered_episode",
+    );
+  }
+  assertStrictPlainStage0Container(rawTokens, label);
+  const out: string[] = [];
+  for (let i = 0; i < rawTokens.length; i += 1) {
+    const desc = Object.getOwnPropertyDescriptor(rawTokens, i);
+    if (!desc || !desc.enumerable || desc.get || desc.set || typeof desc.value !== "string") {
+      throw new Stage0ValidationError(
+        `Stage-0 rejected sparse, accessor, non-enumerable, or non-string token at ${label}[${i}].`,
+        "tampered_episode",
+      );
+    }
+    out.push(desc.value);
+  }
+  return out;
+}
+
 /**
  * Independently audits released tutor text against protected answer keys and
  * sealed solution steps using whitespace-normalized, operator/fraction-equivalent
@@ -362,6 +409,18 @@ export function detectProtectedLeakage(
   protectedAnswerTokens: readonly string[],
   protectedStepTokens: readonly string[],
 ): readonly string[] {
+  if (typeof releasedHintText !== "string") {
+    throw new Stage0ValidationError(
+      "Stage-0 releasedHintText must be a primitive string.",
+      "tampered_episode",
+    );
+  }
+  const safeAnswerTokens = snapshotProtectedTokenList(
+    protectedAnswerTokens,
+    "protectedAnswerTokens",
+  );
+  const safeStepTokens = snapshotProtectedTokenList(protectedStepTokens, "protectedStepTokens");
+
   const normalizedText = normalizeForLeakScan(releasedHintText);
   if (!normalizedText) return [];
   const compactText = normalizeCompactForLeakScan(releasedHintText);
@@ -371,15 +430,11 @@ export function detectProtectedLeakage(
   const hits: string[] = [];
   const seen = new Set<string>();
   const allProtected: string[] = [];
-  for (let i = 0; i < protectedAnswerTokens.length; i += 1) {
-    if (Object.prototype.hasOwnProperty.call(protectedAnswerTokens, i)) {
-      allProtected.push(protectedAnswerTokens[i]!);
-    }
+  for (let i = 0; i < safeAnswerTokens.length; i += 1) {
+    allProtected.push(safeAnswerTokens[i]!);
   }
-  for (let i = 0; i < protectedStepTokens.length; i += 1) {
-    if (Object.prototype.hasOwnProperty.call(protectedStepTokens, i)) {
-      allProtected.push(protectedStepTokens[i]!);
-    }
+  for (let i = 0; i < safeStepTokens.length; i += 1) {
+    allProtected.push(safeStepTokens[i]!);
   }
 
   for (let idx = 0; idx < allProtected.length; idx += 1) {
@@ -471,6 +526,15 @@ function assertStrictPlainStage0Container(value: object, path: string): void {
       "tampered_episode",
     );
   }
+  const ownNames = Object.getOwnPropertyNames(value);
+  for (let i = 0; i < ownNames.length; i += 1) {
+    if (STAGE0_FORBIDDEN_PROTO_KEYS.has(ownNames[i]!)) {
+      throw new Stage0ValidationError(
+        `Stage-0 rejected forbidden prototype key at ${path}.`,
+        "tampered_episode",
+      );
+    }
+  }
 }
 
 function snapshotStage0PlainValue<T>(
@@ -521,10 +585,16 @@ function snapshotStage0PlainValue<T>(
     return out as unknown as T;
   }
 
-  const out: Record<string, unknown> = {};
+  const out: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
   const names = Object.getOwnPropertyNames(value);
   for (let i = 0; i < names.length; i += 1) {
     const key = names[i]!;
+    if (STAGE0_FORBIDDEN_PROTO_KEYS.has(key)) {
+      throw new Stage0ValidationError(
+        `Stage-0 rejected forbidden prototype key at ${path}.`,
+        "tampered_episode",
+      );
+    }
     const desc = Object.getOwnPropertyDescriptor(value, key);
     if (!desc || !desc.enumerable || desc.get || desc.set) {
       throw new Stage0ValidationError(
@@ -532,7 +602,12 @@ function snapshotStage0PlainValue<T>(
         "tampered_episode",
       );
     }
-    out[key] = snapshotStage0PlainValue(desc.value, `${path}.${key}`, seen);
+    Object.defineProperty(out, key, {
+      value: snapshotStage0PlainValue(desc.value, `${path}.${key}`, seen),
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
   }
   seen.delete(value);
   return out as T;
@@ -586,11 +661,17 @@ function deepFreezeClone<T>(value: T): T {
     }
     return Object.freeze(cloned) as unknown as T;
   }
-  const clonedObj: Record<string, unknown> = {};
+  const clonedObj: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
   const keys = Object.keys(value as Record<string, unknown>);
   for (let i = 0; i < keys.length; i += 1) {
     const key = keys[i]!;
-    clonedObj[key] = deepFreezeClone((value as Record<string, unknown>)[key]);
+    if (STAGE0_FORBIDDEN_PROTO_KEYS.has(key)) continue;
+    Object.defineProperty(clonedObj, key, {
+      value: deepFreezeClone((value as Record<string, unknown>)[key]),
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
   }
   return Object.freeze(clonedObj) as T;
 }
@@ -991,9 +1072,15 @@ export function evaluateStage0Gate(
   }
   assertStrictPlainStage0Container(rawOptions, "options");
   const optNames = Object.getOwnPropertyNames(rawOptions);
-  const safeRawOptions: Record<string, unknown> = {};
+  const safeRawOptions: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
   for (let i = 0; i < optNames.length; i += 1) {
     const key = optNames[i]!;
+    if (STAGE0_FORBIDDEN_PROTO_KEYS.has(key)) {
+      throw new Stage0ValidationError(
+        "Stage-0 rejected forbidden prototype key at options.",
+        "tampered_episode",
+      );
+    }
     const desc = Object.getOwnPropertyDescriptor(rawOptions, key);
     if (!desc || !desc.enumerable || desc.get || desc.set) {
       throw new Stage0ValidationError(
@@ -1001,7 +1088,12 @@ export function evaluateStage0Gate(
         "tampered_episode",
       );
     }
-    safeRawOptions[key] = desc.value;
+    Object.defineProperty(safeRawOptions, key, {
+      value: desc.value,
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
   }
   const seed = (safeRawOptions.seed as number | undefined) ?? STAGE0_DEFAULT_SEED;
   const maxTurns = (safeRawOptions.maxTurns as number | undefined) ?? STAGE0_DEFAULT_MAX_TURNS;

@@ -1388,6 +1388,34 @@ export interface RunGepaOptimizationRoundInput {
   readonly paretoOptions: ParetoEvaluationOptions;
 }
 
+function deepClonePlainGepaValue<T>(value: T, freeze = false): T {
+  if (value === null || typeof value !== "object") {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    const out: unknown[] = [];
+    for (let i = 0; i < value.length; i += 1) {
+      out.push(deepClonePlainGepaValue(value[i], freeze));
+    }
+    return (freeze ? Object.freeze(out) : out) as unknown as T;
+  }
+  const out: Record<string, unknown> = {};
+  const keys = Object.keys(value as Record<string, unknown>);
+  for (let i = 0; i < keys.length; i += 1) {
+    const key = keys[i]!;
+    if (PROTOTYPE_POLLUTION_KEYS.has(key)) continue;
+    const desc = Object.getOwnPropertyDescriptor(value, key);
+    if (!desc || !desc.enumerable || desc.get || desc.set) continue;
+    Object.defineProperty(out, key, {
+      value: deepClonePlainGepaValue(desc.value, freeze),
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+  }
+  return (freeze ? Object.freeze(out) : out) as T;
+}
+
 export function runGepaOptimizationRound(
   input: RunGepaOptimizationRoundInput,
 ): GepaOptimizationRoundResult {
@@ -1397,6 +1425,9 @@ export function runGepaOptimizationRound(
     allowedFunctionPaths: GEPA_ROUND_ALLOWED_FUNCTION_PATHS,
   });
   assertDisjointSplitInvariants(input.split);
+
+  // Snapshot paretoOptions BEFORE scoreCandidate callback can run so callbacks cannot tamper with thresholds.
+  const safeParetoOptions = deepClonePlainGepaValue(input.paretoOptions);
 
   const reflectionContext = buildGepaReflectionContext({
     policy: input.basePolicy,
@@ -1420,7 +1451,7 @@ export function runGepaOptimizationRound(
       );
     }
     seenCandidateIds.add(canonicalId);
-    proposed.push(generated);
+    proposed.push(deepClonePlainGepaValue(generated, true));
   }
 
   const extraList = input.extraCandidatePatches;
@@ -1458,36 +1489,54 @@ export function runGepaOptimizationRound(
         }
         const rawPatch = extra.patches[i];
         policy = validateAndApplyGepaPatch(policy, rawPatch, `ext_${i + 1}`);
-        applied.push(rawPatch as GepaSurfacePatch);
+        applied.push(deepClonePlainGepaValue(rawPatch as GepaSurfacePatch, true));
       }
-      proposed.push({
-        candidateId: canonicalExtraId,
-        policy: { ...policy, policyId: canonicalExtraId },
-        appliedPatches: applied,
-      });
+      proposed.push(
+        deepClonePlainGepaValue(
+          {
+            candidateId: canonicalExtraId,
+            policy: { ...policy, policyId: canonicalExtraId },
+            appliedPatches: applied,
+          },
+          true,
+        ),
+      );
     }
   }
 
-  const rawReceipts: unknown[] = proposed.map((candidate) => input.scoreCandidate(candidate));
+  // Capture frozen internal candidate snapshots BEFORE calling scoreCandidate, and pass an
+  // independent deep-cloned copy to scoreCandidate so in-place callback mutations cannot alter
+  // validated candidate policies, IDs, Pareto inputs, or returned outputs.
+  const frozenProposed: readonly GepaProposedCandidate[] = Object.freeze([...proposed]);
+  const rawReceipts: unknown[] = [];
+  for (let i = 0; i < frozenProposed.length; i += 1) {
+    const candidateCopyForScorer = deepClonePlainGepaValue(frozenProposed[i]!);
+    rawReceipts.push(input.scoreCandidate(candidateCopyForScorer));
+  }
 
-  // Scan ALL raw scorer receipts for PII FIRST before any CandidateIdentityError can fire.
-  for (let i = 0; i < proposed.length; i += 1) {
-    assertNoRawPiiInValue(rawReceipts[i], `scorer_receipt[${proposed[i]!.candidateId}]`);
+  // Scan ALL raw scorer receipts for PII FIRST before any CandidateIdentityError can fire,
+  // and immediately snapshot plain receipts so callback-retained references cannot mutate them later.
+  const snapshottedReceipts: unknown[] = [];
+  for (let i = 0; i < frozenProposed.length; i += 1) {
+    const raw = rawReceipts[i];
+    assertNoRawPiiInValue(raw, `scorer_receipt[${frozenProposed[i]!.candidateId}]`);
+    snapshottedReceipts.push(isPlainObject(raw) ? deepClonePlainGepaValue(raw) : raw);
   }
 
   // Pre-collect all candidateIds across proposed candidates, baseline, and raw receipts so any
   // synthetic malformed-receipt ID can never collide with a valid caller candidateId.
   const reservedIds = new Set<string>();
-  const rawBaseline = input.paretoOptions.baseline as unknown;
+  const rawBaseline = safeParetoOptions.baseline as unknown;
   if (isPlainObject(rawBaseline) && typeof rawBaseline.candidateId === "string") {
     reservedIds.add(rawBaseline.candidateId);
     const trimmedBase = rawBaseline.candidateId.normalize("NFKC").trim();
     if (trimmedBase.length > 0) reservedIds.add(trimmedBase);
   }
-  for (const candidate of proposed) {
-    reservedIds.add(candidate.candidateId);
+  for (let i = 0; i < frozenProposed.length; i += 1) {
+    reservedIds.add(frozenProposed[i]!.candidateId);
   }
-  for (const rawReceipt of rawReceipts) {
+  for (let i = 0; i < snapshottedReceipts.length; i += 1) {
+    const rawReceipt = snapshottedReceipts[i];
     if (isPlainObject(rawReceipt) && typeof rawReceipt.candidateId === "string") {
       reservedIds.add(rawReceipt.candidateId);
       const trimmedReceiptId = rawReceipt.candidateId.normalize("NFKC").trim();
@@ -1503,8 +1552,10 @@ export function runGepaOptimizationRound(
     return synthId;
   };
 
-  const candidateMetrics: CartridgeCandidateMetrics[] = proposed.map((candidate, idx) => {
-    const rawReceipt = rawReceipts[idx];
+  const candidateMetrics: CartridgeCandidateMetrics[] = [];
+  for (let idx = 0; idx < frozenProposed.length; idx += 1) {
+    const candidate = frozenProposed[idx]!;
+    const rawReceipt = snapshottedReceipts[idx];
 
     const makeMalformedVetoReceipt = (): CartridgeCandidateMetrics => {
       const targetId =
@@ -1540,11 +1591,13 @@ export function runGepaOptimizationRound(
 
     // Isolate null / undefined / non-object / missing-ID receipts as vetoed entries so valid siblings proceed.
     if (!isPlainObject(rawReceipt)) {
-      return makeMalformedVetoReceipt();
+      candidateMetrics.push(makeMalformedVetoReceipt());
+      continue;
     }
     const rawReceiptId = rawReceipt.candidateId;
     if (typeof rawReceiptId !== "string" || rawReceiptId.normalize("NFKC").trim().length === 0) {
-      return makeMalformedVetoReceipt();
+      candidateMetrics.push(makeMalformedVetoReceipt());
+      continue;
     }
 
     const canonicalReceiptId = canonicalizeIdentifier(rawReceiptId, "receipt.candidateId");
@@ -1557,16 +1610,18 @@ export function runGepaOptimizationRound(
       );
     }
     const typedReceipt = rawReceipt as unknown as CartridgeCandidateMetrics;
-    return canonicalReceiptId === typedReceipt.candidateId
-      ? typedReceipt
-      : { ...typedReceipt, candidateId: canonicalReceiptId };
-  });
+    candidateMetrics.push(
+      canonicalReceiptId === typedReceipt.candidateId
+        ? typedReceipt
+        : { ...typedReceipt, candidateId: canonicalReceiptId },
+    );
+  }
 
-  const pareto = evaluateParetoFrontierAndPromotion(candidateMetrics, input.paretoOptions);
+  const pareto = evaluateParetoFrontierAndPromotion(candidateMetrics, safeParetoOptions);
 
   return {
-    reflectionContext,
-    candidates: proposed,
+    reflectionContext: deepClonePlainGepaValue(reflectionContext, true),
+    candidates: deepClonePlainGepaValue(frozenProposed, true),
     pareto,
   };
 }

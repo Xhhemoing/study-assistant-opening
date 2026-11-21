@@ -790,4 +790,89 @@ describe("Stage-0 768-episode deterministic student simulator", () => {
     expect(compliantReport.promotable).toBe(true);
     expect(compliantReport.metrics.answerLeakageRate).toBe(0);
   });
+
+  it("rejects own index getters on protected token arrays in detectProtectedLeakage and rejects __proto__ own data properties in Stage-0 options/episodes (Round-15 P1-2, P1-3)", () => {
+    // 1) Stateful index getter on protectedAnswerTokens MUST fail closed without invoking the getter!
+    let tokenGetterCalled = false;
+    const getterTokens: string[] = [];
+    Object.defineProperty(getterTokens, 0, {
+      enumerable: true,
+      configurable: true,
+      get() {
+        tokenGetterCalled = true;
+        return "";
+      },
+    });
+    expect(() => detectProtectedLeakage("The answer is 3/4.", getterTokens, [])).toThrow(
+      Stage0ValidationError,
+    );
+    expect(tokenGetterCalled).toBe(false);
+
+    // Custom-prototype token array MUST also fail closed.
+    const customTokenArr = ["3/4"];
+    Object.setPrototypeOf(customTokenArr, Object.create(Array.prototype));
+    expect(() => detectProtectedLeakage("The answer is 3/4.", customTokenArr, [])).toThrow(
+      Stage0ValidationError,
+    );
+
+    // 2) Own data property "__proto__" on Stage-0 options MUST fail closed without mutating snapshot prototype!
+    let protoGetterInvoked = false;
+    const poisonedProto = {};
+    Object.defineProperty(poisonedProto, "allowDiagnosticSubset", {
+      enumerable: true,
+      get() {
+        protoGetterInvoked = true;
+        return true;
+      },
+    });
+    const protoOptions = JSON.parse('{"seed":20261121}') as Record<string, unknown>;
+    Object.defineProperty(protoOptions, "__proto__", {
+      value: poisonedProto,
+      enumerable: true,
+      configurable: true,
+    });
+    expect(() =>
+      evaluateStage0Gate(
+        createCompliantReferencePolicy(),
+        protoOptions as unknown as Parameters<typeof evaluateStage0Gate>[1],
+      ),
+    ).toThrow(Stage0ValidationError);
+    expect(protoGetterInvoked).toBe(false);
+  });
+
+  it("catches signed denominators ('6/-8', '-6/-8', '\\frac{-6}{-8}', '\\frac{6}{-8}', '(6)/(-8)') with exact combined-sign rational reduction (Round-15 P1-4)", () => {
+    // Positive +3/4 equivalents with negative numerator AND negative denominator MUST trigger "3/4" & "0.75" and NOT "-3/4"!
+    for (const posSigned of [
+      "The limit equals -6/-8.",
+      "Compute (-6)/(-8) directly.",
+      "Write \\frac{-6}{-8} here.",
+      "Write \\dfrac{-6}{-8} here.",
+      "Negating gives -\\frac{6}{-8}.",
+      "Or -(6/-8).",
+      "Or -\\frac{-6}{8}.",
+    ]) {
+      expect(detectProtectedLeakage(posSigned, ["3/4", "0.75"], [])).toEqual(["3/4", "0.75"]);
+      expect(detectProtectedLeakage(posSigned, ["-3/4", "-0.75"], [])).toEqual([]);
+    }
+
+    // Negative -3/4 equivalents with signed denominator MUST trigger "-3/4" & "-0.75" and NOT "+3/4"!
+    for (const negSigned of [
+      "The limit equals 6/-8.",
+      "Compute (6)/(-8) directly.",
+      "Compute 6 / -8 directly.",
+      "Write \\frac{6}{-8} here.",
+      "Write \\tfrac{6}{-8} here.",
+      "Write -\\frac{-6}{-8} here.",
+    ]) {
+      expect(detectProtectedLeakage(negSigned, ["-3/4", "-0.75"], [])).toEqual(["-3/4", "-0.75"]);
+      expect(detectProtectedLeakage(negSigned, ["3/4", "0.75"], [])).toEqual([]);
+    }
+
+    // Compliant 768-episode reference policy still clears all 768 episodes with 0 leaks.
+    const compliantReport = evaluateStage0Gate(createCompliantReferencePolicy(), {
+      seed: 20261121,
+    });
+    expect(compliantReport.promotable).toBe(true);
+    expect(compliantReport.metrics.answerLeakageRate).toBe(0);
+  });
 });
