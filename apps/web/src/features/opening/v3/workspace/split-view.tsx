@@ -116,18 +116,19 @@ export function SplitView({ panes, children, suspended = false, restoring = fals
     <Panel key="main" id="main" minSize={wide && !restoreMode ? "40%" : "0%"} className="min-w-0">
       <div hidden={fullWidth} inert={fullWidth} className={fullWidth ? "hidden" : "h-full min-h-0"}>{children}</div>
     </Panel>
-    {wide && selected && !restoreMode ? <Separator key="separator" data-split-separator aria-label={`调整「${panes[selected]!.label}」栏宽度`} className="group relative w-2 shrink-0 outline-none">
+    {wide && selected && !restoreMode ? <Separator key="separator" data-split-separator aria-label={`调整「${panes[selected]!.label}」栏宽度`} className="group relative w-3 shrink-0 cursor-col-resize outline-none">
       <span aria-hidden="true" className="absolute inset-y-4 left-1/2 w-px -translate-x-1/2 rounded-pill bg-line transition-colors duration-(--duration-micro) group-hover:bg-line-strong group-focus-visible:w-0.5 group-focus-visible:bg-accent group-data-[separator=active]:bg-accent" />
+      <span aria-hidden="true" className="absolute left-1/2 top-1/2 h-8 w-1 -translate-x-1/2 -translate-y-1/2 rounded-pill bg-line-strong/0 transition-[background-color,transform] duration-150 ease-out-strong group-hover:bg-line-strong group-focus-visible:bg-accent group-data-[separator=active]:scale-y-110 group-data-[separator=active]:bg-accent" />
     </Separator> : null}
     <Panel key="tools" id="tools" panelRef={toolPanel} collapsible collapsedSize="0%" minSize={selected && wide ? "260px" : "0%"} maxSize={selected ? fullWidth ? "100%" : "60%" : "0%"} defaultSize="0%" className="min-w-0">
-      <section ref={surface} hidden={!selected} aria-label="学习工具" className={selected ? "flex h-full min-h-0 flex-col overflow-hidden rounded-panel bg-surface p-2" : "hidden"}>
-        <header className="flex min-h-11 shrink-0 items-center gap-1">
-          <div role="tablist" aria-label="学习工具" className="flex min-w-0 flex-1 flex-wrap gap-1">
-            {tabs.map((pane, index) => <button key={pane} id={`${id}-tab-${pane}`} role="tab" type="button" aria-selected={selected === pane} aria-controls={`${id}-panel-${pane}`} tabIndex={selected === pane ? 0 : -1} className={ui.toolbarButton} onClick={() => { if (!suspended) setPref({ split: [pane] }); }} onKeyDown={event => navigate(event, index)}>{panes[pane]!.label}</button>)}
+      <section ref={surface} hidden={!selected} aria-label="学习工具" className={selected ? "flex h-full min-h-0 flex-col overflow-hidden rounded-panel border border-line/80 bg-surface p-2.5 shadow-card" : "hidden"}>
+        <header className="flex min-h-11 shrink-0 items-center gap-1.5 border-b border-line/60 pb-2">
+          <div role="tablist" aria-label="学习工具" className="well-recessed flex min-w-0 flex-1 flex-wrap gap-0.5 rounded-xl p-0.5">
+            {tabs.map((pane, index) => <button key={pane} id={`${id}-tab-${pane}`} role="tab" type="button" aria-selected={selected === pane} aria-controls={`${id}-panel-${pane}`} tabIndex={selected === pane ? 0 : -1} className={`min-h-8 rounded-lg px-3 text-xs font-medium transition-[color,background-color,box-shadow,transform] duration-150 ease-out-strong focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 active:scale-[0.98] ${selected === pane ? "bg-surface text-text shadow-card" : "text-text-2 hover:text-text"}`} onClick={() => { if (!suspended) setPref({ split: [pane] }); }} onKeyDown={event => navigate(event, index)}>{panes[pane]!.label}</button>)}
           </div>
           <button type="button" className={ui.iconSm} aria-label="关闭学习工具" onClick={close}><X size={15} aria-hidden="true" /></button>
         </header>
-        {available.map(pane => <div key={pane} id={`${id}-panel-${pane}`} role="tabpanel" aria-labelledby={`${id}-tab-${pane}`} hidden={selected !== pane} tabIndex={0} className={selected === pane ? "min-h-0 flex-1 overflow-y-auto" : "hidden"}>{visited.current.has(pane) ? panes[pane]!.render() : null}</div>)}
+        {available.map(pane => <div key={pane} id={`${id}-panel-${pane}`} role="tabpanel" aria-labelledby={`${id}-tab-${pane}`} hidden={selected !== pane} tabIndex={0} className={selected === pane ? "min-h-0 flex-1 overflow-y-auto pt-2" : "hidden"}>{visited.current.has(pane) ? panes[pane]!.render() : null}</div>)}
       </section>
     </Panel>
   </Group>;

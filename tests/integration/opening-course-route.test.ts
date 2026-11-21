@@ -41,6 +41,7 @@ import { createOpeningCourseRouteRepository } from "../../packages/database/src/
 import { createOpeningAttemptService } from "../../apps/web/src/features/opening/learning/attempt-service";
 import { createOpeningPlanService } from "../../apps/web/src/features/opening/planning/plan-service";
 import { createCourseRouteService } from "../../apps/web/src/features/opening/teaching/course-route-service";
+import { createOpeningTeachingResumeService } from "../../apps/web/src/features/opening/teaching/resume-service";
 import { createCompileTeachingUnitHandler } from "../../apps/worker/src/jobs/compile-teaching-unit";
 import { createCompileTeachingUnitWorkerDeps } from "../../apps/worker/src/runtime/compile-teaching-unit-wiring";
 import { rankPedagogy } from "../fixtures/opening/teaching/rank-pedagogy";
@@ -125,6 +126,49 @@ it("waits for a queued grading job on ordinary unknown evidence",async()=>{
   const snapshot=await x.repo.read(f.scope,x.courseId,one.activity.id),before=await readOpeningLearningCapacity(f.sql,f.scope);
   expect(await x.repo.next(f.scope,x.courseId,{goalId:x.goal.id,expectedGoalRevision:1,activityId:one.activity.id,expectedPathVersion:snapshot.currentActivity!.pathVersion,observationId:result.observation.id,clientKey:randomUUID(),minutes:20})).toMatchObject({kind:"choice",reason:"evidence_unknown"});
   expect((await readOpeningLearningCapacity(f.sql,f.scope)).usedMinutes).toBe(before.usedMinutes);
+});
+it("withholds a completed route recommendation when a newer unusable observation becomes the route head", async () => {
+  const x = await seed();
+  const { activity } = ready(await x.start());
+  await compile(activity);
+  const { observation: checked, session } = await answer(activity, 0, "correct", "hinted");
+  const activities = createOpeningTeachingActivitiesRepository(f.sql);
+  const current = await activities.get(f.scope, activity.id);
+  await activities.setStatus(f.scope, activity.id, { status: "completed", expectedUpdatedAt: current!.updatedAt });
+  const summary = createOpeningTeachingResumeService(f.sql);
+  expect((await summary.getSummary(f.scope, activity.id))?.nextStep).toEqual({ kind: "assisted_check", observationId: checked.id });
+  expect((await x.repo.read(f.scope, x.courseId, activity.id)).observationId).toBe(checked.id);
+
+  const latest = await createOpeningLearningRepository(f.sql).insertObservation(f.scope, {
+    sessionId: session.id, courseId: x.courseId, skillLabel: activity.learnerFocus!.skillLabel,
+    sourceIds: activity.sourceIds, clientKey: randomUUID(), answer: "补记一次作答",
+    outcome: "unverified", assistance: "unknown", verdictSource: "self_report",
+  });
+  await f.sql`UPDATE opening_learning_observations SET occurred_at=GREATEST(occurred_at, ${checked.submittedAt ?? checked.occurredAt}::timestamptz + interval '1 second') WHERE id=${latest.id}`;
+  expect(latest.eligibility?.usableForCurrentVersion).not.toBe("yes");
+  expect((await x.repo.read(f.scope, x.courseId, activity.id)).observationId).toBe(latest.id);
+  expect((await summary.getSummary(f.scope, activity.id))?.nextStep).toBeUndefined();
+});
+it("binds completed ordinary matrix practice to a new check on the same course source", async () => {
+  const { courseId, sourceId } = await seed();
+  await f.sql`UPDATE course_asset_memberships SET purpose='practice' WHERE course_id=${courseId} AND asset_id=${sourceId}`;
+  const learning = createOpeningLearningRepository(f.sql);
+  const session = await learning.createSession(f.scope, { courseId, skillLabel: "矩阵加法", sourceIds: [sourceId] });
+  const attempts = createOpeningAttemptService(f.sql);
+  const attempt = await attempts.create(f.scope, {
+    sessionId: session.id, clientKey: randomUUID(), matrixExercise: { sourceId, exerciseKey: "addition", variant: 1 },
+  });
+  const checked = await attempts.submit(f.scope, attempt.id, {
+    clientKey: randomUUID(), answer: "[[5,-3],[-3,1]]", outcome: "unverified", assistance: "hinted", verdictSource: "self_report",
+  });
+  expect(checked.eligibility).toMatchObject({ verifiedCorrect: "yes", usableForCurrentVersion: "yes" });
+  const activityId = attempt.contextAnchor!.activityId!;
+  await createOpeningTeachingActivitiesRepository(f.sql).setStatus(f.scope, activityId, { status: "completed" });
+
+  const summary = createOpeningTeachingResumeService(f.sql);
+  expect((await summary.getSummary(f.scope, activityId))?.nextStep).toEqual({
+    kind: "assisted_check", observationId: checked.id, matrixPractice: { sourceId, exerciseKey: "addition", variant: 2 },
+  });
 });
 it("persists zero source versions through real course start and next without rolling back activities",async()=>{
   const x=await seed(1,0),one=ready(await x.start());

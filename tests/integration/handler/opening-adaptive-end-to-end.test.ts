@@ -8,7 +8,7 @@ import { setAuthRuntimeForTests } from "../../../apps/web/src/server/runtime";
 import type { TodayPlanResult } from "../../../apps/web/src/features/opening/planning/plan-service";
 import { POST as createAttempt } from "../../../apps/web/src/app/api/opening/attempts/route";
 import { POST as submitAttempt } from "../../../apps/web/src/app/api/opening/attempts/[id]/submit/route";
-import { GET as getToday } from "../../../apps/web/src/app/api/opening/today/route";
+import { POST as prepareToday } from "../../../apps/web/src/app/api/opening/today/route";
 import { POST as acceptPlan } from "../../../apps/web/src/app/api/opening/plans/[id]/accept/route";
 import { POST as createActivity } from "../../../apps/web/src/app/api/opening/teaching-activities/route";
 import { createOpeningFixture, type OpeningFixture } from "../opening-fixture";
@@ -83,7 +83,7 @@ it("carries a verified error through Today selection into a server-derived targe
   const chosen = await recordVerifiedError();
   const unchosen = await recordVerifiedError();
   const repo = createOpeningPlansRepository(fixture.sql);
-  const todayResponse = await getToday(request(`/today?date=${day}`));
+  const todayResponse = await prepareToday(request(`/today?date=${day}`, {}));
   expect(todayResponse.status).toBe(200);
   const today = await todayResponse.json() as TodayPlanResult;
   const draft = today.dailyDraft!;

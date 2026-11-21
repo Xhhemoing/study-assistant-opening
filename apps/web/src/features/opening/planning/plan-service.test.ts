@@ -8,6 +8,8 @@ const taskReads = vi.hoisted(() => ({
   upsertHardBlocks: vi.fn(),
   listHardBlocks: vi.fn(),
   listTimetable: vi.fn(),
+  findDraftByProposeClientKey: vi.fn(),
+  ensureAutoDraft: vi.fn(),
 }));
 vi.mock("@aistudy/database", async original => ({
   ...await original<typeof import("@aistudy/database")>(),
@@ -28,6 +30,19 @@ import {
 } from "./plan-service";
 
 const SH = "Asia/Shanghai";
+it("reads the existing daily draft without generating or changing plan state", async () => {
+  const scope = { workspaceId: id(1), ownerUserId: id(1) };
+  const date = "2026-11-19";
+  const draft = { id: id(2), date, status: "draft" };
+  taskReads.getToday.mockResolvedValueOnce(null);
+  taskReads.listHardBlocks.mockResolvedValueOnce([]);
+  taskReads.findDraftByProposeClientKey.mockResolvedValueOnce(draft);
+  const service = createOpeningPlanService({} as Sql);
+  expect(await service.readToday(scope, date)).toMatchObject({ date, acceptedVersion: 0, dailyDraft: draft });
+  expect(taskReads.findDraftByProposeClientKey).toHaveBeenCalledWith(scope, date, "auto-draft:2026-11-19");
+  expect(taskReads.ensureAutoDraft).not.toHaveBeenCalled();
+});
+
 it("projects persisted minutes without replacing the legacy task field and keeps UI listTasks unfiltered", async () => {
   taskReads.listTasks.mockReset();
   taskReads.listTasks.mockResolvedValue([task(1)]);
