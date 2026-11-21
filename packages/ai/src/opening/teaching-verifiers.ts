@@ -983,6 +983,27 @@ function isProseTextMacroBody(body: string): boolean {
   );
 }
 
+function isDigitInternalComma(text: string, index: number, clauseStart: number): boolean {
+  const prev = index > clauseStart ? text[index - 1]! : "";
+  const next = index + 1 < text.length ? text[index + 1]! : "";
+  if (!/\d/.test(prev) || !/\d/.test(next)) return false;
+
+  let left = index - 1;
+  while (left > clauseStart && /[\d,]/.test(text[left - 1]!)) left--;
+  let right = index + 2;
+  while (right < text.length && /[\d,]/.test(text[right]!)) right++;
+  const token = text.slice(left, right);
+  if ((left === 0 || text[left - 1] !== ".") && /^\d{1,3}(?:,\d{3})+$/.test(token)) {
+    return true;
+  }
+
+  const lhs = text.slice(clauseStart, index);
+  const restAfter = text.slice(index + 1);
+  const nextBoundary = restAfter.search(/[;，；。<>≠≤≥≈≡⇒⇐⇔→←↔↦∴∵\r\n]|,\s|[\u4e00-\u9fff\u3400-\u4dbf]|\\(?:implies|iff|Rightarrow|Leftrightarrow|text|quad)/);
+  const rhs = nextBoundary < 0 ? restAfter : restAfter.slice(0, nextBoundary);
+  return !(lhs.includes("=") && rhs.includes("="));
+}
+
 function splitMultiClauseFormula(text: string): string[] {
   const clauses: string[] = [];
   let start = 0;
@@ -1054,6 +1075,8 @@ function splitMultiClauseFormula(text: string): string[] {
     if (ch === "]") { bracketDepth = Math.max(0, bracketDepth - 1); continue; }
 
     if (braceDepth !== 0 || parenDepth !== 0 || bracketDepth !== 0 || envDepth !== 0) continue;
+
+    if (ch === "," && isDigitInternalComma(text, i, start)) continue;
 
     if (/[,;，；。<>≠≤≥≈≡⇒⇐⇔→←↔↦∴∵]/.test(ch)) {
       clauses.push(text.slice(start, i));

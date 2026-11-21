@@ -383,6 +383,9 @@ describe("teaching-verifiers", () => {
     ["display \\[...\\] with explicit \\\\ before contradiction", String.raw`\[1 + 1 = 2 \\ 2 + 2 = 5\]`, "2 + 2 = 5"],
     ["display \\[...\\] single-line contradiction", String.raw`\[1 + 1 = 5\]`, "1 + 1 = 5"],
     ["display \\[...\\] wrapped across physical newline with false sum", "\\[\n1 + 1 = 1\n+ 2 = 4\n\\]", "1 + 1 = 1 + 2 = 4"],
+    ["comma-separated arithmetic contradiction with space", "1 + 1 = 2, 2 + 2 = 5", "2 + 2 = 5"],
+    ["tight comma-separated arithmetic contradiction without space", "1 + 1 = 2,2 + 2 = 5", "2 + 2 = 5"],
+    ["comma-separated contradiction after thousands-grouped unknown equation", "1,000 + 2 = 1,002, 2 + 2 = 5", "2 + 2 = 5"],
   ])("flags multiline LaTeX contradiction with real arithmetic probe (%s)", async (_label, latex, expectedDetail) => {
     const report = await verifyTeachingContent({
       activityId: ACT, publishInput: basePublish(), pack: packWithSupport(), keyClaims: [],
@@ -454,6 +457,13 @@ describe("teaching-verifiers", () => {
       "1 + 1 = 2 得到 2 + 2 = 4",
       "1 + 1 = 2 由此得到 2 + 2 = 4",
       String.raw`3 \text{ 米} = 300 厘米 = 3000 毫米`,
+      "1,000 + 2 = 1,002",
+      "1,000,000 + 5 = 1,000,005",
+      "1,5 + 2,5 = 4",
+      "1,5 = 1,5",
+      "x = 1,000 + 2 = 1,002",
+      "1,000 + 2 = 1,002, 1 + 1 = 2",
+      "1,5 = 1,5 得到 2 + 2 = 4",
       "50\\% = 0.5\n% \\\\ 1 + 1 = 5",
       "% \\\\ 1 + 1 = 5",
       "\\begin{aligned}\nA &= \\begin{pmatrix}\n1 & 2 \\\\\n3 & 4\n\\end{pmatrix} \\\\\n1 + 1 &= 2\n\\end{aligned}",
