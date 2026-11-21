@@ -327,17 +327,26 @@ function rootSortKey(root: IsolatedRoot): SpanRational {
   return root.kind === "exact" ? root.value : root.low;
 }
 
-function isolateRealRoots(sfPoly: Polynomial, interval: NormalizedInterval): IsolatedRoot[] {
-  if (sfPoly.size === 0) return [];
+type IsolateRealRootsResult = {
+  roots: IsolatedRoot[];
+  unresolvedRootIsolation: boolean;
+};
+
+function isolateRealRoots(sfPoly: Polynomial, interval: NormalizedInterval): IsolateRealRootsResult {
+  if (sfPoly.size === 0) return { roots: [], unresolvedRootIsolation: false };
   let work = polynomialSquareFree(sfPoly);
-  if (polynomialDegree(work) <= 0) return [];
+  if (polynomialDegree(work) <= 0) return { roots: [], unresolvedRootIsolation: false };
   if (interval.left && interval.right) {
     const cmp = compareRational(interval.left, interval.right);
-    if (cmp > 0) return [];
+    if (cmp > 0) return { roots: [], unresolvedRootIsolation: false };
     if (cmp === 0) {
-      return !interval.leftOpen && !interval.rightOpen && polynomialEvaluate(work, interval.left).n === 0n
-        ? [{ kind: "exact", value: interval.left }]
-        : [];
+      return {
+        roots:
+          !interval.leftOpen && !interval.rightOpen && polynomialEvaluate(work, interval.left).n === 0n
+            ? [{ kind: "exact", value: interval.left }]
+            : [],
+        unresolvedRootIsolation: false,
+      };
     }
   }
   const roots: IsolatedRoot[] = [];
@@ -349,13 +358,15 @@ function isolateRealRoots(sfPoly: Polynomial, interval: NormalizedInterval): Iso
     if (!interval.rightOpen) roots.push({ kind: "exact", value: interval.right });
     work = polynomialDivMod(work, linearFactor(interval.right)).quotient;
   }
-  if (polynomialDegree(work) <= 0) return roots.sort((a, b) => compareRational(rootSortKey(a), rootSortKey(b)));
+  if (polynomialDegree(work) <= 0) {
+    return { roots: roots.sort((a, b) => compareRational(rootSortKey(a), rootSortKey(b))), unresolvedRootIsolation: false };
+  }
   if (polynomialDegree(work) === 1) {
     const a1 = work.get(1)!;
     const a0 = work.get(0) ?? rational(0n);
     const root = divideRational(rational(-a0.n, a0.d), a1);
     if (pointInInterval(root, interval)) roots.push({ kind: "exact", value: root });
-    return roots.sort((a, b) => compareRational(rootSortKey(a), rootSortKey(b)));
+    return { roots: roots.sort((a, b) => compareRational(rootSortKey(a), rootSortKey(b))), unresolvedRootIsolation: false };
   }
 
   const bound = cauchyRootBound(work);
@@ -374,6 +385,7 @@ function isolateRealRoots(sfPoly: Polynomial, interval: NormalizedInterval): Iso
     while (polynomialEvaluate(work, high).n === 0n) high = addRational(high, rational(1n));
   }
 
+  let unresolvedRootIsolation = false;
   const stack: Array<{ a: SpanRational; b: SpanRational; depth: number }> = [{ a: low, b: high, depth: 0 }];
   let guard = 0;
   while (stack.length > 0 && guard++ < 2048) {
@@ -381,7 +393,12 @@ function isolateRealRoots(sfPoly: Polynomial, interval: NormalizedInterval): Iso
     if (compareRational(a, b) >= 0) continue;
     const count = sturmCountOpen(work, a, b);
     if (count === 0) continue;
-    if (count === 1 || depth >= 80) {
+    if (count === 1) {
+      roots.push({ kind: "open", low: a, high: b });
+      continue;
+    }
+    if (depth >= 80) {
+      unresolvedRootIsolation = true;
       roots.push({ kind: "open", low: a, high: b });
       continue;
     }
@@ -393,7 +410,8 @@ function isolateRealRoots(sfPoly: Polynomial, interval: NormalizedInterval): Iso
     stack.push({ a: mid, b, depth: depth + 1 });
     stack.push({ a, b: mid, depth: depth + 1 });
   }
-  return roots.sort((a, b) => compareRational(rootSortKey(a), rootSortKey(b)));
+  if (stack.length > 0) unresolvedRootIsolation = true;
+  return { roots: roots.sort((a, b) => compareRational(rootSortKey(a), rootSortKey(b))), unresolvedRootIsolation };
 }
 
 export type RationalForm = {
@@ -1467,7 +1485,7 @@ function pickRationalBetween(a: SpanRational | null, b: SpanRational | null): Sp
 }
 
 type CadOpenCell = { left: SpanRational | null; right: SpanRational | null; sample: SpanRational };
-type CadPlan = { sites: SampleSite[]; openCells: CadOpenCell[] };
+type CadPlan = { sites: SampleSite[]; openCells: CadOpenCell[]; unresolvedRootIsolation: boolean };
 
 function buildCadPlan(
   constraints: readonly DomainConstraint[],
@@ -1492,6 +1510,7 @@ function buildCadPlan(
 
   const sites: SampleSite[] = [];
   const openCells: CadOpenCell[] = [];
+  let unresolvedRootIsolation = false;
   const pushRationalSite = (x: SpanRational) => {
     if (!sites.some((s) => s.kind === "rational" && equalRational(s.x, x))) {
       sites.push({ kind: "rational", x });
@@ -1521,7 +1540,9 @@ function buildCadPlan(
       }
     };
 
-    const roots = polynomialDegree(master) >= 1 ? isolateRealRoots(master, iv) : [];
+    const isolated = polynomialDegree(master) >= 1 ? isolateRealRoots(master, iv) : { roots: [], unresolvedRootIsolation: false };
+    if (isolated.unresolvedRootIsolation) unresolvedRootIsolation = true;
+    const roots = isolated.roots;
     const rootBounds: Array<{ low: SpanRational; high: SpanRational }> = [];
     for (const r of roots) {
       if (r.kind === "exact") {
@@ -1553,6 +1574,7 @@ function buildCadPlan(
             }
             curHi = mid;
           } else {
+            unresolvedRootIsolation = true;
             break;
           }
         }
@@ -1614,7 +1636,7 @@ function buildCadPlan(
       }
     }
   }
-  return { sites, openCells };
+  return { sites, openCells, unresolvedRootIsolation };
 }
 
 function evaluateExactRationalExt(
@@ -2738,11 +2760,14 @@ export function verifyScalarEquivalence(
       polynomialMultiply(rf.numerator, sf.denominator),
       -1,
     );
-    const { sites } = buildCadPlan(
+    const { sites, unresolvedRootIsolation } = buildCadPlan(
       [...sConstraints.rational, ...rConstraints.rational],
       parsedDomain,
       [...sConstraints.splitPolys, ...rConstraints.splitPolys],
     );
+    if (unresolvedRootIsolation) {
+      return { status: "unverified", reason: "unresolved_root_isolation", domain };
+    }
     const validRationalPoints = sites
       .filter((s): s is { kind: "rational"; x: SpanRational } => s.kind === "rational")
       .map((s) => s.x)
@@ -2811,11 +2836,14 @@ export function verifyScalarEquivalence(
 
   // Extended fragment (radicals, abs, ln, sin, cos, exp): 1D CAD domain verification first
   const allRationalConstraints = [...sConstraints.rational, ...rConstraints.rational];
-  const { sites, openCells } = buildCadPlan(
+  const { sites, openCells, unresolvedRootIsolation } = buildCadPlan(
     allRationalConstraints,
     parsedDomain,
     [...sConstraints.splitPolys, ...rConstraints.splitPolys],
   );
+  if (unresolvedRootIsolation) {
+    return { status: "unverified", reason: "unresolved_root_isolation", domain };
+  }
   const validSites: SampleSite[] = [];
   const ambiguousSites: Array<{ site: SampleSite; definedSide: "student" | "reference" }> = [];
   for (const site of sites) {
@@ -3090,13 +3118,13 @@ function checkDenominatorSetsEquivalent(
 
   for (const iv of intervals) {
     if (polynomialDegree(sOnly) >= 1 && sturmCount(sOnly, iv) > 0) {
-      const roots = isolateRealRoots(sOnly, iv);
+      const { roots } = isolateRealRoots(sOnly, iv);
       const first = roots[0];
       const witnessInput = first ? (first.kind === "exact" ? formatRational(first.value) : `(${formatRational(first.low)}, ${formatRational(first.high)})`) : "domain";
       return { equal: false, witness: { input: witnessInput, detail: "student undefined" } };
     }
     if (polynomialDegree(rOnly) >= 1 && sturmCount(rOnly, iv) > 0) {
-      const roots = isolateRealRoots(rOnly, iv);
+      const { roots } = isolateRealRoots(rOnly, iv);
       const first = roots[0];
       const witnessInput = first ? (first.kind === "exact" ? formatRational(first.value) : `(${formatRational(first.low)}, ${formatRational(first.high)})`) : "domain";
       return { equal: false, witness: { input: witnessInput, detail: "reference undefined" } };
@@ -3179,11 +3207,14 @@ function checkAntiderivativeDefinedOnIntegrandDomain(
   if (!parsedDomain || parsedDomain.empty) return null;
   const sConstraints = collectConstraints(antiderivative, variable);
   const iConstraints = collectConstraints(integrand, variable);
-  const { sites, openCells } = buildCadPlan(
+  const { sites, openCells, unresolvedRootIsolation } = buildCadPlan(
     [...sConstraints.rational, ...iConstraints.rational],
     parsedDomain,
     [...sConstraints.splitPolys, ...iConstraints.splitPolys],
   );
+  if (unresolvedRootIsolation) {
+    return { status: "unverified", reason: "unresolved_root_isolation", domain };
+  }
   let hasUnresolvedDomainMismatch = false;
   const ambiguousSites: SampleSite[] = [];
   for (const site of sites) {
@@ -3247,6 +3278,69 @@ function checkAntiderivativeDefinedOnIntegrandDomain(
   }
   if (hasUnresolvedDomainMismatch) {
     return { status: "unverified", reason: "unresolved_nonrational_domain", domain };
+  }
+  if (sConstraints.hasNonRationalDomainOps) {
+    const validSites: SampleSite[] = [];
+    const activeOpenIntervals: NormalizedInterval[] = [];
+    for (const site of sites) {
+      const iOk = !iConstraints.alwaysUndefined && constraintsSatisfiedAtSite(iConstraints, site);
+      const sOk = !sConstraints.alwaysUndefined && constraintsSatisfiedAtSite(sConstraints, site);
+      if (iOk && sOk) {
+        validSites.push(site);
+        if (
+          site.kind === "rational" &&
+          resolveExprDefinedAtSite(antiderivative, site, variable) === "undefined_domain" &&
+          resolveExprDefinedAtSite(integrand, site, variable) === "defined"
+        ) {
+          return {
+            status: "inequivalent",
+            reason: "natural_domain_mismatch",
+            witness: { input: formatRational(site.x), detail: "student antiderivative undefined on integrand domain" },
+            domain,
+          };
+        }
+      }
+    }
+    for (const cell of openCells) {
+      const sampleSite: SampleSite = { kind: "rational", x: cell.sample };
+      const iOk = !iConstraints.alwaysUndefined && constraintsSatisfiedAtSite(iConstraints, sampleSite);
+      const sOk = !sConstraints.alwaysUndefined && constraintsSatisfiedAtSite(sConstraints, sampleSite);
+      if (iOk && sOk) {
+        activeOpenIntervals.push({ left: cell.left, right: cell.right, leftOpen: true, rightOpen: true });
+        for (const probe of collectOpenCellProbes(cell, parsedDomain.excluded)) {
+          const probeSite: SampleSite = { kind: "rational", x: probe };
+          if (
+            resolveExprDefinedAtSite(antiderivative, probeSite, variable) === "undefined_domain" &&
+            resolveExprDefinedAtSite(integrand, probeSite, variable) === "defined"
+          ) {
+            return {
+              status: "inequivalent",
+              reason: "natural_domain_mismatch",
+              witness: { input: formatRational(probe), detail: "student antiderivative undefined on integrand domain" },
+              domain,
+            };
+          }
+        }
+      }
+    }
+    if (validSites.length > 0 || activeOpenIntervals.length > 0) {
+      const sKeys = canonicalizeUncheckedOps(sConstraints.uncheckedOps, variable, validSites, activeOpenIntervals);
+      const iKeys = iConstraints.hasNonRationalDomainOps
+        ? canonicalizeUncheckedOps(iConstraints.uncheckedOps, variable, validSites, activeOpenIntervals)
+        : new Set<string>();
+      const allStudentOpsCertified =
+        sKeys !== null &&
+        iKeys !== null &&
+        [...sKeys].every((key) => {
+          if (iKeys.has(key)) return true;
+          if (key.startsWith("ge0:") && iKeys.has(`gt0:${key.slice(4)}`)) return true;
+          if (key.startsWith("nonzero:") && iKeys.has(`gt0:${key.slice(8)}`)) return true;
+          return false;
+        });
+      if (!allStudentOpsCertified) {
+        return { status: "unverified", reason: "unresolved_nonrational_domain", domain };
+      }
+    }
   }
   return null;
 }

@@ -104,6 +104,14 @@ function compareEquality(left: C408Value, right: C408Value): { ok: true; equal: 
   return { ok: false };
 }
 
+function estimateValueBytes(value: C408Value): number {
+  if (typeof value === "string") return 16 + value.length * 2;
+  if (isPointer(value)) {
+    return 48 + (typeof value.fieldOrIndex === "string" ? value.fieldOrIndex.length * 2 : 0);
+  }
+  return 8;
+}
+
 function estimateCodeBytes(program: C408Program): number {
   try {
     return JSON.stringify(program.instructions).length;
@@ -132,9 +140,26 @@ export function runCSubset408(program: C408Program, options: { fuel?: number; me
 
   const codeBytes = estimateCodeBytes(program);
   let heapBytes = 0;
-  let varBytes = vars.size * VAR_ENTRY_BYTES;
+  let varBytes = [...vars.entries()].reduce(
+    (sum, [key, value]) => sum + VAR_ENTRY_BYTES + key.length * 2 + (typeof value === "string" ? value.length * 2 : 0),
+    0,
+  );
   let traceBytes = 0;
   const totalMemoryBytes = () => codeBytes + heapBytes + varBytes + traceBytes;
+
+  const estimateSnapshotBytes = (): number => {
+    let bytes = TRACE_ENTRY_BYTES;
+    for (const [key, value] of vars) {
+      bytes += VAR_ENTRY_BYTES + key.length * 2 + estimateValueBytes(value);
+    }
+    for (const object of heap.values()) {
+      bytes += HEAP_HEADER_BYTES + object.fields.size * HEAP_SLOT_BYTES;
+      for (const [fieldKey, fieldValue] of object.fields) {
+        bytes += (typeof fieldKey === "string" ? fieldKey.length * 2 : 0) + estimateValueBytes(fieldValue);
+      }
+    }
+    return bytes;
+  };
 
   const snapshot = (instruction: C408Instruction, phase: "before" | "after"): StepTraceSnapshot => ({
     pc,
@@ -153,10 +178,15 @@ export function runCSubset408(program: C408Program, options: { fuel?: number; me
     ),
   });
 
-  const pushTrace = (instruction: C408Instruction, phase: "before" | "after"): void => {
-    if (trace.length >= MAX_TRACE_SNAPSHOTS) return;
+  const pushTrace = (instruction: C408Instruction, phase: "before" | "after"): C408RunResult | null => {
+    if (trace.length >= MAX_TRACE_SNAPSHOTS) return null;
+    const snapBytes = estimateSnapshotBytes();
+    if (totalMemoryBytes() + snapBytes > memoryLimit) {
+      return failure("memory_limit_exceeded", "trace_memory_limit_exceeded");
+    }
     trace.push(snapshot(instruction, phase));
-    traceBytes += TRACE_ENTRY_BYTES;
+    traceBytes += snapBytes;
+    return null;
   };
 
   const failure = (reason: C408FailureReason, detail?: string): C408RunResult => ({
@@ -195,11 +225,15 @@ export function runCSubset408(program: C408Program, options: { fuel?: number; me
   const writeTarget = (target: string, value: C408Value | undefined): C408RunResult | null => {
     if (value === undefined) return failure("uninitialized_read");
     const isNew = !vars.has(target);
-    if (isNew && totalMemoryBytes() + VAR_ENTRY_BYTES > memoryLimit) {
+    const prevValue = vars.get(target);
+    const prevStringBytes = typeof prevValue === "string" ? prevValue.length * 2 : 0;
+    const nextStringBytes = typeof value === "string" ? value.length * 2 : 0;
+    const deltaBytes = (isNew ? VAR_ENTRY_BYTES + target.length * 2 : 0) + nextStringBytes - prevStringBytes;
+    if (deltaBytes > 0 && totalMemoryBytes() + deltaBytes > memoryLimit) {
       return failure("memory_limit_exceeded");
     }
     vars.set(target, cloneValue(value));
-    if (isNew) varBytes += VAR_ENTRY_BYTES;
+    varBytes = Math.max(0, varBytes + deltaBytes);
     return null;
   };
 
@@ -207,7 +241,8 @@ export function runCSubset408(program: C408Program, options: { fuel?: number; me
     if (totalMemoryBytes() > memoryLimit) return failure("memory_limit_exceeded");
     if (steps >= fuel) return failure("fuel_exhausted");
     const instruction = program.instructions[pc]!;
-    pushTrace(instruction, "before");
+    const beforeTraceErr = pushTrace(instruction, "before");
+    if (beforeTraceErr) return beforeTraceErr;
     steps++;
     let nextPc = pc + 1;
     try {
@@ -277,8 +312,12 @@ export function runCSubset408(program: C408Program, options: { fuel?: number; me
           }
           const fieldEntries = Object.entries(instruction.fields ?? {});
           const slotCount = (instruction.length ?? 0) + fieldEntries.length;
-          const allocBytes = HEAP_HEADER_BYTES + slotCount * HEAP_SLOT_BYTES;
-          const targetBytes = vars.has(instruction.target) ? 0 : VAR_ENTRY_BYTES;
+          const fieldStringBytes = fieldEntries.reduce(
+            (sum, [key, value]) => sum + key.length * 2 + (typeof value === "string" ? value.length * 2 : 0),
+            0,
+          );
+          const allocBytes = HEAP_HEADER_BYTES + slotCount * HEAP_SLOT_BYTES + fieldStringBytes;
+          const targetBytes = vars.has(instruction.target) ? 0 : VAR_ENTRY_BYTES + instruction.target.length * 2;
           if (totalMemoryBytes() + allocBytes + targetBytes > memoryLimit) {
             return failure("memory_limit_exceeded");
           }
@@ -346,6 +385,14 @@ export function runCSubset408(program: C408Program, options: { fuel?: number; me
           const key = isPointer(pointer) ? pointer.fieldOrIndex : null;
           if (key === null) return failure("type_error", "root_pointer_has_no_store_field");
           if (typeof key === "number" && (object.length === undefined || key < 0 || key >= object.length)) return failure("out_of_bounds");
+          const prevField = object.fields.get(key);
+          const prevStrBytes = typeof prevField === "string" ? prevField.length * 2 : 0;
+          const nextStrBytes = typeof value === "string" ? value.length * 2 : 0;
+          const deltaStrBytes = nextStrBytes - prevStrBytes;
+          if (deltaStrBytes > 0 && totalMemoryBytes() + deltaStrBytes > memoryLimit) {
+            return failure("memory_limit_exceeded");
+          }
+          heapBytes = Math.max(0, heapBytes + deltaStrBytes);
           object.fields.set(key, cloneValue(value));
           object.initialized.add(key);
           break;
@@ -396,7 +443,8 @@ export function runCSubset408(program: C408Program, options: { fuel?: number; me
         case "return": {
           const value = instruction.value === undefined ? null : read(instruction.value);
           if (value === undefined) return failure("uninitialized_read");
-          pushTrace(instruction, "after");
+          const returnTraceErr = pushTrace(instruction, "after");
+          if (returnTraceErr) return returnTraceErr;
           return { status: "verified", value, steps, trace };
         }
         case "noop":
@@ -407,7 +455,8 @@ export function runCSubset408(program: C408Program, options: { fuel?: number; me
     } catch (error) {
       return failure("type_error", error instanceof Error ? error.message : "interpreter_error");
     }
-    pushTrace(instruction, "after");
+    const afterTraceErr = pushTrace(instruction, "after");
+    if (afterTraceErr) return afterTraceErr;
     pc = nextPc;
   }
   return { status: "verified", value: null, steps, trace };

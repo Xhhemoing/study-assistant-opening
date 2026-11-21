@@ -39,12 +39,15 @@ export type ReleaseCaps = {
   readonly stopSignal?: AbortSignal;
   readonly answerLeakageBlocker?: (text: string) => boolean;
 };
+export type AssessmentMode = "pure" | "practice";
 export type TutorGraphInput = {
   questionStem: string;
   submission: unknown;
   verifyCaps: VerifyCaps;
   releaseCaps: ReleaseCaps;
   budget?: import("./min-entropy-budget").MinEntropyBudget;
+  assessmentMode?: AssessmentMode;
+  attemptSubmitted?: boolean;
   answerProbe?: boolean;
   nowMs?: number;
   provider?: never;
@@ -57,5 +60,7 @@ export type TutorGraphResult = {
   releasedText?: string;
   leakageBits: number;
   helpState?: "pure" | "scaffolded" | "contaminated";
+  cooldownUntilMs?: number;
+  releaseApproved?: boolean;
   reason?: string;
 };

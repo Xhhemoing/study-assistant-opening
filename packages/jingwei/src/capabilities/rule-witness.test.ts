@@ -21,11 +21,13 @@ describe("rule witness and proposal capabilities", () => {
     expect(V3_CAPABILITIES.map((capability) => capability.id)).toContain(functionDiffPlotCapability.id);
   });
 
-  it("hides host-only proposal diffs from model capability lists", () => {
+  it("hides host-only proposal diffs from model capability lists and default describe()", () => {
     const registry = createV3CapabilityRegistry();
     expect(proposalDiffCapability.hostOnly).toBe(true);
     expect(proposalDiffCapability.aiCandidateOnly).toBe(true);
     expect(registry.get(proposalDiffCapability.id)).toBeDefined();
+    expect(registry.describe().some((capability) => capability.id === proposalDiffCapability.id)).toBe(false);
+    expect(registry.describe({ includeHostOnly: true }).some((capability) => capability.id === proposalDiffCapability.id)).toBe(true);
     expect(listModelCapabilities(registry).some((capability) => capability.id === proposalDiffCapability.id)).toBe(false);
     expect(listModelCapabilities(registry).some((capability) => capability.id === functionDiffPlotCapability.id)).toBe(true);
     expect(listModelCapabilities(registry).some((capability) => capability.id === subspaceRowTraceCapability.id)).toBe(true);
@@ -33,28 +35,46 @@ describe("rule witness and proposal capabilities", () => {
 
   it("requires rule provenance, rejects actions and oversized payloads, and provides text fallbacks", () => {
     const registry = createCapabilityRegistry([dsPointerStepCapability, proposalDiffCapability]);
-    const decision = decideBlock(
-      {
-        id: "w",
-        capability: dsPointerStepCapability.id,
+    const ruleBlock = {
+      id: "w",
+      capability: dsPointerStepCapability.id,
+      allowedActions: [],
+      limits: [],
+      sourceRefs: [],
+      params: {
+        origin: "rules",
         allowedActions: [],
-        limits: [],
-        sourceRefs: [],
-        params: {
-          origin: "rules",
-          allowedActions: [],
-          title: "反转",
-          before: [{ id: "A", next: "B" }],
-          after: [{ id: "A", next: null }],
-          severed: ["A.next"],
-          dangling: [],
-          explanation: "丢失 B",
-        },
+        title: "反转",
+        before: [{ id: "A", next: "B" }],
+        after: [{ id: "A", next: null }],
+        severed: ["A.next"],
+        dangling: [],
+        explanation: "丢失 B",
       },
-      registry,
-    );
+    };
+    // Untrusted/omitted producer defaults to "model" and cannot emit rule witness cards
+    expect(decideBlock(ruleBlock, registry)).toMatchObject({ ok: false, reason: "untrusted_provenance" });
+
+    const decision = decideBlock(ruleBlock, registry, {}, { producer: "rules" });
     expect(decision.ok).toBe(true);
     if (decision.ok) expect(decision.text).toContain("断链");
+
+    const proposalBlock = {
+      id: "p1",
+      capability: proposalDiffCapability.id,
+      allowedActions: [],
+      limits: [],
+      sourceRefs: [],
+      params: {
+        aiCandidateOnly: true,
+        title: "建议修订",
+        revisions: [{ path: "doc.md", before: "a", after: "b", kind: "note" }],
+        undo: { token: "tok", compensates: [] },
+      },
+    };
+    expect(decideBlock(proposalBlock, registry)).toMatchObject({ ok: false, reason: "unauthorized_capability" });
+    expect(decideBlock(proposalBlock, registry, {}, { producer: "rules" })).toMatchObject({ ok: false, reason: "unauthorized_capability" });
+    expect(decideBlock(proposalBlock, registry, {}, { producer: "host" }).ok).toBe(true);
 
     const illegalAction = decideBlock(
       {
@@ -66,6 +86,8 @@ describe("rule witness and proposal capabilities", () => {
         params: { origin: "rules", allowedActions: [], title: "t", before: [], after: [], explanation: "x" },
       },
       registry,
+      {},
+      { producer: "rules" },
     );
     expect(illegalAction).toMatchObject({ ok: false, reason: "illegal_action" });
 

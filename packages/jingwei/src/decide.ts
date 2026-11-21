@@ -7,8 +7,13 @@ import type { Capability, CapabilityRegistry, DisplayMode } from "./capability";
 import { findUnsafeContent, type UnsafeContentKind } from "./sanitize";
 import { resolveDisplayMode, type ViewPrefs } from "./view";
 
+export type BlockProducer = "model" | "rules" | "host";
+export type DecideOptions = { producer?: BlockProducer };
+
 export type BlockFailReason =
   | "unknown_capability"
+  | "unauthorized_capability"
+  | "untrusted_provenance"
   | "unsafe_link"
   | "unsafe_markup"
   | "unsafe_handler"
@@ -35,13 +40,27 @@ const UNSAFE_REASON: Record<UnsafeContentKind, BlockFailReason> = {
   depth: "params_too_deep",
 };
 
+function claimsRuleOrigin(params: unknown): boolean {
+  return typeof params === "object" && params !== null && !Array.isArray(params) && (params as Record<string, unknown>).origin === "rules";
+}
+
 export function decideBlock(
   block: ArtifactBlock,
   registry: CapabilityRegistry,
   prefs: ViewPrefs = {},
+  options: DecideOptions = {},
 ): BlockDecision {
+  const producer: BlockProducer = options.producer ?? "model";
   const capability = registry.get(block.capability);
   if (!capability) return { ok: false, blockId: block.id, reason: "unknown_capability" };
+
+  if (capability.hostOnly === true && producer !== "host") {
+    return { ok: false, blockId: block.id, reason: "unauthorized_capability", detail: capability.id };
+  }
+
+  if (claimsRuleOrigin(block.params) && producer !== "rules" && producer !== "host") {
+    return { ok: false, blockId: block.id, reason: "untrusted_provenance", detail: "rules" };
+  }
 
   const unsafe = findUnsafeContent(block.params);
   if (unsafe) return { ok: false, blockId: block.id, reason: UNSAFE_REASON[unsafe.kind], detail: unsafe.path };
@@ -60,6 +79,10 @@ export function decideBlock(
     };
   }
 
+  if (claimsRuleOrigin(parsed.data) && producer !== "rules" && producer !== "host") {
+    return { ok: false, blockId: block.id, reason: "untrusted_provenance", detail: "rules" };
+  }
+
   return {
     ok: true,
     blockId: block.id,
@@ -70,14 +93,25 @@ export function decideBlock(
   };
 }
 
-export function decideArtifact(artifact: Artifact, registry: CapabilityRegistry, prefs: ViewPrefs = {}): BlockDecision[] {
-  return artifact.blocks.map((block) => decideBlock(block, registry, prefs));
+export function decideArtifact(
+  artifact: Artifact,
+  registry: CapabilityRegistry,
+  prefs: ViewPrefs = {},
+  options: DecideOptions = {},
+): BlockDecision[] {
+  const requestedProducer: BlockProducer = options.producer ?? "model";
+  // Untrusted artifact metadata may never elevate a model-produced artifact above caller provenance.
+  const effectiveProducer: BlockProducer =
+    requestedProducer === "rules" && artifact.provenance.origin !== "rules" ? "model" : requestedProducer;
+  return artifact.blocks.map((block) => decideBlock(block, registry, prefs, { producer: effectiveProducer }));
 }
 
+export const decide = decideArtifact;
+
 /** Prose rendering of a whole artifact (terminals, exports, other agents). Skipped blocks are named, not hidden. */
-export function artifactToText(artifact: Artifact, registry: CapabilityRegistry): string {
+export function artifactToText(artifact: Artifact, registry: CapabilityRegistry, options: DecideOptions = {}): string {
   const parts = artifact.title ? [artifact.title] : [];
-  for (const [index, decision] of decideArtifact(artifact, registry, { textOnly: true }).entries()) {
+  for (const [index, decision] of decideArtifact(artifact, registry, { textOnly: true }, options).entries()) {
     const limits = artifact.blocks[index]!.limits;
     if (!decision.ok) {
       parts.push(`[已跳过一块内容：${decision.reason}]`);

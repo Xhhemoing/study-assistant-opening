@@ -242,6 +242,43 @@ describe("bounded symbolic equivalence", () => {
         piecewise: { split: 20, left: "ln(x - 10)", right: "ln(x - 10)" },
       }).status,
     ).toBe("inequivalent");
+
+    // Round-6 P1-4: student antiderivative non-rational domain ops on open cells fail closed
+    expect(
+      verifyIndefiniteIntegral({
+        student: "x + ln(sin(x))^0",
+        integrand: "1",
+      }).status,
+    ).not.toBe("equivalent");
+    expect(
+      verifyIndefiniteIntegral({
+        student: "x + ln(sin(x))^0",
+        integrand: "1",
+        domain: { intervals: [{ left: "0.1", right: "3" }] },
+      }).status,
+    ).toBe("unverified");
+    expect(
+      verifyIndefiniteIntegral({
+        student: "x + ln(exp(x) - 2)^0",
+        integrand: "1",
+      }).status,
+    ).toBe("inequivalent");
+    expect(
+      verifyIndefiniteIntegral({
+        student: "x + ln(exp(x) - 3/2)^0",
+        integrand: "1",
+        domain: { intervals: [{ left: "0.5", right: 2 }] },
+      }).status,
+    ).toBe("unverified");
+
+    // Round-6 P1-5: unresolved multi-root Sturm bracket at depth cap fails closed
+    const m = "38685626227668133590597632";
+    const closeRootsResult = verifyScalarEquivalence(
+      `abs((${m} * x - 1) * (${m} * x - 2))`,
+      `(${m} * x - 1) * (${m} * x - 2)`,
+    );
+    expect(closeRootsResult.status).toBe("unverified");
+    expect(closeRootsResult.reason).toBe("unresolved_root_isolation");
   });
 
   it("checks derivative residuals, variable forwarding, piecewise integrals, and general substitution bounds", () => {
@@ -410,5 +447,20 @@ describe("bounded 408 VM", () => {
     expect(loop50k.status).toBe("unverified");
     if (loop50k.status === "unverified") expect(loop50k.reason).toBe("fuel_exhausted");
     expect(loop50k.steps).toBe(50_000);
+
+    // Round-6 P1-6: actual cloned heap + variable footprint counted in 8 MiB trace ceiling
+    const traceHeapBlast = runCSubset408({
+      instructions: [
+        { op: "alloc", target: "arr", length: 60_000 },
+        { op: "const", target: "i", value: 0 },
+        { op: "binary", target: "i", operator: "+", left: { variable: "i" }, right: 1 },
+        { op: "binary", target: "cont", operator: "<", left: { variable: "i" }, right: 20 },
+        { op: "branch", condition: { variable: "cont" }, ifTrue: 2, ifFalse: 5 },
+        { op: "return", value: { variable: "i" } },
+      ],
+    });
+    expect(traceHeapBlast.status).toBe("unverified");
+    if (traceHeapBlast.status === "unverified") expect(traceHeapBlast.reason).toBe("memory_limit_exceeded");
+    expect(traceHeapBlast.trace.length).toBeLessThan(10);
   });
 });

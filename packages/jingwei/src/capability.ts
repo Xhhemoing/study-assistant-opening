@@ -51,11 +51,13 @@ export type CapabilityDescriptor = {
   hostOnly?: boolean;
 };
 
+export type DescribeCapabilitiesOptions = { includeHostOnly?: boolean };
+
 export type CapabilityRegistry = {
   get(id: string): Capability | undefined;
   list(): Capability[];
   /** JSON-serializable catalog for model prompts, tool schemas and other agents. */
-  describe(): CapabilityDescriptor[];
+  describe(options?: DescribeCapabilitiesOptions): CapabilityDescriptor[];
 };
 
 export class CapabilityRegistrationError extends Error {
@@ -89,21 +91,23 @@ export function createCapabilityRegistry(capabilities: readonly Capability[]): C
   return {
     get: (id) => byId.get(id),
     list: () => [...byId.values()],
-    describe: () =>
-      [...byId.values()].map((capability) => ({
-        id: capability.id,
-        title: capability.title,
-        tasks: [...capability.tasks],
-        modes: [...capability.modes],
-        limits: [...capability.limits],
-        actions: [...(capability.actions ?? [])],
-        // Input shape is what producers must emit; refinements without a JSON form become {}.
-        paramsSchema: z.toJSONSchema(capability.params, { io: "input", unrepresentable: "any" }) as Record<
-          string,
-          unknown
-        >,
-        ...(capability.hostOnly ? { hostOnly: true } : {}),
-      })),
+    describe: (options = {}) =>
+      [...byId.values()]
+        .filter((capability) => options.includeHostOnly === true || capability.hostOnly !== true)
+        .map((capability) => ({
+          id: capability.id,
+          title: capability.title,
+          tasks: [...capability.tasks],
+          modes: [...capability.modes],
+          limits: [...capability.limits],
+          actions: [...(capability.actions ?? [])],
+          // Input shape is what producers must emit; refinements without a JSON form become {}.
+          paramsSchema: z.toJSONSchema(capability.params, { io: "input", unrepresentable: "any" }) as Record<
+            string,
+            unknown
+          >,
+          ...(capability.hostOnly ? { hostOnly: true } : {}),
+        })),
   };
 }
 
@@ -114,5 +118,5 @@ export function defineCapability<P>(capability: Capability<P>): Capability {
 
 /** Capabilities exposed to model tool lists and prompt schemas. */
 export function listModelCapabilities(registry: CapabilityRegistry): CapabilityDescriptor[] {
-  return registry.describe().filter((descriptor) => descriptor.hostOnly !== true);
+  return registry.describe({ includeHostOnly: false });
 }

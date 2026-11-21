@@ -3,7 +3,7 @@
 import type { ComponentType, ErrorInfo, ReactNode } from "react";
 import type { Artifact, ArtifactBlock } from "../artifact";
 import type { CapabilityRegistry, DisplayMode } from "../capability";
-import { decideBlock, type BlockDecision, type BlockFailReason } from "../decide";
+import { decideBlock, type BlockDecision, type BlockFailReason, type BlockProducer } from "../decide";
 import type { ViewPrefs } from "../view";
 import { RenderBoundary } from "./render-boundary";
 
@@ -24,6 +24,8 @@ export function defineRenderer<P>(renderer: ComponentType<RendererProps<P>>): Co
 
 export const BLOCK_FAIL_LABELS: Record<BlockFailReason, string> = {
   unknown_capability: "暂不支持这种表达，已跳过该块",
+  unauthorized_capability: "当前来源无权使用该表达，已跳过该块",
+  untrusted_provenance: "来源声明未通过校验，已跳过该块",
   unsafe_link: "含有不安全链接，已跳过该块",
   unsafe_markup: "含有不受支持的标记，已跳过该块",
   unsafe_handler: "含有未授权脚本，已跳过该块",
@@ -39,6 +41,7 @@ export type BlockViewProps = {
   registry: CapabilityRegistry;
   renderers: RendererMap;
   prefs?: ViewPrefs;
+  producer?: BlockProducer;
   /** Usually the artifact revision; a new value retries a crashed renderer. */
   resetKey?: string | number;
   /** Hosts may keep their own fail-soft copy; defaults to BLOCK_FAIL_LABELS. */
@@ -68,11 +71,12 @@ export function BlockView({
   registry,
   renderers,
   prefs = {},
+  producer = "model",
   resetKey = 0,
   renderSkipped,
   onRenderError,
 }: BlockViewProps) {
-  const decision = decideBlock(block, registry, prefs);
+  const decision = decideBlock(block, registry, prefs, { producer });
   if (!decision.ok) return <>{renderSkipped ? renderSkipped(decision) : <SkippedBlock decision={decision} />}</>;
 
   const Renderer = renderers[decision.capability.id];

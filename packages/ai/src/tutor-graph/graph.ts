@@ -1,7 +1,6 @@
 import {
   PURE_CONTAMINATED_GUIDANCE,
   PURE_COOLDOWN_GUIDANCE,
-  createMinEntropyBudget,
   fixedPureGuidance,
   type MinEntropyBudget,
 } from "./min-entropy-budget";
@@ -19,6 +18,28 @@ export * from "./min-entropy-budget";
 
 function isStopped(signal?: AbortSignal): boolean {
   return signal?.aborted === true;
+}
+
+function collectStructuredStrings(value: unknown, out: string[], seen = new Set<unknown>(), depth = 0): void {
+  if (depth > 16 || value === null || value === undefined) return;
+  if (typeof value === "string") {
+    if (value.length > 0) out.push(value);
+    return;
+  }
+  if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") {
+    out.push(String(value));
+    return;
+  }
+  if (typeof value !== "object") return;
+  if (seen.has(value)) return;
+  seen.add(value);
+  if (Array.isArray(value)) {
+    for (const item of value) collectStructuredStrings(item, out, seen, depth + 1);
+    return;
+  }
+  for (const entry of Object.values(value as Record<string, unknown>)) {
+    collectStructuredStrings(entry, out, seen, depth + 1);
+  }
 }
 
 function propagateSteps(steps: readonly LearnerStep[], firstError?: VerifyOutput["firstError"]): LearnerStep[] {
@@ -92,12 +113,24 @@ function toPublicCaps(questionStem: string, steps: readonly LearnerStep[], verif
   };
 }
 
-function guardText(caps: PublicTeachingCaps, release: TutorGraphInput["releaseCaps"]): string | undefined {
+function guardRelease(
+  caps: PublicTeachingCaps,
+  verification: VerifyOutput,
+  release: TutorGraphInput["releaseCaps"],
+): string | undefined {
   release.assertCurrent();
   if (isStopped(release.stopSignal)) return undefined;
-  const text = [caps.questionStem, ...caps.publicBlocks.map((block) => block.text)].join("\n");
-  if (release.answerLeakageBlocker?.(text)) return undefined;
-  return text;
+  const proseText = [caps.questionStem, ...caps.publicBlocks.map((block) => block.text)].join("\n");
+  const blocker = release.answerLeakageBlocker;
+  if (!blocker) return proseText;
+  if (blocker(proseText)) return undefined;
+
+  const structuredValues: string[] = [];
+  collectStructuredStrings(caps, structuredValues);
+  collectStructuredStrings(verification, structuredValues);
+  if (structuredValues.some((entry) => blocker(entry))) return undefined;
+  if (structuredValues.length > 0 && blocker([proseText, ...structuredValues].join("\n"))) return undefined;
+  return proseText;
 }
 
 function blockedByBudgetResult(
@@ -112,12 +145,24 @@ function blockedByBudgetResult(
     releasedText: isCooldown ? PURE_COOLDOWN_GUIDANCE : PURE_CONTAMINATED_GUIDANCE,
     leakageBits: budget.leakageBits,
     helpState: budget.state,
+    cooldownUntilMs: budget.cooldownUntilMs,
+    releaseApproved: false,
     reason,
   };
 }
 
 export function runTutorGraph(input: TutorGraphInput): TutorGraphResult {
-  const budget: MinEntropyBudget = input.budget ?? createMinEntropyBudget({ scaffoldBitBudget: 8 });
+  const budget = input.budget;
+  if (!budget) {
+    return {
+      state: "unverified",
+      providerCalls: 0,
+      verification: { steps: [] },
+      leakageBits: 0,
+      releaseApproved: false,
+      reason: "missing_entropy_budget",
+    };
+  }
   const nowMs = input.nowMs ?? budget.nowMs();
 
   if (isStopped(input.releaseCaps.stopSignal) || isStopped(input.verifyCaps.stopSignal)) {
@@ -127,19 +172,23 @@ export function runTutorGraph(input: TutorGraphInput): TutorGraphResult {
       verification: { steps: [] },
       leakageBits: budget.leakageBits,
       helpState: budget.state,
+      cooldownUntilMs: budget.cooldownUntilMs,
+      releaseApproved: false,
       reason: "cancelled",
     };
   }
 
-  if (budget.cooldownUntil !== undefined && nowMs < budget.cooldownUntil) {
+  if (budget.cooldownUntilMs !== undefined && nowMs < budget.cooldownUntilMs) {
     return blockedByBudgetResult(budget, "cooldown");
   }
   if (budget.state === "contaminated") {
     return blockedByBudgetResult(budget, "budget_contaminated");
   }
 
-  if (input.answerProbe) {
-    const pure = fixedPureGuidance();
+  const assessmentMode = input.assessmentMode ?? "pure";
+  const requiresSubmittedAttempt = assessmentMode === "pure" || budget.state === "pure";
+  if (input.answerProbe || (requiresSubmittedAttempt && input.attemptSubmitted !== true)) {
+    const pure = fixedPureGuidance(input.answerProbe ? "unsubmitted_answer_probe" : "unsubmitted_pure_attempt");
     return {
       state: pure.state,
       providerCalls: 0,
@@ -147,6 +196,7 @@ export function runTutorGraph(input: TutorGraphInput): TutorGraphResult {
       releasedText: pure.releasedText,
       leakageBits: budget.leakageBits,
       helpState: budget.state,
+      releaseApproved: true,
       reason: pure.reason,
     };
   }
@@ -162,6 +212,8 @@ export function runTutorGraph(input: TutorGraphInput): TutorGraphResult {
       verification: { steps: [] },
       leakageBits: budget.leakageBits,
       helpState: budget.state,
+      cooldownUntilMs: budget.cooldownUntilMs,
+      releaseApproved: false,
       reason: error instanceof Error ? error.message : "verification_failed",
     };
   }
@@ -173,6 +225,8 @@ export function runTutorGraph(input: TutorGraphInput): TutorGraphResult {
       verification: { steps: [] },
       leakageBits: budget.leakageBits,
       helpState: budget.state,
+      cooldownUntilMs: budget.cooldownUntilMs,
+      releaseApproved: false,
       reason: "cancelled",
     };
   }
@@ -186,15 +240,17 @@ export function runTutorGraph(input: TutorGraphInput): TutorGraphResult {
   const steps = propagateSteps(verification.steps, verification.firstError);
   const publicTeaching = toPublicCaps(input.questionStem, steps, verification);
 
-  const releasedText = guardText(publicTeaching, input.releaseCaps);
+  const releasedText = guardRelease(publicTeaching, { ...verification, steps }, input.releaseCaps);
   if (releasedText === undefined || isStopped(input.verifyCaps.stopSignal) || isStopped(input.releaseCaps.stopSignal)) {
     const stopped = isStopped(input.releaseCaps.stopSignal) || isStopped(input.verifyCaps.stopSignal);
     return {
       state: stopped ? "stopped" : "unverified",
       providerCalls: 0,
-      verification: { ...verification, steps },
+      verification: { steps: [] },
       leakageBits: budget.leakageBits,
       helpState: budget.state,
+      cooldownUntilMs: budget.cooldownUntilMs,
+      releaseApproved: false,
       reason: stopped ? "cancelled" : "release_guard_rejected",
     };
   }
@@ -208,9 +264,12 @@ export function runTutorGraph(input: TutorGraphInput): TutorGraphResult {
     releasedText,
     leakageBits: budget.leakageBits,
     helpState: budget.state,
+    cooldownUntilMs: budget.cooldownUntilMs,
+    releaseApproved: true,
   };
 }
 
+export const runTutorGraphTurn = runTutorGraph;
 export const executeTutorGraph = runTutorGraph;
 export class TutorGraph {
   run(input: TutorGraphInput): TutorGraphResult {
