@@ -67,8 +67,17 @@ function normalizeLatexFractions(text: string): string {
   return output.join("");
 }
 
+function normalizeMathRelations(text: string): string {
+  return text.normalize("NFKC")
+    .replace(/\\leq?(?![a-z])|≤/gi, "<=")
+    .replace(/\\geq?(?![a-z])|≥/gi, ">=")
+    .replace(/\\neq?(?![a-z])|≠/gi, "!=")
+    .replace(/\\approx(?![a-z])/gi, "≈")
+    .replace(/\\equiv(?![a-z])/gi, "≡");
+}
+
 function normalizeUnicodeMath(text: string): string {
-  const normalized = text.normalize("NFKC").replace(/[\u2212\u2010\u2011\u2012\u2013\u2014]/g, "-");
+  const normalized = normalizeMathRelations(text).replace(/[\u2212\u2010\u2011\u2012\u2013\u2014]/g, "-");
   return normalizeLatexFractions(normalized)
     .replace(/\\(?:left|right)\b/gi, "")
     .replace(/\\\{/g, "{")
@@ -77,11 +86,6 @@ function normalizeUnicodeMath(text: string): string {
     .replace(/[\u00F7\u2044\u2215]/g, "/")
     .replace(/\\(?:times|cdot)(?![a-z])/gi, "*")
     .replace(/[\u00D7\u00B7\u22C5]/g, "*")
-    .replace(/\\leq?(?![a-z])|≤/gi, "<=")
-    .replace(/\\geq?(?![a-z])|≥/gi, ">=")
-    .replace(/\\neq?(?![a-z])|≠/gi, "!=")
-    .replace(/\\approx(?![a-z])/gi, "≈")
-    .replace(/\\equiv(?![a-z])/gi, "≡")
     .toLowerCase();
 }
 
@@ -120,7 +124,7 @@ function stripEquationFormatting(text: string): string {
   return normalizeAlignment(formattedBlocks.join(";"), "&");
 }
 
-const equationMarkers = /(\\?`+|\\(?:begin|end)\{[a-zA-Z]+\*?\}|\\[\\|$()[\]]|\*+|_+|~~|\$\$?|\|)/u;
+const equationMarkers = /(\\?`+|\\(?:begin|end)\{[a-zA-Z]+\*?\}|\\[\\|%$()[\]]|\*+|_+|~~|\$\$?|[%|])/u;
 
 function splitEquationCells(parts: string[], spanEnds?: Map<number, number>): string[] {
   const cells: string[] = [];
@@ -153,10 +157,13 @@ const startsWithRelation = new RegExp(`^\\s*(?:${texRelation.source})`, "u");
 const endsWithRelation = new RegExp(`(?:${texRelation.source})\\s*$`, "u");
 const variableRelation = new RegExp(`^[a-z]\\w*(?:${texRelation.source})`, "u");
 const relationWithOperand = new RegExp(String.raw`(?:${texRelation.source})\s*[+-]?\s*[\p{L}\p{N}\\([{.]`, "u");
-const numberedLabel = /(?:^|[^\s+*/^=-])\s*(?:\b(?:step|item|part|line|row|case|eq(?:uation)?|formula|problem|question|exercise|example|option|choice|turn|stage|point|section|rule|hint|move|no\.?)\s+|#)\d+[.)]?\s+$/iu;
+const labelKeyword = /\b(?:step|sec(?:tion)?|item|part|line|row|case|eq(?:uation)?|formula|problem|question|exercise|example|option|choice|turn|stage|point|rule|hint|move|no|fig(?:ure)?|table|theorem|lemma|claim|proposition|corollary)\.?\s+/iu;
+const labelNumber = /\(?\d+(?:[.:-]\d+)*[a-z]?\)?[.]?/iu;
+const numberedLabel = new RegExp(String.raw`(?:^|[^\s+*/^=-])\s*(?:${labelKeyword.source}|#)${labelNumber.source}\s+$`, "iu");
 
 /** Only an unescaped alignment tab next to a relation joins its two columns. */
-function normalizeAlignment(text: string, separator: "&" | ";"): string {
+function normalizeAlignment(source: string, separator: "&" | ";"): string {
+  const text = normalizeMathRelations(source);
   if (!text.includes("&")) return text;
   const columns: string[] = [];
   let start = 0;
@@ -244,9 +251,10 @@ function stripEquationSegment(segment: string): string {
   let proseStart = 0;
   for (const [open, close] of mathSpans) {
     const prose = normalizeUnicodeMath(parts.slice(proseStart, open).join(""));
-    if (/\d[.)]?\s+$/u.test(prose)) {
+    const label = numberedLabel.test(prose);
+    if (label || /\d[.)]?\s+$/u.test(prose)) {
       const body = normalizeUnicodeMath(parts.slice(open + 1, close).join(""));
-      if (/^\s*\p{L}/u.test(body) && (relationWithOperand.test(body) || numberedLabel.test(prose))) {
+      if (/^\s*\p{L}/u.test(body) && (label || relationWithOperand.test(body))) {
         parts[open] = ";";
       }
     }

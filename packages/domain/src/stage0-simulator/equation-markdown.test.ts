@@ -3,6 +3,32 @@ import { equationMarkdownBlocks } from "./equation-markdown";
 import { detectProtectedLeakage } from "./evaluator";
 
 describe("Markdown paragraph and table boundaries in the equation audit", () => {
+  it.each([
+    ["$", "$"], ["$$", "$$"], ["\\(", "\\)"], ["\\[", "\\]"],
+    ["\\begin{align}", "\\end{align}"],
+  ])("recognizes a closing %s only outside TeX comments", (open, close) => {
+    const start = "At 50% use " + open + "y = 2 \\\\[1ex]% ";
+    const end = "\ny = 3 \\\\[1ex]x &= 4" + close;
+    expect(detectProtectedLeakage(start + close + end, ["x = 4"], [])).toEqual(["x = 4"]);
+    expect(detectProtectedLeakage(start + close + " ; x = 4\nz = 3" + close, ["x = 4"], [])).toEqual([]);
+    const escapedPercent = open + "y = 100\\% \\\\[1ex]x &= 4" + close;
+    expect(detectProtectedLeakage(escapedPercent, ["x = 4"], [])).toEqual(["x = 4"]);
+  });
+
+  it("pairs the visible nested environments even when the opener follows a prose percentage", () => {
+    const body = [
+      " % \\end{align}", "\\begin{align}", "% \\begin{align} \\end{align}",
+      "x &= 4", "\\end{align}", "- x = 4", "",
+    ].join("\n");
+    const text = "At 50% use \\begin{align}" + body + "\\end{align} done.";
+    expect(equationMarkdownBlocks(text)).toEqual(["At 50% use ", { math: body }, " done."]);
+  });
+
+  it("keeps a display opener in an inline math comment from masking a following bullet", () => {
+    const hint = "Read $y % \\begin{align}\nz$.\n- **x = 4**\n\\end{align}";
+    expect(detectProtectedLeakage(hint, ["x = 4"], [])).toEqual(["x = 4"]);
+  });
+
   it("consumes only the backslash that escapes a pipe in a table cell", () => {
     const row = [String.raw`a\|b`, "c" + "\\".repeat(2), String.raw`d\\\|e`].join("|");
     expect(equationMarkdownBlocks("one|two|three\n-:|:-|:-:\n" + row)).toEqual([

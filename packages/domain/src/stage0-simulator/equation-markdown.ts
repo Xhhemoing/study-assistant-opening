@@ -1,33 +1,72 @@
 export const mathSpanClosers = new Map([["$", "$"], ["$$", "$$"], ["\\(", "\\)"], ["\\[", "\\]"]]);
 
+interface TexMarker {
+  text: string;
+  index: number;
+}
+
+interface PendingCloser<T> {
+  token: T;
+  next?: PendingCloser<T>;
+}
+type TexClosers<T> = Map<string, PendingCloser<T> | undefined>;
+
+/** Index one physical line from the right. An opener after a prose percent can
+ * still use later closers. Its matches cannot change the stack for math that
+ * was already open when the percent began a comment. */
+function matchTexLine<T extends TexMarker>(
+  markers: T[], closers: TexClosers<T>, pair: (open: T, close: T) => void,
+): void {
+  const firstComment = markers.findIndex((token) => token.text === "%");
+  const suffix: TexClosers<T> | undefined = firstComment < 0 ? undefined : new Map();
+  for (let i = markers.length - 1; i >= 0; i--) {
+    const token = markers[i]!;
+    const marker = token.text;
+    if (marker === "%") {
+      suffix!.clear();
+      continue;
+    }
+    const target = mathSpanClosers.get(marker) ??
+      (marker.startsWith("\\begin{") ? marker.replace("\\begin", "\\end") : undefined);
+    if (!target && marker !== "\\]" && marker !== "\\)" && !marker.startsWith("\\end{")) continue;
+    const key = target ?? marker;
+    const pending = suffix && i > firstComment ? suffix : closers;
+    const head = pending.has(key) ? pending.get(key) : closers.get(key);
+    if (target && head) pair(token, head.token);
+    if (marker === key) {
+      pending.set(key, { token, next: target ? undefined : head });
+    } else if (head) {
+      pending.set(key, head.next);
+    }
+  }
+}
+
 /** Index the first matching closer to the right. The forward scan consumes each span once. */
 export function equationSpanEnds(parts: readonly string[]): Map<number, number> {
   const nextFence = new Map<string, number>();
-  const environmentEnds = new Map<string, number[]>();
+  const closers: TexClosers<TexMarker> = new Map();
   const spanEnds = new Map<number, number>();
+  const line: TexMarker[] = [];
+  const finishLine = () => {
+    matchTexLine(line.reverse(), closers, (open, close) => spanEnds.set(open.index, close.index));
+    line.length = 0;
+  };
   for (let i = parts.length - 2; i > 0; i -= 2) {
     const marker = parts[i]!;
-    if (marker.startsWith("\\end{")) {
-      const stack = environmentEnds.get(marker) ?? [];
-      stack.push(i);
-      environmentEnds.set(marker, stack);
-      continue;
-    }
-    if (marker.startsWith("\\begin{")) {
-      const end = environmentEnds.get(marker.replace("\\begin", "\\end"))?.pop();
-      if (end !== undefined) spanEnds.set(i, end);
+    if (marker === "\n" || parts[i + 1]!.includes("\n")) finishLine();
+    if (!marker.endsWith("`")) {
+      if (marker === "%" || marker.startsWith("$") || marker.startsWith("\\")) line.push({ text: marker, index: i });
       continue;
     }
     // A backslash escapes the first opening tick, but is literal inside code.
     const escapedTick = marker.startsWith("\\`");
     const fence = escapedTick ? marker.slice(1) : marker;
-    const closer = fence.startsWith("`")
-      ? (escapedTick ? fence.slice(1) : fence)
-      : mathSpanClosers.get(marker);
+    const closer = escapedTick ? fence.slice(1) : fence;
     const end = closer ? nextFence.get(closer) : undefined;
     if (end !== undefined) spanEnds.set(i, end);
     nextFence.set(fence, i);
   }
+  finishLine();
   return spanEnds;
 }
 
@@ -128,11 +167,14 @@ function markdownLine(raw: string, index: number, previous?: EquationLine): Equa
   return line;
 }
 
-/** Read the rest of one paragraph before deciding whether inline code owns a possible
+/** Read the rest of one paragraph before deciding whether an earlier inline span owns a possible
  * display opener. A following table delimiter may turn the last line into a header. */
-function paragraphMathMarkers(rawLines: string[], parsed: EquationLine[], first: number): Set<number>[] | undefined {
+function paragraphMathMarkers(rawLines: string[], parsed: EquationLine[], first: number, column: number): Set<number>[] | undefined {
   const paragraph = parsed.slice(first);
-  if (!paragraph.some((line) => line.content.includes("`"))) return undefined;
+  // The first display candidate is visible if no earlier inline span can own it.
+  if (!paragraph.some((line, i) => /[`$\\]/u.test(
+    i === paragraph.length - 1 ? line.content.slice(0, column) : line.content,
+  ))) return undefined;
   // Lookahead may classify its previous line as a header. Keep the real parser state intact.
   paragraph[paragraph.length - 1] = { ...paragraph.at(-1)! };
   for (let j = parsed.length; j < rawLines.length; j++) {
@@ -176,7 +218,7 @@ function markdownLines(rawLines: string[], fences?: Map<number, number>, display
       const first = line.paragraph;
       if (first === undefined) continue;
       if (first !== checkedParagraph) {
-        visibleMath = paragraphMathMarkers(rawLines, lines, first);
+        visibleMath = paragraphMathMarkers(rawLines, lines, first, candidates![0]!.column);
         checkedParagraph = first;
       }
       const display = candidates?.find(({ column }) => !visibleMath || visibleMath[i - first]?.has(column));
@@ -353,13 +395,13 @@ function matchedFences(lines: EquationLine[]): Map<number, number> {
   return ends;
 }
 
-/** Inside a Markdown paragraph, only display openers outside closed code spans are eligible. */
+/** Inside a paragraph, an earlier closed code or math span owns its delimiters. */
 function mathMarkers(lines: EquationLine[]): Set<number>[] {
   const columns = lines.map(() => new Set<number>());
   const paragraph = lines.map((line) => line.content).join("\n");
-  const parts = paragraph.split(/(\\?`+|\\(?:begin|end)\{[a-zA-Z]+\*?\}|\\.|\$+|\n)/u);
+  const parts = paragraph.split(/(\\?`+|\\(?:begin|end)\{[a-zA-Z]+\*?\}|\\.|\$+|%|\n)/u);
   const spanEnds = equationSpanEnds(parts);
-  let codeEnd = -1;
+  let spanEnd = -1;
   let line = 0;
   let column = 0;
   for (let i = 1; i < parts.length; i += 2) {
@@ -369,9 +411,9 @@ function mathMarkers(lines: EquationLine[]): Set<number>[] {
     if (marker === "\n") {
       line++;
       column = 0;
-    } else if (i > codeEnd) {
-      if (marker.endsWith("`")) codeEnd = spanEnds.get(i) ?? i;
-      else if (marker === "$$" || marker === "\\[" || marker.startsWith("\\begin{")) columns[line]!.add(start);
+    } else if (i > spanEnd) {
+      if (marker === "$$" || marker === "\\[" || marker.startsWith("\\begin{")) columns[line]!.add(start);
+      spanEnd = spanEnds.get(i) ?? i;
     }
   }
   return columns;
@@ -381,46 +423,39 @@ function mathMarkers(lines: EquationLine[]): Set<number>[] {
  * Markdown pass gives ownership to the first actual opener and skips its body. */
 function matchedDisplays(lines: EquationLine[]): Map<number, DisplayPair[]> {
   const ends = new Map<number, DisplayPair[]>();
-  const scopes = new Map<Container | undefined, Map<string, DisplayCloser[]>>();
+  const scopes = new Map<Container | undefined, TexClosers<TexMarker & { line: number }>>();
+  const dollarClosers = new Map<Container | undefined, DisplayCloser>();
   for (let i = lines.length - 1; i >= 0; i--) {
     const { raw, content, containers } = lines[i]!;
     const dollars = /^( {0,3})\$\$([^$\r\n]*)$/u.exec(content);
     if (!dollars && !content.includes("\\")) continue;
-    const tokens = dollars ? [] : Array.from(content.matchAll(/\\(?:begin|end)\{[a-zA-Z]+\*?\}|\\./gu));
     const pairs: DisplayPair[] = [];
     const contentStart = raw.length - content.length;
+    const tokens = dollars ? [] : Array.from(content.matchAll(/\\(?:begin|end)\{[a-zA-Z]+\*?\}|\\.|%/gu),
+      (match) => ({ text: match[0], line: i, index: match.index + contentStart }));
     for (let depth = containers.length; depth >= 0; depth--) {
       const parent = containers[depth - 1];
       const indent = raw.slice(parent?.end ?? 0, contentStart);
       if (/\S/u.test(indent)) break;
-      const closers = scopes.get(parent?.scope) ?? new Map<string, DisplayCloser[]>();
-      scopes.set(parent?.scope, closers);
       if (dollars) {
         const column = dollars[1]!.length;
         // The closer must be bare and within three spaces of this container.
         if (!/^ {0,3}$/u.test(indent + dollars[1])) break;
-        const close = closers.get("$$")?.[0];
+        const close = dollarClosers.get(parent?.scope);
         if (depth === containers.length && close) pairs.push({ column, opener: "$$", close });
         if (/^[ \t]*$/u.test(dollars[2]!)) {
-          closers.set("$$", [{ line: i, column: contentStart + column, length: 2 }]);
+          dollarClosers.set(parent?.scope, { line: i, column: contentStart + column, length: 2 });
         }
         continue;
       }
-      for (let j = tokens.length - 1; j >= 0; j--) {
-        const token = tokens[j]!;
-        const marker = token[0];
-        if (marker === "\\]" || marker.startsWith("\\end{")) {
-          const stack = closers.get(marker) ?? [];
-          stack.push({ line: i, column: contentStart + token.index, length: marker.length });
-          closers.set(marker, stack);
-        } else if (marker === "\\[" || marker.startsWith("\\begin{")) {
-          const closer = marker === "\\[" ? "\\]" : marker.replace("\\begin", "\\end");
-          const close = closers.get(closer)?.pop();
-          if (depth === containers.length && close && close.line > i) {
-            pairs.push({ column: token.index, opener: marker, close });
-          }
+      const closers = scopes.get(parent?.scope) ?? new Map();
+      scopes.set(parent?.scope, closers);
+      matchTexLine(tokens, closers, (open, end) => {
+        if (depth === containers.length && end.line > i && open.text !== "\\(") {
+          const close = { line: end.line, column: end.index, length: end.text.length };
+          pairs.push({ column: open.index - contentStart, opener: open.text, close });
         }
-      }
+      });
     }
     if (pairs.length) ends.set(i, pairs.reverse());
   }
