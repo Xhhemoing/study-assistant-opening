@@ -145,8 +145,11 @@ function splitEquationCells(parts: string[], spanEnds?: Map<number, number>): st
 }
 
 function stripEquationLine(line: string): string {
-  if (!line.includes("|")) return stripEquationSegment(line);
-  const parts = line.split(equationMarkers);
+  // Block prefixes belong to the physical line. A sign after a cell boundary is inline text.
+  const containerPrefix = /^[ \t]*(?:>[ \t]*|(?:[-*+]|\d+[.)])[ \t]+(?:\[[ xX]\][ \t]+)?)+/;
+  const content = line.replace(containerPrefix, "").replace(/^[ \t]*#{1,6}[ \t]+/, "");
+  if (!content.includes("|")) return stripEquationSegment(content);
+  const parts = content.split(equationMarkers);
   const cells = splitEquationCells(parts);
   const inlineSegments = splitEquationCells(parts, equationSpanEnds(parts));
   // Inline spans can only hide a cell boundary. Equal counts give identical segments.
@@ -155,11 +158,8 @@ function stripEquationLine(line: string): string {
 }
 
 function stripEquationSegment(segment: string): string {
-  // Quotes and lists can nest. A checkbox belongs to the preceding list marker.
-  const containerPrefix = /^[ \t]*(?:>[ \t]*|(?:[-*+]|\d+[.)])[ \t]+(?:\[[ xX]\][ \t]+)?)+/;
-  const content = segment.replace(containerPrefix, "").replace(/^[ \t]*#{1,6}[ \t]+/, "");
-  const parts = content.split(equationMarkers);
-  if (parts.length === 1) return content;
+  const parts = segment.split(equationMarkers);
+  if (parts.length === 1) return segment;
   const spanEnds = equationSpanEnds(parts);
   const cellOpeners = new Map<string, number[]>();
   for (let i = 1; i < parts.length; i += 2) {
