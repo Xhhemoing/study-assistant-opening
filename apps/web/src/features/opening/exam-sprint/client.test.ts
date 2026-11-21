@@ -163,13 +163,16 @@ describe("exam sprint lesson confirmation", () => {
 });
 
 describe("exam sprint client recovery", () => {
-  it("still dispatches when WebCrypto is unavailable", async () => {
-    vi.stubGlobal("crypto", { randomUUID: () => key });
+  it("dispatches with a UUIDv4 client key when HTTP only provides getRandomValues", async () => {
+    const getRandomValues = vi.fn((bytes: Uint8Array) => bytes.fill(0xff));
+    vi.stubGlobal("crypto", { getRandomValues });
     try {
       const fetcher = vi.fn<Fetcher>().mockResolvedValue(Response.json(overview(1)));
-      const client = createExamSprintClient({ fetcher, keyFactory: () => key });
+      const client = createExamSprintClient({ fetcher });
       await client.send(intent);
+      expect(getRandomValues).toHaveBeenCalledOnce();
       expect(fetcher).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(String(fetcher.mock.calls[0]![1]?.body)).clientKey).toBe("ffffffff-ffff-4fff-bfff-ffffffffffff");
       expect(client.getSnapshot().overview?.summary.onlineAnswered).toBe(1);
     } finally { vi.unstubAllGlobals(); }
   });

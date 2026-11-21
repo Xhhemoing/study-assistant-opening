@@ -23,7 +23,14 @@ function errorMessage(body: unknown, status: number): string {
   }
   return status === 401 ? "登录已过期，请重新登录。" : `请求失败（${status}），请稍后重试。`;
 }
-export function createExamSprintClientKey(): string { return crypto.randomUUID(); }
+export function createExamSprintClientKey(): string {
+  if (typeof globalThis.crypto?.randomUUID === "function") return globalThis.crypto.randomUUID();
+  const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6]! & 0x0f) | 0x40;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
 // The sprint routes reject invalid input, missing resources, conflicts and oversized bodies.
 // Other failures can precede the receipt lookup and leave an earlier attempt unresolved.
 const terminalWriteStatuses = new Set([400, 404, 409, 413]);

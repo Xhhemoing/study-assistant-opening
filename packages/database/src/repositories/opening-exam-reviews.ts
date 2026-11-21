@@ -87,7 +87,7 @@ export function createOpeningExamReviewsRepository(sql: Sql) {
             AND sprint_id=${checked.sprintId} AND source_item_id=${input.sourceItemId}
             AND work_source_id=${input.workSourceId} AND work_source_version=${input.workSourceVersion}
             AND reference_source_id=${input.referenceSourceId} AND reference_source_version=${input.referenceSourceVersion}
-            AND answer_text=${input.answerText} AND status IN ('pending', 'unknown')
+            AND privacy_epoch=${checked.privacyEpoch} AND answer_text=${input.answerText} AND status IN ('pending', 'unknown')
           ORDER BY created_at, id LIMIT 1 FOR UPDATE`;
         if (unresolved) {
           const context = await readContext(tx, scope, String(unresolved.id));

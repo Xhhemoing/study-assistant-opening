@@ -18,6 +18,7 @@ import {
 } from "@aistudy/contracts";
 import type { OpeningScope } from "./opening-sources";
 import { OpeningPlanError } from "./opening-plan-error";
+import { assertPlanningDay, TIMETABLE_REVISION_DAY } from "./opening-plan-day";
 import { insertOpeningTask, insertOpeningTaskWithOutcome, type TaskCreateOutcome } from "./opening-retest-task";
 import { transitionRetestActivityForTask } from "./opening-retest-activities";
 import { lockWorkspaceLearningHistory, nextWorkspaceLearningHistoryRevision } from "./opening-learning-facts";
@@ -167,27 +168,22 @@ function toWeekSession(row: Record<string, unknown>): WeekSession {
   };
 }
 
+const TIMETABLE_REVISION_PREFIX = "timetable-revision:";
+
 async function readTimetableSnapshot(sql: Sql, scope: OpeningScope) {
   const rows = await sql`
-    SELECT s.*, h.revision AS history_revision FROM workspaces w
-    LEFT JOIN opening_workspace_history_revisions h
-      ON h.workspace_id = w.id AND h.owner_user_id = w.owner_user_id
+    SELECT s.*, ps.hard_blocks_fingerprint FROM workspaces w
+    LEFT JOIN opening_plan_state ps ON ps.workspace_id = w.id AND ps.day = ${TIMETABLE_REVISION_DAY}::date
     LEFT JOIN opening_timetable_sessions s ON s.workspace_id = w.id AND s.owner_user_id = w.owner_user_id
     WHERE w.id = ${scope.workspaceId} AND w.owner_user_id = ${scope.ownerUserId}
     ORDER BY s.weekday, s.start_period, s.id`;
   const sessions = rows.filter(row => row.id != null).map(toWeekSession);
   const firstSession = rows.find(row => row.id != null);
-  const historyRevision = rows[0]?.history_revision;
-  const revision = historyRevision == null
-    ? (firstSession?.id as string | null) ?? `empty:${scope.workspaceId}`
-    : timetableRevisionToken(scope.workspaceId, Number(historyRevision));
+  const fingerprint = rows[0]?.hard_blocks_fingerprint as string | null | undefined;
+  const revision = fingerprint?.startsWith(TIMETABLE_REVISION_PREFIX)
+    ? fingerprint.slice(TIMETABLE_REVISION_PREFIX.length)
+    : (firstSession?.id as string | null) ?? `empty:${scope.workspaceId}`;
   return { sessions, revision };
-}
-
-/** Derive a UUID token from the rollback-transparent workspace history counter. */
-function timetableRevisionToken(workspaceId: string, revision: number): string {
-  const hex = createHash("sha256").update(`opening-timetable:${workspaceId}:${revision}`).digest("hex");
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-${(parseInt(hex[16]!, 16) & 0x3 | 0x8).toString(16)}${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }
 
 export function createOpeningPlansRepository(sql: Sql, options: { now?: () => Date } = {}) {
@@ -404,10 +400,15 @@ export function createOpeningPlansRepository(sql: Sql, options: { now?: () => Da
               ${s.courseId ?? null}, ${s.weekday}, ${s.weeks}, ${s.startPeriod}, ${s.endPeriod}
             )`;
         }
-        await tx`INSERT INTO opening_workspace_history_revisions(workspace_id,owner_user_id,revision)
-          VALUES (${scope.workspaceId},${scope.ownerUserId},0) ON CONFLICT DO NOTHING`;
-        await tx`UPDATE opening_workspace_history_revisions SET revision=revision+1
-          WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+        const revision = TIMETABLE_REVISION_PREFIX + randomUUID();
+        const saved = await tx`INSERT INTO opening_plan_state
+          (workspace_id, day, accepted_version, accepted_blocks, hard_blocks_fingerprint)
+          VALUES (${scope.workspaceId}, ${TIMETABLE_REVISION_DAY}::date, 0, '[]'::jsonb, ${revision})
+          ON CONFLICT (workspace_id, day) DO UPDATE
+          SET hard_blocks_fingerprint = EXCLUDED.hard_blocks_fingerprint, updated_at = now()
+          WHERE starts_with(opening_plan_state.hard_blocks_fingerprint, ${TIMETABLE_REVISION_PREFIX})
+          RETURNING day`;
+        if (!saved.length) throw new OpeningPlanError("CONFLICT", "课表版本的保留日期已有计划，无法保存课表。");
         return (await readTimetableSnapshot(tx, scope)).sessions;
       });
     },
@@ -428,6 +429,7 @@ export function createOpeningPlansRepository(sql: Sql, options: { now?: () => Da
     },
 
     async upsertHardBlocks(scope: OpeningScope, day: string, blocks: TimeBlock[]): Promise<void> {
+      assertPlanningDay(day);
       await sql.begin(async (tx) => {
         const owners = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
         if (!owners.length) throw new OpeningPlanError("NOT_FOUND", "workspace not found");
@@ -459,7 +461,8 @@ export function createOpeningPlansRepository(sql: Sql, options: { now?: () => Da
     } | null> {
       const rows = await sql`
         SELECT accepted_version, accepted_blocks, hard_blocks_fingerprint FROM opening_plan_state
-        WHERE workspace_id = ${scope.workspaceId} AND day = ${day}::date`;
+        WHERE workspace_id = ${scope.workspaceId} AND day = ${day}::date
+          AND NOT (day = ${TIMETABLE_REVISION_DAY}::date AND starts_with(hard_blocks_fingerprint, ${TIMETABLE_REVISION_PREFIX}))`;
       if (!rows.length) return null;
       const r = rows[0] as Record<string, unknown>;
       return {
@@ -470,9 +473,7 @@ export function createOpeningPlansRepository(sql: Sql, options: { now?: () => Da
     },
 
     async proposePlan(scope: OpeningScope, input: ProposePlanInput): Promise<PlanDraft> {
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(input.date)) {
-        throw new OpeningPlanError("VALIDATION", "date must be YYYY-MM-DD (no invented dates)");
-      }
+      assertPlanningDay(input.date);
       if (input.clientKey && isReservedDayAdjustmentProposePrefix(input.clientKey)) {
         throw new OpeningPlanError("VALIDATION", "clientKey cannot start with reserved day-exception: or day-adjustment: prefix");
       }
@@ -552,9 +553,7 @@ export function createOpeningPlansRepository(sql: Sql, options: { now?: () => Da
       /** The open draft is still executable but newer suggestions exist. */
       hasNewerSuggestion?: boolean;
     }> {
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) {
-        throw new OpeningPlanError("VALIDATION", "date must be YYYY-MM-DD");
-      }
+      assertPlanningDay(day);
       const [lockA, lockB] = dailyDraftAdvisoryLockKeys(scope.workspaceId, day);
       return sql.begin(async (tx) => {
         await tx`SELECT pg_advisory_xact_lock(${lockA}, ${lockB})`;
