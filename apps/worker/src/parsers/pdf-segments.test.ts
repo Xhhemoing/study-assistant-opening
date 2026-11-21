@@ -925,7 +925,7 @@ describe("bounded resumable PDF parser", () => {
         { page: 2, text: "Theorem 1: Next theorem.", visualKinds: [] },
       ],
       recognizePages: async function* () {
-        yield { text: "A parabola opening upward.\nAnswer: (0, 0).", imageObjectKey: "vision/parabola" };
+        yield { text: "Chapter 2: Conic Sections\nA parabola opening upward.\nAnswer: (0, 0).", imageObjectKey: "vision/parabola" };
       },
     });
     expect(inlineBeforeVision.publishedChunks.map(c => c.page)).toEqual([1, 2]);
@@ -944,7 +944,7 @@ describe("bounded resumable PDF parser", () => {
           slideLabel: null,
           startMs: null,
           endMs: null,
-          text: "[原生提取]\nFind the vertex.\nAnswer: (0, 0).\n\n[视觉转写与描述]\nA parabola opening upward.\nAnswer: (0, 0).",
+          text: "[原生提取]\nFind the vertex.\nAnswer: (0, 0).\n\n[视觉转写与描述]\nChapter 2: Conic Sections\nA parabola opening upward.\nAnswer: (0, 0).",
           imageObjectKey: "vision/saved-parabola",
         },
       ],
@@ -1160,7 +1160,7 @@ describe("bounded resumable PDF parser", () => {
     });
     expect(live.pdfWarning).toBeUndefined();
     expect(live.publishedChunks.map(c => c.page)).toEqual([1, 2, 3]);
-    expect(live.publishedChunks[0]?.text).toBe("[原生提取]\nFind x.\n\n[视觉转写与描述]\n【原图忠实转写，尚需核对】\nFigure 1.");
+    expect(live.publishedChunks[0]?.text).toBe("Find x.");
     expect(live.publishedChunks[0]?.imageObjectKey).toBeNull();
     expect(live.publishedChunks[1]?.text).toBe("[视觉转写与描述]\n【原图忠实转写，尚需核对】\nPublic stem.");
     expect(live.publishedChunks[1]?.text).not.toContain("Shows x = 2.");
@@ -1206,14 +1206,14 @@ describe("bounded resumable PDF parser", () => {
       ],
       recognizePages: async function* () {
         yield {
-          text: "【原图忠实转写，尚需核对】\nUnit ball diagram.\nAnswer Key\n1. x = 2\n\n【图表观察描述，非原文或解答】\nShows answer plot.",
+          text: "【原图忠实转写，尚需核对】\n## Norm Equivalence\nUnit ball diagram.\nAnswer Key\n1. x = 2\n\n【图表观察描述，非原文或解答】\nShows answer plot.",
           imageObjectKey: "vision/p1-theorem",
         };
       },
     });
     expect(liveSamePageVision.pdfWarning).toBeUndefined();
     expect(liveSamePageVision.publishedChunks.map(c => c.page)).toEqual([1, 3]);
-    expect(liveSamePageVision.publishedChunks[0]?.text).toBe("[原生提取]\nTheorem 1: Norm equivalence.\n\n[视觉转写与描述]\n【原图忠实转写，尚需核对】\nUnit ball diagram.");
+    expect(liveSamePageVision.publishedChunks[0]?.text).toBe("[原生提取]\nTheorem 1: Norm equivalence.\n\n[视觉转写与描述]\n【原图忠实转写，尚需核对】\n## Norm Equivalence\nUnit ball diagram.");
     expect(liveSamePageVision.publishedChunks[0]?.imageObjectKey).toBeNull();
 
     const resumeReusable = await runPdfScenario({
@@ -1228,7 +1228,7 @@ describe("bounded resumable PDF parser", () => {
           slideLabel: null,
           startMs: null,
           endMs: null,
-          text: "[原生提取]\nTheorem 1.\n\n[视觉转写与描述]\nDiagram caption.\nAnswer Key\n1. x = 2",
+          text: "[原生提取]\nTheorem 1.\n\n[视觉转写与描述]\n## Norm Equivalence\nDiagram caption.\nAnswer Key\n1. x = 2",
           imageObjectKey: "vision/old-p1",
         },
       ],
@@ -1249,7 +1249,7 @@ describe("bounded resumable PDF parser", () => {
           slideLabel: null,
           startMs: null,
           endMs: null,
-          text: "[原生提取]\nTheorem 1.\n\n[视觉转写与描述]\nDiagram caption.\nAnswer Key\n1. x = 2",
+          text: "[原生提取]\nTheorem 1.\n\n[视觉转写与描述]\n## Norm Equivalence\nDiagram caption.\nAnswer Key\n1. x = 2",
           imageObjectKey: "vision/old-p1",
         },
       ],
@@ -1293,37 +1293,42 @@ describe("bounded resumable PDF parser", () => {
     expect(scannedResumeWithNullKey.publishedChunks[0]?.imageObjectKey).toBeNull();
   });
 
-  it("Round-8 [P1-1..4]: seals Lecture Solutions & bare/review lectures, drops un-delimited contaminated Vision, starts Vision from incomingSeal, and consumes cached batch results on partial degradation", async () => {
-    const lectureOpenersAndBareGuard = await runPdfScenario({
+  it("keeps Markdown review and untitled lecture headings sealed until a new topic", async () => {
+    const { publishedChunks } = await runPdfScenario({
       pages: [
         { page: 1, text: "Lecture 4: Solutions\n1. x = 5", visualKinds: [] },
-        { page: 2, text: "Lecture 1", visualKinds: [] },
-        { page: 3, text: "第 1 讲", visualKinds: [] },
-        { page: 4, text: "Lecture 4: Review", visualKinds: [] },
-        { page: 5, text: "第 3 讲 思考题\n2. y = 6", visualKinds: [] },
+        { page: 2, text: "## Lecture 1\n## Review", visualKinds: [] },
+        { page: 3, text: "## 第 1 讲：\n## Exercises", visualKinds: [] },
+        { page: 4, text: "## Lecture 4: Review\n2. y = 6\n## 2.1 x = 3", visualKinds: [] },
+        { page: 5, text: "## 第 3 讲 思考题\n3. z = 7", visualKinds: [] },
         { page: 6, text: "Lecture 5: Singular Values\nTheorem 5.1: SVD exists.", visualKinds: [] },
         { page: 7, text: "Chapter 4: Solutions\n3. z = 7", visualKinds: [] },
         { page: 8, text: "第 4 讲 习题答案\n4. w = 8", visualKinds: [] },
         { page: 9, text: "Chapter 6: Projections\nDef. 6.1.", visualKinds: [] },
       ],
     });
-    expect(lectureOpenersAndBareGuard.publishedChunks.map(c => c.page)).toEqual([6, 9]);
-    expect(lectureOpenersAndBareGuard.publishedChunks[0]?.text).toBe("Lecture 5: Singular Values\nTheorem 5.1: SVD exists.");
+    expect(publishedChunks.map(c => c.page)).toEqual([6, 9]);
+    expect(publishedChunks[0]?.text).toBe("Lecture 5: Singular Values\nTheorem 5.1: SVD exists.");
+  });
 
-    const undelimitedContaminatedLive = await runPdfScenario({
+  it("drops an unheaded Vision answer even when a later line has an inline answer marker", async () => {
+    const { outcome, pdfWarning, publishedChunks } = await runPdfScenario({
       pages: [
         { page: 1, text: "Find x.", visualKinds: ["picture"], hadSealedContent: true },
       ],
       recognizePages: async function* () {
-        yield { text: "【原图忠实转写，尚需核对】\n1. x = 5", imageObjectKey: "vision/p1-missed-heading" };
+        yield { text: "【原图忠实转写，尚需核对】\n1. x = 5\nAnswer: y = 6", imageObjectKey: "vision/p1-missed-heading" };
       },
     });
-    expect(undelimitedContaminatedLive.pdfWarning).toBeUndefined();
-    expect(undelimitedContaminatedLive.publishedChunks).toHaveLength(1);
-    expect(undelimitedContaminatedLive.publishedChunks[0]?.text).toBe("Find x.");
-    expect(undelimitedContaminatedLive.publishedChunks[0]?.imageObjectKey).toBeNull();
+    expect(outcome).toEqual({ pages: 1 });
+    expect(pdfWarning).toBeUndefined();
+    expect(publishedChunks).toHaveLength(1);
+    expect(publishedChunks[0]?.text).toBe("Find x.");
+    expect(publishedChunks[0]?.imageObjectKey).toBeNull();
+  });
 
-    const undelimitedContaminatedSaved = await runPdfScenario({
+  it.each(["1. y = 9", "1. y = 9\nAnswer: z = 10"])("drops unheaded saved Vision-only text on a contaminated page (%s)", async (visionText) => {
+    const { publishedChunks } = await runPdfScenario({
       pages: [
         { page: 1, text: "Find y.", visualKinds: ["picture"], hadSealedContent: true },
       ],
@@ -1333,16 +1338,31 @@ describe("bounded resumable PDF parser", () => {
           slideLabel: null,
           startMs: null,
           endMs: null,
-          text: "[原生提取]\nFind y.\n\n[视觉转写与描述]\n1. y = 9",
+          text: `[视觉转写与描述]\n${visionText}`,
           imageObjectKey: "vision/p1-stale-leaked",
         },
       ],
     });
-    expect(undelimitedContaminatedSaved.pdfWarning).toBeUndefined();
-    expect(undelimitedContaminatedSaved.publishedChunks).toHaveLength(1);
-    expect(undelimitedContaminatedSaved.publishedChunks[0]?.text).toBe("Find y.");
-    expect(undelimitedContaminatedSaved.publishedChunks[0]?.imageObjectKey).toBeNull();
+    expect(publishedChunks).toHaveLength(1);
+    expect(publishedChunks[0]?.text).toBe("Find y.");
+    expect(publishedChunks[0]?.imageObjectKey).toBeNull();
+  });
 
+  it("opens contaminated Vision only at an explicit public heading and closes at the next answer marker", async () => {
+    const { publishedChunks } = await runPdfScenario({
+      pages: [{ page: 1, text: "Find x.", visualKinds: ["picture"], hadSealedContent: true }],
+      recognizePages: async function* () {
+        yield {
+          text: "1. x = 5\nChapter 2: Rings\nPublic diagram caption.\nAnswer: y = 6\n\n2. z = 7",
+          imageObjectKey: "vision/p1-contaminated",
+        };
+      },
+    });
+    expect(publishedChunks[0]?.text).toBe("[原生提取]\nFind x.\n\n[视觉转写与描述]\nChapter 2: Rings\nPublic diagram caption.");
+    expect(publishedChunks[0]?.imageObjectKey).toBeNull();
+  });
+
+  it("starts Vision from the incoming seal and consumes cached batch results on partial degradation", async () => {
     const mixedExitFromIncomingSeal = await runPdfScenario({
       pages: [
         { page: 1, text: "Answer Key\n1. x = 1", visualKinds: [] },
@@ -1389,12 +1409,12 @@ describe("bounded resumable PDF parser", () => {
       ],
       recognizePages: async function* () {
         yield {
-          text: "【原图忠实转写，尚需核对】\nFigure 1.\nAnswer: x = 2.\n\n【图表观察描述，非原文或解答】\nShows x = 2.",
+          text: "【原图忠实转写，尚需核对】\nChapter 2: Vector Spaces\nFigure 1.\nAnswer: x = 2.\n\n【图表观察描述，非原文或解答】\nShows x = 2.",
           imageObjectKey: "vision/inline-worker-strip",
         };
       },
     });
-    expect(workerStrippedInlineVisionDesc.publishedChunks[0]?.text).toBe("[原生提取]\nProblem 1.\n\n[视觉转写与描述]\n【原图忠实转写，尚需核对】\nFigure 1.");
+    expect(workerStrippedInlineVisionDesc.publishedChunks[0]?.text).toBe("[原生提取]\nProblem 1.\n\n[视觉转写与描述]\n【原图忠实转写，尚需核对】\nChapter 2: Vector Spaces\nFigure 1.");
     expect(workerStrippedInlineVisionDesc.publishedChunks[0]?.imageObjectKey).toBeNull();
 
     const partialDegradationBatch = await runPdfScenario({

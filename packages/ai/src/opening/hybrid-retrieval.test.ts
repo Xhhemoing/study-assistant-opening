@@ -146,6 +146,13 @@ describe("material hybrid retrieval", () => {
     expect(segEn.some(s => s.chunk.text.includes("$x + y = z$"))).toBe(true);
   });
 
+  it.each(["$2 xy$", "$2 x$", "$10 n^2$", "$3 ab + 1$"])("keeps %s whole across the 6,000-byte boundary", (formula) => {
+    const prefix = "a".repeat(5997);
+    const segments = segmentMaterialChunks([chunk("short-formula", prefix + formula)], 6000);
+    expect(segments.map(segment => segment.chunk.text.length)).toEqual([prefix.length, formula.length]);
+    expect(segments[1]?.chunk.text).toBe(formula);
+  });
+
   it("scans pathological backslash and mismatched-env inputs in linear O(N) time", () => {
     const backslashes = "\\".repeat(100_000);
     const envs = "\\begin{a}".repeat(5_000) + "\\end{b}".repeat(5_000);

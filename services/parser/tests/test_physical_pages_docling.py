@@ -14,7 +14,7 @@ from docling.datamodel.base_models import AssembledUnit, Cluster, ConversionStat
 from docling.datamodel.document import ConversionResult, InputDocument
 from docling.models.stages.page_assemble.page_assemble_model import PageAssembleModel, PageAssembleOptions
 from docling.models.stages.reading_order.readingorder_model import ReadingOrderModel, ReadingOrderOptions
-from docling_core.types.doc import BoundingBox, DocItemLabel, DoclingDocument, ProvenanceItem, Size, TableCell
+from docling_core.types.doc import BoundingBox, ContentLayer, DocItemLabel, DoclingDocument, ProvenanceItem, Size, TableCell
 
 from opening_parser import __main__ as cli
 from opening_parser import physical_pages
@@ -277,6 +277,36 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
         pub = cli.texts_by_page(result)
         self.assertEqual(pub[11], [])
         self.assertEqual(cli.visual_kinds_by_page(result, pub)[11], [])
+
+    def test_page_furniture_brackets_body_for_filtered_and_legacy_document_iterators(self):
+        document = DoclingDocument(name="page-furniture")
+        document.add_page(page_no=1, size=SIZE)
+
+        def add(text, label, layer):
+            return document.add_text(
+                text=text, label=label, content_layer=layer,
+                prov=ProvenanceItem(page_no=1, charspan=(0, len(text)), bbox=cluster(1).bbox),
+            )
+
+        body = add("1.1 x = 3", DocItemLabel.TEXT, ContentLayer.BODY)
+        footer = add("Page 1", DocItemLabel.PAGE_FOOTER, ContentLayer.FURNITURE)
+        header = add("Answers to Exercises", DocItemLabel.PAGE_HEADER, ContentLayer.FURNITURE)
+        requested_layers = []
+
+        def iterate_items(included_content_layers=None):
+            requested_layers.append(included_content_layers)
+            layers = {ContentLayer.BODY} if included_content_layers is None else included_content_layers
+            for item in (body, footer, header):
+                if item.content_layer in layers:
+                    yield item, 1
+
+        for iterate in (iterate_items, lambda: iterate_items()):
+            with self.subTest(legacy=iterate is not iterate_items):
+                doc = SimpleNamespace(pages=document.pages, texts=document.texts, tables=[], iterate_items=iterate)
+                ext = physical_pages.extract_physical_pages(doc)
+                self.assertEqual(ext.raw_texts_by_page[1], ["Answers to Exercises", "1.1 x = 3", "Page 1"])
+                self.assertEqual(ext.public_texts_by_page[1], [])
+        self.assertEqual(requested_layers, [{ContentLayer.BODY, ContentLayer.FURNITURE}, None])
 
         # Test visual_kinds_by_page resilience to text=None, Table elements, and OCR cells using lightweight doubles
         # (never mutating read-only Pydantic Page.cells or passing text=None into ReadingOrderModel).
@@ -641,6 +671,11 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
         bbox_ext = physical_pages.extract_physical_pages(bbox_doc)
         self.assertEqual(bbox_ext.texts_by_page[1], ["Chapter 2: Rings"])
         self.assertTrue(bbox_ext.had_sealed_by_page[1])
+
+        bbox_doc.iterate_items = lambda: ((item, 1) for item in bbox_doc.texts)
+        partial_ext = physical_pages.extract_physical_pages(bbox_doc)
+        self.assertEqual(partial_ext.raw_texts_by_page[1], ["Answer Key", "| sealed |", "Chapter 2: Rings"])
+        self.assertEqual(partial_ext.texts_by_page[1], ["Chapter 2: Rings"])
 
 
 if __name__ == "__main__":

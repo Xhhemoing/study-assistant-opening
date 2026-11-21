@@ -6,6 +6,7 @@ by those spans. ConversionResult.pages still holds the original page elements.
 """
 
 from dataclasses import dataclass, field, replace
+from inspect import signature
 import re
 
 ACADEMIC_DISCOURSE_KINDS = (
@@ -257,11 +258,11 @@ def _normalized_label(node):
     return str(label).lower() if label is not None else None
 
 
-def _item_sort_key(item, kind_bucket: int, seq: int):
+def _item_sort_key(item, kind_bucket: int):
     for attr in ("reading_order", "order"):
         order_val = getattr(item, attr, None)
         if isinstance(order_val, (int, float)):
-            return (0, float(order_val), 0.0, kind_bucket, seq)
+            return (0, float(order_val), 0.0, kind_bucket)
     bbox = None
     prov = getattr(item, "prov", None) or ()
     if prov:
@@ -271,8 +272,18 @@ def _item_sort_key(item, kind_bucket: int, seq: int):
     top = getattr(bbox, "t", None) if bbox is not None else None
     left = getattr(bbox, "l", 0.0) if bbox is not None else 0.0
     if isinstance(top, (int, float)):
-        return (1, float(top), float(left) if isinstance(left, (int, float)) else 0.0, kind_bucket, seq)
-    return (2, 0.0, 0.0, kind_bucket, seq)
+        return (1, float(top), float(left) if isinstance(left, (int, float)) else 0.0, kind_bucket)
+    return (2, 0.0, 0.0, kind_bucket)
+
+
+def _iterate_document_items(iterate):
+    try:
+        signature(iterate).bind_partial(included_content_layers=None)
+    except (TypeError, ValueError):
+        return iterate()
+    from docling_core.types.doc import ContentLayer
+
+    return iterate(included_content_layers={ContentLayer.BODY, ContentLayer.FURNITURE})
 
 
 def _document_fragments(document):
@@ -294,33 +305,51 @@ def _document_fragments(document):
             text = getattr(item, "orig", None) or ""
         return text, label
 
+    def furniture_rank(row):
+        label = row[1][1]
+        return 0 if label == "page_header" else 2 if label == "page_footer" else 1
+
+    def reading_order_key(row):
+        item, fragment = row
+        return (furniture_rank(row), _item_sort_key(item, int(fragment[1] == "table")))
+
+    traversed = {page: [] for page in result}
+    supplemental = {page: [] for page in result}
+    seen_ids = set()
     iterate = getattr(document, "iterate_items", None)
     if callable(iterate):
-        seen_ids = set()
-        for entry in iterate():
+        for entry in _iterate_document_items(iterate):
             item = entry[0] if isinstance(entry, tuple) else entry
             seen_ids.add(id(item))
             if hasattr(item, "export_to_markdown"):
-                result[page_of(item)].append((item.export_to_markdown(doc=document), "table"))
+                fragment = (item.export_to_markdown(doc=document), "table")
             elif getattr(item, "prov", None) is not None and (hasattr(item, "text") or hasattr(item, "orig")):
-                result[page_of(item)].append(text_fragment(item))
-        # Also visit any items attached only to .texts / .tables so partial mocks stay covered.
-        for item in getattr(document, "texts", ()):
-            if id(item) not in seen_ids:
-                result[page_of(item)].append(text_fragment(item))
-        for table in getattr(document, "tables", ()):
-            if id(table) not in seen_ids:
-                result[page_of(table)].append((table.export_to_markdown(doc=document), "table"))
-        return result
+                fragment = text_fragment(item)
+            else:
+                continue
+            traversed[page_of(item)].append((item, fragment))
 
-    candidates = []
-    for seq, item in enumerate(getattr(document, "texts", ())):
-        candidates.append((_item_sort_key(item, 0, seq), page_of(item), text_fragment(item)))
-    for seq, table in enumerate(getattr(document, "tables", ())):
-        candidates.append((_item_sort_key(table, 1, seq), page_of(table), (table.export_to_markdown(doc=document), "table")))
-    candidates.sort(key=lambda row: row[0])
-    for _key, page_no, frag in candidates:
-        result[page_no].append(frag)
+    for item in getattr(document, "texts", ()):
+        if id(item) not in seen_ids:
+            supplemental[page_of(item)].append((item, text_fragment(item)))
+    for table in getattr(document, "tables", ()):
+        if id(table) not in seen_ids:
+            supplemental[page_of(table)].append((table, (table.export_to_markdown(doc=document), "table")))
+
+    for page, fragments in result.items():
+        # Keep Docling's body traversal order while placing furniture around it
+        # and inserting unattached items by their available reading-order data.
+        remaining = iter(sorted(supplemental[page], key=reading_order_key))
+        pending = next(remaining, None)
+        for row in sorted(traversed[page], key=furniture_rank):
+            key = reading_order_key(row)
+            while pending is not None and reading_order_key(pending) < key:
+                fragments.append(pending[1])
+                pending = next(remaining, None)
+            fragments.append(row[1])
+        if pending is not None:
+            fragments.append(pending[1])
+            fragments.extend(fragment for _, fragment in remaining)
     return result
 
 
@@ -424,7 +453,7 @@ def _is_titled_non_answer_chapter(stripped: str) -> bool:
 def _is_section_sealed_exit(stripped: str, frag_label: str | None, is_markdown_heading: bool) -> bool:
     if _is_section_sealed_opener(stripped):
         return False
-    if _MAJOR_NON_ANSWER_HEADING_RE.match(stripped):
+    if _MAJOR_NON_ANSWER_HEADING_RE.match(stripped) and not _ANSWER_TITLE_WORD_RE.search(stripped):
         return True
     if _TEXTBOOK_NON_ANSWER_HEADING_RE.match(stripped):
         return True
@@ -438,7 +467,7 @@ def _is_section_sealed_exit(stripped: str, frag_label: str | None, is_markdown_h
         re.IGNORECASE,
     ):
         return False
-    if (frag_label in _HEADING_LABELS or is_markdown_heading) and not _SECTION_BREAK_RE.match(stripped) and not _EXERCISE_RE.match(stripped) and not _SECTION_SEALED_RE.match(stripped) and not _INLINE_SEALED_ALWAYS_RE.match(stripped) and not _INLINE_SEALED_NON_EXAMPLE_RE.match(stripped) and not re.search(r"(?:\b(?:Answers?|Solutions?|Exercises?|Problems?|Chapters?|Sections?|Parts?|Lectures?)\b|答案|解答|习题|练习|章|节|篇|部|讲)", stripped, re.IGNORECASE):
+    if (frag_label in _HEADING_LABELS or is_markdown_heading) and not _SECTION_BREAK_RE.match(stripped) and not _EXERCISE_RE.match(stripped) and not _SECTION_SEALED_RE.match(stripped) and not _INLINE_SEALED_ALWAYS_RE.match(stripped) and not _INLINE_SEALED_NON_EXAMPLE_RE.match(stripped) and not _ANSWER_TITLE_WORD_RE.search(stripped) and not re.search(r"(?:\b(?:Chapters?|Sections?|Parts?|Lectures?|Units?|Homework|Self-Check)\b|章|节|篇|部|讲|作业题)", stripped, re.IGNORECASE):
         return True
     if (frag_label in _HEADING_LABELS or is_markdown_heading) and re.match(r"^\d+(?:\.\d+)+\s+(?!True\.?$|False\.?$|Yes\.?$|No\.?$|None\.?$|[A-F](?:\s*,\s*[A-F])*\.?$)[A-Z]", stripped) and not _ANSWER_TITLE_WORD_RE.search(stripped):
         return True

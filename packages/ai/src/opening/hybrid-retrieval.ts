@@ -41,7 +41,7 @@ function codePointUtf8Bytes(cp: number): number {
 
 const BEGIN_ENV_RE = /\\begin\{([A-Za-z][A-Za-z0-9*]*)\}/y;
 const END_ENV_RE = /\\end\{([A-Za-z][A-Za-z0-9*]*)\}/y;
-const CURRENCY_PROSE_OR_NON_MATH_RE = /\b(?:and|or|to|for|per|with|from|in|of|at|is|are|was|were|cost|costs|price|prices|usd|cad|aud|eur|cents?|dollars?)\b|\b[A-Za-z]{2,}\b|[\u3000-\u303f\u4e00-\u9fff\uff00-\uffef]/iu;
+const CURRENCY_PROSE_OR_NON_MATH_RE = /\b(?:and|to|or|per|for|in|of|at|from|with|by|on|million|billion|thousand|hundred|usd|eur|gbp|cad|aud|cny|rmb|jpy|hkd|sgd|dollars?|cents?|each|more|less|off|only|about|around|over|under|between|is|are|was|were|costs?|prices?)\b|^\d[\d,.]*[;:]\s*[a-z]|[\u3000-\u303f\u4e00-\u9fff\uff00-\uffef]/iu;
 const MATH_COMMAND_OR_OP_RE = /\\[A-Za-z]+|[=+\-*/^_<>!{}|]/;
 
 function isBareCurrencyStart(text: string, dollarIndex: number): boolean {
