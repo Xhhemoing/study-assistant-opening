@@ -1239,16 +1239,17 @@ const OPTION_SEQUENCE_SEPARATOR =
 
 function containsSingleChoiceReveal(syntax: string, normalizedText: string, choiceLetter: string): boolean {
   const escaped = escapeRegExp(choiceLetter);
+  const option = `${OPTION_WRAPPER_OPEN}?\\s*${escaped}\\s*${OPTION_WRAPPER_CLOSE}?(?!${ALPHA_NUM_IDENT_CHAR})`;
   const patterns = [
     new RegExp(
-      `(?:correct(?:\\s+(?:option|choice|answer))?|choice|option|key|ans(?:wer)?|选|答案|正确选项)\\s*(?:is|[:：=]|为|是)?\\s*[\\[(（]?\\s*${escaped}\\s*[\\])）]?(?!${ALPHA_NUM_IDENT_CHAR})`,
+      `(?:correct(?:\\s+(?:option|choice|answer))?|choice|option|key|ans(?:wer)?|选|答案|正确选项)\\s*(?:is|[:：=]|为|是)?\\s*${option}`,
       "iu",
     ),
-    new RegExp(`=\\s*[\\[(（]?\\s*${escaped}\\s*[\\])）]?(?!${ALPHA_NUM_IDENT_CHAR})`, "iu"),
+    new RegExp(`=\\s*${option}`, "iu"),
   ];
   if (patterns.some(pattern => pattern.test(syntax))) return true;
 
-  const trailing = new RegExp(`[\\[(（]\\s*${escaped}\\s*[\\])）]\\s*$`, "iu");
+  const trailing = new RegExp(`${OPTION_WRAPPER_OPEN}\\s*${escaped}\\s*${OPTION_WRAPPER_CLOSE}\\s*$`, "iu");
   if (!trailing.test(syntax)) return false;
 
   // Only suppress the trailing-label heuristic for a list the ordered matcher also recognizes.

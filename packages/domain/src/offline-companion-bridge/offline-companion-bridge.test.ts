@@ -2162,6 +2162,44 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
     });
   });
 
+  describe.each(["variant stem", "sibling card back"] as const)("single-choice wrappers in a %s", surface => {
+    const wrappedLabels = [
+      "«B»", "‹B›", "「B」", "『B』", "“B”", "‘B’", "《B》", "〈B〉", "<B>", "{B}", "[B]", "(B)",
+      '"B"', "'B'", "`B`",
+    ];
+
+    it.each([
+      ...wrappedLabels.flatMap(label => [
+        { text: `Correct option is ${label} for this exercise.`, answerKey: "B", ok: false },
+        { text: `The marked response ${label}`, answerKey: "B", ok: false },
+      ]),
+      { text: "Correct option is «Ｂ»", answerKey: "B", ok: false },
+      { text: "Correct option is «B»", answerKey: "B", ok: false },
+      { text: "Answer: 「B」", answerKey: "B", ok: false },
+      { text: "Marked response = ‹B› for this exercise.", answerKey: "B", ok: false },
+      { text: "Compare «D» and «B»", answerKey: "B", ok: true },
+      { text: "A cat runs across the garden.", answerKey: "A", ok: true },
+      { text: "I am learning about option order.", answerKey: "I", ok: true },
+    ])("sets ok=$ok for $text", ({ text, answerKey, ok }) => {
+      const variant = makeMissVariantCandidate({
+        answerKey,
+        sealedPayload: { order: ["B", "D"] },
+        freshVariantStem: surface === "variant stem" ? text : "Which ordering is correct?",
+      });
+      const candidates = surface === "variant stem" ? [variant] : [
+        variant,
+        { ...makeFlashcardCandidate(900), backSummary: text },
+      ];
+      expect(issueOfflineFlashcardLease({
+        leaseId: "lease-choice-wrappers",
+        workspaceId: "ws-1",
+        learnerId: "learner-1",
+        issuedAtMs: T0,
+        candidates,
+      })).toMatchObject(ok ? { ok: true } : { ok: false, httpStatus: 422, code: "miss_variant_answer_leak" });
+    });
+  });
+
   it.each([
     "The marked response [B]",
     "Compare the candidates, [B]",
