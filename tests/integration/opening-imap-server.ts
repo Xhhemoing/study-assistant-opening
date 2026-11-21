@@ -30,12 +30,20 @@ export type OpeningImapServer = {
   waitForConnectionsClosed(): Promise<void>;
 };
 
+export type OpeningImapServerOptions = {
+  beforeFetch?: (ctx: { isUidFetch: boolean; fields: string; send: (line: string) => void }) => void;
+  afterFetch?: (ctx: { isUidFetch: boolean; fields: string; send: (line: string) => void }) => void;
+};
+
 /**
  * Minimal standard IMAP4rev1 server used only by the isolated Opening sync
  * gate. It exercises the real ImapFlow protocol stack and real MailParser
  * through wire-compatible LIST/EXAMINE/FETCH/LOGOUT exchanges.
  */
-export async function startOpeningImapServer(inputMails: OpeningImapMail[]): Promise<OpeningImapServer> {
+export async function startOpeningImapServer(
+  inputMails: OpeningImapMail[],
+  options?: OpeningImapServerOptions,
+): Promise<OpeningImapServer> {
   // Reply in fixture order while keeping sequence numbers in mailbox order.
   const mails = [...inputMails];
   let logoutCount = 0;
@@ -104,6 +112,7 @@ export async function startOpeningImapServer(inputMails: OpeningImapMail[]): Pro
           const fields = match[3] ?? match[4] ?? "";
           const sequenceByUid = new Map([...mails].sort((a, b) => a.uid - b.uid)
             .map((mail, index) => [mail.uid, index + 1]));
+          options?.beforeFetch?.({ isUidFetch, fields, send });
           for (const mail of mails) {
             const sequence = sequenceByUid.get(mail.uid)!;
             const selector = isUidFetch ? mail.uid : sequence;
@@ -147,6 +156,7 @@ export async function startOpeningImapServer(inputMails: OpeningImapMail[]): Pro
               send(`* ${sequence} FETCH (${metadataParts.join(" ")})`);
             }
           }
+          options?.afterFetch?.({ isUidFetch, fields, send });
           tagged(tag, "OK FETCH completed");
         } else if (verb === "LOGOUT") {
           send(`* BYE Opening IMAP fixture closing`);

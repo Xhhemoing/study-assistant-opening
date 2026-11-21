@@ -767,4 +767,66 @@ describe("approved IMAP dialer", () => {
       await server.close();
     }
   });
+
+  it("handles unsolicited FLAGS updates before and after UID FETCH in discovery, body fetch, overlap probe, and expunged messages", { timeout: 15_000 }, async () => {
+    const body180 = "Subject: Unsolicited Flags\r\n\r\n" + "f".repeat(180 - "Subject: Unsolicited Flags\r\n\r\n".length);
+    const server = await startOpeningImapServer(
+      [
+        { uid: 11, source: body180, advertisedSize: 220 },
+        { uid: 12, source: "Subject: UID 12\r\n\r\nsecond" },
+      ],
+      {
+        beforeFetch: ({ send }) => {
+          send(`* 2 FETCH (FLAGS (\\Seen))`);
+          send(`* 1 FETCH (UID 11 FLAGS (\\Seen \\Flagged))`);
+        },
+        afterFetch: ({ send }) => {
+          send(`* 1 FETCH (UID 11 FLAGS (\\Seen))`);
+          send(`* 2 FETCH (UID 12 FLAGS (\\Recent) MODSEQ (77))`);
+        },
+      },
+    );
+    const client = installImapCommandGuard(
+      new ImapFlow({ host: "127.0.0.1", port: server.port, secure: false, logger: false, auth }),
+    );
+    const flagEvents: unknown[] = [];
+    client.on("flags", (event: unknown) => {
+      flagEvents.push(event);
+    });
+    try {
+      await client.connect();
+      const result = await syncMailbox({
+        scope: { workspaceId: "workspace", ownerUserId: "owner" },
+        connectionId: "connection",
+        connectionVersion: 1,
+        folder: "INBOX",
+        cursor: null,
+        since: new Date("2026-01-01T00:00:00.000Z"),
+        client,
+        imports: { advanceImapCursor: vi.fn() },
+        storage: { upload: vi.fn(), remove: vi.fn() },
+      } as unknown as ImapSyncDeps);
+      expect(result).toMatchObject({ imported: 2, skipped: 0, cursor: { uidValidity: "42", lastUid: 12 } });
+      expect(flagEvents.length).toBeGreaterThanOrEqual(4);
+
+      // Missing/expunged target UID with only unsolicited FLAGS notifications returns false -> skipped safely.
+      server.mails.splice(0, server.mails.length);
+      const clientExpunged = installImapCommandGuard(
+        new ImapFlow({ host: "127.0.0.1", port: server.port, secure: false, logger: false, auth }),
+      );
+      try {
+        await clientExpunged.connect();
+        await clientExpunged.mailboxOpen("INBOX", { readOnly: true });
+        await expect(
+          clientExpunged.fetchOne("99", { source: { start: 0, maxLength: 1024 }, size: true }, { uid: true }),
+        ).resolves.toBe(false);
+      } finally {
+        clientExpunged.close();
+      }
+    } finally {
+      client.close();
+      await server.waitForConnectionsClosed();
+      await server.close();
+    }
+  });
 });
