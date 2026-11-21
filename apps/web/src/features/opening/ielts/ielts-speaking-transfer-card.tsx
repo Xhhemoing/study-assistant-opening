@@ -5,6 +5,7 @@ import {
   evaluateSpeakingRetelling,
   getSpeakingEvaluationContext,
   getSpeakingTargets,
+  maskIeltsMarkup,
   type IeltsSpeakingFeedbackReceipt,
   type IeltsSpeakingPart3Seed,
 } from "./domain-bridge";
@@ -34,7 +35,20 @@ function snapshotReceipt(receipt: IeltsSpeakingFeedbackReceipt): string {
 }
 
 function normalizeTranscriptKey(transcript: string): string {
-  return transcript.trim().replace(/\s+/gu, " ");
+  const masked = maskIeltsMarkup(transcript)
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/\p{Cf}+/gu, "");
+  const tokens = masked
+    .match(/[\p{L}\p{N}]+/gu)
+    ?.filter((token) => /[a-z]/u.test(token));
+  if (tokens && tokens.length > 0) {
+    return tokens.join(" ");
+  }
+  return (
+    masked.replace(/\s+/gu, "") ||
+    transcript.normalize("NFKC").toLowerCase().replace(/[\s\p{Cf}]+/gu, "")
+  );
 }
 
 export function IeltsSpeakingTransferCard({
@@ -107,14 +121,26 @@ function SpeakingAttempt({
   );
   if (seedReceiptAssistedKey && !assistedTranscripts.includes(seedReceiptAssistedKey)) {
     setAssistedTranscripts([...assistedTranscripts, seedReceiptAssistedKey]);
+    if (
+      editedAnswer &&
+      !editedAnswer.assisted &&
+      normalizeTranscriptKey(editedAnswer.transcript) === seedReceiptAssistedKey
+    ) {
+      setEditedAnswer({ ...editedAnswer, assisted: true });
+    }
   }
   const matchingReceipt = seedReceipt?.sourceTranscript === startingTranscript &&
     (external.durationSeconds === undefined || external.durationSeconds === seedReceipt.durationSeconds)
     ? seedReceipt : null;
+  const startingTranscriptKey = normalizeTranscriptKey(startingTranscript);
+  const isStartingStickyAssisted = startingTranscriptKey !== "" && (
+    seedReceiptAssistedKey === startingTranscriptKey ||
+    assistedTranscripts.includes(startingTranscriptKey)
+  );
   const answer = editedAnswer ?? {
     transcript: startingTranscript,
     durationInput: String(external.durationSeconds ?? matchingReceipt?.durationSeconds ?? ""),
-    assisted: matchingReceipt?.assisted ?? false,
+    assisted: (matchingReceipt?.assisted ?? false) || isStartingStickyAssisted,
   };
   const { transcript, durationInput } = answer;
   const parsedDuration = durationInput.trim() === "" ? Number.NaN : Number(durationInput);

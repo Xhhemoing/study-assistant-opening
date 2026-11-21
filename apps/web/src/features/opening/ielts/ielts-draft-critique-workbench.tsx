@@ -8,6 +8,7 @@ import {
   evaluateRevisedDraftDeterministically,
   getWritingDraftSource,
   getWritingTransferSource,
+  maskIeltsMarkup,
   type IeltsCriterion,
   type IeltsCrossDraftTransferReport,
   type IeltsEssayDraft,
@@ -66,8 +67,25 @@ function draftEditorText(draft: IeltsEssayDraft): string {
   return draft.paragraphs.join("\n\n").replace(/\r\n?/gu, "\n");
 }
 
+function normalizeLexicalTextKey(text: string): string {
+  const masked = maskIeltsMarkup(text)
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/\p{Cf}+/gu, "");
+  const tokens = masked
+    .match(/[\p{L}\p{N}]+/gu)
+    ?.filter((token) => /[a-z]/u.test(token));
+  if (tokens && tokens.length > 0) {
+    return tokens.join(" ");
+  }
+  return (
+    masked.replace(/\s+/gu, "") ||
+    text.normalize("NFKC").toLowerCase().replace(/[\s\p{Cf}]+/gu, "")
+  );
+}
+
 function writingTextKey(paragraphs: readonly string[]): string {
-  return paragraphs.join(" ").trim().replace(/\s+/gu, " ");
+  return normalizeLexicalTextKey(paragraphs.join("\n"));
 }
 
 function collectAssistedWritingKeys(
@@ -141,13 +159,18 @@ export function IeltsDraftCritiqueWorkbench({
   });
   const { draft2, draft2Receipt, transferReport: savedReport } = evaluation;
 
+  const authoritativeAssistedKeys = collectAssistedWritingKeys(fixture.draft2, fixture.draft2Receipt);
+  const authoritativeDraft2Key = writingTextKey(fixture.draft2.paragraphs);
   const [composerOpen, setComposerOpen] = useState(false);
   const [composerText, setComposerText] = useState(() => draftEditorText(fixture.draft2));
-  const [composerAssisted, setComposerAssisted] = useState(fixture.draft2.assisted);
+  const [composerAssisted, setComposerAssisted] = useState(
+    () =>
+      fixture.draft2.assisted ||
+      (authoritativeDraft2Key !== "" && authoritativeAssistedKeys.includes(authoritativeDraft2Key)),
+  );
   const [composerNeedsText, setComposerNeedsText] = useState(false);
   const composerGuidanceId = `${tabsIdPrefix}-revision-guidance`;
   const [revisionCount, setRevisionCount] = useState(0);
-  const authoritativeAssistedKeys = collectAssistedWritingKeys(fixture.draft2, fixture.draft2Receipt);
   const [localAssistedTexts, setLocalAssistedTexts] = useState<readonly string[]>(() => authoritativeAssistedKeys);
 
   if (evaluation.authorityFingerprint !== authorityFingerprint) {
@@ -160,19 +183,26 @@ export function IeltsDraftCritiqueWorkbench({
           fixture.draft2.draftId === evaluation.draft2.draftId ||
           fixture.draft2Receipt.receiptId === evaluation.draft2Receipt.receiptId
         );
-      setLocalAssistedTexts(
-        isOwnWriteBack
-          ? [...new Set([...localAssistedTexts, ...authoritativeAssistedKeys])]
-          : authoritativeAssistedKeys,
-      );
+      const nextAssistedTexts = isOwnWriteBack
+        ? [...new Set([...localAssistedTexts, ...authoritativeAssistedKeys])]
+        : authoritativeAssistedKeys;
+      setLocalAssistedTexts(nextAssistedTexts);
       setComposerText(draftEditorText(fixture.draft2));
-      setComposerAssisted(fixture.draft2.assisted);
+      setComposerAssisted(
+        fixture.draft2.assisted ||
+          (authoritativeDraft2Key !== "" && nextAssistedTexts.includes(authoritativeDraft2Key)),
+      );
       setViewMode(initialView);
       setCriterionFilter("ALL");
       setComposerOpen(false);
       setRevisionCount(0);
     } else if (authoritativeAssistedKeys.some((key) => !localAssistedTexts.includes(key))) {
-      setLocalAssistedTexts([...new Set([...localAssistedTexts, ...authoritativeAssistedKeys])]);
+      const nextAssistedTexts = [...new Set([...localAssistedTexts, ...authoritativeAssistedKeys])];
+      setLocalAssistedTexts(nextAssistedTexts);
+      const currentComposerKey = writingTextKey(composerText.split(PARAGRAPH_BREAK));
+      if (currentComposerKey !== "" && nextAssistedTexts.includes(currentComposerKey)) {
+        setComposerAssisted(true);
+      }
     }
   }
 

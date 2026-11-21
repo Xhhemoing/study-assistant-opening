@@ -641,6 +641,107 @@ describe("IeltsDraftCritiqueWorkbench", () => {
     expect(resetCheckbox.checked).toBe(false);
     expect(resetCheckbox.disabled).toBe(false);
   });
+
+  it("blocks punctuation-adjacent whitespace, punctuation, casing, and non-lexical bypasses on sticky-assisted Writing drafts", async () => {
+    const fixture = IELTS_WRITING_SPEAKING_FIXTURE;
+    const assistedDraft2 = { ...fixture.draft2, draftId: "assisted-punct-writing-draft", assisted: true };
+    const evaluated = evaluateRevisedDraftDeterministically({
+      baselineDraft: fixture.draft1,
+      revisedDraft: assistedDraft2,
+      targets: fixture.targets,
+      receiptId: "assisted-punct-writing-receipt",
+    });
+    if (!evaluated.ok) throw new Error("Expected a practice receipt for the assisted Writing draft");
+    const onRevisionEvaluated = vi.fn();
+    await act(async () => root.render(createElement(IeltsDraftCritiqueWorkbench, {
+      fixture: {
+        ...fixture,
+        draft2: assistedDraft2,
+        draft2Receipt: evaluated.receipt,
+        transferReport: evaluated.transferReport,
+      },
+      onRevisionEvaluated,
+    })));
+    await act(async () => writingButton("打开改写编辑区").click());
+    const textarea = host.querySelector<HTMLTextAreaElement>('[aria-label="二稿改写编辑区"]')!;
+    const checkbox = host.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    const originalText = textarea.value;
+    expect(originalText).toContain("rapidly,");
+
+    const cosmeticVariants = [
+      originalText.replace("rapidly,", "rapidly ,"),
+      originalText.replace("rapidly,", "RAPIDLY;"),
+      `${originalText.replace("rapidly,", "rapidly").replace(/\n\n/gu, "\n")} <!-- note --> 123`,
+    ];
+    for (const [index, variant] of cosmeticVariants.entries()) {
+      await act(async () => setNativeInputValue(textarea, variant));
+      expect(checkbox.checked).toBe(true);
+      expect(checkbox.disabled).toBe(true);
+      await act(async () => checkbox.click());
+      await act(async () => writingButton("重新分析改写").click());
+      expect(onRevisionEvaluated).toHaveBeenCalledTimes(index + 1);
+      expect(onRevisionEvaluated.mock.lastCall?.[0]).toMatchObject({
+        revisedDraft: expect.objectContaining({ assisted: true }),
+        receipt: expect.objectContaining({
+          epistemicStatus: "practice_feedback",
+          masteryQualified: false,
+          countsTowardMastery: false,
+        }),
+      });
+    }
+
+    // Genuine lexical revision unlocks the checkbox cleanly while preserving checked state until unchecked.
+    await act(async () => setNativeInputValue(
+      textarea,
+      `${originalText} Dedicated commuter rail funding also stabilises multi-year maintenance budgets.`,
+    ));
+    expect(checkbox.disabled).toBe(false);
+    expect(checkbox.checked).toBe(true);
+    await act(async () => checkbox.click());
+    expect(checkbox.checked).toBe(false);
+    await act(async () => writingButton("重新分析改写").click());
+    expect(onRevisionEvaluated.mock.lastCall?.[0]).toMatchObject({
+      revisedDraft: expect.objectContaining({ assisted: false }),
+      receipt: expect.objectContaining({
+        epistemicStatus: "rubric_verified_evidence",
+        masteryQualified: true,
+        countsTowardMastery: true,
+      }),
+    });
+  });
+
+  it("initializes Writing composer checkbox cleanly when sticky assistance starts from mismatched receipt provenance", async () => {
+    const fixture = IELTS_WRITING_SPEAKING_FIXTURE;
+    const assistedDraft2 = { ...fixture.draft2, draftId: "mismatched-writing-draft", assisted: true };
+    const evaluated = evaluateRevisedDraftDeterministically({
+      baselineDraft: fixture.draft1,
+      revisedDraft: assistedDraft2,
+      targets: fixture.targets,
+      receiptId: "mismatched-writing-receipt",
+    });
+    if (!evaluated.ok) throw new Error("Expected a practice receipt for the assisted Writing draft");
+    await act(async () => root.render(createElement(IeltsDraftCritiqueWorkbench, {
+      fixture: {
+        ...fixture,
+        draft2: { ...assistedDraft2, assisted: false },
+        draft2Receipt: evaluated.receipt,
+        transferReport: evaluated.transferReport,
+      },
+    })));
+    await act(async () => writingButton("打开改写编辑区").click());
+    const textarea = host.querySelector<HTMLTextAreaElement>('[aria-label="二稿改写编辑区"]')!;
+    const checkbox = host.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    expect(checkbox.checked).toBe(true);
+    expect(checkbox.disabled).toBe(true);
+
+    // Unlocking to genuinely new prose keeps the checkbox checked until the learner explicitly unchecks it.
+    await act(async () => setNativeInputValue(
+      textarea,
+      `${textarea.value} Clear capital planning also prevents sudden fare spikes.`,
+    ));
+    expect(checkbox.disabled).toBe(false);
+    expect(checkbox.checked).toBe(true);
+  });
 });
 
 describe("IeltsSpeakingTransferCard", () => {
@@ -1088,6 +1189,97 @@ describe("IeltsSpeakingTransferCard", () => {
     expect(host.querySelector<HTMLTextAreaElement>("textarea")?.value)
       .toBe("Fresh host transcript after invalid duration.");
     expect(host.querySelector<HTMLInputElement>('input[type="number"]')?.value).toBe("68");
+  });
+
+  it("blocks punctuation-adjacent whitespace, punctuation, casing, and non-lexical bypasses on sticky-assisted Speaking transcripts", async () => {
+    const fixture = IELTS_WRITING_SPEAKING_FIXTURE;
+    const seed = fixture.speakingSeed;
+    const assistedReceipt = evaluateSpeakingRetelling({
+      seed,
+      transcript: fixture.initialSpeakingTranscript,
+      durationSeconds: fixture.initialSpeakingDurationSeconds,
+      assisted: true,
+    });
+    const onEvaluated = vi.fn<(receipt: typeof fixture.initialSpeakingReceipt) => void>();
+    await act(async () => root.render(createElement(IeltsSpeakingTransferCard, {
+      seed,
+      initialTranscript: fixture.initialSpeakingTranscript,
+      initialDurationSeconds: fixture.initialSpeakingDurationSeconds,
+      initialReceipt: assistedReceipt,
+      onEvaluated,
+    })));
+
+    const textarea = host.querySelector<HTMLTextAreaElement>('[aria-label="口语复述记录输入框"]')!;
+    const checkbox = host.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    const evaluateBtn = () => host.querySelector<HTMLButtonElement>("button")!;
+    const original = fixture.initialSpeakingTranscript;
+    expect(original).toContain("Personally,");
+
+    const cosmeticVariants = [
+      original.replace("Personally,", "Personally ,"),
+      original.replace("Personally,", "personally!"),
+      `${original.replace("Personally,", "Personally").replace("per-capita", "per - capita")} <!-- note --> 123`,
+    ];
+    for (const variant of cosmeticVariants) {
+      await act(async () => setNativeInputValue(textarea, variant));
+      expect(checkbox.checked).toBe(true);
+      expect(checkbox.disabled).toBe(true);
+      await act(async () => checkbox.click());
+      await act(async () => evaluateBtn().click());
+      expect(onEvaluated.mock.lastCall?.[0]).toMatchObject({
+        assisted: true,
+        epistemicStatus: "practice_feedback",
+        masteryQualified: false,
+        countsTowardMastery: false,
+      });
+    }
+
+    // Genuine lexical revision unlocks the checkbox cleanly and stays checked until explicitly unchecked.
+    await act(async () => setNativeInputValue(
+      textarea,
+      `${original} Steady investment in rail reliability also makes suburban commutes much more predictable.`,
+    ));
+    expect(checkbox.disabled).toBe(false);
+    expect(checkbox.checked).toBe(true);
+    await act(async () => checkbox.click());
+    expect(checkbox.checked).toBe(false);
+    await act(async () => evaluateBtn().click());
+    expect(onEvaluated.mock.lastCall?.[0]).toMatchObject({
+      assisted: false,
+      epistemicStatus: "rubric_verified_evidence",
+      masteryQualified: true,
+      countsTowardMastery: true,
+    });
+  });
+
+  it("initializes Speaking checkbox cleanly when sticky assistance starts active with mismatched duration props", async () => {
+    const fixture = IELTS_WRITING_SPEAKING_FIXTURE;
+    const seed = fixture.speakingSeed;
+    const assistedReceipt = evaluateSpeakingRetelling({
+      seed,
+      transcript: fixture.initialSpeakingTranscript,
+      durationSeconds: fixture.initialSpeakingDurationSeconds,
+      assisted: true,
+    });
+    await act(async () => root.render(createElement(IeltsSpeakingTransferCard, {
+      seed,
+      initialTranscript: fixture.initialSpeakingTranscript,
+      initialDurationSeconds: 72,
+      initialReceipt: assistedReceipt,
+    })));
+
+    const textarea = host.querySelector<HTMLTextAreaElement>('[aria-label="口语复述记录输入框"]')!;
+    const checkbox = host.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    expect(checkbox.checked).toBe(true);
+    expect(checkbox.disabled).toBe(true);
+
+    // Unlocking to genuinely new prose keeps the checkbox checked until the learner explicitly unchecks it.
+    await act(async () => setNativeInputValue(
+      textarea,
+      `${fixture.initialSpeakingTranscript} Better evening timetables also help outer-suburban commuters.`,
+    ));
+    expect(checkbox.disabled).toBe(false);
+    expect(checkbox.checked).toBe(true);
   });
 });
 
