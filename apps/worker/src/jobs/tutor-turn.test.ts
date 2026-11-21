@@ -1595,7 +1595,12 @@ describe("tutor turn handler", () => {
   });
 
   it("propagates UnconfirmedStreamSealError out of withStreamPublication, skips redundant seal, and fails the job with preserved claimToken", async () => {
-    const { deps, provider, tutorJobs, budget } = setup();
+    const claimedWithExecution = {
+      ...claimedJob,
+      claimToken: "00000000-0000-4000-8000-0000000000cc",
+      executionId: "00000000-0000-4000-8000-0000000000ee",
+    };
+    const { deps, provider, tutorJobs, budget } = setup({ claim: claimedWithExecution });
     const sealError = new UnconfirmedStreamSealError(new Error("Command timed out"), new Error("connect ECONNREFUSED"));
     const onStreamUnavailable = vi.fn();
     let seenByPublication: unknown;
@@ -1632,7 +1637,49 @@ describe("tutor turn handler", () => {
       claimedJob.id,
       expect.any(String),
       undefined,
-      claimedJob.claimToken,
+      claimedWithExecution.claimToken,
     );
+  });
+
+  it("bounds a hung fallback stream.seal on withStreamPublication failure so failure cleanup is never delayed", async () => {
+    vi.useFakeTimers();
+    try {
+      const claimedWithExecution = {
+        ...claimedJob,
+        claimToken: "00000000-0000-4000-8000-0000000000cd",
+        executionId: "00000000-0000-4000-8000-0000000000ef",
+      };
+      const { deps, provider, tutorJobs } = setup({ claim: claimedWithExecution });
+      const pgDrop = Object.assign(new Error("connection dropped"), { code: "CONNECTION_CLOSED" });
+      const onStreamUnavailable = vi.fn();
+      tutorJobs.withStreamPublication
+        .mockImplementationOnce(async (_scope, _job, _context, publish) => publish())
+        .mockRejectedValueOnce(pgDrop);
+      const stream = {
+        begin: vi.fn(async () => {}),
+        seal: vi.fn(() => new Promise<void>(() => undefined)),
+        append: vi.fn(async () => 1),
+      };
+      provider.complete.mockImplementationOnce(async (_input, _signal, delta) => {
+        await delta("First");
+        return { text: "First", citedChunkIds: [], candidates: [], requestId: null, inputTokens: 10, outputTokens: 10 };
+      });
+      const result = createTutorTurnHandler({ ...deps, stream, onStreamUnavailable })(claimedJob.id)
+        .then(() => undefined, error => error);
+      await vi.advanceTimersByTimeAsync(1_500);
+      expect(await result).toBe(pgDrop);
+      expect(stream.seal).toHaveBeenCalledWith(claimedJob.workspaceId, claimedJob.id, claimedWithExecution.executionId);
+      expect(onStreamUnavailable).toHaveBeenCalledOnce();
+      expect(tutorJobs.fail).toHaveBeenCalledWith(
+        { workspaceId: claimedJob.workspaceId, ownerUserId: claimedJob.ownerUserId },
+        claimedJob.id,
+        expect.any(String),
+        undefined,
+        claimedWithExecution.claimToken,
+      );
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

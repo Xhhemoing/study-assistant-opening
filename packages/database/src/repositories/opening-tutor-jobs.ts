@@ -122,9 +122,6 @@ async function assertStreamMaterialAdmission(
         }
       }
     }
-    if (!admissionOptions.skipPinRepoAssert && (pin.courseId !== null || pin.sources.length > 0)) {
-      await createOpeningCourseReadySourcesRepository(sql).assertMaterialPurposePin(scope, pin, tx);
-    }
   }
   const attemptRefSet = new Set((verifiedAttemptRefs ?? []).map(ref => `${ref.sourceId.toLowerCase()}:${ref.sourceVersion}`));
   const verifiedAttemptSourceIds = new Set((verifiedAttemptRefs ?? []).map(ref => ref.sourceId.toLowerCase()));
@@ -137,6 +134,26 @@ async function assertStreamMaterialAdmission(
       ? [anchor.sourceId.toLowerCase()]
       : []),
   ].filter(sourceId => !pinnedSourceIds.has(sourceId)))].sort();
+  if (derivedSourceIds.length) {
+    // Lock courses -> all opening_sources (pinned + derived) in deterministic ID order
+    // BEFORE any course_asset_memberships lock so addAssetMembership(FOR UPDATE on opening_sources)
+    // can never deadlock or race standalone classification.
+    if (courseId !== null) {
+      const course = await tx`SELECT id FROM courses WHERE id=${courseId} AND workspace_id=${scope.workspaceId}
+        AND archived_at IS NULL FOR SHARE`;
+      if (!course.length) throw Object.assign(new Error("course is no longer available"), { code: "CONFLICT" });
+    }
+    const allSourceIds = [...new Set([...pinnedSourceIds, ...derivedSourceIds])].sort();
+    const lockedSources = await tx`SELECT s.id,s.version FROM opening_sources s
+      WHERE s.workspace_id=${scope.workspaceId} AND s.id=ANY(${allSourceIds}::uuid[])
+      ORDER BY s.id FOR SHARE OF s`;
+    if (lockedSources.length !== allSourceIds.length) {
+      throw Object.assign(new Error("stream material unavailable or excluded"), { code: "CONFLICT" });
+    }
+  }
+  if (pin && !admissionOptions.skipPinRepoAssert && (pin.courseId !== null || pin.sources.length > 0)) {
+    await createOpeningCourseReadySourcesRepository(sql).assertMaterialPurposePin(scope, pin, tx);
+  }
   if (!derivedSourceIds.length) return;
   if (courseId === null) {
     const classified = await tx`SELECT id FROM course_asset_memberships WHERE workspace_id=${scope.workspaceId}
@@ -145,11 +162,6 @@ async function assertStreamMaterialAdmission(
       throw Object.assign(new Error("select a course to use classified materials"), { code: "CONFLICT" });
     }
     return;
-  }
-  if (!pin) {
-    const course = await tx`SELECT id FROM courses WHERE id=${courseId} AND workspace_id=${scope.workspaceId}
-      AND archived_at IS NULL FOR SHARE`;
-    if (!course.length) throw Object.assign(new Error("course is no longer available"), { code: "CONFLICT" });
   }
   const memberships = await tx`SELECT asset_id,purpose FROM course_asset_memberships
     WHERE workspace_id=${scope.workspaceId} AND course_id=${courseId}
@@ -398,13 +410,11 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
     });
     if (ended && pendingSeal) {
       // PostgreSQL has already committed terminal status and cleared timing_execution_id,
-      // fencing all stream reads and publications. Seal Redis best-effort within the
-      // bounded timeout so a Redis outage never blocks or fails job termination.
-      try {
-        await fenceCancelledOpeningTutorStream(
-          pendingSeal.workspaceId, pendingSeal.jobId, pendingSeal.executionId, options.tutorStreamRedisUrl,
-        );
-      } catch { /* PostgreSQL fence already invalidates stale snapshots. */ }
+      // fencing all stream reads and publications. Fire a bounded, unref'd Redis seal
+      // post-commit without blocking fail/markUnknown/recoverExpired during a Redis outage.
+      void fenceCancelledOpeningTutorStream(
+        pendingSeal.workspaceId, pendingSeal.jobId, pendingSeal.executionId, options.tutorStreamRedisUrl,
+      ).catch(() => undefined);
     }
     return ended;
   }
@@ -631,10 +641,9 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
       });
       if (cancelled && priorExecutionId) {
         // PostgreSQL already committed status='cancelled' and timing_execution_id=NULL.
-        // Seal Redis best-effort within the bounded timeout so Stop succeeds even during a Redis outage.
-        try {
-          await fenceCancelledOpeningTutorStream(cancelled.workspaceId, cancelled.id, priorExecutionId, options.tutorStreamRedisUrl);
-        } catch { /* PostgreSQL fence already blocks stale reads and publications. */ }
+        // Fire a bounded, unref'd Redis seal post-commit so Stop returns immediately even during a Redis outage.
+        void fenceCancelledOpeningTutorStream(cancelled.workspaceId, cancelled.id, priorExecutionId, options.tutorStreamRedisUrl)
+          .catch(() => undefined);
       }
       return cancelled;
     },
@@ -650,7 +659,6 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
       context: StreamPublicationContext & { attemptContext?: TutorAttemptContext }, publish: () => Promise<void>): Promise<void> {
       let transactionClosed = false;
       let publicationStarted = false;
-      let publishSettledCleanly = false;
       let publishPromise: Promise<void> | undefined;
       let unconfirmedSealError: unknown;
       let hasUnconfirmedSealError = false;
@@ -694,7 +702,6 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
             publishPromise = Promise.resolve().then(() => publish());
             void publishPromise.catch(() => undefined);
             await publishPromise;
-            publishSettledCleanly = true;
           } catch (error) {
             if (!transactionClosed && isUnconfirmedStreamSealError(error)) {
               // Fail closed in PostgreSQL before releasing locks so unsealed Redis
@@ -714,20 +721,21 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
         });
       } catch (error: unknown) {
         transactionClosed = true;
-        if (publicationStarted && !publishSettledCleanly) {
+        if (publicationStarted) {
           let cleanupTimer: ReturnType<typeof setTimeout> | undefined;
           try {
             if (publishPromise) {
               const deadline = new Promise<void>(resolve => {
                 cleanupTimer = setTimeout(resolve, PUBLICATION_CLEANUP_DEADLINE_MS);
+                cleanupTimer.unref?.();
               });
               await Promise.race([Promise.allSettled([publishPromise]), deadline]);
             }
           } finally {
             clearTimeout(cleanupTimer);
           }
-          // Always fence timing_execution_id in PostgreSQL when publication did not
-          // settle cleanly under the transaction locks (e.g. PG drop or deadlock).
+          // Always fence timing_execution_id in PostgreSQL whenever sql.begin fails
+          // after publication started — even if publish() already resolved before COMMIT failed.
           try { await clearExecutionFence(sql); } catch { /* Best effort; preserve original error. */ }
           if (context.executionId && !hasUnconfirmedSealError) {
             try {

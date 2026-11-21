@@ -34,8 +34,8 @@ function database(handler: (query: string, values: unknown[]) => Row[]) {
     if (query.startsWith("INSERT INTO opening_workspace_history_revisions")) return [];
     if (query.startsWith("SELECT revision FROM opening_workspace_history_revisions")) { locked = true; return [{ revision }]; }
     if (query.startsWith("UPDATE opening_workspace_history_revisions")) { expect(locked).toBe(true); return [{ revision: ++revision }]; }
-    if (query.startsWith("UPDATE workspaces SET privacy_epoch")) return [{ privacy_epoch: ++epoch }];
-    if (query.startsWith("SELECT 1 FROM opening_tutor_jobs")) return [];
+    if (query.startsWith("UPDATE workspaces SET privacy_epoch")) return [{ id: workspaceId, privacy_epoch: ++epoch }];
+    if (query.startsWith("SELECT 1 FROM opening_tutor_jobs") || query.startsWith("UPDATE opening_tutor_jobs j SET timing_execution_id = NULL")) return [];
     if (query.startsWith("DELETE FROM opening_learning_eligibility")) { invalidations.push(values); return []; }
     return handler(query, values);
   };

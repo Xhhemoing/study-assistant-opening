@@ -51,7 +51,7 @@ import {
   type ResolvedTaskModel,
   type ParentInteractionBudget,
 } from "@aistudy/ai";
-import { isTutorStreamUnavailable, isUnconfirmedStreamSealError, withTutorDeltaBatches, type TutorStreamWriter } from "../runtime/tutor-stream";
+import { DEFAULT_SEAL_DEADLINE_MS, isTutorStreamUnavailable, isUnconfirmedStreamSealError, withTutorDeltaBatches, type TutorStreamWriter } from "../runtime/tutor-stream";
 import { chunksAtSnapshots } from "./tutor-chunks";
 import { prepareTutorNextAction, type TutorNextActionService } from "./tutor-next-action";
 import { withJobHeartbeat } from "../runtime/lifecycle";
@@ -445,8 +445,17 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
           });
         } catch (error) {
           if (claimed.executionId && deps.stream?.seal && !isUnconfirmedStreamSealError(error)) {
-            try { await deps.stream.seal(scope.workspaceId, claimed.id, claimed.executionId); }
-            catch (sealError) { deps.onStreamUnavailable?.(sealError); }
+            let sealTimer: ReturnType<typeof setTimeout> | undefined;
+            try {
+              const sealAttempt = Promise.resolve().then(() => deps.stream!.seal!(scope.workspaceId, claimed.id, claimed.executionId!));
+              void sealAttempt.catch(() => undefined);
+              const deadline = new Promise<never>((_resolve, reject) => {
+                sealTimer = setTimeout(() => reject(new Error(`fallback stream seal timed out after ${DEFAULT_SEAL_DEADLINE_MS}ms`)), DEFAULT_SEAL_DEADLINE_MS);
+                sealTimer.unref?.();
+              });
+              await Promise.race([sealAttempt, deadline]);
+            } catch (sealError) { deps.onStreamUnavailable?.(sealError); }
+            finally { clearTimeout(sealTimer); }
           }
           throw error;
         }

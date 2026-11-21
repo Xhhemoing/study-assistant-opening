@@ -311,6 +311,12 @@ describe("stream receipt release waits for current job authorization and assista
       vi.useRealTimers();
     }
 
+    // Even if publish() succeeded cleanly before sql.begin COMMIT failed, still clear timing_execution_id on outer sql.
+    const commitFailAfterPublish = fixture({ failCommitAtTx: 1 });
+    await expect(commitFailAfterPublish.repo.withStreamPublication(scope, jobId, context, async () => {}))
+      .rejects.toBe(commitFailAfterPublish.failure);
+    expect(commitFailAfterPublish.txEvents).toContain("outer-clear-execution-fence");
+
     const fenced = fixture({ execution: null });
     await expect(fenced.repo.readStream(scope, jobId, context)).rejects.toThrow("stream execution changed");
     await expect(fenced.repo.readStream(scope, jobId, { ...context, executionId: undefined })).rejects.toThrow("stream execution changed");
@@ -338,6 +344,10 @@ describe("stream receipt release waits for current job authorization and assista
     const classifiedStandalone = fixture({ courseId: null, sourceIds: [], classifiedStandalone: true });
     await expect(classifiedStandalone.repo.readStream(scope, jobId, { ...context, contextSourceRefs: derivedRefs }))
       .rejects.toMatchObject({ code: "CONFLICT" });
+    const sourceLockIndex = classifiedStandalone.calls.findIndex(c => c.sql.startsWith("SELECT s.id,s.version FROM opening_sources") && c.sql.includes("FOR SHARE"));
+    const membershipCheckIndex = classifiedStandalone.calls.findIndex(c => c.sql.startsWith("SELECT id FROM course_asset_memberships"));
+    expect(sourceLockIndex).toBeGreaterThanOrEqual(0);
+    expect(membershipCheckIndex).toBeGreaterThan(sourceLockIndex);
     const allowed = fixture({ courseId, sourceIds: [], derivedMembershipPurpose: "teaching" });
     expect(await allowed.repo.readStream(scope, jobId, { ...context, contextSourceRefs: derivedRefs }))
       .toMatchObject({ status: "running" });

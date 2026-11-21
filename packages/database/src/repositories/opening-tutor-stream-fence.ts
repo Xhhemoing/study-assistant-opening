@@ -205,6 +205,8 @@ async function evalRevocationRedis(redisUrl: string, script: string, keyCount: n
       else resolve();
     };
     const timeout = setTimeout(() => finish(new Error("Redis fence timed out")), FENCE_TIMEOUT_MS);
+    timeout.unref?.();
+    socket.unref?.();
     const send = () => socket.write(redisCommand(commands[command]!));
     socket.once(useTls ? "secureConnect" : "connect", send);
     socket.on("error", finish);
@@ -263,20 +265,47 @@ export async function advanceOpeningWorkspacePrivacyEpoch(tx: TransactionSql, sc
   const [workspace] = await tx`UPDATE workspaces SET privacy_epoch=privacy_epoch+1, updated_at=now()
     WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} RETURNING id,privacy_epoch`;
   if (!workspace) throw new Error("Workspace disappeared while revoking tutor stream eligibility");
+  const workspaceId = String(workspace.id ?? scope.workspaceId);
   const epoch = Number(workspace.privacy_epoch);
 
-  if (!redisUrl) {
-    // A claimed execution can have unresolved bytes even after a terminal job write.
-    const [execution] = await tx`SELECT 1 FROM opening_tutor_jobs
-      WHERE workspace_id=${workspace.id} AND timing_execution_id IS NOT NULL LIMIT 1`;
-    if (execution) throw new Error("Redis is required to revoke tutor stream publication");
-    return epoch;
-  }
-  // The fence outlives existing snapshots. Expiry also bounds the cache
-  // disruption if Redis confirms and the subsequent PostgreSQL commit fails.
-  await evalRevocationRedis(redisUrl, `
+  // Fence active tutor stream executions directly in PostgreSQL so privacy deletions
+  // and exclusions never roll back or block during a Redis outage.
+  const priorExecutions = await tx`
+    UPDATE opening_tutor_jobs j
+    SET timing_execution_id = NULL
+    FROM (
+      SELECT id AS prior_id, timing_execution_id AS prior_execution_id
+      FROM opening_tutor_jobs
+      WHERE workspace_id = ${workspaceId}
+        AND status = 'running'
+        AND timing_execution_id IS NOT NULL
+      ORDER BY id
+      FOR UPDATE
+    ) prior
+    WHERE j.id = prior.prior_id AND j.workspace_id = ${workspaceId}
+    RETURNING j.id, prior.prior_execution_id AS timing_execution_id
+  `;
+  if (!priorExecutions.length || !redisUrl) return epoch;
+
+  const streamKeys = priorExecutions.map(row => tutorStreamKey(workspaceId, String(row.id)));
+  const executionIds = priorExecutions.map(row => String(row.timing_execution_id));
+  // Fire bounded, unref'd best-effort Redis epoch + stream seals without blocking or
+  // failing PostgreSQL privacy commits; PostgreSQL privacy_epoch + timing_execution_id=NULL
+  // already fences all subsequent readStream and withStreamPublication calls.
+  void evalRevocationRedis(redisUrl, `
     local minimum = tonumber(redis.call('GET', KEYS[1]) or '0')
     redis.call('SET', KEYS[1], math.max(minimum, tonumber(ARGV[1])), 'EX', ARGV[2])
-  `, 1, tutorStreamEpochKey(String(workspace.id)), epoch, TUTOR_STREAM_TTL_SECONDS);
+    for i = 2, #KEYS do
+      local execution = redis.call('HGET', KEYS[i], 'executionId')
+      local expected = ARGV[i + 1]
+      if execution == expected then
+        redis.call('HSET', KEYS[i], 'sealed', '1')
+      elseif not execution then
+        redis.call('HSET', KEYS[i], 'executionId', expected, 'sealed', '1')
+        redis.call('EXPIRE', KEYS[i], ARGV[2])
+      end
+    end
+  `, 1 + streamKeys.length, tutorStreamEpochKey(workspaceId), ...streamKeys, epoch, TUTOR_STREAM_TTL_SECONDS, ...executionIds)
+    .catch(() => undefined);
   return epoch;
 }

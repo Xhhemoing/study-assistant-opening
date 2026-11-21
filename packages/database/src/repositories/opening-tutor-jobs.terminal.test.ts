@@ -107,3 +107,30 @@ it.each(["fail", "markUnknown", "cancel"] as const)(
     expect(fence.call).toHaveBeenCalledWith(canonicalWorkspaceId, canonicalJobId, "execution", "redis://localhost:6379");
   },
 );
+
+it("returns from cancel immediately without blocking on a hung post-commit Redis seal", async () => {
+  fence.call.mockReset();
+  fence.call.mockImplementationOnce(() => new Promise<void>(() => undefined));
+  const sql = ((strings: TemplateStringsArray) => {
+    const query = strings.join("?");
+    if (query.includes("SELECT owner_user_id FROM workspaces")) return Promise.resolve([{ owner_user_id: "owner" }]);
+    if (query.includes("SELECT id, owner_user_id FROM workspaces")) return Promise.resolve([{ id: canonicalWorkspaceId, owner_user_id: "owner" }]);
+    if (query.includes("UPDATE opening_tutor_jobs j")) {
+      return Promise.resolve([{
+        id: canonicalJobId, workspace_id: canonicalWorkspaceId, conversation_id: "conv",
+        user_turn_id: "user", assistant_turn_id: "assistant", status: "cancelled", mode: "hint",
+        error: { message: "cancelled by user" }, created_at: "2026-11-20T00:00:00.000Z",
+        updated_at: "2026-11-20T00:00:01.000Z", timing_execution_id: null, prior_execution_id: "execution",
+      }]);
+    }
+    if (query.includes("UPDATE opening_turns")) return Promise.resolve([]);
+    throw new Error(`unexpected query ${query}`);
+  }) as unknown as Sql;
+  sql.begin = ((callback: (tx: Sql) => unknown) => callback(sql)) as Sql["begin"];
+  sql.json = ((value: unknown) => value) as Sql["json"];
+
+  const jobs = createOpeningTutorJobsRepository(sql, { tutorStreamRedisUrl: "redis://localhost:6379" });
+  await expect(jobs.cancel({ workspaceId: mixedWorkspaceId, ownerUserId: "owner" }, mixedJobId))
+    .resolves.toMatchObject({ id: canonicalJobId, status: "cancelled" });
+  expect(fence.call).toHaveBeenCalledWith(canonicalWorkspaceId, canonicalJobId, "execution", "redis://localhost:6379");
+});

@@ -1,9 +1,11 @@
 import { once } from "node:events";
 import { createServer, type AddressInfo, type Socket } from "node:net";
 import Redis from "ioredis";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
+import type { TransactionSql } from "postgres";
 import {
-  fenceCancelledOpeningTutorStream, openingRedisConnectionOptions, tutorStreamAttemptHeadKey, tutorStreamKey,
+  advanceOpeningWorkspacePrivacyEpoch, fenceCancelledOpeningTutorStream, openingRedisConnectionOptions,
+  tutorStreamAttemptHeadKey, tutorStreamKey,
 } from "./opening-tutor-stream-fence";
 
 async function withRedisServer(run: (url: string) => Promise<void>, onConnection: (socket: Socket) => void) {
@@ -153,5 +155,35 @@ it("refuses an unconfirmed seal and closes the socket on a Redis error", async (
   }, socket => {
     socket.once("close", onClose);
     socket.once("data", () => socket.write("-ERR fence failed\r\n"));
+  });
+});
+
+it("advanceOpeningWorkspacePrivacyEpoch skips Redis in idle workspaces and never blocks or rolls back during a Redis outage", async () => {
+  const scope = { workspaceId: "00000000-0000-4000-8000-000000000001", ownerUserId: "00000000-0000-4000-8000-000000000002" };
+  let connections = 0;
+  await withRedisServer(async address => {
+    const makeTx = (priorExecutions: Array<{ id: string; timing_execution_id: string }>) =>
+      (async (parts: TemplateStringsArray) => {
+        const query = parts.join("?").replace(/\s+/g, " ").trim();
+        if (query.startsWith("UPDATE workspaces SET privacy_epoch")) return [{ id: scope.workspaceId, privacy_epoch: 5 }];
+        if (query.startsWith("UPDATE opening_tutor_jobs j SET timing_execution_id = NULL")) return priorExecutions;
+        throw new Error(`unexpected query: ${query}`);
+      }) as unknown as TransactionSql;
+
+    // Idle workspace: zero running executions => zero Redis connections even when REDIS_URL is set.
+    expect(await advanceOpeningWorkspacePrivacyEpoch(makeTx([]), scope, `redis://${address}`)).toBe(5);
+    expect(connections).toBe(0);
+
+    // Active workspace with blackholed Redis: returns immediately without throwing or blocking PG commit.
+    const startedAt = performance.now();
+    expect(await advanceOpeningWorkspacePrivacyEpoch(
+      makeTx([{ id: "00000000-0000-4000-8000-000000000003", timing_execution_id: "00000000-0000-4000-8000-000000000004" }]),
+      scope, `redis://${address}`,
+    )).toBe(5);
+    expect(performance.now() - startedAt).toBeLessThan(500);
+    await vi.waitFor(() => expect(connections).toBe(1));
+  }, () => {
+    // Blackhole: accept TCP and never reply.
+    connections += 1;
   });
 });

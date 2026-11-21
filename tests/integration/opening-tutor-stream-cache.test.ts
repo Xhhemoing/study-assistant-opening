@@ -152,7 +152,11 @@ it("revokes the same Redis privacy epoch for upper- and lowercase workspace UUID
     const before = await reader.read(scope.workspaceId, jobId);
     expect(before).toMatchObject({ text: "before revocation", sequence: 1, executionId: job.executionId });
     await expect(sql.begin(tx => advanceOpeningWorkspacePrivacyEpoch(tx, mixedCase))).resolves.toBe(1);
-    expect(await redis.get(tutorStreamEpochKey(scope.workspaceId))).toBe("1");
+    expect(await sql`SELECT timing_execution_id FROM opening_tutor_jobs WHERE id=${jobId}`)
+      .toMatchObject([{ timing_execution_id: null }]);
+    await vi.waitFor(async () => {
+      expect(await redis.get(tutorStreamEpochKey(scope.workspaceId))).toBe("1");
+    });
     const mixedCaseJobId = jobId.toUpperCase();
     await writer.begin(mixedCase.workspaceId, mixedCaseJobId, { privacyEpoch: 0, contextSourceRefs: [],
       exposureReceiptId: null, executionId: job.executionId });
@@ -165,8 +169,8 @@ it("revokes the same Redis privacy epoch for upper- and lowercase workspace UUID
   }
 });
 
-it("seals a recovered execution before committing outcome_unknown", async () => {
-  const { fixture, scope, sql, jobId, writer, reader, jobs } = await streamFixture();
+it("seals a recovered execution after committing outcome_unknown", async () => {
+  const { fixture, scope, sql, jobId, key, writer, reader, jobs } = await streamFixture();
   try {
     const job = (await jobs.claim(jobId))!;
     const context = { privacyEpoch: 0, contextSourceRefs: [], exposureReceiptId: null,
@@ -176,6 +180,9 @@ it("seals a recovered execution before committing outcome_unknown", async () => 
     await sql`UPDATE opening_tutor_jobs SET updated_at=now()-interval '10 minutes' WHERE id=${jobId}`;
 
     expect(await jobs.recoverExpired()).toBe(1);
+    await vi.waitFor(async () => {
+      expect(await redis.hget(key, "sealed")).toBe("1");
+    });
     expect(await writer.append(scope.workspaceId, jobId, "late bytes", job.executionId, 0)).toBe(0);
     expect(await reader.read(scope.workspaceId, jobId)).toMatchObject({ text: "before recovery", sequence: 1 });
   } finally {
@@ -316,6 +323,9 @@ it.each(["web", "repository"] as const)("keeps Redis unchanged when %s cancellat
     expect(before).toMatchObject({ sequence: 1, text: "First" });
     const cancelled = path === "web" ? (await getTutorJobService(sql).cancel(scope, jobId))?.job : await jobs.cancel(scope, jobId);
     expect(cancelled?.status).toBe("cancelled");
+    await vi.waitFor(async () => {
+      expect(await redis.hget(key, "sealed")).toBe("1");
+    });
     expect(await writer.append(scope.workspaceId, jobId, "sealed", before?.executionId, 0)).toBe(0);
     resume.resolve();
     expect(await settled).toMatchObject({ code: "CONFLICT" });
@@ -410,33 +420,53 @@ it.each([
   }
 }, 15_000);
 
-it.each(["missing configuration", "unreachable Redis"] as const)("rolls back privacy changes while still committing Stop cancellation in PostgreSQL with %s", async failure => {
-  const { fixture, scope, sql, jobs, jobId } = await streamFixture();
-  const server = createServer(socket => socket.destroy());
-  server.listen(0, "127.0.0.1");
-  await once(server, "listening");
-  try {
-    const claimed = (await jobs.claim(jobId))!;
-    const port = (server.address() as AddressInfo).port;
-    vi.stubEnv("REDIS_URL", failure === "missing configuration" ? undefined : `redis://127.0.0.1:${port}`);
-    await expect(sql.begin(tx => advanceOpeningWorkspacePrivacyEpoch(tx, scope))).rejects.toThrow();
-    expect(await sql`SELECT privacy_epoch FROM workspaces WHERE id=${scope.workspaceId}`).toMatchObject([{ privacy_epoch: 0 }]);
+it.each(["missing configuration", "unreachable Redis", "blackholed Redis"] as const)(
+  "commits privacy epoch fencing and Stop cancellation in PostgreSQL without blocking on %s",
+  async failure => {
+    const { fixture, scope, sql, jobs, jobId } = await streamFixture();
+    const sockets = new Set<import("node:net").Socket>();
+    const server = createServer(socket => {
+      sockets.add(socket);
+      socket.on("close", () => sockets.delete(socket));
+      if (failure === "unreachable Redis") socket.destroy();
+    });
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    try {
+      const claimed = (await jobs.claim(jobId))!;
+      const port = (server.address() as AddressInfo).port;
+      vi.stubEnv("REDIS_URL", failure === "missing configuration" ? undefined : `redis://127.0.0.1:${port}`);
 
-    // Stop (cancel) must commit status='cancelled' and timing_execution_id=NULL in PostgreSQL
-    // even when Redis is unavailable so jobs never stay stuck running during an outage.
-    expect(await jobs.cancel(scope, jobId)).toMatchObject({ status: "cancelled" });
-    expect(await sql`SELECT status, timing_execution_id FROM opening_tutor_jobs WHERE id=${jobId}`)
-      .toMatchObject([{ status: "cancelled", timing_execution_id: null }]);
-    expect(await jobs.readStream(scope, jobId, {
-      privacyEpoch: 0, contextSourceRefs: [], exposureReceiptId: null,
-      claimToken: claimed.claimToken, executionId: claimed.executionId,
-    })).toMatchObject({ status: "cancelled" });
-  } finally {
-    vi.stubEnv("REDIS_URL", redisUrl);
-    await new Promise<void>(resolve => { server.close(() => resolve()); });
-    await fixture.close();
-  }
-});
+      const privacyStartedAt = performance.now();
+      await expect(sql.begin(tx => advanceOpeningWorkspacePrivacyEpoch(tx, scope))).resolves.toBe(1);
+      expect(performance.now() - privacyStartedAt).toBeLessThan(1_000);
+      expect(await sql`SELECT privacy_epoch FROM workspaces WHERE id=${scope.workspaceId}`).toMatchObject([{ privacy_epoch: 1 }]);
+      expect(await sql`SELECT status, timing_execution_id FROM opening_tutor_jobs WHERE id=${jobId}`)
+        .toMatchObject([{ status: "running", timing_execution_id: null }]);
+      await expect(jobs.readStream(scope, jobId, {
+        privacyEpoch: 0, contextSourceRefs: [], exposureReceiptId: null,
+        claimToken: claimed.claimToken, executionId: claimed.executionId,
+      })).rejects.toThrow("stream authorization changed");
+
+      // Stop (cancel) must also commit status='cancelled' and timing_execution_id=NULL immediately
+      // in PostgreSQL without waiting on an unreachable or blackholed Redis server.
+      const cancelStartedAt = performance.now();
+      expect(await jobs.cancel(scope, jobId)).toMatchObject({ status: "cancelled" });
+      expect(performance.now() - cancelStartedAt).toBeLessThan(1_000);
+      expect(await sql`SELECT status, timing_execution_id FROM opening_tutor_jobs WHERE id=${jobId}`)
+        .toMatchObject([{ status: "cancelled", timing_execution_id: null }]);
+      expect(await jobs.readStream(scope, jobId, {
+        privacyEpoch: 0, contextSourceRefs: [], exposureReceiptId: null,
+        claimToken: claimed.claimToken, executionId: claimed.executionId,
+      })).toMatchObject({ status: "cancelled" });
+    } finally {
+      vi.stubEnv("REDIS_URL", redisUrl);
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>(resolve => { server.close(() => resolve()); });
+      await fixture.close();
+    }
+  },
+);
 
 it("holds cancellation behind an append already admitted by PostgreSQL", async () => {
   const { fixture, scope, reader, writer, jobs, jobId } = await streamFixture();
@@ -798,10 +828,12 @@ it("bounds seal confirmation during a Redis outage, fences timing_execution_id i
       });
       expect(await sse.text()).toBe("");
 
-      // Stop (cancel) succeeds in PostgreSQL even while Redis remains blackholed.
+      // Stop (cancel) succeeds immediately in PostgreSQL even while Redis remains blackholed.
+      const cancelStartedAt = performance.now();
       const cancelled = await createOpeningTutorJobsRepository(revocationSession.sql, { tutorStreamRedisUrl: blackholeUrl })
         .cancel(scope, jobId);
       expect(cancelled).toMatchObject({ status: "cancelled" });
+      expect(performance.now() - cancelStartedAt).toBeLessThan(1_000);
     } finally {
       stalledAppend.release();
       await Promise.allSettled([publishing]);
@@ -857,3 +889,122 @@ it("revokes a course stream using derived historySourceRefs when the history sou
     await fixture.close();
   }
 });
+
+it.each(["pinned", "derived"] as const)(
+  "serializes standalone %s SSE delivery against concurrent first mock_exam course classification",
+  async mode => {
+    const fixture = await createOpeningFixture();
+    const { scope, sql } = fixture;
+    const courses = createCourseMembershipRepository(sql);
+    const conversations = createOpeningConversationRepository(sql);
+    const jobs = createOpeningTutorJobsRepository(sql);
+    const writer = createTutorStreamWriter(redis), reader = createTutorStreamReader(redis);
+    const deliverySession = openRaceSession(), revocationSession = openRaceSession();
+    const course = await courses.createCourse({ workspaceId: scope.workspaceId, title: "Standalone Classification", slug: randomUUID() });
+    const sourceId = randomUUID();
+    await sql`INSERT INTO opening_sources (id,workspace_id,name,mime,bytes,sha256,version,upload_state,parse_state)
+      VALUES (${sourceId},${scope.workspaceId},'standalone-exam.txt','text/plain',16,${"d".repeat(64)},0,'uploaded','ready')`;
+    await sql`INSERT INTO opening_source_versions (source_id,version,workspace_id,availability)
+      VALUES (${sourceId},0,${scope.workspaceId},'available')`;
+    const conversation = await conversations.create(scope, { title: "Standalone SSE barrier", courseId: null });
+    const classifyInput = {
+      workspaceId: scope.workspaceId, courseId: course.id, assetType: "source" as const, assetId: sourceId,
+      role: "core" as const, sortOrder: 0, visibility: "course" as const, purpose: "mock_exam" as const,
+    };
+
+    const prepareTurn = async (text: string) => {
+      const turn = await conversations.appendSavedTurn({
+        scope, conversationId: conversation.id, text: "Explain standalone", mode: "explain", clientKey: randomUUID(),
+        sourceIds: mode === "pinned" ? [sourceId] : [], learningSessionId: null, currentPage: null, chunkId: null,
+      });
+      keys.push(tutorStreamKey(scope.workspaceId, turn.jobId), tutorStreamEpochKey(scope.workspaceId));
+      const claimed = (await jobs.claim(turn.jobId))!;
+      const materialPurposePin = mode === "pinned"
+        ? await createOpeningCourseReadySourcesRepository(sql).readMaterialPurposePin(scope, {
+          courseId: null, materialUse: "citation", sourceIds: [sourceId],
+        })
+        : undefined;
+      const context = {
+        privacyEpoch: 0, contextSourceRefs: [{ sourceId, sourceVersion: 0 }], exposureReceiptId: null,
+        claimToken: claimed.claimToken, executionId: claimed.executionId,
+        ...(materialPurposePin ? { materialPurposePin } : {}),
+      };
+      await jobs.withStreamPublication(scope, turn.jobId, context, async () => {
+        await writer.begin(scope.workspaceId, turn.jobId, context);
+        expect(await writer.append(scope.workspaceId, turn.jobId, text, claimed.executionId, 0)).toBe(1);
+      });
+      return { turn, claimed, context, cached: (await reader.read(scope.workspaceId, turn.jobId))! };
+    };
+
+    const enqueued = deferred(), releaseCommit = deferred();
+    try {
+      await Promise.all([deliverySession.ready, revocationSession.ready]);
+      // Order 1: standalone readStream Phase 2 holds FOR SHARE on opening_sources across controller.enqueue;
+      // concurrent addAssetMembership(purpose='mock_exam') blocks on opening_sources FOR UPDATE until commit.
+      const first = await prepareTurn("Delivered before mock_exam classification");
+      const proxiedDeliverySql = new Proxy(deliverySession.sql, {
+        get(target, prop, receiver) {
+          if (prop === "begin") {
+            return (fn: (tx: unknown) => Promise<unknown>) => target.begin(async tx => {
+              const result = await fn(tx);
+              enqueued.resolve();
+              await releaseCommit.promise;
+              return result;
+            });
+          }
+          return Reflect.get(target, prop, receiver);
+        },
+      });
+      const deliveryJobs = createOpeningTutorJobsRepository(proxiedDeliverySql);
+      const response = await createJobStreamResponse({
+        job: first.claimed, signal: new AbortController().signal,
+        reader: { read: async () => first.cached, subscribe: async () => async () => {} },
+        getJob: () => jobs.get(scope, first.turn.jobId),
+        authorizeSnapshot: (snapshot, commitAuthorized, canDeliver) =>
+          deliveryJobs.readStream(scope, first.turn.jobId, snapshot, commitAuthorized, canDeliver),
+        close: () => {},
+      });
+      const streamReader = response.body!.getReader();
+      await enqueued.promise;
+      const chunk = await streamReader.read();
+      expect(new TextDecoder().decode(chunk.value)).toContain("Delivered before mock_exam classification");
+
+      const classifying = track(createCourseMembershipRepository(revocationSession.sql).addAssetMembership(classifyInput));
+      try {
+        await waitUntilBlocked(sql, revocationSession.pid, deliverySession.pid, "standalone mock_exam classification");
+      } finally {
+        releaseCommit.resolve();
+      }
+      await classifying;
+      await streamReader.cancel();
+
+      // Order 2: mock_exam classification already committed; standalone SSE, publication, and completion reject.
+      const commitSpy = vi.fn();
+      const afterClassification = await createJobStreamResponse({
+        job: first.claimed, signal: new AbortController().signal,
+        reader: { read: async () => first.cached, subscribe: async () => async () => {} },
+        getJob: () => jobs.get(scope, first.turn.jobId),
+        authorizeSnapshot: (snapshot, commitAuthorized, canDeliver) => jobs.readStream(scope, first.turn.jobId, snapshot, authorized => {
+          commitSpy(authorized);
+          commitAuthorized?.(authorized);
+        }, canDeliver),
+        close: () => {},
+      });
+      expect(await afterClassification.text()).toBe("");
+      expect(commitSpy).not.toHaveBeenCalled();
+      await expect(jobs.readStream(scope, first.turn.jobId, first.cached)).rejects.toMatchObject({ code: "CONFLICT" });
+      await expect(jobs.withStreamPublication(scope, first.turn.jobId, first.context, async () => {})).rejects.toMatchObject({ code: "CONFLICT" });
+      await expect(jobs.completeTurn({
+        scope, jobId: first.turn.jobId, assistantTurnId: first.turn.assistantTurnId,
+        text: "Should not persist after mock_exam classification",
+        citations: [], candidates: [], contextSourceRefs: [{ sourceId, sourceVersion: 0 }],
+        expectedPrivacyEpoch: 0, claimToken: first.claimed.claimToken,
+      }, first.context.materialPurposePin ? { materialPurposePin: first.context.materialPurposePin } : undefined))
+        .rejects.toMatchObject({ code: "CONFLICT" });
+    } finally {
+      releaseCommit.resolve();
+      await Promise.all([closeRace(deliverySession.sql), closeRace(revocationSession.sql), fixture.close()]);
+    }
+  },
+  15_000,
+);
