@@ -1154,15 +1154,26 @@ function normalizeMathSymbols(text: string): string {
 }
 
 function normalizeOptionSyntax(syntax: string): string {
-  return normalizeMathSymbols(stripLatexNonOperandCommands(syntax, true))
+  const mathSyntax = normalizeMathSymbols(stripLatexNonOperandCommands(syntax, true))
     .replace(/(?<!\\)\\\(([\s\S]*?)(?<!\\)\\\)|(?<!\\)\\\[([\s\S]*?)(?<!\\)\\\]/g, "$1$2")
     // A currency amount must not pair with the opening dollar in a wrapped option.
-    .replace(/(?<![\\$])(\${1,2})(?!\$|\s*\p{N}[^$]*[\p{Ps}\p{Pi}<"']\s*\$)([^$]+)\1(?![$\p{L}\p{N}])/gu, "$2")
-    .replace(/(?<![\\\p{L}\p{N}*])(\*{1,3})(?!\*)([^*\r\n]+)\1(?![\p{L}\p{N}*])/gu, "$2")
-    .replace(/(?<![\\\p{L}\p{N}_])(_{1,2})(?!_)([^_\r\n]+)\1(?![\p{L}\p{N}_])/gu, "$2")
-    // Backticks also serve as choice wrappers themselves, so only remove a
-    // code span here when another choice wrapper encloses it.
-    .replace(OPTION_WRAPPED_CODE_RE, "$1$2");
+    .replace(/(?<![\\$])(\${1,2})(?!\$|\s*\p{N}[^$]*[\p{Ps}\p{Pi}<"']\s*\$)([^$]+)\1(?![$\p{L}\p{N}])/gu, "$2");
+  return stripOptionMarkdown(mathSyntax);
+}
+
+function stripOptionMarkdown(text: string): string {
+  let previous: string;
+  do {
+    previous = text;
+    text = text
+      .replace(/(?<![\\\p{L}\p{M}\p{N}*])(\*+)(?!\*)([^*\r\n]+)\1(?![\p{L}\p{M}\p{N}*])/gu, "$2")
+      .replace(/(?<![\\\p{L}\p{M}\p{N}_])(_+)(?!_)([^_\r\n]+)\1(?![\p{L}\p{M}\p{N}_])/gu, "$2")
+      .replace(/(?<![\\\p{L}\p{M}\p{N}~])(~+)(?!~)([^~\r\n]+)\1(?![\p{L}\p{M}\p{N}~])/gu, "$2")
+      .replace(OPTION_WRAPPED_CODE_RE, "$1$3")
+      // An unenclosed code span still acts as a choice wrapper.
+      .replace(/(?<![\\\x60])(\x60{2,})(?!\x60)([^\x60]+)\1(?!\x60)/g, "\x60$2\x60");
+  } while (text !== previous);
+  return text;
 }
 
 function normalizeMathOperators(text: string): string {
@@ -1266,7 +1277,9 @@ const WRAPPED_OPTION_LETTER_RE = new RegExp(
 const OPTION_WORD_CONNECTOR = /\b(?:and|or|then)\b/.source;
 const OPTION_END_PUNCTUATION = /[\s.!?。！？;；:：,，、…—–-]*/u.source;
 const OPTION_WRAPPED_CODE_RE = new RegExp(
-  "(" + OPTION_WRAPPER_OPEN + "\\s*)\\x60([^\\x60]+)\\x60(?=" + OPTION_END_PUNCTUATION + OPTION_WRAPPER_CLOSE + ")",
+  "(" + OPTION_WRAPPER_OPEN + "\\s*)(?<!\\x60)(\\x60+)(?!\\x60)" +
+  "((?:(?!(?<!\\x60)\\2(?!\\x60))[\\s\\S])+)(?<!\\x60)\\2(?!\\x60)" +
+  "(?=" + OPTION_END_PUNCTUATION + OPTION_WRAPPER_CLOSE + ")",
   "gu",
 );
 const OPTION_CLOSING = `${OPTION_END_PUNCTUATION}${OPTION_WRAPPER_CLOSE}`;
@@ -1651,11 +1664,13 @@ const MAX_PROTECTED_PAYLOAD_NODES = 4_096;
 
 interface ProtectedAnswerTexts {
   readonly texts: Set<string>;
+  readonly arrayOptionLabels: Set<string>;
   readonly mathOptionGroups: { members: ReadonlySet<string>; labels: string[] }[];
 }
 
 function collectSecretTexts(value: unknown): ProtectedAnswerTexts | null {
   const texts = new Set<string>();
+  const arrayOptionLabels = new Set<string>();
   const mathOptionGroups: ProtectedAnswerTexts["mathOptionGroups"] = [];
   const ancestors = new Set<object>();
   let remainingNodes = MAX_PROTECTED_PAYLOAD_NODES;
@@ -1667,13 +1682,15 @@ function collectSecretTexts(value: unknown): ProtectedAnswerTexts | null {
       const raw = value.trim();
       const label = normalizeOptionLabel(raw);
       if (raw) members.add(raw);
-      if (label) members.add(label);
       return label;
     });
     if (labels.length >= 2 && labels.every(label => GREEK_OR_CONST_LABEL_RE.test(label))) {
       mathOptionGroups.push({ members, labels });
     } else {
       for (const text of members) texts.add(text);
+      for (const label of labels) {
+        if (label) arrayOptionLabels.add(label);
+      }
     }
   }
 
@@ -1754,7 +1771,7 @@ function collectSecretTexts(value: unknown): ProtectedAnswerTexts | null {
       const decoded = parseSerializedAnswerArray(value);
       if (decoded) collectArrayMembers(decoded);
     }
-    return { texts, mathOptionGroups };
+    return { texts, arrayOptionLabels, mathOptionGroups };
   } catch {
     return null;
   }
@@ -1764,9 +1781,12 @@ function containsProtectedAnswerLeak(text: string, protectedAnswers: ProtectedAn
   for (const secret of protectedAnswers.texts) {
     if (containsAnswerLeak(text, secret)) return true;
   }
-  if (!protectedAnswers.mathOptionGroups.length) return false;
+  if (protectedAnswers.arrayOptionLabels.size === 0 && !protectedAnswers.mathOptionGroups.length) return false;
 
   const optionSyntax = normalizeOptionSyntax(normalizeLeakSyntax(text));
+  for (const label of protectedAnswers.arrayOptionLabels) {
+    if (containsAnswerLeak(optionSyntax, label)) return true;
+  }
   for (const { members, labels } of protectedAnswers.mathOptionGroups) {
     // Ignore the reversed list in a comparison sentence only when checking its
     // members. The ordered list and any independently protected value still apply.
@@ -1777,9 +1797,10 @@ function containsProtectedAnswerLeak(text: string, protectedAnswers: ProtectedAn
       "giu",
     );
     const withoutComparison = optionSyntax.replace(comparison, match => LINE_BREAK_RE.test(match) ? match : " ");
-    const standaloneText = withoutComparison === optionSyntax ? text : withoutComparison;
+    if (labels.some(label => containsAnswerLeak(withoutComparison, label))) return true;
+    const rawMemberText = withoutComparison === optionSyntax ? text : withoutComparison;
     for (const member of members) {
-      if (containsAnswerLeak(standaloneText, member)) return true;
+      if (containsAnswerLeak(rawMemberText, member)) return true;
     }
   }
   return false;
@@ -2440,7 +2461,11 @@ export function issueOfflineFlashcardLease(
 
   // Collect protected secrets across ALL candidates so every card (flashcard AND miss_variant)
   // is checked against both self and cross-card protected answers/sealed payloads.
-  const protectedAnswers: ProtectedAnswerTexts = { texts: new Set(), mathOptionGroups: [] };
+  const protectedAnswers: ProtectedAnswerTexts = {
+    texts: new Set(),
+    arrayOptionLabels: new Set(),
+    mathOptionGroups: [],
+  };
   for (const candidate of candidates) {
     for (const forbiddenField of FORBIDDEN_MISS_VARIANT_FIELDS) {
       const property = Object.getOwnPropertyDescriptor(candidate, forbiddenField);
@@ -2456,6 +2481,7 @@ export function issueOfflineFlashcardLease(
         };
       }
       for (const text of secretTexts.texts) protectedAnswers.texts.add(text);
+      for (const label of secretTexts.arrayOptionLabels) protectedAnswers.arrayOptionLabels.add(label);
       for (const group of secretTexts.mathOptionGroups) protectedAnswers.mathOptionGroups.push(group);
     }
   }
