@@ -30,7 +30,9 @@ async function setup({ freeTier = false }: { freeTier?: boolean } = {}) {
   const input = { path: '/tmp/input.wav', mime: 'audio/wav', sourceId, sourceVersion: 1, hasAudio: true, durationMs: 601_000 };
   let failThirdConversion = false;
   let failSettlement = false;
+  let loseSaveAcknowledgement = false;
   const bound = scopeBudget(budget, f.scope);
+  const settle = vi.spyOn(budget, 'settle');
   const run = vi.fn(async (_binary: string, argv: string[]) => {
     if (failThirdConversion && argv.includes('600')) throw new Error('third conversion failed');
     await writeFile(argv.at(-1)!, 'RIFF-audio');
@@ -44,7 +46,10 @@ async function setup({ freeTier = false }: { freeTier?: boolean } = {}) {
     ...(freeTier ? { modelSnapshot: freeTierModel, requestCapPerDay: 10 } : {}),
   }) }, checkpoints: {
     load: chunk => repo.recover(f.scope, { ...chunk, jobId, privacyEpoch: 0 }, budget),
-    save: (chunk, output, receipt) => repo.save(f.scope, { ...chunk, jobId, privacyEpoch: 0 }, { output, ...receipt }),
+    save: async (chunk, output, receipt) => {
+      await repo.save(f.scope, { ...chunk, jobId, privacyEpoch: 0 }, { output, ...receipt });
+      if (loseSaveAcknowledgement) throw new Error('checkpoint save acknowledgement lost');
+    },
   } });
   const adapter = makeAdapter(job.id);
   async function manualRetry() {
@@ -57,12 +62,37 @@ async function setup({ freeTier = false }: { freeTier?: boolean } = {}) {
     await jobs.claim(retried!.id);
     return makeAdapter(retried!.id);
   }
-  return { sourceId, job, jobs, repo, budget, provider, input, adapter, run,
+  return { sourceId, job, jobs, repo, budget, provider, input, adapter, run, settle,
     manualRetry,
+    loseSaveAcknowledgement: () => { loseSaveAcknowledgement = true; },
     setFailThird: (value: boolean) => { failThirdConversion = value; },
     setFailSettlement: (value: boolean) => { failSettlement = value; } };
 }
 const signal = new AbortController().signal;
+
+it('attaches a durably saved checkpoint after its acknowledgement is lost and the call is already charged', async () => {
+  const s = await setup();
+  const input = { ...s.input, durationMs: 1000 };
+  const key = `transcribe:${s.job.id}:0`;
+  s.loseSaveAcknowledgement();
+  await expect(s.adapter(input, signal)).rejects.toThrow('checkpoint save acknowledgement lost');
+  const ledger = () => f.sql`SELECT state, amount_cents, result_ref FROM opening_budget_reservations
+    WHERE workspace_id=${f.scope.workspaceId}`;
+  expect(await ledger()).toEqual([{ state: 'completed', amount_cents: 1, result_ref: null }]);
+  const [checkpoint] = await f.sql`SELECT state FROM opening_jobs WHERE workspace_id=${f.scope.workspaceId} AND key=${key}`;
+  expect(checkpoint?.state).toBe('succeeded');
+  expect(s.settle).toHaveBeenCalledOnce();
+
+  const retry = await s.manualRetry();
+  s.run.mockClear();
+  const expected = [expect.objectContaining({ startMs: 0, endMs: 900, text: 'spoken' })];
+  const recovered = await Promise.all([retry(input, signal), retry(input, signal)]);
+  expect(recovered).toEqual([expected, expected]);
+  expect(await ledger()).toEqual([{ state: 'completed', amount_cents: 1, result_ref: key }]);
+  expect(s.settle).toHaveBeenCalledOnce();
+  expect(s.provider).toHaveBeenCalledOnce();
+  expect(s.run).not.toHaveBeenCalled();
+});
 
 it('restarts at the missing third chunk and never settles completed chunks twice', async () => {
   const s = await setup(); s.setFailThird(true);
@@ -105,8 +135,61 @@ it('recovers a receipt saved before settlement crashed without another provider 
   s.setFailSettlement(false);
   await expect(s.adapter(input, signal)).resolves.toHaveLength(1);
   expect(s.provider).toHaveBeenCalledTimes(1);
-  const [row] = await f.sql`SELECT state, amount_cents, result_ref FROM opening_budget_reservations WHERE workspace_id=${f.scope.workspaceId}`;
-  expect(row).toEqual({ state: 'completed', amount_cents: 1, result_ref: `transcribe:${s.job.id}:0` });
+  const [row] = await f.sql`SELECT id, state, amount_cents, result_ref, settlement_cost_basis FROM opening_budget_reservations WHERE workspace_id=${f.scope.workspaceId}`;
+  expect(row).toEqual({ id: expect.any(String), state: 'completed', amount_cents: 1, result_ref: `transcribe:${s.job.id}:0`, settlement_cost_basis: 'media_usage_upper_bound' });
+  expect(await s.budget.listPendingReconcile(f.scope)).toEqual([
+    expect.objectContaining({ id: row!.id, settlementCostBasis: 'media_usage_upper_bound' }),
+  ]);
+  await expect(s.budget.settle(f.scope, row!.id, 2, { costBasis: 'vendor_receipt' })).resolves.toMatchObject({
+    id: row!.id, amountCents: 2, settlementCostBasis: 'vendor_receipt',
+  });
+  expect(await s.budget.listPendingReconcile(f.scope)).toHaveLength(0);
+  await expect(s.adapter(input, signal)).resolves.toHaveLength(1);
+  expect(s.provider).toHaveBeenCalledTimes(1);
+});
+
+it('repairs result_ref after vendor_receipt reconciliation and rejects wrong-basis rows', async () => {
+  const s = await setup();
+  const input = { ...s.input, durationMs: 1000 };
+  const key = `transcribe:${s.job.id}:0`;
+  s.loseSaveAcknowledgement();
+  await expect(s.adapter(input, signal)).rejects.toThrow('checkpoint save acknowledgement lost');
+  const [pending] = await s.budget.listPendingReconcile(f.scope);
+  expect(pending).toMatchObject({ settlementCostBasis: 'media_usage_upper_bound', resultRef: null });
+  await s.budget.settle(f.scope, pending!.id, 3, { costBasis: 'vendor_receipt' });
+  const retry = await s.manualRetry();
+  await expect(retry(input, signal)).resolves.toHaveLength(1);
+  const [repaired] = await f.sql`SELECT amount_cents, result_ref, settlement_cost_basis FROM opening_budget_reservations WHERE id=${pending!.id}`;
+  expect(repaired).toEqual({ amount_cents: 3, result_ref: key, settlement_cost_basis: 'vendor_receipt' });
+
+  await f.sql`UPDATE opening_budget_reservations SET settlement_cost_basis='usage_pricing' WHERE id=${pending!.id}`;
+  await expect(retry(input, signal)).rejects.toMatchObject({ code: 'NOT_FOUND' });
+});
+
+it('reuses legacy checkpoints without costBasis settled as usage_pricing and allows vendor_receipt after TTL recovery', async () => {
+  const s = await setup();
+  const input = { ...s.input, durationMs: 1000 };
+  const key = `transcribe:${s.job.id}:0`;
+  s.setFailSettlement(true);
+  await expect(s.adapter(input, signal)).rejects.toThrow('settlement connection lost');
+  await f.sql`UPDATE opening_budget_reservations SET created_at=now() - interval '31 minutes'
+    WHERE workspace_id=${f.scope.workspaceId} AND request_id=${key}`;
+  await s.budget.reserve(f.scope, { purpose: 'transcribe', requestId: `tick:${randomUUID()}`, amountCents: 1 });
+  s.setFailSettlement(false);
+  await expect(s.adapter(input, signal)).resolves.toHaveLength(1);
+  const [afterRecover] = await f.sql`SELECT id, amount_cents, settlement_cost_basis FROM opening_budget_reservations WHERE request_id=${key}`;
+  expect(afterRecover).toMatchObject({ amount_cents: 1, settlement_cost_basis: 'media_usage_upper_bound' });
+  await expect(s.budget.settle(f.scope, afterRecover!.id, 4, { costBasis: 'vendor_receipt' })).resolves.toMatchObject({
+    id: afterRecover!.id, amountCents: 4, settlementCostBasis: 'vendor_receipt',
+  });
+  expect(await s.budget.listPendingReconcile(f.scope)).toHaveLength(0);
+  await expect(s.budget.settle(f.scope, afterRecover!.id, 4, { costBasis: 'vendor_receipt' })).rejects.toMatchObject({ code: 'NOT_FOUND' });
+
+  await f.sql`UPDATE opening_jobs SET result=result - 'costBasis' WHERE workspace_id=${f.scope.workspaceId} AND key=${key}`;
+  await f.sql`UPDATE opening_budget_reservations SET settlement_cost_basis='usage_pricing', amount_cents=1 WHERE id=${afterRecover!.id}`;
+  const retry = await s.manualRetry();
+  await expect(retry(input, signal)).resolves.toHaveLength(1);
+  expect(s.provider).toHaveBeenCalledTimes(1);
 });
 
 it('recovers a free-tier receipt after TTL reconciliation and audits the late receipt only once', async () => {
