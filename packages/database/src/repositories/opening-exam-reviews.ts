@@ -1,20 +1,43 @@
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { Sql, TransactionSql } from "postgres";
+import { z } from "zod";
 import {
-  examWorkReviewInputSchema, examWorkReviewProposalSchema,
+  examWorkReviewInputSchema, examWorkReviewProposalSchema, uuidSchema,
   type ExamWorkReview, type ExamWorkReviewInput, type ExamWorkReviewProposal, type Scope,
 } from "@aistudy/contracts";
 import { learningError } from "./opening-learning-facts";
 import { assertExamMaterialAvailable } from "./opening-exam-integration-binding";
-import { parseExamBinding } from "./opening-exam-integration-facts";
+import { parseExamBinding, readCommittedExamReceipt } from "./opening-exam-integration-facts";
 import { parseExamSprintSnapshot } from "./opening-exam-sprint-snapshot";
 
 type Row = Record<string, unknown>;
 export type ExamReviewContext = {
   review: ExamWorkReview; input: ExamWorkReviewInput; privacyEpoch: number;
-  referencePage: number; questionLabel: string;
+  referencePage: number; questionLabel: string; reusedUnresolved?: boolean;
+  executionUpdatedAt?: string;
 };
+// Exceeds the 200-char clientKey ceiling of bind/mapSource so review aliases cannot collide in opening_exam_integration_commands.
+const REVIEW_ALIAS_KEY_PREFIX = `exam-review-alias:v1:${"_".repeat(180)}:`;
+const reviewAliasKey = (clientKey: string) => `${REVIEW_ALIAS_KEY_PREFIX}${clientKey}`;
+const STALE_PENDING_LEASE_SECONDS = 60;
+const reviewOperationId = (workspaceId: string, reviewId: string) => `exam-review:${workspaceId}:${reviewId}`;
+const examReviewAliasSchema = z.object({
+  reviewId: uuidSchema,
+}).strict();
+type ExamReviewAlias = z.infer<typeof examReviewAliasSchema>;
+
+function reviewIntentBody(input: ExamWorkReviewInput) {
+  const { clientKey: _clientKey, ...body } = input;
+  return body;
+}
+
+function epochExpiredError() {
+  return Object.assign(
+    learningError("CONFLICT", "材料隐私设置已变化，请重新选择材料"),
+    { businessCode: "EXAM_REVIEW_EPOCH_EXPIRED" as const },
+  );
+}
 function view(row: Row): ExamWorkReview {
   return { id: String(row.id), sourceItemId: String(row.source_item_id), workSourceId: String(row.work_source_id),
     referenceSourceId: String(row.reference_source_id), createdAt: new Date(row.created_at as Date).toISOString(),
@@ -30,7 +53,7 @@ export function createOpeningExamReviewsRepository(sql: Sql) {
       WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR SHARE`;
     if (!workspace) throw learningError("NOT_FOUND", "工作区不存在");
     const privacyEpoch = Number(workspace.privacy_epoch);
-    if (expectedEpoch !== undefined && expectedEpoch !== privacyEpoch) throw learningError("CONFLICT", "材料隐私设置已变化，请重新选择材料");
+    if (expectedEpoch !== undefined && expectedEpoch !== privacyEpoch) throw epochExpiredError();
     const [row] = await tx`SELECT s.id,s.pack_snapshot,s.state,b.binding FROM opening_exam_sprints s
       JOIN opening_exam_bindings b ON b.sprint_id=s.id
       WHERE s.workspace_id=${scope.workspaceId} AND s.owner_user_id=${scope.ownerUserId} FOR SHARE OF s,b`;
@@ -65,49 +88,344 @@ export function createOpeningExamReviewsRepository(sql: Sql) {
     if (!row) throw learningError("NOT_FOUND", "评阅记录不存在");
     const input = examWorkReviewInputSchema.parse(row.intent);
     const checked = await validate(tx, scope, input, Number(row.privacy_epoch));
-    return { review: view(row), input, ...checked };
+    return {
+      review: view(row), input, privacyEpoch: checked.privacyEpoch,
+      referencePage: checked.referencePage, questionLabel: checked.questionLabel,
+    };
   }
+  async function inspectReviewLedger(
+    tx: TransactionSql,
+    workspaceId: string,
+    reviewId: string,
+  ): Promise<"none" | "released_only" | "active_or_billed"> {
+    const operationId = reviewOperationId(workspaceId, reviewId);
+    const rows = await tx`SELECT state, release_reason, outcome_unknown_at, pending_reconcile_cents
+      FROM opening_budget_reservations
+      WHERE workspace_id=${workspaceId}
+        AND (
+          request_id=${operationId}
+          OR left(request_id, length(${operationId}) + 1)=${`${operationId}:`}
+          OR parent_interaction_id=${operationId}
+        )
+      ORDER BY id
+      FOR UPDATE`;
+    if (!rows.length) return "none";
+    const allReleasedNotSent = rows.every(row =>
+      row.state === "released"
+      && (row.release_reason === "not_sent" || row.release_reason === "cancelled")
+      && row.outcome_unknown_at == null
+      && Number(row.pending_reconcile_cents ?? 0) === 0,
+    );
+    return allReleasedNotSent ? "released_only" : "active_or_billed";
+  }
+
+  async function reconcileExistingReview(
+    tx: TransactionSql,
+    scope: Scope,
+    row: Row,
+    options: { wrapCommittedReceipt: boolean; allowFreshOnReleasedStale?: boolean },
+  ): Promise<ExamReviewContext | null> {
+    const id = String(row.id);
+    const load = () => options.wrapCommittedReceipt
+      ? readCommittedExamReceipt(() => readContext(tx, scope, id))
+      : readContext(tx, scope, id);
+    if (row.status === "unknown") {
+      if (row.is_stale) {
+        const ledger = await inspectReviewLedger(tx, scope.workspaceId, id);
+        // Only a positive released_only receipt proves zero spend. Missing ledger rows
+        // (e.g. after Backup v2 restore, which omits opening_budget_reservations) MUST stay unknown.
+        if (ledger === "released_only") {
+          await tx`UPDATE opening_exam_reviews
+            SET status='failed', updated_at=GREATEST(now(), updated_at + interval '1 microsecond')
+            WHERE id=${id} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND status='unknown'`;
+          if (options.allowFreshOnReleasedStale) return null;
+          return await load();
+        }
+      }
+      const context = await load();
+      return { ...context, reusedUnresolved: true };
+    }
+    if (row.status !== "pending") {
+      return await load();
+    }
+    if (!row.is_stale) {
+      const context = await load();
+      return { ...context, reusedUnresolved: true };
+    }
+    const ledger = await inspectReviewLedger(tx, scope.workspaceId, id);
+    if (ledger === "active_or_billed") {
+      // Preserve updated_at so the in-flight worker's lease still matches if it later
+      // confirms a no-charge release, and stale-unknown recovery stays eligible once released.
+      await tx`UPDATE opening_exam_reviews SET status='unknown'
+        WHERE id=${id} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND status='pending'`;
+      const context = await load();
+      return { ...context, reusedUnresolved: true };
+    }
+    if (ledger === "released_only") {
+      await tx`UPDATE opening_exam_reviews
+        SET status='failed', updated_at=GREATEST(now(), updated_at + interval '1 microsecond')
+        WHERE id=${id} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND status='pending'`;
+      if (options.allowFreshOnReleasedStale) return null;
+      return await load();
+    }
+    // Stale pending with zero budget reservation: proven pre-send crash; validate before reclaiming lease.
+    const context = await load();
+    const [reclaimed] = await tx`UPDATE opening_exam_reviews
+      SET updated_at=GREATEST(now(), updated_at + interval '1 microsecond')
+      WHERE id=${id} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND status='pending'
+      RETURNING updated_at::text AS lease_updated_at`;
+    return {
+      ...context,
+      ...(typeof reclaimed?.lease_updated_at === "string" ? { executionUpdatedAt: reclaimed.lease_updated_at } : {}),
+    };
+  }
+
   return {
     async begin(scope: Scope, raw: ExamWorkReviewInput): Promise<ExamReviewContext> {
       const input = examWorkReviewInputSchema.parse(raw);
-      return sql.begin(async tx => {
-        // Serializes logical operation creation. No learning-history mutation occurs here.
-        const owners = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId}
-          AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
-        if (!owners.length) throw learningError("NOT_FOUND", "工作区不存在");
-        const [existing] = await tx`SELECT * FROM opening_exam_reviews WHERE workspace_id=${scope.workspaceId}
-          AND owner_user_id=${scope.ownerUserId} AND client_key=${input.clientKey}`;
-        if (existing) {
-          if (!isDeepStrictEqual(existing.intent, input)) throw learningError("CONFLICT", "同一评阅标识不能提交不同作答");
-          return readContext(tx, scope, String(existing.id));
+      let staleAlias: { id: string; sprintId: string; reviewId: string } | null = null;
+      try {
+        return await sql.begin(async tx => {
+          // Serializes logical operation creation. No learning-history mutation occurs here.
+          const [owner] = await tx`SELECT id,privacy_epoch FROM workspaces WHERE id=${scope.workspaceId}
+            AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
+          if (!owner) throw learningError("NOT_FOUND", "工作区不存在");
+          const workspacePrivacyEpoch = Number(owner.privacy_epoch);
+          const [existing] = await tx`SELECT *, (updated_at <= now() - make_interval(secs => ${STALE_PENDING_LEASE_SECONDS})) AS is_stale
+            FROM opening_exam_reviews
+            WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND client_key=${input.clientKey}
+            FOR UPDATE`;
+          if (existing) {
+            if (!isDeepStrictEqual(existing.intent, input)) throw learningError("CONFLICT", "同一评阅标识不能提交不同作答");
+            if (Number(existing.privacy_epoch) !== workspacePrivacyEpoch) throw epochExpiredError();
+            return (await reconcileExistingReview(tx, scope, existing, { wrapCommittedReceipt: true }))!;
+          }
+          const [aliasRow] = await tx`SELECT c.id,c.sprint_id,c.intent FROM opening_exam_integration_commands c
+            JOIN opening_exam_sprints s ON s.id=c.sprint_id
+            WHERE s.workspace_id=${scope.workspaceId} AND s.owner_user_id=${scope.ownerUserId}
+              AND c.client_key=${reviewAliasKey(input.clientKey)} LIMIT 1`;
+          if (aliasRow) {
+            const parsed = examReviewAliasSchema.safeParse(aliasRow.intent);
+            if (!parsed.success) throw learningError("CONFLICT", "评阅记录无法校验，请保留数据并联系维护者");
+            const [target] = await tx`SELECT *, (updated_at <= now() - make_interval(secs => ${STALE_PENDING_LEASE_SECONDS})) AS is_stale
+              FROM opening_exam_reviews
+              WHERE id=${parsed.data.reviewId} AND sprint_id=${aliasRow.sprint_id}
+                AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
+              FOR UPDATE`;
+            if (!target) {
+              staleAlias = {
+                id: String(aliasRow.id),
+                sprintId: String(aliasRow.sprint_id),
+                reviewId: parsed.data.reviewId,
+              };
+              await tx`DELETE FROM opening_exam_integration_commands WHERE id=${aliasRow.id}`;
+            } else {
+              const targetIntent = examWorkReviewInputSchema.safeParse(target.intent);
+              if (!targetIntent.success) throw learningError("CONFLICT", "评阅记录无法校验，请保留数据并联系维护者");
+              if (!isDeepStrictEqual(reviewIntentBody(targetIntent.data), reviewIntentBody(input))) {
+                throw learningError("CONFLICT", "同一评阅标识不能提交不同作答");
+              }
+              if (Number(target.privacy_epoch) !== workspacePrivacyEpoch) throw epochExpiredError();
+              return (await reconcileExistingReview(tx, scope, target, { wrapCommittedReceipt: true }))!;
+            }
+          }
+          const checked = await validate(tx, scope, input), id = randomUUID();
+          // Lock ALL non-failed same-intent rows in canonical id order so a legacy multi-row
+          // workspace cannot skip an active/unknown/ready sibling after expiring an older row.
+          const candidates = await tx`SELECT *, (updated_at <= now() - make_interval(secs => ${STALE_PENDING_LEASE_SECONDS})) AS is_stale
+            FROM opening_exam_reviews
+            WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
+              AND sprint_id=${checked.sprintId} AND source_item_id=${input.sourceItemId}
+              AND work_source_id=${input.workSourceId} AND work_source_version=${input.workSourceVersion}
+              AND reference_source_id=${input.referenceSourceId} AND reference_source_version=${input.referenceSourceVersion}
+              AND privacy_epoch=${checked.privacyEpoch} AND answer_text=${input.answerText}
+              AND status IN ('pending', 'unknown', 'ready')
+            ORDER BY id ASC
+            FOR UPDATE`;
+          if (candidates.length) {
+            const sortByCreatedThenId = (a: Row, b: Row) => {
+              const aTime = new Date(a.created_at as string | Date).getTime();
+              const bTime = new Date(b.created_at as string | Date).getTime();
+              return aTime !== bTime ? aTime - bTime : String(a.id).localeCompare(String(b.id));
+            };
+            const readyRows: Row[] = [];
+            const blockingRows: Row[] = [];
+            const reclaimableRows: Row[] = [];
+            for (const row of candidates) {
+              const rowId = String(row.id);
+              if (row.status === "ready") {
+                readyRows.push(row);
+              } else if (row.status === "unknown") {
+                if (row.is_stale) {
+                  const ledger = await inspectReviewLedger(tx, scope.workspaceId, rowId);
+                  if (ledger === "released_only") {
+                    await tx`UPDATE opening_exam_reviews
+                      SET status='failed', updated_at=GREATEST(now(), updated_at + interval '1 microsecond')
+                      WHERE id=${rowId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND status='unknown'`;
+                    continue;
+                  }
+                }
+                blockingRows.push(row);
+              } else if (row.status === "pending") {
+                if (!row.is_stale) {
+                  blockingRows.push(row);
+                } else {
+                  const ledger = await inspectReviewLedger(tx, scope.workspaceId, rowId);
+                  if (ledger === "released_only") {
+                    await tx`UPDATE opening_exam_reviews
+                      SET status='failed', updated_at=GREATEST(now(), updated_at + interval '1 microsecond')
+                      WHERE id=${rowId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND status='pending'`;
+                    continue;
+                  }
+                  if (ledger === "active_or_billed") {
+                    await tx`UPDATE opening_exam_reviews SET status='unknown'
+                      WHERE id=${rowId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND status='pending'`;
+                    blockingRows.push(row);
+                  } else {
+                    reclaimableRows.push(row);
+                  }
+                }
+              }
+            }
+            const attachAlias = async (reviewId: string) => {
+              const alias: ExamReviewAlias = { reviewId };
+              await tx`INSERT INTO opening_exam_integration_commands(id,sprint_id,client_key,intent,recorded_at)
+                VALUES(${randomUUID()},${checked.sprintId},${reviewAliasKey(input.clientKey)},${tx.json(alias)},now())`;
+            };
+            if (readyRows.length) {
+              const chosenId = String(readyRows.sort(sortByCreatedThenId)[0]!.id);
+              const context = await readContext(tx, scope, chosenId);
+              await attachAlias(chosenId);
+              return context;
+            }
+            if (blockingRows.length) {
+              const chosenId = String(blockingRows.sort(sortByCreatedThenId)[0]!.id);
+              const context = await readContext(tx, scope, chosenId);
+              await attachAlias(chosenId);
+              return { ...context, reusedUnresolved: true };
+            }
+            if (reclaimableRows.length) {
+              const ordered = reclaimableRows.sort(sortByCreatedThenId);
+              const chosenId = String(ordered[0]!.id);
+              const context = await readContext(tx, scope, chosenId);
+              for (const extra of ordered.slice(1)) {
+                await tx`UPDATE opening_exam_reviews
+                  SET status='failed', updated_at=GREATEST(now(), updated_at + interval '1 microsecond')
+                  WHERE id=${String(extra.id)} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND status='pending'`;
+              }
+              const [reclaimed] = await tx`UPDATE opening_exam_reviews
+                SET updated_at=GREATEST(now(), updated_at + interval '1 microsecond')
+                WHERE id=${chosenId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND status='pending'
+                RETURNING updated_at::text AS lease_updated_at`;
+              await attachAlias(chosenId);
+              return {
+                ...context,
+                ...(typeof reclaimed?.lease_updated_at === "string" ? { executionUpdatedAt: reclaimed.lease_updated_at } : {}),
+              };
+            }
+          }
+          const [inserted] = await tx`INSERT INTO opening_exam_reviews(id,sprint_id,workspace_id,owner_user_id,source_item_id,
+            work_source_id,work_source_version,reference_source_id,reference_source_version,answer_text,
+            client_key,intent,status,privacy_epoch)
+            VALUES(${id},${checked.sprintId},${scope.workspaceId},${scope.ownerUserId},${input.sourceItemId},
+            ${input.workSourceId},${input.workSourceVersion},${input.referenceSourceId},${input.referenceSourceVersion},
+            ${input.answerText},${input.clientKey},${tx.json(input)},'pending',${checked.privacyEpoch})
+            RETURNING updated_at::text AS lease_updated_at`;
+          const context = await readContext(tx, scope, id);
+          return {
+            ...context,
+            ...(typeof inserted?.lease_updated_at === "string" ? { executionUpdatedAt: inserted.lease_updated_at } : {}),
+          };
+        });
+      } catch (error) {
+        if (staleAlias) {
+          const { id, sprintId, reviewId } = staleAlias;
+          try {
+            await sql`DELETE FROM opening_exam_integration_commands c
+              USING opening_exam_sprints s
+              WHERE c.id=${id} AND c.sprint_id=${sprintId} AND s.id=c.sprint_id
+                AND s.workspace_id=${scope.workspaceId} AND s.owner_user_id=${scope.ownerUserId}
+                AND c.client_key=${reviewAliasKey(input.clientKey)}
+                AND NOT EXISTS (
+                  SELECT 1 FROM opening_exam_reviews r
+                  WHERE r.id=${reviewId} AND r.sprint_id=c.sprint_id
+                    AND r.workspace_id=s.workspace_id AND r.owner_user_id=s.owner_user_id
+                )`;
+          } catch {
+            // Preserve the original validation error if best-effort cleanup fails.
+          }
         }
-        const checked = await validate(tx, scope, input), id = randomUUID();
-        await tx`INSERT INTO opening_exam_reviews(id,sprint_id,workspace_id,owner_user_id,source_item_id,
-          work_source_id,work_source_version,reference_source_id,reference_source_version,answer_text,
-          client_key,intent,status,privacy_epoch)
-          VALUES(${id},${checked.sprintId},${scope.workspaceId},${scope.ownerUserId},${input.sourceItemId},
-          ${input.workSourceId},${input.workSourceVersion},${input.referenceSourceId},${input.referenceSourceVersion},
-          ${input.answerText},${input.clientKey},${tx.json(input)},'pending',${checked.privacyEpoch})`;
-        return readContext(tx, scope, id);
-      });
+        throw error;
+      }
     },
     async read(scope: Scope, id: string): Promise<ExamWorkReview> {
       return sql.begin(async tx => (await readContext(tx, scope, id)).review);
     },
-    async assertCurrent(scope: Scope, id: string): Promise<void> {
-      await sql.begin(async tx => { await readContext(tx, scope, id); });
+    async assertCurrent(scope: Scope, id: string, expectedUpdatedAt?: string): Promise<void> {
+      await sql.begin(async tx => {
+        await readContext(tx, scope, id);
+        const [active] = await tx`SELECT id FROM opening_exam_reviews
+          WHERE id=${id} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
+            AND status='pending'
+            ${expectedUpdatedAt ? tx`AND updated_at=(${expectedUpdatedAt}::text)::timestamptz` : tx``}
+          FOR SHARE`;
+        if (!active) throw learningError("CONFLICT", "评阅状态已变化，本次尝试已中止");
+      });
     },
     async complete(scope: Scope, id: string, raw: ExamWorkReviewProposal, modelLabel: string | null): Promise<void> {
       const proposal = examWorkReviewProposalSchema.parse(raw);
       await sql.begin(async tx => {
         await readContext(tx, scope, id);
         await tx`UPDATE opening_exam_reviews SET status='ready',proposal=${tx.json(proposal)},model_label=${modelLabel},updated_at=now()
-          WHERE id=${id} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND status<>'ready'`;
+          WHERE id=${id} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND status IN ('pending', 'unknown')`;
       });
     },
-    async fail(scope: Scope, id: string, status: "unknown" | "failed"): Promise<void> {
-      await sql`UPDATE opening_exam_reviews SET status=${status},updated_at=now() WHERE id=${id}
-        AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND status<>'ready'`;
+    async fail(scope: Scope, id: string, status: "unknown" | "failed", expectedUpdatedAt?: string): Promise<void> {
+      const operationId = reviewOperationId(scope.workspaceId, id);
+      const allowedStatuses = status === "failed" && expectedUpdatedAt
+        ? sql`AND (
+            status='pending'
+            OR (
+              status='unknown'
+              AND EXISTS (
+                SELECT 1 FROM opening_budget_reservations r
+                WHERE r.workspace_id=${scope.workspaceId}
+                  AND (
+                    r.request_id=${operationId}
+                    OR left(r.request_id, length(${operationId}) + 1)=${`${operationId}:`}
+                    OR r.parent_interaction_id=${operationId}
+                  )
+                  AND r.state='released'
+                  AND r.release_reason IS NOT NULL
+                  AND r.release_reason IN ('not_sent','cancelled')
+                  AND r.outcome_unknown_at IS NULL
+                  AND COALESCE(r.pending_reconcile_cents,0)=0
+              )
+            )
+          )`
+        : sql`AND status='pending'`;
+      await sql`UPDATE opening_exam_reviews
+        SET status=${status}, updated_at=GREATEST(now(), updated_at + interval '1 microsecond')
+        WHERE id=${id}
+          AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
+          ${allowedStatuses}
+          ${expectedUpdatedAt ? sql`AND updated_at=(${expectedUpdatedAt}::text)::timestamptz` : sql``}
+          ${status === "failed" ? sql`AND NOT EXISTS (
+            SELECT 1 FROM opening_budget_reservations b
+            WHERE b.workspace_id=${scope.workspaceId}
+              AND (
+                b.request_id=${operationId}
+                OR left(b.request_id, length(${operationId}) + 1)=${`${operationId}:`}
+                OR b.parent_interaction_id=${operationId}
+              )
+              AND (
+                b.state='released'
+                AND b.release_reason IS NOT NULL
+                AND b.release_reason IN ('not_sent','cancelled')
+                AND b.outcome_unknown_at IS NULL
+                AND COALESCE(b.pending_reconcile_cents,0)=0
+              ) IS NOT TRUE
+          )` : sql``}`;
     },
   };
 }

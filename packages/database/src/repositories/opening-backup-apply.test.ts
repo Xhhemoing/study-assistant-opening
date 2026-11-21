@@ -7,6 +7,7 @@ import {
   executeOpeningRestoreApply,
   OPENING_RESTORE_ROW_COLUMNS,
   parseOpeningRestoreObjectVersion,
+  stripLegacyTimetableRevision,
 } from "./opening-backup-apply";
 import { normalizeOpeningImportedEvaluation } from "./opening-backup-evaluation";
 import type { OpeningRestoreNamespaceCounts } from "./opening-backup-empty-namespace";
@@ -51,6 +52,14 @@ function draft(): OpeningBackup {
 }
 
 describe("executeOpeningRestoreApply fail-closed gates", () => {
+  it("strips timetable revision metadata before restoring strict intervention settings", () => {
+    const row = { workspace_id: workspaceId, intervention_settings: { quietMode: "focus", timetableRevision: "legacy" } };
+    expect(stripLegacyTimetableRevision(row)).toEqual({
+      workspace_id: workspaceId,
+      intervention_settings: { quietMode: "focus" },
+    });
+  });
+
   it("refuses without confirmLocalRestore", async () => {
     const denied = await executeOpeningRestoreApply({} as never, {
       confirmLocalRestore: false as unknown as true,

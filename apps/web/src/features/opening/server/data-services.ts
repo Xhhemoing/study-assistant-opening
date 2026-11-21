@@ -75,8 +75,8 @@ export function getTutorJobService(sql: Sql) {
   const repo = createOpeningTutorJobsRepository(sql, { staleMs: loadOpeningJobStaleConfig().tutorJobStaleMs });
   return {
     get: (scope: Scope, id: string) => repo.get(scope, id),
-    findPendingForConversation: (scope: Scope, conversationId: string) =>
-      repo.findPendingForConversation(scope, conversationId),
+    findPendingForConversation: (scope: Scope, conversationId: string, clientKey?: string) =>
+      repo.findPendingForConversation(scope, conversationId, clientKey),
     /** `cancelled` null => not found; `conflict` => exists but not cancellable. */
     async cancel(scope: Scope, id: string): Promise<{ job: Job; conflict: boolean } | null> {
       const job = await repo.cancel(scope, id);

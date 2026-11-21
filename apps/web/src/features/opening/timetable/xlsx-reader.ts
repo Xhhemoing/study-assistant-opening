@@ -14,8 +14,55 @@ const dayMap: Record<string, number> = {
   "周四": 4, "星期四": 4, "周五": 5, "星期五": 5, "周六": 6, "星期六": 6,
   "周日": 7, "星期日": 7,
 };
-const weekPattern = /(?:周次?[:：]?\s*)?([0-9]+(?:\s*[-－]\s*[0-9]+)?(?:\s*[,，]\s*[0-9]+(?:\s*[-－]\s*[0-9]+)?)*)周?/;
+const weekRange = /\d+(?:\s*[-－至]\s*\d+)?/.source;
+const weekListPattern = `(${weekRange}(?:\\s*[,，、]\\s*${weekRange})*)`;
+const paritySuffix = /(?:\s*(?:\(\s*([单双])周?\s*\)|（\s*([单双])周?\s*）|([单双])周?))?/.source;
+const inlineWeeks = new RegExp(`第?\\s*${weekListPattern}\\s*([单双])?周(?!次|[一二三四五六日天0-9])${paritySuffix}`, "y");
+const labeledWeeks = new RegExp(`(?:周次\\s*[:：]?|周\\s*[:：])\\s*第?\\s*${weekListPattern}\\s*([单双])?周?${paritySuffix}`, "y");
+// A bare 周1 can name a weekday. Require a range or list after the prefix.
+const leadingWeeks = new RegExp(`周\\s*(?=\\d+\\s*[-－至,，、]\\s*\\d)${weekListPattern}\\s*([单双])?周?${paritySuffix}`, "y");
+const inlineWeekMatchers = [labeledWeeks, leadingWeeks, inlineWeeks];
+// Consume one complete list and its delimiter so a parity suffix applies to the whole list.
+const columnSegment = new RegExp(
+  /((?:\s*(?:(?:周次\s*[:：]?|周\s*[:：])\s*)?[[（【(])*)/.source
+  + "(" + /(?:\s*(周次|周)\s*[:：]?)?\s*第?\s*/.source + weekListPattern
+  + /\s*([单双])?周?(?:\s*([单双])周?)?/.source
+  + ")" + /((?:\s*[)）】\]])*)\s*([,，、;；]|$)/.source,
+  "y",
+);
+const matchingClose: Record<string, string> = { "(": ")", "（": "）", "[": "]", "【": "】" };
+const closeBracketChars = new Set(Object.values(matchingClose));
 const periodPattern = /([0-9]+)\s*[-－至]\s*([0-9]+)\s*节/;
+const wrappedPeriodPattern = /\s*(?:\(\s*[0-9]+\s*[-－至]\s*[0-9]+\s*节\s*\)|（\s*[0-9]+\s*[-－至]\s*[0-9]+\s*节\s*）|\[\s*[0-9]+\s*[-－至]\s*[0-9]+\s*节\s*\]|【\s*[0-9]+\s*[-－至]\s*[0-9]+\s*节\s*】)/g;
+const globalPeriodPattern = /[0-9]+\s*[-－至]\s*[0-9]+\s*节/g;
+const weekPrefixBeforeBracket = /^(?:周次\s*[:：]?|周\s*[:：])\s*/;
+const weekMarkerHint = /周次|第\s*(?:[^\s()（）[\]【】]{0,16}|[\d\s\-－至,，、?？]{1,24})\s*周(?!期|围|边|年|末|转|折|密|全|到|游|旋|长|率|律)|\d\s*[单双]?周|周\s*[:：\d一二三四五六日天]|[单双]周/;
+const weekPlaceholder = /(?:[?？]|待定|暂定|另行|未定|TBD\b)/.source;
+const malformedNumericTail = `(?:第\\s*)?\\d+(?:\\s*[-－至]\\s*\\d+)?\\s*(?:${weekPlaceholder}|[~～至]|[-－—–](?!\\s*\\d)|/\\s*(?:$|${weekPlaceholder})|[,，、;；]\\s*${weekPlaceholder})`;
+const malformedListTail = `(?:[（(\\[【]?\\s*(?:(?:第\\s*)?${weekPlaceholder}|${malformedNumericTail}))`;
+const malformedBareWeekTail = new RegExp(`^\\s*(?:[-－至~～—–/]|[,，、;；]\\s*${malformedListTail})`, "i");
+const malformedCompletedWeekTail = new RegExp(
+  `^\\s*(?:`
+  + `[~～至]`
+  + `|[,，、;；]\\s*${malformedListTail}`
+  + `|[-－—–/]\\s*(?:$`
+    + `|(?:第\\s*)?${weekPlaceholder}`
+    + `|(?:第\\s*)?\\d+(?:\\s*[-－至]\\s*\\d+)?\\s*[单双]?周(?!期|围|边|年|末|转|折|密|全|到|游|旋|长|率|律)`
+    + `|${malformedNumericTail}`
+  + `))`,
+  "i",
+);
+const bracketWeekIndicator = /(?:[0-9A-Za-z?？\-－至~～—–,，、;；:：/]|待定|暂定|另行|未定|全|(?:第|前|后)\s*[一二三四五六七八九十百零两]+)/;
+
+function hasMalformedWeekTail(tail: string, completedUnit: boolean): boolean {
+  return (completedUnit ? malformedCompletedWeekTail : malformedBareWeekTail).test(tail);
+}
+
+function looksLikeMalformedWeekBracket(segment: string): boolean {
+  if (weekMarkerHint.test(segment)) return true;
+  const match = /^[[（【(]\s*([\s\S]*?)周\s*[)）】\]]?$/.exec(segment.trim());
+  return match !== null && bracketWeekIndicator.test(match[1]!);
+}
 
 function text(value: CellValue): string {
   return value == null ? "" : String(value).trim();
@@ -32,18 +79,192 @@ function address(row: number, column: number): string {
   return `${result}${row + 1}`;
 }
 
-function weeks(value: string): number[] | undefined {
-  const match = value.match(weekPattern);
-  if (!match) return undefined;
-  const result: number[] = [];
-  for (const part of match[1]!.split(/[,，]/)) {
-    const pieces = part.split(/[-－]/).map(Number);
+function addWeeks(result: Set<number>, list: string, parity?: string): boolean {
+  for (const part of list.split(/[,，、]/)) {
+    const pieces = part.split(/[-－至]/).map(Number);
     const first = pieces[0] ?? NaN;
     const last = pieces[1] ?? first;
-    if (!Number.isInteger(first) || !Number.isInteger(last) || first > last) return undefined;
-    for (let week = first; week <= last; week++) result.push(week);
+    if (!Number.isSafeInteger(last) || first < 1 || first > last) return false;
+    for (let week = first; week <= last; week++) {
+      if (!parity || week % 2 === (parity === "单" ? 1 : 0)) result.add(week);
+      if (result.size > 60) return false; // WeekSession accepts at most 60 distinct weeks.
+    }
   }
-  return result;
+  return true;
+}
+
+function columnWeekList(value: string): number[] | undefined {
+  // Resolve parenthesized parity suffixes before matching wrappers around week lists.
+  const source = value.replace(/\s+/g, " ").replace(/^周次\s*[:：]?\s*/, "")
+    .replace(/\(\s*([单双]周?)\s*\)|（\s*([单双]周?)\s*）/g, "$1$2");
+  const result = new Set<number>();
+  const closers: string[] = [];
+  const segments = new RegExp(columnSegment);
+  while (true) {
+    const match = segments.exec(source);
+    if (!match) return undefined;
+    const [, open, expression, prefix, list, beforeWeek, afterWeek, close, separator] = match;
+    for (const char of open!) {
+      const closer = matchingClose[char];
+      if (closer) closers.push(closer);
+    }
+    for (const char of close!.replace(/\s/g, "")) {
+      if (closers.pop() !== char) return undefined;
+    }
+    // Inspect the matched segment after its wrappers and label have been consumed.
+    if (/^周\s*[1-7]$/.test(expression!.trim())) return undefined;
+    if (prefix === "周" && Number(list) > 60) return undefined;
+    if (!addWeeks(result, list!, beforeWeek ?? afterWeek)) return undefined;
+    if (!separator) break;
+  }
+  return !closers.length && result.size ? [...result] : undefined;
+}
+
+function findMatchingClose(source: string, start: number): number {
+  const stack: string[] = [];
+  for (let i = start; i < source.length; i++) {
+    const ch = source[i]!;
+    const closer = matchingClose[ch];
+    if (closer) {
+      stack.push(closer);
+    } else if (closeBracketChars.has(ch)) {
+      if (stack.pop() !== ch) return -1;
+      if (stack.length === 0) return i;
+    }
+  }
+  return -1;
+}
+
+function hasUnbalancedBrackets(source: string): boolean {
+  const stack: string[] = [];
+  for (const ch of source) {
+    const closer = matchingClose[ch];
+    if (closer) {
+      stack.push(closer);
+    } else if (closeBracketChars.has(ch) && stack.pop() !== ch) {
+      return true;
+    }
+  }
+  return stack.length > 0;
+}
+
+function matchInlineWeekToken(source: string, index: number) {
+  for (const matcher of inlineWeekMatchers) {
+    matcher.lastIndex = index;
+    const match = matcher.exec(source);
+    if (match) {
+      return {
+        end: matcher.lastIndex,
+        list: match[1]!,
+        parity: match[2] ?? match[3] ?? match[4] ?? match[5],
+      };
+    }
+  }
+  return null;
+}
+
+function parseInlineCourseLine(line: string): { courseName: string; weeks: number[] | undefined; invalid: boolean } {
+  const withoutPeriods = line
+    .replace(wrappedPeriodPattern, "")
+    .replace(globalPeriodPattern, "");
+  const weeks = new Set<number>();
+  const matchedSpans: Array<{ start: number; end: number }> = [];
+  let invalid = false;
+
+  for (let i = 0; i < withoutPeriods.length;) {
+    const ch = withoutPeriods[i]!;
+    if (/\s/.test(ch)) {
+      i += 1;
+      continue;
+    }
+    const precededByDigit = i > 0 && /\d/.test(withoutPeriods[i - 1]!);
+    if (!precededByDigit) {
+      const token = matchInlineWeekToken(withoutPeriods, i);
+      if (token) {
+        const completedUnit = /(?:周|[单双]周?|[)）])$/.test(withoutPeriods.slice(i, token.end));
+        if (!addWeeks(weeks, token.list, token.parity) || hasMalformedWeekTail(withoutPeriods.slice(token.end), completedUnit)) {
+          invalid = true;
+        }
+        matchedSpans.push({ start: i, end: token.end });
+        i = token.end;
+        continue;
+      }
+    }
+
+    const prefixMatch = weekPrefixBeforeBracket.exec(withoutPeriods.slice(i));
+    const bracketStart = i + (prefixMatch?.[0].length ?? 0);
+    if (bracketStart < withoutPeriods.length && matchingClose[withoutPeriods[bracketStart]!]) {
+      const closeIdx = findMatchingClose(withoutPeriods, bracketStart);
+      if (closeIdx < 0) {
+        if (looksLikeMalformedWeekBracket(withoutPeriods.slice(i))) {
+          invalid = true;
+          break;
+        }
+        i += 1;
+        continue;
+      }
+      const segment = withoutPeriods.slice(i, closeIdx + 1);
+      if (segment.includes("周")) {
+        const parsed = columnWeekList(segment);
+        if (parsed) {
+          for (const week of parsed) {
+            weeks.add(week);
+            if (weeks.size > 60) {
+              invalid = true;
+              break;
+            }
+          }
+          if (hasMalformedWeekTail(withoutPeriods.slice(closeIdx + 1), true)) {
+            invalid = true;
+          }
+          matchedSpans.push({ start: i, end: closeIdx + 1 });
+        } else if (looksLikeMalformedWeekBracket(segment)) {
+          invalid = true;
+        }
+      }
+      i = closeIdx + 1;
+      continue;
+    }
+
+    i += 1;
+  }
+
+  const merged: Array<{ start: number; end: number }> = [];
+  for (const span of matchedSpans) {
+    const prev = merged.at(-1);
+    if (prev && /^[\s,，、;；]*$/.test(withoutPeriods.slice(prev.end, span.start))) {
+      prev.end = span.end;
+    } else {
+      merged.push({ ...span });
+    }
+  }
+  const lastSpan = merged.at(-1);
+  if (lastSpan && /^[\s,，、;；]+$/.test(withoutPeriods.slice(lastSpan.end))) {
+    lastSpan.end = withoutPeriods.length;
+  }
+
+  let cursor = 0;
+  let residual = "";
+  for (const span of merged) {
+    residual += withoutPeriods.slice(cursor, span.start);
+    if (residual && !/\s$/.test(residual)) residual += " ";
+    cursor = span.end;
+  }
+  residual += withoutPeriods.slice(cursor);
+  const courseName = residual.replace(/\s+/g, " ").trim();
+
+  if (
+    weekMarkerHint.test(courseName)
+    || ((matchedSpans.length > 0 || courseName.includes("周")) && hasUnbalancedBrackets(courseName))
+  ) {
+    invalid = true;
+  }
+
+  return {
+    courseName,
+    weeks: !invalid && weeks.size > 0 ? [...weeks] : undefined,
+    invalid,
+  };
 }
 
 function day(value: string): number | undefined {
@@ -95,11 +316,10 @@ export function parseTimetableSheets(sheets: TimetableSheet[]): ParsedTimetable 
         if (courseColumn >= 0 && c !== courseColumn) continue;
         const lines = value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
         for (const line of lines) {
-          const courseName = line
-            .replace(/\s*\([^)]*(?:周|节)[^)]*\)/, "")
-            .replace(/\s+[0-9]+\s*[-－至]\s*[0-9]+\s*节\s*$/, "")
-            .trim();
-          const weekList = weeks(line) ?? (weekColumn >= 0 ? weeks(text(rows[r]![weekColumn]!)) : undefined);
+          const inline = parseInlineCourseLine(line);
+          const courseName = inline.courseName;
+          const weekCell = weekColumn >= 0 ? text(rows[r]![weekColumn]!) : "";
+          const weekList = inline.invalid ? undefined : weekCell ? columnWeekList(weekCell) : inline.weeks;
           const weekday = day(dayColumn >= 0 ? text(rows[r]![dayColumn]!) : header[c]!);
           const range = period(line) ?? (periodColumn >= 0 ? period(text(rows[r]![periodColumn]!)) : undefined);
           if (!weekList || weekday === undefined || !range) {

@@ -187,7 +187,10 @@ function storedReader(overrides: { owned?: boolean; prefs?: unknown; settings?: 
     if (text.includes("FROM course_goals g")) return [];
     if (text.includes("p.planning_settings FROM workspaces")) return [{ planning_settings: stored.settings }];
     if (text.includes("FROM opening_tasks t")) return stored.tasks;
-    if (text.includes("FROM opening_timetable_sessions")) return [];
+    if (text.includes("FROM opening_timetable_sessions")) {
+      expect(values).toEqual([scope.workspaceId, scope.ownerUserId]);
+      return [];
+    }
     if (text.includes("FROM opening_plan_state")) {
       expect(values).toEqual(expect.arrayContaining([scope.workspaceId, scope.ownerUserId, "2026-10-23T00:00:00.000Z", "2026-10-24T00:00:00.000Z", now]));
       expect(values).toContainEqual([taskId]);

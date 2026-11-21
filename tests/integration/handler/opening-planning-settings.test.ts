@@ -5,7 +5,7 @@ import { deriveDayBlocks } from "@aistudy/domain";
 import type { OpeningPlanningSettings } from "@aistudy/contracts";
 import { GET as getPlanningSettings, PUT as putPlanningSettings } from "../../../apps/web/src/app/api/opening/planning-settings/route";
 import { POST as proposePlan } from "../../../apps/web/src/app/api/opening/plans/route";
-import { PUT as putTimetable } from "../../../apps/web/src/app/api/opening/timetable/route";
+import { GET as getTimetable, PUT as putTimetable } from "../../../apps/web/src/app/api/opening/timetable/route";
 import { POST as createTask } from "../../../apps/web/src/app/api/opening/tasks/route";
 import { POST as register } from "../../../apps/web/src/app/api/auth/register/route";
 import { createAuthRuntime } from "../../../apps/web/src/features/auth/service";
@@ -193,6 +193,59 @@ describe("opening planning-settings handlers (DL9)", () => {
 
     expect(derivedDraft.blocks).toEqual(explicitDraft.blocks);
     expect(derivedDraft.unscheduledTaskIds).toEqual(explicitDraft.unscheduledTaskIds);
+  });
+
+  it("allows only one replacement of a timetable revision, including the empty timetable", async () => {
+    const path = "/api/opening/timetable";
+    const snapshot = async () => (await getTimetable(req(path))).json();
+    const replace = (courseName: string, expectedRevision: string) => putTimetable(req(path, "PUT", {
+      sessions: [{ courseName, weekday: 1, weeks: [1], startPeriod: 1, endPeriod: 2 }], expectedRevision,
+    }));
+    const { revision } = await snapshot();
+    const candidates = ["物理", "历史"];
+    const results = await Promise.all(candidates.map(name => replace(name, revision)));
+    expect(results.map(r => r.status).sort()).toEqual([200, 409]);
+    const winner = candidates[results.findIndex(r => r.status === 200)]!;
+    const current = await snapshot();
+    expect(current.sessions).toMatchObject([{ courseName: winner }]);
+    expect(current.revision).not.toBe(revision);
+
+    expect((await replace("数学", current.revision)).status).toBe(200);
+    expect((await replace(winner, current.revision)).status).toBe(409);
+    expect((await snapshot()).sessions).toMatchObject([{ courseName: "数学" }]);
+  });
+
+  it("rejects an untouched preview after import and clear, and accepts the post-clear revision", async () => {
+    const path = "/api/opening/timetable", freshCookie = await registerUser("clear-timetable");
+    const snapshot = async () => (await getTimetable(req(path, "GET", undefined, freshCookie))).json();
+    const sessions = [{ courseName: "物理", weekday: 1, weeks: [1], startPeriod: 1, endPeriod: 2 }];
+    const put = (rows: typeof sessions, expectedRevision: string) =>
+      putTimetable(req(path, "PUT", { sessions: rows, expectedRevision }, freshCookie));
+    const initial = await snapshot();
+    expect(initial).toEqual({ sessions: [], revision: expect.stringMatching(/^empty:[\da-f-]{36}:[0-9a-f]{32}$/i) });
+    const other = await registerUser("other-untouched-timetable");
+    const otherSnapshot = async () => (await getTimetable(req(path, "GET", undefined, other))).json();
+    const untouched = await otherSnapshot();
+    expect(untouched.sessions).toEqual([]);
+    expect(untouched.revision).not.toBe(initial.revision);
+    const foreign = await putTimetable(req(path, "PUT", { sessions, expectedRevision: initial.revision }, other));
+    expect(foreign.status).toBe(409);
+    expect((await foreign.json()).error.code).toBe("CONFLICT");
+    expect(await otherSnapshot()).toEqual(untouched);
+    expect((await put(sessions, initial.revision)).status).toBe(200);
+    const imported = await snapshot();
+    expect((await put([], imported.revision)).status).toBe(200);
+    const cleared = await snapshot();
+    expect(cleared).toEqual({ sessions: [], revision: expect.stringMatching(/^[\da-f-]{36}:[0-9a-f]{32}$/i) });
+    expect(cleared.revision).not.toBe(imported.revision);
+    const stale = await put(sessions, initial.revision);
+    expect(stale.status).toBe(409);
+    expect((await stale.json()).error.code).toBe("CONFLICT");
+    expect(await snapshot()).toEqual(cleared);
+    expect((await put([], cleared.revision)).status).toBe(200);
+    const clearedAgain = await snapshot();
+    expect(clearedAgain.revision).not.toBe(cleared.revision);
+    expect((await put(sessions, clearedAgain.revision)).status).toBe(200);
   });
 
   it("requires authentication", async () => {
