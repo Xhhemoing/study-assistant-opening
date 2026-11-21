@@ -81,14 +81,81 @@ function extractLeakSegments(normalizedSecret: string): string[] {
   return [...segments];
 }
 
-const SHORT_NUMERIC_OR_SYMBOLIC_ANSWER_RE =
-  /^(?:[+-]?\d+(?:\.\d+)?(?:\/\d+)?|[+-]?(?:pi|inf|infty|sqrt\([^)]+\)|[a-z]\^\d+)(?:\/[a-z0-9]+)?|[+-]?\d+(?:\/\d+)?\s*(?:pi|sqrt\([^)]+\))|[a-z0-9]+\/[a-z0-9]+|[+-]?\d+[a-z](?:\^\d+)?)$/i;
+const SIGN_PREFIX = "(?:\\+-|-\\+|[+-])?";
+const GREEK_OR_CONST =
+  "(?:pi|theta|alpha|beta|gamma|delta|epsilon|zeta|eta|kappa|lambda|mu|nu|xi|rho|sigma|tau|phi|chi|psi|omega|inf|infty)";
 
+const SHORT_NUMERIC_OR_SYMBOLIC_ANSWER_RE = new RegExp(
+  `^(?:` +
+    `${SIGN_PREFIX}\\d+(?:\\.\\d+)?(?:\\/\\d+)?` +
+    `|${SIGN_PREFIX}(?:${GREEK_OR_CONST}|sqrt\\([^)]+\\)|[a-z]\\^\\d+)(?:\\/[a-z0-9]+)?` +
+    `|${SIGN_PREFIX}\\d+(?:\\/\\d+)?\\s*(?:${GREEK_OR_CONST}|sqrt\\([^)]+\\))` +
+    `|${SIGN_PREFIX}[a-z0-9]+(?:[*\\/][a-z0-9]+)+` +
+    `|${SIGN_PREFIX}\\d+[a-z](?:\\^\\d+)?` +
+  `)$`,
+  "i",
+);
+
+const UNICODE_MATH_SYMBOL_RE = /[\p{Sm}\p{Script=Greek}]/u;
+const RELATION_OP_RE = /(?:<=|>=|!=|~=|==|=|<|>)/;
 const SINGLE_CHOICE_LETTER_RE = /^[a-z]$/i;
+
+const UNICODE_MATH_REPLACEMENTS: ReadonlyArray<readonly [RegExp, string]> = [
+  [/[\u2212\u2013\u2014\u2010\u2011\uFE63\uFF0D]/g, "-"],
+  [/\u00B1\s*(?=[a-z0-9(\u221A\p{Script=Greek}])/giu, "+-"],
+  [/\u00B1/g, "+-"],
+  [/\u2213\s*(?=[a-z0-9(\u221A\p{Script=Greek}])/giu, "-+"],
+  [/\u2213/g, "-+"],
+  [/[\u00D7\u00B7\u22C5\u2219\u2217]/g, "*"],
+  [/[\u00F7\u2215\u2044]/g, "/"],
+  [/\u2264/g, "<="],
+  [/\u2265/g, ">="],
+  [/\u2260/g, "!="],
+  [/\u2248/g, "~="],
+  [/\u221E/g, "inf"],
+  [/[\u03C0\u03A0]/g, "pi"],
+  [/[\u03B8\u0398]/g, "theta"],
+  [/[\u03B1\u0391]/g, "alpha"],
+  [/[\u03B2\u0392]/g, "beta"],
+  [/[\u03B3\u0393]/g, "gamma"],
+  [/[\u03B4\u0394]/g, "delta"],
+  [/[\u03B5\u0395]/g, "epsilon"],
+  [/\u03B6/g, "zeta"],
+  [/\u03B7/g, "eta"],
+  [/\u03BA/g, "kappa"],
+  [/[\u03BB\u039B]/g, "lambda"],
+  [/\u03BC/g, "mu"],
+  [/\u03BD/g, "nu"],
+  [/[\u03BE\u039E]/g, "xi"],
+  [/\u03C1/g, "rho"],
+  [/[\u03C3\u03A3\u03C2]/g, "sigma"],
+  [/\u03C4/g, "tau"],
+  [/[\u03C6\u03A6\u03D5]/g, "phi"],
+  [/\u03C7/g, "chi"],
+  [/[\u03C8\u03A8]/g, "psi"],
+  [/[\u03C9\u03A9]/g, "omega"],
+  [/\u221A\s*\(/g, "sqrt("],
+  [/\u221A\s*([a-z0-9]+(?:\.[a-z0-9]+)?)/gi, "sqrt($1)"],
+  [/\u221A/g, "sqrt"],
+  [/\bsqrt\s*([0-9]+(?:\.[0-9]+)?)/gi, "sqrt($1)"],
+];
+
+/**
+ * Deterministically canonicalizes Unicode math notation (NFKC fractions/superscripts,
+ * minus signs, Greek symbols, radicals, operators, comparisons, infinity) so leak checks
+ * match symmetrically across ASCII and Unicode representations.
+ */
+export function canonicalizeMathNotation(value: string): string {
+  let text = value.normalize("NFKC");
+  for (const [pattern, replacement] of UNICODE_MATH_REPLACEMENTS) {
+    text = text.replace(pattern, replacement);
+  }
+  return text.trim().replace(/\s+/g, " ").toLowerCase();
+}
 
 function containsStandaloneNumericOrSymbolicToken(haystack: string, token: string): boolean {
   const escaped = escapeRegExp(token);
-  const pattern = new RegExp(`(?<![a-z0-9]|\\d\\.)${escaped}(?![a-z0-9]|\\.\\d)`, "i");
+  const pattern = new RegExp(`(?<![\\p{L}\\p{N}]|\\d\\.)${escaped}(?![\\p{L}\\p{N}]|\\.\\d)`, "iu");
   return pattern.test(haystack);
 }
 
@@ -107,10 +174,10 @@ function containsSingleChoiceReveal(rawText: string, choiceLetter: string): bool
 
 /**
  * Checks whether a candidate stem/text leaks a secret answer/solution value, including:
- * - exact normalized equality
+ * - exact normalized equality (after symmetric Unicode math canonicalization)
  * - non-trivial substring or multi-segment solution excerpts
- * - whitespace-tolerant algebraic equations (e.g. `x=5` / `x = 5`)
- * - short single-token numeric/symbolic answers (e.g. `"42"`, `"-7"`, `"0.5"`, `"pi/2"`, `"1"`)
+ * - whitespace-tolerant equations/inequalities (`x=5`, `x<=5`, `x>=0`, `x!=1`)
+ * - short single-token numeric/symbolic answers (`"42"`, `"−7"`, `"0.5"`, `"½"`, `"π/2"`, `"√2"`, `"±3"`, `"∞"`)
  * - single-letter choice answer reveals (e.g. `"Correct option is B"`, `"(B)"`)
  */
 export function containsAnswerLeak(
@@ -133,18 +200,26 @@ export function containsAnswerLeak(
     if (tokenCount >= 2 && segment.length >= 4 && containsTokenBoundedSubstring(normalizedStem, segment)) {
       return true;
     }
-    if (segment.includes("=")) {
-      const compactEq = segment.replace(/\s*=\s*/g, "=");
-      if (compactEq.length >= 3) {
-        const eqRegexSource = escapeRegExp(compactEq).replace(/=/g, "\\s*=\\s*");
-        const eqPattern = new RegExp(`(?:^|[^a-z0-9])${eqRegexSource}(?:$|[^a-z0-9])`, "i");
-        if (eqPattern.test(normalizedStem)) {
+    if (RELATION_OP_RE.test(segment)) {
+      const compactRel = segment.replace(/\s*(<=|>=|!=|~=|==|=|<|>)\s*/g, "$1");
+      if (compactRel.length >= 3) {
+        const relRegexSource = compactRel
+          .split(/(<=|>=|!=|~=|==|=|<|>)/)
+          .map(part =>
+            RELATION_OP_RE.test(part) ? `\\s*${escapeRegExp(part)}\\s*` : escapeRegExp(part),
+          )
+          .join("");
+        const relPattern = new RegExp(`(?<![\\p{L}\\p{N}])${relRegexSource}(?![\\p{L}\\p{N}])`, "iu");
+        if (relPattern.test(normalizedStem)) {
           return true;
         }
       }
     }
     if (includeShortTokens && tokenCount === 1) {
-      if (SHORT_NUMERIC_OR_SYMBOLIC_ANSWER_RE.test(segment)) {
+      if (
+        SHORT_NUMERIC_OR_SYMBOLIC_ANSWER_RE.test(segment) ||
+        UNICODE_MATH_SYMBOL_RE.test(segment)
+      ) {
         if (containsStandaloneNumericOrSymbolicToken(normalizedStem, segment)) {
           return true;
         }
@@ -256,7 +331,7 @@ function isNonNegativeSafeInteger(value: unknown): value is number {
 }
 
 function normalizeComparableText(value: string): string {
-  return value.trim().replace(/\s+/g, " ").toLowerCase();
+  return canonicalizeMathNotation(value);
 }
 
 function collectSecretTexts(value: unknown, depth = 0): string[] {

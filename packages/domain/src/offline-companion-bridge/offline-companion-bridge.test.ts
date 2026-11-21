@@ -435,6 +435,58 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
     });
     expect(cleanSiblingLease.ok).toBe(true);
 
+    // [Round-6 P1] Symmetric Unicode math-notation canonicalization in short-token leak detection:
+    // catches "π/2" (vs both "π/2" and "pi/2"), "−7" (\u2212), "√2" (vs both "√2" and "sqrt(2)"),
+    // "±3", "½", "θ/4", "2×3", "x≤5", "x≥0", "x≠1", and "∞" in flashcard prompt/backSummary.
+    expect(containsAnswerLeak("The angle is π/2 radians.", "π/2")).toBe(true);
+    expect(containsAnswerLeak("The angle is π/2 radians.", "pi/2")).toBe(true);
+    expect(containsAnswerLeak("The angle is pi/2 radians.", "π/2")).toBe(true);
+    expect(containsAnswerLeak("Evaluate f(2), expected \u22127.", "-7")).toBe(true);
+    expect(containsAnswerLeak("Evaluate f(2), expected -7.", "\u22127")).toBe(true);
+    expect(containsAnswerLeak("The diagonal length is √2 units.", "√2")).toBe(true);
+    expect(containsAnswerLeak("The diagonal length is √2 units.", "sqrt(2)")).toBe(true);
+    expect(containsAnswerLeak("The diagonal length is sqrt2 units.", "√2")).toBe(true);
+    expect(containsAnswerLeak("Symmetric roots are ±3.", "±3")).toBe(true);
+    expect(containsAnswerLeak("Midpoint fraction equals ½.", "½")).toBe(true);
+    expect(containsAnswerLeak("Midpoint fraction equals 1/2.", "½")).toBe(true);
+    expect(containsAnswerLeak("Phase shift is θ/4.", "θ/4")).toBe(true);
+    expect(containsAnswerLeak("Product evaluates to 2×3.", "2*3")).toBe(true);
+    expect(containsAnswerLeak("Domain constraint x≤5 holds.", "x<=5")).toBe(true);
+    expect(containsAnswerLeak("Non-negative bound x≥0 holds.", "x>=0")).toBe(true);
+    expect(containsAnswerLeak("Exclude pole x≠1.", "x!=1")).toBe(true);
+    expect(containsAnswerLeak("Sequence diverges to ∞.", "∞")).toBe(true);
+
+    for (const [idx, unicodeLeak] of [
+      { answerKey: "π/2", prompt: "Unit circle right angle.", backSummary: "Measured as π/2 radians." },
+      { answerKey: "pi/2", prompt: "Recall π/2 on the unit circle.", backSummary: "Quarter turn." },
+      { answerKey: "\u22127", prompt: "Signed integer shift.", backSummary: "Evaluates to \u22127 here." },
+      { answerKey: "-7", prompt: "Check result \u22127.", backSummary: "Linear offset." },
+      { answerKey: "√2", prompt: "Diagonal of unit square.", backSummary: "Length equals √2." },
+      { answerKey: "sqrt(2)", prompt: "Remember √2 is irrational.", backSummary: "Proof by parity." },
+      { answerKey: "±3", prompt: "Roots of x^2 = 9.", backSummary: "Solutions are ±3." },
+      { answerKey: "½", prompt: "Exact value of sin(30 deg).", backSummary: "Equals ½." },
+    ].entries()) {
+      const rejectedUnicode = issueOfflineFlashcardLease({
+        leaseId: `lease-fc-unicode-short-${idx}`,
+        workspaceId: "ws-1",
+        learnerId: "learner-1",
+        issuedAtMs: T0,
+        candidates: [
+          makeMissVariantCandidate({ answerKey: unicodeLeak.answerKey }),
+          {
+            ...makeFlashcardCandidate(200 + idx),
+            prompt: unicodeLeak.prompt,
+            backSummary: unicodeLeak.backSummary,
+          },
+        ],
+      });
+      expect(rejectedUnicode.ok).toBe(false);
+      if (!rejectedUnicode.ok) {
+        expect(rejectedUnicode.httpStatus).toBe(422);
+        expect(rejectedUnicode.code).toBe("miss_variant_answer_leak");
+      }
+    }
+
     expect(containsAnswerLeak("Compute the trace of M (result 42).", "42")).toBe(true);
     expect(containsAnswerLeak("Evaluate f(2), expected -7.", "-7")).toBe(true);
     expect(containsAnswerLeak("Compute probability (0.5).", "0.5")).toBe(true);
