@@ -7,11 +7,14 @@ export function assertNonEmptyRevisionBlocks(blocks: RevisionProposalBlock[]): v
   if (!blocks.length) throw new Error("Document requires at least one block");
 }
 
+const idKey = (id: string) => id.toLowerCase();
+
 function assertUnique(blocks: RevisionProposalBlock[]): void {
   const seen = new Set<string>();
   for (const block of blocks) {
-    if (seen.has(block.id)) throw new Error(`Duplicate block id: ${block.id}`);
-    seen.add(block.id);
+    const key = idKey(block.id);
+    if (seen.has(key)) throw new Error(`Duplicate block id: ${block.id}`);
+    seen.add(key);
   }
 }
 
@@ -36,10 +39,10 @@ export function diffRevisionBlocks(
 ): RevisionProposalDiffEntry[] {
   assertUnique(baseBlocks);
   assertUnique(proposedBlocks);
-  const proposedById = new Map(proposedBlocks.map((block) => [block.id, block]));
-  const baseIds = new Set(baseBlocks.map((block) => block.id));
+  const proposedById = new Map(proposedBlocks.map((block) => [idKey(block.id), block]));
+  const baseIds = new Set(baseBlocks.map((block) => idKey(block.id)));
   const result: RevisionProposalDiffEntry[] = baseBlocks.map((base) => {
-    const proposed = proposedById.get(base.id) ?? null;
+    const proposed = proposedById.get(idKey(base.id)) ?? null;
     return {
       blockId: base.id,
       kind: proposed === null ? "removed" : sameBlock(base, proposed) ? "unchanged" : "changed",
@@ -48,7 +51,7 @@ export function diffRevisionBlocks(
     };
   });
   for (const proposed of proposedBlocks) {
-    if (!baseIds.has(proposed.id)) {
+    if (!baseIds.has(idKey(proposed.id))) {
       result.push({ blockId: proposed.id, kind: "added", base: null, proposed });
     }
   }
@@ -58,8 +61,9 @@ export function diffRevisionBlocks(
 function selectedSet(selectedIds: string[]): Set<string> {
   const result = new Set<string>();
   for (const id of selectedIds) {
-    if (result.has(id)) throw new Error(`Duplicate selected block id: ${id}`);
-    result.add(id);
+    const key = idKey(id);
+    if (result.has(key)) throw new Error(`Duplicate selected block id: ${id}`);
+    result.add(key);
   }
   return result;
 }
@@ -73,17 +77,28 @@ export function selectProposalBlocks(
   assertUnique(currentBlocks);
   assertUnique(proposedBlocks);
   const selected = selectedSet(selectedProposalBlockIds);
-  const proposedById = new Map(proposedBlocks.map((block) => [block.id, block]));
-  const removedIds = new Set(diff.filter((entry) => entry.kind === "removed").map((entry) => entry.blockId));
-  for (const id of selected) {
-    if (!proposedById.has(id) && !removedIds.has(id)) throw new Error(`Unknown selected proposal block: ${id}`);
+  const proposedById = new Map(proposedBlocks.map((block) => [idKey(block.id), block]));
+  const removedIds = new Set(
+    diff
+      .filter((entry) => entry.kind === "removed" && !proposedById.has(idKey(entry.blockId)))
+      .map((entry) => idKey(entry.blockId)),
+  );
+  for (const rawId of selectedProposalBlockIds) {
+    const key = idKey(rawId);
+    if (!proposedById.has(key) && !removedIds.has(key)) throw new Error(`Unknown selected proposal block: ${rawId}`);
   }
-  const currentIds = new Set(currentBlocks.map((block) => block.id));
+  const currentIds = new Set(currentBlocks.map((block) => idKey(block.id)));
   const result = currentBlocks
-    .filter((block) => !selected.has(block.id) || !removedIds.has(block.id))
-    .map((block) => selected.has(block.id) ? proposedById.get(block.id) ?? block : block);
+    .filter((block) => !selected.has(idKey(block.id)) || !removedIds.has(idKey(block.id)))
+    .map((block) => {
+      const key = idKey(block.id);
+      if (!selected.has(key)) return block;
+      const proposed = proposedById.get(key);
+      return proposed ? { ...proposed, id: block.id } : block;
+    });
   for (const block of proposedBlocks) {
-    if (selected.has(block.id) && !currentIds.has(block.id)) result.push(block);
+    const key = idKey(block.id);
+    if (selected.has(key) && !currentIds.has(key)) result.push(block);
   }
   return result.map((block, position) => ({ ...block, position }));
 }
@@ -104,19 +119,25 @@ export function preserveBothBlocks(
   assertUnique(currentBlocks);
   assertUnique(proposedBlocks);
   const selected = selectedSet(selectedProposalBlockIds);
-  const proposedById = new Map(proposedBlocks.map((block) => [block.id, block]));
-  const removedIds = new Set(diff.filter((entry) => entry.kind === "removed").map((entry) => entry.blockId));
-  for (const id of selected) {
-    if (!proposedById.has(id) && !removedIds.has(id)) throw new Error(`Unknown selected proposal block: ${id}`);
+  const proposedById = new Map(proposedBlocks.map((block) => [idKey(block.id), block]));
+  const removedIds = new Set(
+    diff
+      .filter((entry) => entry.kind === "removed" && !proposedById.has(idKey(entry.blockId)))
+      .map((entry) => idKey(entry.blockId)),
+  );
+  for (const rawId of selectedProposalBlockIds) {
+    const key = idKey(rawId);
+    if (!proposedById.has(key) && !removedIds.has(key)) throw new Error(`Unknown selected proposal block: ${rawId}`);
   }
-  const used = new Set(currentBlocks.map((block) => block.id));
+  const used = new Set(currentBlocks.map((block) => idKey(block.id)));
   const result = [...currentBlocks];
   let salt = 0;
   for (const proposed of proposedBlocks) {
-    if (!selected.has(proposed.id)) continue;
+    const proposedKey = idKey(proposed.id);
+    if (!selected.has(proposedKey)) continue;
     let id = proposed.id;
-    while (used.has(id)) id = stableCollisionId(proposed.id, ++salt);
-    used.add(id);
+    while (used.has(idKey(id))) id = stableCollisionId(proposedKey, ++salt);
+    used.add(idKey(id));
     result.push({ ...proposed, id });
   }
   return result.map((block, position) => ({ ...block, position }));
