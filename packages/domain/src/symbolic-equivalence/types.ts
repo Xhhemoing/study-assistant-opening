@@ -1,10 +1,8 @@
 import {
   addRational as rawAddRational,
-  divideRational as rawDivideRational,
   equalRational,
   multiplyRational as rawMultiplyRational,
   rational as rawRational,
-  subtractRational as rawSubtractRational,
   type SpanRational,
 } from "../opening/span-rational";
 
