@@ -20,6 +20,7 @@ import {
 import {
   addLocalDays,
   buildDailyDraftInput,
+  carryOverTaskIds,
   dailyDraftClientKey,
   deriveDayBlocks,
   planDay,
@@ -28,6 +29,7 @@ import {
   type ReplanOffer,
   resolveLocalDayBounds,
   type PlanDayOptions,
+  type PreferredTaskOrder,
 } from "@aistudy/domain";
 import {
   createOpeningPlansRepository,
@@ -118,7 +120,8 @@ export type BuildServerPlanDayOptionsArgs = {
   date: string;
   timeZone: string;
   now: Date;
-  preferredOrder?: readonly string[];
+  preferredOrder?: PreferredTaskOrder;
+  carryOverTaskIds?: ReadonlySet<string>;
 };
 
 /**
@@ -149,6 +152,10 @@ export function buildServerPlanDayOptions(args: BuildServerPlanDayOptionsArgs): 
   }
   if (args.preferredOrder?.length) {
     options.preferredOrder = args.preferredOrder;
+  }
+  const carryOver = args.carryOverTaskIds ?? args.preferredOrder?.[carryOverTaskIds];
+  if (carryOver !== undefined) {
+    options.carryOverTaskIds = carryOver;
   }
   return options;
 }
@@ -259,7 +266,13 @@ export function createOpeningPlanService(sql: Sql, serviceOptions: OpeningPlanSe
             date,
             timeZone,
             now,
-            planDayOptions: (preferredOrder) => buildServerPlanDayOptions({ date, timeZone, now, preferredOrder }),
+            planDayOptions: (preferredOrder, carryOver) => buildServerPlanDayOptions({
+              date,
+              timeZone,
+              now,
+              preferredOrder,
+              carryOverTaskIds: carryOver,
+            }),
           });
           return {
             kind: "propose",
@@ -281,7 +294,7 @@ export function createOpeningPlanService(sql: Sql, serviceOptions: OpeningPlanSe
           return true;
         });
         const now = clock();
-        const { orderedTaskIds, reasons } = buildDailyDraftInput({
+        const { orderedTaskIds, reasons, carryOverTaskIds: dailyCarryOverTaskIds } = buildDailyDraftInput({
           tasks,
           yesterdayAccepted,
           dueRetests,
@@ -302,6 +315,7 @@ export function createOpeningPlanService(sql: Sql, serviceOptions: OpeningPlanSe
             timeZone,
             now,
             preferredOrder: orderedTaskIds,
+            carryOverTaskIds: dailyCarryOverTaskIds,
           }),
         );
         const blocks = applyDraftReasons(planned.blocks, reasons);

@@ -37,7 +37,7 @@ function setup(operationId = base) {
   return { repository, budget, complete, service, gateway };
 }
 
-it.each(["provider", "parse", "persist"] as const)("preserves safe %s diagnosis when the ledger requires unknown cost", async phase => {
+it.each(["provider", "parse", "persist"] as const)("preserves safe %s diagnosis and bills received usage", async phase => {
   const f = setup();
   const sensitive = "sk-secret https://private.example prompt answer rawresponse stack";
   const fetchImpl = vi.fn(async () => new Response(phase === "provider" ? sensitive : JSON.stringify({
@@ -48,16 +48,25 @@ it.each(["provider", "parse", "persist"] as const)("preserves safe %s diagnosis 
   const gateway = createModelGateway({ resolve: async () => ({ provider, inputCentsPerMillion: 1, outputCentsPerMillion: 1,
     modelSnapshot: { id: "fixture", providerId: "fixture", modelName: "fixture" } }) });
   f.budget.markUnknown.mockImplementation(async () => { f.repository.ledger.mockResolvedValue("unknown"); });
+  f.budget.settle.mockImplementation(async () => { f.repository.ledger.mockResolvedValue("completed"); });
   if (phase === "persist") f.repository.apply.mockRejectedValue(Object.assign(new Error(sensitive), { code: sensitive }));
   const service = createOpeningAiGradingService({ repository: f.repository, gateway, budget: () => f.budget, images: async () => [] });
   const error = await service.grade(scope, input).catch(error => error);
-  expect(error).toMatchObject({ code: "GRADING_UNKNOWN_COST" });
+  const errorCode = phase === "provider" ? "GRADING_UNKNOWN_COST" : "CONFLICT";
+  expect(error).toMatchObject({ code: errorCode });
   expect(readGradingDiagnostic(error)).toEqual({ phase, errorClass: phase === "provider" ? "OpeningProviderError" : "Error",
     code: phase === "provider" ? "PROVIDER_UNAVAILABLE" : phase === "parse" ? "GRADING_PARSE" : "UNKNOWN",
     attemptedFetch: true, httpStatus: phase === "provider" ? 503 : 200 });
   expect(JSON.stringify(readGradingDiagnostic(error))).not.toContain(sensitive);
-  await expect(service.grade(scope, input)).rejects.toMatchObject({ code: "GRADING_UNKNOWN_COST" });
+  await expect(service.grade(scope, input)).rejects.toMatchObject({ code: errorCode });
   expect(fetchImpl).toHaveBeenCalledTimes(1); expect(f.budget.release).not.toHaveBeenCalled();
+  if (phase === "provider") {
+    expect(f.budget.markUnknown).toHaveBeenCalledOnce();
+    expect(f.budget.settle).not.toHaveBeenCalled();
+  } else {
+    expect(f.budget.markUnknown).not.toHaveBeenCalled();
+    expect(f.budget.settle).toHaveBeenCalledExactlyOnceWith("fresh", 1);
+  }
 });
 
 it.each([
