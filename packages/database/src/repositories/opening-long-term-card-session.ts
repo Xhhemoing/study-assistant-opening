@@ -64,7 +64,7 @@ function requirePositiveMinutes(value: unknown, message: string): number {
   return minutes;
 }
 
-function isCardRecoveryTaskRow(task: Row): boolean {
+export function isCardRecoveryTaskRow(task: Row): boolean {
   return (
     task.status !== "skipped"
     && (
@@ -95,10 +95,23 @@ function cardSessionActivityBelongsToDay(
   );
 }
 
+async function readHasPriorCardSessionForDay(
+  tx: TransactionSql,
+  scope: Scope,
+  day: { localDate: string; timeZone: string; bounds: { dayStart: Date; nextDayStart: Date } },
+): Promise<boolean> {
+  const priorCardRows = await tx`SELECT created_at,goal_json FROM opening_teaching_activities
+    WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
+      AND (create_intent->>'protocol'='card-review-session-v1' OR goal_json ? 'cardReviewSession')
+      AND ((created_at>=${day.bounds.dayStart} AND created_at<${day.bounds.nextDayStart}) OR goal_json ? 'learningBudget')`;
+  return priorCardRows.some((row) => cardSessionActivityBelongsToDay(row as Row, day));
+}
+
 /**
  * Sums all workspace-wide card-recovery commitments overlapping `day`:
- * accepted `review_cards` plan blocks, due/completed `review_cards` tasks, and `card-review-session-v1`
- * activities — deduplicating linked `task:${id}` / `activity:${id}` references via `Math.max`.
+ * accepted `review_cards` plan blocks (clipped to `day`), due/completed `review_cards` tasks,
+ * and `card-review-session-v1` activities — deduplicating linked `task:${id}` / `activity:${id}`
+ * references via `Math.max`.
  */
 export function sumCardRecoveryMinutesForDay(input: {
   localDate: string;
@@ -153,9 +166,9 @@ export function sumCardRecoveryMinutesForDay(input: {
     const taskId = String(task.id);
     const scheduledMinutes = blockMinutes.get(taskId);
     if (scheduledMinutes !== undefined) {
-      const taskMinutes = requirePositiveMinutes(task.minutes, "已有卡片恢复任务的学习时长无法确认，请先核对今日安排。");
-      charge(`task:${taskId}`, Math.max(taskMinutes, scheduledMinutes));
-    } else if (inDay(task.due_at) || (task.status === "done" && inDay(task.updated_at))) {
+      charge(`task:${taskId}`, scheduledMinutes);
+    }
+    if (inDay(task.due_at) || (task.status === "done" && inDay(task.updated_at))) {
       const taskMinutes = requirePositiveMinutes(task.minutes, "已有卡片恢复任务的学习时长无法确认，请先核对今日安排。");
       charge(`task:${taskId}`, taskMinutes);
     }
@@ -202,6 +215,74 @@ export function sumCardRecoveryMinutesForDay(input: {
   for (const minutes of usage.values()) total += minutes;
   return total;
 }
+
+/**
+ * Symmetrically enforces the workspace-wide 30% daily card-recovery ceiling during plan confirmation
+ * whenever a draft adds or changes card-recovery (`review_cards`) blocks.
+ */
+export async function assertCardRecoveryPlanDayCap(
+  tx: TransactionSql,
+  scope: Scope,
+  input: {
+    day: {
+      budget: { dailyMinutes: number; bufferMinutes: number } | null;
+      localDate: string;
+      timeZone: string;
+      bounds: { dayStart: Date; nextDayStart: Date };
+      activities: readonly Row[];
+      tasks: readonly Row[];
+      blocks: readonly Row[];
+    };
+    postTasks: readonly Row[];
+    postBlocks: readonly Row[];
+    now: Date;
+  },
+): Promise<void> {
+  if (input.day.budget === null) return;
+  const dailyExecutableMinutes = Math.max(0, input.day.budget.dailyMinutes - input.day.budget.bufferMinutes);
+  const preCardMinutes = sumCardRecoveryMinutesForDay(input.day);
+  const postCardMinutes = sumCardRecoveryMinutesForDay({
+    localDate: input.day.localDate,
+    timeZone: input.day.timeZone,
+    bounds: input.day.bounds,
+    activities: input.day.activities,
+    tasks: input.postTasks,
+    blocks: input.postBlocks,
+  });
+  if (postCardMinutes <= preCardMinutes + 1e-6) return;
+
+  const strictCap = Math.floor((dailyExecutableMinutes * 3) / 10);
+  let effectiveCap = strictCap;
+  if (
+    dailyExecutableMinutes >= 15
+    && dailyExecutableMinutes < 34
+    && preCardMinutes === 0
+    && postCardMinutes > strictCap
+    && postCardMinutes <= Math.min(10, Math.floor(dailyExecutableMinutes))
+  ) {
+    const hasPriorToday = await readHasPriorCardSessionForDay(tx, scope, input.day);
+    if (!hasPriorToday) {
+      const cards = createCardRepository(tx as unknown as Sql);
+      const isBacklogRecovery = (await cards.listQueue({
+        ...scope,
+        mode: "auto",
+        now: input.now,
+        timeZone: input.day.timeZone,
+      })).length >= 200;
+      if (!isBacklogRecovery) {
+        effectiveCap = Math.max(Math.min(10, Math.floor(dailyExecutableMinutes)), strictCap);
+      }
+    }
+  }
+
+  if (postCardMinutes > effectiveCap + 1e-6) {
+    const displayCap = Number.isInteger(effectiveCap) ? effectiveCap : Number(effectiveCap.toFixed(2));
+    throw learningError(
+      "CONFLICT",
+      `新的安排超出今日卡片恢复可用上限（${displayCap} 分钟，不超过每日可执行学习时长的 30%），请缩短或调整卡片复习安排；已接受事项保留。`,
+    );
+  }
+}
 export function mapLearningCardSession(row: Row): LearningCardSession {
   const goal = object(object(row.goal_json).cardReviewSession), state = object(object(row.checkpoint_json).cardReviewSession);
   const cardIds = Array.isArray(goal.orderedCardIds) ? goal.orderedCardIds : goal.cardIds;
@@ -247,14 +328,8 @@ export async function writeLearningCardSession(sql: Sql, scope: Scope, raw: unkn
     if (capacity.budget !== null) {
       const dailyExecutableMinutes = Math.max(0, capacity.budget.dailyMinutes - capacity.budget.bufferMinutes);
       const usedOrReservedCardSessionMinutes = sumCardRecoveryMinutesForDay(capacity);
-      let hasPriorCardSessionToday = usedOrReservedCardSessionMinutes > 0;
-      if (!hasPriorCardSessionToday) {
-        const priorCardRows = await tx`SELECT created_at,goal_json FROM opening_teaching_activities
-          WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
-            AND (create_intent->>'protocol'='card-review-session-v1' OR goal_json ? 'cardReviewSession')
-            AND ((created_at>=${capacity.bounds.dayStart} AND created_at<${capacity.bounds.nextDayStart}) OR goal_json ? 'learningBudget')`;
-        hasPriorCardSessionToday = priorCardRows.some((row) => cardSessionActivityBelongsToDay(row as Row, capacity));
-      }
+      const hasPriorCardSessionToday = usedOrReservedCardSessionMinutes > 0
+        || await readHasPriorCardSessionForDay(tx, scope, capacity);
       const strictCap = Math.floor((dailyExecutableMinutes * 3) / 10);
       const isBacklogRecovery = dailyExecutableMinutes < 34
         && !hasPriorCardSessionToday

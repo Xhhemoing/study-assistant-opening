@@ -8,11 +8,12 @@ import {
   type Scope,
 } from "@aistudy/contracts";
 import type { TransactionSql } from "postgres";
-import { resolveLocalDayBounds } from "@aistudy/domain";
+import { addLocalDays, localDateKeyInZone, resolveLocalDayBounds } from "@aistudy/domain";
 import { collectNonDaySpilloverBlocks, readOpeningLearningCapacity } from "./opening-learning-capacity";
 import { calculateSpanTutorBudgetUsage, evaluateDayPlanCapacity } from "./opening-learning-capacity-usage";
 import { assertLearningGoalAction } from "./opening-learning-goals";
 import { learningError } from "./opening-learning-facts";
+import { assertCardRecoveryPlanDayCap, isCardRecoveryTaskRow } from "./opening-long-term-card-session";
 import { OpeningPlanError } from "./opening-plan-error";
 
 /** Existing accept transaction owns locks and historical receipt replay before this check. */
@@ -40,7 +41,13 @@ export async function assertOpeningLearningManagementDraft(tx: TransactionSql, s
   const state = await readOpeningLearningCapacity(tx, scope, resolveLocalDayBounds(day, current.timeZone).dayStart);
   const blocks = plannedBlockSchema.array().parse(draft.blocks ?? []);
   const fresh = blocks.filter(block => !state.blocks.some(old => old.taskId === block.taskId && old.start === block.start && old.end === block.end));
-  const suggestions = (draft.suggested_tasks ?? []) as Array<{ id: string; courseId?: string | null }>;
+  const suggestions = (draft.suggested_tasks ?? []) as Array<{
+    id: string;
+    courseId?: string | null;
+    key?: string;
+    kind?: string;
+    minutes?: number;
+  }>;
   const taskIds = fresh.map(block => block.taskId);
   const actualCourses = await tx`SELECT DISTINCT course_id FROM opening_tasks WHERE id=ANY(${taskIds}::uuid[]) AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND course_id IS NOT NULL`;
   const courseIds = [...new Set([...actualCourses.map(row => String(row.course_id)), ...suggestions.filter(item => taskIds.includes(item.id) && item.courseId).map(item => item.courseId!)])];
@@ -75,6 +82,68 @@ export async function assertOpeningLearningManagementDraft(tx: TransactionSql, s
     }
     if (evaluated.shortfallMinutes > 0) {
       throw new OpeningPlanError("CONFLICT", "新的安排超出今日临时可用时长上限，请先调整今日安排；已接受事项保留。", "stale_version");
+    }
+  }
+  if (fresh.length) {
+    const placedTaskIds = new Set(blocks.map((block) => block.taskId));
+    const syntheticSuggestionsFor = (existingTasks: readonly Record<string, unknown>[]) => {
+      const existingIds = new Set(existingTasks.map((task) => String(task.id)));
+      return suggestions
+        .filter((item) => placedTaskIds.has(item.id) && !existingIds.has(item.id))
+        .map((item) => ({
+          id: item.id,
+          origin: "planner",
+          client_key: item.key ?? null,
+          suggestion_kind: item.kind ?? null,
+          minutes: item.minutes,
+          due_at: null,
+          status: "pending",
+          course_id: item.courseId ?? null,
+        }));
+    };
+    const dayPostTasks = [...state.tasks, ...syntheticSuggestionsFor(state.tasks)];
+    const cardRecoveryTaskIds = new Set(
+      dayPostTasks.filter(isCardRecoveryTaskRow).map((task) => String(task.id)),
+    );
+    const freshCardBlocks = fresh.filter((block) => cardRecoveryTaskIds.has(block.taskId));
+    if (freshCardBlocks.length) {
+      const daysToCheck = new Set<string>();
+      for (const block of freshCardBlocks) {
+        const startMs = Date.parse(block.start);
+        const endMs = Date.parse(block.end);
+        if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) continue;
+        let cursor = localDateKeyInZone(new Date(startMs), current.timeZone);
+        const endDate = localDateKeyInZone(new Date(endMs - 1), current.timeZone);
+        for (let step = 0; step < 3; step += 1) {
+          daysToCheck.add(cursor);
+          if (cursor >= endDate) break;
+          cursor = addLocalDays(cursor, 1);
+        }
+      }
+      for (const targetDay of daysToCheck) {
+        const targetState = targetDay === state.localDate
+          ? state
+          : await readOpeningLearningCapacity(
+              tx,
+              scope,
+              resolveLocalDayBounds(targetDay, current.timeZone).dayStart,
+            );
+        const targetPostTasks = targetDay === state.localDate
+          ? dayPostTasks
+          : [...targetState.tasks, ...syntheticSuggestionsFor(targetState.tasks)];
+        const spilloverBlocks = collectNonDaySpilloverBlocks({
+          day: draftDay,
+          dayStartMs: targetState.bounds.dayStart.getTime(),
+          nextDayStartMs: targetState.bounds.nextDayStart.getTime(),
+          planEntries: targetState.planEntries,
+        });
+        await assertCardRecoveryPlanDayCap(tx, scope, {
+          day: targetState,
+          postTasks: targetPostTasks,
+          postBlocks: [...blocks, ...spilloverBlocks],
+          now,
+        });
+      }
     }
   }
   if (!current.budget && !meta) return;
