@@ -385,6 +385,52 @@ export function runTutorGraph(input: TutorGraphInput): TutorGraphResult {
     );
   }
 
+  let verifiedPureFallback: { caps: PublicTeachingCaps; text: string } | null = null;
+  if (isPureTurn) {
+    const pureFallbackCandidates: ReadonlyArray<{ text: string; rationale: string }> = [
+      { text: PURE_SAFE_CONSERVATIVE_PROMPT, rationale: "请先整体复查关键条件与每一步推导依据" },
+      { text: "Attempt recorded.", rationale: "Attempt recorded." },
+      { text: "Step recorded.", rationale: "Step recorded." },
+    ];
+    for (const candidate of pureFallbackCandidates) {
+      const candidateCaps: PublicTeachingCaps = {
+        questionStem: "",
+        learnerSteps: [],
+        movePlan: { move: "concept_cue", rationale: candidate.rationale },
+        publicBlocks: [{ kind: "question", text: candidate.text }],
+      };
+      const candidateReleased = guardRelease(candidateCaps, { steps: [] }, input.releaseCaps);
+      if (isStopped(input.releaseCaps.stopSignal) || isStopped(input.verifyCaps.stopSignal)) {
+        return {
+          state: "stopped",
+          providerCalls: 0,
+          verification: { steps: [] },
+          leakageBits: budget.leakageBits,
+          helpState: budget.state,
+          cooldownUntilMs: budget.cooldownUntilMs,
+          releaseApproved: false,
+          reason: "cancelled",
+        };
+      }
+      if (candidateReleased !== undefined) {
+        verifiedPureFallback = { caps: candidateCaps, text: candidate.text };
+        break;
+      }
+    }
+    if (!verifiedPureFallback) {
+      return {
+        state: "unverified",
+        providerCalls: 0,
+        verification: { steps: [] },
+        leakageBits: budget.leakageBits,
+        helpState: budget.state,
+        cooldownUntilMs: budget.cooldownUntilMs,
+        releaseApproved: false,
+        reason: "release_guard_rejected",
+      };
+    }
+  }
+
   input.verifyCaps.assertCurrent();
   let verification: VerifyOutput;
   try {
@@ -496,11 +542,8 @@ export function runTutorGraph(input: TutorGraphInput): TutorGraphResult {
     };
   }
   if (releasedText === undefined && isPureTurn) {
-    publicTeaching = toPublicCaps("", [], verification, {
-      coarsened: true,
-      allVerifiedValid: false,
-    });
-    releasedText = PURE_SAFE_CONSERVATIVE_PROMPT;
+    publicTeaching = verifiedPureFallback!.caps;
+    releasedText = verifiedPureFallback!.text;
   }
 
   budget.commitRelease(requiredBits, nowMs);

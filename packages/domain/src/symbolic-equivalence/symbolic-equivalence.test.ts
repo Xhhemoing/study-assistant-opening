@@ -939,6 +939,35 @@ describe("bounded symbolic equivalence", () => {
     });
     expect(differentiate(deepSumAst, "x")).toBeNull();
     expect(simplifyRadical(deepSumAst)).toBe(deepSumAst);
+
+    // Round-17 P1-2: multivariate LaTeX matrices evaluate all cells simultaneously at each sample point
+    expect(
+      verifyMatrixExpressionEquivalence(
+        "\\begin{pmatrix} 1/(x-x) & y \\end{pmatrix}",
+        "\\begin{pmatrix} 1/(x-x) & y+1 \\end{pmatrix}",
+      ).status,
+    ).toBe("unverified");
+    expect(
+      verifyMatrixExpressionEquivalence(
+        "\\begin{pmatrix} 1/(x-x) & y \\end{pmatrix}",
+        "\\begin{pmatrix} 1/(x-x) & y \\end{pmatrix}",
+      ).status,
+    ).toBe("unverified");
+    expect(
+      verifyMatrixExpressionEquivalence(
+        "\\begin{pmatrix} 1/(x-1) & y \\end{pmatrix}",
+        "\\begin{pmatrix} 1/(x-1) & y+1 \\end{pmatrix}",
+      ).status,
+    ).toBe("inequivalent");
+    expect(
+      verifyMatrixExpressionEquivalence(
+        "\\begin{pmatrix} 1/(x-1) & y \\end{pmatrix}",
+        "\\begin{pmatrix} x/(x^2-x) & y \\end{pmatrix}",
+      ),
+    ).toMatchObject({
+      status: "inequivalent",
+      reason: "natural_domain_mismatch",
+    });
   });
 });
 

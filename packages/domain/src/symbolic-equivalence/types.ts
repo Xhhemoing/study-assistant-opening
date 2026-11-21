@@ -6189,16 +6189,223 @@ function collectMultivarDivDens(expr: ScalarExpr): ScalarExpr[] {
   return dens;
 }
 
+type MultivarEvalResult =
+  | { status: "exact"; value: SpanRational }
+  | { status: "float"; value: number; err: number; marginOk: boolean }
+  | { status: "undefined_domain" }
+  | { status: "unsupported" };
+
+function evalMultivarFloat(
+  expr: ScalarExpr,
+  env: ReadonlyMap<string, SpanRational>,
+  depth = 0,
+): FloatEvalResult {
+  if (depth > MAX_AST_WALK_DEPTH) throw new PolyComplexityError();
+  const BOUND_EPS = 1e-9;
+  switch (expr.kind) {
+    case "const": {
+      const q = toRational(expr.value);
+      if (q) {
+        const arg = rationalToFloatArg(q);
+        if (!arg) return { status: "unstable" };
+        return { status: "ok", value: arg.fx, err: arg.xRadius, marginOk: true, irrational: false };
+      }
+      const val = Number(expr.value);
+      return Number.isFinite(val)
+        ? {
+            status: "ok",
+            value: val,
+            err: Number.isSafeInteger(val) ? 0 : Math.abs(val) * 1e-13 + Number.MIN_VALUE,
+            marginOk: true,
+            irrational: !Number.isInteger(val),
+          }
+        : { status: "unstable" };
+    }
+    case "variable": {
+      const q = env.get(expr.name);
+      if (!q) return { status: "unstable" };
+      const arg = rationalToFloatArg(q);
+      if (!arg) return { status: "unstable" };
+      return {
+        status: "ok",
+        value: arg.fx,
+        err: arg.xRadius,
+        marginOk: arg.xRadius === 0 || Math.abs(arg.fx) > BOUND_EPS + arg.xRadius,
+        irrational: arg.xRadius > 0,
+      };
+    }
+    case "neg": {
+      const inner = evalMultivarFloat(expr.value, env, depth + 1);
+      return inner.status === "ok"
+        ? { status: "ok", value: -inner.value, err: inner.err, marginOk: inner.marginOk, irrational: inner.irrational }
+        : inner;
+    }
+    case "abs": {
+      const inner = evalMultivarFloat(expr.value, env, depth + 1);
+      return inner.status === "ok"
+        ? {
+            status: "ok",
+            value: Math.abs(inner.value),
+            err: inner.err,
+            marginOk: inner.marginOk && Math.abs(inner.value) > BOUND_EPS + inner.err,
+            irrational: inner.irrational,
+          }
+        : inner;
+    }
+    case "sqrt": {
+      const inner = evalMultivarFloat(expr.value, env, depth + 1);
+      if (inner.status !== "ok") return inner;
+      if (inner.value + inner.err < -BOUND_EPS) return { status: "undefined_domain", reason: "even_root_domain" };
+      if (inner.value === 0 && !inner.irrational && inner.err === 0) {
+        return { status: "ok", value: 0, err: 0, marginOk: inner.marginOk, irrational: false };
+      }
+      if (inner.value - inner.err < BOUND_EPS) return { status: "unstable" };
+      const s = Math.sqrt(inner.value);
+      const err = inner.err / (2 * Math.sqrt(inner.value - inner.err)) + s * 1e-13;
+      return Number.isFinite(err)
+        ? { status: "ok", value: s, err, marginOk: inner.marginOk, irrational: true }
+        : { status: "unstable" };
+    }
+    case "ln": {
+      const inner = evalMultivarFloat(expr.value, env, depth + 1);
+      if (inner.status !== "ok") return inner;
+      if (inner.value + inner.err < -BOUND_EPS) return { status: "undefined_domain", reason: "ln_domain" };
+      if (inner.value - inner.err <= BOUND_EPS) return { status: "unstable" };
+      const val = Math.log(inner.value);
+      const err = inner.err / (inner.value - inner.err) + Math.abs(val) * 1e-13;
+      return Number.isFinite(err)
+        ? { status: "ok", value: val, err, marginOk: inner.marginOk, irrational: true }
+        : { status: "unstable" };
+    }
+    case "sin":
+    case "cos":
+    case "exp": {
+      const inner = evalMultivarFloat(expr.value, env, depth + 1);
+      if (inner.status !== "ok") return inner;
+      if (expr.kind === "exp" && (inner.value + inner.err > 50 || inner.value - inner.err < -50 || inner.err > 10)) {
+        return { status: "unstable" };
+      }
+      const val = expr.kind === "sin" ? Math.sin(inner.value) : expr.kind === "cos" ? Math.cos(inner.value) : Math.exp(inner.value);
+      const err =
+        expr.kind === "exp"
+          ? Math.exp(inner.value + inner.err) - val + val * 1e-13
+          : inner.err + Math.abs(val) * 1e-13 + 1e-15;
+      return Number.isFinite(err)
+        ? { status: "ok", value: val, err, marginOk: inner.marginOk, irrational: true }
+        : { status: "unstable" };
+    }
+    case "add":
+    case "sub":
+    case "mul":
+    case "div": {
+      const l = evalMultivarFloat(expr.left, env, depth + 1);
+      const r = evalMultivarFloat(expr.right, env, depth + 1);
+      if (l.status === "undefined_domain") return l;
+      if (r.status === "undefined_domain") return r;
+      if (l.status !== "ok" || r.status !== "ok") return { status: "unstable" };
+      if (expr.kind === "div") {
+        if (Math.abs(r.value) <= BOUND_EPS + r.err) return { status: "unstable" };
+        const val = l.value / r.value;
+        const rMin = Math.abs(r.value) - r.err;
+        const err = (l.err + Math.abs(l.value) * (r.err / rMin)) / rMin + Math.abs(val) * 1e-13;
+        return Number.isFinite(val) && Number.isFinite(err) && Math.abs(val) < 1e10
+          ? { status: "ok", value: val, err, marginOk: l.marginOk && r.marginOk, irrational: l.irrational || r.irrational }
+          : { status: "unstable" };
+      }
+      const val = expr.kind === "add" ? l.value + r.value : expr.kind === "sub" ? l.value - r.value : l.value * r.value;
+      const err =
+        expr.kind === "mul"
+          ? Math.abs(l.value) * r.err + Math.abs(r.value) * l.err + l.err * r.err + Math.abs(val) * 1e-13
+          : l.err + r.err + (Math.abs(l.value) + Math.abs(r.value)) * 1e-14 + Math.abs(val) * 1e-14;
+      return Number.isFinite(val) && Number.isFinite(err) && Math.abs(val) < 1e10
+        ? { status: "ok", value: val, err, marginOk: l.marginOk && r.marginOk, irrational: l.irrational || r.irrational }
+        : { status: "unstable" };
+    }
+    case "pow": {
+      const b = evalMultivarFloat(expr.base, env, depth + 1);
+      if (b.status !== "ok") return b;
+      if (expr.exponent <= 0 && b.value === 0 && b.err === 0) {
+        return { status: "undefined_domain", reason: "natural_domain_denominator_zero" };
+      }
+      if (expr.exponent <= 0 && Math.abs(b.value) <= BOUND_EPS + b.err) return { status: "unstable" };
+      const val = b.value ** expr.exponent;
+      if (!Number.isFinite(val) || Math.abs(val) >= 1e10) return { status: "unstable" };
+      if (expr.exponent === 0) return { status: "ok", value: 1, err: 0, marginOk: b.marginOk, irrational: false };
+      const boundBase = expr.exponent > 0 ? Math.abs(b.value) + b.err : Math.abs(b.value) - b.err;
+      const err = Math.abs(boundBase ** expr.exponent - Math.abs(val)) + Math.abs(val) * 1e-13;
+      return Number.isFinite(err)
+        ? { status: "ok", value: val, err, marginOk: b.marginOk, irrational: b.irrational }
+        : { status: "unstable" };
+    }
+  }
+}
+
+function evalMultivarPoint(expr: ScalarExpr, env: ReadonlyMap<string, SpanRational>): MultivarEvalResult {
+  const exact = evalMultivarRational(expr, env);
+  if (exact.status === "value") return { status: "exact", value: exact.value };
+  if (exact.status === "undefined_domain") return { status: "undefined_domain" };
+  const flt = evalMultivarFloat(expr, env);
+  if (flt.status === "undefined_domain") return { status: "undefined_domain" };
+  if (flt.status === "ok") return { status: "float", value: flt.value, err: flt.err, marginOk: flt.marginOk };
+  return { status: "unsupported" };
+}
+
+function multivarValuesDiffer(sv: MultivarEvalResult, rv: MultivarEvalResult): "different" | "equal" | "uncertain" {
+  if (sv.status === "exact" && rv.status === "exact") {
+    return equalRational(sv.value, rv.value) ? "equal" : "different";
+  }
+  const toF = (res: MultivarEvalResult): { value: number; err: number; marginOk: boolean } | null => {
+    if (res.status === "float") return res;
+    if (res.status === "exact") {
+      const arg = rationalToFloatArg(res.value);
+      return arg ? { value: arg.fx, err: arg.xRadius, marginOk: true } : null;
+    }
+    return null;
+  };
+  const sf = toF(sv);
+  const rf = toF(rv);
+  if (!sf || !rf || !sf.marginOk || !rf.marginOk) return "uncertain";
+  const tol = 1e-6 * Math.max(1, Math.abs(sf.value), Math.abs(rf.value)) + sf.err + rf.err;
+  return Math.abs(sf.value - rf.value) > tol ? "different" : "equal";
+}
+
 function verifyMultivariateScalarPairs(
   pairs: Array<{ sExpr: ScalarExpr; rExpr: ScalarExpr }>,
   domain: DomainSpec | undefined,
 ): VerificationResult {
   const allVars = new Set<string>();
   let anyDivOrNonRat = false;
+  const univarDenRoots = new Map<string, SpanRational[]>();
+  const addDenRoot = (v: string, q: SpanRational) => {
+    const list = univarDenRoots.get(v) ?? [];
+    if (list.length < 6 && !list.some((x) => equalRational(x, q))) {
+      list.push(q);
+      univarDenRoots.set(v, list);
+    }
+  };
+  const collectDenRoots = (expr: ScalarExpr) => {
+    for (const den of collectMultivarDivDens(expr)) {
+      const dVars = collectVariables(den);
+      if (dVars.size !== 1) continue;
+      const v = [...dVars][0]!;
+      const rf = rationalForm(den, v);
+      if (!rf.unsupported && polynomialDegree(rf.numerator) >= 1) {
+        const { roots } = isolateRealRoots(rf.numerator, { left: null, right: null, leftOpen: true, rightOpen: true });
+        for (const root of roots) {
+          if (root.kind === "exact") addDenRoot(v, root.value);
+        }
+      }
+    }
+  };
+
   for (const { sExpr, rExpr } of pairs) {
     for (const v of collectVariables(sExpr)) allVars.add(v);
     for (const v of collectVariables(rExpr)) allVars.add(v);
-    if (collectMultivarDivDens(sExpr).length > 0 || collectMultivarDivDens(rExpr).length > 0) anyDivOrNonRat = true;
+    if (collectMultivarDivDens(sExpr).length > 0 || collectMultivarDivDens(rExpr).length > 0) {
+      anyDivOrNonRat = true;
+      collectDenRoots(sExpr);
+      collectDenRoots(rExpr);
+    }
     if (hasTranscendental(sExpr) || hasTranscendental(rExpr)) anyDivOrNonRat = true;
     const hasSqrtOrAbs = (e: ScalarExpr): boolean => {
       const st: ScalarExpr[] = [e];
@@ -6234,51 +6441,117 @@ function verifyMultivariateScalarPairs(
   }
   const varList = [...allVars].sort();
 
-  for (const { sExpr, rExpr } of pairs) {
-    if (anyDivOrNonRat) {
-      for (let sampleIdx = 0; sampleIdx < 16; sampleIdx++) {
-        const env = new Map<string, SpanRational>();
-        varList.forEach((v, vi) => {
-          const raw = ((sampleIdx + vi * 3) % 7) - 3;
-          env.set(v, rational(BigInt(raw === 0 ? 5 : raw)));
-        });
-        const sv = evalMultivarRational(sExpr, env);
-        const rv = evalMultivarRational(rExpr, env);
-        if (sv.status === "undefined_domain" && rv.status === "value") {
-          return { status: "inequivalent", reason: "natural_domain_mismatch", witness: { input: varList.map((v) => `${v}=${formatRational(env.get(v)!)}`).join(","), detail: "student undefined" }, domain };
-        }
-        if (rv.status === "undefined_domain" && sv.status === "value") {
-          return { status: "inequivalent", reason: "natural_domain_mismatch", witness: { input: varList.map((v) => `${v}=${formatRational(env.get(v)!)}`).join(","), detail: "reference undefined" }, domain };
-        }
-        if (sv.status === "value" && rv.status === "value" && !equalRational(sv.value, rv.value)) {
-          return { status: "inequivalent", reason: "exact_radical_counterexample", witness: { input: varList.map((v) => `${v}=${formatRational(env.get(v)!)}`).join(","), detail: "multivariate values differ" }, domain };
+  const buildSampleEnvs = (): Array<Map<string, SpanRational>> => {
+    const envs: Array<Map<string, SpanRational>> = [];
+    const seenKeys = new Set<string>();
+    const pushEnv = (env: Map<string, SpanRational>) => {
+      const key = varList.map((v) => formatRational(env.get(v)!)).join(",");
+      if (!seenKeys.has(key)) {
+        seenKeys.add(key);
+        envs.push(env);
+      }
+    };
+    for (const v of varList) {
+      addDenRoot(v, rational(0n));
+      addDenRoot(v, rational(1n));
+      addDenRoot(v, rational(-1n));
+    }
+    for (const [targetVar, roots] of univarDenRoots) {
+      for (const root of roots) {
+        for (const fill of [1n, 2n, -1n]) {
+          const env = new Map<string, SpanRational>();
+          for (const v of varList) {
+            env.set(v, v === targetVar ? root : rational(fill));
+          }
+          pushEnv(env);
         }
       }
-      return { status: "unverified", reason: "foreign_variable", domain };
     }
+    for (let sampleIdx = 0; sampleIdx < 24; sampleIdx++) {
+      const env = new Map<string, SpanRational>();
+      varList.forEach((v, vi) => {
+        const raw = ((sampleIdx + vi * 3) % 7) - 3;
+        env.set(v, rational(BigInt(raw)));
+      });
+      pushEnv(env);
+    }
+    return envs;
+  };
+
+  const sampleEnvs = buildSampleEnvs();
+  const formatEnv = (env: ReadonlyMap<string, SpanRational>): string =>
+    varList.map((v) => `${v}=${formatRational(env.get(v)!)}`).join(",");
+
+  let jointMatrixDefinedCount = 0;
+  let hasUnresolved = false;
+
+  for (const env of sampleEnvs) {
+    const sVals = pairs.map((p) => evalMultivarPoint(p.sExpr, env));
+    const rVals = pairs.map((p) => evalMultivarPoint(p.rExpr, env));
+    const sAnyUndef = sVals.some((v) => v.status === "undefined_domain");
+    const rAnyUndef = rVals.some((v) => v.status === "undefined_domain");
+    const sAnyUnsup = sVals.some((v) => v.status === "unsupported");
+    const rAnyUnsup = rVals.some((v) => v.status === "unsupported");
+
+    if (sAnyUndef && rAnyUndef) {
+      continue;
+    }
+    if (sAnyUndef && !rAnyUndef && !rAnyUnsup) {
+      return {
+        status: "inequivalent",
+        reason: "natural_domain_mismatch",
+        witness: { input: formatEnv(env), detail: "student undefined" },
+        domain,
+      };
+    }
+    if (rAnyUndef && !sAnyUndef && !sAnyUnsup) {
+      return {
+        status: "inequivalent",
+        reason: "natural_domain_mismatch",
+        witness: { input: formatEnv(env), detail: "reference undefined" },
+        domain,
+      };
+    }
+    if (sAnyUndef || rAnyUndef || sAnyUnsup || rAnyUnsup) {
+      hasUnresolved = true;
+      continue;
+    }
+
+    jointMatrixDefinedCount++;
+    for (let pIdx = 0; pIdx < pairs.length; pIdx++) {
+      const sv = sVals[pIdx]!;
+      const rv = rVals[pIdx]!;
+      if (multivarValuesDiffer(sv, rv) === "different") {
+        const isExact = sv.status === "exact" && rv.status === "exact";
+        return {
+          status: "inequivalent",
+          reason: isExact ? "exact_radical_counterexample" : "numeric_counterexample",
+          witness: { input: formatEnv(env), detail: "multivariate values differ" },
+          domain,
+        };
+      }
+    }
+  }
+
+  if (jointMatrixDefinedCount === 0) {
+    return {
+      status: "unverified",
+      reason: hasUnresolved ? "unresolved_nonrational_domain" : "empty_natural_domain",
+      domain,
+    };
+  }
+
+  if (anyDivOrNonRat) {
+    return { status: "unverified", reason: "foreign_variable", domain };
+  }
+
+  for (const { sExpr, rExpr } of pairs) {
     const reg: RingAtomRegistry = { sqrtDefs: new Map(), absDefs: new Map(), sinPairs: new Map(), expExps: new Map() };
     const sn = ringNormalizeRational(sExpr, "__mv__", [], reg, []);
     const rn = ringNormalizeRational(rExpr, "__mv__", [], reg, []);
     if (!sn || !rn) return { status: "unverified", reason: "foreign_variable", domain };
     const diff = mpolyAdd(mpolyMultiply(sn.num, rn.den, reg), mpolyMultiply(rn.num, sn.den, reg), -1);
     if (diff.size !== 0) {
-      for (let sampleIdx = 0; sampleIdx < 24; sampleIdx++) {
-        const env = new Map<string, SpanRational>();
-        varList.forEach((v, vi) => {
-          const raw = sampleIdx === 0 ? vi + 1 : ((sampleIdx * 5 + vi * 7 + 1) % 11) - 5;
-          env.set(v, rational(BigInt(raw)));
-        });
-        const sv = evalMultivarRational(sExpr, env);
-        const rv = evalMultivarRational(rExpr, env);
-        if (sv.status === "value" && rv.status === "value" && !equalRational(sv.value, rv.value)) {
-          return {
-            status: "inequivalent",
-            reason: "exact_radical_counterexample",
-            witness: { input: varList.map((v) => `${v}=${formatRational(env.get(v)!)}`).join(","), detail: "multivariate values differ" },
-            domain,
-          };
-        }
-      }
       return {
         status: "inequivalent",
         reason: "non_commutative_residual_nonzero",

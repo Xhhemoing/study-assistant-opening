@@ -787,6 +787,61 @@ describe("TutorGraph fast path", () => {
     expect(stemBlockedPure.releaseApproved).toBe(true);
     expect(stemBlockedBudget.leakageBits).toBe(1);
     expect(JSON.stringify(stemBlockedPure)).not.toContain("SECRET_ANSWER_42");
+
+    // Round-17 P1-1: preflight pure fallback must pass guardRelease when primary prompt contains blocked key ("推导依据"),
+    // and unconditional guard rejection must fail closed with 0 verifier calls and 0 leaked bits.
+    const secondaryFallbackBudget = createMinEntropyBudget({ scaffoldBitBudget: 1.5, now: () => 1000 });
+    const secondaryFallbackRes = runTutorGraph({
+      questionStem: "Contains 推导依据 in stem",
+      submission: { steps: [{ id: "s1", text: "any" }] },
+      budget: secondaryFallbackBudget,
+      attemptSubmitted: true,
+      verifyCaps: { verify: () => ({ steps: [{ id: "s1", text: "a", status: "invalid" }] }), assertCurrent: () => undefined },
+      releaseCaps: { assertCurrent: () => undefined, answerLeakageBlocker: (text) => text.includes("推导依据") },
+    });
+    expect(secondaryFallbackRes.state).toBe("released");
+    expect(secondaryFallbackRes.releaseApproved).toBe(true);
+    expect(secondaryFallbackRes.releasedText).toBe("Attempt recorded.");
+    expect(secondaryFallbackBudget.leakageBits).toBe(1);
+    expect(JSON.stringify(secondaryFallbackRes)).not.toContain("推导依据");
+
+    let unconditionalVerifyCalls = 0;
+    const rejectRightBudget = createMinEntropyBudget({ scaffoldBitBudget: 1.5, now: () => 1000 });
+    const rejectWrongBudget = createMinEntropyBudget({ scaffoldBitBudget: 1.5, now: () => 1000 });
+    const rejectRight = runTutorGraph({
+      questionStem: "积分",
+      submission: { steps: [{ id: "s1", text: "SECRET_42" }] },
+      budget: rejectRightBudget,
+      attemptSubmitted: true,
+      verifyCaps: {
+        verify: () => {
+          unconditionalVerifyCalls++;
+          return { steps: [{ id: "s1", text: "SECRET_42", status: "valid" }] };
+        },
+        assertCurrent: () => undefined,
+      },
+      releaseCaps: { assertCurrent: () => undefined, answerLeakageBlocker: () => true },
+    });
+    const rejectWrong = runTutorGraph({
+      questionStem: "积分",
+      submission: { steps: [{ id: "s1", text: "wrong" }] },
+      budget: rejectWrongBudget,
+      attemptSubmitted: true,
+      verifyCaps: {
+        verify: () => {
+          unconditionalVerifyCalls++;
+          return { steps: [{ id: "s1", text: "wrong", status: "invalid" }] };
+        },
+        assertCurrent: () => undefined,
+      },
+      releaseCaps: { assertCurrent: () => undefined, answerLeakageBlocker: () => true },
+    });
+    expect(unconditionalVerifyCalls).toBe(0);
+    expect(rejectRight).toMatchObject({ state: "unverified", releaseApproved: false, reason: "release_guard_rejected" });
+    expect(rejectRight).toEqual(rejectWrong);
+    expect(rejectRightBudget.leakageBits).toBe(0);
+    expect(rejectWrongBudget.leakageBits).toBe(0);
+
     expect(zeroBitOutcomes.size).toBe(1);
     expect(oneBitOutcomes.size).toBe(2);
 
