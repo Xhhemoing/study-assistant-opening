@@ -12,6 +12,7 @@ export function confirmOwnedMemory(
   id: string,
   expectedVersion: number,
   clientKey: string,
+  now: () => Date = () => new Date(),
 ): Promise<MemoryItem> {
   return sql.begin(async (tx) => {
     const owners = await tx`SELECT id FROM workspaces
@@ -46,6 +47,200 @@ export function confirmOwnedMemory(
     }
     if (current.status !== "active" || current.kind === "confirmed") {
       throw new OpeningMemoryError("CONFLICT", "memory cannot be confirmed");
+    }
+    if (current.kind === "temporary" || current.sourceTurnIds.length > 0) {
+      const admitted = await tx`
+        SELECT m.id, (
+          WITH RECURSIVE mem_deps(dep_id) AS (
+            SELECT lower(dep.id)
+            FROM jsonb_array_elements_text(
+              CASE WHEN jsonb_typeof(m.source_turn_ids) = 'array' THEN m.source_turn_ids ELSE '[]'::jsonb END
+            ) AS st(turn_id)
+            JOIN opening_turns dt ON dt.id::text = lower(st.turn_id) AND dt.workspace_id = m.workspace_id
+            CROSS JOIN LATERAL jsonb_array_elements(
+              CASE WHEN jsonb_typeof(dt.context_source_refs) = 'array' THEN dt.context_source_refs ELSE '[]'::jsonb END
+            ) AS dep_elem
+            CROSS JOIN LATERAL jsonb_array_elements_text(
+              CASE WHEN dep_elem = jsonb_build_object('memoryDependencyIds', dep_elem->'memoryDependencyIds')
+                AND jsonb_typeof(dep_elem->'memoryDependencyIds') = 'array'
+                THEN dep_elem->'memoryDependencyIds' ELSE '[]'::jsonb END
+            ) AS dep(id)
+            UNION
+            SELECT lower(dep.id)
+            FROM mem_deps prev
+            JOIN opening_memories pm ON pm.id::text = prev.dep_id AND pm.workspace_id = m.workspace_id
+            CROSS JOIN LATERAL jsonb_array_elements_text(
+              CASE WHEN jsonb_typeof(pm.source_turn_ids) = 'array' THEN pm.source_turn_ids ELSE '[]'::jsonb END
+            ) AS st(turn_id)
+            JOIN opening_turns dt ON dt.id::text = lower(st.turn_id) AND dt.workspace_id = m.workspace_id
+            CROSS JOIN LATERAL jsonb_array_elements(
+              CASE WHEN jsonb_typeof(dt.context_source_refs) = 'array' THEN dt.context_source_refs ELSE '[]'::jsonb END
+            ) AS dep_elem
+            CROSS JOIN LATERAL jsonb_array_elements_text(
+              CASE WHEN dep_elem = jsonb_build_object('memoryDependencyIds', dep_elem->'memoryDependencyIds')
+                AND jsonb_typeof(dep_elem->'memoryDependencyIds') = 'array'
+                THEN dep_elem->'memoryDependencyIds' ELSE '[]'::jsonb END
+            ) AS dep(id)
+          )
+          SELECT min(dep_m.expires_at)
+          FROM mem_deps d
+          JOIN opening_memories dep_m ON dep_m.id::text = d.dep_id
+            AND dep_m.workspace_id = m.workspace_id
+            AND dep_m.status = 'active'
+            AND dep_m.course_id IS NULL
+            AND dep_m.kind = 'temporary'
+            AND dep_m.expires_at IS NOT NULL
+        ) AS ancestor_temporary_expires_at
+        FROM opening_memories m
+        WHERE m.id = ${id}
+          AND m.workspace_id = ${scope.workspaceId}
+          AND m.status = 'active'
+          AND (m.kind <> 'temporary' OR (m.expires_at IS NOT NULL AND m.expires_at > clock_timestamp()))
+          AND NOT EXISTS (
+            SELECT 1 FROM jsonb_array_elements_text(
+              CASE WHEN jsonb_typeof(m.source_turn_ids) = 'array' THEN m.source_turn_ids ELSE '[]'::jsonb END
+            ) AS ref(turn_id)
+            WHERE NOT EXISTS (
+              SELECT 1 FROM opening_turns t
+              INNER JOIN opening_conversations c ON c.id = t.conversation_id
+              WHERE t.id::text = lower(ref.turn_id)
+                AND t.workspace_id = ${scope.workspaceId}
+                AND c.workspace_id = ${scope.workspaceId}
+                AND c.owner_user_id = ${scope.ownerUserId}
+            )
+            OR EXISTS (
+              SELECT 1 FROM opening_turns t
+              WHERE t.id::text = lower(ref.turn_id)
+                AND t.workspace_id = ${scope.workspaceId}
+                AND (
+                  EXISTS (
+                    SELECT 1 FROM unnest(t.source_ids) AS sid(id)
+                    WHERE NOT EXISTS (
+                      SELECT 1 FROM opening_sources s
+                      WHERE s.id = sid.id AND s.workspace_id = ${scope.workspaceId} AND s.upload_state = 'uploaded'
+                    )
+                    OR EXISTS (
+                      SELECT 1 FROM opening_privacy_exclusions e
+                      WHERE e.workspace_id = ${scope.workspaceId} AND e.source_id = sid.id
+                    )
+                  )
+                  OR EXISTS (
+                    SELECT 1 FROM jsonb_array_elements(
+                      CASE WHEN jsonb_typeof(t.citations) = 'array' THEN t.citations ELSE '[]'::jsonb END
+                    ) AS citation
+                    WHERE NOT EXISTS (
+                      SELECT 1 FROM opening_sources s
+                      WHERE s.id::text = lower(citation->>'sourceId')
+                        AND s.workspace_id = ${scope.workspaceId}
+                        AND s.upload_state = 'uploaded'
+                        AND s.version::text = citation->>'sourceVersion'
+                        AND NOT EXISTS (
+                          SELECT 1 FROM opening_source_versions sv
+                          WHERE sv.workspace_id = ${scope.workspaceId}
+                            AND sv.source_id = s.id
+                            AND sv.version::text = citation->>'sourceVersion'
+                            AND sv.availability = 'unavailable'
+                        )
+                    )
+                    OR EXISTS (
+                      SELECT 1 FROM opening_privacy_exclusions e
+                      WHERE e.workspace_id = ${scope.workspaceId} AND e.source_id::text = lower(citation->>'sourceId')
+                    )
+                  )
+                  OR (
+                    t.role = 'assistant' AND t.context_source_refs IS NOT NULL AND (
+                      jsonb_typeof(t.context_source_refs) IS DISTINCT FROM 'array'
+                      OR EXISTS (
+                        SELECT 1 FROM jsonb_array_elements(
+                          CASE WHEN jsonb_typeof(t.context_source_refs) = 'array' THEN t.context_source_refs ELSE '[]'::jsonb END
+                        ) AS ctx_ref
+                        WHERE NOT (
+                          ctx_ref = jsonb_build_object('memoryDependencyIds', ctx_ref->'memoryDependencyIds')
+                          AND jsonb_typeof(ctx_ref->'memoryDependencyIds') = 'array'
+                          AND jsonb_array_length(ctx_ref->'memoryDependencyIds') > 0
+                        )
+                        AND NOT EXISTS (
+                          SELECT 1 FROM opening_sources s
+                          WHERE s.id::text = lower(ctx_ref->>'sourceId')
+                            AND s.workspace_id = ${scope.workspaceId}
+                            AND s.upload_state = 'uploaded'
+                            AND s.version::text = ctx_ref->>'sourceVersion'
+                            AND NOT EXISTS (
+                              SELECT 1 FROM opening_source_versions sv
+                              WHERE sv.workspace_id = ${scope.workspaceId}
+                                AND sv.source_id = s.id
+                                AND sv.version::text = ctx_ref->>'sourceVersion'
+                                AND sv.availability = 'unavailable'
+                            )
+                            AND NOT EXISTS (
+                              SELECT 1 FROM opening_privacy_exclusions e
+                              WHERE e.workspace_id = ${scope.workspaceId} AND e.source_id = s.id
+                            )
+                        )
+                      )
+                    )
+                  )
+                )
+            )
+          )
+          AND NOT EXISTS (
+            WITH RECURSIVE mem_deps(dep_id) AS (
+              SELECT lower(dep.id)
+              FROM jsonb_array_elements_text(
+                CASE WHEN jsonb_typeof(m.source_turn_ids) = 'array' THEN m.source_turn_ids ELSE '[]'::jsonb END
+              ) AS st(turn_id)
+              JOIN opening_turns dt ON dt.id::text = lower(st.turn_id) AND dt.workspace_id = m.workspace_id
+              CROSS JOIN LATERAL jsonb_array_elements(
+                CASE WHEN jsonb_typeof(dt.context_source_refs) = 'array' THEN dt.context_source_refs ELSE '[]'::jsonb END
+              ) AS dep_elem
+              CROSS JOIN LATERAL jsonb_array_elements_text(
+                CASE WHEN dep_elem = jsonb_build_object('memoryDependencyIds', dep_elem->'memoryDependencyIds')
+                  AND jsonb_typeof(dep_elem->'memoryDependencyIds') = 'array'
+                  THEN dep_elem->'memoryDependencyIds' ELSE '[]'::jsonb END
+              ) AS dep(id)
+              UNION
+              SELECT lower(dep.id)
+              FROM mem_deps prev
+              JOIN opening_memories pm ON pm.id::text = prev.dep_id AND pm.workspace_id = m.workspace_id
+              CROSS JOIN LATERAL jsonb_array_elements_text(
+                CASE WHEN jsonb_typeof(pm.source_turn_ids) = 'array' THEN pm.source_turn_ids ELSE '[]'::jsonb END
+              ) AS st(turn_id)
+              JOIN opening_turns dt ON dt.id::text = lower(st.turn_id) AND dt.workspace_id = m.workspace_id
+              CROSS JOIN LATERAL jsonb_array_elements(
+                CASE WHEN jsonb_typeof(dt.context_source_refs) = 'array' THEN dt.context_source_refs ELSE '[]'::jsonb END
+              ) AS dep_elem
+              CROSS JOIN LATERAL jsonb_array_elements_text(
+                CASE WHEN dep_elem = jsonb_build_object('memoryDependencyIds', dep_elem->'memoryDependencyIds')
+                  AND jsonb_typeof(dep_elem->'memoryDependencyIds') = 'array'
+                  THEN dep_elem->'memoryDependencyIds' ELSE '[]'::jsonb END
+              ) AS dep(id)
+            )
+            SELECT 1
+            FROM mem_deps d
+            WHERE NOT EXISTS (
+              SELECT 1
+              FROM opening_memories dep_m
+              WHERE dep_m.id::text = d.dep_id
+                AND dep_m.workspace_id = m.workspace_id
+                AND dep_m.status = 'active'
+                AND dep_m.course_id IS NULL
+                AND (dep_m.kind = 'confirmed' OR (dep_m.kind = 'temporary' AND dep_m.expires_at IS NOT NULL AND dep_m.expires_at > clock_timestamp()))
+            )
+          )`;
+      if (!admitted.length) {
+        throw new OpeningMemoryError("VALIDATION", "memory source or dependency is no longer active");
+      }
+      const nowMs = now().getTime();
+      if (current.kind === "temporary" && (current.expiresAt === null || Date.parse(current.expiresAt) <= nowMs)) {
+        throw new OpeningMemoryError("VALIDATION", "memory source or dependency is no longer active");
+      }
+      const ancestorExp = (admitted[0] as Record<string, unknown>).ancestor_temporary_expires_at;
+      if (ancestorExp != null) {
+        const parsedMs = new Date(ancestorExp as string | Date).getTime();
+        if (Number.isNaN(parsedMs) || parsedMs <= nowMs) {
+          throw new OpeningMemoryError("VALIDATION", "memory source or dependency is no longer active");
+        }
+      }
     }
     const updated = await tx`
       UPDATE opening_memories

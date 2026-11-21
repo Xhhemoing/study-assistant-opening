@@ -359,7 +359,7 @@ async function assertStreamMaterialAdmission(
           AND EXISTS (
             SELECT 1
             FROM jsonb_array_elements_text(m.source_turn_ids) AS ref(turn_id)
-            JOIN opening_turns t ON t.id::text = ref.turn_id AND t.workspace_id = ${scope.workspaceId}
+            JOIN opening_turns t ON t.id::text = lower(ref.turn_id) AND t.workspace_id = ${scope.workspaceId}
             JOIN opening_conversations c ON c.id = t.conversation_id
               AND c.workspace_id = ${scope.workspaceId}
               AND c.owner_user_id = ${scope.ownerUserId}

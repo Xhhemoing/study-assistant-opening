@@ -736,4 +736,122 @@ it("blocks confirming or injecting a derived permanent memory once its temporary
     contextSourceRefs: [],
     globalMemoryIds: [confirmedDerived.id],
   })).rejects.toMatchObject({ code: "CONFLICT" });
+
+  // 4) Ordinary proposeMemory + confirm path also blocks confirming a memory derived from an expired ancestor.
+  const activeTemp2 = await memories.proposeMemory(fixture.scope, {
+    text: "Temporary preference 2",
+    sourceTurnIds: [originTurn.turnId],
+    courseId: null,
+    expiresAt: new Date(Date.now() + 60 * 60 * 1_000).toISOString(),
+  });
+  const turnFromTemp2 = await conversations.appendSavedTurn({
+    scope: fixture.scope, conversationId: derivedConv.id, text: "Ask with temp 2", mode: "explain",
+    clientKey: randomUUID(), sourceIds: [], learningSessionId: null, currentPage: null, chunkId: null,
+  });
+  await expect(createTutorTurnHandler({
+    tutorJobs: jobs, chunks, budget,
+    provider: {
+      complete: async () => ({
+        text: "Answer using temp 2", citedChunkIds: [], candidates: [],
+        requestId: null, inputTokens: 10, outputTokens: 10,
+      }),
+    },
+    memories: { listContext: (scope, now) => memories.listContext(scope, now) },
+    privacy: createOpeningPrivacyRepository(fixture.sql),
+    retrieveContext: createOpeningMaterialRetriever(fixture.sql, budget, null),
+    config: { maxContextCharacters: 2000, reservedCents: 100, maxOutputTokens: 100, inputCentsPerMillion: 100, outputCentsPerMillion: 200 },
+  })(turnFromTemp2.jobId)).resolves.toEqual({ skipped: false });
+
+  // Propose via ordinary POST /api/opening/memory path while activeTemp2 is still active, then expire activeTemp2 before confirm.
+  const proposedOrdinary = await memories.proposeMemory(fixture.scope, {
+    text: "Ordinary proposed derived memory",
+    sourceTurnIds: [turnFromTemp2.assistantTurnId],
+    courseId: null,
+    expiresAt: null,
+  });
+  await fixture.sql`UPDATE opening_memories SET expires_at = now() - interval '1 second' WHERE id = ${activeTemp2.id}`;
+  await expect(memories.confirm(fixture.scope, proposedOrdinary.id, proposedOrdinary.version, randomUUID()))
+    .rejects.toMatchObject({ code: "VALIDATION" });
+  expect(await memories.get(fixture.scope, proposedOrdinary.id)).toMatchObject({ kind: "candidate", version: 0 });
+  // Proposing after ancestor expiry also fails closed.
+  await expect(memories.proposeMemory(fixture.scope, {
+    text: "Late proposed derived memory",
+    sourceTurnIds: [turnFromTemp2.assistantTurnId],
+    courseId: null,
+    expiresAt: null,
+  })).rejects.toMatchObject({ code: "VALIDATION" });
+});
+
+it("admits restored uppercase source_turn_ids on document-backed global memories across send authorization and history replay", async () => {
+  const courses = createCourseMembershipRepository(fixture.sql);
+  const conversations = createOpeningConversationRepository(fixture.sql);
+  const chunks = createOpeningSourceChunksRepository(fixture.sql);
+  const jobs = createOpeningTutorJobsRepository(fixture.sql);
+  const budget = createOpeningBudgetRepository(fixture.sql, { envCapCents: 100_000 });
+  const course = await courses.createCourse({
+    workspaceId: fixture.scope.workspaceId,
+    title: "Restored uppercase memory course",
+    slug: randomUUID(),
+  });
+  const docSourceId = randomUUID();
+  await fixture.sql`INSERT INTO opening_sources (id,workspace_id,name,mime,bytes,sha256,version,upload_state,parse_state)
+    VALUES (${docSourceId},${fixture.scope.workspaceId},'restored-doc.txt','text/plain',16,${"e".repeat(64)},0,'uploaded','ready')`;
+  await fixture.sql`INSERT INTO opening_source_versions (source_id,version,workspace_id,availability)
+    VALUES (${docSourceId},0,${fixture.scope.workspaceId},'available')`;
+  await chunks.replaceChunks(fixture.scope, {
+    sourceId: docSourceId,
+    sourceVersion: 0,
+    chunks: [{ page: 1, text: "Restored document notes", slideLabel: null, startMs: null, endMs: null, imageObjectKey: null }],
+  });
+
+  const originConv = await conversations.create(fixture.scope, { title: "Standalone doc origin", courseId: null });
+  const originTurn = await conversations.appendSavedTurn({
+    scope: fixture.scope, conversationId: originConv.id, text: "Remember restored doc fact", mode: "explain",
+    clientKey: randomUUID(), sourceIds: [docSourceId], learningSessionId: null, currentPage: 1, chunkId: null,
+  });
+  const proposed = await memories.proposeMemory(fixture.scope, {
+    text: "Restored uppercase memory fact",
+    sourceTurnIds: [originTurn.turnId],
+    courseId: null,
+    expiresAt: null,
+  });
+  const confirmed = await memories.confirm(fixture.scope, proposed.id, proposed.version, randomUUID());
+  // Simulate Backup v2 restore preserving uppercase UUID strings in JSONB source_turn_ids.
+  await fixture.sql`UPDATE opening_memories
+    SET source_turn_ids = ${fixture.sql.json([originTurn.turnId.toUpperCase()] as never)}
+    WHERE id = ${confirmed.id}`;
+
+  const courseConv = await conversations.create(fixture.scope, { title: "Course chat using restored memory", courseId: course.id });
+  const receivedHistories: Array<Array<{ role: string; text: string }>> = [];
+  const makeHandler = (answerText: string) => createTutorTurnHandler({
+    tutorJobs: jobs, chunks, budget,
+    provider: {
+      complete: async input => {
+        receivedHistories.push(input.history ?? []);
+        return { text: answerText, citedChunkIds: [], candidates: [], requestId: null, inputTokens: 10, outputTokens: 10 };
+      },
+    },
+    memories: { listContext: (scope, now) => memories.listContext(scope, now) },
+    privacy: createOpeningPrivacyRepository(fixture.sql),
+    retrieveContext: createOpeningMaterialRetriever(fixture.sql, budget, null),
+    config: { maxContextCharacters: 2000, reservedCents: 100, maxOutputTokens: 100, inputCentsPerMillion: 100, outputCentsPerMillion: 200 },
+  });
+
+  const turn1 = await conversations.appendSavedTurn({
+    scope: fixture.scope, conversationId: courseConv.id, text: "Turn 1 with restored uppercase memory", mode: "explain",
+    clientKey: randomUUID(), sourceIds: [], learningSessionId: null, currentPage: null, chunkId: null,
+  });
+  await expect(makeHandler("Answer 1 with restored memory")(turn1.jobId)).resolves.toEqual({ skipped: false });
+
+  // Turn 2 replays Turn 1's memoryOnly history referencing the uppercase source_turn_ids memory.
+  await fixture.sql`UPDATE opening_turns SET created_at = now() - interval '1 minute' WHERE id IN (${turn1.turnId}, ${turn1.assistantTurnId})`;
+  const turn2 = await conversations.appendSavedTurn({
+    scope: fixture.scope, conversationId: courseConv.id, text: "Turn 2 history replay", mode: "explain",
+    clientKey: randomUUID(), sourceIds: [], learningSessionId: null, currentPage: null, chunkId: null,
+  });
+  await expect(makeHandler("Answer 2 continuing Turn 1")(turn2.jobId)).resolves.toEqual({ skipped: false });
+  expect(receivedHistories[1]).toEqual([
+    { role: "user", text: "Turn 1 with restored uppercase memory" },
+    { role: "assistant", text: "Answer 1 with restored memory" },
+  ]);
 });

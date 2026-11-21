@@ -121,7 +121,7 @@ export function createOpeningMemoryRepository(
       expectedVersion: number,
       clientKey: string,
     ): Promise<MemoryItem> {
-      return confirmOwnedMemory(sql, scope, id, expectedVersion, clientKey);
+      return confirmOwnedMemory(sql, scope, id, expectedVersion, clientKey, now);
     },
 
     async reject(

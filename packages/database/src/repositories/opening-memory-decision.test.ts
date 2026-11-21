@@ -82,3 +82,83 @@ it("rejectOwnedMemory skips privacy_epoch advance on idempotent replay", async (
   expect(result.status).toBe("rejected");
   expect(calls.some(query => query.startsWith("UPDATE workspaces SET privacy_epoch"))).toBe(false);
 });
+
+describe("confirmOwnedMemory transitive source_turn_ids and memoryDependencyIds enforcement", () => {
+  const sourceTurnId = randomUUID();
+
+  function sourcedStub(options: {
+    kind?: "candidate" | "temporary";
+    expiresAt?: string | null;
+    admittedRow?: { id: string; ancestor_temporary_expires_at: string | null } | null;
+  }) {
+    const calls: string[] = [];
+    const row = {
+      id, workspace_id: scope.workspaceId, course_id: null,
+      kind: options.kind ?? "candidate", text: "derived memory",
+      source_turn_ids: [sourceTurnId], version: 0, status: "active",
+      expires_at: options.expiresAt ?? null, last_decision_client_key: null as string | null,
+      created_at: new Date(), updated_at: new Date(),
+    };
+    const tx = async (strings: TemplateStringsArray) => {
+      const query = strings.join(" ").replace(/\s+/g, " ").trim();
+      calls.push(query);
+      if (query.includes("FROM workspaces")) return [{ id: scope.workspaceId }];
+      if (query.includes("SELECT * FROM opening_memories")) return [row];
+      if (query.includes("FROM opening_memories m") && query.includes("WITH RECURSIVE mem_deps(dep_id)")) {
+        return options.admittedRow ? [options.admittedRow] : [];
+      }
+      if (query.includes("UPDATE opening_memories")) {
+        return [{ ...row, kind: "confirmed", expires_at: null, version: 1, last_decision_client_key: "confirm-sourced" }];
+      }
+      return [];
+    };
+    const begin = vi.fn(async (run: (db: typeof tx) => Promise<unknown>) => run(tx));
+    return { sql: Object.assign(tx, { begin }), calls };
+  }
+
+  it("rejects confirming a sourced memory when SQL transitive dependency check fails (revoked/deleted/expired ancestor)", async () => {
+    const { sql, calls } = sourcedStub({ admittedRow: null });
+    await expect(confirmOwnedMemory(sql as never, scope, id, 0, "confirm-sourced"))
+      .rejects.toMatchObject({ code: "VALIDATION" });
+    const checkIdx = calls.findIndex(q => q.includes("WITH RECURSIVE mem_deps(dep_id)") && q.includes("dep_m.expires_at > clock_timestamp()"));
+    const lockIdx = calls.findIndex(q => q.includes("SELECT * FROM opening_memories") && q.includes("FOR UPDATE"));
+    expect(checkIdx).toBeGreaterThan(lockIdx);
+    expect(calls.some(q => q.startsWith("UPDATE opening_memories"))).toBe(false);
+  });
+
+  it("rejects confirming when ancestor temporary memory expiry has elapsed at now()", async () => {
+    const { sql, calls } = sourcedStub({
+      admittedRow: { id, ancestor_temporary_expires_at: "2026-11-21T00:00:00.000Z" },
+    });
+    await expect(confirmOwnedMemory(
+      sql as never, scope, id, 0, "confirm-sourced", () => new Date("2026-11-21T00:01:00.000Z"),
+    )).rejects.toMatchObject({ code: "VALIDATION" });
+    expect(calls.some(q => q.startsWith("UPDATE opening_memories"))).toBe(false);
+  });
+
+  it("rejects promoting an already-expired temporary memory into confirmed", async () => {
+    const { sql, calls } = sourcedStub({
+      kind: "temporary",
+      expiresAt: "2026-11-21T00:00:00.000Z",
+      admittedRow: { id, ancestor_temporary_expires_at: null },
+    });
+    await expect(confirmOwnedMemory(
+      sql as never, scope, id, 0, "confirm-sourced", () => new Date("2026-11-21T00:01:00.000Z"),
+    )).rejects.toMatchObject({ code: "VALIDATION" });
+    expect(calls.some(q => q.startsWith("UPDATE opening_memories"))).toBe(false);
+  });
+
+  it("confirms a sourced memory when all source turns and transitive memory dependencies remain active and unexpired", async () => {
+    const { sql, calls } = sourcedStub({
+      admittedRow: { id, ancestor_temporary_expires_at: "2099-01-01T00:00:00.000Z" },
+    });
+    const confirmed = await confirmOwnedMemory(
+      sql as never, scope, id, 0, "confirm-sourced", () => new Date("2026-11-21T00:00:00.000Z"),
+    );
+    expect(confirmed.kind).toBe("confirmed");
+    expect(confirmed.version).toBe(1);
+    const checkIdx = calls.findIndex(q => q.includes("WITH RECURSIVE mem_deps(dep_id)"));
+    const updateIdx = calls.findIndex(q => q.startsWith("UPDATE opening_memories"));
+    expect(updateIdx).toBeGreaterThan(checkIdx);
+  });
+});

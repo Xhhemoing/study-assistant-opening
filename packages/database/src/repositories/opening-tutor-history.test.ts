@@ -65,6 +65,7 @@ describe("loadTutorHistory context selection", () => {
       { sourceId: memorySourceId, sourceVersion: 0, memoryOnly: true },
     ]);
     expect(queries.some(q => q.includes("(mem_ref->>'memoryOnly') = 'true'") && q.includes("m.expires_at > clock_timestamp()"))).toBe(true);
+    expect(queries.some(q => q.includes("JOIN opening_turns mt ON mt.id::text = lower(mref.turn_id)"))).toBe(true);
     expect(queries.some(q => q.includes("'memoryDependencyIds'") && q.includes("m.expires_at > clock_timestamp()"))).toBe(true);
   });
   it("extracts saved memoryIds and earliest temporaryMemoryExpiresAt from history and fails closed on elapsed expiry", async () => {

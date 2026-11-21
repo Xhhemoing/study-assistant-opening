@@ -78,7 +78,7 @@ export async function loadTutorHistoryContext(sql: Sql, scope: OpeningScope, cur
                   AND EXISTS (
                     SELECT 1
                     FROM jsonb_array_elements_text(m.source_turn_ids) AS mref(turn_id)
-                    JOIN opening_turns mt ON mt.id::text = mref.turn_id AND mt.workspace_id = ${scope.workspaceId}
+                    JOIN opening_turns mt ON mt.id::text = lower(mref.turn_id) AND mt.workspace_id = ${scope.workspaceId}
                     JOIN opening_conversations mc ON mc.id = mt.conversation_id
                       AND mc.workspace_id = ${scope.workspaceId}
                       AND mc.owner_user_id = ${scope.ownerUserId}

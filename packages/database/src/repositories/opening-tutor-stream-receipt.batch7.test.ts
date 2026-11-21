@@ -566,4 +566,24 @@ describe("stream receipt release waits for current job authorization and assista
     expect(f.calls[lastMemIdx]?.sql).toContain("WITH RECURSIVE mem_deps(dep_id)");
     expect(sse.calls[sseLastMemIdx]?.sql).toContain("WITH RECURSIVE mem_deps(dep_id)");
   });
+
+  it("matches restored uppercase opening_memories.source_turn_ids case-insensitively during memoryOnly admission", async () => {
+    const memoryId = "12000000-0000-4000-8000-0000000000ad";
+    const f = fixture({
+      courseId,
+      sourceIds: [],
+      activeGlobalMemoryIds: [memoryId],
+      backedMemorySourceIds: [sourceId],
+    });
+    await expect(f.repo.assertSendAuthorized(scope, jobId, {
+      expectedPrivacyEpoch: 2,
+      claimToken: token,
+      executionId: execution,
+      contextSourceRefs: [{ sourceId, sourceVersion: 0, memoryOnly: true }],
+      memoryLineageSourceIds: [sourceId],
+      globalMemoryIds: [memoryId],
+    })).resolves.toBeUndefined();
+    const backedCall = f.calls.find(c => c.sql.startsWith("SELECT DISTINCT lower(sid.id::text) AS source_id"));
+    expect(backedCall?.sql).toContain("JOIN opening_turns t ON t.id::text = lower(ref.turn_id)");
+  });
 });

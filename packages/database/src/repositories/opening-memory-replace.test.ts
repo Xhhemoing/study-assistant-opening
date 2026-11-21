@@ -131,6 +131,7 @@ describe("replaceOwnedMemory", () => {
     expect(calls.some((query) => query.includes("status = 'superseded'"))).toBe(true);
     expect(calls.some((query) => query.includes("INSERT INTO opening_memories"))).toBe(true);
     expect(calls.some((query) => query.startsWith("UPDATE workspaces SET privacy_epoch"))).toBe(true);
+    expect(calls.some((query) => query.includes("SELECT t.id FROM opening_turns") && query.includes("WITH RECURSIVE mem_deps(dep_id)") && query.includes("dep_m.expires_at > clock_timestamp()"))).toBe(true);
     expect(replaced).toMatchObject({ id: nextMemoryId, kind: "confirmed", version: 3, status: "active", text: "先看定义" });
   });
 });
