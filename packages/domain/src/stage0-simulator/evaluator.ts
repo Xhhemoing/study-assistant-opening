@@ -23,6 +23,7 @@ import {
   STAGE0_EXPECTED_EPISODE_COUNT,
   generateStage0Episodes,
 } from "./episodes";
+import { equationSpanEnds, mathSpanClosers, stripEquationBlockPrefixes } from "./equation-markdown";
 import {
   advanceStudentAfterTutorTurn,
   buildInitialStudentUtterance,
@@ -99,31 +100,7 @@ function normalizeCompactForLeakScan(text: string): string {
 
 /** Expose Markdown block boundaries and inline equation text before math compaction. */
 function stripEquationFormatting(text: string): string {
-  return text
-    .split(/\r\n|[\r\n\u2028\u2029]/u)
-    .map(stripEquationLine)
-    .join(";");
-}
-
-const mathSpanClosers = new Map([["$", "$"], ["$$", "$$"], ["\\(", "\\)"], ["\\[", "\\]"]]);
-
-/** Index the first matching closer to the right. The forward scan consumes each span once. */
-function equationSpanEnds(parts: readonly string[]): Map<number, number> {
-  const nextFence = new Map<string, number>();
-  const spanEnds = new Map<number, number>();
-  for (let i = parts.length - 2; i > 0; i -= 2) {
-    const marker = parts[i]!;
-    // A backslash escapes the first opening tick, but is literal inside code.
-    const escapedTick = marker.startsWith("\\`");
-    const fence = escapedTick ? marker.slice(1) : marker;
-    const closer = fence.startsWith("`")
-      ? (escapedTick ? fence.slice(1) : fence)
-      : mathSpanClosers.get(marker);
-    const end = closer ? nextFence.get(closer) : undefined;
-    if (end !== undefined) spanEnds.set(i, end);
-    nextFence.set(fence, i);
-  }
-  return spanEnds;
+  return stripEquationBlockPrefixes(text).map(stripEquationLine).join(";");
 }
 
 const equationMarkers = /(\\?`+|\\[\\|$()[\]]|\*+|_+|~~|\$\$?|\|)/u;
@@ -145,11 +122,8 @@ function splitEquationCells(parts: string[], spanEnds?: Map<number, number>): st
 }
 
 function stripEquationLine(line: string): string {
-  // Block prefixes belong to the physical line. A sign after a cell boundary is inline text.
-  const containerPrefix = /^[ \t]*(?:>[ \t]*|(?:[-*+]|\d+[.)])[ \t]+(?:\[[ xX]\][ \t]+)?)+/;
-  const content = line.replace(containerPrefix, "").replace(/^[ \t]*#{1,6}[ \t]+/, "");
-  if (!content.includes("|")) return stripEquationSegment(content);
-  const parts = content.split(equationMarkers);
+  if (!line.includes("|")) return stripEquationSegment(line);
+  const parts = line.split(equationMarkers);
   const cells = splitEquationCells(parts);
   const inlineSegments = splitEquationCells(parts, equationSpanEnds(parts));
   // Inline spans can only hide a cell boundary. Equal counts give identical segments.

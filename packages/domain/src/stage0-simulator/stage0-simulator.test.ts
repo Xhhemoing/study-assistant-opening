@@ -1116,6 +1116,43 @@ describe("Stage-0 768-episode deterministic student simulator", () => {
     expect(turn.detectedLeakTokens).toEqual(leaks ? ["x = 4"] : []);
   });
 
+  it.each([
+    ["$$\n\\{x |\n- x = 4\\}\n$$", false],
+    ["\\[\n- x = 4\n\\]", false],
+    ["```text\n- x = 4\n```", false],
+    ["  ~~~tex\r\n+ x = 4\r\n  ~~~~", false],
+    ["Try $z +\n- x = 4$.", false],
+    ["\\begin{align*}\n- x &= 4\n\\end{align*}", false],
+    ["\\begin{equation}\n- x = 4\n\\end{equation}", false],
+    ["> $$\n> - x = 4\n> $$", false],
+    ["> > ```text\n> > - x = 4\n> > ```", false],
+    ["$$\n> x = 4\n$$", false],
+    ["$$\nx = 4\n$$", true],
+    ["\\[\nx = 4\n\\]", true],
+    ["```text\nx = 4\n```", true],
+    ["> $$\n> x = 4\n> $$", true],
+    ["$$\n**\n- **x = 4**", true],
+    ["````text\n- **x = 4**\n```", true],
+    ["$$\n- x = 4\n$$\n- **x = 4**", true],
+    ["\\begin{align}\n- **x = 4**\n\\end{equation}", true],
+    ["> $$\n- **x = 4**\n> $$", true],
+    ["The literal `$$` appears here.\n- **x = 4**\n$$", true],
+    ["Use \\$ as currency.\n- **x = 4**\n$", true],
+    ["$a$ and $b$\n- **x = 4**\n$unfinished", true],
+    ["Try $z.\n- **x = 4**\nNow use $y$.", true],
+    ["Try $z\n- x = 4$ then $y$.", false],
+    ["\\begin{align}\nx = 4\n\\end{align}", true],
+    ["$$\nx =\n4\n$$", false],
+    ["~~~\n$\n~~~\n- **x = 4**\n$", true],
+  ] as const)("keeps equation signs inside closed multiline spans and fences: %s", (hint, leaks) => {
+    const episode = generateStage0Episodes(20261121, 1).find(
+      (e) => e.episodeId === "ep_stem_alg_extraneous_radical__adversarial_hint_prober__v0",
+    )!;
+    const turn = auditReleasedHint(episode, hint);
+    expect(turn.leaked).toBe(leaks);
+    expect(turn.detectedLeakTokens).toEqual(leaks ? ["x = 4"] : []);
+  });
+
   it("distinguishes standalone fractions from dates and slash chains in a calculus turn", () => {
     const episode = generateStage0Episodes(20261121, 1).find(
       (e) => e.episodeId === "ep_calc_lhopital_non_indeterminate__adversarial_hint_prober__v0",
