@@ -204,7 +204,6 @@ export function IeltsDraftCritiqueWorkbench({
 
   const [hasSubmitted, setHasSubmitted] = useState(hasPreloadedSubmission);
   const [hintsRevealed, setHintsRevealed] = useState(false);
-  const [promptScaffoldRevealed, setPromptScaffoldRevealed] = useState(false);
   const [attemptAssistedLatched, setAttemptAssistedLatched] = useState(initiallyLatched);
   const [resetPastAuthorityFingerprint, setResetPastAuthorityFingerprint] = useState<string | null>(
     null,
@@ -235,12 +234,10 @@ export function IeltsDraftCritiqueWorkbench({
         ? [...new Set([...localAssistedSources, ...authoritativeAssistedSources])]
         : initialAssistedSources;
       const nextFingerprints = collectAssistedFingerprints(nextAssistedSources);
-      const nextPromptScaffold = isOwnWriteBack ? promptScaffoldRevealed : false;
       const nextLatched = isOwnWriteBack
-        ? attemptAssistedLatched || initiallyLatched || nextPromptScaffold
+        ? attemptAssistedLatched || initiallyLatched
         : initiallyLatched;
       setLocalAssistedSources(nextAssistedSources);
-      setPromptScaffoldRevealed(nextPromptScaffold);
       setAttemptAssistedLatched(nextLatched);
       setHasSubmitted(hasPreloadedSubmission);
       if (!isOwnWriteBack) {
@@ -280,7 +277,6 @@ export function IeltsDraftCritiqueWorkbench({
     [localAssistedSources, authoritativeAssistedSources, hasSubmitted, draft2, draft2Receipt],
   );
   const draft2EffectivelyAssisted =
-    promptScaffoldRevealed ||
     attemptAssistedLatched ||
     (hasSubmitted && draft2.assisted) ||
     (hasSubmitted &&
@@ -289,8 +285,7 @@ export function IeltsDraftCritiqueWorkbench({
     composerText,
     stickyAssistedFingerprints,
   );
-  const isComposerStickyAssisted =
-    promptScaffoldRevealed || attemptAssistedLatched || isComposerMatchingAssistedText;
+  const isComposerStickyAssisted = attemptAssistedLatched || isComposerMatchingAssistedText;
   const effectiveComposerAssisted = composerAssisted || isComposerStickyAssisted;
 
   const draftSource = stableSerialize(getWritingDraftSource(draft2));
@@ -402,8 +397,9 @@ export function IeltsDraftCritiqueWorkbench({
 
   function handleRevealScaffold() {
     const sampleSources = collectFixtureSampleSources(fixture);
+    const currentTrimmed = composerText.trim();
+    if (currentTrimmed) sampleSources.push(currentTrimmed);
     setHintsRevealed(true);
-    setPromptScaffoldRevealed(true);
     setAttemptAssistedLatched(true);
     setComposerAssisted(true);
     if (sampleSources.length > 0) {
@@ -416,7 +412,6 @@ export function IeltsDraftCritiqueWorkbench({
     const nextAssisted =
       isDemoPreview ||
       composerAssisted ||
-      promptScaffoldRevealed ||
       attemptAssistedLatched ||
       matchesAssistedFingerprint(composerText, stickyAssistedFingerprints);
     const baseDraft: IeltsEssayDraft = hasSubmitted
@@ -510,10 +505,21 @@ export function IeltsDraftCritiqueWorkbench({
       setSelectedSpanId(null);
       return;
     }
+    const retainedSources: string[] = [];
+    if (hintsRevealed || attemptAssistedLatched || effectiveComposerAssisted) {
+      const currentTrimmed = composerText.trim();
+      if (currentTrimmed) retainedSources.push(currentTrimmed);
+    }
+    if (hintsRevealed) {
+      retainedSources.push(...collectFixtureSampleSources(fixture));
+    }
+    if (retainedSources.length > 0) {
+      setLocalAssistedSources((current) => [...new Set([...current, ...retainedSources])]);
+    }
     setHasSubmitted(false);
     setHintsRevealed(false);
-    setAttemptAssistedLatched(promptScaffoldRevealed);
-    setComposerAssisted(promptScaffoldRevealed);
+    setAttemptAssistedLatched(false);
+    setComposerAssisted(false);
     setComposerText("");
     setComposerNeedsText(false);
     setSelectedSpanId(null);

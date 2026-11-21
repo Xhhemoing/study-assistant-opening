@@ -215,8 +215,9 @@ describe("IeltsDraftCritiqueWorkbench", () => {
     });
     expect(host.querySelector('[data-epistemic-badge="rubric_verified_evidence"]')).not.toBeNull();
 
-    // Starting a fresh default learner mount: clicking [data-reveal-scaffold] reveals draft1 + rewrites
-    // and irreversibly latches prompt assistance even across [data-reset-attempt].
+    // Clicking [data-reveal-scaffold] reveals draft1 + rewrites and latches the active attempt,
+    // while clicking [data-reset-attempt] resets the attempt latch for a genuinely fresh independent essay
+    // yet retains fingerprints of revealed samples & prior scaffold-assisted drafts.
     await act(async () => host.querySelector<HTMLButtonElement>("[data-reset-attempt]")!.click());
     const revealBtn = host.querySelector<HTMLButtonElement>("[data-reveal-scaffold]")!;
     await act(async () => revealBtn.click());
@@ -228,21 +229,49 @@ describe("IeltsDraftCritiqueWorkbench", () => {
     expect(latchedCheckbox.checked).toBe(true);
     expect(latchedCheckbox.disabled).toBe(true);
 
-    // Even after clicking [data-reset-attempt], this prompt remains assisted because scaffold was revealed.
+    // Draft a scaffold-assisted response before resetting; its fingerprint must persist across reset.
+    const priorScaffoldDraft =
+      "Municipal planners should evaluate suburban commuter corridors carefully before committing tax funds to extra highway lanes.";
+    const openTextarea = host.querySelector<HTMLTextAreaElement>('[aria-label="二稿改写编辑区"]')!;
+    await act(async () => setNativeInputValue(openTextarea, priorScaffoldDraft));
+
+    // Clicking [data-reset-attempt] clears inputs, re-gates draft1, and unlocks the fresh attempt.
     await act(async () => host.querySelector<HTMLButtonElement>("[data-reset-attempt]")!.click());
     const afterRevealResetTextarea = host.querySelector<HTMLTextAreaElement>('[aria-label="二稿改写编辑区"]')!;
     const afterRevealResetCheckbox = host.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
     expect(afterRevealResetTextarea.value).toBe("");
+    expect(afterRevealResetCheckbox.checked).toBe(false);
+    expect(afterRevealResetCheckbox.disabled).toBe(false);
+    expect(host.querySelector('[data-writing-scaffold="true"]')).toBeNull();
+    expect(host.querySelector('[data-draft1-gated="true"]')).not.toBeNull();
+
+    // Pasting the revealed sample (draft2) or the prior scaffold-assisted draft STILL re-latches assistance.
+    await act(async () => setNativeInputValue(afterRevealResetTextarea, priorScaffoldDraft));
     expect(afterRevealResetCheckbox.checked).toBe(true);
     expect(afterRevealResetCheckbox.disabled).toBe(true);
-    await act(async () => setNativeInputValue(afterRevealResetTextarea, GENUINE_ORIGINAL_WRITING_ESSAY));
+
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-reset-attempt]")!.click());
+    await act(async () => setNativeInputValue(
+      host.querySelector<HTMLTextAreaElement>('[aria-label="二稿改写编辑区"]')!,
+      fixture.draft2.paragraphs.join("\n\n"),
+    ));
+    expect(host.querySelector<HTMLInputElement>('input[type="checkbox"]')!.checked).toBe(true);
+    expect(host.querySelector<HTMLInputElement>('input[type="checkbox"]')!.disabled).toBe(true);
+
+    // Resetting and submitting a genuinely new original essay evaluates as unassisted / independent.
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-reset-attempt]")!.click());
+    const freshWritingTextarea = host.querySelector<HTMLTextAreaElement>('[aria-label="二稿改写编辑区"]')!;
+    const freshWritingCheckbox = host.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    await act(async () => setNativeInputValue(freshWritingTextarea, GENUINE_ORIGINAL_WRITING_ESSAY));
+    expect(freshWritingCheckbox.checked).toBe(false);
+    expect(freshWritingCheckbox.disabled).toBe(false);
     await act(async () => host.querySelector<HTMLButtonElement>("[data-submit-writing]")!.click());
     expect(onRevisionEvaluated.mock.lastCall?.[0]).toMatchObject({
-      revisedDraft: expect.objectContaining({ assisted: true }),
+      revisedDraft: expect.objectContaining({ assisted: false }),
       receipt: expect.objectContaining({
-        epistemicStatus: "practice_feedback",
-        masteryQualified: false,
-        countsTowardMastery: false,
+        epistemicStatus: "rubric_verified_evidence",
+        masteryQualified: true,
+        countsTowardMastery: true,
       }),
     });
   });
@@ -1008,18 +1037,25 @@ describe("IeltsSpeakingTransferCard", () => {
     expect(checkbox.checked).toBe(true);
     expect(checkbox.disabled).toBe(true);
 
-    // Click reset, paste revealed sample back at 78s -> stays assisted & practice_feedback!
+    // Click reset: current attempt latch resets to independent (false), scaffold hides,
+    // while fingerprints of the revealed sample & any scaffold-assisted draft persist across reset.
+    const priorScaffoldSpeech =
+      "My first assisted note while viewing the scaffold mentions commuter trains and local bus feeders.";
+    await act(async () => setNativeInputValue(verifiedTextarea, priorScaffoldSpeech));
     await act(async () => host.querySelector<HTMLButtonElement>("[data-reset-attempt]")!.click());
     expect(verifiedTextarea.value).toBe("");
     expect(verifiedDuration.value).toBe("");
-    expect(checkbox.checked).toBe(true);
-    expect(checkbox.disabled).toBe(true);
+    expect(checkbox.checked).toBe(false);
+    expect(checkbox.disabled).toBe(false);
     expect(host.querySelector('[data-speaking-scaffold="true"]')).toBeNull();
 
+    // Pasting the revealed sample back at 78s STILL latches assisted & produces practice_feedback!
     await act(async () => {
       setNativeInputValue(verifiedTextarea, revealedSample);
       setNativeInputValue(verifiedDuration, "78");
     });
+    expect(checkbox.checked).toBe(true);
+    expect(checkbox.disabled).toBe(true);
     await act(async () => host.querySelector<HTMLButtonElement>("[data-speaking-evaluate]")!.click());
     expect(onEvaluated.mock.lastCall?.[0]).toMatchObject({
       assisted: true,
@@ -1028,8 +1064,32 @@ describe("IeltsSpeakingTransferCard", () => {
       countsTowardMastery: false,
     });
 
-    // Without revealing scaffold on a fresh prompt/seed with a real verifiedWritingReceipt:
-    // pasting the built-in sample transcript is blocked upfront, while genuinely original speech qualifies!
+    // Pasting the prior scaffold-assisted transcript after another reset STILL latches assisted!
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-reset-attempt]")!.click());
+    await act(async () => setNativeInputValue(verifiedTextarea, priorScaffoldSpeech));
+    expect(checkbox.checked).toBe(true);
+    expect(checkbox.disabled).toBe(true);
+
+    // Step-2 regression [P1-1]: Resetting on the SAME seed and submitting a genuinely brand-new
+    // independent response + duration evaluates as unassisted and qualifies for verified mastery!
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-reset-attempt]")!.click());
+    expect(checkbox.checked).toBe(false);
+    expect(checkbox.disabled).toBe(false);
+    await act(async () => {
+      setNativeInputValue(verifiedTextarea, GENUINE_ORIGINAL_SPEAKING_TRANSCRIPT);
+      setNativeInputValue(verifiedDuration, "76");
+    });
+    expect(checkbox.checked).toBe(false);
+    expect(checkbox.disabled).toBe(false);
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-speaking-evaluate]")!.click());
+    expect(onEvaluated.mock.lastCall?.[0]).toMatchObject({
+      assisted: false,
+      epistemicStatus: "rubric_verified_evidence",
+      masteryQualified: true,
+      countsTowardMastery: true,
+    });
+
+    // On a fresh seed mount without clicking reveal: pasting built-in sample is still blocked upfront.
     await act(async () =>
       root.render(
         createElement(IeltsSpeakingTransferCard, {
@@ -1048,21 +1108,6 @@ describe("IeltsSpeakingTransferCard", () => {
     });
     expect(freshCheckbox.checked).toBe(true);
     expect(freshCheckbox.disabled).toBe(true);
-
-    await act(async () => host.querySelector<HTMLButtonElement>("[data-reset-attempt]")!.click());
-    await act(async () => {
-      setNativeInputValue(freshTextarea, GENUINE_ORIGINAL_SPEAKING_TRANSCRIPT);
-      setNativeInputValue(freshDuration, "76");
-    });
-    expect(freshCheckbox.checked).toBe(false);
-    expect(freshCheckbox.disabled).toBe(false);
-    await act(async () => host.querySelector<HTMLButtonElement>("[data-speaking-evaluate]")!.click());
-    expect(onEvaluated.mock.lastCall?.[0]).toMatchObject({
-      assisted: false,
-      epistemicStatus: "rubric_verified_evidence",
-      masteryQualified: true,
-      countsTowardMastery: true,
-    });
   });
 
   it("allows opt-in demoFixtureMode preview on Speaking without ever displaying verified learner mastery", async () => {

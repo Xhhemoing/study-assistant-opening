@@ -183,7 +183,6 @@ function assessPromptTopicRelevance(
   revisedProse: readonly string[],
   revisedParagraphs: readonly (readonly GroundedSentence[])[],
   revisedWordCount: number,
-  transferredCount: number,
 ): TopicRelevanceAssessment {
   const keywordCount = spec.keywords.size;
   if (keywordCount === 0 || revisedWordCount === 0) {
@@ -195,10 +194,6 @@ function assessPromptTopicRelevance(
   let overlapCount = 0;
   for (const keyword of spec.keywords) {
     if (revisedStems.has(keyword)) overlapCount += 1;
-  }
-
-  if (transferredCount > 0) {
-    return { isOffTopic: false, isTangential: false, keywordCount, overlapCount };
   }
 
   if (overlapCount === 0) {
@@ -233,7 +228,10 @@ function assessPromptTopicRelevance(
 
   const requiredMatches = spec.fromPromptStatement
     ? Math.min(keywordCount, Math.max(3, Math.ceil(keywordCount * 0.35)))
-    : Math.min(keywordCount, keywordCount >= 5 ? 2 : 1);
+    : Math.min(
+        keywordCount,
+        keywordCount >= 6 ? Math.max(3, Math.ceil(keywordCount * 0.25)) : keywordCount >= 5 ? 2 : 1,
+      );
   const hasSufficientSpread =
     nonEmptyParagraphs >= 2 ? paragraphsWithHit >= 2 : sentencesWithHit >= 2;
 
@@ -943,7 +941,25 @@ function analyzeTransfer(
     return { target, baseHit, rawRevHit, baseWeak, revWeak, revCliche, candidates, sawMechanical, sawUnchanged };
   });
 
-  const canAllocate = canEvaluateTransfer && hasSubstantiveRevision;
+  // Evaluate prompt/topic relevance independently of target matches so generic
+  // discourse connectors (e.g. "therefore", "consequently") on off-topic text
+  // never receive transfer credit or bypass off-topic band caps.
+  const topicSpec = extractPromptTopicSpec(
+    input.promptStatement,
+    input.draft2.promptId,
+    targets,
+    baselineProse,
+    samePrompt,
+  );
+  const topicRelevance = assessPromptTopicRelevance(
+    topicSpec,
+    revisedProse,
+    revisedParagraphs,
+    revisedWordCount,
+  );
+  const isOffTopicOrTangential = topicRelevance.isOffTopic || topicRelevance.isTangential;
+
+  const canAllocate = canEvaluateTransfer && hasSubstantiveRevision && !isOffTopicOrTangential;
   const eligibleTargets = targetMatches
     .filter(({ revCliche }) => canAllocate && revCliche.matched.length === 0)
     .sort((a, b) => compareText(a.target.criterion, b.target.criterion) || compareText(a.target.label, b.target.label));
@@ -954,7 +970,11 @@ function analyzeTransfer(
   const items: IeltsUpgradeTransferItem[] = targetMatches.map((match) => {
     const { target, baseHit, rawRevHit, baseWeak, revWeak, revCliche, candidates, sawMechanical, sawUnchanged } = match;
     const winner = candidates.find((candidate) => allocated.has(candidate));
-    const matches = canAllocate && revCliche.matched.length === 0 ? (winner ? [winner] : []) : candidates;
+    const matches = isOffTopicOrTangential
+      ? []
+      : canAllocate && revCliche.matched.length === 0
+        ? (winner ? [winner] : [])
+        : candidates;
     const revMatchedList = [...new Set(matches.map(({ pattern }) => pattern))];
     const revParagraphList = [...new Set(matches.map(({ paragraphIndex }) => paragraphIndex))].sort((a, b) => a - b);
     const matchedOnlyInMechanicalPaste = candidates.length === 0 && sawMechanical;
@@ -976,6 +996,11 @@ function analyzeTransfer(
     ) {
       status = "regressed";
       explanation = `二稿新增了偏笼统或薄弱表达（${revWeak.matched.join(" / ")}），尚未替换为目标升级结构。`;
+    } else if (isOffTopicOrTangential) {
+      status = "pending";
+      explanation = candidates.length > 0 || rawRevHit.matched.length > 0
+        ? "当前作答未实质性回应题干核心主题与争议维度，偏题文本中的衔接词或表达不计作有效迁移。"
+        : "尚未在紧扣题干的论证语境中观察到目标表达，请先切题展开再尝试迁移。";
     } else if (!canEvaluateTransfer && revMatchedList.length > 0) {
       status = "pending";
       explanation = "跨稿迁移需在同一题目下推进稿件版本，新题作答需单独复核。";
@@ -1024,21 +1049,6 @@ function analyzeTransfer(
   const pendingCount = items.filter((item) => item.status === "pending").length;
   const totalTargets = items.length;
   const transferRate = totalTargets > 0 ? transferredCount / totalTargets : 0;
-
-  const topicSpec = extractPromptTopicSpec(
-    input.promptStatement,
-    input.draft2.promptId,
-    targets,
-    baselineProse,
-    samePrompt,
-  );
-  const topicRelevance = assessPromptTopicRelevance(
-    topicSpec,
-    revisedProse,
-    revisedParagraphs,
-    revisedWordCount,
-    transferredCount,
-  );
 
   let disqualificationReason: string | undefined;
   if (revisedWordCount === 0) {

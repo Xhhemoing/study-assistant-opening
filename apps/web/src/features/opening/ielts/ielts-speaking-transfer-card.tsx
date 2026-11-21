@@ -151,7 +151,6 @@ function SpeakingAttempt({
     receipt: IeltsSpeakingFeedbackReceipt;
   } | null>(null);
   const [hintsRevealed, setHintsRevealed] = useState(false);
-  const [promptScaffoldRevealed, setPromptScaffoldRevealed] = useState(false);
   const seedReceiptAssistedSource = seedReceipt?.assisted ? seedReceipt.sourceTranscript.trim() : "";
   const [attemptAssistedLatched, setAttemptAssistedLatched] = useState(
     () => Boolean(seedReceipt?.assisted),
@@ -202,7 +201,6 @@ function SpeakingAttempt({
       ? seedReceipt
       : null;
   const isStartingStickyAssisted =
-    promptScaffoldRevealed ||
     attemptAssistedLatched ||
     matchesAssistedFingerprint(startingTranscript, assistedFingerprints);
   const answer = editedAnswer ?? {
@@ -215,8 +213,7 @@ function SpeakingAttempt({
   const receiptDuration =
     Number.isFinite(parsedDuration) && parsedDuration > 0 ? parsedDuration : null;
   const isMatchingAssistedText = matchesAssistedFingerprint(transcript, assistedFingerprints);
-  const isStickyAssisted =
-    promptScaffoldRevealed || attemptAssistedLatched || isMatchingAssistedText;
+  const isStickyAssisted = attemptAssistedLatched || isMatchingAssistedText;
   const assisted = answer.assisted || isStickyAssisted;
   const targets = [...getSpeakingTargets(seed.targetSpokenCollocations).values()];
   const context = getSpeakingEvaluationContext(seed);
@@ -280,21 +277,34 @@ function SpeakingAttempt({
   const paceMeta = receipt ? SPEAKING_PACE_META[receipt.paceStatus] : null;
 
   function handleRevealScaffold() {
+    const nextSources = [...scaffoldSources];
+    const currentTrimmed = transcript.trim();
+    if (currentTrimmed) nextSources.push(currentTrimmed);
     setHintsRevealed(true);
-    setPromptScaffoldRevealed(true);
     setAttemptAssistedLatched(true);
-    if (scaffoldSources.length > 0) {
-      setAssistedSources((current) => [...new Set([...current, ...scaffoldSources])]);
+    if (nextSources.length > 0) {
+      setAssistedSources((current) => [...new Set([...current, ...nextSources])]);
     }
     setEditedAnswer((current) => ({ ...(current ?? answer), assisted: true }));
     setLocalEvaluation(null);
   }
 
   function handleResetForFreshAttempt() {
-    setEditedAnswer({ transcript: "", durationInput: "", assisted: promptScaffoldRevealed });
+    const retainedSources: string[] = [];
+    if (hintsRevealed || attemptAssistedLatched || assisted) {
+      const currentTrimmed = transcript.trim();
+      if (currentTrimmed) retainedSources.push(currentTrimmed);
+    }
+    if (hintsRevealed && scaffoldSources.length > 0) {
+      retainedSources.push(...scaffoldSources);
+    }
+    if (retainedSources.length > 0) {
+      setAssistedSources((current) => [...new Set([...current, ...retainedSources])]);
+    }
+    setEditedAnswer({ transcript: "", durationInput: "", assisted: false });
     setLocalEvaluation(null);
     setHintsRevealed(false);
-    setAttemptAssistedLatched(promptScaffoldRevealed);
+    setAttemptAssistedLatched(false);
     setSeenAssistedReceiptSnapshot(seedReceipt?.assisted ? external.receiptSnapshot : undefined);
     setClearedPersistedReceiptSnapshot(external.receiptSnapshot);
   }

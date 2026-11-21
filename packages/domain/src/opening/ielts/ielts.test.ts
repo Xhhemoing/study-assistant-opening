@@ -1940,6 +1940,41 @@ describe("Writing topic-relevance band grounding", () => {
     expect(withStatement.receipt.criteria.TR.summary).toContain("偏离题干");
   });
 
+  it("withholds transfer credit and enforces off-topic TR/CC caps when an off-topic essay includes generic connectors like consequently, therefore, and admittedly", () => {
+    const offTopicWithConnectors: IeltsEssayDraft = {
+      ...DRAFT_2,
+      draftId: "draft-2-off-topic-connectors",
+      paragraphs: [
+        `Admittedly, ${offTopicParagraphs[0]}`,
+        `Consequently, ${offTopicParagraphs[1]}`,
+        `${offTopicParagraphs[2]} Therefore, luthiers inspect spruce rings patiently before gluing soundboards.`,
+        offTopicParagraphs[3]!,
+      ],
+    };
+    expect(countDraftWords(offTopicWithConnectors.paragraphs)).toBeGreaterThanOrEqual(250);
+
+    for (const promptStatement of [
+      undefined,
+      "Some people believe that governments should invest public funds primarily in urban rail networks rather than expanding road systems for private vehicles. To what extent do you agree or disagree?",
+    ]) {
+      const evaluated = evaluateNonEmptyRevision({
+        baselineDraft: DRAFT_1,
+        revisedDraft: offTopicWithConnectors,
+        targets: TARGETS,
+        promptStatement,
+        receiptId: promptStatement ? "r-off-topic-conn-stmt" : "r-off-topic-conn-nostmt",
+      });
+      expect(evaluated.transferReport.summary.transferredCount).toBe(0);
+      expect(evaluated.transferReport.items.every((item) => item.status !== "transferred")).toBe(true);
+      expect(evaluated.receipt.criteria.TR.band).toBeLessThanOrEqual(4);
+      expect(evaluated.receipt.criteria.CC.band).toBeLessThanOrEqual(4.5);
+      expect(evaluated.receipt.overallBand).toBeLessThanOrEqual(4.5);
+      expect(evaluated.receipt.masteryQualified).toBe(false);
+      expect(evaluated.receipt.countsTowardMastery).toBe(false);
+      expect(evaluated.receipt.epistemicStatus).toBe("practice_feedback");
+    }
+  });
+
   it("caps off-topic essays against an explicit promptStatement even when targets are empty", () => {
     const museumPrompt =
       "Should national museums charge entrance fees to international visitors instead of offering free admission to everyone?";
