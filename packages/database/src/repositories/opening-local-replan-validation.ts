@@ -4,6 +4,11 @@ import { localReplanFixedBlocks, samePlannedBlocks, taskNotBeforeAt } from "@ais
 import { OpeningPlanError } from "./opening-plan-error";
 import { assertOpeningPlanConstraints } from "./opening-plan-constraints";
 import {
+  assertAcceptedBlocksCardRecoveryCap,
+  consumePendingDraftAcceptanceForTx,
+  withLocalReplanConstraintsCheckForTx,
+} from "./opening-learning-management-draft";
+import {
   isBlockAllowedForTaskWindow,
   isBlockWithinLocalDay,
   isScheduledStartAllowedOnDay,
@@ -15,6 +20,7 @@ import {
 export async function validateOpeningLocalReplan(tx: TransactionSql, scope: Scope, input: {
   day: string; state: Record<string, unknown>; draft: Record<string, unknown>; blocks: PlannedBlock[]; now: Date;
 }) {
+  const pending = consumePendingDraftAcceptanceForTx(tx, scope, input.day);
   const conflict = (message: string, reason: "stale_version" | "task_changed" | "slot_expired" = "stale_version") => {
     throw new OpeningPlanError("CONFLICT", message, reason);
   };
@@ -147,6 +153,11 @@ export async function validateOpeningLocalReplan(tx: TransactionSql, scope: Scop
         && isBlockWithinLocalDay(block, input.day, timeZone)
       ));
   }))) return conflict("unknown or deferred new task", "task_changed");
-  await assertOpeningPlanConstraints(tx, scope, input.day, fresh, true, meta.data.explicitFree);
-  await assertOpeningPlanConstraints(tx, scope, input.day, futureFixed, false);
+  await withLocalReplanConstraintsCheckForTx(tx, async () => {
+    await assertOpeningPlanConstraints(tx, scope, input.day, fresh, true, meta.data.explicitFree);
+    await assertOpeningPlanConstraints(tx, scope, input.day, futureFixed, false);
+  });
+  if (pending) {
+    await assertAcceptedBlocksCardRecoveryCap(tx, scope, input.day, input.blocks, pending.draft, pending.now);
+  }
 }

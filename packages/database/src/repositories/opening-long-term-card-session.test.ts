@@ -3,8 +3,10 @@ import type { Sql, TransactionSql } from "postgres";
 import { resolveLocalDayBounds, SRS_VERSION } from "@aistudy/domain";
 import { listCardQueue } from "./cards-ops";
 import { assertOpeningLearningManagementDraft } from "./opening-learning-management-draft";
+import { acceptOpeningPlan } from "./opening-plan-accept";
 import {
   assertCardSessionStop,
+  resolveCardSessionRecoveryAllowance,
   sumCardRecoveryMinutesForDay,
   writeLearningCardSession,
 } from "./opening-long-term-card-session";
@@ -559,6 +561,12 @@ describe("Round-7 P1-2 & P2-1: symmetrical 30% card-recovery cap in plan confirm
     }) as unknown as TransactionSql;
 
     // 1. 18m active bounded card session + confirming 10m suggested review_cards block -> 28m > 18m -> CONFLICT!
+    const suggested10Block = {
+      taskId: suggestedCardTaskId,
+      start: "2026-11-19T06:00:00.000Z",
+      end: "2026-11-19T06:10:00.000Z",
+      reason: "planned",
+    };
     await expect(
       assertOpeningLearningManagementDraft(
         buildTx({ daySessionMinutes: 18 }),
@@ -574,14 +582,10 @@ describe("Round-7 P1-2 & P2-1: symmetrical 30% card-recovery cap in plan confirm
             minutes: 10,
             courseId: null,
           }],
-          blocks: [{
-            taskId: suggestedCardTaskId,
-            start: "2026-11-19T06:00:00.000Z",
-            end: "2026-11-19T06:10:00.000Z",
-            reason: "planned",
-          }],
+          blocks: [suggested10Block],
         },
         now,
+        { acceptedBlocks: [suggested10Block] },
       ),
     ).rejects.toMatchObject({ code: "CONFLICT" });
 
@@ -617,6 +621,12 @@ describe("Round-7 P1-2 & P2-1: symmetrical 30% card-recovery cap in plan confirm
     ).rejects.toMatchObject({ code: "CONFLICT" });
 
     // 3. 10m session + 8m review_cards block = 18m <= 18m -> allowed!
+    const suggested8Block = {
+      taskId: suggestedCardTaskId,
+      start: "2026-11-19T06:00:00.000Z",
+      end: "2026-11-19T06:08:00.000Z",
+      reason: "planned",
+    };
     await expect(
       assertOpeningLearningManagementDraft(
         buildTx({ daySessionMinutes: 10 }),
@@ -632,18 +642,20 @@ describe("Round-7 P1-2 & P2-1: symmetrical 30% card-recovery cap in plan confirm
             minutes: 8,
             courseId: null,
           }],
-          blocks: [{
-            taskId: suggestedCardTaskId,
-            start: "2026-11-19T06:00:00.000Z",
-            end: "2026-11-19T06:08:00.000Z",
-            reason: "planned",
-          }],
+          blocks: [suggested8Block],
         },
         now,
+        { acceptedBlocks: [suggested8Block] },
       ),
     ).resolves.toBeUndefined();
 
     // 4. Cross-midnight 23:58-00:18 (20m) review_cards block: 2m on day (ok), 18m on nextDay + 5m existing = 23m > 18m -> CONFLICT!
+    const crossMidnightSuggestedBlock = {
+      taskId: suggestedCardTaskId,
+      start: "2026-11-19T15:58:00.000Z",
+      end: "2026-11-19T16:18:00.000Z",
+      reason: "planned",
+    };
     await expect(
       assertOpeningLearningManagementDraft(
         buildTx({ daySessionMinutes: 0, nextDaySessionMinutes: 5 }),
@@ -659,14 +671,10 @@ describe("Round-7 P1-2 & P2-1: symmetrical 30% card-recovery cap in plan confirm
             minutes: 20,
             courseId: null,
           }],
-          blocks: [{
-            taskId: suggestedCardTaskId,
-            start: "2026-11-19T15:58:00.000Z",
-            end: "2026-11-19T16:18:00.000Z",
-            reason: "planned",
-          }],
+          blocks: [crossMidnightSuggestedBlock],
         },
         now,
+        { acceptedBlocks: [crossMidnightSuggestedBlock] },
       ),
     ).rejects.toMatchObject({ code: "CONFLICT" });
 
@@ -686,17 +694,19 @@ describe("Round-7 P1-2 & P2-1: symmetrical 30% card-recovery cap in plan confirm
             minutes: 10,
             courseId: null,
           }],
-          blocks: [{
-            taskId: suggestedCardTaskId,
-            start: "2026-11-19T06:00:00.000Z",
-            end: "2026-11-19T06:10:00.000Z",
-            reason: "planned",
-          }],
+          blocks: [suggested10Block],
         },
         now,
+        { acceptedBlocks: [suggested10Block] },
       ),
     ).rejects.toMatchObject({ code: "CONFLICT" });
 
+    const suggested9Block = {
+      taskId: suggestedCardTaskId,
+      start: "2026-11-19T06:00:00.000Z",
+      end: "2026-11-19T06:09:00.000Z",
+      reason: "planned",
+    };
     await expect(
       assertOpeningLearningManagementDraft(
         buildTx({ dailyMinutes: 30, bufferMinutes: 0, zeroSecondPriorSession: true }),
@@ -712,14 +722,10 @@ describe("Round-7 P1-2 & P2-1: symmetrical 30% card-recovery cap in plan confirm
             minutes: 9,
             courseId: null,
           }],
-          blocks: [{
-            taskId: suggestedCardTaskId,
-            start: "2026-11-19T06:00:00.000Z",
-            end: "2026-11-19T06:09:00.000Z",
-            reason: "planned",
-          }],
+          blocks: [suggested9Block],
         },
         now,
+        { acceptedBlocks: [suggested9Block] },
       ),
     ).resolves.toBeUndefined();
   });
@@ -845,5 +851,464 @@ describe("Round-7 P2-2: delayed_check_covered scopes requirement-keyed retests t
     expect(queue).toHaveLength(200);
     expect(queue[0]?.card.id).toBe(cardS2.id);
     expect(queue.some((entry) => entry.card.id === cardS1.id)).toBe(false);
+  });
+});
+
+describe("Round-8 fixes: persisted-block card cap in acceptOpeningPlan, archived requirement guard, unkeyed retest ambiguity, and 10m floor copy", () => {
+  const planningSettings = {
+    weekOneMonday: "2026-09-07",
+    periodTimes: {},
+    dailyWindow: { start: "07:30", end: "22:30" },
+    lunch: { start: "12:00", end: "12:45" },
+    dinner: { start: "18:00", end: "18:45" },
+    sleep: { start: "23:00", end: "07:00" },
+    timeZone: "Asia/Shanghai",
+  };
+
+  it("P1-1: acceptOpeningPlan allows deselected review_cards suggestion (acceptSuggestedKeys: []) while rejecting selected review_cards exceeding 30% cap", async () => {
+    const day = "2026-11-19";
+    const now = new Date("2026-11-19T05:00:00.000Z"); // 13:00 Asia/Shanghai
+    const draftId = uuid("13131313", 1);
+    const ordinaryTaskId = uuid("13131313", 2);
+    const cardSuggestionId = uuid("13131313", 3);
+    const cardSuggestionKey = `planner:${day}:review_cards:none:long-term`;
+
+    const ordinaryBlock = {
+      taskId: ordinaryTaskId,
+      start: "2026-11-19T06:00:00.000Z", // 14:00 Asia/Shanghai
+      end: "2026-11-19T06:20:00.000Z",   // 14:20 Asia/Shanghai (20m)
+      reason: "planned",
+    };
+    const cardSuggestionBlock = {
+      taskId: cardSuggestionId,
+      start: "2026-11-19T06:30:00.000Z", // 14:30 Asia/Shanghai
+      end: "2026-11-19T06:40:00.000Z",   // 14:40 Asia/Shanghai (10m)
+      reason: "planned",
+    };
+    const cardSuggestion = {
+      id: cardSuggestionId,
+      key: cardSuggestionKey,
+      kind: "review_cards",
+      title: "到期卡片复习（有界会话）",
+      minutes: 10,
+      courseId: null,
+      skillLabel: null,
+      reasonCode: "review_cards",
+      reason: "有到期卡片需要复习。",
+    };
+    const draftRow = {
+      id: draftId,
+      workspace_id: WS,
+      owner_user_id: OWNER,
+      day,
+      status: "draft",
+      origin: "manual",
+      version: 0,
+      base_version: 0,
+      strategy_version: "ordinary-v1",
+      hard_blocks_fingerprint: "",
+      blocks: [ordinaryBlock, cardSuggestionBlock],
+      suggested_tasks: [cardSuggestion],
+      unscheduled_task_ids: [],
+      input_snapshot: {
+        tasks: [{
+          id: ordinaryTaskId,
+          version: 1,
+          title: "高数练习",
+          minutes: 20,
+          dueAt: null,
+          priority: 2,
+          status: "pending",
+        }],
+      },
+      reasons: {},
+      propose_client_key: "ordinary-propose-1",
+    };
+
+    const buildAcceptSql = () => {
+      let savedAcceptedBlocks: unknown = null;
+      let insertedTaskCount = 0;
+      const sql = createMockSql((query, values) => {
+        if (query.includes("pg_advisory_xact_lock") || query.includes("opening_workspace_history_revisions")) return [];
+        if (query.includes("SELECT id FROM workspaces WHERE")) return [{ id: WS }];
+        if (query.includes("FROM workspaces w LEFT JOIN workspace_preferences")) {
+          return [{
+            learning_management: { dailyMinutes: 75, bufferMinutes: 15, revision: 1, updatedAt: "2026-11-19T00:00:00.000Z" },
+            planning_settings: planningSettings,
+          }];
+        }
+        if (query.includes("SELECT planning_settings FROM workspace_preferences")) {
+          return [{ planning_settings: planningSettings }];
+        }
+        if (query.includes("SELECT day FROM opening_plan_drafts")) return [{ day }];
+        if (query.includes("SELECT * FROM opening_plan_drafts")) return [draftRow];
+        if (query.includes("FROM opening_plan_drafts") && query.includes("strategy_version")) return [];
+        if (query.includes("INSERT INTO opening_plan_state")) return [];
+        if (query.includes("SELECT accepted_version, accepted_blocks, hard_blocks_fingerprint FROM opening_plan_state")) {
+          return [{ accepted_version: 0, accepted_blocks: [], hard_blocks_fingerprint: "" }];
+        }
+        if (query.includes("SELECT day, accepted_blocks FROM opening_plan_state")) return [];
+        if (query.includes("FROM opening_plan_acceptances")) return [];
+        if (query.includes("SELECT a.id FROM opening_teaching_activities a")) return [];
+        if (query.includes("FROM opening_teaching_activities")) {
+          return [{
+            id: uuid("91919191", 1),
+            course_id: null,
+            status: "active",
+            created_at: "2026-11-19T02:00:00.000Z",
+            updated_at: "2026-11-19T02:00:00.000Z",
+            create_intent: { protocol: "card-review-session-v1" },
+            checkpoint_json: { cardReviewSession: { elapsedSeconds: 0, stoppedAt: null } },
+            goal_json: {
+              cardReviewSession: { budgetMinutes: 18 },
+              learningBudget: { localDate: day, timeZone: "Asia/Shanghai", minutes: 18 },
+            },
+          }];
+        }
+        if (query.includes("SELECT DISTINCT course_id FROM opening_tasks")) return [];
+        if (query.includes("FROM opening_tasks")) {
+          return [{
+            id: ordinaryTaskId,
+            workspace_id: WS,
+            owner_user_id: OWNER,
+            title: "高数练习",
+            minutes: 20,
+            due_at: null,
+            not_before: null,
+            priority: 2,
+            status: "pending",
+            version: 1,
+            origin: "manual",
+            client_key: null,
+            retest_id: null,
+            candidate_id: null,
+            candidate_reference_id: null,
+            scheduled_start_at: null,
+            recommended_at: null,
+            not_before_at: null,
+            snoozed_until: null,
+            learning_protocol: null,
+          }];
+        }
+        if (query.includes("FROM opening_timetable_sessions") || query.includes("FROM opening_hard_blocks")) return [];
+        if (query.includes("FROM opening_suggestion_feedback")) return [];
+        if (query.includes("INSERT INTO opening_tasks")) {
+          insertedTaskCount += 1;
+          return [{ id: cardSuggestionId, version: 1 }];
+        }
+        if (query.includes("UPDATE opening_plan_state SET accepted_version=")) {
+          savedAcceptedBlocks = values[1];
+          return [];
+        }
+        if (query.includes("UPDATE opening_plan_drafts SET status='accepted'")) {
+          return [{ ...draftRow, status: "accepted", version: 1, blocks: savedAcceptedBlocks }];
+        }
+        if (query.includes("INSERT INTO opening_plan_acceptances")) return [];
+        return [];
+      });
+      return {
+        sql,
+        getSavedBlocks: () => savedAcceptedBlocks,
+        getInsertedTaskCount: () => insertedTaskCount,
+      };
+    };
+
+    // 1. Deselecting the 10m review_cards suggestion (`acceptSuggestedKeys: []`) succeeds and saves the 20m ordinary task!
+    const deselected = buildAcceptSql();
+    const accepted = await acceptOpeningPlan(
+      deselected.sql,
+      SCOPE,
+      {
+        draftId,
+        expectedBaseVersion: 0,
+        clientKey: "accept-ordinary-only-key-1",
+        acceptSuggestedKeys: [],
+      },
+      now,
+    );
+    expect(accepted.status).toBe("accepted");
+    expect(deselected.getSavedBlocks()).toEqual([ordinaryBlock]);
+    expect(deselected.getInsertedTaskCount()).toBe(0);
+
+    // 2. Selecting the 10m review_cards suggestion (`18m + 10m = 28m > 18m`) rejects with CONFLICT and zero writes!
+    const selected = buildAcceptSql();
+    await expect(
+      acceptOpeningPlan(
+        selected.sql,
+        SCOPE,
+        {
+          draftId,
+          expectedBaseVersion: 0,
+          clientKey: "accept-with-cards-key-1",
+          acceptSuggestedKeys: [cardSuggestionKey],
+        },
+        now,
+      ),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(selected.getSavedBlocks()).toBeNull();
+    expect(selected.getInsertedTaskCount()).toBe(0);
+
+    // 3. Omitting `acceptSuggestedKeys` (selects all suggestions) also rejects with CONFLICT and zero writes!
+    const defaultSelect = buildAcceptSql();
+    await expect(
+      acceptOpeningPlan(
+        defaultSelect.sql,
+        SCOPE,
+        {
+          draftId,
+          expectedBaseVersion: 0,
+          clientKey: "accept-default-all-key-1",
+        },
+        now,
+      ),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(defaultSelect.getSavedBlocks()).toBeNull();
+    expect(defaultSelect.getInsertedTaskCount()).toBe(0);
+  });
+
+  it("P2-1: listCardQueue does not match an archived requirementKey directly on binding.skills when card.syllabusPointId is null", async () => {
+    const now = new Date("2026-11-19T12:00:00.000Z");
+    const nodeArchived = uuid("aaaaaaaa", 11);
+    const nodeActive = uuid("aaaaaaaa", 12);
+    const skillIds = ["skill-archived", "skill-active"];
+
+    const cardWithArchivedReqKey = band1CardRow({
+      id: uuid("bbbbbbbb", 11),
+      now,
+      dueAt: "2026-11-01T00:00:00.000Z", // earlier dueAt
+      courseId: COURSE_A,
+      syllabusPointId: null,
+      skillLabel: "req-archived-1", // matches archived requirement_key verbatim!
+      goalPriority: 5,
+    });
+    const cardWithActiveReq = band1CardRow({
+      id: uuid("bbbbbbbb", 12),
+      now,
+      dueAt: "2026-11-18T00:00:00.000Z", // later dueAt
+      courseId: COURSE_A,
+      syllabusPointId: null,
+      skillLabel: "活跃考点",
+      goalPriority: 5,
+    });
+
+    const binding = {
+      courseId: COURSE_A,
+      milestoneId: null,
+      packSourceId: PACK_SOURCE_ID,
+      boundAt: "2026-10-05T00:00:00.000Z",
+      skills: [
+        { skillId: "skill-archived", nodeId: nodeArchived, requirementKey: "req-archived-1" },
+        { skillId: "skill-active", nodeId: nodeActive, requirementKey: "req-active-2" },
+      ],
+      materials: [{ sourceTitle: "真卷", sourceId: PACK_SOURCE_ID, sourceVersion: 1 }],
+    };
+
+    const sql = createMockSql((query) => {
+      if (query.includes("FROM cards c")) return [cardWithArchivedReqKey, cardWithActiveReq];
+      if (query.includes("FROM opening_exam_papers p")) {
+        return [{
+          id: uuid("cccccccc", 11),
+          sprint_id: SPRINT_ID,
+          course_id: COURSE_A,
+          source_id: uuid("dddddddd", 11),
+          source_version: 1,
+          teacher: "张教授",
+          year: 2025,
+          label: "2025 真卷",
+          kind: "past_exam",
+          skills: [
+            { skillId: "skill-archived", points: 15 },
+            { skillId: "skill-active", points: 8 },
+          ],
+          client_key: "exam-paper-archived-guard",
+          recorded_at: "2026-10-10T00:00:00.000Z",
+          binding,
+          pack_snapshot: buildExamPack(skillIds),
+          sprint_state: buildExamState(),
+        }];
+      }
+      if (query.includes("FROM opening_course_knowledge g")) {
+        // Both nodes remain supported, yet req-archived-1 is archived in course_requirements.
+        return [
+          { course_id: COURSE_A, node_id: nodeArchived },
+          { course_id: COURSE_A, node_id: nodeActive },
+        ];
+      }
+      if (query.includes("FROM course_requirements")) {
+        return [
+          { course_id: COURSE_A, requirement_key: "req-archived-1", title: "旧考点", knowledge_node_id: nodeArchived, lifecycle: "archived" },
+          { course_id: COURSE_A, requirement_key: "req-active-2", title: "活跃考点", knowledge_node_id: nodeActive, lifecycle: "active" },
+        ];
+      }
+      return [];
+    });
+
+    const queue = await listCardQueue(sql, {
+      ...SCOPE,
+      mode: "auto",
+      now,
+      timeZone: "Asia/Shanghai",
+      maxSessionCards: 200,
+    });
+
+    // Card with archived requirementKey keeps fallback goalPriority (5) instead of inheriting 15 pts,
+    // so the active requirement card (8 pts) ranks ahead of it!
+    expect(queue.map((entry) => entry.card.id)).toEqual([
+      cardWithActiveReq.id,
+      cardWithArchivedReqKey.id,
+    ]);
+  });
+
+  it("P2-2: applies duplicate-active-requirement-title multi-node ambiguity guard to unkeyed retests (requirement_key IS NULL)", async () => {
+    const now = new Date("2026-11-19T12:00:00.000Z");
+    const nodeS1 = uuid("aaaaaaaa", 21);
+    const nodeS2 = uuid("aaaaaaaa", 22);
+
+    const courseRequirements = [
+      { course_id: COURSE_A, requirement_key: "req-lim-1", title: "极限", knowledge_node_id: nodeS1, lifecycle: "active" },
+      { course_id: COURSE_A, requirement_key: "req-lim-2", title: "极限", knowledge_node_id: nodeS2, lifecycle: "active" },
+    ];
+    const unkeyedRetests = [
+      { course_id: COURSE_A, skill_label: "极限", requirement_key: null as string | null, status: "accepted" },
+    ];
+
+    const evalDelayedCheckCovered = (
+      card: { course_id: string | null; syllabus_point_id: string | null; skill_label: string | null },
+      reqs: typeof courseRequirements,
+    ) =>
+      unkeyedRetests.some((r) => {
+        if (r.course_id !== card.course_id) return false;
+        if (card.syllabus_point_id !== null) return false;
+        const label = card.skill_label?.trim().toLowerCase() ?? "";
+        if (!label || r.skill_label.trim().toLowerCase() !== label) return false;
+        const matchingNodes = new Set(
+          reqs
+            .filter(
+              (cr) =>
+                cr.course_id === r.course_id
+                && cr.lifecycle === "active"
+                && cr.knowledge_node_id !== null
+                && (cr.title.trim().toLowerCase() === label || cr.requirement_key.trim().toLowerCase() === label),
+            )
+            .map((cr) => cr.knowledge_node_id!),
+        );
+        return matchingNodes.size < 2;
+      });
+
+    const legacyCard = band1CardRow({
+      id: uuid("bbbbbbbb", 21),
+      now,
+      dueAt: "2026-11-18T00:00:00.000Z",
+      syllabusPointId: null,
+      skillLabel: "极限",
+      goalPriority: 5,
+    });
+    const band4Filler = Array.from({ length: 200 }, (_, i) => ({
+      ...band1CardRow({
+        id: uuid("bbbbbbbb", i + 22),
+        now,
+        dueAt: "2026-11-01T00:00:00.000Z",
+        syllabusPointId: uuid("aaaaaaaa", i + 100),
+        skillLabel: `filler-${i}`,
+        goalPriority: 5,
+      }),
+      fsrs_state: {
+        stability: 30,
+        difficulty: 5,
+        elapsedDays: 1,
+        scheduledDays: 30,
+        learningSteps: 0,
+        reps: 4,
+        lapses: 0,
+        state: 2,
+        lastReview: new Date(now.getTime() - 86_400_000).toISOString(),
+      },
+    }));
+
+    let capturedCardQuery = "";
+    const sql = createMockSql((query) => {
+      if (query.includes("FROM cards c")) {
+        capturedCardQuery = query;
+        return [
+          { ...legacyCard, delayed_check_covered: evalDelayedCheckCovered(legacyCard, courseRequirements) },
+          ...band4Filler,
+        ];
+      }
+      return [];
+    });
+
+    const queue = await listCardQueue(sql, {
+      ...SCOPE,
+      mode: "auto",
+      now,
+      timeZone: "Asia/Shanghai",
+      maxSessionCards: 200,
+    });
+
+    // SQL must guard label-only matches against >= 2 distinct active knowledge_node_ids regardless of r.requirement_key.
+    expect(capturedCardQuery).toContain("FROM course_requirements cr1");
+    expect(capturedCardQuery).toContain("JOIN course_requirements cr2");
+    expect(capturedCardQuery).toContain("cr1.knowledge_node_id <> cr2.knowledge_node_id");
+    expect(capturedCardQuery.indexOf("cr1.knowledge_node_id <> cr2.knowledge_node_id")).toBeLessThan(
+      capturedCardQuery.indexOf("r.requirement_key IS NULL"),
+    );
+
+    // Legacy card stays uncovered in Band 1 at index 0 (not demoted to Band 5 behind 200 Band-4 cards).
+    expect(evalDelayedCheckCovered(legacyCard, courseRequirements)).toBe(false);
+    expect(evalDelayedCheckCovered(legacyCard, [courseRequirements[0]!])).toBe(true);
+    expect(queue).toHaveLength(200);
+    expect(queue[0]?.card.id).toBe(legacyCard.id);
+  });
+
+  it("P2-3: reports the 10-minute single-session maintenance floor explicitly rather than misstating 10m as 30% on a 30m executable day", async () => {
+    const decision = resolveCardSessionRecoveryAllowance({
+      dailyExecutableMinutes: 30,
+      freeUnreservedMinutes: 30,
+      usedOrReservedCardSessionMinutes: 0,
+      isBacklogRecovery: false,
+      hasPriorCardSessionToday: false,
+    });
+    expect(decision).toEqual({
+      allowanceMinutes: 10,
+      strictCapMinutes: 9,
+      effectiveCapMinutes: 10,
+      maintenanceFloorApplied: true,
+    });
+
+    const cardId = uuid("ffffffff", 31);
+    const now = new Date("2026-11-19T12:00:00.000Z");
+    const sql = createMockSql((query) => {
+      if (query.includes("opening_workspace_history_revisions") || query.includes("SELECT id FROM workspaces WHERE")) {
+        return [{ id: WS }];
+      }
+      if (query.includes("FROM workspaces w LEFT JOIN workspace_preferences")) {
+        return [{
+          learning_management: { dailyMinutes: 30, bufferMinutes: 0, revision: 1, updatedAt: "2026-11-19T00:00:00.000Z" },
+          planning_settings: planningSettings,
+        }];
+      }
+      if (query.includes("FROM cards c")) {
+        return [band1CardRow({ id: cardId, now, dueAt: "2026-11-19T00:00:00.000Z" })];
+      }
+      return [];
+    });
+
+    let caughtMessage = "";
+    try {
+      await writeLearningCardSession(sql, SCOPE, {
+        action: "start",
+        cardIds: [cardId],
+        goalIds: [],
+        budgetMinutes: 11,
+        clientKey: "maintenance-floor-copy-11m",
+      }, now);
+    } catch (error) {
+      caughtMessage = error instanceof Error ? error.message : String(error);
+    }
+    expect(caughtMessage).toContain("30%");
+    expect(caughtMessage).toContain("9 分钟");
+    expect(caughtMessage).toContain("单次最低 10 分钟维护额度");
+    expect(caughtMessage).toContain("10 分钟");
+    expect(caughtMessage).not.toContain("可用上限为 10 分钟（不超过每日可执行学习时长的 30%）");
   });
 });

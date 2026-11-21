@@ -23,6 +23,57 @@ export type CardSessionRecoveryAllowanceInput = {
   hasPriorCardSessionToday?: boolean;
 };
 
+export type CardSessionRecoveryAllowanceDecision = {
+  allowanceMinutes: number;
+  strictCapMinutes: number;
+  effectiveCapMinutes: number;
+  maintenanceFloorApplied: boolean;
+};
+
+function formatAllowanceMinutes(value: number): number {
+  return Number.isInteger(value) ? value : Number(value.toFixed(2));
+}
+
+/**
+ * Computes the workspace-wide 30% daily card-recovery allowance and records whether
+ * the single-session 10-minute non-backlog maintenance floor (`15 <= dailyExecutable < 34`)
+ * expanded the strict 30% ceiling.
+ */
+export function resolveCardSessionRecoveryAllowance(
+  input: CardSessionRecoveryAllowanceInput,
+): CardSessionRecoveryAllowanceDecision {
+  if (
+    !Number.isFinite(input.dailyExecutableMinutes)
+    || !Number.isFinite(input.freeUnreservedMinutes)
+    || !Number.isFinite(input.usedOrReservedCardSessionMinutes)
+  ) {
+    return {
+      allowanceMinutes: 0,
+      strictCapMinutes: 0,
+      effectiveCapMinutes: 0,
+      maintenanceFloorApplied: false,
+    };
+  }
+  const dailyExecutable = Math.max(0, input.dailyExecutableMinutes);
+  const freeUnreserved = Math.max(0, input.freeUnreservedMinutes);
+  const usedCardMinutes = Math.max(0, input.usedOrReservedCardSessionMinutes);
+  const hasPriorToday = Boolean(input.hasPriorCardSessionToday) || usedCardMinutes > 0;
+  const strictCapMinutes = Math.floor((dailyExecutable * 3) / 10);
+  const floorCandidate = Math.min(10, Math.floor(dailyExecutable));
+  const maintenanceFloorApplied = !input.isBacklogRecovery
+    && !hasPriorToday
+    && dailyExecutable >= 15
+    && floorCandidate > strictCapMinutes;
+  const effectiveCapMinutes = maintenanceFloorApplied ? floorCandidate : strictCapMinutes;
+  const allowanceMinutes = Math.max(0, Math.min(freeUnreserved, effectiveCapMinutes - usedCardMinutes));
+  return {
+    allowanceMinutes,
+    strictCapMinutes,
+    effectiveCapMinutes,
+    maintenanceFloorApplied,
+  };
+}
+
 /**
  * Enforces the workspace-wide 30% daily card-recovery ceiling across all courses.
  * For non-backlog maintenance on tight daily budgets (`15 <= dailyExecutable < 34`) with zero
@@ -31,22 +82,7 @@ export type CardSessionRecoveryAllowanceInput = {
  * enforce the strict `floor(0.30 * dailyExecutableMinutes)` cap.
  */
 export function computeCardSessionRecoveryAllowance(input: CardSessionRecoveryAllowanceInput): number {
-  if (
-    !Number.isFinite(input.dailyExecutableMinutes)
-    || !Number.isFinite(input.freeUnreservedMinutes)
-    || !Number.isFinite(input.usedOrReservedCardSessionMinutes)
-  ) {
-    return 0;
-  }
-  const dailyExecutable = Math.max(0, input.dailyExecutableMinutes);
-  const freeUnreserved = Math.max(0, input.freeUnreservedMinutes);
-  const usedCardMinutes = Math.max(0, input.usedOrReservedCardSessionMinutes);
-  const hasPriorToday = Boolean(input.hasPriorCardSessionToday) || usedCardMinutes > 0;
-  const strictCap = Math.floor((dailyExecutable * 3) / 10);
-  const effectiveCap = !input.isBacklogRecovery && !hasPriorToday && dailyExecutable >= 15
-    ? Math.max(Math.min(10, Math.floor(dailyExecutable)), strictCap)
-    : strictCap;
-  return Math.max(0, Math.min(freeUnreserved, effectiveCap - usedCardMinutes));
+  return resolveCardSessionRecoveryAllowance(input).allowanceMinutes;
 }
 
 function overlapsCapacityDay(
@@ -252,31 +288,42 @@ export async function assertCardRecoveryPlanDayCap(
   if (postCardMinutes <= preCardMinutes + 1e-6) return;
 
   const strictCap = Math.floor((dailyExecutableMinutes * 3) / 10);
-  let effectiveCap = strictCap;
+  let isBacklogRecovery = true;
+  let hasPriorToday = preCardMinutes > 0;
   if (
     dailyExecutableMinutes >= 15
     && dailyExecutableMinutes < 34
     && preCardMinutes === 0
     && postCardMinutes > strictCap
-    && postCardMinutes <= Math.min(10, Math.floor(dailyExecutableMinutes))
   ) {
-    const hasPriorToday = await readHasPriorCardSessionForDay(tx, scope, input.day);
+    hasPriorToday = await readHasPriorCardSessionForDay(tx, scope, input.day);
     if (!hasPriorToday) {
       const cards = createCardRepository(tx as unknown as Sql);
-      const isBacklogRecovery = (await cards.listQueue({
+      isBacklogRecovery = (await cards.listQueue({
         ...scope,
         mode: "auto",
         now: input.now,
         timeZone: input.day.timeZone,
       })).length >= 200;
-      if (!isBacklogRecovery) {
-        effectiveCap = Math.max(Math.min(10, Math.floor(dailyExecutableMinutes)), strictCap);
-      }
     }
   }
 
-  if (postCardMinutes > effectiveCap + 1e-6) {
-    const displayCap = Number.isInteger(effectiveCap) ? effectiveCap : Number(effectiveCap.toFixed(2));
+  const decision = resolveCardSessionRecoveryAllowance({
+    dailyExecutableMinutes,
+    freeUnreservedMinutes: dailyExecutableMinutes,
+    usedOrReservedCardSessionMinutes: 0,
+    isBacklogRecovery,
+    hasPriorCardSessionToday: hasPriorToday,
+  });
+
+  if (postCardMinutes > decision.effectiveCapMinutes + 1e-6) {
+    const displayCap = formatAllowanceMinutes(decision.effectiveCapMinutes);
+    if (decision.maintenanceFloorApplied) {
+      throw learningError(
+        "CONFLICT",
+        `今日按每日可执行学习时长 30% 计算的卡片恢复额度为 ${decision.strictCapMinutes} 分钟，非积压单次最低 10 分钟维护额度下本次最多可安排 ${displayCap} 分钟，请缩短或调整卡片复习安排；已接受事项保留。`,
+      );
+    }
     throw learningError(
       "CONFLICT",
       `新的安排超出今日卡片恢复可用上限（${displayCap} 分钟，不超过每日可执行学习时长的 30%），请缩短或调整卡片复习安排；已接受事项保留。`,
@@ -337,15 +384,21 @@ export async function writeLearningCardSession(sql: Sql, scope: Scope, raw: unkn
         ? (await cards.listQueue({ ...scope, mode: "auto", now, timeZone: capacity.timeZone })).length >= 200
         : true;
       const freeUnreservedMinutes = Math.max(0, dailyExecutableMinutes - capacity.usedMinutes);
-      const allowance = computeCardSessionRecoveryAllowance({
+      const decision = resolveCardSessionRecoveryAllowance({
         dailyExecutableMinutes,
         freeUnreservedMinutes,
         usedOrReservedCardSessionMinutes,
         isBacklogRecovery,
         hasPriorCardSessionToday,
       });
-      if (input.budgetMinutes > allowance) {
-        const displayAllowance = Number.isInteger(allowance) ? allowance : Number(allowance.toFixed(2));
+      if (input.budgetMinutes > decision.allowanceMinutes) {
+        const displayAllowance = formatAllowanceMinutes(decision.allowanceMinutes);
+        if (decision.maintenanceFloorApplied) {
+          throw learningError(
+            "CONFLICT",
+            `今日按每日可执行学习时长 30% 计算的卡片恢复额度为 ${decision.strictCapMinutes} 分钟，非积压单次最低 10 分钟维护额度下本次最多可安排 ${displayAllowance} 分钟，请缩短本次时长。`,
+          );
+        }
         throw learningError("CONFLICT", `今日卡片恢复可用上限为 ${displayAllowance} 分钟（不超过每日可执行学习时长的 30%），请缩短本次时长。`);
       }
     }

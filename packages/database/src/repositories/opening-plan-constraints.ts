@@ -2,6 +2,12 @@ import type { TransactionSql } from "postgres";
 import { openingPlanningSettingsSchema, weekSessionSchema, type PlannedBlock, type Scope, type TimeBlock } from "@aistudy/contracts";
 import { deriveDayBlocks, resolveLocalDayBounds, resolveWorkspaceTimeZone } from "@aistudy/domain";
 import { OpeningPlanError } from "./opening-plan-error";
+import {
+  assertAcceptedBlocksCardRecoveryCap,
+  assertStandaloneBlocksCardRecoveryCap,
+  consumePendingDraftAcceptanceForTx,
+  isLocalReplanConstraintsCheckActiveForTx,
+} from "./opening-learning-management-draft";
 
 /** An explicit manual window can extend daily availability, but cannot erase a class, meal or sleep. */
 export function plannedBlocksFitConstraints(blocks: readonly PlannedBlock[], constraints: readonly TimeBlock[], requireFreeWindow: boolean): boolean {
@@ -16,6 +22,7 @@ export function plannedBlocksFitConstraints(blocks: readonly PlannedBlock[], con
 /** Called while holding the workspace lock shared with settings and timetable writes. */
 export async function assertOpeningPlanConstraints(tx: TransactionSql, scope: Scope, day: string, blocks: readonly PlannedBlock[], autoDraft: boolean,
   explicitFree?: readonly TimeBlock[]) {
+  const pending = consumePendingDraftAcceptanceForTx(tx, scope, day);
   const [preferences] = await tx`SELECT planning_settings FROM workspace_preferences WHERE workspace_id=${scope.workspaceId}`;
   const stored = preferences?.planning_settings;
   const parsed = openingPlanningSettingsSchema.safeParse(stored);
@@ -48,4 +55,9 @@ export async function assertOpeningPlanConstraints(tx: TransactionSql, scope: Sc
   constraints.push(...locked.map(row => ({ start: new Date(row.start_at as string | Date).toISOString(),
     end: new Date(row.end_at as string | Date).toISOString(), kind: (row.kind ?? "locked") as TimeBlock["kind"] })));
   if (!plannedBlocksFitConstraints(blocks, constraints, autoDraft && explicitFree === undefined)) throw conflict();
+  if (pending) {
+    await assertAcceptedBlocksCardRecoveryCap(tx, scope, day, blocks, pending.draft, pending.now);
+  } else if (explicitFree === undefined && blocks.length > 0 && !isLocalReplanConstraintsCheckActiveForTx(tx)) {
+    await assertStandaloneBlocksCardRecoveryCap(tx, scope, day, blocks, new Date());
+  }
 }

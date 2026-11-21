@@ -116,11 +116,13 @@ async function loadBoundExamSkillWeights(
 ): Promise<{
   skillsByCourse: Map<string, BoundExamSkillWeight[]>;
   requirementsByCourseLabel: Map<string, Map<string, ActiveRequirementMatch[]>>;
+  archivedRequirementKeysByCourse: Map<string, Set<string>>;
 }> {
   const skillsByCourse = new Map<string, BoundExamSkillWeight[]>();
   const requirementsByCourseLabel = new Map<string, Map<string, ActiveRequirementMatch[]>>();
+  const archivedRequirementKeysByCourse = new Map<string, Set<string>>();
   if (!candidateCourseIds.length) {
-    return { skillsByCourse, requirementsByCourseLabel };
+    return { skillsByCourse, requirementsByCourseLabel, archivedRequirementKeysByCourse };
   }
 
   const rawPaperRows = await sql`
@@ -212,7 +214,7 @@ async function loadBoundExamSkillWeights(
     }
   }
   if (!sprints.size) {
-    return { skillsByCourse, requirementsByCourseLabel };
+    return { skillsByCourse, requirementsByCourseLabel, archivedRequirementKeysByCourse };
   }
 
   const nodeRows = await openingCurrentKnowledgeNodesQuery(sql as unknown as LearningSql, scope);
@@ -231,16 +233,26 @@ async function loadBoundExamSkillWeights(
   const paperCourseIds = [...new Set([...sprints.values()].map((bucket) => bucket.courseId))];
   if (needsSkillLabelLookup && paperCourseIds.length) {
     const reqRows = await sql`
-      SELECT course_id, requirement_key, title, knowledge_node_id
+      SELECT course_id, requirement_key, title, knowledge_node_id, lifecycle
       FROM course_requirements
       WHERE workspace_id = ${scope.workspaceId}
         AND owner_user_id = ${scope.ownerUserId}
         AND course_id = ANY(${paperCourseIds}::uuid[])
-        AND lifecycle = 'active'
     `;
     for (const row of reqRows) {
       const raw = row as Row;
       if (typeof raw.course_id !== "string" || typeof raw.requirement_key !== "string") continue;
+      const lifecycle = typeof raw.lifecycle === "string" ? raw.lifecycle : "active";
+      if (lifecycle === "archived") {
+        let archivedKeys = archivedRequirementKeysByCourse.get(raw.course_id);
+        if (!archivedKeys) {
+          archivedKeys = new Set<string>();
+          archivedRequirementKeysByCourse.set(raw.course_id, archivedKeys);
+        }
+        archivedKeys.add(raw.requirement_key);
+        continue;
+      }
+      if (lifecycle !== "active") continue;
       let byLabel = requirementsByCourseLabel.get(raw.course_id);
       if (!byLabel) {
         byLabel = new Map<string, ActiveRequirementMatch[]>();
@@ -308,7 +320,7 @@ async function loadBoundExamSkillWeights(
     }
   }
 
-  return { skillsByCourse, requirementsByCourseLabel };
+  return { skillsByCourse, requirementsByCourseLabel, archivedRequirementKeysByCourse };
 }
 
 function resolveCardHistoricalMeanPoints(
@@ -317,6 +329,7 @@ function resolveCardHistoricalMeanPoints(
   lookup: {
     skillsByCourse: Map<string, BoundExamSkillWeight[]>;
     requirementsByCourseLabel: Map<string, Map<string, ActiveRequirementMatch[]>>;
+    archivedRequirementKeysByCourse: Map<string, Set<string>>;
   },
 ): number | undefined {
   if (!lookup.skillsByCourse.size) return undefined;
@@ -347,23 +360,29 @@ function resolveCardHistoricalMeanPoints(
 
     if (!normalizedLabel) continue;
     const reqMatches = lookup.requirementsByCourseLabel.get(courseId)?.get(normalizedLabel) ?? [];
+    const archivedReqKeys = lookup.archivedRequirementKeysByCourse.get(courseId);
     let matchedDirect = false;
     for (const skill of boundSkills) {
-      const matchesRequirement = reqMatches.some(
+      // Requirement keys match exclusively via active `course_requirements`, never directly
+      // on `binding.skills`, so archived requirements cannot be revived by label lookup.
+      const matchesActiveRequirement = reqMatches.some(
         (req) => req.requirementKey === skill.requirementKey
           || (req.knowledgeNodeId !== null && req.knowledgeNodeId === skill.nodeId),
       );
-      if (
-        matchesRequirement
-        || normalizeSkillLabel(skill.skillId) === normalizedLabel
-        || normalizeSkillLabel(skill.requirementKey) === normalizedLabel
-      ) {
+      if (matchesActiveRequirement) {
+        matchedDirect = true;
+        consider(skill.meanPoints);
+        continue;
+      }
+      if (archivedReqKeys?.has(skill.requirementKey)) continue;
+      if (normalizeSkillLabel(skill.skillId) === normalizedLabel) {
         matchedDirect = true;
         consider(skill.meanPoints);
       }
     }
     if (!matchedDirect) {
       for (const skill of boundSkills) {
+        if (archivedReqKeys?.has(skill.requirementKey)) continue;
         if (skill.packLabels.has(normalizedLabel)) consider(skill.meanPoints);
       }
     }
@@ -551,6 +570,30 @@ export async function listCardQueue(
               AND c.skill_label IS NOT NULL
               AND btrim(c.skill_label) <> ''
               AND lower(btrim(r.skill_label)) = lower(btrim(c.skill_label))
+              AND NOT EXISTS (
+                SELECT 1
+                FROM course_requirements cr1
+                JOIN course_requirements cr2
+                  ON cr2.workspace_id = cr1.workspace_id
+                 AND cr2.owner_user_id = cr1.owner_user_id
+                 AND cr2.course_id = cr1.course_id
+                 AND cr2.lifecycle = 'active'
+                WHERE cr1.workspace_id = c.workspace_id
+                  AND cr1.owner_user_id = ${input.ownerUserId}
+                  AND cr1.course_id = r.course_id
+                  AND cr1.lifecycle = 'active'
+                  AND cr1.knowledge_node_id IS NOT NULL
+                  AND cr2.knowledge_node_id IS NOT NULL
+                  AND cr1.knowledge_node_id <> cr2.knowledge_node_id
+                  AND (
+                    lower(btrim(cr1.title)) = lower(btrim(c.skill_label))
+                    OR lower(btrim(cr1.requirement_key)) = lower(btrim(c.skill_label))
+                  )
+                  AND (
+                    lower(btrim(cr2.title)) = lower(btrim(c.skill_label))
+                    OR lower(btrim(cr2.requirement_key)) = lower(btrim(c.skill_label))
+                  )
+              )
               AND (
                 r.requirement_key IS NULL
                 OR NOT EXISTS (
