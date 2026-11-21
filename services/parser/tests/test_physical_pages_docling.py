@@ -611,6 +611,70 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
         self.assertEqual(extracted.texts_by_page[10], ["Exercise 1: Find x."])
         self.assertEqual(extracted.texts_by_page[11], ["Public explanation."])
 
+    def test_singular_model_answer_with_body_uses_an_inline_seal(self):
+        for label in ("Model Answer:", "MODEL ANSWER 1.2 (CONTD.):"):
+            for closed in (True, False):
+                with self.subTest(label=label, closed=closed):
+                    answer = label + (" x = 3." if closed else " x =")
+                    result = result_for(
+                        [text_element(10, "Exercise 1: Find x.\n" + answer)],
+                        [text_element(11, "Public explanation." if closed else "5 units.")],
+                        [text_element(12, "Public example.")],
+                        start_page=10,
+                    )
+                    ext = physical_pages.extract_physical_pages(result)
+                    self.assertEqual(ext.texts_by_page[10], ["Exercise 1: Find x."])
+                    self.assertEqual(ext.sealed_texts_by_page[10], [answer])
+                    self.assertFalse(ext.section_sealed_by_page[10])
+                    self.assertEqual(ext.inline_sealed_by_page[10], not closed)
+                    self.assertEqual(ext.texts_by_page[11], ["Public explanation."] if closed else [])
+                    self.assertEqual(ext.texts_by_page[12], ["Public example."])
+
+    def test_model_answer_section_headings_still_seal_the_following_page(self):
+        for title in ("Model Answer", "Model Answers:"):
+            with self.subTest(title=title):
+                result = result_for(
+                    [text_element(10, "Exercise 1: Find x.\n" + title + "\n1. x = 3.")],
+                    [text_element(11, "2. y = 4.")],
+                    [text_element(12, "Chapter 2: Vectors")],
+                    start_page=10,
+                )
+                ext = physical_pages.extract_physical_pages(result)
+                self.assertEqual(ext.texts_by_page[10], ["Exercise 1: Find x."])
+                self.assertTrue(ext.section_sealed_by_page[10])
+                self.assertEqual(ext.texts_by_page[11], [])
+                self.assertEqual(ext.texts_by_page[12], ["Chapter 2: Vectors"])
+
+    def test_repeated_chinese_answer_labels_in_the_same_exercise_stay_inline(self):
+        for label in ("答案：", "解答："):
+            with self.subTest(label=label):
+                result = result_for(
+                    [text_element(10, f"练习\n（1）计算 x。\n{label}\n3.\n\n（2）计算 y。\n{label}\n4.")],
+                    [text_element(11, "Public explanation.")],
+                    start_page=10,
+                )
+                ext = physical_pages.extract_physical_pages(result)
+                public_lines = [line for line in "\n".join(ext.texts_by_page[10]).splitlines() if line.strip()]
+                self.assertEqual(public_lines, ["练习", "（1）计算 x。", "（2）计算 y。"])
+                self.assertEqual(ext.sealed_texts_by_page[10], [label + "\n3.", label + "\n4."])
+                self.assertFalse(ext.section_sealed_by_page[10])
+                self.assertFalse(ext.inline_sealed_by_page[10])
+                self.assertEqual(ext.texts_by_page[11], ["Public explanation."])
+
+    def test_scan_without_native_text_keeps_visuals_and_inherited_section_seal(self):
+        result = result_for(
+            [],
+            [text_element(12, "3. z = 5")],
+        )
+        ext = physical_pages.extract_physical_pages(result, initial_seal_mode="section_sealed")
+        self.assertEqual(ext.texts_by_page[11], [])
+        self.assertEqual(ext.visual_kinds_by_page[11], ["scan"])
+        self.assertTrue(ext.section_sealed_by_page[11])
+        self.assertFalse(ext.had_sealed_by_page[11])
+        self.assertEqual(ext.texts_by_page[12], [])
+        self.assertEqual(ext.visual_kinds_by_page[12], [])
+        self.assertTrue(ext.had_sealed_by_page[12])
+
     def test_assignment_and_bare_multichar_container_titles_keep_answers_sealed(self):
         for title in (
             "Lecture 4: Homework", "Lecture 4: Assignments", "Lecture 4: Lab",

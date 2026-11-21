@@ -3,6 +3,7 @@ import { mkdtemp, readdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import { OpeningModelRoutingError } from "@aistudy/ai";
 import type { SourceRecord } from "@aistudy/contracts";
 import type { NewSourceChunk, OpeningJobRecord, OpeningPdfSegmentsRepository, PdfSegment, PdfSegmentIdentity, PdfSegmentPage } from "@aistudy/database";
 import { createParseSourceHandler, sealTextWithState, type ParseSourceVisualPageInput, type ParseSourceVisualPageResult } from "../jobs/parse-source";
@@ -54,12 +55,14 @@ describe("bounded resumable PDF parser", () => {
     expect(d.ranges).toEqual([]);
   });
 
-  it("does not reuse visual metadata cached before native cell provenance was retained", async () => {
+  it.each([
+    "docling-2.126.0/pdf-segments-v3-visual/text",
+    "docling-2.126.0/pdf-segments-v11-discourse/text",
+  ])("does not reuse segments cached with the older profile %s", async legacyProfile => {
     const d = setup(2);
-    const legacyProfile = "docling-2.126.0/pdf-segments-v3-visual/text";
     await collectPdfSegments({ ...d.input, parserProfile: legacyProfile });
     const profile = pdfParserProfile({});
-    expect(profile).toBe("docling-2.126.0/pdf-segments-v11-discourse/text");
+    expect(profile).toBe("docling-2.126.0/pdf-segments-v12-discourse/text");
     expect(profile).not.toBe(legacyProfile);
     d.ranges.length = 0;
     await collectPdfSegments({ ...d.input, parserProfile: profile });
@@ -645,6 +648,7 @@ describe("bounded resumable PDF parser", () => {
     }>;
     savedChunks?: NewSourceChunk[];
     failedStarts?: number[];
+    segmentPages?: number;
     segmentData?: Map<string, PdfSegment>;
     recognizePage?: (input: ParseSourceVisualPageInput) => Promise<ParseSourceVisualPageResult | null>;
     recognizePages?: (
@@ -713,6 +717,7 @@ describe("bounded resumable PDF parser", () => {
             }),
         },
         segments,
+        segmentPages: options.segmentPages,
         storage: {
           finalKey: () => "sources/test/0/original",
           presignGet: async () => `data:application/pdf;base64,${pdfBytes.toString("base64")}`,
@@ -1168,6 +1173,73 @@ describe("bounded resumable PDF parser", () => {
     expect(retry.publishedChunks.at(-1)?.text).toBe("Chapter 2: Vectors");
   });
 
+  it("reads newly eligible raw Vision from cache after a cached chapter reopens a sealed section", async () => {
+    const segmentData = new Map<string, PdfSegment>();
+    const pages = [
+      { page: 1, text: "Public introduction.", visualKinds: ["picture" as const] },
+      ...Array.from({ length: 10 }, (_, index) => ({ page: index + 2, text: "Public page." })),
+      { page: 12, text: "Answer Key\n1. y = 4" },
+      { page: 13, text: "", visualKinds: ["scan" as const] },
+      { page: 14, text: "1. Find x.", visualKinds: ["picture" as const] },
+      { page: 15, text: "5 units." },
+    ];
+    const vision = new Map([
+      [13, { text: "Chapter 2: Vectors", imageObjectKey: "vision/chapter" }],
+      [14, { text: "1. Find x.\nAnswer: x =", imageObjectKey: "vision/exercise" }],
+    ]);
+    const recognizePage = vi.fn(async ({ physicalPage }: ParseSourceVisualPageInput) => vision.get(physicalPage) ?? null);
+    const batchCalls: Array<[number, boolean | undefined]> = [];
+    async function* recognizePages(inputs: readonly ParseSourceVisualPageInput[], cacheOnly?: boolean) {
+      for (const { physicalPage } of inputs) {
+        batchCalls.push([physicalPage, cacheOnly]);
+        if (physicalPage === 1) throw new OpeningModelRoutingError("Vision route unavailable");
+        yield vision.get(physicalPage) ?? null;
+      }
+    }
+    const first = await runPdfScenario({ pages, failedStarts: [1], segmentData, recognizePage, recognizePages });
+    expect(first.publishedChunks).toEqual([
+      expect.objectContaining({ page: 13, text: "[视觉转写与描述]\nChapter 2: Vectors", imageObjectKey: null }),
+      expect.objectContaining({ page: 14, text: "[原生提取]\n1. Find x.\n\n[视觉转写与描述]\n1. Find x.", imageObjectKey: null }),
+    ]);
+    expect(batchCalls).toEqual([[13, false]]);
+    expect(recognizePage).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ physicalPage: 14 }));
+    batchCalls.length = 0;
+    recognizePage.mockClear();
+
+    const retry = await runPdfScenario({ pages, segmentData, savedChunks: first.publishedChunks, recognizePage, recognizePages });
+    expect(retry.publishedChunks.slice(-2)).toEqual(first.publishedChunks);
+    expect(retry.publishedChunks.some(chunk => chunk.page === 15)).toBe(false);
+    expect(batchCalls).toEqual([[1, false], [13, true], [14, true]]);
+    expect(recognizePage).not.toHaveBeenCalled();
+  });
+
+  it.each([10, 11])("inspects a scan after a native answer key with %i-page segments", async segmentPages => {
+    const lead = Array.from({ length: 9 }, (_, index) => ({ page: index + 1, text: "Public page." }));
+    for (const { scanText, nextText, opensChapter } of [
+      { scanText: "Chapter 2: Vectors\nPublic lesson.", nextText: "Public continuation.", opensChapter: true },
+      { scanText: "2. y = 4", nextText: "3. z = 5", opensChapter: false },
+    ]) {
+      const recognizePage = vi.fn(async () => ({ text: scanText, imageObjectKey: "vision/scan" }));
+      const result = await runPdfScenario({
+        pages: [
+          ...lead,
+          { page: 10, text: "", visualKinds: [], hadSealedContent: true, sectionSealedAtEnd: true },
+          { page: 11, text: "", visualKinds: ["scan"], sectionSealedAtEnd: true },
+          { page: 12, text: nextText },
+        ],
+        segmentPages,
+        recognizePage,
+      });
+      expect(recognizePage).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ physicalPage: 11, visualKinds: ["scan"] }));
+      expect(result.requests[1]).toEqual(
+        opensChapter && segmentPages === 11 ? { start: 12 } : { start: segmentPages + 1, seed: "section_sealed" },
+      );
+      expect(result.publishedChunks.filter(chunk => chunk.page >= 10).map(({ page, text, imageObjectKey }) => [page, text, imageObjectKey]))
+        .toEqual(opensChapter ? [[11, "[视觉转写与描述]\n" + scanText, null], [12, nextText, null]] : []);
+      expect(result.pdfWarning).toBeUndefined();
+    }
+  });
+
   it("falls back to saved Vision after a single-page route failure and reports missing OCR pages", async () => {
     const recognizePage = vi.fn(async () => null);
     const savedPage = { slideLabel: null, startMs: null, endMs: null, imageObjectKey: null };
@@ -1205,6 +1277,44 @@ describe("bounded resumable PDF parser", () => {
     expect(result.requests[1]).toEqual({ start: 11, seed: "inline_sealed" });
     expect(result.publishedChunks.slice(-2).map(chunk => [chunk.page, chunk.text]))
       .toEqual([[10, "Exercise 1: Find x."], [12, "Public explanation."]]);
+  });
+
+  it.each(["Model Answer:", "MODEL ANSWER 1.2 (CONTD.):"])("treats singular %s with a body as inline", async label => {
+    for (const closed of [true, false]) {
+      const result = await runPdfScenario({
+        pages: [
+          ...Array.from({ length: 9 }, (_, index) => ({ page: index + 1, text: "Public page." })),
+          { page: 10, text: "Exercise 1: Find x.\n" + label + (closed ? " x = 3." : " x =") },
+          { page: 11, text: closed ? "Public explanation." : "5 units." },
+          { page: 12, text: "Public example." },
+        ],
+      });
+      expect(result.requests[1]).toEqual(closed ? { start: 11 } : { start: 11, seed: "inline_sealed" });
+      expect(result.publishedChunks.slice(9).map(chunk => [chunk.page, chunk.text])).toEqual([
+        [10, "Exercise 1: Find x."],
+        ...(closed ? [[11, "Public explanation."]] : []),
+        [12, "Public example."],
+      ]);
+    }
+  });
+
+  it.each(["Model Answer", "Model Answers:"])("keeps the standalone %s header section-sealed", async title => {
+    const result = await runPdfScenario({ pages: [
+      { page: 1, text: "Exercise 1: Find x.\n" + title + "\n1. x = 3." },
+      { page: 2, text: "2. y = 4." },
+      { page: 3, text: "Chapter 2: Vectors" },
+    ] });
+    expect(result.publishedChunks.map(chunk => [chunk.page, chunk.text]))
+      .toEqual([[1, "Exercise 1: Find x."], [3, "Chapter 2: Vectors"]]);
+  });
+
+  it.each(["答案：", "解答："])("keeps repeated %s labels inline within an exercise", async label => {
+    const result = await runPdfScenario({ pages: [
+      { page: 1, text: `练习\n（1）计算 x。\n${label}\n3.\n\n（2）计算 y。\n${label}\n4.` },
+      { page: 2, text: "Public explanation." },
+    ] });
+    expect(result.publishedChunks.map(chunk => [chunk.page, chunk.text]))
+      .toEqual([[1, "练习\n（1）计算 x。\n（2）计算 y。"], [2, "Public explanation."]]);
   });
 
   it.each(["【参考答案】", "【标准答案】", "【习题答案】", "【课后答案】", "参考答案", "标准答案", "答案："])(

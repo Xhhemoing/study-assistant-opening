@@ -103,7 +103,7 @@ const CONTAINER_OR_NUMBERED_HEADING_RE = /^(?:(?:Chapters?|Sections?|Parts?|Unit
 const SECTION_SEALED_TERMINATOR_RE = /(?:End\s+of\s+(?:Answers?|Solutions?)|答案完|解答完)\s*[.。]?\s*$/iu;
 const INLINE_SEALED_TERMINATOR_RE = /(?:[□■∎]|End\s+of\s+Answers?|答案完|解答完)\s*[.。]?\s*$/iu;
 const BARE_ANSWER_LABEL_RE = /^(?:答案|解答)\s*[:：]$/u;
-const MODEL_ANSWER_LABEL_RE = /^(?:Model\s+Answer|MODEL\s+ANSWER)\s*[:：]$/u;
+const MODEL_ANSWER_LABEL_RE = /^(?:Model\s+Answer|MODEL\s+ANSWER)(?:\s+\d+(?:\.\d+)*)?(?:\s*\(\s*(?:continued|cont\.?|CONTD?\.?|CONTINUED)\s*\))?\s*[:：]/u;
 const TERMINAL_PUNCTUATION_RE = /[.。!?！？;；)）\]】□■∎]$/u;
 const NEXT_CONTINUATION_RE = /(?:\(\s*(?:to\s+be\s+continued|continued(?:\s+on\s+next\s+page)?)\s*\)|[（(]\s*(?:下接下页|转下页|未完待续)\s*[）)]|接下页|转下页)$/iu;
 
@@ -162,7 +162,7 @@ function stripSealedSolutionLines(
     if (requirePublicVisionHeading && nextMode !== "none") publish = false;
     const prevMode = state.mode;
     state.mode = nextMode;
-    inExercise = false;
+    if (nextMode === "section_sealed") inExercise = false;
     if (prevMode !== nextMode || explicitInlineOpener) onModeTransition?.(prevMode, nextMode);
     if (nextMode !== "inline_sealed") lastInlineBodyLine = "";
   };
@@ -256,6 +256,7 @@ function stripSealedSolutionLines(
     if (WORKED_EXAMPLE_RE.test(stripped)) {
       setMode("none");
       state.inWorkedExample = true;
+      inExercise = false;
       keep(line);
       continue;
     }
@@ -700,8 +701,11 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
         const publicText = !isImage
           ? sealTextWithState(rawPage.text, nativeOutSeal, rawPage.page, rawPage.discourseBlocks)
           : rawPage.text;
-        const doclingEndSeal = isPdf ? pdfPageEndSeal(rawPage) : undefined;
         const doclingHadSealedContent = !isImage && Boolean(rawPage.hadSealedContent);
+        // With no native fragments, the end flag only echoes Docling's incoming seal.
+        const doclingEndSeal = isPdf && (hadRawText || doclingHadSealedContent || doclingSealedBlank)
+          ? pdfPageEndSeal(rawPage)
+          : undefined;
         const pageHadNativeSeal = doclingHadSealedContent || doclingEndSeal !== undefined;
         const nativeContaminatedOnPage = !isImage && (
           doclingSealedBlank
@@ -878,18 +882,18 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
         const withheldAfterFailurePages: number[] = [];
         let usablePages = 0;
         const pdfSealState: SealState = { mode: "none", inWorkedExample: false, afterAllSealedPage: false };
-        const fallbackRecognizePage =
-          !deps.recognizePage && deps.recognizePages
-            ? async (vInput: ParseSourceVisualPageInput): Promise<ParseSourceVisualPageResult | null> => {
-                const single = deps.recognizePages!([vInput], visualRecognitionUnavailable);
-                try {
-                  const next = await single.next();
-                  return next.done ? null : next.value;
-                } finally {
-                  await single.return();
-                }
+        const recognizePages = deps.recognizePages;
+        const recognizeSingleFromBatch = recognizePages
+          ? async (input: ParseSourceVisualPageInput): Promise<ParseSourceVisualPageResult | null> => {
+              const single = recognizePages([input], visualRecognitionUnavailable);
+              try {
+                const next = await single.next();
+                return next.done ? null : next.value;
+              } finally {
+                await single.return();
               }
-            : undefined;
+            }
+          : undefined;
         const stagePath = path.join(workDir, "chunks.ndjson");
         const stage = await open(stagePath, "wx", 0o600);
         const result = await parsePdfSegments({ path: temp, ...publication, scope, runner: deps.runner,
@@ -921,7 +925,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
               doclingIncomingSeal = pdfPageEndSeal(rawPage);
               return { rawPage, doclingIncomingSeal: seed, visualInput: prep.visual && !prep.reusable ? prep.visual : undefined };
             });
-            const recognition = deps.recognizePages?.(
+            const recognition = recognizePages?.(
               planned.flatMap(({ visualInput }) => visualInput ? [visualInput] : []), visualRecognitionUnavailable,
             );
             const recognizePage = recognition ? async () => {
@@ -945,9 +949,10 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
                 const effectivePrepared = prefetched?.value && preparedPage.visual && !preparedPage.sealedAllText
                   ? { ...preparedPage, reusable: undefined }
                   : preparedPage;
-                const pageRecognize = prefetched
-                  ? async () => prefetched.value
-                  : (!visualInput && !visualRecognitionUnavailable ? (deps.recognizePage ?? fallbackRecognizePage) : undefined);
+                const singlePageRecognition = visualRecognitionUnavailable
+                  ? recognizeSingleFromBatch
+                  : deps.recognizePage ?? recognizeSingleFromBatch;
+                const pageRecognize = prefetched ? async () => prefetched.value : visualInput ? undefined : singlePageRecognition;
                 let chunk = await consumePage(effectivePrepared, pdfSealState, pageRecognize);
                 if (!chunk) {
                   if (preparedPage.withheldAfterFailure) {

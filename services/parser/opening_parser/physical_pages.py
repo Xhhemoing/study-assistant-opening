@@ -210,7 +210,10 @@ _PROOF_TERMINATOR_RE = re.compile(r"(?:[□■∎]|Q\.?E\.?D\.?|证毕|证完)\s
 _SECTION_SEALED_TERMINATOR_RE = re.compile(r"(?:End\s+of\s+(?:Answers?|Solutions?)|答案完|解答完)\s*[.。]?\s*$", re.IGNORECASE)
 _INLINE_SEALED_TERMINATOR_RE = re.compile(r"(?:[□■∎]|End\s+of\s+Answers?|答案完|解答完)\s*[.。]?\s*$", re.IGNORECASE)
 _BARE_ANSWER_LABEL_RE = re.compile(r"^(?:答案|解答)\s*[:：]$")
-_MODEL_ANSWER_LABEL_RE = re.compile(r"^(?:Model\s+Answer|MODEL\s+ANSWER)\s*[:：]$")
+_MODEL_ANSWER_LABEL_RE = re.compile(
+    r"^(?:Model\s+Answer|MODEL\s+ANSWER)(?:\s+\d+(?:\.\d+)*)?"
+    r"(?:\s*\(\s*(?:continued|cont\.?|CONTD?\.?|CONTINUED)\s*\))?\s*[:：]"
+)
 _TERMINAL_PUNCTUATION_RE = re.compile(r"[.。!?！？;；)）\]】□■∎]\s*$")
 
 
@@ -686,10 +689,11 @@ def _build_page_blocks(page_number: int, fragments: list[tuple[str, str | None]]
                 in_exercise = False
             continue
 
-        # Update worked_example context on explicit non-example transitions.
+        # An inline answer stays within the current exercise.
         if explicit_opener or section_break:
             in_worked_example = kind == "worked_example"
-            in_exercise = kind == "exercise"
+            if seal_kind != "inline_sealed":
+                in_exercise = kind == "exercise"
             page_seal_mode = seal_kind
 
         if current is None or explicit_opener or section_break:
