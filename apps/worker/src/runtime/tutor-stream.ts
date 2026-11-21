@@ -17,6 +17,7 @@ export type TutorStreamContext = {
   materialPurposePin?: OpeningMaterialPurposePin;
   memoryLineageSourceIds?: string[];
   globalMemoryIds?: string[];
+  temporaryMemoryExpiresAt?: string;
 };
 export type TutorStreamDelta = { text: string; sequence: number };
 export type TutorStreamSnapshot = TutorStreamContext & TutorStreamDelta;
@@ -436,10 +437,18 @@ function parseSnapshot(row: Record<string, string>): TutorStreamSnapshot | null 
     }
     globalMemoryIds = [...new Set(context.globalMemoryIds.map(id => id.toLowerCase()))].sort();
   }
+  let temporaryMemoryExpiresAt: string | undefined;
+  if (context.temporaryMemoryExpiresAt !== undefined) {
+    if (typeof context.temporaryMemoryExpiresAt !== "string" || Number.isNaN(Date.parse(context.temporaryMemoryExpiresAt))) {
+      throw new Error("invalid tutor stream cache");
+    }
+    temporaryMemoryExpiresAt = context.temporaryMemoryExpiresAt;
+  }
   return { ...context, ...(fence ? { attemptFence: fence } : {}),
     ...(materialPurposePin ? { materialPurposePin } : {}),
     ...(memoryLineageSourceIds ? { memoryLineageSourceIds } : {}),
     ...(globalMemoryIds ? { globalMemoryIds } : {}),
+    ...(temporaryMemoryExpiresAt ? { temporaryMemoryExpiresAt } : {}),
     contextSourceRefs: refs, text: row.text, sequence };
 }
 

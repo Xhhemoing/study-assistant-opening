@@ -1745,7 +1745,7 @@ describe("tutor turn handler", () => {
       expect.objectContaining({
         contextSourceRefs: expect.arrayContaining([
           { sourceId: chunkA.sourceId, sourceVersion: 0 },
-          { sourceId: memoryOnlySourceId, sourceVersion: 0 },
+          { sourceId: memoryOnlySourceId, sourceVersion: 0, memoryOnly: true },
         ]),
         memoryLineageSourceIds: [memoryOnlySourceId],
         globalMemoryIds: ["00000000-0000-4000-8000-0000000000aa"],
@@ -1764,7 +1764,7 @@ describe("tutor turn handler", () => {
       expect.objectContaining({
         contextSourceRefs: expect.arrayContaining([
           { sourceId: chunkA.sourceId, sourceVersion: 0 },
-          { sourceId: memoryOnlySourceId, sourceVersion: 0 },
+          { sourceId: memoryOnlySourceId, sourceVersion: 0, memoryOnly: true },
         ]),
       }),
       expect.objectContaining({
@@ -1988,6 +1988,124 @@ describe("tutor turn handler", () => {
         memoryLineageSourceIds: [memoryOnlySourceId],
         globalMemoryIds: [memoryId],
       });
+    }
+  });
+
+  it("preserves memoryOnly history provenance on follow-up course turns while keeping non-memory history course-bound", async () => {
+    const priorMemoryOnlySourceId = "00000000-0000-4000-8000-000000000095";
+    const priorCourseSourceId = "00000000-0000-4000-8000-000000000096";
+    const memoryId = "00000000-0000-4000-8000-000000000097";
+    const { deps, tutorJobs } = setup();
+    tutorJobs.loadHistoryContext.mockResolvedValueOnce({
+      history: [{ role: "user", text: "turn 1" }, { role: "assistant", text: "turn 1 answer" }],
+      sourceRefs: [
+        { sourceId: priorCourseSourceId, sourceVersion: 0 },
+        { sourceId: priorMemoryOnlySourceId, sourceVersion: 0, memoryOnly: true },
+      ],
+    });
+    const memories = {
+      listContext: vi.fn(async () => ({
+        memories: [{
+          id: memoryId, workspaceId: claimedJob.workspaceId, courseId: null,
+          kind: "confirmed" as const, text: "Global memory", sourceTurnIds: [claimedJob.userTurnId],
+          version: 0, expiresAt: null, status: "active" as const, createdAt: claimedJob.createdAt, updatedAt: claimedJob.updatedAt,
+        }],
+        sourceRefs: [
+          { sourceId: priorCourseSourceId, sourceVersion: 0 },
+          { sourceId: priorMemoryOnlySourceId, sourceVersion: 0 },
+        ],
+      })),
+    };
+    const authorizeSend = vi.fn<OpeningTutorJobsRepository["authorizeSend"]>(async (_scope, _job, _ctx, startSend, beforeStartSend) => {
+      beforeStartSend?.();
+      return startSend();
+    });
+
+    await expect(createTutorTurnHandler({
+      ...deps,
+      tutorJobs: { ...tutorJobs, authorizeSend },
+      memories,
+    })(claimedJob.id)).resolves.toEqual({ skipped: false });
+
+    expect(authorizeSend).toHaveBeenCalledWith(
+      expect.anything(),
+      claimedJob.id,
+      expect.objectContaining({
+        memoryLineageSourceIds: [priorMemoryOnlySourceId],
+        globalMemoryIds: [memoryId],
+      }),
+      expect.any(Function),
+      expect.any(Function),
+    );
+    expect(tutorJobs.completeTurn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        contextSourceRefs: expect.arrayContaining([
+          { sourceId: priorCourseSourceId, sourceVersion: 0 },
+          { sourceId: priorMemoryOnlySourceId, sourceVersion: 0, memoryOnly: true },
+        ]),
+      }),
+      expect.objectContaining({
+        memoryLineageSourceIds: [priorMemoryOnlySourceId],
+        globalMemoryIds: [memoryId],
+      }),
+    );
+  });
+
+  it("propagates earliest temporaryMemoryExpiresAt to stream cache and invokes provider synchronously inside authorizeSend", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-11-21T00:00:00.000Z"));
+      const tempEarlier = "00000000-0000-4000-8000-0000000000d5";
+      const tempLater = "00000000-0000-4000-8000-0000000000d6";
+      const { deps, provider, tutorJobs } = setup();
+      const events: string[] = [];
+      const stream = { begin: vi.fn(async () => {}), seal: vi.fn(async () => {}), append: vi.fn(async () => 1) };
+      const memories = {
+        listContext: vi.fn(async () => ({
+          memories: [
+            {
+              id: tempLater, workspaceId: claimedJob.workspaceId, courseId: null,
+              kind: "temporary" as const, text: "Later expiry", sourceTurnIds: [claimedJob.userTurnId],
+              version: 0, expiresAt: "2026-11-21T02:00:00.000Z", status: "active" as const,
+              createdAt: claimedJob.createdAt, updatedAt: claimedJob.updatedAt,
+            },
+            {
+              id: tempEarlier, workspaceId: claimedJob.workspaceId, courseId: null,
+              kind: "temporary" as const, text: "Earlier expiry", sourceTurnIds: [claimedJob.userTurnId],
+              version: 0, expiresAt: "2026-11-21T00:30:00.000Z", status: "active" as const,
+              createdAt: claimedJob.createdAt, updatedAt: claimedJob.updatedAt,
+            },
+          ],
+          sourceRefs: [],
+        })),
+      };
+      provider.complete.mockImplementationOnce((_input, _signal, onTextDelta) => {
+        events.push("provider-invoked-sync");
+        return Promise.resolve(onTextDelta?.("ok")).then(() => ({
+          text: "ok", citedChunkIds: [], candidates: [], requestId: null, inputTokens: 10, outputTokens: 10,
+        }));
+      });
+      const authorizeSend = vi.fn<OpeningTutorJobsRepository["authorizeSend"]>(async (_scope, _job, _ctx, startSend, beforeStartSend) => {
+        events.push("db-lock-held");
+        beforeStartSend?.();
+        const inFlight = startSend();
+        events.push("db-lock-released");
+        return await inFlight;
+      });
+      await expect(createTutorTurnHandler({
+        ...deps,
+        tutorJobs: { ...tutorJobs, authorizeSend },
+        memories,
+        stream,
+      })(claimedJob.id)).resolves.toEqual({ skipped: false });
+      expect(events).toEqual(["db-lock-held", "provider-invoked-sync", "db-lock-released"]);
+      expect(stream.begin).toHaveBeenCalledWith(
+        claimedJob.workspaceId,
+        claimedJob.id,
+        expect.objectContaining({ temporaryMemoryExpiresAt: "2026-11-21T00:30:00.000Z" }),
+      );
+    } finally {
+      vi.useRealTimers();
     }
   });
 });

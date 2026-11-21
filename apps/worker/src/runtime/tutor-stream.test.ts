@@ -58,6 +58,28 @@ it("parses cached materialPurposePin and rejects malformed pins before delivery"
   await expect(reader.read(id, id)).rejects.toThrow();
 });
 
+it("parses temporaryMemoryExpiresAt and memoryOnly provenance refs and rejects invalid timestamps", async () => {
+  const id = "10000000-0000-4000-8000-000000000001";
+  const expiresAt = "2026-11-21T01:00:00.000Z";
+  const context = {
+    privacyEpoch: 0,
+    contextSourceRefs: [{ sourceId: id, sourceVersion: 0, memoryOnly: true }],
+    exposureReceiptId: null,
+    temporaryMemoryExpiresAt: expiresAt,
+  };
+  const hgetall = vi.fn()
+    .mockResolvedValueOnce({ context: JSON.stringify(context), text: "cached", sequence: "1" })
+    .mockResolvedValueOnce({ context: JSON.stringify({ ...context, temporaryMemoryExpiresAt: "not-a-date" }), text: "cached", sequence: "1" });
+  const reader = createTutorStreamReader({ hgetall } as unknown as IORedis);
+  expect(await reader.read(id, id)).toMatchObject({
+    contextSourceRefs: [{ sourceId: id, sourceVersion: 0, memoryOnly: true }],
+    temporaryMemoryExpiresAt: expiresAt,
+    text: "cached",
+    sequence: 1,
+  });
+  await expect(reader.read(id, id)).rejects.toThrow("invalid tutor stream cache");
+});
+
 it("returns only confirmed publication sequences and includes the expected execution identity", async () => {
   const evalScript = vi.fn().mockResolvedValueOnce(1).mockResolvedValueOnce(0);
   const writer = createTutorStreamWriter({ eval: evalScript } as unknown as IORedis);

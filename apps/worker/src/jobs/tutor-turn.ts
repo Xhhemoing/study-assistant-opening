@@ -345,27 +345,48 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
         [
           ...allowedSourceIds,
           ...context.map(({ sourceId }) => sourceId),
-          ...historySourceRefs.map(({ sourceId }) => sourceId),
+          ...historySourceRefs.filter(ref => ref.memoryOnly !== true).map(({ sourceId }) => sourceId),
           ...(learnerContext?.sourceRefs ?? []).map(({ sourceId }) => sourceId),
           ...(attemptContext?.sourceRefs ?? []).map(({ sourceId }) => sourceId),
           ...(turn.contextAnchor?.sourceId ? [turn.contextAnchor.sourceId] : []),
         ].map(sourceId => sourceId.toLowerCase()),
       );
       const memoryLineageSourceIds = [...new Set(
-        memoryContext.sourceRefs
+        [
+          ...memoryContext.sourceRefs,
+          ...historySourceRefs.filter(ref => ref.memoryOnly === true),
+        ]
           .map(({ sourceId }) => sourceId.toLowerCase())
           .filter(sourceId => !nonMemorySourceIds.has(sourceId)),
       )].sort();
       const eligibleMemories = memoryContext.memories.filter(memory => isMemoryEligible(memory, contextNow));
       const injectedTemporaryMemories = eligibleMemories.filter(memory => memory.kind === "temporary");
+      const earliestTemporaryMemoryExpiresAt = injectedTemporaryMemories.length
+        ? injectedTemporaryMemories.reduce<string>((earliest, memory) =>
+            Date.parse(memory.expiresAt!) < Date.parse(earliest) ? memory.expiresAt! : earliest,
+          injectedTemporaryMemories[0]!.expiresAt!)
+        : undefined;
+      const assertTempMemoriesUnexpiredSync = () => {
+        if (!injectedTemporaryMemories.length) return;
+        const sendNow = Date.now();
+        if (injectedTemporaryMemories.some(memory => {
+          const expiresAt = memory.expiresAt ? Date.parse(memory.expiresAt) : Number.NaN;
+          return Number.isNaN(expiresAt) || expiresAt <= sendNow;
+        })) {
+          throw Object.assign(new Error("injected temporary memory expired before send"), { code: "CONFLICT" });
+        }
+      };
       const globalMemoryIds = [...new Set(
         eligibleMemories
           .filter(memory => memory.courseId == null)
           .map(memory => memory.id.toLowerCase()),
       )].sort();
+      const memoryTaggedSourceRefs = memoryContext.sourceRefs.map(ref =>
+        nonMemorySourceIds.has(ref.sourceId.toLowerCase()) ? ref : { ...ref, memoryOnly: true },
+      );
       const contextSourceRefs = mergeContextSourceRefs(
         context.map(({ sourceId, sourceVersion }) => ({ sourceId, sourceVersion })),
-        historySourceRefs, memoryContext.sourceRefs, learnerContext?.sourceRefs ?? [], attemptContext?.sourceRefs ?? [],
+        historySourceRefs, memoryTaggedSourceRefs, learnerContext?.sourceRefs ?? [], attemptContext?.sourceRefs ?? [],
       );
       const mode = helpInputSnapshot.tutorMode;
       const baseInstruction = instructionWithMemories(
@@ -431,7 +452,8 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
         executionId: claimed.executionId,
         ...(retrieved?.purposePin ? { materialPurposePin: retrieved.purposePin } : {}),
         ...(memoryLineageSourceIds.length ? { memoryLineageSourceIds } : {}),
-        ...(globalMemoryIds.length ? { globalMemoryIds } : {}) };
+        ...(globalMemoryIds.length ? { globalMemoryIds } : {}),
+        ...(earliestTemporaryMemoryExpiresAt ? { temporaryMemoryExpiresAt: earliestTemporaryMemoryExpiresAt } : {}) };
       const publicationContext = { ...streamContext, attemptContext: attemptContext ?? undefined };
       const attemptFence = attemptContext && deps.stream ? tutorAttemptFence(attemptContext) : undefined;
       let streamAvailable = Boolean(deps.stream);
@@ -440,6 +462,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
         const cacheContext = { ...streamContext, exposureReceiptId: exposureReceipt?.id ?? null,
           ...(attemptFence ? { attemptFence } : {}) };
         await deps.tutorJobs.withStreamPublication(scope, claimed.id, publicationContext, async () => {
+          assertTempMemoriesUnexpiredSync();
           try { await stream.begin(scope.workspaceId, claimed.id, cacheContext); }
           catch (error) {
             if (!isTutorStreamUnavailable(error)) throw error;
@@ -452,6 +475,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
       const authorizeAndPublish = async (text: string) => {
         try {
           await deps.tutorJobs.withStreamPublication(scope, claimed.id, publicationContext, async () => {
+            assertTempMemoriesUnexpiredSync();
             if (firstTextAt === null) {
               const observedAt = new Date();
               firstTextAt = performance.now();
@@ -542,20 +566,25 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
             if (learnerContext) await deps.learnerContext!.assertCurrent(scope, learnerContext);
             if (deps.privacy && jobEpoch !== null) assertCurrentEpoch(jobEpoch, await deps.privacy.getWorkspaceEpoch(scope));
             await assertMaterialsCurrent();
-            // Final atomic DB send gate before provider dispatch: locks workspaces + opening_tutor_jobs FOR SHARE
-            // and verifies running status, claim_token, timing_execution_id, privacy_epoch, attempt context,
-            // material admission, and post-lock clock_timestamp() global memory eligibility.
+          },
+          authorizeAndStartSend: async <T>(startSend: () => Promise<T>): Promise<T> => {
+            const sendContext = {
+              ...(jobEpoch !== null ? { expectedPrivacyEpoch: jobEpoch } : {}),
+              claimToken: claimed.claimToken,
+              executionId: claimed.executionId,
+              contextSourceRefs,
+              ...(retrieved?.purposePin ? { materialPurposePin: retrieved.purposePin } : {}),
+              ...(memoryLineageSourceIds.length ? { memoryLineageSourceIds } : {}),
+              ...(globalMemoryIds.length ? { globalMemoryIds } : {}),
+              ...(attemptContext ? { attemptContext } : {}),
+            };
+            // Hold FOR SHARE locks across synchronous provider.complete / fetch initiation,
+            // releasing the DB connection immediately on commit without awaiting network I/O.
+            if (deps.tutorJobs.authorizeSend) {
+              return deps.tutorJobs.authorizeSend(scope, claimed.id, sendContext, startSend, assertTempMemoriesUnexpiredSync);
+            }
             if (deps.tutorJobs.assertSendAuthorized) {
-              await deps.tutorJobs.assertSendAuthorized(scope, claimed.id, {
-                ...(jobEpoch !== null ? { expectedPrivacyEpoch: jobEpoch } : {}),
-                claimToken: claimed.claimToken,
-                executionId: claimed.executionId,
-                contextSourceRefs,
-                ...(retrieved?.purposePin ? { materialPurposePin: retrieved.purposePin } : {}),
-                ...(memoryLineageSourceIds.length ? { memoryLineageSourceIds } : {}),
-                ...(globalMemoryIds.length ? { globalMemoryIds } : {}),
-                ...(attemptContext ? { attemptContext } : {}),
-              });
+              await deps.tutorJobs.assertSendAuthorized(scope, claimed.id, sendContext);
             } else {
               if (globalMemoryIds.length) {
                 await deps.tutorJobs.assertGlobalMemoriesCurrent?.(scope, globalMemoryIds);
@@ -573,16 +602,8 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
                 throw Object.assign(new Error("tutor job claim is no longer current"), { code: "CONFLICT" });
               }
             }
-            // Final synchronous wall-clock expiry check with zero async gap before provider dispatch.
-            if (injectedTemporaryMemories.length) {
-              const sendNow = Date.now();
-              if (injectedTemporaryMemories.some(memory => {
-                const expiresAt = memory.expiresAt ? Date.parse(memory.expiresAt) : Number.NaN;
-                return Number.isNaN(expiresAt) || expiresAt <= sendNow;
-              })) {
-                throw Object.assign(new Error("injected temporary memory expired before send"), { code: "CONFLICT" });
-              }
-            }
+            assertTempMemoriesUnexpiredSync();
+            return startSend();
           },
         });
         // Settle confirmed provider usage before a refused tail can end the job.

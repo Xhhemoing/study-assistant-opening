@@ -4,7 +4,9 @@ import { notePublicationMetadata } from "@aistudy/domain";
 
 type Db = Sql | TransactionSql;
 type Fragment = ReturnType<Db>;
-export type ContextSourceRef = Pick<Citation, "sourceId" | "sourceVersion">;
+export type ContextSourceRef = Pick<Citation, "sourceId" | "sourceVersion"> & {
+  memoryOnly?: boolean;
+};
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** Persisted JSON is a trust boundary. NULL is unknown, never an empty lineage. */
@@ -13,19 +15,33 @@ export function parseContextSourceRefs(value: unknown): ContextSourceRef[] | nul
   const refs: ContextSourceRef[] = [];
   for (const ref of value) {
     if (!ref || typeof ref !== "object" || typeof ref.sourceId !== "string"
-      || !UUID.test(ref.sourceId) || !Number.isSafeInteger(ref.sourceVersion) || ref.sourceVersion < 0) return null;
-    refs.push({ sourceId: ref.sourceId.toLowerCase(), sourceVersion: ref.sourceVersion });
+      || !UUID.test(ref.sourceId) || !Number.isSafeInteger(ref.sourceVersion) || ref.sourceVersion < 0
+      || (ref.memoryOnly !== undefined && typeof ref.memoryOnly !== "boolean")) return null;
+    refs.push({
+      sourceId: ref.sourceId.toLowerCase(),
+      sourceVersion: ref.sourceVersion,
+      ...(ref.memoryOnly === true ? { memoryOnly: true } : {}),
+    });
   }
   return mergeContextSourceRefs(refs);
 }
 
 export function mergeContextSourceRefs(...groups: readonly ContextSourceRef[][]): ContextSourceRef[] {
-  const unique = new Map<string, ContextSourceRef>();
+  const unique = new Map<string, { sourceId: string; sourceVersion: number }>();
+  const nonMemorySourceIds = new Set<string>();
+  const memoryOnlySourceIds = new Set<string>();
   for (const group of groups) for (const ref of group) {
-    const normalized = { sourceId: ref.sourceId.toLowerCase(), sourceVersion: ref.sourceVersion };
-    unique.set(`${normalized.sourceId}:${normalized.sourceVersion}`, normalized);
+    const sourceId = ref.sourceId.toLowerCase();
+    if (ref.memoryOnly === true) memoryOnlySourceIds.add(sourceId);
+    else nonMemorySourceIds.add(sourceId);
+    const key = `${sourceId}:${ref.sourceVersion}`;
+    if (!unique.has(key)) unique.set(key, { sourceId, sourceVersion: ref.sourceVersion });
   }
-  return [...unique.values()];
+  return [...unique.values()].map(entry =>
+    memoryOnlySourceIds.has(entry.sourceId) && !nonMemorySourceIds.has(entry.sourceId)
+      ? { ...entry, memoryOnly: true }
+      : entry,
+  );
 }
 
 export function parseNoteContextSourceRefs(value: unknown): ContextSourceRef[] | null {
@@ -84,7 +100,7 @@ export function contextSourceRefsIncluded(
 }
 
 /** User turns are original leaves; assistant turns must carry their full consumed lineage. */
-export function turnContextSourceRefs(db: Db, alias: "t" | "u" | "a"): Fragment {
+export function turnContextSourceRefs(db: Db, alias: "t" | "u" | "a" | "mt"): Fragment {
   const column = (name: string) => db.unsafe(`${alias}.${name}`);
   return db`CASE WHEN ${column("role")} = 'assistant' THEN ${column("context_source_refs")}
     ELSE (

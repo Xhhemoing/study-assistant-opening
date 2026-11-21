@@ -84,7 +84,7 @@ describe("saved tutor material provenance", () => {
     const secondMemory = await confirm(second.assistantTurnId);
     const refs = await f.sql<{ context_source_refs: unknown; source_ids: string[]; citations: unknown[] }[]>`
       SELECT context_source_refs, source_ids, citations FROM opening_turns WHERE id=${second.assistantTurnId}`;
-    expect(refs[0]).toEqual({ context_source_refs: [{ sourceId: id, sourceVersion: 0 }], source_ids: [], citations: [] });
+    expect(refs[0]).toEqual({ context_source_refs: [{ sourceId: id, sourceVersion: 0, memoryOnly: true }], source_ids: [], citations: [] });
     const receipt = await memories.deleteMemory(f.scope, {
       id: secondMemory.id, expectedVersion: secondMemory.version, deleteSourceText: false, clientKey: randomUUID(),
     });

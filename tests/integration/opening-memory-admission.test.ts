@@ -505,3 +505,88 @@ it("never lets an active global memory exempt a detached course source shared wi
   })(learnerTurn.jobId)).rejects.toMatchObject({ code: "CONFLICT" });
   expect(providerComplete).not.toHaveBeenCalled();
 });
+
+it("allows follow-up turns in a course conversation after a valid global-memory turn and omits expired temporary-memory history", async () => {
+  const courses = createCourseMembershipRepository(fixture.sql);
+  const conversations = createOpeningConversationRepository(fixture.sql);
+  const chunks = createOpeningSourceChunksRepository(fixture.sql);
+  const jobs = createOpeningTutorJobsRepository(fixture.sql);
+  const budget = createOpeningBudgetRepository(fixture.sql, { envCapCents: 100_000 });
+  const course = await courses.createCourse({
+    workspaceId: fixture.scope.workspaceId,
+    title: "Multi-turn global memory course",
+    slug: randomUUID(),
+  });
+  const standaloneSourceId = randomUUID();
+  await fixture.sql`INSERT INTO opening_sources (id,workspace_id,name,mime,bytes,sha256,version,upload_state,parse_state)
+    VALUES (${standaloneSourceId},${fixture.scope.workspaceId},'standalone-mem.txt','text/plain',16,${"d".repeat(64)},0,'uploaded','ready')`;
+  await fixture.sql`INSERT INTO opening_source_versions (source_id,version,workspace_id,availability)
+    VALUES (${standaloneSourceId},0,${fixture.scope.workspaceId},'available')`;
+  await chunks.replaceChunks(fixture.scope, {
+    sourceId: standaloneSourceId,
+    sourceVersion: 0,
+    chunks: [{ page: 1, text: "Standalone origin notes", slideLabel: null, startMs: null, endMs: null, imageObjectKey: null }],
+  });
+
+  // Origin turn in standalone conversation backs a temporary global memory (course_id IS NULL).
+  const standaloneConv = await conversations.create(fixture.scope, { title: "Standalone origin", courseId: null });
+  const originTurn = await conversations.appendSavedTurn({
+    scope: fixture.scope, conversationId: standaloneConv.id, text: "Use concise proofs", mode: "explain",
+    clientKey: randomUUID(), sourceIds: [standaloneSourceId], learningSessionId: null, currentPage: 1, chunkId: null,
+  });
+  const tempMemory = await memories.proposeMemory(fixture.scope, {
+    text: "Use concise proofs today",
+    sourceTurnIds: [originTurn.turnId],
+    courseId: null,
+    expiresAt: new Date(Date.now() + 60 * 60 * 1_000).toISOString(),
+  });
+
+  const courseConv = await conversations.create(fixture.scope, { title: "Course multi-turn", courseId: course.id });
+  const receivedHistories: Array<Array<{ role: string; text: string }>> = [];
+  const makeHandler = (answerText: string) => createTutorTurnHandler({
+    tutorJobs: jobs,
+    chunks,
+    budget,
+    provider: {
+      complete: async input => {
+        receivedHistories.push(input.history ?? []);
+        return { text: answerText, citedChunkIds: [], candidates: [], requestId: null, inputTokens: 10, outputTokens: 10 };
+      },
+    },
+    memories: { listContext: (scope, now) => memories.listContext(scope, now) },
+    privacy: createOpeningPrivacyRepository(fixture.sql),
+    retrieveContext: createOpeningMaterialRetriever(fixture.sql, budget, null),
+    config: { maxContextCharacters: 2000, reservedCents: 100, maxOutputTokens: 100, inputCentsPerMillion: 100, outputCentsPerMillion: 200 },
+  });
+
+  // Turn 1 in Course A uses active temporary global memory backed by standaloneSourceId -> persists memoryOnly: true.
+  const turn1 = await conversations.appendSavedTurn({
+    scope: fixture.scope, conversationId: courseConv.id, text: "Turn 1 question", mode: "explain",
+    clientKey: randomUUID(), sourceIds: [], learningSessionId: null, currentPage: null, chunkId: null,
+  });
+  await expect(makeHandler("Turn 1 answer with temporary global memory")(turn1.jobId)).resolves.toEqual({ skipped: false });
+  const [persistedTurn1] = await fixture.sql`SELECT context_source_refs FROM opening_turns WHERE id = ${turn1.assistantTurnId}`;
+  expect(persistedTurn1?.context_source_refs).toEqual([{ sourceId: standaloneSourceId, sourceVersion: 0, memoryOnly: true }]);
+
+  // Turn 2 in Course A while temporary global memory is STILL active -> loads Turn 1 history and SUCCEEDS!
+  await fixture.sql`UPDATE opening_turns SET created_at = now() - interval '2 minutes' WHERE id IN (${turn1.turnId}, ${turn1.assistantTurnId})`;
+  const turn2 = await conversations.appendSavedTurn({
+    scope: fixture.scope, conversationId: courseConv.id, text: "Turn 2 follow-up", mode: "explain",
+    clientKey: randomUUID(), sourceIds: [], learningSessionId: null, currentPage: null, chunkId: null,
+  });
+  await expect(makeHandler("Turn 2 answer continuing Turn 1")(turn2.jobId)).resolves.toEqual({ skipped: false });
+  expect(receivedHistories[1]).toEqual([
+    { role: "user", text: "Turn 1 question" },
+    { role: "assistant", text: "Turn 1 answer with temporary global memory" },
+  ]);
+
+  // Now expire the temporary global memory BEFORE Turn 3 -> Turn 3 MUST NOT leak Turn 1/2 expired-memory answers!
+  await fixture.sql`UPDATE opening_turns SET created_at = now() - interval '1 minute' WHERE id IN (${turn2.turnId}, ${turn2.assistantTurnId})`;
+  await fixture.sql`UPDATE opening_memories SET expires_at = now() - interval '1 second' WHERE id = ${tempMemory.id}`;
+  const turn3 = await conversations.appendSavedTurn({
+    scope: fixture.scope, conversationId: courseConv.id, text: "Turn 3 after expiry", mode: "explain",
+    clientKey: randomUUID(), sourceIds: [], learningSessionId: null, currentPage: null, chunkId: null,
+  });
+  await expect(makeHandler("Turn 3 clean answer")(turn3.jobId)).resolves.toEqual({ skipped: false });
+  expect(receivedHistories[2]).toEqual([]);
+});

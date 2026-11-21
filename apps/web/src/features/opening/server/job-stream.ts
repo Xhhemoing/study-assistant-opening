@@ -90,6 +90,12 @@ export async function createJobStreamResponse(input: {
         const canDeliver = () => !closed && Boolean(controller);
         const commitAuthorized = (authorizedJob: StreamJob) => {
           if (!canDeliver()) throw new Error("stream closed before delivery");
+          if (snapshot?.temporaryMemoryExpiresAt) {
+            const expiresAt = Date.parse(snapshot.temporaryMemoryExpiresAt);
+            if (Number.isNaN(expiresAt) || expiresAt <= Date.now()) {
+              throw new Error("stream temporary memory expired before delivery");
+            }
+          }
           if (authorizedJob.status !== "running" || deliveredInTransaction) return;
           deliveredInTransaction = true;
           emitSnapshot(authorizedJob, snapshot);

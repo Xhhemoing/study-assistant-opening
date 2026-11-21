@@ -520,4 +520,48 @@ describe("stream receipt release waits for current job authorization and assista
       contextSourceRefs: [], globalMemoryIds: [memoryId],
     })).rejects.toMatchObject({ code: "CONFLICT" });
   });
+
+  it("authorizeSend starts provider synchronously inside FOR SHARE transaction without holding DB across network wait, and rechecks clock_timestamp() after all blocking queries", async () => {
+    const memoryId = "12000000-0000-4000-8000-0000000000ac";
+    const f = fixture({ courseId, sourceIds: [], derivedMembershipPurpose: "teaching", activeGlobalMemoryIds: [memoryId] });
+    let resolveNetwork!: (value: string) => void;
+    const network = new Promise<string>(resolve => { resolveNetwork = resolve; });
+    const started = f.repo.authorizeSend(
+      scope, jobId,
+      {
+        expectedPrivacyEpoch: 2, claimToken: token, executionId: execution,
+        contextSourceRefs: [{ sourceId, sourceVersion: 0 }], globalMemoryIds: [memoryId],
+      },
+      () => {
+        f.txEvents.push("start-send-sync");
+        return network;
+      },
+      () => { f.txEvents.push("before-start-sync"); },
+    );
+    // DB transaction commits immediately after synchronous startSend(), while network promise is still pending!
+    await vi.waitFor(() => expect(f.txEvents).toEqual(["begin:1", "before-start-sync", "start-send-sync", "commit:1"]));
+    // Final SQL query before startSend() is the non-blocking clock_timestamp() temporary memory check,
+    // strictly AFTER course_asset_memberships FOR SHARE and assertStreamSources (SELECT 1 WHERE)!
+    const membershipIdx = f.calls.findIndex(c => c.sql.startsWith("SELECT asset_id,purpose FROM course_asset_memberships"));
+    const sourcesIdx = f.calls.findIndex(c => c.sql.startsWith("SELECT 1 WHERE"));
+    const lastMemIdx = f.calls.findLastIndex(c => c.sql.startsWith("SELECT id FROM opening_memories") && c.sql.includes("expires_at > clock_timestamp()"));
+    expect(membershipIdx).toBeGreaterThanOrEqual(0);
+    expect(sourcesIdx).toBeGreaterThan(membershipIdx);
+    expect(lastMemIdx).toBeGreaterThan(sourcesIdx);
+    expect(lastMemIdx).toBe(f.calls.length - 1);
+    resolveNetwork("provider-ok");
+    expect(await started).toBe("provider-ok");
+
+    // Verify readStream Phase 2 ALSO runs expires_at > clock_timestamp() as the final SQL query before commitAuthorized.
+    const sse = fixture({ courseId, sourceIds: [], derivedMembershipPurpose: "teaching", activeGlobalMemoryIds: [memoryId] });
+    const commitAuthorized = vi.fn();
+    await sse.repo.readStream(scope, jobId, {
+      ...context, exposureReceiptId: null, contextSourceRefs: [{ sourceId, sourceVersion: 0 }], globalMemoryIds: [memoryId],
+    }, commitAuthorized);
+    expect(commitAuthorized).toHaveBeenCalledOnce();
+    const sseSourcesIdx = sse.calls.findLastIndex(c => c.sql.startsWith("SELECT 1 WHERE"));
+    const sseLastMemIdx = sse.calls.findLastIndex(c => c.sql.startsWith("SELECT id FROM opening_memories") && c.sql.includes("expires_at > clock_timestamp()"));
+    expect(sseLastMemIdx).toBeGreaterThan(sseSourcesIdx);
+    expect(sseLastMemIdx).toBe(sse.calls.length - 1);
+  });
 });

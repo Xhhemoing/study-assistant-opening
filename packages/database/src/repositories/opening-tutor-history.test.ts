@@ -42,4 +42,28 @@ describe("loadTutorHistory context selection", () => {
       sourceRefs: [{ sourceId, sourceVersion: 0 }],
     });
   });
+  it("preserves memoryOnly history lineage and filters expired/inactive memoryOnly turns via clock_timestamp()", async () => {
+    const queries: string[] = [];
+    const memorySourceId = "00000000-0000-4000-8000-000000000002";
+    const sql = (async (strings: TemplateStringsArray) => {
+      const text = strings.join("?").replace(/\s+/g, " ").trim();
+      queries.push(text);
+      if (!text.includes("WITH prior")) return [];
+      return [{
+        question: "question", answer: "answer",
+        user_source_refs: [{ sourceId, sourceVersion: 0 }],
+        assistant_source_refs: [
+          { sourceId, sourceVersion: 0 },
+          { sourceId: memorySourceId, sourceVersion: 0, memoryOnly: true },
+        ],
+      }];
+    }) as unknown as Sql;
+    sql.unsafe = (() => "fragment") as unknown as Sql["unsafe"];
+    const result = await loadTutorHistoryContext(sql, scope, "turn-1");
+    expect(result.sourceRefs).toEqual([
+      { sourceId, sourceVersion: 0 },
+      { sourceId: memorySourceId, sourceVersion: 0, memoryOnly: true },
+    ]);
+    expect(queries.some(q => q.includes("(mem_ref->>'memoryOnly') = 'true'") && q.includes("m.expires_at > clock_timestamp()"))).toBe(true);
+  });
 });

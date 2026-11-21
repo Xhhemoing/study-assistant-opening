@@ -29,6 +29,11 @@ function setup(_input: { sourceIds: string[]; chunks: [] }) {
       originalAnswer: null, currentAnswer: null, rootObservationId: null, headObservationId: null, workSource: null, effectiveGrading: null, sourceRefs: [] })),
     assertAttemptContext: vi.fn<OpeningTutorJobsRepository["assertAttemptContext"]>(async () => {}),
     assertGlobalMemoriesCurrent: vi.fn<OpeningTutorJobsRepository["assertGlobalMemoriesCurrent"]>(async () => {}),
+    authorizeSend: vi.fn<OpeningTutorJobsRepository["authorizeSend"]>(async (scope, jobId, ctx, startSend, beforeStartSend) => {
+      await tutorJobs.assertSendAuthorized(scope, jobId, ctx);
+      beforeStartSend?.();
+      return startSend();
+    }),
     assertSendAuthorized: vi.fn<OpeningTutorJobsRepository["assertSendAuthorized"]>(async (scope, jobId, ctx) => {
       const current = await tutorJobs.get(scope, jobId);
       if (

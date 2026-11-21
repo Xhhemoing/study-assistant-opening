@@ -118,6 +118,28 @@ describe("authorized tutor job event stream", () => {
     await vi.waitFor(() => expect(commitError).toBeInstanceOf(Error));
     expect(await readEvent(reader)).toBeNull();
   });
+  it("withholds SSE enqueue inside commitAuthorized when snapshot temporaryMemoryExpiresAt has elapsed", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-11-21T00:00:00.000Z"));
+    const deps = setup();
+    deps.read.mockResolvedValue({
+      ...snapshot("expired temp memory text", 1),
+      temporaryMemoryExpiresAt: "2026-11-21T00:00:01.000Z",
+    });
+    let commitError: unknown;
+    deps.authorizeSnapshot.mockImplementationOnce(async (_snap, commitAuthorized) => {
+      // Simulate clock advancing past temporaryMemoryExpiresAt while waiting for DB locks.
+      vi.advanceTimersByTime(2_000);
+      try { commitAuthorized?.(job); }
+      catch (error) { commitError = error; throw error; }
+      return job;
+    });
+    const response = await deps.open();
+    expect(await response.text()).toBe("");
+    expect(commitError).toBeInstanceOf(Error);
+    expect((commitError as Error).message).toContain("temporary memory expired");
+    expect(deps.unsubscribe).toHaveBeenCalledOnce();
+  });
   it("subscribes first, releases help before the first bytes, and reconnects with a full snapshot", async () => {
     const deps = setup();
     let release: (() => void) | undefined;

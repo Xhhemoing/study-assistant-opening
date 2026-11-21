@@ -77,6 +77,42 @@ type StreamTurnBinding = {
 const PUBLICATION_CLEANUP_DEADLINE_MS = 1_500;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+type SendAuthorizationContext = {
+  expectedPrivacyEpoch?: number;
+  claimToken?: string;
+  executionId?: string;
+  contextSourceRefs: ContextSourceRef[];
+  materialPurposePin?: OpeningMaterialPurposePin;
+  memoryLineageSourceIds?: readonly string[];
+  globalMemoryIds?: readonly string[];
+  attemptContext?: TutorAttemptContext;
+};
+
+/** Post-lock non-blocking recheck so any earlier FOR SHARE lock wait cannot admit an expired temporary memory. */
+async function assertGlobalMemoriesUnexpiredInTx(
+  tx: TransactionSql,
+  scope: OpeningScope,
+  globalMemoryIds: readonly string[] | undefined,
+): Promise<void> {
+  if (!globalMemoryIds?.length) return;
+  const ids = [...new Set(globalMemoryIds.map(id => {
+    if (typeof id !== "string" || !UUID_PATTERN.test(id)) {
+      throw Object.assign(new Error("stream global memory binding invalid"), { code: "CONFLICT" });
+    }
+    return id.toLowerCase();
+  }))].sort();
+  const active = await tx`SELECT id FROM opening_memories
+    WHERE workspace_id=${scope.workspaceId}
+      AND id=ANY(${ids}::uuid[])
+      AND status='active'
+      AND course_id IS NULL
+      AND (kind='confirmed' OR (kind='temporary' AND expires_at IS NOT NULL AND expires_at > clock_timestamp()))
+    ORDER BY id`;
+  if (active.length !== ids.length) {
+    throw Object.assign(new Error("stream global memory is no longer active"), { code: "CONFLICT" });
+  }
+}
+
 async function assertStreamMaterialAdmission(
   sql: Sql,
   tx: TransactionSql,
@@ -263,23 +299,28 @@ async function assertStreamMaterialAdmission(
       throw Object.assign(new Error("source purpose no longer permits this use"), { code: "CONFLICT" });
     }
   }
-  if (!courseDerivedSourceIds.length) return;
-  if (courseId === null) {
-    const classified = await tx`SELECT id FROM course_asset_memberships WHERE workspace_id=${scope.workspaceId}
-      AND asset_type='source' AND asset_id=ANY(${courseDerivedSourceIds}::uuid[]) AND purpose IS NOT NULL FOR SHARE`;
-    if (classified.length) {
-      throw Object.assign(new Error("select a course to use classified materials"), { code: "CONFLICT" });
+  if (courseDerivedSourceIds.length) {
+    if (courseId === null) {
+      const classified = await tx`SELECT id FROM course_asset_memberships WHERE workspace_id=${scope.workspaceId}
+        AND asset_type='source' AND asset_id=ANY(${courseDerivedSourceIds}::uuid[]) AND purpose IS NOT NULL FOR SHARE`;
+      if (classified.length) {
+        throw Object.assign(new Error("select a course to use classified materials"), { code: "CONFLICT" });
+      }
+    } else {
+      const memberships = await tx`SELECT asset_id,purpose FROM course_asset_memberships
+        WHERE workspace_id=${scope.workspaceId} AND course_id=${courseId}
+          AND asset_type='source' AND asset_id=ANY(${courseDerivedSourceIds}::uuid[]) ORDER BY asset_id FOR SHARE`;
+      const bySource = new Map(memberships.map(row => [String(row.asset_id).toLowerCase(), row.purpose as CourseSourcePurpose | null]));
+      for (const sourceId of courseDerivedSourceIds) {
+        if (!bySource.has(sourceId) || !courseSourcePurposeAllows(bySource.get(sourceId) ?? null, materialUse)) {
+          throw Object.assign(new Error("source purpose no longer permits this use"), { code: "CONFLICT" });
+        }
+      }
     }
-    return;
   }
-  const memberships = await tx`SELECT asset_id,purpose FROM course_asset_memberships
-    WHERE workspace_id=${scope.workspaceId} AND course_id=${courseId}
-      AND asset_type='source' AND asset_id=ANY(${courseDerivedSourceIds}::uuid[]) ORDER BY asset_id FOR SHARE`;
-  const bySource = new Map(memberships.map(row => [String(row.asset_id).toLowerCase(), row.purpose as CourseSourcePurpose | null]));
-  for (const sourceId of courseDerivedSourceIds) {
-    if (!bySource.has(sourceId) || !courseSourcePurposeAllows(bySource.get(sourceId) ?? null, materialUse)) {
-      throw Object.assign(new Error("source purpose no longer permits this use"), { code: "CONFLICT" });
-    }
+  // Re-evaluate post-lock clock_timestamp() after any course_asset_memberships FOR SHARE lock wait.
+  if (globalMemoryIdList.length && (memoryOnlySourceIds.length || courseDerivedSourceIds.length)) {
+    await assertGlobalMemoriesUnexpiredInTx(tx, scope, globalMemoryIdList);
   }
 }
 
@@ -641,6 +682,71 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
     return (await expireStale({ staleMs: options.staleMs, jobId, workspaceId: scope.workspaceId, limit: 1 })) > 0;
   }
 
+  /**
+   * Final atomic send gate before external provider dispatch.
+   * Locks workspaces -> opening_tutor_jobs FOR SHARE in canonical lock order, verifying
+   * running status, claim_token, timing_execution_id, privacy_epoch, attempt context,
+   * material admission, and post-lock clock_timestamp() global memory eligibility, then
+   * invokes startSend() SYNCHRONOUSLY while PostgreSQL still holds FOR SHARE locks
+   * (releasing the DB connection on commit immediately without awaiting network I/O).
+   */
+  async function authorizeSend<T>(
+    scope: OpeningScope,
+    id: string,
+    context: SendAuthorizationContext,
+    startSend: () => Promise<T>,
+    beforeStartSend?: () => void,
+  ): Promise<T> {
+    let inFlight: Promise<T> | undefined;
+    await sql.begin(async tx => {
+      if (context.attemptContext) await lockWorkspaceLearningHistory(tx, scope);
+      const [workspace] = await tx`SELECT privacy_epoch FROM workspaces
+        WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR SHARE`;
+      if (!workspace) {
+        throw Object.assign(new Error("tutor job workspace is no longer available"), { code: "CONFLICT" });
+      }
+      if (context.expectedPrivacyEpoch !== undefined && Number(workspace.privacy_epoch) !== context.expectedPrivacyEpoch) {
+        throw Object.assign(new Error("stream authorization changed"), { code: "PRIVACY_EPOCH_MISMATCH" });
+      }
+      const [job] = await tx`SELECT j.user_turn_id,t.attempt_id,t.context_anchor,t.source_ids,t.source_versions,c.course_id
+        FROM opening_tutor_jobs j
+        JOIN opening_conversations c ON c.id=j.conversation_id AND c.workspace_id=j.workspace_id
+        JOIN opening_turns t ON t.id=j.user_turn_id AND t.workspace_id=j.workspace_id AND t.conversation_id=j.conversation_id
+        WHERE j.id=${id} AND j.workspace_id=${scope.workspaceId} AND c.owner_user_id=${scope.ownerUserId}
+          AND j.status='running'
+          AND j.claim_token IS NOT DISTINCT FROM ${context.claimToken ?? null}::uuid
+          AND j.timing_execution_id IS NOT DISTINCT FROM ${context.executionId ?? null}::uuid
+          AND (j.claim_token IS NULL OR j.timing_execution_id IS NOT NULL)
+        FOR SHARE OF j`;
+      if (!job) {
+        throw Object.assign(new Error("tutor job claim is no longer current"), { code: "CONFLICT" });
+      }
+      if (job.attempt_id || (job.context_anchor as StudyContextAnchor | null)?.attemptId || context.attemptContext) {
+        if (!context.attemptContext) {
+          throw Object.assign(new Error("stream attempt context missing"), { code: "CONFLICT" });
+        }
+        await assertTutorAttemptContext(tx, scope,
+          { jobId: id, userTurnId: String(job.user_turn_id), claimToken: context.claimToken }, context.attemptContext);
+      }
+      await assertStreamMaterialAdmission(sql, tx, scope, job, context.materialPurposePin,
+        context.contextSourceRefs, context.attemptContext?.sourceRefs, {
+          memoryLineageSourceIds: context.memoryLineageSourceIds,
+          globalMemoryIds: context.globalMemoryIds,
+        });
+      if (context.contextSourceRefs.length) {
+        await assertStreamSources(
+          tx, scope, context.contextSourceRefs, context.attemptContext?.sourceRefs,
+          job.source_versions as Record<string, unknown> | null | undefined,
+        );
+        await assertGlobalMemoriesUnexpiredInTx(tx, scope, context.globalMemoryIds);
+      }
+      beforeStartSend?.();
+      inFlight = startSend();
+      void inFlight.catch(() => undefined);
+    });
+    return await inFlight!;
+  }
+
   return {
     loadHistory: (scope: OpeningScope, currentTurnId: string) => loadTutorHistory(sql, scope, currentTurnId),
     loadHistoryContext: (scope: OpeningScope, currentTurnId: string, purpose?: TutorHistoryPurpose) => loadTutorHistoryContext(sql, scope, currentTurnId, purpose),
@@ -840,6 +946,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
               tx, scope, context.contextSourceRefs, context.attemptContext?.sourceRefs,
               job.source_versions as Record<string, unknown> | null | undefined,
             );
+            await assertGlobalMemoriesUnexpiredInTx(tx, scope, context.globalMemoryIds);
           }
           try {
             publicationStarted = true;
@@ -952,6 +1059,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
           tx, scope, context.contextSourceRefs, verifiedAttemptRefs,
           row.source_versions as Record<string, unknown> | null | undefined,
         );
+        await assertGlobalMemoriesUnexpiredInTx(tx, scope, context.globalMemoryIds);
         return job;
       };
 
@@ -1028,68 +1136,14 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
       }
     },
 
-    /**
-     * Final atomic send gate before external provider dispatch.
-     * Locks workspaces -> opening_tutor_jobs FOR SHARE in canonical lock order, verifying
-     * running status, claim_token, timing_execution_id, privacy_epoch, attempt context,
-     * material admission, and post-lock clock_timestamp() global memory eligibility.
-     */
+    authorizeSend,
+
     async assertSendAuthorized(
       scope: OpeningScope,
       id: string,
-      context: {
-        expectedPrivacyEpoch?: number;
-        claimToken?: string;
-        executionId?: string;
-        contextSourceRefs: ContextSourceRef[];
-        materialPurposePin?: OpeningMaterialPurposePin;
-        memoryLineageSourceIds?: readonly string[];
-        globalMemoryIds?: readonly string[];
-        attemptContext?: TutorAttemptContext;
-      },
+      context: SendAuthorizationContext,
     ): Promise<void> {
-      await sql.begin(async tx => {
-        if (context.attemptContext) await lockWorkspaceLearningHistory(tx, scope);
-        const [workspace] = await tx`SELECT privacy_epoch FROM workspaces
-          WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR SHARE`;
-        if (!workspace) {
-          throw Object.assign(new Error("tutor job workspace is no longer available"), { code: "CONFLICT" });
-        }
-        if (context.expectedPrivacyEpoch !== undefined && Number(workspace.privacy_epoch) !== context.expectedPrivacyEpoch) {
-          throw Object.assign(new Error("stream authorization changed"), { code: "PRIVACY_EPOCH_MISMATCH" });
-        }
-        const [job] = await tx`SELECT j.user_turn_id,t.attempt_id,t.context_anchor,t.source_ids,t.source_versions,c.course_id
-          FROM opening_tutor_jobs j
-          JOIN opening_conversations c ON c.id=j.conversation_id AND c.workspace_id=j.workspace_id
-          JOIN opening_turns t ON t.id=j.user_turn_id AND t.workspace_id=j.workspace_id AND t.conversation_id=j.conversation_id
-          WHERE j.id=${id} AND j.workspace_id=${scope.workspaceId} AND c.owner_user_id=${scope.ownerUserId}
-            AND j.status='running'
-            AND j.claim_token IS NOT DISTINCT FROM ${context.claimToken ?? null}::uuid
-            AND j.timing_execution_id IS NOT DISTINCT FROM ${context.executionId ?? null}::uuid
-            AND (j.claim_token IS NULL OR j.timing_execution_id IS NOT NULL)
-          FOR SHARE OF j`;
-        if (!job) {
-          throw Object.assign(new Error("tutor job claim is no longer current"), { code: "CONFLICT" });
-        }
-        if (job.attempt_id || (job.context_anchor as StudyContextAnchor | null)?.attemptId || context.attemptContext) {
-          if (!context.attemptContext) {
-            throw Object.assign(new Error("stream attempt context missing"), { code: "CONFLICT" });
-          }
-          await assertTutorAttemptContext(tx, scope,
-            { jobId: id, userTurnId: String(job.user_turn_id), claimToken: context.claimToken }, context.attemptContext);
-        }
-        await assertStreamMaterialAdmission(sql, tx, scope, job, context.materialPurposePin,
-          context.contextSourceRefs, context.attemptContext?.sourceRefs, {
-            memoryLineageSourceIds: context.memoryLineageSourceIds,
-            globalMemoryIds: context.globalMemoryIds,
-          });
-        if (context.contextSourceRefs.length) {
-          await assertStreamSources(
-            tx, scope, context.contextSourceRefs, context.attemptContext?.sourceRefs,
-            job.source_versions as Record<string, unknown> | null | undefined,
-          );
-        }
-      });
+      await authorizeSend(scope, id, context, () => Promise.resolve());
     },
 
     /** Complete the answer, lineage and inert help receipt in one transaction. */
@@ -1198,6 +1252,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
                 options?.attemptContext?.snapshot.sourceRefs,
                 boundTurn.source_versions as Record<string, unknown> | null | undefined,
               );
+              await assertGlobalMemoriesUnexpiredInTx(tx, input.scope, options?.globalMemoryIds);
             }
           }
         }

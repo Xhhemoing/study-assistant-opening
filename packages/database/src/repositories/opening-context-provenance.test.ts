@@ -20,4 +20,21 @@ describe("material provenance JSON", () => {
     ]);
     expect(mergeContextSourceRefs([{ sourceId: id, sourceVersion: 0 }], [{ sourceId: id, sourceVersion: 1 }])).toHaveLength(2);
   });
+  it("preserves memoryOnly only when every occurrence of that sourceId is memoryOnly and rejects malformed memoryOnly", () => {
+    const other = "b0b0c0d0-1111-4222-8333-000000000000";
+    expect(parseContextSourceRefs([{ sourceId: id, sourceVersion: 0, memoryOnly: "true" }])).toBeNull();
+    expect(parseContextSourceRefs([{ sourceId: id, sourceVersion: 0, memoryOnly: true }])).toEqual([
+      { sourceId: id, sourceVersion: 0, memoryOnly: true },
+    ]);
+    // Any non-memory occurrence of the same sourceId (even across distinct versions) strips memoryOnly.
+    expect(mergeContextSourceRefs(
+      [{ sourceId: id, sourceVersion: 0 }, { sourceId: other, sourceVersion: 0, memoryOnly: true }],
+      [{ sourceId: id, sourceVersion: 1, memoryOnly: true }, { sourceId: other, sourceVersion: 1, memoryOnly: true }],
+    )).toEqual([
+      { sourceId: id, sourceVersion: 0 },
+      { sourceId: other, sourceVersion: 0, memoryOnly: true },
+      { sourceId: id, sourceVersion: 1 },
+      { sourceId: other, sourceVersion: 1, memoryOnly: true },
+    ]);
+  });
 });
