@@ -741,11 +741,40 @@ describe("exam photo review repository integration", () => {
       if (entry !== "concurrent") {
         expect(winner).toBe(otherId);
         expect(rows.find(row => row.id === old.review.id)).toMatchObject({ status: "unknown", client_key: old.input.clientKey });
+        expect(await repository.read(f.scope, old.review.id)).toMatchObject({ id: winner, status: "ready", proposal });
       }
       const ledger = await f.sql`SELECT state FROM opening_budget_reservations WHERE workspace_id=${f.scope.workspaceId} AND request_id=${operationId}`;
       expect(ledger).toEqual([{ state: "reserved" }]);
       for (const retry of [old.input, aliasInput, otherInput]) {
         expect((await repository.begin(f.scope, retry)).review.id).toBe(winner);
+      }
+      if (entry === "complete-first") {
+        const [pointer] = await f.sql`SELECT id,intent FROM opening_exam_integration_commands
+          WHERE sprint_id=${record!.sprint_id} AND client_key LIKE 'exam-review-superseded:v1:%'
+            AND right(client_key,36)=${old.review.id}`;
+        expect(pointer?.intent).toEqual({ reviewId: winner });
+        const unrelated = await repository.begin(f.scope, input({ answerText: "A different answer" }));
+        for (const badPointer of [{ reviewId: unrelated.review.id }, { reviewId: old.review.id },
+          { reviewId: randomUUID() }, { reviewId: "invalid" }]) {
+          await f.sql`UPDATE opening_exam_integration_commands SET intent=${f.sql.json(badPointer)} WHERE id=${pointer!.id}`;
+          expect(await repository.read(f.scope, old.review.id)).toMatchObject({ id: old.review.id, status: "unknown" });
+        }
+        await f.sql`UPDATE opening_exam_integration_commands SET intent=${f.sql.json({ reviewId: winner })} WHERE id=${pointer!.id}`;
+        expect(await repository.read(f.scope, old.review.id)).toMatchObject({ id: winner, status: "ready", proposal });
+        await f.sql`UPDATE opening_exam_reviews SET proposal='{}'::jsonb WHERE id=${winner}`;
+        expect(await repository.read(f.scope, old.review.id)).toMatchObject({ id: old.review.id, status: "unknown" });
+        await f.sql`UPDATE opening_exam_reviews SET proposal=${f.sql.json(proposal)} WHERE id=${winner}`;
+
+        const foreignSprintId = randomUUID();
+        await f.sql`INSERT INTO opening_exam_sprints(id,workspace_id,owner_user_id,pack_snapshot,state)
+          SELECT ${foreignSprintId},${f.otherScope.workspaceId},${f.otherScope.ownerUserId},pack_snapshot,state
+          FROM opening_exam_sprints WHERE id=${record!.sprint_id}`;
+        await f.sql`UPDATE opening_exam_reviews SET sprint_id=${foreignSprintId} WHERE id IN (${old.review.id},${winner})`;
+        await f.sql`UPDATE opening_exam_integration_commands SET sprint_id=${foreignSprintId} WHERE id=${pointer!.id}`;
+        expect(await repository.read(f.scope, old.review.id)).toMatchObject({ id: old.review.id, status: "unknown" });
+        await f.sql`UPDATE opening_exam_integration_commands SET sprint_id=${record!.sprint_id} WHERE id=${pointer!.id}`;
+        await f.sql`UPDATE opening_exam_reviews SET sprint_id=${record!.sprint_id} WHERE id IN (${old.review.id},${winner})`;
+        await f.sql`DELETE FROM opening_exam_sprints WHERE id=${foreignSprintId}`;
       }
     }
   });

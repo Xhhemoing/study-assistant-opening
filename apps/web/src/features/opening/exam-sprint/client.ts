@@ -119,10 +119,9 @@ export function createExamSprintClient(options: { workspaceId?: string; courseId
       const result = await request(operation.controller.signal, target, path);
       if (!isCurrent(operation)) return;
       if (result.review && isResolvedReview(result.review)) {
-        const receipt = unresolvedReviews.get(result.review.id);
-        if (receipt) {
-          recovery?.confirm(receipt.fingerprint, receipt.clientKey);
-          unresolvedReviews.delete(result.review.id);
+        for (const id of [reviewId, result.review.id]) {
+          const receipt = id && unresolvedReviews.get(id);
+          if (receipt) forgetReviewKey(receipt.fingerprint, receipt.clientKey);
         }
       }
       publish({ ...result, error: pending ? uncertainMessage : null });

@@ -427,7 +427,40 @@ export function createOpeningExamReviewsRepository(sql: Sql) {
       }
     },
     async read(scope: Scope, id: string): Promise<ExamWorkReview> {
-      return sql.begin(async tx => (await readContext(tx, scope, id)).review);
+      return sql.begin(async tx => {
+        const original = await readContext(tx, scope, id);
+        let current = original;
+        const visited = new Set([id]);
+        for (let hop = 0; hop < 8; hop++) {
+          const [pointer] = await tx`SELECT c.intent FROM opening_exam_integration_commands c
+            JOIN opening_exam_reviews source ON source.sprint_id=c.sprint_id
+            JOIN opening_exam_sprints sprint ON sprint.id=c.sprint_id
+            WHERE source.id=${current.review.id} AND source.workspace_id=${scope.workspaceId}
+              AND source.owner_user_id=${scope.ownerUserId}
+              AND sprint.workspace_id=${scope.workspaceId} AND sprint.owner_user_id=${scope.ownerUserId}
+              AND c.client_key=${supersededReviewKey(current.review.id)} LIMIT 1`;
+          if (!pointer) return current.review;
+          const parsed = examReviewAliasSchema.safeParse(pointer.intent);
+          if (!parsed.success || visited.has(parsed.data.reviewId)) return original.review;
+          const [target] = await tx`SELECT target.intent, target.privacy_epoch, target.proposal FROM opening_exam_reviews target
+            JOIN opening_exam_reviews source ON source.id=${id}
+              AND target.sprint_id=source.sprint_id AND target.workspace_id=source.workspace_id
+              AND target.owner_user_id=source.owner_user_id AND target.source_item_id=source.source_item_id
+              AND target.work_source_id=source.work_source_id AND target.work_source_version=source.work_source_version
+              AND target.reference_source_id=source.reference_source_id AND target.reference_source_version=source.reference_source_version
+              AND target.privacy_epoch=source.privacy_epoch AND target.answer_text=source.answer_text
+            WHERE source.workspace_id=${scope.workspaceId} AND source.owner_user_id=${scope.ownerUserId}
+              AND target.id=${parsed.data.reviewId}`;
+          const targetInput = target && examWorkReviewInputSchema.safeParse(target.intent);
+          if (!targetInput || !targetInput.success
+            || Number(target.privacy_epoch) !== original.privacyEpoch
+            || (target.proposal != null && !examWorkReviewProposalSchema.safeParse(target.proposal).success)
+            || !isDeepStrictEqual(reviewIntentBody(targetInput.data), reviewIntentBody(original.input))) return original.review;
+          visited.add(parsed.data.reviewId);
+          current = await readContext(tx, scope, parsed.data.reviewId);
+        }
+        return original.review;
+      });
     },
     async assertCurrent(scope: Scope, id: string, expectedUpdatedAt?: string): Promise<void> {
       await sql.begin(async tx => {

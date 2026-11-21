@@ -467,6 +467,24 @@ describe("exam integration shares mutation recovery", () => {
     expect(posts.map(([, init]) => JSON.parse(String(init?.body)).clientKey)).toEqual([key, key, "next-review-key"]);
   });
 
+  it("clears the requested review key when refresh resolves to a superseding review", async () => {
+    const ready = { ...review, id: "66666666-6666-4666-8666-666666666666", status: "ready", proposal: {
+      transcription: "x=2", questionMatch: true, outcome: "correct",
+      steps: [{ label: "计算", verdict: "correct", feedback: "正确" }], summary: "正确", errorCause: null,
+    } };
+    const fetcher = vi.fn<Fetcher>().mockResolvedValueOnce(Response.json(review))
+      .mockResolvedValueOnce(Response.json(ready)).mockResolvedValueOnce(Response.json(review));
+    const keys = vi.fn().mockReturnValueOnce(key).mockReturnValueOnce("next-review-key");
+    const client = createExamSprintClient({ fetcher, keyFactory: keys });
+    const command = { action: "review", input: reviewInput } as const;
+    await client.sendIntegration(command);
+    await client.loadReview(review.id);
+    expect(client.getSnapshot().review).toMatchObject({ id: ready.id, status: "ready" });
+    await client.sendIntegration(command);
+    const posts = fetcher.mock.calls.filter(([, init]) => init?.method === "POST");
+    expect(posts.map(([, init]) => JSON.parse(String(init?.body)).clientKey)).toEqual([key, "next-review-key"]);
+  });
+
   it("blocks all write types after a lost binding response and replays the same binding key", async () => {
     const fetcher = vi.fn<Fetcher>().mockRejectedValueOnce(new Error("lost binding response"))
       .mockResolvedValueOnce(Response.json(integration)).mockResolvedValueOnce(Response.json(integration)).mockResolvedValueOnce(Response.json(integration));
