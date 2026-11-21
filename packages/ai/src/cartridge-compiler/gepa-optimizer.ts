@@ -86,6 +86,15 @@ const KNOWN_PATCH_SCHEMA_KEYS: ReadonlySet<string> = new Set([
 ]);
 const MAX_SLOT_KEY_LENGTH = 256;
 const MAX_PATCH_STRING_LENGTH = 4096;
+const DISJOINT_SPLIT_ALLOWED_NUMERIC_PATHS: ReadonlySet<string> = new Set([
+  "disjoint_split_options.seed",
+  "options.seed",
+  "splitOptions.seed",
+  "seed",
+]);
+const GEPA_ROUND_ALLOWED_FUNCTION_PATHS: ReadonlySet<string> = new Set([
+  "gepa_round.scoreCandidate",
+]);
 
 function deterministicHash32(input: string): number {
   let h = 2166136261 >>> 0;
@@ -139,6 +148,33 @@ function checkStrictPlainObjectOwnProperties(
       issues.push(`${path}:forbidden_accessor_property`);
     } else if (!desc.enumerable) {
       issues.push(`${path}:forbidden_non_enumerable_property`);
+    }
+  }
+}
+
+function checkStrictPlainArray(arr: readonly unknown[], path: string, issues: string[]): void {
+  if (Object.getPrototypeOf(arr) !== Array.prototype) {
+    issues.push(`${path}:forbidden_non_plain_array`);
+  }
+  if (Object.getOwnPropertySymbols(arr).length > 0) {
+    issues.push(`${path}:forbidden_symbol_key`);
+  }
+  const ownNames = Object.getOwnPropertyNames(arr);
+  for (let i = 0; i < ownNames.length; i += 1) {
+    const key = ownNames[i]!;
+    if (key === "length") continue;
+    const idx = Number(key);
+    const isDenseIndex = Number.isInteger(idx) && idx >= 0 && idx < arr.length && String(idx) === key;
+    if (!isDenseIndex) {
+      issues.push(`${path}:forbidden_array_property`);
+      continue;
+    }
+    const desc = Object.getOwnPropertyDescriptor(arr, key);
+    if (!desc) continue;
+    if (desc.get || desc.set) {
+      issues.push(`${path}[${idx}]:forbidden_accessor_property`);
+    } else if (!desc.enumerable) {
+      issues.push(`${path}[${idx}]:forbidden_non_enumerable_property`);
     }
   }
 }
@@ -200,6 +236,7 @@ function validateRubricAnchorExampleShape(
   if (!Array.isArray(value.establishedPremises)) {
     issues.push(`${path}.establishedPremises:must_be_string_array`);
   } else {
+    checkStrictPlainArray(value.establishedPremises, `${path}.establishedPremises`, issues);
     let validPremises = true;
     for (let pIdx = 0; pIdx < value.establishedPremises.length; pIdx += 1) {
       if (!Object.prototype.hasOwnProperty.call(value.establishedPremises, pIdx)) {
@@ -227,6 +264,7 @@ function validateSurfacePayloadSchema(surface: string, payload: unknown): void {
         issues.push("moveRules.payload:must_be_array");
         break;
       }
+      checkStrictPlainArray(payload, "moveRules.payload", issues);
       for (let index = 0; index < payload.length; index += 1) {
         const path = `moveRules[${index}]`;
         if (!Object.prototype.hasOwnProperty.call(payload, index)) {
@@ -258,6 +296,7 @@ function validateSurfacePayloadSchema(surface: string, payload: unknown): void {
         issues.push("hintLadder.payload:must_be_array");
         break;
       }
+      checkStrictPlainArray(payload, "hintLadder.payload", issues);
       for (let index = 0; index < payload.length; index += 1) {
         const path = `hintLadder[${index}]`;
         if (!Object.prototype.hasOwnProperty.call(payload, index)) {
@@ -294,6 +333,7 @@ function validateSurfacePayloadSchema(surface: string, payload: unknown): void {
         issues.push("rubricAnchors.payload:must_be_array");
         break;
       }
+      checkStrictPlainArray(payload, "rubricAnchors.payload", issues);
       for (let index = 0; index < payload.length; index += 1) {
         const path = `rubricAnchors[${index}]`;
         if (!Object.prototype.hasOwnProperty.call(payload, index)) {
@@ -315,6 +355,7 @@ function validateSurfacePayloadSchema(surface: string, payload: unknown): void {
         if (!Array.isArray(item.requiredAstTokens)) {
           issues.push(`${path}.requiredAstTokens:must_be_nonempty_string_array`);
         } else {
+          checkStrictPlainArray(item.requiredAstTokens, `${path}.requiredAstTokens`, issues);
           let validAstTokens = true;
           for (let tIdx = 0; tIdx < item.requiredAstTokens.length; tIdx += 1) {
             if (!Object.prototype.hasOwnProperty.call(item.requiredAstTokens, tIdx)) {
@@ -334,6 +375,7 @@ function validateSurfacePayloadSchema(surface: string, payload: unknown): void {
         if (!Array.isArray(item.positiveAnchors)) {
           issues.push(`${path}.positiveAnchors:must_be_array`);
         } else {
+          checkStrictPlainArray(item.positiveAnchors, `${path}.positiveAnchors`, issues);
           for (let aIdx = 0; aIdx < item.positiveAnchors.length; aIdx += 1) {
             if (!Object.prototype.hasOwnProperty.call(item.positiveAnchors, aIdx)) {
               issues.push(`${path}.positiveAnchors[${aIdx}]:sparse_array_hole`);
@@ -349,6 +391,7 @@ function validateSurfacePayloadSchema(surface: string, payload: unknown): void {
         if (!Array.isArray(item.negativeAnchors)) {
           issues.push(`${path}.negativeAnchors:must_be_array`);
         } else {
+          checkStrictPlainArray(item.negativeAnchors, `${path}.negativeAnchors`, issues);
           for (let aIdx = 0; aIdx < item.negativeAnchors.length; aIdx += 1) {
             if (!Object.prototype.hasOwnProperty.call(item.negativeAnchors, aIdx)) {
               issues.push(`${path}.negativeAnchors[${aIdx}]:sparse_array_hole`);
@@ -415,66 +458,80 @@ export function assertDisjointSplitInvariants(split: DisjointDatasetSplit): void
   // Defense-in-depth: scan the entire split and enforce pseudonymized trajectory invariants FIRST
   // so raw PII learner/trajectory IDs are quarantined before any overlap error is constructed.
   assertNoRawPiiInValue(split, "disjoint_split");
-  for (const record of [
-    ...split.holdout,
-    ...split.train,
-    ...split.dev,
-    ...(split.quarantinedCrossing ?? []),
-  ]) {
-    assertPseudonymizedTrajectory(record);
+  const allSplitBuckets: readonly (readonly ErrorTrajectoryRecord[])[] = [
+    split.holdout,
+    split.train,
+    split.dev,
+    split.quarantinedCrossing ?? [],
+  ];
+  for (let b = 0; b < allSplitBuckets.length; b += 1) {
+    const bucket = allSplitBuckets[b]!;
+    for (let i = 0; i < bucket.length; i += 1) {
+      assertPseudonymizedTrajectory(bucket[i]!);
+    }
   }
   if (split.holdoutFirewall) {
-    for (const id of split.holdoutFirewall.holdoutTrajectoryIds) {
-      assertNoRawPiiInText(canonicalizeIdentifier(id, "holdoutTrajectoryId"), "holdoutTrajectoryId");
-    }
-    for (const id of split.holdoutFirewall.holdoutLearnerPseudoIds) {
+    for (let i = 0; i < split.holdoutFirewall.holdoutTrajectoryIds.length; i += 1) {
       assertNoRawPiiInText(
-        canonicalizeIdentifier(id, "holdoutLearnerPseudoId"),
+        canonicalizeIdentifier(split.holdoutFirewall.holdoutTrajectoryIds[i]!, "holdoutTrajectoryId"),
+        "holdoutTrajectoryId",
+      );
+    }
+    for (let i = 0; i < split.holdoutFirewall.holdoutLearnerPseudoIds.length; i += 1) {
+      assertNoRawPiiInText(
+        canonicalizeIdentifier(
+          split.holdoutFirewall.holdoutLearnerPseudoIds[i]!,
+          "holdoutLearnerPseudoId",
+        ),
         "holdoutLearnerPseudoId",
       );
     }
-    for (const id of split.holdoutFirewall.holdoutItemFamilyIds) {
-      assertNoRawPiiInText(canonicalizeIdentifier(id, "holdoutItemFamilyId"), "holdoutItemFamilyId");
+    for (let i = 0; i < split.holdoutFirewall.holdoutItemFamilyIds.length; i += 1) {
+      assertNoRawPiiInText(
+        canonicalizeIdentifier(split.holdoutFirewall.holdoutItemFamilyIds[i]!, "holdoutItemFamilyId"),
+        "holdoutItemFamilyId",
+      );
     }
   }
 
-  const holdoutTrajIds = new Set(
-    split.holdout.map((t) => canonicalizeIdentifier(t.trajectoryId, "trajectoryId")),
-  );
-  const holdoutLearners = new Set(
-    split.holdout.map((t) =>
-      canonicalizeIdentifier(t.learnerPseudoId, "learnerPseudoId", t.trajectoryId),
-    ),
-  );
-  const holdoutFamilies = new Set(
-    split.holdout.map((t) =>
-      canonicalizeIdentifier(t.itemFamilyId, "itemFamilyId", t.trajectoryId),
-    ),
-  );
+  const holdoutTrajIds = new Set<string>();
+  const holdoutLearners = new Set<string>();
+  const holdoutFamilies = new Set<string>();
+  for (let i = 0; i < split.holdout.length; i += 1) {
+    const t = split.holdout[i]!;
+    holdoutTrajIds.add(canonicalizeIdentifier(t.trajectoryId, "trajectoryId"));
+    holdoutLearners.add(canonicalizeIdentifier(t.learnerPseudoId, "learnerPseudoId", t.trajectoryId));
+    holdoutFamilies.add(canonicalizeIdentifier(t.itemFamilyId, "itemFamilyId", t.trajectoryId));
+  }
 
   const leakedTrajectoryIds: string[] = [];
   const leakedLearners = new Set<string>();
   const leakedFamilies = new Set<string>();
 
-  for (const record of [...split.train, ...split.dev]) {
-    const trajId = canonicalizeIdentifier(record.trajectoryId, "trajectoryId");
-    const learnerId = canonicalizeIdentifier(record.learnerPseudoId, "learnerPseudoId", trajId);
-    const familyId = canonicalizeIdentifier(record.itemFamilyId, "itemFamilyId", trajId);
+  const trainAndDevBuckets: readonly (readonly ErrorTrajectoryRecord[])[] = [split.train, split.dev];
+  for (let b = 0; b < trainAndDevBuckets.length; b += 1) {
+    const bucket = trainAndDevBuckets[b]!;
+    for (let i = 0; i < bucket.length; i += 1) {
+      const record = bucket[i]!;
+      const trajId = canonicalizeIdentifier(record.trajectoryId, "trajectoryId");
+      const learnerId = canonicalizeIdentifier(record.learnerPseudoId, "learnerPseudoId", trajId);
+      const familyId = canonicalizeIdentifier(record.itemFamilyId, "itemFamilyId", trajId);
 
-    let violated = false;
-    if (holdoutTrajIds.has(trajId)) {
-      violated = true;
-    }
-    if (holdoutLearners.has(learnerId)) {
-      leakedLearners.add(learnerId);
-      violated = true;
-    }
-    if (holdoutFamilies.has(familyId)) {
-      leakedFamilies.add(familyId);
-      violated = true;
-    }
-    if (violated) {
-      leakedTrajectoryIds.push(trajId);
+      let violated = false;
+      if (holdoutTrajIds.has(trajId)) {
+        violated = true;
+      }
+      if (holdoutLearners.has(learnerId)) {
+        leakedLearners.add(learnerId);
+        violated = true;
+      }
+      if (holdoutFamilies.has(familyId)) {
+        leakedFamilies.add(familyId);
+        violated = true;
+      }
+      if (violated) {
+        leakedTrajectoryIds.push(trajId);
+      }
     }
   }
 
@@ -497,8 +554,35 @@ export function createDisjointTrajectorySplit(
   trajectories: readonly ErrorTrajectoryRecord[],
   options: DisjointSplitOptions = {},
 ): DisjointDatasetSplit {
-  assertNoRawPiiInValue(options, "disjoint_split_options");
+  assertNoRawPiiInValue(options, "disjoint_split_options", undefined, {
+    allowedNumericMetadataPaths: DISJOINT_SPLIT_ALLOWED_NUMERIC_PATHS,
+  });
   assertNoRawPiiInValue(trajectories, "disjoint_split_trajectories");
+  if (
+    options.seed !== undefined &&
+    (typeof options.seed !== "number" || !Number.isFinite(options.seed))
+  ) {
+    throw new RangeError(
+      `disjointSplit options.seed must be a finite number (received invalid ${typeof options.seed}).`,
+    );
+  }
+  if (
+    options.holdoutRatio !== undefined &&
+    (typeof options.holdoutRatio !== "number" || !Number.isFinite(options.holdoutRatio))
+  ) {
+    throw new RangeError(
+      `disjointSplit options.holdoutRatio must be a finite number (received invalid ${typeof options.holdoutRatio}).`,
+    );
+  }
+  if (
+    options.devRatio !== undefined &&
+    (typeof options.devRatio !== "number" || !Number.isFinite(options.devRatio))
+  ) {
+    throw new RangeError(
+      `disjointSplit options.devRatio must be a finite number (received invalid ${typeof options.devRatio}).`,
+    );
+  }
+
   const canonical: ErrorTrajectoryRecord[] = [];
   for (let i = 0; i < trajectories.length; i += 1) {
     if (!Object.prototype.hasOwnProperty.call(trajectories, i)) {
@@ -688,34 +772,47 @@ export function assertNoHoldoutLeakage(
   assertNoRawPiiInValue(firewall, "holdout_firewall");
   assertNoRawPiiInValue(trajectories, "firewall_trajectories");
 
-  const blockedTrajectoryIds = new Set(
-    firewall.holdoutTrajectoryIds.map((id) => {
-      const canonical = canonicalizeIdentifier(id, "holdoutTrajectoryId");
-      assertNoRawPiiInText(canonical, "holdoutTrajectoryId");
-      return canonical;
-    }),
-  );
-  const blockedLearners = new Set(
-    firewall.holdoutLearnerPseudoIds.map((id) => {
-      const canonical = canonicalizeIdentifier(id, "holdoutLearnerPseudoId");
-      assertNoRawPiiInText(canonical, "holdoutLearnerPseudoId");
-      return canonical;
-    }),
-  );
-  const blockedFamilies = new Set(
-    firewall.holdoutItemFamilyIds.map((id) => {
-      const canonical = canonicalizeIdentifier(id, "holdoutItemFamilyId");
-      assertNoRawPiiInText(canonical, "holdoutItemFamilyId");
-      return canonical;
-    }),
-  );
+  const blockedTrajectoryIds = new Set<string>();
+  for (let i = 0; i < firewall.holdoutTrajectoryIds.length; i += 1) {
+    const canonical = canonicalizeIdentifier(
+      firewall.holdoutTrajectoryIds[i]!,
+      "holdoutTrajectoryId",
+    );
+    assertNoRawPiiInText(canonical, "holdoutTrajectoryId");
+    blockedTrajectoryIds.add(canonical);
+  }
+  const blockedLearners = new Set<string>();
+  for (let i = 0; i < firewall.holdoutLearnerPseudoIds.length; i += 1) {
+    const canonical = canonicalizeIdentifier(
+      firewall.holdoutLearnerPseudoIds[i]!,
+      "holdoutLearnerPseudoId",
+    );
+    assertNoRawPiiInText(canonical, "holdoutLearnerPseudoId");
+    blockedLearners.add(canonical);
+  }
+  const blockedFamilies = new Set<string>();
+  for (let i = 0; i < firewall.holdoutItemFamilyIds.length; i += 1) {
+    const canonical = canonicalizeIdentifier(
+      firewall.holdoutItemFamilyIds[i]!,
+      "holdoutItemFamilyId",
+    );
+    assertNoRawPiiInText(canonical, "holdoutItemFamilyId");
+    blockedFamilies.add(canonical);
+  }
 
   const leakedTrajectoryIds: string[] = [];
   const leakedLearners = new Set<string>();
   const leakedFamilies = new Set<string>();
 
-  for (const raw of trajectories) {
-    const t = canonicalizeTrajectoryRecord(raw);
+  for (let i = 0; i < trajectories.length; i += 1) {
+    if (!Object.prototype.hasOwnProperty.call(trajectories, i)) {
+      throw new GepaInvalidPatchPayloadError(
+        `Trajectory list contains sparse array hole at index ${i}`,
+        "holdoutFirewall",
+        [`trajectories[${i}]:sparse_array_hole`],
+      );
+    }
+    const t = canonicalizeTrajectoryRecord(trajectories[i]!);
     let hit = false;
     if (blockedTrajectoryIds.has(t.trajectoryId)) {
       hit = true;
@@ -856,22 +953,35 @@ export function assertAllowedGepaPatch(patch: unknown): asserts patch is GepaSur
   }
 
   validateSurfacePayloadSchema(surface, patch.payload);
-  // Post-normalization PII scan on rubric anchor expressions/AST tokens/premises.
+  // Post-normalization PII scan on rubric anchor expressions/AST tokens/premises using indexed loops.
   if (surface === "rubricAnchors") {
     const rules = patch.payload as readonly MisconceptionRubricRule[];
     for (let ruleIdx = 0; ruleIdx < rules.length; ruleIdx += 1) {
       const rule = rules[ruleIdx]!;
+      const astTokens: string[] = [];
+      for (let tIdx = 0; tIdx < rule.requiredAstTokens.length; tIdx += 1) {
+        astTokens.push(rule.requiredAstTokens[tIdx]!);
+      }
       assertNoRawPiiInText(
-        normalizeAstEdit(rule.requiredAstTokens.join("|")),
+        normalizeAstEdit(astTokens.join("|")),
         `gepa_patch:rubricAnchors[${ruleIdx}].requiredAstTokens(post_norm)`,
       );
-      const anchors = [...rule.positiveAnchors, ...rule.negativeAnchors];
-      for (let anchorIdx = 0; anchorIdx < anchors.length; anchorIdx += 1) {
-        const anchor = anchors[anchorIdx]!;
+      let anchorIdx = 0;
+      for (let pIdx = 0; pIdx < rule.positiveAnchors.length; pIdx += 1) {
+        const anchor = rule.positiveAnchors[pIdx]!;
         assertNoRawPiiInText(
           normalizeAstEdit(anchor.normalizedAstEdit),
           `gepa_patch:rubricAnchors[${ruleIdx}].anchor[${anchorIdx}](post_norm)`,
         );
+        anchorIdx += 1;
+      }
+      for (let nIdx = 0; nIdx < rule.negativeAnchors.length; nIdx += 1) {
+        const anchor = rule.negativeAnchors[nIdx]!;
+        assertNoRawPiiInText(
+          normalizeAstEdit(anchor.normalizedAstEdit),
+          `gepa_patch:rubricAnchors[${ruleIdx}].anchor[${anchorIdx}](post_norm)`,
+        );
+        anchorIdx += 1;
       }
     }
   }
@@ -897,33 +1007,44 @@ function cloneHintStep(step: CartridgeHintStep): CartridgeHintStep {
   };
 }
 
+function copyStringArrayByIndex(items: readonly string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < items.length; i += 1) {
+    out.push(items[i]!);
+  }
+  return out;
+}
+
+function cloneRubricAnchorByIndex(a: MisconceptionRubricRule["positiveAnchors"][number]) {
+  return {
+    anchorId: a.anchorId,
+    label: a.label,
+    conceptId: a.conceptId,
+    firstErrorRuleId: a.firstErrorRuleId,
+    normalizedAstEdit: a.normalizedAstEdit,
+    establishedPremises: copyStringArrayByIndex(a.establishedPremises),
+    expression: a.expression,
+    rationale: a.rationale,
+  };
+}
+
 function cloneRubricRule(rule: MisconceptionRubricRule): MisconceptionRubricRule {
+  const positiveAnchors = [];
+  for (let i = 0; i < rule.positiveAnchors.length; i += 1) {
+    positiveAnchors.push(cloneRubricAnchorByIndex(rule.positiveAnchors[i]!));
+  }
+  const negativeAnchors = [];
+  for (let i = 0; i < rule.negativeAnchors.length; i += 1) {
+    negativeAnchors.push(cloneRubricAnchorByIndex(rule.negativeAnchors[i]!));
+  }
   return {
     ruleId: rule.ruleId,
     conceptId: rule.conceptId,
     firstErrorRuleId: rule.firstErrorRuleId,
-    requiredAstTokens: [...rule.requiredAstTokens],
+    requiredAstTokens: copyStringArrayByIndex(rule.requiredAstTokens),
     requiredMissingPremise: rule.requiredMissingPremise,
-    positiveAnchors: rule.positiveAnchors.map((a) => ({
-      anchorId: a.anchorId,
-      label: a.label,
-      conceptId: a.conceptId,
-      firstErrorRuleId: a.firstErrorRuleId,
-      normalizedAstEdit: a.normalizedAstEdit,
-      establishedPremises: [...a.establishedPremises],
-      expression: a.expression,
-      rationale: a.rationale,
-    })),
-    negativeAnchors: rule.negativeAnchors.map((a) => ({
-      anchorId: a.anchorId,
-      label: a.label,
-      conceptId: a.conceptId,
-      firstErrorRuleId: a.firstErrorRuleId,
-      normalizedAstEdit: a.normalizedAstEdit,
-      establishedPremises: [...a.establishedPremises],
-      expression: a.expression,
-      rationale: a.rationale,
-    })),
+    positiveAnchors,
+    negativeAnchors,
   };
 }
 
@@ -933,7 +1054,7 @@ function bumpPolicyVersion(version: string, suffix: string): string {
 
 /**
  * Applies a validated declarative patch to a cartridge policy, returning a new
- * immutable policy reconstructed strictly from validated declared fields.
+ * immutable policy reconstructed strictly from validated declared fields via indexed loops.
  * Rejects forbidden surfaces, undeclared/malformed payload shapes, raw PII in
  * patch strings, and invalid rubric anchor pairs.
  */
@@ -943,15 +1064,19 @@ export function validateAndApplyGepaPatch(
   versionTag = "gepa",
 ): CartridgeDeclarativePolicy {
   assertNoRawPiiInValue(policy, "gepa_base_policy");
+  assertNoRawPiiInText(versionTag, "gepa_version_tag");
   assertAllowedGepaPatch(patch);
 
   switch (patch.surface) {
     case "moveRules": {
-      const merged = new Map<string, CartridgeMoveRule>(
-        policy.moveRules.map((r) => [r.id, cloneMoveRule(r)]),
-      );
-      for (const rule of patch.payload) {
-        merged.set(rule.id, cloneMoveRule(rule));
+      const merged = new Map<string, CartridgeMoveRule>();
+      for (let i = 0; i < policy.moveRules.length; i += 1) {
+        const r = cloneMoveRule(policy.moveRules[i]!);
+        merged.set(r.id, r);
+      }
+      for (let i = 0; i < patch.payload.length; i += 1) {
+        const r = cloneMoveRule(patch.payload[i]!);
+        merged.set(r.id, r);
       }
       const sortedRules = [...merged.values()].sort((a, b) =>
         b.priority !== a.priority ? b.priority - a.priority : a.id.localeCompare(b.id),
@@ -964,11 +1089,14 @@ export function validateAndApplyGepaPatch(
     }
 
     case "hintLadder": {
-      const merged = new Map<string, CartridgeHintStep>(
-        policy.hintLadder.map((h) => [`${h.conceptId}::${h.stage}`, cloneHintStep(h)]),
-      );
-      for (const step of patch.payload) {
-        merged.set(`${step.conceptId}::${step.stage}`, cloneHintStep(step));
+      const merged = new Map<string, CartridgeHintStep>();
+      for (let i = 0; i < policy.hintLadder.length; i += 1) {
+        const h = cloneHintStep(policy.hintLadder[i]!);
+        merged.set(`${h.conceptId}::${h.stage}`, h);
+      }
+      for (let i = 0; i < patch.payload.length; i += 1) {
+        const step = cloneHintStep(patch.payload[i]!);
+        merged.set(`${step.conceptId}::${step.stage}`, step);
       }
       const sortedHints = [...merged.values()].sort((a, b) => {
         const cmp = a.conceptId.localeCompare(b.conceptId);
@@ -982,8 +1110,12 @@ export function validateAndApplyGepaPatch(
     }
 
     case "rubricAnchors": {
-      const sanitizedRules = patch.payload.map((rule) => cloneRubricRule(rule));
-      for (const rule of sanitizedRules) {
+      const sanitizedRules: MisconceptionRubricRule[] = [];
+      for (let i = 0; i < patch.payload.length; i += 1) {
+        sanitizedRules.push(cloneRubricRule(patch.payload[i]!));
+      }
+      for (let i = 0; i < sanitizedRules.length; i += 1) {
+        const rule = sanitizedRules[i]!;
         const check = validateRubricAnchorPair(rule);
         if (!check.valid) {
           throw new InvalidRubricAnchorPairError(
@@ -993,10 +1125,13 @@ export function validateAndApplyGepaPatch(
           );
         }
       }
-      const merged = new Map<string, MisconceptionRubricRule>(
-        policy.rubricAnchors.map((r) => [r.ruleId, cloneRubricRule(r)]),
-      );
-      for (const rule of sanitizedRules) {
+      const merged = new Map<string, MisconceptionRubricRule>();
+      for (let i = 0; i < policy.rubricAnchors.length; i += 1) {
+        const r = cloneRubricRule(policy.rubricAnchors[i]!);
+        merged.set(r.ruleId, r);
+      }
+      for (let i = 0; i < sanitizedRules.length; i += 1) {
+        const rule = sanitizedRules[i]!;
         merged.set(rule.ruleId, rule);
       }
       const sortedRubrics = [...merged.values()].sort((a, b) => a.ruleId.localeCompare(b.ruleId));
@@ -1078,14 +1213,8 @@ export interface BuildGepaReflectionInput {
 export function buildGepaReflectionContext(
   input: BuildGepaReflectionInput,
 ): GepaReflectionContext {
-  // Scan ALL reflection inputs FIRST before dot-accessing or spreading any properties so getters never run.
-  assertNoRawPiiInValue(input.policy, "reflection_base_policy");
-  assertNoRawPiiInValue(input.holdoutFirewall, "reflection_holdout_firewall");
-  assertNoRawPiiInValue(input.trainTrajectories, "reflection_train_trajectories");
-  assertNoRawPiiInValue(input.devTrajectories, "reflection_dev_trajectories");
-  if (input.clusteringOptions !== undefined) {
-    assertNoRawPiiInValue(input.clusteringOptions, "reflection_clustering_options");
-  }
+  // Scan the ENTIRE outer input container FIRST before reading ANY input.* property so getters never run.
+  assertNoRawPiiInValue(input, "gepa_reflection_input");
 
   const canonicalPolicyId = canonicalizeIdentifier(input.policy.policyId, "policyId");
   assertNoRawPiiInText(canonicalPolicyId, "reflection_base_policy.policyId");
@@ -1262,17 +1391,11 @@ export interface RunGepaOptimizationRoundInput {
 export function runGepaOptimizationRound(
   input: RunGepaOptimizationRoundInput,
 ): GepaOptimizationRoundResult {
-  // Scan ALL static inputs for raw PII strictly BEFORE disjoint-split / holdout / ID checks
-  // so raw PII learner IDs, boxed primitives, or fields can never echo into HoldoutFirewallError or RangeError.
-  assertNoRawPiiInValue(input.split, "gepa_round.split");
-  assertNoRawPiiInValue(input.basePolicy, "gepa_round.basePolicy");
-  assertNoRawPiiInValue(input.paretoOptions, "gepa_round.paretoOptions");
-  if (input.clusteringOptions !== undefined) {
-    assertNoRawPiiInValue(input.clusteringOptions, "gepa_round.clusteringOptions");
-  }
-  if (input.extraCandidatePatches !== undefined) {
-    assertNoRawPiiInValue(input.extraCandidatePatches, "gepa_round.extraCandidatePatches");
-  }
+  // Scan the ENTIRE outer input container FIRST (before reading ANY input.* property!) so getters,
+  // symbols, boxed primitives, non-plain arrays, or raw PII fail closed without invoking user code.
+  assertNoRawPiiInValue(input, "gepa_round", undefined, {
+    allowedFunctionPaths: GEPA_ROUND_ALLOWED_FUNCTION_PATHS,
+  });
   assertDisjointSplitInvariants(input.split);
 
   const reflectionContext = buildGepaReflectionContext({
@@ -1300,31 +1423,49 @@ export function runGepaOptimizationRound(
     proposed.push(generated);
   }
 
-  for (const extra of input.extraCandidatePatches ?? []) {
-    assertNoRawPiiInValue(extra, "extra_candidate");
-    const canonicalExtraId = canonicalizeIdentifier(extra.candidateId, "candidateId");
-    assertNoRawPiiInText(canonicalExtraId, "extra_candidate.candidateId");
-    if (seenCandidateIds.has(canonicalExtraId)) {
-      throw new CandidateIdentityError(
-        `Duplicate candidateId "${canonicalExtraId}" in GEPA optimization round.`,
-        "duplicate_candidate_id",
-        canonicalExtraId,
-      );
-    }
-    seenCandidateIds.add(canonicalExtraId);
+  const extraList = input.extraCandidatePatches;
+  if (extraList !== undefined) {
+    for (let eIdx = 0; eIdx < extraList.length; eIdx += 1) {
+      if (!Object.prototype.hasOwnProperty.call(extraList, eIdx)) {
+        throw new GepaInvalidPatchPayloadError(
+          `extraCandidatePatches contains sparse array hole at index ${eIdx}`,
+          "extraCandidatePatches",
+          [`extraCandidatePatches[${eIdx}]:sparse_array_hole`],
+        );
+      }
+      const extra = extraList[eIdx]!;
+      assertNoRawPiiInValue(extra, "extra_candidate");
+      const canonicalExtraId = canonicalizeIdentifier(extra.candidateId, "candidateId");
+      assertNoRawPiiInText(canonicalExtraId, "extra_candidate.candidateId");
+      if (seenCandidateIds.has(canonicalExtraId)) {
+        throw new CandidateIdentityError(
+          `Duplicate candidateId "${canonicalExtraId}" in GEPA optimization round.`,
+          "duplicate_candidate_id",
+          canonicalExtraId,
+        );
+      }
+      seenCandidateIds.add(canonicalExtraId);
 
-    let policy = reflectionContext.currentPolicy;
-    const applied: GepaSurfacePatch[] = [];
-    for (let i = 0; i < extra.patches.length; i += 1) {
-      const rawPatch = extra.patches[i];
-      policy = validateAndApplyGepaPatch(policy, rawPatch, `ext_${i + 1}`);
-      applied.push(rawPatch as GepaSurfacePatch);
+      let policy = reflectionContext.currentPolicy;
+      const applied: GepaSurfacePatch[] = [];
+      for (let i = 0; i < extra.patches.length; i += 1) {
+        if (!Object.prototype.hasOwnProperty.call(extra.patches, i)) {
+          throw new GepaInvalidPatchPayloadError(
+            `extraCandidatePatches[${eIdx}].patches contains sparse array hole at index ${i}`,
+            "extraCandidatePatches",
+            [`extraCandidatePatches[${eIdx}].patches[${i}]:sparse_array_hole`],
+          );
+        }
+        const rawPatch = extra.patches[i];
+        policy = validateAndApplyGepaPatch(policy, rawPatch, `ext_${i + 1}`);
+        applied.push(rawPatch as GepaSurfacePatch);
+      }
+      proposed.push({
+        candidateId: canonicalExtraId,
+        policy: { ...policy, policyId: canonicalExtraId },
+        appliedPatches: applied,
+      });
     }
-    proposed.push({
-      candidateId: canonicalExtraId,
-      policy: { ...policy, policyId: canonicalExtraId },
-      appliedPatches: applied,
-    });
   }
 
   const rawReceipts: unknown[] = proposed.map((candidate) => input.scoreCandidate(candidate));

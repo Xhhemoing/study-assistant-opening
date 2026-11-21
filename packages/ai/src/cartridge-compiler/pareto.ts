@@ -53,7 +53,12 @@ function canonicalizeTelemetryIssues(raw: unknown): readonly string[] | undefine
   if (!Array.isArray(raw)) return ["invalid_telemetry_issue_entry"];
   if (raw.length === 0) return undefined;
   const codes = new Set<string>();
-  for (const entry of raw) {
+  for (let i = 0; i < raw.length; i += 1) {
+    if (!Object.prototype.hasOwnProperty.call(raw, i)) {
+      codes.add("invalid_telemetry_issue_entry");
+      continue;
+    }
+    const entry = raw[i];
     if (typeof entry !== "string") {
       codes.add("invalid_telemetry_issue_entry");
     } else if (KNOWN_TELEMETRY_ISSUE_CODES.has(entry)) {
@@ -268,8 +273,10 @@ export function computeCandidateMetrics(
   const matureFollowups: { learnerId: string; passed: boolean }[] = [];
   let pendingCohortCount = 0;
 
-  for (const t of trajectories) {
-    if (!isNonNullRecord(t)) {
+  for (let i = 0; i < trajectories.length; i += 1) {
+    const hasOwn = Object.prototype.hasOwnProperty.call(trajectories, i);
+    const t = hasOwn ? trajectories[i] : undefined;
+    if (!hasOwn || !isNonNullRecord(t)) {
       telemetryIssues.push("trajectory_malformed");
       continue;
     }
@@ -1093,7 +1100,9 @@ export function evaluateParetoFrontierAndPromotion(
     const trimmedBase = rawBaseline.candidateId.normalize("NFKC").trim();
     if (trimmedBase.length > 0) reservedIds.add(trimmedBase);
   }
-  for (const rawCandidate of candidates) {
+  for (let i = 0; i < candidates.length; i += 1) {
+    if (!Object.prototype.hasOwnProperty.call(candidates, i)) continue;
+    const rawCandidate = candidates[i];
     if (isNonNullRecord(rawCandidate) && typeof rawCandidate.candidateId === "string") {
       reservedIds.add(rawCandidate.candidateId);
       const trimmedId = rawCandidate.candidateId.normalize("NFKC").trim();

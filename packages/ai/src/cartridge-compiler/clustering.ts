@@ -260,6 +260,18 @@ export const KNOWN_SAFE_DIAGNOSTIC_KEYS: ReadonlySet<string> = new Set([
   "minClusterCount",
   "confidenceZ",
   "allowPartialMaturity",
+  // RunGepaOptimizationRoundInput, BuildGepaReflectionInput & DisjointSplitOptions
+  "split",
+  "basePolicy",
+  "paretoOptions",
+  "clusteringOptions",
+  "extraCandidatePatches",
+  "scoreCandidate",
+  "seed",
+  "holdoutRatio",
+  "devRatio",
+  "trainTrajectories",
+  "devTrajectories",
 ]);
 
 export interface RawPiiScanOptions {
@@ -273,6 +285,11 @@ export interface RawPiiScanOptions {
    * Defaults to `KNOWN_SAFE_DIAGNOSTIC_KEYS`; unrecognized keys are replaced with `<unexpected_key>`.
    */
   readonly allowedDiagnosticKeys?: ReadonlySet<string>;
+  /**
+   * Optional exact full schema paths (e.g., `"gepa_round.scoreCandidate"`) where
+   * a plain own data property holding a function callback is permitted.
+   */
+  readonly allowedFunctionPaths?: ReadonlySet<string>;
 }
 
 function sanitizeTrajectoryIdForError(trajectoryId: string | undefined): string | undefined {
@@ -312,6 +329,7 @@ function scanOwnPropertyForPii(
   skipKeys: ReadonlySet<string> | undefined,
   allowedNumericMetadataPaths: ReadonlySet<string> | undefined,
   allowedDiagnosticKeys: ReadonlySet<string>,
+  allowedFunctionPaths: ReadonlySet<string> | undefined,
 ): void {
   const desc = Object.getOwnPropertyDescriptor(owner, rawKey);
   if (!desc) return;
@@ -339,6 +357,7 @@ function scanOwnPropertyForPii(
       allowedNumericMetadataPaths,
       allowedDiagnosticKeys,
       symPath,
+      allowedFunctionPaths,
     );
     return;
   }
@@ -375,7 +394,41 @@ function scanOwnPropertyForPii(
     allowedNumericMetadataPaths,
     allowedDiagnosticKeys,
     rawChildPath,
+    allowedFunctionPaths,
   );
+}
+
+function tryUnboxString(value: object): string | null {
+  try {
+    return String.prototype.valueOf.call(value);
+  } catch {
+    return null;
+  }
+}
+
+function tryUnboxNumber(value: object): number | null {
+  try {
+    return Number.prototype.valueOf.call(value);
+  } catch {
+    return null;
+  }
+}
+
+function tryUnboxBigInt(value: object): bigint | null {
+  try {
+    return BigInt.prototype.valueOf.call(value);
+  } catch {
+    return null;
+  }
+}
+
+function isBoxedBoolean(value: object): boolean {
+  try {
+    Boolean.prototype.valueOf.call(value);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function collectRawPiiViolations(
@@ -387,6 +440,7 @@ function collectRawPiiViolations(
   allowedNumericMetadataPaths?: ReadonlySet<string>,
   allowedDiagnosticKeys: ReadonlySet<string> = KNOWN_SAFE_DIAGNOSTIC_KEYS,
   rawPathLabel: string = pathLabel,
+  allowedFunctionPaths?: ReadonlySet<string>,
 ): void {
   if (typeof value === "string") {
     const reasons = detectRawPiiReasonsInText(value);
@@ -415,102 +469,21 @@ function collectRawPiiViolations(
     return;
   }
   if (typeof value === "function") {
-    out.push(`${pathLabel}:forbidden_function_value`);
+    if (!allowedFunctionPaths?.has(rawPathLabel)) {
+      out.push(`${pathLabel}:forbidden_function_value`);
+    }
     return;
   }
   if (!value || typeof value !== "object") return;
   if (seen.has(value)) return;
   seen.add(value);
 
-  if (!Array.isArray(value)) {
-    const tag = Object.prototype.toString.call(value);
-    if (tag === "[object String]") {
-      const unboxed = String.prototype.valueOf.call(value);
-      out.push(`${pathLabel}:forbidden_boxed_primitive`);
-      for (const reason of detectRawPiiReasonsInText(unboxed)) {
-        out.push(`${pathLabel}:${reason}`);
-      }
-      return;
-    }
-    if (tag === "[object Number]") {
-      const unboxed = Number.prototype.valueOf.call(value);
-      out.push(`${pathLabel}:forbidden_boxed_primitive`);
-      collectRawPiiViolations(
-        unboxed,
-        pathLabel,
-        out,
-        seen,
-        undefined,
-        allowedNumericMetadataPaths,
-        allowedDiagnosticKeys,
-        rawPathLabel,
-      );
-      return;
-    }
-    if (tag === "[object BigInt]") {
-      const unboxed = BigInt.prototype.valueOf.call(value);
-      out.push(`${pathLabel}:forbidden_boxed_primitive`);
-      collectRawPiiViolations(
-        unboxed,
-        pathLabel,
-        out,
-        seen,
-        undefined,
-        allowedNumericMetadataPaths,
-        allowedDiagnosticKeys,
-        rawPathLabel,
-      );
-      return;
-    }
-    if (tag === "[object Boolean]") {
-      out.push(`${pathLabel}:forbidden_boxed_primitive`);
-      return;
-    }
-    if (tag === "[object RegExp]") {
-      const source = RegExp.prototype.toString.call(value);
-      out.push(`${pathLabel}:forbidden_non_plain_object`);
-      for (const reason of detectRawPiiReasonsInText(source)) {
-        out.push(`${pathLabel}:${reason}`);
-      }
-      return;
-    }
-    if (tag === "[object URL]" || (typeof URL !== "undefined" && value instanceof URL)) {
-      out.push(`${pathLabel}:forbidden_non_plain_object`);
-      for (const reason of detectRawPiiReasonsInText(URL.prototype.toString.call(value))) {
-        out.push(`${pathLabel}:${reason}`);
-      }
-      return;
-    }
-    if (
-      tag === "[object Date]" ||
-      value instanceof Date ||
-      ArrayBuffer.isView(value) ||
-      value instanceof ArrayBuffer
-    ) {
-      out.push(`${pathLabel}:forbidden_non_plain_object`);
-      return;
-    }
-    const proto = Object.getPrototypeOf(value);
-    if (proto !== Object.prototype && proto !== null) {
-      out.push(`${pathLabel}:forbidden_non_plain_object`);
-      for (const rawKey of Reflect.ownKeys(value)) {
-        scanOwnPropertyForPii(
-          value,
-          rawKey,
-          pathLabel,
-          rawPathLabel,
-          out,
-          seen,
-          skipKeys,
-          allowedNumericMetadataPaths,
-          allowedDiagnosticKeys,
-        );
-      }
-      return;
-    }
-  }
+  const proto = Object.getPrototypeOf(value);
 
   if (Array.isArray(value)) {
+    if (proto !== Array.prototype) {
+      out.push(`${pathLabel}:forbidden_non_plain_array`);
+    }
     const visitedIndices = new Set<string>();
     for (let i = 0; i < value.length; i += 1) {
       visitedIndices.add(String(i));
@@ -519,6 +492,9 @@ function collectRawPiiViolations(
       if (desc.get || desc.set) {
         out.push(`${pathLabel}[${i}]:forbidden_accessor_property`);
         continue;
+      }
+      if (!desc.enumerable) {
+        out.push(`${pathLabel}[${i}]:forbidden_non_enumerable_property`);
       }
       collectRawPiiViolations(
         desc.value,
@@ -529,12 +505,16 @@ function collectRawPiiViolations(
         allowedNumericMetadataPaths,
         allowedDiagnosticKeys,
         `${rawPathLabel}[${i}]`,
+        allowedFunctionPaths,
       );
     }
-    // Also inspect any non-index own string (enumerable or non-enumerable) and symbol properties on arrays.
+    // Reject any extra own string keys beyond "length"/indices (e.g. overridden .map) or own symbols (e.g. Symbol.iterator).
     for (const rawKey of Reflect.ownKeys(value)) {
       if (typeof rawKey === "string" && (rawKey === "length" || visitedIndices.has(rawKey))) {
         continue;
+      }
+      if (typeof rawKey === "string") {
+        out.push(`${pathLabel}.<unexpected_key>:forbidden_array_property`);
       }
       scanOwnPropertyForPii(
         value,
@@ -546,6 +526,121 @@ function collectRawPiiViolations(
         undefined,
         allowedNumericMetadataPaths,
         allowedDiagnosticKeys,
+        allowedFunctionPaths,
+      );
+    }
+    return;
+  }
+
+  // Never call Object.prototype.toString.call(value) (which reads Symbol.toStringTag getter).
+  // Use intrinsic internal-slot brand checks via try/catch instead.
+  const unboxedStr = tryUnboxString(value);
+  if (unboxedStr !== null) {
+    out.push(`${pathLabel}:forbidden_boxed_primitive`);
+    for (const reason of detectRawPiiReasonsInText(unboxedStr)) {
+      out.push(`${pathLabel}:${reason}`);
+    }
+    for (const rawKey of Reflect.ownKeys(value)) {
+      if (typeof rawKey === "string" && (rawKey === "length" || /^\d+$/.test(rawKey))) {
+        continue;
+      }
+      scanOwnPropertyForPii(
+        value,
+        rawKey,
+        pathLabel,
+        rawPathLabel,
+        out,
+        seen,
+        skipKeys,
+        allowedNumericMetadataPaths,
+        allowedDiagnosticKeys,
+        allowedFunctionPaths,
+      );
+    }
+    return;
+  }
+
+  const unboxedNum = tryUnboxNumber(value);
+  if (unboxedNum !== null) {
+    out.push(`${pathLabel}:forbidden_boxed_primitive`);
+    collectRawPiiViolations(
+      unboxedNum,
+      pathLabel,
+      out,
+      seen,
+      undefined,
+      allowedNumericMetadataPaths,
+      allowedDiagnosticKeys,
+      rawPathLabel,
+      allowedFunctionPaths,
+    );
+    return;
+  }
+
+  const unboxedBigInt = tryUnboxBigInt(value);
+  if (unboxedBigInt !== null) {
+    out.push(`${pathLabel}:forbidden_boxed_primitive`);
+    collectRawPiiViolations(
+      unboxedBigInt,
+      pathLabel,
+      out,
+      seen,
+      undefined,
+      allowedNumericMetadataPaths,
+      allowedDiagnosticKeys,
+      rawPathLabel,
+      allowedFunctionPaths,
+    );
+    return;
+  }
+
+  if (isBoxedBoolean(value)) {
+    out.push(`${pathLabel}:forbidden_boxed_primitive`);
+    return;
+  }
+
+  if (proto !== Object.prototype && proto !== null) {
+    out.push(`${pathLabel}:forbidden_non_plain_object`);
+    // Safely inspect intrinsic RegExp / URL string forms without invoking any own getter.
+    if (
+      proto === RegExp.prototype &&
+      !Object.getOwnPropertyDescriptor(value, "source") &&
+      !Object.getOwnPropertyDescriptor(value, "flags")
+    ) {
+      try {
+        const reStr = RegExp.prototype.toString.call(value);
+        for (const reason of detectRawPiiReasonsInText(reStr)) {
+          out.push(`${pathLabel}:${reason}`);
+        }
+      } catch {
+        // Non-RegExp exotic prototype; already flagged as forbidden_non_plain_object.
+      }
+    } else if (
+      typeof URL !== "undefined" &&
+      proto === URL.prototype &&
+      !Object.getOwnPropertyDescriptor(value, "href")
+    ) {
+      try {
+        const urlStr = URL.prototype.toString.call(value);
+        for (const reason of detectRawPiiReasonsInText(urlStr)) {
+          out.push(`${pathLabel}:${reason}`);
+        }
+      } catch {
+        // Non-URL exotic prototype; already flagged as forbidden_non_plain_object.
+      }
+    }
+    for (const rawKey of Reflect.ownKeys(value)) {
+      scanOwnPropertyForPii(
+        value,
+        rawKey,
+        pathLabel,
+        rawPathLabel,
+        out,
+        seen,
+        skipKeys,
+        allowedNumericMetadataPaths,
+        allowedDiagnosticKeys,
+        allowedFunctionPaths,
       );
     }
     return;
@@ -563,6 +658,7 @@ function collectRawPiiViolations(
       skipKeys,
       allowedNumericMetadataPaths,
       allowedDiagnosticKeys,
+      allowedFunctionPaths,
     );
   }
 }
@@ -588,6 +684,7 @@ export function assertNoRawPiiInValue(
     options?.allowedNumericMetadataPaths,
     options?.allowedDiagnosticKeys ?? KNOWN_SAFE_DIAGNOSTIC_KEYS,
     rootLabel,
+    options?.allowedFunctionPaths,
   );
   if (offending.length > 0) {
     const safeTrajectoryId = sanitizeTrajectoryIdForError(trajectoryId);
@@ -979,6 +1076,9 @@ export function matchesRubricRule(
     "conceptId" | "firstErrorRuleId" | "normalizedAstEdit" | "establishedPremises"
   >,
 ): boolean {
+  assertNoRawPiiInValue(rule, "rubric_rule");
+  assertNoRawPiiInValue(example, "rubric_example");
+
   if (example.conceptId.normalize("NFKC").trim() !== rule.conceptId.normalize("NFKC").trim()) {
     return false;
   }
@@ -992,12 +1092,16 @@ export function matchesRubricRule(
   const normalizedExampleAst = normalizeAstEdit(example.normalizedAstEdit);
   const exampleTokens = new Set(tokenizeNormalizedAst(normalizedExampleAst));
 
-  const requiredTokens = rule.requiredAstTokens
-    .map((t) => normalizeAstEdit(t))
-    .filter((t) => t.length > 0);
+  const requiredTokens: string[] = [];
+  for (let i = 0; i < rule.requiredAstTokens.length; i += 1) {
+    if (!Object.prototype.hasOwnProperty.call(rule.requiredAstTokens, i)) continue;
+    const norm = normalizeAstEdit(rule.requiredAstTokens[i]!);
+    if (norm.length > 0) requiredTokens.push(norm);
+  }
   if (requiredTokens.length === 0) return false;
 
-  for (const token of requiredTokens) {
+  for (let i = 0; i < requiredTokens.length; i += 1) {
+    const token = requiredTokens[i]!;
     if (!exampleTokens.has(token) && !normalizedExampleAst.includes(token)) {
       return false;
     }
@@ -1006,9 +1110,12 @@ export function matchesRubricRule(
   const normalizedMissingPremise = normalizePremise(rule.requiredMissingPremise);
   if (!normalizedMissingPremise) return false;
 
-  const established = new Set(
-    example.establishedPremises.map((p) => normalizePremise(p)).filter((p) => p.length > 0),
-  );
+  const established = new Set<string>();
+  for (let i = 0; i < example.establishedPremises.length; i += 1) {
+    if (!Object.prototype.hasOwnProperty.call(example.establishedPremises, i)) continue;
+    const norm = normalizePremise(example.establishedPremises[i]!);
+    if (norm.length > 0) established.add(norm);
+  }
   if (established.has(normalizedMissingPremise)) {
     // Premise is explicitly established -> valid derivation, NOT a misconception!
     return false;
@@ -1026,6 +1133,7 @@ export function matchesRubricRule(
 export function validateRubricAnchorPair(
   rule: MisconceptionRubricRule,
 ): AnchorPairValidationResult {
+  assertNoRawPiiInValue(rule, "rubric_rule");
   const issues: string[] = [];
   const missedPositiveAnchorIds: string[] = [];
   const falsePositiveNegativeAnchorIds: string[] = [];
@@ -1044,7 +1152,8 @@ export function validateRubricAnchorPair(
   }
 
   let positiveFiredCount = 0;
-  for (const pos of rule.positiveAnchors) {
+  for (let i = 0; i < rule.positiveAnchors.length; i += 1) {
+    const pos = rule.positiveAnchors[i]!;
     if (pos.label !== "positive") {
       issues.push(`Positive anchor ${pos.anchorId} has mismatched label "${pos.label}".`);
       missedPositiveAnchorIds.push(pos.anchorId);
@@ -1059,7 +1168,8 @@ export function validateRubricAnchorPair(
   }
 
   let negativeFalsePositiveCount = 0;
-  for (const neg of rule.negativeAnchors) {
+  for (let i = 0; i < rule.negativeAnchors.length; i += 1) {
+    const neg = rule.negativeAnchors[i]!;
     if (neg.label !== "negative") {
       issues.push(`Negative anchor ${neg.anchorId} has mismatched label "${neg.label}".`);
       falsePositiveNegativeAnchorIds.push(neg.anchorId);

@@ -2789,4 +2789,140 @@ describe("Exact (C, -L, T7) Pareto frontier, Hard Pre-Pareto Veto, and Promotion
     expect(sparseRes.promotedCandidateIds).toEqual(["cand_r13_sparse_valid"]);
     expect(sparseRes.vetoedCandidateIds).toHaveLength(1);
   });
+
+  it("never invokes Symbol.toStringTag getters or outer input getters in PII scanner and GEPA entrypoints (Round-14 P1-1)", () => {
+    // 1) Throwing Symbol.toStringTag getter MUST be caught as CartridgePiiViolationError without invoking getter!
+    let tagGetterCalled = false;
+    const tagBomb: Record<string | symbol, unknown> = { ok: "clean" };
+    Object.defineProperty(tagBomb, Symbol.toStringTag, {
+      configurable: true,
+      get() {
+        tagGetterCalled = true;
+        throw new Error("toStringTag getter exploded");
+      },
+    });
+    expect(() => assertNoRawPiiInValue(tagBomb, "tag_bomb")).toThrow(CartridgePiiViolationError);
+    expect(tagGetterCalled).toBe(false);
+
+    // 2) Outer input getter on buildGepaReflectionContext MUST throw CartridgePiiViolationError without running getter!
+    let reflectionGetterCalled = false;
+    const reflectionInput = {} as Parameters<typeof buildGepaReflectionContext>[0];
+    Object.defineProperty(reflectionInput, "policy", {
+      enumerable: true,
+      get() {
+        reflectionGetterCalled = true;
+        return makeBasePolicy();
+      },
+    });
+    expect(() => buildGepaReflectionContext(reflectionInput)).toThrow(CartridgePiiViolationError);
+    expect(reflectionGetterCalled).toBe(false);
+
+    // 3) Outer input getter on runGepaOptimizationRound MUST throw CartridgePiiViolationError without running getter!
+    let roundGetterCalled = false;
+    const roundInput = {} as Parameters<typeof runGepaOptimizationRound>[0];
+    Object.defineProperty(roundInput, "split", {
+      enumerable: true,
+      get() {
+        roundGetterCalled = true;
+        return {
+          train: [],
+          dev: [],
+          holdout: [],
+          quarantinedCrossing: [],
+          holdoutFirewall: {
+            holdoutTrajectoryIds: [],
+            holdoutLearnerPseudoIds: [],
+            holdoutItemFamilyIds: [],
+          },
+        };
+      },
+    });
+    expect(() => runGepaOptimizationRound(roundInput)).toThrow(CartridgePiiViolationError);
+    expect(roundGetterCalled).toBe(false);
+  });
+
+  it("rejects custom-prototype arrays and overridden Symbol.iterator on GEPA patch payloads (Round-14 P1-2)", () => {
+    const base = makeBasePolicy();
+    const validRule = {
+      id: "r14_rule_1",
+      conceptId: "alg.zero_product_property",
+      triggerRuleId: "err.divide_by_variable",
+      missingPremise: "x != 0",
+      move: "targeted_scaffold",
+      priority: 10,
+    };
+    const smuggledRule = {
+      ...validRule,
+      id: "r14_smuggled_pii",
+      move: "email alice@example.com",
+    };
+
+    // 1) Custom-prototype array with overridden [Symbol.iterator]
+    const customProto = Object.create(Array.prototype);
+    customProto[Symbol.iterator] = function* () {
+      yield smuggledRule;
+    };
+    const protoArray = [validRule];
+    Object.setPrototypeOf(protoArray, customProto);
+    expect(() =>
+      validateAndApplyGepaPatch(base, {
+        surface: "moveRules",
+        summary: "Custom prototype array",
+        payload: protoArray,
+      }),
+    ).toThrow(CartridgePiiViolationError);
+
+    // 2) Own Symbol.iterator override directly on array
+    const iterArray = [validRule];
+    Object.defineProperty(iterArray, Symbol.iterator, {
+      value: function* () {
+        yield smuggledRule;
+      },
+      configurable: true,
+    });
+    expect(() =>
+      validateAndApplyGepaPatch(base, {
+        surface: "moveRules",
+        summary: "Own iterator override array",
+        payload: iterArray,
+      }),
+    ).toThrow(CartridgePiiViolationError);
+  });
+
+  it("allows 9-digit numeric PRNG split seed while still rejecting string/boxed/non-exempt 9-digit SSNs (Round-14 P1-5)", () => {
+    const records: ErrorTrajectoryRecord[] = [];
+    for (let comp = 0; comp < 4; comp += 1) {
+      for (let i = 0; i < 4; i += 1) {
+        records.push(
+          makeTrajectory({
+            trajectoryId: `r14_seed_c${comp}_t${i}`,
+            learnerPseudoId: `pseudo_r14_c${comp}_u${i}`,
+            itemFamilyId: `fam_r14_c${comp}`,
+          }),
+        );
+      }
+    }
+
+    // Valid 9-digit numeric seed MUST succeed cleanly!
+    const split = createDisjointTrajectorySplit(records, { seed: 123456789 });
+    expect(split.train.length + split.dev.length + split.holdout.length).toBe(records.length);
+
+    // String 9-digit SSN or boxed Number in seed MUST still throw CartridgePiiViolationError!
+    expect(() =>
+      createDisjointTrajectorySplit(records, { seed: "123456789" as unknown as number }),
+    ).toThrow(CartridgePiiViolationError);
+    expect(() =>
+      createDisjointTrajectorySplit(records, { seed: "123-45-6789" as unknown as number }),
+    ).toThrow(CartridgePiiViolationError);
+    expect(() =>
+      createDisjointTrajectorySplit(records, { seed: new Number(123456789) as unknown as number }),
+    ).toThrow(CartridgePiiViolationError);
+    // Non-exempt 9-digit integer field in options still fails closed as numeric_ssn_pii!
+    expect(() =>
+      createDisjointTrajectorySplit(records, {
+        seed: 123456789,
+        extraSecret: 123456789,
+      } as unknown as Parameters<typeof createDisjointTrajectorySplit>[1]),
+    ).toThrow(CartridgePiiViolationError);
+  });
 });

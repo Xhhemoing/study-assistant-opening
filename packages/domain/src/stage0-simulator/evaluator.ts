@@ -92,11 +92,32 @@ function isBinaryOperandBefore(text: string, signIndex: number): boolean {
   return /(?:\d|[)\]}]|(?:^|[^a-z])[a-z])$/.test(trimmedBefore);
 }
 
-function hasUnaryMinusBefore(text: string, matchStart: number): boolean {
-  const before = text.slice(0, matchStart);
+function hasUnaryMinusBefore(text: string, matchStart: number, matchEnd: number): boolean {
+  let left = matchStart;
+  let right = matchEnd;
+  // Peel immediately enclosing matching grouping delimiters `(...)` or `{...}`
+  // so forms like `-(7.5e-1)`, `-(6/8)`, `-(0.75)`, `-\left(0.75\right)` stay negative.
+  while (left > 0 && right < text.length) {
+    let l = left - 1;
+    while (l >= 0 && text[l] === " ") l -= 1;
+    let r = right;
+    while (r < text.length && text[r] === " ") r += 1;
+    if (
+      l >= 0 &&
+      r < text.length &&
+      ((text[l] === "(" && text[r] === ")") || (text[l] === "{" && text[r] === "}"))
+    ) {
+      left = l;
+      right = r + 1;
+    } else {
+      break;
+    }
+  }
+
+  const before = text.slice(0, left);
   const minusMatch = /-\s*$/.exec(before);
   if (!minusMatch) return false;
-  const signIndex = matchStart - minusMatch[0].length;
+  const signIndex = left - minusMatch[0].length;
   return !isBinaryOperandBefore(text, signIndex);
 }
 
@@ -208,35 +229,63 @@ function parseScientificToExactRational(
 }
 
 /**
- * Extracts exact reduced `BigInt` rationals from E-notation (`7.50e-1`, `-7.5e-1`, `75e-2`)
+ * Extracts exact reduced `BigInt` rationals from E-notation (`7.50e-1`, `-7.5e-1`, `-(7.5e-1)`)
  * and base-10 scientific notation (`7.5 * 10^{-1}`, `-7.5 × 10^-1`) on whitespace-preserving
  * numeric-scan text so unary negative signs after prose words (`"Use -7.5e-1."`) stay negative.
  */
 function extractScientificRationals(numericText: string): readonly ExactRational[] {
   const out: ExactRational[] = [];
 
-  // 1) E-notation: e.g. 7.50e-1, 75e-2, 0.075e+1, -7.5e-1
+  // 1) E-notation: e.g. 7.50e-1, 75e-2, 0.075e+1, -7.5e-1, -(7.5e-1)
   const eNotationPattern =
     /(?<![\d.])(\d+(?:\.\d*)?|\.\d+)[eE]([+-]?\d+)(?!\d|\.\d|[eE][+-]?\d)/g;
   for (const m of numericText.matchAll(eNotationPattern)) {
     const startIdx = m.index ?? 0;
-    const isNeg = hasUnaryMinusBefore(numericText, startIdx);
+    const endIdx = startIdx + m[0].length;
+    const isNeg = hasUnaryMinusBefore(numericText, startIdx, endIdx);
     const rat = parseScientificToExactRational(`${isNeg ? "-" : ""}${m[1]!}`, m[2]!);
     if (rat) out.push(rat);
   }
 
   // 2) Base-10 scientific notation (post-Unicode/LaTeX normalization: \times/\cdot/×/· -> *):
-  //    e.g. 7.5*10^{-1}, -7.5*10^-1, 7.5*10^(-1)
+  //    e.g. 7.5*10^{-1}, -7.5*10^-1, -(7.5*10^{-1})
   const pow10Pattern =
     /(?<![\d.])(\d+(?:\.\d*)?|\.\d+)\*10\^(?:\{([+-]?\d+)\}|\(([+-]?\d+)\)|([+-]?\d+))(?!\d|\.\d|[eE][+-]?\d)/g;
   for (const m of numericText.matchAll(pow10Pattern)) {
     const startIdx = m.index ?? 0;
-    const isNeg = hasUnaryMinusBefore(numericText, startIdx);
+    const endIdx = startIdx + m[0].length;
+    const isNeg = hasUnaryMinusBefore(numericText, startIdx, endIdx);
     const expStr = m[2] ?? m[3] ?? m[4]!;
     const rat = parseScientificToExactRational(`${isNeg ? "-" : ""}${m[1]!}`, expStr);
     if (rat) out.push(rat);
   }
 
+  return out;
+}
+
+/**
+ * Extracts exact reduced `BigInt` rationals from integer fraction tokens (`6/8`, `\frac{6}{8}`,
+ * `6 / 8`, `6 ÷ 8`, `-(6/8)`) with slash/digit boundary guards so chained dates/paths (`2026/11/21`)
+ * never match while equivalent fractions (`6/8` === `3/4`) are caught accurately.
+ */
+function extractFractionRationals(numericText: string): readonly ExactRational[] {
+  const out: ExactRational[] = [];
+  const fractionPattern =
+    /(?<![\d./])(\d+)\/(\d+)(?!\d|\.\d|\/|[eE][+-]?\d|\*10\^(?:\{[+-]?\d+\}|\([+-]?\d+\)|[+-]?\d+))/g;
+  for (const m of numericText.matchAll(fractionPattern)) {
+    const numStr = m[1]!;
+    const denStr = m[2]!;
+    if (numStr.length > MAX_DECIMAL_MANTISSA_DIGITS || denStr.length > MAX_DECIMAL_MANTISSA_DIGITS) {
+      continue;
+    }
+    const startIdx = m.index ?? 0;
+    const endIdx = startIdx + m[0].length;
+    const isNeg = hasUnaryMinusBefore(numericText, startIdx, endIdx);
+    const num = BigInt(`${isNeg ? "-" : ""}${numStr}`);
+    const den = BigInt(denStr);
+    const rat = makeExactRational(num, den);
+    if (rat) out.push(rat);
+  }
   return out;
 }
 
@@ -250,7 +299,8 @@ function matchesWithNumericBoundaries(numericText: string, numericLiteral: strin
   );
   for (const m of numericText.matchAll(re)) {
     const startIdx = m.index ?? 0;
-    const isNeg = hasUnaryMinusBefore(numericText, startIdx);
+    const endIdx = startIdx + m[0].length;
+    const isNeg = hasUnaryMinusBefore(numericText, startIdx, endIdx);
     if (isNeg === expectNegative) {
       return true;
     }
@@ -317,11 +367,23 @@ export function detectProtectedLeakage(
   const compactText = normalizeCompactForLeakScan(releasedHintText);
   const numericText = normalizeNumericScanText(releasedHintText);
   const scientificRationals = extractScientificRationals(numericText);
+  const fractionRationals = extractFractionRationals(numericText);
   const hits: string[] = [];
   const seen = new Set<string>();
-  const allProtected = [...protectedAnswerTokens, ...protectedStepTokens];
+  const allProtected: string[] = [];
+  for (let i = 0; i < protectedAnswerTokens.length; i += 1) {
+    if (Object.prototype.hasOwnProperty.call(protectedAnswerTokens, i)) {
+      allProtected.push(protectedAnswerTokens[i]!);
+    }
+  }
+  for (let i = 0; i < protectedStepTokens.length; i += 1) {
+    if (Object.prototype.hasOwnProperty.call(protectedStepTokens, i)) {
+      allProtected.push(protectedStepTokens[i]!);
+    }
+  }
 
-  for (const token of allProtected) {
+  for (let idx = 0; idx < allProtected.length; idx += 1) {
+    const token = allProtected[idx]!;
     const normalizedToken = normalizeForLeakScan(token);
     const compactToken = normalizeCompactForLeakScan(token);
     if (!normalizedToken || seen.has(token)) continue;
@@ -339,7 +401,8 @@ export function detectProtectedLeakage(
           matchesWithNumericBoundaries(numericText, dec),
         ) ||
         (targetRational !== null &&
-          scientificRationals.some((sci) => rationalsEqual(sci, targetRational)));
+          (fractionRationals.some((frac) => rationalsEqual(frac, targetRational)) ||
+            scientificRationals.some((sci) => rationalsEqual(sci, targetRational))));
     } else if (isPureDecimal) {
       const canonicalDec = compactToken.replace(/(\.\d*?[1-9])0+$/, "$1");
       const decVariants = [canonicalDec];
@@ -351,7 +414,8 @@ export function detectProtectedLeakage(
       matched =
         decVariants.some((dec) => matchesWithNumericBoundaries(numericText, dec)) ||
         (targetRational !== null &&
-          scientificRationals.some((sci) => rationalsEqual(sci, targetRational)));
+          (fractionRationals.some((frac) => rationalsEqual(frac, targetRational)) ||
+            scientificRationals.some((sci) => rationalsEqual(sci, targetRational))));
     } else {
       matched =
         normalizedText.includes(normalizedToken) ||
@@ -366,22 +430,172 @@ export function detectProtectedLeakage(
   return hits;
 }
 
+function assertStrictPlainStage0Container(value: object, path: string): void {
+  const proto = Object.getPrototypeOf(value);
+  if (Array.isArray(value)) {
+    if (proto !== Array.prototype) {
+      throw new Stage0ValidationError(
+        `Stage-0 rejected custom-prototype array at ${path}.`,
+        "tampered_episode",
+      );
+    }
+    if (Object.getOwnPropertySymbols(value).length > 0) {
+      throw new Stage0ValidationError(
+        `Stage-0 rejected array with symbol property at ${path}.`,
+        "tampered_episode",
+      );
+    }
+    const ownNames = Object.getOwnPropertyNames(value);
+    for (let i = 0; i < ownNames.length; i += 1) {
+      const key = ownNames[i]!;
+      if (key === "length") continue;
+      const idx = Number(key);
+      if (!Number.isInteger(idx) || idx < 0 || idx >= value.length || String(idx) !== key) {
+        throw new Stage0ValidationError(
+          `Stage-0 rejected array with extra property at ${path}.`,
+          "tampered_episode",
+        );
+      }
+    }
+    return;
+  }
+  if (proto !== Object.prototype && proto !== null) {
+    throw new Stage0ValidationError(
+      `Stage-0 rejected non-plain object at ${path}.`,
+      "tampered_episode",
+    );
+  }
+  if (Object.getOwnPropertySymbols(value).length > 0) {
+    throw new Stage0ValidationError(
+      `Stage-0 rejected object with symbol property at ${path}.`,
+      "tampered_episode",
+    );
+  }
+}
+
+function snapshotStage0PlainValue<T>(
+  value: unknown,
+  path: string,
+  seen: WeakSet<object> = new WeakSet(),
+): T {
+  if (
+    value === null ||
+    value === undefined ||
+    typeof value === "string" ||
+    typeof value === "number" ||
+    typeof value === "boolean"
+  ) {
+    return value as T;
+  }
+  if (typeof value === "function" && /\.scenario\.buildVariant$/.test(path)) {
+    return value as T;
+  }
+  if (typeof value !== "object") {
+    throw new Stage0ValidationError(
+      `Stage-0 rejected unsupported value type at ${path}.`,
+      "tampered_episode",
+    );
+  }
+  if (seen.has(value)) {
+    throw new Stage0ValidationError(
+      `Stage-0 rejected cyclic input object at ${path}.`,
+      "tampered_episode",
+    );
+  }
+  seen.add(value);
+  assertStrictPlainStage0Container(value, path);
+
+  if (Array.isArray(value)) {
+    const out: unknown[] = [];
+    for (let i = 0; i < value.length; i += 1) {
+      const desc = Object.getOwnPropertyDescriptor(value, i);
+      if (!desc || !desc.enumerable || desc.get || desc.set) {
+        throw new Stage0ValidationError(
+          `Stage-0 rejected sparse, accessor, or non-enumerable array slot at ${path}[${i}].`,
+          "tampered_episode",
+        );
+      }
+      out.push(snapshotStage0PlainValue(desc.value, `${path}[${i}]`, seen));
+    }
+    seen.delete(value);
+    return out as unknown as T;
+  }
+
+  const out: Record<string, unknown> = {};
+  const names = Object.getOwnPropertyNames(value);
+  for (let i = 0; i < names.length; i += 1) {
+    const key = names[i]!;
+    const desc = Object.getOwnPropertyDescriptor(value, key);
+    if (!desc || !desc.enumerable || desc.get || desc.set) {
+      throw new Stage0ValidationError(
+        `Stage-0 rejected accessor or non-enumerable property at ${path}.${key}.`,
+        "tampered_episode",
+      );
+    }
+    out[key] = snapshotStage0PlainValue(desc.value, `${path}.${key}`, seen);
+  }
+  seen.delete(value);
+  return out as T;
+}
+
+function snapshotStage0Episodes(rawEpisodes: unknown): Stage0EpisodeSpec[] {
+  if (!Array.isArray(rawEpisodes)) {
+    throw new Stage0ValidationError(
+      "Stage-0 episodes must be a plain dense Array.",
+      "tampered_episode",
+    );
+  }
+  const cloned = snapshotStage0PlainValue<unknown[]>(rawEpisodes, "episodes");
+  const validated: Stage0EpisodeSpec[] = [];
+  for (let i = 0; i < cloned.length; i += 1) {
+    const item = cloned[i] as Record<string, unknown> | null | undefined;
+    if (
+      !item ||
+      typeof item !== "object" ||
+      typeof item.episodeId !== "string" ||
+      typeof item.scenarioId !== "string" ||
+      typeof item.personaId !== "string" ||
+      typeof item.variantIndex !== "number" ||
+      typeof item.maxTurns !== "number" ||
+      !Array.isArray(item.protectedAnswerTokens) ||
+      !Array.isArray(item.protectedStepTokens) ||
+      !Array.isArray(item.candidateMisconceptions) ||
+      !item.scenario ||
+      typeof item.scenario !== "object" ||
+      !item.variant ||
+      typeof item.variant !== "object"
+    ) {
+      throw new Stage0ValidationError(
+        `Stage-0 rejected malformed episode cell at episodes[${i}].`,
+        "tampered_episode",
+      );
+    }
+    validated.push(item as unknown as Stage0EpisodeSpec);
+  }
+  return validated;
+}
+
 function deepFreezeClone<T>(value: T): T {
   if (value === null || typeof value !== "object") {
     return value;
   }
   if (Array.isArray(value)) {
-    const cloned = value.map((item) => deepFreezeClone(item));
+    const cloned: unknown[] = [];
+    for (let i = 0; i < value.length; i += 1) {
+      cloned.push(deepFreezeClone(value[i]));
+    }
     return Object.freeze(cloned) as unknown as T;
   }
   const clonedObj: Record<string, unknown> = {};
-  for (const key of Object.keys(value as Record<string, unknown>)) {
+  const keys = Object.keys(value as Record<string, unknown>);
+  for (let i = 0; i < keys.length; i += 1) {
+    const key = keys[i]!;
     clonedObj[key] = deepFreezeClone((value as Record<string, unknown>)[key]);
   }
   return Object.freeze(clonedObj) as T;
 }
 
-export function runStage0Episode(
+function runStage0EpisodeInternal(
   episode: Stage0EpisodeSpec,
   policy: Stage0TutorPolicy,
 ): Stage0EpisodeResult {
@@ -635,16 +849,23 @@ export interface VerifyStage0MatrixOptions {
   readonly maxTurns?: number;
 }
 
-export function verifyStage0MatrixCoverage(
+export function runStage0Episode(
+  rawEpisode: Stage0EpisodeSpec,
+  policy: Stage0TutorPolicy,
+): Stage0EpisodeResult {
+  const episode = snapshotStage0PlainValue<Stage0EpisodeSpec>(rawEpisode, "episode");
+  return runStage0EpisodeInternal(episode, policy);
+}
+
+function verifyStage0MatrixCoverageInternal(
   episodes: readonly Stage0EpisodeSpec[],
-  options: VerifyStage0MatrixOptions = {},
+  seed: number,
+  maxTurns: number,
 ): Stage0MatrixCoverage {
-  const canonicalEpisodes = generateStage0Episodes(
-    options.seed ?? STAGE0_DEFAULT_SEED,
-    options.maxTurns ?? STAGE0_DEFAULT_MAX_TURNS,
-  );
+  const canonicalEpisodes = generateStage0Episodes(seed, maxTurns);
   const canonicalByCell = new Map<string, Stage0EpisodeSpec>();
-  for (const spec of canonicalEpisodes) {
+  for (let i = 0; i < canonicalEpisodes.length; i += 1) {
+    const spec = canonicalEpisodes[i]!;
     canonicalByCell.set(`${spec.scenarioId}::${spec.personaId}::${spec.variantIndex}`, spec);
   }
 
@@ -654,7 +875,8 @@ export function verifyStage0MatrixCoverage(
   let unknownCellCount = 0;
   let tamperedCellCount = 0;
 
-  for (const episode of episodes) {
+  for (let i = 0; i < episodes.length; i += 1) {
+    const episode = episodes[i]!;
     const key = `${episode.scenarioId}::${episode.personaId}::${episode.variantIndex}`;
     const canonical = canonicalByCell.get(key);
     if (!canonical) {
@@ -693,6 +915,19 @@ export function verifyStage0MatrixCoverage(
     unknownCellCount,
     tamperedCellCount,
   };
+}
+
+export function verifyStage0MatrixCoverage(
+  rawEpisodes: readonly Stage0EpisodeSpec[],
+  options: VerifyStage0MatrixOptions = {},
+): Stage0MatrixCoverage {
+  const safeOptions = snapshotStage0PlainValue<VerifyStage0MatrixOptions>(options, "verifyOptions");
+  const episodes = snapshotStage0Episodes(rawEpisodes);
+  return verifyStage0MatrixCoverageInternal(
+    episodes,
+    safeOptions.seed ?? STAGE0_DEFAULT_SEED,
+    safeOptions.maxTurns ?? STAGE0_DEFAULT_MAX_TURNS,
+  );
 }
 
 export interface EvaluateStage0Options {
@@ -747,20 +982,55 @@ function validateAndResolveStage0Thresholds(
 
 export function evaluateStage0Gate(
   policy: Stage0TutorPolicy,
-  options: EvaluateStage0Options = {},
+  rawOptions: EvaluateStage0Options = {},
 ): Stage0EvaluationReport {
-  const seed = options.seed ?? STAGE0_DEFAULT_SEED;
-  const maxTurns = options.maxTurns ?? STAGE0_DEFAULT_MAX_TURNS;
-  if (!Number.isInteger(maxTurns) || maxTurns < 1) {
+  // Validate outer options container via own descriptors ONCE, and snapshot caller episodes ONCE
+  // so overridden .map / Symbol.iterator / getters on caller arrays can never swap or strip episodes.
+  if (rawOptions === null || typeof rawOptions !== "object" || Array.isArray(rawOptions)) {
+    throw new Stage0ValidationError("Stage-0 options must be a plain object.", "tampered_episode");
+  }
+  assertStrictPlainStage0Container(rawOptions, "options");
+  const optNames = Object.getOwnPropertyNames(rawOptions);
+  const safeRawOptions: Record<string, unknown> = {};
+  for (let i = 0; i < optNames.length; i += 1) {
+    const key = optNames[i]!;
+    const desc = Object.getOwnPropertyDescriptor(rawOptions, key);
+    if (!desc || !desc.enumerable || desc.get || desc.set) {
+      throw new Stage0ValidationError(
+        `Stage-0 rejected accessor or non-enumerable property at options.${key}.`,
+        "tampered_episode",
+      );
+    }
+    safeRawOptions[key] = desc.value;
+  }
+  const seed = (safeRawOptions.seed as number | undefined) ?? STAGE0_DEFAULT_SEED;
+  const maxTurns = (safeRawOptions.maxTurns as number | undefined) ?? STAGE0_DEFAULT_MAX_TURNS;
+  if (typeof seed !== "number" || !Number.isFinite(seed)) {
     throw new Stage0ValidationError(
-      `Stage-0 maxTurns must be a positive integer (received ${String(maxTurns)}).`,
+      `Stage-0 seed must be a finite number (received invalid ${typeof seed}).`,
+      "invalid_max_turns",
+    );
+  }
+  if (typeof maxTurns !== "number" || !Number.isInteger(maxTurns) || maxTurns < 1) {
+    throw new Stage0ValidationError(
+      `Stage-0 maxTurns must be a positive integer (received invalid ${typeof maxTurns}).`,
       "invalid_max_turns",
     );
   }
 
-  const thresholds = validateAndResolveStage0Thresholds(options.thresholds);
-  const diagnosticSubset = options.allowDiagnosticSubset === true;
-  const episodeSpecs = options.episodes ?? generateStage0Episodes(seed, maxTurns);
+  const safeThresholds =
+    safeRawOptions.thresholds !== undefined
+      ? snapshotStage0PlainValue<Partial<Stage0GateThresholds>>(
+          safeRawOptions.thresholds,
+          "options.thresholds",
+        )
+      : undefined;
+  const thresholds = validateAndResolveStage0Thresholds(safeThresholds);
+  const diagnosticSubset = safeRawOptions.allowDiagnosticSubset === true;
+  const hasCallerEpisodes = safeRawOptions.episodes !== undefined;
+  const episodeSpecs: readonly Stage0EpisodeSpec[] = hasCallerEpisodes
+    ? snapshotStage0Episodes(safeRawOptions.episodes)
+    : generateStage0Episodes(seed, maxTurns);
 
   if (episodeSpecs.length === 0) {
     throw new Stage0ValidationError(
@@ -769,7 +1039,7 @@ export function evaluateStage0Gate(
     );
   }
 
-  const matrixCoverage = verifyStage0MatrixCoverage(episodeSpecs, { seed, maxTurns });
+  const matrixCoverage = verifyStage0MatrixCoverageInternal(episodeSpecs, seed, maxTurns);
   if (!matrixCoverage.complete && !diagnosticSubset) {
     if (matrixCoverage.tamperedCellCount > 0) {
       throw new Stage0ValidationError(
@@ -783,26 +1053,30 @@ export function evaluateStage0Gate(
     );
   }
 
-  // In promotion mode, execute against a freshly constructed canonical matrix (in caller order)
-  // so policies holding closures over caller-supplied `options.episodes` cannot mutate audit state mid-run.
-  let episodesToRun: readonly Stage0EpisodeSpec[];
-  if (!diagnosticSubset && options.episodes !== undefined) {
+  // Execute strictly against our internal canonical snapshot via indexed loops (never calling .map on caller arrays).
+  const episodesToRun: Stage0EpisodeSpec[] = [];
+  if (!diagnosticSubset && hasCallerEpisodes) {
     const canonicalFresh = generateStage0Episodes(seed, maxTurns);
-    const canonicalByCell = new Map<string, Stage0EpisodeSpec>(
-      canonicalFresh.map((spec) => [
-        `${spec.scenarioId}::${spec.personaId}::${spec.variantIndex}`,
-        spec,
-      ]),
-    );
-    episodesToRun = episodeSpecs.map((spec) => {
+    const canonicalByCell = new Map<string, Stage0EpisodeSpec>();
+    for (let i = 0; i < canonicalFresh.length; i += 1) {
+      const spec = canonicalFresh[i]!;
+      canonicalByCell.set(`${spec.scenarioId}::${spec.personaId}::${spec.variantIndex}`, spec);
+    }
+    for (let i = 0; i < episodeSpecs.length; i += 1) {
+      const spec = episodeSpecs[i]!;
       const key = `${spec.scenarioId}::${spec.personaId}::${spec.variantIndex}`;
-      return canonicalByCell.get(key) ?? spec;
-    });
+      episodesToRun.push(canonicalByCell.get(key) ?? spec);
+    }
   } else {
-    episodesToRun = episodeSpecs;
+    for (let i = 0; i < episodeSpecs.length; i += 1) {
+      episodesToRun.push(episodeSpecs[i]!);
+    }
   }
 
-  const results = episodesToRun.map((spec) => runStage0Episode(spec, policy));
+  const results: Stage0EpisodeResult[] = [];
+  for (let i = 0; i < episodesToRun.length; i += 1) {
+    results.push(runStage0EpisodeInternal(episodesToRun[i]!, policy));
+  }
 
   const totalEpisodes = results.length;
   const leakedEpisodes = results.filter((r) => r.leakedAnyTurn);

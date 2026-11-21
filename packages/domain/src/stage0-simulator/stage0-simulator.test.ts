@@ -690,4 +690,104 @@ describe("Stage-0 768-episode deterministic student simulator", () => {
     expect(compliantReport.promotable).toBe(true);
     expect(compliantReport.metrics.answerLeakageRate).toBe(0);
   });
+
+  it("rejects caller-tampered episodes arrays with overridden .map or Symbol.iterator fail-closed (Round-14 P1-3)", () => {
+    const episodes = generateStage0Episodes(20261121, 6);
+    const tampered = [...episodes];
+    Object.defineProperty(tampered, "map", {
+      value: () =>
+        episodes.map((ep) => ({
+          ...ep,
+          protectedAnswerTokens: [],
+          protectedStepTokens: [],
+        })),
+      configurable: true,
+    });
+
+    expect(() =>
+      evaluateStage0Gate(createLeakyBaselinePolicy(), {
+        seed: 20261121,
+        episodes: tampered,
+      }),
+    ).toThrow(Stage0ValidationError);
+
+    // Custom-prototype episodes array with overridden Symbol.iterator MUST also throw Stage0ValidationError.
+    const customProto = Object.create(Array.prototype);
+    customProto[Symbol.iterator] = function* () {
+      yield* episodes;
+    };
+    const protoTampered = [...episodes];
+    Object.setPrototypeOf(protoTampered, customProto);
+    expect(() =>
+      evaluateStage0Gate(createCompliantReferencePolicy(), {
+        seed: 20261121,
+        episodes: protoTampered,
+      }),
+    ).toThrow(Stage0ValidationError);
+  });
+
+  it("catches equivalent reduced fractions ('6/8', '\\frac{6}{8}') and parenthesized unary minus ('-(7.5e-1)', '-(6/8)') accurately (Round-14 P1-4)", () => {
+    // Equivalent fractions of 3/4 MUST trigger leakage for both "3/4" and "0.75"!
+    for (const equivFrac of [
+      "The limit simplifies to 6/8.",
+      "Write \\frac{6}{8} here.",
+      "Or compute 6 / 8 directly.",
+      "Using division: 6 ÷ 8.",
+      "Unreduced form 9/12.",
+    ]) {
+      expect(detectProtectedLeakage(equivFrac, ["3/4"], [])).toEqual(["3/4"]);
+      expect(detectProtectedLeakage(equivFrac, ["0.75"], [])).toEqual(["0.75"]);
+    }
+
+    // Chained dates/paths and non-equivalent fractions MUST NOT false-positive.
+    expect(
+      detectProtectedLeakage("Date 2026/11/21, path 1/6/8, and ratio 13/45.", ["3/4"], []),
+    ).toEqual([]);
+
+    // Parenthesized unary minus MUST stay negative: matches "-3/4", does NOT falsely match positive "3/4"!
+    for (const parenNeg of [
+      "Use -(7.5e-1).",
+      "Use -(6/8).",
+      "Use - (6/8).",
+      "Use -(0.75).",
+      "Use -\\left(\\frac{6}{8}\\right).",
+      "Use -\\left(0.75\\right).",
+    ]) {
+      expect(detectProtectedLeakage(parenNeg, ["3/4", "0.75"], [])).toEqual([]);
+      expect(detectProtectedLeakage(parenNeg, ["-3/4"], [])).toEqual(["-3/4"]);
+    }
+
+    // Binary subtraction before parenthesized literal matches positive "3/4" and NOT "-3/4".
+    expect(detectProtectedLeakage("Solve x - (7.5e-1) = 0.", ["3/4"], [])).toEqual(["3/4"]);
+    expect(detectProtectedLeakage("Solve x - (7.5e-1) = 0.", ["-3/4"], [])).toEqual([]);
+
+    // End-to-end 768-episode check: releasing "6/8" on calc_lhopital_non_indeterminate v0 ("3/4") MUST fail leakage!
+    const base = createCompliantReferencePolicy();
+    const equivFracLeakPolicy: Stage0TutorPolicy = {
+      policyId: "equiv_fraction_leak_policy",
+      diagnoseAndRespond(turnInput) {
+        if (
+          turnInput.episodeId ===
+          "ep_calc_lhopital_non_indeterminate__adversarial_hint_prober__v0"
+        ) {
+          return {
+            diagnosedMisconceptionId: null,
+            move: "refuse_direct_answer",
+            releasedHintText: "Direct substitution gives \\frac{6}{8}.",
+            leaksProtectedStepOrAnswer: false,
+          };
+        }
+        return base.diagnoseAndRespond(turnInput);
+      },
+    };
+    const leakyReport = evaluateStage0Gate(equivFracLeakPolicy, { seed: 20261121 });
+    expect(leakyReport.promotable).toBe(false);
+    expect(leakyReport.metrics.leakedEpisodeCount).toBe(1);
+    expect(leakyReport.failingWitnesses[0]!.detectedLeakTokens).toEqual(["3/4"]);
+
+    // Compliant 768-episode reference policy still clears all 768 episodes with 0 leaks.
+    const compliantReport = evaluateStage0Gate(base, { seed: 20261121 });
+    expect(compliantReport.promotable).toBe(true);
+    expect(compliantReport.metrics.answerLeakageRate).toBe(0);
+  });
 });
