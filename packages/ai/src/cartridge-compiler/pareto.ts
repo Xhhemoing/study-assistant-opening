@@ -19,6 +19,16 @@ export const DEFAULT_ONE_SIDED_95_Z = 1.6448536269514722;
 export const DEFAULT_ONE_SIDED_95_ALPHA = 0.05;
 export const MAX_PROMOTION_ALPHA = 0.05;
 
+const KNOWN_PENDING_T7_REASONS: ReadonlySet<string> = new Set([
+  "followup_window_immature",
+  "no_eligible_followup_cohort",
+  "followup_window_partially_immature",
+]);
+
+function isNonNullRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function clamp01(value: number): number {
   return Math.min(1, Math.max(0, value));
 }
@@ -218,6 +228,10 @@ export function computeCandidateMetrics(
   let pendingCohortCount = 0;
 
   for (const t of trajectories) {
+    if (!isNonNullRecord(t)) {
+      telemetryIssues.push("trajectory_malformed");
+      continue;
+    }
     if (t.verifiableFirstError) {
       verifiableFirstErrorCount += 1;
       if (t.selfRepairedInSession) {
@@ -411,7 +425,9 @@ export function computeCandidateMetrics(
 export type ParetoObjectiveMode = "3d_c_neg_l_t7" | "2d_c_neg_l";
 
 function exactDerivedLeakageRate(candidate: CartridgeCandidateMetrics): number {
-  const { leakedReleasedTurns, totalReleasedTurns, rate } = candidate.l;
+  const rawL = candidate.l as CartridgeCandidateMetrics["l"] | null | undefined;
+  if (!isNonNullRecord(rawL)) return Number.NaN;
+  const { leakedReleasedTurns, totalReleasedTurns, rate } = rawL;
   if (
     isNonNegativeInteger(totalReleasedTurns) &&
     totalReleasedTurns > 0 &&
@@ -465,7 +481,10 @@ function validateLeakageTelemetryFailClosed(
   maxAllowedLeakageRate: number,
 ): string[] {
   const vetoReasons: string[] = [];
-  const l = candidate.l;
+  const l = candidate.l as CartridgeCandidateMetrics["l"] | null | undefined;
+  if (!isNonNullRecord(l)) {
+    return ["invalid_leakage_telemetry"];
+  }
 
   if (l.telemetryIssues !== undefined) {
     if (!Array.isArray(l.telemetryIssues)) {
@@ -732,49 +751,49 @@ function validateObjectiveTelemetryFailClosed(
   candidate: CartridgeCandidateMetrics,
 ): { issues: string[]; matureCert: MatureTransferCertification | null } {
   const issues: string[] = [];
-  const c = candidate.c;
+  const c = candidate.c as CartridgeCandidateMetrics["c"] | null | undefined;
 
-  const validVerifiable = isNonNegativeInteger(c.verifiableFirstErrorCount);
-  const validRepaired = isNonNegativeInteger(c.repairedCount);
-  if (!validVerifiable) {
-    issues.push("invalid_c_verifiableFirstErrorCount");
-  }
-  if (!validRepaired) {
-    issues.push("invalid_c_repairedCount");
-  }
-  if (validVerifiable && validRepaired && c.repairedCount > c.verifiableFirstErrorCount) {
-    issues.push("inconsistent_c_counts");
-  }
-  if (!isNonNegativeInteger(c.abandonedCount)) {
-    issues.push("invalid_c_abandonedCount");
-  }
-  if (
-    typeof c.abandonmentRate !== "number" ||
-    !Number.isFinite(c.abandonmentRate) ||
-    c.abandonmentRate < 0 ||
-    c.abandonmentRate > 1
-  ) {
-    issues.push("invalid_c_abandonmentRate");
-  }
-  if (typeof c.rate !== "number" || !Number.isFinite(c.rate) || c.rate < 0 || c.rate > 1) {
-    issues.push("invalid_c_rate");
-  } else if (validVerifiable && validRepaired && c.repairedCount <= c.verifiableFirstErrorCount) {
-    const expectedC =
-      c.verifiableFirstErrorCount > 0 ? c.repairedCount / c.verifiableFirstErrorCount : 0;
-    if (Math.abs(c.rate - expectedC) > 1e-9) {
-      issues.push(
-        `inconsistent_c_rate:reported(${c.rate.toFixed(9)})!=derived(${expectedC.toFixed(9)})`,
-      );
+  if (!isNonNullRecord(c)) {
+    issues.push("invalid_objective_telemetry:missing_c");
+  } else {
+    const validVerifiable = isNonNegativeInteger(c.verifiableFirstErrorCount);
+    const validRepaired = isNonNegativeInteger(c.repairedCount);
+    if (!validVerifiable) {
+      issues.push("invalid_c_verifiableFirstErrorCount");
+    }
+    if (!validRepaired) {
+      issues.push("invalid_c_repairedCount");
+    }
+    if (validVerifiable && validRepaired && c.repairedCount > c.verifiableFirstErrorCount) {
+      issues.push("inconsistent_c_counts");
+    }
+    if (!isNonNegativeInteger(c.abandonedCount)) {
+      issues.push("invalid_c_abandonedCount");
+    }
+    if (
+      typeof c.abandonmentRate !== "number" ||
+      !Number.isFinite(c.abandonmentRate) ||
+      c.abandonmentRate < 0 ||
+      c.abandonmentRate > 1
+    ) {
+      issues.push("invalid_c_abandonmentRate");
+    }
+    if (typeof c.rate !== "number" || !Number.isFinite(c.rate) || c.rate < 0 || c.rate > 1) {
+      issues.push("invalid_c_rate");
+    } else if (validVerifiable && validRepaired && c.repairedCount <= c.verifiableFirstErrorCount) {
+      const expectedC =
+        c.verifiableFirstErrorCount > 0 ? c.repairedCount / c.verifiableFirstErrorCount : 0;
+      if (Math.abs(c.rate - expectedC) > 1e-9) {
+        issues.push(
+          `inconsistent_c_rate:reported(${c.rate.toFixed(9)})!=derived(${expectedC.toFixed(9)})`,
+        );
+      }
     }
   }
 
   let matureCert: MatureTransferCertification | null = null;
   const rawT7 = candidate.t7 as T7Metric | null | undefined;
-  if (
-    !rawT7 ||
-    typeof rawT7 !== "object" ||
-    (rawT7.status !== "mature" && rawT7.status !== "pending")
-  ) {
+  if (!isNonNullRecord(rawT7) || (rawT7.status !== "mature" && rawT7.status !== "pending")) {
     // Fixed constant code — never echo raw malformed status values.
     issues.push("invalid_t7_status");
   } else if (rawT7.status === "mature") {
@@ -815,13 +834,16 @@ function validateObjectiveTelemetryFailClosed(
 function projectDeclaredCandidateMetrics(
   candidate: CartridgeCandidateMetrics,
 ): CartridgeCandidateMetrics {
-  const safeTelemetryIssues = Array.isArray(candidate.l.telemetryIssues)
-    ? candidate.l.telemetryIssues.filter((entry): entry is string => typeof entry === "string")
-    : undefined;
+  const rawC = candidate.c as CartridgeCandidateMetrics["c"] | null | undefined;
+  const rawL = candidate.l as CartridgeCandidateMetrics["l"] | null | undefined;
+  const safeTelemetryIssues =
+    isNonNullRecord(rawL) && Array.isArray(rawL.telemetryIssues)
+      ? rawL.telemetryIssues.filter((entry): entry is string => typeof entry === "string")
+      : undefined;
 
   const rawT7 = candidate.t7 as T7Metric | null | undefined;
   let safeT7: T7Metric;
-  if (rawT7 && typeof rawT7 === "object" && rawT7.status === "mature") {
+  if (isNonNullRecord(rawT7) && rawT7.status === "mature") {
     safeT7 = {
       status: "mature",
       rate: typeof rawT7.rate === "number" ? rawT7.rate : Number.NaN,
@@ -857,7 +879,7 @@ function projectDeclaredCandidateMetrics(
           : Number.NaN,
       ...(typeof rawT7.alpha === "number" ? { alpha: rawT7.alpha } : {}),
     };
-  } else if (rawT7 && typeof rawT7 === "object" && rawT7.status === "pending") {
+  } else if (isNonNullRecord(rawT7) && rawT7.status === "pending") {
     safeT7 = {
       status: "pending",
       passedFreshTransferCount:
@@ -888,35 +910,41 @@ function projectDeclaredCandidateMetrics(
   return {
     candidateId: candidate.candidateId,
     c: {
-      rate: typeof candidate.c.rate === "number" ? candidate.c.rate : Number.NaN,
+      rate: isNonNullRecord(rawC) && typeof rawC.rate === "number" ? rawC.rate : Number.NaN,
       repairedCount:
-        typeof candidate.c.repairedCount === "number" ? candidate.c.repairedCount : Number.NaN,
+        isNonNullRecord(rawC) && typeof rawC.repairedCount === "number"
+          ? rawC.repairedCount
+          : Number.NaN,
       verifiableFirstErrorCount:
-        typeof candidate.c.verifiableFirstErrorCount === "number"
-          ? candidate.c.verifiableFirstErrorCount
+        isNonNullRecord(rawC) && typeof rawC.verifiableFirstErrorCount === "number"
+          ? rawC.verifiableFirstErrorCount
           : Number.NaN,
       abandonedCount:
-        typeof candidate.c.abandonedCount === "number" ? candidate.c.abandonedCount : Number.NaN,
+        isNonNullRecord(rawC) && typeof rawC.abandonedCount === "number"
+          ? rawC.abandonedCount
+          : Number.NaN,
       abandonmentRate:
-        typeof candidate.c.abandonmentRate === "number"
-          ? candidate.c.abandonmentRate
+        isNonNullRecord(rawC) && typeof rawC.abandonmentRate === "number"
+          ? rawC.abandonmentRate
           : Number.NaN,
     },
     l: {
-      rate: typeof candidate.l.rate === "number" ? candidate.l.rate : Number.NaN,
+      rate: isNonNullRecord(rawL) && typeof rawL.rate === "number" ? rawL.rate : Number.NaN,
       leakedReleasedTurns:
-        typeof candidate.l.leakedReleasedTurns === "number"
-          ? candidate.l.leakedReleasedTurns
+        isNonNullRecord(rawL) && typeof rawL.leakedReleasedTurns === "number"
+          ? rawL.leakedReleasedTurns
           : Number.NaN,
       totalReleasedTurns:
-        typeof candidate.l.totalReleasedTurns === "number"
-          ? candidate.l.totalReleasedTurns
+        isNonNullRecord(rawL) && typeof rawL.totalReleasedTurns === "number"
+          ? rawL.totalReleasedTurns
           : Number.NaN,
       severeLeakCount:
-        typeof candidate.l.severeLeakCount === "number" ? candidate.l.severeLeakCount : Number.NaN,
+        isNonNullRecord(rawL) && typeof rawL.severeLeakCount === "number"
+          ? rawL.severeLeakCount
+          : Number.NaN,
       guardBlockedCount:
-        typeof candidate.l.guardBlockedCount === "number"
-          ? candidate.l.guardBlockedCount
+        isNonNullRecord(rawL) && typeof rawL.guardBlockedCount === "number"
+          ? rawL.guardBlockedCount
           : Number.NaN,
       ...(safeTelemetryIssues && safeTelemetryIssues.length > 0
         ? { telemetryIssues: safeTelemetryIssues }
@@ -1007,8 +1035,21 @@ export function evaluateParetoFrontierAndPromotion(
   } = validateParetoEvaluationOptions(options);
 
   // Canonicalize, scan ENTIRE candidate receipt for raw PII, and enforce strict candidateId uniqueness upfront.
+  // Malformed non-object elements are isolated as vetoed placeholders so valid siblings still evaluate.
   const seenCandidateIds = new Set<string>();
-  const canonicalCandidates: CartridgeCandidateMetrics[] = candidates.map((candidate) => {
+  const malformedEntryIds = new Set<string>();
+  const canonicalCandidates: CartridgeCandidateMetrics[] = candidates.map((rawCandidate, idx) => {
+    if (!isNonNullRecord(rawCandidate)) {
+      const placeholderId = `__malformed_candidate_${idx}`;
+      malformedEntryIds.add(placeholderId);
+      return {
+        candidateId: placeholderId,
+        c: null as unknown as CartridgeCandidateMetrics["c"],
+        l: null as unknown as CartridgeCandidateMetrics["l"],
+        t7: null as unknown as CartridgeCandidateMetrics["t7"],
+      };
+    }
+    const candidate = rawCandidate as unknown as CartridgeCandidateMetrics;
     const canonicalId = canonicalizeIdentifier(candidate.candidateId, "candidateId");
     assertNoRawPiiInText(canonicalId, "candidateId");
     assertNoRawPiiInValue(candidate, `pareto_candidate[${canonicalId}]`);
@@ -1034,6 +1075,14 @@ export function evaluateParetoFrontierAndPromotion(
   const safePending: CartridgeCandidateMetrics[] = [];
 
   for (const candidate of canonicalCandidates) {
+    if (malformedEntryIds.has(candidate.candidateId)) {
+      vetoMap.set(candidate.candidateId, {
+        status: "vetoed_invalid_telemetry",
+        reasons: ["invalid_candidate_receipt"],
+      });
+      continue;
+    }
+
     const leakVetoReasons = validateLeakageTelemetryFailClosed(candidate, maxAllowedLeakageRate);
     if (leakVetoReasons.length > 0) {
       vetoMap.set(candidate.candidateId, {
@@ -1122,7 +1171,10 @@ export function evaluateParetoFrontierAndPromotion(
     // Non-dominated safe candidate on Pareto frontier: check promotion gate (fail-closed on NaN/invalid).
     const promotionBlockers: string[] = [];
     if (candidate.t7.status === "pending") {
-      promotionBlockers.push(`t7_pending:${candidate.t7.reason}`);
+      const pendingCode = KNOWN_PENDING_T7_REASONS.has(candidate.t7.reason)
+        ? candidate.t7.reason
+        : "immature_followup";
+      promotionBlockers.push(`t7_pending:${pendingCode}`);
     } else if (candidate.t7.status === "mature") {
       const t7 = candidate.t7;
       const cert = matureCertMap.get(candidate.candidateId) ?? certifyMatureTransferLowerBound(t7);

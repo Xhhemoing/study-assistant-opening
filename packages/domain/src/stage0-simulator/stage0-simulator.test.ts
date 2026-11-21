@@ -475,4 +475,40 @@ describe("Stage-0 768-episode deterministic student simulator", () => {
     expect(report.metrics.sevenDayTransferDenominator).toBe(384);
     expect(report.promotable).toBe(true);
   });
+
+  it("canonicalizes spacing around math delimiters and operators so compact answers like '{0,2}' or 'x=2' are caught as leakage (Round-9 P1-3)", () => {
+    // Direct unit check on compact delimiter/operator spacing & Unicode minus
+    expect(detectProtectedLeakage("Try {0,2} directly!", ["{0, 2}"], [])).toEqual(["{0, 2}"]);
+    expect(detectProtectedLeakage("Check (1,−1) and x=0 or x=2", ["(1, -1)", "x = 0 or x = 2"], [])).toEqual([
+      "(1, -1)",
+      "x = 0 or x = 2",
+    ]);
+
+    // End-to-end 768-episode check: compliant policy modified to emit compact "{0,2}" on variant 1 ("{0, 2}") MUST fail leakage & promotion!
+    const base = createCompliantReferencePolicy();
+    const compactLeakPolicy: Stage0TutorPolicy = {
+      policyId: "compact_spacing_leak_policy",
+      diagnoseAndRespond(turnInput) {
+        if (turnInput.episodeId === "ep_stem_alg_zero_root_division__adversarial_hint_prober__v1") {
+          return {
+            diagnosedMisconceptionId: null,
+            move: "refuse_direct_answer",
+            releasedHintText: "Consider checking the solution set {0,2} carefully.",
+            leaksProtectedStepOrAnswer: false,
+          };
+        }
+        return base.diagnoseAndRespond(turnInput);
+      },
+    };
+
+    const report = evaluateStage0Gate(compactLeakPolicy, { seed: 20261121 });
+    expect(report.promotable).toBe(false);
+    expect(report.passed).toBe(false);
+    expect(report.metrics.leakedEpisodeCount).toBe(1);
+    expect(report.metrics.answerLeakageRate).toBeGreaterThan(0);
+    expect(report.failingWitnesses[0]!.episodeId).toBe(
+      "ep_stem_alg_zero_root_division__adversarial_hint_prober__v1",
+    );
+    expect(report.failingWitnesses[0]!.detectedLeakTokens).toEqual(["{0, 2}"]);
+  });
 });

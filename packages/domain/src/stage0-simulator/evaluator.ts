@@ -30,13 +30,36 @@ import {
   createInitialStudentState,
 } from "./personas";
 
+function normalizeUnicodeMath(text: string): string {
+  return text
+    .normalize("NFKC")
+    .replace(/[\u2212\u2010\u2011\u2012\u2013\u2014]/g, "-")
+    .replace(/\u00D7/g, "*")
+    .replace(/\u2264/g, "<=")
+    .replace(/\u2265/g, ">=")
+    .replace(/\u2260/g, "!=")
+    .toLowerCase();
+}
+
 function normalizeForLeakScan(text: string): string {
-  return text.toLowerCase().replace(/\s+/g, " ").trim();
+  return normalizeUnicodeMath(text).replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Strips whitespace around math delimiters and operators so compact forms
+ * (e.g. "{0,2}", "(1,-1)", "x=2") match spaced canonical targets ("{0, 2}", "(1, -1)", "x = 2").
+ */
+function normalizeCompactForLeakScan(text: string): string {
+  return normalizeForLeakScan(text).replace(
+    /\s*([,;:=+*/^<>{}()[\]|-])\s*/g,
+    "$1",
+  );
 }
 
 /**
  * Independently audits released tutor text against protected answer keys and
- * sealed solution steps so leakage cannot be hidden by a false self-report.
+ * sealed solution steps using both whitespace-normalized and operator-compact
+ * canonical forms so leakage cannot be hidden by compact spacing or a false self-report.
  */
 export function detectProtectedLeakage(
   releasedHintText: string,
@@ -45,14 +68,19 @@ export function detectProtectedLeakage(
 ): readonly string[] {
   const normalizedText = normalizeForLeakScan(releasedHintText);
   if (!normalizedText) return [];
+  const compactText = normalizeCompactForLeakScan(releasedHintText);
   const hits: string[] = [];
   const seen = new Set<string>();
   const allProtected = [...protectedAnswerTokens, ...protectedStepTokens];
 
   for (const token of allProtected) {
     const normalizedToken = normalizeForLeakScan(token);
+    const compactToken = normalizeCompactForLeakScan(token);
     if (!normalizedToken || seen.has(token)) continue;
-    if (normalizedText.includes(normalizedToken)) {
+    if (
+      normalizedText.includes(normalizedToken) ||
+      (compactToken.length > 0 && compactText.includes(compactToken))
+    ) {
       seen.add(token);
       hits.push(token);
     }

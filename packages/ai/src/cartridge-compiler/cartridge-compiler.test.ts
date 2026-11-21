@@ -1920,4 +1920,159 @@ describe("Exact (C, -L, T7) Pareto frontier, Hard Pre-Pareto Veto, and Promotion
       }
     }
   });
+
+  it("rejects unformatted 9-digit SSN strings while preserving UUIDs/alphanumeric IDs and avoids echoing custom pending reason strings (Round-9 P1-1)", () => {
+    for (const bad of ["123456789", "ssn=123456789", "id: 123456789"]) {
+      expect(() => assertNoRawPiiInText(bad, "ssn_text")).toThrow(CartridgePiiViolationError);
+    }
+
+    // Benign UUIDs and alphanumeric/underscore IDs pass cleanly.
+    expect(() =>
+      assertNoRawPiiInText(
+        "trace=550e8400-e29b-41d4-a716-a12345678901 ref=id_123456789 ratio=0.123456789",
+        "benign_text",
+      ),
+    ).not.toThrow();
+
+    // Unformatted 9-digit SSN string in t7.reason is caught!
+    const clean = buildMatureCohort("cand_r9_ssn_base", {
+      learnerCount: 25,
+      repairedCount: 23,
+      t7PassedCount: 24,
+    });
+    const ssnPending: CartridgeCandidateMetrics = {
+      ...clean,
+      candidateId: "cand_ssn_reason",
+      t7: {
+        status: "pending",
+        passedFreshTransferCount: 0,
+        eligibleFollowupCohortCount: 0,
+        pendingCohortCount: 5,
+        reason: "pending review for 123456789",
+      },
+    };
+    expect(() =>
+      evaluateParetoFrontierAndPromotion([ssnPending], {
+        baseline: { cRate: 0.8, t7Rate: 0.72 },
+      }),
+    ).toThrow(CartridgePiiViolationError);
+
+    // Custom benign pending reason maps to fixed diagnostic code in promotionBlockers (never echoes arbitrary text).
+    const customPending: CartridgeCandidateMetrics = {
+      ...clean,
+      candidateId: "cand_custom_pending_reason",
+      t7: {
+        status: "pending",
+        passedFreshTransferCount: 0,
+        eligibleFollowupCohortCount: 0,
+        pendingCohortCount: 5,
+        reason: "internal_custom_note_xyz",
+      },
+    };
+    const pendingRes = evaluateParetoFrontierAndPromotion([customPending], {
+      baseline: { cRate: 0.8, t7Rate: 0.72 },
+    });
+    expect(pendingRes.results[0]!.promotionBlockers).toEqual(["t7_pending:immature_followup"]);
+  });
+
+  it("scans PII before GEPA patch schema validation and redacts unexpected keys in validateAndApplyGepaPatch (Round-9 P1-2)", () => {
+    const base = makeBasePolicy();
+
+    // PII-bearing unexpected top-level key MUST trigger CartridgePiiViolationError (not schema error) and NEVER echo the email!
+    let piiCaught: unknown;
+    try {
+      validateAndApplyGepaPatch(base, {
+        surface: "approvedTemplateSlots",
+        summary: "Test patch",
+        payload: { slotA: "Check premise" },
+        "alice@example.com": 1,
+      });
+    } catch (err) {
+      piiCaught = err;
+    }
+    expect(piiCaught).toBeInstanceOf(CartridgePiiViolationError);
+    expect((piiCaught as CartridgePiiViolationError).message).not.toContain("alice@example.com");
+    expect(JSON.stringify((piiCaught as CartridgePiiViolationError).offendingFields)).not.toContain(
+      "alice@example.com",
+    );
+
+    // Non-PII unexpected key MUST throw GepaInvalidPatchPayloadError WITHOUT echoing the raw key name!
+    let schemaCaught: unknown;
+    try {
+      validateAndApplyGepaPatch(base, {
+        surface: "moveRules",
+        summary: "Extra non-PII key",
+        payload: [
+          {
+            id: "r1",
+            conceptId: "alg.zero_product_property",
+            triggerRuleId: "err.divide_by_variable",
+            missingPremise: "x != 0",
+            move: "targeted_scaffold",
+            priority: 10,
+            secretInternalPropName: "value",
+          },
+        ],
+      });
+    } catch (err) {
+      schemaCaught = err;
+    }
+    expect(schemaCaught).toBeInstanceOf(GepaInvalidPatchPayloadError);
+    const invalidErr = schemaCaught as GepaInvalidPatchPayloadError;
+    expect(invalidErr.message).not.toContain("secretInternalPropName");
+    expect(JSON.stringify(invalidErr.issues)).not.toContain("secretInternalPropName");
+    expect(JSON.stringify(invalidErr.issues)).toContain("unexpected_patch_field");
+  });
+
+  it("vetoes individual malformed receipts (l: null, c: null, t7: null) without crashing batch evaluation of valid siblings (Round-9 P1-4)", () => {
+    const validPromotable = buildMatureCohort("cand_valid_sibling", {
+      learnerCount: 25,
+      repairedCount: 22,
+      t7PassedCount: 24,
+    });
+
+    const nullL = {
+      ...validPromotable,
+      candidateId: "cand_null_l",
+      l: null,
+    } as unknown as CartridgeCandidateMetrics;
+
+    const nullC = {
+      ...validPromotable,
+      candidateId: "cand_null_c",
+      c: null,
+    } as unknown as CartridgeCandidateMetrics;
+
+    const nullT7 = {
+      ...validPromotable,
+      candidateId: "cand_null_t7",
+      t7: null,
+    } as unknown as CartridgeCandidateMetrics;
+
+    const result = evaluateParetoFrontierAndPromotion(
+      [nullL, nullC, nullT7, validPromotable],
+      {
+        baseline: { cRate: 0.85, t7Rate: 0.72 },
+        minT7Gain: 0.05,
+        nonInferiorityMargin: 0.02,
+        minClusterCount: 5,
+      },
+    );
+
+    expect(result.vetoedCandidateIds).toEqual(["cand_null_l", "cand_null_c", "cand_null_t7"]);
+    expect(result.frontierCandidateIds).toEqual(["cand_valid_sibling"]);
+    expect(result.promotedCandidateIds).toEqual(["cand_valid_sibling"]);
+
+    const nullLEval = result.results.find((r) => r.candidateId === "cand_null_l")!;
+    expect(nullLEval.status).toBe("vetoed_leakage");
+    expect(nullLEval.vetoReasons).toEqual(["invalid_leakage_telemetry"]);
+
+    const nullCEval = result.results.find((r) => r.candidateId === "cand_null_c")!;
+    expect(nullCEval.status).toBe("vetoed_invalid_telemetry");
+    expect(nullCEval.vetoReasons).toEqual(["invalid_objective_telemetry:missing_c"]);
+
+    const nullT7Eval = result.results.find((r) => r.candidateId === "cand_null_t7")!;
+    expect(nullT7Eval.status).toBe("vetoed_invalid_telemetry");
+    expect(nullT7Eval.vetoReasons).toEqual(["invalid_t7_status"]);
+  });
 });

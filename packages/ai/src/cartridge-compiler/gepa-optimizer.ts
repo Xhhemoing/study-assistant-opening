@@ -123,7 +123,8 @@ function checkOnlyDeclaredKeys(
   for (const key of Object.getOwnPropertyNames(obj)) {
     if (PROTOTYPE_POLLUTION_KEYS.has(key)) continue;
     if (!allowedKeys.has(key)) {
-      issues.push(`${path}:undeclared_key(${key})`);
+      // Never echo raw unknown caller keys into error messages or issue lists.
+      issues.push(`${path}.[unexpected_key]:unexpected_patch_field`);
     }
   }
 }
@@ -285,15 +286,11 @@ function validateSurfacePayloadSchema(surface: string, payload: unknown): void {
       for (const key of Object.getOwnPropertyNames(payload)) {
         if (PROTOTYPE_POLLUTION_KEYS.has(key)) continue;
         if (key.trim().length === 0 || key.length > MAX_SLOT_KEY_LENGTH) {
-          issues.push(
-            `approvedTemplateSlots[${JSON.stringify(key)}]:key_must_be_nonempty_string(max=${MAX_SLOT_KEY_LENGTH})`,
-          );
+          issues.push("approvedTemplateSlots.[unexpected_key]:invalid_slot_key");
         }
         const val = payload[key];
         if (typeof val !== "string" || val.length > MAX_PATCH_STRING_LENGTH) {
-          issues.push(
-            `approvedTemplateSlots.${key}:value_must_be_finite_string(max=${MAX_PATCH_STRING_LENGTH})`,
-          );
+          issues.push("approvedTemplateSlots.[unexpected_key]:value_must_be_finite_string");
         }
       }
       break;
@@ -631,6 +628,10 @@ function scanObjectForForbiddenSurfaceKeys(value: unknown, pathPrefix: string): 
  * 3) contains zero raw PII across `summary` and every nested string leaf.
  */
 export function assertAllowedGepaPatch(patch: unknown): asserts patch is GepaSurfacePatch {
+  // Run PII scan FIRST before any surface/schema check so raw PII in unexpected keys or
+  // malformed fields is quarantined without ever being echoed in schema validation errors.
+  assertNoRawPiiInValue(patch, "gepa_patch");
+
   if (!isPlainObject(patch)) {
     throw new GepaForbiddenSurfaceError("GEPA patch must be a plain non-null object", "invalid");
   }
@@ -639,16 +640,20 @@ export function assertAllowedGepaPatch(patch: unknown): asserts patch is GepaSur
   if (topProtoIssues.length > 0) {
     throw new GepaInvalidPatchPayloadError(
       `GEPA patch contains forbidden prototype key: ${topProtoIssues.join(", ")}`,
-      String(patch.surface ?? "unknown"),
+      "invalid",
       topProtoIssues,
     );
   }
 
   const surface = patch.surface;
   if (typeof surface !== "string" || !ALLOWED_SURFACE_SET.has(surface)) {
+    const safeSurfaceLabel =
+      typeof surface === "string" && FORBIDDEN_SURFACE_SET.has(surface.toLowerCase())
+        ? surface
+        : "[unknown_surface]";
     throw new GepaForbiddenSurfaceError(
-      `GEPA patch attempted to mutate forbidden or unknown surface "${String(surface)}". Allowed surfaces: ${ALLOWED_GEPA_MUTATION_SURFACES.join(", ")}`,
-      String(surface),
+      `GEPA patch attempted to mutate forbidden or unknown surface "${safeSurfaceLabel}". Allowed surfaces: ${ALLOWED_GEPA_MUTATION_SURFACES.join(", ")}`,
+      safeSurfaceLabel,
     );
   }
 
@@ -673,7 +678,7 @@ export function assertAllowedGepaPatch(patch: unknown): asserts patch is GepaSur
   checkOnlyDeclaredKeys(patch, PATCH_TOP_LEVEL_KEYS, "patch", topDeclaredIssues);
   if (topDeclaredIssues.length > 0) {
     throw new GepaInvalidPatchPayloadError(
-      `GEPA patch contains undeclared top-level keys: ${topDeclaredIssues.join(", ")}`,
+      `GEPA patch contains unexpected top-level keys: ${topDeclaredIssues.join(", ")}`,
       surface,
       topDeclaredIssues,
     );
@@ -692,7 +697,6 @@ export function assertAllowedGepaPatch(patch: unknown): asserts patch is GepaSur
   }
 
   validateSurfacePayloadSchema(surface, patch.payload);
-  assertNoRawPiiInValue(patch, `gepa_patch:${surface}`);
   // Post-normalization PII scan on rubric anchor expressions/AST tokens/premises.
   if (surface === "rubricAnchors") {
     for (const rule of patch.payload as readonly MisconceptionRubricRule[]) {
@@ -775,6 +779,7 @@ export function validateAndApplyGepaPatch(
   patch: unknown,
   versionTag = "gepa",
 ): CartridgeDeclarativePolicy {
+  assertNoRawPiiInValue(policy, "gepa_base_policy");
   assertAllowedGepaPatch(patch);
 
   switch (patch.surface) {

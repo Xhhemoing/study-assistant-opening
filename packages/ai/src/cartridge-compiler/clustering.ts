@@ -22,6 +22,8 @@ const INTL_PHONE_PATTERN =
 const UNFORMATTED_PHONE_PATTERN =
   /(?<![0-9A-Za-z_.])\d{10,11}(?![0-9A-Za-z_]|\.\d)/;
 const SSN_PATTERN = /(?<![\d.])\d{3}-\d{2}-\d{4}(?![\d.])/;
+const UNFORMATTED_SSN_PATTERN =
+  /(?<![0-9A-Za-z_.])\d{9}(?![0-9A-Za-z_]|\.\d)/;
 const TOKEN_URL_PATTERN =
   /https?:\/\/[^\s]*?(?:[?&]\s*(?:token|access_token|auth|api_key|apikey|secret|password|passwd|session|sid|jwt|key)\s*=|[^/\s@]+:[^/\s@]+@)/i;
 const SPACED_TOKEN_URL_PATTERN =
@@ -107,6 +109,9 @@ function detectRawPiiReasonsInText(text: string): string[] {
     if (SSN_PATTERN.test(form)) reasons.add("ssn");
   }
   for (const form of new Set<string>([rawMasked, nfkcMasked])) {
+    if (UNFORMATTED_SSN_PATTERN.test(form)) {
+      reasons.add("ssn");
+    }
     if (
       PHONE_PATTERN.test(form) ||
       INTL_PHONE_PATTERN.test(form) ||
