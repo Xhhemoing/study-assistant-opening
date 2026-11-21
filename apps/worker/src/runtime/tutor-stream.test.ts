@@ -3,7 +3,8 @@ import type IORedis from "ioredis";
 import { expect, it, vi } from "vitest";
 import {
   createTutorStreamReader, createTutorStreamWriter, createWorkerTutorStreamWriter, isDefinitiveRedisRejection,
-  isNonMutatingRedisReplyError, isUnconfirmedStreamSealError, UnconfirmedStreamSealError, withTutorDeltaBatches,
+  isNonMutatingRedisReplyError, isTutorStreamExpiredError, isUnconfirmedStreamSealError, TutorStreamExpiredError,
+  UnconfirmedStreamSealError, withTutorDeltaBatches,
 } from "./tutor-stream";
 
 function deferred() {
@@ -400,6 +401,56 @@ it("aborts a hung seal attempt at sealDeadlineMs and destroys the stuck control 
     expect(vi.getTimerCount()).toBe(0);
   } finally {
     writer.disconnect();
+    vi.useRealTimers();
+  }
+});
+
+it("enforces temporaryMemoryExpiresAt after Redis connect/reconnect and inside begin/append Lua scripts", async () => {
+  vi.useFakeTimers();
+  try {
+    vi.setSystemTime(new Date("2026-11-21T00:00:00.000Z"));
+    const expiresAt = "2026-11-21T00:00:01.000Z";
+    const id = "10000000-0000-4000-8000-000000000001";
+
+    // 1. Direct writer checks Redis TIME + effectiveNowMs inside Lua and converts EXPIRED / -1 into TutorStreamExpiredError.
+    const evalScript = vi.fn()
+      .mockResolvedValueOnce("EXPIRED")
+      .mockResolvedValueOnce(-1);
+    const direct = createTutorStreamWriter({ eval: evalScript } as unknown as IORedis);
+    await expect(direct.begin(id, id, {
+      privacyEpoch: 0, contextSourceRefs: [], exposureReceiptId: null, executionId: id, temporaryMemoryExpiresAt: expiresAt,
+    })).rejects.toBeInstanceOf(TutorStreamExpiredError);
+    expect(evalScript.mock.calls[0]?.[0]).toContain("redis.call('TIME')");
+    expect(evalScript.mock.calls[0]?.[0]).toContain("temporaryMemoryExpiresAt");
+
+    await expect(direct.append(id, id, "delta", id, 0, undefined, expiresAt))
+      .rejects.toBeInstanceOf(TutorStreamExpiredError);
+    expect(evalScript.mock.calls[1]?.[0]).toContain("redis.call('TIME')");
+    expect(evalScript.mock.calls[1]?.[0]).toContain("redis.call('HSET', KEYS[1], 'sealed', '1')");
+
+    // 2. Worker writer re-checks Date.now() synchronously AFTER slow connect()/reconnect resolves, never issuing EVAL.
+    const appendConn = {
+      status: "ready",
+      on: vi.fn(),
+      disconnect: vi.fn(),
+      connect: vi.fn(async () => {
+        // Reconnect latency crosses temporaryMemoryExpiresAt before EVAL is dispatched.
+        vi.advanceTimersByTime(2_000);
+      }),
+      eval: vi.fn(),
+    };
+    const producer = { duplicate: vi.fn().mockReturnValueOnce(appendConn) };
+    const workerWriter = createWorkerTutorStreamWriter(producer as unknown as IORedis, vi.fn());
+    try {
+      const err = await workerWriter.append(id, id, "stale after reconnect", id, 0, undefined, expiresAt).catch(e => e);
+      expect(err).toBeInstanceOf(TutorStreamExpiredError);
+      expect(isTutorStreamExpiredError(err)).toBe(true);
+      expect(appendConn.eval).not.toHaveBeenCalled();
+      expect(producer.duplicate).toHaveBeenCalledOnce();
+    } finally {
+      workerWriter.disconnect();
+    }
+  } finally {
     vi.useRealTimers();
   }
 });

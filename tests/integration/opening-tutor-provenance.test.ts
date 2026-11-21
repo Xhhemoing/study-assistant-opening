@@ -73,7 +73,7 @@ describe("saved tutor material provenance", () => {
       return memories.decideMemoryCandidate(f.scope, { id: rows[0]!.id,
         action: "confirm", expectedVersion: 0, expiresAt: null, clientKey: randomUUID() });
     };
-    await confirm(first.assistantTurnId);
+    const firstMemory = await confirm(first.assistantTurnId);
     const secondConversation = await conversations.create(f.scope, { title: "second", courseId: null });
     const second = await append(secondConversation.id);
     const secondCall = handler("second-secret-answer", "second-secret-memory");
@@ -84,7 +84,14 @@ describe("saved tutor material provenance", () => {
     const secondMemory = await confirm(second.assistantTurnId);
     const refs = await f.sql<{ context_source_refs: unknown; source_ids: string[]; citations: unknown[] }[]>`
       SELECT context_source_refs, source_ids, citations FROM opening_turns WHERE id=${second.assistantTurnId}`;
-    expect(refs[0]).toEqual({ context_source_refs: [{ sourceId: id, sourceVersion: 0, memoryOnly: true }], source_ids: [], citations: [] });
+    expect(refs[0]).toEqual({
+      context_source_refs: [
+        { sourceId: id, sourceVersion: 0, memoryOnly: true },
+        { memoryDependencyIds: [firstMemory.id] },
+      ],
+      source_ids: [],
+      citations: [],
+    });
     const receipt = await memories.deleteMemory(f.scope, {
       id: secondMemory.id, expectedVersion: secondMemory.version, deleteSourceText: false, clientKey: randomUUID(),
     });

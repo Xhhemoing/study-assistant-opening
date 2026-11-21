@@ -13,7 +13,7 @@ import { createProducerRedisConnection } from "../../apps/worker/src/runtime/que
 import { createTutorTurnHandler, type TutorTurnDeps } from "../../apps/worker/src/jobs/tutor-turn";
 import { createOpeningMaterialRetriever } from "../../apps/worker/src/runtime/material-retrieval";
 import { createTutorStreamReader, createTutorStreamWriter, createWorkerTutorStreamWriter,
-  UnconfirmedStreamSealError, type TutorStreamDelta } from "../../apps/worker/src/runtime/tutor-stream";
+  TutorStreamExpiredError, UnconfirmedStreamSealError, type TutorStreamDelta } from "../../apps/worker/src/runtime/tutor-stream";
 import { getTutorJobService } from "../../apps/web/src/features/opening/server/data-services";
 import { createJobStreamResponse } from "../../apps/web/src/features/opening/server/job-stream";
 import { deleteOwnedMemory } from "../../packages/database/src/repositories/opening-memory-delete";
@@ -1381,6 +1381,37 @@ it("enforces temporary global memory expiry at beforeSend, stream publication/re
     } finally {
       releaseLock.resolve();
       await Promise.all([closeRace(holder.sql), closeRace(waiter.sql)]);
+    }
+
+    // 4. Redis Lua TIME check atomically seals and refuses append/PUBLISH once temporaryMemoryExpiresAt elapses.
+    const luaJobId = randomUUID();
+    const luaExecId = randomUUID();
+    const luaKey = tutorStreamKey(scope.workspaceId, luaJobId);
+    keys.push(luaKey);
+    const luaExpiresAt = new Date(Date.now() + 250).toISOString();
+    const observedLuaDeltas: TutorStreamDelta[] = [];
+    const luaCheckpoint = deferred();
+    const unsubLua = await reader.subscribe(scope.workspaceId, luaJobId, delta => {
+      if (delta.text === "checkpoint") luaCheckpoint.resolve();
+      else observedLuaDeltas.push(delta);
+    });
+    try {
+      await writer.begin(scope.workspaceId, luaJobId, {
+        privacyEpoch: 1, contextSourceRefs: [], exposureReceiptId: null,
+        executionId: luaExecId, temporaryMemoryExpiresAt: luaExpiresAt,
+      });
+      expect(await writer.append(scope.workspaceId, luaJobId, "Before expiry", luaExecId, 1)).toBe(1);
+      await new Promise(resolve => setTimeout(resolve, 350));
+      // Even without passing temporaryMemoryExpiresAt to append, Redis Lua checks stored temporaryMemoryExpiresAt vs TIME!
+      await expect(writer.append(scope.workspaceId, luaJobId, "After expiry", luaExecId, 1))
+        .rejects.toBeInstanceOf(TutorStreamExpiredError);
+      expect(await redis.hget(luaKey, "sealed")).toBe("1");
+      expect(await reader.read(scope.workspaceId, luaJobId)).toMatchObject({ text: "Before expiry", sequence: 1 });
+      await redis.publish(`${luaKey}:events`, JSON.stringify({ text: "checkpoint", sequence: 2 }));
+      await luaCheckpoint.promise;
+      expect(observedLuaDeltas).toEqual([{ text: "Before expiry", sequence: 1 }]);
+    } finally {
+      await unsubLua();
     }
   } finally {
     await fixture.close();

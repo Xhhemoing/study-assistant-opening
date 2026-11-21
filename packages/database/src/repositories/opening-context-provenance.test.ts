@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mergeContextSourceRefs, parseContextSourceRefs } from "./opening-context-provenance";
+import { mergeContextSourceRefs, parseContextMemoryDependencyIds, parseContextSourceRefs } from "./opening-context-provenance";
 
 const id = "a0b0c0d0-1111-4222-8333-000000000000";
 describe("material provenance JSON", () => {
@@ -36,5 +36,24 @@ describe("material provenance JSON", () => {
       { sourceId: id, sourceVersion: 1 },
       { sourceId: other, sourceVersion: 1, memoryOnly: true },
     ]);
+  });
+  it("parses exact memoryDependencyIds metadata separately from document source refs and rejects malformed metadata", () => {
+    const m1 = "c0b0c0d0-1111-4222-8333-000000000001";
+    const m2 = "c0b0c0d0-1111-4222-8333-000000000002";
+    const mixed = [{ sourceId: id, sourceVersion: 0, memoryOnly: true }, { memoryDependencyIds: [m2.toUpperCase(), m1, m2] }];
+    expect(parseContextSourceRefs(mixed)).toEqual([{ sourceId: id, sourceVersion: 0, memoryOnly: true }]);
+    expect(parseContextMemoryDependencyIds(mixed)).toEqual([m1, m2]);
+    // Documentless global-memory turn has [] document refs and exact memoryDependencyIds.
+    expect(parseContextSourceRefs([{ memoryDependencyIds: [m1] }])).toEqual([]);
+    expect(parseContextMemoryDependencyIds([{ memoryDependencyIds: [m1] }])).toEqual([m1]);
+    // Malformed metadata fails closed in both parsers.
+    for (const bad of [
+      [{ memoryDependencyIds: [] }],
+      [{ memoryDependencyIds: ["not-a-uuid"] }],
+      [{ memoryDependencyIds: [m1], extra: true }],
+    ]) {
+      expect(parseContextSourceRefs(bad)).toBeNull();
+      expect(parseContextMemoryDependencyIds(bad)).toBeNull();
+    }
   });
 });

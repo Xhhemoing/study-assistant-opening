@@ -7,6 +7,7 @@ import {
 import type { ConversationPlanningContext, HelpInputSnapshot, SourceChunk, StudyIntentEvent, TutorMode } from "@aistudy/contracts";
 import { PrivacyEpochError } from "../runtime/privacy-guard";
 import { composerMessageText, studyIntentForMessage, DEFAULT_STRATEGY_TEMPLATE_ID, PAGE_CITATION_CLARIFY_MESSAGE, PageCitationClarifyError, TUTOR_FAILURE_MESSAGE } from "@aistudy/domain";
+import { DEFAULT_SEAL_DEADLINE_MS, TutorStreamExpiredError } from "../runtime/tutor-stream";
 import { createTutorTurnHandler, isImageOnlySourceChunks, makeTutorInstruction, VISION_REQUIRED_MESSAGE } from "./tutor-turn";
 import type { TutorNextActionService } from "./tutor-next-action";
 import { inferComposerIntent } from "@aistudy/domain";
@@ -2104,8 +2105,55 @@ describe("tutor turn handler", () => {
         claimedJob.id,
         expect.objectContaining({ temporaryMemoryExpiresAt: "2026-11-21T00:30:00.000Z" }),
       );
+      expect(DEFAULT_SEAL_DEADLINE_MS).toBeGreaterThan(0);
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("propagates retained history memoryIds/temporaryMemoryExpiresAt and aborts fail-closed when Redis append throws TutorStreamExpiredError", async () => {
+    const historyMemId = "00000000-0000-4000-8000-0000000000e1";
+    const historyExpiresAt = "2099-01-01T00:05:00.000Z";
+    const { deps, provider, tutorJobs } = setup();
+    tutorJobs.loadHistoryContext.mockResolvedValueOnce({
+      history: [{ role: "user", text: "prior" }, { role: "assistant", text: "prior answer using temp memory" }],
+      sourceRefs: [],
+      memoryIds: [historyMemId],
+      temporaryMemoryExpiresAt: historyExpiresAt,
+    });
+    const onStreamUnavailable = vi.fn();
+    const stream = {
+      begin: vi.fn(async () => {}),
+      seal: vi.fn(async () => {}),
+      append: vi.fn(async () => { throw new TutorStreamExpiredError(); }),
+    };
+    provider.complete.mockImplementationOnce(async (_input, _signal, onTextDelta) => {
+      await onTextDelta?.("expired delta");
+      return { text: "expired delta", citedChunkIds: [], candidates: [], requestId: null, inputTokens: 10, outputTokens: 10 };
+    });
+
+    await expect(createTutorTurnHandler({
+      ...deps, stream, onStreamUnavailable,
+    })(claimedJob.id)).rejects.toBeInstanceOf(TutorStreamExpiredError);
+    expect(stream.begin).toHaveBeenCalledWith(
+      claimedJob.workspaceId,
+      claimedJob.id,
+      expect.objectContaining({
+        globalMemoryIds: [historyMemId],
+        temporaryMemoryExpiresAt: historyExpiresAt,
+      }),
+    );
+    expect(stream.append).toHaveBeenCalledWith(
+      claimedJob.workspaceId,
+      claimedJob.id,
+      "expired delta",
+      undefined,
+      0,
+      undefined,
+      historyExpiresAt,
+    );
+    expect(onStreamUnavailable).not.toHaveBeenCalled();
+    expect(tutorJobs.completeTurn).not.toHaveBeenCalled();
+    expect(tutorJobs.fail).toHaveBeenCalledOnce();
   });
 });

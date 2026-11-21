@@ -54,7 +54,7 @@ import {
   type ResolvedTaskModel,
   type ParentInteractionBudget,
 } from "@aistudy/ai";
-import { DEFAULT_SEAL_DEADLINE_MS, isTutorStreamUnavailable, isUnconfirmedStreamSealError, withTutorDeltaBatches, type TutorStreamWriter } from "../runtime/tutor-stream";
+import { DEFAULT_SEAL_DEADLINE_MS, isTutorStreamExpiredError, isTutorStreamUnavailable, isUnconfirmedStreamSealError, withTutorDeltaBatches, type TutorStreamWriter } from "../runtime/tutor-stream";
 import { chunksAtSnapshots } from "./tutor-chunks";
 import { prepareTutorNextAction, type TutorNextActionService } from "./tutor-next-action";
 import { withJobHeartbeat } from "../runtime/lifecycle";
@@ -334,7 +334,10 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
       if (allowedSourceIds.length && (!retrieved?.assertCurrent || !retrieved.purposePin)) throw Object.assign(new Error("material admission pin unavailable"), { code: "CONFLICT" });
       const assertMaterialsCurrent = async () => { await retrieved?.assertCurrent?.(); };
       const context = (retrieved?.chunks ?? selectContext(retrievalInput)).slice(0, MAX_PROVIDER_CHUNKS);
-      const { history, sourceRefs: historySourceRefs } = continuationHistory ?? await deps.tutorJobs.loadHistoryContext(scope, claimed.userTurnId);
+      const loadedHistory = continuationHistory ?? await deps.tutorJobs.loadHistoryContext(scope, claimed.userTurnId);
+      const { history, sourceRefs: historySourceRefs } = loadedHistory;
+      const historyMemoryIds = loadedHistory.memoryIds ?? [];
+      const historyTempExpiresAt = loadedHistory.temporaryMemoryExpiresAt;
       const contextNow = new Date().toISOString();
       const memoryContext = deps.memories
         ? await deps.memories.listContext(scope, contextNow)
@@ -361,26 +364,28 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
       )].sort();
       const eligibleMemories = memoryContext.memories.filter(memory => isMemoryEligible(memory, contextNow));
       const injectedTemporaryMemories = eligibleMemories.filter(memory => memory.kind === "temporary");
-      const earliestTemporaryMemoryExpiresAt = injectedTemporaryMemories.length
-        ? injectedTemporaryMemories.reduce<string>((earliest, memory) =>
-            Date.parse(memory.expiresAt!) < Date.parse(earliest) ? memory.expiresAt! : earliest,
-          injectedTemporaryMemories[0]!.expiresAt!)
+      const temporaryExpiryCandidates = [
+        ...injectedTemporaryMemories.map(memory => memory.expiresAt!),
+        ...(historyTempExpiresAt ? [historyTempExpiresAt] : []),
+      ];
+      const earliestTemporaryMemoryExpiresAt = temporaryExpiryCandidates.length
+        ? temporaryExpiryCandidates.reduce<string>((earliest, candidate) =>
+            Date.parse(candidate) < Date.parse(earliest) ? candidate : earliest,
+          temporaryExpiryCandidates[0]!)
         : undefined;
       const assertTempMemoriesUnexpiredSync = () => {
-        if (!injectedTemporaryMemories.length) return;
-        const sendNow = Date.now();
-        if (injectedTemporaryMemories.some(memory => {
-          const expiresAt = memory.expiresAt ? Date.parse(memory.expiresAt) : Number.NaN;
-          return Number.isNaN(expiresAt) || expiresAt <= sendNow;
-        })) {
+        if (earliestTemporaryMemoryExpiresAt === undefined) return;
+        const expiresAt = Date.parse(earliestTemporaryMemoryExpiresAt);
+        if (Number.isNaN(expiresAt) || expiresAt <= Date.now()) {
           throw Object.assign(new Error("injected temporary memory expired before send"), { code: "CONFLICT" });
         }
       };
-      const globalMemoryIds = [...new Set(
-        eligibleMemories
+      const globalMemoryIds = [...new Set([
+        ...eligibleMemories
           .filter(memory => memory.courseId == null)
           .map(memory => memory.id.toLowerCase()),
-      )].sort();
+        ...historyMemoryIds.map(id => id.toLowerCase()),
+      ])].sort();
       const memoryTaggedSourceRefs = memoryContext.sourceRefs.map(ref =>
         nonMemorySourceIds.has(ref.sourceId.toLowerCase()) ? ref : { ...ref, memoryOnly: true },
       );
@@ -486,9 +491,18 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
               // Keep this inside the publication transaction: on a transport
               // error the worker writer settles only after Redis confirms the seal
               // or hits its bounded deadline (throwing UnconfirmedStreamSealError).
-              const sequence = await deps.stream!.append(scope.workspaceId, claimed.id, text, claimed.executionId, streamContext.privacyEpoch, attemptFence);
+              const sequence = earliestTemporaryMemoryExpiresAt !== undefined
+                ? await deps.stream!.append(
+                  scope.workspaceId, claimed.id, text, claimed.executionId,
+                  streamContext.privacyEpoch, attemptFence, earliestTemporaryMemoryExpiresAt,
+                )
+                : await deps.stream!.append(
+                  scope.workspaceId, claimed.id, text, claimed.executionId,
+                  streamContext.privacyEpoch, attemptFence,
+                );
               if (sequence === 1) recordTiming("tutor_first_chunk", new Date(), Math.round(performance.now() - firstTextAt));
             } catch (error) {
+              if (isTutorStreamExpiredError(error)) throw error;
               streamAvailable = false;
               deps.onStreamUnavailable?.(error);
               if (isUnconfirmedStreamSealError(error)) throw error;

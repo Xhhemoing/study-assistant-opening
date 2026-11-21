@@ -1265,10 +1265,16 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
           RETURNING id
         `;
         if (!claimed.length) return;
+        const memoryDependencyIds = options?.globalMemoryIds?.length
+          ? [...new Set(options.globalMemoryIds.map(id => id.toLowerCase()))].sort()
+          : [];
+        const persistedContextSourceRefs = input.contextSourceRefs === undefined
+          ? (memoryDependencyIds.length ? [{ memoryDependencyIds }] : null)
+          : [...input.contextSourceRefs, ...(memoryDependencyIds.length ? [{ memoryDependencyIds }] : [])];
         const assistant = await tx`
           UPDATE opening_turns SET text = ${input.text}, citations = ${tx.json(input.citations as never)},
             system_query=${receipt ? tx.json(receipt as never) : null},
-            context_source_refs = ${input.contextSourceRefs === undefined ? null : tx.json(input.contextSourceRefs as never)}, status = 'complete'
+            context_source_refs = ${persistedContextSourceRefs === null ? null : tx.json(persistedContextSourceRefs as never)}, status = 'complete'
           WHERE id = ${input.assistantTurnId} AND workspace_id = ${input.scope.workspaceId} AND (${receipt === null} OR query_system)
           RETURNING id
         `;

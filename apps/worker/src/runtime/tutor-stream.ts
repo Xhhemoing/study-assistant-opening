@@ -156,28 +156,74 @@ export async function withTutorDeltaBatches<T>(
   return signal.aborted ? { value, publicationFailure: { reason: signal.reason } } : { value };
 }
 
+export class TutorStreamExpiredError extends Error {
+  readonly code = "CONFLICT" as const;
+  readonly reasonCode = "TEMPORARY_MEMORY_EXPIRED" as const;
+  constructor(message = "stream temporary memory expired") {
+    super(message);
+    this.name = "TutorStreamExpiredError";
+  }
+}
+
+export function isTutorStreamExpiredError(error: unknown): boolean {
+  return error instanceof TutorStreamExpiredError
+    || (error !== null && typeof error === "object" && "reasonCode" in error
+      && (error as { reasonCode?: unknown }).reasonCode === "TEMPORARY_MEMORY_EXPIRED");
+}
+
+function parseTempExpiryMs(expiresAt: string | number | undefined): number | null {
+  if (expiresAt === undefined) return null;
+  const ms = typeof expiresAt === "number" ? expiresAt : Date.parse(expiresAt);
+  if (!Number.isSafeInteger(ms)) throw new TutorStreamExpiredError("stream temporary memory expiry invalid");
+  return ms;
+}
+
 /** Redis is temporary presentation state; completed answers and job status remain in PostgreSQL. */
 export function createTutorStreamWriter(redis: IORedis) {
   return {
     async begin(workspaceId: string, jobId: string, context: TutorStreamContext) {
       const key = tutorStreamKey(workspaceId, jobId);
       const head = attemptHeadBinding(workspaceId, context.attemptFence);
-      await redis.eval(`
+      const tempExpiresAtMs = parseTempExpiryMs(context.temporaryMemoryExpiresAt);
+      const nowMs = Date.now();
+      if (tempExpiresAtMs !== null && nowMs >= tempExpiresAtMs) {
+        throw new TutorStreamExpiredError();
+      }
+      const result = await redis.eval(`
+        if redis.replicate_commands then redis.replicate_commands() end
         local epoch = tonumber(ARGV[4])
         local minimum = tonumber(redis.call('GET', KEYS[2]) or '0')
-        if epoch < minimum then return end
+        if epoch < minimum then return 0 end
         if redis.call('HGET', KEYS[1], 'executionId') == ARGV[1]
-          and redis.call('HGET', KEYS[1], 'sealed') == '1' then return end
+          and redis.call('HGET', KEYS[1], 'sealed') == '1' then return 0 end
+        local expMs = tonumber(ARGV[7])
+        if ARGV[7] ~= '' and not expMs then
+          if redis.call('EXISTS', KEYS[1]) == 1 and (redis.call('HGET', KEYS[1], 'executionId') or '') == ARGV[1] then
+            redis.call('HSET', KEYS[1], 'sealed', '1')
+          end
+          return 'EXPIRED'
+        end
+        if expMs then
+          local t = redis.call('TIME')
+          local redisNowMs = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
+          local effectiveNowMs = math.max(redisNowMs, tonumber(ARGV[8]) or 0)
+          if effectiveNowMs >= expMs then
+            if redis.call('EXISTS', KEYS[1]) == 1 and (redis.call('HGET', KEYS[1], 'executionId') or '') == ARGV[1] then
+              redis.call('HSET', KEYS[1], 'sealed', '1')
+            end
+            return 'EXPIRED'
+          end
+        end
         if ARGV[5] ~= '' then
           local head = redis.call('GET', KEYS[3])
           local cachedRev = tonumber(redis.call('GET', KEYS[4]))
           local jobRev = tonumber(ARGV[6])
           if jobRev and cachedRev then
-            if cachedRev > jobRev or (cachedRev == jobRev and head and head ~= ARGV[5]) then return end
+            if cachedRev > jobRev or (cachedRev == jobRev and head and head ~= ARGV[5]) then return 0 end
           elseif head and head ~= ARGV[5] then
-            if not jobRev or jobRev <= 0 then return end
+            if not jobRev or jobRev <= 0 then return 0 end
           elseif cachedRev and not jobRev and not head then
-            return
+            return 0
           end
           if not cachedRev or (jobRev and jobRev >= cachedRev) then
             redis.call('SET', KEYS[3], ARGV[5], 'EX', ARGV[3])
@@ -193,6 +239,9 @@ export function createTutorStreamWriter(redis: IORedis) {
         redis.call('SET', KEYS[2], epoch, 'EX', ARGV[3])
         redis.call('DEL', KEYS[1])
         redis.call('HSET', KEYS[1], 'executionId', ARGV[1], 'privacyEpoch', ARGV[4], 'context', ARGV[2], 'text', '', 'sequence', '0')
+        if ARGV[7] ~= '' then
+          redis.call('HSET', KEYS[1], 'temporaryMemoryExpiresAt', ARGV[7])
+        end
         if ARGV[5] ~= '' then
           redis.call('HSET', KEYS[1], 'attemptHeadKey', KEYS[3], 'attemptHeadId', ARGV[5])
           if ARGV[6] ~= '' then
@@ -200,29 +249,61 @@ export function createTutorStreamWriter(redis: IORedis) {
           end
         end
         redis.call('EXPIRE', KEYS[1], ARGV[3])
+        return 1
       `, 4, key, tutorStreamEpochKey(workspaceId), head?.key ?? key, head?.revKey ?? key,
       context.executionId ?? "", JSON.stringify(context), TUTOR_STREAM_TTL_SECONDS, context.privacyEpoch,
-      head?.id ?? "", head?.revision ?? "");
+      head?.id ?? "", head?.revision ?? "", tempExpiresAtMs !== null ? String(tempExpiresAtMs) : "", nowMs);
+      if (result === "EXPIRED") {
+        throw new TutorStreamExpiredError();
+      }
     },
     seal: (workspaceId: string, jobId: string, executionId: string) => sealOpeningTutorStream(redis, workspaceId, jobId, executionId),
     async append(workspaceId: string, jobId: string, text: string, executionId: string | undefined, privacyEpoch: number,
-      attemptFence?: TutorAttemptFence): Promise<number> {
+      attemptFence?: TutorAttemptFence, temporaryMemoryExpiresAt?: string | number): Promise<number> {
       if (!text) return 0;
+      const tempExpiresAtMs = parseTempExpiryMs(temporaryMemoryExpiresAt);
+      const nowMs = Date.now();
+      if (tempExpiresAtMs !== null && nowMs >= tempExpiresAtMs) {
+        throw new TutorStreamExpiredError();
+      }
       const key = tutorStreamKey(workspaceId, jobId);
       const head = attemptHeadBinding(workspaceId, attemptFence);
       // Append, sequence and notification are one atomic operation. A late subscriber reads the full snapshot.
       const result = await redis.eval(`
+        if redis.replicate_commands then redis.replicate_commands() end
         if redis.call('EXISTS', KEYS[1]) == 0 then return 0 end
-        if (redis.call('HGET', KEYS[1], 'executionId') or '') ~= ARGV[3] then return 0 end
+        if (redis.call('HGET', KEYS[1], 'executionId') or '') ~= ARGV[5] then return 0 end
         if redis.call('HGET', KEYS[1], 'sealed') == '1' then return 0 end
-        if redis.call('HGET', KEYS[1], 'privacyEpoch') ~= ARGV[4] then return 0 end
-        local epoch = tonumber(ARGV[4])
+        if redis.call('HGET', KEYS[1], 'privacyEpoch') ~= ARGV[6] then return 0 end
+        local epoch = tonumber(ARGV[6])
         local minimum = tonumber(redis.call('GET', KEYS[3]))
         if not epoch or not minimum or epoch < minimum then return 0 end
+        local rawStoredExp = redis.call('HGET', KEYS[1], 'temporaryMemoryExpiresAt')
+        local storedExp = tonumber(rawStoredExp)
+        if rawStoredExp and rawStoredExp ~= '' and not storedExp then
+          redis.call('HSET', KEYS[1], 'sealed', '1')
+          return -1
+        end
+        local argExp = tonumber(ARGV[4])
+        if ARGV[4] ~= '' and not argExp then
+          redis.call('HSET', KEYS[1], 'sealed', '1')
+          return -1
+        end
+        local expMs = storedExp
+        if argExp and (not expMs or argExp < expMs) then expMs = argExp end
+        if expMs then
+          local t = redis.call('TIME')
+          local redisNowMs = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
+          local effectiveNowMs = math.max(redisNowMs, tonumber(ARGV[3]) or 0)
+          if effectiveNowMs >= expMs then
+            redis.call('HSET', KEYS[1], 'sealed', '1')
+            return -1
+          end
+        end
         local headKey = redis.call('HGET', KEYS[1], 'attemptHeadKey')
-        if ARGV[5] ~= '' then
-          if headKey ~= KEYS[4] or redis.call('HGET', KEYS[1], 'attemptHeadId') ~= ARGV[5]
-            or redis.call('GET', KEYS[4]) ~= ARGV[5] then return 0 end
+        if ARGV[7] ~= '' then
+          if headKey ~= KEYS[4] or redis.call('HGET', KEYS[1], 'attemptHeadId') ~= ARGV[7]
+            or redis.call('GET', KEYS[4]) ~= ARGV[7] then return 0 end
           redis.call('EXPIRE', KEYS[4], ARGV[2])
           if redis.call('EXISTS', KEYS[5]) == 1 then redis.call('EXPIRE', KEYS[5], ARGV[2]) end
         elseif headKey then
@@ -236,7 +317,9 @@ export function createTutorStreamWriter(redis: IORedis) {
         redis.call('PUBLISH', KEYS[2], cjson.encode({text=ARGV[1], sequence=sequence}))
         return sequence
       `, 5, key, channelFor(workspaceId, jobId), tutorStreamEpochKey(workspaceId), head?.key ?? key, head?.revKey ?? key,
-      text, TUTOR_STREAM_TTL_SECONDS, executionId ?? "", privacyEpoch, head?.id ?? "");
+      text, TUTOR_STREAM_TTL_SECONDS, nowMs, tempExpiresAtMs !== null ? String(tempExpiresAtMs) : "",
+      executionId ?? "", privacyEpoch, head?.id ?? "");
+      if (result === -1) throw new TutorStreamExpiredError();
       if (typeof result !== "number" || !Number.isSafeInteger(result) || result < 0) throw new Error("invalid stream publication sequence");
       return result;
     },
@@ -378,24 +461,84 @@ export function createWorkerTutorStreamWriter(
     }
   }
 
+  const activeTempExpiryMs = new Map<string, { expMs: number; touchedAt: number }>();
+  const streamExpiryKey = (workspaceId: string, jobId: string, executionId: string | undefined) =>
+    `${workspaceId}:${jobId}:${executionId ?? ""}`;
+  const pruneTrackedExpiries = (nowMs: number) => {
+    const staleBefore = nowMs - TUTOR_STREAM_TTL_SECONDS * 1000;
+    for (const [key, entry] of activeTempExpiryMs) {
+      if (entry.expMs <= nowMs || entry.touchedAt < staleBefore) activeTempExpiryMs.delete(key);
+    }
+  };
+
   return {
     async begin(...args: Parameters<TutorStreamWriter["begin"]>) {
+      const [workspaceId, jobId, context] = args;
+      const expMs = parseTempExpiryMs(context.temporaryMemoryExpiresAt);
+      const beforeNowMs = Date.now();
+      pruneTrackedExpiries(beforeNowMs);
+      if (expMs !== null && beforeNowMs >= expMs) {
+        throw new TutorStreamExpiredError();
+      }
       const connection = await getAppendConnection();
+      // Re-check synchronously AFTER awaiting Redis connect/reconnect, right before sending EVAL.
+      const afterNowMs = Date.now();
+      if (expMs !== null && afterNowMs >= expMs) {
+        throw new TutorStreamExpiredError();
+      }
+      const trackingKey = streamExpiryKey(workspaceId, jobId, context.executionId);
+      if (expMs !== null) activeTempExpiryMs.set(trackingKey, { expMs, touchedAt: afterNowMs });
+      else activeTempExpiryMs.delete(trackingKey);
       try { await connection.writer.begin(...args); }
-      catch (error) { disconnectAppend(connection); throw error; }
+      catch (error) {
+        if (isTutorStreamExpiredError(error)) {
+          activeTempExpiryMs.delete(trackingKey);
+          throw error;
+        }
+        disconnectAppend(connection);
+        throw error;
+      }
     },
-    seal,
+    async seal(workspaceId: string, jobId: string, executionId: string) {
+      activeTempExpiryMs.delete(streamExpiryKey(workspaceId, jobId, executionId));
+      return seal(workspaceId, jobId, executionId);
+    },
     disconnect() {
+      activeTempExpiryMs.clear();
       disconnectAppend();
       retireControl();
     },
     async append(...args: Parameters<TutorStreamWriter["append"]>) {
-      const [workspaceId, jobId, text, executionId] = args;
+      const [workspaceId, jobId, text, executionId, privacyEpoch, attemptFence, temporaryMemoryExpiresAt] = args;
       if (!text) return 0;
+      const argExpMs = parseTempExpiryMs(temporaryMemoryExpiresAt);
+      const trackingKey = streamExpiryKey(workspaceId, jobId, executionId);
+      const tracked = activeTempExpiryMs.get(trackingKey);
+      const effectiveExpMs = argExpMs !== null && tracked !== undefined
+        ? Math.min(argExpMs, tracked.expMs)
+        : (argExpMs ?? tracked?.expMs ?? null);
+      if (effectiveExpMs !== null && Date.now() >= effectiveExpMs) {
+        activeTempExpiryMs.delete(trackingKey);
+        throw new TutorStreamExpiredError();
+      }
       const connection = await getAppendConnection();
+      // Re-check synchronously AFTER awaiting Redis connect/reconnect, right before sending EVAL.
+      const afterNowMs = Date.now();
+      if (effectiveExpMs !== null && afterNowMs >= effectiveExpMs) {
+        activeTempExpiryMs.delete(trackingKey);
+        throw new TutorStreamExpiredError();
+      }
+      if (tracked) tracked.touchedAt = afterNowMs;
       try {
-        return await connection.writer.append(...args);
+        return await connection.writer.append(
+          workspaceId, jobId, text, executionId, privacyEpoch, attemptFence,
+          effectiveExpMs !== null ? effectiveExpMs : undefined,
+        );
       } catch (error) {
+        if (isTutorStreamExpiredError(error)) {
+          activeTempExpiryMs.delete(trackingKey);
+          throw error;
+        }
         disconnectAppend(connection);
         if (isNonMutatingRedisReplyError(error)) throw error;
         // Redis may still execute bytes already in transit. Try to confirm a

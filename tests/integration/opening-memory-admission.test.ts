@@ -566,7 +566,10 @@ it("allows follow-up turns in a course conversation after a valid global-memory 
   });
   await expect(makeHandler("Turn 1 answer with temporary global memory")(turn1.jobId)).resolves.toEqual({ skipped: false });
   const [persistedTurn1] = await fixture.sql`SELECT context_source_refs FROM opening_turns WHERE id = ${turn1.assistantTurnId}`;
-  expect(persistedTurn1?.context_source_refs).toEqual([{ sourceId: standaloneSourceId, sourceVersion: 0, memoryOnly: true }]);
+  expect(persistedTurn1?.context_source_refs).toEqual([
+    { sourceId: standaloneSourceId, sourceVersion: 0, memoryOnly: true },
+    { memoryDependencyIds: [tempMemory.id] },
+  ]);
 
   // Turn 2 in Course A while temporary global memory is STILL active -> loads Turn 1 history and SUCCEEDS!
   await fixture.sql`UPDATE opening_turns SET created_at = now() - interval '2 minutes' WHERE id IN (${turn1.turnId}, ${turn1.assistantTurnId})`;
@@ -580,6 +583,16 @@ it("allows follow-up turns in a course conversation after a valid global-memory 
     { role: "assistant", text: "Turn 1 answer with temporary global memory" },
   ]);
 
+  // Also create a CONFIRMED global memory M2 backed by the SAME standaloneSourceId:
+  // when M1 (tempMemory) expires while M2 remains active, M2 MUST NOT keep M1's derived Turn 1/2 answers in history!
+  const confirmedSiblingProposal = await memories.proposeMemory(fixture.scope, {
+    text: "Sibling confirmed memory on same source",
+    sourceTurnIds: [originTurn.turnId],
+    courseId: null,
+    expiresAt: null,
+  });
+  await memories.confirm(fixture.scope, confirmedSiblingProposal.id, confirmedSiblingProposal.version, randomUUID());
+
   // Now expire the temporary global memory BEFORE Turn 3 -> Turn 3 MUST NOT leak Turn 1/2 expired-memory answers!
   await fixture.sql`UPDATE opening_turns SET created_at = now() - interval '1 minute' WHERE id IN (${turn2.turnId}, ${turn2.assistantTurnId})`;
   await fixture.sql`UPDATE opening_memories SET expires_at = now() - interval '1 second' WHERE id = ${tempMemory.id}`;
@@ -589,4 +602,55 @@ it("allows follow-up turns in a course conversation after a valid global-memory 
   });
   await expect(makeHandler("Turn 3 clean answer")(turn3.jobId)).resolves.toEqual({ skipped: false });
   expect(receivedHistories[2]).toEqual([]);
+});
+
+it("persists exact memoryDependencyIds for documentless chat memories and omits history once expired or superseded", async () => {
+  const conversations = createOpeningConversationRepository(fixture.sql);
+  const chunks = createOpeningSourceChunksRepository(fixture.sql);
+  const jobs = createOpeningTutorJobsRepository(fixture.sql);
+  const budget = createOpeningBudgetRepository(fixture.sql, { envCapCents: 100_000 });
+  const originConv = await conversations.create(fixture.scope, { title: "Pure chat origin", courseId: null });
+  const originTurn = await conversations.appendSavedTurn({
+    scope: fixture.scope, conversationId: originConv.id, text: "I prefer visual analogies", mode: "explain",
+    clientKey: randomUUID(), sourceIds: [], learningSessionId: null, currentPage: null, chunkId: null,
+  });
+  const chatTempMemory = await memories.proposeMemory(fixture.scope, {
+    text: "Use visual analogies today",
+    sourceTurnIds: [originTurn.turnId],
+    courseId: null,
+    expiresAt: new Date(Date.now() + 60 * 60 * 1_000).toISOString(),
+  });
+  const chatConv = await conversations.create(fixture.scope, { title: "Documentless memory follow-up", courseId: null });
+  const receivedHistories: Array<Array<{ role: string; text: string }>> = [];
+  const makeHandler = (answerText: string) => createTutorTurnHandler({
+    tutorJobs: jobs, chunks, budget,
+    provider: {
+      complete: async input => {
+        receivedHistories.push(input.history ?? []);
+        return { text: answerText, citedChunkIds: [], candidates: [], requestId: null, inputTokens: 10, outputTokens: 10 };
+      },
+    },
+    memories: { listContext: (scope, now) => memories.listContext(scope, now) },
+    privacy: createOpeningPrivacyRepository(fixture.sql),
+    retrieveContext: createOpeningMaterialRetriever(fixture.sql, budget, null),
+    config: { maxContextCharacters: 2000, reservedCents: 100, maxOutputTokens: 100, inputCentsPerMillion: 100, outputCentsPerMillion: 200 },
+  });
+
+  const turn1 = await conversations.appendSavedTurn({
+    scope: fixture.scope, conversationId: chatConv.id, text: "Explain gravity", mode: "explain",
+    clientKey: randomUUID(), sourceIds: [], learningSessionId: null, currentPage: null, chunkId: null,
+  });
+  await expect(makeHandler("Visual analogy answer")(turn1.jobId)).resolves.toEqual({ skipped: false });
+  const [persisted] = await fixture.sql`SELECT context_source_refs FROM opening_turns WHERE id = ${turn1.assistantTurnId}`;
+  expect(persisted?.context_source_refs).toEqual([{ memoryDependencyIds: [chatTempMemory.id] }]);
+
+  // Expire documentless chatTempMemory -> Turn 2 MUST NOT see Turn 1's derived answer in history!
+  await fixture.sql`UPDATE opening_turns SET created_at = now() - interval '1 minute' WHERE id IN (${turn1.turnId}, ${turn1.assistantTurnId})`;
+  await fixture.sql`UPDATE opening_memories SET expires_at = now() - interval '1 second' WHERE id = ${chatTempMemory.id}`;
+  const turn2 = await conversations.appendSavedTurn({
+    scope: fixture.scope, conversationId: chatConv.id, text: "Explain more", mode: "explain",
+    clientKey: randomUUID(), sourceIds: [], learningSessionId: null, currentPage: null, chunkId: null,
+  });
+  await expect(makeHandler("Fresh answer without expired chat memory")(turn2.jobId)).resolves.toEqual({ skipped: false });
+  expect(receivedHistories[1]).toEqual([]);
 });
