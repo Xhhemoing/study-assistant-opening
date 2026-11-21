@@ -315,15 +315,21 @@ function ephemeralRollbackSiblings(workspaceId: string, row: {
   const clientKey = row.parent_interaction_id.slice(prefix.length);
   const legacy = `eph:${clientKey}`;
   const encoded = `eph-v2:${workspaceId}:${Buffer.from(clientKey, "utf16le").toString("base64url")}`;
-  if ([legacy, `${legacy}:fallback`, encoded, `${encoded}:fallback`].includes(row.request_id)) {
-    return [legacy, `${legacy}:fallback`].filter(key => key !== row.request_id);
-  }
-  return [];
+  const keys = [legacy, `${legacy}:fallback`, encoded, `${encoded}:fallback`];
+  return keys.includes(row.request_id) ? keys.filter(key => key !== row.request_id) : [];
 }
 
 function isRollbackFence(row: BudgetReservationRecord) {
   return row.state === "released" && row.releaseReason === "not_sent" && row.amountCents === 0
     && row.reservedAmountCents === null && row.modelSnapshot === null;
+}
+
+// fallbackStartsFamily records the real fallback attempt on its suffix key and
+// leaves terminal sibling markers with reserved_amount_cents = 0. They retain
+// the released/not_sent replay disposition without being reusable fences.
+function isTerminalRollbackFence(row: BudgetReservationRecord) {
+  return row.state === "released" && row.releaseReason === "not_sent" && row.amountCents === 0
+    && row.reservedAmountCents === 0 && row.modelSnapshot === null;
 }
 
 function attemptsOf(tx: TransactionSql, family: string) {
@@ -335,11 +341,9 @@ function attemptsOf(tx: TransactionSql, family: string) {
 
 async function assertRequestFamilyAvailable(tx: TransactionSql, workspaceId: string, input: ReserveInput,
   excludedRequestId: string, parentId: string | undefined) {
-  const rollbackSiblings = input.requestFamily === null
-    ? ephemeralRollbackSiblings(workspaceId, {
-      request_id: excludedRequestId, parent_interaction_id: parentId ?? null, purpose: input.purpose,
-    })
-    : [];
+  const rollbackSiblings = ephemeralRollbackSiblings(workspaceId, {
+    request_id: excludedRequestId, parent_interaction_id: parentId ?? null, purpose: input.purpose,
+  });
   if (input.requestFamily === null && !rollbackSiblings.length) return;
   const family = input.requestFamily;
   const root = family ?? input.requestId.replace(attemptSuffix, "");
@@ -350,11 +354,12 @@ async function assertRequestFamilyAvailable(tx: TransactionSql, workspaceId: str
       AND regexp_replace(request_id, ${attemptSuffix.source}, '') = ${root}`
     : attemptsOf(tx, family);
   // An opaque client key can also look like another parent's attempt suffix.
-  const siblingMatch = family === null
-    ? familyMatch
-    : parentId && input.alternateRequestFamily
+  const familyScopedMatch = family !== null && parentId && input.alternateRequestFamily
     ? tx`parent_interaction_id = ${parentId} AND ((${familyMatch}) OR ${attemptsOf(tx, input.alternateRequestFamily)})`
     : familyMatch;
+  const siblingMatch = family === null || !rollbackSiblings.length
+    ? familyScopedMatch
+    : tx`(${familyScopedMatch}) OR request_id = ANY(${rollbackSiblings}::text[])`;
   const [sibling] = await tx`
     SELECT id, state, purpose, result_ref, outcome_unknown_at, reconciled_at, pending_reconcile_cents
     FROM opening_budget_reservations
@@ -570,7 +575,10 @@ export function createOpeningBudgetRepository(
         // when a different interaction occupies its legacy fallback suffix.
         const fallbackStartsFamily = canonicalFallbackId !== null && (!primary || primaryOccupied)
           && !alternate && !exactRows.some(row => row.request_id === canonicalFallbackId);
-        const requestId = fallbackStartsFamily ? canonicalFallbackId
+        // A fallback that starts a family has no primary reservation to adopt.
+        // Keep the suffix as the real attempt, then leave terminal sibling
+        // markers so an exact legacy retry cannot reactivate another call.
+        const requestId = fallbackStartsFamily ? input.requestId
           : alternateId && (primaryOccupied || (!primary && alternate)) ? alternateId : input.requestId;
         const existing = requestId === input.requestId ? primary : alternate;
         const exactRow = existing ? mapReservation(existing as Record<string, unknown>) : null;
@@ -595,10 +603,15 @@ export function createOpeningBudgetRepository(
           // Original amounts survive settlement. An old, unparented reservation
           // may be adopted once below; an attributed request can never move parents.
           const originalAmount = existingRow.reservedAmountCents ?? (existingRow.state === "reserved" ? existingRow.amountCents : null);
-          if (existingRow.workspaceId !== scope.workspaceId || existingRow.purpose !== input.purpose
+          const terminalFence = isTerminalRollbackFence(existingRow)
+            && existingRow.workspaceId === scope.workspaceId
+            && existingRow.parentInteractionId === parentBudget?.id
+            && existingRow.purpose === input.purpose;
+          if (!terminalFence
+            && (existingRow.workspaceId !== scope.workspaceId || existingRow.purpose !== input.purpose
             || (existingRow.parentInteractionId !== null && existingRow.parentInteractionId !== (parentBudget?.id ?? null))
             || (originalAmount !== null && originalAmount !== input.amountCents)
-            || JSON.stringify(existingRow.modelSnapshot) !== JSON.stringify(modelSnapshot)) {
+             || JSON.stringify(existingRow.modelSnapshot) !== JSON.stringify(modelSnapshot))) {
             throw new OpeningBudgetError("CONFLICT", "request already consumed or changed");
           }
         }
@@ -684,15 +697,17 @@ export function createOpeningBudgetRepository(
           request_id: requestId, parent_interaction_id: parentBudget?.id ?? null, purpose: input.purpose,
         });
         if (rollbackSiblings.length) {
+          const rollbackSiblingIds = rollbackSiblings.map(() => randomUUID());
           // Fence both exact legacy rollback keys in the reserve transaction so
           // an older reader cannot reserve a sibling between reserve and claim.
           await tx`
             INSERT INTO opening_budget_reservations (id, workspace_id, purpose, amount_cents, reserved_amount_cents,
               request_id, model_snapshot, parent_interaction_id, state, release_reason, created_at, updated_at)
-            SELECT ${randomUUID()}, ${scope.workspaceId}, ${input.purpose}, 0, NULL,
+            SELECT keys.id, ${scope.workspaceId}, ${input.purpose}, 0,
+              ${fallbackStartsFamily ? 0 : null},
               keys.request_id, NULL, ${parentBudget?.id ?? null},
-              'released', 'not_sent', ${instant}, ${instant})
-            FROM unnest(${rollbackSiblings}::text[]) AS keys(request_id)
+              'released', 'not_sent', ${instant}, ${instant}
+            FROM unnest(${rollbackSiblingIds}::uuid[], ${rollbackSiblings}::text[]) AS keys(id, request_id)
             ON CONFLICT (request_id) DO NOTHING
           `;
         }
@@ -759,12 +774,13 @@ export function createOpeningBudgetRepository(
         }
         if (!(await claim(tx))) return false;
         // An exact key owned by another turn already rejects rollback's scope/parent check.
+        const siblingFenceIds = siblings.map(() => randomUUID());
         await tx`
           INSERT INTO opening_budget_reservations
-            (workspace_id, purpose, amount_cents, request_id, parent_interaction_id, state, release_reason)
-          SELECT ${scope.workspaceId}, ${candidate.purpose}, 0, request_id,
+            (id, workspace_id, purpose, amount_cents, request_id, parent_interaction_id, state, release_reason)
+          SELECT keys.id, ${scope.workspaceId}, ${candidate.purpose}, 0, keys.request_id,
             ${candidate.parent_interaction_id}, 'released', 'not_sent'
-          FROM unnest(${siblings}::text[]) AS keys(request_id)
+          FROM unnest(${siblingFenceIds}::uuid[], ${siblings}::text[]) AS keys(id, request_id)
           ON CONFLICT (request_id) DO NOTHING
         `;
         return true;

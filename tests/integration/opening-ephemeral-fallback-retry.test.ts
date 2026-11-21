@@ -217,20 +217,80 @@ it.each(["pre-reservation failure", "released not_sent"] as const)("fences both 
   });
   await expect(withModelFallback({
     primary: async () => recoveredPrimary, fallback: async () => fallback, operationId: requestId, run: legacyReserve,
-  })).rejects.toMatchObject({ code: primaryFailure === "released not_sent" ? "BUDGET_REPLAY_COMPLETED" : "CONFLICT" });
+  })).rejects.toMatchObject({ code: "BUDGET_REPLAY_COMPLETED" });
   await expect(legacyReserve(fallback, `${requestId}:fallback`)).rejects.toMatchObject({
-    code: primaryFailure === "released not_sent" ? "BUDGET_REPLAY_COMPLETED" : "BUDGET_REPLAY_RELEASED",
+    code: "BUDGET_REPLAY_COMPLETED",
   });
   expect(paidCall).toHaveBeenCalledOnce();
   const rows = await f.sql`SELECT request_id, state, amount_cents FROM opening_budget_reservations
     WHERE workspace_id=${scope.workspaceId} AND parent_interaction_id=${parentBudget.id}`;
   expect(rows).toHaveLength(2);
   expect(rows.filter(row => row.state !== "released")).toEqual([{
-    request_id: primaryFailure === "released not_sent" ? `${requestId}:fallback` : requestId,
+    request_id: `${requestId}:fallback`,
     state: "completed", amount_cents: 1,
   }]);
   await expect(service.replyEphemeral(scope, request)).rejects.toMatchObject({ code: "BUDGET_REPLAY_COMPLETED" });
   expect(paidCall).toHaveBeenCalledOnce();
+});
+
+it("does not reactivate the fallback fence after a fallbackStartsFamily release", async () => {
+  const { budget } = ledger();
+  const { scope } = f;
+  const clientKey = randomUUID();
+  const parentId = `study-ephemeral:${scope.workspaceId}:${clientKey}`;
+  const primaryFailure = new OpeningProviderError("PROVIDER_AUTH", "bad credentials");
+  const fallbackCall = vi.fn(async () => { throw primaryFailure; });
+  const fallback = model("fallback-terminal", fallbackCall);
+  const service = createEphemeralTutorService({
+    budget,
+    provider: null,
+    resolveModel: async () => { throw primaryFailure; },
+    resolveFallbackModel: async () => fallback,
+    sources: { listOwnedIds: async () => [] }, chunks: { listForSources: async () => [] },
+    privacy: { snapshot: async () => ({ epoch: 0, excludedSourceIds: [] }), currentEpoch: async () => 0 },
+    config: { maxContextCharacters: 1000, maxOutputTokens: 32, reservedCents: 10, inputCentsPerMillion: 1, outputCentsPerMillion: 1 },
+  });
+  const request = { text: "Explain", sourceIds: [], history: [], clientKey };
+
+  await expect(service.replyEphemeral(scope, request)).rejects.toMatchObject({ code: "EPHEMERAL_REQUEST_NOT_SENT" });
+  expect(fallbackCall).toHaveBeenCalledOnce();
+  const before = await f.sql`SELECT request_id, state, release_reason, reserved_amount_cents, model_snapshot
+    FROM opening_budget_reservations WHERE workspace_id=${scope.workspaceId} AND parent_interaction_id=${parentId}
+    ORDER BY request_id`;
+  expect(before).toHaveLength(2);
+  expect(before).toEqual(expect.arrayContaining([
+    expect.objectContaining({ request_id: `eph:${clientKey}`, state: "released", release_reason: "not_sent", reserved_amount_cents: 0 }),
+    expect.objectContaining({ request_id: `eph:${clientKey}:fallback`, state: "released", release_reason: "not_sent", reserved_amount_cents: 10 }),
+  ]));
+
+  await expect(service.replyEphemeral(scope, request)).rejects.toMatchObject({ code: "EPHEMERAL_REQUEST_NOT_SENT" });
+  expect(fallbackCall).toHaveBeenCalledOnce();
+  await expect(f.sql`SELECT request_id, state, release_reason FROM opening_budget_reservations
+    WHERE workspace_id=${scope.workspaceId} AND parent_interaction_id=${parentId} ORDER BY request_id`).resolves.toEqual([
+    { request_id: `eph:${clientKey}`, state: "released", release_reason: "not_sent" },
+    { request_id: `eph:${clientKey}:fallback`, state: "released", release_reason: "not_sent" },
+  ]);
+});
+
+it("blocks a legacy rollback reader on an active encoded sibling after a workspace collision", async () => {
+  const repo = createOpeningBudgetRepository(f.sql, { envCapCents: 100_000 });
+  const clientKey = randomUUID();
+  const legacy = `eph:${clientKey}`;
+  const encoded = `eph-v2:${f.otherScope.workspaceId}:${Buffer.from(clientKey, "utf16le").toString("base64url")}`;
+  await f.sql`INSERT INTO opening_budget_reservations
+    (id, workspace_id, purpose, amount_cents, reserved_amount_cents, request_id, parent_interaction_id)
+    VALUES (${randomUUID()}, ${f.scope.workspaceId}, 'tutor', 10, 10, ${legacy},
+      ${`study-ephemeral:${f.scope.workspaceId}:${clientKey}`})`;
+  const encodedReservation = await repo.reserve(f.otherScope, {
+    purpose: "tutor", amountCents: 10, requestId: legacy,
+    parentBudget: { id: `study-ephemeral:${f.otherScope.workspaceId}:${clientKey}` },
+    requestFamily: legacy, alternateRequestFamily: encoded,
+  });
+  expect(encodedReservation.requestId).toBe(encoded);
+  await expect(repo.reserve(f.otherScope, {
+    purpose: "tutor", amountCents: 10, requestId: `${legacy}:fallback`,
+    parentBudget: { id: `study-ephemeral:${f.otherScope.workspaceId}:${clientKey}` }, requestFamily: null,
+  })).rejects.toMatchObject({ code: "BUDGET_EXECUTION_CLAIMED", disposition: { reservationId: encodedReservation.id } });
 });
 
 it.each(["unknown", "completed", "not_sent"] as const)("keeps the whole operation's %s fallback history after the user removes that route", async outcome => {
