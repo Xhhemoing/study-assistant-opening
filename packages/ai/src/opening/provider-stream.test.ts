@@ -64,6 +64,16 @@ describe("direct Markdown streaming", () => {
     expect(h.cancel).toHaveBeenCalledOnce();
   });
 
+  it("preserves terminal refusal usage when a zero trailer follows", async () => {
+    const h = harness(), receipt = vi.fn();
+    const deliver = Object.assign(vi.fn(), { [onFailedResponseUsage]: receipt });
+    h.write(event({ id: "stream-1", choices: [{ index: 0, delta: { refusal: "refused" } }] })
+      + event({ choices: [{ index: 0, delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 24, completion_tokens: 1100 } })
+      + event({ choices: [], usage: { prompt_tokens: 24, completion_tokens: 0 } }) + done);
+    await expect(h.provider.complete(input, undefined, deliver)).rejects.toMatchObject({ code: "PROVIDER_REFUSAL", requestSent: true });
+    expect(receipt).toHaveBeenCalledExactlyOnceWith({ requestId: "stream-1", inputTokens: 24, outputTokens: 1100, cachedInputTokens: null });
+  });
+
   it.each(["one chunk", "two chunks"])("collects terminal usage after length (%s)", async chunks => {
     const h = harness(), receipt = vi.fn();
     const truncated = delta("partial") + event({ choices: [{ index: 0, delta: { content: "truncated" }, finish_reason: "length" }] });

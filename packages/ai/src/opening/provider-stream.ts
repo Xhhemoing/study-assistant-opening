@@ -77,7 +77,7 @@ export async function readOpeningProviderStream(body: ReadableStream<Uint8Array>
       if (!stopped || trailer) {
         latestUsage = {
           inputTokens: maxReportedTokens(latestUsage?.inputTokens, parsedUsage.inputTokens),
-          outputTokens: parsedUsage.outputTokens ?? latestUsage?.outputTokens ?? null,
+          outputTokens: maxReportedTokens(latestUsage?.outputTokens, parsedUsage.outputTokens),
           cachedInputTokens: maxReportedTokens(latestUsage?.cachedInputTokens, parsedUsage.cachedInputTokens),
         };
         if ((terminal || trailer) && parsedUsage.outputTokens !== null) hasTerminalOutputUsage = true;

@@ -335,15 +335,24 @@ function attemptsOf(tx: TransactionSql, family: string) {
 
 async function assertRequestFamilyAvailable(tx: TransactionSql, workspaceId: string, input: ReserveInput,
   excludedRequestId: string, parentId: string | undefined) {
-  if (input.requestFamily === null) return;
+  const rollbackSiblings = input.requestFamily === null
+    ? ephemeralRollbackSiblings(workspaceId, {
+      request_id: excludedRequestId, parent_interaction_id: parentId ?? null, purpose: input.purpose,
+    })
+    : [];
+  if (input.requestFamily === null && !rollbackSiblings.length) return;
   const family = input.requestFamily;
   const root = family ?? input.requestId.replace(attemptSuffix, "");
-  const familyMatch = family === undefined
+  const familyMatch = family === null
+    ? tx`request_id = ANY(${rollbackSiblings}::text[])`
+    : family === undefined
     ? tx`(request_id = ${root} OR starts_with(request_id, ${root + ":"}))
       AND regexp_replace(request_id, ${attemptSuffix.source}, '') = ${root}`
     : attemptsOf(tx, family);
   // An opaque client key can also look like another parent's attempt suffix.
-  const siblingMatch = parentId && input.alternateRequestFamily
+  const siblingMatch = family === null
+    ? familyMatch
+    : parentId && input.alternateRequestFamily
     ? tx`parent_interaction_id = ${parentId} AND ((${familyMatch}) OR ${attemptsOf(tx, input.alternateRequestFamily)})`
     : familyMatch;
   const [sibling] = await tx`
@@ -568,7 +577,7 @@ export function createOpeningBudgetRepository(
         // Leave the exact key occupied for rollback, including when another
         // turn relies on its ownership. The current family can reuse its own
         // unused fence only after sibling, quota and budget checks below.
-        const fence = alternateId && exactRow && isRollbackFence(exactRow) && exactRow.workspaceId === scope.workspaceId
+        const fence = exactRow && isRollbackFence(exactRow) && exactRow.workspaceId === scope.workspaceId
           && exactRow.parentInteractionId === parentBudget?.id && exactRow.purpose === input.purpose ? exactRow : null;
         const existingRow = fence ? null : exactRow;
         // An operator switching back to a finite day must not invalidate an already
@@ -671,16 +680,19 @@ export function createOpeningBudgetRepository(
           RETURNING *
         `;
         if (!rows.length) throw new OpeningBudgetError("BUDGET_EXCEEDED", "daily workspace budget exceeded");
-        if (fallbackStartsFamily) {
-          // Older code can bypass the canonical key if model resolution fails.
-          // Fence that exact suffix in the same transaction with a non-billable
-          // terminal row. A conflicting row already fences the old exact lookup.
+        const rollbackSiblings = ephemeralRollbackSiblings(scope.workspaceId, {
+          request_id: requestId, parent_interaction_id: parentBudget?.id ?? null, purpose: input.purpose,
+        });
+        if (rollbackSiblings.length) {
+          // Fence both exact legacy rollback keys in the reserve transaction so
+          // an older reader cannot reserve a sibling between reserve and claim.
           await tx`
             INSERT INTO opening_budget_reservations (id, workspace_id, purpose, amount_cents, reserved_amount_cents,
               request_id, model_snapshot, parent_interaction_id, state, release_reason, created_at, updated_at)
-            VALUES (${randomUUID()}, ${scope.workspaceId}, ${input.purpose}, 0, ${input.amountCents},
-              ${input.requestId}, ${modelSnapshot === null ? null : tx.json(modelSnapshot)}, ${parentBudget?.id ?? null},
+            SELECT ${randomUUID()}, ${scope.workspaceId}, ${input.purpose}, 0, NULL,
+              keys.request_id, NULL, ${parentBudget?.id ?? null},
               'released', 'not_sent', ${instant}, ${instant})
+            FROM unnest(${rollbackSiblings}::text[]) AS keys(request_id)
             ON CONFLICT (request_id) DO NOTHING
           `;
         }
@@ -732,7 +744,20 @@ export function createOpeningBudgetRepository(
               AND outcome_unknown_at IS NULL AND pending_reconcile_cents = 0)
           LIMIT 1
         `;
-        if (liveSibling || !(await claim(tx))) return false;
+        if (liveSibling) {
+          await tx`
+            UPDATE opening_budget_reservations
+            SET amount_cents = 0, reserved_amount_cents = NULL, model_snapshot = NULL,
+                state = 'released', release_reason = 'not_sent', execution_claimed_at = NULL,
+                outcome_unknown_at = NULL, reconciled_at = NULL, pending_reconcile_cents = 0,
+                settlement_cost_basis = NULL, result_ref = NULL, updated_at = now()
+            WHERE id = ${reservationId} AND ${inScope(scope)}
+              AND parent_interaction_id IS NOT DISTINCT FROM ${candidate.parent_interaction_id}
+              AND state = 'reserved' AND execution_claimed_at IS NULL AND outcome_unknown_at IS NULL
+          `;
+          return false;
+        }
+        if (!(await claim(tx))) return false;
         // An exact key owned by another turn already rejects rollback's scope/parent check.
         await tx`
           INSERT INTO opening_budget_reservations

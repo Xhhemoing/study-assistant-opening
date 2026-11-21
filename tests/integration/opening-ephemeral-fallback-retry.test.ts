@@ -107,6 +107,52 @@ it.each([
   expect(paid).toEqual([{ request_id: requestId, amount_cents: 3 }]);
 });
 
+it("fences a rollback reader between reserve and claim and releases its unsent sibling", async () => {
+  const { repo } = ledger();
+  const { scope } = f;
+  const clientKey = randomUUID();
+  const requestId = `eph:${clientKey}`;
+  const parentBudget = { id: `study-ephemeral:${scope.workspaceId}:${clientKey}` };
+  const primary = await repo.reserve(scope, {
+    purpose: "tutor", amountCents: 10, requestId, parentBudget,
+    requestFamily: requestId,
+    alternateRequestFamily: `eph-v2:${scope.workspaceId}:${Buffer.from(clientKey, "utf16le").toString("base64url")}`,
+  });
+
+  // This is the pause point between reserve and claimExecution. The old
+  // rollback reader cannot reserve the fenced exact fallback key anymore.
+  await expect(repo.reserve(scope, {
+    purpose: "tutor", amountCents: 10, requestId: `${requestId}:fallback`, parentBudget, requestFamily: null,
+  })).rejects.toMatchObject({ code: "BUDGET_EXECUTION_CLAIMED", disposition: { reservationId: primary.id } });
+
+  let paidCalls = 0;
+  expect(await repo.claimExecution(scope, primary.id)).toBe(true);
+  paidCalls += 1;
+  await repo.settle(scope, primary.id, 3);
+
+  // Preserve coverage for a legacy active sibling that is observed by
+  // claimExecution after reserve. The unsent primary must be released atomically.
+  const secondaryKey = `eph:${randomUUID()}`;
+  const secondaryParent = { id: `study-ephemeral:${scope.workspaceId}:${randomUUID()}` };
+  const secondary = await repo.reserve(scope, {
+    purpose: "tutor", amountCents: 10, requestId: secondaryKey, parentBudget: secondaryParent,
+    requestFamily: secondaryKey,
+    alternateRequestFamily: `eph-v2:${scope.workspaceId}:${Buffer.from(secondaryKey.slice(4), "utf16le").toString("base64url")}`,
+  });
+  await f.sql`UPDATE opening_budget_reservations SET state='reserved', amount_cents=10,
+    reserved_amount_cents=10, release_reason=NULL WHERE request_id=${`${secondaryKey}:fallback`}`;
+  expect(await repo.claimExecution(scope, secondary.id)).toBe(false);
+  const [unsent] = await f.sql`SELECT state, amount_cents, release_reason FROM opening_budget_reservations WHERE id=${secondary.id}`;
+  expect(unsent).toEqual({ state: "released", amount_cents: 0, release_reason: "not_sent" });
+  expect(paidCalls).toBe(1);
+
+  await f.sql`UPDATE opening_budget_reservations SET created_at=now()-interval '31 minutes' WHERE id=${secondary.id}`;
+  await repo.reserve(scope, { purpose: "tutor", amountCents: 1, requestId: `tick-${clientKey}` });
+  const completed = await f.sql`SELECT request_id, amount_cents FROM opening_budget_reservations
+    WHERE workspace_id=${scope.workspaceId} AND state='completed' ORDER BY request_id`;
+  expect(completed).toEqual([{ request_id: requestId, amount_cents: 3 }]);
+});
+
 it("keeps a shared exact key fenced when its first owner releases and reuses it for fallback", async () => {
   const { repo } = ledger();
   const { scope } = f;
