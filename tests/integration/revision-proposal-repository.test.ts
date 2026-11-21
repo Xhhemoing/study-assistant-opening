@@ -626,5 +626,185 @@ describe("revision proposal repository", () => {
       const [rev5Snap] = await sql`SELECT blocks FROM library_revisions WHERE document_id=${fx.doc.id} AND revision_number=5`;
       expect((rev5Snap!.blocks as Array<{ id: string }>).length).toBe(trustedDoc.blocks.length);
     });
+
+    it("blocks republishing a removed historical answer from a legacy proposal and never resurrects deleted answers", async () => {
+      const fx = await seedProtectedDocument();
+      const deletedAnswerId = randomUUID();
+      const deletedAnswerBlock = { id: deletedAnswerId, type: "answer_key", position: 0, content: { answer: "DELETED_LEGACY_ANSWER_SECRET" } };
+      const untaggedCopyBlock = { id: deletedAnswerId.toUpperCase(), type: "paragraph", position: 0, content: { text: "DELETED_LEGACY_ANSWER_SECRET" } };
+      const visibleBlock = { id: fx.visibleA.id, type: "paragraph", position: 1, content: { text: "RP_PUBLIC_A" } };
+      const legacyCopyId = randomUUID();
+      const legacyConflict = {
+        currentRevisionNumber: 2,
+        currentTitle: "Protected Lesson Note",
+        currentBlocks: [visibleBlock],
+        conflictedAt: new Date().toISOString(),
+      };
+      const legacyDiff = [
+        { blockId: deletedAnswerId, kind: "changed", base: deletedAnswerBlock, proposed: untaggedCopyBlock },
+        { blockId: fx.visibleA.id, kind: "unchanged", base: visibleBlock, proposed: visibleBlock },
+      ];
+      await fx.library.updateDocument({
+        workspaceId,
+        documentId: fx.doc.id,
+        expectedRevisionNumber: 1,
+        blocks: [
+          { id: fx.visibleA.id, type: "paragraph", content: { text: "RP_PUBLIC_A_V2" } },
+          { id: fx.visibleB.id, type: "paragraph", content: { text: "RP_PUBLIC_B" } },
+        ],
+      });
+
+      // Legacy conflicted proposal: deletedAnswerId is absent from live library_blocks and live metadata.
+      await sql`INSERT INTO revision_proposals(
+        id,workspace_id,document_id,base_revision_number,base_title,base_blocks,proposed_title,proposed_blocks,diff,source,provenance,support_state,status,review_action,reviewer_user_id,reviewed_at,current_conflict
+      ) VALUES (
+        ${legacyCopyId},${workspaceId},${fx.doc.id},1,'Protected Lesson Note',${sql.json([deletedAnswerBlock, visibleBlock] as never)},'Republish',${sql.json([untaggedCopyBlock, visibleBlock] as never)},${sql.json(legacyDiff as never)},${sql.json(source as never)},${sql.json({ origin: "manual", actorUserId: userId, sourceDocumentId: null, sourceRevisionNumber: 1 } as never)},'supported','conflicted','accept',${userId},now(),${sql.json(legacyConflict as never)}
+      )`;
+
+      const fetched = await repository.get({ workspaceId, proposalId: legacyCopyId });
+      expect(JSON.stringify(fetched)).not.toContain("DELETED_LEGACY_ANSWER_SECRET");
+      await expect(repository.resolveConflict({
+        workspaceId,
+        proposalId: legacyCopyId,
+        action: "preserve_both",
+        selectedProposalBlockIds: [deletedAnswerId],
+        expectedCurrentRevisionNumber: 2,
+        actorUserId: userId,
+      })).rejects.toMatchObject({ code: "VALIDATION" });
+
+      // Legacy pending proposal carrying the same untagged copy is also blocked on accept and partial_accept.
+      const legacyPendingCopyId = randomUUID();
+      await sql`INSERT INTO revision_proposals(
+        id,workspace_id,document_id,base_revision_number,base_title,base_blocks,proposed_title,proposed_blocks,diff,source,provenance,support_state
+      ) VALUES (
+        ${legacyPendingCopyId},${workspaceId},${fx.doc.id},2,'Protected Lesson Note',${sql.json([deletedAnswerBlock, visibleBlock] as never)},'RepublishPending',${sql.json([untaggedCopyBlock, visibleBlock] as never)},${sql.json(legacyDiff as never)},${sql.json(source as never)},${sql.json({ origin: "manual", actorUserId: userId, sourceDocumentId: null, sourceRevisionNumber: 2 } as never)},'supported'
+      )`;
+      await expect(repository.review({
+        workspaceId,
+        proposalId: legacyPendingCopyId,
+        action: "accept",
+        actorUserId: userId,
+      })).rejects.toMatchObject({ code: "VALIDATION" });
+      await expect(repository.review({
+        workspaceId,
+        proposalId: legacyPendingCopyId,
+        action: "partial_accept",
+        selectedProposalBlockIds: [fx.visibleA.id],
+        actorUserId: userId,
+      })).rejects.toMatchObject({ code: "VALIDATION" });
+
+      // Legacy pending proposal where deletedAnswerId only exists in base_blocks accepts cleanly without resurrecting it.
+      const legacyCleanPendingId = randomUUID();
+      const updatedVisibleA = { id: fx.visibleA.id, type: "paragraph", position: 0, content: { text: "RP_PUBLIC_A_V3" } };
+      await sql`INSERT INTO revision_proposals(
+        id,workspace_id,document_id,base_revision_number,base_title,base_blocks,proposed_title,proposed_blocks,diff,source,provenance,support_state
+      ) VALUES (
+        ${legacyCleanPendingId},${workspaceId},${fx.doc.id},2,'Protected Lesson Note',${sql.json([deletedAnswerBlock, visibleBlock] as never)},'CleanLegacy',${sql.json([updatedVisibleA] as never)},${sql.json([{ blockId: deletedAnswerId, kind: "removed", base: deletedAnswerBlock, proposed: null }, { blockId: fx.visibleA.id, kind: "changed", base: visibleBlock, proposed: updatedVisibleA }] as never)},${sql.json(source as never)},${sql.json({ origin: "manual", actorUserId: userId, sourceDocumentId: null, sourceRevisionNumber: 2 } as never)},'supported'
+      )`;
+      const accepted = await repository.review({
+        workspaceId,
+        proposalId: legacyCleanPendingId,
+        action: "accept",
+        actorUserId: userId,
+      });
+      expect(accepted.proposal.status).toBe("accepted");
+      const liveIds = (await sql`SELECT id FROM library_blocks WHERE document_id=${fx.doc.id} ORDER BY position`).map((row) => row.id);
+      expect(liveIds).not.toContain(deletedAnswerId);
+      expect(liveIds).toContain(fx.leadAnswer.id);
+      expect(liveIds).toContain(fx.visibleA.id);
+    });
+
+    it("handles uppercase visible UUIDs without PK collision and enforces non-empty visible blocks like library.ts", async () => {
+      const library = createLibraryRepository(sql);
+      const soleVisibleId = randomUUID();
+      const hiddenAnswerId = randomUUID();
+      const replacementId = randomUUID();
+      const doc = await library.createDocument({
+        workspaceId,
+        title: "Single visible + hidden",
+        lifecycle: "confirmed",
+        blocks: [
+          { id: hiddenAnswerId, type: "answer_key", content: { answer: "ONLY_HIDDEN_SECRET" } },
+          { id: soleVisibleId, type: "paragraph", content: { text: "SOLE_VISIBLE" } },
+        ],
+      });
+
+      // Removing the sole visible block via partial_accept matches library.ts (requires >= 1 visible block).
+      const removalProposal = await repository.create({
+        workspaceId,
+        documentId: doc.id,
+        baseRevisionNumber: 1,
+        proposedBlocks: [{ id: replacementId, type: "paragraph", position: 0, content: { text: "REPLACEMENT" } }],
+        source,
+        supportState: "partial",
+      });
+      await expect(repository.review({
+        workspaceId,
+        proposalId: removalProposal.id,
+        action: "partial_accept",
+        selectedProposalBlockIds: [soleVisibleId],
+        actorUserId: userId,
+      })).rejects.toMatchObject({ code: "VALIDATION", message: "Document requires at least one block" });
+      await expect(library.updateDocument({
+        workspaceId,
+        documentId: doc.id,
+        expectedRevisionNumber: 1,
+        blocks: [],
+      })).rejects.toMatchObject({ code: "VALIDATION", message: "Document requires at least one block" });
+
+      // Uppercase UUID matching a lowercase live visible block succeeds cleanly on partial_accept and preserve_both.
+      const upperProposal = await repository.create({
+        workspaceId,
+        documentId: doc.id,
+        baseRevisionNumber: 1,
+        proposedBlocks: [{ id: soleVisibleId.toUpperCase(), type: "paragraph", position: 0, content: { text: "UPPER_EDITED" } }],
+        source,
+        supportState: "supported",
+      });
+      expect(upperProposal.diff).toMatchObject([{ blockId: soleVisibleId, kind: "changed" }]);
+      const partialRes = await repository.review({
+        workspaceId,
+        proposalId: upperProposal.id,
+        action: "partial_accept",
+        selectedProposalBlockIds: [soleVisibleId.toUpperCase()],
+        actorUserId: userId,
+      });
+      expect(partialRes.proposal.status).toBe("accepted");
+      expect(partialRes.document?.blocks.map((b) => b.id)).toEqual([soleVisibleId]);
+
+      const conflictUpper = await repository.create({
+        workspaceId,
+        documentId: doc.id,
+        baseRevisionNumber: 2,
+        proposedBlocks: [{ id: soleVisibleId.toUpperCase(), type: "paragraph", position: 0, content: { text: "UPPER_CONFLICT_COPY" } }],
+        source,
+        supportState: "supported",
+      });
+      await library.updateDocument({
+        workspaceId,
+        documentId: doc.id,
+        expectedRevisionNumber: 2,
+        blocks: [{ id: soleVisibleId, type: "paragraph", content: { text: "CONCURRENT_V3" } }],
+      });
+      const conflicted = await repository.review({
+        workspaceId,
+        proposalId: conflictUpper.id,
+        action: "accept",
+        actorUserId: userId,
+      });
+      expect(conflicted.proposal.status).toBe("conflicted");
+      const resolved = await repository.resolveConflict({
+        workspaceId,
+        proposalId: conflictUpper.id,
+        action: "preserve_both",
+        selectedProposalBlockIds: [soleVisibleId.toUpperCase()],
+        expectedCurrentRevisionNumber: 3,
+        actorUserId: userId,
+      });
+      expect(resolved.proposal.status).toBe("accepted");
+      expect(resolved.document?.blocks).toHaveLength(2);
+      const trusted = await library.getDocument({ workspaceId, documentId: doc.id, includeAnswerKeys: true });
+      expect(trusted.blocks.map((b) => b.id)).toContain(hiddenAnswerId);
+    });
   });
 });

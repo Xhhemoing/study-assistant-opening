@@ -19,10 +19,10 @@ import {
 } from "@aistudy/contracts";
 import type { Sql, TransactionSql } from "postgres";
 import {
+  collectProposalProtectedBlockIds,
   collectProtectedBlockIds,
   excludeAnswerKeys,
   hasForgedOrProtectedBlock,
-  isBackupAnswerBlock,
   mergePreservedProtectedBlocks,
   PROTECTED_ANSWER_BLOCK_ERROR_MESSAGE,
   readDocumentAnswerKeyIds,
@@ -143,27 +143,9 @@ function assertSelectedBlockIdsSafe(selectedIds: readonly string[], protectedIds
 }
 function redactProposal(
   proposal: RevisionProposalRecord,
-  protectedIds: ReadonlySet<string>,
+  liveProtectedIds: ReadonlySet<string>,
 ): RevisionProposalRecord {
-  const hiddenIds = new Set<string>(protectedIds);
-  const collectHidden = (blocks: readonly RevisionProposalBlock[]) => {
-    for (const block of blocks) {
-      if (isBackupAnswerBlock(block as unknown as Record<string, unknown>)) {
-        hiddenIds.add(block.id.toLowerCase());
-      }
-    }
-  };
-  collectHidden(proposal.baseBlocks);
-  collectHidden(proposal.proposedBlocks);
-  if (proposal.conflict) collectHidden(proposal.conflict.currentBlocks);
-  for (const entry of proposal.diff) {
-    if (
-      (entry.base && isBackupAnswerBlock(entry.base as unknown as Record<string, unknown>))
-      || (entry.proposed && isBackupAnswerBlock(entry.proposed as unknown as Record<string, unknown>))
-    ) {
-      hiddenIds.add(entry.blockId.toLowerCase());
-    }
-  }
+  const hiddenIds = collectProposalProtectedBlockIds(liveProtectedIds, proposal);
   const isVisible = excludeAnswerKeys([...hiddenIds]);
   return {
     ...proposal,
@@ -351,18 +333,26 @@ export function createRevisionProposalRepository(sql: Sql): RevisionProposalRepo
         }
         const document = await documentRow(tx, input.workspaceId, proposal.documentId, true);
         const policy = await loadProtectedBlockPolicy(tx, input.workspaceId, proposal.documentId, "update");
-        assertProposalBlocksSafe(proposal.proposedBlocks, policy.protectedIds);
-        const visibleProposal = redactProposal(proposal, policy.protectedIds);
+        const protectedIds = collectProposalProtectedBlockIds(policy.protectedIds, proposal);
+        assertProposalBlocksSafe(proposal.proposedBlocks, protectedIds);
+        const visibleProposal = redactProposal(proposal, protectedIds);
         let nextVisibleBlocks: RevisionProposalBlock[];
         if (input.action === "accept") {
-          nextVisibleBlocks = proposal.proposedBlocks.map((block, position) => ({ ...block, position }));
+          const canonicalVisibleIds = new Map(policy.visibleBlocks.map((block) => [block.id.toLowerCase(), block.id]));
+          nextVisibleBlocks = proposal.proposedBlocks.map((block, position) => ({
+            ...block,
+            id: canonicalVisibleIds.get(block.id.toLowerCase()) ?? block.id,
+            position,
+          }));
         } else {
           const selected = input.selectedProposalBlockIds ?? [];
-          assertSelectedBlockIdsSafe(selected, policy.protectedIds);
+          assertSelectedBlockIdsSafe(selected, protectedIds);
           nextVisibleBlocks = selectProposalBlocks(policy.visibleBlocks, proposal.proposedBlocks, selected, visibleProposal.diff);
         }
+        // Match library.ts updateDocumentInTx (normalizeBlocks before protected-block merge):
+        // learner writes must retain at least one learner-visible block and cannot probe hidden blocks.
         assertValidRevisionBlocks(nextVisibleBlocks);
-        assertProposalBlocksSafe(nextVisibleBlocks, policy.protectedIds);
+        assertProposalBlocksSafe(nextVisibleBlocks, protectedIds);
         if (document.current_revision_number !== proposal.baseRevisionNumber) {
           const conflict = { currentRevisionNumber: document.current_revision_number as number, currentTitle: document.title as string, currentBlocks: policy.visibleBlocks, conflictedAt: new Date().toISOString() };
           const rows = await tx`UPDATE revision_proposals SET status='conflicted',review_action=${input.action},reviewer_user_id=${input.actorUserId},reviewed_at=now(),current_conflict=${tx.json(conflict as never)},updated_at=now() WHERE id=${proposal.id} RETURNING *`;
@@ -388,12 +378,13 @@ export function createRevisionProposalRepository(sql: Sql): RevisionProposalRepo
         const document = await documentRow(tx, input.workspaceId, proposal.documentId, true);
         if (document.current_revision_number !== input.expectedCurrentRevisionNumber) throw new RevisionProposalRepositoryError("CONFLICT", "Current revision changed; reload before resolving");
         const policy = await loadProtectedBlockPolicy(tx, input.workspaceId, proposal.documentId, "update");
-        assertProposalBlocksSafe(proposal.proposedBlocks, policy.protectedIds);
-        assertSelectedBlockIdsSafe(input.selectedProposalBlockIds, policy.protectedIds);
-        const visibleProposal = redactProposal(proposal, policy.protectedIds);
+        const protectedIds = collectProposalProtectedBlockIds(policy.protectedIds, proposal);
+        assertProposalBlocksSafe(proposal.proposedBlocks, protectedIds);
+        assertSelectedBlockIdsSafe(input.selectedProposalBlockIds, protectedIds);
+        const visibleProposal = redactProposal(proposal, protectedIds);
         const nextVisibleBlocks = preserveBothBlocks(policy.visibleBlocks, proposal.proposedBlocks, input.selectedProposalBlockIds, visibleProposal.diff);
         assertValidRevisionBlocks(nextVisibleBlocks);
-        assertProposalBlocksSafe(nextVisibleBlocks, policy.protectedIds);
+        assertProposalBlocksSafe(nextVisibleBlocks, protectedIds);
         const persistedBlocks = mergePreservedProtectedBlocks(policy.existingBlocks, nextVisibleBlocks, policy.isVisible);
         const revision = await appendRevision(tx, { workspaceId: input.workspaceId, documentId: proposal.documentId, document, title: proposal.proposedTitle ?? proposal.baseTitle, blocks: persistedBlocks, reason: "revision-proposal:preserve_both" });
         const rows = await tx`UPDATE revision_proposals SET status='accepted',review_action='preserve_both',reviewer_user_id=${input.actorUserId},reviewed_at=now(),resulting_revision_number=${revision},current_conflict=NULL,updated_at=now() WHERE id=${proposal.id} RETURNING *`;

@@ -100,4 +100,35 @@ const c = "33333333-3333-4333-8333-333333333333";
 
     expect(result.map((item) => item.id)).toEqual([a, b]);
   });
+
+  it("matches visible block IDs case-insensitively and preserves canonical live IDs", () => {
+    const upperA = a.toUpperCase();
+    const diff = diffRevisionBlocks([block(a, "before", 0)], [block(upperA, "after", 0)]);
+    expect(diff).toEqual([
+      { blockId: a, kind: "changed", base: block(a, "before", 0), proposed: block(upperA, "after", 0) },
+    ]);
+
+    const partial = selectProposalBlocks(
+      [block(a, "current", 0), block(b, "keep", 1)],
+      [block(upperA, "updated", 0), block(c.toUpperCase(), "added", 1)],
+      [upperA, c],
+      diffRevisionBlocks([block(a, "current", 0), block(b, "keep", 1)], [block(upperA, "updated", 0), block(c.toUpperCase(), "added", 1)]),
+    );
+    expect(partial.map((item) => item.id)).toEqual([a, b, c.toUpperCase()]);
+    expect(partial.map((item) => item.content.text)).toEqual(["updated", "keep", "added"]);
+
+    const preserved = preserveBothBlocks(
+      [block(a, "current", 0)],
+      [block(upperA, "proposed", 0)],
+      [upperA],
+      diff,
+    );
+    expect(preserved).toHaveLength(2);
+    expect(preserved[0]).toMatchObject({ id: a, content: { text: "current" } });
+    expect(preserved[1]!.id.toLowerCase()).not.toBe(a.toLowerCase());
+    expect(preserved[1]!.content).toEqual({ text: "proposed" });
+
+    expect(() => diffRevisionBlocks([block(a, "one", 0), block(upperA, "two", 1)], [])).toThrow(/Duplicate block id/);
+    expect(() => selectProposalBlocks([block(a, "one", 0)], [block(a, "two", 0)], [a, upperA])).toThrow(/Duplicate selected block id/);
+  });
 });

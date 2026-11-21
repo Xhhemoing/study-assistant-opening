@@ -38,6 +38,42 @@ export function collectProtectedBlockIds(
   ]);
 }
 
+export function collectProposalProtectedBlockIds(
+  liveProtectedIds: ReadonlySet<string>,
+  proposal: {
+    baseBlocks: readonly RevisionBlockSnapshot[];
+    proposedBlocks: readonly RevisionBlockSnapshot[];
+    diff: readonly {
+      blockId: string;
+      base: RevisionBlockSnapshot | null;
+      proposed: RevisionBlockSnapshot | null;
+    }[];
+    conflict: { currentBlocks: readonly RevisionBlockSnapshot[] } | null;
+  },
+): Set<string> {
+  const hiddenIds = new Set<string>();
+  for (const id of liveProtectedIds) hiddenIds.add(id.toLowerCase());
+  const collectHidden = (blocks: readonly RevisionBlockSnapshot[]) => {
+    for (const block of blocks) {
+      if (isBackupAnswerBlock(block as unknown as Record<string, unknown>)) {
+        hiddenIds.add(block.id.toLowerCase());
+      }
+    }
+  };
+  collectHidden(proposal.baseBlocks);
+  collectHidden(proposal.proposedBlocks);
+  if (proposal.conflict) collectHidden(proposal.conflict.currentBlocks);
+  for (const entry of proposal.diff) {
+    if (
+      (entry.base && isBackupAnswerBlock(entry.base as unknown as Record<string, unknown>))
+      || (entry.proposed && isBackupAnswerBlock(entry.proposed as unknown as Record<string, unknown>))
+    ) {
+      hiddenIds.add(entry.blockId.toLowerCase());
+    }
+  }
+  return hiddenIds;
+}
+
 export function hasForgedOrProtectedBlock(
   rawBlocks: readonly unknown[],
   protectedIds: ReadonlySet<string>,

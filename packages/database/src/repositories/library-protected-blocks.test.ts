@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  collectProposalProtectedBlockIds,
   collectProtectedBlockIds,
   excludeAnswerKeys,
   hasForgedOrProtectedBlock,
@@ -52,5 +53,41 @@ describe("library protected block helpers", () => {
       trailAnswer.id,
     ]);
     expect(merged.map((b) => b.position)).toEqual([0, 1, 2, 3, 4, 5]);
+  });
+
+  it("unites live protected IDs with legacy historical answer IDs across proposal snapshots", () => {
+    const deletedHistoricalAnswer = {
+      id: "99999999-9999-4999-8999-999999999999",
+      type: "answer_key",
+      position: 0,
+      content: { answer: "HISTORICAL_SECRET" },
+    };
+    const conflictAnswer = {
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      type: "solution",
+      position: 1,
+      content: { solution: "CONFLICT_SECRET" },
+    };
+    const untaggedCopy = {
+      id: deletedHistoricalAnswer.id.toUpperCase(),
+      type: "paragraph",
+      position: 0,
+      content: { text: "HISTORICAL_SECRET" },
+    };
+
+    const protectedIds = collectProposalProtectedBlockIds(new Set([leadAnswer.id.toUpperCase()]), {
+      baseBlocks: [deletedHistoricalAnswer, visibleA],
+      proposedBlocks: [untaggedCopy, visibleA],
+      diff: [{ blockId: deletedHistoricalAnswer.id, kind: "changed", base: deletedHistoricalAnswer, proposed: untaggedCopy }],
+      conflict: { currentBlocks: [visibleA, conflictAnswer] },
+    });
+
+    expect([...protectedIds].sort()).toEqual([
+      leadAnswer.id,
+      deletedHistoricalAnswer.id,
+      conflictAnswer.id,
+    ].sort());
+    expect(hasForgedOrProtectedBlock([untaggedCopy], protectedIds)).toBe(true);
+    expect(hasForgedOrProtectedBlock([visibleA], protectedIds)).toBe(false);
   });
 });
