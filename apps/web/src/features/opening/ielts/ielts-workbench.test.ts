@@ -1145,6 +1145,104 @@ describe("IeltsDraftCritiqueWorkbench", () => {
       }),
     });
   });
+
+  it("latches exposed critique rewrites and baseline exemplars from a restored unassisted Writing receipt on mount before any edit or resubmission", async () => {
+    const fixture = IELTS_WRITING_SPEAKING_FIXTURE;
+    const onRevisionEvaluated = vi.fn();
+
+    // Case A: Copy a displayed draft2Receipt critique rewrite (d2-tr-1) directly into the editor and resubmit.
+    await act(async () =>
+      root.render(createElement(IeltsDraftCritiqueWorkbench, { fixture, onRevisionEvaluated })),
+    );
+    expect(host.querySelector('[data-epistemic-badge="rubric_verified_evidence"]')).not.toBeNull();
+    const displayedTrRewrite = fixture.draft2Receipt.criteria.TR.evidenceSpans[0]!.upgradeRewrite;
+    expect(host.textContent).toContain(displayedTrRewrite);
+
+    await act(async () => writingButton("打开改写编辑区").click());
+    const textarea = host.querySelector<HTMLTextAreaElement>('[aria-label="二稿改写编辑区"]')!;
+    const checkbox = host.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    expect(checkbox.checked).toBe(false);
+    expect(checkbox.disabled).toBe(false);
+
+    await act(async () => setNativeInputValue(textarea, `${textarea.value} ${displayedTrRewrite}`));
+    expect(checkbox.checked).toBe(true);
+    expect(checkbox.disabled).toBe(true);
+    await act(async () => writingButton("重新分析改写").click());
+    expect(onRevisionEvaluated).toHaveBeenCalledTimes(1);
+    expect(onRevisionEvaluated.mock.lastCall?.[0]).toMatchObject({
+      revisedDraft: expect.objectContaining({ assisted: true }),
+      receipt: expect.objectContaining({
+        epistemicStatus: "practice_feedback",
+        masteryQualified: false,
+        countsTowardMastery: false,
+      }),
+    });
+
+    // Case B: Fresh restored mount -> copy d2-lr-1 rewrite (which fuzzily resembled restored draft2) -> MUST still be assisted!
+    const displayedLrRewrite = fixture.draft2Receipt.criteria.LR.evidenceSpans[0]!.upgradeRewrite;
+    await act(async () =>
+      root.render(
+        createElement(IeltsDraftCritiqueWorkbench, {
+          key: "restored-lr-rewrite-copy",
+          fixture,
+          onRevisionEvaluated,
+        }),
+      ),
+    );
+    await act(async () => writingButton("打开改写编辑区").click());
+    const lrTextarea = host.querySelector<HTMLTextAreaElement>('[aria-label="二稿改写编辑区"]')!;
+    const lrCheckbox = host.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    await act(async () =>
+      setNativeInputValue(
+        lrTextarea,
+        lrTextarea.value.replace(
+          "offers far greater long-term fiscal viability and environmental relief than continually expanding motorways.",
+          displayedLrRewrite,
+        ),
+      ),
+    );
+    expect(lrCheckbox.checked).toBe(true);
+    expect(lrCheckbox.disabled).toBe(true);
+    await act(async () => writingButton("重新分析改写").click());
+    expect(onRevisionEvaluated).toHaveBeenCalledTimes(2);
+    expect(onRevisionEvaluated.mock.lastCall?.[0]).toMatchObject({
+      revisedDraft: expect.objectContaining({ assisted: true }),
+      receipt: expect.objectContaining({
+        epistemicStatus: "practice_feedback",
+        masteryQualified: false,
+        countsTowardMastery: false,
+      }),
+    });
+
+    // Case C: Fresh restored mount -> copy a paragraph from restored draft1 -> MUST be assisted!
+    await act(async () =>
+      root.render(
+        createElement(IeltsDraftCritiqueWorkbench, {
+          key: "restored-draft1-copy",
+          fixture,
+          onRevisionEvaluated,
+        }),
+      ),
+    );
+    await act(async () => writingButton("打开改写编辑区").click());
+    const d1Textarea = host.querySelector<HTMLTextAreaElement>('[aria-label="二稿改写编辑区"]')!;
+    const d1Checkbox = host.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    await act(async () =>
+      setNativeInputValue(d1Textarea, `${d1Textarea.value}\n\n${fixture.draft1.paragraphs[1]!}`),
+    );
+    expect(d1Checkbox.checked).toBe(true);
+    expect(d1Checkbox.disabled).toBe(true);
+    await act(async () => writingButton("重新分析改写").click());
+    expect(onRevisionEvaluated).toHaveBeenCalledTimes(3);
+    expect(onRevisionEvaluated.mock.lastCall?.[0]).toMatchObject({
+      revisedDraft: expect.objectContaining({ assisted: true }),
+      receipt: expect.objectContaining({
+        epistemicStatus: "practice_feedback",
+        masteryQualified: false,
+        countsTowardMastery: false,
+      }),
+    });
+  });
 });
 
 describe("IeltsSpeakingTransferCard", () => {
@@ -2050,6 +2148,159 @@ describe("IeltsSpeakingTransferCard", () => {
     expect(checkbox.checked).toBe(false);
     expect(checkbox.disabled).toBe(false);
     await act(async () => evaluateBtn().click());
+    expect(onEvaluated.mock.lastCall?.[0]).toMatchObject({
+      assisted: false,
+      epistemicStatus: "rubric_verified_evidence",
+      masteryQualified: true,
+      countsTowardMastery: true,
+    });
+  });
+
+  it("latches exposed cues and quote rewrites from a restored unassisted Speaking receipt before duration edits hide it", async () => {
+    const fixture = IELTS_WRITING_SPEAKING_FIXTURE;
+    const customSeed = {
+      ...buildSpeakingPart3Seed(
+        {
+          promptId: fixture.promptId,
+          topic: "urban public transport funding",
+          coreClaim:
+            "Municipal councils should prioritise electrified urban rail networks over continual motorway expansion for sustainable commuter capacity.",
+          supportingReason:
+            "High-capacity trains alleviate chronic congestion and reduce per-capita emissions without carving extra highway lanes through residential blocks.",
+          counterPerspective:
+            "Admittedly, distant suburban households still rely on feeder buses to connect comfortably with major transit corridors.",
+          activeCollocations: fixture.coreArgument.activeCollocations,
+        },
+        fixture.draft2.draftId,
+      ),
+      seedId: "restored-speaking-duration-hide-seed",
+      requiresVerifiedReceipt: true,
+      verifiedWritingReceipt: fixture.draft2Receipt,
+    };
+    const restoredTranscript = GENUINE_ORIGINAL_SPEAKING_TRANSCRIPT;
+    const restoredReceipt = evaluateSpeakingRetelling({
+      seed: customSeed,
+      transcript: restoredTranscript,
+      durationSeconds: 78,
+      assisted: false,
+      createdAt: "2026-11-21T09:00:00.000Z",
+    });
+    expect(restoredReceipt.epistemicStatus).toBe("rubric_verified_evidence");
+    const displayedQuoteRewrite = restoredReceipt.evidenceQuotes[0]!.upgradeRewrite;
+    expect(displayedQuoteRewrite).toContain("Personally, I think the core tension");
+
+    // Case A: Restored unassisted receipt -> edit duration (hiding receipt) -> paste displayed quote rewrite -> resubmit -> assisted: true!
+    const onEvaluated = vi.fn();
+    await act(async () =>
+      root.render(
+        createElement(IeltsSpeakingTransferCard, {
+          seed: customSeed,
+          initialTranscript: restoredTranscript,
+          initialDurationSeconds: 78,
+          initialReceipt: restoredReceipt,
+          onEvaluated,
+        }),
+      ),
+    );
+    expect(host.querySelector('[data-speaking-epistemic="rubric_verified_evidence"]')).not.toBeNull();
+    expect(host.textContent).toContain(customSeed.argumentBridgeCues[0]!);
+    expect(host.textContent).toContain(displayedQuoteRewrite);
+
+    const textarea = host.querySelector<HTMLTextAreaElement>('[aria-label="口语复述记录输入框"]')!;
+    const durationInput = host.querySelector<HTMLInputElement>('[aria-label="口语作答时长秒数"]')!;
+    const checkbox = host.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    const evaluateBtn = () => host.querySelector<HTMLButtonElement>("[data-speaking-evaluate]")!;
+
+    // Changing duration hides the restored receipt; latched guidance MUST survive!
+    await act(async () => setNativeInputValue(durationInput, "72"));
+    expect(host.querySelector("[data-speaking-epistemic]")).toBeNull();
+    expect(checkbox.checked).toBe(false);
+    expect(checkbox.disabled).toBe(false);
+
+    // Pasting the previously displayed quote rewrite after receipt is hidden MUST lock assistance!
+    await act(async () =>
+      setNativeInputValue(
+        textarea,
+        `${displayedQuoteRewrite} Local authorities must balance immediate commuter convenience against multi-decade fiscal resilience for growing metropolitan districts.`,
+      ),
+    );
+    expect(checkbox.checked).toBe(true);
+    expect(checkbox.disabled).toBe(true);
+    await act(async () => evaluateBtn().click());
+    expect(onEvaluated).toHaveBeenCalledTimes(1);
+    expect(onEvaluated.mock.lastCall?.[0]).toMatchObject({
+      assisted: true,
+      epistemicStatus: "practice_feedback",
+      masteryQualified: false,
+      countsTowardMastery: false,
+    });
+
+    // Case B: Fresh restored mount -> edit duration (hiding receipt) -> paste previously displayed argumentBridgeCue -> resubmit -> assisted: true!
+    await act(async () =>
+      root.render(
+        createElement(IeltsSpeakingTransferCard, {
+          key: "restored-speaking-cue-after-duration-edit",
+          seed: customSeed,
+          initialTranscript: restoredTranscript,
+          initialDurationSeconds: 78,
+          initialReceipt: restoredReceipt,
+          onEvaluated,
+        }),
+      ),
+    );
+    const cueTextarea = host.querySelector<HTMLTextAreaElement>('[aria-label="口语复述记录输入框"]')!;
+    const cueDuration = host.querySelector<HTMLInputElement>('[aria-label="口语作答时长秒数"]')!;
+    const cueCheckbox = host.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    await act(async () => setNativeInputValue(cueDuration, "74"));
+    expect(host.querySelector("[data-speaking-epistemic]")).toBeNull();
+
+    await act(async () =>
+      setNativeInputValue(
+        cueTextarea,
+        "Municipal councils should prioritise electrified urban rail networks over continual motorway expansion for sustainable commuter capacity. " +
+          "Regional ministries also have to coordinate shuttle routes so outer commuters reach platforms smoothly during busy weekday evenings.",
+      ),
+    );
+    expect(cueCheckbox.checked).toBe(true);
+    expect(cueCheckbox.disabled).toBe(true);
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-speaking-evaluate]")!.click());
+    expect(onEvaluated).toHaveBeenCalledTimes(2);
+    expect(onEvaluated.mock.lastCall?.[0]).toMatchObject({
+      assisted: true,
+      epistemicStatus: "practice_feedback",
+      masteryQualified: false,
+      countsTowardMastery: false,
+    });
+
+    // Case C: Reset after duration-hidden restored receipt -> pasting displayed rewrite stays assisted,
+    // while genuinely brand-new original speech qualifies as independent verified mastery!
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-reset-attempt]")!.click());
+    expect(cueCheckbox.checked).toBe(false);
+    expect(cueCheckbox.disabled).toBe(false);
+    await act(async () => {
+      setNativeInputValue(
+        cueTextarea,
+        `${displayedQuoteRewrite} Councils must plan beyond a single election cycle to sustain affordable commuting.`,
+      );
+      setNativeInputValue(cueDuration, "74");
+    });
+    expect(cueCheckbox.checked).toBe(true);
+    expect(cueCheckbox.disabled).toBe(true);
+
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-reset-attempt]")!.click());
+    const brandNewIndependentSpeech =
+      "Honestly, city mayors face tough political pressure because car owners celebrate fresh highway asphalt right away, while subway tunnels demand years of construction funding. " +
+      "Still, building electric rail lines lets cities alleviate chronic congestion and cut per-capita emissions across busy neighbourhoods. " +
+      "Certainly, suburban families living far from stations depend on personal cars, so planners should pair major lines with dependable feeder buses. " +
+      "Taken together, safeguarding long-term fiscal viability requires backing durable rail transit instead of expensive road widening that only triggers induced traffic demand.";
+    await act(async () => {
+      setNativeInputValue(cueTextarea, brandNewIndependentSpeech);
+      setNativeInputValue(cueDuration, "75");
+    });
+    expect(cueCheckbox.checked).toBe(false);
+    expect(cueCheckbox.disabled).toBe(false);
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-speaking-evaluate]")!.click());
+    expect(onEvaluated).toHaveBeenCalledTimes(3);
     expect(onEvaluated.mock.lastCall?.[0]).toMatchObject({
       assisted: false,
       epistemicStatus: "rubric_verified_evidence",

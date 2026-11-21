@@ -200,9 +200,52 @@ function assessPromptTopicRelevance(
     return { isOffTopic: true, isTangential: false, keywordCount, overlapCount };
   }
 
+  // Count paragraph, sentence, and word-share engagement with prompt keywords
+  // across BOTH short (60–159 words) and full essays so stuffing prompt facet words
+  // into a single throwaway sentence cannot bypass off-topic caps.
+  let nonEmptyParagraphs = 0;
+  let paragraphsWithHit = 0;
+  let totalSentences = 0;
+  let sentencesWithHit = 0;
+  let totalSentenceWords = 0;
+  let wordsInOnTopicSentences = 0;
+  for (const [pIndex, prose] of revisedProse.entries()) {
+    if (countProseWords(prose) === 0) continue;
+    nonEmptyParagraphs += 1;
+    const pStems = new Set<string>();
+    collectTopicStems(prose, STOP_WORDS, 3, pStems);
+    if ([...spec.keywords].some((kw) => pStems.has(kw))) {
+      paragraphsWithHit += 1;
+    }
+    for (const sentence of revisedParagraphs[pIndex] ?? []) {
+      const sentenceWords = countProseWords(sentence.text);
+      if (sentenceWords === 0) continue;
+      totalSentences += 1;
+      totalSentenceWords += sentenceWords;
+      const sStems = new Set<string>();
+      collectTopicStems(sentence.text, STOP_WORDS, 3, sStems);
+      if ([...spec.keywords].some((kw) => sStems.has(kw))) {
+        sentencesWithHit += 1;
+        wordsInOnTopicSentences += sentenceWords;
+      }
+    }
+  }
+
+  const sentenceHitRatio = totalSentences > 0 ? sentencesWithHit / totalSentences : 0;
+  const onTopicWordRatio =
+    totalSentenceWords > 0 ? wordsInOnTopicSentences / totalSentenceWords : 0;
+
   if (revisedWordCount < 160) {
     const minShortMatches = keywordCount >= 2 ? 2 : 1;
     if (overlapCount < minShortMatches) {
+      return { isOffTopic: true, isTangential: false, keywordCount, overlapCount };
+    }
+    const isSingleSentenceOrLowShareStuffing =
+      (totalSentences >= 3 && (sentencesWithHit < 2 || sentenceHitRatio < 0.35)) ||
+      (revisedWordCount >= 60 &&
+        (onTopicWordRatio < 0.35 ||
+          (totalSentences >= 2 && sentencesWithHit < 2 && overlapCount < 3)));
+    if (isSingleSentenceOrLowShareStuffing) {
       return { isOffTopic: true, isTangential: false, keywordCount, overlapCount };
     }
     if (revisedWordCount >= 60 && spec.contrastFacets) {
@@ -216,28 +259,6 @@ function assessPromptTopicRelevance(
     return { isOffTopic: false, isTangential: false, keywordCount, overlapCount };
   }
 
-  // Count how many paragraphs & sentences engage with prompt keywords to reject
-  // off-topic essays with a single tacked-on venue sentence.
-  let nonEmptyParagraphs = 0;
-  let paragraphsWithHit = 0;
-  let sentencesWithHit = 0;
-  for (const [pIndex, prose] of revisedProse.entries()) {
-    if (countProseWords(prose) === 0) continue;
-    nonEmptyParagraphs += 1;
-    const pStems = new Set<string>();
-    collectTopicStems(prose, STOP_WORDS, 3, pStems);
-    if ([...spec.keywords].some((kw) => pStems.has(kw))) {
-      paragraphsWithHit += 1;
-    }
-    for (const sentence of revisedParagraphs[pIndex] ?? []) {
-      const sStems = new Set<string>();
-      collectTopicStems(sentence.text, STOP_WORDS, 3, sStems);
-      if ([...spec.keywords].some((kw) => sStems.has(kw))) {
-        sentencesWithHit += 1;
-      }
-    }
-  }
-
   const requiredMatches = spec.fromPromptStatement
     ? Math.min(keywordCount, Math.max(3, Math.ceil(keywordCount * 0.35)))
     : Math.min(
@@ -246,8 +267,11 @@ function assessPromptTopicRelevance(
       );
   const hasSufficientSpread =
     nonEmptyParagraphs >= 2 ? paragraphsWithHit >= 2 : sentencesWithHit >= 2;
+  const hasSufficientSentenceShare =
+    totalSentences < 3 ||
+    (sentencesWithHit >= 2 && sentenceHitRatio >= 0.35 && onTopicWordRatio >= 0.3);
 
-  if (overlapCount < requiredMatches || !hasSufficientSpread) {
+  if (overlapCount < requiredMatches || !hasSufficientSpread || !hasSufficientSentenceShare) {
     return { isOffTopic: true, isTangential: false, keywordCount, overlapCount };
   }
 

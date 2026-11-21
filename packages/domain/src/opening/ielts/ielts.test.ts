@@ -2168,4 +2168,106 @@ describe("Writing topic-relevance band grounding", () => {
     expect(shortOnTopicResult.receipt.criteria.TR.band).toBeGreaterThanOrEqual(5.5);
     expect(shortOnTopicResult.receipt.overallBand).toBeGreaterThanOrEqual(5.5);
   });
+
+  it("caps 60–159-word and longer unrelated essays that stuff rail-vs-road facet keywords into a single throwaway sentence", () => {
+    const railVsRoadPrompt =
+      "Some people believe that governments should invest public funds primarily in urban rail networks rather than expanding road systems for private vehicles. To what extent do you agree or disagree?";
+
+    // 60–159-word museum essay stuffing BOTH contrast facets ("rail" + "road") into 1 throwaway sentence.
+    const shortMuseumWithRailRoadSentence: IeltsEssayDraft = {
+      ...DRAFT_2,
+      draftId: "draft-2-short-museum-rail-road-stuffing",
+      paragraphs: [
+        "National museums preserve fragile ceramics, ancient bronze sculptures, and illuminated manuscripts for curious audiences across generations. Curators carefully regulate gallery lighting, ambient humidity, and archival ventilation so delicate pigments resist seasonal decay.",
+        "Visiting school classes sketch marble carvings during peaceful weekday mornings while senior historians catalogue regional pottery techniques. Botanical wing volunteers also document pressed mountain wildflowers inside quiet timber drawers. Yesterday I took a rail train down the road to reach the museum.",
+      ],
+    };
+    const stuffedWords = countDraftWords(shortMuseumWithRailRoadSentence.paragraphs);
+    expect(stuffedWords).toBeGreaterThanOrEqual(60);
+    expect(stuffedWords).toBeLessThan(160);
+
+    const stuffedResult = evaluateNonEmptyRevision({
+      baselineDraft: DRAFT_1,
+      revisedDraft: shortMuseumWithRailRoadSentence,
+      targets: TARGETS,
+      promptStatement: railVsRoadPrompt,
+      receiptId: "r-short-museum-rail-road-stuffing",
+    });
+    expect(stuffedResult.transferReport.summary.transferredCount).toBe(0);
+    expect(stuffedResult.receipt.criteria.TR.band).toBeLessThanOrEqual(4);
+    expect(stuffedResult.receipt.criteria.CC.band).toBeLessThanOrEqual(4.5);
+    expect(stuffedResult.receipt.overallBand).toBeLessThanOrEqual(4.5);
+    expect(stuffedResult.receipt.masteryQualified).toBe(false);
+    expect(stuffedResult.receipt.countsTowardMastery).toBe(false);
+    expect(stuffedResult.receipt.epistemicStatus).toBe("practice_feedback");
+
+    // 60–159-word museum essay tacking on two tiny throwaway sentences (< 35% on-topic word share).
+    const shortMuseumTwoTinyThrowaways: IeltsEssayDraft = {
+      ...DRAFT_2,
+      draftId: "draft-2-short-museum-two-tiny-sentences",
+      paragraphs: [
+        "National museums preserve fragile ceramics, ancient bronze sculptures, and illuminated manuscripts for curious audiences while curators carefully regulate gallery lighting, ambient humidity, and archival ventilation across quiet exhibition halls every season.",
+        "Visiting school classes sketch carved marble busts during peaceful weekday mornings while senior historians catalogue regional pottery techniques and maritime trade artefacts inside quiet timber archive drawers. Rail works. Road fails.",
+      ],
+    };
+    const tinyStuffedWords = countDraftWords(shortMuseumTwoTinyThrowaways.paragraphs);
+    expect(tinyStuffedWords).toBeGreaterThanOrEqual(60);
+    expect(tinyStuffedWords).toBeLessThan(160);
+    const tinyStuffedResult = evaluateNonEmptyRevision({
+      baselineDraft: DRAFT_1,
+      revisedDraft: shortMuseumTwoTinyThrowaways,
+      targets: TARGETS,
+      promptStatement: railVsRoadPrompt,
+      receiptId: "r-short-museum-tiny-throwaways",
+    });
+    expect(tinyStuffedResult.receipt.criteria.TR.band).toBeLessThanOrEqual(4);
+    expect(tinyStuffedResult.receipt.overallBand).toBeLessThanOrEqual(4.5);
+    expect(tinyStuffedResult.receipt.masteryQualified).toBe(false);
+
+    // >= 160-word off-topic essay stuffing 2 short throwaway sentences across 2 paragraphs (< 35% sentence share).
+    const longOffTopicTwoStuffedSentences: IeltsEssayDraft = {
+      ...DRAFT_2,
+      draftId: "draft-2-long-off-topic-two-stuffed",
+      paragraphs: [
+        `${offTopicParagraphs[0]} Urban rail networks serve governments well.`,
+        `${offTopicParagraphs[1]} Expanding road systems helps private vehicles.`,
+        offTopicParagraphs[2]!,
+        offTopicParagraphs[3]!,
+      ],
+    };
+    expect(countDraftWords(longOffTopicTwoStuffedSentences.paragraphs)).toBeGreaterThanOrEqual(160);
+    const longStuffedResult = evaluateNonEmptyRevision({
+      baselineDraft: DRAFT_1,
+      revisedDraft: longOffTopicTwoStuffedSentences,
+      targets: TARGETS,
+      promptStatement: railVsRoadPrompt,
+      receiptId: "r-long-off-topic-two-stuffed",
+    });
+    expect(longStuffedResult.receipt.criteria.TR.band).toBeLessThanOrEqual(4);
+    expect(longStuffedResult.receipt.criteria.CC.band).toBeLessThanOrEqual(4.5);
+    expect(longStuffedResult.receipt.overallBand).toBeLessThanOrEqual(4.5);
+    expect(longStuffedResult.receipt.masteryQualified).toBe(false);
+
+    // Genuine short (60–159 words) on-topic urban rail vs road draft passes uncapped.
+    const shortOnTopicRailVsRoad: IeltsEssayDraft = {
+      ...DRAFT_2,
+      draftId: "draft-2-short-rail-on-topic",
+      paragraphs: [
+        "Governments should invest public funds primarily in urban rail networks rather than continuously expanding road systems for private vehicles. High-capacity rail corridors move far more commuters during peak hours while keeping crowded streets cleaner.",
+        "Admittedly, widening road systems can help outer-suburban private vehicles temporarily, yet new highway lanes quickly attract extra traffic. Backing reliable urban rail alongside local feeder buses gives cities a far stronger long-term solution.",
+      ],
+    };
+    const shortOnTopicRailWords = countDraftWords(shortOnTopicRailVsRoad.paragraphs);
+    expect(shortOnTopicRailWords).toBeGreaterThanOrEqual(60);
+    expect(shortOnTopicRailWords).toBeLessThan(160);
+    const shortOnTopicRailResult = evaluateNonEmptyRevision({
+      baselineDraft: DRAFT_1,
+      revisedDraft: shortOnTopicRailVsRoad,
+      targets: [],
+      promptStatement: railVsRoadPrompt,
+      receiptId: "r-short-rail-on-topic",
+    });
+    expect(shortOnTopicRailResult.receipt.criteria.TR.band).toBeGreaterThanOrEqual(5.5);
+    expect(shortOnTopicRailResult.receipt.overallBand).toBeGreaterThanOrEqual(5.5);
+  });
 });

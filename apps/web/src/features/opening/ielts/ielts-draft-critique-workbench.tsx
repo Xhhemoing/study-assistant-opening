@@ -24,11 +24,12 @@ import {
   EPISTEMIC_BADGE_META,
   TRANSFER_STATUS_META,
   UPGRADE_CATEGORY_LABELS,
+  buildExposedGuidanceMatcher,
   collectAssistedFingerprints,
   formatBandScore,
   formatTimeBox,
   matchesAssistedFingerprint,
-  normalizeAssistedTextKey,
+  matchesExposedGuidance,
   segmentParagraphWithSpans,
   type DraftViewMode,
 } from "./workbench-model";
@@ -109,6 +110,18 @@ function collectFixtureSampleSources(fixture: IeltsWorkbenchFixture): string[] {
   return sources;
 }
 
+function collectVisibleWritingGuidanceSources(
+  fixture: IeltsWorkbenchFixture,
+  receipt: IeltsRubricReceipt,
+): string[] {
+  const sources: string[] = [];
+  const d1 = draftEditorText(fixture.draft1).trim();
+  if (d1) sources.push(d1);
+  sources.push(...collectReceiptUpgradeRewrites(fixture.draft1Receipt));
+  sources.push(...collectReceiptUpgradeRewrites(receipt));
+  return [...new Set(sources)];
+}
+
 function stableSerialize(value: unknown): string {
   return JSON.stringify(value, (_key, nested: unknown) => {
     if (nested === null || typeof nested !== "object" || Array.isArray(nested)) return nested;
@@ -178,6 +191,7 @@ export function IeltsDraftCritiqueWorkbench({
     fixture.transferReport,
   );
   const authoritative = {
+    promptId: fixture.promptId,
     attemptKey,
     authorityFingerprint,
     draft2: fixture.draft2,
@@ -207,6 +221,9 @@ export function IeltsDraftCritiqueWorkbench({
     (fixture.draft2.assisted ||
       Boolean(fixture.draft2Receipt.sourceDraft?.assisted) ||
       matchesAssistedFingerprint(authoritativeDraft2Text, initialAssistedFingerprints));
+  const initialRestoredGuidanceSources = hasPreloadedSubmission
+    ? collectVisibleWritingGuidanceSources(fixture, fixture.draft2Receipt)
+    : [];
 
   const [hasSubmitted, setHasSubmitted] = useState(hasPreloadedSubmission);
   const [hintsRevealed, setHintsRevealed] = useState(false);
@@ -225,12 +242,20 @@ export function IeltsDraftCritiqueWorkbench({
   const [localAssistedSources, setLocalAssistedSources] = useState<readonly string[]>(
     () => initialAssistedSources,
   );
-  const [deferredPostSubmit, setDeferredPostSubmit] = useState<{
-    readonly evaluatedKey: string;
-    readonly sources: readonly string[];
-  } | null>(null);
+  // Monotonic per-prompt history of visible exemplar/critique guidance.
+  // Seeded immediately from any initial/restored visible receipt on mount so copying a displayed
+  // rewrite or baseline exemplar before reset is always detected as assisted.
+  const [exposedGuidanceSources, setExposedGuidanceSources] = useState<readonly string[]>(
+    () => initialRestoredGuidanceSources,
+  );
+  const [unassistedBaselineTexts, setUnassistedBaselineTexts] = useState<readonly string[]>(() =>
+    hasPreloadedSubmission && !initiallyLatched && authoritativeDraft2Text.trim().length > 0
+      ? [authoritativeDraft2Text]
+      : [],
+  );
 
   if (evaluation.authorityFingerprint !== authorityFingerprint) {
+    const samePrompt = evaluation.promptId === fixture.promptId;
     setEvaluation({ ...authoritative, cachedFingerprint: null });
     setComposerNeedsText(false);
     setSelectedSpanId(null);
@@ -243,17 +268,29 @@ export function IeltsDraftCritiqueWorkbench({
       const nextAssistedSources = isOwnWriteBack
         ? [...new Set([...localAssistedSources, ...authoritativeAssistedSources])]
         : initialAssistedSources;
+      const nextExposedSources = samePrompt
+        ? [...new Set([...exposedGuidanceSources, ...initialRestoredGuidanceSources])]
+        : initialRestoredGuidanceSources;
       const nextFingerprints = collectAssistedFingerprints(nextAssistedSources);
       const nextLatched = isOwnWriteBack
         ? attemptAssistedLatched || initiallyLatched
         : initiallyLatched;
+      const nextBaselines = isOwnWriteBack
+        ? hasPreloadedSubmission && !nextLatched && authoritativeDraft2Text.trim().length > 0
+          ? [...new Set([...unassistedBaselineTexts, authoritativeDraft2Text])]
+          : unassistedBaselineTexts
+        : hasPreloadedSubmission && !nextLatched && authoritativeDraft2Text.trim().length > 0
+          ? [authoritativeDraft2Text]
+          : [];
+      const nextExposedMatcher = buildExposedGuidanceMatcher(nextExposedSources, nextBaselines);
       setLocalAssistedSources(nextAssistedSources);
+      setExposedGuidanceSources(nextExposedSources);
+      setUnassistedBaselineTexts(nextBaselines);
       setAttemptAssistedLatched(nextLatched);
       setHasSubmitted(hasPreloadedSubmission);
       if (!isOwnWriteBack) {
         setHintsRevealed(false);
         setResetPastAuthorityFingerprint(null);
-        setDeferredPostSubmit(null);
       }
       setComposerText(
         hasPreloadedSubmission ? draftEditorText(fixture.draft2) : (initialDraft ?? ""),
@@ -261,7 +298,8 @@ export function IeltsDraftCritiqueWorkbench({
       setComposerAssisted(
         nextLatched ||
           (hasPreloadedSubmission &&
-            matchesAssistedFingerprint(authoritativeDraft2Text, nextFingerprints)),
+            (matchesAssistedFingerprint(authoritativeDraft2Text, nextFingerprints) ||
+              matchesExposedGuidance(authoritativeDraft2Text, nextExposedMatcher))),
       );
       setViewMode(initialView);
       setCriterionFilter("ALL");
@@ -271,10 +309,34 @@ export function IeltsDraftCritiqueWorkbench({
       if (authoritativeAssistedSources.some((src) => !localAssistedSources.includes(src))) {
         setLocalAssistedSources([...new Set([...localAssistedSources, ...authoritativeAssistedSources])]);
       }
+      if (initialRestoredGuidanceSources.some((src) => !exposedGuidanceSources.includes(src))) {
+        setExposedGuidanceSources([...new Set([...exposedGuidanceSources, ...initialRestoredGuidanceSources])]);
+      }
+      if (
+        !fixture.draft2.assisted &&
+        !fixture.draft2Receipt.sourceDraft?.assisted &&
+        authoritativeDraft2Text.trim().length > 0 &&
+        !unassistedBaselineTexts.includes(authoritativeDraft2Text)
+      ) {
+        setUnassistedBaselineTexts([...unassistedBaselineTexts, authoritativeDraft2Text]);
+      }
       if (fixture.draft2.assisted || Boolean(fixture.draft2Receipt.sourceDraft?.assisted)) {
         setAttemptAssistedLatched(true);
         setComposerAssisted(true);
       }
+    }
+  }
+
+  const currentlyVisibleGuidance = useMemo(
+    () => (hasSubmitted ? collectVisibleWritingGuidanceSources(fixture, draft2Receipt) : []),
+    [hasSubmitted, fixture, draft2Receipt],
+  );
+  if (hasSubmitted && currentlyVisibleGuidance.length > 0) {
+    const missingGuidance = currentlyVisibleGuidance.filter(
+      (source) => !exposedGuidanceSources.includes(source),
+    );
+    if (missingGuidance.length > 0) {
+      setExposedGuidanceSources([...exposedGuidanceSources, ...missingGuidance]);
     }
   }
 
@@ -287,15 +349,19 @@ export function IeltsDraftCritiqueWorkbench({
       ]),
     [localAssistedSources, authoritativeAssistedSources, hasSubmitted, draft2, draft2Receipt],
   );
+  const exposedGuidanceMatcher = useMemo(
+    () => buildExposedGuidanceMatcher(exposedGuidanceSources, unassistedBaselineTexts),
+    [exposedGuidanceSources, unassistedBaselineTexts],
+  );
   const draft2EffectivelyAssisted =
     attemptAssistedLatched ||
     (hasSubmitted && draft2.assisted) ||
     (hasSubmitted &&
-      matchesAssistedFingerprint(draftEditorText(draft2), stickyAssistedFingerprints));
-  const isComposerMatchingAssistedText = matchesAssistedFingerprint(
-    composerText,
-    stickyAssistedFingerprints,
-  );
+      (matchesAssistedFingerprint(draftEditorText(draft2), stickyAssistedFingerprints) ||
+        matchesExposedGuidance(draftEditorText(draft2), exposedGuidanceMatcher)));
+  const isComposerMatchingAssistedText =
+    matchesAssistedFingerprint(composerText, stickyAssistedFingerprints) ||
+    matchesExposedGuidance(composerText, exposedGuidanceMatcher);
   const isComposerStickyAssisted = attemptAssistedLatched || isComposerMatchingAssistedText;
   const effectiveComposerAssisted = composerAssisted || isComposerStickyAssisted;
 
@@ -409,14 +475,15 @@ export function IeltsDraftCritiqueWorkbench({
   function handleRevealScaffold() {
     const sampleSources = [
       ...collectFixtureSampleSources(fixture),
-      ...(deferredPostSubmit?.sources ?? []),
+      ...exposedGuidanceSources,
+      ...currentlyVisibleGuidance,
     ];
     const currentTrimmed = composerText.trim();
     if (currentTrimmed) sampleSources.push(currentTrimmed);
     setHintsRevealed(true);
     setAttemptAssistedLatched(true);
     setComposerAssisted(true);
-    setDeferredPostSubmit(null);
+    setUnassistedBaselineTexts([]);
     if (sampleSources.length > 0) {
       setLocalAssistedSources((current) => [...new Set([...current, ...sampleSources])]);
     }
@@ -424,24 +491,19 @@ export function IeltsDraftCritiqueWorkbench({
 
   function handleAnalyzeRevision() {
     const paragraphs = composerText.split(PARAGRAPH_BREAK);
-    const composerKey = normalizeAssistedTextKey(composerText);
-    const shouldPromoteDeferred =
-      deferredPostSubmit !== null &&
-      deferredPostSubmit.sources.length > 0 &&
-      composerKey !== deferredPostSubmit.evaluatedKey;
-    const activeFingerprints = shouldPromoteDeferred
-      ? collectAssistedFingerprints([
-          ...localAssistedSources,
-          ...authoritativeAssistedSources,
-          ...(hasSubmitted ? collectAssistedWritingSources(draft2, draft2Receipt) : []),
-          ...deferredPostSubmit.sources,
-        ])
-      : stickyAssistedFingerprints;
+    const mergedExposedSources = [
+      ...new Set([...exposedGuidanceSources, ...currentlyVisibleGuidance]),
+    ];
+    const activeExposedMatcher =
+      mergedExposedSources.length > exposedGuidanceSources.length
+        ? buildExposedGuidanceMatcher(mergedExposedSources, unassistedBaselineTexts)
+        : exposedGuidanceMatcher;
     const nextAssisted =
       isDemoPreview ||
       composerAssisted ||
       attemptAssistedLatched ||
-      matchesAssistedFingerprint(composerText, activeFingerprints);
+      matchesAssistedFingerprint(composerText, stickyAssistedFingerprints) ||
+      matchesExposedGuidance(composerText, activeExposedMatcher);
     const baseDraft: IeltsEssayDraft = hasSubmitted
       ? draft2
       : {
@@ -486,48 +548,28 @@ export function IeltsDraftCritiqueWorkbench({
       return;
     }
 
-    const wasUnsubmitted = !hasSubmitted;
     setComposerNeedsText(false);
     setHasSubmitted(true);
     setRevisionCount(nextCount);
-    const newlyTrackedSources: string[] = shouldPromoteDeferred
-      ? [...deferredPostSubmit.sources]
-      : [];
     if (updatedDraft.assisted) {
       setAttemptAssistedLatched(true);
       setComposerAssisted(true);
       const trimmedSource = composerText.trim();
       if (trimmedSource) {
-        newlyTrackedSources.push(trimmedSource);
+        setLocalAssistedSources((current) => [...new Set([...current, trimmedSource])]);
       }
     }
-    if (newlyTrackedSources.length > 0) {
-      setLocalAssistedSources((current) => [...new Set([...current, ...newlyTrackedSources])]);
+    // Monotonically latch all newly displayed critique rewrites and unlocked baseline exemplars
+    // so any subsequent edit or reset retry that copies them is marked assisted.
+    const newlyVisibleGuidance = collectVisibleWritingGuidanceSources(fixture, evaluated.receipt);
+    setExposedGuidanceSources((current) => [
+      ...new Set([...current, ...mergedExposedSources, ...newlyVisibleGuidance]),
+    ]);
+    if (!updatedDraft.assisted && composerText.trim().length > 0) {
+      setUnassistedBaselineTexts((current) =>
+        current.includes(composerText) ? current : [...current, composerText],
+      );
     }
-    // Once a submission renders critique cards and unlocks draft1/exemplar rewrites,
-    // defer those newly displayed guidance texts keyed to the just-evaluated submission so the
-    // current submission is never retroactively tainted, while any subsequent edit or reset retry checks them.
-    const nextPostSubmitSources: string[] = [
-      ...collectReceiptUpgradeRewrites(evaluated.receipt),
-    ];
-    if (wasUnsubmitted) {
-      const d1Text = draftEditorText(fixture.draft1).trim();
-      if (d1Text) nextPostSubmitSources.push(d1Text);
-      nextPostSubmitSources.push(...collectReceiptUpgradeRewrites(fixture.draft1Receipt));
-    }
-    setDeferredPostSubmit(
-      nextPostSubmitSources.length > 0
-        ? {
-            evaluatedKey: composerKey,
-            sources: [
-              ...new Set([
-                ...(shouldPromoteDeferred ? [] : (deferredPostSubmit?.sources ?? [])),
-                ...nextPostSubmitSources,
-              ]),
-            ],
-          }
-        : null,
-    );
     setEvaluation({
       ...authoritative,
       draft2: updatedDraft,
@@ -562,7 +604,10 @@ export function IeltsDraftCritiqueWorkbench({
       setSelectedSpanId(null);
       return;
     }
-    const retainedSources: string[] = [...(deferredPostSubmit?.sources ?? [])];
+    const retainedSources: string[] = [
+      ...exposedGuidanceSources,
+      ...currentlyVisibleGuidance,
+    ];
     if (hintsRevealed || attemptAssistedLatched || effectiveComposerAssisted) {
       const currentTrimmed = composerText.trim();
       if (currentTrimmed) retainedSources.push(currentTrimmed);
@@ -570,16 +615,10 @@ export function IeltsDraftCritiqueWorkbench({
     if (hintsRevealed) {
       retainedSources.push(...collectFixtureSampleSources(fixture));
     }
-    if (hasSubmitted) {
-      const d1Text = draftEditorText(fixture.draft1).trim();
-      if (d1Text) retainedSources.push(d1Text);
-      retainedSources.push(...collectReceiptUpgradeRewrites(fixture.draft1Receipt));
-      retainedSources.push(...collectReceiptUpgradeRewrites(draft2Receipt));
-    }
     if (retainedSources.length > 0) {
       setLocalAssistedSources((current) => [...new Set([...current, ...retainedSources])]);
     }
-    setDeferredPostSubmit(null);
+    setUnassistedBaselineTexts([]);
     setHasSubmitted(false);
     setHintsRevealed(false);
     setAttemptAssistedLatched(false);
@@ -1017,28 +1056,24 @@ export function IeltsDraftCritiqueWorkbench({
                     placeholder={`在此独立撰写你的二稿改写（空行分段，建议 ${fixture.targetWordCount}+ 词）...`}
                     onChange={(event) => {
                       const nextValue = event.target.value;
-                      const nextKey = normalizeAssistedTextKey(nextValue);
-                      const shouldPromoteDeferred =
-                        deferredPostSubmit !== null &&
-                        deferredPostSubmit.sources.length > 0 &&
-                        nextKey !== deferredPostSubmit.evaluatedKey;
-                      const activeFingerprints = shouldPromoteDeferred
-                        ? collectAssistedFingerprints([
-                            ...localAssistedSources,
-                            ...authoritativeAssistedSources,
-                            ...(hasSubmitted
-                              ? collectAssistedWritingSources(draft2, draft2Receipt)
-                              : []),
-                            ...deferredPostSubmit.sources,
-                          ])
-                        : stickyAssistedFingerprints;
-                      if (shouldPromoteDeferred) {
-                        setLocalAssistedSources((current) => [
-                          ...new Set([...current, ...deferredPostSubmit.sources]),
-                        ]);
-                        setDeferredPostSubmit(null);
+                      const mergedExposedSources =
+                        currentlyVisibleGuidance.length > 0
+                          ? [...new Set([...exposedGuidanceSources, ...currentlyVisibleGuidance])]
+                          : exposedGuidanceSources;
+                      if (mergedExposedSources.length > exposedGuidanceSources.length) {
+                        setExposedGuidanceSources(mergedExposedSources);
                       }
-                      if (matchesAssistedFingerprint(nextValue, activeFingerprints)) {
+                      const activeExposedMatcher =
+                        mergedExposedSources.length > exposedGuidanceSources.length
+                          ? buildExposedGuidanceMatcher(
+                              mergedExposedSources,
+                              unassistedBaselineTexts,
+                            )
+                          : exposedGuidanceMatcher;
+                      if (
+                        matchesAssistedFingerprint(nextValue, stickyAssistedFingerprints) ||
+                        matchesExposedGuidance(nextValue, activeExposedMatcher)
+                      ) {
                         setAttemptAssistedLatched(true);
                         setComposerAssisted(true);
                       }

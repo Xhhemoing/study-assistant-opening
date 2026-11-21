@@ -468,6 +468,138 @@ export function matchesAssistedFingerprint(
   return false;
 }
 
+export type NovelAssistedFingerprint = {
+  readonly key: string | null;
+  readonly shingles9: ReadonlySet<string>;
+  readonly shortCueShingles7: ReadonlySet<string>;
+  readonly novelShingles5: ReadonlySet<string>;
+  readonly passageKeys: readonly string[];
+};
+
+export type ExposedGuidanceMatcher = {
+  readonly fullFingerprints: readonly AssistedFingerprint[];
+  readonly novelFingerprints: readonly NovelAssistedFingerprint[];
+};
+
+/**
+ * Builds an append-only matcher for visibly exposed guidance (cues, rewrites,
+ * baseline drafts) relative to already-evaluated unassisted baseline texts.
+ * - Guidance that did not already match any baseline uses full fuzzy/passage/shingle matching.
+ * - Guidance that fuzzily overlapped a baseline (e.g. a minor critique tweak of a restored
+ *   unassisted sentence) still tracks every novel phrase, 9-word shingle, and novel 5-gram cluster
+ *   that was not in the baseline so copying the rewrite is caught without tainting unrelated edits.
+ */
+export function buildExposedGuidanceMatcher(
+  sources: readonly string[],
+  baselineTexts: readonly string[] = [],
+): ExposedGuidanceMatcher {
+  const allFingerprints = collectAssistedFingerprints(sources);
+  if (allFingerprints.length === 0) {
+    return { fullFingerprints: [], novelFingerprints: [] };
+  }
+  const nonEmptyBaselines = baselineTexts.filter((text) => text.trim().length > 0);
+  const baselineFingerprints = collectAssistedFingerprints(nonEmptyBaselines);
+  if (baselineFingerprints.length === 0) {
+    return { fullFingerprints: allFingerprints, novelFingerprints: [] };
+  }
+  const baselineShingles7 = baselineFingerprints.map((fp) =>
+    buildContiguousShingles(fp.tokens, 7),
+  );
+
+  const fullFingerprints: AssistedFingerprint[] = [];
+  const novelFingerprints: NovelAssistedFingerprint[] = [];
+
+  for (const fp of allFingerprints) {
+    const alreadyMatchedByBaseline = nonEmptyBaselines.some((base) =>
+      matchesAssistedFingerprint(base, [fp]),
+    );
+    if (!alreadyMatchedByBaseline) {
+      fullFingerprints.push(fp);
+      continue;
+    }
+
+    const key =
+      fp.tokens.length >= 8 && baselineFingerprints.every((b) => !b.key.includes(fp.key))
+        ? fp.key
+        : null;
+    const shingles9 = new Set<string>();
+    for (const s of fp.shingles9) {
+      if (baselineFingerprints.every((b) => !b.shingles9.has(s))) {
+        shingles9.add(s);
+      }
+    }
+    const shortCueShingles7 = new Set<string>();
+    for (const s of fp.shortCueShingles7) {
+      if (baselineShingles7.every((b7) => !b7.has(s))) {
+        shortCueShingles7.add(s);
+      }
+    }
+    const novelShingles5 = new Set<string>();
+    for (const s of fp.shingles) {
+      if (baselineFingerprints.every((b) => !b.shingles.has(s))) {
+        novelShingles5.add(s);
+      }
+    }
+    const passageKeys = fp.passages
+      .map((passage) => passage.key)
+      .filter((pk) => baselineFingerprints.every((b) => !b.key.includes(pk)));
+
+    if (
+      key !== null ||
+      shingles9.size > 0 ||
+      shortCueShingles7.size > 0 ||
+      novelShingles5.size >= 3 ||
+      passageKeys.length > 0
+    ) {
+      novelFingerprints.push({
+        key,
+        shingles9,
+        shortCueShingles7,
+        novelShingles5,
+        passageKeys,
+      });
+    }
+  }
+
+  return { fullFingerprints, novelFingerprints };
+}
+
+export function matchesExposedGuidance(
+  candidateText: string,
+  matcher: ExposedGuidanceMatcher,
+): boolean {
+  if (matchesAssistedFingerprint(candidateText, matcher.fullFingerprints)) {
+    return true;
+  }
+  if (matcher.novelFingerprints.length === 0) return false;
+  const candidate = buildAssistedFingerprint(candidateText);
+  if (!candidate) return false;
+  const candidateShingles7 = buildContiguousShingles(candidate.tokens, 7);
+
+  for (const nfp of matcher.novelFingerprints) {
+    if (nfp.key && candidate.key.includes(nfp.key)) return true;
+    for (const s of nfp.shingles9) {
+      if (candidate.shingles9.has(s)) return true;
+    }
+    for (const s of nfp.shortCueShingles7) {
+      if (candidateShingles7.has(s)) return true;
+    }
+    for (const pk of nfp.passageKeys) {
+      if (candidate.key.includes(pk)) return true;
+    }
+    if (nfp.novelShingles5.size >= 3 && candidate.shingles.size > 0) {
+      let hits = 0;
+      for (const s of nfp.novelShingles5) {
+        if (candidate.shingles.has(s)) hits += 1;
+      }
+      if (hits >= Math.max(2, Math.ceil(nfp.novelShingles5.size * 0.5))) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 export type ParagraphHighlightSegment =
   | { readonly kind: "text"; readonly text: string }
   | { readonly kind: "span"; readonly text: string; readonly span: IeltsSpanEvidence };
