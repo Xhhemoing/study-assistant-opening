@@ -83,6 +83,11 @@ const CLOSED_DIRECTORY_NAMES = new Set([
   "stack-408-v1",
   "ielts-writing-speaking-v1",
 ]);
+const CLOSED_DOMAIN_SUBTREES = [
+  "commercial-resilience", "resilience-canary-shredding", "metacognition", "multimodal-evidence",
+  "offline-companion-bridge", "stage0-simulator",
+  "opening/cartridges", "opening/exam-sprint", "opening/share", "opening/teachback-arena",
+].map(dir => `packages/domain/src/${dir}`);
 
 const slash = (value: string) => value.replaceAll("\\", "/");
 const normalizeFile = (file: string) => path.normalize(path.resolve(file));
@@ -103,7 +108,8 @@ function isClosedFile(file: string, root: string): boolean {
     segments.some(segment => /(?:^|[-_])(?:l3|l4|0109|seeded-recipe|flagship)(?:[-_]|$)/u.test(segment)) ||
     /(?:^|\/)0109(?:\/|[-_.]|$)/u.test(relative) ||
     /^packages\/(?:ai|database)\//u.test(relative) ||
-    /^packages\/domain\/src\/opening\/(?:exam-sprint\/|cartridges\/|span-)/u.test(relative);
+    CLOSED_DOMAIN_SUBTREES.some(dir => relative === dir || relative.startsWith(`${dir}/`)) ||
+    relative.startsWith("packages/domain/src/opening/span-");
 }
 
 function isStringRecord(value: unknown): value is Record<string, unknown> {
@@ -2388,6 +2394,33 @@ describe("v3 Open-Core public candidate boundary", () => {
   it.each(["diagnostic-placement", "remedy-clinic", "rubric-calibration", "exam-forecast"])("blocks Wave P directory %s", name => {
     const file = `packages/${name === "rubric-calibration" ? "ai" : "domain"}/src/${name}/index.ts`;
     const { violations } = virtualAnalyze({ "index.ts": `export * from "./${file}";`, [file]: "export {};" }, "index.ts");
+    expect(violations.map(v => v.target)).toEqual([file]);
+  });
+
+  it.each([
+    "commercial-resilience/index", "commercial-resilience/three-ledgers",
+    "resilience-canary-shredding/index", "resilience-canary-shredding/envelope-crypto-shredding",
+    "metacognition/index", "multimodal-evidence/index",
+    "opening/cartridges/index", "opening/share/catalog", "opening/teachback-arena/index",
+  ])("rejects a native candidate re-export of the installed domain module %s", module => {
+    const root = path.resolve(__dirname, "../..");
+    const entry = path.join(root, "packages/domain/src/portability/native/index.ts");
+    const target = `packages/domain/src/${module}.ts`;
+    const file = path.join(root, target);
+    expect(statSync(file, { throwIfNoEntry: false })?.isFile()).toBe(true);
+    // Overlay only the public entry. The relative re-export resolves against the real repository.
+    const files = new Map([[entry, `export * from "../../${module}";`]]);
+    const { violations } = analyzeModuleGraph([entry], { root, files, profile: "portable-runtime" });
+    expect(violations.map(v => v.target)).toEqual([target]);
+    expect(isClosedFile(path.dirname(file), root)).toBe(true);
+    expect(isClosedFile(file, root)).toBe(true);
+  });
+
+  it.each(["offline-companion-bridge", "stage0-simulator"])("reserves the private domain engine %s", name => {
+    const entry = "packages/domain/src/portability/native/index.ts";
+    const file = `packages/domain/src/${name}/index.ts`;
+    const { violations } = virtualAnalyze({ [entry]: `export * from "../../${name}/index";`, [file]: "export {};" },
+      entry, undefined, "portable-runtime");
     expect(violations.map(v => v.target)).toEqual([file]);
   });
 

@@ -89,22 +89,34 @@ surface, public package graph, portable export, vector index, or community editi
   sealed` discourse AST pre-splitting and sparse approximately 15-line PPR retrieval.
 - `packages/ai/src/tutor-graph/**` contains the four-node `TutorGraph`, Min-Entropy
   prompt-budget pre-deduction, and the deterministic sub-550ms Socratic fast path.
-- `packages/ai/src/cartridge-compiler/**` contains the Stage-0 768-turn student
-  simulator, the GEPA `(C, -L, T7)` Pareto compiler, and
-  `AnchorCalibratedRubricV1` position-swap anchor calibration.
+- Stage 0 reserves `packages/domain/src/stage0-simulator/**` for the 768-episode
+  student simulator and promotion checks. `packages/ai/src/cartridge-compiler/**`
+  owns the GEPA `(C, -L, T7)` Pareto compiler. The entire `packages/ai/src/**`
+  tree is private.
 - Wave P reserves `packages/domain/src/diagnostic-placement/**`,
   `packages/domain/src/remedy-clinic/**`, and `packages/domain/src/exam-forecast/**`
   for the commercial diagnostic, remediation, and forecasting engines.
-- Wave P also reserves `packages/ai/src/rubric-calibration/**` for commercial rubric
-  calibration.
+- Wave P also reserves `packages/ai/src/rubric-calibration/**` for
+  `AnchorCalibratedRubricV1` position-swap anchor calibration.
+- Wave R keeps the millionth-precision three-ledger margin guard and bilateral cohort privacy gate
+  (`E >= 5 & N-E >= 5`) in `packages/domain/src/commercial-resilience/**`.
+  `packages/domain/src/resilience-canary-shredding/**` owns the 15-minute drift
+  sentinel, canary rollback, and envelope-encryption erasure.
+- `packages/domain/src/metacognition/**` owns confidence routing, Brier calibration,
+  and wheel-spinning detection. `packages/domain/src/multimodal-evidence/**` owns
+  handwriting verification and speech timing. Both Wave R engines are private.
+- Wave R reserves `packages/domain/src/offline-companion-bridge/**` for the
+  12-hour offline lease and companion pairing for scanned scratch paper.
 - L3-L4 flagship cartridges and the `SeededRecipe` rational-variant generator,
   including `stack-408-v1`, `ielts-writing-speaking-v1`, `span-*`, and
   `exam-sprint` assets, remain private.
-- The `0109` reserved exam-question vault, `0113+` `btree_gist` bitemporal error
-  memory, and the Wave R margin and privacy controls remain private. The Wave R controls
-  include the millionth-precision three-ledger guard, bilateral privacy gate
-  `E >= 5 & N-E >= 5`, offline 12-hour lease, scanned scratch paper, 15-minute drift
-  sentinel, and envelope-encryption erasure.
+- The hosted product retains `packages/domain/src/opening/cartridges/**` (cartridges
+  and evidence gates), `packages/domain/src/opening/teachback-arena/**` (authored
+  rubrics and retest rules), and `packages/domain/src/opening/share/**` (share-card
+  catalog). Learners can view share cards. The catalog source stays outside the
+  Community Edition.
+- The `0109` reserved exam-question vault and `0113+` `btree_gist` bitemporal
+  error memory remain private.
 
 Closed-core classification applies through aliases and transitive paths. A package name,
 relative path, `#*` import alias, type-only edge, dynamic import, or `require` call does
