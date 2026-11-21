@@ -804,6 +804,142 @@ describe("bounded symbolic equivalence", () => {
     expect(normalizeLatexExpr(deepBraces)).toBeNull();
     expect(performance.now() - tDeepNestStart).toBeLessThan(200);
   });
+
+  it("closes Round-16 matrix/joint-domain witness, LaTeX matrix literals, and deep flat-chain stack guards", () => {
+    // Round-16 P1-2 Issue A: const word differences check positively defined domain sites instead of hardcoded x = 0
+    expect(
+      verifyMatrixExpressionEquivalence("A / x + sin(x) * C + B", "A / x + sin(x) * C + 2 * B", {
+        variable: "x",
+        nonCommutativeVars: ["A", "B", "C"],
+        intervals: [{ left: 1, right: 2 }],
+      }).status,
+    ).toBe("inequivalent");
+    expect(
+      verifyMatrixExpressionEquivalence("A / x + sin(x) * C + B", "(A + B * x) / x + sin(x) * C", {
+        variable: "x",
+        nonCommutativeVars: ["A", "B", "C"],
+        intervals: [{ left: 1, right: 2 }],
+      }).status,
+    ).toBe("equivalent");
+
+    // Round-16 P1-2 Mid-turn steer: disjoint non-rational domains fail closed unverified instead of inequivalent/equivalent
+    const disjointNonRatDiff = verifyMatrixExpressionEquivalence(
+      "sqrt((x^2 - 6) * (x - 1)) * A + sqrt(cos(x) + 3 / 4) * C + B",
+      "sqrt((x^2 - 6) * (x - 1)) * A + sqrt(cos(x) + 3 / 4) * C + 2 * B",
+      {
+        variable: "x",
+        nonCommutativeVars: ["A", "B", "C"],
+        intervals: [{ left: 2, right: 3 }],
+      },
+    );
+    expect(disjointNonRatDiff.status).toBe("unverified");
+    const disjointNonRatSame = verifyMatrixExpressionEquivalence(
+      "sqrt((x^2 - 6) * (x - 1)) * A + sqrt(cos(x) + 3 / 4) * C + B",
+      "sqrt((x^2 - 6) * (x - 1)) * A + sqrt(cos(x) + 3 / 4) * C + B",
+      {
+        variable: "x",
+        nonCommutativeVars: ["A", "B", "C"],
+        intervals: [{ left: 2, right: 3 }],
+      },
+    );
+    expect(disjointNonRatSame.status).toBe("unverified");
+
+    // Round-16 P1-2 Issue B: LaTeX pmatrix/bmatrix/matrix/vmatrix literals & joint-domain verification
+    expect(
+      verifyMatrixExpressionEquivalence(
+        "\\begin{pmatrix} 1/(x-2) & \\sin(x) \\end{pmatrix}",
+        "\\begin{pmatrix} x/(x^2-2x) & \\sin(x) \\end{pmatrix}",
+      ),
+    ).toMatchObject({
+      status: "inequivalent",
+      reason: "natural_domain_mismatch",
+    });
+    expect(
+      verifyScalarEquivalence(
+        "\\begin{pmatrix} 1/(x-2) & \\sin(x) \\end{pmatrix}",
+        "\\begin{pmatrix} x/(x^2-2x) & \\sin(x) \\end{pmatrix}",
+      ),
+    ).toMatchObject({
+      status: "inequivalent",
+      reason: "natural_domain_mismatch",
+    });
+    expect(
+      verifyMatrixExpressionEquivalence(
+        "\\begin{pmatrix} 1/(x-2) & \\sin(x) \\end{pmatrix}",
+        "\\begin{pmatrix} x/(x^2-2x) & \\sin(x) \\end{pmatrix}",
+        { intervals: [{ left: 3, right: 4 }] },
+      ).status,
+    ).toBe("equivalent");
+    expect(
+      verifyScalarEquivalence(
+        "\\begin{pmatrix} 1/(x-2) & \\sin(x) \\end{pmatrix}",
+        "\\begin{pmatrix} x/(x^2-2x) & \\sin(x) \\end{pmatrix}",
+        { intervals: [{ left: 3, right: 4 }] },
+      ).status,
+    ).toBe("equivalent");
+    expect(
+      verifyMatrixExpressionEquivalence(
+        "2 * \\begin{bmatrix} x & 1 \\end{bmatrix} + \\begin{matrix} 1 & x \\end{matrix}",
+        "\\begin{pmatrix} 2*x + 1 & x + 2 \\end{pmatrix}",
+      ).status,
+    ).toBe("equivalent");
+    expect(
+      verifyMatrixExpressionEquivalence(
+        "\\begin{pmatrix} 1 & x \\\\ 0 & 1 \\end{pmatrix} * \\begin{pmatrix} 2 \\\\ 3 \\end{pmatrix}",
+        "\\begin{pmatrix} 2 + 3*x \\\\ 3 \\end{pmatrix}",
+      ).status,
+    ).toBe("equivalent");
+    expect(
+      verifyMatrixExpressionEquivalence(
+        "\\begin{vmatrix} a & b \\\\ c & d \\end{vmatrix}",
+        "d*a - c*b",
+      ).status,
+    ).toBe("equivalent");
+    expect(
+      verifyScalarEquivalence(
+        "\\begin{vmatrix} a & b \\\\ c & d \\end{vmatrix}",
+        "a*d - b*c",
+      ).status,
+    ).toBe("equivalent");
+    expect(
+      verifyMatrixExpressionEquivalence(
+        "\\begin{pmatrix} 1 & 2 \\end{pmatrix}",
+        "\\begin{pmatrix} 1 \\\\ 2 \\end{pmatrix}",
+      ),
+    ).toMatchObject({
+      status: "inequivalent",
+      reason: "matrix_dimension_mismatch",
+    });
+
+    // Round-16 P1-3: long flat chains and programmatic 20,000-deep ScalarExpr chains never overflow call stack
+    const longSum = Array(20_000).fill("x").join("+");
+    const longProd = Array(20_000).fill("x").join("*");
+    expect(verifyScalarEquivalence(longSum, "x")).toMatchObject({
+      status: "unverified",
+      reason: "polynomial_complexity_exceeded",
+    });
+    expect(verifyScalarEquivalence(longProd, "x")).toMatchObject({
+      status: "unverified",
+      reason: "polynomial_complexity_exceeded",
+    });
+    expect(parseScalarExpr(longSum)).toBeNull();
+    expect(parseScalarExpr(longProd)).toBeNull();
+
+    let deepSumAst: ScalarExpr = { kind: "variable", name: "x" };
+    for (let i = 0; i < 20_000; i++) {
+      deepSumAst = { kind: "add", left: deepSumAst, right: { kind: "const", value: 1 } };
+    }
+    expect(verifyScalarEquivalence(deepSumAst, "x")).toMatchObject({
+      status: "unverified",
+      reason: "polynomial_complexity_exceeded",
+    });
+    expect(verifyMatrixExpressionEquivalence(deepSumAst, "A", { nonCommutativeVars: ["A"] })).toMatchObject({
+      status: "unverified",
+      reason: "polynomial_complexity_exceeded",
+    });
+    expect(differentiate(deepSumAst, "x")).toBeNull();
+    expect(simplifyRadical(deepSumAst)).toBe(deepSumAst);
+  });
 });
 
 describe("exact rational subspaces", () => {

@@ -736,13 +736,57 @@ describe("TutorGraph fast path", () => {
       expect(oneRes.state).toBe("released");
       expect(oneB.leakageBits).toBe(1);
       expect(JSON.stringify(oneRes)).not.toContain("SECRET_42");
-      expect(oneRes.verification.steps).toEqual([
-        { id: "c1", text: "x^2", status: "unknown", dependsOn: [] },
-        { id: "c2", text: "2x", status: "unknown", dependsOn: ["c1"] },
-      ]);
-      expect(oneRes.publicTeaching?.learnerSteps).toEqual(oneRes.verification.steps);
+      expect(oneRes.verification.steps).toEqual([]);
+      expect(oneRes.publicTeaching?.learnerSteps).toEqual([]);
+      expect(JSON.stringify(oneRes)).not.toContain("x^2");
       oneBitOutcomes.add(JSON.stringify(oneRes));
     }
+
+    // Round-16 P1-1: pure-mode release guard must not create a 0-bit answer-guessing oracle from learner submission text or blocked prompts
+    for (const verifierFn of [
+      () => ({ steps: [] }),
+      () => {
+        throw new Error("SECRET_ANSWER_42");
+      },
+    ]) {
+      const guessRightBudget = createMinEntropyBudget({ scaffoldBitBudget: 1.5, now: () => 1000 });
+      const guessWrongBudget = createMinEntropyBudget({ scaffoldBitBudget: 1.5, now: () => 1000 });
+      const rightRes = runTutorGraph({
+        questionStem: "积分",
+        submission: { steps: [{ id: "s1", text: "SECRET_ANSWER_42" }] },
+        budget: guessRightBudget,
+        attemptSubmitted: true,
+        verifyCaps: { verify: verifierFn, assertCurrent: () => undefined },
+        releaseCaps: { assertCurrent: () => undefined, answerLeakageBlocker: (text) => text.includes("SECRET_ANSWER_42") },
+      });
+      const wrongRes = runTutorGraph({
+        questionStem: "积分",
+        submission: { steps: [{ id: "s1", text: "completely_wrong_attempt" }] },
+        budget: guessWrongBudget,
+        attemptSubmitted: true,
+        verifyCaps: { verify: verifierFn, assertCurrent: () => undefined },
+        releaseCaps: { assertCurrent: () => undefined, answerLeakageBlocker: (text) => text.includes("SECRET_ANSWER_42") },
+      });
+      expect(rightRes.state).toBe("released");
+      expect(wrongRes.state).toBe("released");
+      expect(guessRightBudget.leakageBits).toBe(1);
+      expect(guessWrongBudget.leakageBits).toBe(1);
+      expect(rightRes).toEqual(wrongRes);
+      expect(JSON.stringify(rightRes)).not.toContain("SECRET_ANSWER_42");
+    }
+    const stemBlockedBudget = createMinEntropyBudget({ scaffoldBitBudget: 1.5, now: () => 1000 });
+    const stemBlockedPure = runTutorGraph({
+      questionStem: "Contains SECRET_ANSWER_42 in stem",
+      submission: { steps: [{ id: "s1", text: "any" }] },
+      budget: stemBlockedBudget,
+      attemptSubmitted: true,
+      verifyCaps: { verify: () => ({ steps: [{ id: "s1", text: "a", status: "valid" }] }), assertCurrent: () => undefined },
+      releaseCaps: { assertCurrent: () => undefined, answerLeakageBlocker: (text) => text.includes("SECRET_ANSWER_42") },
+    });
+    expect(stemBlockedPure.state).toBe("released");
+    expect(stemBlockedPure.releaseApproved).toBe(true);
+    expect(stemBlockedBudget.leakageBits).toBe(1);
+    expect(JSON.stringify(stemBlockedPure)).not.toContain("SECRET_ANSWER_42");
     expect(zeroBitOutcomes.size).toBe(1);
     expect(oneBitOutcomes.size).toBe(2);
 

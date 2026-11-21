@@ -215,6 +215,8 @@ function questionFor(move: MovePlan, error?: VerifyOutput["firstError"]): string
   }
 }
 
+const PURE_SAFE_CONSERVATIVE_PROMPT = "请先复查本题条件与已有步骤的推导依据，你会先检查哪一步？";
+
 function toPublicCaps(
   questionStem: string,
   steps: readonly LearnerStep[],
@@ -230,7 +232,7 @@ function toPublicCaps(
     };
     const text = allValid
       ? "你愿意先写出下一步，并说明依据吗？"
-      : "请先复查本题条件与已有步骤的推导依据，你会先检查哪一步？";
+      : PURE_SAFE_CONSERVATIVE_PROMPT;
     return {
       questionStem: String(questionStem),
       learnerSteps: projectedSteps,
@@ -440,7 +442,12 @@ export function runTutorGraph(input: TutorGraphInput): TutorGraphResult {
     return blockedByBudgetResult(budget, releaseCheck.reason ?? "budget_exhausted");
   }
 
-  const candidateSteps = shouldCoarsen ? extractSubmissionCandidateSteps(input.submission) : propagatedSteps;
+  // In pure assessment mode, never echo or release-guard raw learner-submitted text.
+  const candidateSteps = isPureTurn
+    ? []
+    : shouldCoarsen
+      ? extractSubmissionCandidateSteps(input.submission)
+      : propagatedSteps;
   let publicTeaching = toPublicCaps(
     input.questionStem,
     candidateSteps,
@@ -462,7 +469,7 @@ export function runTutorGraph(input: TutorGraphInput): TutorGraphResult {
             }
           : {}),
       };
-  // On coarsened/pure turns guardRelease never sees raw verifier data so verifier output cannot create a 3rd state.
+  // On coarsened/pure turns guardRelease never sees raw verifier data or learner submission text.
   let releasedText = guardRelease(
     publicTeaching,
     shouldCoarsen ? publicVerification : verification,
@@ -475,18 +482,25 @@ export function runTutorGraph(input: TutorGraphInput): TutorGraphResult {
     });
     releasedText = guardRelease(publicTeaching, publicVerification, input.releaseCaps);
   }
-  if (releasedText === undefined || isStopped(input.verifyCaps.stopSignal) || isStopped(input.releaseCaps.stopSignal)) {
-    const stopped = isStopped(input.releaseCaps.stopSignal) || isStopped(input.verifyCaps.stopSignal);
+  const stoppedAfterGuard = isStopped(input.verifyCaps.stopSignal) || isStopped(input.releaseCaps.stopSignal);
+  if (stoppedAfterGuard || (releasedText === undefined && !isPureTurn)) {
     return {
-      state: stopped ? "stopped" : "unverified",
+      state: stoppedAfterGuard ? "stopped" : "unverified",
       providerCalls: 0,
       verification: { steps: [] },
       leakageBits: budget.leakageBits,
       helpState: budget.state,
       cooldownUntilMs: budget.cooldownUntilMs,
       releaseApproved: false,
-      reason: stopped ? "cancelled" : "release_guard_rejected",
+      reason: stoppedAfterGuard ? "cancelled" : "release_guard_rejected",
     };
+  }
+  if (releasedText === undefined && isPureTurn) {
+    publicTeaching = toPublicCaps("", [], verification, {
+      coarsened: true,
+      allVerifiedValid: false,
+    });
+    releasedText = PURE_SAFE_CONSERVATIVE_PROMPT;
   }
 
   budget.commitRelease(requiredBits, nowMs);
