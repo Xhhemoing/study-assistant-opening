@@ -5,8 +5,10 @@ import { createOpeningPrivacyRepository } from "./opening-privacy";
 
 import {
   contextSourceRefsIncluded, mergeContextSourceRefs, parseContextMemoryDependencyIds,
-  parseContextSourceRefs, turnContextSourceRefs, type ContextSourceRef,
+  parseContextSourceRefs, turnContextSourceRefs, turnTransitiveDependenciesActive,
+  turnTransitiveDepsCte, type ContextSourceRef,
 } from "./opening-context-provenance";
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 type HistoryTurn = { role: "user" | "assistant"; text: string };
 export type TutorHistoryPurpose = "model" | "record_referents";
 export type TutorHistoryContext = {
@@ -27,22 +29,21 @@ export async function loadTutorHistoryContext(sql: Sql, scope: OpeningScope, cur
         ${turnContextSourceRefs(sql, "u")} AS user_source_refs,
         ${turnContextSourceRefs(sql, "a")} AS assistant_source_refs,
         (
+          ${turnTransitiveDepsCte(sql, "a")}
           SELECT min(m.expires_at)
-          FROM jsonb_array_elements(
-            CASE WHEN jsonb_typeof(a.context_source_refs) = 'array' THEN a.context_source_refs ELSE '[]'::jsonb END
-          ) AS dep_elem
-          CROSS JOIN LATERAL jsonb_array_elements_text(
-            CASE WHEN dep_elem = jsonb_build_object('memoryDependencyIds', dep_elem->'memoryDependencyIds')
-              AND jsonb_typeof(dep_elem->'memoryDependencyIds') = 'array'
-              THEN dep_elem->'memoryDependencyIds' ELSE '[]'::jsonb END
-          ) AS dep(id)
-          JOIN opening_memories m ON m.id::text = lower(dep.id)
+          FROM mem_deps d
+          JOIN opening_memories m ON m.id::text = d.dep_id
             AND m.workspace_id = ${scope.workspaceId}
             AND m.status = 'active'
             AND m.course_id IS NULL
             AND m.kind = 'temporary'
             AND m.expires_at IS NOT NULL
         ) AS memory_temporary_expires_at,
+        (
+          ${turnTransitiveDepsCte(sql, "a")}
+          SELECT COALESCE(jsonb_agg(d.dep_id ORDER BY d.dep_id), '[]'::jsonb)
+          FROM mem_deps d
+        ) AS memory_dependency_ids,
         EXISTS (
           SELECT 1 FROM unnest(u.source_ids || a.source_ids) AS ref(id)
           WHERE NOT EXISTS (SELECT 1 FROM opening_sources s WHERE s.id=ref.id
@@ -60,26 +61,7 @@ export async function loadTutorHistoryContext(sql: Sql, scope: OpeningScope, cur
           WHERE citation->>'sourceId' = ANY(${excludedSourceIds}::text[])
         ) OR NOT (${contextSourceRefsIncluded(sql, scope.workspaceId, turnContextSourceRefs(sql, "u"))})
           OR NOT (${contextSourceRefsIncluded(sql, scope.workspaceId, turnContextSourceRefs(sql, "a"))})
-          OR EXISTS (
-            SELECT 1
-            FROM jsonb_array_elements(
-              CASE WHEN jsonb_typeof(a.context_source_refs) = 'array' THEN a.context_source_refs ELSE '[]'::jsonb END
-            ) AS dep_elem
-            CROSS JOIN LATERAL jsonb_array_elements_text(
-              CASE WHEN dep_elem = jsonb_build_object('memoryDependencyIds', dep_elem->'memoryDependencyIds')
-                AND jsonb_typeof(dep_elem->'memoryDependencyIds') = 'array'
-                THEN dep_elem->'memoryDependencyIds' ELSE '[]'::jsonb END
-            ) AS dep(id)
-            WHERE NOT EXISTS (
-              SELECT 1
-              FROM opening_memories m
-              WHERE m.id::text = lower(dep.id)
-                AND m.workspace_id = ${scope.workspaceId}
-                AND m.status = 'active'
-                AND m.course_id IS NULL
-                AND (m.kind = 'confirmed' OR (m.kind = 'temporary' AND m.expires_at IS NOT NULL AND m.expires_at > clock_timestamp()))
-            )
-          )
+          OR NOT (${turnTransitiveDependenciesActive(sql, "a")})
           OR EXISTS (
             SELECT 1
             FROM jsonb_array_elements(
@@ -132,7 +114,7 @@ export async function loadTutorHistoryContext(sql: Sql, scope: OpeningScope, cur
     )
     SELECT left(question,12001) AS question,
       CASE WHEN ${recordReferents} THEN '' ELSE left(answer,12001) END AS answer,
-      user_source_refs, assistant_source_refs, memory_temporary_expires_at, query_system, system_query, current_privacy_epoch
+      user_source_refs, assistant_source_refs, memory_temporary_expires_at, memory_dependency_ids, query_system, system_query, current_privacy_epoch
     FROM prior WHERE NOT EXISTS (SELECT 1 FROM prior WHERE invalid)
     ORDER BY created_at DESC, id DESC LIMIT 20
   `;
@@ -175,6 +157,11 @@ export async function loadTutorHistoryContext(sql: Sql, scope: OpeningScope, cur
     else history.unshift({ role: "user", text: question }, { role: "assistant", text: answer });
     sourceRefs.push(...(parseContextSourceRefs(row.user_source_refs) ?? []), ...(parseContextSourceRefs(row.assistant_source_refs) ?? []));
     for (const memoryId of turnMemoryIds) memoryIdSet.add(memoryId);
+    if (Array.isArray(row.memory_dependency_ids)) {
+      for (const id of row.memory_dependency_ids as unknown[]) {
+        if (typeof id === "string" && UUID.test(id)) memoryIdSet.add(id.toLowerCase());
+      }
+    }
     characters += question.length + answer.length;
   }
   const memoryIds = [...memoryIdSet].sort();

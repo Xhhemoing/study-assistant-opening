@@ -5,6 +5,7 @@ import { createOpeningCandidateRepository } from "./opening-candidates";
 import { lockLearningHistory } from "./opening-learning-facts";
 import { OpeningPlanError } from "./opening-plan-error";
 import { includedTurn } from "./opening-backup-record-predicates";
+import { turnTransitiveDependenciesActive } from "./opening-context-provenance";
 import { admitTaskCandidate } from "./opening-task-candidate-admission";
 
 type Db = Sql | TransactionSql;
@@ -33,7 +34,8 @@ export async function readOpeningAssistantReviewCandidates(sql: Sql, scope: Open
     WHERE a.workspace_id = ${scope.workspaceId} AND a.status = 'pending'
       AND EXISTS (SELECT 1 FROM workspaces w WHERE w.id = ${scope.workspaceId} AND w.owner_user_id = ${scope.ownerUserId})
       AND ${cleanJsonSources(sql, scope, sql`a.source_ids`)}
-      AND ${includedTurn(sql, scope.workspaceId, scope.ownerUserId, "t")}`;
+      AND ${includedTurn(sql, scope.workspaceId, scope.ownerUserId, "t")}
+      AND ${turnTransitiveDependenciesActive(sql, "t")}`;
   const visible = new Set(rows.map((row) => row.id as string));
   return candidates.filter((candidate) => visible.has(candidate.id) && assistantCandidateSchema.safeParse(candidate.payload).success);
 }

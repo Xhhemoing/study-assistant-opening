@@ -354,24 +354,25 @@ export async function readOpeningBackupTableRows(
     attemptIds = new Set(tables.opening_learning_attempts.map(row => row.id));
     tables.opening_turns = tables.opening_turns.filter(row => (row.attempt_id == null || attemptIds.has(row.attempt_id))
       && (row.learning_session_id == null || sessionIds.has(row.learning_session_id)) && admittedAnchor(row));
-    turnIds = new Set(tables.opening_turns.map(row => row.id));
-    tables.opening_help_exposures = tables.opening_help_exposures.filter(row => (row.turn_id == null || turnIds.has(row.turn_id))
+    turnIds = new Set(tables.opening_turns.map(row => typeof row.id === "string" ? row.id.toLowerCase() : row.id));
+    const canonicalId = (value: unknown) => typeof value === "string" ? value.toLowerCase() : value;
+    tables.opening_help_exposures = tables.opening_help_exposures.filter(row => (row.turn_id == null || turnIds.has(canonicalId(row.turn_id)))
       && (row.session_id == null || sessionIds.has(row.session_id)) && (row.activity_id == null || activityIds.has(row.activity_id))
       && (row.problem_id == null || problemIds.has(row.problem_id)) && admittedAnchor(row)
-      && (row.help_input_snapshot == null || turnIds.has((row.help_input_snapshot as { userTurnId: string }).userTurnId))
+      && (row.help_input_snapshot == null || turnIds.has(canonicalId((row.help_input_snapshot as { userTurnId: string }).userTurnId)))
       && (row.attempt_id == null || attemptIds.has(row.attempt_id))
       && (row.item_version_id == null || itemIds.has(row.item_version_id)));
     tables.opening_learning_observations = tables.opening_learning_observations.filter(row =>
       (row.attempt_id == null || attemptIds.has(row.attempt_id))
       && (row.item_version_id == null || itemIds.has(row.item_version_id))
       && Array.isArray(row.source_turn_ids)
-      && (row.source_turn_ids as string[]).every(turn => turnIds.has(turn)));
+      && (row.source_turn_ids as string[]).every(turn => turnIds.has(canonicalId(turn))));
     retainCompleteObservationChains(tables, lineage);
     attemptIds = new Set(tables.opening_learning_attempts.map(row => row.id));
-    turnIds = new Set(tables.opening_turns.map(row => row.id));
+    turnIds = new Set(tables.opening_turns.map(row => canonicalId(row.id)));
     tables.opening_help_exposures = tables.opening_help_exposures.filter(row =>
-      (row.turn_id == null || turnIds.has(row.turn_id))
-      && (row.help_input_snapshot == null || turnIds.has((row.help_input_snapshot as { userTurnId: string }).userTurnId))
+      (row.turn_id == null || turnIds.has(canonicalId(row.turn_id)))
+      && (row.help_input_snapshot == null || turnIds.has(canonicalId((row.help_input_snapshot as { userTurnId: string }).userTurnId)))
       && (row.attempt_id == null || attemptIds.has(row.attempt_id)));
     const preMemoryTurnIdsLower = new Set(
       tables.opening_turns.flatMap(row => (typeof row.id === "string" ? [row.id.toLowerCase()] : [])),
@@ -414,8 +415,9 @@ export async function readOpeningBackupTableRows(
     }
     break;
   }
-  const completeTurnIds = new Set(tables.opening_turns.map(row => row.id));
-  tables.opening_assistant_candidates = tables.opening_assistant_candidates.filter(row => completeTurnIds.has(row.source_turn_id));
+  const canonicalId = (value: unknown) => typeof value === "string" ? value.toLowerCase() : value;
+  const completeTurnIds = new Set(tables.opening_turns.map(row => canonicalId(row.id)));
+  tables.opening_assistant_candidates = tables.opening_assistant_candidates.filter(row => completeTurnIds.has(canonicalId(row.source_turn_id)));
   const includedCandidateIds = new Set(tables.opening_assistant_candidates
     .map(row => typeof row.id === "string" ? row.id.toLowerCase() : null)
     .filter((value): value is string => value !== null));
@@ -434,10 +436,10 @@ export async function readOpeningBackupTableRows(
       : null,
   }));
   tables.opening_memories = tables.opening_memories.filter(row => Array.isArray(row.source_turn_ids)
-    && (row.source_turn_ids as string[]).every(turn => completeTurnIds.has(turn)));
-  const completeObservationIds = new Set(tables.opening_learning_observations.map(row => row.id));
-  const excludedObservations = new Set(lineage.filter(row => !completeObservationIds.has(row.id)).map(row => row.id));
-  tables.cards = tables.cards.filter(row => !excludedObservations.has(row.origin_observation_root_id));
+    && (row.source_turn_ids as string[]).every(turn => typeof turn === "string" && completeTurnIds.has(turn.toLowerCase())));
+  const completeObservationIds = new Set(tables.opening_learning_observations.map(row => canonicalId(row.id)));
+  const excludedObservations = new Set(lineage.filter(row => !completeObservationIds.has(canonicalId(row.id))).map(row => canonicalId(row.id)));
+  tables.cards = tables.cards.filter(row => !excludedObservations.has(canonicalId(row.origin_observation_root_id)));
   tables.cards = projectOpeningBackupCardSources({ ...tables, ...libraryTables }, noteProvenance);
   const cardIds = new Set(tables.cards.map(row => row.id));
   tables.card_review_states = tables.card_review_states.filter(row => cardIds.has(row.card_id));
@@ -447,10 +449,11 @@ export async function readOpeningBackupTableRows(
   );
   // Privacy/source filtering may omit a protocol's baseline. Keep the task and
   // stable identity, but never export a dangling baseline or replay receipt.
+  const canonicalActivityIds = new Set([...activityIds].map(canonicalId));
   tables.opening_retest_activities = tables.opening_retest_activities.map(row => {
     const protocol = row.learning_protocol as { protocolId?: unknown; originActivityId?: unknown; baselineObservationId?: unknown; baselineRootId?: unknown } | null;
-    if (!protocol || completeObservationIds.has(protocol.baselineObservationId) && completeObservationIds.has(protocol.baselineRootId)
-      && (protocol.protocolId !== "course-route-delayed-v1" || activityIds.has(protocol.originActivityId))) return row;
+    if (!protocol || completeObservationIds.has(canonicalId(protocol.baselineObservationId)) && completeObservationIds.has(canonicalId(protocol.baselineRootId))
+      && (protocol.protocolId !== "course-route-delayed-v1" || canonicalActivityIds.has(canonicalId(protocol.originActivityId)))) return row;
     return { ...row, learning_protocol: null, accept_client_key: null,
       reason: [row.reason, "learning_protocol_baseline_unavailable"].filter(Boolean).join(";").slice(0, 200) };
   });

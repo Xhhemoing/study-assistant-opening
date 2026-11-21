@@ -654,3 +654,86 @@ it("persists exact memoryDependencyIds for documentless chat memories and omits 
   await expect(makeHandler("Fresh answer without expired chat memory")(turn2.jobId)).resolves.toEqual({ skipped: false });
   expect(receivedHistories[1]).toEqual([]);
 });
+
+it("blocks confirming or injecting a derived permanent memory once its temporary ancestor memory expires", async () => {
+  const conversations = createOpeningConversationRepository(fixture.sql);
+  const chunks = createOpeningSourceChunksRepository(fixture.sql);
+  const jobs = createOpeningTutorJobsRepository(fixture.sql);
+  const budget = createOpeningBudgetRepository(fixture.sql, { envCapCents: 100_000 });
+  const originConv = await conversations.create(fixture.scope, { title: "Temp ancestor origin", courseId: null });
+  const originTurn = await conversations.appendSavedTurn({
+    scope: fixture.scope, conversationId: originConv.id, text: "Focus on matrices today", mode: "explain",
+    clientKey: randomUUID(), sourceIds: [], learningSessionId: null, currentPage: null, chunkId: null,
+  });
+  const ancestorExpiry = new Date(Date.now() + 60 * 60 * 1_000).toISOString();
+  const ancestorTemp = await memories.proposeMemory(fixture.scope, {
+    text: "Focus on matrices today",
+    sourceTurnIds: [originTurn.turnId],
+    courseId: null,
+    expiresAt: ancestorExpiry,
+  });
+
+  const derivedConv = await conversations.create(fixture.scope, { title: "Derived candidate chat", courseId: null });
+  const derivedTurn = await conversations.appendSavedTurn({
+    scope: fixture.scope, conversationId: derivedConv.id, text: "Give me a matrix exercise", mode: "explain",
+    clientKey: randomUUID(), sourceIds: [], learningSessionId: null, currentPage: null, chunkId: null,
+  });
+  await expect(createTutorTurnHandler({
+    tutorJobs: jobs, chunks, budget,
+    provider: {
+      complete: async () => ({
+        text: "Matrix exercise answer",
+        citedChunkIds: [],
+        candidates: [
+          { kind: "memory", text: "Derived permanent preference A", temporary: false },
+          { kind: "memory", text: "Derived permanent preference B", temporary: false },
+        ],
+        requestId: null, inputTokens: 10, outputTokens: 10,
+      }),
+    },
+    memories: { listContext: (scope, now) => memories.listContext(scope, now) },
+    privacy: createOpeningPrivacyRepository(fixture.sql),
+    retrieveContext: createOpeningMaterialRetriever(fixture.sql, budget, null),
+    config: { maxContextCharacters: 2000, reservedCents: 100, maxOutputTokens: 100, inputCentsPerMillion: 100, outputCentsPerMillion: 200 },
+  })(derivedTurn.jobId)).resolves.toEqual({ skipped: false });
+
+  const candidates = await fixture.sql<{ id: string }[]>`
+    SELECT id FROM opening_assistant_candidates
+    WHERE source_turn_id = ${derivedTurn.assistantTurnId}
+    ORDER BY created_at ASC, id ASC`;
+  expect(candidates).toHaveLength(2);
+
+  // Confirm first permanent candidate WHILE temporary ancestor is active -> inherits ancestor expiry & dependency ID.
+  const confirmedDerived = await memories.decideMemoryCandidate(fixture.scope, {
+    id: candidates[0]!.id, action: "confirm", expectedVersion: 0, expiresAt: null, clientKey: randomUUID(),
+  });
+  const activeContext = await memories.listContext(fixture.scope, new Date().toISOString());
+  expect(activeContext.memories.map(m => m.id)).toContain(confirmedDerived.id);
+  expect(activeContext.dependencyMemoryIds).toContain(ancestorTemp.id);
+  expect(Date.parse(activeContext.temporaryMemoryExpiresAt!)).toBe(Date.parse(ancestorExpiry));
+
+  // Now expire the temporary ancestor memory:
+  await fixture.sql`UPDATE opening_memories SET expires_at = now() - interval '1 second' WHERE id = ${ancestorTemp.id}`;
+
+  // 1) Second candidate derived from the same turn can no longer be confirmed.
+  await expect(memories.decideMemoryCandidate(fixture.scope, {
+    id: candidates[1]!.id, action: "confirm", expectedVersion: 0, expiresAt: null, clientKey: randomUUID(),
+  })).rejects.toMatchObject({ code: "VALIDATION" });
+
+  // 2) Already-confirmed permanent memory derived from the expired temporary ancestor is excluded from context.
+  const afterExpiryContext = await memories.listContext(fixture.scope, new Date().toISOString());
+  expect(afterExpiryContext.memories).toEqual([]);
+
+  // 3) Direct send authorization with [confirmedDerived.id] also rejects fail-closed via transitive SQL check.
+  const probeTurn = await conversations.appendSavedTurn({
+    scope: fixture.scope, conversationId: derivedConv.id, text: "Probe send gate", mode: "explain",
+    clientKey: randomUUID(), sourceIds: [], learningSessionId: null, currentPage: null, chunkId: null,
+  });
+  const probeClaim = (await jobs.claim(probeTurn.jobId))!;
+  await expect(jobs.assertSendAuthorized(fixture.scope, probeTurn.jobId, {
+    claimToken: probeClaim.claimToken,
+    executionId: probeClaim.executionId,
+    contextSourceRefs: [],
+    globalMemoryIds: [confirmedDerived.id],
+  })).rejects.toMatchObject({ code: "CONFLICT" });
+});

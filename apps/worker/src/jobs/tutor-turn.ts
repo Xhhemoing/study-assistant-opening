@@ -107,7 +107,14 @@ export type TutorTurnDeps = {
     listExcludedSourceIds(scope: Scope): Promise<string[]>;
   };
   /** M01: confirmed/unexpired temporary memories only. Optional. */
-  memories?: { listContext(scope: Scope, now: string): Promise<{ memories: MemoryItem[]; sourceRefs: ContextSourceRef[] }> };
+  memories?: {
+    listContext(scope: Scope, now: string): Promise<{
+      memories: MemoryItem[];
+      sourceRefs: ContextSourceRef[];
+      temporaryMemoryExpiresAt?: string;
+      dependencyMemoryIds?: string[];
+    }>;
+  };
   /** Optional, feature-gated, read-only summary; failure leaves ordinary conversation available. */
   planningContext?: { read(scope: Scope, now: Date): Promise<ConversationPlanningContext> };
   /** L01: record delivered help in the tutor completion transaction. */
@@ -366,6 +373,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
       const injectedTemporaryMemories = eligibleMemories.filter(memory => memory.kind === "temporary");
       const temporaryExpiryCandidates = [
         ...injectedTemporaryMemories.map(memory => memory.expiresAt!),
+        ...(memoryContext.temporaryMemoryExpiresAt ? [memoryContext.temporaryMemoryExpiresAt] : []),
         ...(historyTempExpiresAt ? [historyTempExpiresAt] : []),
       ];
       const earliestTemporaryMemoryExpiresAt = temporaryExpiryCandidates.length
@@ -384,6 +392,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
         ...eligibleMemories
           .filter(memory => memory.courseId == null)
           .map(memory => memory.id.toLowerCase()),
+        ...(memoryContext.dependencyMemoryIds ?? []).map(id => id.toLowerCase()),
         ...historyMemoryIds.map(id => id.toLowerCase()),
       ])].sort();
       const memoryTaggedSourceRefs = memoryContext.sourceRefs.map(ref =>

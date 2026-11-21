@@ -2156,4 +2156,79 @@ describe("tutor turn handler", () => {
     expect(tutorJobs.completeTurn).not.toHaveBeenCalled();
     expect(tutorJobs.fail).toHaveBeenCalledOnce();
   });
+
+  it("propagates ancestor temporaryMemoryExpiresAt and dependencyMemoryIds from a derived permanent memory into authorizeSend, stream, and completeTurn", async () => {
+    const ancestorTempId = "00000000-0000-4000-8000-0000000000f1";
+    const derivedPermId = "00000000-0000-4000-8000-0000000000f2";
+    const ancestorExpiresAt = "2099-01-01T00:15:00.000Z";
+    const { deps, provider, tutorJobs } = setup();
+    const authorizeSend = vi.fn(async (_scope, _jobId, _context, startSend, beforeStartSend) => {
+      beforeStartSend?.();
+      return await startSend();
+    });
+    const stream = {
+      begin: vi.fn(async () => {}),
+      seal: vi.fn(async () => {}),
+      append: vi.fn(async () => 1),
+    };
+    provider.complete.mockImplementationOnce(async (_input, _signal, onTextDelta) => {
+      await onTextDelta?.("chunk");
+      return { text: "chunk", citedChunkIds: [], candidates: [], requestId: null, inputTokens: 10, outputTokens: 10 };
+    });
+    const memories = {
+      listContext: vi.fn(async () => ({
+        memories: [{
+          id: derivedPermId,
+          workspaceId: claimedJob.workspaceId,
+          courseId: null,
+          kind: "confirmed" as const,
+          text: "Derived permanent memory",
+          sourceTurnIds: [claimedJob.userTurnId],
+          version: 1,
+          expiresAt: null,
+          status: "active" as const,
+          createdAt: "2026-11-21T00:00:00.000Z",
+          updatedAt: "2026-11-21T00:00:00.000Z",
+        }],
+        sourceRefs: [],
+        temporaryMemoryExpiresAt: ancestorExpiresAt,
+        dependencyMemoryIds: [ancestorTempId],
+      })),
+    };
+
+    await expect(createTutorTurnHandler({
+      ...deps,
+      tutorJobs: { ...tutorJobs, authorizeSend },
+      memories,
+      stream,
+    })(claimedJob.id)).resolves.toEqual({ skipped: false });
+    expect(authorizeSend).toHaveBeenCalledWith(
+      expect.anything(),
+      claimedJob.id,
+      expect.objectContaining({ globalMemoryIds: [ancestorTempId, derivedPermId] }),
+      expect.any(Function),
+      expect.any(Function),
+    );
+    expect(stream.begin).toHaveBeenCalledWith(
+      claimedJob.workspaceId,
+      claimedJob.id,
+      expect.objectContaining({
+        globalMemoryIds: [ancestorTempId, derivedPermId],
+        temporaryMemoryExpiresAt: ancestorExpiresAt,
+      }),
+    );
+    expect(stream.append).toHaveBeenCalledWith(
+      claimedJob.workspaceId,
+      claimedJob.id,
+      "chunk",
+      undefined,
+      0,
+      undefined,
+      ancestorExpiresAt,
+    );
+    expect(tutorJobs.completeTurn).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ globalMemoryIds: [ancestorTempId, derivedPermId] }),
+    );
+  });
 });

@@ -563,5 +563,7 @@ describe("stream receipt release waits for current job authorization and assista
     const sseLastMemIdx = sse.calls.findLastIndex(c => c.sql.startsWith("SELECT id FROM opening_memories") && c.sql.includes("expires_at > clock_timestamp()"));
     expect(sseLastMemIdx).toBeGreaterThan(sseSourcesIdx);
     expect(sseLastMemIdx).toBe(sse.calls.length - 1);
+    expect(f.calls[lastMemIdx]?.sql).toContain("WITH RECURSIVE mem_deps(dep_id)");
+    expect(sse.calls[sseLastMemIdx]?.sql).toContain("WITH RECURSIVE mem_deps(dep_id)");
   });
 });
