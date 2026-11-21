@@ -13,6 +13,7 @@ vi.mock("../inbox/upload-client", () => ({ createUploadClient: () => ({ uploadFi
 vi.mock("../inbox/source-cleanup-panel", () => ({ SourceCleanupPanel: () => null }));
 vi.mock("./material-organization-client", () => ({ createMaterialOrganizationClient: () => ({ read: state.read, addToCourse: state.addToCourse }) }));
 import { MaterialLibrary } from "./material-library";
+import { LibraryView } from "./library-view";
 
 const source: SourceRecord = { id: "source", workspaceId: "workspace", name: "notes.pdf", mime: "application/pdf", bytes: 3, sha256: "ab".repeat(32), version: 1, uploadState: "uploaded", parseState: "ready", error: null, createdAt: "2026-10-01T00:00:00.000Z" };
 const api = { listSources: async () => state.sources } as OpeningApi;
@@ -38,6 +39,32 @@ function button(text: string) { return Array.from(container.querySelectorAll("bu
 function fileBatch(id: number): LibraryFileBatch {
   return { id, files: [{ name: `notes-${id}.pdf`, type: "application/pdf", size: 3, arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer } as File] };
 }
+
+it("refreshes materials and course memberships after saving a pasted explanation", async () => {
+  state.sources = [];
+  state.read.mockResolvedValue({ courses: [{ id: "course-a", title: "课程 A", archived: false }], memberships: [] });
+  const listSources = vi.fn(async () => state.sources);
+  const planningApi = { listSources, getPlanningSettings: vi.fn(async () => ({ settings: { timeZone: "Asia/Shanghai" } })) } as unknown as OpeningApi;
+  vi.stubGlobal("fetch", vi.fn(async () => {
+    state.sources = [source];
+    state.read.mockResolvedValue({ courses: [{ id: "course-a", title: "课程 A", archived: false }], memberships: [{ courseId: "course-a", sourceId: source.id, role: "reference" }] });
+    return Response.json({ sourceId: source.id, taskId: "task" });
+  }));
+  await act(async () => root.render(createElement(LibraryView, { api: planningApi, courseId: "course-a" })));
+  expect(container.textContent).not.toContain("notes.pdf");
+  const beforeList = listSources.mock.calls.length, beforeRead = state.read.mock.calls.length;
+  await act(async () => button("粘贴讲解").click());
+  const area = container.querySelector("textarea")!;
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(area, "先列出方程");
+    area.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await act(async () => button("保存讲解").click());
+  expect(listSources.mock.calls.length).toBeGreaterThan(beforeList);
+  expect(state.read.mock.calls.length).toBeGreaterThan(beforeRead);
+  expect(container.textContent).toContain("notes.pdf");
+  expect(container.textContent).toContain("课程 A");
+});
 
 it("clears an inbound course without rebinding an upload already in flight or the next upload", async () => {
   let finish!: (value: SourceRecord) => void;

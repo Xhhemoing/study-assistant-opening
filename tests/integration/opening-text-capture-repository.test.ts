@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { createOpeningSourceActionsRepository, OpeningS3, OpeningStorageError } from "@aistudy/database";
+import { createOpeningSourceActionsRepository, createOpeningSourceRepository, OpeningS3, OpeningStorageError } from "@aistudy/database";
 import { POST as startTeaching } from "../../apps/web/src/app/api/opening/teaching-activities/route";
+import { POST as completeSource } from "../../apps/web/src/app/api/opening/sources/[id]/complete/route";
 import { POST } from "../../apps/web/src/app/api/opening/imports/text/route";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 
@@ -38,6 +39,127 @@ beforeEach(async () => {
   vi.spyOn(store, "deleteObject").mockImplementation(async key => { objects.delete(key); });
 });
 afterEach(async () => { vi.restoreAllMocks(); await f?.close(); });
+
+it.each([false, true])("standard completion preserves atomic capture when course is archived (archive first=%s)", async archiveFirst => {
+  let entered!: () => void, release!: () => void;
+  const paused = new Promise<void>(resolve => { entered = resolve; });
+  const resume = new Promise<void>(resolve => { release = resolve; });
+  const put = vi.mocked(OpeningS3.prototype.putObject);
+  const write = put.getMockImplementation()!;
+  put.mockImplementationOnce(async (key, bytes) => { await write(key, bytes); entered(); await resume; });
+  const capture = post(courseA, true);
+  let sourceId = "";
+  try {
+    await Promise.race([paused, capture.then(r => { throw new Error(`Unexpected HTTP ${r.status}`); })]);
+    const [source] = await f.sql`SELECT id FROM opening_sources WHERE workspace_id=${f.scope.workspaceId}`;
+    sourceId = source!.id as string;
+    if (archiveFirst) await f.sql`UPDATE courses SET archived_at=now() WHERE id=${courseA}`;
+    const response = await completeSource(new Request(`http://localhost/api/opening/sources/${sourceId}/complete`, { method: "POST" }), { params: Promise.resolve({ id: sourceId }) });
+    expect(response.status).toBe(archiveFirst ? 404 : 200);
+    if (!archiveFirst) await f.sql`UPDATE courses SET archived_at=now() WHERE id=${courseA}`;
+  } finally { release(); }
+  const result = await capture;
+  expect(result.status).toBe(archiveFirst ? 404 : 200);
+  if (!archiveFirst) expect(await result.json()).toMatchObject({ sourceId, taskId: sourceId });
+  expect(await f.sql`SELECT upload_state FROM opening_sources WHERE id=${sourceId}`)
+    .toEqual([{ upload_state: archiveFirst ? "pending" : "uploaded" }]);
+  for (const query of [
+    f.sql`SELECT source_id FROM opening_source_versions WHERE source_id=${sourceId}`,
+    f.sql`SELECT id FROM opening_jobs WHERE workspace_id=${f.scope.workspaceId}`,
+    f.sql`SELECT asset_id FROM course_asset_memberships WHERE asset_id=${sourceId}`,
+    f.sql`SELECT id FROM opening_tasks WHERE id=${sourceId}`,
+  ]) expect(await query).toHaveLength(archiveFirst ? 0 : 1);
+});
+
+it("persists a one-off retell intent and standard completion creates its task", async () => {
+  let entered!: () => void, release!: () => void;
+  const paused = new Promise<void>(resolve => { entered = resolve; });
+  const resume = new Promise<void>(resolve => { release = resolve; });
+  const put = vi.mocked(OpeningS3.prototype.putObject);
+  const write = put.getMockImplementation()!;
+  put.mockImplementationOnce(async (key, bytes) => { await write(key, bytes); entered(); await resume; });
+  const capture = POST(new Request("http://localhost/api/opening/imports/text", { method: "POST",
+    body: JSON.stringify({ title: "Notes", content: "Original", scheduleNextDayRetell: true }) }));
+  let sourceId = "";
+  try {
+    await Promise.race([paused, capture.then(r => { throw new Error(`Unexpected HTTP ${r.status}`); })]);
+    const [source] = await f.sql`SELECT id, text_capture_intent FROM opening_sources WHERE workspace_id=${f.scope.workspaceId}`;
+    sourceId = source!.id as string;
+    expect(source!.text_capture_intent).toMatchObject({ title: "Notes", scheduleNextDayRetell: true });
+    expect((await completeSource(new Request(`http://localhost/api/opening/sources/${sourceId}/complete`, { method: "POST" }), { params: Promise.resolve({ id: sourceId }) })).status).toBe(200);
+  } finally { release(); }
+  expect((await capture).status).toBe(200);
+  expect(await f.sql`SELECT id FROM opening_tasks WHERE id=${sourceId}`).toHaveLength(1);
+});
+
+it("rejects direct repository completion without the capture transaction handler", async () => {
+  let entered!: () => void, release!: () => void;
+  const paused = new Promise<void>(resolve => { entered = resolve; });
+  const resume = new Promise<void>(resolve => { release = resolve; });
+  const put = vi.mocked(OpeningS3.prototype.putObject);
+  const write = put.getMockImplementation()!;
+  put.mockImplementationOnce(async (key, bytes) => { await write(key, bytes); entered(); await resume; });
+  const capture = post(courseA, true);
+  try {
+    await Promise.race([paused, capture.then(r => { throw new Error(`Unexpected HTTP ${r.status}`); })]);
+    const [source] = await f.sql`SELECT id, bytes, sha256, mime FROM opening_sources WHERE workspace_id=${f.scope.workspaceId}`;
+    const repo = createOpeningSourceRepository(f.sql);
+    const actual = { bytes: Number(source!.bytes), sha256: source!.sha256 as string, mime: source!.mime as string };
+    await expect(repo.complete(f.scope, source!.id as string, actual)).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(repo.completeWithParseJob(f.scope, source!.id as string, { actual, key: "test", payload: {}, privacyEpoch: 0 }))
+      .rejects.toMatchObject({ code: "CONFLICT" });
+  } finally { release(); }
+  expect((await capture).status).toBe(201);
+});
+
+it("standard completion maps a retell task conflict to 409 and rolls back", async () => {
+  let entered!: () => void, release!: () => void;
+  const paused = new Promise<void>(resolve => { entered = resolve; });
+  const resume = new Promise<void>(resolve => { release = resolve; });
+  const put = vi.mocked(OpeningS3.prototype.putObject);
+  const write = put.getMockImplementation()!;
+  put.mockImplementationOnce(async (key, bytes) => { await write(key, bytes); entered(); await resume; });
+  const capture = post(courseA, true);
+  try {
+    await Promise.race([paused, capture.then(r => { throw new Error(`Unexpected HTTP ${r.status}`); })]);
+    const [source] = await f.sql`SELECT id FROM opening_sources WHERE workspace_id=${f.scope.workspaceId}`;
+    const id = source!.id as string;
+    await f.sql`INSERT INTO opening_tasks (id, workspace_id, owner_user_id, title, minutes, origin)
+      VALUES (${id}, ${f.scope.workspaceId}, ${f.scope.ownerUserId}, 'existing', 10, 'manual')`;
+    expect((await completeSource(new Request(`http://localhost/api/opening/sources/${id}/complete`, { method: "POST" }), { params: Promise.resolve({ id }) })).status).toBe(409);
+    expect(await f.sql`SELECT upload_state FROM opening_sources WHERE id=${id}`).toEqual([{ upload_state: "pending" }]);
+    expect(await f.sql`SELECT source_id FROM opening_source_versions WHERE source_id=${id}`).toHaveLength(0);
+    expect(await f.sql`SELECT id FROM opening_jobs WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
+    expect(await f.sql`SELECT asset_id FROM course_asset_memberships WHERE asset_id=${id}`).toHaveLength(0);
+  } finally { release(); }
+  expect((await capture).status).toBe(409);
+});
+
+it.each([false, true])("standard completion handles persisted capture intent safely (invalid=%s)", async invalid => {
+  let entered!: () => void, release!: () => void;
+  const paused = new Promise<void>(resolve => { entered = resolve; });
+  const resume = new Promise<void>(resolve => { release = resolve; });
+  const put = vi.mocked(OpeningS3.prototype.putObject);
+  const write = put.getMockImplementation()!;
+  put.mockImplementationOnce(async (key, bytes) => { await write(key, bytes); entered(); await resume; });
+  const capture = post(courseA, true);
+  try {
+    await Promise.race([paused, capture.then(r => { throw new Error(`Unexpected HTTP ${r.status}`); })]);
+    const [source] = await f.sql`SELECT id FROM opening_sources WHERE workspace_id=${f.scope.workspaceId}`;
+    const id = source!.id as string;
+    if (invalid) await f.sql`UPDATE opening_sources SET text_capture_intent=jsonb_set(text_capture_intent, '{scheduleNextDayRetell}', '"bad"'::jsonb) WHERE id=${id}`;
+    else await f.sql`UPDATE opening_sources SET text_capture_intent=text_capture_intent - 'title' WHERE id=${id}`;
+    expect((await completeSource(new Request(`http://localhost/api/opening/sources/${id}/complete`, { method: "POST" }), { params: Promise.resolve({ id }) })).status).toBe(invalid ? 409 : 200);
+    if (invalid) {
+      expect(await f.sql`SELECT upload_state FROM opening_sources WHERE id=${id}`).toEqual([{ upload_state: "pending" }]);
+      expect(await f.sql`SELECT id FROM opening_jobs WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
+      expect(OpeningS3.prototype.copyStagingToFinal).not.toHaveBeenCalled();
+    } else {
+      expect(await f.sql`SELECT title FROM opening_tasks WHERE id=${id}`).toEqual([{ title: "闭卷复述《Notes》的关键步骤" }]);
+    }
+  } finally { release(); }
+  expect((await capture).status).toBe(invalid ? 409 : 200);
+});
 
 it.each([true, false])("cleans a late staging write and reports only the completing request as created (retell=%s)", async retell => {
   let entered!: () => void, release!: () => void;

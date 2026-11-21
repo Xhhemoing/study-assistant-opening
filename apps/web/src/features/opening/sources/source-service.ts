@@ -17,11 +17,12 @@ import {
   type OpeningTextCapture,
 } from "@aistudy/database";
 import { sourceActionInputSchema, uploadInputSchema, type SourceActionInput, type SourceActionResult, type SourceRecord, type UploadInput, type UploadTicket } from "@aistudy/contracts";
-import type { Sql, TransactionSql } from "postgres";
+import type { Sql } from "postgres";
 import { validatedUploadStream, validateStoredUpload, UploadPolicyError } from "./upload-policy";
 import { isPreviewableMime } from "./preview-mime";
 import type { Principal } from "../../../lib/authorization";
 import { assertAuthorized, boundWorkspaceId } from "../../../lib/authorization";
+import { finishCaptureInTransaction } from "../imports-text/retell-task";
 
 const STAGING_UPLOAD_LEASE_MS = 900_000;
 
@@ -127,7 +128,7 @@ export function createOpeningSourceService(sql: Sql, storage: OpeningStorage = n
     }
     return canonicalKey;
   }
-  async function completeUpload(p: Principal, id: string, capture?: (tx: TransactionSql) => Promise<void>) {
+  async function completeUpload(p: Principal, id: string, capture = false) {
     auth(p, "source.complete");
     const scope = scopeOf(p);
     const sourceId = id.toLowerCase();
@@ -158,7 +159,10 @@ export function createOpeningSourceService(sql: Sql, storage: OpeningStorage = n
       privacyEpoch: await privacy.getWorkspaceEpoch(scope),
       actual,
       beforeComplete: current => storage.copyStagingToFinal(key, storage.finalKey(sourceId, current.version), { expectedEtag: head.etag }),
-      afterComplete: capture,
+      afterComplete: async (tx, intent) => {
+        await finishCaptureInTransaction(tx, scope, { sourceId, title: intent.title, courseId: intent.courseId,
+          timeZone: intent.timeZone ?? undefined, scheduleNextDayRetell: intent.scheduleNextDayRetell });
+      },
       onAlreadyCompleted: () => { replayed = true; },
     });
     if (capture && replayed) {
@@ -263,8 +267,8 @@ export function createOpeningSourceService(sql: Sql, storage: OpeningStorage = n
       return { ok: true };
     },
     async completeUpload(p: Principal, id: string): Promise<SourceRecord> { return (await completeUpload(p, id)).source; },
-    async completeCaptureUpload(p: Principal, id: string, afterComplete: (tx: TransactionSql) => Promise<void>) {
-      return completeUpload(p, id, afterComplete);
+    async completeCaptureUpload(p: Principal, id: string) {
+      return completeUpload(p, id, true);
     },
     async retryParse(p: Principal, id: string): Promise<SourceRecord> {
       auth(p, "source.complete");

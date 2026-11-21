@@ -112,13 +112,13 @@ describe("opening source upload completion boundary", () => {
   it("rejects an archived capture course before invoking the canonical copy", async () => {
     const { sql, revision } = transactionalSql(q => {
       if (q.startsWith("SELECT id, privacy_epoch FROM workspaces")) return [{ id: W, privacy_epoch: 7 }];
-      if (q.startsWith("SELECT * FROM opening_sources")) return [pendingRow({ text_capture_intent: { courseId: S } })];
+      if (q.startsWith("SELECT * FROM opening_sources")) return [pendingRow({ text_capture_intent: { courseId: S, scheduleNextDayRetell: true, inputDigest: SHA, title: "Notes", timeZone: null } })];
       if (q.includes("FROM courses")) return [];
       throw new Error("unexpected: " + q);
     });
     const copy = vi.fn();
     await expect(createOpeningSourceRepository(sql).completeWithParseJob(scope, S, {
-      key: "parse:source:v0", payload: { sourceId: S }, privacyEpoch: 7, beforeComplete: copy,
+      key: "parse:source:v0", payload: { sourceId: S }, privacyEpoch: 7, beforeComplete: copy, afterComplete: async () => {},
       actual: { bytes: 12, sha256: SHA, mime: "application/pdf" },
     })).rejects.toMatchObject({ code: "NOT_FOUND", message: "找不到这门课程。" });
     expect(copy).not.toHaveBeenCalled();

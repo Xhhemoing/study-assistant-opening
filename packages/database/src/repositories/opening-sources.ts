@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Sql, TransactionSql } from "postgres";
-import type { SourceRecord, UploadInput, UploadTicket } from "@aistudy/contracts";
+import { uuidSchema, type SourceRecord, type UploadInput, type UploadTicket } from "@aistudy/contracts";
+import { resolveWorkspaceTimeZone } from "@aistudy/domain";
 import type { OpeningJobRecord } from "./opening-jobs";
 import { lockWorkspaceLearningHistory, nextWorkspaceLearningHistoryRevision } from "./opening-learning-facts";
 import { invalidateOpeningLearningEligibility } from "./opening-learning-eligibility";
@@ -18,11 +19,33 @@ export type OpeningSourceRepositoryOptions = {
 
 export type OpeningScope = OpeningJobScope;
 
+export type OpeningTextCaptureIntent = { courseId: string | null; scheduleNextDayRetell: boolean; inputDigest: string; title: string; timeZone: string | null };
+
 export type OpeningTextCapture = {
   oppositeUploadId: string;
   completedOnly?: boolean;
-  intent: { courseId: string | null; scheduleNextDayRetell: boolean; inputDigest: string; title: string; timeZone: string | null };
+  intent: OpeningTextCaptureIntent;
 };
+
+function readCaptureIntent(value: unknown, sourceName: string): OpeningTextCaptureIntent | null {
+  if (value == null) return null;
+  if (typeof value !== "object" || Array.isArray(value)) throw new OpeningSourceError("CONFLICT", "讲解保存信息无效，请重新保存。");
+  const intent = value as Record<string, unknown>;
+  const courseId = intent.courseId;
+  const zone = intent.timeZone ?? null;
+  if ((courseId !== null && (typeof courseId !== "string" || !uuidSchema.safeParse(courseId).success))
+    || typeof intent.scheduleNextDayRetell !== "boolean"
+    || typeof intent.inputDigest !== "string" || !/^[a-f0-9]{64}$/.test(intent.inputDigest)
+    || (intent.title !== undefined && (typeof intent.title !== "string" || !intent.title.trim() || intent.title.length > 180))
+    || (zone !== null && (typeof zone !== "string" || !zone.trim() || zone.length > 100))) {
+    throw new OpeningSourceError("CONFLICT", "讲解保存信息无效，请重新保存。");
+  }
+  if (typeof zone === "string") {
+    try { resolveWorkspaceTimeZone(zone); } catch { throw new OpeningSourceError("CONFLICT", "讲解保存时区无效，请重新保存。"); }
+  }
+  return { courseId: courseId as string | null, scheduleNextDayRetell: intent.scheduleNextDayRetell,
+    inputDigest: intent.inputDigest, title: typeof intent.title === "string" ? intent.title : sourceName.replace(/\.md$/i, "").trim() || "外部讲解", timeZone: zone as string | null };
+}
 
 /**
  * Null-lease fallback for pending rows that never got `upload_url_expires_at`
@@ -62,7 +85,7 @@ export type OpeningSourceRepository = {
     id: string,
     actual: { bytes: number; sha256: string; mime: string },
   ): Promise<SourceRecord>;
-  completeWithParseJob(scope: OpeningScope, id: string, input: { key: string; payload: unknown; privacyEpoch: number; actual: { bytes: number; sha256: string; mime: string }; beforeComplete?: (current: SourceRecord) => Promise<void>; afterComplete?: (tx: TransactionSql) => Promise<void>; onAlreadyCompleted?: () => void }): Promise<SourceRecord>;
+  completeWithParseJob(scope: OpeningScope, id: string, input: { key: string; payload: unknown; privacyEpoch: number; actual: { bytes: number; sha256: string; mime: string }; beforeComplete?: (current: SourceRecord) => Promise<void>; afterComplete?: (tx: TransactionSql, intent: OpeningTextCaptureIntent) => Promise<void>; onAlreadyCompleted?: () => void }): Promise<SourceRecord>;
   retryParseWithJob(scope: OpeningScope, id: string, input: { key: string; payload: unknown; privacyEpoch: number }): Promise<SourceRecord>;
   resolveLegacyFinalKey?(scope: OpeningScope, sourceId: string, canonicalFinalKey: string): Promise<string | null>;
   list(scope: OpeningScope): Promise<SourceRecord[]>;
@@ -429,6 +452,7 @@ export function createOpeningSourceRepository(sql: Sql, options: OpeningSourceRe
         if (!currentRows.length) throw new OpeningSourceError("NOT_FOUND", `Source not found: ${id}`);
         const current = mapSource(currentRows[0] as Record<string, unknown>);
         if (current.uploadState === "uploaded") return current;
+        if (currentRows[0]!.text_capture_intent != null) throw new OpeningSourceError("CONFLICT", "请通过讲解保存流程完成上传。");
         if (current.uploadState !== "pending") {
           throw new OpeningSourceError("CONFLICT", `cannot complete uploadState=${current.uploadState}`);
         }
@@ -464,7 +488,9 @@ export function createOpeningSourceRepository(sql: Sql, options: OpeningSourceRe
         const current = mapSource(currentRows[0] as Record<string, unknown>);
         if (current.uploadState === "uploaded") { input.onAlreadyCompleted?.(); return current; }
         if (current.uploadState !== "pending") throw new OpeningSourceError("CONFLICT", "Upload is no longer pending");
-        await requireActiveCaptureCourse(tx, scope, currentRows[0]!.text_capture_intent?.courseId);
+        const captureIntent = readCaptureIntent(currentRows[0]!.text_capture_intent, current.name);
+        if (captureIntent && !input.afterComplete) throw new OpeningSourceError("CONFLICT", "请通过讲解保存流程完成上传。");
+        await requireActiveCaptureCourse(tx, scope, captureIntent?.courseId);
         assertMatch({ bytes: current.bytes, sha256: current.sha256, mime: current.mime }, input.actual);
         await input.beforeComplete?.(current);
         const sourceRows = await tx`UPDATE opening_sources SET upload_state = 'uploaded', parse_state = 'queued', error = NULL, updated_at = now() WHERE id = ${id} AND workspace_id = ${scope.workspaceId} AND upload_state = 'pending' RETURNING *`;
@@ -476,7 +502,7 @@ export function createOpeningSourceRepository(sql: Sql, options: OpeningSourceRe
         const jobKind = parseJobKindForMime(current.mime);
         await tx`INSERT INTO opening_jobs (id, workspace_id, owner_user_id, key, kind, payload, privacy_epoch) VALUES (${jobId}, ${scope.workspaceId}, ${scope.ownerUserId}, ${input.key}, ${jobKind}, ${tx.json(input.payload as never)}, ${input.privacyEpoch})`;
         await tx`INSERT INTO opening_outbox (workspace_id, job_id, topic, payload) VALUES (${scope.workspaceId}, ${jobId}, 'opening.job.enqueue', ${tx.json({ jobId, kind: jobKind, sourceId: id } as never)})`;
-        await input.afterComplete?.(tx);
+        if (captureIntent) await input.afterComplete!(tx, captureIntent);
         await nextWorkspaceLearningHistoryRevision(tx, scope);
         await invalidateOpeningLearningEligibility(tx, scope, { sourceIds: [id] });
         return mapSource(sourceRows[0] as Record<string, unknown>);

@@ -19,7 +19,7 @@ export type LibraryFileBatch = { id: number; files: File[] };
 const tabs = [{ id: "materials", label: "材料", icon: Files }, { id: "notes", label: "笔记", icon: BookOpen }];
 const selectedTab = (tab: string) => tab === "notes" ? "notes" : "materials";
 
-export function LibraryView({ tab = "materials", basePath = "/opening/library", api: supplied, courseId = null, initialOpen = null }: { tab?: string; basePath?: LibraryBasePath; api?: OpeningApi; courseId?: string | null; initialOpen?: SourceViewerTarget | null }) {
+export function LibraryView({ tab = "materials", basePath = "/opening/library", api: supplied, courseId = null, initialOpen = null, timeZone }: { tab?: string; basePath?: LibraryBasePath; api?: OpeningApi; courseId?: string | null; initialOpen?: SourceViewerTarget | null; timeZone?: string }) {
   const [filterQuery, setFilterQuery] = useState("");
   const [activeCourseId, setActiveCourseId] = useState(courseId);
   const [selected, setSelected] = useState(selectedTab(tab));
@@ -30,12 +30,24 @@ export function LibraryView({ tab = "materials", basePath = "/opening/library", 
   const [dragging, setDragging] = useState(false);
   const [captureOpen, setCaptureOpen] = useState(false);
   const [captureMounted, setCaptureMounted] = useState(false);
+  const [captureRefreshRevision, setCaptureRefreshRevision] = useState(0);
   const captureId = useId();
   const nextBatch = useRef(0);
   const picker = useRef<HTMLInputElement>(null);
   useEffect(() => setActiveCourseId(courseId), [courseId]);
   useEffect(() => setSelected(selectedTab(tab)), [tab]);
   const api = useMemo(() => supplied ?? createOpeningApi(), [supplied]);
+  const resolveTimeZone = useMemo(() => {
+    let pending: Promise<string | undefined> | undefined;
+    return () => {
+      if (timeZone !== undefined) return Promise.resolve(timeZone);
+      if (!pending) pending = typeof api.getPlanningSettings === "function"
+        ? Promise.resolve().then(() => api.getPlanningSettings()).then(result => result.settings?.timeZone).catch(() => undefined)
+        : Promise.resolve(undefined);
+      return pending;
+    };
+  }, [api, timeZone]);
+  useEffect(() => { void resolveTimeZone(); }, [resolveTimeZone]);
   const opening = basePath === "/opening/library";
 
   function changeTab(next: string) {
@@ -78,7 +90,7 @@ export function LibraryView({ tab = "materials", basePath = "/opening/library", 
           {activeCourseId ? <Link className={ui.quiet} href={`${basePath}?tab=${selected}${filterQuery}`}>查看全部{selected === "notes" ? "笔记" : "材料"}</Link> : null}
         </div>
       </div>
-      <TabsContent value="materials" forceMount className="mx-auto w-full max-w-[1040px] px-4 py-5 sm:px-6"><div id={captureId} hidden={!captureOpen} className="mb-5">{captureMounted ? <ExternalAiCaptureCard courseId={activeCourseId} /> : null}</div><MaterialLibrary api={api} onCourseChange={setActiveCourseId} onFilterQueryChange={setFilterQuery} courseId={activeCourseId} initialOpen={selected === "materials" ? initialOpen : null} incomingFiles={incomingFiles} onIncomingFilesAccepted={() => setIncomingFiles(null)} onUploadBusyChange={setUploadBusy} onUploadRequested={() => picker.current?.click()} onEmptyChange={setMaterialsEmpty} hideUploadPicker /></TabsContent>
+      <TabsContent value="materials" forceMount className="mx-auto w-full max-w-[1040px] px-4 py-5 sm:px-6"><div id={captureId} hidden={!captureOpen} className="mb-5">{captureMounted ? <ExternalAiCaptureCard courseId={activeCourseId} timeZone={timeZone} resolveTimeZone={resolveTimeZone} onSaved={() => setCaptureRefreshRevision(value => value + 1)} /> : null}</div><MaterialLibrary api={api} refreshRevision={captureRefreshRevision} onCourseChange={setActiveCourseId} onFilterQueryChange={setFilterQuery} courseId={activeCourseId} initialOpen={selected === "materials" ? initialOpen : null} incomingFiles={incomingFiles} onIncomingFilesAccepted={() => setIncomingFiles(null)} onUploadBusyChange={setUploadBusy} onUploadRequested={() => picker.current?.click()} onEmptyChange={setMaterialsEmpty} hideUploadPicker /></TabsContent>
       <TabsContent value="notes" className="mx-auto w-full max-w-[1040px] px-4 py-5 sm:px-6"><details className="group mb-4 rounded-card border border-line bg-surface px-4 py-2 text-xs text-text-2 shadow-card"><summary className="flex min-h-9 cursor-pointer list-none items-center justify-between font-medium text-text-2 hover:text-text [&::-webkit-details-marker]:hidden"><span>查看关联学习记录</span><ChevronDown size={14} aria-hidden="true" className="shrink-0 text-text-3 transition-transform duration-200 group-open:rotate-180" /></summary><div className="pt-2"><LearnerStateCard courseId={activeCourseId ?? undefined} /></div></details>{activeCourseId ? <CourseNotes courseId={activeCourseId} /> : <LibraryDocumentList basePath={basePath} />}</TabsContent>
     </Tabs>
   </section>;

@@ -5,7 +5,7 @@ import { POST } from "./route";
 
 const deps = vi.hoisted(() => ({
   scope: { workspaceId: "5d884393-cdef-43a0-9004-f3fc6f48bada", ownerUserId: "a0ec7242-238a-42fb-97f7-44a97ffef6de" },
-  sql: vi.fn(), captureSource: vi.fn(), reissueUploadTicket: vi.fn(), beginUpload: vi.fn(), putStaging: vi.fn(), completeCaptureUpload: vi.fn(), schedule: vi.fn(), scheduleInTransaction: vi.fn(),
+  sql: vi.fn(), captureSource: vi.fn(), reissueUploadTicket: vi.fn(), beginUpload: vi.fn(), putStaging: vi.fn(), completeCaptureUpload: vi.fn(), schedule: vi.fn(),
 }));
 vi.mock("../../../../../features/opening/runtime", () => ({
   requireOpeningScope: vi.fn(async () => ({ scope: deps.scope, sql: deps.sql,
@@ -14,7 +14,6 @@ vi.mock("../../../../../features/opening/runtime", () => ({
 vi.mock("../../../../../features/opening/sources/source-service", () => ({ createOpeningSourceService: () => deps }));
 vi.mock("../../../../../features/opening/imports-text/retell-task", () => ({
   finishCapture: deps.schedule,
-  finishCaptureInTransaction: deps.scheduleInTransaction,
 }));
 
 const post = (body: string, headers?: HeadersInit) => POST(new Request("http://localhost/api/opening/imports/text", {
@@ -24,10 +23,7 @@ beforeEach(() => {
   vi.resetAllMocks();
   deps.captureSource.mockResolvedValue({ id: "source", uploadState: "pending" });
   deps.beginUpload.mockResolvedValue({ source: { id: "source" } });
-  deps.completeCaptureUpload.mockImplementation(async (_principal, _id, complete) => {
-    await complete(deps.sql);
-    return { source: { id: "source", name: "归纳.md", bytes: 24 }, replayed: false };
-  });
+  deps.completeCaptureUpload.mockResolvedValue({ source: { id: "source", name: "归纳.md", bytes: 24 }, replayed: false });
   deps.schedule.mockResolvedValue({ taskId: "task", notBefore: "2026-11-22T00:00:01Z", deferredBehindActiveRetest: true });
 });
 
@@ -58,10 +54,9 @@ describe("POST /api/opening/imports/text", () => {
     expect(input).toMatchObject({ name: "归纳.md", mime: "text/markdown", bytes: bytes.length,
       sha256: createHash("sha256").update(bytes).digest("hex") });
     expect(deps.putStaging).toHaveBeenCalledWith(principal, "source", { contentType: input.mime, bytes });
-    expect(deps.completeCaptureUpload).toHaveBeenCalledWith(principal, "source", expect.any(Function));
+    expect(deps.completeCaptureUpload).toHaveBeenCalledWith(principal, "source");
     expect(deps.reissueUploadTicket).toHaveBeenCalledBefore(deps.putStaging);
     expect(deps.putStaging).toHaveBeenCalledBefore(deps.completeCaptureUpload);
-    expect(deps.scheduleInTransaction).toHaveBeenCalledWith(deps.sql, deps.scope, expect.objectContaining({ timeZone: body.timeZone }));
     expect(deps.completeCaptureUpload).toHaveBeenCalledBefore(deps.schedule);
     expect(deps.schedule).toHaveBeenCalledWith(deps.sql, deps.scope, expect.objectContaining({ timeZone: body.timeZone }));
   });
@@ -164,6 +159,8 @@ describe("POST /api/opening/imports/text", () => {
 
   it("does not schedule after an incomplete upload", async () => {
     deps.putStaging.mockRejectedValue(new OpeningSourceError("CONFLICT", "staging failed"));
+    deps.captureSource.mockResolvedValueOnce({ id: "source", uploadState: "pending" })
+      .mockRejectedValueOnce(new OpeningSourceError("CONFLICT", "still pending"));
     expect((await post('{"content":"x"}')).status).toBe(409);
     expect(deps.completeCaptureUpload).not.toHaveBeenCalled();
     expect(deps.schedule).not.toHaveBeenCalled();

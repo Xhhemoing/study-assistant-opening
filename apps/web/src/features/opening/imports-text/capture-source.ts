@@ -7,7 +7,6 @@ import { createOpeningSourceService } from "../sources/source-service";
 import { UploadPolicyError } from "../sources/upload-policy";
 import { isOpeningDataError } from "../server/data-services";
 import type { prepareCapture } from "./markdown";
-import { finishCaptureInTransaction } from "./retell-task";
 
 function isSourceUnavailable(error: unknown) {
   return isOpeningDataError(error, "source") && (error.code === "CONFLICT" || error.code === "NOT_FOUND");
@@ -37,7 +36,7 @@ export async function saveCaptureSource(
 ) {
   const bytes = new TextEncoder().encode(prepared.markdown);
   // A one-off course capture still needs a durable binding through completion.
-  const key = clientKey ?? (courseId ? randomUUID() : undefined);
+  const key = clientKey ?? (courseId || scheduleNextDayRetell ? randomUUID() : undefined);
   const uploadId = key ? uploadIdFor(principal, key, scheduleNextDayRetell) : undefined;
   const oppositeUploadId = key ? uploadIdFor(principal, key, !scheduleNextDayRetell) : undefined;
   const capture = oppositeUploadId ? {
@@ -67,11 +66,7 @@ export async function saveCaptureSource(
   try {
     if (capture) await sources.reissueUploadTicket(principal, source.id);
     await sources.putStaging(principal, source.id, { bytes, contentType: input.mime });
-    const completed = await sources.completeCaptureUpload(principal, source.id, async tx => {
-      await finishCaptureInTransaction(tx, { workspaceId: principal.workspaceId, ownerUserId: principal.userId }, {
-        sourceId: source.id, title: prepared.title, courseId, timeZone, scheduleNextDayRetell,
-      });
-    });
+    const completed = await sources.completeCaptureUpload(principal, source.id);
     return { sourceId: completed.source.id, name: completed.source.name, bytes: completed.source.bytes, replayed: completed.replayed };
   } catch (error) {
     const stagingUnavailable = error instanceof UploadPolicyError

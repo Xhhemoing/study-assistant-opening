@@ -77,3 +77,18 @@ it("disables submission while saving and honors the scheduling toggle", async ()
   await act(async () => finish(Response.json({ sourceId: "saved", taskId: null })));
   expect(host.querySelector("[role=status]")?.textContent).toBe("讲解已存入资料库。");
 });
+
+it("falls back to server time zone and only notifies after a confirmed save", async () => {
+  const onSaved = vi.fn();
+  const resolveTimeZone = vi.fn().mockRejectedValue(new Error("settings unavailable"));
+  const fetcher = vi.fn().mockResolvedValueOnce(new Response(null, { status: 503 }))
+    .mockResolvedValueOnce(Response.json({ sourceId: "saved", taskId: "task" }));
+  vi.stubGlobal("fetch", fetcher);
+  await act(async () => root.render(<ExternalAiCaptureCard resolveTimeZone={resolveTimeZone} onSaved={onSaved} />));
+  await fill("先列出方程");
+  await submit();
+  expect(onSaved).not.toHaveBeenCalled();
+  await submit();
+  expect(JSON.parse(fetcher.mock.calls[1]![1].body)).not.toHaveProperty("timeZone");
+  expect(onSaved).toHaveBeenCalledExactlyOnceWith({ sourceId: "saved", taskId: "task" });
+});

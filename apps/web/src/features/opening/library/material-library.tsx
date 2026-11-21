@@ -33,7 +33,7 @@ const sorts: Array<{ value: MaterialSort; label: string }> = [
   { value: "name", label: "名称排序" }, { value: "largest", label: "文件大小" },
 ];
 
-export function MaterialLibrary({ api, courseId: uploadCourseId = null, initialOpen = null, onCourseChange, onFilterQueryChange, incomingFiles, onIncomingFilesAccepted, onUploadBusyChange, onUploadRequested, onEmptyChange, hideUploadPicker = false }: { api: OpeningApi; courseId?: string | null; initialOpen?: SourceViewerTarget | null; onCourseChange?: (courseId: string | null) => void; onFilterQueryChange?: (query: string) => void; incomingFiles?: LibraryFileBatch | null; onIncomingFilesAccepted?: () => void; onUploadBusyChange?: (busy: boolean) => void; onUploadRequested?: () => void; onEmptyChange?: (empty: boolean) => void; hideUploadPicker?: boolean }) {
+export function MaterialLibrary({ api, courseId: uploadCourseId = null, initialOpen = null, onCourseChange, onFilterQueryChange, incomingFiles, onIncomingFilesAccepted, onUploadBusyChange, onUploadRequested, onEmptyChange, hideUploadPicker = false, refreshRevision = 0 }: { api: OpeningApi; courseId?: string | null; initialOpen?: SourceViewerTarget | null; onCourseChange?: (courseId: string | null) => void; onFilterQueryChange?: (query: string) => void; incomingFiles?: LibraryFileBatch | null; onIncomingFilesAccepted?: () => void; onUploadBusyChange?: (busy: boolean) => void; onUploadRequested?: () => void; onEmptyChange?: (empty: boolean) => void; hideUploadPicker?: boolean; refreshRevision?: number }) {
   const library = useMaterialLibrary(api, { uploadCourseId });
   const { sources, organization, space, selection, loading, refreshing, busy, error, organizationError, refresh, load, changeSpace: setLibrarySpace } = library;
   const [query, setQuery] = useState("");
@@ -45,6 +45,12 @@ export function MaterialLibrary({ api, courseId: uploadCourseId = null, initialO
   const [managing, setManaging] = useState(false);
   const [assignId, setAssignId] = useState<string | null>(null);
   const previousUploadCourseId = useRef<string | null | undefined>(undefined);
+  const previousRefreshRevision = useRef(refreshRevision);
+  useEffect(() => {
+    if (previousRefreshRevision.current === refreshRevision) return;
+    previousRefreshRevision.current = refreshRevision;
+    void load();
+  }, [load, refreshRevision]);
   useEffect(() => { onEmptyChange?.(!loading && !error && sources.length === 0); }, [loading, error, sources.length, onEmptyChange]);
   // Apply only inbound changes, preserving locally selected views or newly created courses.
   useEffect(() => {

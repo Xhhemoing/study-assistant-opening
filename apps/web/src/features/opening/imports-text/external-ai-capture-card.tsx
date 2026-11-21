@@ -4,9 +4,9 @@ import { useId, useRef, useState, type FormEvent } from "react";
 import { ui } from "@aistudy/ui";
 import { extractKeySteps, providers, type Provider } from "./markdown";
 
-type Props = { courseId?: string | null; timeZone?: string };
+type Props = { courseId?: string | null; timeZone?: string; resolveTimeZone?: () => Promise<string | undefined>; onSaved?: (result: { sourceId: string; taskId?: string }) => void | Promise<void> };
 
-export function ExternalAiCaptureCard({ courseId, timeZone }: Props) {
+export function ExternalAiCaptureCard({ courseId, timeZone, resolveTimeZone, onSaved }: Props) {
   const heading = useId();
   const [content, setContent] = useState("");
   const [summary, setSummary] = useState("");
@@ -27,7 +27,8 @@ export function ExternalAiCaptureCard({ courseId, timeZone }: Props) {
     setStatus("");
     setError("");
     try {
-      const input = { content, keyStepSummary: summary || undefined, providerHint: provider, courseId, timeZone,
+      const zone = timeZone ?? await resolveTimeZone?.().catch(() => undefined);
+      const input = { content, keyStepSummary: summary || undefined, providerHint: provider, courseId, timeZone: zone,
         scheduleNextDayRetell: schedule };
       const payload = JSON.stringify(input);
       if (attempt.current?.payload !== payload) {
@@ -57,6 +58,9 @@ export function ExternalAiCaptureCard({ courseId, timeZone }: Props) {
       attempt.current = null;
       setContent("");
       setSummary("");
+      // A refresh failure cannot make an already-confirmed save uncertain.
+      void Promise.resolve().then(() => onSaved?.({ sourceId: result.sourceId,
+        taskId: typeof result.taskId === "string" ? result.taskId : undefined })).catch(() => undefined);
     } catch {
       setError("未能确认保存结果，可用当前内容重试。");
     } finally {
