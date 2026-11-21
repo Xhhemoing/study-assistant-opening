@@ -28,19 +28,24 @@ interface EquationLine {
   trimmed: string;
   quote?: Container;
   fence?: { indent: number; run: string; canClose: boolean };
-  paragraphBreak: boolean;
+  paragraph?: number;
+  cells?: string[];
+  setext?: boolean;
+  literalBlock?: boolean;
   literalStart?: number;
 }
 
 // A list item owns indented continuation lines. A task checkbox is content of the item
 // and adds no indentation requirement. Each sibling item gets a distinct scope.
 function markdownLines(rawLines: string[]): EquationLine[] {
-  let previous: EquationLine["containers"] = [];
-  return rawLines.map((raw) => {
+  const lines: EquationLine[] = [];
+  let activeContainers: EquationLine["containers"] = [];
+  for (const raw of rawLines) {
+    const previous = lines.at(-1);
     const containers: EquationLine["containers"] = [];
     let offset = 0;
     let quote: Container | undefined;
-    for (const { scope } of previous) {
+    for (const { scope } of activeContainers) {
       const rest = raw.slice(offset);
       if (scope.kind === "quote") {
         const prefix = /^ {0,3}>[ \t]?/.exec(rest);
@@ -54,31 +59,131 @@ function markdownLines(rawLines: string[]): EquationLine[] {
       }
       containers.push({ scope, end: offset });
     }
+    // A sibling list starts a new block. Within the same open paragraph, only a
+    // nonempty bullet or an ordered item numbered exactly 1 can interrupt it.
+    let paragraphOpen = previous?.paragraph !== undefined;
+    let continuing = paragraphOpen && containers.length === activeContainers.length;
+    let listCode = false;
     for (;;) {
       const rest = raw.slice(offset);
-      const prefix = /^(?:( {0,3}>[ \t]?)|( {0,3}(?:[-*+]|\d{1,9}[.)])[ \t]+)(?:\[[ xX]\][ \t]+)?)/u.exec(rest);
-      if (!prefix) break;
+      if (isThematicBreak(rest) || (continuing && isSetextUnderline(rest))) break;
+      const quotePrefix = /^ {0,3}>[ \t]?/.exec(rest);
       let scope: Container;
-      if (prefix[1]) {
+      if (quotePrefix) {
         scope = { kind: "quote" };
         quote = scope;
+        offset += quotePrefix[0].length;
       } else {
-        let indent = 0;
-        for (const char of prefix[2]!) indent += char === "\t" ? 4 - indent % 4 : 1;
-        scope = { kind: "list", indent };
+        const item = listPrefix(rest);
+        if (!item || (continuing && !item.interrupts)) break;
+        scope = { kind: "list", indent: item.indent };
+        listCode = item.code;
+        offset += item.end;
       }
-      offset += prefix[0].length;
       containers.push({ scope, end: offset });
+      continuing = false;
+      paragraphOpen = false;
+      if (listCode) break;
     }
-    previous = containers;
     const content = raw.slice(offset);
     const trimmed = content.trim();
-    const fence = readFence(content);
-    const heading = /^ {0,3}(?:#{1,6}(?:\s|$)|(?:=+|-+)[ \t]*$)/u.test(content);
-    const thematicBreak = /^ {0,3}([_*-])(?:[ \t]*\1){2,}[ \t]*$/u.test(content);
-    const paragraphBreak = !trimmed || !!fence || heading || thematicBreak;
-    return { raw, containers, content, trimmed, quote, fence, paragraphBreak };
-  });
+    const sameScope = activeContainers.at(-1)?.scope === containers.at(-1)?.scope;
+    const setext = continuing && isSetextUnderline(content);
+    const indented = listCode || (!paragraphOpen && /^(?: {4}| {0,3}\t)/u.test(content));
+    const fence = indented ? undefined : readFence(content);
+    const atx = /^ {0,3}#{1,6}(?:[ \t]|$)/u.test(content);
+    const block = !trimmed || fence || setext || atx || isThematicBreak(content) || indented || startsHtmlBlock(content, paragraphOpen);
+    const line: EquationLine = { raw, containers, content, trimmed, quote, fence, setext, literalBlock: indented };
+    if (!block) {
+      line.paragraph = paragraphOpen ? previous!.paragraph : lines.length;
+    }
+    if (sameScope && previous) {
+      if (previous.cells && !block) {
+        line.cells = gfmCells(content);
+      } else if (previous.paragraph !== undefined && isTableDelimiter(content)) {
+        const header = gfmCells(previous.content);
+        if (header.length === gfmCells(content).length) {
+          previous.cells = header;
+          previous.paragraph = undefined;
+          line.cells = []; // The delimiter row contains alignment syntax only.
+        }
+      }
+    }
+    if (line.cells) line.paragraph = undefined;
+    // A lazy paragraph retains its container identity for later explicit prefixes.
+    // Fence and math matching use only prefixes physically present on each line.
+    if (!paragraphOpen || block || sameScope) activeContainers = containers;
+    lines.push(line);
+  }
+  return lines;
+}
+
+function listPrefix(text: string) {
+  const match = /^( {0,3})([-*+]|\d{1,9}[.)])([ \t]+|$)/u.exec(text);
+  if (!match) return undefined;
+  const [, leading, marker, padding] = match;
+  const markerEnd = leading!.length + marker!.length;
+  let indent = markerEnd;
+  for (const char of padding!) indent += char === "\t" ? 4 - indent % 4 : 1;
+  const content = text.slice(match[0].length);
+  const code = !!content && indent - markerEnd > 4;
+  const interrupts = !!content && (marker!.length === 1 || /^1[.)]$/.test(marker!));
+  // Empty items and items starting with indented code have one column of list padding.
+  if (!content || code) indent = markerEnd + 1;
+  const checkbox = /^\[[ xX]\][ \t]+/.exec(content);
+  const end = code ? markerEnd + 1 : match[0].length + (checkbox?.[0].length ?? 0);
+  return { indent, end, interrupts, code };
+}
+
+function isSetextUnderline(text: string): boolean {
+  return /^ {0,3}(?:=+|-+)[ \t]*$/u.test(text);
+}
+
+function isThematicBreak(text: string): boolean {
+  return /^ {0,3}([_*-])(?:[ \t]*\1){2,}[ \t]*$/u.test(text);
+}
+
+/** GFM splits an unescaped pipe even inside a code span. Only the backslash
+ * escaping a pipe is consumed here; the remaining text still has inline syntax. */
+function gfmCells(text: string): string[] {
+  const cells: string[] = [];
+  let start = 0;
+  let cell = "";
+  for (let pipe = text.indexOf("|"); pipe >= 0; pipe = text.indexOf("|", start)) {
+    let before = pipe;
+    while (before > start && text[before - 1] === "\\") before--;
+    if ((pipe - before) % 2) {
+      cell += text.slice(start, pipe - 1) + "|";
+    } else {
+      cells.push((cell + text.slice(start, pipe)).trim());
+      cell = "";
+    }
+    start = pipe + 1;
+  }
+  cells.push((cell + text.slice(start)).trim());
+  if (cells[0] === "") cells.shift();
+  if (cells.at(-1) === "") cells.pop();
+  return cells;
+}
+
+function isTableDelimiter(text: string): boolean {
+  if (!/^ {0,3}[:|-][ \t:|-]*$/u.test(text) || !/[:|]/u.test(text)) return false;
+  const cells = gfmCells(text);
+  return cells.length > 0 && cells.every((cell) => /^:?-+:?$/u.test(cell));
+}
+
+// CommonMark HTML block starts 1–6 can interrupt a paragraph. A complete
+// generic tag (type 7) can start an HTML block only between paragraphs.
+const blockTags = new Set(("address article aside base basefont blockquote body caption center col colgroup dd details dialog " +
+  "dir div dl dt fieldset figcaption figure footer form frame frameset h1 h2 h3 h4 h5 h6 head header hr html iframe " +
+  "legend li link main menu menuitem nav noframes ol optgroup option p param search section summary table tbody td tfoot th thead title tr track ul").split(" "));
+
+function startsHtmlBlock(text: string, paragraphOpen: boolean): boolean {
+  if (/^ {0,3}<(?:!--|\?|!\[CDATA\[|![A-Z]|(?:pre|script|style|textarea)(?=[ \t>]|$))/iu.test(text)) return true;
+  const tag = /^ {0,3}<\/?([a-z][\w-]*)(?=[ \t>]|\/>|$)/iu.exec(text);
+  if (!tag) return false;
+  if (blockTags.has(tag[1]!.toLowerCase())) return true;
+  return !paragraphOpen && /^ {0,3}<\/?[a-z][\w-]*(?:[ \t]+[a-z_:][\w.:-]*(?:[ \t]*=[ \t]*(?:"[^"]*"|\x27[^\x27]*\x27|[^\s"\x27=<>`]+))?)*[ \t]*\/?>[ \t]*$/iu.test(text);
 }
 
 function continuationIndent(text: string, width: number): number | undefined {
@@ -93,10 +198,10 @@ function continuationIndent(text: string, width: number): number | undefined {
   return count;
 }
 
-/** Strip Markdown block prefixes only where the physical line starts in Markdown. */
-export function stripEquationBlockPrefixes(text: string): string[] {
+/** Formal table rows expose independent inline cells; other blocks retain their physical lines. */
+export function equationMarkdownLines(text: string): (string | string[])[] {
   const rawLines = text.split(/\r\n|[\r\n\u2028\u2029]/u);
-  if (rawLines.length === 1) return [stripMarkdownPrefix(text)];
+  if (rawLines.length === 1 && !/^[ \t>+*#\d-]/u.test(text)) return [text];
   const lines = markdownLines(rawLines);
   const fences = matchedFences(lines);
   let proseStart = 0;
@@ -110,14 +215,11 @@ export function stripEquationBlockPrefixes(text: string): string[] {
     proseStart = end + 1;
   }
   markMathLines(lines.slice(proseStart));
-  return lines.map(({ raw, literalStart }) =>
-    literalStart === undefined ? stripMarkdownPrefix(raw) : raw.slice(literalStart),
-  );
-}
-
-function stripMarkdownPrefix(line: string): string {
-  const containerPrefix = /^[ \t]*(?:>[ \t]*|(?:[-*+]|\d+[.)])[ \t]+(?:\[[ xX]\][ \t]+)?)+/;
-  return line.replace(containerPrefix, "").replace(/^[ \t]*#{1,6}[ \t]+/, "");
+  return lines.map(({ raw, literalStart, content, cells, literalBlock }) => {
+    if (literalStart !== undefined) return raw.slice(literalStart);
+    if (cells) return cells;
+    return literalBlock ? content : content.replace(/^ {0,3}#{1,6}[ \t]+/, "");
+  });
 }
 
 function readFence(content: string): EquationLine["fence"] {
@@ -172,11 +274,11 @@ function mathMarkers(lines: EquationLine[]): MathMarker[][] {
   while (start < lines.length) {
     let stop = start + 1;
     const first = lines[start]!;
-    const scope = first.containers.at(-1)?.scope;
-    while (
-      !first.paragraphBreak && stop < lines.length &&
-      !lines[stop]!.paragraphBreak && lines[stop]!.containers.at(-1)?.scope === scope
-    ) {
+    if (first.cells || first.literalBlock) {
+      start++;
+      continue;
+    }
+    while (first.paragraph !== undefined && stop < lines.length && lines[stop]!.paragraph === first.paragraph) {
       stop++;
     }
     const paragraph = lines.slice(start, stop).map((line) => line.content).join("\n");
@@ -214,7 +316,11 @@ function markMathLines(lines: EquationLine[]): void {
   const scopes = new Map<Container | undefined, Map<string, MathMarker[]>>();
   const markers = mathMarkers(lines);
   for (let i = lines.length - 1; i >= 0; i--) {
-    const { quote, trimmed, containers } = lines[i]!;
+    const { quote, trimmed, containers, cells, setext } = lines[i]!;
+    if (cells || setext) {
+      scopes.clear();
+      continue;
+    }
     const scope = scopes.get(quote) ?? new Map<string, MathMarker[]>();
     scopes.set(quote, scope);
     if (!trimmed) scope.delete("$");

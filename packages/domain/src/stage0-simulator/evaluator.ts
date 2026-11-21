@@ -23,7 +23,7 @@ import {
   STAGE0_EXPECTED_EPISODE_COUNT,
   generateStage0Episodes,
 } from "./episodes";
-import { equationSpanEnds, mathSpanClosers, stripEquationBlockPrefixes } from "./equation-markdown";
+import { equationMarkdownLines, equationSpanEnds, mathSpanClosers } from "./equation-markdown";
 import {
   advanceStudentAfterTutorTurn,
   buildInitialStudentUtterance,
@@ -100,7 +100,9 @@ function normalizeCompactForLeakScan(text: string): string {
 
 /** Expose Markdown block boundaries and inline equation text before math compaction. */
 function stripEquationFormatting(text: string): string {
-  return stripEquationBlockPrefixes(text).map(stripEquationLine).join(";");
+  return equationMarkdownLines(text)
+    .map((line) => typeof line === "string" ? stripEquationLine(line) : line.map(stripEquationSegment).join(";"))
+    .join(";");
 }
 
 const equationMarkers = /(\\?`+|\\[\\|$()[\]]|\*+|_+|~~|\$\$?|\|)/u;
