@@ -496,28 +496,61 @@ function readBalancedBracket(text: string, openIndex: number): number {
   return -1;
 }
 
-function stripOuterMathDelimiters(raw: string): string {
+function stripLatexComments(text: string): string {
+  let out = "";
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]!;
+    if (ch === "\\") {
+      if (i + 1 < text.length) {
+        out += ch + text[i + 1]!;
+        i++;
+      } else {
+        out += ch;
+      }
+      continue;
+    }
+    if (ch === "%") {
+      while (i + 1 < text.length && text[i + 1] !== "\r" && text[i + 1] !== "\n") {
+        i++;
+      }
+      continue;
+    }
+    out += ch;
+  }
+  return out;
+}
+
+function unwrapOuterMathDelimiters(raw: string): { text: string; hadDelimiters: boolean } {
   let text = raw.trim();
+  let hadDelimiters = false;
   while (text) {
     if (text.startsWith("$$") && text.endsWith("$$") && text.length >= 4 && !text.slice(2, -2).includes("$$")) {
       text = text.slice(2, -2).trim();
+      hadDelimiters = true;
       continue;
     }
     if (text.startsWith("\\[") && text.endsWith("\\]") && text.length >= 4 && !text.slice(2, -2).includes("\\]")) {
       text = text.slice(2, -2).trim();
+      hadDelimiters = true;
       continue;
     }
     if (text.startsWith("\\(") && text.endsWith("\\)") && text.length >= 4 && !text.slice(2, -2).includes("\\)")) {
       text = text.slice(2, -2).trim();
+      hadDelimiters = true;
       continue;
     }
     if (text.startsWith("$") && text.endsWith("$") && text.length >= 2 && !text.slice(1, -1).includes("$")) {
       text = text.slice(1, -1).trim();
+      hadDelimiters = true;
       continue;
     }
     break;
   }
-  return text;
+  return { text, hadDelimiters };
+}
+
+function stripOuterMathDelimiters(raw: string): string {
+  return unwrapOuterMathDelimiters(raw).text;
 }
 
 function matchEnvTag(text: string, index: number, kind: "begin" | "end"): { env: string; endIndex: number } | null {
@@ -806,8 +839,10 @@ function isExtractableEnv(env: string): boolean {
 }
 
 function extractFromLatexFragment(raw: string, out: string[], insideMathEnv = false): boolean {
-  const text = stripOuterMathDelimiters(raw);
+  const cleanedRaw = insideMathEnv ? raw : stripLatexComments(raw);
+  const { text, hadDelimiters } = unwrapOuterMathDelimiters(cleanedRaw);
   if (!text) return false;
+  const inMathContext = insideMathEnv || hadDelimiters;
   if (text.startsWith("\\begin{")) {
     const outer = findMatchingEnvEnd(text, 0);
     if (outer && outer.afterEnd === text.length) {
@@ -839,7 +874,7 @@ function extractFromLatexFragment(raw: string, out: string[], insideMathEnv = fa
       }
     }
   }
-  const { rows, hasIntertext } = splitTopLevelRows(text, { splitNewlines: !insideMathEnv });
+  const { rows, hasIntertext } = splitTopLevelRows(text, { splitNewlines: !inMathContext });
   let hasNonEquationContent = hasIntertext;
   let pendingRowClause: string | null = null;
   const flushPending = () => {
@@ -911,9 +946,11 @@ function extractFromLatexFragment(raw: string, out: string[], insideMathEnv = fa
 }
 
 function extractFormulaSnippets(formula: string): string[] {
+  const cleanFormula = stripLatexComments(formula).trim();
+  if (!cleanFormula) return [];
   const equations: string[] = [];
-  const hasNonEquationContent = extractFromLatexFragment(formula, equations);
-  if (equations.length === 0 || hasNonEquationContent) equations.push(formula);
+  const hasNonEquationContent = extractFromLatexFragment(cleanFormula, equations);
+  if (equations.length === 0 || hasNonEquationContent) equations.push(cleanFormula);
   return [...new Set(equations)];
 }
 
@@ -929,7 +966,9 @@ const TEXT_MACRO_NAMES = new Set(["text", "mtext", "textbf", "textit", "textrm",
 
 const PROSE_CONNECTIVE_WORD = /^(?:and|or|when|where|if|then|so|for|with|hence|thus|since|as|therefore|because|but|otherwise|while)$/i;
 
-const CJK_CLAUSE_CONNECTIVE = /^(?:所以|因此|于是|从而|进而|并且|而且|但是|然而|如果|因为|由于|其中|此时|例如|比如|验证|检查|步骤|得到|可得|解得|化简得|整理得|推出|由此得|由此可得|且|或|和|与|即|故|则|若|当|得|由)$/;
+const CJK_CLAUSE_CONNECTIVE = /^(?:所以|因此|于是|从而得到|进而得到|从而|进而|并且|而且|但是|然而|如果|因为|由于|其中|此时|例如|比如|验证|检查|步骤|由此得到|由此可得|由此推出|由此得|化简得|整理得|计算得|得到|可得|解得|推出|故得|即得|且|或|和|与|即|故|则|若|当|得|由)$/;
+
+const CJK_INLINE_MULTI_CLAUSE_CONNECTIVE = /(?:所以|因此|于是|从而得到|进而得到|从而|进而|并且|而且|但是|然而|如果|因为|由于|其中|此时|例如|比如|验证|检查|步骤|由此得到|由此可得|由此推出|由此得|化简得|整理得|计算得|得到|可得|解得|推出|故得|即得)/;
 
 function isProseTextMacroBody(body: string): boolean {
   const trimmed = body.trim();
@@ -1039,6 +1078,15 @@ function splitMultiClauseFormula(text: string): string[] {
           clauses.push(text.slice(start, i));
           start = nextIndex;
           i = nextIndex - 1;
+          continue;
+        }
+        const inlineMatch = CJK_INLINE_MULTI_CLAUSE_CONNECTIVE.exec(word);
+        if (inlineMatch) {
+          const splitAt = i + inlineMatch.index;
+          const afterConn = splitAt + inlineMatch[0].length;
+          clauses.push(text.slice(start, splitAt));
+          start = afterConn;
+          i = afterConn - 1;
           continue;
         }
         i = nextIndex - 1;
@@ -1184,11 +1232,12 @@ async function verifyToolResult(input: VerifyTeachingInput): Promise<LayerResult
       fields.push(...block.content.steps.filter(step => typeof step === "string" && step.includes("=")));
     }
     const formulas = fields.filter((field): field is string => typeof field === "string" && !!field.trim());
-    if (!formulas.length && (block.type === "formula" || block.type === "math")) {
-      unknown ??= { layer: "tool_result", outcome: "unknown", reason: "formula block has no checkable latex" };
-    }
+    const beforeCount = latexSnippets.length;
     for (const formula of new Set(formulas)) {
       latexSnippets.push(...extractFormulaSnippets(formula));
+    }
+    if (latexSnippets.length === beforeCount && (block.type === "formula" || block.type === "math")) {
+      unknown ??= { layer: "tool_result", outcome: "unknown", reason: "formula block has no checkable latex" };
     }
   }
 

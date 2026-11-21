@@ -378,6 +378,11 @@ describe("teaching-verifiers", () => {
     ["gather* CRLF wrapped expression contradiction", "\\begin{gather*}\r\n1 + 2 =\r\n4\r\n\\end{gather*}", "1 + 2 = 4"],
     ["nested aligned inside equation* with physical newline contradiction", "\\begin{equation*}\n\\begin{aligned}\n1 + 1 &= 2 \\\\\n2 + 2 &= 5\n\\end{aligned}\n\\end{equation*}", "2 + 2 = 5"],
     ["aligned with nested pmatrix and physical newlines before contradiction", "\\begin{aligned}\nA &= \\begin{pmatrix}\n1 & 2 \\\\\n3 & 4\n\\end{pmatrix} \\\\\n2 + 2 &= 5\n\\end{aligned}", "2 + 2 = 5"],
+    ["CJK derivation connective 由此得到 contradiction", "1 + 1 = 2 由此得到 2 + 2 = 5", "2 + 2 = 5"],
+    ["inline CJK unit followed by 由此得到 contradiction", "1 + 2 = 300厘米由此得到2 + 2 = 5", "2 + 2 = 5"],
+    ["display \\[...\\] with explicit \\\\ before contradiction", String.raw`\[1 + 1 = 2 \\ 2 + 2 = 5\]`, "2 + 2 = 5"],
+    ["display \\[...\\] single-line contradiction", String.raw`\[1 + 1 = 5\]`, "1 + 1 = 5"],
+    ["display \\[...\\] wrapped across physical newline with false sum", "\\[\n1 + 1 = 1\n+ 2 = 4\n\\]", "1 + 1 = 1 + 2 = 4"],
   ])("flags multiline LaTeX contradiction with real arithmetic probe (%s)", async (_label, latex, expectedDetail) => {
     const report = await verifyTeachingContent({
       activityId: ACT, publishInput: basePublish(), pack: packWithSupport(), keyClaims: [],
@@ -404,6 +409,12 @@ describe("teaching-verifiers", () => {
       "\\begin{eqnarray*}\r\n1 + 1 &=& 1\r\n+ 1\r\n\\end{eqnarray*}",
       "\\begin{gather}\n1 + 2 + 3\n= 6\n\\end{gather}",
       "\\begin{equation*}\n\\begin{aligned}\n1 + 1 &= 1\n+ 1 = 2\n\\end{aligned}\n\\end{equation*}",
+      "\\[\n1 + 1 = 1\n+ 1 = 2\n\\]",
+      "$$\n1 + 1 = 1\n+ 1 = 2\n$$",
+      "\\(\n1 + 1 = 1\n+ 1 = 2\n\\)",
+      "$\n1 + 1 = 1\n+ 1 = 2\n$",
+      "1 + 1 = 2 % \\\\ 2 + 2 = 5",
+      "\\begin{aligned}\n1 + 1 &= 1 % partial summand\n+ 1 = 2 \\\\\n% \\\\ 2 + 2 = 5\n2 + 2 &= 4\n\\end{aligned}",
     ]) {
       const passReport = await verifyTeachingContent({
         activityId: ACT, publishInput: basePublish(), pack: packWithSupport(), keyClaims: [],
@@ -441,7 +452,10 @@ describe("teaching-verifiers", () => {
       String.raw`1 \text{ ft} = 12 \text{ in}`,
       "1 + 2 = 300 厘米, 1 + 1 = 2",
       "1 + 1 = 2 得到 2 + 2 = 4",
+      "1 + 1 = 2 由此得到 2 + 2 = 4",
       String.raw`3 \text{ 米} = 300 厘米 = 3000 毫米`,
+      "50\\% = 0.5\n% \\\\ 1 + 1 = 5",
+      "% \\\\ 1 + 1 = 5",
       "\\begin{aligned}\nA &= \\begin{pmatrix}\n1 & 2 \\\\\n3 & 4\n\\end{pmatrix} \\\\\n1 + 1 &= 2\n\\end{aligned}",
     ]) {
       const unknownReport = await verifyTeachingContent({
