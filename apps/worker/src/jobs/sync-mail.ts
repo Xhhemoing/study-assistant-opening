@@ -7,7 +7,7 @@ import {
   OpeningS3,
 } from "@aistudy/database";
 import { createApprovedImapClient } from "../connectors/imap-endpoint";
-import { syncMailbox } from "../connectors/imap-sync";
+import { DEFAULT_IMAP_SYNC_DURATION_MS, runWithSyncDeadline, syncMailbox } from "../connectors/imap-sync";
 
 export type SyncMailInput = { connectionId: string };
 
@@ -59,12 +59,21 @@ export function createSyncMailHandler(sql = createSqlClient(loadWorkerEnv().data
     try {
       if (!folder) throw new Error("imap connection has no selected folder");
       const cursor = await imports.readImapCursor(scope, connectionId, folder);
-      await client.connect();
+      const deadlineMs = Date.now() + DEFAULT_IMAP_SYNC_DURATION_MS;
+      const closeClient = () => client.close();
+      await runWithSyncDeadline(() => client.connect(), {
+        phase: "connect",
+        deadlineMs,
+        now: Date.now,
+        onDeadlineAbort: closeClient,
+      });
       return await syncMailbox({
         scope, connectionId, connectionVersion: version, folder, cursor, since, client, imports,
-        onDeadlineAbort: () => client.close(),
+        deadlineMs,
+        onDeadlineAbort: closeClient,
         storage: {
-          upload: ({ key, bytes, mime }) => storage.putObject(key, bytes, { mime }),
+          upload: ({ key, bytes, mime, signal }) =>
+            storage.putObject(key, bytes, { mime, ...(signal ? { signal } : {}) }),
           remove: key => storage.deleteObject(key),
         },
       });
@@ -81,10 +90,35 @@ export function createCheckMailHandler(sql = createSqlClient(loadWorkerEnv().dat
   return async function checkMail({ connectionId }: SyncMailInput): Promise<CheckMailResult> {
     const { client, folder } = await loadMailConnection(sql, connectionId);
     try {
-      await client.connect();
-      if (folder) await client.mailboxOpen(folder, { readOnly: true });
-      else await client.list();
-      await client.logout().catch(() => undefined);
+      const deadlineMs = Date.now() + DEFAULT_IMAP_SYNC_DURATION_MS;
+      const closeClient = () => client.close();
+      await runWithSyncDeadline(() => client.connect(), {
+        phase: "connect",
+        deadlineMs,
+        now: Date.now,
+        onDeadlineAbort: closeClient,
+      });
+      if (folder) {
+        await runWithSyncDeadline(() => client.mailboxOpen(folder, { readOnly: true }), {
+          phase: "mailboxOpen",
+          deadlineMs,
+          now: Date.now,
+          onDeadlineAbort: closeClient,
+        });
+      } else {
+        await runWithSyncDeadline(() => client.list(), {
+          phase: "list",
+          deadlineMs,
+          now: Date.now,
+          onDeadlineAbort: closeClient,
+        });
+      }
+      await runWithSyncDeadline(() => client.logout(), {
+        phase: "logout",
+        deadlineMs,
+        now: Date.now,
+        onDeadlineAbort: closeClient,
+      }).catch(() => undefined);
       return { ok: true, kind: "imap" };
     } finally {
       client.close();

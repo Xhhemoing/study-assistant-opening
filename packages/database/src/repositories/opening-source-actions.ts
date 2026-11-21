@@ -6,7 +6,9 @@ import { lockWorkspaceLearningHistory, nextWorkspaceLearningHistoryRevision } fr
 import { invalidateOpeningLearningEligibility } from "./opening-learning-eligibility";
 
 type Keys = { stagingKey(id: string): string; finalKey(id: string, version: number): string };
-type Cleanup = { keys: string[]; notBefore: string | null };
+export const CONNECTOR_PUT_TIMEOUT_MS = 30_000;
+export const CONNECTOR_RESERVATION_GRACE_MS = 60_000;
+type Cleanup = { keys: string[]; notBefore: string | null; connectorReservation?: boolean };
 type Db = Sql | TransactionSql;
 
 async function owner(db: Db, scope: OpeningScope, lock = false) {
@@ -24,9 +26,17 @@ async function courses(db: Db, scope: OpeningScope, id: string): Promise<SourceI
     archivedAt: row.archived_at ? new Date(row.archived_at).toISOString() : null }));
 }
 
+function isConnectorReservationRow(row: Record<string, unknown>): boolean {
+  if (row.id == null || row.source_id == null || row.memory_id != null) return false;
+  return String(row.id).toLowerCase() === connectorReservationId(String(row.source_id));
+}
+
 function cleanup(row: Record<string, unknown>): Cleanup {
-  return { keys: (row.pending_object_keys as string[] | null) ?? [],
-    notBefore: row.cleanup_not_before ? new Date(row.cleanup_not_before as Date).toISOString() : null };
+  return {
+    keys: (row.pending_object_keys as string[] | null) ?? [],
+    notBefore: row.cleanup_not_before ? new Date(row.cleanup_not_before as Date).toISOString() : null,
+    ...(isConnectorReservationRow(row) ? { connectorReservation: true } : {}),
+  };
 }
 
 // Ordinary exclusions are generated as UUIDv4. Use the attempt's UUID with
@@ -36,20 +46,40 @@ export function connectorReservationId(sourceId: string) {
   return normalized.slice(0, 14) + "8" + normalized.slice(15);
 }
 
-export async function releaseConnectorReservation(tx: TransactionSql, scope: OpeningScope, id: string, key: string) {
+async function tryReleaseConnectorReservation(
+  tx: TransactionSql,
+  scope: OpeningScope,
+  id: string,
+  key: string,
+  options?: { enforceNotBefore?: boolean; now?: Date },
+): Promise<"released" | "deferred" | "none"> {
   const canonicalId = id.toLowerCase();
-  const [receipt] = await tx`SELECT id FROM opening_privacy_exclusions
+  const [receipt] = await tx`SELECT id, cleanup_not_before FROM opening_privacy_exclusions
     WHERE workspace_id=${scope.workspaceId} AND source_id=${canonicalId} AND id=${connectorReservationId(canonicalId)}
       AND asset_deleted_at IS NOT NULL AND pending_object_keys=ARRAY[${key}]::text[]
       AND NOT EXISTS (SELECT 1 FROM opening_sources WHERE id=${canonicalId})
     FOR UPDATE`;
-  if (!receipt) return false;
+  if (!receipt) return "none";
+  if (options?.enforceNotBefore && receipt.cleanup_not_before) {
+    const cutoff = options.now ?? new Date();
+    if (new Date(receipt.cleanup_not_before as Date) > cutoff) return "deferred";
+  }
   const removed = await tx`DELETE FROM opening_source_versions WHERE workspace_id=${scope.workspaceId}
     AND source_id=${canonicalId} AND version=0 AND availability='unavailable' AND sha256 IS NULL
     AND material_manifest IS NULL RETURNING source_id`;
   if (!removed.length) throw new OpeningSourceError("CONFLICT", "Connector reservation changed");
   await tx`DELETE FROM opening_privacy_exclusions WHERE id=${receipt.id}`;
-  return true;
+  return "released";
+}
+
+export async function releaseConnectorReservation(
+  tx: TransactionSql,
+  scope: OpeningScope,
+  id: string,
+  key: string,
+  options?: { enforceNotBefore?: boolean; now?: Date },
+) {
+  return (await tryReleaseConnectorReservation(tx, scope, id, key, options)) === "released";
 }
 
 async function claimCleanup(tx: TransactionSql, scope: OpeningScope, id: string): Promise<Cleanup> {
@@ -79,7 +109,14 @@ export function createOpeningSourceActionsRepository(sql: Sql) {
       return { sourceId: canonicalId, version: Number(rows[0]!.version), aiExcluded: Boolean(rows[0]!.excluded), courses: await courses(sql, scope, canonicalId) };
     },
 
-    async apply(scope: OpeningScope, id: string, input: Exclude<SourceActionInput, { action: "retry_cleanup" }>, keys: Keys, now: Date): Promise<{ deleted: boolean; cleanup: Cleanup }> {
+    async apply(
+      scope: OpeningScope,
+      id: string,
+      input: Exclude<SourceActionInput, { action: "retry_cleanup" }>,
+      keys: Keys,
+      now: Date,
+      options?: { extraKeys?: readonly string[] },
+    ): Promise<{ deleted: boolean; cleanup: Cleanup }> {
       const canonicalId = id.toLowerCase();
       return sql.begin(async tx => {
         await lockWorkspaceLearningHistory(tx, scope);
@@ -116,15 +153,26 @@ export function createOpeningSourceActionsRepository(sql: Sql) {
         const versions = await tx`SELECT version FROM opening_source_versions WHERE workspace_id=${scope.workspaceId} AND source_id=${canonicalId}
           UNION SELECT source_version AS version FROM opening_source_chunks WHERE source_id=${canonicalId}`;
         const versionNumbers = [Number(source.version), ...versions.map(row => Number(row.version))];
-        const objectKeys = new Set([
-          keys.stagingKey(canonicalId),
-          ...versionNumbers.map(version => keys.finalKey(canonicalId, version)),
-          ...(id !== canonicalId
-            ? [keys.stagingKey(id), ...versionNumbers.map(version => keys.finalKey(id, version))]
-            : []),
-        ]);
+        const upperId = canonicalId.toUpperCase();
+        const variantIds = new Set([canonicalId]);
+        if (upperId !== canonicalId) variantIds.add(upperId);
+        if (id !== canonicalId) variantIds.add(id);
+        const objectKeys = new Set<string>();
+        for (const variantId of variantIds) {
+          objectKeys.add(keys.stagingKey(variantId));
+          for (const version of versionNumbers) {
+            objectKeys.add(keys.finalKey(variantId, version));
+          }
+        }
         const sourcePrefix = "opening/sources/";
         const ownPrefix = `${sourcePrefix}${canonicalId}/`;
+        const ownStagingKeyLower = keys.stagingKey(canonicalId).toLowerCase();
+        for (const extraKey of options?.extraKeys ?? []) {
+          const lowerExtra = extraKey.toLowerCase();
+          if (!extraKey.includes("..") && (lowerExtra === ownStagingKeyLower || lowerExtra.startsWith(ownPrefix))) {
+            objectKeys.add(extraKey);
+          }
+        }
         const images = await tx`SELECT image_object_key FROM opening_source_chunks
           WHERE source_id=${canonicalId} AND image_object_key IS NOT NULL
           UNION ALL SELECT key AS image_object_key FROM opening_jobs
@@ -137,7 +185,8 @@ export function createOpeningSourceActionsRepository(sql: Sql) {
           }
           objectKeys.add(key);
           const recordedId = key.slice(sourcePrefix.length, sourcePrefix.length + canonicalId.length);
-          if (recordedId !== canonicalId) {
+          if (!variantIds.has(recordedId)) {
+            variantIds.add(recordedId);
             objectKeys.add(keys.stagingKey(recordedId));
             for (const version of versionNumbers) {
               objectKeys.add(keys.finalKey(recordedId, version));
@@ -163,11 +212,16 @@ export function createOpeningSourceActionsRepository(sql: Sql) {
       });
     },
 
-    async cleaned(scope: OpeningScope, id: string, key: string): Promise<boolean> {
+    async cleaned(scope: OpeningScope, id: string, key: string, now = new Date()): Promise<boolean> {
       const canonicalId = id.toLowerCase();
       return sql.begin(async tx => {
         await owner(tx, scope);
-        if (await releaseConnectorReservation(tx, scope, canonicalId, key)) return true;
+        const status = await tryReleaseConnectorReservation(tx, scope, canonicalId, key, {
+          enforceNotBefore: true,
+          now,
+        });
+        if (status === "released") return true;
+        if (status === "deferred") return false;
         await tx`UPDATE opening_privacy_exclusions SET pending_object_keys=array_remove(pending_object_keys,${key})
           WHERE workspace_id=${scope.workspaceId} AND source_id=${canonicalId} AND asset_deleted_at IS NOT NULL`;
         return false;

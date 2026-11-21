@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ImapCursor } from "@aistudy/contracts";
-import { mailToImportInput, MAX_MAIL_BYTES, nextImapCursor, syncMailbox, type ImapSyncDeps } from "./imap-sync";
+import { mailToImportInput, MAX_MAIL_BYTES, nextImapCursor, runWithSyncDeadline, syncMailbox, type ImapSyncDeps } from "./imap-sync";
 import { publishConnectorSource } from "./publish-source";
 
 vi.mock("./publish-source", () => ({ publishConnectorSource: vi.fn() }));
@@ -218,6 +218,36 @@ describe("imap sync cursor and parser guards", () => {
     await expect(syncMailbox(stalled.deps)).rejects.toThrow("IMAP sync exceeded time budget during discovery");
     expect(Date.now() - startedAt).toBeLessThan(400);
     expect(returnCalled).toBe(true);
+    expect(onDeadlineAbort).toHaveBeenCalledOnce();
+  });
+
+  it.each(["mailboxOpen", "fetch", "logout"] as const)(
+    "bounds %s under the shared sync deadline and triggers onDeadlineAbort",
+    async phase => {
+      const base = mailbox([1], null);
+      const onDeadlineAbort = vi.fn();
+      base.deps.maxSyncDurationMs = 20;
+      base.deps.onDeadlineAbort = onDeadlineAbort;
+      if (phase === "mailboxOpen") {
+        base.deps.client.mailboxOpen = (() => new Promise(() => undefined)) as ImapSyncDeps["client"]["mailboxOpen"];
+      } else if (phase === "fetch") {
+        base.deps.client.fetchOne = (() => new Promise(() => undefined)) as ImapSyncDeps["client"]["fetchOne"];
+      } else {
+        base.deps.client.logout = (() => new Promise(() => undefined)) as ImapSyncDeps["client"]["logout"];
+      }
+      await expect(syncMailbox(base.deps)).rejects.toThrow(`IMAP sync exceeded time budget during ${phase}`);
+      expect(onDeadlineAbort).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("bounds stalled connect under runWithSyncDeadline and invokes onDeadlineAbort", async () => {
+    const onDeadlineAbort = vi.fn();
+    await expect(runWithSyncDeadline(() => new Promise(() => undefined), {
+      phase: "connect",
+      deadlineMs: Date.now() + 20,
+      now: Date.now,
+      onDeadlineAbort,
+    })).rejects.toThrow("IMAP sync exceeded time budget during connect");
     expect(onDeadlineAbort).toHaveBeenCalledOnce();
   });
 });

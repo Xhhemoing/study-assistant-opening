@@ -3,6 +3,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import { ImapFlow } from "imapflow";
 import type { ImapCursor } from "@aistudy/contracts";
 import {
+  CONNECTOR_RESERVATION_GRACE_MS,
   createOpeningConnectionsRepository,
   createOpeningImportsRepository,
   createOpeningSourceActionsRepository,
@@ -255,13 +256,23 @@ describe("isolated standard IMAP sync gate", () => {
     const orphanKey = `opening/sources/${orphanId}/v0`;
     expect(objectByKey.has(orphanKey)).toBe(true);
 
-    expect(await service.actOnSource(principal, orphanId, { action: "retry_cleanup" })).toEqual({
+    const deferred = await service.actOnSource(principal, orphanId, { action: "retry_cleanup" });
+    expect(deferred).toMatchObject({
+      sourceId: orphanId, aiExcluded: true, deleted: true, cleanupPending: 1,
+    });
+    expect(deferred.retryAfter).toBeTruthy();
+    expect(objectByKey.has(orphanKey)).toBe(true);
+
+    const expiredService = createOpeningSourceService(f.sql, storage, {
+      now: () => new Date(Date.now() + CONNECTOR_RESERVATION_GRACE_MS + 1_000),
+    });
+    expect(await expiredService.actOnSource(principal, orphanId, { action: "retry_cleanup" })).toEqual({
       sourceId: orphanId, aiExcluded: true, deleted: true, cleanupPending: 0, retryAfter: null,
     });
     expect(objectByKey.has(orphanKey)).toBe(false);
     expect(await service.listSourceDeletions(principal)).toEqual([]);
     expect(await readOpeningSourceQuotaUsage(f.sql, f.scope.workspaceId, 1024)).toEqual({ bytes: 0n, objects: 0n });
-    await expect(service.actOnSource(principal, orphanId, { action: "retry_cleanup" })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(expiredService.actOnSource(principal, orphanId, { action: "retry_cleanup" })).rejects.toMatchObject({ code: "NOT_FOUND" });
 
     // Committed sources must never be removed by removeUnpublishedSource even if no reservation exists,
     // while an unpublished fresh UUID with no retained rows cleans up a late-landing key.

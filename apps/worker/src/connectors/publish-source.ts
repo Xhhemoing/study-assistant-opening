@@ -2,10 +2,10 @@ import { createHash, randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { loadOpeningUploadQuota } from "@aistudy/config";
 import { uploadInputSchema, type SourceMime } from "@aistudy/contracts";
-import type { createOpeningImportsRepository, OpeningImportCommit, OpeningScope } from "@aistudy/database";
+import { CONNECTOR_PUT_TIMEOUT_MS, type createOpeningImportsRepository, type OpeningImportCommit, type OpeningScope } from "@aistudy/database";
 
 export type ConnectorSourceStorage = {
-  upload(input: { key: string; bytes: Uint8Array; mime: string }): Promise<void>;
+  upload(input: { key: string; bytes: Uint8Array; mime: string; signal?: AbortSignal }): Promise<void>;
   remove(key: string): Promise<void>;
 };
 
@@ -49,7 +49,12 @@ export async function publishConnectorSource(
       sourceId, source, key, quota,
     }, async () => {
       staged = true;
-      await storage.upload({ key, bytes: input.bytes, mime: source.mime });
+      await storage.upload({
+        key,
+        bytes: input.bytes,
+        mime: source.mime,
+        signal: AbortSignal.timeout(CONNECTOR_PUT_TIMEOUT_MS),
+      });
     });
   } catch (error) {
     if (staged) {

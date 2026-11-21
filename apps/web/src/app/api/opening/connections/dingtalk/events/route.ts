@@ -41,11 +41,14 @@ export async function POST(request: Request): Promise<Response> {
     return response;
   } catch (error) {
     if (error instanceof ApiError) {
-      response = jsonError(error);
+      response = error.status >= 500
+        ? Response.json({ error: { code: "CONFIGURATION", message: "callback processing failed" } }, { status: error.status })
+        : jsonError(error);
     } else if (error instanceof DingTalkClientError) {
+      const status = error.code === "INVALID_CONFIG" ? 503 : 400;
       response = Response.json(
-        { error: { code: error.code, message: error.message } },
-        { status: error.code === "INVALID_CONFIG" ? 503 : 400 },
+        { error: { code: error.code, message: status >= 500 ? "callback processing failed" : error.message } },
+        { status },
       );
     } else if (error instanceof OpeningConnectionError) {
       response = Response.json(

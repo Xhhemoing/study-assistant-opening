@@ -5,6 +5,10 @@ import { ImapFlow } from "imapflow";
 import { isPublicProviderAddress } from "@aistudy/ai/provider-network";
 import { imapEndpointSchema, isApprovedImapHost } from "@aistudy/contracts";
 
+export const MAX_IMAP_LINE_BYTES = 2 * 1024 * 1024;
+export const MAX_IMAP_LITERAL_BYTES = 26 * 1024 * 1024;
+export const MAX_IMAP_RESPONSE_BYTES = 28 * 1024 * 1024;
+
 export async function createApprovedImapClient(
   endpoint: { host: string; port: number; tlsMode: string },
   auth: { user: string; pass: string },
@@ -30,6 +34,9 @@ export async function createApprovedImapClient(
     doSTARTTLS: tlsMode === "starttls",
     tls: { rejectUnauthorized: true },
     auth,
+    maxLineLength: MAX_IMAP_LINE_BYTES,
+    maxLiteralSize: MAX_IMAP_LITERAL_BYTES,
+    maxResponseSize: MAX_IMAP_RESPONSE_BYTES,
     logger: false,
   });
 }

@@ -46,6 +46,13 @@ export type RestorePreview = {
   recordCounts: Record<string, number>;
 };
 
+function isTemporaryConnectorReservationRow(row: Record<string, unknown>): boolean {
+  if (!isUuid(row.id) || !isUuid(row.source_id)) return false;
+  if (row.memory_id !== null && row.memory_id !== undefined) return false;
+  const sourceId = row.source_id.toLowerCase();
+  return row.id.toLowerCase() === `${sourceId.slice(0, 14)}8${sourceId.slice(15)}`;
+}
+
 function validateWorkspaceHistory(
   tables: Record<string, Record<string, unknown>[]>,
   errors: string[],
@@ -351,6 +358,7 @@ export function validateOpeningRestore(
       }
       if (name === "opening_privacy_exclusions") {
         if ("pending_object_keys" in row || "cleanup_not_before" in row) errors.push("storage cleanup state cannot be restored");
+        if (isTemporaryConnectorReservationRow(row)) errors.push("temporary connector reservation cannot be restored");
         const mark = backup.deletionJournal.find(item => item.sourceId.toLowerCase() === String(row.source_id).toLowerCase());
         const marker = row.asset_deleted_at;
         if (marker != null && (!(typeof marker === "string" || marker instanceof Date) || !Number.isFinite(new Date(marker as string | Date).getTime()))) errors.push("invalid asset deletion time");

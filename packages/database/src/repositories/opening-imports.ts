@@ -4,7 +4,7 @@ import type { ImapCursor, ImportIdentity, UploadInput } from "@aistudy/contracts
 import { OpeningConnectionError } from "./opening-connections";
 import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { createOpeningPrivacyRepository } from "./opening-privacy";
-import { connectorReservationId, releaseConnectorReservation } from "./opening-source-actions";
+import { CONNECTOR_RESERVATION_GRACE_MS, connectorReservationId, releaseConnectorReservation } from "./opening-source-actions";
 import { reserveOpeningSourceQuota } from "./opening-source-quota";
 import { createOpeningSourceRepository, type OpeningScope, type OpeningSourceQuota } from "./opening-sources";
 
@@ -175,11 +175,12 @@ export function createOpeningImportsRepository(sql: Sql) {
             UNION ALL SELECT 1 FROM opening_privacy_exclusions WHERE source_id=${canonicalSourceId}
             UNION ALL SELECT 1 FROM opening_source_versions WHERE source_id=${canonicalSourceId} LIMIT 1`;
           if (used) throw new OpeningConnectionError("CONFLICT", "connector source object is already reserved");
+          const reservationNotBefore = new Date(Date.now() + CONNECTOR_RESERVATION_GRACE_MS);
           await tx`INSERT INTO opening_source_versions (source_id, version, workspace_id, bytes, availability)
             VALUES (${canonicalSourceId}, 0, ${scope.workspaceId}, ${input.source.bytes}, 'unavailable')`;
           await tx`INSERT INTO opening_privacy_exclusions
-            (id, workspace_id, source_id, asset_deleted_at, pending_object_keys)
-            VALUES (${connectorReservationId(canonicalSourceId)}, ${scope.workspaceId}, ${canonicalSourceId}, now(), ARRAY[${input.key}]::text[])`;
+            (id, workspace_id, source_id, asset_deleted_at, pending_object_keys, cleanup_not_before)
+            VALUES (${connectorReservationId(canonicalSourceId)}, ${scope.workspaceId}, ${canonicalSourceId}, now(), ARRAY[${input.key}]::text[], ${reservationNotBefore})`;
           return null;
         });
         if (duplicate) return duplicate;

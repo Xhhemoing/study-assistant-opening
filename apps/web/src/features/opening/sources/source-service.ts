@@ -262,9 +262,13 @@ export function createOpeningSourceService(sql: Sql, storage: OpeningStorage = n
       auth(p, "source.delete");
       const sourceId = id.toLowerCase();
       const input = sourceActionInputSchema.parse(raw), scope = scopeOf(p);
+      const currentTime = now();
+      const discoveredStagingKeys = input.action === "exclude"
+        ? []
+        : await (storage.listMatchingStagingKeys?.(sourceId).catch(() => []) ?? Promise.resolve([]));
       const result = input.action === "retry_cleanup"
         ? { deleted: true, cleanup: await actions.cleanup(scope, sourceId) }
-        : await actions.apply(scope, id, input, storage, now());
+        : await actions.apply(scope, id, input, storage, currentTime, { extraKeys: discoveredStagingKeys });
       if (input.action !== "retry_cleanup") {
         try {
           await createOpeningKnowledgeRepository(sql).reconcileCoursesForSource(scope, {
@@ -277,30 +281,59 @@ export function createOpeningSourceService(sql: Sql, storage: OpeningStorage = n
       }
       if (!result.deleted) return { sourceId, aiExcluded: true, deleted: false, cleanupPending: 0, retryAfter: null };
       let released = false;
-      for (const key of result.cleanup.keys) {
-        try { await storage.deleteObject(key); }
-        catch { continue; } // The receipt keeps this failed key visible and retryable.
-        const isStagingKey = key.toLowerCase() === storage.stagingKey(sourceId).toLowerCase();
-        if (isStagingKey && result.cleanup.notBefore && new Date(result.cleanup.notBefore) > now()) continue;
-        if (await actions.cleaned(scope, sourceId, key)) released = true;
-      }
+      const cleanupKeys = new Set(result.cleanup.keys);
+      const canonicalStagingKey = storage.stagingKey(sourceId);
+      const requestedStagingKey = id !== sourceId ? storage.stagingKey(id) : canonicalStagingKey;
+      const deferredConnector = Boolean(
+        result.cleanup.connectorReservation
+        && result.cleanup.notBefore
+        && new Date(result.cleanup.notBefore) > currentTime,
+      );
       let remaining: { keys: string[]; notBefore: string | null };
-      if (released) {
-        remaining = { keys: [], notBefore: null };
+      if (deferredConnector) {
+        remaining = result.cleanup;
       } else {
-        try {
-          remaining = await actions.cleanup(scope, sourceId);
-        } catch (error) {
-          if (error instanceof OpeningSourceError && error.code === "NOT_FOUND" && result.cleanup.keys.length > 0) {
-            // Concurrent cleanup may have already released a temporary connector reservation.
-            remaining = { keys: [], notBefore: null };
-          } else {
-            throw error;
+        const extraRetryKeys = input.action === "retry_cleanup"
+          ? discoveredStagingKeys.filter(key =>
+            key.toLowerCase() === canonicalStagingKey.toLowerCase() && !key.includes("..") && !cleanupKeys.has(key))
+          : [];
+        let extraStagingFailed = false;
+        for (const key of extraRetryKeys) {
+          try { await storage.deleteObject(key); }
+          catch { extraStagingFailed = true; }
+        }
+        const hasCanonicalStagingDeferred = cleanupKeys.has(canonicalStagingKey);
+        const notBeforeActive = Boolean(result.cleanup.notBefore && new Date(result.cleanup.notBefore) > currentTime);
+        for (const key of result.cleanup.keys) {
+          try { await storage.deleteObject(key); }
+          catch { continue; } // The receipt keeps this failed key visible and retryable.
+          const isStagingKey = key.toLowerCase() === canonicalStagingKey.toLowerCase();
+          if (isStagingKey && extraStagingFailed) continue;
+          const keepStagingDeferred = isStagingKey && notBeforeActive && (
+            key === canonicalStagingKey
+            || key === requestedStagingKey
+            || !hasCanonicalStagingDeferred
+          );
+          if (keepStagingDeferred) continue;
+          if (await actions.cleaned(scope, sourceId, key, currentTime)) released = true;
+        }
+        if (released) {
+          remaining = { keys: [], notBefore: null };
+        } else {
+          try {
+            remaining = await actions.cleanup(scope, sourceId);
+          } catch (error) {
+            if (error instanceof OpeningSourceError && error.code === "NOT_FOUND" && result.cleanup.keys.length > 0) {
+              // Concurrent cleanup may have already released a temporary connector reservation.
+              remaining = { keys: [], notBefore: null };
+            } else {
+              throw error;
+            }
           }
         }
       }
       return { sourceId, aiExcluded: true, deleted: true, cleanupPending: remaining.keys.length,
-        retryAfter: remaining.keys.length && remaining.notBefore && new Date(remaining.notBefore) > now() ? remaining.notBefore : null };
+        retryAfter: remaining.keys.length && remaining.notBefore && new Date(remaining.notBefore) > currentTime ? remaining.notBefore : null };
     },
     /**
      * Server/worker-oriented download ticket. Still uses MinIO loopback presignGet.

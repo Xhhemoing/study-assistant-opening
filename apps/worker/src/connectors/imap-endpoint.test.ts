@@ -1,7 +1,12 @@
 import net, { type AddressInfo, type NetConnectOpts } from "node:net";
 import tls from "node:tls";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createApprovedImapClient } from "./imap-endpoint";
+import {
+  createApprovedImapClient,
+  MAX_IMAP_LINE_BYTES,
+  MAX_IMAP_LITERAL_BYTES,
+  MAX_IMAP_RESPONSE_BYTES,
+} from "./imap-endpoint";
 
 const host = "imap.example.edu";
 const approvedIp = "1.1.1.1";
@@ -75,4 +80,15 @@ describe("approved IMAP dialer", () => {
       }
     },
   );
+
+  it("configures bounded line, literal, and response size limits on ImapFlow", async () => {
+    const client = await createApprovedImapClient(endpoint, auth, publicAnswers);
+    expect(client.options.maxLineLength).toBe(MAX_IMAP_LINE_BYTES);
+    expect(client.options.maxLiteralSize).toBe(MAX_IMAP_LITERAL_BYTES);
+    expect(client.options.maxResponseSize).toBe(MAX_IMAP_RESPONSE_BYTES);
+    expect(MAX_IMAP_LITERAL_BYTES).toBeGreaterThan(25 * 1024 * 1024);
+    expect(MAX_IMAP_LITERAL_BYTES).toBeLessThan(64 * 1024 * 1024);
+    expect(MAX_IMAP_RESPONSE_BYTES).toBeGreaterThan(MAX_IMAP_LITERAL_BYTES);
+    client.close();
+  });
 });

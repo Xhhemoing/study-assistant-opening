@@ -6,8 +6,12 @@ type Imports = Parameters<typeof publishConnectorSource>[0];
 it("reconciles the same unreferenced object on redelivery after bounded delete retries", async () => {
   const objects = new Set<string>();
   let storageHealthy = false;
+  const uploadSignals: (AbortSignal | undefined)[] = [];
   const storage = {
-    upload: vi.fn(async ({ key }: { key: string }) => { objects.add(key); }),
+    upload: vi.fn(async ({ key, signal }: { key: string; signal?: AbortSignal }) => {
+      uploadSignals.push(signal);
+      objects.add(key);
+    }),
     remove: vi.fn(async (key: string) => {
       if (!storageHealthy) throw new Error("delete temporarily unavailable");
       objects.delete(key);
@@ -40,4 +44,6 @@ it("reconciles the same unreferenced object on redelivery after bounded delete r
   expect(storage.remove).toHaveBeenCalledTimes(4);
   expect(objects.size).toBe(1);
   expect(objects.has(firstKey)).toBe(true);
+  expect(uploadSignals).toHaveLength(2);
+  expect(uploadSignals.every(signal => signal instanceof AbortSignal)).toBe(true);
 });

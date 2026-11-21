@@ -106,8 +106,8 @@ export function getOpeningConnectorStorage() {
     forcePathStyle: process.env.S3_FORCE_PATH_STYLE !== "false",
   });
   return {
-    upload: (input: { key: string; bytes: Uint8Array; mime: string }) =>
-      storage.putObject(input.key, input.bytes, { mime: input.mime }),
+    upload: (input: { key: string; bytes: Uint8Array; mime: string; signal?: AbortSignal }) =>
+      storage.putObject(input.key, input.bytes, { mime: input.mime, ...(input.signal ? { signal: input.signal } : {}) }),
     remove: (key: string) => storage.deleteObject(key),
   };
 }

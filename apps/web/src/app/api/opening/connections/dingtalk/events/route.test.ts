@@ -97,4 +97,31 @@ describe("DingTalk webhook ingress", () => {
     expect(response.headers.get("cache-control")).toBe("no-store");
     expect(sql).not.toHaveBeenCalled();
   });
+
+  it("masks internal error details on 500 and 503 responses", async () => {
+    vi.stubEnv("OPENING_DINGTALK_CALLBACK_CONNECTIONS", JSON.stringify({
+      "fixture-corp": {
+        workspaceId: "00000000-0000-4000-8000-000000000001",
+        ownerUserId: "00000000-0000-4000-8000-0000000000aa",
+        connectionId: "00000000-0000-4000-8000-000000000002",
+      },
+    }));
+    const input = encryptedEnvelope(JSON.stringify({ EventType: "bpms_task_change", eventId: "evt-500" }));
+    const leak = "relation internal_secret_table does not exist at pg://host";
+    sql.mockImplementationOnce(() => {
+      throw new Error(leak);
+    });
+    const r500 = await POST(new NextRequest(input.request.url, { method: "POST", body: input.body, duplex: "half" }));
+    expect(r500.status).toBe(500);
+    const b500 = await r500.json() as { error: { code: string; message: string } };
+    expect(b500).toEqual({ error: { code: "CONFIGURATION", message: "callback processing failed" } });
+    expect(JSON.stringify(b500)).not.toContain(leak);
+
+    vi.stubEnv("OPENING_DINGTALK_CALLBACK_TOKEN", "");
+    const r503 = await POST(new NextRequest(input.request.url, { method: "POST", body: input.body, duplex: "half" }));
+    expect(r503.status).toBe(503);
+    const b503 = await r503.json() as { error: { code: string; message: string } };
+    expect(b503).toEqual({ error: { code: "INVALID_CONFIG", message: "callback processing failed" } });
+    expect(JSON.stringify(b503)).not.toContain("OPENING_DINGTALK_CALLBACK_TOKEN");
+  });
 });

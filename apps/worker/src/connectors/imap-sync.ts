@@ -78,33 +78,38 @@ export type ImapSyncDeps = {
   imports: OpeningImports;
   storage: ConnectorSourceStorage;
   maxSyncDurationMs?: number;
+  deadlineMs?: number;
   teardownTimeoutMs?: number;
   signal?: AbortSignal;
   now?: () => number;
   onDeadlineAbort?: () => void;
 };
 
-async function nextWithDeadline<T>(
-  iterator: AsyncIterator<T>,
-  deadlineMs: number,
-  clock: () => number,
-  signal: AbortSignal | undefined,
-  onDeadlineAbort: () => void,
-): Promise<IteratorResult<T>> {
+export async function runWithSyncDeadline<T>(
+  operation: () => Promise<T>,
+  options: {
+    phase: string;
+    deadlineMs: number;
+    now: () => number;
+    signal?: AbortSignal;
+    onDeadlineAbort: () => void;
+  },
+): Promise<T> {
+  const { phase, deadlineMs, now, signal, onDeadlineAbort } = options;
   if (signal?.aborted) {
     onDeadlineAbort();
-    throw new Error("IMAP sync aborted during discovery");
+    throw new Error(`IMAP sync aborted during ${phase}`);
   }
-  const remainingMs = deadlineMs - clock();
+  const remainingMs = deadlineMs - now();
   if (remainingMs < 0) {
     onDeadlineAbort();
-    throw new Error("IMAP sync exceeded time budget during discovery");
+    throw new Error(`IMAP sync exceeded time budget during ${phase}`);
   }
-  const nextPromise = Promise.resolve(iterator.next());
+  const opPromise = Promise.resolve().then(operation);
   if (!signal && remainingMs >= 2_147_483_647) {
-    return nextPromise;
+    return opPromise;
   }
-  void nextPromise.catch(() => undefined);
+  void opPromise.catch(() => undefined);
   let timer: ReturnType<typeof setTimeout> | undefined;
   let onAbort: (() => void) | undefined;
   try {
@@ -112,7 +117,7 @@ async function nextWithDeadline<T>(
       if (signal) {
         onAbort = () => {
           onDeadlineAbort();
-          reject(new Error("IMAP sync aborted during discovery"));
+          reject(new Error(`IMAP sync aborted during ${phase}`));
         };
         if (signal.aborted) {
           onAbort();
@@ -123,12 +128,12 @@ async function nextWithDeadline<T>(
       if (remainingMs < 2_147_483_647) {
         timer = setTimeout(() => {
           onDeadlineAbort();
-          reject(new Error("IMAP sync exceeded time budget during discovery"));
+          reject(new Error(`IMAP sync exceeded time budget during ${phase}`));
         }, remainingMs);
         timer.unref?.();
       }
     });
-    return await Promise.race([nextPromise, guard]);
+    return await Promise.race([opPromise, guard]);
   } finally {
     if (timer !== undefined) clearTimeout(timer);
     if (signal && onAbort) signal.removeEventListener("abort", onAbort);
@@ -150,7 +155,7 @@ export async function syncMailbox(deps: ImapSyncDeps): Promise<{
   if (!Number.isFinite(teardownWaitMs) || teardownWaitMs <= 0) {
     throw new Error("IMAP sync teardownTimeoutMs must be positive");
   }
-  const deadlineMs = clock() + maxDurationMs;
+  const deadlineMs = deps.deadlineMs ?? (clock() + maxDurationMs);
   let abortHookInvoked = false;
   const invokeDeadlineAbort = () => {
     if (abortHookInvoked) return;
@@ -161,7 +166,14 @@ export async function syncMailbox(deps: ImapSyncDeps): Promise<{
       // Teardown hook errors must not mask timeout or abort errors.
     }
   };
-  const assertWithinBudget = (phase: "discovery" | "fetch") => {
+  const withDeadline = <T>(phase: string, operation: () => Promise<T>) => runWithSyncDeadline(operation, {
+    phase,
+    deadlineMs,
+    now: clock,
+    signal: deps.signal,
+    onDeadlineAbort: invokeDeadlineAbort,
+  });
+  const assertWithinBudget = (phase: string) => {
     if (deps.signal?.aborted) {
       invokeDeadlineAbort();
       throw new Error(`IMAP sync aborted during ${phase}`);
@@ -173,7 +185,7 @@ export async function syncMailbox(deps: ImapSyncDeps): Promise<{
   };
   assertWithinBudget("discovery");
 
-  const opened = await deps.client.mailboxOpen(deps.folder, { readOnly: true });
+  const opened = await withDeadline("mailboxOpen", () => deps.client.mailboxOpen(deps.folder, { readOnly: true }));
   if (!opened) throw new Error(`folder is unavailable: ${deps.folder}`);
   const uidValidity = String(opened.uidValidity);
   let expectedCursor = deps.cursor;
@@ -193,7 +205,7 @@ export async function syncMailbox(deps: ImapSyncDeps): Promise<{
   let discoveryFinished = false;
   try {
     while (true) {
-      const step = await nextWithDeadline(iterator, deadlineMs, clock, deps.signal, invokeDeadlineAbort);
+      const step = await withDeadline("discovery", () => iterator.next());
       if (step.done) {
         discoveryFinished = true;
         break;
@@ -248,11 +260,11 @@ export async function syncMailbox(deps: ImapSyncDeps): Promise<{
       generation: cursor.uidValidity,
       remoteId: String(uid),
     };
-    const fetched = await deps.client.fetchOne(
+    const fetched = await withDeadline("fetch", () => deps.client.fetchOne(
       String(uid),
       { source: { start: 0, maxLength: MAX_MAIL_BYTES + 1 }, size: true },
       { uid: true },
-    );
+    ));
     if (fetched === false) {
       // The message was expunged after discovery.
       skipped += 1;
@@ -289,6 +301,6 @@ export async function syncMailbox(deps: ImapSyncDeps): Promise<{
     });
   }
 
-  await deps.client.logout();
+  await withDeadline("logout", () => deps.client.logout());
   return { imported, skipped, cursor };
 }

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
 import type { Sql } from "postgres";
 import { createOpeningSourceService } from "./source-service";
-import { OpeningSourceError, type OpeningStorage } from "@aistudy/database";
+import { createOpeningSourceActionsRepository, OpeningSourceError, type OpeningStorage } from "@aistudy/database";
 import type { Principal } from "../../../lib/authorization";
 
 const principal: Principal = {
@@ -1079,6 +1079,164 @@ describe("opening signed upload service", () => {
       sourceVersion: 2,
       objectKey: v2MixedKey,
     });
+  });
+
+  it("cleans legacy pending_upload mixed-case and uppercase staging objects with zero jobs or chunks", async () => {
+    const baseSql = makeFakeSql();
+    const s3 = makeFakeStorage();
+    const storage: OpeningStorage = {
+      ...s3.storage,
+      stagingKey: (id) => `opening/staging/${id}`,
+      finalKey: (id, version) => `opening/sources/${id}/v${version}`,
+      listMatchingStagingKeys: async (canonicalId) =>
+        [...s3.objects.keys()].filter(key => key.toLowerCase() === `opening/staging/${canonicalId.toLowerCase()}`),
+    };
+    let canonicalId = "";
+    let pendingKeys: string[] = [];
+    let exclusionCreated = false;
+    let notBefore: Date | null = null;
+    const wrappedSql = Object.assign(((parts: TemplateStringsArray, ...values: unknown[]) => {
+      const query = parts.join("?").replace(/\s+/g, " ").trim();
+      if (query === "" || query === "FOR UPDATE") return query;
+      if (query.startsWith("SELECT version, upload_url_expires_at FROM opening_sources")) {
+        const row = baseSql.sources.get(String(values[0]));
+        return row ? [{ version: 0, upload_url_expires_at: row.upload_url_expires_at }] : [];
+      }
+      if (query.startsWith("SELECT * FROM opening_privacy_exclusions")) {
+        return exclusionCreated ? [{ id: "00000000-0000-4000-8000-000000000099", source_id: canonicalId, pending_object_keys: pendingKeys, cleanup_not_before: notBefore }] : [];
+      }
+      if (query.startsWith("SELECT m.id") || query.startsWith("UPDATE opening_course_knowledge")
+        || query.startsWith("UPDATE workspaces SET privacy_epoch")
+        || query.startsWith("SELECT version FROM opening_source_versions") || query.startsWith("SELECT image_object_key")
+        || query.startsWith("DELETE FROM course_asset_memberships") || query.startsWith("UPDATE opening_source_versions")) {
+        return [];
+      }
+      if (query.startsWith("DELETE FROM opening_sources")) {
+        baseSql.sources.delete(String(values[1]));
+        return [];
+      }
+      if (query.startsWith("INSERT INTO opening_privacy_exclusions")) {
+        exclusionCreated = true;
+        return [];
+      }
+      if (query.startsWith("UPDATE opening_privacy_exclusions SET asset_deleted_at")) {
+        pendingKeys = values[1] as string[];
+        notBefore = values[2] as Date;
+        return [];
+      }
+      if (query.startsWith("SELECT id, source_id, pending_object_keys, cleanup_not_before FROM opening_privacy_exclusions")) {
+        return pendingKeys.length ? [{ id: "00000000-0000-4000-8000-000000000099", source_id: canonicalId, pending_object_keys: pendingKeys, cleanup_not_before: notBefore }] : [];
+      }
+      if (query.startsWith("SELECT id, cleanup_not_before FROM opening_privacy_exclusions")) return [];
+      if (query.startsWith("UPDATE opening_privacy_exclusions SET pending_object_keys=array_remove")) {
+        pendingKeys = pendingKeys.filter(k => k !== values[0]);
+        return [];
+      }
+      return (baseSql as unknown as (p: TemplateStringsArray, ...v: unknown[]) => unknown)(parts, ...values);
+    }) as unknown as typeof baseSql, {
+      json: baseSql.json,
+      begin: (cb: (tx: Sql) => Promise<unknown>) => cb(wrappedSql as unknown as Sql),
+    });
+
+    const svc = createOpeningSourceService(wrappedSql as unknown as Sql, storage);
+    const ticket = await svc.beginUpload(principal, {
+      name: "legacy-pending.pdf",
+      mime: "application/pdf",
+      bytes: pdfBytes.length,
+      sha256: pdfSha,
+    });
+    canonicalId = ticket.source.id;
+    const upperKey = storage.stagingKey(canonicalId.toUpperCase());
+    const mixedKey = `opening/staging/${canonicalId.slice(0, 6).toUpperCase()}${canonicalId.slice(6)}`;
+    s3.objects.set(upperKey, { bytes: pdfBytes, etag: "etag-upper" });
+    s3.objects.set(mixedKey, { bytes: pdfBytes, etag: "etag-mixed" });
+
+    const res = await svc.actOnSource(principal, canonicalId, {
+      action: "delete",
+      expectedVersion: 0,
+      expectedMembershipIds: [],
+    });
+    expect(res).toMatchObject({ sourceId: canonicalId, deleted: true, cleanupPending: 1 });
+    expect(s3.objects.has(upperKey)).toBe(false);
+    expect(s3.objects.has(mixedKey)).toBe(false);
+    expect(pendingKeys).toEqual([storage.stagingKey(canonicalId)]);
+  });
+
+  it("defers S3 deletion and release on connector reservations until cleanup_not_before expires", async () => {
+    const sql = makeFakeSql();
+    const s3 = makeFakeStorage();
+    const storage: OpeningStorage = {
+      ...s3.storage,
+      stagingKey: (id) => `opening/staging/${id}`,
+      finalKey: (id, version) => `opening/sources/${id}/v${version}`,
+    };
+    const connSourceId = "00000000-0000-4000-8000-0000000000c1";
+    const reservationId = "00000000-0000-8000-8000-0000000000c1";
+    const connKey = storage.finalKey(connSourceId, 0);
+    s3.objects.set(connKey, { bytes: pdfBytes, etag: "etag-conn" });
+    let reservationActive = true;
+    const notBefore = new Date("2030-01-01T00:02:00.000Z");
+
+    const wrappedSql = Object.assign(((parts: TemplateStringsArray, ...values: unknown[]) => {
+      const query = parts.join("?").replace(/\s+/g, " ").trim();
+      if (query === "" || query === "FOR UPDATE") return query;
+      if (query.startsWith("SELECT id, source_id, pending_object_keys, cleanup_not_before FROM opening_privacy_exclusions")) {
+        return reservationActive ? [{
+          id: reservationId,
+          workspace_id: principal.workspaceId,
+          source_id: connSourceId,
+          asset_deleted_at: new Date("2030-01-01T00:00:00.000Z"),
+          pending_object_keys: [connKey],
+          cleanup_not_before: notBefore,
+        }] : [];
+      }
+      if (query.startsWith("SELECT pg_try_advisory_xact_lock")) return [{ acquired: true }];
+      if (query.startsWith("SELECT id, cleanup_not_before FROM opening_privacy_exclusions")) {
+        return reservationActive ? [{ id: reservationId, cleanup_not_before: notBefore }] : [];
+      }
+      if (query.startsWith("DELETE FROM opening_source_versions")) return [{ source_id: connSourceId }];
+      if (query.startsWith("DELETE FROM opening_privacy_exclusions")) {
+        reservationActive = false;
+        return [];
+      }
+      return (sql as unknown as (p: TemplateStringsArray, ...v: unknown[]) => unknown)(parts, ...values);
+    }) as unknown as typeof sql, {
+      json: sql.json,
+      begin: (cb: (tx: Sql) => Promise<unknown>) => cb(wrappedSql as unknown as Sql),
+    });
+
+    let clock = new Date("2030-01-01T00:00:30.000Z");
+    const svc = createOpeningSourceService(wrappedSql as unknown as Sql, storage, { now: () => clock });
+    const actions = createOpeningSourceActionsRepository(wrappedSql as unknown as Sql);
+
+    const deferred = await svc.actOnSource(principal, connSourceId, { action: "retry_cleanup" });
+    expect(deferred).toEqual({
+      sourceId: connSourceId,
+      aiExcluded: true,
+      deleted: true,
+      cleanupPending: 1,
+      retryAfter: notBefore.toISOString(),
+    });
+    expect(s3.objects.has(connKey)).toBe(true);
+    expect(await actions.cleaned(
+      { workspaceId: principal.workspaceId, ownerUserId: principal.userId },
+      connSourceId,
+      connKey,
+      clock,
+    )).toBe(false);
+    expect(reservationActive).toBe(true);
+
+    clock = new Date("2030-01-01T00:02:01.000Z");
+    const released = await svc.actOnSource(principal, connSourceId, { action: "retry_cleanup" });
+    expect(released).toEqual({
+      sourceId: connSourceId,
+      aiExcluded: true,
+      deleted: true,
+      cleanupPending: 0,
+      retryAfter: null,
+    });
+    expect(s3.objects.has(connKey)).toBe(false);
+    expect(reservationActive).toBe(false);
   });
 
 });
