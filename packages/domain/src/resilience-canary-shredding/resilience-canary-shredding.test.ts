@@ -123,21 +123,53 @@ describe("A. 15-Minute Drift Canary Sentinel & Zero-Double-Billing", () => {
     });
   });
 
-  it("triggers 0ms circuit break on live SSE leak flag inside a partial/sparse window without waiting", () => {
-    const decision = evaluateDriftCanarySentinel({
+  it("triggers 0ms circuit break on live SSE leak flag inside a partial/in-progress window without waiting", () => {
+    const partialDecision = evaluateDriftCanarySentinel({
       route: baseRoute,
       thresholds: baseThresholds,
       windows: [
-        makeWindow(0, { decisionCount: 5, sseAnswerMarkerLeak: true }),
+        {
+          windowStartMs: 0,
+          windowEndMs: 60_000, // 1m partial in-progress window
+          taskKind: "tutor_turn",
+          providerFamily: "openai",
+          modelId: "gpt-5.4-mini",
+          decisionCount: 5,
+          errorRate: 0,
+          p95TtftMs: 400,
+          verifierContradictionRate: 0,
+          canaryFailureRate: 0,
+          sseAnswerMarkerLeak: true,
+        },
       ],
     });
 
-    expect(decision.action).toBe("immediate_circuit_break");
-    expect(decision.triggerLatencyMs).toBe(0);
-    expect(decision.waitedForWindowCompletion).toBe(false);
+    expect(partialDecision.action).toBe("immediate_circuit_break");
+    expect(partialDecision.triggerLatencyMs).toBe(0);
+    expect(partialDecision.waitedForWindowCompletion).toBe(false);
+
+    // Without sseAnswerMarkerLeak, statistical rate evaluation still requires full 5m windows
+    expect(() =>
+      evaluateDriftCanarySentinel({
+        route: baseRoute,
+        thresholds: baseThresholds,
+        windows: [
+          {
+            windowStartMs: 0,
+            windowEndMs: 60_000,
+            taskKind: "tutor_turn",
+            decisionCount: 150,
+            errorRate: 0.9,
+            p95TtftMs: 400,
+            verifierContradictionRate: 0,
+            canaryFailureRate: 0,
+          },
+        ],
+      }),
+    ).toThrow(RangeError);
   });
 
-  it("ignores sparse windows (< 100 decisions), single-window spikes, non-consecutive windows, and disjoint metric breaches", () => {
+  it("ignores sparse windows (< 100 decisions), single-window spikes, non-consecutive windows, quiet-separated breaches, and disjoint metric breaches", () => {
     const sparse = evaluateDriftCanarySentinel({
       route: baseRoute,
       thresholds: baseThresholds,
@@ -176,6 +208,33 @@ describe("A. 15-Minute Drift Canary Sentinel & Zero-Double-Billing", () => {
     expect(bridgedBySparse.action).toBe("keep_primary");
     if (bridgedBySparse.action === "keep_primary") {
       expect(bridgedBySparse.reason).toBe("non_consecutive_breach_windows");
+    }
+
+    const separatedByHealthy = evaluateDriftCanarySentinel({
+      route: baseRoute,
+      thresholds: baseThresholds,
+      windows: [
+        makeWindow(0, { decisionCount: 150, errorRate: 0.25 }),
+        makeWindow(1, { decisionCount: 150, errorRate: 0.01 }),
+        makeWindow(2, { decisionCount: 150, errorRate: 0.25 }),
+      ],
+    });
+    expect(separatedByHealthy.action).toBe("keep_primary");
+    if (separatedByHealthy.action === "keep_primary") {
+      expect(separatedByHealthy.reason).toBe("non_consecutive_breach_windows");
+    }
+
+    const separatedByMissingInterval = evaluateDriftCanarySentinel({
+      route: baseRoute,
+      thresholds: baseThresholds,
+      windows: [
+        makeWindow(0, { decisionCount: 150, errorRate: 0.25 }),
+        makeWindow(2, { decisionCount: 150, errorRate: 0.25 }),
+      ],
+    });
+    expect(separatedByMissingInterval.action).toBe("keep_primary");
+    if (separatedByMissingInterval.action === "keep_primary") {
+      expect(separatedByMissingInterval.reason).toBe("non_consecutive_breach_windows");
     }
 
     const disjoint = evaluateDriftCanarySentinel({
@@ -490,20 +549,143 @@ describe("B. Multi-Source Nested Envelope Crypto-Shredding & Quarantine Restore"
     });
   });
 
-  it("supports full workspace shred destroying K_w and all K_s while keeping 0014 append-only", () => {
+  it("supports full workspace shred destroying K_w and all K_s while keeping 0014 append-only and aggregating multi-row itemRevisionId rollbacks", () => {
     const wsShred = planAndExecuteCryptoShred({
       keyTree: initialTree,
       target: { kind: "workspace" },
       executedAtMs: 20_000,
+      affectedItemRevisions: [
+        {
+          itemRevisionId: "rev-multi-source",
+          sourceId: "src-a",
+          currentSampleCount: 52,
+          shreddedFirstIndependentSubmissionIds: ["sub-1"],
+        },
+        {
+          itemRevisionId: "rev-multi-source",
+          sourceId: "src-b",
+          currentSampleCount: 52,
+          shreddedFirstIndependentSubmissionIds: ["sub-2", "sub-3", "sub-1"],
+        },
+      ],
     });
 
     expect(wsShred.appendOnlyCompliant).toBe(true);
     expect(wsShred.immutableAppendOnlyDeletes).toEqual([]);
     expect(wsShred.nextKeyTree.masterKey.status).toBe("shredded");
     expect(wsShred.receipt.shreddedWorkspaceKeyId).toBe("kw-1");
+    expect(wsShred.receipt.shreddedSourceIds).toEqual(["src-a", "src-b"]);
     expect(wsShred.receipt.shreddedSourceKeyIds).toEqual(["ks-a", "ks-b"]);
     expect(wsShred.nextKeyTree.sources.every((s) => s.status === "shredded")).toBe(true);
     expect(deriveCalibrationTier(50)).toBe("tier2_mmle");
+    expect(wsShred.calibrationRollbacks).toEqual([
+      {
+        itemRevisionId: "rev-multi-source",
+        previousSampleCount: 52,
+        newlyShreddedCount: 3,
+        deduplicatedSkippedCount: 1,
+        nextSampleCount: 49,
+        postShredTier: "tier1_difficulty_only",
+        appliedSubmissionIds: ["sub-1", "sub-2", "sub-3"],
+      },
+    ]);
+
+    // After tree compaction/rebuild (new active K_w and empty sources), receipt still blocks sourceKeyId-only restore
+    const rebuiltKeyTree: WorkspaceKeyTree = {
+      workspaceId: "ws-1",
+      masterKey: {
+        workspaceKeyId: "kw-2",
+        keyVersion: 2,
+        status: "active",
+        privacyEpoch: 2,
+        createdAtMs: 25_000,
+        shreddedAtMs: null,
+      },
+      sources: [],
+    };
+    const postCompactionRestore = evaluateQuarantineRestoreBundle({
+      bundleId: "bundle-post-compaction",
+      policy: "strict_atomic",
+      liveKeyTree: rebuiltKeyTree,
+      existingReceipts: [wsShred.receipt],
+      records: [
+        {
+          recordId: "rec-compacted-source-key-only",
+          recordType: "source_chunk",
+          workspaceId: "ws-1",
+          workspaceKeyId: "kw-2",
+          sourceId: null,
+          sourceKeyId: "ks-b",
+          privacyEpoch: 2,
+        },
+      ],
+    });
+    expect(postCompactionRestore.status).toBe("rejected_shredded_lineage");
+    expect(postCompactionRestore.rejectedRecords.map((r) => [r.recordId, r.reason])).toEqual([
+      ["rec-compacted-source-key-only", "shredded_source_key"],
+    ]);
+  });
+
+  it("fails closed on source-scoped records missing both sourceId and sourceKeyId while permitting explicit workspace metadata", () => {
+    const result = evaluateQuarantineRestoreBundle({
+      bundleId: "bundle-missing-source-lineage",
+      policy: "strip_shredded_lineage",
+      liveKeyTree: initialTree,
+      records: [
+        {
+          recordId: "rec-chunk-no-lineage",
+          recordType: "source_chunk",
+          workspaceId: "ws-1",
+          workspaceKeyId: "kw-1",
+          sourceId: null,
+          sourceKeyId: null,
+          privacyEpoch: 1,
+        },
+        {
+          recordId: "rec-embedding-no-lineage",
+          recordType: "source_embedding",
+          workspaceId: "ws-1",
+          workspaceKeyId: "kw-1",
+          privacyEpoch: 1,
+        },
+        {
+          recordId: "rec-explicit-required",
+          recordType: "workspace_metadata",
+          workspaceId: "ws-1",
+          workspaceKeyId: "kw-1",
+          requiresSourceLineage: true,
+          privacyEpoch: 1,
+        },
+        {
+          recordId: "rec-workspace-meta",
+          recordType: "workspace_metadata",
+          workspaceId: "ws-1",
+          workspaceKeyId: "kw-1",
+          sourceId: null,
+          sourceKeyId: null,
+          privacyEpoch: 1,
+        },
+        {
+          recordId: "rec-explicit-exempt",
+          recordType: "custom_note",
+          workspaceId: "ws-1",
+          workspaceKeyId: "kw-1",
+          requiresSourceLineage: false,
+          privacyEpoch: 1,
+        },
+      ],
+    });
+
+    expect(result.status).toBe("approved_after_filtering");
+    expect(result.approvedRecords.map((r) => r.recordId)).toEqual([
+      "rec-workspace-meta",
+      "rec-explicit-exempt",
+    ]);
+    expect(result.rejectedRecords.map((r) => [r.recordId, r.reason])).toEqual([
+      ["rec-chunk-no-lineage", "missing_source_lineage"],
+      ["rec-embedding-no-lineage", "missing_source_lineage"],
+      ["rec-explicit-required", "missing_source_lineage"],
+    ]);
   });
 
   it("quarantines and blocks/strips shredded keys, revoked sources, and stale privacyEpochs before live apply", () => {
@@ -798,12 +980,26 @@ describe("C. Expand-Contract Canary Router & < 5s Candidate Publish Lease Rollba
     expect(routed.reason).toBe("expand_contract_incompatible");
   });
 
-  it("enforces 2s lease TTL and guarantees zero dirty writes within < 5s rollback SLA even for partitioned workers", () => {
+  it("enforces 2s lease TTL, blocks stale partitioned renewals, clamps drain >= 0, and guarantees zero dirty writes within < 5s rollback SLA", () => {
     const initial = createCanaryRolloutState({
       rolloutId: "rollout-lease",
       schemaContractBackwardCompatible: true,
       stage: "10_percent",
       epoch: 3,
+      synchronizedAtMs: 10_000,
+    });
+
+    // Missing authoritative snapshot or stale sync fails closed
+    expect(
+      acquireCandidatePublishLease(
+        { ...initial, synchronizedAtMs: null },
+        "worker-no-sync",
+        10_000,
+      ),
+    ).toEqual({
+      granted: false,
+      lease: null,
+      reason: "stale_authoritative_snapshot",
     });
 
     const acquired = acquireCandidatePublishLease(initial, "worker-1", 10_000);
@@ -851,6 +1047,17 @@ describe("C. Expand-Contract Canary Router & < 5s Candidate Publish Lease Rollba
       EMERGENCY_ROLLBACK_SLA_MS,
     );
 
+    // Already-expired activeLeases never produce a negative maxDrainWindowMs
+    const expiredDrainRollback = triggerEmergencyRollback(
+      initial,
+      "already_expired_leases",
+      15_000,
+      [acquired.lease],
+    );
+    expect(expiredDrainRollback.maxDrainWindowMs).toBe(0);
+    expect(expiredDrainRollback.rollbackDeadlineAtMs).toBe(15_000);
+    expect(expiredDrainRollback.withinRollbackSla).toBe(true);
+
     // Authoritative coordinator state immediately rejects any in-flight lease
     expect(
       validateCandidateCommitFence(rollback.nextState, acquired.lease, 11_100),
@@ -859,6 +1066,49 @@ describe("C. Expand-Contract Canary Router & < 5s Candidate Publish Lease Rollba
       dirtyWritePrevented: true,
       reason: "emergency_rollback_active",
     });
+
+    // Partitioned worker passing its STALE local state alongside authoritativeStoreState is rejected immediately
+    expect(
+      validateCandidateCommitFence(
+        initial,
+        acquired.lease,
+        11_100,
+        rollback.nextState,
+      ),
+    ).toMatchObject({
+      allowed: false,
+      dirtyWritePrevented: true,
+      reason: "emergency_rollback_active",
+      stateEpoch: 4,
+      leaseEpoch: 3,
+    });
+
+    // Partitioned worker trying to renew against stale local state AFTER sync TTL (> 2_000 ms) is rejected
+    expect(
+      acquireCandidatePublishLease(initial, "worker-1", 12_500),
+    ).toEqual({
+      granted: false,
+      lease: null,
+      reason: "stale_authoritative_snapshot",
+    });
+
+    // Even if renewed slightly before sync TTL expiry (11_500, syncAt 10_000), lease expiry is bounded <= syncAt + 2_000 <= rollbackAt + 2_000
+    const earlyRenew = acquireCandidatePublishLease(initial, "worker-1", 11_500);
+    expect(earlyRenew.granted).toBe(true);
+    if (earlyRenew.granted) {
+      expect(earlyRenew.lease.expiresAtMs).toBeLessThanOrEqual(rollback.rollbackDeadlineAtMs);
+      expect(
+        validateCandidateCommitFence(
+          initial,
+          earlyRenew.lease,
+          rollback.rollbackDeadlineAtMs + 1,
+        ),
+      ).toMatchObject({
+        allowed: false,
+        dirtyWritePrevented: true,
+        reason: "lease_expired",
+      });
+    }
 
     // Even a network-partitioned worker evaluating against its STALE pre-rollback state
     // cannot commit past its 2s TTL (well before the 5s SLA deadline)

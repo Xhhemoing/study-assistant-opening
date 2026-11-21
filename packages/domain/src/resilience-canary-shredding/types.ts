@@ -309,6 +309,7 @@ export type QuarantineRestoreRecord = {
   workspaceKeyId: string;
   sourceId?: string | null;
   sourceKeyId?: string | null;
+  requiresSourceLineage?: boolean;
   privacyEpoch: number;
 };
 
@@ -319,7 +320,8 @@ export type QuarantineRejectReason =
   | "shredded_source_key"
   | "revoked_or_deleted_source"
   | "stale_source_key"
-  | "stale_privacy_epoch";
+  | "stale_privacy_epoch"
+  | "missing_source_lineage";
 
 export type QuarantinedRecordRejection = {
   recordId: string;
@@ -371,6 +373,7 @@ export type CanaryRolloutState = {
   rollbackReason: string | null;
   rollbackTriggeredAtMs: number | null;
   rollbackDeadlineAtMs: number | null;
+  synchronizedAtMs?: number | null;
 };
 
 export type ExpandContractRouteInput = {
@@ -425,6 +428,11 @@ export type CandidatePublishLease = {
   revoked: boolean;
 };
 
+export type AcquireLeaseOptions = {
+  stateSynchronizedAtMs?: number;
+  authoritativeStoreState?: CanaryRolloutState;
+};
+
 export type AcquireLeaseResult =
   | {
       granted: true;
@@ -437,7 +445,8 @@ export type AcquireLeaseResult =
       reason:
         | "emergency_rollback_active"
         | "stage_zero_percent"
-        | "expand_contract_incompatible";
+        | "expand_contract_incompatible"
+        | "stale_authoritative_snapshot";
     };
 
 export type CommitFenceReason =
@@ -467,7 +476,7 @@ export type EmergencyRollbackResult = {
   rollbackTriggeredAtMs: number;
   rollbackDeadlineAtMs: number;
   slaDeadlineAtMs: number;
-  maxDrainWindowMs: 2000;
+  maxDrainWindowMs: number;
   withinRollbackSla: boolean;
   reason: string;
 };

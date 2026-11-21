@@ -22,6 +22,14 @@ export const PGVECTOR_EMBEDDINGS_TABLE_0084 =
   "opening_source_embeddings" as const;
 export const TIER2_MMLE_MIN_SAMPLES = 50 as const;
 
+const WORKSPACE_METADATA_RECORD_TYPES = new Set([
+  "workspace_metadata",
+  "workspace_settings",
+  "workspace_preference",
+  "workspace_key_manifest",
+  "workspace_profile",
+]);
+
 function assertNonEmpty(value: string, fieldName: string): string {
   const trimmed = value.trim();
   if (!trimmed) {
@@ -154,6 +162,12 @@ function buildMutablePurgeDescriptors(
   };
 }
 
+type AggregatedRevisionBucket = {
+  itemRevisionId: string;
+  previousSampleCount: number;
+  targetedSubmissionInputs: string[];
+};
+
 function computeCalibrationRollbacks(
   revisions: readonly AffectedCalibrationItemInput[],
   target: CryptoShredExecutionInput["target"],
@@ -164,7 +178,7 @@ function computeCalibrationRollbacks(
 } {
   const seenKeys = new Set(priorShreddedKeys);
   const newlyAppliedKeys: string[] = [];
-  const rollbacks: CalibrationCountRollbackResult[] = [];
+  const buckets = new Map<string, AggregatedRevisionBucket>();
 
   for (const item of revisions) {
     const itemRevisionId = assertNonEmpty(
@@ -176,27 +190,40 @@ function computeCalibrationRollbacks(
       "item.currentSampleCount",
     );
 
+    let bucket = buckets.get(itemRevisionId);
+    if (!bucket) {
+      bucket = {
+        itemRevisionId,
+        previousSampleCount,
+        targetedSubmissionInputs: [],
+      };
+      buckets.set(itemRevisionId, bucket);
+    } else if (bucket.previousSampleCount !== previousSampleCount) {
+      throw new RangeError(
+        `Conflicting currentSampleCount for itemRevisionId ${itemRevisionId}: ${bucket.previousSampleCount} vs ${previousSampleCount}`,
+      );
+    }
+
     if (
       target.kind === "source" &&
       item.sourceId !== undefined &&
       item.sourceId.trim() !== target.sourceId
     ) {
-      rollbacks.push({
-        itemRevisionId,
-        previousSampleCount,
-        newlyShreddedCount: 0,
-        deduplicatedSkippedCount: 0,
-        nextSampleCount: previousSampleCount,
-        postShredTier: deriveCalibrationTier(previousSampleCount),
-        appliedSubmissionIds: [],
-      });
       continue;
     }
 
-    const appliedSubmissionIds: string[] = [];
     for (const rawSubmissionId of item.shreddedFirstIndependentSubmissionIds) {
-      const submissionId = assertNonEmpty(rawSubmissionId, "submissionId");
-      const key = submissionCompoundKey(itemRevisionId, submissionId);
+      bucket.targetedSubmissionInputs.push(
+        assertNonEmpty(rawSubmissionId, "submissionId"),
+      );
+    }
+  }
+
+  const rollbacks: CalibrationCountRollbackResult[] = [];
+  for (const bucket of buckets.values()) {
+    const appliedSubmissionIds: string[] = [];
+    for (const submissionId of bucket.targetedSubmissionInputs) {
+      const key = submissionCompoundKey(bucket.itemRevisionId, submissionId);
       if (seenKeys.has(key)) continue;
       seenKeys.add(key);
       newlyAppliedKeys.push(key);
@@ -205,12 +232,15 @@ function computeCalibrationRollbacks(
 
     const newlyShreddedCount = appliedSubmissionIds.length;
     const deduplicatedSkippedCount =
-      item.shreddedFirstIndependentSubmissionIds.length - newlyShreddedCount;
-    const nextSampleCount = Math.max(0, previousSampleCount - newlyShreddedCount);
+      bucket.targetedSubmissionInputs.length - newlyShreddedCount;
+    const nextSampleCount = Math.max(
+      0,
+      bucket.previousSampleCount - newlyShreddedCount,
+    );
 
     rollbacks.push({
-      itemRevisionId,
-      previousSampleCount,
+      itemRevisionId: bucket.itemRevisionId,
+      previousSampleCount: bucket.previousSampleCount,
       newlyShreddedCount,
       deduplicatedSkippedCount,
       nextSampleCount,
@@ -321,11 +351,24 @@ export function planAndExecuteCryptoShred(
       };
     });
 
-    shreddedWorkspaceKeyId = nextMasterKey.workspaceKeyId;
-    shreddedSourceIds = nextSources.map((source) => source.sourceId).sort();
-    shreddedSourceKeyIds = nextSources
-      .map((source) => source.sourceKeyId)
-      .sort();
+    shreddedWorkspaceKeyId = nextMasterKey.workspaceKeyId.trim();
+    const wsShreddedSourceIds = new Set<string>(
+      nextSources.map((source) => source.sourceId.trim()),
+    );
+    const wsShreddedSourceKeyIds = new Set<string>(
+      nextSources.map((source) => source.sourceKeyId.trim()),
+    );
+    for (const priorReceipt of existingReceipts) {
+      if (priorReceipt.workspaceId !== workspaceId) continue;
+      for (const sourceId of priorReceipt.shreddedSourceIds) {
+        wsShreddedSourceIds.add(sourceId.trim());
+      }
+      for (const keyId of priorReceipt.shreddedSourceKeyIds) {
+        wsShreddedSourceKeyIds.add(keyId.trim());
+      }
+    }
+    shreddedSourceIds = [...wsShreddedSourceIds].sort();
+    shreddedSourceKeyIds = [...wsShreddedSourceKeyIds].sort();
   }
 
   const { rollbacks, newlyAppliedKeys } = computeCalibrationRollbacks(
@@ -401,6 +444,15 @@ function classifyQuarantineRecord(
 
   const recordSourceId = record.sourceId?.trim() || null;
   const recordSourceKeyId = record.sourceKeyId?.trim() || null;
+
+  const requiresSourceLineage =
+    record.requiresSourceLineage === true ||
+    (record.requiresSourceLineage !== false &&
+      !WORKSPACE_METADATA_RECORD_TYPES.has(record.recordType.trim()));
+
+  if (requiresSourceLineage && !recordSourceId && !recordSourceKeyId) {
+    return "missing_source_lineage";
+  }
 
   if (recordSourceKeyId && shreddedSourceKeyIds.has(recordSourceKeyId)) {
     return "shredded_source_key";

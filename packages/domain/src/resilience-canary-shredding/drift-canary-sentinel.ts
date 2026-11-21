@@ -86,15 +86,16 @@ function validateThresholds(thresholds: DriftSentinelThresholds): void {
   );
 }
 
-function validateWindow(window: SanitizedDriftWindowMetrics): void {
+function validateWindowBase(window: SanitizedDriftWindowMetrics): void {
   assertNonEmptyString(window.taskKind, "window.taskKind");
   if (
     !Number.isFinite(window.windowStartMs) ||
+    window.windowStartMs < 0 ||
     !Number.isFinite(window.windowEndMs) ||
-    window.windowEndMs - window.windowStartMs !== DRIFT_WINDOW_MS
+    window.windowEndMs < window.windowStartMs
   ) {
     throw new RangeError(
-      `Drift window duration must equal DRIFT_WINDOW_MS (${DRIFT_WINDOW_MS} ms)`,
+      "Drift window bounds must be finite non-negative timestamps with windowEndMs >= windowStartMs",
     );
   }
   if (!Number.isInteger(window.decisionCount) || window.decisionCount < 0) {
@@ -109,6 +110,14 @@ function validateWindow(window: SanitizedDriftWindowMetrics): void {
     "window.verifierContradictionRate",
   );
   assertUnitRate(window.canaryFailureRate, "window.canaryFailureRate");
+}
+
+function validateFullWindowDuration(window: SanitizedDriftWindowMetrics): void {
+  if (window.windowEndMs - window.windowStartMs !== DRIFT_WINDOW_MS) {
+    throw new RangeError(
+      `Drift window duration must equal DRIFT_WINDOW_MS (${DRIFT_WINDOW_MS} ms)`,
+    );
+  }
 }
 
 function routeMatchesProbe(
@@ -214,7 +223,7 @@ export function evaluateDriftCanarySentinel(
   }
 
   for (const window of input.windows) {
-    validateWindow(window);
+    validateWindowBase(window);
   }
 
   const scopedWindows = input.windows
@@ -240,6 +249,10 @@ export function evaluateDriftCanarySentinel(
       breachedMetrics: [],
       reason: "sse_answer_marker_leak",
     };
+  }
+
+  for (const window of scopedWindows) {
+    validateFullWindowDuration(window);
   }
 
   for (let i = 1; i < scopedWindows.length; i += 1) {
@@ -272,7 +285,8 @@ export function evaluateDriftCanarySentinel(
     if (i === 0) continue;
     const prev = scopedWindows[i - 1]!;
     if (
-      curr.windowStartMs !== prev.windowEndMs ||
+      prev.windowStartMs + DRIFT_WINDOW_MS !== curr.windowStartMs ||
+      prev.windowEndMs !== curr.windowStartMs ||
       prev.decisionCount < MIN_DECISIONS_PER_WINDOW
     ) {
       continue;

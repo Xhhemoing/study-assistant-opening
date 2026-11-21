@@ -1,4 +1,5 @@
 import type {
+  AcquireLeaseOptions,
   AcquireLeaseResult,
   CanaryRolloutStage,
   CanaryRolloutState,
@@ -77,6 +78,7 @@ export function createCanaryRolloutState(input: {
   schemaContractBackwardCompatible: boolean;
   stage?: CanaryRolloutStage;
   epoch?: number;
+  synchronizedAtMs?: number | null;
 }): CanaryRolloutState {
   const rolloutId = assertNonEmptyString(input.rolloutId, "rolloutId");
   const stage = input.stage ?? "0_percent";
@@ -89,6 +91,9 @@ export function createCanaryRolloutState(input: {
       "Cannot initialize canary stage above 0_percent without backward-compatible Expand-Contract schema",
     );
   }
+  if (input.synchronizedAtMs !== undefined && input.synchronizedAtMs !== null) {
+    assertNonNegativeFinite(input.synchronizedAtMs, "synchronizedAtMs");
+  }
 
   return {
     rolloutId,
@@ -99,6 +104,7 @@ export function createCanaryRolloutState(input: {
     rollbackReason: null,
     rollbackTriggeredAtMs: null,
     rollbackDeadlineAtMs: null,
+    synchronizedAtMs: input.synchronizedAtMs ?? null,
   };
 }
 
@@ -197,9 +203,45 @@ export function acquireCandidatePublishLease(
   state: CanaryRolloutState,
   workerId: string,
   nowMs: number,
+  options?: AcquireLeaseOptions,
 ): AcquireLeaseResult {
   const normalizedWorkerId = assertNonEmptyString(workerId, "workerId");
   const issuedAtMs = assertNonNegativeFinite(nowMs, "nowMs");
+
+  const authoritativeState = options?.authoritativeStoreState;
+  if (authoritativeState) {
+    if (authoritativeState.emergencyRollbackActive) {
+      return {
+        granted: false,
+        lease: null,
+        reason: "emergency_rollback_active",
+      };
+    }
+    if (authoritativeState.stage === "0_percent") {
+      return {
+        granted: false,
+        lease: null,
+        reason: "stage_zero_percent",
+      };
+    }
+    if (!authoritativeState.schemaContractBackwardCompatible) {
+      return {
+        granted: false,
+        lease: null,
+        reason: "expand_contract_incompatible",
+      };
+    }
+    if (
+      authoritativeState.epoch !== state.epoch ||
+      authoritativeState.rolloutId !== state.rolloutId
+    ) {
+      return {
+        granted: false,
+        lease: null,
+        reason: "stale_authoritative_snapshot",
+      };
+    }
+  }
 
   if (state.emergencyRollbackActive) {
     return {
@@ -225,13 +267,63 @@ export function acquireCandidatePublishLease(
     };
   }
 
+  const rawSyncAtMs =
+    options?.stateSynchronizedAtMs ?? state.synchronizedAtMs ?? null;
+  let expiresAtMs = issuedAtMs + CANDIDATE_PUBLISH_LEASE_TTL_MS;
+
+  if (!authoritativeState) {
+    if (rawSyncAtMs === null) {
+      return {
+        granted: false,
+        lease: null,
+        reason: "stale_authoritative_snapshot",
+      };
+    }
+    const syncAtMs = assertNonNegativeFinite(
+      rawSyncAtMs,
+      "stateSynchronizedAtMs",
+    );
+    if (
+      issuedAtMs < syncAtMs ||
+      issuedAtMs - syncAtMs > CANDIDATE_PUBLISH_LEASE_TTL_MS
+    ) {
+      return {
+        granted: false,
+        lease: null,
+        reason: "stale_authoritative_snapshot",
+      };
+    }
+    // Bound lease expiry by both issuedAtMs + TTL and syncAtMs + TTL so a
+    // partitioned worker renewing slightly before sync TTL expiry cannot push
+    // its lease past rollbackAtMs + 2_000.
+    expiresAtMs = Math.min(
+      issuedAtMs + CANDIDATE_PUBLISH_LEASE_TTL_MS,
+      syncAtMs + CANDIDATE_PUBLISH_LEASE_TTL_MS,
+    );
+  } else if (rawSyncAtMs !== null) {
+    const syncAtMs = assertNonNegativeFinite(
+      rawSyncAtMs,
+      "stateSynchronizedAtMs",
+    );
+    if (
+      issuedAtMs < syncAtMs ||
+      issuedAtMs - syncAtMs > CANDIDATE_PUBLISH_LEASE_TTL_MS
+    ) {
+      return {
+        granted: false,
+        lease: null,
+        reason: "stale_authoritative_snapshot",
+      };
+    }
+  }
+
   const lease: CandidatePublishLease = {
     leaseId: `${state.rolloutId}:epoch-${state.epoch}:${normalizedWorkerId}:${issuedAtMs}`,
     rolloutId: state.rolloutId,
     workerId: normalizedWorkerId,
     rolloutEpoch: state.epoch,
     issuedAtMs,
-    expiresAtMs: issuedAtMs + CANDIDATE_PUBLISH_LEASE_TTL_MS,
+    expiresAtMs,
     ttlMs: CANDIDATE_PUBLISH_LEASE_TTL_MS,
     revoked: false,
   };
@@ -256,8 +348,10 @@ export function validateCandidateCommitFence(
   state: CanaryRolloutState,
   lease: CandidatePublishLease | null | undefined,
   commitNowMs: number,
+  authoritativeStoreState?: CanaryRolloutState,
 ): CommitFenceResult {
   assertNonNegativeFinite(commitNowMs, "commitNowMs");
+  const effectiveState = authoritativeStoreState ?? state;
 
   if (!lease) {
     return {
@@ -265,45 +359,50 @@ export function validateCandidateCommitFence(
       dirtyWritePrevented: true,
       reason: "missing_lease",
       commitNowMs,
-      stateEpoch: state.epoch,
+      stateEpoch: effectiveState.epoch,
       leaseEpoch: null,
     };
   }
 
-  if (state.emergencyRollbackActive) {
+  if (effectiveState.emergencyRollbackActive || state.emergencyRollbackActive) {
     return {
       allowed: false,
       dirtyWritePrevented: true,
       reason: "emergency_rollback_active",
       commitNowMs,
-      stateEpoch: state.epoch,
+      stateEpoch: effectiveState.epoch,
       leaseEpoch: lease.rolloutEpoch,
     };
   }
 
-  if (state.stage === "0_percent") {
+  if (effectiveState.stage === "0_percent" || state.stage === "0_percent") {
     return {
       allowed: false,
       dirtyWritePrevented: true,
       reason: "rollout_at_zero_percent",
       commitNowMs,
-      stateEpoch: state.epoch,
-      leaseEpoch: lease.rolloutEpoch,
-    };
-  }
-
-  if (!state.schemaContractBackwardCompatible) {
-    return {
-      allowed: false,
-      dirtyWritePrevented: true,
-      reason: "expand_contract_incompatible",
-      commitNowMs,
-      stateEpoch: state.epoch,
+      stateEpoch: effectiveState.epoch,
       leaseEpoch: lease.rolloutEpoch,
     };
   }
 
   if (
+    !effectiveState.schemaContractBackwardCompatible ||
+    !state.schemaContractBackwardCompatible
+  ) {
+    return {
+      allowed: false,
+      dirtyWritePrevented: true,
+      reason: "expand_contract_incompatible",
+      commitNowMs,
+      stateEpoch: effectiveState.epoch,
+      leaseEpoch: lease.rolloutEpoch,
+    };
+  }
+
+  if (
+    lease.rolloutEpoch !== effectiveState.epoch ||
+    lease.rolloutId !== effectiveState.rolloutId ||
     lease.rolloutEpoch !== state.epoch ||
     lease.rolloutId !== state.rolloutId
   ) {
@@ -312,7 +411,7 @@ export function validateCandidateCommitFence(
       dirtyWritePrevented: true,
       reason: "stale_rollout_epoch",
       commitNowMs,
-      stateEpoch: state.epoch,
+      stateEpoch: effectiveState.epoch,
       leaseEpoch: lease.rolloutEpoch,
     };
   }
@@ -383,10 +482,24 @@ export function triggerEmergencyRollback(
   state: CanaryRolloutState,
   reason: string,
   rollbackAtMs: number,
+  activeLeases?: readonly CandidatePublishLease[],
 ): EmergencyRollbackResult {
   const normalizedReason = assertNonEmptyString(reason, "reason");
   const triggeredAtMs = assertNonNegativeFinite(rollbackAtMs, "rollbackAtMs");
-  const rollbackDeadlineAtMs = triggeredAtMs + CANDIDATE_PUBLISH_LEASE_TTL_MS;
+
+  let maxDrainWindowMs: number = CANDIDATE_PUBLISH_LEASE_TTL_MS;
+  if (activeLeases !== undefined) {
+    let latestExpiry = triggeredAtMs;
+    for (const lease of activeLeases) {
+      if (lease.revoked || !Number.isFinite(lease.expiresAtMs)) continue;
+      if (lease.expiresAtMs > latestExpiry) {
+        latestExpiry = lease.expiresAtMs;
+      }
+    }
+    maxDrainWindowMs = Math.max(0, latestExpiry - triggeredAtMs);
+  }
+
+  const rollbackDeadlineAtMs = triggeredAtMs + maxDrainWindowMs;
   const slaDeadlineAtMs = triggeredAtMs + EMERGENCY_ROLLBACK_SLA_MS;
 
   const nextState: CanaryRolloutState = {
@@ -398,6 +511,7 @@ export function triggerEmergencyRollback(
     rollbackReason: normalizedReason,
     rollbackTriggeredAtMs: triggeredAtMs,
     rollbackDeadlineAtMs,
+    synchronizedAtMs: triggeredAtMs,
   };
 
   return {
@@ -407,8 +521,8 @@ export function triggerEmergencyRollback(
     rollbackTriggeredAtMs: triggeredAtMs,
     rollbackDeadlineAtMs,
     slaDeadlineAtMs,
-    maxDrainWindowMs: CANDIDATE_PUBLISH_LEASE_TTL_MS,
-    withinRollbackSla: CANDIDATE_PUBLISH_LEASE_TTL_MS <= EMERGENCY_ROLLBACK_SLA_MS,
+    maxDrainWindowMs,
+    withinRollbackSla: maxDrainWindowMs <= EMERGENCY_ROLLBACK_SLA_MS,
     reason: normalizedReason,
   };
 }
