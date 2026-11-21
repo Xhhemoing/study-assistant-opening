@@ -85,6 +85,7 @@ export class PrerequisiteDrilldownStateMachine {
   private readonly usedFamilyIds = new Set<string>();
   private readonly seenObservationIds = new Set<string>();
   private readonly snapshotConsumedObservationIds = new Set<string>();
+  private readonly failedTestedPrerequisiteIds = new Set<string>();
 
   private status: DrilldownStatus = "probing";
   private rootCause: DrilldownRootCause | null = null;
@@ -147,7 +148,7 @@ export class PrerequisiteDrilldownStateMachine {
     }
     this.renormalize();
 
-    if (this.prerequisitesInTopoOrder.length === 0) this.transitionToRestoreOriginal();
+    if (this.prerequisitesInTopoOrder.length === 0) this.transitionToInsufficientEvidence();
   }
 
   private renormalize(): boolean {
@@ -203,14 +204,23 @@ export class PrerequisiteDrilldownStateMachine {
   }
 
   private transitionToRepairPlan(): void {
-    let bestDeficit = this.prerequisitesInTopoOrder[0]!;
+    let bestDeficit: string | null = null;
     let bestWeight = -1;
     for (let i = 0; i < this.hypotheses.length; i++) {
       const h = this.hypotheses[i]!;
-      if (h.kind === "prerequisite_deficit" && this.weights[i]! > bestWeight + 1e-12) {
+      if (
+        h.kind === "prerequisite_deficit" &&
+        h.skillId !== null &&
+        this.failedTestedPrerequisiteIds.has(h.skillId) &&
+        this.weights[i]! > bestWeight + 1e-12
+      ) {
         bestWeight = this.weights[i]!;
-        bestDeficit = h.skillId!;
+        bestDeficit = h.skillId;
       }
+    }
+    if (!bestDeficit) {
+      this.transitionToInsufficientEvidence();
+      return;
     }
     const bridging = this.prerequisitesInTopoOrder.filter(id => id !== bestDeficit && this.graph.skillsById.get(id)!.ancestorIds.has(bestDeficit));
     this.status = "repair_plan_ready";
@@ -229,7 +239,7 @@ export class PrerequisiteDrilldownStateMachine {
       this.transitionToInsufficientEvidence();
     } else if (this.unassistedCorrectCount === this.probesAdministered && !this.hadNonUnassistedProbe) {
       this.transitionToRestoreOriginal();
-    } else if (this.unassistedFailureCount === 0) {
+    } else if (this.unassistedFailureCount === 0 || this.failedTestedPrerequisiteIds.size === 0) {
       this.transitionToInsufficientEvidence();
     } else {
       this.transitionToRepairPlan();
@@ -282,7 +292,7 @@ export class PrerequisiteDrilldownStateMachine {
     if (this.snapshotConsumedObservationIds.has(trimmedObsId)) {
       throw new DiagnosticPlacementError("VALIDATION", `Observation ${trimmedObsId} was already consumed by KST placement snapshot`);
     }
-    if (this.seenObservationIds.has(observation.observationId)) return this.getState();
+    if (this.seenObservationIds.has(trimmedObsId)) return this.getState();
     const cap = this.capLimit();
     if (this.status !== "probing" || this.probesAdministered >= cap) {
       throw new DiagnosticPlacementError("INVALID_STATE", `Drilldown hard cap (${MAX_TOTAL_DRILLDOWN_PROBES}) reached or already finalized`);
@@ -299,14 +309,13 @@ export class PrerequisiteDrilldownStateMachine {
       throw new DiagnosticPlacementError("VALIDATION", `Drilldown probe familyId ${probe.familyId} has already been used`);
     }
 
-    this.seenObservationIds.add(observation.observationId);
+    this.seenObservationIds.add(trimmedObsId);
     this.usedItemIds.add(probe.itemId);
     this.usedFamilyIds.add(probe.familyId);
     this.pendingProbeId = null;
     this.probesAdministered += 1;
 
     if (isUnassistedValidObservation(observation)) {
-      this.unassistedProbeCount += 1;
       const savedLogW = this.logWeights.slice();
       const savedW = this.weights.slice();
       for (let i = 0; i < this.hypotheses.length; i++) {
@@ -314,9 +323,22 @@ export class PrerequisiteDrilldownStateMachine {
         const like = observation.correct ? p1 : 1 - p1;
         this.logWeights[i] = this.logWeights[i]! + (like > 0 ? Math.log(like) : -Infinity);
       }
-      if (!this.renormalize()) { this.logWeights.set(savedLogW); this.weights.set(savedW); }
-      if (observation.correct) this.unassistedCorrectCount += 1;
-      else this.unassistedFailureCount += 1;
+      if (this.renormalize()) {
+        this.unassistedProbeCount += 1;
+        if (observation.correct) {
+          this.unassistedCorrectCount += 1;
+        } else {
+          this.unassistedFailureCount += 1;
+          if (1 - probe.slip - probe.guess > 0) {
+            for (const skillId of probe.requiredSkillIds) {
+              if (this.prerequisiteSet.has(skillId)) this.failedTestedPrerequisiteIds.add(skillId);
+            }
+          }
+        }
+      } else {
+        this.logWeights.set(savedLogW);
+        this.weights.set(savedW);
+      }
     } else {
       this.hadNonUnassistedProbe = true;
     }

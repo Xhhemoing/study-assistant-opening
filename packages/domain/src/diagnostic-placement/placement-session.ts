@@ -1,5 +1,7 @@
 import { KstStateSpace, defineRecordEntry, readRecordEntry, validateKstSnapshot, validateProbeItem } from "./kst-state-space";
 import {
+  DiagnosticPlacementError,
+  MAX_EXACT_KST_STATES,
   BLOCKED_UI_LABEL,
   DEFAULT_HIGH_VALUE_WEIGHT_THRESHOLD,
   DEFAULT_MAX_PLACEMENT_ITEMS,
@@ -8,7 +10,6 @@ import {
   DEFAULT_READY_THRESHOLD,
   DEFAULT_SKIP_THRESHOLD,
   DELAYED_CHECK_AFTER_HOURS,
-  DiagnosticPlacementError,
   READY_UI_LABEL,
   SKIP_CANDIDATE_UI_LABEL,
   type ChapterQuotaInput,
@@ -61,7 +62,10 @@ export function classifyPlacementRoutes(
   const snapshot = source instanceof KstStateSpace ? source.buildPriorSnapshot() : (validateKstSnapshot(source), source);
   const componentModeBySkill = new Map<string, KstComponentMode>();
   for (const comp of snapshot.componentJointWeights) {
-    for (const id of comp.skillIds) componentModeBySkill.set(id, comp.approximationMode);
+    for (const id of comp.skillIds) {
+      if (componentModeBySkill.get(id) === "bounded_component_envelope") continue;
+      componentModeBySkill.set(id, comp.approximationMode);
+    }
   }
   const hasExplicitComponentModes = snapshot.componentJointWeights.length > 0;
 
@@ -284,35 +288,246 @@ export class DiagnosticPlacementSession {
     return true;
   }
 
-  private canCompleteSessionWith(candidate: DiagnosticProbeItem, budgetSeconds = this.remainingBudgetSeconds): boolean {
+  private canCompleteSessionWith(
+    candidate: DiagnosticProbeItem,
+    budgetSeconds = this.remainingBudgetSeconds,
+    candidateCost = candidate.estimatedSeconds,
+  ): boolean {
     if (!this.stateSpace.canEvaluateProbe(candidate)) return false;
     if (this.usedItemIds.size + 1 > this.maxItems) return false;
-    const budgetAfter = budgetSeconds - candidate.estimatedSeconds;
+    const budgetAfter = budgetSeconds - candidateCost;
     if (budgetAfter < -1e-9) return false;
 
     const nextChapterCount = (this.chapterCounts.get(candidate.chapterId) ?? 0) + 1;
     const candidateQuota = this.chapterQuotas.get(candidate.chapterId);
     if (candidateQuota && nextChapterCount > candidateQuota.maxItems) return false;
 
-    const deficits = new Map<string, number>();
-    const headroom = new Map<string, number>();
-    let totalDeficit = 0;
+    const initRemMin = new Map<string, number>();
+    const initRemMaxCap = new Map<string, number>();
+    let initTotalDeficit = 0;
     for (const [chapterId, quota] of this.chapterQuotas.entries()) {
       const count = chapterId === candidate.chapterId ? nextChapterCount : (this.chapterCounts.get(chapterId) ?? 0);
       const deficit = Math.max(0, quota.minItems - count);
-      deficits.set(chapterId, deficit);
-      totalDeficit += deficit;
-      headroom.set(chapterId, quota.maxItems === Infinity ? Infinity : Math.max(0, quota.maxItems - count - deficit));
+      if (deficit > 0) initRemMin.set(chapterId, deficit);
+      initTotalDeficit += deficit;
+      initRemMaxCap.set(chapterId, quota.maxItems === Infinity ? Infinity : Math.max(0, quota.maxItems - count));
     }
-    const kNeeded = Math.max(totalDeficit, Math.max(0, this.minItems - (this.usedItemIds.size + 1)));
-    if (this.usedItemIds.size + 1 + kNeeded > this.maxItems) return false;
-    if (kNeeded === 0) return true;
+    const initKNeeded = Math.max(initTotalDeficit, Math.max(0, this.minItems - (this.usedItemIds.size + 1)));
+    if (this.usedItemIds.size + 1 + initKNeeded > this.maxItems) return false;
+    if (initKNeeded === 0) return true;
 
-    const remainingPool = this.candidatePool.filter(item =>
-      item.itemId !== candidate.itemId && item.familyId !== candidate.familyId &&
-      !this.usedItemIds.has(item.itemId) && !this.usedFamilyIds.has(item.familyId) &&
-      this.stateSpace.canEvaluateProbeAfter(candidate, item));
-    return minCostFeasibleCompletion(remainingPool, deficits, headroom, kNeeded, budgetAfter);
+    const meta = this.stateSpace.getComponentMetadata();
+    const compIndexBySkill = this.stateSpace.componentIndexBySkill;
+    const groupModes = meta.map(m => m.approximationMode);
+    const maxExactStates = BigInt(MAX_EXACT_KST_STATES);
+
+    const origCompsCache = new Map<string, readonly number[]>();
+    const getOrigComps = (item: DiagnosticProbeItem): readonly number[] => {
+      let cached = origCompsCache.get(item.itemId);
+      if (!cached) {
+        const set = new Set<number>();
+        for (const skillId of item.requiredSkillIds) {
+          const idx = compIndexBySkill.get(skillId);
+          if (idx !== undefined) set.add(idx);
+        }
+        cached = [...set];
+        origCompsCache.set(item.itemId, cached);
+      }
+      return cached;
+    };
+
+    type MergeOutcome =
+      | { ok: false }
+      | { ok: true; groupsCount: number; nextCompToGroup: number[]; nextGroupCounts: bigint[] };
+
+    const evalMerge = (
+      item: DiagnosticProbeItem,
+      compToGroup: number[],
+      groupCounts: bigint[],
+    ): MergeOutcome => {
+      const origComps = getOrigComps(item);
+      if (origComps.length <= 1) {
+        return { ok: true, groupsCount: origComps.length, nextCompToGroup: compToGroup, nextGroupCounts: groupCounts };
+      }
+      const gSet = new Set<number>();
+      for (const orig of origComps) gSet.add(compToGroup[orig]!);
+      if (gSet.size <= 1) {
+        return { ok: true, groupsCount: 1, nextCompToGroup: compToGroup, nextGroupCounts: groupCounts };
+      }
+      let prod = 1n;
+      let targetGroup = Infinity;
+      for (const g of gSet) {
+        if (groupModes[g] !== "exact") return { ok: false };
+        prod *= groupCounts[g]!;
+        if (prod > maxExactStates) return { ok: false };
+        if (g < targetGroup) targetGroup = g;
+      }
+      const nextCompToGroup = compToGroup.slice();
+      for (let i = 0; i < nextCompToGroup.length; i++) {
+        if (gSet.has(nextCompToGroup[i]!)) nextCompToGroup[i] = targetGroup;
+      }
+      const nextGroupCounts = groupCounts.slice();
+      nextGroupCounts[targetGroup] = prod;
+      return { ok: true, groupsCount: gSet.size, nextCompToGroup, nextGroupCounts };
+    };
+
+    const startCompToGroup = Array.from({ length: meta.length }, (_, i) => i);
+    const startGroupCounts = meta.map(m => m.stateCount);
+    const afterCandidate = evalMerge(candidate, startCompToGroup, startGroupCounts);
+    if (!afterCandidate.ok) return false;
+
+    const basePool = this.candidatePool
+      .filter(item =>
+        item.itemId !== candidate.itemId &&
+        item.familyId !== candidate.familyId &&
+        !this.usedItemIds.has(item.itemId) &&
+        !this.usedFamilyIds.has(item.familyId),
+      )
+      .sort((a, b) => (a.estimatedSeconds - b.estimatedSeconds) || cmpStr(a.itemId, b.itemId));
+
+    const poolIdxById = new Map(basePool.map((it, idx) => [it.itemId, idx]));
+    const pickedFams = new Set<string>();
+    const pickedItems = new Set<string>();
+    let visitedNodes = 0;
+    const MAX_DFS_NODES = 25_000;
+
+    const dfs = (
+      usedTotal: number,
+      remBudget: number,
+      remMinMap: ReadonlyMap<string, number>,
+      totalRemMin: number,
+      remMaxCapMap: ReadonlyMap<string, number>,
+      compToGroup: number[],
+      groupCounts: bigint[],
+      minIdxByChapter: ReadonlyMap<string, number>,
+      caseBStartIdx: number,
+    ): boolean => {
+      if (++visitedNodes > MAX_DFS_NODES) return false;
+      const remNeeded = Math.max(totalRemMin, Math.max(0, this.minItems - usedTotal));
+      if (remNeeded === 0) return true;
+      if (usedTotal + remNeeded > this.maxItems) return false;
+
+      const allowNonDeficit = totalRemMin < remNeeded;
+      const feasible: Array<{ item: DiagnosticProbeItem; outcome: Extract<MergeOutcome, { ok: true }> }> = [];
+      let hasMultiGroupCandidate = false;
+      for (const item of basePool) {
+        if (pickedItems.has(item.itemId) || pickedFams.has(item.familyId)) continue;
+        if (item.estimatedSeconds > remBudget + 1e-9) continue;
+        if ((remMaxCapMap.get(item.chapterId) ?? Infinity) <= 0) continue;
+        if (!allowNonDeficit && (remMinMap.get(item.chapterId) ?? 0) <= 0) continue;
+        const outcome = evalMerge(item, compToGroup, groupCounts);
+        if (!outcome.ok) continue;
+        if (outcome.groupsCount > 1) hasMultiGroupCandidate = true;
+        feasible.push({ item, outcome });
+      }
+      if (feasible.length < remNeeded) return false;
+
+      const headroomNow = new Map<string, number>();
+      for (const [ch, cap] of remMaxCapMap.entries()) {
+        headroomNow.set(ch, cap === Infinity ? Infinity : Math.max(0, cap - (remMinMap.get(ch) ?? 0)));
+      }
+      if (!minCostFeasibleCompletion(feasible.map(f => f.item), remMinMap, headroomNow, remNeeded, remBudget)) {
+        return false;
+      }
+      if (!hasMultiGroupCandidate) return true;
+
+      if (totalRemMin > 0) {
+        let targetChap: string | null = null;
+        let targetCands: typeof feasible = [];
+        for (const [ch, def] of remMinMap.entries()) {
+          if (def <= 0) continue;
+          const minIdx = minIdxByChapter.get(ch) ?? 0;
+          const cands = feasible.filter(f => f.item.chapterId === ch && poolIdxById.get(f.item.itemId)! >= minIdx);
+          if (cands.length < def) return false;
+          if (targetChap === null || cands.length < targetCands.length) {
+            targetChap = ch;
+            targetCands = cands;
+          }
+        }
+        if (!targetChap) return false;
+        targetCands.sort((a, b) =>
+          (a.outcome.groupsCount <= 1 ? 0 : 1) - (b.outcome.groupsCount <= 1 ? 0 : 1) ||
+          a.item.estimatedSeconds - b.item.estimatedSeconds ||
+          cmpStr(a.item.itemId, b.item.itemId),
+        );
+
+        for (const { item, outcome } of targetCands) {
+          pickedItems.add(item.itemId);
+          pickedFams.add(item.familyId);
+          const nextMinMap = new Map(remMinMap);
+          const curDef = nextMinMap.get(targetChap)!;
+          if (curDef <= 1) nextMinMap.delete(targetChap);
+          else nextMinMap.set(targetChap, curDef - 1);
+          const nextMaxCap = new Map(remMaxCapMap);
+          const prevCap = nextMaxCap.get(targetChap) ?? Infinity;
+          if (prevCap !== Infinity) nextMaxCap.set(targetChap, prevCap - 1);
+          const nextMinIdxMap = new Map(minIdxByChapter);
+          nextMinIdxMap.set(targetChap, poolIdxById.get(item.itemId)! + 1);
+
+          const solved = dfs(
+            usedTotal + 1,
+            remBudget - item.estimatedSeconds,
+            nextMinMap,
+            totalRemMin - 1,
+            nextMaxCap,
+            outcome.nextCompToGroup,
+            outcome.nextGroupCounts,
+            nextMinIdxMap,
+            caseBStartIdx,
+          );
+          pickedItems.delete(item.itemId);
+          pickedFams.delete(item.familyId);
+          if (solved) return true;
+        }
+        return false;
+      }
+
+      // All chapter minItems satisfied; fill remaining minItems gap cleanly without permutations
+      const ordered = feasible
+        .filter(f => poolIdxById.get(f.item.itemId)! >= caseBStartIdx)
+        .sort((a, b) =>
+          (a.outcome.groupsCount <= 1 ? 0 : 1) - (b.outcome.groupsCount <= 1 ? 0 : 1) ||
+          a.item.estimatedSeconds - b.item.estimatedSeconds ||
+          cmpStr(a.item.itemId, b.item.itemId),
+        );
+      if (ordered.length < remNeeded) return false;
+      for (const { item, outcome } of ordered) {
+        const gIdx = poolIdxById.get(item.itemId)!;
+        pickedItems.add(item.itemId);
+        pickedFams.add(item.familyId);
+        const nextMaxCap = new Map(remMaxCapMap);
+        const prevCap = nextMaxCap.get(item.chapterId) ?? Infinity;
+        if (prevCap !== Infinity) nextMaxCap.set(item.chapterId, prevCap - 1);
+
+        const solved = dfs(
+          usedTotal + 1,
+          remBudget - item.estimatedSeconds,
+          remMinMap,
+          0,
+          nextMaxCap,
+          outcome.nextCompToGroup,
+          outcome.nextGroupCounts,
+          minIdxByChapter,
+          gIdx + 1,
+        );
+        pickedItems.delete(item.itemId);
+        pickedFams.delete(item.familyId);
+        if (solved) return true;
+      }
+      return false;
+    };
+
+    return dfs(
+      this.usedItemIds.size + 1,
+      budgetAfter,
+      initRemMin,
+      initTotalDeficit,
+      initRemMaxCap,
+      afterCandidate.nextCompToGroup,
+      afterCandidate.nextGroupCounts,
+      new Map(),
+      0,
+    );
   }
 
   selectNextProbe(): PlacementSelectionResult {
@@ -361,14 +576,15 @@ export class DiagnosticPlacementSession {
   }
 
   recordResponse(observation: DiagnosticProbeObservation): KstObservationUpdateResult & { administeredCount: number; remainingBudgetSeconds: number } {
-    if (!observation.observationId.trim()) {
+    const canonicalObsId = observation.observationId.trim();
+    if (!canonicalObsId) {
       throw new DiagnosticPlacementError("VALIDATION", "observationId must be non-empty");
     }
     const probe = this.probeById.get(observation.itemId);
     if (!probe) throw new DiagnosticPlacementError("VALIDATION", `Unknown placement probe itemId: ${observation.itemId}`);
-    if (this.seenObservationIds.has(observation.observationId)) {
+    if (this.seenObservationIds.has(canonicalObsId)) {
       return {
-        applied: false, reason: "duplicate_observation", observationId: observation.observationId,
+        applied: false, reason: "duplicate_observation", observationId: canonicalObsId,
         consumedProbeObservationIds: [...this.stateSpace.consumedProbeObservationIds],
         administeredCount: this.usedItemIds.size, remainingBudgetSeconds: this.remainingBudgetSeconds,
       };
@@ -396,16 +612,16 @@ export class DiagnosticPlacementSession {
       if (chapterQuota && nextChapterCount > chapterQuota.maxItems) {
         throw new DiagnosticPlacementError("VALIDATION", `Chapter ${probe.chapterId} maxItems quota exceeded by probe ${probe.itemId}`);
       }
-      if (probe.estimatedSeconds > this.remainingBudgetSeconds + 1e-9) {
-        throw new DiagnosticPlacementError("INFEASIBLE", `Probe ${probe.itemId} exceeds remaining budget (${this.remainingBudgetSeconds}s)`);
+      if (elapsed > this.remainingBudgetSeconds + 1e-9) {
+        throw new DiagnosticPlacementError("INFEASIBLE", `Probe ${probe.itemId} elapsedSeconds (${elapsed}s) exceeds remaining budget (${this.remainingBudgetSeconds}s)`);
       }
-      if (!this.canCompleteSessionWith(probe, this.remainingBudgetSeconds)) {
+      if (!this.canCompleteSessionWith(probe, this.remainingBudgetSeconds, elapsed)) {
         throw new DiagnosticPlacementError("INFEASIBLE", `Probe ${probe.itemId} leaves remaining session constraints infeasible`);
       }
     }
 
     const update = this.stateSpace.applyProbeObservation(probe, observation);
-    this.seenObservationIds.add(observation.observationId);
+    this.seenObservationIds.add(canonicalObsId);
     this.usedItemIds.add(probe.itemId);
     this.usedFamilyIds.add(probe.familyId);
     this.pendingProbeId = null;

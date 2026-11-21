@@ -59,6 +59,12 @@ type ComponentSpace = {
   w: Float64Array;
 };
 
+export type KstComponentMetadata = {
+  readonly componentId: string;
+  readonly approximationMode: KstComponentMode;
+  readonly stateCount: bigint;
+};
+
 export function canonicalStateKey(masteredSkillIds: readonly string[]): string {
   return JSON.stringify([...masteredSkillIds].sort(cmpStr));
 }
@@ -357,7 +363,16 @@ export function validateKstSnapshot(snapshot: KstSnapshotV1): void {
   validateProbabilityRecord(snapshot.piBySkill, "piBySkill");
   validateProbabilityRecord(snapshot.outerFringeBySkill, "outerFringeBySkill");
   validateProbabilityRecord(snapshot.parentsSatisfiedBySkill, "parentsSatisfiedBySkill");
+  const knownSkills = new Set(Object.keys(snapshot.piBySkill));
+  for (const skillId of Object.keys(snapshot.parentsSatisfiedBySkill)) {
+    if (!knownSkills.has(skillId)) {
+      throw new DiagnosticPlacementError("VALIDATION", `parentsSatisfiedBySkill references unknown skill ${skillId}`);
+    }
+  }
   for (const [skillId, outer] of Object.entries(snapshot.outerFringeBySkill)) {
+    if (!knownSkills.has(skillId)) {
+      throw new DiagnosticPlacementError("VALIDATION", `outerFringeBySkill references unknown skill ${skillId}`);
+    }
     const parentsSat = readRecordEntry(snapshot.parentsSatisfiedBySkill, skillId);
     if (parentsSat !== undefined && outer > parentsSat + 1e-6) {
       throw new DiagnosticPlacementError("VALIDATION", `outerFringeBySkill[${skillId}] exceeds parentsSatisfiedBySkill[${skillId}]`);
@@ -373,6 +388,7 @@ export function validateKstSnapshot(snapshot: KstSnapshotV1): void {
   if (!Array.isArray(snapshot.componentJointWeights)) {
     throw new DiagnosticPlacementError("VALIDATION", "KstSnapshotV1 componentJointWeights must be an array");
   }
+  const seenCompSkills = new Set<string>();
   snapshot.componentJointWeights.forEach((comp, idx) => {
     if (!comp || typeof comp !== "object") {
       throw new DiagnosticPlacementError("VALIDATION", `componentJointWeights[${idx}] must be an object`);
@@ -380,8 +396,27 @@ export function validateKstSnapshot(snapshot: KstSnapshotV1): void {
     if (comp.approximationMode !== "exact" && comp.approximationMode !== "bounded_component_envelope") {
       throw new DiagnosticPlacementError("VALIDATION", `componentJointWeights[${idx}] has invalid approximationMode`);
     }
+    if (!Array.isArray(comp.skillIds) || comp.skillIds.length === 0) {
+      throw new DiagnosticPlacementError("VALIDATION", `componentJointWeights[${idx}].skillIds must be a non-empty array`);
+    }
+    for (let sIdx = 0; sIdx < comp.skillIds.length; sIdx++) {
+      if (!(sIdx in comp.skillIds) || typeof comp.skillIds[sIdx] !== "string" || !comp.skillIds[sIdx]!.trim()) {
+        throw new DiagnosticPlacementError("VALIDATION", `componentJointWeights[${idx}].skillIds[${sIdx}] must be a non-empty string`);
+      }
+      const skillId = comp.skillIds[sIdx]!;
+      if (!knownSkills.has(skillId)) {
+        throw new DiagnosticPlacementError("VALIDATION", `componentJointWeights[${idx}] references unknown skill ${skillId}`);
+      }
+      if (seenCompSkills.has(skillId)) {
+        throw new DiagnosticPlacementError("VALIDATION", `Duplicate skill ${skillId} in componentJointWeights`);
+      }
+      seenCompSkills.add(skillId);
+    }
     validateProbabilityRecord(comp.wByState, `componentJointWeights[${idx}].wByState`, { requireSumOne: true, requireNonEmpty: true });
   });
+  if (snapshot.componentJointWeights.length > 0 && seenCompSkills.size !== knownSkills.size) {
+    throw new DiagnosticPlacementError("VALIDATION", "componentJointWeights must partition snapshot skills");
+  }
   if (!snapshot.skillCovariance || typeof snapshot.skillCovariance !== "object" || Array.isArray(snapshot.skillCovariance)) {
     throw new DiagnosticPlacementError("VALIDATION", "KstSnapshotV1 skillCovariance must be a record");
   }
@@ -409,6 +444,14 @@ export class KstStateSpace {
 
   get componentIndexBySkill(): ReadonlyMap<string, number> {
     return this._componentIndexBySkill;
+  }
+
+  getComponentMetadata(): readonly KstComponentMetadata[] {
+    return this._components.map(c => ({
+      componentId: c.componentId,
+      approximationMode: c.approximationMode,
+      stateCount: BigInt(c.states.length),
+    }));
   }
 
   constructor(skills: readonly DiagnosticSkillNode[]) {
@@ -612,13 +655,14 @@ export class KstStateSpace {
 
   applyProbeObservation(probe: DiagnosticProbeItem, observation: DiagnosticProbeObservation): KstObservationUpdateResult {
     validateProbeItem(probe, this.graph.skillsById);
-    if (!observation.observationId.trim()) throw new DiagnosticPlacementError("VALIDATION", "observationId must be non-empty");
+    const canonicalObsId = observation.observationId.trim();
+    if (!canonicalObsId) throw new DiagnosticPlacementError("VALIDATION", "observationId must be non-empty");
     if (observation.itemId !== probe.itemId) throw new DiagnosticPlacementError("VALIDATION", `Observation itemId ${observation.itemId} does not match probe ${probe.itemId}`);
 
     const mkResult = (applied: boolean, reason: KstObservationUpdateResult["reason"]): KstObservationUpdateResult => ({
-      applied, reason, observationId: observation.observationId, consumedProbeObservationIds: [...this.consumedProbeObservationIds],
+      applied, reason, observationId: canonicalObsId, consumedProbeObservationIds: [...this.consumedProbeObservationIds],
     });
-    if (this.seenObservationIds.has(observation.observationId)) return mkResult(false, "duplicate_observation");
+    if (this.seenObservationIds.has(canonicalObsId)) return mkResult(false, "duplicate_observation");
 
     const touched = this.touchedMasks(probe.requiredSkillIds);
     const touchedIndices = [...touched.keys()].sort((a, b) => a - b);
@@ -626,7 +670,7 @@ export class KstStateSpace {
     if (!mergeCheck.feasible) throw new DiagnosticPlacementError("INFEASIBLE", mergeCheck.reason);
 
     if (!isUnassistedValidObservation(observation)) {
-      this.seenObservationIds.add(observation.observationId);
+      this.seenObservationIds.add(canonicalObsId);
       return mkResult(false, "assisted_or_invalid_response");
     }
 
@@ -643,7 +687,7 @@ export class KstStateSpace {
         merged.logW[i] = merged.logW[i]! + ((merged.states[i]! & reqMask) === reqMask ? logM : logU);
       }
       if (!normalizeLogWeights(merged.logW, merged.w)) {
-        this.seenObservationIds.add(observation.observationId);
+        this.seenObservationIds.add(canonicalObsId);
         return mkResult(false, "zero_likelihood_observation");
       }
 
@@ -668,13 +712,13 @@ export class KstStateSpace {
       if (!normalizeLogWeights(comp.logW, comp.w)) {
         comp.logW.set(savedLogW);
         comp.w.set(savedW);
-        this.seenObservationIds.add(observation.observationId);
+        this.seenObservationIds.add(canonicalObsId);
         return mkResult(false, "zero_likelihood_observation");
       }
     }
 
-    this.seenObservationIds.add(observation.observationId);
-    this.consumedProbeObservationIds.push(observation.observationId);
+    this.seenObservationIds.add(canonicalObsId);
+    this.consumedProbeObservationIds.push(canonicalObsId);
     return mkResult(true, "updated");
   }
 
@@ -818,16 +862,18 @@ export function partitionObservationsAgainstKstSnapshot<T extends {
   observations: readonly T[],
 ): PartitionedObservationsResult<T> {
   validateKstSnapshot(snapshot);
-  const consumedSet = new Set(snapshot.consumedProbeObservationIds);
+  const consumedIdsCanonical = snapshot.consumedProbeObservationIds.map(id => id.trim()).filter(id => id.length > 0);
+  const consumedSet = new Set(consumedIdsCanonical);
   const seenBatchIds = new Set<string>();
   const directObservations: T[] = [];
   const strippedConsumedObservations: PartitionedObservation<T>[] = [];
   const annotatedObservations: PartitionedObservation<T>[] = [];
   for (const obs of observations) {
-    const id = typeof obs.observationId === "string" ? obs.observationId : "";
-    const hasNonBlankId = id.trim().length > 0;
-    const alreadyConsumed = hasNonBlankId && consumedSet.has(id);
-    const duplicateInBatch = hasNonBlankId && !alreadyConsumed && seenBatchIds.has(id);
+    const rawId = typeof obs.observationId === "string" ? obs.observationId : "";
+    const trimmedId = rawId.trim();
+    const hasNonBlankId = trimmedId.length > 0;
+    const alreadyConsumed = hasNonBlankId && consumedSet.has(trimmedId);
+    const duplicateInBatch = hasNonBlankId && !alreadyConsumed && seenBatchIds.has(trimmedId);
     const unassistedValid = "correct" in obs
       ? isUnassistedValidObservation(obs as { correct: unknown; channel?: string; unassisted?: boolean; assisted?: boolean; hinted?: boolean; valid?: boolean })
       : obs.valid !== false && obs.assisted !== true && obs.hinted !== true && obs.unassisted !== false
@@ -836,7 +882,7 @@ export function partitionObservationsAgainstKstSnapshot<T extends {
     const eligibleForFirePropagation = eligibleForDirectUpdate && (obs.eligibleForFirePropagation ?? true);
 
     if (eligibleForDirectUpdate) {
-      seenBatchIds.add(id);
+      seenBatchIds.add(trimmedId);
       directObservations.push(obs);
     }
     const annotated: PartitionedObservation<T> = {
@@ -853,7 +899,7 @@ export function partitionObservationsAgainstKstSnapshot<T extends {
     unconsumedObservations: directObservations,
     strippedConsumedObservations,
     annotatedObservations,
-    consumedObservationIds: [...snapshot.consumedProbeObservationIds],
+    consumedObservationIds: [...consumedSet],
   };
 }
 
@@ -892,7 +938,7 @@ export function updateSkillMasteryFromKstSnapshot(
       }
       const pM = obs.correct ? 1 - obs.slip : obs.slip;
       const pU = obs.correct ? obs.guess : 1 - obs.guess;
-      appliedObservationIds.push(obs.observationId);
+      appliedObservationIds.push(obs.observationId.trim());
       if (pM === 0 && pU > 0) { posterior = 0; break; }
       if (pU === 0 && pM > 0) { posterior = 1; break; }
       if (pM > 0 && pU > 0) logOdds += Math.log(pM) - Math.log(pU);
