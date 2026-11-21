@@ -92,6 +92,45 @@ describe("workbench-model helpers", () => {
     expect(segments.find((segment) => segment.kind === "span")?.text)
       .toBe("alleviate chronic congestion");
   });
+
+  it("honors the validated offsets of multiple occurrences in prose", () => {
+    const paragraph = '<div title="congestion">Rail reduces congestion. Buses also reduce congestion.</div>';
+    const span = {
+      id: "rail",
+      paragraphIndex: 0,
+      excerpt: "congestion",
+      criterion: "LR" as const,
+      diagnosis: "精准搭配。",
+      upgradeRewrite: "chronic congestion",
+      startOffset: 37,
+      endOffset: 47,
+    };
+    const segments = segmentParagraphWithSpans(paragraph, [
+      span,
+      { ...span, id: "bus", startOffset: 67, endOffset: 77 },
+    ], "ALL");
+    expect(segments.map((segment) => segment.text)).toEqual([
+      '<div title="congestion">Rail reduces ', "congestion", ". Buses also reduce ", "congestion", ".</div>",
+    ]);
+    expect(segments.flatMap((segment) => segment.kind === "span" ? [segment.span.id] : [])).toEqual(["rail", "bus"]);
+  });
+
+  it("only searches prose when a span has missing or invalid offsets", () => {
+    const paragraph = '<div title="congestion">Rail reduces congestion.</div>';
+    const span = {
+      id: "rail",
+      paragraphIndex: 0,
+      excerpt: "congestion",
+      criterion: "LR" as const,
+      diagnosis: "精准搭配。",
+      upgradeRewrite: "chronic congestion",
+    };
+    for (const candidate of [span, { ...span, startOffset: 37.5, endOffset: 47.5 }]) {
+      expect(segmentParagraphWithSpans(paragraph, [candidate], "ALL").map((segment) => segment.text)).toEqual([
+        '<div title="congestion">Rail reduces ', "congestion", ".</div>",
+      ]);
+    }
+  });
 });
 
 describe("IeltsDraftCritiqueWorkbench", () => {
@@ -463,7 +502,10 @@ describe("IeltsSpeakingTransferCard", () => {
         initialTranscript: fixture.initialSpeakingTranscript,
         initialDurationSeconds: fixture.initialSpeakingDurationSeconds,
         initialReceipt: receipt,
-        onEvaluated: setReceipt,
+        onEvaluated: (nextReceipt: typeof fixture.initialSpeakingReceipt) => {
+          const { createdAt, ...rest } = structuredClone(nextReceipt);
+          setReceipt({ createdAt, ...rest });
+        },
       });
     }
 
@@ -479,6 +521,45 @@ describe("IeltsSpeakingTransferCard", () => {
     expect(host.querySelector('[data-speaking-epistemic="rubric_verified_evidence"]')).not.toBeNull();
     expect(host.querySelector('[data-speaking-pace="on_target"]')).not.toBeNull();
   });
+
+  it.each(["transcript", "duration", "practice feedback", "mastery flag", "assistance", "removal"] as const)(
+    "discards generated Speaking mastery after the host changes %s on the same seed",
+    async (change) => {
+      const fixture = IELTS_WRITING_SPEAKING_FIXTURE;
+      const onEvaluated = vi.fn<(receipt: typeof fixture.initialSpeakingReceipt) => void>();
+      const props = {
+        seed: fixture.speakingSeed,
+        initialTranscript: fixture.initialSpeakingTranscript,
+        initialDurationSeconds: fixture.initialSpeakingDurationSeconds,
+        onEvaluated,
+      };
+      const render = (overrides: Partial<Parameters<typeof IeltsSpeakingTransferCard>[0]> = {}) =>
+        act(async () => root.render(createElement(IeltsSpeakingTransferCard, { ...props, ...overrides })));
+      await render();
+      await act(async () => host.querySelector<HTMLButtonElement>("button")!.click());
+      const emitted = onEvaluated.mock.calls[0]![0];
+      await render({ initialReceipt: structuredClone(emitted) });
+      expect(host.querySelector('[data-speaking-epistemic="rubric_verified_evidence"]')).not.toBeNull();
+
+      if (change === "transcript") {
+        await render({ initialTranscript: "Rail is my recommendation.", initialReceipt: emitted });
+      } else if (change === "duration") {
+        await render({ initialDurationSeconds: 20, initialReceipt: emitted });
+      } else if (change === "practice feedback") {
+        await render({ initialReceipt: { ...emitted, epistemicStatus: "practice_feedback", masteryQualified: false, countsTowardMastery: false } });
+        expect(host.querySelector('[data-speaking-epistemic="practice_feedback"]')).not.toBeNull();
+      } else if (change === "mastery flag") {
+        await render({ initialReceipt: { ...emitted, masteryQualified: false } });
+      } else if (change === "assistance") {
+        await render({ initialReceipt: { ...emitted, assisted: true } });
+      } else {
+        await render();
+      }
+      expect(host.querySelector('[data-speaking-epistemic="rubric_verified_evidence"]')).toBeNull();
+      await render();
+      expect(host.querySelector("[data-speaking-epistemic]")).toBeNull();
+    },
+  );
 
   it("never shows verified Speaking evidence for an assisted initial receipt", async () => {
     const fixture = IELTS_WRITING_SPEAKING_FIXTURE;

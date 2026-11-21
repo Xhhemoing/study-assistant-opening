@@ -1,4 +1,4 @@
-import { graphemeBoundaries } from "./graphemes";
+import { graphemeBoundaries, trimToProseGraphemes } from "./graphemes";
 import { countProseWords, maskIeltsParagraphs } from "./prose";
 import { allocateIeltsSpans, compareText, rangesOverlap, type MatchRange } from "./span-allocation";
 import { segmentIeltsText, type GroundedClause, type GroundedSentence, type GroundedTextSpan } from "./text-segments";
@@ -860,70 +860,6 @@ type ParagraphEvidence = {
   readonly endOffset: number;
 };
 
-function evidenceSnippet(
-  source: Pick<GroundedTextSpan, "text" | "startOffset">,
-  paragraphIndex: number,
-  rawParagraph: string,
-  match?: MatchRange,
-  citationBounds?: MatchRange,
-): ParagraphEvidence {
-  const { text, startOffset } = source;
-  const rawText = rawParagraph.slice(startOffset, startOffset + text.length);
-  const boundaries = graphemeBoundaries(rawText);
-  const requiredStart = boundaries.floor(match?.start ?? 0);
-  const requiredEnd = boundaries.ceil(match?.end ?? 0);
-  const minStart = boundaries.ceil((citationBounds?.start ?? startOffset) - startOffset);
-  const maxEnd = boundaries.floor((citationBounds?.end ?? startOffset + text.length) - startOffset);
-  const width = Math.min(maxEnd - minStart, Math.max(130, requiredEnd - requiredStart));
-  const contextBefore = Math.floor((width - (requiredEnd - requiredStart)) / 2);
-  const windowStart = Math.max(minStart, Math.min(requiredStart - contextBefore, maxEnd - width));
-  let start = boundaries.ceil(windowStart);
-  const windowEnd = Math.min(maxEnd, windowStart + width);
-  let end = boundaries.floor(windowEnd);
-  if (end === start) end = boundaries.ceil(windowEnd);
-
-  // Prefer word edges if they leave the matched occurrence intact.
-  if (start > 0 && !/\s/u.test(rawText[start - 1]!)) {
-    const firstSpace = rawText.indexOf(" ", start);
-    if (firstSpace >= start && firstSpace < requiredStart) start = boundaries.ceil(firstSpace + 1);
-  }
-  if (end < rawText.length) {
-    const lastSpace = rawText.lastIndexOf(" ", end - 1);
-    if (lastSpace > start + 40 && lastSpace >= requiredEnd) end = boundaries.floor(lastSpace);
-  }
-  return {
-    paragraphIndex,
-    excerpt: rawText.slice(start, end),
-    startOffset: startOffset + start,
-    endOffset: startOffset + end,
-  };
-}
-
-function findParagraphEvidence(
-  paragraphs: readonly (readonly GroundedSentence[])[],
-  rawParagraphs: readonly string[],
-  patterns: readonly string[],
-  fallbackPosition: number,
-): ParagraphEvidence {
-  const nonEmpty = paragraphs.flatMap((sentences, paragraphIndex) =>
-    sentences.length > 0 ? [{ sentences, paragraphIndex }] : [],
-  );
-  for (const { sentences, paragraphIndex } of nonEmpty) {
-    for (const sentence of sentences) {
-      for (const pattern of patterns) {
-        const [match] = findPatternRanges(sentence.text, pattern);
-        if (match) return evidenceSnippet(sentence, paragraphIndex, rawParagraphs[paragraphIndex]!, match);
-      }
-    }
-  }
-  const fallback = nonEmpty[Math.min(fallbackPosition, nonEmpty.length - 1)]!;
-  return evidenceSnippet(
-    fallback.sentences[0]!,
-    fallback.paragraphIndex,
-    rawParagraphs[fallback.paragraphIndex]!,
-  );
-}
-
 export type EvaluateRevisedDraftInput = {
   readonly baselineDraft: IeltsEssayDraft;
   readonly revisedDraft: IeltsEssayDraft;
@@ -964,6 +900,52 @@ export function evaluateRevisedDraftDeterministically(
       transferReport: finalizeTransferReport(transferReport, false),
     };
   }
+
+  const paragraphBoundaries = paragraphs.map(graphemeBoundaries);
+  function evidenceSnippet(
+    source: Pick<GroundedTextSpan, "startOffset" | "endOffset">,
+    paragraphIndex: number,
+    match?: MatchRange,
+    citationBounds?: MatchRange,
+  ): ParagraphEvidence | null {
+    const prose = revisedProse[paragraphIndex]!;
+    const boundaries = paragraphBoundaries[paragraphIndex]!;
+    const limits = trimToProseGraphemes(
+      prose, boundaries, citationBounds?.start ?? source.startOffset, citationBounds?.end ?? source.endOffset,
+    );
+    if (!limits) return null;
+    const { startOffset: minStart, endOffset: maxEnd } = limits;
+    const requiredStart = Math.max(minStart, boundaries.floor(match?.start ?? minStart));
+    const requiredEnd = Math.min(maxEnd, boundaries.ceil(match?.end ?? minStart));
+    const width = Math.min(maxEnd - minStart, Math.max(130, requiredEnd - requiredStart));
+    const contextBefore = Math.floor((width - (requiredEnd - requiredStart)) / 2);
+    const windowStart = Math.max(minStart, Math.min(requiredStart - contextBefore, maxEnd - width));
+    let start = boundaries.ceil(windowStart);
+    const windowEnd = Math.min(maxEnd, windowStart + width);
+    let end = boundaries.floor(windowEnd);
+    if (end <= start) end = boundaries.ceil(windowEnd);
+
+    // Prefer word edges if they leave the matched occurrence intact.
+    if (start > minStart && !/\s/u.test(prose[start - 1]!)) {
+      const firstSpace = prose.indexOf(" ", start);
+      if (firstSpace >= start && firstSpace < requiredStart) start = boundaries.ceil(firstSpace + 1);
+    }
+    if (end < maxEnd) {
+      const lastSpace = prose.lastIndexOf(" ", end - 1);
+      if (lastSpace > start + 40 && lastSpace >= requiredEnd) end = boundaries.floor(lastSpace);
+    }
+    const range = trimToProseGraphemes(prose, boundaries, start, end) ?? limits;
+    return { paragraphIndex, ...range, excerpt: paragraphs[paragraphIndex]!.slice(range.startOffset, range.endOffset) };
+  }
+
+  const fallbackEvidence = segmentedParagraphs.flatMap((sentences, paragraphIndex) => {
+    for (const sentence of sentences) {
+      const snippet = evidenceSnippet(sentence, paragraphIndex);
+      if (snippet) return [snippet];
+    }
+    return [];
+  });
+
   const templateHits = transferReport.memorizedTemplateHits;
   const templatePenalty =
     templateHits.some((h) => h.severity === "blocking") || templateHits.length >= 2
@@ -1011,12 +993,26 @@ export function evaluateRevisedDraftDeterministically(
     fallbackPosition: number,
   ): ParagraphEvidence {
     const occurrence = creditedOccurrences.get(criterion);
-    if (!occurrence) return findParagraphEvidence(segmentedParagraphs, paragraphs, patterns, fallbackPosition);
-    const { sentence, paragraphIndex, start, end, citationBounds } = occurrence;
-    return evidenceSnippet(sentence, paragraphIndex, paragraphs[paragraphIndex]!, {
-      start: start - sentence.startOffset,
-      end: end - sentence.startOffset,
-    }, citationBounds);
+    if (occurrence) {
+      const { sentence, paragraphIndex, start, end, citationBounds } = occurrence;
+      const snippet = evidenceSnippet(sentence, paragraphIndex, { start, end }, citationBounds);
+      if (snippet) return snippet;
+    }
+    for (const [paragraphIndex, sentences] of segmentedParagraphs.entries()) {
+      for (const sentence of sentences) {
+        for (const pattern of patterns) {
+          const [match] = findPatternRanges(sentence.text, pattern);
+          if (!match) continue;
+          const snippet = evidenceSnippet(sentence, paragraphIndex, {
+            start: sentence.startOffset + match.start,
+            end: sentence.startOffset + match.end,
+          });
+          if (snippet) return snippet;
+        }
+      }
+    }
+    // A draft with counted words has at least one prose sentence with a citable range.
+    return fallbackEvidence[Math.min(fallbackPosition, fallbackEvidence.length - 1)]!;
   }
 
   const trLoc = findCriterionEvidence(
@@ -1030,19 +1026,16 @@ export function evaluateRevisedDraftDeterministically(
     1,
   );
   const diagnosedTemplate = templateHits[0];
-  let lrLoc: ParagraphEvidence;
+  let templateEvidence: ParagraphEvidence | null = null;
   if (diagnosedTemplate) {
     const { paragraphIndex, startOffset, endOffset } = diagnosedTemplate;
     const source = segmentedParagraphs[paragraphIndex]!.find(
       (sentence) => sentence.startOffset <= startOffset && sentence.endOffset >= endOffset,
-    ) ?? { text: paragraphs[paragraphIndex]!, startOffset: 0 };
-    lrLoc = evidenceSnippet(source, paragraphIndex, paragraphs[paragraphIndex]!, {
-      start: startOffset - source.startOffset,
-      end: endOffset - source.startOffset,
-    });
-  } else {
-    lrLoc = findCriterionEvidence("LR", ["alleviate", "viability", "emissions", "congestion", "infrastructure"], 0);
+    ) ?? { startOffset: 0, endOffset: paragraphs[paragraphIndex]!.length };
+    templateEvidence = evidenceSnippet(source, paragraphIndex, { start: startOffset, end: endOffset });
   }
+  const lrLoc = templateEvidence ??
+    findCriterionEvidence("LR", ["alleviate", "viability", "emissions", "congestion", "infrastructure"], 0);
   const graLoc = findCriterionEvidence(
     "GRA",
     ["while", "although", "whereas", "which", "whereby", "rather than"],
@@ -1157,13 +1150,7 @@ export function evaluateRevisedDraftDeterministically(
     draft: input.revisedDraft,
     baselineDraft: input.baselineDraft,
     transferTargets: input.targets,
-    assessments: assessments.map((assessment) => ({
-      ...assessment,
-      evidenceSpans: assessment.evidenceSpans.map((span) => ({
-        ...span,
-        excerpt: paragraphs[span.paragraphIndex]!.slice(span.startOffset, span.endOffset),
-      })),
-    })),
+    assessments,
     crossDraftTransferVerified: transferReport.summary.meetsCrossDraftVerification,
     freshPromptTransfer: canQualifyFreshPrompt,
     disqualificationReason: transferReport.summary.disqualificationReason,

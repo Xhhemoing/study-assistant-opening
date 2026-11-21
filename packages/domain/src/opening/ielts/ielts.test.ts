@@ -955,6 +955,22 @@ describe("Writing transfer review regressions", () => {
     })).not.toThrow();
   });
 
+  it.each(["", "<b>\u0301</b>\n"])("cites Writing prose beyond a tag-boundary grapheme (%j)", (prefix) => {
+    const excerpt = "Urban rail helps commuters every day.";
+    const paragraph = `${prefix}<a b=\u0600>\u0301${excerpt}`;
+    const { receipt } = evaluateNonEmptyRevision({
+      baselineDraft: DRAFT_1,
+      revisedDraft: { ...DRAFT_2, paragraphs: [paragraph] },
+      targets: TARGETS,
+      receiptId: "r-markup-boundary",
+    });
+    for (const assessment of Object.values(receipt.criteria)) {
+      expect(assessment.evidenceSpans[0]).toMatchObject({
+        excerpt, startOffset: prefix.length + 8, endOffset: paragraph.length,
+      });
+    }
+  });
+
   it("does not count interior noun lists as substantive rewriting", () => {
     const report = analyzeCrossDraftTransfer({
       draft1: {
@@ -1126,6 +1142,13 @@ describe("Speaking contextual transfer regressions", () => {
     expect(receipt.evidenceQuotes[0]?.quote).toBe(transcript);
     expect(receipt.evidenceQuotes[0]?.endOffset).toBe(transcript.length);
   });
+
+  it("keeps Speaking quote edges on full-transcript grapheme boundaries", () => {
+    const quote = "Urban rail helps commuters every day.";
+    const transcript = `<a b=\u0600>\u0301${quote}`;
+    const receipt = evaluateSpeakingRetelling({ seed, transcript, durationSeconds: 75, assisted: false });
+    expect(receipt.evidenceQuotes[0]).toMatchObject({ quote, startOffset: 8, endOffset: transcript.length });
+  });
 });
 
 describe("Writing lineage and evidence regressions", () => {
@@ -1176,6 +1199,7 @@ describe("Writing lineage and evidence regressions", () => {
     const { transferReport } = evaluateNonEmptyRevision({ ...input, baselineDraft: { ...DRAFT_1, paragraphs } });
     expect(countDraftWords(paragraphs)).toBe(5);
     expect(transferReport.summary.transferredCount).toBe(4);
+    expect(countDraftWords(["x < 5 && y > 3"])).toBe(2);
   });
 
   it("excludes a markup block spanning Writing paragraphs", () => {
@@ -1184,6 +1208,16 @@ describe("Writing lineage and evidence regressions", () => {
 
   it.each([
     "<script src=https://example.com/>Monitor per-capita emissions.</script>",
+    "<script src=https://example.com/?v=1&x=2>Monitor per-capita emissions.</script>",
+    '<div/title="Local planners should monitor per-capita emissions."></div>',
+    "<script/src=https://example.com>Monitor per-capita emissions.</script>",
+    "<div data-empty=></div>",
+    "<xmp>Monitor per-capita emissions.</xmp>",
+    "<noframes>Monitor per-capita emissions.</noframes>",
+    "<noembed>Monitor per-capita emissions.</noembed>",
+    "<svg><title>Monitor per-capita emissions.</title><text>Hidden words</text></svg>",
+    "<math><mtext>Monitor per-capita emissions.</mtext></math>",
+    "<!hidden words><?hidden words?>",
     "<form action=https://example.com/>Submit answer</form>",
     "<textarea name=notes/>hidden words</textarea>",
     "<details id=d/>hidden words</details>",
@@ -1199,6 +1233,15 @@ describe("Writing lineage and evidence regressions", () => {
     "<video>Video fallback stays hidden.</video>",
   ])("masks non-prose HTML containers and HTML5 attribute edge cases (%s)", (markup) => {
     expect(countDraftWords([markup])).toBe(0);
+  });
+
+  it("resumes prose after foreign self-closing tags and an attributed raw-text end tag", () => {
+    expect(countDraftWords(['<svg/><math/>Rail helps. <script>Hidden words</script a=">">Buses help.'])).toBe(4);
+  });
+
+  it("keeps the contents of a double-escaped script outside draft prose", () => {
+    expect(countDraftWords(["<script><!--<script>Hidden</script>Monitor per-capita emissions.--></script>Rail helps."]))
+      .toBe(2);
   });
 
   it("grounds an un-offsetted excerpt in prose instead of a duplicate attribute value", () => {

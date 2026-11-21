@@ -1,3 +1,4 @@
+import { graphemeBoundaries, trimToProseGraphemes } from "./graphemes";
 import { allocateIeltsSpans, compareText, type MatchRange } from "./span-allocation";
 import { countProseWords, maskIeltsMarkup } from "./prose";
 import { segmentIeltsText, type GroundedSentence } from "./text-segments";
@@ -507,15 +508,19 @@ export function evaluateSpeakingRetelling(
 
   // Build exact, untrimmed-offset evidence quotes: 1 fluency quote + 1 quote per credited target hit.
   const evidenceQuotes: IeltsSpeakingEvidenceQuote[] = [];
+  const boundaries = graphemeBoundaries(rawTranscript);
+  function groundQuote(sentence: GroundedSentence) {
+    const range = trimToProseGraphemes(prose, boundaries, sentence.startOffset, sentence.endOffset);
+    return range && { ...range, quote: rawTranscript.slice(range.startOffset, range.endOffset) };
+  }
 
-  if (sentences.length > 0) {
-    const firstSentence = sentences[0]!;
+  const groundedQuotes = sentences.map(groundQuote).filter((quote) => quote !== null);
+  const [firstQuote] = groundedQuotes;
+  if (firstQuote) {
     evidenceQuotes.push({
       id: `${input.seed.seedId}-sp-fluency`,
       signal: "fluencyCohesion",
-      quote: rawTranscript.slice(firstSentence.startOffset, firstSentence.endOffset),
-      startOffset: firstSentence.startOffset,
-      endOffset: firstSentence.endOffset,
+      ...firstQuote,
       diagnosis:
         hasStiffWrittenConnector
           ? "转写中带有明显书面连接词（如 Furthermore / In conclusion），口语中改用 That said / On top of that 会更自然。"
@@ -533,14 +538,13 @@ export function evaluateSpeakingRetelling(
     if (transferredCollocations.length > 0) {
       // Emit one grounded citation for EVERY credited target hit!
       transferredCollocations.forEach((expr, idx) => {
-        const matchedSentence = matchedSentenceByCollocation.get(expr)!;
+        const matchedQuote = groundQuote(matchedSentenceByCollocation.get(expr)!);
+        if (!matchedQuote) return;
         evidenceQuotes.push({
           id: `${input.seed.seedId}-sp-lexical-${idx + 1}`,
           signal: "lexicalTransfer",
-          quote: rawTranscript.slice(matchedSentence.startOffset, matchedSentence.endOffset),
+          ...matchedQuote,
           matchedExpression: expr,
-          startOffset: matchedSentence.startOffset,
-          endOffset: matchedSentence.endOffset,
           diagnosis: `该句已自然迁移写作目标表达（${expr}），使口语论述更具体。`,
           upgradeRewrite:
             pendingCollocations.length > 0
@@ -549,15 +553,14 @@ export function evaluateSpeakingRetelling(
         });
       });
     } else if (targets.size > 0) {
-      const longestSentence = [...sentences].sort(
-        (a, b) => b.text.length - a.text.length,
-      )[0]!;
+      const longestQuote = groundedQuotes.reduce(
+        (longest, quote) => quote.quote.length > longest.quote.length ? quote : longest,
+        firstQuote,
+      );
       evidenceQuotes.push({
         id: `${input.seed.seedId}-sp-lexical-0`,
         signal: "lexicalTransfer",
-        quote: rawTranscript.slice(longestSentence.startOffset, longestSentence.endOffset),
-        startOffset: longestSentence.startOffset,
-        endOffset: longestSentence.endOffset,
+        ...longestQuote,
         diagnosis: hasBareTargetPaste
           ? "仅检测到孤立拼贴的目标词组片段，尚未融入完整口语句子语境。"
           : "本次转写尚未命中任何目标活性搭配，建议结合提示词把写作二稿中的核心搭配自然说出来。",

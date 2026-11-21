@@ -1,6 +1,8 @@
 import {
   IELTS_CRITERION_META,
+  graphemeBoundaries,
   locateGroundedExcerpt,
+  maskIeltsMarkup,
   type IeltsBandScore,
   type IeltsCriterion,
   type IeltsEpistemicStatus,
@@ -201,25 +203,25 @@ export function segmentParagraphWithSpans(
   spans: readonly IeltsSpanEvidence[],
   criterionFilter: IeltsCriterion | "ALL",
 ): ParagraphHighlightSegment[] {
+  const boundaries = graphemeBoundaries(paragraph);
+  let prose: string | undefined;
   const eligible = spans
     .filter((span) => criterionFilter === "ALL" || span.criterion === criterionFilter)
     .map((span) => {
-      const grounded = locateGroundedExcerpt(paragraph, span.excerpt);
+      const { startOffset, endOffset, excerpt } = span;
       if (
-        typeof span.startOffset === "number" &&
-        typeof span.endOffset === "number" &&
-        span.startOffset >= 0 &&
-        span.endOffset > span.startOffset &&
-        span.endOffset <= paragraph.length &&
-        paragraph.slice(span.startOffset, span.endOffset) === span.excerpt &&
-        paragraph.slice(span.startOffset, span.endOffset).trim().length > 0 &&
-        grounded?.startOffset === span.startOffset &&
-        grounded.endOffset === span.endOffset
+        startOffset !== undefined && Number.isInteger(startOffset) &&
+        endOffset !== undefined && Number.isInteger(endOffset) &&
+        startOffset >= 0 && endOffset > startOffset && endOffset <= paragraph.length &&
+        excerpt.trim() && paragraph.slice(startOffset, endOffset) === excerpt &&
+        boundaries.floor(startOffset) === startOffset && boundaries.floor(endOffset) === endOffset
       ) {
-        return { span, start: span.startOffset, end: span.endOffset };
+        return { span, start: startOffset, end: endOffset };
       }
-      const located = locateGroundedExcerpt(paragraph, span.excerpt);
-      if (!located) return null;
+      prose ??= maskIeltsMarkup(paragraph);
+      const located = locateGroundedExcerpt(prose, excerpt);
+      if (!located || boundaries.floor(located.startOffset) !== located.startOffset ||
+        boundaries.floor(located.endOffset) !== located.endOffset) return null;
       return { span, start: located.startOffset, end: located.endOffset };
     })
     .filter(

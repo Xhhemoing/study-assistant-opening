@@ -81,3 +81,5 @@ export {
 } from "./speaking";
 
 export { getWritingDraftSource, getWritingTransferSource } from "./writing-source";
+export { graphemeBoundaries } from "./graphemes";
+export { maskIeltsMarkup } from "./prose";

@@ -24,6 +24,15 @@ export type IeltsSpeakingTransferCardProps = {
   readonly onEvaluated?: (receipt: IeltsSpeakingFeedbackReceipt) => void;
 };
 
+function snapshotReceipt(receipt: IeltsSpeakingFeedbackReceipt): string {
+  // Persisted receipt objects can return with their fields in a different order.
+  return JSON.stringify(receipt, (_key: string, value: unknown) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+    const fields = value as Record<string, unknown>;
+    return Object.fromEntries(Object.keys(fields).sort().map((key) => [key, fields[key]]));
+  });
+}
+
 export function IeltsSpeakingTransferCard({
   seed: providedSeed,
   initialTranscript,
@@ -53,22 +62,35 @@ export function IeltsSpeakingTransferCard({
       startingTranscript={startingTranscript}
       startingDuration={startingDuration}
       matchingReceipt={matchingReceipt}
+      external={{
+        transcript: initialTranscript,
+        durationSeconds: initialDurationSeconds,
+        receiptSnapshot: candidateReceipt && snapshotReceipt(candidateReceipt),
+      }}
       onEvaluated={onEvaluated}
     />
   );
 }
+
+type ExternalSpeakingInput = {
+  readonly transcript: string | undefined;
+  readonly durationSeconds: number | undefined;
+  readonly receiptSnapshot: string | undefined;
+};
 
 function SpeakingAttempt({
   seed,
   startingTranscript,
   startingDuration,
   matchingReceipt,
+  external,
   onEvaluated,
 }: {
   readonly seed: IeltsSpeakingPart3Seed;
   readonly startingTranscript: string;
   readonly startingDuration: string;
   readonly matchingReceipt: IeltsSpeakingFeedbackReceipt | null;
+  readonly external: ExternalSpeakingInput;
   readonly onEvaluated: IeltsSpeakingTransferCardProps["onEvaluated"];
 }) {
   const [editedAnswer, setEditedAnswer] = useState<{
@@ -78,6 +100,8 @@ function SpeakingAttempt({
   } | null>(null);
   const [localEvaluation, setLocalEvaluation] = useState<{
     authority: string;
+    external: ExternalSpeakingInput;
+    receiptSnapshot: string;
     receipt: IeltsSpeakingFeedbackReceipt;
   } | null>(null);
   const answer = editedAnswer ?? {
@@ -86,17 +110,34 @@ function SpeakingAttempt({
     assisted: matchingReceipt?.assisted ?? false,
   };
   const { transcript, durationInput, assisted } = answer;
+  const parsedDuration = durationInput.trim() === "" ? Number.NaN : Number(durationInput);
+  const receiptDuration = Number.isFinite(parsedDuration) && parsedDuration > 0 ? parsedDuration : null;
   const targets = [...getSpeakingTargets(seed.targetSpokenCollocations).values()];
   const context = getSpeakingEvaluationContext(seed);
   const authority = JSON.stringify([targets, context]);
-  const evaluatedReceipt = localEvaluation?.authority === authority
-    ? localEvaluation.receipt
-    : editedAnswer ? null : matchingReceipt;
+  let evaluatedReceipt = editedAnswer ? null : matchingReceipt;
+  if (localEvaluation) {
+    const baseline = localEvaluation.external;
+    const receiptChanged = baseline.receiptSnapshot !== external.receiptSnapshot;
+    if (localEvaluation.authority !== authority ||
+      baseline.transcript !== external.transcript ||
+      !Object.is(baseline.durationSeconds, external.durationSeconds) ||
+      (receiptChanged && localEvaluation.receiptSnapshot !== external.receiptSnapshot)) {
+      setLocalEvaluation(null);
+    } else {
+      evaluatedReceipt = localEvaluation.receipt;
+      // Acknowledging the emitted receipt makes a subsequent removal a new change.
+      if (receiptChanged) setLocalEvaluation({ ...localEvaluation, external });
+    }
+  }
   const evaluatedTargets = evaluatedReceipt
     ? [...evaluatedReceipt.transferredCollocations, ...evaluatedReceipt.pendingCollocations]
     : [];
   const evaluatedContext = evaluatedReceipt?.evaluationContext;
   const receipt = evaluatedReceipt?.seedId === seed.seedId &&
+    evaluatedReceipt.sourceTranscript === transcript &&
+    evaluatedReceipt.durationSeconds === receiptDuration &&
+    evaluatedReceipt.assisted === assisted &&
     evaluatedContext?.timeWindowSeconds.min === context.timeWindowSeconds.min &&
     evaluatedContext.timeWindowSeconds.max === context.timeWindowSeconds.max &&
     evaluatedContext.writingReceiptEligible === context.writingReceiptEligible &&
@@ -110,15 +151,13 @@ function SpeakingAttempt({
   const paceMeta = receipt ? SPEAKING_PACE_META[receipt.paceStatus] : null;
 
   function handleEvaluate() {
-    const parsedDuration =
-      durationInput.trim() === "" ? Number.NaN : Number(durationInput);
     const nextReceipt = evaluateSpeakingRetelling({
       seed,
       transcript,
       durationSeconds: parsedDuration,
       assisted,
     });
-    setLocalEvaluation({ authority, receipt: nextReceipt });
+    setLocalEvaluation({ authority, external, receiptSnapshot: snapshotReceipt(nextReceipt), receipt: nextReceipt });
     onEvaluated?.(nextReceipt);
   }
 
