@@ -135,6 +135,13 @@ it.each([
   "数学（1-4周）；（6-8周",
   "数学 1-4周（单周)；6-8周",
   "数学（1-4周）；（周7）",
+  "高等数学 周次：待定",
+  "高等数学 周：待定",
+  "大学英语 第TBD周",
+  "大学英语 第 1-? 周",
+  "大学英语 [TBD周]",
+  "大学英语 (TBD周",
+  "大学英语 单周",
 ])("warns and drops malformed inline week expression %s even when the dedicated weeks column is valid", title => {
   const result = parseTimetableSheets([{ sheet: "课表", data: [
     ["课程", "星期", "周次", "节次"],
@@ -142,6 +149,22 @@ it.each([
   ] }]);
   expect(result.sessions).toEqual([]);
   expect(result.warnings).toMatchObject([{ raw: title, address: "A2" }]);
+});
+
+it.each([
+  "圆周运动专题",
+  "周期信号分析",
+  "四周实习",
+  "唐诗宋词",
+  "中国近代史（周恩来专题）",
+  "第一周期信号分析",
+])("accepts genuine course title %s with a dedicated weeks column", title => {
+  const result = parseTimetableSheets([{ sheet: "课表", data: [
+    ["课程", "星期", "周次", "节次"],
+    [title, "周一", "1-8周", "1-2节"],
+  ] }]);
+  expect(result.sessions).toMatchObject([{ courseName: title, weeks: [1, 2, 3, 4, 5, 6, 7, 8] }]);
+  expect(result.warnings).toEqual([]);
 });
 
 it.each(["物理2", "英语4", "高数1 1-2节", "物理2 周三", "物理2 周一", "物理2 周1"])("warns about missing weeks for %s", title => {

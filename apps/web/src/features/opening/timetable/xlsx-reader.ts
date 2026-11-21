@@ -36,7 +36,8 @@ const periodPattern = /([0-9]+)\s*[-－至]\s*([0-9]+)\s*节/;
 const wrappedPeriodPattern = /\s*(?:\(\s*[0-9]+\s*[-－至]\s*[0-9]+\s*节\s*\)|（\s*[0-9]+\s*[-－至]\s*[0-9]+\s*节\s*）|\[\s*[0-9]+\s*[-－至]\s*[0-9]+\s*节\s*\]|【\s*[0-9]+\s*[-－至]\s*[0-9]+\s*节\s*】)/g;
 const globalPeriodPattern = /[0-9]+\s*[-－至]\s*[0-9]+\s*节/g;
 const weekPrefixBeforeBracket = /^(?:周次\s*[:：]?|周\s*[:：])\s*/;
-const weekMarkerHint = /周次|第\s*(?:\d+\s*[-－至,，、\s]*)?周|\d\s*[单双]?周|周\s*[:：\d一二三四五六日天]|[单双]周/;
+const weekMarkerHint = /周次|第\s*(?:[^\s()（）[\]【】]{0,16}|[\d\s\-－至,，、?？]{1,24})\s*周(?!期|围|边|年|末|转|折|密|全|到|游|旋|长|率|律)|\d\s*[单双]?周|周\s*[:：\d一二三四五六日天]|[单双]周/;
+const bracketedWeekEnd = /周\s*[)）\]】]$/;
 
 function text(value: CellValue): string {
   return value == null ? "" : String(value).trim();
@@ -169,7 +170,7 @@ function parseInlineCourseLine(line: string): { courseName: string; weeks: numbe
     if (bracketStart < withoutPeriods.length && matchingClose[withoutPeriods[bracketStart]!]) {
       const closeIdx = findMatchingClose(withoutPeriods, bracketStart);
       if (closeIdx < 0) {
-        if (weekMarkerHint.test(withoutPeriods.slice(i))) {
+        if (weekMarkerHint.test(withoutPeriods.slice(i)) || /周(?:\s|$)/.test(withoutPeriods.slice(i))) {
           invalid = true;
           break;
         }
@@ -188,7 +189,7 @@ function parseInlineCourseLine(line: string): { courseName: string; weeks: numbe
             }
           }
           matchedSpans.push({ start: i, end: closeIdx + 1 });
-        } else if (weekMarkerHint.test(segment)) {
+        } else if (weekMarkerHint.test(segment) || bracketedWeekEnd.test(segment)) {
           invalid = true;
         }
       }
@@ -223,7 +224,10 @@ function parseInlineCourseLine(line: string): { courseName: string; weeks: numbe
   residual += withoutPeriods.slice(cursor);
   const courseName = residual.replace(/\s+/g, " ").trim();
 
-  if (matchedSpans.length > 0 && (hasUnbalancedBrackets(courseName) || weekMarkerHint.test(courseName))) {
+  if (
+    weekMarkerHint.test(courseName)
+    || ((matchedSpans.length > 0 || courseName.includes("周")) && hasUnbalancedBrackets(courseName))
+  ) {
     invalid = true;
   }
 

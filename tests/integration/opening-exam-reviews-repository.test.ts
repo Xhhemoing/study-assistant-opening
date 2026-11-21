@@ -165,7 +165,10 @@ describe("exam photo review repository integration", () => {
   it("serializes simultaneous retries by client key and rejects a changed intent", async () => {
     const intent = input();
     const [first, retry] = await Promise.all([repository.begin(f.scope, intent), repository.begin(f.scope, intent)]);
-    expect(retry).toEqual(first);
+    const { reusedUnresolved: firstReused, ...firstBase } = first;
+    const { reusedUnresolved: retryReused, ...retryBase } = retry;
+    expect(retryBase).toEqual(firstBase);
+    expect([Boolean(firstReused), Boolean(retryReused)].sort()).toEqual([false, true]);
     await expect(repository.begin(f.scope, { ...intent, answerText: "A different answer" })).rejects.toMatchObject({ code: "CONFLICT" });
     const rows = await f.sql`SELECT id FROM opening_exam_reviews WHERE workspace_id=${f.scope.workspaceId}`;
     expect(rows.map(row => row.id)).toEqual([first.review.id]);
@@ -451,5 +454,49 @@ describe("exam photo review repository integration", () => {
     expect(aliasRows).toEqual([{ intent: { reviewId: first.id } }]);
     await expect(repository.begin(f.scope, input({ clientKey: freshKey, answerText: "Changed answer" })))
       .rejects.toMatchObject({ code: "CONFLICT" });
+  });
+
+  it("prevents a same-key retry from failing an in-flight review and never downgrades unknown to failed", async () => {
+    type Options = Parameters<ModelGateway["call"]>[2];
+    const output = { text: JSON.stringify(proposal), inputTokens: 10, outputTokens: 20, citedChunkIds: [], candidates: [], requestId: null };
+    let releaseGateway!: () => void;
+    let enteredGateway!: () => void;
+    const gatewayEntered = new Promise<void>(resolve => { enteredGateway = resolve; });
+    const gatewayGate = new Promise<void>(resolve => { releaseGateway = resolve; });
+    const call = vi.fn(async (_scope: Scope, _task: string, options: Options) => {
+      await options.beforeSend?.();
+      enteredGateway();
+      await gatewayGate;
+      await options.persistResult?.(output, { reservationId: randomUUID(), settledCents: 1 });
+      return output;
+    });
+    const ownerService = createExamPhotoReviewService({ repository, gateway: { call },
+      images: async () => [{ mediaType: "image/png", data: "data:image/png;base64,AAAA" }],
+      budget: () => ({} as Options["budget"]) });
+    const failingRetryImages = vi.fn(async () => { throw new Error("transient storage outage"); });
+    const retryService = createExamPhotoReviewService({ repository, gateway: { call },
+      images: failingRetryImages,
+      budget: () => ({} as Options["budget"]) });
+
+    const intent = input({ clientKey: randomUUID(), answerText: "In-flight answer" });
+    const inflight = ownerService.review(f.scope, intent);
+    await gatewayEntered;
+
+    // Retrying with the SAME clientKey while in-flight must return pending without calling images/gateway/fail.
+    const sameKeyRetry = await retryService.review(f.scope, intent);
+    expect(sameKeyRetry.status).toBe("pending");
+    expect(failingRetryImages).not.toHaveBeenCalled();
+    expect(call).toHaveBeenCalledTimes(1);
+    expect(await rawReview(sameKeyRetry.id)).toMatchObject({ status: "pending" });
+
+    releaseGateway();
+    expect(await inflight).toMatchObject({ id: sameKeyRetry.id, status: "ready", proposal });
+    expect(await f.sql`SELECT id FROM opening_exam_reviews WHERE workspace_id=${f.scope.workspaceId}`).toEqual([{ id: sameKeyRetry.id }]);
+
+    // fail() must never downgrade an unknown review to failed.
+    const second = await repository.begin(f.scope, input({ clientKey: randomUUID(), answerText: "Unknown review" }));
+    await repository.fail(f.scope, second.review.id, "unknown");
+    await repository.fail(f.scope, second.review.id, "failed");
+    expect(await rawReview(second.review.id)).toMatchObject({ status: "unknown" });
   });
 });

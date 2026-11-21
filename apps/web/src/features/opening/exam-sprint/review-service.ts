@@ -16,7 +16,8 @@ export function createExamPhotoReviewService(deps: {
     read: deps.repository.read,
     async review(scope: Scope, input: ExamWorkReviewInput) {
       const context = await deps.repository.begin(scope, input), id = context.review.id;
-      if (context.reusedUnresolved || context.review.status !== "pending") return context.review;
+      const ownsExecution = !context.reusedUnresolved && context.review.status === "pending";
+      if (!ownsExecution) return context.review;
       let sent = false;
       try {
         const [work, reference] = await Promise.all([
@@ -42,12 +43,14 @@ export function createExamPhotoReviewService(deps: {
           },
         });
       } catch (error) {
-        if (isBudgetReplayError(error)) {
-          if (error.disposition.kind !== "in_flight") {
-            await deps.repository.fail(scope, id, error.disposition.kind === "released" ? "failed" : "unknown");
+        if (ownsExecution) {
+          if (isBudgetReplayError(error)) {
+            if (error.disposition.kind !== "in_flight") {
+              await deps.repository.fail(scope, id, error.disposition.kind === "released" ? "failed" : "unknown");
+            }
+          } else {
+            await deps.repository.fail(scope, id, !sent || isNotSentFailure(error) ? "failed" : "unknown");
           }
-        } else {
-          await deps.repository.fail(scope, id, !sent || isNotSentFailure(error) ? "failed" : "unknown");
         }
       }
       return deps.repository.read(scope, id);

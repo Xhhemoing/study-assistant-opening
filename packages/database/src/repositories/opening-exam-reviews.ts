@@ -105,7 +105,10 @@ export function createOpeningExamReviewsRepository(sql: Sql) {
             AND owner_user_id=${scope.ownerUserId} AND client_key=${input.clientKey}`;
           if (existing) {
             if (!isDeepStrictEqual(existing.intent, input)) throw learningError("CONFLICT", "同一评阅标识不能提交不同作答");
-            return readCommittedExamReceipt(() => readContext(tx, scope, String(existing.id)));
+            const context = await readCommittedExamReceipt(() => readContext(tx, scope, String(existing.id)));
+            return context.review.status === "pending" || context.review.status === "unknown"
+              ? { ...context, reusedUnresolved: true }
+              : context;
           }
           const [aliasRow] = await tx`SELECT c.id,c.sprint_id,c.intent FROM opening_exam_integration_commands c
             JOIN opening_exam_sprints s ON s.id=c.sprint_id
@@ -200,7 +203,7 @@ export function createOpeningExamReviewsRepository(sql: Sql) {
     },
     async fail(scope: Scope, id: string, status: "unknown" | "failed"): Promise<void> {
       await sql`UPDATE opening_exam_reviews SET status=${status},updated_at=now() WHERE id=${id}
-        AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND status<>'ready'`;
+        AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND status='pending'`;
     },
   };
 }

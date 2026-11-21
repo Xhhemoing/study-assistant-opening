@@ -51,6 +51,15 @@ describe("exam photo review is a durable proposal", () => {
     expect(await service.review(scope, { ...input, clientKey: "fresh-review-key" })).toEqual(stored);
     expect(call).not.toHaveBeenCalled();
     expect(images).not.toHaveBeenCalled();
+    expect(repository.fail).not.toHaveBeenCalled();
+  });
+  it("does not load images, call gateway, or fail an in-flight review when the same client key retries", async () => {
+    images.mockRejectedValueOnce(new Error("transient image load failure"));
+    repository.begin.mockResolvedValueOnce({ review: { ...stored }, input, privacyEpoch: 2, referencePage: 3, questionLabel: "题1", reusedUnresolved: true });
+    expect(await service.review(scope, input)).toEqual(stored);
+    expect(images).not.toHaveBeenCalled();
+    expect(call).not.toHaveBeenCalled();
+    expect(repository.fail).not.toHaveBeenCalled();
   });
   it("does not charge again when a reused secondary client key replays after completion", async () => {
     const ready: ExamWorkReview = { ...stored, status: "ready", proposal, modelLabel: "vision-model" };
