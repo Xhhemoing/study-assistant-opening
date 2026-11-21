@@ -259,14 +259,14 @@ export function createOpeningImportsRepository(sql: Sql) {
       options?: { putUncertain?: boolean; now?: Date },
     ): Promise<void> {
       const canonicalId = sourceId.toLowerCase();
-      await sql.begin(async tx => {
+      const uncertainPut = options?.putUncertain ?? true;
+      const removeAfterTx = await sql.begin(async tx => {
         // An uncertain COMMIT must settle before deleting a possibly published key.
         await tx`SELECT pg_advisory_xact_lock(hashtextextended(${importLock(scope, identity)}, 0))`;
         const [owner] = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
         if (!owner) throw new OpeningConnectionError("NOT_FOUND", "workspace not found");
         const [published] = await tx`SELECT 1 FROM opening_sources WHERE id=${canonicalId} LIMIT 1`;
-        if (published) return;
-        const uncertainPut = options?.putUncertain ?? true;
+        if (published) return false;
         if (uncertainPut) {
           const graceSeconds = Math.ceil(CONNECTOR_RESERVATION_GRACE_MS / 1000);
           const explicitCutoff = options?.now
@@ -287,22 +287,29 @@ export function createOpeningImportsRepository(sql: Sql) {
                   AND id=${connectorReservationId(canonicalId)} AND asset_deleted_at IS NOT NULL
                 RETURNING id`;
           if (extended) {
-            // Uncertain PUT: extend grace window to a full post-abort duration while
-            // attempting best-effort immediate S3 deletion.
-            await remove();
-            return;
+            // Commit the post-abort grace extension before attempting S3 remove()
+            // so an S3 delete failure cannot roll back cleanup_not_before.
+            return true;
           }
-        } else if (await releaseConnectorReservation(tx, scope, canonicalId, key, {
+          const [retained] = await tx`SELECT 1 FROM opening_source_versions WHERE source_id=${canonicalId}
+            UNION ALL SELECT 1 FROM opening_privacy_exclusions WHERE source_id=${canonicalId} LIMIT 1`;
+          return !retained;
+        }
+        if (await releaseConnectorReservation(tx, scope, canonicalId, key, {
           enforceNotBefore: false,
           now: options?.now,
         })) {
           await remove();
-          return;
+          return false;
         }
         const [retained] = await tx`SELECT 1 FROM opening_source_versions WHERE source_id=${canonicalId}
           UNION ALL SELECT 1 FROM opening_privacy_exclusions WHERE source_id=${canonicalId} LIMIT 1`;
         if (!retained) await remove();
+        return false;
       });
+      if (removeAfterTx) {
+        await remove();
+      }
     },
   };
 }

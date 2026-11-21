@@ -3,6 +3,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import { ImapFlow } from "imapflow";
 import type { ImapCursor } from "@aistudy/contracts";
 import {
+  CONNECTOR_PUT_TIMEOUT_MS,
   CONNECTOR_RESERVATION_GRACE_MS,
   createOpeningConnectionsRepository,
   createOpeningImportsRepository,
@@ -225,7 +226,7 @@ describe("isolated standard IMAP sync gate", () => {
     objectByKey.delete(key);
     await expect(actions.cleaned(f.scope, sourceId, key)).resolves.toBe(false);
     expect(await usage()).toEqual({ bytes: BigInt(Buffer.byteLength(initialMail.source)), objects: 1n });
-    const afterGrace = new Date(Date.now() + CONNECTOR_RESERVATION_GRACE_MS + 1_000);
+    const afterGrace = new Date(Date.now() + CONNECTOR_PUT_TIMEOUT_MS + CONNECTOR_RESERVATION_GRACE_MS + 1_000);
     await expect(actions.cleaned(f.scope, sourceId, key, afterGrace)).resolves.toBe(true);
     expect(await usage()).toEqual({ bytes: 0n, objects: 0n });
     await expect(actions.cleanup(f.scope, sourceId)).rejects.toMatchObject({ code: "NOT_FOUND" });
@@ -267,7 +268,7 @@ describe("isolated standard IMAP sync gate", () => {
     expect(objectByKey.has(orphanKey)).toBe(true);
 
     const expiredService = createOpeningSourceService(f.sql, storage, {
-      now: () => new Date(Date.now() + CONNECTOR_RESERVATION_GRACE_MS + 1_000),
+      now: () => new Date(Date.now() + CONNECTOR_PUT_TIMEOUT_MS + CONNECTOR_RESERVATION_GRACE_MS + 1_000),
     });
     expect(await expiredService.actOnSource(principal, orphanId, { action: "retry_cleanup" })).toEqual({
       sourceId: orphanId, aiExcluded: true, deleted: true, cleanupPending: 0, retryAfter: null,
@@ -332,7 +333,7 @@ describe("isolated standard IMAP sync gate", () => {
     failImmediateDeletes = false;
     const actions = createOpeningSourceActionsRepository(f.sql);
     const cleanup = await actions.cleanup(f.scope, String(journal!.source_id));
-    const afterGrace = new Date(Date.now() + CONNECTOR_RESERVATION_GRACE_MS + 1_000);
+    const afterGrace = new Date(Date.now() + CONNECTOR_PUT_TIMEOUT_MS + CONNECTOR_RESERVATION_GRACE_MS + 1_000);
     for (const pendingKey of cleanup.keys) {
       objectByKey.delete(pendingKey);
       await actions.cleaned(f.scope, String(journal!.source_id), pendingKey, afterGrace);

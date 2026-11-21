@@ -41,10 +41,17 @@ export async function publishConnectorSource(
   // The final key is private staging until its source transaction commits.
   const key = `opening/sources/${sourceId}/v0`;
   const quota = loadOpeningUploadQuota();
+  let enteredStage = false;
   let staged = false;
   let putUncertain = false;
-  const cleanup = (uncertain: boolean) => imports.removeUnpublishedSource(
-    scope, input.identity, sourceId, key, source.bytes, () => removeWithRetry(storage, key),
+  let prePutError: unknown = null;
+  const cleanup = (uncertain: boolean, touchStorage = true) => imports.removeUnpublishedSource(
+    scope,
+    input.identity,
+    sourceId,
+    key,
+    source.bytes,
+    touchStorage ? () => removeWithRetry(storage, key) : async () => undefined,
     { putUncertain: uncertain },
   );
   let receipt: Awaited<ReturnType<typeof imports.publish>>;
@@ -53,7 +60,13 @@ export async function publishConnectorSource(
       identity: input.identity, connectionVersion: input.connectionVersion, cursor: input.cursor,
       sourceId, source, key, quota,
     }, async () => {
-      await imports.refreshConnectorReservationCutoff(scope, sourceId, key);
+      enteredStage = true;
+      try {
+        await imports.refreshConnectorReservationCutoff(scope, sourceId, key);
+      } catch (error) {
+        prePutError = error;
+        throw error;
+      }
       staged = true;
       putUncertain = true;
       await storage.upload({
@@ -70,6 +83,15 @@ export async function publishConnectorSource(
         await cleanup(putUncertain);
       } catch (cleanupError) {
         throw new AggregateError([error, cleanupError], "Connector publication failed and object cleanup could not be confirmed");
+      }
+    } else if (enteredStage) {
+      const code = (error as { code?: unknown } | null)?.code;
+      if (error !== prePutError || code !== "CONFLICT") {
+        try {
+          await cleanup(false, false);
+        } catch (cleanupError) {
+          throw new AggregateError([error, cleanupError], "Connector pre-upload cleanup failed");
+        }
       }
     }
     throw error;

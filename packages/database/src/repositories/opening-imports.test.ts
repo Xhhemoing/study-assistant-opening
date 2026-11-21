@@ -47,7 +47,17 @@ function fakeImportsSql(opts: { committed?: boolean; notBefore: Date }) {
     }
     return Promise.reject(new Error(`unexpected sql: ${query}`));
   }) as unknown as Sql;
-  tag.begin = (async (cb: (tx: Sql) => Promise<unknown>) => cb(tag)) as unknown as Sql["begin"];
+  tag.begin = (async (cb: (tx: Sql) => Promise<unknown>) => {
+    const savedPresent = reservationPresent;
+    const savedCutoff = new Date(cutoff.getTime());
+    try {
+      return await cb(tag);
+    } catch (error) {
+      reservationPresent = savedPresent;
+      cutoff = savedCutoff;
+      throw error;
+    }
+  }) as unknown as Sql["begin"];
   return {
     sql: tag,
     hasReservation: () => reservationPresent,
@@ -108,6 +118,29 @@ describe("opening imports reservation cutoff and removeUnpublishedSource grace w
     const afterPostAbortGrace = new Date(abortAt.getTime() + CONNECTOR_RESERVATION_GRACE_MS + 1_000);
     await expect(actions.cleaned(scope, sourceId, key, afterPostAbortGrace)).resolves.toBe(true);
     expect(db.hasReservation()).toBe(false);
+  });
+
+  it("commits extended cleanup_not_before on uncertain PUT even if immediate remove rejects, while preserving rollback for putUncertain=false", async () => {
+    const initialExpiry = new Date("2030-01-01T00:01:00.000Z");
+    const db = fakeImportsSql({ notBefore: initialExpiry });
+    const repo = createOpeningImportsRepository(db.sql);
+    const abortAt = new Date("2030-01-01T00:01:20.000Z");
+
+    await expect(repo.removeUnpublishedSource(
+      scope, identity, sourceId, key, 128, async () => { throw new Error("s3 unavailable"); },
+      { putUncertain: true, now: abortAt },
+    )).rejects.toThrow("s3 unavailable");
+    expect(db.hasReservation()).toBe(true);
+    expect(db.getCutoff()).toEqual(new Date(abortAt.getTime() + CONNECTOR_RESERVATION_GRACE_MS));
+
+    // When putUncertain is false and S3 remove() fails, transaction rollback preserves the reservation.
+    const rollbackDb = fakeImportsSql({ notBefore: initialExpiry });
+    await expect(createOpeningImportsRepository(rollbackDb.sql).removeUnpublishedSource(
+      scope, identity, sourceId, key, 128, async () => { throw new Error("s3 unavailable"); },
+      { putUncertain: false, now: abortAt },
+    )).rejects.toThrow("s3 unavailable");
+    expect(rollbackDb.hasReservation()).toBe(true);
+    expect(rollbackDb.getCutoff()).toEqual(initialExpiry);
   });
 
   it("never deletes objects belonging to a committed source", async () => {

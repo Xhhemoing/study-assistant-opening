@@ -75,17 +75,39 @@ it("forwards putUncertain accurately across pre-PUT, upload failure, and post-up
     .rejects.toThrow("connection locked");
   expect(removeUnpublishedSource).not.toHaveBeenCalled();
 
-  // Pre-PUT failure when reservation refresh detects lost reservation before storage.upload runs.
+  // Pre-PUT failure when reservation refresh hits CONFLICT (reservation already gone): no cleanup call.
   const uploadMock = vi.fn();
-  const refreshFailImports: Imports = {
+  const conflictRefreshImports: Imports = {
     publish: vi.fn(async (_s, _i, stage) => { await stage(); throw new Error("unreachable"); }),
-    refreshConnectorReservationCutoff: vi.fn(async () => { throw new Error("reservation gone"); }),
+    refreshConnectorReservationCutoff: vi.fn(async () => {
+      throw Object.assign(new Error("connector staging reservation changed"), { code: "CONFLICT" });
+    }),
     removeUnpublishedSource,
   };
-  await expect(publishConnectorSource(refreshFailImports, { upload: uploadMock, remove: removeSpy }, scope, delivery))
-    .rejects.toThrow("reservation gone");
+  await expect(publishConnectorSource(conflictRefreshImports, { upload: uploadMock, remove: removeSpy }, scope, delivery))
+    .rejects.toMatchObject({ code: "CONFLICT" });
   expect(uploadMock).not.toHaveBeenCalled();
   expect(removeUnpublishedSource).not.toHaveBeenCalled();
+
+  // Pre-PUT transient non-CONFLICT failure on reservation refresh: releases reservation (putUncertain: false) without touching S3.
+  const transientRefreshImports: Imports = {
+    publish: vi.fn(async (_s, _i, stage) => { await stage(); throw new Error("unreachable"); }),
+    refreshConnectorReservationCutoff: vi.fn(async () => { throw new Error("pool reset"); }),
+    removeUnpublishedSource: vi.fn(async (_s, _i, _sid, _k, _b, remove) => { await remove(); }),
+  };
+  await expect(publishConnectorSource(transientRefreshImports, { upload: uploadMock, remove: removeSpy }, scope, delivery))
+    .rejects.toThrow("pool reset");
+  expect(uploadMock).not.toHaveBeenCalled();
+  expect(removeSpy).not.toHaveBeenCalled();
+  expect(transientRefreshImports.removeUnpublishedSource).toHaveBeenCalledWith(
+    scope,
+    delivery.identity,
+    expect.any(String),
+    expect.stringMatching(/^opening\/sources\/.+\/v0$/),
+    delivery.bytes.byteLength,
+    expect.any(Function),
+    { putUncertain: false },
+  );
 
   // Uncertain PUT failure: storage.upload starts then aborts/throws -> putUncertain: true.
   const putErrorImports: Imports = {
