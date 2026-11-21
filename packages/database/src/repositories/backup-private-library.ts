@@ -4,9 +4,14 @@ import { asObject } from "./backup-map";
 type Row = Record<string, unknown>;
 type DocumentKey = "document_id" | "documentId";
 
+function isAnswerType(value: unknown): boolean {
+  return value === "answer_key" || value === "solution";
+}
+
 export function isBackupAnswerBlock(block: Row): boolean {
-  return block.role === "answer_key" || block.type === "answer_key" || block.type === "solution"
-    || block.blockType === "answer_key" || block.blockType === "solution";
+  const content = asObject(block.content);
+  return block.role === "answer_key" || isAnswerType(block.type) || isAnswerType(block.blockType)
+    || isAnswerType(content?.role) || isAnswerType(content?.blockType);
 }
 
 const idKey = (id: unknown) => typeof id === "string" ? id.toLowerCase() : "";

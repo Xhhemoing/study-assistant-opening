@@ -12,6 +12,7 @@ import {
   createPromotionRepository,
   createSqlClient,
   listMigrationFiles,
+  readOpeningBackupRecords,
   BackupRestoreError,
 } from "@aistudy/database";
 import { defaultGoalAbilities } from "@aistudy/domain";
@@ -50,6 +51,28 @@ describe("native backup round-trip", () => {
 
   afterAll(async () => {
     await sql.end({ timeout: 5 });
+  });
+
+  it("omits answers marked only in block content from learner exports and revision snapshots", async () => {
+    const owner = await identity.createUserWithWorkspace({
+      email: `backup-${randomUUID()}@example.com`, displayName: "Backup", passwordHash: "scrypt$not-used",
+    });
+    const scope = { workspaceId: owner.workspace.id, ownerUserId: owner.user.id };
+    const visible = { id: randomUUID(), type: "paragraph", content: { text: "Public lesson" } };
+    await library.createDocument({ workspaceId: scope.workspaceId, title: "Lesson", blocks: [
+      visible,
+      { id: randomUUID(), type: "text", content: { role: "answer_key", text: "Private answer" } },
+      { id: randomUUID(), type: "text", content: { blockType: "solution", text: "Private solution" } },
+    ] });
+
+    const { records } = await backups.exportWorkspace(scope);
+    const { tables } = await readOpeningBackupRecords(sql, scope);
+    for (const blocks of [records.blocks, tables.library_blocks]) {
+      expect(blocks).toMatchObject([visible]);
+    }
+    for (const revisions of [records.revisions, tables.library_revisions]) {
+      expect(revisions).toMatchObject([{ blocks: [visible] }]);
+    }
   });
 
   it("restores identities, relations, revisions, and file hashes into a wiped workspace", async () => {

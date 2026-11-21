@@ -405,8 +405,8 @@ function visibleSearchBlockCondition(client: SqlClient, input: AnswerKeyReadOpti
   if (!shouldRedactAnswerKeys(input)) return client`TRUE`;
   return client`NOT (
     b.type IN ('answer_key', 'solution')
-    OR b.content->>'role' IN ('answer_key', 'solution')
-    OR b.content->>'blockType' IN ('answer_key', 'solution')
+    OR COALESCE(b.content->>'role' IN ('answer_key', 'solution'), FALSE)
+    OR COALESCE(b.content->>'blockType' IN ('answer_key', 'solution'), FALSE)
     OR EXISTS (
       SELECT 1
       FROM opening_teaching_activity_specs answer_spec

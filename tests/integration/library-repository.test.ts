@@ -1378,4 +1378,29 @@ describe("library repository foundation", () => {
     expect((await repo.getBlock({ workspaceId: workspaceA, blockId: answerId, includeAnswerKeys: true })).content)
       .toEqual({ answer: "PRIVATE_ANSWER" });
   });
+
+  it("redacts answers marked only in block content across learner reads and search", async () => {
+    const visible = { id: randomUUID(), type: "paragraph", content: { text: "PUBLIC_SEARCH_TEXT" } };
+    const answers = [
+      { id: randomUUID(), type: "text", content: { role: "answer_key", text: "roleprivate" } },
+      { id: randomUUID(), type: "text", content: { role: "solution", text: "rolesolution" } },
+      { id: randomUUID(), type: "text", content: { blockType: "answer_key", text: "typeprivate" } },
+      { id: randomUUID(), type: "text", content: { blockType: "solution", text: "solutionprivate" } },
+    ];
+    const { id: documentId } = await repo.createDocument({
+      workspaceId: workspaceA, title: "Lesson notes", blocks: [visible, ...answers],
+    });
+
+    const trusted = await repo.getDocument({ workspaceId: workspaceA, documentId, includeAnswerKeys: true });
+    expect(trusted.blocks).toMatchObject([visible, ...answers]);
+    const document = await repo.getDocument({ workspaceId: workspaceA, documentId });
+    expect(document.blocks.map(block => block.id)).toEqual([visible.id]);
+    expect((await repo.listDocuments({ workspaceId: workspaceA })).map(doc => doc.blocks)).toEqual([document.blocks]);
+    for (const answer of answers) {
+      await expect(repo.getBlock({ workspaceId: workspaceA, blockId: answer.id })).rejects.toMatchObject({ code: "NOT_FOUND" });
+      expect(await repo.searchLibrary({ workspaceId: workspaceA, query: answer.content.text })).toEqual([]);
+    }
+    expect(await repo.searchLibrary({ workspaceId: workspaceA, query: visible.content.text }))
+      .toMatchObject([{ id: documentId, body: visible.content.text }]);
+  });
 });
