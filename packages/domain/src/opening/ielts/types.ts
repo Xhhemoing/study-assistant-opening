@@ -81,6 +81,15 @@ export type IeltsEssayDraft = {
   readonly createdAt: string;
 };
 
+export type IeltsWritingDraftSource = Pick<
+  IeltsEssayDraft, "draftId" | "promptId" | "version" | "basedOnVersion" | "assisted" | "paragraphs"
+>;
+
+export type IeltsWritingTransferSource = {
+  readonly baseline: IeltsWritingDraftSource;
+  readonly targets: readonly IeltsUpgradeTarget[];
+};
+
 export type IeltsMemorizedTemplateHit = {
   readonly phrase: string;
   readonly paragraphIndex: number;
@@ -97,6 +106,8 @@ export type IeltsRubricReceipt = {
   readonly promptId: string;
   readonly draftId: string;
   readonly draftVersion: number;
+  readonly sourceDraft?: IeltsWritingDraftSource;
+  readonly transferSource?: IeltsWritingTransferSource;
   readonly overallBand: IeltsBandScore;
   readonly criteria: Readonly<Record<IeltsCriterion, IeltsCriterionAssessment>>;
   readonly epistemicStatus: IeltsEpistemicStatus;
@@ -194,6 +205,8 @@ export type IeltsCrossDraftTransferSummary = {
 export type IeltsCrossDraftTransferReport = {
   readonly fromDraftId: string;
   readonly toDraftId: string;
+  readonly sourceDraft?: IeltsWritingDraftSource;
+  readonly transferSource?: IeltsWritingTransferSource;
   readonly items: readonly IeltsUpgradeTransferItem[];
   readonly paragraphDiffs: readonly IeltsParagraphDiff[];
   readonly memorizedTemplateHits: readonly IeltsMemorizedTemplateHit[];
@@ -274,6 +287,10 @@ export type IeltsSpeakingFeedbackReceipt = {
   readonly seedId: string;
   readonly sourceTranscript: string;
   readonly assisted: boolean;
+  readonly evaluationContext?: {
+    readonly timeWindowSeconds: IeltsSpeakingPart3Seed["timeWindowSeconds"];
+    readonly writingReceiptEligible: boolean;
+  };
   readonly taskMode: "speaking_part3";
   readonly feedbackMode: "transcript_practice_feedback";
   readonly pronunciationAssessed: false;

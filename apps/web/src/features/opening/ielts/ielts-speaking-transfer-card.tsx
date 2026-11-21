@@ -3,8 +3,8 @@
 import { useState } from "react";
 import {
   evaluateSpeakingRetelling,
+  getSpeakingEvaluationContext,
   getSpeakingTargets,
-  hasRequiredWritingReceipt,
   type IeltsSpeakingFeedbackReceipt,
   type IeltsSpeakingPart3Seed,
 } from "./domain-bridge";
@@ -45,8 +45,6 @@ export function IeltsSpeakingTransferCard({
   const startingDuration = String(initialDurationSeconds ?? matchingReceipt?.durationSeconds ?? "");
   const attemptKey = JSON.stringify([
     seed.seedId, seed.cartridgeId, seed.sourcePromptId, seed.sourceDraftId,
-    startingTranscript, startingDuration, seed.timeWindowSeconds,
-    [...getSpeakingTargets(seed.targetSpokenCollocations).values()], matchingReceipt,
   ]);
   return (
     <SpeakingAttempt
@@ -73,18 +71,38 @@ function SpeakingAttempt({
   readonly matchingReceipt: IeltsSpeakingFeedbackReceipt | null;
   readonly onEvaluated: IeltsSpeakingTransferCardProps["onEvaluated"];
 }) {
-  const [transcript, setTranscript] = useState(startingTranscript);
-  const [durationInput, setDurationInput] = useState(startingDuration);
-  const [assisted, setAssisted] = useState(matchingReceipt?.assisted ?? false);
-  const [evaluatedReceipt, setReceipt] = useState<IeltsSpeakingFeedbackReceipt | null>(matchingReceipt);
+  const [editedAnswer, setEditedAnswer] = useState<{
+    transcript: string;
+    durationInput: string;
+    assisted: boolean;
+  } | null>(null);
+  const [localEvaluation, setLocalEvaluation] = useState<{
+    authority: string;
+    receipt: IeltsSpeakingFeedbackReceipt;
+  } | null>(null);
+  const answer = editedAnswer ?? {
+    transcript: startingTranscript,
+    durationInput: startingDuration,
+    assisted: matchingReceipt?.assisted ?? false,
+  };
+  const { transcript, durationInput, assisted } = answer;
   const targets = [...getSpeakingTargets(seed.targetSpokenCollocations).values()];
+  const context = getSpeakingEvaluationContext(seed);
+  const authority = JSON.stringify([startingTranscript, startingDuration, targets, context, matchingReceipt]);
+  const evaluatedReceipt = localEvaluation?.authority === authority
+    ? localEvaluation.receipt
+    : editedAnswer ? null : matchingReceipt;
   const evaluatedTargets = evaluatedReceipt
     ? [...evaluatedReceipt.transferredCollocations, ...evaluatedReceipt.pendingCollocations]
     : [];
+  const evaluatedContext = evaluatedReceipt?.evaluationContext;
   const receipt = evaluatedReceipt?.seedId === seed.seedId &&
+    evaluatedContext?.timeWindowSeconds.min === context.timeWindowSeconds.min &&
+    evaluatedContext.timeWindowSeconds.max === context.timeWindowSeconds.max &&
+    evaluatedContext.writingReceiptEligible === context.writingReceiptEligible &&
     evaluatedTargets.length === targets.length && targets.every((target) => evaluatedTargets.includes(target)) &&
     (evaluatedReceipt.epistemicStatus !== "rubric_verified_evidence" ||
-      (evaluatedReceipt.masteryQualified && evaluatedReceipt.countsTowardMastery && hasRequiredWritingReceipt(seed)))
+      (evaluatedReceipt.masteryQualified && evaluatedReceipt.countsTowardMastery && context.writingReceiptEligible))
     ? evaluatedReceipt
     : null;
   const epistemicMeta = receipt ? EPISTEMIC_BADGE_META[receipt.epistemicStatus] : null;
@@ -99,7 +117,7 @@ function SpeakingAttempt({
       durationSeconds: parsedDuration,
       assisted,
     });
-    setReceipt(nextReceipt);
+    setLocalEvaluation({ authority, receipt: nextReceipt });
     onEvaluated?.(nextReceipt);
   }
 
@@ -209,10 +227,11 @@ function SpeakingAttempt({
             rows={5}
             value={transcript}
             onChange={(event) => {
-              setTranscript(event.target.value);
-              setReceipt(null);
+              const transcript = event.target.value;
+              setEditedAnswer((current) => ({ ...(current ?? answer), transcript }));
+              setLocalEvaluation(null);
             }}
-            placeholder="先口头计时说 60–90 秒，再粘贴转写稿或记录你的关键表达..."
+            placeholder={`先口头计时说 ${seed.timeWindowSeconds.min}–${seed.timeWindowSeconds.max} 秒，再粘贴转写稿或记录你的关键表达...`}
             className="block w-full rounded-ctl border border-line-strong bg-surface px-3.5 py-2.5 font-reading text-read leading-6 text-text placeholder:text-text-3 focus:border-text focus:outline-none"
           />
         </label>
@@ -228,8 +247,9 @@ function SpeakingAttempt({
                 max={180}
                 value={durationInput}
                 onChange={(event) => {
-                  setDurationInput(event.target.value);
-                  setReceipt(null);
+                  const durationInput = event.target.value;
+                  setEditedAnswer((current) => ({ ...(current ?? answer), durationInput }));
+                  setLocalEvaluation(null);
                 }}
                 className="w-20 rounded-ctl border border-line-strong bg-surface px-2.5 py-1 text-center tabular-nums text-text"
               />
@@ -241,8 +261,9 @@ function SpeakingAttempt({
                 type="checkbox"
                 checked={assisted}
                 onChange={(event) => {
-                  setAssisted(event.target.checked);
-                  setReceipt(null);
+                  const assisted = event.target.checked;
+                  setEditedAnswer((current) => ({ ...(current ?? answer), assisted }));
+                  setLocalEvaluation(null);
                 }}
                 className="size-4 accent-ink"
               />

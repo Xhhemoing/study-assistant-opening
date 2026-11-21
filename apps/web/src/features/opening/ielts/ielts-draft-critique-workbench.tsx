@@ -6,6 +6,8 @@ import {
   analyzeCrossDraftTransfer,
   countDraftWords,
   evaluateRevisedDraftDeterministically,
+  getWritingDraftSource,
+  getWritingTransferSource,
   type IeltsCriterion,
   type IeltsCrossDraftTransferReport,
   type IeltsEssayDraft,
@@ -64,20 +66,24 @@ function draftEditorText(draft: IeltsEssayDraft): string {
   return draft.paragraphs.join("\n\n").replace(/\r\n?/gu, "\n");
 }
 
+function stableSerialize(value: unknown): string {
+  return JSON.stringify(value, (_key, nested: unknown) => {
+    if (nested === null || typeof nested !== "object" || Array.isArray(nested)) return nested;
+    const record = nested as Record<string, unknown>;
+    return Object.fromEntries(Object.keys(record).sort().map((key) => [key, record[key]]));
+  });
+}
+
 function evaluationFingerprint(
   fixture: IeltsWorkbenchFixture,
   draft: IeltsEssayDraft,
   receipt: IeltsRubricReceipt,
   report: IeltsCrossDraftTransferReport,
 ): string {
-  return JSON.stringify([
+  return stableSerialize([
     fixture.promptId, fixture.promptTitleZh, fixture.promptStatementEn, fixture.promptTaskTypeLabel,
     fixture.targetWordCount, fixture.draft1, fixture.draft1Receipt, fixture.targets, draft, receipt, report,
-  ], (_key, value: unknown) => {
-    if (value === null || typeof value !== "object" || Array.isArray(value)) return value;
-    const record = value as Record<string, unknown>;
-    return Object.fromEntries(Object.keys(record).sort().map((key) => [key, record[key]]));
-  });
+  ]);
 }
 
 const PARAGRAPH_BREAK = /\n\s*\n+/u;
@@ -136,19 +142,26 @@ export function IeltsDraftCritiqueWorkbench({
     }
   }
 
-  const transferReport = useMemo(() => {
-    const targetIds = new Set(fixture.targets.map(({ id }) => id));
-    const matchesAttempt = savedReport.fromDraftId === fixture.draft1.draftId && savedReport.toDraftId === draft2.draftId &&
-      savedReport.items.length === targetIds.size && savedReport.items.every(({ targetId }) => targetIds.has(targetId));
-    // Targets may arrive before their corresponding report.
-    return matchesAttempt ? savedReport : analyzeCrossDraftTransfer({ draft1: fixture.draft1, draft2, targets: fixture.targets });
-  }, [fixture.draft1, fixture.targets, draft2, savedReport]);
+  const draftSource = stableSerialize(getWritingDraftSource(draft2));
+  const transferSource = stableSerialize(getWritingTransferSource(fixture.draft1, fixture.targets));
+  const { transferReport, matchesSavedEvaluation } = useMemo(() => {
+    const matchesReport = savedReport.fromDraftId === fixture.draft1.draftId && savedReport.toDraftId === draft2.draftId &&
+      stableSerialize(savedReport.sourceDraft) === draftSource && stableSerialize(savedReport.transferSource) === transferSource;
+    return {
+      transferReport: matchesReport ? savedReport :
+        analyzeCrossDraftTransfer({ draft1: fixture.draft1, draft2, targets: fixture.targets }),
+      matchesSavedEvaluation: matchesReport &&
+        stableSerialize(draft2Receipt.sourceDraft) === draftSource &&
+        stableSerialize(draft2Receipt.transferSource) === transferSource,
+    };
+  }, [fixture.draft1, fixture.targets, draft2, draft2Receipt, savedReport, draftSource, transferSource]);
   const activeDraft = viewMode === "draft1" ? fixture.draft1 : draft2;
   const activeReceipt = viewMode === "draft1" ? fixture.draft1Receipt : draft2Receipt;
   const canShowVerifiedReceipt = activeReceipt.masteryQualified && activeReceipt.countsTowardMastery && !activeDraft.assisted &&
     activeReceipt.promptId === activeDraft.promptId && activeReceipt.draftId === activeDraft.draftId &&
-    activeReceipt.draftVersion === activeDraft.version && (viewMode === "draft1" ||
-      (transferReport === savedReport && transferReport.summary.masteryQualified));
+    activeReceipt.draftVersion === activeDraft.version && (viewMode === "draft1"
+      ? stableSerialize(activeReceipt.sourceDraft) === stableSerialize(getWritingDraftSource(activeDraft))
+      : matchesSavedEvaluation && transferReport.summary.masteryQualified);
   const epistemicStatus = activeReceipt.epistemicStatus === "rubric_verified_evidence" && !canShowVerifiedReceipt
     ? "practice_feedback"
     : activeReceipt.epistemicStatus;
@@ -208,7 +221,7 @@ export function IeltsDraftCritiqueWorkbench({
     const paragraphs = composerText.split(PARAGRAPH_BREAK);
     const composerDraft = { ...draft2, paragraphs, assisted: composerAssisted };
     const fingerprint = evaluationFingerprint(fixture, composerDraft, draft2Receipt, transferReport);
-    if (fingerprint === evaluation.cachedFingerprint) {
+    if (matchesSavedEvaluation && fingerprint === evaluation.cachedFingerprint) {
       setComposerNeedsText(false);
       activateTab("draft2");
       return;

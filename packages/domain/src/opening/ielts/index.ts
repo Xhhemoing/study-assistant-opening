@@ -73,6 +73,9 @@ export type {
 export {
   buildSpeakingPart3Seed,
   evaluateSpeakingRetelling,
+  getSpeakingEvaluationContext,
   getSpeakingTargets,
   hasRequiredWritingReceipt,
 } from "./speaking";
+
+export { getWritingDraftSource, getWritingTransferSource } from "./writing-source";

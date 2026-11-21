@@ -1119,6 +1119,69 @@ describe("Writing lineage and evidence regressions", () => {
     receiptId: "r-round-six",
   };
 
+  it.each([
+    "<input disabled>",
+    "<textarea readonly></textarea>",
+    "<select multiple></select>",
+    "<button disabled></button>",
+    "<fieldset disabled></fieldset>",
+    "<option selected></option>",
+    "<optgroup disabled></optgroup>",
+    "<details open></details>",
+    "<dialog open></dialog>",
+    '<div class="essay > words"></div>',
+    "<!-- comment words -->",
+    "<SCRIPT type='text/plain'>words</SCRIPT>",
+    "<style>body { display: none; }</style>",
+    '<?xml version="1.0"?><essay:draft status="pending" />',
+    "<![CDATA[hidden words]]>",
+  ])("keeps a markup-only Writing baseline as practice (%s)", (markup) => {
+    const baselineDraft = { ...DRAFT_1, paragraphs: [markup] };
+    const revised = evaluateNonEmptyRevision({ ...input, baselineDraft });
+    const direct = createValidatedRubricReceipt({
+      receiptId: "r-markup-baseline",
+      taskMode: "writing_task2",
+      draft: DRAFT_2,
+      assessments: buildValidDraft2Assessments(),
+      baselineDraft,
+      crossDraftTransferVerified: true,
+    });
+    expect(countDraftWords(baselineDraft.paragraphs)).toBe(0);
+    expect(revised.receipt).toMatchObject({
+      epistemicStatus: "practice_feedback", countsTowardMastery: false, masteryQualified: false,
+    });
+    expect(revised.transferReport.summary).toMatchObject({ transferredCount: 0, masteryQualified: false });
+    expect(direct).toMatchObject({ ok: true, receipt: { masteryQualified: false } });
+  });
+
+  it("keeps comparison operators in plain-text Writing prose", () => {
+    const paragraphs = ["a < b and c > d"];
+    const { transferReport } = evaluateNonEmptyRevision({ ...input, baselineDraft: { ...DRAFT_1, paragraphs } });
+    expect(countDraftWords(paragraphs)).toBe(5);
+    expect(transferReport.summary.transferredCount).toBe(4);
+  });
+
+  it("excludes a markup block spanning Writing paragraphs", () => {
+    expect(countDraftWords(["<script>", "Only hidden words", "</script>"])).toBe(0);
+  });
+
+  it("does not use markup-only baselines for fresh-prompt Writing transfer", () => {
+    const baselineDraft = { ...DRAFT_1, paragraphs: ["<details open><button disabled>Submit answer</button></details>"] };
+    const revisedDraft = { ...DRAFT_2, promptId: "different-rail-question" };
+    const revised = evaluateNonEmptyRevision({ ...input, baselineDraft, revisedDraft, freshPromptTransfer: true });
+    expect(revised.receipt).toMatchObject({ epistemicStatus: "practice_feedback", masteryQualified: false });
+    expect(revised.transferReport.summary).toMatchObject({ transferredCount: 0, masteryQualified: false });
+    expect(createValidatedRubricReceipt({
+      receiptId: "r-fresh-markup-baseline",
+      taskMode: "writing_task2",
+      draft: revisedDraft,
+      assessments: buildValidDraft2Assessments(),
+      baselineDraft,
+      crossDraftTransferVerified: false,
+      freshPromptTransfer: true,
+    })).toMatchObject({ ok: true, receipt: { masteryQualified: false } });
+  });
+
   it.each([[], ["..."], ["   "], ["12345 ???"]].map((paragraphs) => ({ paragraphs })))(
     "keeps a revision with a non-lexical baseline as practice ($paragraphs)",
     ({ paragraphs }) => {
@@ -1569,6 +1632,24 @@ describe("Speaking clause and evidence regressions", () => {
       evidenceQuotes: [],
     });
     expect(receipt.epistemicReason).toContain("英文单词");
+  });
+
+  it("does not treat markup-only Speaking transcripts as prose", () => {
+    const transcript = '<input disabled><!-- hidden notes --><script>Monitor per-capita emissions.</script>';
+    const receipt = evaluateSpeakingRetelling({ seed, transcript, durationSeconds: 75, assisted: false });
+    expect(receipt).toMatchObject({
+      wordCount: 0,
+      masteryQualified: false,
+      transferredCollocations: [],
+      evidenceQuotes: [],
+    });
+  });
+
+  it("does not transfer a Speaking target found only in an attribute", () => {
+    const transcript = setup + '<div title="Local planners should monitor per-capita emissions across the district."></div>';
+    const receipt = evaluateSpeakingRetelling({ seed, transcript, durationSeconds: 75, assisted: false });
+    expect(receipt.transferredCollocations).toEqual([]);
+    expect(receipt.masteryQualified).toBe(false);
   });
 
   it("requires an eligible Writing receipt for the source draft when the seed opts in", () => {

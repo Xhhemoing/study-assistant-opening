@@ -1,7 +1,7 @@
 import { allocateIeltsSpans, compareText, type MatchRange } from "./span-allocation";
+import { countProseWords, maskIeltsMarkup } from "./prose";
 import { segmentIeltsText, type GroundedSentence } from "./text-segments";
 import {
-  countEnglishWords,
   detectMemorizedTemplates,
   hasMemorizedTemplateStuffing,
 } from "./rubric";
@@ -446,6 +446,11 @@ export function hasRequiredWritingReceipt(seed: IeltsSpeakingPart3Seed): boolean
       (Array.isArray(seed.verifiedTransferIds) && seed.verifiedTransferIds.includes(receipt.receiptId)));
 }
 
+export function getSpeakingEvaluationContext(seed: IeltsSpeakingPart3Seed) {
+  const { min, max } = seed.timeWindowSeconds;
+  return { timeWindowSeconds: { min, max }, writingReceiptEligible: hasRequiredWritingReceipt(seed) };
+}
+
 /**
  * Evaluates a learner's Speaking Part 3 oral retelling transcript with strict
  * duration/target/contextual-clause verification (no fresh-prompt or bare-fragment bypass),
@@ -456,19 +461,20 @@ export function evaluateSpeakingRetelling(
   input: IeltsSpeakingRetellingInput,
 ): IeltsSpeakingFeedbackReceipt {
   const rawTranscript = input.transcript;
-  const trimmedTranscript = rawTranscript.trim();
-  const wordCount = countEnglishWords(trimmedTranscript);
-  const paceStatus = classifySpeakingPace(
-    input.durationSeconds,
-    input.seed.timeWindowSeconds,
-  );
+  const prose = maskIeltsMarkup(rawTranscript);
+  const trimmedTranscript = prose.trim();
+  const wordCount = countProseWords(trimmedTranscript);
+  const evaluationContext = getSpeakingEvaluationContext(input.seed);
+  const { min, max } = evaluationContext.timeWindowSeconds;
+  const timeWindowLabel = `${min}–${max} 秒`;
+  const paceStatus = classifySpeakingPace(input.durationSeconds, evaluationContext.timeWindowSeconds);
   const safeDurationSeconds =
     Number.isFinite(input.durationSeconds) && input.durationSeconds > 0
       ? input.durationSeconds
       : null;
 
-  const sentences = wordCount > 0 ? segmentIeltsText(rawTranscript) : [];
-  const paragraphs = [rawTranscript];
+  const sentences = wordCount > 0 ? segmentIeltsText(prose) : [];
+  const paragraphs = [prose];
   const memorizedTemplateHits = detectMemorizedTemplates(paragraphs);
   const hasStuffing = hasMemorizedTemplateStuffing(memorizedTemplateHits);
   const hasLowEntropy = detectLowEntropyStuffing(paragraphs, [sentences]);
@@ -507,7 +513,7 @@ export function evaluateSpeakingRetelling(
     evidenceQuotes.push({
       id: `${input.seed.seedId}-sp-fluency`,
       signal: "fluencyCohesion",
-      quote: firstSentence.text,
+      quote: rawTranscript.slice(firstSentence.startOffset, firstSentence.endOffset),
       startOffset: firstSentence.startOffset,
       endOffset: firstSentence.endOffset,
       diagnosis:
@@ -516,9 +522,9 @@ export function evaluateSpeakingRetelling(
           : hasSpokenSignpost && paceStatus === "on_target"
             ? "开头直接切入政策权衡并具备清晰口语过渡线索，时长控制在目标窗口内。"
             : paceStatus === "too_short"
-              ? "回应偏短（不足 60 秒），建议补一个具体城市或通勤者视角把观点说透。"
+              ? `回应偏短（不足 ${min} 秒），建议补一个具体城市或通勤者视角把观点说透。`
               : paceStatus === "invalid_duration"
-                ? "未提供有效作答时长，无法确认节奏控制，请在 60–90 秒内重新计时复述。"
+                ? `未提供有效作答时长，无法确认节奏控制，请在 ${timeWindowLabel}内重新计时复述。`
                 : "可进一步用口语路标词（Personally / That said / For instance）串联观点的正反两面。",
       upgradeRewrite:
         "Personally, I think the core tension is that drivers feel highway widening right away, whereas urban rail takes years to pay off.",
@@ -531,7 +537,7 @@ export function evaluateSpeakingRetelling(
         evidenceQuotes.push({
           id: `${input.seed.seedId}-sp-lexical-${idx + 1}`,
           signal: "lexicalTransfer",
-          quote: matchedSentence.text,
+          quote: rawTranscript.slice(matchedSentence.startOffset, matchedSentence.endOffset),
           matchedExpression: expr,
           startOffset: matchedSentence.startOffset,
           endOffset: matchedSentence.endOffset,
@@ -549,7 +555,7 @@ export function evaluateSpeakingRetelling(
       evidenceQuotes.push({
         id: `${input.seed.seedId}-sp-lexical-0`,
         signal: "lexicalTransfer",
-        quote: longestSentence.text,
+        quote: rawTranscript.slice(longestSentence.startOffset, longestSentence.endOffset),
         startOffset: longestSentence.startOffset,
         endOffset: longestSentence.endOffset,
         diagnosis: hasBareTargetPaste
@@ -568,7 +574,7 @@ export function evaluateSpeakingRetelling(
     hasEnoughTargets && transferredCollocations.length >= requiredTransferred;
   const hasValidPace = paceStatus === "on_target";
   const hasEnoughWords = wordCount >= MIN_VERIFIED_SPEAKING_WORDS;
-  const hasWritingReceipt = hasRequiredWritingReceipt(input.seed);
+  const hasWritingReceipt = evaluationContext.writingReceiptEligible;
 
   const masteryQualified =
     !input.assisted &&
@@ -589,8 +595,8 @@ export function evaluateSpeakingRetelling(
   let epistemicReason: string;
   if (masteryQualified) {
     epistemicReason = input.freshPromptTransfer
-      ? `独立在 ${input.seed.timeWindowSeconds.min}–${input.seed.timeWindowSeconds.max} 秒内完成新题口语迁移并命中 ${transferredCollocations.length} 组目标搭配，已确认为口语转写迁移证据（不含语音发音评分）。`
-      : `独立在 ${input.seed.timeWindowSeconds.min}–${input.seed.timeWindowSeconds.max} 秒内完成 Part 3 追问复述并命中 ${transferredCollocations.length} 组目标搭配，已确认为口语转写迁移证据（不含语音发音评分）。`;
+      ? `独立在 ${timeWindowLabel}内完成新题口语迁移并命中 ${transferredCollocations.length} 组目标搭配，已确认为口语转写迁移证据（不含语音发音评分）。`
+      : `独立在 ${timeWindowLabel}内完成 Part 3 追问复述并命中 ${transferredCollocations.length} 组目标搭配，已确认为口语转写迁移证据（不含语音发音评分）。`;
   } else if (wordCount === 0) {
     epistemicReason = "请先输入包含英文单词的口语复述或转写，再生成反馈。";
   } else if (input.assisted) {
@@ -598,12 +604,12 @@ export function evaluateSpeakingRetelling(
   } else if (!hasWritingReceipt) {
     epistemicReason = "这道口语题需先通过来源写作稿件的迁移复核，本次仅作转写练习反馈。";
   } else if (paceStatus === "invalid_duration") {
-    epistemicReason = "作答时长无效或缺失，无法确认是否落在 60–90 秒有效区间，本次仅作转写练习反馈。";
+    epistemicReason = `作答时长无效或缺失，无法确认是否落在 ${timeWindowLabel}有效区间，本次仅作转写练习反馈。`;
   } else if (!hasValidPace) {
     epistemicReason =
       paceStatus === "too_short"
-        ? `当前作答时长（${safeDurationSeconds} 秒）低于 60–90 秒有效窗口，本次仅作转写练习反馈。`
-        : `当前作答时长（${safeDurationSeconds} 秒）超出 60–90 秒有效窗口，建议精炼观点后重新复述。`;
+        ? `当前作答时长（${safeDurationSeconds} 秒）低于 ${timeWindowLabel}有效窗口，本次仅作转写练习反馈。`
+        : `当前作答时长（${safeDurationSeconds} 秒）超出 ${timeWindowLabel}有效窗口，建议精炼观点后重新复述。`;
   } else if (!hasEnoughTargets) {
     epistemicReason = "当前题卡未配置目标口语迁移表达，无法完成迁移检核，仅作转写练习反馈。";
   } else if (hasBareTargetPaste) {
@@ -613,7 +619,7 @@ export function evaluateSpeakingRetelling(
   } else if (hasStiffWrittenConnector) {
     epistemicReason = "检测到偏生硬的书面连接词（如 Furthermore / In conclusion），改用自然口语衔接后可重新复核。";
   } else if (!hasEnoughWords) {
-    epistemicReason = `当前转写有效词数为 ${wordCount} 词，低于 60–90 秒口语展开门槛（${MIN_VERIFIED_SPEAKING_WORDS} 词），暂作转写练习反馈。`;
+    epistemicReason = `当前转写有效词数为 ${wordCount} 词，低于 ${timeWindowLabel}口语展开门槛（${MIN_VERIFIED_SPEAKING_WORDS} 词），暂作转写练习反馈。`;
   } else {
     epistemicReason = `当前命中 ${transferredCollocations.length}/${targetCount} 组目标搭配（至少需自然迁移 ${requiredTransferred} 组），本次仅作转写练习反馈。`;
   }
@@ -675,12 +681,12 @@ export function evaluateSpeakingRetelling(
             : "needs_work",
       note:
         paceStatus === "invalid_duration"
-          ? "时长无效，需记录有效的 60–90 秒计时结果。"
+          ? `时长无效，需记录有效的 ${timeWindowLabel}计时结果。`
           : paceStatus === "on_target"
-            ? `作答 ${safeDurationSeconds} 秒，落在 60–90 秒目标区间内。`
+            ? `作答 ${safeDurationSeconds} 秒，落在 ${timeWindowLabel}目标区间内。`
             : paceStatus === "too_short"
-              ? `作答 ${safeDurationSeconds} 秒，低于 60 秒下限，观点展开偏简略。`
-              : `作答 ${safeDurationSeconds} 秒，超过 90 秒上限，建议收紧收尾。`,
+              ? `作答 ${safeDurationSeconds} 秒，低于 ${min} 秒下限，观点展开偏简略。`
+              : `作答 ${safeDurationSeconds} 秒，超过 ${max} 秒上限，建议收紧收尾。`,
     },
   };
 
@@ -690,6 +696,7 @@ export function evaluateSpeakingRetelling(
     seedId: input.seed.seedId,
     sourceTranscript: rawTranscript,
     assisted: input.assisted,
+    evaluationContext,
     taskMode: "speaking_part3",
     feedbackMode: "transcript_practice_feedback",
     pronunciationAssessed: false,

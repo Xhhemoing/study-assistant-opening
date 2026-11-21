@@ -175,6 +175,50 @@ describe("IeltsDraftCritiqueWorkbench", () => {
     }));
   });
 
+  it.each(["targets", "baseline text", "revision text"] as const)(
+    "rejects saved Writing evidence after changing %s under the same IDs",
+    async (change) => {
+      const fixture = IELTS_WRITING_SPEAKING_FIXTURE;
+      const targets = change === "targets" ? fixture.targets.map((target) => ({
+        ...target, targetPatterns: ["affordable housing"],
+      })) : fixture.targets;
+      const draft1 = change === "baseline text" ? { ...fixture.draft1, paragraphs: ["<input disabled>"] } : fixture.draft1;
+      const draft2 = change === "revision text" ? { ...fixture.draft2, paragraphs: ["A short and unrelated revision."] } : fixture.draft2;
+      const onRevisionEvaluated = vi.fn();
+      const render = (nextFixture: typeof fixture) => act(async () => root.render(createElement(
+        IeltsDraftCritiqueWorkbench, { fixture: nextFixture, onRevisionEvaluated },
+      )));
+      await render(fixture);
+      expect(host.querySelector('[data-epistemic-badge="rubric_verified_evidence"]')).not.toBeNull();
+      expect(host.querySelector("[data-transfer-summary]")?.textContent).toContain("已迁移 4 / 4");
+
+      await render({ ...fixture, targets, draft1, draft2 });
+      expect(host.querySelector('[data-epistemic-badge="practice_feedback"]')).not.toBeNull();
+      expect(host.querySelector("[data-transfer-summary]")?.textContent).toContain("已迁移 0 / 4");
+      await act(async () => writingButton("打开改写编辑区").click());
+      await act(async () => writingButton("重新分析改写").click());
+      expect(onRevisionEvaluated).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+        receipt: expect.objectContaining({ masteryQualified: false }),
+      }));
+    },
+  );
+
+  it("requires a new Writing receipt even if a changed target definition still transfers", async () => {
+    const fixture = IELTS_WRITING_SPEAKING_FIXTURE;
+    const targets = fixture.targets.map((target) => ({ ...target, guidance: "Use this expression in a new context." }));
+    const next = evaluateRevisedDraftDeterministically({
+      baselineDraft: fixture.draft1, revisedDraft: fixture.draft2, targets, receiptId: fixture.draft2Receipt.receiptId,
+    });
+    if (!next.ok) throw new Error("Expected a receipt for the existing Writing draft");
+    expect(next.transferReport.summary.transferredCount).toBe(4);
+    const render = (nextFixture: typeof fixture) => act(async () =>
+      root.render(createElement(IeltsDraftCritiqueWorkbench, { fixture: nextFixture })));
+    await render({ ...fixture, targets, transferReport: next.transferReport });
+    expect(host.querySelector('[data-epistemic-badge="practice_feedback"]')).not.toBeNull();
+    await render({ ...fixture, targets, transferReport: next.transferReport, draft2Receipt: next.receipt });
+    expect(host.querySelector('[data-epistemic-badge="rubric_verified_evidence"]')).not.toBeNull();
+  });
+
   it("asks for English text when a punctuation-only revision is submitted", async () => {
     const onRevisionEvaluated = vi.fn();
     await act(async () => root.render(createElement(IeltsDraftCritiqueWorkbench, { onRevisionEvaluated })));
@@ -410,6 +454,54 @@ describe("IeltsSpeakingTransferCard", () => {
     expect(onEvaluated).toHaveBeenCalledWith(expect.objectContaining({
       seedId: seed.seedId, sourceTranscript: transcript, durationSeconds: 36, assisted: true,
     }));
+  });
+
+  it.each(["targets", "time window", "Writing receipt", "Speaking receipt"] as const)(
+    "preserves the in-progress Speaking answer after a refresh of %s",
+    async (change) => {
+      const fixture = IELTS_WRITING_SPEAKING_FIXTURE;
+      const seed = fixture.speakingSeed;
+      const nextSeed: typeof seed = change === "targets" ? { ...seed, targetSpokenCollocations: ["affordable housing"] }
+        : change === "time window" ? { ...seed, timeWindowSeconds: { ...seed.timeWindowSeconds, max: 70 as 90 } }
+          : change === "Writing receipt" ? { ...seed, verifiedWritingReceipt: undefined } : seed;
+      const initialReceipt = fixture.initialSpeakingReceipt;
+      const nextReceipt = change === "Speaking receipt" ? { ...initialReceipt, assisted: true } : initialReceipt;
+      const onEvaluated = vi.fn();
+      const render = (currentSeed: typeof seed, receipt: typeof initialReceipt) => act(async () =>
+        root.render(createElement(IeltsSpeakingTransferCard, {
+          seed: currentSeed, initialTranscript: fixture.initialSpeakingTranscript, initialReceipt: receipt, onEvaluated,
+        })));
+      await render(seed, initialReceipt);
+      expect(host.querySelector('[data-speaking-epistemic="rubric_verified_evidence"]')).not.toBeNull();
+      await act(async () => {
+        setNativeInputValue(host.querySelector<HTMLTextAreaElement>("textarea")!, "My unfinished answer");
+        setNativeInputValue(host.querySelector<HTMLInputElement>('input[type="number"]')!, "75");
+      });
+      await render(nextSeed, nextReceipt);
+      expect(host.querySelector<HTMLTextAreaElement>("textarea")?.value).toBe("My unfinished answer");
+      expect(host.querySelector<HTMLInputElement>('input[type="number"]')?.value).toBe("75");
+      expect(host.querySelector("[data-speaking-epistemic]")).toBeNull();
+      await act(async () => host.querySelector<HTMLButtonElement>("button")!.click());
+      expect(onEvaluated).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+        sourceTranscript: "My unfinished answer", durationSeconds: 75, masteryQualified: false,
+      }));
+    },
+  );
+
+  it("invalidates Speaking pace feedback when the time window changes", async () => {
+    const fixture = IELTS_WRITING_SPEAKING_FIXTURE;
+    const seed = fixture.speakingSeed;
+    const render = (currentSeed: typeof seed) => act(async () =>
+      root.render(createElement(IeltsSpeakingTransferCard, {
+        seed: currentSeed, initialTranscript: fixture.initialSpeakingTranscript, initialReceipt: fixture.initialSpeakingReceipt,
+      })));
+    await render(seed);
+    expect(host.querySelector('[data-speaking-pace="on_target"]')).not.toBeNull();
+    await render({ ...seed, timeWindowSeconds: { ...seed.timeWindowSeconds, max: 70 as 90 } });
+    expect(host.querySelector('[data-speaking-pace="on_target"]')).toBeNull();
+    await act(async () => host.querySelector<HTMLButtonElement>("button")!.click());
+    expect(host.querySelector('[data-speaking-pace="over_time"]')).not.toBeNull();
+    expect(host.querySelector('[data-speaking-signal="durationCompliance"]')?.textContent).toContain("超过 70 秒上限");
   });
 
   it("shows each Speaking target once and guides a learner who submits only punctuation", async () => {

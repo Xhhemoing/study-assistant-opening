@@ -1,10 +1,10 @@
 import { graphemeBoundaries } from "./graphemes";
+import { countProseWords, maskIeltsParagraphs } from "./prose";
 import { allocateIeltsSpans, compareText, rangesOverlap, type MatchRange } from "./span-allocation";
 import { segmentIeltsText, type GroundedClause, type GroundedSentence, type GroundedTextSpan } from "./text-segments";
+import { getUniqueWritingTargets, getWritingDraftSource, getWritingTransferSource } from "./writing-source";
 import {
   clampToIeltsBand,
-  countDraftWords,
-  countEnglishWords,
   createValidatedRubricReceipt,
   detectMemorizedTemplates,
   getWritingTransferLineage,
@@ -209,7 +209,7 @@ function isMechanicalKeywordSentence(
     }
     distinctMatches.push(match);
     matchedPatterns.add(match.pattern);
-    matchedWordCount += countEnglishWords(clause.text.slice(match.start, match.end));
+    matchedWordCount += countProseWords(clause.text.slice(match.start, match.end));
   }
 
   return (
@@ -502,6 +502,8 @@ export function diffEssayParagraphs(
 ): IeltsParagraphDiff[] {
   const maxLen = Math.max(draft1Paragraphs.length, draft2Paragraphs.length);
   const diffs: IeltsParagraphDiff[] = [];
+  const draft1Prose = maskIeltsParagraphs(draft1Paragraphs);
+  const draft2Prose = maskIeltsParagraphs(draft2Paragraphs);
 
   for (let i = 0; i < maxLen; i += 1) {
     const p1 = draft1Paragraphs[i] ?? "";
@@ -520,8 +522,10 @@ export function diffEssayParagraphs(
       status = "revised";
     }
 
-    const terms1 = extractMeaningfulTerms(p1);
-    const terms2 = extractMeaningfulTerms(p2);
+    const prose1 = draft1Prose[i] ?? "";
+    const prose2 = draft2Prose[i] ?? "";
+    const terms1 = extractMeaningfulTerms(prose1);
+    const terms2 = extractMeaningfulTerms(prose2);
     const addedTerms = [...terms2].filter((t) => !terms1.has(t)).slice(0, 8);
     const removedTerms = [...terms1].filter((t) => !terms2.has(t)).slice(0, 8);
 
@@ -530,7 +534,7 @@ export function diffEssayParagraphs(
       draft1Text: p1,
       draft2Text: p2,
       status,
-      wordDelta: countEnglishWords(p2) - countEnglishWords(p1),
+      wordDelta: countProseWords(prose2) - countProseWords(prose1),
       addedTerms,
       removedTerms,
     });
@@ -561,8 +565,9 @@ function finalizeTransferReport(
 export function analyzeCrossDraftTransfer(
   input: AnalyzeCrossDraftTransferInput,
 ): IeltsCrossDraftTransferReport {
-  const wordCount = countDraftWords(input.draft2.paragraphs);
-  const { report } = analyzeTransfer(input, false, input.draft2.paragraphs.map(segmentIeltsText), wordCount);
+  const revisedProse = maskIeltsParagraphs(input.draft2.paragraphs);
+  const wordCount = countProseWords(revisedProse.join("\n"));
+  const { report } = analyzeTransfer(input, false, revisedProse, revisedProse.map(segmentIeltsText), wordCount);
   const { masteryQualified } = resolveIeltsEpistemicStatus({
     draftVersion: input.draft2.version,
     assisted: input.draft2.assisted,
@@ -585,6 +590,7 @@ type WritingCandidate = MatchRange & {
 function analyzeTransfer(
   input: AnalyzeCrossDraftTransferInput,
   freshPromptConfirmed: boolean,
+  revisedProse: readonly string[],
   revisedParagraphs: readonly (readonly GroundedSentence[])[],
   revisedWordCount: number,
 ): { report: TransferAnalysis; creditedOccurrences: ReadonlyMap<IeltsCriterion, WritingCandidate> } {
@@ -592,13 +598,10 @@ function analyzeTransfer(
   const lineage = getWritingTransferLineage(input.draft1, input.draft2);
   const advancingLineage = lineage === "advancing_revision";
   const freshPrompt = lineage === "fresh_prompt" && freshPromptConfirmed;
-  const hasBaselineText = countDraftWords(input.draft1.paragraphs) > 0;
-  const canEvaluateTransfer = (advancingLineage && hasBaselineText) || freshPrompt;
-  const targetsById = new Map<string, IeltsUpgradeTarget>();
-  for (const target of input.targets) {
-    if (!targetsById.has(target.id)) targetsById.set(target.id, target);
-  }
-  const targets = [...targetsById.values()];
+  const baselineProse = maskIeltsParagraphs(input.draft1.paragraphs);
+  const hasBaselineText = baselineProse.some((paragraph) => countProseWords(paragraph) > 0);
+  const canEvaluateTransfer = (advancingLineage || freshPrompt) && hasBaselineText;
+  const targets = getUniqueWritingTargets(input.targets);
 
   const paragraphDiffs = diffEssayParagraphs(
     input.draft1.paragraphs,
@@ -606,8 +609,8 @@ function analyzeTransfer(
   );
   const memorizedTemplateHits = detectMemorizedTemplates(input.draft2.paragraphs);
   const hasStuffing = hasMemorizedTemplateStuffing(memorizedTemplateHits);
-  const hasLowEntropyStuffing = detectLowEntropyStuffing(input.draft2.paragraphs, revisedParagraphs);
-  const baselineClauses = input.draft1.paragraphs
+  const hasLowEntropyStuffing = detectLowEntropyStuffing(revisedProse, revisedParagraphs);
+  const baselineClauses = baselineProse
     .flatMap(segmentIeltsText)
     .flatMap((sentence) => sentence.clauses.map(prepareCoreClause));
   const baselineCoreClauseTokens = baselineClauses.map(({ tokens }) => tokens);
@@ -640,22 +643,26 @@ function analyzeTransfer(
       };
     })),
   );
-  const hasSubstantiveRevision = assessSubstantiveRevision(input.draft1, input.draft2, revisedClauses);
+  const hasSubstantiveRevision = assessSubstantiveRevision(
+    { ...input.draft1, paragraphs: baselineProse },
+    { ...input.draft2, paragraphs: revisedProse },
+    revisedClauses,
+  );
   let hasMechanicalKeywordPaste = false;
 
   const targetMatches = targets.map((target) => {
-    const baseHit = findMatchedPatterns(input.draft1.paragraphs, target.targetPatterns);
-    const rawRevHit = findMatchedPatterns(input.draft2.paragraphs, target.targetPatterns);
+    const baseHit = findMatchedPatterns(baselineProse, target.targetPatterns);
+    const rawRevHit = findMatchedPatterns(revisedProse, target.targetPatterns);
     const baseWeak = findMatchedPatterns(
-      input.draft1.paragraphs,
+      baselineProse,
       target.weakBaselinePatterns,
     );
     const revWeak = findMatchedPatterns(
-      input.draft2.paragraphs,
+      revisedProse,
       target.weakBaselinePatterns,
     );
     const revCliche = findMatchedPatterns(
-      input.draft2.paragraphs,
+      revisedProse,
       target.clichePatterns,
     );
 
@@ -796,7 +803,7 @@ function analyzeTransfer(
   let disqualificationReason: string | undefined;
   if (revisedWordCount === 0) {
     disqualificationReason = "请先提交至少一段写作正文，再复核改写。";
-  } else if (advancingLineage && !hasBaselineText) {
+  } else if ((advancingLineage || freshPrompt) && !hasBaselineText) {
     disqualificationReason = "请先提交含英文正文的一稿，再复核跨草稿迁移。";
   } else if (!canEvaluateTransfer) {
     disqualificationReason = samePrompt
@@ -823,6 +830,8 @@ function analyzeTransfer(
   const report: TransferAnalysis = {
     fromDraftId: input.draft1.draftId,
     toDraftId: input.draft2.draftId,
+    sourceDraft: getWritingDraftSource(input.draft2),
+    transferSource: getWritingTransferSource(input.draft1, input.targets),
     items,
     paragraphDiffs,
     memorizedTemplateHits,
@@ -931,13 +940,14 @@ export function evaluateRevisedDraftDeterministically(
   const freshPrompt = input.revisedDraft.promptId !== input.baselineDraft.promptId &&
     input.freshPromptTransfer === true;
   const paragraphs = input.revisedDraft.paragraphs;
-  const segmentedParagraphs = paragraphs.map(segmentIeltsText);
-  const wordCount = countDraftWords(paragraphs);
+  const revisedProse = maskIeltsParagraphs(paragraphs);
+  const segmentedParagraphs = revisedProse.map(segmentIeltsText);
+  const wordCount = countProseWords(revisedProse.join("\n"));
   const { report: transferReport, creditedOccurrences } = analyzeTransfer({
     draft1: input.baselineDraft,
     draft2: input.revisedDraft,
     targets: input.targets,
-  }, freshPrompt, segmentedParagraphs, wordCount);
+  }, freshPrompt, revisedProse, segmentedParagraphs, wordCount);
 
   if (wordCount === 0) {
     return {
@@ -1139,7 +1149,14 @@ export function evaluateRevisedDraftDeterministically(
     taskMode: "writing_task2",
     draft: input.revisedDraft,
     baselineDraft: input.baselineDraft,
-    assessments,
+    transferTargets: input.targets,
+    assessments: assessments.map((assessment) => ({
+      ...assessment,
+      evidenceSpans: assessment.evidenceSpans.map((span) => ({
+        ...span,
+        excerpt: paragraphs[span.paragraphIndex]!.slice(span.startOffset, span.endOffset),
+      })),
+    })),
     crossDraftTransferVerified: transferReport.summary.meetsCrossDraftVerification,
     freshPromptTransfer: canQualifyFreshPrompt,
     disqualificationReason: transferReport.summary.disqualificationReason,

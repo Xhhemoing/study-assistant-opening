@@ -137,19 +137,19 @@ export const SPEAKING_PACE_META: Readonly<
   Record<IeltsSpeakingPaceStatus, { readonly label: string; readonly badgeClass: string }>
 > = {
   invalid_duration: {
-    label: "时长无效（需 60–90 秒）",
+    label: "时长无效",
     badgeClass: "border-danger/30 bg-danger-soft text-danger",
   },
   too_short: {
-    label: "时长偏短（低于 60 秒）",
+    label: "时长偏短",
     badgeClass: "border-warn/30 bg-warn-soft text-warn",
   },
   on_target: {
-    label: "时长适中（60–90 秒）",
+    label: "时长适中",
     badgeClass: "border-accent/30 bg-accent-soft text-accent",
   },
   over_time: {
-    label: "略微超时（超过 90 秒）",
+    label: "作答超时",
     badgeClass: "border-warn/30 bg-warn-soft text-warn",
   },
 };

@@ -1,4 +1,5 @@
 import { graphemeBoundaries } from "./graphemes";
+import { countProseWords, maskIeltsMarkup, maskIeltsParagraphs } from "./prose";
 import {
   IELTS_CARTRIDGE_ID,
   IELTS_CRITERIA,
@@ -14,7 +15,9 @@ import {
   type IeltsRubricValidationResult,
   type IeltsSpanEvidence,
   type IeltsTaskMode,
+  type IeltsUpgradeTarget,
 } from "./types";
+import { getWritingDraftSource, getWritingTransferSource } from "./writing-source";
 
 const MIN_BAND = 4;
 const MAX_BAND = 9;
@@ -108,12 +111,11 @@ export function computeOverallIeltsBand(
 }
 
 export function countEnglishWords(text: string): number {
-  const tokens = text.match(/[\p{L}\p{N}]+(?:['’-][\p{L}\p{N}]+)*/gu);
-  return tokens?.filter((token) => /[A-Za-z]/u.test(token)).length ?? 0;
+  return countProseWords(maskIeltsMarkup(text));
 }
 
 export function countDraftWords(paragraphs: readonly string[]): number {
-  return paragraphs.reduce((total, paragraph) => total + countEnglishWords(paragraph), 0);
+  return countProseWords(maskIeltsParagraphs(paragraphs).join("\n"));
 }
 
 function escapeRegExp(literal: string): string {
@@ -144,7 +146,7 @@ export function detectMemorizedTemplates(
   paragraphs: readonly string[],
 ): GroundedTemplateHit[] {
   const hits: GroundedTemplateHit[] = [];
-  paragraphs.forEach((paragraph, paragraphIndex) => {
+  maskIeltsParagraphs(paragraphs).forEach((paragraph, paragraphIndex) => {
     if (!paragraph.trim()) return;
     for (const entry of IELTS_MEMORIZED_TEMPLATE_CATALOG) {
       const regex = buildFlexiblePhraseRegex(entry.phrase, "giu");
@@ -409,7 +411,9 @@ export type CreateRubricReceiptInput = {
   readonly receiptId: string;
   readonly taskMode: IeltsTaskMode;
   readonly draft: IeltsEssayDraft;
-  readonly baselineDraft?: DraftLineage & Pick<IeltsEssayDraft, "paragraphs">;
+  readonly baselineDraft?: DraftLineage & Pick<IeltsEssayDraft, "paragraphs"> &
+    Partial<Pick<IeltsEssayDraft, "draftId" | "assisted">>;
+  readonly transferTargets?: readonly IeltsUpgradeTarget[];
   readonly assessments: readonly IeltsCriterionAssessment[];
   readonly crossDraftTransferVerified: boolean;
   readonly freshPromptTransfer?: boolean;
@@ -427,7 +431,8 @@ export function createValidatedRubricReceipt(
 ): IeltsRubricValidationResult {
   const errors: IeltsRubricValidationError[] = [];
   const paragraphs = input.draft.paragraphs;
-  const wordCount = countDraftWords(paragraphs);
+  const prose = maskIeltsParagraphs(paragraphs);
+  const wordCount = countProseWords(prose.join("\n"));
 
   if (wordCount === 0) {
     errors.push({
@@ -530,7 +535,7 @@ export function createValidatedRubricReceipt(
           located = { startOffset, endOffset, matchedText: excerpt };
         }
       }
-      if (!located) {
+      if (!located || !prose[span.paragraphIndex]!.slice(located.startOffset, located.endOffset).trim()) {
         errors.push({
           code: "EXCERPT_NOT_GROUNDED",
           criterion,
@@ -562,18 +567,22 @@ export function createValidatedRubricReceipt(
 
   const memorizedTemplateFlags = detectMemorizedTemplates(paragraphs);
   const lineage = getWritingTransferLineage(input.baselineDraft, input.draft);
+  const hasBaselineText = lineage !== null && countDraftWords(input.baselineDraft?.paragraphs ?? []) > 0;
   const epistemic = resolveIeltsEpistemicStatus({
     draftVersion: input.draft.version,
     assisted: input.draft.assisted,
-    crossDraftTransferVerified: lineage === "advancing_revision" && input.crossDraftTransferVerified &&
-      countDraftWords(input.baselineDraft?.paragraphs ?? []) > 0,
-    freshPromptTransfer: lineage === "fresh_prompt" && input.freshPromptTransfer,
+    crossDraftTransferVerified: lineage === "advancing_revision" && hasBaselineText && input.crossDraftTransferVerified,
+    freshPromptTransfer: lineage === "fresh_prompt" && hasBaselineText && input.freshPromptTransfer,
     memorizedTemplateHits: memorizedTemplateFlags,
     wordCount,
     minVerifiedWords: input.minVerifiedWords,
     disqualificationReason: input.disqualificationReason,
   });
 
+  const baseline = input.baselineDraft;
+  const transferSource = baseline?.draftId !== undefined && baseline.assisted !== undefined && input.transferTargets
+    ? getWritingTransferSource({ ...baseline, draftId: baseline.draftId, assisted: baseline.assisted }, input.transferTargets)
+    : undefined;
   const receipt: IeltsRubricReceipt = {
     receiptId: input.receiptId,
     cartridgeId: IELTS_CARTRIDGE_ID,
@@ -581,6 +590,8 @@ export function createValidatedRubricReceipt(
     promptId: input.draft.promptId,
     draftId: input.draft.draftId,
     draftVersion: input.draft.version,
+    sourceDraft: getWritingDraftSource(input.draft),
+    transferSource,
     overallBand: computeOverallIeltsBand(bandMap),
     criteria: groundedCriteria,
     epistemicStatus: epistemic.epistemicStatus,

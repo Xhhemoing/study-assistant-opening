@@ -265,6 +265,7 @@ function mustValidateReceipt(
     taskMode: "writing_task2",
     draft,
     baselineDraft: DRAFT_1,
+    transferTargets: UPGRADE_TARGETS,
     assessments,
     crossDraftTransferVerified,
   });
