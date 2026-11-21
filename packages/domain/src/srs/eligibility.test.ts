@@ -6,6 +6,8 @@ import {
   buildKnowledgeUnitKey,
   buildReviewQueue,
   computeWorkspaceRecoveryBudgetMinutes,
+  deriveCardFamilyKey,
+  deriveCardKnowledgeUnitKey,
   isCardEligibleForMode,
   resolveSyllabusWeight,
   reviewEligibilityForMode,
@@ -404,14 +406,25 @@ describe("pre-200-cap 5-band recovery triage, dedup, 30% cap, and eligibleSince 
     expect(resolveSyllabusWeight({ goalPriority: 3 })).toBe(3);
   });
 
-  it("supports configurable highWeightThreshold and demotes familyKey duplicates without distinct knowledgeUnitKey", () => {
+  it("supports configurable highWeightThreshold, routes all low-weight cards to Band 5, and demotes familyKey duplicates", () => {
     const idHigh = uuidFor(21);
     const idDupFamily = uuidFor(22);
-    const idBelowThreshold = uuidFor(23);
+    const idLowSalvage = uuidFor(23);
+    const idZeroHighRetention = uuidFor(24);
+    const idLowUnseen = uuidFor(25);
+    const idZeroForgotten = uuidFor(26);
+    const idZeroSalvage = uuidFor(27);
     const salvage = fsrsState(idHigh, { stability: 1.0, daysAgo: 20 });
+    const highRet = fsrsState(idZeroHighRetention, { stability: 30, daysAgo: 1 });
+    const forgotten = fsrsState(idZeroForgotten, { stability: 0.2, daysAgo: 365 });
+
     const plan = buildBacklogRehabilitationPlan(
       [
-        { card: card({ id: idBelowThreshold }), state: { ...salvage, cardId: idBelowThreshold }, goalPriority: 1, syllabusWeight: 3 },
+        { card: card({ id: idZeroHighRetention }), state: highRet, goalPriority: 0, syllabusWeight: 0 },
+        { card: card({ id: idZeroForgotten }), state: forgotten, goalPriority: 0, syllabusWeight: 0 },
+        { card: card({ id: idZeroSalvage }), state: { ...salvage, cardId: idZeroSalvage }, goalPriority: 0, syllabusWeight: 0 },
+        { card: card({ id: idLowUnseen }), state: state({ cardId: idLowUnseen }), goalPriority: 2, syllabusWeight: 2 },
+        { card: card({ id: idLowSalvage }), state: { ...salvage, cardId: idLowSalvage }, goalPriority: 1, syllabusWeight: 4 },
         { card: card({ id: idDupFamily }), state: { ...salvage, cardId: idDupFamily }, goalPriority: 1, syllabusWeight: 6, familyKey: "fam-only" },
         { card: card({ id: idHigh }), state: salvage, goalPriority: 1, syllabusWeight: 8, familyKey: "fam-only" },
       ],
@@ -422,12 +435,44 @@ describe("pre-200-cap 5-band recovery triage, dedup, 30% cap, and eligibleSince 
     );
     expect(plan.triaged.map((entry) => [entry.item.card.id, entry.band, entry.demotedReason])).toEqual([
       [idHigh, 1, null],
-      [idBelowThreshold, 5, null],
+      [idLowSalvage, 5, null], // syllabusWeight 4, R in [0.35, 0.75] stays ahead of syllabusWeight 0 R=0.99
+      [idLowUnseen, 5, null], // syllabusWeight 2, unseen stays in Band 5 under threshold 5
+      [idZeroSalvage, 5, null], // equal weight 0: [0.35, 0.75] first
+      [idZeroForgotten, 5, null], // equal weight 0: < 0.35 second
+      [idZeroHighRetention, 5, null], // equal weight 0: > 0.75 last among non-demoted
       [idDupFamily, 5, "duplicate_family"],
     ]);
   });
 
-  it("enforces workspace-wide 30% daily recovery cap shared across courses", () => {
+  it("auto-derives canonical knowledgeUnitKey and familyKey from card metadata when omitted", () => {
+    const courseId = "aaaaaaaa-0000-4000-8000-000000000001";
+    const limitCard1 = card({ id: uuidFor(31), courseId, skillLabel: " 极限 ", tags: ["review:concept"] });
+    const limitCard2 = card({ id: uuidFor(32), courseId, skillLabel: "极限", tags: ["review:concept"] });
+    const otherCard = card({ id: uuidFor(33), courseId, skillLabel: "导数", tags: ["review:concept"] });
+
+    expect(deriveCardKnowledgeUnitKey(limitCard1)).toBe(`${courseId}:sk:极限:concept`);
+    expect(deriveCardKnowledgeUnitKey(limitCard2)).toBe(deriveCardKnowledgeUnitKey(limitCard1));
+    expect(deriveCardFamilyKey(limitCard1)).toBe(`${courseId}:skill:极限`);
+
+    const salvage = fsrsState(limitCard1.id, { stability: 1.0, daysAgo: 20 });
+    const plan = buildBacklogRehabilitationPlan(
+      [
+        { card: limitCard1, state: salvage, goalPriority: 5 },
+        { card: limitCard2, state: { ...salvage, cardId: limitCard2.id }, goalPriority: 5 },
+        { card: otherCard, state: { ...salvage, cardId: otherCard.id }, goalPriority: 5 },
+      ],
+      "auto",
+      NOW,
+      TODAY,
+    );
+    expect(plan.triaged.map((entry) => [entry.item.card.id, entry.band, entry.demotedReason])).toEqual([
+      [limitCard1.id, 1, null],
+      [otherCard.id, 1, null],
+      [limitCard2.id, 5, "duplicate_knowledge_unit"],
+    ]);
+  });
+
+  it("enforces workspace-wide 30% daily recovery cap shared across courses and fails closed on non-finite usage", () => {
     // 60m day -> max 18m workspace-wide recovery cap
     expect(computeWorkspaceRecoveryBudgetMinutes({
       dailyBudgetMinutes: 60,
@@ -458,6 +503,24 @@ describe("pre-200-cap 5-band recovery triage, dedup, 30% cap, and eligibleSince 
       freeUnreservedMinutes: 100,
       usedOrReservedRecoveryMinutes: 0,
     })).toBe(69);
+    // Fail-closed on NaN / Infinity inputs (never treat corrupted usage as 0)
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      expect(computeWorkspaceRecoveryBudgetMinutes({
+        dailyBudgetMinutes: 60,
+        freeUnreservedMinutes: 45,
+        usedOrReservedRecoveryMinutes: bad,
+      })).toBe(0);
+    }
+    expect(computeWorkspaceRecoveryBudgetMinutes({
+      dailyBudgetMinutes: Number.NaN,
+      freeUnreservedMinutes: 45,
+      usedOrReservedRecoveryMinutes: 0,
+    })).toBe(0);
+    expect(computeWorkspaceRecoveryBudgetMinutes({
+      dailyBudgetMinutes: 60,
+      freeUnreservedMinutes: Number.POSITIVE_INFINITY,
+      usedOrReservedRecoveryMinutes: 0,
+    })).toBe(0);
   });
 
   it("decouples overdue card dueAt into eligibleSince with hardDeadlineAt: null so day-planner schedules instead of deadline_passed", () => {

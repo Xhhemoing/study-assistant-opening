@@ -3,6 +3,7 @@ import { act, useEffect, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { beforeEach, afterEach, expect, it, vi } from "vitest";
 import type { LearningCardSession, ReviewCard, ReviewQueueItem, ReviewState } from "@aistudy/contracts";
+import { buildReviewQueue } from "@aistudy/domain";
 import { BudgetCardSession } from "./budget-card-session";
 import type { LearningManagementClient } from "../planning/learning-management-client";
 import type { OpeningCardsClient } from "../cards/cards-client";
@@ -93,7 +94,14 @@ it("still clears a first definite HTTP 409 card command rejection", async () => 
 
 function queueItem(
   cardId: string,
-  options: { stability: number; daysAgo: number; dueAt: string; goalPriority: number },
+  options: {
+    stability: number;
+    daysAgo: number;
+    dueAt: string;
+    goalPriority: number;
+    courseId?: string | null;
+    skillLabel?: string | null;
+  },
   nowMs: number,
 ): ReviewQueueItem {
   const lastReview = new Date(nowMs - options.daysAgo * 86_400_000).toISOString();
@@ -105,8 +113,8 @@ function queueItem(
     sourceDocumentId: null,
     syllabusPointId: null,
     tags: ["review:concept"],
-    courseId: null,
-    skillLabel: null,
+    courseId: options.courseId ?? null,
+    skillLabel: options.skillLabel ?? null,
     archived: false,
     contentVersion: 1,
     pausedUntil: null,
@@ -139,11 +147,18 @@ function queueItem(
   return { card, state, goalPriority: options.goalPriority };
 }
 
-it("triages the full due queue before the 200-card start cap so high-priority salvageable item #201 is placed first", async () => {
+it("triages an untriaged 201-card dueAt-sorted queue before the 200-card start cap so high-priority salvageable item #201 is placed first", async () => {
   const nowMs = Date.now();
   const makeUuid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
   const dueItems: ReviewQueueItem[] = [];
-  for (let i = 1; i <= 200; i += 1) {
+  for (let i = 1; i <= 100; i += 1) {
+    dueItems.push(queueItem(
+      makeUuid(i),
+      { stability: 0.2, daysAgo: 365, dueAt: "2026-07-01T00:00:00.000Z", goalPriority: 0 },
+      nowMs,
+    ));
+  }
+  for (let i = 101; i <= 200; i += 1) {
     dueItems.push(queueItem(
       makeUuid(i),
       { stability: 30, daysAgo: 1, dueAt: "2026-08-01T00:00:00.000Z", goalPriority: 5 },
@@ -175,6 +190,83 @@ it("triages the full due queue before the 200-card start cap so high-priority sa
   }
 });
 
+it("preserves server concept deduplication and delayedCheckCovered Band-5 demotion across 250 single-concept + 20 retest-covered + 150 distinct cards", async () => {
+  const now = new Date();
+  const nowMs = now.getTime();
+  const courseId = "99999999-9999-4999-8999-999999999999";
+  const makeUuid = (prefix: string, n: number) => `${prefix}-0000-4000-8000-${String(n).padStart(12, "0")}`;
+
+  const rawServerInputs: Array<ReviewQueueItem & { delayedCheckCovered?: boolean }> = [];
+  const limitIds = new Set<string>();
+  const retestCoveredIds = new Set<string>();
+  const distinctIds = new Set<string>();
+
+  // 250 cards on the single concept "极限"
+  for (let i = 1; i <= 250; i += 1) {
+    const cid = makeUuid("10000000", i);
+    limitIds.add(cid);
+    rawServerInputs.push(queueItem(
+      cid,
+      { stability: 1.5, daysAgo: 10, dueAt: "2026-08-01T00:00:00.000Z", goalPriority: 5, courseId, skillLabel: "极限" },
+      nowMs,
+    ));
+  }
+  // 20 higher-priority cards already covered by active accepted/in-progress delayed checks
+  for (let i = 1; i <= 20; i += 1) {
+    const cid = makeUuid("20000000", i);
+    retestCoveredIds.add(cid);
+    rawServerInputs.push({
+      ...queueItem(
+        cid,
+        { stability: 1.2, daysAgo: 12, dueAt: "2026-08-02T00:00:00.000Z", goalPriority: 9, courseId, skillLabel: `复测知识点-${i}` },
+        nowMs,
+      ),
+      delayedCheckCovered: true,
+    });
+  }
+  // 150 distinct concepts that MUST stay ahead of duplicates and retest-covered cards
+  for (let i = 1; i <= 150; i += 1) {
+    const cid = makeUuid("30000000", i);
+    distinctIds.add(cid);
+    rawServerInputs.push(queueItem(
+      cid,
+      { stability: 1.5, daysAgo: 10, dueAt: "2026-08-03T00:00:00.000Z", goalPriority: 5, courseId, skillLabel: `独立概念-${i}` },
+      nowMs,
+    ));
+  }
+
+  // Simulate server listCardQueue triage followed by public API stripping `delayedCheckCovered`.
+  const serverTriagedPublic: ReviewQueueItem[] = buildReviewQueue(
+    rawServerInputs,
+    "auto",
+    now,
+    now.toISOString().slice(0, 10),
+  ).map(({ card, state, goalPriority }) => ({ card, state, goalPriority }));
+
+  const value = clients();
+  vi.mocked(value.cards.listDue).mockResolvedValue(serverTriagedPublic);
+  vi.mocked(value.management.cardCommand).mockImplementation(async (command) => ({
+    ...session,
+    cardIds: command.action === "start" ? command.cardIds : session.cardIds,
+  }));
+
+  await render(value);
+  await act(async () => button("开始本次限时复习").click());
+
+  const startCall = vi.mocked(value.management.cardCommand).mock.calls[0]?.[0];
+  expect(startCall?.action).toBe("start");
+  if (startCall?.action === "start") {
+    expect(startCall.cardIds).toHaveLength(200);
+    const first151 = startCall.cardIds.slice(0, 151);
+    // All 150 distinct concepts + exactly 1 primary "极限" card occupy positions 0..150.
+    expect(first151.filter((cid) => distinctIds.has(cid))).toHaveLength(150);
+    expect(first151.filter((cid) => limitIds.has(cid))).toHaveLength(1);
+    expect(first151.filter((cid) => retestCoveredIds.has(cid))).toHaveLength(0);
+    // The 20 server-demoted delayedCheckCovered cards stay in the Band-5 tail (positions >= 151).
+    expect(startCall.cardIds.slice(151, 171).every((cid) => retestCoveredIds.has(cid))).toBe(true);
+  }
+});
+
 it("presents active and resumed cards in exact session.cardIds order while skipping reviewed cards", async () => {
   const cardA = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
   const cardB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -195,5 +287,32 @@ it("presents active and resumed cards in exact session.cardIds order while skipp
   ]);
 
   await render(value, id);
+  expect(host.querySelector('[data-testid="presented-order"]')?.textContent).toBe(`${cardB},${cardA}`);
+});
+
+it("hydrates missing unreviewed resumed session cards from the free queue in exact saved session order", async () => {
+  const cardA = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const cardB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const cardC = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+  const nowMs = Date.now();
+  const itemA = queueItem(cardA, { stability: 5, daysAgo: 2, dueAt: "2026-08-10T00:00:00.000Z", goalPriority: 1 }, nowMs);
+  const itemB = queueItem(cardB, { stability: 5, daysAgo: 2, dueAt: "2026-08-11T00:00:00.000Z", goalPriority: 1 }, nowMs);
+  const itemC = queueItem(cardC, { stability: 5, daysAgo: 2, dueAt: "2026-08-12T00:00:00.000Z", goalPriority: 1 }, nowMs);
+
+  const value = clients();
+  vi.mocked(value.cards.listDue).mockImplementation(async (mode) => (
+    mode === "free" ? [itemA, itemB, itemC] : [itemA]
+  ));
+  vi.mocked(value.management.cardSessions).mockResolvedValue([
+    {
+      ...session,
+      cardIds: [cardC, cardB, cardA],
+      reviewedCardIds: [cardC],
+    },
+  ]);
+
+  await render(value, id);
+  expect(value.cards.listDue).toHaveBeenCalledWith("auto");
+  expect(value.cards.listDue).toHaveBeenCalledWith("free");
   expect(host.querySelector('[data-testid="presented-order"]')?.textContent).toBe(`${cardB},${cardA}`);
 });

@@ -132,27 +132,6 @@ export async function listWorkspaceCards(
   return rows.map((row) => mapCard(row as Row));
 }
 
-function deriveCardKnowledgeUnitKey(card: CardRecord): string | undefined {
-  if (!card.syllabusPointId && !card.skillLabel) return undefined;
-  const scope = card.courseId ?? "workspace";
-  const unit = card.syllabusPointId
-    ? `sp:${card.syllabusPointId}`
-    : `sk:${card.skillLabel!.trim().toLowerCase()}`;
-  const dimension = card.originObservationRootId || card.tags.includes("review:question")
-    ? "question"
-    : card.tags.includes("review:concept")
-      ? "concept"
-      : "general";
-  return `${scope}:${unit}:${dimension}`;
-}
-
-function deriveCardFamilyKey(card: CardRecord): string | undefined {
-  if (card.originObservationRootId) return `obs:${card.originObservationRootId}`;
-  if (card.skillLabel) return `${card.courseId ?? "workspace"}:skill:${card.skillLabel.trim().toLowerCase()}`;
-  if (card.syllabusPointId) return `${card.courseId ?? "workspace"}:sp:${card.syllabusPointId}`;
-  return undefined;
-}
-
 export async function listCardQueue(
   sql: Sql,
   input: {
@@ -184,11 +163,23 @@ export async function listCardQueue(
         SELECT 1 FROM opening_retest_activities r
         WHERE r.workspace_id = c.workspace_id
           AND r.owner_user_id = ${input.ownerUserId}
-          AND c.course_id IS NOT NULL
           AND c.skill_label IS NOT NULL
-          AND r.course_id = c.course_id
-          AND r.skill_label = c.skill_label
-          AND r.status IN ('proposed', 'accepted', 'in_progress')
+          AND btrim(c.skill_label) <> ''
+          AND lower(btrim(r.skill_label)) = lower(btrim(c.skill_label))
+          AND r.status IN ('accepted', 'in_progress')
+          AND (
+            r.course_id = c.course_id
+            OR (
+              c.course_id IS NULL
+              AND EXISTS (
+                SELECT 1 FROM course_asset_memberships m2
+                WHERE m2.workspace_id = c.workspace_id
+                  AND m2.asset_type = 'card'
+                  AND m2.asset_id = c.id
+                  AND m2.course_id = r.course_id
+              )
+            )
+          )
       ) AS delayed_check_covered
     FROM cards c
     INNER JOIN card_review_states s
@@ -207,6 +198,8 @@ export async function listCardQueue(
       s.due_at, s.reps, s.lapses, s.last_grade, s.updated_at
   `;
 
+  // Leave knowledgeUnitKey / familyKey unset so buildReviewQueue auto-derives them via
+  // the canonical domain helpers, guaranteeing identical server and client dedup keys.
   const items: ReviewQueueItem[] = rows.map((row) => {
     const raw = row as Row;
     const card = mapCard(raw);
@@ -217,15 +210,11 @@ export async function listCardQueue(
       workspace_id: input.workspaceId,
       updated_at: raw.state_updated_at,
     });
-    const knowledgeUnitKey = deriveCardKnowledgeUnitKey(card);
-    const familyKey = deriveCardFamilyKey(card);
     const delayedCheckCovered = Boolean(raw.delayed_check_covered);
     return {
       card,
       state,
       goalPriority: Number(raw.goal_priority ?? 0),
-      ...(knowledgeUnitKey ? { knowledgeUnitKey } : {}),
-      ...(familyKey ? { familyKey } : {}),
       ...(delayedCheckCovered ? { delayedCheckCovered: true } : {}),
     };
   });

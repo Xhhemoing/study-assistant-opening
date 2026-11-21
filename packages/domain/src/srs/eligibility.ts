@@ -130,17 +130,60 @@ export function buildKnowledgeUnitKey(parts: {
 }
 
 /**
+ * Deterministically derives a canonical knowledge-unit key from card metadata when
+ * callers omit `ReviewQueueItem.knowledgeUnitKey`, ensuring identical server/client dedup.
+ */
+export function deriveCardKnowledgeUnitKey(
+  card: Pick<ReviewCard, "courseId" | "syllabusPointId" | "skillLabel" | "originObservationRootId" | "tags">,
+): string | undefined {
+  const syllabusPointId = card.syllabusPointId?.trim() || "";
+  const skillLabel = card.skillLabel?.trim().toLowerCase() || "";
+  if (!syllabusPointId && !skillLabel) return undefined;
+  const scope = card.courseId?.trim() || "workspace";
+  const unit = syllabusPointId ? `sp:${syllabusPointId}` : `sk:${skillLabel}`;
+  const tags = Array.isArray(card.tags) ? card.tags : [];
+  const dimension = card.originObservationRootId || tags.includes("review:question")
+    ? "question"
+    : tags.includes("review:concept")
+      ? "concept"
+      : "general";
+  return `${scope}:${unit}:${dimension}`;
+}
+
+/**
+ * Deterministically derives a question/skill family key from card metadata when
+ * callers omit `ReviewQueueItem.familyKey`.
+ */
+export function deriveCardFamilyKey(
+  card: Pick<ReviewCard, "courseId" | "syllabusPointId" | "skillLabel" | "originObservationRootId">,
+): string | undefined {
+  const originRoot = card.originObservationRootId?.trim() || "";
+  if (originRoot) return `obs:${originRoot}`;
+  const skillLabel = card.skillLabel?.trim().toLowerCase() || "";
+  if (skillLabel) return `${card.courseId?.trim() || "workspace"}:skill:${skillLabel}`;
+  const syllabusPointId = card.syllabusPointId?.trim() || "";
+  if (syllabusPointId) return `${card.courseId?.trim() || "workspace"}:sp:${syllabusPointId}`;
+  return undefined;
+}
+
+/**
  * Workspace-wide 30% daily recovery cap shared across all courses in a workspace:
  * `max(0, min(freeUnreservedMinutes, floor(0.30 * dailyBudgetMinutes) - usedOrReservedRecoveryMinutes))`.
+ * Fails closed (`0`) if any budget input is non-finite.
  */
 export function computeWorkspaceRecoveryBudgetMinutes(
   input: WorkspaceRecoveryBudgetInput,
 ): number {
-  const daily = Number.isFinite(input.dailyBudgetMinutes) ? Math.max(0, input.dailyBudgetMinutes) : 0;
-  const free = Number.isFinite(input.freeUnreservedMinutes) ? Math.max(0, input.freeUnreservedMinutes) : 0;
-  const used = Number.isFinite(input.usedOrReservedRecoveryMinutes)
-    ? Math.max(0, input.usedOrReservedRecoveryMinutes)
-    : 0;
+  if (
+    !Number.isFinite(input.dailyBudgetMinutes)
+    || !Number.isFinite(input.freeUnreservedMinutes)
+    || !Number.isFinite(input.usedOrReservedRecoveryMinutes)
+  ) {
+    return 0;
+  }
+  const daily = Math.max(0, input.dailyBudgetMinutes);
+  const free = Math.max(0, input.freeUnreservedMinutes);
+  const used = Math.max(0, input.usedOrReservedRecoveryMinutes);
   // Use exact rational arithmetic (3 / 10) to avoid IEEE-754 floor drift (e.g. 0.30 * 230 = 68.99999999999999).
   const dailyCap = Math.floor((daily * 3) / 10);
   return Math.max(0, Math.min(free, dailyCap - used));
@@ -243,15 +286,18 @@ type TriageCandidate = {
 };
 
 function bandFiveSubTier(entry: Pick<TriagedReviewQueueItem, "retrievabilityStatus" | "retrievability">): number {
-  if (
-    entry.retrievabilityStatus === "known"
-    && entry.retrievability !== null
-    && entry.retrievability >= SALVAGEABLE_RETRIEVABILITY_MIN
-    && entry.retrievability <= SALVAGEABLE_RETRIEVABILITY_MAX
-  ) {
-    return 0;
+  if (entry.retrievabilityStatus === "known" && entry.retrievability !== null) {
+    if (
+      entry.retrievability >= SALVAGEABLE_RETRIEVABILITY_MIN
+      && entry.retrievability <= SALVAGEABLE_RETRIEVABILITY_MAX
+    ) {
+      return 0;
+    }
+    if (entry.retrievability < SALVAGEABLE_RETRIEVABILITY_MIN) {
+      return 1;
+    }
+    return 3;
   }
-  if (entry.retrievabilityStatus === "unseen_or_unknown") return 1;
   return 2;
 }
 
@@ -283,21 +329,19 @@ function compareWithinSameBand(
 
 function classifyBaseBand(
   item: ReviewQueueItem,
-  effectiveWeight: number,
   highWeight: boolean,
   retrievabilityStatus: "known" | "unseen_or_unknown",
   retrievability: number | null,
 ): RecoveryTriageBand {
-  if (item.delayedCheckCovered === true) return 5;
+  if (item.delayedCheckCovered === true || !highWeight) return 5;
   if (retrievabilityStatus === "known" && retrievability !== null) {
     if (
-      highWeight
-      && retrievability >= SALVAGEABLE_RETRIEVABILITY_MIN
+      retrievability >= SALVAGEABLE_RETRIEVABILITY_MIN
       && retrievability <= SALVAGEABLE_RETRIEVABILITY_MAX
     ) {
       return 1;
     }
-    if (highWeight && retrievability < SALVAGEABLE_RETRIEVABILITY_MIN) {
+    if (retrievability < SALVAGEABLE_RETRIEVABILITY_MIN) {
       return 2;
     }
     if (retrievability > SALVAGEABLE_RETRIEVABILITY_MAX) {
@@ -305,8 +349,7 @@ function classifyBaseBand(
     }
     return 5;
   }
-  const linked = effectiveWeight > 0 || item.card.syllabusPointId != null || item.goalPriority > 0;
-  return linked ? 3 : 5;
+  return 3;
 }
 
 /**
@@ -336,11 +379,16 @@ export function buildBacklogRehabilitationPlan(
       const highWeight = isHighWeightValue(effectiveWeight, threshold);
       const baseBand = classifyBaseBand(
         item,
-        effectiveWeight,
         highWeight,
         evaluated.retrievabilityStatus,
         evaluated.retrievability,
       );
+      const resolvedKnowledgeUnitKey = item.knowledgeUnitKey !== undefined
+        ? normalizeOptionalKey(item.knowledgeUnitKey)
+        : normalizeOptionalKey(deriveCardKnowledgeUnitKey(item.card));
+      const resolvedFamilyKey = item.familyKey !== undefined
+        ? normalizeOptionalKey(item.familyKey)
+        : normalizeOptionalKey(deriveCardFamilyKey(item.card));
       return {
         item,
         baseBand,
@@ -348,8 +396,8 @@ export function buildBacklogRehabilitationPlan(
         retrievabilityStatus: evaluated.retrievabilityStatus,
         retrievability: evaluated.retrievability,
         elapsedDaysSinceLastReview: evaluated.elapsedDaysSinceLastReview,
-        knowledgeUnitKey: normalizeOptionalKey(item.knowledgeUnitKey),
-        familyKey: normalizeOptionalKey(item.familyKey),
+        knowledgeUnitKey: resolvedKnowledgeUnitKey,
+        familyKey: resolvedFamilyKey,
         delayedCheckCovered: item.delayedCheckCovered === true,
       };
     });

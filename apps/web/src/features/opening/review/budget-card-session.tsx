@@ -13,23 +13,104 @@ type Command = z.infer<typeof learningCardSessionCommandSchema>;
 const progressSchema = z.object({ elapsedSeconds: z.number().int().min(0).max(43200), reviewedCardIds: z.array(z.string().uuid()).max(200) });
 function pendingKey(namespace: string) { return `aistudy:card-session-command:${namespace}`; }
 function readPending(namespace: string | null): Command | null { if (!namespace) return null; try { const raw = sessionStorage.getItem(pendingKey(namespace)); const parsed = raw ? learningCardSessionCommandSchema.safeParse(JSON.parse(raw)) : null; return parsed?.success ? parsed.data : null; } catch { return null; } }
+type TriageAwareQueueItem = ReviewQueueItem & {
+  syllabusWeight?: number;
+  knowledgeUnitKey?: string;
+  familyKey?: string;
+  delayedCheckCovered?: boolean;
+};
+
+function sameCardIdSequence(a: readonly ReviewQueueItem[], b: readonly ReviewQueueItem[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i]?.card.id !== b[i]?.card.id) return false;
+  }
+  return true;
+}
+
+function skillCoverageKey(card: ReviewQueueItem["card"]): string | null {
+  const skill = card.skillLabel?.trim().toLowerCase();
+  if (!skill) return null;
+  return `${card.courseId?.trim() ?? ""}::${skill}`;
+}
+
 function triageSessionQueue(items: readonly ReviewQueueItem[], now: Date): ReviewQueueItem[] {
-  const triagable: ReviewQueueItem[] = [];
+  const triagable: TriageAwareQueueItem[] = [];
   const fallback: ReviewQueueItem[] = [];
   for (const item of items) {
     if (item.state && typeof item.state.dueAt === "string") {
+      const aware = item as TriageAwareQueueItem;
       triagable.push({
-        ...item,
-        goalPriority: typeof item.goalPriority === "number" ? item.goalPriority : 0,
+        ...aware,
+        goalPriority: typeof aware.goalPriority === "number" ? aware.goalPriority : 0,
       });
     } else {
       fallback.push(item);
     }
   }
-  const ordered = triagable.length
-    ? buildReviewQueue(triagable, "free", now, now.toISOString().slice(0, 10))
-    : [];
-  return [...ordered, ...fallback];
+  if (!triagable.length) return fallback;
+  const today = now.toISOString().slice(0, 10);
+  const baseline = buildReviewQueue(triagable, "free", now, today);
+  if (baseline.length !== triagable.length) {
+    return [...baseline, ...fallback];
+  }
+  if (sameCardIdSequence(baseline, triagable)) {
+    return [...triagable, ...fallback];
+  }
+
+  // Preserve valid server-triaged queues whose Band-5 tail includes server-side
+  // `delayedCheckCovered: true` demotions stripped by the public queue contract.
+  const baseRank = new Map(baseline.map((item, index) => [item.card.id, index]));
+  let maxRank = -1;
+  const movedBackIndices: number[] = [];
+  for (let i = 0; i < triagable.length; i += 1) {
+    const rank = baseRank.get(triagable[i]!.card.id) ?? -1;
+    if (rank < maxRank) {
+      movedBackIndices.push(i);
+    } else {
+      maxRank = rank;
+    }
+  }
+
+  if (movedBackIndices.length > 0) {
+    const allMatchable = movedBackIndices.every((index) => {
+      const entry = triagable[index]!;
+      return entry.delayedCheckCovered === true || skillCoverageKey(entry.card) !== null;
+    });
+    if (allMatchable) {
+      const firstMovedBack = movedBackIndices[0]!;
+      const coveredSkillKeys = new Set<string>();
+      const inferredDelayedIds = new Set<string>();
+      for (const index of movedBackIndices) {
+        const entry = triagable[index]!;
+        inferredDelayedIds.add(entry.card.id);
+        const key = skillCoverageKey(entry.card);
+        if (key) coveredSkillKeys.add(key);
+      }
+      for (let i = firstMovedBack; i < triagable.length; i += 1) {
+        const entry = triagable[i]!;
+        const key = skillCoverageKey(entry.card);
+        if (key && coveredSkillKeys.has(key)) {
+          inferredDelayedIds.add(entry.card.id);
+        }
+      }
+      const candidate = buildReviewQueue(
+        triagable.map((entry) => (
+          inferredDelayedIds.has(entry.card.id)
+            ? { ...entry, delayedCheckCovered: true }
+            : entry
+        )),
+        "free",
+        now,
+        today,
+      );
+      if (sameCardIdSequence(candidate, triagable)) {
+        return [...triagable, ...fallback];
+      }
+    }
+  }
+
+  return [...baseline, ...fallback];
 }
 export function BudgetCardSession({ initialActivityId, client: suppliedClient, cardsClient: suppliedCards }: { initialActivityId?: string; client?: Pick<LearningManagementClient, "cardSessions" | "cardCommand">; cardsClient?: OpeningCardsClient }) {
   const client = useMemo(() => suppliedClient ?? createLearningManagementClient(), [suppliedClient]);
@@ -109,12 +190,17 @@ export function BudgetCardSession({ initialActivityId, client: suppliedClient, c
       if (!sessionCardIds?.length) return [];
       const byId = new Map(queue.map(item => [item.card.id, item]));
       const reviewedSet = new Set(reviewedRef.current);
-      return sessionCardIds
-        .filter(id => !reviewedSet.has(id))
-        .flatMap(id => {
-          const item = byId.get(id);
-          return item ? [item] : [];
-        });
+      const remainingIds = sessionCardIds.filter(id => !reviewedSet.has(id));
+      if (remainingIds.some(id => !byId.has(id))) {
+        const fallbackItems = await cards.listDue("free");
+        for (const item of fallbackItems) {
+          if (!byId.has(item.card.id)) byId.set(item.card.id, item);
+        }
+      }
+      return remainingIds.flatMap(id => {
+        const item = byId.get(id);
+        return item ? [item] : [];
+      });
     },
   }), [cards, queue, sessionCardIds]);
   const onGraded = useCallback((cardId: string, _receipt: GradeReviewResponse) => {
