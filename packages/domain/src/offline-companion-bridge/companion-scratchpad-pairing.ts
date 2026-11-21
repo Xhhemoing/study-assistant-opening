@@ -139,8 +139,8 @@ function isAllowedCompanionAction(action: string): action is CompanionAllowedAct
 }
 
 /**
- * Normalizes an HTTP(S) origin string (`scheme://host[:non-default-port]`) and rejects
- * origins with credentials, non-root paths, query strings, fragments, or unsupported schemes.
+ * Normalizes an HTTPS origin string (`https://host[:non-default-port]`) and rejects
+ * non-HTTPS schemes, credentials, non-root paths, query strings, or fragments.
  */
 export function normalizeOrigin(rawOrigin: string): string | null {
   if (!isNonEmptyString(rawOrigin)) return null;
@@ -151,11 +151,42 @@ export function normalizeOrigin(rawOrigin: string): string | null {
   } catch {
     return null;
   }
-  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return null;
+  if (parsed.protocol !== "https:") return null;
   if (parsed.username !== "" || parsed.password !== "") return null;
   if (parsed.pathname !== "/" || parsed.search !== "" || parsed.hash !== "") return null;
   if (!parsed.origin || parsed.origin === "null") return null;
   return parsed.origin.toLowerCase();
+}
+
+function normalizeHostname(origin: string): string {
+  return new URL(origin).hostname.toLowerCase().replace(/\.$/, "");
+}
+
+/**
+ * Enforces RFC 6265 cookie isolation between primary and companion HTTPS origins:
+ * - Both origins must be valid HTTPS origins.
+ * - Hostnames must be strictly distinct (different ports on the same host share cookies).
+ * - Neither hostname may be a parent/child suffix of the other (`a.b.com` vs `b.com`)
+ *   so parent `Domain=` cookies cannot leak across origins.
+ */
+export function areCompanionOriginsIsolated(
+  primaryOrigin: string,
+  companionOrigin: string,
+): boolean {
+  const normalizedPrimary = normalizeOrigin(primaryOrigin);
+  const normalizedCompanion = normalizeOrigin(companionOrigin);
+  if (!normalizedPrimary || !normalizedCompanion) return false;
+  const primaryHost = normalizeHostname(normalizedPrimary);
+  const companionHost = normalizeHostname(normalizedCompanion);
+  if (!primaryHost || !companionHost) return false;
+  if (primaryHost === companionHost) return false;
+  if (
+    companionHost.endsWith(`.${primaryHost}`) ||
+    primaryHost.endsWith(`.${companionHost}`)
+  ) {
+    return false;
+  }
+  return true;
 }
 
 /**
@@ -215,8 +246,8 @@ export function parseCompanionQrUrl(
   } catch {
     return { ok: false, code: "invalid_qr_url", message: "QR URL is not a valid URL." };
   }
-  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
-    return { ok: false, code: "invalid_qr_url", message: "QR URL must use http(s)." };
+  if (parsed.protocol !== "https:") {
+    return { ok: false, code: "invalid_qr_url", message: "QR URL must use https." };
   }
   if (parsed.searchParams.has("k")) {
     return {
@@ -296,15 +327,15 @@ export function createCompanionPairingOffer(
       ok: false,
       code: "invalid_origin",
       httpStatus: 400,
-      message: "primaryOrigin and allowedCompanionOrigin must be valid HTTP(S) origins.",
+      message: "primaryOrigin and allowedCompanionOrigin must be valid HTTPS origins.",
     };
   }
-  if (normalizedPrimaryOrigin === normalizedCompanionOrigin) {
+  if (!areCompanionOriginsIsolated(normalizedPrimaryOrigin, normalizedCompanionOrigin)) {
     return {
       ok: false,
       code: "origin_isolation_violation",
       httpStatus: 400,
-      message: "Companion origin must be strictly isolated from primaryOrigin so main-session cookies are never shared.",
+      message: "Companion origin must use a strictly distinct, non-parent/child HTTPS hostname from primaryOrigin so cookies are never shared across ports or Domain suffixes.",
     };
   }
 
@@ -403,57 +434,8 @@ export function redeemCompanionPairingOffer(
     };
   }
 
-  if (offer.status === "redeemed") {
-    return {
-      ok: false,
-      code: "pairing_already_redeemed",
-      httpStatus: 409,
-      revokeIssuedSession: true,
-      revokedSessionId: offer.issuedSessionId,
-      offer: {
-        ...offer,
-        replayDetectedAtMs: nowMs,
-      },
-      message: "Pairing offer was already redeemed; signal immediate revocation of the issued companion session.",
-    };
-  }
-
-  if (offer.status === "revoked") {
-    return {
-      ok: false,
-      code: "pairing_revoked",
-      httpStatus: 410,
-      revokeIssuedSession: false,
-      revokedSessionId: offer.issuedSessionId,
-      offer,
-      message: "Pairing offer has been revoked.",
-    };
-  }
-
-  if (offer.status === "expired" || nowMs > offer.expiresAtMs) {
-    return {
-      ok: false,
-      code: "pairing_expired",
-      httpStatus: 410,
-      revokeIssuedSession: false,
-      revokedSessionId: null,
-      offer: offer.status === "expired" ? offer : { ...offer, status: "expired" },
-      message: `Pairing offer expired at ${offer.expiresAtMs} (90s ceiling).`,
-    };
-  }
-
-  if (!isNonEmptyString(input.sessionId)) {
-    return {
-      ok: false,
-      code: "invalid_session_id",
-      httpStatus: 400,
-      revokeIssuedSession: false,
-      revokedSessionId: null,
-      offer,
-      message: "sessionId must be a non-empty string.",
-    };
-  }
-
+  // Authenticate origin and full pairing credentials BEFORE inspecting redeemed state so
+  // unauthenticated probes cannot DoS/revoke an active companion session.
   const normalizedRequestOrigin = normalizeOrigin(input.requestOrigin);
   if (!normalizedRequestOrigin || normalizedRequestOrigin !== offer.allowedCompanionOrigin) {
     return {
@@ -484,11 +466,62 @@ export function redeemCompanionPairingOffer(
     return {
       ok: false,
       code: "invalid_pairing_credentials",
-      httpStatus: 401,
+      httpStatus: 403,
       revokeIssuedSession: false,
       revokedSessionId: null,
       offer,
       message: "Companion pairing credentials failed verification.",
+    };
+  }
+
+  if (offer.status === "redeemed") {
+    return {
+      ok: false,
+      code: "pairing_already_redeemed",
+      httpStatus: 409,
+      revokeIssuedSession: true,
+      revokedSessionId: offer.issuedSessionId,
+      offer: {
+        ...offer,
+        replayDetectedAtMs: nowMs,
+      },
+      message: "Authenticated replay of an already-redeemed pairing offer detected; signal immediate revocation of the issued companion session.",
+    };
+  }
+
+  if (offer.status === "revoked") {
+    return {
+      ok: false,
+      code: "pairing_revoked",
+      httpStatus: 410,
+      revokeIssuedSession: false,
+      revokedSessionId: null,
+      offer,
+      message: "Pairing offer has been revoked.",
+    };
+  }
+
+  if (offer.status === "expired" || nowMs > offer.expiresAtMs) {
+    return {
+      ok: false,
+      code: "pairing_expired",
+      httpStatus: 410,
+      revokeIssuedSession: false,
+      revokedSessionId: null,
+      offer: offer.status === "expired" ? offer : { ...offer, status: "expired" },
+      message: `Pairing offer expired at ${offer.expiresAtMs} (90s ceiling).`,
+    };
+  }
+
+  if (!isNonEmptyString(input.sessionId)) {
+    return {
+      ok: false,
+      code: "invalid_session_id",
+      httpStatus: 400,
+      revokeIssuedSession: false,
+      revokedSessionId: null,
+      offer,
+      message: "sessionId must be a non-empty string.",
     };
   }
 
@@ -646,29 +679,52 @@ export function createCompanionScratchpadDraft(input: {
 
 /**
  * Appends (or replaces by pageNumber) a companion scratchpad page and increments
- * `draftRevision` monotonically while `frozen === false`. Rejects writes once frozen.
+ * `draftRevision` monotonically while `frozen === false`. Unconditionally verifies the
+ * mandatory companion `session`, `requestOrigin`, and `nowMs` via `authorizeCompanionAction`
+ * before allowing any write, and rejects writes once frozen.
  */
 export function appendCompanionScratchpadPage(
   state: CompanionScratchpadState,
   input: AppendCompanionScratchpadPageInput,
 ): AppendCompanionScratchpadPageResult {
-  if (input.session) {
-    const auth = authorizeCompanionAction({
-      session: input.session,
-      action: "upload_page",
-      attemptId: state.attemptId,
-      nowMs: input.uploadedAtMs,
-      requestOrigin: input.requestOrigin,
-    });
-    if (!auth.allowed) {
-      return {
-        ok: false,
-        code: auth.reason,
-        httpStatus: 403,
-        state,
-        message: auth.message,
-      };
-    }
+  if (!input.session || typeof input.requestOrigin !== "string") {
+    return {
+      ok: false,
+      code: "companion_capability_forbidden",
+      httpStatus: 403,
+      state,
+      message: "A verified companion session and requestOrigin are mandatory to upload scratchpad pages.",
+    };
+  }
+
+  const auth = authorizeCompanionAction({
+    session: input.session,
+    action: "upload_page",
+    attemptId: state.attemptId,
+    nowMs: input.nowMs,
+    requestOrigin: input.requestOrigin,
+  });
+  if (!auth.allowed) {
+    return {
+      ok: false,
+      code: auth.reason,
+      httpStatus: 403,
+      state,
+      message: auth.message,
+    };
+  }
+
+  if (
+    input.session.workspaceId !== state.workspaceId ||
+    input.session.learnerId !== state.learnerId
+  ) {
+    return {
+      ok: false,
+      code: "attempt_mismatch",
+      httpStatus: 403,
+      state,
+      message: "Companion session workspace/learner scope does not match scratchpad draft.",
+    };
   }
 
   if (state.frozen) {
@@ -681,6 +737,8 @@ export function appendCompanionScratchpadPage(
     };
   }
 
+  const effectiveUploadedAtMs = input.uploadedAtMs ?? input.nowMs;
+
   if (
     !Number.isSafeInteger(input.pageNumber) ||
     input.pageNumber < 1 ||
@@ -689,14 +747,14 @@ export function appendCompanionScratchpadPage(
     !SHA256_HEX_RE.test(input.sha256.trim()) ||
     !Number.isSafeInteger(input.byteLength) ||
     input.byteLength <= 0 ||
-    !isValidTimestamp(input.uploadedAtMs)
+    !isValidTimestamp(effectiveUploadedAtMs)
   ) {
     return {
       ok: false,
       code: "invalid_page_payload",
       httpStatus: 400,
       state,
-      message: "Scratchpad page requires positive pageNumber, objectKey, 64-char hex sha256, positive byteLength, and valid uploadedAtMs.",
+      message: "Scratchpad page requires positive pageNumber, objectKey, 64-char hex sha256, positive byteLength, and valid timestamp.",
     };
   }
 
@@ -706,7 +764,7 @@ export function appendCompanionScratchpadPage(
     objectKey: input.objectKey.trim(),
     sha256: input.sha256.trim().toLowerCase(),
     byteLength: input.byteLength,
-    uploadedAtMs: input.uploadedAtMs,
+    uploadedAtMs: effectiveUploadedAtMs,
     uploadedInRevision: nextRevision,
   };
 

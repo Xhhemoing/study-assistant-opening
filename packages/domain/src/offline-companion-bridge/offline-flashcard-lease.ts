@@ -44,6 +44,67 @@ const STRIPPABLE_CLIENT_PROMOTION_FLAGS = [
   "promoteMastery",
 ] as const;
 
+const SOLUTION_DIRECTIVE_PATTERNS: ReadonlyArray<RegExp> = [
+  /\\begin\s*\{\s*(?:solution|answer|answers|proof|rubric|key|grading|hint)\*?\s*\}/i,
+  /(?:^|\n)\s*:{3,}\s*(?:solution|answer|rubric|key|grading)\b/i,
+  /(?:^|\n)\s*`{3,}\s*(?:solution|answer|rubric|key|grading)\b/i,
+  /<\s*(?:details|summary)\b/i,
+  /\[\s*(?:answer|ans|solution|sol|key|rubric|canonical\s+solution|reference\s+answer)\s*[:：=]/i,
+  /(?:^|[\s,.;!?()[\]])(?:answer|ans|solution|canonical\s+solution|reference\s+answer|answer\s+key|grading\s+rubric)\s*[:：=]/i,
+  /(?:参考答案|标准答案|正确答案|答案|解析|解答|解题过程|评分标准)\s*[:：]/,
+];
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function containsTokenBoundedSubstring(haystack: string, needle: string): boolean {
+  const pattern = new RegExp(`(?:^|[^a-z0-9])${escapeRegExp(needle)}(?:$|[^a-z0-9])`, "i");
+  return pattern.test(haystack);
+}
+
+function containsSolutionDirectiveMarker(rawStem: string): boolean {
+  return SOLUTION_DIRECTIVE_PATTERNS.some(pattern => pattern.test(rawStem));
+}
+
+function extractLeakSegments(normalizedSecret: string): string[] {
+  const segments = new Set<string>([normalizedSecret]);
+  for (const part of normalizedSecret.split(/[\n;]+|\.\s+|\bstep\s*\d+\s*[:.)]\s*/i)) {
+    const trimmed = part.trim();
+    if (trimmed.length >= 10 || (trimmed.length >= 6 && trimmed.split(/\s+/).length >= 3)) {
+      segments.add(trimmed);
+    }
+  }
+  return [...segments];
+}
+
+function stemLeaksSecretText(normalizedStem: string, secretText: string): boolean {
+  const normalizedSecret = normalizeComparableText(secretText);
+  if (!normalizedSecret) return false;
+  if (normalizedStem === normalizedSecret) return true;
+
+  for (const segment of extractLeakSegments(normalizedSecret)) {
+    if (segment.length >= 6 && normalizedStem.includes(segment)) {
+      return true;
+    }
+    const tokenCount = segment.split(/\s+/).filter(Boolean).length;
+    if (tokenCount >= 2 && segment.length >= 4 && containsTokenBoundedSubstring(normalizedStem, segment)) {
+      return true;
+    }
+    if (segment.includes("=")) {
+      const compactEq = segment.replace(/\s*=\s*/g, "=");
+      if (compactEq.length >= 3) {
+        const eqRegexSource = escapeRegExp(compactEq).replace(/=/g, "\\s*=\\s*");
+        const eqPattern = new RegExp(`(?:^|[^a-z0-9])${eqRegexSource}(?:$|[^a-z0-9])`, "i");
+        if (eqPattern.test(normalizedStem)) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
 const SHA256_K = [
   0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
   0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
@@ -332,18 +393,21 @@ function sanitizeLeaseCandidate(
         message: `Miss variant card ${candidateCardId} must include non-empty freshVariantId and freshVariantStem.`,
       };
     }
+    if (containsSolutionDirectiveMarker(candidate.freshVariantStem)) {
+      return {
+        ok: false,
+        code: "miss_variant_answer_leak",
+        httpStatus: 422,
+        cardId: candidateCardId,
+        message: `Miss variant card ${candidateCardId} refused: freshVariantStem contains solution/answer directive markup.`,
+      };
+    }
     const normalizedStem = normalizeComparableText(candidate.freshVariantStem);
     for (const forbiddenField of FORBIDDEN_MISS_VARIANT_FIELDS) {
       const rawSecret = (candidate as Record<string, unknown>)[forbiddenField];
       const secretTexts = collectSecretTexts(rawSecret);
       for (const secretText of secretTexts) {
-        const normalizedSecret = normalizeComparableText(secretText);
-        const isDirectMatch = normalizedStem === normalizedSecret;
-        const isEmbeddedSealedLeak =
-          forbiddenField === "sealedPayload" &&
-          normalizedSecret.length >= 6 &&
-          normalizedStem.includes(normalizedSecret);
-        if (isDirectMatch || isEmbeddedSealedLeak) {
+        if (stemLeaksSecretText(normalizedStem, secretText)) {
           return {
             ok: false,
             code: "miss_variant_answer_leak",
@@ -786,7 +850,8 @@ export function reconcileOfflineLeaseOutbox(
       continue;
     }
 
-    if (!leasedCardById.has(entry.cardId)) {
+    const leasedCard = leasedCardById.get(entry.cardId);
+    if (!leasedCard) {
       results.push({
         leaseId: lease.leaseId,
         seq: entry.seq,
@@ -811,15 +876,35 @@ export function reconcileOfflineLeaseOutbox(
       continue;
     }
 
+    // Compare live serverCard.revision and client expectedCardRevision against the
+    // authoritative leasedCard.cardRevision snapshot minted into the lease (never trust
+    // a client claiming a newer revision to overwrite a same-millisecond desktop review).
     const fsrsLastReviewAtMs = serverCard.fsrs?.lastReviewAtMs ?? null;
-    const reviewedAfterLeaseIssued =
-      (serverCard.lastServerReviewedAtMs !== null && serverCard.lastServerReviewedAtMs > lease.issuedAtMs) ||
-      (fsrsLastReviewAtMs !== null && fsrsLastReviewAtMs > lease.issuedAtMs);
-    const revisionMoved = serverCard.revision !== entry.expectedCardRevision;
+    const serverMovedFromLease = serverCard.revision !== leasedCard.cardRevision;
+    const expectedRevisionMismatch =
+      entry.expectedCardRevision !== leasedCard.cardRevision ||
+      serverCard.revision !== entry.expectedCardRevision;
+    const serverReviewedSinceLease =
+      serverCard.lastServerReviewedAtMs !== null &&
+      (serverCard.lastServerReviewedAtMs > lease.issuedAtMs ||
+        (serverCard.lastServerReviewedAtMs >= lease.issuedAtMs &&
+          (serverMovedFromLease ||
+            serverCard.lastServerReviewedAtMs !== leasedCard.lastServerReviewedAtMs)));
+    const fsrsReviewedSinceLease =
+      fsrsLastReviewAtMs !== null &&
+      (fsrsLastReviewAtMs > lease.issuedAtMs ||
+        (fsrsLastReviewAtMs >= lease.issuedAtMs &&
+          (serverMovedFromLease || fsrsLastReviewAtMs !== leasedCard.lastServerReviewedAtMs)));
     const reviewAheadOfServerClock =
       fsrsLastReviewAtMs !== null && fsrsLastReviewAtMs > serverReceiptAtMs;
 
-    if (revisionMoved || reviewedAfterLeaseIssued || reviewAheadOfServerClock) {
+    if (
+      serverMovedFromLease ||
+      expectedRevisionMismatch ||
+      serverReviewedSinceLease ||
+      fsrsReviewedSinceLease ||
+      reviewAheadOfServerClock
+    ) {
       conflictCount += 1;
       results.push({
         leaseId: lease.leaseId,
@@ -828,9 +913,10 @@ export function reconcileOfflineLeaseOutbox(
         outcome: "reviewed_elsewhere",
         httpStatus: 409,
         serverRevision: serverCard.revision,
+        leasedCardRevision: leasedCard.cardRevision,
         expectedCardRevision: entry.expectedCardRevision,
         serverLastReviewedAtMs: serverCard.lastServerReviewedAtMs,
-        reason: `Card ${entry.cardId} was reviewed elsewhere (serverRevision=${serverCard.revision}, expected=${entry.expectedCardRevision}).`,
+        reason: `Card ${entry.cardId} was reviewed elsewhere (serverRevision=${serverCard.revision}, leasedRevision=${leasedCard.cardRevision}, expected=${entry.expectedCardRevision}).`,
       });
       continue;
     }

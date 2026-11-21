@@ -232,6 +232,7 @@ export type OfflineOutboxItemResult =
       readonly outcome: "reviewed_elsewhere";
       readonly httpStatus: 409;
       readonly serverRevision: number;
+      readonly leasedCardRevision: number;
       readonly expectedCardRevision: number;
       readonly serverLastReviewedAtMs: number | null;
       readonly reason: string;
@@ -487,13 +488,14 @@ export interface CompanionScratchpadState {
 }
 
 export interface AppendCompanionScratchpadPageInput {
+  readonly session: CompanionSession;
+  readonly requestOrigin: string;
+  readonly nowMs: number;
   readonly pageNumber: number;
   readonly objectKey: string;
   readonly sha256: string;
   readonly byteLength: number;
-  readonly uploadedAtMs: number;
-  readonly session?: CompanionSession;
-  readonly requestOrigin?: string;
+  readonly uploadedAtMs?: number;
 }
 
 export type AppendCompanionScratchpadPageResult =
@@ -556,7 +558,23 @@ export interface CrossCourseConceptEdge {
   readonly targetCourseId: string;
   readonly targetConceptId: string;
   readonly alignmentWeight: number;
-  readonly sourceMasteryProbability: number;
+  /**
+   * Direct in-course success count (in `[0, sourceDirectObservationCount]`).
+   * Preferred input: bridge probability is computed strictly as
+   * `sourceDirectSuccessCount / sourceDirectObservationCount` without any bridged prior.
+   */
+  readonly sourceDirectSuccessCount?: number;
+  /**
+   * Direct-only mastery probability certified free of any cross-course bridged priors
+   * (used only when `sourceDirectSuccessCount` is omitted and `includesBridgedPrior !== true`).
+   */
+  readonly sourceDirectOnlyMasteryProbability?: number;
+  /**
+   * Legacy / mixed posterior probability that may include imported cross-course priors.
+   * Never admitted directly into 1-hop bridge computation to prevent 2-hop relay.
+   */
+  readonly sourceMasteryProbability?: number;
+  readonly includesBridgedPrior?: boolean;
   readonly sourceDirectObservationCount: number;
   readonly edgePrivacyEpoch: number;
   readonly supportingSourceIds: ReadonlyArray<string>;
@@ -569,6 +587,7 @@ export type CrossCourseDecoupleReason =
   | "privacy_epoch_mismatch"
   | "supporting_source_revoked"
   | "no_direct_source_observations"
+  | "bridged_prior_contamination"
   | "multi_hop_rejected"
   | "invalid_edge_parameters";
 
@@ -600,7 +619,9 @@ export interface AcceptedConceptBridgeEdge {
   readonly sourceCourseId: string;
   readonly sourceConceptId: string;
   readonly alignmentWeight: number;
+  readonly sourceDirectOnlyMasteryProbability: number;
   readonly sourceMasteryProbability: number;
+  readonly directEvidenceSource: "direct_counts" | "certified_direct_only_probability";
   readonly sourceDirectObservationCount: number;
   readonly edgePrivacyEpoch: number;
   readonly effectiveWeight: number;

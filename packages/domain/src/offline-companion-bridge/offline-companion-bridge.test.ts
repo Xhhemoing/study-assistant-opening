@@ -12,6 +12,7 @@ import {
   MIN_BRIDGE_PRIOR_MEAN,
   OFFLINE_LEASE_TTL_MS,
   appendCompanionScratchpadPage,
+  areCompanionOriginsIsolated,
   authorizeCompanionAction,
   computeCrossCourseWeakPrior,
   createCompanionPairingOffer,
@@ -218,6 +219,57 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
     });
     expect(leakedSealed.ok).toBe(false);
     if (!leakedSealed.ok) expect(leakedSealed.code).toBe("miss_variant_answer_leak");
+
+    // [P1-1] Embedded substring solutions, algebraic answers, and solution directive markers MUST fail closed.
+    const embeddedLeaks: ReadonlyArray<Record<string, unknown>> = [
+      {
+        freshVariantStem:
+          "Compute the determinant of [[2, 1], [5, 3]]. Working: det = 2*3 - 1*5 = 1.",
+      },
+      {
+        answerKey: "x = 7",
+        freshVariantStem: "Solve 2x = 14 (check that x=7 satisfies the equation).",
+      },
+      {
+        answerKey: "O(n log n)",
+        freshVariantStem: "Find the merge sort runtime; recall O(n log n) dominates.",
+      },
+      {
+        freshVariantStem: "Solve 2x = 6.\n\\begin{solution}\nx = 3\n\\end{solution}",
+      },
+      {
+        freshVariantStem: "Solve 2x = 6.\n:::solution\nx = 3\n:::",
+      },
+      {
+        freshVariantStem: "Solve 2x = 6. <details><summary>Check</summary>3</details>",
+      },
+      {
+        freshVariantStem: "Solve 2x = 6. [Answer: 3]",
+      },
+      {
+        freshVariantStem: "Solve 2x = 6. Answer: 3",
+      },
+      {
+        freshVariantStem: "计算行列式的值。解析：2*3 - 1*5 = 1",
+      },
+      {
+        freshVariantStem: "计算行列式的值。答案：1",
+      },
+    ];
+    for (const [idx, leakOverrides] of embeddedLeaks.entries()) {
+      const rejected = issueOfflineFlashcardLease({
+        leaseId: `lease-miss-embedded-${idx}`,
+        workspaceId: "ws-1",
+        learnerId: "learner-1",
+        issuedAtMs: T0,
+        candidates: [makeMissVariantCandidate(leakOverrides)],
+      });
+      expect(rejected.ok).toBe(false);
+      if (!rejected.ok) {
+        expect(rejected.httpStatus).toBe(422);
+        expect(rejected.code).toBe("miss_variant_answer_leak");
+      }
+    }
   });
 
   it("settles unordered outbox entries idempotently at serverReceiptAtMs, clamps easy->good, strips delayedCheck, and catches seq payload mismatch", () => {
@@ -392,9 +444,49 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
     if (!raceResult.ok) throw new Error("expected reconciliation response");
     expect(raceResult.settledCount).toBe(0);
     expect(raceResult.conflictCount).toBe(2);
-    expect(raceResult.results[0]).toMatchObject({ outcome: "reviewed_elsewhere", httpStatus: 409 });
-    expect(raceResult.results[1]).toMatchObject({ outcome: "reviewed_elsewhere", httpStatus: 409 });
+    expect(raceResult.results[0]).toMatchObject({
+      outcome: "reviewed_elsewhere",
+      httpStatus: 409,
+      leasedCardRevision: 1,
+    });
+    expect(raceResult.results[1]).toMatchObject({
+      outcome: "reviewed_elsewhere",
+      httpStatus: 409,
+      leasedCardRevision: 1,
+    });
     expect(raceResult.updatedServerCards).toEqual(racedCards);
+
+    // [P1-2] Desktop review occurring at the EXACT lease.issuedAtMs millisecond MUST fail closed
+    // with 409 reviewed_elsewhere even if the offline client claims the newer server revision!
+    const sameMsDesktopReviewed: Record<string, ServerFlashcardSnapshot> = {
+      "card-1": { ...card1Base, revision: 2, lastServerReviewedAtMs: T0 },
+    };
+    const spoofedRevisionAttempt = reconcileOfflineLeaseOutbox({
+      lease: minted.lease,
+      serverCards: sameMsDesktopReviewed,
+      serverReceiptAtMs: T0 + 30_000,
+      entries: [
+        {
+          leaseId: "lease-race-1",
+          seq: 1,
+          cardId: "card-1",
+          expectedCardRevision: 2, // client tries to match newer desktop revision
+          rating: "good",
+        },
+      ],
+    });
+    expect(spoofedRevisionAttempt.ok).toBe(true);
+    if (!spoofedRevisionAttempt.ok) throw new Error("expected reconcile response");
+    expect(spoofedRevisionAttempt.settledCount).toBe(0);
+    expect(spoofedRevisionAttempt.conflictCount).toBe(1);
+    expect(spoofedRevisionAttempt.results[0]).toMatchObject({
+      outcome: "reviewed_elsewhere",
+      httpStatus: 409,
+      serverRevision: 2,
+      leasedCardRevision: 1,
+      expectedCardRevision: 2,
+    });
+    expect(spoofedRevisionAttempt.updatedServerCards).toEqual(sameMsDesktopReviewed);
 
     // Backdated clientReviewedAtMs CANNOT bypass 12h expiry when serverReceiptAtMs > expiresAtMs.
     const expiredResult = reconcileOfflineLeaseOutbox({
@@ -567,6 +659,12 @@ describe("RFC 8628 90s Companion Scratchpad Pairing & Atomic Freeze (Wave R / La
   it("enforces origin isolation, fragment-only QR secret, ambiguous-char user code rejection, 90s TTL, and single-use replay revocation", () => {
     expect(COMPANION_PAIRING_TTL_MS).toBe(90_000);
     expect(normalizeOrigin("HTTPS://App.AIStudy.Example:443")).toBe("https://app.aistudy.example");
+    expect(normalizeOrigin("http://app.aistudy.example")).toBeNull();
+    expect(areCompanionOriginsIsolated(PRIMARY_ORIGIN, COMPANION_ORIGIN)).toBe(true);
+    expect(areCompanionOriginsIsolated(PRIMARY_ORIGIN, "https://companion.other-domain.example")).toBe(true);
+    expect(areCompanionOriginsIsolated("https://app.aistudy.example:443", "https://app.aistudy.example:8443")).toBe(false);
+    expect(areCompanionOriginsIsolated("https://aistudy.example", "https://scratchpad.aistudy.example")).toBe(false);
+    expect(areCompanionOriginsIsolated("https://app.aistudy.example", "https://sub.app.aistudy.example")).toBe(false);
     expect(normalizeCompanionUserCode("ab23-cd45")).toBe("AB23-CD45");
     expect(normalizeCompanionUserCode("AB01-CDIL")).toBeNull();
     expect(normalizeCompanionUserCode("ABOO-CD23")).toBeNull();
@@ -574,21 +672,31 @@ describe("RFC 8628 90s Companion Scratchpad Pairing & Atomic Freeze (Wave R / La
     const generatedCode = formatCompanionUserCodeFromBytes(new Uint8Array([0, 1, 2, 3, 28, 29, 30, 31]));
     expect(generatedCode).toMatch(/^[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}$/);
 
-    // Same origin (including case / default-port equivalence) MUST fail closed.
-    const sameOrigin = createCompanionPairingOffer({
-      offerId: "offer-bad-origin",
-      workspaceId: "ws-1",
-      learnerId: "learner-1",
-      attemptId: "attempt-1",
-      primaryOrigin: "https://app.aistudy.example:443",
-      allowedCompanionOrigin: "HTTPS://APP.AISTUDY.EXAMPLE",
-      issuedAtMs: T0,
-      deviceCode: DEVICE_CODE,
-      userCode: RAW_USER_CODE,
-      fragmentSecret: FRAGMENT_SECRET,
-    });
-    expect(sameOrigin.ok).toBe(false);
-    if (!sameOrigin.ok) expect(sameOrigin.code).toBe("origin_isolation_violation");
+    // [P1-3] Same host (including different port!) and parent/child Domain suffix sharing MUST fail closed,
+    // and non-HTTPS origins MUST fail closed.
+    for (const [primaryOrigin, allowedCompanionOrigin, expectedCode] of [
+      ["https://app.aistudy.example:443", "HTTPS://APP.AISTUDY.EXAMPLE", "origin_isolation_violation"],
+      ["https://app.aistudy.example:443", "https://app.aistudy.example:8443", "origin_isolation_violation"],
+      ["https://aistudy.example", "https://scratchpad.aistudy.example", "origin_isolation_violation"],
+      ["https://app.aistudy.example", "https://aistudy.example", "origin_isolation_violation"],
+      ["https://app.aistudy.example", "https://sub.app.aistudy.example", "origin_isolation_violation"],
+      ["http://app.aistudy.example", "http://scratchpad.aistudy.example", "invalid_origin"],
+    ] as const) {
+      const badOrigin = createCompanionPairingOffer({
+        offerId: "offer-bad-origin",
+        workspaceId: "ws-1",
+        learnerId: "learner-1",
+        attemptId: "attempt-1",
+        primaryOrigin,
+        allowedCompanionOrigin,
+        issuedAtMs: T0,
+        deviceCode: DEVICE_CODE,
+        userCode: RAW_USER_CODE,
+        fragmentSecret: FRAGMENT_SECRET,
+      });
+      expect(badOrigin.ok).toBe(false);
+      if (!badOrigin.ok) expect(badOrigin.code).toBe(expectedCode);
+    }
 
     const created = createCompanionPairingOffer({
       offerId: "offer-1",
@@ -676,7 +784,51 @@ describe("RFC 8628 90s Companion Scratchpad Pairing & Atomic Freeze (Wave R / La
       path: "/api/companion/scratchpad",
     });
 
-    // Second redemption attempt MUST signal immediate revocation of the issued session!
+    // [P1-4] Unauthenticated probes against an already-redeemed offer MUST return 403
+    // WITHOUT triggering session revocation (prevents unauthenticated DoS revocation).
+    for (const probe of [
+      {
+        deviceCode: DEVICE_CODE,
+        userCode: "ZZZZ-ZZZZ",
+        fragmentSecretProof: proof,
+        requestOrigin: COMPANION_ORIGIN,
+        expectedCode: "invalid_pairing_credentials",
+      },
+      {
+        deviceCode: DEVICE_CODE,
+        userCode: "AB23-CD45",
+        fragmentSecretProof: "0".repeat(64),
+        requestOrigin: COMPANION_ORIGIN,
+        expectedCode: "invalid_pairing_credentials",
+      },
+      {
+        deviceCode: DEVICE_CODE,
+        userCode: "AB23-CD45",
+        fragmentSecretProof: proof,
+        requestOrigin: PRIMARY_ORIGIN,
+        expectedCode: "origin_mismatch",
+      },
+    ] as const) {
+      const unauthProbe = redeemCompanionPairingOffer({
+        offer: redeemed.offer,
+        sessionId: "sess-unauth-probe",
+        deviceCode: probe.deviceCode,
+        userCode: probe.userCode,
+        fragmentSecretProof: probe.fragmentSecretProof,
+        requestOrigin: probe.requestOrigin,
+        nowMs: T0 + 90_000,
+      });
+      expect(unauthProbe.ok).toBe(false);
+      if (!unauthProbe.ok) {
+        expect(unauthProbe.httpStatus).toBe(403);
+        expect(unauthProbe.code).toBe(probe.expectedCode);
+        expect(unauthProbe.revokeIssuedSession).toBe(false);
+        expect(unauthProbe.revokedSessionId).toBeNull();
+        expect(unauthProbe.offer.replayDetectedAtMs).toBeNull();
+      }
+    }
+
+    // Authenticated second redemption attempt with valid credentials MUST signal immediate revocation!
     const replay = redeemCompanionPairingOffer({
       offer: redeemed.offer,
       sessionId: "sess-replay",
@@ -688,6 +840,7 @@ describe("RFC 8628 90s Companion Scratchpad Pairing & Atomic Freeze (Wave R / La
     });
     expect(replay.ok).toBe(false);
     if (!replay.ok) {
+      expect(replay.httpStatus).toBe(409);
       expect(replay.code).toBe("pairing_already_redeemed");
       expect(replay.revokeIssuedSession).toBe(true);
       expect(replay.revokedSessionId).toBe("sess-1");
@@ -809,14 +962,61 @@ describe("RFC 8628 90s Companion Scratchpad Pairing & Atomic Freeze (Wave R / La
     });
     expect(draft0.draftRevision).toBe(0);
 
-    const up1 = appendCompanionScratchpadPage(draft0, {
+    // [P1-5] Mandatory session + requestOrigin + nowMs authorization on appendCompanionScratchpadPage.
+    const missingSessionUpload = appendCompanionScratchpadPage(draft0, {
+      session: undefined as unknown as typeof session,
+      requestOrigin: COMPANION_ORIGIN,
+      nowMs: T0 + 18_000,
       pageNumber: 1,
       objectKey: "scratchpad/attempt-42/p1.png",
       sha256: shaA,
       byteLength: 42_000,
-      uploadedAtMs: T0 + 20_000,
+    });
+    expect(missingSessionUpload).toMatchObject({
+      ok: false,
+      code: "companion_capability_forbidden",
+      httpStatus: 403,
+    });
+    expect(missingSessionUpload.state.draftRevision).toBe(0);
+
+    const wrongOriginUpload = appendCompanionScratchpadPage(draft0, {
+      session,
+      requestOrigin: PRIMARY_ORIGIN,
+      nowMs: T0 + 18_500,
+      pageNumber: 1,
+      objectKey: "scratchpad/attempt-42/p1.png",
+      sha256: shaA,
+      byteLength: 42_000,
+    });
+    expect(wrongOriginUpload).toMatchObject({
+      ok: false,
+      code: "companion_capability_forbidden",
+      httpStatus: 403,
+    });
+
+    const revokedUpload = appendCompanionScratchpadPage(draft0, {
+      session: revokedSession,
+      requestOrigin: COMPANION_ORIGIN,
+      nowMs: T0 + 19_000,
+      pageNumber: 1,
+      objectKey: "scratchpad/attempt-42/p1.png",
+      sha256: shaA,
+      byteLength: 42_000,
+    });
+    expect(revokedUpload).toMatchObject({
+      ok: false,
+      code: "session_revoked",
+      httpStatus: 403,
+    });
+
+    const up1 = appendCompanionScratchpadPage(draft0, {
       session,
       requestOrigin: COMPANION_ORIGIN,
+      nowMs: T0 + 20_000,
+      pageNumber: 1,
+      objectKey: "scratchpad/attempt-42/p1.png",
+      sha256: shaA,
+      byteLength: 42_000,
     });
     expect(up1.ok).toBe(true);
     if (!up1.ok) throw new Error("expected page 1");
@@ -824,13 +1024,13 @@ describe("RFC 8628 90s Companion Scratchpad Pairing & Atomic Freeze (Wave R / La
 
     // Tablet races page 2 before desktop clicks submit using stale preview revision 1.
     const up2 = appendCompanionScratchpadPage(up1.state, {
+      session,
+      requestOrigin: COMPANION_ORIGIN,
+      nowMs: T0 + 25_000,
       pageNumber: 2,
       objectKey: "scratchpad/attempt-42/p2.png",
       sha256: shaB,
       byteLength: 55_000,
-      uploadedAtMs: T0 + 25_000,
-      session,
-      requestOrigin: COMPANION_ORIGIN,
     });
     expect(up2.ok).toBe(true);
     if (!up2.ok) throw new Error("expected page 2");
@@ -862,13 +1062,13 @@ describe("RFC 8628 90s Companion Scratchpad Pairing & Atomic Freeze (Wave R / La
 
     // Post-freeze upload MUST fail closed with 409 scratchpad_already_frozen.
     const postFreezeUpload = appendCompanionScratchpadPage(frozen.state, {
+      session,
+      requestOrigin: COMPANION_ORIGIN,
+      nowMs: T0 + 40_000,
       pageNumber: 3,
       objectKey: "scratchpad/attempt-42/p3.png",
       sha256: shaC,
       byteLength: 10_000,
-      uploadedAtMs: T0 + 40_000,
-      session,
-      requestOrigin: COMPANION_ORIGIN,
     });
     expect(postFreezeUpload).toMatchObject({
       ok: false,
@@ -941,7 +1141,7 @@ describe("1-Hop Bounded Cross-Course Concept Bridge (Wave R / Lane R4-C)", () =>
       targetCourseId: "course-target",
       targetConceptId: "target-concept",
       alignmentWeight: 1,
-      sourceMasteryProbability: 1,
+      sourceDirectSuccessCount: 15,
       sourceDirectObservationCount: 15,
       edgePrivacyEpoch: 2,
       supportingSourceIds: [`src-${i}`],
@@ -965,7 +1165,7 @@ describe("1-Hop Bounded Cross-Course Concept Bridge (Wave R / Lane R4-C)", () =>
     expect(upperBound.posteriorMean).toBeCloseTo(MAX_BRIDGE_PRIOR_MEAN, 12);
     expect(upperBound.posteriorMean).toBeLessThanOrEqual(MAX_BRIDGE_PRIOR_MEAN);
 
-    const manyWeakEdges = manyStrongEdges.map(e => ({ ...e, sourceMasteryProbability: 0 }));
+    const manyWeakEdges = manyStrongEdges.map(e => ({ ...e, sourceDirectSuccessCount: 0 }));
     const lowerBound = computeCrossCourseWeakPrior({
       targetCourseId: "course-target",
       targetConceptId: "target-concept",
@@ -994,7 +1194,7 @@ describe("1-Hop Bounded Cross-Course Concept Bridge (Wave R / Lane R4-C)", () =>
         targetCourseId: "course-target",
         targetConceptId: "span",
         alignmentWeight: 0.9,
-        sourceMasteryProbability: 0.95,
+        sourceDirectOnlyMasteryProbability: 0.95,
         sourceDirectObservationCount: 8,
         edgePrivacyEpoch: 3,
         supportingSourceIds: ["src-a1"],
@@ -1006,7 +1206,7 @@ describe("1-Hop Bounded Cross-Course Concept Bridge (Wave R / Lane R4-C)", () =>
         targetCourseId: "course-target",
         targetConceptId: "span",
         alignmentWeight: 0.8,
-        sourceMasteryProbability: 0.9,
+        sourceDirectSuccessCount: 5,
         sourceDirectObservationCount: 6,
         edgePrivacyEpoch: 5,
         supportingSourceIds: ["src-b1"],
@@ -1018,7 +1218,7 @@ describe("1-Hop Bounded Cross-Course Concept Bridge (Wave R / Lane R4-C)", () =>
         targetCourseId: "course-target",
         targetConceptId: "span",
         alignmentWeight: 0.7,
-        sourceMasteryProbability: 0.85,
+        sourceDirectOnlyMasteryProbability: 0.85,
         sourceDirectObservationCount: 5,
         edgePrivacyEpoch: 2,
         supportingSourceIds: ["src-c1", "src-c2-revoked"],
@@ -1075,7 +1275,7 @@ describe("1-Hop Bounded Cross-Course Concept Bridge (Wave R / Lane R4-C)", () =>
     });
   });
 
-  it("rejects same-course, multi-hop flagged, missing-epoch, and duplicate-edge weight inflation", () => {
+  it("rejects same-course, multi-hop flagged, missing-epoch, bridged-prior contamination ([P1-6]), and duplicate-edge weight inflation", () => {
     const result = computeCrossCourseWeakPrior({
       targetCourseId: "course-target",
       targetConceptId: "span",
@@ -1087,7 +1287,7 @@ describe("1-Hop Bounded Cross-Course Concept Bridge (Wave R / Lane R4-C)", () =>
           targetCourseId: "course-target",
           targetConceptId: "span",
           alignmentWeight: 1,
-          sourceMasteryProbability: 1,
+          sourceDirectOnlyMasteryProbability: 1,
           sourceDirectObservationCount: 10,
           edgePrivacyEpoch: 1,
           supportingSourceIds: [],
@@ -1099,7 +1299,7 @@ describe("1-Hop Bounded Cross-Course Concept Bridge (Wave R / Lane R4-C)", () =>
           targetCourseId: "course-target",
           targetConceptId: "span",
           alignmentWeight: 1,
-          sourceMasteryProbability: 1,
+          sourceDirectOnlyMasteryProbability: 1,
           sourceDirectObservationCount: 10,
           edgePrivacyEpoch: 1,
           supportingSourceIds: [],
@@ -1112,8 +1312,35 @@ describe("1-Hop Bounded Cross-Course Concept Bridge (Wave R / Lane R4-C)", () =>
           targetCourseId: "course-target",
           targetConceptId: "span",
           alignmentWeight: 0.9,
-          sourceMasteryProbability: 1,
+          sourceDirectOnlyMasteryProbability: 1,
           sourceDirectObservationCount: 10,
+          edgePrivacyEpoch: 1,
+          supportingSourceIds: [],
+        },
+        // [P1-6] Uncertified mixed `sourceMasteryProbability` (no direct counts / direct-only probability) MUST decouple.
+        {
+          edgeId: "mixed-only-edge",
+          sourceCourseId: "course-mixed",
+          sourceConceptId: "relayed-from-a",
+          targetCourseId: "course-target",
+          targetConceptId: "span",
+          alignmentWeight: 1,
+          sourceMasteryProbability: 0.95,
+          sourceDirectObservationCount: 2,
+          edgePrivacyEpoch: 1,
+          supportingSourceIds: [],
+        },
+        // [P1-6] `includesBridgedPrior: true` without raw direct counts MUST decouple.
+        {
+          edgeId: "contaminated-edge",
+          sourceCourseId: "course-contaminated",
+          sourceConceptId: "mixed-prior",
+          targetCourseId: "course-target",
+          targetConceptId: "span",
+          alignmentWeight: 1,
+          sourceDirectOnlyMasteryProbability: 0.9,
+          includesBridgedPrior: true,
+          sourceDirectObservationCount: 2,
           edgePrivacyEpoch: 1,
           supportingSourceIds: [],
         },
@@ -1125,7 +1352,7 @@ describe("1-Hop Bounded Cross-Course Concept Bridge (Wave R / Lane R4-C)", () =>
           targetCourseId: "course-target",
           targetConceptId: "span",
           alignmentWeight: 0.4,
-          sourceMasteryProbability: 0.9,
+          sourceDirectOnlyMasteryProbability: 0.9,
           sourceDirectObservationCount: 4,
           edgePrivacyEpoch: 7,
           supportingSourceIds: ["src-v1"],
@@ -1137,17 +1364,25 @@ describe("1-Hop Bounded Cross-Course Concept Bridge (Wave R / Lane R4-C)", () =>
           targetCourseId: "course-target",
           targetConceptId: "span",
           alignmentWeight: 0.4,
-          sourceMasteryProbability: 0.9,
+          sourceDirectOnlyMasteryProbability: 0.9,
           sourceDirectObservationCount: 4,
           edgePrivacyEpoch: 7,
           supportingSourceIds: ["src-v1"],
         },
       ],
-      coursePrivacyEpochs: { "course-a": 1, "course-target": 1, "course-valid": 7 },
+      coursePrivacyEpochs: {
+        "course-a": 1,
+        "course-target": 1,
+        "course-mixed": 1,
+        "course-contaminated": 1,
+        "course-valid": 7,
+      },
       activeCourseSharingEnabled: {
         "course-a": true,
         "course-target": true,
         "course-unknown": true,
+        "course-mixed": true,
+        "course-contaminated": true,
         "course-valid": true,
       },
       revokedSourceIds: new Set<string>(),
@@ -1159,11 +1394,45 @@ describe("1-Hop Bounded Cross-Course Concept Bridge (Wave R / Lane R4-C)", () =>
     expect(result.decoupledEdges).toEqual([
       expect.objectContaining({ edgeId: "multi-hop-flagged", reason: "multi_hop_rejected" }),
       expect.objectContaining({ edgeId: "missing-epoch", reason: "privacy_epoch_mismatch" }),
+      expect.objectContaining({ edgeId: "mixed-only-edge", reason: "bridged_prior_contamination" }),
+      expect.objectContaining({ edgeId: "contaminated-edge", reason: "bridged_prior_contamination" }),
     ]);
     expect(result.acceptedEdges).toHaveLength(1);
     expect(result.equivalentObservations).toBeCloseTo(0.4, 12);
     expect(result.deltaAlpha).toBeCloseTo(0.36, 12);
     expect(result.deltaBeta).toBeCloseTo(0.04, 12);
     expect(result.posteriorMean).toBeCloseTo(1.36 / 2.4, 12);
+
+    // [P1-6] When raw direct counts are supplied alongside a higher mixed `sourceMasteryProbability`
+    // inflated by an upstream course A, ONLY `sourceDirectSuccessCount / sourceDirectObservationCount` is used!
+    const directCountOnly = computeCrossCourseWeakPrior({
+      targetCourseId: "course-c",
+      targetConceptId: "eigenvalues",
+      edges: [
+        {
+          edgeId: "b-to-c-with-direct-counts",
+          sourceCourseId: "course-b",
+          sourceConceptId: "matrices",
+          targetCourseId: "course-c",
+          targetConceptId: "eigenvalues",
+          alignmentWeight: 1,
+          sourceDirectSuccessCount: 1,
+          sourceDirectObservationCount: 4, // pure direct ratio = 0.25
+          sourceMasteryProbability: 0.99, // mixed posterior polluted by Course A — MUST be ignored!
+          includesBridgedPrior: true,
+          edgePrivacyEpoch: 1,
+          supportingSourceIds: ["src-b1"],
+        },
+      ],
+      coursePrivacyEpochs: { "course-b": 1 },
+      activeCourseSharingEnabled: { "course-b": true },
+      revokedSourceIds: new Set<string>(),
+    });
+    expect(directCountOnly.acceptedEdges).toHaveLength(1);
+    expect(directCountOnly.acceptedEdges[0]?.directEvidenceSource).toBe("direct_counts");
+    expect(directCountOnly.acceptedEdges[0]?.sourceDirectOnlyMasteryProbability).toBe(0.25);
+    expect(directCountOnly.deltaAlpha).toBeCloseTo(0.25, 12);
+    expect(directCountOnly.deltaBeta).toBeCloseTo(0.75, 12);
+    expect(directCountOnly.posteriorMean).toBeCloseTo(1.25 / 3, 12);
   });
 });
