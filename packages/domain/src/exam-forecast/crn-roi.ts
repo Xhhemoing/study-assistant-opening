@@ -142,26 +142,20 @@ export function evaluateCrnActionRoi(input: EvaluateCrnActionRoiInput): CrnActio
     squeezeDeltas[i] = baseSqueeze - plusSqueeze;
   }
   const pairedMeanGain = safeArithmeticMean(diffs);
-  let sqSum = 0;
-  let maxAbsDev = 0;
+  let scale = Math.abs(pairedMeanGain);
   for (let i = 0; i < n; i++) {
-    const dev = diffs[i]! - pairedMeanGain;
-    const absDev = Math.abs(dev);
-    if (absDev > maxAbsDev) maxAbsDev = absDev;
-    sqSum += dev * dev;
+    const absD = Math.abs(diffs[i]!);
+    if (absD > scale) scale = absD;
   }
   let monteCarloSe = 0;
-  if (n > 1) {
-    if (Number.isFinite(sqSum)) {
-      monteCarloSe = Math.sqrt(sqSum / (n * (n - 1)));
-    } else if (maxAbsDev > 0) {
-      let scaledSqSum = 0;
-      for (let i = 0; i < n; i++) {
-        const scaled = (diffs[i]! - pairedMeanGain) / maxAbsDev;
-        scaledSqSum += scaled * scaled;
-      }
-      monteCarloSe = maxAbsDev * Math.sqrt(scaledSqSum / (n * (n - 1)));
+  if (n > 1 && scale > 0) {
+    const meanScaled = pairedMeanGain / scale;
+    let sumSqScaled = 0;
+    for (let i = 0; i < n; i++) {
+      const devScaled = diffs[i]! / scale - meanScaled;
+      sumSqScaled += devScaled * devScaled;
     }
+    monteCarloSe = Math.sqrt(sumSqScaled / (n * (n - 1))) * scale;
   }
   const roiBandPerHour = pairedMeanGain / input.candidateAction.durationHours;
   const timeSqueezeReduction = safeArithmeticMean(squeezeDeltas);

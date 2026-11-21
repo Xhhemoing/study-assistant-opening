@@ -595,6 +595,48 @@ type PrecomputedUntimedSection = {
   readonly untimedMean: number;
 };
 
+function computeDiscreteExpectation(
+  states: Iterable<readonly [number, number]>,
+  minClamp: number,
+  maxClamp: number,
+): number {
+  let totalProb = 0;
+  let minScore = Infinity;
+  let maxScore = -Infinity;
+  const positiveStates: Array<readonly [number, number]> = [];
+  for (const [score, prob] of states) {
+    if (!Number.isFinite(score) || !Number.isFinite(prob) || prob <= 0) continue;
+    totalProb += prob;
+    if (score < minScore) minScore = score;
+    if (score > maxScore) maxScore = score;
+    positiveStates.push([score, prob]);
+  }
+  if (positiveStates.length === 0 || !(totalProb > 0) || !Number.isFinite(totalProb)) {
+    return clamp(0, minClamp, maxClamp);
+  }
+  const lowerBound = Math.max(minClamp, minScore);
+  const upperBound = Math.min(maxClamp, maxScore);
+  if (minScore === maxScore || lowerBound >= upperBound) {
+    return clamp(minScore, minClamp, maxClamp);
+  }
+  const span = maxScore - minScore;
+  if (Number.isFinite(span)) {
+    let offsetSum = 0;
+    for (const [score, prob] of positiveStates) {
+      offsetSum += (prob / totalProb) * (score - minScore);
+    }
+    return clamp(minScore + offsetSum, lowerBound, upperBound);
+  }
+  let posSum = 0;
+  let negSum = 0;
+  for (const [score, prob] of positiveStates) {
+    const term = (prob / totalProb) * score;
+    if (term >= 0) posSum += term;
+    else negSum += term;
+  }
+  return clamp(posSum + negSum, lowerBound, upperBound);
+}
+
 function computeStaticUntimedSection(
   section: ExamSectionBlueprint,
   staticMasteryBySkill: Readonly<Record<string, number>>,
@@ -607,8 +649,7 @@ function computeStaticUntimedSection(
     itemPoints.push(item.points ?? 1);
   }
   const untimedDist = collapseRawDistributionToScoreMap(convolveLordWingersky(itemProbs, itemPoints), section);
-  let untimedMean = 0;
-  for (const [score, prob] of untimedDist.entries()) untimedMean += score * prob;
+  const untimedMean = computeDiscreteExpectation(untimedDist.entries(), section.scoreRange[0], section.scoreRange[1]);
   return { untimedDist, untimedMean };
 }
 
@@ -714,8 +755,11 @@ function simulateItemSectionDraw(input: DrawItemSectionInput): DrawItemSectionRe
     untimedMean = input.precomputedUntimed.untimedMean;
   } else {
     untimedDist = collapseRawDistributionToScoreMap(convolveLordWingersky(itemProbs!, itemPoints!), input.section);
-    untimedMean = 0;
-    for (const [score, prob] of untimedDist.entries()) untimedMean += score * prob;
+    untimedMean = computeDiscreteExpectation(
+      untimedDist.entries(),
+      input.section.scoreRange[0],
+      input.section.scoreRange[1],
+    );
   }
 
   return {
@@ -757,9 +801,10 @@ function computeRubricWeightedSectionScore(
     let intWeightSum = 0;
     let intWeightedSum = 0;
     for (let i = 0; i < parts.length; i++) {
-      const scaled = parts[i]!.weight * denom;
+      const weight = parts[i]!.weight;
+      const scaled = weight * denom;
       const rounded = Math.round(scaled);
-      if (!Number.isFinite(scaled) || Math.abs(scaled - rounded) > 1e-12 * denom) {
+      if (!Number.isFinite(scaled) || Math.abs(scaled - rounded) > 1e-12 * denom || (weight > 0 && rounded <= 0)) {
         allRational = false;
         break;
       }
@@ -1049,25 +1094,110 @@ function addToPmfWithCap(pmf: Map<number, number>, key: number, prob: number): v
   }
 }
 
+type WeightedSumScaling = {
+  readonly shiftW: number;
+  readonly shiftS: number;
+  readonly invW: number;
+  readonly invS: number;
+};
+
+function computeWeightedSumScaling(sections: readonly ExamSectionBlueprint[]): WeightedSumScaling | null {
+  let worstBound = 0;
+  let maxAbsW = 1;
+  let maxAbsS = 1;
+  let needsScaling = false;
+  for (const sec of sections) {
+    const absW = Math.abs(sec.weight);
+    const absS = Math.max(Math.abs(sec.scoreRange[0]), Math.abs(sec.scoreRange[1]));
+    if (absW > maxAbsW) maxAbsW = absW;
+    if (absS > maxAbsS) maxAbsS = absS;
+    const termBound = absW * absS;
+    worstBound += termBound;
+    if (!Number.isFinite(termBound) || !Number.isFinite(worstBound) || worstBound > Number.MAX_VALUE / 2) {
+      needsScaling = true;
+    }
+  }
+  if (!needsScaling) return null;
+  const shiftW = Math.min(1022, Math.max(0, Math.ceil(Math.log2(maxAbsW))));
+  const shiftS = Math.min(1022, Math.max(0, Math.ceil(Math.log2(maxAbsS))));
+  return {
+    shiftW,
+    shiftS,
+    invW: Math.pow(2, -shiftW),
+    invS: Math.pow(2, -shiftS),
+  };
+}
+
+function computeWeightedSumFromTerms(
+  sections: readonly ExamSectionBlueprint[],
+  scoreBySection: Readonly<Record<string, number>>,
+  range: readonly [number, number],
+): number {
+  let partial = 0;
+  let overflowed = false;
+  let maxAbsW = 1;
+  let maxAbsS = 1;
+  for (const sec of sections) {
+    const score = Object.hasOwn(scoreBySection, sec.sectionId) ? scoreBySection[sec.sectionId]! : 0;
+    const absW = Math.abs(sec.weight);
+    const absS = Math.max(Math.abs(score), 0);
+    if (absW > maxAbsW) maxAbsW = absW;
+    if (absS > maxAbsS) maxAbsS = absS;
+    const prod = sec.weight * score;
+    partial += prod;
+    if (!Number.isFinite(prod) || !Number.isFinite(partial)) {
+      overflowed = true;
+    }
+  }
+  if (!overflowed) return partial;
+  const shiftW = Math.min(1022, Math.max(0, Math.ceil(Math.log2(maxAbsW))));
+  const shiftS = Math.min(1022, Math.max(0, Math.ceil(Math.log2(maxAbsS))));
+  const invW = Math.pow(2, -shiftW);
+  const invS = Math.pow(2, -shiftS);
+  let scaledSum = 0;
+  for (const sec of sections) {
+    const score = Object.hasOwn(scoreBySection, sec.sectionId) ? scoreBySection[sec.sectionId]! : 0;
+    scaledSum += (sec.weight * invW) * (score * invS);
+  }
+  return clamp(unscalePow2(scaledSum, shiftW + shiftS), range[0], range[1]);
+}
+
+function unscalePow2(value: number, shift: number): number {
+  if (value === 0 || shift <= 0 || !Number.isFinite(value)) return value;
+  let result = value;
+  let rem = shift;
+  while (rem > 0) {
+    const stepShift = Math.min(512, rem);
+    result *= Math.pow(2, stepShift);
+    rem -= stepShift;
+  }
+  return result;
+}
+
 function convolveWeightedSections(
   initialDist: ReadonlyMap<number, number>,
   sections: readonly ExamSectionBlueprint[],
   untimedSectionDistributions: ReadonlyMap<string, ReadonlyMap<number, number>>,
   untimedContinuousSections: ReadonlyMap<string, number>,
   opsBudget: PmfOpsBudget,
+  scaling: WeightedSumScaling | null,
 ): Map<number, number> {
   let dist = new Map<number, number>(initialDist);
+  const invW = scaling ? scaling.invW : 1;
+  const invS = scaling ? scaling.invS : 1;
   for (const section of sections) {
     const secDist = untimedSectionDistributions.get(section.sectionId);
+    const scaledWeight = section.weight * invW;
     const next = new Map<number, number>();
     if (!secDist) {
       const val = untimedContinuousSections.get(section.sectionId) ?? 0;
+      const scaledTerm = scaledWeight * (val * invS);
       opsBudget.remaining -= dist.size;
       if (opsBudget.remaining < 0) {
         throw new RangeError(`Untimed PMF convolution ops exceed limit (${MAX_PMF_CONVOLUTION_OPS})`);
       }
       for (const [s, p] of dist.entries()) {
-        addToPmfWithCap(next, s + section.weight * val, p);
+        addToPmfWithCap(next, s + scaledTerm, p);
       }
     } else {
       opsBudget.remaining -= dist.size * secDist.size;
@@ -1076,7 +1206,7 @@ function convolveWeightedSections(
       }
       for (const [s0, p0] of dist.entries()) {
         for (const [s1, p1] of secDist.entries()) {
-          addToPmfWithCap(next, s0 + section.weight * s1, p0 * p1);
+          addToPmfWithCap(next, s0 + scaledWeight * (s1 * invS), p0 * p1);
         }
       }
     }
@@ -1090,14 +1220,18 @@ function addDistToUntimedOverallPmf(
   blueprint: ExamBlueprintV1,
   drawWeight: number,
   targetPmf: Map<number, number>,
+  scaling: WeightedSumScaling | null,
 ): number {
-  let drawExpected = 0;
+  const [bpMin, bpMax] = blueprint.scoreRange;
+  const totalShift = scaling ? scaling.shiftW + scaling.shiftS : 0;
+  const snappedStates: Array<readonly [number, number]> = [];
   for (const [score, p] of dist.entries()) {
-    const snapped = snapToScoreGrid(score, blueprint.scoreRange, blueprint.scoreStep, "nearest");
+    const unscaled = totalShift > 0 ? clamp(unscalePow2(score, totalShift), bpMin, bpMax) : score;
+    const snapped = snapToScoreGrid(unscaled, blueprint.scoreRange, blueprint.scoreStep, "nearest");
     addToPmfWithCap(targetPmf, snapped, p * drawWeight);
-    drawExpected += snapped * p;
+    snappedStates.push([snapped, p]);
   }
-  return clamp(drawExpected, blueprint.scoreRange[0], blueprint.scoreRange[1]);
+  return computeDiscreteExpectation(snappedStates, bpMin, bpMax);
 }
 
 export type SimulateExamPaperInput = {
@@ -1215,10 +1349,12 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
   let hoistedWeightedPrefixDist: ReadonlyMap<number, number> = new Map<number, number>([[0, 1]]);
   let hoistedRemainingWeightedSections: readonly ExamSectionBlueprint[] = blueprint.sections;
   let allUntimedPmfHoisted = false;
+  let weightedSumPmfScaling: WeightedSumScaling | null = null;
   let hoistedIeltsLRDist: ReadonlyMap<number, number> | null = null;
   let allIeltsUntimedPmfHoisted = false;
 
   if (blueprint.aggregationMode !== "ielts_overall_half_up") {
+    weightedSumPmfScaling = computeWeightedSumScaling(blueprint.sections);
     while (
       hoistedWeightedPrefixLen < blueprint.sections.length &&
       precomputedUntimedSections.has(blueprint.sections[hoistedWeightedPrefixLen]!.sectionId)
@@ -1237,11 +1373,14 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
         hoistedSectionDistMap,
         new Map(),
         pmfOpsBudget,
+        weightedSumPmfScaling,
       );
       hoistedRemainingWeightedSections = blueprint.sections.slice(hoistedWeightedPrefixLen);
       if (hoistedWeightedPrefixLen === blueprint.sections.length) {
         allUntimedPmfHoisted = true;
-        untimedDrawMeans.push(addDistToUntimedOverallPmf(hoistedWeightedPrefixDist, blueprint, 1, untimedOverallPmf));
+        untimedDrawMeans.push(
+          addDistToUntimedOverallPmf(hoistedWeightedPrefixDist, blueprint, 1, untimedOverallPmf, weightedSumPmfScaling),
+        );
       }
     }
   } else {
@@ -1549,17 +1688,12 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
         }
       }
     } else {
-      const totalTimed = blueprint.sections.reduce(
-        (s, sec) => s + sec.weight * (Object.hasOwn(timedSectionBand, sec.sectionId) ? timedSectionBand[sec.sectionId]! : 0),
-        0,
-      );
+      const totalTimed = computeWeightedSumFromTerms(blueprint.sections, timedSectionBand, blueprint.scoreRange);
       timedScores.push(snapToScoreGrid(totalTimed, blueprint.scoreRange, blueprint.scoreStep, "nearest"));
-      const totalMatchedUntimed = blueprint.sections.reduce(
-        (s, sec) =>
-          s +
-          sec.weight *
-            (Object.hasOwn(matchedUntimedSectionBand, sec.sectionId) ? matchedUntimedSectionBand[sec.sectionId]! : 0),
-        0,
+      const totalMatchedUntimed = computeWeightedSumFromTerms(
+        blueprint.sections,
+        matchedUntimedSectionBand,
+        blueprint.scoreRange,
       );
       untimedScores.push(snapToScoreGrid(totalMatchedUntimed, blueprint.scoreRange, blueprint.scoreStep, "nearest"));
       if (!allUntimedPmfHoisted) {
@@ -1569,8 +1703,11 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
           untimedSectionDistributions,
           untimedContinuousSections,
           pmfOpsBudget,
+          weightedSumPmfScaling,
         );
-        untimedDrawMeans.push(addDistToUntimedOverallPmf(drawDist, blueprint, drawWeight, untimedOverallPmf));
+        untimedDrawMeans.push(
+          addDistToUntimedOverallPmf(drawDist, blueprint, drawWeight, untimedOverallPmf, weightedSumPmfScaling),
+        );
       }
     }
   }
