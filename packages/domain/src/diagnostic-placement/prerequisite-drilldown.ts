@@ -31,7 +31,7 @@ export type PrerequisiteDrilldownInput = {
   targetSkillId: string;
   probePool: readonly DiagnosticProbeItem[];
   originalContext: FrozenOriginalContext;
-  /** Caller values > 2 are clamped to MAX_TOTAL_DRILLDOWN_PROBES (2). */
+  /** Fixed hard cap; if provided, must equal MAX_TOTAL_DRILLDOWN_PROBES (2). */
   maxProbes?: number;
   kstSnapshot?: KstSnapshotV1 | KstStateSpace;
 };
@@ -105,11 +105,12 @@ export class PrerequisiteDrilldownStateMachine {
     this.targetSkillId = input.targetSkillId;
     this.frozenContext = freezeOriginalContext(input.originalContext);
 
-    const reqMax = input.maxProbes ?? MAX_TOTAL_DRILLDOWN_PROBES;
-    const effectiveMax = Math.min(MAX_TOTAL_DRILLDOWN_PROBES, Math.max(1, Number.isFinite(reqMax) ? Math.floor(reqMax) : MAX_TOTAL_DRILLDOWN_PROBES));
-    this.#effectiveMaxProbes = effectiveMax;
+    if (input.maxProbes !== undefined && input.maxProbes !== MAX_TOTAL_DRILLDOWN_PROBES) {
+      throw new DiagnosticPlacementError("VALIDATION", `maxProbes must equal ${MAX_TOTAL_DRILLDOWN_PROBES}; got ${String(input.maxProbes)}`);
+    }
+    this.#effectiveMaxProbes = MAX_TOTAL_DRILLDOWN_PROBES;
     Object.defineProperty(this, "maxTotalProbes", {
-      value: effectiveMax,
+      value: MAX_TOTAL_DRILLDOWN_PROBES,
       writable: false,
       configurable: false,
       enumerable: true,

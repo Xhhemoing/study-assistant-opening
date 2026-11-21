@@ -95,7 +95,7 @@ export type KstSnapshotV1 = {
   outerFringeBySkill: Readonly<Record<string, number>>;
   parentsSatisfiedBySkill: Readonly<Record<string, number>>;
   skillCovariance: Readonly<Record<string, Readonly<Record<string, number>>>>;
-  prerequisitesBySkill?: Readonly<Record<string, readonly string[]>>;
+  prerequisitesBySkill: Readonly<Record<string, readonly string[]>>;
   consumedProbeObservationIds: readonly string[];
 };
 

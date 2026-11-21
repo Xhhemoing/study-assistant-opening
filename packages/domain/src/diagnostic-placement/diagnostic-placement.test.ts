@@ -20,6 +20,7 @@ import {
   type ChapterQuotaInput,
   type DiagnosticProbeItem,
   type DiagnosticSkillNode,
+  type KstSnapshotV1,
 } from "./index";
 
 describe("KST state space validation, decomposition & bounded envelope", () => {
@@ -254,8 +255,10 @@ describe("Hard-capped 2-probe PrerequisiteDrilldownStateMachine", () => {
   ];
   const originalContext = { originalAttemptId: "attempt-99", originalItemId: "item-target-1", frozenDraftText: "let x = 2 * (a + b) - ", frozenCursorOffset: 22, startedAtMs: 1_700_000_000_000 };
 
-  it("clamps maxProbes > 2 to 2 total across a 4-layer chain and builds bottom-up repair plan", () => {
-    const machine = new PrerequisiteDrilldownStateMachine({ skills: chainSkills, targetSkillId: "TARGET", probePool: chainProbes, originalContext, maxProbes: 8 });
+  it("enforces hardcoded maxTotalProbes === 2 across a 4-layer chain and builds bottom-up repair plan", () => {
+    expect(() => new PrerequisiteDrilldownStateMachine({ skills: chainSkills, targetSkillId: "TARGET", probePool: chainProbes, originalContext, maxProbes: 8 })).toThrow(DiagnosticPlacementError);
+    expect(() => new PrerequisiteDrilldownStateMachine({ skills: chainSkills, targetSkillId: "TARGET", probePool: chainProbes, originalContext, maxProbes: 1 })).toThrow(DiagnosticPlacementError);
+    const machine = new PrerequisiteDrilldownStateMachine({ skills: chainSkills, targetSkillId: "TARGET", probePool: chainProbes, originalContext, maxProbes: 2 });
     expect(machine.maxTotalProbes).toBe(MAX_TOTAL_DRILLDOWN_PROBES);
 
     const sel1 = machine.selectNextProbe();
@@ -277,10 +280,11 @@ describe("Hard-capped 2-probe PrerequisiteDrilldownStateMachine", () => {
     expect(Object.isFrozen(restored)).toBe(true);
   });
 
-  it("classifies integration_step_coordination only when all probes (1 or 2) pass unassisted, preserving frozen context", () => {
+  it("classifies integration_step_coordination only when all probes (both when 2 exist, or sole 1-probe pool) pass unassisted, preserving frozen context", () => {
     const machine = new PrerequisiteDrilldownStateMachine({ skills: chainSkills, targetSkillId: "TARGET", probePool: chainProbes, originalContext });
     const sel1 = machine.selectNextProbe();
-    machine.recordProbeResponse({ observationId: "pass-1", itemId: sel1.probe!.itemId, correct: true });
+    const afterOne = machine.recordProbeResponse({ observationId: "pass-1", itemId: sel1.probe!.itemId, correct: true });
+    expect(afterOne.status).toBe("probing");
     const sel2 = machine.selectNextProbe();
     const state = machine.recordProbeResponse({ observationId: "pass-2", itemId: sel2.probe!.itemId, correct: true });
 
@@ -289,16 +293,16 @@ describe("Hard-capped 2-probe PrerequisiteDrilldownStateMachine", () => {
     expect(state.rootCause).toBe(INTEGRATION_STEP_COORDINATION);
     expect(state.restoreContext).toEqual(originalContext);
 
-    const single = new PrerequisiteDrilldownStateMachine({ skills: chainSkills, targetSkillId: "TARGET", probePool: chainProbes, originalContext, maxProbes: 1 });
-    const one = single.selectNextProbe();
-    const oneDone = single.recordProbeResponse({ observationId: "one-pass", itemId: one.probe!.itemId, correct: true });
+    const singlePool = new PrerequisiteDrilldownStateMachine({ skills: chainSkills, targetSkillId: "TARGET", probePool: [chainProbes[0]!], originalContext });
+    const one = singlePool.selectNextProbe();
+    const oneDone = singlePool.recordProbeResponse({ observationId: "one-pass", itemId: one.probe!.itemId, correct: true });
     expect(oneDone.probesAdministered).toBe(1);
     expect(oneDone.status).toBe("restore_original_attempt");
     expect(oneDone.rootCause).toBe(INTEGRATION_STEP_COORDINATION);
     expect(oneDone.restoreContext).toEqual(originalContext);
 
     // Assisted-only probes have zero unassisted diagnostic evidence -> honest insufficient_diagnostic_evidence restore
-    const assisted = new PrerequisiteDrilldownStateMachine({ skills: chainSkills, targetSkillId: "TARGET", probePool: chainProbes, originalContext, maxProbes: 1 });
+    const assisted = new PrerequisiteDrilldownStateMachine({ skills: chainSkills, targetSkillId: "TARGET", probePool: [chainProbes[0]!], originalContext });
     const aSel = assisted.selectNextProbe();
     const aDone = assisted.recordProbeResponse({ observationId: "a-pass", itemId: aSel.probe!.itemId, correct: true, channel: "assisted" });
     expect(aDone.status).toBe("restore_original_attempt");
@@ -704,7 +708,6 @@ describe("Round-3 multi-merge lookahead, envelope gating, cap integrity & protot
       targetSkillId: "TARGET",
       probePool: [pL0, pL1],
       originalContext,
-      maxProbes: 5,
       kstSnapshot: kstSnap,
     });
     expect(Reflect.set(machine, "maxTotalProbes", 4)).toBe(false);
@@ -861,7 +864,6 @@ describe("Round-4 multi-step completion DFS, component partition & evidence inte
       targetSkillId: "T",
       probePool: [{ itemId: "p-a", familyId: "f-a", chapterId: "c1", requiredSkillIds: ["A"], slip: 0.1, guess: 0.1, estimatedSeconds: 20 }],
       originalContext: orig,
-      maxProbes: 1,
       kstSnapshot: abSnap,
     });
     const abState = abMachine.recordProbeResponse({ observationId: "fail-a", itemId: "p-a", correct: false });
@@ -1393,11 +1395,11 @@ describe("Round-8 outer-fringe gating, joint snapshot consistency, observed-merg
     expect(() => validateKstSnapshot(tampered, abSkills)).toThrow(DiagnosticPlacementError);
     expect(() => classifyPlacementRoutes(tampered, abSkills)).toThrow(DiagnosticPlacementError);
 
-    // Even when prerequisitesBySkill is absent, piBySkill & wByState must match componentJointWeights within 1e-9
-    const withoutPrereqs = { ...snap, prerequisitesBySkill: undefined };
-    expect(() => validateKstSnapshot({ ...withoutPrereqs, piBySkill: { ...snap.piBySkill, B: 0.1 } })).toThrow(DiagnosticPlacementError);
+    // Reject omitted prerequisitesBySkill, tampered piBySkill, and tampered wByState
+    expect(() => validateKstSnapshot({ ...snap, prerequisitesBySkill: undefined } as unknown as KstSnapshotV1)).toThrow(DiagnosticPlacementError);
+    expect(() => validateKstSnapshot({ ...snap, piBySkill: { ...snap.piBySkill, B: 0.1 } })).toThrow(DiagnosticPlacementError);
     expect(() => validateKstSnapshot({
-      ...withoutPrereqs,
+      ...snap,
       wByState: { "[]": 0.4, '["A"]': 0.3, '["A","B"]': 0.3 },
     })).toThrow(DiagnosticPlacementError);
 
@@ -1421,7 +1423,7 @@ describe("Round-8 outer-fringe gating, joint snapshot consistency, observed-merg
       outerFringeBySkill: {},
       parentsSatisfiedBySkill: {},
       skillCovariance: {},
-      prerequisitesBySkill: undefined,
+      prerequisitesBySkill: {},
     })).toThrow(DiagnosticPlacementError);
   });
 
@@ -1600,10 +1602,9 @@ describe("Round-9 live DAG parity, drilldown snapshot certification, global wByS
     expect(fullSnap.parentsSatisfiedBySkill["T"]).toBeCloseTo(0.4, 12);
     expect(fullSnap.outerFringeBySkill["T"]).toBeCloseTo(0.2, 12);
 
-    // Strip optional prerequisitesBySkill and tamper T's parentsSatisfiedBySkill / outerFringeBySkill from 0.4/0.2 to 1.0/0.8
+    // Tamper T's parentsSatisfiedBySkill / outerFringeBySkill from 0.4/0.2 to 1.0/0.8 (consistent with pi + outer === parentsSat, invalid against DAG)
     const tamperedSnap = {
       ...fullSnap,
-      prerequisitesBySkill: undefined,
       parentsSatisfiedBySkill: { ...fullSnap.parentsSatisfiedBySkill, T: 1.0 },
       outerFringeBySkill: { ...fullSnap.outerFringeBySkill, T: 0.8 },
     };
@@ -1629,14 +1630,13 @@ describe("Round-9 live DAG parity, drilldown snapshot certification, global wByS
       targetSkillId: "T",
       probePool: probes,
       originalContext: orig,
-      kstSnapshot: { ...fullSnap, prerequisitesBySkill: undefined },
+      kstSnapshot: fullSnap,
     });
     expect(honestDd.selectNextProbe().probe?.itemId).toBe("p-a");
 
-    // 1-arg validateKstSnapshot without prerequisitesBySkill rejects violation of parentsSatisfied == pi + outerFringe
+    // 1-arg validateKstSnapshot rejects violation of parentsSatisfied == pi + outerFringe
     expect(() => validateKstSnapshot({
       ...fullSnap,
-      prerequisitesBySkill: undefined,
       parentsSatisfiedBySkill: { ...fullSnap.parentsSatisfiedBySkill, T: 0.9 },
     })).toThrow(DiagnosticPlacementError);
   });
@@ -1800,5 +1800,169 @@ describe("Round-9 live DAG parity, drilldown snapshot certification, global wByS
     const firstPick = slackSession.selectNextProbe();
     expect(firstPick.status).toBe("selected");
     expect(firstPick.probe?.itemId).not.toBe("opt-ab");
+  });
+});
+
+describe("Round-10 mandatory DAG snapshots, true DAG mode certification, immutable ledger & hardcoded 2-probe drilldown", () => {
+  it("[P1-1] rejects missing prerequisitesBySkill (and non-downward-closed A->B payload putting weight 1 on [B])", () => {
+    const abSkills: DiagnosticSkillNode[] = [
+      { skillId: "A", chapterId: "c1" },
+      { skillId: "B", chapterId: "c1", prerequisiteIds: ["A"] },
+    ];
+    const validSnap = buildKstPriorSnapshot(createKstStateSpace(abSkills));
+    expect(Object.isFrozen(validSnap.prerequisitesBySkill)).toBe(true);
+    expect(Object.isFrozen(validSnap.prerequisitesBySkill["B"])).toBe(true);
+
+    // Counterexample: omit prerequisitesBySkill and submit [], ["A"], ["B"] with probability 1 on ["B"]
+    const invalidBOnlyW = { "[]": 0, '["A"]': 0, '["B"]': 1 };
+    const spoofedMissingDag = {
+      ...validSnap,
+      prerequisitesBySkill: undefined,
+      wByState: invalidBOnlyW,
+      componentJointWeights: [{
+        ...validSnap.componentJointWeights[0]!,
+        wByState: invalidBOnlyW,
+      }],
+      piBySkill: { A: 0, B: 1 },
+      outerFringeBySkill: { A: 1, B: 0 },
+      parentsSatisfiedBySkill: { A: 1, B: 1 },
+    } as unknown as KstSnapshotV1;
+
+    expect(() => validateKstSnapshot(spoofedMissingDag)).toThrow(DiagnosticPlacementError);
+    expect(() => classifyPlacementRoutes(spoofedMissingDag, abSkills)).toThrow(DiagnosticPlacementError);
+    expect(() => updateSkillMasteryFromKstSnapshot(spoofedMissingDag, "B", [])).toThrow(DiagnosticPlacementError);
+
+    // Even if prerequisitesBySkill is present for A -> B, ["B"] without ["A"] is rejected as non-downward-closed
+    const spoofedWithDag: KstSnapshotV1 = {
+      ...validSnap,
+      wByState: invalidBOnlyW,
+      componentJointWeights: [{
+        ...validSnap.componentJointWeights[0]!,
+        wByState: invalidBOnlyW,
+      }],
+      piBySkill: { A: 0, B: 1 },
+      outerFringeBySkill: { A: 1, B: 0 },
+      parentsSatisfiedBySkill: { A: 1, B: 1 },
+    };
+    expect(() => validateKstSnapshot(spoofedWithDag)).toThrow(DiagnosticPlacementError);
+  });
+
+  it("[P1-2] certifies top-level and per-component approximationMode against true DAG feasible state counts", () => {
+    const singleSkill: DiagnosticSkillNode[] = [{ skillId: "A", chapterId: "c1" }];
+    const baseSingle = buildKstPriorSnapshot(createKstStateSpace(singleSkill));
+
+    // Counterexample: 1-skill DAG A (true feasible states = 2 <= 20_000) spoofed as bounded_component_envelope with ["A"]: 1
+    const spoofedBoundedSingle: KstSnapshotV1 = {
+      ...baseSingle,
+      approximationMode: "bounded_component_envelope",
+      totalFeasibleStateCount: null,
+      totalFeasibleStateCountExact: null,
+      wByState: null,
+      componentJointWeights: [{
+        componentId: "comp-full",
+        skillIds: ["A"],
+        approximationMode: "bounded_component_envelope",
+        exactStateCountEstimate: null,
+        stateCount: 1,
+        wByState: { '["A"]': 1 },
+      }],
+      piBySkill: { A: 1 },
+      outerFringeBySkill: { A: 0 },
+      parentsSatisfiedBySkill: { A: 1 },
+    };
+    expect(() => validateKstSnapshot(spoofedBoundedSingle)).toThrow(DiagnosticPlacementError);
+    expect(() => classifyPlacementRoutes(spoofedBoundedSingle, singleSkill)).toThrow(DiagnosticPlacementError);
+
+    // Mixed graph: star (> 20_000) + solo skill (2 <= 20_000); marking solo component as bounded must also fail VALIDATION
+    const mixedSkills: DiagnosticSkillNode[] = [
+      { skillId: "ROOT", chapterId: "c1" },
+      ...Array.from({ length: 16 }, (_, i) => ({ skillId: `LEAF_${String(i).padStart(2, "0")}`, chapterId: "c1", prerequisiteIds: ["ROOT"] })),
+      { skillId: "SOLO", chapterId: "c2" },
+    ];
+    const mixedSnap = buildKstPriorSnapshot(createKstStateSpace(mixedSkills));
+    const soloIdx = mixedSnap.componentJointWeights.findIndex(c => c.skillIds.includes("SOLO"));
+    expect(soloIdx).toBeGreaterThanOrEqual(0);
+    const spoofedSoloInMixed: KstSnapshotV1 = {
+      ...mixedSnap,
+      componentJointWeights: mixedSnap.componentJointWeights.map((c, idx) =>
+        idx === soloIdx
+          ? { ...c, approximationMode: "bounded_component_envelope", exactStateCountEstimate: null, stateCount: 1, wByState: { '["SOLO"]': 1 } }
+          : c,
+      ),
+      piBySkill: { ...mixedSnap.piBySkill, SOLO: 1 },
+      outerFringeBySkill: { ...mixedSnap.outerFringeBySkill, SOLO: 0 },
+    };
+    expect(() => validateKstSnapshot(spoofedSoloInMixed, mixedSkills)).toThrow(DiagnosticPlacementError);
+  });
+
+  it("[P1-3] keeps KstStateSpace and snapshot consumedProbeObservationIds immutable (frozen) against external .pop() mutation", () => {
+    const space = createKstStateSpace([{ skillId: "A", chapterId: "c1" }]);
+    const probe: DiagnosticProbeItem = { itemId: "q1", familyId: "fam-1", chapterId: "c1", requiredSkillIds: ["A"], slip: 0.1, guess: 0.1, estimatedSeconds: 30 };
+
+    const upd = space.applyProbeObservation(probe, { observationId: "obs-9to1", itemId: "q1", correct: true });
+    expect(upd.applied).toBe(true);
+    expect(space.getSkillMarginals()["A"]).toBeCloseTo(0.9, 12);
+
+    // Attempting to pop/mutate returned ledger arrays must throw TypeError and leave internal deduplication intact
+    const liveIds = space.consumedProbeObservationIds;
+    const updIds = upd.consumedProbeObservationIds;
+    const snap = buildKstPriorSnapshot(space);
+    expect(Object.isFrozen(liveIds)).toBe(true);
+    expect(Object.isFrozen(updIds)).toBe(true);
+    expect(Object.isFrozen(snap.consumedProbeObservationIds)).toBe(true);
+    expect(() => (liveIds as string[]).pop()).toThrow(TypeError);
+    expect(() => (updIds as string[]).pop()).toThrow(TypeError);
+    expect(() => (snap.consumedProbeObservationIds as string[]).pop()).toThrow(TypeError);
+
+    expect(space.consumedProbeObservationIds).toEqual(["obs-9to1"]);
+    const replay = space.applyProbeObservation(probe, { observationId: "obs-9to1", itemId: "q1", correct: true });
+    expect(replay.applied).toBe(false);
+    expect(replay.reason).toBe("duplicate_observation");
+
+    const downstream = updateSkillMasteryFromKstSnapshot(snap, "A", [
+      { observationId: "obs-9to1", skillId: "A", correct: true, slip: 0.1, guess: 0.1 },
+    ]);
+    expect(downstream.partitioned.directObservations).toEqual([]);
+    expect(downstream.partitioned.strippedConsumedObservations[0]?.eligibleForFirePropagation).toBe(false);
+    expect(downstream.posteriorProbability).toBeCloseTo(0.9, 12);
+    expect(downstream.posteriorProbability).not.toBeCloseTo(81 / 82, 2);
+  });
+
+  it("[P1-4] hardcodes maxTotalProbes = 2, rejects maxProbes != 2, and requires answering 2 probes before integration_step_coordination when available", () => {
+    const skills: DiagnosticSkillNode[] = [
+      { skillId: "L0", chapterId: "c1" },
+      { skillId: "L1", chapterId: "c1", prerequisiteIds: ["L0"] },
+      { skillId: "TARGET", chapterId: "c1", prerequisiteIds: ["L1"] },
+    ];
+    const pool: DiagnosticProbeItem[] = [
+      { itemId: "p-l0", familyId: "f-l0", chapterId: "c1", requiredSkillIds: ["L0"], slip: 0.05, guess: 0.05, estimatedSeconds: 20 },
+      { itemId: "p-l1", familyId: "f-l1", chapterId: "c1", requiredSkillIds: ["L1"], slip: 0.05, guess: 0.05, estimatedSeconds: 20 },
+    ];
+    const orig = { originalAttemptId: "att-10", originalItemId: "item-10", frozenDraftText: "", frozenCursorOffset: 0, startedAtMs: 1 };
+
+    for (const badMax of [0, 1, 3, Number.NaN]) {
+      expect(() => new PrerequisiteDrilldownStateMachine({
+        skills,
+        targetSkillId: "TARGET",
+        probePool: pool,
+        originalContext: orig,
+        maxProbes: badMax,
+      })).toThrow(DiagnosticPlacementError);
+    }
+
+    const machine = new PrerequisiteDrilldownStateMachine({ skills, targetSkillId: "TARGET", probePool: pool, originalContext: orig });
+    expect(machine.maxTotalProbes).toBe(MAX_TOTAL_DRILLDOWN_PROBES);
+
+    const sel1 = machine.selectNextProbe();
+    const afterOne = machine.recordProbeResponse({ observationId: "dd10-1", itemId: sel1.probe!.itemId, correct: true });
+    expect(afterOne.status).toBe("probing");
+    expect(afterOne.rootCause).toBeNull();
+
+    const sel2 = machine.selectNextProbe();
+    expect(sel2.status).toBe("probing");
+    const afterTwo = machine.recordProbeResponse({ observationId: "dd10-2", itemId: sel2.probe!.itemId, correct: true });
+    expect(afterTwo.probesAdministered).toBe(2);
+    expect(afterTwo.status).toBe("restore_original_attempt");
+    expect(afterTwo.rootCause).toBe(INTEGRATION_STEP_COORDINATION);
   });
 });

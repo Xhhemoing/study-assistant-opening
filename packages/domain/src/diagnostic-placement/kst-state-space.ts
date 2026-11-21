@@ -437,36 +437,83 @@ function validateSnapshotAgainstDag(
   // Build sub-DAG component mapping so exact downset enumeration runs per weakly-connected DAG subcomponent (fast O(sum))
   const subCompBySkill = new Map<string, number>();
   graph.components.forEach((sub, sIdx) => sub.forEach(id => subCompBySkill.set(id, sIdx)));
-  const exactCountPerSubComp = new Map<number, bigint | "exceeded">();
-  const getSubCompExactCount = (sIdx: number): bigint | "exceeded" => {
-    let cached = exactCountPerSubComp.get(sIdx);
-    if (cached === undefined) {
-      const subSkills = graph.components[sIdx]!;
-      const res = enumerateDownsetsBounded(subSkills, graph, MAX_EXACT_KST_STATES);
-      cached = res.exceededLimit ? "exceeded" : BigInt(res.states.length);
-      exactCountPerSubComp.set(sIdx, cached);
-    }
-    return cached;
-  };
+  const subCompExactCounts: Array<bigint | "exceeded"> = graph.components.map(subSkills => {
+    const res = enumerateDownsetsBounded(subSkills, graph, MAX_EXACT_KST_STATES);
+    return res.exceededLimit ? "exceeded" : BigInt(res.states.length);
+  });
+  const anySubExceeded = subCompExactCounts.some(c => c === "exceeded");
+  let trueTotalStates: bigint | "exceeded" = "exceeded";
+  if (!anySubExceeded) {
+    let prod = 1n;
+    for (const c of subCompExactCounts) prod *= c as bigint;
+    trueTotalStates = prod;
+  }
+
+  const maxExactBig = BigInt(MAX_EXACT_KST_STATES);
+  const expectedTopMode: KstApproximationMode = anySubExceeded
+    ? "bounded_component_envelope"
+    : (trueTotalStates as bigint) <= maxExactBig
+      ? "exact"
+      : "component_decomposed";
+  if (snapshot.approximationMode !== expectedTopMode) {
+    throw new DiagnosticPlacementError(
+      "VALIDATION",
+      `Snapshot approximationMode ${snapshot.approximationMode} does not match true DAG mode ${expectedTopMode}`,
+    );
+  }
 
   for (let idx = 0; idx < snapshot.componentJointWeights.length; idx++) {
     const comp = snapshot.componentJointWeights[idx]!;
-    if (comp.approximationMode !== "exact") continue;
     const subIndices = new Set<number>();
     for (const s of comp.skillIds) subIndices.add(subCompBySkill.get(s)!);
+    let hasExceededSub = false;
     let trueCount = 1n;
     for (const sIdx of subIndices) {
-      const subCount = getSubCompExactCount(sIdx);
+      const subCount = subCompExactCounts[sIdx]!;
       if (subCount === "exceeded") {
-        throw new DiagnosticPlacementError("VALIDATION", `componentJointWeights[${idx}] exceeds MAX_EXACT_KST_STATES under true prerequisite DAG`);
+        hasExceededSub = true;
+        break;
       }
       trueCount *= subCount;
-      if (trueCount > BigInt(MAX_EXACT_KST_STATES)) {
-        throw new DiagnosticPlacementError("VALIDATION", `componentJointWeights[${idx}] merged exact count exceeds MAX_EXACT_KST_STATES under true prerequisite DAG`);
-      }
     }
-    if (BigInt(comp.stateCount) !== trueCount || BigInt(comp.exactStateCountEstimate ?? -1) !== trueCount) {
-      throw new DiagnosticPlacementError("VALIDATION", `componentJointWeights[${idx}] stateCount does not match true DAG downset count (${trueCount})`);
+
+    if (hasExceededSub) {
+      if (subIndices.size !== 1) {
+        throw new DiagnosticPlacementError(
+          "VALIDATION",
+          `componentJointWeights[${idx}] cannot merge a bounded component with other DAG components`,
+        );
+      }
+      if (comp.approximationMode !== "bounded_component_envelope") {
+        throw new DiagnosticPlacementError(
+          "VALIDATION",
+          `componentJointWeights[${idx}] exceeds MAX_EXACT_KST_STATES under true prerequisite DAG`,
+        );
+      }
+      if (comp.stateCount > MAX_EXACT_KST_STATES || comp.exactStateCountEstimate !== null) {
+        throw new DiagnosticPlacementError(
+          "VALIDATION",
+          `componentJointWeights[${idx}] has invalid bounded component metadata`,
+        );
+      }
+    } else if (trueCount <= maxExactBig) {
+      if (comp.approximationMode !== "exact") {
+        throw new DiagnosticPlacementError(
+          "VALIDATION",
+          `componentJointWeights[${idx}] has <= ${MAX_EXACT_KST_STATES} feasible DAG states (${trueCount}) and must use exact mode`,
+        );
+      }
+      if (BigInt(comp.stateCount) !== trueCount || BigInt(comp.exactStateCountEstimate ?? -1) !== trueCount) {
+        throw new DiagnosticPlacementError(
+          "VALIDATION",
+          `componentJointWeights[${idx}] stateCount does not match true DAG downset count (${trueCount})`,
+        );
+      }
+    } else {
+      throw new DiagnosticPlacementError(
+        "VALIDATION",
+        `componentJointWeights[${idx}] merges exact DAG components beyond MAX_EXACT_KST_STATES (${trueCount})`,
+      );
     }
   }
 
@@ -800,31 +847,27 @@ export function certifyKstSnapshot(snapshot: KstSnapshotV1, skills?: readonly Di
     }
   }
 
-  let snapshotPrereqs: Map<string, readonly string[]> | null = null;
-  let snapshotGraph: ValidatedSkillGraph | null = null;
-  if (snapshot.prerequisitesBySkill !== undefined) {
-    if (!snapshot.prerequisitesBySkill || typeof snapshot.prerequisitesBySkill !== "object" || Array.isArray(snapshot.prerequisitesBySkill)) {
-      throw new DiagnosticPlacementError("VALIDATION", "KstSnapshotV1 prerequisitesBySkill must be a record");
-    }
-    const syntheticNodes: DiagnosticSkillNode[] = [];
-    for (const [skillId, rawParents] of Object.entries(snapshot.prerequisitesBySkill)) {
-      if (!knownSkills.has(skillId) || !Array.isArray(rawParents)) {
-        throw new DiagnosticPlacementError("VALIDATION", `Invalid prerequisitesBySkill entry for ${skillId}`);
-      }
-      for (let k = 0; k < rawParents.length; k++) {
-        if (!Object.hasOwn(rawParents, k) || typeof rawParents[k] !== "string" || !knownSkills.has(rawParents[k]!)) {
-          throw new DiagnosticPlacementError("VALIDATION", `Invalid prerequisite reference in prerequisitesBySkill[${skillId}]`);
-        }
-      }
-      syntheticNodes.push({ skillId, chapterId: "snapshot", prerequisiteIds: rawParents });
-    }
-    if (syntheticNodes.length !== knownSkills.size) {
-      throw new DiagnosticPlacementError("VALIDATION", "prerequisitesBySkill must cover every skill in piBySkill");
-    }
-    snapshotGraph = validateSkillGraph(syntheticNodes);
-    snapshotPrereqs = new Map<string, readonly string[]>();
-    for (const [id, rec] of snapshotGraph.skillsById.entries()) snapshotPrereqs.set(id, rec.prerequisiteIds);
+  if (!snapshot.prerequisitesBySkill || typeof snapshot.prerequisitesBySkill !== "object" || Array.isArray(snapshot.prerequisitesBySkill)) {
+    throw new DiagnosticPlacementError("VALIDATION", "KstSnapshotV1 prerequisitesBySkill is required and must be a record");
   }
+  const syntheticNodes: DiagnosticSkillNode[] = [];
+  for (const [skillId, rawParents] of Object.entries(snapshot.prerequisitesBySkill)) {
+    if (!knownSkills.has(skillId) || !Array.isArray(rawParents)) {
+      throw new DiagnosticPlacementError("VALIDATION", `Invalid prerequisitesBySkill entry for ${skillId}`);
+    }
+    for (let k = 0; k < rawParents.length; k++) {
+      if (!Object.hasOwn(rawParents, k) || typeof rawParents[k] !== "string" || !knownSkills.has(rawParents[k]!)) {
+        throw new DiagnosticPlacementError("VALIDATION", `Invalid prerequisite reference in prerequisitesBySkill[${skillId}]`);
+      }
+    }
+    syntheticNodes.push({ skillId, chapterId: "snapshot", prerequisiteIds: rawParents });
+  }
+  if (syntheticNodes.length !== knownSkills.size) {
+    throw new DiagnosticPlacementError("VALIDATION", "prerequisitesBySkill must cover every skill in piBySkill");
+  }
+  const snapshotGraph = validateSkillGraph(syntheticNodes);
+  const snapshotPrereqs = new Map<string, readonly string[]>();
+  for (const [id, rec] of snapshotGraph.skillsById.entries()) snapshotPrereqs.set(id, rec.prerequisiteIds);
 
   let skillsPrereqs: Map<string, readonly string[]> | null = null;
   let skillsGraph: ValidatedSkillGraph | null = null;
@@ -832,9 +875,7 @@ export function certifyKstSnapshot(snapshot: KstSnapshotV1, skills?: readonly Di
     skillsGraph = validateSkillGraph(skills);
     skillsPrereqs = new Map<string, readonly string[]>();
     for (const [id, rec] of skillsGraph.skillsById.entries()) skillsPrereqs.set(id, rec.prerequisiteIds);
-  }
 
-  if (snapshotPrereqs && skillsPrereqs) {
     if (snapshotPrereqs.size !== skillsPrereqs.size) {
       throw new DiagnosticPlacementError("VALIDATION", "Snapshot prerequisitesBySkill skill set disagrees with skills");
     }
@@ -852,34 +893,15 @@ export function certifyKstSnapshot(snapshot: KstSnapshotV1, skills?: readonly Di
 
   const validatedGraph = skillsGraph ?? snapshotGraph;
   const validatedPrereqs = skillsPrereqs ?? snapshotPrereqs;
-  if (validatedGraph && validatedPrereqs) {
-    const { parentsSatisfiedBySkill, outerFringeBySkill } = validateSnapshotAgainstDag(
-      snapshot,
-      knownSkills,
-      validatedPrereqs,
-      validatedGraph,
-      compSkillSets,
-      compParsedEntries,
-      snapshotParsedEntries,
-    );
-    return { piBySkill: derivedPiBySkill, parentsSatisfiedBySkill, outerFringeBySkill };
-  }
-
-  const parentsSatisfiedBySkill = new Map<string, number>();
-  const outerFringeBySkill = new Map<string, number>();
-  for (const skillId of knownSkills) {
-    const pi = derivedPiBySkill.get(skillId)!;
-    const parentsSat = readRecordEntry(snapshot.parentsSatisfiedBySkill, skillId)!;
-    const outer = readRecordEntry(snapshot.outerFringeBySkill, skillId)!;
-    if (Math.abs(parentsSat - (pi + outer)) > SNAPSHOT_CONSISTENCY_EPSILON) {
-      throw new DiagnosticPlacementError(
-        "VALIDATION",
-        `parentsSatisfiedBySkill[${skillId}] (${parentsSat}) must equal piBySkill + outerFringeBySkill (${pi + outer}) within ${SNAPSHOT_CONSISTENCY_EPSILON}`,
-      );
-    }
-    parentsSatisfiedBySkill.set(skillId, parentsSat);
-    outerFringeBySkill.set(skillId, outer);
-  }
+  const { parentsSatisfiedBySkill, outerFringeBySkill } = validateSnapshotAgainstDag(
+    snapshot,
+    knownSkills,
+    validatedPrereqs,
+    validatedGraph,
+    compSkillSets,
+    compParsedEntries,
+    snapshotParsedEntries,
+  );
   return { piBySkill: derivedPiBySkill, parentsSatisfiedBySkill, outerFringeBySkill };
 }
 
@@ -892,10 +914,14 @@ export class KstStateSpace {
   readonly approximationMode: KstApproximationMode;
   readonly totalFeasibleStateCount: number | null;
   readonly totalFeasibleStateCountExact: string | null;
-  readonly consumedProbeObservationIds: string[] = [];
+  readonly #consumedProbeObservationIds: string[] = [];
+  readonly #seenObservationIds = new Set<string>();
   private _components: ComponentSpace[];
   private _componentIndexBySkill: Map<string, number>;
-  private readonly seenObservationIds = new Set<string>();
+
+  get consumedProbeObservationIds(): readonly string[] {
+    return Object.freeze([...this.#consumedProbeObservationIds]);
+  }
 
   get components(): readonly ComponentSpace[] {
     return this._components;
@@ -1128,9 +1154,9 @@ export class KstStateSpace {
     if (observation.itemId !== probe.itemId) throw new DiagnosticPlacementError("VALIDATION", `Observation itemId ${observation.itemId} does not match probe ${probe.itemId}`);
 
     const mkResult = (applied: boolean, reason: KstObservationUpdateResult["reason"]): KstObservationUpdateResult => ({
-      applied, reason, observationId: canonicalObsId, consumedProbeObservationIds: [...this.consumedProbeObservationIds],
+      applied, reason, observationId: canonicalObsId, consumedProbeObservationIds: this.consumedProbeObservationIds,
     });
-    if (this.seenObservationIds.has(canonicalObsId)) return mkResult(false, "duplicate_observation");
+    if (this.#seenObservationIds.has(canonicalObsId)) return mkResult(false, "duplicate_observation");
 
     const touched = this.touchedMasks(probe.requiredSkillIds);
     const touchedIndices = [...touched.keys()].sort((a, b) => a - b);
@@ -1138,7 +1164,7 @@ export class KstStateSpace {
     if (!mergeCheck.feasible) throw new DiagnosticPlacementError("INFEASIBLE", mergeCheck.reason);
 
     if (!isUnassistedValidObservation(observation)) {
-      this.seenObservationIds.add(canonicalObsId);
+      this.#seenObservationIds.add(canonicalObsId);
       return mkResult(false, "assisted_or_invalid_response");
     }
 
@@ -1155,7 +1181,7 @@ export class KstStateSpace {
         merged.logW[i] = merged.logW[i]! + ((merged.states[i]! & reqMask) === reqMask ? logM : logU);
       }
       if (!normalizeLogWeights(merged.logW, merged.w)) {
-        this.seenObservationIds.add(canonicalObsId);
+        this.#seenObservationIds.add(canonicalObsId);
         return mkResult(false, "zero_likelihood_observation");
       }
 
@@ -1180,13 +1206,13 @@ export class KstStateSpace {
       if (!normalizeLogWeights(comp.logW, comp.w)) {
         comp.logW.set(savedLogW);
         comp.w.set(savedW);
-        this.seenObservationIds.add(canonicalObsId);
+        this.#seenObservationIds.add(canonicalObsId);
         return mkResult(false, "zero_likelihood_observation");
       }
     }
 
-    this.seenObservationIds.add(canonicalObsId);
-    this.consumedProbeObservationIds.push(canonicalObsId);
+    this.#seenObservationIds.add(canonicalObsId);
+    this.#consumedProbeObservationIds.push(canonicalObsId);
     return mkResult(true, "updated");
   }
 
@@ -1218,7 +1244,7 @@ export class KstStateSpace {
     }
     const canonicalObsId = typeof observation.observationId === "string" ? observation.observationId.trim() : "";
     if (!canonicalObsId || observation.itemId !== probe.itemId) return false;
-    if (this.seenObservationIds.has(canonicalObsId)) return false;
+    if (this.#seenObservationIds.has(canonicalObsId)) return false;
     if (!isUnassistedValidObservation(observation)) return false;
 
     const touched = this.touchedMasks(probe.requiredSkillIds);
@@ -1326,8 +1352,9 @@ export class KstStateSpace {
     const skillCovariance = this.getSkillCovariance(piBySkill);
     const prerequisitesBySkill: Record<string, readonly string[]> = {};
     for (const [skillId, rec] of this.graph.skillsById.entries()) {
-      defineRecordEntry(prerequisitesBySkill, skillId, [...rec.prerequisiteIds]);
+      defineRecordEntry(prerequisitesBySkill, skillId, Object.freeze([...rec.prerequisiteIds]));
     }
+    Object.freeze(prerequisitesBySkill);
     const componentJointWeights: KstComponentJointWeights[] = this.components.map(comp => {
       const wByState: Record<string, number> = {};
       for (let s = 0; s < comp.states.length; s++) {
@@ -1353,7 +1380,7 @@ export class KstStateSpace {
       parentsSatisfiedBySkill,
       skillCovariance,
       prerequisitesBySkill,
-      consumedProbeObservationIds: [...this.consumedProbeObservationIds],
+      consumedProbeObservationIds: this.consumedProbeObservationIds,
     };
   }
 }

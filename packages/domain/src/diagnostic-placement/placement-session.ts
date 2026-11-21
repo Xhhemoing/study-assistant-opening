@@ -1022,7 +1022,7 @@ export class DiagnosticPlacementSession {
     if (this.seenObservationIds.has(canonicalObsId)) {
       return {
         applied: false, reason: "duplicate_observation", observationId: canonicalObsId,
-        consumedProbeObservationIds: [...this.stateSpace.consumedProbeObservationIds],
+        consumedProbeObservationIds: this.stateSpace.consumedProbeObservationIds,
         administeredCount: this.usedItemIds.size, remainingBudgetSeconds: this.remainingBudgetSeconds,
       };
     }
@@ -1100,7 +1100,7 @@ export class DiagnosticPlacementSession {
       remainingBudgetSeconds: this.remainingBudgetSeconds,
       chapterCounts,
       stopReason: this.stopReason,
-      consumedProbeObservationIds: [...this.stateSpace.consumedProbeObservationIds],
+      consumedProbeObservationIds: this.stateSpace.consumedProbeObservationIds,
     };
   }
 }
