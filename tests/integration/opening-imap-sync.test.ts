@@ -6,7 +6,9 @@ import {
   createOpeningConnectionsRepository,
   createOpeningImportsRepository,
   createOpeningSourceActionsRepository,
+  type OpeningStorage,
 } from "@aistudy/database";
+import { createOpeningSourceService } from "../../apps/web/src/features/opening/sources/source-service";
 import { readOpeningSourceQuotaUsage } from "../../packages/database/src/repositories/opening-source-quota";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { startOpeningImapServer, type OpeningImapServer } from "./opening-imap-server";
@@ -224,6 +226,61 @@ describe("isolated standard IMAP sync gate", () => {
     expect(await usage()).toEqual({ bytes: 0n, objects: 0n });
     await expect(actions.cleanup(f.scope, sourceId)).rejects.toMatchObject({ code: "NOT_FOUND" });
     expect(await f.sql`SELECT 1 FROM opening_source_versions WHERE source_id=${sourceId}`).toEqual([]);
+  });
+
+  it("recovers an orphaned IMAP reservation end-to-end via OpeningSourceService.actOnSource and guards removeUnpublishedSource", async () => {
+    const imports = createOpeningImportsRepository(f.sql);
+    await f.sql`CREATE FUNCTION fixture_import_disconnect_service() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN RAISE EXCEPTION 'publisher database connection lost' USING ERRCODE='08006'; END $$`;
+    try {
+      await f.sql`CREATE TRIGGER fixture_import_disconnect_service BEFORE INSERT ON opening_import_receipts
+        FOR EACH ROW EXECUTE FUNCTION fixture_import_disconnect_service()`;
+      vi.spyOn(imports, "removeUnpublishedSource").mockRejectedValueOnce(new Error("offline"));
+      await expect(runSync({ imports })).rejects.toBeInstanceOf(AggregateError);
+    } finally {
+      await f.sql`DROP FUNCTION fixture_import_disconnect_service() CASCADE`;
+    }
+
+    const storage = {
+      stagingKey: (id: string) => `opening/staging/${id}`,
+      finalKey: (id: string, version: number) => `opening/sources/${id}/v${version}`,
+      deleteObject: async (key: string) => { objectByKey.delete(key); },
+      objectExists: async (key: string) => objectByKey.has(key),
+    } as OpeningStorage;
+    const service = createOpeningSourceService(f.sql, storage);
+    const principal = { workspaceId: f.scope.workspaceId, userId: f.scope.ownerUserId, sessionId: "fixture" };
+    const pending = await service.listSourceDeletions(principal);
+    expect(pending).toHaveLength(1);
+    const orphanId = pending[0]!.sourceId;
+    const orphanKey = `opening/sources/${orphanId}/v0`;
+    expect(objectByKey.has(orphanKey)).toBe(true);
+
+    expect(await service.actOnSource(principal, orphanId, { action: "retry_cleanup" })).toEqual({
+      sourceId: orphanId, aiExcluded: true, deleted: true, cleanupPending: 0, retryAfter: null,
+    });
+    expect(objectByKey.has(orphanKey)).toBe(false);
+    expect(await service.listSourceDeletions(principal)).toEqual([]);
+    expect(await readOpeningSourceQuotaUsage(f.sql, f.scope.workspaceId, 1024)).toEqual({ bytes: 0n, objects: 0n });
+    await expect(service.actOnSource(principal, orphanId, { action: "retry_cleanup" })).rejects.toMatchObject({ code: "NOT_FOUND" });
+
+    // Committed sources must never be removed by removeUnpublishedSource even if no reservation exists,
+    // while an unpublished fresh UUID with no retained rows cleans up a late-landing key.
+    await expect(runSync()).resolves.toMatchObject({ imported: 1 });
+    const [committed] = await f.sql`SELECT id FROM opening_sources WHERE workspace_id=${f.scope.workspaceId}`;
+    const committedId = String(committed!.id);
+    const committedKey = `opening/sources/${committedId}/v0`;
+    const removeSpy = vi.fn(async (key: string) => { objectByKey.delete(key); });
+    const identity = { connectionId: fixtureConnection.id, container: "INBOX", generation: "42", remoteId: "11" };
+    await imports.removeUnpublishedSource(f.scope, identity, committedId, committedKey, 10, () => removeSpy(committedKey));
+    expect(removeSpy).not.toHaveBeenCalled();
+    expect(objectByKey.has(committedKey)).toBe(true);
+
+    const lateId = randomUUID();
+    const lateKey = `opening/sources/${lateId}/v0`;
+    objectByKey.set(lateKey, Buffer.from("late"));
+    await imports.removeUnpublishedSource(f.scope, identity, lateId, lateKey, 4, () => removeSpy(lateKey));
+    expect(removeSpy).toHaveBeenCalledWith(lateKey);
+    expect(objectByKey.has(lateKey)).toBe(false);
   });
 
   it("discards the message and staged object when revocation wins before publication", async () => {

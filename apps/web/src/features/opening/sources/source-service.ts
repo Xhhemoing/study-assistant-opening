@@ -181,29 +181,45 @@ export function createOpeningSourceService(sql: Sql, storage: OpeningStorage = n
     async listSourceDeletions(p: Principal) { auth(p, "source.list"); return actions.listPending(scopeOf(p), now()); },
     async actOnSource(p: Principal, id: string, raw: SourceActionInput): Promise<SourceActionResult> {
       auth(p, "source.delete");
+      const sourceId = id.toLowerCase();
       const input = sourceActionInputSchema.parse(raw), scope = scopeOf(p);
       const result = input.action === "retry_cleanup"
-        ? { deleted: true, cleanup: await actions.cleanup(scope, id) }
-        : await actions.apply(scope, id, input, storage, now());
+        ? { deleted: true, cleanup: await actions.cleanup(scope, sourceId) }
+        : await actions.apply(scope, sourceId, input, storage, now());
       if (input.action !== "retry_cleanup") {
         try {
           await createOpeningKnowledgeRepository(sql).reconcileCoursesForSource(scope, {
-            sourceId: id,
+            sourceId,
             markInvalidated: true,
           });
         } catch {
           // Best-effort sync: source action already committed.
         }
       }
-      if (!result.deleted) return { sourceId: id, aiExcluded: true, deleted: false, cleanupPending: 0, retryAfter: null };
+      if (!result.deleted) return { sourceId, aiExcluded: true, deleted: false, cleanupPending: 0, retryAfter: null };
+      let released = false;
       for (const key of result.cleanup.keys) {
         try { await storage.deleteObject(key); }
         catch { continue; } // The receipt keeps this failed key visible and retryable.
-        if (key === storage.stagingKey(id) && result.cleanup.notBefore && new Date(result.cleanup.notBefore) > now()) continue;
-        await actions.cleaned(scope, id, key);
+        if (key === storage.stagingKey(sourceId) && result.cleanup.notBefore && new Date(result.cleanup.notBefore) > now()) continue;
+        if (await actions.cleaned(scope, sourceId, key)) released = true;
       }
-      const remaining = await actions.cleanup(scope, id);
-      return { sourceId: id, aiExcluded: true, deleted: true, cleanupPending: remaining.keys.length,
+      let remaining: { keys: string[]; notBefore: string | null };
+      if (released) {
+        remaining = { keys: [], notBefore: null };
+      } else {
+        try {
+          remaining = await actions.cleanup(scope, sourceId);
+        } catch (error) {
+          if (error instanceof OpeningSourceError && error.code === "NOT_FOUND" && result.cleanup.keys.length > 0) {
+            // Concurrent cleanup may have already released a temporary connector reservation.
+            remaining = { keys: [], notBefore: null };
+          } else {
+            throw error;
+          }
+        }
+      }
+      return { sourceId, aiExcluded: true, deleted: true, cleanupPending: remaining.keys.length,
         retryAfter: remaining.keys.length && remaining.notBefore && new Date(remaining.notBefore) > now() ? remaining.notBefore : null };
     },
     /**

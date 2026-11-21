@@ -156,11 +156,12 @@ export function createOpeningImportsRepository(sql: Sql) {
       stage: () => Promise<void>,
     ): Promise<OpeningImportReceiptView> {
       const deliveryLock = importLock(scope, input.identity);
+      const canonicalSourceId = input.sourceId.toLowerCase();
       return withImportSession(sql, async (session, lost) => {
         // One session fences duplicate deliveries and protects its physical key
         // across PUT, while revocation remains free to commit on another session.
         await session`SELECT pg_advisory_lock(hashtextextended(${deliveryLock}, 0))`;
-        await session`SELECT pg_advisory_lock(hashtextextended(${input.sourceId}, 0))`;
+        await session`SELECT pg_advisory_lock(hashtextextended(${canonicalSourceId}, 0))`;
         const duplicate = await session.begin(async tx => {
           if (await readReceipt(tx, scope, input.identity)) {
             await lockWorkspaceLearningHistory(tx, scope);
@@ -170,22 +171,22 @@ export function createOpeningImportsRepository(sql: Sql) {
           }
           await lockImportConnection(tx, scope, { connectionId: input.identity.connectionId, connectionVersion: input.connectionVersion });
           await reserveOpeningSourceQuota(tx, scope, input.source.bytes, input.quota);
-          const [used] = await tx`SELECT 1 FROM opening_sources WHERE id=${input.sourceId}
-            UNION ALL SELECT 1 FROM opening_privacy_exclusions WHERE source_id=${input.sourceId}
-            UNION ALL SELECT 1 FROM opening_source_versions WHERE source_id=${input.sourceId} LIMIT 1`;
+          const [used] = await tx`SELECT 1 FROM opening_sources WHERE id=${canonicalSourceId}
+            UNION ALL SELECT 1 FROM opening_privacy_exclusions WHERE source_id=${canonicalSourceId}
+            UNION ALL SELECT 1 FROM opening_source_versions WHERE source_id=${canonicalSourceId} LIMIT 1`;
           if (used) throw new OpeningConnectionError("CONFLICT", "connector source object is already reserved");
           await tx`INSERT INTO opening_source_versions (source_id, version, workspace_id, bytes, availability)
-            VALUES (${input.sourceId}, 0, ${scope.workspaceId}, ${input.source.bytes}, 'unavailable')`;
+            VALUES (${canonicalSourceId}, 0, ${scope.workspaceId}, ${input.source.bytes}, 'unavailable')`;
           await tx`INSERT INTO opening_privacy_exclusions
             (id, workspace_id, source_id, asset_deleted_at, pending_object_keys)
-            VALUES (${connectorReservationId(input.sourceId)}, ${scope.workspaceId}, ${input.sourceId}, now(), ARRAY[${input.key}]::text[])`;
+            VALUES (${connectorReservationId(canonicalSourceId)}, ${scope.workspaceId}, ${canonicalSourceId}, now(), ARRAY[${input.key}]::text[])`;
           return null;
         });
         if (duplicate) return duplicate;
         if (lost()) {
           // No PUT was attempted. A healthy pool can cancel the reservation
           // without contacting storage after the dedicated session was lost.
-          await sql.begin(tx => releaseConnectorReservation(tx, scope, input.sourceId, input.key));
+          await sql.begin(tx => releaseConnectorReservation(tx, scope, canonicalSourceId, input.key));
           throw new OpeningConnectionError("CONFLICT", "connector staging session disconnected");
         }
         await stage();
@@ -194,13 +195,13 @@ export function createOpeningImportsRepository(sql: Sql) {
           if (lost()) throw new OpeningConnectionError("CONFLICT", "connector staging session disconnected");
           await lockWorkspaceLearningHistory(tx, scope);
           return commitImport(tx, scope, input, async () => {
-            if (!await releaseConnectorReservation(tx, scope, input.sourceId, input.key)) {
+            if (!await releaseConnectorReservation(tx, scope, canonicalSourceId, input.key)) {
               throw new OpeningConnectionError("CONFLICT", "connector staging reservation changed");
             }
             // A failure in either source operation rolls back the entire publication.
             const sourceSql = { begin: (run: (db: TransactionSql) => Promise<unknown>) => tx.savepoint(run) } as Sql;
             const sources = createOpeningSourceRepository(sourceSql, { quota: input.quota });
-            const source = await sources.create(scope, { ...input.source, uploadId: input.sourceId });
+            const source = await sources.create(scope, { ...input.source, uploadId: canonicalSourceId });
             const privacyEpoch = await createOpeningPrivacyRepository(tx).getWorkspaceEpoch(scope);
             await sources.completeWithParseJob(scope, source.id, {
               key: input.key, payload: { sourceId: source.id, sourceVersion: source.version, connectionId: input.identity.connectionId },
@@ -220,12 +221,20 @@ export function createOpeningImportsRepository(sql: Sql) {
       scope: OpeningScope, identity: ImportIdentity, sourceId: string, key: string, _byteSize: number,
       remove: () => Promise<void>,
     ): Promise<void> {
+      const canonicalId = sourceId.toLowerCase();
       await sql.begin(async tx => {
         // An uncertain COMMIT must settle before deleting a possibly published key.
         await tx`SELECT pg_advisory_xact_lock(hashtextextended(${importLock(scope, identity)}, 0))`;
         const [owner] = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
         if (!owner) throw new OpeningConnectionError("NOT_FOUND", "workspace not found");
-        if (await releaseConnectorReservation(tx, scope, sourceId, key)) await remove();
+        if (await releaseConnectorReservation(tx, scope, canonicalId, key)) {
+          await remove();
+          return;
+        }
+        const [retained] = await tx`SELECT 1 FROM opening_sources WHERE id=${canonicalId}
+          UNION ALL SELECT 1 FROM opening_source_versions WHERE source_id=${canonicalId}
+          UNION ALL SELECT 1 FROM opening_privacy_exclusions WHERE source_id=${canonicalId} LIMIT 1`;
+        if (!retained) await remove();
       });
     },
   };
