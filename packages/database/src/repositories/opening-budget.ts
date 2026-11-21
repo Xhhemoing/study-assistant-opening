@@ -308,7 +308,7 @@ const RETRIEVAL_BUDGET_PREFIX = "retrieval:";
 const retrievalFamilyPrefixPattern = /^(?:retrieval:)+(?=.*\S)/;
 
 /** Normalize `"retrieval:<turnId>"` and `"<turnId>"` to one turn-family budget root. */
-function parentBudgetFamilyRoot(parentId: string): string {
+export function parentBudgetFamilyRoot(parentId: string): string {
   let root = parentId;
   while (root.startsWith(RETRIEVAL_BUDGET_PREFIX)) {
     const rest = root.slice(RETRIEVAL_BUDGET_PREFIX.length);
@@ -318,9 +318,34 @@ function parentBudgetFamilyRoot(parentId: string): string {
   return root;
 }
 
-function parentBudgetFamilyIds(parentId: string): string[] {
+export function parentBudgetFamilyIds(parentId: string): string[] {
   const root = parentBudgetFamilyRoot(parentId);
   return [...new Set([root, `${RETRIEVAL_BUDGET_PREFIX}${root}`, parentId])];
+}
+
+export function parentBudgetFamilyPredicate(
+  db: BudgetSql,
+  column: "id" | "parent_interaction_id",
+  parentId: string,
+) {
+  const rootId = parentBudgetFamilyRoot(parentId);
+  const familyIds = parentBudgetFamilyIds(parentId);
+  if (column === "id") {
+    return db`(
+      id = ANY(${familyIds}::text[])
+      OR (
+        starts_with(id, 'retrieval:retrieval:')
+        AND regexp_replace(id, ${retrievalFamilyPrefixPattern.source}, '') = ${rootId}
+      )
+    )`;
+  }
+  return db`(
+    parent_interaction_id = ANY(${familyIds}::text[])
+    OR (
+      starts_with(parent_interaction_id, 'retrieval:retrieval:')
+      AND regexp_replace(parent_interaction_id, ${retrievalFamilyPrefixPattern.source}, '') = ${rootId}
+    )
+  )`;
 }
 
 // Older callers omitted the root. Keep their legacy key interpretation.
@@ -548,14 +573,17 @@ export function createOpeningBudgetRepository(
       return sql.begin(async tx => {
         const owners = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
         if (!owners.length) throw new OpeningBudgetError("NOT_FOUND", "workspace not found");
-        // Same owner lock as reserve: configuration changes cannot hide a sibling
-        // that was sent, completed, unknown or still in flight.
-        const [row] = await tx`SELECT count(*)::int AS calls,
+        // Same owner lock and turn-family match as reserve(): any live, settled,
+        // unknown, or pending-reconcile sibling (including nested retrieval:) blocks retry.
+        const [row] = await tx`SELECT
+          bool_or(parent_interaction_id=${parentId}) AS has_parent,
           bool_and(state='released' AND outcome_unknown_at IS NULL
+            AND COALESCE(pending_reconcile_cents, 0) = 0
             AND COALESCE(release_reason IN ('not_sent','cancelled'), false)) AS not_sent
           FROM opening_budget_reservations
-          WHERE workspace_id=${scope.workspaceId} AND parent_interaction_id=${parentId}`;
-        return Number(row!.calls) > 0 && row!.not_sent === true;
+          WHERE workspace_id=${scope.workspaceId}
+            AND ${parentBudgetFamilyPredicate(tx, "parent_interaction_id", parentId)}`;
+        return row!.has_parent === true && row!.not_sent === true;
       });
     },
     async reserve(scope, input) {
@@ -679,17 +707,10 @@ export function createOpeningBudgetRepository(
         if (parentBudget) {
           const parent = parentBudget;
           const rootId = parentBudgetFamilyRoot(parent.id);
-          const familyIds = parentBudgetFamilyIds(parent.id);
           const existingParents = await tx`
             SELECT * FROM opening_parent_interaction_budgets
             WHERE workspace_id = ${scope.workspaceId}
-              AND (
-                id = ANY(${familyIds}::text[])
-                OR (
-                  starts_with(id, 'retrieval:retrieval:')
-                  AND regexp_replace(id, ${retrievalFamilyPrefixPattern.source}, '') = ${rootId}
-                )
-              )
+              AND ${parentBudgetFamilyPredicate(tx, "id", parent.id)}
             ORDER BY (id = ${parent.id}) DESC, (id = ${rootId}) DESC, id
           `;
           const ownPinned = existingParents.find(row => row.id === parent.id);
@@ -733,13 +754,7 @@ export function createOpeningBudgetRepository(
               count(*) FILTER (WHERE outcome_unknown_at IS NOT NULL AND parent_interaction_id = ${parent.id})::int AS unknown_calls
             FROM opening_budget_reservations
             WHERE workspace_id = ${scope.workspaceId}
-              AND (
-                parent_interaction_id = ANY(${familyIds}::text[])
-                OR (
-                  starts_with(parent_interaction_id, 'retrieval:retrieval:')
-                  AND regexp_replace(parent_interaction_id, ${retrievalFamilyPrefixPattern.source}, '') = ${rootId}
-                )
-              )
+              AND ${parentBudgetFamilyPredicate(tx, "parent_interaction_id", parent.id)}
           `;
           // Existing post-send/terminal legacy rows must stay replayable and must
           // enter this parent's accounting, even when their bill already exceeds it.
@@ -910,18 +925,10 @@ export function createOpeningBudgetRepository(
         let reservationOverrunAlert: BudgetReconcileEvent | null = null;
         if (actualCents > (row.reservedAmountCents ?? row.amountCents)) {
           if (row.parentInteractionId) {
-            const rootId = parentBudgetFamilyRoot(row.parentInteractionId);
-            const familyIds = parentBudgetFamilyIds(row.parentInteractionId);
             await tx`UPDATE opening_parent_interaction_budgets
               SET blocked_at = COALESCE(blocked_at, ${instant}), blocked_reason = 'actual_exceeded_conservative_bound'
               WHERE workspace_id = ${scope.workspaceId}
-                AND (
-                  id = ANY(${familyIds}::text[])
-                  OR (
-                    starts_with(id, 'retrieval:retrieval:')
-                    AND regexp_replace(id, ${retrievalFamilyPrefixPattern.source}, '') = ${rootId}
-                  )
-                )`;
+                AND ${parentBudgetFamilyPredicate(tx, "id", row.parentInteractionId)}`;
           }
           const event = await tx`INSERT INTO opening_budget_reconcile_events
             (reservation_id, workspace_id, kind, amount_before_cents, amount_after_cents, reported_actual_cents, state_before, cap_cents, created_at)

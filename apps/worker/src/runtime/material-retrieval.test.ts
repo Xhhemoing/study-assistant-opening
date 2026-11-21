@@ -7,7 +7,7 @@ vi.mock("@aistudy/database", async original => ({ ...(await original<typeof impo
   createOpeningCourseReadySourcesRepository: () => mocks,
   createOpeningSourceEmbeddingsRepository: () => mocks }));
 vi.mock("@aistudy/ai", async original => ({ ...(await original<typeof import("@aistudy/ai")>()), runBudgetedEmbedding: mocks.embed }));
-import { createOpeningMaterialRetriever } from "./material-retrieval";
+import { createOpeningMaterialRetriever, retrievalBudgetId } from "./material-retrieval";
 const config = { modelKey: "test-model:3", baseUrl: "https://models.example.test/v1", modelName: "embedding", apiKey: "test",
   dimensions: 3, inputCentsPerMillion: 1, billing: "metered" as const, dailyRequestCap: null, requestDimensions: true };
 const scope = { workspaceId: "workspace", ownerUserId: "owner" };
@@ -73,6 +73,9 @@ describe("shared material retriever", () => {
     expect(mocks.assertMaterialPurposePin).toHaveBeenCalledTimes(2);
     expect(mocks.embed).toHaveBeenCalledWith(expect.objectContaining({ inputs: [input.query], operationId: "material-query:saved-job",
       parentBudget: { ...parentBudget, id: "retrieval:study-turn:user-turn" }, timeoutMs: 2_000 }));
+    expect(retrievalBudgetId("study-turn:user-turn")).toBe("retrieval:study-turn:user-turn");
+    expect(retrievalBudgetId("retrieval:study-turn:user-turn")).toBe("retrieval:study-turn:user-turn");
+    expect(retrievalBudgetId("retrieval:retrieval:study-turn:user-turn")).toBe("retrieval:study-turn:user-turn");
     const route = { sourceIds: input.sourceIds, chunkIds: chunks.map(chunk => chunk.id), privacyEpoch: 1 };
     expect(mocks.hasIndex).toHaveBeenCalledWith(scope, expect.objectContaining(route));
     expect(mocks.search).toHaveBeenCalledWith(scope, expect.objectContaining({ ...route, modelKey: config.modelKey, dimensions: 3 }));

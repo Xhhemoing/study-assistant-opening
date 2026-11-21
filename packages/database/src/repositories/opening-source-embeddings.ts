@@ -2,6 +2,7 @@ import type { Sql, TransactionSql } from "postgres";
 import type { SourceChunk } from "@aistudy/contracts";
 import type { MaterialSegment } from "@aistudy/ai";
 import type { OpeningScope } from "./opening-sources";
+import { parentBudgetFamilyPredicate } from "./opening-budget";
 import { lockOpeningJobExecution } from "./opening-job-execution";
 import { mapChunk } from "./opening-source-chunks";
 import { enqueueOpeningSourceIndex } from "./opening-source-index-jobs";
@@ -29,15 +30,17 @@ export function createOpeningSourceEmbeddingsRepository(sql: Sql) {
   return {
     async isTurnWithRetrievalNotSent(scope: OpeningScope, tutorId: string, retrievalId: string): Promise<boolean> {
       return sql.begin(async tx => {
-        // Serialize the retry decision with admission under either interaction.
+        // Serialize the retry decision with admission across the full turn family.
         const owner = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId}
           AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
         if (!owner.length) return false;
         const [proof] = await tx`SELECT bool_or(parent_interaction_id=${tutorId}) AND
           bool_and(state='released' AND outcome_unknown_at IS NULL
+            AND COALESCE(pending_reconcile_cents, 0) = 0
             AND COALESCE(release_reason IN ('not_sent','cancelled'), false)) AS not_sent
           FROM opening_budget_reservations WHERE workspace_id=${scope.workspaceId}
-            AND parent_interaction_id IN (${tutorId},${retrievalId})`;
+            AND (${parentBudgetFamilyPredicate(tx, "parent_interaction_id", tutorId)}
+              OR parent_interaction_id=${retrievalId})`;
         return proof?.not_sent === true;
       });
     },
@@ -103,20 +106,22 @@ export function createOpeningSourceEmbeddingsRepository(sql: Sql) {
     },
     async search(scope: OpeningScope, input: ModelIdentity & SearchScope & { vector: number[] }): Promise<MaterialSegment[]> {
       if (!input.sourceIds.length || input.chunkIds?.length === 0) return [];
-      // MATERIALIZED puts authorization, version, privacy and dimensions before the distance operation.
-      const rows = await sql`WITH authorized AS MATERIALIZED (
+      const queryVector = JSON.stringify(input.vector);
+      const rows = await sql`
         SELECT c.id,c.source_id,c.source_version,c.page,c.slide_label,c.start_ms,c.end_ms,c.image_object_key,
-          e.text,e.segment_index,e.embedding
-        FROM opening_source_embeddings e JOIN opening_source_chunks c ON c.id=e.chunk_id
+          e.text,e.segment_index
+        FROM opening_source_embeddings e
+        JOIN opening_source_chunks c ON c.id=e.chunk_id
           AND c.source_id=e.source_id AND c.source_version=e.source_version
-        JOIN opening_sources s ON s.id=c.source_id JOIN workspaces w ON w.id=s.workspace_id
+        JOIN opening_sources s ON s.id=c.source_id
+        JOIN workspaces w ON w.id=s.workspace_id
         WHERE w.id=${scope.workspaceId} AND w.owner_user_id=${scope.ownerUserId}
           AND s.id IN ${sql(input.sourceIds)} AND s.version=c.source_version AND s.upload_state='uploaded' AND s.parse_state='ready'
           AND e.model_key=${input.modelKey} AND e.dimensions=${input.dimensions}
           ${routeFilter(input)}
           AND NOT EXISTS(SELECT 1 FROM opening_privacy_exclusions x WHERE x.workspace_id=w.id AND x.source_id=s.id)
-      ) SELECT *,embedding <=> ${JSON.stringify(input.vector)}::vector AS distance FROM authorized
-        ORDER BY distance,id,segment_index LIMIT 48`;
+        ORDER BY e.embedding <=> ${queryVector}::vector, c.id, e.segment_index
+        LIMIT 48`;
       return rows.map(row => ({ chunk: mapChunk(row), segmentIndex: Number(row.segment_index) }));
     },
     async hasIndex(scope: OpeningScope, input: ModelIdentity & SearchScope): Promise<boolean> {

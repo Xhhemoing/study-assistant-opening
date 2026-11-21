@@ -913,6 +913,94 @@ function extractFormulaSnippets(formula: string): string[] {
   return [...new Set(equations)];
 }
 
+function splitTopLevelEquals(text: string): string[] {
+  const parts: string[] = [];
+  let start = 0;
+  let braceDepth = 0;
+  let envDepth = 0;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]!;
+    if (ch === "\\") {
+      const open = matchEnvTag(text, i, "begin");
+      if (open) {
+        envDepth++;
+        i = open.endIndex - 1;
+        continue;
+      }
+      const close = matchEnvTag(text, i, "end");
+      if (close) {
+        envDepth = Math.max(0, envDepth - 1);
+        i = close.endIndex - 1;
+        continue;
+      }
+      if (i + 1 < text.length && !/[A-Za-z]/.test(text[i + 1]!)) i++;
+      continue;
+    }
+    if (ch === "{") braceDepth++;
+    else if (ch === "}") braceDepth = Math.max(0, braceDepth - 1);
+    else if (ch === "=" && braceDepth === 0 && envDepth === 0) {
+      const prev = i > 0 ? text[i - 1]! : "";
+      const next = i + 1 < text.length ? text[i + 1]! : "";
+      if (prev === "<" || prev === ">" || prev === "!" || prev === "=" || prev === ":" || prev === "~"
+        || next === "=" || next === "<" || next === ">") {
+        continue;
+      }
+      parts.push(text.slice(start, i));
+      start = i + 1;
+    }
+  }
+  parts.push(text.slice(start));
+  return parts;
+}
+
+async function runSingleFormulaCheck(
+  checkFormula: NonNullable<VerifyTeachingInput["tools"]>["checkFormula"],
+  latex: string,
+): Promise<{ outcome: "pass" } | { outcome: "fail" | "unknown"; result: LayerResult }> {
+  let result: { ok: boolean } | { unknown: true; reason: string };
+  try {
+    result = await checkFormula!(latex);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/timeout|timed\s*out|ETIMEDOUT|abort/i.test(msg)) {
+      result = { unknown: true, reason: `formula tool timeout: ${msg}` };
+    } else {
+      return {
+        outcome: "fail",
+        result: {
+          layer: "tool_result",
+          outcome: "fail",
+          reason: `formula tool error: ${msg}`,
+          details: { latex },
+        },
+      };
+    }
+  }
+  if ("unknown" in result && result.unknown) {
+    return {
+      outcome: "unknown",
+      result: {
+        layer: "tool_result",
+        outcome: "unknown",
+        reason: result.reason || "formula tool returned unknown",
+        details: { latex },
+      },
+    };
+  }
+  if ("ok" in result && !result.ok) {
+    return {
+      outcome: "fail",
+      result: {
+        layer: "tool_result",
+        outcome: "fail",
+        reason: "formula check failed",
+        details: { latex },
+      },
+    };
+  }
+  return { outcome: "pass" };
+}
+
 async function verifyToolResult(input: VerifyTeachingInput): Promise<LayerResult> {
   const latexSnippets: string[] = [];
   let unknown: LayerResult | undefined;
@@ -947,37 +1035,27 @@ async function verifyToolResult(input: VerifyTeachingInput): Promise<LayerResult
     };
   }
 
+  const checkFormula = input.tools.checkFormula;
   for (const latex of uniqueSnippets) {
-    let result: { ok: boolean } | { unknown: true; reason: string };
-    try {
-      result = await input.tools.checkFormula(latex);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (/timeout|timed\s*out|ETIMEDOUT|abort/i.test(msg)) {
-        result = { unknown: true, reason: `formula tool timeout: ${msg}` };
-      } else return {
-        layer: "tool_result",
-        outcome: "fail",
-        reason: `formula tool error: ${msg}`,
-        details: { latex },
-      };
-    }
-
-    if ("unknown" in result && result.unknown) {
-      unknown ??= {
-        layer: "tool_result",
-        outcome: "unknown",
-        reason: result.reason || "formula tool returned unknown",
-        details: { latex },
-      };
-    }
-    if ("ok" in result && !result.ok) {
-      return {
-        layer: "tool_result",
-        outcome: "fail",
-        reason: "formula check failed",
-        details: { latex },
-      };
+    const checked = await runSingleFormulaCheck(checkFormula, latex);
+    if (checked.outcome === "fail") return checked.result;
+    if (checked.outcome === "unknown") {
+      unknown ??= checked.result;
+      // Mixed symbolic-numeric chains (e.g. 1 + 1 = 3 = x) return unknown on the full chain;
+      // probe numeric pairs across the chain so contradictory arithmetic still fails.
+      const members = splitTopLevelEquals(latex).map(member => member.trim());
+      if (members.length >= 3 && members.length <= 12 && members.every(Boolean)) {
+        for (let i = 0; i < members.length; i++) {
+          for (let j = i + 1; j < members.length; j++) {
+            const forward = await runSingleFormulaCheck(checkFormula, `${members[i]} = ${members[j]}`);
+            if (forward.outcome === "fail") return forward.result;
+            if (forward.outcome === "unknown") {
+              const reverse = await runSingleFormulaCheck(checkFormula, `${members[j]} = ${members[i]}`);
+              if (reverse.outcome === "fail") return reverse.result;
+            }
+          }
+        }
+      }
     }
   }
 

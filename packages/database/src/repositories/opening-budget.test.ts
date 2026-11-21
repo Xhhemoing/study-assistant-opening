@@ -828,6 +828,27 @@ describe("retrieval turn-family budget aggregation and isolation", () => {
         return [];
       }
 
+      if (q.includes("AS has_parent") && q.includes("FROM opening_budget_reservations")) {
+        const exactParentId = compiled.params[0] as string;
+        const wsId = compiled.params[1] as string;
+        const familyIds = compiled.params[2] as string[];
+        const rootId = compiled.params[4] as string;
+        const matched = [...reservations.values()].filter(r =>
+          r.workspace_id === wsId
+          && r.parent_interaction_id != null
+          && (familyIds.includes(String(r.parent_interaction_id)) || normalizeRoot(String(r.parent_interaction_id)) === rootId),
+        );
+        if (!matched.length) return [{ has_parent: null, not_sent: null }];
+        const hasParent = matched.some(r => r.parent_interaction_id === exactParentId);
+        const notSent = matched.every(r =>
+          r.state === "released"
+          && r.outcome_unknown_at == null
+          && Number(r.pending_reconcile_cents ?? 0) === 0
+          && (r.release_reason === "not_sent" || r.release_reason === "cancelled"),
+        );
+        return [{ has_parent: hasParent, not_sent: notSent }];
+      }
+
       if (q.includes("FROM opening_parent_interaction_budgets") && q.includes("SELECT *")) {
         const wsId = compiled.params[0] as string;
         const familyIds = compiled.params[1] as string[];
@@ -1231,5 +1252,78 @@ describe("retrieval turn-family budget aggregation and isolation", () => {
       requestFamily: null,
       parentBudget: { id: turnId },
     })).rejects.toMatchObject({ code: "PARENT_BUDGET_BLOCKED" });
+  });
+
+  it.each(["reserved", "settled", "outcome_unknown", "ttl_reconciled"] as const)(
+    "blocks isParentNotSent when a nested retrieval:retrieval:<turnId> reservation is %s",
+    async blockerState => {
+      const h = turnFamilyLedgerHarness({ clock: new Date("2026-11-21T10:00:00Z") });
+      const repo = createOpeningBudgetRepository(h.sql, { envCapCents: 100, unknownAgeMs: 1000 });
+      const turnId = `study-turn:unsent-${blockerState}`;
+      const nestedRetrievalId = `retrieval:retrieval:${turnId}`;
+
+      const tutor = await repo.reserve(scope, {
+        purpose: "tutor",
+        amountCents: 5,
+        requestId: `tutor-${blockerState}`,
+        requestFamily: null,
+        parentBudget: { id: turnId },
+      });
+      await repo.release(scope, tutor.requestId, "not_sent");
+      expect(await repo.isParentNotSent(scope, turnId)).toBe(true);
+
+      const emb = await repo.reserve(scope, {
+        purpose: "material-embedding",
+        amountCents: 1,
+        requestId: `emb-${blockerState}`,
+        requestFamily: null,
+        parentBudget: { id: nestedRetrievalId },
+      });
+      if (blockerState === "settled") await repo.settle(scope, emb.id, 1);
+      if (blockerState === "outcome_unknown") await repo.markUnknown(scope, emb.id);
+      if (blockerState === "ttl_reconciled") {
+        await repo.markUnknown(scope, emb.id);
+        h.advanceClock(5000);
+        // Trigger lazy TTL reconcile on an unrelated turn.
+        await repo.reserve(scope, { purpose: "tutor", amountCents: 1, requestId: `other-${blockerState}`, requestFamily: null });
+      }
+
+      // Root tutor was not_sent, but nested retrieval reservation is unresolved/charged -> must fail closed.
+      expect(await repo.isParentNotSent(scope, turnId)).toBe(false);
+    },
+  );
+
+  it("blocks isParentNotSent when root <turnId> is unresolved and authorizes once both root and nested retrieval are not_sent", async () => {
+    const h = turnFamilyLedgerHarness();
+    const repo = createOpeningBudgetRepository(h.sql, { envCapCents: 100 });
+    const turnId = "study-turn:unsent-both";
+    const retrievalId = `retrieval:${turnId}`;
+    const nestedRetrievalId = `retrieval:retrieval:${turnId}`;
+
+    const tutor = await repo.reserve(scope, {
+      purpose: "tutor",
+      amountCents: 5,
+      requestId: "tutor-unsent-both",
+      requestFamily: null,
+      parentBudget: { id: turnId },
+    });
+    const nestedEmb = await repo.reserve(scope, {
+      purpose: "material-embedding",
+      amountCents: 1,
+      requestId: "emb-unsent-nested",
+      requestFamily: null,
+      parentBudget: { id: nestedRetrievalId },
+    });
+
+    // Release only retrievalId / nestedRetrievalId while root <turnId> is still reserved.
+    await repo.release(scope, nestedEmb.requestId, "not_sent");
+    expect(await repo.isParentNotSent(scope, retrievalId)).toBe(false);
+    expect(await repo.isParentNotSent(scope, nestedRetrievalId)).toBe(false);
+    expect(await repo.isParentNotSent(scope, turnId)).toBe(false);
+
+    // Once root <turnId> is also released not_sent, the whole family is confirmed unsent.
+    await repo.release(scope, tutor.requestId, "not_sent");
+    expect(await repo.isParentNotSent(scope, turnId)).toBe(true);
+    expect(await repo.isParentNotSent(scope, nestedRetrievalId)).toBe(true);
   });
 });

@@ -65,7 +65,7 @@ describe("pgvector material repository", () => {
       await expect(budget.reserve(f.scope, { ...tutor, amountCents: 10 })).rejects.toMatchObject({ code: "BUDGET_EXCEEDED" });
       await expect(budget.reserve(f.scope, { ...tutor, amountCents: 9 })).resolves.toMatchObject({ state: "reserved" });
       await budget.release(f.scope, tutor.requestId, "not_sent");
-      expect(await budget.isParentNotSent(f.scope, parentBudget.id)).toBe(true);
+      expect(await budget.isParentNotSent(f.scope, parentBudget.id)).toBe(false);
       expect(await repository.isTurnWithRetrievalNotSent(f.scope, parentBudget.id, retrievalBudgetId(parentBudget.id))).toBe(false);
     } finally {
       send.mockRestore();
@@ -120,6 +120,13 @@ describe("pgvector material repository", () => {
     expect(await proof()).toBe(false);
     await budget.release(f.scope, embedding.requestId, "cancelled");
     expect(await proof()).toBe(true);
+    const nestedEmbedding = { ...tutor, purpose: "material-embedding", requestId: randomUUID(), parentBudget: { id: `retrieval:${retrievalId}` } };
+    await budget.reserve(f.scope, nestedEmbedding);
+    expect(await proof()).toBe(false);
+    expect(await budget.isParentNotSent(f.scope, tutorId)).toBe(false);
+    await budget.release(f.scope, nestedEmbedding.requestId, "not_sent");
+    expect(await proof()).toBe(true);
+    expect(await budget.isParentNotSent(f.scope, tutorId)).toBe(true);
     expect(await repository.isTurnWithRetrievalNotSent(f.otherScope, tutorId, retrievalId)).toBe(false);
   });
 

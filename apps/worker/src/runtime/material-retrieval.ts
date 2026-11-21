@@ -10,7 +10,15 @@ type ScopedMaterialRetriever = (scope: Parameters<MaterialRetriever>[0],
     Promise<Awaited<ReturnType<MaterialRetriever>> & { assertCurrent(): Promise<void> }>;
 import { scopeBudget } from "./model-gateway";
 
-export const retrievalBudgetId = (parentId: string) => `retrieval:${parentId}`;
+export const retrievalBudgetId = (parentId: string) => {
+  let root = parentId;
+  while (root.startsWith("retrieval:")) {
+    const rest = root.slice("retrieval:".length);
+    if (!rest.trim()) break;
+    root = rest;
+  }
+  return root.startsWith("retrieval:") ? root : `retrieval:${root}`;
+};
 
 /** One material path for saved chat, temporary chat and the teaching compiler. */
 export function createOpeningMaterialRetriever(
