@@ -164,7 +164,7 @@ export function updateBeliefWithEvidence(input: {
     logStability -= Math.max(0, input.etaMinus ?? 0.25) * weight * Math.max(1e-6, 1 - rho);
     implicitLogCredit = 0;
   } else if (channel === "unassisted" && observation.isFreshFamily === true && !observation.sameItemRepeat
-    && !observation.sameFamilyClone && Number.isFinite(input.atMs)) {
+    && !observation.sameFamilyClone && Number.isFinite(input.atMs) && rho > 0) {
     logStability += Math.max(0, input.etaPlus ?? 0.25) * weight * rho * (1 - direct);
     lastDirectRecallAtMs = input.atMs;
     implicitLogCredit = 0;

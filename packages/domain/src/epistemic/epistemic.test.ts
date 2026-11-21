@@ -239,6 +239,47 @@ describe("power-weighted evidence", () => {
       12,
     );
   });
+
+  it("preserves direct-recall history and blocks FIRe credit on a zero-responsibility fresh-family guess", () => {
+    const guessItem: SkillItemModel = { itemId: "guess-only", a: 1, b: 0, g: 0.25, l: 0.05 };
+    const unseeded = baseBelief({ lastDirectRecallAtMs: null, implicitLogCredit: 0 });
+    const result = updateBeliefWithEvidence({
+      belief: unseeded,
+      item: guessItem,
+      atMs: DAY_MS,
+      observation: { outcome: true, channel: "unassisted", isFreshFamily: true, retrievalProbability: 0 },
+    });
+    expect(result.retrievedProbability).toBe(0);
+    expect(result.belief.lastDirectRecallAtMs).toBeNull();
+    expect(result.belief.logStability).toBe(unseeded.logStability);
+    expect(result.belief.implicitLogCredit).toBe(0);
+    expect(retrievability(result.belief, DAY_MS)).toBeCloseTo(0.5, 12);
+    expect(retrievability(result.belief, 2 * DAY_MS)).toBeCloseTo(0.5, 12);
+
+    const fire = propagateFireCredit({
+      sourceSkillId: "encompassing",
+      attemptId: "attempt-after-guess",
+      atMs: 2 * DAY_MS,
+      source: baseBelief({ lastDirectRecallAtMs: DAY_MS }),
+      targets: {
+        guessed: { belief: result.belief, edgeWeight: 0.8, covered: true, stepPassed: true },
+      },
+    });
+    expect(fire.propagatedSkillIds).toEqual([]);
+    expect(fire.targets.guessed.belief.implicitLogCredit).toBe(0);
+
+    const seeded = baseBelief({ lastDirectRecallAtMs: 0, implicitLogCredit: 0.1 });
+    const seededGuess = updateBeliefWithEvidence({
+      belief: seeded,
+      item: guessItem,
+      atMs: DAY_MS,
+      observation: { outcome: true, channel: "unassisted", isFreshFamily: true, retrievalProbability: 0 },
+    });
+    expect(seededGuess.retrievedProbability).toBe(0);
+    expect(seededGuess.belief.lastDirectRecallAtMs).toBe(0);
+    expect(seededGuess.belief.logStability).toBe(seeded.logStability);
+    expect(seededGuess.belief.implicitLogCredit).toBe(0.1);
+  });
 });
 
 describe("FIRe implicit credit", () => {
