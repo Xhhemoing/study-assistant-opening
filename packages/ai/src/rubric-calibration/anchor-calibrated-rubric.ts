@@ -143,7 +143,7 @@ function countWords(text: string): number {
 }
 
 function isWordChar(ch: string | undefined): boolean {
-  return ch !== undefined && /[a-z0-9]/.test(ch);
+  return ch !== undefined && /[\p{L}\p{M}\p{N}]/u.test(ch);
 }
 
 function countNonOverlappingOccurrences(haystack: string, needle: string): number {
@@ -167,7 +167,7 @@ function countNonOverlappingOccurrences(haystack: string, needle: string): numbe
 }
 
 export function detectTemplatePadding(text: string): TemplatePaddingReport {
-  const normalized = text.toLowerCase().replace(/\s+/g, " ").trim();
+  const normalized = text.normalize("NFKC").toLowerCase().replace(/\s+/g, " ").trim();
   const wordCount = countWords(normalized);
   const clicheHits: string[] = [];
   let totalClicheOccurrences = 0;
@@ -529,14 +529,12 @@ export function evaluateAnchorCalibratedRubric(input: RubricSubmissionInput): An
     !Number.isFinite(band) ||
     band < MIN_BAND ||
     band > MAX_BAND;
-  const bracketLow = Math.min(bandRange[0], snapHalfBand(bandRange[0])) - BRACKET_EPSILON;
-  const bracketHigh = Math.max(bandRange[1], snapHalfBand(bandRange[1])) + BRACKET_EPSILON;
   const outsideBracket =
     !nonFinite &&
     (rawBand < bandRange[0] - BRACKET_EPSILON ||
       rawBand > bandRange[1] + BRACKET_EPSILON ||
-      band < bracketLow ||
-      band > bracketHigh);
+      band < bandRange[0] - BRACKET_EPSILON ||
+      band > bandRange[1] + BRACKET_EPSILON);
 
   if (nonFinite || outsideBracket) {
     const fallbackExclusions: MasteryExclusionReason[] = [...masteryExclusionReasons];

@@ -314,13 +314,43 @@ describe("AnchorCalibratedRubricV1 pairwise swap, monotonicity & mastery gates",
     expect(shortBoilerplate.clicheWordRatio).toBeGreaterThanOrEqual(0.20);
     expect(shortBoilerplate.isTemplatePadded).toBe(true);
 
-    // Word-boundary matching: "undeniable factual" must NOT falsely match "undeniable fact".
+    // Word-boundary matching: "undeniable factual" and NFKC ligature "Ofﬁce" must NOT false-positive.
     const cleanFactual = detectTemplatePadding(
       "The report identifies undeniable factual errors and undeniable factual discrepancies in municipal budget projections.",
     );
     expect(cleanFactual.clicheHits).toEqual([]);
     expect(cleanFactual.totalClicheOccurrences).toBe(0);
     expect(cleanFactual.isTemplatePadded).toBe(false);
+
+    const ligatureText = detectTemplatePadding(
+      "Since the Dawn Of\uFB01ce opened downtown, commuters reported shorter bus delays.",
+    );
+    expect(ligatureText.clicheHits).toEqual([]);
+    expect(ligatureText.totalClicheOccurrences).toBe(0);
+    expect(ligatureText.isTemplatePadded).toBe(false);
+
+    // Custom [4.10, 4.20] anchors whose snapped band (4.0) escapes [4.10, 4.20] must fail closed to interval_only.
+    const narrowEscapeAnchors = [
+      { ...baseAnchors[0]!, anchorId: "nar-410", band: 4.10 as unknown as typeof baseAnchors[0]["band"], thetaAnchor: -1 },
+      { ...baseAnchors[1]!, anchorId: "nar-420", band: 4.20 as unknown as typeof baseAnchors[1]["band"], thetaAnchor: 1 },
+    ];
+    const narrowEscapeRes = evaluateAnchorCalibratedRubric({
+      submissionId: "narrow-bracket-escape",
+      dimension: "task_response",
+      text: SENTINEL_ANCHOR_ESSAYS[2]!.text,
+      mode: "formal_assessment",
+      assisted: false,
+      anchors: narrowEscapeAnchors,
+      comparisons: [
+        { anchorId: "nar-410", forwardChoice: "A", reverseChoice: "B" },
+        { anchorId: "nar-420", forwardChoice: "B", reverseChoice: "A" },
+      ],
+    });
+    expect(narrowEscapeRes.status).toBe("interval_only");
+    expect(narrowEscapeRes.band).toBeNull();
+    expect(narrowEscapeRes.bandRange).toEqual([4.10, 4.20]);
+    expect(narrowEscapeRes.countsTowardMastery).toBe(false);
+    expect(narrowEscapeRes.inconsistencyReasons).toEqual(["projection_outside_evidence_bracket"]);
 
     // Out-of-range custom thetaAnchor (e.g. 100 / 101) fails closed and never projects outside evidence bracket.
     const extremeThetaAnchors = [

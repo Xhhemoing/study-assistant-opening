@@ -832,5 +832,211 @@ describe("revalidateRemedyClinic privacy_epoch and source-revocation read guard"
     expect(partialProbeReval.revocationSummary.strippedCaseCount).toBe(0);
     expect(partialProbeReval.revocationSummary.strippedProbeCount).toBe(1);
     expect(partialProbeReval.revocationSummary.reason).toBe("partial_source_revoked_still_active");
+
+    // Step 2 learner-facing prompt must not leak internal snake_case ruleId.
+    expect(clinic.steps[1].ruleId).toBe(RULE_ID);
+    expect(clinic.steps[1].prompt).not.toContain(RULE_ID);
+    const untitledRes = generateRemedyClinic({
+      learnerId: "learner-1",
+      courseId: "course-alg-1",
+      ruleId: RULE_ID,
+      currentPrivacyEpoch: 5,
+      activeSourcesMap: allSources,
+      verifyRuleViolation: verifyNegativeSignFlip,
+      attempts,
+      candidateProbes: [probe2, makeProbe({ probeId: "probe-untitled-2", input: { a: -5, b: 20 } })],
+    });
+    expect(untitledRes.status).toBe("active");
+    expect(untitledRes.clinic!.steps[1].prompt).not.toContain(RULE_ID);
+
+    // verifyRuleViolation attempting to mutate attempt.sourceRefs cannot tamper with frozen provenance.
+    const mutAttempts = attempts.map((item) => ({
+      ...item,
+      sourceRefs: item.sourceRefs.map((r) => ({ ...r })),
+    }));
+    const mutatingVerifierRes = generateRemedyClinic({
+      learnerId: "learner-1",
+      courseId: "course-alg-1",
+      ruleId: RULE_ID,
+      currentPrivacyEpoch: 5,
+      activeSourcesMap: allSources,
+      verifyRuleViolation: (attempt) => {
+        try {
+          (attempt.sourceRefs as Array<{ sourceId: string; sourceVersion: string }>)[0] = {
+            sourceId: "src-ch-3",
+            sourceVersion: "v1",
+          };
+        } catch {
+          // Expected TypeError on frozen sourceRefs; still return true.
+        }
+        return verifyNegativeSignFlip(attempt);
+      },
+      attempts: mutAttempts,
+      candidateProbes: [probe2, makeProbe({ probeId: "probe-mut-ver-2", input: { a: -5, b: 20 } })],
+    });
+    expect(mutatingVerifierRes.status).toBe("active");
+    expect(mutatingVerifierRes.clinic!.evidenceCases[0]!.sourceRefs).toEqual([
+      { sourceId: "src-ch-1", sourceVersion: "v1" },
+    ]);
+
+    // Probe 1 predict mutating shared hypothesis receiver state (this.config.answer) cannot affect Probe 2.
+    const sharedConfig = { answer: "x <= -4" };
+    interface ConfigModel {
+      id: string;
+      label: string;
+      role: "misconception";
+      description: string;
+      config: { answer: string };
+      predict(this: { config: { answer: string } }, input: InequalityInput): string;
+    }
+    const baseProbeA = makeProbe({ probeId: "probe-shared-a", input: { a: -2, b: 8 } });
+    const baseProbeB = makeProbe({ probeId: "probe-shared-b", input: { a: -3, b: 12 } });
+    const mutatingProbeA = {
+      ...baseProbeA,
+      correctModel: {
+        ...baseProbeA.correctModel,
+        predict: (inp: InequalityInput) => {
+          sharedConfig.answer = "x >= -4";
+          return baseProbeA.correctModel.predict(inp);
+        },
+      },
+    };
+    const receiverHypB: ConfigModel = {
+      id: RULE_ID,
+      label: "Receiver-backed hypothesis",
+      role: "misconception",
+      description: "Reads answer from isolated receiver config.",
+      config: sharedConfig,
+      predict() {
+        return this.config.answer;
+      },
+    };
+    const isolatedProbeB: DistinguishableProbeSpec<InequalityInput, string> = {
+      ...baseProbeB,
+      hypotheses: [receiverHypB, baseProbeB.hypotheses[1]!],
+    };
+    const receiverRes = generateRemedyClinic({
+      learnerId: "learner-1",
+      courseId: "course-alg-1",
+      ruleId: RULE_ID,
+      currentPrivacyEpoch: 5,
+      activeSourcesMap: allSources,
+      verifyRuleViolation: verifyNegativeSignFlip,
+      attempts,
+      candidateProbes: [mutatingProbeA, isolatedProbeB],
+    });
+    expect(sharedConfig.answer).toBe("x >= -4");
+    expect(receiverRes.status).toBe("active");
+    expect(receiverRes.clinic!.steps[2].probes).toHaveLength(2);
+
+    // Array-slot getters at index 0 on candidateProbes, hypotheses, and ruleSourceRefs fail closed without executing.
+    let slotGetterCalls = 0;
+    const getterProbesArr: Array<DistinguishableProbeSpec<InequalityInput, string>> = new Array(1);
+    Object.defineProperty(getterProbesArr, "0", {
+      enumerable: true,
+      get() {
+        slotGetterCalls++;
+        return probe2;
+      },
+    });
+    const slotProbeRes = generateRemedyClinic({
+      learnerId: "learner-1",
+      courseId: "course-alg-1",
+      ruleId: RULE_ID,
+      currentPrivacyEpoch: 5,
+      activeSourcesMap: allSources,
+      verifyRuleViolation: verifyNegativeSignFlip,
+      attempts,
+      candidateProbes: getterProbesArr,
+    });
+    expect(slotProbeRes.status).toBe("invalid_input");
+
+    const getterHypArr: Array<DistinguishableProbeSpec<InequalityInput, string>["hypotheses"][number]> = new Array(1);
+    Object.defineProperty(getterHypArr, "0", {
+      enumerable: true,
+      get() {
+        slotGetterCalls++;
+        return probe2.hypotheses[0]!;
+      },
+    });
+    const slotHypRes = generateRemedyClinic({
+      learnerId: "learner-1",
+      courseId: "course-alg-1",
+      ruleId: RULE_ID,
+      currentPrivacyEpoch: 5,
+      activeSourcesMap: allSources,
+      verifyRuleViolation: verifyNegativeSignFlip,
+      attempts,
+      candidateProbes: [{ ...probe2, probeId: "probe-slot-hyp", hypotheses: getterHypArr }, makeProbe({ probeId: "probe-slot-ok", input: { a: -5, b: 20 } })],
+    });
+    expect(slotHypRes.status).toBe("insufficient_distinguishable_probes");
+    expect(slotHypRes.rejectedProbes[0]!.reason).toBe("invalid_probe_descriptor");
+
+    const getterRuleRefs: Array<{ sourceId: string; sourceVersion: string }> = new Array(1);
+    Object.defineProperty(getterRuleRefs, "0", {
+      enumerable: true,
+      get() {
+        slotGetterCalls++;
+        return { sourceId: "src-rule", sourceVersion: "v1" };
+      },
+    });
+    const slotRuleRes = generateRemedyClinic({
+      learnerId: "learner-1",
+      courseId: "course-alg-1",
+      ruleId: RULE_ID,
+      ruleSourceRefs: getterRuleRefs,
+      currentPrivacyEpoch: 5,
+      activeSourcesMap: allSources,
+      verifyRuleViolation: verifyNegativeSignFlip,
+      attempts,
+      candidateProbes: [probe2, makeProbe({ probeId: "probe-slot-rule-2", input: { a: -5, b: 20 } })],
+    });
+    expect(slotRuleRes.status).toBe("invalid_input");
+    expect(slotGetterCalls).toBe(0);
+
+    // 35-level shared diamond DAG + cyclic plain input pass in linear O(V+E) time without throwing.
+    interface GraphInput {
+      a: number;
+      b: number;
+      left?: GraphInput;
+      right?: GraphInput;
+      self?: GraphInput;
+    }
+    let diamond: GraphInput = { a: -2, b: 8 };
+    for (let depth = 0; depth < 35; depth += 1) {
+      diamond = { a: -2, b: 8, left: diamond, right: diamond };
+    }
+    const cyclic: GraphInput = { a: -3, b: 12 };
+    cyclic.self = cyclic;
+
+    const makeGraphProbe = (probeId: string, graphInput: GraphInput): DistinguishableProbeSpec<GraphInput, string> => ({
+      probeId,
+      requirementKey: "alg.linear-inequalities",
+      prompt: `Graph solve ${graphInput.a}x <= ${graphInput.b}`,
+      input: graphInput,
+      correctModel: { id: "M_star", label: "Flip", role: "correct", predict: (x) => `x >= ${x.b / x.a}` },
+      hypotheses: [
+        { id: RULE_ID, label: "No flip", role: "misconception", description: "No flip", predict: (x) => `x <= ${x.b / x.a}` },
+        { id: "rhs_abs", label: "Abs", role: "misconception", description: "Abs", predict: (x) => `x <= ${x.b / Math.abs(x.a)}` },
+      ],
+      observableKey: (s) => s,
+      parseResponse: (r) => (typeof r === "string" ? r : null),
+    });
+
+    const graphRes = generateRemedyClinic({
+      learnerId: "learner-1",
+      courseId: "course-alg-1",
+      ruleId: RULE_ID,
+      currentPrivacyEpoch: 5,
+      activeSourcesMap: allSources,
+      verifyRuleViolation: verifyNegativeSignFlip,
+      attempts,
+      candidateProbes: [
+        makeGraphProbe("probe-diamond-35", diamond),
+        makeGraphProbe("probe-cyclic-self", cyclic),
+      ],
+    });
+    expect(graphRes.status).toBe("active");
+    expect(graphRes.clinic!.steps[2].probes).toHaveLength(2);
   });
 });
