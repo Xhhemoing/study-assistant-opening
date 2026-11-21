@@ -78,6 +78,38 @@ describe("multimodal-evidence: Two-Stage Handwritten Math & 408 Diagram Verifier
     expect(isCriticalMathOr408Token({ kind: "whitespace", rawText: " " })).toBe(false);
     expect(isCriticalMathOr408Token({ kind: "auto", rawText: ";" })).toBe(false);
     expect(isCriticalMathOr408Token({ kind: "auto", rawText: "->" })).toBe(true);
+    // [P1-4] Grouping delimiters ()[]{} are critical under kind: "auto".
+    expect(isCriticalMathOr408Token({ kind: "auto", rawText: "(" })).toBe(true);
+    expect(isCriticalMathOr408Token({ kind: "auto", rawText: ")" })).toBe(true);
+    expect(isCriticalMathOr408Token({ kind: "auto", rawText: "[" })).toBe(true);
+    expect(isCriticalMathOr408Token({ kind: "auto", rawText: "]" })).toBe(true);
+    expect(isCriticalMathOr408Token({ kind: "auto", rawText: "{" })).toBe(true);
+    expect(isCriticalMathOr408Token({ kind: "auto", rawText: "}" })).toBe(true);
+
+    // Low-confidence grouping parentheses under kind: "auto" must block Stage 1.
+    const lowConfParen = evaluateHandwritingStage1([
+      {
+        stepId: "s-paren",
+        bbox: [0.05, 0.05, 0.9, 0.25],
+        ast: {
+          kind: "equation",
+          tokens: [
+            { tokenId: "p1", rawText: "(", kind: "auto", confidence: 0.61 },
+            { tokenId: "p2", rawText: "2", kind: "auto", confidence: 0.98 },
+            { tokenId: "p3", rawText: "+", kind: "auto", confidence: 0.96 },
+            { tokenId: "p4", rawText: "3", kind: "auto", confidence: 0.98 },
+            { tokenId: "p5", rawText: ")", kind: "auto", confidence: 0.95 },
+            { tokenId: "p6", rawText: "=", kind: "auto", confidence: 0.97 },
+            { tokenId: "p7", rawText: "5", kind: "auto", confidence: 0.99 },
+          ],
+        },
+      },
+    ]);
+    expect(lowConfParen.status).toBe("awaiting_symbol_confirmation");
+    expect(lowConfParen.canUpdateSkillBelief).toBe(false);
+    expect(lowConfParen.cropConfirmationPrompts.map((p) => p.rawAmbiguousTokenSpan.text)).toEqual([
+      "(",
+    ]);
 
     // Low-confidence non-semantic punctuation does NOT block Stage 1.
     const stage1 = evaluateHandwritingStage1([
@@ -479,6 +511,91 @@ describe("multimodal-evidence: Two-Stage Handwritten Math & 408 Diagram Verifier
       ]),
     ).toThrow(/cycle/i);
   });
+
+  it("[P1-2][P1-3][P2-2] enforces exponent/unary precedence, fails closed on overflow/unsupported syntax, strips punctuation, and gates confirmedText", () => {
+    const makeEqStep = (stepId: string, tokens: string[]): HandwritingStepInput => ({
+      stepId,
+      bbox: [0.1, 0.1, 0.9, 0.3],
+      ast: {
+        kind: "equation",
+        tokens: tokens.map((rawText, idx) => ({
+          tokenId: `${stepId}-t${idx}`,
+          rawText,
+          kind: "auto",
+          confidence: 0.99,
+        })),
+      },
+    });
+
+    // [P1-2] Unary negation vs exponentiation precedence & right-associative powers.
+    expect(evaluateHandwritingStage2([makeEqStep("p1", ["-2", "^", "2", "=", "-4"])]).overallVerdict).toBe("valid");
+    expect(evaluateHandwritingStage2([makeEqStep("p2", ["-2", "^", "2", "=", "4"])]).overallVerdict).toBe("invalid");
+    expect(evaluateHandwritingStage2([makeEqStep("p3", ["(", "-2", ")", "^", "2", "=", "4"])]).overallVerdict).toBe("valid");
+    expect(evaluateHandwritingStage2([makeEqStep("p4", ["-4", "^", "0.5", "=", "-2"])]).overallVerdict).toBe("valid");
+    expect(evaluateHandwritingStage2([makeEqStep("p5", ["2", "^", "-3", "=", "0.125"])]).overallVerdict).toBe("valid");
+    expect(evaluateHandwritingStage2([makeEqStep("p6", ["2", "^", "3", "^", "2", "=", "512"])]).overallVerdict).toBe("valid");
+
+    // [P1-3] Trailing non-semantic punctuation / decoration excluded before numeric check.
+    const punctuated = evaluateHandwritingStage2([
+      {
+        stepId: "punct",
+        bbox: [0.1, 0.1, 0.9, 0.3],
+        ast: {
+          kind: "equation",
+          tokens: [
+            { tokenId: "t1", rawText: "2.5", kind: "number", confidence: 0.99 },
+            { tokenId: "t2", rawText: "+", kind: "operator", confidence: 0.99 },
+            { tokenId: "t3", rawText: "2.5", kind: "number", confidence: 0.99 },
+            { tokenId: "t4", rawText: "=", kind: "operator", confidence: 0.99 },
+            { tokenId: "t5", rawText: "5.0", kind: "number", confidence: 0.99 },
+            { tokenId: "t6", rawText: ".", kind: "punctuation", confidence: 0.3 },
+            { tokenId: "t7", rawText: "__", kind: "decoration", confidence: 0.2 },
+          ],
+        },
+      },
+    ]);
+    expect(punctuated.overallVerdict).toBe("valid");
+
+    // [P1-3] Unsupported implicit multiplication & float64 overflow fail closed as "unknown", while div-by-zero is "invalid".
+    const implicitMul = evaluateHandwritingStage2([makeEqStep("impl", ["2", "(", "3", ")", "=", "6"])]);
+    expect(implicitMul.overallVerdict).toBe("unknown");
+    expect(implicitMul.canUpdateSkillBelief).toBe(false);
+
+    const overflow = evaluateHandwritingStage2([makeEqStep("ovf", ["10", "^", "400", "=", "10", "^", "400"])]);
+    expect(overflow.overallVerdict).toBe("unknown");
+    expect(overflow.canUpdateSkillBelief).toBe(false);
+
+    const divZero = evaluateHandwritingStage2([makeEqStep("dz", ["1", "/", "0", "=", "0"])]);
+    expect(divZero.overallVerdict).toBe("invalid");
+
+    // [P2-2] Unconfirmed confirmedText must be ignored when confirmedByLearner !== true.
+    const unconfirmedDraft: readonly HandwritingStepInput[] = [
+      {
+        stepId: "draft-only",
+        bbox: [0.1, 0.1, 0.9, 0.3],
+        ast: {
+          kind: "equation",
+          tokens: [
+            { tokenId: "d1", rawText: "2", kind: "digit", confidence: 0.99 },
+            {
+              tokenId: "d2",
+              rawText: "*",
+              kind: "operator",
+              confidence: 0.92,
+              confirmedByLearner: false,
+              confirmedText: "+",
+            },
+            { tokenId: "d3", rawText: "3", kind: "digit", confidence: 0.99 },
+            { tokenId: "d4", rawText: "=", kind: "operator", confidence: 0.99 },
+            { tokenId: "d5", rawText: "5", kind: "digit", confidence: 0.99 },
+          ],
+        },
+      },
+    ];
+    const stage1Draft = evaluateHandwritingStage1(unconfirmedDraft);
+    expect(stage1Draft.steps[0]!.tokens[1]!.effectiveText).toBe("*");
+    expect(evaluateHandwritingStage2(unconfirmedDraft).overallVerdict).toBe("invalid");
+  });
 });
 
 describe("multimodal-evidence: Pre-VAD Original PCM Clock & 0080 Raw Audio Retention", () => {
@@ -553,6 +670,85 @@ describe("multimodal-evidence: Pre-VAD Original PCM Clock & 0080 Raw Audio Reten
     expect(preVadReceipt.articulationRateWordsPerMin).toBe(150); // 5 words / (2000 / 60000) min
     expect(preVadReceipt.integrityDigest).toMatch(/^sha256:[0-9a-f]{64}$/);
     expect("rawAudioBytes" in preVadReceipt).toBe(false);
+  });
+
+  it("[P1-1][P2-1] snaps cross-segment vad_stripped jitter tokens to majority segment without swallowing excised silences", () => {
+    const voicedSegments = [
+      { originalStartMs: 200, originalEndMs: 1200, strippedStartMs: 0, strippedEndMs: 1000 },
+      { originalStartMs: 3400, originalEndMs: 4400, strippedStartMs: 1000, strippedEndMs: 2000 },
+    ] as const;
+
+    // 1. Majority in seg[0] ([700, 1010] -> 300ms in seg0, 10ms in seg1) snaps to seg[0] [900, 1200].
+    const forwardJitter = issueSpeechTimingReceipt({
+      receiptId: "rcpt-seam-forward",
+      totalOriginalDurationMs: 5000,
+      voicedSegments,
+      words: [
+        { word: "I", startMs: 0, endMs: 300 },
+        { word: "prefer", startMs: 700, endMs: 1010 },
+        { word: "reading", startMs: 1010, endMs: 1450 },
+      ],
+      defaultTokenClock: "vad_stripped",
+    });
+    expect(forwardJitter.voicedDurationMs).toBe(2000);
+    expect(forwardJitter.words[1]!.originalStartMs).toBe(900);
+    expect(forwardJitter.words[1]!.originalEndMs).toBe(1200);
+    expect(forwardJitter.words[2]!.originalStartMs).toBe(3410);
+    expect(forwardJitter.breakdownPauseCount).toBe(1);
+    expect(forwardJitter.midClauseHesitationPauses[0]!.durationMs).toBe(2210);
+    expect(forwardJitter.meanLengthOfRunWords).toBe(1.5);
+
+    // 2. Majority in seg[1] ([990, 1450] -> 10ms in seg0, 450ms in seg1) snaps to seg[1] [3400, 3850].
+    const backwardJitter = issueSpeechTimingReceipt({
+      receiptId: "rcpt-seam-backward",
+      totalOriginalDurationMs: 5000,
+      voicedSegments,
+      words: [
+        { word: "prefer", startMs: 700, endMs: 990 },
+        { word: "reading", startMs: 990, endMs: 1450 },
+      ],
+      defaultTokenClock: "vad_stripped",
+    });
+    expect(backwardJitter.words[0]!.originalEndMs).toBe(1190);
+    expect(backwardJitter.words[1]!.originalStartMs).toBe(3400);
+    expect(backwardJitter.breakdownPauseCount).toBe(1);
+    expect(backwardJitter.midClauseHesitationPauses[0]!.durationMs).toBe(2210);
+
+    // 3. Token spanning > 1 excised silence gap snaps to majority island without swallowing silences.
+    const multiIslandSegments = [
+      { originalStartMs: 0, originalEndMs: 500, strippedStartMs: 0, strippedEndMs: 500 },
+      { originalStartMs: 2500, originalEndMs: 3500, strippedStartMs: 500, strippedEndMs: 1500 },
+      { originalStartMs: 5500, originalEndMs: 6500, strippedStartMs: 1500, strippedEndMs: 2500 },
+    ] as const;
+    const multiSpan = issueSpeechTimingReceipt({
+      receiptId: "rcpt-multi-island",
+      totalOriginalDurationMs: 7000,
+      voicedSegments: multiIslandSegments,
+      words: [
+        { word: "well", startMs: 0, endMs: 400 },
+        { word: "um", startMs: 450, endMs: 1550 }, // 50ms in seg0, 1000ms in seg1, 50ms in seg2
+        { word: "yes", startMs: 1600, endMs: 2200 },
+      ],
+      defaultTokenClock: "vad_stripped",
+    });
+    expect(multiSpan.voicedDurationMs).toBe(2500);
+    expect(multiSpan.words[1]!.originalStartMs).toBe(2500);
+    expect(multiSpan.words[1]!.originalEndMs).toBe(3500);
+    expect(multiSpan.breakdownPauseCount).toBe(2);
+
+    // 4. [P2-1] Non-touching padded stripped segments honor exact segment endpoints.
+    const paddedSegments = [
+      { originalStartMs: 0, originalEndMs: 1000, strippedStartMs: 0, strippedEndMs: 1000 },
+      { originalStartMs: 3000, originalEndMs: 4000, strippedStartMs: 1050, strippedEndMs: 2050 },
+    ] as const;
+    expect(mapStrippedClockToOriginalPcmMs(1000, paddedSegments, "start")).toEqual({
+      originalMs: 1000,
+      segmentIndex: 0,
+    });
+    expect(mapStrippedClockToOriginalPcmMs(1050, paddedSegments, "end")).toEqual({
+      originalMs: 3000,
+      segmentIndex: 1,
+    });
   });
 
   it("distinguishes sentence-boundary pauses, minor hesitations, and repair/repetition ratio", () => {
@@ -707,5 +903,33 @@ describe("multimodal-evidence: Pre-VAD Original PCM Clock & 0080 Raw Audio Reten
     expect(expiredAtCeiling.disposition).toBe("sweep_expired");
     expect(expiredAtCeiling.retainRawAudio).toBe(false);
     expect(expiredAtCeiling.sweep_due_immediately).toBe(true);
+
+    // [P2-3] immediate_delete sets sweep_due_immediately: true unconditionally even if nowMs < issuedAtMs.
+    const earlyClockImmediate = evaluateRawAudioRetentionPolicy({
+      mediaBytesUsed: 0,
+      recordingBytes: 10_000,
+      mediaQuotaBytes: 10_000_000,
+      durationMs: 5_000,
+      maxRecordingDurationMs: 180_000,
+      issuedAtMs,
+      nowMs: issuedAtMs - 1_000,
+      learnerOptInReplay: false,
+    });
+    expect(earlyClockImmediate.disposition).toBe("immediate_delete");
+    expect(earlyClockImmediate.sweep_due_immediately).toBe(true);
+
+    const earlyClockOptInExpired = evaluateRawAudioRetentionPolicy({
+      mediaBytesUsed: 0,
+      recordingBytes: 10_000,
+      mediaQuotaBytes: 10_000_000,
+      durationMs: 5_000,
+      maxRecordingDurationMs: 180_000,
+      issuedAtMs,
+      nowMs: issuedAtMs - 1_000,
+      learnerOptInReplay: true,
+      requestedRetentionUntilMs: issuedAtMs,
+    });
+    expect(earlyClockOptInExpired.disposition).toBe("immediate_delete");
+    expect(earlyClockOptInExpired.sweep_due_immediately).toBe(true);
   });
 });

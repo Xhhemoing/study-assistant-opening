@@ -198,9 +198,12 @@ export function mapStrippedClockToOriginalPcmMs(
   if (role === "start") {
     for (const [index, seg] of segments.entries()) {
       const isLast = index === segments.length - 1;
-      const inUpper = isLast
-        ? strippedMs <= seg.strippedEndMs + DURATION_EPSILON_MS
-        : strippedMs < seg.strippedEndMs - DURATION_EPSILON_MS;
+      const touchesNext =
+        !isLast &&
+        Math.abs(segments[index + 1]!.strippedStartMs - seg.strippedEndMs) <= DURATION_EPSILON_MS;
+      const inUpper = touchesNext
+        ? strippedMs < seg.strippedEndMs - DURATION_EPSILON_MS
+        : strippedMs <= seg.strippedEndMs + DURATION_EPSILON_MS;
       if (strippedMs >= seg.strippedStartMs - DURATION_EPSILON_MS && inUpper) {
         const clampedOffset = Math.min(
           seg.originalEndMs - seg.originalStartMs,
@@ -213,9 +216,12 @@ export function mapStrippedClockToOriginalPcmMs(
     for (let index = segments.length - 1; index >= 0; index -= 1) {
       const seg = segments[index]!;
       const isFirst = index === 0;
-      const inLower = isFirst
-        ? strippedMs >= seg.strippedStartMs - DURATION_EPSILON_MS
-        : strippedMs > seg.strippedStartMs + DURATION_EPSILON_MS;
+      const touchesPrev =
+        !isFirst &&
+        Math.abs(seg.strippedStartMs - segments[index - 1]!.strippedEndMs) <= DURATION_EPSILON_MS;
+      const inLower = touchesPrev
+        ? strippedMs > seg.strippedStartMs + DURATION_EPSILON_MS
+        : strippedMs >= seg.strippedStartMs - DURATION_EPSILON_MS;
       if (inLower && strippedMs <= seg.strippedEndMs + DURATION_EPSILON_MS) {
         const clampedOffset = Math.min(
           seg.originalEndMs - seg.originalStartMs,
@@ -329,8 +335,47 @@ export function issueSpeechTimingReceipt(
         originalEndMs = mappedStart.originalMs;
       } else {
         const mappedEnd = mapStrippedClockToOriginalPcmMs(token.endMs, segments, "end");
-        originalStartMs = mappedStart.originalMs;
-        originalEndMs = mappedEnd.originalMs;
+        let hasExcisedSilenceBetween = false;
+        if (mappedStart.segmentIndex !== mappedEnd.segmentIndex) {
+          const lowSeg = Math.min(mappedStart.segmentIndex, mappedEnd.segmentIndex);
+          const highSeg = Math.max(mappedStart.segmentIndex, mappedEnd.segmentIndex);
+          for (let k = lowSeg; k < highSeg; k += 1) {
+            const leftSeg = segments[k]!;
+            const rightSeg = segments[k + 1]!;
+            if (rightSeg.originalStartMs - leftSeg.originalEndMs > DURATION_EPSILON_MS) {
+              hasExcisedSilenceBetween = true;
+              break;
+            }
+          }
+        }
+
+        if (hasExcisedSilenceBetween) {
+          // Snap cross-seam jitter tokens to the single voiced segment owning the majority
+          // of their stripped duration so excised pauses remain exposed between adjacent tokens.
+          const lowSeg = Math.min(mappedStart.segmentIndex, mappedEnd.segmentIndex);
+          const highSeg = Math.max(mappedStart.segmentIndex, mappedEnd.segmentIndex);
+          let bestSegIndex = lowSeg;
+          let bestOverlap = -1;
+          for (let k = lowSeg; k <= highSeg; k += 1) {
+            const seg = segments[k]!;
+            const overlap = Math.max(
+              0,
+              Math.min(token.endMs, seg.strippedEndMs) - Math.max(token.startMs, seg.strippedStartMs),
+            );
+            if (overlap > bestOverlap) {
+              bestOverlap = overlap;
+              bestSegIndex = k;
+            }
+          }
+          const snappedSeg = segments[bestSegIndex]!;
+          const clampedStart = Math.max(token.startMs, snappedSeg.strippedStartMs);
+          const clampedEnd = Math.min(token.endMs, snappedSeg.strippedEndMs);
+          originalStartMs = snappedSeg.originalStartMs + (clampedStart - snappedSeg.strippedStartMs);
+          originalEndMs = snappedSeg.originalStartMs + (clampedEnd - snappedSeg.strippedStartMs);
+        } else {
+          originalStartMs = mappedStart.originalMs;
+          originalEndMs = mappedEnd.originalMs;
+        }
       }
     }
 
@@ -596,7 +641,7 @@ export function evaluateRawAudioRetentionPolicy(
       disposition: "immediate_delete",
       retainRawAudio: false,
       deleteDeadlineMs: issuedAtMs,
-      sweep_due_immediately: nowMs >= issuedAtMs,
+      sweep_due_immediately: true,
       hardCeilingMs,
       hardCeilingApplied: false,
       remainingMediaBytesAfterUpload,
@@ -611,13 +656,14 @@ export function evaluateRawAudioRetentionPolicy(
 
   const hardCeilingApplied = requestedUntilMs > hardCeilingMs;
   const deleteDeadlineMs = Math.max(issuedAtMs, Math.min(requestedUntilMs, hardCeilingMs));
-  const sweepDue = nowMs >= deleteDeadlineMs;
+  let sweepDue = nowMs >= deleteDeadlineMs;
 
   let disposition: RawAudioDisposition;
   let retainRawAudio: boolean;
   if (deleteDeadlineMs <= issuedAtMs) {
     disposition = "immediate_delete";
     retainRawAudio = false;
+    sweepDue = true;
   } else if (sweepDue) {
     disposition = "sweep_expired";
     retainRawAudio = false;

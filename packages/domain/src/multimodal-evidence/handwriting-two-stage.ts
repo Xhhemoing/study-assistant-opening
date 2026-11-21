@@ -27,9 +27,9 @@ export const DEFAULT_SYMBOL_CONFIDENCE_THRESHOLD = 0.85;
 const CRITICAL_KIND_SET: ReadonlySet<string> = new Set(CRITICAL_HANDWRITING_TOKEN_KINDS);
 const NON_SEMANTIC_KIND_SET: ReadonlySet<string> = new Set(NON_SEMANTIC_HANDWRITING_TOKEN_KINDS);
 
-const NON_SEMANTIC_TEXT_RE = /^(?:[.,;:，。；：、…·•\-–—"'“”‘’()[\]{}]|\.{2,})$/u;
+const NON_SEMANTIC_TEXT_RE = /^(?:[.,;:，。；：、…·•\-–—"'“”‘’]|\.{2,})$/u;
 const CRITICAL_AUTO_TEXT_RE =
-  /(?:[0-9]|!=|==|<=|>=|->|=>|<-|←|→|[+\-*/=<>^_∑∫∂×÷≤≥≠∈∉⊂⊆∪∩∀∃]|[A-Za-zα-ωΑ-Ω])/u;
+  /(?:[0-9()[\]{}]|!=|==|<=|>=|->|=>|<-|←|→|[+\-*/=<>^_∑∫∂×÷≤≥≠∈∉⊂⊆∪∩∀∃]|[A-Za-zα-ωΑ-Ω])/u;
 
 export function validateNormalizedBoundingBox(
   bbox: NormalizedBoundingBox,
@@ -245,8 +245,9 @@ export function evaluateHandwritingStage1(
         ? validateNormalizedBoundingBox(token.bbox, `step[${stepIndex}].tokens[${tokenIndex}].bbox`)
         : stepBbox;
 
+      const confirmedByLearner = token.confirmedByLearner === true;
       let effectiveText = token.rawText;
-      if (token.confirmedText !== undefined) {
+      if (confirmedByLearner && token.confirmedText !== undefined) {
         const trimmedConfirmed = token.confirmedText.trim();
         if (trimmedConfirmed.length === 0) {
           throw new RangeError(
@@ -256,7 +257,6 @@ export function evaluateHandwritingStage1(
         effectiveText = trimmedConfirmed;
       }
 
-      const confirmedByLearner = token.confirmedByLearner === true;
       const isCritical = isCriticalMathOr408Token({
         kind: token.kind,
         rawText: effectiveText,
@@ -342,77 +342,90 @@ export function evaluateHandwritingStage1(
 // Deterministic Numeric Arithmetic / Comparison Evaluator (Pure Fallback)
 // ---------------------------------------------------------------------------
 
-function evaluateNumericExpression(expr: string): number | null {
+type NumericEvalResult =
+  | { kind: "value"; value: number }
+  | { kind: "div_by_zero" }
+  | { kind: "unknown" };
+
+function evaluateNumericExpression(expr: string): NumericEvalResult {
   const cleaned = expr.replace(/\s+/g, "");
   if (cleaned.length === 0 || !/^[0-9+\-*/^().]+$/u.test(cleaned)) {
-    return null;
+    return { kind: "unknown" };
   }
 
   let pos = 0;
 
-  const parseExpr = (): number | null => {
-    let left = parseTerm();
-    if (left === null) return null;
+  const parseExpr = (): NumericEvalResult => {
+    let left: NumericEvalResult = parseTerm();
+    if (left.kind !== "value") return left;
     while (pos < cleaned.length && (cleaned[pos] === "+" || cleaned[pos] === "-")) {
       const op = cleaned[pos]!;
       pos += 1;
       const right = parseTerm();
-      if (right === null) return null;
-      left = op === "+" ? left + right : left - right;
+      if (right.kind !== "value") return right;
+      const nextValue: number = op === "+" ? left.value + right.value : left.value - right.value;
+      if (!Number.isFinite(nextValue)) return { kind: "unknown" };
+      left = { kind: "value", value: nextValue };
     }
-    return Number.isFinite(left) ? left : null;
+    return left;
   };
 
-  const parseTerm = (): number | null => {
-    let left = parsePower();
-    if (left === null) return null;
+  const parseTerm = (): NumericEvalResult => {
+    let left: NumericEvalResult = parseUnary();
+    if (left.kind !== "value") return left;
     while (pos < cleaned.length && (cleaned[pos] === "*" || cleaned[pos] === "/")) {
       const op = cleaned[pos]!;
       pos += 1;
-      const right = parsePower();
-      if (right === null) return null;
+      const right = parseUnary();
+      if (right.kind !== "value") return right;
       if (op === "/") {
-        if (Math.abs(right) <= 1e-12) return null;
-        left = left / right;
+        if (Math.abs(right.value) <= 1e-12) return { kind: "div_by_zero" };
+        const quotient: number = left.value / right.value;
+        if (!Number.isFinite(quotient)) return { kind: "unknown" };
+        left = { kind: "value", value: quotient };
       } else {
-        left = left * right;
+        const product: number = left.value * right.value;
+        if (!Number.isFinite(product)) return { kind: "unknown" };
+        left = { kind: "value", value: product };
       }
     }
-    return Number.isFinite(left) ? left : null;
+    return left;
   };
 
-  const parsePower = (): number | null => {
-    const base = parseUnary();
-    if (base === null) return null;
-    if (pos < cleaned.length && cleaned[pos] === "^") {
-      pos += 1;
-      const exp = parsePower();
-      if (exp === null) return null;
-      const result = Math.pow(base, exp);
-      return Number.isFinite(result) ? result : null;
-    }
-    return base;
-  };
-
-  const parseUnary = (): number | null => {
+  const parseUnary = (): NumericEvalResult => {
     if (pos < cleaned.length && cleaned[pos] === "-") {
       pos += 1;
       const inner = parseUnary();
-      return inner === null ? null : -inner;
+      if (inner.kind !== "value") return inner;
+      return { kind: "value", value: -inner.value };
     }
     if (pos < cleaned.length && cleaned[pos] === "+") {
       pos += 1;
       return parseUnary();
     }
-    return parsePrimary();
+    return parsePower();
   };
 
-  const parsePrimary = (): number | null => {
-    if (pos >= cleaned.length) return null;
+  const parsePower = (): NumericEvalResult => {
+    const base = parsePrimary();
+    if (base.kind !== "value") return base;
+    if (pos < cleaned.length && cleaned[pos] === "^") {
+      pos += 1;
+      const exp = parseUnary();
+      if (exp.kind !== "value") return exp;
+      const result = Math.pow(base.value, exp.value);
+      if (!Number.isFinite(result)) return { kind: "unknown" };
+      return { kind: "value", value: result };
+    }
+    return base;
+  };
+
+  const parsePrimary = (): NumericEvalResult => {
+    if (pos >= cleaned.length) return { kind: "unknown" };
     if (cleaned[pos] === "(") {
       pos += 1;
       const inner = parseExpr();
-      if (inner === null || cleaned[pos] !== ")") return null;
+      if (inner.kind !== "value" || cleaned[pos] !== ")") return inner.kind === "div_by_zero" ? inner : { kind: "unknown" };
       pos += 1;
       return inner;
     }
@@ -431,14 +444,15 @@ function evaluateNumericExpression(expr: string): number | null {
         break;
       }
     }
-    if (!sawDigit) return null;
+    if (!sawDigit) return { kind: "unknown" };
     const value = Number(cleaned.slice(start, pos));
-    return Number.isFinite(value) ? value : null;
+    return Number.isFinite(value) ? { kind: "value", value } : { kind: "unknown" };
   };
 
-  const value = parseExpr();
-  if (value === null || pos !== cleaned.length) return null;
-  return value;
+  const result = parseExpr();
+  if (result.kind !== "value") return result;
+  if (pos !== cleaned.length) return { kind: "unknown" };
+  return result;
 }
 
 function tryVerifyPureNumericRelation(expression: string): StepLocalVerdict | null {
@@ -462,29 +476,27 @@ function tryVerifyPureNumericRelation(expression: string): StepLocalVerdict | nu
 
   const lhs = evaluateNumericExpression(lhsRaw);
   const rhs = evaluateNumericExpression(rhsRaw);
-  if (lhs === null || rhs === null) {
-    // Only fail invalid if both sides are pure numeric syntax with division-by-zero; otherwise unknown.
-    const pureSyntax = /^[0-9+\-*/^().\s]+$/u;
-    if (pureSyntax.test(lhsRaw) && pureSyntax.test(rhsRaw)) {
-      return "invalid";
-    }
+  if (lhs.kind === "div_by_zero" || rhs.kind === "div_by_zero") {
+    return "invalid";
+  }
+  if (lhs.kind === "unknown" || rhs.kind === "unknown") {
     return null;
   }
 
   const eps = 1e-9;
   switch (operator) {
     case "=":
-      return Math.abs(lhs - rhs) <= eps ? "valid" : "invalid";
+      return Math.abs(lhs.value - rhs.value) <= eps ? "valid" : "invalid";
     case "!=":
-      return Math.abs(lhs - rhs) > eps ? "valid" : "invalid";
+      return Math.abs(lhs.value - rhs.value) > eps ? "valid" : "invalid";
     case "<":
-      return lhs < rhs - eps ? "valid" : "invalid";
+      return lhs.value < rhs.value - eps ? "valid" : "invalid";
     case "<=":
-      return lhs <= rhs + eps ? "valid" : "invalid";
+      return lhs.value <= rhs.value + eps ? "valid" : "invalid";
     case ">":
-      return lhs > rhs + eps ? "valid" : "invalid";
+      return lhs.value > rhs.value + eps ? "valid" : "invalid";
     case ">=":
-      return lhs >= rhs - eps ? "valid" : "invalid";
+      return lhs.value >= rhs.value - eps ? "valid" : "invalid";
     default:
       return null;
   }
@@ -649,10 +661,21 @@ export function evaluateHandwritingStage2(
 
   for (const { step, stepIndex, deps } of ordered) {
     const stage1Step = stage1ById.get(step.stepId)!;
+    const semanticTokenExpression = stage1Step.tokens
+      .filter((t) => t.isCritical)
+      .map((t) => t.effectiveText)
+      .join(" ")
+      .trim();
+    const fallbackExpression =
+      semanticTokenExpression.length > 0
+        ? semanticTokenExpression
+        : stage1Step.tokens.length === 0
+          ? stage1Step.effectiveExpression
+          : "";
     const localVerdict: StepLocalVerdict =
       step.localVerdict ??
       (step.ast.kind === "equation" || step.ast.kind === "inequality"
-        ? (tryVerifyPureNumericRelation(stage1Step.effectiveExpression) ?? "unknown")
+        ? (tryVerifyPureNumericRelation(fallbackExpression) ?? "unknown")
         : "unknown");
 
     const upstreamErrorStepIds: string[] = [];
