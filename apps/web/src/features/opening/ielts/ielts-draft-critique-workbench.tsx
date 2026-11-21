@@ -119,10 +119,16 @@ function collectVisibleWritingGuidanceSources(
     const d1 = draftEditorText(fixture.draft1).trim();
     if (d1) sources.push(d1);
   }
-  if (fixture.draft1Receipt.promptId === fixture.promptId) {
+  if (
+    fixture.draft1Receipt.promptId === fixture.promptId &&
+    fixture.draft1Receipt.sourceDraft?.promptId === fixture.promptId
+  ) {
     sources.push(...collectReceiptUpgradeRewrites(fixture.draft1Receipt));
   }
-  if (receipt.promptId === fixture.promptId) {
+  if (
+    receipt.promptId === fixture.promptId &&
+    receipt.sourceDraft?.promptId === fixture.promptId
+  ) {
     sources.push(...collectReceiptUpgradeRewrites(receipt));
   }
   return [...new Set(sources)];
@@ -172,8 +178,8 @@ function WritingWorkbenchPromptSession({
   const hasPromptMatchingDraft2 =
     fixture.draft2.promptId === fixture.promptId &&
     fixture.draft2Receipt.promptId === fixture.promptId &&
-    (fixture.draft2Receipt.sourceDraft === undefined ||
-      fixture.draft2Receipt.sourceDraft.promptId === fixture.promptId) &&
+    fixture.draft2Receipt.sourceDraft !== undefined &&
+    fixture.draft2Receipt.sourceDraft.promptId === fixture.promptId &&
     countDraftWords(fixture.draft2.paragraphs) > 0;
   const hasPreloadedSubmission =
     isDemoPreview || (hasExternalFixture && hasPromptMatchingDraft2);
@@ -260,9 +266,10 @@ function WritingWorkbenchPromptSession({
   const [composerNeedsText, setComposerNeedsText] = useState(false);
   const composerGuidanceId = `${tabsIdPrefix}-revision-guidance`;
   const [revisionCount, setRevisionCount] = useState(0);
-  const [localAssistedSources, setLocalAssistedSources] = useState<readonly string[]>(
-    () => initialAssistedSources,
-  );
+  // Composer drafts captured locally while hints/assistance were active; evaluated baseline-aware
+  // against unassistedBaselineTexts so revealing hints then resetting never poisons a prior
+  // independent verified essay.
+  const [localAssistedSources, setLocalAssistedSources] = useState<readonly string[]>(() => []);
   // Monotonic per-prompt history of explicitly revealed scaffold/exemplar guidance.
   // Never erased by same-prompt host prop refreshes before or after submission.
   const [revealedScaffoldSources, setRevealedScaffoldSources] = useState<readonly string[]>(() => []);
@@ -297,9 +304,7 @@ function WritingWorkbenchPromptSession({
         !isOwnWriteBack;
       const preserveActiveSession = samePrompt && !isNewPreloadedAttempt;
       const nextHintsRevealed = preserveActiveSession ? hintsRevealed : false;
-      const nextAssistedSources = preserveActiveSession
-        ? [...new Set([...localAssistedSources, ...authoritativeAssistedSources, ...initialAssistedSources])]
-        : initialAssistedSources;
+      const nextLocalAssistedSources = preserveActiveSession ? localAssistedSources : [];
       const nextRevealedSources = samePrompt
         ? [
             ...new Set([
@@ -311,7 +316,7 @@ function WritingWorkbenchPromptSession({
       const nextExposedSources = samePrompt
         ? [...new Set([...exposedGuidanceSources, ...initialRestoredGuidanceSources])]
         : initialRestoredGuidanceSources;
-      const nextFingerprints = collectAssistedFingerprints(nextAssistedSources);
+      const nextUnconditionalFingerprints = collectAssistedFingerprints(initialAssistedSources);
       const nextLatched = preserveActiveSession
         ? attemptAssistedLatched || initiallyLatched
         : initiallyLatched;
@@ -323,7 +328,7 @@ function WritingWorkbenchPromptSession({
           ? [authoritativeDraft2Text]
           : [];
       const nextExposedMatcher = buildExposedGuidanceMatcher(
-        [...new Set([...nextExposedSources, ...nextRevealedSources])],
+        [...new Set([...nextExposedSources, ...nextRevealedSources, ...nextLocalAssistedSources])],
         nextBaselines,
       );
       const nextComposerText = hasPreloadedSubmission
@@ -331,7 +336,7 @@ function WritingWorkbenchPromptSession({
         : preserveActiveSession && composerText.trim().length > 0
           ? composerText
           : (initialDraft ?? "");
-      setLocalAssistedSources(nextAssistedSources);
+      setLocalAssistedSources(nextLocalAssistedSources);
       setRevealedScaffoldSources(nextRevealedSources);
       setExposedGuidanceSources(nextExposedSources);
       setUnassistedBaselineTexts(nextBaselines);
@@ -345,31 +350,36 @@ function WritingWorkbenchPromptSession({
       setComposerAssisted(
         nextLatched ||
           (preserveActiveSession && composerAssisted) ||
-          matchesAssistedFingerprint(nextComposerText, nextFingerprints) ||
+          matchesAssistedFingerprint(nextComposerText, nextUnconditionalFingerprints) ||
           matchesExposedGuidance(nextComposerText, nextExposedMatcher),
       );
       setViewMode(initialView);
       setCriterionFilter("ALL");
       setComposerOpen(!hasPreloadedSubmission);
       setRevisionCount(0);
-    } else if (hasPreloadedSubmission && authorityFingerprint !== resetPastAuthorityFingerprint) {
-      if (authoritativeAssistedSources.some((src) => !localAssistedSources.includes(src))) {
-        setLocalAssistedSources([...new Set([...localAssistedSources, ...authoritativeAssistedSources])]);
+    } else {
+      if (hintsRevealed) {
+        const refreshedScaffolds = collectFixtureSampleSources(fixture);
+        if (refreshedScaffolds.some((src) => !revealedScaffoldSources.includes(src))) {
+          setRevealedScaffoldSources([...new Set([...revealedScaffoldSources, ...refreshedScaffolds])]);
+        }
       }
-      if (initialRestoredGuidanceSources.some((src) => !exposedGuidanceSources.includes(src))) {
-        setExposedGuidanceSources([...new Set([...exposedGuidanceSources, ...initialRestoredGuidanceSources])]);
-      }
-      if (
-        !fixture.draft2.assisted &&
-        !fixture.draft2Receipt.sourceDraft?.assisted &&
-        authoritativeDraft2Text.trim().length > 0 &&
-        !unassistedBaselineTexts.includes(authoritativeDraft2Text)
-      ) {
-        setUnassistedBaselineTexts([...unassistedBaselineTexts, authoritativeDraft2Text]);
-      }
-      if (fixture.draft2.assisted || Boolean(fixture.draft2Receipt.sourceDraft?.assisted)) {
-        setAttemptAssistedLatched(true);
-        setComposerAssisted(true);
+      if (hasPreloadedSubmission && authorityFingerprint !== resetPastAuthorityFingerprint) {
+        if (initialRestoredGuidanceSources.some((src) => !exposedGuidanceSources.includes(src))) {
+          setExposedGuidanceSources([...new Set([...exposedGuidanceSources, ...initialRestoredGuidanceSources])]);
+        }
+        if (
+          !fixture.draft2.assisted &&
+          !fixture.draft2Receipt.sourceDraft?.assisted &&
+          authoritativeDraft2Text.trim().length > 0 &&
+          !unassistedBaselineTexts.includes(authoritativeDraft2Text)
+        ) {
+          setUnassistedBaselineTexts([...unassistedBaselineTexts, authoritativeDraft2Text]);
+        }
+        if (fixture.draft2.assisted || Boolean(fixture.draft2Receipt.sourceDraft?.assisted)) {
+          setAttemptAssistedLatched(true);
+          setComposerAssisted(true);
+        }
       }
     }
   }
@@ -390,18 +400,45 @@ function WritingWorkbenchPromptSession({
     }
   }
 
+  const currentlyVisibleScaffolds = useMemo(
+    () => (isSyncedAuthority && hintsRevealed ? collectFixtureSampleSources(fixture) : []),
+    [isSyncedAuthority, hintsRevealed, fixture],
+  );
+  if (isSyncedAuthority && hintsRevealed && currentlyVisibleScaffolds.length > 0) {
+    const missingScaffolds = currentlyVisibleScaffolds.filter(
+      (source) => !revealedScaffoldSources.includes(source),
+    );
+    if (missingScaffolds.length > 0) {
+      setRevealedScaffoldSources([...revealedScaffoldSources, ...missingScaffolds]);
+    }
+  }
+
   const stickyAssistedFingerprints = useMemo(
     () =>
       collectAssistedFingerprints([
-        ...localAssistedSources,
+        ...fixtureSampleSources,
         ...authoritativeAssistedSources,
         ...(hasSubmitted ? collectAssistedWritingSources(draft2, draft2Receipt) : []),
       ]),
-    [localAssistedSources, authoritativeAssistedSources, hasSubmitted, draft2, draft2Receipt],
+    [fixtureSampleSources, authoritativeAssistedSources, hasSubmitted, draft2, draft2Receipt],
   );
   const allExposedGuidanceSources = useMemo(
-    () => [...new Set([...exposedGuidanceSources, ...revealedScaffoldSources])],
-    [exposedGuidanceSources, revealedScaffoldSources],
+    () => [
+      ...new Set([
+        ...exposedGuidanceSources,
+        ...revealedScaffoldSources,
+        ...localAssistedSources,
+        ...currentlyVisibleGuidance,
+        ...currentlyVisibleScaffolds,
+      ]),
+    ],
+    [
+      exposedGuidanceSources,
+      revealedScaffoldSources,
+      localAssistedSources,
+      currentlyVisibleGuidance,
+      currentlyVisibleScaffolds,
+    ],
   );
   const exposedGuidanceMatcher = useMemo(
     () => buildExposedGuidanceMatcher(allExposedGuidanceSources, unassistedBaselineTexts),
@@ -462,6 +499,8 @@ function WritingWorkbenchPromptSession({
     !activeDraftAssisted &&
     activeDraft.promptId === fixture.promptId &&
     activeReceipt.promptId === fixture.promptId &&
+    activeReceipt.sourceDraft !== undefined &&
+    activeReceipt.sourceDraft.promptId === fixture.promptId &&
     activeReceipt.promptId === activeDraft.promptId &&
     activeReceipt.draftId === activeDraft.draftId &&
     activeReceipt.draftVersion === activeDraft.version &&

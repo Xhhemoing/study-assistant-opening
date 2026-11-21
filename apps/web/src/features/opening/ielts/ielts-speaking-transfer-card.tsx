@@ -27,6 +27,7 @@ import {
 export type IeltsSpeakingTransferCardProps = {
   readonly seed?: IeltsSpeakingPart3Seed;
   readonly verifiedWritingReceipt?: IeltsRubricReceipt;
+  readonly initialAttemptPromptId?: string;
   readonly initialTranscript?: string;
   readonly initialDurationSeconds?: number;
   readonly initialReceipt?: IeltsSpeakingFeedbackReceipt;
@@ -47,6 +48,7 @@ function snapshotReceipt(receipt: IeltsSpeakingFeedbackReceipt): string {
 export function IeltsSpeakingTransferCard({
   seed: providedSeed,
   verifiedWritingReceipt: providedVerifiedWritingReceipt,
+  initialAttemptPromptId,
   initialTranscript,
   initialDurationSeconds,
   initialReceipt,
@@ -77,17 +79,70 @@ export function IeltsSpeakingTransferCard({
   const receiptBelongsToSeed =
     candidateReceipt !== undefined &&
     candidateReceipt.seedId === seed.seedId &&
-    (candidateReceipt.sourcePromptId === undefined ||
-      candidateReceipt.sourcePromptId === seed.sourcePromptId);
+    typeof candidateReceipt.sourcePromptId === "string" &&
+    candidateReceipt.sourcePromptId === seed.sourcePromptId;
   const hasForeignReceipt = candidateReceipt !== undefined && !receiptBelongsToSeed;
+  const hasForeignAttemptPromptId =
+    initialAttemptPromptId !== undefined && initialAttemptPromptId !== seed.sourcePromptId;
+  const hasExplicitPromptBinding =
+    initialAttemptPromptId === seed.sourcePromptId || receiptBelongsToSeed;
+
+  // Guard against a parent switching seed.sourcePromptId before clearing transcript-only
+  // state (initialReceipt === undefined, initialAttemptPromptId omitted).
+  const [promptSwitchGuard, setPromptSwitchGuard] = useState<{
+    readonly sourcePromptId: string;
+    readonly staleTranscript: string | undefined;
+    readonly staleDuration: number | undefined;
+    readonly active: boolean;
+  }>(() => ({
+    sourcePromptId: seed.sourcePromptId,
+    staleTranscript: undefined,
+    staleDuration: undefined,
+    active: false,
+  }));
+  const switchedPrompt = promptSwitchGuard.sourcePromptId !== seed.sourcePromptId;
+  if (switchedPrompt) {
+    setPromptSwitchGuard({
+      sourcePromptId: seed.sourcePromptId,
+      staleTranscript: hasExplicitPromptBinding ? undefined : initialTranscript,
+      staleDuration: hasExplicitPromptBinding ? undefined : initialDurationSeconds,
+      active: !hasExplicitPromptBinding,
+    });
+  } else if (
+    promptSwitchGuard.active &&
+    (hasExplicitPromptBinding ||
+      (initialTranscript !== promptSwitchGuard.staleTranscript &&
+        initialDurationSeconds !== promptSwitchGuard.staleDuration))
+  ) {
+    setPromptSwitchGuard({
+      sourcePromptId: seed.sourcePromptId,
+      staleTranscript: undefined,
+      staleDuration: undefined,
+      active: false,
+    });
+  }
+
+  const rejectStaleTranscript =
+    hasForeignReceipt ||
+    hasForeignAttemptPromptId ||
+    (!hasExplicitPromptBinding &&
+      (switchedPrompt ||
+        (promptSwitchGuard.active && initialTranscript === promptSwitchGuard.staleTranscript)));
+  const rejectStaleDuration =
+    hasForeignReceipt ||
+    hasForeignAttemptPromptId ||
+    (!hasExplicitPromptBinding &&
+      (switchedPrompt ||
+        (promptSwitchGuard.active && initialDurationSeconds === promptSwitchGuard.staleDuration)));
+
   const startingTranscript = useDemoFixture
     ? demo.initialSpeakingTranscript
-    : hasForeignReceipt
+    : rejectStaleTranscript
       ? ""
       : (initialTranscript ?? "");
   const startingDuration = useDemoFixture
     ? demo.initialSpeakingDurationSeconds
-    : hasForeignReceipt
+    : rejectStaleDuration
       ? undefined
       : initialDurationSeconds;
   const scaffoldSampleTranscript =
@@ -115,7 +170,7 @@ export function IeltsSpeakingTransferCard({
       external={{
         transcript: useDemoFixture
           ? demo.initialSpeakingTranscript
-          : hasForeignReceipt
+          : rejectStaleTranscript
             ? undefined
             : initialTranscript,
         durationSeconds: startingDuration,
@@ -162,7 +217,8 @@ function isSpeakingReceiptVisibleForAttempt(
   const evaluatedContext = receipt.evaluationContext;
   return (
     receipt.seedId === seed.seedId &&
-    (receipt.sourcePromptId === undefined || receipt.sourcePromptId === seed.sourcePromptId) &&
+    typeof receipt.sourcePromptId === "string" &&
+    receipt.sourcePromptId === seed.sourcePromptId &&
     receipt.sourceTranscript === transcript &&
     receipt.durationSeconds === durationSeconds &&
     receipt.assisted === assisted &&
@@ -228,12 +284,17 @@ function SpeakingAttempt({
   const [clearedPersistedReceiptSnapshot, setClearedPersistedReceiptSnapshot] = useState<
     string | undefined
   >(undefined);
-  const [assistedSources, setAssistedSources] = useState<readonly string[]>(() => {
+  // Unconditional assisted sources (upfront built-in samples & host-loaded assisted receipts).
+  const [unconditionalAssistedSources, setUnconditionalAssistedSources] = useState<readonly string[]>(() => {
     const initial: string[] = [];
     if (seedFixtureSamplesUpfront) initial.push(...scaffoldSources);
     if (seedReceiptAssistedSource) initial.push(seedReceiptAssistedSource);
     return [...new Set(initial)];
   });
+  // Composer transcripts captured locally while hints/assistance were active; evaluated baseline-aware
+  // against unassistedBaselineTexts so revealing hints then resetting never poisons a prior
+  // independent verified speech.
+  const [capturedAssistedSources, setCapturedAssistedSources] = useState<readonly string[]>(() => []);
 
   const initialVisibleReceipt = (() => {
     const initialMatching =
@@ -278,34 +339,48 @@ function SpeakingAttempt({
       : [],
   );
 
-  if (hintsRevealed && scaffoldSources.some((src) => !revealedScaffoldSources.includes(src))) {
-    setRevealedScaffoldSources([...new Set([...revealedScaffoldSources, ...scaffoldSources])]);
+  const currentlyVisibleScaffolds = useMemo(
+    () => (hintsRevealed ? scaffoldSources : []),
+    [hintsRevealed, scaffoldSources],
+  );
+  if (hintsRevealed && currentlyVisibleScaffolds.some((src) => !revealedScaffoldSources.includes(src))) {
+    setRevealedScaffoldSources([...new Set([...revealedScaffoldSources, ...currentlyVisibleScaffolds])]);
   }
 
   if (seedReceipt?.assisted && external.receiptSnapshot !== seenAssistedReceiptSnapshot) {
     setSeenAssistedReceiptSnapshot(external.receiptSnapshot);
     setAttemptAssistedLatched(true);
-    if (seedReceiptAssistedSource && !assistedSources.includes(seedReceiptAssistedSource)) {
-      setAssistedSources([...assistedSources, seedReceiptAssistedSource]);
+    if (seedReceiptAssistedSource && !unconditionalAssistedSources.includes(seedReceiptAssistedSource)) {
+      setUnconditionalAssistedSources([...unconditionalAssistedSources, seedReceiptAssistedSource]);
     }
     if (editedAnswer && !editedAnswer.assisted) {
       setEditedAnswer({ ...editedAnswer, assisted: true });
     }
-  } else if (seedReceiptAssistedSource && !assistedSources.includes(seedReceiptAssistedSource)) {
-    setAssistedSources([...assistedSources, seedReceiptAssistedSource]);
+  } else if (
+    seedReceiptAssistedSource &&
+    !unconditionalAssistedSources.includes(seedReceiptAssistedSource)
+  ) {
+    setUnconditionalAssistedSources([...unconditionalAssistedSources, seedReceiptAssistedSource]);
   }
 
   const assistedFingerprints = useMemo(
     () =>
       collectAssistedFingerprints([
-        ...assistedSources,
+        ...unconditionalAssistedSources,
         ...(seedReceiptAssistedSource ? [seedReceiptAssistedSource] : []),
       ]),
-    [assistedSources, seedReceiptAssistedSource],
+    [unconditionalAssistedSources, seedReceiptAssistedSource],
   );
   const allExposedGuidanceSources = useMemo(
-    () => [...new Set([...exposedGuidanceSources, ...revealedScaffoldSources])],
-    [exposedGuidanceSources, revealedScaffoldSources],
+    () => [
+      ...new Set([
+        ...exposedGuidanceSources,
+        ...revealedScaffoldSources,
+        ...capturedAssistedSources,
+        ...currentlyVisibleScaffolds,
+      ]),
+    ],
+    [exposedGuidanceSources, revealedScaffoldSources, capturedAssistedSources, currentlyVisibleScaffolds],
   );
   const exposedGuidanceMatcher = useMemo(
     () => buildExposedGuidanceMatcher(allExposedGuidanceSources, unassistedBaselineTexts),
@@ -421,17 +496,17 @@ function SpeakingAttempt({
       setExposedGuidanceSources((current) => [...new Set([...current, ...displayedPostSubmitSources])]);
     }
     if (currentTrimmed) {
-      setAssistedSources((current) => [...new Set([...current, currentTrimmed])]);
+      setCapturedAssistedSources((current) => [...new Set([...current, currentTrimmed])]);
     }
     setEditedAnswer((current) => ({ ...(current ?? answer), assisted: true }));
     setLocalEvaluation(null);
   }
 
   function handleResetForFreshAttempt() {
-    // Preserve unassistedBaselineTexts and keep exposed/revealed guidance in their baseline-aware
-    // lists so retyping an earlier independent speech with benign edits is never falsely marked assisted,
-    // while pasting any novel post-submit cue/rewrite, revealed scaffold, or prior assisted transcript
-    // still locks assistance.
+    // Preserve unassistedBaselineTexts and keep exposed/revealed/captured sources in baseline-aware
+    // lists so retyping an earlier independent speech (even after Reveal -> Reset) is never falsely
+    // marked assisted, while pasting any novel post-submit cue/rewrite, revealed scaffold, or novel
+    // assisted transcript still locks assistance.
     if (displayedPostSubmitSources.length > 0) {
       setExposedGuidanceSources((current) => [...new Set([...current, ...displayedPostSubmitSources])]);
     }
@@ -441,7 +516,7 @@ function SpeakingAttempt({
     if (hintsRevealed || attemptAssistedLatched || assisted) {
       const currentTrimmed = transcript.trim();
       if (currentTrimmed) {
-        setAssistedSources((current) => [...new Set([...current, currentTrimmed])]);
+        setCapturedAssistedSources((current) => [...new Set([...current, currentTrimmed])]);
       }
     }
     setEditedAnswer({ transcript: "", durationInput: "", assisted: false });
@@ -476,7 +551,7 @@ function SpeakingAttempt({
       );
       const trimmedTranscript = transcript.trim();
       if (trimmedTranscript) {
-        setAssistedSources((current) => [...new Set([...current, trimmedTranscript])]);
+        setCapturedAssistedSources((current) => [...new Set([...current, trimmedTranscript])]);
       }
     }
     // A substantive submission displays argumentBridgeCues and evidence quote rewrites on screen.

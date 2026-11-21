@@ -1569,6 +1569,152 @@ describe("IeltsDraftCritiqueWorkbench", () => {
       }),
     });
   });
+
+  it("rejects draft2Receipt missing sourceDraft, latches same-attemptKey scaffold rewrite swaps, and protects prior independent essays across Reveal -> Reset", async () => {
+    const fixture = IELTS_WRITING_SPEAKING_FIXTURE;
+    const onRevisionEvaluated = vi.fn();
+
+    // [P1-1] A restored draft2Receipt with sourceDraft: undefined MUST NOT unlock hasSubmitted, exemplars, or feedback!
+    const unboundDraft2Receipt = { ...fixture.draft2Receipt, sourceDraft: undefined };
+    await act(async () =>
+      root.render(
+        createElement(IeltsDraftCritiqueWorkbench, {
+          fixture: { ...fixture, draft2Receipt: unboundDraft2Receipt },
+          onRevisionEvaluated,
+        }),
+      ),
+    );
+    expect(host.querySelector('[data-submission-state="unsubmitted"]')).not.toBeNull();
+    expect(host.querySelector("[data-epistemic-badge]")).toBeNull();
+    expect(host.querySelectorAll("[data-exemplar-rewrite]")).toHaveLength(0);
+    expect(host.querySelector<HTMLTextAreaElement>('[aria-label="二稿改写编辑区"]')?.value).toBe("");
+
+    // [P1-3] While hintsRevealed === true, a same-prompt host refresh replacing rewrite A with rewrite B
+    // (keeping draft1 & draft1Receipt IDs / attemptKey unchanged!) then refreshing back to A -> Reset -> pasting B MUST still mark assisted: true!
+    const rewriteA = fixture.draft1Receipt.criteria.LR.evidenceSpans[0]!.upgradeRewrite;
+    const rewriteB =
+      "Municipal transit agencies should dedicate long-range capital grants to electrified rail networks rather than continual highway widening.";
+    const unsubmittedBase = {
+      ...fixture,
+      draft2: { ...fixture.draft2, paragraphs: [] as string[], assisted: false },
+    };
+    const withRewriteB = {
+      ...unsubmittedBase,
+      draft1Receipt: {
+        ...unsubmittedBase.draft1Receipt,
+        criteria: {
+          ...unsubmittedBase.draft1Receipt.criteria,
+          LR: {
+            ...unsubmittedBase.draft1Receipt.criteria.LR,
+            evidenceSpans: [
+              {
+                ...unsubmittedBase.draft1Receipt.criteria.LR.evidenceSpans[0]!,
+                upgradeRewrite: rewriteB,
+              },
+            ],
+          },
+        },
+      },
+    };
+    await act(async () =>
+      root.render(
+        createElement(IeltsDraftCritiqueWorkbench, {
+          key: "same-attemptkey-scaffold-swap",
+          fixture: unsubmittedBase,
+          onRevisionEvaluated,
+        }),
+      ),
+    );
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-reveal-scaffold]")!.click());
+    expect(host.textContent).toContain(rewriteA);
+
+    // Swap rewrite A -> B keeping exact same draft1/draft1Receipt IDs (same attemptKey), then swap back to A!
+    await act(async () =>
+      root.render(
+        createElement(IeltsDraftCritiqueWorkbench, {
+          key: "same-attemptkey-scaffold-swap",
+          fixture: withRewriteB,
+          onRevisionEvaluated,
+        }),
+      ),
+    );
+    expect(host.textContent).toContain(rewriteB);
+    await act(async () =>
+      root.render(
+        createElement(IeltsDraftCritiqueWorkbench, {
+          key: "same-attemptkey-scaffold-swap",
+          fixture: unsubmittedBase,
+          onRevisionEvaluated,
+        }),
+      ),
+    );
+    expect(host.textContent).not.toContain(rewriteB);
+
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-reset-attempt]")!.click());
+    const swappedTextarea = host.querySelector<HTMLTextAreaElement>('[aria-label="二稿改写编辑区"]')!;
+    const swappedCheckbox = host.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    await act(async () =>
+      setNativeInputValue(swappedTextarea, `${rewriteB}\n\n${GENUINE_ORIGINAL_WRITING_ESSAY}`),
+    );
+    expect(swappedCheckbox.checked).toBe(true);
+    expect(swappedCheckbox.disabled).toBe(true);
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-submit-writing]")!.click());
+    expect(onRevisionEvaluated.mock.lastCall?.[0]).toMatchObject({
+      revisedDraft: expect.objectContaining({ assisted: true }),
+      receipt: expect.objectContaining({
+        epistemicStatus: "practice_feedback",
+        countsTowardMastery: false,
+      }),
+    });
+
+    // [P1-4] Independent verified essay -> Reset -> retype independent essay -> Reveal -> Reset without submitting -> retype cleanly -> assisted: false!
+    await act(async () =>
+      root.render(
+        createElement(IeltsDraftCritiqueWorkbench, {
+          key: "reveal-reset-preserves-independent-writing",
+          fixture: unsubmittedBase,
+          onRevisionEvaluated,
+        }),
+      ),
+    );
+    const indepTextarea = host.querySelector<HTMLTextAreaElement>('[aria-label="二稿改写编辑区"]')!;
+    await act(async () => setNativeInputValue(indepTextarea, GENUINE_ORIGINAL_WRITING_ESSAY));
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-submit-writing]")!.click());
+    expect(onRevisionEvaluated.mock.lastCall?.[0]).toMatchObject({
+      revisedDraft: expect.objectContaining({ assisted: false }),
+      receipt: expect.objectContaining({
+        epistemicStatus: "rubric_verified_evidence",
+        countsTowardMastery: true,
+      }),
+    });
+
+    // Reset -> retype independent essay -> click Reveal -> click Reset without submitting -> retype independent essay cleanly.
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-reset-attempt]")!.click());
+    await act(async () =>
+      setNativeInputValue(
+        host.querySelector<HTMLTextAreaElement>('[aria-label="二稿改写编辑区"]')!,
+        GENUINE_ORIGINAL_WRITING_ESSAY,
+      ),
+    );
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-reveal-scaffold]")!.click());
+    expect(host.querySelector<HTMLInputElement>('input[type="checkbox"]')!.checked).toBe(true);
+
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-reset-attempt]")!.click());
+    const cleanRetypeTextarea = host.querySelector<HTMLTextAreaElement>('[aria-label="二稿改写编辑区"]')!;
+    const cleanRetypeCheckbox = host.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    await act(async () => setNativeInputValue(cleanRetypeTextarea, GENUINE_ORIGINAL_WRITING_ESSAY));
+    expect(cleanRetypeCheckbox.checked).toBe(false);
+    expect(cleanRetypeCheckbox.disabled).toBe(false);
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-submit-writing]")!.click());
+    expect(onRevisionEvaluated.mock.lastCall?.[0]).toMatchObject({
+      revisedDraft: expect.objectContaining({ assisted: false }),
+      receipt: expect.objectContaining({
+        epistemicStatus: "rubric_verified_evidence",
+        masteryQualified: true,
+        countsTowardMastery: true,
+      }),
+    });
+  });
 });
 
 describe("IeltsSpeakingTransferCard", () => {
@@ -2822,6 +2968,198 @@ describe("IeltsSpeakingTransferCard", () => {
       epistemicStatus: "practice_feedback",
       masteryQualified: false,
       countsTowardMastery: false,
+    });
+  });
+
+  it("blocks unbound Speaking transcript/receipt carryover across prompt switches, latches swapped scaffolds, and protects prior independent speeches across Reveal -> Reset", async () => {
+    const fixture = IELTS_WRITING_SPEAKING_FIXTURE;
+    const onEvaluated = vi.fn();
+
+    // [P1-2a] Prompt switch with transcript-only state (initialReceipt === undefined) MUST NOT carry Prompt A's transcript into Prompt B!
+    const promptBSeed = {
+      ...fixture.speakingSeed,
+      seedId: "speaking-p3-housing-switch",
+      sourcePromptId: "ielts-task2-public-vs-private-housing",
+      topic: "public vs private housing",
+    };
+    await act(async () =>
+      root.render(
+        createElement(IeltsSpeakingTransferCard, {
+          seed: fixture.speakingSeed,
+          initialTranscript: fixture.initialSpeakingTranscript,
+          initialDurationSeconds: 76,
+          onEvaluated,
+        }),
+      ),
+    );
+    expect(host.querySelector<HTMLTextAreaElement>('[aria-label="口语复述记录输入框"]')?.value).toBe(
+      fixture.initialSpeakingTranscript,
+    );
+
+    await act(async () =>
+      root.render(
+        createElement(IeltsSpeakingTransferCard, {
+          seed: promptBSeed,
+          initialTranscript: fixture.initialSpeakingTranscript,
+          initialDurationSeconds: 76,
+          onEvaluated,
+        }),
+      ),
+    );
+    expect(host.querySelector<HTMLTextAreaElement>('[aria-label="口语复述记录输入框"]')?.value).toBe("");
+    expect(host.querySelector<HTMLInputElement>('[aria-label="口语作答时长秒数"]')?.value).toBe("");
+
+    // [P1-2b] Explicit initialAttemptPromptId mismatch rejects initialTranscript even on fresh mount,
+    // and legacy receipt with sourcePromptId: undefined is rejected even when seedId matches!
+    const legacyReceiptWithoutPromptId = {
+      ...fixture.initialSpeakingReceipt,
+      sourcePromptId: undefined,
+    };
+    await act(async () =>
+      root.render(
+        createElement(IeltsSpeakingTransferCard, {
+          key: "speaking-legacy-unbound-receipt",
+          seed: fixture.speakingSeed,
+          initialTranscript: fixture.initialSpeakingTranscript,
+          initialDurationSeconds: fixture.initialSpeakingDurationSeconds,
+          initialReceipt: legacyReceiptWithoutPromptId,
+          onEvaluated,
+        }),
+      ),
+    );
+    expect(host.querySelector("[data-speaking-epistemic]")).toBeNull();
+    expect(host.querySelector<HTMLTextAreaElement>('[aria-label="口语复述记录输入框"]')?.value).toBe("");
+
+    await act(async () =>
+      root.render(
+        createElement(IeltsSpeakingTransferCard, {
+          key: "speaking-foreign-attempt-prompt-id",
+          seed: promptBSeed,
+          initialAttemptPromptId: fixture.promptId,
+          initialTranscript: fixture.initialSpeakingTranscript,
+          initialDurationSeconds: 76,
+          onEvaluated,
+        }),
+      ),
+    );
+    expect(host.querySelector<HTMLTextAreaElement>('[aria-label="口语复述记录输入框"]')?.value).toBe("");
+    expect(host.querySelector<HTMLInputElement>('[aria-label="口语作答时长秒数"]')?.value).toBe("");
+
+    // [P1-3] Same-seed scaffold cue swap while hintsRevealed === true -> swap back -> Reset -> pasting swapped cue stays assisted!
+    const cueA =
+      "Municipal councils should prioritise electrified urban rail networks over continual motorway expansion for sustainable commuter capacity.";
+    const cueB =
+      "Regional transport ministries must safeguard fiscal sustainability by expanding high-frequency commuter rail rather than widening suburban highways.";
+    const baseCustomSeed = {
+      ...buildSpeakingPart3Seed(
+        {
+          promptId: fixture.promptId,
+          topic: "urban public transport funding",
+          coreClaim: cueA,
+          supportingReason:
+            "High-capacity trains alleviate chronic congestion and reduce per-capita emissions across dense districts.",
+          counterPerspective:
+            "Admittedly, outer suburbs still depend on reliable feeder buses during off-peak evenings.",
+          activeCollocations: fixture.coreArgument.activeCollocations,
+        },
+        fixture.draft2.draftId,
+      ),
+      seedId: "speaking-scaffold-swap-and-reveal-reset",
+      requiresVerifiedReceipt: true,
+      verifiedWritingReceipt: fixture.draft2Receipt,
+    };
+    const swappedCueSeed = {
+      ...baseCustomSeed,
+      argumentBridgeCues: [cueB, ...baseCustomSeed.argumentBridgeCues.slice(1)],
+    };
+    await act(async () =>
+      root.render(
+        createElement(IeltsSpeakingTransferCard, {
+          key: "speaking-cue-swap",
+          seed: baseCustomSeed,
+          onEvaluated,
+        }),
+      ),
+    );
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-reveal-scaffold]")!.click());
+    await act(async () =>
+      root.render(
+        createElement(IeltsSpeakingTransferCard, {
+          key: "speaking-cue-swap",
+          seed: swappedCueSeed,
+          onEvaluated,
+        }),
+      ),
+    );
+    expect(host.textContent).toContain(cueB);
+    await act(async () =>
+      root.render(
+        createElement(IeltsSpeakingTransferCard, {
+          key: "speaking-cue-swap",
+          seed: baseCustomSeed,
+          onEvaluated,
+        }),
+      ),
+    );
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-reset-attempt]")!.click());
+    const swapSpTextarea = host.querySelector<HTMLTextAreaElement>('[aria-label="口语复述记录输入框"]')!;
+    const swapSpDuration = host.querySelector<HTMLInputElement>('[aria-label="口语作答时长秒数"]')!;
+    const swapSpCheckbox = host.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    await act(async () => {
+      setNativeInputValue(swapSpTextarea, `${cueB} ${GENUINE_ORIGINAL_SPEAKING_TRANSCRIPT}`);
+      setNativeInputValue(swapSpDuration, "76");
+    });
+    expect(swapSpCheckbox.checked).toBe(true);
+    expect(swapSpCheckbox.disabled).toBe(true);
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-speaking-evaluate]")!.click());
+    expect(onEvaluated.mock.lastCall?.[0]).toMatchObject({
+      assisted: true,
+      epistemicStatus: "practice_feedback",
+      countsTowardMastery: false,
+    });
+
+    // [P1-4] Submit independent verified speech -> Reset -> retype same speech -> click Reveal -> Reset without submitting -> retype cleanly -> assisted: false!
+    await act(async () =>
+      root.render(
+        createElement(IeltsSpeakingTransferCard, {
+          key: "speaking-reveal-reset-independent",
+          seed: baseCustomSeed,
+          onEvaluated,
+        }),
+      ),
+    );
+    const indSpTextarea = host.querySelector<HTMLTextAreaElement>('[aria-label="口语复述记录输入框"]')!;
+    const indSpDuration = host.querySelector<HTMLInputElement>('[aria-label="口语作答时长秒数"]')!;
+    const indSpCheckbox = host.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    await act(async () => {
+      setNativeInputValue(indSpTextarea, GENUINE_ORIGINAL_SPEAKING_TRANSCRIPT);
+      setNativeInputValue(indSpDuration, "76");
+    });
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-speaking-evaluate]")!.click());
+    expect(onEvaluated.mock.lastCall?.[0]).toMatchObject({
+      assisted: false,
+      epistemicStatus: "rubric_verified_evidence",
+      countsTowardMastery: true,
+    });
+
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-reset-attempt]")!.click());
+    await act(async () => setNativeInputValue(indSpTextarea, GENUINE_ORIGINAL_SPEAKING_TRANSCRIPT));
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-reveal-scaffold]")!.click());
+    expect(indSpCheckbox.checked).toBe(true);
+
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-reset-attempt]")!.click());
+    await act(async () => {
+      setNativeInputValue(indSpTextarea, GENUINE_ORIGINAL_SPEAKING_TRANSCRIPT);
+      setNativeInputValue(indSpDuration, "77");
+    });
+    expect(indSpCheckbox.checked).toBe(false);
+    expect(indSpCheckbox.disabled).toBe(false);
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-speaking-evaluate]")!.click());
+    expect(onEvaluated.mock.lastCall?.[0]).toMatchObject({
+      assisted: false,
+      epistemicStatus: "rubric_verified_evidence",
+      masteryQualified: true,
+      countsTowardMastery: true,
     });
   });
 });

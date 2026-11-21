@@ -70,9 +70,9 @@ const TOPIC_SCAFFOLD_STOP_WORDS = new Set([
   "between", "among", "around", "across", "through", "during", "before", "after",
   "against", "toward", "within", "every", "coin", "double", "edged", "sword", "denying",
   "heated", "sparked", "concerned", "stand", "last", "least", "carry", "buy",
-  "government", "public", "private", "money", "spend", "spending", "build", "building",
-  "family", "citizen", "resident", "authority", "society", "country", "nation", "national",
-  "local", "global", "world", "life", "daily", "community", "area", "place", "region",
+  "government", "money", "spend", "spending", "build", "building",
+  "family", "citizen", "resident", "authority", "society", "country", "nation",
+  "world", "life", "daily", "community", "area", "place", "region",
   "district", "expand", "expanding", "invest", "investing", "undermine", "alleviate",
   "chronic", "demand", "induced",
   "test", "demo", "fixture", "sample", "custom", "fresh", "attempt", "version",
@@ -135,10 +135,43 @@ function extractPromptTopicSpec(
     const firstSentence = trimmedStatement.split(/[.?!]+/u)[0] ?? trimmedStatement;
     const splitParts = firstSentence.split(PROMPT_CONTRAST_SPLIT);
     if (splitParts.length >= 2) {
-      const left = new Set<string>();
-      const right = new Set<string>();
-      collectTopicStems(splitParts[0]!, TOPIC_SCAFFOLD_STOP_WORDS, 3, left);
-      collectTopicStems(splitParts.slice(1).join(" "), TOPIC_SCAFFOLD_STOP_WORDS, 3, right);
+      const leftText = splitParts[0]!;
+      const rightText = splitParts.slice(1).join(" ");
+      const rawLeft = new Set<string>();
+      const rawRight = new Set<string>();
+      collectTopicStems(leftText, TOPIC_SCAFFOLD_STOP_WORDS, 3, rawLeft);
+      collectTopicStems(rightText, TOPIC_SCAFFOLD_STOP_WORDS, 3, rawRight);
+
+      // Subtract terms shared across both sides (e.g. "housing" in "public housing rather than
+      // private housing") so a one-sided essay cannot satisfy both poles via the shared head noun.
+      const sharedTerms = new Set([...rawLeft].filter((term) => rawRight.has(term)));
+      const distinctiveLeft = new Set([...rawLeft].filter((term) => !rawRight.has(term)));
+      const distinctiveRight = new Set([...rawRight].filter((term) => !rawLeft.has(term)));
+
+      let left: ReadonlySet<string> = distinctiveLeft.size > 0 ? distinctiveLeft : rawLeft;
+      const right: ReadonlySet<string> = distinctiveRight.size > 0 ? distinctiveRight : rawRight;
+
+      if (sharedTerms.size > 0 && distinctiveLeft.size > 1) {
+        // When both sides share a head noun (e.g. "Should cities subsidise public housing rather
+        // than private housing?"), focus the left pole on the distinctive modifier directly
+        // preceding the shared head noun so main-clause nouns like "cities" don't mask a missing left pole.
+        const leftTokens = (leftText.toLowerCase().match(/[a-z]+/gu) ?? []).map((tok) =>
+          stemTopicToken(tok),
+        );
+        const adjacentLeftModifiers = new Set<string>();
+        for (let i = 1; i < leftTokens.length; i += 1) {
+          if (sharedTerms.has(leftTokens[i]!)) {
+            const prev = leftTokens[i - 1]!;
+            if (distinctiveLeft.has(prev)) {
+              adjacentLeftModifiers.add(prev);
+            }
+          }
+        }
+        if (adjacentLeftModifiers.size > 0) {
+          left = adjacentLeftModifiers;
+        }
+      }
+
       if (left.size > 0 && right.size > 0) {
         contrastFacets = [left, right];
       }

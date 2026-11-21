@@ -2328,4 +2328,77 @@ describe("Writing topic-relevance band grounding", () => {
     expect(runOnResult.receipt.overallBand).toBeLessThanOrEqual(4.5);
     expect(runOnResult.receipt.masteryQualified).toBe(false);
   });
+
+  it("requires side-specific contrast poles on shared-noun contrast prompts (public housing rather than private housing)", () => {
+    const housingPrompt =
+      "Should cities subsidise public housing rather than private housing?";
+
+    // One-sided essay discussing ONLY public housing (never addressing private housing) MUST be capped as tangential.
+    const publicOnlyHousingEssay: IeltsEssayDraft = {
+      ...DRAFT_2,
+      draftId: "draft-2-housing-public-only",
+      promptId: "housing-subsidy-v1",
+      paragraphs: [
+        "Cities should subsidise public housing extensively so working families can secure stable urban accommodation near schools and clinics. Municipal housing boards can construct durable apartment blocks on underused civic land and keep monthly rents affordable across generations.",
+        "Expanding public housing also reduces residential turnover, strengthens neighbourhood cohesion, and lowers emergency shelter spending for municipal treasuries. When cities fund reliable public housing estates, teachers, nurses, and transit operators remain close to essential workplaces.",
+        "Furthermore, long-term public housing subsidies help cities retrofit ageing municipal blocks with clean heating systems, better insulation, and accessible courtyards for older residents. Clear housing waitlists ensure low-income households receive priority placement.",
+        "Overall, sustained municipal investment in public housing offers cities dependable social stability and fairer urban living standards for essential workers.",
+      ],
+    };
+    const publicOnlyResult = evaluateNonEmptyRevision({
+      baselineDraft: DRAFT_1,
+      revisedDraft: publicOnlyHousingEssay,
+      targets: [],
+      promptStatement: housingPrompt,
+      receiptId: "r-housing-public-only",
+    });
+    expect(publicOnlyResult.receipt.criteria.TR.band).toBeLessThanOrEqual(4.5);
+    expect(publicOnlyResult.receipt.overallBand).toBeLessThanOrEqual(4.5);
+    expect(publicOnlyResult.receipt.masteryQualified).toBe(false);
+
+    // One-sided essay discussing ONLY private housing (never addressing public housing) MUST also be capped as tangential.
+    const privateOnlyHousingEssay: IeltsEssayDraft = {
+      ...DRAFT_2,
+      draftId: "draft-2-housing-private-only",
+      promptId: "housing-subsidy-v1",
+      paragraphs: [
+        "Cities should support private housing developers through targeted construction grants so new residential towers reach the market faster. Commercial housing firms mobilize capital rapidly and tailor floor plans to diverse household sizes across expanding suburbs.",
+        "Subsidising private housing projects also encourages competitive architectural design, faster maintenance response times, and stronger retail investment around newly built districts. When cities partner with private housing builders, total residential supply grows quickly.",
+        "In addition, flexible private housing incentives attract institutional lenders who finance energy-efficient apartment complexes without burdening municipal maintenance departments over coming decades.",
+        "Overall, directing urban subsidies toward private housing developers accelerates construction capacity and modernises city neighbourhoods.",
+      ],
+    };
+    const privateOnlyResult = evaluateNonEmptyRevision({
+      baselineDraft: DRAFT_1,
+      revisedDraft: privateOnlyHousingEssay,
+      targets: [],
+      promptStatement: housingPrompt,
+      receiptId: "r-housing-private-only",
+    });
+    expect(privateOnlyResult.receipt.criteria.TR.band).toBeLessThanOrEqual(4.5);
+    expect(privateOnlyResult.receipt.overallBand).toBeLessThanOrEqual(4.5);
+    expect(privateOnlyResult.receipt.masteryQualified).toBe(false);
+
+    // Balanced essay (190+ words) debating BOTH public housing AND private housing passes uncapped!
+    const balancedHousingEssay: IeltsEssayDraft = {
+      ...DRAFT_2,
+      draftId: "draft-2-housing-balanced",
+      promptId: "housing-subsidy-v1",
+      paragraphs: [
+        "Cities regularly debate whether to subsidise public housing rather than private housing as urban rents climb faster than household wages across metropolitan neighbourhoods. While commercial builders can add residential units quickly during construction booms, directing municipal subsidies primarily toward public housing guarantees permanent affordability that private housing incentives rarely preserve over several decades.",
+        "Directly financing public housing allows cities to lock in income-indexed rents for nurses, school teachers, transit staff, and municipal service workers without losing public assets when market cycles shift. By contrast, subsidising private housing developers frequently produces temporary price caps that expire once grant agreements lapse, forcing cities to repeatedly pay rising market premiums to house essential residents.",
+        "Admittedly, well-regulated private housing projects can supplement residential supply in fast-growing transit corridors whenever municipal construction pipelines face severe land or engineering bottlenecks. Pairing core public housing construction with strict long-term affordability covenants on any targeted private housing grant resolves both construction speed and urban equity concerns.",
+        "Overall, cities should anchor long-term housing subsidies in durable public housing estates while restricting private housing support strictly to verifiable multi-decade affordable units.",
+      ],
+    };
+    const balancedResult = evaluateNonEmptyRevision({
+      baselineDraft: DRAFT_1,
+      revisedDraft: balancedHousingEssay,
+      targets: [],
+      promptStatement: housingPrompt,
+      receiptId: "r-housing-balanced",
+    });
+    expect(balancedResult.receipt.criteria.TR.band).toBeGreaterThanOrEqual(6);
+    expect(balancedResult.receipt.overallBand).toBeGreaterThanOrEqual(6);
+  });
 });
