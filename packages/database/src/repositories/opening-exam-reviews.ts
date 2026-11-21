@@ -324,12 +324,13 @@ export function createOpeningExamReviewsRepository(sql: Sql) {
                 OR left(b.request_id, length(${operationId}) + 1)=${`${operationId}:`}
                 OR b.parent_interaction_id=${operationId}
               )
-              AND NOT (
+              AND (
                 b.state='released'
+                AND b.release_reason IS NOT NULL
                 AND b.release_reason IN ('not_sent','cancelled')
                 AND b.outcome_unknown_at IS NULL
                 AND COALESCE(b.pending_reconcile_cents,0)=0
-              )
+              ) IS NOT TRUE
           )` : sql``}`;
     },
   };

@@ -154,6 +154,22 @@ describe("openingApi (RU-07 client)", () => {
     await expect(api.getPendingJob(U)).resolves.toBeNull();
   });
 
+  it("scopes pending-job lookup by clientKey when requested", async () => {
+    const fetchImpl = vi.fn(async (url: string, init?: RequestInit) => {
+      expect(url).toBe(`/api/opening/conversations/${U}/pending-job?clientKey=turn-key%2F1`);
+      expect(init?.method).toBe("GET");
+      return jsonResponse({ id: U, status: "running", error: null, updatedAt: ISO, clientKey: "turn-key/1" });
+    });
+    const api = createOpeningApi(fetchImpl as unknown as typeof fetch);
+    await expect(api.getPendingJob(U, undefined, { clientKey: "turn-key/1" })).resolves.toEqual({
+      id: U,
+      status: "running",
+      error: null,
+      updatedAt: ISO,
+      clientKey: "turn-key/1",
+    });
+  });
+
   it.each(["queued", "running", "succeeded", "failed", "cancelled", "outcome_unknown"] as const)(
     "gets strict job status response for %s",
     async (status) => {

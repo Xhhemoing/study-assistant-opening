@@ -584,5 +584,18 @@ describe("exam photo review repository integration", () => {
     expect(freshAfterUnknown.review.id).not.toBe(unknownRecovered.review.id);
     expect(freshAfterUnknown.review.status).toBe("pending");
     expect(await rawReview(unknownRecovered.review.id)).toMatchObject({ status: "failed" });
+
+    // 5) Released reservation with NULL release_reason is unconfirmed: fail('failed') MUST stay blocked (no 3-valued NULL bypass) and stale begin() marks unknown.
+    const unconfirmedIntent = input({ clientKey: randomUUID(), answerText: "Null release reason answer" });
+    const unconfirmed = await repository.begin(f.scope, unconfirmedIntent);
+    const unconfirmedOpId = `exam-review:${f.scope.workspaceId}:${unconfirmed.review.id}`;
+    await f.sql`INSERT INTO opening_budget_reservations(id, workspace_id, purpose, amount_cents, request_id, state, release_reason)
+      VALUES(${randomUUID()}, ${f.scope.workspaceId}, 'practice.grade-photo', 10, ${unconfirmedOpId}, 'released', NULL)`;
+    await repository.fail(f.scope, unconfirmed.review.id, "failed", unconfirmed.executionUpdatedAt);
+    expect(await rawReview(unconfirmed.review.id)).toMatchObject({ status: "pending" });
+    await f.sql`UPDATE opening_exam_reviews SET updated_at = now() - interval '61 seconds' WHERE id = ${unconfirmed.review.id}`;
+    const afterStaleUnconfirmed = await repository.begin(f.scope, unconfirmedIntent);
+    expect(afterStaleUnconfirmed.review.status).toBe("unknown");
+    expect(afterStaleUnconfirmed.reusedUnresolved).toBe(true);
   });
 });

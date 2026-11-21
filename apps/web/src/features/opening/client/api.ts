@@ -305,9 +305,14 @@ export function createOpeningApi(transport: FetchLike = fetch) {
       return parseOpeningResponse(jobStatusResponseSchema, body);
     },
 
-    async getPendingJob(conversationId: string, signal?: AbortSignal): Promise<JobStatusResponse | null> {
+    async getPendingJob(
+      conversationId: string,
+      signal?: AbortSignal,
+      options?: { clientKey?: string },
+    ): Promise<JobStatusResponse | null> {
+      const query = options?.clientKey ? `?clientKey=${encodeURIComponent(options.clientKey)}` : "";
       const body = await request(
-        `/api/opening/conversations/${conversationId}/pending-job`,
+        `/api/opening/conversations/${conversationId}/pending-job${query}`,
         { method: "GET", signal },
         fetchImpl,
       );

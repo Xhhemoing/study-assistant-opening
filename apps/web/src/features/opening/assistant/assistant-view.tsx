@@ -666,30 +666,61 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
       setUnknownJob(pendingJob?.status === "outcome_unknown" ? pendingJob : null);
       setRecoveryNow(Date.now());
       const discovered = pendingJobDiscoveryState({ ok: true, job: pendingJob });
-      if (discovered.kind === "active") {
-        if (deferredStop) {
-          if (pendingJob?.clientKey === deferredStop.clientKey) {
-            setActiveJobId(null);
-            setPending(false);
-            await stopSavedJobRef.current(discovered.activeJobId, id, { fromDeferredStop: true });
-            return true;
-          }
-          // Another turn is now active; clear our stale Stop marker without cancelling it.
+      if (deferredStop) {
+        if (discovered.kind === "active" && pendingJob?.clientKey === deferredStop.clientKey) {
+          setActiveJobId(null);
+          setPending(false);
+          await stopSavedJobRef.current(discovered.activeJobId, id, { fromDeferredStop: true });
+          return true;
+        }
+        if (pendingStopTurnSettled(nextTurns, deferredStop.clientKey)) {
           pendingStop.current = null;
           setPendingStopRecovery(false);
+        } else {
+          // Unfiltered pending-job only returns the conversation's newest job, so a newer
+          // turn from another tab can hide our stopped job. Query by clientKey before clearing.
+          let scopedJob: Awaited<ReturnType<OpeningApi["getPendingJob"]>>;
+          try {
+            scopedJob = await api.getPendingJob(id, signal, { clientKey: deferredStop.clientKey });
+          } catch (scopedError) {
+            if (signal?.aborted) return false;
+            const unavailable = pendingJobDiscoveryState({ ok: false, error: scopedError });
+            if (unavailable.kind === "unavailable") {
+              setPendingHint(`尚未确认是否有进行中的回答：${unavailable.message}`);
+            }
+            setRecoveryRequired(true);
+            setPendingStopRecovery(true);
+            return true;
+          }
+          if (signal?.aborted) return false;
+          const scopedDiscovered = pendingJobDiscoveryState({ ok: true, job: scopedJob });
+          if (scopedDiscovered.kind === "active") {
+            if (!scopedJob?.clientKey || scopedJob.clientKey === deferredStop.clientKey) {
+              setActiveJobId(null);
+              setPending(false);
+              await stopSavedJobRef.current(scopedDiscovered.activeJobId, id, { fromDeferredStop: true });
+              return true;
+            }
+            // Legacy/unfiltered response returned a different clientKey: never cancel it and
+            // never clear our Stop marker without confirmation for deferredStop.clientKey.
+            setRecoveryRequired(true);
+            setPendingStopRecovery(true);
+          } else if (discovered.kind === "active") {
+            // clientKey-scoped lookup confirmed no active queued/running job for our clientKey.
+            pendingStop.current = null;
+            setPendingStopRecovery(false);
+          }
         }
+      }
+      const remainingStop = pendingStop.current?.conversationId === id ? pendingStop.current : null;
+      if (discovered.kind === "active") {
         setActiveJobId(discovered.activeJobId);
         setPending(discovered.pending);
         setPendingHint(discovered.hint);
       } else if (discovered.kind === "unknown") {
-        if (deferredStop) {
-          if (pendingStopTurnSettled(nextTurns, deferredStop.clientKey)) {
-            pendingStop.current = null;
-            setPendingStopRecovery(false);
-          } else {
-            setRecoveryRequired(true);
-            setPendingStopRecovery(true);
-          }
+        if (remainingStop) {
+          setRecoveryRequired(true);
+          setPendingStopRecovery(true);
         }
         setActiveJobId(null);
         setPending(false);
@@ -697,24 +728,18 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
       } else {
         setActiveJobId(null);
         setPending(false);
-        if (deferredStop) {
-          if (pendingStopTurnSettled(nextTurns, deferredStop.clientKey)) {
-            pendingStop.current = null;
-            setPendingStopRecovery(false);
-            if (!guard.receipt || nextTurns.length) setPendingHint("");
-          } else {
-            // Keep pendingStop and recovery active while delivery of the stopped turn is still uncertain.
-            setRecoveryRequired(true);
-            setPendingStopRecovery(true);
-            setPendingHint("尚未确认发送结果，请重新读取对话。");
-          }
+        if (remainingStop) {
+          // Keep pendingStop and recovery active while delivery of the stopped turn is still uncertain.
+          setRecoveryRequired(true);
+          setPendingStopRecovery(true);
+          setPendingHint("尚未确认发送结果，请重新读取对话。");
         } else if (!guard.receipt || nextTurns.length) {
           setPendingHint("");
         }
       }
       return true;
     },
-    [conversationReader, draftStore, initialCourseId, initialSourceIds, initialPage, learningAttempt, resumeBoundConversation, setConversationId],
+    [api, conversationReader, draftStore, initialCourseId, initialSourceIds, initialPage, learningAttempt, resumeBoundConversation, setConversationId],
   );
 
 
@@ -876,7 +901,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
     turnStopLock.current = true;
     try {
       const job = await api.cancelJob(jobId);
-      if (id && pendingStop.current?.conversationId === id) {
+      if (options?.fromDeferredStop && id && pendingStop.current?.conversationId === id) {
         pendingStop.current = null;
         setPendingStopRecovery(false);
       }

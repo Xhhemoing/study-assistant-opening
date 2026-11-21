@@ -38,15 +38,16 @@ const globalPeriodPattern = /[0-9]+\s*[-－至]\s*[0-9]+\s*节/g;
 const weekPrefixBeforeBracket = /^(?:周次\s*[:：]?|周\s*[:：])\s*/;
 const weekMarkerHint = /周次|第\s*(?:[^\s()（）[\]【】]{0,16}|[\d\s\-－至,，、?？]{1,24})\s*周(?!期|围|边|年|末|转|折|密|全|到|游|旋|长|率|律)|\d\s*[单双]?周|周\s*[:：\d一二三四五六日天]|[单双]周/;
 const weekPlaceholder = /(?:[?？]|待定|暂定|另行|未定|TBD\b)/.source;
-const malformedBareWeekTail = new RegExp(`^\\s*(?:[-－至~～—–/]|[,，、]\\s*${weekPlaceholder})`, "i");
+const malformedListTail = `(?:(?:第\\s*)?${weekPlaceholder}|\\d+(?:\\s*[-－至]\\s*\\d+)?\\s*(?:${weekPlaceholder}|[~～至]|[-－—–/]\\s*(?:$|${weekPlaceholder})|[,，、;；]\\s*${weekPlaceholder}))`;
+const malformedBareWeekTail = new RegExp(`^\\s*(?:[-－至~～—–/]|[,，、;；]\\s*${malformedListTail})`, "i");
 const malformedCompletedWeekTail = new RegExp(
   `^\\s*(?:`
   + `[~～至]`
-  + `|[,，、]\\s*${weekPlaceholder}`
+  + `|[,，、;；]\\s*${malformedListTail}`
   + `|[-－—–/]\\s*(?:$`
     + `|(?:第\\s*)?${weekPlaceholder}`
     + `|(?:第\\s*)?\\d+(?:\\s*[-－至]\\s*\\d+)?\\s*[单双]?周(?!期|围|边|年|末|转|折|密|全|到|游|旋|长|率|律)`
-    + `|\\d+(?:\\s*[-－至]\\s*\\d+)?\\s*(?:${weekPlaceholder}|[~～至]|[-－—–/]\\s*(?:$|${weekPlaceholder})|[,，、]\\s*${weekPlaceholder})`
+    + `|\\d+(?:\\s*[-－至]\\s*\\d+)?\\s*(?:${weekPlaceholder}|[~～至]|[-－—–/]\\s*(?:$|${weekPlaceholder})|[,，、;；]\\s*${weekPlaceholder})`
   + `))`,
   "i",
 );

@@ -317,7 +317,9 @@ describe("opening-exam-reviews stale pending reconciliation and fail guards", ()
     const leasedFailedFrags = getFrags(f.calls.at(-1)!);
     expect(leasedFailedFrags.some(fr => fr.__fragment.includes("AND status IN ('pending', 'unknown')"))).toBe(true);
     expect(leasedFailedFrags.some(fr => fr.__fragment === "AND updated_at=(?::text)::timestamptz" && fr.values?.[0] === "2026-10-17 00:02:00.123456+00")).toBe(true);
-    expect(leasedFailedFrags.some(fr => fr.__fragment.includes("opening_budget_reservations"))).toBe(true);
+    expect(leasedFailedFrags.some(fr => fr.__fragment.includes("opening_budget_reservations")
+      && fr.__fragment.includes("b.release_reason IS NOT NULL")
+      && fr.__fragment.includes("IS NOT TRUE"))).toBe(true);
 
     await repo.fail(scope, reviewId, "failed");
     const unleasedFailedFrags = getFrags(f.calls.at(-1)!);

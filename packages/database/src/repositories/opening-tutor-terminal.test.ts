@@ -190,6 +190,16 @@ describe("opening tutor jobs repository", () => {
       error: { message: TUTOR_UNKNOWN_MESSAGE },
       updatedAt: "2026-09-13T12:00:00.000Z",
     });
+    // clientKey-scoped lookup filters on u.client_key and only returns active queued/running jobs.
+    await expect(createOpeningTutorJobsRepository(activeSql).findPendingForConversation(scope, "conversation-1", "turn-client-key-1")).resolves.toEqual({
+      id: "job-active",
+      status: "running",
+      error: null,
+      updatedAt: "2026-09-13T12:00:00.000Z",
+      clientKey: "turn-client-key-1",
+    });
+    expect(activeSql.calls.at(-1)).toContain("u.client_key");
+    await expect(createOpeningTutorJobsRepository(unknownSql).findPendingForConversation(scope, "conversation-1", "turn-client-key-2")).resolves.toBeNull();
   });
 
   it("discovers a recovered unknown outcome without marking it active", async () => {
