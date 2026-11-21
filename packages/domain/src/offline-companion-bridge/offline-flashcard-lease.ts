@@ -268,13 +268,14 @@ const UNICODE_MATH_SYMBOL_RE = /[\p{Sm}\p{Script=Greek}]/u;
 const RELATION_OP_RE = /(?:<=|>=|!=|~=|==|=|<|>)/;
 const SINGLE_CHOICE_LETTER_RE = /^[a-z]$/i;
 
+const UNICODE_MULTIPLICATION_RE = /[\u00D7\u00B7\u22C5\u2219\u2217]/g;
 const UNICODE_MATH_REPLACEMENTS: ReadonlyArray<readonly [RegExp, string]> = [
   [/[\u2212\u2013\u2014\u2010\u2011\uFE63\uFF0D]/g, "-"],
   [/\u00B1\s*(?=[a-z0-9(\u221A\p{Script=Greek}])/giu, "+-"],
   [/\u00B1/g, "+-"],
   [/\u2213\s*(?=[a-z0-9(\u221A\p{Script=Greek}])/giu, "-+"],
   [/\u2213/g, "-+"],
-  [/[\u00D7\u00B7\u22C5\u2219\u2217]/g, "*"],
+  [UNICODE_MULTIPLICATION_RE, "*"],
   [/[\u00F7\u2215\u2044]/g, "/"],
   [/\u2264/g, "<="],
   [/\u2265/g, ">="],
@@ -1235,7 +1236,7 @@ function collapseSpacedProseArticleSigns(text: string, preserveLineBreaks: boole
   );
 }
 
-function normalizeMathSymbols(text: string): string {
+function normalizeMathSymbols(text: string, preserveMultiplication = false): string {
   text = text
     .replace(/\p{Script=Greek}/gu, symbol => {
       const lower = symbol.toLowerCase();
@@ -1246,19 +1247,21 @@ function normalizeMathSymbols(text: string): string {
     )
     .replace(ASCII_GREEK_VARIANT_RE, name => GREEK_NAME_VARIANTS.get(name.toLowerCase()) ?? name);
   for (const [pattern, replacement] of UNICODE_MATH_REPLACEMENTS) {
+    if (preserveMultiplication && pattern === UNICODE_MULTIPLICATION_RE) continue;
     text = text.replace(pattern, replacement);
   }
   return text;
 }
 
 function normalizeOptionSyntax(syntax: string): string {
-  const mathSyntax = stripOptionMarkdown(normalizeMathSymbols(stripLatexNonOperandCommands(syntax, true)))
+  // Keep multiplication glyphs from becoming Markdown delimiters during unwrapping.
+  const mathSyntax = stripOptionMarkdown(normalizeMathSymbols(stripLatexNonOperandCommands(syntax, true), true))
     .replace(
       /(?<!\\)\\\(([\s\S]*?)(?<!\\)\\\)|(?<!\\)\\\[([\s\S]*?)(?<!\\)\\\]/g,
       (span, inline: string | undefined, display: string, offset: number, text: string) =>
         preserveFormattedChoice(inline ?? display, text.slice(0, offset), text.slice(offset + span.length)),
     );
-  return stripOptionMarkdown(stripOptionDollarMath(mathSyntax));
+  return stripOptionMarkdown(stripOptionDollarMath(mathSyntax)).replace(UNICODE_MULTIPLICATION_RE, "*");
 }
 
 function preserveFormattedChoice(body: string, before: string, after: string): string {
@@ -1565,7 +1568,7 @@ const ARTICLE_STOP_WORD_RE = new RegExp("^(?:" +
   "for|in|on|at|to|of|by|with|from|into|onto|upon|over|under|after|before|between|among|through|during|" +
   "without|within|about|against|per|via|as|up|off|out|across|along|past|around|inside|outside|despite|except|towards?|" +
   "like|unlike|besides|beside|beyond|behind|above|below|beneath|amid|amidst|amongst|throughout|concerning|regarding|" +
-  "including|excluding|following|barring|pending|worth|" +
+  "including|excluding|following|barring|pending|worth|provided|assuming|supposing|considering|granted|seeing|" +
   "is|was|are|were|be|been|being|has|have|had|do|does|did|can|could|will|would|shall|should|may|might|must|equals?|" +
   "and|or|but|nor|yet|so|if|then|else|when|while|where|whereas|because|since|unless|until|till|although|though|than|whether|" +
   "that|which|who|whom|whose|what|i|he|him|his|she|her|hers|it|its|we|us|our|ours|you|your|yours|they|them|their|theirs|" +
@@ -1581,36 +1584,67 @@ const ARTICLE_MODIFIER_WORD_RE = new RegExp("^(?:" +
   "zeroth|first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth|" +
   "[a-z]+(?:teenth|tieth|illionth)|hundredth|thousandth|next|last|[a-z]+ly|almost|pairwise|" +
   "right|left|single|double|triple|fast|hard|early|late|soon|far|near|close|very|quite|pretty|rather|well|ill|more|less|most|least|" +
-  "still|given|provided|assuming|supposing|considering)$");
+  "still|given)$");
 const ARTICLE_LY_NOUN_RE =
   /^(?:family|anomaly|assembly|monopoly|supply|reply|ally|tally|rally|valley|pulley|belly|jelly|lily|(?:butter|dragon|fire|may)?fly|bully|folly|gully|holly)$/;
 const ARTICLE_QUANTITY_TOKEN = /\d(?:[^\s.,;:!?()[\]{}<>]|\.(?=\d))*/u.source;
-const ARTICLE_QUANTITY = `${ARTICLE_QUANTITY_TOKEN}(?:[ \\t]+(?:by|[x×*])[ \\t]+${ARTICLE_QUANTITY_TOKEN})*`;
-const ARTICLE_CARDINAL_RE = new RegExp("^(?:" +
-  DECIMAL_DIGITS + "|zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|" +
+const ARTICLE_CARDINAL_WORD = "zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|" +
   "thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|" +
-  "eighty|ninety|hundred|thousand|million|billion|trillion|quadrillion|quintillion)$");
+  "eighty|ninety|hundred|thousand|million|billion|trillion|quadrillion|quintillion";
+const ARTICLE_CARDINAL_RE = new RegExp(`^(?:${DECIMAL_DIGITS}|${ARTICLE_CARDINAL_WORD})$`);
 const ARTICLE_CARDINAL_ADJUNCT_RE = /^[ \t]+(?:more|less|last|other|another|by|at|of|or|and|times)\b/i;
+const ARTICLE_DIMENSION = `(?:${ARTICLE_QUANTITY_TOKEN}|${ARTICLE_CARDINAL_WORD}|[a-z])`;
+const ARTICLE_DIMENSION_SEPARATOR = /(?:[ \t]+(?:by|[x×*])[ \t]+|-by-)/.source;
+const ARTICLE_DIMENSION_TOKEN =
+  `${ARTICLE_DIMENSION}(?:${ARTICLE_DIMENSION_SEPARATOR}${ARTICLE_DIMENSION})+(?![\\w-])`;
 const ARTICLE_REPETITION_NOUN_RE = /^(?:times?|way|turn|round|try|chance)$/;
+const ARTICLE_SINGULAR_S_RE = /(?:[suio]s|^(?:series|species|lens|canvas|atlas|bias|gas|bus|alias|news|means))$/;
+const ARTICLE_IRREGULAR_PLURAL_RE = /^(?:children|people|men|women|teeth|feet|mice|geese|criteria|phenomena)$/;
+const ARTICLE_GIVEN_NOUN_COMPLEMENT_RE =
+  /^[ \t]+(?:that|which|who|whom|whose|where|when|of|in|on|from|at|for|with|to|under|over|between|among|within|across|along|through|near|above|below|into|onto)\b/i;
+const ARTICLE_GIVEN_LABEL = /(?:[a-z]|[ivx]{2,4}|\d+|[a-z]+[\d_]\w*)/.source;
+const ARTICLE_GIVEN_PREDICATE = `(?:${RELATION_OP_RE.source}|(?:` +
+  "is|are|was|were|be|been|has|have|had|do|does|did|can|could|will|would|shall|should|may|might|must|" +
+  "holds|fails|equals|exceeds|vanishes|converges|diverges|exists|implies|satisfies|violates|remains|stays|" +
+  "becomes|appears|occurs|works|gives|yields|makes|means|shows|states|requires|matches|differs|contains|includes)\\b)";
+const ARTICLE_GIVEN_CLAUSE_RE = new RegExp(
+  `^[ \\t]*(?:(?:[\\p{L}_][\\p{L}\\p{N}_]*[ \\t]+)?${ARTICLE_GIVEN_PREDICATE}|` +
+  `${ARTICLE_GIVEN_LABEL}\\b|${OPTION_WRAPPER_OPEN}[ \\t]*${ARTICLE_GIVEN_LABEL}[ \\t]*${OPTION_WRAPPER_CLOSE})`,
+  "iu",
+);
 
 function startsArticleNounPhrase(text: string): boolean {
-  const tokens = new RegExp(`[ \\t]+(?:${ARTICLE_QUANTITY}(?=[ \\t])|([a-z]+)(?:-[a-z]+)*\\b)`, "iyu");
+  const tokens = new RegExp(
+    `[ \\t]+(?:${ARTICLE_DIMENSION_TOKEN}|${ARTICLE_QUANTITY_TOKEN}(?=[ \\t])|([a-z]+)(?:-[a-z]+)*\\b)`,
+    "iyu",
+  );
   let modifiers = 0;
   let afterTemporalModifier = false;
+  let afterGiven = false;
   for (let match = tokens.exec(text); match !== null; match = tokens.exec(text)) {
     const token = match[0].trim().toLowerCase();
-    if (ARTICLE_CARDINAL_RE.test(token) && ARTICLE_CARDINAL_ADJUNCT_RE.test(text.slice(tokens.lastIndex))) return false;
+    const remainder = text.slice(tokens.lastIndex);
+    const cardinal = ARTICLE_CARDINAL_RE.test(token);
+    if (cardinal && ARTICLE_CARDINAL_ADJUNCT_RE.test(remainder)) return false;
 
     const word = match[1]?.toLowerCase();
     // A repetition word after "next" or "last" needs a head, as in "next time step".
     const repetitionModifier = afterTemporalModifier && ARTICLE_REPETITION_NOUN_RE.test(token);
     if (word !== undefined && !repetitionModifier) {
       if (token.length < 2 || ARTICLE_STOP_WORD_RE.test(word)) return false;
-      if (!ARTICLE_MODIFIER_WORD_RE.test(word) || ARTICLE_LY_NOUN_RE.test(word)) return true;
+      if (!cardinal && (!ARTICLE_MODIFIER_WORD_RE.test(word) || ARTICLE_LY_NOUN_RE.test(word))) {
+        const head = token.slice(token.lastIndexOf("-") + 1);
+        if (ARTICLE_IRREGULAR_PLURAL_RE.test(head) ||
+          (head.endsWith("s") && !ARTICLE_SINGULAR_S_RE.test(head))) return false;
+        // A predicate after "given option" can make "given" introduce a condition.
+        return !afterGiven || ARTICLE_GIVEN_NOUN_COMPLEMENT_RE.test(remainder) ||
+          !ARTICLE_GIVEN_CLAUSE_RE.test(remainder);
+      }
     }
     if (modifiers === 3) return false;
     modifiers += 1;
     afterTemporalModifier = token === "next" || token === "last";
+    afterGiven ||= token === "given";
   }
   return false;
 }
