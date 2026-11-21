@@ -573,4 +573,114 @@ describe("revalidateRemedyClinic privacy_epoch and source-revocation read guard"
     expect(scrubbed.revocationSummary.strippedCaseCount).toBe(2);
     expect(JSON.stringify(scrubbed)).not.toContain("TOP_SECRET_REVOKED_TEXT");
   });
+
+  it("scrubs Step 2 ruleTitle and Step 3 probes on revocation, enforces probe/rule sourceRefs, and freezes probe snapshots before predict", () => {
+    const allSources = {
+      "src-rule": "v1",
+      "src-probe-1": "v1",
+      "src-probe-2": "v1",
+      "src-ch-1": "v1",
+      "src-ch-2": "v1",
+      "src-ch-3": "v1",
+    };
+
+    const attempts = [
+      makeAttempt({ attemptId: "a1", rootAttemptId: "r1", chapterId: "ch-1", localDate: "2026-11-01" }),
+      makeAttempt({ attemptId: "a2", rootAttemptId: "r2", chapterId: "ch-2", localDate: "2026-11-03" }),
+      makeAttempt({ attemptId: "a3", rootAttemptId: "r3", chapterId: "ch-3", localDate: "2026-11-05" }),
+    ];
+
+    // Probe 1's predict callback tries to mutate the caller's original probe.prompt to "".
+    const mutatingProbe = {
+      ...makeProbe({ probeId: "probe-mutating", input: { a: -2, b: 8 } }),
+      prompt: "SECRET_PROBE_PROMPT_1: Solve -2x <= 8",
+      sourceRefs: [{ sourceId: "src-probe-1", sourceVersion: "v1" }],
+    };
+    const originalPredict = mutatingProbe.correctModel.predict;
+    mutatingProbe.correctModel = {
+      ...mutatingProbe.correctModel,
+      predict: (input) => {
+        mutatingProbe.prompt = "";
+        return originalPredict(input);
+      },
+    };
+    const probe2 = {
+      ...makeProbe({ probeId: "probe-src-2", input: { a: -3, b: 12 } }),
+      prompt: "SECRET_PROBE_PROMPT_2: Solve -3x <= 12",
+      sourceRefs: [{ sourceId: "src-probe-2", sourceVersion: "v1" }],
+    };
+    const emptySourceRefProbe = {
+      ...makeProbe({ probeId: "probe-empty-refs", input: { a: -4, b: 16 } }),
+      prompt: "Solve -4x <= 16",
+      sourceRefs: [],
+    };
+
+    const generated = generateRemedyClinic({
+      learnerId: "learner-1",
+      courseId: "course-alg-1",
+      ruleId: RULE_ID,
+      ruleTitle: "SECRET_RULE_TITLE_NEGATIVE_FLIP",
+      ruleSourceRefs: [{ sourceId: "src-rule", sourceVersion: "v1" }],
+      currentPrivacyEpoch: 5,
+      activeSourcesMap: allSources,
+      verifyRuleViolation: verifyNegativeSignFlip,
+      attempts,
+      candidateProbes: [emptySourceRefProbe, mutatingProbe, probe2],
+    });
+    expect(generated.status).toBe("active");
+    expect(generated.rejectedProbes).toHaveLength(1);
+    expect(generated.rejectedProbes[0]!.reason).toBe("revoked_probe_source");
+
+    const clinic = generated.clinic!;
+    // Pre-verification frozen snapshot preserved original prompt despite predict mutating caller's object.
+    expect(mutatingProbe.prompt).toBe("");
+    expect(clinic.steps[2].probes[0]!.prompt).toBe("SECRET_PROBE_PROMPT_1: Solve -2x <= 8");
+    expect(clinic.steps[1].ruleTitle).toBe("SECRET_RULE_TITLE_NEGATIVE_FLIP");
+
+    // Revoking src-probe-1 leaves < 2 active probes => degrades and scrubs ALL 3 steps.
+    const probeRevoked = revalidateRemedyClinic(
+      clinic,
+      {
+        "src-rule": "v1",
+        "src-probe-2": "v1",
+        "src-ch-1": "v1",
+        "src-ch-2": "v1",
+        "src-ch-3": "v1",
+      },
+      6,
+    );
+    expect(probeRevoked.status).toBe("stale_source_revoked");
+    expect(probeRevoked.revocationSummary.reason).toBe("insufficient_surviving_probes");
+    expect(probeRevoked.steps[0].selectedCases).toEqual([]);
+    expect(probeRevoked.steps[1].ruleTitle).toBe("");
+    expect(probeRevoked.steps[2].probes).toEqual([]);
+    expect(JSON.stringify(probeRevoked)).not.toContain("SECRET_RULE_TITLE_NEGATIVE_FLIP");
+    expect(JSON.stringify(probeRevoked)).not.toContain("SECRET_PROBE_PROMPT_1");
+    expect(JSON.stringify(probeRevoked)).not.toContain("SECRET_PROBE_PROMPT_2");
+
+    // Revoking src-rule degrades immediately and scrubs ALL 3 steps.
+    const ruleRevoked = revalidateRemedyClinic(
+      clinic,
+      {
+        "src-probe-1": "v1",
+        "src-probe-2": "v1",
+        "src-ch-1": "v1",
+        "src-ch-2": "v1",
+        "src-ch-3": "v1",
+      },
+      6,
+    );
+    expect(ruleRevoked.status).toBe("stale_source_revoked");
+    expect(ruleRevoked.revocationSummary.reason).toBe("rule_source_revoked");
+    expect(ruleRevoked.steps[1].ruleTitle).toBe("");
+    expect(ruleRevoked.steps[2].probes).toEqual([]);
+    expect(JSON.stringify(ruleRevoked)).not.toContain("SECRET_RULE_TITLE_NEGATIVE_FLIP");
+
+    // Corrupted createdPrivacyEpoch = -1 with validatedPrivacyEpoch = 7, current = 8 must NOT reset to 0.
+    const corruptedEpochClinic = { ...clinic, createdPrivacyEpoch: -1, validatedPrivacyEpoch: 7 };
+    const corruptedRes = revalidateRemedyClinic(corruptedEpochClinic, allSources, 8);
+    expect(corruptedRes.status).toBe("stale_source_revoked");
+    expect(corruptedRes.revocationSummary.reason).toBe("invalid_privacy_epoch");
+    expect(corruptedRes.validatedPrivacyEpoch).toBeGreaterThanOrEqual(7);
+  });
 });

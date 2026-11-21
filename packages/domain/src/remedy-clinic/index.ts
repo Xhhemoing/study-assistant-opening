@@ -26,6 +26,7 @@ export {
   STEP3_TRANSFER_PROBES_MINUTES,
   generateRemedyClinic,
   revalidateRemedyClinic,
+  type ClinicCandidateProbe,
   type ClinicCandidateRejectionCounts,
   type ClinicRevocationReason,
   type DiagnosedRootAttempt,

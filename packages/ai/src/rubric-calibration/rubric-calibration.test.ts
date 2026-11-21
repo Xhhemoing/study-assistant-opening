@@ -205,6 +205,88 @@ describe("AnchorCalibratedRubricV1 pairwise swap, monotonicity & mastery gates",
     expect(invalidChoiceResult.inconsistencyReasons).toContain("invalid_comparison_choice");
   });
 
+  it("fails closed on invalid custom anchors (duplicate IDs, NaN theta, non-monotone order) and repeated single-phrase boilerplate", () => {
+    const baseAnchors = getSentinelAnchorsForDimension("task_response");
+    const duplicateAnchors = [
+      baseAnchors[0]!,
+      { ...baseAnchors[1]!, anchorId: baseAnchors[0]!.anchorId },
+      ...baseAnchors.slice(2),
+    ];
+    const dupAnchorResult = evaluateAnchorCalibratedRubric({
+      submissionId: "bad-anchors-dup",
+      dimension: "task_response",
+      text: SENTINEL_ANCHOR_ESSAYS[2]!.text,
+      mode: "formal_assessment",
+      assisted: false,
+      anchors: duplicateAnchors,
+      comparisons: consistentComparisonsForTarget("task_response", 6.0),
+    });
+    expect(dupAnchorResult.status).toBe("interval_only");
+    expect(dupAnchorResult.band).toBeNull();
+    expect(dupAnchorResult.rawBand).toBeNull();
+    expect(dupAnchorResult.theta).toBeNull();
+    expect(dupAnchorResult.bandRange).toEqual([0, 9]);
+    expect(dupAnchorResult.countsTowardMastery).toBe(false);
+    expect(dupAnchorResult.inconsistencyReasons).toEqual(["invalid_anchor_definitions"]);
+
+    const nanThetaAnchors = baseAnchors.map((a, idx) =>
+      idx === 1 ? { ...a, thetaAnchor: Number.NaN } : a,
+    );
+    const nanAnchorResult = evaluateAnchorCalibratedRubric({
+      submissionId: "bad-anchors-nan",
+      dimension: "task_response",
+      text: SENTINEL_ANCHOR_ESSAYS[2]!.text,
+      mode: "formal_assessment",
+      assisted: false,
+      anchors: nanThetaAnchors,
+      comparisons: consistentComparisonsForTarget("task_response", 6.0),
+    });
+    expect(nanAnchorResult.status).toBe("interval_only");
+    expect(nanAnchorResult.band).toBeNull();
+    expect(nanAnchorResult.countsTowardMastery).toBe(false);
+    expect(nanAnchorResult.inconsistencyReasons).toEqual(["invalid_anchor_definitions"]);
+
+    const reversedAnchors = baseAnchors.map((a, idx) =>
+      idx === 2 ? { ...a, thetaAnchor: baseAnchors[1]!.thetaAnchor - 1 } : a,
+    );
+    const reversedResult = evaluateAnchorCalibratedRubric({
+      submissionId: "bad-anchors-order",
+      dimension: "task_response",
+      text: SENTINEL_ANCHOR_ESSAYS[2]!.text,
+      mode: "formal_assessment",
+      assisted: false,
+      anchors: reversedAnchors,
+      comparisons: consistentComparisonsForTarget("task_response", 6.0),
+    });
+    expect(reversedResult.status).toBe("interval_only");
+    expect(reversedResult.countsTowardMastery).toBe(false);
+    expect(reversedResult.inconsistencyReasons).toEqual(["invalid_anchor_definitions"]);
+
+    // Repeated single cliche phrase across essay must trigger template padding.
+    const repeatedSingleCliche =
+      "Every coin has two sides when cities evaluate transit subsidies. " +
+      "Outer commuters need reliable feeder buses and affordable fares. " +
+      "Every coin has two sides in municipal transport planning.";
+    const repeatedEval = evaluateAnchorCalibratedRubric({
+      submissionId: "repeated-cliche",
+      dimension: "task_response",
+      text: repeatedSingleCliche,
+      mode: "formal_assessment",
+      assisted: false,
+      comparisons: consistentComparisonsForTarget("task_response", 6.0),
+    });
+    expect(repeatedEval.paddingReport.clicheHits).toEqual(["every coin has two sides"]);
+    expect(repeatedEval.paddingReport.totalClicheOccurrences).toBe(2);
+    expect(repeatedEval.paddingReport.isTemplatePadded).toBe(true);
+    expect(repeatedEval.countsTowardMastery).toBe(false);
+    expect(repeatedEval.masteryExclusionReasons).toContain("template_padding_detected");
+
+    // High boilerplate word coverage (>= 0.20) from even a single phrase occurrence.
+    const shortBoilerplate = detectTemplatePadding("In light of the aforementioned considerations, policy choices matter.");
+    expect(shortBoilerplate.clicheWordRatio).toBeGreaterThanOrEqual(0.20);
+    expect(shortBoilerplate.isTemplatePadded).toBe(true);
+  });
+
   it("blocks mastery updates for practice_feedback, assisted submissions, and template-padded essays", () => {
     const comparisons = consistentComparisonsForTarget("grammatical_range_accuracy", 6.5);
     const cleanText = SENTINEL_ANCHOR_ESSAYS[3]!.text;
@@ -384,5 +466,74 @@ describe("evaluateRubricCalibrationGate four-fold & 3-way anti-padding gate", ()
     expect(paddedCountsForMastery.passed).toBe(false);
     expect(paddedCountsForMastery.failures).toContain("counterfactual_padded_counts_toward_mastery");
     expect(paddedCountsForMastery.counterfactualAudits[0]!.passed).toBe(false);
+
+    // Runtime undefined countsTowardMastery must also fail closed (!== false).
+    const undefinedMasteryPoint = {
+      status: "calibrated",
+      band: 6.0,
+      rawBand: 6.0,
+      countsTowardMastery: undefined,
+    } as unknown as RubricCalibrationPoint;
+    const missingMasteryFlag = evaluateRubricCalibrationGate({
+      benchmarkItems: [
+        { itemId: "u1", trueBand: 4.5, evaluation: calibratedPoint(4.5) },
+        { itemId: "u2", trueBand: 5.0, evaluation: calibratedPoint(5.0) },
+        { itemId: "u3", trueBand: 6.0, evaluation: calibratedPoint(6.0) },
+        { itemId: "u4", trueBand: 6.5, evaluation: calibratedPoint(6.5) },
+        { itemId: "u5", trueBand: 7.5, evaluation: calibratedPoint(7.5) },
+        { itemId: "u6", trueBand: 8.0, evaluation: calibratedPoint(8.0) },
+      ],
+      counterfactualTriplets: [
+        {
+          tripletId: "undefined-mastery-flag",
+          substantiveConcise: calibratedPoint(6.0, 6.0),
+          templatePaddedExpansion: undefinedMasteryPoint,
+          equalLengthSubstantive: calibratedPoint(7.5, 7.5),
+        },
+      ],
+    });
+    expect(missingMasteryFlag.passed).toBe(false);
+    expect(missingMasteryFlag.failures).toContain("counterfactual_padded_counts_toward_mastery");
+  });
+
+  it("enforces tightening-only thresholds and rejects non-finite threshold overrides", () => {
+    const trueBands = [4.5, 5.0, 6.0, 6.5, 7.5, 8.0];
+    const compressedPreds = [5.5, 5.5, 6.0, 6.5, 7.0, 7.0];
+
+    // Attempting to relax thresholds MUST NOT let a mean-compressed scorer pass.
+    const relaxedAttempt = evaluateRubricCalibrationGate({
+      benchmarkItems: trueBands.map((trueBand, index) => ({
+        itemId: `rel-${index}`,
+        trueBand,
+        evaluation: calibratedPoint(compressedPreds[index]!),
+      })),
+      counterfactualTriplets: passingCounterfactuals,
+      thresholds: {
+        minQwk: 0.1,
+        maxAbsSmd: 2.0,
+        maxAbsBiasLow: 1.0,
+        maxAbsBiasHigh: 1.0,
+        minSdRatio: 0,
+        minAdmissibleCoverage: 0.1,
+        maxPaddingGain: 3.0,
+      },
+    });
+    expect(relaxedAttempt.passed).toBe(false);
+    expect(relaxedAttempt.failures).toContain("low_tail_bias_exceeds_threshold");
+    expect(relaxedAttempt.failures).toContain("high_tail_bias_exceeds_threshold");
+    expect(relaxedAttempt.failures).toContain("sd_ratio_compression_detected");
+
+    // Non-finite threshold override fails closed with invalid_threshold_configuration.
+    const nanThreshold = evaluateRubricCalibrationGate({
+      benchmarkItems: trueBands.map((trueBand, index) => ({
+        itemId: `nan-${index}`,
+        trueBand,
+        evaluation: calibratedPoint(trueBand),
+      })),
+      counterfactualTriplets: passingCounterfactuals,
+      thresholds: { minQwk: Number.NaN },
+    });
+    expect(nanThreshold.passed).toBe(false);
+    expect(nanThreshold.failures).toContain("invalid_threshold_configuration");
   });
 });

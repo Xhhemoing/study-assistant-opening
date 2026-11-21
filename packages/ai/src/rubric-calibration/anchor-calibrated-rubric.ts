@@ -33,6 +33,7 @@ export interface RubricSubmissionInput {
 }
 
 export type RubricInconsistencyReason =
+  | "invalid_anchor_definitions"
   | "insufficient_anchor_coverage"
   | "missing_reverse_comparison"
   | "invalid_comparison_choice"
@@ -42,7 +43,8 @@ export type RubricInconsistencyReason =
   | "swap_position_bias_second"
   | "swap_verdict_asymmetry"
   | "non_adjacent_monotonicity_violation"
-  | "adjacent_monotonicity_violation";
+  | "adjacent_monotonicity_violation"
+  | "non_finite_projection";
 
 export type MasteryExclusionReason =
   | "practice_feedback_only"
@@ -54,6 +56,7 @@ export interface TemplatePaddingReport {
   readonly isTemplatePadded: boolean;
   readonly wordCount: number;
   readonly clicheHits: readonly string[];
+  readonly totalClicheOccurrences: number;
   readonly clicheWordRatio: number;
 }
 
@@ -137,26 +140,44 @@ function countWords(text: string): number {
   return trimmed.split(/\s+/).length;
 }
 
+function countNonOverlappingOccurrences(haystack: string, needle: string): number {
+  if (!needle) return 0;
+  let count = 0;
+  let fromIndex = 0;
+  while (fromIndex <= haystack.length - needle.length) {
+    const idx = haystack.indexOf(needle, fromIndex);
+    if (idx === -1) break;
+    count++;
+    fromIndex = idx + needle.length;
+  }
+  return count;
+}
+
 export function detectTemplatePadding(text: string): TemplatePaddingReport {
   const normalized = text.toLowerCase().replace(/\s+/g, " ").trim();
   const wordCount = countWords(normalized);
   const clicheHits: string[] = [];
+  let totalClicheOccurrences = 0;
   let clicheWordCount = 0;
 
   for (const phrase of TEMPLATE_CLICHE_PATTERNS) {
-    if (normalized.includes(phrase)) {
+    const occurrences = countNonOverlappingOccurrences(normalized, phrase);
+    if (occurrences > 0) {
       clicheHits.push(phrase);
-      clicheWordCount += countWords(phrase);
+      totalClicheOccurrences += occurrences;
+      clicheWordCount += countWords(phrase) * occurrences;
     }
   }
 
   const clicheWordRatio = wordCount > 0 ? Math.min(1, clicheWordCount / wordCount) : 0;
-  const isTemplatePadded = clicheHits.length >= 3 || (clicheHits.length >= 2 && clicheWordRatio >= 0.12);
+  const isTemplatePadded =
+    clicheHits.length >= 2 || totalClicheOccurrences >= 2 || clicheWordRatio >= 0.20;
 
   return {
     isTemplatePadded,
     wordCount,
     clicheHits,
+    totalClicheOccurrences,
     clicheWordRatio,
   };
 }
@@ -261,13 +282,14 @@ function solveBradleyTerryTheta(
     return { g, gp };
   };
 
-  // Expand bracket defensively if needed so g(lo) > 0 > g(hi).
-  while (scoreGradient(lo).g <= 0) lo -= 8;
-  while (scoreGradient(hi).g >= 0) hi += 8;
+  // Expand bracket defensively with bounded steps so g(lo) > 0 > g(hi).
+  for (let step = 0; step < 64 && scoreGradient(lo).g <= 0; step++) lo -= 8;
+  for (let step = 0; step < 64 && scoreGradient(hi).g >= 0; step++) hi += 8;
 
   let theta = clamp(priorCenter, lo + 1e-6, hi - 1e-6);
   for (let iteration = 0; iteration < 64; iteration++) {
     const { g, gp } = scoreGradient(theta);
+    if (!Number.isFinite(g) || !Number.isFinite(gp)) return Number.NaN;
     if (Math.abs(g) < 1e-12 || hi - lo < 1e-12) break;
     if (g > 0) lo = theta;
     else hi = theta;
@@ -282,10 +304,66 @@ export function snapHalfBand(band: number): number {
   return clamp(Math.round(band * 2) / 2, MIN_BAND, MAX_BAND);
 }
 
+function validateAndSortAnchors(
+  sourceAnchors: readonly DimensionSentinelAnchor[],
+): readonly DimensionSentinelAnchor[] | null {
+  if (!Array.isArray(sourceAnchors) || sourceAnchors.length < 2) return null;
+  const seenIds = new Set<string>();
+  for (const anchor of sourceAnchors) {
+    if (!anchor || typeof anchor.anchorId !== "string" || anchor.anchorId.trim().length === 0) return null;
+    if (seenIds.has(anchor.anchorId)) return null;
+    seenIds.add(anchor.anchorId);
+    if (
+      typeof anchor.band !== "number" ||
+      !Number.isFinite(anchor.band) ||
+      anchor.band < MIN_BAND ||
+      anchor.band > MAX_BAND
+    ) {
+      return null;
+    }
+    if (typeof anchor.thetaAnchor !== "number" || !Number.isFinite(anchor.thetaAnchor)) return null;
+  }
+
+  const sorted = [...sourceAnchors].sort((a, b) => a.band - b.band || a.thetaAnchor - b.thetaAnchor);
+  for (let i = 1; i < sorted.length; i++) {
+    const prev = sorted[i - 1];
+    const curr = sorted[i];
+    if (!prev || !curr) return null;
+    if (curr.band > prev.band && !(curr.thetaAnchor > prev.thetaAnchor)) return null;
+    if (curr.band === prev.band && curr.thetaAnchor !== prev.thetaAnchor) return null;
+  }
+  return sorted;
+}
+
 export function evaluateAnchorCalibratedRubric(input: RubricSubmissionInput): AnchorCalibratedRubricV1Result {
   const sourceAnchors = input.anchors ?? getSentinelAnchorsForDimension(input.dimension);
-  const anchors = [...sourceAnchors].sort((a, b) => a.band - b.band || a.thetaAnchor - b.thetaAnchor);
   const paddingReport = detectTemplatePadding(input.text);
+  const anchors = validateAndSortAnchors(sourceAnchors);
+
+  if (!anchors) {
+    const masteryExclusionReasons: MasteryExclusionReason[] = [];
+    if (input.mode === "practice_feedback") masteryExclusionReasons.push("practice_feedback_only");
+    if (input.assisted) masteryExclusionReasons.push("assisted_submission");
+    masteryExclusionReasons.push("interval_only_inconsistent");
+    if (paddingReport.isTemplatePadded) masteryExclusionReasons.push("template_padding_detected");
+
+    return {
+      schemaVersion: 1,
+      submissionId: input.submissionId,
+      dimension: input.dimension,
+      status: "interval_only",
+      band: null,
+      rawBand: null,
+      theta: null,
+      bandRange: [MIN_BAND, MAX_BAND],
+      countsTowardMastery: false,
+      masteryExclusionReasons,
+      inconsistencyReasons: ["invalid_anchor_definitions"],
+      paddingReport,
+      anchorComparisons: [],
+    };
+  }
+
   const reasons = new Set<RubricInconsistencyReason>();
 
   const comparisonByAnchor = new Map<string, PairwiseSwapComparison>();
@@ -392,8 +470,38 @@ export function evaluateAnchorCalibratedRubric(input: RubricSubmissionInput): An
 
   const outcomes = resolved.map((entry) => entry.outcome as 1 | 0.5 | 0);
   const theta = solveBradleyTerryTheta(anchors, outcomes);
-  const rawBand = clamp(bandFromTheta(theta), MIN_BAND, MAX_BAND);
+  const rawUnclamped = bandFromTheta(theta);
+  const rawBand = clamp(rawUnclamped, MIN_BAND, MAX_BAND);
   const band = snapHalfBand(rawBand);
+
+  if (
+    !Number.isFinite(theta) ||
+    !Number.isFinite(rawUnclamped) ||
+    !Number.isFinite(rawBand) ||
+    !Number.isFinite(band) ||
+    band < MIN_BAND ||
+    band > MAX_BAND
+  ) {
+    const fallbackExclusions: MasteryExclusionReason[] = [...masteryExclusionReasons];
+    if (!fallbackExclusions.includes("interval_only_inconsistent")) {
+      fallbackExclusions.push("interval_only_inconsistent");
+    }
+    return {
+      schemaVersion: 1,
+      submissionId: input.submissionId,
+      dimension: input.dimension,
+      status: "interval_only",
+      band: null,
+      rawBand: null,
+      theta: null,
+      bandRange,
+      countsTowardMastery: false,
+      masteryExclusionReasons: fallbackExclusions,
+      inconsistencyReasons: ["non_finite_projection"],
+      paddingReport,
+      anchorComparisons: resolved,
+    };
+  }
 
   return {
     schemaVersion: 1,

@@ -55,17 +55,30 @@ export interface EmbeddingRecallCandidate {
   readonly anchorAttemptId?: string;
 }
 
+export type ClinicCandidateProbe<TInput = unknown, TObservable = unknown> =
+  DistinguishableProbeSpec<TInput, TObservable> & {
+    readonly targetMisconceptionId?: string;
+    readonly sourceRefs?: readonly RemedySourceRef[];
+  };
+
 export interface VerifiedClinicTransferProbe {
   readonly probeId: string;
   readonly requirementKey: string;
   readonly prompt: string;
+  readonly targetMisconceptionId?: string;
+  readonly sourceRefs?: readonly RemedySourceRef[];
   readonly competingModelIds: readonly string[];
   readonly report: ProbeDistinguishabilityReport;
 }
 
 export interface RejectedClinicProbe {
   readonly probeId: string;
-  readonly reason: "duplicate_probe_id" | "duplicate_probe_prompt" | "not_distinguishable";
+  readonly reason:
+    | "duplicate_probe_id"
+    | "duplicate_probe_prompt"
+    | "not_distinguishable"
+    | "revoked_probe_source"
+    | "invalid_probe_prompt";
   readonly report: ProbeDistinguishabilityReport | null;
 }
 
@@ -82,6 +95,7 @@ export interface InvariantRuleRestatementStep {
   readonly kind: "invariant_rule_restatement";
   readonly durationMinutes: 3;
   readonly ruleId: string;
+  readonly ruleTitle: string;
   readonly prompt: string;
   readonly checklist: readonly string[];
 }
@@ -90,13 +104,15 @@ export interface DistinguishableTransferProbesStep {
   readonly stepNumber: 3;
   readonly kind: "distinguishable_transfer_probes";
   readonly durationMinutes: 7;
-  readonly probes: readonly [VerifiedClinicTransferProbe, VerifiedClinicTransferProbe];
+  readonly probes: readonly VerifiedClinicTransferProbe[];
 }
 
 export type ClinicRevocationReason =
   | "none"
   | "partial_source_revoked_still_active"
   | "insufficient_surviving_evidence"
+  | "insufficient_surviving_probes"
+  | "rule_source_revoked"
   | "invalid_privacy_epoch"
   | "already_revoked";
 
@@ -107,6 +123,7 @@ export interface RemedyClinicSessionV1 {
   readonly learnerId: string;
   readonly courseId: string;
   readonly ruleId: string;
+  readonly ruleSourceRefs?: readonly RemedySourceRef[];
   readonly totalMinutes: 14;
   readonly createdPrivacyEpoch: number;
   readonly validatedPrivacyEpoch: number;
@@ -141,12 +158,13 @@ export interface GenerateRemedyClinicInput<TInput = unknown, TObservable = unkno
   readonly courseId: string;
   readonly ruleId: string;
   readonly ruleTitle?: string;
+  readonly ruleSourceRefs?: readonly RemedySourceRef[];
   readonly currentPrivacyEpoch: number;
   readonly activeSourcesMap: ActiveSourcesMap;
   readonly attempts: readonly DiagnosedRootAttempt[];
   readonly embeddingRecallCandidates?: readonly EmbeddingRecallCandidate[];
   readonly verifyRuleViolation: (attempt: DiagnosedRootAttempt) => boolean;
-  readonly candidateProbes: readonly DistinguishableProbeSpec<TInput, TObservable>[];
+  readonly candidateProbes: readonly ClinicCandidateProbe<TInput, TObservable>[];
 }
 
 export interface GenerateRemedyClinicResult {
@@ -187,13 +205,18 @@ function safeVerifyRuleViolation(
   }
 }
 
+const REVOKED_CLINIC_STEP2_PLACEHOLDER =
+  "This remedy clinic is no longer available because an underlying source was updated or removed.";
+
 function buildRestatementStep(ruleId: string, ruleTitle?: string): InvariantRuleRestatementStep {
-  const label = isNonBlankText(ruleTitle) ? `${ruleTitle.trim()} (${ruleId})` : ruleId;
+  const trimmedTitle = isNonBlankText(ruleTitle) ? ruleTitle.trim() : "";
+  const label = trimmedTitle ? `${trimmedTitle} (${ruleId})` : ruleId;
   return {
     stepNumber: 2,
     kind: "invariant_rule_restatement",
     durationMinutes: STEP2_INVARIANT_RESTATEMENT_MINUTES,
     ruleId,
+    ruleTitle: trimmedTitle,
     prompt:
       `Compare the 3 side-by-side cases above and restate the core invariant for ${label} in your own words. ` +
       "Explain what structural condition triggers the rule, why the recurring error fails that condition, " +
@@ -206,6 +229,26 @@ function buildRestatementStep(ruleId: string, ruleTitle?: string): InvariantRule
   };
 }
 
+function freezeSourceRefs(sourceRefs: readonly RemedySourceRef[]): readonly RemedySourceRef[] {
+  return Object.freeze(
+    sourceRefs.map((ref) => Object.freeze({ sourceId: ref.sourceId, sourceVersion: ref.sourceVersion })),
+  );
+}
+
+function cloneVerifiedProbe(probe: VerifiedClinicTransferProbe): VerifiedClinicTransferProbe {
+  return Object.freeze({
+    probeId: probe.probeId,
+    requirementKey: probe.requirementKey,
+    prompt: probe.prompt,
+    ...(probe.targetMisconceptionId !== undefined
+      ? { targetMisconceptionId: probe.targetMisconceptionId }
+      : {}),
+    ...(probe.sourceRefs !== undefined ? { sourceRefs: freezeSourceRefs(probe.sourceRefs) } : {}),
+    competingModelIds: Object.freeze([...probe.competingModelIds]),
+    report: probe.report,
+  });
+}
+
 export function generateRemedyClinic<TInput = unknown, TObservable = unknown>(
   input: GenerateRemedyClinicInput<TInput, TObservable>,
 ): GenerateRemedyClinicResult {
@@ -216,7 +259,8 @@ export function generateRemedyClinic<TInput = unknown, TObservable = unknown>(
     !isNonBlankText(input.courseId) ||
     !isNonBlankText(input.ruleId) ||
     !isValidPrivacyEpoch(input.currentPrivacyEpoch) ||
-    typeof input.verifyRuleViolation !== "function"
+    typeof input.verifyRuleViolation !== "function" ||
+    (input.ruleSourceRefs !== undefined && !areSourceRefsActive(input.ruleSourceRefs, input.activeSourcesMap))
   ) {
     return {
       status: "invalid_input",
@@ -345,8 +389,49 @@ export function generateRemedyClinic<TInput = unknown, TObservable = unknown>(
   const acceptedProbePrompts = new Set<string>();
 
   for (const probe of input.candidateProbes) {
-    const report = verifyProbeDistinguishability(probe);
-    const probeId = report.probeId || (typeof probe?.probeId === "string" ? probe.probeId : "");
+    // Capture an immutable pre-verification snapshot before running any probe callback.
+    const frozenProbeId = typeof probe?.probeId === "string" ? probe.probeId : "";
+    const frozenRequirementKey = typeof probe?.requirementKey === "string" ? probe.requirementKey : "";
+    const frozenPrompt = typeof probe?.prompt === "string" ? probe.prompt : "";
+    const frozenTargetMisconceptionId =
+      typeof probe?.targetMisconceptionId === "string" ? probe.targetMisconceptionId : undefined;
+    const hasExplicitSourceRefs = probe?.sourceRefs !== undefined;
+    const frozenSourceRefs = hasExplicitSourceRefs
+      ? Array.isArray(probe.sourceRefs)
+        ? freezeSourceRefs(probe.sourceRefs)
+        : Object.freeze([])
+      : undefined;
+
+    if (!isNonBlankText(frozenPrompt)) {
+      rejectedProbes.push({ probeId: frozenProbeId, reason: "invalid_probe_prompt", report: null });
+      continue;
+    }
+    if (frozenSourceRefs !== undefined && !areSourceRefsActive(frozenSourceRefs, input.activeSourcesMap)) {
+      rejectedProbes.push({ probeId: frozenProbeId, reason: "revoked_probe_source", report: null });
+      continue;
+    }
+
+    let frozenInput: TInput;
+    try {
+      frozenInput = structuredClone(probe.input);
+    } catch {
+      rejectedProbes.push({ probeId: frozenProbeId, reason: "not_distinguishable", report: null });
+      continue;
+    }
+
+    const frozenSpec: DistinguishableProbeSpec<TInput, TObservable> = Object.freeze({
+      probeId: frozenProbeId,
+      requirementKey: frozenRequirementKey,
+      prompt: frozenPrompt,
+      input: frozenInput,
+      correctModel: probe.correctModel,
+      hypotheses: Array.isArray(probe.hypotheses) ? Object.freeze([...probe.hypotheses]) : probe.hypotheses,
+      observableKey: probe.observableKey,
+      parseResponse: probe.parseResponse,
+    });
+
+    const report = verifyProbeDistinguishability(frozenSpec);
+    const probeId = report.probeId || frozenProbeId;
     if (!report.distinguishable) {
       rejectedProbes.push({ probeId, reason: "not_distinguishable", report });
       continue;
@@ -355,20 +440,26 @@ export function generateRemedyClinic<TInput = unknown, TObservable = unknown>(
       rejectedProbes.push({ probeId, reason: "duplicate_probe_id", report });
       continue;
     }
-    const normalizedPrompt = probe.prompt.trim().replace(/\s+/g, " ").toLowerCase();
+    const normalizedPrompt = frozenPrompt.trim().replace(/\s+/g, " ").toLowerCase();
     if (acceptedProbePrompts.has(normalizedPrompt)) {
       rejectedProbes.push({ probeId, reason: "duplicate_probe_prompt", report });
       continue;
     }
     acceptedProbeIds.add(probeId);
     acceptedProbePrompts.add(normalizedPrompt);
-    verifiedProbes.push({
-      probeId,
-      requirementKey: probe.requirementKey,
-      prompt: probe.prompt,
-      competingModelIds: report.predictions.map((entry) => entry.modelId),
-      report,
-    });
+    verifiedProbes.push(
+      Object.freeze({
+        probeId,
+        requirementKey: frozenRequirementKey,
+        prompt: frozenPrompt,
+        ...(frozenTargetMisconceptionId !== undefined
+          ? { targetMisconceptionId: frozenTargetMisconceptionId }
+          : {}),
+        ...(frozenSourceRefs !== undefined ? { sourceRefs: frozenSourceRefs } : {}),
+        competingModelIds: Object.freeze(report.predictions.map((entry) => entry.modelId)),
+        report,
+      }),
+    );
   }
 
   const probe1 = verifiedProbes[0];
@@ -396,6 +487,7 @@ export function generateRemedyClinic<TInput = unknown, TObservable = unknown>(
     learnerId: input.learnerId,
     courseId: input.courseId,
     ruleId: input.ruleId,
+    ...(input.ruleSourceRefs !== undefined ? { ruleSourceRefs: freezeSourceRefs(input.ruleSourceRefs) } : {}),
     totalMinutes: REMEDY_CLINIC_TOTAL_MINUTES,
     createdPrivacyEpoch: input.currentPrivacyEpoch,
     validatedPrivacyEpoch: input.currentPrivacyEpoch,
@@ -443,6 +535,7 @@ function degradeClinicToRevoked(
   const [step1, step2, step3] = clinic.steps;
   return {
     ...clinic,
+    ...(clinic.ruleSourceRefs !== undefined ? { ruleSourceRefs: [] } : {}),
     status: "stale_source_revoked",
     validatedPrivacyEpoch,
     coverage,
@@ -453,8 +546,16 @@ function degradeClinicToRevoked(
         selectedCases: [],
         diffs: [],
       },
-      step2,
-      step3,
+      {
+        ...step2,
+        ruleTitle: "",
+        prompt: REVOKED_CLINIC_STEP2_PLACEHOLDER,
+        checklist: [],
+      },
+      {
+        ...step3,
+        probes: [],
+      },
     ],
     revocationSummary: {
       strippedCaseCount,
@@ -465,9 +566,9 @@ function degradeClinicToRevoked(
 
 /**
  * Read-time privacy_epoch and source-version guard.
- * Strips any case referencing missing/revoked/version-mismatched sources (completely scrubbing
- * its excerpt) and degrades to "stale_source_revoked" with empty excerpts if surviving cases
- * no longer satisfy >= 3 roots x >= 2 chapters x >= 2 local calendar days.
+ * Strips any case or probe referencing missing/revoked/version-mismatched sources (scrubbing
+ * revoked text across all steps) and degrades to "stale_source_revoked" with empty excerpts,
+ * cleared Step 2 title/prompt, and empty Step 3 probes when invariants fail.
  */
 export function revalidateRemedyClinic(
   clinic: RemedyClinicSessionV1,
@@ -482,12 +583,12 @@ export function revalidateRemedyClinic(
     currentPrivacyEpoch < clinic.createdPrivacyEpoch ||
     currentPrivacyEpoch < clinic.validatedPrivacyEpoch
   ) {
-    const safeEpoch =
-      isValidPrivacyEpoch(clinic.validatedPrivacyEpoch) && isValidPrivacyEpoch(clinic.createdPrivacyEpoch)
-        ? Math.max(clinic.createdPrivacyEpoch, clinic.validatedPrivacyEpoch)
-        : isValidPrivacyEpoch(clinic.createdPrivacyEpoch)
-          ? clinic.createdPrivacyEpoch
-          : 0;
+    const validEpochs = [
+      clinic.createdPrivacyEpoch,
+      clinic.validatedPrivacyEpoch,
+      currentPrivacyEpoch,
+    ].filter(isValidPrivacyEpoch);
+    const safeEpoch = validEpochs.length > 0 ? Math.max(0, ...validEpochs) : 0;
     return degradeClinicToRevoked(
       clinic,
       safeEpoch,
@@ -504,6 +605,19 @@ export function revalidateRemedyClinic(
       { rootAttemptCount: 0, chapterCount: 0, localDateCount: 0 },
       clinic.revocationSummary.strippedCaseCount,
       "already_revoked",
+    );
+  }
+
+  if (
+    clinic.ruleSourceRefs !== undefined &&
+    !areSourceRefsActive(clinic.ruleSourceRefs, activeSourcesMap)
+  ) {
+    return degradeClinicToRevoked(
+      clinic,
+      currentPrivacyEpoch,
+      { rootAttemptCount: 0, chapterCount: 0, localDateCount: 0 },
+      clinic.evidenceCases.length,
+      "rule_source_revoked",
     );
   }
 
@@ -532,8 +646,25 @@ export function revalidateRemedyClinic(
     );
   }
 
-  const selectedCases = selectSpreadRepresentativeCases(survivingCases);
   const [step1, step2, step3] = clinic.steps;
+  const survivingProbes: VerifiedClinicTransferProbe[] = [];
+  for (const probe of step3.probes) {
+    if (probe.sourceRefs !== undefined && !areSourceRefsActive(probe.sourceRefs, activeSourcesMap)) {
+      continue;
+    }
+    survivingProbes.push(cloneVerifiedProbe(probe));
+  }
+  if (survivingProbes.length < REQUIRED_TRANSFER_PROBE_COUNT) {
+    return degradeClinicToRevoked(
+      clinic,
+      currentPrivacyEpoch,
+      coverage,
+      strippedCaseCount,
+      "insufficient_surviving_probes",
+    );
+  }
+
+  const selectedCases = selectSpreadRepresentativeCases(survivingCases);
   return {
     ...clinic,
     status: "active",
@@ -547,7 +678,10 @@ export function revalidateRemedyClinic(
         diffs: buildSelfDiffEntries(selectedCases),
       },
       step2,
-      step3,
+      {
+        ...step3,
+        probes: survivingProbes.slice(0, REQUIRED_TRANSFER_PROBE_COUNT),
+      },
     ],
     revocationSummary: {
       strippedCaseCount,

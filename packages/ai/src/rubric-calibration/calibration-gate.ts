@@ -37,6 +37,7 @@ export interface RubricCalibrationGateThresholds {
 }
 
 export type RubricCalibrationGateFailure =
+  | "invalid_threshold_configuration"
   | "empty_benchmark"
   | "admissible_coverage_below_threshold"
   | "missing_low_tail_samples"
@@ -175,13 +176,107 @@ function extractCounterfactualScore(point: RubricCalibrationPoint): number | nul
   return score;
 }
 
+interface ResolvedCalibrationThresholds {
+  readonly minQwk: number;
+  readonly maxAbsSmd: number;
+  readonly maxAbsBiasLow: number;
+  readonly maxAbsBiasHigh: number;
+  readonly minSdRatio: number;
+  readonly minAdmissibleCoverage: number;
+  readonly lowTailMaxBand: number;
+  readonly highTailMinBand: number;
+  readonly maxPaddingGain: number;
+}
+
+function resolveTighteningThresholds(
+  overrides: RubricCalibrationGateThresholds | undefined,
+): { readonly thresholds: ResolvedCalibrationThresholds; readonly valid: boolean } {
+  if (!overrides) {
+    return { thresholds: DEFAULT_CALIBRATION_THRESHOLDS, valid: true };
+  }
+
+  let valid = true;
+  const checkFinite = (
+    value: number | undefined,
+    fallback: number,
+    minAllowed: number,
+    maxAllowed: number,
+  ): number => {
+    if (value === undefined) return fallback;
+    if (typeof value !== "number" || !Number.isFinite(value) || value < minAllowed || value > maxAllowed) {
+      valid = false;
+      return fallback;
+    }
+    return value;
+  };
+
+  const minQwk = Math.max(
+    DEFAULT_CALIBRATION_THRESHOLDS.minQwk,
+    checkFinite(overrides.minQwk, DEFAULT_CALIBRATION_THRESHOLDS.minQwk, -1, 1),
+  );
+  const maxAbsSmd = Math.min(
+    DEFAULT_CALIBRATION_THRESHOLDS.maxAbsSmd,
+    checkFinite(overrides.maxAbsSmd, DEFAULT_CALIBRATION_THRESHOLDS.maxAbsSmd, 0, Number.MAX_SAFE_INTEGER),
+  );
+  const maxAbsBiasLow = Math.min(
+    DEFAULT_CALIBRATION_THRESHOLDS.maxAbsBiasLow,
+    checkFinite(overrides.maxAbsBiasLow, DEFAULT_CALIBRATION_THRESHOLDS.maxAbsBiasLow, 0, 9),
+  );
+  const maxAbsBiasHigh = Math.min(
+    DEFAULT_CALIBRATION_THRESHOLDS.maxAbsBiasHigh,
+    checkFinite(overrides.maxAbsBiasHigh, DEFAULT_CALIBRATION_THRESHOLDS.maxAbsBiasHigh, 0, 9),
+  );
+  const minSdRatio = Math.max(
+    DEFAULT_CALIBRATION_THRESHOLDS.minSdRatio,
+    checkFinite(overrides.minSdRatio, DEFAULT_CALIBRATION_THRESHOLDS.minSdRatio, 0, Number.MAX_SAFE_INTEGER),
+  );
+  const minAdmissibleCoverage = Math.max(
+    DEFAULT_CALIBRATION_THRESHOLDS.minAdmissibleCoverage,
+    checkFinite(overrides.minAdmissibleCoverage, DEFAULT_CALIBRATION_THRESHOLDS.minAdmissibleCoverage, 0, 1),
+  );
+  const lowTailMaxBand = Math.min(
+    DEFAULT_CALIBRATION_THRESHOLDS.lowTailMaxBand,
+    checkFinite(overrides.lowTailMaxBand, DEFAULT_CALIBRATION_THRESHOLDS.lowTailMaxBand, 0, 9),
+  );
+  const highTailMinBand = Math.max(
+    DEFAULT_CALIBRATION_THRESHOLDS.highTailMinBand,
+    checkFinite(overrides.highTailMinBand, DEFAULT_CALIBRATION_THRESHOLDS.highTailMinBand, 0, 9),
+  );
+  const maxPaddingGain = Math.min(
+    DEFAULT_CALIBRATION_THRESHOLDS.maxPaddingGain,
+    checkFinite(overrides.maxPaddingGain, DEFAULT_CALIBRATION_THRESHOLDS.maxPaddingGain, 0, 9),
+  );
+
+  if (lowTailMaxBand >= highTailMinBand) {
+    valid = false;
+  }
+
+  return {
+    valid,
+    thresholds: {
+      minQwk,
+      maxAbsSmd,
+      maxAbsBiasLow,
+      maxAbsBiasHigh,
+      minSdRatio,
+      minAdmissibleCoverage,
+      lowTailMaxBand,
+      highTailMinBand,
+      maxPaddingGain,
+    },
+  };
+}
+
 export function evaluateRubricCalibrationGate(input: {
   readonly benchmarkItems: readonly GoldRubricBenchmarkItem[];
   readonly counterfactualTriplets: readonly EvaluatedCounterfactualTriplet[];
   readonly thresholds?: RubricCalibrationGateThresholds;
 }): RubricCalibrationGateReport {
-  const t = { ...DEFAULT_CALIBRATION_THRESHOLDS, ...input.thresholds };
+  const { thresholds: t, valid: thresholdsValid } = resolveTighteningThresholds(input.thresholds);
   const failures = new Set<RubricCalibrationGateFailure>();
+  if (!thresholdsValid) {
+    failures.add("invalid_threshold_configuration");
+  }
 
   const totalCount = input.benchmarkItems.length;
   if (totalCount === 0) {
@@ -252,7 +347,7 @@ export function evaluateRubricCalibrationGate(input: {
   } else {
     for (const triplet of input.counterfactualTriplets) {
       const tripletFailures: RubricCalibrationGateFailure[] = [];
-      if (triplet.templatePaddedExpansion.countsTowardMastery) {
+      if (triplet.templatePaddedExpansion.countsTowardMastery !== false) {
         tripletFailures.push("counterfactual_padded_counts_toward_mastery");
         failures.add("counterfactual_padded_counts_toward_mastery");
       }
