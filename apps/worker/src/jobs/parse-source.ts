@@ -70,7 +70,7 @@ const QUALIFIED_MULTI_SECTION_RE = /^(?:(?:(?:Appendix\s+[A-Z0-9]+|APPENDIX\s+[A
 
 const INLINE_SEALED_ALWAYS_RE = new RegExp(
   "^(?:" +
-  "(?:Answer\\s+Key|ANSWER\\s+KEY|Official\\s+Answer|OFFICIAL\\s+ANSWER|Model\\s+Answer|MODEL\\s+ANSWER|Correct\\s+Answer|CORRECT\\s+ANSWER|Answer|ANSWER|Answers|ANSWERS)(?:\\s+\\d+(?:\\.\\d+)*)?(?:\\s*\\(\\s*(?:continued|cont\\.?|CONTD?\\.?|CONTINUED)\\s*\\))?\\s*[:：]" +
+  "(?:Answer\\s+[Kk]ey|ANSWER\\s+KEY|(?:Official|Model|Correct|Sample|Reference)\\s+[Aa]nswer|(?:OFFICIAL|MODEL|CORRECT|SAMPLE|REFERENCE)\\s+ANSWER|Answers?|ANSWERS?)(?:\\s+\\d+(?:\\.\\d+)*)?(?:\\s*\\(\\s*(?:continued|cont\\.?|CONTD?\\.?|CONTINUED)\\s*\\))?\\s*[:：]" +
   "|【\\s*(?:参考答案|标准答案|正确答案|答案)\\s*】" +
   "|(?:参考答案与解析|参考答案|标准答案|正确答案|课后习题答案|课后练习答案|课后答案|练习答案|习题答案|思考题答案|部分习题答案|答案与解析|答案)\\s*(?:\\d+(?:[.\\-]\\d+)*)?\\s*(?:（续）|\\(续\\)|（接上页）|\\(接上页\\))?\\s*[:：]" +
   ")",
@@ -103,7 +103,9 @@ const CONTAINER_OR_NUMBERED_HEADING_RE = /^(?:(?:Chapters?|Sections?|Parts?|Unit
 const SECTION_SEALED_TERMINATOR_RE = /(?:End\s+of\s+(?:Answers?|Solutions?)|答案完|解答完)\s*[.。]?\s*$/iu;
 const INLINE_SEALED_TERMINATOR_RE = /(?:[□■∎]|End\s+of\s+Answers?|答案完|解答完)\s*[.。]?\s*$/iu;
 const BARE_ANSWER_LABEL_RE = /^(?:答案|解答)\s*[:：]$/u;
-const MODEL_ANSWER_LABEL_RE = /^(?:Model\s+Answer|MODEL\s+ANSWER)(?:\s+\d+(?:\.\d+)*)?(?:\s*\(\s*(?:continued|cont\.?|CONTD?\.?|CONTINUED)\s*\))?\s*[:：]/u;
+const MODEL_ANSWER_LABEL_RE = /^(?:Model\s+[Aa]nswer|MODEL\s+ANSWER)(?:\s+\d+(?:\.\d+)*)?(?:\s*\(\s*(?:continued|cont\.?|CONTD?\.?|CONTINUED)\s*\))?\s*[:：]/u;
+const SAVED_VISION_MARKER_RE = /(?:^|\r?\n)\[视觉转写与描述\](?:\r?\n|$)/u;
+const SAVED_NATIVE_HEADER_RE = /^\[(?:原生提取|本地提取（可能含OCR）)\]\r?\n/u;
 const TERMINAL_PUNCTUATION_RE = /[.。!?！？;；)）\]】□■∎]$/u;
 const NEXT_CONTINUATION_RE = /(?:\(\s*(?:to\s+be\s+continued|continued(?:\s+on\s+next\s+page)?)\s*\)|[（(]\s*(?:下接下页|转下页|未完待续)\s*[）)]|接下页|转下页)$/iu;
 
@@ -627,7 +629,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
       ): { sanitized: NewSourceChunk | undefined; savedSeal: SealState; hasVisionMarker: boolean; visionWasSealed: boolean } => {
         const anyNativeOrIncomingSeal = nativeContaminatedOnPage || incomingSeal.mode !== "none";
         const savedSeal: SealState = { ...nativeOutSeal };
-        const visionMatch = /(?:^|\r?\n)(\[视觉转写与描述\](?:\r?\n|$))/u.exec(saved.text);
+        const visionMatch = SAVED_VISION_MARKER_RE.exec(saved.text);
         if (!visionMatch || visionMatch.index === undefined) {
           if (!anyNativeOrIncomingSeal && (!saved.text.trim() || sealTextWithState(saved.text, { ...incomingSeal }) === saved.text)) {
             return { sanitized: saved, savedSeal, hasVisionMarker: false, visionWasSealed: false };
@@ -641,8 +643,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
         }
         const prefix = saved.text.slice(0, visionMatch.index);
         const visionBody = saved.text.slice(visionMatch.index + visionMatch[0].length);
-        const nativeHeaderMatch = /^(\[(?:原生提取|本地提取（可能含OCR）)\]\r?\n)/u.exec(prefix);
-        const nativeHeader = nativeHeaderMatch?.[1] ?? "";
+        const nativeHeader = SAVED_NATIVE_HEADER_RE.exec(prefix)?.[0] ?? "";
         const nativeBody = (nativeHeader ? prefix.slice(nativeHeader.length) : prefix).replace(/(?:\r?\n)+$/u, "");
         const cachedNativeOutSeal: SealState = { ...incomingSeal };
         const sealedNativeBody = nativeBody.trim() ? sealTextWithState(nativeBody, cachedNativeOutSeal) : "";
@@ -686,8 +687,9 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
       const preparePage = (rawPage: AnnotatedParsedPage, saved: NewSourceChunk | undefined, sealState: SealState, doclingIncomingSeal?: PdfSealMode) => {
         const hadRawText = Boolean(rawPage.text.trim());
         const doclingSealedBlank = isPdf && rawPage.text === "" && Array.isArray(rawPage.visualKinds) && rawPage.visualKinds.length === 0;
+        const closedInlineAnswer = rawPage.inlineSealedAtEnd === false && !rawPage.sectionSealedAtEnd;
         if (doclingSealedBlank && sealState.mode === "none") {
-          sealState.afterAllSealedPage = true;
+          if (!closedInlineAnswer) sealState.afterAllSealedPage = true;
           sealState.inWorkedExample = false;
         }
         const incomingSeal: SealState = { ...sealState };
@@ -911,10 +913,15 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
             if (previousPage !== undefined) {
               const previous = published.get(previousPage);
               const clean: SealState = { mode: "none", inWorkedExample: false, afterAllSealedPage: false };
-              // Sealed pages publish without an image key. Recheck the saved text against the current rules.
-              const knownPublic = previous?.imageObjectKey?.trim()
-                && sealTextWithState(previous.text, { ...clean }) === previous.text
-                && !sealVisionText(previous.text, { ...clean }, false).hadSealedContent;
+              let knownPublic = false;
+              if (pdfSealState.mode === "none" && previous?.text.trim()) {
+                const checkSeal = { ...clean };
+                const hasVision = SAVED_VISION_MARKER_RE.test(previous.text);
+                // Only Vision needs the image key as evidence that its output was unsealed.
+                knownPublic = sealTextWithState(previous.text, checkSeal) === previous.text && checkSeal.mode === "none"
+                  && (!hasVision || (Boolean(previous.imageObjectKey?.trim())
+                    && !sealVisionText(previous.text, { ...clean }, false).hadSealedContent));
+              }
               Object.assign(pdfSealState, clean, { unknownAfterFailure: !knownPublic });
             }
             const drySealState: SealState = { ...pdfSealState };
@@ -934,8 +941,13 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
               return next.value;
             } : undefined;
             try {
-              for (const { rawPage, doclingIncomingSeal, visualInput } of planned) {
+              for (const [index, { rawPage, doclingIncomingSeal, visualInput }] of planned.entries()) {
                 signal.throwIfAborted();
+                const actualSealMode = pdfSealState.unknownAfterFailure || pdfSealState.mode === "none" ? undefined : pdfSealState.mode;
+                if (index > 0 && doclingIncomingSeal && actualSealMode !== doclingIncomingSeal) {
+                  // Docling may have removed text and visual kinds from the remaining pages.
+                  return { resumeFromPage: rawPage.page, nextSealMode: actualSealMode ?? null };
+                }
                 const preparedPage = preparePage(rawPage, published.get(rawPage.page), pdfSealState, doclingIncomingSeal);
                 let prefetched: { value: ParseSourceVisualPageResult | null } | undefined;
                 if (visualInput && recognizePage) {
@@ -989,9 +1001,30 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
           },
         }).finally(() => stage.close());
         pageCount = result.pageCount;
-        for (const range of result.failedRanges) {
-          const [start, end] = range.split("-").map(Number) as [number, number];
-          for (let page = start; page <= end; page++) {
+        for (const { pageStart, pageEnd, initialSealMode } of result.failedSegments ?? []) {
+          const pages = Array.from({ length: pageEnd - pageStart + 1 }, (_, index) => pageStart + index);
+          const withheld = new Set<number>();
+          if (initialSealMode) {
+            const incomingSeal: SealState = { mode: initialSealMode, inWorkedExample: false, afterAllSealedPage: false };
+            const existing = await deps.chunks.listChunksAtVersion(scope, source.id, source.version, pages);
+            for (const chunk of existing) {
+              if (chunk.page === null) continue;
+              const marker = SAVED_VISION_MARKER_RE.exec(chunk.text);
+              const native = marker ? chunk.text.slice(0, marker.index) : chunk.text;
+              const vision = marker ? chunk.text.slice(marker.index + marker[0].length) : "";
+              const nativeBody = native.replace(SAVED_NATIVE_HEADER_RE, "").trimEnd();
+              // Retaining the row would retain its original text and image as-is.
+              if (chunk.imageObjectKey || sealTextWithState(nativeBody, { ...incomingSeal }) !== nativeBody
+                || (vision && sealVisionText(vision, { ...incomingSeal }, false).text !== vision)) {
+                withheld.add(chunk.page);
+              }
+            }
+          }
+          for (const page of pages) {
+            if (withheld.has(page)) {
+              withheldAfterFailurePages.push(page);
+              continue;
+            }
             preservePages.push(page);
             if (previousCappedPages.has(page)) cappedTextPages.add(page);
           }

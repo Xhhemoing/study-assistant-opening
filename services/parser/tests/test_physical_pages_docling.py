@@ -4,30 +4,41 @@ Run separately in the pinned parser venv. The stdlib-only suite tests boundary
 failures; this suite exercises real ConversionResult/Page/ReadingOrderModel and
 TableItem export, including the upstream merge that corrupts charspans.
 """
+import io
+import json
 import os
+import sys
+import tempfile
 import unittest
+from contextlib import redirect_stdout
+from importlib.util import find_spec
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
-
-from docling.datamodel.base_models import AssembledUnit, Cluster, ConversionStatus, InputFormat, Page, Table, TextElement
-from docling.datamodel.document import ConversionResult, InputDocument
-from docling.models.stages.page_assemble.page_assemble_model import PageAssembleModel, PageAssembleOptions
-from docling.models.stages.reading_order.readingorder_model import ReadingOrderModel, ReadingOrderOptions
-from docling_core.types.doc import BoundingBox, ContentLayer, DocItemLabel, DoclingDocument, ProvenanceItem, Size, TableCell
 
 from opening_parser import __main__ as cli
 from opening_parser import physical_pages
 
 
-SIZE = Size(width=612, height=792)
+WORKER_FIXTURE_MODE = __name__ == "__main__" and sys.argv[1:] == ["--worker-fixtures"]
+USE_DOCLING = not WORKER_FIXTURE_MODE or find_spec("docling") is not None
+if USE_DOCLING:
+    from docling.datamodel.base_models import AssembledUnit, Cluster, ConversionStatus, InputFormat, LayoutPrediction, Page, Table, TextElement
+    from docling.datamodel.document import ConversionResult, InputDocument
+    from docling.models.stages.page_assemble.page_assemble_model import PageAssembleModel, PageAssembleOptions
+    from docling.models.stages.reading_order.readingorder_model import ReadingOrderModel, ReadingOrderOptions
+    from docling_core.types.doc import BoundingBox, ContentLayer, DocItemLabel, DoclingDocument, ProvenanceItem, Size, TableCell
+    from docling_core.types.doc.page import SegmentedPdfPage, TextCell
+
+    SIZE = Size(width=612, height=792)
 
 
-def cluster(identifier, label=DocItemLabel.TEXT):
-    return Cluster(id=identifier, label=label, bbox=BoundingBox(l=72, t=72 + identifier * 40, r=500, b=100 + identifier * 40))
+def cluster(identifier, label=None):
+    return Cluster(id=identifier, label=label or DocItemLabel.TEXT, bbox=BoundingBox(l=72, t=72 + identifier * 40, r=500, b=100 + identifier * 40))
 
 
-def text_element(page_no, text, identifier=1, label=DocItemLabel.TEXT):
+def text_element(page_no, text, identifier=1, label=None):
+    label = label or DocItemLabel.TEXT
     return TextElement(id=identifier, label=label, page_no=page_no, text=text, cluster=cluster(identifier, label))
 
 
@@ -43,7 +54,87 @@ def result_for(*page_elements, start_page=11):
         assembled=AssembledUnit(elements=[element for page in pages for element in page.assembled.elements]), document=doc)
 
 
+def worker_pdf_conversion(texts, picture_pages):
+    if not USE_DOCLING:
+        # Draft CI installs only the PDF renderer wheels. Still run the real CLI
+        # and extraction, using its page-local document interface for the input.
+        return SimpleNamespace(
+            pages=list(texts),
+            texts=[SimpleNamespace(text=text, label="text", prov=[SimpleNamespace(page_no=page)])
+                   for page, text in texts.items() if text],
+            pictures=[SimpleNamespace(label="picture", prov=[SimpleNamespace(page_no=page)])
+                      for page in texts if page in picture_pages],
+        )
+    pages = [[text_element(page, text)] if text else [] for page, text in texts.items()]
+    conversion = result_for(*pages, start_page=next(iter(texts)))
+    for page, elements in zip(conversion.pages, pages):
+        if elements:
+            page.parsed_page = SegmentedPdfPage.model_construct(textline_cells=[
+                TextCell.model_construct(text=elements[0].text, from_ocr=False),
+            ])
+        if page.page_no in picture_pages:
+            page.predictions.layout = LayoutPrediction(clusters=[cluster(2, DocItemLabel.PICTURE)])
+    return conversion
+
+
+def worker_pdf_cli_fixtures():
+    cases = {
+        "previous_answer_key": (23, {10: "Answer Key", 11: "", 12: "Public continuation."}, (), [
+            (1, 10, None), (11, 20, "section_sealed"), (12, 20, None), (21, 23, None),
+        ]),
+        "same_segment_answer_key": (23, {12: "Answer Key", 13: "", 14: "1. Find x.", 15: "5 units."}, (1, 14), [
+            (1, 10, None), (11, 20, None), (14, 20, None), (21, 23, None),
+        ]),
+        "completed_inline": (12, {10: "Model Answer: x = 3.", 11: "2. Calculate y.", 12: "Use the diagram for this exercise."}, (), [
+            (1, 10, None), (11, 12, None), (11, 12, "section_sealed"),
+        ]),
+        "failed_sealed_retry": (11, {10: "", 11: "5 units."}, (), [
+            (1, 10, None), (11, 11, None),
+        ]),
+        "sentence_case_answer": (2, {1: "Exercise 1: Find x.\nModel answer: x = 3.", 2: "Public explanation."}, (2,), [
+            (1, 2, None),
+        ]),
+    }
+    fixtures = {}
+    with tempfile.TemporaryDirectory() as tmp:
+        pdf_path = Path(tmp) / "worker-fixture.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\n")
+        for name, (page_count, texts, picture_pages, ranges) in cases.items():
+            outputs = {}
+            for start, end, seal in ranges:
+                conversion = worker_pdf_conversion({page: texts.get(page, "Public page.")
+                                                    for page in range(start, end + 1)}, picture_pages)
+                argv = ["--input", str(pdf_path), "--mime", "application/pdf", "--max-pages", str(page_count),
+                        "--page-start", str(start), "--page-end", str(end)]
+                if seal:
+                    argv += ["--initial-seal-mode", seal]
+                stdout = io.StringIO()
+                with patch.object(cli, "pdf_page_count", return_value=page_count), \
+                     patch.object(cli, "convert", return_value=conversion), redirect_stdout(stdout):
+                    if cli.main(argv) != 0:
+                        raise RuntimeError(f"could not generate {name} fixture for pages {start}-{end}")
+                outputs[f"{start}-{end}/{seal or ''}"] = json.loads(stdout.getvalue())
+            fixtures[name] = {"pageCount": page_count, "ranges": outputs}
+    return fixtures
+
+
 class PhysicalPagesDoclingTests(unittest.TestCase):
+    def test_worker_pdf_cli_fixtures_keep_raw_scan_and_report_seal_metadata(self):
+        fixtures = worker_pdf_cli_fixtures()
+        previous = fixtures["previous_answer_key"]["ranges"]
+        self.assertEqual(previous["11-20/section_sealed"]["pages"][0]["visualKinds"], ["scan"])
+        self.assertEqual(previous["11-20/section_sealed"]["pages"][1]["text"], "")
+        self.assertEqual(previous["12-20/"]["pages"][0]["text"], "Public continuation.")
+        same = fixtures["same_segment_answer_key"]["ranges"]
+        self.assertEqual(same["11-20/"]["pages"][3]["visualKinds"], [])
+        self.assertEqual(same["14-20/"]["pages"][0]["visualKinds"], ["picture"])
+        closed = fixtures["completed_inline"]["ranges"]["1-10/"]["pages"][-1]
+        self.assertEqual(closed["text"], "")
+        self.assertIs(closed["hadSealedContent"], True)
+        self.assertIs(closed["inlineSealedAtEnd"], False)
+        sentence_case = fixtures["sentence_case_answer"]["ranges"]["1-2/"]["pages"][0]
+        self.assertEqual(sentence_case["text"], "Exercise 1: Find x.")
+
     def test_converter_keeps_text_regions_without_native_cells_for_visual_routing(self):
         with patch.dict(os.environ, {"PARSER_OCR_MODEL_DIR": ""}), patch("docling.document_converter.DocumentConverter") as converter:
             cli.create_converter()
@@ -612,7 +703,8 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
         self.assertEqual(extracted.texts_by_page[11], ["Public explanation."])
 
     def test_singular_model_answer_with_body_uses_an_inline_seal(self):
-        for label in ("Model Answer:", "MODEL ANSWER 1.2 (CONTD.):"):
+        for label in ("Model Answer:", "MODEL ANSWER 1.2 (CONTD.):", "Model answer:", "Official answer：",
+                      "Correct answer:", "Sample answer：", "Reference answer:", "Answer key:"):
             for closed in (True, False):
                 with self.subTest(label=label, closed=closed):
                     answer = label + (" x = 3." if closed else " x =")
@@ -859,4 +951,7 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    if WORKER_FIXTURE_MODE:
+        print(json.dumps(worker_pdf_cli_fixtures()))
+    else:
+        unittest.main()

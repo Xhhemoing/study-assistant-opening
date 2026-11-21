@@ -82,7 +82,9 @@ _QUALIFIED_MULTI_SECTION_RE = re.compile(
 # Single-item inline answers attached to an exercise (always requires explicit ':' / '：' or 【...】).
 _INLINE_SEALED_ALWAYS_RE = re.compile(
     r"^(?:"
-    r"(?:Answer\s+Key|ANSWER\s+KEY|Official\s+Answer|OFFICIAL\s+ANSWER|Model\s+Answer|MODEL\s+ANSWER|Correct\s+Answer|CORRECT\s+ANSWER|Answer|ANSWER|Answers|ANSWERS)(?:\s+\d+(?:\.\d+)*)?(?:\s*\(\s*(?:continued|cont\.?|CONTD?\.?|CONTINUED)\s*\))?\s*[:：]"
+    r"(?:Answer\s+[Kk]ey|ANSWER\s+KEY|(?:Official|Model|Correct|Sample|Reference)\s+[Aa]nswer|"
+    r"(?:OFFICIAL|MODEL|CORRECT|SAMPLE|REFERENCE)\s+ANSWER|Answers?|ANSWERS?)(?:\s+\d+(?:\.\d+)*)?"
+    r"(?:\s*\(\s*(?:continued|cont\.?|CONTD?\.?|CONTINUED)\s*\))?\s*[:：]"
     r"|【\s*(?:参考答案|标准答案|正确答案|答案)\s*】"
     r"|(?:参考答案与解析|参考答案|标准答案|正确答案|课后习题答案|课后练习答案|课后答案|练习答案|习题答案|思考题答案|部分习题答案|答案与解析|答案)\s*(?:\d+(?:[.\-]\d+)*)?\s*(?:（续）|\(续\)|（接上页）|\(接上页\))?\s*[:：]"
     r")"
@@ -211,7 +213,7 @@ _SECTION_SEALED_TERMINATOR_RE = re.compile(r"(?:End\s+of\s+(?:Answers?|Solutions
 _INLINE_SEALED_TERMINATOR_RE = re.compile(r"(?:[□■∎]|End\s+of\s+Answers?|答案完|解答完)\s*[.。]?\s*$", re.IGNORECASE)
 _BARE_ANSWER_LABEL_RE = re.compile(r"^(?:答案|解答)\s*[:：]$")
 _MODEL_ANSWER_LABEL_RE = re.compile(
-    r"^(?:Model\s+Answer|MODEL\s+ANSWER)(?:\s+\d+(?:\.\d+)*)?"
+    r"^(?:Model\s+[Aa]nswer|MODEL\s+ANSWER)(?:\s+\d+(?:\.\d+)*)?"
     r"(?:\s*\(\s*(?:continued|cont\.?|CONTD?\.?|CONTINUED)\s*\))?\s*[:：]"
 )
 _TERMINAL_PUNCTUATION_RE = re.compile(r"[.。!?！？;；)）\]】□■∎]\s*$")
