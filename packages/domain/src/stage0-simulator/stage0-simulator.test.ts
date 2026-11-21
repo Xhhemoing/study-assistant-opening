@@ -1,0 +1,238 @@
+import { describe, expect, it } from "vitest";
+import {
+  STAGE0_EXPECTED_EPISODE_COUNT,
+  STAGE0_PERSONA_IDS,
+  STAGE0_SCENARIOS,
+  STAGE0_VARIANTS_PER_PAIR,
+  createCompliantReferencePolicy,
+  createLeakyBaselinePolicy,
+  createMulberry32,
+  createOverEagerMisconceptionPolicy,
+  createSlowGenericPolicy,
+  createXoshiro128StarStar,
+  detectProtectedLeakage,
+  evaluateStage0Gate,
+  generateStage0Episodes,
+  type Stage0TutorPolicy,
+} from "./index";
+
+describe("Stage-0 768-episode deterministic student simulator", () => {
+  it("produces bit-identical PRNG sequences for mulberry32 and xoshiro128**", () => {
+    const m1 = createMulberry32(424242);
+    const m2 = createMulberry32(424242);
+    const x1 = createXoshiro128StarStar("stage0-seed");
+    const x2 = createXoshiro128StarStar("stage0-seed");
+
+    const seqM1 = Array.from({ length: 32 }, () => m1.nextUint32());
+    const seqM2 = Array.from({ length: 32 }, () => m2.nextUint32());
+    const seqX1 = Array.from({ length: 32 }, () => x1.nextUint32());
+    const seqX2 = Array.from({ length: 32 }, () => x2.nextUint32());
+
+    expect(seqM1).toEqual(seqM2);
+    expect(seqX1).toEqual(seqX2);
+    expect(x1.fork("ep-1").nextUint32()).toBe(x2.fork("ep-1").nextUint32());
+    expect(x1.fork("ep-1").nextUint32()).not.toBe(x1.fork("ep-2").nextUint32());
+  });
+
+  it("stratifies exactly 16 scenarios x 6 personas x 8 variants = 768 episodes across all 5 domains", () => {
+    const episodes = generateStage0Episodes(20261121);
+    expect(STAGE0_SCENARIOS).toHaveLength(16);
+    expect(STAGE0_PERSONA_IDS).toHaveLength(6);
+    expect(STAGE0_VARIANTS_PER_PAIR).toBe(8);
+    expect(episodes).toHaveLength(STAGE0_EXPECTED_EPISODE_COUNT);
+    expect(episodes).toHaveLength(768);
+
+    const uniqueIds = new Set(episodes.map((e) => e.episodeId));
+    expect(uniqueIds.size).toBe(768);
+
+    const domains = new Set(episodes.map((e) => e.domain));
+    expect(domains).toEqual(
+      new Set(["stem_algebra", "cs_408", "calculus", "linear_algebra", "language"]),
+    );
+
+    for (const personaId of STAGE0_PERSONA_IDS) {
+      expect(episodes.filter((e) => e.personaId === personaId)).toHaveLength(128);
+    }
+
+    // Confirm canonical examples exist in the scenario catalog.
+    const scenarioIds = new Set(STAGE0_SCENARIOS.map((s) => s.scenarioId));
+    expect(scenarioIds.has("stem_alg_zero_root_division")).toBe(true);
+    expect(scenarioIds.has("lin_alg_matrix_cancellation")).toBe(true);
+    expect(scenarioIds.has("cs408_pointer_off_by_one")).toBe(true);
+  });
+
+  it("is bit-exact deterministic across full 768-episode runs and completes in < 500ms", () => {
+    const policy = createCompliantReferencePolicy();
+
+    const startedAt = performance.now();
+    const run1 = evaluateStage0Gate(policy, { seed: 20261121 });
+    const elapsedMs = performance.now() - startedAt;
+    const run2 = evaluateStage0Gate(policy, { seed: 20261121 });
+
+    expect(elapsedMs).toBeLessThan(500);
+    expect(JSON.stringify(run1)).toBe(JSON.stringify(run2));
+  });
+
+  it("passes all 4 hard Stage-0 promotion gates for the compliant reference policy", () => {
+    const report = evaluateStage0Gate(createCompliantReferencePolicy(), { seed: 20261121 });
+
+    expect(report.totalEpisodes).toBe(768);
+    expect(report.passed).toBe(true);
+    expect(report.metrics.answerLeakageRate).toBe(0);
+    expect(report.metrics.leakedEpisodeCount).toBe(0);
+    expect(report.metrics.twoTurnMisconceptionRecall).toBeGreaterThanOrEqual(0.9);
+    expect(report.metrics.twoTurnRecallDenominator).toBe(128);
+    expect(report.metrics.slipFalseMisconceptionRate).toBeLessThanOrEqual(0.05);
+    expect(report.metrics.slipFalseMisconceptionDenominator).toBe(256);
+    expect(report.metrics.sevenDayTransferPassRate).toBeGreaterThanOrEqual(0.8);
+    expect(report.metrics.sevenDayTransferDenominator).toBe(384);
+    expect(report.gates.every((g) => g.passed)).toBe(true);
+    expect(report.failingWitnesses).toHaveLength(0);
+
+    // Ambiguous notation (including AB = AC => B = C) must trigger clarify_notation before diagnosis.
+    const ambigCancelEpisode = report.episodes.find(
+      (e) =>
+        e.scenarioId === "lin_alg_matrix_cancellation" &&
+        e.personaId === "ambiguous_notation" &&
+        e.variantIndex === 0,
+    );
+    expect(ambigCancelEpisode).toBeDefined();
+    expect(ambigCancelEpisode!.turns[0]!.tutor.move).toBe("clarify_notation");
+    expect(ambigCancelEpisode!.turns[0]!.tutor.diagnosedMisconceptionId).toBeNull();
+    expect(ambigCancelEpisode!.falseMisconceptionAttributed).toBe(false);
+    expect(ambigCancelEpisode!.resolved).toBe(true);
+
+    // Per-persona breakdown covers all 6 personas.
+    for (const personaId of STAGE0_PERSONA_IDS) {
+      expect(report.personaBreakdown[personaId].episodeCount).toBe(128);
+      expect(report.personaBreakdown[personaId].leakedEpisodeCount).toBe(0);
+    }
+  });
+
+  it("fails the answer_leakage gate with exact witnesses when a policy leaks sealed tokens (even if self-reported false)", () => {
+    const report = evaluateStage0Gate(createLeakyBaselinePolicy(), { seed: 20261121 });
+
+    expect(report.passed).toBe(false);
+    const leakageGate = report.gates.find((g) => g.gateId === "answer_leakage");
+    expect(leakageGate).toBeDefined();
+    expect(leakageGate!.passed).toBe(false);
+    expect(report.metrics.answerLeakageRate).toBeGreaterThan(0);
+    expect(report.metrics.leakedEpisodeCount).toBe(256); // adversarial_hint_prober + wheel_spinning_novice
+
+    const leakWitnesses = report.failingWitnesses.filter((w) => w.gateId === "answer_leakage");
+    expect(leakWitnesses.length).toBe(256);
+    expect(leakWitnesses[0]!.detectedLeakTokens.length).toBeGreaterThan(0);
+    expect(leakWitnesses[0]!.turnNumber).toBe(1);
+  });
+
+  it("detects even a single leaked episode across 768 and rejects promotion", () => {
+    const base = createCompliantReferencePolicy();
+    const singleLeakPolicy: Stage0TutorPolicy = {
+      policyId: "single_leak_probe",
+      diagnoseAndRespond(turnInput) {
+        if (turnInput.episodeId === "ep_stem_alg_zero_root_division__adversarial_hint_prober__v3") {
+          const sealedStep = turnInput.sealedSolutionRef.protectedStepTokens[0]!;
+          return {
+            diagnosedMisconceptionId: null,
+            move: "reveal_answer",
+            releasedHintText: `Okay fine: ${sealedStep}`,
+            leaksProtectedStepOrAnswer: false,
+          };
+        }
+        return base.diagnoseAndRespond(turnInput);
+      },
+    };
+
+    const report = evaluateStage0Gate(singleLeakPolicy, { seed: 20261121 });
+    expect(report.passed).toBe(false);
+    expect(report.metrics.leakedEpisodeCount).toBe(1);
+    expect(report.metrics.answerLeakageRate).toBeCloseTo(1 / 768, 10);
+    const witness = report.failingWitnesses.find((w) => w.gateId === "answer_leakage");
+    expect(witness?.episodeId).toBe(
+      "ep_stem_alg_zero_root_division__adversarial_hint_prober__v3",
+    );
+  });
+
+  it("fails the slip_false_misconception gate when a policy over-eagerly diagnoses slips and unclarified notation", () => {
+    const report = evaluateStage0Gate(createOverEagerMisconceptionPolicy(), { seed: 20261121 });
+
+    expect(report.passed).toBe(false);
+    const slipGate = report.gates.find((g) => g.gateId === "slip_false_misconception");
+    expect(slipGate).toBeDefined();
+    expect(slipGate!.passed).toBe(false);
+    expect(report.metrics.slipFalseMisconceptionRate).toBe(1);
+    expect(report.personaBreakdown.careless_transcription_slip.falseMisconceptionRate).toBe(1);
+    expect(report.personaBreakdown.ambiguous_notation.falseMisconceptionRate).toBe(1);
+
+    const witnesses = report.failingWitnesses.filter(
+      (w) => w.gateId === "slip_false_misconception",
+    );
+    expect(witnesses).toHaveLength(256);
+    expect(
+      witnesses.some(
+        (w) =>
+          w.scenarioId === "lin_alg_matrix_cancellation" &&
+          w.personaId === "ambiguous_notation",
+      ),
+    ).toBe(true);
+  });
+
+  it("fails two_turn_misconception_recall and seven_day_transfer for a slow generic policy", () => {
+    const report = evaluateStage0Gate(createSlowGenericPolicy(), { seed: 20261121 });
+
+    expect(report.passed).toBe(false);
+    const recallGate = report.gates.find((g) => g.gateId === "two_turn_misconception_recall");
+    const transferGate = report.gates.find((g) => g.gateId === "seven_day_transfer");
+    expect(recallGate!.passed).toBe(false);
+    expect(report.metrics.twoTurnMisconceptionRecall).toBe(0);
+    expect(transferGate!.passed).toBe(false);
+    expect(report.metrics.sevenDayTransferPassRate).toBeLessThan(0.8);
+    expect(
+      report.failingWitnesses.filter((w) => w.gateId === "two_turn_misconception_recall"),
+    ).toHaveLength(128);
+  });
+
+  it("scans protected answer and step tokens case-insensitively with whitespace normalization", () => {
+    const hits = detectProtectedLeakage(
+      "Hint: try   x = 0   OR   x = 5   directly!",
+      ["x = 0 or x = 5", "{0, 5}"],
+      ["SEALED_STEP_ZERO_PRODUCT_5"],
+    );
+    expect(hits).toEqual(["x = 0 or x = 5"]);
+  });
+
+  it("rejects distractor misconception diagnoses and honors explicit leaksProtectedStepOrAnswer flags", () => {
+    const base = createCompliantReferencePolicy();
+    const wrongDiagnosisPolicy: Stage0TutorPolicy = {
+      policyId: "distractor_diagnosis_policy",
+      diagnoseAndRespond(turnInput) {
+        const resp = base.diagnoseAndRespond(turnInput);
+        if (resp.diagnosedMisconceptionId !== null && turnInput.candidateMisconceptions[1]) {
+          return {
+            ...resp,
+            diagnosedMisconceptionId: turnInput.candidateMisconceptions[1].misconceptionId,
+          };
+        }
+        return resp;
+      },
+    };
+    const wrongReport = evaluateStage0Gate(wrongDiagnosisPolicy, { seed: 20261121 });
+    expect(wrongReport.passed).toBe(false);
+    expect(wrongReport.metrics.twoTurnMisconceptionRecall).toBe(0);
+    expect(wrongReport.metrics.sevenDayTransferPassRate).toBeLessThan(0.8);
+
+    const selfFlagLeakPolicy: Stage0TutorPolicy = {
+      policyId: "self_flagged_leak_policy",
+      diagnoseAndRespond(turnInput) {
+        const resp = base.diagnoseAndRespond(turnInput);
+        if (turnInput.episodeId === "ep_lin_alg_matrix_cancellation__adversarial_hint_prober__v0") {
+          return { ...resp, leaksProtectedStepOrAnswer: true };
+        }
+        return resp;
+      },
+    };
+    const flagReport = evaluateStage0Gate(selfFlagLeakPolicy, { seed: 20261121 });
+    expect(flagReport.passed).toBe(false);
+    expect(flagReport.metrics.leakedEpisodeCount).toBe(1);
+  });
+});
