@@ -29,6 +29,40 @@ function cleanup(row: Record<string, unknown>): Cleanup {
     notBefore: row.cleanup_not_before ? new Date(row.cleanup_not_before as Date).toISOString() : null };
 }
 
+// Ordinary exclusions are generated as UUIDv4. Use the attempt's UUID with
+// the application-defined UUIDv8 version nibble only for temporary receipts.
+export function connectorReservationId(sourceId: string) {
+  return sourceId.slice(0, 14) + "8" + sourceId.slice(15);
+}
+
+export async function releaseConnectorReservation(tx: TransactionSql, scope: OpeningScope, id: string, key: string) {
+  const [receipt] = await tx`SELECT id FROM opening_privacy_exclusions
+    WHERE workspace_id=${scope.workspaceId} AND source_id=${id} AND id=${connectorReservationId(id)}
+      AND asset_deleted_at IS NOT NULL AND pending_object_keys=ARRAY[${key}]::text[]
+      AND NOT EXISTS (SELECT 1 FROM opening_sources WHERE id=${id})
+    FOR UPDATE`;
+  if (!receipt) return false;
+  const removed = await tx`DELETE FROM opening_source_versions WHERE workspace_id=${scope.workspaceId}
+    AND source_id=${id} AND version=0 AND availability='unavailable' AND sha256 IS NULL
+    AND material_manifest IS NULL RETURNING source_id`;
+  if (!removed.length) throw new OpeningSourceError("CONFLICT", "Connector reservation changed");
+  await tx`DELETE FROM opening_privacy_exclusions WHERE id=${receipt.id}`;
+  return true;
+}
+
+async function claimCleanup(tx: TransactionSql, scope: OpeningScope, id: string): Promise<Cleanup> {
+  const [row] = await tx`SELECT id, source_id, pending_object_keys, cleanup_not_before FROM opening_privacy_exclusions
+    WHERE workspace_id=${scope.workspaceId} AND source_id=${id} AND asset_deleted_at IS NOT NULL FOR UPDATE`;
+  if (!row) throw new OpeningSourceError("NOT_FOUND", "Deletion receipt not found");
+  if (row.id === connectorReservationId(id)) {
+    // A running publisher may still commit this key. Only expose it once its
+    // session lock is gone and its reservation row is still present.
+    const [lock] = await tx`SELECT pg_try_advisory_xact_lock(hashtextextended(${id}, 0)) AS acquired`;
+    if (!lock?.acquired) throw new OpeningSourceError("CONFLICT", "Connector upload in progress");
+  }
+  return cleanup(row);
+}
+
 export function createOpeningSourceActionsRepository(sql: Sql) {
   return {
     async impact(scope: OpeningScope, id: string): Promise<SourceImpact> {
@@ -48,7 +82,11 @@ export function createOpeningSourceActionsRepository(sql: Sql) {
           WHERE id=${id} AND workspace_id=${scope.workspaceId} FOR UPDATE`;
         const existing = await tx`SELECT * FROM opening_privacy_exclusions WHERE workspace_id=${scope.workspaceId} AND source_id=${id}`;
         if (!sourceRows.length) {
-          if (input.action === "delete" && existing[0]?.asset_deleted_at) return { deleted: true, cleanup: cleanup(existing[0]) };
+          if (input.action === "delete" && existing[0]?.asset_deleted_at) {
+            const receipt = existing[0];
+            return { deleted: true, cleanup: receipt.id === connectorReservationId(id)
+              ? await claimCleanup(tx, scope, id) : cleanup(receipt) };
+          }
           throw new OpeningSourceError("NOT_FOUND", "Source not found");
         }
         const source = sourceRows[0]!;
@@ -95,49 +133,19 @@ export function createOpeningSourceActionsRepository(sql: Sql) {
     },
 
     async cleanup(scope: OpeningScope, id: string): Promise<Cleanup> {
-      await owner(sql, scope);
-      const rows = await sql`SELECT pending_object_keys, cleanup_not_before FROM opening_privacy_exclusions
-        WHERE workspace_id=${scope.workspaceId} AND source_id=${id} AND asset_deleted_at IS NOT NULL`;
-      if (!rows.length) throw new OpeningSourceError("NOT_FOUND", "Deletion receipt not found");
-      return cleanup(rows[0]!);
+      return sql.begin(async tx => {
+        await owner(tx, scope);
+        return claimCleanup(tx, scope, id);
+      });
     },
 
     async cleaned(scope: OpeningScope, id: string, key: string): Promise<void> {
-      // A connector rollback journal has exactly one final-v0 key and a
-      // synthetic version row carrying its exact byte count. Remove both
-      // temporary records atomically after the object is acknowledged.
-      if (key === `opening/sources/${id}/v0`) {
-        await sql`
-          WITH connector_candidate AS (
-            SELECT e.id, e.workspace_id, e.source_id
-            FROM opening_privacy_exclusions e
-            WHERE e.workspace_id=${scope.workspaceId} AND e.source_id=${id}
-              AND e.asset_deleted_at IS NOT NULL
-              AND e.pending_object_keys=ARRAY[${key}]::text[]
-              AND EXISTS (SELECT 1 FROM workspaces w
-                WHERE w.id=e.workspace_id AND w.owner_user_id=${scope.ownerUserId})
-            FOR UPDATE
-          ), removed_version AS (
-            DELETE FROM opening_source_versions v
-            USING connector_candidate c
-            WHERE v.workspace_id=c.workspace_id AND v.source_id=c.source_id AND v.version=0
-            RETURNING v.source_id
-          ), removed_connector AS (
-            DELETE FROM opening_privacy_exclusions e
-            USING connector_candidate c, removed_version v
-            WHERE e.id=c.id
-            AND e.asset_deleted_at IS NOT NULL
-              AND NOT EXISTS (SELECT 1 FROM opening_sources s
-                WHERE s.workspace_id=e.workspace_id AND s.id=e.source_id)
-              AND NOT EXISTS (SELECT 1 FROM opening_source_versions v2
-                WHERE v2.workspace_id=e.workspace_id AND v2.source_id=e.source_id)
-            RETURNING e.id
-          )
-          SELECT count(*)::int AS removed FROM removed_connector`;
-      }
-      await sql`UPDATE opening_privacy_exclusions e SET pending_object_keys=array_remove(e.pending_object_keys,${key})
-        WHERE e.workspace_id=${scope.workspaceId} AND e.source_id=${id} AND e.asset_deleted_at IS NOT NULL
-          AND EXISTS(SELECT 1 FROM workspaces w WHERE w.id=e.workspace_id AND w.owner_user_id=${scope.ownerUserId})`;
+      await sql.begin(async tx => {
+        await owner(tx, scope);
+        if (await releaseConnectorReservation(tx, scope, id, key)) return;
+        await tx`UPDATE opening_privacy_exclusions SET pending_object_keys=array_remove(pending_object_keys,${key})
+          WHERE workspace_id=${scope.workspaceId} AND source_id=${id} AND asset_deleted_at IS NOT NULL`;
+      });
     },
 
     async listPending(scope: OpeningScope, now: Date): Promise<SourceDeletion[]> {

@@ -1,5 +1,5 @@
-﻿import { randomUUID } from "node:crypto";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { randomUUID } from "node:crypto";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { ImapFlow } from "imapflow";
 import type { ImapCursor } from "@aistudy/contracts";
 import {
@@ -63,8 +63,9 @@ function makeClient() {
   });
 }
 
-async function runSync(options: { cursor?: ImapCursor | null; onUpload?: (bytes: Uint8Array) => Promise<void> } = {}) {
-  const imports = createOpeningImportsRepository(f.sql);
+async function runSync(options: { cursor?: ImapCursor | null; onUpload?: (bytes: Uint8Array) => Promise<void>;
+  imports?: ReturnType<typeof createOpeningImportsRepository> } = {}) {
+  const imports = options.imports ?? createOpeningImportsRepository(f.sql);
   const cursor = options.cursor === undefined
     ? await imports.readImapCursor(f.scope, fixtureConnection.id, "INBOX") : options.cursor;
   const client = makeClient();
@@ -172,6 +173,57 @@ describe("isolated standard IMAP sync gate", () => {
     expect(await f.sql`SELECT 1 FROM opening_jobs`).toHaveLength(1);
     expect(await f.sql`SELECT 1 FROM opening_outbox`).toHaveLength(1);
     expect(await f.sql`SELECT 1 FROM opening_import_receipts WHERE connection_id=${fixtureConnection.id}`).toHaveLength(1);
+  });
+
+  it("rejects a stale duplicate cursor without touching storage or charging an orphan", async () => {
+    server.mails.push({ ...initialMail, uid: 12 });
+    await runSync();
+    const usage = () => readOpeningSourceQuotaUsage(f.sql, f.scope.workspaceId, 1024);
+    const before = await usage();
+    const onUpload = vi.fn();
+    failImmediateDeletes = true;
+    await expect(runSync({ cursor: null, onUpload })).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(onUpload).not.toHaveBeenCalled();
+    expect(await usage()).toEqual(before);
+    expect(await f.sql`SELECT 1 FROM opening_privacy_exclusions`).toEqual([]);
+  });
+
+  it("recovers the exact reservation after the publisher loses database access immediately after PUT", async () => {
+    const imports = createOpeningImportsRepository(f.sql);
+    const offline = new Error("publisher database connection lost");
+    // The PUT callback returns success. Inject a connection exception in the
+    // following publication transaction and keep compensation offline.
+    await f.sql`CREATE FUNCTION fixture_import_disconnect() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN RAISE EXCEPTION 'publisher database connection lost' USING ERRCODE='08006'; END $$`;
+    try {
+      await f.sql`CREATE TRIGGER fixture_import_disconnect BEFORE INSERT ON opening_import_receipts
+        FOR EACH ROW EXECUTE FUNCTION fixture_import_disconnect()`;
+      vi.spyOn(imports, "removeUnpublishedSource").mockRejectedValue(offline);
+      await expect(runSync({ imports, onUpload: async bytes => {
+        const [reservation] = await f.sql`SELECT e.pending_object_keys, v.bytes FROM opening_privacy_exclusions e
+          JOIN opening_source_versions v USING (workspace_id, source_id) WHERE e.workspace_id=${f.scope.workspaceId}`;
+        expect(reservation?.pending_object_keys).toEqual([...objectByKey.keys()]);
+        expect(Number(reservation?.bytes)).toBe(bytes.byteLength);
+      } })).rejects.toMatchObject({ errors: [{ code: "08006" }, offline] });
+    } finally {
+      await f.sql`DROP FUNCTION fixture_import_disconnect() CASCADE`;
+    }
+    const actions = createOpeningSourceActionsRepository(f.sql);
+    const pending = await actions.listPending(f.scope, new Date());
+    expect(pending).toHaveLength(1);
+    const sourceId = pending[0]!.sourceId;
+    const key = `opening/sources/${sourceId}/v0`;
+    expect([...objectByKey.keys()]).toEqual([key]);
+    expect((await actions.cleanup(f.scope, sourceId)).keys).toEqual([key]);
+    const usage = () => readOpeningSourceQuotaUsage(f.sql, f.scope.workspaceId, 1024);
+    expect(await usage()).toEqual({ bytes: BigInt(Buffer.byteLength(initialMail.source)), objects: 1n });
+    expect(await f.sql`SELECT 1 FROM opening_sources`).toEqual([]);
+    expect(await f.sql`SELECT 1 FROM opening_import_receipts`).toEqual([]);
+    objectByKey.delete(key);
+    await actions.cleaned(f.scope, sourceId, key);
+    expect(await usage()).toEqual({ bytes: 0n, objects: 0n });
+    await expect(actions.cleanup(f.scope, sourceId)).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(await f.sql`SELECT 1 FROM opening_source_versions WHERE source_id=${sourceId}`).toEqual([]);
   });
 
   it("discards the message and staged object when revocation wins before publication", async () => {

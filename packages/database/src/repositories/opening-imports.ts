@@ -1,9 +1,11 @@
 import { randomUUID } from "node:crypto";
-import type { Sql, TransactionSql } from "postgres";
+import postgres, { type Sql, type TransactionSql } from "postgres";
 import type { ImapCursor, ImportIdentity, UploadInput } from "@aistudy/contracts";
 import { OpeningConnectionError } from "./opening-connections";
 import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { createOpeningPrivacyRepository } from "./opening-privacy";
+import { connectorReservationId, releaseConnectorReservation } from "./opening-source-actions";
+import { reserveOpeningSourceQuota } from "./opening-source-quota";
 import { createOpeningSourceRepository, type OpeningScope, type OpeningSourceQuota } from "./opening-sources";
 
 export type OpeningImportCursor = { expected: ImapCursor | null; next: ImapCursor };
@@ -23,11 +25,39 @@ function identityKey(identity: ImportIdentity): string {
   return JSON.stringify([identity.connectionId, identity.container, identity.generation, identity.remoteId]);
 }
 
-async function lockImportObject(tx: TransactionSql, scope: OpeningScope, identity: ImportIdentity) {
-  // Serialize storage operations for redeliveries across web and worker processes.
-  // Take this before workspace locks so revocation may still win during staging.
-  const key = JSON.stringify(["opening-import-object", scope.workspaceId, identityKey(identity)]);
-  await tx`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))`;
+function importLock(scope: OpeningScope, identity: ImportIdentity) {
+  return JSON.stringify(["opening-import-object", scope.workspaceId, identityKey(identity)]);
+}
+
+// Each active import needs one physical session for its locks across PUT. A
+// dedicated single-connection client can be closed even if that session dies
+// during storage I/O. Limit these clients across repository instances per pool.
+const activeImports = new WeakMap<Sql, Set<Promise<void>>>();
+// postgres.js also accepts its own parsed options (as used by its subscriber).
+// Its public overloads only describe URL and unparsed options.
+const openSession = postgres as typeof postgres & ((options: postgres.ParsedOptions) => Sql);
+
+async function withImportSession<T>(pool: Sql, run: (session: Sql, lost: () => boolean) => Promise<T>) {
+  const active = activeImports.get(pool) ?? new Set<Promise<void>>();
+  activeImports.set(pool, active);
+  while (active.size >= pool.options.max) await Promise.race(active);
+  let release!: () => void;
+  const slot = new Promise<void>(resolve => { release = resolve; });
+  active.add(slot);
+  try {
+    let lost = false;
+    const session = openSession({ ...pool.options, max: 1, idle_timeout: 0, max_lifetime: null,
+      onclose: () => { lost = true; } });
+    try {
+      return await run(session, () => lost);
+    } finally {
+      // Closing this physical connection releases only this attempt's locks.
+      await session.end({ timeout: 0 });
+    }
+  } finally {
+    active.delete(slot);
+    release();
+  }
 }
 
 async function lockImportConnection(tx: TransactionSql, scope: OpeningScope, input: ConnectionVersion) {
@@ -125,30 +155,57 @@ export function createOpeningImportsRepository(sql: Sql) {
       input: OpeningImportCommit & { source: UploadInput; key: string; quota: OpeningSourceQuota },
       stage: () => Promise<void>,
     ): Promise<OpeningImportReceiptView> {
-      return sql.begin(async tx => {
-        await lockImportObject(tx, scope, input.identity);
-        const existing = await readReceipt(tx, scope, input.identity);
-        if (!existing) {
-          const [reserved] = await tx`SELECT 1 FROM opening_sources WHERE id=${input.sourceId}
-            UNION ALL SELECT 1 FROM opening_privacy_exclusions
-            WHERE workspace_id=${scope.workspaceId} AND source_id=${input.sourceId} AND asset_deleted_at IS NOT NULL`;
-          if (reserved) throw new OpeningConnectionError("CONFLICT", "connector source object is already reserved");
-          await stage();
+      const deliveryLock = importLock(scope, input.identity);
+      return withImportSession(sql, async (session, lost) => {
+        // One session fences duplicate deliveries and protects its physical key
+        // across PUT, while revocation remains free to commit on another session.
+        await session`SELECT pg_advisory_lock(hashtextextended(${deliveryLock}, 0))`;
+        await session`SELECT pg_advisory_lock(hashtextextended(${input.sourceId}, 0))`;
+        const duplicate = await session.begin(async tx => {
+          if (await readReceipt(tx, scope, input.identity)) {
+            await lockWorkspaceLearningHistory(tx, scope);
+            return commitImport(tx, scope, input, async () => {
+              throw new OpeningConnectionError("CONFLICT", "import receipt changed; retry the delivery");
+            });
+          }
+          await lockImportConnection(tx, scope, { connectionId: input.identity.connectionId, connectionVersion: input.connectionVersion });
+          await reserveOpeningSourceQuota(tx, scope, input.source.bytes, input.quota);
+          const [used] = await tx`SELECT 1 FROM opening_sources WHERE id=${input.sourceId}
+            UNION ALL SELECT 1 FROM opening_privacy_exclusions WHERE source_id=${input.sourceId}
+            UNION ALL SELECT 1 FROM opening_source_versions WHERE source_id=${input.sourceId} LIMIT 1`;
+          if (used) throw new OpeningConnectionError("CONFLICT", "connector source object is already reserved");
+          await tx`INSERT INTO opening_source_versions (source_id, version, workspace_id, bytes, availability)
+            VALUES (${input.sourceId}, 0, ${scope.workspaceId}, ${input.source.bytes}, 'unavailable')`;
+          await tx`INSERT INTO opening_privacy_exclusions
+            (id, workspace_id, source_id, asset_deleted_at, pending_object_keys)
+            VALUES (${connectorReservationId(input.sourceId)}, ${scope.workspaceId}, ${input.sourceId}, now(), ARRAY[${input.key}]::text[])`;
+          return null;
+        });
+        if (duplicate) return duplicate;
+        if (lost()) {
+          // No PUT was attempted. A healthy pool can cancel the reservation
+          // without contacting storage after the dedicated session was lost.
+          await sql.begin(tx => releaseConnectorReservation(tx, scope, input.sourceId, input.key));
+          throw new OpeningConnectionError("CONFLICT", "connector staging session disconnected");
         }
-        await lockWorkspaceLearningHistory(tx, scope);
-        return commitImport(tx, scope, input, async () => {
-          if (existing) throw new OpeningConnectionError("CONFLICT", "import receipt changed; retry the delivery");
-          // Reuse the source writer's quota, parse kind, outbox and history logic
-          // with savepoints on this same SQL transaction.
-          const sourceSql = { begin: (run: (db: TransactionSql) => Promise<unknown>) => tx.savepoint(run) } as Sql;
-          const sources = createOpeningSourceRepository(sourceSql, { quota: input.quota });
-          const source = await sources.create(scope, { ...input.source, uploadId: input.sourceId });
-          const privacyEpoch = await createOpeningPrivacyRepository(tx).getWorkspaceEpoch(scope);
-          await sources.completeWithParseJob(scope, source.id, {
-            key: input.key,
-            payload: { sourceId: source.id, sourceVersion: source.version, connectionId: input.identity.connectionId },
-            privacyEpoch,
-            actual: input.source,
+        await stage();
+        if (lost()) throw new OpeningConnectionError("CONFLICT", "connector staging session disconnected");
+        return session.begin(async tx => {
+          if (lost()) throw new OpeningConnectionError("CONFLICT", "connector staging session disconnected");
+          await lockWorkspaceLearningHistory(tx, scope);
+          return commitImport(tx, scope, input, async () => {
+            if (!await releaseConnectorReservation(tx, scope, input.sourceId, input.key)) {
+              throw new OpeningConnectionError("CONFLICT", "connector staging reservation changed");
+            }
+            // A failure in either source operation rolls back the entire publication.
+            const sourceSql = { begin: (run: (db: TransactionSql) => Promise<unknown>) => tx.savepoint(run) } as Sql;
+            const sources = createOpeningSourceRepository(sourceSql, { quota: input.quota });
+            const source = await sources.create(scope, { ...input.source, uploadId: input.sourceId });
+            const privacyEpoch = await createOpeningPrivacyRepository(tx).getWorkspaceEpoch(scope);
+            await sources.completeWithParseJob(scope, source.id, {
+              key: input.key, payload: { sourceId: source.id, sourceVersion: source.version, connectionId: input.identity.connectionId },
+              privacyEpoch, actual: input.source,
+            });
           });
         });
       });
@@ -160,55 +217,16 @@ export function createOpeningImportsRepository(sql: Sql) {
       });
     },
     async removeUnpublishedSource(
-      scope: OpeningScope, identity: ImportIdentity, sourceId: string, key: string, byteSize: number,
+      scope: OpeningScope, identity: ImportIdentity, sourceId: string, key: string, _byteSize: number,
       remove: () => Promise<void>,
     ): Promise<void> {
-      let shouldRemove = false;
       await sql.begin(async tx => {
-        // Wait out an ambiguous COMMIT before deciding whether the object is
-        // still unpublished. A connector attempt gets a fresh source id, so a
-        // later delivery cannot overwrite this object while it is being
-        // cleaned up.
-        await lockImportObject(tx, scope, identity);
-        const [owner] = await tx`SELECT id FROM workspaces
-          WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+        // An uncertain COMMIT must settle before deleting a possibly published key.
+        await tx`SELECT pg_advisory_xact_lock(hashtextextended(${importLock(scope, identity)}, 0))`;
+        const [owner] = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
         if (!owner) throw new OpeningConnectionError("NOT_FOUND", "workspace not found");
-        const [source] = await tx`SELECT id FROM opening_sources WHERE id=${sourceId}`;
-        if (source) return;
-        shouldRemove = true;
+        if (await releaseConnectorReservation(tx, scope, sourceId, key)) await remove();
       });
-      if (!shouldRemove) return;
-      try {
-        await remove();
-      } catch (error) {
-        // Only a failed external delete needs a durable orphan record. It is
-        // a cleanup receipt, not a source privacy tombstone, and is removed
-        // once its object key is acknowledged by the cleanup path.
-        await sql.begin(async tx => {
-          await lockImportObject(tx, scope, identity);
-          const [owner] = await tx`SELECT id FROM workspaces
-            WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
-          if (!owner) throw new OpeningConnectionError("NOT_FOUND", "workspace not found");
-          const [source] = await tx`SELECT id FROM opening_sources WHERE id=${sourceId}`;
-          if (source) return;
-          await tx`INSERT INTO opening_source_versions
-              (source_id, version, workspace_id, bytes, availability)
-            VALUES (${sourceId}, 0, ${scope.workspaceId}, ${byteSize}, 'unavailable')
-            ON CONFLICT (source_id, version) DO UPDATE SET
-              workspace_id=EXCLUDED.workspace_id, bytes=EXCLUDED.bytes,
-              availability='unavailable'`;
-          await tx`INSERT INTO opening_privacy_exclusions
-              (id, workspace_id, source_id, deleted_at, asset_deleted_at,
-               pending_object_keys, cleanup_not_before)
-            VALUES (${randomUUID()}, ${scope.workspaceId}, ${sourceId}, now(), now(),
-              ARRAY[${key}]::text[], now())
-            ON CONFLICT (workspace_id, source_id) DO UPDATE SET
-              asset_deleted_at = COALESCE(opening_privacy_exclusions.asset_deleted_at, now()),
-              pending_object_keys = ARRAY[${key}]::text[],
-              cleanup_not_before = now()`;
-        });
-        throw error;
-      }
     },
   };
 }

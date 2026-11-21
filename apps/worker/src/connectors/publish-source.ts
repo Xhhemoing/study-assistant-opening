@@ -52,10 +52,12 @@ export async function publishConnectorSource(
       await storage.upload({ key, bytes: input.bytes, mime: source.mime });
     });
   } catch (error) {
-    try {
-      await cleanup();
-    } catch (cleanupError) {
-      throw new AggregateError([error, cleanupError], "Connector publication failed and object cleanup could not be confirmed");
+    if (staged) {
+      try {
+        await cleanup();
+      } catch (cleanupError) {
+        throw new AggregateError([error, cleanupError], "Connector publication failed and object cleanup could not be confirmed");
+      }
     }
     throw error;
   }
