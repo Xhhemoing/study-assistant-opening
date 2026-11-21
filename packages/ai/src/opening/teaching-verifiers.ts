@@ -743,7 +743,7 @@ function cleanEquationClause(raw: string): string {
     .replace(/\\(?:notag|nonumber|hline|toprule|midrule|bottomrule|displaystyle|textstyle|scriptstyle|scriptscriptstyle)(?![A-Za-z])/g, " ")
     .replace(/\\left\s*\(/g, "(")
     .replace(/\\right\s*\)/g, ")")
-    .replace(/\\(?:quad|qquad|enspace|thinspace)(?![A-Za-z])/g, " ")
+    .replace(/\\(?:enspace|thinspace)(?![A-Za-z])/g, " ")
     .replace(/\\[,;:! ]/g, " ")
     .replace(/\s+/g, " ")
     .trim()
@@ -952,15 +952,19 @@ function extractFormulaSnippets(formula: string): string[] {
   const equations: string[] = [];
   const hasNonEquationContent = extractFromLatexFragment(cleanFormula, equations);
   if (equations.length === 0 || hasNonEquationContent) equations.push(cleanFormula);
-  return [...new Set(equations)];
+  return [...new Set(equations.flatMap(equation => splitMultiClauseFormula(equation, "layout")))];
 }
+
+const COMPARISON_MACROS = new Set([
+  "le", "leq", "leqslant", "ge", "geq", "geqslant", "neq", "ne",
+  "approx", "sim", "simeq", "cong", "equiv", "propto",
+]);
 
 const CLAUSE_SPLIT_MACROS = new Set([
   "implies", "impliedby", "iff", "Rightarrow", "Leftarrow", "Leftrightarrow",
   "Longrightarrow", "Longleftrightarrow", "Longleftarrow",
   "to", "rightarrow", "leftarrow", "leftrightarrow", "mapsto", "therefore", "because",
-  "le", "leq", "leqslant", "ge", "geq", "geqslant", "neq", "ne",
-  "approx", "sim", "simeq", "cong", "equiv", "propto",
+  ...COMPARISON_MACROS,
 ]);
 
 const TEXT_MACRO_NAMES = new Set(["text", "mtext", "textbf", "textit", "textrm", "textsf", "texttt", "mbox", "hbox"]);
@@ -1184,13 +1188,53 @@ function isDigitInternalComma(text: string, index: number, clauseStart: number):
   return leftWithDotCorrect || rightWithDotCorrect;
 }
 
-function splitMultiClauseFormula(text: string): string[] {
+function splitMultiClauseFormula(text: string, mode: "layout" | "logical"): string[] {
+  const wideSpacing = /\\(?:qquad|quad)(?![A-Za-z])/g;
+  if (mode === "layout" && !wideSpacing.test(text)) return [text];
   const clauses: string[] = [];
+  let relationEnd: number | undefined;
+  const pendingSpaces: { start: number; end: number }[] = [];
   let start = 0;
+  let logicalStart = 0;
   let braceDepth = 0;
   let parenDepth = 0;
   let bracketDepth = 0;
   let envDepth = 0;
+
+  function recordBoundary(at: number, end: number, kind: "space" | "equality" | "comparison" | "connective") {
+    const splitsLogicalClause = kind === "connective" || kind === "comparison";
+    if (splitsLogicalClause) logicalStart = end;
+    if (mode === "logical") {
+      if (splitsLogicalClause) {
+        clauses.push(text.slice(start, at));
+        start = end;
+      }
+    } else if (kind === "connective") {
+      relationEnd = undefined;
+      pendingSpaces.length = 0;
+    } else if (kind === "space") {
+      // Indentation within an operand is ordinary whitespace. A new equation
+      // needs a completed RHS before the space and its own LHS after it.
+      if (relationEnd !== undefined) {
+        const rhs = text.slice(relationEnd, at).trim();
+        if (rhs && !endsWithOperatorOrEquals(rhs)) pendingSpaces.push({ start: at, end });
+      }
+    } else {
+      let lhsEnd = at;
+      for (let i = pendingSpaces.length - 1; i >= 0; i--) {
+        const space = pendingSpaces[i]!;
+        if (text.slice(space.end, lhsEnd).trim()) {
+          clauses.push(text.slice(start, space.start));
+          start = space.end;
+          if (kind === "equality") logicalStart = start;
+          break;
+        }
+        lhsEnd = space.start;
+      }
+      relationEnd = end;
+      pendingSpaces.length = 0;
+    }
+  }
 
   for (let i = 0; i < text.length; i++) {
     const ch = text[i]!;
@@ -1212,9 +1256,9 @@ function splitMultiClauseFormula(text: string): string[] {
         const cmd = cmdMatch[1]!;
         const afterCmd = i + 1 + cmd.length;
         if (braceDepth === 0 && parenDepth === 0 && bracketDepth === 0 && envDepth === 0) {
+          if (cmd === "quad" || cmd === "qquad") recordBoundary(i, afterCmd, "space");
           if (CLAUSE_SPLIT_MACROS.has(cmd)) {
-            clauses.push(text.slice(start, i));
-            start = afterCmd;
+            recordBoundary(i, afterCmd, COMPARISON_MACROS.has(cmd) ? "comparison" : "connective");
             i = afterCmd - 1;
             continue;
           }
@@ -1229,8 +1273,7 @@ function splitMultiClauseFormula(text: string): string[] {
                   ? PROSE_CONNECTIVE_WORD.test(body.trim())
                   : isProseTextMacroBody(body);
                 if (shouldSplit) {
-                  clauses.push(text.slice(start, i));
-                  start = groupEnd;
+                  recordBoundary(i, groupEnd, "connective");
                   i = groupEnd - 1;
                   continue;
                 }
@@ -1256,18 +1299,22 @@ function splitMultiClauseFormula(text: string): string[] {
 
     if (braceDepth !== 0 || parenDepth !== 0 || bracketDepth !== 0 || envDepth !== 0) continue;
 
-    if (ch === "," && isDigitInternalComma(text, i, start)) continue;
+    if (ch === "=") {
+      recordBoundary(i, i + 1, "equality");
+      continue;
+    }
+
+    if (ch === "," && isDigitInternalComma(text, i, logicalStart)) continue;
 
     if (/[,;，；。<>≠≤≥≈≡⇒⇐⇔→←↔↦∴∵]/.test(ch)) {
-      clauses.push(text.slice(start, i));
+      const at = i;
       if ((ch === "<" || ch === ">") && text[i + 1] === "=") i++;
-      start = i + 1;
+      recordBoundary(at, i + 1, /[<>≠≤≥≈≡]/.test(ch) ? "comparison" : "connective");
       continue;
     }
 
     if (ch === "!" && text[i + 1] === "=") {
-      clauses.push(text.slice(start, i));
-      start = i + 2;
+      recordBoundary(i, i + 2, "comparison");
       i++;
       continue;
     }
@@ -1278,8 +1325,7 @@ function splitMultiClauseFormula(text: string): string[] {
         const word = cjkMatch[0];
         const nextIndex = i + word.length;
         if (CJK_CLAUSE_CONNECTIVE.test(word)) {
-          clauses.push(text.slice(start, i));
-          start = nextIndex;
+          recordBoundary(i, nextIndex, "connective");
           i = nextIndex - 1;
           continue;
         }
@@ -1287,8 +1333,7 @@ function splitMultiClauseFormula(text: string): string[] {
         if (inlineMatch) {
           const splitAt = i + inlineMatch.index;
           const afterConn = splitAt + inlineMatch[0].length;
-          clauses.push(text.slice(start, splitAt));
-          start = afterConn;
+          recordBoundary(splitAt, afterConn, "connective");
           i = afterConn - 1;
           continue;
         }
@@ -1301,8 +1346,7 @@ function splitMultiClauseFormula(text: string): string[] {
       const wordCheck = matchProseConnectiveWord(text, i);
       if (wordCheck) {
         if (wordCheck.matched) {
-          clauses.push(text.slice(start, i));
-          start = wordCheck.wordEnd;
+          recordBoundary(i, wordCheck.wordEnd, "connective");
         }
         i = wordCheck.wordEnd - 1;
         continue;
@@ -1310,12 +1354,15 @@ function splitMultiClauseFormula(text: string): string[] {
     }
   }
   clauses.push(text.slice(start));
+  if (mode === "layout") {
+    return clauses.map(clause => clause.replace(wideSpacing, " ").replace(/\s+/g, " ").trim()).filter(Boolean);
+  }
   return clauses.map(clause => cleanEquationClause(clause)).filter(Boolean);
 }
 
 function isCleanEqualityMember(segment: string): boolean {
   const trimmed = segment.trim();
-  if (!trimmed || trimmed.includes("=")) return false;
+  if (!trimmed || trimmed.includes("=") || /\d\s+\d/.test(trimmed)) return false;
   if (/[\u4e00-\u9fff\u3400-\u4dbf,;，；。<>≠≤≥≈≡⇒⇐⇔→←↔↦∴∵]/.test(trimmed)) return false;
   if (/\\(?:text|mtext|textbf|textit|textrm|textsf|texttt|mbox|hbox)\b/.test(trimmed)) return false;
   const cmdRe = new RegExp(`\\\\(?:${[...CLAUSE_SPLIT_MACROS].join("|")})\\b`);
@@ -1462,7 +1509,7 @@ async function verifyToolResult(input: VerifyTeachingInput): Promise<LayerResult
       unknown ??= checked.result;
       // Split independent multi-clause segments before probing equality chains so
       // separate equations separated by ',', ';', '\implies', '<', or prose never cross-bridge.
-      const clauses = splitMultiClauseFormula(latex);
+      const clauses = splitMultiClauseFormula(latex, "logical");
       const multiClause = clauses.length > 1 || (clauses.length === 1 && clauses[0] !== latex.trim());
       for (const clause of clauses) {
         if (!clause.includes("=")) continue;

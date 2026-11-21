@@ -341,6 +341,27 @@ describe("teaching-verifiers", () => {
   };
 
   it.each([
+    [String.raw`1 - 1 = 1,5 * 0 \qquad -2 + 6 = 4`, "unknown"],
+    [String.raw`1 + 2 = 1,5 * 2 \qquad (1 + 1) = 2`, "unknown"],
+    [String.raw`1 + 2 = 1,5 * 2 \qquad -1 + 3 = 2`, "unknown"],
+    [String.raw`1 + 2 = 3 \qquad 1 + 1 = 2`, "pass"],
+    [String.raw`1 + 2 = 3 \qquad -1 + 3 \quad = 2`, "pass"],
+    [String.raw`1 + 2 = 1 \quad + 2`, "pass"],
+    [String.raw`1 + 2 = (1 \qquad + 2)`, "pass"],
+    [String.raw`1 + 2 = 300 \quad \text{cm}`, "unknown"],
+    [String.raw`1 + 2 = 1 \quad + 2; 2 + 2 = 4`, "unknown"],
+    [String.raw`1 + 2 = 3 and 1 \quad + 1 = 2`, "unknown"],
+    ["1 + 2 = 3 1 = 2", "unknown"],
+  ])("preserves arithmetic and uncertainty across equation spacing (%s)", async (latex, outcome) => {
+    const report = await verifyTeachingContent({
+      activityId: ACT, publishInput: basePublish(), pack: packWithSupport(), keyClaims: [],
+      blocks: [{ id: BLOCK, role: "teach", type: "formula", content: { latex } }],
+      tools: { checkFormula: realArithmeticCheckFormula },
+    });
+    expect(report.layers.find(layer => layer.layer === "tool_result")?.outcome).toBe(outcome);
+  });
+
+  it.each([
     ["gathered symbolic before contradiction", String.raw`\begin{gathered} x = y \\ 2 + 2 = 5 \end{gathered}`, "2 + 2 = 5"],
     ["gathered contradiction before symbolic", String.raw`\begin{gathered} 2 + 2 = 5 \\ x = y \end{gathered}`, "2 + 2 = 5"],
     ["align* with non-equation header", String.raw`\begin{align*} \text{Step 1} \\ x &= y \\ 2 + 2 &= 5 \end{align*}`, "2 + 2 = 5"],
@@ -395,6 +416,9 @@ describe("teaching-verifiers", () => {
     ["decimal-comma equation followed by tight comma and contradiction", "1 + 2 = 1,5 * 2,2 + 2 = 5", "2 + 2 = 5"],
     ["decimal-comma equation followed by English connective and contradiction", "1 + 2 = 1,5 * 2 and 2 + 2 = 5", "2 + 2 = 5"],
     ["chained equality with middle decimal-comma member and trailing contradiction", "2 + 2 = 2 * 1,5 + 1 = 5", "2 + 2 = 5"],
+    ["contradiction after wide-spaced decimal-comma equation", String.raw`1 + 2 = 1,5 * 2 \qquad 2 + 2 = 5`, "2 + 2 = 5"],
+    ["contradiction before wide-spaced equation", String.raw`1 + 2 = 5 \quad 2 + 2 = 4`, "1 + 2 = 5"],
+    ["contradiction before wide-spaced inequality", String.raw`1 + 2 = 5 \quad x \neq y`, "1 + 2 = 5"],
   ])("flags multiline LaTeX contradiction with real arithmetic probe (%s)", async (_label, latex, expectedDetail) => {
     const report = await verifyTeachingContent({
       activityId: ACT, publishInput: basePublish(), pack: packWithSupport(), keyClaims: [],
