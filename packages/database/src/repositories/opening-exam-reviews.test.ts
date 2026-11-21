@@ -64,6 +64,7 @@ function makeFakeSql(options: {
   ledgerRows: Array<Record<string, unknown>>;
   matchByClientKey?: boolean;
   leaseTimestamp?: string;
+  reviewMissing?: boolean;
 }) {
   let currentStatus = options.existingStatus ?? "pending";
   let currentLease = options.leaseTimestamp ?? "2026-10-17 00:00:00.000000+00";
@@ -143,6 +144,7 @@ function makeFakeSql(options: {
       return Promise.resolve(matches ? [{ id: reviewId }] : []);
     }
     if (query.includes("FROM opening_exam_reviews")) {
+      if (options.reviewMissing) return Promise.resolve([]);
       if (query.includes("AND client_key=?") && !matchByClientKey) return Promise.resolve([]);
       if (query.includes("WHERE id=?") && insertedRow && values[0] === insertedRow.id) {
         return Promise.resolve([insertedRow]);
@@ -233,16 +235,30 @@ describe("opening-exam-reviews stale pending reconciliation and fail guards", ()
     expect(freshAfterUnknown.executionUpdatedAt).toBe("2026-10-17 00:03:00.654321+00");
   });
 
-  it("fences assertCurrent with status='pending' and lease updated_at, and blocks complete() on failed reviews", async () => {
-    const lease = "2026-10-17 00:00:00.000000+00";
+  it("fences assertCurrent after readContext with status='pending' and text-cast microsecond lease, and blocks complete() on failed reviews", async () => {
+    const lease = "2026-10-17 00:00:00.123456+00";
     const f = makeFakeSql({ isStale: false, ledgerRows: [], leaseTimestamp: lease });
     const repo = createOpeningExamReviewsRepository(f.sql);
     await expect(repo.assertCurrent(scope, reviewId, lease)).resolves.toBeUndefined();
-    await expect(repo.assertCurrent(scope, reviewId, "2026-10-17 00:01:00.000000+00")).rejects.toThrow("评阅状态已变化");
+    const readIdx = f.calls.findIndex(c => c.query.startsWith("SELECT * FROM opening_exam_reviews"));
+    const leaseIdx = f.calls.findIndex(c => c.query.includes("SELECT id FROM opening_exam_reviews") && c.query.includes("AND status='pending'"));
+    expect(readIdx).toBeGreaterThanOrEqual(0);
+    expect(leaseIdx).toBeGreaterThan(readIdx);
+    const leaseFrag = f.calls[leaseIdx]!.values.find((v): v is { __fragment: string; values?: unknown[] } =>
+      Boolean(v && typeof v === "object" && "__fragment" in v && String((v as { __fragment: string }).__fragment).includes("updated_at")));
+    expect(leaseFrag?.__fragment).toBe("AND updated_at=(?::text)::timestamptz");
+    expect(leaseFrag?.values).toEqual([lease]);
+
+    await expect(repo.assertCurrent(scope, reviewId, "2026-10-17 00:01:00.123456+00")).rejects.toMatchObject({ code: "CONFLICT" });
+
+    // Missing or foreign-workspace review must throw NOT_FOUND from readContext before status/lease CONFLICT.
+    const foreignFake = makeFakeSql({ isStale: false, ledgerRows: [], reviewMissing: true });
+    await expect(createOpeningExamReviewsRepository(foreignFake.sql).assertCurrent(scope, reviewId, lease)).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(foreignFake.calls.some(c => c.query.includes("AND status='pending'"))).toBe(false);
 
     const failedFake = makeFakeSql({ existingStatus: "failed", isStale: false, ledgerRows: [], leaseTimestamp: lease });
     const failedRepo = createOpeningExamReviewsRepository(failedFake.sql);
-    await expect(failedRepo.assertCurrent(scope, reviewId, lease)).rejects.toThrow("评阅状态已变化");
+    await expect(failedRepo.assertCurrent(scope, reviewId, lease)).rejects.toMatchObject({ code: "CONFLICT" });
     await failedRepo.complete(scope, reviewId, {
       transcription: "x=1", questionMatch: true, outcome: "correct",
       steps: [{ label: "Step 1", verdict: "correct", feedback: "ok" }], summary: "ok", errorCause: null,
@@ -300,7 +316,7 @@ describe("opening-exam-reviews stale pending reconciliation and fail guards", ()
     await repo.fail(scope, reviewId, "failed", "2026-10-17 00:02:00.123456+00");
     const leasedFailedFrags = getFrags(f.calls.at(-1)!);
     expect(leasedFailedFrags.some(fr => fr.__fragment.includes("AND status IN ('pending', 'unknown')"))).toBe(true);
-    expect(leasedFailedFrags.some(fr => fr.__fragment.includes("AND updated_at=?::timestamptz"))).toBe(true);
+    expect(leasedFailedFrags.some(fr => fr.__fragment === "AND updated_at=(?::text)::timestamptz" && fr.values?.[0] === "2026-10-17 00:02:00.123456+00")).toBe(true);
     expect(leasedFailedFrags.some(fr => fr.__fragment.includes("opening_budget_reservations"))).toBe(true);
 
     await repo.fail(scope, reviewId, "failed");
@@ -312,7 +328,7 @@ describe("opening-exam-reviews stale pending reconciliation and fail guards", ()
     await repo.fail(scope, reviewId, "unknown", "2026-10-17 00:02:00.123456+00");
     const unknownFrags = getFrags(f.calls.at(-1)!);
     expect(unknownFrags.some(fr => fr.__fragment.includes("AND status='pending'"))).toBe(true);
-    expect(unknownFrags.some(fr => fr.__fragment.includes("AND updated_at=?::timestamptz"))).toBe(true);
+    expect(unknownFrags.some(fr => fr.__fragment === "AND updated_at=(?::text)::timestamptz" && fr.values?.[0] === "2026-10-17 00:02:00.123456+00")).toBe(true);
     expect(unknownFrags.some(fr => fr.__fragment.includes("opening_budget_reservations"))).toBe(false);
   });
 });

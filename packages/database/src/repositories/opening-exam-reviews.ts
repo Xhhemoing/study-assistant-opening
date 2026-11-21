@@ -288,16 +288,13 @@ export function createOpeningExamReviewsRepository(sql: Sql) {
     },
     async assertCurrent(scope: Scope, id: string, expectedUpdatedAt?: string): Promise<void> {
       await sql.begin(async tx => {
-        const [workspace] = await tx`SELECT id FROM workspaces
-          WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR SHARE`;
-        if (!workspace) throw learningError("NOT_FOUND", "工作区不存在");
+        await readContext(tx, scope, id);
         const [active] = await tx`SELECT id FROM opening_exam_reviews
           WHERE id=${id} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
             AND status='pending'
-            ${expectedUpdatedAt ? tx`AND updated_at=${expectedUpdatedAt}::timestamptz` : tx``}
+            ${expectedUpdatedAt ? tx`AND updated_at=(${expectedUpdatedAt}::text)::timestamptz` : tx``}
           FOR SHARE`;
         if (!active) throw learningError("CONFLICT", "评阅状态已变化，本次尝试已中止");
-        await readContext(tx, scope, id);
       });
     },
     async complete(scope: Scope, id: string, raw: ExamWorkReviewProposal, modelLabel: string | null): Promise<void> {
@@ -318,7 +315,7 @@ export function createOpeningExamReviewsRepository(sql: Sql) {
         WHERE id=${id}
           AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
           ${allowedStatuses}
-          ${expectedUpdatedAt ? sql`AND updated_at=${expectedUpdatedAt}::timestamptz` : sql``}
+          ${expectedUpdatedAt ? sql`AND updated_at=(${expectedUpdatedAt}::text)::timestamptz` : sql``}
           ${status === "failed" ? sql`AND NOT EXISTS (
             SELECT 1 FROM opening_budget_reservations b
             WHERE b.workspace_id=${scope.workspaceId}
