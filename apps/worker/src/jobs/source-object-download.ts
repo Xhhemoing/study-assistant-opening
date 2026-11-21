@@ -72,32 +72,21 @@ export async function fetchPresignedSourceObject(input: {
   signal?: AbortSignal;
 }): Promise<Response> {
   const canonicalKey = input.storage.finalKey(input.source.id, input.source.version);
-  if (typeof input.storage.objectExists === "function") {
-    let selectedKey = canonicalKey;
-    if (!(await input.storage.objectExists(canonicalKey))) {
-      const fallbacks = await resolveFallbackKeys({
-        scope: input.scope,
-        sourceId: input.source.id,
-        sourceVersion: input.source.version,
-        canonicalKey,
-        jobKey: input.job.key,
-        payload: input.payload,
-        sources: input.sources,
-      });
-      for (const fallbackKey of fallbacks) {
-        if (await input.storage.objectExists(fallbackKey)) {
-          selectedKey = fallbackKey;
-          break;
-        }
-      }
-    }
-    const url = await input.storage.presignGet(selectedKey, PRESIGN_OPTIONS);
+  const download = async (key: string) => {
+    input.signal?.throwIfAborted();
+    const url = await input.storage.presignGet(key, PRESIGN_OPTIONS);
     return input.signal ? fetch(url, { signal: input.signal }) : fetch(url);
+  };
+  let first: Response | undefined;
+  let firstError: unknown;
+  try {
+    first = await download(canonicalKey);
+    if (first.ok) return first;
+    void first.body?.cancel().catch(() => undefined);
+  } catch (error) {
+    if (input.signal?.aborted) throw error;
+    firstError = error;
   }
-
-  const canonicalUrl = await input.storage.presignGet(canonicalKey, PRESIGN_OPTIONS);
-  const first = input.signal ? await fetch(canonicalUrl, { signal: input.signal }) : await fetch(canonicalUrl);
-  if (first.ok) return first;
 
   const fallbacks = await resolveFallbackKeys({
     scope: input.scope,
@@ -107,13 +96,17 @@ export async function fetchPresignedSourceObject(input: {
     jobKey: input.job.key,
     payload: input.payload,
     sources: input.sources,
-  });
+  }).catch(() => []); // A failed legacy lookup cannot recover the canonical download.
+  input.signal?.throwIfAborted();
   for (const fallbackKey of fallbacks) {
-    void first.body?.cancel().catch(() => undefined);
-    const fallbackUrl = await input.storage.presignGet(fallbackKey, PRESIGN_OPTIONS);
-    const response = input.signal ? await fetch(fallbackUrl, { signal: input.signal }) : await fetch(fallbackUrl);
-    if (response.ok) return response;
-    void response.body?.cancel().catch(() => undefined);
+    try {
+      const response = await download(fallbackKey);
+      if (response.ok) return response;
+      void response.body?.cancel().catch(() => undefined);
+    } catch (error) {
+      if (input.signal?.aborted) throw error;
+    }
   }
-  return first;
+  if (first) return first;
+  throw firstError;
 }
