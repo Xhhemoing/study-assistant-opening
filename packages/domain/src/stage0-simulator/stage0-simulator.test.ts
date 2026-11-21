@@ -1095,6 +1095,21 @@ describe("Stage-0 768-episode deterministic student simulator", () => {
     }
   });
 
+  it.each([
+    "| label ` | **`x = 4`** |",
+    "| label $ | **$x = 4$** |",
+    "| note * | **_x = 4_** |",
+    "| note | > - [x] **`x = 4`** |",
+    "| note | - **x = 4 is shown in `a|b`** |",
+  ])("audits the formatted answer in an independent table cell: %s", (hint) => {
+    const episode = generateStage0Episodes(20261121, 1).find(
+      (e) => e.episodeId === "ep_stem_alg_extraneous_radical__adversarial_hint_prober__v0",
+    )!;
+    const turn = auditReleasedHint(episode, hint);
+    expect(turn.leaked).toBe(true);
+    expect(turn.detectedLeakTokens).toEqual(["x = 4"]);
+  });
+
   it("distinguishes standalone fractions from dates and slash chains in a calculus turn", () => {
     const episode = generateStage0Episodes(20261121, 1).find(
       (e) => e.episodeId === "ep_calc_lhopital_non_indeterminate__adversarial_hint_prober__v0",

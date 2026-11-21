@@ -99,11 +99,7 @@ function normalizeCompactForLeakScan(text: string): string {
 
 /** Expose Markdown block boundaries and inline equation text before math compaction. */
 function stripEquationFormatting(text: string): string {
-  // Quotes and lists can nest. A checkbox belongs to the preceding list marker.
-  const containerPrefix = /^[ \t]*(?:>[ \t]*|(?:[-*+]|\d+[.)])[ \t]+(?:\[[ xX]\][ \t]+)?)+/gm;
   return text
-    .replace(containerPrefix, "")
-    .replace(/^[ \t]*#{1,6}[ \t]+/gm, "")
     .split(/\r\n|[\r\n\u2028\u2029]/u)
     .map(stripEquationLine)
     .join(";");
@@ -130,29 +126,40 @@ function equationSpanEnds(parts: readonly string[]): Map<number, number> {
   return spanEnds;
 }
 
-function stripEquationLine(line: string): string {
-  const parts = line.split(/(\\?`+|\\[\\|$()[\]]|\*+|_+|~~|\$\$?|\|)/u);
-  if (parts.length === 1) return line;
-  // A tutor can emit a table fragment with an entire cell of literal delimiters.
-  // Audit that block-level reading independently of the inline spans on the line.
-  const sections: string[][] = [];
-  let sectionStart = 0;
-  let cellStart = 0;
+const equationMarkers = /(\\?`+|\\[\\|$()[\]]|\*+|_+|~~|\$\$?|\|)/u;
+
+function splitEquationCells(parts: string[], spanEnds?: Map<number, number>): string[] {
+  const cells: string[] = [];
+  let start = 0;
   for (let i = 1; i < parts.length; i += 2) {
-    if (parts[i] !== "|") continue;
-    const cell = parts.slice(cellStart, i).join("").trim();
-    if (/^[*_~]*(?:`+|\${1,2})[*_~]*$/u.test(cell)) {
-      if (cellStart > sectionStart) sections.push(parts.slice(sectionStart, cellStart - 1));
-      sectionStart = i + 1;
+    const end = spanEnds?.get(i);
+    if (end !== undefined) {
+      i = end;
+    } else if (parts[i] === "|") {
+      cells.push(parts.slice(start, i).join(""));
+      start = i + 1;
     }
-    cellStart = i + 1;
   }
-  if (sectionStart === 0) return stripEquationSegment(parts);
-  sections.push(parts.slice(sectionStart));
-  return [stripEquationSegment(parts), ...sections.map(stripEquationSegment)].join(";");
+  cells.push(parts.slice(start).join(""));
+  return cells;
 }
 
-function stripEquationSegment(parts: string[]): string {
+function stripEquationLine(line: string): string {
+  if (!line.includes("|")) return stripEquationSegment(line);
+  const parts = line.split(equationMarkers);
+  const cells = splitEquationCells(parts);
+  const inlineSegments = splitEquationCells(parts, equationSpanEnds(parts));
+  // Inline spans can only hide a cell boundary. Equal counts give identical segments.
+  const candidates = cells.length === inlineSegments.length ? cells : cells.concat(inlineSegments);
+  return candidates.map(stripEquationSegment).join(";");
+}
+
+function stripEquationSegment(segment: string): string {
+  // Quotes and lists can nest. A checkbox belongs to the preceding list marker.
+  const containerPrefix = /^[ \t]*(?:>[ \t]*|(?:[-*+]|\d+[.)])[ \t]+(?:\[[ xX]\][ \t]+)?)+/;
+  const content = segment.replace(containerPrefix, "").replace(/^[ \t]*#{1,6}[ \t]+/, "");
+  const parts = content.split(equationMarkers);
+  if (parts.length === 1) return content;
   const spanEnds = equationSpanEnds(parts);
   const cellOpeners = new Map<string, number[]>();
   for (let i = 1; i < parts.length; i += 2) {
@@ -166,9 +173,6 @@ function stripEquationSegment(parts: string[]): string {
       parts[i] = marker.startsWith("\\`") ? "\\`" : "";
       parts[end] = parts[end]!.startsWith("\\`") ? "\\" : "";
       i = end;
-    } else if (marker === "|") {
-      cellOpeners.clear();
-      parts[i] = ";";
     } else {
       stripEquationMarker(parts, i, cellOpeners);
     }
