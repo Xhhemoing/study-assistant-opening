@@ -81,10 +81,39 @@ function normalizeLeakSyntax(text: string): string {
   const normalized = (hasGroupingSpace
     ? text.replace(/[^\u00A0\u2007\u2009\u202F]+/gu, part => part.normalize("NFKC"))
     : text.normalize("NFKC")).replace(/[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu, "");
-  return hasGroupingSpace
-    ? normalized.replace(LOCALE_SPACE_GROUPED_DECIMAL_RE, value => value.replace(LOCALE_GROUPING_SPACE, "_"))
+  const grouped = hasGroupingSpace
+    ? normalized.replace(LOCALE_SPACE_GROUPED_DECIMAL_RE, value => value.replace(LOCALE_GROUPING_SPACE, "_").replace(",", "."))
       .replace(LOCALE_GROUPING_SPACE, " ")
     : normalized;
+  return /\d,\d/.test(grouped) ? normalizeGroupedDecimalCommas(grouped) : grouped;
+}
+
+function normalizeGroupedDecimalCommas(text: string): string {
+  // Paired brackets can contain comma-separated answers. Preserve the
+  // decimal-point interpretation of dotted values in those groups.
+  const openBrackets: { index: number; close: string }[] = [];
+  const pairedBrackets = new Set<number>();
+  for (const bracket of text.matchAll(DECIMAL_CONTEXT_BRACKET_RE)) {
+    if (bracket[0] === "(" || bracket[0] === "[") {
+      openBrackets.push({ index: bracket.index, close: bracket[0] === "(" ? ")" : "]" });
+    } else {
+      const open = openBrackets.at(-1);
+      if (open?.close !== bracket[0]) continue;
+      openBrackets.pop();
+      pairedBrackets.add(open.index);
+      pairedBrackets.add(bracket.index);
+    }
+  }
+
+  let depth = 0;
+  return text.replace(GROUPED_COMMA_DECIMAL_OR_BRACKET_RE, (token, offset: number) => {
+    if (pairedBrackets.has(offset)) depth += token === "(" || token === "[" ? 1 : -1;
+    const commaIndex = token.indexOf(",");
+    if (commaIndex < 0) return token;
+    const integer = token.slice(0, commaIndex);
+    if (depth > 0 && integer.includes(".")) return token;
+    return integer.replace(/[.'’]/g, "_") + "." + token.slice(commaIndex + 1);
+  });
 }
 
 function containsSolutionDirectiveMarker(stem: string): boolean {
@@ -1298,15 +1327,22 @@ const ENGLISH_ANSWER_CUE =
   "(?:(?:correct|right|selected|marked|final|official)[_\\s-]*(?:" + ANSWER_CUE_NOUN + "|response|letter|value)" +
   "|(?:ans(?:wer)?|option|choice|solution|result|selection)[_\\s-]*key|" + ANSWER_CUE_NOUN + ")";
 const BOUNDED_ANSWER_CUE = `(?:(?<!${NON_CJK_WORD_CHAR})${ENGLISH_ANSWER_CUE}(?!${NON_CJK_WORD_CHAR})|选|答案|正确选项)`;
-const BARE_CORRECT_CUE = `(?<!${NON_CJK_WORD_CHAR})correct(?!${NON_CJK_WORD_CHAR})`;
-const ANSWER_CUE_BEFORE_DASH_RE = new RegExp(`(?:${BOUNDED_ANSWER_CUE}|${BARE_CORRECT_CUE})\\s+$`, "iu");
+const BARE_CHOICE_VERB = `(?<!${NON_CJK_WORD_CHAR})(?:correct|select|choose)(?!${NON_CJK_WORD_CHAR})`;
+const ANSWER_CUE_BEFORE_DASH_RE = new RegExp(`(?:${BOUNDED_ANSWER_CUE}|${BARE_CHOICE_VERB})\\s+$`, "iu");
 
 const NUMERIC_TOKEN_END = `(?!${ALPHA_NUM_IDENT_CHAR}|\\.\\d|[eE][+-]?\\d)`;
 const LOCALE_GROUPING_SPACE = /[\u00A0\u2007\u2009\u202F]/gu;
 const LOCALE_SPACE_GROUPED_DECIMAL_RE = new RegExp(standaloneNumericSource(
   `(?<!\\d${LOCALE_GROUPING_SPACE.source})\\d{1,3}(${LOCALE_GROUPING_SPACE.source})\\d{3}(?:\\1\\d{3})*` +
-  `(?!${LOCALE_GROUPING_SPACE.source}\\d)(?:${DECIMAL_FRACTION})?${OPTIONAL_DECIMAL_EXPONENT}`,
+  `(?!${LOCALE_GROUPING_SPACE.source}\\d)(?:[.,]${DECIMAL_DIGITS})?${OPTIONAL_DECIMAL_EXPONENT}(?!,\\d)`,
 ), "gu");
+const DECIMAL_CONTEXT_BRACKET_RE = /(?<!\\)[()[\]]/gu;
+const GROUPED_COMMA_DECIMAL_OR_BRACKET_RE = new RegExp(
+  DECIMAL_CONTEXT_BRACKET_RE.source + "|" + standaloneNumericSource(
+    `\\d{1,3}(?:(?:\\.\\d{3})+|(?:['’]\\d{3})+),${DECIMAL_DIGITS}${OPTIONAL_DECIMAL_EXPONENT}(?!,\\d)`,
+  ),
+  "gu",
+);
 // After an ellipsis, start at the digits rather than treating its final dot
 // as the leading decimal point of a different value.
 const UNGROUPED_DECIMAL_TOKEN = `(?!(?<=\\.)\\.)${UNGROUPED_DECIMAL}`;
@@ -1477,6 +1513,20 @@ const NEXT_OPTION_RE = new RegExp(
   `^${OPTION_SEQUENCE_CONNECTOR}(?:${WRAPPED_NEIGHBOR_OPTION}|${BARE_NEIGHBOR_OPTION}(?=${OPTION_SENTENCE_END}))`,
   "iu",
 );
+const ARTICLE_FUNCTION_WORD = "(?:" +
+  "for|in|on|at|to|of|by|with|from|into|onto|upon|over|under|after|before|between|among|through|during|" +
+  "without|within|about|against|per|via|as|up|off|out|across|along|past|around|inside|outside|despite|except|towards?|" +
+  "is|was|are|were|be|been|being|has|have|had|do|does|did|can|could|will|would|shall|should|may|might|must|equals?|" +
+  "and|or|but|nor|yet|so|if|then|else|when|while|where|because|since|unless|until|although|though|than|" +
+  "that|which|who|whom|whose|what|he|him|his|she|her|hers|it|its|we|us|our|ours|you|your|yours|they|them|their|theirs|" +
+  "me|my|mine|this|these|those|the|an|another|each|every|all|both|any|either|neither|some|several|many|much|none)";
+const ARTICLE_NOMINAL_WORD = `(?!${ARTICLE_FUNCTION_WORD}\\b)[a-z]{2,}\\b`;
+const DIMENSION_MODIFIER = /\d+(?:(?:[ \t]*[x×*][ \t]*|[ \t]+by[ \t]+)\d+)*/.source;
+const ARTICLE_NOUN_PHRASE_RE = new RegExp(
+  `^[ \\t]+(?:${ARTICLE_NOMINAL_WORD}|${DIMENSION_MODIFIER}(?:[ \\t]+${ARTICLE_NOMINAL_WORD}|` +
+  `-?(?!${ARTICLE_FUNCTION_WORD}\\b)[a-z]+\\b))`,
+  "iu",
+);
 
 function containsSingleChoiceReveal(syntax: string, optionText: string, choiceLetter: string): boolean {
   const escaped = escapeRegExp(choiceLetter);
@@ -1486,18 +1536,18 @@ function containsSingleChoiceReveal(syntax: string, optionText: string, choiceLe
   const afterCue = `\\s*${copula}${separator}?\\s*${option}`;
   const patterns = [
     new RegExp(BOUNDED_ANSWER_CUE + afterCue, "iu"),
-    new RegExp(`${BARE_CORRECT_CUE}\\s*${copula}${separator}\\s*${option}`, "iu"),
+    new RegExp(`${BARE_CHOICE_VERB}\\s*${copula}${separator}\\s*${option}`, "iu"),
     new RegExp(`(?<!${NON_CJK_WORD_CHAR})${option}\\s+is\\s+correct(?!${NON_CJK_WORD_CHAR})`, "iu"),
     new RegExp(`=\\s*${option}`, "iu"),
   ];
   if (patterns.some(pattern => pattern.test(optionText))) return true;
 
-  const bareCorrect = new RegExp(`${BARE_CORRECT_CUE}\\s*${copula}(${option})`, "giu");
-  for (const match of syntax.matchAll(bareCorrect)) {
+  const bareChoice = new RegExp(`${BARE_CHOICE_VERB}\\s*${copula}(${option})`, "giu");
+  for (const match of syntax.matchAll(bareChoice)) {
     const remainder = syntax.slice(match.index + match[0].length);
     // "Correct a mistake" uses an article. Case, wrappers and line breaks
     // distinguish it from a choice label in the same position.
-    if (match[1]?.trim() !== "a" || !/^[ \t]+(?!(?:and|or|then|is)\b)[a-z]{2,}\b/i.test(remainder)) return true;
+    if (match[1]?.trim() !== "a" || !ARTICLE_NOUN_PHRASE_RE.test(remainder)) return true;
   }
 
   const wrapped = new RegExp(

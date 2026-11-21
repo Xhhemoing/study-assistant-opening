@@ -2524,6 +2524,10 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
     { answerKey: "[1000,0.5]", text: "Use 1,000 and 0.5_0.", leaks: true },
     { answerKey: "[1000,0.5]", text: "Use 1\u202F000 and 0.5.", leaks: true },
     { answerKey: "[100000,0.5]", text: "Use 1,00,000 and 0.5.", leaks: true },
+    { answerKey: "[1000.5,17]", text: "Use 1\u202F000,5 and 17.", leaks: true },
+    { answerKey: "[1000,17]", text: "Use 1\u202F000,5 and 17.", leaks: false },
+    { answerKey: "[1,5]", text: "Use (1.000,5).", leaks: true },
+    { answerKey: "[1,5,6]", text: "Use 1.000,5,6 as the initial values.", leaks: true },
   ])("matches only the exact numeric sequence $answerKey in $text", ({ answerKey, text, leaks }) => {
     expect(containsAnswerLeak(text, answerKey)).toBe(leaks);
   });
@@ -2542,6 +2546,21 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
         "1\u2007000", "1'000", "1\u2019000", "１\u202F０００"].map(value => ({
         answerKey: "[1000]", text: `The selected value is ${value}.`, ok: false,
       })),
+      ...[new Intl.NumberFormat("fr-FR").format(1000.5), "1\u00A0000,50", "1\u2009000,5",
+        "1\u2007000,5", "1'000,5", "1\u2019000,5", "1.000,5"].flatMap(value => [
+        { answerKey: "[1000.5]", text: `The selected value is ${value}.`, ok: false },
+        { answerKey: "[1000]", text: `The selected value is ${value}.`, ok: true },
+      ]),
+      { answerKey: "[1000.5]", text: "The selected value is 1\u202F000.", ok: true },
+      { answerKey: "[1000.125]", text: "The selected value is 1\u202F000,125.", ok: false },
+      { answerKey: "[-1000.5]", text: "The selected value is -1\u202F000,5.", ok: false },
+      { answerKey: "[10000.5]", text: "The selected value is 1'000,05e1.", ok: false },
+      { answerKey: "[10005]", text: "The selected value is 1\u202F000,5e1.", ok: false },
+      { answerKey: "[1000000.5]", text: "The selected value is 1.000.000,5.", ok: false },
+      { answerKey: "[1000.5]", text: "Use [1.000,5] as the starting vector.", ok: true },
+      { answerKey: "[1000.5]", text: "Use (7, (1.000,5)) as the starting tuple.", ok: true },
+      { answerKey: "[1000.5]", text: "Use 1.000,5,6 as the initial values.", ok: true },
+      { answerKey: "[1000.5]", text: "The hint has an unmatched [. The value is 1.000,5.", ok: false },
       { answerKey: "[1000]", text: "The selected value is 1.000.", ok: true },
       { answerKey: "[1]", text: "The selected value is 1.000.", ok: false },
       { answerKey: "[1]", text: "Compare 1\u202F000 with the threshold.", ok: true },
@@ -2606,7 +2625,9 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
         answerKey: "A", text, ok: true,
       })),
       ...["Can you correct a mistake?", "Correct a calculation error.", "Correct a sign error first.", "What is a matrix?",
-        "Select a valid approach.", "Choose a basis vector."].map(text => ({
+        "Select a valid approach.", "Choose a basis vector.", "Can you correct a 2×2 matrix calculation?",
+        "Correct a 2x2 system.", "Select a 3-step approach.", "Choose a 2D vector.",
+        "Choose a 64-bit integer.", "Correct a 10-point scale.", "Choose a 3 by 3 grid."].map(text => ({
         answerKey: "A", text, ok: true,
       })),
       ...["Answer key: *a*", "Key is A", "Key is a", "Key: A", "Answer: A", "Option A in the list", "Choice (a) under review"].map(text => ({
@@ -2618,6 +2639,10 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
         "Correct A.", "Correct (A) for this item.", "Correct (a) for this item.", 'Correct "a"',
         "Correct a.", "Correct a\n  Show your work.", "Correct A for this item.", "Correct: a", "Correct — a",
         "Correct option a", "Choice a", "Option a is correct", "Answer: a", "Answer is a", "The answer is a.",
+        "Correct a for this item.", "Select a in part 2.", "Choose a or b.", "The answer is a because it fits.",
+        "Correct a that works.", "Correct a with justification.", "Correct a if necessary.",
+        "Correct a was chosen.", "Correct a will work.", "Correct a after checking.",
+        "Correct a 2.", "Correct a 2 by 2.", "Correct a 2×2.",
         "A is correct.", "Correct response is A.", "Correct letter is A.", "Correct value is A.",
         ...["-", "–", "—", "―"].map(separator => `Answer ${separator} A`)].map(text => ({
         answerKey: "A", text, ok: false,
@@ -2660,6 +2685,7 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
       { order: [1000], text: "The result is 1_000." },
       { order: [1000], text: "The result is 1,000." },
       { order: [1000], text: `The result is ${new Intl.NumberFormat("fr-FR").format(1000)}.` },
+      { order: [1000.5], text: `The result is ${new Intl.NumberFormat("fr-FR").format(1000.5)}.` },
       { order: [1, 234], text: "Use [1,234]." },
     ])("rejects $text for native protected array $order", ({ order, text }) => {
       const variant = makeMissVariantCandidate({
