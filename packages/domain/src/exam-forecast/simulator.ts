@@ -5,6 +5,7 @@ import {
   computeWritingBand,
   rawScoreToBand,
   snapToScoreGrid,
+  validateExamBlueprint,
 } from "./ielts-blueprint";
 import type {
   ExamBlueprintV1,
@@ -17,6 +18,7 @@ import type {
   SectionSimulationSummary,
   SimulatedItemOutcome,
   SkillBeliefMap,
+  SpeechTimingReceiptV1,
 } from "./types";
 
 export const MAX_SIMULATION_DRAWS = 50_000;
@@ -30,6 +32,48 @@ export function validateNumDraws(numDraws: number | undefined, fallback = 400): 
     throw new RangeError(`numDraws must be an integer in [1, ${MAX_SIMULATION_DRAWS}]`);
   }
   return n;
+}
+
+export function resolveDrawsCount(
+  numDraws: number | undefined,
+  precomputedDraws?: readonly PaperRandomDraw[],
+  fallback = 400,
+): number {
+  const explicitCount = numDraws !== undefined ? validateNumDraws(numDraws, fallback) : undefined;
+  if (precomputedDraws !== undefined) {
+    const actualCount = validateNumDraws(precomputedDraws.length, fallback);
+    if (explicitCount !== undefined && actualCount !== explicitCount) {
+      throw new RangeError(`precomputedDraws.length (${actualCount}) must match numDraws (${explicitCount})`);
+    }
+    return actualCount;
+  }
+  return explicitCount ?? validateNumDraws(undefined, fallback);
+}
+
+function isValidFluencyScore(value: number | undefined): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 9;
+}
+
+function isValidPauseRatio(value: number | undefined): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
+}
+
+function isValidSpeechRateWpm(value: number | undefined): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0;
+}
+
+function hasValidDefinedSpeechMetrics(receipt: SpeechTimingReceiptV1): boolean {
+  if (!Number.isFinite(receipt.durationSeconds) || receipt.durationSeconds <= 0) return false;
+  if (receipt.fluencyScore !== undefined && !isValidFluencyScore(receipt.fluencyScore)) return false;
+  if (receipt.pauseRatio !== undefined && !isValidPauseRatio(receipt.pauseRatio)) return false;
+  if (receipt.speechRateWpm !== undefined && !isValidSpeechRateWpm(receipt.speechRateWpm)) return false;
+  return true;
+}
+
+function isUsableSpeechTimingReceipt(receipt: SpeechTimingReceiptV1 | undefined): receipt is SpeechTimingReceiptV1 {
+  if (!receipt || receipt.calibrated !== true) return false;
+  if (!hasValidDefinedSpeechMetrics(receipt)) return false;
+  return receipt.fluencyScore !== undefined || receipt.speechRateWpm !== undefined;
 }
 
 function parseScoreObservationBounds(
@@ -59,7 +103,14 @@ function parseScoreObservationBounds(
 export function hasUsableObservedPayload(
   record: ExamEvidenceRecord,
   sectionRange?: readonly [number, number],
+  allowedParts?: ReadonlySet<string>,
 ): boolean {
+  if (allowedParts) {
+    if (record.partId !== undefined && !allowedParts.has(record.partId)) return false;
+    if (record.speechTimingReceipt?.partId !== undefined && !allowedParts.has(record.speechTimingReceipt.partId)) {
+      return false;
+    }
+  }
   const scoreBounds = parseScoreObservationBounds(
     record.rubricScore ?? record.observedScore ?? record.observedBand,
     sectionRange,
@@ -69,19 +120,8 @@ export function hasUsableObservedPayload(
   }
   if (record.evidenceKind === "speech_timing") {
     const receipt = record.speechTimingReceipt;
-    const validReceipt =
-      receipt !== undefined &&
-      receipt.calibrated === true &&
-      Number.isFinite(receipt.durationSeconds) &&
-      receipt.durationSeconds > 0 &&
-      ((receipt.fluencyScore !== undefined &&
-        Number.isFinite(receipt.fluencyScore) &&
-        receipt.fluencyScore >= 0 &&
-        receipt.fluencyScore <= 9) ||
-        (receipt.speechRateWpm !== undefined &&
-          Number.isFinite(receipt.speechRateWpm) &&
-          receipt.speechRateWpm > 0));
-    return validReceipt || scoreBounds !== null;
+    if (receipt !== undefined && !hasValidDefinedSpeechMetrics(receipt)) return false;
+    return isUsableSpeechTimingReceipt(receipt) || scoreBounds !== null;
   }
   if (record.evidenceKind === "diagnostic_item") {
     return typeof record.correct === "boolean" || scoreBounds !== null;
@@ -96,6 +136,7 @@ export type EvidenceFilterOptions = {
   readonly learnerId?: string;
   readonly examAtMs?: number;
   readonly sectionRanges?: ReadonlyMap<string, readonly [number, number]>;
+  readonly sectionParts?: ReadonlyMap<string, ReadonlySet<string>>;
 };
 
 export function isIndependentExamEvidence(
@@ -115,13 +156,16 @@ export function isIndependentExamEvidence(
   if (options.examAtMs !== undefined) {
     if (!Number.isFinite(options.examAtMs) || record.observedAtMs > options.examAtMs) return false;
   }
+  if (options.sectionRanges && !options.sectionRanges.has(record.sectionId)) return false;
+  const allowedParts = options.sectionParts ? options.sectionParts.get(record.sectionId) : undefined;
+  if (options.sectionParts && !allowedParts) return false;
   return (
     record.countsTowardMastery === true &&
     record.assisted === false &&
     record.exposed !== true &&
     record.evidenceKind !== "practice_feedback" &&
     record.evidenceKind !== "self_report" &&
-    hasUsableObservedPayload(record, options.sectionRanges?.get(record.sectionId))
+    hasUsableObservedPayload(record, options.sectionRanges?.get(record.sectionId), allowedParts)
   );
 }
 
@@ -143,6 +187,12 @@ export function partitionExamEvidence(
 
 export function sectionRangesMap(blueprint: ExamBlueprintV1): ReadonlyMap<string, readonly [number, number]> {
   return new Map(blueprint.sections.map((section) => [section.sectionId, section.scoreRange] as const));
+}
+
+export function sectionPartIdsMap(blueprint: ExamBlueprintV1): ReadonlyMap<string, ReadonlySet<string>> {
+  return new Map(
+    blueprint.sections.map((section) => [section.sectionId, new Set(section.parts.map((part) => part.partId))] as const),
+  );
 }
 
 export { choleskyDecompose };
@@ -242,7 +292,10 @@ export function convolveLordWingersky(
 
 export function itemSuccessProbability(item: ExamItemSpec, mBySkill: Readonly<Record<string, number>>): number {
   let prod = 1;
-  for (const skillId of item.skillIds) prod *= clamp(mBySkill[skillId] ?? 0.5, 0, 1);
+  for (const skillId of item.skillIds) {
+    const mastery = Object.hasOwn(mBySkill, skillId) ? mBySkill[skillId]! : 0.5;
+    prod *= clamp(mastery, 0, 1);
+  }
   const g = clamp(item.guess, 0, 1);
   const l = clamp(item.lapse, 0, Math.max(0, 1 - g));
   return clamp(g + (1 - l - g) * prod, 0, 1);
@@ -296,6 +349,7 @@ type RubricEvidenceSummary = {
 function summarizeRubricAndTimingEvidence(
   admitted: readonly ExamEvidenceRecord[],
   sectionRanges: ReadonlyMap<string, readonly [number, number]>,
+  sectionParts: ReadonlyMap<string, ReadonlySet<string>>,
 ): RubricEvidenceSummary {
   const partAnchors = new Map<string, RubricAnchor>();
   const sectionAnchors = new Map<string, RubricAnchor>();
@@ -303,30 +357,43 @@ function summarizeRubricAndTimingEvidence(
   let speakingCount = 0;
 
   for (const record of admitted) {
+    if (!sectionRanges.has(record.sectionId)) continue;
+    const allowedParts = sectionParts.get(record.sectionId);
+    if (!allowedParts) continue;
+    if (record.partId !== undefined && !allowedParts.has(record.partId)) continue;
+    if (record.speechTimingReceipt?.partId !== undefined && !allowedParts.has(record.speechTimingReceipt.partId)) {
+      continue;
+    }
+
     const scoreBounds = parseScoreObservationBounds(
       record.rubricScore ?? record.observedScore ?? record.observedBand,
       sectionRanges.get(record.sectionId),
     );
     if (scoreBounds) {
       const anchor: RubricAnchor = { low: scoreBounds.low, high: scoreBounds.high, observedAtMs: record.observedAtMs };
-      const targetMap = record.partId ? partAnchors : sectionAnchors;
-      const key = record.partId ?? record.sectionId;
-      const existing = targetMap.get(key);
-      if (!existing || anchor.observedAtMs >= existing.observedAtMs) {
-        targetMap.set(key, anchor);
+      if (record.partId !== undefined) {
+        const key = `${record.sectionId}\u0000${record.partId}`;
+        const existing = partAnchors.get(key);
+        if (!existing || anchor.observedAtMs >= existing.observedAtMs) {
+          partAnchors.set(key, anchor);
+        }
+      } else {
+        const existing = sectionAnchors.get(record.sectionId);
+        if (!existing || anchor.observedAtMs >= existing.observedAtMs) {
+          sectionAnchors.set(record.sectionId, anchor);
+        }
       }
     }
-    if (record.sectionId === "speaking" && record.speechTimingReceipt?.calibrated) {
+    if (record.sectionId === "speaking" && isUsableSpeechTimingReceipt(record.speechTimingReceipt)) {
       const receipt = record.speechTimingReceipt;
-      if (receipt.fluencyScore !== undefined && Number.isFinite(receipt.fluencyScore)) {
+      if (isValidFluencyScore(receipt.fluencyScore)) {
         speakingShiftSum += clamp((receipt.fluencyScore - 6) * 0.25, -1, 1);
         speakingCount += 1;
-      } else if (receipt.speechRateWpm !== undefined && Number.isFinite(receipt.speechRateWpm) && receipt.speechRateWpm > 0) {
+      } else if (isValidSpeechRateWpm(receipt.speechRateWpm)) {
         const wpmDelta = clamp((receipt.speechRateWpm - 125) / 80, -0.5, 0.5);
-        const pausePenalty =
-          receipt.pauseRatio !== undefined && Number.isFinite(receipt.pauseRatio)
-            ? clamp((receipt.pauseRatio - 0.18) * 1.5, -0.2, 0.5)
-            : 0;
+        const pausePenalty = isValidPauseRatio(receipt.pauseRatio)
+          ? clamp((receipt.pauseRatio - 0.18) * 1.5, -0.2, 0.5)
+          : 0;
         speakingShiftSum += wpmDelta - pausePenalty;
         speakingCount += 1;
       }
@@ -541,6 +608,10 @@ function simulateRubricSectionDraw(input: {
   readonly finalClockUsedSec: number;
   readonly anyCensored: boolean;
   readonly censoredItems: readonly SimulatedItemOutcome[];
+  readonly partCensoredCounts: ReadonlyMap<string, number>;
+  readonly partTotalCounts: ReadonlyMap<string, number>;
+  readonly totalItems: number;
+  readonly censoredCount: number;
   readonly timedScore: number;
   readonly untimedScore: number;
 } {
@@ -550,7 +621,10 @@ function simulateRubricSectionDraw(input: {
   let untimedWeightedSum = 0;
   let weightSum = 0;
   let anyCensored = false;
+  let censoredCount = 0;
   const censoredItems: SimulatedItemOutcome[] = [];
+  const partCensoredCounts = new Map<string, number>();
+  const partTotalCounts = new Map<string, number>();
   const sectionAnchor = input.rubricSummary.sectionAnchors.get(input.section.sectionId);
   const [minB, maxB] = input.section.scoreRange;
   const baseOffset = maxB > minB + 3 ? minB + 3 : minB;
@@ -561,7 +635,10 @@ function simulateRubricSectionDraw(input: {
     const epsScore = input.draw.rubricScoreNormals[rubricCursor] ?? 0;
     const epsTime = input.draw.rubricTimeNormals[rubricCursor] ?? 0;
     rubricCursor += 1;
-    const partAnchor = input.rubricSummary.partAnchors.get(part.partId) ?? sectionAnchor;
+    const partAnchorKey = `${input.section.sectionId}\u0000${part.partId}`;
+    const partAnchor = input.rubricSummary.partAnchors.get(partAnchorKey) ?? sectionAnchor;
+    const partStatKey = `${input.section.sectionId}:${part.partId}`;
+    partTotalCounts.set(partStatKey, (partTotalCounts.get(partStatKey) ?? 0) + 1);
     const skillVals = part.skillIds.map((id) => (Object.hasOwn(input.mBySkill, id) ? input.mBySkill[id]! : 0.5 * sigmoid(0)));
     const meanMastery = skillVals.length > 0 ? skillVals.reduce((a, b) => a + b, 0) / skillVals.length : 0.5 * sigmoid(0);
 
@@ -584,6 +661,8 @@ function simulateRubricSectionDraw(input: {
       const remaining = Math.max(0, input.sectionLimitSec - usedSec);
       if (remaining <= 0) {
         anyCensored = true;
+        censoredCount += 1;
+        partCensoredCounts.set(partStatKey, (partCensoredCounts.get(partStatKey) ?? 0) + 1);
         timedPartScore = minB;
         if (input.captureCensored) {
           censoredItems.push({
@@ -615,6 +694,8 @@ function simulateRubricSectionDraw(input: {
         const partDuration = Math.exp(clamp(logDuration, 4, 10));
         if (partDuration > remaining) {
           anyCensored = true;
+          censoredCount += 1;
+          partCensoredCounts.set(partStatKey, (partCensoredCounts.get(partStatKey) ?? 0) + 1);
           usedSec = input.sectionLimitSec;
           const completionRatio = clamp(remaining / partDuration, 0.35, 1);
           timedPartScore = clamp(minB + (untimedPartScore - minB) * completionRatio, minB, maxB);
@@ -633,6 +714,10 @@ function simulateRubricSectionDraw(input: {
     finalClockUsedSec: usedSec,
     anyCensored,
     censoredItems,
+    partCensoredCounts,
+    partTotalCounts,
+    totalItems: input.section.parts.length,
+    censoredCount,
     timedScore: weightSum > 0 ? partWeightedSum / weightSum : 0,
     untimedScore: weightSum > 0 ? untimedWeightedSum / weightSum : 0,
   };
@@ -688,22 +773,25 @@ export type SimulateExamPaperInput = {
 
 export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulationSummary {
   const { blueprint, beliefs, examAtMs } = input;
+  const blueprintIssues = validateExamBlueprint(blueprint);
+  if (blueprintIssues.length > 0) {
+    throw new RangeError(`Invalid exam blueprint: ${blueprintIssues.join(", ")}`);
+  }
   const trimmedLearnerId = input.learnerId.trim();
   if (!trimmedLearnerId) {
     throw new RangeError("learnerId must be a non-empty string");
   }
-  const numDraws =
-    input.precomputedDraws !== undefined
-      ? validateNumDraws(input.precomputedDraws.length)
-      : validateNumDraws(input.numDraws, 400);
+  const numDraws = resolveDrawsCount(input.numDraws, input.precomputedDraws, 400);
   const draws = input.precomputedDraws ?? generatePaperRandomDraws(blueprint, numDraws, input.seed ?? 20261121);
   const ranges = sectionRangesMap(blueprint);
+  const partIds = sectionPartIdsMap(blueprint);
   const { admitted } = partitionExamEvidence(input.evidence, {
     learnerId: trimmedLearnerId,
     examAtMs,
     sectionRanges: ranges,
+    sectionParts: partIds,
   });
-  const rubricSummary = summarizeRubricAndTimingEvidence(admitted, ranges);
+  const rubricSummary = summarizeRubricAndTimingEvidence(admitted, ranges, partIds);
   const skillParams = buildDecayedSkillParams(blueprint, beliefs, trimmedLearnerId, examAtMs, input.skillOverrides);
   const speedShift = input.speedShift ?? 0;
 
@@ -733,6 +821,26 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
 
   const untimedOverallPmf = new Map<number, number>();
   let untimedExpectedTotal = 0;
+
+  const recordCensoringStats = (
+    sectionId: string,
+    drawCensoredItems: SimulatedItemOutcome[],
+    res: {
+      readonly anyCensored: boolean;
+      readonly partTotalCounts: ReadonlyMap<string, number>;
+      readonly partCensoredCounts: ReadonlyMap<string, number>;
+      readonly totalItems: number;
+      readonly censoredCount: number;
+      readonly censoredItems: readonly SimulatedItemOutcome[];
+    },
+  ): void => {
+    if (res.anyCensored) sectionCensoredDraws.set(sectionId, (sectionCensoredDraws.get(sectionId) ?? 0) + 1);
+    for (const [pk, cnt] of res.partTotalCounts.entries()) partTotalItemCounts.set(pk, (partTotalItemCounts.get(pk) ?? 0) + cnt);
+    for (const [pk, cnt] of res.partCensoredCounts.entries()) partCensoredItemCounts.set(pk, (partCensoredItemCounts.get(pk) ?? 0) + cnt);
+    sectionTotalItemsCount.set(sectionId, (sectionTotalItemsCount.get(sectionId) ?? 0) + res.totalItems);
+    sectionCensoredItemsCount.set(sectionId, (sectionCensoredItemsCount.get(sectionId) ?? 0) + res.censoredCount);
+    drawCensoredItems.push(...res.censoredItems);
+  };
 
   for (const draw of draws) {
     const mBySkill: Record<string, number> = Object.create(null) as Record<string, number>;
@@ -776,12 +884,7 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
         });
         itemCursor = res.nextItemCursor;
         if (blueprint.clockMode === "shared_full_paper") sharedClockUsedSec = res.finalClockUsedSec;
-        if (res.anyCensored) sectionCensoredDraws.set(section.sectionId, (sectionCensoredDraws.get(section.sectionId) ?? 0) + 1);
-        for (const [pk, cnt] of res.partTotalCounts.entries()) partTotalItemCounts.set(pk, (partTotalItemCounts.get(pk) ?? 0) + cnt);
-        for (const [pk, cnt] of res.partCensoredCounts.entries()) partCensoredItemCounts.set(pk, (partCensoredItemCounts.get(pk) ?? 0) + cnt);
-        sectionTotalItemsCount.set(section.sectionId, (sectionTotalItemsCount.get(section.sectionId) ?? 0) + res.totalItems);
-        sectionCensoredItemsCount.set(section.sectionId, (sectionCensoredItemsCount.get(section.sectionId) ?? 0) + res.censoredCount);
-        drawCensoredItems.push(...res.censoredItems);
+        recordCensoringStats(section.sectionId, drawCensoredItems, res);
         timedSectionBand[section.sectionId] = res.timedScore;
         matchedUntimedSectionBand[section.sectionId] = res.matchedUntimedScore;
         sectionTimedTotal.set(section.sectionId, (sectionTimedTotal.get(section.sectionId) ?? 0) + res.timedScore);
@@ -803,8 +906,7 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
         });
         rubricCursor = res.nextRubricCursor;
         if (blueprint.clockMode === "shared_full_paper") sharedClockUsedSec = res.finalClockUsedSec;
-        if (res.anyCensored) sectionCensoredDraws.set(section.sectionId, (sectionCensoredDraws.get(section.sectionId) ?? 0) + 1);
-        drawCensoredItems.push(...res.censoredItems);
+        recordCensoringStats(section.sectionId, drawCensoredItems, res);
         timedSectionBand[section.sectionId] = res.timedScore;
         matchedUntimedSectionBand[section.sectionId] = res.untimedScore;
         untimedContinuousSections.set(section.sectionId, res.untimedScore);

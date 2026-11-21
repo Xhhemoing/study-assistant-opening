@@ -1,6 +1,6 @@
 import { IELTS_ACADEMIC_V1_BLUEPRINT, snapToScoreGrid, validateExamBlueprint } from "./ielts-blueprint";
 import { IELTS_ACADEMIC_DIAGNOSTIC_SEEDS } from "./ielts-diagnostic-seeds";
-import { partitionExamEvidence, sectionRangesMap, simulateExamPaper, validateNumDraws } from "./simulator";
+import { partitionExamEvidence, sectionPartIdsMap, sectionRangesMap, simulateExamPaper, validateNumDraws } from "./simulator";
 import type {
   ExamBlueprintV1,
   ExamEvidenceRecord,
@@ -255,8 +255,8 @@ function recordRawProbForTarget(record: WholePaperCalibrationRecord, target: Joi
 
   const matched = record.predictedTargetPassProbs?.find(
     (entry) =>
-      Math.abs(entry.targetOverall - target.targetOverall) <= 1e-9 &&
-      Math.abs(entry.targetMinSection - target.targetMinSection) <= 1e-9,
+      entry.targetOverall === target.targetOverall &&
+      entry.targetMinSection === target.targetMinSection,
   );
   if (matched && Number.isFinite(matched.rawProbability) && matched.rawProbability >= 0 && matched.rawProbability <= 1) {
     return matched.rawProbability;
@@ -270,16 +270,49 @@ export function calibrateJointPassTargets(input: {
   readonly calibrationRecords: readonly WholePaperCalibrationRecord[];
   readonly targets: readonly JointPassTarget[];
   readonly minCalibrationSamples?: number;
+  readonly excludeLearnerId?: string;
+  readonly excludePaperFamilyIds?: ReadonlySet<string>;
+  readonly targetKind?: ForecastTargetKind;
 }): JointPassProbabilityEstimate[] {
   const minSamples = Math.max(1, Math.round(input.minCalibrationSamples ?? 4));
+  const excludedLearner = input.excludeLearnerId?.trim();
+  const excludedFamilies = input.excludePaperFamilyIds
+    ? new Set([...input.excludePaperFamilyIds].map((id) => id.trim()).filter(Boolean))
+    : null;
+  const requiredEvidenceKind = input.targetKind
+    ? input.targetKind === "official_exam"
+      ? "official_exam"
+      : "independent_mock"
+    : null;
+
   const rawEstimates = input.targets.map((target) => {
     const rawProbability = rawJointPassFromSimulation(input.simulation, input.blueprint, target);
+    const seenRecordIds = new Set<string>();
+    const seenLearnerFamilies = new Set<string>();
     const points: Array<{ x: number; y: number }> = [];
     for (const rec of input.calibrationRecords) {
+      if (rec.blueprintId !== input.blueprint.blueprintId) continue;
+      if (!rec.countsTowardMastery || rec.assisted || rec.exposed === true) continue;
+      if (rec.evidenceKind === "practice_feedback" || rec.evidenceKind === "self_report") continue;
+      if (input.targetKind && (rec.targetKind !== input.targetKind || rec.evidenceKind !== requiredEvidenceKind)) {
+        continue;
+      }
+      const recId = rec.recordId?.trim() ?? "";
+      const recLearner = rec.learnerId?.trim() ?? "";
+      const recFamily = rec.paperFamilyId?.trim() ?? "";
+      if (!recId || !recLearner || !recFamily) continue;
+      if (excludedLearner && recLearner === excludedLearner) continue;
+      if (excludedFamilies && excludedFamilies.has(recFamily)) continue;
+
       const y = observedPassesJointTarget(rec, target, input.blueprint);
       if (y === null) continue;
       const rawProb = recordRawProbForTarget(rec, target);
       if (rawProb === null) continue;
+
+      const learnerFamilyKey = `${recLearner}\u0000${recFamily}`;
+      if (seenRecordIds.has(recId) || seenLearnerFamilies.has(learnerFamilyKey)) continue;
+      seenRecordIds.add(recId);
+      seenLearnerFamilies.add(learnerFamilyKey);
       points.push({ x: rawProb, y });
     }
     const isCalibrated = points.length >= minSamples;
@@ -388,6 +421,7 @@ export function evaluateExamForecast(input: {
     learnerId: trimmedLearnerId,
     examAtMs: input.examAtMs,
     sectionRanges: sectionRangesMap(input.blueprint),
+    sectionParts: sectionPartIdsMap(input.blueprint),
   });
   const coveredSections = new Set(admitted.map((e) => e.sectionId));
   const missingSections = input.blueprint.sections
@@ -507,6 +541,9 @@ export function evaluateExamForecast(input: {
           blueprint: input.blueprint,
           calibrationRecords: validCalibrations,
           targets: combinedTargets,
+          excludeLearnerId: trimmedLearnerId,
+          excludePaperFamilyIds: excludeFamilies,
+          targetKind,
         })
       : [];
 

@@ -301,19 +301,14 @@ function hasCompleteRawTable(section: ExamSectionBlueprint): boolean {
 /** Cholesky factor L such that L * L^T ≈ matrix. Rejects asymmetric or non-PSD matrices. */
 export function choleskyDecompose(matrix: readonly (readonly number[])[]): number[][] {
   const n = matrix.length;
-  let maxDiag = 0;
-  for (let i = 0; i < n; i++) {
-    const diagVal = matrix[i]?.[i];
-    if (diagVal !== undefined && Number.isFinite(diagVal)) {
-      maxDiag = Math.max(maxDiag, Math.abs(diagVal));
-    }
-  }
-  const pivotTol = 1e-12 * Math.max(1, maxDiag);
-  const offDiagTol = 1e-8 * Math.max(1, Math.sqrt(maxDiag));
   const lower: number[][] = Array.from({ length: n }, () => Array<number>(n).fill(0));
   for (let i = 0; i < n; i++) {
     const row = matrix[i];
     if (!row || row.length !== n) throw new RangeError("thetaCovariance must be square");
+    const diagEntry = row[i];
+    if (diagEntry === undefined || !Number.isFinite(diagEntry)) {
+      throw new RangeError("thetaCovariance must be finite and symmetric");
+    }
     for (let j = 0; j <= i; j++) {
       const entry = row[j];
       const mirror = matrix[j]?.[i];
@@ -329,9 +324,10 @@ export function choleskyDecompose(matrix: readonly (readonly number[])[]): numbe
       let sum = entry;
       for (let k = 0; k < j; k++) sum -= lower[i]![k]! * lower[j]![k]!;
       if (i === j) {
+        const localPivotTol = 1e-12 * Math.max(0, entry);
         if (sum > 0) {
           lower[i]![j] = Math.sqrt(sum);
-        } else if (sum >= -pivotTol) {
+        } else if (sum >= -localPivotTol) {
           lower[i]![j] = 0;
         } else {
           throw new RangeError("thetaCovariance must be positive semidefinite");
@@ -339,7 +335,8 @@ export function choleskyDecompose(matrix: readonly (readonly number[])[]): numbe
       } else {
         const diag = lower[j]![j]!;
         if (diag === 0) {
-          if (Math.abs(sum) > offDiagTol) {
+          const localOffDiagTol = 1e-10 * Math.sqrt(Math.max(0, diagEntry) * Math.max(0, matrix[j]![j]!));
+          if (Math.abs(sum) > localOffDiagTol) {
             throw new RangeError("thetaCovariance must be positive semidefinite");
           }
           lower[i]![j] = 0;

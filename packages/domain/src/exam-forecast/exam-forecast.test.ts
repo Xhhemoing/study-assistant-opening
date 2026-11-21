@@ -1415,4 +1415,391 @@ describe("CRN marginal ROI sandbox & UnifiedDecisionSnapshotV1", () => {
       }),
     ).toThrow(RangeError);
   });
+
+  it("enforces all Round-5 4 P1 & 7 P2 invariants", () => {
+    const beliefs = makeIeltsBeliefs({ abilityMean: 0.4, logStability: Math.log(14), lastDirectRecallAtMs: 0 });
+    const evidence = makeIndependentSectionEvidence(1_000);
+
+    // [R5 P1-1] Scope anchors to (sectionId, partId) & reject mismatched partId records.
+    const crossSectionAnchorSpoof: ExamEvidenceRecord = {
+      evidenceId: "ev-listening-spoof-w2",
+      learnerId: "learner-target",
+      paperFamilyId: "diag-family-spoof",
+      sectionId: "listening",
+      partId: "writing-task-2",
+      countsTowardMastery: true,
+      assisted: false,
+      evidenceKind: "rubric_assessment",
+      observedAtMs: 2_000,
+      observedScore: { kind: "exact", score: 9.0 },
+    };
+    const lowWritingEvidence: ExamEvidenceRecord[] = [
+      ...evidence.filter((e) => e.sectionId !== "writing"),
+      {
+        evidenceId: "ev-w-low",
+        learnerId: "learner-target",
+        paperFamilyId: "diag-family-w",
+        sectionId: "writing",
+        partId: "writing-task-2",
+        countsTowardMastery: true,
+        assisted: false,
+        evidenceKind: "rubric_assessment",
+        observedAtMs: 1_000,
+        rubricScore: { kind: "exact", score: 4.0 },
+      },
+      crossSectionAnchorSpoof,
+    ];
+    const anchoredLowSim = simulateExamPaper({
+      blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+      learnerId: "learner-target",
+      beliefs,
+      evidence: lowWritingEvidence,
+      examAtMs: DAY_MS,
+      numDraws: 40,
+      seed: 19,
+    });
+    const cleanLowSim = simulateExamPaper({
+      blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+      learnerId: "learner-target",
+      beliefs,
+      evidence: lowWritingEvidence.filter((e) => e.evidenceId !== "ev-listening-spoof-w2"),
+      examAtMs: DAY_MS,
+      numDraws: 40,
+      seed: 19,
+    });
+    expect(anchoredLowSim.sectionSummaries["writing"]!.timedMeanScore).toBeCloseTo(
+      cleanLowSim.sectionSummaries["writing"]!.timedMeanScore,
+      8,
+    );
+    expect(anchoredLowSim.sectionSummaries["writing"]!.timedMeanScore).toBeLessThan(5.0);
+
+    const mismatchedCoverage = evaluateExamForecast({
+      blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+      learnerId: "learner-target",
+      beliefs,
+      evidence: [
+        ...evidence.filter((e) => e.sectionId !== "writing" && e.sectionId !== "listening"),
+        crossSectionAnchorSpoof,
+      ],
+      calibrationRecords: makeCalibrationRecords(4),
+      examAtMs: DAY_MS,
+    });
+    expect(mismatchedCoverage.status).toBe("insufficient_independent_evidence");
+    if (mismatchedCoverage.status === "insufficient_independent_evidence") {
+      expect(mismatchedCoverage.missingSections).toEqual(["listening", "writing"]);
+    }
+
+    // [R5 P1-2] Reject out-of-range fluencyScore / pauseRatio / speechRateWpm & match scoring predicate.
+    const invalidFluencyReceipt: ExamEvidenceRecord = {
+      evidenceId: "sp-bad-fluency",
+      learnerId: "learner-target",
+      sectionId: "speaking",
+      countsTowardMastery: true,
+      assisted: false,
+      evidenceKind: "speech_timing",
+      observedAtMs: 1_000,
+      speechTimingReceipt: {
+        receiptId: "sr-bad-f",
+        durationSeconds: 120,
+        speechRateWpm: 125,
+        fluencyScore: 99,
+        calibrated: true,
+      },
+    };
+    const invalidPauseReceipt: ExamEvidenceRecord = {
+      ...invalidFluencyReceipt,
+      evidenceId: "sp-bad-pause",
+      speechTimingReceipt: {
+        receiptId: "sr-bad-p",
+        durationSeconds: 120,
+        speechRateWpm: 125,
+        pauseRatio: 1.5,
+        calibrated: true,
+      },
+    };
+    const invalidWpmReceipt: ExamEvidenceRecord = {
+      ...invalidFluencyReceipt,
+      evidenceId: "sp-bad-wpm",
+      speechTimingReceipt: {
+        receiptId: "sr-bad-w",
+        durationSeconds: 120,
+        speechRateWpm: -5,
+        fluencyScore: 7.0,
+        calibrated: true,
+      },
+    };
+    expect(partitionExamEvidence([invalidFluencyReceipt, invalidPauseReceipt, invalidWpmReceipt]).admitted).toEqual([]);
+    const speakingBaseline = simulateExamPaper({
+      blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+      learnerId: "learner-target",
+      beliefs: {},
+      evidence: evidence.filter((e) => e.sectionId !== "speaking"),
+      examAtMs: DAY_MS,
+      numDraws: 40,
+      seed: 21,
+    });
+    const speakingWithInvalidFluency = simulateExamPaper({
+      blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+      learnerId: "learner-target",
+      beliefs: {},
+      evidence: [...evidence.filter((e) => e.sectionId !== "speaking"), invalidFluencyReceipt],
+      examAtMs: DAY_MS,
+      numDraws: 40,
+      seed: 21,
+    });
+    expect(speakingWithInvalidFluency.sectionSummaries["speaking"]!.timedMeanScore).toBeCloseTo(
+      speakingBaseline.sectionSummaries["speaking"]!.timedMeanScore,
+      8,
+    );
+
+    // [R5 P1-3] Direct simulateExamPaper and evaluateCrnActionRoi enforce validateExamBlueprint.
+    const invalidSharedBp = createSharedFullPaperBlueprint({
+      blueprintId: "shared-invalid-entry",
+      title: "Missing Rubric TM",
+      totalTimeLimitMinutes: 30,
+      totalPoints: 20,
+      skillIds: ["s1"],
+      sections: [
+        {
+          sectionId: "essay",
+          label: "Essay",
+          scoringKind: "rubric_band",
+          timeLimitMinutes: null,
+          weight: 1,
+          scoreRange: [0, 20],
+          scoreStep: 1,
+          parts: [{ partId: "e1", label: "E1", weight: 1, skillIds: ["s1"] }],
+        },
+      ],
+    });
+    expect(() =>
+      simulateExamPaper({ blueprint: invalidSharedBp, learnerId: "l", beliefs: {}, evidence: [], examAtMs: DAY_MS }),
+    ).toThrow(RangeError);
+    expect(() =>
+      evaluateCrnActionRoi({
+        blueprint: invalidSharedBp,
+        learnerId: "l",
+        beliefs: {},
+        evidence: [],
+        examAtMs: DAY_MS,
+        baselineActions: [],
+        candidateAction: { actionId: "a", title: "A", durationHours: 1, kind: "skill_repair" },
+        crnSeed: 1,
+      }),
+    ).toThrow(RangeError);
+
+    // [R5 P1-4] Direct calibrateJointPassTargets deduplicates recordId and (learnerId, paperFamilyId).
+    const sim = simulateExamPaper({
+      blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+      learnerId: "learner-target",
+      beliefs,
+      evidence,
+      examAtMs: DAY_MS,
+      numDraws: 30,
+      seed: 5,
+    });
+    const oneRec = makeCalibrationRecords(1)[0]!;
+    const dupJointSameId = calibrateJointPassTargets({
+      simulation: sim,
+      blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+      calibrationRecords: [oneRec, oneRec, oneRec, oneRec],
+      targets: [{ targetOverall: 7.0, targetMinSection: 6.5 }],
+    });
+    const dupJointSamePair = calibrateJointPassTargets({
+      simulation: sim,
+      blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+      calibrationRecords: Array.from({ length: 4 }, (_, idx) => ({ ...oneRec, recordId: `dup-joint-${idx}` })),
+      targets: [{ targetOverall: 7.0, targetMinSection: 6.5 }],
+    });
+    expect(dupJointSameId[0]!.calibrationSampleCount).toBe(1);
+    expect(dupJointSameId[0]!.isCalibrated).toBe(false);
+    expect(dupJointSameId[0]!.calibratedProbability).toBeNull();
+    expect(dupJointSamePair[0]!.calibrationSampleCount).toBe(1);
+    expect(dupJointSamePair[0]!.isCalibrated).toBe(false);
+
+    // [R5 P2-1] Exact numeric equality on array-backed target lookup.
+    const exactMatchCal = makeCalibrationRecords(4);
+    const fuzzyTargetRes = calibrateJointPassTargets({
+      simulation: sim,
+      blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+      calibrationRecords: exactMatchCal,
+      targets: [{ targetOverall: 7.0000000005, targetMinSection: 6.5 }],
+    });
+    expect(fuzzyTargetRes[0]!.calibrationSampleCount).toBe(0);
+    expect(fuzzyTargetRes[0]!.calibratedProbability).toBeNull();
+
+    // [R5 P2-2] Entry-local Cauchy-Schwarz zero-pivot tolerance vs scaled rank-1 PSD.
+    expect(() =>
+      choleskyDecompose([
+        [0, 5e-5, 0],
+        [5e-5, 1e-8, 0],
+        [0, 0, 1e8],
+      ]),
+    ).toThrow(/positive semidefinite/);
+    const scaledPsd = choleskyDecompose([
+      [2 ** -82, 2 ** -21],
+      [2 ** -21, 2 ** 40],
+    ]);
+    expect(scaledPsd[0]![0]).toBeCloseTo(2 ** -41, 15);
+    expect(scaledPsd[1]![0]).toBeCloseTo(2 ** 20, 5);
+    expect(scaledPsd[1]![1]).toBe(0);
+    expect(() =>
+      choleskyDecompose([
+        [1, 1, 1],
+        [1, 1, 1],
+        [1, 1, 1],
+      ]),
+    ).not.toThrow();
+
+    // [R5 P2-3] Independent numDraws & precomputedDraws.length validation.
+    const oneDraw = [
+      {
+        zLatent: Array.from({ length: IELTS_ACADEMIC_SKILL_IDS.length }, () => 0),
+        nuSpeed: 0,
+        itemUniforms: Array.from({ length: 80 }, () => 0.5),
+        itemTimeNormals: Array.from({ length: 80 }, () => 0),
+        rubricScoreNormals: Array.from({ length: 5 }, () => 0),
+        rubricTimeNormals: Array.from({ length: 5 }, () => 0),
+      },
+    ];
+    expect(() =>
+      simulateExamPaper({
+        blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+        learnerId: "learner-target",
+        beliefs,
+        evidence,
+        examAtMs: DAY_MS,
+        numDraws: 0,
+        precomputedDraws: oneDraw,
+      }),
+    ).toThrow(RangeError);
+    expect(() =>
+      evaluateCrnActionRoi({
+        blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+        learnerId: "learner-target",
+        beliefs,
+        evidence,
+        examAtMs: DAY_MS,
+        baselineActions: [],
+        candidateAction: { actionId: "valid", title: "Valid", durationHours: 1, kind: "skill_repair" },
+        crnSeed: 1,
+        numDraws: 2,
+        precomputedDraws: oneDraw,
+      }),
+    ).toThrow(RangeError);
+
+    // [R5 P2-4] Recovery allocation excludes trimmed baseline action IDs.
+    const restSnap = buildUnifiedDecisionSnapshot({
+      decisionId: "dec-rest-dedup",
+      blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+      learnerId: "learner-target",
+      beliefs,
+      evidence,
+      calibrationRecords: makeCalibrationRecords(5),
+      examAtMs: DAY_MS,
+      crnSeed: 3,
+      horizonHours: 48,
+      executableMinutes: 600,
+      baselineActions: [{ actionId: "rest", title: "Baseline Rest", durationHours: 1, kind: "recovery", recoveryMinutes: 60 }],
+      candidateActions: [{ actionId: " rest ", title: "Dup Rest", durationHours: 1, kind: "recovery", recoveryMinutes: 60 }],
+      numDraws: 30,
+    });
+    expect(restSnap.allocatedRecoveryMinutes).toBe(0);
+    expect(restSnap.selectedActionIds).toEqual([]);
+
+    // [R5 P2-5] Populate partCensoringRates for censored rubric parts.
+    const exhaustedRubricBp = createSharedFullPaperBlueprint({
+      blueprintId: "shared-rubric-part-rate",
+      title: "Rubric Part Censoring Rate",
+      totalTimeLimitMinutes: 10,
+      totalPoints: 20,
+      skillIds: ["s1", "s2"],
+      sections: [
+        {
+          sectionId: "mcq",
+          label: "MCQ",
+          scoringKind: "item_raw_table",
+          timeLimitMinutes: null,
+          weight: 1,
+          scoreRange: [0, 10],
+          scoreStep: 1,
+          parts: [{ partId: "mcq-p1", label: "P1", weight: 1, skillIds: ["s1"] }],
+          items: [
+            {
+              itemId: "m-long",
+              sectionId: "mcq",
+              partId: "mcq-p1",
+              skillIds: ["s1"],
+              guess: 0,
+              lapse: 0,
+              points: 10,
+              timeModel: { mu: Math.log(900), speedLoading: 0, skillLoading: { s1: 0 }, sigma: 0.01 },
+            },
+          ],
+          rawToBandTable: Array.from({ length: 11 }, (_, raw) => ({ rawMin: raw, rawMax: raw, score: raw })),
+        },
+        {
+          sectionId: "essay",
+          label: "Essay",
+          scoringKind: "rubric_band",
+          timeLimitMinutes: null,
+          weight: 1,
+          scoreRange: [0, 10],
+          scoreStep: 1,
+          parts: [
+            {
+              partId: "essay-unstarted",
+              label: "Essay",
+              weight: 1,
+              skillIds: ["s2"],
+              timeModel: { mu: Math.log(300), speedLoading: 0, skillLoading: { s2: 0 }, sigma: 0.01 },
+            },
+          ],
+        },
+      ],
+    });
+    const rubricRateSim = simulateExamPaper({
+      blueprint: exhaustedRubricBp,
+      learnerId: "l",
+      beliefs: {
+        s1: createSkillBelief({ workspaceId: "w", learnerId: "l", courseId: "c", confirmedSkillVersion: 1, abilityMean: 3, lastDirectRecallAtMs: 0 }),
+        s2: createSkillBelief({ workspaceId: "w", learnerId: "l", courseId: "c", confirmedSkillVersion: 1, abilityMean: 3, lastDirectRecallAtMs: 0 }),
+      },
+      evidence: [],
+      examAtMs: DAY_MS,
+      numDraws: 10,
+      seed: 3,
+    });
+    expect(rubricRateSim.sectionSummaries["essay"]!.partCensoringRates["essay-unstarted"]).toBe(1);
+    expect(rubricRateSim.sectionSummaries["essay"]!.censoredItemFraction).toBe(1);
+
+    // [R5 P2-6] Prototype-safe itemSuccessProbability on external direct calls.
+    const protoProb = itemSuccessProbability(
+      {
+        itemId: "proto-item",
+        sectionId: "reading",
+        partId: "reading-passage-1",
+        skillIds: ["constructor"],
+        guess: 0.25,
+        lapse: 0.05,
+        timeModel: { mu: 4, speedLoading: 0.1, skillLoading: {}, sigma: 0.1 },
+      },
+      {},
+    );
+    expect(protoProb).toBeCloseTo(0.25 + 0.7 * 0.5, 10);
+
+    // [R5 P2-7] Blank candidateAction.actionId throws RangeError in evaluateCrnActionRoi.
+    expect(() =>
+      evaluateCrnActionRoi({
+        blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+        learnerId: "learner-target",
+        beliefs,
+        evidence,
+        examAtMs: DAY_MS,
+        baselineActions: [],
+        candidateAction: { actionId: "   ", title: "Blank ID", durationHours: 1, kind: "skill_repair" },
+        crnSeed: 1,
+      }),
+    ).toThrow(RangeError);
+  });
 });

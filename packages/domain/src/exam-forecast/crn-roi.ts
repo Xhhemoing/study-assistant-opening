@@ -3,6 +3,8 @@ import { validateExamBlueprint } from "./ielts-blueprint";
 import {
   generatePaperRandomDraws,
   partitionExamEvidence,
+  resolveDrawsCount,
+  sectionPartIdsMap,
   sectionRangesMap,
   simulateExamPaper,
   validateNumDraws,
@@ -61,17 +63,21 @@ export type EvaluateCrnActionRoiInput = {
  * Explicitly forbids CQR interval subtraction.
  */
 export function evaluateCrnActionRoi(input: EvaluateCrnActionRoiInput): CrnActionEvaluation {
+  const blueprintIssues = validateExamBlueprint(input.blueprint);
+  if (blueprintIssues.length > 0) {
+    throw new RangeError(`Invalid exam blueprint: ${blueprintIssues.join(", ")}`);
+  }
   const trimmedLearnerId = input.learnerId.trim();
   if (!trimmedLearnerId) {
     throw new RangeError("learnerId must be a non-empty string");
   }
+  if (!input.candidateAction.actionId.trim()) {
+    throw new RangeError("candidateAction.actionId must be a non-empty string");
+  }
   if (!(input.candidateAction.durationHours > 0) || !Number.isFinite(input.candidateAction.durationHours)) {
     throw new RangeError("candidateAction.durationHours must be positive and finite");
   }
-  const numDraws =
-    input.precomputedDraws !== undefined
-      ? validateNumDraws(input.precomputedDraws.length)
-      : validateNumDraws(input.numDraws, 400);
+  const numDraws = resolveDrawsCount(input.numDraws, input.precomputedDraws, 400);
   const draws =
     input.precomputedDraws ?? generatePaperRandomDraws(input.blueprint, numDraws, input.crnSeed);
 
@@ -79,6 +85,7 @@ export function evaluateCrnActionRoi(input: EvaluateCrnActionRoiInput): CrnActio
     learnerId: trimmedLearnerId,
     examAtMs: input.examAtMs,
     sectionRanges: sectionRangesMap(input.blueprint),
+    sectionParts: sectionPartIdsMap(input.blueprint),
   }).admitted;
 
   const baseEffects = composeActionSetEffects(input.baselineActions);
@@ -166,8 +173,11 @@ export function evaluateCrnActionRoi(input: EvaluateCrnActionRoiInput): CrnActio
   };
 }
 
-function deduplicateActionsById(actions: readonly CandidateStudyAction[]): CandidateStudyAction[] {
-  const seen = new Set<string>();
+function deduplicateActionsById(
+  actions: readonly CandidateStudyAction[],
+  excludeIds?: ReadonlySet<string>,
+): CandidateStudyAction[] {
+  const seen = new Set<string>(excludeIds);
   const deduped: CandidateStudyAction[] = [];
   for (const action of actions) {
     const id = action.actionId.trim();
@@ -219,7 +229,8 @@ export function buildUnifiedDecisionSnapshot(input: {
 
   const blueprintValid = validateExamBlueprint(input.blueprint).length === 0;
   const baselineActions = deduplicateActionsById(input.baselineActions ?? []);
-  const dedupedCandidates = deduplicateActionsById(input.candidateActions);
+  const baselineActionIds = new Set(baselineActions.map((a) => a.actionId.trim()));
+  const dedupedCandidates = deduplicateActionsById(input.candidateActions, baselineActionIds);
   const studyCandidates = dedupedCandidates.filter(
     (a) => a.kind !== "recovery" && Number.isFinite(a.durationHours) && a.durationHours > 0,
   );
@@ -248,6 +259,7 @@ export function buildUnifiedDecisionSnapshot(input: {
         learnerId,
         examAtMs: input.examAtMs,
         sectionRanges: sectionRangesMap(input.blueprint),
+        sectionParts: sectionPartIdsMap(input.blueprint),
       })
     : { admitted: [] as readonly ExamEvidenceRecord[] };
 
