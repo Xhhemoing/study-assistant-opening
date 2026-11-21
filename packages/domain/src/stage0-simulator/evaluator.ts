@@ -97,6 +97,36 @@ function normalizeCompactForLeakScan(text: string): string {
   );
 }
 
+/** Remove paired inline delimiters before math normalization collapses spaces around `*`. */
+function stripEquationFormatting(text: string): string {
+  const parts = text.split(/(\\[()[\]]|\*+|_+|`+|~~|\$\$?)/u);
+  const openings = new Map<string, number>();
+  for (let i = 1; i < parts.length; i += 2) {
+    const marker = parts[i]!;
+    if (marker === "\\(" || marker === "\\[") {
+      openings.set(marker === "\\(" ? "\\)" : "\\]", i);
+      continue;
+    }
+
+    const before = parts[i - 1]!;
+    const after = parts[i + 1]!;
+    const emphasis = /^[*_~]/.test(marker);
+    // Emphasis touches its content. Keep markers attached to an outer operand
+    // so multiplication and identifier continuations reach the boundary check.
+    const canOpen = !emphasis || (!/[\p{L}\p{M}\p{N})\]}]$/u.test(before) && !/^\s/.test(after));
+    const canClose = !emphasis || (!/\s$/.test(before) && !/^[\p{L}\p{M}\p{N}([{]/u.test(after));
+    const opening = openings.get(marker);
+    if (opening !== undefined && canClose) {
+      parts[opening] = "";
+      parts[i] = "";
+      openings.delete(marker);
+    } else if (!marker.startsWith("\\") && canOpen) {
+      openings.set(marker, i);
+    }
+  }
+  return parts.join("");
+}
+
 /**
  * Preserves whitespace around `-`/`+` (so prose words like `"Use -7.5e-1."` keep
  * their boundary before unary `-`) while compacting `*`, `/`, `^`, and exponent brackets.
@@ -456,6 +486,7 @@ export function detectProtectedLeakage(
   const normalizedText = normalizeForLeakScan(releasedHintText);
   if (!normalizedText) return [];
   const compactText = normalizeCompactForLeakScan(releasedHintText);
+  let compactEquationText: string | undefined;
   const numericText = normalizeNumericScanText(releasedHintText);
   const scientificRationals = extractScientificRationals(numericText);
   const fractionRationals = extractFractionRationals(numericText);
@@ -507,7 +538,8 @@ export function detectProtectedLeakage(
       const leftBoundary = /(?<![\p{L}\p{M}\p{N}_+*/^=<>!%.)\]}\\-]|\d\s)/u;
       const rightBoundary = /(?![\p{L}\p{M}\p{N}_+*/^=<>%-]|\.\d)/u;
       const equation = leftBoundary.source + escapeRegExp(compactToken) + rightBoundary.source;
-      matched = new RegExp(equation, "u").test(compactText);
+      compactEquationText ??= normalizeCompactForLeakScan(stripEquationFormatting(releasedHintText));
+      matched = new RegExp(equation, "u").test(compactEquationText);
     } else {
       matched =
         normalizedText.includes(normalizedToken) ||

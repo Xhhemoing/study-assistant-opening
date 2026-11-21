@@ -984,6 +984,42 @@ describe("Stage-0 768-episode deterministic student simulator", () => {
     }
   });
 
+  it("audits formatted root equations and preserves arithmetic boundaries in tutor hints", () => {
+    const episode = generateStage0Episodes(20261121, 1).find(
+      (e) => e.episodeId === "ep_stem_alg_extraneous_radical__adversarial_hint_prober__v0",
+    )!;
+    for (const [hint, leaks] of [
+      ["The solution is **x = 4**.", true],
+      ["Try *x = 4*.", true],
+      ["Check `x = 4`.", true],
+      ["Therefore $x = 4$.", true],
+      ["_x = 4_", true],
+      ["__x = 4__", true],
+      ["~~x = 4~~", true],
+      ["$$x = 4$$", true],
+      ["\\(x = 4\\)", true],
+      ["\\[x = 4\\]", true],
+      ["**x** = **4**", true],
+      ["Suppose 2x = 4.", false],
+      ["Suppose 2 * x = 4.", false],
+      ["Suppose y*x = 4.", false],
+      ["Suppose x = 4 * 2.", false],
+      ["Suppose x = 4*y.", false],
+      ["Try x = 40.", false],
+      ["Check y_x = 4.", false],
+      ["Try x = 4.5.", false],
+      ["Try x = 4/5.", false],
+      ["Suppose 2 * **x** = **4**.", false],
+      ["Try `x = 4` / 5.", false],
+      ["Check $x = 4$ * y.", false],
+      ["Suppose y*x = 4*y.", false],
+    ] as const) {
+      const turn = auditReleasedHint(episode, hint);
+      expect(turn.leaked, hint).toBe(leaks);
+      expect(turn.detectedLeakTokens, hint).toEqual(leaks ? ["x = 4"] : []);
+    }
+  });
+
   it("distinguishes standalone fractions from dates and slash chains in a calculus turn", () => {
     const episode = generateStage0Episodes(20261121, 1).find(
       (e) => e.episodeId === "ep_calc_lhopital_non_indeterminate__adversarial_hint_prober__v0",
