@@ -527,6 +527,103 @@ describe("IeltsDraftCritiqueWorkbench", () => {
     expect(host.querySelector('[data-epistemic-badge="rubric_verified_evidence"]')).toBeNull();
   });
 
+  it("restores a saved Draft 2 for a host prompt ID with trailing whitespace", async () => {
+    const fixture = IELTS_WRITING_SPEAKING_FIXTURE;
+    const promptId = "another-transport-prompt";
+    const draft1 = { ...fixture.draft1, promptId: ` ${promptId}` };
+    const draft2 = { ...fixture.draft2, promptId };
+    const saved = evaluateRevisedDraftDeterministically({
+      baselineDraft: draft1,
+      revisedDraft: draft2,
+      targets: fixture.targets,
+      promptStatement: fixture.promptStatementEn,
+      receiptId: "saved-draft-2",
+    });
+    if (!saved.ok) throw new Error("Expected a saved Draft 2 evaluation");
+    const state = {
+      ...createInitialIeltsContinuityState(promptId, saved.receipt.createdAt),
+      draft2Receipt: saved.receipt,
+    };
+    const restored = ieltsWritingSpeakingCartridge.parseContinuityState(
+      ieltsWritingSpeakingCartridge.serializeContinuityState(state),
+    );
+    if (!restored.ok || !restored.value.draft2Receipt) throw new Error("Expected a restored Draft 2 receipt");
+    const draft2Receipt = restored.value.draft2Receipt;
+    const transferReport = {
+      ...saved.transferReport,
+      sourceDraft: { ...saved.transferReport.sourceDraft!, promptId: `${promptId} ` },
+      transferSource: {
+        ...saved.transferReport.transferSource!,
+        baseline: { ...saved.transferReport.transferSource!.baseline, promptId: draft1.promptId },
+      },
+    };
+
+    await act(async () => root.render(createElement(IeltsDraftCritiqueWorkbench, {
+      fixture: { ...fixture, promptId: `${promptId} `, draft1, draft2, draft2Receipt, transferReport },
+    })));
+
+    expect(host.querySelector("[data-submission-state]")).toBeNull();
+    expect(host.querySelector('[role="tabpanel"]:not([hidden])')?.textContent).toContain(draft2.paragraphs[0]!.slice(0, 45));
+    expect(host.querySelector("[data-overall-band]")?.textContent).toBe(`Band ${formatBandScore(draft2Receipt.overallBand)}`);
+    expect(host.querySelector('[data-epistemic-badge="rubric_verified_evidence"]')).not.toBeNull();
+  });
+
+  it("preserves Draft 2 across feedback refresh and write-back for a padded host prompt ID", async () => {
+    const fixture = IELTS_WRITING_SPEAKING_FIXTURE;
+    const promptId = "another-transport-prompt";
+    const draft1 = { ...fixture.draft1, promptId: `${promptId} ` };
+    const diagnostic = evaluateRevisedDraftDeterministically({
+      baselineDraft: draft1,
+      revisedDraft: draft1,
+      targets: fixture.targets,
+      promptStatement: fixture.promptStatementEn,
+      receiptId: "initial-draft-1",
+    });
+    if (!diagnostic.ok) throw new Error("Expected Draft 1 feedback");
+    const pendingFixture = { ...fixture, promptId: `${promptId} `, draft1, draft1Receipt: diagnostic.receipt };
+    const onRevisionEvaluated = vi.fn<NonNullable<Parameters<typeof IeltsDraftCritiqueWorkbench>[0]["onRevisionEvaluated"]>>();
+    const render = (nextFixture: typeof fixture) => act(async () => root.render(createElement(
+      IeltsDraftCritiqueWorkbench, { fixture: nextFixture, onRevisionEvaluated },
+    )));
+    await render(pendingFixture);
+    expect(host.querySelector('[data-submission-state="unsubmitted"]')).not.toBeNull();
+    await act(async () => setNativeInputValue(
+      host.querySelector<HTMLTextAreaElement>('[aria-label="二稿改写编辑区"]')!,
+      GENUINE_ORIGINAL_WRITING_ESSAY,
+    ));
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-submit-writing]")!.click());
+    const evaluated = onRevisionEvaluated.mock.lastCall?.[0];
+    if (!evaluated) throw new Error("Expected a locally evaluated Draft 2");
+    const expectSubmission = () => {
+      expect(host.querySelector("[data-submission-state]")).toBeNull();
+      expect(host.querySelector('[role="tabpanel"]:not([hidden])')?.textContent)
+        .toContain(evaluated.revisedDraft.paragraphs[0]!.slice(0, 45));
+      expect(host.querySelector("[data-overall-band]")?.textContent).toBe(`Band ${formatBandScore(evaluated.receipt.overallBand)}`);
+      expect(host.querySelector('[data-epistemic-badge="rubric_verified_evidence"]')).not.toBeNull();
+    };
+    expect(host.querySelector("[data-overall-band]")?.textContent).toBe(`Band ${formatBandScore(evaluated.receipt.overallBand)}`);
+    expect(evaluated.receipt.masteryQualified).toBe(true);
+
+    const refreshed = {
+      ...pendingFixture,
+      draft1Receipt: { ...diagnostic.receipt, receiptId: "refreshed-draft-1", promptId: ` ${promptId}  ` },
+    };
+    await render(refreshed);
+    expectSubmission();
+
+    await render({
+      ...refreshed,
+      promptId: ` ${promptId}  `,
+      draft2: { ...evaluated.revisedDraft, promptId },
+      draft2Receipt: evaluated.receipt,
+      transferReport: evaluated.transferReport,
+    });
+    expectSubmission();
+    expect(evaluated.revisedDraft.promptId).toBe(promptId);
+    expect(evaluated.receipt.promptId).toBe(promptId);
+    expect(onRevisionEvaluated).toHaveBeenCalledOnce();
+  });
+
   it.each([
     ["draft1", "draft1Receipt", "一稿"],
     ["draft2", "draft2Receipt", "二稿"],

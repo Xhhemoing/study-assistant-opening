@@ -165,13 +165,48 @@ function evaluationFingerprint(
 
 const PARAGRAPH_BREAK = /\n\s*\n+/u;
 
-export function IeltsDraftCritiqueWorkbench(props: IeltsDraftCritiqueWorkbenchProps) {
-  const hasExternalFixture = props.fixture !== undefined;
-  const fixture = props.fixture ?? IELTS_WRITING_SPEAKING_FIXTURE;
-  const isDemoPreview = props.demoFixtureMode === true;
-  const promptBoundaryKey = JSON.stringify([isDemoPreview, hasExternalFixture, fixture.promptId]);
+function normalizePromptRecord<T extends { readonly promptId: string }>(record: T): T {
+  if (typeof record.promptId !== "string") return record;
+  const promptId = record.promptId.trim();
+  return promptId === record.promptId ? record : { ...record, promptId };
+}
 
-  return <WritingWorkbenchPromptSession key={promptBoundaryKey} {...props} />;
+function normalizeWritingEvidence<T extends Pick<IeltsRubricReceipt, "sourceDraft" | "transferSource">>(
+  evidence: T,
+): T {
+  const sourceDraft = evidence.sourceDraft && normalizePromptRecord(evidence.sourceDraft);
+  let transferSource = evidence.transferSource;
+  if (transferSource?.baseline) {
+    const baseline = normalizePromptRecord(transferSource.baseline);
+    if (baseline !== transferSource.baseline) transferSource = { ...transferSource, baseline };
+  }
+  return sourceDraft === evidence.sourceDraft && transferSource === evidence.transferSource
+    ? evidence
+    : { ...evidence, sourceDraft, transferSource };
+}
+
+export function IeltsDraftCritiqueWorkbench(props: IeltsDraftCritiqueWorkbenchProps) {
+  const fixture = useMemo(() => {
+    const incoming = props.fixture;
+    if (!incoming) return undefined;
+    // Session keys and saved evaluation comparisons share the same prompt IDs as the domain.
+    return {
+      ...normalizePromptRecord(incoming),
+      draft1: normalizePromptRecord(incoming.draft1),
+      draft2: normalizePromptRecord(incoming.draft2),
+      draft1Receipt: normalizeWritingEvidence(normalizePromptRecord(incoming.draft1Receipt)),
+      draft2Receipt: normalizeWritingEvidence(normalizePromptRecord(incoming.draft2Receipt)),
+      transferReport: normalizeWritingEvidence(incoming.transferReport),
+    };
+  }, [props.fixture]);
+  const isDemoPreview = props.demoFixtureMode === true;
+  const promptBoundaryKey = JSON.stringify([
+    isDemoPreview,
+    fixture !== undefined,
+    (fixture ?? IELTS_WRITING_SPEAKING_FIXTURE).promptId,
+  ]);
+
+  return <WritingWorkbenchPromptSession key={promptBoundaryKey} {...props} fixture={fixture} />;
 }
 
 function WritingWorkbenchPromptSession({
@@ -565,7 +600,7 @@ function WritingWorkbenchPromptSession({
     hasSubmitted &&
     verifiedForCurrentPrompt &&
     !activeDraftAssisted &&
-    activeDraft.promptId.trim() === fixture.promptId.trim() &&
+    activeDraft.promptId === fixture.promptId &&
     activeReceipt.sourceDraft !== undefined &&
     activeReceipt.draftVersion === activeDraft.version &&
     (viewMode === "draft1"
