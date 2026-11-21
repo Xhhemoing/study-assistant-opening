@@ -267,7 +267,7 @@ describe("PitfallShareCard, /s/[token] page, and opengraph-image", () => {
     expect(navMocks.ogCalls).toHaveLength(0);
   });
 
-  it("generates non-cacheable OpenGraph images with the appropriate badge and footer", async () => {
+  it("generates briefly cacheable OpenGraph images with the appropriate badge and footer", async () => {
     vi.spyOn(process, "cwd").mockReturnValue(resolve(__dirname, "../../../.."));
     expect(ogDynamic).toBe("force-dynamic");
     vi.stubEnv("OPENING_PUBLIC_TRY", "1");
@@ -278,11 +278,12 @@ describe("PitfallShareCard, /s/[token] page, and opengraph-image", () => {
     });
     expect(validOg).toBeInstanceOf(Response);
     expect(validOg.status).toBe(200);
-    expect(validOg.headers.get("cache-control")).toBe("no-store");
+    const cacheControl = "public, max-age=30, must-revalidate";
+    expect(validOg.headers.get("cache-control")).toBe(cacheControl);
     expect(navMocks.ogCalls[0]?.options).toMatchObject({
       width: 1200,
       height: 630,
-      headers: { "Cache-Control": "no-store" },
+      headers: { "Cache-Control": cacheControl },
     });
     expect(JSON.stringify(navMocks.ogCalls[0]?.element)).toContain("BFS 入队时就该标记已访问");
     expect(JSON.stringify(navMocks.ogCalls[0]?.element)).toContain("约 52% 同学曾在此踩坑 · 36 人样本");

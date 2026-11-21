@@ -737,3 +737,668 @@ describe("media_usage_upper_bound to vendor_receipt reconciliation", () => {
     expect(h2.alerts).toHaveLength(1);
   });
 });
+
+describe("retrieval turn-family budget aggregation and isolation", () => {
+  function turnFamilyLedgerHarness(options: { clock?: Date } = {}) {
+    let clock = options.clock ?? new Date("2026-11-21T10:00:00Z");
+    let seq = 0;
+    const parentBudgets = new Map<string, {
+      workspace_id: string;
+      id: string;
+      budget_cents: number;
+      max_provider_calls: number;
+      blocked_at: Date | null;
+      blocked_reason: string | null;
+    }>();
+    const reservations = new Map<string, Record<string, unknown>>();
+    const reconcileEvents = new Set<string>();
+    const queries: Array<{ text: string; params: unknown[] }> = [];
+
+    const normalizeRoot = (id: string): string => {
+      let cur = id;
+      while (cur.startsWith("retrieval:")) {
+        const rest = cur.slice("retrieval:".length);
+        if (!rest.trim()) break;
+        cur = rest;
+      }
+      return cur;
+    };
+
+    const flat = (s: TemplateStringsArray, vals: unknown[]): { text: string; params: unknown[] } => {
+      let text = "";
+      const params: unknown[] = [];
+      for (let i = 0; i < s.length; i++) {
+        text += s[i]!;
+        if (i < vals.length) {
+          const v = vals[i];
+          if (v && typeof v === "object" && "__frag" in (v as Record<string, unknown>)) {
+            const inner = v as { text: string; params: unknown[] };
+            text += inner.text;
+            params.push(...inner.params);
+          } else {
+            text += "?";
+            params.push(v);
+          }
+        }
+      }
+      return { text, params };
+    };
+
+    const runQuery = async (strings: TemplateStringsArray, ...bindings: unknown[]): Promise<unknown[]> => {
+      const compiled = flat(strings, bindings);
+      const q = compiled.text;
+      if (!q.trim()) return [];
+      queries.push(compiled);
+
+      if (q.includes("FROM workspaces WHERE id")) return [{ id: scope.workspaceId }];
+      if (q.includes("clock_timestamp()")) return [{ instant: clock }];
+      if (q.includes("FROM workspace_preferences")) return [];
+
+      if (q.includes("WITH reconciled AS")) {
+        const instant = compiled.params[0] as Date;
+        const wsId = compiled.params[3] as string;
+        const cutoff = compiled.params[4] as Date;
+        for (const row of reservations.values()) {
+          if (row.workspace_id === wsId && row.state === "reserved" && (row.created_at as Date) < cutoff) {
+            row.state = "completed";
+            row.updated_at = instant;
+            row.reconciled_at = instant;
+            row.outcome_unknown_at = row.outcome_unknown_at ?? instant;
+            row.pending_reconcile_cents = row.amount_cents;
+            reconcileEvents.add(`${String(row.id)}:ttl_reconciled`);
+          }
+        }
+        return [];
+      }
+
+      if (q.includes("FROM opening_budget_reservations") && q.includes("WHERE request_id IN")) {
+        const primaryId = compiled.params[0] as string;
+        const canonicalFallbackId = compiled.params[1] as string | null;
+        const alternateId = compiled.params[2] as string | null;
+        const wsId = compiled.params[3] as string;
+        const parentId = compiled.params[4] as string | null;
+        return [...reservations.values()]
+          .filter(r => r.request_id === primaryId
+            || (canonicalFallbackId != null && r.request_id === canonicalFallbackId)
+            || (alternateId != null && r.request_id === alternateId && r.workspace_id === wsId && r.parent_interaction_id === parentId))
+          .map(r => ({ ...r }));
+      }
+
+      if (q.includes("SELECT id, state, purpose, result_ref") && q.includes("FROM opening_budget_reservations")) {
+        return [];
+      }
+
+      if (q.includes("AS has_parent") && q.includes("FROM opening_budget_reservations")) {
+        const exactParentId = compiled.params[0] as string;
+        const wsId = compiled.params[1] as string;
+        const familyIds = compiled.params[2] as string[];
+        const rootId = compiled.params[4] as string;
+        const matched = [...reservations.values()].filter(r =>
+          r.workspace_id === wsId
+          && r.parent_interaction_id != null
+          && (familyIds.includes(String(r.parent_interaction_id)) || normalizeRoot(String(r.parent_interaction_id)) === rootId),
+        );
+        if (!matched.length) return [{ has_parent: null, not_sent: null }];
+        const hasParent = matched.some(r => r.parent_interaction_id === exactParentId);
+        const notSent = matched.every(r =>
+          r.state === "released"
+          && r.outcome_unknown_at == null
+          && Number(r.pending_reconcile_cents ?? 0) === 0
+          && (r.release_reason === "not_sent" || r.release_reason === "cancelled"),
+        );
+        return [{ has_parent: hasParent, not_sent: notSent }];
+      }
+
+      if (q.includes("FROM opening_parent_interaction_budgets") && q.includes("SELECT *")) {
+        const wsId = compiled.params[0] as string;
+        const familyIds = compiled.params[1] as string[];
+        const rootId = compiled.params[3] as string;
+        return [...parentBudgets.values()]
+          .filter(p => p.workspace_id === wsId && (familyIds.includes(p.id) || normalizeRoot(p.id) === rootId))
+          .map(p => ({ ...p }));
+      }
+
+      if (q.includes("INSERT INTO opening_parent_interaction_budgets")) {
+        const [wsId, id, budgetCents, maxCalls, blockedAt, blockedReason] = compiled.params as [
+          string, string, number, number, Date | null, string | null,
+        ];
+        if (!parentBudgets.has(`${wsId}:${id}`)) {
+          parentBudgets.set(`${wsId}:${id}`, {
+            workspace_id: wsId,
+            id,
+            budget_cents: budgetCents,
+            max_provider_calls: maxCalls,
+            blocked_at: blockedAt,
+            blocked_reason: blockedReason,
+          });
+        }
+        return [];
+      }
+
+      if (q.includes("AS unknown_calls") && q.includes("FROM opening_budget_reservations")) {
+        const exactParentId = compiled.params[0] as string;
+        const wsId = compiled.params[1] as string;
+        const familyIds = compiled.params[2] as string[];
+        const rootId = compiled.params[4] as string;
+        const matched = [...reservations.values()].filter(r =>
+          r.workspace_id === wsId
+          && r.parent_interaction_id != null
+          && (familyIds.includes(String(r.parent_interaction_id)) || normalizeRoot(String(r.parent_interaction_id)) === rootId),
+        );
+        let cents = 0;
+        let calls = 0;
+        let unknownCalls = 0;
+        for (const r of matched) {
+          const pending = Number(r.pending_reconcile_cents ?? 0);
+          const amt = Number(r.amount_cents);
+          if (r.state !== "released" || r.outcome_unknown_at != null) {
+            cents += Math.max(amt, pending);
+          } else if (pending > 0) {
+            cents += pending;
+          }
+          const isFence = r.state === "released" && r.release_reason === "not_sent"
+            && amt === 0 && Number(r.reserved_amount_cents ?? 0) === 0
+            && r.model_snapshot == null && r.execution_claimed_at == null && r.outcome_unknown_at == null;
+          if (!isFence) calls++;
+          if (r.outcome_unknown_at != null && r.parent_interaction_id === exactParentId) unknownCalls++;
+        }
+        return [{ cents, calls, unknown_calls: unknownCalls }];
+      }
+
+      if (q.includes("COALESCE(sum(amount_cents), 0) AS used FROM opening_budget_reservations")) {
+        const [wsId, dayStart, nextDayStart] = compiled.params as [string, Date, Date];
+        const used = [...reservations.values()]
+          .filter(r =>
+            r.workspace_id === wsId
+            && (
+              r.state === "reserved"
+              || (
+                r.state === "completed"
+                && (r.created_at as Date) >= dayStart
+                && (r.created_at as Date) < nextDayStart
+              )
+            ),
+          )
+          .reduce((sum, r) => sum + Number(r.amount_cents), 0);
+        return [{ used }];
+      }
+
+      if (q.includes("SELECT count(*)::int AS n FROM opening_budget_reservations")) {
+        const wsId = compiled.params[0] as string;
+        const modelId = compiled.params[1] as string;
+        const count = [...reservations.values()].filter(r =>
+          r.workspace_id === wsId && r.state !== "released"
+          && (r.model_snapshot as { id?: string } | null)?.id === modelId,
+        ).length;
+        return [{ n: count }];
+      }
+
+      if (q.includes("INSERT INTO opening_budget_reservations") && q.includes("SELECT")) {
+        const [id, wsId, purpose, amountCents, reservedAmountCents, requestId, modelSnapshot, parentId, createdAt, updatedAt,
+          zeroOrUnlimited, checkAmount] = compiled.params as [
+          string, string, string, number, number, string, unknown, string | null, Date, Date, boolean, number,
+        ];
+        if (!zeroOrUnlimited) {
+          const used = [...reservations.values()]
+            .filter(r => r.workspace_id === wsId && (r.state === "reserved" || r.state === "completed"))
+            .reduce((sum, r) => sum + Number(r.amount_cents), 0);
+          const cap = Number(compiled.params[compiled.params.length - 1]);
+          if (checkAmount + used > cap) return [];
+        }
+        const uuid = id || `00000000-0000-4000-8000-${String(++seq).padStart(12, "0")}`;
+        const row = {
+          id: uuid,
+          workspace_id: wsId,
+          parent_interaction_id: parentId,
+          settlement_cost_basis: null,
+          purpose,
+          amount_cents: amountCents,
+          reserved_amount_cents: reservedAmountCents,
+          request_id: requestId,
+          state: "reserved",
+          model_snapshot: modelSnapshot,
+          execution_claimed_at: null,
+          outcome_unknown_at: null,
+          release_reason: null,
+          result_ref: null,
+          reconciled_at: null,
+          pending_reconcile_cents: 0,
+          created_at: createdAt,
+          updated_at: updatedAt,
+        };
+        reservations.set(uuid, row);
+        return [{ ...row }];
+      }
+
+      if (q.includes("SELECT request_id, parent_interaction_id, purpose FROM opening_budget_reservations")) {
+        const row = reservations.get(String(compiled.params[0]));
+        return row ? [{ request_id: row.request_id, parent_interaction_id: row.parent_interaction_id, purpose: row.purpose }] : [];
+      }
+
+      if (q.includes("SET execution_claimed_at = now()")) {
+        const id = String(compiled.params[0]);
+        const row = reservations.get(id);
+        if (row && row.state === "reserved" && row.execution_claimed_at == null && row.outcome_unknown_at == null) {
+          row.execution_claimed_at = clock;
+          row.updated_at = clock;
+          return [{ id }];
+        }
+        return [];
+      }
+
+      if (q.includes("SET outcome_unknown_at = COALESCE")) {
+        const id = String(compiled.params[0]);
+        const row = reservations.get(id);
+        if (row && row.state === "reserved") {
+          row.outcome_unknown_at = row.outcome_unknown_at ?? clock;
+          row.updated_at = clock;
+          return [{ ...row }];
+        }
+        return [];
+      }
+
+      if (q.includes("UPDATE opening_budget_reservations") && q.includes("SET state =")) {
+        const [newState, releaseReason, resultRef, target] = compiled.params as [string, string | null, string | null, string];
+        const row = [...reservations.values()].find(r =>
+          (q.includes("request_id =") ? r.request_id === target : r.id === target)
+          && r.state === "reserved" && (newState !== "released" || r.outcome_unknown_at == null),
+        );
+        if (!row) return [];
+        row.state = newState;
+        row.release_reason = releaseReason;
+        row.result_ref = resultRef ?? row.result_ref;
+        row.updated_at = clock;
+        return [{ ...row }];
+      }
+
+      if (q.includes("SELECT * FROM opening_budget_reservations") && q.includes("FOR UPDATE")) {
+        const row = reservations.get(String(compiled.params[0]));
+        return row ? [{ ...row }] : [];
+      }
+
+      if (q.includes("UPDATE opening_parent_interaction_budgets")) {
+        const [instant, wsId, familyIds, , rootId] = compiled.params as [Date, string, string[], string, string];
+        for (const p of parentBudgets.values()) {
+          if (p.workspace_id === wsId && (familyIds.includes(p.id) || normalizeRoot(p.id) === rootId)) {
+            p.blocked_at = p.blocked_at ?? instant;
+            p.blocked_reason = "actual_exceeded_conservative_bound";
+          }
+        }
+        return [];
+      }
+
+      if (q.includes("UPDATE opening_budget_reservations") && q.includes("settlement_cost_basis")) {
+        const late = q.includes("pending_reconcile_cents = 0");
+        const actualCents = compiled.params[0] as number;
+        const instant = compiled.params[1] as Date;
+        const resultRef = compiled.params[late ? 3 : 2] as string | null;
+        const costBasis = compiled.params[late ? 4 : 3] as string;
+        const id = compiled.params[late ? 5 : 4] as string;
+        const row = reservations.get(id);
+        if (!row) return [];
+        row.amount_cents = actualCents;
+        row.state = "completed";
+        row.updated_at = instant;
+        row.result_ref = resultRef ?? row.result_ref;
+        row.outcome_unknown_at = null;
+        row.pending_reconcile_cents = 0;
+        row.settlement_cost_basis = costBasis;
+        return [{ ...row }];
+      }
+
+      return [];
+    };
+
+    const sqlTag = ((strings: TemplateStringsArray, ...bindings: unknown[]) => {
+      const head = strings[0]!.trimStart();
+      if (!/^(?:SELECT|WITH|INSERT|UPDATE|DELETE)\b/i.test(head)) {
+        return { __frag: true, text: strings.join("?"), params: bindings };
+      }
+      return runQuery(strings, ...bindings);
+    }) as unknown as Sql & { json: (v: unknown) => unknown };
+    sqlTag.json = (v: unknown) => v;
+
+    const sql = Object.assign(sqlTag, {
+      begin: async (run: (txArg: typeof sqlTag) => Promise<unknown>) => {
+        const snapBudgets = new Map([...parentBudgets.entries()].map(([k, v]) => [k, { ...v }]));
+        const snapReservations = new Map([...reservations.entries()].map(([k, v]) => [k, { ...v }]));
+        try {
+          return await run(sqlTag);
+        } catch (error) {
+          parentBudgets.clear();
+          for (const [k, v] of snapBudgets) parentBudgets.set(k, v);
+          reservations.clear();
+          for (const [k, v] of snapReservations) reservations.set(k, v);
+          throw error;
+        }
+      },
+    }) as unknown as Sql;
+
+    return {
+      sql,
+      queries,
+      reservations,
+      advanceClock: (ms: number) => { clock = new Date(clock.getTime() + ms); },
+      insertFence: (parentInteractionId: string, requestId: string) => {
+        const id = `00000000-0000-4000-8000-${String(++seq).padStart(12, "0")}`;
+        reservations.set(id, {
+          id,
+          workspace_id: scope.workspaceId,
+          parent_interaction_id: parentInteractionId,
+          settlement_cost_basis: null,
+          purpose: "tutor",
+          amount_cents: 0,
+          reserved_amount_cents: 0,
+          request_id: requestId,
+          state: "released",
+          model_snapshot: null,
+          execution_claimed_at: null,
+          outcome_unknown_at: null,
+          release_reason: "not_sent",
+          result_ref: null,
+          reconciled_at: null,
+          pending_reconcile_cents: 0,
+          created_at: clock,
+          updated_at: clock,
+        });
+      },
+    };
+  }
+
+  it("aggregates spend across retrieval:<turnId> and <turnId> in unlimited mode while keeping outcome_unknown isolated to retrieval", async () => {
+    const h = turnFamilyLedgerHarness();
+    const repo = createOpeningBudgetRepository(h.sql, { envCapCents: 0, dailyQuotaMode: "unlimited", parentCapCents: 10 });
+    const turnId = "study-turn:turn-1";
+    const retrievalId = `retrieval:${turnId}`;
+
+    // 1c embedding times out after send -> outcome_unknown_at set on retrieval:<turnId>.
+    const emb = await repo.reserve(scope, {
+      purpose: "material-embedding",
+      amountCents: 1,
+      requestId: "material-query:op-1",
+      requestFamily: null,
+      parentBudget: { id: retrievalId },
+    });
+    expect(await repo.claimExecution(scope, emb.id)).toBe(true);
+    await repo.markUnknown(scope, emb.id);
+
+    // Exact retry on retrieval:<turnId> replays the unknown reservation without creating a second send.
+    const embReplay = await repo.reserve(scope, {
+      purpose: "material-embedding",
+      amountCents: 1,
+      requestId: "material-query:op-1",
+      requestFamily: null,
+      parentBudget: { id: retrievalId },
+    });
+    expect(embReplay.replayed).toBe(true);
+    expect(embReplay.outcomeUnknownAt).toBeInstanceOf(Date);
+
+    // A different embedding request under retrieval:<turnId> is still blocked by outcome_unknown.
+    await expect(repo.reserve(scope, {
+      purpose: "material-embedding",
+      amountCents: 1,
+      requestId: "material-query:op-2",
+      requestFamily: null,
+      parentBudget: { id: retrievalId },
+    })).rejects.toMatchObject({ code: "PARENT_BUDGET_OUTCOME_UNKNOWN" });
+
+    // Tutor requesting 10c under <turnId> exceeds the shared 10c turn-family cap (1c + 10c > 10c).
+    await expect(repo.reserve(scope, {
+      purpose: "tutor",
+      amountCents: 10,
+      requestId: "tutor-req-10",
+      requestFamily: null,
+      parentBudget: { id: turnId },
+    })).rejects.toMatchObject({ code: "PARENT_BUDGET_EXCEEDED" });
+
+    // Tutor requesting 9c under <turnId> IS admitted despite retrieval's unknown timeout (1c + 9c <= 10c).
+    const tutor = await repo.reserve(scope, {
+      purpose: "tutor",
+      amountCents: 9,
+      requestId: "tutor-req-9",
+      requestFamily: null,
+      parentBudget: { id: turnId },
+    });
+    expect(tutor).toMatchObject({ state: "reserved", amountCents: 9, parentInteractionId: turnId });
+
+    // Verify historical behavior: an unknown charge directly on <turnId> still blocks <turnId>.
+    await repo.markUnknown(scope, tutor.id);
+    await expect(repo.reserve(scope, {
+      purpose: "tutor",
+      amountCents: 1,
+      requestId: "tutor-req-extra",
+      requestFamily: null,
+      parentBudget: { id: turnId },
+    })).rejects.toMatchObject({ code: "PARENT_BUDGET_OUTCOME_UNKNOWN" });
+  });
+
+  it("retains TTL-reconciled pending_reconcile_cents and enforces aggregate maxProviderCalls across retrieval and tutor", async () => {
+    const h = turnFamilyLedgerHarness();
+    const repo = createOpeningBudgetRepository(h.sql, {
+      envCapCents: 0,
+      dailyQuotaMode: "unlimited",
+      parentCapCents: 10,
+      unknownAgeMs: 1000,
+    });
+    const turnId = "study-turn:turn-2";
+    const retrievalId = `retrieval:${turnId}`;
+    h.insertFence(turnId, "eph:turn-2:fence");
+
+    const emb = await repo.reserve(scope, {
+      purpose: "material-embedding",
+      amountCents: 1,
+      requestId: "material-query:op-ttl",
+      requestFamily: null,
+      parentBudget: { id: retrievalId, budgetCents: 10, maxProviderCalls: 2 },
+    });
+    await repo.markUnknown(scope, emb.id);
+    h.advanceClock(5000);
+
+    // Even after TTL reconciliation, pending_reconcile_cents = 1c & 1 call remain attributed to the family.
+    await expect(repo.reserve(scope, {
+      purpose: "tutor",
+      amountCents: 10,
+      requestId: "tutor-ttl-10",
+      requestFamily: null,
+      parentBudget: { id: turnId },
+    })).rejects.toMatchObject({ code: "PARENT_BUDGET_EXCEEDED" });
+
+    // Admitting tutor (5c, omitting limits) inherits family pinned limits (10c, 2 calls) and counts as call #2.
+    const tutor = await repo.reserve(scope, {
+      purpose: "tutor",
+      amountCents: 5,
+      requestId: "tutor-ttl-5",
+      requestFamily: null,
+      parentBudget: { id: turnId },
+    });
+    await repo.release(scope, tutor.requestId);
+
+    // 3rd call (1c <= 10c) still hits aggregate maxProviderCalls: 2 across retrieval + tutor (fences excluded).
+    await expect(repo.reserve(scope, {
+      purpose: "tutor",
+      amountCents: 1,
+      requestId: "tutor-ttl-call3",
+      requestFamily: null,
+      parentBudget: { id: turnId },
+    })).rejects.toMatchObject({ code: "PARENT_BUDGET_CALL_LIMIT" });
+
+    // Attempting to silently enlarge or alter the family limits from <turnId> rejects with CONFLICT.
+    await expect(repo.reserve(scope, {
+      purpose: "tutor",
+      amountCents: 1,
+      requestId: "tutor-ttl-enlarge-calls",
+      requestFamily: null,
+      parentBudget: { id: turnId, maxProviderCalls: 3 },
+    })).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(repo.reserve(scope, {
+      purpose: "tutor",
+      amountCents: 1,
+      requestId: "tutor-ttl-change-budget",
+      requestFamily: null,
+      parentBudget: { id: turnId, budgetCents: 5 },
+    })).rejects.toMatchObject({ code: "CONFLICT" });
+  });
+
+  it("normalizes nested retrieval prefixes and propagates overage blocks across the turn family", async () => {
+    const h = turnFamilyLedgerHarness();
+    const repo = createOpeningBudgetRepository(h.sql, { envCapCents: 100, dailyQuotaMode: "limited" });
+    const turnId = "study-turn:turn-3";
+    const nestedRetrievalId = `retrieval:retrieval:${turnId}`;
+
+    const emb = await repo.reserve(scope, {
+      purpose: "material-embedding",
+      amountCents: 2,
+      requestId: "material-query:op-nested",
+      requestFamily: null,
+      parentBudget: { id: nestedRetrievalId, budgetCents: 10, maxProviderCalls: 1 },
+    });
+    // Single-call family limit blocks tutor even under a nested retrieval prefix.
+    await expect(repo.reserve(scope, {
+      purpose: "tutor",
+      amountCents: 1,
+      requestId: "tutor-nested-blocked-by-calls",
+      requestFamily: null,
+      parentBudget: { id: turnId },
+    })).rejects.toMatchObject({ code: "PARENT_BUDGET_CALL_LIMIT" });
+
+    // Overage settlement on retrieval:<turnId> blocks the parent turn family as well.
+    await repo.settle(scope, emb.id, 5);
+    await expect(repo.reserve(scope, {
+      purpose: "tutor",
+      amountCents: 1,
+      requestId: "tutor-after-overage",
+      requestFamily: null,
+      parentBudget: { id: turnId },
+    })).rejects.toMatchObject({ code: "PARENT_BUDGET_BLOCKED" });
+  });
+
+  it.each(["reserved", "settled", "outcome_unknown", "ttl_reconciled"] as const)(
+    "blocks isParentNotSent when a nested retrieval:retrieval:<turnId> reservation is %s",
+    async blockerState => {
+      const h = turnFamilyLedgerHarness({ clock: new Date("2026-11-21T10:00:00Z") });
+      const repo = createOpeningBudgetRepository(h.sql, { envCapCents: 100, unknownAgeMs: 1000 });
+      const turnId = `study-turn:unsent-${blockerState}`;
+      const nestedRetrievalId = `retrieval:retrieval:${turnId}`;
+
+      const tutor = await repo.reserve(scope, {
+        purpose: "tutor",
+        amountCents: 5,
+        requestId: `tutor-${blockerState}`,
+        requestFamily: null,
+        parentBudget: { id: turnId },
+      });
+      await repo.release(scope, tutor.requestId, "not_sent");
+      expect(await repo.isParentNotSent(scope, turnId)).toBe(true);
+
+      const emb = await repo.reserve(scope, {
+        purpose: "material-embedding",
+        amountCents: 1,
+        requestId: `emb-${blockerState}`,
+        requestFamily: null,
+        parentBudget: { id: nestedRetrievalId },
+      });
+      if (blockerState === "settled") await repo.settle(scope, emb.id, 1);
+      if (blockerState === "outcome_unknown") await repo.markUnknown(scope, emb.id);
+      if (blockerState === "ttl_reconciled") {
+        await repo.markUnknown(scope, emb.id);
+        h.advanceClock(5000);
+        // Trigger lazy TTL reconcile on an unrelated turn.
+        await repo.reserve(scope, { purpose: "tutor", amountCents: 1, requestId: `other-${blockerState}`, requestFamily: null });
+      }
+
+      // Root tutor was not_sent, but nested retrieval reservation is unresolved/charged -> must fail closed.
+      expect(await repo.isParentNotSent(scope, turnId)).toBe(false);
+    },
+  );
+
+  it("blocks isParentNotSent when root <turnId> is unresolved and authorizes once both root and nested retrieval are not_sent", async () => {
+    const h = turnFamilyLedgerHarness();
+    const repo = createOpeningBudgetRepository(h.sql, { envCapCents: 100 });
+    const turnId = "study-turn:unsent-both";
+    const retrievalId = `retrieval:${turnId}`;
+    const nestedRetrievalId = `retrieval:retrieval:${turnId}`;
+
+    const tutor = await repo.reserve(scope, {
+      purpose: "tutor",
+      amountCents: 5,
+      requestId: "tutor-unsent-both",
+      requestFamily: null,
+      parentBudget: { id: turnId },
+    });
+    const nestedEmb = await repo.reserve(scope, {
+      purpose: "material-embedding",
+      amountCents: 1,
+      requestId: "emb-unsent-nested",
+      requestFamily: null,
+      parentBudget: { id: nestedRetrievalId },
+    });
+
+    // Release only retrievalId / nestedRetrievalId while root <turnId> is still reserved.
+    await repo.release(scope, nestedEmb.requestId, "not_sent");
+    expect(await repo.isParentNotSent(scope, retrievalId)).toBe(false);
+    expect(await repo.isParentNotSent(scope, nestedRetrievalId)).toBe(false);
+    expect(await repo.isParentNotSent(scope, turnId)).toBe(false);
+
+    // Once root <turnId> is also released not_sent, the whole family is confirmed unsent.
+    await repo.release(scope, tutor.requestId, "not_sent");
+    expect(await repo.isParentNotSent(scope, turnId)).toBe(true);
+    expect(await repo.isParentNotSent(scope, nestedRetrievalId)).toBe(true);
+  });
+
+  it("reports BUDGET_EXCEEDED when daily workspace cap is exhausted across retrieval and tutor in limited mode, and PARENT_BUDGET_EXCEEDED when only tighter parent cap is exceeded", async () => {
+    const h = turnFamilyLedgerHarness();
+    const limitedDaily = createOpeningBudgetRepository(h.sql, { envCapCents: 10 });
+    const turnA = "study-turn:limited-daily-cap";
+    const embA = await limitedDaily.reserve(scope, {
+      purpose: "material-embedding",
+      amountCents: 1,
+      requestId: "material-query:op-limited-daily",
+      requestFamily: null,
+      parentBudget: { id: `retrieval:${turnA}` },
+    });
+    await limitedDaily.markUnknown(scope, embA.id);
+
+    // Daily cap (10c) only has 9c left, so 10c tutor fails with BUDGET_EXCEEDED (not PARENT_BUDGET_EXCEEDED).
+    await expect(limitedDaily.reserve(scope, {
+      purpose: "tutor",
+      amountCents: 10,
+      requestId: "tutor-limited-daily-10",
+      requestFamily: null,
+      parentBudget: { id: turnA },
+    })).rejects.toMatchObject({ code: "BUDGET_EXCEEDED" });
+    await expect(limitedDaily.reserve(scope, {
+      purpose: "tutor",
+      amountCents: 9,
+      requestId: "tutor-limited-daily-9",
+      requestFamily: null,
+      parentBudget: { id: turnA },
+    })).resolves.toMatchObject({ state: "reserved", amountCents: 9 });
+
+    // With daily workspace headroom available, an explicit tighter parent cap rejects with PARENT_BUDGET_EXCEEDED.
+    const limitedTightParent = createOpeningBudgetRepository(h.sql, { envCapCents: 50 });
+    const turnB = "study-turn:limited-parent-cap";
+    const embB = await limitedTightParent.reserve(scope, {
+      purpose: "material-embedding",
+      amountCents: 1,
+      requestId: "material-query:op-limited-parent",
+      requestFamily: null,
+      parentBudget: { id: `retrieval:${turnB}`, budgetCents: 10 },
+    });
+    await limitedTightParent.markUnknown(scope, embB.id);
+
+    await expect(limitedTightParent.reserve(scope, {
+      purpose: "tutor",
+      amountCents: 10,
+      requestId: "tutor-limited-parent-10",
+      requestFamily: null,
+      parentBudget: { id: turnB },
+    })).rejects.toMatchObject({ code: "PARENT_BUDGET_EXCEEDED" });
+    await expect(limitedTightParent.reserve(scope, {
+      purpose: "tutor",
+      amountCents: 9,
+      requestId: "tutor-limited-parent-9",
+      requestFamily: null,
+      parentBudget: { id: turnB },
+    })).resolves.toMatchObject({ state: "reserved", amountCents: 9 });
+  });
+});

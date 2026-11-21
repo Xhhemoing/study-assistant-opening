@@ -304,6 +304,50 @@ async function capAndDay(tx: BudgetSql, workspaceId: string, options: OpeningBud
   return { capCents: effective.capCents, budgetDay, unlimited, parentCapCents: unlimited ? options.parentCapCents! : effective.capCents };
 }
 
+const RETRIEVAL_BUDGET_PREFIX = "retrieval:";
+const retrievalFamilyPrefixPattern = /^(?:retrieval:)+(?=.*\S)/;
+
+/** Normalize `"retrieval:<turnId>"` and `"<turnId>"` to one turn-family budget root. */
+export function parentBudgetFamilyRoot(parentId: string): string {
+  let root = parentId;
+  while (root.startsWith(RETRIEVAL_BUDGET_PREFIX)) {
+    const rest = root.slice(RETRIEVAL_BUDGET_PREFIX.length);
+    if (!rest.trim()) break;
+    root = rest;
+  }
+  return root;
+}
+
+export function parentBudgetFamilyIds(parentId: string): string[] {
+  const root = parentBudgetFamilyRoot(parentId);
+  return [...new Set([root, `${RETRIEVAL_BUDGET_PREFIX}${root}`, parentId])];
+}
+
+export function parentBudgetFamilyPredicate(
+  db: BudgetSql,
+  column: "id" | "parent_interaction_id",
+  parentId: string,
+) {
+  const rootId = parentBudgetFamilyRoot(parentId);
+  const familyIds = parentBudgetFamilyIds(parentId);
+  if (column === "id") {
+    return db`(
+      id = ANY(${familyIds}::text[])
+      OR (
+        starts_with(id, 'retrieval:retrieval:')
+        AND regexp_replace(id, ${retrievalFamilyPrefixPattern.source}, '') = ${rootId}
+      )
+    )`;
+  }
+  return db`(
+    parent_interaction_id = ANY(${familyIds}::text[])
+    OR (
+      starts_with(parent_interaction_id, 'retrieval:retrieval:')
+      AND regexp_replace(parent_interaction_id, ${retrievalFamilyPrefixPattern.source}, '') = ${rootId}
+    )
+  )`;
+}
+
 // Older callers omitted the root. Keep their legacy key interpretation.
 const attemptSuffix = /(?::fallback|:retry:[^:]+)+$/;
 
@@ -529,14 +573,17 @@ export function createOpeningBudgetRepository(
       return sql.begin(async tx => {
         const owners = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
         if (!owners.length) throw new OpeningBudgetError("NOT_FOUND", "workspace not found");
-        // Same owner lock as reserve: configuration changes cannot hide a sibling
-        // that was sent, completed, unknown or still in flight.
-        const [row] = await tx`SELECT count(*)::int AS calls,
+        // Same owner lock and turn-family match as reserve(): any live, settled,
+        // unknown, or pending-reconcile sibling (including nested retrieval:) blocks retry.
+        const [row] = await tx`SELECT
+          bool_or(parent_interaction_id=${parentId}) AS has_parent,
           bool_and(state='released' AND outcome_unknown_at IS NULL
+            AND COALESCE(pending_reconcile_cents, 0) = 0
             AND COALESCE(release_reason IN ('not_sent','cancelled'), false)) AS not_sent
           FROM opening_budget_reservations
-          WHERE workspace_id=${scope.workspaceId} AND parent_interaction_id=${parentId}`;
-        return Number(row!.calls) > 0 && row!.not_sent === true;
+          WHERE workspace_id=${scope.workspaceId}
+            AND ${parentBudgetFamilyPredicate(tx, "parent_interaction_id", parentId)}`;
+        return row!.has_parent === true && row!.not_sent === true;
       });
     },
     async reserve(scope, input) {
@@ -659,37 +706,80 @@ export function createOpeningBudgetRepository(
 
         if (parentBudget) {
           const parent = parentBudget;
-          await tx`
-            INSERT INTO opening_parent_interaction_budgets (workspace_id, id, budget_cents, max_provider_calls)
-            VALUES (${scope.workspaceId}, ${parent.id}, ${Math.min(parent.budgetCents ?? parentCapCents, parentCapCents)},
-              ${parent.maxProviderCalls ?? DEFAULT_PARENT_INTERACTION_MAX_PROVIDER_CALLS})
-            ON CONFLICT (workspace_id, id) DO NOTHING
+          const rootId = parentBudgetFamilyRoot(parent.id);
+          const existingParents = await tx`
+            SELECT * FROM opening_parent_interaction_budgets
+            WHERE workspace_id = ${scope.workspaceId}
+              AND ${parentBudgetFamilyPredicate(tx, "id", parent.id)}
+            ORDER BY (id = ${parent.id}) DESC, (id = ${rootId}) DESC, id
           `;
-          const [pinned] = await tx`SELECT * FROM opening_parent_interaction_budgets
-            WHERE workspace_id = ${scope.workspaceId} AND id = ${parent.id}`;
+          const ownPinned = existingParents.find(row => row.id === parent.id);
+          const limitAnchor = ownPinned ?? existingParents[0];
+          const requestedBudgetCents = parent.budgetCents !== undefined ? Math.min(parent.budgetCents, parentCapCents) : undefined;
+          const requestedMaxCalls = parent.maxProviderCalls;
           // Retries may omit a tighter limit but cannot silently enlarge or replace it.
-          if ((parent.budgetCents !== undefined && Math.min(parent.budgetCents, parentCapCents) !== Number(pinned!.budget_cents))
-            || (parent.maxProviderCalls !== undefined && parent.maxProviderCalls !== Number(pinned!.max_provider_calls))) {
+          if (limitAnchor && ((requestedBudgetCents !== undefined && requestedBudgetCents !== Number(limitAnchor.budget_cents))
+            || (requestedMaxCalls !== undefined && requestedMaxCalls !== Number(limitAnchor.max_provider_calls)))) {
             throw new OpeningBudgetError("CONFLICT", "parent interaction limits already pinned");
           }
+          const pinnedBudgetCents = existingParents.length
+            ? Math.min(...existingParents.map(row => Number(row.budget_cents)))
+            : (requestedBudgetCents ?? parentCapCents);
+          const pinnedMaxCalls = existingParents.length
+            ? Math.min(...existingParents.map(row => Number(row.max_provider_calls)))
+            : (requestedMaxCalls ?? DEFAULT_PARENT_INTERACTION_MAX_PROVIDER_CALLS);
+          const blockedSource = existingParents.find(row => row.blocked_at != null);
+          const familyBlocked = blockedSource !== undefined;
+          if (!ownPinned) {
+            await tx`
+              INSERT INTO opening_parent_interaction_budgets (workspace_id, id, budget_cents, max_provider_calls, blocked_at, blocked_reason)
+              VALUES (${scope.workspaceId}, ${parent.id}, ${pinnedBudgetCents}, ${pinnedMaxCalls},
+                ${blockedSource?.blocked_at ?? null}, ${blockedSource?.blocked_reason ?? null})
+              ON CONFLICT (workspace_id, id) DO NOTHING
+            `;
+          }
+          // Aggregate spend & provider calls across the turn family (<turnId> + retrieval:<turnId>),
+          // while keeping outcome_unknown blocking scoped strictly to the exact parent_interaction_id.
           const [usage] = await tx`
-            SELECT COALESCE(sum(amount_cents) FILTER (WHERE state <> 'released'), 0) AS cents,
+            SELECT COALESCE(sum(
+                CASE
+                  WHEN state <> 'released' OR outcome_unknown_at IS NOT NULL THEN GREATEST(amount_cents, COALESCE(pending_reconcile_cents, 0))
+                  WHEN COALESCE(pending_reconcile_cents, 0) > 0 THEN pending_reconcile_cents
+                  ELSE 0
+                END
+              ), 0) AS cents,
               count(*) FILTER (WHERE NOT (state = 'released' AND COALESCE(release_reason = 'not_sent', false)
                 AND amount_cents = 0 AND COALESCE(reserved_amount_cents, 0) = 0 AND model_snapshot IS NULL
                 AND execution_claimed_at IS NULL AND outcome_unknown_at IS NULL))::int AS calls,
-              count(*) FILTER (WHERE outcome_unknown_at IS NOT NULL)::int AS unknown_calls
+              count(*) FILTER (WHERE outcome_unknown_at IS NOT NULL AND parent_interaction_id = ${parent.id})::int AS unknown_calls
             FROM opening_budget_reservations
-            WHERE workspace_id = ${scope.workspaceId} AND parent_interaction_id = ${parent.id}
+            WHERE workspace_id = ${scope.workspaceId}
+              AND ${parentBudgetFamilyPredicate(tx, "parent_interaction_id", parent.id)}
           `;
           // Existing post-send/terminal legacy rows must stay replayable and must
           // enter this parent's accounting, even when their bill already exceeds it.
           const replayOnly = existingRow && (existingRow.state !== "reserved" || existingRow.executionClaimedAt !== null || existingRow.outcomeUnknownAt !== null);
           if (!replayOnly) {
-            if (pinned!.blocked_at) throw new OpeningBudgetError("PARENT_BUDGET_BLOCKED", "parent interaction cost bound was exceeded");
+            if (familyBlocked) throw new OpeningBudgetError("PARENT_BUDGET_BLOCKED", "parent interaction cost bound was exceeded");
             if (Number(usage!.unknown_calls) > 0) throw new OpeningBudgetError("PARENT_BUDGET_OUTCOME_UNKNOWN", "parent interaction has unknown billing; not re-sending");
-            if (Number(usage!.calls) >= Number(pinned!.max_provider_calls)) throw new OpeningBudgetError("PARENT_BUDGET_CALL_LIMIT", "parent interaction request limit reached");
+            if (Number(usage!.calls) >= pinnedMaxCalls) throw new OpeningBudgetError("PARENT_BUDGET_CALL_LIMIT", "parent interaction request limit reached");
             // All settled spend + outstanding reservations + next conservative bound.
-            if (Number(usage!.cents) + input.amountCents > Math.min(Number(pinned!.budget_cents), parentCapCents)) {
+            if (Number(usage!.cents) + input.amountCents > Math.min(pinnedBudgetCents, parentCapCents)) {
+              // When the workspace's daily cap is already exhausted for a new paid charge,
+              // surface daily quota/request errors instead of attributing the refusal solely to
+              // the parent interaction (so fallback routing and user messaging stay accurate).
+              if (!existingRow && !zeroCost && !unlimited) {
+                const [daily] = await tx`
+                  SELECT COALESCE(sum(amount_cents), 0) AS used FROM opening_budget_reservations
+                  WHERE ${chargedBudgetRows(tx, scope.workspaceId, budgetDay)}
+                `;
+                if (input.amountCents + Number(daily?.used ?? 0) > capCents) {
+                  if (await requestCapReached(tx, scope.workspaceId, budgetDay, modelSnapshot, requestCap)) {
+                    throw new OpeningBudgetError("REQUEST_CAP_EXCEEDED", "该模型今天的请求次数已达上限；可在设置中为该用途指定备用模型。");
+                  }
+                  throw new OpeningBudgetError("BUDGET_EXCEEDED", "daily workspace budget exceeded");
+                }
+              }
               throw new OpeningBudgetError("PARENT_BUDGET_EXCEEDED", "parent interaction budget exceeded");
             }
           }
@@ -852,7 +942,8 @@ export function createOpeningBudgetRepository(
           if (row.parentInteractionId) {
             await tx`UPDATE opening_parent_interaction_budgets
               SET blocked_at = COALESCE(blocked_at, ${instant}), blocked_reason = 'actual_exceeded_conservative_bound'
-              WHERE workspace_id = ${scope.workspaceId} AND id = ${row.parentInteractionId}`;
+              WHERE workspace_id = ${scope.workspaceId}
+                AND ${parentBudgetFamilyPredicate(tx, "id", row.parentInteractionId)}`;
           }
           const event = await tx`INSERT INTO opening_budget_reconcile_events
             (reservation_id, workspace_id, kind, amount_before_cents, amount_after_cents, reported_actual_cents, state_before, cap_cents, created_at)

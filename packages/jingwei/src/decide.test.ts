@@ -105,6 +105,96 @@ describe("decideBlock", () => {
     };
     expect(decideArtifact(artifact, registry).map((d) => d.ok)).toEqual([false, true]);
   });
+
+  it("prevents model-provenance artifacts from escalating to rules even if caller passes producer='rules'", () => {
+    const hostCap = defineCapability({
+      id: "host-secret@1",
+      title: "Host",
+      tasks: ["cite"],
+      modes: ["text"],
+      params: z.object({ text: z.string() }).strict(),
+      limits: [],
+      hostOnly: true,
+      toText: ({ text }) => text,
+    });
+    const ruleCap = defineCapability({
+      id: "witness-card@1",
+      title: "Witness",
+      tasks: ["cite"],
+      modes: ["text"],
+      params: z.object({ origin: z.literal("rules"), text: z.string() }).strict(),
+      limits: [],
+      toText: ({ text }) => text,
+    });
+    const extRegistry = createCapabilityRegistry([prose, hostCap, ruleCap]);
+    expect(extRegistry.describe().map((c) => c.id)).toEqual(["prose@1", "witness-card@1"]);
+    expect(extRegistry.describe({ includeHostOnly: true }).map((c) => c.id)).toEqual(["prose@1", "host-secret@1", "witness-card@1"]);
+
+    const forgedArtifact: Artifact = {
+      schemaVersion: "1",
+      artifactId: "a2",
+      revision: 1,
+      provenance: { origin: "model" },
+      blocks: [
+        block({ id: "h", capability: "host-secret@1", params: { text: "x" } }),
+        block({ id: "w", capability: "witness-card@1", params: { origin: "rules", text: "y" } }),
+      ],
+    };
+    const forgedDecisions = decideArtifact(forgedArtifact, extRegistry, {}, { producer: "rules" });
+    expect(forgedDecisions[0]).toMatchObject({ ok: false, reason: "unauthorized_capability" });
+    expect(forgedDecisions[1]).toMatchObject({ ok: false, reason: "untrusted_provenance" });
+  });
+
+  it("rejects aiCandidateOnly capabilities without trusted host+artifact AI candidate provenance", () => {
+    const aiCap = defineCapability({
+      id: "ai-proposal@1",
+      title: "Proposal",
+      tasks: ["compare"],
+      modes: ["text"],
+      params: z.object({ aiCandidateOnly: z.literal(true), note: z.string() }).strict(),
+      limits: [],
+      hostOnly: true,
+      aiCandidateOnly: true,
+      toText: ({ note }) => note,
+    });
+    const extRegistry = createCapabilityRegistry([aiCap]);
+    const proposalBlock = block({
+      id: "p1",
+      capability: "ai-proposal@1",
+      params: { aiCandidateOnly: true, note: "candidate change" },
+    });
+
+    for (const origin of ["user", "import", "model", "rules"] as const) {
+      const artifact: Artifact = {
+        schemaVersion: "1",
+        artifactId: `art-${origin}`,
+        revision: 1,
+        provenance: { origin },
+        blocks: [proposalBlock],
+      };
+      expect(decideArtifact(artifact, extRegistry, {}, { producer: "host", aiCandidateProvenance: true })[0]).toMatchObject({
+        ok: false,
+        reason: "untrusted_provenance",
+      });
+    }
+
+    for (const origin of ["ai_candidate", "assistant"] as const) {
+      const candidateArtifact: Artifact = {
+        schemaVersion: "1",
+        artifactId: `art-${origin}`,
+        revision: 1,
+        provenance: { origin },
+        blocks: [proposalBlock],
+      };
+      expect(decideArtifact(candidateArtifact, extRegistry, {}, { producer: "host" })[0]).toMatchObject({
+        ok: false,
+        reason: "untrusted_provenance",
+      });
+      expect(
+        decideArtifact(candidateArtifact, extRegistry, {}, { producer: "host", aiCandidateProvenance: true })[0],
+      ).toMatchObject({ ok: true, text: "candidate change" });
+    }
+  });
 });
 
 describe("artifactToText", () => {

@@ -1,16 +1,25 @@
-import { createHash } from "node:crypto";
 import type { ImapCursor } from "@aistudy/contracts";
-import { uploadInputSchema } from "@aistudy/contracts";
 import type {
-  createOpeningImportsRepository,
-  createOpeningPrivacyRepository,
-  createOpeningSourceRepository,
-  OpeningScope,
+  createOpeningImportsRepository, createOpeningPrivacyRepository, createOpeningSourceRepository, OpeningScope,
 } from "@aistudy/database";
 import type { ImapFlow } from "imapflow";
 import { simpleParser } from "mailparser";
+import {
+  attachImapClientErrorGuard,
+  getClientErrorState,
+  installImapCommandGuard,
+  MAX_IMAP_FETCH_COMMAND_BYTES,
+  MAX_IMAP_PROBE_COMMAND_BYTES,
+  partialBodyOffsetKey,
+  runGuardedImapFetch,
+} from "./imap-command-guard";
+import { publishConnectorSource, type ConnectorSourceStorage } from "./publish-source";
+
+export { attachImapClientErrorGuard };
 
 export const IMAP_BATCH_SIZE = 100;
+export const DEFAULT_IMAP_SYNC_DURATION_MS = 120_000;
+export const DEFAULT_IMAP_TEARDOWN_WAIT_MS = 500;
 export const MAX_MAIL_BYTES = 25 * 1024 * 1024;
 export const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 export const MAX_TOTAL_ATTACHMENT_BYTES = 25 * 1024 * 1024;
@@ -19,14 +28,9 @@ export type ImapClient = Pick<
   ImapFlow,
   "list" | "mailboxOpen" | "fetch" | "fetchOne" | "logout"
 >;
-export type OpeningSources = ReturnType<typeof createOpeningSourceRepository>;
 export type OpeningImports = ReturnType<typeof createOpeningImportsRepository>;
 export type OpeningPrivacy = ReturnType<typeof createOpeningPrivacyRepository>;
-export type OpeningStorageUpload = (input: {
-  key: string;
-  bytes: Uint8Array;
-  mime: string;
-}) => Promise<void>;
+export type OpeningSources = ReturnType<typeof createOpeningSourceRepository>;
 
 export function nextImapCursor(previous: ImapCursor, uid: number): ImapCursor {
   return { ...previous, lastUid: Math.max(previous.lastUid, uid) };
@@ -79,14 +83,267 @@ export type ImapSyncDeps = {
   connectionId: string;
   connectionVersion: number;
   folder: string;
-  cursor: ImapCursor;
+  cursor: ImapCursor | null;
   since: Date;
   client: ImapClient;
   imports: OpeningImports;
-  sources: OpeningSources;
-  privacy: OpeningPrivacy;
-  upload: OpeningStorageUpload;
+  storage: ConnectorSourceStorage;
+  maxSyncDurationMs?: number;
+  deadlineMs?: number;
+  teardownTimeoutMs?: number;
+  signal?: AbortSignal;
+  now?: () => number;
+  onDeadlineAbort?: () => void;
 };
+
+export async function runWithSyncDeadline<T>(
+  operation: () => Promise<T>,
+  options: {
+    phase: string;
+    deadlineMs: number;
+    now: () => number;
+    signal?: AbortSignal;
+    client?: object;
+    onDeadlineAbort: () => void;
+  },
+): Promise<T> {
+  const { phase, deadlineMs, now, signal, client, onDeadlineAbort } = options;
+  const errorState = client ? getClientErrorState(attachImapClientErrorGuard(client)) : undefined;
+  if (errorState?.firstError) {
+    onDeadlineAbort();
+    throw errorState.firstError;
+  }
+  if (signal?.aborted) {
+    onDeadlineAbort();
+    throw new Error(`IMAP sync aborted during ${phase}`);
+  }
+  const remainingMs = deadlineMs - now();
+  if (remainingMs < 0) {
+    onDeadlineAbort();
+    throw new Error(`IMAP sync exceeded time budget during ${phase}`);
+  }
+  const opPromise = Promise.resolve().then(operation);
+  if (!signal && !errorState && remainingMs >= 2_147_483_647) {
+    return opPromise;
+  }
+  void opPromise.catch(() => undefined);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: (() => void) | undefined;
+  let onClientError: ((error: Error) => void) | undefined;
+  try {
+    const guard = new Promise<never>((_, reject) => {
+      if (errorState) {
+        onClientError = (err: Error) => {
+          onDeadlineAbort();
+          reject(err);
+        };
+        if (errorState.firstError) {
+          onClientError(errorState.firstError);
+          return;
+        }
+        errorState.waiters.add(onClientError);
+      }
+      if (signal) {
+        onAbort = () => {
+          onDeadlineAbort();
+          reject(new Error(`IMAP sync aborted during ${phase}`));
+        };
+        if (signal.aborted) {
+          onAbort();
+          return;
+        }
+        signal.addEventListener("abort", onAbort, { once: true });
+      }
+      if (remainingMs < 2_147_483_647) {
+        timer = setTimeout(() => {
+          onDeadlineAbort();
+          reject(new Error(`IMAP sync exceeded time budget during ${phase}`));
+        }, remainingMs);
+        timer.unref?.();
+      }
+    });
+    return await Promise.race([opPromise, guard]);
+  } catch (error) {
+    if (errorState?.firstError) throw errorState.firstError;
+    throw error;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    if (signal && onAbort) signal.removeEventListener("abort", onAbort);
+    if (onClientError) errorState?.waiters.delete(onClientError);
+  }
+}
+
+export const DISCOVERY_UID_WINDOW_SIZE = 5_000;
+export const MAX_DISCOVERY_WINDOWS_PER_SYNC = 10;
+
+async function resolveMaxMailboxUid(
+  opened: { uidValidity: bigint; uidNext?: unknown; exists?: unknown },
+  client: ImapClient,
+  withDeadline: <T>(phase: string, operation: () => Promise<T>) => Promise<T>,
+): Promise<number | undefined> {
+  if (typeof opened.uidNext === "number" && Number.isSafeInteger(opened.uidNext) && opened.uidNext >= 1) {
+    return opened.uidNext - 1;
+  }
+  if (typeof opened.exists === "number" && Number.isSafeInteger(opened.exists) && opened.exists >= 0) {
+    if (opened.exists === 0) return 0;
+    const highest = await withDeadline("discovery", () => runGuardedImapFetch(
+      client,
+      { maxBytes: MAX_IMAP_PROBE_COMMAND_BYTES, maxFetchResponses: 1 },
+      () => client.fetchOne("*", { uid: true }, { uid: true }),
+    ));
+    if (highest === false) return 0;
+    if (!highest || !Number.isSafeInteger(highest.uid) || highest.uid <= 0) {
+      throw new Error("IMAP mailbox UID probe returned an invalid UID");
+    }
+    return highest.uid;
+  }
+  return undefined;
+}
+
+async function scanDiscoveryWindow(input: {
+  client: ImapClient;
+  windowStart: number;
+  windowEnd: number;
+  since: Date;
+  teardownWaitMs: number;
+  eligibleUids: Set<number>;
+  sizeByUid: Map<number, number>;
+  withDeadline: <T>(phase: string, operation: () => Promise<T>) => Promise<T>;
+  assertWithinBudget: (phase: string) => void;
+}): Promise<{ observedCount: number; maxObservedUid: number }> {
+  const {
+    client,
+    windowStart,
+    windowEnd,
+    since,
+    teardownWaitMs,
+    eligibleUids,
+    sizeByUid,
+    withDeadline,
+    assertWithinBudget,
+  } = input;
+  const range = windowStart === windowEnd ? String(windowStart) : `${windowStart}:${windowEnd}`;
+  const stream = client.fetch(
+    { uid: range },
+    { uid: true, internalDate: true, size: true },
+  );
+  const iterator = stream[Symbol.asyncIterator]();
+  let discoveryFinished = false;
+  let observedCount = 0;
+  let maxObservedUid = 0;
+  try {
+    while (true) {
+      const step = await withDeadline("discovery", () => iterator.next());
+      if (step.done) {
+        discoveryFinished = true;
+        break;
+      }
+      const message = step.value;
+      assertWithinBudget("discovery");
+      if (
+        !Number.isSafeInteger(message.uid)
+        || message.uid < windowStart
+        || message.uid > windowEnd
+      ) {
+        continue;
+      }
+      observedCount += 1;
+      maxObservedUid = Math.max(maxObservedUid, message.uid);
+      if (message.internalDate && message.internalDate < since) continue;
+      if (eligibleUids.has(message.uid)) continue;
+      if (eligibleUids.size === IMAP_BATCH_SIZE) {
+        let highest = -1;
+        for (const uid of eligibleUids) highest = Math.max(highest, uid);
+        if (message.uid >= highest) continue;
+        eligibleUids.delete(highest);
+        sizeByUid.delete(highest);
+      }
+      eligibleUids.add(message.uid);
+      if (typeof message.size === "number" && Number.isFinite(message.size)) {
+        sizeByUid.set(message.uid, message.size);
+      }
+    }
+  } finally {
+    if (!discoveryFinished && typeof iterator.return === "function") {
+      const returnPromise = Promise.resolve(iterator.return(undefined)).catch(() => undefined);
+      let teardownTimer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const timeout = new Promise<void>((resolve) => {
+          teardownTimer = setTimeout(resolve, teardownWaitMs);
+          teardownTimer.unref?.();
+        });
+        await Promise.race([returnPromise, timeout]);
+      } finally {
+        if (teardownTimer !== undefined) clearTimeout(teardownTimer);
+      }
+    }
+  }
+  return { observedCount, maxObservedUid };
+}
+
+async function discoverUidBatch(input: {
+  client: ImapClient;
+  startAfterUid: number;
+  maxMailboxUid: number | undefined;
+  since: Date;
+  teardownWaitMs: number;
+  withDeadline: <T>(phase: string, operation: () => Promise<T>) => Promise<T>;
+  assertWithinBudget: (phase: string) => void;
+}): Promise<{ uids: number[]; sizeByUid: Map<number, number>; scannedThroughUid: number }> {
+  const {
+    client,
+    startAfterUid,
+    maxMailboxUid,
+    since,
+    teardownWaitMs,
+    withDeadline,
+    assertWithinBudget,
+  } = input;
+  const eligibleUids = new Set<number>();
+  const sizeByUid = new Map<number, number>();
+  const baseUid = Math.max(0, startAfterUid);
+  let windowStart = baseUid + 1;
+  let windowsScanned = 0;
+  let lastWindowEnd = baseUid;
+  let maxObservedInRangeUid = baseUid;
+
+  while (
+    windowsScanned < MAX_DISCOVERY_WINDOWS_PER_SYNC
+    && (maxMailboxUid === undefined || windowStart <= maxMailboxUid)
+  ) {
+    assertWithinBudget("discovery");
+    const rawWindowEnd = windowStart + DISCOVERY_UID_WINDOW_SIZE - 1;
+    const windowEnd = maxMailboxUid === undefined ? rawWindowEnd : Math.min(maxMailboxUid, rawWindowEnd);
+    const { observedCount, maxObservedUid } = await scanDiscoveryWindow({
+      client,
+      windowStart,
+      windowEnd,
+      since,
+      teardownWaitMs,
+      eligibleUids,
+      sizeByUid,
+      withDeadline,
+      assertWithinBudget,
+    });
+    windowsScanned += 1;
+    lastWindowEnd = windowEnd;
+    maxObservedInRangeUid = Math.max(maxObservedInRangeUid, maxObservedUid);
+    if (eligibleUids.size >= IMAP_BATCH_SIZE) break;
+    if (maxMailboxUid === undefined && observedCount === 0) break;
+    windowStart = windowEnd + 1;
+  }
+
+  // The server can return UIDs in any order. Sorting the bounded set keeps
+  // publication and cursor advancement ascending without an unbounded array.
+  const uids = [...eligibleUids].sort((a, b) => a - b).slice(0, IMAP_BATCH_SIZE);
+  const batchHitCap = uids.length >= IMAP_BATCH_SIZE;
+  const scannedThroughUid = batchHitCap
+    ? uids[uids.length - 1]!
+    : maxMailboxUid !== undefined
+      ? lastWindowEnd
+      : maxObservedInRangeUid;
+  return { uids, sizeByUid, scannedThroughUid };
+}
 
 /** Bounded read-only IMAP adapter. Cursor advances only after commit succeeds. */
 export async function syncMailbox(deps: ImapSyncDeps): Promise<{
@@ -94,35 +351,73 @@ export async function syncMailbox(deps: ImapSyncDeps): Promise<{
   skipped: number;
   cursor: ImapCursor;
 }> {
-  const opened = await deps.client.mailboxOpen(deps.folder, { readOnly: true });
-  if (!opened) throw new Error(`folder is unavailable: ${deps.folder}`);
-  let cursor = deps.cursor.folder === deps.folder
-    ? deps.cursor
-    : { folder: deps.folder, uidValidity: String(opened.uidValidity), lastUid: 0 };
-  if (cursor.uidValidity !== String(opened.uidValidity)) {
-    cursor = { folder: deps.folder, uidValidity: String(opened.uidValidity), lastUid: 0 };
+  installImapCommandGuard(deps.client);
+  const clock = deps.now ?? (() => Date.now());
+  const maxDurationMs = deps.maxSyncDurationMs ?? DEFAULT_IMAP_SYNC_DURATION_MS;
+  if (!Number.isFinite(maxDurationMs) || maxDurationMs <= 0) {
+    throw new Error("IMAP sync maxSyncDurationMs must be positive");
   }
-
-  const uids: number[] = [];
-  const stream = deps.client.fetch(
-    { uid: `${cursor.lastUid + 1}:*` },
-    { uid: true, envelope: true, internalDate: true, source: true },
-  );
-  for await (const message of stream) {
-    if (!message.uid || (message.internalDate && message.internalDate < deps.since)) continue;
-    if (message.source && message.source.byteLength > MAX_MAIL_BYTES) {
-      throw new Error("mail exceeds limit");
+  const teardownWaitMs = deps.teardownTimeoutMs ?? DEFAULT_IMAP_TEARDOWN_WAIT_MS;
+  if (!Number.isFinite(teardownWaitMs) || teardownWaitMs <= 0) {
+    throw new Error("IMAP sync teardownTimeoutMs must be positive");
+  }
+  const deadlineMs = deps.deadlineMs ?? (clock() + maxDurationMs);
+  let abortHookInvoked = false;
+  const invokeDeadlineAbort = () => {
+    if (abortHookInvoked) return;
+    abortHookInvoked = true;
+    try {
+      deps.onDeadlineAbort?.();
+    } catch {
+      // Teardown hook errors must not mask timeout or abort errors.
     }
-    uids.push(message.uid);
-    if (uids.length >= IMAP_BATCH_SIZE) break;
-  }
+  };
+  const withDeadline = <T>(phase: string, operation: () => Promise<T>) => runWithSyncDeadline(operation, {
+    phase,
+    deadlineMs,
+    now: clock,
+    signal: deps.signal,
+    client: deps.client,
+    onDeadlineAbort: invokeDeadlineAbort,
+  });
+  const assertWithinBudget = (phase: string) => {
+    if (deps.signal?.aborted) {
+      invokeDeadlineAbort();
+      throw new Error(`IMAP sync aborted during ${phase}`);
+    }
+    if (clock() > deadlineMs) {
+      invokeDeadlineAbort();
+      throw new Error(`IMAP sync exceeded time budget during ${phase}`);
+    }
+  };
+  assertWithinBudget("discovery");
+
+  const opened = await withDeadline("mailboxOpen", () => deps.client.mailboxOpen(deps.folder, { readOnly: true }));
+  if (!opened) throw new Error(`folder is unavailable: ${deps.folder}`);
+  const uidValidity = String(opened.uidValidity);
+  let expectedCursor = deps.cursor;
+  let cursor = expectedCursor?.uidValidity === uidValidity
+    ? expectedCursor : { folder: deps.folder, uidValidity, lastUid: 0 };
+
+  const maxMailboxUid = await resolveMaxMailboxUid(opened, deps.client, withDeadline);
+  const { uids, sizeByUid, scannedThroughUid } = await discoverUidBatch({
+    client: deps.client,
+    startAfterUid: cursor.lastUid,
+    maxMailboxUid,
+    since: deps.since,
+    teardownWaitMs,
+    withDeadline,
+    assertWithinBudget,
+  });
 
   let imported = 0;
   let skipped = 0;
+  let hadExpunged = false;
   for (const uid of uids) {
-    if (uid <= cursor.lastUid) {
-      skipped += 1;
-      continue;
+    assertWithinBudget("fetch");
+    const knownSize = sizeByUid.get(uid);
+    if (knownSize !== undefined && knownSize > MAX_MAIL_BYTES) {
+      throw new Error("mail exceeds limit");
     }
     const identity = {
       connectionId: deps.connectionId,
@@ -130,61 +425,115 @@ export async function syncMailbox(deps: ImapSyncDeps): Promise<{
       generation: cursor.uidValidity,
       remoteId: String(uid),
     };
-    // Receipt identity is connection/container/generation/UID — never Message-ID alone.
-    const existing = await deps.imports.findByIdentity(deps.scope, identity);
-    if (existing) {
+    const fetched = await withDeadline("fetch", () => runGuardedImapFetch(
+      deps.client,
+      { maxBytes: MAX_IMAP_FETCH_COMMAND_BYTES, maxFetchResponses: 1, expectedUid: uid, expectedStartOffset: 0 },
+      () => deps.client.fetchOne(
+        String(uid),
+        { source: { start: 0, maxLength: MAX_MAIL_BYTES + 1 }, size: true },
+        { uid: true },
+      ),
+    ));
+    if (fetched === false) {
+      // The message was expunged after discovery.
+      hadExpunged = true;
       skipped += 1;
-      cursor = nextImapCursor(cursor, uid);
       continue;
     }
-    const fetched = await deps.client.fetchOne(
-      String(uid),
-      { source: true },
-      { uid: true },
-    ) as Exclude<Awaited<ReturnType<ImapClient["fetchOne"]>>, false>;
-    if (!fetched?.source) {
-      skipped += 1;
-      continue;
+    if (!fetched?.source || fetched.uid !== uid) throw new Error("IMAP body response did not match the requested UID");
+    const fetchedSource = fetched.source;
+    if (typeof fetched.size === "number" && fetched.size > MAX_MAIL_BYTES) {
+      throw new Error("mail exceeds limit");
     }
-    const parsed = await simpleParser(fetched.source, {
+    if (fetchedSource.byteLength > MAX_MAIL_BYTES) throw new Error("mail exceeds limit");
+    const initialBodySlice =
+      fetched.bodyParts?.get(partialBodyOffsetKey(0))
+      ?? fetched.bodyParts?.get("BODY[]");
+    const hasUnexpectedPartialKey = [...(fetched.bodyParts?.keys() ?? [])]
+      .some((key) => key.startsWith("BODY[]<") && key !== partialBodyOffsetKey(0));
+    if (!Buffer.isBuffer(initialBodySlice) || !initialBodySlice.equals(fetchedSource) || hasUnexpectedPartialKey) {
+      throw new Error("IMAP message body offset did not match requested start 0");
+    }
+    const reportedSize = Math.max(
+      typeof fetched.size === "number" && Number.isFinite(fetched.size) && fetched.size > 0 ? fetched.size : 0,
+      knownSize !== undefined && Number.isFinite(knownSize) && knownSize > 0 ? knownSize : 0,
+    );
+    if (reportedSize > 0 && fetchedSource.byteLength < reportedSize) {
+      const receivedBytes = fetchedSource.byteLength;
+      if (receivedBytes === 0) {
+        throw new Error("IMAP message body was truncated before reaching reported size");
+      }
+      // Exchange / Office 365 / Maildir can over-report RFC822.SIZE relative to BODY[].
+      // Probe the trailing overlap window plus 1 byte: require the exact server-returned
+      // BODY[]<overlapStart> offset and matching tail bytes terminating at EOF.
+      const overlapStart = Math.max(0, receivedBytes - 64);
+      const expectedOverlapLen = receivedBytes - overlapStart;
+      const expectedOffsetKey = partialBodyOffsetKey(overlapStart);
+      const probe = await withDeadline("fetch", () => runGuardedImapFetch(
+        deps.client,
+        {
+          maxBytes: MAX_IMAP_PROBE_COMMAND_BYTES,
+          maxFetchResponses: 1,
+          expectedUid: uid,
+          expectedStartOffset: overlapStart,
+          isProbe: true,
+        },
+        () => deps.client.fetchOne(
+          String(uid),
+          { source: { start: overlapStart, maxLength: expectedOverlapLen + 1 } },
+          { uid: true },
+        ),
+      ));
+      if (probe === false) {
+        // The message was expunged after the initial fetch.
+        hadExpunged = true;
+        skipped += 1;
+        continue;
+      }
+      const probeSlice = probe?.bodyParts?.get(expectedOffsetKey);
+      if (
+        !probe
+        || probe.uid !== uid
+        || !Buffer.isBuffer(probeSlice)
+        || probeSlice.byteLength !== expectedOverlapLen
+        || !probeSlice.equals(fetchedSource.subarray(overlapStart, receivedBytes))
+      ) {
+        throw new Error("IMAP message body was truncated before reaching reported size");
+      }
+    }
+    const parsed = await simpleParser(fetchedSource, {
       skipImageLinks: true,
       skipHtmlToText: true,
     });
-    const bytes = fetched.source.byteLength;
-    const sha256 = createHash("sha256").update(fetched.source).digest("hex");
-    const mime = "message/rfc822";
     const prepared = mailToImportInput({ mail: parsed });
-    const source = await deps.sources.create(deps.scope, uploadInputSchema.parse({
-      name: `${prepared.subject}.eml`,
-      mime,
-      bytes,
-      sha256,
-    }));
-    const stagingKey = `opening/staging/${source.id}`;
-    const finalKey = `opening/sources/${source.id}/v${source.version}`;
-    await deps.upload({ key: stagingKey, bytes: fetched.source, mime });
-    const privacyEpoch = await deps.privacy.getWorkspaceEpoch(deps.scope);
-    await deps.sources.completeWithParseJob(deps.scope, source.id, {
-      key: finalKey,
-      payload: { sourceId: source.id, sourceVersion: source.version },
-      privacyEpoch,
-      actual: { bytes, sha256, mime },
-      beforeComplete: () => deps.upload({ key: finalKey, bytes: fetched.source!, mime }),
-    });
-    const receipt = await deps.imports.commit(deps.scope, {
+    const next = hadExpunged ? cursor : nextImapCursor(cursor, uid);
+    const receipt = await publishConnectorSource(deps.imports, deps.storage, deps.scope, {
       connectionVersion: deps.connectionVersion,
       identity,
-      sourceId: source.id,
-      cursor: {
-        generation: cursor.uidValidity,
-        cursor: nextImapCursor(cursor, uid),
-      },
+      name: `${prepared.subject}.eml`,
+      mime: "message/rfc822",
+      bytes: fetched.source,
+      cursor: { expected: expectedCursor, next },
     });
-    cursor = nextImapCursor(cursor, uid);
+    expectedCursor = cursor = next;
     if (receipt.duplicate) skipped += 1;
     else imported += 1;
   }
 
-  await deps.client.logout();
+  if (skipped === 0 && !hadExpunged && scannedThroughUid > cursor.lastUid) {
+    cursor = nextImapCursor(cursor, scannedThroughUid);
+  }
+
+  const cursorChanged = expectedCursor === null
+    || expectedCursor.uidValidity !== cursor.uidValidity
+    || expectedCursor.lastUid !== cursor.lastUid;
+  if (cursorChanged) {
+    await deps.imports.advanceImapCursor(deps.scope, {
+      connectionId: deps.connectionId, connectionVersion: deps.connectionVersion,
+      cursor: { expected: expectedCursor, next: cursor },
+    });
+  }
+
+  await withDeadline("logout", () => deps.client.logout());
   return { imported, skipped, cursor };
 }

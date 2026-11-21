@@ -142,6 +142,41 @@ describe("learning semantic revision writers", () => {
     expect(db.invalidations).toHaveLength(2);
   });
 
+  it("includes mixed-case stagingKey when historical opening_jobs.key recorded a mixed-case finalKey on lowercase delete", async () => {
+    const upperId = sourceId.toUpperCase();
+    const recordedMixedFinalKey = `opening/sources/${upperId}/v0`;
+    let pendingKeys: unknown;
+    const db = database((query, values) => {
+      if (query.startsWith("UPDATE opening_course_knowledge SET node_definitions")) return [];
+      if (query.startsWith("SELECT version, upload_url_expires_at")) return [{ version: 0 }];
+      if (query.startsWith("SELECT * FROM opening_privacy_exclusions")) return [];
+      if (query.startsWith("SELECT m.id") || query.startsWith("SELECT version FROM opening_source_versions")) return [];
+      if (query.startsWith("SELECT image_object_key")) return [{ image_object_key: recordedMixedFinalKey }];
+      if (query.startsWith("INSERT INTO opening_privacy_exclusions")) return [];
+      if (query.startsWith("UPDATE opening_privacy_exclusions SET asset_deleted_at")) {
+        pendingKeys = values[1];
+        return [];
+      }
+      if (query.startsWith("DELETE FROM opening_sources")
+        || query.startsWith("DELETE FROM course_asset_memberships")
+        || query.startsWith("UPDATE opening_source_versions")) return [];
+      throw new Error(query);
+    });
+    const repo = createOpeningSourceActionsRepository(db.sql);
+    const keys = {
+      stagingKey: (source: string) => `opening/staging/${source}`,
+      finalKey: (source: string, version: number) => `opening/sources/${source}/v${version}`,
+    };
+    const result = await repo.apply(scope, sourceId, { action: "delete", expectedVersion: 0, expectedMembershipIds: [] }, keys, new Date(at));
+    expect(result.cleanup.keys).toEqual(expect.arrayContaining([
+      `opening/staging/${sourceId}`,
+      `opening/staging/${upperId}`,
+      `opening/sources/${sourceId}/v0`,
+      recordedMixedFinalKey,
+    ]));
+    expect(pendingKeys).toEqual(result.cleanup.keys);
+  });
+
   it.each([false, true])("memory deletion advances semantic revision only for new exclusions (already excluded: %s)", async (alreadyExcluded) => {
     const db = database((query) => {
       if (query.startsWith("SELECT * FROM opening_memories")) return [{ id: memoryId, status: "active", version: 1, source_turn_ids: [turnId] }];
