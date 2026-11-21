@@ -816,6 +816,258 @@ describe("multimodal-evidence: Two-Stage Handwritten Math & 408 Diagram Verifier
     expect(ambiguousFloat.overallVerdict).toBe("unknown");
     expect(ambiguousFloat.canUpdateSkillBelief).toBe(false);
   });
+
+  it("Round-4 [P1-1]: evaluates negative-base rational-exponent sign parity and widens amplified float rounding intervals", () => {
+    const makeRel = (kind: "equation" | "inequality", id: string, tokens: string[]): HandwritingStepInput => ({
+      stepId: id,
+      bbox: [0.1, 0.1, 0.9, 0.3],
+      ast: {
+        kind,
+        tokens: tokens.map((rawText, idx) => ({
+          tokenId: `${id}-${idx}`,
+          rawText,
+          kind: "auto",
+          confidence: 0.99,
+        })),
+      },
+    });
+
+    // (-2)^(2/3) and (-2)^0.4 = (-2)^(2/5) have even reduced numerators -> strictly positive.
+    expect(evaluateHandwritingStage2([makeRel("inequality", "neg-even-frac-gt", ["(", "-", "2", ")", "^", "(", "2", "/", "3", ")", ">", "0"])]).overallVerdict).toBe("valid");
+    expect(evaluateHandwritingStage2([makeRel("inequality", "neg-even-frac-lt", ["(", "-", "2", ")", "^", "(", "2", "/", "3", ")", "<", "0"])]).overallVerdict).toBe("invalid");
+    expect(evaluateHandwritingStage2([makeRel("inequality", "neg-04-gt", ["(", "-", "2", ")", "^", "0.4", ">", "0"])]).overallVerdict).toBe("valid");
+    expect(evaluateHandwritingStage2([makeRel("inequality", "neg-04-lt", ["(", "-", "2", ")", "^", "0.4", "<", "0"])]).overallVerdict).toBe("invalid");
+    expect(evaluateHandwritingStage2([makeRel("inequality", "neg-even-neg-exp-gt", ["(", "-", "2", ")", "^", "(", "-", "2", "/", "3", ")", ">", "0"])]).overallVerdict).toBe("valid");
+
+    // Odd reduced numerator (-2)^(1/3) and (-2)^0.2 remain strictly negative.
+    expect(evaluateHandwritingStage2([makeRel("inequality", "neg-odd-frac-lt", ["(", "-", "2", ")", "^", "(", "1", "/", "3", ")", "<", "0"])]).overallVerdict).toBe("valid");
+    expect(evaluateHandwritingStage2([makeRel("inequality", "neg-odd-frac-gt", ["(", "-", "2", ")", "^", "(", "1", "/", "3", ")", ">", "0"])]).overallVerdict).toBe("invalid");
+
+    // (1 + 1e-16)^(1e16 + 0.5) ≈ e ≈ 2.71828 rounds base to 1 in float64; interval power
+    // widens cleanly across [~1.4e-4, ~7200], so falsely claiming "= 1" or "= 2.718" abstains as "unknown".
+    const amplifiedEqOne = evaluateHandwritingStage2([
+      makeRel("equation", "amp-eq-one", ["(", "1.0000000000000001", ")", "^", "10000000000000000.5", "=", "1"]),
+    ]);
+    expect(amplifiedEqOne.overallVerdict).toBe("unknown");
+    expect(amplifiedEqOne.canUpdateSkillBelief).toBe(false);
+
+    // Positivity and huge-exponent overflow safety still hold cleanly.
+    expect(
+      evaluateHandwritingStage2([
+        makeRel("inequality", "amp-gt-zero", ["(", "1.0000000000000001", ")", "^", "10000000000000000.5", ">", "0"]),
+      ]).overallVerdict,
+    ).toBe("valid");
+    expect(
+      evaluateHandwritingStage2([
+        makeRel("inequality", "amp-overflow", ["(", "1.0000000000000001", ")", "^", "10000000000000000000.5", ">", "0"]),
+      ]).overallVerdict,
+    ).toBe("unknown");
+  });
+
+  it("Round-4 [P1-2]: transitively invalidates downstream dependsOnStepIds stale verdicts & misconceptions when upstream OCR mutates", () => {
+    // s1 -> s2 -> s3 (ordered non-chronologically in input to also exercise DAG propagation regardless of array order).
+    const chain: readonly HandwritingStepInput[] = [
+      {
+        stepId: "s3",
+        bbox: [0.1, 0.7, 0.9, 0.9],
+        dependsOnStepIds: ["s2"],
+        ast: {
+          kind: "equation",
+          tokens: [
+            { tokenId: "s3-1", rawText: "2", kind: "digit", confidence: 0.99 },
+            { tokenId: "s3-2", rawText: "*", kind: "operator", confidence: 0.99 },
+            { tokenId: "s3-3", rawText: "x", kind: "variable", confidence: 0.99 },
+            { tokenId: "s3-4", rawText: "-", kind: "operator", confidence: 0.99 },
+            { tokenId: "s3-5", rawText: "1", kind: "digit", confidence: 0.99 },
+            { tokenId: "s3-6", rawText: "=", kind: "operator", confidence: 0.99 },
+            { tokenId: "s3-7", rawText: "5", kind: "digit", confidence: 0.99 },
+          ],
+        },
+        localVerdict: "invalid",
+        misconceptionId: "stale_s3_err",
+        errorCode: "OLD_S3",
+        errorSummary: "stale s3 summary",
+        postConfirmationVerdict: {
+          // Previously validated only against intermediate s2 without binding upstream s1!
+          confirmedExpression: "2 * x - 1 = 5",
+          upstreamConfirmedExpressions: { s2: "2 * x = 6" },
+          localVerdict: "invalid",
+          misconceptionId: "stale_s3_unbound",
+        },
+      },
+      {
+        stepId: "s2",
+        bbox: [0.1, 0.4, 0.9, 0.6],
+        dependsOnStepIds: ["s1"],
+        ast: {
+          kind: "equation",
+          tokens: [
+            { tokenId: "s2-1", rawText: "2", kind: "digit", confidence: 0.99 },
+            { tokenId: "s2-2", rawText: "*", kind: "operator", confidence: 0.99 },
+            { tokenId: "s2-3", rawText: "x", kind: "variable", confidence: 0.99 },
+            { tokenId: "s2-4", rawText: "=", kind: "operator", confidence: 0.99 },
+            { tokenId: "s2-5", rawText: "6", kind: "digit", confidence: 0.99 },
+          ],
+        },
+        localVerdict: "invalid",
+        misconceptionId: "stale_s2_err",
+        errorCode: "OLD_S2",
+        errorSummary: "stale s2 summary",
+        postConfirmationVerdict: {
+          confirmedExpression: "2 * x = 6",
+          localVerdict: "invalid",
+          misconceptionId: "stale_s2_unbound",
+        },
+      },
+      {
+        stepId: "s1",
+        bbox: [0.1, 0.1, 0.9, 0.3],
+        ast: {
+          kind: "equation",
+          tokens: [
+            { tokenId: "s1-1", rawText: "x", kind: "variable", confidence: 0.98 },
+            { tokenId: "s1-2", rawText: "=", kind: "operator", confidence: 0.99 },
+            {
+              tokenId: "s1-3",
+              rawText: "2",
+              kind: "digit",
+              confidence: 0.42,
+              visualCandidates: ["2", "3"],
+            },
+          ],
+        },
+        localVerdict: "valid",
+      },
+    ];
+
+    // 1. applyLearnerSymbolConfirmations clears stale verdicts/misconceptions/unmatched postConfirmationVerdict across s1 -> s2 -> s3.
+    const confirmed = applyLearnerSymbolConfirmations(chain, [
+      { stepId: "s1", tokenId: "s1-3", confirmedText: "3" },
+    ]);
+    for (const updatedStep of confirmed) {
+      expect(updatedStep.localVerdict).toBeUndefined();
+      expect(updatedStep.misconceptionId).toBeUndefined();
+      expect(updatedStep.errorCode).toBeUndefined();
+      expect(updatedStep.errorSummary).toBeUndefined();
+      expect(updatedStep.postConfirmationVerdict).toBeUndefined();
+    }
+
+    const stage2AfterConfirm = evaluateHandwritingStage2(confirmed, { assisted: false });
+    expect(stage2AfterConfirm.overallVerdict).toBe("unknown");
+    expect(stage2AfterConfirm.canUpdateSkillBelief).toBe(false);
+    expect(stage2AfterConfirm.firstRootCauseError).toBeNull();
+    expect(stage2AfterConfirm.steps.every((s) => s.localVerdict === "unknown")).toBe(true);
+    expect(stage2AfterConfirm.steps.every((s) => s.attributedMisconceptionId === null)).toBe(true);
+    expect(stage2AfterConfirm.steps.every((s) => s.errorCode === null && s.errorSummary === null)).toBe(true);
+
+    // 2. Direct evaluateHandwritingStage2 call (without applyLearnerSymbolConfirmations) ALSO ignores stale
+    // downstream s2/s3 verdicts and stale postConfirmationVerdict bound to old upstream expressions.
+    const directMutatedChain: readonly HandwritingStepInput[] = chain.map((step) =>
+      step.stepId === "s1"
+        ? {
+            ...step,
+            ast: {
+              ...step.ast,
+              tokens: step.ast.tokens.map((t) =>
+                t.tokenId === "s1-3" ? { ...t, confirmedByLearner: true, confirmedText: "3" } : t,
+              ),
+            },
+            postConfirmationVerdict: {
+              confirmedExpression: "x = 3",
+              localVerdict: "valid",
+            },
+          }
+        : step.stepId === "s2"
+          ? {
+              ...step,
+              postConfirmationVerdict: {
+                confirmedExpression: "2 * x = 6",
+                upstreamConfirmedExpressions: { s1: "x = 2" }, // Bound to OLD OCR value!
+                localVerdict: "invalid",
+                misconceptionId: "old_x_eq_2_err",
+              },
+            }
+          : step,
+    );
+    const directStage2 = evaluateHandwritingStage2(directMutatedChain, { assisted: false });
+    expect(directStage2.overallVerdict).toBe("unknown");
+    expect(directStage2.canUpdateSkillBelief).toBe(false);
+    expect(directStage2.firstRootCauseError).toBeNull();
+    expect(directStage2.steps.find((s) => s.stepId === "s2")?.localVerdict).toBe("unknown");
+    expect(directStage2.steps.find((s) => s.stepId === "s3")?.localVerdict).toBe("unknown");
+
+    // 3. Providing freshly bound postConfirmationVerdict across the chain restores exact belief-updating evaluation.
+    const boundChain: readonly HandwritingStepInput[] = directMutatedChain.map((step) => {
+      if (step.stepId === "s2") {
+        return {
+          ...step,
+          postConfirmationVerdict: {
+            confirmedExpression: "2 * x = 6",
+            upstreamConfirmedExpressions: { s1: "x = 3" },
+            localVerdict: "valid",
+          },
+        };
+      }
+      if (step.stepId === "s3") {
+        return {
+          ...step,
+          postConfirmationVerdict: {
+            confirmedExpression: "2 * x - 1 = 5",
+            upstreamConfirmedExpressions: { s1: "x = 3", s2: "2 * x = 6" },
+            localVerdict: "valid",
+          },
+        };
+      }
+      return step;
+    });
+    const boundStage2 = evaluateHandwritingStage2(boundChain, { assisted: false });
+    expect(boundStage2.overallVerdict).toBe("valid");
+    expect(boundStage2.canUpdateSkillBelief).toBe(true);
+    expect(boundStage2.firstRootCauseError).toBeNull();
+
+    // 4. Downstream pure-numeric step re-evaluates purely arithmetically instead of trusting stale misconceptionId.
+    const numericDownstream = applyLearnerSymbolConfirmations(
+      [
+        {
+          stepId: "n1",
+          bbox: [0.1, 0.1, 0.9, 0.3],
+          ast: {
+            kind: "equation",
+            tokens: [
+              { tokenId: "n1-1", rawText: "2", kind: "digit", confidence: 0.99 },
+              { tokenId: "n1-2", rawText: "+", kind: "operator", confidence: 0.99 },
+              { tokenId: "n1-3", rawText: "2", kind: "digit", confidence: 0.99 },
+              { tokenId: "n1-4", rawText: "=", kind: "operator", confidence: 0.99 },
+              { tokenId: "n1-5", rawText: "5", kind: "digit", confidence: 0.5 },
+            ],
+          },
+          localVerdict: "invalid",
+          misconceptionId: "old_n1",
+        },
+        {
+          stepId: "n2",
+          bbox: [0.1, 0.4, 0.9, 0.6],
+          dependsOnStepIds: ["n1"],
+          ast: {
+            kind: "equation",
+            tokens: [
+              { tokenId: "n2-1", rawText: "2", kind: "digit", confidence: 0.99 },
+              { tokenId: "n2-2", rawText: "*", kind: "operator", confidence: 0.99 },
+              { tokenId: "n2-3", rawText: "3", kind: "digit", confidence: 0.99 },
+              { tokenId: "n2-4", rawText: "=", kind: "operator", confidence: 0.99 },
+              { tokenId: "n2-5", rawText: "6", kind: "digit", confidence: 0.99 },
+            ],
+          },
+          localVerdict: "invalid",
+          misconceptionId: "stale_n2_misconception",
+        },
+      ],
+      [{ stepId: "n1", tokenId: "n1-5", confirmedText: "4" }],
+    );
+    const numericStage2 = evaluateHandwritingStage2(numericDownstream, { assisted: false });
+    expect(numericStage2.overallVerdict).toBe("valid");
+    expect(numericStage2.firstRootCauseError).toBeNull();
+  });
 });
 
 describe("multimodal-evidence: Pre-VAD Original PCM Clock & 0080 Raw Audio Retention", () => {

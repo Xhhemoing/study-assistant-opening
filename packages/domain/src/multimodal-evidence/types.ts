@@ -88,6 +88,13 @@ export type PostConfirmationVerdict = Readonly<{
    * or critical-token expression) this verdict was produced against.
    */
   confirmedExpression: string;
+  /**
+   * Required whenever any transitive dependency in `dependsOnStepIds`
+   * mutated via learner OCR confirmation: maps upstream dependency `stepId`s
+   * (at minimum every mutated upstream ancestor) to their normalized
+   * confirmed expression.
+   */
+  upstreamConfirmedExpressions?: Readonly<Record<string, string>>;
   localVerdict: StepLocalVerdict;
   misconceptionId?: string;
   errorCode?: string;
@@ -102,7 +109,9 @@ export type HandwritingStepInput = Readonly<{
   /**
    * Local transition verdict given this step's stated premises.
    * Ignored if learner OCR confirmation changed any token's text from `rawText`
-   * unless a matching `postConfirmationVerdict` is provided.
+   * on this step or any transitive dependency in `dependsOnStepIds`, unless a
+   * matching `postConfirmationVerdict` (including mutated upstream bindings)
+   * is provided.
    */
   localVerdict?: StepLocalVerdict;
   postConfirmationVerdict?: PostConfirmationVerdict;

@@ -19,6 +19,7 @@ import {
   type HandwrittenTokenKind,
   type LearnerSymbolConfirmation,
   type NormalizedBoundingBox,
+  type PostConfirmationVerdict,
   type StepLocalVerdict,
 } from "./types";
 
@@ -150,14 +151,120 @@ function normalizeExpressionKey(expr: string): string {
   return expr.replace(/\s+/g, " ").trim();
 }
 
+type StepExpressionKeys = Readonly<{
+  effectiveKey: string;
+  semanticKey: string;
+  hasConfirmedTextMutation: boolean;
+}>;
+
+function computeStepExpressionKeys(
+  tokens: readonly HandwrittenAstTokenInput[],
+  rawExpression?: string,
+): StepExpressionKeys {
+  const effectiveTexts: string[] = [];
+  const semanticTexts: string[] = [];
+  let hasConfirmedTextMutation = false;
+
+  for (const token of tokens) {
+    const confirmedByLearner = token.confirmedByLearner === true;
+    const effectiveText =
+      confirmedByLearner && token.confirmedText !== undefined
+        ? token.confirmedText.trim()
+        : token.rawText;
+    if (confirmedByLearner && effectiveText.trim() !== token.rawText.trim()) {
+      hasConfirmedTextMutation = true;
+    }
+    effectiveTexts.push(effectiveText);
+    if (isCriticalMathOr408Token({ kind: token.kind, rawText: effectiveText })) {
+      semanticTexts.push(effectiveText);
+    }
+  }
+
+  const joinedEffective = effectiveTexts.join(" ").trim();
+  const effectiveExpression =
+    joinedEffective.length > 0 ? joinedEffective : (rawExpression ?? "").trim();
+
+  return {
+    effectiveKey: normalizeExpressionKey(effectiveExpression),
+    semanticKey: normalizeExpressionKey(semanticTexts.join(" ")),
+    hasConfirmedTextMutation,
+  };
+}
+
+function collectTransitiveAncestors(
+  stepId: string,
+  stepsById: ReadonlyMap<string, HandwritingStepInput>,
+): Set<string> {
+  const ancestors = new Set<string>();
+  const startStep = stepsById.get(stepId);
+  if (!startStep?.dependsOnStepIds) return ancestors;
+
+  const queue = [...startStep.dependsOnStepIds];
+  while (queue.length > 0) {
+    const depId = queue.shift()!;
+    if (depId === stepId || ancestors.has(depId)) continue;
+    ancestors.add(depId);
+    const depStep = stepsById.get(depId);
+    if (depStep?.dependsOnStepIds) {
+      for (const parentDepId of depStep.dependsOnStepIds) {
+        if (!ancestors.has(parentDepId) && parentDepId !== stepId) {
+          queue.push(parentDepId);
+        }
+      }
+    }
+  }
+  return ancestors;
+}
+
+function doesPostConfirmationVerdictMatch(
+  verdict: PostConfirmationVerdict | undefined,
+  stepKeys: StepExpressionKeys,
+  ancestorIds: ReadonlySet<string>,
+  stepKeysById: ReadonlyMap<string, StepExpressionKeys>,
+  mutatedUpstreamIds: ReadonlySet<string>,
+): verdict is PostConfirmationVerdict {
+  if (verdict === undefined) return false;
+
+  const targetExpr = normalizeExpressionKey(verdict.confirmedExpression);
+  if (targetExpr !== stepKeys.effectiveKey && targetExpr !== stepKeys.semanticKey) {
+    return false;
+  }
+
+  const boundByDepId = new Map<string, string>();
+  if (verdict.upstreamConfirmedExpressions !== undefined) {
+    for (const [depId, depExpr] of Object.entries(verdict.upstreamConfirmedExpressions)) {
+      if (!ancestorIds.has(depId)) return false;
+      const depKeys = stepKeysById.get(depId);
+      if (!depKeys) return false;
+      const normalizedDepExpr = normalizeExpressionKey(depExpr);
+      if (normalizedDepExpr !== depKeys.effectiveKey && normalizedDepExpr !== depKeys.semanticKey) {
+        return false;
+      }
+      boundByDepId.set(depId, normalizedDepExpr);
+    }
+  }
+
+  if (mutatedUpstreamIds.size > 0) {
+    if (verdict.upstreamConfirmedExpressions === undefined) return false;
+    for (const mutatedDepId of mutatedUpstreamIds) {
+      if (!boundByDepId.has(mutatedDepId)) {
+        return false;
+      }
+    }
+  }
+
+  return true;
+}
+
 /**
  * Pure helper applying learner confirmation/corrections onto step AST tokens
  * before re-running Stage 1 / Stage 2.
  *
- * Whenever any confirmed token text differs from its OCR `rawText`, clears
- * stale pre-confirmation `localVerdict`, `misconceptionId`, `errorCode`,
- * `errorSummary`, and mismatched `postConfirmationVerdict` so Stage 2 never
- * reuses stale pre-confirmation verdicts.
+ * Whenever any confirmed token text differs from its OCR `rawText` (or changes
+ * an already-confirmed token), propagates invalidation transitively along
+ * `dependsOnStepIds` so affected steps and all downstream steps clear stale
+ * pre-confirmation `localVerdict`, `misconceptionId`, `errorCode`,
+ * `errorSummary`, and unmatched `postConfirmationVerdict`.
  */
 export function applyLearnerSymbolConfirmations(
   steps: readonly HandwritingStepInput[],
@@ -174,32 +281,71 @@ export function applyLearnerSymbolConfirmations(
     confirmationMap.set(`${confirmation.stepId}\u0000${confirmation.tokenId}`, trimmed);
   }
 
-  return Object.freeze(
-    steps.map((step) => {
-      let stepTextMutated = false;
-      const updatedTokens = Object.freeze(
-        step.ast.tokens.map((token) => {
-          const confirmedText = confirmationMap.get(`${step.stepId}\u0000${token.tokenId}`);
-          if (confirmedText === undefined) return token;
-          if (confirmedText !== token.rawText.trim()) {
-            stepTextMutated = true;
-          }
-          return {
-            ...token,
-            confirmedByLearner: true,
-            confirmedText,
-          };
-        }),
-      );
+  const directlyMutatedIds = new Set<string>();
+  const stepKeysById = new Map<string, StepExpressionKeys>();
+  const updatedById = new Map<string, HandwritingStepInput>();
+  const dependentsById = new Map<string, string[]>();
 
-      if (!stepTextMutated) {
+  const preliminarySteps = steps.map((step) => {
+    let stepTextMutated = false;
+    const updatedTokens = Object.freeze(
+      step.ast.tokens.map((token) => {
+        const confirmedText = confirmationMap.get(`${step.stepId}\u0000${token.tokenId}`);
+        if (confirmedText === undefined) return token;
+        const prevEffectiveText =
+          token.confirmedByLearner === true && token.confirmedText !== undefined
+            ? token.confirmedText.trim()
+            : token.rawText.trim();
+        if (confirmedText !== token.rawText.trim() || confirmedText !== prevEffectiveText) {
+          stepTextMutated = true;
+        }
         return {
-          ...step,
-          ast: {
-            ...step.ast,
-            tokens: updatedTokens,
-          },
+          ...token,
+          confirmedByLearner: true,
+          confirmedText,
         };
+      }),
+    );
+
+    const updatedStep: HandwritingStepInput = {
+      ...step,
+      ast: {
+        ...step.ast,
+        tokens: updatedTokens,
+      },
+    };
+    const keys = computeStepExpressionKeys(updatedTokens, step.ast.rawExpression);
+    if (stepTextMutated || keys.hasConfirmedTextMutation) {
+      directlyMutatedIds.add(step.stepId);
+    }
+    stepKeysById.set(step.stepId, keys);
+    updatedById.set(step.stepId, updatedStep);
+    dependentsById.set(step.stepId, []);
+    return updatedStep;
+  });
+
+  for (const step of preliminarySteps) {
+    for (const depId of step.dependsOnStepIds ?? []) {
+      dependentsById.get(depId)?.push(step.stepId);
+    }
+  }
+
+  const affectedStepIds = new Set<string>(directlyMutatedIds);
+  const queue = [...directlyMutatedIds];
+  while (queue.length > 0) {
+    const currentId = queue.shift()!;
+    for (const childId of dependentsById.get(currentId) ?? []) {
+      if (!affectedStepIds.has(childId)) {
+        affectedStepIds.add(childId);
+        queue.push(childId);
+      }
+    }
+  }
+
+  return Object.freeze(
+    preliminarySteps.map((step) => {
+      if (!affectedStepIds.has(step.stepId)) {
+        return step;
       }
 
       const {
@@ -211,46 +357,28 @@ export function applyLearnerSymbolConfirmations(
         ...restStep
       } = step;
 
-      const nextEffective = updatedTokens
-        .map((t) =>
-          t.confirmedByLearner === true && t.confirmedText !== undefined
-            ? t.confirmedText.trim()
-            : t.rawText,
-        )
-        .join(" ")
-        .trim();
-      const nextSemantic = updatedTokens
-        .filter((t) =>
-          isCriticalMathOr408Token({
-            kind: t.kind,
-            rawText:
-              t.confirmedByLearner === true && t.confirmedText !== undefined
-                ? t.confirmedText.trim()
-                : t.rawText,
-          }),
-        )
-        .map((t) =>
-          t.confirmedByLearner === true && t.confirmedText !== undefined
-            ? t.confirmedText.trim()
-            : t.rawText,
-        )
-        .join(" ")
-        .trim();
+      const ancestorIds = collectTransitiveAncestors(step.stepId, updatedById);
+      const mutatedUpstreamIds = new Set<string>();
+      for (const ancestorId of ancestorIds) {
+        if (
+          directlyMutatedIds.has(ancestorId) ||
+          stepKeysById.get(ancestorId)?.hasConfirmedTextMutation === true
+        ) {
+          mutatedUpstreamIds.add(ancestorId);
+        }
+      }
 
-      const keepPostVerdict =
-        stalePostVerdict !== undefined &&
-        (normalizeExpressionKey(stalePostVerdict.confirmedExpression) ===
-          normalizeExpressionKey(nextEffective) ||
-          normalizeExpressionKey(stalePostVerdict.confirmedExpression) ===
-            normalizeExpressionKey(nextSemantic));
+      const keepPostVerdict = doesPostConfirmationVerdictMatch(
+        stalePostVerdict,
+        stepKeysById.get(step.stepId)!,
+        ancestorIds,
+        stepKeysById,
+        mutatedUpstreamIds,
+      );
 
       return {
         ...restStep,
         ...(keepPostVerdict ? { postConfirmationVerdict: stalePostVerdict } : {}),
-        ast: {
-          ...step.ast,
-          tokens: updatedTokens,
-        },
       };
     }),
   );
@@ -716,16 +844,50 @@ function powRational(base: Rational, exp: Rational): NumericEvalResult {
     return powRational({ num: signedRootNum, den: rootDen }, { num: exp.num, den: 1n });
   }
 
-  // Irrational power: certify via bounded IEEE-754 interval so ambiguous float equality abstains.
-  const baseFloat = rationalToFloat(base);
-  const expFloat = rationalToFloat(exp);
-  if (baseFloat === null || expFloat === null) return { kind: "unknown" };
-  const approx =
-    baseFloat < 0
-      ? -Math.pow(-baseFloat, expFloat)
-      : Math.pow(baseFloat, expFloat);
-  if (!Number.isFinite(approx)) return { kind: "unknown" };
-  return widenInterval(approx, approx, 1e-11);
+  // Irrational power: compute magnitude via interval power on |base| and exp
+  // so float64 rounding errors cannot produce false precision or wrong signs.
+  const absBaseInterval = toRealInterval({
+    kind: "rational",
+    value: { num: absNum, den: base.den },
+  });
+  const expInterval = toRealInterval({ kind: "rational", value: exp });
+  if (!absBaseInterval || !expInterval) return { kind: "unknown" };
+  const magnitude = powPositiveRealIntervals(absBaseInterval, expInterval);
+  if (base.num < 0n && exp.num % 2n !== 0n) {
+    return negNumeric(magnitude);
+  }
+  return magnitude;
+}
+
+function powPositiveRealIntervals(b: RealInterval, e: RealInterval): NumericEvalResult {
+  if (b.lower <= 0) return { kind: "unknown" };
+  const corners = [
+    Math.pow(b.lower, e.lower),
+    Math.pow(b.lower, e.upper),
+    Math.pow(b.upper, e.lower),
+    Math.pow(b.upper, e.upper),
+  ];
+  if (corners.some((value) => !Number.isFinite(value))) {
+    return { kind: "unknown" };
+  }
+  const lower = Math.min(...corners);
+  const upper = Math.max(...corners);
+  const relErr = 1e-11;
+  const upperPad = Math.max(Number.MIN_VALUE, Math.abs(upper) * relErr);
+  const finalUpper = upper + upperPad;
+  if (!Number.isFinite(finalUpper)) {
+    return { kind: "unknown" };
+  }
+  // Strictly positive base interval raised to finite exponent remains > 0
+  // unless IEEE-754 underflowed a corner to subnormal / 0.
+  const finalLower =
+    lower >= 1e-300
+      ? Math.max(Number.MIN_VALUE, lower * (1 - relErr) - Number.MIN_VALUE)
+      : 0;
+  return {
+    kind: "real_interval",
+    interval: { lower: finalLower, upper: finalUpper },
+  };
 }
 
 function powNumeric(base: NumericEvalResult, exp: NumericEvalResult): NumericEvalResult {
@@ -736,14 +898,8 @@ function powNumeric(base: NumericEvalResult, exp: NumericEvalResult): NumericEva
   }
   const b = toRealInterval(base);
   const e = toRealInterval(exp);
-  if (!b || !e || b.lower <= 0) return { kind: "unknown" };
-  const corners = [
-    Math.pow(b.lower, e.lower),
-    Math.pow(b.lower, e.upper),
-    Math.pow(b.upper, e.lower),
-    Math.pow(b.upper, e.upper),
-  ];
-  return widenInterval(Math.min(...corners), Math.max(...corners), 1e-11);
+  if (!b || !e) return { kind: "unknown" };
+  return powPositiveRealIntervals(b, e);
 }
 
 function evaluateNumericExpression(expr: string): NumericEvalResult {
@@ -1074,6 +1230,24 @@ export function evaluateHandwritingStage2(
   }
 
   const stage1ById = new Map(stage1.steps.map((s) => [s.stepId, s] as const));
+  const stepKeysById = new Map<string, StepExpressionKeys>();
+  const semanticExprById = new Map<string, string>();
+  for (const s1 of stage1.steps) {
+    const semanticTokenExpression = s1.tokens
+      .filter((t) => t.isCritical)
+      .map((t) => t.effectiveText)
+      .join(" ")
+      .trim();
+    semanticExprById.set(s1.stepId, semanticTokenExpression);
+    stepKeysById.set(s1.stepId, {
+      effectiveKey: normalizeExpressionKey(s1.effectiveExpression),
+      semanticKey: normalizeExpressionKey(semanticTokenExpression),
+      hasConfirmedTextMutation: s1.hasConfirmedTextMutation,
+    });
+  }
+
+  const ancestorsById = new Map<string, Set<string>>();
+  const mutatedPremiseStepIds = new Set<string>();
   const evalById = new Map<string, HandwritingStepEvaluation>();
 
   let firstRootCauseError: HandwritingRootCauseError | null = null;
@@ -1084,20 +1258,40 @@ export function evaluateHandwritingStage2(
 
   for (const { step, stepIndex, deps } of ordered) {
     const stage1Step = stage1ById.get(step.stepId)!;
-    const semanticTokenExpression = stage1Step.tokens
-      .filter((t) => t.isCritical)
-      .map((t) => t.effectiveText)
-      .join(" ")
-      .trim();
+    const semanticTokenExpression = semanticExprById.get(step.stepId)!;
+    const ancestors = new Set<string>();
+    for (const depId of deps) {
+      ancestors.add(depId);
+      const depAncestors = ancestorsById.get(depId);
+      if (depAncestors) {
+        for (const ancId of depAncestors) {
+          ancestors.add(ancId);
+        }
+      }
+    }
+    ancestorsById.set(step.stepId, ancestors);
 
-    const effectiveKey = normalizeExpressionKey(stage1Step.effectiveExpression);
-    const semanticKey = normalizeExpressionKey(semanticTokenExpression);
-    const matchedPostVerdict =
-      step.postConfirmationVerdict !== undefined &&
-      (normalizeExpressionKey(step.postConfirmationVerdict.confirmedExpression) === effectiveKey ||
-        normalizeExpressionKey(step.postConfirmationVerdict.confirmedExpression) === semanticKey)
-        ? step.postConfirmationVerdict
-        : undefined;
+    const hasMutatedUpstreamPremise = deps.some((depId) => mutatedPremiseStepIds.has(depId));
+    if (stage1Step.hasConfirmedTextMutation || hasMutatedUpstreamPremise) {
+      mutatedPremiseStepIds.add(step.stepId);
+    }
+
+    const mutatedUpstreamIds = new Set<string>();
+    for (const ancId of ancestors) {
+      if (stepKeysById.get(ancId)?.hasConfirmedTextMutation === true) {
+        mutatedUpstreamIds.add(ancId);
+      }
+    }
+
+    const matchedPostVerdict = doesPostConfirmationVerdictMatch(
+      step.postConfirmationVerdict,
+      stepKeysById.get(step.stepId)!,
+      ancestors,
+      stepKeysById,
+      mutatedUpstreamIds,
+    )
+      ? step.postConfirmationVerdict
+      : undefined;
 
     // [P1-2] Untokenized steps (tokens: [] or 0 critical tokens) must fail closed as "unknown"
     // and never bypass Stage-1 confidence gating via rawExpression or pre-confirmation localVerdict.
@@ -1113,8 +1307,9 @@ export function evaluateHandwritingStage2(
       stepMisconceptionId = matchedPostVerdict.misconceptionId ?? null;
       stepErrorCode = matchedPostVerdict.errorCode ?? null;
       stepErrorSummary = matchedPostVerdict.errorSummary ?? null;
-    } else if (stage1Step.hasConfirmedTextMutation) {
-      // [P1-1] Confirmed symbol mutation invalidates stale pre-confirmation localVerdict / misconception.
+    } else if (mutatedPremiseStepIds.has(step.stepId)) {
+      // Confirmed symbol mutation on this step or any transitive upstream premise invalidates
+      // stale pre-confirmation localVerdict / misconception / error metadata.
       localVerdict =
         step.ast.kind === "equation" || step.ast.kind === "inequality"
           ? (tryVerifyPureNumericRelation(semanticTokenExpression) ?? "unknown")
