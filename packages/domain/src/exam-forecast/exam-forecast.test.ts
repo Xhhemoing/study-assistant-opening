@@ -4557,4 +4557,280 @@ describe("CRN marginal ROI sandbox & UnifiedDecisionSnapshotV1", () => {
     expect(cancelSim.matchedUntimedExpectedScore).toBe(1e308);
     expect(cancelSim.untimedExpectedScore).toBe(1e308);
   });
+
+  it("enforces all Round-15 2 P1 fast-path & ScaledFloat invariants", () => {
+    // [R15 P1-1 Case A] Inactive large section w=1e308, score=0 paired with active w=1, score=1 preserves 1 exact.
+    const r15CaseABp = {
+      ...createSharedFullPaperBlueprint({
+        blueprintId: "r15-case-a",
+        title: "R15 Case A",
+        totalTimeLimitMinutes: 60,
+        totalPoints: 1,
+        skillIds: ["kR15"],
+        thetaCovariance: [[0]],
+        sections: [
+          {
+            sectionId: "sBigZero",
+            label: "BigZero",
+            scoringKind: "item_raw_table",
+            timeLimitMinutes: null,
+            weight: 1e308,
+            scoreRange: [0, 1e308],
+            scoreStep: 1e308,
+            parts: [{ partId: "p1", label: "P1", weight: 1, skillIds: ["kR15"] }],
+            items: [
+              {
+                itemId: "q1",
+                sectionId: "sBigZero",
+                partId: "p1",
+                skillIds: ["kR15"],
+                guess: 0,
+                lapse: 0,
+                points: 1,
+                timeModel: { mu: 3, speedLoading: 0, skillLoading: {}, sigma: 0.01 },
+              },
+            ],
+            rawToBandTable: [
+              { rawMin: 0, rawMax: 1, score: 0 },
+            ],
+          },
+          {
+            sectionId: "sUnitOne",
+            label: "UnitOne",
+            scoringKind: "item_raw_table",
+            timeLimitMinutes: null,
+            weight: 1,
+            scoreRange: [0, 1],
+            scoreStep: 1,
+            parts: [{ partId: "p2", label: "P2", weight: 1, skillIds: ["kR15"] }],
+            items: [
+              {
+                itemId: "q2",
+                sectionId: "sUnitOne",
+                partId: "p2",
+                skillIds: ["kR15"],
+                guess: 0,
+                lapse: 0,
+                points: 1,
+                timeModel: { mu: 3, speedLoading: 0, skillLoading: {}, sigma: 0.01 },
+              },
+            ],
+            rawToBandTable: [
+              { rawMin: 0, rawMax: 1, score: 1 },
+            ],
+          },
+        ],
+      }),
+      scoreRange: [0, 1] as const,
+      scoreStep: 1,
+    };
+    const r15CaseASim = simulateExamPaper({
+      blueprint: r15CaseABp,
+      learnerId: "l-r15",
+      beliefs: {},
+      evidence: [],
+      examAtMs: DAY_MS,
+      numDraws: 2,
+      seed: 24,
+    });
+    expect(r15CaseASim.timedExpectedScore).toBe(1);
+    expect(r15CaseASim.matchedUntimedExpectedScore).toBe(1);
+    expect(r15CaseASim.untimedExpectedScore).toBe(1);
+
+    // [R15 P1-1 Case B] 3-section [1e308*0, 1*0, 100] AND 50/50 s1 (w=1e308, P(0)=0.5, P(1e308)=0.5) + s2 (w=1, 100) on [0, 200] -> 150.
+    const r15ThreeZeroBp = {
+      ...createSharedFullPaperBlueprint({
+        blueprintId: "r15-3sec-100",
+        title: "R15 3sec 100",
+        totalTimeLimitMinutes: 90,
+        totalPoints: 200,
+        skillIds: ["kR15"],
+        thetaCovariance: [[0]],
+        sections: [
+          {
+            sectionId: "s1",
+            label: "S1",
+            scoringKind: "item_raw_table",
+            timeLimitMinutes: null,
+            weight: 1e308,
+            scoreRange: [0, 1],
+            scoreStep: 1,
+            parts: [{ partId: "p1", label: "P1", weight: 1, skillIds: ["kR15"] }],
+            items: [{ itemId: "q1", sectionId: "s1", partId: "p1", skillIds: ["kR15"], guess: 0, lapse: 0, points: 1, timeModel: { mu: 3, speedLoading: 0, skillLoading: {}, sigma: 0.01 } }],
+            rawToBandTable: [{ rawMin: 0, rawMax: 1, score: 0 }],
+          },
+          {
+            sectionId: "s2",
+            label: "S2",
+            scoringKind: "item_raw_table",
+            timeLimitMinutes: null,
+            weight: 1,
+            scoreRange: [0, 1e308],
+            scoreStep: 1e308,
+            parts: [{ partId: "p2", label: "P2", weight: 1, skillIds: ["kR15"] }],
+            items: [{ itemId: "q2", sectionId: "s2", partId: "p2", skillIds: ["kR15"], guess: 0, lapse: 0, points: 1, timeModel: { mu: 3, speedLoading: 0, skillLoading: {}, sigma: 0.01 } }],
+            rawToBandTable: [{ rawMin: 0, rawMax: 1, score: 0 }],
+          },
+          {
+            sectionId: "s3",
+            label: "S3",
+            scoringKind: "item_raw_table",
+            timeLimitMinutes: null,
+            weight: 1,
+            scoreRange: [0, 100],
+            scoreStep: 1,
+            parts: [{ partId: "p3", label: "P3", weight: 1, skillIds: ["kR15"] }],
+            items: [{ itemId: "q3", sectionId: "s3", partId: "p3", skillIds: ["kR15"], guess: 0, lapse: 0, points: 1, timeModel: { mu: 3, speedLoading: 0, skillLoading: {}, sigma: 0.01 } }],
+            rawToBandTable: [{ rawMin: 0, rawMax: 1, score: 100 }],
+          },
+        ],
+      }),
+      scoreRange: [0, 200] as const,
+      scoreStep: 1,
+    };
+    const r15ThreeZeroSim = simulateExamPaper({
+      blueprint: r15ThreeZeroBp,
+      learnerId: "l-r15",
+      beliefs: {},
+      evidence: [],
+      examAtMs: DAY_MS,
+      numDraws: 2,
+      seed: 25,
+    });
+    expect(r15ThreeZeroSim.untimedExpectedScore).toBe(100);
+    expect(r15ThreeZeroSim.matchedUntimedExpectedScore).toBe(100);
+
+    const r15HalfBlowupBp = {
+      ...createSharedFullPaperBlueprint({
+        blueprintId: "r15-50-50-150",
+        title: "R15 50/50 150",
+        totalTimeLimitMinutes: 60,
+        totalPoints: 200,
+        skillIds: ["kHalf"],
+        thetaCovariance: [[0]],
+        sections: [
+          {
+            sectionId: "s1",
+            label: "S1",
+            scoringKind: "item_raw_table",
+            timeLimitMinutes: null,
+            weight: 1e308,
+            scoreRange: [0, 1e308],
+            scoreStep: 1e308,
+            parts: [{ partId: "p1", label: "P1", weight: 1, skillIds: ["kHalf"] }],
+            items: [
+              { itemId: "q1", sectionId: "s1", partId: "p1", skillIds: ["kHalf"], guess: 0, lapse: 0, points: 1, timeModel: { mu: 3, speedLoading: 0, skillLoading: {}, sigma: 0.01 } },
+            ],
+            rawToBandTable: [
+              { rawMin: 0, rawMax: 0, score: 0 },
+              { rawMin: 1, rawMax: 1, score: 1e308 },
+            ],
+          },
+          {
+            sectionId: "s2",
+            label: "S2",
+            scoringKind: "item_raw_table",
+            timeLimitMinutes: null,
+            weight: 1,
+            scoreRange: [0, 100],
+            scoreStep: 1,
+            parts: [{ partId: "p2", label: "P2", weight: 1, skillIds: ["kHalf"] }],
+            items: [
+              { itemId: "q2", sectionId: "s2", partId: "p2", skillIds: ["kHalf"], guess: 0, lapse: 0, points: 1, timeModel: { mu: 3, speedLoading: 0, skillLoading: {}, sigma: 0.01 } },
+            ],
+            rawToBandTable: [{ rawMin: 0, rawMax: 1, score: 100 }],
+          },
+        ],
+      }),
+      scoreRange: [0, 200] as const,
+      scoreStep: 1,
+    };
+    const r15HalfBeliefs = {
+      kHalf: createSkillBelief({
+        workspaceId: "ws-1",
+        learnerId: "l-r15",
+        courseId: "r15",
+        confirmedSkillVersion: 1,
+        abilityMean: 0,
+        abilityVariance: 0,
+        logStability: Math.log(14),
+        implicitLogCredit: 0,
+        lastDirectRecallAtMs: DAY_MS,
+      }),
+    };
+    const r15HalfDraws = [
+      { zLatent: [0], nuSpeed: 0, itemUniforms: [0.25, 0.25], itemTimeNormals: [0, 0], rubricScoreNormals: [], rubricTimeNormals: [] },
+      { zLatent: [0], nuSpeed: 0, itemUniforms: [0.75, 0.75], itemTimeNormals: [0, 0], rubricScoreNormals: [], rubricTimeNormals: [] },
+    ];
+    const r15HalfSim = simulateExamPaper({
+      blueprint: r15HalfBlowupBp,
+      learnerId: "l-r15",
+      beliefs: r15HalfBeliefs,
+      evidence: [],
+      examAtMs: DAY_MS,
+      precomputedDraws: r15HalfDraws,
+    });
+    expect(r15HalfSim.untimedExpectedScore).toBe(150);
+    expect(r15HalfSim.matchedUntimedExpectedScore).toBe(150);
+
+    // [R15 P1-2] [-2^80, 0] with 2 items at p = 1 - 2^-41 preserves -0.25 without catastrophic cancellation.
+    const negPow80 = -(2 ** 80);
+    const lapsePow41 = 2 ** -41;
+    const negCancelBp = {
+      ...createSharedFullPaperBlueprint({
+        blueprintId: "r15-neg-pow80",
+        title: "R15 Neg 2^80",
+        totalTimeLimitMinutes: 30,
+        totalPoints: 2 ** 80,
+        skillIds: ["kNeg80"],
+        thetaCovariance: [[0]],
+        sections: [
+          {
+            sectionId: "sec",
+            label: "Sec",
+            scoringKind: "item_raw_table",
+            timeLimitMinutes: null,
+            weight: 1,
+            scoreRange: [negPow80, 0],
+            scoreStep: 2 ** 80,
+            parts: [{ partId: "p1", label: "P1", weight: 1, skillIds: ["kNeg80"] }],
+            items: [
+              { itemId: "q1", sectionId: "sec", partId: "p1", skillIds: ["kNeg80"], guess: 0, lapse: lapsePow41, points: 1, timeModel: { mu: 3, speedLoading: 0, skillLoading: {}, sigma: 0.01 } },
+              { itemId: "q2", sectionId: "sec", partId: "p1", skillIds: ["kNeg80"], guess: 0, lapse: lapsePow41, points: 1, timeModel: { mu: 3, speedLoading: 0, skillLoading: {}, sigma: 0.01 } },
+            ],
+            rawToBandTable: [
+              { rawMin: 0, rawMax: 0, score: negPow80 },
+              { rawMin: 1, rawMax: 2, score: 0 },
+            ],
+          },
+        ],
+      }),
+      scoreRange: [negPow80, 0] as const,
+      scoreStep: 2 ** 80,
+    };
+    const negCancelBeliefs = {
+      kNeg80: createSkillBelief({
+        workspaceId: "ws-1",
+        learnerId: "l-r15",
+        courseId: "r15",
+        confirmedSkillVersion: 1,
+        abilityMean: 100,
+        abilityVariance: 0,
+        logStability: Math.log(14),
+        implicitLogCredit: 0,
+        lastDirectRecallAtMs: DAY_MS,
+      }),
+    };
+    const negCancelSim = simulateExamPaper({
+      blueprint: negCancelBp,
+      learnerId: "l-r15",
+      beliefs: negCancelBeliefs,
+      evidence: [],
+      examAtMs: DAY_MS,
+      numDraws: 1,
+      seed: 26,
+    });
+    expect(negCancelSim.sectionSummaries["sec"]!.untimedMeanScore).toBe(-0.25);
+    expect(negCancelSim.untimedExpectedScore).toBe(-0.25);
+  });
 });
