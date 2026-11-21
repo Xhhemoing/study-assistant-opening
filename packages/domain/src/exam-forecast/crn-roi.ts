@@ -1,5 +1,5 @@
 import { evaluateExamForecast } from "./cqr-calibration";
-import { validateExamBlueprint } from "./ielts-blueprint";
+import { safeArithmeticMean, validateExamBlueprint } from "./ielts-blueprint";
 import {
   DEFAULT_EXAM_SIMULATION_DRAWS,
   generatePaperRandomDraws,
@@ -133,25 +133,38 @@ export function evaluateCrnActionRoi(input: EvaluateCrnActionRoiInput): CrnActio
 
   const n = draws.length;
   const diffs = new Array<number>(n);
-  let sumDiff = 0;
-  let squeezeReductionSum = 0;
+  const squeezeDeltas = new Array<number>(n);
   for (let i = 0; i < n; i++) {
     const d = plusSim.timedScores[i]! - baseSim.timedScores[i]!;
     diffs[i] = d;
-    sumDiff += d;
     const baseSqueeze = baseSim.untimedScores[i]! - baseSim.timedScores[i]!;
     const plusSqueeze = plusSim.untimedScores[i]! - plusSim.timedScores[i]!;
-    squeezeReductionSum += baseSqueeze - plusSqueeze;
+    squeezeDeltas[i] = baseSqueeze - plusSqueeze;
   }
-  const pairedMeanGain = sumDiff / n;
+  const pairedMeanGain = safeArithmeticMean(diffs);
   let sqSum = 0;
+  let maxAbsDev = 0;
   for (let i = 0; i < n; i++) {
     const dev = diffs[i]! - pairedMeanGain;
+    const absDev = Math.abs(dev);
+    if (absDev > maxAbsDev) maxAbsDev = absDev;
     sqSum += dev * dev;
   }
-  const monteCarloSe = n > 1 ? Math.sqrt(sqSum / (n * (n - 1))) : 0;
+  let monteCarloSe = 0;
+  if (n > 1) {
+    if (Number.isFinite(sqSum)) {
+      monteCarloSe = Math.sqrt(sqSum / (n * (n - 1)));
+    } else if (maxAbsDev > 0) {
+      let scaledSqSum = 0;
+      for (let i = 0; i < n; i++) {
+        const scaled = (diffs[i]! - pairedMeanGain) / maxAbsDev;
+        scaledSqSum += scaled * scaled;
+      }
+      monteCarloSe = maxAbsDev * Math.sqrt(scaledSqSum / (n * (n - 1)));
+    }
+  }
   const roiBandPerHour = pairedMeanGain / input.candidateAction.durationHours;
-  const timeSqueezeReduction = squeezeReductionSum / n;
+  const timeSqueezeReduction = safeArithmeticMean(squeezeDeltas);
 
   let superlinearSynergy = Math.max(0, timeSqueezeReduction);
   if (input.baselineActions.length > 0) {

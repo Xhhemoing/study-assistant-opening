@@ -5,6 +5,7 @@ import {
   defineRecordEntry,
   rawScoreToBand,
   roundHalfUp05,
+  safeArithmeticMean,
   snapToScoreGrid,
   validateExamBlueprint,
 } from "./ielts-blueprint";
@@ -758,40 +759,70 @@ function computeRubricWeightedSectionScore(
     for (let i = 0; i < parts.length; i++) {
       const scaled = parts[i]!.weight * denom;
       const rounded = Math.round(scaled);
-      if (Math.abs(scaled - rounded) > 1e-12 * denom) {
+      if (!Number.isFinite(scaled) || Math.abs(scaled - rounded) > 1e-12 * denom) {
         allRational = false;
         break;
       }
       intWeightSum += rounded;
       intWeightedSum += rounded * scores[i]!;
     }
-    if (allRational && intWeightSum > 0) {
+    if (allRational && Number.isFinite(intWeightSum) && intWeightSum > 0 && Number.isFinite(intWeightedSum)) {
       const candidate = intWeightedSum / intWeightSum;
-      if (Number.isFinite(intWeightedSum) && Number.isFinite(candidate)) {
+      if (Number.isFinite(candidate)) {
         return candidate;
       }
       break;
     }
   }
-  let weightedSum = 0;
-  let weightSum = 0;
+
+  let maxWeight = 0;
   for (let i = 0; i < parts.length; i++) {
     const w = parts[i]!.weight;
-    weightedSum += w * scores[i]!;
-    weightSum += w;
+    if (Number.isFinite(w) && w > maxWeight) maxWeight = w;
   }
-  if (Number.isFinite(weightedSum) && weightSum > 0) {
-    const ratio = weightedSum / weightSum;
-    if (Number.isFinite(ratio)) return ratio;
-  }
-  if (weightSum > 0) {
-    let normalizedSum = 0;
-    for (let i = 0; i < parts.length; i++) {
-      normalizedSum += (parts[i]!.weight / weightSum) * scores[i]!;
+  if (maxWeight <= 0) return 0;
+
+  let relWeightSum = 0;
+  let minPartScore = Infinity;
+  let maxPartScore = -Infinity;
+  const relWeights = new Array<number>(parts.length);
+  for (let i = 0; i < parts.length; i++) {
+    const rawW = parts[i]!.weight;
+    const relW = rawW > 0 ? rawW / maxWeight : 0;
+    relWeights[i] = relW;
+    if (relW > 0) {
+      relWeightSum += relW;
+      const sc = scores[i]!;
+      if (sc < minPartScore) minPartScore = sc;
+      if (sc > maxPartScore) maxPartScore = sc;
     }
-    return normalizedSum;
   }
-  return 0;
+  if (!(relWeightSum > 0) || !Number.isFinite(relWeightSum)) return 0;
+  if (minPartScore === maxPartScore) return minPartScore;
+
+  const span = maxPartScore - minPartScore;
+  if (Number.isFinite(span)) {
+    let offsetSum = 0;
+    for (let i = 0; i < parts.length; i++) {
+      const alpha = relWeights[i]! / relWeightSum;
+      if (alpha > 0) {
+        offsetSum += alpha * (scores[i]! - minPartScore);
+      }
+    }
+    return clamp(minPartScore + offsetSum, minPartScore, maxPartScore);
+  }
+
+  let posSum = 0;
+  let negSum = 0;
+  for (let i = 0; i < parts.length; i++) {
+    const alpha = relWeights[i]! / relWeightSum;
+    if (alpha > 0) {
+      const term = alpha * scores[i]!;
+      if (term >= 0) posSum += term;
+      else negSum += term;
+    }
+  }
+  return clamp(posSum + negSum, minPartScore, maxPartScore);
 }
 
 function isCanonicalOneThirdTwoThirdsWriting(section: ExamSectionBlueprint): boolean {
@@ -1060,14 +1091,13 @@ function addDistToUntimedOverallPmf(
   drawWeight: number,
   targetPmf: Map<number, number>,
 ): number {
-  let expectedAdd = 0;
+  let drawExpected = 0;
   for (const [score, p] of dist.entries()) {
     const snapped = snapToScoreGrid(score, blueprint.scoreRange, blueprint.scoreStep, "nearest");
-    const prob = p * drawWeight;
-    addToPmfWithCap(targetPmf, snapped, prob);
-    expectedAdd += snapped * prob;
+    addToPmfWithCap(targetPmf, snapped, p * drawWeight);
+    drawExpected += snapped * p;
   }
-  return expectedAdd;
+  return clamp(drawExpected, blueprint.scoreRange[0], blueprint.scoreRange[1]);
 }
 
 export type SimulateExamPaperInput = {
@@ -1155,16 +1185,16 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
   let sampleRightCensoredItems: SimulatedItemOutcome[] = [];
 
   const sectionCensoredDraws = new Map<string, number>();
-  const sectionTimedTotal = new Map<string, number>();
-  const sectionUntimedTotal = new Map<string, number>();
+  const sectionTimedDraws = new Map<string, number[]>();
+  const sectionUntimedDraws = new Map<string, number[]>();
   const partCensoredItemCounts = new Map<string, Map<string, number>>();
   const partTotalItemCounts = new Map<string, Map<string, number>>();
   const sectionCensoredItemsCount = new Map<string, number>();
   const sectionTotalItemsCount = new Map<string, number>();
   for (const section of blueprint.sections) {
     sectionCensoredDraws.set(section.sectionId, 0);
-    sectionTimedTotal.set(section.sectionId, 0);
-    sectionUntimedTotal.set(section.sectionId, 0);
+    sectionTimedDraws.set(section.sectionId, []);
+    sectionUntimedDraws.set(section.sectionId, []);
     sectionCensoredItemsCount.set(section.sectionId, 0);
     sectionTotalItemsCount.set(section.sectionId, 0);
     const secCensoredParts = new Map<string, number>();
@@ -1178,7 +1208,7 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
   }
 
   const untimedOverallPmf = new Map<number, number>();
-  let untimedExpectedTotal = 0;
+  const untimedDrawMeans: number[] = [];
   const pmfOpsBudget: PmfOpsBudget = { remaining: MAX_PMF_CONVOLUTION_OPS };
 
   let hoistedWeightedPrefixLen = 0;
@@ -1211,7 +1241,7 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
       hoistedRemainingWeightedSections = blueprint.sections.slice(hoistedWeightedPrefixLen);
       if (hoistedWeightedPrefixLen === blueprint.sections.length) {
         allUntimedPmfHoisted = true;
-        untimedExpectedTotal += addDistToUntimedOverallPmf(hoistedWeightedPrefixDist, blueprint, 1, untimedOverallPmf);
+        untimedDrawMeans.push(addDistToUntimedOverallPmf(hoistedWeightedPrefixDist, blueprint, 1, untimedOverallPmf));
       }
     }
   } else {
@@ -1294,6 +1324,7 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
         if (pmfOpsBudget.remaining < 0) {
           throw new RangeError(`Untimed PMF convolution ops exceed limit (${MAX_PMF_CONVOLUTION_OPS})`);
         }
+        let hoistedMean = 0;
         for (const [lrKey, probLR] of hoistedIeltsLRDist.entries()) {
           if (probLR <= 0) continue;
           const overall = computeIeltsOverallFromLRKey({
@@ -1303,8 +1334,9 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
             speaking: staticS,
           });
           addToPmfWithCap(untimedOverallPmf, overall, probLR);
-          untimedExpectedTotal += overall * probLR;
+          hoistedMean += overall * probLR;
         }
+        untimedDrawMeans.push(hoistedMean);
         allIeltsUntimedPmfHoisted = true;
       }
     }
@@ -1408,9 +1440,9 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
         recordCensoringStats(section.sectionId, drawCensoredItems, res);
         defineRecordEntry(timedSectionBand, section.sectionId, res.timedScore);
         defineRecordEntry(matchedUntimedSectionBand, section.sectionId, res.matchedUntimedScore);
-        sectionTimedTotal.set(section.sectionId, (sectionTimedTotal.get(section.sectionId) ?? 0) + res.timedScore);
+        sectionTimedDraws.get(section.sectionId)!.push(res.timedScore);
         untimedSectionDistributions.set(section.sectionId, res.untimedDist);
-        sectionUntimedTotal.set(section.sectionId, (sectionUntimedTotal.get(section.sectionId) ?? 0) + res.untimedMean);
+        sectionUntimedDraws.get(section.sectionId)!.push(res.untimedMean);
       } else {
         const res = simulateRubricSectionDraw({
           section,
@@ -1433,8 +1465,8 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
         untimedContinuousSections.set(section.sectionId, res.untimedScore);
         if (res.timedWritingTasks) timedWritingTasks = res.timedWritingTasks;
         if (res.untimedWritingTasks) untimedWritingTasks = res.untimedWritingTasks;
-        sectionTimedTotal.set(section.sectionId, (sectionTimedTotal.get(section.sectionId) ?? 0) + res.timedScore);
-        sectionUntimedTotal.set(section.sectionId, (sectionUntimedTotal.get(section.sectionId) ?? 0) + res.untimedScore);
+        sectionTimedDraws.get(section.sectionId)!.push(res.timedScore);
+        sectionUntimedDraws.get(section.sectionId)!.push(res.untimedScore);
       }
     }
 
@@ -1474,18 +1506,19 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
           if (pmfOpsBudget.remaining < 0) {
             throw new RangeError(`Untimed PMF convolution ops exceed limit (${MAX_PMF_CONVOLUTION_OPS})`);
           }
+          let drawUntimedMean = 0;
           for (const [lrKey, probLR] of hoistedIeltsLRDist.entries()) {
-            const prob = probLR * drawWeight;
-            if (prob <= 0) continue;
+            if (probLR <= 0) continue;
             const overall = computeIeltsOverallFromLRKey({
               lrKey,
               writingBand: uW,
               writingTasks: untimedWritingTasks,
               speaking: uS,
             });
-            addToPmfWithCap(untimedOverallPmf, overall, prob);
-            untimedExpectedTotal += overall * prob;
+            addToPmfWithCap(untimedOverallPmf, overall, probLR * drawWeight);
+            drawUntimedMean += overall * probLR;
           }
+          untimedDrawMeans.push(drawUntimedMean);
         } else {
           const lDist = untimedSectionDistributions.get("listening");
           const rDist = untimedSectionDistributions.get("reading");
@@ -1496,10 +1529,11 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
           if (pmfOpsBudget.remaining < 0) {
             throw new RangeError(`Untimed PMF convolution ops exceed limit (${MAX_PMF_CONVOLUTION_OPS})`);
           }
+          let drawUntimedMean = 0;
           for (const [bL, pL] of lDist.entries()) {
             for (const [bR, pR] of rDist.entries()) {
-              const prob = pL * pR * drawWeight;
-              if (prob <= 0) continue;
+              const rawProb = pL * pR;
+              if (rawProb <= 0) continue;
               const overall = computeIeltsOverallExact({
                 listening: bL,
                 reading: bR,
@@ -1507,10 +1541,11 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
                 writingTasks: untimedWritingTasks,
                 speaking: uS,
               });
-              addToPmfWithCap(untimedOverallPmf, overall, prob);
-              untimedExpectedTotal += overall * prob;
+              addToPmfWithCap(untimedOverallPmf, overall, rawProb * drawWeight);
+              drawUntimedMean += overall * rawProb;
             }
           }
+          untimedDrawMeans.push(drawUntimedMean);
         }
       }
     } else {
@@ -1535,16 +1570,16 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
           untimedContinuousSections,
           pmfOpsBudget,
         );
-        untimedExpectedTotal += addDistToUntimedOverallPmf(drawDist, blueprint, drawWeight, untimedOverallPmf);
+        untimedDrawMeans.push(addDistToUntimedOverallPmf(drawDist, blueprint, drawWeight, untimedOverallPmf));
       }
     }
   }
 
   const [bpMinScore, bpMaxScore] = blueprint.scoreRange;
   const sortedTimed = [...timedScores].sort((a, b) => a - b);
-  const timedExpectedScore = clamp(timedScores.reduce((a, b) => a + b, 0) / draws.length, bpMinScore, bpMaxScore);
-  const matchedUntimedExpectedScore = clamp(untimedScores.reduce((a, b) => a + b, 0) / draws.length, bpMinScore, bpMaxScore);
-  const untimedExpectedScore = clamp(untimedExpectedTotal, bpMinScore, bpMaxScore);
+  const timedExpectedScore = clamp(safeArithmeticMean(timedScores), bpMinScore, bpMaxScore);
+  const matchedUntimedExpectedScore = clamp(safeArithmeticMean(untimedScores), bpMinScore, bpMaxScore);
+  const untimedExpectedScore = clamp(safeArithmeticMean(untimedDrawMeans), bpMinScore, bpMaxScore);
   const sectionSummaries: Record<string, SectionSimulationSummary> = {};
   const rightCensoringRateBySection: Record<string, number> = {};
 
@@ -1564,8 +1599,8 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
     defineRecordEntry(rightCensoringRateBySection, sid, rate);
     defineRecordEntry(sectionSummaries, sid, {
       sectionId: sid,
-      timedMeanScore: (sectionTimedTotal.get(sid) ?? 0) / draws.length,
-      untimedMeanScore: (sectionUntimedTotal.get(sid) ?? 0) / draws.length,
+      timedMeanScore: safeArithmeticMean(sectionTimedDraws.get(sid) ?? []),
+      untimedMeanScore: safeArithmeticMean(sectionUntimedDraws.get(sid) ?? []),
       rightCensoringRate: rate,
       censoredItemFraction: totalSecItems > 0 ? censoredSecItems / totalSecItems : 0,
       partCensoringRates: partRates,

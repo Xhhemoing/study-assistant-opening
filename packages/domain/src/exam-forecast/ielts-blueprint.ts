@@ -53,6 +53,47 @@ export function roundHalfUp05(score: number): number {
   return Math.floor(clamped * 2 + 0.5) / 2;
 }
 
+/** Overflow-safe arithmetic mean preserving bit-for-bit `sum / n` when finite. */
+export function safeArithmeticMean(values: readonly number[]): number {
+  const n = values.length;
+  if (n === 0) return 0;
+  let sum = 0;
+  let minVal = Infinity;
+  let maxVal = -Infinity;
+  for (let i = 0; i < n; i++) {
+    const v = values[i]!;
+    sum += v;
+    if (v < minVal) minVal = v;
+    if (v > maxVal) maxVal = v;
+  }
+  if (Number.isFinite(sum)) {
+    return Math.min(maxVal, Math.max(minVal, sum / n));
+  }
+  const span = maxVal - minVal;
+  if (Number.isFinite(span)) {
+    let offsetSum = 0;
+    for (let i = 0; i < n; i++) {
+      offsetSum += values[i]! - minVal;
+    }
+    if (Number.isFinite(offsetSum)) {
+      return Math.min(maxVal, Math.max(minVal, minVal + offsetSum / n));
+    }
+    let scaledOffsetSum = 0;
+    for (let i = 0; i < n; i++) {
+      scaledOffsetSum += (values[i]! - minVal) / n;
+    }
+    return Math.min(maxVal, Math.max(minVal, minVal + scaledOffsetSum));
+  }
+  let posAvg = 0;
+  let negAvg = 0;
+  for (let i = 0; i < n; i++) {
+    const v = values[i]!;
+    if (v >= 0) posAvg += v / n;
+    else negAvg += v / n;
+  }
+  return Math.min(maxVal, Math.max(minVal, posAvg + negAvg));
+}
+
 export const MAX_SECTION_ITEMS = 500;
 export const MAX_BLUEPRINT_ITEMS = 2_000;
 export const MAX_ITEM_POINTS = 1_000;
@@ -139,15 +180,15 @@ export function snapToScoreGrid(
   if (minScore === maxScore) {
     return minScore === 0 ? 0 : minScore;
   }
-  const rawSteps = (maxScore - minScore) / step;
-  if (!Number.isFinite(rawSteps) || rawSteps > MAX_SCORE_GRID_STEPS) {
-    throw new RangeError(`Score grid step count exceeds limit (${MAX_SCORE_GRID_STEPS})`);
-  }
   const alignedSteps = resolveAlignedScoreGridSteps(minScore, maxScore, step);
   let maxK: number;
   if (alignedSteps !== null) {
     maxK = alignedSteps;
   } else {
+    const rawSteps = (maxScore - minScore) / step;
+    if (!Number.isFinite(rawSteps) || rawSteps > MAX_SCORE_GRID_STEPS) {
+      throw new RangeError(`Score grid step count exceeds limit (${MAX_SCORE_GRID_STEPS})`);
+    }
     maxK = Math.floor(rawSteps + 1e-12);
     for (let iter = 0; iter < 2 && maxK >= 0 && gridPointAt(minScore, step, maxK) > maxScore; iter += 1) {
       maxK -= 1;

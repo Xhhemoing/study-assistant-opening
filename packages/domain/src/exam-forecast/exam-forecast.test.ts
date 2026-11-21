@@ -3796,4 +3796,341 @@ describe("CRN marginal ROI sandbox & UnifiedDecisionSnapshotV1", () => {
     expect(hugeWeightedSim.sectionSummaries["sec"]!.timedMeanScore).toBeGreaterThan(8e307);
     expect(hugeWeightedSim.sectionSummaries["sec"]!.timedMeanScore).toBeLessThan(9e307);
   });
+
+  it("enforces all Round-13 3 P1 IEEE-754 parity & overflow invariants", () => {
+    // [R13 P1-1] Parity between validateExamBlueprint and snapToScoreGrid at exact MAX_SCORE_GRID_STEPS (e.g. [0, 700000] step 0.7).
+    for (const [maxScore, step] of [
+      [700_000, 0.7],
+      [290_000, 0.29],
+      [350_000, 0.35],
+      [820_000, 0.82],
+    ] as const) {
+      expect(snapToScoreGrid(maxScore, [0, maxScore], step, "nearest")).toBe(maxScore);
+      expect(snapToScoreGrid(maxScore, [0, maxScore], step, "floor")).toBe(maxScore);
+      expect(snapToScoreGrid(maxScore, [0, maxScore], step, "ceil")).toBe(maxScore);
+    }
+    const boundary700kBp = {
+      ...createSharedFullPaperBlueprint({
+        blueprintId: "grid-700k-07",
+        title: "Grid 700k Step 0.7",
+        totalTimeLimitMinutes: 60,
+        totalPoints: 700_000,
+        skillIds: ["sGrid"],
+        thetaCovariance: [[0]],
+        sections: [
+          {
+            sectionId: "sec",
+            label: "Sec",
+            scoringKind: "rubric_band",
+            timeLimitMinutes: null,
+            weight: 1,
+            scoreRange: [0, 700_000],
+            scoreStep: 0.7,
+            parts: [
+              {
+                partId: "p",
+                label: "P",
+                weight: 1,
+                skillIds: ["sGrid"],
+                timeModel: { mu: 4, speedLoading: 0, skillLoading: {}, sigma: 0.01 },
+              },
+            ],
+          },
+        ],
+      }),
+      scoreRange: [0, 700_000] as const,
+      scoreStep: 0.7,
+    };
+    expect(validateExamBlueprint(boundary700kBp)).toEqual([]);
+    const boundarySim = simulateExamPaper({
+      blueprint: boundary700kBp,
+      learnerId: "l-grid",
+      beliefs: {},
+      evidence: [
+        {
+          evidenceId: "ev-grid",
+          learnerId: "l-grid",
+          sectionId: "sec",
+          evidenceKind: "rubric_assessment",
+          observedAtMs: DAY_MS - 10,
+          countsTowardMastery: true,
+          assisted: false,
+          exposed: false,
+          rubricScore: { kind: "exact", score: 700_000 },
+        },
+      ],
+      examAtMs: DAY_MS,
+      numDraws: 4,
+      seed: 17,
+    });
+    const gridCals: WholePaperCalibrationRecord[] = [0, 1, 2, 3, 4].map((idx) => ({
+      recordId: `grid-cal-${idx}`,
+      blueprintId: "grid-700k-07",
+      learnerId: `other-grid-${idx}`,
+      paperFamilyId: `fam-grid-${idx}`,
+      targetKind: "same_blueprint_mock",
+      evidenceKind: "independent_mock",
+      recordedAtMs: DAY_MS - 10,
+      countsTowardMastery: true,
+      assisted: false,
+      exposed: false,
+      predictedQuantiles: { q10: 600_000, q50: 650_000, q90: 700_000 },
+      observedScore: { kind: "exact", score: 699_999.3 },
+    }));
+    const gridInterval = computeConformalBandInterval({
+      simulation: boundarySim,
+      blueprint: boundary700kBp,
+      calibrationRecords: gridCals,
+      examAtMs: DAY_MS,
+    });
+    expect(gridInterval.status).toBe("ready");
+    const gridForecast = evaluateExamForecast({
+      blueprint: boundary700kBp,
+      learnerId: "l-grid",
+      beliefs: {},
+      evidence: [
+        {
+          evidenceId: "ev-grid-f",
+          learnerId: "l-grid",
+          sectionId: "sec",
+          evidenceKind: "rubric_assessment",
+          observedAtMs: DAY_MS - 10,
+          countsTowardMastery: true,
+          assisted: false,
+          exposed: false,
+          rubricScore: { kind: "exact", score: 700_000 },
+        },
+      ],
+      calibrationRecords: gridCals,
+      examAtMs: DAY_MS,
+      maxInformativeWidth: 700_000,
+      numDraws: 4,
+      seed: 17,
+    });
+    expect(gridForecast.status).toBe("calibrated_forecast_ready");
+    expect(() => snapToScoreGrid(700_001, [0, 700_001], 0.7, "nearest")).toThrow(RangeError);
+
+    // [R13 P1-2 & P1-3] Extreme rubric weights (1e308, 1e-320, 11x MAX_VALUE) & cross-draw means (numDraws = 3 & 11) stay finite and exact.
+    const makeWeightAndDrawBp = (id: string, weights: readonly number[], range: readonly [number, number], step: number) => ({
+      ...createSharedFullPaperBlueprint({
+        blueprintId: id,
+        title: id,
+        totalTimeLimitMinutes: 60,
+        totalPoints: range[1],
+        skillIds: ["kExt"],
+        thetaCovariance: [[0]],
+        sections: [
+          {
+            sectionId: "sec",
+            label: "Sec",
+            scoringKind: "rubric_band",
+            timeLimitMinutes: null,
+            weight: 1,
+            scoreRange: range,
+            scoreStep: step,
+            parts: weights.map((w, idx) => ({
+              partId: `p${idx + 1}`,
+              label: `P${idx + 1}`,
+              weight: w,
+              skillIds: ["kExt"],
+              timeModel: { mu: 4, speedLoading: 0, skillLoading: {}, sigma: 0.01 },
+            })),
+          },
+        ],
+      }),
+      scoreRange: range,
+      scoreStep: step,
+    });
+    const zeroVarExtBelief = {
+      kExt: createSkillBelief({
+        workspaceId: "ws-1",
+        learnerId: "l-ext",
+        courseId: "ext",
+        confirmedSkillVersion: 1,
+        abilityMean: 0,
+        abilityVariance: 0,
+        logStability: Math.log(14),
+        implicitLogCredit: 0,
+        lastDirectRecallAtMs: DAY_MS,
+      }),
+    };
+
+    // Case A: [1e308, 1e308] with scores [5, 7] -> 6 (never 0).
+    const maxWeightBp = makeWeightAndDrawBp("max-w-1e308", [1e308, 1e308], [4, 9], 0.5);
+    const maxWeightSim = simulateExamPaper({
+      blueprint: maxWeightBp,
+      learnerId: "l-ext",
+      beliefs: zeroVarExtBelief,
+      evidence: [
+        {
+          evidenceId: "mw1",
+          learnerId: "l-ext",
+          sectionId: "sec",
+          partId: "p1",
+          evidenceKind: "rubric_assessment",
+          observedAtMs: DAY_MS,
+          countsTowardMastery: true,
+          assisted: false,
+          exposed: false,
+          rubricScore: { kind: "exact", score: 5 },
+        },
+        {
+          evidenceId: "mw2",
+          learnerId: "l-ext",
+          sectionId: "sec",
+          partId: "p2",
+          evidenceKind: "rubric_assessment",
+          observedAtMs: DAY_MS,
+          countsTowardMastery: true,
+          assisted: false,
+          exposed: false,
+          rubricScore: { kind: "exact", score: 7 },
+        },
+      ],
+      examAtMs: DAY_MS,
+      numDraws: 3,
+      seed: 18,
+    });
+    expect(maxWeightSim.sectionSummaries["sec"]!.timedMeanScore).toBeCloseTo(6, 12);
+    expect(maxWeightSim.sectionSummaries["sec"]!.untimedMeanScore).toBeCloseTo(6, 12);
+
+    // Case B: Tiny subnormal weights [1e-320, 2e-320] with [1e-10, 2e-10] -> ~1.6666666666666667e-10 (never 0).
+    const tinyWeightBp = makeWeightAndDrawBp("tiny-w", [1e-320, 2e-320], [0, 1], 0.1);
+    const tinyWeightSim = simulateExamPaper({
+      blueprint: tinyWeightBp,
+      learnerId: "l-ext",
+      beliefs: zeroVarExtBelief,
+      evidence: [
+        {
+          evidenceId: "tw1",
+          learnerId: "l-ext",
+          sectionId: "sec",
+          partId: "p1",
+          evidenceKind: "rubric_assessment",
+          observedAtMs: DAY_MS,
+          countsTowardMastery: true,
+          assisted: false,
+          exposed: false,
+          rubricScore: { kind: "exact", score: 1e-10 },
+        },
+        {
+          evidenceId: "tw2",
+          learnerId: "l-ext",
+          sectionId: "sec",
+          partId: "p2",
+          evidenceKind: "rubric_assessment",
+          observedAtMs: DAY_MS,
+          countsTowardMastery: true,
+          assisted: false,
+          exposed: false,
+          rubricScore: { kind: "exact", score: 2e-10 },
+        },
+      ],
+      examAtMs: DAY_MS,
+      numDraws: 3,
+      seed: 19,
+    });
+    expect(tinyWeightSim.sectionSummaries["sec"]!.untimedMeanScore).toBeGreaterThan(1e-10);
+    expect(tinyWeightSim.sectionSummaries["sec"]!.untimedMeanScore).toBeLessThan(2e-10);
+
+    // Case C: 11 parts near Number.MAX_VALUE with numDraws = 3 and numDraws = 3 on [8e307, 9e307] [1/3, 2/3] fixture.
+    const elevenWeights = Array.from({ length: 11 }, () => 1);
+    const elevenMaxBp = makeWeightAndDrawBp("eleven-max-val", elevenWeights, [0, Number.MAX_VALUE], Number.MAX_VALUE);
+    const elevenEvidence: ExamEvidenceRecord[] = elevenWeights.map((_, idx) => ({
+      evidenceId: `em-${idx}`,
+      learnerId: "l-ext",
+      sectionId: "sec",
+      partId: `p${idx + 1}`,
+      evidenceKind: "rubric_assessment",
+      observedAtMs: DAY_MS,
+      countsTowardMastery: true,
+      assisted: false,
+      exposed: false,
+      rubricScore: {
+        kind: "exact",
+        score: idx === 0 ? Number.MAX_VALUE : Number.MAX_VALUE * (1 - 1e-15),
+      },
+    }));
+    const elevenMaxSim = simulateExamPaper({
+      blueprint: elevenMaxBp,
+      learnerId: "l-ext",
+      beliefs: zeroVarExtBelief,
+      evidence: elevenEvidence,
+      examAtMs: DAY_MS,
+      numDraws: 11,
+      seed: 20,
+    });
+    expect(Number.isFinite(elevenMaxSim.sectionSummaries["sec"]!.timedMeanScore)).toBe(true);
+    expect(Number.isFinite(elevenMaxSim.sectionSummaries["sec"]!.untimedMeanScore)).toBe(true);
+    expect(Number.isFinite(elevenMaxSim.timedExpectedScore)).toBe(true);
+    expect(Number.isFinite(elevenMaxSim.untimedExpectedScore)).toBe(true);
+
+    const r13HugeThreeDrawBp = makeWeightAndDrawBp("r13-huge-3draws", [1 / 3, 2 / 3], [0, 1e308], 1e308);
+    const r13HugeEvidence: ExamEvidenceRecord[] = [
+      {
+        evidenceId: "r13-hp1",
+        learnerId: "l-huge-w",
+        sectionId: "sec",
+        partId: "p1",
+        evidenceKind: "rubric_assessment",
+        observedAtMs: DAY_MS,
+        countsTowardMastery: true,
+        assisted: false,
+        exposed: false,
+        rubricScore: { kind: "exact", score: 8e307 },
+      },
+      {
+        evidenceId: "r13-hp2",
+        learnerId: "l-huge-w",
+        sectionId: "sec",
+        partId: "p2",
+        evidenceKind: "rubric_assessment",
+        observedAtMs: DAY_MS,
+        countsTowardMastery: true,
+        assisted: false,
+        exposed: false,
+        rubricScore: { kind: "exact", score: 9e307 },
+      },
+    ];
+    const r13HugeBeliefs = {
+      kExt: createSkillBelief({
+        workspaceId: "ws-1",
+        learnerId: "l-huge-w",
+        courseId: "huge",
+        confirmedSkillVersion: 1,
+        abilityMean: 0,
+        abilityVariance: 0,
+        logStability: Math.log(14),
+        implicitLogCredit: 0,
+        lastDirectRecallAtMs: DAY_MS,
+      }),
+    };
+    const r13ThreeDrawHugeSim = simulateExamPaper({
+      blueprint: r13HugeThreeDrawBp,
+      learnerId: "l-huge-w",
+      beliefs: r13HugeBeliefs,
+      evidence: r13HugeEvidence,
+      examAtMs: DAY_MS,
+      numDraws: 3,
+      seed: 21,
+    });
+    expect(Number.isFinite(r13ThreeDrawHugeSim.sectionSummaries["sec"]!.timedMeanScore)).toBe(true);
+    expect(Number.isFinite(r13ThreeDrawHugeSim.sectionSummaries["sec"]!.untimedMeanScore)).toBe(true);
+    expect(Number.isFinite(r13ThreeDrawHugeSim.timedExpectedScore)).toBe(true);
+    expect(Number.isFinite(r13ThreeDrawHugeSim.untimedExpectedScore)).toBe(true);
+    expect(r13ThreeDrawHugeSim.sectionSummaries["sec"]!.timedMeanScore / 1e307).toBeCloseTo(8 + 2 / 3, 12);
+    const r13Crn = evaluateCrnActionRoi({
+      blueprint: r13HugeThreeDrawBp,
+      learnerId: "l-huge-w",
+      beliefs: r13HugeBeliefs,
+      evidence: r13HugeEvidence,
+      examAtMs: DAY_MS,
+      baselineActions: [],
+      candidateAction: { actionId: "ext-boost", title: "Ext", durationHours: 1, kind: "skill_repair" },
+      crnSeed: 21,
+      numDraws: 3,
+    });
+    expect(Number.isFinite(r13Crn.pairedMeanGain)).toBe(true);
+    expect(Number.isFinite(r13Crn.monteCarloSe)).toBe(true);
+  });
 });
