@@ -341,41 +341,58 @@ describe("teaching-verifiers", () => {
   };
 
   it.each([
-    ["gathered symbolic before contradiction", String.raw`\begin{gathered} x = y \\ 2 + 2 = 5 \end{gathered}`],
-    ["gathered contradiction before symbolic", String.raw`\begin{gathered} 2 + 2 = 5 \\ x = y \end{gathered}`],
-    ["align* with non-equation header", String.raw`\begin{align*} \text{Step 1} \\ x &= y \\ 2 + 2 &= 5 \end{align*}`],
-    ["align with tags, spacing, and trailing punctuation", String.raw`$$\begin{align} \text{Check:} \\ 2 + 2 &= 5, \tag{1} \\[6pt] x &= y. \notag \end{align}$$`],
-    ["aligned side-by-side columns", String.raw`\[\begin{aligned} x &= y & 2 + 2 &= 5 \end{aligned}\]`],
-    ["gather with \\cr and non-equation line", String.raw`\begin{gather} \text{Verify} \cr x = y \cr 2 + 2 = 5 \end{gather}`],
-    ["eqnarray and array environments", String.raw`\begin{array}{ll} x = y \\ 2 + 2 = 5; \end{array}`],
-    ["cases contradiction in branch expression", String.raw`f(x) = \begin{cases} 2 + 2 = 5, & x = 0 \\ 2, & x = 1 \end{cases}`],
-    ["cases contradiction in later branch", String.raw`f(x) = \begin{cases} 1, & x = 0 \\ 2 + 2 = 5, & x = 1 \end{cases}`],
-    ["cases contradiction in branch condition", String.raw`f(x) = \begin{cases} 1, & 2 + 2 = 5 \\ 2, & x = 1 \end{cases}`],
-  ])("flags multiline LaTeX contradiction with real arithmetic probe (%s)", async (_label, latex) => {
+    ["gathered symbolic before contradiction", String.raw`\begin{gathered} x = y \\ 2 + 2 = 5 \end{gathered}`, "2 + 2 = 5"],
+    ["gathered contradiction before symbolic", String.raw`\begin{gathered} 2 + 2 = 5 \\ x = y \end{gathered}`, "2 + 2 = 5"],
+    ["align* with non-equation header", String.raw`\begin{align*} \text{Step 1} \\ x &= y \\ 2 + 2 &= 5 \end{align*}`, "2 + 2 = 5"],
+    ["align with tags, spacing, and trailing punctuation", String.raw`$$\begin{align} \text{Check:} \\ 2 + 2 &= 5, \tag{1} \\[6pt] x &= y. \notag \end{align}$$`, "2 + 2 = 5"],
+    ["aligned side-by-side columns", String.raw`\[\begin{aligned} x &= y & 2 + 2 &= 5 \end{aligned}\]`, "2 + 2 = 5"],
+    ["gather with \\cr and non-equation line", String.raw`\begin{gather} \text{Verify} \cr x = y \cr 2 + 2 = 5 \end{gather}`, "2 + 2 = 5"],
+    ["eqnarray and array environments", String.raw`\begin{array}{ll} x = y \\ 2 + 2 = 5; \end{array}`, "2 + 2 = 5"],
+    ["cases contradiction in branch expression", String.raw`f(x) = \begin{cases} 2 + 2 = 5, & x = 0 \\ 2, & x = 1 \end{cases}`, "2 + 2 = 5"],
+    ["cases contradiction in later branch", String.raw`f(x) = \begin{cases} 1, & x = 0 \\ 2 + 2 = 5, & x = 1 \end{cases}`, "2 + 2 = 5"],
+    ["cases contradiction in branch condition", String.raw`f(x) = \begin{cases} 1, & 2 + 2 = 5 \\ 2, & x = 1 \end{cases}`, "2 + 2 = 5"],
+    ["multi-step chained equality contradiction across \\\\", String.raw`\begin{align*} 1 + 2 &= 3 \\ &= 4 \end{align*}`, "1 + 2 = 3 = 4"],
+    ["side-by-side signed second column contradiction", String.raw`\begin{aligned} x &= y & -2 + 5 &= 4 \end{aligned}`, "-2 + 5 = 4"],
+    ["outer contradiction alongside inner cases environment", String.raw`2 + 2 = 5, \begin{cases} 1, & x = 0 \end{cases}`, "2 + 2 = 5"],
+    ["wrapped split contradiction across \\\\", String.raw`\begin{split} 1 + 2 + 3 + 4 &= 1 + 2 \\ &\quad + 3 + 5 \end{split}`, "1 + 2 + 3 + 4 = 1 + 2 + 3 + 5"],
+    ["wrapped multline contradiction across \\\\", String.raw`\begin{multline} 1 + 2 + 3 \\ + 4 = 11 \end{multline}`, "1 + 2 + 3 + 4 = 11"],
+    ["prose header before signed equation contradiction", String.raw`\begin{align*} \text{Step 1} \\ -2 + 5 &= 4 \end{align*}`, "-2 + 5 = 4"],
+  ])("flags multiline LaTeX contradiction with real arithmetic probe (%s)", async (_label, latex, expectedDetail) => {
     const report = await verifyTeachingContent({
       activityId: ACT, publishInput: basePublish(), pack: packWithSupport(), keyClaims: [],
       blocks: [{ id: BLOCK, role: "teach", type: "formula", content: { latex } }],
       tools: { checkFormula: realArithmeticCheckFormula },
     });
     expect(report.layers.find(layer => layer.layer === "tool_result")).toMatchObject({
-      outcome: "fail", details: { latex: "2 + 2 = 5" },
+      outcome: "fail", details: { latex: expectedDetail },
     });
     expect(report.factPassed).toBe(false);
     expect(mayPublishVerified(report)).toBe(false);
   });
 
-  it("passes pure multiline arithmetic blocks and keeps valid piecewise cases or matrices unknown without false failure", async () => {
-    const passReport = await verifyTeachingContent({
-      activityId: ACT, publishInput: basePublish(), pack: packWithSupport(), keyClaims: [],
-      blocks: [{ id: BLOCK, role: "teach", type: "formula", content: { latex: String.raw`\begin{gathered} 1 + 1 = 2 \\ 2 + 2 = 4 \end{gathered}` } }],
-      tools: { checkFormula: realArithmeticCheckFormula },
-    });
-    expect(passReport.layers.find(layer => layer.layer === "tool_result")).toMatchObject({ outcome: "pass" });
+  it("passes pure multiline arithmetic blocks including wrapped, bracketed, and signed multi-column equations", async () => {
+    for (const latex of [
+      String.raw`\begin{gathered} 1 + 1 = 2 \\ 2 + 2 = 4 \end{gathered}`,
+      String.raw`\begin{split} 1 + 2 + 3 + 4 &= 1 + 2 \\ &\quad + 3 + 4 \end{split}`,
+      String.raw`\begin{multline} 1 + 2 + 3 + 4 = 1 + 2 \\ + 3 + 4 \end{multline}`,
+      String.raw`\begin{multline*} 1 + 2 + 3 \\ + 4 = 10 \end{multline*}`,
+      String.raw`\begin{split} 1 + 2 + 3 \\ &\quad + 4 = 10 \end{split}`,
+      String.raw`\begin{aligned}[t] 2 + 2 &= 4 & -3 + 3 &= 0 \end{aligned}`,
+    ]) {
+      const passReport = await verifyTeachingContent({
+        activityId: ACT, publishInput: basePublish(), pack: packWithSupport(), keyClaims: [],
+        blocks: [{ id: BLOCK, role: "teach", type: "formula", content: { latex } }],
+        tools: { checkFormula: realArithmeticCheckFormula },
+      });
+      expect(passReport.layers.find(layer => layer.layer === "tool_result")).toMatchObject({ outcome: "pass" });
+    }
 
     for (const latex of [
       String.raw`f(x) = \begin{cases} 1, & x = 0 \\ 2, & x = 1 \end{cases}`,
       String.raw`f(x) = \begin{cases} 1 + 1, & x = 0 \\ 2, & x = 1 \end{cases}`,
       String.raw`\begin{pmatrix} 1 & 2 \\ 3 & 4 \end{pmatrix} = \begin{pmatrix} 1 & 2 \\ 3 & 4 \end{pmatrix}`,
+      String.raw`\begin{equation} [1 + 2] + 3 = 6 \end{equation}`,
+      String.raw`\begin{align*} [2 + 3] + 1 &= 6 \end{align*}`,
     ]) {
       const unknownReport = await verifyTeachingContent({
         activityId: ACT, publishInput: basePublish(), pack: packWithSupport(), keyClaims: [],

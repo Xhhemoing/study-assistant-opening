@@ -448,12 +448,21 @@ const EQUATION_ROW_ENVS = new Set([
   "align", "align*", "aligned", "alignat", "alignat*", "alignedat",
   "xalignat", "xalignat*", "xxalignat", "flalign", "flalign*",
   "gather", "gather*", "gathered", "eqnarray", "eqnarray*",
-  "equation", "equation*", "split", "multline", "multline*", "array",
+  "equation", "equation*", "split", "array",
 ]);
+
+const WRAPPED_SINGLE_EQUATION_ENVS = new Set(["multline", "multline*"]);
 
 const CASES_ENVS = new Set(["cases", "cases*", "dcases", "dcases*", "rcases", "rcases*"]);
 
 const ARG_SKIP_ENVS = new Set(["array", "alignat", "alignat*", "alignedat", "xalignat", "xalignat*", "xxalignat"]);
+
+const OPTIONAL_POS_ENVS = new Set([
+  "aligned", "gathered", "alignedat", "array",
+  "matrix*", "pmatrix*", "bmatrix*", "Bmatrix*", "vmatrix*", "Vmatrix*",
+]);
+
+const INTERTEXT_BREAK = "\0INTERTEXT_BREAK\0";
 
 function readBalancedGroup(text: string, openIndex: number): number {
   let depth = 0;
@@ -525,9 +534,9 @@ function findMatchingEnvEnd(text: string, openIndex: number): { env: string; bod
   if (!open) return null;
   let bodyStart = open.endIndex;
   while (bodyStart < text.length && /\s/.test(text[bodyStart]!)) bodyStart++;
-  if (text[bodyStart] === "[") {
+  if (OPTIONAL_POS_ENVS.has(open.env) && text[bodyStart] === "[") {
     const bracketEnd = readBalancedBracket(text, bodyStart);
-    if (bracketEnd > 0) {
+    if (bracketEnd > 0 && /^\[\s*[tbclr]\s*\]$/.test(text.slice(bodyStart, bracketEnd))) {
       bodyStart = bracketEnd;
       while (bodyStart < text.length && /\s/.test(text[bodyStart]!)) bodyStart++;
     }
@@ -623,7 +632,7 @@ function splitTopLevelRows(text: string): { rows: string[]; hasIntertext: boolea
       if (interMatch) {
         const groupEnd = readBalancedGroup(text, i + interMatch[0].length - 1);
         if (groupEnd > 0) {
-          rows.push(text.slice(start, i));
+          rows.push(text.slice(start, i), INTERTEXT_BREAK);
           hasIntertext = true;
           start = groupEnd;
           i = groupEnd - 1;
@@ -700,17 +709,96 @@ function cleanEquationClause(raw: string): string {
     .replace(/\\[,;:! ]/g, " ")
     .replace(/\s+/g, " ")
     .trim()
+    .replace(/^[,;，；]+/, "")
     .replace(/[.,;。，；]+$/, "")
     .trim();
   return text;
 }
 
-function endsWithOperatorOrEquals(text: string): boolean {
-  return /(?:=|\\times|\\div|\\cdot|[+\-*/×÷−])\s*$/.test(text);
+function stripLeadingHorizontalSpacing(text: string): string {
+  return text.replace(/^(?:\s|\\(?:quad|qquad|enspace|thinspace)(?![A-Za-z])|\\[,;:! ])+/, "");
 }
 
-function startsWithOperatorOrEquals(text: string): boolean {
-  return /^\s*(?:=|\\times|\\div|\\cdot|[+\-*/×÷−])/.test(text);
+function endsWithOperatorOrEquals(text: string): boolean {
+  return /(?:=|\\times|\\div|\\cdot|\\pm|\\mp|[+\-*/×÷−±])\s*$/.test(text);
+}
+
+function startsWithEquals(text: string): boolean {
+  return /^\s*=/.test(stripLeadingHorizontalSpacing(text));
+}
+
+function startsWithContinuationOperator(text: string): boolean {
+  return /^\s*(?:\\times|\\div|\\cdot|\\pm|\\mp|[+\-*/×÷−±])/.test(stripLeadingHorizontalSpacing(text));
+}
+
+function looksLikeMathExpression(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed || /[:：]$/.test(trimmed)) return false;
+  const withoutTextMacros = trimmed
+    .replace(/\\(?:text|textbf|textit|textrm|textsf|texttt|mbox|hbox)\s*\{[^{}]*\}/g, " ")
+    .trim();
+  if (!withoutTextMacros) return false;
+  return /(?:[+\-*/×÷−^_()]|\\(?:frac|dfrac|tfrac|times|div|cdot))/.test(withoutTextMacros)
+    || /^-?(?:\d+(?:\.\d+)?|\.\d+|[A-Za-z])$/.test(withoutTextMacros);
+}
+
+function isNewColumnEquation(cells: string[], startIndex: number): boolean {
+  const first = stripLeadingHorizontalSpacing(cells[startIndex]!);
+  if (first.includes("=")) return true;
+  for (let j = startIndex + 1; j < cells.length; j++) {
+    const next = stripLeadingHorizontalSpacing(cells[j]!);
+    if (startsWithEquals(next) || next.includes("=")) return true;
+    if (!startsWithContinuationOperator(next) && !endsWithOperatorOrEquals(cells[j - 1]!)) break;
+  }
+  return false;
+}
+
+function mergeAlignedCells(cells: string[]): string[] {
+  if (cells.length <= 1) return cells;
+  const nonEmpty = cells.map(cell => cell.trim()).filter(Boolean);
+  const groups: string[] = [];
+  let current = "";
+  for (let i = 0; i < nonEmpty.length; i++) {
+    const cell = nonEmpty[i]!;
+    const stripped = stripLeadingHorizontalSpacing(cell);
+    if (!current) {
+      current = cell;
+      continue;
+    }
+    if (endsWithOperatorOrEquals(current) || startsWithEquals(stripped)) {
+      current = `${current} ${cell}`;
+      continue;
+    }
+    if (startsWithContinuationOperator(stripped)) {
+      if (!current.includes("=")) {
+        current = `${current} ${cell}`;
+        continue;
+      }
+      const isSignedNewEquation = /^[+\-−]/.test(stripped) && isNewColumnEquation(nonEmpty, i);
+      if (!isSignedNewEquation) {
+        current = `${current} ${cell}`;
+        continue;
+      }
+    }
+    groups.push(current);
+    current = cell;
+  }
+  if (current) groups.push(current);
+  return groups;
+}
+
+function shouldRejoinRowClause(prev: string, next: string): boolean {
+  if (endsWithOperatorOrEquals(prev)) return true;
+  if (startsWithEquals(next)) return prev.includes("=") || looksLikeMathExpression(prev);
+  if (startsWithContinuationOperator(next)) {
+    if (prev.includes("=")) return !next.includes("=");
+    return looksLikeMathExpression(prev);
+  }
+  return false;
+}
+
+function isExtractableEnv(env: string): boolean {
+  return EQUATION_ROW_ENVS.has(env) || WRAPPED_SINGLE_EQUATION_ENVS.has(env) || CASES_ENVS.has(env);
 }
 
 function extractFromLatexFragment(raw: string, out: string[]): boolean {
@@ -719,10 +807,11 @@ function extractFromLatexFragment(raw: string, out: string[]): boolean {
   if (text.startsWith("\\begin{")) {
     const outer = findMatchingEnvEnd(text, 0);
     if (outer && outer.afterEnd === text.length) {
+      const body = text.slice(outer.bodyStart, outer.bodyEnd);
       if (CASES_ENVS.has(outer.env)) {
-        const { rows } = splitTopLevelRows(text.slice(outer.bodyStart, outer.bodyEnd));
+        const { rows } = splitTopLevelRows(body);
         for (const branch of rows) {
-          if (!branch.trim()) continue;
+          if (!branch.trim() || branch === INTERTEXT_BREAK) continue;
           const cells = splitTopLevelAmpersands(branch);
           for (const cell of cells) {
             const cleaned = cleanEquationClause(cell);
@@ -731,58 +820,89 @@ function extractFromLatexFragment(raw: string, out: string[]): boolean {
         }
         return true;
       }
+      if (WRAPPED_SINGLE_EQUATION_ENVS.has(outer.env)) {
+        const { rows } = splitTopLevelRows(body);
+        const joined = cleanEquationClause(rows.filter(r => r !== INTERTEXT_BREAK).map(r => r.trim()).filter(Boolean).join(" "));
+        if (!joined) return false;
+        if (joined.includes("=")) {
+          out.push(joined);
+          return false;
+        }
+        return true;
+      }
       if (EQUATION_ROW_ENVS.has(outer.env)) {
-        return extractFromLatexFragment(text.slice(outer.bodyStart, outer.bodyEnd), out);
+        return extractFromLatexFragment(body, out);
       }
     }
   }
   const { rows, hasIntertext } = splitTopLevelRows(text);
   let hasNonEquationContent = hasIntertext;
+  let pendingRowClause: string | null = null;
+  const flushPending = () => {
+    if (!pendingRowClause) return;
+    if (pendingRowClause.includes("=")) out.push(pendingRowClause);
+    else hasNonEquationContent = true;
+    pendingRowClause = null;
+  };
   for (const row of rows) {
-    if (!row.trim()) continue;
-    const cells = splitTopLevelAmpersands(row);
-    const groups: string[] = [];
-    if (cells.length === 1) {
-      groups.push(cells[0]!);
-    } else {
-      let current = "";
-      for (const rawCell of cells) {
-        const cell = rawCell.trim();
-        if (!cell) continue;
-        if (!current) current = cell;
-        else if (endsWithOperatorOrEquals(current) || startsWithOperatorOrEquals(cell)) {
-          current = `${current} ${cell}`;
-        } else {
-          groups.push(current);
-          current = cell;
-        }
-      }
-      if (current) groups.push(current);
+    if (row === INTERTEXT_BREAK) {
+      flushPending();
+      hasNonEquationContent = true;
+      continue;
     }
+    if (!row.trim()) continue;
+    const groups = mergeAlignedCells(splitTopLevelAmpersands(row));
+    const singleGroupRow = groups.length === 1;
+    if (!singleGroupRow) flushPending();
     for (const group of groups) {
-      let extractedInner = false;
+      const outerParts: string[] = [];
+      let outerStart = 0;
       let cursor = 0;
+      let extractedInner = false;
       while (cursor < group.length) {
         const innerStart = group.indexOf("\\begin{", cursor);
         if (innerStart < 0) break;
         const innerEnv = findMatchingEnvEnd(group, innerStart);
         if (!innerEnv) break;
-        if (EQUATION_ROW_ENVS.has(innerEnv.env) || CASES_ENVS.has(innerEnv.env)) {
+        if (isExtractableEnv(innerEnv.env)) {
           extractedInner = true;
           hasNonEquationContent = true;
+          outerParts.push(group.slice(outerStart, innerStart));
           extractFromLatexFragment(group.slice(innerStart, innerEnv.afterEnd), out);
+          outerStart = innerEnv.afterEnd;
           cursor = innerEnv.afterEnd;
         } else {
           cursor = innerStart + 7;
         }
       }
-      if (extractedInner) continue;
+      if (extractedInner) {
+        flushPending();
+        outerParts.push(group.slice(outerStart));
+        for (const part of outerParts) {
+          const cleanedOuter = cleanEquationClause(part);
+          if (!cleanedOuter) continue;
+          if (cleanedOuter.includes("=") && !/^\s*=|=\s*$/.test(cleanedOuter)) out.push(cleanedOuter);
+          else hasNonEquationContent = true;
+        }
+        continue;
+      }
       const cleaned = cleanEquationClause(group);
       if (!cleaned) continue;
-      if (cleaned.includes("=")) out.push(cleaned);
-      else hasNonEquationContent = true;
+      if (singleGroupRow) {
+        if (pendingRowClause && shouldRejoinRowClause(pendingRowClause, cleaned)) {
+          pendingRowClause = `${pendingRowClause} ${cleaned}`.trim();
+        } else {
+          flushPending();
+          pendingRowClause = cleaned;
+        }
+      } else if (cleaned.includes("=")) {
+        out.push(cleaned);
+      } else {
+        hasNonEquationContent = true;
+      }
     }
   }
+  flushPending();
   return hasNonEquationContent;
 }
 
