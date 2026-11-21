@@ -1,13 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { SourceChunk } from "@aistudy/contracts";
-import type { OpeningBudgetRepository } from "@aistudy/database";
+import { OpeningBudgetError, type OpeningBudgetRepository } from "@aistudy/database";
 
 const mocks = vi.hoisted(() => ({ authorizeChunks: vi.fn(), hasIndex: vi.fn(), search: vi.fn(), embed: vi.fn(), readMaterialPurposePin: vi.fn(), assertMaterialPurposePin: vi.fn() }));
 vi.mock("@aistudy/database", async original => ({ ...(await original<typeof import("@aistudy/database")>()),
   createOpeningCourseReadySourcesRepository: () => mocks,
   createOpeningSourceEmbeddingsRepository: () => mocks }));
 vi.mock("@aistudy/ai", async original => ({ ...(await original<typeof import("@aistudy/ai")>()), runBudgetedEmbedding: mocks.embed }));
-import { createOpeningMaterialRetriever } from "./material-retrieval";
+import { createOpeningMaterialRetriever, retrievalBudgetId } from "./material-retrieval";
 const config = { modelKey: "test-model:3", baseUrl: "https://models.example.test/v1", modelName: "embedding", apiKey: "test",
   dimensions: 3, inputCentsPerMillion: 1, billing: "metered" as const, dailyRequestCap: null, requestDimensions: true };
 const scope = { workspaceId: "workspace", ownerUserId: "owner" };
@@ -49,6 +49,13 @@ describe("shared material retriever", () => {
     mocks.assertMaterialPurposePin.mockRejectedValue(Object.assign(new Error("source purpose changed"), { code: "CONFLICT" }));
     await expect(createOpeningMaterialRetriever(sql, budget, null)(scope, input)).rejects.toMatchObject({ code: "CONFLICT" });
   });
+  it("keeps lexical material when the ledger refuses to move an existing embedding key", async () => {
+    mocks.embed.mockRejectedValue(new OpeningBudgetError("CONFLICT", "request already consumed or changed"));
+    const result = await createOpeningMaterialRetriever(sql, budget, config)(scope, { ...input, query: "零空间" });
+    expect(result).toMatchObject({ mode: "lexical", chunks: [{ id: "semantic" }] });
+    expect(mocks.search).not.toHaveBeenCalled();
+    expect(mocks.assertMaterialPurposePin).toHaveBeenCalledOnce();
+  });
   it("retains the exact captured purpose pin for the real provider-send check", async () => {
     const result = await createOpeningMaterialRetriever(sql, budget, null)(scope, input);
     const pin = await mocks.readMaterialPurposePin.mock.results[0]!.value;
@@ -59,17 +66,26 @@ describe("shared material retriever", () => {
     expect(mocks.assertMaterialPurposePin).toHaveBeenLastCalledWith(scope, pin);
   });
   it("keeps dense ranking and scopes the real embedding request and search to admitted sources", async () => {
-    const parentBudget = { id: "study-turn:user-turn" };
+    const parentBudget = { id: "study-turn:user-turn", budgetCents: 20, maxProviderCalls: 4 };
     const result = await createOpeningMaterialRetriever(sql, budget, config)(scope, { ...input, parentBudget });
     expect(result).toMatchObject({ mode: "hybrid", chunks: [{ id: "semantic" }] });
     expect(mocks.readMaterialPurposePin).toHaveBeenCalledWith(scope, { ...input.courseContext, sourceIds: input.sourceIds });
     expect(mocks.assertMaterialPurposePin).toHaveBeenCalledTimes(2);
-    expect(mocks.embed).toHaveBeenCalledWith(expect.objectContaining({ inputs: [input.query], operationId: "material-query:saved-job", parentBudget, timeoutMs: 2_000 }));
-    expect(mocks.search).toHaveBeenCalledWith(scope, expect.objectContaining({ sourceIds: input.sourceIds, modelKey: config.modelKey, dimensions: 3 }));
+    expect(mocks.embed).toHaveBeenCalledWith(expect.objectContaining({ inputs: [input.query], operationId: "material-query:saved-job",
+      parentBudget: { ...parentBudget, id: "retrieval:study-turn:user-turn" }, timeoutMs: 2_000 }));
+    expect(retrievalBudgetId("study-turn:user-turn")).toBe("retrieval:study-turn:user-turn");
+    expect(retrievalBudgetId("retrieval:study-turn:user-turn")).toBe("retrieval:study-turn:user-turn");
+    expect(retrievalBudgetId("retrieval:retrieval:study-turn:user-turn")).toBe("retrieval:study-turn:user-turn");
+    const route = { sourceIds: input.sourceIds, chunkIds: chunks.map(chunk => chunk.id), privacyEpoch: 1 };
+    expect(mocks.hasIndex).toHaveBeenCalledWith(scope, expect.objectContaining(route));
+    expect(mocks.search).toHaveBeenCalledWith(scope, expect.objectContaining({ ...route, modelKey: config.modelKey, dimensions: 3 }));
   });
-  it.each(["configuration", "index", "quota", "timeout"])("falls back to lexical material when %s is unavailable", async reason => {
+  it.each(["configuration", "index", "quota", "parent-budget", "parent-calls", "parent-unknown", "timeout"])("falls back to lexical material when %s is unavailable", async reason => {
     if (reason === "index") mocks.hasIndex.mockResolvedValue(false);
     if (reason === "quota") mocks.embed.mockRejectedValue(new Error("budget limit"));
+    if (reason === "parent-budget") mocks.embed.mockRejectedValue(new OpeningBudgetError("PARENT_BUDGET_EXCEEDED", "parent interaction budget exceeded"));
+    if (reason === "parent-calls") mocks.embed.mockRejectedValue(new OpeningBudgetError("PARENT_BUDGET_CALL_LIMIT", "parent interaction request limit reached"));
+    if (reason === "parent-unknown") mocks.embed.mockRejectedValue(new OpeningBudgetError("PARENT_BUDGET_OUTCOME_UNKNOWN", "parent interaction has unknown billing; not re-sending"));
     if (reason === "timeout") mocks.embed.mockRejectedValue(new Error("embedding request timed out"));
     const result = await createOpeningMaterialRetriever(sql, budget, reason === "configuration" ? null : config)(scope, { ...input, query: "零空间" });
     expect(result).toMatchObject({ mode: "lexical", chunks: [{ id: "semantic" }] });
