@@ -152,23 +152,372 @@ const UNICODE_MATH_REPLACEMENTS: ReadonlyArray<readonly [RegExp, string]> = [
 const MATH_OPERAND_LOOKAHEAD =
   `(?=\\d|\\.|sqrt\\(|(?:${GREEK_OR_CONST})\\b)`;
 
-const LATEX_SPACING_AND_STYLE_RE =
-  /\\(?:q?quad|enspace|thinspace|medspace|thickspace|space|displaystyle|textstyle|scriptstyle|scriptscriptstyle)\b|\\hspace\*?\s*\{[^}]*\}|\\[,;:! ]/gi;
+const LATEX_ZERO_ARG_NON_OPERAND_COMMANDS: ReadonlySet<string> = new Set([
+  "quad",
+  "qquad",
+  "enspace",
+  "thinspace",
+  "medspace",
+  "thickspace",
+  "space",
+  "displaystyle",
+  "textstyle",
+  "scriptstyle",
+  "scriptscriptstyle",
+]);
 
-const BINARY_LEFT_OPERAND_ATOM =
-  `(?:[\\d)\\]}|'\\u2032\\u2019]|(?<![\\p{L}\\p{N}_])[A-Za-z\\p{Script=Greek}]|[A-Za-z\\p{Script=Greek}]_[A-Za-z0-9\\p{Script=Greek}]+|\\\\[A-Za-z]+|\\b(?:${GREEK_OR_CONST}))`;
+const LATEX_ONE_ARG_NON_OPERAND_COMMANDS: ReadonlySet<string> = new Set([
+  "color",
+  "pagecolor",
+  "textcolor",
+  "colorbox",
+  "hspace",
+  "vspace",
+  "phantom",
+  "hphantom",
+  "vphantom",
+  "begin",
+  "end",
+  "label",
+  "tag",
+  "style",
+  "class",
+  "cssid",
+]);
+
+const LATEX_TWO_ARG_NON_OPERAND_COMMANDS: ReadonlySet<string> = new Set([
+  "rule",
+  "fcolorbox",
+]);
+
+const LATEX_SKIP_DIM_COMMANDS: ReadonlySet<string> = new Set([
+  "kern",
+  "mkern",
+  "mskip",
+  "hskip",
+]);
+
+const LATEX_CONTROL_SPACE_CHARS = new Set([",", ";", ":", "!", " "]);
+
+const LATEX_DIM_PREFIX_RE =
+  /^\s*[+-]?\d+(?:\.\d+)?\s*(?:em|ex|pt|px|mu|cm|mm|in|pc|bp|dd|cc|sp)\b/i;
+
+function skipBalancedGroup(text: string, start: number, openChar: string, closeChar: string): number {
+  let i = start;
+  while (i < text.length && /\s/.test(text[i] ?? "")) i += 1;
+  if (text[i] !== openChar) return -1;
+  let depth = 0;
+  while (i < text.length) {
+    const ch = text[i];
+    if (ch === "\\" && i + 1 < text.length) {
+      i += 2;
+      continue;
+    }
+    if (ch === openChar) {
+      depth += 1;
+    } else if (ch === closeChar) {
+      depth -= 1;
+      if (depth === 0) return i + 1;
+    }
+    i += 1;
+  }
+  return -1;
+}
+
+/**
+ * Strips non-operand LaTeX spacing, styling, layout, and environment commands
+ * (`\quad`, `\color{red}`, `\textcolor{red}` prefix, `\pagecolor{...}`, `\hspace{...}`,
+ * `\phantom{...}`, `\begin{...}`, `\end{...}`, `\rule{...}{...}`, `\style{...}`, etc.)
+ * to single spaces so their closing braces never masquerade as binary left operands.
+ */
+function stripLatexNonOperandCommands(text: string): string {
+  let out = "";
+  let i = 0;
+  while (i < text.length) {
+    if (text[i] !== "\\") {
+      out += text[i];
+      i += 1;
+      continue;
+    }
+    if (i + 1 >= text.length) {
+      out += "\\";
+      break;
+    }
+    const nextChar = text[i + 1] ?? "";
+    if (nextChar === "\\") {
+      out += "\\\\";
+      i += 2;
+      continue;
+    }
+    if (LATEX_CONTROL_SPACE_CHARS.has(nextChar)) {
+      out += " ";
+      i += 2;
+      continue;
+    }
+    if (!/[A-Za-z]/.test(nextChar)) {
+      out += `\\${nextChar}`;
+      i += 2;
+      continue;
+    }
+    let nameEnd = i + 1;
+    while (nameEnd < text.length && /[A-Za-z]/.test(text[nameEnd] ?? "")) {
+      nameEnd += 1;
+    }
+    const cmdLower = text.slice(i + 1, nameEnd).toLowerCase();
+
+    if (LATEX_ZERO_ARG_NON_OPERAND_COMMANDS.has(cmdLower)) {
+      out += " ";
+      i = nameEnd;
+      continue;
+    }
+
+    if (LATEX_SKIP_DIM_COMMANDS.has(cmdLower)) {
+      const bracedEnd = skipBalancedGroup(text, nameEnd, "{", "}");
+      if (bracedEnd !== -1) {
+        out += " ";
+        i = bracedEnd;
+        continue;
+      }
+      const dimMatch = LATEX_DIM_PREFIX_RE.exec(text.slice(nameEnd));
+      if (dimMatch) {
+        out += " ";
+        i = nameEnd + dimMatch[0].length;
+        continue;
+      }
+      out += " ";
+      i = nameEnd;
+      continue;
+    }
+
+    if (LATEX_ONE_ARG_NON_OPERAND_COMMANDS.has(cmdLower)) {
+      let cursor = nameEnd;
+      if (text[cursor] === "*") cursor += 1;
+      const optEnd = skipBalancedGroup(text, cursor, "[", "]");
+      if (optEnd !== -1) cursor = optEnd;
+      const argStart = cursor;
+      const argEnd = skipBalancedGroup(text, cursor, "{", "}");
+      if (argEnd !== -1) {
+        cursor = argEnd;
+        if (cmdLower === "begin") {
+          const postOptEnd = skipBalancedGroup(text, cursor, "[", "]");
+          if (postOptEnd !== -1) cursor = postOptEnd;
+          const envName = text.slice(argStart, argEnd).trim().slice(1, -1).trim().toLowerCase();
+          if (envName === "array" || envName === "tabular") {
+            const colSpecEnd = skipBalancedGroup(text, cursor, "{", "}");
+            if (colSpecEnd !== -1) cursor = colSpecEnd;
+          }
+        }
+        out += " ";
+        i = cursor;
+        continue;
+      }
+    }
+
+    if (LATEX_TWO_ARG_NON_OPERAND_COMMANDS.has(cmdLower)) {
+      let cursor = nameEnd;
+      const optEnd = skipBalancedGroup(text, cursor, "[", "]");
+      if (optEnd !== -1) cursor = optEnd;
+      const arg1End = skipBalancedGroup(text, cursor, "{", "}");
+      if (arg1End !== -1) {
+        const arg2End = skipBalancedGroup(text, arg1End, "{", "}");
+        if (arg2End !== -1) {
+          out += " ";
+          i = arg2End;
+          continue;
+        }
+      }
+    }
+
+    out += text.slice(i, nameEnd);
+    i = nameEnd;
+  }
+  return out;
+}
+
+function findMathRanges(text: string): ReadonlyArray<readonly [number, number]> {
+  const ranges: Array<readonly [number, number]> = [];
+  let i = 0;
+  while (i < text.length) {
+    if (text[i] === "\\") {
+      const next = text[i + 1];
+      if (next === "(") {
+        const closeIdx = text.indexOf("\\)", i + 2);
+        if (closeIdx !== -1) {
+          ranges.push([i, closeIdx + 2]);
+          i = closeIdx + 2;
+          continue;
+        }
+      } else if (next === "[") {
+        const closeIdx = text.indexOf("\\]", i + 2);
+        if (closeIdx !== -1) {
+          ranges.push([i, closeIdx + 2]);
+          i = closeIdx + 2;
+          continue;
+        }
+      }
+      i += 2;
+      continue;
+    }
+    if (text[i] === "$") {
+      if (text[i + 1] === "$") {
+        let closeIdx = text.indexOf("$$", i + 2);
+        while (closeIdx !== -1 && text[closeIdx - 1] === "\\") {
+          closeIdx = text.indexOf("$$", closeIdx + 2);
+        }
+        if (closeIdx !== -1) {
+          ranges.push([i, closeIdx + 2]);
+          i = closeIdx + 2;
+          continue;
+        }
+      } else {
+        let closeIdx = i + 1;
+        while (closeIdx < text.length) {
+          if (text[closeIdx] === "\\" && closeIdx + 1 < text.length) {
+            closeIdx += 2;
+            continue;
+          }
+          if (text[closeIdx] === "$") {
+            ranges.push([i, closeIdx + 1]);
+            i = closeIdx + 1;
+            break;
+          }
+          closeIdx += 1;
+        }
+        if (closeIdx < text.length) continue;
+      }
+    }
+    i += 1;
+  }
+  return ranges;
+}
+
+function isInsideMathRange(index: number, ranges: ReadonlyArray<readonly [number, number]>): boolean {
+  return ranges.some(([start, end]) => index >= start && index < end);
+}
+
+const DEFINITE_BINARY_LEFT_OPERAND_END_RE = new RegExp(
+  `(?:[\\d)\\]}|'\\u2032\\u2019]|(?<![\\p{L}\\p{N}_])[B-HJ-Zb-hj-z\\p{Script=Greek}]|[A-Za-z\\p{Script=Greek}]_[A-Za-z0-9\\p{Script=Greek}]+|\\\\[A-Za-z]+|\\b(?:${GREEK_OR_CONST}))\\s*$`,
+  "u",
+);
+
+const AMBIGUOUS_PROSE_SINGLE_LETTER_END_RE = /(?<![\p{L}\p{N}_])[aAiI]\s*$/u;
+
+const CLAUSE_ALGEBRAIC_RELATION_RE =
+  /(?:<=|>=|!=|~=|==|=|<|>|\u2264|\u2265|\u2260|\\(?:le|leq|ge|geq|ne|neq)\b)/i;
+
+const MATH_PROSE_CONJUNCTIONS: ReadonlySet<string> = new Set([
+  "where",
+  "when",
+  "if",
+  "for",
+  "and",
+  "or",
+]);
+
+function extractLocalClause(text: string, index: number): string {
+  let start = index;
+  while (start > 0) {
+    const ch = text[start - 1];
+    if (
+      ch === "\n" ||
+      ch === ";" ||
+      ch === ":" ||
+      ch === "!" ||
+      ch === "?" ||
+      (ch === "." && !/\d/.test(text[start] ?? ""))
+    ) {
+      break;
+    }
+    start -= 1;
+  }
+  let end = index;
+  while (end < text.length) {
+    const ch = text[end];
+    if (
+      ch === "\n" ||
+      ch === ";" ||
+      ch === ":" ||
+      ch === "!" ||
+      ch === "?" ||
+      (ch === "." && !/\d/.test(text[end + 1] ?? ""))
+    ) {
+      break;
+    }
+    end += 1;
+  }
+  return text.slice(start, end);
+}
+
+function isBinaryLeftOperandBeforeSign(
+  text: string,
+  signIndex: number,
+  operandEndIndex: number,
+  mathRanges: ReadonlyArray<readonly [number, number]>,
+): boolean {
+  const before = text.slice(0, signIndex);
+  if (DEFINITE_BINARY_LEFT_OPERAND_END_RE.test(before)) {
+    return true;
+  }
+  if (!AMBIGUOUS_PROSE_SINGLE_LETTER_END_RE.test(before)) {
+    return false;
+  }
+  if (isInsideMathRange(signIndex, mathRanges)) {
+    return true;
+  }
+  const clause = extractLocalClause(text, signIndex);
+  if (!CLAUSE_ALGEBRAIC_RELATION_RE.test(clause)) {
+    return false;
+  }
+  const trailingWordMatch = /^\s+([A-Za-z]{2,})\b/.exec(text.slice(operandEndIndex));
+  if (trailingWordMatch) {
+    const trailingWord = (trailingWordMatch[1] ?? "").toLowerCase();
+    if (!MATH_PROSE_CONJUNCTIONS.has(trailingWord)) {
+      return false;
+    }
+  }
+  return true;
+}
 
 const SPACED_UNARY_SIGN_RE = new RegExp(
-  `(?<=^|[(\\[,;:=<>!~]\\s*|\\p{Script=Han}\\s*|\\p{Script=Hiragana}\\s*|\\p{Script=Katakana}\\s*|\\p{Script=Hangul}\\s*|\\b(?:is|equals|expected|result|value|gives|be|are|to|of|at|around|about)\\s+)([+-])\\s+${MATH_OPERAND_LOOKAHEAD}`,
+  `(?<=^|[(\\[{$,;:=<>!~]\\s*|\\p{Script=Han}\\s*|\\p{Script=Hiragana}\\s*|\\p{Script=Katakana}\\s*|\\p{Script=Hangul}\\s*|\\b(?:is|equals|expected|result|value|gives|be|are|to|of|at|around|about)\\s+)([+-])\\s+${MATH_OPERAND_LOOKAHEAD}`,
   "giu",
 );
 
-const SPACED_UNICODE_MINUS_UNARY_RE = new RegExp(
-  `(?<!${BINARY_LEFT_OPERAND_ATOM}\\s*)\u2212\\s+(?=\\d|\\.|\\u221A|\\p{Script=Greek}|sqrt\\()`,
+const SPACED_UNICODE_MINUS_CANDIDATE_RE =
+  /\u2212\s+(\d+(?:\.\d+)?|\.\d+|\u221A(?:\s*\([^)]*\)|\s*[a-z0-9]+)?|\p{Script=Greek}|sqrt\([^)]*\))/giu;
+
+const SPACED_PROSE_ARTICLE_SIGN_RE = new RegExp(
+  `(?<=(?<![\\p{L}\\p{N}_])[aAiI]\\s+)([+-])\\s+(\\d+(?:\\.\\d+)?|\\.\\d+|sqrt\\([^)]*\\)|(?:${GREEK_OR_CONST})\\b)`,
   "giu",
 );
 
 const SPACED_PLUS_MINUS_RE = new RegExp(`(\\+-|-\\+)\\s+${MATH_OPERAND_LOOKAHEAD}`, "gi");
+
+function collapseSpacedUnaryUnicodeMinus(text: string): string {
+  const mathRanges = findMathRanges(text);
+  return text.replace(
+    SPACED_UNICODE_MINUS_CANDIDATE_RE,
+    (match, operand: string, offset: number) => {
+      if (isBinaryLeftOperandBeforeSign(text, offset, offset + match.length, mathRanges)) {
+        return match;
+      }
+      return `-${operand}`;
+    },
+  );
+}
+
+function collapseSpacedProseArticleSigns(text: string): string {
+  const mathRanges = findMathRanges(text);
+  return text.replace(
+    SPACED_PROSE_ARTICLE_SIGN_RE,
+    (match, sign: string, operand: string, offset: number) => {
+      if (isBinaryLeftOperandBeforeSign(text, offset, offset + match.length, mathRanges)) {
+        return match;
+      }
+      return `${sign}${operand}`;
+    },
+  );
+}
 
 /**
  * Deterministically canonicalizes Unicode math notation (NFKC fractions/superscripts,
@@ -178,11 +527,12 @@ const SPACED_PLUS_MINUS_RE = new RegExp(`(\\+-|-\\+)\\s+${MATH_OPERAND_LOOKAHEAD
  */
 export function canonicalizeMathNotation(value: string): string {
   let text = value.normalize("NFKC");
-  // Normalize LaTeX spacing/display-style commands to spaces BEFORE unary-minus detection
-  // so `\(\quad − 4\)` or `\; − 4` is not mistaken for a left math operand.
-  text = text.replace(LATEX_SPACING_AND_STYLE_RE, " ");
+  // Normalize non-operand LaTeX spacing/styling/environment commands to spaces BEFORE
+  // unary-minus detection so `\(\quad − 4\)`, `$\color{red} − 4$`, `\textcolor{red}{− 4}`,
+  // or `\begin{aligned} − 4 \end{aligned}` are not mistaken for left math operands.
+  text = stripLatexNonOperandCommands(text);
   // Collapse spaced Unicode minus (`− 7`) when unary before mapping `\u2212` -> `-`.
-  text = text.replace(SPACED_UNICODE_MINUS_UNARY_RE, "-");
+  text = collapseSpacedUnaryUnicodeMinus(text);
   for (const [pattern, replacement] of UNICODE_MATH_REPLACEMENTS) {
     text = text.replace(pattern, replacement);
   }
@@ -193,6 +543,7 @@ export function canonicalizeMathNotation(value: string): string {
   text = text.replace(/\bsqrt\s*\(\s*([^()]+?)\s*\)/g, "sqrt($1)");
   text = text.replace(SPACED_PLUS_MINUS_RE, "$1");
   text = text.replace(SPACED_UNARY_SIGN_RE, "$1");
+  text = collapseSpacedProseArticleSigns(text);
   return text;
 }
 
@@ -205,14 +556,25 @@ function containsStandaloneNumericOrSymbolicToken(haystack: string, token: strin
   const escaped = escapeRegExp(token);
   const excludeBinaryLeftOperand =
     /^[+-](?![+-])/.test(token) && STANDALONE_SIGNED_LITERAL_RE.test(token);
-  const leadingGuard = excludeBinaryLeftOperand
-    ? `(?<!${ALPHA_NUM_IDENT_CHAR}|\\d\\.|${BINARY_LEFT_OPERAND_ATOM}\\s*)`
-    : `(?<!${ALPHA_NUM_IDENT_CHAR}|\\d\\.)`;
+  if (!excludeBinaryLeftOperand) {
+    const pattern = new RegExp(
+      `(?<!${ALPHA_NUM_IDENT_CHAR}|\\d\\.)${escaped}(?!${ALPHA_NUM_IDENT_CHAR}|\\.\\d)`,
+      "iu",
+    );
+    return pattern.test(haystack);
+  }
+  const mathRanges = findMathRanges(haystack);
   const pattern = new RegExp(
-    `${leadingGuard}${escaped}(?!${ALPHA_NUM_IDENT_CHAR}|\\.\\d)`,
-    "iu",
+    `(?<!${ALPHA_NUM_IDENT_CHAR}|\\d\\.)${escaped}(?!${ALPHA_NUM_IDENT_CHAR}|\\.\\d)`,
+    "giu",
   );
-  return pattern.test(haystack);
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(haystack)) !== null) {
+    if (!isBinaryLeftOperandBeforeSign(haystack, match.index, match.index + match[0].length, mathRanges)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function containsUnicodeWordBoundedToken(haystack: string, token: string): boolean {

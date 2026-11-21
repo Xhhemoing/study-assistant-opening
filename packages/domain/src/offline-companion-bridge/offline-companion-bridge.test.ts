@@ -1240,7 +1240,8 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
     // (`"The answer is − 4"`, `"Answer: − 4"`, `"Result = − 4"`) remain blocked and `"x − y"` <-> `"x-y"` leaks!
     expect(containsAnswerLeak("Solve x \u2212 4 = 0", "-4")).toBe(false);
     expect(containsAnswerLeak("Evaluate \u03B8 \u2212 4 = 0", "-4")).toBe(false);
-    expect(containsAnswerLeak("Evaluate a \u2212 4", "-4")).toBe(false);
+    expect(containsAnswerLeak("Solve a \u2212 4 = 0", "-4")).toBe(false);
+    expect(containsAnswerLeak("Evaluate $a \u2212 4$", "-4")).toBe(false);
     expect(containsAnswerLeak("Find x_1 \u2212 4 and x_n \u2212 4", "-4")).toBe(false);
     expect(containsAnswerLeak("Compute \\theta \u2212 4 = 0", "-4")).toBe(false);
     expect(containsAnswerLeak("The answer is \u2212 4", "-4")).toBe(true);
@@ -1320,6 +1321,70 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
         entries: [],
       }),
     ).toThrow(TypeError);
+
+    // [Round-14 P1] Prose English article/pronoun (`a`, `A`, `I`) and styled LaTeX commands
+    // (`\color{red}`, `\textcolor{red}{...}`, `\pagecolor{...}`, `\phantom{...}`, `\begin{aligned}`, etc.)
+    // MUST NOT mask unary `-4` leakage at `issueOfflineFlashcardLease`, while algebraic binary subtraction
+    // (`Solve x −4 = 0`, `Solve a − 4 = 0`, `$\theta − 4$`) remains allowed!
+    for (const [idx, r14LeakStem] of [
+      "Apply a \u22124 point adjustment.",
+      "Apply a \u2212 4 point adjustment.",
+      "Apply a - 4 point adjustment.",
+      "Recorded an adjustment of a \u22124.",
+      "Give a \u22124.",
+      "I \u22124",
+      "The value is $\\color{red} \u2212 4$.",
+      "The value is $\\color{red} - 4$.",
+      "The value is $\\textcolor{red}{\u2212 4}$.",
+      "The value is $\\pagecolor{yellow} \u2212 4$.",
+      "The value is $\\hspace{1em} \u2212 4$.",
+      "The value is $\\phantom{x} \u2212 4$.",
+      "The value is $\\begin{aligned} \u2212 4 \\end{aligned}$.",
+      "The value is {\\color{red} \u2212 4}.",
+      "The value is $\\quad \u2212 4$.",
+    ].entries()) {
+      expect(containsAnswerLeak(r14LeakStem, "-4")).toBe(true);
+      const r14Rejected = issueOfflineFlashcardLease({
+        leaseId: `lease-r14-leak-${idx}`,
+        workspaceId: "ws-1",
+        learnerId: "learner-1",
+        issuedAtMs: T0,
+        candidates: [
+          makeMissVariantCandidate({
+            answerKey: "-4",
+            freshVariantStem: r14LeakStem,
+          }),
+        ],
+      });
+      expect(r14Rejected.ok).toBe(false);
+      if (!r14Rejected.ok) {
+        expect(r14Rejected.httpStatus).toBe(422);
+        expect(r14Rejected.code).toBe("miss_variant_answer_leak");
+      }
+    }
+
+    for (const [idx, r14BenignStem] of [
+      "Solve x \u22124 = 0",
+      "Solve x - 4 = 0",
+      "Solve a \u2212 4 = 0",
+      "Compute $\\theta \u2212 4$",
+      "Evaluate $a \u2212 4$",
+    ].entries()) {
+      expect(containsAnswerLeak(r14BenignStem, "-4")).toBe(false);
+      const r14Allowed = issueOfflineFlashcardLease({
+        leaseId: `lease-r14-benign-${idx}`,
+        workspaceId: "ws-1",
+        learnerId: "learner-1",
+        issuedAtMs: T0,
+        candidates: [
+          makeMissVariantCandidate({
+            answerKey: "-4",
+            freshVariantStem: r14BenignStem,
+          }),
+        ],
+      });
+      expect(r14Allowed.ok).toBe(true);
+    }
 
     for (const [idx, spacedOrCjk] of [
       { answerKey: "π/2", prompt: "Right-angle measure.", backSummary: "The angle is π / 2 radians" },
