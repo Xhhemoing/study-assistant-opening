@@ -1007,3 +1007,134 @@ describe("Round-5 falsified-posterior drilldown guard & sparse snapshot validati
     }
   });
 });
+
+describe("Round-6 aggregate/component mode parity, redundant-variant DFS & sparse probe IDs", () => {
+  it("[P1-1] rejects bounded snapshot claiming all components exact or empty componentJointWeights", () => {
+    const boundedSkills: DiagnosticSkillNode[] = [
+      { skillId: "ROOT", chapterId: "c1" },
+      ...Array.from({ length: 16 }, (_, i) => ({ skillId: `LEAF_${String(i).padStart(2, "0")}`, chapterId: "c1", prerequisiteIds: ["ROOT"] })),
+    ];
+    const snap = buildKstPriorSnapshot(createKstStateSpace(boundedSkills));
+    expect(snap.approximationMode).toBe("bounded_component_envelope");
+    expect(snap.totalFeasibleStateCountExact).toBeNull();
+
+    // Forged sole component approximationMode -> "exact" while snapshot claims bounded_component_envelope
+    const forgedComp = {
+      ...snap,
+      componentJointWeights: [
+        { ...snap.componentJointWeights[0]!, approximationMode: "exact" as const },
+      ],
+    };
+    expect(() => validateKstSnapshot(forgedComp)).toThrow(DiagnosticPlacementError);
+    expect(() => classifyPlacementRoutes(forgedComp, boundedSkills, { readyThreshold: 0.1 })).toThrow(DiagnosticPlacementError);
+
+    // Forged empty componentJointWeights on a populated snapshot
+    expect(() => validateKstSnapshot({ ...snap, componentJointWeights: [] })).toThrow(DiagnosticPlacementError);
+  });
+
+  it("[P2-1] finds feasible 3x28-state schedule despite 40 X singles + 21 AB + 20 AC redundant variants without DFS cutoff", () => {
+    const makeChain = (prefix: string, chapterId: string, len: number): DiagnosticSkillNode[] =>
+      Array.from({ length: len }, (_, i) => ({
+        skillId: `${prefix}_${i}`,
+        chapterId,
+        ...(i > 0 ? { prerequisiteIds: [`${prefix}_${i - 1}`] } : {}),
+      }));
+
+    // 3 independent chains of 27 skills => 28 states each (28^2 = 784 <= 20_000, 28^3 = 21_952 > 20_000)
+    const skills = [
+      ...makeChain("A", "Q", 27),
+      ...makeChain("B", "X", 27),
+      ...makeChain("C", "Y", 27),
+    ];
+    const pool: DiagnosticProbeItem[] = [
+      { itemId: "q-0", familyId: "fam-q", chapterId: "Q", requiredSkillIds: ["A_0"], slip: 0.1, guess: 0.1, estimatedSeconds: 1 },
+      // X has 40 single-component probes, first sharing fam-shared with Y's sole single-component probe
+      { itemId: "x-shared", familyId: "fam-shared", chapterId: "X", requiredSkillIds: ["B_0"], slip: 0.1, guess: 0.1, estimatedSeconds: 1 },
+      ...Array.from({ length: 39 }, (_, i) => ({
+        itemId: `x-${String(i).padStart(2, "0")}`,
+        familyId: `fam-x-${i}`,
+        chapterId: "X",
+        requiredSkillIds: ["B_1"],
+        slip: 0.1,
+        guess: 0.1,
+        estimatedSeconds: 1,
+      })),
+      // Y has 21 AB variants (same family) + 20 AC variants (same family) + 1 single sharing fam-shared
+      ...Array.from({ length: 21 }, (_, i) => ({
+        itemId: `y-ab-${i}`,
+        familyId: "fam-y-ab",
+        chapterId: "Y",
+        requiredSkillIds: ["A_2", "B_2"],
+        slip: 0.05,
+        guess: 0.05,
+        estimatedSeconds: 1,
+      })),
+      ...Array.from({ length: 20 }, (_, i) => ({
+        itemId: `y-ac-${i}`,
+        familyId: "fam-y-ac",
+        chapterId: "Y",
+        requiredSkillIds: ["A_3", "C_3"],
+        slip: 0.05,
+        guess: 0.05,
+        estimatedSeconds: 1,
+      })),
+      { itemId: "y-shared", familyId: "fam-shared", chapterId: "Y", requiredSkillIds: ["C_0"], slip: 0.1, guess: 0.1, estimatedSeconds: 1 },
+    ];
+
+    const session = new DiagnosticPlacementSession({
+      skills,
+      candidatePool: pool,
+      config: { minItems: 8, maxItems: 8, totalBudgetSeconds: 8, chapterQuotas: { Q: 1, X: 5, Y: 2 } },
+    });
+
+    // Also verify the exact post-Q counterexample state (Q=1 done, X=5 and Y=2 remaining with 40/21/20 redundant variants)
+    const afterQSession = new DiagnosticPlacementSession({
+      skills,
+      candidatePool: pool,
+      config: { minItems: 8, maxItems: 8, totalBudgetSeconds: 8, chapterQuotas: { Q: 1, X: 5, Y: 2 } },
+    });
+    afterQSession.recordResponse({ observationId: "r6-post-q", itemId: "q-0", correct: true });
+    for (let step = 1; step < 8; step++) {
+      const sel = afterQSession.selectNextProbe();
+      expect(sel.status).toBe("selected");
+      afterQSession.recordResponse({ observationId: `r6-postq-${step}`, itemId: sel.probe!.itemId, correct: true });
+    }
+    const postQSummary = afterQSession.getSessionSummary();
+    expect(postQSummary.chapterCounts["Q"]).toBe(1);
+    expect(postQSummary.chapterCounts["X"]).toBe(5);
+    expect(postQSummary.chapterCounts["Y"]).toBe(2);
+
+    // Complete all 8 steps directly from step 0 -> must never hit DFS cutoff or false INFEASIBLE
+    for (let step = 0; step < 8; step++) {
+      const sel = session.selectNextProbe();
+      expect(sel.status).toBe("selected");
+      session.recordResponse({ observationId: `r6-step-${step}`, itemId: sel.probe!.itemId, correct: true });
+    }
+    const summary = session.getSessionSummary();
+    expect(summary.administeredCount).toBe(8);
+    expect(summary.chapterCounts["Q"]).toBe(1);
+    expect(summary.chapterCounts["X"]).toBe(5);
+    expect(summary.chapterCounts["Y"]).toBe(2);
+  });
+
+  it("[P2-2] rejects sparse-array holes in probe.requiredSkillIds inside validateProbeItem with VALIDATION", () => {
+    const space = createKstStateSpace([{ skillId: "A", chapterId: "c1" }]);
+    const sparseSkills = new Array<string>(1);
+    const badProbe: DiagnosticProbeItem = {
+      itemId: "bad-sparse",
+      familyId: "f-bad",
+      chapterId: "c1",
+      requiredSkillIds: sparseSkills,
+      slip: 0.1,
+      guess: 0.1,
+      estimatedSeconds: 20,
+    };
+    expect(() => space.computeProbeMutualInformation(badProbe)).toThrow(DiagnosticPlacementError);
+    expect(space.canEvaluateProbe(badProbe)).toBe(false);
+    expect(() => new DiagnosticPlacementSession({
+      skills: [{ skillId: "A", chapterId: "c1" }],
+      candidatePool: [badProbe],
+      config: { minItems: 1, maxItems: 1 },
+    })).toThrow(DiagnosticPlacementError);
+  });
+});

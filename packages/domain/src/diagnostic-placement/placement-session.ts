@@ -101,9 +101,9 @@ export function classifyPlacementRoutes(
       };
     }
 
-    const exactCertified = hasExplicitComponentModes
-      ? [skill.skillId, ...parents].every(id => componentModeBySkill.get(id) === "exact")
-      : snapshot.approximationMode === "exact";
+    const exactCertified =
+      hasExplicitComponentModes &&
+      [skill.skillId, ...parents].every(id => componentModeBySkill.get(id) === "exact");
     if (exactCertified && parentsSatisfied >= readyThreshold) {
       return { ...base, route: "inferred_ready", uiLabel: READY_UI_LABEL, holdoutVerificationRequired: false, delayedCheckAfterHours: null, missingPrerequisiteIds: [] };
     }
@@ -371,12 +371,7 @@ export class DiagnosticPlacementSession {
       return { ok: true, groupsCount: gSet.size, nextCompToGroup, nextGroupCounts };
     };
 
-    const startCompToGroup = Array.from({ length: meta.length }, (_, i) => i);
-    const startGroupCounts = meta.map(m => m.stateCount);
-    const afterCandidate = evalMerge(candidate, startCompToGroup, startGroupCounts);
-    if (!afterCandidate.ok) return false;
-
-    const basePool = this.candidatePool
+    const rawRemaining = this.candidatePool
       .filter(item =>
         item.itemId !== candidate.itemId &&
         item.familyId !== candidate.familyId &&
@@ -385,11 +380,73 @@ export class DiagnosticPlacementSession {
       )
       .sort((a, b) => (a.estimatedSeconds - b.estimatedSeconds) || cmpStr(a.itemId, b.itemId));
 
+    // Fix 1: Dominance pruning per (familyId, chapterId, canonicalTouchedGroupSignature)
+    const bestByEquivClass = new Map<string, DiagnosticProbeItem>();
+    const startCompToGroup = Array.from({ length: meta.length }, (_, i) => i);
+    const startGroupCounts = meta.map(m => m.stateCount);
+    const afterCandidate = evalMerge(candidate, startCompToGroup, startGroupCounts);
+    if (!afterCandidate.ok) return false;
+
+    const getGroupSig = (item: DiagnosticProbeItem, compToGroup: number[]): string => {
+      const gSet = new Set<number>();
+      for (const orig of getOrigComps(item)) gSet.add(compToGroup[orig]!);
+      return gSet.size <= 1 ? "single" : [...gSet].sort((a, b) => a - b).join(",");
+    };
+
+    for (const item of rawRemaining) {
+      const gSig = getGroupSig(item, afterCandidate.nextCompToGroup);
+      const eqKey = `${item.familyId}\0${item.chapterId}\0${gSig}`;
+      if (!bestByEquivClass.has(eqKey)) bestByEquivClass.set(eqKey, item);
+    }
+
+    const basePool = [...bestByEquivClass.values()].sort(
+      (a, b) => (a.estimatedSeconds - b.estimatedSeconds) || cmpStr(a.itemId, b.itemId),
+    );
+    const itemsPerFamily = new Map<string, number>();
+    for (const item of basePool) {
+      itemsPerFamily.set(item.familyId, (itemsPerFamily.get(item.familyId) ?? 0) + 1);
+    }
+
+    // Fix 2: Separate non-conflicting single-component free probes per chapter from conflicting/multi-component items
+    const isFreeSingleMap = new Map<string, boolean>();
+    const freeSinglesByChapter = new Map<string, DiagnosticProbeItem[]>();
+    for (const item of basePool) {
+      const gSig = getGroupSig(item, afterCandidate.nextCompToGroup);
+      const isFreeSingle = gSig === "single" && itemsPerFamily.get(item.familyId) === 1;
+      isFreeSingleMap.set(item.itemId, isFreeSingle);
+      if (isFreeSingle) {
+        if (!freeSinglesByChapter.has(item.chapterId)) freeSinglesByChapter.set(item.chapterId, []);
+        freeSinglesByChapter.get(item.chapterId)!.push(item);
+      }
+    }
+
+    const freeIdxInChapter = new Map<string, number>();
+    for (const list of freeSinglesByChapter.values()) {
+      list.forEach((it, idx) => freeIdxInChapter.set(it.itemId, idx));
+    }
     const poolIdxById = new Map(basePool.map((it, idx) => [it.itemId, idx]));
     const pickedFams = new Set<string>();
     const pickedItems = new Set<string>();
+    const usedFreeCountByChapter = new Map<string, number>();
+    // Fix 3: Fail-state budget memoization
+    const failedBudgetMemo = new Map<string, number>();
     let visitedNodes = 0;
     const MAX_DFS_NODES = 25_000;
+
+    const getCanonicalUnionSig = (compToGroup: number[]): string => {
+      const members = new Map<number, number[]>();
+      for (let i = 0; i < compToGroup.length; i++) {
+        const g = compToGroup[i]!;
+        if (!members.has(g)) members.set(g, []);
+        members.get(g)!.push(i);
+      }
+      const multiBlocks: string[] = [];
+      for (const grp of members.values()) {
+        if (grp.length > 1) multiBlocks.push(grp.join("+"));
+      }
+      multiBlocks.sort();
+      return multiBlocks.join("|");
+    };
 
     const dfs = (
       usedTotal: number,
@@ -407,53 +464,98 @@ export class DiagnosticPlacementSession {
       if (remNeeded === 0) return true;
       if (usedTotal + remNeeded > this.maxItems) return false;
 
+      const sortedMin = [...remMinMap.entries()].sort((a, b) => cmpStr(a[0], b[0])).map(([k, v]) => `${k}:${v}`).join(",");
+      const sortedMax = [...remMaxCapMap.entries()].filter(([, v]) => v !== Infinity).sort((a, b) => cmpStr(a[0], b[0])).map(([k, v]) => `${k}:${v}`).join(",");
+      const sortedFams = [...pickedFams].sort(cmpStr).join("\0");
+      const sortedFree = [...usedFreeCountByChapter.entries()].filter(([, v]) => v > 0).sort((a, b) => cmpStr(a[0], b[0])).map(([k, v]) => `${k}:${v}`).join(",");
+      const cursorSig = totalRemMin > 0
+        ? `A:${[...minIdxByChapter.entries()].sort((a, b) => cmpStr(a[0], b[0])).map(([k, v]) => `${k}:${v}`).join(",")}`
+        : `B:${caseBStartIdx}`;
+      const memoKey = `${getCanonicalUnionSig(compToGroup)}|${remNeeded}|${sortedMin}|${sortedMax}|${sortedFams}|${sortedFree}|${cursorSig}`;
+      const prevFailBudget = failedBudgetMemo.get(memoKey);
+      if (prevFailBudget !== undefined && prevFailBudget >= remBudget - 1e-9) return false;
+
       const allowNonDeficit = totalRemMin < remNeeded;
       const feasible: Array<{ item: DiagnosticProbeItem; outcome: Extract<MergeOutcome, { ok: true }> }> = [];
+      const singleOnly: DiagnosticProbeItem[] = [];
       let hasMultiGroupCandidate = false;
+
       for (const item of basePool) {
         if (pickedItems.has(item.itemId) || pickedFams.has(item.familyId)) continue;
+        if (isFreeSingleMap.get(item.itemId) && (freeIdxInChapter.get(item.itemId)! < (usedFreeCountByChapter.get(item.chapterId) ?? 0))) {
+          continue;
+        }
         if (item.estimatedSeconds > remBudget + 1e-9) continue;
         if ((remMaxCapMap.get(item.chapterId) ?? Infinity) <= 0) continue;
         if (!allowNonDeficit && (remMinMap.get(item.chapterId) ?? 0) <= 0) continue;
         const outcome = evalMerge(item, compToGroup, groupCounts);
         if (!outcome.ok) continue;
         if (outcome.groupsCount > 1) hasMultiGroupCandidate = true;
+        else singleOnly.push(item);
         feasible.push({ item, outcome });
       }
-      if (feasible.length < remNeeded) return false;
+
+      const failAndMemo = (): false => {
+        if (prevFailBudget === undefined || remBudget > prevFailBudget) {
+          failedBudgetMemo.set(memoKey, remBudget);
+        }
+        return false;
+      };
+
+      if (feasible.length < remNeeded) return failAndMemo();
 
       const headroomNow = new Map<string, number>();
       for (const [ch, cap] of remMaxCapMap.entries()) {
         headroomNow.set(ch, cap === Infinity ? Infinity : Math.max(0, cap - (remMinMap.get(ch) ?? 0)));
       }
       if (!minCostFeasibleCompletion(feasible.map(f => f.item), remMinMap, headroomNow, remNeeded, remBudget)) {
-        return false;
+        return failAndMemo();
       }
       if (!hasMultiGroupCandidate) return true;
+      if (singleOnly.length >= remNeeded && minCostFeasibleCompletion(singleOnly, remMinMap, headroomNow, remNeeded, remBudget)) {
+        return true;
+      }
 
       if (totalRemMin > 0) {
         let targetChap: string | null = null;
-        let targetCands: typeof feasible = [];
+        let allCandsInChap: typeof feasible = [];
         for (const [ch, def] of remMinMap.entries()) {
           if (def <= 0) continue;
           const minIdx = minIdxByChapter.get(ch) ?? 0;
           const cands = feasible.filter(f => f.item.chapterId === ch && poolIdxById.get(f.item.itemId)! >= minIdx);
-          if (cands.length < def) return false;
-          if (targetChap === null || cands.length < targetCands.length) {
+          if (cands.length < def) return failAndMemo();
+          if (targetChap === null || cands.length < allCandsInChap.length) {
             targetChap = ch;
-            targetCands = cands;
+            allCandsInChap = cands;
           }
         }
-        if (!targetChap) return false;
-        targetCands.sort((a, b) =>
+        if (!targetChap) return failAndMemo();
+
+        // Within targetChap, keep ALL non-free candidates + ONLY the next cheapest unused free single
+        const freePtr = usedFreeCountByChapter.get(targetChap) ?? 0;
+        let addedFree = false;
+        const branchCands: typeof feasible = [];
+        for (const entry of allCandsInChap) {
+          if (isFreeSingleMap.get(entry.item.itemId)) {
+            if (!addedFree && freeIdxInChapter.get(entry.item.itemId) === freePtr) {
+              addedFree = true;
+              branchCands.push(entry);
+            }
+          } else {
+            branchCands.push(entry);
+          }
+        }
+        branchCands.sort((a, b) =>
           (a.outcome.groupsCount <= 1 ? 0 : 1) - (b.outcome.groupsCount <= 1 ? 0 : 1) ||
           a.item.estimatedSeconds - b.item.estimatedSeconds ||
           cmpStr(a.item.itemId, b.item.itemId),
         );
 
-        for (const { item, outcome } of targetCands) {
+        for (const { item, outcome } of branchCands) {
+          const isFree = isFreeSingleMap.get(item.itemId) === true;
           pickedItems.add(item.itemId);
           pickedFams.add(item.familyId);
+          if (isFree) usedFreeCountByChapter.set(targetChap, freePtr + 1);
           const nextMinMap = new Map(remMinMap);
           const curDef = nextMinMap.get(targetChap)!;
           if (curDef <= 1) nextMinMap.delete(targetChap);
@@ -475,23 +577,19 @@ export class DiagnosticPlacementSession {
             nextMinIdxMap,
             caseBStartIdx,
           );
+          if (isFree) usedFreeCountByChapter.set(targetChap, freePtr);
           pickedItems.delete(item.itemId);
           pickedFams.delete(item.familyId);
           if (solved) return true;
         }
-        return false;
+        return failAndMemo();
       }
 
-      // All chapter minItems satisfied; fill remaining minItems gap cleanly without permutations
-      const ordered = feasible
-        .filter(f => poolIdxById.get(f.item.itemId)! >= caseBStartIdx)
-        .sort((a, b) =>
-          (a.outcome.groupsCount <= 1 ? 0 : 1) - (b.outcome.groupsCount <= 1 ? 0 : 1) ||
-          a.item.estimatedSeconds - b.item.estimatedSeconds ||
-          cmpStr(a.item.itemId, b.item.itemId),
-        );
-      if (ordered.length < remNeeded) return false;
-      for (const { item, outcome } of ordered) {
+      // All chapter minItems satisfied and singleOnly alone failed -> must pick at least one multi-group item
+      const orderedMulti = feasible
+        .filter(f => f.outcome.groupsCount > 1 && poolIdxById.get(f.item.itemId)! >= caseBStartIdx)
+        .sort((a, b) => a.item.estimatedSeconds - b.item.estimatedSeconds || cmpStr(a.item.itemId, b.item.itemId));
+      for (const { item, outcome } of orderedMulti) {
         const gIdx = poolIdxById.get(item.itemId)!;
         pickedItems.add(item.itemId);
         pickedFams.add(item.familyId);
@@ -514,7 +612,7 @@ export class DiagnosticPlacementSession {
         pickedFams.delete(item.familyId);
         if (solved) return true;
       }
-      return false;
+      return failAndMemo();
     };
 
     return dfs(

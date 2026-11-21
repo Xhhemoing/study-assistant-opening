@@ -98,8 +98,13 @@ export function validateProbeItem(probe: DiagnosticProbeItem, knownSkillIds: Rea
     || !Number.isFinite(probe.guess) || probe.guess < 0 || probe.guess >= 0.49 || !(1 - probe.slip > probe.guess)) {
     throw new DiagnosticPlacementError("VALIDATION", `Probe ${probe.itemId} must have slip, guess in [0, 0.49) and 1 - slip > guess`);
   }
-  if (probe.requiredSkillIds.length === 0 || probe.requiredSkillIds.some(id => !knownSkillIds.has(id))) {
-    throw new DiagnosticPlacementError("VALIDATION", `Probe ${probe.itemId} has empty or unknown requiredSkillIds`);
+  if (!Array.isArray(probe.requiredSkillIds) || probe.requiredSkillIds.length === 0) {
+    throw new DiagnosticPlacementError("VALIDATION", `Probe ${probe.itemId} has empty requiredSkillIds`);
+  }
+  for (let i = 0; i < probe.requiredSkillIds.length; i++) {
+    if (!Object.hasOwn(probe.requiredSkillIds, i) || typeof probe.requiredSkillIds[i] !== "string" || !knownSkillIds.has(probe.requiredSkillIds[i]!)) {
+      throw new DiagnosticPlacementError("VALIDATION", `Probe ${probe.itemId} has empty or unknown requiredSkillIds`);
+    }
   }
 }
 
@@ -389,6 +394,9 @@ export function validateKstSnapshot(snapshot: KstSnapshotV1): void {
     throw new DiagnosticPlacementError("VALIDATION", "KstSnapshotV1 componentJointWeights must be an array");
   }
   const seenCompSkills = new Set<string>();
+  let allComponentsExact = true;
+  let hasBoundedComponent = false;
+  let exactStateProduct = 1n;
   for (let idx = 0; idx < snapshot.componentJointWeights.length; idx++) {
     if (!Object.hasOwn(snapshot.componentJointWeights, idx)) {
       throw new DiagnosticPlacementError("VALIDATION", `componentJointWeights[${idx}] must not be a sparse hole`);
@@ -403,6 +411,7 @@ export function validateKstSnapshot(snapshot: KstSnapshotV1): void {
     if (!Array.isArray(comp.skillIds) || comp.skillIds.length === 0) {
       throw new DiagnosticPlacementError("VALIDATION", `componentJointWeights[${idx}].skillIds must be a non-empty array`);
     }
+    const compSkillSet = new Set<string>();
     for (let sIdx = 0; sIdx < comp.skillIds.length; sIdx++) {
       if (!Object.hasOwn(comp.skillIds, sIdx) || typeof comp.skillIds[sIdx] !== "string" || !comp.skillIds[sIdx]!.trim()) {
         throw new DiagnosticPlacementError("VALIDATION", `componentJointWeights[${idx}].skillIds[${sIdx}] must be a non-empty string`);
@@ -415,11 +424,71 @@ export function validateKstSnapshot(snapshot: KstSnapshotV1): void {
         throw new DiagnosticPlacementError("VALIDATION", `Duplicate skill ${skillId} in componentJointWeights`);
       }
       seenCompSkills.add(skillId);
+      compSkillSet.add(skillId);
     }
     validateProbabilityRecord(comp.wByState, `componentJointWeights[${idx}].wByState`, { requireSumOne: true, requireNonEmpty: true });
+    const stateKeys = Object.keys(comp.wByState);
+    for (const stateKey of stateKeys) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(stateKey);
+      } catch {
+        throw new DiagnosticPlacementError("VALIDATION", `componentJointWeights[${idx}].wByState has invalid state key ${stateKey}`);
+      }
+      if (!Array.isArray(parsed) || canonicalStateKey(parsed as string[]) !== stateKey) {
+        throw new DiagnosticPlacementError("VALIDATION", `componentJointWeights[${idx}].wByState has non-canonical state key ${stateKey}`);
+      }
+      for (const s of parsed) {
+        if (typeof s !== "string" || !compSkillSet.has(s)) {
+          throw new DiagnosticPlacementError("VALIDATION", `componentJointWeights[${idx}].wByState references unknown state skill`);
+        }
+      }
+    }
+    if (!Number.isSafeInteger(comp.stateCount) || comp.stateCount !== stateKeys.length) {
+      throw new DiagnosticPlacementError("VALIDATION", `componentJointWeights[${idx}].stateCount mismatch`);
+    }
+    if (comp.approximationMode === "exact") {
+      if (comp.stateCount > MAX_EXACT_KST_STATES || comp.exactStateCountEstimate !== comp.stateCount) {
+        throw new DiagnosticPlacementError("VALIDATION", `componentJointWeights[${idx}] invalid exact component metadata`);
+      }
+      exactStateProduct *= BigInt(comp.stateCount);
+    } else {
+      allComponentsExact = false;
+      hasBoundedComponent = true;
+      if (comp.exactStateCountEstimate !== null) {
+        throw new DiagnosticPlacementError("VALIDATION", `componentJointWeights[${idx}] bounded component must have null exactStateCountEstimate`);
+      }
+    }
+  }
+  if (knownSkills.size > 0 && snapshot.componentJointWeights.length === 0) {
+    throw new DiagnosticPlacementError("VALIDATION", "componentJointWeights must not be empty for non-empty snapshot skills");
   }
   if (snapshot.componentJointWeights.length > 0 && seenCompSkills.size !== knownSkills.size) {
     throw new DiagnosticPlacementError("VALIDATION", "componentJointWeights must partition snapshot skills");
+  }
+  if (snapshot.componentJointWeights.length > 0) {
+    if (snapshot.approximationMode === "bounded_component_envelope") {
+      if (!hasBoundedComponent || snapshot.totalFeasibleStateCount !== null || snapshot.totalFeasibleStateCountExact !== null) {
+        throw new DiagnosticPlacementError("VALIDATION", "bounded_component_envelope snapshot requires bounded component and null exact counts");
+      }
+    } else {
+      if (!allComponentsExact || hasBoundedComponent) {
+        throw new DiagnosticPlacementError("VALIDATION", `Snapshot approximationMode ${snapshot.approximationMode} conflicts with bounded component`);
+      }
+      if (snapshot.approximationMode === "exact" && (snapshot.componentJointWeights.length !== 1 || exactStateProduct > BigInt(MAX_EXACT_KST_STATES))) {
+        throw new DiagnosticPlacementError("VALIDATION", "Snapshot exact mode requires a single component within MAX_EXACT_KST_STATES");
+      }
+      if (snapshot.approximationMode === "component_decomposed" && (snapshot.componentJointWeights.length < 2 || exactStateProduct <= BigInt(MAX_EXACT_KST_STATES))) {
+        throw new DiagnosticPlacementError("VALIDATION", "Snapshot component_decomposed mode requires >= 2 components and product > MAX_EXACT_KST_STATES");
+      }
+      if (snapshot.totalFeasibleStateCountExact !== undefined && snapshot.totalFeasibleStateCountExact !== exactStateProduct.toString()) {
+        throw new DiagnosticPlacementError("VALIDATION", "Snapshot totalFeasibleStateCountExact does not match component state product");
+      }
+      const expectedSafeCount = exactStateProduct <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(exactStateProduct) : null;
+      if (snapshot.totalFeasibleStateCount !== expectedSafeCount) {
+        throw new DiagnosticPlacementError("VALIDATION", "Snapshot totalFeasibleStateCount does not match component state product");
+      }
+    }
   }
   if (!snapshot.skillCovariance || typeof snapshot.skillCovariance !== "object" || Array.isArray(snapshot.skillCovariance)) {
     throw new DiagnosticPlacementError("VALIDATION", "KstSnapshotV1 skillCovariance must be a record");
@@ -527,18 +596,27 @@ export class KstStateSpace {
   }
 
   canEvaluateProbe(probe: DiagnosticProbeItem): boolean {
-    if (probe.requiredSkillIds.length === 0 || probe.requiredSkillIds.some(id => !this.graph.skillsById.has(id))) {
-      return false;
+    if (!Array.isArray(probe.requiredSkillIds) || probe.requiredSkillIds.length === 0) return false;
+    for (let i = 0; i < probe.requiredSkillIds.length; i++) {
+      if (!Object.hasOwn(probe.requiredSkillIds, i) || typeof probe.requiredSkillIds[i] !== "string" || !this.graph.skillsById.has(probe.requiredSkillIds[i]!)) {
+        return false;
+      }
     }
     const touchedIndices = [...this.touchedMasks(probe.requiredSkillIds).keys()].sort((a, b) => a - b);
     return this.checkCrossComponentMerge(touchedIndices).feasible;
   }
 
   canEvaluateProbeAfter(priorCandidate: DiagnosticProbeItem, nextProbe: DiagnosticProbeItem): boolean {
-    if (
-      priorCandidate.requiredSkillIds.length === 0 || priorCandidate.requiredSkillIds.some(id => !this.graph.skillsById.has(id)) ||
-      nextProbe.requiredSkillIds.length === 0 || nextProbe.requiredSkillIds.some(id => !this.graph.skillsById.has(id))
-    ) {
+    const validSkills = (item: DiagnosticProbeItem): boolean => {
+      if (!Array.isArray(item.requiredSkillIds) || item.requiredSkillIds.length === 0) return false;
+      for (let i = 0; i < item.requiredSkillIds.length; i++) {
+        if (!Object.hasOwn(item.requiredSkillIds, i) || typeof item.requiredSkillIds[i] !== "string" || !this.graph.skillsById.has(item.requiredSkillIds[i]!)) {
+          return false;
+        }
+      }
+      return true;
+    };
+    if (!validSkills(priorCandidate) || !validSkills(nextProbe)) {
       return false;
     }
     const priorTouchedIndices = [...this.touchedMasks(priorCandidate.requiredSkillIds).keys()].sort((a, b) => a - b);
