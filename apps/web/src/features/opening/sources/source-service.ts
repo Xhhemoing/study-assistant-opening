@@ -7,6 +7,7 @@ import {
   createOpeningKnowledgeRepository,
   readOpeningExamPublicSource,
   resolveLegacySourceFinalKey,
+  stagingDiscoveryPendingKey,
   OpeningSourceError,
   OpeningS3,
   magicMatchesMime,
@@ -265,6 +266,7 @@ export function createOpeningSourceService(sql: Sql, storage: OpeningStorage = n
       const currentTime = now();
       let stagingDiscoveryFailed = false;
       let discoveredStagingKeys: string[] = [];
+      const discoveryPendingKey = stagingDiscoveryPendingKey(sourceId);
       if (input.action !== "exclude" && typeof storage.listMatchingStagingKeys === "function") {
         try {
           discoveredStagingKeys = await storage.listMatchingStagingKeys(sourceId);
@@ -272,9 +274,10 @@ export function createOpeningSourceService(sql: Sql, storage: OpeningStorage = n
           stagingDiscoveryFailed = true;
         }
       }
+      const extraKeysForReceipt = stagingDiscoveryFailed ? [discoveryPendingKey] : discoveredStagingKeys;
       const result = input.action === "retry_cleanup"
-        ? { deleted: true, cleanup: await actions.cleanup(scope, sourceId, { extraKeys: discoveredStagingKeys, keys: storage }) }
-        : await actions.apply(scope, id, input, storage, currentTime, { extraKeys: discoveredStagingKeys });
+        ? { deleted: true, cleanup: await actions.cleanup(scope, sourceId, { extraKeys: extraKeysForReceipt, keys: storage }) }
+        : await actions.apply(scope, id, input, storage, currentTime, { extraKeys: extraKeysForReceipt });
       if (input.action !== "retry_cleanup") {
         try {
           await createOpeningKnowledgeRepository(sql).reconcileCoursesForSource(scope, {
@@ -318,6 +321,7 @@ export function createOpeningSourceService(sql: Sql, storage: OpeningStorage = n
         );
         const notBeforeActive = Boolean(result.cleanup.notBefore && new Date(result.cleanup.notBefore) > currentTime);
         for (const key of result.cleanup.keys) {
+          if (key === discoveryPendingKey) continue;
           try { await storage.deleteObject(key); }
           catch { continue; } // The receipt keeps this failed key visible and retryable.
           const isStagingKey = key.toLowerCase() === canonicalStagingKey.toLowerCase();
@@ -329,6 +333,9 @@ export function createOpeningSourceService(sql: Sql, storage: OpeningStorage = n
           );
           if (keepStagingDeferred) continue;
           if (await actions.cleaned(scope, sourceId, key, currentTime)) released = true;
+        }
+        if (cleanupKeys.has(discoveryPendingKey) && !stagingDiscoveryFailed && !extraStagingFailed) {
+          if (await actions.cleaned(scope, sourceId, discoveryPendingKey, currentTime)) released = true;
         }
         if (released) {
           remaining = { keys: [], notBefore: null };

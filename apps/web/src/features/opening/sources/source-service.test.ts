@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
 import type { Sql } from "postgres";
 import { createOpeningSourceService } from "./source-service";
-import { createOpeningSourceActionsRepository, OpeningSourceError, type OpeningStorage } from "@aistudy/database";
+import { createOpeningSourceActionsRepository, OpeningSourceError, stagingDiscoveryPendingKey, type OpeningStorage } from "@aistudy/database";
 import type { Principal } from "../../../lib/authorization";
 
 const principal: Principal = {
@@ -1462,7 +1462,7 @@ describe("opening signed upload service", () => {
         [...s3.objects.keys()].filter(key => key.toLowerCase() === `opening/staging/${canonicalId.toLowerCase()}`),
     };
     const sourceId = "00000000-0000-4000-8000-0000000000e1";
-    const mixedKey = `opening/staging/${sourceId.slice(0, 6).toUpperCase()}${sourceId.slice(6)}`;
+    const mixedKey = `opening/staging/${sourceId.replace(/[a-f]/, (ch) => ch.toUpperCase())}`;
     s3.objects.set(mixedKey, { bytes: pdfBytes, etag: "etag-mixed" });
 
     // Legacy deletion receipt with empty pending_object_keys = [].
@@ -1519,6 +1519,116 @@ describe("opening signed upload service", () => {
     });
     expect(pendingKeys).toEqual([]);
     expect(s3.objects.has(mixedKey)).toBe(false);
+  });
+
+  it("persists discovery sentinel on an empty receipt when listMatchingStagingKeys throws, keeps source listed, and merges mixed-case keys on recovery", async () => {
+    const baseSql = makeFakeSql();
+    const s3 = makeFakeStorage();
+    let listShouldFail = true;
+    const storage: OpeningStorage = {
+      ...s3.storage,
+      stagingKey: (id) => `opening/staging/${id}`,
+      finalKey: (id, version) => `opening/sources/${id}/v${version}`,
+      listMatchingStagingKeys: async (canonicalId) => {
+        if (listShouldFail) throw new Error("s3 list outage");
+        return [...s3.objects.keys()].filter(key => key.toLowerCase() === `opening/staging/${canonicalId.toLowerCase()}`);
+      },
+    };
+    const sourceId = "00000000-0000-4000-8000-0000000000f2";
+    const mixedKey = `opening/staging/${sourceId.replace(/[a-f]/, (ch) => ch.toUpperCase())}`;
+    const sentinelKey = stagingDiscoveryPendingKey(sourceId);
+    s3.objects.set(mixedKey, { bytes: pdfBytes, etag: "etag-mixed" });
+
+    let pendingKeys: string[] = [];
+    const deletedKeys: string[] = [];
+    const realDelete = storage.deleteObject;
+    storage.deleteObject = async (key: string) => {
+      deletedKeys.push(key);
+      return realDelete(key);
+    };
+    const wrappedSql = Object.assign(((parts: TemplateStringsArray, ...values: unknown[]) => {
+      const query = parts.join("?").replace(/\s+/g, " ").trim();
+      if (query === "" || query === "FOR UPDATE") return query;
+      if (query.startsWith("SELECT id, source_id, pending_object_keys, cleanup_not_before FROM opening_privacy_exclusions")) {
+        return [{
+          id: "00000000-0000-4000-8000-000000000099",
+          source_id: sourceId,
+          pending_object_keys: [...pendingKeys],
+          cleanup_not_before: null,
+        }];
+      }
+      if (query.startsWith("SELECT source_id, cardinality(pending_object_keys) AS pending, cleanup_not_before FROM opening_privacy_exclusions")) {
+        return pendingKeys.length
+          ? [{ source_id: sourceId, pending: pendingKeys.length, cleanup_not_before: null }]
+          : [];
+      }
+      if (query.startsWith("UPDATE opening_privacy_exclusions SET pending_object_keys=?")) {
+        pendingKeys = [...(values[0] as string[])];
+        return [];
+      }
+      if (query.startsWith("SELECT id, cleanup_not_before FROM opening_privacy_exclusions")) return [];
+      if (query.startsWith("UPDATE opening_privacy_exclusions SET pending_object_keys=array_remove")) {
+        pendingKeys = pendingKeys.filter(k => k !== values[0]);
+        return [];
+      }
+      return (baseSql as unknown as (p: TemplateStringsArray, ...v: unknown[]) => unknown)(parts, ...values);
+    }) as unknown as typeof baseSql, {
+      json: baseSql.json,
+      begin: (cb: (tx: Sql) => Promise<unknown>) => cb(wrappedSql as unknown as Sql),
+    });
+
+    const svc = createOpeningSourceService(wrappedSql as unknown as Sql, storage);
+
+    // 1) Empty receipt + listMatchingStagingKeys failure persists sentinel, keeps source listed with cleanupPending: 1.
+    const failedDiscovery = await svc.actOnSource(principal, sourceId, { action: "retry_cleanup" });
+    expect(failedDiscovery).toEqual({
+      sourceId,
+      aiExcluded: true,
+      deleted: true,
+      cleanupPending: 1,
+      retryAfter: null,
+    });
+    expect(pendingKeys).toEqual([sentinelKey]);
+    expect(deletedKeys).not.toContain(sentinelKey);
+    expect(await svc.listSourceDeletions(principal)).toEqual([
+      { sourceId, cleanupPending: 1, retryAfter: null },
+    ]);
+
+    // 2) Listing recovers, but S3 delete of mixedKey fails -> merges mixedKey BEFORE clearing sentinel, leaving cleanupPending: 1.
+    listShouldFail = false;
+    storage.deleteObject = async (key: string) => {
+      deletedKeys.push(key);
+      throw new Error("delete failed");
+    };
+    const deleteBlocked = await svc.actOnSource(principal, sourceId, { action: "retry_cleanup" });
+    expect(deleteBlocked).toEqual({
+      sourceId,
+      aiExcluded: true,
+      deleted: true,
+      cleanupPending: 1,
+      retryAfter: null,
+    });
+    expect(pendingKeys).toEqual([mixedKey]);
+    expect(s3.objects.has(mixedKey)).toBe(true);
+    expect(deletedKeys).not.toContain(sentinelKey);
+
+    // 3) Next retry deletes mixedKey from S3 and clears the receipt cleanly.
+    storage.deleteObject = async (key: string) => {
+      deletedKeys.push(key);
+      return realDelete(key);
+    };
+    const recovered = await svc.actOnSource(principal, sourceId, { action: "retry_cleanup" });
+    expect(recovered).toEqual({
+      sourceId,
+      aiExcluded: true,
+      deleted: true,
+      cleanupPending: 0,
+      retryAfter: null,
+    });
+    expect(pendingKeys).toEqual([]);
+    expect(s3.objects.has(mixedKey)).toBe(false);
+    expect(deletedKeys).not.toContain(sentinelKey);
+    expect(await svc.listSourceDeletions(principal)).toEqual([]);
   });
 
 });

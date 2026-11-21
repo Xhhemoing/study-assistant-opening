@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Sql } from "postgres";
-import { connectorReservationId, createOpeningSourceActionsRepository } from "./opening-source-actions";
+import { connectorReservationId, createOpeningSourceActionsRepository, stagingDiscoveryPendingKey } from "./opening-source-actions";
 
 const workspaceId = "00000000-0000-4000-8000-000000000001";
 const ownerUserId = "00000000-0000-4000-8000-0000000000aa";
@@ -50,6 +50,30 @@ describe("opening source actions cleanup extra key persistence", () => {
     expect(db.updates).toEqual([[mixedKey]]);
     expect(db.row.pending_object_keys).toEqual([mixedKey]);
     expect(cleanup.keys).toEqual([mixedKey]);
+  });
+
+  it("persists stagingDiscoveryPendingKey on an empty receipt and keeps it listed in listPending", async () => {
+    const db = fakeActionsSql({ id: "00000000-0000-4000-8000-000000000044", pendingKeys: [] });
+    const baseTag = db.sql as unknown as (parts: TemplateStringsArray, ...values: unknown[]) => unknown;
+    const sqlWithList = Object.assign(((parts: TemplateStringsArray, ...values: unknown[]) => {
+      const query = parts.join("?").replace(/\s+/g, " ").trim();
+      if (query.startsWith("SELECT source_id, cardinality(pending_object_keys) AS pending, cleanup_not_before FROM opening_privacy_exclusions")) {
+        return Promise.resolve(db.row.pending_object_keys.length
+          ? [{ source_id: sourceId, pending: db.row.pending_object_keys.length, cleanup_not_before: null }]
+          : []);
+      }
+      return baseTag(parts, ...values);
+    }) as unknown as Sql, {
+      begin: db.sql.begin,
+    });
+    const repo = createOpeningSourceActionsRepository(sqlWithList);
+    const sentinelKey = stagingDiscoveryPendingKey(sourceId);
+
+    const cleanup = await repo.cleanup(scope, sourceId, { extraKeys: [sentinelKey] });
+    expect(cleanup.keys).toEqual([sentinelKey]);
+    expect(await repo.listPending(scope, new Date())).toEqual([
+      { sourceId, cleanupPending: 1, retryAfter: null },
+    ]);
   });
 
   it("never modifies pending_object_keys on a UUIDv8 connector reservation", async () => {

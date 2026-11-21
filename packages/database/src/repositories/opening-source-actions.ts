@@ -39,6 +39,10 @@ function isConnectorReservationRow(row: Record<string, unknown>): boolean {
   return String(row.id).toLowerCase() === connectorReservationId(String(row.source_id));
 }
 
+export function stagingDiscoveryPendingKey(sourceId: string): string {
+  return `opening/sources/${sourceId.toLowerCase()}/.staging-discovery-pending`;
+}
+
 function validExtraObjectKeys(canonicalId: string, keys: StagingKeyProvider, extraKeys?: readonly string[]): string[] {
   if (!extraKeys?.length) return [];
   const ownPrefix = `opening/sources/${canonicalId}/`;
