@@ -119,6 +119,9 @@ function makeCalibrationRecords(count = 5): WholePaperCalibrationRecord[] {
     countsTowardMastery: true,
     predictedQuantiles: { q10: 5.5, q50: 6.5, q90: 7.0 },
     predictedJointPassProb: 0.25 + idx * 0.15,
+    predictedTargetPassProbs: [
+      { targetOverall: 7.0, targetMinSection: 6.5, rawProbability: 0.15 + idx * 0.15 },
+    ],
     observedScore: { kind: "exact", score: 6.0 + (idx % 3) * 0.5 },
     observedSectionScores: {
       listening: 6.0 + (idx % 3) * 0.5,
@@ -555,5 +558,292 @@ describe("CRN marginal ROI sandbox & UnifiedDecisionSnapshotV1", () => {
     expect(cycle.policyMode).toBe("cycle_90d");
     expect(cycle.allocatedRecoveryMinutes).toBe(240);
     expect(cycle.allocatedRecoveryMinutes).toBeLessThanOrEqual(300);
+  });
+
+  it("reproduces and guards all Round-2 P1 & P2 invariants", () => {
+    // [P1-1] Cholesky rejects NaN upper triangle and indefinite zero-diagonal Schur complements.
+    expect(() => choleskyDecompose([[1, Number.NaN], [0, 1]])).toThrow(RangeError);
+    expect(() => choleskyDecompose([[0, 1], [1, 0]])).toThrow(/positive semidefinite/);
+    expect(() => choleskyDecompose([[1, 1, 0], [1, 1, 1], [0, 1, 1]])).toThrow(/positive semidefinite/);
+    expect(choleskyDecompose([[1, 1], [1, 1]])).toEqual([[1, 0], [1, 0]]);
+
+    // [P1-2] Anchored Writing/Speaking preserves [low, high] at observedAtMs, decays +180d, and yields positive CRN ROI.
+    const anchorMs = 1_000;
+    const beliefs = makeIeltsBeliefs({ abilityMean: 0.5, logStability: Math.log(14), lastDirectRecallAtMs: 0 });
+    const anchoredEvidence = makeIndependentSectionEvidence(anchorMs);
+    const atAnchor = simulateExamPaper({
+      blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+      beliefs,
+      evidence: anchoredEvidence,
+      examAtMs: anchorMs,
+      numDraws: 200,
+      seed: 31,
+    });
+    const after180d = simulateExamPaper({
+      blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+      beliefs,
+      evidence: anchoredEvidence,
+      examAtMs: anchorMs + 180 * DAY_MS,
+      numDraws: 200,
+      seed: 31,
+    });
+    expect(atAnchor.sectionSummaries["writing"]!.untimedMeanScore).toBeGreaterThanOrEqual(6.0);
+    expect(atAnchor.sectionSummaries["writing"]!.untimedMeanScore).toBeLessThanOrEqual(7.0);
+    expect(after180d.sectionSummaries["writing"]!.untimedMeanScore).toBeLessThan(
+      atAnchor.sectionSummaries["writing"]!.untimedMeanScore,
+    );
+    expect(after180d.sectionSummaries["speaking"]!.untimedMeanScore).toBeLessThan(
+      atAnchor.sectionSummaries["speaking"]!.untimedMeanScore,
+    );
+
+    const writingRepair: CandidateStudyAction = {
+      actionId: "writing-task2-repair",
+      title: "Task 2 Argument Repair",
+      durationHours: 2,
+      kind: "skill_repair",
+      skillEffects: {
+        "ielts.writing.task2_argument": { abilityDelta: 2.0 },
+        "ielts.writing.cohesion_lexis": { abilityDelta: 1.5 },
+      },
+    };
+    const writingRoi = evaluateCrnActionRoi({
+      blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+      beliefs,
+      evidence: anchoredEvidence,
+      examAtMs: anchorMs + 20 * DAY_MS,
+      baselineActions: [],
+      candidateAction: writingRepair,
+      crnSeed: 77,
+      numDraws: 120,
+    });
+    expect(writingRoi.pairedMeanGain).toBeGreaterThan(0);
+    expect(writingRoi.roiBandPerHour).toBeGreaterThan(0);
+
+    // [P1-3] convolveLordWingersky validates probabilities & non-negative integer points; blueprint rejects fractional points.
+    expect(() => convolveLordWingersky([0.5], [0.5])).toThrow(RangeError);
+    expect(() => convolveLordWingersky([0.5], [-1])).toThrow(RangeError);
+    expect(() => convolveLordWingersky([Number.NaN], [1])).toThrow(RangeError);
+    expect(convolveLordWingersky([0.7], [0])).toEqual([1]);
+
+    const badPointsBlueprint = {
+      ...IELTS_ACADEMIC_V1_BLUEPRINT,
+      sections: IELTS_ACADEMIC_V1_BLUEPRINT.sections.map((sec) =>
+        sec.sectionId === "listening" && sec.items
+          ? { ...sec, items: [{ ...sec.items[0]!, points: 0.5 }, ...sec.items.slice(1)] }
+          : sec,
+      ),
+    };
+    expect(validateExamBlueprint(badPointsBlueprint).some((f) => f.endsWith(".points"))).toBe(true);
+
+    // [P1-4] Reject spoofed evidenceKind and NaN/out-of-range/disordered calibration numbers.
+    const spoofedCal = makeCalibrationRecords(4).map((r) => ({
+      ...r,
+      targetKind: "official_exam" as const,
+      evidenceKind: "diagnostic_item" as const,
+    }));
+    const spoofedRes = evaluateExamForecast({
+      blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+      learnerId: "learner-target",
+      beliefs,
+      evidence: anchoredEvidence,
+      calibrationRecords: spoofedCal,
+      examAtMs: DAY_MS,
+      targetKind: "official_exam",
+    });
+    expect(spoofedRes.status).toBe("insufficient_independent_evidence");
+
+    const nanCal = makeCalibrationRecords(4).map((r, idx) =>
+      idx === 0 ? { ...r, observedScore: { kind: "exact" as const, score: Number.NaN } } : r,
+    );
+    const nanRes = evaluateExamForecast({
+      blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+      learnerId: "learner-target",
+      beliefs,
+      evidence: anchoredEvidence,
+      calibrationRecords: nanCal,
+      examAtMs: DAY_MS,
+    });
+    expect(nanRes.status).toBe("insufficient_independent_evidence");
+    if (nanRes.status === "insufficient_independent_evidence") {
+      expect(nanRes.calibrationCount).toBe(3);
+    }
+
+    // [P1-5] Missing or NaN section scores must be skipped when targetMinSection > scoreRange[0].
+    const sim = simulateExamPaper({
+      blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+      beliefs,
+      evidence: anchoredEvidence,
+      examAtMs: DAY_MS,
+      numDraws: 60,
+      seed: 19,
+    });
+    const incompleteSectionsCal: WholePaperCalibrationRecord[] = makeCalibrationRecords(4).map((r, idx) => ({
+      ...r,
+      observedSectionScores: idx === 0 ? undefined : { listening: 7.0, reading: 7.0, writing: 7.0 },
+    }));
+    const ladder = calibrateJointPassTargets({
+      simulation: sim,
+      blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+      calibrationRecords: incompleteSectionsCal,
+      targets: [{ targetOverall: 7.0, targetMinSection: 6.5 }],
+    });
+    expect(ladder[0]!.calibrationSampleCount).toBe(0);
+
+    // [P2-1] computeWritingBand & computeIeltsOverallBand clamp finite [0, 9] and throw on non-finite.
+    expect(() => computeWritingBand(Number.NaN, 7)).toThrow(RangeError);
+    expect(() => computeIeltsOverallBand({ listening: 7, reading: 7, writing: 7, speaking: Number.POSITIVE_INFINITY })).toThrow(RangeError);
+    expect(computeIeltsOverallBand({ listening: 12, reading: 12, writing: 12, speaking: 12 })).toBe(9);
+    const badPartBlueprint = {
+      ...IELTS_ACADEMIC_V1_BLUEPRINT,
+      scoreRange: [9, 0] as const,
+      sections: IELTS_ACADEMIC_V1_BLUEPRINT.sections.map((sec) =>
+        sec.sectionId === "speaking"
+          ? { ...sec, parts: [{ ...sec.parts[0]!, weight: 0, skillIds: ["missing.skill"] }] }
+          : sec,
+      ),
+    };
+    const badFields = validateExamBlueprint(badPartBlueprint);
+    expect(badFields).toContain("scoreRange");
+    expect(badFields).toContain("sections.speaking.parts.speaking-part-1.weight");
+
+    // [P2-2] shared_full_paper threads clock through rubric sections and uses independent score/time normals.
+    const sharedRubricBp = createSharedFullPaperBlueprint({
+      blueprintId: "shared-rubric-v1",
+      title: "Shared Clock With Rubric Section",
+      totalTimeLimitMinutes: 30,
+      totalPoints: 20,
+      skillIds: ["s1", "s2"],
+      sections: [
+        {
+          sectionId: "mcq",
+          label: "MCQ",
+          scoringKind: "item_raw_table",
+          timeLimitMinutes: null,
+          weight: 1,
+          scoreRange: [0, 10],
+          scoreStep: 1,
+          parts: [{ partId: "mcq-p1", label: "P1", weight: 1, skillIds: ["s1"] }],
+          items: Array.from({ length: 2 }, (_, idx) => ({
+            itemId: `m-${idx}`,
+            sectionId: "mcq",
+            partId: "mcq-p1",
+            skillIds: ["s1"],
+            guess: 0,
+            lapse: 0,
+            points: 5,
+            timeModel: { mu: Math.log(950), speedLoading: 0.1, skillLoading: { s1: 0.1 }, sigma: 0.05 },
+          })),
+          rawToBandTable: Array.from({ length: 11 }, (_, raw) => ({ rawMin: raw, rawMax: raw, score: raw })),
+        },
+        {
+          sectionId: "essay",
+          label: "Essay",
+          scoringKind: "rubric_band",
+          timeLimitMinutes: null,
+          weight: 1,
+          scoreRange: [0, 10],
+          scoreStep: 1,
+          parts: [
+            {
+              partId: "essay-p1",
+              label: "Essay",
+              weight: 1,
+              skillIds: ["s2"],
+              timeModel: { mu: Math.log(900), speedLoading: 0.1, skillLoading: { s2: 0.1 }, sigma: 0.05 },
+            },
+          ],
+        },
+      ],
+    });
+    const sharedSim = simulateExamPaper({
+      blueprint: sharedRubricBp,
+      beliefs: {
+        s1: createSkillBelief({ workspaceId: "w", learnerId: "l", courseId: "c", confirmedSkillVersion: 1, abilityMean: 1, lastDirectRecallAtMs: 0 }),
+        s2: createSkillBelief({ workspaceId: "w", learnerId: "l", courseId: "c", confirmedSkillVersion: 1, abilityMean: 1, lastDirectRecallAtMs: 0 }),
+      },
+      evidence: [],
+      examAtMs: DAY_MS,
+      numDraws: 40,
+      seed: 13,
+    });
+    expect(sharedSim.rightCensoringRateBySection["essay"]).toBeGreaterThan(0.5);
+
+    // [P2-3] Cross-learner isolation, target-keyed raw prob isolation, and non-IELTS seed isolation.
+    const crossLearner = evaluateExamForecast({
+      blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+      learnerId: "learner-target",
+      beliefs,
+      evidence: anchoredEvidence.map((e) => (e.sectionId === "reading" ? { ...e, learnerId: "other-learner" } : e)),
+      calibrationRecords: makeCalibrationRecords(5),
+      examAtMs: DAY_MS,
+    });
+    expect(crossLearner.status).toBe("insufficient_independent_evidence");
+    if (crossLearner.status === "insufficient_independent_evidence") {
+      expect(crossLearner.missingSections).toEqual(["reading"]);
+    }
+
+    const unmatchedTargetLadder = calibrateJointPassTargets({
+      simulation: sim,
+      blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+      calibrationRecords: makeCalibrationRecords(5),
+      targets: [{ targetOverall: 8.0, targetMinSection: 7.5 }],
+    });
+    expect(unmatchedTargetLadder[0]!.calibrationSampleCount).toBe(0);
+
+    const nonIeltsBlocked = evaluateExamForecast({
+      blueprint: sharedRubricBp,
+      learnerId: "learner-target",
+      beliefs: {},
+      evidence: [],
+      calibrationRecords: [],
+      examAtMs: DAY_MS,
+    });
+    expect(nonIeltsBlocked.status).toBe("insufficient_independent_evidence");
+    if (nonIeltsBlocked.status === "insufficient_independent_evidence") {
+      expect(nonIeltsBlocked.nextDiagnosticAction.recommendedItemIds).toEqual([]);
+    }
+
+    // [P2-4] Zero recovery allocation when uncalibrated; recovery-only works when calibrated.
+    const recoveryAction: CandidateStudyAction = {
+      actionId: "sleep-recovery",
+      title: "Consolidation & Sleep Recovery",
+      durationHours: 4,
+      kind: "recovery",
+      recoveryMinutes: 240,
+    };
+    const uncalibratedSnap = buildUnifiedDecisionSnapshot({
+      decisionId: "dec-uncal",
+      blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+      learnerId: "learner-target",
+      beliefs,
+      evidence: [],
+      calibrationRecords: [],
+      examAtMs: DAY_MS,
+      crnSeed: 1,
+      horizonHours: 48,
+      executableMinutes: Number.NaN,
+      candidateActions: [recoveryAction],
+    });
+    expect(uncalibratedSnap.allocatedRecoveryMinutes).toBe(0);
+    expect(uncalibratedSnap.executableMinutes).toBe(0);
+    expect(uncalibratedSnap.selectedActionIds).toEqual([]);
+
+    const recoveryOnlySnap = buildUnifiedDecisionSnapshot({
+      decisionId: "dec-rec-only",
+      blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+      learnerId: "learner-target",
+      beliefs,
+      evidence: anchoredEvidence,
+      calibrationRecords: makeCalibrationRecords(5),
+      examAtMs: 2 * DAY_MS,
+      crnSeed: 1,
+      horizonHours: 72,
+      executableMinutes: 1000,
+      candidateActions: [recoveryAction],
+      numDraws: 60,
+    });
+    expect(recoveryOnlySnap.forecast.status).toBe("calibrated_forecast_ready");
+    expect(recoveryOnlySnap.allocatedRecoveryMinutes).toBe(240);
+    expect(recoveryOnlySnap.selectedActionIds).toEqual(["sleep-recovery"]);
   });
 });

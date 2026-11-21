@@ -151,6 +151,7 @@ export type WholePaperCalibrationRecord = {
     readonly q90: number;
   };
   readonly predictedJointPassProb?: number;
+  readonly predictedJointPassByTarget?: Readonly<Record<string, number>>;
   readonly predictedTargetPassProbs?: readonly {
     readonly targetOverall: number;
     readonly targetMinSection: number;

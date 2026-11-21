@@ -21,25 +21,29 @@ import type {
 const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value));
 const sigmoid = (x: number): number => (x >= 0 ? 1 / (1 + Math.exp(-x)) : Math.exp(x) / (1 + Math.exp(x)));
 
-export function isIndependentExamEvidence(record: ExamEvidenceRecord): boolean {
+export function isIndependentExamEvidence(record: ExamEvidenceRecord, learnerId?: string): boolean {
   return (
     record.countsTowardMastery === true &&
     record.assisted === false &&
     record.exposed !== true &&
     record.evidenceKind !== "practice_feedback" &&
     record.evidenceKind !== "self_report" &&
-    Number.isFinite(record.observedAtMs)
+    Number.isFinite(record.observedAtMs) &&
+    (learnerId === undefined || record.learnerId === learnerId)
   );
 }
 
-export function partitionExamEvidence(records: readonly ExamEvidenceRecord[]): {
+export function partitionExamEvidence(
+  records: readonly ExamEvidenceRecord[],
+  options: { readonly learnerId?: string } = {},
+): {
   readonly admitted: readonly ExamEvidenceRecord[];
   readonly rejectedCount: number;
 } {
   const admitted: ExamEvidenceRecord[] = [];
   let rejectedCount = 0;
   for (const record of records) {
-    if (isIndependentExamEvidence(record)) admitted.push(record);
+    if (isIndependentExamEvidence(record, options.learnerId)) admitted.push(record);
     else rejectedCount += 1;
   }
   return { admitted, rejectedCount };
@@ -68,7 +72,8 @@ export type PaperRandomDraw = {
   readonly nuSpeed: number;
   readonly itemUniforms: readonly number[];
   readonly itemTimeNormals: readonly number[];
-  readonly rubricNormals: readonly number[];
+  readonly rubricScoreNormals: readonly number[];
+  readonly rubricTimeNormals: readonly number[];
 };
 
 export function generatePaperRandomDraws(
@@ -94,7 +99,8 @@ export function generatePaperRandomDraws(
       nuSpeed: sampleStandardNormal(rng),
       itemUniforms: Array.from({ length: totalItems }, () => rng()),
       itemTimeNormals: Array.from({ length: totalItems }, () => sampleStandardNormal(rng)),
-      rubricNormals: Array.from({ length: totalParts }, () => sampleStandardNormal(rng)),
+      rubricScoreNormals: Array.from({ length: totalParts }, () => sampleStandardNormal(rng)),
+      rubricTimeNormals: Array.from({ length: totalParts }, () => sampleStandardNormal(rng)),
     });
   }
   return draws;
@@ -108,14 +114,24 @@ export function convolveLordWingersky(
   probabilities: readonly number[],
   points: readonly number[] = [],
 ): number[] {
-  const itemPoints = probabilities.map((_, idx) => Math.max(1, Math.round(points[idx] ?? 1)));
+  const itemPoints = probabilities.map((p, idx) => {
+    if (!Number.isFinite(p) || p < 0 || p > 1) {
+      throw new RangeError("Item success probability must be finite in [0, 1]");
+    }
+    const pts = points[idx] ?? 1;
+    if (!Number.isFinite(pts) || !Number.isInteger(pts) || pts < 0) {
+      throw new RangeError("Item points must be finite non-negative integers");
+    }
+    return pts;
+  });
   const maxPoints = itemPoints.reduce((a, b) => a + b, 0);
   const dp = new Array<number>(maxPoints + 1).fill(0);
   dp[0] = 1;
   let runningMax = 0;
   for (let idx = 0; idx < probabilities.length; idx++) {
-    const p = clamp(probabilities[idx] ?? 0, 0, 1);
     const pts = itemPoints[idx]!;
+    if (pts === 0) continue;
+    const p = probabilities[idx]!;
     for (let s = runningMax; s >= 0; s--) {
       const mass = dp[s]!;
       if (mass === 0) continue;
@@ -159,26 +175,48 @@ function percentileSorted(sorted: readonly number[], q: number): number {
   return sorted[lo]! * (1 - frac) + sorted[hi]! * frac;
 }
 
+type RubricAnchor = {
+  readonly low: number;
+  readonly high: number;
+  readonly observedAtMs: number;
+};
+
 type RubricEvidenceSummary = {
-  readonly partAnchors: ReadonlyMap<string, { readonly low: number; readonly high: number }>;
-  readonly sectionAnchors: ReadonlyMap<string, { readonly low: number; readonly high: number }>;
+  readonly partAnchors: ReadonlyMap<string, RubricAnchor>;
+  readonly sectionAnchors: ReadonlyMap<string, RubricAnchor>;
   readonly speakingFluencyShift: number;
 };
 
 function summarizeRubricAndTimingEvidence(admitted: readonly ExamEvidenceRecord[]): RubricEvidenceSummary {
-  const partAnchors = new Map<string, { low: number; high: number }>();
-  const sectionAnchors = new Map<string, { low: number; high: number }>();
+  const partAnchors = new Map<string, RubricAnchor>();
+  const sectionAnchors = new Map<string, RubricAnchor>();
   let speakingShiftSum = 0;
   let speakingCount = 0;
 
   for (const record of admitted) {
     if (record.rubricScore) {
-      const bounds =
-        record.rubricScore.kind === "exact"
-          ? { low: record.rubricScore.score, high: record.rubricScore.score }
-          : { low: Math.min(record.rubricScore.low, record.rubricScore.high), high: Math.max(record.rubricScore.low, record.rubricScore.high) };
-      if (record.partId) partAnchors.set(record.partId, bounds);
-      else sectionAnchors.set(record.sectionId, bounds);
+      let anchor: RubricAnchor | null = null;
+      if (record.rubricScore.kind === "exact" && Number.isFinite(record.rubricScore.score)) {
+        anchor = { low: record.rubricScore.score, high: record.rubricScore.score, observedAtMs: record.observedAtMs };
+      } else if (
+        record.rubricScore.kind === "interval_only" &&
+        Number.isFinite(record.rubricScore.low) &&
+        Number.isFinite(record.rubricScore.high)
+      ) {
+        anchor = {
+          low: Math.min(record.rubricScore.low, record.rubricScore.high),
+          high: Math.max(record.rubricScore.low, record.rubricScore.high),
+          observedAtMs: record.observedAtMs,
+        };
+      }
+      if (anchor) {
+        const targetMap = record.partId ? partAnchors : sectionAnchors;
+        const key = record.partId ?? record.sectionId;
+        const existing = targetMap.get(key);
+        if (!existing || anchor.observedAtMs >= existing.observedAtMs) {
+          targetMap.set(key, anchor);
+        }
+      }
     }
     if (record.sectionId === "speaking" && record.speechTimingReceipt?.calibrated) {
       const receipt = record.speechTimingReceipt;
@@ -289,6 +327,9 @@ function simulateItemSectionDraw(input: DrawItemSectionInput): DrawItemSectionRe
 
     const pSuccess = itemSuccessProbability(item, input.mBySkill);
     const pts = item.points ?? 1;
+    if (!Number.isFinite(pts) || !Number.isInteger(pts) || pts < 0) {
+      throw new RangeError("Item points must be finite non-negative integers");
+    }
     itemProbs.push(pSuccess);
     itemPoints.push(pts);
 
@@ -339,38 +380,59 @@ function simulateItemSectionDraw(input: DrawItemSectionInput): DrawItemSectionRe
   };
 }
 
+function referenceSkillMasteryAt(beliefs: SkillBeliefMap, skillId: string, observedAtMs: number): number {
+  const belief = beliefs[skillId];
+  if (!belief) return 0.5 * sigmoid(0);
+  return clamp(retrievability(belief, observedAtMs) * sigmoid(belief.abilityMean), 0, 1);
+}
+
 function simulateRubricSectionDraw(input: {
   readonly section: ExamSectionBlueprint;
+  readonly beliefs: SkillBeliefMap;
   readonly mBySkill: Readonly<Record<string, number>>;
   readonly nu: number;
   readonly draw: PaperRandomDraw;
   readonly rubricCursorStart: number;
   readonly sectionLimitSec: number;
+  readonly initialClockUsedSec: number;
   readonly rubricSummary: RubricEvidenceSummary;
-}): { readonly nextRubricCursor: number; readonly anyCensored: boolean; readonly timedScore: number; readonly untimedScore: number } {
+}): {
+  readonly nextRubricCursor: number;
+  readonly finalClockUsedSec: number;
+  readonly anyCensored: boolean;
+  readonly timedScore: number;
+  readonly untimedScore: number;
+} {
   let rubricCursor = input.rubricCursorStart;
-  let usedSec = 0;
+  let usedSec = input.initialClockUsedSec;
   let partWeightedSum = 0;
   let untimedWeightedSum = 0;
   let weightSum = 0;
   let anyCensored = false;
   const sectionAnchor = input.rubricSummary.sectionAnchors.get(input.section.sectionId);
   const [minB, maxB] = input.section.scoreRange;
+  const baseOffset = maxB > minB + 3 ? minB + 3 : minB;
+  const bandScale = maxB - baseOffset;
   const speakingShift = input.section.sectionId === "speaking" ? input.rubricSummary.speakingFluencyShift : 0;
 
   for (const part of input.section.parts) {
-    const epsPart = input.draw.rubricNormals[rubricCursor] ?? 0;
+    const epsScore = input.draw.rubricScoreNormals[rubricCursor] ?? 0;
+    const epsTime = input.draw.rubricTimeNormals[rubricCursor] ?? 0;
     rubricCursor += 1;
     const partAnchor = input.rubricSummary.partAnchors.get(part.partId) ?? sectionAnchor;
-    const skillVals = part.skillIds.map((id) => input.mBySkill[id] ?? 0.5);
-    const meanMastery = skillVals.length > 0 ? skillVals.reduce((a, b) => a + b, 0) / skillVals.length : 0.5;
+    const skillVals = part.skillIds.map((id) => input.mBySkill[id] ?? 0.5 * sigmoid(0));
+    const meanMastery = skillVals.length > 0 ? skillVals.reduce((a, b) => a + b, 0) / skillVals.length : 0.5 * sigmoid(0);
+
     let untimedPartScore: number;
     if (partAnchor) {
+      const refVals = part.skillIds.map((id) => referenceSkillMasteryAt(input.beliefs, id, partAnchor.observedAtMs));
+      const refMastery = refVals.length > 0 ? refVals.reduce((a, b) => a + b, 0) / refVals.length : 0.5 * sigmoid(0);
       const span = partAnchor.high - partAnchor.low;
-      const anchorPos = span > 0 ? partAnchor.low + span * clamp(0.5 + 0.25 * epsPart, 0, 1) : partAnchor.low;
-      untimedPartScore = clamp(anchorPos + speakingShift * 0.25, minB, maxB);
+      const anchorPos = span > 0 ? partAnchor.low + span * clamp(0.5 + 0.25 * epsScore, 0, 1) : partAnchor.low;
+      const masteryDeltaBand = bandScale * (meanMastery - refMastery);
+      untimedPartScore = clamp(anchorPos + masteryDeltaBand + speakingShift * 0.25, minB, maxB);
     } else {
-      untimedPartScore = clamp(minB + 3 + (maxB - (minB + 3)) * meanMastery + speakingShift + 0.2 * epsPart, minB, maxB);
+      untimedPartScore = clamp(baseOffset + bandScale * meanMastery + speakingShift + 0.2 * epsScore, minB, maxB);
     }
 
     let timedPartScore = untimedPartScore;
@@ -380,10 +442,10 @@ function simulateRubricSectionDraw(input: {
         skillTerm += load * (input.mBySkill[id] ?? 0.5);
       }
       const partDuration = Math.exp(
-        clamp(part.timeModel.mu - part.timeModel.speedLoading * input.nu - skillTerm + part.timeModel.sigma * epsPart, 4, 10),
+        clamp(part.timeModel.mu - part.timeModel.speedLoading * input.nu - skillTerm + part.timeModel.sigma * epsTime, 4, 10),
       );
       const remaining = Math.max(0, input.sectionLimitSec - usedSec);
-      usedSec += partDuration;
+      usedSec = Math.min(input.sectionLimitSec, usedSec + partDuration);
       if (partDuration > remaining) {
         anyCensored = true;
         timedPartScore = clamp(untimedPartScore * clamp(remaining / partDuration, 0.35, 1), minB, maxB);
@@ -394,12 +456,12 @@ function simulateRubricSectionDraw(input: {
     weightSum += part.weight;
   }
 
-  const normalize = input.section.sectionId === "writing" && input.section.parts.length === 2 ? 1 : weightSum || 1;
   return {
     nextRubricCursor: rubricCursor,
+    finalClockUsedSec: usedSec,
     anyCensored,
-    timedScore: partWeightedSum / normalize,
-    untimedScore: untimedWeightedSum / normalize,
+    timedScore: weightSum > 0 ? partWeightedSum / weightSum : 0,
+    untimedScore: weightSum > 0 ? untimedWeightedSum / weightSum : 0,
   };
 }
 
@@ -535,8 +597,19 @@ export function simulateExamPaper(input: {
         untimedSectionDistributions.set(section.sectionId, res.untimedDist);
         sectionUntimedTotal.set(section.sectionId, (sectionUntimedTotal.get(section.sectionId) ?? 0) + res.untimedMean);
       } else {
-        const res = simulateRubricSectionDraw({ section, mBySkill, nu, draw, rubricCursorStart: rubricCursor, sectionLimitSec, rubricSummary });
+        const res = simulateRubricSectionDraw({
+          section,
+          beliefs,
+          mBySkill,
+          nu,
+          draw,
+          rubricCursorStart: rubricCursor,
+          sectionLimitSec,
+          initialClockUsedSec: blueprint.clockMode === "shared_full_paper" ? sharedClockUsedSec : 0,
+          rubricSummary,
+        });
         rubricCursor = res.nextRubricCursor;
+        if (blueprint.clockMode === "shared_full_paper") sharedClockUsedSec = res.finalClockUsedSec;
         if (res.anyCensored) sectionCensoredDraws.set(section.sectionId, (sectionCensoredDraws.get(section.sectionId) ?? 0) + 1);
         timedSectionBand[section.sectionId] = res.timedScore;
         untimedContinuousSections.set(section.sectionId, res.untimedScore);

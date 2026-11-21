@@ -1,4 +1,4 @@
-import { snapToScoreGrid, validateExamBlueprint } from "./ielts-blueprint";
+import { IELTS_ACADEMIC_V1_BLUEPRINT, snapToScoreGrid, validateExamBlueprint } from "./ielts-blueprint";
 import { IELTS_ACADEMIC_DIAGNOSTIC_SEEDS } from "./ielts-diagnostic-seeds";
 import { partitionExamEvidence, simulateExamPaper } from "./simulator";
 import type {
@@ -102,22 +102,43 @@ export function filterIndependentCalibrationRecords(input: {
   readonly records: readonly WholePaperCalibrationRecord[];
   readonly blueprintId: string;
   readonly targetKind: ForecastTargetKind;
+  readonly scoreRange?: readonly [number, number];
   readonly excludeLearnerId?: string;
   readonly excludePaperFamilyIds?: ReadonlySet<string>;
 }): WholePaperCalibrationRecord[] {
+  const requiredEvidenceKind = input.targetKind === "official_exam" ? "official_exam" : "independent_mock";
   return input.records.filter((rec) => {
     if (rec.blueprintId !== input.blueprintId) return false;
     if (rec.targetKind !== input.targetKind) return false;
+    if (rec.evidenceKind !== requiredEvidenceKind) return false;
     if (!rec.countsTowardMastery || rec.assisted || rec.exposed === true) return false;
-    if (rec.evidenceKind === "practice_feedback" || rec.evidenceKind === "self_report") return false;
+    if (!rec.learnerId || !rec.learnerId.trim() || !rec.paperFamilyId || !rec.paperFamilyId.trim()) return false;
     if (input.excludeLearnerId && rec.learnerId === input.excludeLearnerId) return false;
     if (input.excludePaperFamilyIds && input.excludePaperFamilyIds.has(rec.paperFamilyId)) return false;
-    if (!Number.isFinite(rec.predictedQuantiles.q10) || !Number.isFinite(rec.predictedQuantiles.q90)) return false;
+
+    const { q10, q50, q90 } = rec.predictedQuantiles;
+    if (!Number.isFinite(q10) || !Number.isFinite(q50) || !Number.isFinite(q90)) return false;
+    if (q10 > q50 || q50 > q90) return false;
+
+    const range = input.scoreRange;
+    if (rec.observedScore.kind === "exact") {
+      const s = rec.observedScore.score;
+      if (!Number.isFinite(s)) return false;
+      if (range && (s < range[0] || s > range[1])) return false;
+    } else {
+      const { low, high } = rec.observedScore;
+      if (!Number.isFinite(low) || !Number.isFinite(high) || low > high) return false;
+      if (range && (low < range[0] || high > range[1])) return false;
+    }
     return true;
   });
 }
 
-function observedPassesJointTarget(record: WholePaperCalibrationRecord, target: JointPassTarget): number | null {
+function observedPassesJointTarget(
+  record: WholePaperCalibrationRecord,
+  target: JointPassTarget,
+  blueprint: ExamBlueprintV1,
+): number | null {
   const overallLow =
     record.observedScore.kind === "exact"
       ? record.observedScore.score
@@ -126,17 +147,23 @@ function observedPassesJointTarget(record: WholePaperCalibrationRecord, target: 
     record.observedScore.kind === "exact"
       ? record.observedScore.score
       : Math.max(record.observedScore.low, record.observedScore.high);
-  let overallPass: number;
-  if (overallLow >= target.targetOverall) overallPass = 1;
-  else if (overallHigh < target.targetOverall) overallPass = 0;
-  else overallPass = 0; // Conservative for interval-censored straddling scores.
+  if (!Number.isFinite(overallLow) || !Number.isFinite(overallHigh) || overallLow > overallHigh) return null;
 
-  if (!record.observedSectionScores) return overallPass;
-  const entries = Object.values(record.observedSectionScores);
-  if (entries.length === 0) return overallPass;
-  for (const val of entries) {
-    const secLow = typeof val === "number" ? val : Math.min(val.low, val.high);
-    if (secLow < target.targetMinSection) return 0;
+  const overallPass = overallLow >= target.targetOverall ? 1 : 0;
+  if (target.targetMinSection <= blueprint.scoreRange[0]) return overallPass;
+
+  const sectionMap = record.observedSectionScores;
+  if (!sectionMap) return null;
+  for (const section of blueprint.sections) {
+    const val = sectionMap[section.sectionId];
+    if (val === undefined) return null;
+    if (typeof val === "number") {
+      if (!Number.isFinite(val)) return null;
+      if (val < target.targetMinSection) return 0;
+    } else {
+      if (!Number.isFinite(val.low) || !Number.isFinite(val.high) || val.low > val.high) return null;
+      if (val.low < target.targetMinSection) return 0;
+    }
   }
   return overallPass;
 }
@@ -161,18 +188,20 @@ function rawJointPassFromSimulation(
   return passed / n;
 }
 
-function recordRawProbForTarget(record: WholePaperCalibrationRecord, target: JointPassTarget): number {
+function recordRawProbForTarget(record: WholePaperCalibrationRecord, target: JointPassTarget): number | null {
+  const targetKey = `${target.targetOverall}:${target.targetMinSection}`;
+  const keyed = record.predictedJointPassByTarget?.[targetKey];
+  if (keyed !== undefined && Number.isFinite(keyed) && keyed >= 0 && keyed <= 1) return keyed;
+
   const matched = record.predictedTargetPassProbs?.find(
     (entry) =>
       Math.abs(entry.targetOverall - target.targetOverall) <= 1e-9 &&
       Math.abs(entry.targetMinSection - target.targetMinSection) <= 1e-9,
   );
-  if (matched) return Math.min(1, Math.max(0, matched.rawProbability));
-  if (record.predictedJointPassProb !== undefined) return Math.min(1, Math.max(0, record.predictedJointPassProb));
-  const { q10, q50, q90 } = record.predictedQuantiles;
-  const spread = Math.max(0.25, (q90 - q10) / 2.56);
-  const z = (q50 - Math.max(target.targetOverall, target.targetMinSection)) / spread;
-  return 1 / (1 + Math.exp(-1.7 * z));
+  if (matched && Number.isFinite(matched.rawProbability) && matched.rawProbability >= 0 && matched.rawProbability <= 1) {
+    return matched.rawProbability;
+  }
+  return null;
 }
 
 export function calibrateJointPassTargets(input: {
@@ -185,9 +214,11 @@ export function calibrateJointPassTargets(input: {
     const rawProbability = rawJointPassFromSimulation(input.simulation, input.blueprint, target);
     const points: Array<{ x: number; y: number }> = [];
     for (const rec of input.calibrationRecords) {
-      const y = observedPassesJointTarget(rec, target);
+      const y = observedPassesJointTarget(rec, target, input.blueprint);
       if (y === null) continue;
-      points.push({ x: recordRawProbForTarget(rec, target), y });
+      const rawProb = recordRawProbForTarget(rec, target);
+      if (rawProb === null) continue;
+      points.push({ x: rawProb, y });
     }
     const blocks = fitPavIsotonic(points);
     const calibratedProbability = points.length > 0 ? evaluatePavIsotonic(blocks, rawProbability) : rawProbability;
@@ -253,29 +284,61 @@ export function evaluateExamForecast(input: {
   }
 
   const targetKind: ForecastTargetKind = input.targetKind ?? "same_blueprint_mock";
-  const { admitted, rejectedCount } = partitionExamEvidence(input.evidence);
+  const [minScore, maxScore] = input.blueprint.scoreRange;
+  const maxInformativeWidth = input.maxInformativeWidth ?? (maxScore - minScore) * 0.5;
+  if (!Number.isFinite(maxInformativeWidth) || maxInformativeWidth <= 0) {
+    throw new RangeError("maxInformativeWidth must be finite and positive");
+  }
+
+  const trimmedLearnerId = input.learnerId.trim();
+  const isIeltsBlueprint = input.blueprint.blueprintId === IELTS_ACADEMIC_V1_BLUEPRINT.blueprintId;
+  const recommendedSeedIdsFor = (sections: readonly string[]): readonly string[] =>
+    isIeltsBlueprint
+      ? IELTS_ACADEMIC_DIAGNOSTIC_SEEDS.filter((seed) => sections.includes(seed.sectionId)).map((seed) => seed.seedId)
+      : [];
+
+  if (!trimmedLearnerId) {
+    const allSectionIds = input.blueprint.sections.map((s) => s.sectionId);
+    return {
+      schemaVersion: 1,
+      blueprintId: input.blueprint.blueprintId,
+      status: "insufficient_independent_evidence",
+      missingSections: allSectionIds,
+      rejectedEvidenceCount: input.evidence.length,
+      calibrationCount: 0,
+      requiredCalibrationCount: 4,
+      nextDiagnosticAction: {
+        kind: "run_diagnostic_items",
+        sectionIds: allSectionIds,
+        recommendedItemIds: recommendedSeedIdsFor(allSectionIds),
+        message: "请先登录学习账号并完成各部分独立诊断作答，再生成预估区间。",
+      },
+      officialExamCalibrated: false,
+    };
+  }
+
+  const { admitted, rejectedCount } = partitionExamEvidence(input.evidence, { learnerId: trimmedLearnerId });
   const coveredSections = new Set(admitted.map((e) => e.sectionId));
   const missingSections = input.blueprint.sections
     .map((s) => s.sectionId)
     .filter((sid) => !coveredSections.has(sid));
 
   const excludeFamilies = new Set<string>(input.targetPaperFamilyIds ?? []);
-  for (const rec of input.evidence) {
+  for (const rec of admitted) {
     if (rec.paperFamilyId) excludeFamilies.add(rec.paperFamilyId);
   }
   const validCalibrations = filterIndependentCalibrationRecords({
     records: input.calibrationRecords,
     blueprintId: input.blueprint.blueprintId,
     targetKind,
-    excludeLearnerId: input.learnerId,
+    scoreRange: input.blueprint.scoreRange,
+    excludeLearnerId: trimmedLearnerId,
     excludePaperFamilyIds: excludeFamilies,
   });
 
   const n = validCalibrations.length;
   const k = Math.ceil(TARGET_COVERAGE * (n + 1));
-  const recommendedSeedIds = IELTS_ACADEMIC_DIAGNOSTIC_SEEDS.filter((seed) =>
-    missingSections.includes(seed.sectionId),
-  ).map((seed) => seed.seedId);
+  const recommendedSeedIds = recommendedSeedIdsFor(missingSections);
 
   if (missingSections.length > 0 || n < 4 || k > n) {
     const kind = missingSections.length > 0 ? "run_diagnostic_items" : "submit_independent_mock";
@@ -319,10 +382,9 @@ export function evaluateExamForecast(input: {
   const low = snapToScoreGrid(safeLow, input.blueprint.scoreRange, input.blueprint.scoreStep, "floor");
   const high = snapToScoreGrid(safeHigh, input.blueprint.scoreRange, input.blueprint.scoreStep, "ceil");
   const width = Math.round((high - low) * 1_000_000) / 1_000_000;
-  const [minScore, maxScore] = input.blueprint.scoreRange;
-  const maxInformativeWidth = input.maxInformativeWidth ?? (maxScore - minScore) * 0.5;
 
   if (width > maxInformativeWidth) {
+    const allSectionIds = input.blueprint.sections.map((s) => s.sectionId);
     return {
       schemaVersion: 1,
       blueprintId: input.blueprint.blueprintId,
@@ -336,8 +398,8 @@ export function evaluateExamForecast(input: {
       maxInformativeWidth,
       nextDiagnosticAction: {
         kind: "collect_section_evidence",
-        sectionIds: input.blueprint.sections.map((s) => s.sectionId),
-        recommendedItemIds: IELTS_ACADEMIC_DIAGNOSTIC_SEEDS.map((s) => s.seedId),
+        sectionIds: allSectionIds,
+        recommendedItemIds: recommendedSeedIdsFor(allSectionIds),
         message: "当前标定波动过宽，建议补充高区分度独立诊断或限时模考以收窄预估区间。",
       },
       officialExamCalibrated: false,

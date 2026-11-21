@@ -77,7 +77,12 @@ export function computeWritingBand(
   task2Band: number,
   options: { readonly roundSection?: boolean } = {},
 ): number {
-  const continuous = (task1Band + 2 * task2Band) / 3;
+  if (!Number.isFinite(task1Band) || !Number.isFinite(task2Band)) {
+    throw new RangeError("Writing task bands must be finite");
+  }
+  const t1 = Math.min(9, Math.max(0, task1Band));
+  const t2 = Math.min(9, Math.max(0, task2Band));
+  const continuous = (t1 + 2 * t2) / 3;
   return options.roundSection ? roundHalfUp05(continuous) : continuous;
 }
 
@@ -87,9 +92,12 @@ export function computeIeltsOverallBand(sections: {
   readonly writing: number;
   readonly speaking: number;
 }): number {
-  const continuousMean =
-    (sections.listening + sections.reading + sections.writing + sections.speaking) / 4;
-  return roundHalfUp05(continuousMean);
+  const values = [sections.listening, sections.reading, sections.writing, sections.speaking];
+  if (values.some((v) => !Number.isFinite(v))) {
+    throw new RangeError("All four IELTS section bands must be finite");
+  }
+  const clampedSum = values.reduce((sum, v) => sum + Math.min(9, Math.max(0, v)), 0);
+  return roundHalfUp05(clampedSum / 4);
 }
 
 export function rawScoreToBand(rawScore: number, table: readonly RawToScoreBand[]): number {
@@ -277,7 +285,12 @@ function hasCompleteRawTable(section: ExamSectionBlueprint): boolean {
   const table = section.rawToBandTable;
   const items = section.items;
   if (!table || table.length === 0 || !items || items.length === 0) return false;
-  const maxRaw = items.reduce((sum, item) => sum + (item.points ?? 1), 0);
+  let maxRaw = 0;
+  for (const item of items) {
+    const pts = item.points ?? 1;
+    if (!Number.isFinite(pts) || !Number.isInteger(pts) || pts <= 0) return false;
+    maxRaw += pts;
+  }
   for (let raw = 0; raw <= maxRaw; raw++) {
     if (!table.some((row) => raw >= row.rawMin && raw <= row.rawMax)) return false;
   }
@@ -294,7 +307,13 @@ export function choleskyDecompose(matrix: readonly (readonly number[])[]): numbe
     for (let j = 0; j <= i; j++) {
       const entry = row[j];
       const mirror = matrix[j]?.[i];
-      if (entry === undefined || mirror === undefined || !Number.isFinite(entry) || Math.abs(entry - mirror) > 1e-8) {
+      if (
+        entry === undefined ||
+        mirror === undefined ||
+        !Number.isFinite(entry) ||
+        !Number.isFinite(mirror) ||
+        Math.abs(entry - mirror) > 1e-8
+      ) {
         throw new RangeError("thetaCovariance must be finite and symmetric");
       }
       let sum = entry;
@@ -304,7 +323,14 @@ export function choleskyDecompose(matrix: readonly (readonly number[])[]): numbe
         lower[i]![j] = sum > 0 ? Math.sqrt(sum) : 0;
       } else {
         const diag = lower[j]![j]!;
-        lower[i]![j] = diag > 1e-12 ? sum / diag : 0;
+        if (diag <= 1e-12) {
+          if (Math.abs(sum) > 1e-8) {
+            throw new RangeError("thetaCovariance must be positive semidefinite");
+          }
+          lower[i]![j] = 0;
+        } else {
+          lower[i]![j] = sum / diag;
+        }
       }
     }
   }
@@ -320,9 +346,14 @@ function isSymmetricPsdMatrix(matrix: readonly (readonly number[])[]): boolean {
   }
 }
 
+function isValidScoreRange(range: readonly [number, number]): boolean {
+  return range.length === 2 && Number.isFinite(range[0]) && Number.isFinite(range[1]) && range[0] < range[1];
+}
+
 export function validateExamBlueprint(blueprint: ExamBlueprintV1): string[] {
   const missing: string[] = [];
   if (blueprint.schemaVersion !== 1 || !blueprint.blueprintId.trim()) missing.push("blueprintId");
+  if (!isValidScoreRange(blueprint.scoreRange)) missing.push("scoreRange");
   if (!Number.isFinite(blueprint.scoreStep) || blueprint.scoreStep <= 0) missing.push("scoreStep");
   if (blueprint.skillIds.length === 0) missing.push("skillIds");
   if (blueprint.sections.length === 0) missing.push("sections");
@@ -346,6 +377,9 @@ export function validateExamBlueprint(blueprint: ExamBlueprintV1): string[] {
         missing.push(`sections.${section.sectionId}.timeLimitMinutes`);
       }
     }
+    if (!isValidScoreRange(section.scoreRange)) missing.push(`sections.${section.sectionId}.scoreRange`);
+    if (!Number.isFinite(section.scoreStep) || section.scoreStep <= 0) missing.push(`sections.${section.sectionId}.scoreStep`);
+    if (!Number.isFinite(section.weight) || section.weight < 0) missing.push(`sections.${section.sectionId}.weight`);
     if (section.parts.length === 0) missing.push(`sections.${section.sectionId}.parts`);
     if (section.scoringKind === "item_raw_table") {
       if (!section.items || section.items.length === 0) {
@@ -360,6 +394,10 @@ export function validateExamBlueprint(blueprint: ExamBlueprintV1): string[] {
             missing.push(`sections.${section.sectionId}.items.${item.itemId}.guessLapse`);
             break;
           }
+          if (item.points !== undefined && (!Number.isFinite(item.points) || !Number.isInteger(item.points) || item.points <= 0)) {
+            missing.push(`sections.${section.sectionId}.items.${item.itemId}.points`);
+            break;
+          }
           if (!(item.timeModel.sigma > 0 && Number.isFinite(item.timeModel.mu))) {
             missing.push(`sections.${section.sectionId}.items.${item.itemId}.timeModel`);
             break;
@@ -368,6 +406,17 @@ export function validateExamBlueprint(blueprint: ExamBlueprintV1): string[] {
       }
       if (!hasCompleteRawTable(section)) {
         missing.push(`sections.${section.sectionId}.rawToBandTable`);
+      }
+    } else {
+      for (const part of section.parts) {
+        if (!Number.isFinite(part.weight) || part.weight <= 0) {
+          missing.push(`sections.${section.sectionId}.parts.${part.partId}.weight`);
+          break;
+        }
+        if (part.skillIds.length === 0 || part.skillIds.some((id) => !skillSet.has(id))) {
+          missing.push(`sections.${section.sectionId}.parts.${part.partId}.skillIds`);
+          break;
+        }
       }
     }
   }

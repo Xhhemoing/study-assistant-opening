@@ -52,6 +52,7 @@ export function evaluateCrnActionRoi(input: {
   const numDraws = Math.max(2, Math.round(input.numDraws ?? 400));
   const draws =
     input.precomputedDraws ?? generatePaperRandomDraws(input.blueprint, numDraws, input.crnSeed);
+  if (draws.length === 0) throw new RangeError("precomputedDraws must be non-empty");
 
   const baseEffects = composeActionSetEffects(input.baselineActions);
   const plusEffects = composeActionSetEffects([...input.baselineActions, input.candidateAction]);
@@ -90,7 +91,7 @@ export function evaluateCrnActionRoi(input: {
     const dev = diffs[i]! - pairedMeanGain;
     sqSum += dev * dev;
   }
-  const monteCarloSe = Math.sqrt(sqSum / (n * (n - 1)));
+  const monteCarloSe = n > 1 ? Math.sqrt(sqSum / (n * (n - 1))) : 0;
   const roiBandPerHour = pairedMeanGain / input.candidateAction.durationHours;
   const timeSqueezeReduction = baseSim.timeSqueezeDelta - plusSim.timeSqueezeDelta;
 
@@ -148,10 +149,8 @@ export function buildUnifiedDecisionSnapshot(input: {
   if (!Number.isFinite(input.horizonHours) || input.horizonHours < 0) {
     throw new RangeError("horizonHours must be finite and non-negative");
   }
-  const executableMinutes = Math.max(
-    0,
-    Math.floor(input.executableMinutes ?? Math.floor(input.horizonHours * 60)),
-  );
+  const rawExec = input.executableMinutes ?? input.horizonHours * 60;
+  const executableMinutes = Number.isFinite(rawExec) ? Math.max(0, Math.floor(rawExec)) : 0;
   const policyMode: PolicyMode = input.horizonHours <= 72 ? "sprint_72h" : "cycle_90d";
   const maxRecoveryMinutes = Math.floor((executableMinutes * 30) / 100);
 
@@ -168,16 +167,22 @@ export function buildUnifiedDecisionSnapshot(input: {
 
   const blueprintValid = validateExamBlueprint(input.blueprint).length === 0;
   const baselineActions = input.baselineActions ?? [];
-  const studyCandidates = input.candidateActions.filter((a) => a.kind !== "recovery" && a.durationHours > 0);
+  const studyCandidates = input.candidateActions.filter(
+    (a) => a.kind !== "recovery" && Number.isFinite(a.durationHours) && a.durationHours > 0,
+  );
   const recoveryCandidates = input.candidateActions.filter((a) => a.kind === "recovery");
 
   let allocatedRecoveryMinutes = 0;
   const selectedRecoveryIds: string[] = [];
-  for (const recovery of recoveryCandidates) {
-    const mins = Math.max(0, Math.round(recovery.recoveryMinutes ?? recovery.durationHours * 60));
-    if (mins > 0 && allocatedRecoveryMinutes + mins <= maxRecoveryMinutes) {
-      allocatedRecoveryMinutes += mins;
-      selectedRecoveryIds.push(recovery.actionId);
+  if (forecast.status === "calibrated_forecast_ready") {
+    for (const recovery of recoveryCandidates) {
+      const rawMins = recovery.recoveryMinutes ?? recovery.durationHours * 60;
+      if (!Number.isFinite(rawMins) || rawMins <= 0) continue;
+      const mins = Math.round(rawMins);
+      if (mins > 0 && allocatedRecoveryMinutes + mins <= maxRecoveryMinutes) {
+        allocatedRecoveryMinutes += mins;
+        selectedRecoveryIds.push(recovery.actionId);
+      }
     }
   }
 
@@ -213,8 +218,11 @@ export function buildUnifiedDecisionSnapshot(input: {
           selectedActionIds.push(evalItem.actionId);
         }
       }
-      selectedActionIds.push(...selectedRecoveryIds);
     }
+  }
+
+  if (forecast.status === "calibrated_forecast_ready") {
+    selectedActionIds.push(...selectedRecoveryIds);
   }
 
   return {
