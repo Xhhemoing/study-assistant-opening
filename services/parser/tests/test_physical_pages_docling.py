@@ -515,9 +515,14 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
 
         for mode, opener, continuation, flag in (
             ("inline_sealed", "Answer: x =", "5 units.", "inlineSealedAtEnd"),
+            ("inline_sealed", "Answer:", "5 units.", "inlineSealedAtEnd"),
+            ("inline_sealed", "答案：", "5 units.", "inlineSealedAtEnd"),
+            ("inline_sealed", "【参考答案】", "5 units.", "inlineSealedAtEnd"),
+            ("inline_sealed", "Answer:\n\n", "5 units.", "inlineSealedAtEnd"),
+            ("inline_sealed", "Solution (continued)", "5 units.", "inlineSealedAtEnd"),
             ("section_sealed", "Answer Key\n1. x =", "5 units.", "sectionSealedAtEnd"),
         ):
-            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
+            with self.subTest(mode=mode, opener=opener), tempfile.TemporaryDirectory() as tmp:
                 leading = [[text_element(page, "Public page.")] for page in range(1, 10)]
                 page10 = [text_element(10, "Exercise 1: Find x.\n" + opener)]
                 page11 = [text_element(11, continuation)]
@@ -546,6 +551,16 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
                     self.assertIs(pages[0].get("hadSealedContent"), True)
                     self.assertEqual(bool(pages[0].get(flag)), mode == "section_sealed")
                     self.assertIn("Public chapter.", pages[1]["text"])
+
+    def test_completed_inline_answer_releases_next_page_but_label_before_blank_does_not(self):
+        result = result_for(
+            [text_element(10, "Exercise 1: Find x.\nAnswer:\n\n5 units.\n")],
+            [text_element(11, "Public explanation.")],
+            start_page=10,
+        )
+        extracted = physical_pages.extract_physical_pages(result)
+        self.assertEqual(extracted.texts_by_page[10], ["Exercise 1: Find x."])
+        self.assertEqual(extracted.texts_by_page[11], ["Public explanation."])
 
     def test_assignment_and_bare_multichar_container_titles_keep_answers_sealed(self):
         for title in (

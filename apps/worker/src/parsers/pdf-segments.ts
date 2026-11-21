@@ -89,7 +89,8 @@ export async function watchPdfExecution(assertCurrent: () => Promise<void>, poll
 export async function parsePdfSegments(input: {
   path: string; sourceId: string; sourceVersion: number; scope: OpeningScope;
   runner: ParserRunner; segments?: OpeningPdfSegmentsRepository; signal: AbortSignal;
-  onPages?: (pages: PdfSegmentPage[], initialSealMode?: PdfSealMode) => void | Promise<void>;
+  onPages?: (pages: PdfSegmentPage[], initialSealMode?: PdfSealMode, afterFailedSegment?: boolean) =>
+    PdfSealMode | null | void | Promise<PdfSealMode | null | void>;
   onSegment?: (segment: PdfSegmentBatch) => void | Promise<void>;
   segmentPages?: number; timeoutSeconds?: number; parserProfile?: string;
   maxPages?: number; maxSegmentBytes?: number; maxPageTextBytes?: number; maxBookBytes?: number;
@@ -157,12 +158,14 @@ export async function parsePdfSegments(input: {
   // segments sequentially so 500-2,000 page books stay bounded in worker memory.
   const parserProfile = input.parserProfile ?? pdfParserProfile();
   let initialSealMode: PdfSealMode | undefined;
+  let afterFailedSegment = false;
   let parsedPageCount = 0;
   const emitSegment = async (pageStart: number, pageEnd: number, pages: PdfSegmentPage[], cached: boolean, segmentBytes: number) => {
     const nextSealMode = pdfPageEndSeal(pages.at(-1));
     await input.onSegment?.({ pageStart, pageEnd, pages, cached, segmentBytes });
-    await input.onPages?.(pages, initialSealMode);
-    initialSealMode = nextSealMode;
+    const workerEndSeal = await input.onPages?.(pages, initialSealMode, afterFailedSegment);
+    initialSealMode = workerEndSeal === undefined ? nextSealMode : workerEndSeal ?? undefined;
+    afterFailedSegment = false;
   };
   const failed: string[] = [];
   for (let start = 1; start <= pageCount; start += size) {
@@ -215,6 +218,8 @@ export async function parsePdfSegments(input: {
         : error instanceof TypeError || error instanceof RangeError || error instanceof SyntaxError ? "invalid_output" : "conversion_failed";
       await input.segments?.save(input.scope, identity, { state: "failed", errorCode }, input.signal);
       failed.push(`${start}-${end}`);
+      initialSealMode = undefined;
+      afterFailedSegment = true;
       continue;
     }
     input.signal.throwIfAborted();

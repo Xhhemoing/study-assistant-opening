@@ -8,7 +8,7 @@ import { preserveOpeningKnowledgeDefinitions } from "./opening-knowledge-definit
 import { knowledgeChunkDigests } from "./opening-knowledge-snapshot";
 import { resolvedKnowledgeCoverage } from "./opening-knowledge-legacy-coverage";
 export type NewSourceChunk = Omit<SourceChunk, "id" | "sourceId" | "sourceVersion">;
-type ChunkPublication = { sourceId: string; sourceVersion: number; warning?: ApiFailure };
+type ChunkPublication = { sourceId: string; sourceVersion: number; warning?: ApiFailure; allowSealedEmpty?: boolean };
 export type OpeningSourceChunksRepository = {
   replaceChunks(scope: OpeningScope, input: ChunkPublication & { chunks: NewSourceChunk[] }): Promise<void>;
   listChunks(scope: OpeningScope, sourceId: string): Promise<SourceChunk[]>;
@@ -56,11 +56,18 @@ async function backfillLegacyChunkDigest(tx: TransactionSql, scope: OpeningScope
         WHERE added.text ~ '[^[:space:]]'))`;
 }
 
-async function publishChunks(tx: TransactionSql, scope: OpeningScope, input: ChunkPublication, reconcile: (sourceId: string) => Promise<void>) {
+async function publishChunks(tx: TransactionSql, scope: OpeningScope, input: ChunkPublication,
+  reconcile: (sourceId: string) => Promise<void>, preservePages: number[] = []) {
   // Privacy takes history before workspace. A rejected execution rolls back the ensure too.
   await lockWorkspaceLearningHistory(tx, scope);
   await lockOpeningJobExecution(tx, scope);
-  await preserveOpeningKnowledgeDefinitions(tx, scope, input.sourceId, input.sourceVersion);
+  if (input.allowSealedEmpty && !preservePages.length) {
+    // Take the same workspace lock without copying withdrawn content into knowledge definitions.
+    const [owner] = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR SHARE`;
+    if (!owner) throw new Error("workspace not found");
+  } else {
+    await preserveOpeningKnowledgeDefinitions(tx, scope, input.sourceId, input.sourceVersion);
+  }
   const [source] = await tx`SELECT id,version,upload_state FROM opening_sources
     WHERE id=${input.sourceId} AND workspace_id=${scope.workspaceId} FOR UPDATE`;
   if (!source) throw new Error("source not found");
@@ -102,13 +109,15 @@ async function stagePdfChunks(tx: TransactionSql, chunks: AsyncIterable<NewSourc
   return readable;
 }
 
-async function reconcilePdfChunks(tx: TransactionSql, scope: OpeningScope, { sourceId, sourceVersion, preservePages }: ChunkPublication & { preservePages: number[] }, stagedReadable: boolean) {
+async function reconcilePdfChunks(tx: TransactionSql, scope: OpeningScope,
+  { sourceId, sourceVersion, preservePages, allowSealedEmpty }: ChunkPublication & { preservePages: number[] },
+  stagedReadable: boolean) {
   // Retained pages are references only. PostgreSQL keeps the original rows and citation IDs.
   if (preservePages.length) await tx`INSERT INTO pg_temp.opening_pdf_chunk_stage (page,matched_id)
     SELECT page,id FROM opening_source_chunks
     WHERE source_id=${sourceId} AND source_version=${sourceVersion} AND page=ANY(${preservePages}::int[])
     ON CONFLICT (page) DO NOTHING`;
-  if (!stagedReadable) {
+  if (!stagedReadable && !allowSealedEmpty) {
     const [retained] = await tx`SELECT EXISTS (
       SELECT 1 FROM pg_temp.opening_pdf_chunk_stage staged JOIN opening_source_chunks c ON c.id=staged.matched_id
       WHERE c.text ~ '[^[:space:]]' OR c.image_object_key ~ '[^[:space:]]') AS readable`;
@@ -139,7 +148,7 @@ async function reconcilePdfChunks(tx: TransactionSql, scope: OpeningScope, { sou
 export function createOpeningSourceChunksRepository(sql: Sql): OpeningSourceChunksRepository & OpeningPdfChunkPublisher { return {
   async replaceChunks(scope, input) {
     await sql.begin(tx => publishChunks(tx, scope, input, async sourceId => {
-      requireReadableContent(chunksHaveReadableContent(input.chunks));
+      if (!input.allowSealedEmpty) requireReadableContent(chunksHaveReadableContent(input.chunks));
       const existing = await tx`SELECT *, text ~ '[^[:space:]]' AS readable FROM opening_source_chunks
         WHERE source_id=${input.sourceId} AND source_version=${input.sourceVersion}`;
       const existingChunks = existing.map(row => mapChunk(row));
@@ -172,8 +181,9 @@ export function createOpeningSourceChunksRepository(sql: Sql): OpeningSourceChun
     await sql.begin(async tx => {
       // Disk staging is complete before this transaction. Hold publication locks only for reconciliation.
       const stagedReadable = await stagePdfChunks(tx, input.chunks);
-      if (!input.preservePages.length) requireReadableContent(stagedReadable);
-      await publishChunks(tx, scope, input, sourceId => reconcilePdfChunks(tx, scope, { ...input, sourceId }, stagedReadable));
+      if (!input.preservePages.length && !input.allowSealedEmpty) requireReadableContent(stagedReadable);
+      await publishChunks(tx, scope, input,
+        sourceId => reconcilePdfChunks(tx, scope, { ...input, sourceId }, stagedReadable), input.preservePages);
     });
   },
   async listChunks(scope, sourceId) { sourceId = controlledLearningTools.open_fragment.input.parse(sourceId); const rows = await sql`SELECT version FROM opening_sources WHERE id = ${sourceId} AND workspace_id = ${scope.workspaceId} AND upload_state = 'uploaded'`; const row = rows[0] as Record<string, unknown> | undefined; return row ? fetchChunks(sql, scope, sourceId, Number(row.version)) : []; },
