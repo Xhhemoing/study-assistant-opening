@@ -3,9 +3,21 @@ export const mathSpanClosers = new Map([["$", "$"], ["$$", "$$"], ["\\(", "\\)"]
 /** Index the first matching closer to the right. The forward scan consumes each span once. */
 export function equationSpanEnds(parts: readonly string[]): Map<number, number> {
   const nextFence = new Map<string, number>();
+  const environmentEnds = new Map<string, number[]>();
   const spanEnds = new Map<number, number>();
   for (let i = parts.length - 2; i > 0; i -= 2) {
     const marker = parts[i]!;
+    if (marker.startsWith("\\end{")) {
+      const stack = environmentEnds.get(marker) ?? [];
+      stack.push(i);
+      environmentEnds.set(marker, stack);
+      continue;
+    }
+    if (marker.startsWith("\\begin{")) {
+      const end = environmentEnds.get(marker.replace("\\begin", "\\end"))?.pop();
+      if (end !== undefined) spanEnds.set(i, end);
+      continue;
+    }
     // A backslash escapes the first opening tick, but is literal inside code.
     const escapedTick = marker.startsWith("\\`");
     const fence = escapedTick ? marker.slice(1) : marker;
@@ -27,8 +39,8 @@ interface EquationLine {
   containers: ContainerPrefix[];
   scope: ContainerPrefix[];
   content: string;
-  trimmed: string;
   fence?: { indent: number; run: string; canClose: boolean };
+  display?: DisplayPair;
   paragraph?: number;
   cells?: string[];
   literalBlock?: boolean;
@@ -94,7 +106,7 @@ function markdownLine(raw: string, index: number, previous?: EquationLine): Equa
   const fence = indented ? undefined : readFence(content);
   const atx = /^ {0,3}#{1,6}(?:[ \t]|$)/u.test(content);
   const block = !trimmed || fence || setext || atx || isThematicBreak(content) || indented || startsHtmlBlock(content, paragraphOpen);
-  const line: EquationLine = { raw, containers, scope: containers, content, trimmed, fence, literalBlock: indented };
+  const line: EquationLine = { raw, containers, scope: containers, content, fence, literalBlock: indented };
   if (!block) {
     line.paragraph = paragraphOpen ? previous!.paragraph : index;
   }
@@ -118,7 +130,7 @@ function markdownLine(raw: string, index: number, previous?: EquationLine): Equa
 
 /** Read the rest of one paragraph before deciding whether inline code owns a possible
  * display opener. A following table delimiter may turn the last line into a header. */
-function paragraphMathMarkers(rawLines: string[], parsed: EquationLine[], first: number): MathMarker[][] | undefined {
+function paragraphMathMarkers(rawLines: string[], parsed: EquationLine[], first: number): Set<number>[] | undefined {
   const paragraph = parsed.slice(first);
   if (!paragraph.some((line) => line.content.includes("`"))) return undefined;
   // Lookahead may classify its previous line as a header. Keep the real parser state intact.
@@ -133,15 +145,22 @@ function paragraphMathMarkers(rawLines: string[], parsed: EquationLine[], first:
   return mathMarkers(paragraph);
 }
 
+interface DisplayCloser {
+  line: number;
+  column: number;
+  length: number;
+}
+
 interface DisplayPair {
   column: number;
-  end: number;
+  opener: string;
+  close: DisplayCloser;
 }
 
 function markdownLines(rawLines: string[], fences?: Map<number, number>, displays?: Map<number, DisplayPair[]>): EquationLine[] {
   const lines: EquationLine[] = [];
   let checkedParagraph: number | undefined;
-  let visibleMath: MathMarker[][] | undefined;
+  let visibleMath: Set<number>[] | undefined;
   for (let i = 0; i < rawLines.length; i++) {
     const line = markdownLine(rawLines[i]!, i, lines.at(-1));
     lines.push(line);
@@ -160,10 +179,10 @@ function markdownLines(rawLines: string[], fences?: Map<number, number>, display
         visibleMath = paragraphMathMarkers(rawLines, lines, first);
         checkedParagraph = first;
       }
-      end = candidates?.find(({ column }) =>
-        !visibleMath || visibleMath[i - first]?.some((marker) => marker.column === column),
-      )?.end;
-      if (end === undefined) continue;
+      const display = candidates?.find(({ column }) => !visibleMath || visibleMath[i - first]?.has(column));
+      if (!display) continue;
+      line.display = display;
+      end = display.close.line;
     }
     // A closed display or fence owns its body. Only the enclosing quote/list
     // prefixes are structural there, including on its closing line.
@@ -174,7 +193,7 @@ function markdownLines(rawLines: string[], fences?: Map<number, number>, display
       const raw = rawLines[++i]!;
       const containers = continuedContainers(raw, line.scope);
       const content = raw.slice(containers.at(-1)?.end ?? 0);
-      lines.push({ raw, content, trimmed: content.trim(), containers, scope: line.scope, literalBlock: true });
+      lines.push({ raw, content, containers, scope: line.scope, literalBlock: true });
     }
   }
   return lines;
@@ -260,19 +279,32 @@ function continuationIndent(text: string, width: number): number | undefined {
   return count;
 }
 
-/** Paragraphs retain their soft breaks, table rows expose cells, and literal blocks retain separate lines. */
-export function equationMarkdownBlocks(text: string): (string | string[])[] {
+type EquationBlock = string | string[] | { math: string };
+
+/** Keep paragraphs, GFM cells and TeX displays intact for their respective inline scans. */
+export function equationMarkdownBlocks(text: string): EquationBlock[] {
   const rawLines = text.split(/\r\n|[\r\n\u2028\u2029]/u);
   if (rawLines.length === 1 && !/^[ \t>+*#\d-]/u.test(text)) return [text];
   const initial = markdownLines(rawLines);
   const fences = matchedFences(initial);
   const displays = matchedDisplays(initial);
   const lines = fences.size || displays.size ? markdownLines(rawLines, fences, displays) : initial;
-  preserveSignedMathContinuations(lines);
-  const blocks: (string | string[])[] = [];
+  const blocks: EquationBlock[] = [];
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!;
-    if (line.paragraph !== undefined) {
+    if (line.display) {
+      const { column, opener, close } = line.display;
+      const afterOpener = line.content.slice(column + opener.length);
+      const prefix = opener === "$$" ? afterOpener : line.content.slice(0, column);
+      if (prefix.trim()) blocks.push(prefix); // Fence metadata or prose before a TeX display.
+      const body = [opener === "$$" ? "" : afterOpener];
+      while (++i < close.line) body.push(lines[i]!.content);
+      const last = lines[i]!;
+      body.push(last.raw.slice(last.raw.length - last.content.length, close.column));
+      blocks.push({ math: body.join("\n") });
+      const suffix = last.raw.slice(close.column + close.length);
+      if (suffix.trim()) blocks.push(suffix);
+    } else if (line.paragraph !== undefined) {
       const parts = [line.content];
       while (i + 1 < lines.length && lines[i + 1]!.paragraph === line.paragraph) {
         parts.push(lines[++i]!.content);
@@ -321,84 +353,57 @@ function matchedFences(lines: EquationLine[]): Map<number, number> {
   return ends;
 }
 
-interface MathMarker {
-  column: number;
-  text: string;
-  canOpen: boolean;
-  canClose: boolean;
-}
-
-/** Pair code spans within a paragraph before indexing its math markers. The audit
- * still reads the original lines, including the contents of those code spans. */
-function mathMarkers(lines: EquationLine[]): MathMarker[][] {
-  const markers = lines.map((): MathMarker[] => []);
-  let start = 0;
-  while (start < lines.length) {
-    let stop = start + 1;
-    const first = lines[start]!;
-    if (first.cells || first.literalBlock) {
-      start++;
-      continue;
+/** Inside a Markdown paragraph, only display openers outside closed code spans are eligible. */
+function mathMarkers(lines: EquationLine[]): Set<number>[] {
+  const columns = lines.map(() => new Set<number>());
+  const paragraph = lines.map((line) => line.content).join("\n");
+  const parts = paragraph.split(/(\\?`+|\\(?:begin|end)\{[a-zA-Z]+\*?\}|\\.|\$+|\n)/u);
+  const spanEnds = equationSpanEnds(parts);
+  let codeEnd = -1;
+  let line = 0;
+  let column = 0;
+  for (let i = 1; i < parts.length; i += 2) {
+    const marker = parts[i]!;
+    const start = column + parts[i - 1]!.length;
+    column = start + marker.length;
+    if (marker === "\n") {
+      line++;
+      column = 0;
+    } else if (i > codeEnd) {
+      if (marker.endsWith("`")) codeEnd = spanEnds.get(i) ?? i;
+      else if (marker === "$$" || marker === "\\[" || marker.startsWith("\\begin{")) columns[line]!.add(start);
     }
-    while (first.paragraph !== undefined && stop < lines.length && lines[stop]!.paragraph === first.paragraph) {
-      stop++;
-    }
-    const paragraph = lines.slice(start, stop).map((line) => line.content).join("\n");
-    const parts = paragraph.split(/(\\?`+|\\(?:begin|end)\{[a-zA-Z]+\*?\}|\\.|\$+|\n)/u);
-    const spanEnds = equationSpanEnds(parts);
-    let codeEnd = -1;
-    let lineIndex = start;
-    let column = 0;
-    for (let i = 1; i < parts.length; i += 2) {
-      const marker = parts[i]!;
-      const markerColumn = column + parts[i - 1]!.length;
-      column = markerColumn + marker.length;
-      if (marker === "\n") {
-        lineIndex++;
-        column = 0;
-        continue;
-      }
-      if (i <= codeEnd) continue;
-      if (marker.endsWith("`")) {
-        codeEnd = spanEnds.get(i) ?? i;
-        continue;
-      }
-      if (!/^(?:\${1,2}$|\\[()[\]]$|\\(?:begin|end)\{)/u.test(marker)) continue;
-      const before = parts[i - 1]!.at(-1) ?? parts[i - 2]?.at(-1);
-      const after = parts[i + 1]![0] ?? parts[i + 2]?.[0];
-      const dollar = marker.startsWith("$");
-      const canOpen = !dollar || (!!after && !/\s/u.test(after));
-      const canClose = !dollar || (!!before && !/\s/u.test(before));
-      markers[lineIndex]!.push({ column: markerColumn, text: marker, canOpen, canClose });
-    }
-    start = stop;
   }
-  return markers;
+  return columns;
 }
 
 /** Index possible display closers even in table- or list-looking text. The forward
  * Markdown pass gives ownership to the first actual opener and skips its body. */
 function matchedDisplays(lines: EquationLine[]): Map<number, DisplayPair[]> {
   const ends = new Map<number, DisplayPair[]>();
-  const scopes = new Map<Container | undefined, Map<string, number[]>>();
+  const scopes = new Map<Container | undefined, Map<string, DisplayCloser[]>>();
   for (let i = lines.length - 1; i >= 0; i--) {
-    const { raw, content, trimmed, containers } = lines[i]!;
-    const dollars = trimmed === "$$";
+    const { raw, content, containers } = lines[i]!;
+    const dollars = /^( {0,3})\$\$([^$\r\n]*)$/u.exec(content);
     if (!dollars && !content.includes("\\")) continue;
     const tokens = dollars ? [] : Array.from(content.matchAll(/\\(?:begin|end)\{[a-zA-Z]+\*?\}|\\./gu));
     const pairs: DisplayPair[] = [];
-    // An apparent list inside a display is literal. A closer can belong to an
-    // enclosing scope only if the intervening prefixes are pure indentation.
     const contentStart = raw.length - content.length;
     for (let depth = containers.length; depth >= 0; depth--) {
       const parent = containers[depth - 1];
-      if (/\S/u.test(raw.slice(parent?.end ?? 0, contentStart))) break;
-      const closers = scopes.get(parent?.scope) ?? new Map<string, number[]>();
+      const indent = raw.slice(parent?.end ?? 0, contentStart);
+      if (/\S/u.test(indent)) break;
+      const closers = scopes.get(parent?.scope) ?? new Map<string, DisplayCloser[]>();
       scopes.set(parent?.scope, closers);
       if (dollars) {
-        const end = closers.get("$$")?.[0];
-        if (depth === containers.length && end !== undefined) pairs.push({ column: content.indexOf("$$"), end });
-        closers.set("$$", [i]);
+        const column = dollars[1]!.length;
+        // The closer must be bare and within three spaces of this container.
+        if (!/^ {0,3}$/u.test(indent + dollars[1])) break;
+        const close = closers.get("$$")?.[0];
+        if (depth === containers.length && close) pairs.push({ column, opener: "$$", close });
+        if (/^[ \t]*$/u.test(dollars[2]!)) {
+          closers.set("$$", [{ line: i, column: contentStart + column, length: 2 }]);
+        }
         continue;
       }
       for (let j = tokens.length - 1; j >= 0; j--) {
@@ -406,13 +411,13 @@ function matchedDisplays(lines: EquationLine[]): Map<number, DisplayPair[]> {
         const marker = token[0];
         if (marker === "\\]" || marker.startsWith("\\end{")) {
           const stack = closers.get(marker) ?? [];
-          stack.push(i);
+          stack.push({ line: i, column: contentStart + token.index, length: marker.length });
           closers.set(marker, stack);
         } else if (marker === "\\[" || marker.startsWith("\\begin{")) {
           const closer = marker === "\\[" ? "\\]" : marker.replace("\\begin", "\\end");
-          const end = closers.get(closer)?.pop();
-          if (depth === containers.length && end !== undefined && end > i) {
-            pairs.push({ column: token.index, end });
+          const close = closers.get(closer)?.pop();
+          if (depth === containers.length && close && close.line > i) {
+            pairs.push({ column: token.index, opener: marker, close });
           }
         }
       }
@@ -420,46 +425,4 @@ function matchedDisplays(lines: EquationLine[]): Map<number, DisplayPair[]> {
     if (pairs.length) ends.set(i, pairs.reverse());
   }
   return ends;
-}
-
-/** A signed continuation ending the open inline formula keeps its sign, even
- * when the provisional Markdown parse saw a new list item on that line. */
-function preserveSignedMathContinuations(lines: EquationLine[]): void {
-  if (lines.length < 2) return;
-  const markers = mathMarkers(lines);
-  let closer: string | undefined;
-  let previousParagraph: number | undefined;
-  let paragraph: number | undefined;
-  let parent: Container | undefined;
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]!;
-    const sourceParagraph = line.paragraph;
-    if (sourceParagraph === undefined || sourceParagraph !== previousParagraph) {
-      const list = line.containers.at(-1);
-      const enclosing = line.containers.at(-2);
-      const signed = line.raw.slice(enclosing?.end ?? 0);
-      const end = closer && markers[i]!.find(({ text }) => text === closer || mathSpanClosers.get(text) === closer);
-      // A signed operand may finish the formula. A formatted list item or a
-      // new inline opener starts its own Markdown content.
-      const signedOperand = /^ {0,3}[+*-][ \t]+(?=[\p{L}\p{N}\\([{.])/u.test(signed);
-      if (sourceParagraph !== undefined && end && end.text === closer && end.canClose &&
-          list?.scope.kind === "list" && enclosing?.scope === parent && signedOperand) {
-        line.content = signed;
-      } else {
-        closer = undefined;
-        paragraph = sourceParagraph;
-        parent = line.scope.at(-1)?.scope;
-      }
-    }
-    previousParagraph = sourceParagraph;
-    line.paragraph = paragraph;
-    if (sourceParagraph === undefined) continue;
-    for (const token of markers[i]!) {
-      if (closer === token.text && token.canClose) {
-        closer = undefined;
-      } else if (!closer && token.canOpen && token.text !== "\\[") {
-        closer = mathSpanClosers.get(token.text);
-      }
-    }
-  }
 }

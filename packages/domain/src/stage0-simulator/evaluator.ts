@@ -102,6 +102,7 @@ function normalizeCompactForLeakScan(text: string): string {
 function stripEquationFormatting(text: string): string {
   return equationMarkdownBlocks(text).map((block) => {
     if (Array.isArray(block)) return block.map(stripEquationSegment).join(";");
+    if (typeof block !== "string") return stripEquationSegment(normalizeMathLayout(block.math));
     const formatted = stripEquationLine(block);
     if (!formatted.includes("\n")) return formatted;
     const math = normalizeUnicodeMath(formatted).replace(/[^\S\n]+/gu, " ");
@@ -116,7 +117,7 @@ function stripEquationFormatting(text: string): string {
   }).join(";");
 }
 
-const equationMarkers = /(\\?`+|\\[\\|$()[\]]|\*+|_+|~~|\$\$?|\|)/u;
+const equationMarkers = /(\\?`+|\\(?:begin|end)\{[a-zA-Z]+\*?\}|\\[\\|$()[\]]|\*+|_+|~~|\$\$?|\|)/u;
 
 function splitEquationCells(parts: string[], spanEnds?: Map<number, number>): string[] {
   const cells: string[] = [];
@@ -136,20 +137,43 @@ function splitEquationCells(parts: string[], spanEnds?: Map<number, number>): st
 
 function stripEquationLine(line: string): string {
   if (!line.includes("|")) return stripEquationSegment(line);
-  const parts = line.split(equationMarkers);
+  const { parts, spanEnds } = inlineEquationParts(line);
   const cells = splitEquationCells(parts);
-  const inlineSegments = splitEquationCells(parts, equationSpanEnds(parts));
+  const inlineSegments = splitEquationCells(parts, spanEnds);
   // Inline spans can only hide a cell boundary. Equal counts give identical segments.
   const candidates = cells.length === inlineSegments.length ? cells : cells.concat(inlineSegments);
   return candidates.map(stripEquationSegment).join(";");
 }
 
-function stripEquationSegment(segment: string): string {
+/** TeX newlines and spacing commands are whitespace. Only a row break ends an equation. */
+function normalizeMathLayout(text: string): string {
+  return text.replace(/\\\\|\\(?:begin|end)\{[a-zA-Z]+\*?\}|\\.|&(?=\s*=)|\n/gu, (token) => {
+    if (token === "\\\\") return ";";
+    if (token === "\n" || /^\\[ ,;!]$/u.test(token)) return " ";
+    if (token === "&" || token.startsWith("\\begin{") || token.startsWith("\\end{")) return "";
+    return token;
+  });
+}
+
+function inlineEquationParts(segment: string) {
   const parts = segment.split(equationMarkers);
+  const spanEnds = equationSpanEnds(parts);
+  for (let i = 1; i < parts.length; i += 2) {
+    const end = spanEnds.get(i);
+    if (end === undefined) continue;
+    if (mathSpanClosers.has(parts[i]!) || parts[i]!.startsWith("\\begin{")) {
+      for (let j = i + 1; j < end; j++) parts[j] = normalizeMathLayout(parts[j]!);
+    }
+    i = end;
+  }
+  return { parts, spanEnds };
+}
+
+function stripEquationSegment(segment: string): string {
+  const { parts, spanEnds } = inlineEquationParts(segment);
   const hardBreak = /(?: {2}|\\)\n/gu;
   if (parts.length === 1) return segment.replace(hardBreak, ";");
   parts[0] = parts[0]!.replace(hardBreak, ";");
-  const spanEnds = equationSpanEnds(parts);
   const cellOpeners = new Map<string, number[]>();
   for (let i = 1; i < parts.length; i += 2) {
     const marker = parts[i]!;

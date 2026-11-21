@@ -1122,7 +1122,8 @@ describe("Stage-0 768-episode deterministic student simulator", () => {
     ["\\[\n- x = 4\n\\]", false],
     ["```text\n- x = 4\n```", false],
     ["  ~~~tex\r\n+ x = 4\r\n  ~~~~", false],
-    ["Try $z +\n- x = 4$.", false],
+    ["Try $z +\n- x = 4$.", true],
+    ["Try $z -\nx = 4$ then $y$.", false],
     ["\\begin{align*}\n- x &= 4\n\\end{align*}", false],
     ["\\begin{equation}\n- x = 4\n\\end{equation}", false],
     ["> $$\n> - x = 4\n> $$", false],
@@ -1141,7 +1142,8 @@ describe("Stage-0 768-episode deterministic student simulator", () => {
     ["Use \\$ as currency.\n- **x = 4**\n$", true],
     ["$a$ and $b$\n- **x = 4**\n$unfinished", true],
     ["Try $z.\n- **x = 4**\nNow use $y$.", true],
-    ["Try $z\n- x = 4$ then $y$.", false],
+    ["Try $z\n- x = 4$ then $y$.", true],
+    ["Try $z\n-x = 4$ then $y$.", false],
     ["\\begin{align}\nx = 4\n\\end{align}", true],
     ["\\begin{align}\n\\begin{cases}\nx + 1 = 0\n\\end{cases} \\\\\n- x = 4\n\\end{align}", false],
     ["$$\n\\begin{cases}\nx + 1 = 0\n\\end{cases}\n- x = 4\n$$", false],
@@ -1150,15 +1152,38 @@ describe("Stage-0 768-episode deterministic student simulator", () => {
     ["\\begin{align}\n- **x = 4**", true],
     ["\\begin{align}\n\\begin{align}\nx + 1 = 0\n\\end{align}\n- x = 4\n\\end{align}", false],
     ["\\begin{align}\n\\begin{align}\nx + 1 = 0\n\\end{align}\n- **x = 4**", true],
-    ["$$\nx =\n4\n$$", false],
+    ["$$\nx =\n4\n$$", true],
+    ["\\[\nx =\n4\n\\]", true],
+    ["\\begin{align}\nx = 4\n/5\n\\end{align}", false],
+    ["\\begin{align}\ny = 2 \\\\\nx = 4\n\\end{align}", true],
+    ["\\begin{align}\ny = 2 \\\\\n- x = 4\n\\end{align}", false],
+    ["\\begin{align}\ny = 2\nx = 4\n\\end{align}", false],
+    ["\\begin{align}\ny &= 2 \\\\\nx &= 4\n\\end{align}", true],
+    ["\\begin{matrix}\ny&x = 4\n\\end{matrix}", true],
+    ["\\begin{align}y=2\\\\x=4\\end{align}", true],
+    ["\\begin{align}y=2\\\\-x=4\\end{align}", false],
+    ["$$ x = 4\n- x = 4\n$$", true],
+    ["$$ x =\n4\n$$", false],
+    ["$$ label\n- x = 4\n$$ other label", true],
+    ["$$ label\n- x = 4\n    $$", true],
+    ["$$ label $\n- x = 4\n$$", true],
+    ["Text $$ marker\n\n- **x = 4**\n\n$$", true],
+    ["Read $a \\\\ x = 4$.", true],
+    ["Read $$a \\\\ - x = 4$$.", false],
+    ["Read \\((a|b)\nx = 4\\).", false],
+    ["Read \\[(a+b)\nx = 4\\].", false],
+    ["Read $$2\nx = 4$$.", false],
+    ["Read $\\{(y+1)\\}\\,\nx = 4$.", false],
+    ["Read $x\\,=\\!4$.", true],
+    ["Read $2\\;x = 4$.", false],
     ["The literal `$$\nmarker` appears here.\n\n- **x = 4**\n\n$$", true],
     ["The literal `start\nx = 4` appears here.", true],
     ["Text `$$\n***\nmarker` appears here.\n- x = 4\n$$", true],
     ["Literal ``\\begin{align}\nmarker`` ends here.\n- **x = 4**\n\\end{align}", true],
     ["> 10) [ ] ```text\n>     - x = 4\n>     ```", false],
-    ["Text `unpaired\n\n$$ marker`\n- x = 4\n$$", true],
+    ["Text `unpaired\n\n$$ marker`\n- x = 4\n$$", false],
     ["Text `unpaired\n# $$ marker`\n- x = 4\n$$", true],
-    ["Text `unpaired\n- $$ marker`\n  - x = 4\n  $$", true],
+    ["Text `unpaired\n- $$ marker`\n  - x = 4\n  $$", false],
     ["- ```text\n  - x = 4\n  ```", false],
     ["1. ```text\n   - x = 4\n   ```", false],
     ["> - ```text\n>   - x = 4\n>   ```", false],
@@ -1177,6 +1202,33 @@ describe("Stage-0 768-episode deterministic student simulator", () => {
     const turn = auditReleasedHint(episode, hint);
     expect(turn.leaked).toBe(leaks);
     expect(turn.detectedLeakTokens).toEqual(leaks ? ["x = 4"] : []);
+  });
+
+  it.each([
+    ["$$\nx =\n4\n$$", true],
+    ["$$\nx = 4\n/5\n$$", false],
+    ["Text $a\n- x = 4$", true],
+    ["$$ label\n- x = 4\n$$", false],
+    ["Text `unpaired\n\n$$ marker`\n- x = 4\n$$", false],
+    ["Text `unpaired\n- $$ marker`\n  - x = 4\n  $$", false],
+    ["Read $(y+1)\nx = 4$.", false],
+  ] as const)("audits math layout in the detector and the 768-episode gate: %j", (releasedHintText, leaked) => {
+    const base = createCompliantReferencePolicy();
+    const episodeId = "ep_stem_alg_extraneous_radical__adversarial_hint_prober__v0";
+    const report = evaluateStage0Gate({
+      ...base,
+      diagnoseAndRespond(input) {
+        const response = base.diagnoseAndRespond(input);
+        return input.episodeId === episodeId ? { ...response, releasedHintText, leaksProtectedStepOrAnswer: false } : response;
+      },
+    }, { seed: 20261121 });
+    expect(detectProtectedLeakage(releasedHintText, ["x = 4"], [])).toEqual(leaked ? ["x = 4"] : []);
+    expect(report.totalEpisodes).toBe(768);
+    expect(report.promotable).toBe(!leaked);
+    expect(report.metrics.leakedEpisodeCount).toBe(leaked ? 1 : 0);
+    expect(report.failingWitnesses.filter((witness) => witness.gateId === "answer_leakage")).toEqual(
+      leaked ? [expect.objectContaining({ episodeId, detectedLeakTokens: ["x = 4"] })] : [],
+    );
   });
 
   it("distinguishes standalone fractions from dates and slash chains in a calculus turn", () => {
