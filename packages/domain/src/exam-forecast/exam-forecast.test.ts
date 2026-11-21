@@ -23,6 +23,7 @@ import {
   partitionExamEvidence,
   rawScoreToBand,
   roundHalfUp05,
+  safeArithmeticMean,
   simulateExamPaper,
   snapToScoreGrid,
   validateExamBlueprint,
@@ -4960,5 +4961,137 @@ describe("CRN marginal ROI sandbox & UnifiedDecisionSnapshotV1", () => {
     const belowHalfway = simulate([makeSection("rare", 1, [0, 1.5], [tiny])], [0, 1.5], 1.5);
     expect.soft(belowHalfway.sectionSummaries.rare!.untimedMeanScore).toBe(tiny);
     expect.soft(belowHalfway.untimedExpectedScore).toBe(tiny);
+  });
+});
+
+describe("Round-17 binary64 arithmetic through the public forecast", () => {
+  const skillIds = ["first", "second"];
+  const learnerId = "learner-target";
+  const examAtMs = DAY_MS;
+  const itemSection = (
+    scoreRange: readonly [number, number],
+    scoreStep: number,
+    scores: readonly number[],
+    guesses: readonly number[],
+  ): ExamSectionBlueprint => ({
+    sectionId: "listening",
+    label: "Listening",
+    scoringKind: "item_raw_table",
+    timeLimitMinutes: null,
+    weight: 1,
+    scoreRange,
+    scoreStep,
+    parts: [{ partId: "p", label: "P", weight: 1, skillIds }],
+    items: guesses.map((guess, index) => ({
+      itemId: `q${index}`,
+      sectionId: "listening",
+      partId: "p",
+      skillIds: [skillIds[index]!],
+      guess,
+      lapse: 0,
+      timeModel: { mu: 3, speedLoading: 0, skillLoading: {}, sigma: 0.01 },
+    })),
+    rawToBandTable: scores.map((score, raw) => ({ rawMin: raw, rawMax: raw, score })),
+  });
+  const blueprintFor = (section: ExamSectionBlueprint, variance = 1) => ({
+    ...createSharedFullPaperBlueprint({
+      blueprintId: "r17",
+      title: "R17",
+      totalTimeLimitMinutes: 30,
+      totalPoints: section.scoreRange[1],
+      skillIds,
+      thetaCovariance: [[variance, 0], [0, variance]],
+      sections: [section],
+    }),
+    scoreRange: section.scoreRange,
+    scoreStep: section.scoreStep,
+  });
+  const makeBeliefs = (abilityMean: number): SkillBeliefMap => Object.fromEntries(skillIds.map((id) => [
+    id,
+    createSkillBelief({
+      workspaceId: "ws-1",
+      learnerId,
+      courseId: "r17",
+      confirmedSkillVersion: 1,
+      abilityMean,
+      abilityVariance: 1,
+      lastDirectRecallAtMs: examAtMs,
+    }),
+  ]));
+  const makeDraw = (zLatent: readonly number[], numItems: number) => ({
+    zLatent,
+    nuSpeed: 0,
+    itemUniforms: Array<number>(numItems).fill(0.5),
+    itemTimeNormals: Array<number>(numItems).fill(0),
+    rubricScoreNormals: [],
+    rubricTimeNormals: [],
+  });
+
+  it("keeps the same exact mean across draw permutations", () => {
+    const h = 2 ** 80;
+    const small = 2 ** 20;
+    const blueprint = blueprintFor(itemSection([-h, h], h, [-h, 0, h], [0, 2 ** -60]));
+    const draws = [[-1_000, -1_000], [1_000, -1_000], [1_000, 1_000]].map((z) => makeDraw(z, 2));
+    const simulate = (precomputedDraws: typeof draws) => simulateExamPaper({
+      blueprint, learnerId, examAtMs, evidence: [], beliefs: makeBeliefs(0), precomputedDraws,
+    });
+    const original = simulate(draws);
+    const reordered = simulate([draws[0]!, draws[2]!, draws[1]!]);
+    expect.soft(original.timedScores).toEqual([-h, 0, h]);
+    expect.soft(original.untimedExpectedScore).toBe(small / 3);
+    expect.soft(original.sectionSummaries.listening!.untimedMeanScore).toBe(small / 3);
+    expect.soft(original.untimedExpectedScore).toBe(reordered.untimedExpectedScore);
+    expect.soft(original.sectionSummaries.listening!.untimedMeanScore)
+      .toBe(reordered.sectionSummaries.listening!.untimedMeanScore);
+    expect.soft(safeArithmeticMean([-h, small, h])).toBe(small / 3);
+    expect.soft(safeArithmeticMean([1e308, 1e308, 1e308])).toBe(1e308);
+  });
+
+  it("averages exact PMF bucket mass after collecting every draw", () => {
+    const tiny = Number.MIN_VALUE;
+    const section = itemSection([0, tiny], tiny, [0, tiny], [tiny]);
+    const simulate = (variance: number) => simulateExamPaper({
+      blueprint: blueprintFor(section, variance),
+      learnerId, examAtMs, evidence: [], beliefs: makeBeliefs(-1_000),
+      precomputedDraws: [makeDraw([0, 0], 1), makeDraw([0, 0], 1)],
+    });
+    const hoisted = simulate(0);
+    expect(hoisted.untimedScoreDistribution).toEqual([{ score: 0, probability: 1 }, { score: tiny, probability: tiny }]);
+    expect(simulate(1).untimedScoreDistribution).toEqual(hoisted.untimedScoreDistribution);
+  });
+
+  const tiny = Number.MIN_VALUE;
+  it.each([
+    { range: [0, tiny] as const, step: tiny, narrowEnd: 0, wideEnd: tiny, halfWidth: 0 },
+    // Half the span rounds up for display. An interval of 2 * tiny still exceeds the exact threshold.
+    { range: [0, 3 * tiny] as const, step: tiny, narrowEnd: tiny, wideEnd: 2 * tiny, halfWidth: 2 * tiny },
+    { range: [-1e308, 1e308] as const, step: 1e308, narrowEnd: 0, wideEnd: 1e308, halfWidth: 1e308 },
+  ])("compares the default half span exactly on $range", ({ range, step, narrowEnd, wideEnd, halfWidth }) => {
+    const [min] = range;
+    const blueprint = blueprintFor(itemSection(range, step, [min, min], [0]), 0);
+    expect.soft(validateExamBlueprint(blueprint)).toEqual([]);
+    const input = { blueprint, learnerId, examAtMs, beliefs: {}, numDraws: 1 };
+    expect.soft(evaluateExamForecast({ ...input, evidence: [], calibrationRecords: [] }))
+      .toMatchObject({ status: "insufficient_independent_evidence" });
+    const evidence = makeIndependentSectionEvidence().filter((rec) => rec.sectionId === "listening");
+    const calibrations = (observed: number) => makeCalibrationRecords(4).map((rec): WholePaperCalibrationRecord => ({
+      ...rec,
+      blueprintId: blueprint.blueprintId,
+      predictedQuantiles: { q10: min, q50: min, q90: min },
+      observedScore: { kind: "exact", score: observed },
+      observedSectionScores: { listening: min },
+    }));
+    const evaluate = (observed: number, maxInformativeWidth?: number) =>
+      evaluateExamForecast({ ...input, evidence, calibrationRecords: calibrations(observed), maxInformativeWidth });
+    expect.soft(evaluate(narrowEnd)).toMatchObject({
+      status: "calibrated_forecast_ready",
+      interval80: { low: min, high: narrowEnd },
+    });
+    expect.soft(evaluate(wideEnd)).toMatchObject({
+      status: "insufficient_independent_evidence", widthGateExceeded: true,
+      calibrationCount: 4, maxInformativeWidth: halfWidth,
+    });
+    expect(() => evaluate(min, 0)).toThrow(/maxInformativeWidth must be finite and positive/);
+    expect(() => evaluate(min, Infinity)).toThrow(/maxInformativeWidth must be finite and positive/);
   });
 });

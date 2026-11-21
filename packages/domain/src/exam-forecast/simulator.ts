@@ -1,8 +1,14 @@
 import { retrievability, type SkillBeliefV1 } from "../epistemic/belief";
 import {
+  addFiniteFloatToExponentBuckets,
+  addToExponentBucket,
   choleskyDecompose,
   computeIeltsOverallBand,
+  decomposeFiniteFloat,
   defineRecordEntry,
+  exactRationalPow2ToNumber,
+  foldExponentBuckets,
+  MIN_BINARY64_UNIT_EXPONENT,
   rawScoreToBand,
   roundHalfUp05,
   safeArithmeticMean,
@@ -595,65 +601,6 @@ type PrecomputedUntimedSection = {
   readonly untimedMean: number;
 };
 
-const FLOAT64_VIEW = new DataView(new ArrayBuffer(8));
-const MIN_BINARY64_UNIT_EXPONENT = -1074;
-
-// Finite binary64 values are signed integer significands times a power of two.
-function decomposeFiniteFloat(value: number): { significand: number; exponent: number } {
-  FLOAT64_VIEW.setFloat64(0, value);
-  const hi = FLOAT64_VIEW.getUint32(0);
-  const lo = FLOAT64_VIEW.getUint32(4);
-  const sign = (hi >>> 31) === 0 ? 1 : -1;
-  const rawExponent = (hi >>> 20) & 0x7ff;
-  const fraction = (hi & 0xfffff) * 2 ** 32 + lo;
-  if (rawExponent === 0) {
-    return { significand: sign * fraction, exponent: MIN_BINARY64_UNIT_EXPONENT };
-  }
-  return { significand: sign * (2 ** 52 + fraction), exponent: rawExponent - 1075 };
-}
-
-function addToExponentBucket(buckets: bigint[], offset: number, significand: bigint): void {
-  const index = offset >> 5;
-  buckets[index] = (buckets[index] ?? 0n) + (significand << BigInt(offset & 31));
-}
-
-function foldExponentBuckets(buckets: readonly bigint[]): bigint {
-  let total = 0n;
-  let previousIndex = buckets.length - 1;
-  for (let index = previousIndex; index >= 0; index--) {
-    const coefficient = buckets[index];
-    if (coefficient === undefined || coefficient === 0n) continue;
-    total = (total << BigInt((previousIndex - index) * 32)) + coefficient;
-    previousIndex = index;
-  }
-  return total << BigInt(previousIndex * 32);
-}
-
-function exactRationalPow2ToNumber(num: bigint, den: bigint, pow2Offset: number): number {
-  if (num === 0n) return 0;
-  const sign = num < 0n ? -1 : 1;
-  const magnitude = num < 0n ? -num : num;
-  const bitLengthDiff = magnitude.toString(2).length - den.toString(2).length;
-  const belowPower = bitLengthDiff >= 0
-    ? magnitude < (den << BigInt(bitLengthDiff))
-    : (magnitude << BigInt(-bitLengthDiff)) < den;
-  const exponent = bitLengthDiff + pow2Offset - (belowPower ? 1 : 0);
-  if (exponent > 1023) return sign * Infinity;
-
-  // Round in units of one ULP, including the fixed spacing of subnormals.
-  const unitExponent = Math.max(MIN_BINARY64_UNIT_EXPONENT, exponent - 52);
-  const shift = pow2Offset - unitExponent;
-  const dividend = shift >= 0 ? magnitude << BigInt(shift) : magnitude;
-  const divisor = shift < 0 ? den << BigInt(-shift) : den;
-  let significand = dividend / divisor;
-  const twiceRemainder = (dividend % divisor) << 1n;
-  if (twiceRemainder > divisor || (twiceRemainder === divisor && (significand & 1n) === 1n)) {
-    significand += 1n;
-  }
-  // The rounded integer (including a carry to 2^53) is exactly representable.
-  return sign * Number(significand) * 2 ** unitExponent;
-}
-
 function computeDiscreteExpectation(
   states: Iterable<readonly [number, number]>,
   minClamp: number,
@@ -1155,6 +1102,16 @@ function addToPmfWithCap(pmf: Map<number, number>, key: number, prob: number, ot
   }
 }
 
+function addUntimedPmfMass(pmf: Map<number, bigint[]>, score: number, prob: number): void {
+  let buckets = pmf.get(score);
+  if (buckets === undefined) {
+    assertPmfCapacity(pmf.size);
+    buckets = [];
+    pmf.set(score, buckets);
+  }
+  addFiniteFloatToExponentBuckets(buckets, prob);
+}
+
 type ScaledFloat = { readonly m: number; readonly e: number };
 
 const SCALED_ZERO: ScaledFloat = { m: 0, e: 0 };
@@ -1303,15 +1260,14 @@ function convolveWeightedSections(
 function addDistToUntimedOverallPmf(
   result: WeightedConvolutionResult,
   blueprint: ExamBlueprintV1,
-  drawWeight: number,
-  targetPmf: Map<number, number>,
+  targetPmf: Map<number, bigint[]>,
 ): number {
   const [bpMin, bpMax] = blueprint.scoreRange;
   const snappedStates: Array<readonly [number, number]> = [];
   const recordScore = (score: number, prob: number): void => {
     const clamped = clamp(score, bpMin, bpMax);
     const snapped = snapToScoreGrid(clamped, blueprint.scoreRange, blueprint.scoreStep, "nearest");
-    addToPmfWithCap(targetPmf, snapped, prob * drawWeight);
+    addUntimedPmfMass(targetPmf, snapped, prob);
     snappedStates.push([snapped, prob]);
   };
   for (const [score, prob] of result.finite) recordScore(score, prob);
@@ -1426,7 +1382,7 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
     partTotalItemCounts.set(section.sectionId, secTotalParts);
   }
 
-  const untimedOverallPmf = new Map<number, number>();
+  const untimedPmfMass = new Map<number, bigint[]>();
   const untimedDrawMeans: number[] = [];
   const pmfOpsBudget: PmfOpsBudget = { remaining: MAX_PMF_CONVOLUTION_OPS };
 
@@ -1464,7 +1420,7 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
       if (hoistedWeightedPrefixLen === blueprint.sections.length) {
         allUntimedPmfHoisted = true;
         untimedDrawMeans.push(
-          addDistToUntimedOverallPmf(hoistedWeightedPrefixResult, blueprint, 1, untimedOverallPmf),
+          addDistToUntimedOverallPmf(hoistedWeightedPrefixResult, blueprint, untimedPmfMass),
         );
       }
     }
@@ -1557,7 +1513,7 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
             writingTasks: staticWritingTasks,
             speaking: staticS,
           });
-          addToPmfWithCap(untimedOverallPmf, overall, probLR);
+          addUntimedPmfMass(untimedPmfMass, overall, probLR);
           hoistedMean += overall * probLR;
         }
         untimedDrawMeans.push(hoistedMean);
@@ -1697,7 +1653,6 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
     if (sampleRightCensoredItems.length === 0 && drawCensoredItems.length > 0) sampleRightCensoredItems = drawCensoredItems;
     drawSectionScores.push(timedSectionBand);
 
-    const drawWeight = 1 / draws.length;
     if (blueprint.aggregationMode === "ielts_overall_half_up") {
       const listening = readRequiredOwnScore(timedSectionBand, "listening");
       const reading = readRequiredOwnScore(timedSectionBand, "reading");
@@ -1739,7 +1694,7 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
               writingTasks: untimedWritingTasks,
               speaking: uS,
             });
-            addToPmfWithCap(untimedOverallPmf, overall, probLR * drawWeight);
+            addUntimedPmfMass(untimedPmfMass, overall, probLR);
             drawUntimedMean += overall * probLR;
           }
           untimedDrawMeans.push(drawUntimedMean);
@@ -1765,7 +1720,7 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
                 writingTasks: untimedWritingTasks,
                 speaking: uS,
               });
-              addToPmfWithCap(untimedOverallPmf, overall, rawProb * drawWeight);
+              addUntimedPmfMass(untimedPmfMass, overall, rawProb);
               drawUntimedMean += overall * rawProb;
             }
           }
@@ -1789,10 +1744,19 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
           untimedContinuousSections,
           pmfOpsBudget,
         );
-        untimedDrawMeans.push(addDistToUntimedOverallPmf(drawDist, blueprint, drawWeight, untimedOverallPmf));
+        untimedDrawMeans.push(addDistToUntimedOverallPmf(drawDist, blueprint, untimedPmfMass));
       }
     }
   }
+
+  // A fully hoisted PMF contributes one distribution. Otherwise average all draws once per score.
+  const pmfDrawCount = allUntimedPmfHoisted || allIeltsUntimedPmfHoisted ? 1n : BigInt(draws.length);
+  const untimedScoreDistribution: ScoreBucketProbability[] = [];
+  for (const [score, buckets] of untimedPmfMass) {
+    const probability = exactRationalPow2ToNumber(foldExponentBuckets(buckets), pmfDrawCount, MIN_BINARY64_UNIT_EXPONENT);
+    if (probability > 0) untimedScoreDistribution.push({ score, probability });
+  }
+  untimedScoreDistribution.sort((a, b) => a.score - b.score);
 
   const [bpMinScore, bpMaxScore] = blueprint.scoreRange;
   const sortedTimed = [...timedScores].sort((a, b) => a - b);
@@ -1825,10 +1789,6 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
       partCensoringRates: partRates,
     });
   }
-
-  const untimedScoreDistribution: ScoreBucketProbability[] = [...untimedOverallPmf.entries()]
-    .sort(([a], [b]) => a - b)
-    .map(([score, probability]) => ({ score, probability }));
 
   const q10 = clamp(percentileSorted(sortedTimed, 0.1), bpMinScore, bpMaxScore);
   const q50 = clamp(percentileSorted(sortedTimed, 0.5), q10, bpMaxScore);

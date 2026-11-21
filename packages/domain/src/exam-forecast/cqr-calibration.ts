@@ -1,4 +1,11 @@
-import { IELTS_ACADEMIC_V1_BLUEPRINT, snapToScoreGrid, validateExamBlueprint } from "./ielts-blueprint";
+import {
+  exactRationalPow2ToNumber,
+  IELTS_ACADEMIC_V1_BLUEPRINT,
+  MIN_BINARY64_UNIT_EXPONENT,
+  snapToScoreGrid,
+  toBinary64Units,
+  validateExamBlueprint,
+} from "./ielts-blueprint";
 import { IELTS_ACADEMIC_DIAGNOSTIC_SEEDS } from "./ielts-diagnostic-seeds";
 import {
   DEFAULT_EXAM_SIMULATION_DRAWS,
@@ -568,9 +575,8 @@ export function evaluateExamForecast(input: {
   }
 
   const targetKind: ForecastTargetKind = input.targetKind ?? "same_blueprint_mock";
-  const [minScore, maxScore] = input.blueprint.scoreRange;
-  const maxInformativeWidth = input.maxInformativeWidth ?? (maxScore - minScore) * 0.5;
-  if (!Number.isFinite(maxInformativeWidth) || maxInformativeWidth <= 0) {
+  const explicitWidth = input.maxInformativeWidth;
+  if (explicitWidth !== undefined && (!Number.isFinite(explicitWidth) || explicitWidth <= 0)) {
     throw new RangeError("maxInformativeWidth must be finite and positive");
   }
   const numDraws = validateNumDraws(input.numDraws, DEFAULT_EXAM_SIMULATION_DRAWS);
@@ -684,7 +690,20 @@ export function evaluateExamForecast(input: {
   }
   const { k: effectiveK, conformalMargin: rK, low, high, width, pointEstimate } = interval;
 
-  if (width > maxInformativeWidth) {
+  let maxInformativeWidth: number;
+  let widthGateExceeded: boolean;
+  if (explicitWidth === undefined) {
+    const [minScore, maxScore] = input.blueprint.scoreRange;
+    const exactSpan = toBinary64Units(maxScore) - toBinary64Units(minScore);
+    const exactIntervalWidth = toBinary64Units(high) - toBinary64Units(low);
+    widthGateExceeded = (exactIntervalWidth << 1n) > exactSpan;
+    // The receipt still reports a number, which can round a half-subnormal to zero.
+    maxInformativeWidth = exactRationalPow2ToNumber(exactSpan, 2n, MIN_BINARY64_UNIT_EXPONENT);
+  } else {
+    maxInformativeWidth = explicitWidth;
+    widthGateExceeded = width > explicitWidth;
+  }
+  if (widthGateExceeded) {
     const allSectionIds = input.blueprint.sections.map((s) => s.sectionId);
     return {
       schemaVersion: 1,

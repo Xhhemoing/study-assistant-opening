@@ -53,45 +53,91 @@ export function roundHalfUp05(score: number): number {
   return Math.floor(clamped * 2 + 0.5) / 2;
 }
 
-/** Overflow-safe arithmetic mean preserving bit-for-bit `sum / n` when finite. */
+const FLOAT64_VIEW = new DataView(new ArrayBuffer(8));
+export const MIN_BINARY64_UNIT_EXPONENT = -1074;
+
+// Finite binary64 values are signed integer significands times a power of two.
+export function decomposeFiniteFloat(value: number): { significand: number; exponent: number } {
+  FLOAT64_VIEW.setFloat64(0, value);
+  const hi = FLOAT64_VIEW.getUint32(0);
+  const lo = FLOAT64_VIEW.getUint32(4);
+  const sign = (hi >>> 31) === 0 ? 1 : -1;
+  const rawExponent = (hi >>> 20) & 0x7ff;
+  const fraction = (hi & 0xfffff) * 2 ** 32 + lo;
+  if (rawExponent === 0) {
+    return { significand: sign * fraction, exponent: MIN_BINARY64_UNIT_EXPONENT };
+  }
+  return { significand: sign * (2 ** 52 + fraction), exponent: rawExponent - 1075 };
+}
+
+export function addToExponentBucket(buckets: bigint[], offset: number, significand: bigint): void {
+  const index = offset >> 5;
+  buckets[index] = (buckets[index] ?? 0n) + (significand << BigInt(offset & 31));
+}
+
+export function foldExponentBuckets(buckets: readonly bigint[]): bigint {
+  let total = 0n;
+  let previousIndex = buckets.length - 1;
+  for (let index = previousIndex; index >= 0; index--) {
+    const coefficient = buckets[index];
+    if (coefficient === undefined || coefficient === 0n) continue;
+    total = (total << BigInt((previousIndex - index) * 32)) + coefficient;
+    previousIndex = index;
+  }
+  return total === 0n ? 0n : total << BigInt(previousIndex * 32);
+}
+
+export function exactRationalPow2ToNumber(num: bigint, den: bigint, pow2Offset: number): number {
+  if (num === 0n) return 0;
+  const sign = num < 0n ? -1 : 1;
+  const magnitude = num < 0n ? -num : num;
+  const bitLengthDiff = magnitude.toString(2).length - den.toString(2).length;
+  const belowPower = bitLengthDiff >= 0
+    ? magnitude < (den << BigInt(bitLengthDiff))
+    : (magnitude << BigInt(-bitLengthDiff)) < den;
+  const exponent = bitLengthDiff + pow2Offset - (belowPower ? 1 : 0);
+  if (exponent > 1023) return sign * Infinity;
+
+  // Round in units of one ULP, including the fixed spacing of subnormals.
+  const unitExponent = Math.max(MIN_BINARY64_UNIT_EXPONENT, exponent - 52);
+  const shift = pow2Offset - unitExponent;
+  const dividend = shift >= 0 ? magnitude << BigInt(shift) : magnitude;
+  const divisor = shift < 0 ? den << BigInt(-shift) : den;
+  let significand = dividend / divisor;
+  const twiceRemainder = (dividend % divisor) << 1n;
+  if (twiceRemainder > divisor || (twiceRemainder === divisor && (significand & 1n) === 1n)) {
+    significand += 1n;
+  }
+  // The rounded integer (including a carry to 2^53) is exactly representable.
+  return sign * Number(significand) * 2 ** unitExponent;
+}
+
+export function toBinary64Units(value: number): bigint {
+  const { significand, exponent } = decomposeFiniteFloat(value);
+  return BigInt(significand) << BigInt(exponent - MIN_BINARY64_UNIT_EXPONENT);
+}
+
+export function addFiniteFloatToExponentBuckets(buckets: bigint[], value: number): void {
+  if (value === 0) return;
+  const { significand, exponent } = decomposeFiniteFloat(value);
+  addToExponentBucket(buckets, exponent - MIN_BINARY64_UNIT_EXPONENT, BigInt(significand));
+}
+
+/** Arithmetic mean with exact finite accumulation and one binary64 rounding. */
 export function safeArithmeticMean(values: readonly number[]): number {
-  const n = values.length;
-  if (n === 0) return 0;
-  let sum = 0;
-  let minVal = Infinity;
-  let maxVal = -Infinity;
-  for (let i = 0; i < n; i++) {
-    const v = values[i]!;
-    sum += v;
-    if (v < minVal) minVal = v;
-    if (v > maxVal) maxVal = v;
-  }
-  if (Number.isFinite(sum)) {
-    return Math.min(maxVal, Math.max(minVal, sum / n));
-  }
-  const span = maxVal - minVal;
-  if (Number.isFinite(span)) {
-    let offsetSum = 0;
-    for (let i = 0; i < n; i++) {
-      offsetSum += values[i]! - minVal;
+  if (values.length === 0) return 0;
+  if (values.length === 1) return values[0]!;
+  const buckets = new Array<bigint>(68);
+  let nonFiniteSum = 0;
+  for (const value of values) {
+    if (Number.isFinite(value)) {
+      addFiniteFloatToExponentBuckets(buckets, value);
+    } else {
+      nonFiniteSum += value;
     }
-    if (Number.isFinite(offsetSum)) {
-      return Math.min(maxVal, Math.max(minVal, minVal + offsetSum / n));
-    }
-    let scaledOffsetSum = 0;
-    for (let i = 0; i < n; i++) {
-      scaledOffsetSum += (values[i]! - minVal) / n;
-    }
-    return Math.min(maxVal, Math.max(minVal, minVal + scaledOffsetSum));
   }
-  let posAvg = 0;
-  let negAvg = 0;
-  for (let i = 0; i < n; i++) {
-    const v = values[i]!;
-    if (v >= 0) posAvg += v / n;
-    else negAvg += v / n;
-  }
-  return Math.min(maxVal, Math.max(minVal, posAvg + negAvg));
+  if (nonFiniteSum !== 0) return nonFiniteSum;
+  return exactRationalPow2ToNumber(foldExponentBuckets(buckets), BigInt(values.length), MIN_BINARY64_UNIT_EXPONENT);
 }
 
 export const MAX_SECTION_ITEMS = 500;
@@ -129,8 +175,22 @@ function cleanGridPoint(raw: number, minScore: number, step: number): number {
   return Object.is(raw, -0) ? 0 : raw;
 }
 
+function rawGridPointAt(minScore: number, step: number, index: number): number {
+  const offset = index * step;
+  if (Number.isFinite(offset)) return minScore + offset;
+  // The offset may overflow even though adding the negative origin gives a finite point.
+  const exactPoint = toBinary64Units(minScore) + BigInt(index) * toBinary64Units(step);
+  return exactRationalPow2ToNumber(exactPoint, 1n, MIN_BINARY64_UNIT_EXPONENT);
+}
+
 function gridPointAt(minScore: number, step: number, index: number): number {
-  return cleanGridPoint(minScore + index * step, minScore, step);
+  return cleanGridPoint(rawGridPointAt(minScore, step, index), minScore, step);
+}
+
+function scoreGridUnits(score: number, origin: number, step: number): number {
+  const span = score - origin;
+  if (Number.isFinite(span)) return span / step;
+  return exactRationalPow2ToNumber(toBinary64Units(score) - toBinary64Units(origin), toBinary64Units(step), 0);
 }
 
 function resolveAlignedScoreGridSteps(minScore: number, maxScore: number, step: number): number | null {
@@ -140,8 +200,7 @@ function resolveAlignedScoreGridSteps(minScore: number, maxScore: number, step: 
   if (!Number.isFinite(step) || step <= 0) {
     return null;
   }
-  const span = maxScore - minScore;
-  const rawSteps = span / step;
+  const rawSteps = scoreGridUnits(maxScore, minScore, step);
   if (!Number.isFinite(rawSteps)) {
     return null;
   }
@@ -149,7 +208,7 @@ function resolveAlignedScoreGridSteps(minScore: number, maxScore: number, step: 
   if (nearestSteps < 1 || nearestSteps > MAX_SCORE_GRID_STEPS) {
     return null;
   }
-  const rawMax = minScore + nearestSteps * step;
+  const rawMax = rawGridPointAt(minScore, step, nearestSteps);
   if (!Number.isFinite(rawMax)) {
     return null;
   }
@@ -185,7 +244,7 @@ export function snapToScoreGrid(
   if (alignedSteps !== null) {
     maxK = alignedSteps;
   } else {
-    const rawSteps = (maxScore - minScore) / step;
+    const rawSteps = scoreGridUnits(maxScore, minScore, step);
     if (!Number.isFinite(rawSteps) || rawSteps > MAX_SCORE_GRID_STEPS) {
       throw new RangeError(`Score grid step count exceeds limit (${MAX_SCORE_GRID_STEPS})`);
     }
@@ -207,7 +266,7 @@ export function snapToScoreGrid(
   if (clampedValue <= minScore) return pointAt(0);
   if (alignedSteps !== null && clampedValue >= maxScore) return pointAt(maxK);
 
-  const relUnits = (clampedValue - minScore) / step;
+  const relUnits = scoreGridUnits(clampedValue, minScore, step);
   const clampK = (candidate: number): number => Math.min(maxK, Math.max(0, candidate));
   const kFloor = clampK(Math.floor(relUnits));
   const kCeil = clampK(Math.ceil(relUnits));
