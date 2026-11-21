@@ -1,13 +1,15 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
-import { openingJobScope, createOpeningJobRepository, createOpeningPdfSegmentsRepository, createOpeningSourceChunksRepository,
-  createOpeningSourceRepository, readOpeningSourceContent } from "@aistudy/database";
+import { OpeningModelRoutingError } from "@aistudy/ai";
+import { sourceRecordSchema } from "@aistudy/contracts";
+import { openingJobScope, createOpeningJobRepository, createOpeningPdfSegmentsRepository, createOpeningPrivacyRepository,
+  createOpeningSourceChunksRepository, createOpeningSourceRepository, readOpeningSourceContent } from "@aistudy/database";
 import { createOpeningSourceService } from "../../apps/web/src/features/opening/sources/source-service";
 import { createOpeningTestStorage } from "./opening-storage-fixture";
-import { createParseSourceHandler } from "../../apps/worker/src/jobs/parse-source";
+import { createParseSourceHandler, type ParseSourceVisualPageInput } from "../../apps/worker/src/jobs/parse-source";
 import { runJob } from "../../apps/worker/src/runtime/run-job";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 
@@ -15,18 +17,18 @@ let f: OpeningFixture;
 beforeAll(async () => { f = await createOpeningFixture(); });
 afterAll(async () => { await f?.close(); });
 const originalText = "This first page is already readable and its existing citation must remain stable across a retry.";
-async function seedRetry(partial = false) {
+async function seedRetry(partial = false, publishedText = originalText, pdfTextCap?: number[]) {
   const sourceId = randomUUID(), bytes = Buffer.from("%PDF synthetic retry");
   const sources = createOpeningSourceRepository(f.sql), chunks = createOpeningSourceChunksRepository(f.sql);
   const jobs = createOpeningJobRepository(f.sql);
   await f.sql`INSERT INTO opening_sources(id,workspace_id,name,mime,bytes,sha256,version,upload_state,parse_state)
-    VALUES (${sourceId},${f.scope.workspaceId},'retry.pdf','application/pdf',${bytes.length},${"a".repeat(64)},0,'uploaded','failed')`;
+    VALUES (${sourceId},${f.scope.workspaceId},'retry.pdf','application/pdf',${bytes.length},${createHash("sha256").update(bytes).digest("hex")},0,'uploaded','failed')`;
   await chunks.replaceChunks(f.scope, { sourceId, sourceVersion: 0, chunks: [
-    { page: 1, slideLabel: null, startMs: null, endMs: null, text: originalText, imageObjectKey: null },
+    { page: 1, slideLabel: null, startMs: null, endMs: null, text: publishedText, imageObjectKey: null },
   ] });
   const original = await chunks.listChunks(f.scope, sourceId);
-  await sources.markParseState(f.scope, sourceId, partial ? "ready" : "failed",
-    { code: partial ? "PARSE_PARTIAL" : "PARSE_FAILED", message: "interrupted", retryable: true });
+  const error = { code: partial ? "PARSE_PARTIAL" : "PARSE_FAILED", message: "interrupted", retryable: true, pdfTextCap };
+  await sources.markParseState(f.scope, sourceId, partial ? "ready" : "failed", error);
   const service = createOpeningSourceService(f.sql, createOpeningTestStorage());
   expect(await service.retryParse({ userId: f.scope.ownerUserId, workspaceId: f.scope.workspaceId, sessionId: "pdf-retry" }, sourceId))
     .toMatchObject({ id: sourceId, version: 0, parseState: "queued", error: null });
@@ -76,6 +78,112 @@ it("runs a normal partial retry through service, outbox target, Worker and both 
   } finally { await rm(tempDir, { recursive: true, force: true }); }
 });
 
+it.each(["native", "vision"] as const)("retains a %s text cap and its citation through a successful queued retry", async textSource => {
+  const sourceId = randomUUID(), bytes = Buffer.from("%PDF capped retry");
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "pdf-capped-retry-"));
+  const sources = createOpeningSourceRepository(f.sql), chunks = createOpeningSourceChunksRepository(f.sql);
+  const jobs = createOpeningJobRepository(f.sql);
+  const payload = { sourceId, sourceVersion: 0 };
+  const privacyEpoch = await jobs.workspacePrivacyEpoch(f.scope.workspaceId);
+  const cappedText = "x".repeat(100_001);
+  const cappedMessage = "第 1 页达到文本长度上限，已保留原文或截短";
+  let retry = false;
+  const recognizePage = vi.fn(async ({ physicalPage }: ParseSourceVisualPageInput) => {
+    if (physicalPage === 1) return { text: cappedText, imageObjectKey: "recognized/1" };
+    if (retry) return { text: "Recovered second page", imageObjectKey: "recognized/2" };
+    throw new OpeningModelRoutingError("vision route unavailable");
+  });
+  try {
+    await f.sql`INSERT INTO opening_sources(id,workspace_id,name,mime,bytes,sha256,version,upload_state,parse_state)
+      VALUES (${sourceId},${f.scope.workspaceId},'cap.pdf','application/pdf',${bytes.length},${createHash("sha256").update(bytes).digest("hex")},0,'uploaded','queued')`;
+    const first = await jobs.createOnce(f.scope, { kind: "parse", key: randomUUID(), payload, privacyEpoch });
+    const handler = createParseSourceHandler({ sources, chunks, tempDir, recognizePage,
+      segments: createOpeningPdfSegmentsRepository(f.sql),
+      storage: { finalKey: () => "synthetic-original", presignGet: async () => `data:application/pdf;base64,${bytes.toString("base64")}` },
+      runner: async argv => ({ exitCode: 0, stdout: JSON.stringify(argv.includes("--inspect-pdf") ? { pageCount: 2 } : { pages: [
+        { page: 1, text: textSource === "native" ? cappedText : "", imagePath: null },
+        { page: 2, text: "", imagePath: null },
+      ] }) }),
+    });
+    expect(await runJob(jobs, first.id, handler)).toBe(true);
+    const firstSource = sourceRecordSchema.parse(await sources.get(f.scope, sourceId));
+    expect(firstSource.error).toEqual({ code: "PARSE_PARTIAL", retryable: true,
+      message: `第 2 页未能识别，可以重新解析；${cappedMessage}` });
+    const [original] = await chunks.listChunks(f.scope, sourceId);
+    expect(original?.text).toHaveLength(100_000);
+
+    const service = createOpeningSourceService(f.sql, createOpeningTestStorage());
+    const queued = await service.retryParse({ userId: f.scope.ownerUserId, workspaceId: f.scope.workspaceId, sessionId: "capped-retry" }, sourceId);
+    expect(sourceRecordSchema.parse(queued)).toMatchObject({ parseState: "queued", error: null });
+    const [second] = await f.sql`SELECT id FROM opening_jobs WHERE workspace_id=${f.scope.workspaceId}
+      AND kind='parse' AND payload->>'sourceId'=${sourceId} AND state='queued'`;
+    retry = true;
+    recognizePage.mockClear();
+    expect(await runJob(jobs, String(second!.id), handler)).toBe(true);
+    const final = sourceRecordSchema.parse(await sources.get(f.scope, sourceId));
+    expect(final.error).toEqual({ code: "PARSE_PARTIAL", message: cappedMessage, retryable: false });
+    expect(await chunks.listChunks(f.scope, sourceId)).toEqual([original,
+      expect.objectContaining({ page: 2, text: "[视觉转写与描述]\nRecovered second page" }),
+    ]);
+    expect(recognizePage).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ physicalPage: 2 }));
+  } finally { await rm(tempDir, { recursive: true, force: true }); }
+});
+
+it("retains an exact citation when retry enrichment exceeds the text limit and publishes recovered pages", async () => {
+  const native = "n".repeat(90_000);
+  const d = await seedRetry(true, native), tempDir = await mkdtemp(path.join(os.tmpdir(), "pdf-retry-text-limit-"));
+  try {
+    const handler = createParseSourceHandler({ sources: d.sources, chunks: d.chunks, tempDir,
+      segments: createOpeningPdfSegmentsRepository(f.sql),
+      storage: { finalKey: () => "synthetic-original", presignGet: async () => `data:application/pdf;base64,${d.bytes.toString("base64")}` },
+      runner: async argv => ({ exitCode: 0, stdout: JSON.stringify(argv.includes("--inspect-pdf")
+        ? { pageCount: 4 } : { pages: [
+          { page: 1, text: native, imagePath: null, visualKinds: ["formula"] },
+          { page: 2, text: `${"n".repeat(99_999)}😀tail`, imagePath: null },
+          { page: 3, text: "", imagePath: null },
+          { page: 4, text: native, imagePath: null, visualKinds: ["formula"] },
+        ] }) }),
+      recognizePage: async ({ physicalPage }) => ({
+        text: "v".repeat(physicalPage === 3 ? 100_001 : 12_000), imageObjectKey: `recognized/${physicalPage}`,
+      }),
+    });
+    expect(await runJob(d.jobs, d.id, handler)).toBe(true);
+    expect(await d.jobs.get(f.scope, d.id)).toMatchObject({ state: "succeeded", result: { pages: 4 } });
+    const saved = await d.chunks.listChunks(f.scope, d.sourceId);
+    expect(saved.map(chunk => chunk.page)).toEqual([1, 2, 3, 4]);
+    expect(saved[0]).toEqual(d.original[0]);
+    expect(saved[1]?.text).toBe("n".repeat(99_999));
+    expect(saved[2]?.imageObjectKey).toBe("recognized/3");
+    expect(saved[2]?.text).toContain("v".repeat(99_000));
+    expect(saved[3]?.text).toContain(native);
+    for (const chunk of saved) {
+      expect(chunk.text.length).toBeLessThanOrEqual(100_000);
+      expect(Array.from(chunk.text)).toHaveLength(chunk.text.length);
+    }
+    expect(await d.sources.get(f.scope, d.sourceId)).toMatchObject({
+      parseState: "ready", error: { code: "PARSE_PARTIAL", message: expect.stringContaining("长度上限"), retryable: false },
+    });
+  } finally { await rm(tempDir, { recursive: true, force: true }); }
+});
+
+it("retains a PostgreSQL-valid legacy citation whose text alone exceeds the UTF-16 staging bound", async () => {
+  const native = "😀".repeat(51_000);
+  const d = await seedRetry(true, native), tempDir = await mkdtemp(path.join(os.tmpdir(), "pdf-retry-legacy-text-"));
+  try {
+    const handler = createParseSourceHandler({ sources: d.sources, chunks: d.chunks, tempDir,
+      segments: createOpeningPdfSegmentsRepository(f.sql),
+      storage: { finalKey: () => "synthetic-original", presignGet: async () => `data:application/pdf;base64,${d.bytes.toString("base64")}` },
+      runner: async argv => ({ exitCode: 0, stdout: JSON.stringify(argv.includes("--inspect-pdf")
+        ? { pageCount: 1 } : { pages: [{ page: 1, text: native, imagePath: null, visualKinds: ["formula"] }] }) }),
+      recognizePage: async () => ({ text: "v".repeat(50_000), imageObjectKey: "recognized/1" }),
+    });
+    expect(await runJob(d.jobs, d.id, handler)).toBe(true);
+    expect(await d.jobs.get(f.scope, d.id)).toMatchObject({ state: "succeeded", result: { pages: 1 } });
+    expect(await d.chunks.listChunks(f.scope, d.sourceId)).toEqual(d.original);
+    expect(await d.sources.get(f.scope, d.sourceId)).toMatchObject({ parseState: "ready", error: { code: "PARSE_PARTIAL" } });
+  } finally { await rm(tempDir, { recursive: true, force: true }); }
+});
+
 it("keeps published pages readable when a normal partial retry fails again in the real parse handler", async () => {
   const d = await seedRetry(true), tempDir = await mkdtemp(path.join(os.tmpdir(), "pdf-retry-fail-"));
   try {
@@ -94,6 +202,30 @@ it("keeps published pages readable when a normal partial retry fails again in th
     expect(await d.sources.get(f.scope, d.sourceId)).toMatchObject({ parseState: "failed", version: 0 });
     await expectPublishedPage(d);
     expect(await d.chunks.listChunks(f.scope, d.sourceId)).toEqual(d.original);
+  } finally { await rm(tempDir, { recursive: true, force: true }); }
+});
+
+it("keeps the exact citation ID in a failed segment while publishing another segment", async () => {
+  const d = await seedRetry(true), tempDir = await mkdtemp(path.join(os.tmpdir(), "pdf-retry-segment-"));
+  try {
+    const handler = createParseSourceHandler({ sources: d.sources, chunks: d.chunks, tempDir, segmentPages: 1,
+      segments: createOpeningPdfSegmentsRepository(f.sql),
+      storage: { finalKey: () => "synthetic-original", presignGet: async () => `data:application/pdf;base64,${d.bytes.toString("base64")}` },
+      runner: async argv => {
+        if (argv.includes("--inspect-pdf")) return { exitCode: 0, stdout: '{"pageCount":2}' };
+        if (argv[argv.indexOf("--page-start") + 1] === "1") return { exitCode: 4, stdout: "" };
+        return { exitCode: 0, stdout: JSON.stringify({ pages: [{ page: 2, text: "Recovered second page", imagePath: null }] }) };
+      },
+    });
+    expect(await runJob(d.jobs, d.id, handler)).toBe(true);
+    const saved = await d.chunks.listChunks(f.scope, d.sourceId);
+    expect(saved.map(chunk => chunk.page)).toEqual([1, 2]);
+    expect(saved[0]).toEqual(d.original[0]);
+    await expectPublishedPage(d);
+    expect(await d.sources.get(f.scope, d.sourceId)).toMatchObject({
+      parseState: "ready", error: { code: "PARSE_PARTIAL", message: "第 1 页未能识别，可以重新解析", retryable: true },
+    });
+    expect(await d.jobs.get(f.scope, d.id)).toMatchObject({ state: "succeeded", result: { pages: 1 } });
   } finally { await rm(tempDir, { recursive: true, force: true }); }
 });
 
@@ -210,4 +342,45 @@ it("records retry failure without replacing saved page identities, and rejects a
   expect(await d.chunks.listChunks(f.scope, d.sourceId)).toEqual(d.original);
   expect(await d.jobs.finish(d.id, "succeeded", { pages: 2 }, randomUUID())).toBe(false);
   expect(await d.sources.get(f.scope, d.sourceId)).toMatchObject({ parseState: "failed" });
+});
+
+it("retains a capped citation and warning after another source makes a queued retry stale", async () => {
+  const d = await seedRetry(true, "x".repeat(100_000), [1]);
+  const staleJob = await d.jobs.get(f.scope, d.id);
+  const other = await d.sources.create(f.scope, {
+    name: "other.pdf", mime: "application/pdf", bytes: 3, sha256: "a".repeat(64),
+  });
+  const privacy = createOpeningPrivacyRepository(f.sql);
+  await privacy.recordExclusions(f.sql, f.scope, { sourceIds: [other.id], memoryId: randomUUID(), deletedAt: new Date() });
+  expect(await privacy.getWorkspaceEpoch(f.scope)).toBe(staleJob.privacyEpoch + 1);
+  const staleHandler = vi.fn();
+  expect(await runJob(d.jobs, d.id, staleHandler)).toBe(false);
+  expect(staleHandler).not.toHaveBeenCalled();
+  const staleSource = await d.sources.get(f.scope, d.sourceId);
+  expect(staleSource.parseState).toBe("failed");
+  expect(staleSource.error).toEqual({ code: "PARSE_STALE", message: "隐私设置已变化，解析结果已丢弃。", retryable: false });
+
+  const service = createOpeningSourceService(f.sql, createOpeningTestStorage());
+  const principal = { userId: f.scope.ownerUserId, workspaceId: f.scope.workspaceId, sessionId: "stale-pdf-retry" };
+  expect(await service.retryParse(principal, d.sourceId)).toMatchObject({ parseState: "queued", error: null });
+  const [retry] = await f.sql`SELECT id FROM opening_jobs WHERE workspace_id=${f.scope.workspaceId}
+    AND kind='parse' AND payload->>'sourceId'=${d.sourceId} AND state='queued'`;
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "pdf-retry-stale-cap-"));
+  try {
+    const handler = createParseSourceHandler({ sources: d.sources, chunks: d.chunks, tempDir, segmentPages: 1,
+      segments: createOpeningPdfSegmentsRepository(f.sql),
+      storage: { finalKey: () => "synthetic-original", presignGet: async () => `data:application/pdf;base64,${d.bytes.toString("base64")}` },
+      runner: async argv => {
+        if (argv.includes("--inspect-pdf")) return { exitCode: 0, stdout: '{"pageCount":2}' };
+        if (argv[argv.indexOf("--page-start") + 1] === "1") return { exitCode: 4, stdout: "" };
+        return { exitCode: 0, stdout: JSON.stringify({ pages: [{ page: 2, text: "Recovered second page", imagePath: null }] }) };
+      },
+    });
+    expect(await runJob(d.jobs, String(retry!.id), handler)).toBe(true);
+    expect(await d.chunks.listChunks(f.scope, d.sourceId)).toEqual([d.original[0],
+      expect.objectContaining({ page: 2, text: "Recovered second page" }),
+    ]);
+    expect((await d.sources.get(f.scope, d.sourceId)).error).toEqual({ code: "PARSE_PARTIAL", retryable: true,
+      message: "第 1 页未能识别，可以重新解析；第 1 页达到文本长度上限，已保留原文或截短" });
+  } finally { await rm(tempDir, { recursive: true, force: true }); }
 });

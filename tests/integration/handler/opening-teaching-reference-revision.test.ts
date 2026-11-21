@@ -40,7 +40,7 @@ async function seed() {
   const spec = await repo.publishActivitySpec(f.scope, { activityId: activity.id, teachingUnitId: unit.id, expectedVersion: 0, revisionNumber: 1,
     blockOrder: blocks.slice(0, 2).map((b, position) => ({ blockId: b.id, blockType: b.type, position, role: position ? "answer_key" as const : "prompt" as const })) });
   const edited = structuredClone(blocks); edited[1]!.content.text = "5";
-  const save = (next = edited, expectedRevisionNumber = 1) => createLibraryRepository(f.sql).updateDocument({ workspaceId: f.scope.workspaceId, documentId: unit.documentId, expectedRevisionNumber, blocks: next });
+  const save = (next = edited, expectedRevisionNumber = 1) => createLibraryRepository(f.sql).updateDocument({ workspaceId: f.scope.workspaceId, documentId: unit.documentId, expectedRevisionNumber, blocks: next, includeAnswerKeys: true });
   return { repo, activity, unit, spec, blocks, edited, save, input: { expectedContentVersion: 1, expectedRevisionNumber: 1, revisionNumber: 2 } };
 }
 describe("explicit saved reference revision", () => {
@@ -135,7 +135,7 @@ describe("explicit saved reference revision", () => {
     ]);
     const before = await history();
     const edited = structuredClone(proof); edited[1]!.content.text = "由平行线同位角得到内角和180度";
-    await createLibraryRepository(f.sql).updateDocument({ workspaceId: f.scope.workspaceId, documentId: unit.documentId, expectedRevisionNumber: 1, blocks: edited });
+    await createLibraryRepository(f.sql).updateDocument({ workspaceId: f.scope.workspaceId, documentId: unit.documentId, expectedRevisionNumber: 1, blocks: edited, includeAnswerKeys: true });
     expect((await POST(request({ expectedContentVersion: 2, expectedRevisionNumber: 1, revisionNumber: 2 }), context(s.activity.id))).status).toBe(200);
     const url = `https://localhost?blockId=${proof[0]!.id}&attemptId=${attempt.id}`;
     expect((await answerKey(new Request(url, { headers: { cookie: f.cookie } }), context(s.activity.id))).status).toBe(409);

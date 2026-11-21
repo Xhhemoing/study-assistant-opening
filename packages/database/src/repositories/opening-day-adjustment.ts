@@ -706,6 +706,9 @@ export function createOpeningDayAdjustmentRepository(
         });
 
         const blockers: string[] = [];
+        if (sourceDate !== current.localDate) {
+          blockers.push("原日期不再是工作区今日，请刷新今日安排后再调整。");
+        }
         if (dayException && dayException.timeZone !== timeZone) {
           blockers.push("工作区时区已在声明今日可用时长后发生变化，请刷新并重新声明今日可用时长。");
         }
@@ -716,6 +719,7 @@ export function createOpeningDayAdjustmentRepository(
         let keptBlocks: PlannedBlock[] = [];
         let removedBlocks: PlannedBlock[] = [];
         let moveTaskIds: string[] = [];
+        const removalFloorMs = Math.max(now.getTime(), effectiveAtMs);
 
         if (hasExplicitDiff) {
           const moveSet = new Set(input.moveTaskIds ?? []);
@@ -729,7 +733,7 @@ export function createOpeningDayAdjustmentRepository(
           }
           for (const block of sourceBeforeBlocks) {
             if (allRequested.has(block.taskId)) {
-              if (Date.parse(block.end) <= effectiveAtMs) {
+              if (Date.parse(block.end) <= removalFloorMs) {
                 blockers.push("已结束的历史时段不能移出，已自动保留。");
                 keptBlocks.push(block);
               } else {
@@ -744,7 +748,7 @@ export function createOpeningDayAdjustmentRepository(
           const fixedPast: PlannedBlock[] = [];
           const adjustableFuture: PlannedBlock[] = [];
           for (const block of sourceBeforeBlocks) {
-            if (Date.parse(block.end) <= effectiveAtMs || activeTeachingTaskIds.has(block.taskId)) {
+            if (Date.parse(block.end) <= removalFloorMs || activeTeachingTaskIds.has(block.taskId)) {
               fixedPast.push(block);
             } else {
               adjustableFuture.push(block);
@@ -1362,6 +1366,12 @@ export function createOpeningDayAdjustmentRepository(
         if (timeZone !== expectedTz) {
           throw new OpeningPlanError("CONFLICT", "工作区时区已变化，请刷新后再确认。", "stale_version");
         }
+        const assertSourceDateCurrent = (now: Date) => {
+          if (localDateKeyInZone(now, timeZone) !== input.sourceDate) {
+            throw new OpeningPlanError("CONFLICT", "已跨过午夜，原日期不再是工作区今日，请刷新今日安排后再调整。", "stale_version");
+          }
+        };
+        assertSourceDateCurrent(clock());
         const sourceBounds = resolveLocalDayBounds(input.sourceDate, timeZone);
         const sourceCap = await readOpeningLearningCapacity(
           tx,
@@ -1422,9 +1432,6 @@ export function createOpeningDayAdjustmentRepository(
           throw new OpeningPlanError("CONFLICT", "当日已有安排已变化，请刷新后再确认。", "stale_version");
         }
         const effectiveAtMs = Date.parse(sourceCap.dayException.effectiveAt);
-        if (removedBlocks.some((block) => Date.parse(block.end) <= effectiveAtMs)) {
-          throw new OpeningPlanError("CONFLICT", "已结束的历史时段不能移出，请刷新核对。", "slot_expired");
-        }
 
         const keptTaskIds = new Set(keptBlocks.map((b) => b.taskId));
         const sourceAddedTaskIds = sourceAddedBlocks.map((b) => b.taskId);
@@ -1579,9 +1586,13 @@ export function createOpeningDayAdjustmentRepository(
           }
         }
 
-        // Read clock ONLY after holding all locks and excluding idempotent replay.
+        // Refresh after the remaining task/retest locks, which can also span midnight.
         const now = clock();
+        assertSourceDateCurrent(now);
         const sourceSlotFloorMs = Math.max(now.getTime(), effectiveAtMs);
+        if (removedBlocks.some((block) => Date.parse(block.end) <= sourceSlotFloorMs)) {
+          throw new OpeningPlanError("CONFLICT", "已结束的历史时段不能移出，请刷新核对。", "slot_expired");
+        }
         for (const block of sourceAddedBlocks) {
           if (Date.parse(block.start) < sourceSlotFloorMs) {
             throw new OpeningPlanError("CONFLICT", "所选今日时段已过期，请刷新后重新选择。", "slot_expired");

@@ -3,6 +3,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { applyMigrations, createSqlClient } from "@aistudy/database";
 import { POST as register } from "../../../apps/web/src/app/api/auth/register/route";
 import { POST as createDocument } from "../../../apps/web/src/app/api/documents/route";
+import { GET as listRevisions } from "../../../apps/web/src/app/api/documents/[id]/revisions/route";
 import { POST as exportMarkdown } from "../../../apps/web/src/app/api/exports/markdown/route";
 import { createAuthRuntime } from "../../../apps/web/src/features/auth/service";
 import { setAuthRuntimeForTests } from "../../../apps/web/src/server/runtime";
@@ -106,5 +107,36 @@ describe("markdown export route", () => {
       request("/api/exports/markdown", "POST", other, { documentId, workspaceId: randomUUID() }),
     );
     expect(denied.status).toBe(403);
+  });
+
+  it("hides historical answer IDs and live answer blocks in revisions and Markdown", async () => {
+    const cookie = await user("owner");
+    const historical = randomUUID(), live = randomUUID(), visible = randomUUID();
+    const created = await createDocument(request("/api/documents", "POST", cookie, {
+      title: "Learner note",
+      blocks: [
+        { id: historical, type: "paragraph", content: { text: "Historical answer secret" } },
+        { id: live, type: "answer_key", content: { text: "Live answer secret" } },
+        { id: visible, type: "paragraph", content: { text: "Public explanation" } },
+      ],
+    }));
+    expect(created.status).toBe(201);
+    const { document } = await created.json() as { document: { id: string; workspaceId: string } };
+    await sql`INSERT INTO opening_note_provenance(document_id,workspace_id,context_source_refs)
+      VALUES(${document.id},${document.workspaceId},${sql.json([{ answerKeyBlockIds: [historical] }])})`;
+
+    const revisions = await listRevisions(request(`/api/documents/${document.id}/revisions`, "GET", cookie), {
+      params: Promise.resolve({ id: document.id }),
+    });
+    const one = await exportMarkdown(request("/api/exports/markdown", "POST", cookie, { documentId: document.id }));
+    const all = await exportMarkdown(request("/api/exports/markdown", "POST", cookie));
+    for (const result of [revisions, one, all]) {
+      expect(result.status).toBe(200);
+      const wire = await result.text();
+      expect(wire).toContain("Public explanation");
+      expect(wire).not.toMatch(/Historical answer secret|Live answer secret/);
+      expect(wire).not.toContain(historical);
+      expect(wire).not.toContain(live);
+    }
   });
 });

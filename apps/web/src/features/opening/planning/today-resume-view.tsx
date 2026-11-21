@@ -44,10 +44,10 @@ export function TodayResumeBody({
     : "/opening/assistant";
 
   return (
-    <>
+    <div className="mx-auto max-w-2xl space-y-4 px-4 py-6 sm:px-6">
       {writingTarget && (noTodayCourses || !item) ? (
-        <article className="border-b border-line bg-surface px-5 py-5">
-          <h2 className="text-sm font-semibold text-text">
+        <article className="rounded-card border border-line bg-surface p-5 shadow-card">
+          <h2 className="text-base font-semibold text-text">
             继续：{activity?.intentSummary ?? writingTarget.variantLabel}
           </h2>
           <p className="mt-2 text-sm text-text-3">上次稿件：{writingTarget.variantLabel}</p>
@@ -73,19 +73,19 @@ export function TodayResumeBody({
           </p>
         </article>
       ) : item ? (
-        <article className="border-b border-line bg-surface px-5 py-5">
-          <h2 className="text-sm font-semibold text-text">继续：{item.title}</h2>
+        <article className="rounded-card border border-line bg-surface p-5 shadow-card">
+          <h2 className="text-base font-semibold text-text">继续：{item.title}</h2>
           {item.lastUserText ? (
             <p className="mt-2 break-words text-sm leading-6 text-text-2">{item.lastUserText}</p>
           ) : null}
-          <p className="mt-3 text-sm text-text-3">
+          <p className="mt-3 text-sm tabular-nums text-text-3">
             {item.currentPage ? `上次读到第 ${item.currentPage} 页` : "从上次对话继续"}
             {Object.keys(item.sourceVersions ?? {}).length
               ? ` · 可恢复 ${Object.keys(item.sourceVersions ?? {}).length} 份材料`
               : ""}
           </p>
           {(item.manualSourceCount ?? 0) > 0 ? (
-            <p className="mt-2 text-sm text-text-3">
+            <p className="mt-2 text-sm tabular-nums text-text-3">
               {item.manualSourceCount} 份材料仅供手工阅读，已停止供 AI 使用；可在材料页查看。
             </p>
           ) : null}
@@ -105,28 +105,28 @@ export function TodayResumeBody({
           </p>
         </article>
       ) : (
-        <>
+        <div className="space-y-3">
           <EmptyState title="还没有可继续的对话" description="可以向助理提问，或从今日工作台开始一条教学活动。" />
-          <p className="px-5 text-sm"><Link href="/onboarding" className={ui.quiet}>先填写学习目标与每日时间</Link></p>
-          {onPrimaryCta ? (
-            <button type="button" className={primary} data-today-primary-cta="true" onClick={onPrimaryCta} disabled={primaryBusy}>
-              {primaryBusy ? "处理中…" : "开始学习"}
-            </button>
-          ) : (
-            <Link className={primary} href={primaryHref} data-today-primary-cta="true">
-              开始学习
-            </Link>
-          )}
-          <p className="mt-3 px-5">
+          <div className="flex flex-wrap items-center gap-3 px-2">
+            {onPrimaryCta ? (
+              <button type="button" className={buttonClass} data-today-primary-cta="true" onClick={onPrimaryCta} disabled={primaryBusy}>
+                {primaryBusy ? "处理中…" : "开始学习"}
+              </button>
+            ) : (
+              <Link className={buttonClass} href={primaryHref} data-today-primary-cta="true">
+                开始学习
+              </Link>
+            )}
+            <Link href="/onboarding" className={ui.quiet}>先填写学习目标与每日时间</Link>
             <Link href="/opening/assistant" className={ui.quiet} data-today-assistant-secondary="true">
               向助理提问（次要）
             </Link>
-          </p>
-        </>
+          </div>
+        </div>
       )}
       {(state.pendingReviews?.count ?? 0) > 0 ? (
-        <article className="border-b border-line bg-surface px-5 py-5">
-          <h2 className="text-base font-semibold text-text">
+        <article className="rounded-card border border-line bg-surface p-5 shadow-card">
+          <h2 className="text-base font-semibold tabular-nums text-text">
             {state.pendingReviews!.count} 项建议待审核
           </h2>
           <p className="mt-2 text-sm leading-6 text-text-2">
@@ -137,6 +137,6 @@ export function TodayResumeBody({
           </Link>
         </article>
       ) : null}
-    </>
+    </div>
   );
 }

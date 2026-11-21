@@ -11,7 +11,14 @@ const receiptSchema = z.object({
   output: providerOutputSchema,
   reservationId: z.string().uuid(),
   settledCents: z.number().int().nonnegative().nullable(),
-}).strict();
+  costBasis: z.preprocess(
+    value => (value === null ? undefined : value),
+    z.enum(["usage_pricing", "media_usage_upper_bound"]).optional(),
+  ),
+}).strict().refine(
+  value => value.settledCents !== null || value.costBasis === undefined,
+  { message: "costBasis requires settledCents" },
+);
 export type TranscriptionChunkReceipt = z.infer<typeof receiptSchema>;
 
 /** Terminal parse-media receipt rows use existing storage, with no outbox or executable job. */
@@ -33,6 +40,15 @@ export function createOpeningTranscriptionCheckpointsRepository(sql: Sql) {
       FOR SHARE OF w, j, s`;
     if (!rows.length) throw new Error("transcription source, job or privacy state changed");
   }
+  const costBasisPolicy = (receipt: TranscriptionChunkReceipt) => {
+    const explicit = receipt.costBasis;
+    return {
+      settleCostBasis: explicit ?? ("media_usage_upper_bound" as const),
+      allowUsagePricing: explicit === undefined || explicit === "usage_pricing",
+      allowMediaUpperBound: explicit === undefined || explicit === "media_usage_upper_bound",
+      allowVendorReceipt: explicit !== "usage_pricing",
+    };
+  };
   async function load(scope: Scope, chunk: TranscriptionChunkIdentity) {
     return sql.begin(async tx => {
       await assertCurrent(tx, scope, chunk);
@@ -60,15 +76,35 @@ export function createOpeningTranscriptionCheckpointsRepository(sql: Sql) {
       }
       const [same] = await tx`SELECT (${tx.json(rows[0]!.payload)}::jsonb - 'jobId' - 'receiptKind') = (${tx.json(chunk)}::jsonb - 'jobId') AS matches`;
       if (!same?.matches) throw new Error("transcription chunk identity changed");
-      return { receipt: receiptSchema.parse(rows[0]!.result), key: String(rows[0]!.key) };
+      const receipt = receiptSchema.parse(rows[0]!.result), key = String(rows[0]!.key);
+      const { allowUsagePricing, allowMediaUpperBound, allowVendorReceipt } = costBasisPolicy(receipt);
+      // A lost save acknowledgement can leave an already-charged reservation
+      // without its result reference. Repair it while the checkpoint is validated.
+      const attached = receipt.settledCents === null ? [] : await tx`UPDATE opening_budget_reservations b
+        SET result_ref=${key}, updated_at=now()
+        WHERE ${ledgerIdentity(tx, scope, receipt, key)}
+          AND b.state='completed' AND b.pending_reconcile_cents=0 AND b.outcome_unknown_at IS NULL
+          AND b.result_ref IS NULL
+          AND (b.reconciled_at IS NULL OR b.settlement_cost_basis IS NOT NULL)
+          AND (
+            (b.amount_cents=${receipt.settledCents} AND (
+              (${allowMediaUpperBound} AND b.settlement_cost_basis='media_usage_upper_bound')
+              OR (${allowUsagePricing} AND b.settlement_cost_basis='usage_pricing')
+            ))
+            OR (${allowVendorReceipt} AND b.settlement_cost_basis='vendor_receipt')
+          )
+        RETURNING b.id`;
+      return { receipt, key, attached: attached.length > 0 };
     });
   }
+  function ledgerIdentity(db: Sql | TransactionSql, scope: Scope, receipt: TranscriptionChunkReceipt, key: string) {
+    return db`b.id=${receipt.reservationId} AND b.workspace_id=${scope.workspaceId} AND b.purpose='transcribe'
+      AND b.request_id IN (${key}, ${`${key}:fallback`})
+      AND EXISTS (SELECT 1 FROM workspaces w WHERE w.id=b.workspace_id AND w.owner_user_id=${scope.ownerUserId})`;
+  }
   async function ledgerState(scope: Scope, receipt: TranscriptionChunkReceipt, key: string) {
-    const rows = await sql`SELECT state, pending_reconcile_cents, amount_cents, result_ref
-      FROM opening_budget_reservations b JOIN workspaces w ON w.id=b.workspace_id
-      WHERE b.id=${receipt.reservationId} AND b.workspace_id=${scope.workspaceId}
-        AND w.owner_user_id=${scope.ownerUserId} AND b.purpose='transcribe'
-        AND b.request_id IN (${key}, ${`${key}:fallback`})`;
+    const rows = await sql`SELECT state, pending_reconcile_cents, amount_cents, result_ref, settlement_cost_basis, outcome_unknown_at
+      FROM opening_budget_reservations b WHERE ${ledgerIdentity(sql, scope, receipt, key)}`;
     if (!rows.length) throw new Error("transcription receipt has no matching reservation");
     return rows[0]!;
   }
@@ -94,16 +130,33 @@ export function createOpeningTranscriptionCheckpointsRepository(sql: Sql) {
       const saved = await load(scope, chunk);
       if (!saved) return null;
       const { receipt, key } = saved;
+      if (saved.attached) return receipt.output;
       const row = await ledgerState(scope, receipt, key);
       if (receipt.settledCents !== null) {
-        const matches = (r: typeof row) => r.state === 'completed' && Number(r.pending_reconcile_cents) === 0
-          && Number(r.amount_cents) === receipt.settledCents && r.result_ref === key;
+        const { settleCostBasis, allowUsagePricing, allowMediaUpperBound, allowVendorReceipt } = costBasisPolicy(receipt);
+        const matches = (r: typeof row) => r.state === 'completed'
+          && Number(r.pending_reconcile_cents) === 0
+          && r.outcome_unknown_at === null
+          && r.result_ref === key
+          && (
+            (Number(r.amount_cents) === receipt.settledCents && (
+              (allowMediaUpperBound && r.settlement_cost_basis === 'media_usage_upper_bound')
+              || (allowUsagePricing && r.settlement_cost_basis === 'usage_pricing')
+            ))
+            || (allowVendorReceipt && r.settlement_cost_basis === 'vendor_receipt')
+          );
         if (!matches(row)) {
+          if (row.result_ref !== null && row.result_ref !== key) throw new Error("transcription reservation has a different result reference");
           try {
-            await budget.settle(scope, receipt.reservationId, receipt.settledCents, { resultRef: key });
+            await budget.settle(scope, receipt.reservationId, receipt.settledCents, {
+              resultRef: key,
+              costBasis: settleCostBasis,
+            });
           } catch (error) {
-            // Another delivery may have settled this exact saved receipt concurrently.
-            if (!matches(await ledgerState(scope, receipt, key))) throw error;
+            // Settlement may have raced the first read or lost its acknowledgement.
+            const retried = await load(scope, chunk);
+            const attached = retried?.attached && retried.key === key && retried.receipt.reservationId === receipt.reservationId;
+            if (!attached && !matches(await ledgerState(scope, receipt, key))) throw error;
           }
         }
       } else if (row.state === 'reserved') {

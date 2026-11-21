@@ -7,6 +7,7 @@ import {
   createOpeningKnowledgeRepository,
   createOpeningPlanningSettingsRepository,
   createOpeningPlansRepository,
+  knowledgeChunkDigests,
   readOpeningLearnerSnapshotBase,
   readOpeningTeachingCompilerFocus,
   readOpeningTeachingTaskFocus,
@@ -576,14 +577,19 @@ describe("adaptive learning loop with real evidence", () => {
       const rows = backupRows(fixture.sql, fixture.scope);
       const secondSourceId = await rows.source();
       await rows.chunk(secondSourceId);
+      await fixture.sql`INSERT INTO opening_source_versions(source_id,version,workspace_id,bytes,sha256,availability)
+        SELECT id,version,workspace_id,bytes,sha256,'available' FROM opening_sources WHERE id=${secondSourceId}`;
       await fixture.sql`INSERT INTO course_asset_memberships
         (id, workspace_id, course_id, asset_type, asset_id, role, sort_order, visibility)
         VALUES (${randomUUID()}, ${fixture.scope.workspaceId}, ${course.courseId}, 'source', ${secondSourceId}, 'core', 1, 'course')`;
       const skillLabel = "Equivalent 矩阵维数";
       const nodeId = randomUUID();
       const knowledge = createOpeningKnowledgeRepository(fixture.sql);
+      const coverage = { [course.sourceId]: 1, [secondSourceId]: 1 };
       const graph = await knowledge.replace(fixture.scope, course.courseId, {
         expectedVersion: 0, sourceVersions: { [course.sourceId]: 1 },
+        extractedSourceVersions: coverage,
+        extractedChunkDigests: knowledgeChunkDigests(await knowledge.listAuthorizedChunks(fixture.scope, course.courseId)),
         snapshot: {
           courseId: course.courseId, version: 0,
           nodes: [{ id: nodeId, courseId: course.courseId, label: skillLabel, kind: "concept",
@@ -606,6 +612,8 @@ describe("adaptive learning loop with real evidence", () => {
         await rows.exclude(course.sourceId);
       } else if (change === "source_version_changed") {
         await fixture.sql`UPDATE opening_sources SET version=2 WHERE id=${course.sourceId}`;
+        await fixture.sql`INSERT INTO opening_source_versions(source_id,version,workspace_id,bytes,sha256,availability)
+          SELECT id,version,workspace_id,bytes,sha256,'available' FROM opening_sources WHERE id=${course.sourceId}`;
         // A is still ready with current chunks, but its old graph was built from version 1.
         await rows.chunk(course.sourceId, 2);
       } else if (change === "source_unlinked") {
@@ -620,9 +628,12 @@ describe("adaptive learning loop with real evidence", () => {
       const base = await readOpeningLearnerSnapshotBase(fixture.sql, fixture.scope);
       expect(base.courses.find((row) => row.courseId === course.courseId))
         .toMatchObject({ hasUsableMaterials: true, knowledgeSnapshot: null });
-      expect(await knowledge.get(fixture.scope, course.courseId)).toMatchObject({
-        snapshot: graph.snapshot, sourceVersions: { [course.sourceId]: 1 },
-      });
+      const coveredSourceVersions = change === "source_excluded" || change === "source_unlinked"
+        ? { [secondSourceId]: 1 } : coverage;
+      const historical = await knowledge.get(fixture.scope, course.courseId);
+      expect(historical?.snapshot).toEqual({ ...graph.snapshot, coveredSourceVersions });
+      expect(historical?.sourceVersions).toEqual({ [course.sourceId]: 1 });
+      expect((await knowledge.getWithSync(fixture.scope, course.courseId)).snapshot).toEqual(historical?.snapshot);
       const after = await snapshots.read(fixture.scope, { date: day, timeZone });
       expect(after.sources.courses.find((row) => row.courseId === course.courseId))
         .toMatchObject({ hasUsableMaterials: true, knowledgeNodes: [] });

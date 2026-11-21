@@ -101,8 +101,8 @@ describe("card variant generation", () => {
     expect(rejected.activity.generateStatus).toBe("failed");
     expect(repository.fail).toHaveBeenCalledExactlyOnceWith(scope, cardId, activityId, "failed");
     if (rejection !== "repeated question") expect(repository.complete).not.toHaveBeenCalled();
-    expect(budget.markUnknown).toHaveBeenCalledExactlyOnceWith("reservation-1");
-    expect(budget.settle).not.toHaveBeenCalled(); expect(budget.release).not.toHaveBeenCalled();
+    expect(budget.settle).toHaveBeenCalledExactlyOnceWith("reservation-1", 1);
+    expect(budget.markUnknown).not.toHaveBeenCalled(); expect(budget.release).not.toHaveBeenCalled();
     expect(await service.start(scope, cardId)).toBe(rejected);
     expect(provider.complete).toHaveBeenCalledTimes(1);
 
@@ -114,8 +114,8 @@ describe("card variant generation", () => {
       `card-variant:${scope.workspaceId}:${activityId}`, `card-variant:${scope.workspaceId}:${id(6)}`,
     ]);
     expect(provider.complete).toHaveBeenCalledTimes(2);
-    expect(budget.markUnknown).toHaveBeenCalledTimes(1);
-    expect(budget.settle).toHaveBeenCalledTimes(1); expect(budget.release).not.toHaveBeenCalled();
+    expect(budget.markUnknown).not.toHaveBeenCalled();
+    expect(budget.settle).toHaveBeenCalledTimes(2); expect(budget.release).not.toHaveBeenCalled();
   });
 
   it("retains an uncertain write failure and does not turn it into a content rejection", async () => {
@@ -123,8 +123,8 @@ describe("card variant generation", () => {
     repository.complete.mockRejectedValueOnce(new Error("database connection lost"));
     expect((await service.start(scope, cardId)).activity.generateStatus).toBe("unknown");
     expect(repository.fail).toHaveBeenCalledWith(scope, cardId, activityId, "unknown");
-    expect(budget.markUnknown).toHaveBeenCalledExactlyOnceWith("reservation-1");
-    expect(budget.release).not.toHaveBeenCalled(); expect(budget.settle).not.toHaveBeenCalled();
+    expect(budget.settle).toHaveBeenCalledExactlyOnceWith("reservation-1", 1);
+    expect(budget.markUnknown).not.toHaveBeenCalled(); expect(budget.release).not.toHaveBeenCalled();
   });
 
   it("keeps a sent network failure unknown and never resends it through refresh or retry", async () => {

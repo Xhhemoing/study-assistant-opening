@@ -72,7 +72,7 @@ export async function seedFeedback(f: OpeningFixture, answer = "两列分别沿�
         expectedRevisionNumber: 1, blocks: [
           { id: blockId, type: "prompt", content: { text: "新版问题不属于旧作答。" } },
           { id: answerBlockId, type: "answer_key", content: { text: "新版解答不属于旧作答。" } },
-        ] });
+        ], includeAnswerKeys: true });
     } };
 }
 

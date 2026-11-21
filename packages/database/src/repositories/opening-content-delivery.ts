@@ -1,7 +1,7 @@
 import type { LearningObservation, Scope, StudyContextAnchor, StudyExposureReceipt } from "@aistudy/contracts";
 import type { Sql } from "postgres";
 import { isDeepStrictEqual } from "node:util";
-import { parseContextSourceRefs } from "./opening-context-provenance";
+import { parseNoteContextSourceRefs } from "./opening-context-provenance";
 import { learningError, lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { createOpeningStudyExposureRepository, generateOpeningStudyExposure, mapOpeningStudyExposure, releaseOpeningStudyExposure, type OpeningStudyExposureInput } from "./opening-study-exposure";
 
@@ -72,7 +72,7 @@ export function createOpeningContentDeliveryRepository(sql: Sql) {
         WHERE d.id=${document.id} AND d.workspace_id=${scope.workspaceId} AND d.deleted_at IS NULL
           AND EXISTS(SELECT 1 FROM library_revisions r WHERE r.document_id=d.id AND r.workspace_id=d.workspace_id AND r.revision_number=${document.currentRevisionNumber})`;
       if (!row) throw learningError("NOT_FOUND", "note revision unavailable for delivery");
-      const refs = row.provenance_id ? parseContextSourceRefs(row.context_source_refs) : [];
+      const refs = row.provenance_id ? parseNoteContextSourceRefs(row.context_source_refs) : [];
       const reference: OriginReference = { type: "note", id: document.id, version: String(document.currentRevisionNumber) };
       if (!refs?.length) return deliverUnassociatedNote(scope, key, reference);
       const deliveries = refs?.length ? refs.map(ref => ({ anchor: { purpose: "note_read" as const, sourceId: ref.sourceId, sourceVersion: ref.sourceVersion }, reference })) : [{ anchor: { purpose: "note_read" as const }, reference }];
@@ -91,7 +91,7 @@ export function createOpeningContentDeliveryRepository(sql: Sql) {
       for (const card of cards) {
         const row = byId.get(card.id);
         if (!row || Number(row.content_version) !== card.contentVersion) throw learningError("CONFLICT", "card version changed before delivery");
-        const refs = parseContextSourceRefs(row.context_source_refs);
+        const refs = parseNoteContextSourceRefs(row.context_source_refs);
         const sourceIds = row.source_ids as string[];
         const sourceRefs = [...(refs ?? []), ...sourceIds.filter(sourceId => !refs?.some(ref => ref.sourceId === sourceId)).map(sourceId => ({ sourceId, sourceVersion: null }))];
         const reference: OriginReference = { type: "card", id: card.id, version: String(card.contentVersion), sourceRefs, skillLabel: row.skill_label as string | null };

@@ -2,8 +2,8 @@ import { mkdtemp, readdir, rm, truncate, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { resolveModelForTask } from "@aistudy/ai";
-import { DEFAULT_OPENING_AI_SETTINGS } from "@aistudy/contracts";
+import { resolveModelForTask, type ModelGateway } from "@aistudy/ai";
+import { DEFAULT_OPENING_AI_SETTINGS, type ProviderOutput } from "@aistudy/contracts";
 import { createModelTranscribeAdapter } from "./model-transcribe-adapter";
 import { MediaValidationError } from "./media-process";
 
@@ -95,6 +95,36 @@ describe("model transcription adapter", () => {
     await expect(s.adapter(input, signal)).rejects.toThrow("outcome unknown");
     expect(s.call).toHaveBeenCalledTimes(1);
     expect(await readdir(s.dir)).toEqual([]);
+  });
+
+  it("reads the saved chunk on retry after its save acknowledgement is lost", async () => {
+    const s = await setup();
+    let saved: ProviderOutput | null = null;
+    const output: ProviderOutput = {
+      text: JSON.stringify({ segments: [{ startMs: 0, endMs: 900, text: "saved" }] }),
+      citedChunkIds: [], requestId: null, candidates: [], inputTokens: 10, outputTokens: 10,
+    };
+    const call = vi.fn<ModelGateway["call"]>(async (_scope, _task, options) => {
+      await options.persistResult?.(output, { reservationId: "reservation", settledCents: 1 });
+      return output;
+    });
+    const adapter = createModelTranscribeAdapter({
+      gateway: { call }, scope, budget: {} as never, jobId: "job-id", run: s.run, tempDir: s.dir,
+      checkpoints: {
+        load: async () => saved,
+        save: async (_chunk, result) => {
+          saved = result;
+          throw new Error("save acknowledgement lost");
+        },
+      },
+    });
+    const audio = { ...input, durationMs: 1000 };
+    await expect(adapter(audio, signal)).rejects.toThrow("save acknowledgement lost");
+    await expect(adapter(audio, signal)).resolves.toEqual([
+      { sourceId: input.sourceId, sourceVersion: 2, startMs: 0, endMs: 900, text: "saved", frameChunkIds: [], quality: "needs_check" },
+    ]);
+    expect(s.run).toHaveBeenCalledOnce();
+    expect(call).toHaveBeenCalledOnce();
   });
 
   it("keeps every chunk of a long recording under the 20 MB inline request limit", async () => {

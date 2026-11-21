@@ -150,7 +150,7 @@ export function loadFeatureSwitches(source: Source = process.env): FeatureSwitch
   const ui = read("OPENING_TEACHING_WORKSPACE", api);
   const chatArtifacts = read("OPENING_CHAT_ARTIFACTS", false);
   const chatProse = read("OPENING_CHAT_PROSE", true);
-  const senseWeaveRaw = present(source, "OPENING_CHAT_SENSEWEAVE")?.toLowerCase() ?? "shadow";
+  const senseWeaveRaw = present(source, "OPENING_CHAT_SENSEWEAVE")?.toLowerCase() ?? "off";
   const chatSenseWeave = senseWeaveRaw === "off" || senseWeaveRaw === "shadow" || senseWeaveRaw === "on" ? senseWeaveRaw : "off";
   if (chatSenseWeave !== senseWeaveRaw) issues.push(`OPENING_CHAT_SENSEWEAVE: must be one of off, shadow, on`);
   const senseWeaveBetaUsers = parseAccountIds(source, "OPENING_CHAT_SENSEWEAVE_BETA_USERS", issues);

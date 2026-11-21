@@ -8,7 +8,7 @@ import { insertOpeningLearningObservationInTx } from "./opening-learning-observa
 import { invalidateOpeningLearningEligibility } from "./opening-learning-eligibility";
 import { examSkillLabel, readCurrentExamNodeIds, readExamBinding, readExamEvidenceState } from "./opening-exam-integration-facts";
 import { projectExamSourceRecord } from "./opening-exam-integration-sources";
-import { captureExamPartRequirements, publishExamPartResult } from "./opening-exam-integration-evaluation";
+import { buildExamChoiceSpec, captureExamPartRequirements, publishExamPartResult } from "./opening-exam-integration-evaluation";
 import { readExamSourceExposure } from "./opening-exam-source-exposure";
 
 
@@ -22,8 +22,7 @@ async function present(tx: TransactionSql, scope: Scope, sprintId: string, pack:
   const skillLabel = examSkillLabel(pack, question.skillId);
   const { sessionId, activityId } = await createExamSession(tx, scope, { sprintId, courseId: binding.courseId,
     sourceIds, skillLabel, identity: attempt.id, now });
-  const spec = { kind: "exam_choice", specVersion: "exam-choice-v1", packId: pack.id, packVersion: pack.version,
-    questionId: question.id, familyId: question.familyId };
+  const spec = buildExamChoiceSpec(pack, question);
   const [existing] = await tx`SELECT v.id,v.problem_id FROM opening_learning_item_versions v
     WHERE v.workspace_id=${scope.workspaceId} AND v.owner_user_id=${scope.ownerUserId} AND v.course_id=${binding.courseId}
       AND v.source_id=${binding.packSourceId} AND v.source_version=${sourceVersion} AND v.evaluation_spec=${tx.json(spec)} ORDER BY created_at,id LIMIT 1`;

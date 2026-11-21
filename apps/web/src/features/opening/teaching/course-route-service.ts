@@ -1,4 +1,4 @@
-import { courseRouteConfirmSchema,courseRouteStartSchema,courseRouteNextSchema,courseRouteRetestScheduleSchema,courseRouteVerificationConfirmSchema,uuidSchema,type Scope } from "@aistudy/contracts";
+import { courseRouteConfirmSchema,courseRouteStartSchema,courseRouteNextSchema,courseRouteRetestScheduleSchema,courseRouteVerificationConfirmSchema,uuidSchema,type CourseRouteTaskReadOptions,type Scope } from "@aistudy/contracts";
 import { isTeachingCompilerEnabled } from "@aistudy/ai";
 import { createOpeningCourseRouteRepository,createOpeningCourseRouteRetestRepository,createOpeningCourseRouteVerificationRepository } from "@aistudy/database";
 import type { Sql } from "postgres";
@@ -13,7 +13,7 @@ export function createCourseRouteService(sql:Sql,env:Record<string,string|undefi
     start(scope:Scope,courseId:string,raw:unknown){return repository.start(scope,uuidSchema.parse(courseId),courseRouteStartSchema.parse(raw));},
     next(scope:Scope,courseId:string,raw:unknown){return repository.next(scope,uuidSchema.parse(courseId),courseRouteNextSchema.parse(raw));},
     scheduleRetest(scope:Scope,courseId:string,raw:unknown){return retests.schedule(scope,uuidSchema.parse(courseId),courseRouteRetestScheduleSchema.parse(raw));},
-    readTask(scope:Scope,courseId:string,taskId:string){return retests.readTask(scope,uuidSchema.parse(courseId),uuidSchema.parse(taskId));},
+    readTask(scope:Scope,courseId:string,taskId:string,options?:CourseRouteTaskReadOptions){return retests.readTask(scope,uuidSchema.parse(courseId),uuidSchema.parse(taskId),options);},
     readVerification(scope:Scope,courseId:string,activityId:string){return verification.read(scope,uuidSchema.parse(courseId),uuidSchema.parse(activityId));},
     confirmVerification(scope:Scope,courseId:string,raw:unknown){return verification.confirm(scope,uuidSchema.parse(courseId),courseRouteVerificationConfirmSchema.parse(raw));}};
 }

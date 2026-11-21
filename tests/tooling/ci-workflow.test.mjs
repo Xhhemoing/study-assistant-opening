@@ -207,8 +207,6 @@ test("quality gate requires both split jobs and handler-browser-spikes shares th
     assert.ok(needs?.includes(name), `quality needs ${name}`);
     assert.ok(gate?.includes(name), `quality gate requires ${name}`);
   }
-  assert.deepEqual([...gate].sort(), needs.filter((name) => !["changes", "docs"].includes(name)).sort(),
-    "every worker the quality job waits for is also required to succeed");
   // Assert resolved consumer values, not which job happens to define the anchor.
   const commonEnv = {
     HERMES_HEAVY_ENABLED: "0",
@@ -276,23 +274,45 @@ test("every gate job runs even when a worker fails and requires exactly the work
     assert.match(block, /^[ ]{4}if:\s*\$\{\{\s*always\(\)\s*\}\}\s*$/m, `${name} must run with if: always()`);
     const needs = block.match(/^[ ]{4}needs:\s*\[([^\]]*)\]/m)?.[1].split(",").map((item) => item.trim());
     const gate = block.match(/checks\.py gate ([^\n]+)/)?.[1].trim().split(/\s+/);
-    assert.ok(needs?.includes("changes") && needs.includes("docs"), `${name} waits for classification and docs`);
-    assert.deepEqual([...gate].sort(), needs.filter((item) => !["changes", "docs"].includes(item)).sort(), `${name} gate covers its workers`);
+    const sharedNeeds = ["changes", "docs", "fast-draft-check"];
+    for (const job of sharedNeeds) assert.ok(needs.includes(job), `${name} waits for ${job}`);
+    assert.deepEqual([...gate].sort(), needs.filter((item) => !sharedNeeds.includes(item)).sort(),
+      `${name} requires every full CI worker it waits for`);
+    const gateStep = parsedJobs[name].steps.find((step) => step.run?.includes("checks.py gate "));
+    assert.equal(gateStep.env.CI_NEEDS, "${{ toJSON(needs) }}");
+    assert.equal(gateStep.env.CI_IS_DRAFT,
+      "${{ (github.event_name == 'pull_request' && github.event.pull_request.draft == true) && 'true' || 'false' }}");
     for (const worker of gate) assert.ok(jobs[worker], `${name} gate names an existing job ${worker}`);
   }
 });
 
-test("every docs_only=false worker is required by exactly one gate job", () => {
+test("the draft-only check runs without services and exercises the real PDF units", () => {
+  const fast = parsedJobs["fast-draft-check"];
+  assert.equal(fast.needs, "changes");
+  assert.equal(fast.if, "github.event_name == 'pull_request' && github.event.pull_request.draft == true && needs.changes.outputs.docs_only == 'false'");
+  assert.equal(fast.services, undefined);
+  assert.equal(fast.env.HERMES_HEAVY_ENABLED, "0");
+  assert.equal(fast.steps.find(step => step.uses === "actions/checkout@v4").with["fetch-depth"], 2);
+  const lint = fast.steps.find(step => step.run === "npm run lint");
+  assert.equal(lint.env.FIXED_COLOR_BASE, "HEAD^1");
+  const test = fast.steps.find(step => step.run === "npm test -- --project unit --project contract");
+  assert.ok(test.env.PARSER_PYTHON);
+});
+
+test("every full CI worker is required by exactly one gate job", () => {
   const jobs = jobBlocks(workflow);
   // Workers are defined by exclusion, not by matching their `if:` text, so a job whose
   // condition is spelled differently (or missing) cannot silently escape every gate.
   const gateJobs = jobs.filter(({ block }) => /checks\.py gate /.test(block));
-  const nonWorkers = new Set(["changes", "docs", ...gateJobs.map(({ name }) => name)]);
+  const nonWorkers = new Set(["changes", "docs", "fast-draft-check", ...gateJobs.map(({ name }) => name)]);
   const workers = jobs.filter(({ name }) => !nonWorkers.has(name));
-  assert.ok(workers.length >= 5, "worker detection found the code-change jobs");
-  for (const { name, block } of workers) {
-    // One canonical spelling keeps the docs-only skip auditable; change it here and in ci.yml together.
-    assert.match(block, /^[ ]{4}if:[ \t]*needs\.changes\.outputs\.docs_only == 'false'[ \t]*$/m, `worker ${name} must use if: needs.changes.outputs.docs_only == 'false'`);
+  for (const name of ["integration-parser", "handler-browser-spikes", "static-unit", "build", "opening-worker-flow"]) {
+    assert.ok(workers.some(worker => worker.name === name), `missing full CI worker ${name}`);
+  }
+  for (const { name } of workers) {
+    assert.equal(parsedJobs[name].if,
+      "needs.changes.outputs.docs_only == 'false' && !(github.event_name == 'pull_request' && github.event.pull_request.draft == true)",
+      `full CI worker ${name} must exclude docs and code drafts`);
   }
   const gated = gateJobs
     .flatMap(({ block }) => block.match(/checks\.py gate ([^\n]+)/)[1].trim().split(/\s+/));

@@ -1,6 +1,7 @@
 import type { OpeningModelSnapshot, ProviderInput, ProviderOutput } from "@aistudy/contracts";
 import {
   isBudgetReplayError,
+  isPostProviderFailure,
   ledgerActionForProviderError,
   runBudgetedCall,
   type BudgetedProvider,
@@ -33,6 +34,8 @@ export type ModelGatewayCallOptions = {
   input: ProviderInput;
   /** Durable ledger key: retries of one logical operation reuse one reservation. */
   operationId: string;
+  /** Stable base for caller-derived retries. Null opts out for a single-model call. */
+  requestFamily?: BudgetedCallOptions["requestFamily"];
   resultRef?: string;
   persistResult?: BudgetedCallOptions["persistResult"];
   /** Reservation floor for paid models, e.g. a configured per-call minimum. */
@@ -84,9 +87,12 @@ export function reservationTerms(model: Omit<ResolvedTaskModel, "provider">, inp
  * failures are unknown outcomes and never fall back.
  */
 export function isNotSentFailure(error: unknown): boolean {
+  if (isPostProviderFailure(error)) return false;
   if (error instanceof OpeningModelRoutingError) return true;
   if (error instanceof OpeningProviderError) return ledgerActionForProviderError(error.code, { requestSent: error.requestSent }) === "release";
-  if (isBudgetReplayError(error)) return error.disposition.kind === "released";
+  if (isBudgetReplayError(error)) {
+    return error.disposition.kind === "released" && (error.disposition.reason === "not_sent" || error.disposition.reason === "cancelled");
+  }
   const code = (error as { code?: unknown } | null)?.code;
   return code === "BUDGET_EXCEEDED" || code === "REQUEST_CAP_EXCEEDED" || code === "BUDGET_MEDIA_COST_UNBOUNDED" || code === "BUDGET_MEDIA_INPUT_TOO_LARGE";
 }
@@ -142,6 +148,7 @@ export function createModelGateway(deps: {
           input: options.input,
           requestId: operationId,
           operationId,
+          requestFamily: options.requestFamily === undefined ? options.operationId : options.requestFamily,
           purpose: modelTaskSpec(task).purpose,
           parentBudget: options.parentBudget ?? { id: options.operationId },
           ...(options.resultRef ? { resultRef: options.resultRef } : {}),

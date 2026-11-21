@@ -13,9 +13,41 @@ const result = (decision: MatrixEvaluation["decision"], reason: string): MatrixE
   reasonCodes: [reason], evaluatorVersion: MATRIX_EVALUATOR_VERSION,
 });
 
+/** Canonical decimal coefficient and power of ten, without expanding exponents. */
+function decimalParts(token: string): { coefficient: string; power: number } {
+  const [, sign, whole, fraction = "", exponent = "0"] = /^(-?)(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/.exec(token)!;
+  const digits = (whole! + fraction).replace(/^0+/, "");
+  if (!digits.length) return { coefficient: "0", power: 0 };
+  let last = digits.length;
+  while (digits[last - 1] === "0") last -= 1;
+  return { coefficient: sign + digits.slice(0, last), power: Number(exponent) - fraction.length + digits.length - last };
+}
+
+/** JSON.parse validates syntax. Scan only unquoted numeric tokens for rounding. */
+function preservesNumericLiterals(answer: string): boolean {
+  const tokens = /\\[\s\S]|"|-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/g;
+  let quoted = false;
+  for (const [token] of answer.matchAll(tokens)) {
+    if (token === '"') quoted = !quoted;
+    if (quoted || token === '"' || token.startsWith("\\")) continue;
+
+    const number = Number(token);
+    if (!Number.isFinite(number) || (Number.isInteger(number) && !Number.isSafeInteger(number))) return false;
+    const literal = decimalParts(token);
+    const decoded = decimalParts(String(number));
+    if (literal.coefficient !== decoded.coefficient || literal.power !== decoded.power) return false;
+  }
+  return true;
+}
+
 function rational(value: unknown): Rational | null {
-  if (typeof value === "number") return Number.isSafeInteger(value) && Math.abs(value) <= 1_000_000
-    ? { n: BigInt(value), d: 1n } : null;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value) || Math.abs(value) > 1_000_000) return null;
+    // The lexical guard ensures this decimal is exactly the learner's value.
+    const { coefficient, power } = decimalParts(String(value));
+    const n = BigInt(coefficient);
+    return power < 0 ? { n, d: 10n ** BigInt(-power) } : { n: n * 10n ** BigInt(power), d: 1n };
+  }
   if (typeof value !== "string") return null;
   const match = /^([+-]?\d{1,7})(?:\/([+-]?\d{1,7}))?$/.exec(value.trim());
   if (!match) return null;
@@ -66,6 +98,7 @@ export function evaluateMatrixAnswer(rawSpec: unknown, answer: string): MatrixEv
   if (answer.length > 2000) return result("abstain", "resource_limit");
   let decoded: unknown;
   try { decoded = JSON.parse(answer); } catch { return result("abstain", "ambiguous_input"); }
+  if (!preservesNumericLiterals(answer)) return result("abstain", "unsupported_number");
   if (spec.exerciseKey === "dimensions") {
     if (!Array.isArray(decoded) || decoded.length !== 2 || !decoded.every(Number.isSafeInteger)) return result("abstain", "ambiguous_input");
     return result(decoded[0] === spec.matrixA.length && decoded[1] === spec.matrixA[0]!.length ? "correct" : "incorrect", "dimensions_compared");

@@ -387,6 +387,7 @@ export function createOpeningTeachingCommandsRepository(sql: Sql) {
                 expectedRevisionNumber: pinnedRev,
                 blocks: newBlocks,
                 reason: `teaching_command:${request.kind}`,
+                includeAnswerKeys: true,
               });
             } catch (error) {
               if (error instanceof LibraryError && error.code === "CONFLICT") {

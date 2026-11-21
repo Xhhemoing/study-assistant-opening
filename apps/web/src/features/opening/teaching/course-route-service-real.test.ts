@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { readOpeningCourseRouteActivityObservationId } from "@aistudy/database";
 import type { Sql } from "postgres";
 import { compilerFlagMatrix } from "../../../../../../tests/fixtures/opening/teaching/compiler-flag-matrix";
 import { createCourseRouteService } from "./course-route-service";
@@ -17,6 +18,8 @@ function fixture(available: boolean, failure?: { prefix: string; error: Error })
     const query = parts.join("?").replace(/\s+/gu, " ").trim();
     if (failure && query.startsWith(failure.prefix)) return Promise.reject(failure.error);
     const index = courses.findIndex(course => values.includes(course));
+    // The observation SELECT interpolates one of these postgres tagged fragments.
+    if (query === "" || query === "AND s.activity_id=?") return { query, values };
     if (query.startsWith("g.course_id=") || query.startsWith("SELECT g.course_id")) return { query, values };
     if (query.startsWith("SELECT c.id FROM courses")) return Promise.resolve(index < 0 ? [] : [{ id: courses[index] }]);
     if (query.startsWith("SELECT * FROM course_requirements")) return Promise.resolve([]);
@@ -71,6 +74,15 @@ describe("real web route read propagates downstream storage failures without par
     const [parts] = sql.mock.calls.at(-1)!;
     expect(parts.join("?").replace(/\s+/gu, " ").trim().startsWith(prefix)).toBe(true);
     for (const [statement] of sql.mock.calls) expect(statement.join(" ")).not.toMatch(/^\s*(?:INSERT|UPDATE|DELETE)\b/i);
+  });
+
+  it("propagates the observation SELECT failure with the activity filter applied", async () => {
+    const error = Object.assign(new Error("active observation unavailable"), { code: "ECONNRESET" });
+    const activityId = id(11);
+    const sql = fixture(true, { prefix: "SELECT o.*,s.activity_id", error });
+    await expect(readOpeningCourseRouteActivityObservationId(sql as unknown as Sql, scope, courses[0]!, activityId)).rejects.toBe(error);
+    const [, ...values] = sql.mock.calls.at(-1)!;
+    expect(values).toEqual([scope.workspaceId, scope.ownerUserId, courses[0], { query: "AND s.activity_id=?", values: [activityId] }]);
   });
 });
 

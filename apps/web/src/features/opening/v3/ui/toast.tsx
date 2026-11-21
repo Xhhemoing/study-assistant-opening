@@ -13,11 +13,14 @@ export function StatusToastProvider({ children }: { children: ReactNode }) {
   const [message, setMessage] = useState<{ id: number; text: string } | null>(null);
   const seq = useRef(0);
   const timer = useRef<number | undefined>(undefined);
-  const notify = useCallback<Notify>(text => {
+  const scheduleDismiss = useCallback((ms = 2400) => {
     window.clearTimeout(timer.current);
-    setMessage({ id: ++seq.current, text });
-    timer.current = window.setTimeout(() => setMessage(null), 2400);
+    timer.current = window.setTimeout(() => setMessage(null), ms);
   }, []);
+  const notify = useCallback<Notify>(text => {
+    setMessage({ id: ++seq.current, text });
+    scheduleDismiss(2400);
+  }, [scheduleDismiss]);
   const { mounted, state } = usePresence(Boolean(message), 140);
   const [last, setLast] = useState("");
   if (message && message.text !== last) setLast(message.text);
@@ -27,7 +30,9 @@ export function StatusToastProvider({ children }: { children: ReactNode }) {
       {/* 常驻 live region（不加 role=status，空容器不应作为页面状态被查询/朗读），内容出现时由 aria-live 播报 */}
       <div aria-live="polite" aria-atomic="true" className="pointer-events-none fixed inset-x-0 top-3 z-[60] flex justify-center px-4">
         {mounted && <p key={message?.id} data-state={state}
-          className="rounded-pill glass px-4 py-2 text-meta font-medium text-text data-[state=open]:motion-safe:animate-toast-in data-[state=closed]:motion-safe:animate-fade-out">{message?.text ?? last}</p>}
+          onMouseEnter={() => window.clearTimeout(timer.current)}
+          onMouseLeave={() => { if (message) scheduleDismiss(1600); }}
+          className="pointer-events-auto rounded-pill glass px-4 py-2 text-meta font-medium text-text shadow-float data-[state=open]:motion-safe:animate-toast-in data-[state=closed]:motion-safe:animate-fade-out">{message?.text ?? last}</p>}
       </div>
     </ToastContext.Provider>
   );

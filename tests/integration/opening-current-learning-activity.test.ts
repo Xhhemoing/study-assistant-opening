@@ -6,6 +6,7 @@ import {
   createOpeningPlansRepository,
   createOpeningSpanSessionRepository,
   createOpeningTeachingActivitiesRepository,
+  createOpeningTeachingContentRepository,
   createOpeningWritingWorkspaceRepository,
   readOpeningCurrentLearningActivity,
   readOpeningCurrentLearningRecovery,
@@ -60,6 +61,92 @@ async function readFootprint() {
     preferences: await f.sql`SELECT * FROM workspace_preferences WHERE workspace_id=${f.scope.workspaceId}`,
   };
 }
+
+it.each(["active", "sibling"] as const)("keeps learner activity ahead of background publish, then ranks an edit to the %s writing variant first", async variant => {
+  const older = await activity({ at: "2026-01-01T00:00:00Z", placeholder: true });
+  const current = await activity({ at: "2026-01-02T00:00:00Z" });
+  const content = createOpeningTeachingContentRepository(f.sql), blockId = randomUUID();
+  const unit = await content.createUnit(f.scope, {
+    title: "Compiled lesson", blocks: [{ id: blockId, type: "text", content: { text: "Background publication" } }],
+  });
+  await content.publishActivitySpec(f.scope, {
+    activityId: older, teachingUnitId: unit.id, expectedVersion: 0, revisionNumber: 1,
+    blockOrder: [{ blockId, blockType: "text", role: "teach", position: 0 }],
+  });
+  const sessionId = randomUUID();
+  await f.sql`INSERT INTO opening_learning_sessions(id,workspace_id,owner_user_id,course_id,activity_id,skill_label)
+    VALUES(${sessionId},${f.scope.workspaceId},${f.scope.ownerUserId},${courseId},${current},'Current')`;
+  await f.sql`INSERT INTO opening_study_intent_events(id,workspace_id,owner_user_id,session_id,activity_id,client_key,
+    version,event_kind,payload,resulting_intent,action,created_at)
+    VALUES(${randomUUID()},${f.scope.workspaceId},${f.scope.ownerUserId},${sessionId},${current},
+      ${randomUUID()},1,'signal','{}','{}','continue','2026-01-02T00:00:00Z')`;
+  await expect(readOpeningCurrentLearningRecovery(f.sql, f.scope)).resolves.toMatchObject({ activityId: current });
+  await expect(readOpeningWorkspaceActivityRecovery(f.sql, f.scope)).resolves.toMatchObject({ kind: "course", activityId: current });
+
+  const library = createLibraryRepository(f.sql);
+  const docId = randomUUID();
+  await f.sql`INSERT INTO library_documents(id,workspace_id,title,lifecycle,current_revision_number)
+    VALUES(${docId},${f.scope.workspaceId},'Writing draft','scratch',1)`;
+  await f.sql`INSERT INTO library_revisions(workspace_id,document_id,revision_number,title,lifecycle,blocks,created_at)
+    VALUES(${f.scope.workspaceId},${docId},1,'Writing draft','scratch','[]'::jsonb,'2026-01-01T00:00:00Z')`;
+  const writingActivity = randomUUID();
+  const checkpoint = { writingWorkspace: {
+    protocol: "writing-workspace-v1", workGroupId: docId, activeDocumentId: docId,
+    activeVariantLabel: "Draft", savedRevisionNumber: 1, focusBlockId: null, updatedAt: "2026-01-01T00:00:00Z",
+  } };
+  await f.sql`INSERT INTO opening_teaching_activities
+    (id,workspace_id,owner_user_id,course_id,status,intent_kind,intent_summary,client_key,create_intent,checkpoint_json,updated_at)
+    VALUES(${writingActivity},${f.scope.workspaceId},${f.scope.ownerUserId},${courseId},'active','topic','Writing draft',${randomUUID()},
+      ${f.sql.json({ protocol: "writing-workspace-v1", workGroupId: docId })},${f.sql.json(checkpoint)},'2026-01-01T00:00:00Z')`;
+  await f.sql`INSERT INTO library_properties(workspace_id,subject_type,subject_id,key,value_type,value)
+    VALUES(${f.scope.workspaceId},'document',${docId},${WRITING_META_PROPERTY_KEY},'json',
+      ${f.sql.json({ workGroupId: docId, variantLabel: "Draft", parentDocumentId: null, parentRevisionNumber: null,
+        keptAsPreferred: false, focusBlockId: null, assistanceRecords: [] })})`;
+  const coverage = () => f.sql`SELECT * FROM opening_course_question_exposure_coverage WHERE workspace_id=${f.scope.workspaceId}`;
+  expect(await coverage()).toMatchObject([{ invalidated: false }]);
+  await expect(readOpeningWorkspaceActivityRecovery(f.sql, f.scope)).resolves.toMatchObject({ activityId: current });
+  let editDocumentId = docId;
+  if (variant === "sibling") {
+    const sibling = await library.createDocument({ workspaceId: f.scope.workspaceId, title: "Alternate draft",
+      blocks: [{ id: randomUUID(), type: "paragraph", content: { text: "Original alternate draft" } }] });
+    editDocumentId = sibling.id;
+    await f.sql`INSERT INTO library_properties(workspace_id,subject_type,subject_id,key,value_type,value)
+      VALUES(${f.scope.workspaceId},'document',${editDocumentId},${WRITING_META_PROPERTY_KEY},'json',
+        ${f.sql.json({ workGroupId: docId, variantLabel: "Alternate", parentDocumentId: docId, parentRevisionNumber: 1,
+          keptAsPreferred: false, focusBlockId: null, assistanceRecords: [] })})`;
+  }
+  const beforeEdit = await coverage();
+  await library.updateDocument({
+    workspaceId: f.scope.workspaceId, documentId: editDocumentId, expectedRevisionNumber: 1,
+    blocks: [{ id: randomUUID(), type: "paragraph", content: { text: "New draft paragraph" } }],
+  });
+  const beforeRecovery = await coverage();
+  if (variant === "active") expect(beforeRecovery).toEqual(beforeEdit);
+  await expect(readOpeningWorkspaceActivityRecovery(f.sql, f.scope)).resolves.toMatchObject({
+    kind: "writing", activityId: writingActivity, documentId: docId, savedRevisionNumber: 1,
+    currentRevisionNumber: variant === "active" ? 2 : 1,
+  });
+  await expect(readOpeningCurrentLearningRecovery(f.sql, f.scope)).resolves.toMatchObject({ activityId: writingActivity });
+  const [stored] = await f.sql`SELECT checkpoint_json,updated_at FROM opening_teaching_activities WHERE id=${writingActivity}`;
+  expect(stored!.checkpoint_json).toEqual(checkpoint);
+  expect(new Date(stored!.updated_at).toISOString()).toBe("2026-01-01T00:00:00.000Z");
+  expect(await coverage()).toEqual(beforeRecovery);
+});
+it("recovers the newer learner action past a later pre-upgrade background publication", async () => {
+  const older = await staticLesson();
+  const newer = await staticLesson();
+  for (const [lesson, at] of [[older, "2026-11-01T09:00:00Z"], [newer, "2026-11-01T10:00:00Z"]] as const) {
+    await f.sql`INSERT INTO opening_study_intent_events(id,workspace_id,owner_user_id,session_id,activity_id,client_key,
+      version,event_kind,payload,resulting_intent,action,created_at)
+      VALUES(${randomUUID()},${f.scope.workspaceId},${f.scope.ownerUserId},${lesson.sessionId},${lesson.activityId},
+        ${randomUUID()},1,'signal','{}','{}','continue',${at})`;
+    await f.sql`UPDATE opening_teaching_activities SET updated_at=${at} WHERE id=${lesson.activityId}`;
+  }
+  await f.sql`UPDATE opening_teaching_activities SET updated_at='2026-11-01T11:00:00Z' WHERE id=${older.activityId}`;
+  await expect(readOpeningCurrentLearningActivity(f.sql, f.scope, courseId)).resolves.toMatchObject({ activityId: newer.activityId });
+  await expect(readOpeningCurrentLearningRecovery(f.sql, f.scope)).resolves.toMatchObject({ activityId: newer.activityId });
+  await expect(readOpeningWorkspaceActivityRecovery(f.sql, f.scope)).resolves.toMatchObject({ activityId: newer.activityId });
+});
 const terminalRetestRecoveryCases = (["cancelled", "completed"] as const).flatMap(retestStatus =>
   (["active", "paused"] as const).flatMap(status => (["same", "other"] as const).map(course => ({ retestStatus, status, course }))));
 it.each(terminalRetestRecoveryCases)("recovers older $course-course progress past a newer $status lesson with $retestStatus retest", async ({ retestStatus, status, course }) => {
@@ -639,9 +726,10 @@ it("excludes malformed writing checkpoints and partial manuscript metadata acros
   expect(currentCourseActivity(listed, courseId)?.id).toBe(ordinaryPrefixed.id);
   expect(pickCurrentTeachingActivity(listed)?.id).toBe(ordinaryPrefixed.id);
 
-  // Implicit candidate selection skips all newer malformed writing activities and falls back to ordinaryPrefixed
+  // Implicit recovery skips the malformed writing activities and prefers the valid writing start
+  // over the ordinary activity that has no persisted learner engagement.
   expect(await readOpeningCurrentLearningActivity(f.sql, f.scope, courseId)).toEqual({
-    activityId: ordinaryPrefixed.id,
+    activityId: decimalZeroActivityId,
     sessionId: null,
     courseId,
   });
@@ -653,14 +741,14 @@ it("excludes malformed writing checkpoints and partial manuscript metadata acros
     courseId,
   });
   expect(await readOpeningCurrentLearningRecovery(f.sql, f.scope)).toEqual({
-    activityId: ordinaryPrefixed.id,
+    activityId: decimalZeroActivityId,
     sessionId: null,
     courseId,
   });
-  expect(await readOpeningWorkspaceActivityRecovery(f.sql, f.scope)).toEqual({
-    kind: "course",
-    activityId: ordinaryPrefixed.id,
-    sessionId: null,
+  expect(await readOpeningWorkspaceActivityRecovery(f.sql, f.scope)).toMatchObject({
+    kind: "writing",
+    activityId: decimalZeroActivityId,
+    documentId: decimalZeroWorkspace.currentDocumentId,
     courseId,
   });
 

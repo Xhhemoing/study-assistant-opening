@@ -16,6 +16,9 @@ describe("UI v3 feature registry", () => {
     expect(activeNavId("/opening/assistant")).toBe("today");
     expect(activeNavId("/opening/courses/abc/study")).toBe("today");
     expect(activeNavId("/opening/agent")).toBe("today");
+    expect(activeNavId("/opening/agent", { studySessionV2: true })).toBe("agent");
+    expect(activeNavId("/opening/assistant", { studySessionV2: true })).toBe("agent");
+    expect(resolveFeature("/opening/agent")).toMatchObject({ id: "agent", layout: "workspace", depth: 0, label: "探索" });
     expect(activeNavId("/opening/sprint")).toBe("today");
     expect(activeNavId("/opening/search")).toBe("library");
     expect(activeNavId("/opening/settings/export")).toBe("settings");
