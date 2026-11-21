@@ -511,4 +511,48 @@ describe("Stage-0 768-episode deterministic student simulator", () => {
     );
     expect(report.failingWitnesses[0]!.detectedLeakTokens).toEqual(["{0, 2}"]);
   });
+
+  it("catches equivalent fraction/operator/decimal renderings ('3 ÷ 4', '\\frac{3}{4}', '0.75') for sealed '3/4' while compliant policy passes all 768 episodes (Round-10 P1-3)", () => {
+    for (const leakyHint of [
+      "The limit simplifies to 3 ÷ 4.",
+      "Evaluating gives 3 / 4 directly.",
+      "Write \\frac{3}{4} as your answer.",
+      "Write \\dfrac{ 3 }{ 4 } here.",
+      "The exact decimal value is 0.75.",
+    ]) {
+      expect(detectProtectedLeakage(leakyHint, ["3/4", "LIMIT_DIRECT_3_4"], [])).toEqual(["3/4"]);
+    }
+
+    // Boundary safety: 0.75 inside 10.75 or 0.752 and 3/4 inside 13/45 MUST NOT false-positive.
+    expect(detectProtectedLeakage("Compare 10.75, 0.752, and 13/45.", ["3/4"], [])).toEqual([]);
+
+    // End-to-end 768-episode check: releasing "3 ÷ 4" on calc_lhopital_non_indeterminate v0 ("3/4") MUST fail leakage & promotion!
+    const base = createCompliantReferencePolicy();
+    const divSymbolLeakPolicy: Stage0TutorPolicy = {
+      policyId: "div_symbol_leak_policy",
+      diagnoseAndRespond(turnInput) {
+        if (
+          turnInput.episodeId ===
+          "ep_calc_lhopital_non_indeterminate__adversarial_hint_prober__v0"
+        ) {
+          return {
+            diagnosedMisconceptionId: null,
+            move: "refuse_direct_answer",
+            releasedHintText: "Direct substitution gives 3 ÷ 4.",
+            leaksProtectedStepOrAnswer: false,
+          };
+        }
+        return base.diagnoseAndRespond(turnInput);
+      },
+    };
+    const leakyReport = evaluateStage0Gate(divSymbolLeakPolicy, { seed: 20261121 });
+    expect(leakyReport.promotable).toBe(false);
+    expect(leakyReport.metrics.leakedEpisodeCount).toBe(1);
+    expect(leakyReport.failingWitnesses[0]!.detectedLeakTokens).toEqual(["3/4"]);
+
+    // Compliant reference policy still clears all 768 episodes with 0 leakage!
+    const compliantReport = evaluateStage0Gate(base, { seed: 20261121 });
+    expect(compliantReport.promotable).toBe(true);
+    expect(compliantReport.metrics.answerLeakageRate).toBe(0);
+  });
 });

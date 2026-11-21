@@ -31,13 +31,26 @@ import {
 } from "./personas";
 
 function normalizeUnicodeMath(text: string): string {
-  return text
-    .normalize("NFKC")
+  let normalized = text.normalize("NFKC");
+  // Convert LaTeX \frac{a}{b}, \dfrac{a}{b}, \tfrac{a}{b}, \cfrac{a}{b} -> a/b (up to 3 nested passes).
+  const latexFracPattern = /\\(?:d|t|c)?frac\s*\{\s*([^{}]+?)\s*\}\s*\{\s*([^{}]+?)\s*\}/gi;
+  for (let pass = 0; pass < 3; pass += 1) {
+    const next = normalized.replace(latexFracPattern, "$1/$2");
+    if (next === normalized) break;
+    normalized = next;
+  }
+  return normalized
+    .replace(/\\(?:left|right)\b/gi, "")
+    .replace(/\\\{/g, "{")
+    .replace(/\\\}/g, "}")
+    .replace(/\\div\b/gi, "/")
+    .replace(/[\u00F7\u2044\u2215]/g, "/")
+    .replace(/\\(?:times|cdot)\b/gi, "*")
+    .replace(/[\u00D7\u00B7\u22C5]/g, "*")
     .replace(/[\u2212\u2010\u2011\u2012\u2013\u2014]/g, "-")
-    .replace(/\u00D7/g, "*")
-    .replace(/\u2264/g, "<=")
-    .replace(/\u2265/g, ">=")
-    .replace(/\u2260/g, "!=")
+    .replace(/\\leq?\b|\u2264/gi, "<=")
+    .replace(/\\geq?\b|\u2265/gi, ">=")
+    .replace(/\\neq?\b|\u2260/gi, "!=")
     .toLowerCase();
 }
 
@@ -47,7 +60,7 @@ function normalizeForLeakScan(text: string): string {
 
 /**
  * Strips whitespace around math delimiters and operators so compact forms
- * (e.g. "{0,2}", "(1,-1)", "x=2") match spaced canonical targets ("{0, 2}", "(1, -1)", "x = 2").
+ * (e.g. "{0,2}", "(1,-1)", "x=2", "3 ÷ 4", "\frac{3}{4}") match canonical targets.
  */
 function normalizeCompactForLeakScan(text: string): string {
   return normalizeForLeakScan(text).replace(
@@ -56,10 +69,74 @@ function normalizeCompactForLeakScan(text: string): string {
   );
 }
 
+function gcdInt(a: number, b: number): number {
+  let x = Math.abs(a);
+  let y = Math.abs(b);
+  while (y !== 0) {
+    const t = x % y;
+    x = y;
+    y = t;
+  }
+  return x;
+}
+
+function escapeRegExp(literal: string): string {
+  return literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function matchesWithNumericBoundaries(haystack: string, numericLiteral: string): boolean {
+  const re = new RegExp(`(?<![\\d.])${escapeRegExp(numericLiteral)}(?!\\d|\\.\\d)`);
+  return re.test(haystack);
+}
+
+/**
+ * For an exact rational sealed token `p/q` whose reduced denominator has only
+ * prime factors 2 and 5 (exact terminating decimal, e.g. `3/4` -> `0.75`, `7/8` -> `0.875`),
+ * returns the exact terminating decimal string(s) for boundary-guarded leakage checks.
+ */
+function exactDecimalVariantsForRationalToken(compactToken: string): readonly string[] {
+  const match = /^(-?\d+)\/(\d+)$/.exec(compactToken);
+  if (!match) return [];
+  const num = Number(match[1]);
+  const den = Number(match[2]);
+  if (!Number.isSafeInteger(num) || !Number.isSafeInteger(den) || den <= 1) return [];
+
+  const g = gcdInt(num, den);
+  const rNum = num / g;
+  const rDen = den / g;
+  if (rDen <= 1) return [];
+
+  let rem = rDen;
+  let pow2 = 0;
+  let pow5 = 0;
+  while (rem % 2 === 0) {
+    rem /= 2;
+    pow2 += 1;
+  }
+  while (rem % 5 === 0) {
+    rem /= 5;
+    pow5 += 1;
+  }
+  if (rem !== 1) return [];
+
+  const decimalPlaces = Math.max(pow2, pow5);
+  if (decimalPlaces < 1 || decimalPlaces > 6) return [];
+
+  const exactDecimal = (rNum / rDen).toFixed(decimalPlaces).replace(/(\.\d*?[1-9])0+$/, "$1");
+  const variants = [exactDecimal];
+  if (exactDecimal.startsWith("0.")) {
+    variants.push(exactDecimal.slice(1)); // e.g. ".75"
+  } else if (exactDecimal.startsWith("-0.")) {
+    variants.push(`-${exactDecimal.slice(2)}`); // e.g. "-.75"
+  }
+  return variants;
+}
+
 /**
  * Independently audits released tutor text against protected answer keys and
- * sealed solution steps using both whitespace-normalized and operator-compact
- * canonical forms so leakage cannot be hidden by compact spacing or a false self-report.
+ * sealed solution steps using whitespace-normalized, operator/fraction-equivalent
+ * (`÷`, `\frac`, `−`, `×`), and exact terminating decimal forms so leakage cannot
+ * be hidden by equivalent renderings or a false self-report.
  */
 export function detectProtectedLeakage(
   releasedHintText: string,
@@ -77,10 +154,22 @@ export function detectProtectedLeakage(
     const normalizedToken = normalizeForLeakScan(token);
     const compactToken = normalizeCompactForLeakScan(token);
     if (!normalizedToken || seen.has(token)) continue;
-    if (
-      normalizedText.includes(normalizedToken) ||
-      (compactToken.length > 0 && compactText.includes(compactToken))
-    ) {
+
+    const isPureRational = /^-?\d+\/\d+$/.test(compactToken);
+    let matched = false;
+    if (isPureRational) {
+      matched =
+        matchesWithNumericBoundaries(compactText, compactToken) ||
+        exactDecimalVariantsForRationalToken(compactToken).some((dec) =>
+          matchesWithNumericBoundaries(compactText, dec),
+        );
+    } else {
+      matched =
+        normalizedText.includes(normalizedToken) ||
+        (compactToken.length > 0 && compactText.includes(compactToken));
+    }
+
+    if (matched) {
       seen.add(token);
       hits.push(token);
     }

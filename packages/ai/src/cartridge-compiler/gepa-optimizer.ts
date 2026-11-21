@@ -75,6 +75,14 @@ const RUBRIC_ANCHOR_KEYS: ReadonlySet<string> = new Set([
   "expression",
   "rationale",
 ]);
+const KNOWN_PATCH_SCHEMA_KEYS: ReadonlySet<string> = new Set([
+  ...ALLOWED_GEPA_MUTATION_SURFACES,
+  ...PATCH_TOP_LEVEL_KEYS,
+  ...MOVE_RULE_KEYS,
+  ...HINT_STEP_KEYS,
+  ...RUBRIC_RULE_KEYS,
+  ...RUBRIC_ANCHOR_KEYS,
+]);
 const MAX_SLOT_KEY_LENGTH = 256;
 const MAX_PATCH_STRING_LENGTH = 4096;
 
@@ -611,8 +619,10 @@ function scanObjectForForbiddenSurfaceKeys(value: unknown, pathPrefix: string): 
     if (FORBIDDEN_SURFACE_SET.has(key.toLowerCase())) {
       return `${pathPrefix}.${key}`;
     }
+    // Never interpolate unrecognized/caller-supplied ancestor keys into error paths or attemptedSurface.
+    const safeSegment = KNOWN_PATCH_SCHEMA_KEYS.has(key) ? key : "<unexpected_key>";
     const nested = (value as Record<string, unknown>)[key];
-    const hit = scanObjectForForbiddenSurfaceKeys(nested, `${pathPrefix}.${key}`);
+    const hit = scanObjectForForbiddenSurfaceKeys(nested, `${pathPrefix}.${safeSegment}`);
     if (hit) return hit;
   }
   return null;
@@ -699,15 +709,19 @@ export function assertAllowedGepaPatch(patch: unknown): asserts patch is GepaSur
   validateSurfacePayloadSchema(surface, patch.payload);
   // Post-normalization PII scan on rubric anchor expressions/AST tokens/premises.
   if (surface === "rubricAnchors") {
-    for (const rule of patch.payload as readonly MisconceptionRubricRule[]) {
+    const rules = patch.payload as readonly MisconceptionRubricRule[];
+    for (let ruleIdx = 0; ruleIdx < rules.length; ruleIdx += 1) {
+      const rule = rules[ruleIdx]!;
       assertNoRawPiiInText(
         normalizeAstEdit(rule.requiredAstTokens.join("|")),
-        `gepa_patch:rubricAnchors.${rule.ruleId}.requiredAstTokens(post_norm)`,
+        `gepa_patch:rubricAnchors[${ruleIdx}].requiredAstTokens(post_norm)`,
       );
-      for (const anchor of [...rule.positiveAnchors, ...rule.negativeAnchors]) {
+      const anchors = [...rule.positiveAnchors, ...rule.negativeAnchors];
+      for (let anchorIdx = 0; anchorIdx < anchors.length; anchorIdx += 1) {
+        const anchor = anchors[anchorIdx]!;
         assertNoRawPiiInText(
           normalizeAstEdit(anchor.normalizedAstEdit),
-          `gepa_patch:rubricAnchors.${rule.ruleId}.${anchor.anchorId}(post_norm)`,
+          `gepa_patch:rubricAnchors[${ruleIdx}].anchor[${anchorIdx}](post_norm)`,
         );
       }
     }
@@ -1113,11 +1127,47 @@ export function runGepaOptimizationRound(
     });
   }
 
-  const candidateMetrics = proposed.map((candidate) => {
-    const receipt = input.scoreCandidate(candidate);
-    // Scan the ENTIRE scorer receipt (including t7.reason, l.telemetryIssues, nested strings) for raw PII.
-    assertNoRawPiiInValue(receipt, `scorer_receipt[${candidate.candidateId}]`);
-    const canonicalReceiptId = canonicalizeIdentifier(receipt.candidateId, "receipt.candidateId");
+  const candidateMetrics: CartridgeCandidateMetrics[] = proposed.map((candidate) => {
+    const rawReceipt = input.scoreCandidate(candidate) as unknown;
+    // Scan the ENTIRE scorer receipt for raw PII first (null/undefined pass safely; PII fails closed).
+    assertNoRawPiiInValue(rawReceipt, `scorer_receipt[${candidate.candidateId}]`);
+
+    const makeMalformedVetoReceipt = (): CartridgeCandidateMetrics => ({
+      candidateId: candidate.candidateId,
+      c: {
+        rate: Number.NaN,
+        repairedCount: Number.NaN,
+        verifiableFirstErrorCount: Number.NaN,
+        abandonedCount: Number.NaN,
+        abandonmentRate: Number.NaN,
+      },
+      l: {
+        rate: Number.NaN,
+        leakedReleasedTurns: Number.NaN,
+        totalReleasedTurns: Number.NaN,
+        severeLeakCount: Number.NaN,
+        guardBlockedCount: Number.NaN,
+        telemetryIssues: ["missing_scorer_receipt"],
+      },
+      t7: {
+        status: "pending",
+        passedFreshTransferCount: 0,
+        eligibleFollowupCohortCount: 0,
+        pendingCohortCount: 0,
+        reason: "redacted_invalid_t7_status",
+      },
+    });
+
+    // Isolate null / undefined / non-object / missing-ID receipts as vetoed entries so valid siblings proceed.
+    if (!isPlainObject(rawReceipt)) {
+      return makeMalformedVetoReceipt();
+    }
+    const rawReceiptId = rawReceipt.candidateId;
+    if (typeof rawReceiptId !== "string" || rawReceiptId.normalize("NFKC").trim().length === 0) {
+      return makeMalformedVetoReceipt();
+    }
+
+    const canonicalReceiptId = canonicalizeIdentifier(rawReceiptId, "receipt.candidateId");
     assertNoRawPiiInText(canonicalReceiptId, "receipt.candidateId");
     if (canonicalReceiptId !== candidate.candidateId) {
       throw new CandidateIdentityError(
@@ -1126,9 +1176,10 @@ export function runGepaOptimizationRound(
         candidate.candidateId,
       );
     }
-    return canonicalReceiptId === receipt.candidateId
-      ? receipt
-      : { ...receipt, candidateId: canonicalReceiptId };
+    const typedReceipt = rawReceipt as unknown as CartridgeCandidateMetrics;
+    return canonicalReceiptId === typedReceipt.candidateId
+      ? typedReceipt
+      : { ...typedReceipt, candidateId: canonicalReceiptId };
   });
 
   const pareto = evaluateParetoFrontierAndPromotion(candidateMetrics, input.paretoOptions);

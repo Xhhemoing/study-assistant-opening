@@ -1972,7 +1972,8 @@ describe("Exact (C, -L, T7) Pareto frontier, Hard Pre-Pareto Veto, and Promotion
     const pendingRes = evaluateParetoFrontierAndPromotion([customPending], {
       baseline: { cRate: 0.8, t7Rate: 0.72 },
     });
-    expect(pendingRes.results[0]!.promotionBlockers).toEqual(["t7_pending:immature_followup"]);
+    expect(pendingRes.results[0]!.promotionBlockers).toEqual(["t7_pending:immature_followup_window"]);
+    expect(JSON.stringify(pendingRes)).not.toContain("internal_custom_note_xyz");
   });
 
   it("scans PII before GEPA patch schema validation and redacts unexpected keys in validateAndApplyGepaPatch (Round-9 P1-2)", () => {
@@ -2074,5 +2075,166 @@ describe("Exact (C, -L, T7) Pareto frontier, Hard Pre-Pareto Veto, and Promotion
     const nullT7Eval = result.results.find((r) => r.candidateId === "cand_null_t7")!;
     expect(nullT7Eval.status).toBe("vetoed_invalid_telemetry");
     expect(nullT7Eval.vetoReasons).toEqual(["invalid_t7_status"]);
+  });
+
+  it("catches space/dot-separated SSNs and scrubs caller free text from metrics.t7.reason and metrics.l.telemetryIssues (Round-10 P1-1)", () => {
+    for (const ssnVariant of ["123 45 6789", "123.45.6789", "123-45-6789", "123456789"]) {
+      expect(() => assertNoRawPiiInText(`id ${ssnVariant}`, "ssn_variants")).toThrow(
+        CartridgePiiViolationError,
+      );
+    }
+
+    const clean = buildMatureCohort("cand_r10_scrub_base", {
+      learnerCount: 25,
+      repairedCount: 23,
+      t7PassedCount: 24,
+    });
+
+    // Space-separated SSN inside t7.reason is caught and throws CartridgePiiViolationError!
+    const spacedSsnReason: CartridgeCandidateMetrics = {
+      ...clean,
+      candidateId: "cand_spaced_ssn_reason",
+      t7: {
+        status: "pending",
+        passedFreshTransferCount: 0,
+        eligibleFollowupCohortCount: 0,
+        pendingCohortCount: 5,
+        reason: "Waiting on cohort 123 45 6789",
+      },
+    };
+    expect(() =>
+      evaluateParetoFrontierAndPromotion([spacedSsnReason], {
+        baseline: { cRate: 0.8, t7Rate: 0.72 },
+      }),
+    ).toThrow(CartridgePiiViolationError);
+
+    // Caller free text in t7.reason and l.telemetryIssues is NEVER echoed verbatim in returned metrics or diagnostics!
+    const freeTextReceipt: CartridgeCandidateMetrics = {
+      ...clean,
+      candidateId: "cand_free_text_scrub",
+      l: {
+        ...clean.l,
+        telemetryIssues: ["Alice Smith custom raw telemetry note"],
+      },
+      t7: {
+        status: "pending",
+        passedFreshTransferCount: 0,
+        eligibleFollowupCohortCount: 0,
+        pendingCohortCount: 5,
+        reason: "Bob Jones awaiting teacher grading",
+      },
+    };
+    const res = evaluateParetoFrontierAndPromotion([freeTextReceipt], {
+      baseline: { cRate: 0.8, t7Rate: 0.72 },
+    });
+    const serialized = JSON.stringify(res);
+    expect(serialized).not.toContain("Alice Smith");
+    expect(serialized).not.toContain("Bob Jones");
+    expect(res.results[0]!.metrics.l.telemetryIssues).toEqual(["telemetry_issue_reported"]);
+    expect(res.results[0]!.metrics.t7.status).toBe("pending");
+    if (res.results[0]!.metrics.t7.status === "pending") {
+      expect(res.results[0]!.metrics.t7.reason).toBe("immature_followup_window");
+    }
+  });
+
+  it("never echoes unexpected ancestor keys in nested forbidden-surface GEPA errors (Round-10 P1-2)", () => {
+    const base = makeBasePolicy();
+    let caught: unknown;
+    try {
+      validateAndApplyGepaPatch(base, {
+        surface: "approvedTemplateSlots",
+        summary: "Attempt nested forbidden key under learner name",
+        payload: {
+          "Alice Smith": {
+            permissions: { allowAll: true },
+          },
+        },
+      });
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).toBeInstanceOf(GepaForbiddenSurfaceError);
+    const surfErr = caught as GepaForbiddenSurfaceError;
+    expect(surfErr.message).not.toContain("Alice Smith");
+    expect(surfErr.attemptedSurface).not.toContain("Alice Smith");
+    expect(surfErr.attemptedSurface).toBe("approvedTemplateSlots.<unexpected_key>.permissions");
+  });
+
+  it("isolates null/undefined/malformed scorer receipts in runGepaOptimizationRound without aborting valid sibling candidates (Round-10 P1-4)", () => {
+    const records: ErrorTrajectoryRecord[] = [];
+    for (let comp = 0; comp < 4; comp += 1) {
+      for (let i = 0; i < 6; i += 1) {
+        records.push(
+          makeTrajectory({
+            trajectoryId: `r10_null_c${comp}_t${i}`,
+            learnerPseudoId: `pseudo_r10_c${comp}_u${i}`,
+            itemFamilyId: `fam_r10_c${comp}`,
+          }),
+        );
+      }
+    }
+    const split = createDisjointTrajectorySplit(records, { seed: 2026 });
+
+    const round = runGepaOptimizationRound({
+      basePolicy: makeBasePolicy(),
+      split,
+      clusteringOptions: { minSupport: 5 },
+      extraCandidatePatches: [
+        {
+          candidateId: "cand_null_receipt",
+          patches: [
+            {
+              surface: "approvedTemplateSlots",
+              summary: "Slot 1",
+              payload: { s1: "Verify premise" },
+            },
+          ],
+        },
+        {
+          candidateId: "cand_valid_sibling_1",
+          patches: [
+            {
+              surface: "approvedTemplateSlots",
+              summary: "Slot 2",
+              payload: { s2: "Verify premise carefully" },
+            },
+          ],
+        },
+        {
+          candidateId: "cand_valid_sibling_2",
+          patches: [
+            {
+              surface: "approvedTemplateSlots",
+              summary: "Slot 3",
+              payload: { s3: "Check edge case" },
+            },
+          ],
+        },
+      ],
+      scoreCandidate: (candidate) => {
+        if (candidate.candidateId === "cand_null_receipt") {
+          return null as unknown as CartridgeCandidateMetrics;
+        }
+        return buildMatureCohort(candidate.candidateId, {
+          learnerCount: 25,
+          repairedCount: 23,
+          t7PassedCount: 24,
+        });
+      },
+      paretoOptions: {
+        baseline: { cRate: 0.85, t7Rate: 0.72 },
+        minT7Gain: 0.05,
+        nonInferiorityMargin: 0.02,
+        minClusterCount: 5,
+      },
+    });
+
+    expect(round.pareto.vetoedCandidateIds).toContain("cand_null_receipt");
+    expect(round.pareto.promotedCandidateIds).toContain("cand_valid_sibling_1");
+    expect(round.pareto.promotedCandidateIds).toContain("cand_valid_sibling_2");
+    const nullEntry = round.pareto.results.find((r) => r.candidateId === "cand_null_receipt")!;
+    expect(nullEntry.status).toBe("vetoed_leakage");
+    expect(nullEntry.onParetoFrontier).toBe(false);
   });
 });

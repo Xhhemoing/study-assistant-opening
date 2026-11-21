@@ -21,7 +21,7 @@ const INTL_PHONE_PATTERN =
   /(?<![\w.])(?:\+\d{1,3}[\s.-]?\d{2,4}[\s.-]?\d{3,4}[\s.-]?\d{3,4}|\+\d{8,15})(?![\d.])/;
 const UNFORMATTED_PHONE_PATTERN =
   /(?<![0-9A-Za-z_.])\d{10,11}(?![0-9A-Za-z_]|\.\d)/;
-const SSN_PATTERN = /(?<![\d.])\d{3}-\d{2}-\d{4}(?![\d.])/;
+const SSN_PATTERN = /(?<![\d.])\d{3}([\s.-])\d{2}\1\d{4}(?![\d.])/;
 const UNFORMATTED_SSN_PATTERN =
   /(?<![0-9A-Za-z_.])\d{9}(?![0-9A-Za-z_]|\.\d)/;
 const TOKEN_URL_PATTERN =

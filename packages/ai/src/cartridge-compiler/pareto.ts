@@ -23,7 +23,47 @@ const KNOWN_PENDING_T7_REASONS: ReadonlySet<string> = new Set([
   "followup_window_immature",
   "no_eligible_followup_cohort",
   "followup_window_partially_immature",
+  "immature_followup_window",
+  "redacted_invalid_reason",
+  "redacted_invalid_t7_status",
 ]);
+
+const KNOWN_TELEMETRY_ISSUE_CODES: ReadonlySet<string> = new Set([
+  "trajectory_malformed",
+  "trajectory_invalid_totalReleasedTurns",
+  "trajectory_invalid_leakedReleasedTurns",
+  "trajectory_leaked_gt_total",
+  "trajectory_invalid_severeLeakCount",
+  "trajectory_invalid_guardBlockedCount",
+  "aggregate_totalReleasedTurns_must_be_positive",
+  "telemetry_issue_reported",
+  "invalid_telemetry_issue_entry",
+  "missing_scorer_receipt",
+]);
+
+function canonicalizePendingReason(raw: unknown): string {
+  if (typeof raw !== "string" || raw.trim().length === 0) {
+    return "redacted_invalid_reason";
+  }
+  return KNOWN_PENDING_T7_REASONS.has(raw) ? raw : "immature_followup_window";
+}
+
+function canonicalizeTelemetryIssues(raw: unknown): readonly string[] | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw)) return ["invalid_telemetry_issue_entry"];
+  if (raw.length === 0) return undefined;
+  const codes = new Set<string>();
+  for (const entry of raw) {
+    if (typeof entry !== "string") {
+      codes.add("invalid_telemetry_issue_entry");
+    } else if (KNOWN_TELEMETRY_ISSUE_CODES.has(entry)) {
+      codes.add(entry);
+    } else {
+      codes.add("telemetry_issue_reported");
+    }
+  }
+  return [...codes];
+}
 
 function isNonNullRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -836,10 +876,9 @@ function projectDeclaredCandidateMetrics(
 ): CartridgeCandidateMetrics {
   const rawC = candidate.c as CartridgeCandidateMetrics["c"] | null | undefined;
   const rawL = candidate.l as CartridgeCandidateMetrics["l"] | null | undefined;
-  const safeTelemetryIssues =
-    isNonNullRecord(rawL) && Array.isArray(rawL.telemetryIssues)
-      ? rawL.telemetryIssues.filter((entry): entry is string => typeof entry === "string")
-      : undefined;
+  const safeTelemetryIssues = isNonNullRecord(rawL)
+    ? canonicalizeTelemetryIssues(rawL.telemetryIssues)
+    : undefined;
 
   const rawT7 = candidate.t7 as T7Metric | null | undefined;
   let safeT7: T7Metric;
@@ -892,10 +931,7 @@ function projectDeclaredCandidateMetrics(
           : Number.NaN,
       pendingCohortCount:
         typeof rawT7.pendingCohortCount === "number" ? rawT7.pendingCohortCount : Number.NaN,
-      reason:
-        typeof rawT7.reason === "string" && rawT7.reason.trim().length > 0
-          ? rawT7.reason
-          : "redacted_invalid_reason",
+      reason: canonicalizePendingReason(rawT7.reason),
     };
   } else {
     safeT7 = {
@@ -1049,10 +1085,22 @@ export function evaluateParetoFrontierAndPromotion(
         t7: null as unknown as CartridgeCandidateMetrics["t7"],
       };
     }
+    // Always scan the entire receipt for raw PII first before isolating missing/non-string candidateId.
+    assertNoRawPiiInValue(rawCandidate, `pareto_candidate[${idx}]`);
+    const rawId = rawCandidate.candidateId;
+    if (typeof rawId !== "string" || rawId.normalize("NFKC").trim().length === 0) {
+      const placeholderId = `__malformed_candidate_${idx}`;
+      malformedEntryIds.add(placeholderId);
+      return {
+        candidateId: placeholderId,
+        c: null as unknown as CartridgeCandidateMetrics["c"],
+        l: null as unknown as CartridgeCandidateMetrics["l"],
+        t7: null as unknown as CartridgeCandidateMetrics["t7"],
+      };
+    }
     const candidate = rawCandidate as unknown as CartridgeCandidateMetrics;
-    const canonicalId = canonicalizeIdentifier(candidate.candidateId, "candidateId");
+    const canonicalId = canonicalizeIdentifier(rawId, "candidateId");
     assertNoRawPiiInText(canonicalId, "candidateId");
-    assertNoRawPiiInValue(candidate, `pareto_candidate[${canonicalId}]`);
     if (seenCandidateIds.has(canonicalId)) {
       throw new CandidateIdentityError(
         `Duplicate candidateId "${canonicalId}" in Pareto evaluation.`,
@@ -1171,10 +1219,7 @@ export function evaluateParetoFrontierAndPromotion(
     // Non-dominated safe candidate on Pareto frontier: check promotion gate (fail-closed on NaN/invalid).
     const promotionBlockers: string[] = [];
     if (candidate.t7.status === "pending") {
-      const pendingCode = KNOWN_PENDING_T7_REASONS.has(candidate.t7.reason)
-        ? candidate.t7.reason
-        : "immature_followup";
-      promotionBlockers.push(`t7_pending:${pendingCode}`);
+      promotionBlockers.push(`t7_pending:${canonicalizePendingReason(candidate.t7.reason)}`);
     } else if (candidate.t7.status === "mature") {
       const t7 = candidate.t7;
       const cert = matureCertMap.get(candidate.candidateId) ?? certifyMatureTransferLowerBound(t7);
