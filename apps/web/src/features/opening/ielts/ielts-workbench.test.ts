@@ -5,8 +5,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   analyzeCrossDraftTransfer,
   buildSpeakingPart3Seed,
+  createInitialIeltsContinuityState,
   evaluateRevisedDraftDeterministically,
   evaluateSpeakingRetelling,
+  ieltsWritingSpeakingCartridge,
 } from "./domain-bridge";
 import {
   IELTS_WRITING_SPEAKING_FIXTURE,
@@ -525,17 +527,46 @@ describe("IeltsDraftCritiqueWorkbench", () => {
     expect(host.querySelector('[data-epistemic-badge="rubric_verified_evidence"]')).toBeNull();
   });
 
-  it("withholds the Draft 1 badge after the prompt text changes under the same prompt ID", async () => {
+  it.each([
+    ["draft1", "draft1Receipt", "一稿"],
+    ["draft2", "draft2Receipt", "二稿"],
+  ] as const)(
+    "withholds the %s Writing badge from a single-draft diagnostic with forged mastery flags",
+    async (initialView, receiptKey, tab) => {
+      const fixture = IELTS_WRITING_SPEAKING_FIXTURE;
+      const receipt = {
+        ...fixture[receiptKey],
+        evidenceSource: "single_draft_diagnostic" as const,
+        epistemicStatus: "rubric_verified_evidence" as const,
+        masteryQualified: true,
+        countsTowardMastery: true,
+      };
+      await act(async () => root.render(createElement(
+        IeltsDraftCritiqueWorkbench,
+        { fixture: { ...fixture, [receiptKey]: receipt }, initialView },
+      )));
+      expect(host.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toBe(tab);
+      expect(host.querySelector('[data-epistemic-badge="practice_feedback"]')).not.toBeNull();
+      expect(host.querySelector('[data-epistemic-badge="rubric_verified_evidence"]')).toBeNull();
+    },
+  );
+
+  it("withholds the genuine Draft 1 badge after the prompt text changes under the same prompt ID", async () => {
     const fixture = IELTS_WRITING_SPEAKING_FIXTURE;
-    const draft1Receipt = {
-      ...fixture.draft1Receipt,
-      epistemicStatus: "rubric_verified_evidence" as const,
-      masteryQualified: true,
-      countsTowardMastery: true,
-    };
+    const draft1 = { ...fixture.draft2, draftId: "fresh-prompt-draft-1", version: 1, basedOnVersion: undefined };
+    const freshTransfer = evaluateRevisedDraftDeterministically({
+      baselineDraft: { ...fixture.draft1, promptId: "previous-transport-prompt" },
+      revisedDraft: draft1,
+      targets: fixture.targets,
+      promptStatement: fixture.promptStatementEn,
+      receiptId: "fresh-prompt-receipt-1",
+      freshPromptTransfer: true,
+    });
+    if (!freshTransfer.ok) throw new Error("Expected a fresh-prompt Writing receipt");
+    expect(freshTransfer.receipt.evidenceSource).toBe("unassisted_fresh_prompt_transfer");
     const render = (promptStatementEn: string) => act(async () => root.render(createElement(
       IeltsDraftCritiqueWorkbench,
-      { fixture: { ...fixture, draft1Receipt, promptStatementEn }, initialView: "draft1" },
+      { fixture: { ...fixture, draft1, draft1Receipt: freshTransfer.receipt, promptStatementEn }, initialView: "draft1" },
     )));
     await render(fixture.promptStatementEn);
     expect(host.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toBe("一稿");
@@ -1756,6 +1787,37 @@ describe("IeltsDraftCritiqueWorkbench", () => {
 });
 
 describe("IeltsSpeakingTransferCard", () => {
+  it("restores the built-in Speaking mastery only for the canonical prompt text", () => {
+    const fixture = IELTS_WRITING_SPEAKING_FIXTURE;
+    const state = {
+      ...createInitialIeltsContinuityState(fixture.promptId, fixture.initialSpeakingReceipt.createdAt),
+      activeStage: "completed" as const,
+      draft2Receipt: fixture.draft2Receipt,
+      speakingReceipt: fixture.initialSpeakingReceipt,
+    };
+    const restored = ieltsWritingSpeakingCartridge.parseContinuityState(
+      ieltsWritingSpeakingCartridge.serializeContinuityState(state),
+    );
+    expect(restored).toMatchObject({ ok: true, value: { speakingReceipt: { countsTowardMastery: true } } });
+    expect(ieltsWritingSpeakingCartridge.buildResumeSummary(state).completedSteps).toBe(3);
+
+    const otherPrompt = evaluateRevisedDraftDeterministically({
+      baselineDraft: fixture.draft1,
+      revisedDraft: fixture.draft2,
+      targets: fixture.targets,
+      promptStatement: "Should cities invest in urban rail rather than widening roads?",
+      receiptId: "same-id-different-prompt",
+    });
+    if (!otherPrompt.ok) throw new Error("Expected a receipt for the other prompt text");
+    expect(otherPrompt.receipt.masteryQualified).toBe(true);
+    const changed = { ...state, draft2Receipt: otherPrompt.receipt };
+    expect(ieltsWritingSpeakingCartridge.parseContinuityState(changed)).toMatchObject({
+      ok: true,
+      value: { speakingReceipt: { countsTowardMastery: false } },
+    });
+    expect(ieltsWritingSpeakingCartridge.buildResumeSummary(changed).completedSteps).toBe(2);
+  });
+
   it("withholds restored Speaking mastery from collocations pasted after a colon", async () => {
     const { speakingSeed, initialSpeakingTranscript } = IELTS_WRITING_SPEAKING_FIXTURE;
     const seed = { ...speakingSeed, targetSpokenCollocations: ["affordable housing"] };

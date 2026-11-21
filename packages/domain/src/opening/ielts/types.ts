@@ -1,5 +1,12 @@
 export const IELTS_CARTRIDGE_ID = "ielts-writing-speaking-v1" as const;
 export const IELTS_CARTRIDGE_VERSION = "1.0.0" as const;
+export const IELTS_PROMPT_ID_MAX_LENGTH = 128;
+
+export function readIeltsPromptId(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const promptId = value.trim();
+  return promptId.length > 0 && promptId.length <= IELTS_PROMPT_ID_MAX_LENGTH ? promptId : undefined;
+}
 
 export function isDenseIeltsArray<T>(
   value: unknown,

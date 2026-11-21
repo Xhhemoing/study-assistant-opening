@@ -62,13 +62,15 @@ export function IeltsSpeakingTransferCard({
     ...IELTS_LEARNER_SPEAKING_SEED,
     verifiedWritingReceipt: providedVerifiedWritingReceipt,
   };
-  const seed: IeltsSpeakingPart3Seed = providedSeed
+  const selectedSeed: IeltsSpeakingPart3Seed = providedSeed
     ? providedVerifiedWritingReceipt !== undefined
       ? { ...providedSeed, verifiedWritingReceipt: providedVerifiedWritingReceipt }
       : providedSeed
     : isDemoPreview
       ? demo.speakingSeed
       : defaultLearnerSeed;
+  const seed = { ...selectedSeed, sourcePromptId: selectedSeed.sourcePromptId.trim() };
+  const attemptPromptId = initialAttemptPromptId?.trim();
   const useDemoFixture =
     isDemoPreview &&
     providedSeed === undefined &&
@@ -80,12 +82,12 @@ export function IeltsSpeakingTransferCard({
     candidateReceipt !== undefined &&
     candidateReceipt.seedId === seed.seedId &&
     typeof candidateReceipt.sourcePromptId === "string" &&
-    candidateReceipt.sourcePromptId === seed.sourcePromptId;
+    candidateReceipt.sourcePromptId.trim() === seed.sourcePromptId;
   const hasForeignReceipt = candidateReceipt !== undefined && !receiptBelongsToSeed;
   const hasForeignAttemptPromptId =
-    initialAttemptPromptId !== undefined && initialAttemptPromptId !== seed.sourcePromptId;
+    attemptPromptId !== undefined && attemptPromptId !== seed.sourcePromptId;
   const hasExplicitPromptBinding =
-    initialAttemptPromptId === seed.sourcePromptId || receiptBelongsToSeed;
+    attemptPromptId === seed.sourcePromptId || receiptBelongsToSeed;
 
   // Guard against a parent switching seed.sourcePromptId before clearing transcript-only
   // state (initialReceipt === undefined, initialAttemptPromptId omitted).
@@ -218,7 +220,7 @@ function isSpeakingReceiptVisibleForAttempt(
   return (
     receipt.seedId === seed.seedId &&
     typeof receipt.sourcePromptId === "string" &&
-    receipt.sourcePromptId === seed.sourcePromptId &&
+    receipt.sourcePromptId.trim() === seed.sourcePromptId &&
     receipt.sourceTranscript === transcript &&
     receipt.durationSeconds === durationSeconds &&
     receipt.assisted === assisted &&

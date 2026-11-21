@@ -24,6 +24,7 @@ import {
   IELTS_CRITERIA,
   isDenseIeltsArray,
   isNonBlankIeltsString as isNonBlankString,
+  readIeltsPromptId,
   type IeltsBandScore,
   type IeltsCriterion,
   type IeltsCriterionAssessment,
@@ -1036,7 +1037,7 @@ function analyzeTransfer(
   creditedOccurrences: ReadonlyMap<IeltsCriterion, WritingCandidate>;
   topicRelevance: TopicRelevanceAssessment;
 } {
-  const samePrompt = input.draft1.promptId === input.draft2.promptId;
+  const samePrompt = readIeltsPromptId(input.draft1.promptId) === readIeltsPromptId(input.draft2.promptId);
   const lineage = getWritingTransferLineage(input.draft1, input.draft2);
   const advancingLineage = lineage === "advancing_revision";
   const freshPrompt = lineage === "fresh_prompt" && freshPromptConfirmed;
@@ -1345,14 +1346,14 @@ export type EvaluateRevisedDraftResult = {
   readonly transferReport: IeltsCrossDraftTransferReport;
 } & (
   | { readonly ok: true; readonly receipt: IeltsRubricReceipt }
-  | { readonly ok: false; readonly reason: "empty_draft"; readonly receipt: null }
+  | { readonly ok: false; readonly reason: "empty_draft" | "invalid_prompt_id"; readonly receipt: null }
 );
 
 /** Evaluates a revision and issues a grounded rubric receipt when there is submitted text. */
 export function evaluateRevisedDraftDeterministically(
   input: EvaluateRevisedDraftInput,
 ): EvaluateRevisedDraftResult {
-  const freshPrompt = input.revisedDraft.promptId !== input.baselineDraft.promptId &&
+  const freshPrompt = getWritingTransferLineage(input.baselineDraft, input.revisedDraft) === "fresh_prompt" &&
     input.freshPromptTransfer === true;
   const paragraphs = input.revisedDraft.paragraphs;
   const revisedProse = maskIeltsParagraphs(paragraphs);
@@ -1369,10 +1370,11 @@ export function evaluateRevisedDraftDeterministically(
     promptStatement: input.promptStatement,
   }, freshPrompt, revisedProse, segmentedParagraphs, wordCount);
 
-  if (wordCount === 0) {
+  const invalidPromptId = !readIeltsPromptId(input.baselineDraft.promptId) || !readIeltsPromptId(input.revisedDraft.promptId);
+  if (wordCount === 0 || invalidPromptId) {
     return {
       ok: false,
-      reason: "empty_draft",
+      reason: invalidPromptId ? "invalid_prompt_id" : "empty_draft",
       receipt: null,
       transferReport: finalizeTransferReport(transferReport, false),
     };
@@ -1689,7 +1691,7 @@ function isValidDraftSourceRecord(
   }
   const initialCount = issues.length;
   if (!isNonBlankString(value.draftId)) issues.push(`${label}.draftId must be a non-blank string`);
-  if (!isNonBlankString(value.promptId)) issues.push(`${label}.promptId must be a non-blank string`);
+  if (!readIeltsPromptId(value.promptId)) issues.push(`${label}.promptId is invalid`);
   if (typeof value.version !== "number" || !Number.isSafeInteger(value.version) || value.version < 1) {
     issues.push(`${label}.version must be a positive integer`);
   }
@@ -1738,7 +1740,8 @@ export function validateWritingRubricReceipt(
   if (!isNonBlankString(rawReceipt.receiptId)) issues.push("receiptId must be a non-blank string");
   if (rawReceipt.cartridgeId !== IELTS_CARTRIDGE_ID) issues.push("cartridgeId mismatch");
   if (rawReceipt.taskMode !== "writing_task2") issues.push("taskMode must be writing_task2");
-  if (!isNonBlankString(rawReceipt.promptId)) issues.push("promptId must be a non-blank string");
+  const promptId = readIeltsPromptId(rawReceipt.promptId);
+  if (!promptId) issues.push("promptId is invalid");
   if (!isNonBlankString(rawReceipt.draftId)) issues.push("draftId must be a non-blank string");
   if (
     typeof rawReceipt.draftVersion !== "number" ||
@@ -1777,7 +1780,7 @@ export function validateWritingRubricReceipt(
     issues.push("memorizedTemplateFlags must be a dense array of objects");
   }
 
-  if (options?.expectedPromptId !== undefined && rawReceipt.promptId !== options.expectedPromptId) {
+  if (options?.expectedPromptId !== undefined && promptId !== readIeltsPromptId(options.expectedPromptId)) {
     issues.push("promptId does not match expectedPromptId");
   }
   if (options?.expectedDraftId !== undefined && rawReceipt.draftId !== options.expectedDraftId) {
@@ -1786,9 +1789,9 @@ export function validateWritingRubricReceipt(
 
   const rawSourceDraft = rawReceipt.sourceDraft;
   const hasValidSourceDraft = isValidDraftSourceRecord(rawSourceDraft, "sourceDraft", issues);
-  if (isValidDraftSourceRecord(rawSourceDraft, "sourceDraft", [])) {
+  if (hasValidSourceDraft) {
     if (rawSourceDraft.draftId !== rawReceipt.draftId) issues.push("sourceDraft.draftId mismatch");
-    if (rawSourceDraft.promptId !== rawReceipt.promptId) issues.push("sourceDraft.promptId mismatch");
+    if (readIeltsPromptId(rawSourceDraft.promptId) !== promptId) issues.push("sourceDraft.promptId mismatch");
     if (rawSourceDraft.version !== rawReceipt.draftVersion) issues.push("sourceDraft.version mismatch");
   }
 
@@ -1827,14 +1830,7 @@ export function validateWritingRubricReceipt(
         if (countDraftWords(rawBaseline.paragraphs) === 0) {
           issues.push("transferSource.baseline must contain prose words");
         } else {
-          validatedBaseline = {
-            draftId: rawBaseline.draftId,
-            promptId: rawBaseline.promptId,
-            version: rawBaseline.version,
-            basedOnVersion: rawBaseline.basedOnVersion,
-            assisted: rawBaseline.assisted,
-            paragraphs: [...rawBaseline.paragraphs],
-          };
+          validatedBaseline = getWritingDraftSource(rawBaseline);
         }
       }
       if (!isDenseIeltsArray(rawReceipt.transferSource.targets, isPlainRecord)) {
@@ -1936,12 +1932,12 @@ export function validateWritingRubricReceipt(
     }
   }
 
-  if (issues.length > 0 || !hasValidSourceDraft) {
+  if (issues.length > 0 || !hasValidSourceDraft || !promptId) {
     return { ok: false, issues };
   }
 
   const receipt = rawReceipt as IeltsRubricReceipt;
-  const sourceDraft = receipt.sourceDraft!;
+  const sourceDraft = getWritingDraftSource(rawSourceDraft);
   const isCrossDraftTransfer = receipt.evidenceSource === "unassisted_cross_draft_transfer";
   const isFreshPromptTransfer = receipt.evidenceSource === "unassisted_fresh_prompt_transfer";
   const claimsVerified =
@@ -2092,7 +2088,17 @@ export function validateWritingRubricReceipt(
   if (issues.length > 0) {
     return { ok: false, issues };
   }
-  return { ok: true, receipt };
+  return {
+    ok: true,
+    receipt: {
+      ...receipt,
+      promptId,
+      sourceDraft,
+      ...(receipt.transferSource && validatedBaseline
+        ? { transferSource: { ...receipt.transferSource, baseline: validatedBaseline } }
+        : {}),
+    },
+  };
 }
 
 /** Issues only receipts that can pass the same validation used during continuity restore. */

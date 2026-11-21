@@ -76,6 +76,7 @@ export type {
 } from "./transfer";
 
 export {
+  IELTS_URBAN_RAIL_SPEAKING_PROMPT,
   buildSpeakingPart3Seed,
   classifySpeakingPace,
   evaluateSpeakingRetelling,

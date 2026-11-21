@@ -5,6 +5,7 @@ import {
   IELTS_CRITERIA,
   isDenseIeltsArray,
   isNonBlankIeltsString,
+  readIeltsPromptId,
   type IeltsBandScore,
   type IeltsCriterion,
   type IeltsCriterionAssessment,
@@ -399,12 +400,15 @@ export function getWritingTransferLineage(
   ) {
     return null;
   }
+  const baselinePromptId = readIeltsPromptId(baseline.promptId);
+  const revisedPromptId = readIeltsPromptId(revised.promptId);
+  if (!baselinePromptId || !revisedPromptId) return null;
   const parent = revised.basedOnVersion;
   // The supplied baseline is the only draft available to verify an explicit parent.
   if (parent !== undefined && (parent !== baseline.version || parent >= revised.version)) {
     return null;
   }
-  if (revised.promptId !== baseline.promptId) return "fresh_prompt";
+  if (revisedPromptId !== baselinePromptId) return "fresh_prompt";
   const followsBaseline = parent !== undefined || revised.version === baseline.version + 1;
   return followsBaseline ? "advancing_revision" : null;
 }
@@ -434,6 +438,10 @@ export function createGroundedRubricReceipt(
 ): IeltsRubricValidationResult {
   const errors: IeltsRubricValidationError[] = [];
   const paragraphs = input.draft.paragraphs;
+  const promptId = readIeltsPromptId(input.draft.promptId);
+  if (!promptId || (input.baselineDraft && !readIeltsPromptId(input.baselineDraft.promptId))) {
+    return { ok: false, errors: [{ code: "INVALID_RECEIPT", message: "Invalid IELTS Writing prompt ID." }] };
+  }
   const isParagraph = (value: unknown) => typeof value === "string";
   if (
     !isDenseIeltsArray(paragraphs, isParagraph) ||
@@ -623,7 +631,7 @@ export function createGroundedRubricReceipt(
     receiptId: input.receiptId,
     cartridgeId: IELTS_CARTRIDGE_ID,
     taskMode: input.taskMode,
-    promptId: input.draft.promptId,
+    promptId,
     draftId: input.draft.draftId,
     draftVersion: input.draft.version,
     sourceDraft: getWritingDraftSource(input.draft),

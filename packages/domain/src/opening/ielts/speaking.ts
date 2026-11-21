@@ -11,6 +11,7 @@ import {
   IELTS_CARTRIDGE_ID,
   isDenseIeltsArray,
   isNonBlankIeltsString,
+  readIeltsPromptId,
   type IeltsSpeakingEvidenceQuote,
   type IeltsSpeakingFeedbackReceipt,
   type IeltsSpeakingPaceStatus,
@@ -20,6 +21,18 @@ import {
   type IeltsSpeakingTranscriptSignal,
   type IeltsWritingCoreArgument,
 } from "./types";
+
+export const IELTS_URBAN_RAIL_SPEAKING_PROMPT = Object.freeze({
+  promptId: "ielts-task2-urban-rail-funding",
+  promptStatement: "Some people believe that governments should invest public funds primarily in urban rail networks rather than expanding road systems for private vehicles. To what extent do you agree or disagree?",
+  targetSpokenCollocations: Object.freeze([
+    "alleviate chronic congestion",
+    "per-capita emissions",
+    "long-term fiscal viability",
+    "induced traffic demand",
+    "feeder buses",
+  ]),
+});
 
 const STIFF_WRITTEN_ONLY_PHRASES = [
   "furthermore",
@@ -338,6 +351,8 @@ export function buildSpeakingPart3Seed(
   argument: IeltsWritingCoreArgument,
   sourceDraftId: string,
 ): IeltsSpeakingPart3Seed {
+  const sourcePromptId = readIeltsPromptId(argument.promptId);
+  if (!sourcePromptId) throw new TypeError("Invalid IELTS Speaking prompt ID");
   const topicClean = argument.topic.trim() || "urban public policy";
   const targetSpokenCollocations = cleanSpokenCollocations(argument.activeCollocations);
 
@@ -353,9 +368,9 @@ export function buildSpeakingPart3Seed(
   ];
 
   return {
-    seedId: `speaking-p3-${argument.promptId}-${sourceDraftId}`,
+    seedId: getSpeakingSeedId(sourcePromptId, sourceDraftId),
     cartridgeId: IELTS_CARTRIDGE_ID,
-    sourcePromptId: argument.promptId,
+    sourcePromptId,
     sourceDraftId,
     topic: topicClean,
     followUpQuestion,
@@ -365,6 +380,10 @@ export function buildSpeakingPart3Seed(
     argumentBridgeCues,
     avoidWrittenClunkyPhrases: [...DEFAULT_AVOID_IN_SPEECH],
   };
+}
+
+export function getSpeakingSeedId(promptId: string, draftId: string): string {
+  return `speaking-p3-${promptId}-${draftId}`;
 }
 
 export function classifySpeakingPace(
@@ -438,11 +457,13 @@ function allocateSpeakingEvidence(sentences: readonly GroundedSentence[], target
 }
 
 export function hasRequiredWritingReceipt(seed: IeltsSpeakingPart3Seed): boolean {
+  const promptId = readIeltsPromptId(seed.sourcePromptId);
+  if (!promptId) return false;
   if (!seed.requiresVerifiedReceipt) return true;
   const receipt = seed.verifiedWritingReceipt;
   if (
     !isVerifiedWritingReceipt(receipt, {
-      expectedPromptId: seed.sourcePromptId,
+      expectedPromptId: promptId,
       expectedDraftId: seed.sourceDraftId,
     })
   ) {
@@ -522,19 +543,21 @@ function analyzeSpeakingRetelling(
   };
 }
 
+export function matchesSpeakingCollocations(stored: readonly string[], expected: readonly string[]): boolean {
+  return isDenseIeltsArray(stored, isNonBlankIeltsString) &&
+    stored.length === expected.length &&
+    expected.every((expression) => stored.includes(expression));
+}
+
 /** Recomputes the mastery claim and its transferred/pending partition from the transcript. */
 export function hasVerifiedSpeakingRetelling(
   receipt: IeltsSpeakingFeedbackReceipt,
   context: SpeakingEvaluationContext,
 ): boolean {
-  const matchesCollocations = (stored: readonly string[], expected: readonly string[]) =>
-    isDenseIeltsArray(stored, isNonBlankIeltsString) &&
-    stored.length === expected.length &&
-    expected.every((expression) => stored.includes(expression));
   const targets = context.targetSpokenCollocations;
   const storedTargets = receipt.evaluationContext?.targetSpokenCollocations;
-  if (!matchesCollocations(targets, [...getSpeakingTargets(targets).values()]) ||
-      (storedTargets !== undefined && !matchesCollocations(storedTargets, targets))) {
+  if (!matchesSpeakingCollocations(targets, [...getSpeakingTargets(targets).values()]) ||
+      (storedTargets !== undefined && !matchesSpeakingCollocations(storedTargets, targets))) {
     return false;
   }
   const retelling = analyzeSpeakingRetelling(
@@ -543,8 +566,8 @@ export function hasVerifiedSpeakingRetelling(
   return retelling.masteryQualified &&
     retelling.wordCount === receipt.wordCount &&
     retelling.paceStatus === receipt.paceStatus &&
-    matchesCollocations(receipt.transferredCollocations, retelling.transferredCollocations) &&
-    matchesCollocations(receipt.pendingCollocations, retelling.pendingCollocations);
+    matchesSpeakingCollocations(receipt.transferredCollocations, retelling.transferredCollocations) &&
+    matchesSpeakingCollocations(receipt.pendingCollocations, retelling.pendingCollocations);
 }
 
 /**
@@ -554,6 +577,8 @@ export function hasVerifiedSpeakingRetelling(
 export function evaluateSpeakingRetelling(
   input: IeltsSpeakingRetellingInput,
 ): IeltsSpeakingFeedbackReceipt {
+  const sourcePromptId = readIeltsPromptId(input.seed.sourcePromptId);
+  if (!sourcePromptId) throw new TypeError("Invalid IELTS Speaking prompt ID");
   const rawTranscript = input.transcript;
   const evaluationContext = getSpeakingEvaluationContext(input.seed);
   const { min, max } = evaluationContext.timeWindowSeconds;
@@ -751,7 +776,7 @@ export function evaluateSpeakingRetelling(
     receiptId: `speaking-receipt-${input.seed.seedId}`,
     cartridgeId: IELTS_CARTRIDGE_ID,
     seedId: input.seed.seedId,
-    sourcePromptId: input.seed.sourcePromptId,
+    sourcePromptId,
     sourceTranscript: rawTranscript,
     assisted: input.assisted,
     evaluationContext,

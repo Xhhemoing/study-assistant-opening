@@ -1102,6 +1102,85 @@ describe("Writing transfer review regressions", () => {
     expect(noTargets.receipt.countsTowardMastery).toBe(false);
   });
 
+  it("issues fresh-prompt receipts with canonical IDs that round-trip through continuity", () => {
+    const draft = { ...DRAFT_2, promptId: "another-transport-prompt " };
+    const result = createValidatedRubricReceipt({
+      taskMode: "writing_task2",
+      receiptId: "r-fresh-trimmed",
+      baselineDraft: { ...DRAFT_1, promptId: ` ${DRAFT_1.promptId} ` },
+      draft,
+      assessments: buildValidDraft2Assessments(),
+      transferTargets: TARGETS,
+      crossDraftTransferVerified: false,
+      freshPromptTransfer: true,
+    });
+    if (!result.ok) throw new Error("Expected a fresh-prompt receipt");
+    expect(result.receipt).toMatchObject({
+      promptId: "another-transport-prompt",
+      sourceDraft: { promptId: "another-transport-prompt" },
+      transferSource: { baseline: { promptId: DRAFT_1.promptId } },
+      evidenceSource: "unassisted_fresh_prompt_transfer",
+      countsTowardMastery: true,
+    });
+    const state = {
+      ...createInitialIeltsContinuityState(draft.promptId, draft.createdAt),
+      draft2Receipt: result.receipt,
+    };
+    expect(parseIeltsContinuityState(serializeIeltsContinuityState(state))).toMatchObject({
+      ok: true,
+      value: { promptId: "another-transport-prompt", draft2Receipt: { countsTowardMastery: true } },
+    });
+    expect(isVerifiedWritingReceipt(result.receipt, { expectedPromptId: draft.promptId })).toBe(true);
+    expect(parseIeltsContinuityState({
+      ...state,
+      promptId: draft.promptId,
+      draft2Receipt: {
+        ...result.receipt,
+        promptId: draft.promptId,
+        sourceDraft: { ...result.receipt.sourceDraft!, promptId: draft.promptId },
+      },
+    })).toMatchObject({
+      ok: true,
+      value: { draft2Receipt: { sourceDraft: { promptId: "another-transport-prompt" } } },
+    });
+  });
+
+  it("treats a whitespace-only prompt ID difference as the same Writing prompt", () => {
+    const baselineDraft = { ...DRAFT_1, promptId: "same-prompt" };
+    const promptStatement = "Should cities invest in urban rail rather than widening roads?";
+    const input = {
+      taskMode: "writing_task2",
+      receiptId: "r-same-spaced",
+      baselineDraft,
+      draft: { ...DRAFT_2, promptId: " same-prompt " },
+      assessments: buildValidDraft2Assessments(),
+      transferTargets: TARGETS,
+      promptStatement,
+      crossDraftTransferVerified: false,
+      freshPromptTransfer: true,
+    } as const;
+    expect(createValidatedRubricReceipt(input)).toMatchObject({
+      ok: true, receipt: { promptId: "same-prompt", countsTowardMastery: false },
+    });
+    const evaluated = evaluateNonEmptyRevision({
+      baselineDraft,
+      revisedDraft: input.draft,
+      targets: TARGETS,
+      promptStatement,
+      receiptId: input.receiptId,
+      freshPromptTransfer: true,
+    });
+    expect(evaluated.receipt.evidenceSource).toBe("unassisted_cross_draft_transfer");
+    expect(isVerifiedWritingReceipt({
+      ...evaluated.receipt,
+      promptId: input.draft.promptId,
+      sourceDraft: { ...evaluated.receipt.sourceDraft!, promptId: input.draft.promptId },
+      evidenceSource: "unassisted_fresh_prompt_transfer",
+    })).toBe(false);
+    expect(createValidatedRubricReceipt({ ...input, draft: { ...input.draft, promptId: " " } }).ok).toBe(false);
+    expect(() => createInitialIeltsContinuityState(" ", DRAFT_2.createdAt)).toThrow("prompt ID");
+  });
+
   it.each([
     ["consequently", " Consequently ", "CONSEQUENTLY", "consequently", "consequently", "consequently"],
     ["long-term fiscal viability", "fiscal viability", "viability"],
@@ -2666,8 +2745,19 @@ describe("IELTS Cartridge SPI v1 L1_CONTINUITY adapter", () => {
       expect(validation.manifest.level).toBe("L1_CONTINUITY");
     }
 
+    const seed = buildSpeakingPart3Seed(
+      {
+        promptId: ` ${DRAFT_2.promptId} `,
+        topic: "Urban rail funding",
+        coreClaim: "Cities should prioritize urban rail.",
+        supportingReason: "Rail cuts per-capita emissions.",
+        activeCollocations: ["per-capita emissions"],
+      },
+      DRAFT_2.draftId,
+    );
+    expect(seed.sourcePromptId).toBe(DRAFT_2.promptId);
     const registry = createCartridgeRegistry();
-    const registration = registry.registerCartridge(createIeltsWritingSpeakingCartridge());
+    const registration = registry.registerCartridge(createIeltsWritingSpeakingCartridge({ speakingSeed: seed }));
     expect(registration.ok).toBe(true);
 
     const registered = registry.getCartridge(IELTS_CARTRIDGE_ID);
@@ -2729,16 +2819,8 @@ describe("IELTS Cartridge SPI v1 L1_CONTINUITY adapter", () => {
     });
 
     const speakingSeed = {
-      ...buildSpeakingPart3Seed(
-        {
-          promptId: DRAFT_2.promptId,
-          topic: "Urban rail funding",
-          coreClaim: "Cities should prioritize urban rail.",
-          supportingReason: "Rail cuts per-capita emissions.",
-          activeCollocations: ["per-capita emissions"],
-        },
-        DRAFT_2.draftId,
-      ),
+      ...seed,
+      sourcePromptId: ` ${seed.sourcePromptId} `,
       requiresVerifiedReceipt: true,
       verifiedWritingReceipt: writingReceipt,
     };
@@ -2754,6 +2836,7 @@ describe("IELTS Cartridge SPI v1 L1_CONTINUITY adapter", () => {
       createdAt: "2026-11-21T08:30:00.000Z",
     });
     expect(speakingReceipt.masteryQualified).toBe(true);
+    expect(speakingReceipt.sourcePromptId).toBe(DRAFT_2.promptId);
 
     const completedState: IeltsContinuityState = {
       ...afterWriting,
@@ -2893,11 +2976,12 @@ describe("IELTS Cartridge SPI v1 L1_CONTINUITY adapter", () => {
       ],
     ];
 
+    const seededCartridge = createIeltsWritingSpeakingCartridge({ speakingSeed });
     for (const [label, candidate] of invalidInputs) {
-      const parsed = ieltsWritingSpeakingCartridge.parseContinuityState(candidate);
+      const parsed = seededCartridge.parseContinuityState(candidate);
       expect(parsed.ok, `expected parseContinuityState to reject ${label}`).toBe(false);
       expect(
-        () => ieltsWritingSpeakingCartridge.buildResumeSummary(candidate as IeltsContinuityState),
+        () => seededCartridge.buildResumeSummary(candidate as IeltsContinuityState),
         `expected buildResumeSummary to throw for ${label}`,
       ).toThrow();
     }
@@ -3181,8 +3265,12 @@ describe("IELTS Cartridge SPI v1 L1_CONTINUITY adapter", () => {
         evaluationContext: { ...validSpeaking.evaluationContext!, targetSpokenCollocations: undefined },
       },
     };
-    expect(parseIeltsContinuityState(legacySpeakingState).ok).toBe(false);
-    expect(parseIeltsContinuityState(legacySpeakingState, { speakingSeed }).ok).toBe(true);
+    expect(parseIeltsContinuityState(legacySpeakingState)).toMatchObject({
+      ok: true, value: { speakingReceipt: { countsTowardMastery: false } },
+    });
+    expect(parseIeltsContinuityState(legacySpeakingState, { speakingSeed })).toMatchObject({
+      ok: true, value: { speakingReceipt: { countsTowardMastery: true } },
+    });
 
     const twoTargetSeed = {
       ...speakingSeed,
@@ -3211,10 +3299,9 @@ describe("IELTS Cartridge SPI v1 L1_CONTINUITY adapter", () => {
         pendingCollocations: [],
       },
     };
-    expect(parseIeltsContinuityState(removedTarget).ok).toBe(false);
-    expect(() => ieltsWritingSpeakingCartridge.buildResumeSummary(removedTarget)).toThrow();
     const changedTargetSet = {
       ...removedTarget,
+      activeStage: "completed" as const,
       speakingReceipt: {
         ...removedTarget.speakingReceipt,
         evaluationContext: {
@@ -3224,8 +3311,27 @@ describe("IELTS Cartridge SPI v1 L1_CONTINUITY adapter", () => {
       },
     };
     const seededCartridge = createIeltsWritingSpeakingCartridge({ speakingSeed: twoTargetSeed });
-    expect(seededCartridge.parseContinuityState(changedTargetSet).ok).toBe(false);
-    expect(() => seededCartridge.buildResumeSummary(changedTargetSet)).toThrow();
+    expect(ieltsWritingSpeakingCartridge.parseContinuityState(changedTargetSet)).toMatchObject({
+      ok: true,
+      value: {
+        activeStage: "speaking_part3",
+        speakingReceipt: {
+          sourceTranscript: oneOfTwo.sourceTranscript,
+          epistemicStatus: "practice_feedback",
+          countsTowardMastery: false,
+          masteryQualified: false,
+        },
+      },
+    });
+    expect(ieltsWritingSpeakingCartridge.buildResumeSummary(changedTargetSet)).toMatchObject({
+      completedSteps: 2,
+      nextRequirementKey: "ielts.speaking.part3-verified-retelling",
+    });
+    expect(seededCartridge.parseContinuityState(changedTargetSet)).toMatchObject({
+      ok: true, value: { speakingReceipt: { countsTowardMastery: false } },
+    });
+    expect(seededCartridge.buildResumeSummary(changedTargetSet).completedSteps).toBe(2);
+    expect(seededCartridge.buildResumeSummary(removedTarget).completedSteps).toBe(2);
     expect(seededCartridge.parseContinuityState({
       ...removedTarget,
       speakingReceipt: oneOfTwo,
@@ -3273,8 +3379,9 @@ describe("IELTS Cartridge SPI v1 L1_CONTINUITY adapter", () => {
         pendingCollocations: [],
       },
     };
-    expect(ieltsWritingSpeakingCartridge.parseContinuityState(forgedCollage).ok).toBe(false);
-    expect(() => ieltsWritingSpeakingCartridge.buildResumeSummary(forgedCollage)).toThrow();
+    const strictCartridge = createIeltsWritingSpeakingCartridge({ speakingSeed });
+    expect(strictCartridge.parseContinuityState(forgedCollage).ok).toBe(false);
+    expect(() => strictCartridge.buildResumeSummary(forgedCollage)).toThrow();
 
     // Low-entropy repetitive transcript (80+ words) for stuffing tamper test:
     const repetitiveSentence = "Local councils reduced harmful per-capita emissions across the city every single week.";
@@ -3371,25 +3478,13 @@ describe("IELTS Cartridge SPI v1 L1_CONTINUITY adapter", () => {
           },
         },
       ],
-      [
-        "verified speaking receipt with only 1 of 2 required collocations",
-        {
-          ...baseState,
-          draft2Receipt: writingReceipt,
-          speakingReceipt: {
-            ...validSpeaking,
-            transferredCollocations: ["per-capita emissions"],
-            pendingCollocations: ["alleviate chronic congestion"],
-          },
-        },
-      ],
     ];
 
     for (const [label, candidate] of rejectedStates) {
-      const parsed = ieltsWritingSpeakingCartridge.parseContinuityState(candidate);
+      const parsed = strictCartridge.parseContinuityState(candidate);
       expect(parsed.ok, `expected parseContinuityState to reject: ${label}`).toBe(false);
       expect(
-        () => ieltsWritingSpeakingCartridge.buildResumeSummary(candidate as IeltsContinuityState),
+        () => strictCartridge.buildResumeSummary(candidate as IeltsContinuityState),
         `expected buildResumeSummary to throw: ${label}`,
       ).toThrow();
     }

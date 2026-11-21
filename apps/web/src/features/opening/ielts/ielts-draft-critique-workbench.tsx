@@ -9,6 +9,7 @@ import {
   evaluateRevisedDraftDeterministically,
   getWritingDraftSource,
   getWritingTransferSource,
+  isVerifiedWritingReceipt,
   type IeltsCriterion,
   type IeltsCrossDraftTransferReport,
   type IeltsEssayDraft,
@@ -552,26 +553,24 @@ function WritingWorkbenchPromptSession({
   const activeDraftAssisted = viewMode === "draft1" ? activeDraft.assisted : draft2EffectivelyAssisted;
   const receiptPromptStatement = activeReceipt.promptStatement;
   const transferPromptStatement = activeReceipt.transferSource?.promptStatement;
-  const matchesPromptStatement =
-    (receiptPromptStatement === undefined || receiptPromptStatement === promptStatement) &&
-    (transferPromptStatement === undefined || transferPromptStatement === promptStatement);
+  const verifiedForCurrentPrompt = useMemo(() =>
+    activeReceipt.epistemicStatus === "rubric_verified_evidence" && isVerifiedWritingReceipt(activeReceipt, {
+      expectedPromptId: fixture.promptId,
+      expectedDraftId: activeDraft.draftId,
+      promptStatement,
+    }),
+  [activeReceipt, activeDraft.draftId, fixture.promptId, promptStatement]);
   const canShowVerifiedReceipt =
     !isDemoPreview &&
     hasSubmitted &&
-    activeReceipt.masteryQualified &&
-    activeReceipt.countsTowardMastery &&
+    verifiedForCurrentPrompt &&
     !activeDraftAssisted &&
-    activeDraft.promptId === fixture.promptId &&
-    activeReceipt.promptId === fixture.promptId &&
+    activeDraft.promptId.trim() === fixture.promptId.trim() &&
     activeReceipt.sourceDraft !== undefined &&
-    activeReceipt.sourceDraft.promptId === fixture.promptId &&
-    activeReceipt.promptId === activeDraft.promptId &&
-    activeReceipt.draftId === activeDraft.draftId &&
     activeReceipt.draftVersion === activeDraft.version &&
-    matchesPromptStatement &&
     (viewMode === "draft1"
       ? promptStatement !== undefined &&
-        (receiptPromptStatement === promptStatement || transferPromptStatement === promptStatement) &&
+        (receiptPromptStatement?.trim() === promptStatement || transferPromptStatement?.trim() === promptStatement) &&
         stableSerialize(activeReceipt.sourceDraft) === stableSerialize(getWritingDraftSource(activeDraft))
       : matchesSavedEvaluation && transferReport.summary.masteryQualified);
   const epistemicStatus =

@@ -8,7 +8,7 @@ import {
 
 export function getWritingDraftSource(draft: IeltsWritingDraftSource): IeltsWritingDraftSource {
   const { draftId, promptId, version, basedOnVersion, assisted, paragraphs } = draft;
-  return { draftId, promptId, version, basedOnVersion, assisted, paragraphs: [...paragraphs] };
+  return { draftId, promptId: promptId.trim(), version, basedOnVersion, assisted, paragraphs: [...paragraphs] };
 }
 
 export function getUniqueWritingTargets(targets: readonly IeltsUpgradeTarget[]): IeltsUpgradeTarget[] {

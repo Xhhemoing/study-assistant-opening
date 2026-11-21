@@ -1,4 +1,5 @@
 import {
+  IELTS_URBAN_RAIL_SPEAKING_PROMPT,
   analyzeCrossDraftTransfer,
   buildSpeakingPart3Seed,
   createValidatedRubricReceipt,
@@ -32,9 +33,7 @@ export type IeltsWorkbenchFixture = {
   readonly initialSpeakingReceipt: IeltsSpeakingFeedbackReceipt;
 };
 
-const PROMPT_ID = "ielts-task2-urban-rail-funding";
-const PROMPT_STATEMENT =
-  "Some people believe that governments should invest public funds primarily in urban rail networks rather than expanding road systems for private vehicles. To what extent do you agree or disagree?";
+const { promptId: PROMPT_ID, promptStatement: PROMPT_STATEMENT } = IELTS_URBAN_RAIL_SPEAKING_PROMPT;
 
 const DRAFT_1: IeltsEssayDraft = {
   draftId: "urban-rail-draft-1",
@@ -293,13 +292,7 @@ const CORE_ARGUMENT: IeltsWritingCoreArgument = {
   coreClaim: "优先投资高运力城市轨道交通，比持续拓宽公路更具长期财政与环境收益。",
   supportingReason: "轨道交通能在不吞噬更多城市土地的前提下缓解高峰拥堵并降低人均排放。",
   counterPerspective: "远郊居民短期内仍依赖私家车，需要高频接驳巴士来补齐最后一公里。",
-  activeCollocations: [
-    "alleviate chronic congestion",
-    "per-capita emissions",
-    "long-term fiscal viability",
-    "induced traffic demand",
-    "feeder buses",
-  ],
+  activeCollocations: IELTS_URBAN_RAIL_SPEAKING_PROMPT.targetSpokenCollocations,
 };
 
 const DRAFT_2_RECEIPT = mustValidateReceipt(

@@ -8,13 +8,22 @@ import {
   type ContinuityCartridge,
 } from "../cartridges/types";
 import { countEnglishWords } from "./rubric";
-import { classifySpeakingPace, getSpeakingTargets, hasVerifiedSpeakingRetelling } from "./speaking";
+import {
+  IELTS_URBAN_RAIL_SPEAKING_PROMPT,
+  classifySpeakingPace,
+  getSpeakingSeedId,
+  getSpeakingTargets,
+  hasVerifiedSpeakingRetelling,
+  matchesSpeakingCollocations,
+} from "./speaking";
 import { validateWritingRubricReceipt } from "./transfer";
 import {
   IELTS_CARTRIDGE_ID,
   IELTS_CARTRIDGE_VERSION,
+  IELTS_PROMPT_ID_MAX_LENGTH,
   isDenseIeltsArray,
   isNonBlankIeltsString as isNonBlankString,
+  readIeltsPromptId,
   type IeltsRubricReceipt,
   type IeltsSpeakingFeedbackReceipt,
   type IeltsSpeakingPaceStatus,
@@ -89,7 +98,7 @@ const ieltsContinuityStateSchema = z
   .object({
     schemaVersion: z.literal(IELTS_CONTINUITY_SCHEMA_VERSION),
     cartridgeId: z.literal(IELTS_CARTRIDGE_ID),
-    promptId: z.string().trim().min(1).max(128),
+    promptId: z.string().trim().min(1).max(IELTS_PROMPT_ID_MAX_LENGTH),
     activeStage: z.enum(["writing_draft1", "writing_draft2", "speaking_part3", "completed"]),
     draft1Id: z.string().trim().min(1).max(128).nullable(),
     draft2Receipt: z.unknown().nullable(),
@@ -108,21 +117,47 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return proto === Object.prototype || proto === null;
 }
 
+function resolveSpeakingTargets(
+  receipt: IeltsSpeakingFeedbackReceipt,
+  writingReceipt: IeltsRubricReceipt,
+  options?: IeltsContinuityOptions,
+): readonly string[] | undefined {
+  const seed = options?.speakingSeed;
+  if (seed) {
+    if (
+      readIeltsPromptId(seed.sourcePromptId) !== writingReceipt.promptId ||
+      seed.sourceDraftId !== writingReceipt.draftId ||
+      seed.seedId !== receipt.seedId
+    ) return undefined;
+    return [...getSpeakingTargets(seed.targetSpokenCollocations).values()];
+  }
+
+  const builtIn = IELTS_URBAN_RAIL_SPEAKING_PROMPT;
+  const promptStatement = options?.promptStatement?.trim() ||
+    writingReceipt.promptStatement?.trim() || writingReceipt.transferSource?.promptStatement?.trim();
+  if (
+    writingReceipt.promptId !== builtIn.promptId ||
+    promptStatement !== builtIn.promptStatement ||
+    receipt.seedId !== getSpeakingSeedId(builtIn.promptId, writingReceipt.draftId)
+  ) return undefined;
+  return [...getSpeakingTargets(builtIn.targetSpokenCollocations).values()];
+}
+
 function validateSpeakingReceipt(
   rawReceipt: unknown,
   expectedPromptId: string,
   draft2Receipt: IeltsRubricReceipt | null,
-  speakingSeed: IeltsContinuityOptions["speakingSeed"],
-): readonly string[] {
+  options?: IeltsContinuityOptions,
+): CartridgeValidationResult<IeltsSpeakingFeedbackReceipt> {
   const issues: string[] = [];
   if (!isPlainRecord(rawReceipt)) {
-    return ["speakingReceipt must be a plain object"];
+    return { ok: false, issues: ["speakingReceipt must be a plain object"] };
   }
 
   if (!isNonBlankString(rawReceipt.receiptId)) issues.push("speakingReceipt.receiptId must be a non-blank string");
   if (rawReceipt.cartridgeId !== IELTS_CARTRIDGE_ID) issues.push("speakingReceipt.cartridgeId mismatch");
   if (!isNonBlankString(rawReceipt.seedId)) issues.push("speakingReceipt.seedId must be a non-blank string");
-  if (rawReceipt.sourcePromptId !== expectedPromptId) {
+  if (readIeltsPromptId(rawReceipt.sourcePromptId) !== expectedPromptId) {
     issues.push("speakingReceipt.sourcePromptId must match continuity promptId");
   }
   if (typeof rawReceipt.sourceTranscript !== "string") {
@@ -250,9 +285,9 @@ function validateSpeakingReceipt(
     }
   }
 
-  if (issues.length > 0) return issues;
+  if (issues.length > 0) return { ok: false, issues };
 
-  const receipt = rawReceipt as IeltsSpeakingFeedbackReceipt;
+  const receipt = { ...(rawReceipt as IeltsSpeakingFeedbackReceipt), sourcePromptId: expectedPromptId };
   const computedWords = countEnglishWords(receipt.sourceTranscript);
   if (computedWords !== receipt.wordCount) {
     issues.push("speakingReceipt.wordCount does not match sourceTranscript");
@@ -283,21 +318,31 @@ function validateSpeakingReceipt(
     }
     if (!draft2Receipt?.masteryQualified) {
       issues.push("speakingReceipt requires a verified Writing draft2Receipt prerequisite in continuity state");
-    } else if (speakingSeed && (
-      speakingSeed.seedId !== receipt.seedId ||
-      speakingSeed.sourcePromptId !== expectedPromptId ||
-      speakingSeed.sourceDraftId !== draft2Receipt.draftId
-    )) {
-      issues.push("speakingReceipt does not match the expected Speaking seed and Writing source");
-    } else if (context?.writingReceiptEligible === true) {
-      const targetSpokenCollocations = speakingSeed
-        ? [...getSpeakingTargets(speakingSeed.targetSpokenCollocations).values()]
-        : context.targetSpokenCollocations;
-      if (!targetSpokenCollocations || !hasVerifiedSpeakingRetelling(receipt, {
-        ...context,
-        targetSpokenCollocations,
-      })) {
+    } else if (context?.writingReceiptEligible === true && issues.length === 0) {
+      const targetSpokenCollocations = resolveSpeakingTargets(receipt, draft2Receipt, options);
+      const recordedTargets = [...receipt.transferredCollocations, ...receipt.pendingCollocations];
+      if (
+        !targetSpokenCollocations?.length ||
+        !matchesSpeakingCollocations(recordedTargets, targetSpokenCollocations) ||
+        (context.targetSpokenCollocations !== undefined &&
+          !matchesSpeakingCollocations(context.targetSpokenCollocations, targetSpokenCollocations))
+      ) {
+        return {
+          ok: true,
+          value: {
+            ...receipt,
+            epistemicStatus: "practice_feedback",
+            countsTowardMastery: false,
+            masteryQualified: false,
+            epistemicReason: "当前题卡的目标搭配无法核对，本次仅保留为口语练习反馈。",
+          },
+        };
+      }
+      const evaluationContext = { ...context, targetSpokenCollocations };
+      if (!hasVerifiedSpeakingRetelling(receipt, evaluationContext)) {
         issues.push("speakingReceipt did not reproduce mastery for the full Speaking target set");
+      } else {
+        return { ok: true, value: { ...receipt, evaluationContext } };
       }
     }
   } else if (
@@ -308,7 +353,7 @@ function validateSpeakingReceipt(
     issues.push("speakingReceipt practice feedback must not claim mastery");
   }
 
-  return issues;
+  return issues.length > 0 ? { ok: false, issues } : { ok: true, value: receipt };
 }
 
 export function createInitialIeltsContinuityState(
@@ -316,7 +361,8 @@ export function createInitialIeltsContinuityState(
   updatedAt: string,
   options?: { readonly draft1Id?: string | null },
 ): IeltsContinuityState {
-  const trimmedPromptId = promptId.trim();
+  const trimmedPromptId = readIeltsPromptId(promptId);
+  if (!trimmedPromptId) throw new TypeError("Invalid IELTS continuity prompt ID");
   const trimmedDraft1Id = options?.draft1Id?.trim() || null;
   return {
     schemaVersion: IELTS_CONTINUITY_SCHEMA_VERSION,
@@ -372,16 +418,16 @@ export function parseIeltsContinuityState(
 
   let validatedSpeakingReceipt: IeltsSpeakingFeedbackReceipt | null = null;
   if (parsed.data.speakingReceipt !== null) {
-    const speakingIssues = validateSpeakingReceipt(
+    const speakingResult = validateSpeakingReceipt(
       parsed.data.speakingReceipt,
       parsed.data.promptId,
       validatedDraft2Receipt,
-      options?.speakingSeed,
+      options,
     );
-    if (speakingIssues.length > 0) {
-      issues.push(...speakingIssues);
+    if (!speakingResult.ok) {
+      issues.push(...speakingResult.issues);
     } else {
-      validatedSpeakingReceipt = parsed.data.speakingReceipt as IeltsSpeakingFeedbackReceipt;
+      validatedSpeakingReceipt = speakingResult.value;
     }
   }
 
@@ -395,7 +441,9 @@ export function parseIeltsContinuityState(
       schemaVersion: parsed.data.schemaVersion,
       cartridgeId: parsed.data.cartridgeId,
       promptId: parsed.data.promptId,
-      activeStage: parsed.data.activeStage,
+      activeStage: parsed.data.activeStage === "completed" && validatedSpeakingReceipt?.masteryQualified === false
+        ? "speaking_part3"
+        : parsed.data.activeStage,
       draft1Id: parsed.data.draft1Id,
       draft2Receipt: validatedDraft2Receipt,
       speakingReceipt: validatedSpeakingReceipt,
