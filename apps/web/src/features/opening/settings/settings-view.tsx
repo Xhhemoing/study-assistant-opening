@@ -23,14 +23,14 @@ export function SettingsView({ basePath = "/settings", section = "appearance", p
   return <div className="min-w-0 bg-bg">
     <PageHeading title="设置" />
     <SettingsHashRedirect basePath={basePath} />
-    <div className="mx-auto max-w-[1040px] px-5 py-5 lg:grid lg:grid-cols-[10rem_minmax(0,1fr)] lg:items-start lg:gap-10">
-      <nav aria-label="设置分区" className="mb-5 flex gap-1 overflow-x-auto lg:flex-col">
+    <div className="mx-auto max-w-[1040px] px-4 py-5 sm:px-6 lg:grid lg:grid-cols-[10.5rem_minmax(0,1fr)] lg:items-start lg:gap-10">
+      <nav aria-label="设置分区" className="no-scrollbar mb-5 flex gap-1.5 overflow-x-auto lg:mb-0 lg:flex-col">
         {sections.map(item => <Link key={item.id} href={`${basePath}${item.suffix}`} aria-current={section === item.id ? "page" : undefined}
-          className={`inline-flex min-h-11 shrink-0 items-center rounded-ctl px-3 text-sm focus-visible:ring-2 focus-visible:ring-accent ${section === item.id ? "bg-accent-soft text-accent" : "text-text-2 hover:bg-surface-2"}`}>{item.label}</Link>)}
+          className={`inline-flex min-h-10 shrink-0 items-center rounded-ctl px-3.5 text-sm transition-[background-color,color,box-shadow,transform] duration-150 ease-out-strong active:translate-y-px focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${section === item.id ? "keycap font-medium text-text" : "text-text-2 hover:bg-surface-2 hover:text-text"}`}>{item.label}</Link>)}
       </nav>
       <div className="min-w-0 space-y-6">
         {section === "appearance" ? <AppearanceSettings /> : section === "learning" ? <LearningSettingsSection planning={planning} /> : <>
-          <section id="connections" className="flex flex-wrap items-center gap-3 rounded-lg border border-line p-4">
+          <section id="connections" className="flex flex-wrap items-center gap-2.5 rounded-card border border-line bg-surface p-4 shadow-card">
             <Link className={ui.secondary} href={`${basePath}/connections`}>连接管理</Link>
             <Link className={ui.secondary} href={`${basePath}/export`}>导出数据</Link>
             <a className={ui.quiet} href="#daily-budget">每日用量</a>
@@ -91,13 +91,13 @@ export function LearningSettingsSection({ planning }: { planning?: ReactNode } =
   return <div className="space-y-6">
         <section id="preferences" className="scroll-mt-6 grid gap-4 border-b border-line pb-6 sm:grid-cols-[12rem_minmax(0,1fr)]" aria-labelledby="learning-preferences-heading">
           <div>
-            <h2 className="text-sm font-medium text-text" id="learning-preferences-heading">学习偏好</h2>
+            <h2 className="text-sm font-semibold text-text" id="learning-preferences-heading">学习偏好</h2>
             <p className="mt-1 text-xs leading-6 text-text-3">评价、补测与提醒，直接影响学习闭环。</p>
           </div>
           <div className="space-y-3">
             {loading ? <LoadingRows label="正在读取设置" /> : null}
             {error ? (
-              <div className="flex flex-wrap items-center gap-3 rounded-md border border-danger/25 bg-danger/10 p-3" role="alert">
+              <div className="flex flex-wrap items-center gap-3 rounded-card border border-danger/25 bg-danger-soft p-3.5" role="alert">
                 <p className="text-sm text-danger">{error}</p>
                 <button className={ui.secondary} onClick={() => void loadSettings()} type="button">
                   <RefreshCw aria-hidden="true" size={14} />重新读取
@@ -106,13 +106,13 @@ export function LearningSettingsSection({ planning }: { planning?: ReactNode } =
             ) : null}
             {!loading && ready ? (
               <>
-                <div className="divide-y divide-line">
+                <div className="divide-y divide-line overflow-hidden rounded-card border border-line bg-surface shadow-card">
                   {learningSwitches.map(({ key, label }) => (
-                    <label className="flex min-h-11 cursor-pointer items-center justify-between gap-3 px-3 py-2 text-sm text-text-2 focus-within:ring-2 focus-within:ring-accent" key={key}>
+                    <label className="flex min-h-12 cursor-pointer items-center justify-between gap-3 px-4 py-2.5 text-sm text-text transition-colors duration-150 hover:bg-surface-2/60 focus-within:ring-2 focus-within:ring-inset focus-within:ring-accent" key={key}>
                       <span>{label}</span>
                       <input
                         checked={learningPreferences[key]}
-                        className="size-6 accent-accent"
+                        className="size-5 rounded accent-accent"
                         disabled={saving || (key !== "assessmentEnabled" && key !== "autoGradeOnSave" && !learningPreferences.assessmentEnabled)}
                         onChange={(event) => setLearningPreferences((current) =>
                           key === "assessmentEnabled" && !event.target.checked

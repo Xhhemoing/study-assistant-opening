@@ -13,9 +13,9 @@ export function InlineAnswerInput({ interaction, value, disabled, onChange }: {
     <legend className="mb-2 text-sm font-medium">先选一个，再看看为什么</legend>
     {interaction.options.map(option => {
       const answer = `${option.id}. ${option.label}`;
-      return <label key={option.id} className="flex min-h-11 cursor-pointer items-start gap-3 rounded-lg border border-line p-3 text-sm has-[:checked]:bg-accent-soft">
-        <input type="radio" name={name} className="mt-1 accent-accent" value={answer} checked={value === answer} onChange={() => onChange(answer)} />
-        <div>{option.id}. <LearningProse text={option.label} /></div>
+      return <label key={option.id} className="flex min-h-11 cursor-pointer items-start gap-3 rounded-xl border border-line bg-surface p-3.5 text-sm shadow-card transition-[border-color,background-color] duration-150 hover:border-line-strong has-[:checked]:border-accent/40 has-[:checked]:bg-accent-soft">
+        <input type="radio" name={name} className="mt-1 size-4 accent-accent" value={answer} checked={value === answer} onChange={() => onChange(answer)} />
+        <div className="leading-7">{option.id}. <LearningProse text={option.label} /></div>
       </label>;
     })}
   </fieldset>;

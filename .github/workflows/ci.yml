@@ -2,6 +2,7 @@ name: CI
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
   push:
     branches:
       - main
@@ -19,7 +20,7 @@ concurrency:
 jobs:
   quality:
     name: lint-typecheck-test-build
-    needs: [changes, docs, static-unit, integration-parser, handler-browser-spikes, build]
+    needs: [changes, docs, fast-draft-check, static-unit, integration-parser, handler-browser-spikes, build]
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -28,6 +29,7 @@ jobs:
       - name: Require actual successful checks
         env:
           CI_NEEDS: ${{ toJSON(needs) }}
+          CI_IS_DRAFT: ${{ (github.event_name == 'pull_request' && github.event.pull_request.draft == true) && 'true' || 'false' }}
         run: python3 scripts/ci/checks.py gate static-unit integration-parser handler-browser-spikes build
 
   changes:
@@ -67,7 +69,7 @@ jobs:
   integration-parser:
     name: integration-parser
     needs: changes
-    if: needs.changes.outputs.docs_only == 'false'
+    if: needs.changes.outputs.docs_only == 'false' && !(github.event_name == 'pull_request' && github.event.pull_request.draft == true)
     runs-on: ubuntu-24.04
     timeout-minutes: 45
 
@@ -220,7 +222,7 @@ jobs:
   handler-browser-spikes:
     name: handler-browser-spikes
     needs: changes
-    if: needs.changes.outputs.docs_only == 'false'
+    if: needs.changes.outputs.docs_only == 'false' && !(github.event_name == 'pull_request' && github.event.pull_request.draft == true)
     runs-on: ubuntu-24.04
     timeout-minutes: 45
 
@@ -346,10 +348,48 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  fast-draft-check:
+    name: fast-draft-check
+    needs: changes
+    if: github.event_name == 'pull_request' && github.event.pull_request.draft == true && needs.changes.outputs.docs_only == 'false'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      HERMES_HEAVY_ENABLED: "0"
+      NODE_ENV: test
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: CI classifier and gate regression tests
+        run: python3 -m unittest discover -s scripts/ci -p 'test_*.py' -v
+      - name: Lint
+        env:
+          FIXED_COLOR_BASE: HEAD^1
+        run: npm run lint
+      - name: Typecheck
+        run: npm run typecheck
+      - *setup-parser-python
+      - name: Install PDF renderer wheels
+        run: |
+          python -m venv "$RUNNER_TEMP/pdf-renderer"
+          "$RUNNER_TEMP/pdf-renderer/bin/python" -m pip install --only-binary=:all: --no-deps \
+            -c services/parser/requirements-lock.txt pypdfium2 pillow
+      - name: Unit and contract tests
+        env:
+          PARSER_PYTHON: ${{ runner.temp }}/pdf-renderer/bin/python
+        run: npm test -- --project unit --project contract
+
   static-unit:
     name: static-unit-contract-spikes
     needs: changes
-    if: needs.changes.outputs.docs_only == 'false'
+    if: needs.changes.outputs.docs_only == 'false' && !(github.event_name == 'pull_request' && github.event.pull_request.draft == true)
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     # Spikes consume real Redis; retain the original isolated service/env setup.
@@ -394,7 +434,7 @@ jobs:
   build:
     name: production-build
     needs: changes
-    if: needs.changes.outputs.docs_only == 'false'
+    if: needs.changes.outputs.docs_only == 'false' && !(github.event_name == 'pull_request' && github.event.pull_request.draft == true)
     # Match the deployment verifier's exact runtime; verify the hosted image below.
     runs-on: ubuntu-22.04
     timeout-minutes: 30
@@ -471,7 +511,7 @@ jobs:
   opening-worker-flow:
     name: isolated-worker-pdf-browser
     needs: changes
-    if: needs.changes.outputs.docs_only == 'false'
+    if: needs.changes.outputs.docs_only == 'false' && !(github.event_name == 'pull_request' && github.event.pull_request.draft == true)
     runs-on: ubuntu-24.04
     timeout-minutes: 45
 
@@ -590,7 +630,7 @@ jobs:
 
   worker-gate:
     name: real-worker-pdf-browser-flow
-    needs: [changes, docs, opening-worker-flow]
+    needs: [changes, docs, fast-draft-check, opening-worker-flow]
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -599,4 +639,5 @@ jobs:
       - name: Require actual successful checks
         env:
           CI_NEEDS: ${{ toJSON(needs) }}
+          CI_IS_DRAFT: ${{ (github.event_name == 'pull_request' && github.event.pull_request.draft == true) && 'true' || 'false' }}
         run: python3 scripts/ci/checks.py gate opening-worker-flow

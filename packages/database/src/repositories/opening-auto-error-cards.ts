@@ -62,7 +62,8 @@ export async function syncOpeningAutomaticErrorCard(tx: TransactionSql, scope: S
     VALUES(${id},${scope.workspaceId},${scope.ownerUserId},${draft.front},${back},${draft.courseId},${draft.skillLabel},${sourceIds},${["错题"]},${rootId})
     ON CONFLICT(workspace_id,owner_user_id,origin_observation_root_id) DO UPDATE SET
       front=EXCLUDED.front,back=EXCLUDED.back,course_id=EXCLUDED.course_id,skill_label=EXCLUDED.skill_label,
-      source_ids=EXCLUDED.source_ids,auto_paused=false,content_version=cards.content_version+1,updated_at=now()
+      source_ids=ARRAY(SELECT DISTINCT unnest(cards.source_ids || EXCLUDED.source_ids)),
+      auto_paused=false,content_version=cards.content_version+1,updated_at=now()
     RETURNING id`;
   // Content corrections do not erase reviews or recreate an existing card.
   if (String(card!.id) === id) await writeState(tx as Sql, scope.workspaceId, scope.ownerUserId, createInitialState(id, new Date()));

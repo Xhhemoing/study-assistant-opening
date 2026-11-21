@@ -9,6 +9,7 @@ import {
   type WritingVariantMeta,
 } from "@aistudy/contracts";
 import type { Sql, TransactionSql } from "postgres";
+import { noteContextSourceRefs } from "./opening-context-provenance";
 import { openingNoteReadable } from "./opening-note-provenance";
 
 type Db = Sql | TransactionSql;
@@ -175,7 +176,7 @@ export function openingWritingActivityReadableSql(
                   SELECT 1
                   FROM jsonb_array_elements(
                     CASE
-                      WHEN jsonb_typeof(np.context_source_refs) = 'array' THEN np.context_source_refs
+                      WHEN jsonb_typeof(np.context_source_refs) = 'array' THEN ${noteContextSourceRefs(db, db`np.context_source_refs`)}
                       ELSE '[]'::jsonb
                     END
                   ) ref

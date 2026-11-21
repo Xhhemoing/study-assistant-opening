@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -32,7 +32,7 @@ afterEach(async () => { await f?.close(); for (const dir of dirs.splice(0)) awai
 async function fixture(complete = vi.fn(async (_input: ProviderInput) => response(recognized)), fallback?: typeof complete) {
   const sourceId = randomUUID();
   await f.sql`INSERT INTO opening_sources(id,workspace_id,name,mime,bytes,sha256,version,upload_state,parse_state)
-    VALUES(${sourceId},${f.scope.workspaceId},'formula.png','image/png',${png.length},${"ac".repeat(32)},1,'uploaded','running')`;
+    VALUES(${sourceId},${f.scope.workspaceId},'formula.png','image/png',${png.length},${createHash("sha256").update(png).digest("hex")},1,'uploaded','running')`;
   const makeJob = async (): Promise<OpeningJobRecord> => {
     const id = randomUUID(), claimToken = randomUUID(), key = `parse-visual:${id}`, payload = { sourceId, sourceVersion: 1 };
     await f.sql`INSERT INTO opening_jobs(id,workspace_id,owner_user_id,key,kind,payload,state,privacy_epoch,claim_token)
@@ -48,11 +48,11 @@ async function fixture(complete = vi.fn(async (_input: ProviderInput) => respons
   const gateway = createModelGateway({ resolve: async () => resolvedModel(complete),
     ...(fallback ? { resolveFallback: async () => resolvedModel(fallback, "controlled-fallback") } : {}) });
   const repository = createOpeningSourceVisualRecognitionsRepository(f.sql);
-  const recognizePage = createSourceVisualRecognition({ repository, gateway, budget: scope => scopeBudget(budget, scope), storage });
   const chunks = createOpeningSourceChunksRepository(f.sql), tempDir = await mkdtemp(path.join(os.tmpdir(), "aistudy-visual-chain-"));
   dirs.push(tempDir);
   const parse = createParseSourceHandler({ sources: createOpeningSourceRepository(f.sql), chunks, storage,
-    runner: async () => { throw new Error("image input must not run the document parser"); }, tempDir, recognizePage,
+    runner: async () => { throw new Error("image input must not run the document parser"); }, tempDir,
+    ...createSourceVisualRecognition({ repository, gateway, budget: scope => scopeBudget(budget, scope), storage }),
     assertCurrent: (scope, input) => repository.assertCurrent(scope, input) });
   return { sourceId, job, makeJob, parse, budget, gateway, repository, chunks, complete };
 }

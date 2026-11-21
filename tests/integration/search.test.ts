@@ -266,4 +266,28 @@ describe("library search repository", () => {
     expect(hits).toEqual([]);
     expect(LibraryError).toBeDefined();
   });
+  it("does not match or include answer-key and historical answer text by default", async () => {
+    const visibleId = randomUUID();
+    const answerId = randomUUID();
+    const historicalId = randomUUID();
+    const document = await repo.createDocument({
+      workspaceId: workspaceA,
+      title: "Searchable lesson",
+      blocks: [
+        { id: visibleId, type: "paragraph", content: { text: "PUBLIC_SEARCH_TEXT" } },
+        { id: answerId, type: "answer_key", content: { answer: "PRIVATE_ANSWER_SEARCH_TEXT" } },
+        { id: historicalId, type: "paragraph", content: { text: "PRIVATE_HISTORICAL_SEARCH_TEXT" } },
+      ],
+    });
+    await sql`INSERT INTO opening_note_provenance(document_id,workspace_id,context_source_refs)
+      VALUES(${document.id},${workspaceA},${sql.json([{ answerKeyBlockIds: [historicalId.toUpperCase()] }])})`;
+
+    expect(await repo.searchLibrary({ workspaceId: workspaceA, query: "PRIVATE_ANSWER_SEARCH_TEXT" })).toEqual([]);
+    expect(await repo.searchLibrary({ workspaceId: workspaceA, query: "PRIVATE_HISTORICAL_SEARCH_TEXT" })).toEqual([]);
+    const publicHit = await repo.searchLibrary({ workspaceId: workspaceA, query: "PUBLIC_SEARCH_TEXT" });
+    expect(publicHit).toHaveLength(1);
+    expect(publicHit[0]?.body).toBe("PUBLIC_SEARCH_TEXT");
+    expect(await repo.searchLibrary({ workspaceId: workspaceA, query: "PRIVATE_ANSWER_SEARCH_TEXT", includeAnswerKeys: true }))
+      .toMatchObject([{ body: expect.stringContaining("PRIVATE_ANSWER_SEARCH_TEXT") }]);
+  });
 });

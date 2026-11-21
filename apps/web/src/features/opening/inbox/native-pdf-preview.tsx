@@ -108,18 +108,18 @@ export function NativePdfPreview({ href, name, fillHeight = false, sourceId, ver
     if (!loaded || next < 1 || next > loaded.document.numPages) return;
     setPage(next); if (scroll.current) scroll.current.scrollTop = 0;
   }
-  return <div ref={container} className={`flex min-h-0 min-w-0 flex-1 flex-col bg-reader-mat ${fillHeight ? "h-full" : "h-[calc(100dvh-15rem)] min-h-80"}`}>
-    <div className="flex shrink-0 flex-wrap items-center gap-2 bg-surface py-1 text-xs text-text-2" aria-label="PDF 阅读工具">
+  return <div ref={container} className={`flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-line bg-reader-mat ${fillHeight ? "h-full" : "h-[calc(100dvh-15rem)] min-h-80"}`}>
+    <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-line bg-surface px-3 py-1.5 text-xs text-text-2" aria-label="PDF 阅读工具">
       <button type="button" className={ui.quiet} disabled={!loaded || page <= 1 || rendering} onClick={() => navigate(page - 1)}>上一页</button>
-      <label className="flex items-center gap-1">第<input aria-label="PDF 页码" className={`${ui.input} w-16`} type="number" min={1} max={loaded?.document.numPages ?? 1} value={page} disabled={!loaded || rendering} onChange={event => navigate(Number(event.target.value))} /> / {loaded?.document.numPages ?? "…"} 页</label>
+      <label className="flex items-center gap-1.5 tabular-nums">第<input aria-label="PDF 页码" className={`${ui.input} w-16 tabular-nums`} type="number" min={1} max={loaded?.document.numPages ?? 1} value={page} disabled={!loaded || rendering} onChange={event => navigate(Number(event.target.value))} /> / {loaded?.document.numPages ?? "…"} 页</label>
       <button type="button" className={ui.quiet} disabled={!loaded || page >= loaded.document.numPages || rendering} onClick={() => navigate(page + 1)}>下一页</button>
-      <label className="flex items-center gap-1">缩放<select aria-label="PDF 缩放" className="min-h-11 rounded border border-line bg-surface px-2" value={zoom} onChange={event => setZoom(event.target.value === "fit" ? "fit" : Number(event.target.value))}><option value="fit">适宽</option>{[50, 75, 100, 125, 150, 200].map(value => <option key={value} value={value}>{value}%</option>)}</select></label>
+      <label className="flex items-center gap-1.5">缩放<select aria-label="PDF 缩放" className={`${ui.input} w-auto px-2.5 tabular-nums`} value={zoom} onChange={event => setZoom(event.target.value === "fit" ? "fit" : Number(event.target.value))}><option value="fit">适宽</option>{[50, 75, 100, 125, 150, 200].map(value => <option key={value} value={value}>{value}%</option>)}</select></label>
       {onExplain ? <button type="button" className={ui.quiet} disabled={!loaded || rendering || Boolean(error)} onClick={() => onExplain(page)}>解释本页</button> : null}
     </div>
     {loading || rendering ? <p role="status" className="shrink-0 px-3 py-1 text-xs text-text-2">{loading ? "正在读取 PDF…" : "正在绘制本页…"}</p> : null}
     {error ? <div role="alert" className="flex shrink-0 flex-wrap items-center gap-2 px-3 py-2 text-xs text-danger"><p>PDF 读取未完成：{error}</p><button type="button" className={ui.secondary} onClick={() => setRevision(value => value + 1)}>重试</button><a className={ui.secondary} href={pdfPreviewLocation(href).url} target="_blank" rel="noreferrer">打开原件</a></div> : null}
     <div ref={scroll} className="min-h-0 min-w-0 flex-1 overflow-auto overscroll-contain p-3 [scrollbar-gutter:stable]">
-      <div ref={pageFrame} className="relative mx-auto [color-scheme:light] [--scale-round-x:1px] [--scale-round-y:1px]" hidden={!loaded || Boolean(error)} aria-busy={rendering}>
+      <div ref={pageFrame} className="relative mx-auto shadow-card ring-1 ring-line/60 [color-scheme:light] [--scale-round-x:1px] [--scale-round-y:1px]" hidden={!loaded || Boolean(error)} aria-busy={rendering}>
         <canvas ref={canvas} aria-label={`${name} · 第 ${page} 页`} className="block max-w-none" />
         <div ref={layer} className="study-pdf-text-layer" data-study-reading-text="true" data-source-id={sourceId} data-source-version={version} data-source-page={page} data-page-kind="physical" />
       </div>

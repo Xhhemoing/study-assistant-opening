@@ -16,6 +16,7 @@ describe("workspace navigation", () => {
     ["/opening/courses/course-a/study", "/opening/today"],
     ["/opening/courses/course-a?mode=sprint", "/opening/today"],
     ["/opening/agent", "/opening/today"],
+    ["/opening/agent/thread", "/opening/today"],
     ["/opening/assistant", "/opening/today"],
     ["/opening/sprint", "/opening/today"],
     ["/opening/suggestions", "/opening/today"],

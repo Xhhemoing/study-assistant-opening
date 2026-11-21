@@ -308,6 +308,7 @@ export {
   type OpeningBackupComposeRecords,
   type OpeningBackupComposeStaging,
 } from "./opening/backup-compose";
+export { libraryBlockSourceReferences, notePublicationMetadata } from "./opening/backup-validation";
 export {
   validateOpeningRestore,
   normalizeOpeningRestoreHistory,
@@ -503,7 +504,7 @@ export * from "./opening/exam-sprint/engine";
 export { reportExamBkt } from "./opening/exam-sprint/analytics";
 export { forecastExamTopics } from "./opening/exam-sprint/forecast";
 export * from "./opening/evaluation/exam-choice-evaluator";
-export { sameKnowledgeNodeIdentity, knowledgeNodeDefinition } from "./opening/knowledge-node-identity";
+export { sameKnowledgeNodeIdentity, knowledgeNodeDefinition, knowledgeDefinitionHeader, serializeKnowledgeEvidence } from "./opening/knowledge-node-identity";
 
 export * from "./opening/span-verifier";
 export * from "./opening/span-repair";
@@ -538,3 +539,4 @@ export * from "./opening/backup-learning-goals";
 export * from "./opening/course-shared-skill";
 export * from "./opening/proof-feedback";
 export * from "./opening/deidentified-dataset";
+export * from "./opening/share/catalog";

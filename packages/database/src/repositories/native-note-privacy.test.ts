@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { NativeBackupSnapshot } from "@aistudy/domain/native";
-import { filterNativeNotes, readNoteBackupProvenance } from "./native-note-privacy";
+import type { Sql } from "postgres";
+import { assertNativeCardRestorePrivacy, filterNativeNotes, readNoteBackupProvenance } from "./native-note-privacy";
 const sourceId = "10000000-0000-4000-8000-000000000001";
 function snapshot(): NativeBackupSnapshot {
   return {
@@ -38,5 +39,20 @@ describe("native linked note privacy", () => {
     expect(() => readNoteBackupProvenance({ id: "lost-metadata" }, true)).toThrow(/missing/);
     expect(() => readNoteBackupProvenance({ id: "unknown", openingProvenance: { contextSourceRefs: null } }, true)).toThrow(/unknown/);
     expect(readNoteBackupProvenance({ id: "known-empty", openingProvenance: { contextSourceRefs: [] } }, true)).toEqual({ contextSourceRefs: [] });
+  });
+
+  it.each([[32, true], [33, false]] as const)("validates a retained card's deduplicated source union of %i", async (size, allowed) => {
+    const source = (i: number) => `10000000-0000-4000-8000-${i.toString(16).padStart(12, "0")}`;
+    const retained = Array.from({ length: 31 }, (_, i) => source(i + 1));
+    const db = ((parts: TemplateStringsArray) => parts.join("").includes("FROM cards")
+      ? [{ source_ids: retained }] : [{ included: true }]) as unknown as Sql;
+    const packed = {
+      schemaManifest: { latestMigrationId: "0064_card_source_lineage.sql" },
+      sourceWorkspaceId: "workspace",
+      records: { cards: [{ id: "card", sourceIds: [source(10).toUpperCase(), ...Array.from({ length: size - 31 }, (_, i) => source(i + 32))] }] },
+    } as Parameters<typeof assertNativeCardRestorePrivacy>[2];
+    const restore = assertNativeCardRestorePrivacy(db, "workspace", packed, { cards: ["card"] } as Parameters<typeof assertNativeCardRestorePrivacy>[3]);
+    if (allowed) await expect(restore).resolves.toBeUndefined();
+    else await expect(restore).rejects.toMatchObject({ code: "VALIDATION", message: expect.stringContaining("32") });
   });
 });

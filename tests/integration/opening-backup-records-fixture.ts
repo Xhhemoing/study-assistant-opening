@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import type { Sql } from "postgres";
+import { OPENING_RESTORE_APPLY_ORDER } from "@aistudy/domain";
+import type { Sql, TransactionSql } from "postgres";
 import type { OpeningScope } from "@aistudy/database";
 import { createOpeningFixture, insertTestTeachingActivity } from "./opening-fixture";
 
@@ -115,6 +116,20 @@ export async function seedBackupGraph(sql: Sql, scope: OpeningScope) {
   await row.exclude(randomUUID());
   return { source, chunk, conversation, session, turn, problem, help, observation, candidate, memory,
     ...await seedBackupPlanning(sql, scope) };
+}
+
+export async function deleteBackupFixtureRows(tx: TransactionSql, scope: OpeningScope) {
+  for (const table of [...OPENING_RESTORE_APPLY_ORDER].reverse()) {
+    // Their workspace-scoped parents delete these child rows by FK cascade.
+    if (["opening_exam_help_receipts", "opening_exam_attempt_links", "opening_exam_bindings",
+      "opening_exam_source_mappings", "opening_exam_source_observations"].includes(table)) continue;
+    if (table === "opening_source_chunks") {
+      await tx`DELETE FROM opening_source_chunks WHERE source_id IN
+        (SELECT id FROM opening_sources WHERE workspace_id=${scope.workspaceId})`;
+    } else {
+      await tx`DELETE FROM ${tx(table)} WHERE workspace_id=${scope.workspaceId}`;
+    }
+  }
 }
 
 export async function createBackupFixture() {
