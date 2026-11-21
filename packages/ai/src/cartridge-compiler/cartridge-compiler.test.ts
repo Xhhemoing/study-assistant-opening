@@ -1581,4 +1581,95 @@ describe("Exact (C, -L, T7) Pareto frontier, Hard Pre-Pareto Veto, and Promotion
       expect(entry.onParetoFrontier).toBe(false);
     }
   });
+
+  it("detects standalone unformatted 10-11 digit phone numbers without floating-point decimal false positives (Round-6 P1-2)", () => {
+    const clean = buildMatureCohort("cand_phone_base", {
+      learnerCount: 25,
+      repairedCount: 23,
+      t7PassedCount: 24,
+    });
+
+    // Unformatted 10-digit US phone & 11-digit mobile inside t7.reason / l.telemetryIssues / trajectories MUST fail closed!
+    expect(() => assertNoRawPiiInText("Call 4155550199", "t7.reason")).toThrow(
+      CartridgePiiViolationError,
+    );
+    expect(() => assertNoRawPiiInText("4155550199", "t7.reason")).toThrow(
+      CartridgePiiViolationError,
+    );
+    expect(() => assertNoRawPiiInText("Mobile 13800138000.", "l.telemetryIssues")).toThrow(
+      CartridgePiiViolationError,
+    );
+
+    const piiUnformattedPhoneReceipt: CartridgeCandidateMetrics = {
+      ...clean,
+      candidateId: "cand_unformatted_phone",
+      t7: {
+        status: "pending",
+        passedFreshTransferCount: 0,
+        eligibleFollowupCohortCount: 0,
+        pendingCohortCount: 5,
+        reason: "Waiting on callback 4155550199",
+      },
+    };
+    expect(() =>
+      evaluateParetoFrontierAndPromotion([piiUnformattedPhoneReceipt], {
+        baseline: { cRate: 0.8, t7Rate: 0.72 },
+      }),
+    ).toThrow(CartridgePiiViolationError);
+
+    // Floating-point decimals, scientific notation, UUIDs, and 13-digit ms timestamps MUST NOT false-positive!
+    expect(() =>
+      assertNoRawPiiInText(
+        "ratio=0.3333333333 exact=1.0000000000 delta=0.01000010000100001 ts=1700000000000 uuid=550e8400-e29b-41d4-a716-446655440000",
+        "numeric_diagnostics",
+      ),
+    ).not.toThrow();
+  });
+
+  it("vetoes unknown t7.status values BEFORE Pareto dominance and never promotes uncertified status (Round-6 P1-3)", () => {
+    const validPromotable = buildMatureCohort("cand_valid_r6", {
+      learnerCount: 25,
+      repairedCount: 22, // C = 0.88
+      t7PassedCount: 24, // T7 = 0.96
+    });
+
+    // Corrupted runtime t7.status ("unknown") with C = 1.0 and zero leaks — must be vetoed BEFORE Pareto!
+    const unknownStatusCandidate: CartridgeCandidateMetrics = {
+      ...validPromotable,
+      candidateId: "cand_unknown_t7_status",
+      c: {
+        rate: 1,
+        repairedCount: 25,
+        verifiableFirstErrorCount: 25,
+        abandonedCount: 0,
+        abandonmentRate: 0,
+      },
+      t7: {
+        status: "unknown" as never,
+        passedFreshTransferCount: 0,
+        eligibleFollowupCohortCount: 0,
+        pendingCohortCount: 0,
+        reason: "corrupted_status",
+      } as unknown as CartridgeCandidateMetrics["t7"],
+    };
+
+    const result = evaluateParetoFrontierAndPromotion([unknownStatusCandidate, validPromotable], {
+      baseline: { cRate: 0.85, t7Rate: 0.72 },
+      minT7Gain: 0.05,
+      nonInferiorityMargin: 0.02,
+      minClusterCount: 5,
+    });
+
+    expect(result.vetoedCandidateIds).toEqual(["cand_unknown_t7_status"]);
+    expect(result.frontierCandidateIds).toEqual(["cand_valid_r6"]);
+    expect(result.promotedCandidateIds).toEqual(["cand_valid_r6"]);
+    expect(result.dominatedCandidateIds).toEqual([]);
+
+    const badEntry = result.results.find((r) => r.candidateId === "cand_unknown_t7_status")!;
+    expect(badEntry.status).toBe("vetoed_invalid_telemetry");
+    expect(badEntry.onParetoFrontier).toBe(false);
+    expect(badEntry.vetoReasons).toEqual(
+      expect.arrayContaining([expect.stringContaining("invalid_t7_status:unknown")]),
+    );
+  });
 });

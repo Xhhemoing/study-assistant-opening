@@ -784,13 +784,24 @@ function validateObjectiveTelemetryFailClosed(
   }
 
   let matureCert: MatureTransferCertification | null = null;
-  if (candidate.t7.status === "mature") {
-    matureCert = certifyMatureTransferLowerBound(candidate.t7);
+  const rawT7 = candidate.t7 as T7Metric | null | undefined;
+  if (
+    !rawT7 ||
+    typeof rawT7 !== "object" ||
+    (rawT7.status !== "mature" && rawT7.status !== "pending")
+  ) {
+    const rawStatus =
+      rawT7 && typeof rawT7 === "object"
+        ? (rawT7 as { status?: unknown }).status
+        : undefined;
+    issues.push(`invalid_t7_status:${String(rawStatus)}`);
+  } else if (rawT7.status === "mature") {
+    matureCert = certifyMatureTransferLowerBound(rawT7);
     if (!matureCert.validTelemetry) {
       issues.push(...matureCert.telemetryIssues);
     }
-  } else {
-    const t7p = candidate.t7;
+  } else if (rawT7.status === "pending") {
+    const t7p = rawT7;
     if (!isNonNegativeInteger(t7p.eligibleFollowupCohortCount)) {
       issues.push(
         `invalid_pending_t7_eligibleFollowupCohortCount:${String(t7p.eligibleFollowupCohortCount)}`,
@@ -902,8 +913,13 @@ export function evaluateParetoFrontierAndPromotion(
 
     if (candidate.t7.status === "mature") {
       safeMature.push(candidate);
-    } else {
+    } else if (candidate.t7.status === "pending") {
       safePending.push(candidate);
+    } else {
+      vetoMap.set(candidate.candidateId, {
+        status: "vetoed_invalid_telemetry",
+        reasons: [`invalid_t7_status:${String((candidate.t7 as { status?: unknown }).status)}`],
+      });
     }
   }
 
@@ -958,48 +974,67 @@ export function evaluateParetoFrontierAndPromotion(
       };
     }
 
-    // Non-dominated safe candidate on Pareto frontier: check promotion gate.
+    // Non-dominated safe candidate on Pareto frontier: check promotion gate (fail-closed on NaN/invalid).
     const promotionBlockers: string[] = [];
     if (candidate.t7.status === "pending") {
       promotionBlockers.push(`t7_pending:${candidate.t7.reason}`);
-    } else {
+    } else if (candidate.t7.status === "mature") {
       const t7 = candidate.t7;
       const cert = matureCertMap.get(candidate.candidateId) ?? certifyMatureTransferLowerBound(t7);
 
+      if (!cert.validTelemetry) {
+        promotionBlockers.push(...cert.telemetryIssues);
+      }
+
       if (
         t7.alpha !== undefined &&
-        (!Number.isFinite(t7.alpha) || t7.alpha <= 0 || t7.alpha > MAX_PROMOTION_ALPHA + 1e-9)
+        !(
+          typeof t7.alpha === "number" &&
+          Number.isFinite(t7.alpha) &&
+          t7.alpha > 0 &&
+          t7.alpha <= MAX_PROMOTION_ALPHA + 1e-9
+        )
       ) {
         promotionBlockers.push(
           `t7_alpha_exceeds_max_0_05:${String(t7.alpha)}>${MAX_PROMOTION_ALPHA}`,
         );
       }
 
-      if (t7.learnerClusterCount < minClusterCount) {
+      if (!(t7.learnerClusterCount >= minClusterCount)) {
         promotionBlockers.push(
-          `insufficient_student_clusters:${t7.learnerClusterCount}<${minClusterCount}`,
+          `insufficient_student_clusters:${String(t7.learnerClusterCount)}<${minClusterCount}`,
         );
       }
 
-      if (t7.learnerClusterLowerBound > cert.certifiedCp95Lcb + 1e-9) {
+      if (
+        !(
+          Number.isFinite(t7.learnerClusterLowerBound) &&
+          Number.isFinite(cert.certifiedCp95Lcb) &&
+          t7.learnerClusterLowerBound <= cert.certifiedCp95Lcb + 1e-9
+        )
+      ) {
         promotionBlockers.push(
-          `t7_lcb_exceeds_certified_cp95:${t7.learnerClusterLowerBound.toFixed(4)}>${cert.certifiedCp95Lcb.toFixed(4)}`,
+          `t7_lcb_exceeds_certified_cp95:${String(t7.learnerClusterLowerBound)}>${String(cert.certifiedCp95Lcb)}`,
         );
       }
 
       const verifiedLcb = Math.min(t7.learnerClusterLowerBound, cert.certifiedCp95Lcb);
       const requiredT7Lcb = options.baseline.t7Rate + minT7Gain;
-      if (verifiedLcb + EPSILON < requiredT7Lcb) {
+      if (!(Number.isFinite(verifiedLcb) && verifiedLcb + EPSILON >= requiredT7Lcb)) {
         promotionBlockers.push(
-          `t7_lcb_below_gain_threshold:${verifiedLcb.toFixed(4)}<${requiredT7Lcb.toFixed(4)}`,
+          `t7_lcb_below_gain_threshold:${Number.isFinite(verifiedLcb) ? verifiedLcb.toFixed(4) : String(verifiedLcb)}<${requiredT7Lcb.toFixed(4)}`,
         );
       }
       const minAllowedC = options.baseline.cRate - nonInferiorityMargin;
-      if (candidate.c.rate + EPSILON < minAllowedC) {
+      if (!(Number.isFinite(candidate.c.rate) && candidate.c.rate + EPSILON >= minAllowedC)) {
         promotionBlockers.push(
-          `c_below_non_inferiority:${candidate.c.rate.toFixed(4)}<${minAllowedC.toFixed(4)}`,
+          `c_below_non_inferiority:${Number.isFinite(candidate.c.rate) ? candidate.c.rate.toFixed(4) : String(candidate.c.rate)}<${minAllowedC.toFixed(4)}`,
         );
       }
+    } else {
+      promotionBlockers.push(
+        `invalid_t7_status:${String((candidate.t7 as { status?: unknown }).status)}`,
+      );
     }
 
     const status: ParetoCandidateStatus =

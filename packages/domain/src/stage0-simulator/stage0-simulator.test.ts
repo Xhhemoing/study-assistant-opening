@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   STAGE0_EXPECTED_EPISODE_COUNT,
+  STAGE0_PERSONAS,
   STAGE0_PERSONA_IDS,
   STAGE0_SCENARIOS,
   STAGE0_VARIANTS_PER_PAIR,
@@ -14,6 +15,7 @@ import {
   detectProtectedLeakage,
   evaluateStage0Gate,
   generateStage0Episodes,
+  getCanonicalStage0PersonaProfile,
   type Stage0TutorPolicy,
 } from "./index";
 
@@ -444,5 +446,33 @@ describe("Stage-0 768-episode deterministic student simulator", () => {
     expect(() => {
       (ep0.scenario as { title: string }).title = "mutated";
     }).toThrow(TypeError);
+  });
+
+  it("deep-freezes canonical STAGE0_PERSONAS profiles & isolates remediationTarget from caller mutation (Round-6 P1-1)", () => {
+    expect(Object.isFrozen(STAGE0_PERSONA_IDS)).toBe(true);
+    expect(Object.isFrozen(STAGE0_PERSONAS)).toBe(true);
+    for (const personaId of STAGE0_PERSONA_IDS) {
+      const exportedProfile = STAGE0_PERSONAS[personaId];
+      const canonicalCopy = getCanonicalStage0PersonaProfile(personaId);
+      expect(Object.isFrozen(exportedProfile)).toBe(true);
+      expect(Object.isFrozen(canonicalCopy)).toBe(true);
+      expect(exportedProfile).not.toBe(canonicalCopy);
+    }
+
+    // Attempting to mutate nested remediationTarget or hasPersistentMisconception throws TypeError.
+    expect(() => {
+      (STAGE0_PERSONAS.specific_misconception as { remediationTarget: boolean }).remediationTarget =
+        false;
+    }).toThrow(TypeError);
+    expect(() => {
+      (
+        STAGE0_PERSONAS.specific_misconception as { hasPersistentMisconception: boolean }
+      ).hasPersistentMisconception = false;
+    }).toThrow(TypeError);
+
+    // Transfer cohort stays intact (384 remediation-target episodes across 768).
+    const report = evaluateStage0Gate(createCompliantReferencePolicy(), { seed: 20261121 });
+    expect(report.metrics.sevenDayTransferDenominator).toBe(384);
+    expect(report.promotable).toBe(true);
   });
 });

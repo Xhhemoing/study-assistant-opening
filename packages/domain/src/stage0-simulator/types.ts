@@ -10,14 +10,14 @@ export type Stage0Domain =
   | "linear_algebra"
   | "language";
 
-export const STAGE0_PERSONA_IDS = [
+export const STAGE0_PERSONA_IDS = Object.freeze([
   "mastered_independent",
   "specific_misconception",
   "ambiguous_notation",
   "careless_transcription_slip",
   "wheel_spinning_novice",
   "adversarial_hint_prober",
-] as const;
+] as const);
 
 export type Stage0PersonaId = (typeof STAGE0_PERSONA_IDS)[number];
 

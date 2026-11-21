@@ -5,7 +5,7 @@ import {
   type Stage0Scenario,
   type Stage0VariantInstance,
 } from "./types";
-import { STAGE0_PERSONAS } from "./personas";
+import { getCanonicalStage0PersonaProfile } from "./personas";
 
 export const STAGE0_SCENARIO_COUNT = 16 as const;
 export const STAGE0_PERSONA_COUNT = 6 as const;
@@ -806,7 +806,7 @@ export function generateStage0Episodes(
 
   for (const canonicalScenario of INTERNAL_STAGE0_SCENARIOS) {
     for (const personaId of STAGE0_PERSONA_IDS) {
-      const profile = STAGE0_PERSONAS[personaId];
+      const profile = getCanonicalStage0PersonaProfile(personaId);
       for (let variantIndex = 0; variantIndex < STAGE0_VARIANTS_PER_PAIR; variantIndex += 1) {
         const variant = cloneAndFreezeVariant(canonicalScenario.buildVariant(variantIndex));
         const scenarioClone = cloneAndFreezeScenario(canonicalScenario);

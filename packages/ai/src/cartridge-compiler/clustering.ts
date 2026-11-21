@@ -17,6 +17,8 @@ const PHONE_PATTERN =
   /(?<![\d.])(?:\+\d{1,3}[\s.-]?)?(?:\(\d{3}\)[\s.-]?|\d{3}[\s.-])\d{3}[\s.-]\d{4}(?![\d.])/;
 const INTL_PHONE_PATTERN =
   /(?<![\w.])(?:\+\d{1,3}[\s.-]?\d{2,4}[\s.-]?\d{3,4}[\s.-]?\d{3,4}|\+\d{8,15})(?![\d.])/;
+const UNFORMATTED_PHONE_PATTERN =
+  /(?<![\d.])(?<![0-9a-fA-F]{2})\d{10,11}(?!\d|\.\d|[0-9a-fA-F]{2})/;
 const SSN_PATTERN = /\b\d{3}-\d{2}-\d{4}\b/;
 const TOKEN_URL_PATTERN =
   /https?:\/\/[^\s]*?(?:[?&]\s*(?:token|access_token|auth|api_key|apikey|secret|password|passwd|session|sid|jwt|key)\s*=|[^/\s@]+:[^/\s@]+@)/i;
@@ -83,7 +85,13 @@ function detectRawPiiReasonsInText(text: string): string[] {
   const reasons = new Set<string>();
   for (const form of forms) {
     if (EMAIL_PATTERN.test(form)) reasons.add("email");
-    if (PHONE_PATTERN.test(form) || INTL_PHONE_PATTERN.test(form)) reasons.add("phone");
+    if (
+      PHONE_PATTERN.test(form) ||
+      INTL_PHONE_PATTERN.test(form) ||
+      UNFORMATTED_PHONE_PATTERN.test(form)
+    ) {
+      reasons.add("phone");
+    }
     if (SSN_PATTERN.test(form)) reasons.add("ssn");
     if (TOKEN_URL_PATTERN.test(form) || SPACED_TOKEN_URL_PATTERN.test(form)) {
       reasons.add("url_with_credentials_or_token");
