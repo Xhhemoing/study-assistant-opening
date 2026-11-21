@@ -155,7 +155,7 @@ describe("opening tutor jobs repository", () => {
     expect(sql.calls[0]).toContain("conversation_id");
   });
 
-  it("includes user turn clientKey on active pending jobs and omits it on outcome_unknown", async () => {
+  it("omits clientKey on unfiltered pending-job discovery and returns exact status+clientKey across active, unknown, and terminal states on scoped lookup", async () => {
     const activeSql = fakeSql((query) => query.includes("FROM opening_tutor_jobs j")
       ? [{
           id: "job-active",
@@ -171,7 +171,6 @@ describe("opening tutor jobs repository", () => {
       status: "running",
       error: null,
       updatedAt: "2026-09-13T12:00:00.000Z",
-      clientKey: "turn-client-key-1",
     });
 
     const unknownSql = fakeSql((query) => query.includes("FROM opening_tutor_jobs j")
@@ -190,7 +189,8 @@ describe("opening tutor jobs repository", () => {
       error: { message: TUTOR_UNKNOWN_MESSAGE },
       updatedAt: "2026-09-13T12:00:00.000Z",
     });
-    // clientKey-scoped lookup filters on u.client_key and only returns active queued/running jobs.
+
+    // clientKey-scoped lookup filters on u.client_key and reports active, outcome_unknown, and terminal states.
     await expect(createOpeningTutorJobsRepository(activeSql).findPendingForConversation(scope, "conversation-1", "turn-client-key-1")).resolves.toEqual({
       id: "job-active",
       status: "running",
@@ -199,7 +199,31 @@ describe("opening tutor jobs repository", () => {
       clientKey: "turn-client-key-1",
     });
     expect(activeSql.calls.at(-1)).toContain("u.client_key");
-    await expect(createOpeningTutorJobsRepository(unknownSql).findPendingForConversation(scope, "conversation-1", "turn-client-key-2")).resolves.toBeNull();
+    await expect(createOpeningTutorJobsRepository(unknownSql).findPendingForConversation(scope, "conversation-1", "turn-client-key-2")).resolves.toEqual({
+      id: "job-unknown",
+      status: "outcome_unknown",
+      error: { message: TUTOR_UNKNOWN_MESSAGE },
+      updatedAt: "2026-09-13T12:00:00.000Z",
+      clientKey: "turn-client-key-2",
+    });
+
+    const terminalSql = fakeSql((query) => query.includes("FROM opening_tutor_jobs j")
+      ? [{
+          id: "job-done",
+          status: "succeeded",
+          turn_status: "complete",
+          client_key: "turn-client-key-3",
+          error: null,
+          updated_at: new Date("2026-09-13T12:00:00.000Z"),
+        }]
+      : []);
+    await expect(createOpeningTutorJobsRepository(terminalSql).findPendingForConversation(scope, "conversation-1", "turn-client-key-3")).resolves.toEqual({
+      id: "job-done",
+      status: "succeeded",
+      error: null,
+      updatedAt: "2026-09-13T12:00:00.000Z",
+      clientKey: "turn-client-key-3",
+    });
   });
 
   it("discovers a recovered unknown outcome without marking it active", async () => {

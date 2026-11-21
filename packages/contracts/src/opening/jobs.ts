@@ -60,7 +60,6 @@ export const jobStatusResponseSchema = z
     status: jobStatusSchema,
     error: tutorJobErrorSchema.nullable(),
     updatedAt: isoDateTimeSchema,
-    clientKey: z.string().min(1).max(200).optional(),
   })
   .strict();
 

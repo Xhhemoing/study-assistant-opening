@@ -154,20 +154,25 @@ describe("openingApi (RU-07 client)", () => {
     await expect(api.getPendingJob(U)).resolves.toBeNull();
   });
 
-  it("scopes pending-job lookup by clientKey when requested", async () => {
+  it("scopes pending-job lookup by clientKey and accepts terminal or legacy responses without weakening unfiltered strict schema", async () => {
     const fetchImpl = vi.fn(async (url: string, init?: RequestInit) => {
       expect(url).toBe(`/api/opening/conversations/${U}/pending-job?clientKey=turn-key%2F1`);
       expect(init?.method).toBe("GET");
-      return jsonResponse({ id: U, status: "running", error: null, updatedAt: ISO, clientKey: "turn-key/1" });
+      return jsonResponse({ id: U, status: "cancelled", error: null, updatedAt: ISO, clientKey: "turn-key/1" });
     });
     const api = createOpeningApi(fetchImpl as unknown as typeof fetch);
     await expect(api.getPendingJob(U, undefined, { clientKey: "turn-key/1" })).resolves.toEqual({
       id: U,
-      status: "running",
+      status: "cancelled",
       error: null,
       updatedAt: ISO,
       clientKey: "turn-key/1",
     });
+
+    const unfilteredWithExtra = createOpeningApi(
+      vi.fn(async () => jsonResponse({ id: U, status: "running", error: null, updatedAt: ISO, clientKey: "unexpected" })) as unknown as typeof fetch,
+    );
+    await expect(unfilteredWithExtra.getPendingJob(U)).rejects.toThrow();
   });
 
   it.each(["queued", "running", "succeeded", "failed", "cancelled", "outcome_unknown"] as const)(

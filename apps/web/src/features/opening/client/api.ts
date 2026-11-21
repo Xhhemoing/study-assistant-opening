@@ -117,6 +117,12 @@ import { retestReviewSchema } from "../planning/review-types";
 
 export type { JobStatusResponse } from "@aistudy/contracts";
 
+const scopedJobLookupResponseSchema = jobStatusResponseSchema.extend({
+  clientKey: z.string().min(1).max(200).optional(),
+}).strict();
+
+export type ScopedJobLookupResponse = z.infer<typeof scopedJobLookupResponseSchema>;
+
 const thinTutorActionSchema = z.object({
   kind: z.enum(["clarify", "guided", "worked_example", "independent_variant", "delayed_retest"]),
   skillLabel: z.string().min(1).max(200),
@@ -309,14 +315,17 @@ export function createOpeningApi(transport: FetchLike = fetch) {
       conversationId: string,
       signal?: AbortSignal,
       options?: { clientKey?: string },
-    ): Promise<JobStatusResponse | null> {
+    ): Promise<ScopedJobLookupResponse | null> {
       const query = options?.clientKey ? `?clientKey=${encodeURIComponent(options.clientKey)}` : "";
       const body = await request(
         `/api/opening/conversations/${conversationId}/pending-job${query}`,
         { method: "GET", signal },
         fetchImpl,
       );
-      return parseOpeningResponse(jobStatusResponseSchema.nullable(), body);
+      return parseOpeningResponse(
+        options?.clientKey ? scopedJobLookupResponseSchema.nullable() : jobStatusResponseSchema.nullable(),
+        body,
+      );
     },
 
     async replyEphemeral(

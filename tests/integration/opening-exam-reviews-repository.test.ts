@@ -597,5 +597,24 @@ describe("exam photo review repository integration", () => {
     const afterStaleUnconfirmed = await repository.begin(f.scope, unconfirmedIntent);
     expect(afterStaleUnconfirmed.review.status).toBe("unknown");
     expect(afterStaleUnconfirmed.reusedUnresolved).toBe(true);
+
+    // 6) Backup v2 restore (status='unknown' with ZERO budget reservation rows at matching privacy_epoch) must NEVER become re-billable.
+    const backupRestoredIntent = input({ clientKey: randomUUID(), answerText: "Backup v2 restored unknown answer" });
+    const backupRestored = await repository.begin(f.scope, backupRestoredIntent);
+    await f.sql`UPDATE opening_exam_reviews SET status = 'unknown', updated_at = now() - interval '61 seconds' WHERE id = ${backupRestored.review.id}`;
+    const [backupRow] = await f.sql`SELECT updated_at::text AS lease FROM opening_exam_reviews WHERE id = ${backupRestored.review.id}`;
+    await repository.fail(f.scope, backupRestored.review.id, "failed", String(backupRow!.lease));
+    expect(await rawReview(backupRestored.review.id)).toMatchObject({ status: "unknown" });
+
+    const retrySameAfterBackup = await repository.begin(f.scope, backupRestoredIntent);
+    expect(retrySameAfterBackup.review.id).toBe(backupRestored.review.id);
+    expect(retrySameAfterBackup.review.status).toBe("unknown");
+    expect(retrySameAfterBackup.reusedUnresolved).toBe(true);
+
+    const retryFreshAfterBackup = await repository.begin(f.scope, input({ clientKey: randomUUID(), answerText: "Backup v2 restored unknown answer" }));
+    expect(retryFreshAfterBackup.review.id).toBe(backupRestored.review.id);
+    expect(retryFreshAfterBackup.review.status).toBe("unknown");
+    expect(retryFreshAfterBackup.reusedUnresolved).toBe(true);
+    expect(retryFreshAfterBackup.executionUpdatedAt).toBeUndefined();
   });
 });

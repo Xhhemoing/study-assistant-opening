@@ -132,7 +132,9 @@ export function createOpeningExamReviewsRepository(sql: Sql) {
     if (row.status === "unknown") {
       if (row.is_stale) {
         const ledger = await inspectReviewLedger(tx, scope.workspaceId, id);
-        if (ledger === "released_only" || ledger === "none") {
+        // Only a positive released_only receipt proves zero spend. Missing ledger rows
+        // (e.g. after Backup v2 restore, which omits opening_budget_reservations) MUST stay unknown.
+        if (ledger === "released_only") {
           await tx`UPDATE opening_exam_reviews
             SET status='failed', updated_at=GREATEST(now(), updated_at + interval '1 microsecond')
             WHERE id=${id} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND status='unknown'`;
@@ -308,7 +310,26 @@ export function createOpeningExamReviewsRepository(sql: Sql) {
     async fail(scope: Scope, id: string, status: "unknown" | "failed", expectedUpdatedAt?: string): Promise<void> {
       const operationId = reviewOperationId(scope.workspaceId, id);
       const allowedStatuses = status === "failed" && expectedUpdatedAt
-        ? sql`AND status IN ('pending', 'unknown')`
+        ? sql`AND (
+            status='pending'
+            OR (
+              status='unknown'
+              AND EXISTS (
+                SELECT 1 FROM opening_budget_reservations r
+                WHERE r.workspace_id=${scope.workspaceId}
+                  AND (
+                    r.request_id=${operationId}
+                    OR left(r.request_id, length(${operationId}) + 1)=${`${operationId}:`}
+                    OR r.parent_interaction_id=${operationId}
+                  )
+                  AND r.state='released'
+                  AND r.release_reason IS NOT NULL
+                  AND r.release_reason IN ('not_sent','cancelled')
+                  AND r.outcome_unknown_at IS NULL
+                  AND COALESCE(r.pending_reconcile_cents,0)=0
+              )
+            )
+          )`
         : sql`AND status='pending'`;
       await sql`UPDATE opening_exam_reviews
         SET status=${status}, updated_at=GREATEST(now(), updated_at + interval '1 microsecond')

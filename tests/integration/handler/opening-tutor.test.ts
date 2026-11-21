@@ -346,7 +346,9 @@ describe("opening tutor polling handlers", () => {
       params: Promise.resolve({ id: conversation.id }),
     });
     expect(unfiltered.status).toBe(200);
-    await expect(unfiltered.json()).resolves.toMatchObject({ id: jobB.jobId, clientKey: clientKeyB });
+    const unfilteredBody = await unfiltered.json() as Record<string, unknown>;
+    expect(unfilteredBody).toMatchObject({ id: jobB.jobId, status: "queued" });
+    expect(unfilteredBody).not.toHaveProperty("clientKey");
 
     const scopedA = await getPendingJob(
       request(`/api/opening/conversations/${conversation.id}/pending-job?clientKey=${encodeURIComponent(clientKeyA)}`),
@@ -371,12 +373,14 @@ describe("opening tutor polling handlers", () => {
       { params: Promise.resolve({ id: conversation.id }) },
     );
     expect(scopedAAfterCancel.status).toBe(200);
-    await expect(scopedAAfterCancel.json()).resolves.toBeNull();
+    await expect(scopedAAfterCancel.json()).resolves.toMatchObject({ id: jobA.jobId, status: "cancelled", clientKey: clientKeyA });
 
     const stillB = await getPendingJob(request(`/api/opening/conversations/${conversation.id}/pending-job`), {
       params: Promise.resolve({ id: conversation.id }),
     });
     expect(stillB.status).toBe(200);
-    await expect(stillB.json()).resolves.toMatchObject({ id: jobB.jobId, status: "queued", clientKey: clientKeyB });
+    const stillBBody = await stillB.json() as Record<string, unknown>;
+    expect(stillBBody).toMatchObject({ id: jobB.jobId, status: "queued" });
+    expect(stillBBody).not.toHaveProperty("clientKey");
   });
 });

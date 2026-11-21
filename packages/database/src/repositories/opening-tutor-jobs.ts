@@ -301,42 +301,56 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
     updatedAt: string;
     clientKey?: string;
   } | null> {
-    const rows = clientKey
-      ? await sql`
-          SELECT j.id, j.status, j.error, j.updated_at, t.status AS turn_status, u.client_key
-          FROM opening_tutor_jobs j
-          JOIN opening_conversations c ON c.id = j.conversation_id
-          JOIN opening_turns t ON t.id = j.assistant_turn_id
-          JOIN opening_turns u ON u.id = j.user_turn_id AND u.workspace_id = j.workspace_id
-          WHERE j.conversation_id = ${conversationId}
-            AND j.workspace_id = ${scope.workspaceId}
-            AND c.workspace_id = ${scope.workspaceId}
-            AND c.owner_user_id = ${scope.ownerUserId}
-            AND t.workspace_id = ${scope.workspaceId}
-            AND u.client_key = ${clientKey}
-          ORDER BY j.created_at DESC, j.id DESC
-          LIMIT 1
-        `
-      : await sql`
-          SELECT j.id, j.status, j.error, j.updated_at, t.status AS turn_status, u.client_key
-          FROM opening_tutor_jobs j
-          JOIN opening_conversations c ON c.id = j.conversation_id
-          JOIN opening_turns t ON t.id = j.assistant_turn_id
-          LEFT JOIN opening_turns u ON u.id = j.user_turn_id AND u.workspace_id = j.workspace_id
-          WHERE j.conversation_id = ${conversationId}
-            AND j.workspace_id = ${scope.workspaceId}
-            AND c.workspace_id = ${scope.workspaceId}
-            AND c.owner_user_id = ${scope.ownerUserId}
-            AND t.workspace_id = ${scope.workspaceId}
-          ORDER BY j.created_at DESC, j.id DESC
-          LIMIT 1
-        `;
+    if (clientKey) {
+      const rows = await sql`
+        SELECT j.id, j.status, j.error, j.updated_at, t.status AS turn_status, u.client_key
+        FROM opening_tutor_jobs j
+        JOIN opening_conversations c ON c.id = j.conversation_id
+        JOIN opening_turns t ON t.id = j.assistant_turn_id
+        JOIN opening_turns u ON u.id = j.user_turn_id AND u.workspace_id = j.workspace_id
+        WHERE j.conversation_id = ${conversationId}
+          AND j.workspace_id = ${scope.workspaceId}
+          AND c.workspace_id = ${scope.workspaceId}
+          AND c.owner_user_id = ${scope.ownerUserId}
+          AND t.workspace_id = ${scope.workspaceId}
+          AND u.client_key = ${clientKey}
+        ORDER BY j.created_at DESC, j.id DESC
+        LIMIT 1
+      `;
+      if (!rows.length) return null;
+      const row = rows[0] as Record<string, unknown>;
+      const status = row.status as OpeningTutorJobRecord["status"];
+      const active = (status === "queued" || status === "running") && row.turn_status === "pending";
+      const terminal = status === "succeeded" || status === "failed" || status === "cancelled";
+      const unknown = status === "outcome_unknown";
+      if (!active && !terminal && !unknown) return null;
+      return {
+        id: row.id as string,
+        status,
+        error: tutorFailureForDisplay(status, row.error),
+        updatedAt: new Date(row.updated_at as string | Date).toISOString(),
+        ...(typeof row.client_key === "string" && row.client_key.length > 0 ? { clientKey: row.client_key } : {}),
+      };
+    }
+    const rows = await sql`
+      SELECT j.id, j.status, j.error, j.updated_at, t.status AS turn_status
+      FROM opening_tutor_jobs j
+      JOIN opening_conversations c ON c.id = j.conversation_id
+      JOIN opening_turns t ON t.id = j.assistant_turn_id
+      WHERE j.conversation_id = ${conversationId}
+        AND j.workspace_id = ${scope.workspaceId}
+        AND c.workspace_id = ${scope.workspaceId}
+        AND c.owner_user_id = ${scope.ownerUserId}
+        AND t.workspace_id = ${scope.workspaceId}
+      ORDER BY j.created_at DESC, j.id DESC
+      LIMIT 1
+    `;
     if (!rows.length) return null;
     const row = rows[0] as Record<string, unknown>;
     // Inspect the latest job before filtering statuses so an older unknown
     // result cannot resurface after a newer answer has already ended.
     const active = (row.status === "queued" || row.status === "running") && row.turn_status === "pending";
-    const unknown = !clientKey && row.status === "outcome_unknown"
+    const unknown = row.status === "outcome_unknown"
       && (row.turn_status === "pending" || row.turn_status === "outcome_unknown");
     if (!active && !unknown) return null;
     return {
@@ -344,7 +358,6 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
       status: row.status as OpeningTutorJobRecord["status"],
       error: tutorFailureForDisplay(row.status, row.error),
       updatedAt: new Date(row.updated_at as string | Date).toISOString(),
-      ...(active && typeof row.client_key === "string" && row.client_key.length > 0 ? { clientKey: row.client_key } : {}),
     };
   }
 

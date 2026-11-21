@@ -93,11 +93,27 @@ it("preserves pending Stop bound to clientKey across lost ack, delays, transient
       serverPhase = "cancelled";
       return { id: jobId, status: "cancelled", error: null, updatedAt: new Date().toISOString() };
     });
-  const getPendingJob = vi.fn(async () => (
-    serverPhase === "running"
-      ? { id: jobId, status: "running" as const, error: null, updatedAt: new Date().toISOString(), clientKey: submittedClientKey }
-      : null
-  ));
+  const getPendingJob = vi.fn(async (_conversationId: string, _signal?: AbortSignal, options?: { clientKey?: string }) => {
+    if (serverPhase === "running") {
+      return {
+        id: jobId,
+        status: "running" as const,
+        error: null,
+        updatedAt: new Date().toISOString(),
+        ...(options?.clientKey ? { clientKey: submittedClientKey } : {}),
+      };
+    }
+    if (serverPhase === "cancelled" && options?.clientKey) {
+      return {
+        id: jobId,
+        status: "cancelled" as const,
+        error: null,
+        updatedAt: new Date().toISOString(),
+        clientKey: submittedClientKey,
+      };
+    }
+    return null;
+  });
   const api = {
     listSources: async () => [],
     createConversation,
@@ -204,7 +220,7 @@ it("does not cancel an active job from another tab (different clientKey) and cle
   }
 });
 
-it("clears pendingStop when reread sees our clientKey already settled as a terminal turn or when recovery is dismissed", async () => {
+it("clears pendingStop when scoped pending-job confirms our clientKey is terminal even with interleaved multi-tab turns", async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 404 })));
   vi.stubGlobal("matchMedia", () => ({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() }));
@@ -212,6 +228,7 @@ it("clears pendingStop when reread sees our clientKey already settled as a termi
   document.body.append(host);
   const root = createRoot(host);
   const id = "66666666-6666-4666-8666-666666666666";
+  const jobId = "67676767-6767-4767-8767-676767676767";
   const now = new Date().toISOString();
   let submittedClientKey = "";
   let rejectSubmit!: (reason?: unknown) => void;
@@ -222,19 +239,27 @@ it("clears pendingStop when reread sees our clientKey already settled as a termi
     return submitPending;
   });
   const cancelJob = vi.fn();
-  let turnsReturned = false;
+  let jobPhase: "uncommitted" | "succeeded" = "uncommitted";
   const api = {
     listSources: async () => [],
     createConversation,
     submitTurn,
     cancelJob,
     resumeConversation: async () => ({ conversationId: id, courseId: null, sourceIds: [], boundedHistory: [] }),
-    listTurns: async () => (turnsReturned ? [
-      { id: "77777777-7777-4777-8777-777777777777", conversationId: id, role: "user" as const, text: "原始提问", citations: [], createdAt: now, mode: "explain" as const, status: "complete" as const, clientKey: submittedClientKey },
+    // Even if user turns appear interleaved before settlement, only scoped job terminal status clears pendingStop.
+    listTurns: async () => (jobPhase === "succeeded" ? [
+      { id: "77777777-7777-4777-8777-777777777777", conversationId: id, role: "user" as const, text: "原始提问", citations: [], createdAt: now, mode: "explain" as const, status: "complete" as const },
       { id: "88888888-8888-4888-8888-888888888888", conversationId: id, role: "assistant" as const, text: "已完成回答", citations: [], createdAt: now, mode: "explain" as const, status: "complete" as const },
-    ] : []),
-    getPendingJob: async () => null,
-    getJob: async () => ({ id: "job", status: "succeeded", error: null, updatedAt: now }),
+    ] : [
+      { id: "77777777-7777-4777-8777-777777777777", conversationId: id, role: "user" as const, text: "原始提问", citations: [], createdAt: now, mode: "explain" as const, status: "complete" as const },
+      { id: "78787878-7878-4878-8878-787878787878", conversationId: id, role: "user" as const, text: "另一标签页提问", citations: [], createdAt: now, mode: "explain" as const, status: "complete" as const },
+    ]),
+    getPendingJob: vi.fn(async (_conversationId: string, _signal?: AbortSignal, options?: { clientKey?: string }) => (
+      options?.clientKey && jobPhase === "succeeded"
+        ? { id: jobId, status: "succeeded" as const, error: null, updatedAt: now, clientKey: submittedClientKey }
+        : null
+    )),
+    getJob: async () => ({ id: jobId, status: "succeeded", error: null, updatedAt: now }),
   } as unknown as OpeningApi;
   try {
     await act(async () => root.render(<AssistantView api={api} startFresh initialDraft="原始提问" />));
@@ -247,13 +272,13 @@ it("clears pendingStop when reread sees our clientKey already settled as a termi
 
     const reloadButton = () => Array.from(host.querySelectorAll("button")).find(b => b.textContent === "重新读取对话");
     const dismissButton = () => Array.from(host.querySelectorAll("button")).find(b => b.textContent === "继续提问");
-    // While turn has not appeared, recovery + dismiss stay available.
+    // While scoped job is not confirmed terminal (even with interleaved user turns), recovery + dismiss stay available.
     await act(async () => reloadButton()!.click());
     expect(reloadButton()).toBeTruthy();
     expect(dismissButton()).toBeTruthy();
 
-    // Once the terminal turn for our clientKey appears, pendingStop & recovery clear automatically.
-    turnsReturned = true;
+    // Once scoped pending-job confirms terminal status for our clientKey, pendingStop & recovery clear automatically.
+    jobPhase = "succeeded";
     await act(async () => reloadButton()!.click());
     expect(cancelJob).not.toHaveBeenCalled();
     expect(reloadButton()).toBeUndefined();
@@ -466,8 +491,8 @@ it("recovers and cancels Tab A's active job by (conversationId, clientKey) even 
         ? { id: tabAJobId, status: "running" as const, error: null, updatedAt: now, clientKey: tabAClientKey }
         : null;
     }
-    // Unfiltered lookup returns only the newest job (Tab B), hiding Tab A's active job.
-    return { id: tabBJobId, status: "running" as const, error: null, updatedAt: now, clientKey: "tab-b-newer-client-key" };
+    // Unfiltered lookup omits clientKey and returns only the newest job (Tab B), hiding Tab A's active job.
+    return { id: tabBJobId, status: "running" as const, error: null, updatedAt: now };
   });
   const api = {
     listSources: async () => [],
@@ -533,7 +558,7 @@ it("keeps Tab A's Stop armed while Tab A's POST is uncommitted even when Tab B i
         ? { id: tabAJobId, status: "running" as const, error: null, updatedAt: now, clientKey: tabAClientKey }
         : null;
     }
-    return { id: tabBJobId, status: "running" as const, error: null, updatedAt: now, clientKey: "tab-b-client-key" };
+    return { id: tabBJobId, status: "running" as const, error: null, updatedAt: now };
   });
   const api = {
     listSources: async () => [],
@@ -577,7 +602,7 @@ it("keeps Tab A's Stop armed while Tab A's POST is uncommitted even when Tab B i
   }
 });
 
-it("clears Tab A's Stop marker and adopts Tab B only once Tab A's own turn is positively confirmed terminal", async () => {
+it("clears Tab A's Stop marker and adopts Tab B only once scoped pending-job positively confirms Tab A is terminal", async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 404 })));
   vi.stubGlobal("matchMedia", () => ({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() }));
@@ -585,6 +610,7 @@ it("clears Tab A's Stop marker and adopts Tab B only once Tab A's own turn is po
   document.body.append(host);
   const root = createRoot(host);
   const id = "19191919-1919-4919-8919-191919191919";
+  const tabAJobId = "19191919-1919-4919-8919-191919191918";
   const tabBJobId = "20202020-2020-4020-8020-202020202020";
   const now = new Date().toISOString();
   let tabAClientKey = "";
@@ -596,27 +622,23 @@ it("clears Tab A's Stop marker and adopts Tab B only once Tab A's own turn is po
   });
   const cancelJob = vi.fn();
   const getJob = vi.fn(async (jobId: string) => ({ id: jobId, status: "running" as const, error: null, updatedAt: now }));
+  let tabAStatus: "outcome_unknown" | "failed" = "outcome_unknown";
   const getPendingJob = vi.fn(async (_conversationId: string, _signal?: AbortSignal, options?: { clientKey?: string }) => {
-    if (options?.clientKey) return null;
-    return { id: tabBJobId, status: "running" as const, error: null, updatedAt: now, clientKey: "tab-b-client-key" };
+    if (options?.clientKey) {
+      return { id: tabAJobId, status: tabAStatus, error: null, updatedAt: now, clientKey: tabAClientKey };
+    }
+    return { id: tabBJobId, status: "running" as const, error: null, updatedAt: now };
   });
-  let listTurnsCalls = 0;
   const api = {
     listSources: async () => [],
     createConversation: vi.fn(async () => ({ id, title: "学习对话", courseId: null })),
     submitTurn,
     cancelJob,
     resumeConversation: async () => ({ conversationId: id, courseId: null, sourceIds: [], boundedHistory: [] }),
-    // First listTurns returns empty (in-flight race); follow-up listTurns after scoped null confirms Tab A settled.
-    listTurns: vi.fn(async () => {
-      listTurnsCalls += 1;
-      return listTurnsCalls >= 2
-        ? [
-            { id: "21212121-2121-4121-8121-212121212121", conversationId: id, role: "user" as const, text: "Tab A 提问", citations: [], createdAt: now, mode: "explain" as const, status: "complete" as const, clientKey: tabAClientKey },
-            { id: "22222222-2222-4222-8222-222222222221", conversationId: id, role: "assistant" as const, text: "已取消", citations: [], createdAt: now, mode: "explain" as const, status: "failed" as const },
-          ]
-        : [];
-    }),
+    listTurns: vi.fn(async () => [
+      { id: "21212121-2121-4121-8121-212121212121", conversationId: id, role: "user" as const, text: "Tab A 提问", citations: [], createdAt: now, mode: "explain" as const, status: "complete" as const },
+      { id: "22222222-2222-4222-8222-222222222221", conversationId: id, role: "assistant" as const, text: "已取消", citations: [], createdAt: now, mode: "explain" as const, status: "failed" as const },
+    ]),
     getPendingJob,
     getJob,
   } as unknown as OpeningApi;
@@ -629,12 +651,21 @@ it("clears Tab A's Stop marker and adopts Tab B only once Tab A's own turn is po
       await Promise.resolve();
     });
 
-    const reloadButton = Array.from(host.querySelectorAll("button")).find(b => b.textContent === "重新读取对话")!;
-    await act(async () => reloadButton.click());
+    const reloadButton = () => Array.from(host.querySelectorAll("button")).find(b => b.textContent === "重新读取对话");
+    const dismissButton = () => Array.from(host.querySelectorAll("button")).find(b => b.textContent === "继续提问");
+    // While Tab A's scoped job is outcome_unknown, keep pendingStop armed and do not adopt Tab B.
+    await act(async () => reloadButton()!.click());
     expect(getPendingJob).toHaveBeenCalledWith(id, expect.anything(), { clientKey: tabAClientKey });
     expect(cancelJob).not.toHaveBeenCalled();
+    expect(getJob).not.toHaveBeenCalled();
+    expect(dismissButton()).toBeTruthy();
+
+    // Once Tab A's scoped job is positively confirmed terminal (failed/succeeded/cancelled), clear Stop and adopt Tab B.
+    tabAStatus = "failed";
+    await act(async () => reloadButton()!.click());
+    expect(cancelJob).not.toHaveBeenCalled();
     expect(getJob).toHaveBeenCalledWith(tabBJobId, expect.anything());
-    expect(Array.from(host.querySelectorAll("button")).find(b => b.textContent === "继续提问")).toBeUndefined();
+    expect(dismissButton()).toBeUndefined();
   } finally {
     await act(async () => root.unmount());
     host.remove();

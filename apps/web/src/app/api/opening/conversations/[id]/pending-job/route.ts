@@ -26,7 +26,7 @@ export async function GET(request: Request, context: Params): Promise<Response> 
             status: job.status,
             error: job.error ? { message: job.error.message } : null,
             updatedAt: job.updatedAt,
-            ...(job.clientKey ? { clientKey: job.clientKey } : {}),
+            ...(clientKey && job.clientKey ? { clientKey: job.clientKey } : {}),
           }
         : null,
     );

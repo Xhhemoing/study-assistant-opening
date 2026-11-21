@@ -193,12 +193,32 @@ describe("opening-exam-reviews stale pending reconciliation and fail guards", ()
     expect(unknownUpdate?.query).not.toContain("updated_at=");
   });
 
-  it("keeps fresh unknown reviews non-recoverable without querying the budget ledger, and recovers stale released-only/none unknown reviews to failed", async () => {
+  it("keeps fresh, billed, and backup-restored (0 ledger rows) unknown reviews non-billable, and recovers stale unknown ONLY with positive released_only receipt", async () => {
     const fresh = makeFakeSql({ existingStatus: "unknown", isStale: false, ledgerRows: [] });
     const freshCtx = await createOpeningExamReviewsRepository(fresh.sql).begin(scope, input);
     expect(freshCtx.review.status).toBe("unknown");
     expect(freshCtx.reusedUnresolved).toBe(true);
     expect(fresh.calls.some(c => c.query.includes("opening_budget_reservations"))).toBe(false);
+
+    // Backup v2 restores in-flight reviews as status='unknown' without opening_budget_reservations.
+    // Absence of ledger rows is NOT proof of zero spend: both same-key and fresh-key retries stay unknown.
+    const backupRestoredSameKey = makeFakeSql({ existingStatus: "unknown", isStale: true, ledgerRows: [] });
+    const backupSameCtx = await createOpeningExamReviewsRepository(backupRestoredSameKey.sql).begin(scope, input);
+    expect(backupSameCtx.review.status).toBe("unknown");
+    expect(backupSameCtx.reusedUnresolved).toBe(true);
+    expect(backupSameCtx.executionUpdatedAt).toBeUndefined();
+    expect(backupRestoredSameKey.getStatus()).toBe("unknown");
+
+    const backupRestoredFreshKey = makeFakeSql({ existingStatus: "unknown", isStale: true, matchByClientKey: false, ledgerRows: [] });
+    const backupFreshCtx = await createOpeningExamReviewsRepository(backupRestoredFreshKey.sql).begin(scope, {
+      ...input,
+      clientKey: "review-key-after-backup-restore-1",
+    });
+    expect(backupFreshCtx.review.id).toBe(reviewId);
+    expect(backupFreshCtx.review.status).toBe("unknown");
+    expect(backupFreshCtx.reusedUnresolved).toBe(true);
+    expect(backupFreshCtx.executionUpdatedAt).toBeUndefined();
+    expect(backupRestoredFreshKey.getStatus()).toBe("unknown");
 
     const staleBilled = makeFakeSql({
       existingStatus: "unknown",
@@ -315,7 +335,10 @@ describe("opening-exam-reviews stale pending reconciliation and fail guards", ()
 
     await repo.fail(scope, reviewId, "failed", "2026-10-17 00:02:00.123456+00");
     const leasedFailedFrags = getFrags(f.calls.at(-1)!);
-    expect(leasedFailedFrags.some(fr => fr.__fragment.includes("AND status IN ('pending', 'unknown')"))).toBe(true);
+    expect(leasedFailedFrags.some(fr => fr.__fragment.includes("status='pending'")
+      && fr.__fragment.includes("status='unknown'")
+      && fr.__fragment.includes("EXISTS (")
+      && fr.__fragment.includes("r.state='released'"))).toBe(true);
     expect(leasedFailedFrags.some(fr => fr.__fragment === "AND updated_at=(?::text)::timestamptz" && fr.values?.[0] === "2026-10-17 00:02:00.123456+00")).toBe(true);
     expect(leasedFailedFrags.some(fr => fr.__fragment.includes("opening_budget_reservations")
       && fr.__fragment.includes("b.release_reason IS NOT NULL")
