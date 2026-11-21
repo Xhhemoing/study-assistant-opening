@@ -1,6 +1,7 @@
 {
   "name": "@aistudy/jingwei",
   "private": true,
+  "license": "UNLICENSED",
   "version": "0.0.0",
   "description": "经纬 Jingwei — host-agnostic adaptive presentation core: one artifact (warp), many views (weft).",
   "type": "module",

@@ -11,7 +11,7 @@ import {
   resolveBudgetLocalDay,
   resolveBudgetTimeZone,
   resolveEffectiveDailyCap,
-} from "@aistudy/ai";
+} from "@aistudy/domain/opening/ai-policy";
 import type { Sql, TransactionSql } from "postgres";
 import type { OpeningScope } from "./opening-sources";
 

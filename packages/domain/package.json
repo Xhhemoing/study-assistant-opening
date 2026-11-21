@@ -1,6 +1,7 @@
 {
   "name": "@aistudy/domain",
   "private": true,
+  "license": "UNLICENSED",
   "version": "0.0.0",
   "type": "module",
   "main": "./src/index.ts",
@@ -20,6 +21,14 @@
     "./native": {
       "types": "./src/portability/native/index.ts",
       "default": "./src/portability/native/index.ts"
+    },
+    "./cartridge-sdk-lite": {
+      "types": "./src/cartridge-sdk-lite/index.ts",
+      "default": "./src/cartridge-sdk-lite/index.ts"
+    },
+    "./opening/ai-policy": {
+      "types": "./src/opening/ai-policy/index.ts",
+      "default": "./src/opening/ai-policy/index.ts"
     },
     "./exam-sprint-catalog": {
       "types": "./src/opening/exam-sprint/catalog.ts",

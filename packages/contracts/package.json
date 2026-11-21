@@ -1,6 +1,7 @@
 {
   "name": "@aistudy/contracts",
   "private": true,
+  "license": "UNLICENSED",
   "version": "0.0.0",
   "type": "module",
   "main": "./src/index.ts",
@@ -9,6 +10,14 @@
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
+    },
+    "./learner-portability": {
+      "types": "./src/learner-portability/index.ts",
+      "default": "./src/learner-portability/index.ts"
+    },
+    "./cartridge-lite": {
+      "types": "./src/cartridge-lite/index.ts",
+      "default": "./src/cartridge-lite/index.ts"
     }
   },
   "scripts": {

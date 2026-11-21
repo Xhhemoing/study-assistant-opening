@@ -1,7 +1,8 @@
-import { teachingBlindSolveReceiptSchema, type ProviderInput, type TeachingQuestionInteraction, type TeachingBlindSolveReceipt, type TeachingBlindSolveIdentity, type TeachingModelIdentity } from "@aistudy/contracts";
+import type { ProviderInput, TeachingQuestionInteraction, TeachingBlindSolveReceipt, TeachingBlindSolveIdentity, TeachingModelIdentity } from "@aistudy/contracts";
 export type { TeachingBlindSolveReceipt, TeachingBlindSolveIdentity, TeachingModelIdentity } from "@aistudy/contracts";
 import { evaluateTeachingAnswer } from "@aistudy/domain";
 import { isDeepStrictEqual } from "node:util";
+export { teachingBlindSolveMatchesCurrent } from "@aistudy/domain/opening/ai-policy";
 import type { ModelGateway, ModelGatewayCallOptions } from "./model-gateway";
 import { isBudgetReplayError } from "./budgeted-call";
 
@@ -12,13 +13,6 @@ export function independentTeachingSolver(config: TeachingBlindSolveConfig | nul
     [identity.providerId, identity.modelName, identity.family].every(value => typeof value === "string" && !!value.trim()))
     && config.solver.family.trim().toLowerCase() !== config.generator.family.trim().toLowerCase()
     && (config.solver.providerId !== config.generator.providerId || config.solver.modelName !== config.generator.modelName);
-}
-
-/** Eligibility metadata only. This is NOT a learner verdict or an independence upgrade. */
-export function teachingBlindSolveMatchesCurrent(receipt: TeachingBlindSolveReceipt | null | undefined, identity: TeachingBlindSolveIdentity): boolean {
-  return teachingBlindSolveReceiptSchema.safeParse(receipt).success && receipt?.decision === "match"
-    && !!receipt.costLedgerRef && !!receipt.modelSnapshot && !!receipt.family
-    && isDeepStrictEqual(receipt.identity, identity);
 }
 
 /** The request is constructed here, never by serializing a key, attempt, config or receipt. */

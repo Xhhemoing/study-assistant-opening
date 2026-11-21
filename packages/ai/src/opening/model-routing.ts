@@ -1,9 +1,8 @@
+import { OpeningModelRoutingError } from "@aistudy/domain/opening/ai-policy";
 import type { OpeningAiSettings, OpeningModelSnapshot, OpeningModelSummary, TutorMode } from "@aistudy/contracts";
 import { modelTaskSpec, type ModelInputKind, type ModelTaskKey } from "./model-tasks";
 
-export class OpeningModelRoutingError extends Error {
-  readonly code = "AI_ROUTE_UNAVAILABLE";
-}
+export { OpeningModelRoutingError } from "@aistudy/domain/opening/ai-policy";
 
 /** Explicit mode mapping only. Never guess quality or silently try another provider. */
 export function selectedOpeningModelId(settings: OpeningAiSettings, mode: TutorMode, serverDefaultId: string | null): string | null {

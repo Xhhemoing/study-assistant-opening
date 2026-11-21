@@ -71,6 +71,25 @@ const validMediaPricing = (model: z.infer<typeof openingModelSnapshotBaseSchema>
 export const openingModelSnapshotSchema = openingModelSnapshotBaseSchema.refine(validMediaPricing, "Incomplete media pricing");
 export type OpeningModelSnapshot = z.infer<typeof openingModelSnapshotSchema>;
 
+export type MediaInputCostBound = {
+  /** Administrator-verified provider context bound, never inferred from encoded bytes. */
+  mediaInputTokenUpperBound: number;
+  mediaMaxInputBytes: number;
+  /** Conservative rate for ALL prompt tokens in a media request, including its text. */
+  mediaInputCentsPerMillion: number;
+};
+
+/** Model snapshot and prices used for reservation before provider execution. */
+export type OpeningReservationModel = Partial<MediaInputCostBound> & {
+  modelSnapshot: OpeningModelSnapshot;
+  inputCentsPerMillion: number;
+  outputCentsPerMillion: number;
+  supportsVision?: boolean;
+  supportsAudio?: boolean;
+  billing?: "metered" | "free_tier";
+  dailyRequestCap?: number | null;
+};
+
 export const openingModelSummarySchema = openingModelSnapshotBaseSchema.extend({
   label: z.string().min(1).max(120),
   providerLabel: z.string().min(1).max(120),
