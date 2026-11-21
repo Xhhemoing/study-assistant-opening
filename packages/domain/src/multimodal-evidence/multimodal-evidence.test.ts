@@ -596,6 +596,226 @@ describe("multimodal-evidence: Two-Stage Handwritten Math & 408 Diagram Verifier
     expect(stage1Draft.steps[0]!.tokens[1]!.effectiveText).toBe("*");
     expect(evaluateHandwritingStage2(unconfirmedDraft).overallVerdict).toBe("invalid");
   });
+
+  it("Round-3 [P1-1]: invalidates stale pre-confirmation localVerdict & misconception when confirmed text changes", () => {
+    // 1. Numeric equation "1 = 2" had stale localVerdict: "invalid" before learner corrected "2" -> "1".
+    const staleNumericSteps: readonly HandwritingStepInput[] = [
+      {
+        stepId: "s-num",
+        bbox: [0.1, 0.1, 0.9, 0.3],
+        ast: {
+          kind: "equation",
+          tokens: [
+            { tokenId: "n1", rawText: "1", kind: "digit", confidence: 0.98 },
+            { tokenId: "n2", rawText: "=", kind: "operator", confidence: 0.99 },
+            { tokenId: "n3", rawText: "2", kind: "digit", confidence: 0.54 },
+          ],
+        },
+        localVerdict: "invalid",
+        misconceptionId: "ocr_stale_misconception",
+        errorCode: "STALE_RHS",
+        errorSummary: "1 != 2",
+      },
+    ];
+
+    const viaHelper = applyLearnerSymbolConfirmations(staleNumericSteps, [
+      { stepId: "s-num", tokenId: "n3", confirmedText: "1" },
+    ]);
+    expect(viaHelper[0]!.localVerdict).toBeUndefined();
+    expect(viaHelper[0]!.misconceptionId).toBeUndefined();
+
+    const helperStage2 = evaluateHandwritingStage2(viaHelper, { assisted: false });
+    expect(helperStage2.overallVerdict).toBe("valid");
+    expect(helperStage2.firstRootCauseError).toBeNull();
+    expect(helperStage2.canUpdateSkillBelief).toBe(true);
+
+    // Even when caller sets confirmedByLearner: true directly without applyLearnerSymbolConfirmations,
+    // Stage 2 still ignores the stale pre-confirmation localVerdict/misconception!
+    const directMutatedStep: readonly HandwritingStepInput[] = [
+      {
+        ...staleNumericSteps[0]!,
+        ast: {
+          ...staleNumericSteps[0]!.ast,
+          tokens: [
+            staleNumericSteps[0]!.ast.tokens[0]!,
+            staleNumericSteps[0]!.ast.tokens[1]!,
+            {
+              ...staleNumericSteps[0]!.ast.tokens[2]!,
+              confirmedByLearner: true,
+              confirmedText: "1",
+            },
+          ],
+        },
+      },
+    ];
+    const directStage2 = evaluateHandwritingStage2(directMutatedStep, { assisted: false });
+    expect(directStage2.overallVerdict).toBe("valid");
+    expect(directStage2.firstRootCauseError).toBeNull();
+
+    // 2. Non-numeric step changed by confirmation fails closed as "unknown" unless a matching postConfirmationVerdict is supplied.
+    const symbolicStale: readonly HandwritingStepInput[] = [
+      {
+        stepId: "s-sym",
+        bbox: [0.1, 0.1, 0.9, 0.3],
+        ast: {
+          kind: "equation",
+          tokens: [
+            { tokenId: "x1", rawText: "x", kind: "variable", confidence: 0.97 },
+            { tokenId: "x2", rawText: "+", kind: "operator", confidence: 0.98 },
+            { tokenId: "x3", rawText: "2", kind: "digit", confidence: 0.51 },
+            { tokenId: "x4", rawText: "=", kind: "operator", confidence: 0.99 },
+            { tokenId: "x5", rawText: "3", kind: "digit", confidence: 0.96 },
+          ],
+        },
+        localVerdict: "invalid",
+        misconceptionId: "stale_symbolic_err",
+      },
+    ];
+    const symConfirmedNoFresh = applyLearnerSymbolConfirmations(symbolicStale, [
+      { stepId: "s-sym", tokenId: "x3", confirmedText: "1" },
+    ]);
+    const symUnknown = evaluateHandwritingStage2(symConfirmedNoFresh, { assisted: false });
+    expect(symUnknown.overallVerdict).toBe("unknown");
+    expect(symUnknown.canUpdateSkillBelief).toBe(false);
+    expect(symUnknown.firstRootCauseError).toBeNull();
+
+    // Mismatched postConfirmationVerdict (keyed to old "x + 2 = 3") is ignored.
+    const mismatchedPostVerdict = evaluateHandwritingStage2([
+      {
+        ...symConfirmedNoFresh[0]!,
+        postConfirmationVerdict: {
+          confirmedExpression: "x + 2 = 3",
+          localVerdict: "invalid",
+          misconceptionId: "stale_symbolic_err",
+        },
+      },
+    ]);
+    expect(mismatchedPostVerdict.overallVerdict).toBe("unknown");
+    expect(mismatchedPostVerdict.canUpdateSkillBelief).toBe(false);
+
+    // Exact matching postConfirmationVerdict IS honored.
+    const matchedPostVerdict = evaluateHandwritingStage2([
+      {
+        ...symConfirmedNoFresh[0]!,
+        postConfirmationVerdict: {
+          confirmedExpression: "x + 1 = 3",
+          localVerdict: "invalid",
+          misconceptionId: "fresh_constant_err",
+        },
+      },
+    ]);
+    expect(matchedPostVerdict.overallVerdict).toBe("invalid");
+    expect(matchedPostVerdict.firstRootCauseError?.misconceptionId).toBe("fresh_constant_err");
+    expect(matchedPostVerdict.canUpdateSkillBelief).toBe(true);
+  });
+
+  it("Round-3 [P1-2]: blocks untokenized OCR steps (tokens: [] or 0 critical tokens) from updating SkillBeliefV1", () => {
+    const initialBelief = makeBelief();
+    const untokenizedSteps: readonly HandwritingStepInput[] = [
+      {
+        stepId: "raw-only",
+        bbox: [0.1, 0.1, 0.9, 0.3],
+        ast: {
+          kind: "equation",
+          rawExpression: "2 = 2",
+          tokens: [],
+        },
+      },
+    ];
+
+    const stage1 = evaluateHandwritingStage1(untokenizedSteps);
+    expect(stage1.status).toBe("awaiting_symbol_confirmation");
+    expect(stage1.readyForStage2).toBe(false);
+    expect(stage1.canUpdateSkillBelief).toBe(false);
+    expect(stage1.epistemicBlockReason).toBe("untokenized_ocr_step");
+    expect(stage1.untokenizedStepIndices).toEqual([0]);
+
+    const stage2 = evaluateHandwritingStage2(untokenizedSteps, { assisted: false });
+    expect(stage2.overallVerdict).toBe("unknown");
+    expect(stage2.steps[0]!.propagatedState).toBe("unknown");
+    expect(stage2.canUpdateSkillBelief).toBe(false);
+    expect(stage2.epistemicSignal.reasonCode).toBe("blocked_untokenized_ocr_step");
+
+    const beliefGuard = applyHandwritingStage2ToSkillBelief({
+      stage2,
+      belief: initialBelief,
+      item: skillItem,
+      atMs: 86_400_000,
+    });
+    expect(beliefGuard.applied).toBe(false);
+    expect(beliefGuard.belief).toBe(initialBelief);
+
+    // Step with only non-semantic punctuation tokens (0 critical tokens) + pre-supplied localVerdict also fails closed.
+    const punctOnlySteps: readonly HandwritingStepInput[] = [
+      {
+        stepId: "punct-only",
+        bbox: [0.1, 0.1, 0.9, 0.3],
+        ast: {
+          kind: "equation",
+          rawExpression: "2 = 2",
+          tokens: [{ tokenId: "p1", rawText: ".", kind: "punctuation", confidence: 0.99 }],
+        },
+        localVerdict: "valid",
+      },
+    ];
+    const punctStage2 = evaluateHandwritingStage2(punctOnlySteps, { assisted: false });
+    expect(punctStage2.overallVerdict).toBe("unknown");
+    expect(punctStage2.canUpdateSkillBelief).toBe(false);
+  });
+
+  it("Round-3 [P1-3]: evaluates decimal/integer expressions with exact BigInt rationals and abstains on ambiguous irrational float comparisons", () => {
+    const makeEq = (id: string, tokens: string[]): HandwritingStepInput => ({
+      stepId: id,
+      bbox: [0.1, 0.1, 0.9, 0.3],
+      ast: {
+        kind: "equation",
+        tokens: tokens.map((rawText, idx) => ({
+          tokenId: `${id}-${idx}`,
+          rawText,
+          kind: "auto",
+          confidence: 0.99,
+        })),
+      },
+    });
+    const makeIneq = (id: string, tokens: string[]): HandwritingStepInput => ({
+      stepId: id,
+      bbox: [0.1, 0.1, 0.9, 0.3],
+      ast: {
+        kind: "inequality",
+        tokens: tokens.map((rawText, idx) => ({
+          tokenId: `${id}-${idx}`,
+          rawText,
+          kind: "auto",
+          confidence: 0.99,
+        })),
+      },
+    });
+
+    // Sub-1e-9 difference MUST NOT pass as equal!
+    const tinyDiff = evaluateHandwritingStage2([makeEq("tiny", ["0", "=", "0.0000000005"])]);
+    expect(tinyDiff.overallVerdict).toBe("invalid");
+
+    // Classic IEEE-754 0.1 + 0.2 == 0.3 and 0.30000000000000004 are exact.
+    expect(evaluateHandwritingStage2([makeEq("dec-ok", ["0.1", "+", "0.2", "=", "0.3"])]).overallVerdict).toBe("valid");
+    expect(
+      evaluateHandwritingStage2([makeEq("dec-bad", ["0.1", "+", "0.2", "=", "0.30000000000000004"])]).overallVerdict,
+    ).toBe("invalid");
+
+    // Exact fractional roots like 4^0.5 = 2 and (9/16)^-0.5 = 4/3 are exact rationals.
+    expect(evaluateHandwritingStage2([makeEq("sqrt4", ["4", "^", "0.5", "=", "2"])]).overallVerdict).toBe("valid");
+    expect(evaluateHandwritingStage2([makeEq("sqrt4-bad", ["4", "^", "0.5", "=", "2.000000000001"])]).overallVerdict).toBe("invalid");
+
+    // Irrational power certified outside IEEE-754 interval uncertainty: 2^0.5 = 2 is invalid; 2^0.5 < 1.5 is valid.
+    expect(evaluateHandwritingStage2([makeEq("irr-false", ["2", "^", "0.5", "=", "2"])]).overallVerdict).toBe("invalid");
+    expect(evaluateHandwritingStage2([makeIneq("irr-lt", ["2", "^", "0.5", "<", "1.5"])]).overallVerdict).toBe("valid");
+
+    // Ambiguous IEEE-754 decimal match for irrational root abstains as "unknown" with canUpdateSkillBelief: false.
+    const ambiguousFloat = evaluateHandwritingStage2([
+      makeEq("irr-ambig", ["2", "^", "0.5", "=", "1.4142135623730951"]),
+    ]);
+    expect(ambiguousFloat.overallVerdict).toBe("unknown");
+    expect(ambiguousFloat.canUpdateSkillBelief).toBe(false);
+  });
 });
 
 describe("multimodal-evidence: Pre-VAD Original PCM Clock & 0080 Raw Audio Retention", () => {
@@ -783,6 +1003,36 @@ describe("multimodal-evidence: Pre-VAD Original PCM Clock & 0080 Raw Audio Reten
     expect(receipt.meanLengthOfRunWords).toBeCloseTo(8 / 3, 10);
     expect(receipt.repairRepetitionCount).toBe(2);
     expect(receipt.repairRepetitionRatio).toBeCloseTo(2 / 8, 10);
+  });
+
+  it("Round-3 [P2]: includes filledPauseCount and per-word disfluency fields in integrityDigest", () => {
+    const baseInput = {
+      receiptId: "rcpt-digest-disfluency",
+      issuedAtMs: 1_700_000_000_000,
+      totalOriginalDurationMs: 4000,
+      voicedSegments: [
+        { originalStartMs: 0, originalEndMs: 2000, strippedStartMs: 0, strippedEndMs: 2000 },
+      ],
+      defaultTokenClock: "original_pcm" as const,
+    };
+    const noneReceipt = issueSpeechTimingReceipt({
+      ...baseInput,
+      words: [
+        { word: "um", startMs: 0, endMs: 300, disfluencyKind: "none" },
+        { word: "yes", startMs: 400, endMs: 800, disfluencyKind: "none" },
+      ],
+    });
+    const fillerReceipt = issueSpeechTimingReceipt({
+      ...baseInput,
+      words: [
+        { word: "um", startMs: 0, endMs: 300, disfluencyKind: "filler" },
+        { word: "yes", startMs: 400, endMs: 800, disfluencyKind: "none" },
+      ],
+    });
+
+    expect(noneReceipt.filledPauseCount).toBe(0);
+    expect(fillerReceipt.filledPauseCount).toBe(1);
+    expect(fillerReceipt.integrityDigest).not.toBe(noneReceipt.integrityDigest);
   });
 
   it("rejects mismatched VAD segment durations, overlaps, and out-of-range timestamps", () => {

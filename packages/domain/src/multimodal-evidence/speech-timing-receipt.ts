@@ -523,8 +523,19 @@ export function issueSpeechTimingReceipt(
     breakdownPauseCount,
     sentenceBoundaryPauseCount: sentenceBoundaryPauses.length,
     meanLengthOfRunWords,
+    repairRepetitionCount,
+    filledPauseCount,
     repairRepetitionRatio,
-    words: mappedWords.map((w) => [w.word, w.originalStartMs, w.originalEndMs, w.mappedFromClock]),
+    words: mappedWords.map((w) => [
+      w.word,
+      w.originalStartMs,
+      w.originalEndMs,
+      w.mappedFromClock,
+      w.disfluencyKind,
+      w.isRepairOrRepetition,
+      w.isSentenceBoundaryAfter,
+      w.syllableCount,
+    ]),
   });
   const integrityDigest = `sha256:${sha256HexUtf8(digestPayload)}`;
 

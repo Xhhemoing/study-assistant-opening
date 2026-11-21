@@ -82,6 +82,18 @@ export type HandwrittenStepAstInput = Readonly<{
 
 export type StepLocalVerdict = "valid" | "invalid" | "unknown";
 
+export type PostConfirmationVerdict = Readonly<{
+  /**
+   * Normalized confirmed expression (matching `stage1Step.effectiveExpression`
+   * or critical-token expression) this verdict was produced against.
+   */
+  confirmedExpression: string;
+  localVerdict: StepLocalVerdict;
+  misconceptionId?: string;
+  errorCode?: string;
+  errorSummary?: string;
+}>;
+
 export type HandwritingStepInput = Readonly<{
   stepId: string;
   bbox: NormalizedBoundingBox;
@@ -89,10 +101,11 @@ export type HandwritingStepInput = Readonly<{
   dependsOnStepIds?: readonly string[];
   /**
    * Local transition verdict given this step's stated premises.
-   * If omitted, pure numeric equations/inequalities are evaluated deterministically;
-   * symbolic/diagram steps without a local verdict fail closed as `"unknown"`.
+   * Ignored if learner OCR confirmation changed any token's text from `rawText`
+   * unless a matching `postConfirmationVerdict` is provided.
    */
   localVerdict?: StepLocalVerdict;
+  postConfirmationVerdict?: PostConfirmationVerdict;
   misconceptionId?: string;
   errorCode?: string;
   errorSummary?: string;
@@ -142,7 +155,9 @@ export type HandwritingStage1StepSummary = Readonly<{
   astKind: HandwrittenAstKind;
   effectiveExpression: string;
   tokens: readonly HandwritingNormalizedToken[];
+  hasCriticalToken: boolean;
   hasUnconfirmedCriticalSymbol: boolean;
+  hasConfirmedTextMutation: boolean;
 }>;
 
 export type HandwritingStage1Result = Readonly<{
@@ -152,8 +167,12 @@ export type HandwritingStage1Result = Readonly<{
   readyForStage2: boolean;
   /** Stage 1 itself never updates belief; always `false` when blocked, and requires Stage 2 completion. */
   canUpdateSkillBelief: false;
-  epistemicBlockReason: "unconfirmed_critical_ocr_symbol" | null;
+  epistemicBlockReason:
+    | "unconfirmed_critical_ocr_symbol"
+    | "untokenized_ocr_step"
+    | null;
   blockedStepIndices: readonly number[];
+  untokenizedStepIndices: readonly number[];
   cropConfirmationPrompts: readonly CropConfirmationPrompt[];
   steps: readonly HandwritingStage1StepSummary[];
 }>;

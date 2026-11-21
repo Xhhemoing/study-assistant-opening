@@ -146,9 +146,18 @@ function resolveSpan(
   });
 }
 
+function normalizeExpressionKey(expr: string): string {
+  return expr.replace(/\s+/g, " ").trim();
+}
+
 /**
  * Pure helper applying learner confirmation/corrections onto step AST tokens
  * before re-running Stage 1 / Stage 2.
+ *
+ * Whenever any confirmed token text differs from its OCR `rawText`, clears
+ * stale pre-confirmation `localVerdict`, `misconceptionId`, `errorCode`,
+ * `errorSummary`, and mismatched `postConfirmationVerdict` so Stage 2 never
+ * reuses stale pre-confirmation verdicts.
  */
 export function applyLearnerSymbolConfirmations(
   steps: readonly HandwritingStepInput[],
@@ -166,23 +175,84 @@ export function applyLearnerSymbolConfirmations(
   }
 
   return Object.freeze(
-    steps.map((step) => ({
-      ...step,
-      ast: {
-        ...step.ast,
-        tokens: Object.freeze(
-          step.ast.tokens.map((token) => {
-            const confirmedText = confirmationMap.get(`${step.stepId}\u0000${token.tokenId}`);
-            if (confirmedText === undefined) return token;
-            return {
-              ...token,
-              confirmedByLearner: true,
-              confirmedText,
-            };
+    steps.map((step) => {
+      let stepTextMutated = false;
+      const updatedTokens = Object.freeze(
+        step.ast.tokens.map((token) => {
+          const confirmedText = confirmationMap.get(`${step.stepId}\u0000${token.tokenId}`);
+          if (confirmedText === undefined) return token;
+          if (confirmedText !== token.rawText.trim()) {
+            stepTextMutated = true;
+          }
+          return {
+            ...token,
+            confirmedByLearner: true,
+            confirmedText,
+          };
+        }),
+      );
+
+      if (!stepTextMutated) {
+        return {
+          ...step,
+          ast: {
+            ...step.ast,
+            tokens: updatedTokens,
+          },
+        };
+      }
+
+      const {
+        localVerdict: _staleVerdict,
+        misconceptionId: _staleMisconception,
+        errorCode: _staleErrorCode,
+        errorSummary: _staleErrorSummary,
+        postConfirmationVerdict: stalePostVerdict,
+        ...restStep
+      } = step;
+
+      const nextEffective = updatedTokens
+        .map((t) =>
+          t.confirmedByLearner === true && t.confirmedText !== undefined
+            ? t.confirmedText.trim()
+            : t.rawText,
+        )
+        .join(" ")
+        .trim();
+      const nextSemantic = updatedTokens
+        .filter((t) =>
+          isCriticalMathOr408Token({
+            kind: t.kind,
+            rawText:
+              t.confirmedByLearner === true && t.confirmedText !== undefined
+                ? t.confirmedText.trim()
+                : t.rawText,
           }),
-        ),
-      },
-    })),
+        )
+        .map((t) =>
+          t.confirmedByLearner === true && t.confirmedText !== undefined
+            ? t.confirmedText.trim()
+            : t.rawText,
+        )
+        .join(" ")
+        .trim();
+
+      const keepPostVerdict =
+        stalePostVerdict !== undefined &&
+        (normalizeExpressionKey(stalePostVerdict.confirmedExpression) ===
+          normalizeExpressionKey(nextEffective) ||
+          normalizeExpressionKey(stalePostVerdict.confirmedExpression) ===
+            normalizeExpressionKey(nextSemantic));
+
+      return {
+        ...restStep,
+        ...(keepPostVerdict ? { postConfirmationVerdict: stalePostVerdict } : {}),
+        ast: {
+          ...step.ast,
+          tokens: updatedTokens,
+        },
+      };
+    }),
   );
 }
 
@@ -193,6 +263,8 @@ export function applyLearnerSymbolConfirmations(
  * Whenever ANY critical symbol has `confidence < tau` and `confirmedByLearner !== true`,
  * emits zero-hint crop confirmation prompts (with ZERO correctness hints, expected
  * values, or answer-key leakage) and sets a hard epistemic block (`canUpdateSkillBelief: false`).
+ * Steps lacking any tokenized critical symbols (`tokens: []` or 0 critical tokens)
+ * also fail closed (`readyForStage2: false`, `canUpdateSkillBelief: false`).
  */
 export function evaluateHandwritingStage1(
   steps: readonly HandwritingStepInput[],
@@ -202,6 +274,7 @@ export function evaluateHandwritingStage1(
   const seenStepIds = new Set<string>();
   const prompts: CropConfirmationPrompt[] = [];
   const blockedStepIndices: number[] = [];
+  const untokenizedStepIndices: number[] = [];
   const stepSummaries: HandwritingStage1StepSummary[] = [];
 
   for (const [stepIndex, step] of steps.entries()) {
@@ -217,6 +290,8 @@ export function evaluateHandwritingStage1(
     const seenTokenIds = new Set<string>();
     const normalizedTokens: HandwritingNormalizedToken[] = [];
     let stepHasUnconfirmedCritical = false;
+    let stepHasConfirmedTextMutation = false;
+    let criticalTokenCount = 0;
     let cursor = 0;
 
     for (const [tokenIndex, token] of step.ast.tokens.entries()) {
@@ -257,10 +332,17 @@ export function evaluateHandwritingStage1(
         effectiveText = trimmedConfirmed;
       }
 
+      if (confirmedByLearner && effectiveText.trim() !== token.rawText.trim()) {
+        stepHasConfirmedTextMutation = true;
+      }
+
       const isCritical = isCriticalMathOr408Token({
         kind: token.kind,
         rawText: effectiveText,
       });
+      if (isCritical) {
+        criticalTokenCount += 1;
+      }
       const span = resolveSpan(token, cursor, token.rawText);
       cursor = Math.max(cursor + token.rawText.length + 1, span.endOffset + 1);
 
@@ -301,8 +383,12 @@ export function evaluateHandwritingStage1(
       );
     }
 
+    const hasCriticalToken = normalizedTokens.length > 0 && criticalTokenCount > 0;
     if (stepHasUnconfirmedCritical) {
       blockedStepIndices.push(stepIndex);
+    }
+    if (!hasCriticalToken) {
+      untokenizedStepIndices.push(stepIndex);
     }
 
     const tokenJoinedExpression = normalizedTokens.map((t) => t.effectiveText).join(" ").trim();
@@ -319,33 +405,346 @@ export function evaluateHandwritingStage1(
         astKind: step.ast.kind,
         effectiveExpression,
         tokens: Object.freeze(normalizedTokens),
+        hasCriticalToken,
         hasUnconfirmedCriticalSymbol: stepHasUnconfirmedCritical,
+        hasConfirmedTextMutation: stepHasConfirmedTextMutation,
       }),
     );
   }
 
   const awaitingConfirmation = prompts.length > 0;
+  const hasUntokenizedSteps = untokenizedStepIndices.length > 0;
   return Object.freeze({
     schemaVersion: 1,
-    status: awaitingConfirmation ? "awaiting_symbol_confirmation" : "ready_for_verification",
+    status:
+      awaitingConfirmation || hasUntokenizedSteps
+        ? "awaiting_symbol_confirmation"
+        : "ready_for_verification",
     confidenceThreshold,
-    readyForStage2: !awaitingConfirmation && stepSummaries.length > 0,
+    readyForStage2: !awaitingConfirmation && !hasUntokenizedSteps && stepSummaries.length > 0,
     canUpdateSkillBelief: false,
-    epistemicBlockReason: awaitingConfirmation ? "unconfirmed_critical_ocr_symbol" : null,
+    epistemicBlockReason: awaitingConfirmation
+      ? "unconfirmed_critical_ocr_symbol"
+      : hasUntokenizedSteps
+        ? "untokenized_ocr_step"
+        : null,
     blockedStepIndices: Object.freeze(blockedStepIndices),
+    untokenizedStepIndices: Object.freeze(untokenizedStepIndices),
     cropConfirmationPrompts: Object.freeze(prompts),
     steps: Object.freeze(stepSummaries),
   });
 }
 
 // ---------------------------------------------------------------------------
-// Deterministic Numeric Arithmetic / Comparison Evaluator (Pure Fallback)
+// Deterministic Exact Rational & Certified Interval Numeric Evaluator
 // ---------------------------------------------------------------------------
 
+const MAX_RATIONAL_BIT_LENGTH = 512;
+
+type Rational = Readonly<{ num: bigint; den: bigint }>;
+type RealInterval = Readonly<{ lower: number; upper: number }>;
+
 type NumericEvalResult =
-  | { kind: "value"; value: number }
+  | { kind: "rational"; value: Rational }
+  | { kind: "real_interval"; interval: RealInterval }
   | { kind: "div_by_zero" }
   | { kind: "unknown" };
+
+const absBigInt = (value: bigint): bigint => (value < 0n ? -value : value);
+const bitLengthBigInt = (value: bigint): number =>
+  value === 0n ? 0 : absBigInt(value).toString(2).length;
+
+function gcdBigInt(a: bigint, b: bigint): bigint {
+  let x = absBigInt(a);
+  let y = absBigInt(b);
+  while (y !== 0n) {
+    const t = x % y;
+    x = y;
+    y = t;
+  }
+  return x === 0n ? 1n : x;
+}
+
+function makeRational(num: bigint, den: bigint): NumericEvalResult {
+  if (den === 0n) return { kind: "div_by_zero" };
+  let n = num;
+  let d = den;
+  if (d < 0n) {
+    n = -n;
+    d = -d;
+  }
+  if (n === 0n) {
+    return { kind: "rational", value: { num: 0n, den: 1n } };
+  }
+  const g = gcdBigInt(n, d);
+  const rn = n / g;
+  const rd = d / g;
+  if (
+    bitLengthBigInt(rn) > MAX_RATIONAL_BIT_LENGTH ||
+    bitLengthBigInt(rd) > MAX_RATIONAL_BIT_LENGTH
+  ) {
+    return { kind: "unknown" };
+  }
+  return { kind: "rational", value: { num: rn, den: rd } };
+}
+
+function parseDecimalRational(literal: string): NumericEvalResult {
+  const dotIndex = literal.indexOf(".");
+  if (dotIndex < 0) {
+    return makeRational(BigInt(literal), 1n);
+  }
+  const intPart = literal.slice(0, dotIndex);
+  const fracPart = literal.slice(dotIndex + 1);
+  if (fracPart.length > 150) {
+    return { kind: "unknown" };
+  }
+  const digits = `${intPart}${fracPart}`;
+  const num = digits.length > 0 ? BigInt(digits) : 0n;
+  const den = 10n ** BigInt(fracPart.length);
+  return makeRational(num, den);
+}
+
+function powBigIntBounded(base: bigint, exp: bigint): bigint | null {
+  let result = 1n;
+  let cur = base;
+  let e = exp;
+  while (e > 0n) {
+    if ((e & 1n) === 1n) {
+      result *= cur;
+      if (bitLengthBigInt(result) > MAX_RATIONAL_BIT_LENGTH) return null;
+    }
+    e >>= 1n;
+    if (e > 0n) {
+      cur *= cur;
+      if (bitLengthBigInt(cur) > MAX_RATIONAL_BIT_LENGTH) return null;
+    }
+  }
+  return result;
+}
+
+function comparePowAgainstTarget(base: bigint, exp: bigint, target: bigint): "lt" | "eq" | "gt" {
+  let result = 1n;
+  let cur = base;
+  let e = exp;
+  while (e > 0n) {
+    if ((e & 1n) === 1n) {
+      result *= cur;
+      if (result > target) return "gt";
+    }
+    e >>= 1n;
+    if (e > 0n) {
+      cur *= cur;
+      if (cur > target) {
+        // Because e > 0 still has at least one set bit, result * cur > target.
+        return "gt";
+      }
+    }
+  }
+  if (result < target) return "lt";
+  if (result > target) return "gt";
+  return "eq";
+}
+
+function integerNthRoot(n: bigint, d: bigint): bigint | null {
+  if (n < 0n || d < 2n) return null;
+  if (n === 0n) return 0n;
+  if (n === 1n) return 1n;
+  const bits = bitLengthBigInt(n);
+  if (d > BigInt(bits)) return null;
+  const dNum = Number(d);
+  let lo = 1n;
+  let hi = (1n << BigInt(Math.ceil(bits / dNum))) + 1n;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1n;
+    const cmp = comparePowAgainstTarget(mid, d, n);
+    if (cmp === "eq") return mid;
+    if (cmp === "lt") {
+      lo = mid + 1n;
+    } else {
+      hi = mid - 1n;
+    }
+  }
+  return null;
+}
+
+function rationalToFloat(r: Rational): number | null {
+  const value = Number(r.num) / Number(r.den);
+  return Number.isFinite(value) ? value : null;
+}
+
+function toRealInterval(res: NumericEvalResult): RealInterval | null {
+  if (res.kind === "real_interval") return res.interval;
+  if (res.kind !== "rational") return null;
+  const f = rationalToFloat(res.value);
+  if (f === null) return null;
+  if (res.value.den === 1n && bitLengthBigInt(res.value.num) <= 53) {
+    return { lower: f, upper: f };
+  }
+  const tol = Math.max(Number.MIN_VALUE, Math.abs(f) * 4 * Number.EPSILON);
+  return { lower: f - tol, upper: f + tol };
+}
+
+function widenInterval(lower: number, upper: number, relErr = 1e-12): NumericEvalResult {
+  if (!Number.isFinite(lower) || !Number.isFinite(upper)) {
+    return { kind: "unknown" };
+  }
+  const lo = Math.min(lower, upper);
+  const hi = Math.max(lower, upper);
+  const pad = Math.max(1e-15, Math.max(Math.abs(lo), Math.abs(hi)) * relErr);
+  const finalLo = lo - pad;
+  const finalHi = hi + pad;
+  if (!Number.isFinite(finalLo) || !Number.isFinite(finalHi)) {
+    return { kind: "unknown" };
+  }
+  return { kind: "real_interval", interval: { lower: finalLo, upper: finalHi } };
+}
+
+function addNumeric(left: NumericEvalResult, right: NumericEvalResult): NumericEvalResult {
+  if (left.kind === "div_by_zero" || left.kind === "unknown") return left;
+  if (right.kind === "div_by_zero" || right.kind === "unknown") return right;
+  if (left.kind === "rational" && right.kind === "rational") {
+    return makeRational(
+      left.value.num * right.value.den + right.value.num * left.value.den,
+      left.value.den * right.value.den,
+    );
+  }
+  const l = toRealInterval(left);
+  const r = toRealInterval(right);
+  if (!l || !r) return { kind: "unknown" };
+  return widenInterval(l.lower + r.lower, l.upper + r.upper);
+}
+
+function subNumeric(left: NumericEvalResult, right: NumericEvalResult): NumericEvalResult {
+  if (left.kind === "div_by_zero" || left.kind === "unknown") return left;
+  if (right.kind === "div_by_zero" || right.kind === "unknown") return right;
+  if (left.kind === "rational" && right.kind === "rational") {
+    return makeRational(
+      left.value.num * right.value.den - right.value.num * left.value.den,
+      left.value.den * right.value.den,
+    );
+  }
+  const l = toRealInterval(left);
+  const r = toRealInterval(right);
+  if (!l || !r) return { kind: "unknown" };
+  return widenInterval(l.lower - r.upper, l.upper - r.lower);
+}
+
+function mulNumeric(left: NumericEvalResult, right: NumericEvalResult): NumericEvalResult {
+  if (left.kind === "div_by_zero" || left.kind === "unknown") return left;
+  if (right.kind === "div_by_zero" || right.kind === "unknown") return right;
+  if (left.kind === "rational" && right.kind === "rational") {
+    return makeRational(left.value.num * right.value.num, left.value.den * right.value.den);
+  }
+  const l = toRealInterval(left);
+  const r = toRealInterval(right);
+  if (!l || !r) return { kind: "unknown" };
+  const corners = [l.lower * r.lower, l.lower * r.upper, l.upper * r.lower, l.upper * r.upper];
+  return widenInterval(Math.min(...corners), Math.max(...corners));
+}
+
+function divNumeric(left: NumericEvalResult, right: NumericEvalResult): NumericEvalResult {
+  if (left.kind === "div_by_zero" || left.kind === "unknown") return left;
+  if (right.kind === "div_by_zero" || right.kind === "unknown") return right;
+  if (left.kind === "rational" && right.kind === "rational") {
+    if (right.value.num === 0n) return { kind: "div_by_zero" };
+    return makeRational(left.value.num * right.value.den, left.value.den * right.value.num);
+  }
+  const l = toRealInterval(left);
+  const r = toRealInterval(right);
+  if (!l || !r) return { kind: "unknown" };
+  if (r.lower <= 0 && r.upper >= 0) {
+    return r.lower === 0 && r.upper === 0 ? { kind: "div_by_zero" } : { kind: "unknown" };
+  }
+  const corners = [l.lower / r.lower, l.lower / r.upper, l.upper / r.lower, l.upper / r.upper];
+  return widenInterval(Math.min(...corners), Math.max(...corners));
+}
+
+function negNumeric(inner: NumericEvalResult): NumericEvalResult {
+  if (inner.kind === "div_by_zero" || inner.kind === "unknown") return inner;
+  if (inner.kind === "rational") {
+    return { kind: "rational", value: { num: -inner.value.num, den: inner.value.den } };
+  }
+  return {
+    kind: "real_interval",
+    interval: { lower: -inner.interval.upper, upper: -inner.interval.lower },
+  };
+}
+
+function powRational(base: Rational, exp: Rational): NumericEvalResult {
+  if (exp.den === 1n) {
+    if (exp.num === 0n) {
+      return base.num === 0n
+        ? { kind: "unknown" }
+        : { kind: "rational", value: { num: 1n, den: 1n } };
+    }
+    let b = base;
+    let e = exp.num;
+    if (e < 0n) {
+      if (b.num === 0n) return { kind: "div_by_zero" };
+      b = b.num < 0n ? { num: -b.den, den: -b.num } : { num: b.den, den: b.num };
+      e = -e;
+    }
+    if (b.num === 0n) return { kind: "rational", value: { num: 0n, den: 1n } };
+    if (b.den === 1n && b.num === 1n) return { kind: "rational", value: { num: 1n, den: 1n } };
+    if (b.den === 1n && b.num === -1n) {
+      return {
+        kind: "rational",
+        value: { num: e % 2n === 0n ? 1n : -1n, den: 1n },
+      };
+    }
+    if (e > BigInt(MAX_RATIONAL_BIT_LENGTH)) return { kind: "unknown" };
+    const rn = powBigIntBounded(b.num, e);
+    const rd = powBigIntBounded(b.den, e);
+    if (rn === null || rd === null) return { kind: "unknown" };
+    return makeRational(rn, rd);
+  }
+
+  // Non-integer rational exponent: attempt exact rational root first.
+  if (base.num < 0n && exp.den % 2n === 0n) {
+    return { kind: "unknown" };
+  }
+  if (base.num === 0n) {
+    return exp.num < 0n
+      ? { kind: "div_by_zero" }
+      : { kind: "rational", value: { num: 0n, den: 1n } };
+  }
+  const absNum = absBigInt(base.num);
+  const rootNum = integerNthRoot(absNum, exp.den);
+  const rootDen = integerNthRoot(base.den, exp.den);
+  if (rootNum !== null && rootDen !== null) {
+    const signedRootNum = base.num < 0n ? -rootNum : rootNum;
+    return powRational({ num: signedRootNum, den: rootDen }, { num: exp.num, den: 1n });
+  }
+
+  // Irrational power: certify via bounded IEEE-754 interval so ambiguous float equality abstains.
+  const baseFloat = rationalToFloat(base);
+  const expFloat = rationalToFloat(exp);
+  if (baseFloat === null || expFloat === null) return { kind: "unknown" };
+  const approx =
+    baseFloat < 0
+      ? -Math.pow(-baseFloat, expFloat)
+      : Math.pow(baseFloat, expFloat);
+  if (!Number.isFinite(approx)) return { kind: "unknown" };
+  return widenInterval(approx, approx, 1e-11);
+}
+
+function powNumeric(base: NumericEvalResult, exp: NumericEvalResult): NumericEvalResult {
+  if (base.kind === "div_by_zero" || base.kind === "unknown") return base;
+  if (exp.kind === "div_by_zero" || exp.kind === "unknown") return exp;
+  if (base.kind === "rational" && exp.kind === "rational") {
+    return powRational(base.value, exp.value);
+  }
+  const b = toRealInterval(base);
+  const e = toRealInterval(exp);
+  if (!b || !e || b.lower <= 0) return { kind: "unknown" };
+  const corners = [
+    Math.pow(b.lower, e.lower),
+    Math.pow(b.lower, e.upper),
+    Math.pow(b.upper, e.lower),
+    Math.pow(b.upper, e.upper),
+  ];
+  return widenInterval(Math.min(...corners), Math.max(...corners), 1e-11);
+}
 
 function evaluateNumericExpression(expr: string): NumericEvalResult {
   const cleaned = expr.replace(/\s+/g, "");
@@ -357,37 +756,26 @@ function evaluateNumericExpression(expr: string): NumericEvalResult {
 
   const parseExpr = (): NumericEvalResult => {
     let left: NumericEvalResult = parseTerm();
-    if (left.kind !== "value") return left;
+    if (left.kind === "div_by_zero" || left.kind === "unknown") return left;
     while (pos < cleaned.length && (cleaned[pos] === "+" || cleaned[pos] === "-")) {
       const op = cleaned[pos]!;
       pos += 1;
       const right = parseTerm();
-      if (right.kind !== "value") return right;
-      const nextValue: number = op === "+" ? left.value + right.value : left.value - right.value;
-      if (!Number.isFinite(nextValue)) return { kind: "unknown" };
-      left = { kind: "value", value: nextValue };
+      left = op === "+" ? addNumeric(left, right) : subNumeric(left, right);
+      if (left.kind === "div_by_zero" || left.kind === "unknown") return left;
     }
     return left;
   };
 
   const parseTerm = (): NumericEvalResult => {
     let left: NumericEvalResult = parseUnary();
-    if (left.kind !== "value") return left;
+    if (left.kind === "div_by_zero" || left.kind === "unknown") return left;
     while (pos < cleaned.length && (cleaned[pos] === "*" || cleaned[pos] === "/")) {
       const op = cleaned[pos]!;
       pos += 1;
       const right = parseUnary();
-      if (right.kind !== "value") return right;
-      if (op === "/") {
-        if (Math.abs(right.value) <= 1e-12) return { kind: "div_by_zero" };
-        const quotient: number = left.value / right.value;
-        if (!Number.isFinite(quotient)) return { kind: "unknown" };
-        left = { kind: "value", value: quotient };
-      } else {
-        const product: number = left.value * right.value;
-        if (!Number.isFinite(product)) return { kind: "unknown" };
-        left = { kind: "value", value: product };
-      }
+      left = op === "*" ? mulNumeric(left, right) : divNumeric(left, right);
+      if (left.kind === "div_by_zero" || left.kind === "unknown") return left;
     }
     return left;
   };
@@ -395,9 +783,7 @@ function evaluateNumericExpression(expr: string): NumericEvalResult {
   const parseUnary = (): NumericEvalResult => {
     if (pos < cleaned.length && cleaned[pos] === "-") {
       pos += 1;
-      const inner = parseUnary();
-      if (inner.kind !== "value") return inner;
-      return { kind: "value", value: -inner.value };
+      return negNumeric(parseUnary());
     }
     if (pos < cleaned.length && cleaned[pos] === "+") {
       pos += 1;
@@ -408,14 +794,11 @@ function evaluateNumericExpression(expr: string): NumericEvalResult {
 
   const parsePower = (): NumericEvalResult => {
     const base = parsePrimary();
-    if (base.kind !== "value") return base;
+    if (base.kind === "div_by_zero" || base.kind === "unknown") return base;
     if (pos < cleaned.length && cleaned[pos] === "^") {
       pos += 1;
       const exp = parseUnary();
-      if (exp.kind !== "value") return exp;
-      const result = Math.pow(base.value, exp.value);
-      if (!Number.isFinite(result)) return { kind: "unknown" };
-      return { kind: "value", value: result };
+      return powNumeric(base, exp);
     }
     return base;
   };
@@ -425,7 +808,8 @@ function evaluateNumericExpression(expr: string): NumericEvalResult {
     if (cleaned[pos] === "(") {
       pos += 1;
       const inner = parseExpr();
-      if (inner.kind !== "value" || cleaned[pos] !== ")") return inner.kind === "div_by_zero" ? inner : { kind: "unknown" };
+      if (inner.kind === "div_by_zero" || inner.kind === "unknown") return inner;
+      if (cleaned[pos] !== ")") return { kind: "unknown" };
       pos += 1;
       return inner;
     }
@@ -445,12 +829,11 @@ function evaluateNumericExpression(expr: string): NumericEvalResult {
       }
     }
     if (!sawDigit) return { kind: "unknown" };
-    const value = Number(cleaned.slice(start, pos));
-    return Number.isFinite(value) ? { kind: "value", value } : { kind: "unknown" };
+    return parseDecimalRational(cleaned.slice(start, pos));
   };
 
   const result = parseExpr();
-  if (result.kind !== "value") return result;
+  if (result.kind === "div_by_zero" || result.kind === "unknown") return result;
   if (pos !== cleaned.length) return { kind: "unknown" };
   return result;
 }
@@ -483,23 +866,61 @@ function tryVerifyPureNumericRelation(expression: string): StepLocalVerdict | nu
     return null;
   }
 
-  const eps = 1e-9;
-  switch (operator) {
-    case "=":
-      return Math.abs(lhs.value - rhs.value) <= eps ? "valid" : "invalid";
-    case "!=":
-      return Math.abs(lhs.value - rhs.value) > eps ? "valid" : "invalid";
-    case "<":
-      return lhs.value < rhs.value - eps ? "valid" : "invalid";
-    case "<=":
-      return lhs.value <= rhs.value + eps ? "valid" : "invalid";
-    case ">":
-      return lhs.value > rhs.value + eps ? "valid" : "invalid";
-    case ">=":
-      return lhs.value >= rhs.value - eps ? "valid" : "invalid";
-    default:
-      return null;
+  if (lhs.kind === "rational" && rhs.kind === "rational") {
+    const leftCross = lhs.value.num * rhs.value.den;
+    const rightCross = rhs.value.num * lhs.value.den;
+    switch (operator) {
+      case "=":
+        return leftCross === rightCross ? "valid" : "invalid";
+      case "!=":
+        return leftCross !== rightCross ? "valid" : "invalid";
+      case "<":
+        return leftCross < rightCross ? "valid" : "invalid";
+      case "<=":
+        return leftCross <= rightCross ? "valid" : "invalid";
+      case ">":
+        return leftCross > rightCross ? "valid" : "invalid";
+      case ">=":
+        return leftCross >= rightCross ? "valid" : "invalid";
+      default:
+        return null;
+    }
   }
+
+  const l = toRealInterval(lhs);
+  const r = toRealInterval(rhs);
+  if (!l || !r) return null;
+
+  if (l.upper < r.lower) {
+    switch (operator) {
+      case "=":
+      case ">":
+      case ">=":
+        return "invalid";
+      case "!=":
+      case "<":
+      case "<=":
+        return "valid";
+      default:
+        return null;
+    }
+  }
+  if (l.lower > r.upper) {
+    switch (operator) {
+      case "=":
+      case "<":
+      case "<=":
+        return "invalid";
+      case "!=":
+      case ">":
+      case ">=":
+        return "valid";
+      default:
+        return null;
+    }
+  }
+  // Overlapping real intervals (e.g. 2^0.5 vs 1.4142135623730951): abstain safely.
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -606,7 +1027,7 @@ export function evaluateHandwritingStage2(
 
   // If Stage 1 still has unconfirmed critical symbols (< tau), block belief-updating
   // grading and return the zero-hint crop confirmation prompts.
-  if (stage1.status === "awaiting_symbol_confirmation") {
+  if (stage1.cropConfirmationPrompts.length > 0) {
     return Object.freeze({
       schemaVersion: 1,
       status: "blocked_unconfirmed_ocr",
@@ -659,6 +1080,8 @@ export function evaluateHandwritingStage2(
   const additionalInvalidStepIndices: number[] = [];
   const suppressedDependentStepIndices: number[] = [];
 
+  const hasUntokenizedStep = stage1.untokenizedStepIndices.length > 0;
+
   for (const { step, stepIndex, deps } of ordered) {
     const stage1Step = stage1ById.get(step.stepId)!;
     const semanticTokenExpression = stage1Step.tokens
@@ -666,17 +1089,46 @@ export function evaluateHandwritingStage2(
       .map((t) => t.effectiveText)
       .join(" ")
       .trim();
-    const fallbackExpression =
-      semanticTokenExpression.length > 0
-        ? semanticTokenExpression
-        : stage1Step.tokens.length === 0
-          ? stage1Step.effectiveExpression
-          : "";
-    const localVerdict: StepLocalVerdict =
-      step.localVerdict ??
-      (step.ast.kind === "equation" || step.ast.kind === "inequality"
-        ? (tryVerifyPureNumericRelation(fallbackExpression) ?? "unknown")
-        : "unknown");
+
+    const effectiveKey = normalizeExpressionKey(stage1Step.effectiveExpression);
+    const semanticKey = normalizeExpressionKey(semanticTokenExpression);
+    const matchedPostVerdict =
+      step.postConfirmationVerdict !== undefined &&
+      (normalizeExpressionKey(step.postConfirmationVerdict.confirmedExpression) === effectiveKey ||
+        normalizeExpressionKey(step.postConfirmationVerdict.confirmedExpression) === semanticKey)
+        ? step.postConfirmationVerdict
+        : undefined;
+
+    // [P1-2] Untokenized steps (tokens: [] or 0 critical tokens) must fail closed as "unknown"
+    // and never bypass Stage-1 confidence gating via rawExpression or pre-confirmation localVerdict.
+    let localVerdict: StepLocalVerdict;
+    let stepMisconceptionId: string | null = null;
+    let stepErrorCode: string | null = null;
+    let stepErrorSummary: string | null = null;
+
+    if (!stage1Step.hasCriticalToken) {
+      localVerdict = "unknown";
+    } else if (matchedPostVerdict !== undefined) {
+      localVerdict = matchedPostVerdict.localVerdict;
+      stepMisconceptionId = matchedPostVerdict.misconceptionId ?? null;
+      stepErrorCode = matchedPostVerdict.errorCode ?? null;
+      stepErrorSummary = matchedPostVerdict.errorSummary ?? null;
+    } else if (stage1Step.hasConfirmedTextMutation) {
+      // [P1-1] Confirmed symbol mutation invalidates stale pre-confirmation localVerdict / misconception.
+      localVerdict =
+        step.ast.kind === "equation" || step.ast.kind === "inequality"
+          ? (tryVerifyPureNumericRelation(semanticTokenExpression) ?? "unknown")
+          : "unknown";
+    } else {
+      localVerdict =
+        step.localVerdict ??
+        (step.ast.kind === "equation" || step.ast.kind === "inequality"
+          ? (tryVerifyPureNumericRelation(semanticTokenExpression) ?? "unknown")
+          : "unknown");
+      stepMisconceptionId = step.misconceptionId ?? null;
+      stepErrorCode = step.errorCode ?? null;
+      stepErrorSummary = step.errorSummary ?? null;
+    }
 
     const upstreamErrorStepIds: string[] = [];
     let hasUpstreamUnknown = false;
@@ -711,9 +1163,9 @@ export function evaluateHandwritingStage2(
         firstRootCauseError = Object.freeze({
           stepId: step.stepId,
           stepIndex,
-          misconceptionId: step.misconceptionId ?? null,
-          errorCode: step.errorCode ?? null,
-          errorSummary: step.errorSummary ?? null,
+          misconceptionId: stepMisconceptionId,
+          errorCode: stepErrorCode,
+          errorSummary: stepErrorSummary,
           cropBoundingBox: stage1Step.bbox,
         });
       } else {
@@ -735,9 +1187,9 @@ export function evaluateHandwritingStage2(
         isRootCauseError: isEarliestInvalid,
         // Shield dependent steps and secondary errors from double-penalization;
         // attribute ONLY the earliest topological/sequential root-cause error.
-        attributedMisconceptionId: isEarliestInvalid ? (step.misconceptionId ?? null) : null,
-        errorCode: step.errorCode ?? null,
-        errorSummary: step.errorSummary ?? null,
+        attributedMisconceptionId: isEarliestInvalid ? stepMisconceptionId : null,
+        errorCode: stepErrorCode,
+        errorSummary: stepErrorSummary,
         cropBoundingBox: stage1Step.bbox,
       }),
     );
@@ -757,7 +1209,9 @@ export function evaluateHandwritingStage2(
       : "valid";
 
   const canUpdateSkillBelief =
-    !assisted && (overallVerdict === "valid" || overallVerdict === "invalid");
+    !assisted &&
+    !hasUntokenizedStep &&
+    (overallVerdict === "valid" || overallVerdict === "invalid");
 
   const epistemicSignal: HandwritingEpistemicSignal = Object.freeze(
     !canUpdateSkillBelief
@@ -766,7 +1220,11 @@ export function evaluateHandwritingStage2(
           channel: null,
           outcome: null,
           misconceptionId: null,
-          reasonCode: assisted ? "blocked_assisted_attempt" : "blocked_unknown_derivation",
+          reasonCode: assisted
+            ? "blocked_assisted_attempt"
+            : hasUntokenizedStep
+              ? "blocked_untokenized_ocr_step"
+              : "blocked_unknown_derivation",
         }
       : overallVerdict === "valid"
         ? {
