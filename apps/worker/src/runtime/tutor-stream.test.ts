@@ -1,6 +1,6 @@
 import type IORedis from "ioredis";
 import { expect, it, vi } from "vitest";
-import { createTutorStreamReader, createTutorStreamWriter, createWorkerTutorStreamWriter, withTutorDeltaBatches } from "./tutor-stream";
+import { createTutorStreamReader, createTutorStreamWriter, createWorkerTutorStreamWriter, isDefinitiveRedisRejection, withTutorDeltaBatches } from "./tutor-stream";
 
 function deferred() {
   let resolve!: () => void;
@@ -27,6 +27,44 @@ it("returns only confirmed publication sequences and includes the expected execu
   expect(evalScript.mock.calls[0]?.slice(-3)).toEqual(["execution", 2, ""]);
   expect(await writer.append("workspace", "job", "", "execution", 2)).toBe(0);
   expect(evalScript).toHaveBeenCalledTimes(2);
+});
+
+it.each([
+  "ERR command rejected by Redis",
+  "OOM command not allowed when used memory > 'maxmemory'",
+  "READONLY You can't write against a read only replica.",
+  "NOPERM this user has no permissions to run the 'eval' command",
+  "WRONGPASS invalid username-password pair",
+])("classifies definitive Redis rejections as non-retryable seal failures: %s", message => {
+  const error = Object.assign(new Error(message), { name: "ReplyError" });
+  expect(isDefinitiveRedisRejection(error)).toBe(true);
+});
+
+it("does not retry a Redis OOM seal while an append publication is held", async () => {
+  const appendError = new Error("Command timed out");
+  const sealError = Object.assign(new Error("OOM command not allowed when used memory > 'maxmemory'"), { name: "ReplyError" });
+  const append = { status: "ready", on: vi.fn(), connect: vi.fn().mockResolvedValue(undefined), disconnect: vi.fn(),
+    eval: vi.fn().mockRejectedValue(appendError) };
+  const control = { status: "ready", on: vi.fn(), connect: vi.fn().mockResolvedValue(undefined), disconnect: vi.fn(),
+    eval: vi.fn().mockRejectedValue(sealError) };
+  const producer = { duplicate: vi.fn().mockReturnValueOnce(append).mockReturnValueOnce(control) };
+  const writer = createWorkerTutorStreamWriter(producer as unknown as IORedis, vi.fn());
+
+  await expect(writer.append("workspace", "job", "tail", "execution", 0)).rejects.toBe(sealError);
+  expect(producer.duplicate).toHaveBeenCalledTimes(2);
+  writer.disconnect();
+});
+
+it("propagates an append OOM without opening a seal retry loop", async () => {
+  const appendError = Object.assign(new Error("OOM command not allowed when used memory > 'maxmemory'"), { name: "ReplyError" });
+  const append = { status: "ready", on: vi.fn(), connect: vi.fn().mockResolvedValue(undefined), disconnect: vi.fn(),
+    eval: vi.fn().mockRejectedValue(appendError) };
+  const producer = { duplicate: vi.fn().mockReturnValueOnce(append) };
+  const writer = createWorkerTutorStreamWriter(producer as unknown as IORedis, vi.fn());
+
+  await expect(writer.append("workspace", "job", "tail", "execution", 0)).rejects.toBe(appendError);
+  expect(producer.duplicate).toHaveBeenCalledOnce();
+  writer.disconnect();
 });
 
 it("flushes at the monotonic deadline even when the timer callback has not run", async () => {

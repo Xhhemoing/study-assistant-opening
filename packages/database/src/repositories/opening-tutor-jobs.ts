@@ -230,7 +230,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
               AND status IN ('running', 'queued')
               AND (${input.staleBefore !== undefined} OR claim_token IS NOT DISTINCT FROM ${input.claimToken ?? null}::uuid)
               AND (${input.staleBefore ?? null}::timestamptz IS NULL OR updated_at < ${input.staleBefore ?? null}::timestamptz)
-            RETURNING assistant_turn_id
+            RETURNING assistant_turn_id, timing_execution_id
           `
         : await tx`
             UPDATE opening_tutor_jobs SET status = 'outcome_unknown',
@@ -239,10 +239,17 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
               AND status = 'running'
               AND (${input.staleBefore !== undefined} OR claim_token IS NOT DISTINCT FROM ${input.claimToken ?? null}::uuid)
               AND (${input.staleBefore ?? null}::timestamptz IS NULL OR updated_at < ${input.staleBefore ?? null}::timestamptz)
-            RETURNING assistant_turn_id
+            RETURNING assistant_turn_id, timing_execution_id
           `;
       if (!rows.length) return false;
-      const assistantTurnId = (rows[0] as Record<string, unknown>).assistant_turn_id as string;
+      const terminalJob = rows[0] as Record<string, unknown>;
+      const assistantTurnId = terminalJob.assistant_turn_id as string;
+      const executionId = typeof terminalJob.timing_execution_id === "string" ? terminalJob.timing_execution_id : undefined;
+      if (executionId) {
+        // A recovered publisher may have released its PG locks with bytes still
+        // in transit. Confirm the Redis seal before this terminal transaction commits.
+        await fenceCancelledOpeningTutorStream(input.scope.workspaceId, input.jobId, executionId, options.tutorStreamRedisUrl);
+      }
       // A terminal turn (complete/failed/clarify/outcome_unknown) is never
       // rewritten, even if a stale job row is swept or re-terminated later.
       const terminal = [...TERMINAL_TURN_STATUSES];

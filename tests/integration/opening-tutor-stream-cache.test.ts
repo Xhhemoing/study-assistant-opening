@@ -159,6 +159,24 @@ it("revokes the same Redis privacy epoch for upper- and lowercase workspace UUID
   }
 });
 
+it("seals a recovered execution before committing outcome_unknown", async () => {
+  const { fixture, scope, sql, jobId, writer, reader, jobs } = await streamFixture();
+  try {
+    const job = (await jobs.claim(jobId))!;
+    const context = { privacyEpoch: 0, contextSourceRefs: [], exposureReceiptId: null,
+      claimToken: job.claimToken, executionId: job.executionId };
+    await writer.begin(scope.workspaceId, jobId, context);
+    expect(await writer.append(scope.workspaceId, jobId, "before recovery", job.executionId, 0)).toBe(1);
+    await sql`UPDATE opening_tutor_jobs SET updated_at=now()-interval '10 minutes' WHERE id=${jobId}`;
+
+    expect(await jobs.recoverExpired()).toBe(1);
+    expect(await writer.append(scope.workspaceId, jobId, "late bytes", job.executionId, 0)).toBe(0);
+    expect(await reader.read(scope.workspaceId, jobId)).toMatchObject({ text: "before recovery", sequence: 1 });
+  } finally {
+    await fixture.close();
+  }
+});
+
 const output = { text: "First unsafe tail", citedChunkIds: [], candidates: [], requestId: null, inputTokens: 10, outputTokens: 10 };
 
 it.each(["cancellation", "privacy epoch"])("fences a timed-out append before %s commits even when Redis control stalls", async revocation => {

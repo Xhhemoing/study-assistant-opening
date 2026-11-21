@@ -50,6 +50,21 @@ it.each(["?db=3", "/?db=3", "/3?db=4"])(
   expect(received).toHaveLength(3);
 });
 
+it("uses ioredis query-selected port for the revocation fence", async () => {
+  const received: Buffer[] = [];
+  await withRedisServer(async address => {
+    const port = address.slice(address.lastIndexOf(":") + 1);
+    await fenceCancelledOpeningTutorStream("workspace", "job", "execution", `redis://127.0.0.1?port=${port}`);
+  }, socket => {
+    socket.on("data", chunk => {
+      received.push(chunk);
+      socket.write("$-1\r\n");
+    });
+  });
+  expect(received).toHaveLength(1);
+  expect(received[0]?.toString()).toMatch(/^\*6\r\n\$4\r\nEVAL\r\n/);
+});
+
 it("refuses an unconfirmed seal and closes the socket on a Redis error", async () => {
   let onClose!: () => void;
   const closed = new Promise<void>(resolve => { onClose = resolve; });

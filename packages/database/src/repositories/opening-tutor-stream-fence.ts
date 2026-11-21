@@ -12,15 +12,57 @@ export const tutorStreamAttemptHeadKey = (workspaceId: string, rootObservationId
 export const tutorStreamPreAnswerHeadKey = (workspaceId: string, attemptId: string) =>
   `opening:tutor-stream:attempt-head:${workspaceId.toLowerCase()}:unsubmitted:${attemptId.toLowerCase()}`;
 
+export type OpeningRedisConnectionOptions = {
+  host: string;
+  port: number;
+  family: number;
+  path?: string;
+  username?: string;
+  password?: string;
+  db: number;
+  tls?: object;
+};
+
+/** Resolve the standalone endpoint with ioredis 5.6.1 URL precedence. */
+export function openingRedisConnectionOptions(redisUrl: string): OpeningRedisConnectionOptions {
+  let parsed = parse(redisUrl, true, true);
+  if (!parsed.slashes && !redisUrl.startsWith("/")) {
+    parsed = parse("//" + redisUrl, true, true);
+  }
+  if (parsed.protocol !== "redis:" && parsed.protocol !== "rediss:") {
+    throw new Error("Invalid Redis fence URL");
+  }
+  const query = parsed.query as Record<string, string | undefined>;
+  const auth = parsed.auth;
+  const authSeparator = auth?.indexOf(":") ?? -1;
+  const username = auth === null || auth === undefined
+    ? query.username
+    : authSeparator === -1 ? auth : auth.slice(0, authSeparator);
+  const password = auth === null || auth === undefined
+    ? query.password
+    : authSeparator === -1 ? "" : auth.slice(authSeparator + 1);
+  const rawPort = parsed.port ?? query.port ?? "6379";
+  const port = Number.parseInt(rawPort, 10);
+  if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) throw new Error("Invalid Redis port");
+  const rawDb = parsed.pathname && parsed.pathname.length > 1 ? parsed.pathname.slice(1) : query.db;
+  const db = rawDb === undefined ? 0 : Number.parseInt(rawDb, 10);
+  if (!Number.isSafeInteger(db) || db < 0) throw new Error("Invalid Redis database index");
+  const rawFamily = query.family;
+  const family = rawFamily === undefined ? 4 : Number.parseInt(rawFamily, 10);
+  if (!Number.isSafeInteger(family) || family < 0) throw new Error("Invalid Redis address family");
+  const options: OpeningRedisConnectionOptions = {
+    host: parsed.hostname || query.host || "localhost", port, family, db,
+    ...(typeof query.path === "string" ? { path: query.path } : {}),
+    ...(username !== undefined ? { username } : {}),
+    ...(password !== undefined ? { password } : {}),
+    ...(parsed.protocol === "rediss:" || query.tls !== undefined && Boolean(query.tls) ? { tls: {} } : {}),
+  };
+  return options;
+}
+
 /** Match ioredis 5.6.1's URL precedence and decimal conversion. */
 export function openingRedisDatabase(redisUrl: string): number {
-  const { pathname, query } = parse(redisUrl, true, true);
-  // A nonempty pathname takes precedence over db. "database" is not an ioredis option.
-  const raw = pathname && pathname.length > 1 ? pathname.slice(1) : query.db;
-  if (raw === undefined) return 0;
-  const db = typeof raw === "string" ? Number.parseInt(raw, 10) : NaN;
-  if (!Number.isSafeInteger(db) || db < 0) throw new Error("Invalid Redis database index");
-  return db;
+  return openingRedisConnectionOptions(redisUrl).db;
 }
 
 export async function sealOpeningTutorStream(redis: RedisEval, workspaceId: string, jobId: string, executionId: string) {
@@ -93,23 +135,23 @@ function redisCommand(args: RedisArgument[]): Buffer {
 
 /** One connection and one deadline for connect, optional AUTH/SELECT, and EVAL. */
 async function evalRevocationRedis(redisUrl: string, script: string, keyCount: number, ...args: RedisArgument[]): Promise<void> {
-  const url = new URL(redisUrl);
-  const useTls = url.protocol === "rediss:";
-  const host = url.hostname.replace(/^\[|\]$/g, "");
-  const port = Number(url.port || "6379");
-  if ((!useTls && url.protocol !== "redis:") || !host) {
-    throw new Error("Invalid Redis fence URL");
-  }
-  const db = openingRedisDatabase(redisUrl);
-  const username = decodeURIComponent(url.username);
-  const password = decodeURIComponent(url.password);
+  const options = openingRedisConnectionOptions(redisUrl);
+  const useTls = options.tls !== undefined;
+  const host = options.host.replace(/^\[|\]$/g, "");
+  const { port, family, path, db, username, password } = options;
   const commands: RedisArgument[][] = [];
-  if (username || password) commands.push(username ? ["AUTH", username, password] : ["AUTH", password]);
+  if (username !== undefined || password !== undefined) {
+    if (username) commands.push(["AUTH", username, password ?? ""]);
+    else if (password !== undefined) commands.push(["AUTH", password]);
+  }
   if (db) commands.push(["SELECT", db]);
   commands.push(["EVAL", script, keyCount, ...args]);
 
   await new Promise<void>((resolve, reject) => {
-    const socket = useTls ? connectTls({ host, port, ...(isIP(host) ? {} : { servername: host }) }) : connect({ host, port });
+    const connectionOptions = path ? { path } : { host, port, family };
+    const socket = useTls
+      ? connectTls({ ...connectionOptions, ...(path || isIP(host) ? {} : { servername: host }) })
+      : connect(connectionOptions);
     let pending: Buffer = Buffer.alloc(0);
     let command = 0;
     const finish = (error?: Error) => {

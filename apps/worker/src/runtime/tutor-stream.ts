@@ -35,6 +35,16 @@ const redisTransportMessages = new Set([
   "Stream isn't writeable and enableOfflineQueue options is false",
 ]);
 
+const definitiveRedisReplyCodes = new Set(["ERR", "OOM", "READONLY", "NOPERM", "WRONGPASS"]);
+
+/** Redis explicitly rejected this command, so retrying could only hold the PG lease longer. */
+export function isDefinitiveRedisRejection(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  if (error.name === "ReplyError") return true;
+  const code = /^-?([A-Z][A-Z0-9_-]*)\b/.exec(error.message.trim())?.[1];
+  return code !== undefined && definitiveRedisReplyCodes.has(code);
+}
+
 export function isTutorStreamUnavailable(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   if (error.name === "ReplyError") return /^(LOADING|READONLY|CLUSTERDOWN|MASTERDOWN|OOM)\b/.test(error.message);
@@ -253,6 +263,7 @@ export function createWorkerTutorStreamWriter(producer: IORedis, reportError: (e
         await seal(workspaceId, jobId, executionId);
         return;
       } catch (error) {
+        if (isDefinitiveRedisRejection(error)) throw error;
         if (reported) await delay(500);
         else reportError(error);
         reported = true;
@@ -279,6 +290,7 @@ export function createWorkerTutorStreamWriter(producer: IORedis, reportError: (e
         return await connection.writer.append(...args);
       } catch (error) {
         disconnectAppend(connection);
+        if (isDefinitiveRedisRejection(error)) throw error;
         // Redis may still execute bytes already in transit. A confirmed seal on
         // the control connection orders that EVAL on Redis: it either already
         // ran under the PG locks, or sees the seal (or a missing/new execution).
