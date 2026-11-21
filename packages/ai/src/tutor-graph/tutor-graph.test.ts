@@ -312,8 +312,9 @@ describe("TutorGraph fast path", () => {
       state: "unverified", reason: "release_guard_rejected", releaseApproved: false, leakageBits: 1,
     });
     expect(checkAfterVerify).not.toHaveBeenCalled();
-    expect(budget.state).toBe("contaminated");
-    expect(runTutorGraph(input).state).toBe("cooldown");
+    expect(budget.state).toBe("scaffolded");
+    expect(budget.leakageBits).toBe(1);
+    expect(runTutorGraph(input).state).toBe("budget_contaminated");
     expect(runTutorGraph({ ...input, nowMs: budget.cooldownUntilMs }).state).toBe("budget_contaminated");
     expect(verify).toHaveBeenCalledTimes(1);
   });
@@ -371,7 +372,8 @@ describe("TutorGraph fast path", () => {
     }
     expect(outcomes.map(({ bitsAtVerify }) => bitsAtVerify)).toEqual([1, 1, 1, 1]);
     expect(aborted.budget.leakageBits).toBe(1);
-    expect(contaminated.budget.state).toBe("contaminated");
+    expect(contaminated.budget.state).toBe("scaffolded");
+    expect(contaminated.budget.leakageBits).toBe(1);
   });
 
   it.each(["abort", "contaminate", "throw"] as const)("withholds when the post-verification guard can %s", (effect) => {
@@ -411,6 +413,71 @@ describe("TutorGraph fast path", () => {
       leakageBits: 1, helpState: "scaffolded",
     });
     expect(result.releasedText).toBeUndefined();
+    expect(budget.snapshot()).toMatchObject({ state: "scaffolded", leakageBits: 1, cooldownUntilMs: undefined });
+  });
+
+  it("keeps the same budget and later responses across verifier and guard side effects", () => {
+    const cases = [
+      "pass", "fail", "guard-reject", "canRelease", "canRelease-zero", "commitRelease",
+      "reset", "throw", "abort", "guard-commit", "guard-canRelease",
+    ] as const;
+    const sequences = cases.map((effect) => {
+      const assertCurrent = () => undefined;
+      const budget = createMinEntropyBudget({ scaffoldBitBudget: 1, now: () => 1000, initialSeed: "seed-a" });
+      const controller = new AbortController();
+      let verified = false;
+      const postVerifyGuard = vi.fn(() => {
+        if (effect === "guard-commit") budget.commitRelease(1);
+        if (effect === "guard-canRelease") budget.canRelease(0);
+        return effect === "guard-reject";
+      });
+      const first = runTutorGraph({
+        questionStem: "积分",
+        submission: {},
+        attemptSubmitted: true,
+        budget,
+        verifyCaps: {
+          assertCurrent,
+          verify: () => {
+            verified = true;
+            if (effect === "canRelease") budget.canRelease(1);
+            if (effect === "canRelease-zero") budget.canRelease(0);
+            if (effect === "commitRelease") budget.commitRelease(1);
+            if (effect === "reset") budget.resetForFreshVariant("seed-b");
+            if (effect === "throw") throw new Error("verifier failure");
+            if (effect === "abort") controller.abort();
+            return { steps: [{ id: "s1", text: "a", status: effect === "fail" ? "invalid" : "valid" }] };
+          },
+        },
+        releaseCaps: {
+          assertCurrent,
+          stopSignal: controller.signal,
+          answerLeakageBlocker: () => verified && postVerifyGuard(),
+        },
+      });
+      expect(budget.snapshot()).toEqual({
+        state: "scaffolded", leakageBits: 1, cooldownUntil: undefined, cooldownUntilMs: undefined,
+        currentSeed: "seed-a", usedSeeds: ["seed-a"],
+      });
+      if (["canRelease", "canRelease-zero", "commitRelease", "reset", "throw", "abort"].includes(effect)) {
+        expect(postVerifyGuard).not.toHaveBeenCalled();
+      }
+      expect(first.state).toBe(effect === "pass" || effect === "fail" ? "released" : "unverified");
+      const nextInput = {
+        questionStem: "积分", submission: {}, attemptSubmitted: true, budget,
+        verifyCaps: { assertCurrent, verify: () => ({ steps: [] }) },
+        releaseCaps: { assertCurrent, stopSignal: controller.signal, answerLeakageBlocker: () => false },
+      };
+      const second = runTutorGraph(nextInput);
+      const afterCooldown = runTutorGraph({ ...nextInput, nowMs: 1000 + 72 * 3_600_000 });
+      const probe = runTutorGraph({ ...nextInput, answerProbe: true });
+      const unsubmitted = runTutorGraph({ ...nextInput, attemptSubmitted: false });
+      const noGuard = runTutorGraph({ ...nextInput, releaseCaps: { assertCurrent, stopSignal: controller.signal } });
+      return [first, second, afterCooldown, probe, unsubmitted, noGuard];
+    });
+    expect(new Set(sequences.map((sequence) => JSON.stringify(sequence))).size).toBe(2);
+    expect(new Set(sequences.map(([, second]) => JSON.stringify(second))).size).toBe(1);
+    expect(new Set(sequences.map(([, , afterCooldown]) => JSON.stringify(afterCooldown))).size).toBe(1);
   });
 
   it.each([
@@ -696,16 +763,16 @@ describe("TutorGraph fast path", () => {
     expect(crashed.releaseApproved).toBe(false);
     expect(JSON.stringify(crashed)).not.toContain("INTERNAL_DB_SECRET_SOLUTION_42");
 
-    // With a static guard, a verifier exception has the same public outcome as a verdict.
+    // A verifier exception is withheld within the same one-bit outcome bound.
     const pureOracleOutcomes = new Set<string>();
-    for (const verdictFn of [
+    for (const [index, verdictFn] of [
       () => ({ steps: [{ id: "s1", text: "x", status: "valid" as const }] }),
       () => ({ steps: [{ id: "s1", text: "x", status: "invalid" as const }] }),
       () => ({ steps: [{ id: "s1", text: "x", status: "unknown" as const }] }),
       () => {
         throw new Error("INTERNAL_DB_SECRET_SOLUTION_42");
       },
-    ]) {
+    ].entries()) {
       const pureB = createMinEntropyBudget({ scaffoldBitBudget: 1.5, now: () => 1000 });
       const res = runTutorGraph({
         questionStem: "积分",
@@ -715,13 +782,13 @@ describe("TutorGraph fast path", () => {
         verifyCaps: { verify: verdictFn, assertCurrent: () => undefined },
         releaseCaps: { assertCurrent: () => undefined, answerLeakageBlocker: () => false },
       });
-      expect(res.state).toBe("released");
-      expect(res.releaseApproved).toBe(true);
+      expect(res.state).toBe(index === 3 ? "unverified" : "released");
+      expect(res.releaseApproved).toBe(index !== 3);
       expect(pureB.leakageBits).toBe(1);
       expect(JSON.stringify(res)).not.toContain("INTERNAL_DB_SECRET_SOLUTION_42");
       pureOracleOutcomes.add(JSON.stringify(res));
     }
-    expect(pureOracleOutcomes.size).toBe(1);
+    expect(pureOracleOutcomes.size).toBe(2);
 
     const leakBudget = createMinEntropyBudget({ scaffoldBitBudget: 1.5, now: () => 1000 });
     const stripped = runTutorGraph({
@@ -988,12 +1055,12 @@ describe("TutorGraph fast path", () => {
     }
 
     // Round-16 P1-1: pure-mode release guard must not create a 0-bit answer-guessing oracle from learner submission text or blocked prompts
-    for (const verifierFn of [
+    for (const [index, verifierFn] of [
       () => ({ steps: [] }),
       () => {
         throw new Error("SECRET_ANSWER_42");
       },
-    ]) {
+    ].entries()) {
       const guessRightBudget = createMinEntropyBudget({ scaffoldBitBudget: 1.5, now: () => 1000 });
       const guessWrongBudget = createMinEntropyBudget({ scaffoldBitBudget: 1.5, now: () => 1000 });
       const rightRes = runTutorGraph({
@@ -1012,8 +1079,8 @@ describe("TutorGraph fast path", () => {
         verifyCaps: { verify: verifierFn, assertCurrent: () => undefined },
         releaseCaps: { assertCurrent: () => undefined, answerLeakageBlocker: (text) => text.includes("SECRET_ANSWER_42") },
       });
-      expect(rightRes.state).toBe("released");
-      expect(wrongRes.state).toBe("released");
+      expect(rightRes.state).toBe(index === 0 ? "released" : "unverified");
+      expect(wrongRes.state).toBe(index === 0 ? "released" : "unverified");
       expect(guessRightBudget.leakageBits).toBe(1);
       expect(guessWrongBudget.leakageBits).toBe(1);
       expect(rightRes).toEqual(wrongRes);

@@ -1,4 +1,5 @@
 import type { TutorGraphResult } from "./types";
+import { pureBudgetScope } from "./budget-isolation";
 
 export type HelpState = "pure" | "scaffolded" | "contaminated";
 export const PURE_MAX_LEAKAGE_BITS = 1.5;
@@ -52,6 +53,7 @@ export function createMinEntropyBudget(options: MinEntropyBudgetOptions) {
     currentSeed,
     ...(options.usedSeeds ?? []).map((seed) => seed.trim()).filter((seed) => seed.length > 0),
   ]);
+  let pureScope: { touched: boolean } | undefined;
 
   const validateBits = (worstBranchBits: number): void => {
     if (!Number.isFinite(worstBranchBits) || worstBranchBits < 0) {
@@ -98,6 +100,10 @@ export function createMinEntropyBudget(options: MinEntropyBudgetOptions) {
       return { state, leakageBits, guidance: undefined };
     },
     canRelease(worstBranchBits: number, nowMs = now()): MinEntropyReleaseCheck {
+      if (pureScope) {
+        pureScope.touched = true;
+        return { allowed: false, reason: "budget_exhausted", state, leakageBits, cooldownUntil: cooldownUntilMs, cooldownUntilMs };
+      }
       validateBits(worstBranchBits);
       validateNowMs(nowMs);
       if (cooldownUntilMs !== undefined && nowMs < cooldownUntilMs) {
@@ -140,6 +146,10 @@ export function createMinEntropyBudget(options: MinEntropyBudgetOptions) {
       return { allowed: true, state, leakageBits, cooldownUntil: cooldownUntilMs, cooldownUntilMs };
     },
     commitRelease(worstBranchBits: number, nowMs = now()) {
+      if (pureScope) {
+        pureScope.touched = true;
+        throw new Error("pure_budget_in_use");
+      }
       validateBits(worstBranchBits);
       validateNowMs(nowMs);
       if (state === "contaminated" || (cooldownUntilMs !== undefined && nowMs < cooldownUntilMs)) {
@@ -162,6 +172,10 @@ export function createMinEntropyBudget(options: MinEntropyBudgetOptions) {
       return this.commitRelease(worstBranchBits, nowMs);
     },
     resetForFreshVariant(newSeed: string, nowMs = now()) {
+      if (pureScope) {
+        pureScope.touched = true;
+        throw new Error("pure_budget_in_use");
+      }
       validateNowMs(nowMs);
       const normalized = newSeed.trim();
       if (!normalized) throw new Error("seeded_recipe_required");
@@ -189,6 +203,19 @@ export function createMinEntropyBudget(options: MinEntropyBudgetOptions) {
         currentSeed,
         usedSeeds: [...usedSeeds],
       };
+    },
+    [pureBudgetScope]<T>(run: (wasTouched: () => boolean) => T): T {
+      if (pureScope) {
+        pureScope.touched = true;
+        throw new Error("pure_budget_in_use");
+      }
+      const scope = { touched: false };
+      pureScope = scope;
+      try {
+        return run(() => scope.touched);
+      } finally {
+        pureScope = undefined;
+      }
     },
   };
   return budget;

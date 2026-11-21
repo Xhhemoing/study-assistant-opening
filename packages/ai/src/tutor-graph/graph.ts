@@ -5,6 +5,7 @@ import {
   fixedPureGuidance,
   type MinEntropyBudget,
 } from "./min-entropy-budget";
+import { pureBudgetScope } from "./budget-isolation";
 import type {
   LearnerStep,
   MovePlan,
@@ -374,6 +375,26 @@ export function runTutorGraph(input: TutorGraphInput): TutorGraphResult {
   }
   const nowMs = input.nowMs ?? budget.nowMs();
 
+  // A signal aborted during an earlier verified turn must not change the
+  // response for an already exhausted pure budget.
+  if (
+    (input.assessmentMode ?? "pure") === "pure" &&
+    budget.leakageBits > 0
+  ) {
+    if (budget.cooldownUntilMs !== undefined && nowMs < budget.cooldownUntilMs) {
+      return blockedByBudgetResult(budget, "cooldown");
+    }
+    if (budget.state === "contaminated") {
+      return blockedByBudgetResult(budget, "budget_contaminated");
+    }
+    const rawCap = Number.isFinite(budget.maxBitsPerTurn) ? budget.maxBitsPerTurn : PURE_MAX_LEAKAGE_BITS;
+    const turnCap = Math.min(rawCap, PURE_MAX_LEAKAGE_BITS);
+    if (turnCap - budget.leakageBits < 1 || budget.leakageBits + 1 >= PURE_MAX_LEAKAGE_BITS) {
+      const preCheck = budget.canRelease(1, nowMs);
+      return blockedByBudgetResult(budget, preCheck.allowed ? "budget_exhausted" : (preCheck.reason ?? "budget_exhausted"));
+    }
+  }
+
   if (isStopped(input.releaseCaps.stopSignal) || isStopped(input.verifyCaps.stopSignal)) {
     return withheldReleaseResult(budget, "cancelled");
   }
@@ -455,31 +476,20 @@ export function runTutorGraph(input: TutorGraphInput): TutorGraphResult {
       releaseApproved: false,
       reason: "release_guard_rejected",
     };
-    const shouldWithhold = () => {
-      const currentCooldownUntilMs = budget.cooldownUntilMs;
-      return (
-        isStopped(input.verifyCaps.stopSignal) ||
-        isStopped(input.releaseCaps.stopSignal) ||
-        budget.state === "contaminated" ||
-        (currentCooldownUntilMs !== undefined && nowMs < currentCooldownUntilMs)
-      );
-    };
+    return budget[pureBudgetScope]((wasTouched) => {
+      const shouldWithhold = () =>
+        wasTouched() || isStopped(input.verifyCaps.stopSignal) || isStopped(input.releaseCaps.stopSignal);
 
-    input.verifyCaps.assertCurrent();
-    try {
-      input.verifyCaps.verify(input.submission);
-    } catch {
-      // Verifier errors have no separate public result in pure mode.
-    }
-    if (shouldWithhold()) return pureWithheldOutcome;
-
-    try {
-      const postVerifyText = guardRelease(committedPure.caps, publicVerification, input.releaseCaps);
-      return postVerifyText === undefined || shouldWithhold() ? pureWithheldOutcome : pureReleasedOutcome;
-    } catch {
-      // Guard errors after verification withhold the same response as a denial.
-      return pureWithheldOutcome;
-    }
+      try {
+        input.verifyCaps.assertCurrent();
+        input.verifyCaps.verify(input.submission);
+        if (shouldWithhold()) return pureWithheldOutcome;
+        const postVerifyText = guardRelease(committedPure.caps, publicVerification, input.releaseCaps);
+        return postVerifyText === undefined || shouldWithhold() ? pureWithheldOutcome : pureReleasedOutcome;
+      } catch {
+        return pureWithheldOutcome;
+      }
+    });
   }
 
   input.verifyCaps.assertCurrent();
