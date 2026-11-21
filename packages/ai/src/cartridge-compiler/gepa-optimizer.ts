@@ -639,8 +639,10 @@ function scanObjectForForbiddenSurfaceKeys(value: unknown, pathPrefix: string): 
  */
 export function assertAllowedGepaPatch(patch: unknown): asserts patch is GepaSurfacePatch {
   // Run PII scan FIRST before any surface/schema check so raw PII in unexpected keys or
-  // malformed fields is quarantined without ever being echoed in schema validation errors.
-  assertNoRawPiiInValue(patch, "gepa_patch");
+  // malformed fields is quarantined without ever echoing unrecognized ancestor keys.
+  assertNoRawPiiInValue(patch, "gepa_patch", undefined, {
+    allowedDiagnosticKeys: KNOWN_PATCH_SCHEMA_KEYS,
+  });
 
   if (!isPlainObject(patch)) {
     throw new GepaForbiddenSurfaceError("GEPA patch must be a plain non-null object", "invalid");
@@ -1127,36 +1129,72 @@ export function runGepaOptimizationRound(
     });
   }
 
-  const candidateMetrics: CartridgeCandidateMetrics[] = proposed.map((candidate) => {
-    const rawReceipt = input.scoreCandidate(candidate) as unknown;
+  const rawReceipts: unknown[] = proposed.map((candidate) => input.scoreCandidate(candidate));
+
+  // Pre-collect all candidateIds across proposed candidates, baseline, and raw receipts so any
+  // synthetic malformed-receipt ID can never collide with a valid caller candidateId.
+  const reservedIds = new Set<string>();
+  const rawBaseline = input.paretoOptions.baseline as unknown;
+  if (isPlainObject(rawBaseline) && typeof rawBaseline.candidateId === "string") {
+    reservedIds.add(rawBaseline.candidateId);
+    const trimmedBase = rawBaseline.candidateId.normalize("NFKC").trim();
+    if (trimmedBase.length > 0) reservedIds.add(trimmedBase);
+  }
+  for (const candidate of proposed) {
+    reservedIds.add(candidate.candidateId);
+  }
+  for (const rawReceipt of rawReceipts) {
+    if (isPlainObject(rawReceipt) && typeof rawReceipt.candidateId === "string") {
+      reservedIds.add(rawReceipt.candidateId);
+      const trimmedReceiptId = rawReceipt.candidateId.normalize("NFKC").trim();
+      if (trimmedReceiptId.length > 0) reservedIds.add(trimmedReceiptId);
+    }
+  }
+  const allocateSyntheticMalformedId = (idx: number): string => {
+    let synthId = `__malformed_receipt_${idx}`;
+    while (reservedIds.has(synthId)) {
+      synthId += "_x";
+    }
+    reservedIds.add(synthId);
+    return synthId;
+  };
+
+  const candidateMetrics: CartridgeCandidateMetrics[] = proposed.map((candidate, idx) => {
+    const rawReceipt = rawReceipts[idx];
     // Scan the ENTIRE scorer receipt for raw PII first (null/undefined pass safely; PII fails closed).
     assertNoRawPiiInValue(rawReceipt, `scorer_receipt[${candidate.candidateId}]`);
 
-    const makeMalformedVetoReceipt = (): CartridgeCandidateMetrics => ({
-      candidateId: candidate.candidateId,
-      c: {
-        rate: Number.NaN,
-        repairedCount: Number.NaN,
-        verifiableFirstErrorCount: Number.NaN,
-        abandonedCount: Number.NaN,
-        abandonmentRate: Number.NaN,
-      },
-      l: {
-        rate: Number.NaN,
-        leakedReleasedTurns: Number.NaN,
-        totalReleasedTurns: Number.NaN,
-        severeLeakCount: Number.NaN,
-        guardBlockedCount: Number.NaN,
-        telemetryIssues: ["missing_scorer_receipt"],
-      },
-      t7: {
-        status: "pending",
-        passedFreshTransferCount: 0,
-        eligibleFollowupCohortCount: 0,
-        pendingCohortCount: 0,
-        reason: "redacted_invalid_t7_status",
-      },
-    });
+    const makeMalformedVetoReceipt = (): CartridgeCandidateMetrics => {
+      const targetId =
+        typeof candidate.candidateId === "string" && candidate.candidateId.trim().length > 0
+          ? candidate.candidateId
+          : allocateSyntheticMalformedId(idx);
+      return {
+        candidateId: targetId,
+        c: {
+          rate: Number.NaN,
+          repairedCount: Number.NaN,
+          verifiableFirstErrorCount: Number.NaN,
+          abandonedCount: Number.NaN,
+          abandonmentRate: Number.NaN,
+        },
+        l: {
+          rate: Number.NaN,
+          leakedReleasedTurns: Number.NaN,
+          totalReleasedTurns: Number.NaN,
+          severeLeakCount: Number.NaN,
+          guardBlockedCount: Number.NaN,
+          telemetryIssues: ["missing_scorer_receipt"],
+        },
+        t7: {
+          status: "pending",
+          passedFreshTransferCount: 0,
+          eligibleFollowupCohortCount: 0,
+          pendingCohortCount: 0,
+          reason: "redacted_invalid_t7_status",
+        },
+      };
+    };
 
     // Isolate null / undefined / non-object / missing-ID receipts as vetoed entries so valid siblings proceed.
     if (!isPlainObject(rawReceipt)) {

@@ -85,7 +85,8 @@ function escapeRegExp(literal: string): string {
 }
 
 function matchesWithNumericBoundaries(haystack: string, numericLiteral: string): boolean {
-  const re = new RegExp(`(?<![\\d.])${escapeRegExp(numericLiteral)}(?!\\d|\\.\\d)`);
+  const trailingZeros = numericLiteral.includes(".") ? "0*" : "";
+  const re = new RegExp(`(?<![\\d.])${escapeRegExp(numericLiteral)}${trailingZeros}(?!\\d|\\.\\d)`);
   return re.test(haystack);
 }
 

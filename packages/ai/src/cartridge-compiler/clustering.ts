@@ -16,12 +16,12 @@ const UUID_PATTERN =
   /\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b/g;
 const EMAIL_PATTERN = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i;
 const PHONE_PATTERN =
-  /(?<![\d.])(?:\+\d{1,3}[\s.-]?)?(?:\(\d{3}\)[\s.-]?|\d{3}[\s.-])\d{3}[\s.-]\d{4}(?![\d.])/;
+  /(?<!\d|\d\.)(?:\+\d{1,3}[\s.-]?)?(?:\(\d{3}\)[\s.-]?|\d{3}[\s.-])\d{3}[\s.-]\d{4}(?!\d|\.\d)/;
 const INTL_PHONE_PATTERN =
-  /(?<![\w.])(?:\+\d{1,3}[\s.-]?\d{2,4}[\s.-]?\d{3,4}[\s.-]?\d{3,4}|\+\d{8,15})(?![\d.])/;
+  /(?<!\w|\d\.)(?:\+\d{1,3}[\s.-]?\d{2,4}[\s.-]?\d{3,4}[\s.-]?\d{3,4}|\+\d{8,15})(?!\d|\.\d)/;
 const UNFORMATTED_PHONE_PATTERN =
   /(?<![0-9A-Za-z_.])\d{10,11}(?![0-9A-Za-z_]|\.\d)/;
-const SSN_PATTERN = /(?<![\d.])\d{3}([\s.-])\d{2}\1\d{4}(?![\d.])/;
+const SSN_PATTERN = /(?<!\d|\d\.)\d{3}([\s.-])\d{2}\1\d{4}(?!\d|\.\d)/;
 const UNFORMATTED_SSN_PATTERN =
   /(?<![0-9A-Za-z_.])\d{9}(?![0-9A-Za-z_]|\.\d)/;
 const TOKEN_URL_PATTERN =
@@ -128,12 +128,133 @@ function detectRawPiiReasonsInText(text: string): string[] {
   return [...reasons];
 }
 
+/**
+ * Closed allowlist of known schema property keys across trajectories, clusters,
+ * rubrics, receipts, Pareto results, and GEPA patches. Any unrecognized object key
+ * encountered during recursive PII scanning is rendered as `<unexpected_key>` so
+ * caller-supplied free-text keys (e.g. learner names) can never echo into diagnostics.
+ */
+export const KNOWN_SAFE_DIAGNOSTIC_KEYS: ReadonlySet<string> = new Set([
+  // ErrorTrajectoryRecord & ExtractedTrajectoryFeatures
+  "trajectoryId",
+  "learnerPseudoId",
+  "conceptId",
+  "firstErrorRuleId",
+  "normalizedAstEdit",
+  "missingPremise",
+  "hintStage",
+  "itemFamilyId",
+  "verifiableFirstError",
+  "selfRepairedInSession",
+  "abandoned",
+  "totalReleasedTurns",
+  "leakedReleasedTurns",
+  "severeLeakCount",
+  "guardBlockedCount",
+  "day7FollowupStatus",
+  "passedFreshFamilyTransfer",
+  "snippet",
+  // RubricAnchorExample & MisconceptionRubricRule
+  "anchorId",
+  "label",
+  "establishedPremises",
+  "expression",
+  "rationale",
+  "ruleId",
+  "requiredAstTokens",
+  "requiredMissingPremise",
+  "positiveAnchors",
+  "negativeAnchors",
+  // ErrorTrajectoryCluster & ClusteringSummary
+  "clusterId",
+  "bucketKey",
+  "centroidAstEdit",
+  "hintStageDistribution",
+  "supportCount",
+  "uniqueLearnerCount",
+  "itemFamilyIds",
+  "trajectoryIds",
+  "status",
+  "cohesionScore",
+  "totalTrajectories",
+  "minSupport",
+  "similarityThreshold",
+  "clusters",
+  "actionableClusters",
+  "observationOnlyClusters",
+  // CMetric, LMetric, T7Metric, CartridgeCandidateMetrics & ParetoEvaluationResult
+  "candidateId",
+  "c",
+  "l",
+  "t7",
+  "rate",
+  "repairedCount",
+  "verifiableFirstErrorCount",
+  "abandonedCount",
+  "abandonmentRate",
+  "telemetryIssues",
+  "passedFreshTransferCount",
+  "eligibleFollowupCohortCount",
+  "learnerClusterCount",
+  "learnerOutcomeCounts",
+  "effectiveClusterSampleSize",
+  "learnerClusterMean",
+  "standardError",
+  "clopperPearsonLowerBound",
+  "learnerClusterLowerBound",
+  "alpha",
+  "pendingCohortCount",
+  "reason",
+  "metrics",
+  "onParetoFrontier",
+  "dominatedBy",
+  "vetoReasons",
+  "promotionBlockers",
+  "results",
+  "frontierCandidateIds",
+  "vetoedCandidateIds",
+  "shadowCandidateIds",
+  "promotedCandidateIds",
+  "dominatedCandidateIds",
+  // CartridgeDeclarativePolicy, GepaSurfacePatch, GepaReflectionContext, GepaProposedCandidate
+  "id",
+  "triggerRuleId",
+  "move",
+  "priority",
+  "stage",
+  "cueTemplate",
+  "revealsPremiseCheck",
+  "policyId",
+  "version",
+  "moveRules",
+  "hintLadder",
+  "rubricAnchors",
+  "approvedTemplateSlots",
+  "surface",
+  "summary",
+  "payload",
+  "patches",
+  "policyVersion",
+  "trainTrajectoryCount",
+  "devTrajectoryCount",
+  "observationOnlyClusterCount",
+  "allowedSurfaces",
+  "currentPolicy",
+  "policy",
+  "appliedPatches",
+]);
+
 export interface RawPiiScanOptions {
   /**
    * Optional exact full schema paths (e.g., `"root.evaluatedAtMs"`) explicitly
    * exempted from numeric SSN/phone/ID digit-length checks. Never exempts by bare key name.
    */
   readonly allowedNumericMetadataPaths?: ReadonlySet<string>;
+  /**
+   * Optional closed allowlist of safe diagnostic property keys for error paths.
+   * Defaults to `KNOWN_SAFE_DIAGNOSTIC_KEYS`; unrecognized keys are replaced with `<unexpected_key>`.
+   */
+  readonly allowedDiagnosticKeys?: ReadonlySet<string>;
 }
 
 function sanitizeTrajectoryIdForError(trajectoryId: string | undefined): string | undefined {
@@ -170,6 +291,8 @@ function collectRawPiiViolations(
   seen: WeakSet<object>,
   skipKeys?: ReadonlySet<string>,
   allowedNumericMetadataPaths?: ReadonlySet<string>,
+  allowedDiagnosticKeys: ReadonlySet<string> = KNOWN_SAFE_DIAGNOSTIC_KEYS,
+  rawPathLabel: string = pathLabel,
 ): void {
   if (typeof value === "string") {
     const reasons = detectRawPiiReasonsInText(value);
@@ -179,7 +302,7 @@ function collectRawPiiViolations(
     return;
   }
   if (typeof value === "number" || typeof value === "bigint") {
-    if (!allowedNumericMetadataPaths?.has(pathLabel)) {
+    if (!allowedNumericMetadataPaths?.has(rawPathLabel)) {
       const isInt = typeof value === "bigint" || (Number.isFinite(value) && Number.isInteger(value));
       if (isInt) {
         const absDigits =
@@ -210,6 +333,8 @@ function collectRawPiiViolations(
         seen,
         undefined,
         allowedNumericMetadataPaths,
+        allowedDiagnosticKeys,
+        `${rawPathLabel}[${i}]`,
       );
     }
     return;
@@ -220,8 +345,13 @@ function collectRawPiiViolations(
     const isForbiddenField = FORBIDDEN_PII_FIELD_SET.has(normalizedKey);
     const keyReasons = detectRawPiiReasonsInText(key);
     const isSensitiveOrPiiKey = isForbiddenField || keyReasons.length > 0;
-    const safeSegment = isSensitiveOrPiiKey ? "[redacted_key]" : key;
+    const safeSegment = isSensitiveOrPiiKey
+      ? "[redacted_key]"
+      : allowedDiagnosticKeys.has(key)
+        ? key
+        : "<unexpected_key>";
     const childPath = `${pathLabel}.${safeSegment}`;
+    const rawChildPath = `${rawPathLabel}.${key}`;
 
     if (isForbiddenField) {
       out.push(`${childPath}:forbidden_pii_field`);
@@ -237,6 +367,8 @@ function collectRawPiiViolations(
       seen,
       undefined,
       allowedNumericMetadataPaths,
+      allowedDiagnosticKeys,
+      rawChildPath,
     );
   }
 }
@@ -244,7 +376,7 @@ function collectRawPiiViolations(
 /**
  * Recursively inspects all keys and leaves of an arbitrary value (such as a
  * trajectory, scorer receipt, or GEPA patch) and throws `CartridgePiiViolationError`
- * on any raw PII without echoing sensitive/PII-bearing keys.
+ * on any raw PII without echoing sensitive, PII-bearing, or unrecognized keys.
  */
 export function assertNoRawPiiInValue(
   value: unknown,
@@ -260,6 +392,8 @@ export function assertNoRawPiiInValue(
     new WeakSet(),
     undefined,
     options?.allowedNumericMetadataPaths,
+    options?.allowedDiagnosticKeys ?? KNOWN_SAFE_DIAGNOSTIC_KEYS,
+    rootLabel,
   );
   if (offending.length > 0) {
     const safeTrajectoryId = sanitizeTrajectoryIdForError(trajectoryId);

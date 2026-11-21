@@ -2237,4 +2237,203 @@ describe("Exact (C, -L, T7) Pareto frontier, Hard Pre-Pareto Veto, and Promotion
     expect(nullEntry.status).toBe("vetoed_leakage");
     expect(nullEntry.onParetoFrontier).toBe(false);
   });
+
+  it("catches formatted SSNs followed by sentence punctuation while excluding dotted version/IP tokens (Round-11 P1-1)", () => {
+    for (const ssnWithPunct of [
+      "Learner SSN is 123-45-6789.",
+      "Learner SSN is 123 45 6789.",
+      "Learner SSN is 123.45.6789.",
+      "Verify 123-45-6789, please.",
+      "Verify 123 45 6789; next.",
+      "Verify 123-45-6789: done",
+      "Is it 123-45-6789?",
+      "Stop 123-45-6789!",
+      "(123-45-6789)",
+    ]) {
+      expect(() => assertNoRawPiiInText(ssnWithPunct, "ssn_sentence_end")).toThrow(
+        CartridgePiiViolationError,
+      );
+    }
+
+    // Dotted version / IP-like tokens with a trailing or leading numeric segment remain excluded.
+    expect(() =>
+      assertNoRawPiiInText("Release 123.45.6789.1 and host 1.123.45.6789 passed.", "dotted_version"),
+    ).not.toThrow();
+
+    // Sentence-ending SSN inside a GEPA patch and trajectory snippet MUST be blocked!
+    expect(() =>
+      validateAndApplyGepaPatch(makeBasePolicy(), {
+        surface: "approvedTemplateSlots",
+        summary: "Note 123-45-6789.",
+        payload: { s1: "Check premise" },
+      }),
+    ).toThrow(CartridgePiiViolationError);
+    expect(() =>
+      clusterErrorTrajectories([
+        makeTrajectory({
+          trajectoryId: "r11_ssn_punct_t1",
+          snippet: "Student wrote 123 45 6789.",
+        }),
+      ]),
+    ).toThrow(CartridgePiiViolationError);
+  });
+
+  it("redacts unexpected object keys as <unexpected_key> in recursive PII scanner error paths (Round-11 P1-2)", () => {
+    // Direct recursive value scan with unrecognized ancestor key ("Alice Smith")
+    let directErr: unknown;
+    try {
+      assertNoRawPiiInValue({ "Alice Smith": { note: "alice@example.com" } }, "audit_payload");
+    } catch (err) {
+      directErr = err;
+    }
+    expect(directErr).toBeInstanceOf(CartridgePiiViolationError);
+    const piiDirect = directErr as CartridgePiiViolationError;
+    expect(piiDirect.message).toContain("<unexpected_key>");
+    expect(JSON.stringify(piiDirect.offendingFields)).toContain("<unexpected_key>");
+    expect(piiDirect.message).not.toContain("Alice Smith");
+    expect(JSON.stringify(piiDirect.offendingFields)).not.toContain("Alice Smith");
+    expect(piiDirect.message).not.toContain("alice@example.com");
+
+    // GEPA patch with unrecognized ancestor key ("Alice Smith") wrapping PII leaf
+    let patchErr: unknown;
+    try {
+      validateAndApplyGepaPatch(makeBasePolicy(), {
+        surface: "approvedTemplateSlots",
+        summary: "Nested PII under learner name key",
+        payload: {
+          "Alice Smith": { note: "alice@example.com" },
+        },
+      });
+    } catch (err) {
+      patchErr = err;
+    }
+    expect(patchErr).toBeInstanceOf(CartridgePiiViolationError);
+    const piiPatch = patchErr as CartridgePiiViolationError;
+    expect(piiPatch.message).toContain("<unexpected_key>");
+    expect(JSON.stringify(piiPatch.offendingFields)).toContain("<unexpected_key>");
+    expect(piiPatch.message).not.toContain("Alice Smith");
+    expect(JSON.stringify(piiPatch.offendingFields)).not.toContain("Alice Smith");
+    expect(piiPatch.message).not.toContain("alice@example.com");
+  });
+
+  it("allocates collision-free synthetic malformed-receipt IDs so valid '__malformed_candidate_0' and '__malformed_receipt_0' siblings still promote (Round-11 P1-4)", () => {
+    const validCand0 = buildMatureCohort("__malformed_candidate_0", {
+      learnerCount: 25,
+      repairedCount: 23,
+      t7PassedCount: 24,
+    });
+    const validReceipt0 = buildMatureCohort("__malformed_receipt_0", {
+      learnerCount: 25,
+      repairedCount: 23,
+      t7PassedCount: 24,
+    });
+    const missingIdReceipt = {
+      c: validCand0.c,
+      l: validCand0.l,
+      t7: validCand0.t7,
+    } as unknown as CartridgeCandidateMetrics;
+
+    // 1) Direct Pareto evaluation: null receipt at index 0 alongside valid "__malformed_candidate_0" and "__malformed_receipt_0"
+    const resNull = evaluateParetoFrontierAndPromotion(
+      [null as unknown as CartridgeCandidateMetrics, validCand0, validReceipt0],
+      {
+        baseline: { cRate: 0.85, t7Rate: 0.72 },
+        minT7Gain: 0.05,
+        nonInferiorityMargin: 0.02,
+        minClusterCount: 5,
+      },
+    );
+    expect(resNull.promotedCandidateIds).toContain("__malformed_candidate_0");
+    expect(resNull.promotedCandidateIds).toContain("__malformed_receipt_0");
+    expect(resNull.vetoedCandidateIds).toHaveLength(1);
+    expect(resNull.vetoedCandidateIds[0]).not.toBe("__malformed_candidate_0");
+    expect(resNull.vetoedCandidateIds[0]).not.toBe("__malformed_receipt_0");
+
+    // 2) Direct Pareto evaluation: missing-ID receipt at index 0 alongside valid "__malformed_candidate_0" and "__malformed_receipt_0"
+    const resMissingId = evaluateParetoFrontierAndPromotion(
+      [missingIdReceipt, validCand0, validReceipt0],
+      {
+        baseline: { cRate: 0.85, t7Rate: 0.72 },
+        minT7Gain: 0.05,
+        nonInferiorityMargin: 0.02,
+        minClusterCount: 5,
+      },
+    );
+    expect(resMissingId.promotedCandidateIds).toContain("__malformed_candidate_0");
+    expect(resMissingId.promotedCandidateIds).toContain("__malformed_receipt_0");
+    expect(resMissingId.vetoedCandidateIds).toHaveLength(1);
+    expect(resMissingId.vetoedCandidateIds[0]).not.toBe("__malformed_candidate_0");
+    expect(resMissingId.vetoedCandidateIds[0]).not.toBe("__malformed_receipt_0");
+
+    // 3) Full GEPA round: null receipt for one candidate alongside valid "__malformed_candidate_0" and "__malformed_receipt_0"
+    const records: ErrorTrajectoryRecord[] = [];
+    for (let comp = 0; comp < 4; comp += 1) {
+      for (let i = 0; i < 6; i += 1) {
+        records.push(
+          makeTrajectory({
+            trajectoryId: `r11_col_c${comp}_t${i}`,
+            learnerPseudoId: `pseudo_r11_c${comp}_u${i}`,
+            itemFamilyId: `fam_r11_c${comp}`,
+          }),
+        );
+      }
+    }
+    const split = createDisjointTrajectorySplit(records, { seed: 2027 });
+    const round = runGepaOptimizationRound({
+      basePolicy: makeBasePolicy(),
+      split,
+      clusteringOptions: { minSupport: 5 },
+      extraCandidatePatches: [
+        {
+          candidateId: "cand_r11_missing_receipt",
+          patches: [
+            {
+              surface: "approvedTemplateSlots",
+              summary: "Slot 0",
+              payload: { s0: "Verify premise" },
+            },
+          ],
+        },
+        {
+          candidateId: "__malformed_candidate_0",
+          patches: [
+            {
+              surface: "approvedTemplateSlots",
+              summary: "Slot 1",
+              payload: { s1: "Verify premise carefully" },
+            },
+          ],
+        },
+        {
+          candidateId: "__malformed_receipt_0",
+          patches: [
+            {
+              surface: "approvedTemplateSlots",
+              summary: "Slot 2",
+              payload: { s2: "Check boundary condition" },
+            },
+          ],
+        },
+      ],
+      scoreCandidate: (candidate) => {
+        if (candidate.candidateId === "cand_r11_missing_receipt") {
+          return null as unknown as CartridgeCandidateMetrics;
+        }
+        return buildMatureCohort(candidate.candidateId, {
+          learnerCount: 25,
+          repairedCount: 23,
+          t7PassedCount: 24,
+        });
+      },
+      paretoOptions: {
+        baseline: { cRate: 0.85, t7Rate: 0.72 },
+        minT7Gain: 0.05,
+        nonInferiorityMargin: 0.02,
+        minClusterCount: 5,
+      },
+    });
+    expect(round.pareto.vetoedCandidateIds).toContain("cand_r11_missing_receipt");
+    expect(round.pareto.promotedCandidateIds).toContain("__malformed_candidate_0");
+    expect(round.pareto.promotedCandidateIds).toContain("__malformed_receipt_0");
+  });
 });

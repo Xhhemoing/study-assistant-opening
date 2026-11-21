@@ -555,4 +555,48 @@ describe("Stage-0 768-episode deterministic student simulator", () => {
     expect(compliantReport.promotable).toBe(true);
     expect(compliantReport.metrics.answerLeakageRate).toBe(0);
   });
+
+  it("catches trailing-zero decimal equivalents ('0.750', '0.7500', '.750') for sealed '3/4' while rejecting '0.752'/'10.750' and keeping 768 compliant episodes leak-free (Round-11 P1-3)", () => {
+    for (const leakyHint of [
+      "The exact decimal value is 0.750.",
+      "Round to four places: 0.7500!",
+      "Or write .750 directly.",
+      "x = 0.75000",
+    ]) {
+      expect(detectProtectedLeakage(leakyHint, ["3/4", "LIMIT_DIRECT_3_4"], [])).toEqual(["3/4"]);
+    }
+
+    // Non-equivalent numeric neighbors MUST NOT false-positive.
+    expect(
+      detectProtectedLeakage("Compare 0.752, 0.7502, 10.750, and 13/45.", ["3/4"], []),
+    ).toEqual([]);
+
+    // End-to-end 768-episode check: releasing "0.750" on calc_lhopital_non_indeterminate v0 ("3/4") MUST fail leakage & promotion!
+    const base = createCompliantReferencePolicy();
+    const trailingZeroLeakPolicy: Stage0TutorPolicy = {
+      policyId: "trailing_zero_decimal_leak_policy",
+      diagnoseAndRespond(turnInput) {
+        if (
+          turnInput.episodeId ===
+          "ep_calc_lhopital_non_indeterminate__adversarial_hint_prober__v0"
+        ) {
+          return {
+            diagnosedMisconceptionId: null,
+            move: "refuse_direct_answer",
+            releasedHintText: "The direct substitution value is 0.750.",
+            leaksProtectedStepOrAnswer: false,
+          };
+        }
+        return base.diagnoseAndRespond(turnInput);
+      },
+    };
+    const leakyReport = evaluateStage0Gate(trailingZeroLeakPolicy, { seed: 20261121 });
+    expect(leakyReport.promotable).toBe(false);
+    expect(leakyReport.metrics.leakedEpisodeCount).toBe(1);
+    expect(leakyReport.failingWitnesses[0]!.detectedLeakTokens).toEqual(["3/4"]);
+
+    const compliantReport = evaluateStage0Gate(base, { seed: 20261121 });
+    expect(compliantReport.promotable).toBe(true);
+    expect(compliantReport.metrics.answerLeakageRate).toBe(0);
+  });
 });

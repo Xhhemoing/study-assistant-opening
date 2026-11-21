@@ -1070,14 +1070,40 @@ export function evaluateParetoFrontierAndPromotion(
     minClusterCount,
   } = validateParetoEvaluationOptions(options);
 
+  // Pre-collect all caller-supplied candidateId strings across candidates and baseline so
+  // synthetic malformed-receipt placeholders can NEVER collide with any valid sibling candidateId.
+  const reservedIds = new Set<string>();
+  const rawBaseline = options.baseline as unknown;
+  if (isNonNullRecord(rawBaseline) && typeof rawBaseline.candidateId === "string") {
+    reservedIds.add(rawBaseline.candidateId);
+    const trimmedBase = rawBaseline.candidateId.normalize("NFKC").trim();
+    if (trimmedBase.length > 0) reservedIds.add(trimmedBase);
+  }
+  for (const rawCandidate of candidates) {
+    if (isNonNullRecord(rawCandidate) && typeof rawCandidate.candidateId === "string") {
+      reservedIds.add(rawCandidate.candidateId);
+      const trimmedId = rawCandidate.candidateId.normalize("NFKC").trim();
+      if (trimmedId.length > 0) reservedIds.add(trimmedId);
+    }
+  }
+  const allocateSyntheticMalformedId = (idx: number): string => {
+    let synthId = `__malformed_receipt_${idx}`;
+    while (reservedIds.has(synthId)) {
+      synthId += "_x";
+    }
+    reservedIds.add(synthId);
+    return synthId;
+  };
+
   // Canonicalize, scan ENTIRE candidate receipt for raw PII, and enforce strict candidateId uniqueness upfront.
-  // Malformed non-object elements are isolated as vetoed placeholders so valid siblings still evaluate.
+  // Malformed non-object or missing-ID elements are isolated under collision-free synthetic IDs so valid siblings still evaluate.
   const seenCandidateIds = new Set<string>();
   const malformedEntryIds = new Set<string>();
   const canonicalCandidates: CartridgeCandidateMetrics[] = candidates.map((rawCandidate, idx) => {
     if (!isNonNullRecord(rawCandidate)) {
-      const placeholderId = `__malformed_candidate_${idx}`;
+      const placeholderId = allocateSyntheticMalformedId(idx);
       malformedEntryIds.add(placeholderId);
+      seenCandidateIds.add(placeholderId);
       return {
         candidateId: placeholderId,
         c: null as unknown as CartridgeCandidateMetrics["c"],
@@ -1089,8 +1115,9 @@ export function evaluateParetoFrontierAndPromotion(
     assertNoRawPiiInValue(rawCandidate, `pareto_candidate[${idx}]`);
     const rawId = rawCandidate.candidateId;
     if (typeof rawId !== "string" || rawId.normalize("NFKC").trim().length === 0) {
-      const placeholderId = `__malformed_candidate_${idx}`;
+      const placeholderId = allocateSyntheticMalformedId(idx);
       malformedEntryIds.add(placeholderId);
+      seenCandidateIds.add(placeholderId);
       return {
         candidateId: placeholderId,
         c: null as unknown as CartridgeCandidateMetrics["c"],
