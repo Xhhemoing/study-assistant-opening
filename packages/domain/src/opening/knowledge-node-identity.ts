@@ -3,6 +3,16 @@ import type { KnowledgeNode, SourceChunk } from "@aistudy/contracts";
 // NFC keeps superscripts and mathematical alphabets distinct (NFKC would turn x² into x2).
 const canonicalText = (text: string) => text.normalize("NFC").replace(/\r\n/gu, "\n");
 
+export function serializeKnowledgeEvidence(chunk: SourceChunk): string | null {
+  if (!chunk.text?.trim()) return null;
+  return JSON.stringify([chunk.sourceId, chunk.page, canonicalText(chunk.slideLabel ?? ""),
+    chunk.startMs, chunk.endMs, canonicalText(chunk.text)]);
+}
+
+export function knowledgeDefinitionHeader(node: KnowledgeNode) {
+  return ["knowledge-definition-v1", node.courseId, node.kind, canonicalText(node.label)];
+}
+
 /** Server-private definition: UUID/version churn is not a semantic change.
  * Keep the complete evidence text and location; never infer equivalence from labels alone. */
 export function knowledgeNodeDefinition(node: KnowledgeNode, chunks: readonly SourceChunk[]): string | null {
@@ -11,11 +21,11 @@ export function knowledgeNodeDefinition(node: KnowledgeNode, chunks: readonly So
   const evidence: string[] = [];
   for (const id of new Set(node.evidenceChunkIds)) {
     const chunk = byId.get(id);
-    if (!chunk?.text?.trim()) return null;
-    evidence.push(JSON.stringify([chunk.sourceId, chunk.page, canonicalText(chunk.slideLabel ?? ""),
-      chunk.startMs, chunk.endMs, canonicalText(chunk.text)]));
+    const serialized = chunk && serializeKnowledgeEvidence(chunk);
+    if (!serialized) return null;
+    evidence.push(serialized);
   }
-  return JSON.stringify(["knowledge-definition-v1", node.courseId, node.kind, canonicalText(node.label), [...new Set(evidence)].sort()]);
+  return JSON.stringify([...knowledgeDefinitionHeader(node), [...new Set(evidence)].sort()]);
 }
 
 /** Labels alone are not identity. A semantic edit must receive a new node UUID. */

@@ -16,7 +16,7 @@ export function MeasurementAttemptCard({ attempt, busy, onAction }: {
   const hasExternalHelp = attempt.helpEvents.some(event => event.kind === "external");
 
   return <section className={`${ui.panel} space-y-5 p-5`} aria-labelledby="measurement-question">
-    <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-text-2">
+    <div className="flex flex-wrap items-center justify-between gap-2 text-xs tabular-nums text-text-2">
       <span>{measurementPhaseLabels[attempt.item.phase]} · 第 {attempt.ordinal} 题</span>
       <span>{attempt.item.skillLabel}</span>
     </div>
@@ -24,8 +24,8 @@ export function MeasurementAttemptCard({ attempt, busy, onAction }: {
     <form onSubmit={event => { event.preventDefault(); if (answer && !busy) onAction({ action: "answer", answer }); }}>
       <fieldset disabled={busy} className="space-y-2">
         <legend className="sr-only">选择你的答案</legend>
-        {attempt.item.options.map(option => <label key={option.id} className="flex cursor-pointer items-start gap-3 rounded-lg border border-line px-3 py-3 text-sm leading-6 text-text-2 has-[:checked]:border-accent has-[:checked]:bg-accent-soft focus-within:ring-2 focus-within:ring-accent">
-          <input type="radio" name={`answer-${attempt.id}`} value={option.id} checked={answer === option.id} onChange={() => setAnswer(option.id)} className="mt-1 size-4 shrink-0 accent-emerald-700" />
+        {attempt.item.options.map(option => <label key={option.id} className="flex cursor-pointer items-start gap-3 rounded-xl border border-line bg-surface px-3.5 py-3 text-sm leading-6 text-text-2 transition-colors hover:border-line-strong has-[:checked]:border-accent/40 has-[:checked]:bg-accent-soft focus-within:ring-2 focus-within:ring-accent">
+          <input type="radio" name={`answer-${attempt.id}`} value={option.id} checked={answer === option.id} onChange={() => setAnswer(option.id)} className="mt-1 size-4 shrink-0 accent-accent" />
           <span>{option.label}</span>
         </label>)}
       </fieldset>
@@ -40,7 +40,7 @@ export function MeasurementAttemptCard({ attempt, busy, onAction }: {
         <button className={ui.quiet} disabled={busy || attempt.helpEvents.some(event => event.kind === "solution")} type="button" onClick={() => onAction({ action: "help", kind: "solution" })}>查看解析</button>
       </div> : <p className="text-xs leading-6 text-text-2">这轮请独立完成。3 题均提交或跳过后，再显示本轮结果与解析。</p>}
       <label className="flex items-start gap-2 text-xs leading-6 text-text-2">
-        <input type="checkbox" className="mt-1 size-4 shrink-0 accent-emerald-700" checked={hasExternalHelp} disabled={busy || hasExternalHelp} onChange={() => onAction({ action: "help", kind: "external" })} />
+        <input type="checkbox" className="mt-1 size-4 shrink-0 accent-accent" checked={hasExternalHelp} disabled={busy || hasExternalHelp} onChange={() => onAction({ action: "help", kind: "external" })} />
         我看过相关答案，或使用了教材、搜索、AI、他人帮助
       </label>
       {attempt.helpEvents.length ? <p className="text-xs leading-6 text-warn" role="status">已记录使用帮助；本题保留为练习记录，不计入独立作答的预测比较。</p> : null}

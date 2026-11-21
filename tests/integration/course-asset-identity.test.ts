@@ -485,4 +485,24 @@ describe("course asset identity invariant", () => {
       }),
     ).rejects.toMatchObject({ code: "CONFLICT" });
   });
+  it("redacts answer-key blocks from course document assets", async () => {
+    const visibleId = randomUUID();
+    const answerId = randomUUID();
+    const document = await library.createDocument({
+      workspaceId,
+      title: "Course lesson",
+      blocks: [
+        { id: visibleId, type: "paragraph", content: { text: "PUBLIC_COURSE_TEXT" } },
+        { id: answerId, type: "solution", content: { solution: "PRIVATE_COURSE_SOLUTION" } },
+      ],
+    });
+    await sql`INSERT INTO opening_note_provenance(document_id,workspace_id,context_source_refs)
+      VALUES(${document.id},${workspaceId},${sql.json([{ answerKeyBlockIds: [answerId] }])})`;
+    const course = await courses.createCourse({ workspaceId, title: "Course", slug: "course-redaction" });
+    await courses.addAssetMembership({ workspaceId, courseId: course.id, assetType: "document", assetId: document.id, role: "core", visibility: "course" });
+
+    const [asset] = await courses.listCourseAssets({ workspaceId, courseId: course.id });
+    expect(asset?.document?.blocks.map((block) => block.id)).toEqual([visibleId]);
+    expect(JSON.stringify(asset)).not.toContain("PRIVATE_COURSE_SOLUTION");
+  });
 });

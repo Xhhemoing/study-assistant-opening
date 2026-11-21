@@ -64,7 +64,7 @@ describe.skipIf(!enabled)("material import supported backup round trip", () => {
     const objectPut = createMemoryOpeningRestoreObjectPut();
     const facts = await snapshotOpeningRestoreCurrentFacts(sql, backup);
     if (reviewer === "existing") {
-      for (const drift of ["time", "microtime", "jsonMicrotime", "matchingMicrotime", "jsonPrecision", "invalidCalendar", "history", "revision"] as const) {
+      for (const drift of ["time", "microtime", "jsonMicrotime", "matchingMicrotime", "jsonPrecision", "invalidCalendar", "history", "revision", "nullRevision"] as const) {
         const corrupted = JSON.parse(JSON.stringify(backup));
         const row = corrupted.tables.opening_source_versions[0];
         if (drift === "time") row.material_reviewed_at = "2000-01-01T00:00:00Z";
@@ -81,6 +81,12 @@ describe.skipIf(!enabled)("material import supported backup round trip", () => {
         }
         if (drift === "history") row.material_manifest.bindings[0].historyRevision = 9000;
         if (drift === "revision") row.material_manifest_revision = 2;
+        if (drift === "nullRevision") {
+          row.material_manifest = null;
+          row.material_reviewed_by = null;
+          row.material_reviewed_at = null;
+          row.material_manifest_revision = null;
+        }
         const before = await importState(sql, x.sourceId, x.scope);
         const writes: string[] = [];
         trackedWrites = writes;
@@ -90,7 +96,7 @@ describe.skipIf(!enabled)("material import supported backup round trip", () => {
             objectBodies: { [archivePath]: bytes }, objectPut });
         } finally { trackedWrites = null; }
         expect(rejected).toMatchObject({ ok: false, mutated: false });
-        expect(writes).toEqual([]);
+        expect(writes, drift).toEqual([]);
         expect(await importState(sql, x.sourceId, x.scope)).toEqual(before);
         expect(objectPut.store.size).toBe(0);
         expect(await sql`SELECT id FROM courses WHERE workspace_id=${x.scope.workspaceId}`).toHaveLength(0);

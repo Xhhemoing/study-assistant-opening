@@ -2,7 +2,7 @@
 
 import type { SourceRecord } from "@aistudy/contracts";
 import { builtInLessonsForCourse } from "./built-in-lessons";
-import { ArrowLeft, BookOpen } from "lucide-react";
+import { ArrowLeft, BookOpen, ChevronDown } from "lucide-react";
 import { TransitionLink as Link } from "../v3/motion/view-transition";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
@@ -123,10 +123,10 @@ export function CourseAssets({ courseId, assets, onRemoved, onChanged, libraryHr
     } catch (reason) { setError(userFacingMessage(reason, "移出课程失败，请重试。")); }
     finally { setBusy(false); }
   }
-  return <div className="space-y-3"><ul className="divide-y divide-line border-y border-line">{assets.map((asset) => {
+  return <div className="space-y-3"><ul className="divide-y divide-line overflow-hidden rounded-card border border-line bg-surface shadow-card">{assets.map((asset) => {
     const roleLabel = assetRoleLabel(asset.role);
     const statusBadge = assetSourceStatus(asset.source as CourseSourceDetails | undefined);
-    return <li className="flex flex-wrap items-center justify-between gap-3 px-4 py-3" key={asset.id}>
+    return <li className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 transition-colors duration-150 hover:bg-surface-2/50" key={asset.id}>
       <span className="flex min-w-0 flex-1 items-center gap-3"><BookOpen aria-hidden="true" className="shrink-0 text-accent" size={17} />{asset.document ? <Link href={objectHref(`${libraryHref}#document-${encodeURIComponent(asset.document.id)}`)} className="truncate text-sm text-text underline decoration-line-strong underline-offset-4 hover:text-accent focus-visible:ring-2 focus-visible:ring-accent">{asset.document.title}</Link> : <span className="truncate text-sm text-text">{asset.source?.name ?? "未命名课程材料"}</span>}</span>
       {statusBadge ? <span className={statusBadge.className}>{statusBadge.label}</span> : null}
       <span className="shrink-0 text-xs text-text-3">{roleLabel}</span><button className={ui.quiet} disabled={busy} onClick={() => { setSelected(asset); setError(""); }} type="button" aria-label={`将 ${asset.document?.title ?? asset.source?.name ?? "未命名课程材料"} 移出此课程`}>移出课程</button>
@@ -134,7 +134,7 @@ export function CourseAssets({ courseId, assets, onRemoved, onChanged, libraryHr
       {diagnostics ? <p className="w-full break-all text-xs text-text-3">材料 ID：{asset.assetId} · 角色：{roleLabel}</p> : null}
     </li>;
   })}</ul>
-    {selected ? <div className="space-y-2"><p className="text-xs leading-6 text-text-2">将“{selected.document?.title ?? selected.source?.name ?? "未命名课程材料"}”移出此课程？原件和其他课程中的引用仍保留，此操作不会删除材料或停止模型使用。</p><div className="flex gap-2"><button className={ui.secondary} disabled={busy} onClick={() => void remove()} type="button">{busy ? "移出中…" : "确认移出此课程"}</button><button className={ui.quiet} disabled={busy} onClick={() => { setSelected(null); setError(""); }} type="button">取消</button></div></div> : null}
+    {selected ? <div className="space-y-2.5 rounded-xl border border-line bg-surface-2/60 p-3.5"><p className="text-xs leading-6 text-text-2">将“{selected.document?.title ?? selected.source?.name ?? "未命名课程材料"}”移出此课程？原件和其他课程中的引用仍保留，此操作不会删除材料或停止模型使用。</p><div className="flex gap-2"><button className={ui.secondary} disabled={busy} onClick={() => void remove()} type="button">{busy ? "移出中…" : "确认移出此课程"}</button><button className={ui.quiet} disabled={busy} onClick={() => { setSelected(null); setError(""); }} type="button">取消</button></div></div> : null}
     {error ? <LoadError message={error} /> : null}
   </div>;
 }
@@ -189,7 +189,7 @@ export function CourseMediaSection({ assets, libraryMaterialsHref = "/opening/li
           <li key={source.id}>
             <button
               type="button"
-              className={`min-h-11 w-full rounded-md border px-3 py-2 text-left text-xs ${selectedId === source.id ? "border-accent bg-accent-soft text-accent" : "border-text-3 bg-surface text-text hover:border-accent"}`}
+              className={`min-h-11 w-full rounded-ctl border px-3.5 py-2.5 text-left text-xs transition-[border-color,background-color,color,box-shadow] duration-150 ${selectedId === source.id ? "border-accent/40 bg-accent-soft font-medium text-accent shadow-card" : "border-line bg-surface text-text hover:border-line-strong hover:bg-surface-2/50"}`}
               aria-pressed={selectedId === source.id}
               onClick={() => { setSelectedId(source.id); setSeekMs(null); setSeekNotice(""); }}
             >
@@ -198,7 +198,7 @@ export function CourseMediaSection({ assets, libraryMaterialsHref = "/opening/li
           </li>
         ))}
       </ul>
-      {seekNotice ? <p className="text-xs leading-6 text-warn" role="status">{seekNotice}</p> : null}
+      {seekNotice ? <p className="text-xs leading-6 tabular-nums text-warn" role="status">{seekNotice}</p> : null}
       {selected ? (
         <MediaReader
           key={selected.id}
@@ -210,7 +210,7 @@ export function CourseMediaSection({ assets, libraryMaterialsHref = "/opening/li
         <p className="text-xs text-text-3" role="status">尚未选择材料。点上方名称打开一份阅读器。</p>
       )}
       {selected && seekMs != null ? (
-        <p className="text-xs text-text-3" role="status">当前参考位置：{Math.floor(seekMs / 1000)}s（在阅读器中核对）。</p>
+        <p className="text-xs tabular-nums text-text-3" role="status">当前参考位置：{Math.floor(seekMs / 1000)}s（在阅读器中核对）。</p>
       ) : null}
       <p className="text-xs leading-5 text-text-3">
         若依据不能定位到片段，可仅打开材料库，暂不能定位到具体时间。
@@ -224,7 +224,7 @@ export function CourseMediaSection({ assets, libraryMaterialsHref = "/opening/li
 export const COURSE_NOT_FOUND = "找不到这门课程";
 export const courseReadMissing = (status: number) => status === 404 || status === 400;
 
-export function useCourseBundle(id: string) {
+export function useCourseBundle(id: string, { includeAssets = true } = {}) {
   const [course, setCourse] = useState<CourseSummary | null>(null);
   const [assets, setAssets] = useState<CourseAsset[]>([]);
   const [loading, setLoading] = useState(true);
@@ -235,19 +235,23 @@ export function useCourseBundle(id: string) {
     let active = true;
     setLoading(true);
     setError("");
-    Promise.all([fetch(`/api/courses/${encodeURIComponent(id)}`, { cache: "no-store" }), fetch(`/api/courses/${encodeURIComponent(id)}/assets`, { cache: "no-store" })])
+    const url = `/api/courses/${encodeURIComponent(id)}`;
+    Promise.all([
+      fetch(url, { cache: "no-store" }),
+      includeAssets ? fetch(`${url}/assets`, { cache: "no-store" }) : null,
+    ])
       .then(async ([courseResponse, assetResponse]) => {
         if (courseReadMissing(courseResponse.status)) { if (active) setError(COURSE_NOT_FOUND); return; }
-        if (!courseResponse.ok || !assetResponse.ok) throw new Error();
+        if (!courseResponse.ok || (assetResponse && !assetResponse.ok)) throw new Error();
         const courseBody = await courseResponse.json() as { course?: CourseSummary };
-        const assetBody = await assetResponse.json() as { assets?: CourseAsset[] };
+        const assetBody = assetResponse ? await assetResponse.json() as { assets?: CourseAsset[] } : null;
         if (!courseBody.course) throw new Error();
-        if (active) { setCourse(courseBody.course); setAssets(assetBody.assets ?? []); }
+        if (active) { setCourse(courseBody.course); setAssets(assetBody?.assets ?? []); }
       })
       .catch(() => { if (active) setError("课程内容加载失败，请重试。"); })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
-  }, [id, reloadToken]);
+  }, [id, includeAssets, reloadToken]);
 
   return { course, assets, setCourse, setAssets, loading, error, reload: () => setReloadToken((value) => value + 1) };
 }
@@ -355,15 +359,15 @@ export function CourseDetail({ id, surface = "opening", mode, conversationId }: 
   const goal = <section aria-labelledby="course-goal-settings-heading" className="space-y-3 border-t border-line pt-5"><h2 id="course-goal-settings-heading" className="text-base font-semibold">目标与学习安排</h2><CourseGoalForm courseId={id} /></section>;
   const materials = <section id="course-assets" aria-labelledby="course-assets-heading" className="scroll-mt-6 space-y-4">
     <div className="flex flex-wrap items-center justify-between gap-3">
-      <h2 className="text-base font-semibold" id="course-assets-heading">课程材料 · {assets.length}</h2>
+      <h2 className="text-base font-semibold tabular-nums" id="course-assets-heading">课程材料 · {assets.length}</h2>
       <div className="flex flex-wrap items-center gap-2"><CourseAddMaterials courseId={id} assets={assets} onAdded={refreshCourseMaterials} /><Link className={ui.quiet} href={objectHref(paths.libraryMaterials)}>打开资料</Link></div>
     </div>
     {assets.length ? <CourseAssets key={id} courseId={id} assets={assets} libraryHref={paths.libraryNotes} onRemoved={(assetId) => { setAssets((current) => current.filter((asset) => asset.id !== assetId)); bumpCrossTab(); }} onChanged={refreshCourseMaterials} /> : <EmptyState title="还没有课程材料" description="点「添加材料」从资料中选择，或「上传并归入本课」直接上传。" action={<Link className={ui.quiet} href={objectHref(paths.upload(id))}>上传并归入本课</Link>} />}
   </section>;
 
-  const page = <section className="flex h-full min-h-0 flex-col bg-bg text-text">
+  const page = <section className="flex min-h-full flex-col bg-bg text-text">
     {paths.openingActions ? <CourseSpaceHeader courseId={id} title={course.title} archived={Boolean(course.archivedAt)} /> : <PageHeader title={course.title} action={<Link className={ui.quiet} href={paths.coursesList}><ArrowLeft size={14} aria-hidden="true" />全部课程</Link>} />}
-    <div className="min-h-0 flex-1 overflow-y-auto"><ContentGrid className="px-5 py-5">
+    <div className="flex-1"><ContentGrid className="px-5 py-5">
       {paths.openingActions ? <CourseTabs courseId={id} conversationId={conversationId} grouped={grouped}>
         <CoursePanel name="overview">
           {grouped ? <h2 className="text-base font-semibold">学习安排</h2> : null}
@@ -400,7 +404,7 @@ export function CourseDetail({ id, surface = "opening", mode, conversationId }: 
           {!grouped ? goal : null}
           <LearnerStateCard courseId={id} />{!grouped ? <CourseExamProgress courseId={id} /> : null}<CourseSummaryPanel courseId={id} />
         </CoursePanel>
-        <CoursePanel name="materials">{materials}<CourseMediaSection assets={assets} libraryMaterialsHref={paths.libraryMaterials} />{grouped ? <details><summary className="cursor-pointer py-3 text-sm font-medium">课程设置</summary>{settings}</details> : settings}</CoursePanel>
+        <CoursePanel name="materials">{materials}<CourseMediaSection assets={assets} libraryMaterialsHref={paths.libraryMaterials} />{grouped ? <details className="group rounded-card border border-line bg-surface px-4 py-3 shadow-card"><summary className="flex cursor-pointer list-none items-center justify-between gap-2 py-1 text-sm font-medium text-text [&::-webkit-details-marker]:hidden"><span>课程设置</span><ChevronDown size={15} aria-hidden="true" className="shrink-0 text-text-3 transition-transform duration-200 ease-out-strong group-open:rotate-180" /></summary><div className="pt-3">{settings}</div></details> : settings}</CoursePanel>
       </CourseTabs> : <>
         {studyActions}<CourseLearningView courseId={id} />
         <section className="space-y-5 border-t border-line pt-4" aria-label="课程资料与设置"><CourseKnowledge courseId={id} knowledgeRefreshToken={knowledgeRefreshToken ?? 0} />{materials}<CourseMediaSection assets={assets} libraryMaterialsHref={paths.libraryMaterials} />{settings}</section>

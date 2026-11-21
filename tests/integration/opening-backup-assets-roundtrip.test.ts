@@ -1,0 +1,1214 @@
+import { createHash, randomUUID } from "node:crypto";
+import { setTimeout } from "node:timers/promises";
+import { expect, it } from "vitest";
+import type { Sql, TransactionSql } from "postgres";
+import { assertOpeningTestDatabase } from "@aistudy/config";
+import { nativeBackupPackageSchema } from "@aistudy/contracts";
+import type { ActivitySpecPublishInput, ExamSprintState } from "@aistudy/contracts";
+import { applyExamSprintCommand, examSprintOverview, composeOpeningBackupDraft, createExamSprintState, validateOpeningRestore, type OpeningBackup } from "@aistudy/domain";
+import { EXAM_SPRINT_PACK } from "@aistudy/domain/exam-sprint-catalog";
+import { createSqlClient } from "../../packages/database/src/migrate";
+import { createMemoryOpeningRestoreObjectPut, executeOpeningRestoreApply, readOpeningBackupRecords, readOpeningRestoreNamespaceCounts } from "../../packages/database/src/repositories/opening-backup";
+import { insertTestTeachingActivity } from "./opening-fixture";
+import { dumpWorkspaceSnapshot, snapshotToPackage } from "../../packages/database/src/repositories/backup-dump";
+import { createBackupRestoreRepository } from "../../packages/database/src/repositories/backup-restore";
+import { createCardRepository } from "../../packages/database/src/repositories/cards";
+import { createOpeningKnowledgeRepository } from "../../packages/database/src/repositories/opening-knowledge";
+import { createOpeningSourceChunksRepository } from "../../packages/database/src/repositories/opening-source-chunks";
+import { createOpeningFirstLearningRepository } from "../../packages/database/src/repositories/opening-first-learning";
+import { createOpeningTeachingContentRepository } from "../../packages/database/src/repositories/opening-teaching-content";
+import { lockWorkspaceLearningHistory } from "../../packages/database/src/repositories/opening-learning-facts";
+import { createOpeningExamSprintRepository } from "../../packages/database/src/repositories/opening-exam-sprint";
+import { createOpeningExamIntegrationRepository } from "../../packages/database/src/repositories/opening-exam-integration";
+import { examPackDirectorySections } from "../../packages/database/src/repositories/opening-exam-source-format";
+import { validExamLessonExposure } from "../../packages/domain/src/opening/exam-sprint/lesson-exposure-mapping";
+import { exportSprintPack, restoreSprintPack } from "../../packages/database/src/repositories/opening-backup-exam-pack";
+import { backupRows, sourceBytes, sourceHash } from "./opening-backup-records-fixture";
+
+it.each([
+  { mode: "diagnostic", linkage: "current" },
+  { mode: "practice", linkage: "forged spec" },
+  { mode: "diagnostic", linkage: "mismatched stem" },
+  { mode: "diagnostic", linkage: "missing link" },
+  { mode: "diagnostic", linkage: "missing binding and link" },
+] as const)(
+  "restores a course-bound $mode with a $linkage pending attempt", async ({ mode, linkage }) => {
+    const url = assertOpeningTestDatabase(process.env.OPENING_TEST_DATABASE_URL!, process.env.OPENING_TEST_DB);
+    const sql = createSqlClient(url.toString(), { max: 1 });
+    const rollback = new Error("rollback restored diagnostic"), discardSeed = new Error("discard source diagnostic");
+    const scope = { workspaceId: randomUUID(), ownerUserId: randomUUID() }, courseId = randomUUID();
+    const pack = EXAM_SPRINT_PACK;
+    const createWorkspace = async (tx: TransactionSql) => {
+      await tx`INSERT INTO workspaces(id,owner_user_id) VALUES(${scope.workspaceId},${scope.ownerUserId})`;
+    };
+    try {
+      await sql.begin("isolation level repeatable read", async outer => {
+        await outer`INSERT INTO users(id,email,display_name,password_hash)
+          VALUES(${scope.ownerUserId},${scope.ownerUserId + "@backup.test"},'fixture','test')`;
+        const bodies = new Map<string, Uint8Array>();
+        let backup: OpeningBackup | undefined;
+        let pendingId: string | undefined;
+        let questionId: string | undefined;
+        await outer.savepoint(async tx => {
+          await createWorkspace(tx);
+          await tx`INSERT INTO courses(id,workspace_id,title,slug) VALUES(${courseId},${scope.workspaceId},'Course','course')`;
+          const db = transactionClient(tx);
+          const integration = createOpeningExamIntegrationRepository(db, pack, { writePublicSource: async source => {
+            bodies.set(`objects/${source.sourceId}/v${source.version}.bin`, source.body);
+          } });
+          const bound = await integration.bind(scope, { clientKey: randomUUID(), courseId, milestoneId: null,
+            expectedPackVersion: pack.version, createKnowledgeNodes: true, skills: [], materials: [] });
+          const sprint = createOpeningExamSprintRepository(db, pack);
+          const started = await sprint.act(scope, { action: "start", mode, clientKey: randomUUID() });
+          pendingId = started.currentAttempt!.id;
+          questionId = started.currentAttempt!.questionId;
+          const records = await readOpeningBackupRecords(db, scope);
+          expect(records.tables.opening_exam_attempt_links).toMatchObject([{ exam_attempt_id: pendingId, publication: "pending_answer" }]);
+          expect(records.tables.opening_learning_item_versions).toMatchObject([{ evaluation_spec: null }]);
+          const sourceId = bound.binding!.packSourceId, archivePath = `objects/${sourceId}/v0.bin`;
+          const body = bodies.get(archivePath)!;
+          const sha256 = createHash("sha256").update(body).digest("hex");
+          const source = { sourceId, version: 0, bytes: body.byteLength, sha256 };
+          const composed = composeOpeningBackupDraft({ records, staging: {
+            snapshot: { workspaceId: scope.workspaceId, privacyEpoch: records.privacyEpoch, deletionJournal: records.deletionJournal,
+              memoryDeletions: records.memoryDeletions, sources: [source] },
+            objects: [{ ...source, actualSha256: sha256, archivePath }],
+          } });
+          if (!composed.ok) throw new Error(composed.errors.join(", "));
+          backup = composed.backup;
+          throw discardSeed;
+        }).catch(error => { if (error !== discardSeed) throw error; });
+        if (!backup || !pendingId || !questionId) throw new Error("Missing diagnostic archive");
+        await createWorkspace(outer);
+        const question = pack.questions.find(entry => entry.id === questionId)!;
+        const wire: OpeningBackup = JSON.parse(JSON.stringify(backup));
+        const item = wire.tables.opening_learning_item_versions![0] as Record<string, unknown>;
+        const spec = { kind: "exam_choice", specVersion: "exam-choice-v1", packId: pack.id, packVersion: pack.version,
+          questionId, familyId: question.familyId };
+        if (linkage === "forged spec") {
+          const wrongOption = question.options.find(option => option.id !== question.answer)!.id;
+          const forged = { ...spec, answer: wrongOption };
+          const attempt = wire.tables.opening_learning_attempts![0] as { create_intent: { examSprint: { spec: unknown } } };
+          attempt.create_intent.examSprint.spec = forged;
+          item.evaluation_spec = forged;
+        }
+        if (linkage === "mismatched stem") item.stem_snapshot = "Different question";
+        if (linkage === "missing link" || linkage === "missing binding and link") wire.tables.opening_exam_attempt_links = [];
+        if (linkage === "missing binding and link") {
+          wire.tables.opening_exam_bindings = [];
+          expect(wire.tables.opening_learning_attempts).toMatchObject([{ create_intent: { examSprint: { examAttemptId: pendingId } } }]);
+          expect(wire.tables.opening_teaching_activities).toMatchObject([{ create_intent: { identity: pendingId } }]);
+        }
+        const db = transactionClient(outer);
+        const result = await executeOpeningRestoreApply(db, { confirmLocalRestore: true, backup: wire,
+          currentMemoryDeletions: wire.memoryDeletions, currentLearningState: { workspacePreferences: null, courses: [] },
+          objectBodies: bodies, objectPut: createMemoryOpeningRestoreObjectPut() });
+        expect(result, result.errors.join(", ")).toMatchObject({ ok: true, objectsApplied: 1 });
+        const sprint = createOpeningExamSprintRepository(db, pack);
+        const submit = (attemptId: string, answer: string) => sprint.act(scope, { action: "answer", attemptId,
+          answer, confidence: 4, clientKey: randomUUID() });
+        if (linkage === "current" || linkage === "forged spec") {
+          const submitted = await submit(pendingId, question.answer);
+          expect(submitted.currentAttempt).toMatchObject({ id: pendingId, correct: true, firstFamilyExposure: false });
+          const [observation] = await outer`SELECT o.outcome,o.verdict_source,l.publication,l.first_family_exposure,
+              a.create_intent #> '{examSprint,spec}' AS archived_spec
+            FROM opening_exam_attempt_links l JOIN opening_learning_observations o ON o.id=l.observation_id
+            JOIN opening_learning_attempts a ON a.id=l.learning_attempt_id
+            WHERE l.exam_attempt_id=${pendingId} AND o.workspace_id=${scope.workspaceId}`;
+          expect(observation).toEqual({ outcome: "correct", verdict_source: "deterministic", publication: "published",
+            first_family_exposure: false, archived_spec: null });
+          const [version] = await outer`SELECT evaluation_spec FROM opening_learning_item_versions WHERE id=${String(item.id)}`;
+          expect(version?.evaluation_spec).toEqual(spec);
+        } else {
+          const historical = await sprint.read(scope);
+          expect(historical).toMatchObject({ activeRun: null, currentAttempt: null,
+            attempts: [{ id: pendingId, answer: null, answeredAt: null, correct: null, feedback: null }] });
+          await expect(submit(pendingId, question.answer)).rejects.toMatchObject({ code: "CONFLICT" });
+          const [activity] = await outer`SELECT status FROM opening_teaching_activities WHERE workspace_id=${scope.workspaceId}`;
+          expect(activity?.status).toBe("completed");
+          const fresh = await sprint.act(scope, { action: "start", mode, clientKey: randomUUID() });
+          const freshAttempt = fresh.currentAttempt!;
+          expect(freshAttempt.id).not.toBe(pendingId);
+          const freshQuestion = pack.questions.find(entry => entry.id === freshAttempt.questionId)!;
+          expect((await submit(freshAttempt.id, freshQuestion.answer)).currentAttempt).toMatchObject({ correct: true });
+          const [version] = await outer`SELECT evaluation_spec FROM opening_learning_item_versions WHERE id=${String(item.id)}`;
+          expect(version?.evaluation_spec).toBeNull();
+        }
+        throw rollback;
+      }).catch(error => { if (error !== rollback) throw error; });
+    } finally { await sql.end(); }
+  }, 30_000,
+);
+
+function publishedRequest(activityId: string, sourceId: string, chunk: string) {
+  const id = randomUUID();
+  const question = { topic: "Algebra", prompt: "Solve the equation", referenceAnswer: "private solution",
+    rubric: ["private grading key"], hints: { direction: "d", concept: "c", firstStep: "s" }, evidenceChunkIds: [chunk], estimatedMinutes: 1 };
+  return { id, input: { sourceId, questionCount: 3, clientKey: "exam-request" }, sourceVersion: 1,
+    sourceTitle: "My paper", privacyEpoch: 0, createdAt: new Date().toISOString(), status: "ready", activityId, modelLabel: null,
+    proposal: { title: "Paper", topics: [{ label: "Algebra", evidenceChunkIds: [chunk] }], questions: [question,question,question] } };
+}
+
+it("retains generated exam request history without disclosing its unpublished answer material", () => {
+  const request = publishedRequest(randomUUID(), randomUUID(), randomUUID());
+  const row = { course_id: randomUUID(), state: {}, pack_snapshot: { format: "course-exam-v1", requests: [request] } };
+  const projected = exportSprintPack(row);
+  expect(projected.pack_snapshot).toMatchObject({ requests: [{ id: request.id, input: request.input, status: "unknown", activityId: null, proposal: null }] });
+  expect(JSON.stringify(projected)).not.toContain("private solution");
+  expect(restoreSprintPack(projected)).toEqual(projected);
+  expect(exportSprintPack({ ...row, state: { referenceAnswer: "private" } }).state).toEqual({});
+  expect(() => restoreSprintPack({ ...projected, state: { referenceAnswer: "private" } })).toThrow(/private/i);
+  expect(() => restoreSprintPack(row)).toThrow(/private/i);
+});
+
+it.each(["mock-a", "mock-b"] as const)("restores %s history without granting catalog feedback", mode => {
+  const now = "2026-11-19T12:00:00Z";
+  const started = applyExamSprintCommand(createExamSprintState(now), { action: "start", clientKey: "start", mode }, EXAM_SPRINT_PACK, now);
+  const attempt = started.attempts[0]!;
+  const question = EXAM_SPRINT_PACK.questions.find(row => row.id === attempt.questionId)!;
+  const answered = applyExamSprintCommand(started, { action: "answer", clientKey: "answer", attemptId: attempt.id,
+    answer: question.options[0]!.id, confidence: 3 }, EXAM_SPRINT_PACK, now);
+  for (const state of [started, answered]) {
+    const archived = exportSprintPack({ course_id: null, pack_snapshot: EXAM_SPRINT_PACK, state });
+    const history = archived.state as ExamSprintState;
+    const interrupted = restoreSprintPack(archived).state as ExamSprintState;
+    expect(examSprintOverview(interrupted, EXAM_SPRINT_PACK, now)).toMatchObject({ activeRun: null, attempts: [{ feedback: null }] });
+    history.runs[0]!.completedAt = now;
+    const restored = restoreSprintPack(archived).state as ExamSprintState;
+    const overview = examSprintOverview(restored, EXAM_SPRINT_PACK, now);
+    expect(overview.attempts[0]).toMatchObject({ feedback: null, correct: null, independent: false });
+    expect(overview.summary.onlineAnswered).toBe(0);
+    history.runs[0]!.mode = "practice";
+    expect(() => restoreSprintPack(archived)).toThrow();
+  }
+});
+
+// Run the real queries and constraints in a rollback-only test transaction. Inside it,
+// each repository transaction has its own savepoint and inherits the outer snapshot.
+// Keep the outer transaction writable for the fixture and restore.
+function transactionClient(tx: TransactionSql): Sql {
+  return new Proxy(tx, { get(target, property, receiver) {
+    if (property !== "begin") return Reflect.get(target, property, receiver);
+    return (...args: unknown[]) => target.savepoint(args.at(-1) as (nested: TransactionSql) => Promise<unknown>);
+  } }) as unknown as Sql;
+}
+
+it("excludes historical teaching text and dependent records when a superseded publication source is excluded", async () => {
+  const url = assertOpeningTestDatabase(process.env.OPENING_TEST_DATABASE_URL!, process.env.OPENING_TEST_DB);
+  const sql = createSqlClient(url.toString(), { max: 1 });
+  const rollback = new Error("rollback teaching source fixture");
+  const w = randomUUID(), u = randomUUID();
+  const scope = { workspaceId: w, ownerUserId: u };
+  const block = randomUUID(), unrelated = randomUUID();
+  const text = "Private material cited only by the teaching spec";
+  try {
+    await sql.begin("isolation level repeatable read", async tx => {
+      const db = transactionClient(tx), rows = backupRows(db, scope);
+      await tx`INSERT INTO users(id,email,display_name,password_hash) VALUES(${u},${u + "@backup.test"},'fixture','test')`;
+      await tx`INSERT INTO workspaces(id,owner_user_id) VALUES(${w},${u})`;
+      const source = await rows.source(), initialSource = await rows.source(), session = await rows.learning([initialSource]);
+      const observation = await rows.observation(session, [initialSource]);
+      const [origin] = await tx`SELECT activity_id FROM opening_learning_sessions WHERE id=${session}`;
+      const activity = String(origin!.activity_id);
+      const teaching = createOpeningTeachingContentRepository(db);
+      const unit = await teaching.createUnit(scope, { title: "Lesson", blocks: [{ id: block, type: "text", content: { text } }] });
+      const doc = unit.documentId;
+      await teaching.publishActivitySpec(scope, { activityId: activity, teachingUnitId: unit.id,
+        revisionNumber: unit.currentRevisionNumber, expectedVersion: 0,
+        blockOrder: [{ blockId: block, blockType: "text", role: "teach" }], sourceRefs: [{ sourceId: source, version: 1 }] });
+      await tx`INSERT INTO library_documents(id,workspace_id,title,lifecycle,current_revision_number) VALUES
+        (${unrelated},${w},'Independent essay','confirmed',1)`;
+      await tx`INSERT INTO library_properties(workspace_id,subject_type,subject_id,key,value_type,value)
+        VALUES(${w},'document',${doc},'provenance','string','"lesson metadata"')`;
+      const card = randomUUID(), review = randomUUID(), correction = randomUUID();
+      await tx`INSERT INTO cards(id,workspace_id,owner_user_id,front,back,origin_observation_root_id,source_ids)
+        VALUES(${card},${w},${u},'Automatic error card','Original answer',${observation},${[initialSource]})`;
+      await tx`INSERT INTO learning_events(id,workspace_id,owner_user_id,type,schema_version,idempotency_key,occurred_at,content_id,content_version,payload)
+        VALUES(${review},${w},${u},'review',1,${review},now(),${card},1,'{"grade":"good"}')`;
+      await tx`INSERT INTO learning_events(id,workspace_id,owner_user_id,type,schema_version,idempotency_key,occurred_at,corrects_event_id,payload)
+        VALUES(${correction},${w},${u},'correction',1,${correction},now(),${review},'{"note":"Private correction"}')`;
+      const native = () => createBackupRestoreRepository(db).exportWorkspace(scope);
+      const opening = () => readOpeningBackupRecords(db, scope);
+      expect((await native()).records.cards).toMatchObject([{ id: card, sourceDocumentId: null, originObservationRootId: observation }]);
+      const newBlock = randomUUID();
+      const revised = await teaching.writeUnitBlocks(scope, unit.id, [{ id: newBlock, type: "text", content: { text: "Replacement text" } }]);
+      const currentRefs = [{ sourceId: initialSource, version: 1 }];
+      const input: ActivitySpecPublishInput = { activityId: activity, teachingUnitId: unit.id, revisionNumber: revised.revisionNumber,
+        expectedVersion: 1, blockOrder: [{ blockId: newBlock, blockType: "text", role: "teach" }], sourceRefs: currentRefs };
+      const spec = await teaching.publishActivitySpec(scope, input);
+      expect(spec.sourceRefs).toEqual(currentRefs);
+      expect(await teaching.publishActivitySpec(scope, input)).toEqual(spec);
+      await tx`INSERT INTO library_relations(workspace_id,from_type,from_id,to_type,to_id,relation_type)
+        VALUES(${w},'document',${unrelated},'block',${newBlock},'references')`;
+      expect((await native()).records.revisions).toContainEqual(expect.objectContaining({
+        documentId: doc, revisionNumber: 1, blocks: [expect.objectContaining({ id: block, content: { text } })],
+      }));
+      expect((await opening()).tables).toMatchObject({
+        library_blocks: [expect.objectContaining({ id: newBlock })],
+        library_relations: [expect.objectContaining({ to_id: newBlock })],
+        library_revisions: expect.arrayContaining([expect.objectContaining({
+          document_id: doc, revision_number: 1, blocks: [expect.objectContaining({ id: block, content: { text } })],
+        })]),
+        library_properties: [expect.objectContaining({ subject_id: doc })],
+        cards: [expect.objectContaining({ id: card, source_document_id: null })],
+        learning_events: [expect.objectContaining({ id: review })],
+      });
+      await rows.exclude(source);
+      const openingAfter = await opening(), nativeAfter = await native();
+      for (const artifact of [openingAfter.tables, nativeAfter.records]) {
+        expect(JSON.stringify(artifact)).toContain(unrelated);
+        expect(JSON.stringify(artifact)).not.toContain(doc);
+        expect(JSON.stringify(artifact)).not.toContain(block);
+        expect(JSON.stringify(artifact)).not.toContain(text);
+        for (const omitted of [card, review, correction, observation]) {
+          expect(JSON.stringify(artifact)).not.toContain(omitted);
+        }
+      }
+      throw rollback;
+    }).catch(error => { if (error !== rollback) throw error; });
+  } finally { await sql.end(); }
+});
+
+it.each(["activity-only", "superseded"])("retains %s publication sources on Opening v2 documents and cards after restore and spec removal", async publication => {
+  const url = assertOpeningTestDatabase(process.env.OPENING_TEST_DATABASE_URL!, process.env.OPENING_TEST_DB);
+  const sql = createSqlClient(url.toString(), { max: 1 });
+  const rollback = new Error("rollback Opening card restore"), discardSeed = new Error("discard source workspace");
+  const scope = { workspaceId: randomUUID(), ownerUserId: randomUUID() };
+  const { workspaceId: w, ownerUserId: u } = scope;
+  const card = randomUUID(), review = randomUUID(), block = randomUUID(), key = randomUUID();
+  const keyBlock = { id: key, type: "text", position: 1, content: { text: "Legacy role-only answer" } };
+  try {
+    await sql.begin("isolation level repeatable read", async outer => {
+      await outer`INSERT INTO users(id,email,display_name,password_hash) VALUES(${u},${u + "@backup.test"},'fixture','test')`;
+      let archive: { backup: OpeningBackup; observation: string; document: string; source: string } | undefined;
+      await outer.savepoint(async tx => {
+        await tx`INSERT INTO workspaces(id,owner_user_id) VALUES(${w},${u})`;
+        const db = transactionClient(tx), rows = backupRows(db, scope), teaching = createOpeningTeachingContentRepository(db);
+        const source = await rows.source(), session = await rows.learning();
+        const observation = await rows.observation(session);
+        const [lesson] = await tx`SELECT activity_id,course_id FROM opening_learning_sessions WHERE id=${session}`;
+        await tx`INSERT INTO courses(id,workspace_id,title,slug) VALUES(${lesson!.course_id},${w},'Course','course')`;
+        await tx`UPDATE opening_teaching_activities SET course_id=${lesson!.course_id} WHERE id=${lesson!.activity_id}`;
+        if (publication === "activity-only") {
+          await tx`UPDATE opening_teaching_activities SET source_ids=${[source]} WHERE id=${lesson!.activity_id}`;
+        }
+        const unit = await teaching.createUnit(scope, { title: "Lesson",
+          blocks: [{ id: block, type: "text", content: { text: "Publication-derived lesson" } }] });
+        const spec = { activityId: String(lesson!.activity_id), teachingUnitId: unit.id,
+          revisionNumber: unit.currentRevisionNumber, blockOrder: [],
+          sourceRefs: publication === "activity-only" ? [] : [{ sourceId: source, version: 1 }] };
+        await teaching.publishActivitySpec(scope, { ...spec, expectedVersion: 0 });
+        if (publication === "activity-only") {
+          const expected = [{ sourceId: source, sourceVersion: 1, publication: true }];
+          expect(await tx`SELECT context_source_refs FROM opening_note_provenance WHERE document_id=${unit.documentId}`)
+            .toEqual([{ context_source_refs: expected }]);
+          await tx`DELETE FROM opening_note_provenance WHERE document_id=${unit.documentId}`;
+          const native = await createBackupRestoreRepository(db).exportWorkspace(scope);
+          expect(native.records.documents[0]?.openingProvenance).toMatchObject({ contextSourceRefs: expected });
+        }
+        if (publication === "superseded") await teaching.publishActivitySpec(scope, { ...spec, expectedVersion: 1, sourceRefs: [] });
+        await tx`INSERT INTO cards(id,workspace_id,owner_user_id,front,back,origin_observation_root_id)
+          VALUES(${card},${w},${u},'Lesson card','Learner answer',${observation})`;
+        await tx`INSERT INTO learning_events(id,workspace_id,owner_user_id,type,schema_version,idempotency_key,occurred_at,content_id,content_version,payload)
+          VALUES(${review},${w},${u},'review',1,${review},now(),${card},1,'{"grade":"good"}')`;
+        const records = await readOpeningBackupRecords(db, scope);
+        expect(records.tables.cards).toMatchObject([{ id: card, source_ids: [source] }]);
+        const object = { sourceId: source, version: 1, sha256: sourceHash, bytes: sourceBytes.length };
+        const composed = composeOpeningBackupDraft({ records, staging: {
+          snapshot: { workspaceId: w, privacyEpoch: records.privacyEpoch, deletionJournal: records.deletionJournal,
+            memoryDeletions: records.memoryDeletions, sources: [object] },
+          objects: [{ ...object, actualSha256: sourceHash, archivePath: `objects/${source}/v1.bin` }],
+        } });
+        if (!composed.ok) throw new Error(composed.errors.join(", "));
+        const backup = JSON.parse(JSON.stringify(composed.backup)) as OpeningBackup;
+        // An older archive may only record the source on the parent activity.
+        if (publication === "activity-only") {
+          backup.tables.opening_note_provenance = [];
+          backup.tables.opening_teaching_activity_specs![0]!.block_order = [{ blockId: key, blockType: "text", role: "answer_key" }];
+          (backup.tables.library_revisions![0]!.blocks as Record<string, unknown>[]).push(keyBlock);
+        }
+        // Exercise restore's derivation for an archive where the card only named its observation.
+        backup.tables.cards![0]!.source_ids = [];
+        archive = { backup, source, observation, document: unit.documentId };
+        throw discardSeed;
+      }).catch(error => { if (error !== discardSeed) throw error; });
+      if (!archive) throw new Error("Missing publication archive");
+      const { backup, source, observation, document } = archive;
+      await outer`INSERT INTO workspaces(id,owner_user_id) VALUES(${w},${u})`;
+      const db = transactionClient(outer);
+      const result = await executeOpeningRestoreApply(db, { confirmLocalRestore: true, backup,
+        objectBodies: new Map(backup.objects.map(object => [object.archivePath, sourceBytes])),
+        objectPut: createMemoryOpeningRestoreObjectPut(), currentMemoryDeletions: backup.memoryDeletions,
+        currentLearningState: { workspacePreferences: null, courses: [] } });
+      expect(result, result.errors.join(", ")).toMatchObject({ ok: true });
+      expect(await outer`SELECT source_ids FROM cards WHERE id=${card}`).toEqual([{ source_ids: [source] }]);
+      await outer`DELETE FROM opening_teaching_activity_specs WHERE workspace_id=${w}`;
+      await outer`DELETE FROM opening_teaching_units WHERE workspace_id=${w}`;
+      if (publication === "activity-only") {
+        const restored = await createBackupRestoreRepository(db).exportWorkspace(scope);
+        expect(restored.records.documents[0]!.openingProvenance).toMatchObject({ answerKeyBlockIds: [key] });
+        expect(JSON.stringify(restored.records.revisions)).not.toContain(keyBlock.content.text);
+      }
+      await backupRows(db, scope).exclude(source);
+      const openingAfter = await readOpeningBackupRecords(db, scope);
+      const nativeAfter = await createBackupRestoreRepository(db).exportWorkspace(scope);
+      if (publication === "activity-only") expect(openingAfter.tables.opening_learning_observations).toEqual([]);
+      else expect(openingAfter.tables.opening_learning_observations).toMatchObject([{ id: observation }]);
+      for (const artifact of [openingAfter.tables, nativeAfter.records]) {
+        for (const omitted of [document, block, card, review]) {
+          expect(JSON.stringify(artifact)).not.toContain(omitted);
+        }
+      }
+      throw rollback;
+    }).catch(error => { if (error !== rollback) throw error; });
+  } finally { await sql.end(); }
+});
+
+async function withPublicationFixture(run: (tx: TransactionSql, scope: { workspaceId: string; ownerUserId: string }) => Promise<void>) {
+  const url = assertOpeningTestDatabase(process.env.OPENING_TEST_DATABASE_URL!, process.env.OPENING_TEST_DB);
+  const sql = createSqlClient(url.toString(), { max: 1 });
+  const rollback = new Error("rollback publication fixture");
+  const scope = { workspaceId: randomUUID(), ownerUserId: randomUUID() };
+  try {
+    await sql.begin("isolation level repeatable read", async tx => {
+      await tx`INSERT INTO users(id,email,display_name,password_hash)
+        VALUES(${scope.ownerUserId},${scope.ownerUserId + "@backup.test"},'fixture','test')`;
+      await tx`INSERT INTO workspaces(id,owner_user_id) VALUES(${scope.workspaceId},${scope.ownerUserId})`;
+      await run(tx, scope);
+      throw rollback;
+    }).catch(error => { if (error !== rollback) throw error; });
+  } finally { await sql.end(); }
+}
+
+it.each(["publication source", "old document", "soft-deleted document"])("blocks an automatic card after switching units and restricting the %s", async exclusion => {
+  await withPublicationFixture(async (tx, scope) => {
+    const db = transactionClient(tx), rows = backupRows(db, scope), backups = createBackupRestoreRepository(db);
+    const teaching = createOpeningTeachingContentRepository(db);
+    const sourceA = await rows.source(), sourceB = await rows.source(), documentSource = await rows.source();
+    const session = await rows.learning(), observation = await rows.observation(session);
+    const [origin] = await tx`SELECT activity_id FROM opening_learning_sessions WHERE id=${session}`;
+    const activityId = String(origin!.activity_id), block = randomUUID();
+    const first = await teaching.createUnit(scope, { title: "Old lesson", blocks: [{ id: block, type: "text", content: {
+      text: "Old explanation", citationBinding: { blockId: block, role: "teach", status: "bound", factualSupport: "unverified",
+        refs: [{ sourceId: documentSource, sourceVersion: 1 }] },
+    } }] });
+    const second = await teaching.createUnit(scope, { title: "New lesson",
+      blocks: [{ id: randomUUID(), type: "text", content: { text: "New explanation" } }] });
+    const publish = (unit: typeof first, sourceId: string, expectedVersion: number) => teaching.publishActivitySpec(scope, {
+      activityId, teachingUnitId: unit.id, revisionNumber: unit.currentRevisionNumber, expectedVersion,
+      blockOrder: [], sourceRefs: [{ sourceId, version: 1 }],
+    });
+    await publish(first, sourceA, 0);
+    const { card, review, corrections } = await seedPublicationCard(tx, scope, observation);
+    await publish(second, sourceB, 1);
+    const packed = await backups.exportWorkspace(scope);
+    expect(packed.records.cards).toMatchObject([{ id: card }]);
+    expect(packed.records.events.map(row => row.id)).toEqual(expect.arrayContaining([review, ...corrections]));
+    await tx`TRUNCATE learning_events`;
+    await tx`DELETE FROM cards WHERE id=${card}`;
+    await tx`UPDATE opening_note_provenance SET context_source_refs=${tx.json([{ sourceId: sourceA, sourceVersion: 1, publication: true }])}
+      WHERE document_id=${first.documentId}`;
+    expect((await backups.restoreWorkspace({ ...scope, packed, conflictPolicy: "skip" })).applied)
+      .toMatchObject({ cards: 1, events: 3 });
+    expect((await readOpeningBackupRecords(db, scope)).tables.cards).toMatchObject([{ id: card }]);
+    if (exclusion === "soft-deleted document") {
+      await tx`UPDATE library_documents SET deleted_at=now() WHERE id=${first.documentId}`;
+    } else {
+      // A legacy card may rely solely on the historical document for its earlier source.
+      if (exclusion === "publication source") await tx`UPDATE cards SET source_ids=${[sourceB]} WHERE id=${card}`;
+      await rows.exclude(exclusion === "publication source" ? sourceA : documentSource);
+    }
+    if (exclusion !== "old document") {
+      await expect(createCardRepository(db).getCard({ workspaceId: scope.workspaceId, cardId: card }))
+        .rejects.toMatchObject({ code: "NOT_FOUND" });
+    }
+    for (const artifact of [(await backups.exportWorkspace(scope)).records, (await readOpeningBackupRecords(db, scope)).tables]) {
+      const wire = JSON.stringify(artifact);
+      expect(wire).toContain(second.documentId);
+      for (const id of [card, review, ...corrections]) expect(wire).not.toContain(id);
+      if (exclusion !== "soft-deleted document") expect(wire).not.toContain(first.documentId);
+    }
+  });
+});
+
+it("carries historical automatic card document links through an Opening restore", async () => {
+  await withPublicationFixture(async (outer, scope) => {
+    const { workspaceId: w } = scope;
+    const discard = new Error("discard the exported lesson workspace data");
+    let archive: { backup: OpeningBackup; oldDoc: string; newDoc: string; card: string; review: string; documentSource: string } | undefined;
+    await outer.savepoint(async tx => {
+      const db = transactionClient(tx), rows = backupRows(db, scope), teaching = createOpeningTeachingContentRepository(db);
+      const documentSource = await rows.source(), session = await rows.learning(), observation = await rows.observation(session);
+      const [origin] = await tx`SELECT activity_id,course_id FROM opening_learning_sessions WHERE id=${session}`;
+      await tx`INSERT INTO courses(id,workspace_id,title,slug) VALUES(${origin!.course_id},${w},'Course','course')`;
+      await tx`UPDATE opening_teaching_activities SET course_id=${origin!.course_id} WHERE id=${origin!.activity_id}`;
+      const block = randomUUID();
+      const oldUnit = await teaching.createUnit(scope, { title: "Old lesson", blocks: [{ id: block, type: "text", content: {
+        text: "Old explanation", citationBinding: { blockId: block, role: "teach", status: "bound", factualSupport: "unverified",
+          refs: [{ sourceId: documentSource, sourceVersion: 1 }] },
+      } }] });
+      const newUnit = await teaching.createUnit(scope, { title: "New lesson",
+        blocks: [{ id: randomUUID(), type: "text", content: { text: "New explanation" } }] });
+      const publish = (unit: typeof oldUnit, expectedVersion: number) => teaching.publishActivitySpec(scope, {
+        activityId: String(origin!.activity_id), teachingUnitId: unit.id, revisionNumber: unit.currentRevisionNumber,
+        expectedVersion, blockOrder: [], sourceRefs: [],
+      });
+      await publish(oldUnit, 0);
+      const { card, review } = await seedPublicationCard(tx, scope, observation);
+      await publish(newUnit, 1);
+      const records = await readOpeningBackupRecords(db, scope);
+      expect(records.tables.cards).toMatchObject([{ id: card, source_ids: [] }]);
+      const object = { sourceId: documentSource, version: 1, sha256: sourceHash, bytes: sourceBytes.length };
+      const composed = composeOpeningBackupDraft({ records, staging: {
+        snapshot: { workspaceId: w, privacyEpoch: records.privacyEpoch, deletionJournal: records.deletionJournal,
+          memoryDeletions: records.memoryDeletions, sources: [object] },
+        objects: [{ ...object, actualSha256: sourceHash, archivePath: `objects/${documentSource}/v1.bin` }],
+      } });
+      if (!composed.ok) throw new Error(composed.errors.join(", "));
+      archive = { backup: JSON.parse(JSON.stringify(composed.backup)), oldDoc: oldUnit.documentId,
+        newDoc: newUnit.documentId, card, review, documentSource };
+      throw discard;
+    }).catch(error => { if (error !== discard) throw error; });
+    if (!archive) throw new Error("Missing publication archive");
+    const { backup, oldDoc, newDoc, card, review, documentSource } = archive;
+    const db = transactionClient(outer);
+    const restored = await executeOpeningRestoreApply(db, { confirmLocalRestore: true, backup,
+      currentMemoryDeletions: backup.memoryDeletions, currentLearningState: { workspacePreferences: null, courses: [] },
+      objectBodies: new Map(backup.objects.map(object => [object.archivePath, sourceBytes])), objectPut: createMemoryOpeningRestoreObjectPut() });
+    expect(restored, restored.errors.join(", ")).toMatchObject({ ok: true });
+    expect((await readOpeningBackupRecords(db, scope)).tables.learning_events).toMatchObject([{ id: review }]);
+    expect((await createBackupRestoreRepository(db).exportWorkspace(scope)).records.cards).toMatchObject([{ id: card, sourceIds: [] }]);
+    await backupRows(db, scope).exclude(documentSource);
+    for (const artifact of [(await readOpeningBackupRecords(db, scope)).tables, (await createBackupRestoreRepository(db).exportWorkspace(scope)).records]) {
+      const wire = JSON.stringify(artifact);
+      expect(wire).toContain(newDoc);
+      for (const omitted of [oldDoc, card, review]) expect(wire).not.toContain(omitted);
+    }
+  });
+});
+
+async function seedPublicationCard(tx: TransactionSql, scope: { workspaceId: string; ownerUserId: string }, observation: string) {
+  const { workspaceId: w, ownerUserId: u } = scope;
+  const card = randomUUID(), review = randomUUID(), corrections = [randomUUID(), randomUUID()];
+  await tx`INSERT INTO cards(id,workspace_id,owner_user_id,front,back,origin_observation_root_id)
+    VALUES(${card},${w},${u},'Lesson card','Learner answer',${observation})`;
+  await tx`INSERT INTO learning_events(id,workspace_id,owner_user_id,type,schema_version,idempotency_key,occurred_at,content_id,content_version,payload)
+    VALUES(${review},${w},${u},'review',1,${review},now(),${card},1,'{"grade":"good"}')`;
+  for (const [index, correction] of corrections.entries()) {
+    await tx`INSERT INTO learning_events(id,workspace_id,owner_user_id,type,schema_version,idempotency_key,occurred_at,corrects_event_id,payload)
+      VALUES(${correction},${w},${u},'correction',1,${correction},now(),${[review, ...corrections][index]!},'{}')`;
+  }
+  return { card, review, corrections };
+}
+
+it("remembers a text block's answer-key role after republication and restore", async () => {
+  await withPublicationFixture(async (tx, scope) => {
+    const db = transactionClient(tx), rows = backupRows(db, scope), backups = createBackupRestoreRepository(db);
+    const session = await rows.learning(), key = randomUUID(), publicBlock = randomUUID();
+    const [origin] = await tx`SELECT activity_id,course_id FROM opening_learning_sessions WHERE id=${session}`;
+    await tx`INSERT INTO courses(id,workspace_id,title,slug) VALUES(${origin!.course_id},${scope.workspaceId},'Course','course')`;
+    await tx`UPDATE opening_teaching_activities SET course_id=${origin!.course_id} WHERE id=${origin!.activity_id}`;
+    const teaching = createOpeningTeachingContentRepository(db);
+    const text = "Unlabelled private answer text";
+    const unit = await teaching.createUnit(scope, { title: "Lesson", blocks: [
+      { id: key, type: "text", content: { text } }, { id: publicBlock, type: "text", content: { text: "Public lesson" } },
+    ] });
+    const spec = { activityId: String(origin!.activity_id), teachingUnitId: unit.id,
+      revisionNumber: unit.currentRevisionNumber, sourceRefs: [] };
+    const visible = { blockId: publicBlock, blockType: "text", role: "teach" } as const;
+    await teaching.publishActivitySpec(scope, { ...spec, expectedVersion: 0,
+      blockOrder: [{ blockId: key, blockType: "text", role: "answer_key" }, visible] });
+    const assertPrivate = async () => {
+      const opening = await readOpeningBackupRecords(db, scope), native = await backups.exportWorkspace(scope);
+      for (const artifact of [opening.tables, native.records]) {
+        expect(JSON.stringify(artifact)).toContain("Public lesson");
+        expect(JSON.stringify(artifact)).not.toContain(text);
+      }
+      return native;
+    };
+    // Pre-existing single publications may only have the role in the spec.
+    await tx`DELETE FROM opening_note_provenance WHERE document_id=${unit.documentId}`;
+    await assertPrivate();
+    expect((await readOpeningBackupRecords(db, scope)).tables.opening_note_provenance)
+      .toMatchObject([{ document_id: unit.documentId, context_source_refs: [{ answerKeyBlockIds: [key] }] }]);
+    await teaching.publishActivitySpec(scope, { ...spec, expectedVersion: 1, blockOrder: [visible] });
+    const packed = await assertPrivate();
+    await tx`DELETE FROM opening_teaching_activity_specs WHERE activity_id=${spec.activityId}`;
+    await tx`DELETE FROM opening_teaching_units WHERE id=${unit.id}`;
+    await tx`TRUNCATE library_revisions`;
+    await tx`DELETE FROM library_documents WHERE id=${unit.documentId}`;
+    // Simulate an older revision payload accompanying the retained redaction identities.
+    (packed.records.revisions[0]!.blocks as Record<string, unknown>[]).push({ id: key, type: "text", position: 0, content: { text } });
+    expect((await backups.restoreWorkspace({ ...scope, packed, conflictPolicy: "skip" })).applied.revisions).toBe(1);
+    await assertPrivate();
+    expect((await backups.exportWorkspace(scope)).records.documents[0]!.openingProvenance)
+      .toMatchObject({ answerKeyBlockIds: [key] });
+  });
+});
+
+it("merges Native skip lineage before importing revisions and reviews onto retained parents", async () => {
+  await withPublicationFixture(async (tx, scope) => {
+    const db = transactionClient(tx), rows = backupRows(db, scope), backups = createBackupRestoreRepository(db);
+    const source = await rows.source(), activitySource = await rows.source(), retainedSource = await rows.source();
+    const session = await rows.learning(), observation = await rows.observation(session);
+    const [origin] = await tx`SELECT activity_id FROM opening_learning_sessions WHERE id=${session}`;
+    await tx`UPDATE opening_teaching_activities SET source_ids=${[activitySource]} WHERE id=${origin!.activity_id}`;
+    const teaching = createOpeningTeachingContentRepository(db), block = randomUUID(), key = randomUUID();
+    const unit = await teaching.createUnit(scope, { title: "Lesson", blocks: [
+      { id: block, type: "text", content: { text: "Publication-derived revision" } }, { id: key, type: "text", content: { text: "Answer key" } },
+    ] });
+    await teaching.publishActivitySpec(scope, { activityId: String(origin!.activity_id), teachingUnitId: unit.id,
+      revisionNumber: unit.currentRevisionNumber, expectedVersion: 0,
+      blockOrder: [{ blockId: key, blockType: "text", role: "answer_key" }], sourceRefs: [{ sourceId: source, version: 1 }] });
+    const { card, review, corrections } = await seedPublicationCard(tx, scope, observation);
+    const packed = await backups.exportWorkspace(scope);
+    const revision = String(packed.records.revisions[0]!.id);
+    await tx`DELETE FROM opening_teaching_activity_specs WHERE activity_id=${origin!.activity_id}`;
+    await tx`DELETE FROM opening_teaching_units WHERE id=${unit.id}`;
+    await tx`UPDATE opening_note_provenance SET context_source_refs=${tx.json([{ sourceId: retainedSource, sourceVersion: 1, publication: true }])}
+      WHERE document_id=${unit.documentId}`;
+    await tx`TRUNCATE library_revisions, learning_events`;
+    await tx`UPDATE cards SET source_ids=${[retainedSource]},origin_observation_root_id=NULL WHERE id=${card}`;
+    const restored = await backups.restoreWorkspace({ ...scope, packed, conflictPolicy: "skip" });
+    expect(restored.skipped).toMatchObject({ documents: 1, cards: 1 });
+    expect(restored.applied).toMatchObject({ revisions: 1, events: 3 });
+    const before = await backups.exportWorkspace(scope);
+    expect(before.records.documents).toMatchObject([{ openingProvenance: { answerKeyBlockIds: [key], contextSourceRefs: expect.arrayContaining([
+      { sourceId: source, sourceVersion: 1, publication: true }, { sourceId: activitySource, sourceVersion: 1, publication: true },
+      { sourceId: retainedSource, sourceVersion: 1, publication: true },
+    ]) } }]);
+    expect(before.records.cards).toMatchObject([{ id: card, originObservationRootId: observation,
+      sourceIds: expect.arrayContaining([source, activitySource, retainedSource]) }]);
+    expect(before.records.events.map(row => row.id)).toEqual(expect.arrayContaining([review, ...corrections]));
+    await rows.exclude(activitySource);
+    for (const artifact of [(await backups.exportWorkspace(scope)).records, (await readOpeningBackupRecords(db, scope)).tables]) {
+      for (const id of [unit.documentId, revision, card, review, ...corrections]) expect(JSON.stringify(artifact)).not.toContain(id);
+    }
+  });
+});
+
+it.each(["excluded", "missing"] as const)("skips native publication lineage on restore when a cited source is %s", async unavailable => {
+  const url = assertOpeningTestDatabase(process.env.OPENING_TEST_DATABASE_URL!, process.env.OPENING_TEST_DB);
+  const sql = createSqlClient(url.toString(), { max: 1 });
+  const rollback = new Error("rollback publication restore fixture");
+  const workspaceId = randomUUID(), ownerUserId = randomUUID(), doc = randomUUID(), block = randomUUID(), unit = randomUUID(), revision = randomUUID();
+  const scope = { workspaceId, ownerUserId };
+  try {
+    await sql.begin("isolation level repeatable read", async tx => {
+      const db = transactionClient(tx), rows = backupRows(db, scope), backups = createBackupRestoreRepository(db);
+      await tx`INSERT INTO users(id,email,display_name,password_hash) VALUES(${ownerUserId},${ownerUserId + "@backup.test"},'fixture','test')`;
+      await tx`INSERT INTO workspaces(id,owner_user_id) VALUES(${workspaceId},${ownerUserId})`;
+      const source = await rows.source(), session = await rows.learning();
+      const observation = await rows.observation(session);
+      const [origin] = await tx`SELECT activity_id FROM opening_learning_sessions WHERE id=${session}`;
+      const activity = String(origin!.activity_id);
+      await tx`INSERT INTO library_documents(id,workspace_id,title,lifecycle,current_revision_number)
+        VALUES(${doc},${workspaceId},'Lesson','published',1)`;
+      await tx`INSERT INTO library_blocks(id,workspace_id,document_id,type,position,content)
+        VALUES(${block},${workspaceId},${doc},'text',0,'{"text":"Publication-derived explanation"}')`;
+      await tx`INSERT INTO library_revisions(id,workspace_id,document_id,revision_number,title,lifecycle,reason,blocks)
+        VALUES(${revision},${workspaceId},${doc},1,'Lesson','published','create',${tx.json([
+          { id: block, type: "text", position: 0, content: { text: "Publication-derived explanation" } },
+        ])})`;
+      await tx`INSERT INTO opening_teaching_units(id,workspace_id,owner_user_id,title,document_id,current_revision_number)
+        VALUES(${unit},${workspaceId},${ownerUserId},'Lesson',${doc},1)`;
+      await tx`INSERT INTO opening_teaching_activity_specs(id,workspace_id,owner_user_id,activity_id,teaching_unit_id,document_id,
+        revision_number,source_refs,version)
+        VALUES(${randomUUID()},${workspaceId},${ownerUserId},${activity},${unit},${doc},1,${tx.json([{ sourceId: source }])},1)`;
+      const card = randomUUID(), review = randomUUID(), correction = randomUUID();
+      await tx`INSERT INTO cards(id,workspace_id,owner_user_id,front,back,origin_observation_root_id)
+        VALUES(${card},${workspaceId},${ownerUserId},'Lesson card','Learner answer',${observation})`;
+      await tx`INSERT INTO learning_events(id,workspace_id,owner_user_id,type,schema_version,idempotency_key,occurred_at,content_id,content_version,payload)
+        VALUES(${review},${workspaceId},${ownerUserId},'review',1,${review},now(),${card},1,'{"grade":"good"}')`;
+      await tx`INSERT INTO learning_events(id,workspace_id,owner_user_id,type,schema_version,idempotency_key,occurred_at,corrects_event_id,payload)
+        VALUES(${correction},${workspaceId},${ownerUserId},'correction',1,${correction},now(),${review},'{"note":"Lesson correction"}')`;
+      const packed = nativeBackupPackageSchema.parse(JSON.parse(JSON.stringify(await backups.exportWorkspace(scope))));
+      expect(packed.counts).toMatchObject({ documents: 1, blocks: 1, revisions: 1, cards: 1, events: 2 });
+      expect(packed.records.cards).toMatchObject([{ id: card, sourceIds: [source] }]);
+      // Round-14 native archives supplied the publication via the document, without card source IDs.
+      const legacy = { ...packed, records: { ...packed.records, cards: packed.records.cards.map(row => ({ ...row, sourceIds: [] })) } };
+      const provenance = { contextSourceRefs: [{ sourceId: source, sourceVersion: 1, publication: true }] };
+
+      // Remove the destination spec so the archive must supply the publication lineage.
+      await tx`TRUNCATE library_revisions, learning_events`;
+      await tx`DELETE FROM cards WHERE id=${card}`;
+      await tx`DELETE FROM opening_teaching_activity_specs WHERE activity_id=${activity}`;
+      await tx`DELETE FROM opening_teaching_units WHERE id=${unit}`;
+      await tx`DELETE FROM library_documents WHERE id=${doc}`;
+      if (unavailable === "missing") {
+        await tx.savepoint(async () => {
+          const admitted = await backups.restoreWorkspace({ ...scope, packed: legacy, conflictPolicy: "reject" });
+          expect(admitted.applied).toMatchObject({ documents: 1, blocks: 1, revisions: 1, cards: 1, events: 2 });
+          expect(await tx`SELECT source_ids FROM cards WHERE id=${card}`).toEqual([{ source_ids: [source] }]);
+          const nativeBefore = await backups.exportWorkspace(scope);
+          expect(nativeBefore.records.documents).toMatchObject([{ id: doc, openingProvenance: provenance }]);
+          expect(nativeBefore.records.events.map(row => row.id)).toEqual(expect.arrayContaining([review, correction]));
+          const openingBefore = await readOpeningBackupRecords(db, scope);
+          expect(openingBefore.tables.cards).toMatchObject([{ id: card, origin_observation_root_id: observation }]);
+          expect(openingBefore.tables.learning_events).toMatchObject([{ id: review }]);
+          await rows.exclude(source);
+          const nativeAfter = await backups.exportWorkspace(scope);
+          const openingAfter = await readOpeningBackupRecords(db, scope);
+          expect(openingAfter.tables.opening_learning_observations).toMatchObject([{ id: observation }]);
+          for (const artifact of [nativeAfter.records, openingAfter.tables]) {
+            for (const omitted of [doc, block, revision, card, review, correction]) {
+              expect(JSON.stringify(artifact)).not.toContain(omitted);
+            }
+          }
+          throw rollback;
+        }).catch(error => { if (error !== rollback) throw error; });
+      }
+      if (unavailable === "excluded") await rows.exclude(source);
+      else await tx`DELETE FROM opening_sources WHERE id=${source}`;
+      const result = await backups.restoreWorkspace({ ...scope, packed, conflictPolicy: "reject" });
+      expect(result.applied).toMatchObject({ documents: 0, blocks: 0, revisions: 0, cards: 0, events: 0 });
+      expect(await tx`SELECT id FROM library_documents WHERE id=${doc}`).toEqual([]);
+      expect(await tx`SELECT id FROM cards WHERE id=${card}`).toEqual([]);
+      expect(await tx`SELECT id FROM learning_events WHERE workspace_id=${workspaceId}`).toEqual([]);
+      throw rollback;
+    }).catch(error => { if (error !== rollback) throw error; });
+  } finally { await sql.end(); }
+});
+
+it.each(["cited source versions", "build receipt"] as const)(
+  "round-trips a legacy graph and its confirmation immediately after parser retry using %s",
+  async (coverageOrigin) => {
+    const url = assertOpeningTestDatabase(process.env.OPENING_TEST_DATABASE_URL!, process.env.OPENING_TEST_DB);
+    const sql = createSqlClient(url.toString(), { max: 1 });
+    const rollback = new Error("rollback legacy graph restore"), discardSeed = new Error("discard source graph");
+    const w = randomUUID(), u = randomUUID(), course = randomUUID(), node = randomUUID();
+    const scope = { workspaceId: w, ownerUserId: u };
+    try {
+      await sql.begin("isolation level repeatable read", async outer => {
+        await outer`INSERT INTO users(id,email,display_name,password_hash) VALUES(${u},${u + "@backup.test"},'fixture','test')`;
+        let backup: OpeningBackup | undefined;
+        await outer.savepoint(async tx => {
+          await tx`INSERT INTO workspaces(id,owner_user_id) VALUES(${w},${u})`;
+          await tx`INSERT INTO courses(id,workspace_id,title,slug) VALUES(${course},${w},'Course','course')`;
+          const db = transactionClient(tx), rows = backupRows(db, scope);
+          const source = await rows.source(), chunk = await rows.chunk(source);
+          const retried = coverageOrigin === "build receipt" ? await rows.source() : source;
+          for (const id of new Set([source, retried])) {
+            await tx`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,visibility)
+              VALUES(${w},${course},'source',${id},'core','course')`;
+            await tx`INSERT INTO opening_source_versions(source_id,version,workspace_id,bytes,sha256,availability)
+              VALUES(${id},1,${w},${sourceBytes.length},${sourceHash},'available')`;
+          }
+          const retriedChunk = retried === source ? chunk : await rows.chunk(retried);
+          const knowledge = createOpeningKnowledgeRepository(db);
+          const sourceVersions = { [source]: 1 };
+          await knowledge.replace(scope, course, { expectedVersion: 0, sourceVersions,
+            snapshot: { courseId: course, version: 0, nodes: [{ id: node, courseId: course, label: "Algebra",
+              kind: "concept", evidenceChunkIds: [chunk], status: "needs_check" }], edges: [] } });
+          await knowledge.confirmNode(scope, course, node, { expectedVersion: 1, sourceVersions });
+          // Recreate the stored shape from before graph coverage was added.
+          await tx`UPDATE opening_course_knowledge SET snapshot=snapshot-'coveredSourceVersions'-'coveredSourceChunkDigests'
+            WHERE course_id=${course}`;
+          const coverage = { [source]: 1, [retried]: 1 };
+          if (coverageOrigin === "build receipt") {
+            await tx`INSERT INTO opening_jobs(workspace_id,owner_user_id,key,kind,payload,result,state)
+              VALUES(${w},${u},'legacy-build','build-course-knowledge',${tx.json({ courseId: course })},
+                ${tx.json({ version: 2, coveredSourceVersions: coverage })},'succeeded')`;
+          }
+          const chunks = createOpeningSourceChunksRepository(db);
+          const [page] = await chunks.listChunks(scope, retried);
+          await chunks.replaceChunks(scope, { sourceId: retried, sourceVersion: 1,
+            chunks: [page!, { ...page!, page: 2, text: "New uncited page" }] });
+          const digest = createHash("sha256").update(retriedChunk).digest("hex");
+          const [stored] = await tx`SELECT snapshot FROM opening_course_knowledge WHERE course_id=${course}`;
+          expect(stored?.snapshot).toMatchObject({ coveredSourceChunkDigests: { [retried]: digest } });
+          expect((await chunks.listChunks(scope, retried)).map(row => row.text)).toEqual(["source evidence", "New uncited page"]);
+
+          const records = await readOpeningBackupRecords(db, scope);
+          expect(records.tables.opening_course_knowledge).toMatchObject([{ course_id: course, snapshot: {
+            nodes: [{ id: node, evidenceChunkIds: [chunk], status: "supported" }],
+            coveredSourceChunkDigests: { [retried]: digest },
+          } }]);
+          expect(records.tables.opening_knowledge_confirmations).toMatchObject([{ node_id: node, evidence_chunk_ids: [chunk] }]);
+          const sources = records.tables.opening_sources.map(row => ({ sourceId: String(row.id), version: 1,
+            sha256: sourceHash, bytes: sourceBytes.length }));
+          const composed = composeOpeningBackupDraft({ records, staging: { snapshot: { workspaceId: w, sources,
+            privacyEpoch: records.privacyEpoch, deletionJournal: records.deletionJournal, memoryDeletions: records.memoryDeletions },
+            objects: sources.map(s => ({ ...s, actualSha256: sourceHash, archivePath: `objects/${s.sourceId}/v1.bin` })) } });
+          if (!composed.ok) throw new Error(composed.errors.join(", "));
+          backup = JSON.parse(JSON.stringify(composed.backup));
+          await rows.exclude(retried);
+          const excluded = await readOpeningBackupRecords(db, scope);
+          expect(excluded.tables.opening_course_knowledge).toEqual([]);
+          expect(excluded.tables.opening_knowledge_confirmations).toEqual([]);
+          throw discardSeed;
+        }).catch(error => { if (error !== discardSeed) throw error; });
+        if (!backup) throw new Error("Missing legacy graph archive");
+        await outer`INSERT INTO workspaces(id,owner_user_id) VALUES(${w},${u})`;
+        const result = await executeOpeningRestoreApply(transactionClient(outer), { confirmLocalRestore: true, backup,
+          objectBodies: new Map(backup.objects.map(object => [object.archivePath, sourceBytes])),
+          objectPut: createMemoryOpeningRestoreObjectPut(), currentMemoryDeletions: backup.memoryDeletions,
+          currentLearningState: { workspacePreferences: null, courses: [] } });
+        expect(result, result.errors.join(", ")).toMatchObject({ ok: true });
+        const [graph] = await outer`SELECT snapshot FROM opening_course_knowledge WHERE course_id=${course}`;
+        expect(graph?.snapshot).toEqual(backup.tables.opening_course_knowledge![0]!.snapshot);
+        if (coverageOrigin === "build receipt") {
+          expect(Object.keys(graph?.snapshot.coveredSourceVersions)).toHaveLength(2);
+        }
+        const confirmations = await outer`SELECT * FROM opening_knowledge_confirmations WHERE course_id=${course}`;
+        expect(JSON.parse(JSON.stringify(confirmations))).toEqual(backup.tables.opening_knowledge_confirmations);
+        throw rollback;
+      }).catch(error => { if (error !== rollback) throw error; });
+    } finally { await sql.end(); }
+  }, 30_000,
+);
+
+it.skipIf(process.env.OPENING_TEST_DB !== "1" || !process.env.OPENING_TEST_DATABASE_URL)(
+  "round-trips the owner-scoped learner assets and refuses excluded graph, note, and exam material", async () => {
+    const url = assertOpeningTestDatabase(process.env.OPENING_TEST_DATABASE_URL!, process.env.OPENING_TEST_DB);
+    const sql = createSqlClient(url.toString(), { max: 1 });
+    const rollback = new Error("rollback B3 fixture"), discardSeed = new Error("discard source fixture");
+    const w = randomUUID(), u = randomUUID(), course = randomUUID(), doc = randomUUID(), block = randomUUID(), sprint = randomUUID();
+    const scope = { workspaceId: w, ownerUserId: u };
+    const examDoc = randomUUID(), examBlock = randomUUID(), examSprint = randomUUID();
+    const answerBlock = randomUUID(), historicalKey = randomUUID(), legacyExam = randomUUID(), attachment = randomUUID();
+    const keyContent = { answer: "private standalone answer", href: "private-key.txt", bytesBase64: "YWJj" };
+    const liveContent = { text: "ordinary essay", meta: { sourceId: "external-reference" } };
+    const oldBlocks = [{ id: block, type: "text", position: 0, content: { ...liveContent, text: "ordinary essay revision", citationBinding: { refs: ["external-reference"] } } },
+      { id: historicalKey, type: "answer_key", position: 1, content: { answer: "private old key" } }];
+    try {
+      await sql.begin("isolation level repeatable read", async outer => {
+        await outer`INSERT INTO users(id,email,display_name,password_hash) VALUES(${u},${u + "@backup.test"},'fixture','test')`;
+        await outer`INSERT INTO workspaces(id,owner_user_id) VALUES(${w},${u})`;
+        let backup: OpeningBackup | undefined;
+        let nativeBackup: ReturnType<typeof snapshotToPackage> | undefined;
+        let sourceVersions: Record<string, number> = {};
+        await outer.savepoint(async tx => {
+          const db = transactionClient(tx), rows = backupRows(db, scope);
+          const source = await rows.source(), chunk = await rows.chunk(source);
+          const denied = await rows.source(), deniedChunk = await rows.chunk(denied), unread = await rows.source("pending");
+          const sourceDigest = createHash("sha256").update(chunk).digest("hex");
+          const deniedDigest = createHash("sha256").update(deniedChunk).digest("hex");
+          sourceVersions = { [source]: 1 };
+          await tx`INSERT INTO opening_source_versions(source_id,version,workspace_id,bytes,sha256,availability)
+            VALUES(${source},1,${w},${sourceBytes.length},${sourceHash},'available'),
+              (${denied},1,${w},${sourceBytes.length},${sourceHash},'available')`;
+          const privateDoc = randomUUID(), privateCourse = randomUUID(), node = randomUUID(), privateNode = randomUUID();
+          await tx`INSERT INTO courses(id,workspace_id,title,slug) VALUES(${course},${w},'Course','course'),(${privateCourse},${w},'Other','other')`;
+          await tx`INSERT INTO library_documents(id,workspace_id,title,lifecycle) VALUES
+            (${doc},${w},'Essay','confirmed'),(${privateDoc},${w},'excluded note text','confirmed')`;
+          for (const [documentId, sourceId] of [[doc,source],[privateDoc,denied]] as const) {
+            await tx`INSERT INTO opening_note_provenance(document_id,workspace_id,context_source_refs)
+              VALUES(${documentId},${w},${tx.json([{ sourceId, sourceVersion: 1 }])})`;
+          }
+          await tx`INSERT INTO library_blocks(id,workspace_id,document_id,type,position,content)
+            VALUES(${block},${w},${doc},'text',0,${tx.json(liveContent)})`;
+          await tx`INSERT INTO library_blocks(id,workspace_id,document_id,type,position,content)
+            VALUES(${answerBlock},${w},${doc},'answer_key',1,${tx.json(keyContent)})`;
+          await tx`INSERT INTO library_revisions(workspace_id,document_id,revision_number,title,lifecycle,blocks)
+            VALUES(${w},${doc},1,'Essay','confirmed',${tx.json(oldBlocks)}),(${w},${privateDoc},1,'excluded revision text','confirmed','[]')`;
+          await tx`INSERT INTO library_properties(workspace_id,subject_type,subject_id,key,value_type,value)
+            VALUES(${w},'block',${block},'language','string','"en"'),(${w},'document',${privateDoc},'hidden','string','"excluded property"')`;
+          await tx`INSERT INTO library_relations(workspace_id,from_type,from_id,to_type,to_id,relation_type)
+            VALUES(${w},'document',${doc},'block',${block},'references'),(${w},'document',${doc},'document',${privateDoc},'references')`;
+          await tx`INSERT INTO course_asset_memberships(workspace_id,course_id,asset_type,asset_id,role,visibility)
+            VALUES(${w},${course},'source',${source},'core','course'),
+              (${w},${course},'source',${unread},'core','course'),
+              (${w},${privateCourse},'source',${source},'core','course'),
+              (${w},${privateCourse},'source',${denied},'core','course')`;
+          const knowledge = createOpeningKnowledgeRepository(db);
+          const publishAndConfirm = async (courseId: string, nodeId: string, extractedSourceVersions: Record<string, number>,
+            extractedChunkDigests: Record<string, string>) => {
+            await knowledge.replace(scope, courseId, { expectedVersion: 0, sourceVersions, extractedSourceVersions,
+              extractedChunkDigests, snapshot: { courseId, version: 0, nodes: [{ id: nodeId, courseId, label: "Algebra",
+                kind: "concept", evidenceChunkIds: [chunk], status: "needs_check" }], edges: [] } });
+            return knowledge.confirmNode(scope, courseId, nodeId, { expectedVersion: 1, sourceVersions });
+          };
+          const coveredSourceChunkDigests = { [source]: sourceDigest };
+          const confirmed = await publishAndConfirm(course, node, sourceVersions, coveredSourceChunkDigests);
+          const privateDigests = { ...coveredSourceChunkDigests, [denied]: deniedDigest };
+          await publishAndConfirm(privateCourse, privateNode, { ...sourceVersions, [denied]: 1 }, privateDigests);
+          await tx`INSERT INTO opening_exam_sprints(id,workspace_id,owner_user_id,pack_snapshot,state)
+            VALUES(${sprint},${w},${u},${tx.json(EXAM_SPRINT_PACK as never)},${tx.json(createExamSprintState(new Date().toISOString()) as never)})`;
+          await tx`INSERT INTO opening_exam_bindings(sprint_id,course_id,binding) VALUES(${sprint},${course},
+            ${tx.json({ courseId: course, packSourceId: source, materials: [], skills: [], milestoneId: null, boundAt: new Date().toISOString() })})`;
+          await tx`INSERT INTO opening_exam_source_mappings(sprint_id,source_item_id,skill_ids)
+            VALUES(${sprint},'item-a',ARRAY['skill-a']),(${sprint},'item-b',ARRAY['skill-b'])`;
+          for (const id of [source,denied]) {
+            await tx`INSERT INTO opening_exam_papers(id,sprint_id,workspace_id,owner_user_id,course_id,source_id,source_version,
+              teacher,year,label,kind,skills,client_key,intent) VALUES(${randomUUID()},${sprint},${w},${u},${course},${id},1,
+              'Teacher',2026,'Paper','sample','[]',${randomUUID()},'{}')`;
+            await tx`INSERT INTO opening_exam_reviews(id,sprint_id,workspace_id,owner_user_id,source_item_id,work_source_id,work_source_version,
+              reference_source_id,reference_source_version,client_key,intent,status,privacy_epoch)
+              VALUES(${randomUUID()},${sprint},${w},${u},'item-a',${id},1,${source},1,${randomUUID()},'{}','failed',0)`;
+          }
+          const activity = await insertTestTeachingActivity(db, scope, course);
+          const request = publishedRequest(activity, source, chunk);
+          await tx`INSERT INTO opening_exam_sprints(id,workspace_id,owner_user_id,course_id,pack_snapshot,state)
+            VALUES(${examSprint},${w},${u},${course},${tx.json({ format: "course-exam-v1", requests: [request] })},'{}')`;
+          const unit = randomUUID();
+          await tx`INSERT INTO library_documents(id,workspace_id,title,lifecycle) VALUES(${examDoc},${w},'Generated exam','confirmed')`;
+          await tx`INSERT INTO library_blocks(id,workspace_id,document_id,type,position,content)
+            VALUES(${examBlock},${w},${examDoc},'answer_key',0,'{"answer":"private live answer","href":"private-exam.txt","bytesBase64":"YWJj"}')`;
+          await tx`INSERT INTO library_revisions(workspace_id,document_id,revision_number,title,lifecycle,blocks)
+            VALUES(${w},${examDoc},1,'Exam','confirmed','[{"type":"text","content":{"text":"private historical answer"}}]')`;
+          await tx`INSERT INTO library_properties(workspace_id,subject_type,subject_id,key,value_type,value)
+            VALUES(${w},'block',${examBlock},'answer','string','"private exam property"')`;
+          await tx`INSERT INTO opening_teaching_units(id,workspace_id,owner_user_id,title,document_id,current_revision_number,generation_config)
+            VALUES(${unit},${w},${u},'Exam',${examDoc},1,${tx.json({ extras: { kind: "course_exam", requestId: request.id } })})`;
+          await tx`INSERT INTO opening_teaching_activity_specs(id,workspace_id,owner_user_id,activity_id,teaching_unit_id,document_id,
+            revision_number,version,block_order) VALUES(${randomUUID()},${w},${u},${activity},${unit},${examDoc},1,1,
+            ${tx.json([{ blockId: examBlock, position: 0, blockType: "answer_key", role: "answer_key" }])})`;
+          await tx`UPDATE opening_teaching_activities SET intent_summary='private generated exam title' WHERE id=${activity}`;
+          const unpublished = await insertTestTeachingActivity(db, scope, course);
+          await tx`UPDATE opening_teaching_activities SET create_intent='{"kind":"course_exam"}' WHERE id=${unpublished}`;
+          const privateSession = randomUUID();
+          await tx`INSERT INTO opening_learning_sessions(id,workspace_id,owner_user_id,course_id,activity_id,skill_label)
+            VALUES(${privateSession},${w},${u},${course},${activity},'private generated exam title')`;
+          const privateTurn = await rows.turn(await rows.conversation());
+          await tx`UPDATE opening_turns SET learning_session_id=${privateSession} WHERE id=${privateTurn}`;
+          const privateProblem = await rows.problem(privateSession, source);
+          const privateObservation = await rows.observation(privateSession, [], [privateTurn], privateProblem);
+          const privateHelp = await rows.help(privateSession, privateTurn, privateProblem);
+          const evidence = randomUUID(), card = randomUUID();
+          await tx`INSERT INTO opening_skill_evidence(id,workspace_id,owner_user_id,course_id,node_id,observation_id,dimension)
+            VALUES(${evidence},${w},${u},${course},${node},${privateObservation},'recall')`;
+          await tx`INSERT INTO opening_learning_activity_history_revisions(workspace_id,owner_user_id,activity_id,revision)
+            VALUES(${w},${u},${activity},1)`;
+          await tx`INSERT INTO cards(id,workspace_id,owner_user_id,front,back,origin_observation_root_id)
+            VALUES(${card},${w},${u},'private generated exam title','private grading key',${privateObservation})`;
+          const privateAttempt = randomUUID();
+          await tx`INSERT INTO opening_learning_attempts(id,workspace_id,owner_user_id,session_id,course_id,activity_id,skill_label,
+            client_key,create_intent,history_revision) VALUES(${privateAttempt},${w},${u},${privateSession},${course},${activity},'Algebra',${privateAttempt},'{}',0)`;
+          const publicActivity = await insertTestTeachingActivity(db, scope, course);
+          const session = randomUUID(), observation = randomUUID(), attempt = randomUUID(), link = randomUUID();
+          await tx`INSERT INTO opening_learning_sessions(id,workspace_id,owner_user_id,course_id,activity_id,skill_label)
+            VALUES(${session},${w},${u},${course},${publicActivity},'Algebra')`;
+          await tx`INSERT INTO opening_workspace_history_revisions(workspace_id,owner_user_id,revision) VALUES(${w},${u},0) ON CONFLICT DO NOTHING`;
+          await tx`INSERT INTO opening_learning_attempts(id,workspace_id,owner_user_id,session_id,course_id,activity_id,skill_label,
+            client_key,create_intent,history_revision) VALUES(${attempt},${w},${u},${session},${course},${publicActivity},'Algebra',${attempt},'{}',0)`;
+          await tx`INSERT INTO opening_learning_observations(id,workspace_id,owner_user_id,session_id,course_id,activity_id,skill_label,
+            answer,outcome,assistance,client_key,verdict_source,workspace_history_revision)
+            VALUES(${observation},${w},${u},${session},${course},${publicActivity},'Algebra','answer','unverified','unknown',${observation},'unknown',0)`;
+          await tx`INSERT INTO opening_exam_attempt_links(id,sprint_id,exam_attempt_id,learning_attempt_id,node_id,requirement_key,
+            first_family_exposure,observation_id,publication) VALUES(${link},${sprint},'attempt-a',${attempt},${node},'req-a',false,${observation},'published')`;
+          await tx`INSERT INTO opening_exam_source_observations(sprint_id,source_record_id,skill_ids,observation_id)
+            VALUES(${sprint},'record-a',ARRAY['skill-a'],${observation})`;
+          await tx`INSERT INTO opening_exam_help_receipts(id,attempt_link_id,kind,delivered_at,history_revision,workspace_history_revision)
+            VALUES(${randomUUID()},${link},'hint',now(),0,0)`;
+          const snapshot = async () => {
+            const records = await readOpeningBackupRecords(db, scope);
+            const sources = records.tables.opening_sources.map(row => ({ sourceId: String(row.id), version: Number(row.version),
+              sha256: sourceHash, bytes: sourceBytes.length }));
+            const composed = composeOpeningBackupDraft({ records, staging: { snapshot: { workspaceId: w, sources,
+              privacyEpoch: records.privacyEpoch, deletionJournal: records.deletionJournal, memoryDeletions: records.memoryDeletions },
+              objects: sources.map(s => ({ ...s, actualSha256: sourceHash, archivePath: `objects/${s.sourceId}/v${s.version}.bin` })) } });
+            if (!composed.ok) throw new Error(`${composed.code} ${composed.errors.join(", ")}`);
+            return composed.backup;
+          };
+          backup = await snapshot();
+          expect(backup.tables.opening_course_knowledge).toContainEqual(expect.objectContaining({
+            course_id: course, version: 2, snapshot: { ...confirmed.snapshot, coveredSourceChunkDigests },
+          }));
+          expect(backup.tables.opening_course_knowledge?.find(row => row.course_id === privateCourse))
+            .toMatchObject({ snapshot: { coveredSourceChunkDigests: privateDigests } });
+          expect(backup.tables.opening_knowledge_confirmations).toEqual(expect.arrayContaining([
+            expect.objectContaining({ course_id: course, node_id: node, graph_version_before: 1, graph_version_after: 2,
+              source_versions: sourceVersions, evidence_chunk_ids: [chunk] }),
+            expect.objectContaining({ course_id: privateCourse, node_id: privateNode }),
+          ]));
+          const courseSprint = backup.tables.opening_exam_sprints?.find(row => (row as { id: string }).id === examSprint);
+          expect(courseSprint).toMatchObject({ pack_snapshot: { requests: [{ id: request.id, status: "unknown", activityId: null, proposal: null }] } });
+          const serialized = JSON.stringify(backup);
+          for (const excluded of [activity, unpublished, unit, examDoc, evidence, card, privateSession, privateProblem, privateObservation, privateHelp,
+            privateAttempt, privateTurn, "private generated exam title"]) expect(serialized).not.toContain(excluded);
+          expect(backup.tables.opening_learning_attempts).toMatchObject([{ id: attempt, activity_id: publicActivity }]);
+          // Later edits may replace the unit metadata. The pinned publication still owns the document.
+          await tx`UPDATE opening_teaching_units SET generation_config='{}' WHERE id=${unit}`;
+          const native = await dumpWorkspaceSnapshot(db, w, u);
+          for (const artifact of [backup, native]) {
+            const wire = JSON.stringify(artifact);
+            expect(wire).toContain(doc);
+            expect(wire).not.toContain(examDoc);
+            expect(wire).not.toMatch(/private (solution|grading key|live answer|historical answer|exam property|standalone answer|old key)|private-(exam|key)\.txt/);
+            expect(wire).toContain("ordinary essay revision");
+          }
+          expect(native.files).toHaveLength(0);
+          // Native v1 stores attachments as block content plus a file manifest.
+          const examContent = { href: "private-paper.txt", bytesBase64: "YWJj" };
+          const legacyExamBlocks = [{ id: randomUUID(), type: "answer_key", position: 0,
+            content: { generated: true, hidden: true, answer: "private generated answer\n\n评分要点：\n- key" } }];
+          const safeDoc = { id: legacyExam, workspaceId: w, title: "Legacy generated paper", lifecycle: "confirmed", openingProvenance: null };
+          const paper = { id: attachment, workspaceId: w, documentId: legacyExam, type: "file", position: 0, content: examContent };
+          for (const name of ["opening_exam_bindings","opening_exam_attempt_links","opening_exam_source_observations",
+            "opening_exam_help_receipts"]) expect(backup.tables[name], name).toHaveLength(1);
+          const historyDoc = randomUUID(), historyBlock = randomUUID();
+          const historyUnit = randomUUID(), historyActivity = randomUUID(), historySpec = randomUUID();
+          const historySession = randomUUID(), historyAttempt = randomUUID();
+          await tx`INSERT INTO library_documents(id,workspace_id,title,lifecycle,current_revision_number)
+            VALUES(${historyDoc},${w},'Historical citation','published',2)`;
+          await tx`INSERT INTO library_blocks(id,workspace_id,document_id,type,position,content)
+            VALUES(${historyBlock},${w},${historyDoc},'text',0,${tx.json(liveContent)})`;
+          await tx`INSERT INTO library_revisions(workspace_id,document_id,revision_number,title,lifecycle,blocks)
+            VALUES(${w},${historyDoc},1,'Historical citation','confirmed',${tx.json([{ id: historyBlock, type: "text", position: 0,
+              content: { text: "excluded historical citation", citationBinding: { blockId: historyBlock, role: "teach",
+                status: "bound", factualSupport: "unverified", refs: [{ sourceId: denied, sourceVersion: 1, chunkId: deniedChunk, page: null }] } },
+            }])}),
+            (${w},${historyDoc},2,'Historical citation','published',${tx.json([{ id: historyBlock, type: "text", position: 0,
+              content: liveContent }])})`;
+          await tx`INSERT INTO opening_teaching_activities(id,workspace_id,owner_user_id,course_id,status,generate_status,intent_kind,intent_summary,source_ids,client_key,create_intent)
+            VALUES(${historyActivity},${w},${u},${course},'active','ready','topic','Historical doc lesson',ARRAY[${source}]::uuid[],${"hist-" + historyActivity},'{"source":"seed"}'::jsonb)`;
+          await tx`INSERT INTO opening_teaching_units(id,workspace_id,owner_user_id,title,document_id,current_revision_number,verification_status)
+            VALUES(${historyUnit},${w},${u},'Historical doc lesson',${historyDoc},2,'verified')`;
+          await tx`INSERT INTO opening_teaching_activity_specs(id,workspace_id,owner_user_id,activity_id,teaching_unit_id,document_id,revision_number,block_order,source_refs,verification_status,version)
+            VALUES(${historySpec},${w},${u},${historyActivity},${historyUnit},${historyDoc},2,${tx.json([{ blockId: historyBlock, blockType: "text", role: "teach" }])},${tx.json([{ sourceId: source, sourceVersion: 1 }])},'verified',1)`;
+          await tx`INSERT INTO opening_learning_sessions(id,workspace_id,owner_user_id,course_id,activity_id,skill_label,source_ids)
+            VALUES(${historySession},${w},${u},${course},${historyActivity},'hist-skill',ARRAY[${source}]::uuid[])`;
+          await tx`INSERT INTO opening_learning_attempts(id,workspace_id,owner_user_id,session_id,course_id,activity_id,skill_label,source_ids,source_versions,client_key,create_intent,history_revision,context_anchor)
+            VALUES(${historyAttempt},${w},${u},${historySession},${course},${historyActivity},'hist-skill',ARRAY[${source}]::uuid[],${tx.json({ [source]: 1 })},${"att-" + historyAttempt},'{}'::jsonb,0,${tx.json({ purpose: "learning_help", courseId: course, activityId: historyActivity, contentVersion: 1, blockId: historyBlock })})`;
+          const historyConv = randomUUID(), historyTurn = randomUUID(), derivedActivity = randomUUID();
+          await tx`INSERT INTO opening_conversations(id,workspace_id,owner_user_id,course_id,title)
+            VALUES(${historyConv},${w},${u},${course},'Historical lesson chat')`;
+          await tx`INSERT INTO opening_turns(id,workspace_id,conversation_id,learning_session_id,role,text,mode,status,source_ids,source_versions,citations)
+            VALUES(${historyTurn},${w},${historyConv},${historySession},'user','Compile follow-up','hint','complete',ARRAY[${source}]::uuid[],${tx.json({ [source]: 1 })},'[]'::jsonb)`;
+          await tx`INSERT INTO opening_teaching_activities(id,workspace_id,owner_user_id,course_id,status,generate_status,intent_kind,intent_summary,source_ids,client_key,create_intent)
+            VALUES(${derivedActivity},${w},${u},${course},'active','ready','topic','Derived lesson',ARRAY[${source}]::uuid[],${"der-" + derivedActivity},${tx.json({ sourceTurnId: historyTurn.toUpperCase() })})`;
+          const beforeExclusion = await snapshot();
+          expect(beforeExclusion.tables.library_revisions).toContainEqual(expect.objectContaining({ document_id: historyDoc }));
+          expect(beforeExclusion.tables.opening_teaching_activities).toContainEqual(expect.objectContaining({ id: historyActivity }));
+          expect(beforeExclusion.tables.opening_teaching_activities).toContainEqual(expect.objectContaining({ id: derivedActivity }));
+          expect(beforeExclusion.tables.opening_learning_sessions).toContainEqual(expect.objectContaining({ id: historySession }));
+          expect(beforeExclusion.tables.opening_learning_attempts).toContainEqual(expect.objectContaining({ id: historyAttempt }));
+          expect(beforeExclusion.tables.opening_turns).toContainEqual(expect.objectContaining({ id: historyTurn }));
+          const nativeBeforeExclusion = await dumpWorkspaceSnapshot(db, w, u);
+          expect(nativeBeforeExclusion.revisions).toContainEqual(expect.objectContaining({ documentId: historyDoc }));
+          nativeBackup = snapshotToPackage({ ...native, courses: [], memberships: [], documents: [
+            ...native.documents.filter(row => row.id === doc).map(row => ({ ...row, openingProvenance: null })), safeDoc,
+            ...nativeBeforeExclusion.documents.filter(row => row.id === historyDoc)],
+            blocks: [...native.blocks, paper, { id: answerBlock, workspaceId: w, documentId: doc, type: "answer_key", position: 1, content: keyContent },
+              ...nativeBeforeExclusion.blocks.filter(row => row.documentId === historyDoc)],
+            revisions: [...native.revisions.filter(row => row.documentId === doc).map(row => ({ ...row, blocks: oldBlocks })),
+              { id: randomUUID(), workspaceId: w, documentId: legacyExam, revisionNumber: 1, title: safeDoc.title,
+                lifecycle: "confirmed", blocks: legacyExamBlocks },
+              ...nativeBeforeExclusion.revisions.filter(row => row.documentId === historyDoc)],
+            relations: [], files: [{ path: examContent.href, mediaType: "text/plain", bytes: sourceBytes }] });
+          await rows.exclude(denied);
+          const filtered = await snapshot();
+          const filteredNative = await dumpWorkspaceSnapshot(db, w, u);
+          for (const artifact of [filtered, filteredNative]) {
+            expect(JSON.stringify(artifact)).not.toContain(historyDoc);
+            expect(JSON.stringify(artifact)).not.toContain("excluded historical citation");
+          }
+          for (const removedId of [historyActivity, historySession, historyAttempt, historyTurn, derivedActivity]) {
+            expect(JSON.stringify(filtered)).not.toContain(removedId);
+          }
+          expect(validateOpeningRestore(beforeExclusion, filtered.deletionJournal, filtered.memoryDeletions).errors)
+            .toContain("table library_revisions references a deleted source");
+          for (const table of ["library_documents","library_revisions","library_properties","library_relations","opening_note_provenance",
+            "opening_course_knowledge","opening_knowledge_confirmations","opening_exam_papers","opening_exam_reviews"] as const) {
+            expect(filtered.tables[table], table).toHaveLength(1);
+          }
+          expect(filtered.tables.opening_course_knowledge?.[0]).toMatchObject({
+            course_id: course, snapshot: { ...confirmed.snapshot, coveredSourceChunkDigests },
+          });
+          expect(filtered.tables.opening_knowledge_confirmations?.[0]).toMatchObject({ node_id: node });
+          expect(JSON.stringify(filtered)).not.toContain(deniedDigest);
+          expect(JSON.stringify(filtered)).not.toMatch(/excluded note text|excluded property|node_definitions|excluded revision text/);
+          expect(filtered.tables.opening_exam_sprints?.find(row => (row as { id: string }).id === sprint)).toMatchObject({ pack_snapshot: { id: EXAM_SPRINT_PACK.id, version: EXAM_SPRINT_PACK.version } });
+          throw discardSeed;
+        }).catch(error => { if (error !== discardSeed) throw error; });
+        if (!backup || !nativeBackup) throw new Error("missing snapshot");
+        const legacyNative = nativeBackup;
+        await outer.savepoint(async tx => {
+          const repository = createBackupRestoreRepository(transactionClient(tx));
+          const result = await repository.restoreWorkspace({ ...scope, packed: legacyNative, conflictPolicy: "reject" });
+          expect(result.applied).toMatchObject({ documents: 1, blocks: 1, revisions: 1, files: 0 });
+          expect(await tx`SELECT id FROM library_documents WHERE workspace_id=${w}`).toEqual([{ id: doc }]);
+          expect(await tx`SELECT blocks FROM library_revisions WHERE document_id=${doc}`)
+            .toEqual([{ blocks: [oldBlocks[0]] }]);
+          throw discardSeed;
+        }).catch(error => { if (error !== discardSeed) throw error; });
+        const wire: OpeningBackup = JSON.parse(JSON.stringify(backup));
+        expect(validateOpeningRestore(wire, [], wire.memoryDeletions)).toMatchObject({ allowed: true, errors: [] });
+        const publication = structuredClone(wire);
+        publication.tables.opening_teaching_units!.push({ id: randomUUID(), workspace_id: w, owner_user_id: u,
+          document_id: doc, generation_config: { extras: { kind: "course_exam" } } });
+        expect(validateOpeningRestore(publication, [], wire.memoryDeletions).errors).toContain(
+          "Private generated exam publications cannot be restored from a learner backup");
+        const forged = structuredClone(wire);
+        (forged.tables.opening_exam_help_receipts![0] as Record<string, unknown>).attempt_link_id = randomUUID();
+        expect(validateOpeningRestore(forged, [], forged.memoryDeletions).allowed).toBe(false);
+        (forged.tables.opening_course_knowledge![0] as Record<string, unknown>).node_definitions = { private: "untrusted" };
+        expect(validateOpeningRestore(forged, [], forged.memoryDeletions).errors).toContain(
+          "opening_course_knowledge has an invalid identity, owner or asset reference");
+        const objectPut = createMemoryOpeningRestoreObjectPut();
+        const legacy = structuredClone(wire);
+        legacy.tables.library_documents!.push({ id: legacyExam, workspace_id: w, title: "Legacy generated paper", lifecycle: "confirmed" });
+        for (const row of legacyNative.records.blocks.filter(row => row.id === answerBlock || row.id === attachment)) {
+          const { workspaceId, documentId, ...fields } = row;
+          legacy.tables.library_blocks!.push({ ...fields, workspace_id: workspaceId, document_id: documentId });
+        }
+        (legacy.tables.library_revisions!.find(row => row.document_id === doc)!).blocks = oldBlocks;
+        legacy.tables.library_revisions!.push({ id: randomUUID(), workspace_id: w, document_id: legacyExam,
+          revision_number: 1, title: "Legacy generated paper", lifecycle: "confirmed",
+          blocks: legacyNative.records.revisions.find(row => row.documentId === legacyExam)!.blocks });
+        const result = await executeOpeningRestoreApply(transactionClient(outer), { confirmLocalRestore: true, backup: legacy,
+          objectBodies: new Map(wire.objects.map(object => [object.archivePath, sourceBytes])), objectPut,
+          currentMemoryDeletions: wire.memoryDeletions, currentLearningState: { workspacePreferences: null, courses: [] } });
+        expect(result, result.errors.join(", ")).toMatchObject({ ok: true, objectApplyDeferred: false, objectsApplied: 2 });
+        const counts = await readOpeningRestoreNamespaceCounts(transactionClient(outer), w);
+        for (const [name, records] of Object.entries(wire.tables)) expect(counts[name as keyof typeof counts], name).toBe(records.length);
+        const knowledge = createOpeningKnowledgeRepository(transactionClient(outer));
+        const restoredGraph = await knowledge.getForRebuild(scope, course);
+        expect(Object.keys(restoredGraph!.nodeDefinitions)).toHaveLength(1);
+        const [stored] = await outer`SELECT snapshot FROM opening_course_knowledge WHERE course_id=${course}`;
+        expect(stored?.snapshot).toEqual(wire.tables.opening_course_knowledge!.find(row => row.course_id === course)!.snapshot);
+        expect(await knowledge.readSyncStatus(scope, course)).toMatchObject({ status: "up_to_date",
+          coveredSourceVersions: sourceVersions });
+        const receipts = await outer`SELECT * FROM opening_knowledge_confirmations WHERE workspace_id=${w} ORDER BY id`;
+        expect(JSON.parse(JSON.stringify(receipts))).toEqual(wire.tables.opening_knowledge_confirmations);
+        const rebuilt = await knowledge.replace(scope, course, { expectedVersion: restoredGraph!.version, sourceVersions,
+          expectedReferencedNodeIds: await knowledge.listReferencedNodeIds(scope, course), snapshot: { ...restoredGraph!.snapshot,
+            nodes: restoredGraph!.snapshot.nodes.map(node => ({ ...node, status: "needs_check" })) } });
+        expect(rebuilt.snapshot.nodes[0]?.status).toBe("supported");
+        expect(await outer`SELECT * FROM opening_knowledge_confirmations WHERE workspace_id=${w} ORDER BY id`).toEqual(receipts);
+        expect(await outer`SELECT blocks FROM library_revisions WHERE document_id=${doc}`).toEqual([{ blocks: [oldBlocks[0]] }]);
+        expect(await outer`SELECT content FROM library_blocks WHERE id=${block}`).toEqual([{ content: liveContent }]);
+        const [property] = await outer`SELECT value FROM library_properties WHERE subject_id=${block}`;
+        expect(property?.value).toBe("en");
+        const [restored] = await outer`SELECT pack_snapshot FROM opening_exam_sprints WHERE id=${sprint}`;
+        expect(restored?.pack_snapshot).toEqual(EXAM_SPRINT_PACK);
+        const [generated] = await outer`SELECT pack_snapshot FROM opening_exam_sprints WHERE id=${examSprint}`;
+        expect(generated?.pack_snapshot.requests[0]).toMatchObject({ status: "unknown", proposal: null, activityId: null });
+        expect(await outer`SELECT id FROM library_documents WHERE id=${examDoc}`).toHaveLength(0);
+        throw rollback;
+      }).catch(error => { if (error !== rollback) throw error; });
+    } finally { await sql.end(); }
+  }, 60_000);
+
+it("serializes first-learning initialization and restore on an empty workspace", async () => {
+  const url = assertOpeningTestDatabase(process.env.OPENING_TEST_DATABASE_URL!, process.env.OPENING_TEST_DB);
+  const application = `restore-lock-test-${randomUUID()}`;
+  const sql = createSqlClient(url.toString(), { max: 2 });
+  url.searchParams.set("application_name", application);
+  url.searchParams.set("statement_timeout", "5000");
+  const restoring = createSqlClient(url.toString(), { max: 1 });
+  const workspaceId = randomUUID(), ownerUserId = randomUUID(), clientKey = randomUUID();
+  const scope = { workspaceId, ownerUserId }, startDate = "2026-11-19";
+  let restore: ReturnType<typeof executeOpeningRestoreApply> | undefined;
+  try {
+    await sql`INSERT INTO users(id,email,display_name,password_hash)
+      VALUES(${ownerUserId},${ownerUserId + "@backup.test"},'fixture','test')`;
+    await sql`INSERT INTO workspaces(id,owner_user_id) VALUES(${workspaceId},${ownerUserId})`;
+    const records = await readOpeningBackupRecords(sql, scope);
+    const composed = composeOpeningBackupDraft({ records, staging: {
+      snapshot: { workspaceId, privacyEpoch: 0, deletionJournal: [], memoryDeletions: records.memoryDeletions, sources: [] }, objects: [],
+    } });
+    if (!composed.ok) throw new Error(composed.errors.join(", "));
+    composed.backup.tables.opening_workspace_history_revisions = [{ workspace_id: workspaceId, owner_user_id: ownerUserId, revision: 0 }];
+
+    const initialized = await sql.begin(async tx => {
+      await lockWorkspaceLearningHistory(tx, scope);
+      restore = executeOpeningRestoreApply(restoring, { confirmLocalRestore: true, backup: composed.backup,
+        currentMemoryDeletions: records.memoryDeletions, currentLearningState: { workspacePreferences: null, courses: [] } });
+      // Hold the real history insert until the other connection is waiting for
+      // this transaction. Before the fix it held the workspace lock here.
+      let blocked: string | undefined;
+      for (let probe = 0; probe < 100 && blocked === undefined; probe++) {
+        const [row] = await sql`SELECT query FROM pg_stat_activity WHERE application_name=${application}
+          AND cardinality(pg_blocking_pids(pid)) > 0`;
+        if (row) blocked = String(row.query);
+        else await setTimeout(20);
+      }
+      expect(blocked).toMatch(/INSERT INTO opening_workspace_history_revisions[\s\S]*ON CONFLICT DO NOTHING/);
+      return createOpeningFirstLearningRepository(transactionClient(tx)).initialize(scope, {
+        intent: { clientKey, topic: "Arithmetic", goal: "", targetDate: null, minutes: 20,
+          startTime: null, timeZone: "UTC", sourceIds: [] },
+        startDate, planTimeZone: "UTC", days: [],
+      });
+    });
+    expect(initialized.courseId).toBe(clientKey);
+    expect(await restore).toMatchObject({ ok: false, code: "TARGET_NOT_EMPTY", mutated: false });
+    expect(await sql`SELECT revision FROM opening_workspace_history_revisions WHERE workspace_id=${workspaceId}`)
+      .toEqual([{ revision: "1" }]);
+  } finally {
+    await restore;
+    await sql`DELETE FROM opening_workspace_history_revisions WHERE workspace_id=${workspaceId}`;
+    await sql`DELETE FROM workspaces WHERE id=${workspaceId}`;
+    await sql`DELETE FROM users WHERE id=${ownerUserId}`;
+    await Promise.all([sql.end(), restoring.end()]);
+  }
+}, 15_000);
+
+it("keeps unanswered mock conversion receipts while removing the catalog solution from backup and restore", async () => {
+  const url = assertOpeningTestDatabase(process.env.OPENING_TEST_DATABASE_URL!, process.env.OPENING_TEST_DB);
+  const sql = createSqlClient(url.toString(), { max: 1 });
+  const rollback = new Error("rollback conversion fixture"), discardSeed = new Error("discard conversion source");
+  const w = randomUUID(), u = randomUUID(), course = randomUUID(), sprint = randomUUID(), source = randomUUID();
+  const scope = { workspaceId: w, ownerUserId: u }, pack = EXAM_SPRINT_PACK;
+  const sections = examPackDirectorySections(pack);
+  const body = Buffer.from(sections.map(section => section.text).join("\n\n"), "utf8");
+  const sha256 = createHash("sha256").update(body).digest("hex");
+  const archivedSource = { sourceId: source, version: 0, sha256, bytes: body.length };
+  const archivePath = `objects/${source}/v0.bin`;
+  try {
+    await sql.begin("isolation level repeatable read", async outer => {
+      await outer`INSERT INTO users(id,email,display_name,password_hash) VALUES(${u},${u + "@backup.test"},'fixture','test')`;
+      await outer`INSERT INTO workspaces(id,owner_user_id) VALUES(${w},${u})`;
+      let backup: OpeningBackup | undefined;
+      let legacyContent: string | undefined;
+      await outer.savepoint(async tx => {
+        const db = transactionClient(tx), repo = createOpeningExamSprintRepository(db, pack);
+        await tx`INSERT INTO courses(id,workspace_id,title,slug) VALUES(${course},${w},'Course','course')`;
+        await tx`INSERT INTO opening_sources(id,workspace_id,name,mime,version,bytes,sha256,upload_state,parse_state)
+          VALUES(${source},${w},'Exam directory','text/plain',0,${body.length},${sha256},'uploaded','ready')`;
+        await tx`INSERT INTO opening_source_versions(source_id,version,workspace_id,bytes,sha256,availability)
+          VALUES(${source},0,${w},${body.length},${sha256},'available')`;
+        for (const [index, section] of sections.entries()) {
+          await tx`INSERT INTO opening_source_chunks(source_id,source_version,page,text) VALUES(${source},0,${index + 1},${section.text})`;
+        }
+        await tx`INSERT INTO opening_exam_sprints(id,workspace_id,owner_user_id,pack_snapshot,state)
+          VALUES(${sprint},${w},${u},${tx.json(pack as never)},${tx.json(createExamSprintState(new Date().toISOString()) as never)})`;
+        await tx`INSERT INTO opening_exam_bindings(sprint_id,course_id,binding) VALUES(${sprint},${course},
+          ${tx.json({ courseId: course, packSourceId: source, materials: [], milestoneId: null, boundAt: new Date().toISOString(),
+            skills: [...new Set(pack.questions.map(question => question.skillId))]
+              .map(skillId => ({ skillId, nodeId: randomUUID(), requirementKey: skillId })) })})`;
+        const mock = await repo.act(scope, { action: "start", mode: "mock-a", clientKey: randomUUID() });
+        const attempt = mock.currentAttempt!;
+        const question = pack.questions.find(entry => entry.id === attempt.questionId)!;
+        const lesson = pack.lessons.find(entry => entry.id === question.lessonId)!;
+        const mapping = validExamLessonExposure(lesson)!;
+        const converted = await repo.act(scope, { action: "switch_to_teaching", clientKey: randomUUID(),
+          expectedAttemptId: attempt.id, expectedRunId: mock.activeRun!.id, lessonId: lesson.id, packVersion: pack.version,
+          contentFingerprint: mapping.contentFingerprint, mappingVersion: mapping.mappingVersion, confirmedEndScoredMock: true });
+        expect(converted.activeRun).toBeNull();
+        expect(converted.attempts.find(entry => entry.id === attempt.id)).toMatchObject({ answer: null, independent: false });
+        const [receipt] = await tx`SELECT r.* FROM opening_exam_help_receipts r JOIN opening_exam_attempt_links l
+          ON l.id=r.attempt_link_id WHERE l.sprint_id=${sprint}`;
+        legacyContent = `${question.answer}\n${question.explanation}`;
+        expect(receipt).toMatchObject({ kind: "solution", content_snapshot: legacyContent });
+        const records = await readOpeningBackupRecords(db, scope);
+        expect(records.tables.opening_exam_help_receipts).toMatchObject([{ ...receipt, content_snapshot: null }]);
+        expect(JSON.stringify(records)).not.toContain(JSON.stringify(question.explanation).slice(1, -1));
+        const composed = composeOpeningBackupDraft({ records, staging: {
+          snapshot: { workspaceId: w, privacyEpoch: records.privacyEpoch, deletionJournal: records.deletionJournal,
+            memoryDeletions: records.memoryDeletions, sources: [archivedSource] },
+          objects: [{ ...archivedSource, actualSha256: sha256, archivePath }],
+        } });
+        if (!composed.ok) throw new Error(composed.errors.join(", "));
+        backup = composed.backup;
+        throw discardSeed;
+      }).catch(error => { if (error !== discardSeed) throw error; });
+      if (!backup || !legacyContent) throw new Error("missing conversion archive");
+      const wire: OpeningBackup = JSON.parse(JSON.stringify(backup));
+      const archivedReceipt = wire.tables.opening_exam_help_receipts![0] as Record<string, unknown>;
+      archivedReceipt.content_snapshot = legacyContent;
+      const result = await executeOpeningRestoreApply(transactionClient(outer), { confirmLocalRestore: true,
+        backup: wire, currentMemoryDeletions: wire.memoryDeletions, currentLearningState: { workspacePreferences: null, courses: [] } });
+      expect(result, result.errors.join(", ")).toMatchObject({ ok: true });
+      const restored = await createOpeningExamSprintRepository(transactionClient(outer), pack).read(scope);
+      expect(restored).toMatchObject({ activeRun: null, currentAttempt: null,
+        attempts: [{ answer: null, answeredAt: null, correct: null, feedback: null }] });
+      const [receipt] = await outer`SELECT * FROM opening_exam_help_receipts WHERE id=${String(archivedReceipt.id)}`;
+      expect(receipt).toMatchObject({ id: archivedReceipt.id, attempt_link_id: archivedReceipt.attempt_link_id, kind: "solution",
+        delivered_at: new Date(String(archivedReceipt.delivered_at)), history_revision: archivedReceipt.history_revision,
+        workspace_history_revision: archivedReceipt.workspace_history_revision, content_snapshot: null });
+      throw rollback;
+    }).catch(error => { if (error !== rollback) throw error; });
+  } finally { await sql.end(); }
+}, 30_000);

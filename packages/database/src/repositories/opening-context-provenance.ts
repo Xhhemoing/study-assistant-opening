@@ -1,5 +1,6 @@
 import type { Sql, TransactionSql } from "postgres";
 import type { Citation } from "@aistudy/contracts";
+import { notePublicationMetadata } from "@aistudy/domain";
 
 type Db = Sql | TransactionSql;
 type Fragment = ReturnType<Db>;
@@ -25,6 +26,25 @@ export function mergeContextSourceRefs(...groups: readonly ContextSourceRef[][])
     unique.set(`${normalized.sourceId}:${normalized.sourceVersion}`, normalized);
   }
   return [...unique.values()];
+}
+
+export function parseNoteContextSourceRefs(value: unknown): ContextSourceRef[] | null {
+  return parseContextSourceRefs(Array.isArray(value) ? value.filter(ref => !notePublicationMetadata(ref)) : value);
+}
+
+/** Strip the exact note-only metadata shapes before applying source admission. */
+export function noteContextSourceRefs(db: Db, refs: Fragment): Fragment {
+  return db`CASE WHEN jsonb_typeof(${refs})='array' THEN (
+    SELECT COALESCE(jsonb_agg(ref), '[]'::jsonb) FROM jsonb_array_elements(${refs}) ref
+    WHERE NOT EXISTS (
+      SELECT 1 FROM (VALUES ('answerKeyBlockIds'), ('publicationCardIds')) AS metadata(key)
+      WHERE ref=jsonb_build_object(metadata.key, ref->metadata.key)
+        AND jsonb_typeof(ref->metadata.key)='array'
+        AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(ref->metadata.key)='array'
+          THEN ref->metadata.key ELSE '[]'::jsonb END) AS item(value)
+          WHERE item.value IS NULL OR item.value !~* ${UUID.source})
+    )
+  ) ELSE ${refs} END`;
 }
 
 /** SQL admission shared by live context and backup, with the latter retaining historical versions. */

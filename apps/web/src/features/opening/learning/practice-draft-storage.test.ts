@@ -1,5 +1,5 @@
 import { expect, it, vi } from "vitest";
-import { assertPracticeDraftSaved, emptyPracticeDraft, parsePracticeDraftCollection, patchPracticeDraft, practiceScope, readPracticeDraft, readPracticeDraftCollection, switchPracticeDraft, writePracticeDraft } from "./practice-draft-storage";
+import { assertPracticeDraftSaved, emptyPracticeDraft, moveArchivedPracticeDraft, parsePracticeDraft, parsePracticeDraftCollection, patchPracticeDraft, practiceDraftHasUnsavedStorage, practiceScope, readPartitionedPracticeDraftCollection, readPracticeDraft, readPracticeDraftCollection, reconcileMovedPracticeArchives, switchPracticeDraft, writePracticeDraft } from "./practice-draft-storage";
 import { runPracticeRequest } from "./practice-draft";
 
 const courseId = "11111111-1111-4111-8111-111111111111";
@@ -7,6 +7,11 @@ const sessionId = "22222222-2222-4222-8222-222222222222";
 const attemptId = "33333333-3333-4333-8333-333333333333";
 const observationId = "44444444-4444-4444-8444-444444444444";
 const newScope = () => practiceScope(courseId, "ordinary", { retestId: crypto.randomUUID(), skillLabel: "scope", prompt: crypto.randomUUID() });
+function matrixDraft(scope: string, sourceId: string, variant: number, answer = "matrix answer", course = courseId) {
+  const clientKey = `matrix-start:${crypto.randomUUID()}`;
+  return { ...emptyPracticeDraft(scope, { sourceId, matrixMode: true, matrixKey: "addition", matrixVariant: variant, answer }),
+    start: { sessionId, clientKey, createInput: { sessionId, clientKey, matrixExercise: { sourceId, exerciseKey: "addition" as const, variant } }, sessionInput: { courseId: course, sourceIds: [sourceId], skillLabel: "矩阵加法" } } };
+}
 function storage() {
   const data = new Map<string, string>();
   return { data, getItem: vi.fn((key: string) => data.get(key) ?? null), setItem: vi.fn((key: string, value: string) => { data.set(key, value); }) };
@@ -40,6 +45,244 @@ it("starts another practice without losing a frozen request, then restores exact
   expect(parsePracticeDraftCollection(persisted, scope)).toEqual(restored);
 });
 
+it.each([
+  { failure: "destination write", hasTarget: true, committed: false },
+  { failure: "source write", hasTarget: true, committed: false },
+  { failure: "source write and rollback setItem", hasTarget: true, committed: true },
+  { failure: "source write and rollback removeItem", hasTarget: false, committed: true },
+] as const)("keeps both matrix drafts consistent after failing $failure", async ({ failure, hasTarget, committed }) => {
+  const courseId = crypto.randomUUID();
+  const sourceId = crypto.randomUUID();
+  const exercise = { sourceId, exerciseKey: "addition", variant: 2 } as const;
+  const source = practiceScope(courseId, "matrix", null, undefined, undefined, exercise);
+  const target = practiceScope(courseId, "matrix", null, undefined, undefined, { ...exercise, variant: 3 });
+  const sourceKey = `opening-practice:v2:${source}`;
+  const targetKey = `opening-practice:v2:${target}`;
+  const fields = { sourceId, matrixKey: "addition" as const, matrixVariant: 2 };
+  const original = emptyPracticeDraft(source, { ...fields, answer: "[[1]]" });
+  const archived = emptyPracticeDraft(source, { ...fields, matrixVariant: 3, answer: "[[2]]" });
+  const existing = emptyPracticeDraft(target, { ...fields, matrixVariant: 3, answer: "[[99]]" });
+  const disk = { ...storage(), removeItem: vi.fn((key: string) => { disk.data.delete(key); }) };
+  writePracticeDraft(archived, disk);
+  switchPracticeDraft(source, archived.id, original, disk);
+  if (hasTarget) writePracticeDraft(existing, disk);
+  const previousTarget = disk.data.get(targetKey);
+  disk.setItem.mockImplementation((key, value) => {
+    if (key === sourceKey || (key === targetKey && (
+      failure === "destination write" || (failure === "source write and rollback setItem" && value === previousTarget)
+    ))) throw new Error("write denied");
+    disk.data.set(key, value);
+  });
+  if (!hasTarget) disk.removeItem.mockImplementation(() => { throw new Error("rollback remove denied"); });
+
+  expect(readPracticeDraft(target, disk)).toEqual(hasTarget ? existing : null);
+  let moveFailure: unknown;
+  try { moveArchivedPracticeDraft(source, original.id, archived.id, target, disk); }
+  catch (reason) { moveFailure = reason; }
+
+  const destination = committed ? { ...archived, scope: target } : existing;
+  expect(readPracticeDraft(source, null)).toEqual(original);
+  expect(readPracticeDraft(target, null)).toEqual(destination);
+  expect(readPracticeDraft(source, null, archived.id)).toEqual(archived);
+  if (hasTarget) expect(readPracticeDraft(target, null, existing.id)).toEqual(existing);
+
+  vi.resetModules();
+  const cold = await import("./practice-draft-storage");
+  expect(cold.readPracticeDraft(source, disk)).toEqual(original);
+  expect(cold.readPracticeDraft(target, disk)).toEqual(destination);
+  expect(cold.readPracticeDraft(source, disk, archived.id)).toEqual(archived);
+  if (hasTarget) expect(cold.readPracticeDraft(target, disk, existing.id)).toEqual(existing);
+  if (committed) expect(moveFailure).toBeUndefined();
+  else expect(moveFailure).toEqual(new Error("草稿未切换，原答案已保留。请允许使用浏览器存储或释放空间后重试。"));
+});
+
+it("uses canonical source bytes when retrying cleanup after a moved matrix archive is edited", () => {
+  const course = crypto.randomUUID();
+  const sourceId = crypto.randomUUID();
+  const source = practiceScope(course, "matrix", null, undefined, undefined, { sourceId, exerciseKey: "addition", variant: 2 });
+  const target = practiceScope(course, "matrix", null, undefined, undefined, { sourceId, exerciseKey: "addition", variant: 3 });
+  const original = emptyPracticeDraft(source, { matrixMode: true, sourceId, matrixKey: "addition", matrixVariant: 2 });
+  const archived = matrixDraft(source, sourceId, 3, "archived answer", course);
+  const sourceKey = `opening-practice:v2:${source}`;
+  const disk = { ...storage(), removeItem: vi.fn((key: string) => { disk.data.delete(key); }) };
+
+  expect(parsePracticeDraft(archived, source)).not.toBeNull();
+  expect(writePracticeDraft(archived, disk)).toBe(true);
+  switchPracticeDraft(source, archived.id, original, disk);
+  disk.setItem.mockImplementationOnce(() => { throw new Error("edit denied"); });
+  expect(patchPracticeDraft(source, {}, { start: archived.start }, disk, archived.id).persisted).toBe(false);
+
+  let sourceWrites = 0;
+  disk.setItem.mockImplementation((key, value) => {
+    if (key === sourceKey && ++sourceWrites > 1) throw new Error("source cleanup denied");
+    disk.data.set(key, value);
+  });
+  disk.removeItem.mockImplementation(() => { throw new Error("rollback denied"); });
+
+  expect(moveArchivedPracticeDraft(source, original.id, archived.id, target, disk).activeId).toBe(archived.id);
+  expect(patchPracticeDraft(target, {}, { fields: { answer: "edited destination" } }, disk, archived.id).persisted).toBe(true);
+
+  disk.setItem.mockImplementation((key, value) => { disk.data.set(key, value); });
+  const sourceCollection = readPracticeDraftCollection(source, disk)!;
+  expect(reconcileMovedPracticeArchives(sourceCollection, () => target, disk)).toEqual(new Set([archived.id]));
+  expect(readPracticeDraft(source, disk, archived.id)).toBeNull();
+});
+
+it("does not hide a moved archive after another editor makes it the source active draft", () => {
+  const course = crypto.randomUUID();
+  const sourceId = crypto.randomUUID();
+  const source = practiceScope(course, "matrix", null, undefined, undefined, { sourceId, exerciseKey: "addition", variant: 2 });
+  const target = practiceScope(course, "matrix", null, undefined, undefined, { sourceId, exerciseKey: "addition", variant: 3 });
+  const original = emptyPracticeDraft(source, { matrixMode: true, sourceId, matrixKey: "addition", matrixVariant: 2 });
+  const archived = matrixDraft(source, sourceId, 3, "matrix answer", course);
+  const moved = parsePracticeDraft({ ...archived, scope: target }, target)!;
+  const sourceKey = `opening-practice:v2:${source}`;
+  const targetKey = `opening-practice:v2:${target}`;
+  const disk = { ...storage(), removeItem: vi.fn((key: string) => { disk.data.delete(key); }) };
+
+  expect(parsePracticeDraft(archived, source)).not.toBeNull();
+  expect(writePracticeDraft(archived, disk)).toBe(true);
+  switchPracticeDraft(source, archived.id, original, disk);
+  const stale = readPracticeDraftCollection(source, disk)!;
+  const canonical = parsePracticeDraftCollection(stale, source)!;
+  disk.data.set(sourceKey, JSON.stringify({ ...canonical, activeId: archived.id }));
+  disk.data.set(targetKey, JSON.stringify({ version: 2, scope: target, activeId: moved.id, drafts: [moved] }));
+
+  expect(reconcileMovedPracticeArchives(stale, () => target, disk)).toEqual(new Set());
+  expect(readPracticeDraft(source, disk)?.id).toBe(archived.id);
+});
+
+it.each([
+  "source flush",
+  "destination write",
+  "source cleanup",
+  "source cleanup and destination rollback",
+] as const)("protects a dirty source when %s fails during a matrix restore", async failure => {
+  const courseId = crypto.randomUUID();
+  const sourceId = crypto.randomUUID();
+  const exercise = { sourceId, exerciseKey: "addition", variant: 2 } as const;
+  const source = practiceScope(courseId, "matrix", null, undefined, undefined, exercise);
+  const target = practiceScope(courseId, "matrix", null, undefined, undefined, { ...exercise, variant: 3 });
+  const sourceKey = `opening-practice:v2:${source}`;
+  const targetKey = `opening-practice:v2:${target}`;
+  const fields = { sourceId, matrixKey: "addition" as const, matrixVariant: 2 };
+  const original = emptyPracticeDraft(source, { ...fields, answer: "[[1]]" });
+  const archived = emptyPracticeDraft(source, { ...fields, matrixVariant: 3, answer: "[[2]]" });
+  const existing = emptyPracticeDraft(target, { ...fields, matrixVariant: 3, answer: "[[99]]" });
+  const disk = { ...storage(), removeItem: vi.fn((key: string) => { disk.data.delete(key); }) };
+  writePracticeDraft(archived, disk);
+  switchPracticeDraft(source, archived.id, original, disk);
+  writePracticeDraft(existing, disk);
+  const previousTarget = disk.data.get(targetKey);
+
+  disk.setItem.mockImplementationOnce(() => { throw new Error("edit save denied"); });
+  const edit = patchPracticeDraft(source, {}, { fields: { answer: "[[8]]" } }, disk, original.id);
+  expect(edit.persisted).toBe(false);
+  expect(disk.data.get(sourceKey)).toContain('"answer":"[[1]]"');
+
+  const flushDenied = failure === "source flush";
+  const committed = failure === "source cleanup and destination rollback";
+  disk.setItem.mockClear();
+  disk.setItem.mockImplementation((key, value) => {
+    if ((key === sourceKey && (flushDenied || !value.includes(archived.id)))
+      || (key === targetKey && (failure === "destination write" || (committed && value === previousTarget)))) {
+      throw new Error("restore write denied");
+    }
+    disk.data.set(key, value);
+  });
+
+  const move = () => moveArchivedPracticeDraft(source, original.id, archived.id, target, disk);
+  if (committed) expect(move().activeId).toBe(archived.id);
+  else expect(move).toThrow("草稿未切换");
+  if (!committed) expect(disk.data.get(targetKey)).toBe(previousTarget);
+  if (flushDenied) expect(disk.setItem.mock.calls.some(([key]) => key === targetKey)).toBe(false);
+  else expect(() => assertPracticeDraftSaved(source)).not.toThrow();
+
+  const hotSource = readPracticeDraft(source, disk);
+  const hotTarget = readPracticeDraft(target, disk);
+  expect(hotSource).toEqual(edit.draft);
+  expect(hotTarget).toEqual(committed ? { ...archived, scope: target } : existing);
+  expect(readPracticeDraft(source, disk, archived.id)).toEqual(archived);
+
+  vi.resetModules();
+  const cold = await import("./practice-draft-storage");
+  expect(cold.readPracticeDraft(source, disk)).toEqual(flushDenied ? original : hotSource);
+  expect(cold.readPracticeDraft(target, disk)).toEqual(hotTarget);
+  expect(cold.readPracticeDraft(source, disk, archived.id)).toEqual(archived);
+
+  if (flushDenied) {
+    // A denied flush keeps the edit in memory. Once storage recovers, retry makes it durable.
+    disk.setItem.mockImplementation((key, value) => { disk.data.set(key, value); });
+    expect(move().activeId).toBe(archived.id);
+    vi.resetModules();
+    const retried = await import("./practice-draft-storage");
+    expect(retried.readPracticeDraft(source, disk)).toEqual(hotSource);
+    expect(retried.readPracticeDraft(target, disk)).toEqual({ ...archived, scope: target });
+  }
+
+  if (committed) {
+    const coldSource = cold.readPracticeDraftCollection(source, disk)!;
+    expect(cold.reconcileMovedPracticeArchives(coldSource, () => target, disk)).toEqual(new Set([archived.id]));
+    expect(cold.readPracticeDraft(source, disk, archived.id)).toEqual(archived);
+    disk.setItem.mockImplementation((key, value) => { disk.data.set(key, value); });
+    expect(cold.reconcileMovedPracticeArchives(coldSource, () => target, disk)).toEqual(new Set([archived.id]));
+    expect(cold.readPracticeDraft(source, disk, archived.id)).toBeNull();
+    expect(cold.readPracticeDraft(source, disk)).toEqual(hotSource);
+    expect(cold.readPracticeDraft(target, disk)).toEqual(hotTarget);
+  }
+});
+
+it.each([
+  "source read",
+  "corrupt source",
+  "target rollback snapshot read",
+  "target collection read",
+  "corrupt target",
+] as const)("keeps both cached drafts editable after a failed archive move (%s)", failure => {
+  const source = newScope();
+  const target = newScope();
+  const sourceKey = `opening-practice:v2:${source}`;
+  const targetKey = `opening-practice:v2:${target}`;
+  const archived = emptyPracticeDraft(source, { answer: "archived answer" });
+  const current = emptyPracticeDraft(source, { answer: "source answer" });
+  const existing = emptyPracticeDraft(target, { answer: "target answer" });
+  const disk = { ...storage(), removeItem: (key: string) => { disk.data.delete(key); } };
+  writePracticeDraft(archived, disk);
+  switchPracticeDraft(source, archived.id, current, disk);
+  writePracticeDraft(existing, disk);
+  const failedScope = failure === "source read" || failure === "corrupt source" ? source : target;
+  const failedKey = failedScope === source ? sourceKey : targetKey;
+  const failedDraft = failedScope === source ? current : existing;
+  const otherDraft = failedScope === source ? existing : current;
+  const originalBytes = disk.data.get(failedKey);
+  let reads = 0;
+  disk.getItem.mockImplementation(key => {
+    if (key === failedKey) {
+      reads += 1;
+      if (failure === "target collection read" && reads === 1) return originalBytes ?? null;
+      if (failure === "corrupt source" || failure === "corrupt target") return "{broken";
+      throw new Error("storage denied");
+    }
+    return disk.data.get(key) ?? null;
+  });
+
+  expect(() => moveArchivedPracticeDraft(source, current.id, archived.id, target, disk))
+    .toThrow("草稿未切换，原答案已保留");
+  const edited = { ...failedDraft, fields: { ...failedDraft.fields, answer: "typed during outage" } };
+  expect(writePracticeDraft(edited, disk)).toBe(false);
+  expect(readPracticeDraft(failedScope, null)).toEqual(edited);
+  expect(disk.data.get(failedKey)).toBe(originalBytes);
+  const otherEdit = { ...otherDraft, fields: { ...otherDraft.fields, answer: "typed in the other scope" } };
+  expect(writePracticeDraft(otherEdit, disk)).toBe(true);
+
+  disk.getItem.mockImplementation(key => disk.data.get(key) ?? null);
+  expect(writePracticeDraft(edited, disk)).toBe(true);
+  const storedSource = parsePracticeDraftCollection(JSON.parse(disk.data.get(sourceKey)!), source);
+  const storedTarget = parsePracticeDraftCollection(JSON.parse(disk.data.get(targetKey)!), target);
+  expect(storedSource).toMatchObject({ activeId: current.id, drafts: [archived, failedScope === source ? edited : otherEdit] });
+  expect(storedTarget).toMatchObject({ activeId: existing.id, drafts: [failedScope === target ? edited : otherEdit] });
+});
+
 it("refuses a second same-tick switch from stale controls rather than discarding the new active draft", () => {
   const { scope, saved, disk } = setup();
   const next = emptyPracticeDraft(scope);
@@ -47,6 +290,519 @@ it("refuses a second same-tick switch from stale controls rather than discarding
   expect(() => switchPracticeDraft(scope, saved.id, emptyPracticeDraft(scope), disk)).toThrow("已切换");
   expect(readPracticeDraftCollection(scope, null)?.drafts).toHaveLength(2);
   expect(readPracticeDraft(scope, null)?.id).toBe(next.id);
+});
+
+async function moveIntoCachedCollection() {
+  const source = newScope();
+  const target = newScope();
+  const disk = { ...storage(), removeItem: (key: string) => { disk.data.delete(key); } };
+  const archived = emptyPracticeDraft(source, { answer: "moved answer" });
+  const sourceActive = emptyPracticeDraft(source);
+  const targetArchive = emptyPracticeDraft(target, { answer: "previous archive" });
+  const targetActive = emptyPracticeDraft(target, { answer: "open answer" });
+  expect(writePracticeDraft(archived, disk)).toBe(true);
+  switchPracticeDraft(source, archived.id, sourceActive, disk);
+  expect(writePracticeDraft(targetArchive, disk)).toBe(true);
+  switchPracticeDraft(target, targetArchive.id, targetActive, disk);
+
+  vi.resetModules();
+  const sibling = await import("./practice-draft-storage");
+  sibling.readPracticeDraftCollection(source, disk);
+  sibling.moveArchivedPracticeDraft(source, sourceActive.id, archived.id, target, disk);
+  expect(readPracticeDraft(target, null)).toEqual(targetActive);
+  return { disk, source, target, targetActive, targetArchive, moved: { ...archived, scope: target } };
+}
+
+it.each(["edit", "switch"] as const)("keeps an archive moved by another editor during a clean cached %s", async action => {
+  const { disk, source, target, targetActive, targetArchive, moved } = await moveIntoCachedCollection();
+  const activeId = action === "edit" ? targetActive.id : targetArchive.id;
+  let expectedActive = targetActive;
+  if (action === "edit") {
+    const edit = patchPracticeDraft(target, {}, { fields: { answer: "edited open answer" } }, disk, targetActive.id);
+    expect(edit.persisted).toBe(true);
+    expectedActive = edit.draft;
+  } else {
+    expect(switchPracticeDraft(target, targetActive.id, targetArchive.id, disk).activeId).toBe(activeId);
+  }
+
+  vi.resetModules();
+  const cold = await import("./practice-draft-storage");
+  expect(cold.readPracticeDraft(source, disk, moved.id)).toBeNull();
+  expect(cold.readPracticeDraftCollection(target, disk)).toMatchObject({
+    activeId, drafts: [targetArchive, expectedActive, moved],
+  });
+});
+
+it.each(["edit", "new draft", "switch", "move out"] as const)(
+  "keeps a concurrently migrated draft during a clean cached %s",
+  async action => {
+    const course = crypto.randomUUID();
+    const ordinary = practiceScope(course, "ordinary");
+    const manual = practiceScope(course, "manual");
+    const target = newScope();
+    const disk = { ...storage(), removeItem: (key: string) => { disk.data.delete(key); } };
+    const original = emptyPracticeDraft(ordinary, { answer: "answer to migrate" });
+    const archived = emptyPracticeDraft(manual, { answer: "archived manual answer" });
+    const current = emptyPracticeDraft(manual, { answer: "open manual answer" });
+    expect(writePracticeDraft(original, disk)).toBe(true);
+    expect(writePracticeDraft(archived, disk)).toBe(true);
+    switchPracticeDraft(manual, archived.id, current, disk);
+
+    vi.resetModules();
+    const sibling = await import("./practice-draft-storage");
+    sibling.readPartitionedPracticeDraftCollection({ ordinary, manual }, current, disk);
+    expect(disk.data.has(`opening-practice:v2:${ordinary}`)).toBe(false);
+
+    const migrated = { ...original, scope: manual };
+    let expected = { activeId: current.id, drafts: [archived, current, migrated] };
+    if (action === "edit") {
+      const edit = patchPracticeDraft(manual, {}, { fields: { answer: "edited manual answer" } }, disk, current.id);
+      expect(edit.persisted).toBe(true);
+      expected = { ...expected, drafts: [archived, edit.draft, migrated] };
+    } else if (action === "new draft") {
+      const next = emptyPracticeDraft(manual, { answer: "new manual answer" });
+      switchPracticeDraft(manual, current.id, next, disk);
+      expected = { activeId: next.id, drafts: [...expected.drafts, next] };
+    } else if (action === "switch") {
+      switchPracticeDraft(manual, current.id, archived.id, disk);
+      expected.activeId = archived.id;
+    } else {
+      moveArchivedPracticeDraft(manual, current.id, archived.id, target, disk);
+      expect(readPracticeDraft(target, disk)).toEqual({ ...archived, scope: target });
+      expected.drafts = [current, migrated];
+    }
+
+    vi.resetModules();
+    const cold = await import("./practice-draft-storage");
+    expect(cold.readPracticeDraftCollection(manual, disk)).toMatchObject(expected);
+  },
+);
+
+it("rejects a cached selection that another editor moved out of the collection", async () => {
+  const { disk, source, target, targetActive, targetArchive, moved } = await moveIntoCachedCollection();
+  vi.resetModules();
+  const sibling = await import("./practice-draft-storage");
+  sibling.readPracticeDraftCollection(target, disk);
+  sibling.moveArchivedPracticeDraft(target, moved.id, targetArchive.id, source, disk);
+  const durable = disk.data.get(`opening-practice:v2:${target}`);
+
+  expect(() => switchPracticeDraft(target, targetActive.id, targetArchive.id, disk)).toThrow("找不到这份保留的草稿");
+  expect(readPracticeDraft(target, null)).toEqual(targetActive);
+  expect(disk.data.get(`opening-practice:v2:${target}`)).toBe(durable);
+  expect(sibling.readPracticeDraft(source, disk, targetArchive.id)).toEqual({ ...targetArchive, scope: source });
+});
+
+it("keeps a newer source answer on the shelf after another editor moves its archive", async () => {
+  const course = crypto.randomUUID();
+  const exercise = { sourceId: crypto.randomUUID(), exerciseKey: "addition", variant: 2 } as const;
+  const source = practiceScope(course, "matrix", null, undefined, undefined, exercise);
+  const target = practiceScope(course, "matrix", null, undefined, undefined, { ...exercise, variant: 3 });
+  const fields = { sourceId: exercise.sourceId, matrixKey: exercise.exerciseKey };
+  const first = emptyPracticeDraft(source, { ...fields, matrixVariant: 3, answer: "first answer" });
+  const original = emptyPracticeDraft(source, { ...fields, matrixVariant: 2 });
+  const disk = { ...storage(), removeItem: (key: string) => { disk.data.delete(key); } };
+  expect(writePracticeDraft(first, disk)).toBe(true);
+  switchPracticeDraft(source, first.id, original, disk);
+
+  vi.resetModules();
+  const sibling = await import("./practice-draft-storage");
+  expect(sibling.readPracticeDraft(source, disk, first.id)).toEqual(first);
+  vi.resetModules();
+  const returning = await import("./practice-draft-storage");
+  const staleCollection = returning.readPracticeDraftCollection(source, disk)!;
+
+  expect(moveArchivedPracticeDraft(source, original.id, first.id, target, disk).activeId).toBe(first.id);
+  const edit = sibling.patchPracticeDraft(source, {}, { fields: { answer: "newer answer" } }, disk, first.id);
+  expect(edit.persisted).toBe(true);
+  expect(returning.reconcileMovedPracticeArchives(staleCollection, () => target, disk).has(first.id)).toBe(false);
+  expect(returning.readPracticeDraft(source, disk, first.id)?.fields.answer).toBe("newer answer");
+
+  vi.resetModules();
+  const reopened = await import("./practice-draft-storage");
+  const sourceCollection = reopened.readPracticeDraftCollection(source, disk)!;
+  expect(sourceCollection.activeId).toBe(original.id);
+  expect(reopened.reconcileMovedPracticeArchives(sourceCollection, () => target, disk).has(first.id)).toBe(false);
+  expect(reopened.readPracticeDraft(source, disk, first.id)?.fields.answer).toBe("newer answer");
+  expect(reopened.readPracticeDraft(target, disk, first.id)?.fields.answer).toBe("first answer");
+});
+
+it.each(["patch", "dirty patch", "full write"] as const)("preserves another editor's answer on a stale %s", async mode => {
+  const scope = newScope();
+  const disk = storage();
+  const original = emptyPracticeDraft(scope, { answer: "first answer" });
+  expect(writePracticeDraft(original, disk)).toBe(true);
+  const localFields = mode === "dirty patch" ? { assistance: "independent" as const } : {};
+  if (mode === "dirty patch") expect(patchPracticeDraft(scope, {}, { fields: localFields }, null).persisted).toBe(false);
+
+  vi.resetModules();
+  const sibling = await import("./practice-draft-storage");
+  expect(sibling.readPracticeDraft(scope, disk)).toEqual(original);
+  expect(sibling.patchPracticeDraft(scope, {}, { fields: { answer: "revised answer" } }, disk).persisted).toBe(true);
+
+  const fields = { outcome: "correct" as const };
+  if (mode === "full write") expect(writePracticeDraft({ ...original, fields: { ...original.fields, ...fields } }, disk)).toBe(true);
+  else expect(patchPracticeDraft(scope, {}, { fields }, disk).persisted).toBe(true);
+
+  vi.resetModules();
+  const cold = await import("./practice-draft-storage");
+  expect(cold.readPracticeDraft(scope, disk)?.fields).toMatchObject({ ...fields, ...localFields, answer: "revised answer" });
+});
+
+it("keeps a concurrently frozen submission readable when an outcome edit conflicts with it", async () => {
+  const scope = newScope();
+  const sealed = frozen(scope);
+  sealed.start.createInput.clientKey = sealed.start.clientKey;
+  const disk = storage();
+  expect(writePracticeDraft({ ...sealed, submission: null }, disk)).toBe(true);
+
+  vi.resetModules();
+  const sibling = await import("./practice-draft-storage");
+  sibling.readPracticeDraft(scope, disk);
+  expect(sibling.patchPracticeDraft(scope, {}, { submission: sealed.submission }, disk).persisted).toBe(true);
+
+  const edit = patchPracticeDraft(scope, {}, { fields: { outcome: "correct" } }, disk);
+  expect(edit.persisted).toBe(false);
+  expect(readPracticeDraft(scope, null)?.fields.outcome).toBe("correct");
+  vi.resetModules();
+  const cold = await import("./practice-draft-storage");
+  expect(cold.readPracticeDraft(scope, disk)).toEqual(sealed);
+});
+
+it("migrates a manual draft while retaining a conflicting matrix edit only in memory", async () => {
+  const retest = { retestId: crypto.randomUUID(), skillLabel: "scope", prompt: "retest" };
+  const ordinary = practiceScope(courseId, "ordinary", retest);
+  const manual = practiceScope(courseId, "manual", retest);
+  const ordinaryKey = `opening-practice:v2:${ordinary}`;
+  const sealed = frozen(ordinary);
+  sealed.start.createInput.clientKey = sealed.start.clientKey;
+  sealed.fields.matrixMode = true;
+  const matrix = { ...sealed, submission: null };
+  const legacyManual = emptyPracticeDraft(ordinary, { answer: "manual answer" });
+  const disk = { ...storage(), removeItem: (key: string) => { disk.data.delete(key); } };
+  disk.data.set(ordinaryKey, JSON.stringify({
+    version: 2, scope: ordinary, activeId: matrix.id, drafts: [matrix, legacyManual],
+  }));
+  expect(readPracticeDraft(ordinary, disk)).toEqual(matrix);
+
+  vi.resetModules();
+  const sibling = await import("./practice-draft-storage");
+  sibling.readPracticeDraft(ordinary, disk);
+  expect(sibling.patchPracticeDraft(ordinary, {}, { submission: sealed.submission }, disk, matrix.id).persisted).toBe(true);
+  expect(patchPracticeDraft(ordinary, {}, { fields: { answer: "edited manual answer" } }, null, legacyManual.id).persisted).toBe(false);
+  expect(patchPracticeDraft(ordinary, {}, { fields: { outcome: "correct" } }, disk, matrix.id).persisted).toBe(false);
+
+  expect(readPartitionedPracticeDraftCollection({ ordinary, manual }, emptyPracticeDraft(manual), disk)?.drafts)
+    .toContainEqual({ ...legacyManual, scope: manual, fields: { ...legacyManual.fields, answer: "edited manual answer" } });
+  expect(parsePracticeDraftCollection(JSON.parse(disk.data.get(ordinaryKey)!), ordinary)?.drafts).toEqual([sealed]);
+  expect(readPracticeDraftCollection(ordinary, null)?.drafts).toMatchObject([
+    { id: matrix.id, fields: { outcome: "correct" }, submission: sealed.submission },
+  ]);
+  expect(practiceDraftHasUnsavedStorage(ordinary)).toBe(true);
+
+  expect(patchPracticeDraft(ordinary, {}, { fields: { outcome: "unverified" } }, disk, matrix.id).persisted).toBe(true);
+  expect(parsePracticeDraftCollection(JSON.parse(disk.data.get(ordinaryKey)!), ordinary)?.drafts).toEqual([sealed]);
+  expect(practiceDraftHasUnsavedStorage(ordinary)).toBe(false);
+});
+
+it.each(["ordinary", "manual"] as const)("recovers sibling manual drafts after a frozen submission conflicts in the %s partition", async conflictedPartition => {
+  const course = crypto.randomUUID();
+  const ordinary = practiceScope(course, "ordinary");
+  const manual = practiceScope(course, "manual");
+  const scopes = { ordinary, manual };
+  const scope = scopes[conflictedPartition];
+  const { submission: { input: { clientKey, answer, outcome, assistance } }, ...checkpoint } = frozen(scope);
+  checkpoint.start.createInput.clientKey = checkpoint.start.clientKey;
+  checkpoint.start.sessionInput.courseId = course;
+  const submission = { attemptId, input: { clientKey, answer, outcome, assistance } };
+  const original = { ...checkpoint, submission: null };
+  const siblingDraft = emptyPracticeDraft(ordinary, { answer: "sibling draft" });
+  const matrix = emptyPracticeDraft(ordinary, { matrixMode: true });
+  const disk = { ...storage(), removeItem: (key: string) => { disk.data.delete(key); } };
+  expect(writePracticeDraft(original, disk)).toBe(true);
+  if (scope === ordinary) switchPracticeDraft(ordinary, original.id, siblingDraft, disk);
+  else expect(writePracticeDraft(siblingDraft, disk)).toBe(true);
+  switchPracticeDraft(ordinary, siblingDraft.id, matrix, disk);
+
+  expect(patchPracticeDraft(scope, {}, { fields: { answer: "unsaved answer", outcome: "correct" } }, null, original.id).persisted).toBe(false);
+  vi.resetModules();
+  const sibling = await import("./practice-draft-storage");
+  sibling.readPracticeDraftCollection(scope, disk);
+  expect(sibling.patchPracticeDraft(scope, {}, { submission }, disk, original.id).persisted).toBe(true);
+
+  const ordinaryKey = `opening-practice:v2:${ordinary}`;
+  let denyCleanup = true;
+  disk.setItem.mockImplementation((key, value) => {
+    if (denyCleanup && key === ordinaryKey) throw new Error("ordinary cleanup denied");
+    disk.data.set(key, value);
+  });
+  const fallback = emptyPracticeDraft(manual);
+  const restored = readPartitionedPracticeDraftCollection(scopes, fallback, disk)!;
+  expect(restored.drafts).toEqual(expect.arrayContaining([
+    { ...original, scope: manual, submission },
+    { ...siblingDraft, scope: manual },
+  ]));
+  const recovery = restored.drafts.find(draft => draft.fields.answer === "unsaved answer");
+  expect(recovery).toMatchObject({ scope: manual, fields: { outcome: "correct" }, start: null, attemptId: null, submission: null });
+  expect(recovery?.id).not.toBe(original.id);
+  expect(parsePracticeDraftCollection(JSON.parse(disk.data.get(ordinaryKey)!), ordinary)?.drafts.length).toBeGreaterThan(1);
+
+  denyCleanup = false;
+  expect(readPartitionedPracticeDraftCollection(scopes, matrix, disk)?.activeId).toBe(matrix.id);
+  expect(readPartitionedPracticeDraftCollection(scopes, fallback, disk)).toEqual(restored);
+  expect(parsePracticeDraftCollection(JSON.parse(disk.data.get(ordinaryKey)!), ordinary)?.drafts).toEqual([matrix]);
+  expect(switchPracticeDraft(manual, restored.activeId, siblingDraft.id, disk).activeId).toBe(siblingDraft.id);
+
+  vi.resetModules();
+  const cold = await import("./practice-draft-storage");
+  expect(cold.readPracticeDraftCollection(manual, disk)?.drafts).toEqual(restored.drafts);
+});
+
+it.each([false, true])("reuses the canonical manual copy across cleanup retries (divergent: %s)", divergent => {
+  const course = crypto.randomUUID();
+  const ordinary = practiceScope(course, "ordinary");
+  const manual = practiceScope(course, "manual");
+  const ordinaryKey = `opening-practice:v2:${ordinary}`;
+  const manualKey = `opening-practice:v2:${manual}`;
+  const original = emptyPracticeDraft(ordinary, { skillLabel: "Algebra", answer: "source answer" });
+  const clientKey = `start-${crypto.randomUUID()}`;
+  const start = { sessionId, clientKey, createInput: { sessionId, clientKey }, sessionInput: { courseId: course, skillLabel: "Algebra", sourceIds: [] } };
+  const existing = {
+    ...original, scope: manual, start,
+    fields: { ...original.fields, answer: divergent ? "destination answer" : "source answer" },
+  };
+  const disk = { ...storage(), removeItem: vi.fn((key: string) => {
+    if (key === ordinaryKey) throw new Error("source cleanup denied");
+    disk.data.delete(key);
+  }) };
+  disk.data.set(ordinaryKey, JSON.stringify({ version: 2, scope: ordinary, activeId: original.id, drafts: [original] }));
+  disk.data.set(manualKey, JSON.stringify({ version: 2, scope: manual, activeId: existing.id, drafts: [existing] }));
+  readPracticeDraft(ordinary, disk);
+  expect(patchPracticeDraft(ordinary, {}, { start }, null, original.id).persisted).toBe(false);
+  readPracticeDraft(manual, disk);
+  const { sessionInput, createInput } = start;
+  expect(patchPracticeDraft(manual, {}, { start: { clientKey, sessionId, sessionInput, createInput } }, null, existing.id).persisted).toBe(false);
+
+  const scopes = { ordinary, manual };
+  const fallback = emptyPracticeDraft(manual);
+  const expectedAnswers = divergent ? ["destination answer", "source answer"] : ["source answer"];
+  const migrated = readPartitionedPracticeDraftCollection(scopes, fallback, disk);
+  expect(migrated?.drafts.map(draft => draft.fields.answer)).toEqual(expectedAnswers);
+  expect(disk.data.has(ordinaryKey)).toBe(true);
+  expect(readPartitionedPracticeDraftCollection(scopes, fallback, disk)).toEqual(migrated);
+  expect(disk.data.has(ordinaryKey)).toBe(true);
+
+  disk.removeItem.mockImplementation(key => { disk.data.delete(key); });
+  expect(readPartitionedPracticeDraftCollection(scopes, fallback, disk)).toEqual(migrated);
+  expect(disk.data.has(ordinaryKey)).toBe(false);
+});
+
+it("keeps a pending field edit when writing an older snapshot with a different edit", () => {
+  const scope = newScope();
+  const disk = storage();
+  const original = emptyPracticeDraft(scope, { answer: "first answer" });
+  const key = `opening-practice:v2:${scope}`;
+  disk.data.set(key, JSON.stringify({ version: 2, scope, activeId: original.id, drafts: [original] }));
+  const snapshot = readPracticeDraft(scope, disk)!;
+  expect(patchPracticeDraft(scope, {}, { fields: { answer: "pending answer" } }, null).persisted).toBe(false);
+  expect(readPracticeDraft(scope, null)?.fields.answer).toBe("pending answer");
+
+  expect(writePracticeDraft({ ...snapshot, fields: { ...snapshot.fields, outcome: "correct" } }, disk)).toBe(true);
+  expect(parsePracticeDraftCollection(JSON.parse(disk.data.get(key)!), scope)?.drafts[0]?.fields)
+    .toMatchObject({ answer: "pending answer", outcome: "correct" });
+  expect(practiceDraftHasUnsavedStorage(scope)).toBe(false);
+});
+
+it("writes an explicit edit back to a value from before a successful patch", () => {
+  const scope = newScope();
+  const disk = storage();
+  const original = emptyPracticeDraft(scope, { answer: "A" });
+  expect(writePracticeDraft(original, disk)).toBe(true);
+  const patched = patchPracticeDraft(scope, {}, { fields: { answer: "B" } }, disk);
+  expect(patched.persisted).toBe(true);
+
+  expect(writePracticeDraft({ ...patched.draft, fields: { ...patched.draft.fields, answer: "A" } }, disk)).toBe(true);
+  const key = `opening-practice:v2:${scope}`;
+  expect(parsePracticeDraftCollection(JSON.parse(disk.data.get(key)!), scope)?.drafts).toEqual([original]);
+});
+
+it("cancels a failed full-write edit on revert while keeping unrelated pending patch edits", () => {
+  const scope = newScope();
+  const disk = storage();
+  const original = emptyPracticeDraft(scope, { answer: "first" });
+  expect(writePracticeDraft(original, disk)).toBe(true);
+  disk.setItem.mockImplementationOnce(() => { throw new Error("save denied"); });
+  expect(writePracticeDraft({ ...original, fields: { ...original.fields, answer: "typo" } }, disk)).toBe(false);
+  expect(patchPracticeDraft(scope, {}, { fields: { assistance: "independent" } }, null).persisted).toBe(false);
+
+  expect(writePracticeDraft({ ...original, fields: { ...original.fields, outcome: "correct" } }, disk)).toBe(true);
+  const key = `opening-practice:v2:${scope}`;
+  expect(parsePracticeDraftCollection(JSON.parse(disk.data.get(key)!), scope)?.drafts[0]?.fields)
+    .toMatchObject({ answer: "first", outcome: "correct", assistance: "independent" });
+  expect(practiceDraftHasUnsavedStorage(scope)).toBe(false);
+});
+
+it("recovers a valid sealed snapshot after rejecting an incompatible full-write edit", () => {
+  const { scope, saved, disk } = setup();
+  expect(writePracticeDraft({ ...saved, fields: { ...saved.fields, outcome: "correct" } }, disk)).toBe(false);
+  expect(practiceDraftHasUnsavedStorage(scope)).toBe(true);
+
+  expect(writePracticeDraft(saved, disk)).toBe(true);
+  const key = `opening-practice:v2:${scope}`;
+  expect(parsePracticeDraftCollection(JSON.parse(disk.data.get(key)!), scope)?.drafts).toEqual([saved]);
+  expect(readPracticeDraft(scope, null)).toEqual(saved);
+  expect(() => assertPracticeDraftSaved(scope)).not.toThrow();
+});
+
+it("retains a pending patch that overwrote a failed full-write edit on the same field", () => {
+  const scope = newScope();
+  const disk = storage();
+  const original = emptyPracticeDraft(scope, { answer: "first" });
+  expect(writePracticeDraft(original, disk)).toBe(true);
+  expect(writePracticeDraft({ ...original, fields: { ...original.fields, answer: "typo" } }, null)).toBe(false);
+  expect(patchPracticeDraft(scope, {}, { fields: { answer: "patched answer" } }, null).persisted).toBe(false);
+
+  expect(writePracticeDraft(original, disk)).toBe(true);
+  const key = `opening-practice:v2:${scope}`;
+  expect(parsePracticeDraftCollection(JSON.parse(disk.data.get(key)!), scope)?.drafts[0]?.fields.answer).toBe("patched answer");
+});
+
+it("keeps a sibling's durable answer after reverting a failed full-write edit", async () => {
+  const scope = newScope();
+  const disk = storage();
+  const original = emptyPracticeDraft(scope, { answer: "first" });
+  expect(writePracticeDraft(original, disk)).toBe(true);
+  expect(writePracticeDraft({ ...original, fields: { ...original.fields, answer: "typo" } }, null)).toBe(false);
+
+  vi.resetModules();
+  const sibling = await import("./practice-draft-storage");
+  sibling.readPracticeDraft(scope, disk);
+  expect(sibling.patchPracticeDraft(scope, {}, { fields: { answer: "newer answer" } }, disk).persisted).toBe(true);
+
+  expect(writePracticeDraft(original, disk)).toBe(true);
+  const key = `opening-practice:v2:${scope}`;
+  expect(parsePracticeDraftCollection(JSON.parse(disk.data.get(key)!), scope)?.drafts[0]?.fields.answer).toBe("newer answer");
+});
+
+it("keeps a sibling edit on retrying the same full snapshot after a failed save", async () => {
+  const scope = newScope();
+  const disk = storage();
+  const original = emptyPracticeDraft(scope, { answer: "first answer" });
+  const key = `opening-practice:v2:${scope}`;
+  expect(writePracticeDraft(original, disk)).toBe(true);
+
+  vi.resetModules();
+  const sibling = await import("./practice-draft-storage");
+  sibling.readPracticeDraft(scope, disk);
+  expect(sibling.patchPracticeDraft(scope, {}, { fields: { answer: "revised answer" } }, disk).persisted).toBe(true);
+
+  const snapshot = { ...original, fields: { ...original.fields, outcome: "correct" as const } };
+  disk.setItem.mockImplementationOnce(() => { throw new Error("save denied"); });
+  expect(writePracticeDraft(snapshot, disk)).toBe(false);
+  expect(readPracticeDraft(scope, null)?.fields.answer).toBe("revised answer");
+  expect(writePracticeDraft(snapshot, disk)).toBe(true);
+  expect(parsePracticeDraftCollection(JSON.parse(disk.data.get(key)!), scope)?.drafts[0]?.fields)
+    .toMatchObject({ answer: "revised answer", outcome: "correct" });
+  expect(practiceDraftHasUnsavedStorage(scope)).toBe(false);
+});
+
+it("accepts an explicit snapshot base for an intentional edit to a pending field", () => {
+  const scope = newScope();
+  const disk = storage();
+  const original = emptyPracticeDraft(scope, { answer: "first answer" });
+  expect(writePracticeDraft(original, disk)).toBe(true);
+  const pending = patchPracticeDraft(scope, {}, { fields: { answer: "pending answer" } }, null);
+  expect(pending.persisted).toBe(false);
+
+  expect(patchPracticeDraft(scope, {}, { fields: { assistance: "independent" } }, null).persisted).toBe(false);
+
+  expect(writePracticeDraft(original, disk, pending.draft)).toBe(true);
+  const key = `opening-practice:v2:${scope}`;
+  expect(parsePracticeDraftCollection(JSON.parse(disk.data.get(key)!), scope)?.drafts[0]?.fields)
+    .toMatchObject({ answer: "first answer", assistance: "independent" });
+});
+
+it("preserves both answers when an ordinary editor saves again after migration", async () => {
+  const course = crypto.randomUUID();
+  const ordinary = practiceScope(course, "ordinary");
+  const manual = practiceScope(course, "manual");
+  const ordinaryKey = `opening-practice:v2:${ordinary}`;
+  const manualKey = `opening-practice:v2:${manual}`;
+  const scopes = { ordinary, manual };
+  const original = emptyPracticeDraft(ordinary, { answer: "initial" });
+  const fallback = emptyPracticeDraft(manual);
+  const disk = { ...storage(), removeItem: vi.fn((key: string) => { disk.data.delete(key); }) };
+  expect(writePracticeDraft(original, disk)).toBe(true);
+
+  vi.resetModules();
+  const sibling = await import("./practice-draft-storage");
+  expect(sibling.readPartitionedPracticeDraftCollection(scopes, fallback, disk)?.activeId).toBe(original.id);
+  expect(sibling.patchPracticeDraft(manual, {}, { fields: { answer: "edited in manual" } }, disk).persisted).toBe(true);
+  expect(disk.data.has(ordinaryKey)).toBe(false);
+  expect(patchPracticeDraft(ordinary, {}, { fields: { answer: "later answer" } }, disk).persisted).toBe(true);
+  const source = disk.data.get(ordinaryKey);
+  const destination = disk.data.get(manualKey);
+
+  disk.setItem.mockImplementationOnce(() => { throw new Error("destination write denied"); });
+  expect(() => sibling.readPartitionedPracticeDraftCollection(scopes, fallback, disk)).toThrow();
+  expect(disk.data.get(ordinaryKey)).toBe(source);
+  expect(disk.data.get(manualKey)).toBe(destination);
+
+  disk.removeItem.mockImplementationOnce(() => { throw new Error("source cleanup denied"); });
+  sibling.readPartitionedPracticeDraftCollection(scopes, fallback, disk);
+  expect(disk.data.get(ordinaryKey)).toBe(source);
+
+  vi.resetModules();
+  const reloaded = await import("./practice-draft-storage");
+  reloaded.readPartitionedPracticeDraftCollection(scopes, fallback, disk);
+  expect(disk.data.has(ordinaryKey)).toBe(false);
+
+  vi.resetModules();
+  const cold = await import("./practice-draft-storage");
+  const saved = cold.readPracticeDraftCollection(manual, disk);
+  expect(saved?.activeId).toBe(original.id);
+  expect(saved?.drafts.map(draft => draft.fields.answer)).toEqual(["edited in manual", "later answer"]);
+  expect(saved?.drafts[1]?.id).not.toBe(original.id);
+});
+
+it("keeps a saved draft clean when switching fails without changing the in-memory selection", () => {
+  const { scope, saved, disk } = setup();
+  disk.setItem.mockImplementationOnce(() => { throw new Error("switch write denied"); });
+  expect(() => switchPracticeDraft(scope, saved.id, emptyPracticeDraft(scope), disk)).toThrow();
+  expect(readPracticeDraft(scope, null)).toEqual(saved);
+  expect(() => assertPracticeDraftSaved(scope)).not.toThrow();
+});
+
+it.each([
+  ["edit", "read denied"],
+  ["edit", "invalid JSON"],
+  ["switch", "read denied"],
+  ["new draft", "invalid JSON"],
+] as const)("keeps cached answers recoverable after %s encounters %s", async (action, failure) => {
+  const { disk, target, targetActive, targetArchive, moved } = await moveIntoCachedCollection();
+  const key = `opening-practice:v2:${target}`;
+  const durable = disk.data.get(key)!;
+  disk.getItem.mockImplementation(storageKey => {
+    if (storageKey !== key) return disk.data.get(storageKey) ?? null;
+    if (failure === "invalid JSON") return "{broken";
+    throw new Error("read denied");
+  });
+
+  if (action !== "edit") {
+    const selection = action === "switch" ? targetArchive.id : emptyPracticeDraft(target);
+    expect(() => switchPracticeDraft(target, targetActive.id, selection, disk)).toThrow("已取消切换");
+  }
+  const edit = patchPracticeDraft(target, {}, { fields: { answer: "typed during read failure" } }, disk, targetActive.id);
+  expect(edit.persisted).toBe(false);
+  expect(readPracticeDraft(target, null)).toEqual(edit.draft);
+  expect(disk.data.get(key)).toBe(durable);
+
+  disk.getItem.mockImplementation(k => disk.data.get(k) ?? null);
+  if (action === "edit") expect(writePracticeDraft(edit.draft, disk)).toBe(true);
+  else {
+    expect(switchPracticeDraft(target, targetActive.id, targetArchive.id, disk).activeId).toBe(targetArchive.id);
+  }
+  expect(parsePracticeDraftCollection(JSON.parse(disk.data.get(key)!), target)?.drafts)
+    .toEqual([targetArchive, edit.draft, moved]);
 });
 
 it("keeps late start/submit/help callbacks attached to the archived draft", async () => {
@@ -115,6 +871,160 @@ it.each(["corrupt", "denied"] as const)("blocks fresh writes when existing stora
   expect(readPracticeDraft(scope, disk)?.fields.answer).toBe("restored browser copy");
 });
 
+it.each([
+  ["cold", "malformed"],
+  ["cold", "unreadable"],
+  ["cached", "malformed"],
+  ["cached", "invalid schema"],
+  ["cached", "unreadable"],
+] as const)("reads and saves manual drafts on a %s load with %s ordinary storage", (cache, mode) => {
+  const course = crypto.randomUUID();
+  const ordinary = practiceScope(course, "ordinary");
+  const manual = practiceScope(course, "manual");
+  const ordinaryKey = `opening-practice:v2:${ordinary}`;
+  const manualKey = `opening-practice:v2:${manual}`;
+  const legacy = emptyPracticeDraft(ordinary, { answer: "saved ordinary answer" });
+  const saved = emptyPracticeDraft(manual, { answer: "saved manual answer" });
+  const disk = { ...storage(), removeItem: (key: string) => { disk.data.delete(key); } };
+  const validOrdinary = JSON.stringify({ version: 2, scope: ordinary, activeId: legacy.id, drafts: [legacy] });
+  if (cache === "cached") {
+    disk.data.set(ordinaryKey, validOrdinary);
+    expect(readPracticeDraft(ordinary, disk)).toEqual(legacy);
+  }
+  const rawOrdinary = mode === "malformed" ? "{broken" : mode === "invalid schema" ? '{"version":2}' : validOrdinary;
+  disk.data.set(ordinaryKey, rawOrdinary);
+  disk.data.set(manualKey, JSON.stringify({ version: 2, scope: manual, activeId: saved.id, drafts: [saved] }));
+  if (mode === "unreadable") {
+    disk.getItem.mockImplementation(key => {
+      if (key === ordinaryKey) throw new Error("denied");
+      return disk.data.get(key) ?? null;
+    });
+  }
+
+  const scopes = { ordinary, manual };
+  expect(readPartitionedPracticeDraftCollection(scopes, emptyPracticeDraft(manual), disk))
+    .toMatchObject({ activeId: saved.id, drafts: [saved] });
+  expect(patchPracticeDraft(manual, {}, { fields: { answer: "edited manual answer" } }, disk).persisted).toBe(true);
+  expect(parsePracticeDraftCollection(JSON.parse(disk.data.get(manualKey)!), manual)?.drafts[0]?.fields.answer)
+    .toBe("edited manual answer");
+  expect(() => readPartitionedPracticeDraftCollection(scopes, emptyPracticeDraft(ordinary), disk)).toThrow();
+  expect(disk.data.get(ordinaryKey)).toBe(rawOrdinary);
+});
+
+it.each(["clean", "dirty archive", "dirty active"] as const)(
+  "retries manual migration against another document's saved drafts and selection (%s cache)",
+  async cache => {
+    const course = crypto.randomUUID();
+    const ordinary = practiceScope(course, "ordinary");
+    const manual = practiceScope(course, "manual");
+    const scopes = { ordinary, manual };
+    const ordinaryKey = `opening-practice:v2:${ordinary}`;
+    const manualKey = `opening-practice:v2:${manual}`;
+    const legacy = emptyPracticeDraft(ordinary, { answer: "legacy answer to migrate" });
+    const cachedActive = emptyPracticeDraft(manual, { answer: "cached active answer" });
+    const cachedArchive = emptyPracticeDraft(manual, { answer: "cached archived answer" });
+    const original = emptyPracticeDraft(manual, { answer: "older manual answer" });
+    const fallback = emptyPracticeDraft(manual);
+    const disk = { ...storage(), removeItem: (key: string) => { disk.data.delete(key); } };
+    disk.data.set(ordinaryKey, JSON.stringify({ version: 2, scope: ordinary, activeId: legacy.id, drafts: [legacy] }));
+    disk.data.set(manualKey, JSON.stringify({
+      version: 2, scope: manual, activeId: cachedActive.id, drafts: [cachedActive, cachedArchive, original],
+    }));
+    disk.getItem.mockImplementation(key => {
+      if (key === ordinaryKey) throw new Error("ordinary storage denied");
+      return disk.data.get(key) ?? null;
+    });
+    expect(readPartitionedPracticeDraftCollection(scopes, fallback, disk)?.activeId).toBe(cachedActive.id);
+    const dirtyDraft = cache === "dirty archive" ? cachedArchive : cachedActive;
+    const localEdit = { ...dirtyDraft, fields: { ...dirtyDraft.fields, answer: "unsaved local answer" } };
+    if (cache !== "clean") expect(writePracticeDraft(localEdit, null)).toBe(false);
+
+    vi.resetModules();
+    const second = await import("./practice-draft-storage");
+    expect(second.readPartitionedPracticeDraftCollection(scopes, fallback, disk)?.activeId).toBe(cachedActive.id);
+    const newer = { ...original, fields: { ...original.fields, answer: "newer manual answer" } };
+    expect(second.writePracticeDraft(newer, disk)).toBe(true);
+    const added = second.emptyPracticeDraft(manual, { answer: "another saved draft" });
+    second.switchPracticeDraft(manual, cachedActive.id, added, disk);
+
+    disk.getItem.mockImplementation(key => disk.data.get(key) ?? null);
+    const migrated = readPartitionedPracticeDraftCollection(scopes, fallback, disk);
+    const expected = {
+      activeId: cache === "dirty active" ? cachedActive.id : added.id,
+      drafts: [
+        cache === "dirty active" ? localEdit : cachedActive,
+        cache === "dirty archive" ? localEdit : cachedArchive,
+        newer,
+        added,
+        { ...legacy, scope: manual },
+      ],
+    };
+    expect(migrated).toMatchObject(expected);
+    expect(parsePracticeDraftCollection(JSON.parse(disk.data.get(manualKey)!), manual)).toMatchObject(expected);
+    expect(disk.data.has(ordinaryKey)).toBe(false);
+  },
+);
+
+it("keeps cached manual edits recoverable when migration cannot read the durable manual collection", () => {
+  const course = crypto.randomUUID();
+  const ordinary = practiceScope(course, "ordinary");
+  const manual = practiceScope(course, "manual");
+  const ordinaryKey = `opening-practice:v2:${ordinary}`;
+  const manualKey = `opening-practice:v2:${manual}`;
+  const legacy = emptyPracticeDraft(ordinary, { answer: "legacy answer" });
+  const saved = emptyPracticeDraft(manual, { answer: "saved manual answer" });
+  const disk = { ...storage(), removeItem: (key: string) => { disk.data.delete(key); } };
+  writePracticeDraft(saved, disk);
+  disk.data.set(ordinaryKey, JSON.stringify({ version: 2, scope: ordinary, activeId: legacy.id, drafts: [legacy] }));
+  const previousManual = disk.data.get(manualKey);
+  disk.getItem.mockImplementation(key => key === manualKey ? "{broken" : disk.data.get(key) ?? null);
+
+  expect(() => readPartitionedPracticeDraftCollection({ ordinary, manual }, legacy, disk)).toThrow();
+  const edited = { ...saved, fields: { ...saved.fields, answer: "typed during outage" } };
+  expect(writePracticeDraft(edited, disk)).toBe(false);
+  expect(readPracticeDraft(manual, null)).toEqual(edited);
+  expect(disk.data.get(manualKey)).toBe(previousManual);
+  expect(disk.data.has(ordinaryKey)).toBe(true);
+
+  disk.getItem.mockImplementation(key => disk.data.get(key) ?? null);
+  expect(readPartitionedPracticeDraftCollection({ ordinary, manual }, saved, disk))
+    .toMatchObject({ activeId: saved.id, drafts: [edited, { ...legacy, scope: manual }] });
+  expect(disk.data.has(ordinaryKey)).toBe(false);
+});
+
+it("reopens manual practice after a failed matrix-only cleanup and retries from live ordinary storage", () => {
+  const course = crypto.randomUUID();
+  const ordinary = practiceScope(course, "ordinary");
+  const manual = practiceScope(course, "manual");
+  const ordinaryKey = `opening-practice:v2:${ordinary}`;
+  const legacy = emptyPracticeDraft(ordinary, { answer: "legacy manual answer" });
+  const matrix = emptyPracticeDraft(ordinary, { matrixMode: true, answer: "matrix answer" });
+  const disk = { ...storage(), removeItem: (key: string) => { disk.data.delete(key); } };
+  const rawOrdinary = JSON.stringify({ version: 2, scope: ordinary, activeId: legacy.id, drafts: [legacy, matrix] });
+  disk.data.set(ordinaryKey, rawOrdinary);
+  expect(readPracticeDraft(ordinary, disk)).toEqual(legacy);
+  disk.setItem.mockImplementation((key, value) => {
+    if (key === ordinaryKey) throw new Error("cleanup write denied");
+    disk.data.set(key, value);
+  });
+
+  const scopes = { ordinary, manual };
+  const fallback = emptyPracticeDraft(manual);
+  expect(readPartitionedPracticeDraftCollection(scopes, fallback, disk))
+    .toMatchObject({ activeId: legacy.id, drafts: [{ ...legacy, scope: manual }] });
+  expect(disk.data.get(ordinaryKey)).toBe(rawOrdinary);
+  const edited = patchPracticeDraft(manual, {}, { fields: { answer: "edited manual answer" } }, disk);
+  expect(edited.persisted).toBe(true);
+
+  const updatedMatrix = { ...matrix, fields: { ...matrix.fields, answer: "newer matrix answer" } };
+  disk.data.set(ordinaryKey, JSON.stringify({ version: 2, scope: ordinary, activeId: matrix.id, drafts: [legacy, updatedMatrix] }));
+  disk.setItem.mockImplementation((key, value) => { disk.data.set(key, value); });
+  expect(readPartitionedPracticeDraftCollection(scopes, fallback, disk))
+    .toMatchObject({ activeId: legacy.id, drafts: [edited.draft, { fields: { answer: "legacy manual answer" } }] });
+  expect(parsePracticeDraftCollection(JSON.parse(disk.data.get(ordinaryKey)!), ordinary))
+    .toMatchObject({ activeId: matrix.id, drafts: [updatedMatrix] });
+});
+
 it("loads a legacy draft once with a stable local identity while preserving frozen server request keys", () => {
   const scope = newScope();
   const saved = frozen(scope); saved.start.createInput.clientKey = saved.start.clientKey;
@@ -159,3 +1069,424 @@ it("restores a pasted question without a source and still rejects changes to its
   expect(parsePracticeDraftCollection({ ...collection, drafts: [{ ...saved, fields: { ...saved.fields, stem: "changed" } }] }, scope)).toBeNull();
   expect(parsePracticeDraftCollection({ ...collection, drafts: [{ ...saved, fields: { ...saved.fields, sourceId: attemptId } }] }, scope)).toBeNull();
 });
+
+it("refreshes a stale ordinary cache when live ordinary storage becomes matrix-only after failed cleanup", () => {
+  const course = crypto.randomUUID();
+  const ordinary = practiceScope(course, "ordinary");
+  const manual = practiceScope(course, "manual");
+  const ordinaryKey = `opening-practice:v2:${ordinary}`;
+  const legacy = emptyPracticeDraft(ordinary, { answer: "legacy manual answer" });
+  const matrix = emptyPracticeDraft(ordinary, { matrixMode: true, answer: "older matrix answer" });
+  const disk = { ...storage(), removeItem: (key: string) => { disk.data.delete(key); } };
+  disk.data.set(ordinaryKey, JSON.stringify({ version: 2, scope: ordinary, activeId: legacy.id, drafts: [legacy, matrix] }));
+  expect(readPracticeDraft(ordinary, disk)).toEqual(legacy);
+  disk.setItem.mockImplementation((key, value) => {
+    if (key === ordinaryKey) throw new Error("cleanup write denied");
+    disk.data.set(key, value);
+  });
+
+  const scopes = { ordinary, manual };
+  expect(readPartitionedPracticeDraftCollection(scopes, emptyPracticeDraft(manual), disk))
+    .toMatchObject({ activeId: legacy.id });
+
+  const newerMatrix = { ...matrix, fields: { ...matrix.fields, answer: "newer matrix answer" } };
+  disk.data.set(ordinaryKey, JSON.stringify({ version: 2, scope: ordinary, activeId: matrix.id, drafts: [newerMatrix] }));
+  disk.setItem.mockImplementation((key, value) => { disk.data.set(key, value); });
+
+  expect(readPartitionedPracticeDraftCollection(scopes, emptyPracticeDraft(ordinary, { matrixMode: true }), disk))
+    .toMatchObject({ activeId: matrix.id, drafts: [newerMatrix] });
+  const edited = patchPracticeDraft(ordinary, { matrixMode: true }, { fields: { answer: "edited newer matrix" } }, disk);
+  expect(edited.persisted).toBe(true);
+  expect(parsePracticeDraftCollection(JSON.parse(disk.data.get(ordinaryKey)!), ordinary))
+    .toMatchObject({ activeId: matrix.id, drafts: [edited.draft] });
+});
+
+it("keeps an unsaved in-memory matrix answer recoverable when the next ordinary storage read throws", () => {
+  const course = crypto.randomUUID();
+  const ordinary = practiceScope(course, "ordinary");
+  const manual = practiceScope(course, "manual");
+  const ordinaryKey = `opening-practice:v2:${ordinary}`;
+  const matrix = emptyPracticeDraft(ordinary, { matrixMode: true, answer: "initial matrix" });
+  const disk = { ...storage(), removeItem: (key: string) => { disk.data.delete(key); } };
+  disk.data.set(ordinaryKey, JSON.stringify({ version: 2, scope: ordinary, activeId: matrix.id, drafts: [matrix] }));
+
+  const scopes = { ordinary, manual };
+  expect(readPartitionedPracticeDraftCollection(scopes, matrix, disk))
+    .toMatchObject({ activeId: matrix.id, drafts: [matrix] });
+
+  disk.setItem.mockImplementation(() => { throw new Error("quota exceeded"); });
+  const unsaved = patchPracticeDraft(ordinary, { matrixMode: true }, { fields: { answer: "unsaved matrix answer" } }, disk);
+  expect(unsaved.persisted).toBe(false);
+
+  disk.getItem.mockImplementation(key => {
+    if (key === ordinaryKey) throw new Error("storage read denied");
+    return disk.data.get(key) ?? null;
+  });
+
+  const liveManual = emptyPracticeDraft(ordinary, { answer: "newer manual answer in live storage" });
+  disk.data.set(ordinaryKey, JSON.stringify({ version: 2, scope: ordinary, activeId: liveManual.id, drafts: [liveManual, matrix] }));
+  disk.setItem.mockImplementation((key, value) => { disk.data.set(key, value); });
+
+  expect(readPartitionedPracticeDraftCollection(scopes, emptyPracticeDraft(ordinary, { matrixMode: true }), disk))
+    .toMatchObject({ activeId: matrix.id, drafts: [unsaved.draft] });
+  const recoveredEdit = patchPracticeDraft(ordinary, { matrixMode: true }, { fields: { answer: "still editable in memory" } }, disk);
+  expect(recoveredEdit.draft.fields.answer).toBe("still editable in memory");
+  expect(recoveredEdit.persisted).toBe(false);
+  expect(parsePracticeDraftCollection(JSON.parse(disk.data.get(ordinaryKey)!), ordinary)?.drafts.map(d => d.fields.answer))
+    .toContain("newer manual answer in live storage");
+
+  disk.getItem.mockImplementation(key => disk.data.get(key) ?? null);
+  expect(readPartitionedPracticeDraftCollection(scopes, emptyPracticeDraft(manual), disk))
+    .toMatchObject({ activeId: liveManual.id, drafts: [expect.objectContaining({ id: liveManual.id, scope: manual, fields: expect.objectContaining({ answer: "newer manual answer in live storage" }) })] });
+  expect(parsePracticeDraftCollection(JSON.parse(disk.data.get(ordinaryKey)!), ordinary))
+    .toMatchObject({ activeId: matrix.id, drafts: [expect.objectContaining({ id: matrix.id, fields: expect.objectContaining({ answer: "still editable in memory" }) })] });
+});
+
+it("preserves newer stored answers on untouched drafts while reconciling a locally edited draft", () => {
+  const course = crypto.randomUUID();
+  const ordinary = practiceScope(course, "ordinary");
+  const manual = practiceScope(course, "manual");
+  const ordinaryKey = `opening-practice:v2:${ordinary}`;
+  const draftA = emptyPracticeDraft(ordinary, { matrixMode: true, answer: "initial A" });
+  const draftB = emptyPracticeDraft(ordinary, { matrixMode: true, matrixVariant: 1, answer: "initial B" });
+  const disk = { ...storage(), removeItem: (key: string) => { disk.data.delete(key); } };
+  disk.data.set(ordinaryKey, JSON.stringify({ version: 2, scope: ordinary, activeId: draftA.id, drafts: [draftA, draftB] }));
+
+  const scopes = { ordinary, manual };
+  expect(readPartitionedPracticeDraftCollection(scopes, draftA, disk))
+    .toMatchObject({ activeId: draftA.id, drafts: [draftA, draftB] });
+
+  disk.setItem.mockImplementation(() => { throw new Error("quota exceeded"); });
+  const editedA = patchPracticeDraft(ordinary, { matrixMode: true }, { fields: { answer: "edited A locally" } }, disk, draftA.id);
+  expect(editedA.persisted).toBe(false);
+
+  const newerB = { ...draftB, fields: { ...draftB.fields, answer: "newer B saved elsewhere" } };
+  disk.data.set(ordinaryKey, JSON.stringify({ version: 2, scope: ordinary, activeId: draftB.id, drafts: [draftA, newerB] }));
+  disk.setItem.mockImplementation((key, value) => { disk.data.set(key, value); });
+
+  const reconciled = readPartitionedPracticeDraftCollection(scopes, draftA, disk);
+  expect(reconciled?.drafts.map(d => [d.id, d.fields.answer])).toEqual([
+    [draftA.id, "edited A locally"],
+    [draftB.id, "newer B saved elsewhere"],
+  ]);
+});
+
+it("reuses the assigned identity without duplicating a legacy v1 matrix draft without ID after save and read outages", () => {
+  const course = crypto.randomUUID();
+  const ordinary = practiceScope(course, "ordinary");
+  const manual = practiceScope(course, "manual");
+  const legacyKey = `opening-practice:v1:${ordinary}`;
+  const ordinaryKey = `opening-practice:v2:${ordinary}`;
+  const { id: _omittedId, ...legacyWithoutId } = emptyPracticeDraft(ordinary, { matrixMode: true, answer: "legacy matrix v1" });
+  void _omittedId;
+  const disk = { ...storage(), removeItem: (key: string) => { disk.data.delete(key); } };
+  disk.data.set(legacyKey, JSON.stringify(legacyWithoutId));
+
+  const scopes = { ordinary, manual };
+  const initial = readPartitionedPracticeDraftCollection(scopes, emptyPracticeDraft(ordinary, { matrixMode: true }), disk);
+  expect(initial?.drafts).toHaveLength(1);
+  const assignedId = initial!.drafts[0]!.id;
+
+  disk.setItem.mockImplementation(() => { throw new Error("quota exceeded"); });
+  const edited = patchPracticeDraft(ordinary, { matrixMode: true }, { fields: { answer: "edited legacy matrix" } }, disk);
+  expect(edited.persisted).toBe(false);
+
+  disk.getItem.mockImplementation(key => {
+    if (key === ordinaryKey || key === legacyKey) throw new Error("read outage");
+    return disk.data.get(key) ?? null;
+  });
+  expect(readPartitionedPracticeDraftCollection(scopes, emptyPracticeDraft(ordinary, { matrixMode: true }), disk))
+    .toMatchObject({ activeId: assignedId, drafts: [edited.draft] });
+
+  disk.getItem.mockImplementation(key => disk.data.get(key) ?? null);
+  disk.setItem.mockImplementation((key, value) => { disk.data.set(key, value); });
+  const recovered = readPartitionedPracticeDraftCollection(scopes, emptyPracticeDraft(ordinary, { matrixMode: true }), disk);
+  expect(recovered?.drafts).toHaveLength(1);
+  expect(recovered?.drafts[0]).toMatchObject({ id: assignedId, fields: { answer: "edited legacy matrix" } });
+  expect(disk.data.has(legacyKey)).toBe(false);
+});
+
+it("reconciles with live storage before retrying an edit while the form stays open so newer sibling answers survive", () => {
+  const scope = newScope();
+  const key = `opening-practice:v2:${scope}`;
+  const draftA = emptyPracticeDraft(scope, { skillLabel: "A", answer: "initial A" });
+  const draftB = emptyPracticeDraft(scope, { skillLabel: "B", answer: "initial B" });
+  const disk = { ...storage(), removeItem: (k: string) => { disk.data.delete(k); } };
+  disk.data.set(key, JSON.stringify({ version: 2, scope, activeId: draftA.id, drafts: [draftA, draftB] }));
+  expect(readPracticeDraftCollection(scope, disk)).toMatchObject({ activeId: draftA.id, drafts: [draftA, draftB] });
+
+  disk.setItem.mockImplementation(() => { throw new Error("quota exceeded"); });
+  const firstEditA = patchPracticeDraft(scope, {}, { fields: { answer: "unsaved A1" } }, disk, draftA.id);
+  expect(firstEditA.persisted).toBe(false);
+
+  const newerB = { ...draftB, fields: { ...draftB.fields, answer: "newer B from sibling tab" } };
+  disk.data.set(key, JSON.stringify({ version: 2, scope, activeId: draftB.id, drafts: [draftA, newerB] }));
+  disk.setItem.mockImplementation((k, v) => { disk.data.set(k, v); });
+
+  const retriedEditA = patchPracticeDraft(scope, {}, { fields: { answer: "saved A2" } }, disk, draftA.id);
+  expect(retriedEditA.persisted).toBe(true);
+  const persisted = parsePracticeDraftCollection(JSON.parse(disk.data.get(key)!), scope);
+  expect(persisted?.drafts.map(d => [d.id, d.fields.answer])).toEqual([
+    [draftA.id, "saved A2"],
+    [draftB.id, "newer B from sibling tab"],
+  ]);
+});
+
+it("retains the remembered UUID of an ID-less legacy v1 draft across a rejected invalid v2 value", () => {
+  const course = crypto.randomUUID();
+  const ordinary = practiceScope(course, "ordinary");
+  const manual = practiceScope(course, "manual");
+  const legacyKey = `opening-practice:v1:${ordinary}`;
+  const ordinaryKey = `opening-practice:v2:${ordinary}`;
+  const { id: _omitted, ...legacyWithoutId } = emptyPracticeDraft(ordinary, { matrixMode: true, answer: "legacy matrix v1" });
+  void _omitted;
+  const disk = { ...storage(), removeItem: (k: string) => { disk.data.delete(k); } };
+  disk.data.set(legacyKey, JSON.stringify(legacyWithoutId));
+
+  const scopes = { ordinary, manual };
+  const initial = readPartitionedPracticeDraftCollection(scopes, emptyPracticeDraft(ordinary, { matrixMode: true }), disk);
+  const assignedId = initial!.drafts[0]!.id;
+
+  disk.setItem.mockImplementation(() => { throw new Error("quota exceeded"); });
+  const edited = patchPracticeDraft(ordinary, { matrixMode: true }, { fields: { answer: "edited legacy matrix" } }, disk);
+  expect(edited.persisted).toBe(false);
+
+  disk.data.set(ordinaryKey, "{}");
+  expect(readPartitionedPracticeDraftCollection(scopes, emptyPracticeDraft(ordinary, { matrixMode: true }), disk))
+    .toMatchObject({ activeId: assignedId, drafts: [edited.draft] });
+
+  disk.data.delete(ordinaryKey);
+  disk.setItem.mockImplementation((k, v) => { disk.data.set(k, v); });
+  const recovered = readPartitionedPracticeDraftCollection(scopes, emptyPracticeDraft(ordinary, { matrixMode: true }), disk);
+  expect(recovered?.drafts).toHaveLength(1);
+  expect(recovered?.drafts[0]).toMatchObject({ id: assignedId, fields: { answer: "edited legacy matrix" } });
+  expect(disk.data.has(legacyKey)).toBe(false);
+});
+
+it("keeps legacy v1 cleanup pending across a dirty retry when an earlier v2 save succeeded but v1 removal failed", () => {
+  const scope = newScope();
+  const legacyKey = `opening-practice:v1:${scope}`;
+  const v2Key = `opening-practice:v2:${scope}`;
+  const legacyDraft = emptyPracticeDraft(scope, { skillLabel: "Stack", answer: "stale v1 answer" });
+  let failRemove = true;
+  const disk = {
+    ...storage(),
+    removeItem: (k: string) => {
+      if (failRemove) throw new Error("removeItem blocked");
+      disk.data.delete(k);
+    },
+  };
+  disk.data.set(legacyKey, JSON.stringify(legacyDraft));
+
+  expect(readPracticeDraftCollection(scope, disk)).toMatchObject({
+    activeId: legacyDraft.id,
+    drafts: [legacyDraft],
+  });
+
+  // First edit writes v2 durably, while v1 removeItem throws.
+  const firstSave = patchPracticeDraft(scope, {}, { fields: { answer: "v2 answer 1" } }, disk);
+  expect(firstSave.persisted).toBe(true);
+  expect(disk.data.has(v2Key)).toBe(true);
+  expect(disk.data.has(legacyKey)).toBe(true);
+
+  // Next edit hits quota, marking the scope dirty while v2 already exists on disk.
+  disk.setItem.mockImplementation(() => { throw new Error("quota exceeded"); });
+  const failedEdit = patchPracticeDraft(scope, {}, { fields: { answer: "unsaved answer 2" } }, disk);
+  expect(failedEdit.persisted).toBe(false);
+
+  // Dirty retry reads valid v2 during reconciliation and must still remove the stale v1 key once storage recovers.
+  failRemove = false;
+  disk.setItem.mockImplementation((k, v) => { disk.data.set(k, v); });
+  const retriedSave = patchPracticeDraft(scope, {}, { fields: { answer: "durable answer 3" } }, disk);
+  expect(retriedSave.persisted).toBe(true);
+  expect(disk.data.has(legacyKey)).toBe(false);
+});
+
+it("retries cleanup of the original v1 matrix after dirty reconciliation", () => {
+  const course = crypto.randomUUID();
+  const ordinary = practiceScope(course, "ordinary");
+  const manual = practiceScope(course, "manual");
+  const legacyKey = `opening-practice:v1:${ordinary}`;
+  const matrix = emptyPracticeDraft(ordinary, { matrixMode: true, answer: "legacy matrix answer" });
+  const disk = { ...storage(), removeItem: vi.fn((_key: string): void => { throw new Error("removeItem blocked"); }) };
+  disk.data.set(legacyKey, JSON.stringify(matrix));
+  expect(readPartitionedPracticeDraftCollection({ ordinary, manual }, matrix, disk)?.drafts).toEqual([matrix]);
+  expect(patchPracticeDraft(ordinary, {}, { fields: { answer: "saved matrix edit" } }, disk).persisted).toBe(true);
+  expect(disk.data.has(legacyKey)).toBe(true);
+
+  disk.setItem.mockImplementationOnce(() => { throw new Error("quota exceeded"); });
+  const edited = patchPracticeDraft(ordinary, {}, { fields: { answer: "unsaved matrix edit" } }, disk);
+  expect(edited.persisted).toBe(false);
+  disk.removeItem.mockImplementation(key => { disk.data.delete(key); });
+  expect(readPartitionedPracticeDraftCollection({ ordinary, manual }, matrix, disk)?.drafts).toEqual([edited.draft]);
+  expect(disk.data.has(legacyKey)).toBe(false);
+});
+
+it("keeps v1 if it changes while the durable v2 copy is being verified", () => {
+  const scope = newScope();
+  const legacyKey = `opening-practice:v1:${scope}`;
+  const v2Key = `opening-practice:v2:${scope}`;
+  const original = emptyPracticeDraft(scope, { answer: "original legacy answer" });
+  const disk = { ...storage(), removeItem: vi.fn((key: string) => { disk.data.delete(key); }) };
+  disk.data.set(legacyKey, JSON.stringify(original));
+  expect(readPracticeDraft(scope, disk)).toEqual(original);
+  const replacement = JSON.stringify({ ...original, fields: { ...original.fields, answer: "later legacy answer" } });
+  disk.getItem.mockImplementation(key => {
+    if (key === v2Key) disk.data.set(legacyKey, replacement);
+    return disk.data.get(key) ?? null;
+  });
+
+  const saved = patchPracticeDraft(scope, {}, { fields: { answer: "saved v2 answer" } }, disk);
+  expect(saved.persisted).toBe(true);
+  expect(parsePracticeDraftCollection(JSON.parse(disk.data.get(v2Key)!), scope)?.drafts).toEqual([saved.draft]);
+  expect(disk.data.get(legacyKey)).toBe(replacement);
+});
+
+it("retries removal of the verified v1 after the migrated manual answer is edited", () => {
+  const course = crypto.randomUUID();
+  const ordinary = practiceScope(course, "ordinary");
+  const manual = practiceScope(course, "manual");
+  const legacyKey = `opening-practice:v1:${ordinary}`;
+  const original = emptyPracticeDraft(ordinary, { answer: "original v1 answer" });
+  const disk = { ...storage(), removeItem: vi.fn((_key: string): void => { throw new Error("removeItem blocked"); }) };
+  const fallback = emptyPracticeDraft(manual);
+  disk.data.set(legacyKey, JSON.stringify(original));
+  expect(readPartitionedPracticeDraftCollection({ ordinary, manual }, fallback, disk)?.drafts).toEqual([{ ...original, scope: manual }]);
+  expect(disk.data.has(legacyKey)).toBe(true);
+
+  const edited = patchPracticeDraft(manual, {}, { fields: { answer: "revised manual answer" } }, disk);
+  expect(edited.persisted).toBe(true);
+  disk.removeItem.mockImplementation(key => { disk.data.delete(key); });
+  expect(readPartitionedPracticeDraftCollection({ ordinary, manual }, fallback, disk))
+    .toMatchObject({ activeId: original.id, drafts: [edited.draft, { fields: { answer: "original v1 answer" } }] });
+  expect(disk.data.has(legacyKey)).toBe(false);
+  expect([...disk.data.keys()]).toEqual([`opening-practice:v2:${manual}`]);
+});
+
+it.each([false, true])("opens matrix practice after a reload with pending legacy cleanup (replacement: %s)", async replaced => {
+  const course = crypto.randomUUID();
+  const ordinary = practiceScope(course, "ordinary");
+  const manual = practiceScope(course, "manual");
+  const matrix = practiceScope(course, "matrix");
+  const scopes = { ordinary, manual };
+  const legacyKey = `opening-practice:v1:${ordinary}`;
+  const ordinaryKey = `opening-practice:v2:${ordinary}`;
+  const original = emptyPracticeDraft(ordinary, { answer: "original v1 answer" });
+  const disk = { ...storage(), removeItem: vi.fn((_key: string): void => { throw new Error("removeItem blocked"); }) };
+  disk.data.set(legacyKey, JSON.stringify(original));
+
+  const manualFallback = emptyPracticeDraft(manual);
+  expect(readPartitionedPracticeDraftCollection(scopes, manualFallback, disk)?.drafts)
+    .toEqual([{ ...original, scope: manual }]);
+  expect(disk.data.has(legacyKey)).toBe(true);
+  expect(patchPracticeDraft(manual, {}, { fields: { answer: "revised manual answer" } }, disk).persisted).toBe(true);
+  expect(parsePracticeDraftCollection(JSON.parse(disk.data.get(ordinaryKey)!), ordinary)?.drafts).toEqual([original]);
+
+  const replacement = JSON.stringify({ ...original, fields: { ...original.fields, answer: "another tab's legacy answer" } });
+  if (replaced) disk.data.set(legacyKey, replacement);
+  disk.removeItem.mockImplementation(key => { disk.data.delete(key); });
+  vi.resetModules();
+  const reloaded = await import("./practice-draft-storage");
+
+  // Matrix practice first admits the ordinary scope, then edits in its own scope.
+  reloaded.readPartitionedPracticeDraftCollection(scopes, emptyPracticeDraft(ordinary, { matrixMode: true }), disk);
+  const matrixDraft = emptyPracticeDraft(matrix, { matrixMode: true, matrixVariant: 3 });
+  reloaded.initializePracticeDraft(matrixDraft);
+  expect(reloaded.patchPracticeDraft(matrix, {}, { fields: { answer: "[[3]]" } }, disk).persisted).toBe(true);
+  expect(reloaded.parsePracticeDraftCollection(JSON.parse(disk.data.get(`opening-practice:v2:${matrix}`)!), matrix)?.drafts[0]?.fields.answer)
+    .toBe("[[3]]");
+  expect(reloaded.readPartitionedPracticeDraftCollection(scopes, manualFallback, disk))
+    .toMatchObject({ activeId: original.id, drafts: [
+      { ...original, scope: manual, fields: { ...original.fields, answer: "revised manual answer" } },
+      { fields: { answer: "original v1 answer" } },
+    ] });
+  expect(disk.data.get(legacyKey)).toBe(replaced ? replacement : undefined);
+});
+
+it.each(["ordinary save", "ordinary save with missing v2", "matrix reconciliation", "matrix to manual"] as const)(
+  "preserves a replacement v1 draft during %s",
+  path => {
+    const course = crypto.randomUUID();
+    const ordinary = practiceScope(course, "ordinary");
+    const manual = practiceScope(course, "manual");
+    const legacyKey = `opening-practice:v1:${ordinary}`;
+    const v2Key = `opening-practice:v2:${ordinary}`;
+    const original = emptyPracticeDraft(ordinary, { matrixMode: true, answer: "original legacy answer" });
+    const disk = { ...storage(), removeItem: vi.fn((_key: string): void => { throw new Error("removeItem blocked"); }) };
+    disk.data.set(legacyKey, JSON.stringify(original));
+    expect(readPracticeDraft(ordinary, disk)).toEqual(original);
+    expect(patchPracticeDraft(ordinary, {}, { fields: { answer: "saved v2 answer" } }, disk).persisted).toBe(true);
+
+    const replacement = path === "matrix to manual"
+      ? emptyPracticeDraft(ordinary, { answer: "other tab's manual answer" })
+      : { ...original, fields: { ...original.fields, answer: "other tab's legacy answer" } };
+    const raw = JSON.stringify(replacement);
+    disk.data.set(legacyKey, raw);
+    if (path === "ordinary save with missing v2") disk.data.delete(v2Key);
+    disk.setItem.mockImplementationOnce(() => { throw new Error("quota exceeded"); });
+    const edited = patchPracticeDraft(ordinary, {}, { fields: { answer: "unsaved local edit" } }, disk);
+    expect(edited.persisted).toBe(false);
+    disk.removeItem.mockImplementation(key => { disk.data.delete(key); });
+
+    if (path === "matrix reconciliation" || path === "matrix to manual") {
+      expect(readPartitionedPracticeDraftCollection({ ordinary, manual }, original, disk)?.drafts).toEqual([edited.draft]);
+    } else {
+      expect(writePracticeDraft(edited.draft, disk)).toBe(true);
+    }
+    expect(parsePracticeDraftCollection(JSON.parse(disk.data.get(v2Key)!), ordinary)?.drafts).toEqual([edited.draft]);
+    expect(disk.data.get(legacyKey)).toBe(raw);
+  },
+);
+
+it.each([false, true])("keeps v1 cleanup pending after a write-only save (replacement: %s)", replaced => {
+  const scope = newScope();
+  const legacyKey = `opening-practice:v1:${scope}`;
+  const original = emptyPracticeDraft(scope, { answer: "original legacy answer" });
+  const disk = storage();
+  const originalRaw = JSON.stringify(original);
+  disk.data.set(legacyKey, originalRaw);
+  expect(readPracticeDraft(scope, disk)).toEqual(original);
+  const raw = replaced ? '{"answer":"unparsed answer"' : originalRaw;
+  disk.data.set(legacyKey, raw);
+  const writer = { setItem: disk.setItem, removeItem: vi.fn((key: string) => { disk.data.delete(key); }) };
+  expect(patchPracticeDraft(scope, {}, { fields: { answer: "saved v2 answer" } }, writer).persisted).toBe(true);
+  expect(writer.removeItem).not.toHaveBeenCalled();
+  expect(disk.data.get(legacyKey)).toBe(raw);
+
+  if (replaced) disk.data.set(legacyKey, originalRaw);
+  const readerWriter = { ...writer, getItem: disk.getItem };
+  expect(patchPracticeDraft(scope, {}, { fields: { answer: "another saved answer" } }, readerWriter).persisted).toBe(true);
+  expect(writer.removeItem).toHaveBeenCalledExactlyOnceWith(legacyKey);
+  expect(disk.data.has(legacyKey)).toBe(false);
+});
+
+it.each(["malformed", "same ID", "new ID", "manual to matrix"] as const)(
+  "preserves a %s replacement v1 draft during manual migration",
+  replacementKind => {
+    const course = crypto.randomUUID();
+    const ordinary = practiceScope(course, "ordinary");
+    const manual = practiceScope(course, "manual");
+    const scopes = { ordinary, manual };
+    const legacyKey = `opening-practice:v1:${ordinary}`;
+    const v2Key = `opening-practice:v2:${ordinary}`;
+    const original = emptyPracticeDraft(ordinary, { answer: "original v1 answer" });
+    const disk = { ...storage(), removeItem: vi.fn((_key: string): void => { throw new Error("removeItem blocked"); }) };
+    disk.data.set(legacyKey, JSON.stringify(original));
+
+    const fallback = emptyPracticeDraft(manual);
+    const migrated = { ...original, scope: manual };
+    expect(readPartitionedPracticeDraftCollection(scopes, fallback, disk)?.drafts).toEqual([migrated]);
+    expect(disk.data.has(legacyKey)).toBe(true);
+    expect(disk.data.has(v2Key)).toBe(true);
+
+    disk.removeItem.mockImplementation(key => { disk.data.delete(key); });
+    const replacement = emptyPracticeDraft(ordinary, { answer: "replacement legacy answer", matrixMode: replacementKind === "manual to matrix" });
+    const raw = replacementKind === "malformed" ? '{"answer":"precious unparsed text"'
+      : JSON.stringify(replacementKind === "same ID" ? { ...replacement, id: original.id } : replacement);
+    disk.data.set(legacyKey, raw);
+    expect(readPartitionedPracticeDraftCollection(scopes, fallback, disk)?.drafts).toEqual([migrated]);
+    expect(disk.data.get(legacyKey)).toBe(raw);
+    expect(() => readPartitionedPracticeDraftCollection(scopes, emptyPracticeDraft(ordinary, { matrixMode: true }), disk)).not.toThrow();
+    expect(disk.data.get(legacyKey)).toBe(raw);
+  },
+);

@@ -59,7 +59,12 @@ export const examRunConversionSchema = z.object({
   contentFingerprint: z.string().min(1).max(200), mappingVersion: conversionId,
 }).strict();
 export type ExamRunConversion = z.infer<typeof examRunConversionSchema>;
-export type ExamRun = { id: string; mode: ExamMode; questionIds: string[]; startedAt: string; deadlineAt: string | null; completedAt: string | null; conversion?: ExamRunConversion };
+export type ExamRun = {
+  id: string; mode: ExamMode; questionIds: string[]; startedAt: string; deadlineAt: string | null;
+  completedAt: string | null; conversion?: ExamRunConversion;
+  /** Backup restore closed this mock without a verifiable graded submission. */
+  restoredUngraded?: true;
+};
 export type ExamSourceRecord = {
   id: string; sourceId: string; phase: "first" | "blind" | "delayed" | "variant";
   outcome: "correct" | "partial" | "incorrect" | "read";
