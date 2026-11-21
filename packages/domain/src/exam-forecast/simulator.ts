@@ -121,7 +121,7 @@ export function hasUsableObservedPayload(
   if (record.evidenceKind === "speech_timing") {
     const receipt = record.speechTimingReceipt;
     if (receipt !== undefined && !hasValidDefinedSpeechMetrics(receipt)) return false;
-    return isUsableSpeechTimingReceipt(receipt) || scoreBounds !== null;
+    return (record.sectionId === "speaking" && isUsableSpeechTimingReceipt(receipt)) || scoreBounds !== null;
   }
   if (record.evidenceKind === "diagnostic_item") {
     return typeof record.correct === "boolean" || scoreBounds !== null;
@@ -341,7 +341,7 @@ type RubricAnchor = {
 };
 
 type RubricEvidenceSummary = {
-  readonly partAnchors: ReadonlyMap<string, RubricAnchor>;
+  readonly partAnchors: ReadonlyMap<string, ReadonlyMap<string, RubricAnchor>>;
   readonly sectionAnchors: ReadonlyMap<string, RubricAnchor>;
   readonly speakingFluencyShift: number;
 };
@@ -351,7 +351,7 @@ function summarizeRubricAndTimingEvidence(
   sectionRanges: ReadonlyMap<string, readonly [number, number]>,
   sectionParts: ReadonlyMap<string, ReadonlySet<string>>,
 ): RubricEvidenceSummary {
-  const partAnchors = new Map<string, RubricAnchor>();
+  const partAnchors = new Map<string, Map<string, RubricAnchor>>();
   const sectionAnchors = new Map<string, RubricAnchor>();
   let speakingShiftSum = 0;
   let speakingCount = 0;
@@ -372,10 +372,14 @@ function summarizeRubricAndTimingEvidence(
     if (scoreBounds) {
       const anchor: RubricAnchor = { low: scoreBounds.low, high: scoreBounds.high, observedAtMs: record.observedAtMs };
       if (record.partId !== undefined) {
-        const key = `${record.sectionId}\u0000${record.partId}`;
-        const existing = partAnchors.get(key);
+        let sectionBucket = partAnchors.get(record.sectionId);
+        if (!sectionBucket) {
+          sectionBucket = new Map<string, RubricAnchor>();
+          partAnchors.set(record.sectionId, sectionBucket);
+        }
+        const existing = sectionBucket.get(record.partId);
         if (!existing || anchor.observedAtMs >= existing.observedAtMs) {
-          partAnchors.set(key, anchor);
+          sectionBucket.set(record.partId, anchor);
         }
       } else {
         const existing = sectionAnchors.get(record.sectionId);
@@ -530,14 +534,13 @@ function simulateItemSectionDraw(input: DrawItemSectionInput): DrawItemSectionRe
     if (untimedCorrect) rawUntimed += pts;
 
     const stepSec = sampleLogNormalStepTimeSeconds(item, input.nu, input.mBySkill, eps);
-    const partKey = `${input.section.sectionId}:${item.partId}`;
-    partTotalCounts.set(partKey, (partTotalCounts.get(partKey) ?? 0) + 1);
+    partTotalCounts.set(item.partId, (partTotalCounts.get(item.partId) ?? 0) + 1);
 
     if (clockUsedSec + stepSec > input.sectionLimitSec) {
       anyCensored = true;
       censoredCount += 1;
       clockUsedSec = input.sectionLimitSec;
-      partCensoredCounts.set(partKey, (partCensoredCounts.get(partKey) ?? 0) + 1);
+      partCensoredCounts.set(item.partId, (partCensoredCounts.get(item.partId) ?? 0) + 1);
       if (input.captureCensored) {
         censoredItems.push({
           itemId: item.itemId,
@@ -635,10 +638,8 @@ function simulateRubricSectionDraw(input: {
     const epsScore = input.draw.rubricScoreNormals[rubricCursor] ?? 0;
     const epsTime = input.draw.rubricTimeNormals[rubricCursor] ?? 0;
     rubricCursor += 1;
-    const partAnchorKey = `${input.section.sectionId}\u0000${part.partId}`;
-    const partAnchor = input.rubricSummary.partAnchors.get(partAnchorKey) ?? sectionAnchor;
-    const partStatKey = `${input.section.sectionId}:${part.partId}`;
-    partTotalCounts.set(partStatKey, (partTotalCounts.get(partStatKey) ?? 0) + 1);
+    const partAnchor = input.rubricSummary.partAnchors.get(input.section.sectionId)?.get(part.partId) ?? sectionAnchor;
+    partTotalCounts.set(part.partId, (partTotalCounts.get(part.partId) ?? 0) + 1);
     const skillVals = part.skillIds.map((id) => (Object.hasOwn(input.mBySkill, id) ? input.mBySkill[id]! : 0.5 * sigmoid(0)));
     const meanMastery = skillVals.length > 0 ? skillVals.reduce((a, b) => a + b, 0) / skillVals.length : 0.5 * sigmoid(0);
 
@@ -662,7 +663,7 @@ function simulateRubricSectionDraw(input: {
       if (remaining <= 0) {
         anyCensored = true;
         censoredCount += 1;
-        partCensoredCounts.set(partStatKey, (partCensoredCounts.get(partStatKey) ?? 0) + 1);
+        partCensoredCounts.set(part.partId, (partCensoredCounts.get(part.partId) ?? 0) + 1);
         timedPartScore = minB;
         if (input.captureCensored) {
           censoredItems.push({
@@ -695,7 +696,7 @@ function simulateRubricSectionDraw(input: {
         if (partDuration > remaining) {
           anyCensored = true;
           censoredCount += 1;
-          partCensoredCounts.set(partStatKey, (partCensoredCounts.get(partStatKey) ?? 0) + 1);
+          partCensoredCounts.set(part.partId, (partCensoredCounts.get(part.partId) ?? 0) + 1);
           usedSec = input.sectionLimitSec;
           const completionRatio = clamp(remaining / partDuration, 0.35, 1);
           timedPartScore = clamp(minB + (untimedPartScore - minB) * completionRatio, minB, maxB);
@@ -803,8 +804,8 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
   const sectionCensoredDraws = new Map<string, number>();
   const sectionTimedTotal = new Map<string, number>();
   const sectionUntimedTotal = new Map<string, number>();
-  const partCensoredItemCounts = new Map<string, number>();
-  const partTotalItemCounts = new Map<string, number>();
+  const partCensoredItemCounts = new Map<string, Map<string, number>>();
+  const partTotalItemCounts = new Map<string, Map<string, number>>();
   const sectionCensoredItemsCount = new Map<string, number>();
   const sectionTotalItemsCount = new Map<string, number>();
   for (const section of blueprint.sections) {
@@ -813,14 +814,33 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
     sectionUntimedTotal.set(section.sectionId, 0);
     sectionCensoredItemsCount.set(section.sectionId, 0);
     sectionTotalItemsCount.set(section.sectionId, 0);
+    const secCensoredParts = new Map<string, number>();
+    const secTotalParts = new Map<string, number>();
     for (const part of section.parts) {
-      partCensoredItemCounts.set(`${section.sectionId}:${part.partId}`, 0);
-      partTotalItemCounts.set(`${section.sectionId}:${part.partId}`, 0);
+      secCensoredParts.set(part.partId, 0);
+      secTotalParts.set(part.partId, 0);
     }
+    partCensoredItemCounts.set(section.sectionId, secCensoredParts);
+    partTotalItemCounts.set(section.sectionId, secTotalParts);
   }
 
   const untimedOverallPmf = new Map<number, number>();
   let untimedExpectedTotal = 0;
+
+  const accumulatePartCounts = (
+    targetBySection: Map<string, Map<string, number>>,
+    sectionId: string,
+    deltaByPart: ReadonlyMap<string, number>,
+  ): void => {
+    let secMap = targetBySection.get(sectionId);
+    if (!secMap) {
+      secMap = new Map<string, number>();
+      targetBySection.set(sectionId, secMap);
+    }
+    for (const [partId, cnt] of deltaByPart.entries()) {
+      secMap.set(partId, (secMap.get(partId) ?? 0) + cnt);
+    }
+  };
 
   const recordCensoringStats = (
     sectionId: string,
@@ -835,8 +855,8 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
     },
   ): void => {
     if (res.anyCensored) sectionCensoredDraws.set(sectionId, (sectionCensoredDraws.get(sectionId) ?? 0) + 1);
-    for (const [pk, cnt] of res.partTotalCounts.entries()) partTotalItemCounts.set(pk, (partTotalItemCounts.get(pk) ?? 0) + cnt);
-    for (const [pk, cnt] of res.partCensoredCounts.entries()) partCensoredItemCounts.set(pk, (partCensoredItemCounts.get(pk) ?? 0) + cnt);
+    accumulatePartCounts(partTotalItemCounts, sectionId, res.partTotalCounts);
+    accumulatePartCounts(partCensoredItemCounts, sectionId, res.partCensoredCounts);
     sectionTotalItemsCount.set(sectionId, (sectionTotalItemsCount.get(sectionId) ?? 0) + res.totalItems);
     sectionCensoredItemsCount.set(sectionId, (sectionCensoredItemsCount.get(sectionId) ?? 0) + res.censoredCount);
     drawCensoredItems.push(...res.censoredItems);
@@ -968,10 +988,17 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
     const totalSecItems = sectionTotalItemsCount.get(sid) ?? 0;
     const censoredSecItems = sectionCensoredItemsCount.get(sid) ?? 0;
     const partRates: Record<string, number> = {};
+    const secTotalParts = partTotalItemCounts.get(sid);
+    const secCensoredParts = partCensoredItemCounts.get(sid);
     for (const part of section.parts) {
-      const pk = `${sid}:${part.partId}`;
-      const pTotal = partTotalItemCounts.get(pk) ?? 0;
-      partRates[part.partId] = pTotal > 0 ? (partCensoredItemCounts.get(pk) ?? 0) / pTotal : 0;
+      const pTotal = secTotalParts?.get(part.partId) ?? 0;
+      const rateValue = pTotal > 0 ? (secCensoredParts?.get(part.partId) ?? 0) / pTotal : 0;
+      Object.defineProperty(partRates, part.partId, {
+        value: rateValue,
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
     }
     rightCensoringRateBySection[sid] = rate;
     sectionSummaries[sid] = {

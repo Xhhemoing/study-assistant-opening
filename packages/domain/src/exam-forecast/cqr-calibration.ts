@@ -98,11 +98,77 @@ export function cqrWorstCaseNonconformity(record: WholePaperCalibrationRecord): 
   return Math.max(q10 - yLow, yHigh - q90);
 }
 
+type NumericBounds = { readonly low: number; readonly high: number };
+
+function parseObservedOverallBounds(
+  observedScore: WholePaperCalibrationRecord["observedScore"],
+  scoreRange?: readonly [number, number],
+): NumericBounds | null {
+  let low: number;
+  let high: number;
+  if (observedScore.kind === "exact") {
+    if (!Number.isFinite(observedScore.score)) return null;
+    low = observedScore.score;
+    high = observedScore.score;
+  } else {
+    if (!Number.isFinite(observedScore.low) || !Number.isFinite(observedScore.high) || observedScore.low > observedScore.high) {
+      return null;
+    }
+    low = observedScore.low;
+    high = observedScore.high;
+  }
+  if (scoreRange && (low < scoreRange[0] - 1e-9 || high > scoreRange[1] + 1e-9)) {
+    return null;
+  }
+  return { low, high };
+}
+
+function parseObservedSectionBounds(
+  sectionMap: WholePaperCalibrationRecord["observedSectionScores"],
+  sectionRanges?: ReadonlyMap<string, readonly [number, number]>,
+): ReadonlyMap<string, NumericBounds> | null {
+  const parsedSections = new Map<string, NumericBounds>();
+  if (!sectionMap) return parsedSections;
+  for (const [secId, val] of Object.entries(sectionMap)) {
+    if (!Object.hasOwn(sectionMap, secId) || val === undefined) continue;
+    const secRange = sectionRanges?.get(secId);
+    if (sectionRanges && !secRange) return null;
+    let low: number;
+    let high: number;
+    if (typeof val === "number") {
+      if (!Number.isFinite(val)) return null;
+      low = val;
+      high = val;
+    } else {
+      if (!Number.isFinite(val.low) || !Number.isFinite(val.high) || val.low > val.high) return null;
+      low = val.low;
+      high = val.high;
+    }
+    if (secRange && (low < secRange[0] - 1e-9 || high > secRange[1] + 1e-9)) return null;
+    parsedSections.set(secId, { low, high });
+  }
+  return parsedSections;
+}
+
+function hasPairSeen(seenPairs: ReadonlyMap<string, ReadonlySet<string>>, first: string, second: string): boolean {
+  return seenPairs.get(first)?.has(second) === true;
+}
+
+function markPairSeen(seenPairs: Map<string, Set<string>>, first: string, second: string): void {
+  let bucket = seenPairs.get(first);
+  if (!bucket) {
+    bucket = new Set<string>();
+    seenPairs.set(first, bucket);
+  }
+  bucket.add(second);
+}
+
 export function filterIndependentCalibrationRecords(input: {
   readonly records: readonly WholePaperCalibrationRecord[];
   readonly blueprintId: string;
   readonly targetKind: ForecastTargetKind;
   readonly scoreRange?: readonly [number, number];
+  readonly sectionRanges?: ReadonlyMap<string, readonly [number, number]>;
   readonly excludeLearnerId?: string;
   readonly excludePaperFamilyIds?: ReadonlySet<string>;
 }): WholePaperCalibrationRecord[] {
@@ -112,7 +178,7 @@ export function filterIndependentCalibrationRecords(input: {
     ? new Set([...input.excludePaperFamilyIds].map((id) => id.trim()).filter(Boolean))
     : null;
   const seenRecordIds = new Set<string>();
-  const seenLearnerFamilies = new Set<string>();
+  const seenLearnerFamilies = new Map<string, Set<string>>();
 
   return input.records.filter((rec) => {
     if (rec.blueprintId !== input.blueprintId) return false;
@@ -134,20 +200,12 @@ export function filterIndependentCalibrationRecords(input: {
     const range = input.scoreRange;
     if (range && (q10 < range[0] || q90 > range[1])) return false;
 
-    if (rec.observedScore.kind === "exact") {
-      const s = rec.observedScore.score;
-      if (!Number.isFinite(s)) return false;
-      if (range && (s < range[0] || s > range[1])) return false;
-    } else {
-      const { low, high } = rec.observedScore;
-      if (!Number.isFinite(low) || !Number.isFinite(high) || low > high) return false;
-      if (range && (low < range[0] || high > range[1])) return false;
-    }
+    if (!parseObservedOverallBounds(rec.observedScore, range)) return false;
+    if (!parseObservedSectionBounds(rec.observedSectionScores, input.sectionRanges)) return false;
 
-    const learnerFamilyKey = `${recLearner}\u0000${recFamily}`;
-    if (seenRecordIds.has(recId) || seenLearnerFamilies.has(learnerFamilyKey)) return false;
+    if (seenRecordIds.has(recId) || hasPairSeen(seenLearnerFamilies, recLearner, recFamily)) return false;
     seenRecordIds.add(recId);
-    seenLearnerFamilies.add(learnerFamilyKey);
+    markPairSeen(seenLearnerFamilies, recLearner, recFamily);
     return true;
   });
 }
@@ -156,45 +214,22 @@ function observedPassesJointTarget(
   record: WholePaperCalibrationRecord,
   target: JointPassTarget,
   blueprint: ExamBlueprintV1,
+  sectionRanges: ReadonlyMap<string, readonly [number, number]>,
 ): number | null {
-  let overallLow: number;
-  let overallHigh: number;
-  if (record.observedScore.kind === "exact") {
-    const score = record.observedScore.score;
-    if (!Number.isFinite(score)) return null;
-    overallLow = score;
-    overallHigh = score;
-  } else {
-    const { low, high } = record.observedScore;
-    if (!Number.isFinite(low) || !Number.isFinite(high) || low > high) return null;
-    overallLow = low;
-    overallHigh = high;
-  }
-
-  const sectionMap = record.observedSectionScores;
-  const parsedSections = new Map<string, { readonly low: number; readonly high: number }>();
-  if (sectionMap) {
-    for (const [secId, val] of Object.entries(sectionMap)) {
-      if (val === undefined) continue;
-      if (typeof val === "number") {
-        if (!Number.isFinite(val)) return null;
-        parsedSections.set(secId, { low: val, high: val });
-      } else {
-        if (!Number.isFinite(val.low) || !Number.isFinite(val.high) || val.low > val.high) return null;
-        parsedSections.set(secId, { low: val.low, high: val.high });
-      }
-    }
-  }
+  const overallBounds = parseObservedOverallBounds(record.observedScore, blueprint.scoreRange);
+  if (!overallBounds) return null;
+  const parsedSections = parseObservedSectionBounds(record.observedSectionScores, sectionRanges);
+  if (!parsedSections) return null;
 
   // Provable failure check before checking missing sections (prevents MNAR bias).
-  if (overallHigh < target.targetOverall) return 0;
+  if (overallBounds.high < target.targetOverall) return 0;
   for (const section of blueprint.sections) {
     const secBounds = parsedSections.get(section.sectionId);
     if (secBounds !== undefined && secBounds.high < target.targetMinSection) return 0;
   }
 
   const needsAllSections = target.targetMinSection > blueprint.scoreRange[0];
-  if (overallLow >= target.targetOverall) {
+  if (overallBounds.low >= target.targetOverall) {
     if (!needsAllSections) return 1;
     const allPass = blueprint.sections.every((section) => {
       const secBounds = parsedSections.get(section.sectionId);
@@ -279,24 +314,19 @@ export function calibrateJointPassTargets(input: {
   const excludedFamilies = input.excludePaperFamilyIds
     ? new Set([...input.excludePaperFamilyIds].map((id) => id.trim()).filter(Boolean))
     : null;
-  const requiredEvidenceKind = input.targetKind
-    ? input.targetKind === "official_exam"
-      ? "official_exam"
-      : "independent_mock"
-    : null;
+  const effectiveTargetKind: ForecastTargetKind = input.targetKind ?? "same_blueprint_mock";
+  const requiredEvidenceKind = effectiveTargetKind === "official_exam" ? "official_exam" : "independent_mock";
+  const sectionRanges = sectionRangesMap(input.blueprint);
 
   const rawEstimates = input.targets.map((target) => {
     const rawProbability = rawJointPassFromSimulation(input.simulation, input.blueprint, target);
     const seenRecordIds = new Set<string>();
-    const seenLearnerFamilies = new Set<string>();
+    const seenLearnerFamilies = new Map<string, Set<string>>();
     const points: Array<{ x: number; y: number }> = [];
     for (const rec of input.calibrationRecords) {
       if (rec.blueprintId !== input.blueprint.blueprintId) continue;
       if (!rec.countsTowardMastery || rec.assisted || rec.exposed === true) continue;
-      if (rec.evidenceKind === "practice_feedback" || rec.evidenceKind === "self_report") continue;
-      if (input.targetKind && (rec.targetKind !== input.targetKind || rec.evidenceKind !== requiredEvidenceKind)) {
-        continue;
-      }
+      if (rec.targetKind !== effectiveTargetKind || rec.evidenceKind !== requiredEvidenceKind) continue;
       const recId = rec.recordId?.trim() ?? "";
       const recLearner = rec.learnerId?.trim() ?? "";
       const recFamily = rec.paperFamilyId?.trim() ?? "";
@@ -304,15 +334,14 @@ export function calibrateJointPassTargets(input: {
       if (excludedLearner && recLearner === excludedLearner) continue;
       if (excludedFamilies && excludedFamilies.has(recFamily)) continue;
 
-      const y = observedPassesJointTarget(rec, target, input.blueprint);
+      const y = observedPassesJointTarget(rec, target, input.blueprint, sectionRanges);
       if (y === null) continue;
       const rawProb = recordRawProbForTarget(rec, target);
       if (rawProb === null) continue;
 
-      const learnerFamilyKey = `${recLearner}\u0000${recFamily}`;
-      if (seenRecordIds.has(recId) || seenLearnerFamilies.has(learnerFamilyKey)) continue;
+      if (seenRecordIds.has(recId) || hasPairSeen(seenLearnerFamilies, recLearner, recFamily)) continue;
       seenRecordIds.add(recId);
-      seenLearnerFamilies.add(learnerFamilyKey);
+      markPairSeen(seenLearnerFamilies, recLearner, recFamily);
       points.push({ x: rawProb, y });
     }
     const isCalibrated = points.length >= minSamples;
@@ -440,6 +469,7 @@ export function evaluateExamForecast(input: {
     blueprintId: input.blueprint.blueprintId,
     targetKind,
     scoreRange: input.blueprint.scoreRange,
+    sectionRanges: sectionRangesMap(input.blueprint),
     excludeLearnerId: trimmedLearnerId,
     excludePaperFamilyIds: excludeFamilies,
   });

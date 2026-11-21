@@ -286,6 +286,12 @@ function hasCompleteRawTable(section: ExamSectionBlueprint): boolean {
   const table = section.rawToBandTable;
   const items = section.items;
   if (!table || table.length === 0 || !items || items.length === 0) return false;
+  const [minScore, maxScore] = section.scoreRange;
+  const rangeValid = Number.isFinite(minScore) && Number.isFinite(maxScore);
+  for (const row of table) {
+    if (!Number.isFinite(row.score)) return false;
+    if (rangeValid && (row.score < minScore - 1e-9 || row.score > maxScore + 1e-9)) return false;
+  }
   let maxRaw = 0;
   for (const item of items) {
     const pts = item.points ?? 1;
@@ -335,8 +341,8 @@ export function choleskyDecompose(matrix: readonly (readonly number[])[]): numbe
       } else {
         const diag = lower[j]![j]!;
         if (diag === 0) {
-          const localOffDiagTol = 1e-10 * Math.sqrt(Math.max(0, diagEntry) * Math.max(0, matrix[j]![j]!));
-          if (Math.abs(sum) > localOffDiagTol) {
+          const localOffDiagTol = 1e-10 * Math.sqrt(Math.max(0, diagEntry)) * Math.sqrt(Math.max(0, matrix[j]![j]!));
+          if (!Number.isFinite(localOffDiagTol) || Math.abs(sum) > localOffDiagTol) {
             throw new RangeError("thetaCovariance must be positive semidefinite");
           }
           lower[i]![j] = 0;
