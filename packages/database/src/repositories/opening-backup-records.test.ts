@@ -362,6 +362,11 @@ it("retains restored uppercase source_turn_ids memories and dependent turns cons
   const dependentTurnId = "e0000000-0000-4000-8000-000000000003";
   const memoryId = "e0000000-0000-4000-8000-000000000004";
   const candidateIdForTurn = "e0000000-0000-4000-8000-000000000005";
+  const expiredMemoryId = "e0000000-0000-4000-8000-000000000006";
+  const expiredDependentTurnId = "e0000000-0000-4000-8000-000000000007";
+  const derivedMemoryId = "e0000000-0000-4000-8000-000000000008";
+  const derivedDependentTurnId = "e0000000-0000-4000-8000-000000000009";
+  const derivedCandidateId = "e0000000-0000-4000-8000-000000000010";
 
   const sql = fakeSql(call => {
     const q = call.query.trim();
@@ -373,17 +378,22 @@ it("retains restored uppercase source_turn_ids memories and dependent turns cons
       return [
         { id: originTurnId, workspace_id: workspaceId, conversation_id: convId, role: "user", attempt_id: null, learning_session_id: null, context_anchor: null, context_source_refs: null, source_ids: [], citations: [], source_versions: {} },
         { id: dependentTurnId, workspace_id: workspaceId, conversation_id: convId, role: "assistant", attempt_id: null, learning_session_id: null, context_anchor: null, context_source_refs: [{ memoryDependencyIds: [memoryId] }], source_ids: [], citations: [], source_versions: {} },
+        { id: expiredDependentTurnId, workspace_id: workspaceId, conversation_id: convId, role: "assistant", context_source_refs: [{ memoryDependencyIds: [expiredMemoryId.toUpperCase()] }], source_ids: [], citations: [], source_versions: {} },
+        { id: derivedDependentTurnId, workspace_id: workspaceId, conversation_id: convId, role: "assistant", context_source_refs: [{ memoryDependencyIds: [derivedMemoryId.toUpperCase()] }], source_ids: [], citations: [], source_versions: {} },
       ];
     }
     if (q.startsWith("SELECT m.id, m.workspace_id, m.course_id")) {
       return [
         // Restored JSONB preserves uppercase UUIDs while opening_turns.id is lowercase uuid.
         { id: memoryId, workspace_id: workspaceId, course_id: null, kind: "confirmed", text: "Restored memory", source_turn_ids: [originTurnId.toUpperCase()], status: "active" },
+        { id: expiredMemoryId, workspace_id: workspaceId, course_id: null, kind: "temporary", expires_at: new Date("2000-01-01T00:00:00Z"), source_turn_ids: [originTurnId], status: "active" },
+        { id: derivedMemoryId, workspace_id: workspaceId, course_id: null, kind: "confirmed", source_turn_ids: [expiredDependentTurnId.toUpperCase()], status: "active" },
       ];
     }
     if (q.startsWith("SELECT a.id, a.workspace_id, a.conversation_id, a.source_turn_id")) {
       return [
         { id: candidateIdForTurn, workspace_id: workspaceId, conversation_id: convId, source_turn_id: dependentTurnId.toUpperCase(), source_ids: [], payload: {} },
+        { id: derivedCandidateId, workspace_id: workspaceId, conversation_id: convId, source_turn_id: derivedDependentTurnId.toUpperCase(), source_ids: [], payload: {} },
       ];
     }
     return [];
@@ -391,7 +401,7 @@ it("retains restored uppercase source_turn_ids memories and dependent turns cons
 
   const snapshot = await readOpeningBackupRecords(sql, { workspaceId, ownerUserId });
   expect(snapshot.tables.opening_turns.map(row => row.id)).toEqual([originTurnId, dependentTurnId]);
-  expect(snapshot.tables.opening_memories.map(row => row.id)).toEqual([memoryId]);
+  expect(snapshot.tables.opening_memories.map(row => row.id)).toEqual([memoryId, expiredMemoryId]);
   expect(snapshot.tables.opening_assistant_candidates.map(row => row.id)).toEqual([candidateIdForTurn]);
 
   const backup: OpeningBackup = {

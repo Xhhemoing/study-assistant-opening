@@ -81,6 +81,25 @@ it("requires authentication and hides foreign or currently excluded sources", as
   expect((await acceptRetest(request({ clientKey: randomUUID() }), params(retest.id))).status).toBe(404);
 });
 
+it("keeps ordinary review candidates visible and rechecks only the dependent turn as memory expires", async () => {
+  const ordinary = await taskCandidate(fixture);
+  const dependent = await taskCandidate(fixture);
+  const memoryId = randomUUID();
+  await fixture.sql`INSERT INTO opening_memories (id, workspace_id, kind, text, source_turn_ids, expires_at)
+    VALUES (${memoryId}, ${fixture.scope.workspaceId}, 'temporary', 'help preference',
+      ${fixture.sql.json([ordinary.sourceTurnId.toUpperCase()])}, clock_timestamp() + interval '1 day')`;
+  await fixture.sql`UPDATE opening_turns
+    SET context_source_refs = ${fixture.sql.json([{ memoryDependencyIds: [memoryId.toUpperCase()] }])}
+    WHERE id = ${dependent.sourceTurnId}`;
+  const visible = await assistantList(request());
+  expect(visible.status).toBe(200);
+  expect((await visible.json()).map((row: { id: string }) => row.id).sort()).toEqual([ordinary.id, dependent.id].sort());
+  await fixture.sql`UPDATE opening_memories SET expires_at = clock_timestamp() WHERE id = ${memoryId}`;
+  const expired = await assistantList(request());
+  expect(expired.status).toBe(200);
+  expect((await expired.json()).map((row: { id: string }) => row.id)).toEqual([ordinary.id]);
+});
+
 it("discards an assistant task idempotently but refuses memory, foreign, and mixed-origin targets", async () => {
   const task = await taskCandidate(fixture), memory = await taskCandidate(fixture), foreign = await taskCandidate({ ...fixture, scope: fixture.otherScope });
   await fixture.sql`UPDATE opening_assistant_candidates SET payload = ${fixture.sql.json({ kind: "memory", text: "不要误送", temporary: false })} WHERE id = ${memory.id}`;

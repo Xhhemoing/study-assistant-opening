@@ -316,6 +316,7 @@ export {
   turnMemoryDependencyIds,
   turnMemoryDependencyMetadata,
   turnSourceReferences,
+  unavailableBackupMemoryLineage,
 } from "./opening/backup-validation";
 export {
   validateOpeningRestore,

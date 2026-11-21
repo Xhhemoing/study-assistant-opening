@@ -2,6 +2,7 @@ import type { Sql } from "postgres";
 import type { MemoryItem } from "@aistudy/contracts";
 import type { OpeningScope } from "./opening-sources";
 import { assertSourceTurnsOwned, lockOwnedWorkspace } from "./opening-memory-admission";
+import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { OpeningMemoryError, mapMemoryRow } from "./opening-memory-types";
 import { advanceOpeningWorkspacePrivacyEpoch, withOpeningTutorStreamFenceCommit } from "./opening-tutor-stream-fence";
 
@@ -28,9 +29,18 @@ export function replaceOwnedMemory(
 ): Promise<MemoryItem> {
   const text = input.text.trim();
   if (!text) throw new OpeningMemoryError("VALIDATION", "memory text is required");
-  if (!input.sourceTurnIds.length) throw new OpeningMemoryError("VALIDATION", "corrected memory requires a source turn");
+  if (!input.sourceTurnIds?.length) throw new OpeningMemoryError("VALIDATION", "corrected memory requires a source turn");
   if (input.clientKey.length < 8) throw new OpeningMemoryError("VALIDATION", "clientKey is too short");
   return withOpeningTutorStreamFenceCommit(sql, async (tx) => {
+    try {
+      await lockWorkspaceLearningHistory(tx, scope);
+    } catch (error) {
+      if (error instanceof Error && "code" in error
+        && error.code === "NOT_FOUND" && error.message === "workspace not found") {
+        throw new OpeningMemoryError("NOT_FOUND", "workspace not found");
+      }
+      throw error;
+    }
     await lockOwnedWorkspace(tx, scope);
     const rows = await tx`
       SELECT * FROM opening_memories
@@ -63,7 +73,7 @@ export function replaceOwnedMemory(
     if (currentMemory.status !== "active" || currentMemory.kind !== "confirmed") {
       throw new OpeningMemoryError("CONFLICT", "only an active confirmed memory can be replaced");
     }
-    await assertSourceTurnsOwned(tx, scope, input.sourceTurnIds);
+    await assertSourceTurnsOwned(tx, scope, input.sourceTurnIds, currentMemory.id);
     const superseded = await tx`
       UPDATE opening_memories
       SET status = 'superseded', version = ${currentMemory.version + 1},

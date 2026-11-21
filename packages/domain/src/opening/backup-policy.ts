@@ -13,7 +13,7 @@ import { validateBackupSystemQuery } from "./backup-system-query";
 import { validateBackupLearningState } from "./backup-learning-state";
 import { isJournal, isMemoryDeletions, isRecord, isTables, isUuid, libraryBlockSourceReferences,
   libraryRevisionSourceReferences, noteProvenanceSourceReferences, parseUuidArray, sourceReferences,
-  turnMemoryDependencyIds, turnSourceReferences, validObject } from "./backup-validation";
+  turnMemoryDependencyIds, turnSourceReferences, unavailableBackupMemoryLineage, validObject } from "./backup-validation";
 
 export type OpeningDeletionMark = { sourceId: string; deletedAt: string; assetDeletedAt?: string | null };
 export type OpeningMemoryDeletions = {
@@ -306,9 +306,12 @@ export function validateOpeningRestore(
   const turns = new Map((tables.opening_turns ?? [])
     .filter((row) => isUuid(row.id) && isUuid(row.workspace_id) && row.workspace_id.toLowerCase() === workspaceId)
     .map((row) => [(row.id as string).toLowerCase(), row]));
-  const ownedMemories = new Set((tables.opening_memories ?? [])
-    .filter((row) => isUuid(row.id) && isUuid(row.workspace_id) && row.workspace_id.toLowerCase() === workspaceId)
-    .map((row) => (row.id as string).toLowerCase()));
+  const ownedMemoryRows = (tables.opening_memories ?? [])
+    .filter((row) => isUuid(row.id) && isUuid(row.workspace_id) && row.workspace_id.toLowerCase() === workspaceId);
+  const ownedMemories = new Set(ownedMemoryRows.map((row) => (row.id as string).toLowerCase()));
+  const unavailableMemoryLineage = unavailableBackupMemoryLineage(
+    [...turns.values()], ownedMemoryRows, Date.now(), deletedMemories,
+  );
   for (const [name, rows] of Object.entries(tables)) {
     if (!OPENING_BACKUP_TABLE_SET.has(name)) {
       errors.push(`table ${name} is not allowlisted`);
@@ -337,6 +340,8 @@ export function validateOpeningRestore(
         }
         if (memoryDeps?.some(id => !ownedMemories.has(id))) {
           errors.push("table opening_turns references a memory missing from the backup");
+        } else if (memoryDeps?.length && unavailableMemoryLineage.has(row)) {
+          errors.push("table opening_turns has an unavailable memory dependency");
         }
       }
       if (name === "opening_assistant_candidates") {
@@ -385,6 +390,8 @@ export function validateOpeningRestore(
         const turnIds = parseUuidArray(row.source_turn_ids);
         if (!turnIds || turnIds.length === 0 || turnIds.some((id) => !turns.has(id.toLowerCase()))) {
           errors.push("memory source turn is missing or invalid");
+        } else if (turnIds.some(id => unavailableMemoryLineage.has(turns.get(id.toLowerCase())!))) {
+          errors.push("memory source turn has an unavailable memory dependency");
         }
       }
     }

@@ -45,10 +45,17 @@ describe("loadTutorHistory context selection", () => {
   it("preserves memoryOnly history lineage and filters expired/inactive memoryOnly turns via clock_timestamp()", async () => {
     const queries: string[] = [];
     const memorySourceId = "00000000-0000-4000-8000-000000000002";
-    const sql = (async (strings: TemplateStringsArray) => {
-      const text = strings.join("?").replace(/\s+/g, " ").trim();
+    const sql = ((strings: TemplateStringsArray, ...values: unknown[]) => {
+      const text = strings.reduce((query, part, index) => {
+        const value = values[index];
+        const binding = typeof value === "object" && value !== null && "fragment" in value
+          && typeof value.fragment === "string" ? value.fragment : "?";
+        return query + part + (index < values.length ? binding : "");
+      }, "").replace(/\s+/g, " ").trim();
       queries.push(text);
-      if (!text.includes("WITH prior")) return [];
+      if (!text.includes("WITH prior")) {
+        return { fragment: text, then: (resolve: (rows: unknown[]) => unknown) => resolve([]) };
+      }
       return [{
         question: "question", answer: "answer",
         user_source_refs: [{ sourceId, sourceVersion: 0 }],

@@ -194,6 +194,81 @@ describe("opening memory handlers", () => {
     ]);
   });
 
+  it.each(["direct", "transitive", "expired"] as const)(
+    "rejects replacement with %s unusable ancestry before superseding the target",
+    async (dependency) => {
+      const conversationId = randomUUID();
+      const targetId = randomUUID();
+      const intermediateId = randomUUID();
+      const originId = randomUUID();
+      const intermediateTurnId = randomUUID();
+      const correctionId = randomUUID();
+      const priorExpiry = dependency === "expired" ? new Date(0) : null;
+      await sql`INSERT INTO opening_conversations (id, workspace_id, owner_user_id, title)
+        VALUES (${conversationId}, ${owner.workspaceId}, ${owner.userId}, 'replacement ancestry')`;
+      await sql`INSERT INTO opening_turns (id, workspace_id, conversation_id, role, text, mode, status, context_source_refs)
+        VALUES
+          (${originId}, ${owner.workspaceId}, ${conversationId}, 'user', 'original', 'listen', 'complete', NULL),
+          (${intermediateTurnId}, ${owner.workspaceId}, ${conversationId}, 'assistant', 'derived', 'listen', 'complete',
+            ${sql.json([{ memoryDependencyIds: [targetId.toUpperCase()] }])}),
+          (${correctionId}, ${owner.workspaceId}, ${conversationId}, 'assistant', 'correction', 'listen', 'complete',
+            ${sql.json([{ memoryDependencyIds: [intermediateId.toUpperCase()] }])})`;
+      await sql`INSERT INTO opening_memories (id, workspace_id, kind, text, source_turn_ids, expires_at)
+        VALUES
+          (${targetId}, ${owner.workspaceId}, 'confirmed', 'original fact', ${sql.json([originId])}, NULL),
+          (${intermediateId}, ${owner.workspaceId}, ${priorExpiry ? "temporary" : "confirmed"}, 'dependent fact',
+            ${sql.json([dependency === "expired" ? originId : intermediateTurnId.toUpperCase()])}, ${priorExpiry})`;
+
+      const response = await decideMemory(req(`/api/opening/memory/${targetId}/decision`, "POST", {
+        expectedVersion: 0,
+        action: "replace",
+        clientKey: `replacement-${dependency}`,
+        text: "corrected fact",
+        sourceTurnIds: [(dependency === "direct" ? intermediateTurnId : correctionId).toUpperCase()],
+      }), { params: Promise.resolve({ id: targetId }) });
+      expect(response.status).toBe(400);
+      const rows = await sql`SELECT id, status FROM opening_memories WHERE workspace_id = ${owner.workspaceId}`;
+      expect(rows).toHaveLength(2);
+      expect(rows).toContainEqual({ id: targetId, status: "active" });
+    },
+  );
+
+  it("rejects proposing or replacing memory from revoked assistant context", async () => {
+    const conversationId = randomUUID();
+    const sourceId = randomUUID();
+    const turnId = randomUUID();
+    const targetId = randomUUID();
+    await sql`INSERT INTO opening_sources (id, workspace_id, name, mime, bytes, sha256, version, upload_state, parse_state)
+      VALUES (${sourceId}, ${owner.workspaceId}, 'revoked.pdf', 'application/pdf', 1, ${"c".repeat(64)}, 0, 'uploaded', 'ready')`;
+    await sql`INSERT INTO opening_conversations (id, workspace_id, owner_user_id, title)
+      VALUES (${conversationId}, ${owner.workspaceId}, ${owner.userId}, 'revoked source')`;
+    await sql`INSERT INTO opening_turns (id, workspace_id, conversation_id, role, text, mode, status, context_source_refs)
+      VALUES (${turnId}, ${owner.workspaceId}, ${conversationId}, 'assistant', 'from revoked material', 'listen', 'complete',
+        ${sql.json([{ sourceId: sourceId.toUpperCase(), sourceVersion: 0 }])})`;
+    await sql`INSERT INTO opening_memories (id, workspace_id, kind, text)
+      VALUES (${targetId}, ${owner.workspaceId}, 'confirmed', 'manual fact')`;
+
+    const body = { text: "from revoked material", sourceTurnIds: [turnId] };
+    const proposed = await proposeMemory(req("/api/opening/memory", "POST", body));
+    expect(proposed.status).toBe(201);
+    const candidate = await proposed.json() as { id: string; version: number };
+    await sql`INSERT INTO opening_privacy_exclusions (workspace_id, source_id) VALUES (${owner.workspaceId}, ${sourceId})`;
+
+    expect((await proposeMemory(req("/api/opening/memory", "POST", body))).status).toBe(400);
+    const confirmation = await decideMemory(req(`/api/opening/memory/${candidate.id}/decision`, "POST", {
+      expectedVersion: candidate.version, action: "confirm", clientKey: "confirm-from-revoked-material",
+    }), { params: Promise.resolve({ id: candidate.id }) });
+    expect(confirmation.status).toBe(400);
+    const response = await decideMemory(req(`/api/opening/memory/${targetId}/decision`, "POST", {
+      ...body, expectedVersion: 0, action: "replace", clientKey: "replace-from-revoked-material",
+    }), { params: Promise.resolve({ id: targetId }) });
+    expect(response.status).toBe(400);
+    const rows = await sql`SELECT id, kind, status FROM opening_memories WHERE workspace_id = ${owner.workspaceId}`;
+    expect(rows).toHaveLength(2);
+    expect(rows).toContainEqual({ id: targetId, kind: "confirmed", status: "active" });
+    expect(rows).toContainEqual({ id: candidate.id, kind: "candidate", status: "active" });
+  });
+
   it("deletes source conversation text only when the user selected it", async () => {
     const conversationId = randomUUID();
     const turnId = randomUUID();

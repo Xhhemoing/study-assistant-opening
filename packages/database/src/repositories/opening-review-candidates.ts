@@ -1,7 +1,7 @@
 import type { Sql, TransactionSql } from "postgres";
 import { assistantCandidateSchema, retestCandidateSchema } from "@aistudy/contracts";
 import type { OpeningScope } from "./opening-sources";
-import { createOpeningCandidateRepository } from "./opening-candidates";
+import { mapOpeningCandidateRow } from "./opening-candidates";
 import { lockLearningHistory } from "./opening-learning-facts";
 import { OpeningPlanError } from "./opening-plan-error";
 import { includedTurn } from "./opening-backup-record-predicates";
@@ -26,18 +26,27 @@ function admittedRetest(db: Db, scope: OpeningScope) {
     AND ${cleanJsonSources(db, scope, db`j.payload->'sourceIds'`)}`;
 }
 export async function readOpeningAssistantReviewCandidates(sql: Sql, scope: OpeningScope) {
-  const candidates = await createOpeningCandidateRepository(sql).listPending(scope);
-  const rows = await sql`
-    SELECT a.id FROM opening_assistant_candidates a
-    JOIN opening_turns t ON t.id = a.source_turn_id AND t.conversation_id = a.conversation_id
-      AND t.workspace_id = a.workspace_id AND t.status = 'complete'
-    WHERE a.workspace_id = ${scope.workspaceId} AND a.status = 'pending'
-      AND EXISTS (SELECT 1 FROM workspaces w WHERE w.id = ${scope.workspaceId} AND w.owner_user_id = ${scope.ownerUserId})
-      AND ${cleanJsonSources(sql, scope, sql`a.source_ids`)}
-      AND ${includedTurn(sql, scope.workspaceId, scope.ownerUserId, "t")}
-      AND ${turnTransitiveDependenciesActive(sql, "t")}`;
-  const visible = new Set(rows.map((row) => row.id as string));
-  return candidates.filter((candidate) => visible.has(candidate.id) && assistantCandidateSchema.safeParse(candidate.payload).success);
+  return sql.begin("isolation level repeatable read, read only", async tx => {
+    const candidates = await tx`
+      SELECT a.*, t.context_source_refs @? '$[*].memoryDependencyIds' AS has_memory_dependencies
+      FROM opening_assistant_candidates a
+      JOIN opening_turns t ON t.id = a.source_turn_id AND t.conversation_id = a.conversation_id
+        AND t.workspace_id = a.workspace_id AND t.status = 'complete'
+      WHERE a.workspace_id = ${scope.workspaceId} AND a.status = 'pending'
+        AND EXISTS (SELECT 1 FROM workspaces w WHERE w.id = ${scope.workspaceId} AND w.owner_user_id = ${scope.ownerUserId})
+        AND ${cleanJsonSources(tx, scope, tx`a.source_ids`)}
+        AND ${includedTurn(tx, scope.workspaceId, scope.ownerUserId, "t")}
+      ORDER BY a.created_at ASC`;
+    const dependentTurns = [...new Set(candidates.filter(row => row.has_memory_dependencies).map(row => row.source_turn_id as string))];
+    // Keep the recursive plan off ordinary review reads. Both phases share the owner-scoped snapshot.
+    const admitted = dependentTurns.length ? await tx`
+      SELECT t.id FROM opening_turns t
+      WHERE t.workspace_id = ${scope.workspaceId} AND t.id = ANY(${dependentTurns}::uuid[])
+        AND ${turnTransitiveDependenciesActive(tx, "t")}` : [];
+    const activeTurns = new Set(admitted.map(row => row.id as string));
+    return candidates.filter(row => (!row.has_memory_dependencies || activeTurns.has(row.source_turn_id as string))
+      && assistantCandidateSchema.safeParse(row.payload).success).map(mapOpeningCandidateRow);
+  });
 }
 export async function readOpeningRetestReviewCandidates(sql: Sql, scope: OpeningScope) {
   const rows = await sql`

@@ -124,6 +124,62 @@ export function turnMemoryDependencyIds(row: Record<string, unknown>): string[] 
   return metadata ?? [];
 }
 
+type BackupHistoryRow = Record<string, unknown>;
+
+function canSupplyBackupMemory(row: BackupHistoryRow, now: number): boolean {
+  if (row.status !== "active" || row.course_id != null) return false;
+  if (row.kind === "confirmed") return true;
+  if (row.kind !== "temporary") return false;
+  const expires = row.expires_at;
+  return (expires instanceof Date ? expires.getTime() : typeof expires === "string" ? Date.parse(expires) : NaN) > now;
+}
+
+/** Propagate broken lineage through both directions of the turn/memory dependency graph. */
+export function unavailableBackupMemoryLineage(
+  turns: readonly BackupHistoryRow[],
+  memories: readonly BackupHistoryRow[],
+  now: number,
+  deletedMemoryIds?: ReadonlySet<string>,
+): ReadonlySet<BackupHistoryRow> {
+  const byId = (rows: readonly BackupHistoryRow[]) => new Map(
+    rows.flatMap(row => isUuid(row.id) ? [[row.id.toLowerCase(), row] as const] : []),
+  );
+  const turnsById = byId(turns);
+  const memoriesById = byId(memories.filter(row => isUuid(row.id)
+    && !deletedMemoryIds?.has(row.id.toLowerCase()) && canSupplyBackupMemory(row, now)));
+  const dependents = new Map<BackupHistoryRow, BackupHistoryRow[]>();
+  const unavailable = new Set<BackupHistoryRow>();
+  const link = (row: BackupHistoryRow, ids: string[] | null, targets: typeof turnsById) => {
+    if (!ids) {
+      unavailable.add(row);
+      return;
+    }
+    for (const id of ids) {
+      const target = targets.get(id.toLowerCase());
+      if (!target) {
+        unavailable.add(row);
+        continue;
+      }
+      const users = dependents.get(target);
+      if (users) users.push(row);
+      else dependents.set(target, [row]);
+    }
+  };
+  for (const turn of turns) link(turn, turnMemoryDependencyIds(turn), memoriesById);
+  for (const memory of memories) {
+    const sourceIds = parseUuidArray(memory.source_turn_ids);
+    if (!isUuid(memory.id) || deletedMemoryIds?.has(memory.id.toLowerCase()) || memory.status === "deleted") {
+      unavailable.add(memory);
+    }
+    link(memory, sourceIds?.length ? sourceIds : null, turnsById);
+  }
+  // Set iteration visits newly added rows once, even for a cycle.
+  for (const row of unavailable) {
+    for (const dependent of dependents.get(row) ?? []) unavailable.add(dependent);
+  }
+  return unavailable;
+}
+
 /** Note provenance can carry publication metadata alongside its versioned source refs. */
 export function notePublicationMetadata(value: unknown) {
   if (!isRecord(value) || Object.keys(value).length !== 1) return null;

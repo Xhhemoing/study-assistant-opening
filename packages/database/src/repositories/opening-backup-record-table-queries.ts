@@ -1,4 +1,4 @@
-import { projectBackupFormalGoalReferences, projectBackupCourseMilestoneReferences, turnMemoryDependencyIds } from "@aistudy/domain";
+import { projectBackupFormalGoalReferences, projectBackupCourseMilestoneReferences, unavailableBackupMemoryLineage } from "@aistudy/domain";
 import { retainBackupEventChains } from "@aistudy/domain/native";
 import { isPrivateExamActivity, privateExamDocumentIds, projectOpeningBackupCardSources, projectOpeningBackupProvenance, readBackupLibrary, readBackupNoteProvenance } from "./opening-backup-library";
 import { readBackupCourseAssets } from "./opening-backup-course-assets";
@@ -266,6 +266,8 @@ export async function readOpeningBackupTableRows(
   const sourceIds = new Set(tables.opening_sources.map(row => typeof row.id === "string" ? row.id.toLowerCase() : row.id));
   const conversationsById = new Map(tables.opening_conversations.map(row => [row.id, row]));
   const initialUserTurnCourse = new Map<string, unknown>();
+  const memoryEvaluationTime = Date.now();
+  const canonicalId = (value: unknown) => typeof value === "string" ? value.toLowerCase() : value;
   for (const turn of tables.opening_turns) {
     const conv = conversationsById.get(turn.conversation_id);
     if (turn.role === "user" && typeof turn.id === "string" && conv && conv.workspace_id === id && conv.owner_user_id === userId) {
@@ -354,8 +356,7 @@ export async function readOpeningBackupTableRows(
     attemptIds = new Set(tables.opening_learning_attempts.map(row => row.id));
     tables.opening_turns = tables.opening_turns.filter(row => (row.attempt_id == null || attemptIds.has(row.attempt_id))
       && (row.learning_session_id == null || sessionIds.has(row.learning_session_id)) && admittedAnchor(row));
-    turnIds = new Set(tables.opening_turns.map(row => typeof row.id === "string" ? row.id.toLowerCase() : row.id));
-    const canonicalId = (value: unknown) => typeof value === "string" ? value.toLowerCase() : value;
+    turnIds = new Set(tables.opening_turns.map(row => canonicalId(row.id)));
     tables.opening_help_exposures = tables.opening_help_exposures.filter(row => (row.turn_id == null || turnIds.has(canonicalId(row.turn_id)))
       && (row.session_id == null || sessionIds.has(row.session_id)) && (row.activity_id == null || activityIds.has(row.activity_id))
       && (row.problem_id == null || problemIds.has(row.problem_id)) && admittedAnchor(row)
@@ -374,23 +375,16 @@ export async function readOpeningBackupTableRows(
       (row.turn_id == null || turnIds.has(canonicalId(row.turn_id)))
       && (row.help_input_snapshot == null || turnIds.has(canonicalId((row.help_input_snapshot as { userTurnId: string }).userTurnId)))
       && (row.attempt_id == null || attemptIds.has(row.attempt_id)));
-    const preMemoryTurnIdsLower = new Set(
-      tables.opening_turns.flatMap(row => (typeof row.id === "string" ? [row.id.toLowerCase()] : [])),
-    );
-    tables.opening_memories = tables.opening_memories.filter(row => Array.isArray(row.source_turn_ids)
-      && (row.source_turn_ids as string[]).every(turn => typeof turn === "string" && preMemoryTurnIdsLower.has(turn.toLowerCase())));
-    const memoryIdsLower = new Set(
-      tables.opening_memories.flatMap(row => (typeof row.id === "string" ? [row.id.toLowerCase()] : [])),
-    );
     const turnCountBeforeMemoryDeps = tables.opening_turns.length;
-    tables.opening_turns = tables.opening_turns.filter(row => {
-      const depIds = turnMemoryDependencyIds(row);
-      return depIds !== null && depIds.every(depId => memoryIdsLower.has(depId));
-    });
+    const unavailableLineage = unavailableBackupMemoryLineage(
+      tables.opening_turns, tables.opening_memories, memoryEvaluationTime,
+    );
+    tables.opening_memories = tables.opening_memories.filter(row => !unavailableLineage.has(row));
+    tables.opening_turns = tables.opening_turns.filter(row => !unavailableLineage.has(row));
     const droppedMemoryDependentTurns = tables.opening_turns.length < turnCountBeforeMemoryDeps;
-    const turnIdsLower = droppedMemoryDependentTurns
-      ? new Set(tables.opening_turns.flatMap(row => (typeof row.id === "string" ? [row.id.toLowerCase()] : [])))
-      : preMemoryTurnIdsLower;
+    const retainedTurnIds = droppedMemoryDependentTurns
+      ? new Set(tables.opening_turns.map(row => canonicalId(row.id)))
+      : turnIds;
     const droppedOriginTurnActivities = new Set(
       tables.opening_teaching_activities
         .filter(row => {
@@ -400,7 +394,7 @@ export async function readOpeningBackupTableRows(
             : undefined;
           if (typeof rawSourceTurnId !== "string") return false;
           const sourceTurnId = rawSourceTurnId.toLowerCase();
-          if (turnIdsLower.has(sourceTurnId)) return false;
+          if (retainedTurnIds.has(sourceTurnId)) return false;
           return initialUserTurnCourse.has(sourceTurnId)
             && initialUserTurnCourse.get(sourceTurnId) === (row.course_id ?? null);
         })
@@ -415,7 +409,6 @@ export async function readOpeningBackupTableRows(
     }
     break;
   }
-  const canonicalId = (value: unknown) => typeof value === "string" ? value.toLowerCase() : value;
   const completeTurnIds = new Set(tables.opening_turns.map(row => canonicalId(row.id)));
   tables.opening_assistant_candidates = tables.opening_assistant_candidates.filter(row => completeTurnIds.has(canonicalId(row.source_turn_id)));
   const includedCandidateIds = new Set(tables.opening_assistant_candidates
@@ -435,8 +428,6 @@ export async function readOpeningBackupTableRows(
       ? row.candidate_id
       : null,
   }));
-  tables.opening_memories = tables.opening_memories.filter(row => Array.isArray(row.source_turn_ids)
-    && (row.source_turn_ids as string[]).every(turn => typeof turn === "string" && completeTurnIds.has(turn.toLowerCase())));
   const completeObservationIds = new Set(tables.opening_learning_observations.map(row => canonicalId(row.id)));
   const excludedObservations = new Set(lineage.filter(row => !completeObservationIds.has(canonicalId(row.id))).map(row => canonicalId(row.id)));
   tables.cards = tables.cards.filter(row => !excludedObservations.has(canonicalId(row.origin_observation_root_id)));

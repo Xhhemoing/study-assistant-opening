@@ -122,7 +122,7 @@ describe("context provenance at the backup boundary", () => {
     expect(noteProvenanceSourceReferences(documentlessTurn)).toBeNull();
 
     const originTurn = turn({ id: originTurnId, role: "user", context_source_refs: null });
-    const memoryRow = row({ id: memoryId, status: "active", source_turn_ids: [originTurnId] });
+    const memoryRow = row({ id: memoryId, kind: "confirmed", status: "active", source_turn_ids: [originTurnId] });
     for (const assistantTurn of [documentlessTurn, mixedTurn]) {
       const input = backup([originTurn, assistantTurn]);
       input.tables.opening_memories = [memoryRow];
@@ -134,6 +134,46 @@ describe("context provenance at the backup boundary", () => {
       }).ok).toBe(true);
       expect(input).toEqual(before);
     }
+  });
+
+  it.each([
+    { label: "missing", ancestor: null },
+    { label: "revoked", ancestor: { kind: "confirmed", status: "revoked" } },
+    { label: "superseded", ancestor: { kind: "confirmed", status: "superseded" } },
+    { label: "rejected", ancestor: { kind: "confirmed", status: "rejected" } },
+    { label: "candidate", ancestor: { kind: "candidate", status: "active" } },
+    { label: "expired", ancestor: { kind: "temporary", status: "active", expires_at: "2000-01-01T00:00:00Z" } },
+    { label: "unexpired", ancestor: { kind: "temporary", status: "active", expires_at: "2099-01-01T00:00:00Z" } },
+  ])("checks $label ancestors through both edges of the backup graph", ({ label, ancestor }) => {
+    const originalId = "aaaaaaaa-0000-4000-8000-000000000001";
+    const ancestorId = "aaaaaaaa-0000-4000-8000-000000000002";
+    const intermediateTurnId = "aaaaaaaa-0000-4000-8000-000000000003";
+    const intermediateMemoryId = "aaaaaaaa-0000-4000-8000-000000000004";
+    const input = backup([
+      turn({ id: originalId, role: "user" }),
+      turn({ id: intermediateTurnId, context_source_refs: [{ memoryDependencyIds: [ancestorId.toUpperCase()] }] }),
+      turn({ context_source_refs: [{ memoryDependencyIds: [intermediateMemoryId.toUpperCase()] }] }),
+    ]);
+    input.tables.opening_memories = [
+      row({ id: intermediateMemoryId, kind: "confirmed", status: "active", source_turn_ids: [intermediateTurnId.toUpperCase()] }),
+      row({ id: candidateId, kind: "candidate", status: "active", source_turn_ids: [turnId] }),
+      ...(ancestor ? [row({ id: ancestorId, source_turn_ids: [originalId.toUpperCase()], ...ancestor })] : []),
+    ];
+    const result = validateOpeningRestore(input, [], currentMemoryDeletions);
+    expect(result.allowed).toBe(label === "unexpired");
+    if (label !== "unexpired") expect(result.errors).toContain("memory source turn has an unavailable memory dependency");
+  });
+
+  it("propagates an unavailable dependency through a cycle", () => {
+    const cycleId = "aaaaaaaa-0000-4000-8000-000000000005";
+    const input = backup([
+      turn({ context_source_refs: [{ memoryDependencyIds: [cycleId.toUpperCase(), candidateId] }] }),
+    ]);
+    input.tables.opening_memories = [
+      row({ id: cycleId, kind: "confirmed", status: "active", source_turn_ids: [turnId] }),
+    ];
+    expect(validateOpeningRestore(input, [], currentMemoryDeletions).errors)
+      .toContain("memory source turn has an unavailable memory dependency");
   });
 
   it.each([

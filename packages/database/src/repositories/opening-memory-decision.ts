@@ -1,7 +1,7 @@
 import type { Sql } from "postgres";
 import type { MemoryItem } from "@aistudy/contracts";
 import type { OpeningScope } from "./opening-sources";
-import { lockOwnedWorkspace } from "./opening-memory-admission";
+import { lockOwnedWorkspace, turnSourceMaterialsActive } from "./opening-memory-admission";
 import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { OpeningMemoryError, mapMemoryRow } from "./opening-memory-types";
 import { advanceOpeningWorkspacePrivacyEpoch, withOpeningTutorStreamFenceCommit } from "./opening-tutor-stream-fence";
@@ -107,80 +107,7 @@ export function confirmOwnedMemory(
                 AND t.workspace_id = ${scope.workspaceId}
                 AND c.workspace_id = ${scope.workspaceId}
                 AND c.owner_user_id = ${scope.ownerUserId}
-            )
-            OR EXISTS (
-              SELECT 1 FROM opening_turns t
-              WHERE t.id::text = lower(ref.turn_id)
-                AND t.workspace_id = ${scope.workspaceId}
-                AND (
-                  EXISTS (
-                    SELECT 1 FROM unnest(t.source_ids) AS sid(id)
-                    WHERE NOT EXISTS (
-                      SELECT 1 FROM opening_sources s
-                      WHERE s.id = sid.id AND s.workspace_id = ${scope.workspaceId} AND s.upload_state = 'uploaded'
-                    )
-                    OR EXISTS (
-                      SELECT 1 FROM opening_privacy_exclusions e
-                      WHERE e.workspace_id = ${scope.workspaceId} AND e.source_id = sid.id
-                    )
-                  )
-                  OR EXISTS (
-                    SELECT 1 FROM jsonb_array_elements(
-                      CASE WHEN jsonb_typeof(t.citations) = 'array' THEN t.citations ELSE '[]'::jsonb END
-                    ) AS citation
-                    WHERE NOT EXISTS (
-                      SELECT 1 FROM opening_sources s
-                      WHERE s.id::text = lower(citation->>'sourceId')
-                        AND s.workspace_id = ${scope.workspaceId}
-                        AND s.upload_state = 'uploaded'
-                        AND s.version::text = citation->>'sourceVersion'
-                        AND NOT EXISTS (
-                          SELECT 1 FROM opening_source_versions sv
-                          WHERE sv.workspace_id = ${scope.workspaceId}
-                            AND sv.source_id = s.id
-                            AND sv.version::text = citation->>'sourceVersion'
-                            AND sv.availability = 'unavailable'
-                        )
-                    )
-                    OR EXISTS (
-                      SELECT 1 FROM opening_privacy_exclusions e
-                      WHERE e.workspace_id = ${scope.workspaceId} AND e.source_id::text = lower(citation->>'sourceId')
-                    )
-                  )
-                  OR (
-                    t.role = 'assistant' AND t.context_source_refs IS NOT NULL AND (
-                      jsonb_typeof(t.context_source_refs) IS DISTINCT FROM 'array'
-                      OR EXISTS (
-                        SELECT 1 FROM jsonb_array_elements(
-                          CASE WHEN jsonb_typeof(t.context_source_refs) = 'array' THEN t.context_source_refs ELSE '[]'::jsonb END
-                        ) AS ctx_ref
-                        WHERE NOT (
-                          ctx_ref = jsonb_build_object('memoryDependencyIds', ctx_ref->'memoryDependencyIds')
-                          AND jsonb_typeof(ctx_ref->'memoryDependencyIds') = 'array'
-                          AND jsonb_array_length(ctx_ref->'memoryDependencyIds') > 0
-                        )
-                        AND NOT EXISTS (
-                          SELECT 1 FROM opening_sources s
-                          WHERE s.id::text = lower(ctx_ref->>'sourceId')
-                            AND s.workspace_id = ${scope.workspaceId}
-                            AND s.upload_state = 'uploaded'
-                            AND s.version::text = ctx_ref->>'sourceVersion'
-                            AND NOT EXISTS (
-                              SELECT 1 FROM opening_source_versions sv
-                              WHERE sv.workspace_id = ${scope.workspaceId}
-                                AND sv.source_id = s.id
-                                AND sv.version::text = ctx_ref->>'sourceVersion'
-                                AND sv.availability = 'unavailable'
-                            )
-                            AND NOT EXISTS (
-                              SELECT 1 FROM opening_privacy_exclusions e
-                              WHERE e.workspace_id = ${scope.workspaceId} AND e.source_id = s.id
-                            )
-                        )
-                      )
-                    )
-                  )
-                )
+                AND ${turnSourceMaterialsActive(tx, scope.workspaceId)}
             )
           )
           AND NOT EXISTS (

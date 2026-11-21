@@ -241,6 +241,10 @@ export function memoryTransitiveDependenciesActive(db: Db, alias: "" | "m" = "m"
   )`;
 }
 
+function lineageUuid(db: Db, value: Fragment): Fragment {
+  return db`CASE WHEN ${value} ~* ${UUID.source} THEN ${value}::uuid END`;
+}
+
 /** Cycle-safe recursive CTE walking a turn's context_source_refs memoryDependencyIds -> ancestor memories. */
 export function turnTransitiveDepsCte(db: Db, alias: "a" | "t"): Fragment {
   const contextRefs = alias === "a" ? db`a.context_source_refs` : db`t.context_source_refs`;
@@ -258,11 +262,11 @@ export function turnTransitiveDepsCte(db: Db, alias: "a" | "t"): Fragment {
     UNION
     SELECT lower(dep.id)
     FROM mem_deps prev
-    JOIN opening_memories pm ON pm.id::text = prev.dep_id AND pm.workspace_id = ${workspaceId}
+    JOIN opening_memories pm ON pm.id = ${lineageUuid(db, db`prev.dep_id`)} AND pm.workspace_id = ${workspaceId}
     CROSS JOIN LATERAL jsonb_array_elements_text(
       CASE WHEN jsonb_typeof(pm.source_turn_ids) = 'array' THEN pm.source_turn_ids ELSE '[]'::jsonb END
     ) AS st(turn_id)
-    JOIN opening_turns dt ON dt.id::text = lower(st.turn_id) AND dt.workspace_id = ${workspaceId}
+    JOIN opening_turns dt ON dt.id = ${lineageUuid(db, db`st.turn_id`)} AND dt.workspace_id = ${workspaceId}
     CROSS JOIN LATERAL jsonb_array_elements(
       CASE WHEN jsonb_typeof(dt.context_source_refs) = 'array' THEN dt.context_source_refs ELSE '[]'::jsonb END
     ) AS dep_elem
@@ -276,42 +280,15 @@ export function turnTransitiveDepsCte(db: Db, alias: "a" | "t"): Fragment {
 
 /** TRUE iff every transitive global memory referenced by a turn's memoryDependencyIds is active and unexpired. */
 export function turnTransitiveDependenciesActive(db: Db, alias: "a" | "t"): Fragment {
-  const contextRefs = alias === "a" ? db`a.context_source_refs` : db`t.context_source_refs`;
   const workspaceId = alias === "a" ? db`a.workspace_id` : db`t.workspace_id`;
   return db`NOT EXISTS (
-    WITH RECURSIVE mem_deps(dep_id) AS (
-      SELECT lower(dep.id)
-      FROM jsonb_array_elements(
-        CASE WHEN jsonb_typeof(${contextRefs}) = 'array' THEN ${contextRefs} ELSE '[]'::jsonb END
-      ) AS dep_elem
-      CROSS JOIN LATERAL jsonb_array_elements_text(
-        CASE WHEN dep_elem = jsonb_build_object('memoryDependencyIds', dep_elem->'memoryDependencyIds')
-          AND jsonb_typeof(dep_elem->'memoryDependencyIds') = 'array'
-          THEN dep_elem->'memoryDependencyIds' ELSE '[]'::jsonb END
-      ) AS dep(id)
-      UNION
-      SELECT lower(dep.id)
-      FROM mem_deps prev
-      JOIN opening_memories pm ON pm.id::text = prev.dep_id AND pm.workspace_id = ${workspaceId}
-      CROSS JOIN LATERAL jsonb_array_elements_text(
-        CASE WHEN jsonb_typeof(pm.source_turn_ids) = 'array' THEN pm.source_turn_ids ELSE '[]'::jsonb END
-      ) AS st(turn_id)
-      JOIN opening_turns dt ON dt.id::text = lower(st.turn_id) AND dt.workspace_id = ${workspaceId}
-      CROSS JOIN LATERAL jsonb_array_elements(
-        CASE WHEN jsonb_typeof(dt.context_source_refs) = 'array' THEN dt.context_source_refs ELSE '[]'::jsonb END
-      ) AS dep_elem
-      CROSS JOIN LATERAL jsonb_array_elements_text(
-        CASE WHEN dep_elem = jsonb_build_object('memoryDependencyIds', dep_elem->'memoryDependencyIds')
-          AND jsonb_typeof(dep_elem->'memoryDependencyIds') = 'array'
-          THEN dep_elem->'memoryDependencyIds' ELSE '[]'::jsonb END
-      ) AS dep(id)
-    )
+    ${turnTransitiveDepsCte(db, alias)}
     SELECT 1
     FROM mem_deps d
     WHERE NOT EXISTS (
       SELECT 1
       FROM opening_memories m
-      WHERE m.id::text = d.dep_id
+      WHERE m.id = ${lineageUuid(db, db`d.dep_id`)}
         AND m.workspace_id = ${workspaceId}
         AND m.status = 'active'
         AND m.course_id IS NULL

@@ -9,8 +9,9 @@ const memoryId = randomUUID();
 const nextMemoryId = randomUUID();
 const sourceTurnId = randomUUID();
 
-function sqlStub(reusedKey = false) {
+function sqlStub(reusedKey = false, admitSources = true) {
   const calls: string[] = [];
+  const admissionBindings: unknown[] = [];
   let inserted = false;
   const corrected = {
     id: nextMemoryId,
@@ -26,13 +27,18 @@ function sqlStub(reusedKey = false) {
     updated_at: new Date("2026-10-02T00:00:00Z"),
   };
   const tx = Object.assign(
-    async (strings: TemplateStringsArray) => {
+    async (strings: TemplateStringsArray, ...values: unknown[]) => {
       const text = strings.join(" ").replace(/\s+/g, " ").trim();
       calls.push(text);
       if (text.includes("FROM workspaces")) return [{ id: workspaceId }];
+      if (text.includes("opening_workspace_history_revisions")) return [];
+      if (text.startsWith("NOT (") && text.includes("opening_privacy_exclusions")) return [];
       if (text.startsWith("UPDATE workspaces SET privacy_epoch")) return [{ id: workspaceId, privacy_epoch: 1 }];
       if (text.startsWith("UPDATE opening_tutor_jobs j SET timing_execution_id = NULL")) return [];
-      if (text.includes("SELECT t.id FROM opening_turns")) return [{ id: sourceTurnId }];
+      if (text.includes("SELECT t.id FROM opening_turns")) {
+        admissionBindings.push(...values);
+        return admitSources ? [{ id: sourceTurnId }] : [];
+      }
       if (text.startsWith("UPDATE opening_memories")) return [{ id: memoryId }];
       if (text.includes("INSERT INTO opening_memories")) {
         inserted = true;
@@ -75,19 +81,40 @@ function sqlStub(reusedKey = false) {
     { json: (value: unknown) => value },
   );
   const begin = vi.fn(async (run: (inner: TransactionSql) => Promise<unknown>) => run(tx as never));
-  return { sql: Object.assign(tx, { begin, json: tx.json }), calls, begin };
+  return { sql: Object.assign(tx, { begin, json: tx.json }), calls, begin, admissionBindings };
 }
 
 describe("replaceOwnedMemory", () => {
-  it("requires at least one source turn for the corrected confirmed fact", async () => {
+  it.each([[], undefined])("requires an explicit non-empty source for the corrected fact (%j)", (sourceTurnIds) => {
     const { sql } = sqlStub();
     expect(() => replaceOwnedMemory(sql as never, { workspaceId, ownerUserId }, {
       id: memoryId,
       expectedVersion: 2,
       text: "先看定义",
-      sourceTurnIds: [],
+      sourceTurnIds: sourceTurnIds as string[],
       clientKey: "memory-replace-empty-source",
     })).toThrow(expect.objectContaining({ code: "VALIDATION" }));
+  });
+
+  it("validates source ancestry under the history lock and excludes the superseded memory", async () => {
+    const { sql, calls, admissionBindings } = sqlStub(false, false);
+    await expect(replaceOwnedMemory(sql as never, { workspaceId, ownerUserId }, {
+      id: memoryId,
+      expectedVersion: 2,
+      text: "先看定义",
+      sourceTurnIds: [sourceTurnId.toUpperCase()],
+      clientKey: "memory-replace-self-dependency",
+    })).rejects.toMatchObject({ code: "VALIDATION" });
+
+    const history = calls.findIndex(query => query.startsWith("SELECT revision"));
+    const workspace = calls.findIndex(query => query.includes("FROM workspaces") && query.includes("FOR UPDATE"));
+    const admission = calls.findIndex(query => query.startsWith("SELECT t.id FROM opening_turns"));
+    expect(history).toBeGreaterThanOrEqual(0);
+    expect(workspace).toBeGreaterThan(history);
+    expect(admission).toBeGreaterThan(workspace);
+    expect(admissionBindings).toContain(memoryId);
+    expect(admissionBindings).toContainEqual([sourceTurnId]);
+    expect(calls.some(query => /^(UPDATE|INSERT INTO) opening_memories/.test(query))).toBe(false);
   });
 
   it("replays the corrected version for the same client key", async () => {
