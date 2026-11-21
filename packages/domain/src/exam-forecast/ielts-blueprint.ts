@@ -1,0 +1,404 @@
+import type {
+  ExamBlueprintV1,
+  ExamItemSpec,
+  ExamSectionBlueprint,
+  RawToScoreBand,
+} from "./types";
+
+export const IELTS_LISTENING_RAW_TO_BAND: readonly RawToScoreBand[] = [
+  { rawMin: 0, rawMax: 0, score: 0.0 },
+  { rawMin: 1, rawMax: 1, score: 1.0 },
+  { rawMin: 2, rawMax: 3, score: 2.0 },
+  { rawMin: 4, rawMax: 5, score: 2.5 },
+  { rawMin: 6, rawMax: 7, score: 3.0 },
+  { rawMin: 8, rawMax: 9, score: 3.5 },
+  { rawMin: 10, rawMax: 12, score: 4.0 },
+  { rawMin: 13, rawMax: 15, score: 4.5 },
+  { rawMin: 16, rawMax: 17, score: 5.0 },
+  { rawMin: 18, rawMax: 22, score: 5.5 },
+  { rawMin: 23, rawMax: 25, score: 6.0 },
+  { rawMin: 26, rawMax: 29, score: 6.5 },
+  { rawMin: 30, rawMax: 31, score: 7.0 },
+  { rawMin: 32, rawMax: 34, score: 7.5 },
+  { rawMin: 35, rawMax: 36, score: 8.0 },
+  { rawMin: 37, rawMax: 38, score: 8.5 },
+  { rawMin: 39, rawMax: 40, score: 9.0 },
+];
+
+export const IELTS_ACADEMIC_READING_RAW_TO_BAND: readonly RawToScoreBand[] = [
+  { rawMin: 0, rawMax: 0, score: 0.0 },
+  { rawMin: 1, rawMax: 1, score: 1.0 },
+  { rawMin: 2, rawMax: 3, score: 2.0 },
+  { rawMin: 4, rawMax: 5, score: 2.5 },
+  { rawMin: 6, rawMax: 7, score: 3.0 },
+  { rawMin: 8, rawMax: 9, score: 3.5 },
+  { rawMin: 10, rawMax: 12, score: 4.0 },
+  { rawMin: 13, rawMax: 14, score: 4.5 },
+  { rawMin: 15, rawMax: 18, score: 5.0 },
+  { rawMin: 19, rawMax: 22, score: 5.5 },
+  { rawMin: 23, rawMax: 26, score: 6.0 },
+  { rawMin: 27, rawMax: 29, score: 6.5 },
+  { rawMin: 30, rawMax: 32, score: 7.0 },
+  { rawMin: 33, rawMax: 34, score: 7.5 },
+  { rawMin: 35, rawMax: 36, score: 8.0 },
+  { rawMin: 37, rawMax: 38, score: 8.5 },
+  { rawMin: 39, rawMax: 40, score: 9.0 },
+];
+
+/** Official IELTS overall rounding: continuous 4-section mean rounded half-up to nearest 0.5 in [0, 9]. */
+export function roundHalfUp05(score: number): number {
+  if (!Number.isFinite(score)) return 0;
+  const clamped = Math.min(9, Math.max(0, score));
+  return Math.floor(clamped * 2 + 0.5) / 2;
+}
+
+export function snapToScoreGrid(
+  value: number,
+  range: readonly [number, number],
+  step: number,
+  direction: "nearest" | "floor" | "ceil",
+): number {
+  const safeStep = Number.isFinite(step) && step > 0 ? step : 0.5;
+  const [minScore, maxScore] = range;
+  if (!Number.isFinite(value)) return minScore;
+  const units = value / safeStep;
+  const snappedUnits =
+    direction === "floor"
+      ? Math.floor(units + 1e-12)
+      : direction === "ceil"
+        ? Math.ceil(units - 1e-12)
+        : Math.floor(units + 0.5);
+  const clamped = Math.min(maxScore, Math.max(minScore, snappedUnits * safeStep));
+  return Math.round(clamped * 1_000_000) / 1_000_000;
+}
+
+export function computeWritingBand(
+  task1Band: number,
+  task2Band: number,
+  options: { readonly roundSection?: boolean } = {},
+): number {
+  const continuous = (task1Band + 2 * task2Band) / 3;
+  return options.roundSection ? roundHalfUp05(continuous) : continuous;
+}
+
+export function computeIeltsOverallBand(sections: {
+  readonly listening: number;
+  readonly reading: number;
+  readonly writing: number;
+  readonly speaking: number;
+}): number {
+  const continuousMean =
+    (sections.listening + sections.reading + sections.writing + sections.speaking) / 4;
+  return roundHalfUp05(continuousMean);
+}
+
+export function rawScoreToBand(rawScore: number, table: readonly RawToScoreBand[]): number {
+  if (!Number.isFinite(rawScore) || table.length === 0) return 0;
+  const rounded = Math.round(rawScore);
+  for (const band of table) {
+    if (rounded >= band.rawMin && rounded <= band.rawMax) return band.score;
+  }
+  const first = table[0];
+  const last = table[table.length - 1];
+  if (first && rounded < first.rawMin) return first.score;
+  return last ? last.score : 0;
+}
+
+export const IELTS_ACADEMIC_SKILL_IDS = [
+  "ielts.listening.detail",
+  "ielts.listening.distractor",
+  "ielts.listening.academic_monologue",
+  "ielts.reading.tfng",
+  "ielts.reading.heading",
+  "ielts.reading.inference",
+  "ielts.reading.pacing",
+  "ielts.writing.task1_overview",
+  "ielts.writing.task2_argument",
+  "ielts.writing.cohesion_lexis",
+  "ielts.speaking.fluency_structure",
+  "ielts.speaking.abstract_extension",
+] as const;
+
+const SKILL_SECTION_GROUP: readonly number[] = [0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 3, 3];
+
+const IELTS_THETA_COVARIANCE: readonly (readonly number[])[] = IELTS_ACADEMIC_SKILL_IDS.map((_, i) =>
+  IELTS_ACADEMIC_SKILL_IDS.map((__, j) => {
+    if (i === j) return 1;
+    const sameSection = SKILL_SECTION_GROUP[i] === SKILL_SECTION_GROUP[j];
+    const receptivePair = (SKILL_SECTION_GROUP[i]! <= 1 && SKILL_SECTION_GROUP[j]! <= 1);
+    return sameSection ? 0.55 : receptivePair ? 0.35 : 0.25;
+  }),
+);
+
+function buildListeningItems(): ExamItemSpec[] {
+  const partConfigs = [
+    { partId: "listening-part-1", count: 10, skills: ["ielts.listening.detail", "ielts.listening.distractor"], mu: Math.log(38), g: 0.1, l: 0.03 },
+    { partId: "listening-part-2", count: 10, skills: ["ielts.listening.detail", "ielts.listening.distractor"], mu: Math.log(40), g: 0.15, l: 0.04 },
+    { partId: "listening-part-3", count: 10, skills: ["ielts.listening.distractor", "ielts.listening.academic_monologue"], mu: Math.log(43), g: 0.2, l: 0.05 },
+    { partId: "listening-part-4", count: 10, skills: ["ielts.listening.academic_monologue"], mu: Math.log(45), g: 0.1, l: 0.05 },
+  ] as const;
+  const items: ExamItemSpec[] = [];
+  let seq = 1;
+  for (const part of partConfigs) {
+    for (let idx = 0; idx < part.count; idx++) {
+      const skillLoading: Record<string, number> = {};
+      for (const skillId of part.skills) skillLoading[skillId] = 0.15;
+      items.push({
+        itemId: `ielts-l-${seq++}`,
+        sectionId: "listening",
+        partId: part.partId,
+        skillIds: part.skills,
+        guess: part.g,
+        lapse: part.l,
+        points: 1,
+        timeModel: { mu: part.mu, speedLoading: 0.12, skillLoading, sigma: 0.14 },
+      });
+    }
+  }
+  return items;
+}
+
+function buildReadingItems(): ExamItemSpec[] {
+  const passageConfigs = [
+    { partId: "reading-passage-1", count: 13, skills: ["ielts.reading.tfng", "ielts.reading.pacing"], mu: Math.log(90), g: 0.2, l: 0.04, speedLoading: 0.3, load: 0.42 },
+    { partId: "reading-passage-2", count: 13, skills: ["ielts.reading.heading", "ielts.reading.pacing"], mu: Math.log(112), g: 0.18, l: 0.05, speedLoading: 0.35, load: 0.45 },
+    { partId: "reading-passage-3", count: 14, skills: ["ielts.reading.inference", "ielts.reading.pacing"], mu: Math.log(138), g: 0.2, l: 0.06, speedLoading: 0.4, load: 0.48 },
+  ] as const;
+  const items: ExamItemSpec[] = [];
+  let seq = 1;
+  for (const passage of passageConfigs) {
+    for (let idx = 0; idx < passage.count; idx++) {
+      const skillLoading: Record<string, number> = {};
+      for (const skillId of passage.skills) skillLoading[skillId] = passage.load / passage.skills.length;
+      items.push({
+        itemId: `ielts-r-${seq++}`,
+        sectionId: "reading",
+        partId: passage.partId,
+        skillIds: passage.skills,
+        guess: passage.g,
+        lapse: passage.l,
+        points: 1,
+        timeModel: { mu: passage.mu, speedLoading: passage.speedLoading, skillLoading, sigma: 0.22 },
+      });
+    }
+  }
+  return items;
+}
+
+export const IELTS_ACADEMIC_V1_BLUEPRINT: ExamBlueprintV1 = {
+  schemaVersion: 1,
+  blueprintId: "ielts-academic-v1",
+  title: "IELTS Academic (4-Section Timed Blueprint)",
+  clockMode: "section_independent",
+  totalTimeLimitMinutes: null,
+  aggregationMode: "ielts_overall_half_up",
+  scoreRange: [0, 9],
+  scoreStep: 0.5,
+  skillIds: IELTS_ACADEMIC_SKILL_IDS,
+  thetaCovariance: IELTS_THETA_COVARIANCE,
+  sections: [
+    {
+      sectionId: "listening",
+      label: "Listening",
+      scoringKind: "item_raw_table",
+      timeLimitMinutes: 30,
+      weight: 0.25,
+      scoreRange: [0, 9],
+      scoreStep: 0.5,
+      parts: [
+        { partId: "listening-part-1", label: "Part 1", weight: 0.25, targetItemCount: 10, skillIds: ["ielts.listening.detail", "ielts.listening.distractor"] },
+        { partId: "listening-part-2", label: "Part 2", weight: 0.25, targetItemCount: 10, skillIds: ["ielts.listening.detail", "ielts.listening.distractor"] },
+        { partId: "listening-part-3", label: "Part 3", weight: 0.25, targetItemCount: 10, skillIds: ["ielts.listening.distractor", "ielts.listening.academic_monologue"] },
+        { partId: "listening-part-4", label: "Part 4", weight: 0.25, targetItemCount: 10, skillIds: ["ielts.listening.academic_monologue"] },
+      ],
+      items: buildListeningItems(),
+      rawToBandTable: IELTS_LISTENING_RAW_TO_BAND,
+    },
+    {
+      sectionId: "reading",
+      label: "Academic Reading",
+      scoringKind: "item_raw_table",
+      timeLimitMinutes: 60,
+      weight: 0.25,
+      scoreRange: [0, 9],
+      scoreStep: 0.5,
+      parts: [
+        { partId: "reading-passage-1", label: "Passage 1", weight: 13 / 40, targetItemCount: 13, skillIds: ["ielts.reading.tfng", "ielts.reading.pacing"] },
+        { partId: "reading-passage-2", label: "Passage 2", weight: 13 / 40, targetItemCount: 13, skillIds: ["ielts.reading.heading", "ielts.reading.pacing"] },
+        { partId: "reading-passage-3", label: "Passage 3", weight: 14 / 40, targetItemCount: 14, skillIds: ["ielts.reading.inference", "ielts.reading.pacing"] },
+      ],
+      items: buildReadingItems(),
+      rawToBandTable: IELTS_ACADEMIC_READING_RAW_TO_BAND,
+    },
+    {
+      sectionId: "writing",
+      label: "Academic Writing",
+      scoringKind: "rubric_band",
+      timeLimitMinutes: 60,
+      weight: 0.25,
+      scoreRange: [0, 9],
+      scoreStep: 0.5,
+      parts: [
+        {
+          partId: "writing-task-1",
+          label: "Task 1 (1/3)",
+          weight: 1 / 3,
+          skillIds: ["ielts.writing.task1_overview", "ielts.writing.cohesion_lexis"],
+          timeModel: { mu: Math.log(1150), speedLoading: 0.2, skillLoading: { "ielts.writing.task1_overview": 0.2 }, sigma: 0.15 },
+        },
+        {
+          partId: "writing-task-2",
+          label: "Task 2 (2/3)",
+          weight: 2 / 3,
+          skillIds: ["ielts.writing.task2_argument", "ielts.writing.cohesion_lexis"],
+          timeModel: { mu: Math.log(2350), speedLoading: 0.25, skillLoading: { "ielts.writing.task2_argument": 0.25 }, sigma: 0.16 },
+        },
+      ],
+    },
+    {
+      sectionId: "speaking",
+      label: "Speaking",
+      scoringKind: "rubric_band",
+      timeLimitMinutes: 14,
+      timeWindowMinutes: [11, 14],
+      weight: 0.25,
+      scoreRange: [0, 9],
+      scoreStep: 0.5,
+      parts: [
+        { partId: "speaking-part-1", label: "Part 1", weight: 0.25, skillIds: ["ielts.speaking.fluency_structure"] },
+        { partId: "speaking-part-2", label: "Part 2", weight: 0.35, skillIds: ["ielts.speaking.fluency_structure"] },
+        { partId: "speaking-part-3", label: "Part 3", weight: 0.4, skillIds: ["ielts.speaking.fluency_structure", "ielts.speaking.abstract_extension"] },
+      ],
+    },
+  ],
+};
+
+function hasCompleteRawTable(section: ExamSectionBlueprint): boolean {
+  const table = section.rawToBandTable;
+  const items = section.items;
+  if (!table || table.length === 0 || !items || items.length === 0) return false;
+  const maxRaw = items.reduce((sum, item) => sum + (item.points ?? 1), 0);
+  for (let raw = 0; raw <= maxRaw; raw++) {
+    if (!table.some((row) => raw >= row.rawMin && raw <= row.rawMax)) return false;
+  }
+  return true;
+}
+
+/** Cholesky factor L such that L * L^T ≈ matrix. Rejects asymmetric or non-PSD matrices. */
+export function choleskyDecompose(matrix: readonly (readonly number[])[]): number[][] {
+  const n = matrix.length;
+  const lower: number[][] = Array.from({ length: n }, () => Array<number>(n).fill(0));
+  for (let i = 0; i < n; i++) {
+    const row = matrix[i];
+    if (!row || row.length !== n) throw new RangeError("thetaCovariance must be square");
+    for (let j = 0; j <= i; j++) {
+      const entry = row[j];
+      const mirror = matrix[j]?.[i];
+      if (entry === undefined || mirror === undefined || !Number.isFinite(entry) || Math.abs(entry - mirror) > 1e-8) {
+        throw new RangeError("thetaCovariance must be finite and symmetric");
+      }
+      let sum = entry;
+      for (let k = 0; k < j; k++) sum -= lower[i]![k]! * lower[j]![k]!;
+      if (i === j) {
+        if (sum < -1e-6) throw new RangeError("thetaCovariance must be positive semidefinite");
+        lower[i]![j] = sum > 0 ? Math.sqrt(sum) : 0;
+      } else {
+        const diag = lower[j]![j]!;
+        lower[i]![j] = diag > 1e-12 ? sum / diag : 0;
+      }
+    }
+  }
+  return lower;
+}
+
+function isSymmetricPsdMatrix(matrix: readonly (readonly number[])[]): boolean {
+  try {
+    choleskyDecompose(matrix);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function validateExamBlueprint(blueprint: ExamBlueprintV1): string[] {
+  const missing: string[] = [];
+  if (blueprint.schemaVersion !== 1 || !blueprint.blueprintId.trim()) missing.push("blueprintId");
+  if (!Number.isFinite(blueprint.scoreStep) || blueprint.scoreStep <= 0) missing.push("scoreStep");
+  if (blueprint.skillIds.length === 0) missing.push("skillIds");
+  if (blueprint.sections.length === 0) missing.push("sections");
+  if (blueprint.clockMode === "shared_full_paper") {
+    if (blueprint.totalTimeLimitMinutes == null || !Number.isFinite(blueprint.totalTimeLimitMinutes) || blueprint.totalTimeLimitMinutes <= 0) {
+      missing.push("totalTimeLimitMinutes");
+    }
+  }
+  const nSkills = blueprint.skillIds.length;
+  if (
+    blueprint.thetaCovariance.length !== nSkills ||
+    blueprint.thetaCovariance.some((row) => row.length !== nSkills) ||
+    !isSymmetricPsdMatrix(blueprint.thetaCovariance)
+  ) {
+    missing.push("thetaCovariance");
+  }
+  const skillSet = new Set(blueprint.skillIds);
+  for (const section of blueprint.sections) {
+    if (blueprint.clockMode === "section_independent") {
+      if (section.timeLimitMinutes == null || !Number.isFinite(section.timeLimitMinutes) || section.timeLimitMinutes <= 0) {
+        missing.push(`sections.${section.sectionId}.timeLimitMinutes`);
+      }
+    }
+    if (section.parts.length === 0) missing.push(`sections.${section.sectionId}.parts`);
+    if (section.scoringKind === "item_raw_table") {
+      if (!section.items || section.items.length === 0) {
+        missing.push(`sections.${section.sectionId}.items`);
+      } else {
+        for (const item of section.items) {
+          if (item.skillIds.length === 0 || item.skillIds.some((id) => !skillSet.has(id))) {
+            missing.push(`sections.${section.sectionId}.items.${item.itemId}.qMatrix`);
+            break;
+          }
+          if (!(item.guess >= 0 && item.guess < 1 && item.lapse >= 0 && item.guess + item.lapse < 1)) {
+            missing.push(`sections.${section.sectionId}.items.${item.itemId}.guessLapse`);
+            break;
+          }
+          if (!(item.timeModel.sigma > 0 && Number.isFinite(item.timeModel.mu))) {
+            missing.push(`sections.${section.sectionId}.items.${item.itemId}.timeModel`);
+            break;
+          }
+        }
+      }
+      if (!hasCompleteRawTable(section)) {
+        missing.push(`sections.${section.sectionId}.rawToBandTable`);
+      }
+    }
+  }
+  return missing;
+}
+
+/** Factory for shared full-paper 180-min / 150-pt blueprints (e.g. Math or CS 408). */
+export function createSharedFullPaperBlueprint(input: {
+  readonly blueprintId: string;
+  readonly title: string;
+  readonly totalTimeLimitMinutes: number;
+  readonly totalPoints: number;
+  readonly skillIds: readonly string[];
+  readonly sections: readonly ExamSectionBlueprint[];
+  readonly thetaCovariance?: readonly (readonly number[])[];
+}): ExamBlueprintV1 {
+  const n = input.skillIds.length;
+  const cov =
+    input.thetaCovariance ??
+    Array.from({ length: n }, (_, i) => Array.from({ length: n }, (__, j) => (i === j ? 1 : 0.3)));
+  return {
+    schemaVersion: 1,
+    blueprintId: input.blueprintId,
+    title: input.title,
+    clockMode: "shared_full_paper",
+    totalTimeLimitMinutes: input.totalTimeLimitMinutes,
+    aggregationMode: "weighted_sum",
+    scoreRange: [0, input.totalPoints],
+    scoreStep: 1,
+    skillIds: input.skillIds,
+    thetaCovariance: cov,
+    sections: input.sections,
+  };
+}
