@@ -5,6 +5,7 @@ import {
   COMPANION_PAIRING_TTL_MS,
   COMPANION_USER_CODE_ALPHABET,
   MAX_SCRATCHPAD_PAGE_BYTES,
+  canonicalizeIdentifier,
   type AppendCompanionScratchpadPageInput,
   type AppendCompanionScratchpadPageResult,
   type AuthorizeCompanionActionInput,
@@ -601,10 +602,10 @@ export function createCompanionPairingOffer(
 
   const offer: CompanionPairingOffer = {
     schemaVersion: 1,
-    offerId: input.offerId.trim(),
-    workspaceId: input.workspaceId.trim(),
-    learnerId: input.learnerId.trim(),
-    attemptId: input.attemptId.trim(),
+    offerId: canonicalizeIdentifier(input.offerId),
+    workspaceId: canonicalizeIdentifier(input.workspaceId),
+    learnerId: canonicalizeIdentifier(input.learnerId),
+    attemptId: canonicalizeIdentifier(input.attemptId),
     primaryOrigin: normalizedPrimaryOrigin,
     allowedCompanionOrigin: normalizedCompanionOrigin,
     userCode: normalizedUserCode,
@@ -746,7 +747,7 @@ export function redeemCompanionPairingOffer(
       ? Math.min(rawSessionTtl, MAX_COMPANION_SESSION_TTL_MS)
       : DEFAULT_COMPANION_SESSION_TTL_MS;
 
-  const sessionId = input.sessionId.trim();
+  const sessionId = canonicalizeIdentifier(input.sessionId);
   const redeemedOffer: CompanionPairingOffer = {
     ...offer,
     status: "redeemed",
@@ -842,7 +843,7 @@ export function authorizeCompanionAction(
     };
   }
 
-  if (attemptId !== session.scopedAttemptId) {
+  if (canonicalizeIdentifier(attemptId) !== canonicalizeIdentifier(session.scopedAttemptId)) {
     return {
       allowed: false,
       httpStatus: 403,
@@ -879,9 +880,9 @@ export function createCompanionScratchpadDraft(input: {
 }): CompanionScratchpadState {
   return {
     schemaVersion: 1,
-    workspaceId: input.workspaceId,
-    learnerId: input.learnerId,
-    attemptId: input.attemptId,
+    workspaceId: canonicalizeIdentifier(input.workspaceId),
+    learnerId: canonicalizeIdentifier(input.learnerId),
+    attemptId: canonicalizeIdentifier(input.attemptId),
     draftRevision: 0,
     frozen: false,
     frozenAtMs: null,
@@ -928,8 +929,8 @@ export function appendCompanionScratchpadPage(
   }
 
   if (
-    input.session.workspaceId !== state.workspaceId ||
-    input.session.learnerId !== state.learnerId
+    canonicalizeIdentifier(input.session.workspaceId) !== canonicalizeIdentifier(state.workspaceId) ||
+    canonicalizeIdentifier(input.session.learnerId) !== canonicalizeIdentifier(state.learnerId)
   ) {
     return {
       ok: false,

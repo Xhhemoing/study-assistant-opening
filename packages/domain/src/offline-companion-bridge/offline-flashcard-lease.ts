@@ -3,6 +3,7 @@ import {
   FORBIDDEN_MISS_VARIANT_FIELDS,
   MAX_OFFLINE_LEASE_CARDS,
   OFFLINE_LEASE_TTL_MS,
+  canonicalizeIdentifier,
   type IssueOfflineFlashcardLeaseInput,
   type IssueOfflineFlashcardLeaseResult,
   type OfflineEffectiveRating,
@@ -57,12 +58,18 @@ const SOLUTION_DIRECTIVE_PATTERNS: ReadonlyArray<RegExp> = [
   /(?:\*{1,3}|_{1,3})?(?:参考答案|标准答案|正确答案|答案|解析|解答|解题过程|评分标准|解)(?:\*{1,3}|_{1,3})?\s*[:：=]/,
 ];
 
+const ALPHA_NUM_IDENT_CHAR =
+  "[\\p{Script=Latin}\\p{Script=Greek}\\p{Script=Cyrillic}\\p{N}_]";
+
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function containsTokenBoundedSubstring(haystack: string, needle: string): boolean {
-  const pattern = new RegExp(`(?:^|[^a-z0-9])${escapeRegExp(needle)}(?:$|[^a-z0-9])`, "i");
+  const pattern = new RegExp(
+    `(?<!${ALPHA_NUM_IDENT_CHAR})${escapeRegExp(needle)}(?!${ALPHA_NUM_IDENT_CHAR})`,
+    "iu",
+  );
   return pattern.test(haystack);
 }
 
@@ -140,22 +147,50 @@ const UNICODE_MATH_REPLACEMENTS: ReadonlyArray<readonly [RegExp, string]> = [
   [/\bsqrt\s*([0-9]+(?:\.[0-9]+)?)/gi, "sqrt($1)"],
 ];
 
+const MATH_OPERAND_LOOKAHEAD =
+  `(?=\\d|\\.|sqrt\\(|(?:${GREEK_OR_CONST})\\b)`;
+
+const SPACED_UNARY_SIGN_RE = new RegExp(
+  `(?<=^|[(\\[,;:=<>!~]|\\p{Script=Han}\\s*|\\p{Script=Hiragana}\\s*|\\p{Script=Katakana}\\s*|\\p{Script=Hangul}\\s*|\\b(?:is|equals|expected|result|value|gives|be|are|to|of|at|around|about)\\s+)([+-])\\s+${MATH_OPERAND_LOOKAHEAD}`,
+  "giu",
+);
+
+const SPACED_UNICODE_MINUS_UNARY_RE = new RegExp(
+  `(?<![\\d)\\]]\\s*)\u2212\\s+(?=\\d|\\.|\\u221A|\\p{Script=Greek}|sqrt\\()`,
+  "giu",
+);
+
+const SPACED_PLUS_MINUS_RE = new RegExp(`(\\+-|-\\+)\\s+${MATH_OPERAND_LOOKAHEAD}`, "gi");
+
 /**
  * Deterministically canonicalizes Unicode math notation (NFKC fractions/superscripts,
- * minus signs, Greek symbols, radicals, operators, comparisons, infinity) so leak checks
- * match symmetrically across ASCII and Unicode representations.
+ * minus signs, Greek symbols, radicals, operators, comparisons, infinity) and collapses
+ * whitespace inside math expressions (`π / 2` -> `pi/2`, `− 7` -> `-7`, `√ ( 2 )` -> `sqrt(2)`)
+ * so leak checks match symmetrically across spaced, ASCII, Unicode, and CJK contexts.
  */
 export function canonicalizeMathNotation(value: string): string {
   let text = value.normalize("NFKC");
+  // Collapse spaced Unicode minus (`− 7`) when unary before mapping `\u2212` -> `-`.
+  text = text.replace(SPACED_UNICODE_MINUS_UNARY_RE, "-");
   for (const [pattern, replacement] of UNICODE_MATH_REPLACEMENTS) {
     text = text.replace(pattern, replacement);
   }
-  return text.trim().replace(/\s+/g, " ").toLowerCase();
+  text = text.trim().replace(/\s+/g, " ").toLowerCase();
+  // Collapse whitespace around math operators and parentheses in math expressions.
+  text = text.replace(/\s*(<=|>=|!=|~=|==|=|<|>|\/|\*|\^)\s*/g, "$1");
+  text = text.replace(/\(\s+/g, "(").replace(/\s+\)/g, ")");
+  text = text.replace(/\bsqrt\s*\(\s*([^()]+?)\s*\)/g, "sqrt($1)");
+  text = text.replace(SPACED_PLUS_MINUS_RE, "$1");
+  text = text.replace(SPACED_UNARY_SIGN_RE, "$1");
+  return text;
 }
 
 function containsStandaloneNumericOrSymbolicToken(haystack: string, token: string): boolean {
   const escaped = escapeRegExp(token);
-  const pattern = new RegExp(`(?<![\\p{L}\\p{N}]|\\d\\.)${escaped}(?![\\p{L}\\p{N}]|\\.\\d)`, "iu");
+  const pattern = new RegExp(
+    `(?<!${ALPHA_NUM_IDENT_CHAR}|\\d\\.)${escaped}(?!${ALPHA_NUM_IDENT_CHAR}|\\.\\d)`,
+    "iu",
+  );
   return pattern.test(haystack);
 }
 
@@ -163,11 +198,11 @@ function containsSingleChoiceReveal(rawText: string, choiceLetter: string): bool
   const escaped = escapeRegExp(choiceLetter);
   const patterns = [
     new RegExp(
-      `(?:correct(?:\\s+(?:option|choice|answer))?|choice|option|key|ans(?:wer)?|选|答案|正确选项)\\s*(?:is|[:：=]|为|是)?\\s*[\\[(（]?\\s*${escaped}\\s*[\\])）]?(?:$|[^a-z0-9])`,
-      "i",
+      `(?:correct(?:\\s+(?:option|choice|answer))?|choice|option|key|ans(?:wer)?|选|答案|正确选项)\\s*(?:is|[:：=]|为|是)?\\s*[\\[(（]?\\s*${escaped}\\s*[\\])）]?(?!${ALPHA_NUM_IDENT_CHAR})`,
+      "iu",
     ),
-    new RegExp(`=\\s*[\\[(（]?\\s*${escaped}\\s*[\\])）]?(?:$|[^a-z0-9])`, "i"),
-    new RegExp(`[\\[(（]\\s*${escaped}\\s*[\\])）]\\s*$`, "i"),
+    new RegExp(`=\\s*[\\[(（]?\\s*${escaped}\\s*[\\])）]?(?!${ALPHA_NUM_IDENT_CHAR})`, "iu"),
+    new RegExp(`[\\[(（]\\s*${escaped}\\s*[\\])）]\\s*$`, "iu"),
   ];
   return patterns.some(pattern => pattern.test(rawText));
 }
@@ -209,7 +244,10 @@ export function containsAnswerLeak(
             RELATION_OP_RE.test(part) ? `\\s*${escapeRegExp(part)}\\s*` : escapeRegExp(part),
           )
           .join("");
-        const relPattern = new RegExp(`(?<![\\p{L}\\p{N}])${relRegexSource}(?![\\p{L}\\p{N}])`, "iu");
+        const relPattern = new RegExp(
+          `(?<!${ALPHA_NUM_IDENT_CHAR})${relRegexSource}(?!${ALPHA_NUM_IDENT_CHAR})`,
+          "iu",
+        );
         if (relPattern.test(normalizedStem)) {
           return true;
         }
@@ -422,12 +460,14 @@ function toServerCardRecord(
   const out: Record<string, ServerFlashcardSnapshot> = {};
   if (cards instanceof Map) {
     for (const [cardId, snapshot] of cards.entries()) {
-      out[cardId] = cloneServerSnapshot(snapshot);
+      const canonicalId = canonicalizeIdentifier(cardId);
+      out[canonicalId] = cloneServerSnapshot({ ...snapshot, cardId: canonicalId });
     }
     return out;
   }
   for (const [cardId, snapshot] of Object.entries(cards)) {
-    out[cardId] = cloneServerSnapshot(snapshot);
+    const canonicalId = canonicalizeIdentifier(cardId);
+    out[canonicalId] = cloneServerSnapshot({ ...snapshot, cardId: canonicalId });
   }
   return out;
 }
@@ -441,20 +481,22 @@ function toLedgerRecord(
   const out: Record<string, OfflineOutboxLedgerEntry> = {};
   if (!ledger) return out;
   if (ledger instanceof Map) {
-    for (const [key, entry] of ledger.entries()) {
-      out[key] = cloneLedgerEntry(entry);
+    for (const [, entry] of ledger.entries()) {
+      const canonicalKey = offlineOutboxIdempotencyKey(entry.leaseId, entry.seq);
+      out[canonicalKey] = cloneLedgerEntry(entry);
     }
     return out;
   }
-  for (const [key, entry] of Object.entries(ledger)) {
-    out[key] = cloneLedgerEntry(entry);
+  for (const [, entry] of Object.entries(ledger)) {
+    const canonicalKey = offlineOutboxIdempotencyKey(entry.leaseId, entry.seq);
+    out[canonicalKey] = cloneLedgerEntry(entry);
   }
   return out;
 }
 
 function sanitizeLeaseCandidate(
   candidate: OfflineLeaseCardCandidate,
-  siblingSecretTexts: ReadonlyArray<string>,
+  allProtectedSecrets: ReadonlyArray<string>,
 ):
   | { readonly ok: true; readonly card: OfflineLeaseCard }
   | {
@@ -530,22 +572,22 @@ function sanitizeLeaseCandidate(
         message: `Flashcard ${candidateCardId} refused: prompt or backSummary contains solution/answer directive markup.`,
       };
     }
-    for (const siblingSecret of siblingSecretTexts) {
+    for (const secretText of allProtectedSecrets) {
       if (
-        containsAnswerLeak(candidate.prompt, siblingSecret, { includeShortTokens: true }) ||
-        containsAnswerLeak(candidate.backSummary, siblingSecret, { includeShortTokens: true })
+        containsAnswerLeak(candidate.prompt, secretText, { includeShortTokens: true }) ||
+        containsAnswerLeak(candidate.backSummary, secretText, { includeShortTokens: true })
       ) {
         return {
           ok: false,
           code: "miss_variant_answer_leak",
           httpStatus: 422,
           cardId: candidateCardId,
-          message: `Flashcard ${candidateCardId} refused: prompt or backSummary leaks sibling sealed/answer material.`,
+          message: `Flashcard ${candidateCardId} refused: prompt or backSummary leaks protected sealed/answer material.`,
         };
       }
     }
     const sanitized: OfflineLeasedStandardFlashcard = {
-      cardId: candidateCardId.trim(),
+      cardId: canonicalizeIdentifier(candidateCardId),
       cardKind: "flashcard",
       cardRevision: candidate.cardRevision,
       lastServerReviewedAtMs: candidate.lastServerReviewedAtMs,
@@ -589,15 +631,28 @@ function sanitizeLeaseCandidate(
         }
       }
     }
+    // Check miss-variant stem against ALL candidates' protected secrets in the lease
+    // so miss_variant #2 cannot expose miss_variant #1's (or any sibling's) answer.
+    for (const secretText of allProtectedSecrets) {
+      if (containsAnswerLeak(candidate.freshVariantStem, secretText, { includeShortTokens: true })) {
+        return {
+          ok: false,
+          code: "miss_variant_answer_leak",
+          httpStatus: 422,
+          cardId: candidateCardId,
+          message: `Miss variant card ${candidateCardId} refused: freshVariantStem leaks a sibling card's protected answer/sealed material.`,
+        };
+      }
+    }
 
     // Strict allowlist construction: physically excludes answerKey, canonicalSolution,
     // gradingRubric, sealedPayload, referenceAnswer, and any unknown properties.
     const sanitized: OfflineLeasedMissVariantCard = {
-      cardId: candidateCardId.trim(),
+      cardId: canonicalizeIdentifier(candidateCardId),
       cardKind: "miss_variant",
       cardRevision: candidate.cardRevision,
       lastServerReviewedAtMs: candidate.lastServerReviewedAtMs,
-      freshVariantId: candidate.freshVariantId.trim(),
+      freshVariantId: canonicalizeIdentifier(candidate.freshVariantId),
       freshVariantStem: candidate.freshVariantStem,
     };
     return { ok: true, card: sanitized };
@@ -627,9 +682,10 @@ export function createInitialOfflineFsrsSnapshot(
   nowMs: number,
   revision = 0,
 ): ServerFlashcardSnapshot {
+  const canonicalCardId = canonicalizeIdentifier(cardId);
   const initialCard = createEmptyCard(new Date(nowMs));
   return {
-    cardId,
+    cardId: canonicalCardId,
     revision,
     lastServerReviewedAtMs: null,
     dueAtMs: nowMs,
@@ -643,11 +699,16 @@ export function createInitialOfflineFsrsSnapshot(
 }
 
 export function offlineOutboxIdempotencyKey(leaseId: string, seq: number): string {
-  return `${leaseId}:${seq}`;
+  return `${canonicalizeIdentifier(leaseId)}:${seq}`;
 }
 
 export function computeOfflineOutboxPayloadFingerprint(entry: OfflineOutboxEntryInput): string {
-  return sha256Utf8Hex(canonicalizeForFingerprint(entry));
+  const normalizedEntry: OfflineOutboxEntryInput = {
+    ...entry,
+    leaseId: isNonEmptyString(entry.leaseId) ? canonicalizeIdentifier(entry.leaseId) : entry.leaseId,
+    cardId: isNonEmptyString(entry.cardId) ? canonicalizeIdentifier(entry.cardId) : entry.cardId,
+  };
+  return sha256Utf8Hex(canonicalizeForFingerprint(normalizedEntry));
 }
 
 /**
@@ -695,16 +756,19 @@ export function issueOfflineFlashcardLease(
     };
   }
 
-  const leaseId = input.leaseId.trim();
-  const workspaceId = input.workspaceId.trim();
-  const learnerId = input.learnerId.trim();
+  const leaseId = canonicalizeIdentifier(input.leaseId);
+  const workspaceId = canonicalizeIdentifier(input.workspaceId);
+  const learnerId = canonicalizeIdentifier(input.learnerId);
 
   let supersededLeaseId: string | null = null;
   let supersededLease: OfflineFlashcardLease | null = null;
 
   if (input.existingActiveLease) {
     const prior = input.existingActiveLease;
-    if (prior.workspaceId !== workspaceId || prior.learnerId !== learnerId) {
+    if (
+      canonicalizeIdentifier(prior.workspaceId) !== workspaceId ||
+      canonicalizeIdentifier(prior.learnerId) !== learnerId
+    ) {
       return {
         ok: false,
         code: "supersede_scope_mismatch",
@@ -712,7 +776,7 @@ export function issueOfflineFlashcardLease(
         message: "Cannot supersede an active lease belonging to a different workspace or learner.",
       };
     }
-    if (prior.leaseId === leaseId) {
+    if (canonicalizeIdentifier(prior.leaseId) === leaseId) {
       return {
         ok: false,
         code: "duplicate_lease_id",
@@ -721,7 +785,7 @@ export function issueOfflineFlashcardLease(
       };
     }
     if (prior.status === "active") {
-      supersededLeaseId = prior.leaseId;
+      supersededLeaseId = canonicalizeIdentifier(prior.leaseId);
       supersededLease = {
         ...prior,
         status: "superseded",
@@ -731,19 +795,23 @@ export function issueOfflineFlashcardLease(
     }
   }
 
-  const siblingSecretTexts: string[] = [];
+  // Collect protected secrets across ALL candidates so every card (flashcard AND miss_variant)
+  // is checked against both self and cross-card protected answers/sealed payloads.
+  const allProtectedSecretSet = new Set<string>();
   for (const candidate of input.candidates) {
-    if (candidate.cardKind !== "miss_variant") continue;
     const rawCandidate = candidate as Record<string, unknown>;
     for (const forbiddenField of FORBIDDEN_MISS_VARIANT_FIELDS) {
-      siblingSecretTexts.push(...collectSecretTexts(rawCandidate[forbiddenField]));
+      for (const secretText of collectSecretTexts(rawCandidate[forbiddenField])) {
+        allProtectedSecretSet.add(secretText);
+      }
     }
   }
+  const allProtectedSecrets = [...allProtectedSecretSet];
 
   const seenCardIds = new Set<string>();
   const sanitizedCards: OfflineLeaseCard[] = [];
   for (const candidate of input.candidates) {
-    const sanitized = sanitizeLeaseCandidate(candidate, siblingSecretTexts);
+    const sanitized = sanitizeLeaseCandidate(candidate, allProtectedSecrets);
     if (!sanitized.ok) {
       return sanitized;
     }
@@ -834,7 +902,7 @@ function scheduleServerReceiptFsrs(
 
 function buildPayloadSummary(entry: OfflineOutboxEntryInput): OfflineOutboxPayloadSummary {
   return {
-    cardId: entry.cardId,
+    cardId: isNonEmptyString(entry.cardId) ? canonicalizeIdentifier(entry.cardId) : entry.cardId,
     rating: entry.rating,
     expectedCardRevision: entry.expectedCardRevision,
     clientReviewedAtMs: entry.clientReviewedAtMs ?? null,
@@ -847,10 +915,13 @@ function payloadMatchesLedgerEntry(
   ledgerEntry: OfflineOutboxLedgerEntry,
 ): boolean {
   if (ledgerEntry.payloadFingerprint !== payloadFingerprint) return false;
+  const canonicalEntryCardId = isNonEmptyString(entry.cardId)
+    ? canonicalizeIdentifier(entry.cardId)
+    : entry.cardId;
   const summary = ledgerEntry.payloadSummary;
   if (summary) {
     if (
-      summary.cardId !== entry.cardId ||
+      canonicalizeIdentifier(summary.cardId) !== canonicalEntryCardId ||
       summary.rating !== entry.rating ||
       summary.expectedCardRevision !== entry.expectedCardRevision ||
       summary.clientReviewedAtMs !== (entry.clientReviewedAtMs ?? null)
@@ -859,7 +930,7 @@ function payloadMatchesLedgerEntry(
     }
   }
   return (
-    ledgerEntry.receipt.cardId === entry.cardId &&
+    canonicalizeIdentifier(ledgerEntry.receipt.cardId) === canonicalEntryCardId &&
     ledgerEntry.receipt.rawRating === entry.rating &&
     ledgerEntry.receipt.previousRevision === entry.expectedCardRevision
   );
@@ -955,9 +1026,10 @@ export function reconcileOfflineLeaseOutbox(
     };
   }
 
+  const canonicalLeaseId = canonicalizeIdentifier(lease.leaseId);
   const leasedCardById = new Map<string, OfflineLeaseCard>();
   for (const card of lease.cards) {
-    leasedCardById.set(card.cardId, card);
+    leasedCardById.set(canonicalizeIdentifier(card.cardId), card);
   }
 
   // Deterministic ordering: settle valid positive seq entries in ascending seq order
@@ -984,7 +1056,14 @@ export function reconcileOfflineLeaseOutbox(
   let conflictCount = 0;
 
   for (const { entry } of orderedEntries) {
-    if (entry.leaseId !== lease.leaseId) {
+    const canonicalEntryLeaseId = isNonEmptyString(entry.leaseId)
+      ? canonicalizeIdentifier(entry.leaseId)
+      : entry.leaseId;
+    const canonicalEntryCardId = isNonEmptyString(entry.cardId)
+      ? canonicalizeIdentifier(entry.cardId)
+      : entry.cardId;
+
+    if (canonicalEntryLeaseId !== canonicalLeaseId) {
       conflictCount += 1;
       results.push({
         leaseId: entry.leaseId,
@@ -1011,7 +1090,7 @@ export function reconcileOfflineLeaseOutbox(
 
     const payloadFingerprint = computeOfflineOutboxPayloadFingerprint(entry);
     const payloadSummary = buildPayloadSummary(entry);
-    const idempotencyKey = offlineOutboxIdempotencyKey(lease.leaseId, entry.seq);
+    const idempotencyKey = offlineOutboxIdempotencyKey(canonicalLeaseId, entry.seq);
     const existingLedgerEntry = workingLedger[idempotencyKey];
 
     // Idempotency check runs BEFORE desktop race checks so retries of already-settled
@@ -1023,7 +1102,7 @@ export function reconcileOfflineLeaseOutbox(
         replayedCount += 1;
         const cachedReceipt = cloneLedgerEntry(existingLedgerEntry).receipt;
         results.push({
-          leaseId: lease.leaseId,
+          leaseId: canonicalLeaseId,
           seq: entry.seq,
           cardId: cachedReceipt.cardId,
           outcome: "replayed",
@@ -1041,14 +1120,14 @@ export function reconcileOfflineLeaseOutbox(
       } else {
         conflictCount += 1;
         results.push({
-          leaseId: lease.leaseId,
+          leaseId: canonicalLeaseId,
           seq: entry.seq,
-          cardId: entry.cardId,
+          cardId: canonicalEntryCardId,
           outcome: "seq_payload_mismatch",
           httpStatus: 409,
           payloadFingerprint,
           expectedPayloadFingerprint: existingLedgerEntry.payloadFingerprint,
-          reason: `Conflicting payload for (${lease.leaseId}, seq=${entry.seq}).`,
+          reason: `Conflicting payload for (${canonicalLeaseId}, seq=${entry.seq}).`,
         });
       }
       continue;
@@ -1059,14 +1138,14 @@ export function reconcileOfflineLeaseOutbox(
       if (priorBatchSeq.payloadFingerprint !== payloadFingerprint) {
         conflictCount += 1;
         results.push({
-          leaseId: lease.leaseId,
+          leaseId: canonicalLeaseId,
           seq: entry.seq,
-          cardId: entry.cardId,
+          cardId: canonicalEntryCardId,
           outcome: "seq_payload_mismatch",
           httpStatus: 409,
           payloadFingerprint,
           expectedPayloadFingerprint: priorBatchSeq.payloadFingerprint,
-          reason: `Conflicting in-batch reuse of (${lease.leaseId}, seq=${entry.seq}).`,
+          reason: `Conflicting in-batch reuse of (${canonicalLeaseId}, seq=${entry.seq}).`,
         });
         continue;
       }
@@ -1080,7 +1159,7 @@ export function reconcileOfflineLeaseOutbox(
       !VALID_RAW_RATINGS.has(entry.rating)
     ) {
       results.push({
-        leaseId: lease.leaseId,
+        leaseId: canonicalLeaseId,
         seq: entry.seq,
         cardId: entry.cardId,
         outcome: "invalid_entry",
@@ -1090,28 +1169,28 @@ export function reconcileOfflineLeaseOutbox(
       continue;
     }
 
-    const leasedCard = leasedCardById.get(entry.cardId);
+    const leasedCard = leasedCardById.get(canonicalEntryCardId);
     if (!leasedCard) {
       results.push({
-        leaseId: lease.leaseId,
+        leaseId: canonicalLeaseId,
         seq: entry.seq,
-        cardId: entry.cardId,
+        cardId: canonicalEntryCardId,
         outcome: "card_not_in_lease",
         httpStatus: 403,
-        reason: `Card ${entry.cardId} is not covered by lease ${lease.leaseId}.`,
+        reason: `Card ${canonicalEntryCardId} is not covered by lease ${canonicalLeaseId}.`,
       });
       continue;
     }
 
-    const serverCard = workingCards[entry.cardId];
+    const serverCard = workingCards[canonicalEntryCardId];
     if (!serverCard) {
       results.push({
-        leaseId: lease.leaseId,
+        leaseId: canonicalLeaseId,
         seq: entry.seq,
-        cardId: entry.cardId,
+        cardId: canonicalEntryCardId,
         outcome: "card_not_found",
         httpStatus: 404,
-        reason: `Server card snapshot ${entry.cardId} was not found.`,
+        reason: `Server card snapshot ${canonicalEntryCardId} was not found.`,
       });
       continue;
     }
@@ -1167,9 +1246,9 @@ export function reconcileOfflineLeaseOutbox(
     const strippedClientFlags = detectStrippedClientFlags(entry);
 
     const receipt: OfflineSettledReceipt = {
-      leaseId: lease.leaseId,
+      leaseId: canonicalLeaseId,
       seq: entry.seq,
-      cardId: entry.cardId,
+      cardId: canonicalEntryCardId,
       rawRating: entry.rating,
       effectiveRating,
       clampedFromEasy,
@@ -1184,14 +1263,14 @@ export function reconcileOfflineLeaseOutbox(
       nextSnapshot,
     };
 
-    workingCards[entry.cardId] = nextSnapshot;
+    workingCards[canonicalEntryCardId] = nextSnapshot;
     workingLedger[idempotencyKey] = {
-      leaseId: lease.leaseId,
+      leaseId: canonicalLeaseId,
       seq: entry.seq,
       payloadFingerprint,
       payloadSummary,
       receipt: cloneLedgerEntry({
-        leaseId: lease.leaseId,
+        leaseId: canonicalLeaseId,
         seq: entry.seq,
         payloadFingerprint,
         payloadSummary,
@@ -1201,9 +1280,9 @@ export function reconcileOfflineLeaseOutbox(
     settledCount += 1;
 
     results.push({
-      leaseId: lease.leaseId,
+      leaseId: canonicalLeaseId,
       seq: entry.seq,
-      cardId: entry.cardId,
+      cardId: canonicalEntryCardId,
       outcome: "settled",
       httpStatus: 200,
       payloadFingerprint,

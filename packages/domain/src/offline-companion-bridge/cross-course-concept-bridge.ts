@@ -6,6 +6,7 @@ import {
   MAX_BRIDGE_WEIGHT,
   MIN_BRIDGE_PRIOR_MEAN,
   MIN_DIRECT_OBSERVATIONS_FOR_BRIDGE,
+  canonicalizeIdentifier,
   type AcceptedConceptBridgeEdge,
   type ComputeCrossCourseWeakPriorInput,
   type CrossCourseConceptEdge,
@@ -123,8 +124,36 @@ export function computeCrossCourseWeakPrior<TTargetState = undefined>(
     targetInCourseState,
   } = input;
 
-  const canonicalTargetCourseId = targetCourseId.trim();
-  const canonicalTargetConceptId = targetConceptId.trim();
+  const canonicalTargetCourseId = canonicalizeIdentifier(targetCourseId);
+  const canonicalTargetConceptId = canonicalizeIdentifier(targetConceptId);
+
+  // Normalize UUID/identifier casing across revocation sets and course lookup tables
+  // so mixed-case UUIDs can never bypass revocation, sharing, or privacy_epoch checks.
+  const canonicalRevokedSourceIds = new Set<string>();
+  for (const revokedId of revokedSourceIds) {
+    canonicalRevokedSourceIds.add(canonicalizeIdentifier(revokedId));
+  }
+
+  const canonicalSharingEnabled = new Map<string, boolean>();
+  for (const [courseId, enabled] of Object.entries(activeCourseSharingEnabled)) {
+    const key = canonicalizeIdentifier(courseId);
+    const existing = canonicalSharingEnabled.get(key);
+    // Fail closed if conflicting mixed-case duplicate keys exist for the same course UUID.
+    canonicalSharingEnabled.set(key, existing === undefined ? enabled === true : existing && enabled === true);
+  }
+
+  const canonicalPrivacyEpochs = new Map<string, number | null>();
+  for (const [courseId, epoch] of Object.entries(coursePrivacyEpochs)) {
+    const key = canonicalizeIdentifier(courseId);
+    const existing = canonicalPrivacyEpochs.get(key);
+    if (existing === undefined) {
+      canonicalPrivacyEpochs.set(key, epoch);
+    } else if (existing !== epoch) {
+      // Fail closed on conflicting mixed-case epoch keys for the same course UUID.
+      canonicalPrivacyEpochs.set(key, null);
+    }
+  }
+
   const ignoredNonDirectEdges: IgnoredNonDirectBridgeEdge[] = [];
   const decoupledEdges: DecoupledConceptBridgeEdge[] = [];
   const survivingBySourceKey = new Map<
@@ -141,10 +170,10 @@ export function computeCrossCourseWeakPrior<TTargetState = undefined>(
 
   for (const edge of edges) {
     const edgeId = resolveEdgeId(edge);
-    const canonicalSourceCourseId = edge.sourceCourseId.trim();
-    const canonicalSourceConceptId = edge.sourceConceptId.trim();
-    const canonicalEdgeTargetCourseId = edge.targetCourseId.trim();
-    const canonicalEdgeTargetConceptId = edge.targetConceptId.trim();
+    const canonicalSourceCourseId = canonicalizeIdentifier(edge.sourceCourseId);
+    const canonicalSourceConceptId = canonicalizeIdentifier(edge.sourceConceptId);
+    const canonicalEdgeTargetCourseId = canonicalizeIdentifier(edge.targetCourseId);
+    const canonicalEdgeTargetConceptId = canonicalizeIdentifier(edge.targetConceptId);
 
     if (
       !canonicalTargetCourseId ||
@@ -185,13 +214,14 @@ export function computeCrossCourseWeakPrior<TTargetState = undefined>(
       decoupleReasons.push("multi_hop_rejected");
     }
 
-    if (activeCourseSharingEnabled[canonicalSourceCourseId] !== true) {
+    if (canonicalSharingEnabled.get(canonicalSourceCourseId) !== true) {
       decoupleReasons.push("course_sharing_disabled");
     }
 
-    const liveEpoch = coursePrivacyEpochs[canonicalSourceCourseId];
+    const liveEpoch = canonicalPrivacyEpochs.get(canonicalSourceCourseId);
     if (
       liveEpoch === undefined ||
+      liveEpoch === null ||
       !Number.isFinite(liveEpoch) ||
       !Number.isFinite(edge.edgePrivacyEpoch) ||
       edge.edgePrivacyEpoch !== liveEpoch
@@ -199,7 +229,11 @@ export function computeCrossCourseWeakPrior<TTargetState = undefined>(
       decoupleReasons.push("privacy_epoch_mismatch");
     }
 
-    if (edge.supportingSourceIds.some(sourceId => revokedSourceIds.has(sourceId))) {
+    if (
+      edge.supportingSourceIds.some(sourceId =>
+        canonicalRevokedSourceIds.has(canonicalizeIdentifier(sourceId)),
+      )
+    ) {
       decoupleReasons.push("supporting_source_revoked");
     }
 

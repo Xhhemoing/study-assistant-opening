@@ -6,6 +6,18 @@
  * - 1-hop bounded cross-course concept bridge weak prior with read-time privacy epoch
  */
 
+const CANONICAL_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Canonicalizes identifiers by trimming whitespace and lowercasing RFC 4122 UUIDs
+ * so mixed-case UUID representations cannot bypass revocation, deduplication, or scoping checks.
+ */
+export function canonicalizeIdentifier(id: string): string {
+  const trimmed = id.trim();
+  return CANONICAL_UUID_RE.test(trimmed) ? trimmed.toLowerCase() : trimmed;
+}
+
 /* -------------------------------------------------------------------------- */
 /* A. 12h Single-Active Offline Flashcard Lease & Outbox                      */
 /* -------------------------------------------------------------------------- */

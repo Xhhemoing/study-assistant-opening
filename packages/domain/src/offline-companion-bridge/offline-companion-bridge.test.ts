@@ -18,6 +18,8 @@ import {
   appendCompanionScratchpadPage,
   areCompanionOriginsIsolated,
   authorizeCompanionAction,
+  canonicalizeIdentifier,
+  canonicalizeMathNotation,
   computeCrossCourseWeakPrior,
   containsAnswerLeak,
   createCompanionPairingOffer,
@@ -486,6 +488,112 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
         expect(rejectedUnicode.code).toBe("miss_variant_answer_leak");
       }
     }
+
+    // [Round-7 P1-1] Spaced operators ("π / 2", "− 7", "± 3", "√ ( 2 )", "1 / 2") AND CJK prose
+    // ("其值为π/2弧度。", "答案是 − 7 分", "等于 √ 2 倍") MUST be detected without false-positiving
+    // on Latin identifiers ("api2", "api/2") or decimals ("3.14").
+    expect(canonicalizeMathNotation("The angle is π / 2 radians")).toBe("the angle is pi/2 radians");
+    expect(canonicalizeMathNotation("等于 √ ( 2 ) 倍")).toBe("等于 sqrt(2) 倍");
+    expect(containsAnswerLeak("The angle is π / 2 radians", "π/2")).toBe(true);
+    expect(containsAnswerLeak("The angle is π / 2 radians", "pi/2")).toBe(true);
+    expect(containsAnswerLeak("其值为π/2弧度。", "π/2")).toBe(true);
+    expect(containsAnswerLeak("其值为π/2弧度。", "pi/2")).toBe(true);
+    expect(containsAnswerLeak("其值为 π / 2 弧度。", "π/2")).toBe(true);
+    expect(containsAnswerLeak("答案是 \u2212 7 分", "-7")).toBe(true);
+    expect(containsAnswerLeak("其值为\u22127分", "\u22127")).toBe(true);
+    expect(containsAnswerLeak("等于 √ 2 倍", "√2")).toBe(true);
+    expect(containsAnswerLeak("等于 √ ( 2 ) 倍", "sqrt(2)")).toBe(true);
+    expect(containsAnswerLeak("对称根为 ± 3 。", "±3")).toBe(true);
+    expect(containsAnswerLeak("比例是 1 / 2 处", "½")).toBe(true);
+    expect(containsAnswerLeak("Use api2 endpoint", "2")).toBe(false);
+    expect(containsAnswerLeak("Use api/2 endpoint", "pi/2")).toBe(false);
+    expect(containsAnswerLeak("Value is 3.14", "14")).toBe(false);
+    expect(containsAnswerLeak("Value is 3.14", "3")).toBe(false);
+    expect(containsAnswerLeak("Solve x^2 - 4 = 0", "-4")).toBe(false);
+
+    for (const [idx, spacedOrCjk] of [
+      { answerKey: "π/2", prompt: "Right-angle measure.", backSummary: "The angle is π / 2 radians" },
+      { answerKey: "π/2", prompt: "直角弧度。", backSummary: "其值为π/2弧度。" },
+      { answerKey: "-7", prompt: "计算结果。", backSummary: "其值为 \u2212 7 分" },
+      { answerKey: "√2", prompt: "正方形对角线。", backSummary: "等于 √ 2 倍" },
+    ].entries()) {
+      const rejectedSpacedCjk = issueOfflineFlashcardLease({
+        leaseId: `lease-r7-spaced-cjk-${idx}`,
+        workspaceId: "ws-1",
+        learnerId: "learner-1",
+        issuedAtMs: T0,
+        candidates: [
+          makeMissVariantCandidate({ answerKey: spacedOrCjk.answerKey }),
+          {
+            ...makeFlashcardCandidate(300 + idx),
+            prompt: spacedOrCjk.prompt,
+            backSummary: spacedOrCjk.backSummary,
+          },
+        ],
+      });
+      expect(rejectedSpacedCjk.ok).toBe(false);
+      if (!rejectedSpacedCjk.ok) {
+        expect(rejectedSpacedCjk.httpStatus).toBe(422);
+        expect(rejectedSpacedCjk.code).toBe("miss_variant_answer_leak");
+      }
+    }
+
+    // [Round-7 P1-2] Cross-miss-variant leak: miss_variant #2 MUST NOT expose miss_variant #1's answer!
+    const crossMissLeak = issueOfflineFlashcardLease({
+      leaseId: "lease-r7-cross-miss-leak",
+      workspaceId: "ws-1",
+      learnerId: "learner-1",
+      issuedAtMs: T0,
+      candidates: [
+        makeMissVariantCandidate({
+          cardId: "miss-card-a",
+          freshVariantId: "var-a",
+          freshVariantStem: "Compute the determinant of [[4, 3], [5, 6]].",
+          answerKey: "42",
+        }),
+        makeMissVariantCandidate({
+          cardId: "miss-card-b",
+          freshVariantId: "var-b",
+          freshVariantStem: "Suppose a matrix has trace 42; compute its rank.",
+          answerKey: "9",
+          canonicalSolution: "rank = 9",
+          gradingRubric: "Full credit for 9",
+          referenceAnswer: "The rank is 9.",
+          sealedPayload: { token: "OTHER_SEALED_TOKEN" },
+        }),
+      ],
+    });
+    expect(crossMissLeak.ok).toBe(false);
+    if (!crossMissLeak.ok) {
+      expect(crossMissLeak.httpStatus).toBe(422);
+      expect(crossMissLeak.code).toBe("miss_variant_answer_leak");
+    }
+
+    const crossMissClean = issueOfflineFlashcardLease({
+      leaseId: "lease-r7-cross-miss-clean",
+      workspaceId: "ws-1",
+      learnerId: "learner-1",
+      issuedAtMs: T0,
+      candidates: [
+        makeMissVariantCandidate({
+          cardId: "miss-card-a",
+          freshVariantId: "var-a",
+          freshVariantStem: "Compute the determinant of [[4, 3], [5, 6]].",
+          answerKey: "42",
+        }),
+        makeMissVariantCandidate({
+          cardId: "miss-card-b",
+          freshVariantId: "var-b",
+          freshVariantStem: "Determine whether [[7, 8], [10, 11]] is invertible.",
+          answerKey: "99",
+          canonicalSolution: "invertible because det != 0",
+          gradingRubric: "Show nonzero determinant",
+          referenceAnswer: "Yes, invertible.",
+          sealedPayload: { token: "CLEAN_OTHER_TOKEN" },
+        }),
+      ],
+    });
+    expect(crossMissClean.ok).toBe(true);
 
     expect(containsAnswerLeak("Compute the trace of M (result 42).", "42")).toBe(true);
     expect(containsAnswerLeak("Evaluate f(2), expected -7.", "-7")).toBe(true);
@@ -2033,5 +2141,120 @@ describe("1-Hop Bounded Cross-Course Concept Bridge (Wave R / Lane R4-C)", () =>
     expect(directCountOnly.deltaAlpha).toBeCloseTo(0.075, 12);
     expect(directCountOnly.deltaBeta).toBeCloseTo(0.225, 12);
     expect(directCountOnly.posteriorMean).toBeCloseTo(1.075 / 2.3, 12);
+
+    // [Round-7 P1-3] Mixed-case UUID revocation & course identity normalization:
+    // Uppercase UUID in supportingSourceIds MUST be decoupled by lowercase UUID in revokedSourceIds!
+    const upperUuid = "550E8400-E29B-41D4-A716-446655440000";
+    const lowerUuid = "550e8400-e29b-41d4-a716-446655440000";
+    const courseAUuidUpper = "11111111-2222-4333-8444-555555555555".toUpperCase();
+    const courseAUuidLower = "11111111-2222-4333-8444-555555555555";
+    const targetCourseUuid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+
+    expect(canonicalizeIdentifier(upperUuid)).toBe(lowerUuid);
+
+    const mixedCaseRevoked = computeCrossCourseWeakPrior({
+      targetCourseId: targetCourseUuid,
+      targetConceptId: "eigenvalues",
+      edges: [
+        {
+          edgeId: "mixed-case-revoked-edge",
+          sourceCourseId: courseAUuidUpper,
+          sourceConceptId: "matrices",
+          targetCourseId: targetCourseUuid.toUpperCase(),
+          targetConceptId: "eigenvalues",
+          alignmentWeight: 0.3,
+          sourceDirectSuccessCount: 5,
+          sourceDirectObservationCount: 5,
+          edgePrivacyEpoch: 2,
+          supportingSourceIds: [upperUuid],
+        },
+        {
+          edgeId: "mixed-case-self-course-edge",
+          sourceCourseId: targetCourseUuid.toUpperCase(),
+          sourceConceptId: "matrices",
+          targetCourseId: targetCourseUuid,
+          targetConceptId: "eigenvalues",
+          alignmentWeight: 0.3,
+          sourceDirectSuccessCount: 5,
+          sourceDirectObservationCount: 5,
+          edgePrivacyEpoch: 2,
+          supportingSourceIds: [],
+        },
+      ],
+      coursePrivacyEpochs: { [courseAUuidLower]: 2, [targetCourseUuid]: 2 },
+      activeCourseSharingEnabled: { [courseAUuidLower]: true, [targetCourseUuid]: true },
+      revokedSourceIds: new Set<string>([lowerUuid]),
+    });
+
+    expect(mixedCaseRevoked.acceptedEdges).toHaveLength(0);
+    expect(mixedCaseRevoked.posteriorMean).toBe(0.5);
+    expect(mixedCaseRevoked.decoupledEdges).toEqual([
+      expect.objectContaining({
+        edgeId: "mixed-case-revoked-edge",
+        reason: "supporting_source_revoked",
+      }),
+    ]);
+    expect(mixedCaseRevoked.ignoredNonDirectEdges).toEqual([
+      expect.objectContaining({
+        edgeId: "mixed-case-self-course-edge",
+        reason: "same_course_edge",
+      }),
+    ]);
+
+    // Also verify mixed-case UUID lease idempotency & supersession in offline-flashcard-lease.ts!
+    const leaseUuidLower = "22222222-3333-4444-8555-666666666666";
+    const leaseUuidUpper = leaseUuidLower.toUpperCase();
+    const cardUuidLower = "33333333-4444-4555-8666-777777777777";
+    const cardUuidUpper = cardUuidLower.toUpperCase();
+    const uuidLease = issueOfflineFlashcardLease({
+      leaseId: leaseUuidUpper,
+      workspaceId: courseAUuidUpper,
+      learnerId: lowerUuid,
+      issuedAtMs: T0,
+      candidates: [{ ...makeFlashcardCandidate(1), cardId: cardUuidUpper }],
+    });
+    expect(uuidLease.ok).toBe(true);
+    if (!uuidLease.ok) throw new Error("expected UUID lease");
+    expect(uuidLease.lease.leaseId).toBe(leaseUuidLower);
+    expect(uuidLease.lease.cards[0]?.cardId).toBe(cardUuidLower);
+
+    const uuidSettle1 = reconcileOfflineLeaseOutbox({
+      lease: uuidLease.lease,
+      serverCards: { [cardUuidUpper]: createInitialOfflineFsrsSnapshot(cardUuidUpper, T0 - 3_600_000, 1) },
+      serverReceiptAtMs: T0 + 60_000,
+      entries: [
+        {
+          leaseId: leaseUuidLower,
+          seq: 1,
+          cardId: cardUuidLower,
+          expectedCardRevision: 1,
+          rating: "good",
+        },
+      ],
+    });
+    expect(uuidSettle1.ok).toBe(true);
+    if (!uuidSettle1.ok) throw new Error("expected UUID settle");
+    expect(uuidSettle1.settledCount).toBe(1);
+
+    // Replaying with uppercase UUIDs MUST match the canonicalized ledger entry ("replayed", zero double mutation).
+    const uuidReplay = reconcileOfflineLeaseOutbox({
+      lease: uuidLease.lease,
+      serverCards: uuidSettle1.updatedServerCards,
+      processedLedger: uuidSettle1.nextProcessedLedger,
+      serverReceiptAtMs: T0 + 120_000,
+      entries: [
+        {
+          leaseId: leaseUuidUpper,
+          seq: 1,
+          cardId: cardUuidUpper,
+          expectedCardRevision: 1,
+          rating: "good",
+        },
+      ],
+    });
+    expect(uuidReplay.ok).toBe(true);
+    if (!uuidReplay.ok) throw new Error("expected UUID replay");
+    expect(uuidReplay.replayedCount).toBe(1);
+    expect(uuidReplay.settledCount).toBe(0);
   });
 });
