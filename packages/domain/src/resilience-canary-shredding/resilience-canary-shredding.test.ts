@@ -581,6 +581,138 @@ describe("B. Multi-Source Nested Envelope Crypto-Shredding & Quarantine Restore"
     expect(cleanOnly.status).toBe("approved_clean");
     expect(cleanOnly.liveApplyAllowed).toBe(true);
   });
+
+  it("fails closed for sourceKeyId-only restore records (deleted without receipt, revoked, stale source epoch, rotated sourceKeyId)", () => {
+    const keyTree: WorkspaceKeyTree = {
+      workspaceId: "ws-key-only",
+      masterKey: {
+        workspaceKeyId: "kw-1",
+        keyVersion: 1,
+        status: "active",
+        privacyEpoch: 1,
+        createdAtMs: 1_000,
+        shreddedAtMs: null,
+      },
+      sources: [
+        {
+          sourceId: "src-revoked",
+          sourceKeyId: "ks-revoked",
+          wrappedByWorkspaceKeyId: "kw-1",
+          status: "revoked",
+          privacyEpoch: 1,
+          createdAtMs: 1_100,
+          shreddedAtMs: null,
+        },
+        {
+          sourceId: "src-epoch-bumped",
+          sourceKeyId: "ks-epoch-2",
+          wrappedByWorkspaceKeyId: "kw-1",
+          status: "active",
+          privacyEpoch: 2,
+          createdAtMs: 1_200,
+          shreddedAtMs: null,
+        },
+        {
+          sourceId: "src-rotated",
+          sourceKeyId: "ks-rotated-v2",
+          wrappedByWorkspaceKeyId: "kw-1",
+          status: "active",
+          privacyEpoch: 1,
+          createdAtMs: 1_300,
+          shreddedAtMs: null,
+        },
+      ],
+    };
+
+    const result = evaluateQuarantineRestoreBundle({
+      bundleId: "bundle-source-key-only",
+      policy: "strip_shredded_lineage",
+      liveKeyTree: keyTree,
+      records: [
+        {
+          recordId: "rec-deleted-no-receipt",
+          recordType: "learning_event",
+          workspaceId: "ws-key-only",
+          workspaceKeyId: "kw-1",
+          sourceId: null,
+          sourceKeyId: "ks-pruned-deleted",
+          privacyEpoch: 1,
+        },
+        {
+          recordId: "rec-revoked-source",
+          recordType: "learning_event",
+          workspaceId: "ws-key-only",
+          workspaceKeyId: "kw-1",
+          sourceId: null,
+          sourceKeyId: "ks-revoked",
+          privacyEpoch: 1,
+        },
+        {
+          recordId: "rec-stale-source-epoch",
+          recordType: "learning_event",
+          workspaceId: "ws-key-only",
+          workspaceKeyId: "kw-1",
+          sourceId: null,
+          sourceKeyId: "ks-epoch-2",
+          privacyEpoch: 1,
+        },
+        {
+          recordId: "rec-rotated-key-only",
+          recordType: "learning_event",
+          workspaceId: "ws-key-only",
+          workspaceKeyId: "kw-1",
+          sourceId: null,
+          sourceKeyId: "ks-rotated-v1",
+          privacyEpoch: 1,
+        },
+        {
+          recordId: "rec-rotated-mismatched-with-source-id",
+          recordType: "learning_event",
+          workspaceId: "ws-key-only",
+          workspaceKeyId: "kw-1",
+          sourceId: "src-rotated",
+          sourceKeyId: "ks-rotated-v1",
+          privacyEpoch: 1,
+        },
+        {
+          recordId: "rec-valid-epoch-2",
+          recordType: "learning_event",
+          workspaceId: "ws-key-only",
+          workspaceKeyId: "kw-1",
+          sourceId: null,
+          sourceKeyId: "ks-epoch-2",
+          privacyEpoch: 2,
+        },
+      ],
+    });
+
+    expect(result.status).toBe("approved_after_filtering");
+    expect(result.approvedRecords.map((r) => r.recordId)).toEqual([
+      "rec-valid-epoch-2",
+    ]);
+    expect(result.rejectedRecords.map((r) => [r.recordId, r.reason])).toEqual([
+      ["rec-deleted-no-receipt", "stale_source_key"],
+      ["rec-revoked-source", "revoked_or_deleted_source"],
+      ["rec-stale-source-epoch", "stale_privacy_epoch"],
+      ["rec-rotated-key-only", "stale_source_key"],
+      ["rec-rotated-mismatched-with-source-id", "stale_source_key"],
+    ]);
+
+    expect(() =>
+      evaluateQuarantineRestoreBundle({
+        bundleId: "bundle-dup-key",
+        policy: "strict_atomic",
+        liveKeyTree: {
+          ...keyTree,
+          sources: [
+            keyTree.sources[0]!,
+            { ...keyTree.sources[1]!, sourceKeyId: "ks-revoked" },
+          ],
+        },
+        records: [],
+      }),
+    ).toThrow(RangeError);
+  });
 });
 
 describe("C. Expand-Contract Canary Router & < 5s Candidate Publish Lease Rollback", () => {
@@ -760,5 +892,48 @@ describe("C. Expand-Contract Canary Router & < 5s Candidate Publish Lease Rollba
       stateEpoch: 4,
       leaseEpoch: 3,
     });
+
+    // Non-finite lease timestamps fail closed rather than slipping past comparisons
+    expect(
+      validateCandidateCommitFence(
+        initial,
+        { ...acquired.lease, issuedAtMs: Number.NaN, expiresAtMs: Number.NaN },
+        10_500,
+      ),
+    ).toMatchObject({
+      allowed: false,
+      dirtyWritePrevented: true,
+      reason: "lease_expired",
+    });
+
+    // Validation guards for evaluatedAtMs and trimmed same-family billing
+    expect(() =>
+      evaluateDriftCanarySentinel({
+        route: baseRoute,
+        thresholds: baseThresholds,
+        windows: [],
+        evaluatedAtMs: -1,
+      }),
+    ).toThrow(RangeError);
+    expect(() =>
+      reconcileFailoverBillingSettlement({
+        requestId: "req-same-family-trim",
+        taskKind: "tutor_turn",
+        primaryAttempt: {
+          providerFamily: "openai",
+          modelId: "gpt-5.4-mini",
+          outcome: "failed",
+          providerCostMicroUnits: 100,
+          quotedLearnerDebitMicroUnits: 200,
+        },
+        fallbackAttempt: {
+          providerFamily: " openai ",
+          modelId: "gpt-5.4",
+          outcome: "succeeded",
+          providerCostMicroUnits: 120,
+          quotedLearnerDebitMicroUnits: 200,
+        },
+      }),
+    ).toThrow(RangeError);
   });
 });

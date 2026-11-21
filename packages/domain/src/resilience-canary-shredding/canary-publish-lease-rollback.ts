@@ -328,6 +328,22 @@ export function validateCandidateCommitFence(
     };
   }
 
+  if (
+    !Number.isFinite(lease.issuedAtMs) ||
+    !Number.isFinite(lease.expiresAtMs) ||
+    lease.issuedAtMs < 0 ||
+    lease.expiresAtMs < lease.issuedAtMs
+  ) {
+    return {
+      allowed: false,
+      dirtyWritePrevented: true,
+      reason: "lease_expired",
+      commitNowMs,
+      stateEpoch: state.epoch,
+      leaseEpoch: lease.rolloutEpoch,
+    };
+  }
+
   if (commitNowMs < lease.issuedAtMs) {
     return {
       allowed: false,

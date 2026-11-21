@@ -67,19 +67,26 @@ function validateKeyTree(keyTree: WorkspaceKeyTree): void {
   );
 
   const seenSourceIds = new Set<string>();
+  const seenSourceKeyIds = new Set<string>();
   for (const source of keyTree.sources) {
-    assertNonEmpty(source.sourceId, "source.sourceId");
-    assertNonEmpty(source.sourceKeyId, "source.sourceKeyId");
+    const sourceId = assertNonEmpty(source.sourceId, "source.sourceId");
+    const sourceKeyId = assertNonEmpty(source.sourceKeyId, "source.sourceKeyId");
     assertNonNegativeInt(source.privacyEpoch, "source.privacyEpoch");
-    if (seenSourceIds.has(source.sourceId)) {
+    if (seenSourceIds.has(sourceId)) {
       throw new RangeError(
-        `Duplicate sourceId in keyTree.sources: ${source.sourceId}`,
+        `Duplicate sourceId in keyTree.sources: ${sourceId}`,
       );
     }
-    seenSourceIds.add(source.sourceId);
+    seenSourceIds.add(sourceId);
+    if (seenSourceKeyIds.has(sourceKeyId)) {
+      throw new RangeError(
+        `Duplicate sourceKeyId in keyTree.sources: ${sourceKeyId}`,
+      );
+    }
+    seenSourceKeyIds.add(sourceKeyId);
     if (source.wrappedByWorkspaceKeyId !== keyTree.masterKey.workspaceKeyId) {
       throw new RangeError(
-        `Source key ${source.sourceKeyId} is not wrapped by workspace master key ${keyTree.masterKey.workspaceKeyId}`,
+        `Source key ${sourceKeyId} is not wrapped by workspace master key ${keyTree.masterKey.workspaceKeyId}`,
       );
     }
   }
@@ -172,7 +179,7 @@ function computeCalibrationRollbacks(
     if (
       target.kind === "source" &&
       item.sourceId !== undefined &&
-      item.sourceId !== target.sourceId
+      item.sourceId.trim() !== target.sourceId
     ) {
       rollbacks.push({
         itemRevisionId,
@@ -239,13 +246,18 @@ export function planAndExecuteCryptoShred(
   let preservedSourceKeyIds: string[] = [];
   let newlyApplied = false;
 
-  if (input.target.kind === "source") {
-    const targetSourceId = assertNonEmpty(
-      input.target.sourceId,
-      "target.sourceId",
-    );
+  const normalizedTarget: CryptoShredExecutionInput["target"] =
+    input.target.kind === "source"
+      ? {
+          kind: "source",
+          sourceId: assertNonEmpty(input.target.sourceId, "target.sourceId"),
+        }
+      : { kind: "workspace" };
+
+  if (normalizedTarget.kind === "source") {
+    const targetSourceId = normalizedTarget.sourceId;
     const matchingSource = input.keyTree.sources.find(
-      (source) => source.sourceId === targetSourceId,
+      (source) => source.sourceId.trim() === targetSourceId,
     );
     if (!matchingSource) {
       throw new RangeError(
@@ -257,7 +269,7 @@ export function planAndExecuteCryptoShred(
       nextMasterKey.status === "active" ? nextMasterKey.workspaceKeyId : null;
 
     nextSources = input.keyTree.sources.map((source) => {
-      if (source.sourceId !== targetSourceId) {
+      if (source.sourceId.trim() !== targetSourceId) {
         return { ...source };
       }
       if (source.status !== "shredded") {
@@ -275,12 +287,12 @@ export function planAndExecuteCryptoShred(
     });
 
     const updatedTarget = nextSources.find(
-      (source) => source.sourceId === targetSourceId,
+      (source) => source.sourceId.trim() === targetSourceId,
     )!;
     shreddedSourceIds = [updatedTarget.sourceId];
     shreddedSourceKeyIds = [updatedTarget.sourceKeyId];
     preservedSourceKeyIds = nextSources
-      .filter((source) => source.sourceId !== targetSourceId && source.status === "active")
+      .filter((source) => source.sourceId.trim() !== targetSourceId && source.status === "active")
       .map((source) => source.sourceKeyId)
       .sort();
   } else {
@@ -318,7 +330,7 @@ export function planAndExecuteCryptoShred(
 
   const { rollbacks, newlyAppliedKeys } = computeCalibrationRollbacks(
     input.affectedItemRevisions ?? [],
-    input.target,
+    normalizedTarget,
     priorShreddedKeys,
   );
   if (newlyAppliedKeys.length > 0) {
@@ -332,13 +344,13 @@ export function planAndExecuteCryptoShred(
   );
 
   const targetDiscriminator =
-    input.target.kind === "workspace"
+    normalizedTarget.kind === "workspace"
       ? "workspace"
-      : `source:${input.target.sourceId}`;
+      : `source:${normalizedTarget.sourceId}`;
   const receipt: CryptoShredTombstoneReceipt = {
     receiptId: `tombstone:${workspaceId}:${targetDiscriminator}:${input.executedAtMs}`,
     workspaceId,
-    target: input.target,
+    target: normalizedTarget,
     issuedAtMs: input.executedAtMs,
     appendOnlyCompliant: true,
     immutableAppendOnlyDeletes: [],
@@ -372,7 +384,9 @@ function classifyQuarantineRecord(
   shreddedWorkspaceKeyIds: ReadonlySet<string>,
   shreddedSourceKeyIds: ReadonlySet<string>,
   revokedSourceIds: ReadonlySet<string>,
+  revokedSourceKeyIds: ReadonlySet<string>,
   sourceById: ReadonlyMap<string, SourceEnvelopeKey>,
+  sourceByKeyId: ReadonlyMap<string, SourceEnvelopeKey>,
 ): QuarantineRejectReason | null {
   if (record.workspaceId !== liveKeyTree.workspaceId) {
     return "workspace_mismatch";
@@ -385,19 +399,41 @@ function classifyQuarantineRecord(
     return "shredded_workspace_key";
   }
 
-  if (record.sourceKeyId && shreddedSourceKeyIds.has(record.sourceKeyId)) {
+  const recordSourceId = record.sourceId?.trim() || null;
+  const recordSourceKeyId = record.sourceKeyId?.trim() || null;
+
+  if (recordSourceKeyId && shreddedSourceKeyIds.has(recordSourceKeyId)) {
     return "shredded_source_key";
   }
 
-  const liveSource = record.sourceId
-    ? sourceById.get(record.sourceId)
-    : undefined;
-
-  if (record.sourceId) {
+  let liveSource: SourceEnvelopeKey | undefined;
+  if (recordSourceId) {
+    liveSource = sourceById.get(recordSourceId);
     if (
-      revokedSourceIds.has(record.sourceId) ||
+      revokedSourceIds.has(recordSourceId) ||
       liveSource?.status === "shredded" ||
-      liveSource?.status === "revoked"
+      liveSource?.status === "revoked" ||
+      !liveSource
+    ) {
+      return "revoked_or_deleted_source";
+    }
+    if (recordSourceKeyId && liveSource.sourceKeyId.trim() !== recordSourceKeyId) {
+      return "stale_source_key";
+    }
+  } else if (recordSourceKeyId) {
+    liveSource = sourceByKeyId.get(recordSourceKeyId);
+    if (!liveSource) {
+      return revokedSourceKeyIds.has(recordSourceKeyId)
+        ? "revoked_or_deleted_source"
+        : "stale_source_key";
+    }
+    if (liveSource.status === "shredded") {
+      return "shredded_source_key";
+    }
+    if (
+      liveSource.status === "revoked" ||
+      revokedSourceIds.has(liveSource.sourceId.trim()) ||
+      revokedSourceKeyIds.has(recordSourceKeyId)
     ) {
       return "revoked_or_deleted_source";
     }
@@ -415,18 +451,6 @@ function classifyQuarantineRecord(
     return "unrecognized_workspace_key";
   }
 
-  if (
-    liveSource &&
-    record.sourceKeyId &&
-    record.sourceKeyId !== liveSource.sourceKeyId
-  ) {
-    return "stale_source_key";
-  }
-
-  if (record.sourceId && !liveSource) {
-    return "revoked_or_deleted_source";
-  }
-
   return null;
 }
 
@@ -439,19 +463,25 @@ export function evaluateQuarantineRestoreBundle(
   const shreddedWorkspaceKeyIds = new Set<string>(input.shreddedKeyIds ?? []);
   const shreddedSourceKeyIds = new Set<string>(input.shreddedKeyIds ?? []);
   const revokedSourceIds = new Set<string>(input.revokedSourceIds ?? []);
+  const revokedSourceKeyIds = new Set<string>();
 
   if (input.liveKeyTree.masterKey.status === "shredded") {
     shreddedWorkspaceKeyIds.add(input.liveKeyTree.masterKey.workspaceKeyId);
   }
 
   const sourceById = new Map<string, SourceEnvelopeKey>();
+  const sourceByKeyId = new Map<string, SourceEnvelopeKey>();
   for (const source of input.liveKeyTree.sources) {
-    sourceById.set(source.sourceId, source);
+    const sourceId = source.sourceId.trim();
+    const sourceKeyId = source.sourceKeyId.trim();
+    sourceById.set(sourceId, source);
+    sourceByKeyId.set(sourceKeyId, source);
     if (source.status === "shredded") {
-      shreddedSourceKeyIds.add(source.sourceKeyId);
-      revokedSourceIds.add(source.sourceId);
+      shreddedSourceKeyIds.add(sourceKeyId);
+      revokedSourceIds.add(sourceId);
     } else if (source.status === "revoked") {
-      revokedSourceIds.add(source.sourceId);
+      revokedSourceIds.add(sourceId);
+      revokedSourceKeyIds.add(sourceKeyId);
     }
   }
 
@@ -484,7 +514,9 @@ export function evaluateQuarantineRestoreBundle(
       shreddedWorkspaceKeyIds,
       shreddedSourceKeyIds,
       revokedSourceIds,
+      revokedSourceKeyIds,
       sourceById,
+      sourceByKeyId,
     );
 
     if (rejectionReason) {

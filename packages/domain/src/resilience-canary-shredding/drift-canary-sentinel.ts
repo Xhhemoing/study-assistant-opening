@@ -178,6 +178,9 @@ export function evaluateDriftCanarySentinel(
 ): DriftSentinelDecision {
   validateRouteConfig(input.route);
   validateThresholds(input.thresholds);
+  if (input.evaluatedAtMs !== undefined) {
+    assertNonNegativeFinite(input.evaluatedAtMs, "evaluatedAtMs");
+  }
 
   const primary = input.route.primary;
   const fallback = input.route.fallback;
@@ -368,11 +371,12 @@ export function reconcileFailoverBillingSettlement(
   const requestId = assertNonEmptyString(input.requestId, "requestId");
   const taskKind = assertNonEmptyString(input.taskKind, "taskKind");
   validateBillingAttempt(input.primaryAttempt, "primaryAttempt");
+  const primaryProviderFamily = input.primaryAttempt.providerFamily.trim();
 
   const fallback = input.fallbackAttempt ?? null;
   if (fallback) {
     validateBillingAttempt(fallback, "fallbackAttempt");
-    if (fallback.providerFamily === input.primaryAttempt.providerFamily) {
+    if (fallback.providerFamily.trim() === primaryProviderFamily) {
       throw new RangeError(
         "Cross-family failover billing requires fallbackAttempt.providerFamily !== primaryAttempt.providerFamily",
       );
