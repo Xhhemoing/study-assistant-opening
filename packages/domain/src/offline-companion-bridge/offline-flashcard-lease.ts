@@ -1222,14 +1222,13 @@ function containsCjkBoundedSubstring(haystack: string, needle: string): boolean 
 
 const OPTION_WRAPPER_OPEN = /[\p{Pi}\p{Ps}\p{Quotation_Mark}<`]/u.source;
 const OPTION_WRAPPER_CLOSE = /[\p{Pf}\p{Pe}\p{Quotation_Mark}>`]/u.source;
-const OPTION_COMMA = "[,，、]";
-const PRECEDING_CHOICE_IN_LIST_RE = new RegExp(
-  `(?:${OPTION_WRAPPER_OPEN}\\s*[a-z]\\s*${OPTION_WRAPPER_CLOSE}|(?<!${NON_CJK_WORD_CHAR})[a-z])\\s*` +
-    `(?:${OPTION_COMMA}(?:\\s*(?:and|or)\\b)?|\\b(?:and|or)\\b)\\s*$`,
-  "iu",
-);
+const OPTION_WORD_CONNECTOR = /\b(?:and|or|then)\b/.source;
+const OPTION_SEQUENCE_SEPARATOR =
+  `\\s*(?:${OPTION_WRAPPER_CLOSE}\\s*)?` +
+  `(?:[,，、](?:\\s*${OPTION_WORD_CONNECTOR})?|[;/&+→]|->|=>|${OPTION_WORD_CONNECTOR})` +
+  `\\s*(?:${OPTION_WRAPPER_OPEN}\\s*)?`;
 
-function containsSingleChoiceReveal(rawText: string, choiceLetter: string): boolean {
+function containsSingleChoiceReveal(rawText: string, normalizedText: string, choiceLetter: string): boolean {
   const escaped = escapeRegExp(choiceLetter);
   const patterns = [
     new RegExp(
@@ -1240,8 +1239,15 @@ function containsSingleChoiceReveal(rawText: string, choiceLetter: string): bool
   ];
   if (patterns.some(pattern => pattern.test(rawText))) return true;
 
-  const trailing = new RegExp(`[\\[(（]\\s*${escaped}\\s*[\\])）]\\s*$`, "iu").exec(rawText);
-  return trailing !== null && !PRECEDING_CHOICE_IN_LIST_RE.test(rawText.slice(0, trailing.index));
+  const trailing = new RegExp(`[\\[(（]\\s*${escaped}\\s*[\\])）]\\s*$`, "iu");
+  if (!trailing.test(rawText)) return false;
+
+  // Only suppress the trailing-label heuristic for a list the ordered matcher also recognizes.
+  const trailingSequence = new RegExp(
+    `(?<!${NON_CJK_WORD_CHAR})[a-z]${OPTION_SEQUENCE_SEPARATOR}${escaped}\\s*${OPTION_WRAPPER_CLOSE}\\s*$`,
+    "iu",
+  );
+  return !trailingSequence.test(normalizedText);
 }
 
 const COMPOUND_BINARY_ADD_SUB_RE =
@@ -1280,10 +1286,6 @@ function compactJsonPunctuation(text: string): string {
     punctuation ?? match,
   );
 }
-
-// Match optional closing and opening wrappers between labels, preserving the word boundaries at the ends.
-const OPTION_SEQUENCE_SEPARATOR =
-  `\\s*(?:${OPTION_WRAPPER_CLOSE}\\s*)?${OPTION_COMMA}\\s*(?:${OPTION_WRAPPER_OPEN}\\s*)?`;
 
 function containsArrayAnswerLeak(stem: string, normalizedSecret: string, rawSecret: string): boolean {
   if (!rawSecret.trimStart().startsWith("[")) return false;
@@ -1407,7 +1409,7 @@ export function containsAnswerLeak(
             return true;
           }
         } else if (SINGLE_CHOICE_LETTER_RE.test(segment)) {
-          if (containsSingleChoiceReveal(rawText, segment)) {
+          if (containsSingleChoiceReveal(rawText, normalizedStem, segment)) {
             return true;
           }
         } else if (segment.length >= 2 && segment.length < 6 && /[\p{L}\p{N}]/u.test(segment)) {

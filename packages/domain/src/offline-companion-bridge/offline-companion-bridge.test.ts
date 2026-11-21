@@ -2072,6 +2072,43 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
     })).toMatchObject({ ok: true });
   });
 
+  describe.each(["variant stem", "sibling card back"] as const)("option sequence connectors in a %s", surface => {
+    const separators = [
+      ", ", "，", "、", "; ", "/", " & ", " + ", " -> ", "→", " => ",
+      " and ", " or ", " then ", ", and ", ", then ", " ＡＮＤ ",
+    ];
+
+    it.each([
+      ...separators.flatMap(separator => [
+        { text: `Use the sequence [B]${separator}[D]`, ok: false },
+        { text: `Compare [D]${separator}[B]`, ok: true },
+      ]),
+      { text: "[B], and [D]", ok: false },
+      { text: "[B] then [D]", ok: false },
+      { text: "Use «B» and «D»", ok: false },
+      { text: "B and D", ok: false },
+      { text: "Compare «D» and «B»", ok: true },
+      { text: "The marked response [B]", ok: false },
+      { text: "The marked response [D]", ok: false },
+    ])("sets ok=$ok for $text", ({ text, ok }) => {
+      const variant = makeMissVariantCandidate({
+        sealedPayload: { order: ["B", "D"] },
+        freshVariantStem: surface === "variant stem" ? text : "Which ordering is correct?",
+      });
+      const candidates = surface === "variant stem" ? [variant] : [
+        variant,
+        { ...makeFlashcardCandidate(900), backSummary: text },
+      ];
+      expect(issueOfflineFlashcardLease({
+        leaseId: "lease-option-connectors",
+        workspaceId: "ws-1",
+        learnerId: "learner-1",
+        issuedAtMs: T0,
+        candidates,
+      })).toMatchObject(ok ? { ok: true } : { ok: false, httpStatus: 422, code: "miss_variant_answer_leak" });
+    });
+  });
+
   it.each([
     "The marked response [B]",
     "Compare the candidates, [B]",
