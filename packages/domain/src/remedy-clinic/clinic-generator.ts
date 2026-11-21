@@ -99,6 +99,7 @@ export interface RejectedClinicProbe {
     | "duplicate_probe_id"
     | "duplicate_probe_prompt"
     | "not_distinguishable"
+    | "target_misconception_mismatch"
     | "revoked_probe_source"
     | "invalid_probe_prompt"
     | "invalid_probe_descriptor";
@@ -1641,10 +1642,40 @@ export function generateRemedyClinic<TInput = unknown, TObservable = unknown>(
       frozenSpec,
     } = item.entry;
 
+    const normalizedRuleId = frozenRuleId.trim();
+    const normalizedTargetId =
+      typeof frozenTargetMisconceptionId === "string" ? frozenTargetMisconceptionId.trim() : "";
+    const hasTargetHypothesis =
+      normalizedTargetId.length > 0 &&
+      normalizedTargetId === normalizedRuleId &&
+      frozenSpec.hypotheses.some((hyp) => isNonBlankText(hyp.id) && hyp.id.trim() === normalizedTargetId);
+    if (!hasTargetHypothesis) {
+      rejectedProbes.push({
+        probeId: frozenProbeId,
+        reason: "target_misconception_mismatch",
+        report: null,
+      });
+      continue;
+    }
+
     const report = verifyProbeFn(frozenSpec);
     const probeId = report.probeId || frozenProbeId;
     if (!report.distinguishable) {
       rejectedProbes.push({ probeId, reason: "not_distinguishable", report });
+      continue;
+    }
+    const correctPred = report.predictions.find((entry) => entry.role === "correct");
+    const targetPred = report.predictions.find(
+      (entry) => entry.role === "misconception" && entry.modelId.trim() === normalizedTargetId,
+    );
+    if (
+      !correctPred ||
+      !targetPred ||
+      !isNonBlankText(correctPred.observableKey) ||
+      !isNonBlankText(targetPred.observableKey) ||
+      targetPred.observableKey === correctPred.observableKey
+    ) {
+      rejectedProbes.push({ probeId, reason: "target_misconception_mismatch", report });
       continue;
     }
     if (acceptedProbeIds.has(probeId)) {
@@ -1663,9 +1694,7 @@ export function generateRemedyClinic<TInput = unknown, TObservable = unknown>(
         probeId,
         requirementKey: frozenRequirementKey,
         prompt: frozenPrompt,
-        ...(frozenTargetMisconceptionId !== undefined
-          ? { targetMisconceptionId: frozenTargetMisconceptionId }
-          : {}),
+        targetMisconceptionId: normalizedTargetId,
         ...(frozenSourceRefs !== undefined ? { sourceRefs: frozenSourceRefs } : {}),
         competingModelIds: Object.freeze(report.predictions.map((entry) => entry.modelId)),
         report,
@@ -1829,14 +1858,14 @@ function snapshotEvidenceCaseForRevalidation(rawCase: unknown): ClinicEvidenceCa
   const rawSourceRefs = readOwnDataProp(rawCase, "sourceRefs");
 
   if (
-    typeof attemptId !== "string" ||
-    typeof rootAttemptId !== "string" ||
-    typeof chapterId !== "string" ||
-    typeof localDate !== "string" ||
-    typeof ruleId !== "string" ||
-    typeof excerpt !== "string" ||
-    typeof invariantSummary !== "string" ||
-    typeof privacyEpoch !== "number"
+    !isNonBlankText(attemptId) ||
+    !isNonBlankText(rootAttemptId) ||
+    !isNonBlankText(chapterId) ||
+    !isValidLocalDate(localDate) ||
+    !isNonBlankText(ruleId) ||
+    !isNonBlankText(excerpt) ||
+    !isNonBlankText(invariantSummary) ||
+    !isValidPrivacyEpoch(privacyEpoch)
   ) {
     return null;
   }
@@ -1845,11 +1874,11 @@ function snapshotEvidenceCaseForRevalidation(rawCase: unknown): ClinicEvidenceCa
   if (!frozenSourceRefs) return null;
 
   return Object.freeze({
-    attemptId,
-    rootAttemptId,
-    chapterId,
+    attemptId: attemptId.trim(),
+    rootAttemptId: rootAttemptId.trim(),
+    chapterId: chapterId.trim(),
     localDate,
-    ruleId,
+    ruleId: ruleId.trim(),
     excerpt,
     invariantSummary,
     sourceRefs: frozenSourceRefs,
@@ -1861,6 +1890,7 @@ function isValidDistinguishableReport(
   report: unknown,
   expectedProbeId: string,
   expectedCompetingModelIds: readonly string[],
+  expectedTargetRuleId: string,
 ): report is ProbeDistinguishabilityReport {
   if (!isPlainRecordOwnDataOnly(report)) return false;
   if (readOwnDataProp(report, "probeId") !== expectedProbeId) return false;
@@ -1887,8 +1917,11 @@ function isValidDistinguishableReport(
 
   let correctCount = 0;
   let misconceptionCount = 0;
+  let correctObservableKey: string | null = null;
+  let targetMisconceptionObservableKey: string | null = null;
   const seenModelIds = new Set<string>();
   const seenObservableKeys = new Set<string>();
+  const normalizedTargetRuleId = expectedTargetRuleId.trim();
 
   for (let i = 0; i < predictions.length; i += 1) {
     const slot = readOwnDataIndex(predictions, i);
@@ -1900,21 +1933,31 @@ function isValidDistinguishableReport(
     if (!isNonBlankText(modelId) || modelId !== expectedCompetingModelIds[i] || seenModelIds.has(modelId)) {
       return false;
     }
-    if (role === "correct") {
-      correctCount += 1;
-    } else if (role === "misconception") {
-      misconceptionCount += 1;
-    } else {
+    if (!isNonBlankText(observableKey) || seenObservableKeys.has(observableKey)) {
       return false;
     }
-    if (!isNonBlankText(observableKey) || seenObservableKeys.has(observableKey)) {
+    if (role === "correct") {
+      correctCount += 1;
+      correctObservableKey = observableKey;
+    } else if (role === "misconception") {
+      misconceptionCount += 1;
+      if (modelId.trim() === normalizedTargetRuleId) {
+        targetMisconceptionObservableKey = observableKey;
+      }
+    } else {
       return false;
     }
     seenModelIds.add(modelId);
     seenObservableKeys.add(observableKey);
   }
 
-  return correctCount === 1 && misconceptionCount >= 1;
+  return (
+    correctCount === 1 &&
+    misconceptionCount >= 1 &&
+    correctObservableKey !== null &&
+    targetMisconceptionObservableKey !== null &&
+    targetMisconceptionObservableKey !== correctObservableKey
+  );
 }
 
 function isValidDelayedRecheck(rawDelayedRecheck: unknown, expectedRuleId: string): boolean {
@@ -1931,6 +1974,7 @@ function isValidDelayedRecheck(rawDelayedRecheck: unknown, expectedRuleId: strin
 function snapshotProbeForRevalidation(
   rawProbe: unknown,
   activeSources: ReadonlyMap<string, ActiveSourceEntry>,
+  expectedRuleId: string,
 ): VerifiedClinicTransferProbe | null {
   if (!isPlainRecordOwnDataOnly(rawProbe)) return null;
   const probeId = readOwnDataProp(rawProbe, "probeId");
@@ -1942,12 +1986,14 @@ function snapshotProbeForRevalidation(
   const rawSourceRefs = hasExplicitSourceRefs ? readOwnDataProp(rawProbe, "sourceRefs") : undefined;
   const rawCompetingModelIds = readOwnDataProp(rawProbe, "competingModelIds");
   const report = readOwnDataProp(rawProbe, "report");
+  const normalizedRuleId = expectedRuleId.trim();
 
   if (
     !isNonBlankText(probeId) ||
     !isNonBlankText(requirementKey) ||
     !isNonBlankText(prompt) ||
-    (targetMisconceptionId !== undefined && typeof targetMisconceptionId !== "string") ||
+    !isNonBlankText(targetMisconceptionId) ||
+    targetMisconceptionId.trim() !== normalizedRuleId ||
     !isPlainRecordOwnDataOnly(report)
   ) {
     return null;
@@ -1955,9 +2001,12 @@ function snapshotProbeForRevalidation(
 
   const frozenCompetingModelIds = snapshotStringArray(rawCompetingModelIds);
   if (!frozenCompetingModelIds || frozenCompetingModelIds.length < 2) return null;
+  let includesTargetModel = false;
   for (const modelId of frozenCompetingModelIds) {
     if (!isNonBlankText(modelId)) return null;
+    if (modelId.trim() === normalizedRuleId) includesTargetModel = true;
   }
+  if (!includesTargetModel) return null;
 
   let validatedSourceRefs: readonly RemedySourceRef[] | undefined;
   if (hasExplicitSourceRefs) {
@@ -1967,7 +2016,10 @@ function snapshotProbeForRevalidation(
   }
 
   const clonedReport = cloneAndFreezePlainData(report);
-  if (!clonedReport.ok || !isValidDistinguishableReport(clonedReport.value, probeId, frozenCompetingModelIds)) {
+  if (
+    !clonedReport.ok ||
+    !isValidDistinguishableReport(clonedReport.value, probeId, frozenCompetingModelIds, normalizedRuleId)
+  ) {
     return null;
   }
 
@@ -1975,7 +2027,7 @@ function snapshotProbeForRevalidation(
     probeId,
     requirementKey,
     prompt,
-    ...(targetMisconceptionId !== undefined ? { targetMisconceptionId } : {}),
+    targetMisconceptionId: normalizedRuleId,
     ...(validatedSourceRefs !== undefined ? { sourceRefs: validatedSourceRefs } : {}),
     competingModelIds: frozenCompetingModelIds,
     report: clonedReport.value,
@@ -2108,7 +2160,7 @@ export function revalidateRemedyClinic(
     }
   }
 
-  if (!isValidDelayedRecheck(rawDelayedRecheck, header.ruleId)) {
+  if (!isNonBlankText(header.ruleId) || !isValidDelayedRecheck(rawDelayedRecheck, header.ruleId)) {
     return buildRevokedClinicFromHeader(
       header,
       currentPrivacyEpoch,
@@ -2166,6 +2218,7 @@ export function revalidateRemedyClinic(
     checklist: rawStep2Checklist,
   });
 
+  const normalizedHeaderRuleId = header.ruleId.trim();
   const seenRoots = new Set<string>();
   const survivingCases: ClinicEvidenceCase[] = [];
   if (evidenceCasesSnap) {
@@ -2173,7 +2226,7 @@ export function revalidateRemedyClinic(
       const snap = snapshotEvidenceCaseForRevalidation(evidenceCasesSnap[i]);
       if (!snap) continue;
       if (seenRoots.has(snap.rootAttemptId)) continue;
-      if (snap.ruleId !== header.ruleId) continue;
+      if (snap.ruleId !== normalizedHeaderRuleId) continue;
       if (!isValidPrivacyEpoch(snap.privacyEpoch) || snap.privacyEpoch > currentPrivacyEpoch) continue;
       if (!isValidLocalDate(snap.localDate)) continue;
       if (!areSourceRefsActive(snap.sourceRefs, activeSourcesSnapshot)) continue;
@@ -2203,7 +2256,11 @@ export function revalidateRemedyClinic(
   const seenProbePrompts = new Set<string>();
   if (step3ProbesSnap) {
     for (let i = 0; i < step3ProbesSnap.length; i += 1) {
-      const snapProbe = snapshotProbeForRevalidation(step3ProbesSnap[i], activeSourcesSnapshot);
+      const snapProbe = snapshotProbeForRevalidation(
+        step3ProbesSnap[i],
+        activeSourcesSnapshot,
+        normalizedHeaderRuleId,
+      );
       if (!snapProbe) continue;
       const promptKey = normalizePromptKey(snapProbe.prompt);
       if (seenProbeIds.has(snapProbe.probeId) || seenProbePrompts.has(promptKey)) continue;

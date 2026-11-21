@@ -24,11 +24,13 @@ function makeProbe(options: {
   input: InequalityInput;
   degenerate?: boolean;
   ambiguousHypotheses?: boolean;
-}): DistinguishableProbeSpec<InequalityInput, string> {
+  targetMisconceptionId?: string;
+}): ClinicCandidateProbe<InequalityInput, string> {
   return {
     probeId: options.probeId,
     requirementKey: "alg.linear-inequalities",
     prompt: `Solve ${options.input.a}x <= ${options.input.b} for x.`,
+    targetMisconceptionId: options.targetMisconceptionId ?? RULE_ID,
     input: options.input,
     correctModel: {
       id: "M_star",
@@ -1014,10 +1016,11 @@ describe("revalidateRemedyClinic privacy_epoch and source-revocation read guard"
     const cyclic: GraphInput = { a: -3, b: 12 };
     cyclic.self = cyclic;
 
-    const makeGraphProbe = (probeId: string, graphInput: GraphInput): DistinguishableProbeSpec<GraphInput, string> => ({
+    const makeGraphProbe = (probeId: string, graphInput: GraphInput): ClinicCandidateProbe<GraphInput, string> => ({
       probeId,
       requirementKey: "alg.linear-inequalities",
       prompt: `Graph solve ${graphInput.a}x <= ${graphInput.b}`,
+      targetMisconceptionId: RULE_ID,
       input: graphInput,
       correctModel: { id: "M_star", label: "Flip", role: "correct", predict: (x) => `x >= ${x.b / x.a}` },
       hypotheses: [
@@ -1113,10 +1116,11 @@ describe("revalidateRemedyClinic privacy_epoch and source-revocation read guard"
     expect(protoRes.rejectedProbes[0]!.reason).toBe("invalid_probe_descriptor");
 
     // Round-7 [P1-3]: observableKey receives the canonical frozen probe as `this` (reads this.requirementKey).
-    const roundingProbe: DistinguishableProbeSpec<InequalityInput, number> = {
+    const roundingProbe: ClinicCandidateProbe<InequalityInput, number> = {
       probeId: "probe-receiver-observable-key",
       requirementKey: "round.int",
       prompt: "Round-based collision probe",
+      targetMisconceptionId: RULE_ID,
       input: { a: -2, b: 8 },
       correctModel: { id: "M_star", label: "Correct", role: "correct", predict: () => 1.1 },
       hypotheses: [
@@ -1679,19 +1683,19 @@ describe("revalidateRemedyClinic privacy_epoch and source-revocation read guard"
       probeId: "probe-target-meta",
       requirementKey: "alg.ineq",
       prompt: "Meta receiver rounding probe",
-      targetMisconceptionId: "h1",
+      targetMisconceptionId: RULE_ID,
       sourceRefs: [{ sourceId: "src-ch-1", sourceVersion: "v1" }],
       input: { a: -2, b: 8 },
       correctModel: { id: "M_star", label: "Correct", role: "correct", predict: () => 1.1 },
       hypotheses: [
-        { id: "h1", label: "Target misconception", role: "misconception", description: "1.2", predict: () => 1.2 },
+        { id: RULE_ID, label: "Target misconception", role: "misconception", description: "1.2", predict: () => 1.2 },
         { id: "h2", label: "Other", role: "misconception", description: "3.0", predict: () => 3.0 },
       ],
       observableKey(
         this: { targetMisconceptionId?: string; sourceRefs?: readonly { sourceId: string }[] },
         obs: number,
       ) {
-        return this?.targetMisconceptionId === "h1" && this?.sourceRefs?.[0]?.sourceId === "src-ch-1"
+        return this?.targetMisconceptionId === RULE_ID && this?.sourceRefs?.[0]?.sourceId === "src-ch-1"
           ? String(Math.round(obs))
           : String(obs);
       },
@@ -2276,6 +2280,176 @@ describe("revalidateRemedyClinic privacy_epoch and source-revocation read guard"
       }
     } finally {
       process.off("unhandledRejection", onUnhandled);
+    }
+  });
+
+  it("enforces Round-12 target misconception binding, strict boolean active/revoked source flags, and non-blank revalidation roots", () => {
+    const allSources = {
+      "src-ch-1": { version: "v1", active: true },
+      "src-ch-2": { version: "v1", active: true },
+      "src-ch-3": { version: "v1", active: true },
+    };
+    const baseAttempts = [
+      makeAttempt({ attemptId: "a1", rootAttemptId: "r1", chapterId: "ch-1", localDate: "2026-10-01", sourceRefs: [{ sourceId: "src-ch-1", sourceVersion: "v1" }] }),
+      makeAttempt({ attemptId: "a2", rootAttemptId: "r2", chapterId: "ch-2", localDate: "2026-10-03", sourceRefs: [{ sourceId: "src-ch-2", sourceVersion: "v1" }] }),
+      makeAttempt({ attemptId: "a3", rootAttemptId: "r3", chapterId: "ch-3", localDate: "2026-10-05", sourceRefs: [{ sourceId: "src-ch-3", sourceVersion: "v1" }] }),
+    ];
+    const probe1 = makeProbe({ probeId: "r12-p1", input: { a: -2, b: 8 } });
+    const probe2 = makeProbe({ probeId: "r12-p2", input: { a: -3, b: 12 } });
+
+    const baselineRes = generateRemedyClinic({
+      learnerId: "learner-1",
+      courseId: "course-alg-1",
+      ruleId: RULE_ID,
+      currentPrivacyEpoch: 5,
+      activeSourcesMap: allSources,
+      verifyRuleViolation: verifyNegativeSignFlip,
+      attempts: baseAttempts,
+      candidateProbes: [probe1, probe2],
+    });
+    expect(baselineRes.status).toBe("active");
+    const clinic = baselineRes.clinic!;
+
+    // [P1-3] Generation rejects probes missing targetMisconceptionId, targeting a different ruleId,
+    // or omitting a misconception hypothesis matching clinic ruleId.
+    const noTargetProbe: ClinicCandidateProbe<InequalityInput, string> = { ...probe1, probeId: "r12-no-target" };
+    delete (noTargetProbe as { targetMisconceptionId?: string }).targetMisconceptionId;
+    const wrongTargetProbe = makeProbe({
+      probeId: "r12-wrong-target",
+      input: { a: -4, b: 16 },
+      targetMisconceptionId: "unrelated_rule",
+    });
+    const missingRuleHypProbe: ClinicCandidateProbe<InequalityInput, string> = {
+      ...makeProbe({ probeId: "r12-missing-hyp", input: { a: -5, b: 20 } }),
+      hypotheses: [
+        {
+          id: "unrelated_hyp_a",
+          label: "Unrelated A",
+          role: "misconception",
+          description: "Unrelated misconception A",
+          predict: ({ a, b }) => `x <= ${b / a}`,
+        },
+        {
+          id: "unrelated_hyp_b",
+          label: "Unrelated B",
+          role: "misconception",
+          description: "Unrelated misconception B",
+          predict: ({ a, b }) => `x <= ${b / Math.abs(a)}`,
+        },
+      ],
+    };
+    const mismatchGenRes = generateRemedyClinic({
+      learnerId: "learner-1",
+      courseId: "course-alg-1",
+      ruleId: RULE_ID,
+      currentPrivacyEpoch: 5,
+      activeSourcesMap: allSources,
+      verifyRuleViolation: verifyNegativeSignFlip,
+      attempts: baseAttempts,
+      candidateProbes: [noTargetProbe, wrongTargetProbe, missingRuleHypProbe],
+    });
+    expect(mismatchGenRes.status).toBe("insufficient_distinguishable_probes");
+    expect(mismatchGenRes.rejectedProbes.map((r) => r.reason)).toEqual([
+      "target_misconception_mismatch",
+      "target_misconception_mismatch",
+      "target_misconception_mismatch",
+    ]);
+
+    // [P1-3] Revalidation rejects Step-3 probes whose targetMisconceptionId or report.predictions omit header.ruleId.
+    const unrelatedProbeInClinic = {
+      ...clinic.steps[2].probes[0]!,
+      targetMisconceptionId: RULE_ID,
+      competingModelIds: ["M_star", "unrelated_hyp_a", "unrelated_hyp_b"],
+      report: {
+        ...clinic.steps[2].probes[0]!.report,
+        predictions: [
+          { modelId: "M_star", role: "correct" as const, observableKey: "x >= -4" },
+          { modelId: "unrelated_hyp_a", role: "misconception" as const, observableKey: "x <= -4" },
+          { modelId: "unrelated_hyp_b", role: "misconception" as const, observableKey: "x <= 4" },
+        ],
+      },
+    };
+    const revalOmittedTargetModel = revalidateRemedyClinic(
+      {
+        ...clinic,
+        steps: [
+          clinic.steps[0],
+          clinic.steps[1],
+          { ...clinic.steps[2], probes: [unrelatedProbeInClinic, clinic.steps[2].probes[1]!] },
+        ] as typeof clinic.steps,
+      },
+      allSources,
+      6,
+    );
+    expect(revalOmittedTargetModel.status).toBe("stale_source_revoked");
+    expect(revalOmittedTargetModel.revocationSummary.reason).toBe("insufficient_surviving_probes");
+
+    const revalWrongTargetProp = revalidateRemedyClinic(
+      {
+        ...clinic,
+        steps: [
+          clinic.steps[0],
+          clinic.steps[1],
+          {
+            ...clinic.steps[2],
+            probes: [
+              { ...clinic.steps[2].probes[0]!, targetMisconceptionId: "wrong_rule" },
+              clinic.steps[2].probes[1]!,
+            ],
+          },
+        ] as typeof clinic.steps,
+      },
+      allSources,
+      6,
+    );
+    expect(revalWrongTargetProp.status).toBe("stale_source_revoked");
+    expect(revalWrongTargetProp.revocationSummary.reason).toBe("insufficient_surviving_probes");
+
+    // [P1-4] Malformed non-boolean revoked/active flags or blank version reject ONLY that source (not valid siblings).
+    const malformedFlagsSources = {
+      "src-revoked-str": { version: "v1", revoked: "true" } as unknown as { version: string; revoked: boolean },
+      "src-active-str": { version: "v1", active: "false" } as unknown as { version: string; active: boolean },
+      "src-blank-ver": { version: "", revoked: false },
+      "src-ch-2": { version: "v1", active: true },
+      "src-ch-3": { version: "v1", active: true },
+    } as ActiveSourcesMap;
+    expect(isSourceRefActive({ sourceId: "src-revoked-str", sourceVersion: "v1" }, malformedFlagsSources)).toBe(false);
+    expect(isSourceRefActive({ sourceId: "src-active-str", sourceVersion: "v1" }, malformedFlagsSources)).toBe(false);
+    expect(isSourceRefActive({ sourceId: "src-blank-ver", sourceVersion: "" }, malformedFlagsSources)).toBe(false);
+    expect(isSourceRefActive({ sourceId: "src-ch-2", sourceVersion: "v1" }, malformedFlagsSources)).toBe(true);
+
+    const revalMalformedRevoked = revalidateRemedyClinic(
+      clinic,
+      {
+        "src-ch-1": { version: "v1", revoked: "true" } as unknown as { version: string; revoked: boolean },
+        "src-ch-2": { version: "v1", active: true },
+        "src-ch-3": { version: "v1", active: true },
+      },
+      6,
+    );
+    expect(revalMalformedRevoked.status).toBe("stale_source_revoked");
+    expect(revalMalformedRevoked.coverage.rootAttemptCount).toBe(2);
+    expect(revalMalformedRevoked.revocationSummary.reason).toBe("insufficient_surviving_evidence");
+
+    // [P1-5] Revalidation rejects blank/whitespace rootAttemptId, attemptId, chapterId, or invalid localDate.
+    for (const tamperedCase of [
+      { ...clinic.evidenceCases[2]!, rootAttemptId: "" },
+      { ...clinic.evidenceCases[2]!, rootAttemptId: "   " },
+      { ...clinic.evidenceCases[2]!, attemptId: "   " },
+      { ...clinic.evidenceCases[2]!, chapterId: "" },
+      { ...clinic.evidenceCases[2]!, localDate: "2026-02-30" },
+    ]) {
+      const blankRootReval = revalidateRemedyClinic(
+        {
+          ...clinic,
+          evidenceCases: [clinic.evidenceCases[0]!, clinic.evidenceCases[1]!, tamperedCase],
+        },
+        allSources,
+        6,
+      );
+      expect(blankRootReval.status).toBe("stale_source_revoked");
+      expect(blankRootReval.coverage.rootAttemptCount).toBe(2);
+      expect(blankRootReval.revocationSummary.reason).toBe("insufficient_surviving_evidence");
     }
   });
 });

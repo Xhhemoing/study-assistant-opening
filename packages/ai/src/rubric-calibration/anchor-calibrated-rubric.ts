@@ -29,6 +29,11 @@ export interface RubricSubmissionInput {
   readonly assisted: boolean;
   readonly comparisons: readonly PairwiseSwapComparison[];
   readonly anchors?: readonly DimensionSentinelAnchor[];
+  /**
+   * Independent formal-assessment submission IDs that corroborate this submission.
+   * Mastery updates require at least 1 distinct non-blank ID !== submissionId (total >= 2 independent drafts).
+   */
+  readonly corroboratingIndependentSubmissionIds?: readonly string[];
 }
 
 export type RubricInconsistencyReason =
@@ -52,7 +57,8 @@ export type MasteryExclusionReason =
   | "assisted_submission"
   | "interval_only_inconsistent"
   | "template_padding_detected"
-  | "unanchored_tail_extrapolation";
+  | "unanchored_tail_extrapolation"
+  | "single_draft_uncorroborated";
 
 export interface TemplatePaddingReport {
   readonly isTemplatePadded: boolean;
@@ -424,10 +430,56 @@ function validateAndSortAnchors(
   return sorted;
 }
 
+function hasIndependentCorroboration(rawIds: unknown, rawSubmissionId: unknown): boolean {
+  if (typeof rawSubmissionId !== "string") return false;
+  const ownId = rawSubmissionId.trim();
+  if (ownId.length === 0) return false;
+  try {
+    if (!Array.isArray(rawIds) || Object.getPrototypeOf(rawIds) !== Array.prototype) return false;
+    const lenDesc = Object.getOwnPropertyDescriptor(rawIds, "length");
+    if (
+      !lenDesc ||
+      !Object.hasOwn(lenDesc, "value") ||
+      typeof lenDesc.value !== "number" ||
+      !Number.isInteger(lenDesc.value) ||
+      lenDesc.value <= 0
+    ) {
+      return false;
+    }
+    const len = lenDesc.value;
+    if (Reflect.ownKeys(rawIds).length !== len + 1) return false;
+    const distinctOtherIds = new Set<string>();
+    for (let i = 0; i < len; i += 1) {
+      const desc = Object.getOwnPropertyDescriptor(rawIds, String(i));
+      if (
+        !desc ||
+        !desc.enumerable ||
+        !Object.hasOwn(desc, "value") ||
+        desc.get !== undefined ||
+        desc.set !== undefined ||
+        typeof desc.value !== "string"
+      ) {
+        return false;
+      }
+      const trimmed = desc.value.trim();
+      if (trimmed.length === 0) return false;
+      if (trimmed !== ownId) distinctOtherIds.add(trimmed);
+    }
+    structuredClone(rawIds);
+    return distinctOtherIds.size >= 1;
+  } catch {
+    return false;
+  }
+}
+
 export function evaluateAnchorCalibratedRubric(input: RubricSubmissionInput): AnchorCalibratedRubricV1Result {
   const sourceAnchors = input.anchors ?? getSentinelAnchorsForDimension(input.dimension);
   const paddingReport = detectTemplatePadding(input.text);
   const anchors = validateAndSortAnchors(sourceAnchors, input.dimension);
+  const hasCorroboration = hasIndependentCorroboration(
+    input.corroboratingIndependentSubmissionIds,
+    input.submissionId,
+  );
 
   if (!anchors) {
     const masteryExclusionReasons: MasteryExclusionReason[] = [];
@@ -435,6 +487,7 @@ export function evaluateAnchorCalibratedRubric(input: RubricSubmissionInput): An
     if (input.assisted) masteryExclusionReasons.push("assisted_submission");
     masteryExclusionReasons.push("interval_only_inconsistent");
     if (paddingReport.isTemplatePadded) masteryExclusionReasons.push("template_padding_detected");
+    if (!hasCorroboration) masteryExclusionReasons.push("single_draft_uncorroborated");
 
     return {
       schemaVersion: 1,
@@ -538,6 +591,7 @@ export function evaluateAnchorCalibratedRubric(input: RubricSubmissionInput): An
   if (input.assisted) masteryExclusionReasons.push("assisted_submission");
   if (!isConsistentAndMonotone) masteryExclusionReasons.push("interval_only_inconsistent");
   if (paddingReport.isTemplatePadded) masteryExclusionReasons.push("template_padding_detected");
+  if (!hasCorroboration) masteryExclusionReasons.push("single_draft_uncorroborated");
 
   if (!isConsistentAndMonotone) {
     return {

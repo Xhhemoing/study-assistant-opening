@@ -89,17 +89,27 @@ export interface RubricCalibrationGateReport {
   readonly failures: readonly RubricCalibrationGateFailure[];
 }
 
-export const DEFAULT_CALIBRATION_THRESHOLDS = {
-  minQwk: 0.70,
-  maxAbsSmd: 0.15,
-  maxAbsBiasLow: 0.25,
-  maxAbsBiasHigh: 0.25,
-  minSdRatio: 0.75,
-  minAdmissibleCoverage: 0.85,
-  lowTailMaxBand: 5.0,
-  highTailMinBand: 7.5,
-  maxPaddingGain: 0.25,
-} as const;
+const HARD_MIN_QWK = 0.70;
+const HARD_MAX_ABS_SMD = 0.15;
+const HARD_MAX_ABS_BIAS_LOW = 0.25;
+const HARD_MAX_ABS_BIAS_HIGH = 0.25;
+const HARD_MIN_SD_RATIO = 0.75;
+const HARD_MIN_ADMISSIBLE_COVERAGE = 0.85;
+const HARD_LOW_TAIL_MAX_BAND = 5.0;
+const HARD_HIGH_TAIL_MIN_BAND = 7.5;
+const HARD_MAX_PADDING_GAIN = 0.25;
+
+export const DEFAULT_CALIBRATION_THRESHOLDS = Object.freeze({
+  minQwk: HARD_MIN_QWK,
+  maxAbsSmd: HARD_MAX_ABS_SMD,
+  maxAbsBiasLow: HARD_MAX_ABS_BIAS_LOW,
+  maxAbsBiasHigh: HARD_MAX_ABS_BIAS_HIGH,
+  minSdRatio: HARD_MIN_SD_RATIO,
+  minAdmissibleCoverage: HARD_MIN_ADMISSIBLE_COVERAGE,
+  lowTailMaxBand: HARD_LOW_TAIL_MAX_BAND,
+  highTailMinBand: HARD_HIGH_TAIL_MIN_BAND,
+  maxPaddingGain: HARD_MAX_PADDING_GAIN,
+} as const);
 
 const HALF_BAND_LEVELS = 19; // [0.0, 0.5, ..., 9.0]
 const MAX_LEVEL_INDEX = HALF_BAND_LEVELS - 1;
@@ -409,16 +419,28 @@ interface ResolvedCalibrationThresholds {
   readonly maxPaddingGain: number;
 }
 
+function defaultResolvedThresholds(): ResolvedCalibrationThresholds {
+  return {
+    minQwk: HARD_MIN_QWK,
+    maxAbsSmd: HARD_MAX_ABS_SMD,
+    maxAbsBiasLow: HARD_MAX_ABS_BIAS_LOW,
+    maxAbsBiasHigh: HARD_MAX_ABS_BIAS_HIGH,
+    minSdRatio: HARD_MIN_SD_RATIO,
+    minAdmissibleCoverage: HARD_MIN_ADMISSIBLE_COVERAGE,
+    lowTailMaxBand: HARD_LOW_TAIL_MAX_BAND,
+    highTailMinBand: HARD_HIGH_TAIL_MIN_BAND,
+    customLowTailMaxBand: null,
+    customHighTailMinBand: null,
+    maxPaddingGain: HARD_MAX_PADDING_GAIN,
+  };
+}
+
 function resolveTighteningThresholds(
   rawOverrides: unknown,
 ): { readonly thresholds: ResolvedCalibrationThresholds; readonly valid: boolean } {
   if (rawOverrides === undefined) {
     return {
-      thresholds: {
-        ...DEFAULT_CALIBRATION_THRESHOLDS,
-        customLowTailMaxBand: null,
-        customHighTailMinBand: null,
-      },
+      thresholds: defaultResolvedThresholds(),
       valid: true,
     };
   }
@@ -426,11 +448,7 @@ function resolveTighteningThresholds(
   const clonedOverrides = snapshotPlainGateData(rawOverrides);
   if (!clonedOverrides.ok || clonedOverrides.value === null || typeof clonedOverrides.value !== "object" || Array.isArray(clonedOverrides.value)) {
     return {
-      thresholds: {
-        ...DEFAULT_CALIBRATION_THRESHOLDS,
-        customLowTailMaxBand: null,
-        customHighTailMinBand: null,
-      },
+      thresholds: defaultResolvedThresholds(),
       valid: false,
     };
   }
@@ -452,28 +470,28 @@ function resolveTighteningThresholds(
   };
 
   const minQwk = Math.max(
-    DEFAULT_CALIBRATION_THRESHOLDS.minQwk,
-    checkFinite(overrides["minQwk"], DEFAULT_CALIBRATION_THRESHOLDS.minQwk, -1, 1),
+    HARD_MIN_QWK,
+    checkFinite(overrides["minQwk"], HARD_MIN_QWK, -1, 1),
   );
   const maxAbsSmd = Math.min(
-    DEFAULT_CALIBRATION_THRESHOLDS.maxAbsSmd,
-    checkFinite(overrides["maxAbsSmd"], DEFAULT_CALIBRATION_THRESHOLDS.maxAbsSmd, 0, Number.MAX_SAFE_INTEGER),
+    HARD_MAX_ABS_SMD,
+    checkFinite(overrides["maxAbsSmd"], HARD_MAX_ABS_SMD, 0, Number.MAX_SAFE_INTEGER),
   );
   const maxAbsBiasLow = Math.min(
-    DEFAULT_CALIBRATION_THRESHOLDS.maxAbsBiasLow,
-    checkFinite(overrides["maxAbsBiasLow"], DEFAULT_CALIBRATION_THRESHOLDS.maxAbsBiasLow, 0, 9),
+    HARD_MAX_ABS_BIAS_LOW,
+    checkFinite(overrides["maxAbsBiasLow"], HARD_MAX_ABS_BIAS_LOW, 0, 9),
   );
   const maxAbsBiasHigh = Math.min(
-    DEFAULT_CALIBRATION_THRESHOLDS.maxAbsBiasHigh,
-    checkFinite(overrides["maxAbsBiasHigh"], DEFAULT_CALIBRATION_THRESHOLDS.maxAbsBiasHigh, 0, 9),
+    HARD_MAX_ABS_BIAS_HIGH,
+    checkFinite(overrides["maxAbsBiasHigh"], HARD_MAX_ABS_BIAS_HIGH, 0, 9),
   );
   const minSdRatio = Math.max(
-    DEFAULT_CALIBRATION_THRESHOLDS.minSdRatio,
-    checkFinite(overrides["minSdRatio"], DEFAULT_CALIBRATION_THRESHOLDS.minSdRatio, 0, Number.MAX_SAFE_INTEGER),
+    HARD_MIN_SD_RATIO,
+    checkFinite(overrides["minSdRatio"], HARD_MIN_SD_RATIO, 0, Number.MAX_SAFE_INTEGER),
   );
   const minAdmissibleCoverage = Math.max(
-    DEFAULT_CALIBRATION_THRESHOLDS.minAdmissibleCoverage,
-    checkFinite(overrides["minAdmissibleCoverage"], DEFAULT_CALIBRATION_THRESHOLDS.minAdmissibleCoverage, 0, 1),
+    HARD_MIN_ADMISSIBLE_COVERAGE,
+    checkFinite(overrides["minAdmissibleCoverage"], HARD_MIN_ADMISSIBLE_COVERAGE, 0, 1),
   );
 
   const rawCustomLow = overrides["lowTailMaxBand"];
@@ -482,18 +500,18 @@ function resolveTighteningThresholds(
   const customLowTailMaxBand =
     rawCustomLow === undefined
       ? null
-      : checkFinite(rawCustomLow, DEFAULT_CALIBRATION_THRESHOLDS.lowTailMaxBand, 0, 9);
+      : checkFinite(rawCustomLow, HARD_LOW_TAIL_MAX_BAND, 0, 9);
   const customHighTailMinBand =
     rawCustomHigh === undefined
       ? null
-      : checkFinite(rawCustomHigh, DEFAULT_CALIBRATION_THRESHOLDS.highTailMinBand, 0, 9);
+      : checkFinite(rawCustomHigh, HARD_HIGH_TAIL_MIN_BAND, 0, 9);
   const maxPaddingGain = Math.min(
-    DEFAULT_CALIBRATION_THRESHOLDS.maxPaddingGain,
-    checkFinite(overrides["maxPaddingGain"], DEFAULT_CALIBRATION_THRESHOLDS.maxPaddingGain, 0, 9),
+    HARD_MAX_PADDING_GAIN,
+    checkFinite(overrides["maxPaddingGain"], HARD_MAX_PADDING_GAIN, 0, 9),
   );
 
-  const effectiveCustomLow = customLowTailMaxBand ?? DEFAULT_CALIBRATION_THRESHOLDS.lowTailMaxBand;
-  const effectiveCustomHigh = customHighTailMinBand ?? DEFAULT_CALIBRATION_THRESHOLDS.highTailMinBand;
+  const effectiveCustomLow = customLowTailMaxBand ?? HARD_LOW_TAIL_MAX_BAND;
+  const effectiveCustomHigh = customHighTailMinBand ?? HARD_HIGH_TAIL_MIN_BAND;
   if (effectiveCustomLow >= effectiveCustomHigh) {
     valid = false;
   }
@@ -507,8 +525,8 @@ function resolveTighteningThresholds(
       maxAbsBiasHigh,
       minSdRatio,
       minAdmissibleCoverage,
-      lowTailMaxBand: DEFAULT_CALIBRATION_THRESHOLDS.lowTailMaxBand,
-      highTailMinBand: DEFAULT_CALIBRATION_THRESHOLDS.highTailMinBand,
+      lowTailMaxBand: HARD_LOW_TAIL_MAX_BAND,
+      highTailMinBand: HARD_HIGH_TAIL_MIN_BAND,
       customLowTailMaxBand,
       customHighTailMinBand,
       maxPaddingGain,

@@ -286,13 +286,20 @@ function snapshotDenseArray(value: unknown): readonly unknown[] | null {
 
 function parseEntrySnap(entry: unknown): { readonly ok: true; readonly entry: ActiveSourceEntry | undefined } | { readonly ok: false } {
   if (entry === null || entry === undefined) return { ok: true, entry: undefined };
-  if (typeof entry === "string" || typeof entry === "number") return { ok: true, entry };
+  if (typeof entry === "string" || typeof entry === "number") {
+    return { ok: true, entry: isValidSourceVersion(entry) ? entry : undefined };
+  }
   const snap = snapshotPlainPrimitiveRecord(entry);
   if (!snap) return { ok: false };
   const version = snap["version"];
-  const active = snap["active"];
-  const revoked = snap["revoked"];
-  if (typeof version !== "string" && typeof version !== "number") return { ok: true, entry: undefined };
+  if (!isValidSourceVersion(version)) return { ok: true, entry: undefined };
+  const hasActive = Object.prototype.hasOwnProperty.call(snap, "active");
+  const hasRevoked = Object.prototype.hasOwnProperty.call(snap, "revoked");
+  const active = hasActive ? snap["active"] : undefined;
+  const revoked = hasRevoked ? snap["revoked"] : undefined;
+  if ((hasActive && typeof active !== "boolean") || (hasRevoked && typeof revoked !== "boolean")) {
+    return { ok: true, entry: undefined };
+  }
   return {
     ok: true,
     entry: Object.freeze({
@@ -537,9 +544,9 @@ export function computeEvidenceCoverage(cases: readonly ClinicEvidenceCase[]): E
   const chapters = new Set<string>();
   const dates = new Set<string>();
   for (const item of cases) {
-    roots.add(item.rootAttemptId);
-    chapters.add(item.chapterId);
-    dates.add(item.localDate);
+    if (isNonBlankText(item.rootAttemptId)) roots.add(item.rootAttemptId.trim());
+    if (isNonBlankText(item.chapterId)) chapters.add(item.chapterId.trim());
+    if (isValidLocalDate(item.localDate)) dates.add(item.localDate);
   }
   return {
     rootAttemptCount: roots.size,

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   ANTI_PADDING_COUNTERFACTUAL_TRIPLETS,
+  DEFAULT_CALIBRATION_THRESHOLDS,
   RUBRIC_DIMENSIONS,
   SENTINEL_ANCHOR_ESSAYS,
   SENTINEL_BANDS,
@@ -67,10 +68,11 @@ describe("AnchorCalibratedRubricV1 sentinel anchors & anti-padding detector", ()
 });
 
 describe("AnchorCalibratedRubricV1 pairwise swap, monotonicity & mastery gates", () => {
-  it("projects consistent monotone pairwise verdicts onto fixed Bradley-Terry anchors including boundary cases", () => {
+  it("projects consistent monotone pairwise verdicts onto fixed Bradley-Terry anchors and requires independent corroboration for mastery", () => {
     const cleanText = SENTINEL_ANCHOR_ESSAYS[2]!.text;
     for (const targetBand of [4.0, 4.5, 5.0, 5.5, 6.0, 6.5, 7.0, 7.5, 8.0, 8.5]) {
-      const result = evaluateAnchorCalibratedRubric({
+      // Standalone single formal_assessment draft calibrates band but MUST NOT count toward mastery.
+      const singleDraft = evaluateAnchorCalibratedRubric({
         submissionId: `sub-${targetBand}`,
         dimension: "task_response",
         text: cleanText,
@@ -79,15 +81,65 @@ describe("AnchorCalibratedRubricV1 pairwise swap, monotonicity & mastery gates",
         comparisons: consistentComparisonsForTarget("task_response", targetBand),
       });
 
-      expect(result.status).toBe("calibrated");
-      expect(result.band).toBe(targetBand);
-      expect(result.rawBand).not.toBeNull();
-      expect(result.theta).not.toBeNull();
-      expect(result.rawBand!).toBeGreaterThanOrEqual(result.bandRange[0]);
-      expect(result.rawBand!).toBeLessThanOrEqual(result.bandRange[1]);
-      expect(result.countsTowardMastery).toBe(true);
-      expect(result.inconsistencyReasons).toEqual([]);
+      expect(singleDraft.status).toBe("calibrated");
+      expect(singleDraft.band).toBe(targetBand);
+      expect(singleDraft.rawBand).not.toBeNull();
+      expect(singleDraft.theta).not.toBeNull();
+      expect(singleDraft.rawBand!).toBeGreaterThanOrEqual(singleDraft.bandRange[0]);
+      expect(singleDraft.rawBand!).toBeLessThanOrEqual(singleDraft.bandRange[1]);
+      expect(singleDraft.countsTowardMastery).toBe(false);
+      expect(singleDraft.masteryExclusionReasons).toEqual(["single_draft_uncorroborated"]);
+      expect(singleDraft.inconsistencyReasons).toEqual([]);
+
+      // Corroborated formal_assessment (>= 2 distinct independent submission IDs) counts toward mastery.
+      const corroborated = evaluateAnchorCalibratedRubric({
+        submissionId: `sub-${targetBand}`,
+        dimension: "task_response",
+        text: cleanText,
+        mode: "formal_assessment",
+        assisted: false,
+        comparisons: consistentComparisonsForTarget("task_response", targetBand),
+        corroboratingIndependentSubmissionIds: ["sub-independent-2"],
+      });
+
+      expect(corroborated.status).toBe("calibrated");
+      expect(corroborated.band).toBe(targetBand);
+      expect(corroborated.countsTowardMastery).toBe(true);
+      expect(corroborated.masteryExclusionReasons).toEqual([]);
+      expect(corroborated.inconsistencyReasons).toEqual([]);
     }
+
+    // Empty, self-only, whitespace, getter-bearing, or Proxy corroboration lists MUST NOT unlock mastery.
+    let corrobGetterRuns = 0;
+    const getterCorrobIds = Object.defineProperty([] as string[], "0", {
+      enumerable: true,
+      get() {
+        corrobGetterRuns += 1;
+        return "sub-independent-2";
+      },
+    });
+    for (const invalidCorrob of [
+      [],
+      ["sub-self"],
+      ["   "],
+      ["sub-independent-2", ""],
+      getterCorrobIds,
+      new Proxy(["sub-independent-2"], {}),
+    ]) {
+      const res = evaluateAnchorCalibratedRubric({
+        submissionId: "sub-self",
+        dimension: "task_response",
+        text: cleanText,
+        mode: "formal_assessment",
+        assisted: false,
+        comparisons: consistentComparisonsForTarget("task_response", 6.5),
+        corroboratingIndependentSubmissionIds: invalidCorrob,
+      });
+      expect(res.status).toBe("calibrated");
+      expect(res.countsTowardMastery).toBe(false);
+      expect(res.masteryExclusionReasons).toEqual(["single_draft_uncorroborated"]);
+    }
+    expect(corrobGetterRuns).toBe(0);
   });
 
   it("fails closed to interval_only without fabricating a band on forward/reverse swap contradiction", () => {
@@ -530,6 +582,7 @@ describe("AnchorCalibratedRubricV1 pairwise swap, monotonicity & mastery gates",
       mode: "practice_feedback",
       assisted: false,
       comparisons,
+      corroboratingIndependentSubmissionIds: ["corrob-independent-1"],
     });
     expect(practiceResult.status).toBe("calibrated");
     expect(practiceResult.countsTowardMastery).toBe(false);
@@ -542,6 +595,7 @@ describe("AnchorCalibratedRubricV1 pairwise swap, monotonicity & mastery gates",
       mode: "formal_assessment",
       assisted: true,
       comparisons,
+      corroboratingIndependentSubmissionIds: ["corrob-independent-1"],
     });
     expect(assistedResult.status).toBe("calibrated");
     expect(assistedResult.countsTowardMastery).toBe(false);
@@ -554,6 +608,7 @@ describe("AnchorCalibratedRubricV1 pairwise swap, monotonicity & mastery gates",
       mode: "formal_assessment",
       assisted: false,
       comparisons,
+      corroboratingIndependentSubmissionIds: ["corrob-independent-1"],
     });
     expect(paddedResult.status).toBe("calibrated");
     expect(paddedResult.paddingReport.isTemplatePadded).toBe(true);
@@ -885,5 +940,15 @@ describe("evaluateRubricCalibrationGate four-fold & 3-way anti-padding gate", ()
     });
     expect(exoticThresholdsRes.passed).toBe(false);
     expect(exoticThresholdsRes.failures).toContain("invalid_threshold_configuration");
+
+    // Round-12 [P1-2]: DEFAULT_CALIBRATION_THRESHOLDS is runtime-frozen and cannot be weakened.
+    expect(Object.isFrozen(DEFAULT_CALIBRATION_THRESHOLDS)).toBe(true);
+    expect(() => {
+      Object.assign(DEFAULT_CALIBRATION_THRESHOLDS as Record<string, number>, {
+        minSdRatio: 0,
+        maxAbsBiasLow: 5,
+        maxAbsBiasHigh: 5,
+      });
+    }).toThrow(TypeError);
   });
 });
