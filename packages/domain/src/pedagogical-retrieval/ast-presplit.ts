@@ -192,7 +192,12 @@ function parseTimestampToMs(raw: string): number | null {
   return ((hours * 60 + minutes) * 60 + seconds) * 1000 + millis;
 }
 
-type InlineCueTiming = { startMs: number; endMs: number; prefixLength: number };
+type InlineCueTiming = {
+  startMs: number;
+  endMs: number;
+  prefixLength: number;
+  visibilityFloor?: PedagogicalVisibility;
+};
 
 function parseInlineTranscriptCue(line: string): InlineCueTiming | null {
   const msMatch = /^[ \t]*\[startMs=(\d+),\s*endMs=(\d+)\][ \t]?/.exec(line);
@@ -367,26 +372,29 @@ function sanitizeHeaderLabel(
 
 function parseTableRowCells(
   sourceLine: Pick<SourceLine, "raw" | "start">,
-  protectedSpans: readonly { readonly start: number; readonly end: number }[] = [],
+  tableSpans?: readonly InlineConstructSpan[],
   leadingEmptyCell = false,
-): Array<{ readonly start: number; readonly end: number }> {
+) {
   const raw = sourceLine.raw;
+  const spans = tableSpans ?? (raw.includes("|")
+    ? findInlineConstructSpans(raw, 0, raw.length, "public", false, true)
+    : []);
+  const spanOffset = tableSpans ? sourceLine.start : 0;
   const pipePositions: number[] = [];
   for (let idx = 0; idx < raw.length; idx++) {
     if (raw.charCodeAt(idx) === 124 && !isEscaped(raw, idx)) {
-      const absPos = sourceLine.start + idx;
-      if (protectedSpans.some(span => absPos >= span.start && absPos < span.end)) {
+      const pos = spanOffset + idx;
+      if (spans.some(span => pos >= span.start && pos < span.end)) {
         continue;
       }
       pipePositions.push(idx);
     }
   }
-  if (pipePositions.length === 0) return [{ start: sourceLine.start, end: sourceLine.start + raw.length }];
-  const trimmedLeft = raw.trimStart();
-  const trimmedRight = raw.trimEnd();
-  const hasLeadingPipe = !leadingEmptyCell && trimmedLeft.startsWith("|");
-  const hasTrailingPipe =
-    trimmedRight.endsWith("|") && !isEscaped(trimmedRight, trimmedRight.length - 1);
+  if (pipePositions.length === 0) {
+    return { cells: [{ start: sourceLine.start, end: sourceLine.start + raw.length }], hasSeparator: false };
+  }
+  const hasLeadingPipe = !leadingEmptyCell && pipePositions[0] === raw.length - raw.trimStart().length;
+  const hasTrailingPipe = pipePositions.at(-1) === raw.trimEnd().length - 1;
 
   const boundaries: number[] = [];
   let pStart = 0;
@@ -418,7 +426,7 @@ function parseTableRowCells(
       cells.push({ start: cStart, end: cEnd });
     }
   }
-  return cells;
+  return { cells, hasSeparator: true };
 }
 
 const THEMATIC_BREAK_RE = /^[ ]{0,3}(?:(?:-[ \t]*){3,}|(?:\*[ \t]*){3,}|(?:_[ \t]*){3,})$/;
@@ -476,22 +484,49 @@ const HTML_BLOCK_START_RE =
   /^[ ]{0,3}<(?:\?|!(?:--|\[CDATA\[|[A-Z])|\/?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|pre|script|search|section|style|summary|table|tbody|td|textarea|tfoot|th|thead|title|tr|track|ul)(?=[ \t/>]|$))/i;
 const STANDALONE_HTML_TAG_RE = /^[ ]{0,3}<\/?[A-Za-z][\w-]*(?:[ \t]+[^<>]*?)?\/?>[ \t]*$/;
 
-function isPipeTableBodyRow(line: string): boolean {
-  return Boolean(line.trim()) &&
-    !/^[ \t]{0,3}(?:\x60{3,}|~{3,}|:{3,}|#{1,6}(?:[ \t]|$)|>)/.test(line) &&
-    !THEMATIC_BREAK_RE.test(line) && !LIST_ITEM_RE.test(line) &&
-    !HTML_BLOCK_START_RE.test(line) && !STANDALONE_HTML_TAG_RE.test(line);
+function interruptsPipeTable(line: string): boolean {
+  return matchFenceOpening(line) !== null || /^[ \t]{0,3}(?::{3,}|#{1,6}(?:[ \t]|$)|>)/.test(line) ||
+    THEMATIC_BREAK_RE.test(line) || LIST_ITEM_RE.test(line) ||
+    HTML_BLOCK_START_RE.test(line) || STANDALONE_HTML_TAG_RE.test(line);
 }
 
-function isPipeTableHeader(line: string): boolean {
+function isPipeTableBodyRow(line: string): boolean {
+  return Boolean(line.trim()) && !interruptsPipeTable(line);
+}
+
+function isPipeParagraphLine(line: string): boolean {
   return line.includes("|") && isPipeTableBodyRow(line) &&
     !/^(?:\$\$|\\\[|\\begin\{)/.test(line.trimStart());
 }
 
-function isPipeTableStart(header: string, delimiter?: string): boolean {
-  if (delimiter === undefined || !isPipeTableHeader(header)) return false;
+function pipeTableHeaderCells(header: Pick<SourceLine, "raw" | "start">, delimiter?: string) {
+  if (delimiter === undefined || !header.raw.includes("|") || !isPipeTableBodyRow(header.raw)) return null;
   const columns = tableDelimiterColumnCount(delimiter);
-  return columns > 0 && columns === parseTableRowCells({ raw: header, start: 0 }).length;
+  if (columns === 0) return null;
+  const { cells, hasSeparator } = parseTableRowCells(header);
+  return hasSeparator && cells.length === columns ? cells : null;
+}
+
+function isPipeTableStart(header: string, delimiter?: string): boolean {
+  return pipeTableHeaderCells({ raw: header, start: 0 }, delimiter) !== null;
+}
+
+function tableColumnVisibility(label: string): PedagogicalVisibility {
+  if (SEALED_HEADING_RE.test(label)) return "sealed";
+  if (HINT_HEADING_RE.test(label)) return "hint_gated";
+  return "public";
+}
+
+function timedTableRowVisibility(raw: string, columns: readonly PedagogicalVisibility[]): PedagogicalVisibility {
+  if (columns.every(visibility => visibility === "public")) return "public";
+  const { cells, hasSeparator } = parseTableRowCells({ raw, start: 0 });
+  if (!hasSeparator) return "public";
+  let visibility: PedagogicalVisibility = "public";
+  for (const [index, cell] of cells.entries()) {
+    const column = columns[index];
+    if (column && raw.slice(cell.start, cell.end).trim()) visibility = maxVisibility(visibility, column);
+  }
+  return visibility;
 }
 
 function matchFenceOpening(line: string): RegExpExecArray | null {
@@ -529,7 +564,7 @@ function createTranscriptCueSeparator() {
     const continuesQuote = innermostQuoteBody(lines.at(-1)!) !== null && innermostQuoteBody(nextLine) !== null;
     const continuesSetext = continued.depth === containers.length && SETEXT_UNDERLINE_RE.test(continued.body);
     const continuesPipeParagraph = continued.depth === containers.length &&
-      isPipeTableHeader(previousBody) && isPipeTableHeader(continued.body);
+      isPipeParagraphLine(previousBody) && isPipeParagraphLine(continued.body);
     if (continuesTable || continuesQuote || continuesSetext || continuesPipeParagraph) return "\n";
 
     // The synthetic paragraph break also ends any table.
@@ -746,16 +781,53 @@ interface InlineConstructSpan {
   readonly summaryEndOffset?: number | null;
 }
 
+function findTableLiteralEnd(text: string, start: number, end: number): number {
+  const marker = text[start]!;
+  if (isEscaped(text, start) || (text[start - 1] === marker && !isEscaped(text, start - 1))) return -1;
+  const newline = text.indexOf("\n", start);
+  const lineEnd = newline === -1 ? end : Math.min(end, newline);
+  if (marker === "\x60") {
+    const runs = /\x60+/g;
+    runs.lastIndex = start;
+    const length = runs.exec(text)![0].length;
+    for (let next = runs.exec(text); next && runs.lastIndex <= lineEnd; next = runs.exec(text)) {
+      if (next[0].length === length) return runs.lastIndex;
+    }
+    return -1;
+  }
+
+  const first = text[start + 1];
+  if (!first || first === "$" || /\s/.test(first)) return -1;
+  let close = findUnescapedToken(text, "$", start + 1);
+  while (close !== -1 && close < lineEnd) {
+    const after = text[close + 1];
+    if (after === "$") return -1;
+    if (!/\s/.test(text[close - 1]!) && (after === undefined || !/\d/.test(after))) return close + 1;
+    close = findUnescapedToken(text, "$", close + 1);
+  }
+  return -1;
+}
+
 function findInlineConstructSpans(
   text: string,
   rangeStart: number,
   rangeEnd: number,
   activeVisibility: PedagogicalVisibility,
   sealProofs: boolean,
+  tableLiterals = false,
 ): InlineConstructSpan[] {
   const spans: InlineConstructSpan[] = [];
   let i = rangeStart;
   while (i < rangeEnd) {
+    if (tableLiterals && (text[i] === "\x60" || text[i] === "$")) {
+      const end = findTableLiteralEnd(text, i, rangeEnd);
+      if (end !== -1) {
+        const kind = text[i] === "\x60" ? "code" : "display_math";
+        spans.push({ start: i, end, kind, visibility: activeVisibility });
+        i = end;
+        continue;
+      }
+    }
     if (text.startsWith("$$", i) && !isEscaped(text, i)) {
       const { end, closed } = findMathDelimiter(text, i, "$$");
       spans.push({ start: i, end, kind: "display_math", visibility: closed ? activeVisibility : "sealed" });
@@ -1020,7 +1092,7 @@ interface TranscriptRegion {
 function scanInlineCueTimings(lines: readonly SourceLine[]): Array<InlineCueTiming | null> {
   let containers: MarkdownContainer[] = [];
   let fence: { opener: string; literal: boolean } | undefined;
-  let inDocumentTable = false;
+  let tableColumns: PedagogicalVisibility[] | undefined;
   return lines.map(({ raw }, index) => {
     if (fence) {
       const timing = fence.literal ? null : parseInlineTranscriptCue(raw);
@@ -1032,27 +1104,40 @@ function scanInlineCueTimings(lines: readonly SourceLine[]): Array<InlineCueTimi
       // A fenced block ends with its list or quote even without a closing marker.
       fence = undefined;
     }
-    if (inDocumentTable) {
+    const timing = parseInlineTranscriptCue(raw);
+    const cueBody = timing ? raw.slice(timing.prefixLength) : "";
+    const latex = /^[ \t]*\\begin\{([a-zA-Z][\w-]*\*?)\}[ \t]*$/.exec(cueBody);
+    const timedBlock = interruptsPipeTable(cueBody) ||
+      (latex !== null && (MATH_ENVS.has(latex[1]!) || classifyLabel(latex[1], "public") !== null));
+    let visibilityFloor: PedagogicalVisibility = "public";
+    if (tableColumns) {
       const continuation = continueMarkdownContainers(raw, containers);
-      if (continuation.depth === containers.length && isPipeTableBodyRow(continuation.body)) return null;
-      inDocumentTable = false;
+      if (continuation.depth === containers.length && isPipeTableBodyRow(continuation.body)) {
+        if (!timedBlock) return null;
+        // A timed block can also look like a literal pipe-separated row.
+        // Retain its existing column protection when using the timed interpretation.
+        visibilityFloor = timedTableRowVisibility(continuation.body, tableColumns);
+      }
+      tableColumns = undefined;
     }
 
     const documentLine = readMarkdownContainerLine(raw, containers);
     const next = lines[index + 1];
     const delimiter = next && continueMarkdownContainers(next.raw, documentLine.containers);
-    if (delimiter?.depth === documentLine.containers.length && isPipeTableStart(documentLine.body, delimiter.body)) {
+    const headerCells = !timedBlock && delimiter?.depth === documentLine.containers.length
+      ? pipeTableHeaderCells({ raw: documentLine.body, start: 0 }, delimiter.body)
+      : null;
+    if (headerCells) {
       containers = documentLine.containers;
-      inDocumentTable = true;
+      tableColumns = headerCells.map(cell => tableColumnVisibility(documentLine.body.slice(cell.start, cell.end)));
       return null;
     }
 
-    const timing = parseInlineTranscriptCue(raw);
-    const line = timing ? readMarkdownContainerLine(raw.slice(timing.prefixLength), containers) : documentLine;
+    const line = timing ? readMarkdownContainerLine(cueBody, containers) : documentLine;
     containers = line.containers;
     const opener = matchFenceOpening(line.body)?.[1];
     if (opener) fence = { opener, literal: !timing };
-    return timing;
+    return timing && visibilityFloor !== "public" ? { ...timing, visibilityFloor } : timing;
   });
 }
 
@@ -1114,9 +1199,10 @@ function parseInlineCuedDocument(
       continue;
     }
 
+    const visibilityFloor = maxVisibility(options.defaultVisibility ?? "public", cue.timing.visibilityFloor ?? "public");
     const spans = start === end
       ? [{ start, end, visibility: "sealed" } satisfies CueSpan]
-      : splitCueVisibility(markdown, start, end, options.defaultVisibility ?? "public", readRange, true);
+      : splitCueVisibility(markdown, start, end, visibilityFloor, readRange, true);
     for (const span of spans) {
       const startOffset = span.start === start ? cue.lineStart : span.start + sourceDelta;
       const endOffset = span.end + sourceDelta;
@@ -1787,9 +1873,11 @@ function parsePedagogicalAstInternal(
       }
     }
 
+    const tableHeaderCells = pipeTableHeaderCells(line, lines[i + 1]?.raw);
+
     // 4. LaTeX environment (\begin{equation|align|theorem|lemma|proof|definition|solution}...)
     const envMatch = /^[ \t]*\\begin\{([a-zA-Z][\w-]*\*?)\}/.exec(raw);
-    if (envMatch) {
+    if (envMatch && !tableHeaderCells) {
       const envName = envMatch[1]!;
       const activeVis = getActiveSectionVisibility();
       const isMath = MATH_ENVS.has(envName);
@@ -1923,7 +2011,7 @@ function parsePedagogicalAstInternal(
 
     // 5. Display math ($$...$$ or \[...\])
     const mathMatch = /^[ \t]*(\$\$|\\\[)/.exec(raw);
-    if (mathMatch) {
+    if (mathMatch && !tableHeaderCells) {
       const leadingWs = mathMatch[0].length - mathMatch[1]!.length;
       const startOffset = line.start + leadingWs;
       const { end, closed } = findMathDelimiter(text, startOffset, mathMatch[1] === "$$" ? "$$" : "\\]");
@@ -2099,7 +2187,7 @@ function parsePedagogicalAstInternal(
     }
 
     // 8. Markdown / pipe table (extracts inline sealed/hint constructs & sealed/hint columns)
-    if (isPipeTableStart(raw, lines[i + 1]?.raw)) {
+    if (tableHeaderCells) {
       let j = i + 2;
       while (j < lines.length && isPipeTableBodyRow(lines[j]!.raw)) j++;
       const endLineIdx = j - 1;
@@ -2107,20 +2195,20 @@ function parsePedagogicalAstInternal(
       const tableStart = line.start;
       const tableEnd = lines[endLineIdx]!.contentEnd;
 
-      const inlineSpans = findInlineConstructSpans(text, tableStart, tableEnd, activeVis, sealProofs);
+      const inlineSpans = findInlineConstructSpans(text, tableStart, tableEnd, activeVis, sealProofs, true);
       const extracted = extractProtectedBlocksFromSpans(inlineSpans, tableEnd, activeVis);
 
       extracted.sort((a, b) => a.startOffset - b.startOffset || a.endOffset - b.endOffset);
 
       // Extract data cells belonging to sealed / hint-gated columns (e.g. Answer Key / Solution / Hint).
-      const headerCells = activeVis === "sealed" ? [] : parseTableRowCells(lines[i]!, inlineSpans);
+      const headerCells = activeVis === "sealed" ? [] : tableHeaderCells;
       const colPolicies = headerCells.map(cell => {
         const cellText = sanitizeHeaderLabel(text, cell.start, cell.end, extracted, "");
-        if (!cellText) return null;
-        if (SEALED_HEADING_RE.test(cellText)) {
+        const visibility = tableColumnVisibility(cellText);
+        if (visibility === "sealed") {
           return { kind: "solution" as const, visibility: maxVisibility("sealed", activeVis), label: cellText };
         }
-        if (HINT_HEADING_RE.test(cellText)) {
+        if (visibility === "hint_gated") {
           const vis = maxVisibility("hint_gated", activeVis);
           return VISIBILITY_RANK[vis] > VISIBILITY_RANK[activeVis]
             ? { kind: "hint" as const, visibility: vis, label: cellText }
@@ -2132,13 +2220,13 @@ function parsePedagogicalAstInternal(
       if (colPolicies.some(Boolean)) {
         for (let rowIdx = i + 2; rowIdx <= endLineIdx; rowIdx++) {
           const row = lines[rowIdx]!;
-          let rowCells = parseTableRowCells(row, inlineSpans);
+          let { cells: rowCells } = parseTableRowCells(row, inlineSpans);
           // A short caption row can start with the separator for an empty
           // first cell. Keep that position without altering document GFM rows.
           const leadingEmptyCell =
             captionRowStarts?.has(row.start) && rowCells.length < headerCells.length &&
             row.raw.trimStart().startsWith("|") && !row.raw.trimEnd().endsWith("|");
-          if (leadingEmptyCell) rowCells = parseTableRowCells(row, inlineSpans, true);
+          if (leadingEmptyCell) rowCells = parseTableRowCells(row, inlineSpans, true).cells;
           for (let colIdx = 0; colIdx < Math.min(colPolicies.length, rowCells.length); colIdx++) {
             const columnPolicy = colPolicies[colIdx];
             // An omitted edge pipe is ambiguous on a short caption row. Keep

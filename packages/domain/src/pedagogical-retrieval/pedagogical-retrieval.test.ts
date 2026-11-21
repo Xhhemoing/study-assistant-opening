@@ -633,6 +633,71 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     expect(secret).toMatchObject({ visibility: "sealed", startMs: 1000, endMs: 2000 });
   });
 
+  it.each([
+    "Norm $$|x|$$",
+    "Norm $|x|$",
+    "Norm \\|x\\|",
+    "Norm `|x|`",
+    "Norm ``one ` | two``",
+    "Norm \\``|x|`",
+    "```|x|```",
+    "\\begin{solution} PRIVATE_HEADER | notes \\end{solution}",
+    "Norm <details>PRIVATE_HEADER | notes</details>",
+  ])("uses the same columns for table detection and extraction (%s)", firstCell => {
+    const text = [
+      firstCell + " | Answer Key", "--- | ---",
+      "Unit $$|y|$$ | PRIVATE_DISPLAY", "Unit $|y|$ | PRIVATE_INLINE",
+      "Unit `|y|` | PRIVATE_CODE", "Unit \\|y\\| | PRIVATE_ESCAPED",
+    ].join("\n");
+    const chunks = chunkPedagogicalDocument({ sourceId: "doc", sourceVersion: 1, text });
+    const { indexableChunks, sealedChunks } = partitionPedagogicalChunks(chunks, { allowHintGated: true });
+    expect(indexableChunks.some(chunk => chunk.text.includes("Unit"))).toBe(true);
+    const secrets = ["PRIVATE_DISPLAY", "PRIVATE_INLINE", "PRIVATE_CODE", "PRIVATE_ESCAPED"];
+    if (firstCell.includes("PRIVATE_HEADER")) secrets.push("PRIVATE_HEADER");
+    for (const secret of secrets) {
+      expect(indexableChunks.some(chunk => chunk.text.includes(secret))).toBe(false);
+      expect(sealedChunks.some(chunk => chunk.text.includes(secret))).toBe(true);
+    }
+    for (const chunk of chunks) expect(text.slice(chunk.startOffset, chunk.endOffset)).toBe(chunk.text);
+  });
+
+  it.each([
+    ["## Answer Key\n", "forty-two"],
+    ["## Answer Key | notes\n--- | ---\n", "forty-two"],
+    ["> [!solution]", "> forty-two"],
+    [":::solution", "forty-two\n[00:02-00:03] :::"],
+    ["<details>", "forty-two</details>"],
+    ["\\begin{solution}", "forty-two\n[00:02-00:03] \\end{solution}"],
+  ])("keeps a timed protected block outside an unprefixed table (%s)", (open, answer) => {
+    const text = ["Topic | Note", "--- | ---", "a | b", "[00:00-00:01] " + open,
+      "[00:01-00:02] " + answer].join("\n");
+    const chunks = chunkPedagogicalDocument({ sourceId: "doc", sourceVersion: 1, text });
+    const { indexableChunks, sealedChunks } = partitionPedagogicalChunks(chunks, { allowHintGated: true });
+    expect(indexableChunks.some(chunk => chunk.text.includes("forty-two"))).toBe(false);
+    expect(sealedChunks.find(chunk => chunk.text.includes("forty-two"))).toMatchObject({
+      visibility: "sealed", startMs: 1000, endMs: 2000,
+    });
+  });
+
+  it("keeps column protection on an ambiguous table row parsed as a timed list item", () => {
+    const text = "Answer Key | Note\n--- | ---\n[00:00-00:01] - forty-two | note";
+    const block = parsePedagogicalAst(text).find(candidate => candidate.text.includes("forty-two"));
+    expect(block).toMatchObject({ visibility: "sealed", startMs: 0, endMs: 1000 });
+  });
+
+  it("does not interpret protected markup quoted in a table code span as a container", () => {
+    const text = [
+      "Topic | Answer Key", "--- | ---", "```|x|``` | PRIVATE_CODE",
+      "`<details><summary>Hint</summary>` | PRIVATE_MARKUP", "</details>",
+    ].join("\n");
+    const chunks = chunkPedagogicalDocument({ sourceId: "doc", sourceVersion: 1, text });
+    const { indexableChunks, sealedChunks } = partitionPedagogicalChunks(chunks, { allowHintGated: true });
+    expect(indexableChunks.some(chunk => /PRIVATE_MARKUP|PRIVATE_CODE/.test(chunk.text))).toBe(false);
+    for (const secret of ["PRIVATE_MARKUP", "PRIVATE_CODE"]) {
+      expect(sealedChunks.some(chunk => chunk.text.includes(secret))).toBe(true);
+    }
+  });
+
   it.each(["# Lecture", "---", "- List", "1. List", "~~~\n~~~", "> Blockquote",
     "<div>", ":::example\n:::"])("ends a table at a block boundary (%s)", boundary => {
     const text = ["Answer Key | Note", "--- | ---", "forty-two", boundary, "Public afterward"].join("\n");
