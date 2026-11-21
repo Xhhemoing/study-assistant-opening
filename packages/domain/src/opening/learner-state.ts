@@ -1,5 +1,11 @@
 import type { LearningObservation } from "@aistudy/contracts";
-import { evaluateEvidenceEligibility, resolveEvidenceAssistance, type EvidenceEligibility } from "./evidence-eligibility";
+import {
+  evaluateEvidenceEligibility,
+  gateObservationCartridgeEvidence,
+  resolveEvidenceAssistance,
+  type CartridgeEvidenceInput,
+  type EvidenceEligibility,
+} from "./evidence-eligibility";
 import { evaluateTransferEligibility, type TransferEligibility, type TransferSpecification } from "./evidence-transfer-eligibility";
 import { summarizeObservations, type CourseEvidence, type RetestEvidenceIdentity } from "./learning-summary";
 
@@ -135,21 +141,40 @@ export function assembleLearnerState(input: { evidence: CourseEvidence; dataAsOf
   scope?: { workspaceId: string; ownerUserId: string; courseId?: string };
   persistedRows?: number; limit?: number; measurementFeatures?: LearnerMeasurementFeature[]; currentSourceVersions?: Record<string, number>;
   transferSpecifications?: Record<string, TransferSpecification>; observationFamilies?: Record<string, string>;
-  dueRetests?: readonly RetestEvidenceIdentity[] }): LearnerState {
+  dueRetests?: readonly RetestEvidenceIdentity[];
+  /** Optional cartridge emissions; only verified L4 probes may keep formal qualification. */
+  cartridgeEvidence?: CartridgeEvidenceInput }): LearnerState {
   const ordered = [...input.evidence.observations].sort((a, b) => {
     const time = (row: LearningObservation) => input.evidence.evidenceContexts[row.id]?.observation.submittedAt
       ?? Date.parse(row.submittedAt ?? row.occurredAt);
     return time(a) - time(b) || a.id.localeCompare(b.id);
   });
+  const withheldByCartridge = new Set<string>();
+  const gatedById = new Map<string, ReturnType<typeof gateObservationCartridgeEvidence>>();
+  const gatedByObservation = new Map<LearningObservation, ReturnType<typeof gateObservationCartridgeEvidence>>();
+  for (const row of ordered) {
+    let gated = gatedById.get(row.id);
+    if (!gated) {
+      const facts = input.evidence.evidenceContexts[row.id];
+      gated = gateObservationCartridgeEvidence(
+        evaluateEvidenceEligibility(facts?.observation ?? { courseId: row.courseId, problemId: row.problemId, assistance: row.assistance, outcome: row.outcome, verdictSource: row.verdictSource }, facts?.context ?? {}),
+        row.id, { outcome: facts?.observation.outcome ?? row.outcome, requirementKey: facts?.observation.requirementKey ?? null }, input.cartridgeEvidence);
+      gatedById.set(row.id, gated);
+    }
+    gatedByObservation.set(row, gated);
+    if (gated.qualification && !gated.qualification.qualified) withheldByCartridge.add(row.id);
+  }
   const features = ordered.map((row, ordinal): LearnerStateFeature => {
     const facts = input.evidence.evidenceContexts[row.id];
-    const eligibility = evaluateEvidenceEligibility(facts?.observation ?? { courseId: row.courseId, problemId: row.problemId, assistance: row.assistance, outcome: row.outcome, verdictSource: row.verdictSource }, facts?.context ?? {});
+    const eligibility = gatedByObservation.get(row)!.eligibility;
     const specification = input.transferSpecifications?.[row.id];
     const baselineFamilyObservedBefore = Boolean(specification && ordered.some(prior => {
       if (prior.id === row.id || prior.courseId !== row.courseId || input.observationFamilies?.[prior.id] !== specification.fromFamilyId) return false;
       const baseline = input.evidence.evidenceContexts[prior.id];
       if (!baseline || (baseline.observation.submittedAt ?? Date.parse(prior.submittedAt ?? prior.occurredAt)) >= (facts?.observation.submittedAt ?? Date.parse(row.submittedAt ?? row.occurredAt))) return false;
-      const qualified = evaluateEvidenceEligibility(baseline.observation, baseline.context);
+      const priorGated = gatedByObservation.get(prior)!;
+      if (priorGated.qualification && !priorGated.qualification.qualified) return false;
+      const qualified = priorGated.eligibility;
       return qualified.independentAttempt === "yes" && qualified.verifiedCorrect === "yes" && qualified.usableForCurrentVersion === "yes";
     }));
     const transfer = evaluateTransferEligibility({ specification, eligibility, baselineFamilyObservedBefore, evaluation: facts?.context.serverEvaluation });
@@ -172,6 +197,7 @@ export function assembleLearnerState(input: { evidence: CourseEvidence; dataAsOf
     if (eligibility.verifiedCorrect === "unknown") gaps.push("correctness_unverified");
     if (eligibility.independentAttempt === "unknown") gaps.push("independence_unknown");
     if (eligibility.usableForCurrentVersion !== "yes") gaps.push("current_version_not_established");
+    if (withheldByCartridge.has(row.id)) gaps.push("cartridge_evidence_not_qualified");
     return { observationId: row.id, attemptId: row.attemptId ?? null, courseId: row.courseId,
       requirementKey: facts?.observation.requirementKey ?? null, itemVersionId: row.itemVersionId ?? null,
       sourceIds: [...row.sourceIds],
@@ -182,7 +208,10 @@ export function assembleLearnerState(input: { evidence: CourseEvidence; dataAsOf
   const summaries = summarizeObservations(ordered, input.dataAsOf, { evidenceContexts: input.evidence.evidenceContexts });
   const summary = summaries.map(row => {
     const members = features.filter(feature => row.evidenceIds.includes(feature.observationId));
-    return { courseId: row.courseId, requirementKey: row.requirementKey, skillLabel: row.skillLabel, status: row.status,
+    // Withheld cartridge evidence has unknown correctness, so it cannot support an independent status.
+    const status = row.status === "observed_independent"
+      && (row.recentPerformance?.evidenceIds ?? row.evidenceIds).some(id => withheldByCartridge.has(id)) ? "needs_check" : row.status;
+    return { courseId: row.courseId, requirementKey: row.requirementKey, skillLabel: row.skillLabel, status,
       sampleCount: row.sampleCount, views: Object.fromEntries((["independent", "retention", "transfer", "help"] as const)
         .map(view => [view, members.filter(member => member.views.includes(view)).length])) as Record<LearnerEvidenceView, number>,
       gaps: [...new Set(members.flatMap(member => member.gaps))] };
