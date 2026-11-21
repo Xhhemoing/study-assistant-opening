@@ -104,6 +104,8 @@ function queueItem(
     courseId?: string | null;
     skillLabel?: string | null;
     syllabusPointId?: string | null;
+    originObservationRootId?: string | null;
+    tags?: string[];
   },
   nowMs: number,
 ): ReviewQueueItem {
@@ -115,9 +117,10 @@ function queueItem(
     back: `A-${cardId}`,
     sourceDocumentId: null,
     syllabusPointId: options.syllabusPointId ?? null,
-    tags: ["review:concept"],
+    tags: options.tags ?? ["review:concept"],
     courseId: options.courseId ?? null,
     skillLabel: options.skillLabel ?? null,
+    ...(options.originObservationRootId !== undefined ? { originObservationRootId: options.originObservationRootId } : {}),
     archived: false,
     contentVersion: 1,
     pausedUntil: null,
@@ -668,16 +671,181 @@ it("enforces the workspace-wide 30% daily card-recovery cap at runtime in writeL
   await expect(writeLearningCardSession(crossCourse.sql, scope, startCmd(10, "cap-test-second-10m"), now)).rejects.toMatchObject({ code: "CONFLICT" });
   expect(crossCourse.getInsertCount()).toBe(0);
 
-  // 30m day with 1 due card (non-backlog maintenance): first 10m session succeeds, 11m fails.
-  const thirtyNonBacklog = mockCardSessionSql({ dailyMinutes: 30, dueCardCount: 1 });
+  // 30m day with 199 due cards (below 200-card backlog threshold): first 10m session succeeds, 11m fails.
+  const thirtyNonBacklog = mockCardSessionSql({ dailyMinutes: 30, dueCardCount: 199 });
   await expect(writeLearningCardSession(thirtyNonBacklog.sql, scope, startCmd(11, "cap-test-30m-11m"), now)).rejects.toMatchObject({ code: "CONFLICT" });
   expect(thirtyNonBacklog.getInsertCount()).toBe(0);
   const allowed = await writeLearningCardSession(thirtyNonBacklog.sql, scope, startCmd(10, "cap-test-30m-10m"), now);
   expect(allowed.budgetMinutes).toBe(10);
   expect(thirtyNonBacklog.getInsertCount()).toBe(1);
 
-  // 30m day with 201 due cards (backlog recovery): strict 30% cap (9m) rejects 10m before INSERT.
-  const thirtyBacklog = mockCardSessionSql({ dailyMinutes: 30, dueCardCount: 201 });
-  await expect(writeLearningCardSession(thirtyBacklog.sql, scope, startCmd(10, "cap-test-30m-backlog"), now)).rejects.toMatchObject({ code: "CONFLICT" });
-  expect(thirtyBacklog.getInsertCount()).toBe(0);
+  // 30m day at exact 200-card backlog threshold (and 201): strict 30% cap (9m) rejects 10m before INSERT.
+  for (const dueCardCount of [200, 201]) {
+    const thirtyBacklog = mockCardSessionSql({ dailyMinutes: 30, dueCardCount });
+    await expect(writeLearningCardSession(thirtyBacklog.sql, scope, startCmd(10, `cap-test-30m-backlog-${dueCardCount}`), now)).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(thirtyBacklog.getInsertCount()).toBe(0);
+  }
+});
+
+it.each([
+  ["courseId null membership-linked", "membership", 0],
+  ["courseId null membership-linked padded >= 200", "membership", 198],
+  ["non-null courseId shared originObservationRootId", "shared-origin", 0],
+  ["non-null courseId shared originObservationRootId padded >= 200", "shared-origin", 198],
+] as const)(
+  "blames active knowledgeUnitKey blocker A instead of C on [P, B, C, A] (%s)",
+  async (_label, variant, padCount) => {
+    const now = new Date();
+    const nowMs = now.getTime();
+    const courseId = variant === "shared-origin" ? "99999999-9999-4999-8999-999999999999" : null;
+    const obsRoot = "77777777-7777-4777-8777-777777777777";
+    const spP = "10000000-0000-4000-8000-000000000010";
+    const spA = "10000000-0000-4000-8000-000000000020";
+    const spC = "10000000-0000-4000-8000-000000000030";
+    const cardP = "11111111-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const cardA = "22222222-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const cardB = "33333333-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const cardC = "44444444-cccc-4ccc-8ccc-cccccccccccc";
+
+    const rawServerInputs: Array<ReviewQueueItem & { delayedCheckCovered?: boolean }> = [
+      queueItem(
+        cardP,
+        {
+          stability: 1.0,
+          daysAgo: 20,
+          dueAt: "2026-08-10T00:00:00.000Z",
+          goalPriority: 100,
+          courseId,
+          skillLabel: "Limits",
+          syllabusPointId: spP,
+          ...(variant === "shared-origin" ? { originObservationRootId: obsRoot, tags: ["review:question"] } : {}),
+        },
+        nowMs,
+      ),
+      {
+        ...queueItem(
+          cardA,
+          {
+            stability: 1.0,
+            daysAgo: 20,
+            dueAt: "2026-08-10T00:00:00.000Z",
+            goalPriority: 50,
+            courseId,
+            skillLabel: variant === "shared-origin" ? "Series" : "Limits",
+            syllabusPointId: spA,
+            ...(variant === "shared-origin" ? { originObservationRootId: obsRoot, tags: ["review:question"] } : {}),
+          },
+          nowMs,
+        ),
+        delayedCheckCovered: true,
+      },
+      queueItem(
+        cardB,
+        {
+          stability: 1.0,
+          daysAgo: 20,
+          dueAt: "2026-08-10T00:00:00.000Z",
+          goalPriority: 30,
+          courseId,
+          skillLabel: null,
+          syllabusPointId: spA,
+          ...(variant === "shared-origin" ? { originObservationRootId: null, tags: ["review:question"] } : {}),
+        },
+        nowMs,
+      ),
+      queueItem(
+        cardC,
+        {
+          stability: 1.0,
+          daysAgo: 20,
+          dueAt: "2026-08-10T00:00:00.000Z",
+          goalPriority: 10,
+          courseId,
+          skillLabel: "Other",
+          syllabusPointId: spC,
+        },
+        nowMs,
+      ),
+    ];
+
+    for (let i = 1; i <= padCount; i += 1) {
+      rawServerInputs.push(queueItem(
+        `50000000-0000-4000-8000-${String(i).padStart(12, "0")}`,
+        { stability: 30, daysAgo: 1, dueAt: "2026-08-01T00:00:00.000Z", goalPriority: 5, courseId, skillLabel: `pad-${i}` },
+        nowMs,
+      ));
+    }
+
+    const serverTriagedPublic: ReviewQueueItem[] = buildReviewQueue(
+      rawServerInputs,
+      "auto",
+      now,
+      now.toISOString().slice(0, 10),
+      { recoveryTriage: true },
+    ).map(({ card, state, goalPriority }) => ({ card, state, goalPriority }));
+    expect(serverTriagedPublic.slice(0, 3).map((item) => item.card.id)).toEqual([cardP, cardB, cardC]);
+    expect(serverTriagedPublic.at(-1)?.card.id).toBe(cardA);
+
+    const value = clients();
+    vi.mocked(value.cards.listDue).mockResolvedValue(serverTriagedPublic);
+    vi.mocked(value.management.cardCommand).mockImplementation(async (command) => ({
+      ...session,
+      cardIds: command.action === "start" ? command.cardIds : session.cardIds,
+    }));
+
+    await render(value);
+    await act(async () => button("开始本次限时复习").click());
+
+    const startCall = vi.mocked(value.management.cardCommand).mock.calls[0]?.[0];
+    expect(startCall?.action).toBe("start");
+    if (startCall?.action === "start") {
+      expect(startCall.cardIds).toEqual(serverTriagedPublic.slice(0, 200).map((item) => item.card.id));
+    }
+  },
+);
+
+it("unconditionally triages a >= 200 strict dueAt-ASC raw queue even when the first 200 already contain Band-1 cards", async () => {
+  const nowMs = Date.now();
+  const courseId = "99999999-9999-4999-8999-999999999999";
+  const makeUuid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+  const dueItems: ReviewQueueItem[] = [];
+  // 1 lower-weight Band-1 card early in the dueAt-ASC head
+  dueItems.push(queueItem(
+    makeUuid(1),
+    { stability: 1.5, daysAgo: 10, dueAt: "2026-07-01T00:00:00.000Z", goalPriority: 2, courseId, skillLabel: "early-band1" },
+    nowMs,
+  ));
+  // 199 Band-4 high-retention cards filling positions 1..199
+  for (let i = 2; i <= 200; i += 1) {
+    dueItems.push(queueItem(
+      makeUuid(i),
+      { stability: 30, daysAgo: 1, dueAt: "2026-08-01T00:00:00.000Z", goalPriority: 5, courseId, skillLabel: `high-ret-${i}` },
+      nowMs,
+    ));
+  }
+  // Card #201: higher-weight Band-1 card sitting past index 199 in raw dueAt-ASC order
+  const highWeightBand1Id = makeUuid(201);
+  dueItems.push(queueItem(
+    highWeightBand1Id,
+    { stability: 1.5, daysAgo: 10, dueAt: "2026-08-14T23:00:00.000Z", goalPriority: 9, courseId, skillLabel: "late-high-band1" },
+    nowMs,
+  ));
+
+  const value = clients();
+  vi.mocked(value.cards.listDue).mockResolvedValue(dueItems);
+  vi.mocked(value.management.cardCommand).mockImplementation(async (command) => ({
+    ...session,
+    cardIds: command.action === "start" ? command.cardIds : session.cardIds,
+  }));
+
+  await render(value);
+  await act(async () => button("开始本次限时复习").click());
+
+  const startCall = vi.mocked(value.management.cardCommand).mock.calls[0]?.[0];
+  expect(startCall?.action).toBe("start");
+  if (startCall?.action === "start") {
+    expect(startCall.cardIds).toHaveLength(200);
+    expect(startCall.cardIds[0]).toBe(highWeightBand1Id);
+    expect(startCall.cardIds[1]).toBe(makeUuid(1));
+  }
 });

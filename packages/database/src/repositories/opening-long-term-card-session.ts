@@ -144,7 +144,7 @@ export async function writeLearningCardSession(sql: Sql, scope: Scope, raw: unkn
       const isBacklogRecovery = dailyExecutableMinutes < 34
         && usedOrReservedCardSessionMinutes === 0
         && input.budgetMinutes > strictCap
-        ? (await cards.listQueue({ ...scope, mode: "auto", now, timeZone: capacity.timeZone })).length > 200
+        ? (await cards.listQueue({ ...scope, mode: "auto", now, timeZone: capacity.timeZone })).length >= 200
         : true;
       const freeUnreservedMinutes = Math.max(0, dailyExecutableMinutes - capacity.usedMinutes);
       const allowance = computeCardSessionRecoveryAllowance({
