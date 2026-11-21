@@ -32,6 +32,10 @@ export type Capability<P = unknown> = {
   limits: readonly string[];
   /** Actions a block of this capability may request from its host. */
   actions?: readonly string[];
+  /** Host-keyed capabilities are registered for rendering but hidden from model catalogs. */
+  hostOnly?: boolean;
+  /** Host validation can require candidates to be explicitly marked AI-generated. */
+  aiCandidateOnly?: boolean;
   /** Plain-text rendering used for text mode, exports, terminals and render failures. */
   toText(params: P): string;
 };
@@ -44,6 +48,7 @@ export type CapabilityDescriptor = {
   limits: string[];
   actions: string[];
   paramsSchema: Record<string, unknown>;
+  hostOnly?: boolean;
 };
 
 export type CapabilityRegistry = {
@@ -97,6 +102,7 @@ export function createCapabilityRegistry(capabilities: readonly Capability[]): C
           string,
           unknown
         >,
+        ...(capability.hostOnly ? { hostOnly: true } : {}),
       })),
   };
 }
@@ -104,4 +110,9 @@ export function createCapabilityRegistry(capabilities: readonly Capability[]): C
 /** Typed helper so `toText` receives the parsed params type. */
 export function defineCapability<P>(capability: Capability<P>): Capability {
   return capability as unknown as Capability;
+}
+
+/** Capabilities exposed to model tool lists and prompt schemas. */
+export function listModelCapabilities(registry: CapabilityRegistry): CapabilityDescriptor[] {
+  return registry.describe().filter((descriptor) => descriptor.hostOnly !== true);
 }
