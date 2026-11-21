@@ -62,13 +62,7 @@ export function classifyPlacementRoutes(
   }
 
   const snapshot = source instanceof KstStateSpace ? source.buildPriorSnapshot() : source;
-  const certified = source instanceof KstStateSpace
-    ? {
-        piBySkill: new Map(Object.entries(snapshot.piBySkill)),
-        parentsSatisfiedBySkill: new Map(Object.entries(snapshot.parentsSatisfiedBySkill)),
-        outerFringeBySkill: new Map(Object.entries(snapshot.outerFringeBySkill)),
-      }
-    : certifyKstSnapshot(snapshot, skills);
+  const certified = certifyKstSnapshot(snapshot, skills);
   const componentModeBySkill = new Map<string, KstComponentMode>();
   for (const comp of snapshot.componentJointWeights) {
     for (const id of comp.skillIds) {
@@ -133,14 +127,16 @@ export function classifyPlacementRoutes(
   });
 }
 
-function minCostFeasibleCompletion(
+function minCostCompletionCost(
   availableItems: readonly DiagnosticProbeItem[],
   deficitsByChapter: ReadonlyMap<string, number>,
   headroomByChapter: ReadonlyMap<string, number>,
   kNeeded: number,
-  budgetRemaining: number,
-): boolean {
-  if (kNeeded === 0) return budgetRemaining >= -1e-9;
+): number {
+  let reqDeficitSum = 0;
+  for (const def of deficitsByChapter.values()) reqDeficitSum += def;
+  if (reqDeficitSum > kNeeded) return Infinity;
+  if (kNeeded === 0) return 0;
 
   const fastestByFamilyChapter = new Map<string, Map<string, DiagnosticProbeItem>>();
   const chaptersPerFamily = new Map<string, Set<string>>();
@@ -176,7 +172,7 @@ function minCostFeasibleCompletion(
     for (const [chapterId, deficit] of deficitsByChapter.entries()) {
       totalDeficit += deficit;
       const items = (byChapter.get(chapterId) ?? []).sort((a, b) => a.estimatedSeconds - b.estimatedSeconds);
-      if (items.length < deficit) return false;
+      if (items.length < deficit) return Infinity;
       for (let i = 0; i < deficit; i++) minTime += items[i]!.estimatedSeconds;
       const cap = headroomByChapter.get(chapterId) ?? Infinity;
       for (let i = deficit; i < items.length && i - deficit < cap; i++) extraPool.push(items[i]!);
@@ -188,10 +184,10 @@ function minCostFeasibleCompletion(
       for (let i = 0; i < sorted.length && i < cap; i++) extraPool.push(sorted[i]!);
     }
     const extraNeeded = Math.max(0, kNeeded - totalDeficit);
-    if (extraPool.length < extraNeeded) return false;
+    if (extraPool.length < extraNeeded) return Infinity;
     extraPool.sort((a, b) => a.estimatedSeconds - b.estimatedSeconds);
     for (let i = 0; i < extraNeeded; i++) minTime += extraPool[i]!.estimatedSeconds;
-    return minTime <= budgetRemaining + 1e-9;
+    return minTime;
   }
 
   // Min-cost max-flow fallback when a familyId spans multiple chapters.
@@ -218,7 +214,7 @@ function minCostFeasibleCompletion(
     if (def > 0) addEdge(chapIdx.get(c)!, deficitSink, def, 0);
     if (cap > 0) addEdge(chapIdx.get(c)!, extraSink, Math.min(kNeeded, cap), 0);
   }
-  if (totalDeficit > kNeeded) return false;
+  if (totalDeficit > kNeeded) return Infinity;
   addEdge(deficitSink, sink, totalDeficit, 0);
   addEdge(extraSink, sink, kNeeded - totalDeficit, 0);
 
@@ -245,7 +241,7 @@ function minCostFeasibleCompletion(
         }
       }
     }
-    if (!Number.isFinite(dist[sink]!)) return false;
+    if (!Number.isFinite(dist[sink]!)) return Infinity;
     flow++;
     totalCost += dist[sink]!;
     for (let v = sink; v !== 0; v = parentNode[v]!) {
@@ -255,7 +251,18 @@ function minCostFeasibleCompletion(
       adj[v]![adj[u]![ei]!.rev]!.cap += 1;
     }
   }
-  return totalCost <= budgetRemaining + 1e-9;
+  return totalCost;
+}
+
+function minCostFeasibleCompletion(
+  availableItems: readonly DiagnosticProbeItem[],
+  deficitsByChapter: ReadonlyMap<string, number>,
+  headroomByChapter: ReadonlyMap<string, number>,
+  kNeeded: number,
+  budgetRemaining: number,
+): boolean {
+  if (kNeeded === 0) return budgetRemaining >= -1e-9;
+  return minCostCompletionCost(availableItems, deficitsByChapter, headroomByChapter, kNeeded) <= budgetRemaining + 1e-9;
 }
 
 export class DiagnosticPlacementSession {
@@ -410,6 +417,7 @@ export class DiagnosticPlacementSession {
       : { ok: true, groupsCount: 1, groupSig: "single", nextCompToGroup: startCompToGroup, nextGroupCounts: startGroupCounts };
     if (!afterCandidate.ok) return false;
 
+    const initSlack = maxAfter - initTotalDeficit;
     const rawRemaining = this.candidatePool
       .filter(item =>
         item.itemId !== candidate.itemId &&
@@ -417,7 +425,8 @@ export class DiagnosticPlacementSession {
         !this.usedItemIds.has(item.itemId) &&
         !this.usedFamilyIds.has(item.familyId) &&
         item.estimatedSeconds <= budgetAfter + 1e-9 &&
-        ((initRemMaxCap.get(item.chapterId) ?? Infinity) > 0),
+        ((initRemMaxCap.get(item.chapterId) ?? Infinity) > 0) &&
+        (initSlack > 0 || (initRemMin.get(item.chapterId) ?? 0) > 0),
       )
       .sort((a, b) => (a.estimatedSeconds - b.estimatedSeconds) || cmpStr(a.itemId, b.itemId));
 
@@ -441,11 +450,9 @@ export class DiagnosticPlacementSession {
 
     const alwaysSinglePool: DiagnosticProbeItem[] = [];
     const potentialMergePool: DiagnosticProbeItem[] = [];
-    const famAppearanceCount = new Map<string, number>();
     for (const byChap of bestByEquiv.values()) {
       for (const bySig of byChap.values()) {
         for (const item of bySig.values()) {
-          famAppearanceCount.set(item.familyId, (famAppearanceCount.get(item.familyId) ?? 0) + 1);
           const out = evalMerge(item, afterCandidate.nextCompToGroup, afterCandidate.nextGroupCounts);
           if (out.ok && out.groupsCount <= 1) alwaysSinglePool.push(item);
           else if (out.ok) potentialMergePool.push(item);
@@ -464,11 +471,6 @@ export class DiagnosticPlacementSession {
       return true;
     }
 
-    const pickedFams = new Set<string>();
-    const pickedMergeItems = new Set<string>();
-    const bannedMergeIds = new Set<string>();
-    const failedBudgetMemo = new Map<string, number>();
-
     const getCanonicalUnionSig = (compToGroup: number[]): string => {
       const members = new Map<number, number[]>();
       for (let i = 0; i < compToGroup.length; i++) {
@@ -486,13 +488,23 @@ export class DiagnosticPlacementSession {
 
     type MergerCandidate = { item: DiagnosticProbeItem; outcome: Extract<MergeOutcome, { ok: true }> };
     type DfsBranchEntry = { item: DiagnosticProbeItem; outcome: Extract<MergeOutcome, { ok: true }>; equivNonConflictingIds: string[] };
-    type DfsBudgetCounter = { visited: number; limit: number; aborted: boolean };
+    type DfsSearchResult = { solved: boolean; minCost: number; aborted: boolean; nodesUsed: number };
 
-    const dedupMergers = (entries: readonly MergerCandidate[]): DfsBranchEntry[] => {
+    const computeActiveFamCounts = (
+      singles: readonly DiagnosticProbeItem[],
+      mergers: readonly MergerCandidate[],
+    ): Map<string, number> => {
+      const counts = new Map<string, number>();
+      for (const item of singles) counts.set(item.familyId, (counts.get(item.familyId) ?? 0) + 1);
+      for (const { item } of mergers) counts.set(item.familyId, (counts.get(item.familyId) ?? 0) + 1);
+      return counts;
+    };
+
+    const dedupMergers = (entries: readonly MergerCandidate[], famCounts: ReadonlyMap<string, number>): DfsBranchEntry[] => {
       const nonConflictingByChapSig = new Map<string, Map<string, DfsBranchEntry>>();
       const result: DfsBranchEntry[] = [];
       for (const entry of entries) {
-        if (famAppearanceCount.get(entry.item.familyId) === 1) {
+        if (famCounts.get(entry.item.familyId) === 1) {
           let bySig = nonConflictingByChapSig.get(entry.item.chapterId);
           if (!bySig) {
             bySig = new Map();
@@ -513,199 +525,446 @@ export class DiagnosticPlacementSession {
       return result;
     };
 
-    const dfs = (
-      multiPickedCount: number,
-      remBudget: number,
-      remMinMap: ReadonlyMap<string, number>,
-      totalRemMin: number,
-      remMaxCapMap: ReadonlyMap<string, number>,
-      compToGroup: number[],
-      groupCounts: bigint[],
-      isRoot: boolean,
-      budgetCounter: DfsBudgetCounter,
-    ): boolean => {
-      const minRemaining = Math.max(0, minAfter - multiPickedCount);
-      const maxRemaining = maxAfter - multiPickedCount;
-      const kSingleNeeded = Math.max(totalRemMin, minRemaining);
-      if (kSingleNeeded > maxRemaining) return false;
-      if (kSingleNeeded === 0) return remBudget >= -1e-9;
+    const runBoundedDfs = (params: {
+      singlesSource: readonly DiagnosticProbeItem[];
+      mergersSource: readonly DiagnosticProbeItem[];
+      initRemMin: ReadonlyMap<string, number>;
+      initTotalRemMin: number;
+      initRemMaxCap: ReadonlyMap<string, number>;
+      initCompToGroup: number[];
+      initGroupCounts: bigint[];
+      initMinAfter: number;
+      initMaxAfter: number;
+      budgetLimit: number;
+      nodeBudget: number;
+      optimizeMinCost: boolean;
+      targetOptimalCost: number;
+      allowClusterSplit: boolean;
+    }): DfsSearchResult => {
+      const pickedFams = new Set<string>();
+      const pickedMergeItems = new Set<string>();
+      const bannedMergeIds = new Set<string>();
+      const failedBudgetMemo = new Map<string, number>();
+      let bestCostRef = Infinity;
 
-      if (!isRoot) {
-        if (budgetCounter.visited >= budgetCounter.limit) {
-          budgetCounter.aborted = true;
-          return false;
-        }
-        budgetCounter.visited += 1;
-      }
+      const innerDfs = (
+        spentCost: number,
+        multiPickedCount: number,
+        remMinMap: ReadonlyMap<string, number>,
+        totalRemMin: number,
+        remMaxCapMap: ReadonlyMap<string, number>,
+        compToGroup: number[],
+        groupCounts: bigint[],
+        allocNodes: number,
+      ): DfsSearchResult => {
+        const capNow = params.optimizeMinCost
+          ? Math.min(params.budgetLimit, bestCostRef - 1e-9)
+          : params.budgetLimit;
+        const remBudget = capNow - spentCost;
+        if (remBudget < -1e-9) return { solved: false, minCost: Infinity, aborted: false, nodesUsed: 0 };
 
-      const sortedMin = [...remMinMap.entries()].sort((a, b) => cmpStr(a[0], b[0]));
-      const sortedMax = [...remMaxCapMap.entries()].filter(([, v]) => v !== Infinity).sort((a, b) => cmpStr(a[0], b[0]));
-      const sortedFams = [...pickedFams].sort(cmpStr);
-      const sortedBanned = [...bannedMergeIds].sort(cmpStr);
-      const memoKey = JSON.stringify([getCanonicalUnionSig(compToGroup), multiPickedCount, minRemaining, sortedMin, sortedMax, sortedFams, sortedBanned]);
-      const prevFailBudget = failedBudgetMemo.get(memoKey);
-      if (prevFailBudget !== undefined && prevFailBudget >= remBudget - 1e-9) return false;
+        const minRemaining = Math.max(0, params.initMinAfter - multiPickedCount);
+        const maxRemaining = params.initMaxAfter - multiPickedCount;
+        const kSingleNeeded = Math.max(totalRemMin, minRemaining);
+        if (kSingleNeeded > maxRemaining) return { solved: false, minCost: Infinity, aborted: false, nodesUsed: 0 };
+        if (kSingleNeeded === 0) return { solved: true, minCost: spentCost, aborted: false, nodesUsed: 0 };
 
-      const failAndMemo = (): false => {
-        if (prevFailBudget === undefined || remBudget > prevFailBudget) {
-          failedBudgetMemo.set(memoKey, remBudget);
-        }
-        return false;
-      };
+        if (allocNodes <= 0) return { solved: false, minCost: Infinity, aborted: true, nodesUsed: 0 };
+        let remNodes = allocNodes - 1;
+        let nodesUsed = 1;
 
-      const headroomNow = new Map<string, number>();
-      for (const [ch, cap] of remMaxCapMap.entries()) {
-        headroomNow.set(ch, cap === Infinity ? Infinity : Math.max(0, cap - (remMinMap.get(ch) ?? 0)));
-      }
-
-      // Single-group probes NEVER merge KST components: partition remaining probes relative to current compToGroup
-      const currentSingles: DiagnosticProbeItem[] = [];
-      for (const item of alwaysSinglePool) {
-        if (pickedFams.has(item.familyId)) continue;
-        if (item.estimatedSeconds > remBudget + 1e-9) continue;
-        if ((remMaxCapMap.get(item.chapterId) ?? Infinity) <= 0) continue;
-        currentSingles.push(item);
-      }
-
-      const activeMergers: MergerCandidate[] = [];
-      for (const item of potentialMergePool) {
-        if (pickedMergeItems.has(item.itemId) || pickedFams.has(item.familyId)) continue;
-        if (item.estimatedSeconds > remBudget + 1e-9) continue;
-        if ((remMaxCapMap.get(item.chapterId) ?? Infinity) <= 0) continue;
-        const outcome = evalMerge(item, compToGroup, groupCounts);
-        if (!outcome.ok) continue;
-        if (outcome.groupsCount <= 1) {
-          currentSingles.push(item);
-        } else if (!bannedMergeIds.has(item.itemId)) {
-          activeMergers.push({ item, outcome });
-        }
-      }
-
-      // Test pure-single completion first at every node
-      if (currentSingles.length >= kSingleNeeded && minCostFeasibleCompletion(currentSingles, remMinMap, headroomNow, kSingleNeeded, remBudget)) {
-        return true;
-      }
-
-      if (multiPickedCount >= maxAfter || activeMergers.length === 0) return failAndMemo();
-
-      const upperItems = [...currentSingles, ...activeMergers.map(m => m.item)];
-      if (upperItems.length < kSingleNeeded || !minCostFeasibleCompletion(upperItems, remMinMap, headroomNow, kSingleNeeded, remBudget)) {
-        return failAndMemo();
-      }
-
-      // Unit-propagate chapter lower bounds and branch on forced chapters using MRV (fewest distinct merger choices)
-      const singlesByChap = new Map<string, number>();
-      for (const item of currentSingles) singlesByChap.set(item.chapterId, (singlesByChap.get(item.chapterId) ?? 0) + 1);
-      const mergersByChap = new Map<string, MergerCandidate[]>();
-      for (const entry of activeMergers) {
-        let list = mergersByChap.get(entry.item.chapterId);
-        if (!list) {
-          list = [];
-          mergersByChap.set(entry.item.chapterId, list);
-        }
-        list.push(entry);
-      }
-
-      let forcedChapter: string | null = null;
-      let forcedBranches: DfsBranchEntry[] | null = null;
-      let bestShortfall = 0;
-      for (const [ch, reqMin] of remMinMap.entries()) {
-        const sCount = singlesByChap.get(ch) ?? 0;
-        const chMergers = mergersByChap.get(ch) ?? [];
-        if (sCount + chMergers.length < reqMin) return failAndMemo();
-        if (sCount < reqMin) {
-          const chBranches = dedupMergers(chMergers);
-          const shortfall = reqMin - sCount;
-          if (
-            forcedBranches === null ||
-            chBranches.length < forcedBranches.length ||
-            (chBranches.length === forcedBranches.length &&
-              (shortfall > bestShortfall || (shortfall === bestShortfall && cmpStr(ch, forcedChapter!) < 0)))
-          ) {
-            forcedChapter = ch;
-            forcedBranches = chBranches;
-            bestShortfall = shortfall;
+        const sortedMin = [...remMinMap.entries()].sort((a, b) => cmpStr(a[0], b[0]));
+        const sortedMax = [...remMaxCapMap.entries()].filter(([, v]) => v !== Infinity).sort((a, b) => cmpStr(a[0], b[0]));
+        const sortedFams = [...pickedFams].sort(cmpStr);
+        const sortedBanned = [...bannedMergeIds].sort(cmpStr);
+        const memoKey = JSON.stringify([getCanonicalUnionSig(compToGroup), multiPickedCount, minRemaining, sortedMin, sortedMax, sortedFams, sortedBanned]);
+        if (!params.optimizeMinCost) {
+          const prevFailBudget = failedBudgetMemo.get(memoKey);
+          if (prevFailBudget !== undefined && prevFailBudget >= remBudget - 1e-9) {
+            return { solved: false, minCost: Infinity, aborted: false, nodesUsed };
           }
         }
-      }
 
-      const branchSet: DfsBranchEntry[] = forcedBranches !== null
-        ? forcedBranches
-        : dedupMergers(activeMergers).sort((a, b) => {
+        const remSlack = maxRemaining - totalRemMin;
+        const tightChaptersOnly = remSlack === 0;
+        const currentSingles: DiagnosticProbeItem[] = [];
+        for (const item of params.singlesSource) {
+          if (pickedFams.has(item.familyId)) continue;
+          if (item.estimatedSeconds > remBudget + 1e-9) continue;
+          if ((remMaxCapMap.get(item.chapterId) ?? Infinity) <= 0) continue;
+          if (tightChaptersOnly && (remMinMap.get(item.chapterId) ?? 0) <= 0) continue;
+          currentSingles.push(item);
+        }
+
+        const activeMergers: MergerCandidate[] = [];
+        for (const item of params.mergersSource) {
+          if (pickedMergeItems.has(item.itemId) || pickedFams.has(item.familyId)) continue;
+          if (item.estimatedSeconds > remBudget + 1e-9) continue;
+          if ((remMaxCapMap.get(item.chapterId) ?? Infinity) <= 0) continue;
+          if (tightChaptersOnly && (remMinMap.get(item.chapterId) ?? 0) <= 0) continue;
+          const outcome = evalMerge(item, compToGroup, groupCounts);
+          if (!outcome.ok) continue;
+          if (outcome.groupsCount <= 1) {
+            currentSingles.push(item);
+          } else if (!bannedMergeIds.has(item.itemId)) {
+            activeMergers.push({ item, outcome });
+          }
+        }
+
+        const headroomNow = new Map<string, number>();
+        for (const [ch, cap] of remMaxCapMap.entries()) {
+          headroomNow.set(ch, tightChaptersOnly ? 0 : (cap === Infinity ? Infinity : Math.max(0, cap - (remMinMap.get(ch) ?? 0))));
+        }
+
+        // 1) Pure-single completion first (exact min cost via greedy/min-cost-flow)
+        const singlesCost = currentSingles.length >= kSingleNeeded
+          ? minCostCompletionCost(currentSingles, remMinMap, headroomNow, kSingleNeeded)
+          : Infinity;
+        if (singlesCost <= remBudget + 1e-9) {
+          const total = spentCost + singlesCost;
+          if (!params.optimizeMinCost) {
+            return { solved: true, minCost: total, aborted: false, nodesUsed };
+          }
+          if (total < bestCostRef) bestCostRef = total;
+          if (bestCostRef <= params.targetOptimalCost + 1e-9) {
+            return { solved: true, minCost: bestCostRef, aborted: false, nodesUsed };
+          }
+        }
+
+        const failAndMemo = (aborted: boolean, localBestCost: number): DfsSearchResult => {
+          if (!aborted && !params.optimizeMinCost && localBestCost === Infinity) {
+            const prevFail = failedBudgetMemo.get(memoKey);
+            if (prevFail === undefined || remBudget > prevFail) failedBudgetMemo.set(memoKey, remBudget);
+          }
+          return { solved: localBestCost < Infinity, minCost: localBestCost, aborted, nodesUsed };
+        };
+
+        if (multiPickedCount >= params.initMaxAfter || activeMergers.length === 0) {
+          return failAndMemo(false, bestCostRef);
+        }
+
+        const singlesByChap = new Map<string, number>();
+        for (const item of currentSingles) singlesByChap.set(item.chapterId, (singlesByChap.get(item.chapterId) ?? 0) + 1);
+        const mergersByChap = new Map<string, MergerCandidate[]>();
+        for (const entry of activeMergers) {
+          let list = mergersByChap.get(entry.item.chapterId);
+          if (!list) {
+            list = [];
+            mergersByChap.set(entry.item.chapterId, list);
+          }
+          list.push(entry);
+        }
+        for (const [ch, reqMin] of remMinMap.entries()) {
+          const sCount = singlesByChap.get(ch) ?? 0;
+          const chMergers = mergersByChap.get(ch) ?? [];
+          if (sCount + chMergers.length < reqMin) return failAndMemo(false, bestCostRef);
+        }
+
+        const upperItems = [...currentSingles, ...activeMergers.map(m => m.item)];
+        const upperCost = upperItems.length >= kSingleNeeded
+          ? minCostCompletionCost(upperItems, remMinMap, headroomNow, kSingleNeeded)
+          : Infinity;
+        if (!(upperCost <= remBudget + 1e-9)) {
+          return failAndMemo(false, bestCostRef);
+        }
+        if (params.optimizeMinCost && singlesCost <= upperCost + 1e-9 && singlesCost <= remBudget + 1e-9) {
+          // Singles already match the theoretical lower bound -> cannot be improved by any merger!
+          return { solved: true, minCost: Math.min(bestCostRef, spentCost + singlesCost), aborted: false, nodesUsed };
+        }
+
+        // 2) Connected (KST-component-group + shared-family) cluster decomposition when slack === 0
+        if (params.allowClusterSplit && tightChaptersOnly && remMinMap.size >= 2) {
+          const chKeys = [...remMinMap.keys()];
+          const chIndex = new Map(chKeys.map((c, i) => [c, i]));
+          const parent = chKeys.map((_, i) => i);
+          const find = (x: number): number => {
+            while (parent[x] !== x) {
+              parent[x] = parent[parent[x]!]!;
+              x = parent[x]!;
+            }
+            return x;
+          };
+          const union = (a: number, b: number): void => {
+            const ra = find(a);
+            const rb = find(b);
+            if (ra !== rb) parent[rb] = ra;
+          };
+          const famFirst = new Map<string, number>();
+          for (const item of currentSingles) {
+            const ci = chIndex.get(item.chapterId)!;
+            const prev = famFirst.get(item.familyId);
+            if (prev === undefined) famFirst.set(item.familyId, ci);
+            else union(prev, ci);
+          }
+          const grpFirst = new Map<number, number>();
+          for (const { item } of activeMergers) {
+            const ci = chIndex.get(item.chapterId)!;
+            const prevF = famFirst.get(item.familyId);
+            if (prevF === undefined) famFirst.set(item.familyId, ci);
+            else union(prevF, ci);
+            for (const orig of getOrigComps(item)) {
+              const g = compToGroup[orig]!;
+              const prevG = grpFirst.get(g);
+              if (prevG === undefined) grpFirst.set(g, ci);
+              else union(prevG, ci);
+            }
+          }
+
+          const byRoot = new Map<number, Set<string>>();
+          for (let i = 0; i < chKeys.length; i++) {
+            const r = find(i);
+            let set = byRoot.get(r);
+            if (!set) {
+              set = new Set();
+              byRoot.set(r, set);
+            }
+            set.add(chKeys[i]!);
+          }
+
+          if (byRoot.size >= 2) {
+            type ClusterPlan = {
+              remMin: Map<string, number>;
+              totalMin: number;
+              singles: DiagnosticProbeItem[];
+              mergers: DiagnosticProbeItem[];
+              lb: number;
+              singlesCost: number;
+            };
+            const plans: ClusterPlan[] = [];
+            let sumLB = 0;
+            for (const chapSet of byRoot.values()) {
+              const clRemMin = new Map<string, number>();
+              let clTotal = 0;
+              for (const ch of chapSet) {
+                const req = remMinMap.get(ch)!;
+                clRemMin.set(ch, req);
+                clTotal += req;
+              }
+              const clSingles = currentSingles.filter(i => chapSet.has(i.chapterId));
+              const clMergers = activeMergers.filter(m => chapSet.has(m.item.chapterId)).map(m => m.item);
+              const clZeroHeadroom = new Map<string, number>();
+              for (const ch of chapSet) clZeroHeadroom.set(ch, 0);
+              const clAll = [...clSingles, ...clMergers];
+              const lb = minCostCompletionCost(clAll, clRemMin, clZeroHeadroom, clTotal);
+              if (!Number.isFinite(lb)) return failAndMemo(false, Infinity);
+              sumLB += lb;
+              const sCost = clSingles.length >= clTotal
+                ? minCostCompletionCost(clSingles, clRemMin, clZeroHeadroom, clTotal)
+                : Infinity;
+              plans.push({ remMin: clRemMin, totalMin: clTotal, singles: clSingles, mergers: clMergers, lb, singlesCost: sCost });
+            }
+            if (sumLB > remBudget + 1e-9) return failAndMemo(false, Infinity);
+
+            let fixedCost = 0;
+            const unsolved: ClusterPlan[] = [];
+            for (const p of plans) {
+              if (p.singlesCost <= p.lb + 1e-9) fixedCost += p.singlesCost;
+              else unsolved.push(p);
+            }
+            if (unsolved.length === 0) {
+              return { solved: fixedCost <= remBudget + 1e-9, minCost: spentCost + fixedCost, aborted: false, nodesUsed };
+            }
+
+            // Solve smallest/simplest independent clusters first; run largest coupled cluster last as first-feasible
+            unsolved.sort((a, b) => a.mergers.length - b.mergers.length || a.totalMin - b.totalMin);
+            let clusterRemBudget = remBudget - fixedCost;
+            let remPendingLB = unsolved.reduce((s, p) => s + p.lb, 0);
+            let totalSolvedCost = fixedCost;
+            let clusterAborted = false;
+            for (let ci = 0; ci < unsolved.length; ci++) {
+              const p = unsolved[ci]!;
+              const otherLB = remPendingLB - p.lb;
+              const capForCluster = clusterRemBudget - otherLB;
+              if (capForCluster < p.lb - 1e-9) return failAndMemo(false, Infinity);
+              const isLast = ci === unsolved.length - 1;
+              const clRes = runBoundedDfs({
+                singlesSource: p.singles,
+                mergersSource: p.mergers,
+                initRemMin: p.remMin,
+                initTotalRemMin: p.totalMin,
+                initRemMaxCap: p.remMin,
+                initCompToGroup: compToGroup,
+                initGroupCounts: groupCounts,
+                initMinAfter: p.totalMin,
+                initMaxAfter: p.totalMin,
+                budgetLimit: capForCluster,
+                nodeBudget: Math.max(2_000, Math.floor(25_000 / unsolved.length)),
+                optimizeMinCost: !isLast,
+                targetOptimalCost: p.lb,
+                allowClusterSplit: false,
+              });
+              nodesUsed += Math.min(clRes.nodesUsed, 1);
+              if (!clRes.solved) {
+                if (clRes.aborted) clusterAborted = true;
+                return failAndMemo(clusterAborted, Infinity);
+              }
+              totalSolvedCost += clRes.minCost;
+              clusterRemBudget -= clRes.minCost;
+              remPendingLB -= p.lb;
+            }
+            return { solved: true, minCost: spentCost + totalSolvedCost, aborted: false, nodesUsed };
+          }
+        }
+
+        // 3) Recompute family counts strictly on surviving active items at this node (eliminating dead/slack-0 family twins)
+        const localFamCounts = computeActiveFamCounts(currentSingles, activeMergers);
+
+        type ForcedChapInfo = {
+          ch: string;
+          branches: DfsBranchEntry[];
+          shortfall: number;
+          isCoupled: boolean;
+        };
+        const forcedList: ForcedChapInfo[] = [];
+        const groupForcedChapCount = new Map<number, number>();
+        const famForcedChapCount = new Map<string, number>();
+        for (const [ch, reqMin] of remMinMap.entries()) {
+          const sCount = singlesByChap.get(ch) ?? 0;
+          const chMergers = mergersByChap.get(ch) ?? [];
+          if (sCount < reqMin) {
+            const chBranches = dedupMergers(chMergers, localFamCounts);
+            const seenGroups = new Set<number>();
+            const seenFams = new Set<string>();
+            for (const m of chMergers) {
+              seenFams.add(m.item.familyId);
+              for (const orig of getOrigComps(m.item)) seenGroups.add(compToGroup[orig]!);
+            }
+            for (const g of seenGroups) groupForcedChapCount.set(g, (groupForcedChapCount.get(g) ?? 0) + 1);
+            for (const f of seenFams) famForcedChapCount.set(f, (famForcedChapCount.get(f) ?? 0) + 1);
+            forcedList.push({ ch, branches: chBranches, shortfall: reqMin - sCount, isCoupled: false });
+          }
+        }
+        for (const info of forcedList) {
+          const chMergers = mergersByChap.get(info.ch)!;
+          info.isCoupled = chMergers.some(m =>
+            (famForcedChapCount.get(m.item.familyId) ?? 0) > 1 ||
+            getOrigComps(m.item).some(orig => (groupForcedChapCount.get(compToGroup[orig]!) ?? 0) > 1),
+          );
+        }
+
+        let branchSet: DfsBranchEntry[];
+        if (forcedList.length > 0) {
+          forcedList.sort((a, b) => {
+            const unitA = a.branches.length === 1 ? 0 : 1;
+            const unitB = b.branches.length === 1 ? 0 : 1;
+            if (unitA !== unitB) return unitA - unitB;
+            const coupA = a.isCoupled ? 0 : 1;
+            const coupB = b.isCoupled ? 0 : 1;
+            if (coupA !== coupB) return coupA - coupB;
+            return a.branches.length - b.branches.length || b.shortfall - a.shortfall || cmpStr(a.ch, b.ch);
+          });
+          branchSet = forcedList[0]!.branches;
+        } else {
+          branchSet = dedupMergers(activeMergers, localFamCounts).sort((a, b) => {
             const defA = (remMinMap.get(a.item.chapterId) ?? 0) > 0 ? 0 : 1;
             const defB = (remMinMap.get(b.item.chapterId) ?? 0) > 0 ? 0 : 1;
             return defA - defB || a.item.estimatedSeconds - b.item.estimatedSeconds || cmpStr(a.item.itemId, b.item.itemId);
           });
-
-      const perRootBranchLimit = Math.max(2_000, Math.min(15_000, Math.floor(80_000 / Math.max(1, branchSet.length))));
-      const addedBans: string[] = [];
-      let anyChildAborted = false;
-
-      for (const entry of branchSet) {
-        const { item, outcome } = entry;
-        pickedMergeItems.add(item.itemId);
-        pickedFams.add(item.familyId);
-        const nextMinMap = new Map(remMinMap);
-        const curDef = nextMinMap.get(item.chapterId) ?? 0;
-        let nextTotalRemMin = totalRemMin;
-        if (curDef > 0) {
-          nextTotalRemMin -= 1;
-          if (curDef <= 1) nextMinMap.delete(item.chapterId);
-          else nextMinMap.set(item.chapterId, curDef - 1);
         }
-        const nextMaxCap = new Map(remMaxCapMap);
-        const prevCap = nextMaxCap.get(item.chapterId) ?? Infinity;
-        if (prevCap !== Infinity) nextMaxCap.set(item.chapterId, prevCap - 1);
 
-        const childCounter: DfsBudgetCounter = isRoot
-          ? { visited: 0, limit: perRootBranchLimit, aborted: false }
-          : budgetCounter;
-        const solved = dfs(
-          multiPickedCount + 1,
-          remBudget - item.estimatedSeconds,
-          nextMinMap,
-          nextTotalRemMin,
-          nextMaxCap,
-          outcome.nextCompToGroup,
-          outcome.nextGroupCounts,
-          false,
-          childCounter,
-        );
-        pickedMergeItems.delete(item.itemId);
-        pickedFams.delete(item.familyId);
-        if (solved) {
-          for (const id of addedBans) bannedMergeIds.delete(id);
-          return true;
-        }
-        if (childCounter.aborted) {
-          anyChildAborted = true;
-          if (!isRoot) break;
-        } else {
-          for (const banId of entry.equivNonConflictingIds) {
-            if (!bannedMergeIds.has(banId)) {
-              bannedMergeIds.add(banId);
-              addedBans.push(banId);
+        // Fair sibling budget allocation: NEVER abort remaining siblings when child i exhausts its share!
+        const addedBans: string[] = [];
+        let anyChildAborted = false;
+        let localSolvedCost = bestCostRef;
+
+        for (let i = 0; i < branchSet.length; i++) {
+          if (remNodes <= 0) {
+            anyChildAborted = true;
+            break;
+          }
+          const remainingSiblings = branchSet.length - i;
+          const childAlloc = Math.max(1, Math.floor(remNodes / remainingSiblings));
+          const entry = branchSet[i]!;
+          const { item, outcome } = entry;
+
+          pickedMergeItems.add(item.itemId);
+          pickedFams.add(item.familyId);
+          const nextMinMap = new Map(remMinMap);
+          const curDef = nextMinMap.get(item.chapterId) ?? 0;
+          let nextTotalRemMin = totalRemMin;
+          if (curDef > 0) {
+            nextTotalRemMin -= 1;
+            if (curDef <= 1) nextMinMap.delete(item.chapterId);
+            else nextMinMap.set(item.chapterId, curDef - 1);
+          }
+          const nextMaxCap = new Map(remMaxCapMap);
+          const prevCap = nextMaxCap.get(item.chapterId) ?? Infinity;
+          if (prevCap !== Infinity) nextMaxCap.set(item.chapterId, prevCap - 1);
+
+          const childRes = innerDfs(
+            spentCost + item.estimatedSeconds,
+            multiPickedCount + 1,
+            nextMinMap,
+            nextTotalRemMin,
+            nextMaxCap,
+            outcome.nextCompToGroup,
+            outcome.nextGroupCounts,
+            childAlloc,
+          );
+          pickedMergeItems.delete(item.itemId);
+          pickedFams.delete(item.familyId);
+
+          remNodes -= childRes.nodesUsed;
+          nodesUsed += childRes.nodesUsed;
+
+          if (childRes.solved) {
+            if (!params.optimizeMinCost) {
+              for (const id of addedBans) bannedMergeIds.delete(id);
+              return { solved: true, minCost: childRes.minCost, aborted: false, nodesUsed };
+            }
+            if (childRes.minCost < localSolvedCost) {
+              localSolvedCost = childRes.minCost;
+              bestCostRef = Math.min(bestCostRef, localSolvedCost);
+            }
+            if (bestCostRef <= params.targetOptimalCost + 1e-9) {
+              for (const id of addedBans) bannedMergeIds.delete(id);
+              return { solved: true, minCost: bestCostRef, aborted: false, nodesUsed };
+            }
+          } else if (childRes.aborted) {
+            anyChildAborted = true;
+          } else {
+            for (const banId of entry.equivNonConflictingIds) {
+              if (!bannedMergeIds.has(banId)) {
+                bannedMergeIds.add(banId);
+                addedBans.push(banId);
+              }
             }
           }
         }
-      }
 
-      for (const id of addedBans) bannedMergeIds.delete(id);
-      if (anyChildAborted || isRoot) return false;
-      return failAndMemo();
+        for (const id of addedBans) bannedMergeIds.delete(id);
+        return failAndMemo(anyChildAborted, localSolvedCost);
+      };
+
+      return innerDfs(
+        0,
+        0,
+        params.initRemMin,
+        params.initTotalRemMin,
+        params.initRemMaxCap,
+        params.initCompToGroup,
+        params.initGroupCounts,
+        params.nodeBudget,
+      );
     };
 
-    return dfs(
-      0,
-      budgetAfter,
+    const result = runBoundedDfs({
+      singlesSource: alwaysSinglePool,
+      mergersSource: potentialMergePool,
       initRemMin,
-      initTotalDeficit,
+      initTotalRemMin: initTotalDeficit,
       initRemMaxCap,
-      afterCandidate.nextCompToGroup,
-      afterCandidate.nextGroupCounts,
-      true,
-      { visited: 0, limit: 25_000, aborted: false },
-    );
+      initCompToGroup: afterCandidate.nextCompToGroup,
+      initGroupCounts: afterCandidate.nextGroupCounts,
+      initMinAfter: minAfter,
+      initMaxAfter: maxAfter,
+      budgetLimit: budgetAfter,
+      nodeBudget: 40_000,
+      optimizeMinCost: false,
+      targetOptimalCost: 0,
+      allowClusterSplit: true,
+    });
+    return result.solved;
   }
 
   selectNextProbe(): PlacementSelectionResult {

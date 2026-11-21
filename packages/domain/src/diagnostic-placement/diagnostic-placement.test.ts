@@ -17,6 +17,7 @@ import {
   partitionObservationsAgainstKstSnapshot,
   updateSkillMasteryFromKstSnapshot,
   validateKstSnapshot,
+  type ChapterQuotaInput,
   type DiagnosticProbeItem,
   type DiagnosticSkillNode,
 } from "./index";
@@ -938,12 +939,20 @@ describe("Round-4 multi-step completion DFS, component partition & evidence inte
     expect(sessDup.applied).toBe(false);
     expect(sessDup.reason).toBe("duplicate_observation");
 
+    const ddSpace = createKstStateSpace([
+      { skillId: "P", chapterId: "ch1" },
+      { skillId: "T", chapterId: "ch1", prerequisiteIds: ["P"] },
+    ]);
+    const ddProbe: DiagnosticProbeItem = { itemId: "ddp", familyId: "fdd", chapterId: "ch1", requiredSkillIds: ["P"], slip: 0.1, guess: 0.1, estimatedSeconds: 20 };
+    ddSpace.applyProbeObservation(ddProbe, { observationId: "  obs-trim  ", itemId: "ddp", correct: true });
+    const ddSnap = buildKstPriorSnapshot(ddSpace);
+
     const dd = new PrerequisiteDrilldownStateMachine({
       skills: [{ skillId: "P", chapterId: "ch1" }, { skillId: "T", chapterId: "ch1", prerequisiteIds: ["P"] }],
       targetSkillId: "T",
-      probePool: [{ itemId: "ddp", familyId: "fdd", chapterId: "ch1", requiredSkillIds: ["P"], slip: 0.1, guess: 0.1, estimatedSeconds: 20 }],
+      probePool: [ddProbe],
       originalContext: { originalAttemptId: "a", originalItemId: "i", frozenDraftText: "", frozenCursorOffset: 0, startedAtMs: 1 },
-      kstSnapshot: snap,
+      kstSnapshot: ddSnap,
     });
     expect(() => dd.recordProbeResponse({ observationId: " obs-trim ", itemId: "ddp", correct: true })).toThrow(DiagnosticPlacementError);
     const dd1 = dd.recordProbeResponse({ observationId: "  dd-obs  ", itemId: "ddp", correct: false });
@@ -1551,5 +1560,245 @@ describe("Round-8 outer-fringe gating, joint snapshot consistency, observed-merg
     expect(chosen).toContain("mand-ac");
     expect(chosen).toContain("mand-bd");
     expect(session.getSessionSummary().administeredCount).toBe(8);
+  });
+});
+
+describe("Round-9 live DAG parity, drilldown snapshot certification, global wByState bijection, duplicate obs merge & cluster decomposition", () => {
+  const makeChain = (prefix: string, chapterId: string, len: number): DiagnosticSkillNode[] =>
+    Array.from({ length: len }, (_, i) => ({
+      skillId: `${prefix}_${i}`,
+      chapterId,
+      ...(i > 0 ? { prerequisiteIds: [`${prefix}_${i - 1}`] } : {}),
+    }));
+
+  it("[P1-1] rejects live KstStateSpace when classifyPlacementRoutes skills disagree on prerequisite edges", () => {
+    const independentSkills: DiagnosticSkillNode[] = [
+      { skillId: "A", chapterId: "c1", priorMastery: 0.1 },
+      { skillId: "B", chapterId: "c1", priorMastery: 0.1 },
+    ];
+    const space = createKstStateSpace(independentSkills);
+    const mismatchedSkills: DiagnosticSkillNode[] = [
+      { skillId: "A", chapterId: "c1", priorMastery: 0.1 },
+      { skillId: "B", chapterId: "c1", prerequisiteIds: ["A"], priorMastery: 0.1 },
+    ];
+    try {
+      classifyPlacementRoutes(space, mismatchedSkills, { readyThreshold: 0.7 });
+      expect.unreachable("should throw VALIDATION on mismatched live KstStateSpace DAG");
+    } catch (err) {
+      expect(err).toBeInstanceOf(DiagnosticPlacementError);
+      expect((err as DiagnosticPlacementError).code).toBe("VALIDATION");
+    }
+  });
+
+  it("[P1-2] enforces 2-arg certifyKstSnapshot in PrerequisiteDrilldownStateMachine and downset identity in 1-arg validateKstSnapshot", () => {
+    const abTSkills: DiagnosticSkillNode[] = [
+      { skillId: "A", chapterId: "c1" },
+      { skillId: "B", chapterId: "c1" },
+      { skillId: "T", chapterId: "c1", prerequisiteIds: ["A", "B"] },
+    ];
+    const fullSnap = buildKstPriorSnapshot(createKstStateSpace(abTSkills));
+    expect(fullSnap.parentsSatisfiedBySkill["T"]).toBeCloseTo(0.4, 12);
+    expect(fullSnap.outerFringeBySkill["T"]).toBeCloseTo(0.2, 12);
+
+    // Strip optional prerequisitesBySkill and tamper T's parentsSatisfiedBySkill / outerFringeBySkill from 0.4/0.2 to 1.0/0.8
+    const tamperedSnap = {
+      ...fullSnap,
+      prerequisitesBySkill: undefined,
+      parentsSatisfiedBySkill: { ...fullSnap.parentsSatisfiedBySkill, T: 1.0 },
+      outerFringeBySkill: { ...fullSnap.outerFringeBySkill, T: 0.8 },
+    };
+
+    const probes: DiagnosticProbeItem[] = [
+      { itemId: "p-a", familyId: "fa", chapterId: "c1", requiredSkillIds: ["A"], slip: 0.1, guess: 0.1, estimatedSeconds: 20 },
+      { itemId: "p-ab", familyId: "fab", chapterId: "c1", requiredSkillIds: ["A", "B"], slip: 0.1, guess: 0.1, estimatedSeconds: 20 },
+    ];
+    const orig = { originalAttemptId: "a-r9", originalItemId: "i-r9", frozenDraftText: "", frozenCursorOffset: 0, startedAtMs: 1 };
+
+    // 2-arg certification inside PrerequisiteDrilldownStateMachine must catch tampered T probabilities!
+    expect(() => new PrerequisiteDrilldownStateMachine({
+      skills: abTSkills,
+      targetSkillId: "T",
+      probePool: probes,
+      originalContext: orig,
+      kstSnapshot: tamperedSnap,
+    })).toThrow(DiagnosticPlacementError);
+
+    // Valid snapshot keeps untouched MI selection consistent (prefers p-a over p-ab when honest)
+    const honestDd = new PrerequisiteDrilldownStateMachine({
+      skills: abTSkills,
+      targetSkillId: "T",
+      probePool: probes,
+      originalContext: orig,
+      kstSnapshot: { ...fullSnap, prerequisitesBySkill: undefined },
+    });
+    expect(honestDd.selectNextProbe().probe?.itemId).toBe("p-a");
+
+    // 1-arg validateKstSnapshot without prerequisitesBySkill rejects violation of parentsSatisfied == pi + outerFringe
+    expect(() => validateKstSnapshot({
+      ...fullSnap,
+      prerequisitesBySkill: undefined,
+      parentsSatisfiedBySkill: { ...fullSnap.parentsSatisfiedBySkill, T: 0.9 },
+    })).toThrow(DiagnosticPlacementError);
+  });
+
+  it("[P2-1] rejects non-null wByState on component_decomposed snapshots and requires exact global key-count bijection", () => {
+    const roots15: DiagnosticSkillNode[] = Array.from({ length: 15 }, (_, i) => ({
+      skillId: `R_${i}`,
+      chapterId: "c1",
+      priorMastery: 1e-7,
+    }));
+    const snap15 = buildKstPriorSnapshot(createKstStateSpace(roots15));
+    expect(snap15.approximationMode).toBe("component_decomposed");
+    expect(snap15.totalFeasibleStateCount).toBe(32_768);
+    expect(snap15.wByState).toBeNull();
+
+    // Tamper wByState to a 1-entry dict { "[]": (1 - 1e-7)^15 } whose missing mass ~1.5e-6 would pass sum-1 tolerance
+    const emptyWeight = Math.pow(1 - 1e-7, 15);
+    expect(() => validateKstSnapshot({
+      ...snap15,
+      wByState: { "[]": emptyWeight },
+    })).toThrow(DiagnosticPlacementError);
+
+    // Single-component bounded envelope emits wByState: null too
+    const starSkills: DiagnosticSkillNode[] = [
+      { skillId: "ROOT", chapterId: "c1" },
+      ...Array.from({ length: 16 }, (_, i) => ({ skillId: `LEAF_${String(i).padStart(2, "0")}`, chapterId: "c1", prerequisiteIds: ["ROOT"] })),
+    ];
+    const starSnap = buildKstPriorSnapshot(createKstStateSpace(starSkills));
+    expect(starSnap.approximationMode).toBe("bounded_component_envelope");
+    expect(starSnap.wByState).toBeNull();
+    expect(() => validateKstSnapshot({ ...starSnap, wByState: starSnap.componentJointWeights[0]!.wByState })).toThrow(DiagnosticPlacementError);
+  });
+
+  it("[P2-2] detects duplicate observationId in stateSpace before simulating component merge on overrun preflight", () => {
+    const skills = [
+      ...makeChain("A", "c0", 27),
+      ...makeChain("B", "c1", 27),
+      ...makeChain("C", "cFinal", 27),
+    ];
+    const pAB: DiagnosticProbeItem = { itemId: "p-ab", familyId: "fam-ab", chapterId: "c0", requiredSkillIds: ["A_1", "B_1"], slip: 0.02, guess: 0.02, estimatedSeconds: 1 };
+    const pOther: DiagnosticProbeItem = { itemId: "p-other", familyId: "fam-other", chapterId: "c1", requiredSkillIds: ["B_2"], slip: 0.1, guess: 0.1, estimatedSeconds: 1 };
+    const singles: DiagnosticProbeItem[] = Array.from({ length: 6 }, (_, i) => ({
+      itemId: `p-s-${i}`,
+      familyId: `fam-s-${i}`,
+      chapterId: `c${i + 1}`,
+      requiredSkillIds: [`A_${i + 2}`],
+      slip: 0.15,
+      guess: 0.15,
+      estimatedSeconds: 1,
+    }));
+    const pBC: DiagnosticProbeItem = { itemId: "p-bc", familyId: "fam-bc", chapterId: "cFinal", requiredSkillIds: ["B_3", "C_3"], slip: 0.15, guess: 0.15, estimatedSeconds: 1 };
+    const pFallback: DiagnosticProbeItem = { itemId: "p-cf", familyId: "fam-cf", chapterId: "cFinal", requiredSkillIds: ["C_0"], slip: 0.15, guess: 0.15, estimatedSeconds: 3 };
+
+    const session = new DiagnosticPlacementSession({
+      skills,
+      candidatePool: [pAB, pOther, ...singles, pBC, pFallback],
+      config: { minItems: 8, maxItems: 8, totalBudgetSeconds: 10, chapterQuotas: { c0: 1, c1: 1, c2: 1, c3: 1, c4: 1, c5: 1, c6: 1, cFinal: 1 } },
+    });
+
+    // Register obs-dup directly on stateSpace with assisted: true (seen in stateSpace without merging components)
+    const preObs = session.stateSpace.applyProbeObservation(pOther, { observationId: "obs-dup-ext", itemId: "p-other", correct: true, assisted: true });
+    expect(preObs.applied).toBe(false);
+    expect(session.stateSpace.willMergeComponentsForObservation(pAB, { observationId: "obs-dup-ext", itemId: "p-ab", correct: true })).toBe(false);
+
+    // Select p-ab then submit an unassisted 2s response reusing obs-dup-ext -> must NOT simulate A+B merge or falsely throw INFEASIBLE!
+    expect(session.selectNextProbe().probe?.itemId).toBe("p-ab");
+    const rec = session.recordResponse({ observationId: "obs-dup-ext", itemId: "p-ab", correct: true, elapsedSeconds: 2 });
+    expect(rec.applied).toBe(false);
+    expect(rec.reason).toBe("duplicate_observation");
+    expect(session.stateSpace.components).toHaveLength(3);
+    expect(session.getSessionSummary().remainingBudgetSeconds).toBe(8);
+
+    for (let step = 1; step < 8; step++) {
+      const next = session.selectNextProbe();
+      expect(next.status).toBe("selected");
+      session.recordResponse({ observationId: `obs-r9-step-${step}`, itemId: next.probe!.itemId, correct: true });
+    }
+    expect(session.getSessionSummary().administeredCount).toBe(8);
+  });
+
+  it("[P2-3] eliminates 25^3 filler blowup via slack-0 optional-twin filtering, cluster decomposition & non-aborting sibling loop", () => {
+    // 28-state chains A..H (28^2 = 784 <= 20_000, 28^3 = 21_952 > 20_000) + filler component chains P1/Q1/P2/Q2/P3/Q3 (16 states each)
+    const skills: DiagnosticSkillNode[] = [
+      ...makeChain("A", "cOpt", 27),
+      ...makeChain("B", "cOpt", 27),
+      ...makeChain("C", "cCD", 27),
+      ...makeChain("D", "cCD", 27),
+      ...makeChain("E", "cCE", 27),
+      ...makeChain("F", "cCD", 27),
+      ...makeChain("G", "cOpt", 27),
+      ...makeChain("H", "cOpt", 27),
+      { skillId: "P1", chapterId: "cF1" },
+      { skillId: "Q1", chapterId: "cF1" },
+      { skillId: "P2", chapterId: "cF2" },
+      { skillId: "Q2", chapterId: "cF2" },
+      { skillId: "P3", chapterId: "cF3" },
+      { skillId: "Q3", chapterId: "cF3" },
+      { skillId: "S_A", chapterId: "cS1" },
+      { skillId: "S_B", chapterId: "cS2" },
+      { skillId: "TWIN", chapterId: "cOptUnused" },
+    ];
+
+    const pool: DiagnosticProbeItem[] = [
+      // cOpt offers cheap AB (1s, blocks AF + CE when AB merged? Actually wait: AB merges {A, B}; AF merges {A, B, F} = 28^3 > 20_000!) or GH (2s)
+      { itemId: "opt-ab", familyId: "fam-ab", chapterId: "cOpt", requiredSkillIds: ["A_1", "B_1"], slip: 0.02, guess: 0.02, estimatedSeconds: 1 },
+      { itemId: "opt-gh", familyId: "fam-gh", chapterId: "cOpt", requiredSkillIds: ["G_1", "H_1"], slip: 0.1, guess: 0.1, estimatedSeconds: 2 },
+      // cCD has 26 CD variants (with twin families in optional 0-min chapter) PLUS sole AF rescue probe
+      ...Array.from({ length: 26 }, (_, i) => ([
+        { itemId: `cd-${i}`, familyId: `fam-cd-${i}`, chapterId: "cCD", requiredSkillIds: ["C_2", "D_2"], slip: 0.1, guess: 0.1, estimatedSeconds: 1 },
+        { itemId: `twin-cd-${i}`, familyId: `fam-cd-${i}`, chapterId: "cOptUnused", requiredSkillIds: ["TWIN"], slip: 0.1, guess: 0.1, estimatedSeconds: 1 },
+      ])).flat(),
+      { itemId: "af-rescue", familyId: "fam-af", chapterId: "cCD", requiredSkillIds: ["A_2", "F_2"], slip: 0.15, guess: 0.15, estimatedSeconds: 3 },
+      // cCE has 26 CE variants (with twin families in optional chapter)
+      ...Array.from({ length: 26 }, (_, i) => ([
+        { itemId: `ce-${i}`, familyId: `fam-ce-${i}`, chapterId: "cCE", requiredSkillIds: ["C_3", "E_3"], slip: 0.1, guess: 0.1, estimatedSeconds: 1 },
+        { itemId: `twin-ce-${i}`, familyId: `fam-ce-${i}`, chapterId: "cOptUnused", requiredSkillIds: ["TWIN"], slip: 0.1, guess: 0.1, estimatedSeconds: 1 },
+      ])).flat(),
+      // Three filler chapters each with 25 distinct families sharing twin probes in cOptUnused (maxItems: 1, minItems: 0)
+      ...([
+        ["cF1", ["P1", "Q1"]],
+        ["cF2", ["P2", "Q2"]],
+        ["cF3", ["P3", "Q3"]],
+      ] as const).flatMap(([ch, pair]) =>
+        Array.from({ length: 25 }, (_, i) => ([
+          { itemId: `${ch}-${i}`, familyId: `fam-${ch}-${i}`, chapterId: ch, requiredSkillIds: [...pair], slip: 0.1, guess: 0.1, estimatedSeconds: 1 },
+          { itemId: `twin-${ch}-${i}`, familyId: `fam-${ch}-${i}`, chapterId: "cOptUnused", requiredSkillIds: ["TWIN"], slip: 0.1, guess: 0.1, estimatedSeconds: 1 },
+        ])).flat(),
+      ),
+      { itemId: "single-1", familyId: "fam-s1", chapterId: "cS1", requiredSkillIds: ["S_A"], slip: 0.1, guess: 0.1, estimatedSeconds: 1 },
+      { itemId: "single-2", familyId: "fam-s2", chapterId: "cS2", requiredSkillIds: ["S_B"], slip: 0.1, guess: 0.1, estimatedSeconds: 1 },
+    ];
+
+    const chapterQuotas: Record<string, ChapterQuotaInput> = {
+      cOpt: 1, cCD: 1, cCE: 1, cF1: 1, cF2: 1, cF3: 1, cS1: 1, cS2: 1,
+      cOptUnused: { minItems: 0, maxItems: 1 },
+    };
+
+    // Case 1: Tight slack === 0 (minItems: 8, maxItems: 8)
+    const tightSession = new DiagnosticPlacementSession({
+      skills,
+      candidatePool: pool,
+      config: { minItems: 8, maxItems: 8, totalBudgetSeconds: 20, chapterQuotas },
+    });
+    const chosenTight: string[] = [];
+    for (let step = 0; step < 8; step++) {
+      const sel = tightSession.selectNextProbe();
+      expect(sel.status).toBe("selected");
+      chosenTight.push(sel.probe!.itemId);
+      tightSession.recordResponse({ observationId: `r9-tight-${step}`, itemId: sel.probe!.itemId, correct: true });
+    }
+    expect(chosenTight).not.toContain("opt-ab");
+    expect(chosenTight).toContain("opt-gh");
+    expect(chosenTight).toContain("af-rescue");
+
+    // Case 2: Non-zero slack (minItems: 8, maxItems: 9) where cOptUnused twins remain in active pool -> coupled MRV + fair sibling loop still solve via opt-gh + af-rescue
+    const slackSession = new DiagnosticPlacementSession({
+      skills,
+      candidatePool: pool,
+      config: { minItems: 8, maxItems: 9, totalBudgetSeconds: 20, chapterQuotas },
+    });
+    const firstPick = slackSession.selectNextProbe();
+    expect(firstPick.status).toBe("selected");
+    expect(firstPick.probe?.itemId).not.toBe("opt-ab");
   });
 });

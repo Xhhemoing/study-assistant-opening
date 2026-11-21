@@ -717,8 +717,24 @@ export function certifyKstSnapshot(snapshot: KstSnapshotV1, skills?: readonly Di
     }
   }
 
-  // Verify global wByState matches independent componentJointWeights product
+  // Verify global wByState matches independent componentJointWeights product and has exact bijection count
   if (snapshotParsedEntries !== null) {
+    if (
+      snapshot.approximationMode !== "exact" ||
+      snapshot.totalFeasibleStateCount === null ||
+      snapshot.totalFeasibleStateCount > MAX_EXACT_KST_STATES
+    ) {
+      throw new DiagnosticPlacementError(
+        "VALIDATION",
+        "wByState must be null unless approximationMode is exact within MAX_EXACT_KST_STATES",
+      );
+    }
+    if (snapshot.componentJointWeights.length > 0 && BigInt(snapshotParsedEntries.length) !== exactStateProduct) {
+      throw new DiagnosticPlacementError(
+        "VALIDATION",
+        `wByState state count (${snapshotParsedEntries.length}) must equal exact state product (${exactStateProduct})`,
+      );
+    }
     const globalWeightMap = new Map<string, number>();
     const numComps = snapshot.componentJointWeights.length;
     for (const entry of snapshotParsedEntries) {
@@ -852,8 +868,17 @@ export function certifyKstSnapshot(snapshot: KstSnapshotV1, skills?: readonly Di
   const parentsSatisfiedBySkill = new Map<string, number>();
   const outerFringeBySkill = new Map<string, number>();
   for (const skillId of knownSkills) {
-    parentsSatisfiedBySkill.set(skillId, readRecordEntry(snapshot.parentsSatisfiedBySkill, skillId)!);
-    outerFringeBySkill.set(skillId, readRecordEntry(snapshot.outerFringeBySkill, skillId)!);
+    const pi = derivedPiBySkill.get(skillId)!;
+    const parentsSat = readRecordEntry(snapshot.parentsSatisfiedBySkill, skillId)!;
+    const outer = readRecordEntry(snapshot.outerFringeBySkill, skillId)!;
+    if (Math.abs(parentsSat - (pi + outer)) > SNAPSHOT_CONSISTENCY_EPSILON) {
+      throw new DiagnosticPlacementError(
+        "VALIDATION",
+        `parentsSatisfiedBySkill[${skillId}] (${parentsSat}) must equal piBySkill + outerFringeBySkill (${pi + outer}) within ${SNAPSHOT_CONSISTENCY_EPSILON}`,
+      );
+    }
+    parentsSatisfiedBySkill.set(skillId, parentsSat);
+    outerFringeBySkill.set(skillId, outer);
   }
   return { piBySkill: derivedPiBySkill, parentsSatisfiedBySkill, outerFringeBySkill };
 }
@@ -1166,7 +1191,36 @@ export class KstStateSpace {
   }
 
   willMergeComponentsForObservation(probe: DiagnosticProbeItem, observation: DiagnosticProbeObservation): boolean {
+    if (
+      !probe ||
+      typeof probe.itemId !== "string" ||
+      !probe.itemId.trim() ||
+      !Number.isFinite(probe.slip) ||
+      probe.slip < 0 ||
+      probe.slip >= 0.49 ||
+      !Number.isFinite(probe.guess) ||
+      probe.guess < 0 ||
+      probe.guess >= 0.49 ||
+      !(1 - probe.slip > probe.guess) ||
+      !Array.isArray(probe.requiredSkillIds) ||
+      probe.requiredSkillIds.length === 0
+    ) {
+      return false;
+    }
+    for (let i = 0; i < probe.requiredSkillIds.length; i++) {
+      if (
+        !Object.hasOwn(probe.requiredSkillIds, i) ||
+        typeof probe.requiredSkillIds[i] !== "string" ||
+        !this.graph.skillsById.has(probe.requiredSkillIds[i]!)
+      ) {
+        return false;
+      }
+    }
+    const canonicalObsId = typeof observation.observationId === "string" ? observation.observationId.trim() : "";
+    if (!canonicalObsId || observation.itemId !== probe.itemId) return false;
+    if (this.seenObservationIds.has(canonicalObsId)) return false;
     if (!isUnassistedValidObservation(observation)) return false;
+
     const touched = this.touchedMasks(probe.requiredSkillIds);
     const touchedIndices = [...touched.keys()].sort((a, b) => a - b);
     if (touchedIndices.length < 2) return false;
@@ -1292,7 +1346,7 @@ export class KstStateSpace {
       approximationMode: this.approximationMode,
       totalFeasibleStateCount: this.totalFeasibleStateCount,
       totalFeasibleStateCountExact: this.totalFeasibleStateCountExact,
-      wByState: componentJointWeights.length === 1 ? componentJointWeights[0]!.wByState : null,
+      wByState: this.approximationMode === "exact" ? componentJointWeights[0]!.wByState : null,
       componentJointWeights,
       piBySkill,
       outerFringeBySkill,

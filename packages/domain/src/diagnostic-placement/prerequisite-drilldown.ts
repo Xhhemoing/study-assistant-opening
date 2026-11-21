@@ -1,9 +1,9 @@
 import { logSumExp } from "../epistemic/gauss-hermite";
 import {
+  KstStateSpace,
   binaryEntropyBits,
+  certifyKstSnapshot,
   isUnassistedValidObservation,
-  readRecordEntry,
-  validateKstSnapshot,
   validateProbeItem,
   validateSkillGraph,
   type ValidatedSkillGraph,
@@ -33,7 +33,7 @@ export type PrerequisiteDrilldownInput = {
   originalContext: FrozenOriginalContext;
   /** Caller values > 2 are clamped to MAX_TOTAL_DRILLDOWN_PROBES (2). */
   maxProbes?: number;
-  kstSnapshot?: KstSnapshotV1;
+  kstSnapshot?: KstSnapshotV1 | KstStateSpace;
 };
 
 export type DrilldownProbeSelection = {
@@ -124,9 +124,11 @@ export class PrerequisiteDrilldownStateMachine {
     }
     this.probePool = input.probePool;
 
-    const kstSnapshot = input.kstSnapshot;
+    const kstSnapshot = input.kstSnapshot instanceof KstStateSpace
+      ? input.kstSnapshot.buildPriorSnapshot()
+      : input.kstSnapshot;
+    const certifiedSnapshot = kstSnapshot ? certifyKstSnapshot(kstSnapshot, input.skills) : null;
     if (kstSnapshot) {
-      validateKstSnapshot(kstSnapshot);
       for (const id of kstSnapshot.consumedProbeObservationIds) {
         const trimmed = id.trim();
         if (trimmed) this.snapshotConsumedObservationIds.add(trimmed);
@@ -141,9 +143,9 @@ export class PrerequisiteDrilldownStateMachine {
     this.weights = new Float64Array(this.hypotheses.length);
     for (let i = 0; i < this.hypotheses.length; i++) {
       const h = this.hypotheses[i]!;
-      const prior = !kstSnapshot ? 1
-        : h.kind === INTEGRATION_STEP_COORDINATION ? Math.max(0.05, readRecordEntry(kstSnapshot.parentsSatisfiedBySkill, this.targetSkillId) ?? 0.5)
-        : Math.max(0.05, 1 - (readRecordEntry(kstSnapshot.piBySkill, h.skillId!) ?? 0.5));
+      const prior = !certifiedSnapshot ? 1
+        : h.kind === INTEGRATION_STEP_COORDINATION ? Math.max(0.05, certifiedSnapshot.parentsSatisfiedBySkill.get(this.targetSkillId) ?? 0.5)
+        : Math.max(0.05, 1 - (certifiedSnapshot.piBySkill.get(h.skillId!) ?? 0.5));
       this.logWeights[i] = Math.log(prior);
     }
     this.renormalize();
