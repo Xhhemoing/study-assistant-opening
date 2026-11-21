@@ -563,6 +563,216 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     expect(ranked.diagnostics.filteredSealedChunks).toBe(partitioned.sealedChunks.length);
     expect(ranked.diagnostics.filteredHintGatedChunks).toBe(partitioned.hintGatedChunks.length);
   });
+
+  it("strips sealed and hint-gated inline directives from container, callout, tilde, and heading labels as well as text", () => {
+    const doc = [
+      ":::exercise Problem 1 \\begin{solution} SECRET_EX_HDR \\end{solution}",
+      "Compute $\\int_0^1 x\\,dx$.",
+      ":::",
+      "",
+      ":::exercise \\begin{solution} SECRET_ONLY_HDR \\end{solution}",
+      "Prompt body with fallback label.",
+      ":::",
+      "",
+      ":::exercise Problem 2 \\begin{hint} HINT_EX_HDR \\end{hint} (Part A)",
+      "Factor $x^2 - 9$.",
+      ":::",
+      "",
+      "> [!question] Callout Q1 \\begin{solution} SECRET_CALLOUT_HDR \\end{solution}",
+      "> Evaluate $2^5$.",
+      "",
+      "~~~exercise Tilde Ex <details><summary>Answer Key</summary> SECRET_TILDE_HDR </details>",
+      "Simplify $\\sqrt{49}$.",
+      "~~~",
+      "",
+      "## Section 1 \\begin{proof_key} SECRET_HEADING_KEY \\end{proof_key}",
+      "Public overview after heading.",
+    ].join("\n");
+
+    const chunks = chunkPedagogicalDocument({
+      sourceId: "src-header-label-leak",
+      sourceVersion: 1,
+      privacyEpoch: 14,
+      text: doc,
+    });
+
+    for (let idx = 0; idx < chunks.length; idx++) {
+      const c = chunks[idx]!;
+      expect(doc.slice(c.startOffset, c.endOffset)).toBe(c.text);
+      if (idx > 0) expect(c.startOffset).toBeGreaterThanOrEqual(chunks[idx - 1]!.endOffset);
+    }
+
+    const partitioned = partitionPedagogicalChunks(chunks);
+    const withHints = partitionPedagogicalChunks(chunks, { allowHintGated: true });
+
+    const sealedSecrets = [
+      "SECRET_EX_HDR",
+      "SECRET_ONLY_HDR",
+      "SECRET_CALLOUT_HDR",
+      "SECRET_TILDE_HDR",
+      "SECRET_HEADING_KEY",
+    ];
+    for (const secret of sealedSecrets) {
+      expect(partitioned.publicChunks.some(c => c.text.includes(secret) || (c.label ?? "").includes(secret))).toBe(false);
+      expect(partitioned.indexableChunks.some(c => c.text.includes(secret) || (c.label ?? "").includes(secret))).toBe(false);
+      expect(withHints.indexableChunks.some(c => c.text.includes(secret) || (c.label ?? "").includes(secret))).toBe(false);
+      expect(partitioned.sealedChunks.some(c => c.text.includes(secret))).toBe(true);
+    }
+
+    expect(partitioned.publicChunks.some(c => c.text.includes("HINT_EX_HDR") || (c.label ?? "").includes("HINT_EX_HDR"))).toBe(false);
+    expect(partitioned.hintGatedChunks.some(c => c.text.includes("HINT_EX_HDR") && c.kind === "hint")).toBe(true);
+
+    // Public chunks preserve safe sanitized labels without answer keys.
+    expect(partitioned.publicChunks.some(c => c.kind === "exercise" && c.label === "Problem 1")).toBe(true);
+    expect(partitioned.publicChunks.some(c => c.kind === "exercise" && c.label === "exercise")).toBe(true);
+    expect(partitioned.publicChunks.some(c => c.kind === "exercise" && c.label === "Problem 2 (Part A)")).toBe(true);
+    expect(partitioned.publicChunks.some(c => c.kind === "exercise" && c.label === "Callout Q1")).toBe(true);
+    expect(partitioned.publicChunks.some(c => c.kind === "exercise" && c.label === "Tilde Ex")).toBe(true);
+    expect(partitioned.publicChunks.some(c => c.kind === "heading" && c.label === "Section 1")).toBe(true);
+  });
+
+  it("extracts sealed solutions and hints from Markdown table cells and sealed/hint columns without leaking into public table chunks", () => {
+    const doc = [
+      "| Problem | Notes |",
+      "| --- | --- |",
+      "| Solve $2x = 6$ | \\begin{solution} SECRET_TBL_LATEX \\end{solution} |",
+      "| Solve $3x = 9$ | Public note <details><summary>Solution</summary> SECRET_TBL_DETAILS </details> |",
+      "| Solve $4x = 12$ | \\begin{hint} HINT_TBL_LATEX \\end{hint} and <details><summary>Hint</summary> HINT_TBL_DETAILS </details> |",
+      "",
+      "| Question | Answer Key | Hint |",
+      "| --- | --- | --- |",
+      "| What is $6 \\times 7$? \\begin{solution} X | Y \\end{solution} | SECRET_COL_42 | HINT_COL_MULT |",
+      "| What is $8 \\times 9$? | SECRET_COL_72 | HINT_COL_NINES |",
+    ].join("\n");
+
+    const chunks = chunkPedagogicalDocument({
+      sourceId: "src-table-leak",
+      sourceVersion: 1,
+      privacyEpoch: 15,
+      text: doc,
+    });
+
+    for (let idx = 0; idx < chunks.length; idx++) {
+      const c = chunks[idx]!;
+      expect(doc.slice(c.startOffset, c.endOffset)).toBe(c.text);
+      if (idx > 0) expect(c.startOffset).toBeGreaterThanOrEqual(chunks[idx - 1]!.endOffset);
+    }
+
+    const partitioned = partitionPedagogicalChunks(chunks);
+    const withHints = partitionPedagogicalChunks(chunks, { allowHintGated: true });
+
+    const sealedSecrets = ["SECRET_TBL_LATEX", "SECRET_TBL_DETAILS", "SECRET_COL_42", "SECRET_COL_72"];
+    for (const secret of sealedSecrets) {
+      expect(partitioned.publicChunks.some(c => c.text.includes(secret))).toBe(false);
+      expect(partitioned.indexableChunks.some(c => c.text.includes(secret))).toBe(false);
+      expect(withHints.indexableChunks.some(c => c.text.includes(secret))).toBe(false);
+      expect(partitioned.sealedChunks.some(c => c.text.includes(secret))).toBe(true);
+    }
+
+    const hintTokens = ["HINT_TBL_LATEX", "HINT_TBL_DETAILS", "HINT_COL_MULT", "HINT_COL_NINES"];
+    for (const hint of hintTokens) {
+      expect(partitioned.publicChunks.some(c => c.text.includes(hint))).toBe(false);
+      expect(partitioned.indexableChunks.some(c => c.text.includes(hint))).toBe(false);
+      expect(partitioned.hintGatedChunks.some(c => c.text.includes(hint) && c.kind === "hint")).toBe(true);
+      expect(withHints.indexableChunks.some(c => c.text.includes(hint))).toBe(true);
+    }
+
+    // Public question cells remain retrievable.
+    const publicText = partitioned.publicChunks.map(c => c.text).join("\n");
+    expect(publicText).toContain("Solve $2x = 6$");
+    expect(publicText).toContain("Public note");
+    expect(publicText).toContain("What is $6 \\times 7$?");
+  });
+
+  it("fails closed on unclosed :::, ~~~, <details>, and \\begin{solution|answer|proof_key|hint} directives and splits same-line prefix/suffix cleanly", () => {
+    // 1. Same-line prefix + closed inline solution + trailing public suffix + second hint.
+    const sameLineDoc =
+      "Prefix prompt. \\begin{solution} SECRET_MID \\end{solution} Middle public suffix. \\begin{hint} HINT_MID \\end{hint} Final public tail.";
+    const sameLineChunks = chunkPedagogicalDocument({
+      sourceId: "src-same-line",
+      sourceVersion: 1,
+      text: sameLineDoc,
+    });
+    for (const c of sameLineChunks) {
+      expect(sameLineDoc.slice(c.startOffset, c.endOffset)).toBe(c.text);
+    }
+    const sameLinePart = partitionPedagogicalChunks(sameLineChunks);
+    const sameLinePublic = sameLinePart.publicChunks.map(c => c.text).join(" ");
+    expect(sameLinePublic).toContain("Prefix prompt.");
+    expect(sameLinePublic).toContain("Middle public suffix.");
+    expect(sameLinePublic).toContain("Final public tail.");
+    expect(sameLinePublic).not.toContain("SECRET_MID");
+    expect(sameLinePublic).not.toContain("HINT_MID");
+    expect(sameLinePart.sealedChunks.some(c => c.text.includes("SECRET_MID"))).toBe(true);
+    expect(sameLinePart.hintGatedChunks.some(c => c.text.includes("HINT_MID"))).toBe(true);
+
+    // 2. Unclosed sealed containers & inline directives MUST fail closed to EOF.
+    const unclosedSealedCases: Array<{ readonly name: string; readonly doc: string; readonly secret: string }> = [
+      {
+        name: "unclosed :::solution",
+        doc: "Public intro.\n\n:::solution\nSECRET_EOF_COLON\n\nTrailing paragraph.",
+        secret: "SECRET_EOF_COLON",
+      },
+      {
+        name: "unclosed ~~~solution",
+        doc: "Public intro.\n\n~~~solution\nSECRET_EOF_TILDE\n\nTrailing paragraph.",
+        secret: "SECRET_EOF_TILDE",
+      },
+      {
+        name: "unclosed <details>",
+        doc: "Public intro.\n\n<details>\n<summary>Answer</summary>\nSECRET_EOF_DETAILS\n\nTrailing paragraph.",
+        secret: "SECRET_EOF_DETAILS",
+      },
+      {
+        name: "unclosed inline \\begin{solution}",
+        doc: "Prefix prompt. \\begin{solution} SECRET_EOF_INLINE\nLine 2.\n\nTrailing paragraph.",
+        secret: "SECRET_EOF_INLINE",
+      },
+      {
+        name: "unclosed \\begin{answer}",
+        doc: "Public intro.\n\n\\begin{answer}\nSECRET_EOF_ANSWER\n\nTrailing paragraph.",
+        secret: "SECRET_EOF_ANSWER",
+      },
+      {
+        name: "unclosed \\begin{proof_key}",
+        doc: "Public intro.\n\n\\begin{proof_key}\nSECRET_EOF_PROOF_KEY\n\nTrailing paragraph.",
+        secret: "SECRET_EOF_PROOF_KEY",
+      },
+      {
+        name: "unclosed inline \\begin{solution} in table cell",
+        doc: "| Problem | Notes |\n| --- | --- |\n| Q1 | \\begin{solution} SECRET_EOF_TBL |\n\nTrailing paragraph.",
+        secret: "SECRET_EOF_TBL",
+      },
+    ];
+
+    for (const tc of unclosedSealedCases) {
+      const chunks = chunkPedagogicalDocument({
+        sourceId: `src-${tc.name}`,
+        sourceVersion: 1,
+        text: tc.doc,
+      });
+      for (const c of chunks) {
+        expect(tc.doc.slice(c.startOffset, c.endOffset)).toBe(c.text);
+      }
+      const part = partitionPedagogicalChunks(chunks);
+      expect(part.publicChunks.some(c => c.text.includes(tc.secret) || c.text.includes("Trailing paragraph."))).toBe(false);
+      expect(part.sealedChunks.some(c => c.text.includes(tc.secret) && c.text.includes("Trailing paragraph."))).toBe(true);
+    }
+
+    // 3. Unclosed hint_gated containers & inline \begin{hint} fail closed as hint_gated to EOF.
+    const unclosedHintCases = [
+      "Public intro.\n\n:::hint\nHINT_EOF_COLON\n\nTrailing hint tail.",
+      "Public intro.\n\n~~~hint\nHINT_EOF_TILDE\n\nTrailing hint tail.",
+      "Public intro.\n\n<details><summary>Hint</summary>\nHINT_EOF_DETAILS\n\nTrailing hint tail.",
+      "Prefix prompt. \\begin{hint} HINT_EOF_INLINE\n\nTrailing hint tail.",
+    ];
+    for (const doc of unclosedHintCases) {
+      const chunks = chunkPedagogicalDocument({ sourceId: "src-unclosed-hint", sourceVersion: 1, text: doc });
+      const part = partitionPedagogicalChunks(chunks);
+      expect(part.publicChunks.some(c => c.text.includes("HINT_EOF_") || c.text.includes("Trailing hint tail."))).toBe(false);
+      expect(part.hintGatedChunks.some(c => c.text.includes("HINT_EOF_") && c.text.includes("Trailing hint tail."))).toBe(true);
+    }
+  });
 });
 
 describe("sparsePpr exactness, dangling-node mass conservation, and validation", () => {
@@ -962,5 +1172,157 @@ describe("rankPedagogicalEvidence security isolation, prerequisite recall, and f
 
     const ids = result.ranked.map(r => r.chunk.id);
     expect(ids).toEqual(["chunk-example-motivating", "chunk-def-formal"]);
+  });
+
+  it("quarantines filtered sealed and unreleased hint_gated chunk IDs so colliding concepts cannot reintroduce them into edges, seeds, or pprByNodeId", () => {
+    const cDef = makeChunk({
+      id: "chunk-def-safe",
+      kind: "definition",
+      conceptIds: ["concept-safe"],
+      pageStart: 1,
+      pageEnd: 1,
+    });
+    const cThm = makeChunk({
+      id: "chunk-thm-safe",
+      kind: "theorem",
+      conceptIds: ["concept-safe"],
+      pageStart: 2,
+      pageEnd: 2,
+    });
+    const cSealed = makeChunk({
+      id: "chunk-sealed-collide",
+      kind: "solution",
+      visibility: "sealed",
+      pageStart: 3,
+      pageEnd: 3,
+    });
+    const cHint = makeChunk({
+      id: "chunk-hint-collide",
+      kind: "hint",
+      visibility: "hint_gated",
+      pageStart: 4,
+      pageEnd: 4,
+    });
+
+    const authorization = {
+      admissibleSourceIds: ["src-notes"],
+      expectedPrivacyEpoch: 7,
+      allowHintGated: false,
+    };
+
+    const baseline = rankPedagogicalEvidence({
+      chunks: [cDef, cThm],
+      concepts: [
+        { id: "concept-safe", label: "Safe", supportingSourceIds: ["src-notes"], privacyEpoch: 7 },
+      ],
+      lexicalRanking: [{ id: "chunk-thm-safe", score: 1.0 }],
+      authorization,
+    });
+
+    // Poison with concepts whose IDs collide with the filtered sealed & unreleased hint_gated chunks,
+    // plus edges and seeds targeting those quarantined IDs.
+    const withCollidingConcepts = rankPedagogicalEvidence({
+      chunks: [cDef, cThm, cSealed, cHint],
+      concepts: [
+        { id: "concept-safe", label: "Safe", supportingSourceIds: ["src-notes"], privacyEpoch: 7 },
+        { id: "chunk-sealed-collide", label: "Colliding Sealed Concept", supportingSourceIds: ["src-notes"], privacyEpoch: 7 },
+        { id: "chunk-hint-collide", label: "Colliding Hint Concept", supportingSourceIds: ["src-notes"], privacyEpoch: 7 },
+      ],
+      edges: [
+        { from: "chunk-thm-safe", to: "chunk-sealed-collide", kind: "requires", supportingSourceIds: ["src-notes"], privacyEpoch: 7 },
+        { from: "chunk-thm-safe", to: "chunk-hint-collide", kind: "requires", supportingSourceIds: ["src-notes"], privacyEpoch: 7 },
+      ],
+      lexicalRanking: [
+        { id: "chunk-sealed-collide", score: 100 },
+        { id: "chunk-hint-collide", score: 50 },
+        { id: "chunk-thm-safe", score: 1.0 },
+      ],
+      seedScores: {
+        "chunk-sealed-collide": 10,
+        "chunk-hint-collide": 10,
+      },
+      authorization,
+    });
+
+    expect(withCollidingConcepts.ranked).toEqual(baseline.ranked);
+    expect(withCollidingConcepts.pprByNodeId).toEqual(baseline.pprByNodeId);
+    expect(withCollidingConcepts.pprByNodeId["chunk-sealed-collide"]).toBeUndefined();
+    expect(withCollidingConcepts.pprByNodeId["chunk-hint-collide"]).toBeUndefined();
+    expect(withCollidingConcepts.diagnostics.filteredSealedChunks).toBe(1);
+    expect(withCollidingConcepts.diagnostics.filteredHintGatedChunks).toBe(1);
+    expect(withCollidingConcepts.diagnostics.filteredEdges).toBe(2);
+  });
+
+  it("blocks transitive multi-hop cycles (A -> B explicit with B -> C and C -> A inferred tier edges) so explicit prerequisite A always precedes B", () => {
+    // Tier hierarchy: definition (0) < theorem (2) < example (5).
+    // Explicit prerequisite: A (example, tier 5) -> B (definition, tier 0).
+    // Shared-concept tier edges:
+    //   B (definition, c1) -> C (theorem, c1 & c2)  [tier 0 < tier 2]
+    //   C (theorem, c2) -> A (example, c2)          [tier 2 < tier 5]
+    // Without reachability checking, admitting both B->C and C->A forms cycle A->B->C->A!
+    const chunkA = makeChunk({
+      id: "chunk-A-example",
+      kind: "example",
+      conceptIds: ["concept-2"],
+      pageStart: 1,
+      pageEnd: 1,
+    });
+    const chunkB = makeChunk({
+      id: "chunk-B-definition",
+      kind: "definition",
+      conceptIds: ["concept-1"],
+      pageStart: 2,
+      pageEnd: 2,
+    });
+    const chunkC = makeChunk({
+      id: "chunk-C-theorem",
+      kind: "theorem",
+      conceptIds: ["concept-1", "concept-2"],
+      pageStart: 3,
+      pageEnd: 3,
+    });
+    const concepts: PedagogicalConceptNode[] = [
+      { id: "concept-1", label: "C1", supportingSourceIds: ["src-notes"], privacyEpoch: 7 },
+      { id: "concept-2", label: "C2", supportingSourceIds: ["src-notes"], privacyEpoch: 7 },
+    ];
+    const edges: PedagogicalGraphEdge[] = [
+      {
+        from: "chunk-A-example",
+        to: "chunk-B-definition",
+        kind: "prerequisite",
+        supportingSourceIds: ["src-notes"],
+        privacyEpoch: 7,
+      },
+    ];
+
+    // Ordering 1: B has highest lexical score (so a cycle fallback would emit B before A).
+    const resBFirst = rankPedagogicalEvidence({
+      chunks: [chunkA, chunkB, chunkC],
+      concepts,
+      edges,
+      lexicalRanking: [
+        { id: "chunk-B-definition", score: 1.0 },
+        { id: "chunk-C-theorem", score: 0.7 },
+        { id: "chunk-A-example", score: 0.4 },
+      ],
+      authorization: { admissibleSourceIds: ["src-notes"], expectedPrivacyEpoch: 7 },
+    });
+    const idsBFirst = resBFirst.ranked.map(r => r.chunk.id);
+    expect(idsBFirst.indexOf("chunk-A-example")).toBeLessThan(idsBFirst.indexOf("chunk-B-definition"));
+
+    // Ordering 2: C has highest lexical score (so C->A is evaluated before B->C).
+    const resCFirst = rankPedagogicalEvidence({
+      chunks: [chunkA, chunkB, chunkC],
+      concepts,
+      edges,
+      lexicalRanking: [
+        { id: "chunk-C-theorem", score: 1.0 },
+        { id: "chunk-B-definition", score: 0.8 },
+        { id: "chunk-A-example", score: 0.4 },
+      ],
+      authorization: { admissibleSourceIds: ["src-notes"], expectedPrivacyEpoch: 7 },
+    });
+    const idsCFirst = resCFirst.ranked.map(r => r.chunk.id);
+    expect(idsCFirst.indexOf("chunk-A-example")).toBeLessThan(idsCFirst.indexOf("chunk-B-definition"));
   });
 });

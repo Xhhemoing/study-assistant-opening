@@ -181,11 +181,13 @@ function filterEdgeAuthorized(
   admissibleSources: ReadonlySet<string>,
   survivingNodeIds: ReadonlySet<string>,
   survivingChunkIds: ReadonlySet<string>,
+  quarantinedNodeIds: ReadonlySet<string>,
 ): boolean {
-  // Answer-solving edges and sealed edges NEVER enter the retrieval graph.
+  // Answer-solving edges, sealed edges, and edges touching quarantined IDs NEVER enter the graph.
   if (edge.kind === "solves") return false;
   if (edge.visibility === "sealed") return false;
   if (edge.visibility === "hint_gated" && !auth.allowHintGated) return false;
+  if (quarantinedNodeIds.has(edge.from) || quarantinedNodeIds.has(edge.to)) return false;
   if (!matchesPrivacyEpoch(edge.privacyEpoch, auth.expectedPrivacyEpoch)) return false;
   if (!survivingNodeIds.has(edge.from) || !survivingNodeIds.has(edge.to)) return false;
   if (edge.sourceId !== undefined && !admissibleSources.has(edge.sourceId)) return false;
@@ -256,43 +258,60 @@ function orderFoundationsBeforeDependents(
     inDegree[afterIdx]!++;
   };
 
+  const isReachable = (startIdx: number, targetIdx: number): boolean => {
+    if (startIdx === targetIdx) return true;
+    const seen = new Uint8Array(n);
+    const stack = [startIdx];
+    seen[startIdx] = 1;
+    while (stack.length > 0) {
+      const cur = stack.pop()!;
+      for (const next of outgoing[cur]!) {
+        if (next === targetIdx) return true;
+        if (!seen[next]) {
+          seen[next] = 1;
+          stack.push(next);
+        }
+      }
+    }
+    return false;
+  };
+
+  // Pass 1: Add ALL explicit filtered prerequisite / requires / defines constraints first so
+  // inferred shared-concept tier edges can never create 2-cycles or transitive multi-hop cycles.
   for (let i = 0; i < n; i++) {
+    const chunkA = selected[i]!.chunk;
     for (let j = 0; j < n; j++) {
       if (i === j) continue;
-      const chunkA = selected[i]!.chunk;
       const chunkB = selected[j]!.chunk;
-
-      // 1. Explicit filtered prerequisite / requires / defines dependency: A precedes B.
       if (prereqBeforePairs.has(`${chunkA.id}\0${chunkB.id}`)) {
         addOrderConstraint(i, j);
-        continue;
       }
+    }
+  }
 
-      // Guard reverse direction: never add a shared-concept tier edge A -> B when an
-      // explicit prerequisite already requires B -> A (prevents spurious 2-cycles).
-      if (prereqBeforePairs.has(`${chunkB.id}\0${chunkA.id}`)) {
-        continue;
-      }
-
-      // 2. Shared concept foundational tier: e.g. Definition precedes Theorem/Proof/Example
-      //    for the same concept, without letting unrelated low-scoring definitions hijack rank 1.
-      const conceptsA = conceptsByChunkId.get(chunkA.id);
+  // Pass 2: Add inferred shared-concept foundational tier edges (e.g., Definition -> Theorem)
+  // only when `i` is NOT reachable from `j` in the accumulated DAG (`!isReachable(j, i)`).
+  for (let i = 0; i < n; i++) {
+    const chunkA = selected[i]!.chunk;
+    const conceptsA = conceptsByChunkId.get(chunkA.id);
+    if (!conceptsA || conceptsA.size === 0) continue;
+    const tierA = PEDAGOGICAL_FOUNDATION_TIER[chunkA.kind];
+    for (let j = 0; j < n; j++) {
+      if (i === j) continue;
+      const chunkB = selected[j]!.chunk;
+      const tierB = PEDAGOGICAL_FOUNDATION_TIER[chunkB.kind];
+      if (tierA >= tierB) continue;
       const conceptsB = conceptsByChunkId.get(chunkB.id);
+      if (!conceptsB || conceptsB.size === 0) continue;
       let sharedConcept = false;
-      if (conceptsA && conceptsB) {
-        for (const c of conceptsA) {
-          if (conceptsB.has(c)) {
-            sharedConcept = true;
-            break;
-          }
+      for (const c of conceptsA) {
+        if (conceptsB.has(c)) {
+          sharedConcept = true;
+          break;
         }
       }
-      if (sharedConcept) {
-        const tierA = PEDAGOGICAL_FOUNDATION_TIER[chunkA.kind];
-        const tierB = PEDAGOGICAL_FOUNDATION_TIER[chunkB.kind];
-        if (tierA < tierB) {
-          addOrderConstraint(i, j);
-        }
+      if (sharedConcept && !isReachable(j, i)) {
+        addOrderConstraint(i, j);
       }
     }
   }
@@ -418,20 +437,24 @@ export function rankPedagogicalEvidence(
   const orderFoundationsFirst = options.orderFoundationsFirst ?? true;
 
   // 1. Pre-graph strict chunk filtering (ZERO sealed / unauthorized / wrong-epoch mass).
+  // Collect quarantinedNodeIds from ALL rejected chunks upfront so no concept, duplicate chunk,
+  // edge, or seed can reintroduce a filtered sealed/hint_gated/unauthorized ID into the graph.
   let filteredSealedChunks = 0;
   let filteredHintGatedChunks = 0;
   let filteredUnauthorizedChunks = 0;
   let filteredExcludedFamilyChunks = 0;
 
-  const survivingChunks: PedagogicalChunk[] = [];
-  const survivingChunkIds = new Set<string>();
+  const quarantinedNodeIds = new Set<string>();
+  const admissibleCandidateChunks: PedagogicalChunk[] = [];
   for (const chunk of input.chunks) {
     if (chunk.visibility === "sealed") {
       filteredSealedChunks++;
+      quarantinedNodeIds.add(chunk.id);
       continue;
     }
     if (chunk.visibility === "hint_gated" && !allowHintGated) {
       filteredHintGatedChunks++;
+      quarantinedNodeIds.add(chunk.id);
       continue;
     }
     if (
@@ -444,12 +467,21 @@ export function rankPedagogicalEvidence(
       !matchesPrivacyEpoch(chunk.privacyEpoch, authorization.expectedPrivacyEpoch)
     ) {
       filteredUnauthorizedChunks++;
+      quarantinedNodeIds.add(chunk.id);
       continue;
     }
     if (chunk.itemFamilyId && excludedFamilies.has(chunk.itemFamilyId)) {
       filteredExcludedFamilyChunks++;
+      quarantinedNodeIds.add(chunk.id);
       continue;
     }
+    admissibleCandidateChunks.push(chunk);
+  }
+
+  const survivingChunks: PedagogicalChunk[] = [];
+  const survivingChunkIds = new Set<string>();
+  for (const chunk of admissibleCandidateChunks) {
+    if (quarantinedNodeIds.has(chunk.id)) continue;
     if (!survivingChunkIds.has(chunk.id)) {
       survivingChunkIds.add(chunk.id);
       survivingChunks.push(chunk);
@@ -459,18 +491,38 @@ export function rankPedagogicalEvidence(
   // Deterministic canonical node order ensures bit-for-bit stable graph indices.
   survivingChunks.sort(compareChunksDeterministically);
 
-  // 2. Pre-graph strict concept filtering.
-  const survivingConcepts: PedagogicalConceptNode[] = [];
-  const survivingConceptIds = new Set<string>();
+  // 2. Pre-graph strict concept filtering (quarantined chunk IDs can never enter as concepts).
+  const candidateConcepts: PedagogicalConceptNode[] = [];
+  const rejectedConceptIds = new Set<string>();
   for (const concept of input.concepts ?? []) {
-    if (!matchesPrivacyEpoch(concept.privacyEpoch, authorization.expectedPrivacyEpoch)) continue;
+    if (quarantinedNodeIds.has(concept.id)) continue;
+    if (!matchesPrivacyEpoch(concept.privacyEpoch, authorization.expectedPrivacyEpoch)) {
+      rejectedConceptIds.add(concept.id);
+      continue;
+    }
     if (concept.supportingSourceIds && concept.supportingSourceIds.length > 0) {
-      if (!concept.supportingSourceIds.some(sourceId => admissibleSources.has(sourceId))) continue;
+      if (!concept.supportingSourceIds.some(sourceId => admissibleSources.has(sourceId))) {
+        rejectedConceptIds.add(concept.id);
+        continue;
+      }
     }
     if (concept.evidenceChunkIds && concept.evidenceChunkIds.length > 0) {
-      if (!concept.evidenceChunkIds.some(chunkId => survivingChunkIds.has(chunkId))) continue;
+      if (!concept.evidenceChunkIds.some(chunkId => survivingChunkIds.has(chunkId))) {
+        rejectedConceptIds.add(concept.id);
+        continue;
+      }
     }
-    if (!survivingConceptIds.has(concept.id) && !survivingChunkIds.has(concept.id)) {
+    candidateConcepts.push(concept);
+  }
+
+  const survivingConcepts: PedagogicalConceptNode[] = [];
+  const survivingConceptIds = new Set<string>();
+  for (const concept of candidateConcepts) {
+    if (
+      !rejectedConceptIds.has(concept.id) &&
+      !survivingConceptIds.has(concept.id) &&
+      !survivingChunkIds.has(concept.id)
+    ) {
       survivingConceptIds.add(concept.id);
       survivingConcepts.push(concept);
     }
@@ -537,6 +589,7 @@ export function rankPedagogicalEvidence(
         admissibleSources,
         survivingNodeIds,
         survivingChunkIds,
+        quarantinedNodeIds,
       )
     ) {
       filteredEdges++;

@@ -73,8 +73,11 @@ const PEDAGOGICAL_LABELS: Readonly<
   answer: { kind: "solution", visibility: "sealed" },
   "answer-key": { kind: "solution", visibility: "sealed" },
   answer_key: { kind: "solution", visibility: "sealed" },
+  "proof-key": { kind: "solution", visibility: "sealed" },
+  proof_key: { kind: "solution", visibility: "sealed" },
   rubric: { kind: "solution", visibility: "sealed" },
   sealed: { kind: "solution", visibility: "sealed" },
+  spoiler: { kind: "solution", visibility: "sealed" },
   "hidden-solution": { kind: "solution", visibility: "sealed" },
   hidden_solution: { kind: "solution", visibility: "sealed" },
 };
@@ -92,8 +95,9 @@ const STANDALONE_PEDAGOGICAL_KINDS = new Set<PedagogicalBlockKind>([
 ]);
 
 const SEALED_HEADING_RE =
-  /(?:^|\b)(?:answer\s*key|official\s*solution|solutions?|answers?|rubric|marking\s*scheme)(?:\b|$)|参考答案|标准答案|习题解答|解答与评分|答案解析/iu;
+  /(?:^|\b)(?:answer[\s_-]*key|official[\s_-]*solution|proof[\s_-]*key|hidden[\s_-]*solution|solutions?|answers?|rubric|marking[\s_-]*scheme)(?:\b|$)|参考答案|标准答案|习题解答|解答与评分|答案解析/iu;
 const HINT_HEADING_RE = /(?:^|\b)(?:hints?|scaffolds?)(?:\b|$)|分步提示|解题提示/iu;
+const DETAILS_OPEN_RE = /^<details(?:\s[^>]*)?>/i;
 
 function splitLinesWithOffsets(text: string): SourceLine[] {
   const lines: SourceLine[] = [];
@@ -257,6 +261,161 @@ function lineIndexContaining(lines: readonly SourceLine[], offset: number, start
   return idx;
 }
 
+function findMatchingDetailsBounds(
+  text: string,
+  searchFrom: number,
+): { readonly closeStart: number; readonly closeEnd: number } {
+  const tokenRe = /<(\/?)details(?:\s[^>]*)?>/gi;
+  tokenRe.lastIndex = searchFrom;
+  let depth = 1;
+  let match: RegExpExecArray | null;
+  while ((match = tokenRe.exec(text)) !== null) {
+    if (match[1] === "/") {
+      depth--;
+      if (depth === 0) {
+        return { closeStart: match.index, closeEnd: match.index + match[0].length };
+      }
+    } else {
+      depth++;
+    }
+  }
+  return { closeStart: text.length, closeEnd: text.length };
+}
+
+function classifyDetailsElement(
+  text: string,
+  openEnd: number,
+  closeStart: number,
+  activeVisibility: PedagogicalVisibility,
+): {
+  readonly kind: PedagogicalBlockKind;
+  readonly visibility: PedagogicalVisibility;
+  readonly label: string;
+  readonly summaryEndOffset: number | null;
+} {
+  const inner = text.slice(openEnd, closeStart);
+  const summaryMatch = /^\s*<summary(?:\s[^>]*)?>([\s\S]*?)<\/summary\s*>/i.exec(inner);
+  if (summaryMatch) {
+    const summaryText = summaryMatch[1]!.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+    const summaryEndOffset = openEnd + summaryMatch[0].length;
+    if (
+      !SEALED_HEADING_RE.test(summaryText) &&
+      !/\bspoiler\b/i.test(summaryText) &&
+      HINT_HEADING_RE.test(summaryText)
+    ) {
+      return {
+        kind: "hint",
+        visibility: maxVisibility("hint_gated", activeVisibility),
+        label: summaryText || "hint",
+        summaryEndOffset,
+      };
+    }
+    return {
+      kind: "solution",
+      visibility: maxVisibility("sealed", activeVisibility),
+      label: summaryText || "solution",
+      summaryEndOffset,
+    };
+  }
+  // Fail closed: any <details> without an explicit hint-only <summary> is sealed.
+  return {
+    kind: "solution",
+    visibility: maxVisibility("sealed", activeVisibility),
+    label: "details",
+    summaryEndOffset: null,
+  };
+}
+
+function sanitizeHeaderLabel(
+  text: string,
+  headerRestStart: number,
+  headerRestEnd: number,
+  higherBlocks: readonly { readonly startOffset: number; readonly endOffset: number }[],
+  fallbackLabel: string,
+): string {
+  if (headerRestEnd <= headerRestStart) return fallbackLabel;
+  let hasOverlap = false;
+  for (const block of higherBlocks) {
+    if (block.endOffset > headerRestStart && block.startOffset < headerRestEnd) {
+      hasOverlap = true;
+      break;
+    }
+  }
+  if (!hasOverlap) {
+    return text.slice(headerRestStart, headerRestEnd).trim() || fallbackLabel;
+  }
+  let cursor = headerRestStart;
+  const kept: string[] = [];
+  for (const block of higherBlocks) {
+    if (block.endOffset <= headerRestStart) continue;
+    if (block.startOffset >= headerRestEnd) break;
+    if (block.startOffset > cursor) {
+      kept.push(text.slice(cursor, block.startOffset));
+    }
+    cursor = Math.max(cursor, Math.min(block.endOffset, headerRestEnd));
+  }
+  if (cursor < headerRestEnd) {
+    kept.push(text.slice(cursor, headerRestEnd));
+  }
+  const cleaned = kept.join(" ").replace(/\s+/g, " ").trim();
+  return cleaned || fallbackLabel;
+}
+
+function parseTableRowCells(
+  sourceLine: SourceLine,
+  protectedSpans: readonly { readonly start: number; readonly end: number }[] = [],
+): Array<{ readonly start: number; readonly end: number }> {
+  const raw = sourceLine.raw;
+  const pipePositions: number[] = [];
+  for (let idx = 0; idx < raw.length; idx++) {
+    if (raw.charCodeAt(idx) === 124 && !isEscaped(raw, idx)) {
+      const absPos = sourceLine.start + idx;
+      if (protectedSpans.some(span => absPos >= span.start && absPos < span.end)) {
+        continue;
+      }
+      pipePositions.push(idx);
+    }
+  }
+  if (pipePositions.length === 0) return [];
+  const trimmedLeft = raw.trimStart();
+  const trimmedRight = raw.trimEnd();
+  const hasLeadingPipe = trimmedLeft.startsWith("|");
+  const hasTrailingPipe =
+    trimmedRight.endsWith("|") && !isEscaped(trimmedRight, trimmedRight.length - 1);
+
+  const boundaries: number[] = [];
+  let pStart = 0;
+  let pEnd = pipePositions.length;
+  if (hasLeadingPipe) {
+    boundaries.push(pipePositions[0]! + 1);
+    pStart = 1;
+  } else {
+    boundaries.push(0);
+  }
+  if (hasTrailingPipe && pEnd > pStart) {
+    pEnd -= 1;
+  }
+  for (let k = pStart; k < pEnd; k++) {
+    boundaries.push(pipePositions[k]!);
+    boundaries.push(pipePositions[k]! + 1);
+  }
+  if (hasTrailingPipe) {
+    boundaries.push(pipePositions[pipePositions.length - 1]!);
+  } else {
+    boundaries.push(raw.length);
+  }
+
+  const cells: Array<{ readonly start: number; readonly end: number }> = [];
+  for (let k = 0; k + 1 < boundaries.length; k += 2) {
+    const cStart = sourceLine.start + boundaries[k]!;
+    const cEnd = sourceLine.start + boundaries[k + 1]!;
+    if (cEnd >= cStart) {
+      cells.push({ start: cStart, end: cEnd });
+    }
+  }
+  return cells;
+}
+
 function startsSpecialBlock(lines: readonly SourceLine[], index: number): boolean {
   const raw = lines[index]!.raw;
   if (/^\s*$/.test(raw)) return true;
@@ -267,6 +426,7 @@ function startsSpecialBlock(lines: readonly SourceLine[], index: number): boolea
     const env = latexEnv[1]!;
     if (MATH_ENVS.has(env) || classifyLabel(env, "public") !== null) return true;
   }
+  if (DETAILS_OPEN_RE.test(raw.trimStart())) return true;
   if (/^[ \t]*\$\$/.test(raw) && !isEscaped(raw, raw.indexOf("$$"))) return true;
   if (/^[ \t]*\\\[/.test(raw)) return true;
   if (/^[ \t]*>/.test(raw)) return true;
@@ -286,9 +446,10 @@ interface InlineConstructSpan {
   readonly label?: string;
   readonly openEnd?: number;
   readonly closeStart?: number;
+  readonly summaryEndOffset?: number | null;
 }
 
-function findInlineDisplayMathSpans(
+function findInlineConstructSpans(
   text: string,
   rangeStart: number,
   rangeEnd: number,
@@ -334,6 +495,26 @@ function findInlineDisplayMathSpans(
           i = bounds.closeEnd;
           continue;
         }
+      }
+    }
+    if (text.charCodeAt(i) === 60 && text.slice(i, i + 8).toLowerCase() === "<details") {
+      const m = DETAILS_OPEN_RE.exec(text.slice(i));
+      if (m) {
+        const openEnd = i + m[0].length;
+        const bounds = findMatchingDetailsBounds(text, openEnd);
+        const classified = classifyDetailsElement(text, openEnd, bounds.closeStart, activeVisibility);
+        spans.push({
+          start: i,
+          end: bounds.closeEnd,
+          kind: classified.kind,
+          visibility: classified.visibility,
+          label: classified.label,
+          openEnd,
+          closeStart: bounds.closeStart,
+          summaryEndOffset: classified.summaryEndOffset,
+        });
+        i = bounds.closeEnd;
+        continue;
       }
     }
     i++;
@@ -588,7 +769,7 @@ function parsePedagogicalAstInternal(
     startLineIdx: number,
     defaultNextLineIdx: number,
   ): number => {
-    const inlineSpans = findInlineDisplayMathSpans(text, rangeStart, rangeEnd, activeVis, sealProofs);
+    const inlineSpans = findInlineConstructSpans(text, rangeStart, rangeEnd, activeVis, sealProofs);
     if (inlineSpans.length === 0) {
       const proseBounds = trimWhitespaceBounds(text, rangeStart, rangeEnd, false);
       if (proseBounds) {
@@ -623,6 +804,14 @@ function parsePedagogicalAstInternal(
           startOffset: span.openEnd! + b.startOffset,
           endOffset: span.openEnd! + b.endOffset,
         }));
+        const higherBlocks = innerBlocks.filter(
+          b => VISIBILITY_RANK[b.visibility] > VISIBILITY_RANK[span.visibility],
+        );
+        const safeLabel =
+          span.summaryEndOffset != null &&
+          higherBlocks.some(b => b.startOffset < span.summaryEndOffset! && b.endOffset > span.openEnd!)
+            ? span.kind
+            : span.label;
         emitContainerWithExtraction(
           span.kind,
           span.visibility,
@@ -630,7 +819,7 @@ function parsePedagogicalAstInternal(
           span.start,
           span.end,
           span.closeStart,
-          span.label,
+          safeLabel,
           false,
           innerBlocks,
         );
@@ -682,15 +871,35 @@ function parsePedagogicalAstInternal(
     if (headingMatch) {
       const level = headingMatch[1]!.length;
       const headingText = headingMatch[2]!.trim();
+      const rawInlineSpans = findInlineConstructSpans(
+        text,
+        line.start,
+        line.contentEnd,
+        defaultVisibility,
+        sealProofs,
+      );
+      const nonMathInlineSpans = rawInlineSpans.filter(s => s.kind !== "display_math");
+      const headingTextStart = line.start + raw.indexOf(headingMatch[2]!);
+      const headingTextEnd = headingTextStart + headingMatch[2]!.length;
+      const cleanHeadingTitle =
+        nonMathInlineSpans.length > 0
+          ? sanitizeHeaderLabel(
+              text,
+              headingTextStart,
+              headingTextEnd,
+              nonMathInlineSpans.map(s => ({ startOffset: s.start, endOffset: s.end })),
+              "",
+            )
+          : headingText;
       if (propagateSectionVisibility) {
         while (headingStack.length > 0 && headingStack[headingStack.length - 1]!.level >= level) {
           headingStack.pop();
         }
         const parentVisibility =
           headingStack.length > 0 ? headingStack[headingStack.length - 1]!.visibility : defaultVisibility;
-        const ownVisibility: PedagogicalVisibility = SEALED_HEADING_RE.test(headingText)
+        const ownVisibility: PedagogicalVisibility = SEALED_HEADING_RE.test(cleanHeadingTitle)
           ? "sealed"
-          : HINT_HEADING_RE.test(headingText)
+          : HINT_HEADING_RE.test(cleanHeadingTitle)
             ? "hint_gated"
             : defaultVisibility;
         headingStack.push({
@@ -698,23 +907,136 @@ function parsePedagogicalAstInternal(
           visibility: maxVisibility(parentVisibility, ownVisibility),
         });
       }
-      pushBlock("heading", getActiveSectionVisibility(), false, line.start, line.contentEnd, {
+      const activeVis = getActiveSectionVisibility();
+      if (activeVis !== "sealed" && nonMathInlineSpans.length > 0) {
+        const spanReachEnd = Math.max(line.contentEnd, ...nonMathInlineSpans.map(s => s.end));
+        const innerBlocks = parsePedagogicalAstInternal(
+          text.slice(headingTextStart, spanReachEnd),
+          {
+            defaultVisibility: activeVis,
+            propagateSectionVisibility: false,
+          },
+          sealProofs,
+        ).map(b => ({
+          ...b,
+          startOffset: headingTextStart + b.startOffset,
+          endOffset: headingTextStart + b.endOffset,
+        }));
+        const higherBlocks = innerBlocks.filter(
+          b => VISIBILITY_RANK[b.visibility] > VISIBILITY_RANK[activeVis],
+        );
+        if (higherBlocks.length > 0) {
+          const safeLabel = sanitizeHeaderLabel(text, headingTextStart, headingTextEnd, higherBlocks, "heading");
+          const maxHigherEnd = Math.max(line.contentEnd, ...higherBlocks.map(b => b.endOffset));
+          emitContainerWithExtraction(
+            "heading",
+            activeVis,
+            false,
+            line.start,
+            maxHigherEnd,
+            maxHigherEnd,
+            safeLabel,
+            false,
+            innerBlocks,
+          );
+          if (maxHigherEnd > line.contentEnd) {
+            const closeLineIdx = lineIndexContaining(lines, Math.max(line.start, maxHigherEnd - 1), i);
+            const closeLine = lines[closeLineIdx]!;
+            const trailingOnCloseLine = text.slice(maxHigherEnd, closeLine.contentEnd);
+            if (!/^[ \t]*$/.test(trailingOnCloseLine)) {
+              lines[closeLineIdx] = {
+                start: maxHigherEnd,
+                contentEnd: closeLine.contentEnd,
+                end: closeLine.end,
+                raw: trailingOnCloseLine,
+              };
+              i = closeLineIdx;
+            } else {
+              i = closeLineIdx + 1;
+            }
+          } else {
+            i++;
+          }
+          continue;
+        }
+      }
+      pushBlock("heading", activeVis, false, line.start, line.contentEnd, {
         label: headingText,
       });
       i++;
       continue;
     }
 
-    // 2. Fenced code block (``` or ~~~)
+    // 2. Fenced code block or tilde/backtick pedagogical fence (``` or ~~~)
     const fenceMatch = /^[ \t]{0,3}(`{3,}|~{3,})(.*)$/.exec(raw);
     if (fenceMatch && !(fenceMatch[1]![0] === "`" && fenceMatch[2]!.includes("`"))) {
       const fenceChar = fenceMatch[1]![0]!;
       const fenceLen = fenceMatch[1]!.length;
+      const activeVis = getActiveSectionVisibility();
+      const infoRaw = fenceMatch[2]!;
+      const infoMatch = /^[ \t]*\{?\.?([a-zA-Z][\w-]*)\}?([ \t].*)?$/.exec(infoRaw);
+      const classified = infoMatch ? classifyLabel(infoMatch[1], activeVis, sealProofs) : null;
+      const treatAsPedagogical =
+        classified !== null &&
+        (fenceChar === "~" || VISIBILITY_RANK[classified.visibility] > VISIBILITY_RANK[activeVis]);
       const closeRe = new RegExp(`^[ \\t]{0,3}${fenceChar}{${fenceLen},}[ \\t]*$`);
       let j = i + 1;
       while (j < lines.length && !closeRe.test(lines[j]!.raw)) j++;
-      const endLineIdx = j < lines.length ? j : lines.length - 1;
-      pushBlock("code", getActiveSectionVisibility(), true, line.start, lines[endLineIdx]!.contentEnd);
+      const closed = j < lines.length;
+      const endLineIdx = closed ? j : lines.length - 1;
+      const outerStart = line.start;
+      const outerEnd = lines[endLineIdx]!.contentEnd;
+
+      if (treatAsPedagogical && classified) {
+        const restStr = infoMatch![2] ?? "";
+        const headerRestStart = line.contentEnd - restStr.length;
+        const bodyEnd = closed
+          ? endLineIdx > i + 1
+            ? lines[endLineIdx - 1]!.contentEnd
+            : line.contentEnd
+          : outerEnd;
+        const fallbackLabel = infoMatch![1]!;
+        if (classified.visibility !== "sealed" && bodyEnd > headerRestStart) {
+          const innerBlocks = parsePedagogicalAstInternal(
+            text.slice(headerRestStart, bodyEnd),
+            {
+              defaultVisibility: classified.visibility,
+              propagateSectionVisibility,
+            },
+            classified.kind === "exercise",
+          ).map(b => ({
+            ...b,
+            startOffset: headerRestStart + b.startOffset,
+            endOffset: headerRestStart + b.endOffset,
+          }));
+          const higherBlocks = innerBlocks.filter(
+            b => VISIBILITY_RANK[b.visibility] > VISIBILITY_RANK[classified.visibility],
+          );
+          const safeLabel = sanitizeHeaderLabel(
+            text,
+            headerRestStart,
+            line.contentEnd,
+            higherBlocks,
+            fallbackLabel,
+          );
+          emitContainerWithExtraction(
+            classified.kind,
+            classified.visibility,
+            true,
+            outerStart,
+            outerEnd,
+            bodyEnd,
+            safeLabel,
+            false,
+            innerBlocks,
+          );
+        } else {
+          const label = restStr.trim() || fallbackLabel;
+          pushBlock(classified.kind, classified.visibility, true, outerStart, outerEnd, { label });
+        }
+      } else {
+        pushBlock("code", activeVis, true, outerStart, outerEnd);
+      }
       i = endLineIdx + 1;
       continue;
     }
@@ -758,7 +1080,7 @@ function parsePedagogicalAstInternal(
         }
         const closed = j < lines.length && colonStack.length === 0;
         const endLineIdx = closed ? j : lines.length - 1;
-        const label = containerMatch[3]!.trim() || containerMatch[2]!;
+        const fallbackLabel = containerMatch[2]!;
         const outerStart = line.start;
         const outerEnd = lines[endLineIdx]!.contentEnd;
         const headerRestStart = line.start + containerMatch[0].length - containerMatch[3]!.length;
@@ -781,6 +1103,16 @@ function parsePedagogicalAstInternal(
             startOffset: headerRestStart + b.startOffset,
             endOffset: headerRestStart + b.endOffset,
           }));
+          const higherBlocks = innerBlocks.filter(
+            b => VISIBILITY_RANK[b.visibility] > VISIBILITY_RANK[classified.visibility],
+          );
+          const safeLabel = sanitizeHeaderLabel(
+            text,
+            headerRestStart,
+            line.contentEnd,
+            higherBlocks,
+            fallbackLabel,
+          );
           emitContainerWithExtraction(
             classified.kind,
             classified.visibility,
@@ -788,11 +1120,12 @@ function parsePedagogicalAstInternal(
             outerStart,
             outerEnd,
             bodyEnd,
-            label,
+            safeLabel,
             false,
             innerBlocks,
           );
         } else {
+          const label = containerMatch[3]!.trim() || fallbackLabel;
           pushBlock(classified.kind, classified.visibility, true, outerStart, outerEnd, { label });
         }
         i = endLineIdx + 1;
@@ -863,6 +1196,73 @@ function parsePedagogicalAstInternal(
         }
         continue;
       }
+    }
+
+    // 4b. HTML <details> block (spoiler / hint / solution disclosure; fails closed if unclosed)
+    const detailsOpenMatch = /^[ \t]*(<details(?:\s[^>]*)?>)/i.exec(raw);
+    if (detailsOpenMatch) {
+      const activeVis = getActiveSectionVisibility();
+      const leadingWs = detailsOpenMatch[0].length - detailsOpenMatch[1]!.length;
+      const detailsStart = line.start + leadingWs;
+      const openEndOffset = line.start + detailsOpenMatch[0].length;
+      const { closeStart, closeEnd } = findMatchingDetailsBounds(text, openEndOffset);
+      const classified = classifyDetailsElement(text, openEndOffset, closeStart, activeVis);
+      const endLineIdx = lineIndexContaining(lines, Math.max(detailsStart, closeEnd - 1), i);
+      const trailingOnCloseLine = text.slice(closeEnd, lines[endLineIdx]!.contentEnd);
+      const hasTrailingContent = !/^[ \t]*$/.test(trailingOnCloseLine);
+      const outerEnd = hasTrailingContent ? closeEnd : Math.max(closeEnd, lines[endLineIdx]!.contentEnd);
+
+      if (classified.visibility !== "sealed" && closeStart > openEndOffset) {
+        const innerBlocks = parsePedagogicalAstInternal(
+          text.slice(openEndOffset, closeStart),
+          {
+            defaultVisibility: classified.visibility,
+            propagateSectionVisibility,
+          },
+          false,
+        ).map(b => ({
+          ...b,
+          startOffset: openEndOffset + b.startOffset,
+          endOffset: openEndOffset + b.endOffset,
+        }));
+        const higherBlocks = innerBlocks.filter(
+          b => VISIBILITY_RANK[b.visibility] > VISIBILITY_RANK[classified.visibility],
+        );
+        const safeLabel =
+          classified.summaryEndOffset != null &&
+          higherBlocks.some(b => b.startOffset < classified.summaryEndOffset! && b.endOffset > openEndOffset)
+            ? classified.kind
+            : classified.label;
+        emitContainerWithExtraction(
+          classified.kind,
+          classified.visibility,
+          true,
+          detailsStart,
+          outerEnd,
+          closeStart,
+          safeLabel,
+          false,
+          innerBlocks,
+        );
+      } else {
+        pushBlock(classified.kind, classified.visibility, true, detailsStart, outerEnd, {
+          label: classified.label,
+        });
+      }
+
+      if (hasTrailingContent) {
+        const closeLine = lines[endLineIdx]!;
+        lines[endLineIdx] = {
+          start: closeEnd,
+          contentEnd: closeLine.contentEnd,
+          end: closeLine.end,
+          raw: trailingOnCloseLine,
+        };
+        i = endLineIdx;
+      } else {
+        i = endLineIdx + 1;
+      }
+      continue;
     }
 
     // 5. Display math ($$...$$)
@@ -958,7 +1358,7 @@ function parsePedagogicalAstInternal(
         while (endLineIdx > i && /^[ \t]*>[ \t]*$/.test(lines[endLineIdx]!.raw)) {
           endLineIdx--;
         }
-        const label = calloutMatch[2]!.trim() || calloutMatch[1]!;
+        const fallbackLabel = calloutMatch[1]!;
         const outerStart = line.start;
         const outerEnd = lines[endLineIdx]!.contentEnd;
 
@@ -973,6 +1373,16 @@ function parsePedagogicalAstInternal(
             propagateSectionVisibility,
             classified.kind === "exercise",
           );
+          const higherBlocks = innerBlocks.filter(
+            b => VISIBILITY_RANK[b.visibility] > VISIBILITY_RANK[classified.visibility],
+          );
+          const safeLabel = sanitizeHeaderLabel(
+            text,
+            headerRestStart,
+            line.contentEnd,
+            higherBlocks,
+            fallbackLabel,
+          );
           emitContainerWithExtraction(
             classified.kind,
             classified.visibility,
@@ -980,11 +1390,12 @@ function parsePedagogicalAstInternal(
             outerStart,
             outerEnd,
             outerEnd,
-            label,
+            safeLabel,
             true,
             innerBlocks,
           );
         } else {
+          const label = calloutMatch[2]!.trim() || fallbackLabel;
           pushBlock(classified.kind, classified.visibility, true, outerStart, outerEnd, { label });
         }
         i = j;
@@ -1039,7 +1450,7 @@ function parsePedagogicalAstInternal(
       continue;
     }
 
-    // 8. Markdown / pipe table
+    // 8. Markdown / pipe table (extracts inline sealed/hint constructs & sealed/hint columns)
     if (raw.includes("|") && i + 1 < lines.length && isTableDelimiterRow(lines[i + 1]!.raw)) {
       let j = i + 2;
       while (
@@ -1051,7 +1462,267 @@ function parsePedagogicalAstInternal(
         j++;
       }
       const endLineIdx = j - 1;
-      pushBlock("table", getActiveSectionVisibility(), true, line.start, lines[endLineIdx]!.contentEnd);
+      const activeVis = getActiveSectionVisibility();
+      const tableStart = line.start;
+      const tableEnd = lines[endLineIdx]!.contentEnd;
+
+      if (activeVis === "sealed") {
+        pushBlock("table", activeVis, true, tableStart, tableEnd);
+        i = j;
+        continue;
+      }
+
+      const extracted: MappedInnerBlock[] = [];
+      const inlineSpans = findInlineConstructSpans(text, tableStart, tableEnd, activeVis, sealProofs);
+      for (const span of inlineSpans) {
+        if (VISIBILITY_RANK[span.visibility] > VISIBILITY_RANK[activeVis]) {
+          if (
+            span.visibility !== "sealed" &&
+            span.openEnd !== undefined &&
+            span.closeStart !== undefined &&
+            span.closeStart > span.openEnd
+          ) {
+            const inner = parsePedagogicalAstInternal(
+              text.slice(span.openEnd, span.closeStart),
+              { defaultVisibility: span.visibility, propagateSectionVisibility },
+              false,
+            ).map(b => ({
+              ...b,
+              startOffset: span.openEnd! + b.startOffset,
+              endOffset: span.openEnd! + b.endOffset,
+            }));
+            const higherInner = inner.filter(
+              b => VISIBILITY_RANK[b.visibility] > VISIBILITY_RANK[span.visibility],
+            );
+            if (higherInner.length === 0) {
+              extracted.push({
+                kind: span.kind,
+                visibility: span.visibility,
+                atomicConstruct: true,
+                startOffset: span.start,
+                endOffset: span.end,
+                startMs: null,
+                endMs: null,
+                ...(span.label ? { label: span.label } : {}),
+              });
+            } else {
+              const safeSpanLabel =
+                span.summaryEndOffset != null &&
+                higherInner.some(b => b.startOffset < span.summaryEndOffset! && b.endOffset > span.openEnd!)
+                  ? span.kind
+                  : span.label ?? span.kind;
+              let spanCursor = span.start;
+              for (const hb of higherInner) {
+                const pre = trimWhitespaceBounds(text, spanCursor, hb.startOffset, false);
+                if (pre) {
+                  extracted.push({
+                    kind: span.kind,
+                    visibility: span.visibility,
+                    atomicConstruct: true,
+                    startOffset: pre.start,
+                    endOffset: pre.end,
+                    startMs: null,
+                    endMs: null,
+                    label: safeSpanLabel,
+                  });
+                }
+                extracted.push(hb);
+                spanCursor = hb.endOffset;
+              }
+              const tail = trimWhitespaceBounds(text, spanCursor, span.closeStart, false);
+              if (tail) {
+                const fullTail = trimWhitespaceBounds(text, tail.start, span.end, false);
+                if (fullTail) {
+                  extracted.push({
+                    kind: span.kind,
+                    visibility: span.visibility,
+                    atomicConstruct: true,
+                    startOffset: fullTail.start,
+                    endOffset: fullTail.end,
+                    startMs: null,
+                    endMs: null,
+                    label: safeSpanLabel,
+                  });
+                }
+              }
+            }
+          } else {
+            extracted.push({
+              kind: span.kind,
+              visibility: span.visibility,
+              atomicConstruct: true,
+              startOffset: span.start,
+              endOffset: span.end,
+              startMs: null,
+              endMs: null,
+              ...(span.label ? { label: span.label } : {}),
+            });
+          }
+        } else if (
+          span.kind !== "display_math" &&
+          span.openEnd !== undefined &&
+          span.closeStart !== undefined &&
+          span.closeStart > span.openEnd
+        ) {
+          const inner = parsePedagogicalAstInternal(
+            text.slice(span.openEnd, span.closeStart),
+            { defaultVisibility: span.visibility, propagateSectionVisibility },
+            span.kind === "exercise",
+          );
+          for (const b of inner) {
+            if (VISIBILITY_RANK[b.visibility] > VISIBILITY_RANK[activeVis]) {
+              extracted.push({
+                kind: b.kind,
+                visibility: b.visibility,
+                atomicConstruct: b.atomicConstruct,
+                startOffset: span.openEnd + b.startOffset,
+                endOffset: span.openEnd + b.endOffset,
+                startMs: b.startMs,
+                endMs: b.endMs,
+                ...(b.label ? { label: b.label } : {}),
+              });
+            }
+          }
+        }
+      }
+
+      extracted.sort((a, b) => a.startOffset - b.startOffset || a.endOffset - b.endOffset);
+
+      // Extract data cells belonging to sealed / hint-gated columns (e.g. Answer Key / Solution / Hint).
+      const headerCells = parseTableRowCells(lines[i]!, inlineSpans);
+      const colPolicies = headerCells.map(cell => {
+        const cellText = sanitizeHeaderLabel(text, cell.start, cell.end, extracted, "");
+        if (!cellText) return null;
+        if (SEALED_HEADING_RE.test(cellText)) {
+          return { kind: "solution" as const, visibility: maxVisibility("sealed", activeVis), label: cellText };
+        }
+        if (HINT_HEADING_RE.test(cellText)) {
+          const vis = maxVisibility("hint_gated", activeVis);
+          return VISIBILITY_RANK[vis] > VISIBILITY_RANK[activeVis]
+            ? { kind: "hint" as const, visibility: vis, label: cellText }
+            : null;
+        }
+        return null;
+      });
+
+      if (colPolicies.some(Boolean)) {
+        for (let rowIdx = i + 2; rowIdx <= endLineIdx; rowIdx++) {
+          const rowCells = parseTableRowCells(lines[rowIdx]!, inlineSpans);
+          for (let colIdx = 0; colIdx < Math.min(colPolicies.length, rowCells.length); colIdx++) {
+            const policy = colPolicies[colIdx];
+            if (!policy) continue;
+            const bounds = trimWhitespaceBounds(text, rowCells[colIdx]!.start, rowCells[colIdx]!.end, false);
+            if (!bounds) continue;
+            const overlapping = extracted
+              .filter(b => b.endOffset > bounds.start && b.startOffset < bounds.end)
+              .sort((a, b) => a.startOffset - b.startOffset || a.endOffset - b.endOffset);
+            if (overlapping.length === 0) {
+              extracted.push({
+                kind: policy.kind,
+                visibility: policy.visibility,
+                atomicConstruct: true,
+                startOffset: bounds.start,
+                endOffset: bounds.end,
+                startMs: null,
+                endMs: null,
+                label: policy.label,
+              });
+            } else {
+              let cCur = bounds.start;
+              for (const ov of overlapping) {
+                if (ov.startOffset > cCur) {
+                  const pre = trimWhitespaceBounds(text, cCur, ov.startOffset, false);
+                  if (pre) {
+                    extracted.push({
+                      kind: policy.kind,
+                      visibility: policy.visibility,
+                      atomicConstruct: true,
+                      startOffset: pre.start,
+                      endOffset: pre.end,
+                      startMs: null,
+                      endMs: null,
+                      label: policy.label,
+                    });
+                  }
+                }
+                if (VISIBILITY_RANK[ov.visibility] < VISIBILITY_RANK[policy.visibility]) {
+                  const idx = extracted.indexOf(ov);
+                  if (idx !== -1) {
+                    extracted[idx] = { ...ov, kind: policy.kind, visibility: policy.visibility };
+                  }
+                }
+                cCur = Math.max(cCur, ov.endOffset);
+              }
+              if (cCur < bounds.end) {
+                const suf = trimWhitespaceBounds(text, cCur, bounds.end, false);
+                if (suf) {
+                  extracted.push({
+                    kind: policy.kind,
+                    visibility: policy.visibility,
+                    atomicConstruct: true,
+                    startOffset: suf.start,
+                    endOffset: suf.end,
+                    startMs: null,
+                    endMs: null,
+                    label: policy.label,
+                  });
+                }
+              }
+            }
+          }
+        }
+      }
+
+      if (extracted.length === 0) {
+        pushBlock("table", activeVis, true, tableStart, tableEnd);
+        i = j;
+        continue;
+      }
+
+      extracted.sort((a, b) => a.startOffset - b.startOffset || a.endOffset - b.endOffset);
+
+      const pushTableFragment = (fragStart: number, fragEnd: number) => {
+        const trimmed = trimWhitespaceBounds(text, fragStart, fragEnd, false);
+        if (!trimmed) return;
+        const slice = text.slice(trimmed.start, trimmed.end);
+        if (/^[|\s:-]+$/.test(slice)) return;
+        pushBlock("table", activeVis, true, trimmed.start, trimmed.end);
+      };
+
+      let cursor = tableStart;
+      for (const block of extracted) {
+        if (block.startOffset > cursor) {
+          pushTableFragment(cursor, block.startOffset);
+        }
+        pushBlock(block.kind, block.visibility, block.atomicConstruct, block.startOffset, block.endOffset, {
+          startMs: block.startMs,
+          endMs: block.endMs,
+          ...(block.label ? { label: block.label } : {}),
+        });
+        cursor = Math.max(cursor, block.endOffset);
+      }
+
+      if (cursor > tableEnd) {
+        const closeLineIdx = lineIndexContaining(lines, Math.max(tableStart, cursor - 1), i);
+        const closeLine = lines[closeLineIdx]!;
+        const trailingOnCloseLine = text.slice(cursor, closeLine.contentEnd);
+        if (!/^[ \t]*$/.test(trailingOnCloseLine)) {
+          lines[closeLineIdx] = {
+            start: cursor,
+            contentEnd: closeLine.contentEnd,
+            end: closeLine.end,
+            raw: trailingOnCloseLine,
+          };
+          i = closeLineIdx;
+        } else {
+          i = closeLineIdx + 1;
+        }
+        continue;
+      }
+
+      if (cursor < tableEnd) {
+        pushTableFragment(cursor, tableEnd);
+      }
       i = j;
       continue;
     }
@@ -1059,10 +1730,61 @@ function parsePedagogicalAstInternal(
     // 9. Inline timestamped transcript cue line
     const cueTiming = parseInlineTranscriptCue(raw);
     if (cueTiming) {
-      pushBlock("transcript_cue", getActiveSectionVisibility(), true, line.start, line.contentEnd, {
-        startMs: cueTiming.startMs,
-        endMs: cueTiming.endMs,
-      });
+      const activeVis = getActiveSectionVisibility();
+      const cueSpans =
+        activeVis !== "sealed"
+          ? findInlineConstructSpans(text, line.start, line.contentEnd, activeVis, sealProofs).filter(
+              s => VISIBILITY_RANK[s.visibility] > VISIBILITY_RANK[activeVis],
+            )
+          : [];
+      if (cueSpans.length === 0) {
+        pushBlock("transcript_cue", activeVis, true, line.start, line.contentEnd, {
+          startMs: cueTiming.startMs,
+          endMs: cueTiming.endMs,
+        });
+        i++;
+        continue;
+      }
+      let cursor = line.start;
+      for (const span of cueSpans) {
+        const pre = trimWhitespaceBounds(text, cursor, span.start, false);
+        if (pre) {
+          pushBlock("transcript_cue", activeVis, true, pre.start, pre.end, {
+            startMs: cueTiming.startMs,
+            endMs: cueTiming.endMs,
+          });
+        }
+        pushBlock(span.kind, span.visibility, true, span.start, span.end, {
+          startMs: cueTiming.startMs,
+          endMs: cueTiming.endMs,
+          ...(span.label ? { label: span.label } : {}),
+        });
+        cursor = Math.max(cursor, span.end);
+      }
+      if (cursor > line.contentEnd) {
+        const closeLineIdx = lineIndexContaining(lines, Math.max(line.start, cursor - 1), i);
+        const closeLine = lines[closeLineIdx]!;
+        const trailingOnCloseLine = text.slice(cursor, closeLine.contentEnd);
+        if (!/^[ \t]*$/.test(trailingOnCloseLine)) {
+          lines[closeLineIdx] = {
+            start: cursor,
+            contentEnd: closeLine.contentEnd,
+            end: closeLine.end,
+            raw: trailingOnCloseLine,
+          };
+          i = closeLineIdx;
+        } else {
+          i = closeLineIdx + 1;
+        }
+        continue;
+      }
+      const suf = trimWhitespaceBounds(text, cursor, line.contentEnd, false);
+      if (suf) {
+        pushBlock("transcript_cue", activeVis, true, suf.start, suf.end, {
+          startMs: cueTiming.startMs,
+          endMs: cueTiming.endMs,
+        });
+      }
       i++;
       continue;
     }

@@ -186,4 +186,56 @@ describe("media anchor bounded playback controller", () => {
     controller.handleTimeUpdate(media);
     expect(media.pauseMock).not.toHaveBeenCalled();
   });
+
+  it("keeps rangeHighlightActive true while paused on jumped range and after auto-pause at endMs until manual play or seek elsewhere", () => {
+    const anchor = validateMediaAnchorRange({ startMs: 10_000, endMs: 25_000, keyframeChunkId: "kf-10" })!;
+    const media = createFakeMedia(2);
+    const controller = createMediaAnchorPlaybackController(anchor);
+
+    // Starts paused on jumped range -> highlight is active.
+    controller.activate(media);
+    expect(media.paused).toBe(true);
+    expect(controller.snapshot().rangeHighlightActive).toBe(true);
+
+    // Programmatic seeked event at startMs keeps highlight active.
+    controller.handleSeeked(media);
+    expect(controller.snapshot().rangeHighlightActive).toBe(true);
+
+    // Auto-pausing at endMs keeps rangeHighlightActive true!
+    media.currentTime = 25;
+    controller.handleTimeUpdate(media);
+    expect(controller.snapshot()).toMatchObject({
+      phase: "paused_at_end",
+      autoPausedAtEnd: true,
+      rangeHighlightActive: true,
+    });
+
+    // Seeking back inside [startMs, endMs] re-arms the bound and keeps highlight active.
+    media.currentTime = 18;
+    controller.handleSeeked(media);
+    expect(controller.snapshot()).toMatchObject({
+      phase: "seeking_segment",
+      boundActive: true,
+      rangeHighlightActive: true,
+    });
+
+    // Auto-pause again at endMs, then seek outside the range -> clears highlight.
+    media.currentTime = 25;
+    controller.handleTimeUpdate(media);
+    expect(controller.snapshot().rangeHighlightActive).toBe(true);
+    media.currentTime = 45;
+    controller.handleSeeked(media);
+    expect(controller.snapshot()).toMatchObject({
+      phase: "continued_past_end",
+      userReleasedBound: true,
+      rangeHighlightActive: false,
+    });
+
+    // Replay re-activates highlight.
+    controller.replay(media);
+    expect(controller.snapshot()).toMatchObject({
+      phase: "seeking_segment",
+      rangeHighlightActive: true,
+    });
+  });
 });

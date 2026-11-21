@@ -98,6 +98,7 @@ function SourceReaderContent({ record, latestRecord = record, requestedVersion, 
     boundActive: mediaAnchor?.bounded ?? false,
     autoPausedAtEnd: false,
     userReleasedBound: false,
+    rangeHighlightActive: mediaAnchor !== null,
   }));
   const mediaController = useMemo(
     () => createMediaAnchorPlaybackController(mediaAnchor, setMediaPlayback),
@@ -183,11 +184,12 @@ function SourceReaderContent({ record, latestRecord = record, requestedVersion, 
         data-media-anchor-end-ms={mediaAnchor ? String(mediaAnchor.endMs) : undefined}
         data-media-anchor-keyframe-id={mediaAnchor?.keyframeChunkId}
         data-media-anchor-phase={mediaPlayback.phase}
+        data-media-anchor-highlight={mediaAnchor ? (mediaPlayback.rangeHighlightActive ? "active" : "inactive") : undefined}
       >
         <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-text-2">
           <div className="flex flex-wrap items-center gap-2">
             {mediaAnchor ? (
-              <span className="inline-flex items-center rounded-pill bg-accent-soft px-2.5 py-1 text-xs font-medium tabular-nums text-accent">
+              <span className={`inline-flex items-center rounded-pill px-2.5 py-1 text-xs font-medium tabular-nums ${mediaPlayback.rangeHighlightActive ? "bg-accent-soft text-accent ring-1 ring-accent/30" : "bg-line/40 text-text-2"}`}>
                 引用片段：{formatMediaAnchorRange(mediaAnchor)}
               </span>
             ) : null}
@@ -226,6 +228,7 @@ function SourceReaderContent({ record, latestRecord = record, requestedVersion, 
             onLoadedMetadata={event => mediaController.handleLoadedMetadata(event.currentTarget)}
             onTimeUpdate={event => mediaController.handleTimeUpdate(event.currentTarget)}
             onPlay={event => mediaController.handlePlay(event.currentTarget)}
+            onSeeked={event => mediaController.handleSeeked(event.currentTarget)}
           />
         ) : (
           <audio
@@ -238,6 +241,7 @@ function SourceReaderContent({ record, latestRecord = record, requestedVersion, 
             onLoadedMetadata={event => mediaController.handleLoadedMetadata(event.currentTarget)}
             onTimeUpdate={event => mediaController.handleTimeUpdate(event.currentTarget)}
             onPlay={event => mediaController.handlePlay(event.currentTarget)}
+            onSeeked={event => mediaController.handleSeeked(event.currentTarget)}
           />
         )}
       </section>

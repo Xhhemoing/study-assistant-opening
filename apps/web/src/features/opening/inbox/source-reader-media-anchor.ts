@@ -33,6 +33,7 @@ export interface MediaAnchorPlaybackSnapshot {
   readonly boundActive: boolean;
   readonly autoPausedAtEnd: boolean;
   readonly userReleasedBound: boolean;
+  readonly rangeHighlightActive: boolean;
 }
 
 export interface MediaAnchorPlaybackController {
@@ -41,6 +42,7 @@ export interface MediaAnchorPlaybackController {
   handleLoadedMetadata(media: SeekableMediaElement): void;
   handleTimeUpdate(media: SeekableMediaElement): void;
   handlePlay(media: SeekableMediaElement): void;
+  handleSeeked(media: SeekableMediaElement): void;
   seekToStart(media: SeekableMediaElement | null): void;
   replay(media: SeekableMediaElement | null): void;
 }
@@ -129,6 +131,7 @@ export function createMediaAnchorPlaybackController(
     boundActive,
     autoPausedAtEnd,
     userReleasedBound,
+    rangeHighlightActive: anchor !== null && phase !== "idle" && phase !== "continued_past_end",
   });
 
   const emit = () => {
@@ -181,6 +184,33 @@ export function createMediaAnchorPlaybackController(
       if (!anchor || !anchor.bounded) return;
       const currentMs = media.currentTime * 1000;
       if (autoPausedAtEnd || (!pendingSeek && Number.isFinite(currentMs) && currentMs >= anchor.endMs)) {
+        userReleasedBound = true;
+        autoPausedAtEnd = false;
+        boundActive = false;
+        phase = "continued_past_end";
+        emit();
+      }
+    },
+    handleSeeked(media) {
+      if (!anchor || pendingSeek) return;
+      const currentMs = media.currentTime * 1000;
+      if (!Number.isFinite(currentMs)) return;
+      if (anchor.bounded) {
+        if (currentMs < anchor.startMs || currentMs > anchor.endMs) {
+          if (phase !== "continued_past_end") {
+            userReleasedBound = true;
+            autoPausedAtEnd = false;
+            boundActive = false;
+            phase = "continued_past_end";
+            emit();
+          }
+        } else if (autoPausedAtEnd && currentMs < anchor.endMs) {
+          autoPausedAtEnd = false;
+          boundActive = true;
+          phase = "seeking_segment";
+          emit();
+        }
+      } else if (Math.abs(currentMs - anchor.startMs) > 500 && phase !== "continued_past_end") {
         userReleasedBound = true;
         autoPausedAtEnd = false;
         boundActive = false;
