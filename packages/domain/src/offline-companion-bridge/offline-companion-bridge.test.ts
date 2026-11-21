@@ -1028,6 +1028,8 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
         ...legacyCtorLedgerEntry.receipt,
         leaseId: aliasUuidUpper,
         cardId: aliasUuidUpper,
+        previousRevision: 2,
+        newRevision: 3,
         nextSnapshot: aliasSnapRev3,
       },
     };
@@ -1039,6 +1041,8 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
         ...legacyCtorLedgerEntry.receipt,
         leaseId: aliasUuidLower,
         cardId: aliasUuidLower,
+        previousRevision: 0,
+        newRevision: 1,
         nextSnapshot: aliasSnapRev1,
       },
     };
@@ -1259,6 +1263,63 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
       ],
     });
     expect(benignVarMinusLease.ok).toBe(true);
+
+    // [Round-13 P1 & Guards]
+    // 1. LaTeX spacing/display-style commands (`\quad`, `\qquad`, `\;`, `\,`, `\hspace{...}`, `\displaystyle`)
+    //    MUST NOT act as left binary operands before `− 4`, while real symbols (`\theta − 4`, `\alpha − 4`) do!
+    expect(containsAnswerLeak("The value is \\(\\quad \u2212 4\\).", "-4")).toBe(true);
+    expect(containsAnswerLeak("The value is \\(\\qquad \u2212 4\\).", "-4")).toBe(true);
+    expect(containsAnswerLeak("The value is \\; \u2212 4.", "-4")).toBe(true);
+    expect(containsAnswerLeak("The value is \\, \u2212 4.", "-4")).toBe(true);
+    expect(containsAnswerLeak("The value is \\(\\hspace{1em} \u2212 4\\).", "-4")).toBe(true);
+    expect(containsAnswerLeak("Evaluate \\(\\displaystyle \u2212 4\\).", "-4")).toBe(true);
+    expect(containsAnswerLeak("Compute \\theta \u2212 4 = 0", "-4")).toBe(false);
+    expect(containsAnswerLeak("Compute \\alpha \u2212 4 = 0", "-4")).toBe(false);
+
+    const latexQuadLeak = issueOfflineFlashcardLease({
+      leaseId: "lease-r13-latex-quad-leak",
+      workspaceId: "ws-1",
+      learnerId: "learner-1",
+      issuedAtMs: T0,
+      candidates: [
+        makeMissVariantCandidate({
+          answerKey: "-4",
+          freshVariantStem: "The value is \\(\\quad \u2212 4\\).",
+        }),
+      ],
+    });
+    expect(latexQuadLeak.ok).toBe(false);
+    if (!latexQuadLeak.ok) {
+      expect(latexQuadLeak.httpStatus).toBe(422);
+      expect(latexQuadLeak.code).toBe("miss_variant_answer_leak");
+    }
+
+    // 2. One-sided binary subtraction (`Solve x −4 = 0` / `Solve x -4 = 0`) MUST NOT false-positive on `"-4"`,
+    //    while standalone unary `"-4"` in `"The value is -4"` / `"Answer: −4"` remains blocked!
+    expect(containsAnswerLeak("Solve x \u22124 = 0", "-4")).toBe(false);
+    expect(containsAnswerLeak("Solve x -4 = 0", "-4")).toBe(false);
+    expect(containsAnswerLeak("Solve x^2 -4 = 0", "-4")).toBe(false);
+    expect(containsAnswerLeak("The value is -4", "-4")).toBe(true);
+    expect(containsAnswerLeak("Answer: \u22124", "-4")).toBe(true);
+
+    // 3. Ledger entry with inconsistent receipt.newRevision vs receipt.nextSnapshot.revision throws TypeError!
+    expect(() =>
+      reconcileOfflineLeaseOutbox({
+        lease: safeLease.lease,
+        serverCards: { "card-1": validCard1Snap },
+        processedLedger: {
+          "constructor:1": {
+            ...legacyCtorLedgerEntry,
+            receipt: {
+              ...legacyCtorLedgerEntry.receipt,
+              newRevision: 99,
+            },
+          },
+        },
+        serverReceiptAtMs: T0 + 60_000,
+        entries: [],
+      }),
+    ).toThrow(TypeError);
 
     for (const [idx, spacedOrCjk] of [
       { answerKey: "π/2", prompt: "Right-angle measure.", backSummary: "The angle is π / 2 radians" },

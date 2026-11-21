@@ -152,13 +152,19 @@ const UNICODE_MATH_REPLACEMENTS: ReadonlyArray<readonly [RegExp, string]> = [
 const MATH_OPERAND_LOOKAHEAD =
   `(?=\\d|\\.|sqrt\\(|(?:${GREEK_OR_CONST})\\b)`;
 
+const LATEX_SPACING_AND_STYLE_RE =
+  /\\(?:q?quad|enspace|thinspace|medspace|thickspace|space|displaystyle|textstyle|scriptstyle|scriptscriptstyle)\b|\\hspace\*?\s*\{[^}]*\}|\\[,;:! ]/gi;
+
+const BINARY_LEFT_OPERAND_ATOM =
+  `(?:[\\d)\\]}|'\\u2032\\u2019]|(?<![\\p{L}\\p{N}_])[A-Za-z\\p{Script=Greek}]|[A-Za-z\\p{Script=Greek}]_[A-Za-z0-9\\p{Script=Greek}]+|\\\\[A-Za-z]+|\\b(?:${GREEK_OR_CONST}))`;
+
 const SPACED_UNARY_SIGN_RE = new RegExp(
   `(?<=^|[(\\[,;:=<>!~]\\s*|\\p{Script=Han}\\s*|\\p{Script=Hiragana}\\s*|\\p{Script=Katakana}\\s*|\\p{Script=Hangul}\\s*|\\b(?:is|equals|expected|result|value|gives|be|are|to|of|at|around|about)\\s+)([+-])\\s+${MATH_OPERAND_LOOKAHEAD}`,
   "giu",
 );
 
 const SPACED_UNICODE_MINUS_UNARY_RE = new RegExp(
-  `(?<!(?:[\\d)\\]}|'\\u2032\\u2019]|(?<![\\p{L}\\p{N}_])[A-Za-z\\p{Script=Greek}]|[A-Za-z\\p{Script=Greek}]_[A-Za-z0-9\\p{Script=Greek}]+|\\\\[A-Za-z]+|\\b(?:${GREEK_OR_CONST}))\\s*)\u2212\\s+(?=\\d|\\.|\\u221A|\\p{Script=Greek}|sqrt\\()`,
+  `(?<!${BINARY_LEFT_OPERAND_ATOM}\\s*)\u2212\\s+(?=\\d|\\.|\\u221A|\\p{Script=Greek}|sqrt\\()`,
   "giu",
 );
 
@@ -172,6 +178,9 @@ const SPACED_PLUS_MINUS_RE = new RegExp(`(\\+-|-\\+)\\s+${MATH_OPERAND_LOOKAHEAD
  */
 export function canonicalizeMathNotation(value: string): string {
   let text = value.normalize("NFKC");
+  // Normalize LaTeX spacing/display-style commands to spaces BEFORE unary-minus detection
+  // so `\(\quad − 4\)` or `\; − 4` is not mistaken for a left math operand.
+  text = text.replace(LATEX_SPACING_AND_STYLE_RE, " ");
   // Collapse spaced Unicode minus (`− 7`) when unary before mapping `\u2212` -> `-`.
   text = text.replace(SPACED_UNICODE_MINUS_UNARY_RE, "-");
   for (const [pattern, replacement] of UNICODE_MATH_REPLACEMENTS) {
@@ -194,8 +203,13 @@ const NON_CJK_WORD_CHAR_RE = new RegExp(`^${NON_CJK_WORD_CHAR}$`, "u");
 
 function containsStandaloneNumericOrSymbolicToken(haystack: string, token: string): boolean {
   const escaped = escapeRegExp(token);
+  const excludeBinaryLeftOperand =
+    /^[+-](?![+-])/.test(token) && STANDALONE_SIGNED_LITERAL_RE.test(token);
+  const leadingGuard = excludeBinaryLeftOperand
+    ? `(?<!${ALPHA_NUM_IDENT_CHAR}|\\d\\.|${BINARY_LEFT_OPERAND_ATOM}\\s*)`
+    : `(?<!${ALPHA_NUM_IDENT_CHAR}|\\d\\.)`;
   const pattern = new RegExp(
-    `(?<!${ALPHA_NUM_IDENT_CHAR}|\\d\\.)${escaped}(?!${ALPHA_NUM_IDENT_CHAR}|\\.\\d)`,
+    `${leadingGuard}${escaped}(?!${ALPHA_NUM_IDENT_CHAR}|\\.\\d)`,
     "iu",
   );
   return pattern.test(haystack);
@@ -685,7 +699,8 @@ function isValidLedgerEntry(value: unknown): value is OfflineOutboxLedgerEntry {
   if (
     canonicalEntryLeaseId !== canonicalReceiptLeaseId ||
     entry.seq !== receipt.seq ||
-    canonicalReceiptCardId !== canonicalNextSnapshotCardId
+    canonicalReceiptCardId !== canonicalNextSnapshotCardId ||
+    receipt.newRevision !== receipt.nextSnapshot.revision
   ) {
     return false;
   }
