@@ -155,3 +155,171 @@ describe("ephemeral execution claims", () => {
     expect(committed).toEqual([]);
   });
 });
+
+describe("media_usage_upper_bound to vendor_receipt reconciliation", () => {
+  function settleSqlMock(initialRow: Record<string, unknown>) {
+    let row = { ...initialRow };
+    let lateReceiptEvent: { amount_before_cents: number; amount_after_cents: number; reported_actual_cents: number } | null =
+      initialRow.has_late_receipt ? { amount_before_cents: 100, amount_after_cents: Number(initialRow.amount_cents), reported_actual_cents: Number(initialRow.amount_cents) } : null;
+    const queries: string[] = [];
+    const tag = async (strings: TemplateStringsArray, ...bindings: unknown[]): Promise<unknown[]> => {
+      const flat = (s: TemplateStringsArray, vals: unknown[]): { text: string; params: unknown[] } => {
+        let text = "";
+        const params: unknown[] = [];
+        for (let i = 0; i < s.length; i++) {
+          text += s[i]!;
+          if (i < vals.length) {
+            const v = vals[i];
+            if (v && typeof v === "object" && "__frag" in (v as Record<string, unknown>)) {
+              const inner = v as { text: string; params: unknown[] };
+              text += inner.text;
+              params.push(...inner.params);
+            } else {
+              text += "?";
+              params.push(v);
+            }
+          }
+        }
+        return { text, params };
+      };
+      const compiled = flat(strings, bindings);
+      const q = compiled.text;
+      if (!q.trim()) return [];
+      queries.push(q);
+      if (q.includes("FROM workspaces WHERE id")) return [{ id: scope.workspaceId }];
+      if (q.includes("SELECT date_trunc('milliseconds', clock_timestamp())")) return [{ instant: new Date("2026-11-21T10:00:00Z") }];
+      if (q.includes("SELECT * FROM opening_budget_reservations") && q.includes("FOR UPDATE")) return [row];
+      if (q.includes("INSERT INTO opening_budget_reconcile_events") && q.includes("'late_receipt'")) {
+        const after = Number(compiled.params[3]);
+        const reported = Number(compiled.params[4]);
+        if (lateReceiptEvent) {
+          if (q.includes("DO UPDATE")) {
+            lateReceiptEvent = { ...lateReceiptEvent, amount_after_cents: after, reported_actual_cents: reported };
+            return [{ id: "evt-1" }];
+          }
+          return [];
+        }
+        lateReceiptEvent = { amount_before_cents: Number(compiled.params[2]), amount_after_cents: after, reported_actual_cents: reported };
+        return [{ id: "evt-1" }];
+      }
+      if (q.includes("UPDATE opening_budget_reservations") && q.includes("settlement_cost_basis")) {
+        row = {
+          ...row,
+          amount_cents: compiled.params[0],
+          state: "completed",
+          pending_reconcile_cents: 0,
+          reconciled_at: row.reconciled_at ?? compiled.params[1],
+          updated_at: compiled.params[1],
+          result_ref: compiled.params[3] ?? row.result_ref,
+          outcome_unknown_at: null,
+          settlement_cost_basis: compiled.params[4],
+        };
+        return [row];
+      }
+      if (q.includes("FROM workspace_preferences")) return [];
+      if (q.includes("SELECT COALESCE(sum(amount_cents), 0) AS used")) return [{ used: row.amount_cents }];
+      return [];
+    };
+    const sqlTag = ((strings: TemplateStringsArray, ...bindings: unknown[]) => {
+      if (strings[0]!.includes("ON CONFLICT") || strings[0]!.trimStart().startsWith("workspace_id")) {
+        return { __frag: true, text: strings.join("?"), params: bindings };
+      }
+      return tag(strings, ...bindings);
+    }) as unknown as Sql;
+    const tx = Object.assign(sqlTag, {});
+    const sql = Object.assign(sqlTag, {
+      begin: async (run: (txArg: typeof tx) => Promise<unknown>) => run(tx),
+    }) as unknown as Sql;
+    return { sql, getRow: () => row, getEvent: () => lateReceiptEvent, queries };
+  }
+
+  it("allows vendor_receipt after TTL recovery recorded a late_receipt for media_usage_upper_bound and rejects duplicate replay", async () => {
+    const mock = settleSqlMock({
+      id: reservationId,
+      workspace_id: scope.workspaceId,
+      parent_interaction_id: null,
+      settlement_cost_basis: "media_usage_upper_bound",
+      purpose: "transcribe",
+      amount_cents: 1,
+      reserved_amount_cents: 100,
+      request_id: "transcribe:job:0",
+      state: "completed",
+      model_snapshot: null,
+      execution_claimed_at: new Date("2026-11-21T09:00:00Z"),
+      outcome_unknown_at: null,
+      release_reason: null,
+      result_ref: "transcribe:job:0",
+      reconciled_at: new Date("2026-11-21T09:35:00Z"),
+      pending_reconcile_cents: 0,
+      has_late_receipt: true,
+    });
+    const repo = createOpeningBudgetRepository(mock.sql, { envCapCents: 10_000 });
+    const settled = await repo.settle(scope, reservationId, 3, { costBasis: "vendor_receipt" });
+    expect(settled).toMatchObject({ amountCents: 3, settlementCostBasis: "vendor_receipt", resultRef: "transcribe:job:0" });
+    expect(mock.getEvent()).toEqual({ amount_before_cents: 100, amount_after_cents: 3, reported_actual_cents: 3 });
+
+    await expect(repo.settle(scope, reservationId, 3, { costBasis: "vendor_receipt" })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(repo.settle(scope, reservationId, 3)).rejects.toMatchObject({ code: "NOT_FOUND" });
+  });
+
+  it("rejects duplicate free-tier settlement after TTL recovery settled with media_usage_upper_bound or vendor_receipt", async () => {
+    const mock = settleSqlMock({
+      id: reservationId,
+      workspace_id: scope.workspaceId,
+      parent_interaction_id: null,
+      settlement_cost_basis: "media_usage_upper_bound",
+      purpose: "transcribe",
+      amount_cents: 0,
+      reserved_amount_cents: 0,
+      request_id: "transcribe:job:0",
+      state: "completed",
+      model_snapshot: null,
+      execution_claimed_at: new Date("2026-11-21T09:00:00Z"),
+      outcome_unknown_at: null,
+      release_reason: null,
+      result_ref: "transcribe:job:0",
+      reconciled_at: new Date("2026-11-21T09:35:00Z"),
+      pending_reconcile_cents: 0,
+      has_late_receipt: true,
+    });
+    const repo = createOpeningBudgetRepository(mock.sql, { envCapCents: 10_000 });
+    await expect(repo.settle(scope, reservationId, 0, { resultRef: "transcribe:job:0" })).rejects.toMatchObject({ code: "NOT_FOUND" });
+
+    const settled = await repo.settle(scope, reservationId, 0, { costBasis: "vendor_receipt" });
+    expect(settled.settlementCostBasis).toBe("vendor_receipt");
+    await expect(repo.settle(scope, reservationId, 0, { costBasis: "vendor_receipt" })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(repo.settle(scope, reservationId, 0)).rejects.toMatchObject({ code: "NOT_FOUND" });
+  });
+
+  it("transitions TTL pending reservation -> media_usage_upper_bound -> vendor_receipt -> replay NOT_FOUND", async () => {
+    const mock = settleSqlMock({
+      id: reservationId,
+      workspace_id: scope.workspaceId,
+      parent_interaction_id: null,
+      settlement_cost_basis: null,
+      purpose: "transcribe",
+      amount_cents: 100,
+      reserved_amount_cents: 100,
+      request_id: "transcribe:job:0",
+      state: "completed",
+      model_snapshot: null,
+      execution_claimed_at: new Date("2026-11-21T09:00:00Z"),
+      outcome_unknown_at: new Date("2026-11-21T09:35:00Z"),
+      release_reason: null,
+      result_ref: null,
+      reconciled_at: new Date("2026-11-21T09:35:00Z"),
+      pending_reconcile_cents: 100,
+      has_late_receipt: false,
+    });
+    const repo = createOpeningBudgetRepository(mock.sql, { envCapCents: 10_000 });
+    const provisional = await repo.settle(scope, reservationId, 1, { resultRef: "transcribe:job:0", costBasis: "media_usage_upper_bound" });
+    expect(provisional).toMatchObject({ amountCents: 1, settlementCostBasis: "media_usage_upper_bound", pendingReconcileCents: 0 });
+    expect(mock.getEvent()).toEqual({ amount_before_cents: 100, amount_after_cents: 1, reported_actual_cents: 1 });
+
+    const final = await repo.settle(scope, reservationId, 3, { costBasis: "vendor_receipt" });
+    expect(final).toMatchObject({ amountCents: 3, settlementCostBasis: "vendor_receipt", resultRef: "transcribe:job:0" });
+    expect(mock.getEvent()).toEqual({ amount_before_cents: 100, amount_after_cents: 3, reported_actual_cents: 3 });
+
+    await expect(repo.settle(scope, reservationId, 3, { costBasis: "vendor_receipt" })).rejects.toMatchObject({ code: "NOT_FOUND" });
+  });
+});

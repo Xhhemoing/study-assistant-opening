@@ -868,23 +868,33 @@ export function createOpeningBudgetRepository(
           `;
           return mapReservation(rows[0] as Record<string, unknown>);
         }
+        const reconcilingMediaUpperBound = row.state === "completed"
+          && row.settlementCostBasis === "media_usage_upper_bound"
+          && options.costBasis === "vendor_receipt";
         // Free-tier TTL reconciliation has no pending cents, but its receipt is
         // still late. The unique late_receipt event below permits it only once.
-        const lateAfterReconcile = row.state === "completed" && ((row.reconciledAt !== null
-          && (row.pendingReconcileCents > 0 || (row.reservedAmountCents === 0 && actualCents === 0)))
-          || (row.settlementCostBasis === "media_usage_upper_bound" && options.costBasis === "vendor_receipt"));
+        const lateAfterReconcile = row.state === "completed" && row.reconciledAt !== null
+          && (row.pendingReconcileCents > 0
+            || (row.reservedAmountCents === 0 && actualCents === 0 && row.settlementCostBasis === null));
         const lateAfterRelease = row.state === "released";
-        if (!lateAfterReconcile && !lateAfterRelease) {
+        if (!reconcilingMediaUpperBound && !lateAfterReconcile && !lateAfterRelease) {
           // Normal completed row: duplicate receipt is rejected, never re-applied.
           throw new OpeningBudgetError("NOT_FOUND", "reservation not found or already settled");
         }
         // Late receipt: audited compensation. The provider DID run, so the real
         // cost is recorded (no loss), pending reconcile cleared exactly once.
+        // If TTL/release recovery provisionally recorded media_usage_upper_bound,
+        // a final vendor_receipt updates that late_receipt record instead of colliding.
+        const conflictAction = reconcilingMediaUpperBound
+          ? tx`ON CONFLICT (reservation_id, kind) DO UPDATE
+            SET amount_after_cents = excluded.amount_after_cents,
+                reported_actual_cents = excluded.reported_actual_cents`
+          : tx`ON CONFLICT (reservation_id, kind) DO NOTHING`;
         const events = await tx`
           INSERT INTO opening_budget_reconcile_events
             (reservation_id, workspace_id, kind, amount_before_cents, amount_after_cents, reported_actual_cents, state_before, created_at)
           VALUES (${row.id}, ${row.workspaceId}, 'late_receipt', ${lateAfterRelease ? 0 : row.amountCents}, ${actualCents}, ${actualCents}, ${row.state}, ${instant})
-          ON CONFLICT (reservation_id, kind) DO NOTHING
+          ${conflictAction}
           RETURNING id
         `;
         if (!events.length) {

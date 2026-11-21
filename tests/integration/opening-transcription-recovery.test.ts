@@ -166,6 +166,32 @@ it('repairs result_ref after vendor_receipt reconciliation and rejects wrong-bas
   await expect(retry(input, signal)).rejects.toMatchObject({ code: 'NOT_FOUND' });
 });
 
+it('reuses legacy checkpoints without costBasis settled as usage_pricing and allows vendor_receipt after TTL recovery', async () => {
+  const s = await setup();
+  const input = { ...s.input, durationMs: 1000 };
+  const key = `transcribe:${s.job.id}:0`;
+  s.setFailSettlement(true);
+  await expect(s.adapter(input, signal)).rejects.toThrow('settlement connection lost');
+  await f.sql`UPDATE opening_budget_reservations SET created_at=now() - interval '31 minutes'
+    WHERE workspace_id=${f.scope.workspaceId} AND request_id=${key}`;
+  await s.budget.reserve(f.scope, { purpose: 'transcribe', requestId: `tick:${randomUUID()}`, amountCents: 1 });
+  s.setFailSettlement(false);
+  await expect(s.adapter(input, signal)).resolves.toHaveLength(1);
+  const [afterRecover] = await f.sql`SELECT id, amount_cents, settlement_cost_basis FROM opening_budget_reservations WHERE request_id=${key}`;
+  expect(afterRecover).toMatchObject({ amount_cents: 1, settlement_cost_basis: 'media_usage_upper_bound' });
+  await expect(s.budget.settle(f.scope, afterRecover!.id, 4, { costBasis: 'vendor_receipt' })).resolves.toMatchObject({
+    id: afterRecover!.id, amountCents: 4, settlementCostBasis: 'vendor_receipt',
+  });
+  expect(await s.budget.listPendingReconcile(f.scope)).toHaveLength(0);
+  await expect(s.budget.settle(f.scope, afterRecover!.id, 4, { costBasis: 'vendor_receipt' })).rejects.toMatchObject({ code: 'NOT_FOUND' });
+
+  await f.sql`UPDATE opening_jobs SET result=result - 'costBasis' WHERE workspace_id=${f.scope.workspaceId} AND key=${key}`;
+  await f.sql`UPDATE opening_budget_reservations SET settlement_cost_basis='usage_pricing', amount_cents=1 WHERE id=${afterRecover!.id}`;
+  const retry = await s.manualRetry();
+  await expect(retry(input, signal)).resolves.toHaveLength(1);
+  expect(s.provider).toHaveBeenCalledTimes(1);
+});
+
 it('recovers a free-tier receipt after TTL reconciliation and audits the late receipt only once', async () => {
   const s = await setup({ freeTier: true }); s.setFailSettlement(true);
   const input = { ...s.input, durationMs: 1000 };
