@@ -122,6 +122,7 @@ export function snapToScoreGrid(
     throw new RangeError("Score range contains no valid grid point");
   }
 
+  const clampedValue = Math.min(maxScore, Math.max(minScore, value));
   const relUnits = (value - minScore) / step;
   const rawK =
     direction === "floor"
@@ -138,6 +139,25 @@ export function snapToScoreGrid(
   for (let iter = 0; iter < 2 && snapped < minScore && k < maxK; iter += 1) {
     k += 1;
     snapped = gridPointAt(minScore, step, k);
+  }
+  if (direction === "floor" && snapped > clampedValue) {
+    for (let iter = 0; iter < 2 && snapped > clampedValue && k > 0; iter += 1) {
+      k -= 1;
+      snapped = k === 0 ? minGrid : gridPointAt(minScore, step, k);
+    }
+    if (snapped > clampedValue) {
+      snapped = minScore;
+    }
+  } else if (direction === "ceil" && snapped < clampedValue) {
+    for (let iter = 0; iter < 2 && snapped < clampedValue && k < maxK; iter += 1) {
+      k += 1;
+      const nextSnapped = gridPointAt(minScore, step, k);
+      if (nextSnapped > maxScore) break;
+      snapped = nextSnapped;
+    }
+    if (snapped < clampedValue) {
+      snapped = maxScore;
+    }
   }
   if (snapped < minScore || snapped > maxScore) {
     throw new RangeError("Snapped score exceeds valid score range");
@@ -346,9 +366,32 @@ export const IELTS_ACADEMIC_V1_BLUEPRINT: ExamBlueprintV1 = {
       scoreRange: [0, 9],
       scoreStep: 0.5,
       parts: [
-        { partId: "speaking-part-1", label: "Part 1", weight: 0.25, skillIds: ["ielts.speaking.fluency_structure"] },
-        { partId: "speaking-part-2", label: "Part 2", weight: 0.35, skillIds: ["ielts.speaking.fluency_structure"] },
-        { partId: "speaking-part-3", label: "Part 3", weight: 0.4, skillIds: ["ielts.speaking.fluency_structure", "ielts.speaking.abstract_extension"] },
+        {
+          partId: "speaking-part-1",
+          label: "Part 1",
+          weight: 0.25,
+          skillIds: ["ielts.speaking.fluency_structure"],
+          timeModel: { mu: Math.log(255), speedLoading: 0.15, skillLoading: { "ielts.speaking.fluency_structure": 0.12 }, sigma: 0.08 },
+        },
+        {
+          partId: "speaking-part-2",
+          label: "Part 2",
+          weight: 0.35,
+          skillIds: ["ielts.speaking.fluency_structure"],
+          timeModel: { mu: Math.log(210), speedLoading: 0.15, skillLoading: { "ielts.speaking.fluency_structure": 0.12 }, sigma: 0.08 },
+        },
+        {
+          partId: "speaking-part-3",
+          label: "Part 3",
+          weight: 0.4,
+          skillIds: ["ielts.speaking.fluency_structure", "ielts.speaking.abstract_extension"],
+          timeModel: {
+            mu: Math.log(255),
+            speedLoading: 0.18,
+            skillLoading: { "ielts.speaking.fluency_structure": 0.1, "ielts.speaking.abstract_extension": 0.12 },
+            sigma: 0.08,
+          },
+        },
       ],
     },
   ],
@@ -478,6 +521,15 @@ function isValidTimeModel(tm: ExamTimeModel): boolean {
   return true;
 }
 
+function isAlignedScoreGrid(range: readonly [number, number], step: number): boolean {
+  const gridSteps = (range[1] - range[0]) / step;
+  if (!Number.isFinite(gridSteps) || gridSteps > MAX_SCORE_GRID_STEPS) {
+    return false;
+  }
+  const nearestSteps = Math.round(gridSteps);
+  return nearestSteps >= 1 && Math.abs(gridSteps - nearestSteps) <= 1e-9 * Math.max(1, nearestSteps);
+}
+
 const CANONICAL_IELTS_SECTIONS = [
   { sectionId: "listening", scoringKind: "item_raw_table" },
   { sectionId: "reading", scoringKind: "item_raw_table" },
@@ -491,13 +543,8 @@ export function validateExamBlueprint(blueprint: ExamBlueprintV1): string[] {
   const bpRangeValid = isValidScoreRange(blueprint.scoreRange);
   if (!bpRangeValid) missing.push("scoreRange");
   const bpStepValid = Number.isFinite(blueprint.scoreStep) && blueprint.scoreStep > 0;
-  if (!bpStepValid) {
+  if (!bpStepValid || (bpRangeValid && !isAlignedScoreGrid(blueprint.scoreRange, blueprint.scoreStep))) {
     missing.push("scoreStep");
-  } else if (bpRangeValid) {
-    const gridSteps = (blueprint.scoreRange[1] - blueprint.scoreRange[0]) / blueprint.scoreStep;
-    if (!Number.isFinite(gridSteps) || gridSteps > MAX_SCORE_GRID_STEPS) {
-      missing.push("scoreStep");
-    }
   }
   if (blueprint.skillIds.length === 0) missing.push("skillIds");
   if (blueprint.sections.length === 0) missing.push("sections");
@@ -565,13 +612,12 @@ export function validateExamBlueprint(blueprint: ExamBlueprintV1): string[] {
     }
     const secRangeValid = isValidScoreRange(section.scoreRange);
     if (!secRangeValid) missing.push(`sections.${section.sectionId}.scoreRange`);
-    if (!Number.isFinite(section.scoreStep) || section.scoreStep <= 0) {
+    if (
+      !Number.isFinite(section.scoreStep) ||
+      section.scoreStep <= 0 ||
+      (secRangeValid && !isAlignedScoreGrid(section.scoreRange, section.scoreStep))
+    ) {
       missing.push(`sections.${section.sectionId}.scoreStep`);
-    } else if (secRangeValid) {
-      const secGridSteps = (section.scoreRange[1] - section.scoreRange[0]) / section.scoreStep;
-      if (!Number.isFinite(secGridSteps) || secGridSteps > MAX_SCORE_GRID_STEPS) {
-        missing.push(`sections.${section.sectionId}.scoreStep`);
-      }
     }
     if (!Number.isFinite(section.weight) || section.weight < 0) missing.push(`sections.${section.sectionId}.weight`);
     if (section.parts.length === 0) missing.push(`sections.${section.sectionId}.parts`);

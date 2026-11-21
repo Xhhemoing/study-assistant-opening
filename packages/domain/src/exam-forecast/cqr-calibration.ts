@@ -500,8 +500,10 @@ function computeIntervalFromCalibrations(
       : 0.5 * clampedLow + 0.5 * clampedHigh;
   const safeLow = clampedLow <= clampedHigh ? clampedLow : safeMid;
   const safeHigh = clampedLow <= clampedHigh ? clampedHigh : safeMid;
-  const low = snapToScoreGrid(safeLow, blueprint.scoreRange, blueprint.scoreStep, "floor");
-  const high = snapToScoreGrid(safeHigh, blueprint.scoreRange, blueprint.scoreStep, "ceil");
+  let low = snapToScoreGrid(safeLow, blueprint.scoreRange, blueprint.scoreStep, "floor");
+  let high = snapToScoreGrid(safeHigh, blueprint.scoreRange, blueprint.scoreStep, "ceil");
+  if (low > safeLow) low = minScore;
+  if (high < safeHigh) high = maxScore;
   const rawWidth = Math.max(0, high - low);
   const width = rawWidth === 0 ? 0 : Number(rawWidth.toPrecision(12));
   const pointEstimate = snapToScoreGrid(

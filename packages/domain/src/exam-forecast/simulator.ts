@@ -744,6 +744,97 @@ function referenceSkillMasteryAt(
   return clamp(retrievability(belief, observedAtMs) * sigmoid(belief.abilityMean), 0, 1);
 }
 
+function computeRubricWeightedSectionScore(
+  parts: readonly { readonly weight: number }[],
+  scores: readonly number[],
+): number {
+  if (parts.length === 0 || scores.length !== parts.length) return 0;
+  const first = scores[0]!;
+  if (scores.every((s) => s === first)) return first;
+  for (const denom of [1, 2, 3, 4, 5, 6, 8, 10, 12, 20, 100]) {
+    let allRational = true;
+    let intWeightSum = 0;
+    let intWeightedSum = 0;
+    for (let i = 0; i < parts.length; i++) {
+      const scaled = parts[i]!.weight * denom;
+      const rounded = Math.round(scaled);
+      if (Math.abs(scaled - rounded) > 1e-12 * denom) {
+        allRational = false;
+        break;
+      }
+      intWeightSum += rounded;
+      intWeightedSum += rounded * scores[i]!;
+    }
+    if (allRational && intWeightSum > 0) {
+      return intWeightedSum / intWeightSum;
+    }
+  }
+  let weightedSum = 0;
+  let weightSum = 0;
+  for (let i = 0; i < parts.length; i++) {
+    const w = parts[i]!.weight;
+    weightedSum += w * scores[i]!;
+    weightSum += w;
+  }
+  return weightSum > 0 ? weightedSum / weightSum : 0;
+}
+
+function extractWritingTaskPair(
+  section: ExamSectionBlueprint,
+  partScores: readonly number[],
+): readonly [number, number] | undefined {
+  if (section.sectionId !== "writing" || section.parts.length !== 2 || partScores.length !== 2) {
+    return undefined;
+  }
+  const w0 = section.parts[0]!.weight;
+  const w1 = section.parts[1]!.weight;
+  if (Math.abs(w0 * 3 - 1) <= 1e-12 && Math.abs(w1 * 3 - 2) <= 1e-12) {
+    return [partScores[0]!, partScores[1]!];
+  }
+  if (Math.abs(w0 * 3 - 2) <= 1e-12 && Math.abs(w1 * 3 - 1) <= 1e-12) {
+    return [partScores[1]!, partScores[0]!];
+  }
+  return undefined;
+}
+
+function computeIeltsOverallExact(input: {
+  readonly listening: number;
+  readonly reading: number;
+  readonly writingBand: number;
+  readonly writingTasks?: readonly [number, number];
+  readonly speaking: number;
+}): number {
+  if (input.writingTasks) {
+    const l = clamp(input.listening, 0, 9);
+    const r = clamp(input.reading, 0, 9);
+    const w1 = clamp(input.writingTasks[0], 0, 9);
+    const w2 = clamp(input.writingTasks[1], 0, 9);
+    const s = clamp(input.speaking, 0, 9);
+    return roundHalfUp05((3 * l + 3 * r + w1 + 2 * w2 + 3 * s) / 12);
+  }
+  return computeIeltsOverallBand({
+    listening: input.listening,
+    reading: input.reading,
+    writing: input.writingBand,
+    speaking: input.speaking,
+  });
+}
+
+function computeIeltsOverallFromSumLR(input: {
+  readonly sumLR: number;
+  readonly writingBand: number;
+  readonly writingTasks?: readonly [number, number];
+  readonly speaking: number;
+}): number {
+  const clampedS = clamp(input.speaking, 0, 9);
+  if (input.writingTasks) {
+    const w1 = clamp(input.writingTasks[0], 0, 9);
+    const w2 = clamp(input.writingTasks[1], 0, 9);
+    return roundHalfUp05((3 * input.sumLR + w1 + 2 * w2 + 3 * clampedS) / 12);
+  }
+  return roundHalfUp05((input.sumLR + clamp(input.writingBand, 0, 9) + clampedS) / 4);
+}
+
 function simulateRubricSectionDraw(input: {
   readonly section: ExamSectionBlueprint;
   readonly beliefs: SkillBeliefMap;
@@ -767,12 +858,13 @@ function simulateRubricSectionDraw(input: {
   readonly censoredCount: number;
   readonly timedScore: number;
   readonly untimedScore: number;
+  readonly timedWritingTasks?: readonly [number, number];
+  readonly untimedWritingTasks?: readonly [number, number];
 } {
   let rubricCursor = input.rubricCursorStart;
   let usedSec = input.initialClockUsedSec;
-  let partWeightedSum = 0;
-  let untimedWeightedSum = 0;
-  let weightSum = 0;
+  const untimedPartScores: number[] = [];
+  const timedPartScores: number[] = [];
   let anyCensored = false;
   let censoredCount = 0;
   const censoredItems: SimulatedItemOutcome[] = [];
@@ -873,9 +965,8 @@ function simulateRubricSectionDraw(input: {
         }
       }
     }
-    untimedWeightedSum += part.weight * untimedPartScore;
-    partWeightedSum += part.weight * timedPartScore;
-    weightSum += part.weight;
+    untimedPartScores.push(untimedPartScore);
+    timedPartScores.push(timedPartScore);
   }
 
   return {
@@ -887,12 +978,26 @@ function simulateRubricSectionDraw(input: {
     partTotalCounts,
     totalItems: input.section.parts.length,
     censoredCount,
-    timedScore: weightSum > 0 ? partWeightedSum / weightSum : 0,
-    untimedScore: weightSum > 0 ? untimedWeightedSum / weightSum : 0,
+    timedScore: computeRubricWeightedSectionScore(input.section.parts, timedPartScores),
+    untimedScore: computeRubricWeightedSectionScore(input.section.parts, untimedPartScores),
+    timedWritingTasks: extractWritingTaskPair(input.section, timedPartScores),
+    untimedWritingTasks: extractWritingTaskPair(input.section, untimedPartScores),
   };
 }
 
 type PmfOpsBudget = { remaining: number };
+
+function addToPmfWithCap(pmf: Map<number, number>, key: number, prob: number): void {
+  const existing = pmf.get(key);
+  if (existing === undefined) {
+    if (pmf.size >= MAX_PMF_CONVOLUTION_STATES) {
+      throw new RangeError(`Untimed PMF convolution states exceed limit (${MAX_PMF_CONVOLUTION_STATES})`);
+    }
+    pmf.set(key, prob);
+  } else {
+    pmf.set(key, existing + prob);
+  }
+}
 
 function convolveWeightedSections(
   initialDist: ReadonlyMap<number, number>,
@@ -912,16 +1017,7 @@ function convolveWeightedSections(
         throw new RangeError(`Untimed PMF convolution ops exceed limit (${MAX_PMF_CONVOLUTION_OPS})`);
       }
       for (const [s, p] of dist.entries()) {
-        const combined = s + section.weight * val;
-        const existing = next.get(combined);
-        if (existing === undefined) {
-          if (next.size >= MAX_PMF_CONVOLUTION_STATES) {
-            throw new RangeError(`Untimed PMF convolution states exceed limit (${MAX_PMF_CONVOLUTION_STATES})`);
-          }
-          next.set(combined, p);
-        } else {
-          next.set(combined, existing + p);
-        }
+        addToPmfWithCap(next, s + section.weight * val, p);
       }
     } else {
       opsBudget.remaining -= dist.size * secDist.size;
@@ -930,16 +1026,7 @@ function convolveWeightedSections(
       }
       for (const [s0, p0] of dist.entries()) {
         for (const [s1, p1] of secDist.entries()) {
-          const combined = s0 + section.weight * s1;
-          const existing = next.get(combined);
-          if (existing === undefined) {
-            if (next.size >= MAX_PMF_CONVOLUTION_STATES) {
-              throw new RangeError(`Untimed PMF convolution states exceed limit (${MAX_PMF_CONVOLUTION_STATES})`);
-            }
-            next.set(combined, p0 * p1);
-          } else {
-            next.set(combined, existing + p0 * p1);
-          }
+          addToPmfWithCap(next, s0 + section.weight * s1, p0 * p1);
         }
       }
     }
@@ -958,7 +1045,7 @@ function addDistToUntimedOverallPmf(
   for (const [score, p] of dist.entries()) {
     const snapped = snapToScoreGrid(score, blueprint.scoreRange, blueprint.scoreStep, "nearest");
     const prob = p * drawWeight;
-    targetPmf.set(snapped, (targetPmf.get(snapped) ?? 0) + prob);
+    addToPmfWithCap(targetPmf, snapped, prob);
     expectedAdd += snapped * prob;
   }
   return expectedAdd;
@@ -1124,20 +1211,13 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
           const prob = pL * pR;
           if (prob <= 0) continue;
           const sumLR = clampedL + clamp(bR, 0, 9);
-          const existing = lrMap.get(sumLR);
-          if (existing === undefined) {
-            if (lrMap.size >= MAX_PMF_CONVOLUTION_STATES) {
-              throw new RangeError(`Untimed PMF convolution states exceed limit (${MAX_PMF_CONVOLUTION_STATES})`);
-            }
-            lrMap.set(sumLR, prob);
-          } else {
-            lrMap.set(sumLR, existing + prob);
-          }
+          addToPmfWithCap(lrMap, sumLR, prob);
         }
       }
       hoistedIeltsLRDist = lrMap;
 
       const staticRubricScores = new Map<string, number>();
+      let staticWritingTasks: readonly [number, number] | undefined;
       for (const sec of blueprint.sections) {
         if (sec.scoringKind !== "rubric_band") continue;
         const [minB, maxB] = sec.scoreRange;
@@ -1145,8 +1225,7 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
         const bandScale = maxB - baseOffset;
         const speakingShift = sec.sectionId === "speaking" ? rubricSummary.speakingFluencyShift : 0;
         const sectionAnchor = rubricSummary.sectionAnchors.get(sec.sectionId);
-        let partWeightedSum = 0;
-        let weightSum = 0;
+        const detPartScores: number[] = [];
         let allPartsDet = sec.parts.length > 0;
         for (const part of sec.parts) {
           const partAnchor = rubricSummary.partAnchors.get(sec.sectionId)?.get(part.partId) ?? sectionAnchor;
@@ -1177,11 +1256,13 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
             minB,
             maxB,
           );
-          partWeightedSum += part.weight * untimedPartScore;
-          weightSum += part.weight;
+          detPartScores.push(untimedPartScore);
         }
         if (allPartsDet) {
-          staticRubricScores.set(sec.sectionId, weightSum > 0 ? partWeightedSum / weightSum : 0);
+          staticRubricScores.set(sec.sectionId, computeRubricWeightedSectionScore(sec.parts, detPartScores));
+          if (sec.sectionId === "writing") {
+            staticWritingTasks = extractWritingTaskPair(sec, detPartScores);
+          }
         }
       }
       const staticW = staticRubricScores.get("writing");
@@ -1191,12 +1272,15 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
         if (pmfOpsBudget.remaining < 0) {
           throw new RangeError(`Untimed PMF convolution ops exceed limit (${MAX_PMF_CONVOLUTION_OPS})`);
         }
-        const clampedW = clamp(staticW, 0, 9);
-        const clampedS = clamp(staticS, 0, 9);
         for (const [sumLR, probLR] of hoistedIeltsLRDist.entries()) {
           if (probLR <= 0) continue;
-          const overall = roundHalfUp05((sumLR + clampedW + clampedS) / 4);
-          untimedOverallPmf.set(overall, (untimedOverallPmf.get(overall) ?? 0) + probLR);
+          const overall = computeIeltsOverallFromSumLR({
+            sumLR,
+            writingBand: staticW,
+            writingTasks: staticWritingTasks,
+            speaking: staticS,
+          });
+          addToPmfWithCap(untimedOverallPmf, overall, probLR);
           untimedExpectedTotal += overall * probLR;
         }
         allIeltsUntimedPmfHoisted = true;
@@ -1274,6 +1358,8 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
     const matchedUntimedSectionBand: Record<string, number> = Object.create(null) as Record<string, number>;
     const untimedSectionDistributions = new Map<string, ReadonlyMap<number, number>>();
     const untimedContinuousSections = new Map<string, number>();
+    let timedWritingTasks: readonly [number, number] | undefined;
+    let untimedWritingTasks: readonly [number, number] | undefined;
     const drawCensoredItems: SimulatedItemOutcome[] = [];
 
     for (const section of blueprint.sections) {
@@ -1323,6 +1409,8 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
         defineRecordEntry(timedSectionBand, section.sectionId, res.timedScore);
         defineRecordEntry(matchedUntimedSectionBand, section.sectionId, res.untimedScore);
         untimedContinuousSections.set(section.sectionId, res.untimedScore);
+        if (res.timedWritingTasks) timedWritingTasks = res.timedWritingTasks;
+        if (res.untimedWritingTasks) untimedWritingTasks = res.untimedWritingTasks;
         sectionTimedTotal.set(section.sectionId, (sectionTimedTotal.get(section.sectionId) ?? 0) + res.timedScore);
         sectionUntimedTotal.set(section.sectionId, (sectionUntimedTotal.get(section.sectionId) ?? 0) + res.untimedScore);
       }
@@ -1337,7 +1425,9 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
       const reading = readRequiredOwnScore(timedSectionBand, "reading");
       const writing = readRequiredOwnScore(timedSectionBand, "writing");
       const speaking = readRequiredOwnScore(timedSectionBand, "speaking");
-      timedScores.push(computeIeltsOverallBand({ listening, reading, writing, speaking }));
+      timedScores.push(
+        computeIeltsOverallExact({ listening, reading, writingBand: writing, writingTasks: timedWritingTasks, speaking }),
+      );
 
       const uL = readRequiredOwnScore(matchedUntimedSectionBand, "listening");
       const uR = readRequiredOwnScore(matchedUntimedSectionBand, "reading");
@@ -1346,7 +1436,15 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
       if (uW === undefined || uS === undefined || !Number.isFinite(uW) || !Number.isFinite(uS)) {
         throw new RangeError("Missing continuous IELTS rubric section score");
       }
-      untimedScores.push(computeIeltsOverallBand({ listening: uL, reading: uR, writing: uW, speaking: uS }));
+      untimedScores.push(
+        computeIeltsOverallExact({
+          listening: uL,
+          reading: uR,
+          writingBand: uW,
+          writingTasks: untimedWritingTasks,
+          speaking: uS,
+        }),
+      );
 
       if (!allIeltsUntimedPmfHoisted) {
         if (hoistedIeltsLRDist) {
@@ -1354,13 +1452,16 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
           if (pmfOpsBudget.remaining < 0) {
             throw new RangeError(`Untimed PMF convolution ops exceed limit (${MAX_PMF_CONVOLUTION_OPS})`);
           }
-          const clampedW = clamp(uW, 0, 9);
-          const clampedS = clamp(uS, 0, 9);
           for (const [sumLR, probLR] of hoistedIeltsLRDist.entries()) {
             const prob = probLR * drawWeight;
             if (prob <= 0) continue;
-            const overall = roundHalfUp05((sumLR + clampedW + clampedS) / 4);
-            untimedOverallPmf.set(overall, (untimedOverallPmf.get(overall) ?? 0) + prob);
+            const overall = computeIeltsOverallFromSumLR({
+              sumLR,
+              writingBand: uW,
+              writingTasks: untimedWritingTasks,
+              speaking: uS,
+            });
+            addToPmfWithCap(untimedOverallPmf, overall, prob);
             untimedExpectedTotal += overall * prob;
           }
         } else {
@@ -1377,8 +1478,14 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
             for (const [bR, pR] of rDist.entries()) {
               const prob = pL * pR * drawWeight;
               if (prob <= 0) continue;
-              const overall = computeIeltsOverallBand({ listening: bL, reading: bR, writing: uW, speaking: uS });
-              untimedOverallPmf.set(overall, (untimedOverallPmf.get(overall) ?? 0) + prob);
+              const overall = computeIeltsOverallExact({
+                listening: bL,
+                reading: bR,
+                writingBand: uW,
+                writingTasks: untimedWritingTasks,
+                speaking: uS,
+              });
+              addToPmfWithCap(untimedOverallPmf, overall, prob);
               untimedExpectedTotal += overall * prob;
             }
           }

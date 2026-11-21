@@ -3054,7 +3054,7 @@ describe("CRN marginal ROI sandbox & UnifiedDecisionSnapshotV1", () => {
     };
     const tiedBeliefs = makeZeroVarBeliefs(100);
     const tiedEvidence: ExamEvidenceRecord[] = IELTS_ACADEMIC_V1_BLUEPRINT.sections.map((sec) => ({
-      recordId: `tied-ev-${sec.sectionId}`,
+      evidenceId: `tied-ev-${sec.sectionId}`,
       learnerId: "learner-tied",
       sectionId: sec.sectionId,
       evidenceKind: "rubric_assessment",
@@ -3073,7 +3073,7 @@ describe("CRN marginal ROI sandbox & UnifiedDecisionSnapshotV1", () => {
       const halfSectionUniforms = Array.from({ length: 40 }, (_, i) => (i < targetRaw ? 0.1 : 0.9));
       const bandBeliefs = makeZeroVarBeliefs(0);
       const bandEvidence: ExamEvidenceRecord[] = IELTS_ACADEMIC_V1_BLUEPRINT.sections.map((sec) => ({
-        recordId: `tied-ev-${band}-${sec.sectionId}`,
+        evidenceId: `tied-ev-${band}-${sec.sectionId}`,
         learnerId: "learner-tied",
         sectionId: sec.sectionId,
         evidenceKind: "rubric_assessment",
@@ -3311,5 +3311,261 @@ describe("CRN marginal ROI sandbox & UnifiedDecisionSnapshotV1", () => {
     expect(driftSim.untimedExpectedScore).toBeLessThanOrEqual(0.6);
     expect(driftSim.timedExpectedScore).toBeLessThanOrEqual(0.6);
     expect(driftSim.q10).toBeLessThanOrEqual(driftSim.q90);
+  });
+
+  it("enforces all Round-11 4 P1 & 1 P2 invariants", () => {
+    // [R11 P1-1] Exact IELTS Writing (W1 + 2 * W2) / 3 and overall (3L + 3R + W1 + 2*W2 + 3S) / 12 arithmetic across timed/untimed/joint-pass.
+    const exactWritingBeliefs: Record<string, SkillBeliefV1> = {};
+    for (const skillId of IELTS_ACADEMIC_SKILL_IDS) {
+      exactWritingBeliefs[skillId] = createSkillBelief({
+        workspaceId: "ws-1",
+        learnerId: "learner-exact-w",
+        courseId: "ielts-academic",
+        confirmedSkillVersion: 1,
+        abilityMean: 0,
+        abilityVariance: 0,
+        logStability: Math.log(14),
+        implicitLogCredit: 0,
+        lastDirectRecallAtMs: DAY_MS,
+      });
+    }
+    const zeroCovIeltsBp = {
+      ...IELTS_ACADEMIC_V1_BLUEPRINT,
+      thetaCovariance: IELTS_ACADEMIC_SKILL_IDS.map(() => IELTS_ACADEMIC_SKILL_IDS.map(() => 0)),
+    };
+    const exactAll7Evidence: ExamEvidenceRecord[] = IELTS_ACADEMIC_V1_BLUEPRINT.sections.map((sec) => ({
+      evidenceId: `exact7-${sec.sectionId}`,
+      learnerId: "learner-exact-w",
+      sectionId: sec.sectionId,
+      evidenceKind: "rubric_assessment",
+      observedAtMs: DAY_MS,
+      countsTowardMastery: true,
+      assisted: false,
+      exposed: false,
+      rubricScore: { kind: "exact", score: 7 },
+    }));
+    const raw31Uniforms = Array.from({ length: 40 }, (_, i) => (i < 31 ? 0.1 : 0.9));
+    const exactAll7Draw = {
+      zLatent: Array.from({ length: IELTS_ACADEMIC_SKILL_IDS.length }, () => 0),
+      nuSpeed: 0,
+      itemUniforms: [...raw31Uniforms, ...raw31Uniforms],
+      itemTimeNormals: Array.from({ length: 80 }, () => 0),
+      rubricScoreNormals: Array.from({ length: 5 }, () => 0),
+      rubricTimeNormals: Array.from({ length: 5 }, () => 0),
+    };
+    const exactAll7Sim = simulateExamPaper({
+      blueprint: zeroCovIeltsBp,
+      learnerId: "learner-exact-w",
+      beliefs: exactWritingBeliefs,
+      evidence: exactAll7Evidence,
+      examAtMs: DAY_MS,
+      precomputedDraws: [exactAll7Draw],
+    });
+    expect(exactAll7Sim.drawSectionScores[0]!["writing"]).toBe(7);
+    expect(exactAll7Sim.timedScores[0]).toBe(7);
+    const exactCal = makeCalibrationRecords(5).map((r) => ({ ...r, recordedAtMs: DAY_MS - 10 }));
+    const exactJoint7 = calibrateJointPassTargets({
+      simulation: exactAll7Sim,
+      blueprint: zeroCovIeltsBp,
+      calibrationRecords: exactCal,
+      targets: [{ targetOverall: 7, targetMinSection: 7 }],
+    });
+    expect(exactJoint7[0]!.rawProbability).toBe(1);
+
+    // [0, 0, W1=7/W2=7, 0] -> (0 + 0 + 7 + 14 + 0) / 12 = 1.75 -> rounds up to 2.0 (never 1.5).
+    const writingOnlyEvidence: ExamEvidenceRecord[] = IELTS_ACADEMIC_V1_BLUEPRINT.sections.map((sec) => ({
+      evidenceId: `w-only-${sec.sectionId}`,
+      learnerId: "learner-exact-w",
+      sectionId: sec.sectionId,
+      evidenceKind: "rubric_assessment",
+      observedAtMs: DAY_MS,
+      countsTowardMastery: true,
+      assisted: false,
+      exposed: false,
+      rubricScore: { kind: "exact", score: sec.sectionId === "writing" ? 7 : 0 },
+    }));
+    const noGuessItemBp = {
+      ...zeroCovIeltsBp,
+      sections: zeroCovIeltsBp.sections.map((sec) =>
+        sec.scoringKind === "item_raw_table" && sec.items
+          ? {
+              ...sec,
+              items: sec.items.map((item) => ({ ...item, guess: 0, lapse: 0 })),
+              rawToBandTable: sec.rawToBandTable!.map((row) => ({ ...row, score: 0 })),
+            }
+          : sec,
+      ),
+    };
+    const writingOnlyDraw = {
+      ...exactAll7Draw,
+      itemUniforms: Array.from({ length: 80 }, () => 0.99),
+    };
+    const writingOnlySim = simulateExamPaper({
+      blueprint: noGuessItemBp,
+      learnerId: "learner-exact-w",
+      beliefs: exactWritingBeliefs,
+      evidence: writingOnlyEvidence,
+      examAtMs: DAY_MS,
+      precomputedDraws: [writingOnlyDraw],
+    });
+    expect(writingOnlySim.drawSectionScores[0]!["writing"]).toBe(7);
+    expect(writingOnlySim.timedScores[0]).toBe(2.0);
+    expect(writingOnlySim.untimedScores[0]).toBe(2.0);
+    expect(writingOnlySim.untimedExpectedScore).toBe(2.0);
+
+    // [R11 P1-2] Reject unaligned blueprint/section scoreStep in validateExamBlueprint and prevent inward CQR outward snapping.
+    const unalignedBp = createSharedFullPaperBlueprint({
+      blueprintId: "unaligned-step-3",
+      title: "Unaligned Step 3",
+      totalTimeLimitMinutes: 30,
+      totalPoints: 10,
+      skillIds: ["s"],
+      sections: [
+        {
+          sectionId: "sec",
+          label: "Sec",
+          scoringKind: "rubric_band",
+          timeLimitMinutes: null,
+          weight: 1,
+          scoreRange: [0, 10],
+          scoreStep: 3,
+          parts: [{ partId: "p", label: "P", weight: 1, skillIds: ["s"], timeModel: { mu: 4, speedLoading: 0, skillLoading: {}, sigma: 0.01 } }],
+        },
+      ],
+    });
+    const unalignedWithStep3 = { ...unalignedBp, scoreStep: 3 };
+    const unalignedErrors = validateExamBlueprint(unalignedWithStep3);
+    expect(unalignedErrors).toContain("scoreStep");
+    expect(unalignedErrors).toContain("sections.sec.scoreStep");
+    const alignedDecimalBp = createSharedFullPaperBlueprint({
+      blueprintId: "aligned-01",
+      title: "Aligned 0.1",
+      totalTimeLimitMinutes: 30,
+      totalPoints: 1,
+      skillIds: ["s"],
+      sections: [
+        {
+          sectionId: "sec",
+          label: "Sec",
+          scoringKind: "rubric_band",
+          timeLimitMinutes: null,
+          weight: 1,
+          scoreRange: [0, 0.3],
+          scoreStep: 0.1,
+          parts: [{ partId: "p", label: "P", weight: 1, skillIds: ["s"], timeModel: { mu: 4, speedLoading: 0, skillLoading: {}, sigma: 0.01 } }],
+        },
+      ],
+    });
+    expect(validateExamBlueprint({ ...alignedDecimalBp, scoreRange: [0, 0.3], scoreStep: 0.1 })).toEqual([]);
+    expect(snapToScoreGrid(10, [0, 10], 3, "ceil")).toBe(10);
+    expect(snapToScoreGrid(8, [0, 10], 3, "floor")).toBe(6);
+
+    // [R11 P1-3] Speaking rubric parts execute shared 11-14m timeModel and right-censor when Speaking budget is tightened to 60s.
+    const speakingSection = IELTS_ACADEMIC_V1_BLUEPRINT.sections.find((s) => s.sectionId === "speaking")!;
+    expect(speakingSection.parts.every((p) => p.timeModel !== undefined)).toBe(true);
+    const tightSpeakingBp = {
+      ...IELTS_ACADEMIC_V1_BLUEPRINT,
+      sections: IELTS_ACADEMIC_V1_BLUEPRINT.sections.map((sec) =>
+        sec.sectionId === "speaking" ? { ...sec, timeLimitMinutes: 1 } : sec,
+      ),
+    };
+    const tightSpeakingSim = simulateExamPaper({
+      blueprint: tightSpeakingBp,
+      learnerId: "learner-exact-w",
+      beliefs: exactWritingBeliefs,
+      evidence: exactAll7Evidence,
+      examAtMs: DAY_MS,
+      numDraws: 16,
+      seed: 13,
+    });
+    expect(tightSpeakingSim.rightCensoringRateBySection["speaking"]).toBeGreaterThan(0);
+    expect(tightSpeakingSim.sectionSummaries["speaking"]!.timedMeanScore).toBeLessThan(
+      tightSpeakingSim.sectionSummaries["speaking"]!.untimedMeanScore,
+    );
+
+    // [R11 P1-4] Cap targetPmf across multi-draw accumulation when continuous rubric draws exceed MAX_PMF_CONVOLUTION_STATES.
+    const crossDrawExplosionBp = {
+      ...createSharedFullPaperBlueprint({
+        blueprintId: "cross-draw-target-pmf-cap",
+        title: "Cross-Draw Target PMF Cap",
+        totalTimeLimitMinutes: 120,
+        totalPoints: 1_000,
+        skillIds: ["kDet", "kRubric"],
+        thetaCovariance: [
+          [0, 0],
+          [0, 1],
+        ],
+        sections: [
+          {
+            sectionId: "det-item",
+            label: "Det Item",
+            scoringKind: "item_raw_table",
+            timeLimitMinutes: null,
+            weight: 25,
+            scoreRange: [0, 20],
+            scoreStep: 1,
+            parts: [{ partId: "p1", label: "P1", weight: 1, skillIds: ["kDet"] }],
+            items: [
+              {
+                itemId: "q1",
+                sectionId: "det-item",
+                partId: "p1",
+                skillIds: ["kDet"],
+                guess: 0.1,
+                lapse: 0.05,
+                points: 1,
+                timeModel: { mu: 3, speedLoading: 0, skillLoading: {}, sigma: 0.01 },
+              },
+              {
+                itemId: "q2",
+                sectionId: "det-item",
+                partId: "p1",
+                skillIds: ["kDet"],
+                guess: 0.1,
+                lapse: 0.05,
+                points: 1,
+                timeModel: { mu: 3, speedLoading: 0, skillLoading: {}, sigma: 0.01 },
+              },
+            ],
+            rawToBandTable: [
+              { rawMin: 0, rawMax: 0, score: 0 },
+              { rawMin: 1, rawMax: 1, score: 10 },
+              { rawMin: 2, rawMax: 2, score: 20 },
+            ],
+          },
+          {
+            sectionId: "stoch-rubric",
+            label: "Stoch Rubric",
+            scoringKind: "rubric_band",
+            timeLimitMinutes: null,
+            weight: 1,
+            scoreRange: [0, 500],
+            scoreStep: 0.001,
+            parts: [
+              {
+                partId: "p2",
+                label: "P2",
+                weight: 1,
+                skillIds: ["kRubric"],
+                timeModel: { mu: 4, speedLoading: 0, skillLoading: {}, sigma: 0.01 },
+              },
+            ],
+          },
+        ],
+      }),
+      scoreRange: [0, 1_000] as const,
+      scoreStep: 0.001,
+    };
+    expect(() =>
+      simulateExamPaper({
+        blueprint: crossDrawExplosionBp,
+        learnerId: "l-cross-pmf",
+        beliefs: {},
+        evidence: [],
+        examAtMs: DAY_MS,
+        numDraws: 26_000,
+        seed: 14,
+      }),
+    ).toThrow(RangeError);
   });
 });
