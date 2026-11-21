@@ -682,5 +682,52 @@ describe("revalidateRemedyClinic privacy_epoch and source-revocation read guard"
     expect(corruptedRes.status).toBe("stale_source_revoked");
     expect(corruptedRes.revocationSummary.reason).toBe("invalid_privacy_epoch");
     expect(corruptedRes.validatedPrivacyEpoch).toBeGreaterThanOrEqual(7);
+
+    // Runtime null/non-object entries in ruleSourceRefs, probe.sourceRefs, and activeSourcesMap fail closed cleanly.
+    const nullRef = null as unknown as { sourceId: string; sourceVersion: string };
+    const nullRuleSourceRes = generateRemedyClinic({
+      learnerId: "learner-1",
+      courseId: "course-alg-1",
+      ruleId: RULE_ID,
+      ruleSourceRefs: [nullRef],
+      currentPrivacyEpoch: 5,
+      activeSourcesMap: allSources,
+      verifyRuleViolation: verifyNegativeSignFlip,
+      attempts,
+      candidateProbes: [probe2, makeProbe({ probeId: "probe-ok-extra", input: { a: -5, b: 20 } })],
+    });
+    expect(nullRuleSourceRes.status).toBe("invalid_input");
+    expect(nullRuleSourceRes.clinic).toBeNull();
+
+    const nullProbeSourceRes = generateRemedyClinic({
+      learnerId: "learner-1",
+      courseId: "course-alg-1",
+      ruleId: RULE_ID,
+      currentPrivacyEpoch: 5,
+      activeSourcesMap: allSources,
+      verifyRuleViolation: verifyNegativeSignFlip,
+      attempts,
+      candidateProbes: [
+        { ...makeProbe({ probeId: "probe-null-ref", input: { a: -6, b: 24 } }), sourceRefs: [nullRef] },
+        probe2,
+      ],
+    });
+    expect(nullProbeSourceRes.status).toBe("insufficient_distinguishable_probes");
+    expect(nullProbeSourceRes.clinic).toBeNull();
+    expect(nullProbeSourceRes.rejectedProbes).toHaveLength(1);
+    expect(nullProbeSourceRes.rejectedProbes[0]!.reason).toBe("revoked_probe_source");
+
+    const nullActiveEntry = revalidateRemedyClinic(
+      clinic,
+      {
+        ...allSources,
+        "src-ch-1": null as unknown as string,
+      },
+      6,
+    );
+    expect(nullActiveEntry.status).toBe("stale_source_revoked");
+    expect(nullActiveEntry.evidenceCases).toEqual([]);
+    expect(nullActiveEntry.steps[0].selectedCases).toEqual([]);
+    expect(nullActiveEntry.steps[2].probes).toEqual([]);
   });
 });

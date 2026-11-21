@@ -95,6 +95,7 @@ function lookupActiveSource(
   activeSourcesMap: ActiveSourcesMap,
   sourceId: string,
 ): ActiveSourceEntry | undefined {
+  if (!activeSourcesMap || typeof activeSourcesMap !== "object") return undefined;
   if (activeSourcesMap instanceof Map) {
     return activeSourcesMap.get(sourceId);
   }
@@ -106,12 +107,15 @@ export function isSourceRefActive(
   ref: RemedySourceRef,
   activeSourcesMap: ActiveSourcesMap,
 ): boolean {
+  if (!ref || typeof ref !== "object") return false;
+  if (!activeSourcesMap || typeof activeSourcesMap !== "object") return false;
   if (!isNonBlankText(ref.sourceId) || !isValidSourceVersion(ref.sourceVersion)) return false;
   const entry = lookupActiveSource(activeSourcesMap, ref.sourceId);
   if (entry === undefined) return false;
   if (typeof entry === "string" || typeof entry === "number") {
     return entry === ref.sourceVersion;
   }
+  if (!entry || typeof entry !== "object") return false;
   if (entry.revoked === true || entry.active === false) return false;
   return entry.version === ref.sourceVersion;
 }

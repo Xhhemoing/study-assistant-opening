@@ -229,13 +229,18 @@ function buildRestatementStep(ruleId: string, ruleTitle?: string): InvariantRule
   };
 }
 
-function freezeSourceRefs(sourceRefs: readonly RemedySourceRef[]): readonly RemedySourceRef[] {
-  return Object.freeze(
-    sourceRefs.map((ref) => Object.freeze({ sourceId: ref.sourceId, sourceVersion: ref.sourceVersion })),
-  );
+function freezeSourceRefs(sourceRefs: readonly RemedySourceRef[]): readonly RemedySourceRef[] | null {
+  if (!Array.isArray(sourceRefs)) return null;
+  const frozen: RemedySourceRef[] = [];
+  for (const ref of sourceRefs) {
+    if (!ref || typeof ref !== "object") return null;
+    frozen.push(Object.freeze({ sourceId: ref.sourceId, sourceVersion: ref.sourceVersion }));
+  }
+  return Object.freeze(frozen);
 }
 
 function cloneVerifiedProbe(probe: VerifiedClinicTransferProbe): VerifiedClinicTransferProbe {
+  const frozenRefs = probe.sourceRefs !== undefined ? freezeSourceRefs(probe.sourceRefs) : undefined;
   return Object.freeze({
     probeId: probe.probeId,
     requirementKey: probe.requirementKey,
@@ -243,7 +248,7 @@ function cloneVerifiedProbe(probe: VerifiedClinicTransferProbe): VerifiedClinicT
     ...(probe.targetMisconceptionId !== undefined
       ? { targetMisconceptionId: probe.targetMisconceptionId }
       : {}),
-    ...(probe.sourceRefs !== undefined ? { sourceRefs: freezeSourceRefs(probe.sourceRefs) } : {}),
+    ...(frozenRefs ? { sourceRefs: frozenRefs } : {}),
     competingModelIds: Object.freeze([...probe.competingModelIds]),
     report: probe.report,
   });
@@ -396,19 +401,23 @@ export function generateRemedyClinic<TInput = unknown, TObservable = unknown>(
     const frozenTargetMisconceptionId =
       typeof probe?.targetMisconceptionId === "string" ? probe.targetMisconceptionId : undefined;
     const hasExplicitSourceRefs = probe?.sourceRefs !== undefined;
-    const frozenSourceRefs = hasExplicitSourceRefs
-      ? Array.isArray(probe.sourceRefs)
-        ? freezeSourceRefs(probe.sourceRefs)
-        : Object.freeze([])
-      : undefined;
 
     if (!isNonBlankText(frozenPrompt)) {
       rejectedProbes.push({ probeId: frozenProbeId, reason: "invalid_probe_prompt", report: null });
       continue;
     }
-    if (frozenSourceRefs !== undefined && !areSourceRefsActive(frozenSourceRefs, input.activeSourcesMap)) {
-      rejectedProbes.push({ probeId: frozenProbeId, reason: "revoked_probe_source", report: null });
-      continue;
+    let frozenSourceRefs: readonly RemedySourceRef[] | undefined;
+    if (hasExplicitSourceRefs) {
+      if (!areSourceRefsActive(probe.sourceRefs, input.activeSourcesMap)) {
+        rejectedProbes.push({ probeId: frozenProbeId, reason: "revoked_probe_source", report: null });
+        continue;
+      }
+      const frozen = freezeSourceRefs(probe.sourceRefs);
+      if (!frozen || !areSourceRefsActive(frozen, input.activeSourcesMap)) {
+        rejectedProbes.push({ probeId: frozenProbeId, reason: "revoked_probe_source", report: null });
+        continue;
+      }
+      frozenSourceRefs = frozen;
     }
 
     let frozenInput: TInput;
@@ -480,6 +489,8 @@ export function generateRemedyClinic<TInput = unknown, TObservable = unknown>(
     ? input.clinicId.trim()
     : `clinic:${input.courseId}:${input.ruleId}:e${input.currentPrivacyEpoch}`;
 
+  const frozenRuleSourceRefs =
+    input.ruleSourceRefs !== undefined ? freezeSourceRefs(input.ruleSourceRefs) : undefined;
   const clinic: RemedyClinicSessionV1 = {
     schemaVersion: 1,
     clinicId,
@@ -487,7 +498,7 @@ export function generateRemedyClinic<TInput = unknown, TObservable = unknown>(
     learnerId: input.learnerId,
     courseId: input.courseId,
     ruleId: input.ruleId,
-    ...(input.ruleSourceRefs !== undefined ? { ruleSourceRefs: freezeSourceRefs(input.ruleSourceRefs) } : {}),
+    ...(frozenRuleSourceRefs ? { ruleSourceRefs: frozenRuleSourceRefs } : {}),
     totalMinutes: REMEDY_CLINIC_TOTAL_MINUTES,
     createdPrivacyEpoch: input.currentPrivacyEpoch,
     validatedPrivacyEpoch: input.currentPrivacyEpoch,

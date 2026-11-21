@@ -329,8 +329,7 @@ function validateAndSortAnchors(
     const prev = sorted[i - 1];
     const curr = sorted[i];
     if (!prev || !curr) return null;
-    if (curr.band > prev.band && !(curr.thetaAnchor > prev.thetaAnchor)) return null;
-    if (curr.band === prev.band && curr.thetaAnchor !== prev.thetaAnchor) return null;
+    if (!(curr.band > prev.band) || !(curr.thetaAnchor > prev.thetaAnchor)) return null;
   }
   return sorted;
 }

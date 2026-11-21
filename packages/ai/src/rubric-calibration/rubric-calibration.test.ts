@@ -262,6 +262,34 @@ describe("AnchorCalibratedRubricV1 pairwise swap, monotonicity & mastery gates",
     expect(reversedResult.countsTowardMastery).toBe(false);
     expect(reversedResult.inconsistencyReasons).toEqual(["invalid_anchor_definitions"]);
 
+    // Equal (band, thetaAnchor) anchors must fail closed in either input order.
+    const anchorA = { ...baseAnchors[2]!, anchorId: "tied-anchor-a", band: 6.0 as const, thetaAnchor: -1.0 };
+    const anchorB = { ...baseAnchors[2]!, anchorId: "tied-anchor-b", band: 6.0 as const, thetaAnchor: -1.0 };
+    for (const tiedPair of [
+      [baseAnchors[0]!, anchorA, anchorB, baseAnchors[5]!],
+      [baseAnchors[0]!, anchorB, anchorA, baseAnchors[5]!],
+    ]) {
+      const tiedResult = evaluateAnchorCalibratedRubric({
+        submissionId: "bad-anchors-tied-band",
+        dimension: "task_response",
+        text: SENTINEL_ANCHOR_ESSAYS[2]!.text,
+        mode: "formal_assessment",
+        assisted: false,
+        anchors: tiedPair,
+        comparisons: [
+          { anchorId: baseAnchors[0]!.anchorId, forwardChoice: "A", reverseChoice: "B" },
+          { anchorId: anchorA.anchorId, forwardChoice: "A", reverseChoice: "B" },
+          { anchorId: anchorB.anchorId, forwardChoice: "B", reverseChoice: "A" },
+          { anchorId: baseAnchors[5]!.anchorId, forwardChoice: "B", reverseChoice: "A" },
+        ],
+      });
+      expect(tiedResult.status).toBe("interval_only");
+      expect(tiedResult.band).toBeNull();
+      expect(tiedResult.bandRange).toEqual([0, 9]);
+      expect(tiedResult.countsTowardMastery).toBe(false);
+      expect(tiedResult.inconsistencyReasons).toEqual(["invalid_anchor_definitions"]);
+    }
+
     // Repeated single cliche phrase across essay must trigger template padding.
     const repeatedSingleCliche =
       "Every coin has two sides when cities evaluate transit subsidies. " +
