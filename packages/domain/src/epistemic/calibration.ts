@@ -39,15 +39,20 @@ export type ItemCalibrationResult = {
 };
 
 const TAG_DIFFICULTY = { easy: -1, medium: 0, hard: 1 } as const;
+const MAP_SEARCH_RADIUS = 10;
+const MAP_GRID_STEP = 0.25;
+const MAP_TIE_TOLERANCE = 1e-12;
 const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value));
 
-function posteriorObjective(difficulty: number, input: {
+type MapInput = {
   priorDifficulty: number;
   priorStandardDeviation: number;
   attempts: readonly CalibrationAttempt[];
   guessing: number;
   lapse: number;
-}): number {
+};
+
+function posteriorObjective(difficulty: number, input: MapInput): number {
   const prior = -0.5 * ((difficulty - input.priorDifficulty) / input.priorStandardDeviation) ** 2;
   const item: SkillItemModel = { itemId: "calibration", a: 1, b: difficulty, g: input.guessing, l: input.lapse };
   const likelihood = input.attempts.reduce((sum, attempt) => {
@@ -58,38 +63,27 @@ function posteriorObjective(difficulty: number, input: {
   return prior + likelihood;
 }
 
-function estimateMap(input: {
-  priorDifficulty: number;
-  priorStandardDeviation: number;
-  attempts: readonly CalibrationAttempt[];
-  guessing: number;
-  lapse: number;
-}): number {
-  const minimum = input.priorDifficulty - 10;
-  const maximum = input.priorDifficulty + 10;
-  let mode = input.priorDifficulty;
-  let objective = posteriorObjective(mode, input);
+function refineMapCandidate(
+  start: number,
+  startObjective: number,
+  minimum: number,
+  maximum: number,
+  input: MapInput,
+): { mode: number; objective: number } {
+  let mode = start;
+  let objective = startObjective;
 
-  // Guessing and lapse asymptotes can make the posterior non-concave.
-  for (let candidate = minimum; candidate <= maximum; candidate++) {
-    const value = posteriorObjective(candidate, input);
-    if (value > objective) {
-      mode = candidate;
-      objective = value;
-    }
-  }
-
-  for (let iteration = 0; iteration < 32; iteration++) {
+  for (let iteration = 0; iteration < 64; iteration++) {
     const h = 1e-4;
     const fp = posteriorObjective(mode + h, input);
     const fm = posteriorObjective(mode - h, input);
     const gradient = (fp - fm) / (2 * h);
     const hessian = (fp - 2 * objective + fm) / (h * h);
-    if (!Number.isFinite(gradient) || Math.abs(gradient) < 1e-8) break;
+    if (!Number.isFinite(gradient) || Math.abs(gradient) < 1e-10) break;
 
     let step = clamp(Number.isFinite(hessian) && hessian < -1e-10 ? -gradient / hessian : gradient, -2, 2);
     let improved = false;
-    while (Math.abs(step) >= 1e-8) {
+    while (Math.abs(step) >= 1e-10) {
       const candidate = clamp(mode + step, minimum, maximum);
       if (candidate === mode) break;
       const value = posteriorObjective(candidate, input);
@@ -104,7 +98,60 @@ function estimateMap(input: {
     if (!improved) break;
   }
 
-  return mode;
+  return { mode, objective };
+}
+
+function estimateMap(input: MapInput): number {
+  const minimum = input.priorDifficulty - MAP_SEARCH_RADIUS;
+  const maximum = input.priorDifficulty + MAP_SEARCH_RADIUS;
+  const steps = Math.round((maximum - minimum) / MAP_GRID_STEP);
+  const grid = Array.from({ length: steps + 1 }, (_, index) => {
+    const mode = index === steps ? maximum : minimum + index * MAP_GRID_STEP;
+    return { mode, objective: posteriorObjective(mode, input) };
+  });
+
+  // Guessing and lapse asymptotes can make the posterior multimodal; refine
+  // every grid local maximum plus endpoints and the prior mean.
+  const seeds: Array<{ mode: number; objective: number }> = [];
+  for (let index = 0; index < grid.length; index++) {
+    const current = grid[index]!;
+    const isEndpoint = index === 0 || index === grid.length - 1;
+    const isPrior = current.mode === input.priorDifficulty;
+    const isLocalMax = !isEndpoint
+      && current.objective >= grid[index - 1]!.objective
+      && current.objective >= grid[index + 1]!.objective;
+    if (isEndpoint || isPrior || isLocalMax) {
+      seeds.push(current);
+    }
+  }
+  if (!seeds.some(seed => seed.mode === input.priorDifficulty)) {
+    seeds.push({ mode: input.priorDifficulty, objective: posteriorObjective(input.priorDifficulty, input) });
+  }
+
+  const refined = seeds.map(seed => refineMapCandidate(seed.mode, seed.objective, minimum, maximum, input));
+  const bestObjective = refined.reduce((max, candidate) => Math.max(max, candidate.objective), -Infinity);
+  const tieTolerance = MAP_TIE_TOLERANCE * Math.max(1, Math.abs(bestObjective));
+
+  let best: { mode: number; objective: number } | undefined;
+  for (const candidate of refined) {
+    if (candidate.objective < bestObjective - tieTolerance) continue;
+    if (!best) {
+      best = candidate;
+      continue;
+    }
+    const candidateDistance = Math.abs(candidate.mode - input.priorDifficulty);
+    const bestDistance = Math.abs(best.mode - input.priorDifficulty);
+    if (
+      candidateDistance < bestDistance - MAP_TIE_TOLERANCE
+      || (Math.abs(candidateDistance - bestDistance) <= MAP_TIE_TOLERANCE
+        && (candidate.objective > best.objective
+          || (candidate.objective === best.objective && candidate.mode < best.mode)))
+    ) {
+      best = candidate;
+    }
+  }
+
+  return best?.mode ?? input.priorDifficulty;
 }
 
 function firstIndependentAttempts(attempts: readonly CalibrationAttempt[], publisherItemRevisionId: string): CalibrationAttempt[] {

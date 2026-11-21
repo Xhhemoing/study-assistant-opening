@@ -13,6 +13,7 @@ import {
   propagateFireCredit,
 } from "./fire-credit";
 import {
+  conditionalSuccessProbability,
   logSumExp,
   posteriorMisconceptionMass,
   updateBeliefWithEvidence,
@@ -185,15 +186,58 @@ describe("power-weighted evidence", () => {
     expect(result.belief.lastDirectRecallAtMs).toBeNull();
   });
 
+  it("treats explicit retrievalProbability as the prior entering the Bayesian posterior update", () => {
+    const plainItem = { ...item, misconceptions: [] };
+    const omitted = updateBeliefWithEvidence({ belief, item: plainItem, atMs: DAY_MS, observation: { outcome: false } });
+    const explicit = updateBeliefWithEvidence({
+      belief,
+      item: plainItem,
+      atMs: DAY_MS,
+      observation: { outcome: false, retrievalProbability: 0.5 },
+    });
+    expect(explicit.directRetrievability).toBeCloseTo(0.5, 12);
+    expect(explicit.retrievedProbability).toBeCloseTo(0.4, 12);
+    expect(explicit.retrievedProbability).toBe(omitted.retrievedProbability);
+    expect(explicit.belief.logStability).toBeCloseTo(belief.logStability - 0.15, 12);
+    expect(explicit.belief).toEqual(omitted.belief);
+    expect(explicit.posteriorMass).toEqual(omitted.posteriorMass);
+
+    const omittedSuccess = updateBeliefWithEvidence({
+      belief,
+      item: plainItem,
+      atMs: DAY_MS,
+      observation: { outcome: true, isFreshFamily: true },
+    });
+    const explicitSuccess = updateBeliefWithEvidence({
+      belief,
+      item: plainItem,
+      atMs: DAY_MS,
+      observation: { outcome: true, isFreshFamily: true, retrievalProbability: omittedSuccess.directRetrievability },
+    });
+    expect(explicitSuccess.retrievedProbability).toBeCloseTo(2 / 3, 12);
+    expect(explicitSuccess.retrievedProbability).toBe(omittedSuccess.retrievedProbability);
+    expect(explicitSuccess.belief).toEqual(omittedSuccess.belief);
+  });
+
   it("decays a lapse at certainty, preserves stability on success and weights fresh recall credit", () => {
     const current = baseBelief({ implicitLogCredit: 0.1 });
     const update = (observation: EvidenceObservation) => updateBeliefWithEvidence({ belief: current, item, atMs: DAY_MS, observation });
     expect(update({ outcome: false, retrievalProbability: 1 }).belief.logStability).toBeLessThan(current.logStability);
     expect(update({ outcome: true, channel: "distractor", retrievalProbability: 0 }).belief.logStability).toBe(current.logStability);
     const fresh = update({ outcome: true, isFreshFamily: true, retrievalProbability: 0.8, powerWeight: 0.5 });
-    expect(fresh.retrievedProbability).toBe(0.8);
+    expect(fresh.retrievedProbability).toBeGreaterThan(0.8);
+    expect(fresh.retrievedProbability).toBeLessThan(1);
     expect(fresh.belief.lastDirectRecallAtMs).toBe(DAY_MS);
-    expect(fresh.belief.logStability).toBeCloseTo(current.logStability + 0.1 * (1 - fresh.directRetrievability), 12);
+    expect(fresh.belief.logStability).toBeCloseTo(
+      current.logStability + 0.25 * 0.5 * fresh.retrievedProbability * (1 - fresh.directRetrievability),
+      12,
+    );
+    const certainFresh = update({ outcome: true, isFreshFamily: true, retrievalProbability: 1, powerWeight: 0.5 });
+    expect(certainFresh.retrievedProbability).toBe(1);
+    expect(certainFresh.belief.logStability).toBeCloseTo(
+      current.logStability + 0.125 * (1 - certainFresh.directRetrievability),
+      12,
+    );
   });
 });
 
@@ -290,6 +334,30 @@ describe("initial tier two MAP snapshot", () => {
     expect(result.parameterSnapshot).toMatchObject({ publisherItemRevisionId: "rev-2", discrimination: 1, guessing: 0, lapse: 0.05 });
     expect(result.servingDifficulty).toBeGreaterThan(5);
     expect(result.parameterSnapshot?.difficulty).toBe(result.servingDifficulty);
+  });
+
+  it("finds the global MAP mode on a bimodal two-choice tier two posterior", () => {
+    const bimodalAttempts = attempts.map(attempt => ({ ...attempt, theta: -6.13, outcome: "correct" as const }));
+    const result = calibrateItemRevision({
+      publisherItemRevisionId: "rev-2",
+      difficultyTag: "medium",
+      choiceCount: 2,
+      attempts: bimodalAttempts,
+      parameterSnapshotVersion: "20",
+    });
+    const logPosterior = (difficulty: number): number => {
+      const prior = -0.5 * (difficulty - result.priorDifficulty) ** 2;
+      const probability = conditionalSuccessProbability(
+        { itemId: "rev-2", a: 1, b: difficulty, g: 0.5, l: 0.05 },
+        -6.13,
+      );
+      return prior + bimodalAttempts.length * Math.log(probability);
+    };
+    expect(result.tier).toBe(2);
+    expect(result.servingDifficulty).toBeCloseTo(-6.67, 2);
+    expect(result.parameterSnapshot?.difficulty).toBe(result.servingDifficulty);
+    expect(logPosterior(result.servingDifficulty)).toBeGreaterThan(-34.4);
+    expect(logPosterior(result.servingDifficulty)).toBeGreaterThan(logPosterior(-0.108396));
   });
 });
 

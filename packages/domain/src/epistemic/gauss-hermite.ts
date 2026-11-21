@@ -99,8 +99,7 @@ export function updateBeliefWithEvidence(input: {
   const direct = retrievability(belief, input.atMs, { familyPrior: input.familyPrior });
   const effective = effectiveRetrievability(belief, input.atMs, { familyPrior: input.familyPrior });
   const override = observation.retrievalProbability;
-  const retrievalOverride = override !== undefined && Number.isFinite(override) ? clamp(override, 0, 1) : undefined;
-  const retrieval = retrievalOverride ?? direct;
+  const retrieval = override !== undefined && Number.isFinite(override) ? clamp(override, 0, 1) : direct;
   const channel = observation.channel ?? "unassisted";
   const power = observation.powerWeight ?? 1;
   const weight = Number.isFinite(power) ? clamp(power, 0, 1) : 0;
@@ -155,7 +154,7 @@ export function updateBeliefWithEvidence(input: {
   const abilityVariance = terms.reduce((sum, term, i) => sum + responsibilities[i]! * (term.theta - abilityMean) ** 2, 0);
   const otherMass = statePosterior[0]!;
   const misconceptionMass = states.slice(1).map((state, index) => [state.id!, statePosterior[index + 1]!] as const);
-  const rho = retrievalOverride ?? clamp(posteriorRetrieval, 0, 1);
+  const rho = clamp(posteriorRetrieval, 0, 1);
 
   let logStability = belief.logStability;
   let implicitLogCredit = belief.implicitLogCredit;
