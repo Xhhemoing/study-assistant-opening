@@ -2,16 +2,21 @@ import { describe, expect, it } from "vitest";
 import {
   CartridgePiiViolationError,
   GepaForbiddenSurfaceError,
+  GepaInvalidPatchPayloadError,
   HoldoutFirewallError,
   InvalidRubricAnchorPairError,
   assertDisjointSplitInvariants,
   assertNoHoldoutLeakage,
+  assertNoRawPiiInText,
   buildGepaReflectionContext,
+  canonicalizeIdentifier,
   clusterErrorTrajectories,
   computeCandidateMetrics,
   createDisjointTrajectorySplit,
   evaluateParetoFrontierAndPromotion,
+  exactClopperPearsonLowerBound,
   matchesRubricRule,
+  proposeGepaReflectivePatches,
   runGepaOptimizationRound,
   validateAndApplyGepaPatch,
   validateRubricAnchorPair,
@@ -575,5 +580,345 @@ describe("Exact (C, -L, T7) Pareto frontier, Hard Pre-Pareto Veto, and Promotion
       }
     }
     expect(round.pareto.promotedCandidateIds.length).toBeGreaterThan(0);
+  });
+
+  it("scans normalizedAstEdit, missingPremise, and GEPA patch strings for raw PII (P1-2)", () => {
+    expect(() =>
+      clusterErrorTrajectories([
+        makeTrajectory({
+          trajectoryId: "t_pii_ast",
+          normalizedAstEdit: "DIV_VAR(x)|NOTE(student@school.edu)",
+        }),
+      ]),
+    ).toThrow(CartridgePiiViolationError);
+
+    expect(() =>
+      clusterErrorTrajectories([
+        makeTrajectory({
+          trajectoryId: "t_pii_premise",
+          missingPremise: "call +1-555-234-5678 before dividing",
+        }),
+      ]),
+    ).toThrow(CartridgePiiViolationError);
+
+    expect(() =>
+      assertNoRawPiiInText("https://example.edu/submit?token=secret123", "test_url"),
+    ).toThrow(CartridgePiiViolationError);
+
+    const base = makeBasePolicy();
+    expect(() =>
+      validateAndApplyGepaPatch(base, {
+        surface: "approvedTemplateSlots",
+        summary: "Safe summary",
+        payload: { cue: "Email teacher@college.edu or visit https://api.example.com?api_key=abc123" },
+      }),
+    ).toThrow(CartridgePiiViolationError);
+
+    expect(() =>
+      validateAndApplyGepaPatch(base, {
+        surface: "hintLadder",
+        summary: "Contains raw student_id=987654",
+        payload: [
+          {
+            stage: 1,
+            conceptId: "alg.zero_product_property",
+            cueTemplate: "Check x != 0 before dividing",
+            revealsPremiseCheck: true,
+          },
+        ],
+      }),
+    ).toThrow(CartridgePiiViolationError);
+
+    // Reflection context with smuggled PII in missingPremise is rejected before generating patches.
+    expect(() =>
+      proposeGepaReflectivePatches({
+        policyId: base.policyId,
+        policyVersion: base.version,
+        trainTrajectoryCount: 5,
+        devTrajectoryCount: 0,
+        actionableClusters: [
+          {
+            clusterId: "cluster_pii",
+            conceptId: "alg.zero_product_property",
+            firstErrorRuleId: "err.divide_by_variable",
+            centroidAstEdit: "DIV_VAR(X)",
+            missingPremise: "contact alice@university.edu",
+            supportCount: 5,
+            uniqueLearnerCount: 5,
+            itemFamilyIds: ["fam_1"],
+          },
+        ],
+        observationOnlyClusterCount: 0,
+        allowedSurfaces: ["moveRules", "hintLadder", "rubricAnchors", "approvedTemplateSlots"],
+        currentPolicy: base,
+      }),
+    ).toThrow(CartridgePiiViolationError);
+  });
+
+  it("canonicalizes NFKC + trimmed itemFamilyId and learnerPseudoId across split, firewall, clustering, and Pareto (P1-3)", () => {
+    expect(canonicalizeIdentifier("  \uFF46\uFF41\uFF4D-\uFF11  ", "itemFamilyId")).toBe("fam-1");
+    expect(() => canonicalizeIdentifier("   \t\n  ", "itemFamilyId")).toThrow(
+      CartridgePiiViolationError,
+    );
+
+    const records: ErrorTrajectoryRecord[] = [];
+    for (let comp = 0; comp < 4; comp += 1) {
+      for (let i = 0; i < 6; i += 1) {
+        records.push(
+          makeTrajectory({
+            trajectoryId: `norm_c${comp}_t${i}`,
+            learnerPseudoId:
+              i % 2 === 0 ? `  pseudo_norm_c${comp}_u${i}  ` : `pseudo_norm_c${comp}_u${i}`,
+            itemFamilyId:
+              i % 2 === 0 ? ` \uFF46\uFF41\uFF4D_c${comp} ` : `fam_c${comp}`,
+          }),
+        );
+      }
+    }
+
+    const split = createDisjointTrajectorySplit(records, { seed: 2026 });
+    expect(() => assertDisjointSplitInvariants(split)).not.toThrow();
+
+    const leaked = split.holdout[0]!;
+    // Whitespace-padded and fullwidth-Unicode variant of holdout itemFamilyId MUST be blocked!
+    const fullwidthFamily = `  ${leaked.itemFamilyId.replace(/f/g, "\uFF46")}  `;
+    expect(() =>
+      assertNoHoldoutLeakage(
+        [
+          makeTrajectory({
+            trajectoryId: "padded_bypass_attempt",
+            learnerPseudoId: "pseudo_brand_new_999",
+            itemFamilyId: fullwidthFamily,
+          }),
+        ],
+        split.holdoutFirewall,
+      ),
+    ).toThrow(HoldoutFirewallError);
+
+    // Whitespace-padded variant of holdout learnerPseudoId MUST also be blocked!
+    expect(() =>
+      assertNoHoldoutLeakage(
+        [
+          makeTrajectory({
+            trajectoryId: "padded_learner_bypass",
+            learnerPseudoId: `  ${leaked.learnerPseudoId}  `,
+            itemFamilyId: "fam_completely_unrelated",
+          }),
+        ],
+        split.holdoutFirewall,
+      ),
+    ).toThrow(HoldoutFirewallError);
+
+    // Padded learnerPseudoId variants collapse to 1 unique student cluster in computeCandidateMetrics!
+    const paddedMetrics = computeCandidateMetrics("cand_padded_clusters", [
+      makeTrajectory({ trajectoryId: "p1", learnerPseudoId: "pseudo_same_u1" }),
+      makeTrajectory({ trajectoryId: "p2", learnerPseudoId: "  pseudo_same_u1  " }),
+      makeTrajectory({ trajectoryId: "p3", learnerPseudoId: "\uFF50seudo_same_u1" }),
+    ]);
+    expect(paddedMetrics.t7.status).toBe("mature");
+    if (paddedMetrics.t7.status === "mature") {
+      expect(paddedMetrics.t7.learnerClusterCount).toBe(1);
+    }
+  });
+
+  it("enforces strict runtime payload schema & blocks prototype pollution in validateAndApplyGepaPatch (P1-4)", () => {
+    const base = makeBasePolicy();
+
+    // Array where plain object is required for approvedTemplateSlots
+    expect(() =>
+      validateAndApplyGepaPatch(base, {
+        surface: "approvedTemplateSlots",
+        summary: "Malformed array payload",
+        payload: ["not", "a", "record"],
+      }),
+    ).toThrow(GepaInvalidPatchPayloadError);
+
+    // Non-string slot value
+    expect(() =>
+      validateAndApplyGepaPatch(base, {
+        surface: "approvedTemplateSlots",
+        summary: "Malformed slot value",
+        payload: { validKey: 12345 },
+      }),
+    ).toThrow(GepaInvalidPatchPayloadError);
+
+    // Prototype pollution key (__proto__, constructor, prototype) via JSON.parse
+    const protoPayload = JSON.parse('{"__proto__": "polluted", "safe": "ok"}') as unknown;
+    expect(() =>
+      validateAndApplyGepaPatch(base, {
+        surface: "approvedTemplateSlots",
+        summary: "Proto pollution attempt",
+        payload: protoPayload,
+      }),
+    ).toThrow(GepaInvalidPatchPayloadError);
+
+    expect(() =>
+      validateAndApplyGepaPatch(base, {
+        surface: "approvedTemplateSlots",
+        summary: "Constructor key attempt",
+        payload: { constructor: "bad" },
+      }),
+    ).toThrow(GepaInvalidPatchPayloadError);
+
+    // Non-array payload for moveRules / hintLadder / rubricAnchors
+    expect(() =>
+      validateAndApplyGepaPatch(base, {
+        surface: "moveRules",
+        summary: "Malformed moveRules",
+        payload: null,
+      }),
+    ).toThrow(GepaInvalidPatchPayloadError);
+
+    expect(() =>
+      validateAndApplyGepaPatch(base, {
+        surface: "hintLadder",
+        summary: "Malformed hint step",
+        payload: [{ stage: -1, conceptId: "", cueTemplate: "x", revealsPremiseCheck: "yes" }],
+      }),
+    ).toThrow(GepaInvalidPatchPayloadError);
+
+    expect(() =>
+      validateAndApplyGepaPatch(base, {
+        surface: "rubricAnchors",
+        summary: "Malformed rubric anchors",
+        payload: [{ ruleId: "r1" }],
+      }),
+    ).toThrow(GepaInvalidPatchPayloadError);
+  });
+
+  it("fails closed on NaN, negative, zero-turn, and inconsistent leakage telemetry before Pareto ranking (P1-5)", () => {
+    const safeBaseline = buildMatureCohort("cand_safe_ref", {
+      learnerCount: 25,
+      repairedCount: 22,
+      t7PassedCount: 24,
+    });
+
+    // NaN leakage counts via trajectories
+    const nanFromTraj = computeCandidateMetrics("cand_nan_traj", [
+      makeTrajectory({
+        trajectoryId: "nan_1",
+        totalReleasedTurns: Number.NaN,
+        leakedReleasedTurns: 0,
+      }),
+    ]);
+
+    // Zero released turns (must NOT silently report rate=0 and pass veto!)
+    const zeroTurns = computeCandidateMetrics("cand_zero_turns", [
+      makeTrajectory({
+        trajectoryId: "zero_1",
+        totalReleasedTurns: 0,
+        leakedReleasedTurns: 0,
+      }),
+    ]);
+
+    // Negative / inconsistent counts constructed directly on metrics
+    const inconsistentDirect: CartridgeCandidateMetrics = {
+      ...safeBaseline,
+      candidateId: "cand_inconsistent_direct",
+      l: {
+        rate: 0,
+        leakedReleasedTurns: 3,
+        totalReleasedTurns: 2,
+        severeLeakCount: 0,
+        guardBlockedCount: 0,
+      },
+    };
+
+    const nanDirect: CartridgeCandidateMetrics = {
+      ...safeBaseline,
+      candidateId: "cand_nan_direct",
+      l: {
+        rate: Number.NaN,
+        leakedReleasedTurns: 0,
+        totalReleasedTurns: 10,
+        severeLeakCount: Number.NaN,
+        guardBlockedCount: 0,
+      },
+    };
+
+    const negativeDirect: CartridgeCandidateMetrics = {
+      ...safeBaseline,
+      candidateId: "cand_negative_direct",
+      l: {
+        rate: -0.1,
+        leakedReleasedTurns: -1,
+        totalReleasedTurns: 10,
+        severeLeakCount: 0,
+        guardBlockedCount: 0,
+      },
+    };
+
+    const evalRes = evaluateParetoFrontierAndPromotion(
+      [safeBaseline, nanFromTraj, zeroTurns, inconsistentDirect, nanDirect, negativeDirect],
+      {
+        baseline: { cRate: 0.8, t7Rate: 0.72 },
+        maxAllowedLeakageRate: 0,
+      },
+    );
+
+    expect(evalRes.vetoedCandidateIds).toEqual([
+      "cand_nan_traj",
+      "cand_zero_turns",
+      "cand_inconsistent_direct",
+      "cand_nan_direct",
+      "cand_negative_direct",
+    ]);
+    expect(evalRes.promotedCandidateIds).toEqual(["cand_safe_ref"]);
+  });
+
+  it("caps cluster-level 95% LCB with exact Clopper-Pearson bound so 5/5 learners yields <= 0.55 and cannot pass a 0.80 gate (P1-6)", () => {
+    // Exact 0.05 ** (1/5) = 0.54928027165...
+    expect(exactClopperPearsonLowerBound(5, 5, 0.05)).toBeCloseTo(Math.pow(0.05, 1 / 5), 10);
+    expect(exactClopperPearsonLowerBound(5, 5, 0.05)).toBeLessThanOrEqual(0.55);
+
+    // 5 learners, 5/5 pass (100% empirical mean, zero sample variance)
+    const fiveOfFive = buildMatureCohort("cand_5_of_5", {
+      learnerCount: 5,
+      repairedCount: 5,
+      t7PassedCount: 5,
+    });
+    expect(fiveOfFive.t7.status).toBe("mature");
+    if (fiveOfFive.t7.status === "mature") {
+      expect(fiveOfFive.t7.rate).toBe(1);
+      expect(fiveOfFive.t7.learnerClusterCount).toBe(5);
+      expect(fiveOfFive.t7.effectiveClusterSampleSize).toBe(5);
+      expect(fiveOfFive.t7.clopperPearsonLowerBound).toBeCloseTo(Math.pow(0.05, 1 / 5), 6);
+      expect(fiveOfFive.t7.learnerClusterLowerBound).toBeLessThanOrEqual(0.55);
+    }
+
+    // Even if those same 5 learners complete 10 items each (50/50 passes), n_eff stays bounded by 5!
+    const repeatedFiveLearners: ErrorTrajectoryRecord[] = [];
+    for (let u = 0; u < 5; u += 1) {
+      for (let item = 0; item < 10; item += 1) {
+        repeatedFiveLearners.push(
+          makeTrajectory({
+            trajectoryId: `rep_u${u}_i${item}`,
+            learnerPseudoId: `pseudo_rep_u${u}`,
+            passedFreshFamilyTransfer: true,
+          }),
+        );
+      }
+    }
+    const repeatedMetrics = computeCandidateMetrics("cand_5_learners_50_items", repeatedFiveLearners);
+    expect(repeatedMetrics.t7.status).toBe("mature");
+    if (repeatedMetrics.t7.status === "mature") {
+      expect(repeatedMetrics.t7.learnerClusterCount).toBe(5);
+      expect(repeatedMetrics.t7.effectiveClusterSampleSize).toBe(5);
+      expect(repeatedMetrics.t7.learnerClusterLowerBound).toBeLessThanOrEqual(0.55);
+    }
+
+    // Neither 5/5 nor 50/50-on-5-learners may pass a 0.80 promotion floor (baseline 0.75 + minT7Gain 0.05).
+    const promoEval = evaluateParetoFrontierAndPromotion([fiveOfFive, repeatedMetrics], {
+      baseline: { cRate: 0.8, t7Rate: 0.75 },
+      minT7Gain: 0.05,
+      minClusterCount: 5,
+    });
+    expect(promoEval.promotedCandidateIds).toEqual([]);
+    expect(promoEval.shadowCandidateIds).toEqual(["cand_5_of_5", "cand_5_learners_50_items"]);
+    for (const r of promoEval.results) {
+      expect(r.promotionBlockers.some((b) => b.startsWith("t7_lcb_below_gain_threshold"))).toBe(
+        true,
+      );
+    }
   });
 });

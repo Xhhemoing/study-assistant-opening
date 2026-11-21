@@ -2,6 +2,7 @@ import {
   ALLOWED_GEPA_MUTATION_SURFACES,
   FORBIDDEN_GEPA_MUTATION_SURFACES,
   GepaForbiddenSurfaceError,
+  GepaInvalidPatchPayloadError,
   HoldoutFirewallError,
   InvalidRubricAnchorPairError,
   type CartridgeCandidateMetrics,
@@ -20,7 +21,9 @@ import {
   type ParetoEvaluationOptions,
 } from "./types";
 import {
-  assertPseudonymizedTrajectory,
+  assertNoRawPiiInValue,
+  canonicalizeIdentifier,
+  canonicalizeTrajectoryRecord,
   clusterErrorTrajectories,
   validateRubricAnchorPair,
 } from "./clustering";
@@ -30,6 +33,13 @@ const ALLOWED_SURFACE_SET: ReadonlySet<string> = new Set(ALLOWED_GEPA_MUTATION_S
 const FORBIDDEN_SURFACE_SET: ReadonlySet<string> = new Set(
   FORBIDDEN_GEPA_MUTATION_SURFACES.map((s) => s.toLowerCase()),
 );
+const PROTOTYPE_POLLUTION_KEYS: ReadonlySet<string> = new Set([
+  "__proto__",
+  "constructor",
+  "prototype",
+]);
+const MAX_SLOT_KEY_LENGTH = 256;
+const MAX_PATCH_STRING_LENGTH = 4096;
 
 function deterministicHash32(input: string): number {
   let h = 2166136261 >>> 0;
@@ -49,6 +59,201 @@ function sortedBySeedHash(values: readonly string[], seed: number, salt: string)
   });
 }
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+function checkPrototypePollutionKeys(
+  obj: Record<string, unknown>,
+  path: string,
+  issues: string[],
+): void {
+  for (const key of Object.getOwnPropertyNames(obj)) {
+    if (PROTOTYPE_POLLUTION_KEYS.has(key)) {
+      issues.push(`${path}:forbidden_prototype_key(${key})`);
+    }
+  }
+}
+
+function checkNonEmptyStringField(
+  obj: Record<string, unknown>,
+  key: string,
+  path: string,
+  issues: string[],
+  maxLength: number = MAX_PATCH_STRING_LENGTH,
+): void {
+  const val = obj[key];
+  if (typeof val !== "string" || val.trim().length === 0 || val.length > maxLength) {
+    issues.push(`${path}.${key}:must_be_nonempty_string(max=${maxLength})`);
+  }
+}
+
+function validateRubricAnchorExampleShape(
+  value: unknown,
+  path: string,
+  issues: string[],
+): void {
+  if (!isPlainObject(value)) {
+    issues.push(`${path}:must_be_plain_object`);
+    return;
+  }
+  checkPrototypePollutionKeys(value, path, issues);
+  checkNonEmptyStringField(value, "anchorId", path, issues);
+  if (value.label !== "positive" && value.label !== "negative") {
+    issues.push(`${path}.label:must_be_positive_or_negative`);
+  }
+  checkNonEmptyStringField(value, "conceptId", path, issues);
+  checkNonEmptyStringField(value, "firstErrorRuleId", path, issues);
+  checkNonEmptyStringField(value, "normalizedAstEdit", path, issues);
+  checkNonEmptyStringField(value, "expression", path, issues);
+  checkNonEmptyStringField(value, "rationale", path, issues);
+  if (
+    !Array.isArray(value.establishedPremises) ||
+    !value.establishedPremises.every(
+      (p) => typeof p === "string" && p.length <= MAX_PATCH_STRING_LENGTH,
+    )
+  ) {
+    issues.push(`${path}.establishedPremises:must_be_string_array`);
+  }
+}
+
+function validateSurfacePayloadSchema(surface: string, payload: unknown): void {
+  const issues: string[] = [];
+
+  switch (surface) {
+    case "moveRules": {
+      if (!Array.isArray(payload)) {
+        issues.push("moveRules.payload:must_be_array");
+        break;
+      }
+      payload.forEach((item, index) => {
+        const path = `moveRules[${index}]`;
+        if (!isPlainObject(item)) {
+          issues.push(`${path}:must_be_plain_object`);
+          return;
+        }
+        checkPrototypePollutionKeys(item, path, issues);
+        checkNonEmptyStringField(item, "id", path, issues);
+        checkNonEmptyStringField(item, "conceptId", path, issues);
+        checkNonEmptyStringField(item, "triggerRuleId", path, issues);
+        checkNonEmptyStringField(item, "missingPremise", path, issues);
+        checkNonEmptyStringField(item, "move", path, issues);
+        if (typeof item.priority !== "number" || !Number.isFinite(item.priority)) {
+          issues.push(`${path}.priority:must_be_finite_number`);
+        }
+      });
+      break;
+    }
+
+    case "hintLadder": {
+      if (!Array.isArray(payload)) {
+        issues.push("hintLadder.payload:must_be_array");
+        break;
+      }
+      payload.forEach((item, index) => {
+        const path = `hintLadder[${index}]`;
+        if (!isPlainObject(item)) {
+          issues.push(`${path}:must_be_plain_object`);
+          return;
+        }
+        checkPrototypePollutionKeys(item, path, issues);
+        if (
+          typeof item.stage !== "number" ||
+          !Number.isFinite(item.stage) ||
+          !Number.isInteger(item.stage) ||
+          item.stage < 0
+        ) {
+          issues.push(`${path}.stage:must_be_nonnegative_integer`);
+        }
+        checkNonEmptyStringField(item, "conceptId", path, issues);
+        checkNonEmptyStringField(item, "cueTemplate", path, issues);
+        if (typeof item.revealsPremiseCheck !== "boolean") {
+          issues.push(`${path}.revealsPremiseCheck:must_be_boolean`);
+        }
+      });
+      break;
+    }
+
+    case "rubricAnchors": {
+      if (!Array.isArray(payload)) {
+        issues.push("rubricAnchors.payload:must_be_array");
+        break;
+      }
+      payload.forEach((item, index) => {
+        const path = `rubricAnchors[${index}]`;
+        if (!isPlainObject(item)) {
+          issues.push(`${path}:must_be_plain_object`);
+          return;
+        }
+        checkPrototypePollutionKeys(item, path, issues);
+        checkNonEmptyStringField(item, "ruleId", path, issues);
+        checkNonEmptyStringField(item, "conceptId", path, issues);
+        checkNonEmptyStringField(item, "firstErrorRuleId", path, issues);
+        checkNonEmptyStringField(item, "requiredMissingPremise", path, issues);
+        if (
+          !Array.isArray(item.requiredAstTokens) ||
+          !item.requiredAstTokens.every(
+            (t) =>
+              typeof t === "string" &&
+              t.trim().length > 0 &&
+              t.length <= MAX_PATCH_STRING_LENGTH,
+          )
+        ) {
+          issues.push(`${path}.requiredAstTokens:must_be_nonempty_string_array`);
+        }
+        if (!Array.isArray(item.positiveAnchors)) {
+          issues.push(`${path}.positiveAnchors:must_be_array`);
+        } else {
+          item.positiveAnchors.forEach((anchor, aIdx) =>
+            validateRubricAnchorExampleShape(anchor, `${path}.positiveAnchors[${aIdx}]`, issues),
+          );
+        }
+        if (!Array.isArray(item.negativeAnchors)) {
+          issues.push(`${path}.negativeAnchors:must_be_array`);
+        } else {
+          item.negativeAnchors.forEach((anchor, aIdx) =>
+            validateRubricAnchorExampleShape(anchor, `${path}.negativeAnchors[${aIdx}]`, issues),
+          );
+        }
+      });
+      break;
+    }
+
+    case "approvedTemplateSlots": {
+      if (!isPlainObject(payload)) {
+        issues.push("approvedTemplateSlots.payload:must_be_plain_object");
+        break;
+      }
+      checkPrototypePollutionKeys(payload, "approvedTemplateSlots", issues);
+      for (const key of Object.getOwnPropertyNames(payload)) {
+        if (PROTOTYPE_POLLUTION_KEYS.has(key)) continue;
+        if (key.trim().length === 0 || key.length > MAX_SLOT_KEY_LENGTH) {
+          issues.push(
+            `approvedTemplateSlots[${JSON.stringify(key)}]:key_must_be_nonempty_string(max=${MAX_SLOT_KEY_LENGTH})`,
+          );
+        }
+        const val = payload[key];
+        if (typeof val !== "string" || val.length > MAX_PATCH_STRING_LENGTH) {
+          issues.push(
+            `approvedTemplateSlots.${key}:value_must_be_finite_string(max=${MAX_PATCH_STRING_LENGTH})`,
+          );
+        }
+      }
+      break;
+    }
+  }
+
+  if (issues.length > 0) {
+    throw new GepaInvalidPatchPayloadError(
+      `Invalid GEPA patch payload for surface "${surface}": ${issues.join("; ")}`,
+      surface,
+      issues,
+    );
+  }
+}
+
 export interface DisjointSplitOptions {
   readonly seed?: number;
   /** Target fraction of trajectories/entities reserved for holdout (default 0.25). */
@@ -58,33 +263,47 @@ export interface DisjointSplitOptions {
 }
 
 /**
- * Verifies strict (learnerPseudoId, itemFamilyId) disjointness between `holdout`
- * and `train`/`dev`. Throws `HoldoutFirewallError` on any violation.
+ * Verifies strict canonicalized (learnerPseudoId, itemFamilyId) disjointness between
+ * `holdout` and `train`/`dev`. Throws `HoldoutFirewallError` on any violation.
  */
 export function assertDisjointSplitInvariants(split: DisjointDatasetSplit): void {
-  const holdoutTrajIds = new Set(split.holdout.map((t) => t.trajectoryId));
-  const holdoutLearners = new Set(split.holdout.map((t) => t.learnerPseudoId));
-  const holdoutFamilies = new Set(split.holdout.map((t) => t.itemFamilyId));
+  const holdoutTrajIds = new Set(
+    split.holdout.map((t) => canonicalizeIdentifier(t.trajectoryId, "trajectoryId")),
+  );
+  const holdoutLearners = new Set(
+    split.holdout.map((t) =>
+      canonicalizeIdentifier(t.learnerPseudoId, "learnerPseudoId", t.trajectoryId),
+    ),
+  );
+  const holdoutFamilies = new Set(
+    split.holdout.map((t) =>
+      canonicalizeIdentifier(t.itemFamilyId, "itemFamilyId", t.trajectoryId),
+    ),
+  );
 
   const leakedTrajectoryIds: string[] = [];
   const leakedLearners = new Set<string>();
   const leakedFamilies = new Set<string>();
 
   for (const record of [...split.train, ...split.dev]) {
+    const trajId = canonicalizeIdentifier(record.trajectoryId, "trajectoryId");
+    const learnerId = canonicalizeIdentifier(record.learnerPseudoId, "learnerPseudoId", trajId);
+    const familyId = canonicalizeIdentifier(record.itemFamilyId, "itemFamilyId", trajId);
+
     let violated = false;
-    if (holdoutTrajIds.has(record.trajectoryId)) {
+    if (holdoutTrajIds.has(trajId)) {
       violated = true;
     }
-    if (holdoutLearners.has(record.learnerPseudoId)) {
-      leakedLearners.add(record.learnerPseudoId);
+    if (holdoutLearners.has(learnerId)) {
+      leakedLearners.add(learnerId);
       violated = true;
     }
-    if (holdoutFamilies.has(record.itemFamilyId)) {
-      leakedFamilies.add(record.itemFamilyId);
+    if (holdoutFamilies.has(familyId)) {
+      leakedFamilies.add(familyId);
       violated = true;
     }
     if (violated) {
-      leakedTrajectoryIds.push(record.trajectoryId);
+      leakedTrajectoryIds.push(trajId);
     }
   }
 
@@ -99,32 +318,21 @@ export function assertDisjointSplitInvariants(split: DisjointDatasetSplit): void
 }
 
 /**
- * Partitions trajectories into `train`, `dev`, and `holdout` such that NO
- * `learnerPseudoId` AND NO `itemFamilyId` appearing in `holdout` ever appears
- * in `train` or `dev`.
- *
- * Strategy:
- * 1) Decompose the `(learnerPseudoId <-> itemFamilyId)` bipartite graph into
- *    connected components. When >= 2 components exist, holdout takes whole
- *    components deterministically (zero quarantined trajectories).
- * 2) When all trajectories belong to a single dense connected component, select
- *    deterministic holdout subsets `(H_L, H_F)` so `holdout = H_L x H_F`,
- *    `train+dev = (L \ H_L) x (F \ H_F)`, and crossing records are isolated in
- *    `quarantinedCrossing` (excluded from both holdout and train/dev).
+ * Partitions trajectories into `train`, `dev`, and `holdout` after NFKC+trim
+ * canonicalization such that NO `learnerPseudoId` AND NO `itemFamilyId` appearing
+ * in `holdout` ever appears in `train` or `dev`.
  */
 export function createDisjointTrajectorySplit(
   trajectories: readonly ErrorTrajectoryRecord[],
   options: DisjointSplitOptions = {},
 ): DisjointDatasetSplit {
-  for (const t of trajectories) {
-    assertPseudonymizedTrajectory(t);
-  }
+  const canonical = trajectories.map((t) => canonicalizeTrajectoryRecord(t));
 
   const seed = options.seed ?? 20261121;
   const holdoutRatio = Math.min(0.5, Math.max(0.1, options.holdoutRatio ?? 0.25));
   const devRatio = Math.min(0.5, Math.max(0.1, options.devRatio ?? 0.25));
 
-  if (trajectories.length === 0) {
+  if (canonical.length === 0) {
     return {
       train: [],
       dev: [],
@@ -138,7 +346,7 @@ export function createDisjointTrajectorySplit(
     };
   }
 
-  // Union-Find over bipartite nodes ("L:<id>" and "F:<id>")
+  // Union-Find over canonical bipartite nodes ("L:<id>" and "F:<id>")
   const parent = new Map<string, string>();
   const find = (x: string): string => {
     let root = x;
@@ -164,12 +372,12 @@ export function createDisjointTrajectorySplit(
     }
   };
 
-  for (const t of trajectories) {
+  for (const t of canonical) {
     union(`L:${t.learnerPseudoId}`, `F:${t.itemFamilyId}`);
   }
 
   const componentsMap = new Map<string, ErrorTrajectoryRecord[]>();
-  for (const t of trajectories) {
+  for (const t of canonical) {
     const root = find(`L:${t.learnerPseudoId}`);
     const list = componentsMap.get(root);
     if (list) list.push(t);
@@ -183,7 +391,7 @@ export function createDisjointTrajectorySplit(
   let quarantinedCrossing: ErrorTrajectoryRecord[] = [];
 
   if (componentKeys.length >= 2) {
-    const targetHoldoutCount = Math.max(1, Math.round(trajectories.length * holdoutRatio));
+    const targetHoldoutCount = Math.max(1, Math.round(canonical.length * holdoutRatio));
     for (let i = 0; i < componentKeys.length; i += 1) {
       const key = componentKeys[i]!;
       const members = componentsMap.get(key) ?? [];
@@ -195,14 +403,13 @@ export function createDisjointTrajectorySplit(
       }
     }
   } else {
-    // Dense single component: deterministic 2D block split H_L x H_F vs (L\H_L) x (F\H_F)
     const uniqueLearners = sortedBySeedHash(
-      [...new Set(trajectories.map((t) => t.learnerPseudoId))],
+      [...new Set(canonical.map((t) => t.learnerPseudoId))],
       seed,
       "learner",
     );
     const uniqueFamilies = sortedBySeedHash(
-      [...new Set(trajectories.map((t) => t.itemFamilyId))],
+      [...new Set(canonical.map((t) => t.itemFamilyId))],
       seed,
       "family",
     );
@@ -220,38 +427,34 @@ export function createDisjointTrajectorySplit(
       const holdoutLearnerSet = new Set(uniqueLearners.slice(0, holdoutLearnerCount));
       const holdoutFamilySet = new Set(uniqueFamilies.slice(0, holdoutFamilyCount));
 
-      // Ensure at least one record falls inside H_L x H_F; if sparse within component, expand minimally.
-      let candidateHoldout = trajectories.filter(
+      let candidateHoldout = canonical.filter(
         (t) => holdoutLearnerSet.has(t.learnerPseudoId) && holdoutFamilySet.has(t.itemFamilyId),
       );
       if (candidateHoldout.length === 0) {
-        const anchor = trajectories[0]!;
+        const anchor = canonical[0]!;
         holdoutLearnerSet.clear();
         holdoutFamilySet.clear();
         holdoutLearnerSet.add(anchor.learnerPseudoId);
         holdoutFamilySet.add(anchor.itemFamilyId);
-        candidateHoldout = trajectories.filter(
+        candidateHoldout = canonical.filter(
           (t) => holdoutLearnerSet.has(t.learnerPseudoId) && holdoutFamilySet.has(t.itemFamilyId),
         );
       }
 
       holdout = candidateHoldout;
-      trainDevPool = trajectories.filter(
+      trainDevPool = canonical.filter(
         (t) => !holdoutLearnerSet.has(t.learnerPseudoId) && !holdoutFamilySet.has(t.itemFamilyId),
       );
-      quarantinedCrossing = trajectories.filter(
+      quarantinedCrossing = canonical.filter(
         (t) =>
           (holdoutLearnerSet.has(t.learnerPseudoId) && !holdoutFamilySet.has(t.itemFamilyId)) ||
           (!holdoutLearnerSet.has(t.learnerPseudoId) && holdoutFamilySet.has(t.itemFamilyId)),
       );
     } else {
-      // Degenerate dataset with only 1 unique learner or 1 unique family: cannot disjointly split both axes;
-      // keep all in trainDevPool so holdout firewall never falsely claims disjointness.
-      trainDevPool = [...trajectories];
+      trainDevPool = [...canonical];
     }
   }
 
-  // Partition trainDevPool into train and dev deterministically by learnerPseudoId.
   const trainDevLearners = sortedBySeedHash(
     [...new Set(trainDevPool.map((t) => t.learnerPseudoId))],
     seed,
@@ -290,23 +493,32 @@ export function createDisjointTrajectorySplit(
 }
 
 /**
- * Enforces the GEPA Holdout Firewall: throws a deterministic `HoldoutFirewallError`
- * if ANY trajectory passed into reflective mutation shares a `trajectoryId`,
- * `learnerPseudoId`, or `itemFamilyId` with `holdout`.
+ * Enforces the GEPA Holdout Firewall after NFKC+trim canonicalization: throws a
+ * deterministic `HoldoutFirewallError` if ANY trajectory shares a canonical
+ * `trajectoryId`, `learnerPseudoId`, or `itemFamilyId` with `holdout`.
  */
 export function assertNoHoldoutLeakage(
   trajectories: readonly ErrorTrajectoryRecord[],
   firewall: HoldoutFirewall,
 ): void {
-  const blockedTrajectoryIds = new Set(firewall.holdoutTrajectoryIds);
-  const blockedLearners = new Set(firewall.holdoutLearnerPseudoIds);
-  const blockedFamilies = new Set(firewall.holdoutItemFamilyIds);
+  const blockedTrajectoryIds = new Set(
+    firewall.holdoutTrajectoryIds.map((id) => canonicalizeIdentifier(id, "holdoutTrajectoryId")),
+  );
+  const blockedLearners = new Set(
+    firewall.holdoutLearnerPseudoIds.map((id) =>
+      canonicalizeIdentifier(id, "holdoutLearnerPseudoId"),
+    ),
+  );
+  const blockedFamilies = new Set(
+    firewall.holdoutItemFamilyIds.map((id) => canonicalizeIdentifier(id, "holdoutItemFamilyId")),
+  );
 
   const leakedTrajectoryIds: string[] = [];
   const leakedLearners = new Set<string>();
   const leakedFamilies = new Set<string>();
 
-  for (const t of trajectories) {
+  for (const raw of trajectories) {
+    const t = canonicalizeTrajectoryRecord(raw);
     let hit = false;
     if (blockedTrajectoryIds.has(t.trajectoryId)) {
       hit = true;
@@ -343,10 +555,11 @@ function scanObjectForForbiddenSurfaceKeys(value: unknown, pathPrefix: string): 
     }
     return null;
   }
-  for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+  for (const key of Object.getOwnPropertyNames(value)) {
     if (FORBIDDEN_SURFACE_SET.has(key.toLowerCase())) {
       return `${pathPrefix}.${key}`;
     }
+    const nested = (value as Record<string, unknown>)[key];
     const hit = scanObjectForForbiddenSurfaceKeys(nested, `${pathPrefix}.${key}`);
     if (hit) return hit;
   }
@@ -354,16 +567,29 @@ function scanObjectForForbiddenSurfaceKeys(value: unknown, pathPrefix: string): 
 }
 
 /**
- * Validates that a GEPA mutation patch targets ONLY an allowed declarative surface
- * (`moveRules`, `hintLadder`, `rubricAnchors`, `approvedTemplateSlots`) and NEVER
- * touches `permissions`, `answerVisibility`, `gradingWriteAuthority`, or `leakageDetectors`.
+ * Validates that a GEPA mutation patch:
+ * 1) targets ONLY an allowed declarative surface (`moveRules`, `hintLadder`,
+ *    `rubricAnchors`, `approvedTemplateSlots`), never touching `permissions`,
+ *    `answerVisibility`, `gradingWriteAuthority`, or `leakageDetectors`,
+ * 2) conforms strictly to the runtime schema of that surface (no prototype
+ *    pollution keys, no malformed containers or non-string fields), and
+ * 3) contains zero raw PII across `summary` and every nested string leaf.
  */
 export function assertAllowedGepaPatch(patch: unknown): asserts patch is GepaSurfacePatch {
-  if (!patch || typeof patch !== "object") {
-    throw new GepaForbiddenSurfaceError("GEPA patch must be a non-null object", "invalid");
+  if (!isPlainObject(patch)) {
+    throw new GepaForbiddenSurfaceError("GEPA patch must be a plain non-null object", "invalid");
   }
-  const raw = patch as Record<string, unknown>;
-  const surface = raw.surface;
+  const topProtoIssues: string[] = [];
+  checkPrototypePollutionKeys(patch, "patch", topProtoIssues);
+  if (topProtoIssues.length > 0) {
+    throw new GepaInvalidPatchPayloadError(
+      `GEPA patch contains forbidden prototype key: ${topProtoIssues.join(", ")}`,
+      String(patch.surface ?? "unknown"),
+      topProtoIssues,
+    );
+  }
+
+  const surface = patch.surface;
   if (typeof surface !== "string" || !ALLOWED_SURFACE_SET.has(surface)) {
     throw new GepaForbiddenSurfaceError(
       `GEPA patch attempted to mutate forbidden or unknown surface "${String(surface)}". Allowed surfaces: ${ALLOWED_GEPA_MUTATION_SURFACES.join(", ")}`,
@@ -371,7 +597,7 @@ export function assertAllowedGepaPatch(patch: unknown): asserts patch is GepaSur
     );
   }
 
-  for (const key of Object.keys(raw)) {
+  for (const key of Object.getOwnPropertyNames(patch)) {
     if (FORBIDDEN_SURFACE_SET.has(key.toLowerCase())) {
       throw new GepaForbiddenSurfaceError(
         `GEPA patch contains forbidden authority key "${key}"`,
@@ -380,13 +606,28 @@ export function assertAllowedGepaPatch(patch: unknown): asserts patch is GepaSur
     }
   }
 
-  const nestedHit = scanObjectForForbiddenSurfaceKeys(raw.payload, surface);
+  const nestedHit = scanObjectForForbiddenSurfaceKeys(patch.payload, surface);
   if (nestedHit) {
     throw new GepaForbiddenSurfaceError(
       `GEPA patch payload attempted to smuggle forbidden authority surface at "${nestedHit}"`,
       nestedHit,
     );
   }
+
+  if (
+    typeof patch.summary !== "string" ||
+    patch.summary.trim().length === 0 ||
+    patch.summary.length > MAX_PATCH_STRING_LENGTH
+  ) {
+    throw new GepaInvalidPatchPayloadError(
+      `GEPA patch summary must be a non-empty finite string (max ${MAX_PATCH_STRING_LENGTH})`,
+      surface,
+      ["patch.summary:must_be_nonempty_string"],
+    );
+  }
+
+  validateSurfacePayloadSchema(surface, patch.payload);
+  assertNoRawPiiInValue(patch, `gepa_patch:${surface}`);
 }
 
 function bumpPolicyVersion(version: string, suffix: string): string {
@@ -395,7 +636,8 @@ function bumpPolicyVersion(version: string, suffix: string): string {
 
 /**
  * Applies a validated declarative patch to a cartridge policy, returning a new
- * immutable policy. Rejects forbidden surfaces and invalid rubric anchor pairs.
+ * immutable policy. Rejects forbidden surfaces, malformed payload shapes,
+ * raw PII in patch strings, and invalid rubric anchor pairs.
  */
 export function validateAndApplyGepaPatch(
   policy: CartridgeDeclarativePolicy,
@@ -464,13 +706,24 @@ export function validateAndApplyGepaPatch(
     }
 
     case "approvedTemplateSlots": {
+      const nextSlots: Record<string, string> = {};
+      for (const [k, v] of Object.entries(policy.approvedTemplateSlots)) {
+        if (!PROTOTYPE_POLLUTION_KEYS.has(k)) {
+          nextSlots[k] = v;
+        }
+      }
+      for (const k of Object.getOwnPropertyNames(patch.payload)) {
+        if (!PROTOTYPE_POLLUTION_KEYS.has(k)) {
+          const val = patch.payload[k];
+          if (typeof val === "string") {
+            nextSlots[k] = val;
+          }
+        }
+      }
       return {
         ...policy,
         version: bumpPolicyVersion(policy.version, versionTag),
-        approvedTemplateSlots: {
-          ...policy.approvedTemplateSlots,
-          ...patch.payload,
-        },
+        approvedTemplateSlots: nextSlots,
       };
     }
   }
@@ -486,11 +739,12 @@ export interface BuildGepaReflectionInput {
 
 /**
  * Builds the sanitized reflective prompt context for GEPA mutation.
- * Enforces the holdout firewall on BOTH train and dev trajectories before clustering.
+ * Enforces PII scanning, canonicalization, and holdout firewall on BOTH train and dev trajectories.
  */
 export function buildGepaReflectionContext(
   input: BuildGepaReflectionInput,
 ): GepaReflectionContext {
+  assertNoRawPiiInValue(input.policy, "reflection_base_policy");
   assertNoHoldoutLeakage(input.trainTrajectories, input.holdoutFirewall);
   assertNoHoldoutLeakage(input.devTrajectories, input.holdoutFirewall);
 
@@ -519,11 +773,13 @@ export function buildGepaReflectionContext(
 /**
  * Deterministically proposes candidate declarative patches over allowed GEPA
  * surfaces (`moveRules`, `hintLadder`, `rubricAnchors`, `approvedTemplateSlots`)
- * derived strictly from actionable clusters in the sanitized reflection context.
+ * derived strictly from actionable clusters in the sanitized reflection context,
+ * verifying every generated patch through PII, schema, surface, and anchor guards.
  */
 export function proposeGepaReflectivePatches(
   context: GepaReflectionContext,
 ): readonly GepaProposedCandidate[] {
+  assertNoRawPiiInValue(context, "gepa_reflection_context");
   const candidates: GepaProposedCandidate[] = [];
   const basePolicy = context.currentPolicy;
 

@@ -4,6 +4,7 @@ import {
   STAGE0_PERSONA_IDS,
   STAGE0_SCENARIOS,
   STAGE0_VARIANTS_PER_PAIR,
+  Stage0ValidationError,
   createCompliantReferencePolicy,
   createLeakyBaselinePolicy,
   createMulberry32,
@@ -233,6 +234,67 @@ describe("Stage-0 768-episode deterministic student simulator", () => {
     };
     const flagReport = evaluateStage0Gate(selfFlagLeakPolicy, { seed: 20261121 });
     expect(flagReport.passed).toBe(false);
+    expect(flagReport.promotable).toBe(false);
     expect(flagReport.metrics.leakedEpisodeCount).toBe(1);
+  });
+
+  it("enforces full 768-cell matrix completeness, non-promotable diagnostic subsets, and hard zero answer leakage (P1-1)", () => {
+    const compliant = createCompliantReferencePolicy();
+    const allEpisodes = generateStage0Episodes(20261121);
+
+    // 1) Empty episodes list must throw Stage0ValidationError (never vacuously pass).
+    expect(() => evaluateStage0Gate(compliant, { episodes: [] })).toThrow(Stage0ValidationError);
+    expect(() =>
+      evaluateStage0Gate(compliant, { episodes: [], allowDiagnosticSubset: true }),
+    ).toThrow(Stage0ValidationError);
+
+    // 2) Partial or duplicated episode subset without allowDiagnosticSubset throws.
+    const partial = allEpisodes.slice(0, 64);
+    expect(() => evaluateStage0Gate(compliant, { episodes: partial })).toThrow(
+      Stage0ValidationError,
+    );
+    const duplicated768 = [...allEpisodes.slice(0, 767), allEpisodes[0]!];
+    expect(() => evaluateStage0Gate(compliant, { episodes: duplicated768 })).toThrow(
+      Stage0ValidationError,
+    );
+
+    // 3) Explicit allowDiagnosticSubset: true allows diagnostics but MUST ALWAYS return promotable: false & passed: false.
+    const diagPartial = evaluateStage0Gate(compliant, {
+      episodes: partial,
+      allowDiagnosticSubset: true,
+    });
+    expect(diagPartial.diagnosticSubset).toBe(true);
+    expect(diagPartial.matrixCoverage.complete).toBe(false);
+    expect(diagPartial.matrixCoverage.coveredCanonicalCells).toBe(64);
+    expect(diagPartial.matrixCoverage.missingCellCount).toBe(704);
+    expect(diagPartial.promotable).toBe(false);
+    expect(diagPartial.passed).toBe(false);
+
+    // Even when all 768 episodes are supplied with allowDiagnosticSubset: true, promotable MUST remain false.
+    const diagFull = evaluateStage0Gate(compliant, {
+      episodes: allEpisodes,
+      allowDiagnosticSubset: true,
+    });
+    expect(diagFull.matrixCoverage.complete).toBe(true);
+    expect(diagFull.promotable).toBe(false);
+    expect(diagFull.passed).toBe(false);
+
+    // 4) Overriding maxAnswerLeakageRate > 0 or NaN is forbidden (throws Stage0ValidationError).
+    expect(() =>
+      evaluateStage0Gate(createLeakyBaselinePolicy(), {
+        thresholds: { maxAnswerLeakageRate: 0.5 },
+      }),
+    ).toThrow(Stage0ValidationError);
+    expect(() =>
+      evaluateStage0Gate(compliant, {
+        thresholds: { maxAnswerLeakageRate: Number.NaN },
+      }),
+    ).toThrow(Stage0ValidationError);
+
+    // 5) Full 768 canonical matrix without diagnostic mode sets promotable: true for compliant policy.
+    const fullReport = evaluateStage0Gate(compliant, { seed: 20261121 });
+    expect(fullReport.matrixCoverage.complete).toBe(true);
+    expect(fullReport.promotable).toBe(true);
+    expect(fullReport.passed).toBe(true);
   });
 });

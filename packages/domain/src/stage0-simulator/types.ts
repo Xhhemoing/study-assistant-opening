@@ -276,11 +276,37 @@ export interface Stage0EvaluationMetrics {
   readonly sevenDayTransferDenominator: number;
 }
 
+export class Stage0ValidationError extends Error {
+  constructor(
+    message: string,
+    readonly code:
+      | "empty_episodes"
+      | "incomplete_matrix"
+      | "invalid_threshold"
+      | "invalid_max_turns",
+  ) {
+    super(message);
+    this.name = "Stage0ValidationError";
+  }
+}
+
+export interface Stage0MatrixCoverage {
+  readonly complete: boolean;
+  readonly expectedCanonicalCells: number;
+  readonly coveredCanonicalCells: number;
+  readonly missingCellCount: number;
+  readonly duplicateCellCount: number;
+  readonly unknownCellCount: number;
+}
+
 export interface Stage0EvaluationReport {
   readonly policyId: string;
   readonly seed: number;
   readonly totalEpisodes: number;
   readonly passed: boolean;
+  readonly promotable: boolean;
+  readonly diagnosticSubset: boolean;
+  readonly matrixCoverage: Stage0MatrixCoverage;
   readonly thresholds: Stage0GateThresholds;
   readonly metrics: Stage0EvaluationMetrics;
   readonly gates: readonly Stage0GateCheck[];

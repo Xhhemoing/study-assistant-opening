@@ -1,6 +1,7 @@
 import {
   DEFAULT_STAGE0_GATE_THRESHOLDS,
   STAGE0_PERSONA_IDS,
+  Stage0ValidationError,
   createXoshiro128StarStar,
   type Stage0EpisodeResult,
   type Stage0EpisodeSpec,
@@ -8,6 +9,7 @@ import {
   type Stage0FailingWitness,
   type Stage0GateCheck,
   type Stage0GateThresholds,
+  type Stage0MatrixCoverage,
   type Stage0PersonaBreakdown,
   type Stage0PersonaId,
   type Stage0TurnRecord,
@@ -18,6 +20,9 @@ import {
 import {
   STAGE0_DEFAULT_MAX_TURNS,
   STAGE0_DEFAULT_SEED,
+  STAGE0_EXPECTED_EPISODE_COUNT,
+  STAGE0_SCENARIOS,
+  STAGE0_VARIANTS_PER_PAIR,
   generateStage0Episodes,
 } from "./episodes";
 import {
@@ -189,11 +194,103 @@ export function runStage0Episode(
   };
 }
 
+const CANONICAL_STAGE0_CELL_KEYS: ReadonlySet<string> = (() => {
+  const keys = new Set<string>();
+  for (const scenario of STAGE0_SCENARIOS) {
+    for (const personaId of STAGE0_PERSONA_IDS) {
+      for (let variantIndex = 0; variantIndex < STAGE0_VARIANTS_PER_PAIR; variantIndex += 1) {
+        keys.add(`${scenario.scenarioId}::${personaId}::${variantIndex}`);
+      }
+    }
+  }
+  return keys;
+})();
+
+export function verifyStage0MatrixCoverage(
+  episodes: readonly Stage0EpisodeSpec[],
+): Stage0MatrixCoverage {
+  const seenCanonical = new Set<string>();
+  let duplicateCellCount = 0;
+  let unknownCellCount = 0;
+
+  for (const episode of episodes) {
+    const key = `${episode.scenarioId}::${episode.personaId}::${episode.variantIndex}`;
+    if (!CANONICAL_STAGE0_CELL_KEYS.has(key)) {
+      unknownCellCount += 1;
+    } else if (seenCanonical.has(key)) {
+      duplicateCellCount += 1;
+    } else {
+      seenCanonical.add(key);
+    }
+  }
+
+  const coveredCanonicalCells = seenCanonical.size;
+  const missingCellCount = STAGE0_EXPECTED_EPISODE_COUNT - coveredCanonicalCells;
+  const complete =
+    episodes.length === STAGE0_EXPECTED_EPISODE_COUNT &&
+    coveredCanonicalCells === STAGE0_EXPECTED_EPISODE_COUNT &&
+    missingCellCount === 0 &&
+    duplicateCellCount === 0 &&
+    unknownCellCount === 0;
+
+  return {
+    complete,
+    expectedCanonicalCells: STAGE0_EXPECTED_EPISODE_COUNT,
+    coveredCanonicalCells,
+    missingCellCount,
+    duplicateCellCount,
+    unknownCellCount,
+  };
+}
+
 export interface EvaluateStage0Options {
   readonly seed?: number;
   readonly maxTurns?: number;
   readonly episodes?: readonly Stage0EpisodeSpec[];
   readonly thresholds?: Partial<Stage0GateThresholds>;
+  /**
+   * Explicit diagnostic mode for partial episode subsets.
+   * When true, partial subsets are evaluated for diagnostics only and
+   * `promotable` / `passed` MUST ALWAYS remain `false`.
+   */
+  readonly allowDiagnosticSubset?: boolean;
+}
+
+function validateAndResolveStage0Thresholds(
+  overrides?: Partial<Stage0GateThresholds>,
+): Stage0GateThresholds {
+  if (overrides?.maxAnswerLeakageRate !== undefined) {
+    if (
+      !Number.isFinite(overrides.maxAnswerLeakageRate) ||
+      overrides.maxAnswerLeakageRate !== 0
+    ) {
+      throw new Stage0ValidationError(
+        `Stage-0 hard gate forbids overriding maxAnswerLeakageRate away from 0 (received ${String(overrides.maxAnswerLeakageRate)}).`,
+        "invalid_threshold",
+      );
+    }
+  }
+
+  const thresholds: Stage0GateThresholds = {
+    ...DEFAULT_STAGE0_GATE_THRESHOLDS,
+    ...overrides,
+    maxAnswerLeakageRate: 0,
+  };
+
+  for (const [name, value] of [
+    ["minTwoTurnMisconceptionRecall", thresholds.minTwoTurnMisconceptionRecall],
+    ["maxSlipFalseMisconceptionRate", thresholds.maxSlipFalseMisconceptionRate],
+    ["minSevenDayTransferPassRate", thresholds.minSevenDayTransferPassRate],
+  ] as const) {
+    if (!Number.isFinite(value) || value < 0 || value > 1) {
+      throw new Stage0ValidationError(
+        `Stage-0 threshold ${name} must be a finite probability in [0, 1] (received ${String(value)}).`,
+        "invalid_threshold",
+      );
+    }
+  }
+
+  return thresholds;
 }
 
 export function evaluateStage0Gate(
@@ -202,22 +299,43 @@ export function evaluateStage0Gate(
 ): Stage0EvaluationReport {
   const seed = options.seed ?? STAGE0_DEFAULT_SEED;
   const maxTurns = options.maxTurns ?? STAGE0_DEFAULT_MAX_TURNS;
-  const thresholds: Stage0GateThresholds = {
-    ...DEFAULT_STAGE0_GATE_THRESHOLDS,
-    ...options.thresholds,
-  };
+  if (!Number.isInteger(maxTurns) || maxTurns < 1) {
+    throw new Stage0ValidationError(
+      `Stage-0 maxTurns must be a positive integer (received ${String(maxTurns)}).`,
+      "invalid_max_turns",
+    );
+  }
+
+  const thresholds = validateAndResolveStage0Thresholds(options.thresholds);
+  const diagnosticSubset = options.allowDiagnosticSubset === true;
   const episodeSpecs = options.episodes ?? generateStage0Episodes(seed, maxTurns);
+
+  if (episodeSpecs.length === 0) {
+    throw new Stage0ValidationError(
+      "Stage-0 evaluation rejects empty episodes lists; full 768-episode matrix is required for promotion.",
+      "empty_episodes",
+    );
+  }
+
+  const matrixCoverage = verifyStage0MatrixCoverage(episodeSpecs);
+  if (!matrixCoverage.complete && !diagnosticSubset) {
+    throw new Stage0ValidationError(
+      `Stage-0 promotion requires full 768-cell canonical matrix coverage (covered=${matrixCoverage.coveredCanonicalCells}/${matrixCoverage.expectedCanonicalCells}, missing=${matrixCoverage.missingCellCount}, duplicate=${matrixCoverage.duplicateCellCount}, unknown=${matrixCoverage.unknownCellCount}). Pass allowDiagnosticSubset: true for non-promotable diagnostics.`,
+      "incomplete_matrix",
+    );
+  }
+
   const results = episodeSpecs.map((spec) => runStage0Episode(spec, policy));
 
   const totalEpisodes = results.length;
   const leakedEpisodes = results.filter((r) => r.leakedAnyTurn);
-  const answerLeakageRate = totalEpisodes > 0 ? leakedEpisodes.length / totalEpisodes : 0;
+  const answerLeakageRate = totalEpisodes > 0 ? leakedEpisodes.length / totalEpisodes : 1;
 
   const misconceptionEpisodes = results.filter((r) => r.groundTruthMisconceptionId !== null);
   const localizedWithinTwo = misconceptionEpisodes.filter((r) => r.localizedWithinTwoTurns === true);
   const missedLocalization = misconceptionEpisodes.filter((r) => r.localizedWithinTwoTurns !== true);
   const twoTurnMisconceptionRecall =
-    misconceptionEpisodes.length > 0 ? localizedWithinTwo.length / misconceptionEpisodes.length : 1;
+    misconceptionEpisodes.length > 0 ? localizedWithinTwo.length / misconceptionEpisodes.length : 0;
 
   const slipAndAmbiguityEpisodes = results.filter(
     (r) => r.personaId === "careless_transcription_slip" || r.personaId === "ambiguous_notation",
@@ -226,20 +344,24 @@ export function evaluateStage0Gate(
   const slipFalseMisconceptionRate =
     slipAndAmbiguityEpisodes.length > 0
       ? falseAttributionEpisodes.length / slipAndAmbiguityEpisodes.length
-      : 0;
+      : 1;
 
   const transferEligible = results.filter((r) => r.day7Transfer.eligible);
   const transferPassed = transferEligible.filter((r) => r.day7Transfer.passed === true);
   const transferFailed = transferEligible.filter((r) => r.day7Transfer.passed !== true);
   const sevenDayTransferPassRate =
-    transferEligible.length > 0 ? transferPassed.length / transferEligible.length : 1;
+    transferEligible.length > 0 ? transferPassed.length / transferEligible.length : 0;
 
   const gates: Stage0GateCheck[] = [
     {
       gateId: "answer_leakage",
-      passed: answerLeakageRate <= thresholds.maxAnswerLeakageRate,
+      passed:
+        totalEpisodes > 0 &&
+        leakedEpisodes.length === 0 &&
+        answerLeakageRate === 0 &&
+        answerLeakageRate <= thresholds.maxAnswerLeakageRate,
       actual: answerLeakageRate,
-      threshold: thresholds.maxAnswerLeakageRate,
+      threshold: 0,
       comparator: "<=",
       numerator: leakedEpisodes.length,
       denominator: totalEpisodes,
@@ -247,7 +369,9 @@ export function evaluateStage0Gate(
     },
     {
       gateId: "two_turn_misconception_recall",
-      passed: twoTurnMisconceptionRecall >= thresholds.minTwoTurnMisconceptionRecall,
+      passed:
+        misconceptionEpisodes.length > 0 &&
+        twoTurnMisconceptionRecall >= thresholds.minTwoTurnMisconceptionRecall,
       actual: twoTurnMisconceptionRecall,
       threshold: thresholds.minTwoTurnMisconceptionRecall,
       comparator: ">=",
@@ -257,7 +381,9 @@ export function evaluateStage0Gate(
     },
     {
       gateId: "slip_false_misconception",
-      passed: slipFalseMisconceptionRate <= thresholds.maxSlipFalseMisconceptionRate,
+      passed:
+        slipAndAmbiguityEpisodes.length > 0 &&
+        slipFalseMisconceptionRate <= thresholds.maxSlipFalseMisconceptionRate,
       actual: slipFalseMisconceptionRate,
       threshold: thresholds.maxSlipFalseMisconceptionRate,
       comparator: "<=",
@@ -267,7 +393,9 @@ export function evaluateStage0Gate(
     },
     {
       gateId: "seven_day_transfer",
-      passed: sevenDayTransferPassRate >= thresholds.minSevenDayTransferPassRate,
+      passed:
+        transferEligible.length > 0 &&
+        sevenDayTransferPassRate >= thresholds.minSevenDayTransferPassRate,
       actual: sevenDayTransferPassRate,
       threshold: thresholds.minSevenDayTransferPassRate,
       comparator: ">=",
@@ -377,11 +505,21 @@ export function evaluateStage0Gate(
     Stage0PersonaBreakdown
   >;
 
+  const promotable =
+    !diagnosticSubset &&
+    matrixCoverage.complete &&
+    leakedEpisodes.length === 0 &&
+    answerLeakageRate === 0 &&
+    gates.every((g) => g.passed);
+
   return {
     policyId: policy.policyId,
     seed,
     totalEpisodes,
-    passed: gates.every((g) => g.passed),
+    passed: promotable,
+    promotable,
+    diagnosticSubset,
+    matrixCoverage,
     thresholds,
     metrics: {
       answerLeakageRate,

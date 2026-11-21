@@ -73,6 +73,17 @@ export class GepaForbiddenSurfaceError extends Error {
   }
 }
 
+export class GepaInvalidPatchPayloadError extends Error {
+  constructor(
+    message: string,
+    readonly surface: string,
+    readonly issues: readonly string[],
+  ) {
+    super(message);
+    this.name = "GepaInvalidPatchPayloadError";
+  }
+}
+
 export class InvalidRubricAnchorPairError extends Error {
   constructor(
     message: string,
@@ -199,6 +210,7 @@ export interface LMetric {
   readonly totalReleasedTurns: number;
   readonly severeLeakCount: number;
   readonly guardBlockedCount: number;
+  readonly telemetryIssues?: readonly string[];
 }
 
 export type T7Metric =
@@ -208,8 +220,10 @@ export type T7Metric =
       readonly passedFreshTransferCount: number;
       readonly eligibleFollowupCohortCount: number;
       readonly learnerClusterCount: number;
+      readonly effectiveClusterSampleSize: number;
       readonly learnerClusterMean: number;
       readonly standardError: number;
+      readonly clopperPearsonLowerBound: number;
       readonly learnerClusterLowerBound: number;
     }
   | {

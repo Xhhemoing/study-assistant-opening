@@ -14,6 +14,18 @@ import {
 const FORBIDDEN_PII_FIELD_SET: ReadonlySet<string> = new Set(FORBIDDEN_PII_FIELDS);
 const EMAIL_PATTERN = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i;
 const PHONE_PATTERN = /(?:\+?\d{1,3}[\s.-]?)?(?:\(\d{3}\)|\d{3})[\s.-]?\d{3}[\s.-]?\d{4}\b/;
+const INTL_PHONE_PATTERN =
+  /(?:^|[^\w])(?:\+\d{1,3}[\s.-]?\d{2,4}[\s.-]?\d{3,4}[\s.-]?\d{3,4}|\+\d{8,15})\b/;
+const SSN_PATTERN = /\b\d{3}-\d{2}-\d{4}\b/;
+const TOKEN_URL_PATTERN =
+  /https?:\/\/[^\s]*?(?:[?&](?:token|access_token|auth|api_key|apikey|secret|password|passwd|session|sid|jwt|key)=|[^/\s@]+:[^/\s@]+@)/i;
+const JWT_PATTERN = /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/;
+const BEARER_TOKEN_PATTERN = /\bbearer\s+[A-Za-z0-9._~+/-]{12,}\b/i;
+const RAW_PII_ASSIGNMENT_PATTERN =
+  /\b(?:student[_\s-]?id|raw[_\s-]?user[_\s-]?id|user[_\s-]?id|full[_\s-]?name|real[_\s-]?name|email|phone|tel|ssn)\s*[:=]\s*[^\s,;]+/i;
+const RAW_PII_PREFIX_PATTERN =
+  /(?:^|[\s(|;,])(?:raw|email|mail|phone|tel|ssn|name):[^\s,;)|]+/i;
+
 const VALID_PSEUDO_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{3,127}$/;
 const FORBIDDEN_PSEUDO_PREFIXES = ["raw:", "email:", "mail:", "phone:", "tel:", "ssn:", "name:"];
 
@@ -23,15 +35,143 @@ function normalizeFieldKey(key: string): string {
 
 function normalizePremise(premise: string): string {
   return premise
+    .normalize("NFKC")
     .toLowerCase()
     .replace(/\s+/g, " ")
     .replace(/\s*([!=<>+-/*(),])\s*/g, "$1")
     .trim();
 }
 
+/**
+ * Canonicalizes an identifier via Unicode NFKC normalization and whitespace trimming.
+ * Throws `CartridgePiiViolationError` if non-string or empty after trimming.
+ */
+export function canonicalizeIdentifier(
+  raw: string,
+  fieldName: string,
+  trajectoryId?: string,
+): string {
+  if (typeof raw !== "string") {
+    throw new CartridgePiiViolationError(
+      `${fieldName} must be a non-empty string`,
+      [`${fieldName}:non_string`],
+      trajectoryId,
+    );
+  }
+  const normalized = raw.normalize("NFKC").trim();
+  if (normalized.length === 0) {
+    throw new CartridgePiiViolationError(
+      `${fieldName} must be non-empty after NFKC normalization and trimming`,
+      [`${fieldName}:empty`],
+      trajectoryId,
+    );
+  }
+  return normalized;
+}
+
+function detectRawPiiReasonsInText(text: string): string[] {
+  const normalized = text.normalize("NFKC");
+  const reasons: string[] = [];
+  if (EMAIL_PATTERN.test(normalized)) reasons.push("email");
+  if (PHONE_PATTERN.test(normalized) || INTL_PHONE_PATTERN.test(normalized)) reasons.push("phone");
+  if (SSN_PATTERN.test(normalized)) reasons.push("ssn");
+  if (TOKEN_URL_PATTERN.test(normalized)) reasons.push("url_with_credentials_or_token");
+  if (JWT_PATTERN.test(normalized) || BEARER_TOKEN_PATTERN.test(normalized)) {
+    reasons.push("auth_token");
+  }
+  if (RAW_PII_ASSIGNMENT_PATTERN.test(normalized) || RAW_PII_PREFIX_PATTERN.test(normalized)) {
+    reasons.push("raw_pii_identifier");
+  }
+  return reasons;
+}
+
+/**
+ * Fails closed (`CartridgePiiViolationError`) if `text` contains raw email,
+ * phone, SSN, credentialed/tokenized URL, auth token, or raw student/user PII markers.
+ */
+export function assertNoRawPiiInText(
+  text: string,
+  fieldPath: string,
+  trajectoryId?: string,
+): void {
+  const reasons = detectRawPiiReasonsInText(text);
+  if (reasons.length > 0) {
+    throw new CartridgePiiViolationError(
+      `Raw PII detected at ${fieldPath}: ${reasons.join(", ")}`,
+      reasons.map((r) => `${fieldPath}:${r}`),
+      trajectoryId,
+    );
+  }
+}
+
+function collectRawPiiViolations(
+  value: unknown,
+  pathLabel: string,
+  out: string[],
+  seen: WeakSet<object>,
+  skipKeys?: ReadonlySet<string>,
+): void {
+  if (typeof value === "string") {
+    const reasons = detectRawPiiReasonsInText(value);
+    for (const reason of reasons) {
+      out.push(`${pathLabel}:${reason}`);
+    }
+    return;
+  }
+  if (!value || typeof value !== "object") return;
+  if (seen.has(value)) return;
+  seen.add(value);
+
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i += 1) {
+      collectRawPiiViolations(value[i], `${pathLabel}[${i}]`, out, seen);
+    }
+    return;
+  }
+
+  for (const key of Object.keys(value as Record<string, unknown>)) {
+    const normalizedKey = normalizeFieldKey(key);
+    if (FORBIDDEN_PII_FIELD_SET.has(normalizedKey)) {
+      out.push(`${pathLabel}.${key}:forbidden_pii_field`);
+    }
+    const keyReasons = detectRawPiiReasonsInText(key);
+    for (const reason of keyReasons) {
+      out.push(`${pathLabel}.<key:${key}>:${reason}`);
+    }
+    if (skipKeys?.has(key)) continue;
+    collectRawPiiViolations(
+      (value as Record<string, unknown>)[key],
+      `${pathLabel}.${key}`,
+      out,
+      seen,
+    );
+  }
+}
+
+/**
+ * Recursively inspects all keys and string leaves of an arbitrary value (such as
+ * a trajectory or GEPA patch) and throws `CartridgePiiViolationError` on any raw PII.
+ */
+export function assertNoRawPiiInValue(
+  value: unknown,
+  rootLabel: string,
+  trajectoryId?: string,
+): void {
+  const offending: string[] = [];
+  collectRawPiiViolations(value, rootLabel, offending, new WeakSet());
+  if (offending.length > 0) {
+    throw new CartridgePiiViolationError(
+      `Raw PII violation in ${rootLabel}: ${offending.join(", ")}`,
+      offending,
+      trajectoryId,
+    );
+  }
+}
+
 /** Canonicalizes an AST edit descriptor into a deterministic sorted token stream. */
 export function normalizeAstEdit(rawAstEdit: string): string {
   const parts = rawAstEdit
+    .normalize("NFKC")
     .split(/[|;\n]+/)
     .map((part) =>
       part
@@ -58,63 +198,131 @@ function tokenizeNormalizedAst(normalizedAstEdit: string): string[] {
 }
 
 /**
- * Validates that a trajectory carries only pseudonymized learner identifiers
- * and contains zero raw PII fields or embedded contact strings.
+ * Validates that a trajectory carries only canonical pseudonymized learner/family
+ * identifiers and contains zero raw PII fields or embedded PII strings across
+ * every field (`normalizedAstEdit`, `missingPremise`, `snippet`, and nested leaves).
  */
 export function assertPseudonymizedTrajectory(record: ErrorTrajectoryRecord): void {
   const offendingFields: string[] = [];
   const rawObject = record as unknown as Record<string, unknown>;
+  const rawTrajectoryId = typeof record.trajectoryId === "string" ? record.trajectoryId : undefined;
 
-  for (const key of Object.keys(rawObject)) {
-    const normalized = normalizeFieldKey(key);
-    if (FORBIDDEN_PII_FIELD_SET.has(normalized)) {
-      offendingFields.push(key);
+  let canonicalPseudo = "";
+  try {
+    canonicalPseudo = canonicalizeIdentifier(
+      record.learnerPseudoId,
+      "learnerPseudoId",
+      rawTrajectoryId,
+    );
+  } catch (err) {
+    if (err instanceof CartridgePiiViolationError) {
+      offendingFields.push(...err.offendingFields);
+    } else {
+      offendingFields.push("learnerPseudoId:invalid");
     }
   }
 
-  const pseudo = record.learnerPseudoId;
-  if (typeof pseudo !== "string" || !VALID_PSEUDO_ID_PATTERN.test(pseudo)) {
-    offendingFields.push("learnerPseudoId:invalid_format");
-  } else {
-    const lowerPseudo = pseudo.toLowerCase();
-    if (
-      EMAIL_PATTERN.test(pseudo) ||
-      PHONE_PATTERN.test(pseudo) ||
-      pseudo.includes("@") ||
-      FORBIDDEN_PSEUDO_PREFIXES.some((prefix) => lowerPseudo.startsWith(prefix))
-    ) {
-      offendingFields.push("learnerPseudoId:raw_pii_detected");
+  try {
+    canonicalizeIdentifier(record.itemFamilyId, "itemFamilyId", rawTrajectoryId);
+  } catch (err) {
+    if (err instanceof CartridgePiiViolationError) {
+      offendingFields.push(...err.offendingFields);
+    } else {
+      offendingFields.push("itemFamilyId:invalid");
     }
   }
 
-  if (typeof record.snippet === "string") {
-    if (EMAIL_PATTERN.test(record.snippet) || PHONE_PATTERN.test(record.snippet)) {
-      offendingFields.push("snippet:raw_pii_detected");
+  try {
+    canonicalizeIdentifier(record.trajectoryId, "trajectoryId", rawTrajectoryId);
+  } catch (err) {
+    if (err instanceof CartridgePiiViolationError) {
+      offendingFields.push(...err.offendingFields);
+    } else {
+      offendingFields.push("trajectoryId:invalid");
     }
   }
+
+  if (canonicalPseudo.length > 0) {
+    if (!VALID_PSEUDO_ID_PATTERN.test(canonicalPseudo)) {
+      offendingFields.push("learnerPseudoId:invalid_format");
+    } else {
+      const lowerPseudo = canonicalPseudo.toLowerCase();
+      if (
+        EMAIL_PATTERN.test(canonicalPseudo) ||
+        PHONE_PATTERN.test(canonicalPseudo) ||
+        INTL_PHONE_PATTERN.test(canonicalPseudo) ||
+        SSN_PATTERN.test(canonicalPseudo) ||
+        canonicalPseudo.includes("@") ||
+        FORBIDDEN_PSEUDO_PREFIXES.some((prefix) => lowerPseudo.startsWith(prefix))
+      ) {
+        offendingFields.push("learnerPseudoId:raw_pii_detected");
+      }
+    }
+  }
+
+  // Scan ALL keys and string leaves (including normalizedAstEdit, missingPremise, snippet, and any extra/nested steps).
+  collectRawPiiViolations(
+    rawObject,
+    "trajectory",
+    offendingFields,
+    new WeakSet(),
+    new Set(["learnerPseudoId"]),
+  );
 
   if (offendingFields.length > 0) {
     throw new CartridgePiiViolationError(
-      `Trajectory ${record.trajectoryId} violated pseudonymization boundary: ${offendingFields.join(", ")}`,
+      `Trajectory ${String(record.trajectoryId)} violated pseudonymization boundary: ${offendingFields.join(", ")}`,
       offendingFields,
-      record.trajectoryId,
+      rawTrajectoryId,
     );
   }
+}
+
+/**
+ * Validates pseudonymization & PII constraints and returns a trajectory whose
+ * `trajectoryId`, `learnerPseudoId`, `itemFamilyId`, `conceptId`, and `firstErrorRuleId`
+ * are NFKC-normalized and trimmed.
+ */
+export function canonicalizeTrajectoryRecord(
+  record: ErrorTrajectoryRecord,
+): ErrorTrajectoryRecord {
+  assertPseudonymizedTrajectory(record);
+  const trajectoryId = canonicalizeIdentifier(record.trajectoryId, "trajectoryId");
+  const learnerPseudoId = canonicalizeIdentifier(
+    record.learnerPseudoId,
+    "learnerPseudoId",
+    trajectoryId,
+  );
+  const itemFamilyId = canonicalizeIdentifier(record.itemFamilyId, "itemFamilyId", trajectoryId);
+  const conceptId = canonicalizeIdentifier(record.conceptId, "conceptId", trajectoryId);
+  const firstErrorRuleId = canonicalizeIdentifier(
+    record.firstErrorRuleId,
+    "firstErrorRuleId",
+    trajectoryId,
+  );
+  return {
+    ...record,
+    trajectoryId,
+    learnerPseudoId,
+    itemFamilyId,
+    conceptId,
+    firstErrorRuleId,
+  };
 }
 
 export function extractTrajectoryFeatures(
   record: ErrorTrajectoryRecord,
 ): ExtractedTrajectoryFeatures {
-  assertPseudonymizedTrajectory(record);
+  const canonical = canonicalizeTrajectoryRecord(record);
   return {
-    trajectoryId: record.trajectoryId,
-    learnerPseudoId: record.learnerPseudoId,
-    conceptId: record.conceptId.trim(),
-    firstErrorRuleId: record.firstErrorRuleId.trim(),
-    normalizedAstEdit: normalizeAstEdit(record.normalizedAstEdit),
-    missingPremise: normalizePremise(record.missingPremise),
-    hintStage: record.hintStage,
-    itemFamilyId: record.itemFamilyId.trim(),
+    trajectoryId: canonical.trajectoryId,
+    learnerPseudoId: canonical.learnerPseudoId,
+    conceptId: canonical.conceptId,
+    firstErrorRuleId: canonical.firstErrorRuleId,
+    normalizedAstEdit: normalizeAstEdit(canonical.normalizedAstEdit),
+    missingPremise: normalizePremise(canonical.missingPremise),
+    hintStage: canonical.hintStage,
+    itemFamilyId: canonical.itemFamilyId,
   };
 }
 
@@ -282,8 +490,15 @@ export function matchesRubricRule(
     "conceptId" | "firstErrorRuleId" | "normalizedAstEdit" | "establishedPremises"
   >,
 ): boolean {
-  if (example.conceptId.trim() !== rule.conceptId.trim()) return false;
-  if (example.firstErrorRuleId.trim() !== rule.firstErrorRuleId.trim()) return false;
+  if (example.conceptId.normalize("NFKC").trim() !== rule.conceptId.normalize("NFKC").trim()) {
+    return false;
+  }
+  if (
+    example.firstErrorRuleId.normalize("NFKC").trim() !==
+    rule.firstErrorRuleId.normalize("NFKC").trim()
+  ) {
+    return false;
+  }
 
   const normalizedExampleAst = normalizeAstEdit(example.normalizedAstEdit);
   const exampleTokens = new Set(tokenizeNormalizedAst(normalizedExampleAst));

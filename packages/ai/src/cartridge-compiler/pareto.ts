@@ -1,3 +1,4 @@
+import { canonicalizeIdentifier } from "./clustering";
 import type {
   CartridgeCandidateMetrics,
   ErrorTrajectoryRecord,
@@ -10,14 +11,158 @@ import type {
 
 const EPSILON = 1e-12;
 export const DEFAULT_ONE_SIDED_95_Z = 1.6448536269514722;
+export const DEFAULT_ONE_SIDED_95_ALPHA = 0.05;
 
 function clamp01(value: number): number {
   return Math.min(1, Math.max(0, value));
 }
 
+function isNonNegativeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && Number.isInteger(value) && value >= 0;
+}
+
+/** Lanczos approximation of ln(Gamma(z)) for z > 0 (accurate to < 1e-14). */
+function logGamma(z: number): number {
+  const coefficients = [
+    0.9999999999998099,
+    676.5203681218851,
+    -1259.1392167224028,
+    771.3234287776531,
+    -176.6150291621406,
+    12.507343278686905,
+    -0.13857109526572012,
+    9.984369578019572e-6,
+    1.5056327351493116e-7,
+  ];
+  if (z < 0.5) {
+    return Math.log(Math.PI / Math.sin(Math.PI * z)) - logGamma(1 - z);
+  }
+  const shifted = z - 1;
+  let x = coefficients[0]!;
+  for (let i = 1; i < coefficients.length; i += 1) {
+    x += coefficients[i]! / (shifted + i);
+  }
+  const t = shifted + 7.5;
+  return 0.5 * Math.log(2 * Math.PI) + (shifted + 0.5) * Math.log(t) - t + Math.log(x);
+}
+
+/** Modified Lentz continued fraction for regularized incomplete beta I_x(a, b). */
+function betaContinuedFraction(a: number, b: number, x: number): number {
+  const maxIter = 200;
+  const eps = 3e-14;
+  const fpMin = 1e-300;
+  const qab = a + b;
+  const qap = a + 1;
+  const qam = a - 1;
+
+  let c = 1;
+  let d = 1 - (qab * x) / qap;
+  if (Math.abs(d) < fpMin) d = fpMin;
+  d = 1 / d;
+  let h = d;
+
+  for (let m = 1; m <= maxIter; m += 1) {
+    const m2 = 2 * m;
+    let aa = (m * (b - m) * x) / ((qam + m2) * (a + m2));
+    d = 1 + aa * d;
+    if (Math.abs(d) < fpMin) d = fpMin;
+    c = 1 + aa / c;
+    if (Math.abs(c) < fpMin) c = fpMin;
+    d = 1 / d;
+    h *= d * c;
+
+    aa = (-(a + m) * (qab + m) * x) / ((a + m2) * (qap + m2));
+    d = 1 + aa * d;
+    if (Math.abs(d) < fpMin) d = fpMin;
+    c = 1 + aa / c;
+    if (Math.abs(c) < fpMin) c = fpMin;
+    d = 1 / d;
+    const delta = d * c;
+    h *= delta;
+    if (Math.abs(delta - 1) < eps) break;
+  }
+
+  return h;
+}
+
+/** Regularized incomplete beta function I_x(a, b) for 0 <= x <= 1, a > 0, b > 0. */
+function regularizedIncompleteBeta(x: number, a: number, b: number): number {
+  if (x <= 0) return 0;
+  if (x >= 1) return 1;
+  const bt = Math.exp(
+    logGamma(a + b) - logGamma(a) - logGamma(b) + a * Math.log(x) + b * Math.log(1 - x),
+  );
+  if (x < (a + 1) / (a + b + 2)) {
+    return clamp01((bt * betaContinuedFraction(a, b, x)) / a);
+  }
+  return clamp01(1 - (bt * betaContinuedFraction(b, a, 1 - x)) / b);
+}
+
+/** Approximate upper-tail probability Phi(-z) = 0.5 * erfc(z / sqrt(2)). */
+function oneSidedAlphaFromZ(z: number): number {
+  if (!Number.isFinite(z) || z <= 0) return 0.5;
+  if (Math.abs(z - DEFAULT_ONE_SIDED_95_Z) < 1e-6) return DEFAULT_ONE_SIDED_95_ALPHA;
+  // Abramowitz & Stegun 7.1.26 approximation for erfc(x), max error 1.5e-7.
+  const x = z / Math.SQRT2;
+  const t = 1 / (1 + 0.3275911 * x);
+  const poly =
+    t *
+    (0.254829592 +
+      t *
+        (-0.284496736 +
+          t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
+  const erfcApprox = poly * Math.exp(-x * x);
+  return clamp01(0.5 * erfcApprox);
+}
+
+/**
+ * Exact one-sided Clopper-Pearson (1 - alpha) lower confidence bound for
+ * `successes` observed in `trials` independent effective units (`0 <= successes <= trials`).
+ *
+ * - When `successes >= trials`, evaluates exact closed form `alpha ** (1 / trials)`
+ *   (e.g., for 5/5 at 95% one-sided: `0.05 ** (1/5) = 0.549280...`).
+ * - When `0 < successes < trials`, solves `I_p(successes, trials - successes + 1) = alpha`.
+ */
+export function exactClopperPearsonLowerBound(
+  successes: number,
+  trials: number,
+  alpha: number = DEFAULT_ONE_SIDED_95_ALPHA,
+): number {
+  if (
+    !Number.isFinite(trials) ||
+    trials <= 0 ||
+    !Number.isFinite(successes) ||
+    successes <= 0 ||
+    !Number.isFinite(alpha) ||
+    alpha <= 0
+  ) {
+    return 0;
+  }
+  if (alpha >= 1) return 1;
+  if (successes >= trials - EPSILON) {
+    return clamp01(Math.pow(alpha, 1 / trials));
+  }
+
+  const a = successes;
+  const b = trials - successes + 1;
+  let lo = 0;
+  let hi = 1;
+  for (let iter = 0; iter < 64; iter += 1) {
+    const mid = 0.5 * (lo + hi);
+    if (regularizedIncompleteBeta(mid, a, b) < alpha) {
+      lo = mid;
+    } else {
+      hi = mid;
+    }
+  }
+  return clamp01(lo);
+}
+
 export interface ComputeCandidateMetricsOptions {
   /** One-sided z-score for student-clustered lower confidence bound (default 95% = 1.64485). */
   readonly confidenceZ?: number;
+  /** Explicit one-sided alpha for Clopper-Pearson bound (derived from confidenceZ when omitted). */
+  readonly alpha?: number;
   /**
    * When false (default), any pending follow-up records keep T7 as `{ status: "pending" }`
    * instead of fabricating 0 or 1 before the 7-day window matures.
@@ -26,8 +171,9 @@ export interface ComputeCandidateMetricsOptions {
 }
 
 /**
- * Computes exact (C, -L, T7) metrics with explicit denominators and
- * student-clustered ratio-estimator lower confidence bound for mature T7.
+ * Computes exact (C, -L, T7) metrics with explicit denominators, fail-closed
+ * leakage telemetry validation, canonicalized learner clustering, and exact
+ * cluster-level Clopper-Pearson lower confidence bound capping.
  */
 export function computeCandidateMetrics(
   candidateId: string,
@@ -35,6 +181,7 @@ export function computeCandidateMetrics(
   options: ComputeCandidateMetricsOptions = {},
 ): CartridgeCandidateMetrics {
   const confidenceZ = options.confidenceZ ?? DEFAULT_ONE_SIDED_95_Z;
+  const alpha = options.alpha ?? oneSidedAlphaFromZ(confidenceZ);
   const allowPartialMaturity = options.allowPartialMaturity ?? false;
 
   let verifiableFirstErrorCount = 0;
@@ -44,8 +191,9 @@ export function computeCandidateMetrics(
   let leakedReleasedTurns = 0;
   let severeLeakCount = 0;
   let guardBlockedCount = 0;
+  const telemetryIssues: string[] = [];
 
-  const matureFollowups: ErrorTrajectoryRecord[] = [];
+  const matureFollowups: { learnerId: string; passed: boolean }[] = [];
   let pendingCohortCount = 0;
 
   for (const t of trajectories) {
@@ -58,23 +206,71 @@ export function computeCandidateMetrics(
     if (t.abandoned) {
       abandonedCount += 1;
     }
-    totalReleasedTurns += Math.max(0, t.totalReleasedTurns);
-    leakedReleasedTurns += Math.max(0, t.leakedReleasedTurns);
-    severeLeakCount += Math.max(0, t.severeLeakCount);
-    guardBlockedCount += Math.max(0, t.guardBlockedCount);
+
+    const validTotal = isNonNegativeInteger(t.totalReleasedTurns);
+    const validLeaked = isNonNegativeInteger(t.leakedReleasedTurns);
+    const validSevere = isNonNegativeInteger(t.severeLeakCount);
+    const validGuard = isNonNegativeInteger(t.guardBlockedCount);
+
+    if (!validTotal) {
+      telemetryIssues.push(
+        `trajectory:${t.trajectoryId}:invalid_totalReleasedTurns(${String(t.totalReleasedTurns)})`,
+      );
+    }
+    if (!validLeaked) {
+      telemetryIssues.push(
+        `trajectory:${t.trajectoryId}:invalid_leakedReleasedTurns(${String(t.leakedReleasedTurns)})`,
+      );
+    }
+    if (validTotal && validLeaked && t.leakedReleasedTurns > t.totalReleasedTurns) {
+      telemetryIssues.push(
+        `trajectory:${t.trajectoryId}:leakedReleasedTurns(${t.leakedReleasedTurns})>totalReleasedTurns(${t.totalReleasedTurns})`,
+      );
+    }
+    if (!validSevere) {
+      telemetryIssues.push(
+        `trajectory:${t.trajectoryId}:invalid_severeLeakCount(${String(t.severeLeakCount)})`,
+      );
+    }
+    if (!validGuard) {
+      telemetryIssues.push(
+        `trajectory:${t.trajectoryId}:invalid_guardBlockedCount(${String(t.guardBlockedCount)})`,
+      );
+    }
+
+    // Preserve raw addition so NaN/negative/inconsistent values are never masked.
+    totalReleasedTurns += t.totalReleasedTurns;
+    leakedReleasedTurns += t.leakedReleasedTurns;
+    severeLeakCount += t.severeLeakCount;
+    guardBlockedCount += t.guardBlockedCount;
 
     if (t.day7FollowupStatus === "mature") {
-      matureFollowups.push(t);
+      const canonicalLearner = canonicalizeIdentifier(
+        t.learnerPseudoId,
+        "learnerPseudoId",
+        t.trajectoryId,
+      );
+      matureFollowups.push({
+        learnerId: canonicalLearner,
+        passed: t.passedFreshFamilyTransfer === true,
+      });
     } else if (t.day7FollowupStatus === "pending") {
       pendingCohortCount += 1;
     }
   }
 
+  if (!isNonNegativeInteger(totalReleasedTurns) || totalReleasedTurns <= 0) {
+    telemetryIssues.push(`aggregate:totalReleasedTurns_must_be_positive(${String(totalReleasedTurns)})`);
+  }
+
   const cRate = verifiableFirstErrorCount > 0 ? repairedCount / verifiableFirstErrorCount : 0;
   const abandonmentRate = trajectories.length > 0 ? abandonedCount / trajectories.length : 0;
-  const lRate = totalReleasedTurns > 0 ? leakedReleasedTurns / totalReleasedTurns : 0;
+  const lRate =
+    telemetryIssues.length === 0 && totalReleasedTurns > 0
+      ? leakedReleasedTurns / totalReleasedTurns
+      : Number.NaN;
 
-  const passedMatureCount = matureFollowups.filter((t) => t.passedFreshFamilyTransfer === true).length;
+  const passedMatureCount = matureFollowups.filter((m) => m.passed).length;
   const eligibleMatureCount = matureFollowups.length;
 
   let t7: T7Metric;
@@ -100,13 +296,13 @@ export function computeCandidateMetrics(
   } else {
     const rate = passedMatureCount / eligibleMatureCount;
     const byLearner = new Map<string, { passed: number; eligible: number }>();
-    for (const t of matureFollowups) {
-      const current = byLearner.get(t.learnerPseudoId) ?? { passed: 0, eligible: 0 };
+    for (const m of matureFollowups) {
+      const current = byLearner.get(m.learnerId) ?? { passed: 0, eligible: 0 };
       current.eligible += 1;
-      if (t.passedFreshFamilyTransfer === true) {
+      if (m.passed) {
         current.passed += 1;
       }
-      byLearner.set(t.learnerPseudoId, current);
+      byLearner.set(m.learnerId, current);
     }
 
     const clusters = [...byLearner.entries()]
@@ -118,9 +314,25 @@ export function computeCandidateMetrics(
         ? clusters.reduce((sum, cl) => sum + cl.passed / cl.eligible, 0) / clusterCount
         : 0;
 
-    let standardError: number;
+    // Kish design-effect effective cluster sample size, bounded strictly above by distinct learner count.
+    const sumSqClusterSize = clusters.reduce((sum, cl) => sum + cl.eligible * cl.eligible, 0);
+    const kishClusters =
+      sumSqClusterSize > 0
+        ? (eligibleMatureCount * eligibleMatureCount) / sumSqClusterSize
+        : 0;
+    const effectiveClusterSampleSize = Math.min(clusterCount, kishClusters);
+    const effectiveSuccesses = rate * effectiveClusterSampleSize;
+    const clopperPearsonLowerBound = exactClopperPearsonLowerBound(
+      effectiveSuccesses,
+      effectiveClusterSampleSize,
+      alpha,
+    );
+
+    let ratioSe: number;
+    let normalClusterLcb: number;
     if (clusterCount <= 1) {
-      standardError = 1;
+      ratioSe = 1;
+      normalClusterLcb = 0;
     } else {
       const sumSqResidual = clusters.reduce((sum, cl) => {
         const residual = cl.passed - rate * cl.eligible;
@@ -129,12 +341,20 @@ export function computeCandidateMetrics(
       const ratioVariance =
         (clusterCount / (clusterCount - 1)) *
         (sumSqResidual / (eligibleMatureCount * eligibleMatureCount));
-      // Finite-sample continuity floor avoids SE = 0 overconfidence when all clusters agree.
-      const continuityFloorSe = Math.sqrt(1 / (4 * clusterCount * clusterCount + 4 * clusterCount));
-      standardError = Math.max(Math.sqrt(Math.max(0, ratioVariance)), continuityFloorSe);
+      ratioSe = Math.sqrt(Math.max(0, ratioVariance));
+      normalClusterLcb = clamp01(rate - confidenceZ * ratioSe);
     }
 
-    const learnerClusterLowerBound = clamp01(rate - confidenceZ * standardError);
+    // Intersect cluster-adjusted ratio bound with exact cluster-level Clopper-Pearson bound
+    // so zero-variance small samples (e.g., 5/5 -> 0.5493) can never falsely clear promotion floors.
+    const learnerClusterLowerBound = Math.min(normalClusterLcb, clopperPearsonLowerBound);
+    const effectiveSe =
+      clusterCount <= 1
+        ? 1
+        : Math.max(
+            ratioSe,
+            confidenceZ > 0 ? Math.max(0, rate - learnerClusterLowerBound) / confidenceZ : ratioSe,
+          );
 
     t7 = {
       status: "mature",
@@ -142,8 +362,10 @@ export function computeCandidateMetrics(
       passedFreshTransferCount: passedMatureCount,
       eligibleFollowupCohortCount: eligibleMatureCount,
       learnerClusterCount: clusterCount,
+      effectiveClusterSampleSize,
       learnerClusterMean,
-      standardError,
+      standardError: effectiveSe,
+      clopperPearsonLowerBound,
       learnerClusterLowerBound,
     };
   }
@@ -163,6 +385,7 @@ export function computeCandidateMetrics(
       totalReleasedTurns,
       severeLeakCount,
       guardBlockedCount,
+      ...(telemetryIssues.length > 0 ? { telemetryIssues } : {}),
     },
     t7,
   };
@@ -192,6 +415,9 @@ export function dominatesInObjectiveSpace(
   for (let i = 0; i < vecA.length; i += 1) {
     const av = vecA[i]!;
     const bv = vecB[i]!;
+    if (!Number.isFinite(av) || !Number.isFinite(bv)) {
+      return false;
+    }
     if (av + EPSILON < bv) {
       return false;
     }
@@ -202,20 +428,103 @@ export function dominatesInObjectiveSpace(
   return strictlyBetter;
 }
 
+function validateLeakageTelemetryFailClosed(
+  candidate: CartridgeCandidateMetrics,
+  maxAllowedLeakageRate: number,
+): string[] {
+  const vetoReasons: string[] = [];
+  const l = candidate.l;
+
+  if (l.telemetryIssues && l.telemetryIssues.length > 0) {
+    vetoReasons.push(...l.telemetryIssues.map((issue) => `telemetry_integrity:${issue}`));
+  }
+
+  const validTotal = isNonNegativeInteger(l.totalReleasedTurns) && l.totalReleasedTurns > 0;
+  if (!validTotal) {
+    vetoReasons.push(
+      `invalid_totalReleasedTurns:must_be_positive_integer(got=${String(l.totalReleasedTurns)})`,
+    );
+  }
+
+  const validLeaked = isNonNegativeInteger(l.leakedReleasedTurns);
+  if (!validLeaked) {
+    vetoReasons.push(
+      `invalid_leakedReleasedTurns:must_be_nonnegative_integer(got=${String(l.leakedReleasedTurns)})`,
+    );
+  }
+
+  if (validTotal && validLeaked && l.leakedReleasedTurns > l.totalReleasedTurns) {
+    vetoReasons.push(
+      `inconsistent_leak_counts:leaked(${l.leakedReleasedTurns})>total(${l.totalReleasedTurns})`,
+    );
+  }
+
+  if (!isNonNegativeInteger(l.severeLeakCount)) {
+    vetoReasons.push(
+      `invalid_severeLeakCount:must_be_nonnegative_integer(got=${String(l.severeLeakCount)})`,
+    );
+  } else if (l.severeLeakCount > 0) {
+    vetoReasons.push(`severeLeakCount=${l.severeLeakCount} exceeds 0`);
+  }
+
+  if (!isNonNegativeInteger(l.guardBlockedCount)) {
+    vetoReasons.push(
+      `invalid_guardBlockedCount:must_be_nonnegative_integer(got=${String(l.guardBlockedCount)})`,
+    );
+  }
+
+  if (typeof l.rate !== "number" || !Number.isFinite(l.rate) || l.rate < 0 || l.rate > 1) {
+    vetoReasons.push(`invalid_leakageRate:must_be_finite_in_0_1(got=${String(l.rate)})`);
+  } else {
+    if (validTotal && validLeaked) {
+      const expectedRate = l.leakedReleasedTurns / l.totalReleasedTurns;
+      if (Math.abs(l.rate - expectedRate) > 1e-6) {
+        vetoReasons.push(
+          `inconsistent_leakageRate:reported(${l.rate})!=computed(${expectedRate})`,
+        );
+      }
+    }
+    if (l.rate > maxAllowedLeakageRate + EPSILON) {
+      vetoReasons.push(
+        `leakageRate=${l.rate.toFixed(6)} exceeds maxAllowedLeakageRate=${maxAllowedLeakageRate}`,
+      );
+    }
+    if (maxAllowedLeakageRate === 0 && (l.rate !== 0 || (validLeaked && l.leakedReleasedTurns !== 0))) {
+      vetoReasons.push(
+        `zero_leakage_policy_violated:rate=${String(l.rate)},leakedReleasedTurns=${String(l.leakedReleasedTurns)}`,
+      );
+    }
+  }
+
+  return vetoReasons;
+}
+
 /**
  * Runs:
- * 1) Hard Pre-Pareto Veto on leakage (`severeLeakCount > 0` or `L > maxAllowedLeakageRate`)
- *    BEFORE any Pareto dominance comparison so high C can never mask answer leakage,
+ * 1) Fail-closed Hard Pre-Pareto Veto on leakage telemetry (`NaN`/non-finite/negative/
+ *    non-integer/zero-turn/inconsistent counts, `severeLeakCount > 0`, or
+ *    `L > maxAllowedLeakageRate`) BEFORE any Pareto dominance comparison so high C
+ *    or corrupted telemetry can NEVER mask answer leakage,
  * 2) Exact non-dominated Pareto frontier ranking on `(C, -L, T7)` for mature candidates
  *    and `(C, -L)` shadow ranking for pending-T7 candidates,
- * 3) Promotion gate requiring mature T7, student-clustered LCB >= baselineT7 + minT7Gain,
- *    minimum cluster count, and C >= baselineC - nonInferiorityMargin.
+ * 3) Promotion gate requiring mature T7, exact cluster-level Clopper-Pearson-capped
+ *    student-clustered LCB >= baselineT7 + minT7Gain, minimum cluster count, and
+ *    C >= baselineC - nonInferiorityMargin.
  */
 export function evaluateParetoFrontierAndPromotion(
   candidates: readonly CartridgeCandidateMetrics[],
   options: ParetoEvaluationOptions,
 ): ParetoEvaluationResult {
   const maxAllowedLeakageRate = options.maxAllowedLeakageRate ?? 0;
+  if (
+    !Number.isFinite(maxAllowedLeakageRate) ||
+    maxAllowedLeakageRate < 0 ||
+    maxAllowedLeakageRate > 1
+  ) {
+    throw new RangeError(
+      `maxAllowedLeakageRate must be a finite number in [0, 1] (received ${String(maxAllowedLeakageRate)}).`,
+    );
+  }
   const minT7Gain = options.minT7Gain ?? 0.05;
   const nonInferiorityMargin = options.nonInferiorityMargin ?? 0.02;
   const minClusterCount = options.minClusterCount ?? 5;
@@ -225,15 +534,7 @@ export function evaluateParetoFrontierAndPromotion(
   const safePending: CartridgeCandidateMetrics[] = [];
 
   for (const candidate of candidates) {
-    const vetoReasons: string[] = [];
-    if (candidate.l.severeLeakCount > 0) {
-      vetoReasons.push(`severeLeakCount=${candidate.l.severeLeakCount} exceeds 0`);
-    }
-    if (candidate.l.rate > maxAllowedLeakageRate + EPSILON) {
-      vetoReasons.push(
-        `leakageRate=${candidate.l.rate.toFixed(6)} exceeds maxAllowedLeakageRate=${maxAllowedLeakageRate}`,
-      );
-    }
+    const vetoReasons = validateLeakageTelemetryFailClosed(candidate, maxAllowedLeakageRate);
 
     if (vetoReasons.length > 0) {
       vetoMap.set(candidate.candidateId, vetoReasons);
@@ -297,25 +598,36 @@ export function evaluateParetoFrontierAndPromotion(
 
     // Non-dominated safe candidate on Pareto frontier: check promotion gate.
     const promotionBlockers: string[] = [];
+    if (!Number.isFinite(candidate.c.rate) || candidate.c.rate < 0 || candidate.c.rate > 1) {
+      promotionBlockers.push(`invalid_c_rate:${String(candidate.c.rate)}`);
+    }
+
     if (candidate.t7.status === "pending") {
       promotionBlockers.push(`t7_pending:${candidate.t7.reason}`);
     } else {
-      if (candidate.t7.learnerClusterCount < minClusterCount) {
-        promotionBlockers.push(
-          `insufficient_student_clusters:${candidate.t7.learnerClusterCount}<${minClusterCount}`,
-        );
-      }
-      const requiredT7Lcb = options.baseline.t7Rate + minT7Gain;
-      if (candidate.t7.learnerClusterLowerBound + EPSILON < requiredT7Lcb) {
-        promotionBlockers.push(
-          `t7_lcb_below_gain_threshold:${candidate.t7.learnerClusterLowerBound.toFixed(4)}<${requiredT7Lcb.toFixed(4)}`,
-        );
-      }
-      const minAllowedC = options.baseline.cRate - nonInferiorityMargin;
-      if (candidate.c.rate + EPSILON < minAllowedC) {
-        promotionBlockers.push(
-          `c_below_non_inferiority:${candidate.c.rate.toFixed(4)}<${minAllowedC.toFixed(4)}`,
-        );
+      if (
+        !Number.isFinite(candidate.t7.rate) ||
+        !Number.isFinite(candidate.t7.learnerClusterLowerBound)
+      ) {
+        promotionBlockers.push("invalid_t7_metrics:non_finite");
+      } else {
+        if (candidate.t7.learnerClusterCount < minClusterCount) {
+          promotionBlockers.push(
+            `insufficient_student_clusters:${candidate.t7.learnerClusterCount}<${minClusterCount}`,
+          );
+        }
+        const requiredT7Lcb = options.baseline.t7Rate + minT7Gain;
+        if (candidate.t7.learnerClusterLowerBound + EPSILON < requiredT7Lcb) {
+          promotionBlockers.push(
+            `t7_lcb_below_gain_threshold:${candidate.t7.learnerClusterLowerBound.toFixed(4)}<${requiredT7Lcb.toFixed(4)}`,
+          );
+        }
+        const minAllowedC = options.baseline.cRate - nonInferiorityMargin;
+        if (candidate.c.rate + EPSILON < minAllowedC) {
+          promotionBlockers.push(
+            `c_below_non_inferiority:${candidate.c.rate.toFixed(4)}<${minAllowedC.toFixed(4)}`,
+          );
+        }
       }
     }
 
