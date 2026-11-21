@@ -24,6 +24,7 @@ import {
 import {
   assertNoRawPiiInText,
   assertNoRawPiiInValue,
+  assertPseudonymizedTrajectory,
   canonicalizeIdentifier,
   canonicalizeTrajectoryRecord,
   clusterErrorTrajectories,
@@ -122,6 +123,26 @@ function checkPrototypePollutionKeys(
   }
 }
 
+function checkStrictPlainObjectOwnProperties(
+  obj: Record<string, unknown>,
+  path: string,
+  issues: string[],
+): void {
+  if (Object.getOwnPropertySymbols(obj).length > 0) {
+    issues.push(`${path}:forbidden_symbol_key`);
+  }
+  for (const key of Object.getOwnPropertyNames(obj)) {
+    if (PROTOTYPE_POLLUTION_KEYS.has(key)) continue;
+    const desc = Object.getOwnPropertyDescriptor(obj, key);
+    if (!desc) continue;
+    if (desc.get || desc.set) {
+      issues.push(`${path}:forbidden_accessor_property`);
+    } else if (!desc.enumerable) {
+      issues.push(`${path}:forbidden_non_enumerable_property`);
+    }
+  }
+}
+
 function checkOnlyDeclaredKeys(
   obj: Record<string, unknown>,
   allowedKeys: ReadonlySet<string>,
@@ -144,7 +165,12 @@ function checkNonEmptyStringField(
   issues: string[],
   maxLength: number = MAX_PATCH_STRING_LENGTH,
 ): void {
-  const val = obj[key];
+  const desc = Object.getOwnPropertyDescriptor(obj, key);
+  if (!desc || !desc.enumerable || desc.get || desc.set) {
+    issues.push(`${path}.${key}:must_be_nonempty_string(max=${maxLength})`);
+    return;
+  }
+  const val = desc.value;
   if (typeof val !== "string" || val.trim().length === 0 || val.length > maxLength) {
     issues.push(`${path}.${key}:must_be_nonempty_string(max=${maxLength})`);
   }
@@ -160,6 +186,7 @@ function validateRubricAnchorExampleShape(
     return;
   }
   checkPrototypePollutionKeys(value, path, issues);
+  checkStrictPlainObjectOwnProperties(value, path, issues);
   checkOnlyDeclaredKeys(value, RUBRIC_ANCHOR_KEYS, path, issues);
   checkNonEmptyStringField(value, "anchorId", path, issues);
   if (value.label !== "positive" && value.label !== "negative") {
@@ -196,6 +223,7 @@ function validateSurfacePayloadSchema(surface: string, payload: unknown): void {
           return;
         }
         checkPrototypePollutionKeys(item, path, issues);
+        checkStrictPlainObjectOwnProperties(item, path, issues);
         checkOnlyDeclaredKeys(item, MOVE_RULE_KEYS, path, issues);
         checkNonEmptyStringField(item, "id", path, issues);
         checkNonEmptyStringField(item, "conceptId", path, issues);
@@ -221,6 +249,7 @@ function validateSurfacePayloadSchema(surface: string, payload: unknown): void {
           return;
         }
         checkPrototypePollutionKeys(item, path, issues);
+        checkStrictPlainObjectOwnProperties(item, path, issues);
         checkOnlyDeclaredKeys(item, HINT_STEP_KEYS, path, issues);
         if (
           typeof item.stage !== "number" ||
@@ -251,6 +280,7 @@ function validateSurfacePayloadSchema(surface: string, payload: unknown): void {
           return;
         }
         checkPrototypePollutionKeys(item, path, issues);
+        checkStrictPlainObjectOwnProperties(item, path, issues);
         checkOnlyDeclaredKeys(item, RUBRIC_RULE_KEYS, path, issues);
         checkNonEmptyStringField(item, "ruleId", path, issues);
         checkNonEmptyStringField(item, "conceptId", path, issues);
@@ -291,12 +321,15 @@ function validateSurfacePayloadSchema(surface: string, payload: unknown): void {
         break;
       }
       checkPrototypePollutionKeys(payload, "approvedTemplateSlots", issues);
+      checkStrictPlainObjectOwnProperties(payload, "approvedTemplateSlots", issues);
       for (const key of Object.getOwnPropertyNames(payload)) {
         if (PROTOTYPE_POLLUTION_KEYS.has(key)) continue;
+        const desc = Object.getOwnPropertyDescriptor(payload, key);
+        if (!desc || !desc.enumerable || desc.get || desc.set) continue;
         if (key.trim().length === 0 || key.length > MAX_SLOT_KEY_LENGTH) {
           issues.push("approvedTemplateSlots.[unexpected_key]:invalid_slot_key");
         }
-        const val = payload[key];
+        const val = desc.value;
         if (typeof val !== "string" || val.length > MAX_PATCH_STRING_LENGTH) {
           issues.push("approvedTemplateSlots.[unexpected_key]:value_must_be_finite_string");
         }
@@ -323,10 +356,38 @@ export interface DisjointSplitOptions {
 }
 
 /**
- * Verifies strict canonicalized (learnerPseudoId, itemFamilyId) disjointness between
- * `holdout` and `train`/`dev`. Throws `HoldoutFirewallError` on any violation.
+ * Verifies raw-PII / pseudonymization invariants FIRST, then strict canonicalized
+ * `(learnerPseudoId, itemFamilyId)` disjointness between `holdout` and `train`/`dev`.
+ * Throws `CartridgePiiViolationError` before any `HoldoutFirewallError` so raw PII IDs
+ * can never echo into holdout overlap error messages or fields.
  */
 export function assertDisjointSplitInvariants(split: DisjointDatasetSplit): void {
+  // Defense-in-depth: scan the entire split and enforce pseudonymized trajectory invariants FIRST
+  // so raw PII learner/trajectory IDs are quarantined before any overlap error is constructed.
+  assertNoRawPiiInValue(split, "disjoint_split");
+  for (const record of [
+    ...split.holdout,
+    ...split.train,
+    ...split.dev,
+    ...(split.quarantinedCrossing ?? []),
+  ]) {
+    assertPseudonymizedTrajectory(record);
+  }
+  if (split.holdoutFirewall) {
+    for (const id of split.holdoutFirewall.holdoutTrajectoryIds) {
+      assertNoRawPiiInText(canonicalizeIdentifier(id, "holdoutTrajectoryId"), "holdoutTrajectoryId");
+    }
+    for (const id of split.holdoutFirewall.holdoutLearnerPseudoIds) {
+      assertNoRawPiiInText(
+        canonicalizeIdentifier(id, "holdoutLearnerPseudoId"),
+        "holdoutLearnerPseudoId",
+      );
+    }
+    for (const id of split.holdoutFirewall.holdoutItemFamilyIds) {
+      assertNoRawPiiInText(canonicalizeIdentifier(id, "holdoutItemFamilyId"), "holdoutItemFamilyId");
+    }
+  }
+
   const holdoutTrajIds = new Set(
     split.holdout.map((t) => canonicalizeIdentifier(t.trajectoryId, "trajectoryId")),
   );
@@ -561,16 +622,30 @@ export function assertNoHoldoutLeakage(
   trajectories: readonly ErrorTrajectoryRecord[],
   firewall: HoldoutFirewall,
 ): void {
+  // Run raw PII checks on BOTH firewall and incoming trajectories FIRST before overlap reporting.
+  assertNoRawPiiInValue(firewall, "holdout_firewall");
+  assertNoRawPiiInValue(trajectories, "firewall_trajectories");
+
   const blockedTrajectoryIds = new Set(
-    firewall.holdoutTrajectoryIds.map((id) => canonicalizeIdentifier(id, "holdoutTrajectoryId")),
+    firewall.holdoutTrajectoryIds.map((id) => {
+      const canonical = canonicalizeIdentifier(id, "holdoutTrajectoryId");
+      assertNoRawPiiInText(canonical, "holdoutTrajectoryId");
+      return canonical;
+    }),
   );
   const blockedLearners = new Set(
-    firewall.holdoutLearnerPseudoIds.map((id) =>
-      canonicalizeIdentifier(id, "holdoutLearnerPseudoId"),
-    ),
+    firewall.holdoutLearnerPseudoIds.map((id) => {
+      const canonical = canonicalizeIdentifier(id, "holdoutLearnerPseudoId");
+      assertNoRawPiiInText(canonical, "holdoutLearnerPseudoId");
+      return canonical;
+    }),
   );
   const blockedFamilies = new Set(
-    firewall.holdoutItemFamilyIds.map((id) => canonicalizeIdentifier(id, "holdoutItemFamilyId")),
+    firewall.holdoutItemFamilyIds.map((id) => {
+      const canonical = canonicalizeIdentifier(id, "holdoutItemFamilyId");
+      assertNoRawPiiInText(canonical, "holdoutItemFamilyId");
+      return canonical;
+    }),
   );
 
   const leakedTrajectoryIds: string[] = [];
@@ -610,19 +685,28 @@ function scanObjectForForbiddenSurfaceKeys(value: unknown, pathPrefix: string): 
   if (!value || typeof value !== "object") return null;
   if (Array.isArray(value)) {
     for (let i = 0; i < value.length; i += 1) {
-      const hit = scanObjectForForbiddenSurfaceKeys(value[i], `${pathPrefix}[${i}]`);
+      const desc = Object.getOwnPropertyDescriptor(value, i);
+      if (!desc || desc.get || desc.set) continue;
+      const hit = scanObjectForForbiddenSurfaceKeys(desc.value, `${pathPrefix}[${i}]`);
       if (hit) return hit;
     }
     return null;
+  }
+  for (const sym of Object.getOwnPropertySymbols(value)) {
+    const symDesc = typeof sym.description === "string" ? sym.description.toLowerCase() : "";
+    if (FORBIDDEN_SURFACE_SET.has(symDesc)) {
+      return `${pathPrefix}.<symbol_key>`;
+    }
   }
   for (const key of Object.getOwnPropertyNames(value)) {
     if (FORBIDDEN_SURFACE_SET.has(key.toLowerCase())) {
       return `${pathPrefix}.${key}`;
     }
+    const desc = Object.getOwnPropertyDescriptor(value, key);
+    if (!desc || desc.get || desc.set) continue;
     // Never interpolate unrecognized/caller-supplied ancestor keys into error paths or attemptedSurface.
     const safeSegment = KNOWN_PATCH_SCHEMA_KEYS.has(key) ? key : "<unexpected_key>";
-    const nested = (value as Record<string, unknown>)[key];
-    const hit = scanObjectForForbiddenSurfaceKeys(nested, `${pathPrefix}.${safeSegment}`);
+    const hit = scanObjectForForbiddenSurfaceKeys(desc.value, `${pathPrefix}.${safeSegment}`);
     if (hit) return hit;
   }
   return null;
@@ -634,8 +718,8 @@ function scanObjectForForbiddenSurfaceKeys(value: unknown, pathPrefix: string): 
  *    `rubricAnchors`, `approvedTemplateSlots`), never touching `permissions`,
  *    `answerVisibility`, `gradingWriteAuthority`, or `leakageDetectors`,
  * 2) conforms strictly to the runtime schema of that surface (no prototype
- *    pollution keys, no malformed containers or non-string fields), and
- * 3) contains zero raw PII across `summary` and every nested string leaf.
+ *    pollution keys, no symbol/accessor/non-enumerable own properties, no malformed containers), and
+ * 3) contains zero raw PII across `summary` and every nested leaf.
  */
 export function assertAllowedGepaPatch(patch: unknown): asserts patch is GepaSurfacePatch {
   // Run PII scan FIRST before any surface/schema check so raw PII in unexpected keys or
@@ -649,9 +733,10 @@ export function assertAllowedGepaPatch(patch: unknown): asserts patch is GepaSur
   }
   const topProtoIssues: string[] = [];
   checkPrototypePollutionKeys(patch, "patch", topProtoIssues);
+  checkStrictPlainObjectOwnProperties(patch, "patch", topProtoIssues);
   if (topProtoIssues.length > 0) {
     throw new GepaInvalidPatchPayloadError(
-      `GEPA patch contains forbidden prototype key: ${topProtoIssues.join(", ")}`,
+      `GEPA patch contains forbidden own property or prototype key: ${topProtoIssues.join(", ")}`,
       "invalid",
       topProtoIssues,
     );
@@ -861,17 +946,49 @@ export function validateAndApplyGepaPatch(
     }
 
     case "approvedTemplateSlots": {
+      const slotIssues: string[] = [];
+      if (!isPlainObject(policy.approvedTemplateSlots)) {
+        slotIssues.push("basePolicy.approvedTemplateSlots:must_be_plain_object");
+      } else {
+        checkPrototypePollutionKeys(
+          policy.approvedTemplateSlots,
+          "basePolicy.approvedTemplateSlots",
+          slotIssues,
+        );
+        checkStrictPlainObjectOwnProperties(
+          policy.approvedTemplateSlots,
+          "basePolicy.approvedTemplateSlots",
+          slotIssues,
+        );
+      }
+      if (!isPlainObject(patch.payload)) {
+        slotIssues.push("approvedTemplateSlots.payload:must_be_plain_object");
+      } else {
+        checkPrototypePollutionKeys(patch.payload, "approvedTemplateSlots", slotIssues);
+        checkStrictPlainObjectOwnProperties(patch.payload, "approvedTemplateSlots", slotIssues);
+      }
+      if (slotIssues.length > 0) {
+        throw new GepaInvalidPatchPayloadError(
+          `Invalid approvedTemplateSlots container: ${slotIssues.join("; ")}`,
+          "approvedTemplateSlots",
+          slotIssues,
+        );
+      }
+
       const nextSlots: Record<string, string> = {};
-      for (const [k, v] of Object.entries(policy.approvedTemplateSlots)) {
+      for (const k of Object.keys(policy.approvedTemplateSlots)) {
         if (!PROTOTYPE_POLLUTION_KEYS.has(k)) {
-          nextSlots[k] = v;
+          const desc = Object.getOwnPropertyDescriptor(policy.approvedTemplateSlots, k);
+          if (desc && desc.enumerable && !desc.get && !desc.set && typeof desc.value === "string") {
+            nextSlots[k] = desc.value;
+          }
         }
       }
-      for (const k of Object.getOwnPropertyNames(patch.payload)) {
+      for (const k of Object.keys(patch.payload)) {
         if (!PROTOTYPE_POLLUTION_KEYS.has(k)) {
-          const val = patch.payload[k];
-          if (typeof val === "string") {
-            nextSlots[k] = val;
+          const desc = Object.getOwnPropertyDescriptor(patch.payload, k);
+          if (desc && desc.enumerable && !desc.get && !desc.set && typeof desc.value === "string") {
+            nextSlots[k] = desc.value;
           }
         }
       }
@@ -1075,6 +1192,14 @@ export interface RunGepaOptimizationRoundInput {
 export function runGepaOptimizationRound(
   input: RunGepaOptimizationRoundInput,
 ): GepaOptimizationRoundResult {
+  // Scan ALL static inputs for raw PII strictly BEFORE disjoint-split / holdout / ID checks
+  // so raw PII learner IDs or fields can never echo into HoldoutFirewallError or RangeError.
+  assertNoRawPiiInValue(input.split, "gepa_round.split");
+  assertNoRawPiiInValue(input.basePolicy, "gepa_round.basePolicy");
+  assertNoRawPiiInValue(input.paretoOptions, "gepa_round.paretoOptions");
+  if (input.extraCandidatePatches !== undefined) {
+    assertNoRawPiiInValue(input.extraCandidatePatches, "gepa_round.extraCandidatePatches");
+  }
   assertDisjointSplitInvariants(input.split);
 
   const reflectionContext = buildGepaReflectionContext({
@@ -1131,6 +1256,11 @@ export function runGepaOptimizationRound(
 
   const rawReceipts: unknown[] = proposed.map((candidate) => input.scoreCandidate(candidate));
 
+  // Scan ALL raw scorer receipts for PII FIRST before any CandidateIdentityError can fire.
+  for (let i = 0; i < proposed.length; i += 1) {
+    assertNoRawPiiInValue(rawReceipts[i], `scorer_receipt[${proposed[i]!.candidateId}]`);
+  }
+
   // Pre-collect all candidateIds across proposed candidates, baseline, and raw receipts so any
   // synthetic malformed-receipt ID can never collide with a valid caller candidateId.
   const reservedIds = new Set<string>();
@@ -1161,8 +1291,6 @@ export function runGepaOptimizationRound(
 
   const candidateMetrics: CartridgeCandidateMetrics[] = proposed.map((candidate, idx) => {
     const rawReceipt = rawReceipts[idx];
-    // Scan the ENTIRE scorer receipt for raw PII first (null/undefined pass safely; PII fails closed).
-    assertNoRawPiiInValue(rawReceipt, `scorer_receipt[${candidate.candidateId}]`);
 
     const makeMalformedVetoReceipt = (): CartridgeCandidateMetrics => {
       const targetId =

@@ -599,4 +599,62 @@ describe("Stage-0 768-episode deterministic student simulator", () => {
     expect(compliantReport.promotable).toBe(true);
     expect(compliantReport.metrics.answerLeakageRate).toBe(0);
   });
+
+  it("rejects scientific-notation prefix false positives ('0.750e1') while catching exact scientific-notation equivalents ('7.50e-1', '75e-2', '7.5 \\times 10^{-1}') for sealed '3/4' (Round-12 P1-2)", () => {
+    // Non-equivalent scientific notations MUST NOT trigger a false-positive leak on sealed "3/4" (0.75) or "0.75".
+    for (const safeHint of [
+      "Compare 0.750e1 (which is 7.5).",
+      "Consider 7.5e1 or 0.75e-1.",
+      "Do not confuse with 0.75 * 10^1 or 0.75 \\times 10^{1}.",
+      "Extreme exponent 7.5e999999999 is safely skipped.",
+      "And 17.5e-1 or 7.5e-12 are distinct.",
+    ]) {
+      expect(detectProtectedLeakage(safeHint, ["3/4", "0.75"], [])).toEqual([]);
+    }
+
+    // Exact scientific-notation equivalents of 3/4 (0.75) MUST ALL trigger leakage!
+    for (const leakyHint of [
+      "The limit equals 7.50e-1.",
+      "Write 7.5e-1 as the result.",
+      "Equivalently 75e-2.",
+      "Notice 0.075e+1 works.",
+      "Or 0.750e0 directly.",
+      "Write 7.5 \\times 10^{-1} here.",
+      "Write 7.5\\times10^{-1} here.",
+      "Write 7.5 × 10^-1 directly.",
+      "Or 7.5 \\cdot 10^{-1}.",
+      "Or 0.750 * 10^0.",
+    ]) {
+      expect(detectProtectedLeakage(leakyHint, ["3/4", "LIMIT_DIRECT_3_4"], [])).toEqual(["3/4"]);
+    }
+
+    // End-to-end 768-episode check: releasing "7.50e-1" on calc_lhopital_non_indeterminate v0 ("3/4") MUST fail leakage!
+    const base = createCompliantReferencePolicy();
+    const sciLeakPolicy: Stage0TutorPolicy = {
+      policyId: "scientific_notation_leak_policy",
+      diagnoseAndRespond(turnInput) {
+        if (
+          turnInput.episodeId ===
+          "ep_calc_lhopital_non_indeterminate__adversarial_hint_prober__v0"
+        ) {
+          return {
+            diagnosedMisconceptionId: null,
+            move: "refuse_direct_answer",
+            releasedHintText: "The direct substitution value is 7.50e-1.",
+            leaksProtectedStepOrAnswer: false,
+          };
+        }
+        return base.diagnoseAndRespond(turnInput);
+      },
+    };
+    const leakyReport = evaluateStage0Gate(sciLeakPolicy, { seed: 20261121 });
+    expect(leakyReport.promotable).toBe(false);
+    expect(leakyReport.metrics.leakedEpisodeCount).toBe(1);
+    expect(leakyReport.failingWitnesses[0]!.detectedLeakTokens).toEqual(["3/4"]);
+
+    // End-to-end 768-episode check: compliant reference policy still clears all 768 episodes with 0 leakage!
+    const compliantReport = evaluateStage0Gate(base, { seed: 20261121 });
+    expect(compliantReport.promotable).toBe(true);
+    expect(compliantReport.metrics.answerLeakageRate).toBe(0);
+  });
 });

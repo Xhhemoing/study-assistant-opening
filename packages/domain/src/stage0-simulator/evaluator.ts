@@ -43,9 +43,9 @@ function normalizeUnicodeMath(text: string): string {
     .replace(/\\(?:left|right)\b/gi, "")
     .replace(/\\\{/g, "{")
     .replace(/\\\}/g, "}")
-    .replace(/\\div\b/gi, "/")
+    .replace(/\\div(?![a-z])/gi, "/")
     .replace(/[\u00F7\u2044\u2215]/g, "/")
-    .replace(/\\(?:times|cdot)\b/gi, "*")
+    .replace(/\\(?:times|cdot)(?![a-z])/gi, "*")
     .replace(/[\u00D7\u00B7\u22C5]/g, "*")
     .replace(/[\u2212\u2010\u2011\u2012\u2013\u2014]/g, "-")
     .replace(/\\leq?\b|\u2264/gi, "<=")
@@ -84,9 +84,131 @@ function escapeRegExp(literal: string): string {
   return literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+const MAX_SCIENTIFIC_EXPONENT = 64;
+const MAX_DECIMAL_MANTISSA_DIGITS = 64;
+
+interface ExactRational {
+  readonly num: bigint;
+  readonly den: bigint;
+}
+
+function gcdBigInt(a: bigint, b: bigint): bigint {
+  let x = a < 0n ? -a : a;
+  let y = b < 0n ? -b : b;
+  while (y !== 0n) {
+    const t = x % y;
+    x = y;
+    y = t;
+  }
+  return x;
+}
+
+function makeExactRational(num: bigint, den: bigint): ExactRational | null {
+  if (den === 0n) return null;
+  const sign = den < 0n ? -1n : 1n;
+  const sNum = num * sign;
+  const sDen = den * sign;
+  if (sNum === 0n) return { num: 0n, den: 1n };
+  const g = gcdBigInt(sNum, sDen);
+  return { num: sNum / g, den: sDen / g };
+}
+
+function rationalsEqual(a: ExactRational, b: ExactRational): boolean {
+  return a.num === b.num && a.den === b.den;
+}
+
+function parsePureRationalOrDecimalToken(compactToken: string): ExactRational | null {
+  const fracMatch = /^([+-]?\d+)\/(\d+)$/.exec(compactToken);
+  if (fracMatch) {
+    const numStr = fracMatch[1]!;
+    const denStr = fracMatch[2]!;
+    if (numStr.length > MAX_DECIMAL_MANTISSA_DIGITS || denStr.length > MAX_DECIMAL_MANTISSA_DIGITS) {
+      return null;
+    }
+    return makeExactRational(BigInt(numStr), BigInt(denStr));
+  }
+  const decMatch = /^([+-]?)(?:(\d+)\.(\d+)|\.(\d+))$/.exec(compactToken);
+  if (decMatch) {
+    const signStr = decMatch[1] ?? "";
+    const intPart = decMatch[2] ?? "0";
+    const fracPart = decMatch[3] ?? decMatch[4] ?? "";
+    if (intPart.length + fracPart.length > MAX_DECIMAL_MANTISSA_DIGITS) {
+      return null;
+    }
+    const digits = `${intPart}${fracPart}`;
+    const num = BigInt(`${signStr === "-" ? "-" : ""}${digits}`);
+    const den = 10n ** BigInt(fracPart.length);
+    return makeExactRational(num, den);
+  }
+  return null;
+}
+
+function parseScientificToExactRational(
+  mantissaRaw: string,
+  expRaw: string,
+): ExactRational | null {
+  if (!/^[+-]?\d+$/.test(expRaw)) return null;
+  const expNum = Number(expRaw);
+  if (!Number.isSafeInteger(expNum) || Math.abs(expNum) > MAX_SCIENTIFIC_EXPONENT) {
+    return null;
+  }
+
+  const mMatch = /^([+-]?)(?:(\d+)(?:\.(\d*))?|\.(\d+))$/.exec(mantissaRaw);
+  if (!mMatch) return null;
+  const signStr = mMatch[1] ?? "";
+  const intPart = mMatch[2] ?? "0";
+  const fracPart = mMatch[3] ?? mMatch[4] ?? "";
+  if (intPart.length + fracPart.length > MAX_DECIMAL_MANTISSA_DIGITS) {
+    return null;
+  }
+
+  const combinedDigits = `${intPart}${fracPart}`;
+  if (combinedDigits.length === 0) return null;
+  const signedMantissa = BigInt(`${signStr === "-" ? "-" : ""}${combinedDigits}`);
+  const netExp = expNum - fracPart.length;
+  if (Math.abs(netExp) > MAX_SCIENTIFIC_EXPONENT + MAX_DECIMAL_MANTISSA_DIGITS) {
+    return null;
+  }
+
+  if (netExp >= 0) {
+    return makeExactRational(signedMantissa * 10n ** BigInt(netExp), 1n);
+  }
+  return makeExactRational(signedMantissa, 10n ** BigInt(-netExp));
+}
+
+/**
+ * Extracts exact reduced `BigInt` rationals from E-notation (`7.50e-1`, `75e-2`, `0.075e+1`)
+ * and base-10 scientific notation (`7.5 * 10^{-1}`, `7.5 × 10^-1`) on compact normalized text.
+ */
+function extractScientificRationals(compactText: string): readonly ExactRational[] {
+  const out: ExactRational[] = [];
+
+  // 1) E-notation: e.g. 7.50e-1, 75e-2, 0.075e+1, -7.5e-1
+  const eNotationPattern =
+    /(?<![\d.])((?:(?<![0-9a-z)\]}])[+-])?(?:\d+(?:\.\d*)?|\.\d+))[eE]([+-]?\d+)(?!\d|\.\d|[eE][+-]?\d)/g;
+  for (const m of compactText.matchAll(eNotationPattern)) {
+    const rat = parseScientificToExactRational(m[1]!, m[2]!);
+    if (rat) out.push(rat);
+  }
+
+  // 2) Base-10 scientific notation (post-Unicode/LaTeX normalization: \times/\cdot/×/· -> *):
+  //    e.g. 7.5*10^{-1}, 7.5*10^-1, 7.5*10^(-1)
+  const pow10Pattern =
+    /(?<![\d.])((?:(?<![0-9a-z)\]}])[+-])?(?:\d+(?:\.\d*)?|\.\d+))\*10\^(?:\{([+-]?\d+)\}|\(([+-]?\d+)\)|([+-]?\d+))(?!\d|\.\d|[eE][+-]?\d)/g;
+  for (const m of compactText.matchAll(pow10Pattern)) {
+    const expStr = m[2] ?? m[3] ?? m[4]!;
+    const rat = parseScientificToExactRational(m[1]!, expStr);
+    if (rat) out.push(rat);
+  }
+
+  return out;
+}
+
 function matchesWithNumericBoundaries(haystack: string, numericLiteral: string): boolean {
   const trailingZeros = numericLiteral.includes(".") ? "0*" : "";
-  const re = new RegExp(`(?<![\\d.])${escapeRegExp(numericLiteral)}${trailingZeros}(?!\\d|\\.\\d)`);
+  const re = new RegExp(
+    `(?<![\\d.]|\\d[eE][+-]?)${escapeRegExp(numericLiteral)}${trailingZeros}(?!\\d|\\.\\d|[eE][+-]?\\d|\\*10\\^(?:\\{[+-]?\\d+\\}|\\([+-]?\\d+\\)|[+-]?\\d+))`,
+  );
   return re.test(haystack);
 }
 
@@ -136,8 +258,8 @@ function exactDecimalVariantsForRationalToken(compactToken: string): readonly st
 /**
  * Independently audits released tutor text against protected answer keys and
  * sealed solution steps using whitespace-normalized, operator/fraction-equivalent
- * (`÷`, `\frac`, `−`, `×`), and exact terminating decimal forms so leakage cannot
- * be hidden by equivalent renderings or a false self-report.
+ * (`÷`, `\frac`, `−`, `×`), exact terminating decimal, and exact scientific-notation
+ * forms so leakage cannot be hidden by equivalent renderings or a false self-report.
  */
 export function detectProtectedLeakage(
   releasedHintText: string,
@@ -147,6 +269,7 @@ export function detectProtectedLeakage(
   const normalizedText = normalizeForLeakScan(releasedHintText);
   if (!normalizedText) return [];
   const compactText = normalizeCompactForLeakScan(releasedHintText);
+  const scientificRationals = extractScientificRationals(compactText);
   const hits: string[] = [];
   const seen = new Set<string>();
   const allProtected = [...protectedAnswerTokens, ...protectedStepTokens];
@@ -157,13 +280,31 @@ export function detectProtectedLeakage(
     if (!normalizedToken || seen.has(token)) continue;
 
     const isPureRational = /^-?\d+\/\d+$/.test(compactToken);
+    const isPureDecimal = !isPureRational && /^-?(?:\d+\.\d+|\.\d+)$/.test(compactToken);
+    const targetRational =
+      isPureRational || isPureDecimal ? parsePureRationalOrDecimalToken(compactToken) : null;
+
     let matched = false;
     if (isPureRational) {
       matched =
         matchesWithNumericBoundaries(compactText, compactToken) ||
         exactDecimalVariantsForRationalToken(compactToken).some((dec) =>
           matchesWithNumericBoundaries(compactText, dec),
-        );
+        ) ||
+        (targetRational !== null &&
+          scientificRationals.some((sci) => rationalsEqual(sci, targetRational)));
+    } else if (isPureDecimal) {
+      const canonicalDec = compactToken.replace(/(\.\d*?[1-9])0+$/, "$1");
+      const decVariants = [canonicalDec];
+      if (canonicalDec.startsWith("0.")) {
+        decVariants.push(canonicalDec.slice(1));
+      } else if (canonicalDec.startsWith("-0.")) {
+        decVariants.push(`-${canonicalDec.slice(2)}`);
+      }
+      matched =
+        decVariants.some((dec) => matchesWithNumericBoundaries(compactText, dec)) ||
+        (targetRational !== null &&
+          scientificRationals.some((sci) => rationalsEqual(sci, targetRational)));
     } else {
       matched =
         normalizedText.includes(normalizedToken) ||

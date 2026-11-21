@@ -242,6 +242,24 @@ export const KNOWN_SAFE_DIAGNOSTIC_KEYS: ReadonlySet<string> = new Set([
   "currentPolicy",
   "policy",
   "appliedPatches",
+  // DisjointDatasetSplit, HoldoutFirewall & ParetoEvaluationOptions
+  "train",
+  "dev",
+  "holdout",
+  "quarantinedCrossing",
+  "holdoutFirewall",
+  "holdoutTrajectoryIds",
+  "holdoutLearnerPseudoIds",
+  "holdoutItemFamilyIds",
+  "baseline",
+  "cRate",
+  "t7Rate",
+  "maxAllowedLeakageRate",
+  "minT7Gain",
+  "nonInferiorityMargin",
+  "minClusterCount",
+  "confidenceZ",
+  "allowPartialMaturity",
 ]);
 
 export interface RawPiiScanOptions {
@@ -282,6 +300,82 @@ export function assertNoRawPiiInText(
       safeTrajectoryId,
     );
   }
+}
+
+function scanOwnPropertyForPii(
+  owner: object,
+  rawKey: string | symbol,
+  pathLabel: string,
+  rawPathLabel: string,
+  out: string[],
+  seen: WeakSet<object>,
+  skipKeys: ReadonlySet<string> | undefined,
+  allowedNumericMetadataPaths: ReadonlySet<string> | undefined,
+  allowedDiagnosticKeys: ReadonlySet<string>,
+): void {
+  const desc = Object.getOwnPropertyDescriptor(owner, rawKey);
+  if (!desc) return;
+
+  if (typeof rawKey === "symbol") {
+    const symDesc = typeof rawKey.description === "string" ? rawKey.description : "";
+    const symPath = `${pathLabel}.[symbol_key]`;
+    out.push(`${symPath}:forbidden_symbol_key`);
+    if (FORBIDDEN_PII_FIELD_SET.has(normalizeFieldKey(symDesc))) {
+      out.push(`${symPath}:forbidden_pii_field`);
+    }
+    for (const reason of detectRawPiiReasonsInText(symDesc)) {
+      out.push(`${symPath}:key_${reason}`);
+    }
+    if (desc.get || desc.set) {
+      out.push(`${symPath}:forbidden_accessor_property`);
+      return;
+    }
+    collectRawPiiViolations(
+      desc.value,
+      symPath,
+      out,
+      seen,
+      undefined,
+      allowedNumericMetadataPaths,
+      allowedDiagnosticKeys,
+      symPath,
+    );
+    return;
+  }
+
+  const normalizedKey = normalizeFieldKey(rawKey);
+  const isForbiddenField = FORBIDDEN_PII_FIELD_SET.has(normalizedKey);
+  const keyReasons = detectRawPiiReasonsInText(rawKey);
+  const isSensitiveOrPiiKey = isForbiddenField || keyReasons.length > 0;
+  const safeSegment = isSensitiveOrPiiKey
+    ? "[redacted_key]"
+    : allowedDiagnosticKeys.has(rawKey)
+      ? rawKey
+      : "<unexpected_key>";
+  const childPath = `${pathLabel}.${safeSegment}`;
+  const rawChildPath = `${rawPathLabel}.${rawKey}`;
+
+  if (isForbiddenField) {
+    out.push(`${childPath}:forbidden_pii_field`);
+  }
+  for (const reason of keyReasons) {
+    out.push(`${childPath}:key_${reason}`);
+  }
+  if (skipKeys?.has(rawKey)) return;
+  if (desc.get || desc.set) {
+    out.push(`${childPath}:forbidden_accessor_property`);
+    return;
+  }
+  collectRawPiiViolations(
+    desc.value,
+    childPath,
+    out,
+    seen,
+    undefined,
+    allowedNumericMetadataPaths,
+    allowedDiagnosticKeys,
+    rawChildPath,
+  );
 }
 
 function collectRawPiiViolations(
@@ -325,9 +419,17 @@ function collectRawPiiViolations(
   seen.add(value);
 
   if (Array.isArray(value)) {
+    const visitedIndices = new Set<string>();
     for (let i = 0; i < value.length; i += 1) {
+      visitedIndices.add(String(i));
+      const desc = Object.getOwnPropertyDescriptor(value, i);
+      if (!desc) continue;
+      if (desc.get || desc.set) {
+        out.push(`${pathLabel}[${i}]:forbidden_accessor_property`);
+        continue;
+      }
       collectRawPiiViolations(
-        value[i],
+        desc.value,
         `${pathLabel}[${i}]`,
         out,
         seen,
@@ -337,38 +439,38 @@ function collectRawPiiViolations(
         `${rawPathLabel}[${i}]`,
       );
     }
+    // Also inspect any non-index own string (enumerable or non-enumerable) and symbol properties on arrays.
+    for (const rawKey of Reflect.ownKeys(value)) {
+      if (typeof rawKey === "string" && (rawKey === "length" || visitedIndices.has(rawKey))) {
+        continue;
+      }
+      scanOwnPropertyForPii(
+        value,
+        rawKey,
+        pathLabel,
+        rawPathLabel,
+        out,
+        seen,
+        undefined,
+        allowedNumericMetadataPaths,
+        allowedDiagnosticKeys,
+      );
+    }
     return;
   }
 
-  for (const key of Object.keys(value as Record<string, unknown>)) {
-    const normalizedKey = normalizeFieldKey(key);
-    const isForbiddenField = FORBIDDEN_PII_FIELD_SET.has(normalizedKey);
-    const keyReasons = detectRawPiiReasonsInText(key);
-    const isSensitiveOrPiiKey = isForbiddenField || keyReasons.length > 0;
-    const safeSegment = isSensitiveOrPiiKey
-      ? "[redacted_key]"
-      : allowedDiagnosticKeys.has(key)
-        ? key
-        : "<unexpected_key>";
-    const childPath = `${pathLabel}.${safeSegment}`;
-    const rawChildPath = `${rawPathLabel}.${key}`;
-
-    if (isForbiddenField) {
-      out.push(`${childPath}:forbidden_pii_field`);
-    }
-    for (const reason of keyReasons) {
-      out.push(`${childPath}:key_${reason}`);
-    }
-    if (skipKeys?.has(key)) continue;
-    collectRawPiiViolations(
-      (value as Record<string, unknown>)[key],
-      childPath,
+  // Inspect ALL own keys (enumerable + non-enumerable string keys AND symbol keys) via descriptors.
+  for (const rawKey of Reflect.ownKeys(value)) {
+    scanOwnPropertyForPii(
+      value,
+      rawKey,
+      pathLabel,
+      rawPathLabel,
       out,
       seen,
-      undefined,
+      skipKeys,
       allowedNumericMetadataPaths,
       allowedDiagnosticKeys,
-      rawChildPath,
     );
   }
 }
@@ -638,6 +740,7 @@ export function clusterErrorTrajectories(
   trajectories: readonly ErrorTrajectoryRecord[],
   options: ClusteringOptions = {},
 ): ClusteringSummary {
+  assertNoRawPiiInValue(options, "clustering_options");
   const minSupport = options.minSupport ?? 5;
   const similarityThreshold = options.similarityThreshold ?? 0.72;
 

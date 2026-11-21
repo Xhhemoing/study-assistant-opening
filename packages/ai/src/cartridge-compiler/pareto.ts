@@ -238,6 +238,7 @@ export function computeCandidateMetrics(
 ): CartridgeCandidateMetrics {
   const canonicalCandidateId = canonicalizeIdentifier(candidateId, "candidateId");
   assertNoRawPiiInText(canonicalCandidateId, "candidateId");
+  assertNoRawPiiInValue(options, `computeCandidateMetrics[${canonicalCandidateId}].options`);
   assertNoRawPiiInValue(trajectories, `computeCandidateMetrics[${canonicalCandidateId}].trajectories`);
 
   const confidenceZ = options.confidenceZ ?? DEFAULT_ONE_SIDED_95_Z;
@@ -1061,6 +1062,10 @@ export function evaluateParetoFrontierAndPromotion(
   candidates: readonly CartridgeCandidateMetrics[],
   options: ParetoEvaluationOptions,
 ): ParetoEvaluationResult {
+  // Scan ALL options and candidate receipts for raw PII FIRST before option RangeErrors or duplicate-ID errors.
+  assertNoRawPiiInValue(options, "pareto_options");
+  assertNoRawPiiInValue(candidates, "pareto_candidates");
+
   const {
     baselineCRate,
     baselineT7Rate,

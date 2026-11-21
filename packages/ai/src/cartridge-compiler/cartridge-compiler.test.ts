@@ -2436,4 +2436,164 @@ describe("Exact (C, -L, T7) Pareto frontier, Hard Pre-Pareto Veto, and Promotion
     expect(round.pareto.promotedCandidateIds).toContain("__malformed_candidate_0");
     expect(round.pareto.promotedCandidateIds).toContain("__malformed_receipt_0");
   });
+
+  it("blocks non-enumerable, symbol-keyed, and accessor properties carrying PII or hidden slots in clustering and GEPA patch application (Round-12 P1-1)", () => {
+    const base = makeBasePolicy();
+
+    // 1) Non-enumerable PII slot inside GEPA approvedTemplateSlots MUST throw CartridgePiiViolationError (never copy into policy!)
+    const hiddenPiiSlots: Record<string, string> = {};
+    Object.defineProperty(hiddenPiiSlots, "hint", {
+      value: "SSN 123-45-6789",
+      enumerable: false,
+      configurable: true,
+    });
+    expect(() =>
+      validateAndApplyGepaPatch(base, {
+        surface: "approvedTemplateSlots",
+        summary: "Hidden non-enumerable PII slot",
+        payload: hiddenPiiSlots,
+      }),
+    ).toThrow(CartridgePiiViolationError);
+
+    // 2) Clean non-enumerable slot property MUST still be rejected fail-closed by GEPA schema/application!
+    const hiddenCleanSlots: Record<string, string> = {};
+    Object.defineProperty(hiddenCleanSlots, "hint", {
+      value: "Check boundary premise",
+      enumerable: false,
+      configurable: true,
+    });
+    expect(() =>
+      validateAndApplyGepaPatch(base, {
+        surface: "approvedTemplateSlots",
+        summary: "Hidden non-enumerable clean slot",
+        payload: hiddenCleanSlots,
+      }),
+    ).toThrow(GepaInvalidPatchPayloadError);
+
+    // 3) Symbol-keyed PII in GEPA slot payload and clustering trajectory MUST fail closed without echoing description or PII
+    const symKey = Symbol("secret_student_key");
+    const symbolPiiSlots: Record<string | symbol, string> = {
+      [symKey]: "alice@example.com",
+    };
+    let symErr: unknown;
+    try {
+      validateAndApplyGepaPatch(base, {
+        surface: "approvedTemplateSlots",
+        summary: "Symbol-keyed PII slot",
+        payload: symbolPiiSlots,
+      });
+    } catch (err) {
+      symErr = err;
+    }
+    expect(symErr).toBeInstanceOf(CartridgePiiViolationError);
+    expect((symErr as CartridgePiiViolationError).message).not.toContain("alice@example.com");
+    expect((symErr as CartridgePiiViolationError).message).not.toContain("secret_student_key");
+
+    const trajWithHiddenPii = makeTrajectory({ trajectoryId: "r12_non_enum_traj" });
+    Object.defineProperty(trajWithHiddenPii, "hiddenSecret", {
+      value: "123-45-6789",
+      enumerable: false,
+      configurable: true,
+    });
+    expect(() => clusterErrorTrajectories([trajWithHiddenPii])).toThrow(CartridgePiiViolationError);
+
+    const trajWithSymbolPii = makeTrajectory({ trajectoryId: "r12_sym_traj" }) as unknown as Record<
+      string | symbol,
+      unknown
+    >;
+    trajWithSymbolPii[Symbol("raw_note")] = "bob@university.edu";
+    expect(() =>
+      clusterErrorTrajectories([trajWithSymbolPii as unknown as ErrorTrajectoryRecord]),
+    ).toThrow(CartridgePiiViolationError);
+
+    // 4) Accessor getter descriptor MUST fail closed WITHOUT invoking the getter!
+    let getterInvoked = false;
+    const getterSlots: Record<string, string> = {};
+    Object.defineProperty(getterSlots, "hint", {
+      enumerable: true,
+      get() {
+        getterInvoked = true;
+        return "123-45-6789";
+      },
+    });
+    expect(() =>
+      validateAndApplyGepaPatch(base, {
+        surface: "approvedTemplateSlots",
+        summary: "Getter slot",
+        payload: getterSlots,
+      }),
+    ).toThrow(CartridgePiiViolationError);
+    expect(getterInvoked).toBe(false);
+  });
+
+  it("scans raw PII strictly before holdout overlap checks so overlapping raw email/SSN learner IDs throw CartridgePiiViolationError without echoing PII (Round-12 P1-3)", () => {
+    const trainEmailTraj = makeTrajectory({
+      trajectoryId: "r12_p13_train_1",
+      learnerPseudoId: "alice@example.com",
+      itemFamilyId: "fam_r12_a",
+    });
+    const holdoutEmailTraj = makeTrajectory({
+      trajectoryId: "r12_p13_holdout_1",
+      learnerPseudoId: "alice@example.com",
+      itemFamilyId: "fam_r12_b",
+    });
+    const taintedSplit: DisjointDatasetSplit = {
+      train: [trainEmailTraj],
+      dev: [],
+      holdout: [holdoutEmailTraj],
+      quarantinedCrossing: [],
+      holdoutFirewall: {
+        holdoutTrajectoryIds: [holdoutEmailTraj.trajectoryId],
+        holdoutLearnerPseudoIds: [holdoutEmailTraj.learnerPseudoId],
+        holdoutItemFamilyIds: [holdoutEmailTraj.itemFamilyId],
+      },
+    };
+
+    // 1) Direct assertDisjointSplitInvariants MUST throw CartridgePiiViolationError (NOT HoldoutFirewallError) and never echo alice@example.com!
+    let directErr: unknown;
+    try {
+      assertDisjointSplitInvariants(taintedSplit);
+    } catch (err) {
+      directErr = err;
+    }
+    expect(directErr).toBeInstanceOf(CartridgePiiViolationError);
+    const directPii = directErr as CartridgePiiViolationError;
+    expect(directPii.message).not.toContain("alice@example.com");
+    expect(JSON.stringify(directPii)).not.toContain("alice@example.com");
+
+    // 2) Full runGepaOptimizationRound MUST also throw CartridgePiiViolationError first and never echo alice@example.com!
+    let roundErr: unknown;
+    try {
+      runGepaOptimizationRound({
+        basePolicy: makeBasePolicy(),
+        split: taintedSplit,
+        scoreCandidate: (c) =>
+          buildMatureCohort(c.candidateId, {
+            learnerCount: 25,
+            repairedCount: 23,
+            t7PassedCount: 24,
+          }),
+        paretoOptions: {
+          baseline: { cRate: 0.85, t7Rate: 0.72 },
+        },
+      });
+    } catch (err) {
+      roundErr = err;
+    }
+    expect(roundErr).toBeInstanceOf(CartridgePiiViolationError);
+    const roundPii = roundErr as CartridgePiiViolationError;
+    expect(roundPii.message).not.toContain("alice@example.com");
+    expect(JSON.stringify(roundPii)).not.toContain("alice@example.com");
+
+    // 3) Direct assertNoHoldoutLeakage with raw email in firewall/trajectories MUST throw CartridgePiiViolationError without echoing email!
+    let fwErr: unknown;
+    try {
+      assertNoHoldoutLeakage([trainEmailTraj], taintedSplit.holdoutFirewall);
+    } catch (err) {
+      fwErr = err;
+    }
+    expect(fwErr).toBeInstanceOf(CartridgePiiViolationError);
+    expect((fwErr as CartridgePiiViolationError).message).not.toContain("alice@example.com");
+    expect(JSON.stringify(fwErr)).not.toContain("alice@example.com");
+  });
 });
