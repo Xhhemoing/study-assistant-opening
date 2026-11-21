@@ -1600,76 +1600,121 @@ const ARTICLE_DIMENSION_TOKEN =
 const ARTICLE_REPETITION_NOUN_RE = /^(?:times?|way|turn|round|try|chance)$/;
 const ARTICLE_SINGULAR_S_RE = /(?:[suio]s|ics|^(?:series|species|lens|canvas|atlas|bias|gas|bus|alias|news|means|corps))$/;
 const ARTICLE_IRREGULAR_PLURAL_RE = /^(?:children|people|men|women|teeth|feet|mice|geese|criteria|phenomena)$/;
-const ARTICLE_CLAUSE_PUNCTUATION = /[.!?。！？;；,，:：\r\n\u2028\u2029]/u.source;
-const ARTICLE_CLAUSE_BOUNDARY_RE = new RegExp(
-  `^(?:${ARTICLE_CLAUSE_PUNCTUATION}|that|which|who|whom|whose|where|when|while|if|unless|because|since|although|though|whether)$`,
+const ARTICLE_MEASUREMENT_UNIT =
+  /(?:kg|cm|mm|km|mg|ms|ns|us|hz|khz|mhz|ghz|pa|kpa|mpa|mol|ev|kev|mev|gev|db|rad|deg|px|pt|kb|mb|gb|tb|ohm|°[cf]?|[msgvwjncfhlktb%])(?:\^?[+-]?\d+)?/.source;
+const ARTICLE_MEASUREMENT_TOKEN =
+  `${UNGROUPED_DECIMAL}[ \\t]*${ARTICLE_MEASUREMENT_UNIT}(?:[ \\t]*/[ \\t]*${ARTICLE_MEASUREMENT_UNIT})*(?![\\w/%°^])`;
+
+const ARTICLE_MEASURE_WORD_RE = new RegExp(
+  `^(?:${ARTICLE_MEASUREMENT_UNIT}|dimensional|sided|step|phase|stage|cycle|point|part|digit|bit|byte|page|` +
+  "unit|term|factor|second|minute|hour|day|week|month|year|inch|foot|yard|mile|met(?:er|re)|" +
+  "(?:centi|milli|kilo)met(?:er|re)|gram|kilogram|milligram|pound|ounce|tonne?|lit(?:er|re)|gallon|degree)$",
 );
+const ARTICLE_PRENOMINAL_ADJECTIVE_RE = /^(?:new|old|small|large|simple|complex|[a-z]+(?:able|ible|ical|ive|ous|less|ful|ish|ary))$/;
+
+const ARTICLE_CLAUSE_END_RE = /[.!?。！？;；:：\r\n\u2028\u2029]/u;
+const ARTICLE_SUBORDINATE_RE = /^(?:that|which|who|whom|whose|where|when|while|if|unless|because|since|although|though|whether)$/;
 const ARTICLE_CLAUSE_TOKEN_RE = new RegExp(
   `${RELATION_OP_RE.source}|${UNGROUPED_DECIMAL}|[\\p{L}_][\\p{L}\\p{M}\\p{N}_]*(?:-[\\p{L}\\p{M}\\p{N}_]+)*|` +
-  `${/[()[\]{}]/u.source}|${ARTICLE_CLAUSE_PUNCTUATION}`,
+  `${/[()[\]{},，]/u.source}|${ARTICLE_CLAUSE_END_RE.source}`,
   "gu",
 );
 const ARTICLE_RELATION_COMPLEMENT_RE = /^(?:in|on|at|with|for|from|over|under|within|between|among|through|near|around|across|along|into|onto)$/;
-const ARTICLE_NOUN_SLOT_RE = /^(?:the|a|an|this|these|those|each|every|all|both|any|some|no|its|their|our|your|my|his|her|of|by)$/;
+const ARTICLE_SYMBOLIC_LHS_RE = /^\p{L}(?:\d+|_[\p{L}\p{N}]+)?$/u;
+const ARTICLE_DETERMINER_RE = /^(?:the|a|an|this|these|those|each|every|all|both|any|some|no|its|their|our|your|my|his|her)$/;
+const ARTICLE_PARTICIPLE_COMPLEMENT_RE = /^(?:in|on|by|from|with|to|for|at|as|under|over|into|through)$/;
 const ARTICLE_FINITE_AUXILIARY_RE = /^(?:is|are|was|were|am|be|been|being|has|have|had|do|does|did|can|could|will|would|shall|should|may|might|must)$/;
-const ARTICLE_INFINITIVE_AUXILIARY_RE = /^(?:be|have|do)$/;
-const ARTICLE_FINITE_VERB_RE = new RegExp("^(?:" +
-  "fails|failed|converges|converged|diverges|diverged|vanishes|vanished|exceeds|exceeded|implies|implied|" +
-  "satisfies|satisfied|violates|violated|occurs|occurred|appears|appeared|exists|existed|becomes|became|" +
-  "differs|differed|succeeds|succeeded|commutes|commuted|terminates|terminated|contradicts|contradicted|" +
-  "guarantees|guaranteed|ensures|ensured)$");
+const ARTICLE_INFINITIVE_CHAIN_RE = /^(?:be|have|been|being)$/;
+const ARTICLE_FINITE_VERB_RE = /^(?:fails|converges|diverges|vanishes|exceeds|implies|satisfies|violates|occurs|appears|exists|becomes|differs|succeeds|commutes|terminates|contradicts|guarantees|ensures)$/;
 const ARTICLE_HOMOGRAPH_VERB_RE = new RegExp("^(?:" +
-  "holds|held|equals|equaled|remains|remained|stays|stayed|works|worked|means|meant|states|stated|shows|showed|" +
-  "gives|gave|yields|yielded|makes|made|takes|took|uses|used|needs|needed|lacks|lacked|contains|contained|" +
-  "includes|included|excludes|excluded|requires|required|matches|matched|applies|applied|follows|followed|" +
-  "depends|depended|lies|lay|falls|fell|rises|rose|grows|grew|decays|decayed|reduces|reduced|simplifies|simplified|" +
-  "cancels|cancelled|persists|persisted|forces|forced|determines|determined|reaches|reached|attains|attained|" +
-  "intersects|intersected|crosses|crossed|starts|started|begins|began|ends|ended|stops|stopped|continues|continued|" +
-  "produces|produced|returns|returned)$");
-const ARTICLE_PLURAL_VERB_RE = /^(?:fail|hold|equal|vanish|converge|diverge|commute|differ|match|satisfy|violate|exist)$/;
+  "holds|equals|remains|stays|works|means|states|shows|gives|yields|makes|takes|uses|needs|lacks|contains|" +
+  "includes|excludes|requires|matches|applies|follows|depends|lies|falls|rises|grows|decays|reduces|simplifies|" +
+  "cancels|persists|forces|determines|reaches|attains|intersects|crosses|starts|begins|ends|stops|continues|produces|returns)$");
+const ARTICLE_INTRANSITIVE_PAST_RE = new RegExp("^(?:" +
+  "failed|converged|diverged|vanished|occurred|appeared|existed|remained|stayed|persisted|worked|held|fell|rose|" +
+  "grew|decayed|began|ended|stopped|became|differed|succeeded|commuted|terminated|depended|lay|continued)$");
+const ARTICLE_TRANSITIVE_PAST_RE = new RegExp("^(?:" +
+  "exceeded|implied|satisfied|violated|contradicted|guaranteed|ensured|equaled|meant|stated|showed|gave|yielded|" +
+  "made|took|used|needed|lacked|contained|included|excluded|required|matched|applied|followed|reduced|simplified|" +
+  "cancelled|forced|determined|reached|attained|intersected|crossed|started|produced|returned|computed|defined|measured|tested)$");
+const ARTICLE_PARTICIPLE_FORM_RE = /^(?:[a-z]{2,}(?:ed|ing)|shown|given|taken|known|written|drawn|seen)$/;
+const ARTICLE_PLURAL_VERB_RE = /^(?:fail|hold|equal|vanish|converge|diverge|commute|differ|match|satisfy|violate|exist|work|remain|stay|appear|occur|apply|follow|depend)$/;
 const ARTICLE_IMPERATIVE_RE = /^(?:compute|find|show|prove|check|explain|determine|evaluate|verify|state|give|write|list|sketch|plot)$/;
 
-function hasConditionalClausePredicate(remainder: string): boolean {
+function articleClauseTokens(remainder: string): string[] {
+  const tokens: string[] = [];
   let depth = 0;
-  let previous = "";
-  let afterQuantifier = false;
-  let hasRelationComplement = false;
-  let hasConjoinedSubject = false;
   for (const [token] of remainder.toLowerCase().matchAll(ARTICLE_CLAUSE_TOKEN_RE)) {
     if ("([{".includes(token)) {
+      // Keep one token for the entire group, including function arguments.
+      if (depth === 0) tokens.push(token);
       depth += 1;
-      continue;
-    }
-    if (")]}".includes(token)) {
+    } else if (")]}".includes(token)) {
       depth = Math.max(0, depth - 1);
-      if (depth === 0) {
-        previous = "";
-        afterQuantifier = false;
-      }
+    } else if (depth === 0) {
+      if (token.length === 1 && ARTICLE_CLAUSE_END_RE.test(token)) break;
+      tokens.push(token === "，" ? "," : token);
+    }
+  }
+  return tokens;
+}
+
+function hasConditionalClausePredicate(remainder: string): boolean {
+  const tokens = articleClauseTokens(remainder);
+  let previous = "";
+  let expectsDeterminedNoun = false;
+  let afterQuantifier = false;
+  let inInfinitive = false;
+  let complementOperator = -1;
+  let hasConjoinedSubject = false;
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index]!;
+    if (token === ",") {
+      const start = tokens[index + 1] ?? "";
+      if (!(start === "as" || ARTICLE_SUBORDINATE_RE.test(start) || ARTICLE_DETERMINER_RE.test(start) ||
+        ARTICLE_RELATION_COMPLEMENT_RE.test(start))) break;
+      const closingComma = tokens.indexOf(",", index + 2);
+      if (closingComma < 0) break;
+      // Resume the main clause after the aside rather than scanning its verbs.
+      index = closingComma;
       continue;
     }
-    if (depth > 0) continue;
-    if (ARTICLE_CLAUSE_BOUNDARY_RE.test(token)) break;
+    if (ARTICLE_SUBORDINATE_RE.test(token)) break;
     const afterConjunction = previous === "and" || previous === "or";
-    // "Choose a given value and compute its square" joins instructions.
     if (afterConjunction && ARTICLE_IMPERATIVE_RE.test(token)) break;
 
-    if (!hasRelationComplement && RELATION_OP_RE.test(token)) return true;
-    if (ARTICLE_FINITE_AUXILIARY_RE.test(token) &&
-      !(previous === "to" && ARTICLE_INFINITIVE_AUXILIARY_RE.test(token))) return true;
-    if (ARTICLE_FINITE_VERB_RE.test(token)) return true;
-
-    const nounSlot: boolean = afterConjunction || afterQuantifier || ARTICLE_NOUN_SLOT_RE.test(previous) ||
-      ARTICLE_RELATION_COMPLEMENT_RE.test(previous);
-    if (!nounSlot &&
-      (ARTICLE_HOMOGRAPH_VERB_RE.test(token) || (hasConjoinedSubject && ARTICLE_PLURAL_VERB_RE.test(token)))) {
-      return true;
+    // Exempt the operator of an immediately following symbolic complement only.
+    if (ARTICLE_RELATION_COMPLEMENT_RE.test(token) && ARTICLE_SYMBOLIC_LHS_RE.test(tokens[index + 1] ?? "")) {
+      complementOperator = index + (tokens[index + 2] === "(" ? 3 : 2);
     }
+    if (index !== complementOperator && RELATION_OP_RE.test(token)) return true;
+
+    const participle = ARTICLE_PARTICIPLE_FORM_RE.test(token);
+    const infinitiveAuxiliary = ARTICLE_INFINITIVE_CHAIN_RE.test(token);
+    const nounSlot: boolean = afterConjunction || expectsDeterminedNoun || afterQuantifier ||
+      previous === "of" || previous === "by" || ARTICLE_RELATION_COMPLEMENT_RE.test(previous);
+    if (ARTICLE_FINITE_AUXILIARY_RE.test(token) &&
+      !(inInfinitive && (infinitiveAuxiliary || token === "do"))) return true;
+    if (ARTICLE_FINITE_VERB_RE.test(token)) return true;
+    if (!nounSlot) {
+      if (ARTICLE_HOMOGRAPH_VERB_RE.test(token) || (hasConjoinedSubject && ARTICLE_PLURAL_VERB_RE.test(token))) {
+        return true;
+      }
+      if (!inInfinitive && (ARTICLE_INTRANSITIVE_PAST_RE.test(token) ||
+        (ARTICLE_TRANSITIVE_PAST_RE.test(token) && !ARTICLE_PARTICIPLE_COMPLEMENT_RE.test(tokens[index + 1] ?? "")))) {
+        return true;
+      }
+    }
+
     // A number opens a noun slot after "among the", but is a label in "theorem 1".
-    afterQuantifier = nounSlot && (ARTICLE_CARDINAL_RE.test(token) || DECIMAL_LITERAL_RE.test(token));
+    const quantity = ARTICLE_CARDINAL_RE.test(token) || DECIMAL_LITERAL_RE.test(token);
+    afterQuantifier = nounSlot && quantity;
+    expectsDeterminedNoun = ARTICLE_DETERMINER_RE.test(token) ||
+      (expectsDeterminedNoun && (quantity || participle ||
+        ARTICLE_PRENOMINAL_ADJECTIVE_RE.test(token) ||
+        (ARTICLE_MODIFIER_WORD_RE.test(token) && !ARTICLE_LY_NOUN_RE.test(token))));
+    inInfinitive = token === "to" || (inInfinitive && infinitiveAuxiliary);
     hasConjoinedSubject ||= afterConjunction;
-    // "Rank of A = 2" has a predicate. "Point on y = x^2" has a complement.
-    hasRelationComplement ||= ARTICLE_RELATION_COMPLEMENT_RE.test(token);
     previous = token;
   }
   return false;
@@ -1677,39 +1722,47 @@ function hasConditionalClausePredicate(remainder: string): boolean {
 
 function startsArticleNounPhrase(text: string): boolean {
   const tokens = new RegExp(
-    `[ \\t]+(?:${ARTICLE_DIMENSION_TOKEN}|${ARTICLE_QUANTITY_TOKEN}(?=[ \\t])|([a-z]+)(?:-[a-z]+)*\\b)`,
+    `[ \\t]+(?:${ARTICLE_DIMENSION_TOKEN}|${ARTICLE_MEASUREMENT_TOKEN}|${ARTICLE_QUANTITY_TOKEN}(?=[ \\t])|([a-z]+)(?:-[a-z]+)*\\b)`,
     "iyu",
   );
   let modifiers = 0;
   let afterTemporalModifier = false;
   let afterParticipialConditional = false;
+  let afterPluralModifier = false;
+  let needsMeasureWord = false;
   for (let match = tokens.exec(text); match !== null; match = tokens.exec(text)) {
     const token = match[0].trim().toLowerCase();
     const remainder = text.slice(tokens.lastIndex);
     const cardinal = ARTICLE_CARDINAL_RE.test(token);
-    if (cardinal && ((token !== "one" && token !== "1") || ARTICLE_CARDINAL_ADJUNCT_RE.test(remainder))) {
-      return false;
-    }
+    if (cardinal && ARTICLE_CARDINAL_ADJUNCT_RE.test(remainder)) return false;
 
     const word = match[1]?.toLowerCase();
+    if (needsMeasureWord && (word === undefined || cardinal)) return false;
+    if (afterParticipialConditional && afterPluralModifier &&
+      (ARTICLE_PLURAL_VERB_RE.test(token) || ARTICLE_INTRANSITIVE_PAST_RE.test(token) ||
+        ARTICLE_TRANSITIVE_PAST_RE.test(token))) return false;
+
     // A repetition word after "next" or "last" needs a head, as in "next time step".
     const repetitionModifier = afterTemporalModifier && ARTICLE_REPETITION_NOUN_RE.test(token);
-    if (word !== undefined && !repetitionModifier) {
+    if (word !== undefined && !cardinal && !repetitionModifier) {
       if (token.length < 2 || ARTICLE_STOP_WORD_RE.test(word)) return false;
-      if (!cardinal && (!ARTICLE_MODIFIER_WORD_RE.test(word) || ARTICLE_LY_NOUN_RE.test(word))) {
-        const head = token.slice(token.lastIndexOf("-") + 1);
-        if (ARTICLE_IRREGULAR_PLURAL_RE.test(head)) return false;
-        if (!head.endsWith("s") || ARTICLE_SINGULAR_S_RE.test(head)) {
-          return !afterParticipialConditional || !hasConditionalClausePredicate(remainder);
-        }
-        // A regular plural can modify a singular head, as in "systems engineer".
-        if (afterParticipialConditional) return false;
+      const head = token.slice(token.lastIndexOf("-") + 1);
+      if (ARTICLE_IRREGULAR_PLURAL_RE.test(head)) return false;
+      const singular = !head.endsWith("s") || ARTICLE_SINGULAR_S_RE.test(head);
+      if (needsMeasureWord) {
+        // A bare plural cardinal needs both a measure word and a head.
+        if (!singular || !ARTICLE_MEASURE_WORD_RE.test(token)) return false;
+        needsMeasureWord = false;
+      } else if (!ARTICLE_MODIFIER_WORD_RE.test(word) || ARTICLE_LY_NOUN_RE.test(word)) {
+        if (singular) return !afterParticipialConditional || !hasConditionalClausePredicate(remainder);
+        afterPluralModifier = true;
       }
     }
     if (modifiers === 3) return false;
     modifiers += 1;
     afterTemporalModifier = token === "next" || token === "last";
     afterParticipialConditional ||= token === "given" || token === "provided";
+    needsMeasureWord ||= cardinal && token !== "one" && token !== "1";
   }
   return false;
 }
