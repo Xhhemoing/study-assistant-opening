@@ -13,6 +13,7 @@ import {
   roundHalfUp05,
   safeArithmeticMean,
   snapToScoreGrid,
+  toBinary64Units,
   validateExamBlueprint,
 } from "./ielts-blueprint";
 import type {
@@ -793,6 +794,23 @@ function referenceSkillMasteryAt(
   return clamp(retrievability(belief, observedAtMs) * sigmoid(belief.abilityMean), 0, 1);
 }
 
+function scoreWithScaledSpan(
+  origin: number,
+  spanStart: number,
+  spanEnd: number,
+  ratio: number,
+  [min, max]: readonly [number, number],
+  adjustment = 0,
+): number {
+  if (ratio === 0 || spanStart === spanEnd) return clamp(origin + adjustment, min, max);
+  // Add the binary64 ratio's exact product to the origin before narrowing to a number.
+  const { significand, exponent } = decomposeFiniteFloat(ratio);
+  const base = (toBinary64Units(origin) + toBinary64Units(adjustment)) << BigInt(-exponent);
+  const span = toBinary64Units(spanEnd) - toBinary64Units(spanStart);
+  const value = exactRationalPow2ToNumber(base + span * BigInt(significand), 1n, MIN_BINARY64_UNIT_EXPONENT + exponent);
+  return clamp(value, min, max);
+}
+
 function computeRubricWeightedSectionScore(
   parts: readonly { readonly weight: number }[],
   scores: readonly number[],
@@ -972,7 +990,6 @@ function simulateRubricSectionDraw(input: {
   const sectionAnchor = input.rubricSummary.sectionAnchors.get(input.section.sectionId);
   const [minB, maxB] = input.section.scoreRange;
   const baseOffset = maxB > minB + 3 ? minB + 3 : minB;
-  const bandScale = maxB - baseOffset;
   const speakingShift = input.section.sectionId === "speaking" ? input.rubricSummary.speakingFluencyShift : 0;
 
   for (const part of input.section.parts) {
@@ -996,12 +1013,16 @@ function simulateRubricSectionDraw(input: {
         referenceSkillMasteryAt(input.beliefs, id, partAnchor.observedAtMs, input.trimmedLearnerId),
       );
       const refMastery = refVals.length > 0 ? refVals.reduce((a, b) => a + b, 0) / refVals.length : 0.5 * sigmoid(0);
-      const span = partAnchor.high - partAnchor.low;
-      const anchorPos = span > 0 ? partAnchor.low + span * clamp(0.5 + 0.25 * epsScore, 0, 1) : partAnchor.low;
-      const masteryDeltaBand = bandScale * (meanMastery - refMastery);
-      untimedPartScore = clamp(anchorPos + masteryDeltaBand + speakingShift * 0.25, minB, maxB);
+      const anchorPos = scoreWithScaledSpan(
+        partAnchor.low, partAnchor.low, partAnchor.high, clamp(0.5 + 0.25 * epsScore, 0, 1), input.section.scoreRange,
+      );
+      untimedPartScore = scoreWithScaledSpan(
+        anchorPos, baseOffset, maxB, meanMastery - refMastery, input.section.scoreRange, speakingShift * 0.25,
+      );
     } else {
-      untimedPartScore = clamp(baseOffset + bandScale * meanMastery + speakingShift + 0.2 * epsScore, minB, maxB);
+      untimedPartScore = scoreWithScaledSpan(
+        baseOffset, baseOffset, maxB, meanMastery, input.section.scoreRange, speakingShift + 0.2 * epsScore,
+      );
     }
 
     let timedPartScore = untimedPartScore;
@@ -1046,7 +1067,7 @@ function simulateRubricSectionDraw(input: {
           partCensoredCounts.set(part.partId, (partCensoredCounts.get(part.partId) ?? 0) + 1);
           usedSec = input.sectionLimitSec;
           const completionRatio = clamp(remaining / partDuration, 0.35, 1);
-          timedPartScore = clamp(minB + (untimedPartScore - minB) * completionRatio, minB, maxB);
+          timedPartScore = scoreWithScaledSpan(minB, minB, untimedPartScore, completionRatio, input.section.scoreRange);
           if (input.captureCensored) {
             censoredItems.push({
               itemId: part.partId,
@@ -1454,7 +1475,6 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
         if (sec.scoringKind !== "rubric_band") continue;
         const [minB, maxB] = sec.scoreRange;
         const baseOffset = maxB > minB + 3 ? minB + 3 : minB;
-        const bandScale = maxB - baseOffset;
         const speakingShift = sec.sectionId === "speaking" ? rubricSummary.speakingFluencyShift : 0;
         const sectionAnchor = rubricSummary.sectionAnchors.get(sec.sectionId);
         const detPartScores: number[] = [];
@@ -1483,10 +1503,8 @@ export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulatio
                   0,
                 ) / part.skillIds.length
               : 0.5 * sigmoid(0);
-          const untimedPartScore = clamp(
-            partAnchor.low + bandScale * (meanMastery - refMastery) + speakingShift * 0.25,
-            minB,
-            maxB,
+          const untimedPartScore = scoreWithScaledSpan(
+            partAnchor.low, baseOffset, maxB, meanMastery - refMastery, sec.scoreRange, speakingShift * 0.25,
           );
           detPartScores.push(untimedPartScore);
         }

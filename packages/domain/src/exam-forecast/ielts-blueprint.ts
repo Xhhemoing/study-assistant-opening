@@ -87,7 +87,12 @@ export function foldExponentBuckets(buckets: readonly bigint[]): bigint {
   return total === 0n ? 0n : total << BigInt(previousIndex * 32);
 }
 
-export function exactRationalPow2ToNumber(num: bigint, den: bigint, pow2Offset: number): number {
+export function exactRationalPow2ToNumber(
+  num: bigint,
+  den: bigint,
+  pow2Offset: number,
+  direction: "nearest" | "floor" | "ceil" = "nearest",
+): number {
   if (num === 0n) return 0;
   const sign = num < 0n ? -1 : 1;
   const magnitude = num < 0n ? -num : num;
@@ -96,7 +101,8 @@ export function exactRationalPow2ToNumber(num: bigint, den: bigint, pow2Offset: 
     ? magnitude < (den << BigInt(bitLengthDiff))
     : (magnitude << BigInt(-bitLengthDiff)) < den;
   const exponent = bitLengthDiff + pow2Offset - (belowPower ? 1 : 0);
-  if (exponent > 1023) return sign * Infinity;
+  const awayFromZero = direction === (sign < 0 ? "floor" : "ceil");
+  if (exponent > 1023) return sign * (direction === "nearest" || awayFromZero ? Infinity : Number.MAX_VALUE);
 
   // Round in units of one ULP, including the fixed spacing of subnormals.
   const unitExponent = Math.max(MIN_BINARY64_UNIT_EXPONENT, exponent - 52);
@@ -105,7 +111,10 @@ export function exactRationalPow2ToNumber(num: bigint, den: bigint, pow2Offset: 
   const divisor = shift < 0 ? den << BigInt(-shift) : den;
   let significand = dividend / divisor;
   const twiceRemainder = (dividend % divisor) << 1n;
-  if (twiceRemainder > divisor || (twiceRemainder === divisor && (significand & 1n) === 1n)) {
+  const roundUp = direction === "nearest"
+    ? twiceRemainder > divisor || (twiceRemainder === divisor && (significand & 1n) === 1n)
+    : awayFromZero && twiceRemainder !== 0n;
+  if (roundUp) {
     significand += 1n;
   }
   // The rounded integer (including a carry to 2^53) is exactly representable.

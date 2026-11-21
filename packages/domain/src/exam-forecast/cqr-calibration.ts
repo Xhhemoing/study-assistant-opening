@@ -98,21 +98,27 @@ export function evaluatePavIsotonic(
   return last.value;
 }
 
+type NumericBounds = { readonly low: number; readonly high: number };
+
+function cqrObservationBounds(observedScore: WholePaperCalibrationRecord["observedScore"]): NumericBounds {
+  if (observedScore.kind === "exact") return { low: observedScore.score, high: observedScore.score };
+  return { low: Math.min(observedScore.low, observedScore.high), high: Math.max(observedScore.low, observedScore.high) };
+}
+
 /** Worst-case interval-censored CQR nonconformity score: never midpoint! */
 export function cqrWorstCaseNonconformity(record: WholePaperCalibrationRecord): number {
   const { q10, q90 } = record.predictedQuantiles;
-  const yLow =
-    record.observedScore.kind === "exact"
-      ? record.observedScore.score
-      : Math.min(record.observedScore.low, record.observedScore.high);
-  const yHigh =
-    record.observedScore.kind === "exact"
-      ? record.observedScore.score
-      : Math.max(record.observedScore.low, record.observedScore.high);
-  return Math.max(q10 - yLow, yHigh - q90);
+  const { low, high } = cqrObservationBounds(record.observedScore);
+  return Math.max(q10 - low, high - q90);
 }
 
-type NumericBounds = { readonly low: number; readonly high: number };
+function exactCqrNonconformity(record: WholePaperCalibrationRecord): bigint {
+  const { q10, q90 } = record.predictedQuantiles;
+  const { low, high } = cqrObservationBounds(record.observedScore);
+  const below = toBinary64Units(q10) - toBinary64Units(low);
+  const above = toBinary64Units(high) - toBinary64Units(q90);
+  return below > above ? below : above;
+}
 
 function assertFiniteJointPassTarget(target: JointPassTarget): void {
   if (!Number.isFinite(target.targetOverall) || !Number.isFinite(target.targetMinSection)) {
@@ -495,18 +501,25 @@ function computeIntervalFromCalibrations(
   if (n < 4 || k > n) {
     return { status: "insufficient_calibration", n, k, validCalibrations };
   }
-  const residuals = validCalibrations.map(cqrWorstCaseNonconformity).sort((a, b) => a - b);
-  const rK = residuals[k - 1] ?? 0;
+  const residuals = validCalibrations.map(exactCqrNonconformity).sort((a, b) => a < b ? -1 : a > b ? 1 : 0);
+  const radius = residuals[k - 1]!;
 
   const [minScore, maxScore] = blueprint.scoreRange;
-  const clampedLow = Math.min(maxScore, Math.max(minScore, simulation.q10 - rK));
-  const clampedHigh = Math.min(maxScore, Math.max(minScore, simulation.q90 + rK));
-  const safeMid =
-    Math.sign(clampedLow) === Math.sign(clampedHigh)
-      ? clampedLow + 0.5 * (clampedHigh - clampedLow)
-      : 0.5 * clampedLow + 0.5 * clampedHigh;
-  const safeLow = clampedLow <= clampedHigh ? clampedLow : safeMid;
-  const safeHigh = clampedLow <= clampedHigh ? clampedHigh : safeMid;
+  const minUnits = toBinary64Units(minScore);
+  const maxUnits = toBinary64Units(maxScore);
+  const clip = (value: bigint): bigint => value < minUnits ? minUnits : value > maxUnits ? maxUnits : value;
+  const clampedLow = clip(toBinary64Units(simulation.q10) - radius);
+  const clampedHigh = clip(toBinary64Units(simulation.q90) + radius);
+  const inverted = clampedLow > clampedHigh;
+  const midpointNumerator = clampedLow + clampedHigh;
+  const divisor = inverted ? 2n : 1n;
+  // Round toward the outside before snapping so an inward binary64 rounding cannot hide a grid crossing.
+  const safeLow = exactRationalPow2ToNumber(
+    inverted ? midpointNumerator : clampedLow, divisor, MIN_BINARY64_UNIT_EXPONENT, "floor",
+  );
+  const safeHigh = exactRationalPow2ToNumber(
+    inverted ? midpointNumerator : clampedHigh, divisor, MIN_BINARY64_UNIT_EXPONENT, "ceil",
+  );
   let low = snapToScoreGrid(safeLow, blueprint.scoreRange, blueprint.scoreStep, "floor");
   let high = snapToScoreGrid(safeHigh, blueprint.scoreRange, blueprint.scoreStep, "ceil");
   if (low > safeLow) low = minScore;
@@ -519,7 +532,9 @@ function computeIntervalFromCalibrations(
     blueprint.scoreStep,
     "nearest",
   );
-  return { status: "ready", n, k, conformalMargin: rK, low, high, width, pointEstimate, validCalibrations };
+  const reportedRadius = exactRationalPow2ToNumber(radius, 1n, MIN_BINARY64_UNIT_EXPONENT);
+  const conformalMargin = Math.min(Number.MAX_VALUE, Math.max(-Number.MAX_VALUE, reportedRadius));
+  return { status: "ready", n, k, conformalMargin, low, high, width, pointEstimate, validCalibrations };
 }
 
 export function computeConformalBandInterval(input: {
@@ -689,19 +704,19 @@ export function evaluateExamForecast(input: {
     throw new RangeError("Unexpected insufficient calibration after pre-check");
   }
   const { k: effectiveK, conformalMargin: rK, low, high, width, pointEstimate } = interval;
+  const exactIntervalWidth = toBinary64Units(high) - toBinary64Units(low);
 
   let maxInformativeWidth: number;
   let widthGateExceeded: boolean;
   if (explicitWidth === undefined) {
     const [minScore, maxScore] = input.blueprint.scoreRange;
     const exactSpan = toBinary64Units(maxScore) - toBinary64Units(minScore);
-    const exactIntervalWidth = toBinary64Units(high) - toBinary64Units(low);
     widthGateExceeded = (exactIntervalWidth << 1n) > exactSpan;
     // The receipt still reports a number, which can round a half-subnormal to zero.
     maxInformativeWidth = exactRationalPow2ToNumber(exactSpan, 2n, MIN_BINARY64_UNIT_EXPONENT);
   } else {
     maxInformativeWidth = explicitWidth;
-    widthGateExceeded = width > explicitWidth;
+    widthGateExceeded = exactIntervalWidth > toBinary64Units(explicitWidth);
   }
   if (widthGateExceeded) {
     const allSectionIds = input.blueprint.sections.map((s) => s.sectionId);

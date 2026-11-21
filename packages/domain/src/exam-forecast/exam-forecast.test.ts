@@ -5095,3 +5095,130 @@ describe("Round-17 binary64 arithmetic through the public forecast", () => {
     expect(() => evaluate(min, Infinity)).toThrow(/maxInformativeWidth must be finite and positive/);
   });
 });
+
+describe("Round-18 extreme scores and forecast width gates", () => {
+  const huge = 1e308;
+  const learnerId = "learner-target";
+  const skillIds = ["k"];
+  const timeModel = { mu: 3, speedLoading: 0, skillLoading: {}, sigma: 0.01 };
+  const blueprintFor = (scoreRange: readonly [number, number], scoreStep: number, itemScores?: readonly [number, number]) => ({
+    ...createSharedFullPaperBlueprint({
+      blueprintId: "r18",
+      title: "R18",
+      totalTimeLimitMinutes: 30,
+      totalPoints: scoreRange[1],
+      skillIds,
+      sections: [{
+        sectionId: "listening",
+        label: "Listening",
+        timeLimitMinutes: null,
+        weight: 1,
+        scoreRange,
+        scoreStep,
+        parts: [{ partId: "p", label: "P", weight: 1, skillIds, timeModel }],
+        ...(itemScores ? {
+          scoringKind: "item_raw_table",
+          items: [{ itemId: "q", sectionId: "listening", partId: "p", skillIds, guess: 0, lapse: 0, timeModel }],
+          rawToBandTable: itemScores.map((score, raw) => ({ rawMin: raw, rawMax: raw, score })),
+        } : { scoringKind: "rubric_band" }),
+      }],
+    }),
+    scoreRange,
+    scoreStep,
+  });
+  const beliefs = { k: createSkillBelief({
+    workspaceId: "ws-1", learnerId, courseId: "r18", confirmedSkillVersion: 1,
+    abilityMean: 0, abilityVariance: 1, lastDirectRecallAtMs: DAY_MS,
+  }) };
+  const itemEvidence = makeIndependentSectionEvidence().filter((rec) => rec.sectionId === "listening");
+  const itemDraw = (z: number) => ({
+    zLatent: [z], nuSpeed: 0, itemUniforms: [0.5], itemTimeNormals: [0], rubricScoreNormals: [], rubricTimeNormals: [],
+  });
+  const calibrations = (predicted: number, observed: number) => makeCalibrationRecords(4).map((rec): WholePaperCalibrationRecord => ({
+    ...rec,
+    blueprintId: "r18",
+    predictedQuantiles: { q10: predicted, q50: predicted, q90: predicted },
+    observedScore: { kind: "exact", score: observed },
+    observedSectionScores: { listening: observed },
+  }));
+
+  it("computes paired gain, standard error, and hourly ROI when a draw difference exceeds MAX_VALUE", () => {
+    const blueprint = blueprintFor([-huge, huge], huge, [-huge, huge]);
+    const input = {
+      blueprint, learnerId, beliefs, evidence: [], examAtMs: DAY_MS, baselineActions: [], crnSeed: 18,
+      candidateAction: {
+        actionId: "repair", title: "Repair", durationHours: 1, kind: "skill_repair" as const,
+        skillEffects: { k: { abilityDelta: 2_000 } },
+      },
+      precomputedDraws: [itemDraw(-1_000), itemDraw(-3_000)],
+    };
+    expect.soft(evaluateCrnActionRoi(input)).toMatchObject({
+      baselineMeanScore: -huge, withActionMeanScore: 0, pairedMeanGain: huge,
+      monteCarloSe: huge, roiBandPerHour: huge, timeSqueezeReduction: 0,
+    });
+    expect.soft(evaluateCrnActionRoi({
+      ...input, precomputedDraws: [itemDraw(-1_000)], candidateAction: { ...input.candidateAction, durationHours: 2 },
+    }).roiBandPerHour).toBe(huge);
+    const tiny = Number.MIN_VALUE;
+    expect.soft(evaluateCrnActionRoi({
+      ...input, blueprint: blueprintFor([0, tiny], tiny, [0, tiny]),
+      candidateAction: { ...input.candidateAction, durationHours: tiny },
+    })).toMatchObject({ pairedMeanGain: 0, monteCarloSe: 0, roiBandPerHour: 0.5 });
+  });
+
+  it("keeps rubric anchors and shifts finite on an overflowing score span", () => {
+    const blueprint = blueprintFor([-huge, huge], huge);
+    const simulate = (rubricScore: NonNullable<ExamEvidenceRecord["rubricScore"]>, z: number) => simulateExamPaper({
+      blueprint, learnerId, beliefs, examAtMs: DAY_MS,
+      evidence: [{
+        ...itemEvidence[0]!, partId: "p", evidenceKind: "rubric_assessment", observedAtMs: DAY_MS, rubricScore,
+      }],
+      precomputedDraws: [{
+        zLatent: [z], nuSpeed: 0, itemUniforms: [], itemTimeNormals: [], rubricScoreNormals: [0], rubricTimeNormals: [0],
+      }],
+    });
+    for (const [anchor, z] of [
+      [{ kind: "exact", score: 0 }, 0],
+      [{ kind: "exact", score: huge }, -1_000],
+      [{ kind: "interval_only", low: -huge, high: huge }, 0],
+    ] as const) {
+      const result = simulate(anchor, z);
+      expect.soft(result.timedScores).toEqual([0]);
+      expect.soft(result.untimedScoreDistribution).toEqual([{ score: 0, probability: 1 }]);
+      expect.soft(result.sectionSummaries.listening).toMatchObject({ timedMeanScore: 0, untimedMeanScore: 0 });
+    }
+  });
+
+  it("clips a conformal interval before narrowing its overflowing calibration radius to a number", () => {
+    const step = 2 ** 1021;
+    const min = -5 * step;
+    const blueprint = blueprintFor([min, 5 * step], step, [min, min]);
+    const simulation = simulateExamPaper({ blueprint, learnerId, beliefs, evidence: [], examAtMs: DAY_MS, numDraws: 1 });
+    const interval = computeConformalBandInterval({
+      blueprint, simulation, calibrationRecords: calibrations(min, 3 * step),
+    });
+    expect(interval).toMatchObject({ status: "ready", low: min, high: 3 * step, conformalMargin: Number.MAX_VALUE });
+
+    // A subnormal radius crosses the grid point in both directions before binary64 rounding.
+    const centeredBlueprint = blueprintFor([0, 2], 1, [1, 1]);
+    const centeredSimulation = simulateExamPaper({
+      blueprint: centeredBlueprint, learnerId, beliefs, evidence: [], examAtMs: DAY_MS, numDraws: 1,
+    });
+    expect(computeConformalBandInterval({
+      blueprint: centeredBlueprint, simulation: centeredSimulation, calibrationRecords: calibrations(0, Number.MIN_VALUE),
+    })).toMatchObject({ status: "ready", low: 0, high: 2, conformalMargin: Number.MIN_VALUE });
+  });
+
+  it("rejects an explicit width limit even when the display width rounds down to that limit", () => {
+    const step = 1.000000000001;
+    const blueprint = blueprintFor([0, 2 * step], step, [0, 0]);
+    const evaluate = (maxInformativeWidth: number) => evaluateExamForecast({
+      blueprint, learnerId, beliefs, evidence: itemEvidence, examAtMs: DAY_MS, numDraws: 1,
+      calibrationRecords: calibrations(0, step), maxInformativeWidth,
+    });
+    expect.soft(evaluate(1)).toMatchObject({
+      status: "insufficient_independent_evidence", widthGateExceeded: true, observedIntervalWidth: 1, maxInformativeWidth: 1,
+    });
+    expect.soft(evaluate(step)).toMatchObject({ status: "calibrated_forecast_ready", interval80: { low: 0, high: step } });
+  });
+});

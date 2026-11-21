@@ -1,5 +1,11 @@
 import { evaluateExamForecast } from "./cqr-calibration";
-import { safeArithmeticMean, validateExamBlueprint } from "./ielts-blueprint";
+import {
+  decomposeFiniteFloat,
+  exactRationalPow2ToNumber,
+  MIN_BINARY64_UNIT_EXPONENT,
+  toBinary64Units,
+  validateExamBlueprint,
+} from "./ielts-blueprint";
 import {
   DEFAULT_EXAM_SIMULATION_DRAWS,
   generatePaperRandomDraws,
@@ -57,6 +63,23 @@ function composeActionSetEffects(actions: readonly CandidateStudyAction[]): {
 
 function compareCodeUnits(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
+}
+
+function pairedStandardError(diffs: readonly bigint[], sum: bigint, count: bigint): number {
+  if (count < 2n) return 0;
+  let squaredDeviations = 0n;
+  for (const diff of diffs) {
+    // The exact centered differences share a denominator of count.
+    const centeredNumerator = diff * count - sum;
+    squaredDeviations += centeredNumerator * centeredNumerator;
+  }
+  if (squaredDeviations === 0n) return 0;
+  const divisor = count ** 3n * (count - 1n);
+  // Normalize the exact variance by a power of four before taking the square root.
+  const scaleExponent = Math.floor((squaredDeviations.toString(2).length - divisor.toString(2).length) / 2);
+  const scaledVariance = exactRationalPow2ToNumber(squaredDeviations, divisor, -2 * scaleExponent);
+  const { significand, exponent } = decomposeFiniteFloat(Math.sqrt(scaledVariance));
+  return exactRationalPow2ToNumber(BigInt(significand), 1n, exponent + scaleExponent + MIN_BINARY64_UNIT_EXPONENT);
 }
 
 export type EvaluateCrnActionRoiInput = {
@@ -132,33 +155,21 @@ export function evaluateCrnActionRoi(input: EvaluateCrnActionRoiInput): CrnActio
   });
 
   const n = draws.length;
-  const diffs = new Array<number>(n);
-  const squeezeDeltas = new Array<number>(n);
+  const count = BigInt(n);
+  const diffs = new Array<bigint>(n);
+  let gainSum = 0n;
+  let squeezeReductionSum = 0n;
   for (let i = 0; i < n; i++) {
-    const d = plusSim.timedScores[i]! - baseSim.timedScores[i]!;
-    diffs[i] = d;
-    const baseSqueeze = baseSim.untimedScores[i]! - baseSim.timedScores[i]!;
-    const plusSqueeze = plusSim.untimedScores[i]! - plusSim.timedScores[i]!;
-    squeezeDeltas[i] = baseSqueeze - plusSqueeze;
+    const timedGain = toBinary64Units(plusSim.timedScores[i]!) - toBinary64Units(baseSim.timedScores[i]!);
+    const untimedGain = toBinary64Units(plusSim.untimedScores[i]!) - toBinary64Units(baseSim.untimedScores[i]!);
+    diffs[i] = timedGain;
+    gainSum += timedGain;
+    squeezeReductionSum += timedGain - untimedGain;
   }
-  const pairedMeanGain = safeArithmeticMean(diffs);
-  let scale = Math.abs(pairedMeanGain);
-  for (let i = 0; i < n; i++) {
-    const absD = Math.abs(diffs[i]!);
-    if (absD > scale) scale = absD;
-  }
-  let monteCarloSe = 0;
-  if (n > 1 && scale > 0) {
-    const meanScaled = pairedMeanGain / scale;
-    let sumSqScaled = 0;
-    for (let i = 0; i < n; i++) {
-      const devScaled = diffs[i]! / scale - meanScaled;
-      sumSqScaled += devScaled * devScaled;
-    }
-    monteCarloSe = Math.sqrt(sumSqScaled / (n * (n - 1))) * scale;
-  }
-  const roiBandPerHour = pairedMeanGain / input.candidateAction.durationHours;
-  const timeSqueezeReduction = safeArithmeticMean(squeezeDeltas);
+  const pairedMeanGain = exactRationalPow2ToNumber(gainSum, count, MIN_BINARY64_UNIT_EXPONENT);
+  const monteCarloSe = pairedStandardError(diffs, gainSum, count);
+  const roiBandPerHour = exactRationalPow2ToNumber(gainSum, count * toBinary64Units(input.candidateAction.durationHours), 0);
+  const timeSqueezeReduction = exactRationalPow2ToNumber(squeezeReductionSum, count, MIN_BINARY64_UNIT_EXPONENT);
 
   let superlinearSynergy = Math.max(0, timeSqueezeReduction);
   if (input.baselineActions.length > 0) {
@@ -181,8 +192,12 @@ export function evaluateCrnActionRoi(input: EvaluateCrnActionRoiInput): CrnActio
       skillOverrides: aloneEffects.skillOverrides,
       speedShift: aloneEffects.speedShift,
     });
-    const standaloneGain = aloneSim.timedExpectedScore - emptySim.timedExpectedScore;
-    superlinearSynergy = Math.max(timeSqueezeReduction, pairedMeanGain - standaloneGain);
+    let standaloneGainSum = 0n;
+    for (let i = 0; i < n; i++) {
+      standaloneGainSum += toBinary64Units(aloneSim.timedScores[i]!) - toBinary64Units(emptySim.timedScores[i]!);
+    }
+    const marginalGain = exactRationalPow2ToNumber(gainSum - standaloneGainSum, count, MIN_BINARY64_UNIT_EXPONENT);
+    superlinearSynergy = Math.max(timeSqueezeReduction, marginalGain);
   }
 
   return {
