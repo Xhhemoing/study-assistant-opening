@@ -100,11 +100,11 @@ function normalizeCompactForLeakScan(text: string): string {
 /** Remove paired inline delimiters before math normalization collapses spaces around `*`. */
 function stripEquationFormatting(text: string): string {
   const parts = text.split(/(\\[()[\]]|\*+|_+|`+|~~|\$\$?)/u);
-  const openings = new Map<string, number>();
+  const openings = new Map<string, number[]>();
   for (let i = 1; i < parts.length; i += 2) {
     const marker = parts[i]!;
     if (marker === "\\(" || marker === "\\[") {
-      openings.set(marker === "\\(" ? "\\)" : "\\]", i);
+      openings.set(marker === "\\(" ? "\\)" : "\\]", [i]);
       continue;
     }
 
@@ -115,13 +115,23 @@ function stripEquationFormatting(text: string): string {
     // so multiplication and identifier continuations reach the boundary check.
     const canOpen = !emphasis || (!/[\p{L}\p{M}\p{N})\]}]$/u.test(before) && !/^\s/.test(after));
     const canClose = !emphasis || (!/\s$/.test(before) && !/^[\p{L}\p{M}\p{N}([{]/u.test(after));
-    const opening = openings.get(marker);
-    if (opening !== undefined && canClose) {
-      parts[opening] = "";
-      parts[i] = "";
-      openings.delete(marker);
-    } else if (!marker.startsWith("\\") && canOpen) {
-      openings.set(marker, i);
+    // A single emphasis run may close multiple openers or close in stages.
+    // Other delimiters pair by their full marker, including code-span length.
+    const kind = /^[*_]/.test(marker) ? marker[0]! : marker;
+    const stack = openings.get(kind) ?? [];
+    let remaining = marker.length;
+    while (canClose && remaining > 0 && stack.length > 0) {
+      const opening = stack[stack.length - 1]!;
+      const opener = parts[opening]!;
+      const paired = Math.min(opener.length, remaining);
+      parts[opening] = opener.slice(paired);
+      remaining -= paired;
+      if (!parts[opening]) stack.pop();
+    }
+    parts[i] = marker.slice(marker.length - remaining);
+    if (remaining > 0 && !marker.startsWith("\\") && canOpen) {
+      stack.push(i);
+      openings.set(kind, stack);
     }
   }
   return parts.join("");
