@@ -1653,26 +1653,45 @@ function evaluateExactRationalExt(
       if (inner.value.n <= 0n) return { status: "undefined_domain", reason: "ln_domain" };
       return inner.value.n === 1n && inner.value.d === 1n ? { status: "value", value: rational(0n) } : { status: "unsupported", reason: "irrational_ln" };
     }
+    case "sin": {
+      const inner = evaluateExactRationalExt(expr.value, x, variable);
+      if (inner.status !== "value") return inner;
+      return inner.value.n === 0n ? { status: "value", value: rational(0n) } : { status: "unsupported", reason: "irrational_sin" };
+    }
+    case "cos": {
+      const inner = evaluateExactRationalExt(expr.value, x, variable);
+      if (inner.status !== "value") return inner;
+      return inner.value.n === 0n ? { status: "value", value: rational(1n) } : { status: "unsupported", reason: "irrational_cos" };
+    }
+    case "exp": {
+      const inner = evaluateExactRationalExt(expr.value, x, variable);
+      if (inner.status !== "value") return inner;
+      return inner.value.n === 0n ? { status: "value", value: rational(1n) } : { status: "unsupported", reason: "irrational_exp" };
+    }
     case "add":
     case "sub":
     case "mul":
     case "div": {
       const left = evaluateExactRationalExt(expr.left, x, variable);
-      if (left.status !== "value") return left;
       const right = evaluateExactRationalExt(expr.right, x, variable);
+      if (left.status === "undefined_domain") return left;
+      if (right.status === "undefined_domain") return right;
+      if (expr.kind === "div" && right.status === "value" && right.value.n === 0n) {
+        return { status: "undefined_domain", reason: "natural_domain_denominator_zero" };
+      }
+      if (left.status !== "value") return left;
       if (right.status !== "value") return right;
       if (expr.kind === "add") return { status: "value", value: addRational(left.value, right.value) };
       if (expr.kind === "sub") return { status: "value", value: subtractRational(left.value, right.value) };
       if (expr.kind === "mul") return { status: "value", value: multiplyRational(left.value, right.value) };
-      return right.value.n === 0n
-        ? { status: "undefined_domain", reason: "natural_domain_denominator_zero" }
-        : { status: "value", value: divideRational(left.value, right.value) };
+      return { status: "value", value: divideRational(left.value, right.value) };
     }
     case "pow": {
+      const base = evaluateExactRationalExt(expr.base, x, variable);
+      if (base.status === "undefined_domain") return base;
       if (!Number.isInteger(expr.exponent) || Math.abs(expr.exponent) > 12) {
         return { status: "unsupported", reason: "power_out_of_bounds" };
       }
-      const base = evaluateExactRationalExt(expr.base, x, variable);
       if (base.status !== "value") return base;
       if (expr.exponent < 0 && base.value.n === 0n) return { status: "undefined_domain", reason: "natural_domain_denominator_zero" };
       let val = rational(1n);
@@ -1680,121 +1699,246 @@ function evaluateExactRationalExt(
       for (let i = 0; i < Math.abs(expr.exponent); i++) val = multiplyRational(val, step);
       return { status: "value", value: val };
     }
-    default:
-      return { status: "unsupported", reason: `${expr.kind}_outside_exact_fragment` };
   }
 }
 
 type FloatEvalResult =
-  | { status: "ok"; value: number; marginOk: boolean; irrational: boolean }
+  | { status: "ok"; value: number; err: number; marginOk: boolean; irrational: boolean }
   | { status: "undefined_domain"; reason: string }
   | { status: "unstable" };
 
-function evaluateFloatSafe(expr: ScalarExpr, x: number, variable: string): FloatEvalResult {
+function evaluateFloatSafe(expr: ScalarExpr, x: number, variable: string, xRadius = 0): FloatEvalResult {
   const BOUND_EPS = 1e-9;
   switch (expr.kind) {
     case "const": {
       const q = toRational(expr.value);
       if (q) {
         const val = Number(q.n) / Number(q.d);
-        if (q.n !== 0n && val === 0) return { status: "unstable" };
-        return Number.isFinite(val) ? { status: "ok", value: val, marginOk: true, irrational: false } : { status: "unstable" };
+        if ((q.n !== 0n && val === 0) || !Number.isFinite(val)) return { status: "unstable" };
+        const exactInt = q.d === 1n && Number.isSafeInteger(val);
+        return {
+          status: "ok",
+          value: val,
+          err: exactInt ? 0 : Math.abs(val) * 1e-13 + Number.MIN_VALUE,
+          marginOk: true,
+          irrational: false,
+        };
       }
       const val = Number(expr.value);
       return Number.isFinite(val)
-        ? { status: "ok", value: val, marginOk: true, irrational: !Number.isInteger(val) }
+        ? {
+            status: "ok",
+            value: val,
+            err: Number.isSafeInteger(val) ? 0 : Math.abs(val) * 1e-13 + Number.MIN_VALUE,
+            marginOk: true,
+            irrational: !Number.isInteger(val),
+          }
         : { status: "unstable" };
     }
-    case "variable":
-      return expr.name === variable ? { status: "ok", value: x, marginOk: true, irrational: false } : { status: "unstable" };
+    case "variable": {
+      if (expr.name !== variable) return { status: "unstable" };
+      const exactInt = xRadius === 0 && Number.isSafeInteger(x);
+      const err = exactInt ? 0 : xRadius + Math.abs(x) * 1e-14 + (xRadius > 0 ? 1e-15 : 0);
+      return {
+        status: "ok",
+        value: x,
+        err,
+        marginOk: xRadius === 0 || Math.abs(x) > BOUND_EPS + err,
+        irrational: xRadius > 0,
+      };
+    }
     case "neg": {
-      const inner = evaluateFloatSafe(expr.value, x, variable);
+      const inner = evaluateFloatSafe(expr.value, x, variable, xRadius);
       return inner.status === "ok"
-        ? { status: "ok", value: -inner.value, marginOk: inner.marginOk, irrational: inner.irrational }
+        ? { status: "ok", value: -inner.value, err: inner.err, marginOk: inner.marginOk, irrational: inner.irrational }
         : inner;
     }
     case "abs": {
-      const inner = evaluateFloatSafe(expr.value, x, variable);
+      const inner = evaluateFloatSafe(expr.value, x, variable, xRadius);
       return inner.status === "ok"
-        ? { status: "ok", value: Math.abs(inner.value), marginOk: inner.marginOk && Math.abs(inner.value) > BOUND_EPS, irrational: inner.irrational }
+        ? {
+            status: "ok",
+            value: Math.abs(inner.value),
+            err: inner.err,
+            marginOk: inner.marginOk && Math.abs(inner.value) > BOUND_EPS + inner.err,
+            irrational: inner.irrational,
+          }
         : inner;
     }
     case "sqrt": {
-      const inner = evaluateFloatSafe(expr.value, x, variable);
+      const inner = evaluateFloatSafe(expr.value, x, variable, xRadius);
       if (inner.status !== "ok") return inner;
-      if (inner.value < -BOUND_EPS) return { status: "undefined_domain", reason: "even_root_domain" };
-      if (inner.value === 0 && !inner.irrational) return { status: "ok", value: 0, marginOk: inner.marginOk, irrational: false };
-      if (inner.value < BOUND_EPS) return { status: "unstable" };
+      if (inner.value + inner.err < -BOUND_EPS) return { status: "undefined_domain", reason: "even_root_domain" };
+      if (inner.value === 0 && !inner.irrational && inner.err === 0) {
+        return { status: "ok", value: 0, err: 0, marginOk: inner.marginOk, irrational: false };
+      }
+      if (inner.value - inner.err < BOUND_EPS) return { status: "unstable" };
       const s = Math.sqrt(inner.value);
-      const exactInt = !inner.irrational && Number.isInteger(inner.value) && Number.isInteger(s);
-      return { status: "ok", value: s, marginOk: inner.marginOk, irrational: !exactInt };
+      const minInner = inner.value - inner.err;
+      const exactInt = !inner.irrational && inner.err === 0 && Number.isSafeInteger(inner.value) && Number.isSafeInteger(s);
+      const err = exactInt ? 0 : inner.err / (2 * Math.sqrt(minInner)) + s * 1e-13;
+      return Number.isFinite(err)
+        ? { status: "ok", value: s, err, marginOk: inner.marginOk, irrational: !exactInt }
+        : { status: "unstable" };
     }
     case "ln": {
-      const inner = evaluateFloatSafe(expr.value, x, variable);
+      const inner = evaluateFloatSafe(expr.value, x, variable, xRadius);
       if (inner.status !== "ok") return inner;
-      if ((inner.value === 0 && !inner.irrational) || inner.value <= -BOUND_EPS) {
+      if (inner.value + inner.err < -BOUND_EPS) {
         return { status: "undefined_domain", reason: "ln_domain" };
       }
-      if (inner.value <= BOUND_EPS) return { status: "unstable" };
-      const exactZero = !inner.irrational && inner.value === 1;
-      return { status: "ok", value: exactZero ? 0 : Math.log(inner.value), marginOk: inner.marginOk, irrational: !exactZero };
+      if (inner.value - inner.err <= BOUND_EPS) return { status: "unstable" };
+      const exactZero = !inner.irrational && inner.err === 0 && inner.value === 1;
+      const val = exactZero ? 0 : Math.log(inner.value);
+      const err = exactZero ? 0 : inner.err / (inner.value - inner.err) + Math.abs(val) * 1e-13;
+      return Number.isFinite(err)
+        ? { status: "ok", value: val, err, marginOk: inner.marginOk, irrational: !exactZero }
+        : { status: "unstable" };
     }
     case "sin": {
-      const inner = evaluateFloatSafe(expr.value, x, variable);
+      const inner = evaluateFloatSafe(expr.value, x, variable, xRadius);
       if (inner.status !== "ok") return inner;
-      const exactZero = !inner.irrational && inner.value === 0;
-      return { status: "ok", value: exactZero ? 0 : Math.sin(inner.value), marginOk: inner.marginOk, irrational: !exactZero };
+      const exactZero = !inner.irrational && inner.err === 0 && inner.value === 0;
+      const val = exactZero ? 0 : Math.sin(inner.value);
+      const err = exactZero ? 0 : inner.err + Math.abs(val) * 1e-13 + 1e-15;
+      return { status: "ok", value: val, err, marginOk: inner.marginOk, irrational: !exactZero };
     }
     case "cos": {
-      const inner = evaluateFloatSafe(expr.value, x, variable);
+      const inner = evaluateFloatSafe(expr.value, x, variable, xRadius);
       if (inner.status !== "ok") return inner;
-      const exactOne = !inner.irrational && inner.value === 0;
-      return { status: "ok", value: exactOne ? 1 : Math.cos(inner.value), marginOk: inner.marginOk, irrational: !exactOne };
+      const exactOne = !inner.irrational && inner.err === 0 && inner.value === 0;
+      const val = exactOne ? 1 : Math.cos(inner.value);
+      const err = exactOne ? 0 : inner.err + Math.abs(val) * 1e-13 + 1e-15;
+      return { status: "ok", value: val, err, marginOk: inner.marginOk, irrational: !exactOne };
     }
     case "exp": {
-      const inner = evaluateFloatSafe(expr.value, x, variable);
+      const inner = evaluateFloatSafe(expr.value, x, variable, xRadius);
       if (inner.status !== "ok") return inner;
-      if (inner.value > 50 || inner.value < -50) return { status: "unstable" };
-      const exactOne = !inner.irrational && inner.value === 0;
-      return { status: "ok", value: exactOne ? 1 : Math.exp(inner.value), marginOk: inner.marginOk, irrational: !exactOne };
+      if (inner.value + inner.err > 50 || inner.value - inner.err < -50 || inner.err > 10) return { status: "unstable" };
+      const exactOne = !inner.irrational && inner.err === 0 && inner.value === 0;
+      const val = exactOne ? 1 : Math.exp(inner.value);
+      const err = exactOne ? 0 : Math.exp(inner.value + inner.err) - val + val * 1e-13;
+      return Number.isFinite(err)
+        ? { status: "ok", value: val, err, marginOk: inner.marginOk, irrational: !exactOne }
+        : { status: "unstable" };
     }
     case "add":
     case "sub":
     case "mul":
     case "div": {
-      const l = evaluateFloatSafe(expr.left, x, variable);
+      const l = evaluateFloatSafe(expr.left, x, variable, xRadius);
+      const r = evaluateFloatSafe(expr.right, x, variable, xRadius);
+      if (l.status === "undefined_domain") return l;
+      if (r.status === "undefined_domain") return r;
       if (l.status !== "ok") return l;
-      const r = evaluateFloatSafe(expr.right, x, variable);
       if (r.status !== "ok") return r;
       const irrational = l.irrational || r.irrational;
       if (expr.kind === "div") {
-        if (r.value === 0) {
-          return r.irrational ? { status: "unstable" } : { status: "undefined_domain", reason: "natural_domain_denominator_zero" };
-        }
-        if (Math.abs(r.value) <= BOUND_EPS) return { status: "unstable" };
+        if (Math.abs(r.value) <= BOUND_EPS + r.err) return { status: "unstable" };
         const val = l.value / r.value;
-        return Number.isFinite(val) && Math.abs(val) < 1e10
-          ? { status: "ok", value: val, marginOk: l.marginOk && r.marginOk, irrational }
+        const rMin = Math.abs(r.value) - r.err;
+        const err = (l.err + Math.abs(l.value) * (r.err / rMin)) / rMin + Math.abs(val) * 1e-13;
+        return Number.isFinite(val) && Number.isFinite(err) && Math.abs(val) < 1e10
+          ? { status: "ok", value: val, err, marginOk: l.marginOk && r.marginOk, irrational }
           : { status: "unstable" };
       }
       const val = expr.kind === "add" ? l.value + r.value : expr.kind === "sub" ? l.value - r.value : l.value * r.value;
-      return Number.isFinite(val) && Math.abs(val) < 1e10
-        ? { status: "ok", value: val, marginOk: l.marginOk && r.marginOk, irrational }
+      const exactInt = l.err === 0 && r.err === 0 && Number.isSafeInteger(val);
+      const err = exactInt
+        ? 0
+        : expr.kind === "mul"
+          ? Math.abs(l.value) * r.err + Math.abs(r.value) * l.err + l.err * r.err + Math.abs(val) * 1e-13
+          : l.err + r.err + (Math.abs(l.value) + Math.abs(r.value)) * 1e-14 + Math.abs(val) * 1e-14;
+      return Number.isFinite(val) && Number.isFinite(err) && Math.abs(val) < 1e10
+        ? { status: "ok", value: val, err, marginOk: l.marginOk && r.marginOk, irrational }
         : { status: "unstable" };
     }
     case "pow": {
-      const b = evaluateFloatSafe(expr.base, x, variable);
+      const b = evaluateFloatSafe(expr.base, x, variable, xRadius);
       if (b.status !== "ok") return b;
-      if (expr.exponent < 0 && b.value === 0) {
-        return b.irrational ? { status: "unstable" } : { status: "undefined_domain", reason: "natural_domain_denominator_zero" };
-      }
-      if (expr.exponent < 0 && Math.abs(b.value) <= BOUND_EPS) return { status: "unstable" };
+      if (expr.exponent < 0 && Math.abs(b.value) <= BOUND_EPS + b.err) return { status: "unstable" };
       const val = b.value ** expr.exponent;
-      return Number.isFinite(val) && Math.abs(val) < 1e10
-        ? { status: "ok", value: val, marginOk: b.marginOk, irrational: b.irrational && expr.exponent !== 0 }
+      if (!Number.isFinite(val) || Math.abs(val) >= 1e10) return { status: "unstable" };
+      if (expr.exponent === 0) return { status: "ok", value: 1, err: 0, marginOk: b.marginOk, irrational: false };
+      const exactInt = b.err === 0 && expr.exponent > 0 && Number.isSafeInteger(val);
+      const boundBase = expr.exponent > 0 ? Math.abs(b.value) + b.err : Math.abs(b.value) - b.err;
+      const boundVal = boundBase ** expr.exponent;
+      const err = exactInt ? 0 : Math.abs(boundVal - Math.abs(val)) + Math.abs(val) * 1e-13;
+      return Number.isFinite(err)
+        ? { status: "ok", value: val, err, marginOk: b.marginOk, irrational: b.irrational && expr.exponent !== 0 }
         : { status: "unstable" };
     }
   }
+}
+
+function resolveExprDefinedAtSite(
+  expr: ScalarExpr,
+  site: SampleSite,
+  variable: string,
+): "defined" | "undefined_domain" | "unresolved" {
+  if (site.kind === "rational") {
+    const exactVal = evaluateExactRationalExt(expr, site.x, variable);
+    if (exactVal.status === "value") return "defined";
+    if (exactVal.status === "undefined_domain") return "undefined_domain";
+    const fx = Number(site.x.n) / Number(site.x.d);
+    if (!Number.isFinite(fx)) return "unresolved";
+    const floatVal = evaluateFloatSafe(expr, fx, variable);
+    if (floatVal.status === "ok") return "defined";
+    if (floatVal.status === "undefined_domain") return "undefined_domain";
+    return "unresolved";
+  }
+
+  let lo = site.low;
+  let hi = site.high;
+  let work = polynomialSquareFree(site.master);
+  if (polynomialEvaluate(work, lo).n === 0n) {
+    work = polynomialDivMod(work, linearFactor(lo)).quotient;
+  }
+  if (polynomialDegree(work) >= 1 && polynomialEvaluate(work, hi).n === 0n) {
+    work = polynomialDivMod(work, linearFactor(hi)).quotient;
+  }
+  const deg = polynomialDegree(work);
+  if (deg <= 0) return "unresolved";
+  if (deg === 1) {
+    const a1 = work.get(1)!;
+    const a0 = work.get(0) ?? rational(0n);
+    const root = divideRational(rational(-a0.n, a0.d), a1);
+    return compareRational(lo, root) < 0 && compareRational(root, hi) < 0
+      ? resolveExprDefinedAtSite(expr, { kind: "rational", x: root }, variable)
+      : "unresolved";
+  }
+
+  const chain = buildSturmChain(work);
+  let vLo = sturmVariationsAtFinite(chain, lo);
+  const vHi = sturmVariationsAtFinite(chain, hi);
+  if (vLo - vHi !== 1) return "unresolved";
+
+  const minWidth = rational(1n, 1n << 45n);
+  for (let step = 0; step < 64 && compareRational(subtractRational(hi, lo), minWidth) > 0; step++) {
+    const mid = divideRational(addRational(lo, hi), rational(2n));
+    if (polynomialEvaluate(work, mid).n === 0n) {
+      return resolveExprDefinedAtSite(expr, { kind: "rational", x: mid }, variable);
+    }
+    const vMid = sturmVariationsAtFinite(chain, mid);
+    if (vLo - vMid === 1) {
+      hi = mid;
+    } else if (vLo - vMid === 0) {
+      lo = mid;
+      vLo = vMid;
+    } else {
+      return "unresolved";
+    }
+  }
+
+  const loNum = Number(lo.n) / Number(lo.d);
+  const hiNum = Number(hi.n) / Number(hi.d);
+  if (!Number.isFinite(loNum) || !Number.isFinite(hiNum)) return "unresolved";
+  const midNum = (loNum + hiNum) / 2;
+  const radius = Math.abs(hiNum - loNum) / 2 + Math.abs(midNum) * 1e-14 + 1e-15;
+  const floatVal = evaluateFloatSafe(expr, midNum, variable, radius);
+  if (floatVal.status === "ok") return "defined";
+  if (floatVal.status === "undefined_domain") return "undefined_domain";
+  return "unresolved";
 }
 
 // Multivariate polynomials over canonical algebraic atoms for symbolic identity checking.
@@ -2264,6 +2408,12 @@ function ringNormalizeRational(
       case "cos": {
         const inner = convert(node.value);
         if (!inner) return null;
+        if (inner.num.size === 0) {
+          return {
+            num: node.kind === "sin" ? new Map() : mpolyConst(rational(1n)),
+            den: mpolyConst(rational(1n)),
+          };
+        }
         const innerKey =
           inner.den.size === 1 && inner.den.has("") && inner.den.get("")!.n === 1n && inner.den.get("")!.d === 1n
             ? formatMPolyKey(inner.num)
@@ -2422,33 +2572,71 @@ export function verifyScalarEquivalence(
     if (!sRad.ok && !sRad.defined && !rRad.ok && !rRad.defined) {
       return { status: "unverified", reason: "empty_natural_domain", domain };
     }
+    const sExact = evaluateExactRationalExt(student, rational(0n), variable);
+    const rExact = evaluateExactRationalExt(reference, rational(0n), variable);
+    if (sExact.status === "value" && rExact.status === "value") {
+      return equalRational(sExact.value, rExact.value)
+        ? { status: "equivalent", reason: "exact_radical_constant_identity", domain }
+        : { status: "inequivalent", reason: "exact_radical_counterexample", witness: { input: "const", detail: "constant values differ" }, domain };
+    }
     const sfFloat = evaluateFloatSafe(student, 0, variable);
     const rfFloat = evaluateFloatSafe(reference, 0, variable);
-    if (sfFloat.status === "undefined_domain" && rfFloat.status === "ok") {
+    const sUndefined = sExact.status === "undefined_domain" || sfFloat.status === "undefined_domain";
+    const rUndefined = rExact.status === "undefined_domain" || rfFloat.status === "undefined_domain";
+    const sDefined = sRad.ok || sExact.status === "value" || sfFloat.status === "ok";
+    const rDefined = rRad.ok || rExact.status === "value" || rfFloat.status === "ok";
+    if (sUndefined && rDefined) {
       return { status: "inequivalent", reason: "natural_domain_mismatch", witness: { input: "const", detail: "student undefined" }, domain };
     }
-    if (rfFloat.status === "undefined_domain" && sfFloat.status === "ok") {
+    if (rUndefined && sDefined) {
       return { status: "inequivalent", reason: "natural_domain_mismatch", witness: { input: "const", detail: "reference undefined" }, domain };
     }
-    if (sfFloat.status === "undefined_domain" && rfFloat.status === "undefined_domain") {
+    if (sUndefined && rUndefined) {
       return { status: "unverified", reason: "empty_natural_domain", domain };
     }
+    if (sUndefined || rUndefined) {
+      return { status: "unverified", reason: "unresolved_nonrational_domain", domain };
+    }
     if (sfFloat.status === "ok" && rfFloat.status === "ok" && sfFloat.marginOk && rfFloat.marginOk) {
-      const tol = 1e-6 * Math.max(1, Math.abs(sfFloat.value), Math.abs(rfFloat.value));
+      const tol = 1e-6 * Math.max(1, Math.abs(sfFloat.value), Math.abs(rfFloat.value)) + sfFloat.err + rfFloat.err;
       if (Math.abs(sfFloat.value - rfFloat.value) > tol) {
         return { status: "inequivalent", reason: "numeric_counterexample", witness: { input: "const", detail: "constant values differ" }, domain };
       }
     }
-    const reg: RingAtomRegistry = { sqrtDefs: new Map(), absDefs: new Map(), sinPairs: new Map(), expExps: new Map() };
-    const sn = ringNormalizeRational(student, variable, [], reg);
-    const rn = ringNormalizeRational(reference, variable, [], reg);
-    if (sn && rn) {
-      try {
-        const diff = mpolyAdd(mpolyMultiply(sn.num, rn.den, reg), mpolyMultiply(rn.num, sn.den, reg), -1);
-        if (diff.size === 0) return { status: "equivalent", reason: "canonical_symbolic_identity", domain };
-      } catch (err) {
-        if (!(err instanceof MPolyOverflowError)) throw err;
-        return { status: "unverified", reason: "symbolic_complexity_exceeded", domain };
+    const sConstConstraints = collectConstraints(student, variable);
+    const rConstConstraints = collectConstraints(reference, variable);
+    if (sConstConstraints.alwaysUndefined !== rConstConstraints.alwaysUndefined) {
+      return {
+        status: "inequivalent",
+        reason: "natural_domain_mismatch",
+        witness: { input: "const", detail: sConstConstraints.alwaysUndefined ? "student undefined" : "reference undefined" },
+        domain,
+      };
+    }
+    if (sConstConstraints.alwaysUndefined && rConstConstraints.alwaysUndefined) {
+      return { status: "unverified", reason: "empty_natural_domain", domain };
+    }
+    let constUncheckedMatch = !sConstConstraints.hasNonRationalDomainOps && !rConstConstraints.hasNonRationalDomainOps;
+    if (!constUncheckedMatch) {
+      const sKeys = canonicalizeUncheckedOps(sConstConstraints.uncheckedOps, variable, [], []);
+      const rKeys = canonicalizeUncheckedOps(rConstConstraints.uncheckedOps, variable, [], []);
+      constUncheckedMatch = sKeys !== null && rKeys !== null && stringSetsEqual(sKeys, rKeys);
+    }
+    const nonRationalResolved =
+      (!sConstConstraints.hasNonRationalDomainOps && !rConstConstraints.hasNonRationalDomainOps) ||
+      (sDefined && rDefined);
+    if (constUncheckedMatch && nonRationalResolved) {
+      const reg: RingAtomRegistry = { sqrtDefs: new Map(), absDefs: new Map(), sinPairs: new Map(), expExps: new Map() };
+      const sn = ringNormalizeRational(student, variable, [], reg);
+      const rn = ringNormalizeRational(reference, variable, [], reg);
+      if (sn && rn) {
+        try {
+          const diff = mpolyAdd(mpolyMultiply(sn.num, rn.den, reg), mpolyMultiply(rn.num, sn.den, reg), -1);
+          if (diff.size === 0) return { status: "equivalent", reason: "canonical_symbolic_identity", domain };
+        } catch (err) {
+          if (!(err instanceof MPolyOverflowError)) throw err;
+          return { status: "unverified", reason: "symbolic_complexity_exceeded", domain };
+        }
       }
     }
     return { status: "unverified", reason: "constant_outside_exact_fragment", domain };
@@ -2573,7 +2761,7 @@ export function verifyScalarEquivalence(
     [...sConstraints.splitPolys, ...rConstraints.splitPolys],
   );
   const validSites: SampleSite[] = [];
-  const ambiguousRationalSites: Array<{ x: SpanRational; definedSide: "student" | "reference" }> = [];
+  const ambiguousSites: Array<{ site: SampleSite; definedSide: "student" | "reference" }> = [];
   for (const site of sites) {
     const sOk = constraintsSatisfiedAtSite(sConstraints, site);
     const rOk = constraintsSatisfiedAtSite(rConstraints, site);
@@ -2587,49 +2775,38 @@ export function verifyScalarEquivalence(
           domain,
         };
       }
-      if (site.kind === "rational") {
-        ambiguousRationalSites.push({ x: site.x, definedSide: sOk ? "student" : "reference" });
-      }
+      ambiguousSites.push({ site, definedSide: sOk ? "student" : "reference" });
       continue;
     }
     if (sOk && rOk) validSites.push(site);
   }
 
-  for (const amb of ambiguousRationalSites) {
+  let hasUnresolvedDomainMismatch = false;
+  for (const amb of ambiguousSites) {
     const definedExpr = amb.definedSide === "student" ? student : reference;
-    const exactVal = evaluateExactRationalExt(definedExpr, amb.x, variable);
-    if (exactVal.status === "value") {
+    const resolution = resolveExprDefinedAtSite(definedExpr, amb.site, variable);
+    if (resolution === "defined") {
       return {
         status: "inequivalent",
         reason: "natural_domain_mismatch",
         witness: {
-          input: formatRational(amb.x),
+          input: formatSampleSite(amb.site),
           detail: amb.definedSide === "student" ? "reference undefined" : "student undefined",
         },
         domain,
       };
     }
-    if (exactVal.status === "unsupported") {
-      const fx = Number(amb.x.n) / Number(amb.x.d);
-      if (Number.isFinite(fx)) {
-        const floatVal = evaluateFloatSafe(definedExpr, fx, variable);
-        if (floatVal.status === "ok" && floatVal.marginOk) {
-          return {
-            status: "inequivalent",
-            reason: "natural_domain_mismatch",
-            witness: {
-              input: formatRational(amb.x),
-              detail: amb.definedSide === "student" ? "reference undefined" : "student undefined",
-            },
-            domain,
-          };
-        }
-      }
+    if (resolution === "unresolved") {
+      hasUnresolvedDomainMismatch = true;
     }
   }
 
   if (validSites.length === 0) {
-    return { status: "unverified", reason: "empty_natural_domain", domain };
+    return {
+      status: "unverified",
+      reason: hasUnresolvedDomainMismatch ? "unresolved_nonrational_domain" : "empty_natural_domain",
+      domain,
+    };
   }
 
   const activeOpenIntervals: NormalizedInterval[] = [];
@@ -2640,32 +2817,57 @@ export function verifyScalarEquivalence(
     }
   }
 
-  // Exact rational evaluation on valid rational sites (handles sqrt/abs/ln(1) counterexamples cleanly)
+  // Exact rational evaluation on valid rational sites (handles sqrt/abs/ln(1)/sin(0)/cos(0)/exp(0) counterexamples cleanly)
   const validRationalSamples = validSites
     .filter((s): s is { kind: "rational"; x: SpanRational } => s.kind === "rational")
     .map((s) => s.x);
 
+  let validEvaluatedCount = 0;
+
   for (const x of validRationalSamples) {
     const sVal = evaluateExactRationalExt(student, x, variable);
     const rVal = evaluateExactRationalExt(reference, x, variable);
-    if (
-      (sVal.status === "undefined_domain" && rVal.status !== "undefined_domain") ||
-      (rVal.status === "undefined_domain" && sVal.status !== "undefined_domain")
-    ) {
-      return {
-        status: "inequivalent",
-        reason: "natural_domain_mismatch",
-        witness: { input: formatRational(x), detail: sVal.status === "undefined_domain" ? "student undefined" : "reference undefined" },
-        domain,
-      };
+    if (sVal.status === "undefined_domain" || rVal.status === "undefined_domain") {
+      if (sVal.status === "undefined_domain" && rVal.status === "undefined_domain") {
+        continue;
+      }
+      if (
+        (sVal.status === "undefined_domain" && rVal.status === "value") ||
+        (rVal.status === "undefined_domain" && sVal.status === "value")
+      ) {
+        return {
+          status: "inequivalent",
+          reason: "natural_domain_mismatch",
+          witness: { input: formatRational(x), detail: sVal.status === "undefined_domain" ? "student undefined" : "reference undefined" },
+          domain,
+        };
+      }
+      const otherExpr = sVal.status === "undefined_domain" ? reference : student;
+      const fx = Number(x.n) / Number(x.d);
+      const otherFloat = Number.isFinite(fx) ? evaluateFloatSafe(otherExpr, fx, variable) : null;
+      if (otherFloat?.status === "ok") {
+        return {
+          status: "inequivalent",
+          reason: "natural_domain_mismatch",
+          witness: { input: formatRational(x), detail: sVal.status === "undefined_domain" ? "student undefined" : "reference undefined" },
+          domain,
+        };
+      }
+      if (otherFloat?.status !== "undefined_domain") {
+        hasUnresolvedDomainMismatch = true;
+      }
+      continue;
     }
-    if (sVal.status === "value" && rVal.status === "value" && !equalRational(sVal.value, rVal.value)) {
-      return {
-        status: "inequivalent",
-        reason: "exact_radical_counterexample",
-        witness: { input: formatRational(x), detail: "exact values differ" },
-        domain,
-      };
+    if (sVal.status === "value" && rVal.status === "value") {
+      validEvaluatedCount++;
+      if (!equalRational(sVal.value, rVal.value)) {
+        return {
+          status: "inequivalent",
+          reason: "exact_radical_counterexample",
+          witness: { input: formatRational(x), detail: "exact values differ" },
+          domain,
+        };
+      }
     }
   }
 
@@ -2699,17 +2901,33 @@ export function verifyScalarEquivalence(
         domain,
       };
     }
-    if (sfRes.status === "ok" && rfRes.status === "ok" && sfRes.marginOk && rfRes.marginOk) {
-      const tol = 1e-6 * Math.max(1, Math.abs(sfRes.value), Math.abs(rfRes.value));
-      if (Math.abs(sfRes.value - rfRes.value) > tol) {
-        return {
-          status: "inequivalent",
-          reason: "numeric_counterexample",
-          witness: { input: String(fx), detail: "evaluated values differ" },
-          domain,
-        };
+    if (
+      (sfRes.status === "undefined_domain" && rfRes.status === "unstable") ||
+      (rfRes.status === "undefined_domain" && sfRes.status === "unstable")
+    ) {
+      hasUnresolvedDomainMismatch = true;
+    }
+    if (sfRes.status === "ok" && rfRes.status === "ok") {
+      validEvaluatedCount++;
+      if (sfRes.marginOk && rfRes.marginOk) {
+        const tol = 1e-6 * Math.max(1, Math.abs(sfRes.value), Math.abs(rfRes.value)) + sfRes.err + rfRes.err;
+        if (Math.abs(sfRes.value - rfRes.value) > tol) {
+          return {
+            status: "inequivalent",
+            reason: "numeric_counterexample",
+            witness: { input: String(fx), detail: "evaluated values differ" },
+            domain,
+          };
+        }
       }
     }
+  }
+
+  if (hasUnresolvedDomainMismatch) {
+    return { status: "unverified", reason: "unresolved_nonrational_domain", domain };
+  }
+  if ((sConstraints.hasNonRationalDomainOps || rConstraints.hasNonRationalDomainOps) && validEvaluatedCount === 0) {
+    return { status: "unverified", reason: "empty_natural_domain", domain };
   }
 
   // Symbolic / algebraic ring equivalence over atoms (only when domains matched and non-empty)
@@ -2934,6 +3152,8 @@ export function verifyIndefiniteIntegral(input: IntegralVerificationInput): Veri
       parsedDomain,
       [...sConstraints.splitPolys, ...iConstraints.splitPolys],
     );
+    let hasUnresolvedDomainMismatch = false;
+    const ambiguousSites: SampleSite[] = [];
     for (const site of sites) {
       if (constraintsSatisfiedAtSite(iConstraints, site) && !constraintsSatisfiedAtSite(sConstraints, site)) {
         if (!iConstraints.hasNonRationalDomainOps) {
@@ -2944,20 +3164,25 @@ export function verifyIndefiniteIntegral(input: IntegralVerificationInput): Veri
             domain: effectiveDomain,
           };
         }
-        if (site.kind === "rational") {
-          const exactI = evaluateExactRationalExt(integrand, site.x, variable);
-          const fx = Number(site.x.n) / Number(site.x.d);
-          const floatI = exactI.status === "unsupported" && Number.isFinite(fx) ? evaluateFloatSafe(integrand, fx, variable) : null;
-          if (exactI.status === "value" || (floatI && floatI.status === "ok" && floatI.marginOk)) {
-            return {
-              status: "inequivalent",
-              reason: "natural_domain_mismatch",
-              witness: { input: formatSampleSite(site), detail: "student antiderivative undefined on integrand domain" },
-              domain: effectiveDomain,
-            };
-          }
-        }
+        ambiguousSites.push(site);
       }
+    }
+    for (const site of ambiguousSites) {
+      const resolution = resolveExprDefinedAtSite(integrand, site, variable);
+      if (resolution === "defined") {
+        return {
+          status: "inequivalent",
+          reason: "natural_domain_mismatch",
+          witness: { input: formatSampleSite(site), detail: "student antiderivative undefined on integrand domain" },
+          domain: effectiveDomain,
+        };
+      }
+      if (resolution === "unresolved") {
+        hasUnresolvedDomainMismatch = true;
+      }
+    }
+    if (hasUnresolvedDomainMismatch) {
+      return { status: "unverified", reason: "unresolved_nonrational_domain", domain: effectiveDomain };
     }
   }
   return derivCheck;

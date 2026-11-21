@@ -143,6 +143,69 @@ describe("bounded symbolic equivalence", () => {
     ).toBe("equivalent");
   });
 
+  it("closes Round-4 non-rational domain mismatches, symmetric exact undefinedness, float cancellation, and empty-domain guards", () => {
+    // P1-1: unresolved CAD domain mismatches fail closed (or prove defined at isolated/rational sites)
+    expect(
+      verifyScalarEquivalence("((x^2 - 2) / (x^2 - 2)) * (1 / (exp(x) - 2))", "1 / (exp(x) - 2)").status,
+    ).toBe("inequivalent");
+    expect(
+      verifyScalarEquivalence("((x - 1) / (x - 1)) * (1 / (exp(x) - 2) + abs(x - 1))", "1 / (exp(x) - 2) + abs(x - 1)").status,
+    ).toBe("inequivalent");
+    expect(
+      verifyScalarEquivalence("((x - 100) / (x - 100)) * (1 / (exp(x) - 2))", "1 / (exp(x) - 2)").status,
+    ).toBe("unverified");
+    expect(
+      verifyIndefiniteIntegral({
+        student: "ln(x - 100) + ln(abs(exp(x) - 2))",
+        integrand: "1 / (x - 100) + exp(x) / (exp(x) - 2)",
+        domain: { intervals: [{ left: 60, right: 90 }] },
+      }).status,
+    ).not.toBe("equivalent");
+    expect(
+      verifyIndefiniteIntegral({
+        student: "ln(x - 100) + ln(abs(exp(x - 60) - 2))",
+        integrand: "1 / (x - 100) + exp(x - 60) / (exp(x - 60) - 2)",
+        domain: { intervals: [{ left: 60, right: 90 }] },
+      }).status,
+    ).toBe("inequivalent");
+    expect(
+      verifyIndefiniteIntegral({
+        student: "ln(x - 100) + ln(abs(exp(x) - 2))",
+        integrand: "1 / (x - 100) + exp(x) / (exp(x) - 2)",
+        domain: { intervals: [{ left: 0, right: 90 }] },
+      }).status,
+    ).toBe("inequivalent");
+
+    // P1-2: symmetric undefined_domain vs unsupported in evaluateExactRationalExt
+    expect(
+      verifyScalarEquivalence("ln(sqrt(x)) + sqrt(x + 2)", "sqrt(x + 2) + ln(sqrt(x))", {
+        intervals: [{ left: 0, right: 1 }],
+      }).status,
+    ).toBe("equivalent");
+    expect(
+      verifyScalarEquivalence("ln(sqrt(x)) + 1 / sin(x)", "1 / sin(x) + ln(sqrt(x))", {
+        intervals: [{ left: 0, right: 1 }],
+      }).status,
+    ).toBe("equivalent");
+
+    // P1-3: IEEE-754 cancellation never fabricates undefined_domain; exact sin(0)=0 still proves sin(x)/sin(x) != 1
+    expect(
+      verifyScalarEquivalence("sin(x) / (100000000000000000 * ((1 + 1/100000000000000000) - 1))", "sin(x)").status,
+    ).toBe("equivalent");
+    expect(
+      verifyScalarEquivalence("ln((1 + 1/100000000000000000) - 1) + sin(x)", "ln(1/100000000000000000) + sin(x)").status,
+    ).toBe("equivalent");
+    expect(verifyScalarEquivalence("sin(x) / sin(x)", "1").status).toBe("inequivalent");
+    expect(verifyScalarEquivalence("sin(0) / sin(0)", "1").status).toBe("inequivalent");
+    expect(
+      verifyScalarEquivalence("sin(x) * (100000000000000000 * ((1 + 1/100000000000000000) - 1) + 1)", "2 * sin(x)").status,
+    ).toBe("equivalent");
+
+    // P2-1: empty natural domain on identical uncheckedOps fails closed
+    expect(verifyScalarEquivalence("1 / sin(x)", "1 / sin(x)", { intervals: [{ left: 0, right: 0 }] }).status).toBe("unverified");
+    expect(verifyScalarEquivalence("sqrt(sin(x) - 2)", "sqrt(sin(x) - 2)").status).toBe("unverified");
+  });
+
   it("checks derivative residuals, variable forwarding, piecewise integrals, and general substitution bounds", () => {
     expect(verifyIndefiniteIntegral({ student: "x^2 / 2", integrand: "x" }).status).toBe("equivalent");
     expect(verifyIndefiniteIntegral({ student: "t^2 / 2", integrand: "t", variable: "t" }).status).toBe("equivalent");
