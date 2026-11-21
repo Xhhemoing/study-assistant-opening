@@ -77,6 +77,7 @@ it("keeps one next action without mounting planning or suggestion requests on To
   host.dataset.focus = "false";
   expect(host.querySelector('a[href="/opening/review"]')).not.toBeNull();
   expect(host.querySelector('a[href="/opening/settings/planning"]')).not.toBeNull();
+  expect(host.querySelector('nav[aria-label="今日其他安排"] a[href="/opening/suggestions"]')?.textContent).toBe("待审核建议");
 });
 
 it("shows every existing course and the full course destination within learning", async () => {

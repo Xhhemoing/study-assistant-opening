@@ -311,7 +311,7 @@ export function WritingVariantsPanel({
 
   return (
     <section
-      className="space-y-4 rounded-xl border border-line bg-surface p-4"
+      className="space-y-4 rounded-card border border-line bg-surface p-4 shadow-card"
       aria-labelledby="writing-workspace-heading"
     >
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line pb-3">
@@ -322,7 +322,7 @@ export function WritingVariantsPanel({
           </h2>
         </div>
         {workspace ? (
-          <span className="rounded-full bg-accent-soft px-2.5 py-0.5 text-xs font-medium text-accent">
+          <span className="rounded-pill bg-accent-soft px-2.5 py-0.5 text-xs font-medium text-accent">
             当前：{workspace.currentVariant.variantLabel}
           </span>
         ) : null}
@@ -331,32 +331,32 @@ export function WritingVariantsPanel({
       {workspace?.focusRestore.status === "block_missing" ? (
         <p
           role="status"
-          className="rounded-md border border-warn/30 bg-warn-soft px-3 py-2 text-xs leading-5 text-warn"
+          className="rounded-xl border border-warn/30 bg-warn-soft px-3 py-2 text-xs leading-5 text-warn"
         >
           {workspace.focusRestore.message}
         </p>
       ) : null}
 
       {hasUnsavedEdits ? (
-        <p role="status" className="rounded-md border border-warn/30 bg-warn-soft px-3 py-2 text-xs text-warn">
+        <p role="status" className="rounded-xl border border-warn/30 bg-warn-soft px-3 py-2 text-xs text-warn">
           当前有未保存修改，请先保存后再派生稿件或采纳润色。
         </p>
       ) : null}
 
       {actionError ? (
-        <p role="alert" className="rounded-md border border-danger/30 bg-danger-soft px-3 py-2 text-xs text-danger">
+        <p role="alert" className="rounded-xl border border-danger/30 bg-danger-soft px-3 py-2 text-xs text-danger">
           {actionError}
         </p>
       ) : null}
 
       {notice ? (
-        <p role="status" className="rounded-md border border-line bg-bg px-3 py-2 text-xs text-text-2">
+        <p role="status" className="rounded-xl border border-line bg-bg px-3 py-2 text-xs text-text-2">
           {notice}
         </p>
       ) : null}
 
       {latestDerived ? (
-        <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-accent/30 bg-accent-soft px-3 py-2 text-xs text-text">
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-accent/30 bg-accent-soft px-3 py-2 text-xs text-text">
           <span>已生成「{latestDerived.label}」</span>
           <Link
             className={ui.quiet}
@@ -369,42 +369,42 @@ export function WritingVariantsPanel({
 
       {!workspace ? (
         <div className="space-y-3">
-          <p className="text-xs leading-5 text-text-2">
+          <p className="text-xs leading-6 text-text-2">
             将当前笔记纳入多稿对比，可派生不同版本、按段落记录反馈，并在下次续写时回到指定段落。
           </p>
         </div>
       ) : (
         <div className="space-y-2">
           <p className="text-xs font-medium text-text-2">稿件版本</p>
-          <ul className="space-y-1.5">
+          <ul className="space-y-2">
             {workspace.variants.map((variant) => {
               const isCurrent = variant.documentId === documentId;
               return (
                 <li
                   key={variant.documentId}
-                  className={`flex flex-wrap items-center justify-between gap-2 rounded-lg border px-3 py-2 text-xs ${
-                    isCurrent ? "border-accent bg-accent-soft/40" : "border-line bg-bg"
+                  className={`flex flex-wrap items-center justify-between gap-2 rounded-xl border px-3.5 py-2.5 text-xs transition-colors ${
+                    isCurrent ? "border-accent/40 bg-accent-soft/60 shadow-card" : "border-line bg-bg/70 hover:bg-surface-2/60"
                   }`}
                 >
                   <div className="min-w-0 space-y-0.5">
                     <div className="flex flex-wrap items-center gap-1.5">
                       <span className="font-medium text-text">{variant.variantLabel}</span>
-                      <span className="text-text-3">v{variant.currentRevisionNumber}</span>
+                      <span className="tabular-nums text-text-3">v{variant.currentRevisionNumber}</span>
                       {variant.keptAsPreferred ? (
-                        <span className="inline-flex items-center gap-1 rounded-full bg-accent-soft px-2 py-0.5 text-[11px] font-medium text-accent">
+                        <span className="inline-flex items-center gap-1 rounded-pill bg-accent-soft px-2 py-0.5 text-xs font-medium text-accent">
                           <Star aria-hidden="true" size={11} />
                           本周保留稿
                         </span>
                       ) : null}
                     </div>
                     {variant.adoptedPolishCount > 0 ? (
-                      <p className="text-[11px] text-text-3">
+                      <p className="tabular-nums text-xs text-text-3">
                         已采纳 {variant.adoptedPolishCount} 句润色
                       </p>
                     ) : null}
                   </div>
                   {isCurrent ? (
-                    <span aria-current="page" className="text-[11px] font-medium text-accent">
+                    <span aria-current="page" className="text-xs font-medium text-accent">
                       正在编辑
                     </span>
                   ) : (
@@ -422,7 +422,7 @@ export function WritingVariantsPanel({
         </div>
       )}
 
-      <form className="space-y-2 border-t border-line pt-3" onSubmit={(event) => void handleDeriveVariant(event)}>
+      <form className="space-y-2.5 border-t border-line pt-3.5" onSubmit={(event) => void handleDeriveVariant(event)}>
         <p className="text-xs font-medium text-text-2">派生对比稿</p>
         <div className="flex flex-wrap gap-1.5">
           {PRESET_VARIANTS.map((preset) => (
@@ -458,7 +458,7 @@ export function WritingVariantsPanel({
       </form>
 
       {workspace ? (
-        <div className="space-y-2 border-t border-line pt-3">
+        <div className="space-y-2.5 border-t border-line pt-3.5">
           <p className="text-xs font-medium text-text-2">续写位置与本周保留</p>
           <label className="block">
             <span className="sr-only">选择续写段落</span>
@@ -499,18 +499,20 @@ export function WritingVariantsPanel({
         </div>
       ) : null}
 
-      <form className="space-y-2.5 border-t border-line pt-3" onSubmit={(event) => void handleRecordFeedback(event)}>
-        <div className="flex items-center justify-between gap-2">
+      <form className="space-y-3 border-t border-line pt-3.5" onSubmit={(event) => void handleRecordFeedback(event)}>
+        <div className="flex flex-wrap items-center justify-between gap-1.5">
           <p className="text-xs font-medium text-text-2">多维反馈与句子润色</p>
-          <span className="text-[11px] text-text-3">已记录辅助，不计入独立作答成绩</span>
+          <span className="text-xs text-text-3">已记录辅助，不计入独立作答成绩</span>
         </div>
-        <div className="flex flex-wrap gap-1.5" role="group" aria-label="评价维度">
+        <div className="well-recessed grid grid-cols-4 gap-1 rounded-xl p-1" role="group" aria-label="评价维度">
           {(Object.keys(DIMENSION_LABELS) as WritingDimension[]).map((key) => (
             <button
               key={key}
               type="button"
               aria-pressed={dimension === key}
-              className={dimension === key ? ui.primary : ui.quiet}
+              className={`min-h-8 rounded-lg px-2 py-1 text-center text-xs font-medium transition-[background-color,color,box-shadow] duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
+                dimension === key ? "bg-surface font-semibold text-text shadow-card" : "text-text-2 hover:text-text"
+              }`}
               onClick={() => setDimension(key)}
             >
               {DIMENSION_LABELS[key]}
@@ -555,7 +557,7 @@ export function WritingVariantsPanel({
         <label className="block">
           <span className="sr-only">反馈或润色内容</span>
           <textarea
-            className={`${ui.input} min-h-20 resize-y`}
+            className={`${ui.input} min-h-24 resize-y leading-6`}
             value={suggestionText}
             onChange={(event) => setSuggestionText(event.target.value)}
             placeholder={kind === "polish_suggestion" ? "输入可替换该段的润色句…" : "记录论点、语言、结构或论据反馈…"}
@@ -573,33 +575,33 @@ export function WritingVariantsPanel({
       </form>
 
       {workspace && workspace.currentVariant.assistanceRecords.length > 0 ? (
-        <div className="space-y-2 border-t border-line pt-3">
-          <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="space-y-2.5 border-t border-line pt-3.5">
+          <div className="flex flex-wrap items-center justify-between gap-1.5">
             <p className="text-xs font-medium text-text-2">已记录的反馈与润色</p>
-            <span className="text-[11px] text-text-3">已记录辅助，不计入独立作答成绩</span>
+            <span className="text-xs text-text-3">已记录辅助，不计入独立作答成绩</span>
           </div>
-          <ul className="space-y-2">
+          <ul className="space-y-2.5">
             {workspace.currentVariant.assistanceRecords.map((record) => {
               const targetExists = record.targetBlockId !== null && liveBlockIds.has(record.targetBlockId);
               return (
-                <li key={record.id} className="space-y-1.5 rounded-lg border border-line bg-bg p-3 text-xs">
+                <li key={record.id} className="space-y-2 rounded-xl border border-line bg-bg/70 p-3.5 text-xs">
                   <div className="flex flex-wrap items-center justify-between gap-1.5">
-                    <span className="font-medium text-text">
+                    <span className="rounded-pill bg-surface px-2.5 py-0.5 font-medium text-text shadow-card">
                       {DIMENSION_LABELS[record.dimension]} · {KIND_LABELS[record.kind]}
                     </span>
                     {record.adoptedAt ? (
-                      <span className="inline-flex items-center gap-1 text-[11px] font-medium text-accent">
+                      <span className="inline-flex items-center gap-1 tabular-nums text-xs font-medium text-accent">
                         <Check aria-hidden="true" size={12} />
                         已采纳（v{record.adoptedRevisionNumber}）
                       </span>
                     ) : null}
                   </div>
                   {record.targetBlockTextSnapshot ? (
-                    <p className="truncate text-[11px] text-text-3">
+                    <p className="well-recessed line-clamp-2 rounded-lg px-2.5 py-1.5 leading-5 text-text-3">
                       原句：{record.targetBlockTextSnapshot}
                     </p>
                   ) : null}
-                  <p className="leading-5 text-text-2">{record.suggestionText}</p>
+                  <p className="leading-6 text-text">{record.suggestionText}</p>
                   {record.kind === "polish_suggestion" && !record.adoptedAt ? (
                     record.targetBlockId && targetExists ? (
                       <button
@@ -616,7 +618,7 @@ export function WritingVariantsPanel({
                         采纳此句润色
                       </button>
                     ) : (
-                      <p className="text-[11px] text-text-3">原定位段落已变化，当前无法直接替换</p>
+                      <p className="text-xs text-text-3">原定位段落已变化，当前无法直接替换</p>
                     )
                   ) : null}
                 </li>

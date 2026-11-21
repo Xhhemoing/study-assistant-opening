@@ -15,7 +15,12 @@ export function LoadingRows({ label = "正在读取你的学习内容", delayMs 
     return () => clearTimeout(timer);
   }, [delayMs]);
   if (!visible) return null;
+  const rows = [
+    { title: "w-3/5", meta: "w-1/3" },
+    { title: "w-4/5", meta: "w-2/5" },
+    { title: "w-1/2", meta: "w-1/4" },
+  ] as const;
   return <div className="space-y-4 p-4" role="status"><span className="sr-only">{label}</span>
-    {[0, 1, 2].map(row => <div key={row} className="flex items-center gap-3"><Skeleton className="size-8" /><div className="flex-1 space-y-2"><Skeleton className="h-2.5 w-2/3" /><Skeleton className="h-2 w-1/3" /></div></div>)}
+    {rows.map((row, index) => <div key={index} className="flex items-center gap-3.5"><Skeleton className="size-9 shrink-0 rounded-lg" /><div className="min-w-0 flex-1 space-y-2"><Skeleton className={`h-3 rounded-sm ${row.title}`} /><Skeleton className={`h-2 rounded-sm ${row.meta}`} /></div></div>)}
   </div>;
 }

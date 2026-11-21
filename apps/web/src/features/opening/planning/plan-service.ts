@@ -332,6 +332,40 @@ export function createOpeningPlanService(sql: Sql, serviceOptions: OpeningPlanSe
     return result;
   }
 
+  async function readToday(scope: Scope, date: string, ensured?: EnsureDailyDraftResult): Promise<TodayPlanResult> {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      throw new OpeningPlanError("VALIDATION", "date must be YYYY-MM-DD");
+    }
+    const [state, hardBlocks, persisted] = await Promise.all([
+      repo.getToday(scope, date),
+      repo.listHardBlocks(scope, date),
+      ensured ? null : repo.findDraftByProposeClientKey(scope, date, dailyDraftClientKey(date)),
+    ]);
+    const acceptedVersion = state?.acceptedVersion ?? 0;
+    const blocks = state?.blocks ?? [];
+    const tasks = acceptedVersion ? await repo.listTasks(scope, { excludeInactiveRetests: true }) : [];
+    const skipped = acceptedVersion || persisted?.status === "accepted" ? "accepted"
+      : persisted?.status === "rejected" ? "rejected"
+      : !ensured && !persisted && !(await resolveFreeBlocks(scope, date)) ? "no_settings"
+      : null;
+    const dailyDraft = skipped ? null : ensured ? ensured.draft : persisted;
+    const visibleDraft = !ensured && dailyDraft?.suggestedTasks?.length && dailyDraft.origin !== "agent"
+      ? withOpeningSuggestionFeedback(dailyDraft, await readOpeningSuppressedSuggestionIdentities(sql, scope, date))
+      : dailyDraft;
+    const result: TodayPlanResult = {
+      date, acceptedVersion, blocks, hardBlocks,
+      dailyDraft: visibleDraft,
+      dailyDraftSkippedReason: skipped || ensured?.dailyDraftSkippedReason || null,
+    };
+    if (acceptedVersion) result.unplannedPendingCount = ensured?.unplannedPendingCount ?? countUnplannedPending(tasks, blocks);
+    if (ensured?.hasNewerSuggestion) result.hasNewerSuggestion = true;
+    if (acceptedVersion && loadFeatureSwitches().adaptivePlanning) {
+      const offer = shouldOfferReplan({ acceptedBlocks: blocks, tasks, now: clock() });
+      result.replanOffer = { ...offer, dismissalKey: `${scope.workspaceId}/${scope.ownerUserId}/${date}/${acceptedVersion}/${offer.reason}` };
+    }
+    return result;
+  }
+
   return {
     async listTasks(scope: Scope): Promise<TaskItem[]> {
       // opening_tasks.minutes is the sole durable estimate owner; no second ledger.
@@ -391,35 +425,10 @@ export function createOpeningPlanService(sql: Sql, serviceOptions: OpeningPlanSe
     },
 
     ensureDailyDraft,
+    readToday,
 
     async getToday(scope: Scope, date: string, options: EnsureDailyDraftOptions = {}): Promise<TodayPlanResult> {
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
-        throw new OpeningPlanError("VALIDATION", "date must be YYYY-MM-DD");
-      }
-      const ensured = await ensureDailyDraft(scope, date, options);
-      const state = await repo.getToday(scope, date);
-      const hard = await repo.listHardBlocks(scope, date);
-      const result: TodayPlanResult = {
-        date,
-        acceptedVersion: state?.acceptedVersion ?? 0,
-        blocks: state?.blocks ?? [],
-        hardBlocks: hard,
-        dailyDraft: ensured.draft,
-        dailyDraftSkippedReason: ensured.dailyDraftSkippedReason,
-      };
-      if (ensured.unplannedPendingCount !== undefined) {
-        result.unplannedPendingCount = ensured.unplannedPendingCount;
-      }
-      if (ensured.hasNewerSuggestion) result.hasNewerSuggestion = true;
-      if (state?.acceptedVersion && loadFeatureSwitches().adaptivePlanning) {
-        const offer = shouldOfferReplan({
-          acceptedBlocks: state.blocks,
-          tasks: await repo.listTasks(scope, { excludeInactiveRetests: true }),
-          now: clock(),
-        });
-        result.replanOffer = { ...offer, dismissalKey: `${scope.workspaceId}/${scope.ownerUserId}/${date}/${state.acceptedVersion}/${offer.reason}` };
-      }
-      return result;
+      return readToday(scope, date, await ensureDailyDraft(scope, date, options));
     },
 
     async proposeLocalReplan(scope: Scope, raw: unknown): Promise<LocalReplanResult> {

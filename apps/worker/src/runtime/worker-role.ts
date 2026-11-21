@@ -1,4 +1,5 @@
 import type { WorkerRole } from "@aistudy/config";
+import type { ChamberRole } from "../chambers/chamber-ports";
 import { preflightParser } from "../parsers/parser-preflight";
 import type { ParserRunner } from "../parsers/types";
 import { OPENING_QUEUE_KINDS } from "./queue";
@@ -6,23 +7,45 @@ import type { ParserOcrHealth } from "@aistudy/database";
 import { probeParserOcr } from "../parsers/ocr-health";
 import { createParserActivity } from "../parsers/parser-activity";
 
-const PARSER_QUEUES = new Set<string>(["parse", "parse-media"]);
+export function parseWorkerRole(raw: string | undefined): WorkerRole {
+  const role = raw?.trim() || "all";
+  switch (role) {
+    case "tutor": return "teaching";
+    case "all": case "parser": case "learning": case "logistics": case "teaching":
+      return role;
+    default:
+      throw new Error(`Unknown WORKER_ROLE: ${role}`);
+  }
+}
+
+export const workerRunsParser = (role: WorkerRole) => role === "all" || role === "parser";
+
+// New queue kinds need an explicit owner before a chamber may consume them.
+const queueOwner = {
+  parse: "parser", "parse-media": "parser", remind: "logistics",
+  tutor: "teaching", "tutor-metadata": "teaching", retest: "teaching",
+  "build-course-knowledge": "logistics", "extract-study-actions": "logistics",
+  "compile-teaching-unit": "teaching", "index-source": "logistics",
+  "recognize-photo-question": "teaching", "grade-observation": "teaching",
+} as const satisfies Record<typeof OPENING_QUEUE_KINDS[number], ChamberRole | "parser">;
 
 /** Producer queues remain complete; only consumers and parser dependencies vary. */
 export async function prepareWorkerRole(
-  role: WorkerRole,
+  rawRole: string | undefined,
   checkParser: () => Promise<ParserRunner> = preflightParser,
   health: { probe?: (signal?: AbortSignal) => Promise<ParserOcrHealth>; record?: (report: ParserOcrHealth) => Promise<void>; now?: () => number; evidenceTtlMs?: number } = {},
 ) {
+  const role = parseWorkerRole(rawRole);
+  const runsParser = workerRunsParser(role);
   const queueKinds = new Set<string>(OPENING_QUEUE_KINDS.filter(kind =>
-    role === "all" || (role === "parser" ? PARSER_QUEUES.has(kind) : !PARSER_QUEUES.has(kind)),
+    role === "all" || role === queueOwner[kind] || (role === "learning" && queueOwner[kind] !== "parser"),
   ));
   // Record even missing-model/preflight failures before refusing startup. A
   // learning-only worker must not overwrite reports from parser consumers.
   const activity = createParserActivity(health.now);
   const probe = (signal?: AbortSignal) => health.probe ? health.probe(signal) : probeParserOcr(undefined, process.env, signal);
   let lastReport: ParserOcrHealth | null = null;
-  const refreshParserHealth = role === "learning" ? null : async (signal?: AbortSignal) => {
+  const refreshParserHealth = !runsParser ? null : async (signal?: AbortSignal) => {
     const report = lastReport?.status === "ready" && activity.canReuseHealth(health.evidenceTtlMs ?? 5 * 60_000)
       ? lastReport : await probe(signal);
     signal?.throwIfAborted();
@@ -31,11 +54,11 @@ export async function prepareWorkerRole(
     lastReport = report;
     return report;
   };
-  const parserOcrHealth = role === "learning" ? null : await probe();
+  const parserOcrHealth = !runsParser ? null : await probe();
   lastReport = parserOcrHealth;
   // Do not catch parser failures: all/parser must never start a broken parser consumer.
   let parserRunner: ParserRunner | null = null;
-  if (role !== "learning") {
+  if (runsParser) {
     try { parserRunner = await checkParser(); }
     catch (error) {
       // Preserve import/path preflight before DB access when OCR is disabled.
@@ -52,7 +75,8 @@ export async function prepareWorkerRole(
   return { queueKinds, parserRunner: parserRunner ? activity.wrap(parserRunner) : null, parserOcrHealth, refreshParserHealth };
 }
 
-export const isParserQueue = (kind: string) => PARSER_QUEUES.has(kind);
+const parserQueues = new Set<string>(OPENING_QUEUE_KINDS.filter(kind => queueOwner[kind] === "parser"));
+export const isParserQueue = (kind: string) => parserQueues.has(kind);
 
 /** Reconcile existing consumers only; recovery never constructs another Worker. */
 export async function reconcileParserConsumers(
