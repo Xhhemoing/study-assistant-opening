@@ -254,7 +254,16 @@ const SHARED_ARRAY_BUFFER_BYTE_LENGTH_GET =
   typeof SharedArrayBuffer !== "undefined"
     ? Object.getOwnPropertyDescriptor(SharedArrayBuffer.prototype, "byteLength")?.get
     : undefined;
+const ERROR_IS_ERROR = (Error as { isError?: (v: unknown) => boolean }).isError;
 const WEAK_PROBE_KEY = Object.freeze({});
+const SPECIES_NON_OBJECT_ERROR_MESSAGE = (() => {
+  try {
+    Reflect.apply(Promise.prototype.finally, { constructor: null }, [NOOP_CALLBACK]);
+  } catch (err) {
+    return err instanceof TypeError ? err.message : "";
+  }
+  return "";
+})();
 
 function matchesBrand(check: () => unknown): boolean {
   try {
@@ -266,13 +275,84 @@ function matchesBrand(check: () => unknown): boolean {
 }
 
 /**
+ * Zero-getter, zero-mutation Promise internal-slot brand check.
+ * Precondition: obj already verified to have proto === Object.prototype | null | Array.prototype
+ * and no own symbol keys or accessor getters.
+ */
+function hasPromiseInternalSlot(obj: object): boolean {
+  if (Array.isArray(obj)) return false;
+  const proto = Object.getPrototypeOf(obj) as object | null;
+  if (proto !== Object.prototype && proto !== null) return true;
+
+  const ctorDesc = Object.getOwnPropertyDescriptor(obj, "constructor");
+  if (ctorDesc && (ctorDesc.get !== undefined || ctorDesc.set !== undefined || !Object.hasOwn(ctorDesc, "value"))) {
+    return true;
+  }
+  const hasOwnCtor = ctorDesc !== undefined;
+  const ctorVal = ctorDesc?.value;
+
+  // Case A: No own constructor, or own constructor is undefined / Object (no user [Symbol.species]).
+  if (!hasOwnCtor || ctorVal === undefined || ctorVal === Object) {
+    return matchesBrand(() => Reflect.apply(Promise.prototype.then, obj, [NOOP_CALLBACK, NOOP_CALLBACK]));
+  }
+
+  // Case B: Non-callable object constructor. Per ECMA-262 PromiseResolve(C, x), if IsPromise(obj)
+  // and obj.constructor === C, returns obj at Step 2b BEFORE touching [Symbol.species] or NewPromiseCapability;
+  // if !IsPromise(obj), NewPromiseCapability throws TypeError immediately on non-callable C.
+  if (typeof ctorVal === "object" && ctorVal !== null) {
+    try {
+      return Reflect.apply(Promise.resolve, ctorVal, [obj]) === obj;
+    } catch {
+      return false;
+    }
+  }
+
+  // Case C: Untrusted function constructor !== Object — fail closed without invoking it.
+  if (typeof ctorVal === "function") {
+    return true;
+  }
+
+  // Case D: null or primitive constructor — distinguish IsPromise Step 2 failure from SpeciesConstructor Step 3 failure.
+  let expectedSpeciesErrMsg = SPECIES_NON_OBJECT_ERROR_MESSAGE;
+  if (ctorVal !== null) {
+    try {
+      Reflect.apply(Promise.prototype.finally, { constructor: ctorVal }, [NOOP_CALLBACK]);
+    } catch (sampleErr) {
+      if (sampleErr instanceof TypeError) expectedSpeciesErrMsg = sampleErr.message;
+    }
+  }
+  try {
+    Reflect.apply(Promise.prototype.then, obj, [NOOP_CALLBACK, NOOP_CALLBACK]);
+    return true;
+  } catch (err) {
+    return (
+      err instanceof TypeError &&
+      expectedSpeciesErrMsg !== "" &&
+      err.message === expectedSpeciesErrMsg
+    );
+  }
+}
+
+/**
  * Detect exotic built-in internal slots (Map, Set, Date, RegExp, ArrayBuffer, TypedArray,
  * DataView, WeakMap, WeakSet, Promise, Error, boxed primitives, SharedArrayBuffer) even when
  * the object's prototype has been reassigned via Object.setPrototypeOf(..., Object.prototype | null).
+ * Call ONLY after verifying prototype and own keys (no symbol keys / no accessors).
  */
 function hasExoticInternalSlots(obj: object): boolean {
   if (ArrayBuffer.isView(obj)) return true;
-  if (Object.prototype.toString.call(obj) === "[object Error]") return true;
+  if (typeof ERROR_IS_ERROR === "function") {
+    if (ERROR_IS_ERROR(obj)) return true;
+  } else {
+    const proto = Object.getPrototypeOf(obj) as object | null;
+    if (
+      (proto === Object.prototype || proto === null || proto === Array.prototype) &&
+      Object.getOwnPropertyDescriptor(obj, Symbol.toStringTag) === undefined &&
+      Object.prototype.toString.call(obj) === "[object Error]"
+    ) {
+      return true;
+    }
+  }
   if (matchesBrand(() => Reflect.apply(Map.prototype.has, obj, [undefined]))) return true;
   if (matchesBrand(() => Reflect.apply(Set.prototype.has, obj, [undefined]))) return true;
   if (matchesBrand(() => Reflect.apply(WeakMap.prototype.has, obj, [WEAK_PROBE_KEY]))) return true;
@@ -297,7 +377,7 @@ function hasExoticInternalSlots(obj: object): boolean {
   ) {
     return true;
   }
-  if (matchesBrand(() => Reflect.apply(Promise.prototype.then, obj, [NOOP_CALLBACK, NOOP_CALLBACK]))) return true;
+  if (hasPromiseInternalSlot(obj)) return true;
   if (matchesBrand(() => Reflect.apply(Number.prototype.valueOf, obj, []))) return true;
   if (matchesBrand(() => Reflect.apply(String.prototype.valueOf, obj, []))) return true;
   if (matchesBrand(() => Reflect.apply(Boolean.prototype.valueOf, obj, []))) return true;
@@ -310,7 +390,6 @@ function isPlainRecordOwnDataOnly(value: unknown): value is Record<string, unkno
   if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
   const proto = Object.getPrototypeOf(value) as object | null;
   if (proto !== Object.prototype && proto !== null) return false;
-  if (hasExoticInternalSlots(value)) return false;
   for (const key of Reflect.ownKeys(value)) {
     if (typeof key !== "string") return false;
     const desc = Object.getOwnPropertyDescriptor(value, key);
@@ -318,7 +397,31 @@ function isPlainRecordOwnDataOnly(value: unknown): value is Record<string, unkno
       return false;
     }
   }
+  if (hasExoticInternalSlots(value)) return false;
   return true;
+}
+
+function isPlainDenseArrayHeader(obj: unknown): obj is unknown[] {
+  if (!Array.isArray(obj)) return false;
+  if (Object.getPrototypeOf(obj) !== Array.prototype) return false;
+  const lenDesc = Object.getOwnPropertyDescriptor(obj, "length");
+  if (!lenDesc || typeof lenDesc.value !== "number" || !Number.isInteger(lenDesc.value)) return false;
+  const len = lenDesc.value;
+  const keys = Reflect.ownKeys(obj);
+  if (keys.length !== len + 1) return false;
+  for (let i = 0; i < len; i += 1) {
+    const desc = Object.getOwnPropertyDescriptor(obj, String(i));
+    if (
+      !desc ||
+      !desc.enumerable ||
+      !Object.hasOwn(desc, "value") ||
+      desc.get !== undefined ||
+      desc.set !== undefined
+    ) {
+      return false;
+    }
+  }
+  return !hasExoticInternalSlots(obj);
 }
 
 /**
@@ -341,32 +444,16 @@ function cloneAndFreezePlainData(
 
   const obj = value as object;
   if (memo.has(obj)) return { ok: true, value: memo.get(obj) };
-  if (hasExoticInternalSlots(obj)) return { ok: false };
 
   const proto = Object.getPrototypeOf(obj) as object | null;
   if (Array.isArray(obj)) {
-    if (proto !== Array.prototype) return { ok: false };
-    const lenDesc = Object.getOwnPropertyDescriptor(obj, "length");
-    if (!lenDesc || typeof lenDesc.value !== "number" || !Number.isInteger(lenDesc.value)) {
-      return { ok: false };
-    }
-    const len = lenDesc.value;
-    const keys = Reflect.ownKeys(obj);
-    if (keys.length !== len + 1) return { ok: false };
-
+    if (!isPlainDenseArrayHeader(obj)) return { ok: false };
+    const len = obj.length;
     const out: unknown[] = new Array(len);
     memo.set(obj, out);
     for (let i = 0; i < len; i += 1) {
       const desc = Object.getOwnPropertyDescriptor(obj, String(i));
-      if (
-        !desc ||
-        !desc.enumerable ||
-        !Object.hasOwn(desc, "value") ||
-        desc.get !== undefined ||
-        desc.set !== undefined
-      ) {
-        return { ok: false };
-      }
+      if (!desc || !Object.hasOwn(desc, "value")) return { ok: false };
       const child = cloneAndFreezePlainData(desc.value, memo);
       if (!child.ok) return { ok: false };
       Object.defineProperty(out, String(i), {
@@ -381,10 +468,9 @@ function cloneAndFreezePlainData(
   }
 
   if (proto !== Object.prototype && proto !== null) return { ok: false };
-  const out: Record<string, unknown> =
-    proto === null ? (Object.create(null) as Record<string, unknown>) : {};
-  memo.set(obj, out);
-  for (const key of Reflect.ownKeys(obj)) {
+  const ownKeys = Reflect.ownKeys(obj);
+  const validatedEntries: Array<{ readonly key: string; readonly value: unknown; readonly enumerable: boolean }> = [];
+  for (const key of ownKeys) {
     if (typeof key !== "string") return { ok: false };
     const desc = Object.getOwnPropertyDescriptor(obj, key);
     if (
@@ -396,12 +482,20 @@ function cloneAndFreezePlainData(
     ) {
       return { ok: false };
     }
-    const child = cloneAndFreezePlainData(desc.value, memo);
+    validatedEntries.push({ key, value: desc.value, enumerable: desc.enumerable });
+  }
+  if (hasExoticInternalSlots(obj)) return { ok: false };
+
+  const out: Record<string, unknown> =
+    proto === null ? (Object.create(null) as Record<string, unknown>) : {};
+  memo.set(obj, out);
+  for (const entry of validatedEntries) {
+    const child = cloneAndFreezePlainData(entry.value, memo);
     if (!child.ok) return { ok: false };
-    Object.defineProperty(out, key, {
+    Object.defineProperty(out, entry.key, {
       value: child.value,
       writable: false,
-      enumerable: desc.enumerable,
+      enumerable: entry.enumerable,
       configurable: false,
     });
   }
@@ -451,9 +545,7 @@ function snapshotActiveSourcesMap(activeSourcesMap: ActiveSourcesMap): ReadonlyM
 }
 
 function freezeSourceRefs(sourceRefs: unknown): readonly RemedySourceRef[] | null {
-  if (!Array.isArray(sourceRefs) || sourceRefs.length === 0) return null;
-  if (Object.getPrototypeOf(sourceRefs) !== Array.prototype || hasExoticInternalSlots(sourceRefs)) return null;
-  if (Reflect.ownKeys(sourceRefs).length !== sourceRefs.length + 1) return null;
+  if (!isPlainDenseArrayHeader(sourceRefs) || sourceRefs.length === 0) return null;
   const frozen: RemedySourceRef[] = [];
   for (let i = 0; i < sourceRefs.length; i += 1) {
     const slot = readOwnDataIndex(sourceRefs, i);
@@ -573,10 +665,7 @@ function snapshotAttemptCandidate(rawAttempt: unknown): DiagnosedRootAttempt | n
 }
 
 function snapshotStringArray(raw: unknown): readonly string[] | null {
-  if (!Array.isArray(raw) || Object.getPrototypeOf(raw) !== Array.prototype || hasExoticInternalSlots(raw)) {
-    return null;
-  }
-  if (Reflect.ownKeys(raw).length !== raw.length + 1) return null;
+  if (!isPlainDenseArrayHeader(raw)) return null;
   const out: string[] = [];
   for (let i = 0; i < raw.length; i += 1) {
     const slot = readOwnDataIndex(raw, i);

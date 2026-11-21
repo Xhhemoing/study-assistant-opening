@@ -1266,5 +1266,144 @@ describe("revalidateRemedyClinic privacy_epoch and source-revocation read guard"
     expect(sameTitleAsIdRes.clinic!.steps[1].ruleId).toBe(RULE_ID);
     expect(sameTitleAsIdRes.clinic!.steps[1].prompt).not.toContain(RULE_ID);
     expect(sameTitleAsIdRes.clinic!.steps[1].prompt).toContain("当前薄弱规则");
+
+    // Round-8 [P1-1]: [Symbol.toStringTag] getter on probe input and in revalidateRemedyClinic MUST NEVER execute.
+    let toStringTagCalls = 0;
+    const toStringTagTrapInput = Object.defineProperty({ a: -2, b: 8 }, Symbol.toStringTag, {
+      enumerable: true,
+      get() {
+        toStringTagCalls++;
+        return "Object";
+      },
+    }) as unknown as InequalityInput;
+    const toStringTagProbe = {
+      ...makeProbe({ probeId: "probe-tostringtag-trap", input: { a: -2, b: 8 } }),
+      input: toStringTagTrapInput,
+    };
+    const toStringTagRes = generateRemedyClinic({
+      learnerId: "learner-1",
+      courseId: "course-alg-1",
+      ruleId: RULE_ID,
+      currentPrivacyEpoch: 5,
+      activeSourcesMap: allSources,
+      verifyRuleViolation: verifyNegativeSignFlip,
+      attempts,
+      candidateProbes: [toStringTagProbe, probe2],
+    });
+    expect(toStringTagCalls).toBe(0);
+    expect(toStringTagRes.status).toBe("insufficient_distinguishable_probes");
+    expect(toStringTagRes.rejectedProbes[0]!.reason).toBe("invalid_probe_descriptor");
+
+    const toStringTagClinic = Object.defineProperty({ ...clinic }, Symbol.toStringTag, {
+      enumerable: true,
+      get() {
+        toStringTagCalls++;
+        return "Object";
+      },
+    }) as unknown as typeof clinic;
+    const toStringTagReval = revalidateRemedyClinic(toStringTagClinic, allSources, 6);
+    expect(toStringTagCalls).toBe(0);
+    expect(toStringTagReval.status).toBe("stale_source_revoked");
+
+    // Round-8 [P1-1] & [P1-2]: Prototype-reassigned Promise with [Symbol.species] getter on constructor
+    // must be rejected WITHOUT executing the [Symbol.species] getter.
+    let speciesGetterCalls = 0;
+    const speciesCtor = Object.defineProperty({}, Symbol.species, {
+      enumerable: true,
+      get() {
+        speciesGetterCalls++;
+        return Promise;
+      },
+    });
+    const speciesPromise = Promise.resolve("secret");
+    Object.setPrototypeOf(speciesPromise, Object.prototype);
+    Object.defineProperty(speciesPromise, "constructor", {
+      value: speciesCtor,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    });
+    const speciesPromiseProbe = {
+      ...makeProbe({ probeId: "probe-species-promise", input: { a: -2, b: 8 } }),
+      input: { a: -2, b: 8, leaked: speciesPromise } as unknown as InequalityInput,
+    };
+    const speciesPromiseRes = generateRemedyClinic({
+      learnerId: "learner-1",
+      courseId: "course-alg-1",
+      ruleId: RULE_ID,
+      currentPrivacyEpoch: 5,
+      activeSourcesMap: allSources,
+      verifyRuleViolation: verifyNegativeSignFlip,
+      attempts,
+      candidateProbes: [speciesPromiseProbe, probe2],
+    });
+    expect(speciesGetterCalls).toBe(0);
+    expect(speciesPromiseRes.status).toBe("insufficient_distinguishable_probes");
+    expect(speciesPromiseRes.rejectedProbes[0]!.reason).toBe("invalid_probe_descriptor");
+
+    // Round-8 [P1-2]: Prototype-reassigned Promise with constructor: null or constructor: 123 is rejected,
+    // while genuine plain objects { constructor: null } and { constructor: 123 } are accepted.
+    const nullCtorPromise = Promise.resolve("secret-null");
+    Object.setPrototypeOf(nullCtorPromise, Object.prototype);
+    Object.defineProperty(nullCtorPromise, "constructor", {
+      value: null,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    });
+    const numCtorPromise = Promise.resolve("secret-num");
+    Object.setPrototypeOf(numCtorPromise, Object.prototype);
+    Object.defineProperty(numCtorPromise, "constructor", {
+      value: 123,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    });
+    const ctorPromiseRes = generateRemedyClinic({
+      learnerId: "learner-1",
+      courseId: "course-alg-1",
+      ruleId: RULE_ID,
+      currentPrivacyEpoch: 5,
+      activeSourcesMap: allSources,
+      verifyRuleViolation: verifyNegativeSignFlip,
+      attempts,
+      candidateProbes: [
+        {
+          ...makeProbe({ probeId: "probe-null-ctor-promise", input: { a: -2, b: 8 } }),
+          input: { a: -2, b: 8, p: nullCtorPromise } as unknown as InequalityInput,
+        },
+        {
+          ...makeProbe({ probeId: "probe-num-ctor-promise", input: { a: -3, b: 12 } }),
+          input: { a: -3, b: 12, p: numCtorPromise } as unknown as InequalityInput,
+        },
+      ],
+    });
+    expect(ctorPromiseRes.status).toBe("insufficient_distinguishable_probes");
+    expect(ctorPromiseRes.rejectedProbes.map((r) => r.reason)).toEqual([
+      "invalid_probe_descriptor",
+      "invalid_probe_descriptor",
+    ]);
+
+    const plainNullCtorRes = generateRemedyClinic({
+      learnerId: "learner-1",
+      courseId: "course-alg-1",
+      ruleId: RULE_ID,
+      currentPrivacyEpoch: 5,
+      activeSourcesMap: allSources,
+      verifyRuleViolation: verifyNegativeSignFlip,
+      attempts,
+      candidateProbes: [
+        {
+          ...makeProbe({ probeId: "probe-plain-null-ctor", input: { a: -2, b: 8 } }),
+          input: { a: -2, b: 8, meta: { constructor: null } } as unknown as InequalityInput,
+        },
+        {
+          ...makeProbe({ probeId: "probe-plain-num-ctor", input: { a: -3, b: 12 } }),
+          input: { a: -3, b: 12, meta: { constructor: 123 } } as unknown as InequalityInput,
+        },
+      ],
+    });
+    expect(plainNullCtorRes.status).toBe("active");
+    expect(plainNullCtorRes.clinic!.steps[2].probes).toHaveLength(2);
   });
 });
