@@ -282,6 +282,8 @@ it("fenceOpeningTutorAttemptHead always updates Redis attempt-head monotonically
     expect(performance.now() - startedAt).toBeLessThan(500);
     await vi.waitFor(() => expect(connections).toBe(2));
     await vi.waitFor(() => expect(evalPayloads[1]).toContain("00000000-0000-4000-8000-000000000009"));
+    expect(evalPayloads[1]).toContain("attemptHeadRevision");
+    expect(evalPayloads[1]).not.toContain("elseif not execution");
   }, socket => {
     const idx = connections++;
     evalPayloads[idx] = "";

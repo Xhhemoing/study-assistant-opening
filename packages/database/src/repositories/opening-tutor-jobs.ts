@@ -201,12 +201,13 @@ async function assertStreamMaterialAdmission(
     await createOpeningCourseReadySourcesRepository(sql).assertMaterialPurposePin(scope, pin, tx);
   }
   if (globalMemoryIdList.length) {
-    // Lock and verify every exact injected global memory is still active (never superseded/deleted).
+    // Lock and verify every exact injected global memory is still active and unexpired (never superseded/rejected/expired).
     const activeMemories = await tx`SELECT id FROM opening_memories
       WHERE workspace_id=${scope.workspaceId}
         AND id=ANY(${globalMemoryIdList}::uuid[])
         AND status='active'
         AND course_id IS NULL
+        AND (kind='confirmed' OR (kind='temporary' AND expires_at IS NOT NULL AND expires_at > now()))
       ORDER BY id FOR SHARE`;
     if (activeMemories.length !== globalMemoryIdList.length) {
       throw Object.assign(new Error("stream global memory is no longer active"), { code: "CONFLICT" });
@@ -217,7 +218,7 @@ async function assertStreamMaterialAdmission(
       throw Object.assign(new Error("stream global memory binding missing"), { code: "CONFLICT" });
     }
     // Workspace-wide global memory lineage does not require active-course membership,
-    // but must still be genuinely backed by the exact active global memories and never mock_exam.
+    // but must still be genuinely backed by the exact active, unexpired global memories and never mock_exam.
     const backed = await tx`
       SELECT DISTINCT lower(sid.id::text) AS source_id
       FROM unnest(${memoryOnlySourceIds}::uuid[]) AS sid(id)
@@ -228,6 +229,7 @@ async function assertStreamMaterialAdmission(
           AND m.id = ANY(${globalMemoryIdList}::uuid[])
           AND m.status = 'active'
           AND m.course_id IS NULL
+          AND (m.kind = 'confirmed' OR (m.kind = 'temporary' AND m.expires_at IS NOT NULL AND m.expires_at > now()))
           AND EXISTS (
             SELECT 1
             FROM jsonb_array_elements_text(m.source_turn_ids) AS ref(turn_id)
@@ -1002,6 +1004,27 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
 
     assertAttemptContext: (scope: OpeningScope, target: TutorAttemptContextTarget, expected: TutorAttemptContext) =>
       sql.begin("isolation level repeatable read", tx => assertTutorAttemptContext(tx, scope, target, expected)) as Promise<void>,
+
+    async assertGlobalMemoriesCurrent(scope: OpeningScope, memoryIds: readonly string[]): Promise<void> {
+      const ids = [...new Set(memoryIds.map(id => {
+        if (typeof id !== "string" || !UUID_PATTERN.test(id)) {
+          throw Object.assign(new Error("stream global memory binding invalid"), { code: "CONFLICT" });
+        }
+        return id.toLowerCase();
+      }))].sort();
+      if (!ids.length) return;
+      const active = await sql`SELECT m.id FROM opening_memories m
+        JOIN workspaces w ON w.id = m.workspace_id AND w.owner_user_id = ${scope.ownerUserId}
+        WHERE m.workspace_id = ${scope.workspaceId}
+          AND m.id = ANY(${ids}::uuid[])
+          AND m.status = 'active'
+          AND m.course_id IS NULL
+          AND (m.kind = 'confirmed' OR (m.kind = 'temporary' AND m.expires_at IS NOT NULL AND m.expires_at > now()))
+        ORDER BY m.id`;
+      if (active.length !== ids.length) {
+        throw Object.assign(new Error("stream global memory is no longer active"), { code: "CONFLICT" });
+      }
+    },
 
     /** Complete the answer, lineage and inert help receipt in one transaction. */
     async completeTurn(input: {

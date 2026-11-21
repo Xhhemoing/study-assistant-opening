@@ -24,10 +24,22 @@ const channelFor = (workspaceId: string, jobId: string) => `${tutorStreamKey(wor
 
 function attemptHeadBinding(workspaceId: string, fence?: TutorAttemptFence) {
   if (fence?.rootObservationId && fence.headObservationId) {
-    return { key: tutorStreamAttemptHeadKey(workspaceId, fence.rootObservationId), id: fence.headObservationId };
+    const key = tutorStreamAttemptHeadKey(workspaceId, fence.rootObservationId);
+    return {
+      key,
+      revKey: `${key}:rev`,
+      id: fence.headObservationId,
+      revision: fence.headRevision !== undefined ? String(fence.headRevision) : "",
+    };
   }
   if (fence?.rootObservationId === null && fence.headObservationId === null) {
-    return { key: tutorStreamPreAnswerHeadKey(workspaceId, fence.attemptId), id: "unsubmitted" };
+    const key = tutorStreamPreAnswerHeadKey(workspaceId, fence.attemptId);
+    return {
+      key,
+      revKey: `${key}:rev`,
+      id: "unsubmitted",
+      revision: fence.headRevision !== undefined ? String(fence.headRevision) : "0",
+    };
   }
 }
 
@@ -157,16 +169,39 @@ export function createTutorStreamWriter(redis: IORedis) {
           and redis.call('HGET', KEYS[1], 'sealed') == '1' then return end
         if ARGV[5] ~= '' then
           local head = redis.call('GET', KEYS[3])
-          if head and head ~= ARGV[5] then return end
-          redis.call('SET', KEYS[3], ARGV[5], 'EX', ARGV[3])
+          local cachedRev = tonumber(redis.call('GET', KEYS[4]))
+          local jobRev = tonumber(ARGV[6])
+          if jobRev and cachedRev then
+            if cachedRev > jobRev or (cachedRev == jobRev and head and head ~= ARGV[5]) then return end
+          elseif head and head ~= ARGV[5] then
+            if not jobRev or jobRev <= 0 then return end
+          elseif cachedRev and not jobRev and not head then
+            return
+          end
+          if not cachedRev or (jobRev and jobRev >= cachedRev) then
+            redis.call('SET', KEYS[3], ARGV[5], 'EX', ARGV[3])
+            if jobRev then
+              redis.call('SET', KEYS[4], ARGV[6], 'EX', ARGV[3])
+            end
+          else
+            if not head then redis.call('SET', KEYS[3], ARGV[5], 'EX', ARGV[3])
+            else redis.call('EXPIRE', KEYS[3], ARGV[3]) end
+            redis.call('EXPIRE', KEYS[4], ARGV[3])
+          end
         end
         redis.call('SET', KEYS[2], epoch, 'EX', ARGV[3])
         redis.call('DEL', KEYS[1])
         redis.call('HSET', KEYS[1], 'executionId', ARGV[1], 'privacyEpoch', ARGV[4], 'context', ARGV[2], 'text', '', 'sequence', '0')
-        if ARGV[5] ~= '' then redis.call('HSET', KEYS[1], 'attemptHeadKey', KEYS[3], 'attemptHeadId', ARGV[5]) end
+        if ARGV[5] ~= '' then
+          redis.call('HSET', KEYS[1], 'attemptHeadKey', KEYS[3], 'attemptHeadId', ARGV[5])
+          if ARGV[6] ~= '' then
+            redis.call('HSET', KEYS[1], 'attemptHeadRevision', ARGV[6])
+          end
+        end
         redis.call('EXPIRE', KEYS[1], ARGV[3])
-      `, 3, key, tutorStreamEpochKey(workspaceId), head?.key ?? key,
-      context.executionId ?? "", JSON.stringify(context), TUTOR_STREAM_TTL_SECONDS, context.privacyEpoch, head?.id ?? "");
+      `, 4, key, tutorStreamEpochKey(workspaceId), head?.key ?? key, head?.revKey ?? key,
+      context.executionId ?? "", JSON.stringify(context), TUTOR_STREAM_TTL_SECONDS, context.privacyEpoch,
+      head?.id ?? "", head?.revision ?? "");
     },
     seal: (workspaceId: string, jobId: string, executionId: string) => sealOpeningTutorStream(redis, workspaceId, jobId, executionId),
     async append(workspaceId: string, jobId: string, text: string, executionId: string | undefined, privacyEpoch: number,
@@ -188,6 +223,7 @@ export function createTutorStreamWriter(redis: IORedis) {
           if headKey ~= KEYS[4] or redis.call('HGET', KEYS[1], 'attemptHeadId') ~= ARGV[5]
             or redis.call('GET', KEYS[4]) ~= ARGV[5] then return 0 end
           redis.call('EXPIRE', KEYS[4], ARGV[2])
+          if redis.call('EXISTS', KEYS[5]) == 1 then redis.call('EXPIRE', KEYS[5], ARGV[2]) end
         elseif headKey then
           return 0
         end
@@ -198,7 +234,7 @@ export function createTutorStreamWriter(redis: IORedis) {
         redis.call('EXPIRE', KEYS[3], ARGV[2])
         redis.call('PUBLISH', KEYS[2], cjson.encode({text=ARGV[1], sequence=sequence}))
         return sequence
-      `, 4, key, channelFor(workspaceId, jobId), tutorStreamEpochKey(workspaceId), head?.key ?? key,
+      `, 5, key, channelFor(workspaceId, jobId), tutorStreamEpochKey(workspaceId), head?.key ?? key, head?.revKey ?? key,
       text, TUTOR_STREAM_TTL_SECONDS, executionId ?? "", privacyEpoch, head?.id ?? "");
       if (typeof result !== "number" || !Number.isSafeInteger(result) || result < 0) throw new Error("invalid stream publication sequence");
       return result;

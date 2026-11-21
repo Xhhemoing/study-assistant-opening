@@ -216,7 +216,8 @@ describe("sm95 same-attempt explain context", () => {
         await unsubscribe?.();
         if (redis.status === "ready") await redis.del(key, tutorStreamEpochKey(scope.workspaceId),
           tutorStreamPreAnswerHeadKey(scope.workspaceId, attempt.id),
-          ...(rootId ? [tutorStreamAttemptHeadKey(scope.workspaceId, rootId)] : []));
+          `${tutorStreamPreAnswerHeadKey(scope.workspaceId, attempt.id)}:rev`,
+          ...(rootId ? [tutorStreamAttemptHeadKey(scope.workspaceId, rootId), `${tutorStreamAttemptHeadKey(scope.workspaceId, rootId)}:rev`] : []));
       } finally {
         redis.disconnect();
         appendRedis.disconnect();
@@ -344,6 +345,126 @@ describe("sm95 same-attempt explain context", () => {
     }
   });
 
+  it("allows rev2 begin() to advance stale Redis attempt-head before delayed post-commit fence arrives", async () => {
+    const f = await seed();
+    const { scope } = fixture;
+    const redis = new Redis(process.env.REDIS_URL!, { maxRetriesPerRequest: 0 });
+    const writer = createTutorStreamWriter(redis), reader = createTutorStreamReader(redis);
+    const headKey = tutorStreamAttemptHeadKey(scope.workspaceId, f.original.id);
+    const keysToClean = [tutorStreamKey(scope.workspaceId, f.saved.jobId), tutorStreamEpochKey(scope.workspaceId), headKey, `${headKey}:rev`];
+    try {
+      // Seed Redis attempt-head at rev1 (simulating a prior completed turn on rev1).
+      const firstClaim = await f.claim();
+      const rev1Snapshot = (await f.jobs.readAttemptContext(scope, firstClaim))!;
+      const rev1Fence = tutorAttemptFence(rev1Snapshot);
+      expect(rev1Fence.headRevision).toBeGreaterThan(0);
+      await writer.begin(scope.workspaceId, f.saved.jobId, {
+        privacyEpoch: rev1Snapshot.privacyEpoch, contextSourceRefs: rev1Snapshot.sourceRefs,
+        exposureReceiptId: null, claimToken: firstClaim.claimToken, executionId: firstClaim.executionId,
+        attemptFence: rev1Fence,
+      });
+      expect(await redis.get(headKey)).toBe(f.graded.id);
+      expect(await redis.get(`${headKey}:rev`)).toBe(String(rev1Fence.headRevision));
+
+      // Commit rev2 WITHOUT letting its post-commit Redis fence reach Redis yet (simulating post-commit delay).
+      vi.stubEnv("REDIS_URL", undefined);
+      let revised: Awaited<ReturnType<typeof f.correct>>;
+      try {
+        revised = await f.correct();
+      } finally {
+        vi.unstubAllEnvs();
+      }
+      // Redis STILL holds rev1 head + rev1:rev when the fresh rev2 job begins!
+      expect(await redis.get(headKey)).toBe(f.graded.id);
+
+      const secondTurn = await bindAttempt(f, f.attempt, "explain");
+      keysToClean.push(tutorStreamKey(scope.workspaceId, secondTurn.saved.jobId));
+      const secondClaim = await secondTurn.claim();
+      const rev2Snapshot = (await f.jobs.readAttemptContext(scope, secondClaim))!;
+      const rev2Fence = tutorAttemptFence(rev2Snapshot);
+      expect(rev2Snapshot.headObservationId).toBe(revised.headObservationId);
+      expect(rev2Fence.headRevision).toBeGreaterThan(rev1Fence.headRevision!);
+      const rev2Context = {
+        privacyEpoch: rev2Snapshot.privacyEpoch, contextSourceRefs: rev2Snapshot.sourceRefs,
+        exposureReceiptId: null, claimToken: secondClaim.claimToken, executionId: secondClaim.executionId,
+        attemptFence: rev2Fence,
+      };
+      await f.jobs.withStreamPublication(scope, secondTurn.saved.jobId, { ...rev2Context, attemptContext: rev2Snapshot }, async () => {
+        await writer.begin(scope.workspaceId, secondTurn.saved.jobId, rev2Context);
+        expect(await writer.append(scope.workspaceId, secondTurn.saved.jobId, "rev2 raced ahead cleanly",
+          secondClaim.executionId, rev2Snapshot.privacyEpoch, rev2Fence)).toBe(1);
+      });
+      expect(await redis.get(headKey)).toBe(revised.headObservationId);
+      expect(await redis.get(`${headKey}:rev`)).toBe(String(rev2Fence.headRevision));
+      expect(await reader.read(scope.workspaceId, secondTurn.saved.jobId)).toMatchObject({
+        text: "rev2 raced ahead cleanly", sequence: 1,
+      });
+      // Stale rev1 execution cannot publish or re-begin once rev2 has advanced Redis.
+      expect(await writer.append(scope.workspaceId, f.saved.jobId, "stale rev1",
+        firstClaim.executionId, rev1Snapshot.privacyEpoch, rev1Fence)).toBe(0);
+    } finally {
+      try { if (redis.status === "ready") await redis.del(...keysToClean); }
+      finally { redis.disconnect(); }
+    }
+  });
+
+  it("does not seal a pre-claimed Tutor job that binds rev2 after revision commits, while still sealing a rev1-bound job", async () => {
+    const f = await seed();
+    const { scope } = fixture;
+    const redis = new Redis(process.env.REDIS_URL!, { maxRetriesPerRequest: 0 });
+    const writer = createTutorStreamWriter(redis), reader = createTutorStreamReader(redis);
+    const headKey = tutorStreamAttemptHeadKey(scope.workspaceId, f.original.id);
+    const secondTurn = await bindAttempt(f, f.attempt, "explain");
+    const keysToClean = [
+      tutorStreamKey(scope.workspaceId, f.saved.jobId),
+      tutorStreamKey(scope.workspaceId, secondTurn.saved.jobId),
+      tutorStreamEpochKey(scope.workspaceId), headKey, `${headKey}:rev`,
+    ];
+    try {
+      // Job 1 is claimed AND initialized on rev1 before the revision.
+      const j1 = await f.claim();
+      const j1Snap = (await f.jobs.readAttemptContext(scope, j1))!;
+      const j1Fence = tutorAttemptFence(j1Snap);
+      await writer.begin(scope.workspaceId, f.saved.jobId, {
+        privacyEpoch: j1Snap.privacyEpoch, contextSourceRefs: j1Snap.sourceRefs,
+        exposureReceiptId: null, claimToken: j1.claimToken, executionId: j1.executionId, attemptFence: j1Fence,
+      });
+      expect(await writer.append(scope.workspaceId, f.saved.jobId, "rev1 prefix", j1.executionId, j1Snap.privacyEpoch, j1Fence)).toBe(1);
+
+      // Job 2 is ALREADY claimed (status = 'running' with timing_execution_id != NULL) BEFORE rev2 commits,
+      // but has NOT read attempt context or called writer.begin() yet!
+      const j2 = await secondTurn.claim();
+      const revised = await f.correct();
+      await vi.waitFor(async () => {
+        expect(await redis.get(headKey)).toBe(revised.headObservationId);
+        expect(await redis.hget(tutorStreamKey(scope.workspaceId, f.saved.jobId), "sealed")).toBe("1");
+      });
+      // Job 1 (bound to rev1) was sealed and blocked; Job 2 (not yet initialized) was NOT tombstoned!
+      expect(await writer.append(scope.workspaceId, f.saved.jobId, "stale j1 tail", j1.executionId, j1Snap.privacyEpoch, j1Fence)).toBe(0);
+      expect(await redis.hget(tutorStreamKey(scope.workspaceId, secondTurn.saved.jobId), "sealed")).toBeNull();
+
+      // Job 2 now reads rev2 from PostgreSQL, initializes Redis, and streams cleanly!
+      const j2Snap = (await f.jobs.readAttemptContext(scope, j2))!;
+      expect(j2Snap.headObservationId).toBe(revised.headObservationId);
+      const j2Fence = tutorAttemptFence(j2Snap);
+      const j2Context = {
+        privacyEpoch: j2Snap.privacyEpoch, contextSourceRefs: j2Snap.sourceRefs,
+        exposureReceiptId: null, claimToken: j2.claimToken, executionId: j2.executionId, attemptFence: j2Fence,
+      };
+      await f.jobs.withStreamPublication(scope, secondTurn.saved.jobId, { ...j2Context, attemptContext: j2Snap }, async () => {
+        await writer.begin(scope.workspaceId, secondTurn.saved.jobId, j2Context);
+        expect(await writer.append(scope.workspaceId, secondTurn.saved.jobId, "rev2 delta on pre-claimed job",
+          j2.executionId, j2Snap.privacyEpoch, j2Fence)).toBe(1);
+      });
+      const cached = (await reader.read(scope.workspaceId, secondTurn.saved.jobId))!;
+      expect(cached).toMatchObject({ text: "rev2 delta on pre-claimed job", sequence: 1 });
+      expect(await f.jobs.readStream(scope, secondTurn.saved.jobId, cached)).toMatchObject({ status: "running" });
+    } finally {
+      try { if (redis.status === "ready") await redis.del(...keysToClean); }
+      finally { redis.disconnect(); }
+    }
+  });
+
   it("streams and saves an explanation pinned to available source v1 after it advances to v2", async () => {
     const f = await seed();
     const { scope, sql } = fixture;
@@ -375,7 +496,8 @@ describe("sm95 same-attempt explain context", () => {
         .toMatchObject([{ text: "sm95 explanation", context_source_refs: [{ sourceId: f.sourceId, sourceVersion: 1 }] }]);
     } finally {
       try { await redis.del(tutorStreamKey(scope.workspaceId, f.saved.jobId), tutorStreamEpochKey(scope.workspaceId),
-        tutorStreamAttemptHeadKey(scope.workspaceId, f.original.id)); }
+        tutorStreamAttemptHeadKey(scope.workspaceId, f.original.id),
+        `${tutorStreamAttemptHeadKey(scope.workspaceId, f.original.id)}:rev`); }
       finally { redis.disconnect(); }
     }
   });

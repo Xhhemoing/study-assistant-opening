@@ -353,9 +353,11 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
           .map(({ sourceId }) => sourceId.toLowerCase())
           .filter(sourceId => !explicitMaterialSourceIds.has(sourceId)),
       )].sort();
+      const eligibleMemories = memoryContext.memories.filter(memory => isMemoryEligible(memory, contextNow));
+      const injectedTemporaryMemories = eligibleMemories.filter(memory => memory.kind === "temporary");
       const globalMemoryIds = [...new Set(
-        memoryContext.memories
-          .filter(memory => memory.courseId == null && isMemoryEligible(memory, contextNow))
+        eligibleMemories
+          .filter(memory => memory.courseId == null)
           .map(memory => memory.id.toLowerCase()),
       )].sort();
       const contextSourceRefs = mergeContextSourceRefs(
@@ -528,6 +530,18 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
             await assertAttemptCurrent();
             await assertMaterialsCurrent();
             if (learnerContext) await deps.learnerContext!.assertCurrent(scope, learnerContext);
+            if (injectedTemporaryMemories.length) {
+              const sendNow = Date.now();
+              if (injectedTemporaryMemories.some(memory => {
+                const expiresAt = memory.expiresAt ? Date.parse(memory.expiresAt) : Number.NaN;
+                return Number.isNaN(expiresAt) || expiresAt <= sendNow;
+              })) {
+                throw Object.assign(new Error("injected temporary memory expired before send"), { code: "CONFLICT" });
+              }
+            }
+            if (globalMemoryIds.length) {
+              await deps.tutorJobs.assertGlobalMemoriesCurrent?.(scope, globalMemoryIds);
+            }
             if (deps.privacy && jobEpoch !== null) assertCurrentEpoch(jobEpoch, await deps.privacy.getWorkspaceEpoch(scope));
             await assertMaterialsCurrent();
             const current = await deps.tutorJobs.get(scope, claimed.id);

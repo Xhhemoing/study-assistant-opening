@@ -372,10 +372,12 @@ export async function fenceOpeningTutorAttemptHead(
         local execution = redis.call('HGET', KEYS[i], 'executionId')
         local expected = ARGV[i + 1]
         if execution == expected then
-          redis.call('HSET', KEYS[i], 'sealed', '1')
-        elseif not execution then
-          redis.call('HSET', KEYS[i], 'executionId', expected, 'sealed', '1')
-          redis.call('EXPIRE', KEYS[i], ARGV[2])
+          local streamRev = tonumber(redis.call('HGET', KEYS[i], 'attemptHeadRevision'))
+          local streamHead = redis.call('HGET', KEYS[i], 'attemptHeadId')
+          if (nextRev and streamRev and streamRev < nextRev)
+            or ((not nextRev or not streamRev) and streamHead and streamHead ~= ARGV[1]) then
+            redis.call('HSET', KEYS[i], 'sealed', '1')
+          end
         end
       end
     `, 2 + streamKeys.length, [

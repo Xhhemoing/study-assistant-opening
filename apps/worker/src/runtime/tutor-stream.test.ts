@@ -17,10 +17,32 @@ it("sm95 parses the cached attempt fence and rejects malformed identities before
   const context = { privacyEpoch: 0, contextSourceRefs: [], exposureReceiptId: null,
     attemptFence: { attemptId: id, itemVersionId: id, rootObservationId: id, headObservationId: id, answerRevision: 1 } };
   const hgetall = vi.fn().mockResolvedValueOnce({ context: JSON.stringify(context), text: "cached", sequence: "1" })
-    .mockResolvedValueOnce({ context: JSON.stringify({ ...context, attemptFence: { ...context.attemptFence, answerRevision: 0 } }), text: "cached", sequence: "1" });
+    .mockResolvedValueOnce({ context: JSON.stringify({ ...context, attemptFence: { ...context.attemptFence, headRevision: 7 } }), text: "cached", sequence: "1" })
+    .mockResolvedValueOnce({ context: JSON.stringify({ ...context, attemptFence: { ...context.attemptFence, answerRevision: 0 } }), text: "cached", sequence: "1" })
+    .mockResolvedValueOnce({ context: JSON.stringify({ ...context, attemptFence: { ...context.attemptFence, headRevision: -1 } }), text: "cached", sequence: "1" });
   const reader = createTutorStreamReader({ hgetall } as unknown as IORedis);
   expect(await reader.read(id, id)).toMatchObject({ ...context, text: "cached", sequence: 1 });
+  expect(await reader.read(id, id)).toMatchObject({ attemptFence: { ...context.attemptFence, headRevision: 7 }, text: "cached", sequence: 1 });
   await expect(reader.read(id, id)).rejects.toThrow();
+  await expect(reader.read(id, id)).rejects.toThrow();
+});
+
+it("passes monotonic attempt-head revision key and headRevision argument in writer.begin", async () => {
+  const id = "10000000-0000-4000-8000-000000000001";
+  const evalScript = vi.fn().mockResolvedValue(undefined);
+  const writer = createTutorStreamWriter({ eval: evalScript } as unknown as IORedis);
+  await writer.begin(id, id, {
+    privacyEpoch: 1, contextSourceRefs: [], exposureReceiptId: null, executionId: id,
+    attemptFence: { attemptId: id, itemVersionId: id, rootObservationId: id, headObservationId: id, answerRevision: 2, headRevision: 12 },
+  });
+  expect(evalScript).toHaveBeenCalledOnce();
+  const [script, keyCount, _streamKey, _epochKey, headKey, revKey, _exec, _ctx, _ttl, _epoch, headId, headRev] = evalScript.mock.calls[0]!;
+  expect(keyCount).toBe(4);
+  expect(revKey).toBe(`${headKey}:rev`);
+  expect(headId).toBe(id);
+  expect(headRev).toBe("12");
+  expect(script).toContain("attemptHeadRevision");
+  expect(script).toContain("cachedRev > jobRev");
 });
 
 it("parses cached materialPurposePin and rejects malformed pins before delivery", async () => {

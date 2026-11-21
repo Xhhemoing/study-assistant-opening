@@ -28,6 +28,7 @@ function setup(_input: { sourceIds: string[]; chunks: [] }) {
       anchor: { purpose: "learning_help", attemptId: claimedJob.userTurnId, itemVersionId: claimedJob.conversationId }, originalQuestion: "saved question",
       originalAnswer: null, currentAnswer: null, rootObservationId: null, headObservationId: null, workSource: null, effectiveGrading: null, sourceRefs: [] })),
     assertAttemptContext: vi.fn<OpeningTutorJobsRepository["assertAttemptContext"]>(async () => {}),
+    assertGlobalMemoriesCurrent: vi.fn<OpeningTutorJobsRepository["assertGlobalMemoriesCurrent"]>(async () => {}),
     freezeHelpInputSnapshot: vi.fn<OpeningTutorJobsRepository["freezeHelpInputSnapshot"]>(async (): Promise<HelpInputSnapshot> => ({ userTurnId: claimedJob.userTurnId, assistantTurnId: claimedJob.assistantTurnId, tutorMode: "explain", studyIntent: null })),
     completeTurn: vi.fn<OpeningTutorJobsRepository["completeTurn"]>(async () => {}),
     canAppendCompletedTurnCandidates: vi.fn<OpeningTutorJobsRepository["canAppendCompletedTurnCandidates"]>(async () => true),

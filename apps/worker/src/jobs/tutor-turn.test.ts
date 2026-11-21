@@ -1773,4 +1773,67 @@ describe("tutor turn handler", () => {
       }),
     );
   });
+
+  it("blocks provider dispatch when an injected temporary memory expires before send or fails DB re-check", async () => {
+    const tempMemoryId = "00000000-0000-4000-8000-0000000000bb";
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-11-21T00:00:00.000Z"));
+      const { deps, provider, budget } = setup();
+      const memories = {
+        listContext: vi.fn(async () => ({
+          memories: [{
+            id: tempMemoryId, workspaceId: claimedJob.workspaceId, courseId: null,
+            kind: "temporary" as const, text: "Short-lived preference", sourceTurnIds: [claimedJob.userTurnId],
+            version: 0, expiresAt: "2026-11-21T00:00:01.000Z", status: "active" as const,
+            createdAt: claimedJob.createdAt, updatedAt: claimedJob.updatedAt,
+          }],
+          sourceRefs: [],
+        })),
+      };
+      // Advance clock past expiresAt right when resolveModel runs (between prompt assembly and beforeSend).
+      const resolveModel = vi.fn(async () => {
+        vi.advanceTimersByTime(2_000);
+        return {
+          provider,
+          modelSnapshot: { id: "m1", providerId: "p", modelName: "m", inputCentsPerMillion: 100, outputCentsPerMillion: 200 },
+          inputCentsPerMillion: 100, outputCentsPerMillion: 200,
+        };
+      });
+      await expect(createTutorTurnHandler({ ...deps, memories, resolveModel })(claimedJob.id))
+        .rejects.toMatchObject({ code: "CONFLICT" });
+      expect(provider.complete).not.toHaveBeenCalled();
+      expect(budget.release).toHaveBeenCalledWith(expect.anything(), `tutor:${claimedJob.id}`, "not_sent");
+    } finally {
+      vi.useRealTimers();
+    }
+
+    // DB-authoritative assertGlobalMemoriesCurrent rejection also prevents provider dispatch.
+    const { deps: dbDeps, provider: dbProvider, budget: dbBudget, tutorJobs: dbJobs } = setup();
+    const assertGlobalMemoriesCurrent = vi.fn(async () => {
+      throw Object.assign(new Error("stream global memory is no longer active"), { code: "CONFLICT" });
+    });
+    const dbMemories = {
+      listContext: vi.fn(async () => ({
+        memories: [{
+          id: tempMemoryId, workspaceId: claimedJob.workspaceId, courseId: null,
+          kind: "temporary" as const, text: "Short-lived preference", sourceTurnIds: [claimedJob.userTurnId],
+          version: 0, expiresAt: "2099-01-01T00:00:00.000Z", status: "active" as const,
+          createdAt: claimedJob.createdAt, updatedAt: claimedJob.updatedAt,
+        }],
+        sourceRefs: [],
+      })),
+    };
+    await expect(createTutorTurnHandler({
+      ...dbDeps,
+      tutorJobs: { ...dbJobs, assertGlobalMemoriesCurrent },
+      memories: dbMemories,
+    })(claimedJob.id)).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(assertGlobalMemoriesCurrent).toHaveBeenCalledWith(
+      { workspaceId: claimedJob.workspaceId, ownerUserId: claimedJob.ownerUserId },
+      [tempMemoryId],
+    );
+    expect(dbProvider.complete).not.toHaveBeenCalled();
+    expect(dbBudget.release).toHaveBeenCalledWith(expect.anything(), `tutor:${claimedJob.id}`, "not_sent");
+  });
 });

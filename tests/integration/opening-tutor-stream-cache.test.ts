@@ -1221,3 +1221,127 @@ it("streams and completes a turn when opening_sources.version advances after sub
     await fixture.close();
   }
 });
+
+it("enforces temporary global memory expiry at beforeSend, stream publication/read, and completeTurn, and fences streams on memories.reject", async () => {
+  const fixture = await createOpeningFixture();
+  const { scope, sql } = fixture;
+  const conversations = createOpeningConversationRepository(sql);
+  const jobs = createOpeningTutorJobsRepository(sql);
+  const memories = createOpeningMemoryRepository(sql);
+  const chunks = createOpeningSourceChunksRepository(sql);
+  const budget = createOpeningBudgetRepository(sql, { envCapCents: 100_000 });
+  const writer = createTutorStreamWriter(redis), reader = createTutorStreamReader(redis);
+  const originConversation = await conversations.create(scope, { title: "Temporary memory origin", courseId: null });
+  const originTurn = await conversations.appendSavedTurn({
+    scope, conversationId: originConversation.id, text: "Keep it brief today", mode: "explain",
+    clientKey: randomUUID(), sourceIds: [], learningSessionId: null, currentPage: null, chunkId: null,
+  });
+  const tempMemory = await memories.proposeMemory(scope, {
+    text: "Keep explanations brief for the next hour",
+    sourceTurnIds: [originTurn.turnId],
+    courseId: null,
+    expiresAt: new Date(Date.now() + 60 * 60 * 1_000).toISOString(),
+  });
+  expect(tempMemory.kind).toBe("temporary");
+  keys.push(tutorStreamEpochKey(scope.workspaceId));
+  try {
+    // 1. Mid-stream expiry blocks withStreamPublication, readStream, completeTurn, and assertGlobalMemoriesCurrent.
+    const streamTurn = await conversations.appendSavedTurn({
+      scope, conversationId: originConversation.id, text: "Explain integrals", mode: "explain",
+      clientKey: randomUUID(), sourceIds: [], learningSessionId: null, currentPage: null, chunkId: null,
+    });
+    keys.push(tutorStreamKey(scope.workspaceId, streamTurn.jobId));
+    const claimed = (await jobs.claim(streamTurn.jobId))!;
+    const streamCtx = {
+      privacyEpoch: 0, contextSourceRefs: [], globalMemoryIds: [tempMemory.id],
+      exposureReceiptId: null, claimToken: claimed.claimToken, executionId: claimed.executionId,
+    };
+    await jobs.withStreamPublication(scope, streamTurn.jobId, streamCtx, async () => {
+      await writer.begin(scope.workspaceId, streamTurn.jobId, streamCtx);
+      expect(await writer.append(scope.workspaceId, streamTurn.jobId, "Brief intro", claimed.executionId, 0)).toBe(1);
+    });
+    const cached = (await reader.read(scope.workspaceId, streamTurn.jobId))!;
+    expect(await jobs.readStream(scope, streamTurn.jobId, cached)).toMatchObject({ status: "running" });
+    await expect(jobs.assertGlobalMemoriesCurrent(scope, [tempMemory.id])).resolves.toBeUndefined();
+
+    // Expire the temporary memory in PostgreSQL.
+    await sql`UPDATE opening_memories SET expires_at = now() - interval '1 second' WHERE id = ${tempMemory.id}`;
+    await expect(jobs.assertGlobalMemoriesCurrent(scope, [tempMemory.id])).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(jobs.withStreamPublication(scope, streamTurn.jobId, streamCtx, async () => {})).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(jobs.readStream(scope, streamTurn.jobId, cached)).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(jobs.completeTurn({
+      scope, jobId: streamTurn.jobId, assistantTurnId: streamTurn.assistantTurnId,
+      text: "Must not persist expired temporary memory", citations: [], candidates: [],
+      contextSourceRefs: [], expectedPrivacyEpoch: 0, claimToken: claimed.claimToken,
+    }, { globalMemoryIds: [tempMemory.id] })).rejects.toMatchObject({ code: "CONFLICT" });
+
+    // 2. Rejecting an active confirmed memory advances privacy_epoch, seals active Redis streams post-commit,
+    //    and blocks subsequent append/readStream/completeTurn; idempotent replay does not bump privacy_epoch again.
+    const proposed = await memories.proposeMemory(scope, {
+      text: "Prefer geometric intuition", sourceTurnIds: [originTurn.turnId], courseId: null, expiresAt: null,
+    });
+    const confirmed = await memories.confirm(scope, proposed.id, proposed.version, randomUUID());
+    const rejectTurn = await conversations.appendSavedTurn({
+      scope, conversationId: originConversation.id, text: "Explain eigenvalues", mode: "explain",
+      clientKey: randomUUID(), sourceIds: [], learningSessionId: null, currentPage: null, chunkId: null,
+    });
+    const rejectKey = tutorStreamKey(scope.workspaceId, rejectTurn.jobId);
+    keys.push(rejectKey);
+    const rejectClaim = (await jobs.claim(rejectTurn.jobId))!;
+    const rejectCtx = {
+      privacyEpoch: 0, contextSourceRefs: [], globalMemoryIds: [confirmed.id],
+      exposureReceiptId: null, claimToken: rejectClaim.claimToken, executionId: rejectClaim.executionId,
+    };
+    await jobs.withStreamPublication(scope, rejectTurn.jobId, rejectCtx, async () => {
+      await writer.begin(scope.workspaceId, rejectTurn.jobId, rejectCtx);
+      expect(await writer.append(scope.workspaceId, rejectTurn.jobId, "Geometric prefix", rejectClaim.executionId, 0)).toBe(1);
+    });
+    const rejectCached = (await reader.read(scope.workspaceId, rejectTurn.jobId))!;
+    const rejectClientKey = randomUUID();
+    const rejected = await memories.reject(scope, confirmed.id, confirmed.version, rejectClientKey);
+    expect(rejected.status).toBe("rejected");
+    expect(await sql`SELECT privacy_epoch FROM workspaces WHERE id=${scope.workspaceId}`).toMatchObject([{ privacy_epoch: 1 }]);
+    await vi.waitFor(async () => {
+      expect(await redis.hget(rejectKey, "sealed")).toBe("1");
+      expect(await redis.get(tutorStreamEpochKey(scope.workspaceId))).toBe("1");
+    });
+    expect(await writer.append(scope.workspaceId, rejectTurn.jobId, "rejected tail", rejectClaim.executionId, 0)).toBe(0);
+    await expect(jobs.readStream(scope, rejectTurn.jobId, rejectCached)).rejects.toThrow();
+    await expect(jobs.completeTurn({
+      scope, jobId: rejectTurn.jobId, assistantTurnId: rejectTurn.assistantTurnId,
+      text: "Must not persist rejected memory", citations: [], candidates: [],
+      contextSourceRefs: [], expectedPrivacyEpoch: 1, claimToken: rejectClaim.claimToken,
+    }, { globalMemoryIds: [confirmed.id] })).rejects.toMatchObject({ code: "CONFLICT" });
+    // Replay returns the same rejected item without bumping privacy_epoch again.
+    expect(await memories.reject(scope, confirmed.id, confirmed.version, rejectClientKey)).toEqual(rejected);
+    expect(await sql`SELECT privacy_epoch FROM workspaces WHERE id=${scope.workspaceId}`).toMatchObject([{ privacy_epoch: 1 }]);
+    // Ensure a fresh turn referencing a memory that expires before beforeSend fails before provider.complete.
+    const beforeSendMemory = await memories.proposeMemory(scope, {
+      text: "Expiring before send", sourceTurnIds: [originTurn.turnId], courseId: null,
+      expiresAt: new Date(Date.now() + 60 * 60 * 1_000).toISOString(),
+    });
+    const beforeSendTurn = await conversations.appendSavedTurn({
+      scope, conversationId: originConversation.id, text: "Check beforeSend expiry", mode: "explain",
+      clientKey: randomUUID(), sourceIds: [], learningSessionId: null, currentPage: null, chunkId: null,
+    });
+    const providerComplete = vi.fn(async () => ({
+      text: "never sent", citedChunkIds: [], candidates: [], requestId: null, inputTokens: 1, outputTokens: 1,
+    }));
+    const listContextSpy = async (s: typeof scope, nowIso: string) => {
+      const result = await memories.listContext(s, nowIso);
+      // Immediately expire in PG right after prompt assembly, before beforeSend executes.
+      await sql`UPDATE opening_memories SET expires_at = now() - interval '1 second' WHERE id = ${beforeSendMemory.id}`;
+      return result;
+    };
+    await expect(createTutorTurnHandler({
+      tutorJobs: jobs, chunks, budget, provider: { complete: providerComplete },
+      memories: { listContext: listContextSpy },
+      privacy: createOpeningPrivacyRepository(sql),
+      retrieveContext: createOpeningMaterialRetriever(sql, budget, null),
+      config: { maxContextCharacters: 1000, reservedCents: 100, maxOutputTokens: 100, inputCentsPerMillion: 100, outputCentsPerMillion: 200 },
+    })(beforeSendTurn.jobId)).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(providerComplete).not.toHaveBeenCalled();
+  } finally {
+    await fixture.close();
+  }
+});

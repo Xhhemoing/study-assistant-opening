@@ -3,6 +3,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import {
   createOpeningMemoryRepository,
   OpeningMemoryError,
+  withOpeningTutorStreamFenceCommit,
 } from "@aistudy/database";
 import { memoriesForContext } from "@aistudy/domain";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
@@ -331,7 +332,7 @@ it("reenters held history/business locks through actual proposal effects and rol
   const turnId = await insertTurn(fixture.scope.workspaceId, fixture.scope.ownerUserId);
   const id = await seedMemory();
   const old = await memoryGraph(), history = await historyGraph();
-  await expect(fixture.sql.begin(async tx => {
+  await expect(withOpeningTutorStreamFenceCommit(fixture.sql, async tx => {
     await lockWorkspaceLearningHistory(tx, fixture.scope);
     await tx`SELECT id FROM workspaces WHERE id=${fixture.scope.workspaceId} FOR UPDATE`;
     await tx`SELECT id FROM opening_memories WHERE id=${id} FOR UPDATE`;

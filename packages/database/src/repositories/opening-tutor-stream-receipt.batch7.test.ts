@@ -91,6 +91,9 @@ function fixture(options: Options = {}) {
       txEvents.push("outer-clear-execution-fence");
       return [];
     }
+    if (query.startsWith("SELECT m.id FROM opening_memories m")) {
+      return (options.activeGlobalMemoryIds ?? []).map(id => ({ id }));
+    }
     return [];
   }), {
     begin: async (fn: (tx: unknown) => Promise<unknown>) => {
@@ -398,6 +401,11 @@ describe("stream receipt release waits for current job authorization and assista
       scope, jobId, assistantTurnId: assistant, text: "course answer with global memory", citations: [], candidates: [],
       contextSourceRefs: memoryRefs, expectedPrivacyEpoch: 2, claimToken: token,
     }, { memoryLineageSourceIds: [memorySourceId], globalMemoryIds: [memoryId] })).resolves.toBeUndefined();
+    expect(admitted.calls.some(c => c.sql.startsWith("SELECT id FROM opening_memories") && c.sql.includes("expires_at > now()"))).toBe(true);
+    expect(admitted.calls.some(c => c.sql.startsWith("SELECT DISTINCT lower(sid.id::text) AS source_id") && c.sql.includes("m.expires_at > now()"))).toBe(true);
+    await expect(admitted.repo.assertGlobalMemoriesCurrent(scope, [memoryId])).resolves.toBeUndefined();
+    expect(admitted.outerCalls.some(sql => sql.startsWith("SELECT m.id FROM opening_memories m") && sql.includes("m.expires_at > now()"))).toBe(true);
+    await expect(admitted.repo.assertGlobalMemoriesCurrent(scope, ["not-a-uuid"])).rejects.toMatchObject({ code: "CONFLICT" });
 
     // Missing globalMemoryIds for memoryLineageSourceIds is rejected fail-closed.
     const unbound = fixture({ courseId, sourceIds: [], membershipRemoved: true, backedMemorySourceIds: [memorySourceId] });
@@ -420,6 +428,7 @@ describe("stream receipt release waits for current job authorization and assista
       scope, jobId, assistantTurnId: assistant, text: "superseded memory answer", citations: [], candidates: [],
       contextSourceRefs: memoryRefs, expectedPrivacyEpoch: 2, claimToken: token,
     }, { memoryLineageSourceIds: [memorySourceId], globalMemoryIds: [memoryId] })).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(superseded.repo.assertGlobalMemoriesCurrent(scope, [memoryId])).rejects.toMatchObject({ code: "CONFLICT" });
 
     // Spoofed memoryLineageSourceIds (not backed by the exact active globalMemoryIds) is rejected fail-closed.
     const spoofed = fixture({

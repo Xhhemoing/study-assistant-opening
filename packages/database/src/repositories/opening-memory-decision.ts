@@ -4,6 +4,7 @@ import type { OpeningScope } from "./opening-sources";
 import { lockOwnedWorkspace } from "./opening-memory-admission";
 import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { OpeningMemoryError, mapMemoryRow } from "./opening-memory-types";
+import { advanceOpeningWorkspacePrivacyEpoch, withOpeningTutorStreamFenceCommit } from "./opening-tutor-stream-fence";
 
 export function confirmOwnedMemory(
   sql: Sql,
@@ -65,7 +66,7 @@ export function rejectOwnedMemory(
   expectedVersion: number,
   clientKey: string,
 ): Promise<MemoryItem> {
-  return sql.begin(async (tx) => {
+  return withOpeningTutorStreamFenceCommit(sql, async (tx) => {
     const owners = await tx`SELECT id FROM workspaces
       WHERE id = ${scope.workspaceId} AND owner_user_id = ${scope.ownerUserId}`;
     if (!owners.length) throw new OpeningMemoryError("NOT_FOUND", "workspace not found");
@@ -103,6 +104,7 @@ export function rejectOwnedMemory(
         AND version = ${expectedVersion}
       RETURNING *`;
     if (!updated.length) throw new OpeningMemoryError("CONFLICT", "reject raced");
+    await advanceOpeningWorkspacePrivacyEpoch(tx, scope);
     return mapMemoryRow(updated[0] as Record<string, unknown>);
   });
 }
