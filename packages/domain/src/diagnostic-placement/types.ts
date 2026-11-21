@@ -15,7 +15,7 @@ export const SKIP_CANDIDATE_UI_LABEL = "暂跳讲解，随时补看";
 export const READY_UI_LABEL = "可进入当前学习";
 export const BLOCKED_UI_LABEL = "先补前置基础";
 
-export type DiagnosticPlacementErrorCode = "VALIDATION" | "STATE" | "INFEASIBLE";
+export type DiagnosticPlacementErrorCode = "VALIDATION" | "STATE" | "INVALID_STATE" | "INFEASIBLE";
 
 export class DiagnosticPlacementError extends Error {
   readonly code: DiagnosticPlacementErrorCode;
@@ -110,6 +110,7 @@ export type PartitionedObservation<T extends { observationId: string }> = T & {
 
 export type PartitionedObservationsResult<T extends { observationId: string }> = {
   directObservations: readonly T[];
+  unconsumedObservations: readonly T[];
   strippedConsumedObservations: readonly PartitionedObservation<T>[];
   annotatedObservations: readonly PartitionedObservation<T>[];
   consumedObservationIds: readonly string[];

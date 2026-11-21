@@ -16,6 +16,7 @@ import {
   getSkillCovariance,
   partitionObservationsAgainstKstSnapshot,
   updateSkillMasteryFromKstSnapshot,
+  validateKstSnapshot,
   type DiagnosticProbeItem,
   type DiagnosticSkillNode,
 } from "./index";
@@ -292,5 +293,260 @@ describe("Hard-capped 2-probe PrerequisiteDrilldownStateMachine", () => {
     const aDone = assisted.recordProbeResponse({ observationId: "a-pass", itemId: aSel.probe!.itemId, correct: true, channel: "assisted" });
     expect(aDone.status).toBe("repair_plan_ready");
     expect(aDone.rootCause).toBe("prerequisite_deficit");
+  });
+});
+
+describe("Round-2 correctness, anti-double-counting & fail-closed regression checks", () => {
+  it("[P0-1] couples cross-component joint posteriors via exact Cartesian merge, hits 1/3 floor, and rejects >20_000 or bounded merges", () => {
+    // 1) 15 independent skills => component_decomposed (32_768 states)
+    const independent15: DiagnosticSkillNode[] = Array.from({ length: 15 }, (_, i) => ({ skillId: `I_${i}`, chapterId: "c1" }));
+    const space = createKstStateSpace(independent15);
+    expect(space.components).toHaveLength(15);
+
+    const qBoth: DiagnosticProbeItem = { itemId: "q-i0-i1", familyId: "f-both", chapterId: "c1", requiredSkillIds: ["I_0", "I_1"], slip: 0.01, guess: 0.01, estimatedSeconds: 30 };
+    const qSingle0: DiagnosticProbeItem = { itemId: "q-i0", familyId: "f-i0", chapterId: "c1", requiredSkillIds: ["I_0"], slip: 0.01, guess: 0.01, estimatedSeconds: 20 };
+
+    // Apply q1(["I_0", "I_1"]) = false then q2(["I_0"]) = true -> exact explaining-away gives pi(I_1) = 1/51
+    const r1 = space.applyProbeObservation(qBoth, { observationId: "cross-1", itemId: "q-i0-i1", correct: false });
+    expect(r1.applied).toBe(true);
+    expect(space.components).toHaveLength(14);
+    expect(getSkillCovariance(buildKstPriorSnapshot(space), "I_0", "I_1")).toBeLessThan(0);
+
+    const r2 = space.applyProbeObservation(qSingle0, { observationId: "cross-2", itemId: "q-i0", correct: true });
+    expect(r2.applied).toBe(true);
+    const snapAfter = buildKstPriorSnapshot(space);
+    expect(snapAfter.piBySkill["I_1"]).toBeCloseTo(1 / 51, 12);
+    expect(getSkillCovariance(snapAfter, "I_0", "I_1")).toBeLessThan(0);
+
+    // 2) Conjunctive failures with s=0, g=0 hit exact 1/3 Bayes floor, and zero-likelihood cross-component merge does not mutate components
+    const zeroSpace = createKstStateSpace(independent15);
+    const qDet: DiagnosticProbeItem = { itemId: "q-det", familyId: "f-det", chapterId: "c1", requiredSkillIds: ["I_0", "I_1"], slip: 0, guess: 0, estimatedSeconds: 20 };
+    expect(zeroSpace.applyProbeObservation(qDet, { observationId: "det-1", itemId: "q-det", correct: false }).applied).toBe(true);
+    expect(zeroSpace.applyProbeObservation(qDet, { observationId: "det-2", itemId: "q-det", correct: false }).applied).toBe(true);
+    expect(zeroSpace.getSkillMarginals()["I_0"]).toBeCloseTo(1 / 3, 12);
+    expect(zeroSpace.getSkillMarginals()["I_1"]).toBeCloseTo(1 / 3, 12);
+
+    const qDetSingle2: DiagnosticProbeItem = { itemId: "q-i2-det", familyId: "f-i2", chapterId: "c1", requiredSkillIds: ["I_2"], slip: 0, guess: 0, estimatedSeconds: 20 };
+    const qDetPair23: DiagnosticProbeItem = { itemId: "q-i2-i3-det", familyId: "f-23", chapterId: "c1", requiredSkillIds: ["I_2", "I_3"], slip: 0, guess: 0, estimatedSeconds: 20 };
+    expect(zeroSpace.applyProbeObservation(qDetSingle2, { observationId: "det-i2-fail", itemId: "q-i2-det", correct: false }).applied).toBe(true);
+    const compCountBeforeZero = zeroSpace.components.length;
+    const zeroMerge = zeroSpace.applyProbeObservation(qDetPair23, { observationId: "det-23-imp", itemId: "q-i2-i3-det", correct: true });
+    expect(zeroMerge.applied).toBe(false);
+    expect(zeroMerge.reason).toBe("zero_likelihood_observation");
+    expect(zeroSpace.components).toHaveLength(compCountBeforeZero);
+
+    // 3) Cross-component merge exceeding 20_000 states (two 150-skill chains => 151 * 151 = 22_801 > 20_000) fails closed and session skips it
+    const makeChain = (prefix: string, len: number): DiagnosticSkillNode[] =>
+      Array.from({ length: len }, (_, i) => ({
+        skillId: `${prefix}_${i}`,
+        chapterId: "c1",
+        ...(i > 0 ? { prerequisiteIds: [`${prefix}_${i - 1}`] } : {}),
+      }));
+    const bigChains = [...makeChain("A", 150), ...makeChain("B", 150)];
+    const bigSpace = createKstStateSpace(bigChains);
+    expect(bigSpace.totalFeasibleStateCount).toBe(22_801);
+    const crossTooBig: DiagnosticProbeItem = { itemId: "cross-big", familyId: "f-big", chapterId: "c1", requiredSkillIds: ["A_149", "B_149"], slip: 0.1, guess: 0.1, estimatedSeconds: 20 };
+    expect(() => bigSpace.computeProbeMutualInformation(crossTooBig)).toThrow(DiagnosticPlacementError);
+    expect(() => bigSpace.applyProbeObservation(crossTooBig, { observationId: "big-1", itemId: "cross-big", correct: true })).toThrow(DiagnosticPlacementError);
+
+    // 4) Cross-component probe touching a bounded_component_envelope fails closed with INFEASIBLE
+    const boundedPlusSolo: DiagnosticSkillNode[] = [
+      { skillId: "ROOT", chapterId: "c1" },
+      ...Array.from({ length: 16 }, (_, i) => ({ skillId: `LEAF_${i}`, chapterId: "c1", prerequisiteIds: ["ROOT"] })),
+      { skillId: "SOLO", chapterId: "c1" },
+    ];
+    const boundedSpace = createKstStateSpace(boundedPlusSolo);
+    const crossBounded: DiagnosticProbeItem = { itemId: "cross-bnd", familyId: "f-bnd", chapterId: "c1", requiredSkillIds: ["LEAF_0", "SOLO"], slip: 0.1, guess: 0.1, estimatedSeconds: 20 };
+    try {
+      boundedSpace.computeProbeMutualInformation(crossBounded);
+      expect.unreachable("should throw INFEASIBLE");
+    } catch (err) {
+      expect(err).toBeInstanceOf(DiagnosticPlacementError);
+      expect((err as DiagnosticPlacementError).code).toBe("INFEASIBLE");
+    }
+
+    const session = new DiagnosticPlacementSession({
+      skills: bigChains,
+      candidatePool: [
+        crossTooBig,
+        { itemId: "safe-a", familyId: "f-sa", chapterId: "c1", requiredSkillIds: ["A_0"], slip: 0.1, guess: 0.1, estimatedSeconds: 20 },
+      ],
+      config: { minItems: 1, maxItems: 2, totalBudgetSeconds: 100 },
+    });
+    const picked = session.selectNextProbe();
+    expect(picked.status).toBe("selected");
+    expect(picked.probe?.itemId).toBe("safe-a");
+  });
+
+  it("[P1-1] computes exact BigInt totalFeasibleStateCount for 16 and 20 independent skills without 20_000 truncation", () => {
+    const ind16 = createKstStateSpace(Array.from({ length: 16 }, (_, i) => ({ skillId: `S_${i}`, chapterId: "c1" })));
+    expect(ind16.approximationMode).toBe("component_decomposed");
+    expect(ind16.totalFeasibleStateCount).toBe(65_536);
+
+    const ind20 = createKstStateSpace(Array.from({ length: 20 }, (_, i) => ({ skillId: `T_${i}`, chapterId: "c1" })));
+    expect(ind20.approximationMode).toBe("component_decomposed");
+    expect(ind20.totalFeasibleStateCount).toBe(1_048_576);
+  });
+
+  it("[P1-2] enforces atomic recordResponse validation, INVALID_STATE after stop/maxItems, idempotent replay, and pendingProbeId reset", () => {
+    const skills: DiagnosticSkillNode[] = [
+      { skillId: "A", chapterId: "c1" },
+      { skillId: "B", chapterId: "c1" },
+    ];
+    const pool: DiagnosticProbeItem[] = [
+      { itemId: "p1", familyId: "f1", chapterId: "c1", requiredSkillIds: ["A"], slip: 0.1, guess: 0.1, estimatedSeconds: 20 },
+      { itemId: "p2", familyId: "f2", chapterId: "c1", requiredSkillIds: ["B"], slip: 0.1, guess: 0.1, estimatedSeconds: 20 },
+    ];
+    const session = new DiagnosticPlacementSession({ skills, candidatePool: pool, config: { minItems: 1, maxItems: 1, totalBudgetSeconds: 100 } });
+
+    const sel1 = session.selectNextProbe();
+    expect(sel1.probe?.itemId).toBe("p1");
+
+    // Blank observationId fails VALIDATION before mutating item/budget state
+    expect(() => session.recordResponse({ observationId: "   ", itemId: "p1", correct: true })).toThrow(DiagnosticPlacementError);
+    expect(session.getSessionSummary().remainingBudgetSeconds).toBe(100);
+    expect(session.selectNextProbe().probe?.itemId).toBe("p1");
+
+    // Valid response for a different item p2 clears pendingProbeId (p1) and reaches maxItems
+    const rec = session.recordResponse({ observationId: "obs-p2", itemId: "p2", correct: true });
+    expect(rec.applied).toBe(true);
+    expect(session.getSessionSummary().stopReason).toBe("max_items_reached");
+
+    // Replay remains idempotent after stop
+    const replay = session.recordResponse({ observationId: "obs-p2", itemId: "p2", correct: true });
+    expect(replay.applied).toBe(false);
+    expect(replay.reason).toBe("duplicate_observation");
+
+    // Fresh observation after stop/maxItems fails closed with INVALID_STATE
+    try {
+      session.recordResponse({ observationId: "obs-after-stop", itemId: "p1", correct: true });
+      expect.unreachable("should throw INVALID_STATE");
+    } catch (err) {
+      expect(err).toBeInstanceOf(DiagnosticPlacementError);
+      expect((err as DiagnosticPlacementError).code).toBe("INVALID_STATE");
+    }
+  });
+
+  it("[P1-3 & P2-3] deduplicates within a batch and blocks unassisted/blank IDs from direct update & FIRE propagation", () => {
+    const space = createKstStateSpace([{ skillId: "A", chapterId: "c1" }]);
+    const snap = buildKstPriorSnapshot(space);
+    const batch = [
+      { observationId: "obs-2", skillId: "A", correct: true, slip: 0.1, guess: 0.1 },
+      { observationId: "obs-2", skillId: "A", correct: true, slip: 0.1, guess: 0.1 },
+      { observationId: "obs-hint", skillId: "A", correct: true, slip: 0.1, guess: 0.1, channel: "hinted" as const },
+      { observationId: "   ", skillId: "A", correct: true, slip: 0.1, guess: 0.1 },
+    ];
+    const part = partitionObservationsAgainstKstSnapshot(snap, batch);
+    expect(part.unconsumedObservations.map(o => o.observationId)).toEqual(["obs-2"]);
+    expect(part.directObservations.map(o => o.observationId)).toEqual(["obs-2"]);
+    expect(part.annotatedObservations[0]!.eligibleForDirectUpdate).toBe(true);
+    expect(part.annotatedObservations[0]!.eligibleForFirePropagation).toBe(true);
+    expect(part.annotatedObservations[1]!.eligibleForDirectUpdate).toBe(false);
+    expect(part.annotatedObservations[1]!.eligibleForFirePropagation).toBe(false);
+    expect(part.annotatedObservations[2]!.eligibleForDirectUpdate).toBe(false);
+    expect(part.annotatedObservations[2]!.eligibleForFirePropagation).toBe(false);
+    expect(part.annotatedObservations[3]!.eligibleForDirectUpdate).toBe(false);
+    expect(part.annotatedObservations[3]!.eligibleForFirePropagation).toBe(false);
+
+    const res = updateSkillMasteryFromKstSnapshot(snap, "A", batch);
+    expect(res.appliedObservationIds).toEqual(["obs-2"]);
+    expect(res.posteriorProbability).toBeCloseTo(0.9, 12);
+  });
+
+  it("[P1-4] excludes non-prerequisite probes in drilldown, rejects invalid direct submissions & repeats, and clears pendingProbeId", () => {
+    const skills: DiagnosticSkillNode[] = [
+      { skillId: "P0", chapterId: "c1" },
+      { skillId: "P1", chapterId: "c1", prerequisiteIds: ["P0"] },
+      { skillId: "TARGET", chapterId: "c1", prerequisiteIds: ["P1"] },
+      { skillId: "UNRELATED", chapterId: "c2" },
+    ];
+    const probes: DiagnosticProbeItem[] = [
+      { itemId: "p-unrelated", familyId: "f-unrel", chapterId: "c2", requiredSkillIds: ["UNRELATED"], slip: 0.05, guess: 0.05, estimatedSeconds: 20 },
+      { itemId: "p-target", familyId: "f-tgt", chapterId: "c1", requiredSkillIds: ["TARGET"], slip: 0.05, guess: 0.05, estimatedSeconds: 20 },
+      { itemId: "p-p0", familyId: "f-p0", chapterId: "c1", requiredSkillIds: ["P0"], slip: 0.05, guess: 0.05, estimatedSeconds: 20 },
+      { itemId: "p-p1", familyId: "f-shared", chapterId: "c1", requiredSkillIds: ["P1"], slip: 0.05, guess: 0.05, estimatedSeconds: 20 },
+      { itemId: "p-p1-clone", familyId: "f-shared", chapterId: "c1", requiredSkillIds: ["P1"], slip: 0.05, guess: 0.05, estimatedSeconds: 20 },
+    ];
+    const machine = new PrerequisiteDrilldownStateMachine({
+      skills,
+      targetSkillId: "TARGET",
+      probePool: probes,
+      originalContext: { originalAttemptId: "att-1", originalItemId: "tgt-item", frozenDraftText: "draft", frozenCursorOffset: 0, startedAtMs: 10 },
+    });
+
+    expect(() => machine.recordProbeResponse({ observationId: "bad-unrel", itemId: "p-unrelated", correct: true })).toThrow(DiagnosticPlacementError);
+    expect(() => machine.recordProbeResponse({ observationId: "bad-tgt", itemId: "p-target", correct: true })).toThrow(DiagnosticPlacementError);
+
+    const sel1 = machine.selectNextProbe();
+    expect(["p-p0", "p-p1", "p-p1-clone"]).toContain(sel1.probe?.itemId);
+    // Record response on p-p0 even if p-p1 was pending; then verify family/item reuse is rejected and pendingProbeId cleared
+    machine.recordProbeResponse({ observationId: "dd-ok-1", itemId: "p-p0", correct: false });
+    expect(() => machine.recordProbeResponse({ observationId: "dd-dup-item", itemId: "p-p0", correct: true })).toThrow(DiagnosticPlacementError);
+
+    const sel2 = machine.selectNextProbe();
+    expect(["p-p1", "p-p1-clone"]).toContain(sel2.probe?.itemId);
+    machine.recordProbeResponse({ observationId: "dd-ok-2", itemId: "p-p1", correct: true });
+    try {
+      machine.recordProbeResponse({ observationId: "dd-after-cap", itemId: "p-p1-clone", correct: true });
+      expect.unreachable("should throw INVALID_STATE");
+    } catch (err) {
+      expect(err).toBeInstanceOf(DiagnosticPlacementError);
+      expect((err as DiagnosticPlacementError).code).toBe("INVALID_STATE");
+    }
+  });
+
+  it("[P2-1 & P2-2] validates external snapshots/configs/drilldown MI and distinguishes candidate_pool_exhausted from time_budget_exhausted", () => {
+    const skills: DiagnosticSkillNode[] = [
+      { skillId: "A", chapterId: "ch1" },
+      { skillId: "B", chapterId: "ch2" },
+    ];
+    const snap = buildKstPriorSnapshot(createKstStateSpace(skills));
+    expect(() => validateKstSnapshot({ ...snap, piBySkill: { ...snap.piBySkill, A: Number.NaN } })).toThrow(DiagnosticPlacementError);
+    expect(() => classifyPlacementRoutes({ ...snap, piBySkill: { ...snap.piBySkill, A: 1.5 } }, skills)).toThrow(DiagnosticPlacementError);
+
+    expect(() => new DiagnosticPlacementSession({
+      skills,
+      candidatePool: [{ itemId: "pa", familyId: "fa", chapterId: "ch1", requiredSkillIds: ["A"], slip: 0.1, guess: 0.1, estimatedSeconds: 20 }],
+      config: { minItems: 1, maxItems: 1, earlyStopMinMutualInfoBits: -0.01 },
+    })).toThrow(DiagnosticPlacementError);
+
+    const dd = new PrerequisiteDrilldownStateMachine({
+      skills: [{ skillId: "A", chapterId: "ch1" }, { skillId: "T", chapterId: "ch1", prerequisiteIds: ["A"] }],
+      targetSkillId: "T",
+      probePool: [{ itemId: "pa", familyId: "fa", chapterId: "ch1", requiredSkillIds: ["A"], slip: 0.1, guess: 0.1, estimatedSeconds: 20 }],
+      originalContext: { originalAttemptId: "a1", originalItemId: "i1", frozenDraftText: "", frozenCursorOffset: 0, startedAtMs: 1 },
+    });
+    expect(() => dd.computeProbeMutualInformation({ itemId: "bad-mi", familyId: "fb", chapterId: "ch1", requiredSkillIds: ["A"], slip: 0.6, guess: 0.1, estimatedSeconds: 20 })).toThrow(DiagnosticPlacementError);
+
+    // Chapter maxItems exhausts legal candidates despite 270s remaining budget -> candidate_pool_exhausted (not time_budget_exhausted)
+    const chapterCapSession = new DiagnosticPlacementSession({
+      skills,
+      candidatePool: [
+        { itemId: "c1-1", familyId: "f1", chapterId: "ch1", requiredSkillIds: ["A"], slip: 0.1, guess: 0.1, estimatedSeconds: 30 },
+        { itemId: "c1-2", familyId: "f2", chapterId: "ch1", requiredSkillIds: ["A"], slip: 0.1, guess: 0.1, estimatedSeconds: 30 },
+      ],
+      config: { minItems: 1, maxItems: 3, totalBudgetSeconds: 300, chapterQuotas: { ch1: { minItems: 0, maxItems: 1 } } },
+    });
+    const pick = chapterCapSession.selectNextProbe();
+    expect(pick.status).toBe("selected");
+    chapterCapSession.recordResponse({ observationId: "cc-1", itemId: pick.probe!.itemId, correct: true });
+    const stoppedByQuota = chapterCapSession.selectNextProbe();
+    expect(stoppedByQuota.status).toBe("stopped");
+    expect(stoppedByQuota.stopReason).toBe("candidate_pool_exhausted");
+
+    // Time shortfall with chapter/family-feasible candidates under Infinity -> time_budget_exhausted
+    const timeSession = new DiagnosticPlacementSession({
+      skills,
+      candidatePool: [
+        { itemId: "t-1", familyId: "ft1", chapterId: "ch1", requiredSkillIds: ["A"], slip: 0.1, guess: 0.1, estimatedSeconds: 30 },
+        { itemId: "t-2", familyId: "ft2", chapterId: "ch2", requiredSkillIds: ["B"], slip: 0.1, guess: 0.1, estimatedSeconds: 40 },
+      ],
+      config: { minItems: 1, maxItems: 2, totalBudgetSeconds: 50 },
+    });
+    const tPick = timeSession.selectNextProbe();
+    timeSession.recordResponse({ observationId: "tm-1", itemId: tPick.probe!.itemId, correct: true });
+    const stoppedByTime = timeSession.selectNextProbe();
+    expect(stoppedByTime.status).toBe("stopped");
+    expect(stoppedByTime.stopReason).toBe("time_budget_exhausted");
   });
 });

@@ -2,6 +2,7 @@ import { logSumExp } from "../epistemic/gauss-hermite";
 import {
   binaryEntropyBits,
   isUnassistedValidObservation,
+  validateKstSnapshot,
   validateProbeItem,
   validateSkillGraph,
   type ValidatedSkillGraph,
@@ -119,8 +120,8 @@ export class PrerequisiteDrilldownStateMachine {
     for (let i = 0; i < this.hypotheses.length; i++) {
       const h = this.hypotheses[i]!;
       const prior = !input.kstSnapshot ? 1
-        : h.kind === INTEGRATION_STEP_COORDINATION ? Math.max(0.05, input.kstSnapshot.parentsSatisfiedBySkill[this.targetSkillId] ?? 0.5)
-        : Math.max(0.05, 1 - (input.kstSnapshot.piBySkill[h.skillId!] ?? 0.5));
+        : (validateKstSnapshot(input.kstSnapshot), h.kind === INTEGRATION_STEP_COORDINATION ? Math.max(0.05, input.kstSnapshot.parentsSatisfiedBySkill[this.targetSkillId] ?? 0.5)
+        : Math.max(0.05, 1 - (input.kstSnapshot.piBySkill[h.skillId!] ?? 0.5)));
       this.logWeights[i] = Math.log(prior);
     }
     this.renormalize();
@@ -146,6 +147,7 @@ export class PrerequisiteDrilldownStateMachine {
   }
 
   computeProbeMutualInformation(probe: DiagnosticProbeItem): number {
+    validateProbeItem(probe, this.graph.skillsById);
     let marginal = 0;
     let condEnt = 0;
     for (let i = 0; i < this.hypotheses.length; i++) {
@@ -160,7 +162,7 @@ export class PrerequisiteDrilldownStateMachine {
   private eligibleUnusedProbes(): DiagnosticProbeItem[] {
     return this.probePool.filter(p =>
       !this.usedItemIds.has(p.itemId) && !this.usedFamilyIds.has(p.familyId) &&
-      p.requiredSkillIds.every(id => this.prerequisiteSet.has(id)));
+      p.requiredSkillIds.length > 0 && p.requiredSkillIds.every(id => this.prerequisiteSet.has(id)));
   }
 
   private transitionToRestoreOriginal(): void {
@@ -206,8 +208,12 @@ export class PrerequisiteDrilldownStateMachine {
       return { status: this.status, probe: null, mutualInformationBits: null, probesAdministered: this.probesAdministered, remainingProbes: 0 };
     }
     if (this.pendingProbeId) {
-      const pending = this.probeById.get(this.pendingProbeId)!;
-      return { status: this.status, probe: pending, mutualInformationBits: this.computeProbeMutualInformation(pending), probesAdministered: this.probesAdministered, remainingProbes: Math.max(0, this.maxTotalProbes - this.probesAdministered) };
+      const pending = this.probeById.get(this.pendingProbeId);
+      if (pending && !this.usedItemIds.has(pending.itemId) && !this.usedFamilyIds.has(pending.familyId)
+        && pending.requiredSkillIds.length > 0 && pending.requiredSkillIds.every(id => this.prerequisiteSet.has(id))) {
+        return { status: this.status, probe: pending, mutualInformationBits: this.computeProbeMutualInformation(pending), probesAdministered: this.probesAdministered, remainingProbes: Math.max(0, this.maxTotalProbes - this.probesAdministered) };
+      }
+      this.pendingProbeId = null;
     }
     const candidates = this.probesAdministered < this.maxTotalProbes ? this.eligibleUnusedProbes() : [];
     if (candidates.length === 0) {
@@ -236,15 +242,24 @@ export class PrerequisiteDrilldownStateMachine {
     if (!observation.observationId.trim()) throw new DiagnosticPlacementError("VALIDATION", "observationId must be non-empty");
     if (this.seenObservationIds.has(observation.observationId)) return this.getState();
     if (this.status !== "probing" || this.probesAdministered >= this.maxTotalProbes) {
-      throw new DiagnosticPlacementError("STATE", `Drilldown hard cap (${MAX_TOTAL_DRILLDOWN_PROBES}) reached or already finalized`);
+      throw new DiagnosticPlacementError("INVALID_STATE", `Drilldown hard cap (${MAX_TOTAL_DRILLDOWN_PROBES}) reached or already finalized`);
     }
     const probe = this.probeById.get(observation.itemId);
     if (!probe) throw new DiagnosticPlacementError("VALIDATION", `Unknown drilldown probe itemId ${observation.itemId}`);
+    if (probe.requiredSkillIds.length === 0 || !probe.requiredSkillIds.every(id => this.prerequisiteSet.has(id))) {
+      throw new DiagnosticPlacementError("VALIDATION", `Drilldown probe ${probe.itemId} must target only prerequisites of ${this.targetSkillId}`);
+    }
+    if (this.usedItemIds.has(probe.itemId)) {
+      throw new DiagnosticPlacementError("VALIDATION", `Drilldown probe itemId ${probe.itemId} has already been used`);
+    }
+    if (this.usedFamilyIds.has(probe.familyId)) {
+      throw new DiagnosticPlacementError("VALIDATION", `Drilldown probe familyId ${probe.familyId} has already been used`);
+    }
 
     this.seenObservationIds.add(observation.observationId);
     this.usedItemIds.add(probe.itemId);
     this.usedFamilyIds.add(probe.familyId);
-    if (this.pendingProbeId === probe.itemId) this.pendingProbeId = null;
+    this.pendingProbeId = null;
     this.probesAdministered += 1;
 
     if (isUnassistedValidObservation(observation)) {

@@ -1,4 +1,4 @@
-import { KstStateSpace, validateProbeItem } from "./kst-state-space";
+import { KstStateSpace, validateKstSnapshot, validateProbeItem } from "./kst-state-space";
 import {
   BLOCKED_UI_LABEL,
   DEFAULT_HIGH_VALUE_WEIGHT_THRESHOLD,
@@ -57,7 +57,7 @@ export function classifyPlacementRoutes(
     throw new DiagnosticPlacementError("VALIDATION", "Invalid highValueWeightThreshold");
   }
 
-  const snapshot = source instanceof KstStateSpace ? source.buildPriorSnapshot() : source;
+  const snapshot = source instanceof KstStateSpace ? source.buildPriorSnapshot() : (validateKstSnapshot(source), source);
   return skills.map(skill => {
     const pi = snapshot.piBySkill[skill.skillId];
     const outerFringe = snapshot.outerFringeBySkill[skill.skillId];
@@ -250,6 +250,9 @@ export class DiagnosticPlacementSession {
     if (!Number.isInteger(this.minItems) || this.minItems < 1) throw new DiagnosticPlacementError("VALIDATION", "minItems must be an integer >= 1");
     if (!Number.isInteger(this.maxItems) || this.maxItems < this.minItems) throw new DiagnosticPlacementError("VALIDATION", "maxItems must be >= minItems");
     if (!Number.isFinite(this.totalBudgetSeconds) || this.totalBudgetSeconds <= 0) throw new DiagnosticPlacementError("VALIDATION", "totalBudgetSeconds must be > 0");
+    if (!Number.isFinite(this.earlyStopMinMutualInfoBits) || this.earlyStopMinMutualInfoBits < 0) {
+      throw new DiagnosticPlacementError("VALIDATION", "earlyStopMinMutualInfoBits must be finite and >= 0");
+    }
 
     this.skills = input.skills;
     this.stateSpace = new KstStateSpace(input.skills);
@@ -269,9 +272,10 @@ export class DiagnosticPlacementSession {
     return true;
   }
 
-  private canCompleteSessionWith(candidate: DiagnosticProbeItem): boolean {
+  private canCompleteSessionWith(candidate: DiagnosticProbeItem, budgetSeconds = this.remainingBudgetSeconds): boolean {
+    if (!this.stateSpace.canEvaluateProbe(candidate)) return false;
     if (this.administeredCount + 1 > this.maxItems) return false;
-    const budgetAfter = this.remainingBudgetSeconds - candidate.estimatedSeconds;
+    const budgetAfter = budgetSeconds - candidate.estimatedSeconds;
     if (budgetAfter < -1e-9) return false;
 
     const nextChapterCount = (this.chapterCounts.get(candidate.chapterId) ?? 0) + 1;
@@ -294,7 +298,8 @@ export class DiagnosticPlacementSession {
 
     const remainingPool = this.candidatePool.filter(item =>
       item.itemId !== candidate.itemId && item.familyId !== candidate.familyId &&
-      !this.usedItemIds.has(item.itemId) && !this.usedFamilyIds.has(item.familyId));
+      !this.usedItemIds.has(item.itemId) && !this.usedFamilyIds.has(item.familyId) &&
+      this.stateSpace.canEvaluateProbe(item));
     return minCostFeasibleCompletion(remainingPool, deficits, headroom, kNeeded, budgetAfter);
   }
 
@@ -305,15 +310,24 @@ export class DiagnosticPlacementSession {
     };
     if (this.stopReason) return stopped(this.stopReason);
     if (this.pendingProbeId) {
-      const pending = this.probeById.get(this.pendingProbeId)!;
-      return { status: "selected", probe: pending, mutualInformationBits: this.stateSpace.computeProbeMutualInformation(pending), stopReason: null, administeredCount: this.administeredCount, remainingBudgetSeconds: this.remainingBudgetSeconds };
+      const pending = this.probeById.get(this.pendingProbeId);
+      if (pending && !this.usedItemIds.has(pending.itemId) && !this.usedFamilyIds.has(pending.familyId)
+        && this.canCompleteSessionWith(pending, this.remainingBudgetSeconds)) {
+        return { status: "selected", probe: pending, mutualInformationBits: this.stateSpace.computeProbeMutualInformation(pending), stopReason: null, administeredCount: this.administeredCount, remainingBudgetSeconds: this.remainingBudgetSeconds };
+      }
+      this.pendingProbeId = null;
     }
     if (this.administeredCount >= this.maxItems) return stopped("max_items_reached");
 
-    const unused = this.candidatePool.filter(item => !this.usedItemIds.has(item.itemId) && !this.usedFamilyIds.has(item.familyId));
-    const feasible = unused.filter(item => this.canCompleteSessionWith(item));
+    const unused = this.candidatePool.filter(item =>
+      !this.usedItemIds.has(item.itemId) && !this.usedFamilyIds.has(item.familyId) && this.stateSpace.canEvaluateProbe(item));
+    const feasible = unused.filter(item => this.canCompleteSessionWith(item, this.remainingBudgetSeconds));
     if (feasible.length === 0) {
       if (unused.length === 0) return stopped("candidate_pool_exhausted");
+      const chapterFamilyFeasibleIgnoringBudget = unused.some(item => this.canCompleteSessionWith(item, Infinity));
+      if (!chapterFamilyFeasibleIgnoringBudget) {
+        return stopped(this.administeredCount === 0 ? "infeasible_constraints" : "candidate_pool_exhausted");
+      }
       return stopped(this.remainingBudgetSeconds < this.totalBudgetSeconds ? "time_budget_exhausted" : "infeasible_constraints");
     }
 
@@ -335,6 +349,9 @@ export class DiagnosticPlacementSession {
   }
 
   recordResponse(observation: DiagnosticProbeObservation): KstObservationUpdateResult & { administeredCount: number; remainingBudgetSeconds: number } {
+    if (!observation.observationId.trim()) {
+      throw new DiagnosticPlacementError("VALIDATION", "observationId must be non-empty");
+    }
     const probe = this.probeById.get(observation.itemId);
     if (!probe) throw new DiagnosticPlacementError("VALIDATION", `Unknown placement probe itemId: ${observation.itemId}`);
     if (this.seenObservationIds.has(observation.observationId)) {
@@ -344,16 +361,25 @@ export class DiagnosticPlacementSession {
         administeredCount: this.administeredCount, remainingBudgetSeconds: this.remainingBudgetSeconds,
       };
     }
+    if (this.stopReason !== null || this.administeredCount >= this.maxItems) {
+      throw new DiagnosticPlacementError("INVALID_STATE", "Cannot record response after placement session has stopped or reached maxItems");
+    }
+    if (this.usedItemIds.has(probe.itemId)) {
+      throw new DiagnosticPlacementError("VALIDATION", `Probe itemId ${probe.itemId} has already been used in this session`);
+    }
+    if (this.usedFamilyIds.has(probe.familyId)) {
+      throw new DiagnosticPlacementError("VALIDATION", `Probe familyId ${probe.familyId} has already been used in this session`);
+    }
     const elapsed = observation.elapsedSeconds ?? probe.estimatedSeconds;
     if (!Number.isFinite(elapsed) || elapsed < 0) throw new DiagnosticPlacementError("VALIDATION", "elapsedSeconds must be finite and >= 0");
 
+    const update = this.stateSpace.applyProbeObservation(probe, observation);
     this.seenObservationIds.add(observation.observationId);
     this.usedItemIds.add(probe.itemId);
     this.usedFamilyIds.add(probe.familyId);
-    if (this.pendingProbeId === probe.itemId) this.pendingProbeId = null;
+    this.pendingProbeId = null;
 
     this.remainingBudgetSeconds = Math.max(0, this.remainingBudgetSeconds - elapsed);
-    const update = this.stateSpace.applyProbeObservation(probe, observation);
     if (update.applied) {
       this.administeredCount += 1;
       this.chapterCounts.set(probe.chapterId, (this.chapterCounts.get(probe.chapterId) ?? 0) + 1);

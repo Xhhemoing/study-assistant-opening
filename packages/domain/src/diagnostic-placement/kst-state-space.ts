@@ -290,14 +290,72 @@ function buildComponentSpace(
   return { componentId, skillIds, localIndexBySkill, parentMasks, states, approximationMode, exactStateCountEstimate, logW, w };
 }
 
+function validateProbabilityRecord(record: unknown, label: string, allowNegative = false): void {
+  if (!record || typeof record !== "object" || Array.isArray(record)) {
+    throw new DiagnosticPlacementError("VALIDATION", `${label} must be a non-null record`);
+  }
+  for (const [key, value] of Object.entries(record as Record<string, unknown>)) {
+    if (typeof value !== "number" || !Number.isFinite(value)) {
+      throw new DiagnosticPlacementError("VALIDATION", `${label}[${key}] must be a finite number`);
+    }
+    if (!allowNegative && (value < 0 || value > 1)) {
+      throw new DiagnosticPlacementError("VALIDATION", `${label}[${key}] must be within [0, 1]`);
+    }
+  }
+}
+
+export function validateKstSnapshot(snapshot: KstSnapshotV1): void {
+  if (!snapshot || typeof snapshot !== "object" || snapshot.schemaVersion !== 1 || typeof snapshot.snapshotId !== "string" || !snapshot.snapshotId.trim()) {
+    throw new DiagnosticPlacementError("VALIDATION", "Invalid KstSnapshotV1 header");
+  }
+  if (!Number.isFinite(snapshot.createdAtMs)) {
+    throw new DiagnosticPlacementError("VALIDATION", "KstSnapshotV1 createdAtMs must be finite");
+  }
+  if (snapshot.totalFeasibleStateCount !== null && (!Number.isFinite(snapshot.totalFeasibleStateCount) || snapshot.totalFeasibleStateCount < 0)) {
+    throw new DiagnosticPlacementError("VALIDATION", "KstSnapshotV1 totalFeasibleStateCount must be null or >= 0");
+  }
+  validateProbabilityRecord(snapshot.piBySkill, "piBySkill");
+  validateProbabilityRecord(snapshot.outerFringeBySkill, "outerFringeBySkill");
+  validateProbabilityRecord(snapshot.parentsSatisfiedBySkill, "parentsSatisfiedBySkill");
+  if (snapshot.wByState !== null) {
+    validateProbabilityRecord(snapshot.wByState, "wByState");
+  }
+  if (!Array.isArray(snapshot.componentJointWeights)) {
+    throw new DiagnosticPlacementError("VALIDATION", "KstSnapshotV1 componentJointWeights must be an array");
+  }
+  snapshot.componentJointWeights.forEach((comp, idx) => {
+    if (!comp || typeof comp !== "object") {
+      throw new DiagnosticPlacementError("VALIDATION", `componentJointWeights[${idx}] must be an object`);
+    }
+    validateProbabilityRecord(comp.wByState, `componentJointWeights[${idx}].wByState`);
+  });
+  if (!snapshot.skillCovariance || typeof snapshot.skillCovariance !== "object" || Array.isArray(snapshot.skillCovariance)) {
+    throw new DiagnosticPlacementError("VALIDATION", "KstSnapshotV1 skillCovariance must be a record");
+  }
+  for (const [skillId, row] of Object.entries(snapshot.skillCovariance)) {
+    validateProbabilityRecord(row, `skillCovariance[${skillId}]`, true);
+  }
+  if (!Array.isArray(snapshot.consumedProbeObservationIds) || snapshot.consumedProbeObservationIds.some(id => typeof id !== "string")) {
+    throw new DiagnosticPlacementError("VALIDATION", "KstSnapshotV1 consumedProbeObservationIds must be string[]");
+  }
+}
+
 export class KstStateSpace {
   readonly graph: ValidatedSkillGraph;
   readonly approximationMode: KstApproximationMode;
   readonly totalFeasibleStateCount: number | null;
-  readonly components: readonly ComponentSpace[];
-  readonly componentIndexBySkill: ReadonlyMap<string, number>;
   readonly consumedProbeObservationIds: string[] = [];
+  private _components: ComponentSpace[];
+  private _componentIndexBySkill: Map<string, number>;
   private readonly seenObservationIds = new Set<string>();
+
+  get components(): readonly ComponentSpace[] {
+    return this._components;
+  }
+
+  get componentIndexBySkill(): ReadonlyMap<string, number> {
+    return this._componentIndexBySkill;
+  }
 
   constructor(skills: readonly DiagnosticSkillNode[]) {
     this.graph = validateSkillGraph(skills);
@@ -305,49 +363,139 @@ export class KstStateSpace {
       index: i, skillIds: compSkills, exact: enumerateDownsetsBounded(compSkills, this.graph, MAX_EXACT_KST_STATES),
     }));
     const anyExceeded = enumerated.some(e => e.exact.exceededLimit);
-    let exactProduct = 1;
-    let productWithinCap = !anyExceeded;
-    for (const e of enumerated) {
-      if (!productWithinCap) break;
-      exactProduct *= e.exact.states.length;
-      if (exactProduct > MAX_EXACT_KST_STATES) productWithinCap = false;
+    let exactProduct = 1n;
+    if (!anyExceeded) {
+      for (const e of enumerated) exactProduct *= BigInt(e.exact.states.length);
     }
+    const productWithinCap = !anyExceeded && exactProduct <= BigInt(MAX_EXACT_KST_STATES);
+    const totalExactCount = !anyExceeded && exactProduct <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(exactProduct) : null;
 
     if (productWithinCap) {
       this.approximationMode = "exact";
-      this.totalFeasibleStateCount = exactProduct;
+      this.totalFeasibleStateCount = totalExactCount;
       const fullExact = enumerateDownsetsBounded(this.graph.topoOrder, this.graph, MAX_EXACT_KST_STATES);
-      this.components = [buildComponentSpace("comp-full", this.graph.topoOrder, this.graph, fullExact.states, fullExact.parentMasks, "exact", fullExact.states.length)];
+      this._components = [buildComponentSpace("comp-full", this.graph.topoOrder, this.graph, fullExact.states, fullExact.parentMasks, "exact", fullExact.states.length)];
     } else if (!anyExceeded) {
       this.approximationMode = "component_decomposed";
-      this.totalFeasibleStateCount = exactProduct;
-      this.components = enumerated.map(e => buildComponentSpace(`comp-${e.index}`, e.skillIds, this.graph, e.exact.states, e.exact.parentMasks, "exact", e.exact.states.length));
+      this.totalFeasibleStateCount = totalExactCount;
+      this._components = enumerated.map(e => buildComponentSpace(`comp-${e.index}`, e.skillIds, this.graph, e.exact.states, e.exact.parentMasks, "exact", e.exact.states.length));
     } else {
       this.approximationMode = "bounded_component_envelope";
       this.totalFeasibleStateCount = null;
-      this.components = enumerated.map(e => e.exact.exceededLimit
+      this._components = enumerated.map(e => e.exact.exceededLimit
         ? buildComponentSpace(`comp-${e.index}`, e.skillIds, this.graph, buildBoundedTopologicalEnvelope(e.skillIds, this.graph), e.exact.parentMasks, "bounded_component_envelope", null)
         : buildComponentSpace(`comp-${e.index}`, e.skillIds, this.graph, e.exact.states, e.exact.parentMasks, "exact", e.exact.states.length));
     }
 
-    const compMap = new Map<string, number>();
-    this.components.forEach((c, idx) => c.skillIds.forEach(id => compMap.set(id, idx)));
-    this.componentIndexBySkill = compMap;
+    this._componentIndexBySkill = new Map<string, number>();
+    this._components.forEach((c, idx) => c.skillIds.forEach(id => this._componentIndexBySkill.set(id, idx)));
   }
 
   private touchedMasks(requiredSkillIds: readonly string[]): Map<number, bigint> {
     const touched = new Map<number, bigint>();
     for (const skillId of requiredSkillIds) {
-      const cIdx = this.componentIndexBySkill.get(skillId)!;
-      const localIdx = this.components[cIdx]!.localIndexBySkill.get(skillId)!;
+      const cIdx = this._componentIndexBySkill.get(skillId)!;
+      const localIdx = this._components[cIdx]!.localIndexBySkill.get(skillId)!;
       touched.set(cIdx, (touched.get(cIdx) ?? 0n) | (1n << BigInt(localIdx)));
     }
     return touched;
   }
 
+  private checkCrossComponentMerge(touchedIndices: readonly number[]): { feasible: true; productCount: number } | { feasible: false; reason: string } {
+    if (touchedIndices.length <= 1) {
+      return { feasible: true, productCount: touchedIndices.length === 1 ? this._components[touchedIndices[0]!]!.states.length : 1 };
+    }
+    let product = 1n;
+    for (const cIdx of touchedIndices) {
+      const comp = this._components[cIdx]!;
+      if (comp.approximationMode !== "exact") {
+        return { feasible: false, reason: `Cross-component probe touches ${comp.approximationMode} component ${comp.componentId}` };
+      }
+      product *= BigInt(comp.states.length);
+      if (product > BigInt(MAX_EXACT_KST_STATES)) {
+        return { feasible: false, reason: `Cross-component merge exceeds MAX_EXACT_KST_STATES (${MAX_EXACT_KST_STATES})` };
+      }
+    }
+    return { feasible: true, productCount: Number(product) };
+  }
+
+  canEvaluateProbe(probe: DiagnosticProbeItem): boolean {
+    if (probe.requiredSkillIds.length === 0 || probe.requiredSkillIds.some(id => !this.graph.skillsById.has(id))) {
+      return false;
+    }
+    const touchedIndices = [...this.touchedMasks(probe.requiredSkillIds).keys()].sort((a, b) => a - b);
+    return this.checkCrossComponentMerge(touchedIndices).feasible;
+  }
+
+  private buildMergedComponentCandidate(touchedIndices: readonly number[]): ComponentSpace {
+    const touchedSet = new Set(touchedIndices);
+    const mergedSkillIds = this.graph.topoOrder.filter(id => touchedSet.has(this._componentIndexBySkill.get(id)!));
+    const localIndexBySkill = new Map(mergedSkillIds.map((id, i) => [id, i]));
+    const parentMasks = mergedSkillIds.map(id => {
+      let mask = 0n;
+      for (const p of this.graph.skillsById.get(id)!.prerequisiteIds) {
+        const idx = localIndexBySkill.get(p);
+        if (idx !== undefined) mask |= 1n << BigInt(idx);
+      }
+      return mask;
+    });
+
+    const mappedByComp = touchedIndices.map(cIdx => {
+      const comp = this._components[cIdx]!;
+      const newBits = comp.skillIds.map(id => 1n << BigInt(localIndexBySkill.get(id)!));
+      return comp.states.map(state => {
+        let m = 0n;
+        for (let k = 0; k < newBits.length; k++) if ((state & (1n << BigInt(k))) !== 0n) m |= newBits[k]!;
+        return m;
+      });
+    });
+
+    let prodStates: bigint[] = [0n];
+    let prodLogW: number[] = [0];
+    for (let r = 0; r < touchedIndices.length; r++) {
+      const comp = this._components[touchedIndices[r]!]!;
+      const mapped = mappedByComp[r]!;
+      const nextStates = new Array<bigint>(prodStates.length * mapped.length);
+      const nextLogW = new Array<number>(prodLogW.length * mapped.length);
+      let out = 0;
+      for (let i = 0; i < prodStates.length; i++) {
+        const baseState = prodStates[i]!;
+        const baseLog = prodLogW[i]!;
+        for (let j = 0; j < mapped.length; j++) {
+          nextStates[out] = baseState | mapped[j]!;
+          nextLogW[out] = baseLog + comp.logW[j]!;
+          out++;
+        }
+      }
+      prodStates = nextStates;
+      prodLogW = nextLogW;
+    }
+
+    const order = Array.from({ length: prodStates.length }, (_, i) => i);
+    order.sort((a, b) => (prodStates[a]! < prodStates[b]! ? -1 : prodStates[a]! > prodStates[b]! ? 1 : 0));
+    const states = order.map(i => prodStates[i]!);
+    const logW = new Float64Array(order.length);
+    const w = new Float64Array(order.length);
+    for (let i = 0; i < order.length; i++) logW[i] = prodLogW[order[i]!]!;
+    normalizeLogWeights(logW, w);
+
+    const minTopo = this.graph.skillsById.get(mergedSkillIds[0]!)!.topoIndex;
+    return {
+      componentId: `comp-merged-${minTopo}`,
+      skillIds: mergedSkillIds,
+      localIndexBySkill,
+      parentMasks,
+      states,
+      approximationMode: "exact",
+      exactStateCountEstimate: states.length,
+      logW,
+      w,
+    };
+  }
+
   private componentSatisfactionProb(compIdx: number, reqMask: bigint): number {
     if (reqMask === 0n) return 1;
-    const comp = this.components[compIdx]!;
+    const comp = this._components[compIdx]!;
     let sum = 0;
     for (let i = 0; i < comp.states.length; i++) if ((comp.states[i]! & reqMask) === reqMask) sum += comp.w[i]!;
     return clamp(sum, 0, 1);
@@ -355,8 +503,13 @@ export class KstStateSpace {
 
   computeProbeMutualInformation(probe: DiagnosticProbeItem): number {
     validateProbeItem(probe, this.graph.skillsById);
+    const touched = this.touchedMasks(probe.requiredSkillIds);
+    const touchedIndices = [...touched.keys()].sort((a, b) => a - b);
+    const mergeCheck = this.checkCrossComponentMerge(touchedIndices);
+    if (!mergeCheck.feasible) throw new DiagnosticPlacementError("INFEASIBLE", mergeCheck.reason);
+
     let pMastered = 1;
-    for (const [cIdx, reqMask] of this.touchedMasks(probe.requiredSkillIds).entries()) {
+    for (const [cIdx, reqMask] of touched.entries()) {
       pMastered *= this.componentSatisfactionProb(cIdx, reqMask);
     }
     const p1 = 1 - probe.slip;
@@ -373,30 +526,55 @@ export class KstStateSpace {
       applied, reason, observationId: observation.observationId, consumedProbeObservationIds: [...this.consumedProbeObservationIds],
     });
     if (this.seenObservationIds.has(observation.observationId)) return mkResult(false, "duplicate_observation");
+
+    const touched = this.touchedMasks(probe.requiredSkillIds);
+    const touchedIndices = [...touched.keys()].sort((a, b) => a - b);
+    const mergeCheck = this.checkCrossComponentMerge(touchedIndices);
+    if (!mergeCheck.feasible) throw new DiagnosticPlacementError("INFEASIBLE", mergeCheck.reason);
+
     if (!isUnassistedValidObservation(observation)) {
       this.seenObservationIds.add(observation.observationId);
       return mkResult(false, "assisted_or_invalid_response");
     }
 
-    const touched = this.touchedMasks(probe.requiredSkillIds);
-    const preSatisfied = new Map([...touched.entries()].map(([cIdx, m]) => [cIdx, this.componentSatisfactionProb(cIdx, m)]));
-    const backups: Array<{ comp: ComponentSpace; logW: Float64Array; w: Float64Array }> = [];
+    const likeMastered = observation.correct ? 1 - probe.slip : probe.slip;
+    const likeUnmastered = observation.correct ? probe.guess : 1 - probe.guess;
+    const logM = likeMastered > 0 ? Math.log(likeMastered) : -Infinity;
+    const logU = likeUnmastered > 0 ? Math.log(likeUnmastered) : -Infinity;
 
-    for (const [cIdx, reqMask] of touched.entries()) {
-      const comp = this.components[cIdx]!;
-      backups.push({ comp, logW: comp.logW.slice(), w: comp.w.slice() });
-      let otherSatisfied = 1;
-      for (const [otherIdx, prob] of preSatisfied.entries()) if (otherIdx !== cIdx) otherSatisfied *= prob;
+    if (touchedIndices.length >= 2) {
+      const merged = this.buildMergedComponentCandidate(touchedIndices);
+      let reqMask = 0n;
+      for (const skillId of probe.requiredSkillIds) reqMask |= 1n << BigInt(merged.localIndexBySkill.get(skillId)!);
+      for (let i = 0; i < merged.states.length; i++) {
+        merged.logW[i] = merged.logW[i]! + ((merged.states[i]! & reqMask) === reqMask ? logM : logU);
+      }
+      if (!normalizeLogWeights(merged.logW, merged.w)) {
+        this.seenObservationIds.add(observation.observationId);
+        return mkResult(false, "zero_likelihood_observation");
+      }
 
-      const p1Mastered = otherSatisfied * (1 - probe.slip) + (1 - otherSatisfied) * probe.guess;
-      const likeMastered = observation.correct ? p1Mastered : 1 - p1Mastered;
-      const likeUnmastered = observation.correct ? probe.guess : 1 - probe.guess;
-      const logM = likeMastered > 0 ? Math.log(likeMastered) : -Infinity;
-      const logU = likeUnmastered > 0 ? Math.log(likeUnmastered) : -Infinity;
-      for (let i = 0; i < comp.states.length; i++) comp.logW[i] = comp.logW[i]! + ((comp.states[i]! & reqMask) === reqMask ? logM : logU);
-
+      const touchedSet = new Set(touchedIndices);
+      const nextComponents: ComponentSpace[] = [];
+      for (let idx = 0; idx < this._components.length; idx++) {
+        if (idx === touchedIndices[0]) nextComponents.push(merged);
+        if (!touchedSet.has(idx)) nextComponents.push(this._components[idx]!);
+      }
+      this._components = nextComponents;
+      this._componentIndexBySkill = new Map<string, number>();
+      this._components.forEach((c, idx) => c.skillIds.forEach(id => this._componentIndexBySkill.set(id, idx)));
+    } else {
+      const cIdx = touchedIndices[0]!;
+      const reqMask = touched.get(cIdx)!;
+      const comp = this._components[cIdx]!;
+      const savedLogW = comp.logW.slice();
+      const savedW = comp.w.slice();
+      for (let i = 0; i < comp.states.length; i++) {
+        comp.logW[i] = comp.logW[i]! + ((comp.states[i]! & reqMask) === reqMask ? logM : logU);
+      }
       if (!normalizeLogWeights(comp.logW, comp.w)) {
-        for (const b of backups) { b.comp.logW.set(b.logW); b.comp.w.set(b.w); }
+        comp.logW.set(savedLogW);
+        comp.w.set(savedW);
         this.seenObservationIds.add(observation.observationId);
         return mkResult(false, "zero_likelihood_observation");
       }
@@ -513,27 +691,57 @@ export const buildKstPriorSnapshot = (
 export const getSkillCovariance = (snapshot: KstSnapshotV1, skillA: string, skillB: string): number =>
   snapshot.skillCovariance[skillA]?.[skillB] ?? 0;
 
-export function partitionObservationsAgainstKstSnapshot<T extends { observationId: string; eligibleForFirePropagation?: boolean }>(
+export function partitionObservationsAgainstKstSnapshot<T extends {
+  observationId: string;
+  correct?: unknown;
+  channel?: string;
+  unassisted?: boolean;
+  assisted?: boolean;
+  hinted?: boolean;
+  valid?: boolean;
+  eligibleForFirePropagation?: boolean;
+}>(
   snapshot: KstSnapshotV1,
   observations: readonly T[],
 ): PartitionedObservationsResult<T> {
+  validateKstSnapshot(snapshot);
   const consumedSet = new Set(snapshot.consumedProbeObservationIds);
+  const seenBatchIds = new Set<string>();
   const directObservations: T[] = [];
   const strippedConsumedObservations: PartitionedObservation<T>[] = [];
   const annotatedObservations: PartitionedObservation<T>[] = [];
   for (const obs of observations) {
-    const alreadyConsumed = consumedSet.has(obs.observationId);
+    const id = typeof obs.observationId === "string" ? obs.observationId : "";
+    const hasNonBlankId = id.trim().length > 0;
+    const alreadyConsumed = hasNonBlankId && consumedSet.has(id);
+    const duplicateInBatch = hasNonBlankId && !alreadyConsumed && seenBatchIds.has(id);
+    const unassistedValid = "correct" in obs
+      ? isUnassistedValidObservation(obs as { correct: unknown; channel?: string; unassisted?: boolean; assisted?: boolean; hinted?: boolean; valid?: boolean })
+      : obs.valid !== false && obs.assisted !== true && obs.hinted !== true && obs.unassisted !== false
+        && (obs.channel === undefined || obs.channel === "unassisted");
+    const eligibleForDirectUpdate = hasNonBlankId && !alreadyConsumed && !duplicateInBatch && unassistedValid;
+    const eligibleForFirePropagation = eligibleForDirectUpdate && (obs.eligibleForFirePropagation ?? true);
+
+    if (eligibleForDirectUpdate) {
+      seenBatchIds.add(id);
+      directObservations.push(obs);
+    }
     const annotated: PartitionedObservation<T> = {
       ...obs,
       alreadyConsumedByKst: alreadyConsumed,
-      eligibleForDirectUpdate: !alreadyConsumed,
-      eligibleForFirePropagation: alreadyConsumed ? false : (obs.eligibleForFirePropagation ?? true),
+      eligibleForDirectUpdate,
+      eligibleForFirePropagation,
     };
     annotatedObservations.push(annotated);
     if (alreadyConsumed) strippedConsumedObservations.push(annotated);
-    else directObservations.push(obs);
   }
-  return { directObservations, strippedConsumedObservations, annotatedObservations, consumedObservationIds: [...snapshot.consumedProbeObservationIds] };
+  return {
+    directObservations,
+    unconsumedObservations: directObservations,
+    strippedConsumedObservations,
+    annotatedObservations,
+    consumedObservationIds: [...snapshot.consumedProbeObservationIds],
+  };
 }
 
 export function buildSkillBeliefFromKstSnapshot(
@@ -541,6 +749,7 @@ export function buildSkillBeliefFromKstSnapshot(
   skillId: string,
   meta: { workspaceId: string; learnerId: string; courseId: string; confirmedSkillVersion: string | number },
 ): SkillBeliefV1 {
+  validateKstSnapshot(snapshot);
   const marginal = snapshot.piBySkill[skillId];
   if (marginal === undefined) throw new DiagnosticPlacementError("VALIDATION", `Skill ${skillId} missing from KstSnapshotV1`);
   const bounded = clamp(marginal, 1e-9, 1 - 1e-9);
@@ -553,6 +762,7 @@ export function updateSkillMasteryFromKstSnapshot(
   observations: readonly DownstreamSkillProbeObservation[],
   beliefMeta?: { workspaceId: string; learnerId: string; courseId: string; confirmedSkillVersion: string | number },
 ): DownstreamSkillPosteriorResult {
+  validateKstSnapshot(snapshot);
   const prior = snapshot.piBySkill[skillId];
   if (prior === undefined) throw new DiagnosticPlacementError("VALIDATION", `Skill ${skillId} missing from KstSnapshotV1`);
   const partitioned = partitionObservationsAgainstKstSnapshot(snapshot, observations);
@@ -561,9 +771,10 @@ export function updateSkillMasteryFromKstSnapshot(
 
   if (posterior > 0 && posterior < 1) {
     let logOdds = Math.log(posterior / (1 - posterior));
-    for (const obs of partitioned.directObservations) {
+    for (const obs of partitioned.unconsumedObservations) {
       if (obs.skillId !== skillId || !isUnassistedValidObservation(obs)) continue;
-      if (obs.slip < 0 || obs.slip >= 0.49 || obs.guess < 0 || obs.guess >= 0.49 || !(1 - obs.slip > obs.guess)) {
+      if (!Number.isFinite(obs.slip) || obs.slip < 0 || obs.slip >= 0.49
+        || !Number.isFinite(obs.guess) || obs.guess < 0 || obs.guess >= 0.49 || !(1 - obs.slip > obs.guess)) {
         throw new DiagnosticPlacementError("VALIDATION", `Invalid slip/guess on observation ${obs.observationId}`);
       }
       const pM = obs.correct ? 1 - obs.slip : obs.slip;
