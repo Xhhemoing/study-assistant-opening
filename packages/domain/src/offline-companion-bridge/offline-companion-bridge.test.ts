@@ -2505,6 +2505,74 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
     });
   });
 
+  it.each([
+    { answerKey: "[17,9007199254740993.0]", text: "Use 17 and 9007199254740993.", leaks: true },
+    { answerKey: "[17,9007199254740993.0]", text: "Use 17 and 9007199254740992.", leaks: false },
+    { answerKey: "[17,1e-400]", text: "Use 17 and 0.", leaks: false },
+    { answerKey: "[17,1e3]", text: "Use 17 and 2.1e3.", leaks: false },
+    { answerKey: "[17,1e3]", text: "Use 17 and 1000.", leaks: true },
+    { answerKey: "[1e3,17]", text: "Use 2.1e3 and 17.", leaks: false },
+  ])("matches only the exact numeric sequence $answerKey in $text", ({ answerKey, text, leaks }) => {
+    expect(containsAnswerLeak(text, answerKey)).toBe(leaks);
+  });
+
+  describe.each(["variant stem", "prompt", "backSummary"] as const)("numeric and cue boundaries in a %s", surface => {
+    it.each([
+      { answerKey: "[1e3]", text: "Compare 2.1e3 with the threshold.", ok: true },
+      { answerKey: "[1e3]", text: "Compare 1e30 with the threshold.", ok: true },
+      { answerKey: "[1e3]", text: "The selected value is 1e3.", ok: false },
+      { answerKey: "[1e3]", text: "The selected value is 1000.", ok: false },
+      { answerKey: "-3", text: "The scale is 1e-3.", ok: true },
+      { answerKey: "3", text: "The scale is 1e+3 or 1e-3.", ok: true },
+      { answerKey: "2", text: "The scale is 2e3.", ok: true },
+      { answerKey: "2.1", text: "The scale is 2.1e3.", ok: true },
+      { answerKey: "5", text: "The scale is .5.", ok: true },
+      { answerKey: "-2e-3", text: "Solve x -2e-3 = 0.", ok: true },
+      { answerKey: "-2e-3", text: "The selected value is -2e-3.", ok: false },
+      { answerKey: "100000", text: "Compare 2.100000 with the threshold.", ok: true },
+      { answerKey: "[9007199254740993.0]", text: "The selected value is 9007199254740993.", ok: false },
+      { answerKey: "[9007199254740993.0]", text: "The selected value is 9007199254740993.0.", ok: false },
+      { answerKey: "[9007199254740993.0]", text: "Start from 9007199254740992.", ok: true },
+      { answerKey: '{"nested":[9007199254740993.0]}', text: "Start from 9007199254740992.", ok: true },
+      { answerKey: '{"nested":[9007199254740993.0]}', text: "The selected value is 9007199254740993.", ok: false },
+      { answerKey: "[1e-400]", text: "Start from 0.", ok: true },
+      { answerKey: "[1e-400]", text: "The selected value is 1e-400.", ok: false },
+      { answerKey: "[1e-400]", text: "Compare 2.1e-400 with the threshold.", ok: true },
+      { answerKey: "[0e-400]", text: "The selected value is 0.", ok: false },
+      { answerKey: "[-0.0]", text: "The selected value is 0.", ok: false },
+      { answerKey: "[123e-4]", text: "The selected value is 0.0123.", ok: false },
+      { answerKey: "[-0.0500e+02]", text: "The selected value is -5.", ok: false },
+      ...["Give the monkey *a* banana.", "Give the monkey a banana.", "Give humans *a* chance.", "Give spans a width."].map(text => ({
+        answerKey: "A", text, ok: true,
+      })),
+      ...["Answer key: *a*", "Key is A", "Key is a", "Key: A", "Answer: A", "Option A in the list", "Choice (a) under review"].map(text => ({
+        answerKey: "A", text, ok: false,
+      })),
+      { answerKey: "B", text: "Ans = B for the first question.", ok: false },
+      { answerKey: "B", text: "Correct option is B in the first question.", ok: false },
+    ])("sets ok=$ok for $text with $answerKey", ({ answerKey, text, ok }) => {
+      const variant = makeMissVariantCandidate({
+        answerKey,
+        canonicalSolution: undefined,
+        gradingRubric: undefined,
+        referenceAnswer: undefined,
+        sealedPayload: {},
+        freshVariantStem: surface === "variant stem" ? text : "Which ordering is correct?",
+      });
+      const candidates = surface === "variant stem" ? [variant] : [
+        variant,
+        { ...makeFlashcardCandidate(900), [surface]: text },
+      ];
+      expect(issueOfflineFlashcardLease({
+        leaseId: "lease-numeric-and-cue-boundaries",
+        workspaceId: "ws-1",
+        learnerId: "learner-1",
+        issuedAtMs: T0,
+        candidates,
+      })).toMatchObject(ok ? { ok: true } : { ok: false, httpStatus: 422, code: "miss_variant_answer_leak" });
+    });
+  });
+
   it("rejects a candidate with an inherited protected getter without invoking it", () => {
     let getterCalled = false;
     const candidate = makeMissVariantCandidate({ freshVariantStem: "The indicator turns violet." });

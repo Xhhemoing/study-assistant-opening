@@ -95,6 +95,8 @@ function extractLeakSegments(normalizedSecret: string): string[] {
 }
 
 const SIGN_PREFIX = "(?:\\+-|-\\+|[+-])?";
+const UNSIGNED_DECIMAL_LITERAL = "(?:\\d+(?:\\.\\d+)?|\\.\\d+)(?:[eE][+-]?\\d+)?";
+const DECIMAL_LITERAL_RE = new RegExp(`^${SIGN_PREFIX}${UNSIGNED_DECIMAL_LITERAL}$`);
 const GREEK_LETTER_NAMES = [
   "alpha",
   "beta",
@@ -167,7 +169,7 @@ const ASCII_GREEK_VARIANT_RE = new RegExp(
 
 const SHORT_NUMERIC_OR_SYMBOLIC_ANSWER_RE = new RegExp(
   `^(?:` +
-    `${SIGN_PREFIX}\\d+(?:\\.\\d+)?(?:\\/\\d+)?` +
+    `${SIGN_PREFIX}${UNSIGNED_DECIMAL_LITERAL}(?:\\/\\d+)?` +
     `|${SIGN_PREFIX}(?:${GREEK_OR_CONST}|sqrt\\([^)]+\\)|[a-z]\\^\\d+)(?:\\/[a-z0-9]+)?` +
     `|${SIGN_PREFIX}\\d+(?:\\/\\d+)?\\s*(?:${GREEK_OR_CONST}|sqrt\\([^)]+\\))` +
     `|${SIGN_PREFIX}[a-z0-9]+(?:[*\\/][a-z0-9]+)+` +
@@ -1271,21 +1273,14 @@ const NON_CJK_WORD_CHAR =
 const NON_CJK_WORD_CHAR_RE = new RegExp(`^${NON_CJK_WORD_CHAR}$`, "u");
 
 function containsStandaloneNumericOrSymbolicToken(haystack: string, token: string): boolean {
-  const escaped = escapeRegExp(token);
+  const source = standaloneNumericOrSymbolicSource(token);
   const excludeBinaryLeftOperand =
     /^[+-](?![+-])/.test(token) && STANDALONE_SIGNED_LITERAL_RE.test(token);
   if (!excludeBinaryLeftOperand) {
-    const pattern = new RegExp(
-      `(?<!${ALPHA_NUM_IDENT_CHAR}|\\d\\.)${escaped}(?!${ALPHA_NUM_IDENT_CHAR}|\\.\\d)`,
-      "iu",
-    );
-    return pattern.test(haystack);
+    return new RegExp(source, "iu").test(haystack);
   }
   const mathRanges = findMathRanges(haystack);
-  const pattern = new RegExp(
-    `(?<!${ALPHA_NUM_IDENT_CHAR}|\\d\\.)${escaped}(?!${ALPHA_NUM_IDENT_CHAR}|\\.\\d)`,
-    "giu",
-  );
+  const pattern = new RegExp(source, "giu");
   let match: RegExpExecArray | null;
   while ((match = pattern.exec(haystack)) !== null) {
     if (!isBinaryLeftOperandBeforeSign(haystack, match.index, match.index + match[0].length, mathRanges)) {
@@ -1293,6 +1288,12 @@ function containsStandaloneNumericOrSymbolicToken(haystack: string, token: strin
     }
   }
   return false;
+}
+
+function standaloneNumericOrSymbolicSource(token: string): string {
+  const precededByDot = DECIMAL_LITERAL_RE.test(token) ? "\\." : "\\d\\.";
+  return `(?<!${ALPHA_NUM_IDENT_CHAR}|${precededByDot}|\\d[eE][+-]?)${escapeRegExp(token)}` +
+    `(?!${ALPHA_NUM_IDENT_CHAR}|\\.\\d|[eE][+-]?\\d)`;
 }
 
 function containsUnicodeWordBoundedToken(haystack: string, token: string): boolean {
@@ -1322,7 +1323,7 @@ function containsCjkBoundedSubstring(haystack: string, needle: string): boolean 
 
 const OPTION_WRAPPER_OPEN = /[\p{Pi}\p{Ps}\p{Quotation_Mark}<`]/u.source;
 const OPTION_WRAPPER_CLOSE = /[\p{Pf}\p{Pe}\p{Quotation_Mark}>`]/u.source;
-const UNSIGNED_OPTION_SCALAR = `(?:\\d+(?:\\.\\d+)?|${GREEK_OR_CONST})`;
+const UNSIGNED_OPTION_SCALAR = `(?:${UNSIGNED_DECIMAL_LITERAL}|${GREEK_OR_CONST})`;
 const UNSIGNED_OPTION_SCALAR_RE = new RegExp(`^${UNSIGNED_OPTION_SCALAR}$`, "iu");
 const WRAPPED_OPTION_LABEL_RE = new RegExp(
   `^${OPTION_WRAPPER_OPEN}\\s*([a-z]|${UNSIGNED_OPTION_SCALAR})\\s*${OPTION_WRAPPER_CLOSE}$`,
@@ -1374,7 +1375,8 @@ function containsSingleChoiceReveal(syntax: string, optionText: string, choiceLe
   const option = `${OPTION_WRAPPER_OPEN}?\\s*${escaped}\\s*${OPTION_WRAPPER_CLOSE}?(?!${ALPHA_NUM_IDENT_CHAR})`;
   const patterns = [
     new RegExp(
-      `(?:correct(?:\\s+(?:option|choice|answer))?|choice|option|key|ans(?:wer)?|选|答案|正确选项)\\s*(?:is|[:：=]|为|是)?\\s*${option}`,
+      `(?:(?<!${NON_CJK_WORD_CHAR})(?:correct(?:\\s+(?:option|choice|answer))?|choice|option|key|ans(?:wer)?)(?!${NON_CJK_WORD_CHAR})` +
+      `|选|答案|正确选项)\\s*(?:is|[:：=]|为|是)?\\s*${option}`,
       "iu",
     ),
     new RegExp(`=\\s*${option}`, "iu"),
@@ -1419,7 +1421,7 @@ const COMPOUND_MATH_EXPR_RE = new RegExp(
 
 const STANDALONE_SIGNED_LITERAL_RE = new RegExp(
   `^(?:\\+-|-\\+|[+-])(?:` +
-    `\\d+(?:\\.\\d+)?(?:\\/\\d+)?` +
+    `${UNSIGNED_DECIMAL_LITERAL}(?:\\/\\d+)?` +
     `|(?:${GREEK_OR_CONST}|sqrt\\([^)]+\\)|[a-z]\\^\\d+)(?:\\/[a-z0-9]+)?` +
     `|\\d+(?:\\/\\d+)?\\s*(?:${GREEK_OR_CONST}|sqrt\\([^)]+\\))` +
     `|\\d+[a-z](?:\\^\\d+)?` +
@@ -1460,7 +1462,14 @@ function protectedPrimitiveText(value: unknown): string | null {
     : null;
 }
 
-function protectedArrayMemberText(value: unknown, remainingDecodes = MAX_PROTECTED_JSON_DECODES): string | null {
+function protectedArrayMemberText(
+  value: unknown,
+  remainingDecodes = MAX_PROTECTED_JSON_DECODES,
+  numberSpelling?: unknown,
+): string | null {
+  if (typeof value === "number" && typeof numberSpelling === "string") {
+    return canonicalJsonDecimal(numberSpelling);
+  }
   for (let depth = 0; depth < remainingDecodes && typeof value === "string"; depth += 1) {
     const trimmed = value.trim();
     if (!trimmed.startsWith('"')) break;
@@ -1471,10 +1480,10 @@ function protectedArrayMemberText(value: unknown, remainingDecodes = MAX_PROTECT
   return value === null ? "null" : protectedPrimitiveText(value);
 }
 
-function normalizeOptionLabels(values: readonly unknown[]): string[] | null {
+function normalizeOptionLabels(values: readonly unknown[], numberSpellings?: readonly unknown[]): string[] | null {
   const labels: string[] = [];
-  for (const value of values) {
-    const text = protectedArrayMemberText(value);
+  for (const [index, value] of values.entries()) {
+    const text = protectedArrayMemberText(value, MAX_PROTECTED_JSON_DECODES, numberSpellings?.[index]);
     if (text === null) return null;
     const label = normalizeOptionLabel(text);
     if (!label) return null;
@@ -1484,11 +1493,14 @@ function normalizeOptionLabels(values: readonly unknown[]): string[] | null {
 }
 
 function optionSequenceSource(labels: readonly string[], aliases?: readonly unknown[]): string {
+  const labelPattern = (label: string): string => DECIMAL_LITERAL_RE.test(label)
+    ? standaloneNumericOrSymbolicSource(label)
+    : escapeRegExp(label).replace(/ /g, "\\s+");
   const sequence = labels.map((label, index) => {
-    const pattern = escapeRegExp(label).replace(/ /g, "\\s+");
+    const pattern = labelPattern(label);
     const alias = aliases?.[index];
     return typeof alias === "string" && alias !== label
-      ? "(?:" + pattern + "|" + escapeRegExp(alias) + ")"
+      ? "(?:" + pattern + "|" + labelPattern(alias) + ")"
       : pattern;
   }).join(OPTION_SEQUENCE_SEPARATOR);
   return `(?<!${NON_CJK_WORD_CHAR})${sequence}(?!${NON_CJK_WORD_CHAR})`;
@@ -1497,6 +1509,23 @@ function optionSequenceSource(labels: readonly string[], aliases?: readonly unkn
 interface DecodedProtectedValue {
   readonly value: string | object;
   readonly numberSpellings?: unknown;
+}
+
+function canonicalJsonDecimal(spelling: string): string {
+  const parts = /^(-?)(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/.exec(spelling);
+  if (!parts) return spelling;
+  const [, sign = "", integer = "", fraction = "", exponent = "0"] = parts;
+  const digits = integer + fraction;
+  if (!/[1-9]/.test(digits)) return "0";
+
+  const magnitudeDigits = exponent.replace(/^[+-]?0*/, "") || "0";
+  if (magnitudeDigits.length > 2) return spelling;
+  const magnitude = Number(magnitudeDigits);
+  if (magnitude > 64) return spelling;
+  const point = integer.length + (exponent.startsWith("-") ? -magnitude : magnitude);
+  const whole = point <= 0 ? "0" : digits.slice(0, point).padEnd(point, "0").replace(/^0+(?=\d)/, "");
+  const decimal = (point < 0 ? "0".repeat(-point) + digits : digits.slice(point)).replace(/0+$/, "");
+  return sign + whole + (decimal ? "." + decimal : "");
 }
 
 function parseSerializedProtectedValue(rawSecret: string): DecodedProtectedValue | null {
@@ -1510,12 +1539,11 @@ function parseSerializedProtectedValue(rawSecret: string): DecodedProtectedValue
     if (typeof value === "string") return { value };
     if (typeof value !== "object" || value === null) return null;
 
-    // Parse a parallel tree with only noncanonical numeric literals quoted.
-    // JSON strings are consumed as whole tokens, and object keys stay aligned
-    // even when parsing reorders integer keys or replaces duplicate keys.
+    // Quote every numeric token in the parallel tree so its value never goes
+    // through IEEE-754. The other tree distinguishes JSON numbers from strings.
     const spellingJson = json.replace(
       /"(?:[^"\\]|\\[\s\S])*"|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/g,
-      token => token.startsWith('"') || String(Number(token)) === token ? token : JSON.stringify(token),
+      token => token.startsWith('"') ? token : JSON.stringify(token),
     );
     return spellingJson === json ? { value } : { value, numberSpellings: JSON.parse(spellingJson) };
   } catch {
@@ -1539,8 +1567,8 @@ function containsArrayAnswerLeak(
 
   // Normalize each decoded label before building the ordered sequence.
   if (values.length < 2) return false;
-  const labels = normalizeOptionLabels(values);
   const spellings = decoded?.numberSpellings;
+  const labels = normalizeOptionLabels(values, Array.isArray(spellings) ? spellings : undefined);
   const aliases = Array.isArray(spellings)
     ? values.map((value, index) => typeof value === "number" ? spellings[index] : undefined)
     : undefined;
@@ -1579,7 +1607,8 @@ export function containsAnswerLeak(
 
   const compactStem = collapseBinaryAddSubWhitespace(normalizedStem);
   const compactSecret = collapseBinaryAddSubWhitespace(normalizedSecret);
-  if (!STANDALONE_SIGNED_LITERAL_RE.test(normalizedSecret) && compactStem === compactSecret) {
+  if (!STANDALONE_SIGNED_LITERAL_RE.test(normalizedSecret) && !DECIMAL_LITERAL_RE.test(normalizedSecret) &&
+    compactStem === compactSecret) {
     return true;
   }
 
@@ -1593,9 +1622,19 @@ export function containsAnswerLeak(
     }
   }
   let signedStemWithLineBreaks: string | undefined;
+  const stemForToken = (signed: boolean): string => signed && LINE_BREAK_RE.test(stemSyntax)
+    ? (signedStemWithLineBreaks ??= canonicalizeMathNotationPreserveCase(stemSyntax, true))
+    : casedStem;
 
   for (const segment of extractLeakSegments(normalizedSecret)) {
     const isStandaloneSigned = STANDALONE_SIGNED_LITERAL_RE.test(segment);
+    // Every decimal spelling, including long literals and exponents containing
+    // a sign, must use token bounds instead of the generic substring paths.
+    if (DECIMAL_LITERAL_RE.test(segment)) {
+      if ((includeShortTokens || segment.length >= 6) &&
+        containsStandaloneNumericOrSymbolicToken(stemForToken(isStandaloneSigned), segment)) return true;
+      continue;
+    }
     const compactSegment = isStandaloneSigned
       ? segment
       : collapseBinaryAddSubWhitespace(segment);
@@ -1659,10 +1698,7 @@ export function containsAnswerLeak(
         ) {
           // Ordinary matching folds whitespace. Signed tokens need the original
           // sentence boundaries to decide whether a unit group is algebraic.
-          const stemForToken = isStandaloneSigned && LINE_BREAK_RE.test(stemSyntax)
-            ? (signedStemWithLineBreaks ??= canonicalizeMathNotationPreserveCase(stemSyntax, true))
-            : casedStem;
-          if (containsStandaloneNumericOrSymbolicToken(stemForToken, segment)) {
+          if (containsStandaloneNumericOrSymbolicToken(stemForToken(isStandaloneSigned), segment)) {
             return true;
           }
         } else if (segment.length >= 2 && segment.length < 6 && /[\p{L}\p{N}]/u.test(segment)) {
@@ -1823,12 +1859,15 @@ function collectSecretTexts(value: unknown): ProtectedAnswerTexts | null {
     if (current === undefined) return undefined;
     if (current === null) return "null";
     if (typeof current === "string" || typeof current === "number" || typeof current === "boolean") {
-      const text = String(current).trim();
+      const rawNumber = typeof current === "number" && typeof numberSpelling === "string" ? numberSpelling : undefined;
+      const text = rawNumber === undefined ? String(current).trim() : canonicalJsonDecimal(rawNumber);
       if (text && collectText) texts.add(text);
-      if (typeof current === "number" && typeof numberSpelling === "string") {
-        texts.add(numberSpelling);
-        if (!collectText) arrayOptionLabels.add(numberSpelling);
-        return numberSpelling;
+      if (rawNumber !== undefined) {
+        if (text !== rawNumber) {
+          texts.add(rawNumber);
+          if (!collectText) arrayOptionLabels.add(rawNumber);
+        }
+        return rawNumber;
       }
       if (typeof current === "string") {
         const decoded = parseSerializedProtectedValue(current);
@@ -1872,13 +1911,13 @@ function collectSecretTexts(value: unknown): ProtectedAnswerTexts | null {
       if (!property || !Object.hasOwn(property, "value")) {
         throw new TypeError("Protected payload properties must be inspectable data");
       }
-      const member = arrayMembers
-        ? protectedArrayMemberText(property.value, MAX_PROTECTED_JSON_DECODES - jsonDepth)
-        : null;
-      if (arrayMembers && member !== null) arrayMembers[Number(key)] = member;
       const childSpelling: unknown = typeof numberSpelling === "object" && numberSpelling !== null
         ? Object.getOwnPropertyDescriptor(numberSpelling, key)?.value
         : undefined;
+      const member = arrayMembers
+        ? protectedArrayMemberText(property.value, MAX_PROTECTED_JSON_DECODES - jsonDepth, childSpelling)
+        : null;
+      if (arrayMembers && member !== null) arrayMembers[Number(key)] = member;
       const json = inspect(property.value, depth + 1, jsonDepth, member === null, childSpelling);
       if (typeof key !== "string") continue;
       if (arrayLength !== null) {
