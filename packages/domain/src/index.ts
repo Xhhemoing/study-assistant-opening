@@ -49,10 +49,12 @@ export { applyPlanOption, needsOptionChoice } from "./planning/choice";
 export { availableTimeSlots } from "./opening/planning-time";
 export { assembleLearningAgenda, type LearningAgendaAssemblyInput } from "./opening/learning-agenda";
 export {
+  carryOverTaskIds,
   planDay,
   taskNotBeforeAt,
   type DayPlanResult,
   type PlanDayOptions,
+  type PreferredTaskOrder,
   type UnscheduledReasonCode,
   type UnscheduledTask,
 } from "./opening/day-planner";
@@ -308,6 +310,7 @@ export {
   type OpeningBackupComposeRecords,
   type OpeningBackupComposeStaging,
 } from "./opening/backup-compose";
+export { libraryBlockSourceReferences, notePublicationMetadata } from "./opening/backup-validation";
 export {
   validateOpeningRestore,
   normalizeOpeningRestoreHistory,

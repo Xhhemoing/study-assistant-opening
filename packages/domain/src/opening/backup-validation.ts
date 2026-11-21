@@ -95,6 +95,48 @@ function parseCitations(value: unknown): string[] | null {
   return refs;
 }
 
+/** Note provenance can carry publication metadata alongside its versioned source refs. */
+export function notePublicationMetadata(value: unknown) {
+  if (!isRecord(value) || Object.keys(value).length !== 1) return null;
+  if (Array.isArray(value.answerKeyBlockIds) && value.answerKeyBlockIds.every(isUuid)) {
+    return { answerKeyBlockIds: value.answerKeyBlockIds.map(id => id.toLowerCase()) };
+  }
+  if (Array.isArray(value.publicationCardIds) && value.publicationCardIds.every(isUuid)) {
+    return { publicationCardIds: value.publicationCardIds.map(id => id.toLowerCase()) };
+  }
+  return null;
+}
+
+const openingCitationRoles = new Set(["teach", "prompt", "example", "answer_key"]);
+const openingCitationStatuses = new Set(["bound", "missing", "mismatch"]);
+
+function isOpeningCitationBindingEnvelope(binding: Record<string, unknown>): boolean {
+  return isUuid(binding.blockId)
+    && typeof binding.role === "string" && openingCitationRoles.has(binding.role)
+    && typeof binding.status === "string" && openingCitationStatuses.has(binding.status)
+    && binding.factualSupport === "unverified";
+}
+
+/** Both the live projection and saved revision blocks persist compiler citation lineage here. */
+export function libraryBlockSourceReferences(block: Record<string, unknown>): string[] | null {
+  const binding = isRecord(block.content) ? block.content.citationBinding : undefined;
+  if (!isRecord(binding) || !isOpeningCitationBindingEnvelope(binding)) return [];
+  if (!Array.isArray(binding.refs)) return null;
+  return parseCitations(binding.refs)?.map(id => id.toLowerCase()) ?? null;
+}
+
+export function libraryRevisionSourceReferences(blocks: unknown): string[] | null {
+  if (!Array.isArray(blocks)) return null;
+  const refs: string[] = [];
+  for (const block of blocks) {
+    if (!isRecord(block)) return null;
+    const ids = libraryBlockSourceReferences(block);
+    if (!ids) return null;
+    for (const id of ids) refs.push(id);
+  }
+  return refs;
+}
+
 function collectSourceIds(value: unknown, refs: Set<string>): boolean {
   if (Array.isArray(value)) return value.every((item) => collectSourceIds(item, refs));
   if (!isRecord(value)) return true;
@@ -158,4 +200,9 @@ export function sourceReferences(row: Record<string, unknown>, allowSourceFreeQu
   if (!opaque) return null;
   refs.push(...opaque);
   return refs.map((id) => id.toLowerCase());
+}
+
+export function noteProvenanceSourceReferences(row: Record<string, unknown>): string[] | null {
+  if (!Array.isArray(row.context_source_refs)) return null;
+  return sourceReferences({ ...row, context_source_refs: row.context_source_refs.filter(ref => !notePublicationMetadata(ref)) });
 }

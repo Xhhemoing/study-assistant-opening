@@ -329,7 +329,7 @@ export function ResumeCardView({
       </details> : null}
 
       {statusError ? (
-        <p className={`mt-2 text-xs ${tone.danger}`} role="alert">
+        <p className="mt-2 text-xs text-danger" role="alert">
           {statusError}
         </p>
       ) : null}
@@ -710,7 +710,7 @@ export function ResumeCard({
         role="alert"
       >
         <h2 className="text-sm font-semibold text-text">学习位置暂时无法读取</h2>
-        <p className={`mt-2 text-xs leading-5 ${tone.danger}`}>
+        <p className="mt-2 text-xs leading-5 text-danger">
           {loadError ?? "未知错误"}
         </p>
         <p className="mt-2 text-xs text-text-3">

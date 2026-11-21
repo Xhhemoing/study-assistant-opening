@@ -394,7 +394,9 @@ function createHarness(state: MockDbState) {
   const tx = ((strings: TemplateStringsArray, ...values: unknown[]) => {
     const text = serialize(strings, values);
     // Support nested SQL fragments like `tx\`d.id\`` and `openingNoteReadable(...)`.
-    if (text === "d.id" || text.startsWith("NOT EXISTS (SELECT 1 FROM opening_note_provenance")) {
+    if (text === "d.id" || text === "np.context_source_refs"
+      || text.startsWith("CASE WHEN jsonb_typeof(np.context_source_refs)='array'")
+      || text.startsWith("NOT EXISTS (SELECT 1 FROM opening_note_provenance")) {
       return { __frag: text };
     }
     executedSql.push(text);

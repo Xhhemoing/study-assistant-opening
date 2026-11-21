@@ -18,6 +18,7 @@ it("defaults auto grading to 50 and rejects malformed or out-of-range caps", () 
 });
 
 it("SenseWeave beta allowlist and gating configuration fail closed", () => {
+  expect(resolveCapabilities(loadFeatureSwitches({}), "private-account").chatSenseWeave).toBe("off");
   expect(() => loadFeatureSwitches({ OPENING_CHAT_SENSEWEAVE_BETA_USERS: "*" })).toThrow(EnvValidationError);
   const caps = resolveCapabilities(loadFeatureSwitches({ OPENING_CHAT_SENSEWEAVE: "on", OPENING_CHAT_SENSEWEAVE_BETA_USERS: "private-account" }), "private-account");
   expect(caps.chatSenseWeave).toBe("on");

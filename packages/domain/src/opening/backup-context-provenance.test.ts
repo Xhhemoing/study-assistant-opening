@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { validateOpeningRestore, type OpeningBackup } from "./backup-policy";
-import { sourceReferences } from "./backup-validation";
+import { noteProvenanceSourceReferences, sourceReferences } from "./backup-validation";
 
 const workspaceId = "22222222-2222-4222-8222-222222222222";
 const ownerId = "33333333-3333-4333-8333-333333333333";
@@ -31,6 +31,15 @@ describe("context provenance at the backup boundary", () => {
     const before = structuredClone(input);
     expect(sourceReferences(input)).toEqual([sourceId, sourceId, otherSourceId]);
     expect(input).toEqual(before);
+  });
+
+  it("accepts publication metadata on notes while requiring citations in other contexts", () => {
+    const source = { sourceId, sourceVersion: 1, publication: true };
+    const note = { context_source_refs: [source, { answerKeyBlockIds: [turnId] }, { publicationCardIds: [candidateId] }] };
+    expect(noteProvenanceSourceReferences(note)).toEqual([sourceId]);
+    expect(sourceReferences(note)).toBeNull();
+    expect(noteProvenanceSourceReferences({ context_source_refs: [source, { answerKeyBlockIds: [null] }] })).toBeNull();
+    expect(noteProvenanceSourceReferences({ context_source_refs: [{ sourceId, answerKeyBlockIds: [turnId] }] })).toBeNull();
   });
 
   it.each([{}, "[]", [null], [{}], [{ sourceId, sourceVersion: "1" }],

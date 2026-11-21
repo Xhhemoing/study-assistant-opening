@@ -5,7 +5,7 @@ import type { Sql, TransactionSql } from "postgres";
 import { learningError, lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { readLearningGoal } from "./opening-learning-goals";
 import { resolveOpeningStudyContext } from "./opening-study-context";
-import { mergeContextSourceRefs, parseContextSourceRefs, type ContextSourceRef } from "./opening-context-provenance";
+import { mergeContextSourceRefs, parseContextSourceRefs, parseNoteContextSourceRefs, type ContextSourceRef } from "./opening-context-provenance";
 import { openingNoteReadable } from "./opening-note-provenance";
 import { learningAssetSourceAvailable, readLearningAssetLinkView, type LearningAssetDb } from "./opening-learning-asset-links-read";
 
@@ -65,7 +65,7 @@ export function createOpeningLearningAssetLinkRepository(sql: Sql) {
       await assertLearningAssetTarget(tx, scope, input);
       let assetRefs: ContextSourceRef[] = [], version = input.assetVersion;
       if (input.assetType === "source") { const source = await learningAssetSourceAvailable(tx, scope.workspaceId, input.assetId, version); if (!source.available || source.currentVersion == null) throw learningError("NOT_FOUND", "原资料或选定版本不可用。"); version ??= source.currentVersion; assetRefs = [{ sourceId: input.assetId, sourceVersion: version }]; }
-      else { const [document] = await tx`SELECT d.id,np.context_source_refs FROM library_documents d LEFT JOIN opening_note_provenance np ON np.document_id=d.id AND np.workspace_id=d.workspace_id WHERE d.id=${input.assetId} AND d.workspace_id=${scope.workspaceId} AND d.deleted_at IS NULL AND ${openingNoteReadable(tx, scope.workspaceId, tx`d.id`)} FOR SHARE OF d`; if (!document) throw learningError("NOT_FOUND", "原笔记不可用。"); if (document.context_source_refs != null) { const refs = parseContextSourceRefs(document.context_source_refs); if (!refs) throw learningError("CONFLICT", "原笔记出处不完整，保留笔记但不新增关联。"); assetRefs = refs; } }
+      else { const [document] = await tx`SELECT d.id,np.context_source_refs FROM library_documents d LEFT JOIN opening_note_provenance np ON np.document_id=d.id AND np.workspace_id=d.workspace_id WHERE d.id=${input.assetId} AND d.workspace_id=${scope.workspaceId} AND d.deleted_at IS NULL AND ${openingNoteReadable(tx, scope.workspaceId, tx`d.id`)} FOR SHARE OF d`; if (!document) throw learningError("NOT_FOUND", "原笔记不可用。"); if (document.context_source_refs != null) { const refs = parseNoteContextSourceRefs(document.context_source_refs); if (!refs) throw learningError("CONFLICT", "原笔记出处不完整，保留笔记但不新增关联。"); assetRefs = refs; } }
       const resolved = await resolveLearningAssetOrigin(tx, scope, input.origin);
       return readLearningAssetLinkView(tx, scope, await insertLearningAssetLink(tx, scope, input, { type: input.assetType, id: input.assetId, version }, resolved.origin, mergeContextSourceRefs(assetRefs, resolved.refs), intent));
     }),

@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { ArrowRight } from "lucide-react";
 import { ui } from "../ui/controls";
 import { TransitionLink } from "../motion/view-transition";
 import { TopBar } from "../shell/top-bar";
@@ -33,23 +34,23 @@ export function SessionSummary({ title, counts, learned, needsHelp, next, backHr
     <div data-scroll-root className="h-full overflow-y-auto [scrollbar-gutter:stable]">
       <TopBar title={title} collapsedTitle />
       <div className="content-grid pb-10 pt-2 motion-safe:stagger">
-        <header className="space-y-1">
-          <p className="text-meta text-text-2">本次小结</p>
-          <h1 className="text-display font-semibold">{title}</h1>
+        <header className="flex flex-wrap items-baseline justify-between gap-2">
+          <h1 className="text-display font-semibold text-text">{title}</h1>
+          <span className="text-meta text-text-2">本次小结</span>
         </header>
-        <dl className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+        <dl className="grid grid-cols-2 gap-2.5 sm:grid-cols-4">
           {STAT.map(stat => (
-            <div key={stat.key} className="rounded-tile border border-line bg-surface/80 px-4 py-3">
+            <div key={stat.key} className="rounded-tile border border-line bg-surface px-4 py-3 shadow-card">
               <dt className="text-meta text-text-2">{stat.label}</dt>
-              <dd className={`text-display font-semibold tabular-nums ${stat.tone}`}><span className="inline-block motion-safe:animate-badge-pop">{counts[stat.key]}</span></dd>
+              <dd className={`mt-1 text-display font-semibold tabular-nums ${stat.tone}`}><span className="inline-block motion-safe:animate-badge-pop">{counts[stat.key]}</span></dd>
             </div>
           ))}
         </dl>
         {learned.length > 0 && <section className="space-y-2"><h2 className="text-meta font-medium text-text-2">这次弄清楚的</h2><ul className="prose-reading list-disc space-y-1 pl-5 text-ui-lg">{learned.map(item => <li key={item}>{item}</li>)}</ul></section>}
         {needsHelp.length > 0 && <section className="space-y-2"><h2 className="text-meta font-medium text-text-2">还需要帮助</h2>
-          <ul className="divide-y divide-line rounded-tile border border-line bg-surface">{needsHelp.map(item => <li key={item.label}><TransitionLink href={item.href} className="flex min-h-(--control-h) items-center justify-between px-4 text-ui text-text hover:bg-surface-2">{item.label}<span aria-hidden="true">→</span></TransitionLink></li>)}</ul></section>}
+          <ul className="divide-y divide-line overflow-hidden rounded-tile border border-line bg-surface shadow-card">{needsHelp.map(item => <li key={item.label}><TransitionLink href={item.href} className="group flex min-h-(--control-h) items-center justify-between px-4 text-ui text-text transition-colors hover:bg-surface-2">{item.label}<ArrowRight size={15} aria-hidden="true" className="text-text-3 transition-transform duration-150 group-hover:translate-x-0.5 group-hover:text-text" /></TransitionLink></li>)}</ul></section>}
         <section className="flex flex-wrap items-center gap-2 rounded-panel glass p-4">
-          <div className="min-w-0 flex-1"><p className="text-meta text-text-2">下一步</p><p className="text-ui text-text">{next.label}{next.when ? <span className="ml-2 text-meta text-text-2">{next.when}</span> : null}</p></div>
+          <div className="min-w-0 flex-1"><p className="text-meta text-text-2">下一步</p><p className="text-ui text-text">{next.label}{next.when ? <span className="ml-2 text-meta tabular-nums text-text-2">{next.when}</span> : null}</p></div>
           <TransitionLink href={backHref} direction="back" className={ui.quiet}>回到课程</TransitionLink>
           <TransitionLink href={next.href} direction="forward" className={ui.primary}>开始</TransitionLink>
         </section>

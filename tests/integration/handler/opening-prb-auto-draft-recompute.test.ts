@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { applyMigrations, createSqlClient } from "@aistudy/database";
 import type { OpeningPlanningSettings } from "@aistudy/contracts";
-import { GET as getToday } from "../../../apps/web/src/app/api/opening/today/route";
+import { POST as prepareToday } from "../../../apps/web/src/app/api/opening/today/route";
 import { POST as createTask } from "../../../apps/web/src/app/api/opening/tasks/route";
 import { POST as acceptPlan } from "../../../apps/web/src/app/api/opening/plans/[id]/accept/route";
 import { POST as rejectPlan } from "../../../apps/web/src/app/api/opening/plans/[id]/reject/route";
@@ -124,8 +124,8 @@ describe("PR-B: unconfirmed auto draft recompute", () => {
         '[]'::jsonb, '[]'::jsonb, ${sql.json({ tasks: [], free: [], autoDraft: true } as never)}, 'stale', ${autoKey})`;
 
     const [a, b] = await Promise.all([
-      getToday(req(`/api/opening/today?date=${day}`)),
-      getToday(req(`/api/opening/today?date=${day}`)),
+      prepareToday(req(`/api/opening/today?date=${day}`, "POST")),
+      prepareToday(req(`/api/opening/today?date=${day}`, "POST")),
     ]);
     expect(a.status).toBe(200);
     expect(b.status).toBe(200);
@@ -143,7 +143,7 @@ describe("PR-B: unconfirmed auto draft recompute", () => {
     expect(rows).toHaveLength(2);
 
     // Unchanged inputs: stable id, no new rows.
-    const again = await (await getToday(req(`/api/opening/today?date=${day}`))).json();
+    const again = await (await prepareToday(req(`/api/opening/today?date=${day}`, "POST"))).json();
     expect(again.dailyDraft.id).toBe(live[0]!.id);
     expect(await draftRows()).toHaveLength(2);
   });
@@ -151,9 +151,9 @@ describe("PR-B: unconfirmed auto draft recompute", () => {
   it("changed inputs recompute; concurrent opens still produce one live draft", async () => {
     await putPlanningSettings(req("/api/opening/planning-settings", "PUT", settings));
     await seedTask("first");
-    const first = await (await getToday(req(`/api/opening/today?date=${day}`))).json();
+    const first = await (await prepareToday(req(`/api/opening/today?date=${day}`, "POST"))).json();
     await seedTask("second");
-    const results = await Promise.all(Array.from({ length: 4 }, () => getToday(req(`/api/opening/today?date=${day}`))));
+    const results = await Promise.all(Array.from({ length: 4 }, () => prepareToday(req(`/api/opening/today?date=${day}`, "POST"))));
     const bodies = await Promise.all(results.map((r) => r.json()));
     const ids = new Set(bodies.map((x) => x.dailyDraft.id));
     expect(ids.size).toBe(1);
@@ -167,7 +167,7 @@ describe("PR-B: unconfirmed auto draft recompute", () => {
   it("accepted plan is never recomputed by later opens", async () => {
     await putPlanningSettings(req("/api/opening/planning-settings", "PUT", settings));
     await seedTask("accepted-one");
-    const body = await (await getToday(req(`/api/opening/today?date=${day}`))).json();
+    const body = await (await prepareToday(req(`/api/opening/today?date=${day}`, "POST"))).json();
     const draft = body.dailyDraft;
     const accepted = await acceptPlan(
       req(`/api/opening/plans/${draft.id}/accept`, "POST", { expectedBaseVersion: draft.baseVersion, clientKey: `accept-${draft.id}` }),
@@ -176,7 +176,7 @@ describe("PR-B: unconfirmed auto draft recompute", () => {
     expect(accepted.status).toBe(200);
     const before = await sql`SELECT accepted_version, accepted_blocks FROM opening_plan_state WHERE day = ${day}::date`;
     await seedTask("added-after-accept");
-    const [x, y] = await Promise.all([getToday(req(`/api/opening/today?date=${day}`)), getToday(req(`/api/opening/today?date=${day}`))]);
+    const [x, y] = await Promise.all([prepareToday(req(`/api/opening/today?date=${day}`, "POST")), prepareToday(req(`/api/opening/today?date=${day}`, "POST"))]);
     for (const r of [await x.json(), await y.json()]) {
       expect(r.dailyDraft).toBeNull();
       expect(r.dailyDraftSkippedReason).toBe("accepted");
@@ -191,11 +191,11 @@ describe("PR-B: unconfirmed auto draft recompute", () => {
   it("a user-rejected auto draft stays rejected (not recomputed)", async () => {
     await putPlanningSettings(req("/api/opening/planning-settings", "PUT", settings));
     await seedTask("to-reject");
-    const body = await (await getToday(req(`/api/opening/today?date=${day}`))).json();
+    const body = await (await prepareToday(req(`/api/opening/today?date=${day}`, "POST"))).json();
     const rejected = await rejectPlan(req(`/api/opening/plans/${body.dailyDraft.id}/reject`, "POST", {}), { params: Promise.resolve({ id: body.dailyDraft.id }) });
     expect(rejected.status).toBeLessThan(300);
     await seedTask("after-reject");
-    const next = await (await getToday(req(`/api/opening/today?date=${day}`))).json();
+    const next = await (await prepareToday(req(`/api/opening/today?date=${day}`, "POST"))).json();
     expect(next.dailyDraft).toBeNull();
     expect(next.dailyDraftSkippedReason).toBe("rejected");
   });

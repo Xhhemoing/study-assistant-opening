@@ -102,6 +102,7 @@ export async function runBudgetedEmbedding(options: {
     maxOutputTokens: 1, mediaCapability: "text_only", imageParts: [] };
   await runBudgetedCall({
     budget: options.budget, input, requestId: options.operationId, operationId: options.operationId, parentBudget: options.parentBudget,
+    requestFamily: null,
     purpose: "material-embedding", resultRef: options.resultRef, signal: options.signal, beforeSend: options.beforeSend,
     modelSnapshot: { id: "embedding", providerId: "embedding", modelName: options.config.modelName,
       inputCentsPerMillion: price, outputCentsPerMillion: 0 },

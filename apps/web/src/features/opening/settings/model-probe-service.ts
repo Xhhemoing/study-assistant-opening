@@ -29,6 +29,7 @@ export async function probeModel(sql: Sql, scope: Scope, ids: { id: string; mode
   try {
     const output = await probeDbModel(sql, scope, ids.id, ids.modelId, {
       budget: scopeBudget(budget, scope), operationId: `probe:${scope.workspaceId}:${ids.modelId}:${clientKey}`, resultRef: "settings:probe",
+      requestFamily: null,
       input: { instruction: 'Return exactly {"ok":true}.', text: "Connectivity test", mode: "listen", chunks: [], imageParts: [], mediaCapability: "text_only", outputFormat: "json", maxOutputTokens: 16 },
     });
     const parsed: unknown = JSON.parse(output.text);

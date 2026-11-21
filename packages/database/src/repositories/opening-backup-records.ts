@@ -1,23 +1,13 @@
+import { OPENING_RESTORE_APPLY_ORDER } from "@aistudy/domain";
+import { isForbiddenBackupTable } from "../../../contracts/src/opening/backup-inventory";
 import type { Sql } from "postgres";
 import type { OpeningScope } from "./opening-sources";
 import { OpeningBackupSourceError } from "./opening-backup-sources";
 import { readOpeningBackupTableRows } from "./opening-backup-record-table-queries";
 import { readOpeningMemoryDeletions, type OpeningMemoryDeletions } from "./opening-backup-memory-deletions";
 
-export const OPENING_BACKUP_TABLES = [
-  "workspace_preferences", "courses", "course_asset_memberships",
-  "course_goals", "course_goal_links", "goal_time_windows", "course_requirements",
-  "course_requirement_evidence_links", "opening_learning_asset_links",
-  "cards", "card_review_states", "learning_events",
-  "opening_sources", "opening_source_chunks", "opening_conversations", "opening_turns",
-  "opening_teaching_activities", "opening_teaching_units", "opening_teaching_activity_specs", "opening_learning_sessions", "opening_problem_refs", "opening_help_exposures",
-  "opening_learning_observations", "opening_skill_evidence", "opening_assistant_candidates", "opening_memories",
-  "opening_privacy_exclusions", "opening_tasks", "opening_plan_feedback", "opening_retest_activities", "opening_timetable_sessions", "opening_hard_blocks",
-  "opening_plan_state", "opening_plan_drafts", "opening_plan_acceptances", "opening_suggestion_feedback",
-  "opening_source_versions", "opening_learning_item_versions", "opening_learning_attempts",
-  "opening_learning_history_revisions", "opening_learning_activity_history_revisions", "opening_workspace_history_revisions",
-  "opening_learning_decisions", "opening_learning_shadow_predictions", "opening_study_intent_events",
-] as const;
+// The restore dependency order also names the complete export inventory.
+export const OPENING_BACKUP_TABLES = OPENING_RESTORE_APPLY_ORDER;
 export type OpeningBackupTable = (typeof OPENING_BACKUP_TABLES)[number];
 export type OpeningBackupRecordSnapshot = {
   privacyEpoch: number;
@@ -31,6 +21,8 @@ export async function readOpeningBackupRecords(
   sql: Sql,
   scope: OpeningScope,
 ): Promise<OpeningBackupRecordSnapshot> {
+  const forbidden = OPENING_BACKUP_TABLES.find(isForbiddenBackupTable);
+  if (forbidden) throw new Error(`Forbidden backup table: ${forbidden}`);
   const id = scope.workspaceId;
   const userId = scope.ownerUserId;
   return sql.begin("isolation level repeatable read, read only", async (tx) => {
@@ -39,6 +31,8 @@ export async function readOpeningBackupRecords(
     const privacyEpoch = Number((owner[0] as { privacy_epoch: number }).privacy_epoch);
     const memoryDeletions = await readOpeningMemoryDeletions(tx, id);
     const tables = await readOpeningBackupTableRows(tx, id, userId);
+    const unexpected = Object.keys(tables).find(isForbiddenBackupTable);
+    if (unexpected) throw new Error(`Forbidden backup table: ${unexpected}`);
     const deletionJournal = tables.opening_privacy_exclusions
       .filter((row) => typeof row.source_id === "string"
         && (typeof row.deleted_at === "string" || row.deleted_at instanceof Date))

@@ -118,14 +118,14 @@ it("under an explicit test exposure port, reserves and issues a real item/attemp
   expect(await readOpeningReservedSupply(f.sql,x.scope,x.requirement,{kind:'new_question'},isolatedExposure)).toMatchObject({status:'ready',available:1});
   const before=await readOpeningBackupRecords(f.sql,x.scope);
   expect(JSON.stringify(before)).not.toContain(x.candidate.text);
-  expect(JSON.stringify(before)).not.toContain(x.candidate.answer);
+  expect(JSON.stringify(before)).not.toContain(JSON.stringify(x.candidate.answer));
   await f.sql.begin(async tx=>{await lockWorkspaceLearningHistory(tx,x.scope);await reserveOpeningCourseQuestion(tx,x.scope,x.requirement,x.activity.id,{kind:'new_family',excludedFamilyIds:[]},isolatedExposure);});
   const content=createOpeningTeachingContentRepository(f.sql,isolatedExposure);
   const [one,two]=await Promise.all([content.getClientInit(x.scope,x.activity.id),content.getClientInit(x.scope,x.activity.id)]);
   expect(one?.blocks).toEqual(two?.blocks);
   expect(one?.blocks).toHaveLength(1);
   expect(one?.blocks[0]?.content).toMatchObject({text:x.candidate.text});
-  expect(JSON.stringify(one)).not.toContain(x.candidate.answer);
+  expect(JSON.stringify(one)).not.toContain(JSON.stringify(x.candidate.answer));
   const [stored]=await f.sql`SELECT * FROM opening_course_reserved_questions WHERE workspace_id=${x.scope.workspaceId}`;
   expect(stored).toMatchObject({state:'issued',reserved_activity_id:x.activity.id});
   expect(await f.sql`SELECT id FROM opening_learning_attempts WHERE workspace_id=${x.scope.workspaceId}`).toHaveLength(1);
@@ -133,7 +133,20 @@ it("under an explicit test exposure port, reserves and issues a real item/attemp
   const again=await createOpeningLearningAttemptRepository(f.sql).create(x.scope,{sessionId:session.id,clientKey:randomUUID(),teachingBlock:{blockId:one!.blocks[0]!.blockId,contentVersion:1}});
   expect(again.itemVersionId).toBe(stored!.issued_item_version_id);
   expect(await readOpeningReservedSupply(f.sql,x.scope,x.requirement,{kind:'new_question'},isolatedExposure)).toMatchObject({status:'missing',available:0});
-  expect(JSON.stringify(await readOpeningBackupRecords(f.sql,x.scope))).not.toContain(x.candidate.answer);
+  // A random archive UUID can end in the same digits as the answer.
+  const backup = await readOpeningBackupRecords(f.sql, x.scope);
+  expect(JSON.stringify(backup)).not.toContain(JSON.stringify(x.candidate.answer));
+  expect(backup.tables.library_blocks).toContainEqual(expect.objectContaining({
+    type: "prompt", content: expect.objectContaining({ text: x.candidate.text }),
+  }));
+  // Exercise the export boundary with legacy answer-bearing scoring metadata.
+  await f.sql`UPDATE opening_learning_item_versions SET evaluation_spec=evaluation_spec ||
+    ${f.sql.json({ answer_key: x.candidate.answer })}::jsonb WHERE id=${String(again.itemVersionId)}`;
+  const legacy = await readOpeningBackupRecords(f.sql, x.scope);
+  expect(legacy.tables.opening_learning_item_versions).toContainEqual(expect.objectContaining({
+    id: again.itemVersionId, evaluation_spec: null,
+  }));
+  expect(JSON.stringify(legacy)).not.toContain(JSON.stringify(x.candidate.answer));
 });
 it("honors authoritative exposure without conflating same family and same question",async()=>{
   const x=await supplyFixture();

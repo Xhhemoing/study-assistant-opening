@@ -14,9 +14,16 @@ const data = vi.hoisted(() => ({
     sourceIds: [], clientKey: "test:course-study", createdAt: "2026-10-23T00:00:00.000Z", updatedAt: "2026-10-23T00:00:00.000Z" } satisfies TeachingActivity,
   teachingMount: vi.fn(), practiceMount: vi.fn(), practiceProps: vi.fn(), materialsProps: vi.fn(), router: { replace: vi.fn() },
   useRealContinueEntry: false,
+  useRealCourseBundle: false,
+  submitAnswer: vi.fn(),
 }));
 vi.mock("next/navigation", () => ({ useRouter: () => data.router, usePathname: () => `/opening/courses/${data.course.id}/study` }));
-vi.mock("./course-detail", () => ({ useCourseBundle: () => ({ course: data.course, loading: false, error: null, reload: vi.fn() }) }));
+vi.mock("./course-detail", async importOriginal => {
+  const actual = await importOriginal<typeof import("./course-detail")>();
+  return { useCourseBundle: (...args: Parameters<typeof actual.useCourseBundle>) => data.useRealCourseBundle
+    ? actual.useCourseBundle(...args)
+    : { course: data.course, loading: false, error: null, reload: vi.fn() } };
+});
 vi.mock("./course-study-entry", () => ({ openCourseStudy: vi.fn(async () => ({ kind: "activity", activity: data.activity })) }));
 vi.mock("./course-study-context-tools", () => ({ CourseStudyContextTools: () => null }));
 vi.mock("./course-study-materials", () => ({ CourseStudyMaterials: ({ children, gate, materialsHref }: { children: React.ReactNode; gate: string; materialsHref: string }) => { data.materialsProps({ gate, materialsHref }); return children; } }));
@@ -25,7 +32,7 @@ vi.mock("../teaching/teaching-workspace", async () => {
   const actual = await vi.importActual<typeof import("../teaching/teaching-workspace")>("../teaching/teaching-workspace");
   function MockTeachingContinueEntry({ onWorkspaceVisibilityChange, previousToolsAction }: { onWorkspaceVisibilityChange?: (visible: boolean) => void; previousToolsAction?: React.ReactNode }) {
     useEffect(() => { data.teachingMount(); }, []);
-    return <><textarea aria-label="讲解原答" defaultValue="讲解中的步骤" /><button onClick={() => onWorkspaceVisibilityChange?.(true)}>讲义已就绪</button>{previousToolsAction}</>;
+    return <><form onSubmit={event => { event.preventDefault(); data.submitAnswer(new FormData(event.currentTarget).get("answer")); }}><textarea aria-label="讲解原答" name="answer" defaultValue="讲解中的步骤" /><button type="submit">提交作答</button></form><button onClick={() => onWorkspaceVisibilityChange?.(true)}>讲义已就绪</button>{previousToolsAction}</>;
   }
   return {
     ...actual,
@@ -49,6 +56,7 @@ let root: Root;
 beforeEach(() => {
   data.course.archivedAt = null;
   data.useRealContinueEntry = false;
+  data.useRealCourseBundle = false;
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
   vi.clearAllMocks();
   window.localStorage.clear();
@@ -65,6 +73,40 @@ async function click(label: string) {
   const button = [...host.querySelectorAll<HTMLButtonElement>("button")].find(item => item.textContent === label)!;
   await act(async () => button.click());
 }
+
+it("resumes and allows answers while the independently retried materials list is failing", async () => {
+  data.useRealCourseBundle = true;
+  const originalUrl = window.location.href;
+  vi.mocked(window.matchMedia).mockImplementation(media => ({
+    media, matches: media === "(min-width: 1024px)", onchange: null,
+    addEventListener: vi.fn(), removeEventListener: vi.fn(),
+    addListener: vi.fn(), removeListener: vi.fn(), dispatchEvent: vi.fn(),
+  }));
+  const fetcher = vi.fn(async (input: string) => {
+    if (input === `/api/courses/${data.course.id}`) return Response.json({ course: data.course });
+    if (input === `/api/courses/${data.course.id}/assets`) return new Response(null, { status: 503 });
+    return Response.json({ courses: [], memberships: [] });
+  });
+  vi.stubGlobal("fetch", fetcher);
+  const getTeachingResume = vi.fn(async () => fullResume({ generateStatus: "ready" }));
+  const listSources = vi.fn().mockRejectedValueOnce(new Error("list temporarily unavailable")).mockResolvedValueOnce([]);
+  const api = { getTeachingResume, listSources } as unknown as OpeningApi;
+  await act(async () => root.render(<CourseStudyWorkspace courseId={data.course.id} activityId={data.activity.id} teachingEnabled teachingCompileEnabled sourceIds={[]} timeZone="Asia/Shanghai" api={api} />));
+  expect(getTeachingResume).toHaveBeenCalledExactlyOnceWith(data.activity.id);
+  await click("工具");
+  await click("资料");
+  expect(host.textContent).toContain("材料暂时无法读取");
+  expect(host.querySelector('[aria-label="讲解原答"]')?.closest("[hidden],[inert]")).toBeNull();
+  await click("提交作答");
+  expect(data.submitAnswer).toHaveBeenCalledExactlyOnceWith("讲解中的步骤");
+  await click("刷新状态");
+  expect(listSources).toHaveBeenCalledTimes(2);
+  expect(host.textContent).not.toContain("材料暂时无法读取");
+  expect(getTeachingResume).toHaveBeenCalledTimes(1);
+  await click("对话");
+  await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="关闭学习工具"]')!.click());
+  window.history.replaceState(null, "", originalUrl);
+});
 
 it.each([undefined, "55555555-5555-4555-8555-555555555555"])("mounts static lesson navigation with persisted retest %s without ordinary resume/create", async retestId => {
   const real = await vi.importActual<typeof import("./course-study-entry")>("./course-study-entry");
@@ -161,6 +203,46 @@ it("passes the original conversation into the route next control", async () => {
   const api = { getTeachingResume: vi.fn(async () => ({ activityId: data.activity.id, status: "active", generateStatus: "ready", contentVersion: 1, pathVersion: 1, clientInit: null, gates: { materials: "available" } })) } as unknown as OpeningApi;
   await act(async () => root.render(<CourseStudyWorkspace courseId={data.course.id} activityId={data.activity.id} originalConversationId={conversation} teachingEnabled teachingCompileEnabled sourceIds={[]} timeZone="Asia/Shanghai" api={api} />));
   expect(host.querySelector("[data-route-conversation]")?.getAttribute("data-route-conversation")).toBe(conversation);
+});
+
+it.each([false, true])("renders one course-route control for a completed activity (task lookup fails: %s)", async taskLookupFails => {
+  const conversation = "66666666-6666-4666-8666-666666666666";
+  const activity = { ...data.activity, status: "completed" as const, routeManaged: true };
+  vi.mocked(openCourseStudy).mockResolvedValueOnce({ kind: "activity", activity });
+  const taskId = "33333333-3333-4333-8333-333333333333";
+  const linkedTask = { id: taskId, title: "关联练习", status: "pending", version: 1 };
+  const listTasks = vi.fn().mockResolvedValue({ tasks: [linkedTask] });
+  if (taskLookupFails) listTasks.mockRejectedValueOnce(new Error("任务暂时无法读取"));
+  const api = { getTeachingResume: vi.fn(async () => fullResume({
+    status: "completed", gates: { permission: "owned", materials: "unavailable", unavailableSourceIds: [], job: "ready" },
+  })), listTasks } as unknown as OpeningApi;
+  vi.stubGlobal("fetch", vi.fn(async () => Response.json({
+    coveredBlockIds: [], skippedBlockIds: [], attempts: { total: 0, correct: 0, incorrect: 0, unverified: 0 },
+    openQuestions: [], taskId,
+  })));
+  await act(async () => root.render(<CourseStudyWorkspace courseId={data.course.id} activityId={activity.id}
+    originalConversationId={conversation} teachingEnabled teachingCompileEnabled sourceIds={[]} timeZone="Asia/Shanghai" api={api} />));
+  expect(listTasks).toHaveBeenCalledOnce();
+  const controls = host.querySelectorAll("[data-route-conversation]");
+  expect(controls).toHaveLength(1);
+  expect(controls[0]?.getAttribute("data-route-conversation")).toBe(conversation);
+  expect(controls[0]?.closest('[aria-label="本次学习小结"]')).not.toBeNull();
+});
+
+it("keeps the completed activity summary and route action available while resume can be retried", async () => {
+  const activity = { ...data.activity, status: "completed" as const, routeManaged: true };
+  vi.mocked(openCourseStudy).mockResolvedValueOnce({ kind: "activity", activity });
+  const api = { getTeachingResume: vi.fn().mockRejectedValue(new Error("学习位置暂时无法读取，请重试。")) } as unknown as OpeningApi;
+  vi.stubGlobal("fetch", vi.fn(async () => Response.json({
+    coveredBlockIds: [], skippedBlockIds: [], attempts: { total: 0, correct: 0, incorrect: 0, unverified: 0 },
+    openQuestions: [], taskId: null,
+  })));
+  await act(async () => root.render(<CourseStudyWorkspace courseId={data.course.id} activityId={activity.id}
+    teachingEnabled teachingCompileEnabled sourceIds={[]} timeZone="Asia/Shanghai" api={api} />));
+  expect(host.textContent).toContain("学习位置暂时无法读取");
+  expect([...host.querySelectorAll("button")].some(button => button.textContent === "重新读取")).toBe(true);
+  const summary = host.querySelector('[aria-label="本次学习小结"]');
+  expect(summary?.querySelector("[data-route-conversation]")).toBeTruthy();
 });
 
 it("carries the original conversation from a read-only retest to its learning records", async () => {
