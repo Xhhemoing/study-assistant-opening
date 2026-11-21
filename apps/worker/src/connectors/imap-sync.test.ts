@@ -149,6 +149,76 @@ describe("imap sync cursor and parser guards", () => {
     );
   });
 
+  it("rejects a truncated parseable body shorter than reported size without saving .eml or advancing the UID cursor", async () => {
+    const truncatedHeaderAndBody = "Subject: Partial Delivery\r\nContent-Type: text/plain\r\n\r\n";
+    const truncatedSource = Buffer.from(
+      truncatedHeaderAndBody + "x".repeat(180 - Buffer.byteLength(truncatedHeaderAndBody)),
+      "utf8",
+    );
+    expect(truncatedSource.byteLength).toBe(180);
+
+    const completeSource = Buffer.from("Subject: UID 30\r\n\r\ncomplete message", "utf8");
+    const published: number[] = [];
+    vi.mocked(publishConnectorSource).mockReset();
+    vi.mocked(publishConnectorSource).mockImplementation(async (_imports, storage, _scope, input) => {
+      await storage.upload({ key: `opening/sources/${input.identity.remoteId}/v0`, bytes: input.bytes, mime: input.mime });
+      published.push(Number(input.identity.remoteId));
+      return { id: `receipt-${input.identity.remoteId}`, sourceIds: [`source-${input.identity.remoteId}`], duplicate: false, connectionVersion: 1 };
+    });
+
+    const upload = vi.fn(async () => undefined);
+    const advanceImapCursor = vi.fn();
+    const deps = {
+      scope: { workspaceId: "workspace", ownerUserId: "owner" },
+      connectionId: "connection",
+      connectionVersion: 1,
+      folder: "INBOX",
+      cursor: { folder: "INBOX", uidValidity: "42", lastUid: 29 },
+      since: new Date(0),
+      client: {
+        mailboxOpen: vi.fn(async () => ({ uidValidity: 42n })),
+        async *fetch() {
+          yield { uid: 30, size: completeSource.byteLength };
+          yield { uid: 31, size: 4096 };
+        },
+        fetchOne: vi.fn(async (uid: string) => (uid === "30"
+          ? { uid: 30, seq: 1, size: completeSource.byteLength, source: completeSource }
+          : { uid: 31, seq: 2, size: 4096, source: truncatedSource })),
+        logout: vi.fn(),
+      },
+      imports: { advanceImapCursor },
+      storage: { upload, remove: vi.fn() },
+    } as unknown as ImapSyncDeps;
+
+    await expect(syncMailbox(deps)).rejects.toThrow("IMAP message body was truncated before reaching reported size");
+    expect(published).toEqual([30]);
+    expect(publishConnectorSource).toHaveBeenCalledTimes(1);
+    expect(upload).toHaveBeenCalledTimes(1);
+    expect(upload).not.toHaveBeenCalledWith(expect.objectContaining({ bytes: truncatedSource }));
+    expect(advanceImapCursor).not.toHaveBeenCalled();
+
+    // Also fail closed when discovery metadata reported 4096 bytes even if fetchOne omits size, starting from an empty mailbox cursor.
+    vi.mocked(publishConnectorSource).mockClear();
+    upload.mockClear();
+    const singleUidDeps = {
+      ...deps,
+      cursor: null,
+      client: {
+        mailboxOpen: vi.fn(async () => ({ uidValidity: 42n })),
+        async *fetch() {
+          yield { uid: 31, size: 4096 };
+        },
+        fetchOne: vi.fn(async () => ({ uid: 31, seq: 1, source: truncatedSource })),
+        logout: vi.fn(),
+      },
+    } as unknown as ImapSyncDeps;
+
+    await expect(syncMailbox(singleUidDeps)).rejects.toThrow("IMAP message body was truncated before reaching reported size");
+    expect(publishConnectorSource).not.toHaveBeenCalled();
+    expect(upload).not.toHaveBeenCalled();
+    expect(advanceImapCursor).not.toHaveBeenCalled();
+  });
+
   it("stops discovery cleanly when elapsed sync time budget or signal expires", async () => {
     let returned = false;
     let tick = 1000;

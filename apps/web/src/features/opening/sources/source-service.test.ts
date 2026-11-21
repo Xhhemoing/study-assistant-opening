@@ -1631,4 +1631,73 @@ describe("opening signed upload service", () => {
     expect(await svc.listSourceDeletions(principal)).toEqual([]);
   });
 
+  it("preserves existing stagingDiscoveryPendingKey sentinel when storage omits listMatchingStagingKeys", async () => {
+    const baseSql = makeFakeSql();
+    const s3 = makeFakeStorage();
+    // Explicitly omit optional listMatchingStagingKeys from the storage adapter.
+    const storageWithoutDiscovery: OpeningStorage = {
+      ...s3.storage,
+      stagingKey: (id) => `opening/staging/${id}`,
+      finalKey: (id, version) => `opening/sources/${id}/v${version}`,
+    };
+    const sourceId = "00000000-0000-4000-8000-0000000000f3";
+    const mixedKey = `opening/staging/${sourceId.replace(/[a-f]/, (ch) => ch.toUpperCase())}`;
+    const sentinelKey = stagingDiscoveryPendingKey(sourceId);
+    s3.objects.set(mixedKey, { bytes: pdfBytes, etag: "etag-mixed" });
+
+    let pendingKeys: string[] = [sentinelKey];
+    const deletedKeys: string[] = [];
+    const realDelete = storageWithoutDiscovery.deleteObject;
+    storageWithoutDiscovery.deleteObject = async (key: string) => {
+      deletedKeys.push(key);
+      return realDelete(key);
+    };
+    const wrappedSql = Object.assign(((parts: TemplateStringsArray, ...values: unknown[]) => {
+      const query = parts.join("?").replace(/\s+/g, " ").trim();
+      if (query === "" || query === "FOR UPDATE") return query;
+      if (query.startsWith("SELECT id, source_id, pending_object_keys, cleanup_not_before FROM opening_privacy_exclusions")) {
+        return [{
+          id: "00000000-0000-4000-8000-000000000099",
+          source_id: sourceId,
+          pending_object_keys: [...pendingKeys],
+          cleanup_not_before: null,
+        }];
+      }
+      if (query.startsWith("SELECT source_id, cardinality(pending_object_keys) AS pending, cleanup_not_before FROM opening_privacy_exclusions")) {
+        return pendingKeys.length
+          ? [{ source_id: sourceId, pending: pendingKeys.length, cleanup_not_before: null }]
+          : [];
+      }
+      if (query.startsWith("UPDATE opening_privacy_exclusions SET pending_object_keys=?")) {
+        pendingKeys = [...(values[0] as string[])];
+        return [];
+      }
+      if (query.startsWith("SELECT id, cleanup_not_before FROM opening_privacy_exclusions")) return [];
+      if (query.startsWith("UPDATE opening_privacy_exclusions SET pending_object_keys=array_remove")) {
+        pendingKeys = pendingKeys.filter(k => k !== values[0]);
+        return [];
+      }
+      return (baseSql as unknown as (p: TemplateStringsArray, ...v: unknown[]) => unknown)(parts, ...values);
+    }) as unknown as typeof baseSql, {
+      json: baseSql.json,
+      begin: (cb: (tx: Sql) => Promise<unknown>) => cb(wrappedSql as unknown as Sql),
+    });
+
+    const svcWithoutDiscovery = createOpeningSourceService(wrappedSql as unknown as Sql, storageWithoutDiscovery);
+    const retried = await svcWithoutDiscovery.actOnSource(principal, sourceId, { action: "retry_cleanup" });
+    expect(retried).toEqual({
+      sourceId,
+      aiExcluded: true,
+      deleted: true,
+      cleanupPending: 1,
+      retryAfter: null,
+    });
+    expect(pendingKeys).toEqual([sentinelKey]);
+    expect(deletedKeys).not.toContain(sentinelKey);
+    expect(s3.objects.has(mixedKey)).toBe(true);
+    expect(await svcWithoutDiscovery.listSourceDeletions(principal)).toEqual([
+      { sourceId, cleanupPending: 1, retryAfter: null },
+    ]);
+  });
+
 });

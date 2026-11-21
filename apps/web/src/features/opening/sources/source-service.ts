@@ -267,9 +267,10 @@ export function createOpeningSourceService(sql: Sql, storage: OpeningStorage = n
       let stagingDiscoveryFailed = false;
       let discoveredStagingKeys: string[] = [];
       const discoveryPendingKey = stagingDiscoveryPendingKey(sourceId);
-      if (input.action !== "exclude" && typeof storage.listMatchingStagingKeys === "function") {
+      const listMatchingStagingKeys = storage.listMatchingStagingKeys;
+      if (input.action !== "exclude" && typeof listMatchingStagingKeys === "function") {
         try {
-          discoveredStagingKeys = await storage.listMatchingStagingKeys(sourceId);
+          discoveredStagingKeys = await listMatchingStagingKeys.call(storage, sourceId);
         } catch {
           stagingDiscoveryFailed = true;
         }
@@ -334,7 +335,12 @@ export function createOpeningSourceService(sql: Sql, storage: OpeningStorage = n
           if (keepStagingDeferred) continue;
           if (await actions.cleaned(scope, sourceId, key, currentTime)) released = true;
         }
-        if (cleanupKeys.has(discoveryPendingKey) && !stagingDiscoveryFailed && !extraStagingFailed) {
+        if (
+          cleanupKeys.has(discoveryPendingKey)
+          && typeof listMatchingStagingKeys === "function"
+          && !stagingDiscoveryFailed
+          && !extraStagingFailed
+        ) {
           if (await actions.cleaned(scope, sourceId, discoveryPendingKey, currentTime)) released = true;
         }
         if (released) {

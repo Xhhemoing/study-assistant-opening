@@ -333,6 +333,13 @@ export async function syncMailbox(deps: ImapSyncDeps): Promise<{
       throw new Error("mail exceeds limit");
     }
     if (fetched.source.byteLength > MAX_MAIL_BYTES) throw new Error("mail exceeds limit");
+    const reportedSize = Math.max(
+      typeof fetched.size === "number" && Number.isFinite(fetched.size) && fetched.size > 0 ? fetched.size : 0,
+      knownSize !== undefined && Number.isFinite(knownSize) && knownSize > 0 ? knownSize : 0,
+    );
+    if (reportedSize > 0 && fetched.source.byteLength < reportedSize) {
+      throw new Error("IMAP message body was truncated before reaching reported size");
+    }
     const parsed = await simpleParser(fetched.source, {
       skipImageLinks: true,
       skipHtmlToText: true,
