@@ -82,7 +82,7 @@ async function readMemoryContext(
           SELECT 1 FROM opening_turns t
           WHERE t.id::text = lower(ref.turn_id) AND t.workspace_id = ${scope.workspaceId}
             AND (
-              NOT (${contextSourceRefsIncluded(db, scope.workspaceId, turnContextSourceRefs(db, "t"))}) OR
+              NOT (${contextSourceRefsIncluded(db, scope.workspaceId, () => turnContextSourceRefs(db, "t"))}) OR
               EXISTS (
                 SELECT 1 FROM unnest(t.source_ids) AS sid(id)
                 WHERE NOT EXISTS (

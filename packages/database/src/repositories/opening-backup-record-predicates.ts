@@ -67,10 +67,10 @@ function turnSourcesIncluded(tx: Tx, id: string, userId: string, _turn: "t", his
           )
       )
     )
-    AND ${turnPinnedSourcesIncluded(tx, id, tx`t.source_versions`, tx`t.context_anchor`, history)}
+    AND ${turnPinnedSourcesIncluded(tx, id, () => tx`t.source_versions`, () => tx`t.context_anchor`, history)}
     AND ${citationsIncluded(tx, id, _turn, history)}
     AND ((t.role = 'user' AND t.context_source_refs IS NULL)
-      OR ${contextSourceRefsIncluded(tx, id, tx`t.context_source_refs`, history)})
+      OR ${contextSourceRefsIncluded(tx, id, () => tx`t.context_source_refs`, history)})
     AND (t.learning_session_id IS NULL OR ${includedLearningSession(tx, id, userId, tx`t.learning_session_id`)})
     AND (${raw(tx, "t.chunk_id")} IS NULL OR EXISTS (
       SELECT 1 FROM opening_source_chunks k
@@ -107,13 +107,9 @@ export function includedTurn(tx: Tx, id: string, userId: string, turn: typeof TU
 }
 
 export function includedProblem(
-  tx: Tx, id: string, userId: string, problem: typeof PROBLEM | Fragment, session?: Fragment, history = false,
+  tx: Tx, id: string, userId: string, problem: typeof PROBLEM | (() => Fragment), session?: () => Fragment, history = false,
 ) {
-  const direct = problem === PROBLEM;
-  const problemId = direct ? raw(tx, "p.problem_id") : problem as Fragment;
-  const sessionId = direct ? raw(tx, "p.session_id") : session as Fragment;
-  const row = direct ? raw(tx, "p") : raw(tx, "p2");
-  return direct ? tx`
+  if (problem === PROBLEM) return tx`
     ${raw(tx, "p.workspace_id")} = ${id}
     AND ${includedLearningSession(tx, id, userId, raw(tx, "p.session_id"))}
     AND (${includedSourceFreeProblem(tx, id, "p")} OR EXISTS (
@@ -126,11 +122,13 @@ export function includedProblem(
       SELECT 1 FROM opening_source_chunks k
       WHERE k.id = ${raw(tx, "p.chunk_id")} AND k.source_id = ${raw(tx, "p.source_id")}
         AND k.source_version = ${raw(tx, "p.source_version")}
-    ))` : tx`
+    ))`;
+  if (!session) throw new Error("missing problem session");
+  return tx`
     EXISTS (
-      SELECT 1 FROM opening_problem_refs ${row}
-      WHERE ${raw(tx, "p2.problem_id")} = ${problemId}
-        AND (${history} OR ${raw(tx, "p2.session_id")} = ${sessionId})
+      SELECT 1 FROM opening_problem_refs p2
+      WHERE ${raw(tx, "p2.problem_id")} = ${problem()}
+        AND (${history} OR ${raw(tx, "p2.session_id")} = ${session()})
         AND ${raw(tx, "p2.workspace_id")} = ${id}
         AND ${includedLearningSession(tx, id, userId, raw(tx, "p2.session_id"))}
         AND (${includedSourceFreeProblem(tx, id, "p2")} OR EXISTS (

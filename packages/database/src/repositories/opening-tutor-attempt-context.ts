@@ -92,7 +92,7 @@ export async function readTutorAttemptContext(db: Db, scope: OpeningScope, targe
       return { sourceId, sourceVersion: versions[sourceId]! };
     });
   }), workSource ? [{ sourceId: workSource.id, sourceVersion: workSource.version }] : []);
-  const [admitted] = await db`SELECT ${contextSourceRefsIncluded(db, scope.workspaceId, db`${db.json(sourceRefs)}::jsonb`, true, true)} AS included`;
+  const [admitted] = await db`SELECT ${contextSourceRefsIncluded(db, scope.workspaceId, () => db`${db.json(sourceRefs)}::jsonb`, true, true)} AS included`;
   if (!admitted?.included) throw conflict();
   const unavailable = sourceRefs.length ? await db`SELECT ref FROM jsonb_array_elements(${db.json(sourceRefs)}::jsonb) ref
     JOIN opening_sources s ON s.id::text=ref->>'sourceId' AND s.workspace_id=${scope.workspaceId}

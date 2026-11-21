@@ -33,7 +33,7 @@ export async function admitTaskCandidate(tx: TransactionSql, scope: OpeningScope
       CROSS JOIN LATERAL (
         SELECT jsonb_array_elements_text(CASE WHEN jsonb_typeof(c.source_ids) = 'array' THEN c.source_ids ELSE '[]'::jsonb END) AS id
         UNION SELECT unnest(t.source_ids)::text
-        UNION SELECT pin.source_id FROM (${turnPinnedSourceRefs(tx, tx`t.source_versions`, tx`t.context_anchor`)}) pin
+        UNION SELECT pin.source_id FROM (${turnPinnedSourceRefs(tx, () => tx`t.source_versions`, () => tx`t.context_anchor`)}) pin
         UNION SELECT citation->>'sourceId' FROM jsonb_array_elements(CASE WHEN jsonb_typeof(t.citations) = 'array' THEN t.citations ELSE '[]'::jsonb END) citation
         UNION SELECT context_ref->>'sourceId'
           FROM jsonb_array_elements(CASE WHEN jsonb_typeof(t.context_source_refs) = 'array' THEN t.context_source_refs ELSE '[]'::jsonb END) context_ref

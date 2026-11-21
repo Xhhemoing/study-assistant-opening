@@ -9,9 +9,9 @@ import { readTurnsWithActiveMemoryDependencies, turnHasMemoryDependencies } from
 import { admitTaskCandidate } from "./opening-task-candidate-admission";
 
 type Db = Sql | TransactionSql;
-function cleanJsonSources(db: Db, scope: OpeningScope, ids: ReturnType<Db>) {
-  return db`jsonb_typeof(${ids}) = 'array' AND NOT EXISTS (
-    SELECT 1 FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(${ids}) = 'array' THEN ${ids} ELSE '[]'::jsonb END) ref(id)
+function cleanJsonSources(db: Db, scope: OpeningScope, ids: () => ReturnType<Db>) {
+  return db`jsonb_typeof(${ids()}) = 'array' AND NOT EXISTS (
+    SELECT 1 FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(${ids()}) = 'array' THEN ${ids()} ELSE '[]'::jsonb END) ref(id)
     WHERE NOT EXISTS (
       SELECT 1 FROM opening_sources s WHERE s.id::text = lower(ref.id)
         AND s.workspace_id = ${scope.workspaceId} AND s.upload_state = 'uploaded'
@@ -23,7 +23,7 @@ function admittedRetest(db: Db, scope: OpeningScope) {
   return db`EXISTS (SELECT 1 FROM workspaces w WHERE w.id = ${scope.workspaceId} AND w.owner_user_id = ${scope.ownerUserId})
     AND EXISTS (SELECT 1 FROM courses c WHERE c.id::text = j.payload->>'courseId' AND c.workspace_id = ${scope.workspaceId})
     AND (j.payload->>'accepted' = 'true' OR COALESCE(j.payload->>'invalidated', 'false') = 'false')
-    AND ${cleanJsonSources(db, scope, db`j.payload->'sourceIds'`)}`;
+    AND ${cleanJsonSources(db, scope, () => db`j.payload->'sourceIds'`)}`;
 }
 export async function readOpeningAssistantReviewCandidates(sql: Sql, scope: OpeningScope) {
   return sql.begin("isolation level repeatable read, read only", async tx => {
@@ -34,7 +34,7 @@ export async function readOpeningAssistantReviewCandidates(sql: Sql, scope: Open
         AND t.workspace_id = a.workspace_id AND t.status = 'complete'
       WHERE a.workspace_id = ${scope.workspaceId} AND a.status = 'pending'
         AND EXISTS (SELECT 1 FROM workspaces w WHERE w.id = ${scope.workspaceId} AND w.owner_user_id = ${scope.ownerUserId})
-        AND ${cleanJsonSources(tx, scope, tx`a.source_ids`)}
+        AND ${cleanJsonSources(tx, scope, () => tx`a.source_ids`)}
         AND ${includedTurn(tx, scope.workspaceId, scope.ownerUserId, "t")}
       ORDER BY a.created_at ASC`;
     const dependentTurns = [...new Set(candidates.filter(row => row.has_memory_dependencies).map(row => row.source_turn_id as string))];

@@ -1,6 +1,6 @@
 import type { Sql, TransactionSql } from "postgres";
 import type { OpeningScope } from "./opening-sources";
-import { turnPinnedSourcesIncluded } from "./opening-context-provenance";
+import { memoryDependencyRows, turnPinnedSourcesIncluded } from "./opening-context-provenance";
 import { OpeningMemoryError } from "./opening-memory-types";
 
 type Db = Sql | TransactionSql;
@@ -85,7 +85,7 @@ export function turnSourceMaterialsActive(db: Db, workspaceId: string): ReturnTy
         )
       )
     )
-  ) AND ${turnPinnedSourcesIncluded(db, workspaceId, db`t.source_versions`, db`t.context_anchor`)}`;
+  ) AND ${turnPinnedSourcesIncluded(db, workspaceId, () => db`t.source_versions`, () => db`t.context_anchor`)}`;
 }
 
 /**
@@ -111,14 +111,7 @@ export async function assertSourceTurnsOwned(
       AND NOT EXISTS (
         WITH RECURSIVE mem_deps(dep_id) AS (
           SELECT lower(dep.id)
-          FROM jsonb_array_elements(
-            CASE WHEN jsonb_typeof(t.context_source_refs) = 'array' THEN t.context_source_refs ELSE '[]'::jsonb END
-          ) AS dep_elem
-          CROSS JOIN LATERAL jsonb_array_elements_text(
-            CASE WHEN dep_elem = jsonb_build_object('memoryDependencyIds', dep_elem->'memoryDependencyIds')
-              AND jsonb_typeof(dep_elem->'memoryDependencyIds') = 'array'
-              THEN dep_elem->'memoryDependencyIds' ELSE '[]'::jsonb END
-          ) AS dep(id)
+          FROM ${memoryDependencyRows(db, () => db`t.context_source_refs`)} AS dep
           UNION
           SELECT lower(dep.id)
           FROM mem_deps prev
@@ -127,14 +120,7 @@ export async function assertSourceTurnsOwned(
             CASE WHEN jsonb_typeof(pm.source_turn_ids) = 'array' THEN pm.source_turn_ids ELSE '[]'::jsonb END
           ) AS st(turn_id)
           JOIN opening_turns dt ON dt.id::text = lower(st.turn_id) AND dt.workspace_id = t.workspace_id
-          CROSS JOIN LATERAL jsonb_array_elements(
-            CASE WHEN jsonb_typeof(dt.context_source_refs) = 'array' THEN dt.context_source_refs ELSE '[]'::jsonb END
-          ) AS dep_elem
-          CROSS JOIN LATERAL jsonb_array_elements_text(
-            CASE WHEN dep_elem = jsonb_build_object('memoryDependencyIds', dep_elem->'memoryDependencyIds')
-              AND jsonb_typeof(dep_elem->'memoryDependencyIds') = 'array'
-              THEN dep_elem->'memoryDependencyIds' ELSE '[]'::jsonb END
-          ) AS dep(id)
+          CROSS JOIN LATERAL ${memoryDependencyRows(db, () => db`dt.context_source_refs`)} AS dep
         )
         SELECT 1
         FROM mem_deps d

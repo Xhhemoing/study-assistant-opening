@@ -4,6 +4,7 @@ import { notePublicationMetadata } from "@aistudy/domain";
 
 type Db = Sql | TransactionSql;
 type Fragment = ReturnType<Db>;
+type FragmentFactory = () => Fragment;
 export type ContextSourceRef = Pick<Citation, "sourceId" | "sourceVersion"> & {
   memoryOnly?: boolean;
 };
@@ -74,9 +75,9 @@ export function parseNoteContextSourceRefs(value: unknown): ContextSourceRef[] |
 }
 
 /** Strip the exact note-only metadata shapes before applying source admission. */
-export function noteContextSourceRefs(db: Db, refs: Fragment): Fragment {
-  return db`CASE WHEN jsonb_typeof(${refs})='array' THEN (
-    SELECT COALESCE(jsonb_agg(ref), '[]'::jsonb) FROM jsonb_array_elements(${refs}) ref
+export function noteContextSourceRefs(db: Db, refs: FragmentFactory): Fragment {
+  return db`CASE WHEN jsonb_typeof(${refs()})='array' THEN (
+    SELECT COALESCE(jsonb_agg(ref), '[]'::jsonb) FROM jsonb_array_elements(${refs()}) ref
     WHERE NOT EXISTS (
       SELECT 1 FROM (VALUES ('answerKeyBlockIds'), ('publicationCardIds')) AS metadata(key)
       WHERE ref=jsonb_build_object(metadata.key, ref->metadata.key)
@@ -85,18 +86,18 @@ export function noteContextSourceRefs(db: Db, refs: Fragment): Fragment {
           THEN ref->metadata.key ELSE '[]'::jsonb END) AS item(value)
           WHERE item.value IS NULL OR item.value !~* ${UUID.source})
     )
-  ) ELSE ${refs} END`;
+  ) ELSE ${refs()} END`;
 }
 
 /** SQL admission shared by live context and backup, with the latter retaining historical versions. */
 export function contextSourceRefsIncluded(
-  db: Db, workspaceId: string, refs: Fragment, allowHistoricalVersions = false, requireAvailability = !allowHistoricalVersions,
+  db: Db, workspaceId: string, refs: FragmentFactory, allowHistoricalVersions = false, requireAvailability = !allowHistoricalVersions,
 ): Fragment {
   return db`
-    COALESCE(jsonb_typeof(${refs}) = 'array', false)
+    COALESCE(jsonb_typeof(${refs()}) = 'array', false)
     AND NOT EXISTS (
       SELECT 1 FROM jsonb_array_elements(
-        CASE WHEN jsonb_typeof(${refs}) = 'array' THEN ${refs} ELSE '[]'::jsonb END
+        CASE WHEN jsonb_typeof(${refs()}) = 'array' THEN ${refs()} ELSE '[]'::jsonb END
       ) provenance_ref
       WHERE NOT (
           provenance_ref = jsonb_build_object('memoryDependencyIds', provenance_ref->'memoryDependencyIds')
@@ -139,21 +140,21 @@ export function contextSourceRefsIncluded(
 }
 
 /** Version pins can exist independently of the turn's explicit source_ids. */
-export function turnPinnedSourceRefs(db: Db, versions: Fragment, anchor: Fragment): Fragment {
+export function turnPinnedSourceRefs(db: Db, versions: FragmentFactory, anchor: FragmentFactory): Fragment {
   return db`
     SELECT source_id, source_version, true AS version_required
-    FROM jsonb_each(CASE WHEN jsonb_typeof(${versions}) = 'object' THEN ${versions} ELSE '{}'::jsonb END)
+    FROM jsonb_each(CASE WHEN jsonb_typeof(${versions()}) = 'object' THEN ${versions()} ELSE '{}'::jsonb END)
       AS pin(source_id, source_version)
     UNION ALL
-    SELECT ${anchor}->>'sourceId', NULLIF(${anchor}->'sourceVersion', 'null'::jsonb), false
-    WHERE ${anchor}->>'sourceId' IS NOT NULL`;
+    SELECT ${anchor()}->>'sourceId', NULLIF(${anchor()}->'sourceVersion', 'null'::jsonb), false
+    WHERE ${anchor()}->>'sourceId' IS NOT NULL`;
 }
 
 export function turnPinnedSourcesIncluded(
-  db: Db, workspaceId: string, versions: Fragment, anchor: Fragment, historical = false,
+  db: Db, workspaceId: string, versions: FragmentFactory, anchor: FragmentFactory, historical = false,
 ): Fragment {
   return db`
-    COALESCE(jsonb_typeof(${versions}) = 'object', false)
+    COALESCE(jsonb_typeof(${versions()}) = 'object', false)
     AND NOT EXISTS (
       SELECT 1 FROM (${turnPinnedSourceRefs(db, versions, anchor)}) pin
       WHERE ((pin.version_required OR pin.source_version IS NOT NULL)
@@ -161,7 +162,7 @@ export function turnPinnedSourcesIncluded(
             OR (pin.source_version #>> '{}') !~ '^[0-9]+$'))
         OR NOT EXISTS (
           SELECT 1 FROM opening_sources s
-          WHERE s.id = ${lineageUuid(db, db`pin.source_id`)}
+          WHERE s.id = ${lineageUuid(db, () => db`pin.source_id`)}
             AND s.workspace_id = ${workspaceId} AND s.upload_state = 'uploaded'
             AND (${historical} OR pin.source_version IS NULL OR s.version::text = pin.source_version #>> '{}')
             AND (${historical} OR NOT EXISTS (
@@ -181,18 +182,18 @@ export function turnPinnedSourcesIncluded(
 /** User turns are original leaves; assistant turns must carry their full consumed lineage. */
 export function turnContextSourceRefs(db: Db, alias: "t" | "u" | "a" | "mt"): Fragment {
   const column = (name: string): Fragment => db`${db.unsafe(`${alias}.${name}`)}`;
-  const versions = column("source_versions");
-  const context = column("context_source_refs");
-  const pins = turnPinnedSourceRefs(db, versions, column("context_anchor"));
+  const versions = () => column("source_versions");
+  const context = () => column("context_source_refs");
+  const pins = () => turnPinnedSourceRefs(db, versions, () => column("context_anchor"));
   return db`CASE
-    WHEN jsonb_typeof(${versions}) IS DISTINCT FROM 'object' THEN NULL
-    WHEN ${column("role")} = 'assistant' AND jsonb_typeof(${context}) IS DISTINCT FROM 'array' THEN ${context}
-    ELSE (CASE WHEN ${column("role")} = 'assistant' THEN ${context} ELSE (
+    WHEN jsonb_typeof(${versions()}) IS DISTINCT FROM 'object' THEN NULL
+    WHEN ${column("role")} = 'assistant' AND jsonb_typeof(${context()}) IS DISTINCT FROM 'array' THEN ${context()}
+    ELSE (CASE WHEN ${column("role")} = 'assistant' THEN ${context()} ELSE (
       SELECT COALESCE(jsonb_agg(ref), '[]'::jsonb) FROM (
         SELECT jsonb_build_object('sourceId', sid.id, 'sourceVersion', NULL) AS ref
         FROM unnest(${column("source_ids")}) sid(id)
         WHERE NOT EXISTS (
-          SELECT 1 FROM (${pins}) pin
+          SELECT 1 FROM (${pins()}) pin
           WHERE lower(pin.source_id) = sid.id::text AND pin.source_version IS NOT NULL
         )
         UNION ALL
@@ -202,83 +203,71 @@ export function turnContextSourceRefs(db: Db, alias: "t" | "u" | "a" | "mt"): Fr
       ) direct_refs
     ) END) || (
       SELECT COALESCE(jsonb_agg(jsonb_build_object('sourceId', pin.source_id, 'sourceVersion', pin.source_version)), '[]'::jsonb)
-      FROM (${pins}) pin
+      FROM (${pins()}) pin
     )
   END`;
 }
 
+/** Expose metadata filters to the planner before expanding their dependency arrays. */
+export function memoryDependencyRows(db: Db, refs: FragmentFactory): Fragment {
+  return db`(
+    SELECT dep.id
+    FROM jsonb_array_elements(
+      CASE WHEN jsonb_typeof(${refs()}) = 'array' THEN ${refs()} ELSE '[]'::jsonb END
+    ) AS dep_elem
+    CROSS JOIN LATERAL jsonb_array_elements_text(
+      CASE WHEN jsonb_typeof(dep_elem->'memoryDependencyIds') = 'array'
+        THEN dep_elem->'memoryDependencyIds' ELSE '[]'::jsonb END
+    ) AS dep(id)
+    WHERE dep_elem = jsonb_build_object('memoryDependencyIds', dep_elem->'memoryDependencyIds')
+      AND jsonb_typeof(dep_elem->'memoryDependencyIds') = 'array'
+  )`;
+}
+
 /** Cycle-safe recursive CTE walking a memory's source_turn_ids -> turn memoryDependencyIds -> ancestor memories. */
 export function memoryTransitiveDepsCte(db: Db, alias: "" | "m" = "m"): Fragment {
-  const sourceTurnIds = alias === "m" ? db`m.source_turn_ids` : db`opening_memories.source_turn_ids`;
-  const workspaceId = alias === "m" ? db`m.workspace_id` : db`opening_memories.workspace_id`;
+  const sourceTurnIds = () => alias === "m" ? db`m.source_turn_ids` : db`opening_memories.source_turn_ids`;
+  const workspaceId = () => alias === "m" ? db`m.workspace_id` : db`opening_memories.workspace_id`;
   return db`WITH RECURSIVE mem_deps(dep_id) AS (
     SELECT lower(dep.id)
     FROM jsonb_array_elements_text(
-      CASE WHEN jsonb_typeof(${sourceTurnIds}) = 'array' THEN ${sourceTurnIds} ELSE '[]'::jsonb END
+      CASE WHEN jsonb_typeof(${sourceTurnIds()}) = 'array' THEN ${sourceTurnIds()} ELSE '[]'::jsonb END
     ) AS st(turn_id)
-    JOIN opening_turns dt ON dt.id::text = lower(st.turn_id) AND dt.workspace_id = ${workspaceId}
-    CROSS JOIN LATERAL jsonb_array_elements(
-      CASE WHEN jsonb_typeof(dt.context_source_refs) = 'array' THEN dt.context_source_refs ELSE '[]'::jsonb END
-    ) AS dep_elem
-    CROSS JOIN LATERAL jsonb_array_elements_text(
-      CASE WHEN dep_elem = jsonb_build_object('memoryDependencyIds', dep_elem->'memoryDependencyIds')
-        AND jsonb_typeof(dep_elem->'memoryDependencyIds') = 'array'
-        THEN dep_elem->'memoryDependencyIds' ELSE '[]'::jsonb END
-    ) AS dep(id)
+    JOIN opening_turns dt ON dt.id::text = lower(st.turn_id) AND dt.workspace_id = ${workspaceId()}
+    CROSS JOIN LATERAL ${memoryDependencyRows(db, () => db`dt.context_source_refs`)} AS dep
     UNION
     SELECT lower(dep.id)
     FROM mem_deps prev
-    JOIN opening_memories pm ON pm.id::text = prev.dep_id AND pm.workspace_id = ${workspaceId}
+    JOIN opening_memories pm ON pm.id::text = prev.dep_id AND pm.workspace_id = ${workspaceId()}
     CROSS JOIN LATERAL jsonb_array_elements_text(
       CASE WHEN jsonb_typeof(pm.source_turn_ids) = 'array' THEN pm.source_turn_ids ELSE '[]'::jsonb END
     ) AS st(turn_id)
-    JOIN opening_turns dt ON dt.id::text = lower(st.turn_id) AND dt.workspace_id = ${workspaceId}
-    CROSS JOIN LATERAL jsonb_array_elements(
-      CASE WHEN jsonb_typeof(dt.context_source_refs) = 'array' THEN dt.context_source_refs ELSE '[]'::jsonb END
-    ) AS dep_elem
-    CROSS JOIN LATERAL jsonb_array_elements_text(
-      CASE WHEN dep_elem = jsonb_build_object('memoryDependencyIds', dep_elem->'memoryDependencyIds')
-        AND jsonb_typeof(dep_elem->'memoryDependencyIds') = 'array'
-        THEN dep_elem->'memoryDependencyIds' ELSE '[]'::jsonb END
-    ) AS dep(id)
+    JOIN opening_turns dt ON dt.id::text = lower(st.turn_id) AND dt.workspace_id = ${workspaceId()}
+    CROSS JOIN LATERAL ${memoryDependencyRows(db, () => db`dt.context_source_refs`)} AS dep
   )`;
 }
 
 /** TRUE iff every transitive global memory referenced by a memory's source turns is active and unexpired. */
 export function memoryTransitiveDependenciesActive(db: Db, alias: "" | "m" = "m"): Fragment {
-  const sourceTurnIds = alias === "m" ? db`m.source_turn_ids` : db`opening_memories.source_turn_ids`;
-  const workspaceId = alias === "m" ? db`m.workspace_id` : db`opening_memories.workspace_id`;
+  const sourceTurnIds = () => alias === "m" ? db`m.source_turn_ids` : db`opening_memories.source_turn_ids`;
+  const workspaceId = () => alias === "m" ? db`m.workspace_id` : db`opening_memories.workspace_id`;
   return db`NOT EXISTS (
     WITH RECURSIVE mem_deps(dep_id) AS (
       SELECT lower(dep.id)
       FROM jsonb_array_elements_text(
-        CASE WHEN jsonb_typeof(${sourceTurnIds}) = 'array' THEN ${sourceTurnIds} ELSE '[]'::jsonb END
+        CASE WHEN jsonb_typeof(${sourceTurnIds()}) = 'array' THEN ${sourceTurnIds()} ELSE '[]'::jsonb END
       ) AS st(turn_id)
-      JOIN opening_turns dt ON dt.id::text = lower(st.turn_id) AND dt.workspace_id = ${workspaceId}
-      CROSS JOIN LATERAL jsonb_array_elements(
-        CASE WHEN jsonb_typeof(dt.context_source_refs) = 'array' THEN dt.context_source_refs ELSE '[]'::jsonb END
-      ) AS dep_elem
-      CROSS JOIN LATERAL jsonb_array_elements_text(
-        CASE WHEN dep_elem = jsonb_build_object('memoryDependencyIds', dep_elem->'memoryDependencyIds')
-          AND jsonb_typeof(dep_elem->'memoryDependencyIds') = 'array'
-          THEN dep_elem->'memoryDependencyIds' ELSE '[]'::jsonb END
-      ) AS dep(id)
+      JOIN opening_turns dt ON dt.id::text = lower(st.turn_id) AND dt.workspace_id = ${workspaceId()}
+      CROSS JOIN LATERAL ${memoryDependencyRows(db, () => db`dt.context_source_refs`)} AS dep
       UNION
       SELECT lower(dep.id)
       FROM mem_deps prev
-      JOIN opening_memories pm ON pm.id::text = prev.dep_id AND pm.workspace_id = ${workspaceId}
+      JOIN opening_memories pm ON pm.id::text = prev.dep_id AND pm.workspace_id = ${workspaceId()}
       CROSS JOIN LATERAL jsonb_array_elements_text(
         CASE WHEN jsonb_typeof(pm.source_turn_ids) = 'array' THEN pm.source_turn_ids ELSE '[]'::jsonb END
       ) AS st(turn_id)
-      JOIN opening_turns dt ON dt.id::text = lower(st.turn_id) AND dt.workspace_id = ${workspaceId}
-      CROSS JOIN LATERAL jsonb_array_elements(
-        CASE WHEN jsonb_typeof(dt.context_source_refs) = 'array' THEN dt.context_source_refs ELSE '[]'::jsonb END
-      ) AS dep_elem
-      CROSS JOIN LATERAL jsonb_array_elements_text(
-        CASE WHEN dep_elem = jsonb_build_object('memoryDependencyIds', dep_elem->'memoryDependencyIds')
-          AND jsonb_typeof(dep_elem->'memoryDependencyIds') = 'array'
-          THEN dep_elem->'memoryDependencyIds' ELSE '[]'::jsonb END
-      ) AS dep(id)
+      JOIN opening_turns dt ON dt.id::text = lower(st.turn_id) AND dt.workspace_id = ${workspaceId()}
+      CROSS JOIN LATERAL ${memoryDependencyRows(db, () => db`dt.context_source_refs`)} AS dep
     )
     SELECT 1
     FROM mem_deps d
@@ -286,7 +275,7 @@ export function memoryTransitiveDependenciesActive(db: Db, alias: "" | "m" = "m"
       SELECT 1
       FROM opening_memories dep_m
       WHERE dep_m.id::text = d.dep_id
-        AND dep_m.workspace_id = ${workspaceId}
+        AND dep_m.workspace_id = ${workspaceId()}
         AND dep_m.status = 'active'
         AND dep_m.course_id IS NULL
         AND (dep_m.kind = 'confirmed' OR (dep_m.kind = 'temporary' AND dep_m.expires_at IS NOT NULL AND dep_m.expires_at > clock_timestamp()))
@@ -294,46 +283,32 @@ export function memoryTransitiveDependenciesActive(db: Db, alias: "" | "m" = "m"
   )`;
 }
 
-function lineageUuid(db: Db, value: Fragment): Fragment {
-  return db`CASE WHEN ${value} ~* ${UUID.source} THEN ${value}::uuid END`;
+function lineageUuid(db: Db, value: FragmentFactory): Fragment {
+  return db`CASE WHEN ${value()} ~* ${UUID.source} THEN ${value()}::uuid END`;
 }
 
 /** Cycle-safe recursive CTE walking a turn's context_source_refs memoryDependencyIds -> ancestor memories. */
 export function turnTransitiveDepsCte(db: Db, alias: "a" | "t"): Fragment {
-  const contextRefs = alias === "a" ? db`a.context_source_refs` : db`t.context_source_refs`;
-  const workspaceId = alias === "a" ? db`a.workspace_id` : db`t.workspace_id`;
+  const contextRefs: FragmentFactory = () => alias === "a" ? db`a.context_source_refs` : db`t.context_source_refs`;
+  const workspaceId = () => alias === "a" ? db`a.workspace_id` : db`t.workspace_id`;
   return db`WITH RECURSIVE mem_deps(dep_id) AS (
     SELECT lower(dep.id)
-    FROM jsonb_array_elements(
-      CASE WHEN jsonb_typeof(${contextRefs}) = 'array' THEN ${contextRefs} ELSE '[]'::jsonb END
-    ) AS dep_elem
-    CROSS JOIN LATERAL jsonb_array_elements_text(
-      CASE WHEN dep_elem = jsonb_build_object('memoryDependencyIds', dep_elem->'memoryDependencyIds')
-        AND jsonb_typeof(dep_elem->'memoryDependencyIds') = 'array'
-        THEN dep_elem->'memoryDependencyIds' ELSE '[]'::jsonb END
-    ) AS dep(id)
+    FROM ${memoryDependencyRows(db, contextRefs)} AS dep
     UNION
     SELECT lower(dep.id)
     FROM mem_deps prev
-    JOIN opening_memories pm ON pm.id = ${lineageUuid(db, db`prev.dep_id`)} AND pm.workspace_id = ${workspaceId}
+    JOIN opening_memories pm ON pm.id = ${lineageUuid(db, () => db`prev.dep_id`)} AND pm.workspace_id = ${workspaceId()}
     CROSS JOIN LATERAL jsonb_array_elements_text(
       CASE WHEN jsonb_typeof(pm.source_turn_ids) = 'array' THEN pm.source_turn_ids ELSE '[]'::jsonb END
     ) AS st(turn_id)
-    JOIN opening_turns dt ON dt.id = ${lineageUuid(db, db`st.turn_id`)} AND dt.workspace_id = ${workspaceId}
-    CROSS JOIN LATERAL jsonb_array_elements(
-      CASE WHEN jsonb_typeof(dt.context_source_refs) = 'array' THEN dt.context_source_refs ELSE '[]'::jsonb END
-    ) AS dep_elem
-    CROSS JOIN LATERAL jsonb_array_elements_text(
-      CASE WHEN dep_elem = jsonb_build_object('memoryDependencyIds', dep_elem->'memoryDependencyIds')
-        AND jsonb_typeof(dep_elem->'memoryDependencyIds') = 'array'
-        THEN dep_elem->'memoryDependencyIds' ELSE '[]'::jsonb END
-    ) AS dep(id)
+    JOIN opening_turns dt ON dt.id = ${lineageUuid(db, () => db`st.turn_id`)} AND dt.workspace_id = ${workspaceId()}
+    CROSS JOIN LATERAL ${memoryDependencyRows(db, () => db`dt.context_source_refs`)} AS dep
   )`;
 }
 
 /** TRUE iff every transitive global memory referenced by a turn's memoryDependencyIds is active and unexpired. */
 export function turnTransitiveDependenciesActive(db: Db, alias: "a" | "t"): Fragment {
-  const workspaceId = alias === "a" ? db`a.workspace_id` : db`t.workspace_id`;
+  const workspaceId = () => alias === "a" ? db`a.workspace_id` : db`t.workspace_id`;
   return db`NOT EXISTS (
     ${turnTransitiveDepsCte(db, alias)}
     SELECT 1
@@ -341,8 +316,8 @@ export function turnTransitiveDependenciesActive(db: Db, alias: "a" | "t"): Frag
     WHERE NOT EXISTS (
       SELECT 1
       FROM opening_memories m
-      WHERE m.id = ${lineageUuid(db, db`d.dep_id`)}
-        AND m.workspace_id = ${workspaceId}
+      WHERE m.id = ${lineageUuid(db, () => db`d.dep_id`)}
+        AND m.workspace_id = ${workspaceId()}
         AND m.status = 'active'
         AND m.course_id IS NULL
         AND (m.kind = 'confirmed' OR (m.kind = 'temporary' AND m.expires_at IS NOT NULL AND m.expires_at > clock_timestamp()))

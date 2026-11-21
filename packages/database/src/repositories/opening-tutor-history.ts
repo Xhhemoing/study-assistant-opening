@@ -59,8 +59,8 @@ export async function loadTutorHistoryContext(sql: Sql, scope: OpeningScope, cur
         ) OR EXISTS (
           SELECT 1 FROM jsonb_array_elements(a.citations) AS citation
           WHERE citation->>'sourceId' = ANY(${excludedSourceIds}::text[])
-        ) OR NOT (${contextSourceRefsIncluded(sql, scope.workspaceId, turnContextSourceRefs(sql, "u"))})
-          OR NOT (${contextSourceRefsIncluded(sql, scope.workspaceId, turnContextSourceRefs(sql, "a"))})
+        ) OR NOT (${contextSourceRefsIncluded(sql, scope.workspaceId, () => turnContextSourceRefs(sql, "u"))})
+          OR NOT (${contextSourceRefsIncluded(sql, scope.workspaceId, () => turnContextSourceRefs(sql, "a"))})
           OR NOT (${turnTransitiveDependenciesActive(sql, "a")})
           OR EXISTS (
             SELECT 1

@@ -94,7 +94,7 @@ export async function readOpeningBackupTableRows(
     SELECT p.problem_id, p.workspace_id, p.session_id, p.source_id, p.source_version, p.physical_page,
       p.chunk_id, p.stem_snapshot, p.artifact_kind, p.teaching_revision_id, p.teaching_block_id, p.updated_at
     FROM opening_problem_refs p
-    WHERE ${includedProblem(tx, id, userId, "p", tx`p.session_id`)}
+    WHERE ${includedProblem(tx, id, userId, "p")}
       AND NOT EXISTS (SELECT 1 FROM library_revisions r WHERE r.id=p.teaching_revision_id AND r.document_id=ANY(${privateExams}::uuid[]))
     ORDER BY p.problem_id`);
   tables.opening_help_exposures = asRows(await tx`
@@ -109,7 +109,7 @@ export async function readOpeningBackupTableRows(
       AND (h.activity_id IS NULL OR EXISTS (SELECT 1 FROM opening_teaching_activities backup_activity
         WHERE backup_activity.id=h.activity_id AND backup_activity.workspace_id=${id} AND backup_activity.owner_user_id=${userId}
           AND ${cleanUuidSources(tx,id,tx`backup_activity.source_ids`)}))
-      AND (h.problem_id IS NULL OR ${includedProblem(tx, id, userId, tx`h.problem_id`, tx`h.session_id`)})
+      AND (h.problem_id IS NULL OR ${includedProblem(tx, id, userId, () => tx`h.problem_id`, () => tx`h.session_id`)})
       AND (h.turn_id IS NULL OR ${includedTurn(tx, id, userId, tx`h.turn_id`)})
     ORDER BY h.id`).map(row => ({ ...row, workspace_history_revision: row.workspace_history_revision == null ? null : Number(row.workspace_history_revision) }));
   tables.opening_learning_observations = asRows(await tx`
@@ -143,7 +143,7 @@ export async function readOpeningBackupTableRows(
       AND NOT EXISTS (
         SELECT 1 FROM unnest(o.source_turn_ids) ref(turn_id) WHERE NOT ${includedTurn(tx, id, userId, tx`ref.turn_id`)}
       )
-      AND (o.problem_id IS NULL OR ${includedProblem(tx, id, userId, tx`o.problem_id`, tx`o.session_id`)})
+      AND (o.problem_id IS NULL OR ${includedProblem(tx, id, userId, () => tx`o.problem_id`, () => tx`o.session_id`)})
     ORDER BY o.id`)
     .map(row => ({ ...row, workspace_history_revision: Number(row.workspace_history_revision) }));
   tables.opening_skill_evidence = asRows(await tx`
@@ -248,7 +248,7 @@ export async function readOpeningBackupTableRows(
     FROM opening_learning_item_versions v WHERE v.workspace_id=${id} AND v.owner_user_id=${userId}
       AND NOT EXISTS (SELECT 1 FROM library_revisions r WHERE r.id=v.teaching_revision_id AND r.document_id=ANY(${privateExams}::uuid[]))
       AND (v.source_id IS NULL OR ${cleanUuidSources(tx,id,tx`ARRAY[v.source_id]`)})
-      AND ${includedProblem(tx,id,userId,tx`v.problem_id`,tx`(SELECT original.session_id FROM opening_problem_refs original
+      AND ${includedProblem(tx,id,userId,() => tx`v.problem_id`,() => tx`(SELECT original.session_id FROM opening_problem_refs original
         WHERE original.problem_id=v.problem_id AND original.workspace_id=v.workspace_id)`)}
       AND EXISTS (SELECT 1 FROM opening_teaching_activities backup_activity WHERE backup_activity.id=v.activity_id
         AND backup_activity.workspace_id=${id} AND backup_activity.owner_user_id=${userId}

@@ -1,6 +1,7 @@
 import type { Sql } from "postgres";
 import type { MemoryItem } from "@aistudy/contracts";
 import type { OpeningScope } from "./opening-sources";
+import { memoryDependencyRows } from "./opening-context-provenance";
 import { lockOwnedWorkspace, turnSourceMaterialsActive } from "./opening-memory-admission";
 import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { OpeningMemoryError, mapMemoryRow } from "./opening-memory-types";
@@ -58,14 +59,7 @@ export function confirmOwnedMemory(
               CASE WHEN jsonb_typeof(m.source_turn_ids) = 'array' THEN m.source_turn_ids ELSE '[]'::jsonb END
             ) AS st(turn_id)
             JOIN opening_turns dt ON dt.id::text = lower(st.turn_id) AND dt.workspace_id = m.workspace_id
-            CROSS JOIN LATERAL jsonb_array_elements(
-              CASE WHEN jsonb_typeof(dt.context_source_refs) = 'array' THEN dt.context_source_refs ELSE '[]'::jsonb END
-            ) AS dep_elem
-            CROSS JOIN LATERAL jsonb_array_elements_text(
-              CASE WHEN dep_elem = jsonb_build_object('memoryDependencyIds', dep_elem->'memoryDependencyIds')
-                AND jsonb_typeof(dep_elem->'memoryDependencyIds') = 'array'
-                THEN dep_elem->'memoryDependencyIds' ELSE '[]'::jsonb END
-            ) AS dep(id)
+            CROSS JOIN LATERAL ${memoryDependencyRows(tx, () => tx`dt.context_source_refs`)} AS dep
             UNION
             SELECT lower(dep.id)
             FROM mem_deps prev
@@ -74,14 +68,7 @@ export function confirmOwnedMemory(
               CASE WHEN jsonb_typeof(pm.source_turn_ids) = 'array' THEN pm.source_turn_ids ELSE '[]'::jsonb END
             ) AS st(turn_id)
             JOIN opening_turns dt ON dt.id::text = lower(st.turn_id) AND dt.workspace_id = m.workspace_id
-            CROSS JOIN LATERAL jsonb_array_elements(
-              CASE WHEN jsonb_typeof(dt.context_source_refs) = 'array' THEN dt.context_source_refs ELSE '[]'::jsonb END
-            ) AS dep_elem
-            CROSS JOIN LATERAL jsonb_array_elements_text(
-              CASE WHEN dep_elem = jsonb_build_object('memoryDependencyIds', dep_elem->'memoryDependencyIds')
-                AND jsonb_typeof(dep_elem->'memoryDependencyIds') = 'array'
-                THEN dep_elem->'memoryDependencyIds' ELSE '[]'::jsonb END
-            ) AS dep(id)
+            CROSS JOIN LATERAL ${memoryDependencyRows(tx, () => tx`dt.context_source_refs`)} AS dep
           )
           SELECT min(dep_m.expires_at)
           FROM mem_deps d
@@ -118,14 +105,7 @@ export function confirmOwnedMemory(
                 CASE WHEN jsonb_typeof(m.source_turn_ids) = 'array' THEN m.source_turn_ids ELSE '[]'::jsonb END
               ) AS st(turn_id)
               JOIN opening_turns dt ON dt.id::text = lower(st.turn_id) AND dt.workspace_id = m.workspace_id
-              CROSS JOIN LATERAL jsonb_array_elements(
-                CASE WHEN jsonb_typeof(dt.context_source_refs) = 'array' THEN dt.context_source_refs ELSE '[]'::jsonb END
-              ) AS dep_elem
-              CROSS JOIN LATERAL jsonb_array_elements_text(
-                CASE WHEN dep_elem = jsonb_build_object('memoryDependencyIds', dep_elem->'memoryDependencyIds')
-                  AND jsonb_typeof(dep_elem->'memoryDependencyIds') = 'array'
-                  THEN dep_elem->'memoryDependencyIds' ELSE '[]'::jsonb END
-              ) AS dep(id)
+              CROSS JOIN LATERAL ${memoryDependencyRows(tx, () => tx`dt.context_source_refs`)} AS dep
               UNION
               SELECT lower(dep.id)
               FROM mem_deps prev
@@ -134,14 +114,7 @@ export function confirmOwnedMemory(
                 CASE WHEN jsonb_typeof(pm.source_turn_ids) = 'array' THEN pm.source_turn_ids ELSE '[]'::jsonb END
               ) AS st(turn_id)
               JOIN opening_turns dt ON dt.id::text = lower(st.turn_id) AND dt.workspace_id = m.workspace_id
-              CROSS JOIN LATERAL jsonb_array_elements(
-                CASE WHEN jsonb_typeof(dt.context_source_refs) = 'array' THEN dt.context_source_refs ELSE '[]'::jsonb END
-              ) AS dep_elem
-              CROSS JOIN LATERAL jsonb_array_elements_text(
-                CASE WHEN dep_elem = jsonb_build_object('memoryDependencyIds', dep_elem->'memoryDependencyIds')
-                  AND jsonb_typeof(dep_elem->'memoryDependencyIds') = 'array'
-                  THEN dep_elem->'memoryDependencyIds' ELSE '[]'::jsonb END
-              ) AS dep(id)
+              CROSS JOIN LATERAL ${memoryDependencyRows(tx, () => tx`dt.context_source_refs`)} AS dep
             )
             SELECT 1
             FROM mem_deps d

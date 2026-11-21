@@ -441,11 +441,11 @@ async function assertStreamSources(
     }
   }
   if (snapshotRefs.length) {
-    const [snapshotAvailable] = await tx`SELECT 1 WHERE ${contextSourceRefsIncluded(tx, scope.workspaceId, tx`${tx.json(snapshotRefs)}::jsonb`, true, true)}`;
+    const [snapshotAvailable] = await tx`SELECT 1 WHERE ${contextSourceRefsIncluded(tx, scope.workspaceId, () => tx`${tx.json(snapshotRefs)}::jsonb`, true, true)}`;
     if (!snapshotAvailable) throw Object.assign(new Error("stream material unavailable or excluded"), { code: "CONFLICT" });
   }
   if (currentRefs.length || !snapshotRefs.length) {
-    const [available] = await tx`SELECT 1 WHERE ${contextSourceRefsIncluded(tx, scope.workspaceId, tx`${tx.json(currentRefs)}::jsonb`)}`;
+    const [available] = await tx`SELECT 1 WHERE ${contextSourceRefsIncluded(tx, scope.workspaceId, () => tx`${tx.json(currentRefs)}::jsonb`)}`;
     if (!available) throw Object.assign(new Error("stream material unavailable or excluded"), { code: "CONFLICT" });
   }
 }
@@ -527,7 +527,7 @@ async function findCompletedCandidateTarget(db: Sql | TransactionSql, input: Com
       AND j.assistant_turn_id=${input.assistantTurnId} AND j.status='succeeded'
       AND j.claim_token IS NOT DISTINCT FROM ${input.claimToken ?? null}::uuid
       AND (${input.expectedPrivacyEpoch ?? null}::integer IS NULL OR w.privacy_epoch=${input.expectedPrivacyEpoch ?? null})
-      AND ${contextSourceRefsIncluded(db, input.scope.workspaceId, db`t.context_source_refs`)}
+      AND ${contextSourceRefsIncluded(db, input.scope.workspaceId, () => db`t.context_source_refs`)}
       AND NOT EXISTS (
         WITH RECURSIVE mem_deps(dep_id) AS (
           SELECT lower(dep.id)
@@ -1390,7 +1390,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
           const refs = mergeContextSourceRefs(...receipt.results.map(result => result.sourceRefs));
           const provided = input.contextSourceRefs ?? [];
           if (refs.some(ref => !provided.some(item => item.sourceId === ref.sourceId && item.sourceVersion === ref.sourceVersion))) throw new Error("query lineage incomplete");
-          const [admitted] = await tx`SELECT ${contextSourceRefsIncluded(tx, input.scope.workspaceId, tx`${tx.json(provided)}::jsonb`, true, true)} AS included`;
+          const [admitted] = await tx`SELECT ${contextSourceRefsIncluded(tx, input.scope.workspaceId, () => tx`${tx.json(provided)}::jsonb`, true, true)} AS included`;
           if (!admitted?.included) throw new Error("query source unavailable before persistence");
         }
         if (input.expectedPrivacyEpoch !== undefined) {
