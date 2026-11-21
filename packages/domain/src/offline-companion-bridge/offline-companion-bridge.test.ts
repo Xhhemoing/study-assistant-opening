@@ -2197,6 +2197,9 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
       { text: "See [B]; ‹I›ll explain.", answerKey: "B", ok: false },
       { text: "Compare D», [B]. Show your work.", answerKey: "B", ok: false },
       { text: "The marked response <B.> Show your work.", answerKey: "B", ok: false },
+      { text: "The marked response [\\,B].", answerKey: "B", ok: false },
+      { text: "The marked response [\\quad \\mathrm{B}].", answerKey: "B", ok: false },
+      { text: "The marked response <\\text{\\mathbf{B}}.> Show your work.", answerKey: "B", ok: false },
       { text: "The marked response (B)\r\nShow your work.", answerKey: "B", ok: false },
       { text: "标记结果 «B»。解释理由。", answerKey: "B", ok: false },
       { text: "Compare «D»,\n«B». Show your work.", answerKey: "B", ok: false },
@@ -2247,6 +2250,61 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
     "Compare [D], [B]. The answer = B",
   ])("still detects a single-choice reveal in %j", stem => {
     expect(containsAnswerLeak(stem, "B")).toBe(true);
+  });
+
+  describe.each(["variant stem", "sibling card back"] as const)("canonical math options in a %s", surface => {
+    it.each([
+      { secret: { answerKey: '["π","θ"]' }, text: "Use pi and theta.", ok: false },
+      { secret: { answerKey: '["π","θ"]' }, text: "Compare theta and pi.", ok: true },
+      {
+        secret: { answerKey: JSON.stringify(["\\mathbf{π}", "\\mathrm{θ}"]) },
+        text: "Use pi and theta.",
+        ok: false,
+      },
+      { secret: { sealedPayload: { order: ["π", "θ"] } }, text: "Use pi and theta.", ok: false },
+      { secret: { sealedPayload: { order: ["π", "θ"] } }, text: "Compare theta and pi.", ok: true },
+      {
+        secret: { sealedPayload: { order: ["π", "θ"] } },
+        text: "Consider both. Compare «theta» and «pi». Explain.",
+        ok: true,
+      },
+      {
+        secret: { sealedPayload: { order: ["π", "θ"] } },
+        text: "The selected order is theta and pi.",
+        ok: false,
+      },
+      {
+        secret: { sealedPayload: { order: ["π", "θ"] } },
+        text: "Compare theta and pi. The selected value is pi.",
+        ok: false,
+      },
+      {
+        secret: { answerKey: "π", sealedPayload: { order: ["π", "θ"] } },
+        text: "Compare theta and pi.",
+        ok: false,
+      },
+      {
+        secret: { sealedPayload: { order: ["B", "D"] } },
+        text: "Correct option is D and B.",
+        ok: false,
+      },
+    ])("sets ok=$ok for $text ($secret)", ({ secret, text, ok }) => {
+      const variant = makeMissVariantCandidate({
+        ...secret,
+        freshVariantStem: surface === "variant stem" ? text : "Which ordering is correct?",
+      });
+      const candidates = surface === "variant stem" ? [variant] : [
+        variant,
+        { ...makeFlashcardCandidate(900), backSummary: text },
+      ];
+      expect(issueOfflineFlashcardLease({
+        leaseId: "lease-canonical-option-text",
+        workspaceId: "ws-1",
+        learnerId: "learner-1",
+        issuedAtMs: T0,
+        candidates,
+      })).toMatchObject(ok ? { ok: true } : { ok: false, httpStatus: 422, code: "miss_variant_answer_leak" });
+    });
   });
 
   it("rejects a candidate with an inherited protected getter without invoking it", () => {

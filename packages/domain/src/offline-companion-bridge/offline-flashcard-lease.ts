@@ -145,6 +145,7 @@ const MATH_FUNCTION_NAMES = [
 ] as const;
 
 const GREEK_OR_CONST = `(?:${[...GREEK_LETTER_NAMES, ...MATH_CONST_NAMES].join("|")})`;
+const GREEK_OR_CONST_LABEL_RE = new RegExp(`^${GREEK_OR_CONST}$`, "i");
 
 const SHORT_NUMERIC_OR_SYMBOLIC_ANSWER_RE = new RegExp(
   `^(?:` +
@@ -253,6 +254,7 @@ const LATEX_SKIP_DIM_COMMANDS: ReadonlySet<string> = new Set([
 ]);
 
 const LATEX_CONTROL_SPACE_CHARS = new Set([",", ";", ":", "!", " "]);
+const LATEX_OPTION_FORMATTING_COMMANDS = new Set(["text", "mathrm", "mathbf"]);
 
 const LATEX_DIM_PREFIX_RE =
   /^\s*[+-]?\d+(?:\.\d+)?\s*(?:em|ex|pt|px|mu|cm|mm|in|pc|bp|dd|cc|sp)\b/i;
@@ -285,10 +287,15 @@ function skipBalancedGroup(text: string, start: number, openChar: string, closeC
  * `\phantom{...}`, `\begin{...}`, `\end{...}`, `\rule{...}{...}`, `\style{...}`, etc.)
  * to single spaces so their closing braces never masquerade as binary left operands.
  */
-function stripLatexNonOperandCommands(text: string): string {
+function stripLatexNonOperandCommands(text: string, unwrapOptionFormatting = false): string {
+  const formattingClosers = unwrapOptionFormatting ? new Set<number>() : undefined;
   let out = "";
   let i = 0;
   while (i < text.length) {
+    if (formattingClosers?.delete(i)) {
+      i += 1;
+      continue;
+    }
     if (text[i] !== "\\") {
       out += text[i];
       i += 1;
@@ -319,6 +326,15 @@ function stripLatexNonOperandCommands(text: string): string {
       nameEnd += 1;
     }
     const cmdLower = text.slice(i + 1, nameEnd).toLowerCase();
+
+    if (formattingClosers && LATEX_OPTION_FORMATTING_COMMANDS.has(cmdLower)) {
+      const argEnd = skipBalancedGroup(text, nameEnd, "{", "}");
+      if (argEnd !== -1) {
+        formattingClosers.add(argEnd - 1);
+        i = text.indexOf("{", nameEnd) + 1;
+        continue;
+      }
+    }
 
     if (LATEX_ZERO_ARG_NON_OPERAND_COMMANDS.has(cmdLower)) {
       out += " ";
@@ -353,7 +369,7 @@ function stripLatexNonOperandCommands(text: string): string {
       if (argEnd !== -1) {
         let openBrace = cursor;
         while (openBrace < argEnd && text[openBrace] !== "{") openBrace += 1;
-        const inner = stripLatexNonOperandCommands(text.slice(openBrace + 1, argEnd - 1));
+        const inner = stripLatexNonOperandCommands(text.slice(openBrace + 1, argEnd - 1), unwrapOptionFormatting);
         out += isStarred ? ` ; ${inner} ` : ` (${inner}) `;
         i = argEnd;
         continue;
@@ -1130,11 +1146,19 @@ function collapseSpacedProseArticleSigns(text: string, preserveLineBreaks: boole
   );
 }
 
-function normalizeMathOperators(text: string): string {
+function normalizeMathSymbols(text: string): string {
   for (const [pattern, replacement] of UNICODE_MATH_REPLACEMENTS) {
     text = text.replace(pattern, replacement);
   }
-  text = text.trim().replace(/\s+/g, " ");
+  return text;
+}
+
+function normalizeOptionSyntax(syntax: string): string {
+  return normalizeMathSymbols(stripLatexNonOperandCommands(syntax, true));
+}
+
+function normalizeMathOperators(text: string): string {
+  text = normalizeMathSymbols(text).trim().replace(/\s+/g, " ");
   // Collapse whitespace around math operators and parentheses in math expressions.
   text = text.replace(/\s*(<=|>=|!=|~=|==|=|<|>|\/|\*|\^)\s*/g, "$1");
   text = text.replace(/\(\s+/g, "(").replace(/\s+\)/g, ")");
@@ -1334,6 +1358,22 @@ function compactJsonPunctuation(text: string): string {
   );
 }
 
+function normalizeOptionLabels(values: readonly unknown[]): string[] | null {
+  const labels: string[] = [];
+  for (const value of values) {
+    if (typeof value !== "string") return null;
+    const label = normalizeOptionSyntax(normalizeLeakSyntax(value)).replace(/\s+/g, " ").trim();
+    if (!label) return null;
+    labels.push(WRAPPED_OPTION_LETTER_RE.exec(label)?.[1] ?? label);
+  }
+  return labels;
+}
+
+function optionSequenceSource(labels: readonly string[]): string {
+  const sequence = labels.map(label => escapeRegExp(label).replace(/ /g, "\\s+")).join(OPTION_SEQUENCE_SEPARATOR);
+  return `(?<!${NON_CJK_WORD_CHAR})${sequence}(?!${NON_CJK_WORD_CHAR})`;
+}
+
 function containsArrayAnswerLeak(
   optionText: string,
   normalizedStem: string,
@@ -1357,15 +1397,11 @@ function containsArrayAnswerLeak(
 
   // Normalize each decoded label before building the ordered sequence.
   if (values.length < 2) return false;
-  const labels: string[] = [];
-  for (const value of values) {
-    if (typeof value !== "string") return false;
-    const label = normalizeLeakSyntax(value).replace(/\s+/g, " ").trim();
-    if (!label) return false;
-    labels.push(WRAPPED_OPTION_LETTER_RE.exec(label)?.[1] ?? label);
-  }
-  const sequence = labels.map(escapeRegExp).join(OPTION_SEQUENCE_SEPARATOR);
-  return new RegExp(`(?<!${NON_CJK_WORD_CHAR})${sequence}(?!${NON_CJK_WORD_CHAR})`, "iu").test(optionText);
+  const labels = normalizeOptionLabels(values);
+  return labels !== null && (
+    new RegExp(optionSequenceSource(labels), "iu").test(optionText) ||
+    new RegExp(optionSequenceSource(labels.map(normalizeComparableText)), "iu").test(normalizedStem)
+  );
 }
 
 /**
@@ -1382,7 +1418,8 @@ export function containsAnswerLeak(
   options: { readonly includeShortTokens?: boolean } = {},
 ): boolean {
   const stemSyntax = normalizeLeakSyntax(rawText);
-  const optionText = stemSyntax.replace(/\s+/g, " ");
+  const optionSyntax = normalizeOptionSyntax(stemSyntax);
+  const optionText = optionSyntax.replace(/\s+/g, " ");
   const casedStem = canonicalizeMathNotationPreserveCase(stemSyntax);
   const normalizedStem = casedStem.toLowerCase();
   const normalizedSecret = normalizeComparableText(secretText);
@@ -1471,7 +1508,7 @@ export function containsAnswerLeak(
             return true;
           }
         } else if (SINGLE_CHOICE_LETTER_RE.test(segment)) {
-          if (containsSingleChoiceReveal(stemSyntax, optionText, segment)) {
+          if (containsSingleChoiceReveal(optionSyntax, optionText, segment)) {
             return true;
           }
         } else if (segment.length >= 2 && segment.length < 6 && /[\p{L}\p{N}]/u.test(segment)) {
@@ -1589,14 +1626,20 @@ function normalizeComparableText(value: string): string {
 const MAX_PROTECTED_PAYLOAD_DEPTH = 64;
 const MAX_PROTECTED_PAYLOAD_NODES = 4_096;
 
-function collectSecretTexts(value: unknown): ReadonlySet<string> | null {
+interface ProtectedAnswerTexts {
+  readonly texts: Set<string>;
+  readonly mathOptionGroups: { members: string[]; labels: string[] }[];
+}
+
+function collectSecretTexts(value: unknown): ProtectedAnswerTexts | null {
   const texts = new Set<string>();
+  const mathOptionGroups: ProtectedAnswerTexts["mathOptionGroups"] = [];
   const ancestors = new Set<object>();
   let remainingNodes = MAX_PROTECTED_PAYLOAD_NODES;
 
   // Build JSON text from the inspected properties so serialization cannot
   // traverse unchecked values or execute getters and toJSON hooks.
-  function inspect(current: unknown, depth: number): string | undefined {
+  function inspect(current: unknown, depth: number, collectText = true): string | undefined {
     remainingNodes -= 1;
     if (depth > MAX_PROTECTED_PAYLOAD_DEPTH || remainingNodes < 0) {
       throw new RangeError("Protected payload exceeds inspection bounds");
@@ -1605,7 +1648,7 @@ function collectSecretTexts(value: unknown): ReadonlySet<string> | null {
     if (current === null) return "null";
     if (typeof current === "string" || typeof current === "number" || typeof current === "boolean") {
       const text = String(current).trim();
-      if (text) texts.add(text);
+      if (text && collectText) texts.add(text);
       return JSON.stringify(current);
     }
     if (typeof current !== "object" || ancestors.has(current)) {
@@ -1630,6 +1673,7 @@ function collectSecretTexts(value: unknown): ReadonlySet<string> | null {
     }
 
     const parts = arrayLength === null ? [] : new Array<string>(arrayLength).fill("null");
+    const arrayStrings = arrayLength === null ? undefined : new Array<string>(arrayLength).fill("");
     let indexedChildren = 0;
     ancestors.add(current);
     for (const key of keys) {
@@ -1638,7 +1682,9 @@ function collectSecretTexts(value: unknown): ReadonlySet<string> | null {
       if (!property || !Object.hasOwn(property, "value")) {
         throw new TypeError("Protected payload properties must be inspectable data");
       }
-      const json = inspect(property.value, depth + 1);
+      const arrayString = arrayStrings !== undefined && typeof property.value === "string";
+      if (arrayString) arrayStrings[Number(key)] = property.value.trim();
+      const json = inspect(property.value, depth + 1, !arrayString);
       if (typeof key !== "string") continue;
       if (arrayLength !== null) {
         parts[Number(key)] = json ?? "null";
@@ -1652,6 +1698,16 @@ function collectSecretTexts(value: unknown): ReadonlySet<string> | null {
     if (arrayLength !== null) {
       remainingNodes -= arrayLength - indexedChildren;
       if (remainingNodes < 0) throw new RangeError("Protected payload exceeds inspection bounds");
+      if (arrayStrings) {
+        const labels = arrayLength >= 2 ? normalizeOptionLabels(arrayStrings) : null;
+        if (labels?.every(label => GREEK_OR_CONST_LABEL_RE.test(label))) {
+          mathOptionGroups.push({ members: arrayStrings, labels });
+        } else {
+          for (const text of arrayStrings) {
+            if (text) texts.add(text);
+          }
+        }
+      }
       const json = `[${parts.join(",")}]`;
       if (arrayLength > 0) texts.add(json);
       return json;
@@ -1663,10 +1719,33 @@ function collectSecretTexts(value: unknown): ReadonlySet<string> | null {
 
   try {
     inspect(value, 0);
-    return texts;
+    return { texts, mathOptionGroups };
   } catch {
     return null;
   }
+}
+
+function containsProtectedAnswerLeak(text: string, protectedAnswers: ProtectedAnswerTexts): boolean {
+  for (const secret of protectedAnswers.texts) {
+    if (containsAnswerLeak(text, secret)) return true;
+  }
+  if (!protectedAnswers.mathOptionGroups.length) return false;
+
+  const optionSyntax = normalizeOptionSyntax(normalizeLeakSyntax(text));
+  for (const { members, labels } of protectedAnswers.mathOptionGroups) {
+    // Ignore the reversed list in a comparison sentence only when checking its
+    // members. The ordered list and any independently protected value still apply.
+    const reversedSequence = optionSequenceSource(labels.slice().reverse());
+    const comparison = new RegExp(
+      `(?:^|(?<=${OPTION_SENTENCE_TERMINATOR_RE.source}\\s|[\\r\\n\\u2028\\u2029]))[^\\S\\r\\n\\u2028\\u2029]*` +
+      `compare\\s+(?:${OPTION_WRAPPER_OPEN}\\s*)?${reversedSequence}(?:${OPTION_CLOSING})?(?=${OPTION_SENTENCE_END})`,
+      "giu",
+    );
+    const withoutComparison = optionSyntax.replace(comparison, match => LINE_BREAK_RE.test(match) ? match : " ");
+    const standaloneText = withoutComparison === optionSyntax ? text : withoutComparison;
+    if (members.some(secret => containsAnswerLeak(standaloneText, secret))) return true;
+  }
+  return false;
 }
 
 function canonicalizeForFingerprint(value: unknown): string {
@@ -1953,7 +2032,7 @@ function toLedgerRecord(
 
 function sanitizeLeaseCandidate(
   candidate: OfflineLeaseCardCandidate,
-  allProtectedSecrets: ReadonlySet<string>,
+  protectedAnswers: ProtectedAnswerTexts,
 ):
   | { readonly ok: true; readonly card: OfflineLeaseCard }
   | {
@@ -2030,19 +2109,17 @@ function sanitizeLeaseCandidate(
         message: `Flashcard ${candidateCardId} refused: prompt or backSummary contains solution/answer directive markup.`,
       };
     }
-    for (const secretText of allProtectedSecrets) {
-      if (
-        containsAnswerLeak(candidate.prompt, secretText, { includeShortTokens: true }) ||
-        containsAnswerLeak(candidate.backSummary, secretText, { includeShortTokens: true })
-      ) {
-        return {
-          ok: false,
-          code: "miss_variant_answer_leak",
-          httpStatus: 422,
-          cardId: candidateCardId,
-          message: `Flashcard ${candidateCardId} refused: prompt or backSummary leaks protected sealed/answer material.`,
-        };
-      }
+    if (
+      containsProtectedAnswerLeak(candidate.prompt, protectedAnswers) ||
+      containsProtectedAnswerLeak(candidate.backSummary, protectedAnswers)
+    ) {
+      return {
+        ok: false,
+        code: "miss_variant_answer_leak",
+        httpStatus: 422,
+        cardId: candidateCardId,
+        message: `Flashcard ${candidateCardId} refused: prompt or backSummary leaks protected sealed/answer material.`,
+      };
     }
     const sanitized: OfflineLeasedStandardFlashcard = {
       cardId: canonicalizeIdentifier(candidateCardId),
@@ -2084,16 +2161,14 @@ function sanitizeLeaseCandidate(
       };
     }
     // Check the stem against protected values from this card and its siblings.
-    for (const secretText of allProtectedSecrets) {
-      if (containsAnswerLeak(candidate.freshVariantStem, secretText, { includeShortTokens: true })) {
-        return {
-          ok: false,
-          code: "miss_variant_answer_leak",
-          httpStatus: 422,
-          cardId: candidateCardId,
-          message: `Miss variant card ${candidateCardId} refused: freshVariantStem leaks protected answer/sealed material.`,
-        };
-      }
+    if (containsProtectedAnswerLeak(candidate.freshVariantStem, protectedAnswers)) {
+      return {
+        ok: false,
+        code: "miss_variant_answer_leak",
+        httpStatus: 422,
+        cardId: candidateCardId,
+        message: `Miss variant card ${candidateCardId} refused: freshVariantStem leaks protected answer/sealed material.`,
+      };
     }
 
     // Strict allowlist construction: physically excludes answerKey, canonicalSolution,
@@ -2328,7 +2403,7 @@ export function issueOfflineFlashcardLease(
 
   // Collect protected secrets across ALL candidates so every card (flashcard AND miss_variant)
   // is checked against both self and cross-card protected answers/sealed payloads.
-  const allProtectedSecrets = new Set<string>();
+  const protectedAnswers: ProtectedAnswerTexts = { texts: new Set(), mathOptionGroups: [] };
   for (const candidate of candidates) {
     for (const forbiddenField of FORBIDDEN_MISS_VARIANT_FIELDS) {
       const property = Object.getOwnPropertyDescriptor(candidate, forbiddenField);
@@ -2343,14 +2418,15 @@ export function issueOfflineFlashcardLease(
           message: `Offline lease refused: protected field ${forbiddenField} could not be fully inspected.`,
         };
       }
-      for (const text of secretTexts) allProtectedSecrets.add(text);
+      for (const text of secretTexts.texts) protectedAnswers.texts.add(text);
+      for (const group of secretTexts.mathOptionGroups) protectedAnswers.mathOptionGroups.push(group);
     }
   }
 
   const seenCardIds = new Set<string>();
   const sanitizedCards: OfflineLeaseCard[] = [];
   for (const candidate of candidates) {
-    const sanitized = sanitizeLeaseCandidate(candidate, allProtectedSecrets);
+    const sanitized = sanitizeLeaseCandidate(candidate, protectedAnswers);
     if (!sanitized.ok) {
       return sanitized;
     }
