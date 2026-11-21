@@ -1852,6 +1852,14 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
     "Let m = 6 and s = 2, (b) Speed change: (m/s) −4.",
     "Speed change: (m/s) −4, (b) let m = 6 and s = 2.",
     "Speed change: (m/s) −4 (b) m = 6 and s = 2.",
+    "Speed change: (m/s) −4 (b): m = 6 and s = 2.",
+    "Speed change: (m/s) −4 (b)： m = 6 and s = 2.",
+    "Speed change: (m/s) −4 (b). m = 6 and s = 2.",
+    "Speed change: (m/s) −4 (b); m = 6 and s = 2.",
+    "Speed change: (m/s) −4 (b), m = 6 and s = 2.",
+    "Speed change: (m/s) −4 (b) - m = 6 and s = 2.",
+    "Speed change: (m/s) −4 (b) — m = 6 and s = 2.",
+    "Speed change: (m/s) −4 2(b)– m = 6 and s = 2.",
     "Speed change: (m/s) −4 (i) m := 6, m = 6 and s = 2.",
     "Speed change: (m/s) −4 (ii) $m = 6$ and s = 2.",
     "Let m = 6 and s = 2 (b) speed change: (m/s) −4.",
@@ -1930,6 +1938,8 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
     "(m/s) −4, where m = 2(x) and s = 3.",
     "(m/s) −4, where m = 2(b) = 8 and s = 2.",
     "(m/s) −4, where m = (a) + (b) and s = 2.",
+    "(m/s) −4, where m = 2(b), s = 2.",
+    "(m/s) −4, where m = (a) + (b), s = 2.",
     "(m/s) −4, where m = approx. +.6 and s = 2.",
     "(m/s) −4, where m = approx. 5.2 and s = 2.",
     "(m/s) −4, e.g. m = 6 and s = 2.",
@@ -1954,12 +1964,22 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
     ["variant stem", '"B, D"'],
     ["variant stem", "'B , D'"],
     ["variant stem", "[B, D]"],
+    ["variant stem", '"B", "D"'],
+    ["variant stem", "' B ', ' D '"],
+    ["variant stem", "“B”， “D”"],
+    ["variant stem", "「 B 」 、 「 D 」"],
+    ["variant stem", "[ B ], ( D )"],
     ["sibling card", '["B","D"]'],
     ["sibling card", '["B", "D"]'],
     ["sibling card", "B , D"],
     ["sibling card", '"B , D"'],
     ["sibling card", "'B, D'"],
     ["sibling card", "[B, D]"],
+    ["sibling card", '"B", "D"'],
+    ["sibling card", "`B`, `D`"],
+    ["sibling card", "‘B’、‘D’"],
+    ["sibling card", "B、D"],
+    ["sibling card", 'B , " D "'],
   ] as const)("rejects a sealed array in a %s (%s)", (surface, sequence) => {
     const leakedText = `Use the sequence ${sequence}.`;
     const variant = makeMissVariantCandidate({
@@ -1979,18 +1999,21 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
     })).toMatchObject({ ok: false, httpStatus: 422, code: "miss_variant_answer_leak" });
   });
 
-  it.each(['["D", "B"]', '"AB , D"', '"B, Delta"'])("allows a different sequence in a stem (%s)", sequence => {
-    expect(issueOfflineFlashcardLease({
-      leaseId: "lease-array-decoy",
-      workspaceId: "ws-1",
-      learnerId: "learner-1",
-      issuedAtMs: T0,
-      candidates: [makeMissVariantCandidate({
-        freshVariantStem: `Compare the sequence ${sequence} with your result.`,
-        sealedPayload: { order: ["B", "D"] },
-      })],
-    })).toMatchObject({ ok: true });
-  });
+  it.each(['["D", "B"]', '"AB , D"', '"B, Delta"', '"D", "B"', '"Bad", "Dog"'])(
+    "allows a different sequence in a stem (%s)",
+    sequence => {
+      expect(issueOfflineFlashcardLease({
+        leaseId: "lease-array-decoy",
+        workspaceId: "ws-1",
+        learnerId: "learner-1",
+        issuedAtMs: T0,
+        candidates: [makeMissVariantCandidate({
+          freshVariantStem: `Compare the sequence ${sequence} with your result.`,
+          sealedPayload: { order: ["B", "D"] },
+        })],
+      })).toMatchObject({ ok: true });
+    },
+  );
 
   it("rejects a candidate with an inherited protected getter without invoking it", () => {
     let getterCalled = false;

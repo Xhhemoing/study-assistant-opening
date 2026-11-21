@@ -515,8 +515,9 @@ const NUMBERED_ITEM_MARKER = `(?:\\d+[.)]?\\s*${BRACKETED_ITEM_MARKER}|\\d+(?:[A
 const ITEM_MARKER_AFTER_ABBREVIATION_RE = new RegExp(
   `^\\s*(?:${NUMBERED_ITEM_MARKER}|${BRACKETED_ITEM_MARKER})`,
 );
-const ITEM_MARKER_FOLLOW = "(?=$|[\\s:：\\p{L}])";
-const SPACED_ITEM_START = String.raw`\s+(?:\p{L}{2}|[A-Za-z]\s*(?::=|=(?![=>])|∈|\\in\b)|\$[^$\r\n]+\$)`;
+const SPACED_ITEM_START =
+  String.raw`(?:\s*[:：.;,\-–—])?\s+(?:\p{L}{2}|[A-Za-z]\s*(?::=|=(?![=>])|∈|\\in\b)|\$[^$\r\n]+\$)`;
+const ITEM_MARKER_FOLLOW = `(?=$|[\\s:：\\p{L}]|${SPACED_ITEM_START})`;
 const ITEM_MARKER_WITHIN_SENTENCE_RE = new RegExp(
   `(?<=^|[\\s,，、:：])(?<![=+*/^−-]\\s*)(?:${NUMBERED_ITEM_MARKER}|(?:[Ee]xercise|[Pp]roblem|[Qq]uestion|[Pp]art|[Ii]tem)\\s+\\d+)${ITEM_MARKER_FOLLOW}|` +
     `(?<=(?:^|[,，、:：])\\s*)${BRACKETED_ITEM_MARKER}${ITEM_MARKER_FOLLOW}|` +
@@ -1263,6 +1264,9 @@ function compactJsonPunctuation(text: string): string {
   );
 }
 
+// Match optional closing and opening wrappers between labels, preserving the word boundaries at the ends.
+const OPTION_SEQUENCE_SEPARATOR = /\s*(?:["'`”’」』】)\]}]\s*)?[,，、]\s*(?:["'`“‘「『【([{]\s*)?/.source;
+
 function containsArrayAnswerLeak(stem: string, normalizedSecret: string, rawSecret: string): boolean {
   if (!rawSecret.trimStart().startsWith("[")) return false;
   let values: unknown;
@@ -1276,11 +1280,11 @@ function containsArrayAnswerLeak(stem: string, normalizedSecret: string, rawSecr
   const compactStem = compactJsonPunctuation(stem);
   if (compactStem.includes(compactJsonPunctuation(normalizedSecret))) return true;
 
-  // Complete letter-choice sequences can also be disclosed without JSON quotes.
+  // Complete letter-choice sequences can also be disclosed outside JSON arrays.
   if (values.length < 2 || !values.every((value: unknown) => typeof value === "string" && /^[a-z]$/i.test(value))) {
     return false;
   }
-  const sequence = values.join("\\s*,\\s*");
+  const sequence = values.join(OPTION_SEQUENCE_SEPARATOR);
   return new RegExp(`(?<!${NON_CJK_WORD_CHAR})${sequence}(?!${NON_CJK_WORD_CHAR})`, "iu").test(stem);
 }
 
