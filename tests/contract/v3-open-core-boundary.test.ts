@@ -47,7 +47,9 @@ type GraphOptions = {
   profile?: RuntimeProfile;
 };
 
-const SOURCE_EXTENSIONS = [".ts", ".tsx", ".d.ts", ".mts", ".cts", ".d.mts", ".d.cts", ".js", ".jsx", ".mjs", ".cjs"];
+const SOURCE_EXTENSIONS = [".js", ".cjs", ".mjs", ".jsx", ".ts", ".tsx", ".d.ts", ".mts", ".cts", ".d.mts", ".d.cts"];
+// Node probes .js, .json, then .node. Also guard a host's Wasm fallback.
+const CJS_FALLBACK_EXTENSIONS = [".js", ".json", ".node", ".wasm"];
 const SOURCE_SUBSTITUTIONS: Record<string, string[]> = {
   ".js": [".ts", ".tsx", ".d.ts"],
   ".jsx": [".tsx", ".d.ts"],
@@ -184,9 +186,9 @@ function unwrapParens(expr: ts.Expression): ts.Expression {
   return expr;
 }
 
-function mentionsCreateRequire(node: ts.Node): true | undefined {
-  if ((ts.isIdentifier(node) || ts.isStringLiteralLike(node)) && node.text === "createRequire") return true;
-  return ts.forEachChild(node, mentionsCreateRequire);
+function mentionsLoader(node: ts.Node): true | undefined {
+  if ((ts.isIdentifier(node) || ts.isStringLiteralLike(node)) && ["require", "module", "createRequire"].includes(node.text)) return true;
+  return ts.forEachChild(node, mentionsLoader);
 }
 
 function localBindingChecker(source: ts.SourceFile): ts.TypeChecker {
@@ -205,7 +207,7 @@ function nodeModuleAPI(expr: ts.Expression | undefined): boolean {
   return !!name && ts.isStringLiteralLike(name) && (name.text === "node:module" || name.text === "module");
 }
 
-type LoaderBinding = "require" | "factory" | "module-api";
+type LoaderBinding = "require" | "factory" | "module-api" | "commonjs-module";
 
 function loaderBinding(expr: ts.Expression, checker?: ts.TypeChecker, seen = new Set<ts.Declaration>()): LoaderBinding | undefined {
   const value = unwrapParens(expr);
@@ -213,10 +215,9 @@ function loaderBinding(expr: ts.Expression, checker?: ts.TypeChecker, seen = new
     const receiver = unwrapParens(value.expression);
     const key = ts.isElementAccessExpression(value) ? unwrapParens(value.argumentExpression) : undefined;
     const name = ts.isPropertyAccessExpression(value) ? value.name.text : key && ts.isStringLiteralLike(key) ? key.text : undefined;
-    if (name === "require" && ts.isIdentifier(receiver) && receiver.text === "module") return "require";
+    if (name === "require" && loaderBinding(receiver, checker, seen) === "commonjs-module") return "require";
     if (name === "createRequire" && loaderBinding(receiver, checker, seen) === "module-api") return "factory";
   }
-  if (ts.isIdentifier(value) && value.text === "require") return "require";
   if (!checker) return undefined;
   if (ts.isCallExpression(value)) {
     const binding = loaderBinding(value.expression, checker, seen);
@@ -224,8 +225,15 @@ function loaderBinding(expr: ts.Expression, checker?: ts.TypeChecker, seen = new
     if (binding === "require" && nodeModuleAPI(value.arguments[0])) return "module-api";
   }
   if (!ts.isIdentifier(value)) return undefined;
-  const decl = checker.getSymbolAtLocation(value)?.declarations?.[0];
-  if (!decl) return value.text === "createRequire" ? "factory" : undefined;
+  const symbol = checker.resolveName(value.text, value, ts.SymbolFlags.Value | ts.SymbolFlags.Alias, false);
+  const decl = symbol?.declarations?.find(d => !(ts.getCombinedModifierFlags(d) & ts.ModifierFlags.Ambient) &&
+    !ts.isTypeOnlyImportOrExportDeclaration(d));
+  // In a .cjs file TypeScript can synthesize an Identifier declaration for the host module.
+  if (value.text === "module" && (!decl || ts.isIdentifier(decl))) return "commonjs-module";
+  if (!decl) {
+    if (value.text === "require") return "require";
+    return value.text === "createRequire" ? "factory" : undefined;
+  }
   if (seen.has(decl)) return undefined;
   seen.add(decl);
   if (ts.isVariableDeclaration(decl) && decl.initializer) return loaderBinding(decl.initializer, checker, seen);
@@ -236,19 +244,101 @@ function loaderBinding(expr: ts.Expression, checker?: ts.TypeChecker, seen = new
   if (ts.isImportClause(decl) && nodeModuleAPI(decl.parent.moduleSpecifier)) return "module-api";
   if (ts.isBindingElement(decl) && ts.isObjectBindingPattern(decl.parent)) {
     const name = decl.propertyName ?? decl.name;
-    if (!(ts.isIdentifier(name) || ts.isStringLiteralLike(name)) || name.text !== "createRequire") return undefined;
     const owner = decl.parent.parent;
-    if (ts.isVariableDeclaration(owner) && owner.initializer &&
-        loaderBinding(owner.initializer, checker, seen) === "module-api") return "factory";
+    if ((ts.isIdentifier(name) || ts.isStringLiteralLike(name)) && ts.isVariableDeclaration(owner) && owner.initializer) {
+      const binding = loaderBinding(owner.initializer, checker, seen);
+      if (name.text === "createRequire" && binding === "module-api") return "factory";
+      if (name.text === "require" && binding === "commonjs-module") return "require";
+    }
   }
   return undefined;
 }
 
+function escapingLoader(node: ts.Expression, checker: ts.TypeChecker): boolean {
+  const parent = node.parent;
+  // Check the outermost value once, excluding type positions and declaration/property names.
+  if (ts.isExpression(parent) && unwrapParens(parent) !== parent) return false;
+  if (ts.isPartOfTypeNode(node) || ts.isTypeQueryNode(parent) || ts.isQualifiedName(parent)) return false;
+  if (ts.isExportSpecifier(parent)) {
+    if (parent.isTypeOnly || parent.parent.parent.isTypeOnly || parent.parent.parent.moduleSpecifier ||
+        node !== (parent.propertyName ?? parent.name)) return false;
+  } else if (ts.isBindingElement(parent) && node === parent.name) {
+    if (!(ts.getCombinedModifierFlags(parent) & ts.ModifierFlags.Export)) return false;
+  } else if (!ts.isShorthandPropertyAssignment(parent) &&
+      ((parent as ts.NamedDeclaration).name === node || ("propertyName" in parent && parent.propertyName === node))) return false;
+  if (ts.isCallExpression(parent) && parent.expression === node) return false;
+  if (ts.isVariableDeclaration(parent) && parent.initializer === node && ts.isIdentifier(parent.name)) {
+    if (!(ts.getCombinedModifierFlags(parent) & ts.ModifierFlags.Export)) return false;
+  }
+  if (ts.isTypeOfExpression(parent) || ts.isVoidExpression(parent)) return false;
+  return loaderBinding(node, checker) === "require";
+}
+
+function jsDocEdges(source: ts.SourceFile): Edge[] {
+  const text = source.text;
+  if (!text.includes("/**") || !text.includes("import")) return [];
+  const edges: Edge[] = [];
+  const comments = new Map<number, number>();
+  const parsed = new Set<number>();
+  const literals: ts.TextRange[] = [];
+  const emit = (pos: number, spec: string) => {
+    edges.push({ spec: slash(spec), line: source.getLineAndCharacterOfPosition(pos).line + 1, kind: "type" });
+  };
+  function visitTag(node: ts.Node): void {
+    if (ts.isStringLiteralLike(node)) literals.push(node);
+    if (ts.isImportTypeNode(node)) {
+      const tokens = node.getChildren(source);
+      const pos = tokens.find(t => t.kind === ts.SyntaxKind.ImportKeyword)?.getStart(source) ?? node.getStart(source);
+      const arg = ts.isLiteralTypeNode(node.argument) ? node.argument.literal : undefined;
+      const complete = tokens.some(t => t.kind === ts.SyntaxKind.CloseParenToken) && tokens.every(t => t.getWidth(source) > 0);
+      if (!parsed.has(pos)) emit(pos, complete && arg && ts.isStringLiteral(arg) ? arg.text : "<dynamic-non-literal>");
+      parsed.add(pos);
+    } else if (ts.isJSDocImportTag(node)) {
+      const spec = node.moduleSpecifier;
+      emit(node.getStart(source), ts.isStringLiteral(spec) ? spec.text : "<dynamic-non-literal>");
+    }
+    ts.forEachChild(node, visitTag);
+  }
+  function visitTokens(node: ts.Node): void {
+    if (ts.isJSDoc(node)) return;
+    for (const doc of (node as { jsDoc?: readonly ts.JSDoc[] }).jsDoc ?? []) {
+      comments.set(doc.pos, doc.end);
+      visitTag(doc);
+    }
+    if (!ts.isToken(node)) {
+      node.getChildren(source).forEach(visitTokens);
+      return;
+    }
+    // Detached documentation also lives in token trivia. String and template contents do not.
+    for (const range of [...ts.getLeadingCommentRanges(text, node.pos) ?? [], ...ts.getTrailingCommentRanges(text, node.pos) ?? []]) {
+      if (text.startsWith("/**", range.pos)) comments.set(range.pos, range.end);
+    }
+  }
+  visitTokens(source);
+  for (const [start, end] of comments) {
+    // Keep offsets while allowing JSDoc line prefixes between the import tokens.
+    const comment = text.slice(start, end).replace(/^(\s*)\*(?!\/)/gmu, "$1 ");
+    for (const match of comment.matchAll(/\bimport\s*\(/gu)) {
+      const pos = start + match.index;
+      if (parsed.has(pos) || literals.some(literal => literal.pos <= pos && pos < literal.end)) continue;
+      // Heritage tags, inline text and malformed tags may have no ImportTypeNode.
+      const arg = match.index + match[0].length;
+      const scanner = ts.createScanner(ts.ScriptTarget.Latest, true, ts.LanguageVariant.Standard, comment, undefined, arg, comment.length - arg);
+      const literal = scanner.scan() === ts.SyntaxKind.StringLiteral && !scanner.isUnterminated();
+      const name = scanner.getTokenValue();
+      emit(pos, literal && scanner.scan() === ts.SyntaxKind.CloseParenToken ? name : "<dynamic-non-literal>");
+    }
+  }
+  return edges;
+}
+
 function parseEdges(file: string, text: string): Edge[] {
   // TypeScript infers ScriptKind from the filename, including TSX and JS variants.
-  const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true);
-  const checker = mentionsCreateRequire(source) ? localBindingChecker(source) : undefined;
-  const edges: Edge[] = [];
+  const source = ts.createSourceFile(file, text, {
+    languageVersion: ts.ScriptTarget.Latest, jsDocParsingMode: ts.JSDocParsingMode.ParseAll,
+  }, true);
+  const checker = mentionsLoader(source) ? localBindingChecker(source) : undefined;
+  const edges = jsDocEdges(source);
   for (const ref of source.referencedFiles) {
     const name = slash(ref.fileName);
     const relative = !rootedPath(name) && !name.startsWith("./") && !name.startsWith("../");
@@ -272,6 +362,9 @@ function parseEdges(file: string, text: string): Edge[] {
     edges.push({ spec, line: line(node), kind });
   }
   const visit = (node: ts.Node): void => {
+    if (checker && ts.isExpression(node) && escapingLoader(node, checker)) {
+      edges.push({ spec: "<escaping-loader>", line: line(node), kind: "require" });
+    }
     if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
       const clause = node.importClause;
       const typeOnly = Boolean(
@@ -508,8 +601,21 @@ class ModuleGraph {
   ): Resolution[] {
     const relative = path.relative(this.root, base);
     if (relative.split(path.sep)[0] === ".." || path.isAbsolute(relative) || seenDirs.has(base)) return [{ violation: spec }];
-    const mappedDirectory = this.targetKind(base, spec) === "directory" && lookup === "module";
+    const directory = this.targetKind(base, spec) === "directory";
+    const mappedDirectory = directory && lookup === "module";
     const extension = /\.d\.[cm]?ts$/u.exec(base)?.[0] ?? path.extname(base);
+    if (use === "runtime" && lookup !== "file-reference") {
+      const stems = [];
+      if (relative && lookup !== "package-root" && !extension) stems.push(base);
+      if (directory) stems.push(path.join(base, "index"));
+      for (const stem of stems) {
+        for (const ext of CJS_FALLBACK_EXTENSIONS) {
+          const file = stem + ext;
+          if (packageScope) this.checkPackagePath(packageScope, file, spec);
+          if (this.targetKind(file, this.label(file)) === "file") break;
+        }
+      }
+    }
     let candidates: string[];
     if (lookup === "file-reference") {
       // A path directive names a file. A same-named directory cannot satisfy it.
@@ -1419,6 +1525,129 @@ describe("v3 Open-Core public candidate boundary", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  it("checks the CommonJS main fallback on disk before accepting a TypeScript sibling", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "aistudy-native-main-"));
+    try {
+      const owner = path.join(root, "packages/lite");
+      const dist = path.join(owner, "dist");
+      mkdirSync(dist, { recursive: true });
+      writeFileSync(path.join(owner, "package.json"), JSON.stringify({ name: "@aistudy/lite", main: "./dist/native" }), "utf8");
+      writeFileSync(path.join(dist, "native.ts"), "", "utf8");
+      writeFileSync(path.join(dist, "native.node"), Uint8Array.of(0, 255));
+      const entry = path.join(root, "entry.cjs");
+      writeFileSync(entry, 'require("@aistudy/lite");', "utf8");
+      const check = () => analyzeModuleGraph([entry], { root }).violations.map(v => v.target);
+      expect(check()).toEqual(["packages/lite/dist/native.node"]);
+      writeFileSync(path.join(dist, "native.cjs"), 'require("jose");', "utf8");
+      writeFileSync(path.join(dist, "native.mjs"), 'import "postgres";', "utf8");
+      expect(check()).toEqual(["packages/lite/dist/native.node"]);
+      writeFileSync(path.join(dist, "native.js"), 'require("pg");', "utf8");
+      expect(check().sort()).toEqual(["jose", "pg", "postgres"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ["./helper", "helper/index.node"], ["./helper", "helper/index.json"], ["#mapped", "helper.wasm"],
+    ["@aistudy/lite/feature", "helper.node"],
+  ])("checks runtime fallback %s for %s", (spec, artifact) => {
+    const result = virtualAnalyze({
+      "lite/entry.cjs": `require("${spec}");`,
+      "lite/package.json": JSON.stringify({ name: "@aistudy/lite", imports: { "#mapped": "./helper" },
+        exports: { "./feature": { require: "./helper" } } }),
+      ["lite/" + artifact]: "", ["lite/" + artifact.slice(0, artifact.lastIndexOf(".")) + ".ts"]: "",
+    }, "lite/entry.cjs");
+    expect(result.violations.map(v => v.target)).toEqual(["lite/" + artifact]);
+  });
+
+  it.each([
+    ['const load = (require); module.exports = (load)(("pg"));', "pg"],
+    ['const r1 = module.require; const r2 = r1; r2("jose");', "jose"],
+    ['const r1 = module["require"]; const r2 = r1; r2(name);', "<dynamic-non-literal>"],
+    ['function publish() { return require; }', "<escaping-loader>"],
+    ['export const r = require;', "<escaping-loader>"],
+    ['const r = require; export { r as loader };', "<escaping-loader>"],
+    ['const r = require; obj.r = r;', "<escaping-loader>"],
+    ['send(module["require"]);', "<escaping-loader>"],
+    ['const r = require; module.exports = { r };', "<escaping-loader>"],
+    ['let r = require; r = choose();', "<escaping-loader>"],
+    ['let r; r = require;', "<escaping-loader>"],
+  ])("tracks a CommonJS loader value through %s", (code, target) => {
+    const result = virtualAnalyze({ "entry.ts": 'import "./public.cjs";', "public.cjs": code }, "entry.ts");
+    expect(result.violations.map(v => v.target)).toEqual([target]);
+  });
+
+  it("distinguishes local bindings named require and module from host loaders", () => {
+    const result = virtualAnalyze({ "public.cjs": [
+      'function f(require, module) { const r = require; r("pg"); module.require("pg"); return require; }',
+      'function g() { const module = {require: f}; return module["require"]("pg"); }',
+      'const load = require; function h(load) { return load("pg"); } load("zod");',
+    ].join("\n") }, "public.cjs");
+    expect(result.violations).toEqual([]);
+  });
+
+  it("keeps host loader bindings when TypeScript declarations disappear at runtime", () => {
+    const result = virtualAnalyze({
+      "entry.ts": 'declare const require: (s: string) => unknown; declare const module: { require: typeof require };\n' +
+        'const r = require; r("pg"); module.require("jose");',
+    }, "entry.ts");
+    expect(result.violations.map(v => v.target)).toEqual(["pg", "jose"]);
+  });
+
+  it("rejects an exported loader obtained by destructuring the CommonJS module", () => {
+    const result = virtualAnalyze({ "entry.ts": "export const { require: load } = module;" }, "entry.ts");
+    expect(result.violations.map(v => v.target)).toEqual(["<escaping-loader>"]);
+  });
+
+  it.each([
+    ["js", '@returns {import("pg").Pool | null}', "pg"],
+    ["ts", '@param {import("jose").Token} arg', "jose"],
+    ["js", '@type {import("postgres").Client}', "postgres"],
+    ["js", '@typedef {import("pg").Pool} Pool', "pg"],
+    ["js", '@callback PoolFactory\n * @returns {import("pg").Pool}', "pg"],
+    ["js", '@satisfies {import("pg").Options}', "pg"],
+    ["js", '@augments {import("pg").Base}', "pg"],
+    ["js", '@implements {import("pg").Pool}', "pg"],
+    ["js", 'Inline {import("pg").Pool}', "pg"],
+    ["js", '@returns {import(name).Pool}', "<dynamic-non-literal>"],
+    ["ts", '@type {import("zod".T}', "<dynamic-non-literal>"],
+    ["ts", '@type {import("zod", ).T}', "<dynamic-non-literal>"],
+    ["js", 'Inline {import(name)}', "<dynamic-non-literal>"],
+    ["ts", '@import { Pool } from "pg"', "pg"],
+  ])("scans a reachable .%s JSDoc type edge in %s", (extension, tag, target) => {
+    const file = "public." + extension;
+    const src = `/** ${tag} */\nexport function pool() { return null; }`;
+    const result = virtualAnalyze({ "entry.ts": `import "./${file}";`, [file]: src }, "entry.ts");
+    expect(result.violations.map(v => v.target)).toEqual([target]);
+    expect(result.violations[0].chain).toContain(`${file}:${tag.includes("\n") ? 2 : 1} -> ${target} [type]`);
+  });
+
+  it("also checks detached JSDoc and follows type imports into local declarations", () => {
+    const result = virtualAnalyze({
+      "public.js": '/** Inline {import("pg").Pool} */\n/** @type {import("./local").T} */\nexport const value = 1;',
+      "local.d.ts": 'import "jose";',
+    }, "public.js");
+    expect(result.violations.map(v => v.target).sort()).toEqual(["jose", "pg"]);
+  });
+
+  it("preserves import line numbers across multiline JSDoc tags and inline references", () => {
+    const code = '/** @type {import\n * ("pg").Pool} */\nexport let pool;\n' +
+      '/** Inline {import\n * (\n * "jose"\n * ).T} */\nexport let token;';
+    const { violations } = virtualAnalyze({ "public.js": code }, "public.js");
+    expect(violations.map(v => v.chain[1])).toEqual(["public.js:1 -> pg [type]", "public.js:4 -> jose [type]"]);
+  });
+
+  it("ignores import text inside source strings, ordinary comments and JSDoc string literal types", () => {
+    const code = [
+      `const example = '/** @type {import("pg").Pool} */';`,
+      '/* import("pg") */',
+      `/** @type {"import('pg')"} */`,
+      `export const label = "import('pg')";`,
+    ].join("\n");
+    expect(virtualAnalyze({ "public.js": code }, "public.js").violations).toEqual([]);
   });
 
   it.each(["main", "module", "types", "typings", "imports"])("rejects an existing unsupported %s target before probing siblings", field => {
