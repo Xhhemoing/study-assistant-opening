@@ -49,14 +49,17 @@ export {
   detectMemorizedTemplates,
   hasMemorizedTemplateStuffing,
   isValidIeltsBand,
+  isVerifiedWritingReceipt,
   locateGroundedExcerpt,
   resolveIeltsEpistemicStatus,
+  validateWritingRubricReceipt,
 } from "./rubric";
 
 export type {
   CreateRubricReceiptInput,
   EpistemicResolution,
   EpistemicResolutionInput,
+  ValidateWritingRubricReceiptOptions,
 } from "./rubric";
 
 export {
@@ -83,3 +86,21 @@ export {
 export { getWritingDraftSource, getWritingTransferSource } from "./writing-source";
 export { graphemeBoundaries } from "./graphemes";
 export { maskIeltsMarkup } from "./prose";
+
+export {
+  IELTS_CARTRIDGE_MANIFEST,
+  IELTS_CONTINUITY_SCHEMA_VERSION,
+  IELTS_REQUIREMENT_KEYS,
+  buildIeltsResumeSummary,
+  createIeltsWritingSpeakingCartridge,
+  createInitialIeltsContinuityState,
+  ieltsWritingSpeakingCartridge,
+  parseIeltsContinuityState,
+  serializeIeltsContinuityState,
+} from "./cartridge";
+
+export type {
+  IeltsContinuityStage,
+  IeltsContinuityState,
+  IeltsRequirementKey,
+} from "./cartridge";

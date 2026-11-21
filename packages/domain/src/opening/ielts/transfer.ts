@@ -75,6 +75,8 @@ const TOPIC_SCAFFOLD_STOP_WORDS = new Set([
   "world", "life", "daily", "community", "area", "place", "region",
   "district", "expand", "expanding", "invest", "investing", "undermine", "alleviate",
   "chronic", "demand", "induced",
+  "encourage", "encouraging", "encouraged", "focus", "focusing", "focused",
+  "prefer", "preferring", "preferred", "favour", "favor", "promote", "promoting", "promoted",
   "test", "demo", "fixture", "sample", "custom", "fresh", "attempt", "version",
   "second", "first", "third",
 ]);
@@ -113,6 +115,131 @@ type PromptTopicSpec = {
 };
 
 const PROMPT_CONTRAST_SPLIT = /\b(?:instead\s+of|rather\s+than|versus|vs\.?)\b/iu;
+const PROMPT_ADVERSATIVE_SPLIT = /(?:,\s*\b(?:while|whereas)\b|\b(?:while\s+others|whereas\s+others|whereas)\b)/iu;
+const PROMPT_NEXT_VIEW_OPENER =
+  /^\s*(?:others|other\s+people|other\s+citizens|however\s*,?\s*others|on\s+the\s+other\s+hand|in\s+contrast|by\s+contrast|conversely|alternatively)\b/iu;
+const PROMPT_BOILERPLATE_INSTRUCTION =
+  /^\s*(?:discuss\s+both|to\s+what\s+extent|do\s+you\s+agree|what\s+are\s+the\s+(?:causes|reasons|solutions|advantages|disadvantages)|give\s+reasons\s+for\s+your\s+answer|include\s+any\s+relevant\s+examples)/iu;
+const PROMPT_BOILERPLATE_QUESTION_OR =
+  /\b(?:agree\s+or\s+disagree|advantages\s+or\s+disadvantages|positive\s+or\s+negative|good\s+or\s+bad|benefits\s+or\s+drawbacks|merits\s+or\s+demerits)\b/iu;
+const PROMPT_CHOICE_SIGNAL = /\b(?:should|whether|prefer|better\s+to|choose)\b|\?\s*$/iu;
+
+function narrowAdjacentModifiers(
+  text: string,
+  sharedTerms: ReadonlySet<string>,
+  distinctive: ReadonlySet<string>,
+): ReadonlySet<string> {
+  if (sharedTerms.size === 0 || distinctive.size <= 1) return distinctive;
+  const tokens = (text.toLowerCase().match(/[a-z]+/gu) ?? []).map((tok) => stemTopicToken(tok));
+  const adjacent = new Set<string>();
+  for (let i = 1; i < tokens.length; i += 1) {
+    if (sharedTerms.has(tokens[i]!)) {
+      const prev = tokens[i - 1]!;
+      if (distinctive.has(prev)) {
+        adjacent.add(prev);
+      }
+    }
+  }
+  return adjacent.size > 0 ? adjacent : distinctive;
+}
+
+function buildContrastFacetsFromPair(
+  leftText: string,
+  rightText: string,
+): readonly [ReadonlySet<string>, ReadonlySet<string>] | null {
+  if (!leftText.trim() || !rightText.trim()) return null;
+  const rawLeft = new Set<string>();
+  const rawRight = new Set<string>();
+  collectTopicStems(leftText, TOPIC_SCAFFOLD_STOP_WORDS, 3, rawLeft);
+  collectTopicStems(rightText, TOPIC_SCAFFOLD_STOP_WORDS, 3, rawRight);
+  if (rawLeft.size === 0 || rawRight.size === 0) return null;
+
+  // Subtract terms shared across both sides (e.g. "housing" in "public housing vs private housing")
+  // so a one-sided essay cannot satisfy both poles via the shared head noun.
+  const sharedTerms = new Set([...rawLeft].filter((term) => rawRight.has(term)));
+  const distinctiveLeft = new Set([...rawLeft].filter((term) => !rawRight.has(term)));
+  const distinctiveRight = new Set([...rawRight].filter((term) => !rawLeft.has(term)));
+
+  if (sharedTerms.size > 0 && (distinctiveLeft.size === 0 || distinctiveRight.size === 0)) {
+    return null;
+  }
+
+  const left = narrowAdjacentModifiers(
+    leftText,
+    sharedTerms,
+    distinctiveLeft.size > 0 ? distinctiveLeft : rawLeft,
+  );
+  const right = narrowAdjacentModifiers(
+    rightText,
+    sharedTerms,
+    distinctiveRight.size > 0 ? distinctiveRight : rawRight,
+  );
+
+  return left.size > 0 && right.size > 0 ? [left, right] : null;
+}
+
+function extractContrastFacets(
+  trimmedStatement: string,
+): readonly [ReadonlySet<string>, ReadonlySet<string>] | null {
+  const sentences = (trimmedStatement.match(/[^.?!;]+(?:[.?!;]+|$)/gu) ?? [trimmedStatement])
+    .map((sentence) => sentence.trim())
+    .filter(Boolean);
+
+  // Pass 1: explicit contrast marker ("instead of", "rather than", "versus", "vs.") in any sentence.
+  for (const sentence of sentences) {
+    const splitParts = sentence.split(PROMPT_CONTRAST_SPLIT);
+    if (splitParts.length >= 2) {
+      const facets = buildContrastFacetsFromPair(splitParts[0]!, splitParts.slice(1).join(" "));
+      if (facets) return facets;
+    }
+  }
+
+  // Pass 2: intra-sentence adversative contrast ("..., while others ...", "whereas ...").
+  for (const sentence of sentences) {
+    if (PROMPT_BOILERPLATE_INSTRUCTION.test(sentence)) continue;
+    const splitParts = sentence.split(PROMPT_ADVERSATIVE_SPLIT);
+    if (splitParts.length >= 2) {
+      const facets = buildContrastFacetsFromPair(splitParts[0]!, splitParts.slice(1).join(" "));
+      if (facets) return facets;
+    }
+  }
+
+  // Pass 3: cross-sentence two-view prompts ("Some people ... . Others ... .").
+  for (let i = 0; i < sentences.length - 1; i += 1) {
+    const current = sentences[i]!;
+    const next = sentences[i + 1]!;
+    if (PROMPT_BOILERPLATE_INSTRUCTION.test(current) || PROMPT_BOILERPLATE_INSTRUCTION.test(next)) {
+      continue;
+    }
+    if (PROMPT_NEXT_VIEW_OPENER.test(next)) {
+      const facets = buildContrastFacetsFromPair(current, next);
+      if (facets) return facets;
+    }
+  }
+
+  // Pass 4: choice-question "or" split ("Should governments subsidize public housing or encourage private housing development?").
+  for (const sentence of sentences) {
+    if (
+      PROMPT_BOILERPLATE_INSTRUCTION.test(sentence) ||
+      PROMPT_BOILERPLATE_QUESTION_OR.test(sentence) ||
+      !PROMPT_CHOICE_SIGNAL.test(sentence)
+    ) {
+      continue;
+    }
+    const orMatches = [...sentence.matchAll(/\bor\b/giu)];
+    for (let i = orMatches.length - 1; i >= 0; i -= 1) {
+      const match = orMatches[i]!;
+      const index = match.index ?? -1;
+      if (index <= 0) continue;
+      const leftText = sentence.slice(0, index);
+      const rightText = sentence.slice(index + match[0].length);
+      const facets = buildContrastFacetsFromPair(leftText, rightText);
+      if (facets) return facets;
+    }
+  }
+
+  return null;
+}
 
 function extractPromptTopicSpec(
   promptStatement: string | undefined,
@@ -131,52 +258,7 @@ function extractPromptTopicSpec(
       collectTopicStems(promptId, STOP_WORDS, 3, keywords);
     }
 
-    let contrastFacets: readonly [ReadonlySet<string>, ReadonlySet<string>] | null = null;
-    const firstSentence = trimmedStatement.split(/[.?!]+/u)[0] ?? trimmedStatement;
-    const splitParts = firstSentence.split(PROMPT_CONTRAST_SPLIT);
-    if (splitParts.length >= 2) {
-      const leftText = splitParts[0]!;
-      const rightText = splitParts.slice(1).join(" ");
-      const rawLeft = new Set<string>();
-      const rawRight = new Set<string>();
-      collectTopicStems(leftText, TOPIC_SCAFFOLD_STOP_WORDS, 3, rawLeft);
-      collectTopicStems(rightText, TOPIC_SCAFFOLD_STOP_WORDS, 3, rawRight);
-
-      // Subtract terms shared across both sides (e.g. "housing" in "public housing rather than
-      // private housing") so a one-sided essay cannot satisfy both poles via the shared head noun.
-      const sharedTerms = new Set([...rawLeft].filter((term) => rawRight.has(term)));
-      const distinctiveLeft = new Set([...rawLeft].filter((term) => !rawRight.has(term)));
-      const distinctiveRight = new Set([...rawRight].filter((term) => !rawLeft.has(term)));
-
-      let left: ReadonlySet<string> = distinctiveLeft.size > 0 ? distinctiveLeft : rawLeft;
-      const right: ReadonlySet<string> = distinctiveRight.size > 0 ? distinctiveRight : rawRight;
-
-      if (sharedTerms.size > 0 && distinctiveLeft.size > 1) {
-        // When both sides share a head noun (e.g. "Should cities subsidise public housing rather
-        // than private housing?"), focus the left pole on the distinctive modifier directly
-        // preceding the shared head noun so main-clause nouns like "cities" don't mask a missing left pole.
-        const leftTokens = (leftText.toLowerCase().match(/[a-z]+/gu) ?? []).map((tok) =>
-          stemTopicToken(tok),
-        );
-        const adjacentLeftModifiers = new Set<string>();
-        for (let i = 1; i < leftTokens.length; i += 1) {
-          if (sharedTerms.has(leftTokens[i]!)) {
-            const prev = leftTokens[i - 1]!;
-            if (distinctiveLeft.has(prev)) {
-              adjacentLeftModifiers.add(prev);
-            }
-          }
-        }
-        if (adjacentLeftModifiers.size > 0) {
-          left = adjacentLeftModifiers;
-        }
-      }
-
-      if (left.size > 0 && right.size > 0) {
-        contrastFacets = [left, right];
-      }
-    }
-
+    const contrastFacets = extractContrastFacets(trimmedStatement);
     return { keywords, contrastFacets, fromPromptStatement: true };
   }
 

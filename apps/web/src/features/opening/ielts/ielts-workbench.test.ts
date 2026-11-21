@@ -3315,3 +3315,121 @@ it("restores a matching assisted Speaking receipt and preserves assistance on re
     masteryQualified: false,
   }));
 });
+
+it("preserves Prompt-B local submission when host refreshes Draft-1 feedback while stale Prompt-A draft2 remains in props", async () => {
+  const promptA = IELTS_WRITING_SPEAKING_FIXTURE;
+  const promptBDraft1 = {
+    ...promptA.draft1,
+    promptId: "prompt-housing-b-2026",
+    draftId: "housing-b-draft-1",
+    label: "住房题一稿",
+    paragraphs: [
+      "Housing costs are rising quickly in many cities. Some people believe governments should build public housing. Other people think private builders can construct homes faster.",
+      "Public housing helps families with modest incomes afford rent near workplaces. Private developers can respond quickly to local demand when land rules are clear.",
+    ],
+  };
+  const promptBDraft1Eval = evaluateRevisedDraftDeterministically({
+    baselineDraft: promptBDraft1,
+    revisedDraft: promptBDraft1,
+    targets: [],
+    promptStatement:
+      "Housing costs have risen sharply in many cities. Should governments subsidize public housing or encourage private housing development?",
+    receiptId: "prompt-b-draft1-receipt",
+  });
+  if (!promptBDraft1Eval.ok) throw new Error("Expected Prompt-B draft1 receipt");
+
+  const promptBTargets = [
+    {
+      id: "housing-t1",
+      category: "targetCollocations" as const,
+      criterion: "LR" as const,
+      label: "可负担长期租约搭配",
+      targetPatterns: ["income-indexed rents"],
+      guidance: "在论证公共住房保障作用时自然使用 income-indexed rents。",
+    },
+    {
+      id: "housing-t2",
+      category: "counterargumentDepth" as const,
+      criterion: "TR" as const,
+      label: "兼顾私营开发的让步回应",
+      targetPatterns: ["private housing development"],
+      guidance: "在让步段客观讨论 private housing development 的补充作用与局限。",
+    },
+  ];
+
+  // Host switches from Prompt A to Prompt B while still passing stale Prompt-A draft2 / draft2Receipt / transferReport.
+  const promptBFixtureWithStaleA = {
+    ...promptA,
+    promptId: "prompt-housing-b-2026",
+    promptTitleZh: "公共住房补贴 vs 私营住房开发",
+    promptStatementEn:
+      "Housing costs have risen sharply in many cities. Should governments subsidize public housing or encourage private housing development?",
+    draft1: promptBDraft1,
+    draft1Receipt: promptBDraft1Eval.receipt,
+    targets: promptBTargets,
+    // Intentionally stale Prompt-A draft2 / receipt / transferReport:
+    draft2: promptA.draft2,
+    draft2Receipt: promptA.draft2Receipt,
+    transferReport: promptA.transferReport,
+  };
+
+  const render = (nextFixture: typeof promptA) =>
+    act(async () =>
+      root.render(createElement(IeltsDraftCritiqueWorkbench, { fixture: nextFixture })),
+    );
+
+  // 1. Start on Prompt A, then switch to Prompt B (with stale Prompt-A draft2 still in props).
+  await render(promptA);
+  await render(promptBFixtureWithStaleA);
+  expect(host.textContent).toContain("待独立提交二稿");
+  expect(host.textContent).not.toContain("urban rail");
+
+  // 2. Learner writes and submits an original 210+ word Prompt-B essay locally.
+  const promptBLocalEssay = [
+    "Housing costs have risen sharply in many cities, prompting sustained debate over whether governments should subsidize public housing or encourage private housing development. While commercial developers add residential towers swiftly during construction booms, anchoring municipal policy in durable civic apartments guarantees reliable affordability for working households across changing economic cycles and demographic shifts.",
+    "Directly financing community estates should provide income-indexed rents for essential workers and municipal service staff without surrendering civic land whenever urban property markets surge unexpectedly. In contrast, tax reliefs for private housing development frequently expire after brief grace periods and leave lower-income families vulnerable to steep rent spikes and repeated neighbourhood displacement over coming decades.",
+    "Admittedly, well-regulated commercial builders can deliver much-needed residential supply in rapidly expanding transit corridors whenever local construction agencies face severe land, financing, or engineering bottlenecks during peak urban growth. Combining core civic apartment investment with strict multi-decade affordability covenants and transparent oversight on targeted developer grants balances construction speed with lasting social equity for essential workers.",
+    "Overall, metropolitan authorities should prioritize permanent subsidies for public housing while relying on private housing development strictly as a regulated supplement across growing districts.",
+  ].join("\n\n");
+
+  const textarea = host.querySelector<HTMLTextAreaElement>('[aria-label="二稿改写编辑区"]')!;
+  await act(async () => {
+    setNativeInputValue(textarea, promptBLocalEssay);
+    textarea.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  const submitButton = [...host.querySelectorAll<HTMLButtonElement>("button")].find((btn) =>
+    btn.textContent?.includes("提交并评估改写"),
+  )!;
+  await act(async () => submitButton.click());
+
+  const draft2PanelText = () =>
+    [...host.querySelectorAll<HTMLElement>('[role="tabpanel"]')].find((panel) => !panel.hidden)?.textContent ?? "";
+  const stalePromptAExcerpt = promptA.draft2.paragraphs[0]!.slice(0, 48);
+
+  expect(draft2PanelText()).toContain("income-indexed rents");
+  expect(draft2PanelText()).not.toContain(stalePromptAExcerpt);
+  expect(host.querySelector('[data-epistemic-badge="rubric_verified_evidence"]')).not.toBeNull();
+
+  // 3. Host refreshes ONLY Prompt-B draft1Receipt feedback text (same receiptId, stale Prompt-A draft2 still passed).
+  const refreshedPromptBFixture = {
+    ...promptBFixtureWithStaleA,
+    draft1Receipt: {
+      ...promptBFixtureWithStaleA.draft1Receipt,
+      epistemicReason: "一稿初评反馈已由服务端同步更新，仅用于参考。",
+      criteria: {
+        ...promptBFixtureWithStaleA.draft1Receipt.criteria,
+        TR: {
+          ...promptBFixtureWithStaleA.draft1Receipt.criteria.TR,
+          summary: "已更新的一稿任务回应诊断摘要。",
+        },
+      },
+    },
+  };
+  await render(refreshedPromptBFixture);
+
+  // Prompt-B local essay & verified evaluation MUST remain intact (never overwritten by stale Prompt-A draft2/receipt).
+  expect(draft2PanelText()).toContain("income-indexed rents");
+  expect(draft2PanelText()).not.toContain(stalePromptAExcerpt);
+  expect(host.textContent).not.toContain(stalePromptAExcerpt);
+  expect(host.querySelector('[data-epistemic-badge="rubric_verified_evidence"]')).not.toBeNull();
+});

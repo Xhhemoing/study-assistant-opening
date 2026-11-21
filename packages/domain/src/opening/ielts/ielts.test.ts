@@ -1,22 +1,33 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   IELTS_CARTRIDGE_ID,
+  IELTS_CARTRIDGE_MANIFEST,
+  IELTS_CARTRIDGE_VERSION,
+  IELTS_REQUIREMENT_KEYS,
   analyzeCrossDraftTransfer,
   buildSpeakingPart3Seed,
   computeOverallIeltsBand,
   countDraftWords,
+  createIeltsWritingSpeakingCartridge,
+  createInitialIeltsContinuityState,
   createValidatedRubricReceipt,
   detectMemorizedTemplates,
   evaluateRevisedDraftDeterministically,
   evaluateSpeakingRetelling,
   hasMemorizedTemplateStuffing,
+  hasRequiredWritingReceipt,
+  ieltsWritingSpeakingCartridge,
   isValidIeltsBand,
+  isVerifiedWritingReceipt,
   locateGroundedExcerpt,
+  validateWritingRubricReceipt,
   type EvaluateRevisedDraftInput,
+  type IeltsContinuityState,
   type IeltsCriterionAssessment,
   type IeltsEssayDraft,
   type IeltsUpgradeTarget,
 } from "./index";
+import { createCartridgeRegistry, validateCartridge } from "../cartridges/index";
 import { segmentIeltsText } from "./text-segments";
 
 function evaluateNonEmptyRevision(input: EvaluateRevisedDraftInput) {
@@ -2400,5 +2411,432 @@ describe("Writing topic-relevance band grounding", () => {
     });
     expect(balancedResult.receipt.criteria.TR.band).toBeGreaterThanOrEqual(6);
     expect(balancedResult.receipt.overallBand).toBeGreaterThanOrEqual(6);
+  });
+
+  it("enforces two-sided contrast facets on multi-sentence choice, adversative, and cross-sentence prompts", () => {
+    const multiSentenceChoicePrompt =
+      "Housing costs have risen sharply in many cities. Should governments subsidize public housing or encourage private housing development?";
+    const multiSentenceAdversativePrompt =
+      "Housing costs have risen sharply in many cities. Some people believe governments should subsidize public housing, while others argue private housing development should be encouraged.";
+    const crossSentenceTwoViewPrompt =
+      "Housing costs have risen sharply in many cities. Some people believe governments should subsidize public housing. Others argue private housing development should be encouraged. Discuss both views and give your own opinion.";
+    const singleSideAgreePrompt =
+      "Housing costs have risen sharply in many cities. Governments should subsidize public housing to help low-income workers. To what extent do you agree or disagree?";
+
+    const publicOnlyEssay: IeltsEssayDraft = {
+      ...DRAFT_2,
+      draftId: "draft-2-multi-public-only",
+      promptId: "housing-multi-v1",
+      paragraphs: [
+        "Housing costs have risen sharply in many cities, and governments should subsidize public housing extensively so working families can secure stable accommodation near schools, clinics, and major transit hubs. Municipal housing boards can construct durable apartment blocks on underused civic land and encourage long-term neighbourhood stability across generations.",
+        "Expanding public housing also reduces residential turnover, strengthens community cohesion, and lowers emergency shelter spending for municipal treasuries during economic downturns. When governments fund reliable public housing estates, teachers, nurses, social workers, and transit staff stay close to essential workplaces instead of facing exhausting commutes from distant suburbs.",
+        "Furthermore, sustained public housing subsidies help cities retrofit ageing municipal blocks with clean heating systems, better thermal insulation, solar rooftops, and accessible courtyards for older residents. Transparent housing waitlists and regular maintenance audits ensure low-income households receive fair placement and safe living conditions.",
+        "Overall, steady municipal investment in public housing delivers dependable social stability, lower energy bills, and fairer urban living standards for essential families throughout growing metropolitan regions.",
+      ],
+    };
+
+    const privateOnlyEssay: IeltsEssayDraft = {
+      ...DRAFT_2,
+      draftId: "draft-2-multi-private-only",
+      promptId: "housing-multi-v1",
+      paragraphs: [
+        "Housing costs have risen sharply in many cities, so governments should encourage private housing development through streamlined planning approvals and clear zoning rules that let commercial builders deliver new apartments rapidly across expanding districts. Experienced housing firms mobilize investment capital quickly and adapt floor plans to varied household budgets.",
+        "Supporting private housing projects also encourages architectural innovation, faster maintenance response times, and stronger local retail growth around newly completed residential corridors. When cities partner with private housing developers and accelerate permit inspections, total housing supply expands far more quickly and eases bidding pressure among young renters.",
+        "In addition, targeted private housing tax credits attract institutional lenders and pension funds who finance energy-efficient apartment blocks without straining municipal construction budgets over coming decades. Competitive tenders among builders also reward modern construction techniques that shorten delivery schedules.",
+        "Overall, encouraging private housing development accelerates residential construction capacity, attracts sustained capital investment, and modernises urban neighbourhoods across fast-growing cities.",
+      ],
+    };
+
+    const balancedEssay: IeltsEssayDraft = {
+      ...DRAFT_2,
+      draftId: "draft-2-multi-balanced",
+      promptId: "housing-multi-v1",
+      paragraphs: [
+        "Housing costs have risen sharply in many cities, prompting sustained debate over whether governments should subsidize public housing or encourage private housing development. While commercial developers add residential units swiftly during construction booms, directing core municipal subsidies toward durable civic estates protects long-term affordability that market incentives rarely preserve across changing cycles.",
+        "Financing community apartments enables cities to lock in income-indexed rents for nurses, school teachers, transit workers, and municipal service staff without surrendering valuable civic land when property markets surge. By contrast, commercial tax reliefs often yield temporary rent caps that expire once grant agreements lapse, leaving working households exposed to sudden rent spikes and repeated displacement.",
+        "Admittedly, well-regulated private builders can expand total supply in fast-growing transit corridors whenever local construction pipelines face severe land, financing, or engineering bottlenecks. Pairing durable public housing investment with strict multi-decade affordability covenants and transparent oversight on any developer grant resolves both construction speed and urban equity concerns.",
+        "Overall, metropolitan authorities should anchor long-term affordability in permanent civic estates while using private housing development strictly as a regulated supplement for expanding neighbourhoods.",
+      ],
+    };
+
+    for (const [label, promptStatement] of [
+      ["choice", multiSentenceChoicePrompt],
+      ["adversative", multiSentenceAdversativePrompt],
+      ["cross-sentence", crossSentenceTwoViewPrompt],
+    ] as const) {
+      const publicResult = evaluateNonEmptyRevision({
+        baselineDraft: DRAFT_1,
+        revisedDraft: publicOnlyEssay,
+        targets: [],
+        promptStatement,
+        receiptId: `r-multi-public-${label}`,
+      });
+      expect(publicResult.receipt.criteria.TR.band).toBeLessThanOrEqual(4.5);
+      expect(publicResult.receipt.overallBand).toBeLessThanOrEqual(4.5);
+      expect(publicResult.receipt.masteryQualified).toBe(false);
+
+      const privateResult = evaluateNonEmptyRevision({
+        baselineDraft: DRAFT_1,
+        revisedDraft: privateOnlyEssay,
+        targets: [],
+        promptStatement,
+        receiptId: `r-multi-private-${label}`,
+      });
+      expect(privateResult.receipt.criteria.TR.band).toBeLessThanOrEqual(4.5);
+      expect(privateResult.receipt.overallBand).toBeLessThanOrEqual(4.5);
+      expect(privateResult.receipt.masteryQualified).toBe(false);
+
+      const balancedResult = evaluateNonEmptyRevision({
+        baselineDraft: DRAFT_1,
+        revisedDraft: balancedEssay,
+        targets: [],
+        promptStatement,
+        receiptId: `r-multi-balanced-${label}`,
+      });
+      expect(balancedResult.receipt.criteria.TR.band).toBeGreaterThanOrEqual(6);
+      expect(balancedResult.receipt.overallBand).toBeGreaterThanOrEqual(6);
+    }
+
+    // Boilerplate "agree or disagree?" in sentence 3 must NOT falsely require a second contrast pole.
+    const singleSideResult = evaluateNonEmptyRevision({
+      baselineDraft: DRAFT_1,
+      revisedDraft: publicOnlyEssay,
+      targets: [],
+      promptStatement: singleSideAgreePrompt,
+      receiptId: "r-multi-single-agree",
+    });
+    expect(singleSideResult.receipt.criteria.TR.band).toBeGreaterThanOrEqual(6);
+    expect(singleSideResult.receipt.overallBand).toBeGreaterThanOrEqual(6);
+  });
+
+  it("rejects Speaking mastery when the Writing receipt lacks sourceDraft or has tampered provenance", () => {
+    const { receipt: validWritingReceipt } = evaluateNonEmptyRevision({
+      baselineDraft: DRAFT_1,
+      revisedDraft: DRAFT_2,
+      targets: TARGETS,
+      receiptId: "r-speaking-provenance-valid",
+    });
+    expect(validWritingReceipt.masteryQualified).toBe(true);
+    expect(isVerifiedWritingReceipt(validWritingReceipt)).toBe(true);
+
+    const baseSeed = buildSpeakingPart3Seed(
+      {
+        promptId: DRAFT_2.promptId,
+        topic: "Urban rail funding",
+        coreClaim: "Cities should prioritize urban rail.",
+        supportingReason: "Rail cuts per-capita emissions.",
+        activeCollocations: ["per-capita emissions"],
+      },
+      DRAFT_2.draftId,
+    );
+    const seed = { ...baseSeed, requiresVerifiedReceipt: true };
+    const spokenTranscript =
+      "Personally, I think city planners should compare both travel demand and long-term maintenance costs before funding major roads. " +
+      "When commuting depends mostly on private vehicles, rush-hour delays quickly worsen across inner neighbourhoods and air quality drops for families living near busy junctions. " +
+      "On top of that, widening urban highways often attracts even more drivers within a few years instead of fixing everyday bottlenecks for working residents. " +
+      "Because modern commuter trains carry far more passengers along a single corridor, local councils reduced harmful per-capita emissions across the entire city.";
+
+    const validResult = evaluateSpeakingRetelling({
+      seed: { ...seed, verifiedWritingReceipt: validWritingReceipt },
+      transcript: spokenTranscript,
+      durationSeconds: 75,
+      assisted: false,
+    });
+    expect(validResult.epistemicStatus).toBe("rubric_verified_evidence");
+    expect(validResult.countsTowardMastery).toBe(true);
+
+    const forgedReceipts: readonly [string, typeof validWritingReceipt][] = [
+      ["missing sourceDraft", { ...validWritingReceipt, sourceDraft: undefined }],
+      [
+        "assisted sourceDraft",
+        {
+          ...validWritingReceipt,
+          sourceDraft: { ...validWritingReceipt.sourceDraft!, assisted: true },
+        },
+      ],
+      [
+        "mismatched sourceDraft promptId",
+        {
+          ...validWritingReceipt,
+          sourceDraft: { ...validWritingReceipt.sourceDraft!, promptId: "other-prompt" },
+        },
+      ],
+      [
+        "ungrounded fabricated span",
+        {
+          ...validWritingReceipt,
+          criteria: {
+            ...validWritingReceipt.criteria,
+            TR: {
+              ...validWritingReceipt.criteria.TR,
+              evidenceSpans: [
+                {
+                  ...validWritingReceipt.criteria.TR.evidenceSpans[0]!,
+                  excerpt: "Completely fabricated text absent from sourceDraft",
+                  startOffset: 0,
+                  endOffset: 48,
+                },
+              ],
+            },
+          },
+        },
+      ],
+      [
+        "tampered overallBand",
+        {
+          ...validWritingReceipt,
+          overallBand: validWritingReceipt.overallBand === 9 ? 4 : 9,
+        },
+      ],
+      [
+        "non-advancing transferSource lineage",
+        {
+          ...validWritingReceipt,
+          transferSource: validWritingReceipt.transferSource
+            ? {
+                ...validWritingReceipt.transferSource,
+                baseline: {
+                  ...validWritingReceipt.transferSource.baseline,
+                  version: validWritingReceipt.draftVersion,
+                },
+              }
+            : undefined,
+        },
+      ],
+    ];
+
+    for (const [label, forged] of forgedReceipts) {
+      expect(
+        hasRequiredWritingReceipt({ ...seed, verifiedWritingReceipt: forged }),
+        `expected forged receipt (${label}) to fail provenance check`,
+      ).toBe(false);
+      const downgraded = evaluateSpeakingRetelling({
+        seed: { ...seed, verifiedWritingReceipt: forged },
+        transcript: spokenTranscript,
+        durationSeconds: 75,
+        assisted: false,
+      });
+      expect(downgraded.epistemicStatus, label).toBe("practice_feedback");
+      expect(downgraded.countsTowardMastery, label).toBe(false);
+      expect(downgraded.masteryQualified, label).toBe(false);
+    }
+  });
+});
+
+describe("IELTS Cartridge SPI v1 L1_CONTINUITY adapter", () => {
+  it("registers cleanly in CartridgeRegistry and round-trips continuity state with deterministic resume summaries", () => {
+    const validation = validateCartridge(ieltsWritingSpeakingCartridge);
+    expect(validation.ok).toBe(true);
+    if (validation.ok) {
+      expect(validation.manifest).toEqual(IELTS_CARTRIDGE_MANIFEST);
+      expect(validation.manifest.id).toBe(IELTS_CARTRIDGE_ID);
+      expect(validation.manifest.version).toBe(IELTS_CARTRIDGE_VERSION);
+      expect(validation.manifest.level).toBe("L1_CONTINUITY");
+    }
+
+    const registry = createCartridgeRegistry();
+    const registration = registry.registerCartridge(createIeltsWritingSpeakingCartridge());
+    expect(registration.ok).toBe(true);
+
+    const registered = registry.getCartridge(IELTS_CARTRIDGE_ID);
+    expect(registered).not.toBeNull();
+    expect(registry.listCartridgesByCapability("L1_CONTINUITY").map((c) => c.manifest.id)).toContain(
+      IELTS_CARTRIDGE_ID,
+    );
+    expect(registry.listCartridgesByCapability("L2_SCHEDULE").map((c) => c.manifest.id)).not.toContain(
+      IELTS_CARTRIDGE_ID,
+    );
+
+    const initialState = createInitialIeltsContinuityState(
+      DRAFT_2.promptId,
+      "2026-11-21T08:00:00.000Z",
+    );
+    const initialSerialized = registered!.serializeContinuityState(initialState);
+    const initialParsed = registered!.parseContinuityState(initialSerialized);
+    expect(initialParsed).toEqual({ ok: true, value: initialState });
+    expect(registered!.buildResumeSummary(initialState)).toEqual({
+      cartridgeId: IELTS_CARTRIDGE_ID,
+      cartridgeVersion: IELTS_CARTRIDGE_VERSION,
+      headline: expect.stringContaining("0/3"),
+      completedSteps: 0,
+      totalSteps: IELTS_REQUIREMENT_KEYS.length,
+      nextRequirementKey: "ielts.writing.draft1-diagnostic",
+    });
+
+    const afterDraft1: IeltsContinuityState = {
+      ...initialState,
+      draft1Id: DRAFT_1.draftId,
+      activeStage: "writing_draft2",
+    };
+    expect(registered!.buildResumeSummary(afterDraft1)).toMatchObject({
+      completedSteps: 1,
+      totalSteps: 3,
+      nextRequirementKey: "ielts.writing.draft2-verified-transfer",
+    });
+
+    const { receipt: writingReceipt } = evaluateNonEmptyRevision({
+      baselineDraft: DRAFT_1,
+      revisedDraft: DRAFT_2,
+      targets: TARGETS,
+      receiptId: "r-cartridge-writing",
+    });
+    expect(validateWritingRubricReceipt(writingReceipt, { requireVerifiedMastery: true }).ok).toBe(true);
+
+    const afterWriting: IeltsContinuityState = {
+      ...afterDraft1,
+      activeStage: "speaking_part3",
+      draft2Receipt: writingReceipt,
+      updatedAt: "2026-11-21T08:15:00.000Z",
+    };
+    const writingJson = registered!.serializeContinuityState(afterWriting);
+    expect(registered!.parseContinuityState(writingJson)).toEqual({ ok: true, value: afterWriting });
+    expect(registered!.buildResumeSummary(afterWriting)).toMatchObject({
+      completedSteps: 2,
+      totalSteps: 3,
+      nextRequirementKey: "ielts.speaking.part3-verified-retelling",
+    });
+
+    const speakingSeed = {
+      ...buildSpeakingPart3Seed(
+        {
+          promptId: DRAFT_2.promptId,
+          topic: "Urban rail funding",
+          coreClaim: "Cities should prioritize urban rail.",
+          supportingReason: "Rail cuts per-capita emissions.",
+          activeCollocations: ["per-capita emissions"],
+        },
+        DRAFT_2.draftId,
+      ),
+      requiresVerifiedReceipt: true,
+      verifiedWritingReceipt: writingReceipt,
+    };
+    const speakingReceipt = evaluateSpeakingRetelling({
+      seed: speakingSeed,
+      transcript:
+        "Personally, I think city planners should compare travel demand and long-term maintenance costs before widening roads. " +
+        "When commuting relies heavily on private vehicles, peak congestion builds quickly across central districts and local air quality worsens for families living near busy junctions. " +
+        "On top of that, extra motorway lanes usually encourage more car trips within a couple of years instead of giving commuters reliable schedules during rush hour. " +
+        "Because commuter rail transports far more passengers per corridor, local councils reduced harmful per-capita emissions across the city.",
+      durationSeconds: 75,
+      assisted: false,
+      createdAt: "2026-11-21T08:30:00.000Z",
+    });
+    expect(speakingReceipt.masteryQualified).toBe(true);
+
+    const completedState: IeltsContinuityState = {
+      ...afterWriting,
+      activeStage: "completed",
+      speakingReceipt,
+      updatedAt: "2026-11-21T08:31:00.000Z",
+    };
+    const completedJson = registered!.serializeContinuityState(completedState);
+    expect(registered!.parseContinuityState(completedJson)).toEqual({
+      ok: true,
+      value: completedState,
+    });
+    expect(registered!.buildResumeSummary(completedState)).toMatchObject({
+      completedSteps: 3,
+      totalSteps: 3,
+      nextRequirementKey: null,
+    });
+  });
+
+  it("rejects malformed or tampered continuity state fail-closed", () => {
+    const { receipt: writingReceipt } = evaluateNonEmptyRevision({
+      baselineDraft: DRAFT_1,
+      revisedDraft: DRAFT_2,
+      targets: TARGETS,
+      receiptId: "r-cartridge-tamper",
+    });
+    const baseState = createInitialIeltsContinuityState(
+      DRAFT_2.promptId,
+      "2026-11-21T08:00:00.000Z",
+      { draft1Id: DRAFT_1.draftId },
+    );
+    const speakingSeed = {
+      ...buildSpeakingPart3Seed(
+        {
+          promptId: DRAFT_2.promptId,
+          topic: "Urban rail funding",
+          coreClaim: "Cities should prioritize urban rail.",
+          supportingReason: "Rail cuts per-capita emissions.",
+          activeCollocations: ["per-capita emissions"],
+        },
+        DRAFT_2.draftId,
+      ),
+      requiresVerifiedReceipt: true,
+      verifiedWritingReceipt: writingReceipt,
+    };
+    const validSpeaking = evaluateSpeakingRetelling({
+      seed: speakingSeed,
+      transcript:
+        "Personally, I think city planners should compare travel demand and long-term maintenance costs before widening roads. " +
+        "When commuting relies heavily on private vehicles, peak congestion builds quickly across central districts and local air quality worsens for families living near busy junctions. " +
+        "On top of that, extra motorway lanes usually encourage more car trips within a couple of years instead of giving commuters reliable schedules during rush hour. " +
+        "Because commuter rail transports far more passengers per corridor, local councils reduced harmful per-capita emissions across the city.",
+      durationSeconds: 75,
+      assisted: false,
+      createdAt: "2026-11-21T08:30:00.000Z",
+    });
+
+    const invalidInputs: readonly [string, unknown][] = [
+      ["malformed json", "{not-json"],
+      ["wrong cartridgeId", { ...baseState, cartridgeId: "other-cartridge" }],
+      ["wrong schemaVersion", { ...baseState, schemaVersion: 2 }],
+      ["invalid updatedAt", { ...baseState, updatedAt: "not-a-date" }],
+      [
+        "writing receipt missing sourceDraft",
+        { ...baseState, draft2Receipt: { ...writingReceipt, sourceDraft: undefined } },
+      ],
+      [
+        "writing receipt cross-prompt mismatch",
+        {
+          ...baseState,
+          promptId: "different-prompt-id",
+          draft2Receipt: writingReceipt,
+        },
+      ],
+      [
+        "speaking receipt missing sourcePromptId",
+        {
+          ...baseState,
+          draft2Receipt: writingReceipt,
+          speakingReceipt: { ...validSpeaking, sourcePromptId: undefined },
+        },
+      ],
+      [
+        "speaking receipt with forged assisted mastery",
+        {
+          ...baseState,
+          draft2Receipt: writingReceipt,
+          speakingReceipt: { ...validSpeaking, assisted: true },
+        },
+      ],
+      [
+        "speaking receipt with ungrounded evidence quote",
+        {
+          ...baseState,
+          draft2Receipt: writingReceipt,
+          speakingReceipt: {
+            ...validSpeaking,
+            evidenceQuotes: [
+              {
+                ...validSpeaking.evidenceQuotes[0]!,
+                quote: "Fabricated quote not in transcript",
+              },
+            ],
+          },
+        },
+      ],
+    ];
+
+    for (const [label, candidate] of invalidInputs) {
+      const parsed = ieltsWritingSpeakingCartridge.parseContinuityState(candidate);
+      expect(parsed.ok, `expected parseContinuityState to reject ${label}`).toBe(false);
+      expect(
+        () => ieltsWritingSpeakingCartridge.buildResumeSummary(candidate as IeltsContinuityState),
+        `expected buildResumeSummary to throw for ${label}`,
+      ).toThrow();
+    }
   });
 });

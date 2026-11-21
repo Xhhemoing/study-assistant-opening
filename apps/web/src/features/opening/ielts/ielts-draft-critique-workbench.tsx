@@ -101,12 +101,20 @@ function collectReceiptUpgradeRewrites(receipt: IeltsRubricReceipt): string[] {
 
 function collectFixtureSampleSources(fixture: IeltsWorkbenchFixture): string[] {
   const sources: string[] = [];
-  const d1 = draftEditorText(fixture.draft1).trim();
-  const d2 = draftEditorText(fixture.draft2).trim();
-  if (d1) sources.push(d1);
-  if (d2) sources.push(d2);
-  sources.push(...collectReceiptUpgradeRewrites(fixture.draft1Receipt));
-  sources.push(...collectReceiptUpgradeRewrites(fixture.draft2Receipt));
+  if (fixture.draft1.promptId === fixture.promptId) {
+    const d1 = draftEditorText(fixture.draft1).trim();
+    if (d1) sources.push(d1);
+  }
+  if (fixture.draft2.promptId === fixture.promptId) {
+    const d2 = draftEditorText(fixture.draft2).trim();
+    if (d2) sources.push(d2);
+  }
+  if (fixture.draft1Receipt.promptId === fixture.promptId) {
+    sources.push(...collectReceiptUpgradeRewrites(fixture.draft1Receipt));
+  }
+  if (fixture.draft2Receipt.promptId === fixture.promptId) {
+    sources.push(...collectReceiptUpgradeRewrites(fixture.draft2Receipt));
+  }
   return sources;
 }
 
@@ -180,6 +188,9 @@ function WritingWorkbenchPromptSession({
     fixture.draft2Receipt.promptId === fixture.promptId &&
     fixture.draft2Receipt.sourceDraft !== undefined &&
     fixture.draft2Receipt.sourceDraft.promptId === fixture.promptId &&
+    (fixture.draft2Receipt.transferSource === undefined ||
+      fixture.draft2Receipt.evidenceSource !== "unassisted_cross_draft_transfer" ||
+      fixture.draft2Receipt.transferSource.baseline.promptId === fixture.promptId) &&
     countDraftWords(fixture.draft2.paragraphs) > 0;
   const hasPreloadedSubmission =
     isDemoPreview || (hasExternalFixture && hasPromptMatchingDraft2);
@@ -217,10 +228,23 @@ function WritingWorkbenchPromptSession({
     fixture.draft2Receipt,
     fixture.transferReport,
   );
+  const authoritativeSubmissionFingerprint = stableSerialize([
+    fixture.promptId,
+    fixture.promptTitleZh,
+    fixture.promptStatementEn,
+    fixture.promptTaskTypeLabel,
+    fixture.targetWordCount,
+    fixture.draft1,
+    fixture.targets,
+    fixture.draft2,
+    fixture.draft2Receipt,
+    fixture.transferReport,
+  ]);
   const authoritative = {
     promptId: fixture.promptId,
     attemptKey,
     authorityFingerprint,
+    authoritativeSubmissionFingerprint,
     draft2: fixture.draft2,
     draft2Receipt: fixture.draft2Receipt,
     transferReport: fixture.transferReport,
@@ -288,7 +312,38 @@ function WritingWorkbenchPromptSession({
   const isSyncedAuthority = evaluation.authorityFingerprint === authorityFingerprint;
   if (!isSyncedAuthority) {
     const samePrompt = evaluation.promptId === fixture.promptId;
-    setEvaluation({ ...authoritative, cachedFingerprint: null });
+    const hasLocalPromptSubmission =
+      samePrompt &&
+      hasSubmitted &&
+      evaluation.draft2.promptId === fixture.promptId &&
+      evaluation.draft2Receipt.promptId === fixture.promptId &&
+      evaluation.draft2Receipt.sourceDraft !== undefined &&
+      evaluation.draft2Receipt.sourceDraft.promptId === fixture.promptId;
+    const isDraft1FeedbackOnlyRefresh =
+      hasPreloadedSubmission &&
+      revisionCount > 0 &&
+      evaluation.authoritativeSubmissionFingerprint === authoritativeSubmissionFingerprint;
+    const preserveLocalSubmission =
+      evaluation.attemptKey === attemptKey &&
+      hasLocalPromptSubmission &&
+      (!hasPreloadedSubmission || isDraft1FeedbackOnlyRefresh);
+
+    if (preserveLocalSubmission) {
+      setEvaluation({
+        ...evaluation,
+        promptId: fixture.promptId,
+        attemptKey,
+        authorityFingerprint,
+        authoritativeSubmissionFingerprint,
+        cachedFingerprint: null,
+      });
+    } else {
+      setEvaluation({ ...authoritative, cachedFingerprint: null });
+      if (evaluation.attemptKey === attemptKey && !hasPreloadedSubmission && hasSubmitted) {
+        setHasSubmitted(false);
+        setComposerOpen(true);
+      }
+    }
     setComposerNeedsText(false);
     setSelectedSpanId(null);
     if (evaluation.attemptKey !== attemptKey) {
@@ -923,8 +978,14 @@ function WritingWorkbenchPromptSession({
           {/* Manuscript Paper Sheets & Comparison Tabpanels (all 3 mounted for valid aria-controls) */}
           {(["draft1", "draft2"] as const).map((sheetMode) => {
             const isActiveSheet = viewMode === sheetMode;
+            const hasPromptBoundDraft2 =
+              isDemoPreview ||
+              (draft2.promptId === fixture.promptId &&
+                draft2Receipt.promptId === fixture.promptId &&
+                draft2Receipt.sourceDraft !== undefined &&
+                draft2Receipt.sourceDraft.promptId === fixture.promptId);
 
-            if (!hasSubmitted && !isDemoPreview && sheetMode === "draft2") {
+            if ((!hasSubmitted || !hasPromptBoundDraft2) && !isDemoPreview && sheetMode === "draft2") {
               return (
                 <article
                   key={sheetMode}

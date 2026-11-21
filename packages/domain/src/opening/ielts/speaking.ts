@@ -5,6 +5,7 @@ import { segmentIeltsText, type GroundedSentence } from "./text-segments";
 import {
   detectMemorizedTemplates,
   hasMemorizedTemplateStuffing,
+  isVerifiedWritingReceipt,
 } from "./rubric";
 import { detectLowEntropyStuffing } from "./transfer";
 import {
@@ -434,17 +435,20 @@ function allocateSpeakingEvidence(sentences: readonly GroundedSentence[], target
 export function hasRequiredWritingReceipt(seed: IeltsSpeakingPart3Seed): boolean {
   if (!seed.requiresVerifiedReceipt) return true;
   const receipt = seed.verifiedWritingReceipt;
-  if (!receipt?.receiptId) return false;
-  return receipt.cartridgeId === seed.cartridgeId &&
-    receipt.taskMode === "writing_task2" &&
-    receipt.promptId === seed.sourcePromptId &&
-    receipt.draftId === seed.sourceDraftId &&
-    receipt.epistemicStatus === "rubric_verified_evidence" &&
-    receipt.countsTowardMastery === true && receipt.masteryQualified === true &&
-    (receipt.evidenceSource === "unassisted_cross_draft_transfer" ||
-      receipt.evidenceSource === "unassisted_fresh_prompt_transfer") &&
+  if (
+    !isVerifiedWritingReceipt(receipt, {
+      expectedPromptId: seed.sourcePromptId,
+      expectedDraftId: seed.sourceDraftId,
+    })
+  ) {
+    return false;
+  }
+  return (
+    receipt.cartridgeId === seed.cartridgeId &&
     (seed.verifiedTransferIds === undefined ||
-      (Array.isArray(seed.verifiedTransferIds) && seed.verifiedTransferIds.includes(receipt.receiptId)));
+      (Array.isArray(seed.verifiedTransferIds) &&
+        seed.verifiedTransferIds.includes(receipt.receiptId)))
+  );
 }
 
 export function getSpeakingEvaluationContext(seed: IeltsSpeakingPart3Seed) {
