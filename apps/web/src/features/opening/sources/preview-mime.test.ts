@@ -7,6 +7,8 @@ describe("preview mime helpers", () => {
     expect(isPreviewableMime("image/jpeg")).toBe(true);
     expect(isPreviewableMime("text/plain; charset=utf-8")).toBe(true);
     expect(isPreviewableMime("text/markdown")).toBe(true);
+    expect(isPreviewableMime("audio/mpeg")).toBe(true);
+    expect(isPreviewableMime("video/webm; codecs=vp9")).toBe(true);
     expect(isPreviewableMime("application/vnd.ms-powerpoint")).toBe(false);
     expect(sourcePreviewKind("application/pdf")).toBe("pdf");
     expect(sourcePreviewKind("image/png")).toBe("image");

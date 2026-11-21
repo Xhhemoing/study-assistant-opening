@@ -273,6 +273,93 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     }).every(chunk => chunk.visibility === "sealed")).toBe(true);
   });
 
+  it.each([
+    ["$$", "$$y = 2$$"], ["\\[", "\\[y = 2\\]"],
+    ["\\begin{align}", "\\begin{align}y = 2\\end{align}"],
+    ["Prose before $$", "$$y = 2$$"],
+  ])("partitions malformed math %s before a protected heading in documents and cues", (opener, laterMath) => {
+    const lines = [opener, "unfinished", "## Answer Key", "PRIVATE_ANSWER", laterMath, "PRIVATE_AFTER", "## Lecture", "Public explanation"];
+    const expected = ["PRIVATE_ANSWER", "PRIVATE_AFTER", "y = 2"];
+    const source = { sourceId: "source", sourceVersion: 1 };
+    for (const chunks of [
+      chunkPedagogicalDocument({ ...source, text: lines.join("\n") }),
+      chunkTranscriptCues({
+        ...source, cues: lines.map((line, i) => ({ text: line, startMs: i * 100, endMs: (i + 1) * 100 })),
+      }),
+    ]) {
+      const partition = partitionPedagogicalChunks(chunks, { allowHintGated: true });
+      const indexable = partition.indexableChunks.map(chunk => chunk.text).join("\n");
+      const sealed = partition.sealedChunks.map(chunk => chunk.text).join("\n");
+      expect(indexable).toContain("Public explanation");
+      for (const snippet of expected) {
+        expect(indexable).not.toContain(snippet);
+        expect(sealed).toContain(snippet);
+      }
+    }
+  });
+
+  it("does not use later paragraph math as a closer for a stray flow fence", () => {
+    const [first, second] = parsePedagogicalAst("$$\nunfinished\n\n$$y = 2$$");
+    expect(first).toMatchObject({ text: "$$\nunfinished", visibility: "sealed" });
+    expect(second).toMatchObject({ text: "$$y = 2$$", visibility: "public" });
+  });
+
+  it.each([
+    "Answer Key\n---\nPRIVATE_MARKUP\n## Lecture",
+    ":::solution\nPRIVATE_MARKUP\n$$y = 2$$\n:::",
+    "> [!solution]\n> PRIVATE_MARKUP\n> $$y = 2$$",
+    "<details><summary>Answer</summary>PRIVATE_MARKUP $$y = 2$$</details>",
+    "\\begin{solution}PRIVATE_MARKUP $$y = 2$$\\end{solution}",
+  ])("recovers from stray math before protected Markdown or LaTeX", protectedBody => {
+    const chunks = chunkPedagogicalDocument({
+      sourceId: "doc", sourceVersion: 1, text: `$$\n${protectedBody}\n\nPublic afterward`,
+    });
+    expect(chunks.filter(chunk => chunk.text.includes("PRIVATE_MARKUP")).map(chunk => chunk.visibility)).toEqual(["sealed"]);
+    expect(chunks.find(chunk => chunk.text.includes("Public afterward"))?.visibility).toBe("public");
+  });
+
+  it("recovers from a stray math opener before same-line details containing a later formula", () => {
+    const text = "Before $$ <details>PRIVATE_MARKUP $$y = 2$$</details> public afterward";
+    const chunks = chunkPedagogicalDocument({ sourceId: "doc", sourceVersion: 1, text });
+    expect(chunks.filter(chunk => chunk.text.includes("PRIVATE_MARKUP")).map(chunk => chunk.visibility)).toEqual(["sealed"]);
+    expect(chunks.find(chunk => chunk.text.includes("public afterward"))?.visibility).toBe("public");
+  });
+
+  it.each([
+    ["> [!solution]", "> PRIVATE_CUE", "sealed"],
+    ["> [!hint]", "> PRIVATE_CUE", "hint_gated"],
+    [":::solution", "PRIVATE_CUE\n:::", "sealed"],
+    ["<details><summary>Answer</summary>", "PRIVATE_CUE</details>", "sealed"],
+  ] as const)("preserves %s across structured cue boundaries", (opener, body, visibility) => {
+    const cues = [opener, body, "Public afterward"].map((text, i) => ({
+      text, startMs: i * 100, endMs: (i + 1) * 100, keyframeChunkId: `frame-${i}`,
+    }));
+    const chunks = chunkTranscriptCues({ sourceId: "media", sourceVersion: 1, cues });
+    expect(chunks.find(chunk => chunk.text.includes("PRIVATE_CUE"))).toMatchObject({
+      visibility, startMs: 100, endMs: 200, keyframeChunkId: "frame-1",
+    });
+    expect(chunks.find(chunk => chunk.text.includes("Public afterward"))?.visibility).toBe("public");
+  });
+
+  it.each([
+    ["- > [!solution]", "  > PRIVATE_LIST", "sealed"],
+    ["* > [!hint]", "  > PRIVATE_LIST", "hint_gated"],
+    ["+ > [!answer]", "  > PRIVATE_LIST", "sealed"],
+    ["1. > [!answer]", "   > PRIVATE_LIST", "sealed"],
+    ["2) > [!answer]", "   > PRIVATE_LIST", "sealed"],
+    ["- [ ] > [!solution]", "  > PRIVATE_LIST", "sealed"],
+    ["-\t> [!solution]", "\t> PRIVATE_LIST", "sealed"],
+    ["> > [!solution]", "> > PRIVATE_LIST", "sealed"],
+    ["> - > [!answer]", ">   > PRIVATE_LIST", "sealed"],
+    ["- :::solution", "  PRIVATE_LIST\n  :::", "sealed"],
+    ["- <details><summary>Answer</summary>", "  PRIVATE_LIST\n  </details>", "sealed"],
+  ] as const)("protects nested list and quote content after %s", (opener, body, visibility) => {
+    const text = [opener, body, "Public afterward"].join("\n");
+    const chunks = chunkPedagogicalDocument({ sourceId: "doc", sourceVersion: 1, text });
+    expect(chunks.filter(chunk => chunk.text.includes("PRIVATE_LIST")).map(chunk => chunk.visibility)).toEqual([visibility]);
+    expect(chunks.find(chunk => chunk.text.includes("Public afterward"))?.visibility).toBe("public");
+  });
+
   it("tracks multi-line Setext titles, heading levels and thematic breaks", () => {
     const text = [
       "Intro", "", "---", "", "From the instructor", "Answer Key", "===", "english-secret",

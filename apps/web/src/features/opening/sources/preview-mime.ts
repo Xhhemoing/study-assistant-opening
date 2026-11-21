@@ -9,7 +9,9 @@ export function isPreviewableMime(mime: string): boolean {
     normalized === "application/pdf" ||
     normalized === "text/plain" ||
     normalized === "text/markdown" ||
-    normalized.startsWith("image/")
+    normalized.startsWith("image/") ||
+    normalized.startsWith("audio/") ||
+    normalized.startsWith("video/")
   );
 }
 

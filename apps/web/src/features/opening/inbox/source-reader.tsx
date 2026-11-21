@@ -15,7 +15,7 @@ import {
   validateMediaAnchorRange,
   type MediaAnchorPlaybackSnapshot,
 } from "./source-reader-media-anchor";
-import { buildSourceDownloadView, sourceDownloadHref, SourceViewer } from "./source-viewer";
+import { buildSourceDownloadView, sourcePreviewHref, SourceViewer } from "./source-viewer";
 import { captureReaderReturnPoint, restoreReaderReturnPoint, type ReaderReturnPoint } from "./reader-return-point";
 import { selectedReaderExcerpt, type ReaderSelection } from "./source-reader-selection";
 import { StudyToolsPanel } from "../teaching/study-tools-panel";
@@ -90,7 +90,7 @@ function SourceReaderContent({ record, latestRecord = record, requestedVersion, 
     [startMs, endMs, keyframeChunkId],
   );
   const hasInvalidMediaRange = mediaKind !== null && (startMs != null || endMs != null) && mediaAnchor == null;
-  const mediaSrc = mediaKind !== null ? sourceDownloadHref(record.id, requestedVersion) : null;
+  const mediaSrc = mediaKind !== null ? sourcePreviewHref(record.id, requestedVersion) : null;
   const mediaRef = useRef<HTMLMediaElement | null>(null);
   const [mediaPlayback, setMediaPlayback] = useState<MediaAnchorPlaybackSnapshot>(() => ({
     anchor: mediaAnchor,

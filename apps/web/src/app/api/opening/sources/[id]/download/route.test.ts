@@ -22,7 +22,7 @@ import { GET } from "./route";
 const SOURCE_ID = "00000000-0000-4000-8000-0000000000aa";
 const principal = { userId: "u", workspaceId: "w", sessionId: "s" };
 
-function getRequest(version?: number, disposition?: "inline" | "attachment") {
+function getRequest(version?: number, disposition?: "inline" | "attachment", range?: string, ifRange?: string) {
   const params = new URLSearchParams();
   if (version !== undefined) params.set("version", String(version));
   if (disposition) params.set("disposition", disposition);
@@ -30,7 +30,10 @@ function getRequest(version?: number, disposition?: "inline" | "attachment") {
   const url = query
     ? `http://localhost/api/opening/sources/${SOURCE_ID}/download?${query}`
     : `http://localhost/api/opening/sources/${SOURCE_ID}/download`;
-  return new Request(url, { method: "GET" });
+  const headers = new Headers();
+  if (range !== undefined) headers.set("Range", range);
+  if (ifRange !== undefined) headers.set("If-Range", ifRange);
+  return new Request(url, { method: "GET", headers });
 }
 
 function bytesStream(bytes: Uint8Array): ReadableStream<Uint8Array> {
@@ -57,6 +60,74 @@ beforeEach(() => {
 });
 
 describe("GET /api/opening/sources/:id/download", () => {
+  const mediaBytes = Uint8Array.from({ length: 100 }, (_, i) => i);
+
+  function mockMedia(body = bytesStream(mediaBytes), contentLength = mediaBytes.length) {
+    mocks.getDownloadStream.mockResolvedValue({
+      body, contentType: "video/mp4", contentLength, contentDisposition: 'inline; filename="video.mp4"',
+      version: 1, currentVersion: 2, versionMismatch: true,
+    });
+  }
+
+  it.each(["bytes=80-99", "bytes=80-", "bytes=-20", "Bytes=80-400", "bytes=80-999999999999999999999999"])(
+    "returns exact byte slice and source metadata for %s", async range => {
+      mockMedia();
+      const response = await GET(getRequest(1, "inline", range), { params: Promise.resolve({ id: SOURCE_ID }) });
+      expect(response.status).toBe(206);
+      expect(Object.fromEntries(response.headers)).toMatchObject({
+        "accept-ranges": "bytes", "content-range": "bytes 80-99/100", "content-length": "20",
+        "content-type": "video/mp4", "content-disposition": 'inline; filename="video.mp4"',
+        "cache-control": "private, no-store", "x-opening-source-version": "1",
+        "x-opening-source-current-version": "2", "x-opening-source-version-mismatch": "1",
+      });
+      expect(new Uint8Array(await response.arrayBuffer())).toEqual(mediaBytes.slice(80));
+    },
+  );
+
+  it("streams a range across chunks and cancels the upstream without reading its tail", async () => {
+    let offset = 0;
+    const cancel = vi.fn();
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.enqueue(mediaBytes.subarray(offset, offset + 10));
+        offset += 10;
+      },
+      cancel,
+    }, { highWaterMark: 0 });
+    mockMedia(body);
+    const response = await GET(getRequest(1, "inline", "bytes=12-25"), { params: Promise.resolve({ id: SOURCE_ID }) });
+    expect(response.status).toBe(206);
+    expect(new Uint8Array(await response.arrayBuffer())).toEqual(mediaBytes.slice(12, 26));
+    expect(offset).toBe(30);
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  it.each([["bytes=200-300", 100], ["bytes=-0", 100], ["bytes=0-", 0]])(
+    "returns 416 and cancels an unsatisfiable %s for length %i", async (range, length) => {
+      const cancel = vi.fn();
+      mockMedia(new ReadableStream({ cancel }), length);
+      const response = await GET(getRequest(1, "inline", range), { params: Promise.resolve({ id: SOURCE_ID }) });
+      expect(response.status).toBe(416);
+      expect(response.headers.get("Accept-Ranges")).toBe("bytes");
+      expect(response.headers.get("Content-Range")).toBe(`bytes */${length}`);
+      expect(response.body).toBeNull();
+      expect(cancel).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each([
+    [undefined, undefined], ["bytes=0-1,4-5", undefined], ["lines=0-1", undefined],
+    ["bytes=abc-9", undefined], ["bytes=10-9", undefined], ["bytes=0-1", '"unknown"'],
+  ])("streams the full body when Range=%s and If-Range=%s", async (range, ifRange) => {
+    mockMedia();
+    const response = await GET(getRequest(1, "inline", range, ifRange), { params: Promise.resolve({ id: SOURCE_ID }) });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Accept-Ranges")).toBe("bytes");
+    expect(response.headers.get("Content-Range")).toBeNull();
+    expect(response.headers.get("Content-Length")).toBe("100");
+    expect(new Uint8Array(await response.arrayBuffer())).toEqual(mediaBytes);
+  });
+
   it("streams bytes with disposition headers and never embeds MinIO hosts", async () => {
     const response = await GET(getRequest(0), {
       params: Promise.resolve({ id: SOURCE_ID }),

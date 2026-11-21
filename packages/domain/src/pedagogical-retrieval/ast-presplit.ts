@@ -234,12 +234,14 @@ function findMatchingLatexEnvBounds(
   text: string,
   envName: string,
   searchFrom: number,
+  limit = text.length,
 ): { readonly closeStart: number; readonly closeEnd: number } {
   const tokenRe = /\\(begin|end)\{([a-zA-Z][\w-]*\*?)\}/g;
   tokenRe.lastIndex = searchFrom;
   const stack: string[] = [envName];
   let match: RegExpExecArray | null;
   while ((match = tokenRe.exec(text)) !== null) {
+    if (tokenRe.lastIndex > limit) break;
     if (isEscaped(text, match.index)) continue;
     const directive = match[1]!;
     const name = match[2]!;
@@ -252,7 +254,7 @@ function findMatchingLatexEnvBounds(
       }
     }
   }
-  return { closeStart: text.length, closeEnd: text.length };
+  return { closeStart: limit, closeEnd: limit };
 }
 
 function lineIndexContaining(lines: readonly SourceLine[], offset: number, startHint: number): number {
@@ -418,7 +420,96 @@ function parseTableRowCells(
 }
 
 const THEMATIC_BREAK_RE = /^[ ]{0,3}(?:(?:-[ \t]*){3,}|(?:\*[ \t]*){3,}|(?:_[ \t]*){3,})$/;
-const SETEXT_LIST_MARKER_RE = /^[ ]{0,3}(?:[-+*]|\d{1,9}[.)])(?:[ \t]|$)/;
+const LIST_ITEM_RE = /^([ ]{0,3}(?:[-+*]|\d{1,9}[.)])(?:[ \t]+|$))(?:\[[ xX]\][ \t]+)?/;
+const SETEXT_UNDERLINE_RE = /^[ ]{0,3}(=+|-+)[ \t]*$/;
+
+function nextMarkdownColumn(column: number, character: string): number {
+  return character === "\t" ? column + (4 - column % 4) : column + 1;
+}
+
+function listContinuationPrefixLength(line: string, indent: number): number {
+  let column = 0;
+  let length = 0;
+  while (column < indent && (line[length] === " " || line[length] === "\t")) {
+    column = nextMarkdownColumn(column, line[length]!);
+    length++;
+  }
+  return column >= indent ? length : 0;
+}
+
+// Malformed math should stop at the paragraph or Markdown container boundary
+// so the main parser can still visit protected sections and blocks.
+function findMathBoundary(text: string, afterOpen: number, through = text.length): number {
+  let boundary = text.length;
+  let newline = text.indexOf("\n", afterOpen);
+  while (newline >= 0 && newline < through) {
+    const lineStart = newline + 1;
+    const nextNewline = text.indexOf("\n", lineStart);
+    const lineEnd = nextNewline === -1 ? text.length : nextNewline;
+    const line = text.slice(lineStart, lineEnd).replace(/\r$/, "");
+    const nextLineEnd = nextNewline === -1 ? -1 : text.indexOf("\n", nextNewline + 1);
+    const nextLine = nextNewline === -1 ? "" : text.slice(nextNewline + 1, nextLineEnd === -1 ? text.length : nextLineEnd).replace(/\r$/, "");
+    const latex = /^[ \t]*\\begin\{([a-zA-Z][\w-]*\*?)\}/.exec(line);
+    if (
+      !line.trim() ||
+      /^[ \t]*(?:#{1,6}(?:[ \t]|$)|:{3,}|>|\x60{3,}|~{3,})/.test(line) ||
+      DETAILS_OPEN_RE.test(line.trimStart()) ||
+      (latex && classifyLabel(latex[1], "public") !== null) ||
+      LIST_ITEM_RE.test(line) ||
+      parseInlineTranscriptCue(line) !== null ||
+      THEMATIC_BREAK_RE.test(line) ||
+      (!/^[ \t]*(?:\$\$|\\\]|\\end\{)/.test(line) && SETEXT_UNDERLINE_RE.test(nextLine))
+    ) {
+      boundary = text[newline - 1] === "\r" ? newline - 1 : newline;
+      break;
+    }
+    newline = nextNewline;
+  }
+  const inline = /<details(?=[\s>])|\\begin\{([a-zA-Z][\w-]*\*?)\}/gi;
+  const inlineText = text.slice(afterOpen, Math.min(boundary, through));
+  for (const match of inlineText.matchAll(inline)) {
+    const start = afterOpen + match.index;
+    if (!match[1]) return start;
+    const classified = classifyLabel(match[1], "public");
+    if (classified && classified.visibility !== "public" && !isEscaped(text, start)) return start;
+  }
+  return boundary;
+}
+
+function findMathDelimiter(text: string, start: number, token: "$$" | "\\]") {
+  const afterOpen = start + 2;
+  const close = findUnescapedToken(text, token, afterOpen);
+  const boundary = findMathBoundary(text, afterOpen, close < 0 ? text.length : close);
+  if (close === -1 || close >= boundary) return { end: boundary, closed: false };
+
+  if (token === "$$") {
+    const openerLineStart = text.lastIndexOf("\n", start - 1) + 1;
+    const closerLineStart = text.lastIndexOf("\n", close - 1) + 1;
+    const closerNewline = text.indexOf("\n", close + 2);
+    const closerLineEnd = closerNewline === -1 ? text.length : closerNewline;
+    const openerNewline = text.indexOf("\n", afterOpen);
+    const flowOpener = closerLineStart > openerLineStart
+      && !text.slice(openerLineStart, start).trim()
+      && !text.slice(afterOpen, openerNewline).trim();
+    const standaloneCloser = !text.slice(closerLineStart, close).trim()
+      && !text.slice(close + 2, closerLineEnd).trim();
+    const startsLaterFormula = closerLineStart > openerLineStart
+      && !text.slice(closerLineStart, close).trim()
+      && !standaloneCloser;
+    if ((flowOpener && !standaloneCloser) || startsLaterFormula) {
+      const newline = closerLineStart - 1;
+      const end = text[newline - 1] === "\r" ? newline - 1 : newline;
+      return { end, closed: false };
+    }
+  }
+  return { end: close + 2, closed: true };
+}
+
+function findMathEnvironment(text: string, envName: string, afterOpen: number) {
+  const limit = findMathBoundary(text, afterOpen);
+  const bounds = findMatchingLatexEnvBounds(text, envName, afterOpen, limit);
+  return { ...bounds, closed: bounds.closeStart < limit };
+}
 
 function startsSpecialBlock(lines: readonly SourceLine[], index: number): boolean {
   const raw = lines[index]!.raw;
@@ -436,6 +527,7 @@ function startsSpecialBlock(lines: readonly SourceLine[], index: number): boolea
   if (/^[ \t]*>/.test(raw)) return true;
   if (/^[ \t]{0,3}#{1,6}[ \t]+/.test(raw)) return true;
   if (THEMATIC_BREAK_RE.test(raw)) return true;
+  if (LIST_ITEM_RE.test(raw)) return true;
   if (raw.includes("|") && index + 1 < lines.length && isTableDelimiterRow(lines[index + 1]!.raw)) {
     return true;
   }
@@ -447,15 +539,14 @@ function findSetextUnderline(lines: readonly SourceLine[], firstLine: number) {
   const titleStart = lines[firstLine]!.raw;
   if (
     startsSpecialBlock(lines, firstLine) ||
-    SETEXT_LIST_MARKER_RE.test(titleStart) ||
     /^(?: {4}| {0,3}\t)/.test(titleStart)
   ) return null;
 
   for (let index = firstLine + 1; index < lines.length; index++) {
     const raw = lines[index]!.raw;
-    const underline = /^[ ]{0,3}(=+|-+)[ \t]*$/.exec(raw);
+    const underline = SETEXT_UNDERLINE_RE.exec(raw);
     if (underline) return { index, level: underline[1]![0] === "=" ? 1 : 2 };
-    if (startsSpecialBlock(lines, index) || SETEXT_LIST_MARKER_RE.test(raw)) break;
+    if (startsSpecialBlock(lines, index)) break;
   }
   return null;
 }
@@ -482,16 +573,14 @@ function findInlineConstructSpans(
   let i = rangeStart;
   while (i < rangeEnd) {
     if (text.startsWith("$$", i) && !isEscaped(text, i)) {
-      const close = findUnescapedToken(text, "$$", i + 2);
-      const end = close !== -1 ? close + 2 : text.length;
-      spans.push({ start: i, end, kind: "display_math", visibility: close === -1 ? "sealed" : activeVisibility });
+      const { end, closed } = findMathDelimiter(text, i, "$$");
+      spans.push({ start: i, end, kind: "display_math", visibility: closed ? activeVisibility : "sealed" });
       i = end;
       continue;
     }
     if (text.startsWith("\\[", i) && !isEscaped(text, i)) {
-      const close = findUnescapedToken(text, "\\]", i + 2);
-      const end = close !== -1 ? close + 2 : text.length;
-      spans.push({ start: i, end, kind: "display_math", visibility: close === -1 ? "sealed" : activeVisibility });
+      const { end, closed } = findMathDelimiter(text, i, "\\]");
+      spans.push({ start: i, end, kind: "display_math", visibility: closed ? activeVisibility : "sealed" });
       i = end;
       continue;
     }
@@ -505,12 +594,13 @@ function findInlineConstructSpans(
           : classifyLabel(envName, activeVisibility, sealProofs);
         if (classified) {
           const openEnd = i + m[0].length;
-          const bounds = findMatchingLatexEnvBounds(text, envName, openEnd);
+          const math = isMath ? findMathEnvironment(text, envName, openEnd) : null;
+          const bounds = math ?? findMatchingLatexEnvBounds(text, envName, openEnd);
           spans.push({
             start: i,
             end: bounds.closeEnd,
             kind: classified.kind,
-            visibility: isMath && bounds.closeStart === text.length ? "sealed" : classified.visibility,
+            visibility: math?.closed === false ? "sealed" : classified.visibility,
             label: envName,
             ...(isMath ? {} : { openEnd, closeStart: bounds.closeStart }),
           });
@@ -592,7 +682,7 @@ function trimWhitespaceBounds(
   return s < e ? { start: s, end: e } : null;
 }
 
-function parseBlockquoteInnerBlocks(
+function parsePrefixedInnerBlocks(
   lines: readonly SourceLine[],
   startLineIdx: number,
   endLineIdx: number,
@@ -600,6 +690,7 @@ function parseBlockquoteInnerBlocks(
   outerVisibility: PedagogicalVisibility,
   propagateSectionVisibility: boolean,
   innerSealProofs: boolean,
+  prefixLength = (line: SourceLine, _index: number) => /^[ \t]*>[ \t]?/.exec(line.raw)?.[0].length ?? 0,
 ): MappedInnerBlock[] {
   const bodyParts: string[] = [];
   const charOrigStart: number[] = [];
@@ -613,8 +704,7 @@ function parseBlockquoteInnerBlocks(
     if (idx === startLineIdx && firstLineSliceStart !== null) {
       prefixLen = firstLineSliceStart - curLine.start;
     } else {
-      const stripMatch = /^[ \t]*>[ \t]?/.exec(curLine.raw);
-      prefixLen = stripMatch ? stripMatch[0].length : 0;
+      prefixLen = prefixLength(curLine, idx);
     }
     const stripped = curLine.raw.slice(prefixLen);
     if (!(idx === startLineIdx && firstLineSliceStart !== null)) {
@@ -1332,7 +1422,8 @@ function parsePedagogicalAstInternal(
         const leadingWs = envMatch[0].length - envMatch[0].trimStart().length;
         const envStart = line.start + leadingWs;
         const openEndOffset = line.start + envMatch[0].length;
-        const { closeStart, closeEnd } = findMatchingLatexEnvBounds(text, envName, openEndOffset);
+        const math = isMath ? findMathEnvironment(text, envName, openEndOffset) : null;
+        const { closeStart, closeEnd } = math ?? findMatchingLatexEnvBounds(text, envName, openEndOffset);
         const endLineIdx = lineIndexContaining(lines, Math.max(envStart, closeEnd - 1), i);
         const trailingOnCloseLine = text.slice(closeEnd, lines[endLineIdx]!.contentEnd);
         const hasTrailingContent = !/^[ \t]*$/.test(trailingOnCloseLine);
@@ -1363,7 +1454,7 @@ function parsePedagogicalAstInternal(
             innerBlocks,
           );
         } else {
-          const visibility = isMath && closeStart === text.length ? "sealed" : classified.visibility;
+          const visibility = math?.closed === false ? "sealed" : classified.visibility;
           pushBlock(classified.kind, visibility, true, envStart, outerEnd, {
             label: envName,
           });
@@ -1452,70 +1543,28 @@ function parsePedagogicalAstInternal(
       continue;
     }
 
-    // 5. Display math ($$...$$)
-    const ddMatch = /^[ \t]*\$\$/.exec(raw);
-    if (ddMatch) {
-      const leadingWs = ddMatch[0].length - ddMatch[0].trimStart().length;
+    // 5. Display math ($$...$$ or \[...\])
+    const mathMatch = /^[ \t]*(\$\$|\\\[)/.exec(raw);
+    if (mathMatch) {
+      const leadingWs = mathMatch[0].length - mathMatch[1]!.length;
       const startOffset = line.start + leadingWs;
-      const afterOpen = line.start + ddMatch[0].length;
-      const closeOffset = findUnescapedToken(text, "$$", afterOpen);
-      const activeVis = getActiveSectionVisibility();
-      if (closeOffset !== -1) {
-        const closeEnd = closeOffset + 2;
-        const endLineIdx = lineIndexContaining(lines, closeOffset + 1, i);
-        const trailingOnCloseLine = text.slice(closeEnd, lines[endLineIdx]!.contentEnd);
-        const hasTrailingContent = !/^[ \t]*$/.test(trailingOnCloseLine);
-        const endOffset = hasTrailingContent ? closeEnd : Math.max(closeEnd, lines[endLineIdx]!.contentEnd);
-        pushBlock("display_math", activeVis, true, startOffset, endOffset);
-        if (hasTrailingContent) {
-          const closeLine = lines[endLineIdx]!;
-          lines[endLineIdx] = {
-            start: closeEnd,
-            contentEnd: closeLine.contentEnd,
-            end: closeLine.end,
-            raw: trailingOnCloseLine,
-          };
-          i = endLineIdx;
-        } else {
-          i = endLineIdx + 1;
-        }
+      const { end, closed } = findMathDelimiter(text, startOffset, mathMatch[1] === "$$" ? "$$" : "\\]");
+      const endLineIdx = lineIndexContaining(lines, end - 1, i);
+      const closeLine = lines[endLineIdx]!;
+      const trailing = text.slice(end, closeLine.contentEnd);
+      const hasTrailingContent = !/^[ \t]*$/.test(trailing);
+      pushBlock(
+        "display_math",
+        closed ? getActiveSectionVisibility() : "sealed",
+        true,
+        startOffset,
+        hasTrailingContent ? end : Math.max(end, closeLine.contentEnd),
+      );
+      if (hasTrailingContent) {
+        lines[endLineIdx] = { ...closeLine, start: end, raw: trailing };
+        i = endLineIdx;
       } else {
-        pushBlock("display_math", "sealed", true, startOffset, text.length);
-        i = lines.length;
-      }
-      continue;
-    }
-
-    // 6. LaTeX bracket display math (\[...\])
-    const bracketMatch = /^[ \t]*\\\[/.exec(raw);
-    if (bracketMatch) {
-      const leadingWs = bracketMatch[0].length - bracketMatch[0].trimStart().length;
-      const startOffset = line.start + leadingWs;
-      const afterOpen = line.start + bracketMatch[0].length;
-      const closeOffset = findUnescapedToken(text, "\\]", afterOpen);
-      const activeVis = getActiveSectionVisibility();
-      if (closeOffset !== -1) {
-        const closeEnd = closeOffset + 2;
-        const endLineIdx = lineIndexContaining(lines, closeOffset + 1, i);
-        const trailingOnCloseLine = text.slice(closeEnd, lines[endLineIdx]!.contentEnd);
-        const hasTrailingContent = !/^[ \t]*$/.test(trailingOnCloseLine);
-        const endOffset = hasTrailingContent ? closeEnd : Math.max(closeEnd, lines[endLineIdx]!.contentEnd);
-        pushBlock("display_math", activeVis, true, startOffset, endOffset);
-        if (hasTrailingContent) {
-          const closeLine = lines[endLineIdx]!;
-          lines[endLineIdx] = {
-            start: closeEnd,
-            contentEnd: closeLine.contentEnd,
-            end: closeLine.end,
-            raw: trailingOnCloseLine,
-          };
-          i = endLineIdx;
-        } else {
-          i = endLineIdx + 1;
-        }
-      } else {
-        pushBlock("display_math", "sealed", true, startOffset, text.length);
-        i = lines.length;
+        i = endLineIdx + 1;
       }
       continue;
     }
@@ -1551,7 +1600,7 @@ function parsePedagogicalAstInternal(
 
         if (classified.visibility !== "sealed") {
           const headerRestStart = line.start + calloutMatch[0].length - calloutMatch[2]!.length;
-          const innerBlocks = parseBlockquoteInnerBlocks(
+          const innerBlocks = parsePrefixedInnerBlocks(
             lines,
             i,
             endLineIdx,
@@ -1608,7 +1657,7 @@ function parsePedagogicalAstInternal(
       const outerEnd = lines[endLineIdx]!.contentEnd;
 
       if (activeVis !== "sealed") {
-        const innerBlocks = parseBlockquoteInnerBlocks(
+        const innerBlocks = parsePrefixedInnerBlocks(
           lines,
           i,
           endLineIdx,
@@ -1634,6 +1683,36 @@ function parsePedagogicalAstInternal(
         }
       }
       i = emitInlineConstructsRange(outerStart, outerEnd, activeVis, i, j);
+      continue;
+    }
+
+    // A list item owns its marker line and subsequent indented content. Parse
+    // that content with the list prefix removed, then map protected spans back.
+    const listMatch = LIST_ITEM_RE.exec(raw);
+    if (listMatch) {
+      let contentIndent = 0;
+      for (const character of listMatch[1]!) contentIndent = nextMarkdownColumn(contentIndent, character);
+      let endLineIdx = i;
+      for (let j = i + 1; j < lines.length; j++) {
+        const candidate = lines[j]!.raw;
+        if (!candidate.trim()) continue;
+        if (!listContinuationPrefixLength(candidate, contentIndent)) break;
+        endLineIdx = j;
+      }
+      const activeVis = getActiveSectionVisibility();
+      const innerBlocks = parsePrefixedInnerBlocks(
+        lines,
+        i,
+        endLineIdx,
+        null,
+        activeVis,
+        propagateSectionVisibility,
+        sealProofs,
+        (bodyLine, index) => index === i ? listMatch[0].length : listContinuationPrefixLength(bodyLine.raw, contentIndent),
+      );
+      const end = lines[endLineIdx]!.contentEnd;
+      emitContainerWithExtraction("prose", activeVis, false, line.start, end, end, undefined, false, innerBlocks);
+      i = endLineIdx + 1;
       continue;
     }
 
@@ -2195,12 +2274,29 @@ export function chunkTranscriptCues(input: ChunkTranscriptCuesInput): Pedagogica
   }
 
   const defaultVisibility = input.defaultVisibility ?? "public";
-  // Keep paragraph boundaries between cues while sharing section and container state.
-  const text = input.cues.map(cue => cue.text).join("\n\n");
+  const cueStarts: number[] = [];
+  const textParts: string[] = [];
+  let virtualOffset = 0;
+  let previousLine = "";
+  for (const cue of input.cues) {
+    if (textParts.length) {
+      const firstLine = cue.text.split(/\r?\n/, 1)[0]!;
+      const previousQuote = /^[ \t]*>/.test(previousLine.slice(LIST_ITEM_RE.exec(previousLine)?.[0].length ?? 0));
+      const continuesQuote = previousQuote && /^[ \t]*>/.test(firstLine);
+      const separator = continuesQuote || SETEXT_UNDERLINE_RE.test(firstLine) ? "\n" : "\n\n";
+      virtualOffset += separator.length;
+      textParts.push(separator);
+    }
+    cueStarts.push(virtualOffset);
+    textParts.push(cue.text);
+    virtualOffset += cue.text.length;
+    previousLine = cue.text.slice(cue.text.lastIndexOf("\n") + 1);
+  }
+  const text = textParts.join("");
   const blocks = parsePedagogicalAst(text, { defaultVisibility });
   const chunks: PedagogicalChunk[] = [];
   let seq = 0;
-  let cueStart = 0;
+  let originalOffset = 0;
   let blockIndex = 0;
 
   for (const [cueIndex, cue] of input.cues.entries()) {
@@ -2212,9 +2308,10 @@ export function chunkTranscriptCues(input: ChunkTranscriptCuesInput): Pedagogica
     ) {
       throw new RangeError(`Invalid transcript cue range [${cue.startMs}, ${cue.endMs}]`);
     }
-    const start = cueStart;
+    const start = cueStarts[cueIndex]!;
     const end = start + cue.text.length;
-    cueStart = end + 2;
+    const offsetAdjustment = start - originalOffset;
+    originalOffset += cue.text.length + 1;
     if (!cue.text) continue;
 
     const visibilityFloor = maxVisibility(defaultVisibility, cue.visibility ?? defaultVisibility);
@@ -2262,8 +2359,8 @@ export function chunkTranscriptCues(input: ChunkTranscriptCuesInput): Pedagogica
           atomicConstruct: true,
           text: part.text,
           // Public offsets still use a single separator between cues.
-          startOffset: span.start + part.start - cueIndex,
-          endOffset: span.start + part.end - cueIndex,
+          startOffset: span.start + part.start - offsetAdjustment,
+          endOffset: span.start + part.end - offsetAdjustment,
           pageStart: null,
           pageEnd: null,
           startMs: cue.startMs,

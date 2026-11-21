@@ -115,8 +115,7 @@ export function formatMediaAnchorRange(anchor: MediaAnchorRange): string {
  * - Releases the stop bound when the learner manually resumes playback at or
  *   after the auto-paused end, allowing uninterrupted continued viewing.
  */
-const SEEK_RANGE_TOLERANCE_MS = 250;
-const PROGRAMMATIC_SEEK_TOLERANCE_MS = 500;
+const POINT_SEEK_TOLERANCE_MS = 500;
 
 export function createMediaAnchorPlaybackController(
   anchor: MediaAnchorRange | null,
@@ -156,9 +155,9 @@ export function createMediaAnchorPlaybackController(
       emit();
       return;
     }
-    media.currentTime = anchor.startMs / 1000;
     pendingSeek = false;
     awaitingProgrammaticSeeked = true;
+    media.currentTime = anchor.startMs / 1000;
     phase = "seeking_segment";
     emit();
   };
@@ -166,7 +165,6 @@ export function createMediaAnchorPlaybackController(
   const pauseAtEnd = (media: SeekableMediaElement) => {
     if (!anchor || !boundActive || pendingSeek || media.paused) return;
     if (!Number.isFinite(media.currentTime) || media.currentTime < anchor.endMs / 1000) return;
-    awaitingProgrammaticSeeked = false;
     autoPausedAtEnd = true;
     boundActive = false;
     phase = "paused_at_end";
@@ -181,27 +179,13 @@ export function createMediaAnchorPlaybackController(
     },
     handleLoadedMetadata(media) {
       if (!anchor || !pendingSeek) return;
-      media.currentTime = anchor.startMs / 1000;
-      pendingSeek = false;
-      awaitingProgrammaticSeeked = true;
-      phase = "seeking_segment";
-      emit();
+      applySeek(media, false);
     },
     handleTimeUpdate(media) {
-      if (!anchor || !anchor.bounded || pendingSeek || userReleasedBound || autoPausedAtEnd) return;
-      const currentMs = media.currentTime * 1000;
-      if (
-        awaitingProgrammaticSeeked &&
-        Number.isFinite(currentMs) &&
-        Math.abs(currentMs - anchor.startMs) > PROGRAMMATIC_SEEK_TOLERANCE_MS
-      ) {
-        awaitingProgrammaticSeeked = false;
-      }
       pauseAtEnd(media);
     },
     handlePlay(media) {
       if (autoPausedAtEnd) {
-        awaitingProgrammaticSeeked = false;
         userReleasedBound = true;
         autoPausedAtEnd = false;
         boundActive = false;
@@ -213,32 +197,25 @@ export function createMediaAnchorPlaybackController(
     },
     handleSeeked(media) {
       if (!anchor || pendingSeek) return;
-      const wasProgrammatic = awaitingProgrammaticSeeked;
-      awaitingProgrammaticSeeked = false;
-      const currentMs = media.currentTime * 1000;
-      if (!Number.isFinite(currentMs)) return;
-      if (anchor.bounded) {
-        const startTolerance = wasProgrammatic ? PROGRAMMATIC_SEEK_TOLERANCE_MS : SEEK_RANGE_TOLERANCE_MS;
-        const latestSeek = Math.max(anchor.endMs + SEEK_RANGE_TOLERANCE_MS, anchor.startMs + startTolerance);
-        if (currentMs < anchor.startMs - startTolerance || currentMs > latestSeek) {
-          if (phase !== "continued_past_end") {
-            userReleasedBound = true;
-            autoPausedAtEnd = false;
-            boundActive = false;
-            phase = "continued_past_end";
-            emit();
-          }
-        } else if (autoPausedAtEnd && currentMs < anchor.endMs) {
-          autoPausedAtEnd = false;
-          boundActive = true;
-          phase = "seeking_segment";
-          emit();
-        }
-      } else if (Math.abs(currentMs - anchor.startMs) > PROGRAMMATIC_SEEK_TOLERANCE_MS && phase !== "continued_past_end") {
+      if (awaitingProgrammaticSeeked) {
+        awaitingProgrammaticSeeked = false;
+        return;
+      }
+      const time = media.currentTime;
+      if (!Number.isFinite(time) || userReleasedBound) return;
+      const outsideRange = anchor.bounded
+        ? time < anchor.startMs / 1000 || time >= anchor.endMs / 1000
+        : Math.abs(time * 1000 - anchor.startMs) > POINT_SEEK_TOLERANCE_MS;
+      if (outsideRange) {
         userReleasedBound = true;
         autoPausedAtEnd = false;
         boundActive = false;
         phase = "continued_past_end";
+        emit();
+      } else if (autoPausedAtEnd) {
+        autoPausedAtEnd = false;
+        boundActive = true;
+        phase = "seeking_segment";
         emit();
       }
     },

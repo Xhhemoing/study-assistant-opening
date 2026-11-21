@@ -116,7 +116,7 @@ describe("dedicated material reader", () => {
     const video = reader.querySelector<HTMLVideoElement>("video")!;
     const player = reader.querySelector<HTMLElement>('[data-media-anchor-player="true"]')!;
     expect(video).not.toBeNull();
-    expect(video.getAttribute("src")).toBe(`/api/opening/sources/${videoRecord.id}/download?version=2`);
+    expect(video.getAttribute("src")).toBe(`/api/opening/sources/${videoRecord.id}/download?version=2&disposition=inline`);
     expect(reader.textContent).toContain("1:05–1:30");
     expect(reader.textContent).not.toContain("尚不能同步确认该位置");
     expect(player.getAttribute("data-media-anchor-keyframe-id")).toBe("kf-65");
@@ -133,6 +133,7 @@ describe("dedicated material reader", () => {
     // Simulate metadata load -> auto-seeks to startMs / 1000 = 65s and keeps highlight active while paused.
     Object.defineProperty(video, "readyState", { configurable: true, value: 1 });
     await act(async () => { video.dispatchEvent(new Event("loadedmetadata")); });
+    await act(async () => { video.dispatchEvent(new Event("seeked")); });
     expect(video.currentTime).toBe(65);
     expect(player.getAttribute("data-media-anchor-highlight")).toBe("active");
 
@@ -165,6 +166,7 @@ describe("dedicated material reader", () => {
     const replayButton = Array.from(reader.querySelectorAll("button")).find(b => b.textContent === "重播片段")!;
     await click(replayButton);
     expect(video.currentTime).toBe(65);
+    await act(async () => { video.dispatchEvent(new Event("seeked")); });
     expect(playSpy).toHaveBeenCalledOnce();
     expect(player.getAttribute("data-media-anchor-highlight")).toBe("active");
     video.currentTime = 90.2;
