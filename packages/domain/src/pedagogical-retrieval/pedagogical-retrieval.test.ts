@@ -305,6 +305,22 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
   });
 
   it.each([
+    ["$$", ["- :::solution", "  Worked answer:", "  $$x = 42$$", "  :::"]],
+    ["$$", ["> :::solution", "> Worked answer:", "> $$x = 42$$", "> :::"]],
+    ["$$", ["- > [!solution]", "  > Worked answer:", "  > $$x = 42$$"]],
+    ["$$", ["- ## Answer Key", "  Worked answer:", "  $$x = 42$$"]],
+    ["\\[", ["1. > :::solution", "   > Worked answer:", "   > \\[x = 42\\]", "   > :::"]],
+  ] as const)("keeps nested protected blocks outside a stray math opener (%j)", (opener, nested) => {
+    const text = [opener, ...nested, "", "Public afterward"].join("\n");
+    const chunks = chunkPedagogicalDocument({ sourceId: "doc", sourceVersion: 1, text });
+    const partition = partitionPedagogicalChunks(chunks, { allowHintGated: true });
+    expect(partition.sealedChunks.some(chunk => chunk.text.includes("Worked answer:"))).toBe(true);
+    expect(partition.sealedChunks.some(chunk => chunk.text.includes("x = 42"))).toBe(true);
+    expect(partition.indexableChunks.some(chunk => /Worked answer:|x = 42/.test(chunk.text))).toBe(false);
+    expect(partition.indexableChunks.some(chunk => chunk.text.includes("Public afterward"))).toBe(true);
+  });
+
+  it.each([
     "Answer Key\n---\nPRIVATE_MARKUP\n## Lecture",
     ":::solution\nPRIVATE_MARKUP\n$$y = 2$$\n:::",
     "> [!solution]\n> PRIVATE_MARKUP\n> $$y = 2$$",
@@ -354,7 +370,7 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     ["- :::solution", "  PRIVATE_LIST\n  :::", "sealed"],
     ["- <details><summary>Answer</summary>", "  PRIVATE_LIST\n  </details>", "sealed"],
   ] as const)("protects nested list and quote content after %s", (opener, body, visibility) => {
-    const text = [opener, body, opener.startsWith("> >") ? "\nPublic afterward" : "Public afterward"].join("\n");
+    const text = [opener, body, "", "Public afterward"].join("\n");
     const chunks = chunkPedagogicalDocument({ sourceId: "doc", sourceVersion: 1, text });
     expect(chunks.filter(chunk => chunk.text.includes("PRIVATE_LIST")).map(chunk => chunk.visibility)).toEqual([visibility]);
     expect(chunks.find(chunk => chunk.text.includes("Public afterward"))?.visibility).toBe("public");
@@ -418,6 +434,109 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     expect(blocks.find(block => block.text.includes("forty-two."))?.visibility).toBe("sealed");
     expect(blocks.find(block => block.text.includes("The unit is seconds."))?.visibility).toBe("sealed");
     expect(blocks.at(-1)).toMatchObject({ visibility: "public", text: "Public afterward" });
+  });
+
+  it.each([
+    ["- > [!solution]", "  > The result is"],
+    ["1. - > [!solution]", "     > The result is"],
+    ["- [x] > [!solution]", "  > The result is"],
+  ])("keeps a callout lazy continuation inside its list item (%s)", (opener, paragraph) => {
+    const text = [opener, paragraph, "forty-two.", "In seconds.", "", "Public afterward"].join("\n");
+    const partition = partitionPedagogicalChunks(chunkPedagogicalDocument({ sourceId: "doc", sourceVersion: 1, text }));
+    expect(partition.sealedChunks.some(chunk => chunk.text.includes("forty-two.\nIn seconds."))).toBe(true);
+    expect(partition.indexableChunks.map(chunk => chunk.text).join("\n")).toContain("Public afterward");
+    expect(partition.indexableChunks.map(chunk => chunk.text).join("\n")).not.toContain("forty-two.");
+  });
+
+  it.each(["## Lecture", "---", "+ Another item", "1. Another item", "```text\nfenced\n```", ":::example\nexample\n:::"])(
+    "ends lazy list callouts at a real block boundary (%s)", boundary => {
+      const text = ["- > [!solution]", "  > The result is", "forty-two.", boundary, "Public afterward"].join("\n");
+      const blocks = parsePedagogicalAst(text);
+      expect(blocks.find(block => block.text.includes("forty-two."))?.visibility).toBe("sealed");
+      expect(blocks.at(-1)?.visibility).toBe("public");
+    },
+  );
+
+  it.each([["~~~", "~~~~", "```"], ["```", "````", "~~~"]])(
+    "keeps literal timestamp lines inside a document fence (%s)", (short, open, other) => {
+      const text = [
+        "## Answer Key", `${open}text`, short, other, `[00:00-00:01] ${open}`,
+        "## Lecture", "Worked answer: 42", open, "## Lecture", "[00:01-00:02] Public afterward",
+      ].join("\n");
+      const blocks = parsePedagogicalAst(text);
+      expect(blocks.find(block => block.text.includes("Worked answer: 42"))).toMatchObject({
+        kind: "code", visibility: "sealed", startMs: null,
+      });
+      expect(blocks.find(block => block.text.includes("[00:00-00:01]"))?.startMs).toBeNull();
+      expect(blocks.at(-1)).toMatchObject({ visibility: "public", startMs: 1000, endMs: 2000 });
+    },
+  );
+
+  it("keeps per-cue timestamps in a fence opened in a cue", () => {
+    const text = [
+      "[00:00-00:01] ## Answer Key", "[00:01-00:02] ~~~text", "[00:02-00:03] ## Lecture",
+      "[00:03-00:04] Worked answer: 42", "[00:04-00:05] ~~~",
+      "[00:05-00:06] ## Lecture", "[00:06-00:07] Public afterward",
+    ].join("\n");
+    const blocks = parsePedagogicalAst(text);
+    expect(blocks.find(block => block.text.includes("Worked answer: 42"))).toMatchObject({
+      visibility: "sealed", startMs: 3000, endMs: 4000,
+    });
+    expect(blocks.at(-1)).toMatchObject({ visibility: "public", startMs: 6000, endMs: 7000 });
+  });
+
+  it.each([
+    ["Time | Answer Key", "[00:00-00:01] | forty-two"],
+    ["[00:00-00:01] | Answer Key", "[00:01-00:02] | forty-two"],
+  ])("keeps literal timestamp cells in an untimed document table (%s)", (header, row) => {
+    const text = [header, "--- | ---", row, "", "[00:02-00:03] Public afterward"].join("\n");
+    const blocks = parsePedagogicalAst(text);
+    expect(blocks.find(block => block.text.includes("forty-two"))).toMatchObject({
+      text: "forty-two", visibility: "sealed", startOffset: text.indexOf("forty-two"), startMs: null,
+    });
+    expect(blocks.find(block => block.startOffset <= text.indexOf(row) && block.endOffset > text.indexOf(row)))
+      .toMatchObject({ visibility: "public", startMs: null });
+    expect(blocks.at(-1)).toMatchObject({ visibility: "public", startMs: 2000 });
+  });
+
+  it.each(["t1 | forty-two", "[00:00-00:01] | forty-two", "| forty-two", "| t1 | forty-two |", "| | forty-two"])(
+    "preserves answer-column index and source anchors in timed table rows (%s)", row => {
+      const bodies = ["Time | Answer Key", "--- | ---", row, "t2 | SECOND_PRIVATE", "Public afterward"];
+      const cues = bodies.map((text, index) => ({
+        text, startMs: index * 1000, endMs: (index + 1) * 1000, keyframeChunkId: `k${index}`,
+      }));
+      const source = { sourceId: "captions", sourceVersion: 1 };
+      const inline = bodies.map((body, index) => `[00:0${index}-00:0${index + 1}] ${body}`).join("\r\n");
+      for (const { text, chunks, frame } of [
+        { text: inline, chunks: chunkPedagogicalDocument({ ...source, text: inline }), frame: null },
+        { text: bodies.join("\n"), chunks: chunkTranscriptCues({ ...source, cues }), frame: "k2" },
+      ]) {
+        const secret = chunks.find(chunk => chunk.text.includes("forty-two"));
+        expect(secret).toMatchObject({
+          visibility: "sealed", startMs: 2000, endMs: 3000, keyframeChunkId: frame,
+          startOffset: text.indexOf("forty-two"),
+        });
+        expect(chunks.find(chunk => chunk.text.includes("SECOND_PRIVATE"))).toMatchObject({
+          visibility: "sealed", startMs: 3000, endMs: 4000,
+        });
+        expect(chunks.find(chunk => chunk.text.includes("Public afterward"))).toMatchObject({
+          visibility: "public", startMs: 4000, endMs: 5000,
+        });
+        for (const chunk of chunks) expect(text.slice(chunk.startOffset, chunk.endOffset)).toBe(chunk.text);
+      }
+    },
+  );
+
+  it("isolates short rows inside a multiline timed table without changing ordinary GFM rows", () => {
+    const header = "Time | Answer Key | Note\n--- | --- | ---";
+    const body = "t0 | First answer | Note\n| forty-two";
+    const cues = [header, body].map((text, index) => ({ text, startMs: index * 1000, endMs: (index + 1) * 1000 }));
+    const chunks = chunkTranscriptCues({ sourceId: "media", sourceVersion: 1, cues });
+    expect(chunks.find(chunk => chunk.text.includes("forty-two"))).toMatchObject({
+      text: "forty-two", visibility: "sealed", startMs: 1000, endMs: 2000,
+    });
+    const document = parsePedagogicalAst(`${header}\n| Public time |`);
+    expect(document.find(block => block.text.includes("Public time"))?.visibility).toBe("public");
   });
 
   it("shares heading state between timed and untimed lines and maps raw page spans", () => {

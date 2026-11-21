@@ -369,6 +369,7 @@ function sanitizeHeaderLabel(
 function parseTableRowCells(
   sourceLine: SourceLine,
   protectedSpans: readonly { readonly start: number; readonly end: number }[] = [],
+  leadingEmptyCell = false,
 ): Array<{ readonly start: number; readonly end: number }> {
   const raw = sourceLine.raw;
   const pipePositions: number[] = [];
@@ -384,7 +385,7 @@ function parseTableRowCells(
   if (pipePositions.length === 0) return [];
   const trimmedLeft = raw.trimStart();
   const trimmedRight = raw.trimEnd();
-  const hasLeadingPipe = trimmedLeft.startsWith("|");
+  const hasLeadingPipe = !leadingEmptyCell && trimmedLeft.startsWith("|");
   const hasTrailingPipe =
     trimmedRight.endsWith("|") && !isEscaped(trimmedRight, trimmedRight.length - 1);
 
@@ -428,7 +429,7 @@ const BLOCKQUOTE_PREFIX_RE = /^[ \t]*>[ \t]?/;
 const CALLOUT_HEADER_RE = /^\[!([a-zA-Z_-]+)\][+-]?(.*)$/;
 const CALLOUT_RE = /^[ \t]*>[ \t]*\[!([a-zA-Z_-]+)\][+-]?(.*)$/;
 
-function innermostQuoteBody(line: string): string | null {
+function stripContainerPrefixes(line: string): { body: string; quoted: boolean } {
   let rest = line;
   let quoted = false;
   while (rest) {
@@ -442,14 +443,38 @@ function innermostQuoteBody(line: string): string | null {
     if (!list) break;
     rest = rest.slice(list[0].length);
   }
-  return quoted ? rest : null;
+  return { body: rest, quoted };
+}
+
+function innermostQuoteBody(line: string): string | null {
+  const { body, quoted } = stripContainerPrefixes(line);
+  return quoted ? body : null;
+}
+
+function isPipeTableRow(line: string): boolean {
+  return line.includes("|") && !/^[ \t]{0,3}(?:`{3,}|~{3,}|:{3,}|#{1,6}[ \t])/.test(line);
+}
+
+function isPipeTableStart(header: string, delimiter?: string): boolean {
+  return isPipeTableRow(header) && delimiter !== undefined && isTableDelimiterRow(delimiter);
+}
+
+function matchFenceOpening(line: string): RegExpExecArray | null {
+  const match = /^[ \t]{0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+  return match && !(match[1]![0] === "`" && match[2]!.includes("`")) ? match : null;
+}
+
+function closesFence(line: string, opener: string): boolean {
+  const match = /^[ \t]{0,3}(`{3,}|~{3,})[ \t]*$/.exec(line)?.[1];
+  return match !== undefined && match[0] === opener[0] && match.length >= opener.length;
 }
 
 function transcriptCueSeparator(previous: string, next: string): string {
   const previousLine = previous.slice(previous.lastIndexOf("\n") + 1);
   const nextLine = next.split(/\r?\n/, 1)[0]!;
   const continuesQuote = innermostQuoteBody(previousLine) !== null && innermostQuoteBody(nextLine) !== null;
-  return continuesQuote || SETEXT_UNDERLINE_RE.test(nextLine) ? "\n" : "\n\n";
+  const continuesTable = isPipeTableRow(previousLine) && isPipeTableRow(nextLine);
+  return continuesQuote || continuesTable || SETEXT_UNDERLINE_RE.test(nextLine) ? "\n" : "\n\n";
 }
 
 function nextMarkdownColumn(column: number, character: string): number {
@@ -478,12 +503,13 @@ function findMathBoundary(text: string, afterOpen: number, through = text.length
     const line = text.slice(lineStart, lineEnd).replace(/\r$/, "");
     const nextLineEnd = nextNewline === -1 ? -1 : text.indexOf("\n", nextNewline + 1);
     const nextLine = nextNewline === -1 ? "" : text.slice(nextNewline + 1, nextLineEnd === -1 ? text.length : nextLineEnd).replace(/\r$/, "");
-    const latex = /^[ \t]*\\begin\{([a-zA-Z][\w-]*\*?)\}/.exec(line);
+    const body = stripContainerPrefixes(line).body.trimStart();
+    const latex = /^\\begin\{([a-zA-Z][\w-]*\*?)\}/.exec(body);
     if (
       !line.trim() ||
-      /^[ \t]*(?:#{1,6}(?:[ \t]|$)|:{3,}|\x60{3,}|~{3,})/.test(line) ||
-      CALLOUT_HEADER_RE.test(innermostQuoteBody(line)?.trimStart() ?? "") ||
-      DETAILS_OPEN_RE.test(line.trimStart()) ||
+      /^(?:#{1,6}(?:[ \t]|$)|:{3,}|\x60{3,}|~{3,})/.test(body) ||
+      CALLOUT_HEADER_RE.test(body) ||
+      DETAILS_OPEN_RE.test(body) ||
       (latex && classifyLabel(latex[1], "public") !== null) ||
       parseInlineTranscriptCue(line) !== null ||
       THEMATIC_BREAK_RE.test(line) ||
@@ -558,9 +584,7 @@ function startsSpecialLine(raw: string, next?: string, interruptsParagraph = fal
   const list = LIST_ITEM_RE.exec(raw);
   if (list && (!interruptsParagraph ||
     (raw.slice(list[1]!.length).trim() && /^(?:[-+*]|1[.)])/.test(list[1]!.trimStart())))) return true;
-  if (next && raw.includes("|") && isTableDelimiterRow(next)) {
-    return true;
-  }
+  if (isPipeTableStart(raw, next)) return true;
   if (parseInlineTranscriptCue(raw) !== null) return true;
   return false;
 }
@@ -569,32 +593,40 @@ function startsSpecialBlock(lines: readonly SourceLine[], index: number): boolea
   return startsSpecialLine(lines[index]!.raw, lines[index + 1]?.raw);
 }
 
+interface QuoteParagraph {
+  open: boolean;
+  fence?: string;
+}
+
+function updateQuotedParagraph(state: QuoteParagraph, rawBody: string) {
+  const body = rawBody.trimStart();
+  const fence = /^(\x60{3,}|~{3,}|\$\$(?=[ \t]*$))(.*)$/.exec(body);
+  if (state.fence) {
+    if (fence && fence[1]![0] === state.fence[0] && fence[1]!.length >= state.fence.length && !fence[2]!.trim()) {
+      state.fence = undefined;
+    }
+    return;
+  }
+  state.fence = fence?.[1];
+  state.open = !startsSpecialLine(body);
+}
+
+function continuesLazyQuote(state: QuoteParagraph, raw: string, next?: string): boolean {
+  return state.open && !startsSpecialLine(raw, next, true) && !/^[ \t]*:{3,}[ \t]*$/.test(raw);
+}
+
 function findBlockquoteEnd(
   lines: readonly SourceLine[],
   start: number,
   interruptsQuote: (line: string) => boolean,
 ): number {
-  let paragraphOpen = false;
-  let openFence: string | undefined;
+  const state: QuoteParagraph = { open: false };
   for (let index = start; index < lines.length; index++) {
     const raw = lines[index]!.raw;
     if (BLOCKQUOTE_PREFIX_RE.test(raw)) {
-      if (!openFence && index > start && interruptsQuote(raw)) return index;
-      const body = innermostQuoteBody(raw)!.trimStart();
-      const fence = /^(\x60{3,}|~{3,}|\$\$(?=[ \t]*$))(.*)$/.exec(body);
-      if (openFence) {
-        if (fence && fence[1]![0] === openFence[0] && fence[1]!.length >= openFence.length && !fence[2]!.trim()) {
-          openFence = undefined;
-        }
-        continue;
-      }
-      if (fence) openFence = fence[1];
-      paragraphOpen = !startsSpecialLine(body);
-    } else if (
-      !paragraphOpen ||
-      startsSpecialLine(raw, lines[index + 1]?.raw, true) ||
-      /^[ \t]*:{3,}[ \t]*$/.test(raw)
-    ) {
+      if (!state.fence && index > start && interruptsQuote(raw)) return index;
+      updateQuotedParagraph(state, innermostQuoteBody(raw)!);
+    } else if (!continuesLazyQuote(state, raw, lines[index + 1]?.raw)) {
       return index;
     }
   }
@@ -896,18 +928,54 @@ interface TranscriptRegion {
   readonly cue?: { readonly timing: InlineCueTiming; readonly lineStart: number };
 }
 
+function scanInlineCueTimings(lines: readonly SourceLine[]): Array<InlineCueTiming | null> {
+  let fence: { opener: string; literal: boolean } | undefined;
+  let inDocumentTable = false;
+  return lines.map(({ raw }, index) => {
+    if (fence) {
+      const timing = fence.literal ? null : parseInlineTranscriptCue(raw);
+      if (closesFence(timing ? raw.slice(timing.prefixLength) : raw, fence.opener)) fence = undefined;
+      return timing;
+    }
+    if (inDocumentTable) {
+      if (isPipeTableRow(raw)) return null;
+      inDocumentTable = false;
+    }
+    const documentFence = matchFenceOpening(raw);
+    if (documentFence) {
+      fence = { opener: documentFence[1]!, literal: true };
+      return null;
+    }
+    if (
+      isPipeTableStart(raw, lines[index + 1]?.raw) &&
+      !LIST_ITEM_RE.test(raw) &&
+      !/^(?:>|\$\$|\\\[|\\begin\{|<details\b)/i.test(raw.trimStart())
+    ) {
+      inDocumentTable = true;
+      return null;
+    }
+    const timing = parseInlineTranscriptCue(raw);
+    const cueFence = timing && matchFenceOpening(raw.slice(timing.prefixLength));
+    if (cueFence) fence = { opener: cueFence[1]!, literal: false };
+    return timing;
+  });
+}
+
 function parseInlineCuedDocument(
   source: string,
   lines: readonly SourceLine[],
   timings: readonly (InlineCueTiming | null)[],
   options: AstParseOptions,
   sealProofs: boolean,
+  captionRowStarts?: ReadonlySet<number>,
 ): PedagogicalAstBlock[] {
   const parts: string[] = [];
   const regions: TranscriptRegion[] = [];
+  const timedRows = new Set<number>();
   let offset = 0;
   for (const [index, line] of lines.entries()) {
     const timing = timings[index];
+    if (timing || captionRowStarts?.has(line.start)) timedRows.add(offset);
     if (timing) {
       const body = line.raw.slice(timing.prefixLength);
       const next = timings[index + 1];
@@ -934,7 +1002,7 @@ function parseInlineCuedDocument(
   const readRange = readAstRanges(parsePedagogicalAstInternal(markdown, {
     defaultVisibility: options.defaultVisibility,
     propagateSectionVisibility: options.propagateSectionVisibility,
-  }, sealProofs));
+  }, sealProofs, timedRows));
   const blocks: PedagogicalAstBlock[] = [];
   for (const region of regions) {
     const { start, end, sourceStart, cue } = region;
@@ -992,13 +1060,14 @@ function parsePedagogicalAstInternal(
   text: string,
   options: AstParseOptions,
   sealProofs: boolean,
+  captionRowStarts?: ReadonlySet<number>,
 ): PedagogicalAstBlock[] {
   if (!text) return [];
   const defaultVisibility = options.defaultVisibility ?? "public";
   const propagateSectionVisibility = options.propagateSectionVisibility ?? true;
   const lines = splitLinesWithOffsets(text);
-  const timings = lines.map(line => parseInlineTranscriptCue(line.raw));
-  if (timings.some(Boolean)) return parseInlineCuedDocument(text, lines, timings, options, sealProofs);
+  const timings = scanInlineCueTimings(lines);
+  if (timings.some(Boolean)) return parseInlineCuedDocument(text, lines, timings, options, sealProofs, captionRowStarts);
   const blocks: PedagogicalAstBlock[] = [];
   const headingStack: Array<{ readonly level: number; readonly visibility: PedagogicalVisibility }> = [];
   const getActiveSectionVisibility = (): PedagogicalVisibility =>
@@ -1458,10 +1527,10 @@ function parsePedagogicalAstInternal(
     }
 
     // 2. Fenced code block or tilde/backtick pedagogical fence (``` or ~~~)
-    const fenceMatch = /^[ \t]{0,3}(`{3,}|~{3,})(.*)$/.exec(raw);
-    if (fenceMatch && !(fenceMatch[1]![0] === "`" && fenceMatch[2]!.includes("`"))) {
-      const fenceChar = fenceMatch[1]![0]!;
-      const fenceLen = fenceMatch[1]!.length;
+    const fenceMatch = matchFenceOpening(raw);
+    if (fenceMatch) {
+      const opener = fenceMatch[1]!;
+      const fenceChar = opener[0]!;
       const activeVis = getActiveSectionVisibility();
       const infoRaw = fenceMatch[2]!;
       const infoMatch = /^[ \t]*\{?\.?([a-zA-Z][\w-]*)\}?([ \t].*)?$/.exec(infoRaw);
@@ -1469,9 +1538,8 @@ function parsePedagogicalAstInternal(
       const treatAsPedagogical =
         classified !== null &&
         (fenceChar === "~" || VISIBILITY_RANK[classified.visibility] > VISIBILITY_RANK[activeVis]);
-      const closeRe = new RegExp(`^[ \\t]{0,3}${fenceChar}{${fenceLen},}[ \\t]*$`);
       let j = i + 1;
-      while (j < lines.length && !closeRe.test(lines[j]!.raw)) j++;
+      while (j < lines.length && !closesFence(lines[j]!.raw, opener)) j++;
       const closed = j < lines.length;
       const endLineIdx = closed ? j : lines.length - 1;
       const outerStart = line.start;
@@ -1885,17 +1953,36 @@ function parsePedagogicalAstInternal(
       continue;
     }
 
-    // A list item owns its marker line and subsequent indented content. Parse
-    // that content with the list prefix removed, then map protected spans back.
+    // Project the item with its indentation removed, including lazy lines
+    // owned by a quoted paragraph inside the item.
     const listMatch = LIST_ITEM_RE.exec(raw);
     if (listMatch) {
       let contentIndent = 0;
       for (const character of listMatch[1]!) contentIndent = nextMarkdownColumn(contentIndent, character);
+      const quote: QuoteParagraph = { open: false };
+      const firstQuote = innermostQuoteBody(raw.slice(listMatch[0].length));
+      if (firstQuote !== null) updateQuotedParagraph(quote, firstQuote);
       let endLineIdx = i;
       for (let j = i + 1; j < lines.length; j++) {
         const candidate = lines[j]!.raw;
-        if (!candidate.trim()) continue;
-        if (!listContinuationPrefixLength(candidate, contentIndent)) break;
+        if (!candidate.trim()) {
+          quote.open = false;
+          quote.fence = undefined;
+          continue;
+        }
+        const prefixLength = listContinuationPrefixLength(candidate, contentIndent);
+        const next = lines[j + 1]?.raw;
+        if (!prefixLength) {
+          if (!continuesLazyQuote(quote, candidate, next)) break;
+        } else {
+          const body = candidate.slice(prefixLength);
+          const quoted = innermostQuoteBody(body);
+          if (quoted !== null) updateQuotedParagraph(quote, quoted);
+          else if (!continuesLazyQuote(quote, body, next)) {
+            quote.open = false;
+            quote.fence = undefined;
+          }
+        }
         endLineIdx = j;
       }
       const activeVis = getActiveSectionVisibility();
@@ -1916,16 +2003,9 @@ function parsePedagogicalAstInternal(
     }
 
     // 8. Markdown / pipe table (extracts inline sealed/hint constructs & sealed/hint columns)
-    if (raw.includes("|") && i + 1 < lines.length && isTableDelimiterRow(lines[i + 1]!.raw)) {
+    if (isPipeTableStart(raw, lines[i + 1]?.raw)) {
       let j = i + 2;
-      while (
-        j < lines.length &&
-        !/^\s*$/.test(lines[j]!.raw) &&
-        lines[j]!.raw.includes("|") &&
-        !/^[ \t]{0,3}(`{3,}|~{3,}|:{3,}|#{1,6}[ \t])/.test(lines[j]!.raw)
-      ) {
-        j++;
-      }
+      while (j < lines.length && isPipeTableRow(lines[j]!.raw)) j++;
       const endLineIdx = j - 1;
       const activeVis = getActiveSectionVisibility();
       const tableStart = line.start;
@@ -1955,9 +2035,23 @@ function parsePedagogicalAstInternal(
 
       if (colPolicies.some(Boolean)) {
         for (let rowIdx = i + 2; rowIdx <= endLineIdx; rowIdx++) {
-          const rowCells = parseTableRowCells(lines[rowIdx]!, inlineSpans);
+          const row = lines[rowIdx]!;
+          let rowCells = parseTableRowCells(row, inlineSpans);
+          // A short caption row can start with the separator for an empty
+          // first cell. Keep that position without altering document GFM rows.
+          const leadingEmptyCell =
+            captionRowStarts?.has(row.start) && rowCells.length < headerCells.length &&
+            row.raw.trimStart().startsWith("|") && !row.raw.trimEnd().endsWith("|");
+          if (leadingEmptyCell) rowCells = parseTableRowCells(row, inlineSpans, true);
           for (let colIdx = 0; colIdx < Math.min(colPolicies.length, rowCells.length); colIdx++) {
-            const policy = colPolicies[colIdx];
+            const columnPolicy = colPolicies[colIdx];
+            // An omitted edge pipe is ambiguous on a short caption row. Keep
+            // the stronger policy if the ordinary GFM alignment also fits.
+            const alternatePolicy = leadingEmptyCell ? colPolicies[colIdx - 1] : null;
+            const policy = alternatePolicy &&
+              (!columnPolicy || VISIBILITY_RANK[alternatePolicy.visibility] > VISIBILITY_RANK[columnPolicy.visibility])
+              ? alternatePolicy
+              : columnPolicy;
             if (!policy) continue;
             const bounds = trimWhitespaceBounds(text, rowCells[colIdx]!.start, rowCells[colIdx]!.end, false);
             if (!bounds) continue;
@@ -2405,6 +2499,7 @@ export function chunkTranscriptCues(input: ChunkTranscriptCuesInput): Pedagogica
 
   const defaultVisibility = input.defaultVisibility ?? "public";
   const cueStarts: number[] = [];
+  const captionRowStarts = new Set<number>();
   const textParts: string[] = [];
   let virtualOffset = 0;
   let previousCue = "";
@@ -2415,12 +2510,15 @@ export function chunkTranscriptCues(input: ChunkTranscriptCuesInput): Pedagogica
       textParts.push(separator);
     }
     cueStarts.push(virtualOffset);
+    for (const { start } of splitLinesWithOffsets(cue.text)) captionRowStarts.add(virtualOffset + start);
     textParts.push(cue.text);
     virtualOffset += cue.text.length;
     previousCue = cue.text;
   }
   const text = textParts.join("");
-  const readRange = readAstRanges(parsePedagogicalAst(text, { defaultVisibility }));
+  const readRange = readAstRanges(parsePedagogicalAstInternal(
+    text, { defaultVisibility }, false, captionRowStarts,
+  ));
   const chunks: PedagogicalChunk[] = [];
   let seq = 0;
   let originalOffset = 0;
