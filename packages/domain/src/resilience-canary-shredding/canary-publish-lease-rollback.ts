@@ -419,7 +419,7 @@ export function validateCandidateCommitFence(
     !Number.isFinite(lease.issuedAtMs) ||
     !Number.isFinite(lease.expiresAtMs) ||
     lease.issuedAtMs < 0 ||
-    lease.expiresAtMs < lease.issuedAtMs
+    lease.expiresAtMs <= lease.issuedAtMs
   ) {
     return {
       allowed: false,
@@ -443,8 +443,8 @@ export function validateCandidateCommitFence(
   }
 
   if (
-    commitNowMs > lease.expiresAtMs ||
-    commitNowMs - lease.issuedAtMs > CANDIDATE_PUBLISH_LEASE_TTL_MS
+    commitNowMs >= lease.expiresAtMs ||
+    commitNowMs - lease.issuedAtMs >= CANDIDATE_PUBLISH_LEASE_TTL_MS
   ) {
     return {
       allowed: false,
@@ -487,25 +487,6 @@ export function triggerEmergencyRollback(
     );
   }
 
-  let syncWatermarkDrainWindowMs = 0;
-  if (!certifiedNewLeaseIssuanceFenced) {
-    if (options?.oldestWorkerSyncWatermarkMs !== undefined) {
-      const oldestWatermark = assertNonNegativeFinite(
-        options.oldestWorkerSyncWatermarkMs,
-        "oldestWorkerSyncWatermarkMs",
-      );
-      syncWatermarkDrainWindowMs =
-        oldestWatermark < triggeredAtMs
-          ? Math.max(
-              0,
-              oldestWatermark + CANDIDATE_PUBLISH_LEASE_TTL_MS - triggeredAtMs,
-            )
-          : CANDIDATE_PUBLISH_LEASE_TTL_MS;
-    } else {
-      syncWatermarkDrainWindowMs = CANDIDATE_PUBLISH_LEASE_TTL_MS;
-    }
-  }
-
   let enumeratedDrainWindowMs = 0;
   if (activeLeases !== undefined) {
     for (const lease of activeLeases) {
@@ -535,15 +516,12 @@ export function triggerEmergencyRollback(
     }
   }
 
-  // Only when BOTH the active lease inventory AND new lease issuance fencing
-  // are certified can rollback drain collapse to the enumerated residual window.
-  const maxDrainWindowMs = certifiedLeaseInventory
-    ? Math.max(enumeratedDrainWindowMs, syncWatermarkDrainWindowMs)
-    : Math.max(
-        CANDIDATE_PUBLISH_LEASE_TTL_MS,
-        enumeratedDrainWindowMs,
-        syncWatermarkDrainWindowMs,
-      );
+  // Collapse drain below CANDIDATE_PUBLISH_LEASE_TTL_MS ONLY when BOTH
+  // active lease inventory and new lease issuance fencing are certified.
+  const maxDrainWindowMs =
+    certifiedLeaseInventory && certifiedNewLeaseIssuanceFenced
+      ? enumeratedDrainWindowMs
+      : Math.max(CANDIDATE_PUBLISH_LEASE_TTL_MS, enumeratedDrainWindowMs);
 
   const rollbackDeadlineAtMs = triggeredAtMs + maxDrainWindowMs;
   const slaDeadlineAtMs = triggeredAtMs + EMERGENCY_ROLLBACK_SLA_MS;

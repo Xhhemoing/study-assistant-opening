@@ -78,7 +78,8 @@ export type KeepPrimaryReason =
   | "insufficient_qualified_windows"
   | "single_window_breach_not_confirmed"
   | "non_consecutive_breach_windows"
-  | "disjoint_threshold_breaches";
+  | "disjoint_threshold_breaches"
+  | "evaluation_timestamp_required";
 
 export type DriftSentinelDecision =
   | {
@@ -477,7 +478,6 @@ export type EmergencyRollbackOptions = {
   certifiedLeaseInventory?: boolean;
   certifiedNewLeaseIssuanceFenced?: boolean;
   certifiedCompleteInventory?: boolean;
-  oldestWorkerSyncWatermarkMs?: number;
 };
 
 export type EmergencyRollbackResult = {

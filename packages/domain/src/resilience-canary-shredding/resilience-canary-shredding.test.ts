@@ -209,10 +209,25 @@ describe("A. 15-Minute Drift Canary Sentinel & Zero-Double-Billing", () => {
     ).toThrow(RangeError);
   });
 
-  it("ignores sparse windows (< 100 decisions), single-window spikes, non-consecutive windows, quiet-separated breaches, and disjoint metric breaches", () => {
+  it("ignores sparse windows (< 100 decisions), omitted evaluatedAtMs, single-window spikes, non-consecutive windows, quiet-separated breaches, and disjoint metric breaches", () => {
+    const missingEvaluatedAt = evaluateDriftCanarySentinel({
+      route: baseRoute,
+      thresholds: baseThresholds,
+      windows: [
+        makeWindow(0, { decisionCount: 150, errorRate: 0.9 }),
+        makeWindow(1, { decisionCount: 150, errorRate: 0.9 }),
+      ],
+    });
+    expect(missingEvaluatedAt.action).toBe("keep_primary");
+    if (missingEvaluatedAt.action === "keep_primary") {
+      expect(missingEvaluatedAt.reason).toBe("evaluation_timestamp_required");
+      expect(missingEvaluatedAt.evaluatedWindowCount).toBe(0);
+    }
+
     const sparse = evaluateDriftCanarySentinel({
       route: baseRoute,
       thresholds: baseThresholds,
+      evaluatedAtMs: 600_000,
       windows: [
         makeWindow(0, { decisionCount: 99, errorRate: 0.9 }),
         makeWindow(1, { decisionCount: 99, errorRate: 0.9 }),
@@ -226,6 +241,7 @@ describe("A. 15-Minute Drift Canary Sentinel & Zero-Double-Billing", () => {
     const singleSpike = evaluateDriftCanarySentinel({
       route: baseRoute,
       thresholds: baseThresholds,
+      evaluatedAtMs: 600_000,
       windows: [
         makeWindow(0, { decisionCount: 140, errorRate: 0.2 }),
         makeWindow(1, { decisionCount: 140, errorRate: 0.01 }),
@@ -239,6 +255,7 @@ describe("A. 15-Minute Drift Canary Sentinel & Zero-Double-Billing", () => {
     const bridgedBySparse = evaluateDriftCanarySentinel({
       route: baseRoute,
       thresholds: baseThresholds,
+      evaluatedAtMs: 900_000,
       windows: [
         makeWindow(0, { decisionCount: 120, errorRate: 0.25 }),
         makeWindow(1, { decisionCount: 40, errorRate: 0.25 }),
@@ -253,6 +270,7 @@ describe("A. 15-Minute Drift Canary Sentinel & Zero-Double-Billing", () => {
     const separatedByHealthy = evaluateDriftCanarySentinel({
       route: baseRoute,
       thresholds: baseThresholds,
+      evaluatedAtMs: 900_000,
       windows: [
         makeWindow(0, { decisionCount: 150, errorRate: 0.25 }),
         makeWindow(1, { decisionCount: 150, errorRate: 0.01 }),
@@ -267,6 +285,7 @@ describe("A. 15-Minute Drift Canary Sentinel & Zero-Double-Billing", () => {
     const separatedByMissingInterval = evaluateDriftCanarySentinel({
       route: baseRoute,
       thresholds: baseThresholds,
+      evaluatedAtMs: 900_000,
       windows: [
         makeWindow(0, { decisionCount: 150, errorRate: 0.25 }),
         makeWindow(2, { decisionCount: 150, errorRate: 0.25 }),
@@ -280,6 +299,7 @@ describe("A. 15-Minute Drift Canary Sentinel & Zero-Double-Billing", () => {
     const disjoint = evaluateDriftCanarySentinel({
       route: baseRoute,
       thresholds: baseThresholds,
+      evaluatedAtMs: 600_000,
       windows: [
         makeWindow(0, { decisionCount: 120, errorRate: 0.25 }),
         makeWindow(1, { decisionCount: 120, p95TtftMs: 4_500 }),
@@ -302,6 +322,7 @@ describe("A. 15-Minute Drift Canary Sentinel & Zero-Double-Billing", () => {
     const tutorDecision = evaluateDriftCanarySentinel({
       route: baseRoute,
       thresholds: baseThresholds,
+      evaluatedAtMs: 600_000,
       windows,
     });
     expect(tutorDecision.action).toBe("switch_task_to_cross_family_fallback");
@@ -319,6 +340,7 @@ describe("A. 15-Minute Drift Canary Sentinel & Zero-Double-Billing", () => {
         fallback: { providerFamily: "anthropic", modelId: "claude-sonnet-4-6", taskKind: "parse_source" },
       },
       thresholds: baseThresholds,
+      evaluatedAtMs: 600_000,
       windows,
     });
     expect(cleanParseDecision.action).toBe("keep_primary");
@@ -1189,15 +1211,15 @@ describe("C. Expand-Contract Canary Router & < 5s Candidate Publish Lease Rollba
     expect(acquired.lease.rolloutEpoch).toBe(3);
     expect(acquired.lease.expiresAtMs).toBe(12_000);
 
-    // Valid commit within 2s TTL
-    expect(validateCandidateCommitFence(initial, acquired.lease, 12_000)).toMatchObject({
+    // Valid commit on half-open [issuedAtMs, expiresAtMs); exact boundary expiresAtMs fails closed
+    expect(validateCandidateCommitFence(initial, acquired.lease, 11_999)).toMatchObject({
       allowed: true,
       dirtyWritePrevented: false,
       reason: "lease_valid",
     });
 
-    // Expired commit (> 2,000 ms) fails closed
-    expect(validateCandidateCommitFence(initial, acquired.lease, 12_001)).toMatchObject({
+    // Expired commit (>= 2,000 ms) fails closed at exact boundary
+    expect(validateCandidateCommitFence(initial, acquired.lease, 12_000)).toMatchObject({
       allowed: false,
       dirtyWritePrevented: true,
       reason: "lease_expired",
@@ -1262,24 +1284,24 @@ describe("C. Expand-Contract Canary Router & < 5s Candidate Publish Lease Rollba
     expect(uncertifiedRollback.withinRollbackSla).toBe(true);
 
     // Worker-acknowledged revocation with certifiedLeaseInventory ONLY (new lease issuance NOT certified fenced)
-    // still includes remaining sync-TTL watermark drain window
+    // MUST preserve full CANDIDATE_PUBLISH_LEASE_TTL_MS (2,000 ms) drain floor
     const workerAckedRevokedLease = revokeCandidatePublishLease(acquired.lease, {
       workerAcknowledged: true,
       acknowledgedAtMs: 10_900,
     });
     const unfencedIssuanceDrain = triggerEmergencyRollback(
       initial,
-      "unfenced_sync_watermark",
+      "unfenced_new_lease_issuance",
       11_000,
       [workerAckedRevokedLease],
       {
         certifiedLeaseInventory: true,
         certifiedNewLeaseIssuanceFenced: false,
-        oldestWorkerSyncWatermarkMs: 10_000,
       },
     );
-    expect(unfencedIssuanceDrain.maxDrainWindowMs).toBe(1_000);
-    expect(unfencedIssuanceDrain.rollbackDeadlineAtMs).toBe(12_000);
+    expect(unfencedIssuanceDrain.maxDrainWindowMs).toBe(2_000);
+    expect(unfencedIssuanceDrain.rollbackDeadlineAtMs).toBe(13_000);
+    expect(unfencedIssuanceDrain.withinRollbackSla).toBe(true);
 
     // Centrally revoked but NOT worker-acknowledged lease stays in certified drain until expiresAtMs
     const centrallyRevokedLease = revokeCandidatePublishLease(acquired.lease);
@@ -1370,9 +1392,9 @@ describe("C. Expand-Contract Canary Router & < 5s Candidate Publish Lease Rollba
     });
 
     // Even a network-partitioned worker evaluating against its STALE pre-rollback state
-    // cannot commit past its 2s TTL (well before the 5s SLA deadline)
+    // cannot commit at or past rollbackDeadlineAtMs (exact half-open boundary)
     expect(
-      validateCandidateCommitFence(initial, acquired.lease, rollback.rollbackDeadlineAtMs + 1),
+      validateCandidateCommitFence(initial, acquired.lease, rollback.rollbackDeadlineAtMs),
     ).toMatchObject({
       allowed: false,
       dirtyWritePrevented: true,

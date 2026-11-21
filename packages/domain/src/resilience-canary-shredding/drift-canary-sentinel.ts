@@ -265,10 +265,28 @@ export function evaluateDriftCanarySentinel(
     }
   }
 
-  const completedWindows =
-    input.evaluatedAtMs !== undefined
-      ? scopedWindows.filter((window) => window.windowEndMs <= input.evaluatedAtMs!)
-      : scopedWindows;
+  if (input.evaluatedAtMs === undefined) {
+    return {
+      action: "keep_primary",
+      triggerLatencyMs: null,
+      detectionElapsedMs: 0,
+      withinDetectionSla: true,
+      waitedForWindowCompletion: false,
+      scopedTaskKind: primary.taskKind,
+      isolatedRoute: null,
+      fallbackRoute: null,
+      isolatedRouteKey: null,
+      breachedMetrics: [],
+      qualifiedWindowCount: 0,
+      evaluatedWindowCount: 0,
+      reason: "evaluation_timestamp_required",
+    };
+  }
+
+  const evaluatedAtMs = input.evaluatedAtMs;
+  const completedWindows = scopedWindows.filter(
+    (window) => window.windowEndMs <= evaluatedAtMs,
+  );
 
   let sawSingleQualifiedBreach = false;
   let sawDisjointBreachPair = false;
