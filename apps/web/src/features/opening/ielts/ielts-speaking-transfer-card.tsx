@@ -33,6 +33,10 @@ function snapshotReceipt(receipt: IeltsSpeakingFeedbackReceipt): string {
   });
 }
 
+function normalizeTranscriptKey(transcript: string): string {
+  return transcript.trim().replace(/\s+/gu, " ");
+}
+
 export function IeltsSpeakingTransferCard({
   seed: providedSeed,
   initialTranscript,
@@ -95,6 +99,15 @@ function SpeakingAttempt({
     receiptSnapshot: string;
     receipt: IeltsSpeakingFeedbackReceipt;
   } | null>(null);
+  const seedReceiptAssistedKey = seedReceipt?.assisted
+    ? normalizeTranscriptKey(seedReceipt.sourceTranscript)
+    : "";
+  const [assistedTranscripts, setAssistedTranscripts] = useState<readonly string[]>(() =>
+    seedReceiptAssistedKey ? [seedReceiptAssistedKey] : [],
+  );
+  if (seedReceiptAssistedKey && !assistedTranscripts.includes(seedReceiptAssistedKey)) {
+    setAssistedTranscripts([...assistedTranscripts, seedReceiptAssistedKey]);
+  }
   const matchingReceipt = seedReceipt?.sourceTranscript === startingTranscript &&
     (external.durationSeconds === undefined || external.durationSeconds === seedReceipt.durationSeconds)
     ? seedReceipt : null;
@@ -106,8 +119,12 @@ function SpeakingAttempt({
   const { transcript, durationInput } = answer;
   const parsedDuration = durationInput.trim() === "" ? Number.NaN : Number(durationInput);
   const receiptDuration = Number.isFinite(parsedDuration) && parsedDuration > 0 ? parsedDuration : null;
-  const assisted = answer.assisted || (seedReceipt?.assisted === true &&
-    seedReceipt.sourceTranscript === transcript && seedReceipt.durationSeconds === receiptDuration);
+  const transcriptKey = normalizeTranscriptKey(transcript);
+  const isStickyAssisted = transcriptKey !== "" && (
+    seedReceiptAssistedKey === transcriptKey ||
+    assistedTranscripts.includes(transcriptKey)
+  );
+  const assisted = answer.assisted || isStickyAssisted;
   const targets = [...getSpeakingTargets(seed.targetSpokenCollocations).values()];
   const context = getSpeakingEvaluationContext(seed);
   const authority = JSON.stringify([targets, context]);
@@ -117,7 +134,7 @@ function SpeakingAttempt({
     const receiptChanged = baseline.receiptSnapshot !== external.receiptSnapshot;
     const hostOwnsAnswer = external.receiptSnapshot === localEvaluation.receiptSnapshot &&
       external.transcript === localEvaluation.receipt.sourceTranscript &&
-      external.durationSeconds === localEvaluation.receipt.durationSeconds;
+      (external.durationSeconds ?? null) === localEvaluation.receipt.durationSeconds;
     if (hostOwnsAnswer) {
       setEditedAnswer(null);
       setLocalEvaluation(null);
@@ -159,6 +176,16 @@ function SpeakingAttempt({
       durationSeconds: parsedDuration,
       assisted,
     });
+    if (nextReceipt.assisted) {
+      setEditedAnswer((current) =>
+        current && !current.assisted ? { ...current, assisted: true } : current,
+      );
+      if (transcriptKey) {
+        setAssistedTranscripts((current) =>
+          current.includes(transcriptKey) ? current : [...current, transcriptKey],
+        );
+      }
+    }
     setLocalEvaluation({ authority, external, receiptSnapshot: snapshotReceipt(nextReceipt), receipt: nextReceipt });
     onEvaluated?.(nextReceipt);
   }
@@ -298,18 +325,28 @@ function SpeakingAttempt({
               <span>秒</span>
             </label>
 
-            <label className="inline-flex cursor-pointer items-center gap-2 text-meta text-text-2">
+            <label
+              className={`inline-flex items-center gap-2 text-meta text-text-2 ${
+                isStickyAssisted ? "cursor-not-allowed" : "cursor-pointer"
+              }`}
+            >
               <input
                 type="checkbox"
                 checked={assisted}
+                disabled={isStickyAssisted}
                 onChange={(event) => {
-                  const assisted = event.target.checked;
-                  setEditedAnswer((current) => ({ ...(current ?? answer), assisted }));
+                  if (isStickyAssisted) return;
+                  const nextAssisted = event.target.checked;
+                  setEditedAnswer((current) => ({ ...(current ?? answer), assisted: nextAssisted }));
                   setLocalEvaluation(null);
                 }}
-                className="size-4 accent-ink"
+                className="size-4 accent-ink disabled:cursor-not-allowed disabled:opacity-60"
               />
-              <span>对照了写作稿件（不计入正式掌握度）</span>
+              <span>
+                {isStickyAssisted
+                  ? "当前转写已含稿件辅助，不计入正式掌握度（修改转写内容后可取消勾选）"
+                  : "对照了写作稿件（不计入正式掌握度）"}
+              </span>
             </label>
           </div>
 

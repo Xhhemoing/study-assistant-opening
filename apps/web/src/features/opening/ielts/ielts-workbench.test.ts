@@ -490,6 +490,157 @@ describe("IeltsDraftCritiqueWorkbench", () => {
       "every coin has two sides",
     );
   });
+
+  it("keeps a loaded assisted Writing revision sticky until the essay text genuinely changes", async () => {
+    const fixture = IELTS_WRITING_SPEAKING_FIXTURE;
+    const assistedDraft2 = { ...fixture.draft2, draftId: "assisted-qualifying-draft-2", assisted: true };
+    const evaluated = evaluateRevisedDraftDeterministically({
+      baselineDraft: fixture.draft1,
+      revisedDraft: assistedDraft2,
+      targets: fixture.targets,
+      receiptId: "assisted-qualifying-receipt",
+    });
+    if (!evaluated.ok) throw new Error("Expected a practice receipt for the assisted qualifying draft");
+    const assistedFixture = {
+      ...fixture,
+      draft2: assistedDraft2,
+      draft2Receipt: evaluated.receipt,
+      transferReport: evaluated.transferReport,
+    };
+    const onRevisionEvaluated = vi.fn();
+    await act(async () => root.render(createElement(IeltsDraftCritiqueWorkbench, {
+      fixture: assistedFixture,
+      onRevisionEvaluated,
+    })));
+    expect(host.querySelector('[data-epistemic-badge="practice_feedback"]')).not.toBeNull();
+
+    await act(async () => writingButton("打开改写编辑区").click());
+    const textarea = host.querySelector<HTMLTextAreaElement>('[aria-label="二稿改写编辑区"]')!;
+    const checkbox = host.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    expect(checkbox.checked).toBe(true);
+    expect(checkbox.disabled).toBe(true);
+
+    // Attempting to uncheck and reanalyze the same text must not promote mastery.
+    await act(async () => checkbox.click());
+    await act(async () => writingButton("重新分析改写").click());
+    expect(checkbox.checked).toBe(true);
+    expect(onRevisionEvaluated).not.toHaveBeenCalled();
+    expect(host.querySelector('[data-epistemic-badge="practice_feedback"]')).not.toBeNull();
+    expect(host.querySelector('[data-epistemic-badge="rubric_verified_evidence"]')).toBeNull();
+
+    // Whitespace-only tweaks on the same assisted text must still evaluate as assisted.
+    const originalText = textarea.value;
+    await act(async () => setNativeInputValue(textarea, `${originalText}   \n\n`));
+    expect(checkbox.checked).toBe(true);
+    expect(checkbox.disabled).toBe(true);
+    await act(async () => writingButton("重新分析改写").click());
+    expect(onRevisionEvaluated).toHaveBeenCalledTimes(1);
+    expect(onRevisionEvaluated.mock.lastCall?.[0]).toMatchObject({
+      revisedDraft: expect.objectContaining({ assisted: true }),
+      receipt: expect.objectContaining({
+        epistemicStatus: "practice_feedback",
+        masteryQualified: false,
+        countsTowardMastery: false,
+      }),
+    });
+
+    // Genuinely revising the essay unlocks the checkbox for an independent submission.
+    const independentText = `${originalText} Transparent multi-year transit funding also helps local authorities plan depot upgrades steadily.`;
+    await act(async () => setNativeInputValue(textarea, independentText));
+    expect(checkbox.disabled).toBe(false);
+    expect(checkbox.checked).toBe(true);
+    await act(async () => checkbox.click());
+    expect(checkbox.checked).toBe(false);
+    await act(async () => writingButton("重新分析改写").click());
+    expect(onRevisionEvaluated).toHaveBeenCalledTimes(2);
+    expect(onRevisionEvaluated.mock.lastCall?.[0]).toMatchObject({
+      revisedDraft: expect.objectContaining({ assisted: false }),
+      receipt: expect.objectContaining({
+        epistemicStatus: "rubric_verified_evidence",
+        masteryQualified: true,
+        countsTowardMastery: true,
+      }),
+    });
+
+    // Pasting the assisted text back re-engages sticky assistance.
+    await act(async () => setNativeInputValue(textarea, originalText));
+    expect(checkbox.checked).toBe(true);
+    expect(checkbox.disabled).toBe(true);
+    await act(async () => writingButton("重新分析改写").click());
+    expect(onRevisionEvaluated).toHaveBeenCalledTimes(3);
+    expect(onRevisionEvaluated.mock.lastCall?.[0]).toMatchObject({
+      revisedDraft: expect.objectContaining({ assisted: true }),
+      receipt: expect.objectContaining({
+        epistemicStatus: "practice_feedback",
+        masteryQualified: false,
+        countsTowardMastery: false,
+      }),
+    });
+  });
+
+  it("keeps a locally evaluated assisted Writing revision sticky and resets cleanly on a new fixture", async () => {
+    const fixture = IELTS_WRITING_SPEAKING_FIXTURE;
+    const onRevisionEvaluated = vi.fn();
+    await act(async () => root.render(createElement(IeltsDraftCritiqueWorkbench, {
+      fixture,
+      onRevisionEvaluated,
+    })));
+    await act(async () => writingButton("打开改写编辑区").click());
+    const textarea = host.querySelector<HTMLTextAreaElement>('[aria-label="二稿改写编辑区"]')!;
+    const checkbox = host.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    const localAssistedText = `${textarea.value} Clear timetable coordination also reduces commuter transfers.`;
+
+    await act(async () => setNativeInputValue(textarea, localAssistedText));
+    await act(async () => checkbox.click());
+    expect(checkbox.checked).toBe(true);
+    await act(async () => writingButton("重新分析改写").click());
+    expect(onRevisionEvaluated).toHaveBeenCalledTimes(1);
+    expect(onRevisionEvaluated.mock.lastCall?.[0]).toMatchObject({
+      revisedDraft: expect.objectContaining({ assisted: true }),
+      receipt: expect.objectContaining({
+        epistemicStatus: "practice_feedback",
+        countsTowardMastery: false,
+      }),
+    });
+    expect(checkbox.checked).toBe(true);
+    expect(checkbox.disabled).toBe(true);
+
+    // Trying to uncheck and reanalyze the same text keeps practice_feedback.
+    await act(async () => checkbox.click());
+    await act(async () => writingButton("重新分析改写").click());
+    expect(onRevisionEvaluated).toHaveBeenCalledTimes(1);
+    expect(host.querySelector('[data-epistemic-badge="practice_feedback"]')).not.toBeNull();
+    expect(host.querySelector('[data-epistemic-badge="rubric_verified_evidence"]')).toBeNull();
+
+    // Switching to a genuinely different unassisted fixture clears previous local sticky state.
+    const nextDraft2 = {
+      ...fixture.draft2,
+      draftId: "fresh-unassisted-attempt",
+      paragraphs: localAssistedText.split("\n\n"),
+      assisted: false,
+    };
+    const nextEval = evaluateRevisedDraftDeterministically({
+      baselineDraft: fixture.draft1,
+      revisedDraft: nextDraft2,
+      targets: fixture.targets,
+      receiptId: "fresh-unassisted-receipt",
+    });
+    if (!nextEval.ok) throw new Error("Expected a verified receipt for the new unassisted fixture");
+    await act(async () => root.render(createElement(IeltsDraftCritiqueWorkbench, {
+      fixture: {
+        ...fixture,
+        draft2: nextDraft2,
+        draft2Receipt: nextEval.receipt,
+        transferReport: nextEval.transferReport,
+      },
+      onRevisionEvaluated,
+    })));
+    expect(host.querySelector('[data-epistemic-badge="rubric_verified_evidence"]')).not.toBeNull();
+    await act(async () => writingButton("打开改写编辑区").click());
+    const resetCheckbox = host.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    expect(resetCheckbox.checked).toBe(false);
+    expect(resetCheckbox.disabled).toBe(false);
+  });
 });
 
 describe("IeltsSpeakingTransferCard", () => {
@@ -772,6 +923,171 @@ describe("IeltsSpeakingTransferCard", () => {
     expect(
       host.querySelectorAll('[data-collocation-state="pending"]').length,
     ).toBe(4);
+  });
+
+  it("keeps a locally evaluated assisted Speaking transcript sticky across uncheck and duration tweaks until edited", async () => {
+    const fixture = IELTS_WRITING_SPEAKING_FIXTURE;
+    const onEvaluated = vi.fn<(receipt: typeof fixture.initialSpeakingReceipt) => void>();
+    await act(async () => root.render(createElement(IeltsSpeakingTransferCard, {
+      seed: fixture.speakingSeed,
+      initialTranscript: fixture.initialSpeakingTranscript,
+      initialDurationSeconds: fixture.initialSpeakingDurationSeconds,
+      onEvaluated,
+    })));
+
+    const textarea = host.querySelector<HTMLTextAreaElement>('[aria-label="口语复述记录输入框"]')!;
+    const durationInput = host.querySelector<HTMLInputElement>('[aria-label="口语作答时长秒数"]')!;
+    const checkbox = host.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    const evaluateBtn = () => host.querySelector<HTMLButtonElement>("button")!;
+
+    // Local evaluation with assisted: true (no host receipt).
+    expect(checkbox.checked).toBe(false);
+    await act(async () => checkbox.click());
+    expect(checkbox.checked).toBe(true);
+    await act(async () => evaluateBtn().click());
+    expect(onEvaluated.mock.lastCall?.[0]).toMatchObject({
+      assisted: true,
+      epistemicStatus: "practice_feedback",
+      masteryQualified: false,
+      countsTowardMastery: false,
+    });
+    expect(checkbox.checked).toBe(true);
+    expect(checkbox.disabled).toBe(true);
+
+    // Attempting to uncheck and re-evaluate at the same duration must stay assisted.
+    await act(async () => checkbox.click());
+    await act(async () => evaluateBtn().click());
+    expect(onEvaluated.mock.lastCall?.[0]).toMatchObject({
+      sourceTranscript: fixture.initialSpeakingTranscript,
+      durationSeconds: fixture.initialSpeakingDurationSeconds,
+      assisted: true,
+      epistemicStatus: "practice_feedback",
+      masteryQualified: false,
+      countsTowardMastery: false,
+    });
+    expect(host.querySelector('[data-speaking-epistemic="practice_feedback"]')).not.toBeNull();
+    expect(host.querySelector('[data-speaking-epistemic="rubric_verified_evidence"]')).toBeNull();
+
+    // Tweaking duration or surrounding whitespace on the same assisted transcript must stay assisted.
+    await act(async () => {
+      setNativeInputValue(durationInput, "75");
+      setNativeInputValue(textarea, `  ${fixture.initialSpeakingTranscript}  `);
+    });
+    expect(checkbox.checked).toBe(true);
+    expect(checkbox.disabled).toBe(true);
+    await act(async () => evaluateBtn().click());
+    expect(onEvaluated.mock.lastCall?.[0]).toMatchObject({
+      durationSeconds: 75,
+      assisted: true,
+      epistemicStatus: "practice_feedback",
+      masteryQualified: false,
+      countsTowardMastery: false,
+    });
+
+    // Editing to a genuinely new qualifying transcript unlocks the checkbox for unassisted evaluation.
+    const independentTranscript = `${fixture.initialSpeakingTranscript} On top of that, predictable rail timetables give commuters real confidence.`;
+    await act(async () => setNativeInputValue(textarea, independentTranscript));
+    expect(checkbox.disabled).toBe(false);
+    expect(checkbox.checked).toBe(true);
+    await act(async () => checkbox.click());
+    expect(checkbox.checked).toBe(false);
+    await act(async () => evaluateBtn().click());
+    expect(onEvaluated.mock.lastCall?.[0]).toMatchObject({
+      sourceTranscript: independentTranscript,
+      durationSeconds: 75,
+      assisted: false,
+      epistemicStatus: "rubric_verified_evidence",
+      masteryQualified: true,
+      countsTowardMastery: true,
+    });
+
+    // Pasting the previously assisted transcript back re-locks assistance.
+    await act(async () => setNativeInputValue(textarea, fixture.initialSpeakingTranscript));
+    expect(checkbox.checked).toBe(true);
+    expect(checkbox.disabled).toBe(true);
+    await act(async () => evaluateBtn().click());
+    expect(onEvaluated.mock.lastCall?.[0]).toMatchObject({
+      sourceTranscript: fixture.initialSpeakingTranscript,
+      durationSeconds: 75,
+      assisted: true,
+      epistemicStatus: "practice_feedback",
+      masteryQualified: false,
+      countsTowardMastery: false,
+    });
+  });
+
+  it("keeps a host-loaded assisted Speaking transcript sticky even after tweaking duration", async () => {
+    const fixture = IELTS_WRITING_SPEAKING_FIXTURE;
+    const seed = fixture.speakingSeed;
+    const assistedReceipt = evaluateSpeakingRetelling({
+      seed,
+      transcript: fixture.initialSpeakingTranscript,
+      durationSeconds: fixture.initialSpeakingDurationSeconds,
+      assisted: true,
+    });
+    const onEvaluated = vi.fn<(receipt: typeof fixture.initialSpeakingReceipt) => void>();
+    await act(async () => root.render(createElement(IeltsSpeakingTransferCard, {
+      seed,
+      initialTranscript: fixture.initialSpeakingTranscript,
+      initialDurationSeconds: fixture.initialSpeakingDurationSeconds,
+      initialReceipt: assistedReceipt,
+      onEvaluated,
+    })));
+
+    const durationInput = host.querySelector<HTMLInputElement>('[aria-label="口语作答时长秒数"]')!;
+    const checkbox = host.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    expect(checkbox.checked).toBe(true);
+    expect(checkbox.disabled).toBe(true);
+
+    await act(async () => setNativeInputValue(durationInput, "72"));
+    expect(checkbox.checked).toBe(true);
+    expect(checkbox.disabled).toBe(true);
+    await act(async () => checkbox.click());
+    await act(async () => host.querySelector<HTMLButtonElement>("button")!.click());
+    expect(onEvaluated.mock.lastCall?.[0]).toMatchObject({
+      durationSeconds: 72,
+      assisted: true,
+      epistemicStatus: "practice_feedback",
+      masteryQualified: false,
+      countsTowardMastery: false,
+    });
+  });
+
+  it("hands Speaking answer ownership back to a 3-prop host when an invalid-duration attempt writes back undefined duration", async () => {
+    const fixture = IELTS_WRITING_SPEAKING_FIXTURE;
+    function ControlledHost({
+      overrideTranscript,
+      overrideDuration,
+    }: {
+      overrideTranscript?: string;
+      overrideDuration?: number;
+    }) {
+      const [receipt, setReceipt] = useState<typeof fixture.initialSpeakingReceipt>();
+      return createElement(IeltsSpeakingTransferCard, {
+        seed: fixture.speakingSeed,
+        initialTranscript: overrideTranscript ?? receipt?.sourceTranscript ?? fixture.initialSpeakingTranscript,
+        initialDurationSeconds: overrideDuration ?? (receipt ? (receipt.durationSeconds ?? undefined) : fixture.initialSpeakingDurationSeconds),
+        initialReceipt: overrideTranscript ? undefined : receipt,
+        onEvaluated: (nextReceipt: typeof fixture.initialSpeakingReceipt) => {
+          setReceipt(structuredClone(nextReceipt));
+        },
+      });
+    }
+
+    await act(async () => root.render(createElement(ControlledHost)));
+    const durationInput = host.querySelector<HTMLInputElement>('[aria-label="口语作答时长秒数"]')!;
+    await act(async () => setNativeInputValue(durationInput, ""));
+    await act(async () => host.querySelector<HTMLButtonElement>("button")!.click());
+    expect(host.querySelector('[data-speaking-pace="invalid_duration"]')).not.toBeNull();
+
+    // Because 3-prop write-back handed ownership back to the host, a subsequent host update is not shadowed.
+    await act(async () => root.render(createElement(ControlledHost, {
+      overrideTranscript: "Fresh host transcript after invalid duration.",
+      overrideDuration: 68,
+    })));
+    expect(host.querySelector<HTMLTextAreaElement>("textarea")?.value)
+      .toBe("Fresh host transcript after invalid duration.");
+    expect(host.querySelector<HTMLInputElement>('input[type="number"]')?.value).toBe("68");
   });
 });
 

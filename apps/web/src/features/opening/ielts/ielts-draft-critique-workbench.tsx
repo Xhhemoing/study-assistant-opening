@@ -66,6 +66,26 @@ function draftEditorText(draft: IeltsEssayDraft): string {
   return draft.paragraphs.join("\n\n").replace(/\r\n?/gu, "\n");
 }
 
+function writingTextKey(paragraphs: readonly string[]): string {
+  return paragraphs.join(" ").trim().replace(/\s+/gu, " ");
+}
+
+function collectAssistedWritingKeys(
+  draft: IeltsEssayDraft,
+  receipt: IeltsRubricReceipt,
+): string[] {
+  const keys = new Set<string>();
+  if (draft.assisted) {
+    const key = writingTextKey(draft.paragraphs);
+    if (key) keys.add(key);
+  }
+  if (receipt.sourceDraft?.assisted) {
+    const key = writingTextKey(receipt.sourceDraft.paragraphs);
+    if (key) keys.add(key);
+  }
+  return [...keys];
+}
+
 function stableSerialize(value: unknown): string {
   return JSON.stringify(value, (_key, nested: unknown) => {
     if (nested === null || typeof nested !== "object" || Array.isArray(nested)) return nested;
@@ -127,20 +147,47 @@ export function IeltsDraftCritiqueWorkbench({
   const [composerNeedsText, setComposerNeedsText] = useState(false);
   const composerGuidanceId = `${tabsIdPrefix}-revision-guidance`;
   const [revisionCount, setRevisionCount] = useState(0);
+  const authoritativeAssistedKeys = collectAssistedWritingKeys(fixture.draft2, fixture.draft2Receipt);
+  const [localAssistedTexts, setLocalAssistedTexts] = useState<readonly string[]>(() => authoritativeAssistedKeys);
 
   if (evaluation.authorityFingerprint !== authorityFingerprint) {
     setEvaluation({ ...authoritative, cachedFingerprint: null });
     setComposerNeedsText(false);
     setSelectedSpanId(null);
     if (evaluation.attemptKey !== attemptKey) {
+      const isOwnWriteBack =
+        revisionCount > 0 && (
+          fixture.draft2.draftId === evaluation.draft2.draftId ||
+          fixture.draft2Receipt.receiptId === evaluation.draft2Receipt.receiptId
+        );
+      setLocalAssistedTexts(
+        isOwnWriteBack
+          ? [...new Set([...localAssistedTexts, ...authoritativeAssistedKeys])]
+          : authoritativeAssistedKeys,
+      );
       setComposerText(draftEditorText(fixture.draft2));
       setComposerAssisted(fixture.draft2.assisted);
       setViewMode(initialView);
       setCriterionFilter("ALL");
       setComposerOpen(false);
       setRevisionCount(0);
+    } else if (authoritativeAssistedKeys.some((key) => !localAssistedTexts.includes(key))) {
+      setLocalAssistedTexts([...new Set([...localAssistedTexts, ...authoritativeAssistedKeys])]);
     }
   }
+
+  const stickyAssistedTexts = new Set([
+    ...localAssistedTexts,
+    ...authoritativeAssistedKeys,
+    ...collectAssistedWritingKeys(draft2, draft2Receipt),
+  ]);
+  const draft2TextKey = writingTextKey(draft2.paragraphs);
+  const draft2EffectivelyAssisted =
+    draft2.assisted || (draft2TextKey !== "" && stickyAssistedTexts.has(draft2TextKey));
+  const composerParagraphs = composerText.split(PARAGRAPH_BREAK);
+  const composerTextKey = writingTextKey(composerParagraphs);
+  const isComposerStickyAssisted = composerTextKey !== "" && stickyAssistedTexts.has(composerTextKey);
+  const effectiveComposerAssisted = composerAssisted || isComposerStickyAssisted;
 
   const draftSource = stableSerialize(getWritingDraftSource(draft2));
   const transferSource = stableSerialize(getWritingTransferSource(fixture.draft1, fixture.targets));
@@ -157,7 +204,8 @@ export function IeltsDraftCritiqueWorkbench({
   }, [fixture.draft1, fixture.targets, draft2, draft2Receipt, savedReport, draftSource, transferSource]);
   const activeDraft = viewMode === "draft1" ? fixture.draft1 : draft2;
   const activeReceipt = viewMode === "draft1" ? fixture.draft1Receipt : draft2Receipt;
-  const canShowVerifiedReceipt = activeReceipt.masteryQualified && activeReceipt.countsTowardMastery && !activeDraft.assisted &&
+  const activeDraftAssisted = viewMode === "draft1" ? activeDraft.assisted : draft2EffectivelyAssisted;
+  const canShowVerifiedReceipt = activeReceipt.masteryQualified && activeReceipt.countsTowardMastery && !activeDraftAssisted &&
     activeReceipt.promptId === activeDraft.promptId && activeReceipt.draftId === activeDraft.draftId &&
     activeReceipt.draftVersion === activeDraft.version && (viewMode === "draft1"
       ? stableSerialize(activeReceipt.sourceDraft) === stableSerialize(getWritingDraftSource(activeDraft))
@@ -219,7 +267,10 @@ export function IeltsDraftCritiqueWorkbench({
 
   function handleAnalyzeRevision() {
     const paragraphs = composerText.split(PARAGRAPH_BREAK);
-    const composerDraft = { ...draft2, paragraphs, assisted: composerAssisted };
+    const nextTextKey = writingTextKey(paragraphs);
+    const nextAssisted =
+      composerAssisted || (nextTextKey !== "" && stickyAssistedTexts.has(nextTextKey));
+    const composerDraft = { ...draft2, paragraphs, assisted: nextAssisted };
     const fingerprint = evaluationFingerprint(fixture, composerDraft, draft2Receipt, transferReport);
     if (matchesSavedEvaluation && fingerprint === evaluation.cachedFingerprint) {
       setComposerNeedsText(false);
@@ -249,6 +300,14 @@ export function IeltsDraftCritiqueWorkbench({
 
     setComposerNeedsText(false);
     setRevisionCount(nextCount);
+    if (updatedDraft.assisted) {
+      setComposerAssisted(true);
+      if (nextTextKey) {
+        setLocalAssistedTexts((current) =>
+          current.includes(nextTextKey) ? current : [...current, nextTextKey],
+        );
+      }
+    }
     setEvaluation({
       ...authoritative,
       draft2: updatedDraft,
@@ -265,12 +324,15 @@ export function IeltsDraftCritiqueWorkbench({
   }
 
   function handleResetRevision() {
+    const resetTextKey = writingTextKey(fixture.draft2.paragraphs);
     setEvaluation({
       ...authoritative,
       cachedFingerprint: evaluation.cachedFingerprint === authorityFingerprint ? authorityFingerprint : null,
     });
     setComposerText(draftEditorText(fixture.draft2));
-    setComposerAssisted(fixture.draft2.assisted);
+    setComposerAssisted(
+      fixture.draft2.assisted || (resetTextKey !== "" && stickyAssistedTexts.has(resetTextKey)),
+    );
     setComposerNeedsText(false);
     setSelectedSpanId(null);
   }
@@ -321,7 +383,9 @@ export function IeltsDraftCritiqueWorkbench({
 
         <p className="mt-3 border-t border-line pt-3 text-meta text-text-2">
           {epistemicStatus === activeReceipt.epistemicStatus ? activeReceipt.epistemicReason :
-            transferReport.summary.disqualificationReason ?? "本轮迁移证据已更新，请重新分析改写。"}
+            activeDraftAssisted
+              ? "本次作答包含提示或脚手架辅助，仅作练习诊断反馈，不计入正式掌握度。"
+              : transferReport.summary.disqualificationReason ?? "本轮迁移证据已更新，请重新分析改写。"}
         </p>
       </header>
 
@@ -448,7 +512,9 @@ export function IeltsDraftCritiqueWorkbench({
                       {sheetDraft.label}
                     </span>
                     <span className="text-meta text-text-2">
-                      {sheetDraft.assisted ? "含提示辅助" : "独立作答"}
+                      {(sheetMode === "draft1" ? sheetDraft.assisted : draft2EffectivelyAssisted)
+                        ? "含提示辅助"
+                        : "独立作答"}
                     </span>
                   </div>
                   <span className="text-cap text-text-3">点击高亮句段可联动右侧诊断</span>
@@ -625,14 +691,26 @@ export function IeltsDraftCritiqueWorkbench({
                 )}
 
                 <div className="flex flex-wrap items-center justify-between gap-3">
-                  <label className="inline-flex cursor-pointer items-center gap-2 text-meta text-text-2">
+                  <label
+                    className={`inline-flex items-center gap-2 text-meta text-text-2 ${
+                      isComposerStickyAssisted ? "cursor-not-allowed" : "cursor-pointer"
+                    }`}
+                  >
                     <input
                       type="checkbox"
-                      checked={composerAssisted}
-                      onChange={(event) => setComposerAssisted(event.target.checked)}
-                      className="size-4 accent-ink"
+                      checked={effectiveComposerAssisted}
+                      disabled={isComposerStickyAssisted}
+                      onChange={(event) => {
+                        if (isComposerStickyAssisted) return;
+                        setComposerAssisted(event.target.checked);
+                      }}
+                      className="size-4 accent-ink disabled:cursor-not-allowed disabled:opacity-60"
                     />
-                    <span>本次改写参考了范文或提示（勾选后仅作练习诊断，不计入正式掌握度）</span>
+                    <span>
+                      {isComposerStickyAssisted
+                        ? "本次改写已含提示辅助，不计入正式掌握度（修改段落内容后可取消勾选）"
+                        : "本次改写参考了范文或提示（勾选后仅作练习诊断，不计入正式掌握度）"}
+                    </span>
                   </label>
 
                   <div className="flex items-center gap-2">
