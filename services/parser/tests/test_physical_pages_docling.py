@@ -546,6 +546,102 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
         self.assertNotIn("sectionSealedAtEnd", payload["pages"][4])
         self.assertNotIn("hadSealedContent", payload["pages"][4])
 
+    def test_round8_reading_order_tables_and_lecture_solutions(self):
+        table_label = DocItemLabel.TABLE
+        answer_table = Table(
+            id=2,
+            label=table_label,
+            page_no=14,
+            cluster=cluster(2, table_label),
+            otsl_seq=[],
+            num_rows=2,
+            num_cols=1,
+            table_cells=[
+                TableCell(
+                    text="Question",
+                    row_span=1,
+                    col_span=1,
+                    start_row_offset_idx=0,
+                    end_row_offset_idx=1,
+                    start_col_offset_idx=0,
+                    end_col_offset_idx=1,
+                    column_header=True,
+                ),
+                TableCell(
+                    text="sealed-table-answer",
+                    row_span=1,
+                    col_span=1,
+                    start_row_offset_idx=1,
+                    end_row_offset_idx=2,
+                    start_col_offset_idx=0,
+                    end_col_offset_idx=1,
+                ),
+            ],
+        )
+        result = result_for(
+            [
+                text_element(11, "Lecture 4: Solutions\n1. x = 5", 1, DocItemLabel.SECTION_HEADER),
+            ],
+            [
+                text_element(12, "Lecture 1", 1, DocItemLabel.SECTION_HEADER),
+                text_element(12, "第 1 讲", 2, DocItemLabel.SECTION_HEADER),
+                text_element(12, "Lecture 4: Review", 3, DocItemLabel.SECTION_HEADER),
+                text_element(12, "第 3 讲 思考题\n2. y = 6", 4, DocItemLabel.SECTION_HEADER),
+            ],
+            [
+                text_element(13, "Lecture 5: Singular Values\nTheorem 5.1: SVD exists.", 1, DocItemLabel.SECTION_HEADER),
+                text_element(13, "第 3 讲：解答\n1. 对", 2),
+                text_element(13, "第 4 讲 习题答案\n2. 错", 3),
+                text_element(13, "第 5 讲 特征值\n定义：Ax = λx。", 4, DocItemLabel.SECTION_HEADER),
+            ],
+            [
+                text_element(14, "Answer Key", 1),
+                answer_table,
+                text_element(14, "Chapter 2: Rings\nRing axioms hold.", 3),
+            ],
+        )
+        ext = physical_pages.extract_physical_pages(result)
+        self.assertEqual(ext.texts_by_page[11], [])
+        self.assertTrue(ext.section_sealed_by_page[11])
+        self.assertTrue(ext.had_sealed_by_page[11])
+
+        self.assertEqual(ext.texts_by_page[12], [])
+        self.assertTrue(ext.section_sealed_by_page[12])
+        self.assertTrue(ext.had_sealed_by_page[12])
+
+        p13 = "\n".join(ext.texts_by_page[13])
+        self.assertIn("Lecture 5: Singular Values", p13)
+        self.assertIn("Theorem 5.1: SVD exists.", p13)
+        self.assertNotIn("1. 对", p13)
+        self.assertNotIn("2. 错", p13)
+        self.assertIn("第 5 讲 特征值", p13)
+        self.assertIn("定义：Ax = λx。", p13)
+        self.assertFalse(ext.section_sealed_by_page[13])
+        self.assertTrue(ext.had_sealed_by_page[13])
+
+        p14 = "\n".join(ext.texts_by_page[14])
+        self.assertNotIn("Answer Key", p14)
+        self.assertNotIn("sealed-table-answer", p14)
+        self.assertIn("Chapter 2: Rings", p14)
+        self.assertIn("Ring axioms hold.", p14)
+        self.assertFalse(ext.section_sealed_by_page[14])
+        self.assertTrue(ext.had_sealed_by_page[14])
+
+        # Verify fallback bbox vertical ordering when iterate_items is unavailable on a lightweight doc double.
+        bbox_doc = SimpleNamespace(
+            pages=[1],
+            texts=[
+                SimpleNamespace(text="Answer Key", label="text", prov=[ProvenanceItem(page_no=1, charspan=(0, 10), bbox=BoundingBox(l=72, t=100, r=400, b=120))]),
+                SimpleNamespace(text="Chapter 2: Rings", label="section_header", prov=[ProvenanceItem(page_no=1, charspan=(0, 16), bbox=BoundingBox(l=72, t=220, r=400, b=240))]),
+            ],
+            tables=[
+                SimpleNamespace(prov=[ProvenanceItem(page_no=1, charspan=(0, 5), bbox=BoundingBox(l=72, t=150, r=400, b=190))], export_to_markdown=lambda doc=None: "| sealed |"),
+            ],
+        )
+        bbox_ext = physical_pages.extract_physical_pages(bbox_doc)
+        self.assertEqual(bbox_ext.texts_by_page[1], ["Chapter 2: Rings"])
+        self.assertTrue(bbox_ext.had_sealed_by_page[1])
+
 
 if __name__ == "__main__":
     unittest.main()

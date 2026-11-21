@@ -56,10 +56,12 @@ _SECTION_SEALED_RE = re.compile(
     r"|(?:Answers?|ANSWERS?|Solutions?|SOLUTIONS?)\s+(?:to|TO)\s+(?:(?:Selected|SELECTED|Odd-Numbered|ODD-NUMBERED|Even-Numbered|EVEN-NUMBERED|All|ALL|the|THE|Chapter\s+\d+|CHAPTER\s+\d+|Section\s+\d+(?:\.\d+)*|SECTION\s+\d+(?:\.\d+)*)\s+)*(?:Exercises?|EXERCISES?|Problems?|PROBLEMS?|Questions?|QUESTIONS?|Review\s+Questions?|REVIEW\s+QUESTIONS?|Practice\s+Problems?|PRACTICE\s+PROBLEMS?|Self-Check\s+Exercises?|SELF-CHECK\s+EXERCISES?|Chapter\s+\d+|CHAPTER\s+\d+|Section\s+\d+(?:\.\d+)*|SECTION\s+\d+(?:\.\d+)*)(?:\s*\(\s*(?:continued|cont\.?|CONTD?\.?|CONTINUED)\s*\))?\s*(?:[:：]|$)"
     r"|(?:Selected\s+Answers?|SELECTED\s+ANSWERS?|Model\s+Answers?|MODEL\s+ANSWERS?|Official\s+Solutions?|OFFICIAL\s+SOLUTIONS?|Reference\s+Solutions?|REFERENCE\s+SOLUTIONS?|Answer\s+Section|ANSWER\s+SECTION|Solutions?\s+Manual|SOLUTIONS?\s+MANUAL|Answers?\s+(?:and|AND)\s+Solutions?|ANSWERS?\s+(?:and|AND)\s+SOLUTIONS?|Odd-Numbered\s+Answers?|ODD-NUMBERED\s+ANSWERS?|Even-Numbered\s+Answers?|EVEN-NUMBERED\s+ANSWERS?)(?:\s*\(\s*(?:continued|cont\.?|CONTD?\.?|CONTINUED)\s*\))?\s*(?:[:：]|$)"
     r"|(?:Answers|ANSWERS)(?:\s*\(\s*(?:continued|cont\.?|CONTD?\.?|CONTINUED)\s*\))?\s*(?:[:：]|$)"
-    r"|【\s*(?:参考答案|标准答案|习题答案|练习答案|课后答案|课后练习答案|课后习题答案|思考题答案|答案与解析|参考解答|详细解答|参考答案与解析|部分习题答案)\s*】\s*$"
-    r"|(?:参考答案与解析|参考答案|标准答案|课后习题答案|课后练习答案|课后答案|习题答案|练习答案|思考题答案|部分习题答案|答案与解析|参考解答|详细解答)(?:\s*(?:（续）|\(续\)|（接上页）|\(接上页\)))?\s*(?:[:：]|$)"
+    r"|【\s*(?:参考答案|标准答案|习题答案|习题解答|练习答案|练习解答|课后答案|课后练习答案|课后习题答案|课后解答|思考题答案|答案与解析|参考解答|详细解答|参考答案与解析|部分习题答案)\s*】\s*$"
+    r"|(?:参考答案与解析|参考答案|标准答案|课后习题答案|课后练习答案|课后答案|课后解答|习题答案|习题解答|练习答案|练习解答|思考题答案|部分习题答案|答案与解析|参考解答|详细解答)(?:\s*(?:（续）|\(续\)|（接上页）|\(接上页\)))?\s*(?:[:：]|$)"
     r"|(?:习题\s*)?(?:答案|解答)(?:\s*(?:（续）|\(续\)|（接上页）|\(接上页\)))?\s*(?:[:：]|$)"
-    r"))"
+    r")"
+    r"|(?:Appendix\s+[A-Z0-9]+|APPENDIX\s+[A-Z0-9]+|Chapter\s+\d+|CHAPTER\s+\d+|Section\s+\d+(?:\.\d+)*|SECTION\s+\d+(?:\.\d+)*|Lecture\s+(?:\d+|[IVXLCDM]+)|LECTURE\s+(?:\d+|[IVXLCDM]+)|第\s*[一二三四五六七八九十百千\d]+\s*[章节篇部讲]|附录\s*[A-Z0-9一二三四五六七八九十]+)(?:\s*[:：.\-—]\s*|\s+)(?:Solutions|SOLUTIONS)(?:\s*\(\s*(?:continued|cont\.?|CONTD?\.?|CONTINUED)\s*\))?\s*(?:[:：]|$)"
+    r")"
 )
 _INLINE_WITH_BODY_CHECK_RE = re.compile(r"[:：]\s*\S")
 _QUALIFIED_MULTI_SECTION_RE = re.compile(
@@ -70,7 +72,7 @@ _QUALIFIED_MULTI_SECTION_RE = re.compile(
     r"Key\s+(?:to|TO)\s+|KEY\s+(?:to|TO)\s+|"
     r"Answers?\s+(?:and|AND)\s+Solutions?|ANSWERS?\s+AND\s+SOLUTIONS?|"
     r"Odd-Numbered\s+Answers?|ODD-NUMBERED\s+ANSWERS?|Even-Numbered\s+Answers?|EVEN-NUMBERED\s+ANSWERS?|"
-    r"参考答案与解析|答案与解析|课后习题答案|课后练习答案|课后答案|练习答案|习题答案|思考题答案|部分习题答案)"
+    r"参考答案与解析|答案与解析|课后习题答案|课后练习答案|课后答案|课后解答|练习答案|练习解答|习题答案|习题解答|思考题答案|部分习题答案)"
     r"|(?:Appendix\s+[A-Z0-9]+|APPENDIX\s+[A-Z0-9]+|Chapter\s+\d+|CHAPTER\s+\d+|Section\s+\d+(?:\.\d+)*|SECTION\s+\d+(?:\.\d+)*|Lecture\s+(?:\d+|[IVXLCDM]+)|LECTURE\s+(?:\d+|[IVXLCDM]+)|附录\s*[A-Z0-9一二三四五六七八九十]+|第\s*[一二三四五六七八九十百千\d]+\s*[章节篇部讲])\s*[:：.\-—]\s*"
     r"(?:Answer\s+Key|ANSWER\s+KEY|Answers?\s+Key|ANSWERS?\s+KEY|Answers|ANSWERS|Solutions|SOLUTIONS|参考答案|标准答案|参考解答|详细解答|答案|解答)"
     r"(?:\s*\(\s*(?:continued|cont\.?|CONTD?\.?|CONTINUED)\s*\))?\s*[:：]?$)"
@@ -165,13 +167,14 @@ _TITLED_CHAPTER_RE = re.compile(
     r"^(?:(?:Chapter|Part|Section|Lecture)\s+(?:\d+(?:\.\d+)*|[IVXLCDM]+)|第\s*[一二三四五六七八九十百千\d]+\s*[章节篇部分讲])(?:\s*[:：.\-—]\s*|\s+)?(?P<title>.*)$",
     re.IGNORECASE,
 )
-_ANSWER_TITLE_WORD_RE = re.compile(r"(?:Answer|Solution|Exercise|Problem|Review|Practice|答案|解答|习题|练习|思考题)", re.IGNORECASE)
+_ANSWER_TITLE_WORD_RE = re.compile(
+    r"(?:Answer|Solution|Exercise|Problem|Review|Practice|Question|Quiz|Drill|答案|解答|习题|练习题?|思考题|复习题|自测题)",
+    re.IGNORECASE,
+)
 _TEXTBOOK_NON_ANSWER_HEADING_RE = re.compile(
     r"^(?:"
     r"(?:Definition|Notation|Terminology|Convention|Theorem|Lemma|Proposition|Corollary|Axiom|Conjecture|Claim|Worked\s+Example|Example)\b"
-    r"|Lecture\s+(?:\d+|[IVXLCDM]+)\b(?!.*(?i:Answer\s+Key|\b(?:Answers?|Solutions?|Exercises?|Problems?|Questions?)\b|参考答案|标准答案|课后(?:习题|练习)?答案|习题答案|练习答案|思考题答案|部分习题答案|答案与解析|参考解答|详细解答|答案|解答|习题|练习))"
     r"|(?:定义|记号|约定|定理|引理|推论|命题|公理|猜想|例题|例\s*\d+|例\s*[:：])"
-    r"|第\s*[一二三四五六七八九十百千\d]+\s*讲(?:\s*[:：.\-—]\s*|\s+|$)(?!.*(?i:参考答案|标准答案|课后(?:习题|练习)?答案|习题答案|练习答案|思考题答案|部分习题答案|答案与解析|参考解答|详细解答|答案|解答|习题|练习|Answer\s+Key|\b(?:Answers?|Solutions?|Exercises?|Problems?|Questions?)\b))"
     r")"
 )
 _MAJOR_NON_ANSWER_HEADING_RE = re.compile(
@@ -254,6 +257,24 @@ def _normalized_label(node):
     return str(label).lower() if label is not None else None
 
 
+def _item_sort_key(item, kind_bucket: int, seq: int):
+    for attr in ("reading_order", "order"):
+        order_val = getattr(item, attr, None)
+        if isinstance(order_val, (int, float)):
+            return (0, float(order_val), 0.0, kind_bucket, seq)
+    bbox = None
+    prov = getattr(item, "prov", None) or ()
+    if prov:
+        bbox = getattr(prov[0], "bbox", None)
+    if bbox is None:
+        bbox = getattr(getattr(item, "cluster", None), "bbox", None)
+    top = getattr(bbox, "t", None) if bbox is not None else None
+    left = getattr(bbox, "l", 0.0) if bbox is not None else 0.0
+    if isinstance(top, (int, float)):
+        return (1, float(top), float(left) if isinstance(left, (int, float)) else 0.0, kind_bucket, seq)
+    return (2, 0.0, 0.0, kind_bucket, seq)
+
+
 def _document_fragments(document):
     """PPTX / page-local document extraction; never split a merged item."""
     result = {page: [] for page in document.pages}
@@ -264,16 +285,42 @@ def _document_fragments(document):
             raise RuntimeError("text/table lacks unambiguous physical-page provenance; pre-merge assembly required")
         return next(iter(pages))
 
-    for item in document.texts:
-        text = item.text or ""
+    def text_fragment(item):
+        text = getattr(item, "text", None) or ""
         label = _normalized_label(item)
         # Without formula enrichment Docling stores formula content only in orig.
         # This is a whole, single-page item, not a slice of merged provenance.
         if not text and label == "formula":
-            text = item.orig or ""
-        result[page_of(item)].append((text, label))
-    for table in getattr(document, "tables", []):
-        result[page_of(table)].append((table.export_to_markdown(doc=document), "table"))
+            text = getattr(item, "orig", None) or ""
+        return text, label
+
+    iterate = getattr(document, "iterate_items", None)
+    if callable(iterate):
+        seen_ids = set()
+        for entry in iterate():
+            item = entry[0] if isinstance(entry, tuple) else entry
+            seen_ids.add(id(item))
+            if hasattr(item, "export_to_markdown"):
+                result[page_of(item)].append((item.export_to_markdown(doc=document), "table"))
+            elif getattr(item, "prov", None) is not None and (hasattr(item, "text") or hasattr(item, "orig")):
+                result[page_of(item)].append(text_fragment(item))
+        # Also visit any items attached only to .texts / .tables so partial mocks stay covered.
+        for item in getattr(document, "texts", ()):
+            if id(item) not in seen_ids:
+                result[page_of(item)].append(text_fragment(item))
+        for table in getattr(document, "tables", ()):
+            if id(table) not in seen_ids:
+                result[page_of(table)].append((table.export_to_markdown(doc=document), "table"))
+        return result
+
+    candidates = []
+    for seq, item in enumerate(getattr(document, "texts", ())):
+        candidates.append((_item_sort_key(item, 0, seq), page_of(item), text_fragment(item)))
+    for seq, table in enumerate(getattr(document, "tables", ())):
+        candidates.append((_item_sort_key(table, 1, seq), page_of(table), (table.export_to_markdown(doc=document), "table")))
+    candidates.sort(key=lambda row: row[0])
+    for _key, page_no, frag in candidates:
+        result[page_no].append(frag)
     return result
 
 
