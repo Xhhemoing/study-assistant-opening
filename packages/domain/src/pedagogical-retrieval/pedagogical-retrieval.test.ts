@@ -773,6 +773,104 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
       expect(part.hintGatedChunks.some(c => c.text.includes("HINT_EOF_") && c.text.includes("Trailing hint tail."))).toBe(true);
     }
   });
+
+  it("seals unclosed <details>/\\begin{solution} inside containers and sealed headings and recurses into nested constructs inside timestamped transcript cues", () => {
+    // 1. Sealed Answer Key heading with unclosed inline \begin{solution} must NOT reset at next same-level heading!
+    const sealedHeadingDoc = [
+      "## Answer Key \\begin{solution} SECRET_HDR_LINE_1",
+      "SECRET_HDR_LINE_2",
+      "## Next Public Section",
+      "SECRET_HDR_LINE_3_STILL_OPEN",
+    ].join("\n");
+    const sealedHeadingChunks = chunkPedagogicalDocument({
+      sourceId: "src-sealed-heading-unclosed",
+      sourceVersion: 1,
+      text: sealedHeadingDoc,
+    });
+    for (const c of sealedHeadingChunks) {
+      expect(sealedHeadingDoc.slice(c.startOffset, c.endOffset)).toBe(c.text);
+    }
+    const sealedHeadingPart = partitionPedagogicalChunks(sealedHeadingChunks);
+    expect(sealedHeadingPart.publicChunks).toHaveLength(0);
+    expect(sealedHeadingPart.indexableChunks).toHaveLength(0);
+    expect(sealedHeadingPart.sealedChunks.some(c => c.text.includes("SECRET_HDR_LINE_3_STILL_OPEN"))).toBe(true);
+
+    // 2. Unclosed <details> inside :::exercise (block & inline) and unclosed \begin{solution} wrapping a closed \begin{hint}.
+    const containerUnclosedDoc = [
+      ":::exercise Problem 1",
+      "Prompt A.",
+      "<details><summary>Solution</summary>",
+      "SECRET_DET_IN_EX",
+      ":::",
+      "",
+      ":::exercise Problem 2",
+      "Prompt B. <details><summary>Answer Key</summary> SECRET_INLINE_DET_IN_EX",
+      "Still inside unclosed details.",
+      ":::",
+      "",
+      "Prompt C. \\begin{solution} SECRET_BEFORE_HINT \\begin{hint} NESTED_HINT_MUST_STAY_SEALED \\end{hint} SECRET_AFTER_HINT",
+    ].join("\n");
+    const containerChunks = chunkPedagogicalDocument({
+      sourceId: "src-container-unclosed",
+      sourceVersion: 1,
+      text: containerUnclosedDoc,
+    });
+    for (const c of containerChunks) {
+      expect(containerUnclosedDoc.slice(c.startOffset, c.endOffset)).toBe(c.text);
+    }
+    const containerPart = partitionPedagogicalChunks(containerChunks);
+    const containerWithHints = partitionPedagogicalChunks(containerChunks, { allowHintGated: true });
+    for (const secret of [
+      "SECRET_DET_IN_EX",
+      "SECRET_INLINE_DET_IN_EX",
+      "Still inside unclosed details.",
+      "SECRET_BEFORE_HINT",
+      "NESTED_HINT_MUST_STAY_SEALED",
+      "SECRET_AFTER_HINT",
+    ]) {
+      expect(containerPart.publicChunks.some(c => c.text.includes(secret))).toBe(false);
+      expect(containerWithHints.indexableChunks.some(c => c.text.includes(secret))).toBe(false);
+      expect(containerPart.sealedChunks.some(c => c.text.includes(secret))).toBe(true);
+    }
+
+    // 3. Timestamped transcript cues MUST recurse into public (\begin{exercise}) and hint_gated (\begin{hint}, <details>) spans!
+    const cueDoc = [
+      "[01:05 - 01:30] \\begin{exercise} Compute $2+2$. \\begin{solution} SECRET_CUE_EX \\end{solution} \\end{exercise}",
+      "[01:30 - 02:00] \\begin{hint} HINT_CUE_1 \\begin{solution} SECRET_CUE_IN_HINT \\end{solution} \\end{hint}",
+      "[02:00 - 02:30] <details><summary>Hint</summary> HINT_CUE_DET \\begin{solution} SECRET_CUE_IN_DET_HINT \\end{solution}</details>",
+    ].join("\n");
+    const cueChunks = chunkPedagogicalDocument({
+      sourceId: "src-cue-nested",
+      sourceVersion: 1,
+      privacyEpoch: 16,
+      text: cueDoc,
+    });
+    for (let idx = 0; idx < cueChunks.length; idx++) {
+      const c = cueChunks[idx]!;
+      expect(cueDoc.slice(c.startOffset, c.endOffset)).toBe(c.text);
+      if (idx > 0) expect(c.startOffset).toBeGreaterThanOrEqual(cueChunks[idx - 1]!.endOffset);
+      expect(c.startMs).not.toBeNull();
+      expect(c.endMs).not.toBeNull();
+    }
+    const cuePart = partitionPedagogicalChunks(cueChunks);
+    const cueWithHints = partitionPedagogicalChunks(cueChunks, { allowHintGated: true });
+
+    for (const secret of ["SECRET_CUE_EX", "SECRET_CUE_IN_HINT", "SECRET_CUE_IN_DET_HINT"]) {
+      expect(cuePart.publicChunks.some(c => c.text.includes(secret))).toBe(false);
+      expect(cuePart.indexableChunks.some(c => c.text.includes(secret))).toBe(false);
+      expect(cueWithHints.indexableChunks.some(c => c.text.includes(secret))).toBe(false);
+      expect(cuePart.sealedChunks.some(c => c.text.includes(secret) && c.kind === "solution")).toBe(true);
+    }
+    for (const hint of ["HINT_CUE_1", "HINT_CUE_DET"]) {
+      expect(cuePart.publicChunks.some(c => c.text.includes(hint))).toBe(false);
+      expect(cuePart.hintGatedChunks.some(c => c.text.includes(hint) && c.kind === "hint")).toBe(true);
+      expect(cueWithHints.indexableChunks.some(c => c.text.includes(hint))).toBe(true);
+    }
+    const pubCue = cuePart.publicChunks.find(c => c.text.includes("Compute $2+2$."));
+    expect(pubCue).toBeDefined();
+    expect(pubCue!.startMs).toBe(65_000);
+    expect(pubCue!.endMs).toBe(90_000);
+  });
 });
 
 describe("sparsePpr exactness, dangling-node mass conservation, and validation", () => {

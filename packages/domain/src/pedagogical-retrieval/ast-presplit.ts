@@ -301,6 +301,7 @@ function classifyDetailsElement(
     if (
       !SEALED_HEADING_RE.test(summaryText) &&
       !/\bspoiler\b/i.test(summaryText) &&
+      !/<details\b/i.test(summaryMatch[1]!) &&
       HINT_HEADING_RE.test(summaryText)
     ) {
       return {
@@ -856,6 +857,158 @@ function parsePedagogicalAstInternal(
     return defaultNextLineIdx;
   };
 
+  const splitNonSealedSpan = (span: InlineConstructSpan): MappedInnerBlock[] => {
+    if (
+      span.openEnd === undefined ||
+      span.closeStart === undefined ||
+      span.visibility === "sealed" ||
+      span.closeStart <= span.openEnd
+    ) {
+      return [
+        {
+          kind: span.kind,
+          visibility: span.visibility,
+          atomicConstruct: true,
+          startOffset: span.start,
+          endOffset: span.end,
+          startMs: null,
+          endMs: null,
+          ...(span.label ? { label: span.label } : {}),
+        },
+      ];
+    }
+
+    const inner = parsePedagogicalAstInternal(
+      text.slice(span.openEnd, span.closeStart),
+      { defaultVisibility: span.visibility, propagateSectionVisibility },
+      span.kind === "exercise",
+    ).map(b => ({
+      ...b,
+      startOffset: span.openEnd! + b.startOffset,
+      endOffset: span.openEnd! + b.endOffset,
+    }));
+    const higherInner = inner.filter(
+      b => VISIBILITY_RANK[b.visibility] > VISIBILITY_RANK[span.visibility],
+    );
+    if (higherInner.length === 0) {
+      return [
+        {
+          kind: span.kind,
+          visibility: span.visibility,
+          atomicConstruct: true,
+          startOffset: span.start,
+          endOffset: span.end,
+          startMs: null,
+          endMs: null,
+          ...(span.label ? { label: span.label } : {}),
+        },
+      ];
+    }
+
+    const out: MappedInnerBlock[] = [];
+    const safeSpanLabel =
+      span.summaryEndOffset != null &&
+      higherInner.some(b => b.startOffset < span.summaryEndOffset! && b.endOffset > span.openEnd!)
+        ? span.kind
+        : span.label ?? span.kind;
+    let spanCursor = span.start;
+    for (const hb of higherInner) {
+      const pre = trimWhitespaceBounds(text, spanCursor, hb.startOffset, false);
+      if (pre) {
+        out.push({
+          kind: span.kind,
+          visibility: span.visibility,
+          atomicConstruct: true,
+          startOffset: pre.start,
+          endOffset: pre.end,
+          startMs: null,
+          endMs: null,
+          label: safeSpanLabel,
+        });
+      }
+      out.push(hb);
+      spanCursor = hb.endOffset;
+    }
+    const tail = trimWhitespaceBounds(text, spanCursor, span.closeStart, false);
+    if (tail) {
+      const fullTail = trimWhitespaceBounds(text, tail.start, span.end, false);
+      if (fullTail) {
+        out.push({
+          kind: span.kind,
+          visibility: span.visibility,
+          atomicConstruct: true,
+          startOffset: fullTail.start,
+          endOffset: fullTail.end,
+          startMs: null,
+          endMs: null,
+          label: safeSpanLabel,
+        });
+      }
+    } else if (span.end > span.closeStart) {
+      const closingBounds = trimWhitespaceBounds(text, span.closeStart, span.end, false);
+      if (closingBounds) {
+        out.push({
+          kind: span.kind,
+          visibility: span.visibility,
+          atomicConstruct: true,
+          startOffset: closingBounds.start,
+          endOffset: closingBounds.end,
+          startMs: null,
+          endMs: null,
+          label: safeSpanLabel,
+        });
+      }
+    }
+    return out;
+  };
+
+  const extractProtectedBlocksFromSpans = (
+    inlineSpans: readonly InlineConstructSpan[],
+    rangeEnd: number,
+    activeVis: PedagogicalVisibility,
+  ): MappedInnerBlock[] => {
+    const extracted: MappedInnerBlock[] = [];
+    for (const span of inlineSpans) {
+      if (VISIBILITY_RANK[span.visibility] > VISIBILITY_RANK[activeVis]) {
+        extracted.push(...splitNonSealedSpan(span));
+      } else if (
+        span.end > rangeEnd &&
+        VISIBILITY_RANK[span.visibility] >= VISIBILITY_RANK["hint_gated"]
+      ) {
+        // Multi-line or unclosed sealed/hint_gated span extending past this line/block
+        // must consume through `span.end` so a later same-level heading cannot reset visibility.
+        extracted.push(...splitNonSealedSpan(span));
+      } else if (
+        span.kind !== "display_math" &&
+        span.visibility !== "sealed" &&
+        span.openEnd !== undefined &&
+        span.closeStart !== undefined &&
+        span.closeStart > span.openEnd
+      ) {
+        const inner = parsePedagogicalAstInternal(
+          text.slice(span.openEnd, span.closeStart),
+          { defaultVisibility: span.visibility, propagateSectionVisibility },
+          span.kind === "exercise",
+        );
+        for (const b of inner) {
+          if (VISIBILITY_RANK[b.visibility] > VISIBILITY_RANK[activeVis]) {
+            extracted.push({
+              kind: b.kind,
+              visibility: b.visibility,
+              atomicConstruct: b.atomicConstruct,
+              startOffset: span.openEnd + b.startOffset,
+              endOffset: span.openEnd + b.endOffset,
+              startMs: b.startMs,
+              endMs: b.endMs,
+              ...(b.label ? { label: b.label } : {}),
+            });
+          }
+        }
+      }
+    }
+    return extracted;
+  };
+
   let i = 0;
   while (i < lines.length) {
     const line = lines[i]!;
@@ -908,57 +1061,54 @@ function parsePedagogicalAstInternal(
         });
       }
       const activeVis = getActiveSectionVisibility();
-      if (activeVis !== "sealed" && nonMathInlineSpans.length > 0) {
-        const spanReachEnd = Math.max(line.contentEnd, ...nonMathInlineSpans.map(s => s.end));
-        const innerBlocks = parsePedagogicalAstInternal(
-          text.slice(headingTextStart, spanReachEnd),
-          {
-            defaultVisibility: activeVis,
-            propagateSectionVisibility: false,
-          },
-          sealProofs,
-        ).map(b => ({
-          ...b,
-          startOffset: headingTextStart + b.startOffset,
-          endOffset: headingTextStart + b.endOffset,
-        }));
-        const higherBlocks = innerBlocks.filter(
-          b => VISIBILITY_RANK[b.visibility] > VISIBILITY_RANK[activeVis],
-        );
-        if (higherBlocks.length > 0) {
-          const safeLabel = sanitizeHeaderLabel(text, headingTextStart, headingTextEnd, higherBlocks, "heading");
-          const maxHigherEnd = Math.max(line.contentEnd, ...higherBlocks.map(b => b.endOffset));
-          emitContainerWithExtraction(
-            "heading",
-            activeVis,
-            false,
-            line.start,
-            maxHigherEnd,
-            maxHigherEnd,
-            safeLabel,
-            false,
-            innerBlocks,
-          );
-          if (maxHigherEnd > line.contentEnd) {
-            const closeLineIdx = lineIndexContaining(lines, Math.max(line.start, maxHigherEnd - 1), i);
-            const closeLine = lines[closeLineIdx]!;
-            const trailingOnCloseLine = text.slice(maxHigherEnd, closeLine.contentEnd);
-            if (!/^[ \t]*$/.test(trailingOnCloseLine)) {
-              lines[closeLineIdx] = {
-                start: maxHigherEnd,
-                contentEnd: closeLine.contentEnd,
-                end: closeLine.end,
-                raw: trailingOnCloseLine,
-              };
-              i = closeLineIdx;
-            } else {
-              i = closeLineIdx + 1;
+      const headingInlineSpans =
+        rawInlineSpans.length > 0
+          ? findInlineConstructSpans(text, line.start, line.contentEnd, activeVis, sealProofs)
+          : [];
+      const extracted = extractProtectedBlocksFromSpans(headingInlineSpans, line.contentEnd, activeVis);
+      if (extracted.length > 0) {
+        extracted.sort((a, b) => a.startOffset - b.startOffset || a.endOffset - b.endOffset);
+        const safeLabel = sanitizeHeaderLabel(text, headingTextStart, headingTextEnd, extracted, "heading");
+        let cursor = line.start;
+        for (const block of extracted) {
+          if (block.startOffset > cursor) {
+            const pre = trimWhitespaceBounds(text, cursor, block.startOffset, false);
+            if (pre) {
+              pushBlock("heading", activeVis, false, pre.start, pre.end, { label: safeLabel });
             }
-          } else {
-            i++;
           }
-          continue;
+          pushBlock(block.kind, block.visibility, block.atomicConstruct, block.startOffset, block.endOffset, {
+            startMs: block.startMs,
+            endMs: block.endMs,
+            ...(block.label ? { label: block.label } : {}),
+          });
+          cursor = Math.max(cursor, block.endOffset);
         }
+        if (cursor > line.contentEnd) {
+          const closeLineIdx = lineIndexContaining(lines, Math.max(line.start, cursor - 1), i);
+          const closeLine = lines[closeLineIdx]!;
+          const trailingOnCloseLine = text.slice(cursor, closeLine.contentEnd);
+          if (!/^[ \t]*$/.test(trailingOnCloseLine)) {
+            lines[closeLineIdx] = {
+              start: cursor,
+              contentEnd: closeLine.contentEnd,
+              end: closeLine.end,
+              raw: trailingOnCloseLine,
+            };
+            i = closeLineIdx;
+          } else {
+            i = closeLineIdx + 1;
+          }
+        } else {
+          if (cursor < line.contentEnd) {
+            const suf = trimWhitespaceBounds(text, cursor, line.contentEnd, false);
+            if (suf) {
+              pushBlock("heading", activeVis, false, suf.start, suf.end, { label: safeLabel });
+            }
+          }
+          i++;
+        }
+        continue;
       }
       pushBlock("heading", activeVis, false, line.start, line.contentEnd, {
         label: headingText,
@@ -1466,130 +1616,13 @@ function parsePedagogicalAstInternal(
       const tableStart = line.start;
       const tableEnd = lines[endLineIdx]!.contentEnd;
 
-      if (activeVis === "sealed") {
-        pushBlock("table", activeVis, true, tableStart, tableEnd);
-        i = j;
-        continue;
-      }
-
-      const extracted: MappedInnerBlock[] = [];
       const inlineSpans = findInlineConstructSpans(text, tableStart, tableEnd, activeVis, sealProofs);
-      for (const span of inlineSpans) {
-        if (VISIBILITY_RANK[span.visibility] > VISIBILITY_RANK[activeVis]) {
-          if (
-            span.visibility !== "sealed" &&
-            span.openEnd !== undefined &&
-            span.closeStart !== undefined &&
-            span.closeStart > span.openEnd
-          ) {
-            const inner = parsePedagogicalAstInternal(
-              text.slice(span.openEnd, span.closeStart),
-              { defaultVisibility: span.visibility, propagateSectionVisibility },
-              false,
-            ).map(b => ({
-              ...b,
-              startOffset: span.openEnd! + b.startOffset,
-              endOffset: span.openEnd! + b.endOffset,
-            }));
-            const higherInner = inner.filter(
-              b => VISIBILITY_RANK[b.visibility] > VISIBILITY_RANK[span.visibility],
-            );
-            if (higherInner.length === 0) {
-              extracted.push({
-                kind: span.kind,
-                visibility: span.visibility,
-                atomicConstruct: true,
-                startOffset: span.start,
-                endOffset: span.end,
-                startMs: null,
-                endMs: null,
-                ...(span.label ? { label: span.label } : {}),
-              });
-            } else {
-              const safeSpanLabel =
-                span.summaryEndOffset != null &&
-                higherInner.some(b => b.startOffset < span.summaryEndOffset! && b.endOffset > span.openEnd!)
-                  ? span.kind
-                  : span.label ?? span.kind;
-              let spanCursor = span.start;
-              for (const hb of higherInner) {
-                const pre = trimWhitespaceBounds(text, spanCursor, hb.startOffset, false);
-                if (pre) {
-                  extracted.push({
-                    kind: span.kind,
-                    visibility: span.visibility,
-                    atomicConstruct: true,
-                    startOffset: pre.start,
-                    endOffset: pre.end,
-                    startMs: null,
-                    endMs: null,
-                    label: safeSpanLabel,
-                  });
-                }
-                extracted.push(hb);
-                spanCursor = hb.endOffset;
-              }
-              const tail = trimWhitespaceBounds(text, spanCursor, span.closeStart, false);
-              if (tail) {
-                const fullTail = trimWhitespaceBounds(text, tail.start, span.end, false);
-                if (fullTail) {
-                  extracted.push({
-                    kind: span.kind,
-                    visibility: span.visibility,
-                    atomicConstruct: true,
-                    startOffset: fullTail.start,
-                    endOffset: fullTail.end,
-                    startMs: null,
-                    endMs: null,
-                    label: safeSpanLabel,
-                  });
-                }
-              }
-            }
-          } else {
-            extracted.push({
-              kind: span.kind,
-              visibility: span.visibility,
-              atomicConstruct: true,
-              startOffset: span.start,
-              endOffset: span.end,
-              startMs: null,
-              endMs: null,
-              ...(span.label ? { label: span.label } : {}),
-            });
-          }
-        } else if (
-          span.kind !== "display_math" &&
-          span.openEnd !== undefined &&
-          span.closeStart !== undefined &&
-          span.closeStart > span.openEnd
-        ) {
-          const inner = parsePedagogicalAstInternal(
-            text.slice(span.openEnd, span.closeStart),
-            { defaultVisibility: span.visibility, propagateSectionVisibility },
-            span.kind === "exercise",
-          );
-          for (const b of inner) {
-            if (VISIBILITY_RANK[b.visibility] > VISIBILITY_RANK[activeVis]) {
-              extracted.push({
-                kind: b.kind,
-                visibility: b.visibility,
-                atomicConstruct: b.atomicConstruct,
-                startOffset: span.openEnd + b.startOffset,
-                endOffset: span.openEnd + b.endOffset,
-                startMs: b.startMs,
-                endMs: b.endMs,
-                ...(b.label ? { label: b.label } : {}),
-              });
-            }
-          }
-        }
-      }
+      const extracted = extractProtectedBlocksFromSpans(inlineSpans, tableEnd, activeVis);
 
       extracted.sort((a, b) => a.startOffset - b.startOffset || a.endOffset - b.endOffset);
 
       // Extract data cells belonging to sealed / hint-gated columns (e.g. Answer Key / Solution / Hint).
-      const headerCells = parseTableRowCells(lines[i]!, inlineSpans);
+      const headerCells = activeVis === "sealed" ? [] : parseTableRowCells(lines[i]!, inlineSpans);
       const colPolicies = headerCells.map(cell => {
         const cellText = sanitizeHeaderLabel(text, cell.start, cell.end, extracted, "");
         if (!cellText) return null;
@@ -1731,13 +1764,15 @@ function parsePedagogicalAstInternal(
     const cueTiming = parseInlineTranscriptCue(raw);
     if (cueTiming) {
       const activeVis = getActiveSectionVisibility();
-      const cueSpans =
-        activeVis !== "sealed"
-          ? findInlineConstructSpans(text, line.start, line.contentEnd, activeVis, sealProofs).filter(
-              s => VISIBILITY_RANK[s.visibility] > VISIBILITY_RANK[activeVis],
-            )
-          : [];
-      if (cueSpans.length === 0) {
+      const cueInlineSpans = findInlineConstructSpans(
+        text,
+        line.start,
+        line.contentEnd,
+        activeVis,
+        sealProofs,
+      );
+      const extracted = extractProtectedBlocksFromSpans(cueInlineSpans, line.contentEnd, activeVis);
+      if (extracted.length === 0) {
         pushBlock("transcript_cue", activeVis, true, line.start, line.contentEnd, {
           startMs: cueTiming.startMs,
           endMs: cueTiming.endMs,
@@ -1745,21 +1780,24 @@ function parsePedagogicalAstInternal(
         i++;
         continue;
       }
+      extracted.sort((a, b) => a.startOffset - b.startOffset || a.endOffset - b.endOffset);
       let cursor = line.start;
-      for (const span of cueSpans) {
-        const pre = trimWhitespaceBounds(text, cursor, span.start, false);
-        if (pre) {
-          pushBlock("transcript_cue", activeVis, true, pre.start, pre.end, {
-            startMs: cueTiming.startMs,
-            endMs: cueTiming.endMs,
-          });
+      for (const block of extracted) {
+        if (block.startOffset > cursor) {
+          const pre = trimWhitespaceBounds(text, cursor, block.startOffset, false);
+          if (pre) {
+            pushBlock("transcript_cue", activeVis, true, pre.start, pre.end, {
+              startMs: cueTiming.startMs,
+              endMs: cueTiming.endMs,
+            });
+          }
         }
-        pushBlock(span.kind, span.visibility, true, span.start, span.end, {
-          startMs: cueTiming.startMs,
-          endMs: cueTiming.endMs,
-          ...(span.label ? { label: span.label } : {}),
+        pushBlock(block.kind, block.visibility, block.atomicConstruct, block.startOffset, block.endOffset, {
+          startMs: block.startMs ?? cueTiming.startMs,
+          endMs: block.endMs ?? cueTiming.endMs,
+          ...(block.label ? { label: block.label } : {}),
         });
-        cursor = Math.max(cursor, span.end);
+        cursor = Math.max(cursor, block.endOffset);
       }
       if (cursor > line.contentEnd) {
         const closeLineIdx = lineIndexContaining(lines, Math.max(line.start, cursor - 1), i);
@@ -1778,12 +1816,14 @@ function parsePedagogicalAstInternal(
         }
         continue;
       }
-      const suf = trimWhitespaceBounds(text, cursor, line.contentEnd, false);
-      if (suf) {
-        pushBlock("transcript_cue", activeVis, true, suf.start, suf.end, {
-          startMs: cueTiming.startMs,
-          endMs: cueTiming.endMs,
-        });
+      if (cursor < line.contentEnd) {
+        const suf = trimWhitespaceBounds(text, cursor, line.contentEnd, false);
+        if (suf) {
+          pushBlock("transcript_cue", activeVis, true, suf.start, suf.end, {
+            startMs: cueTiming.startMs,
+            endMs: cueTiming.endMs,
+          });
+        }
       }
       i++;
       continue;

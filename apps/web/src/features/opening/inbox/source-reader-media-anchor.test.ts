@@ -238,4 +238,54 @@ describe("media anchor bounded playback controller", () => {
       rangeHighlightActive: true,
     });
   });
+
+  it("tolerates IEEE-754 float64 rounding and browser keyframe snapping on initial programmatic seek without dropping boundActive or rangeHighlightActive", () => {
+    // (290 / 1000) * 1000 === 289.99999999999994 < 290 in IEEE-754 float64!
+    const floatAnchor = validateMediaAnchorRange({ startMs: 290, endMs: 5_000 })!;
+    const m1 = createFakeMedia(2);
+    const c1 = createMediaAnchorPlaybackController(floatAnchor);
+    c1.activate(m1);
+    c1.handleSeeked(m1);
+    expect(c1.snapshot()).toMatchObject({
+      phase: "seeking_segment",
+      boundActive: true,
+      rangeHighlightActive: true,
+      userReleasedBound: false,
+    });
+
+    // Browser keyframe snapping slightly below startMs (e.g. 64.7s for 65_000ms) keeps bound and highlight active.
+    const snapAnchor = validateMediaAnchorRange({ startMs: 65_000, endMs: 90_000 })!;
+    const m2 = createFakeMedia(0);
+    const c2 = createMediaAnchorPlaybackController(snapAnchor);
+    c2.activate(m2);
+    m2.readyState = 1;
+    c2.handleLoadedMetadata(m2);
+    m2.currentTime = 64.7;
+    c2.handleSeeked(m2);
+    expect(c2.snapshot()).toMatchObject({
+      phase: "seeking_segment",
+      boundActive: true,
+      rangeHighlightActive: true,
+      userReleasedBound: false,
+    });
+
+    // End bound still auto-pauses cleanly at 90s!
+    m2.currentTime = 90;
+    c2.handleTimeUpdate(m2);
+    expect(m2.pauseMock).toHaveBeenCalledOnce();
+    expect(c2.snapshot()).toMatchObject({
+      phase: "paused_at_end",
+      autoPausedAtEnd: true,
+      rangeHighlightActive: true,
+    });
+
+    // Genuine manual seek well outside [startMs, endMs] still releases bound and clears highlight.
+    m2.currentTime = 15;
+    c2.handleSeeked(m2);
+    expect(c2.snapshot()).toMatchObject({
+      phase: "continued_past_end",
+      userReleasedBound: true,
+      rangeHighlightActive: false,
+    });
+  });
 });
