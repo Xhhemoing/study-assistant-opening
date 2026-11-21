@@ -98,7 +98,11 @@ describe("learner portability", () => {
   });
 
   it.each(["\n", "\r\n", "\r"])("rejects internal Opening keys in both note formats and both ZIP directions with %j", newline => {
-    for (const key of ["workspaceId", "ownerUserId", "privacyEpoch", "memoryDependencyIds", "workspace_id", "workspace-id", "workspace id", "Workspace.ID"]) {
+    for (const key of [
+      "workspaceId", "ownerUserId", "privacyEpoch", "memoryDependencyIds", "workspace_id", "workspace-id", "workspace id", "Workspace.ID",
+      "privateAnswerKeys", "Private.Answer-Keys", "answerKey", "officialAnswers", "modelAnswer", "referenceAnswer",
+      "solutionText", "hiddenRubric", "reservedItems", "privateAssessmentNotes", "trustedKey",
+    ]) {
       const publicKey = "x".repeat(key.length);
       const markdown = ["---", "title: Algebra", "details:", "  - " + publicKey + ": example", "---", "# Note"].join(newline);
       const original = importObsidianNote("notes/algebra.md", markdown);

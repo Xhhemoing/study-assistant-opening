@@ -11,6 +11,9 @@ const privateKeys = new Set([
   "contextsourcerefs", "exposurereceiptid", "materialpurposepin", "sourceversion", "uploadstate", "parsestate", "imageobjectkey",
   "sealed", "solutionsealed", "visibilityhint", "0109", "skillbelief", "skillbeliefv1", "bkt", "fiass", "remedyclinic",
   "examforecast", "diagnosticplacement", "openingcoursereservedquestions", "reservedquestions", "internalrubric", "<<",
+  "privateanswerkey", "privateanswerkeys", "answerkey", "answerkeys", "officialanswer", "officialanswers", "modelanswer",
+  "modelanswers", "referenceanswer", "referenceanswers", "solutions", "solutiontext", "rubric", "hiddenrubric", "reserveditems",
+  "trustedkey", "teachinganswerkey", "answerorrubricanchors",
 ]);
 const yamlEscapes: Readonly<Record<string, string>> = {
   "0": "\0", a: "\x07", b: "\b", t: "\t", n: "\n", v: "\v", f: "\f", r: "\r", e: "\x1b",
@@ -19,6 +22,11 @@ const yamlEscapes: Readonly<Record<string, string>> = {
 
 function invalid(): never {
   throw new TypeError("Unrecognized or private YAML frontmatter");
+}
+
+function isPrivateKey(key: string): boolean {
+  const normalized = key.normalize("NFKC").replace(/[-_.\s]/gu, "").toLowerCase();
+  return normalized.startsWith("private") || privateKeys.has(normalized);
 }
 
 // Walk the data-only YAML grammar without materializing values. Advanced YAML
@@ -142,7 +150,7 @@ class FrontmatterReader {
     this.skipHorizontal();
     if (!key || keys.has(key) || (flow ? this.current !== ":" : !this.indicator(":"))
       || (!quoted && (!plainKey.test(key) || scalarKeyword.test(key)))
-      || privateKeys.has(key.normalize("NFKC").replace(/[-_.\s]/gu, "").toLowerCase())) invalid();
+      || isPrivateKey(key)) invalid();
     keys.add(key);
     this.offset++;
   }

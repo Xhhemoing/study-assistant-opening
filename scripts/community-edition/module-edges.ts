@@ -1,9 +1,53 @@
 import ts from "typescript";
+import { isDeclaration } from "./snapshot.ts";
 
 export type ResolutionMode = "import" | "require";
 export type ModuleEdge = { spec: string; line: number; kind: "module" | "type" | "path" | "ambient"; mode: ResolutionMode };
 type Loader = "require" | "module" | "wrapper";
 const bundler = { module: ts.ModuleKind.ESNext, moduleResolution: ts.ModuleResolutionKind.Bundler };
+
+function sourceMode(file: string, packageType?: unknown): ResolutionMode {
+  return /\.m[jt]s$/u.test(file) ? "import" : /\.c[jt]s$/u.test(file) || packageType === "commonjs" ? "require" : "import";
+}
+
+function lexicalChecker(source: ts.SourceFile): ts.TypeChecker {
+  const host: ts.CompilerHost = {
+    getSourceFile: file => file === source.fileName ? source : undefined,
+    getDefaultLibFileName: () => "",
+    writeFile: () => undefined,
+    getCurrentDirectory: () => "",
+    getCanonicalFileName: file => file,
+    useCaseSensitiveFileNames: () => true,
+    getNewLine: () => "\n",
+    fileExists: file => file === source.fileName,
+    readFile: file => file === source.fileName ? source.text : undefined,
+  };
+  return ts.createProgram([source.fileName], { ...bundler, noLib: true, noResolve: true, allowJs: true, types: [] }, host).getTypeChecker();
+}
+
+function isWrapperVar(declaration: ts.Declaration, mode: ResolutionMode): boolean {
+  if (mode !== "require" || !ts.isVariableDeclaration(declaration) || !ts.isVariableDeclarationList(declaration.parent)
+    || (declaration.parent.flags & ts.NodeFlags.BlockScoped)) return false;
+  // A var in Node's wrapper shares its binding with require/module.
+  let scope: ts.Node | undefined = declaration.parent;
+  while (scope && !ts.isFunctionLike(scope) && !ts.isClassStaticBlockDeclaration(scope)) scope = scope.parent;
+  return !scope;
+}
+
+function localValue(symbol: ts.Symbol | undefined, mode: ResolutionMode): boolean {
+  return symbol?.declarations?.some(declaration => {
+    if ((ts.getCombinedModifierFlags(declaration) & ts.ModifierFlags.Ambient) || isWrapperVar(declaration, mode)) return false;
+    if (ts.isImportSpecifier(declaration)) return !declaration.isTypeOnly && !declaration.parent.parent.isTypeOnly;
+    if (ts.isImportClause(declaration)) return !declaration.isTypeOnly;
+    if (ts.isNamespaceImport(declaration)) return !declaration.parent.isTypeOnly;
+    return Boolean(symbol.flags & ts.SymbolFlags.Value);
+  }) ?? false;
+}
+
+function resolutionOverride(attributes: ts.ImportAttributes | undefined): ResolutionMode | undefined {
+  const value = attributes?.elements.find(attribute => attribute.name.text === "resolution-mode")?.value;
+  return value && ts.isStringLiteralLike(value) && (value.text === "import" || value.text === "require") ? value.text : undefined;
+}
 
 function unwrap(node: ts.Expression): ts.Expression {
   while (ts.isParenthesizedExpression(node) || ts.isAsExpression(node) || ts.isTypeAssertionExpression(node)
@@ -32,8 +76,9 @@ function isPropertyName(node: ts.Identifier): boolean {
     || ts.isMethodSignature(parent) || ts.isPropertyAccessExpression(parent)) && parent.name === node;
 }
 
-export function readModuleEdges(file: string, text: string): ModuleEdge[] {
-  const fileMode: ResolutionMode = /\.c[jt]s$/u.test(file) ? "require" : "import";
+export function readModuleEdges(file: string, text: string, packageType?: unknown): ModuleEdge[] {
+  const fileMode = sourceMode(file, packageType);
+  const declarationFile = isDeclaration(file);
   const source = ts.createSourceFile(file, text, {
     languageVersion: ts.ScriptTarget.Latest, jsDocParsingMode: ts.JSDocParsingMode.ParseAll,
     impliedNodeFormat: fileMode === "require" ? ts.ModuleKind.CommonJS : ts.ModuleKind.ESNext,
@@ -43,7 +88,7 @@ export function readModuleEdges(file: string, text: string): ModuleEdge[] {
   const edges: ModuleEdge[] = [];
   const literals = new Set<number>();
   const handled = new Set<ts.Node>();
-  const aliases = new Map<string, Loader>();
+  const aliases = new Map<ts.Symbol, Loader>();
   const lineAt = (offset: number) => source.getLineAndCharacterOfPosition(offset).line + 1;
   const fail = (node: ts.Node, message: string): never => { throw new Error(`${file}:${lineAt(node.getStart(source))}: ${message}`); };
   const syntax = (source as ts.SourceFile & { parseDiagnostics: readonly ts.DiagnosticWithLocation[] }).parseDiagnostics[0];
@@ -57,6 +102,23 @@ export function readModuleEdges(file: string, text: string): ModuleEdge[] {
     ts.getJSDocCommentsAndTags(node).forEach(visit);
   };
   visit(source);
+  const jsx = nodes.find(node => ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node) || ts.isJsxFragment(node));
+  if (jsx) edges.push({ spec: "react/jsx-runtime", line: lineAt(jsx.getStart(source)), kind: "module", mode: fileMode });
+  const checker = /\b(?:require|module|createRequire)\b/u.test(text) ? lexicalChecker(source) : undefined;
+  const symbolOf = (node: ts.Identifier) => checker?.getSymbolAtLocation(node);
+  const factories = new Set<ts.Symbol>();
+  for (const node of nodes) {
+    if (!ts.isImportDeclaration(node) || !ts.isStringLiteral(node.moduleSpecifier)
+      || !["node:module", "module"].includes(node.moduleSpecifier.text) || node.importClause?.isTypeOnly) continue;
+    const bindings = node.importClause?.namedBindings;
+    if (!bindings || !ts.isNamedImports(bindings)) continue;
+    for (const item of bindings.elements) {
+      if (item.isTypeOnly || (item.propertyName ?? item.name).text !== "createRequire") continue;
+      const symbol = symbolOf(item.name);
+      if (symbol) factories.add(symbol);
+      handled.add(item.name);
+    }
+  }
 
   const edge = (node: ts.Node | undefined, origin: ts.Node, kind: ModuleEdge["kind"], mode?: ResolutionMode): void => {
     const spec = node && ts.isExpression(node) ? unwrap(node) : node;
@@ -71,10 +133,26 @@ export function readModuleEdges(file: string, text: string): ModuleEdge[] {
   function loader(expression: ts.Expression, mark = false): Loader | undefined {
     const node = unwrap(expression);
     if (ts.isIdentifier(node)) {
-      const binding = aliases.get(node.text) ?? (node.text === "require" || node.text === "module" ? node.text
-        : node.text === "arguments" && usesWrapperArguments(node) ? "wrapper" : undefined);
+      const symbol = symbolOf(node);
+      const alias = symbol ? aliases.get(symbol) : undefined;
+      const ambient = !localValue(symbol, fileMode) && (
+        node.text === "require" || node.text === "module" ? node.text
+          : node.text === "arguments" && usesWrapperArguments(node) ? "wrapper" : undefined
+      );
+      if (!alias && ambient && fileMode === "import") fail(node, `Ambient ${node.text} is unavailable in an ESM file`);
+      const binding = alias ?? (ambient || undefined);
       if (binding && mark) handled.add(node);
       return binding;
+    }
+    if (ts.isCallExpression(node)) {
+      const callee = unwrap(node.expression);
+      const symbol = ts.isIdentifier(callee) ? symbolOf(callee) : undefined;
+      if (!symbol || !factories.has(symbol)) return undefined;
+      const base = node.arguments[0] && unwrap(node.arguments[0]);
+      if (!base || !ts.isPropertyAccessExpression(base) || base.name.text !== "url" || !ts.isMetaProperty(base.expression)
+        || base.expression.keywordToken !== ts.SyntaxKind.ImportKeyword) fail(node, "createRequire requires import.meta.url");
+      if (mark) handled.add(callee);
+      return "require";
     }
     if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
       const base = loader(node.expression);
@@ -97,6 +175,11 @@ export function readModuleEdges(file: string, text: string): ModuleEdge[] {
   // Propagate direct aliases. Any write, escape or indirection that cannot be
   // represented by one of these bindings is a boundary violation below.
   const declarations = nodes.filter(ts.isVariableDeclaration);
+  for (const declaration of declarations) {
+    if (ts.isIdentifier(declaration.name) && ["require", "module"].includes(declaration.name.text) && isWrapperVar(declaration, fileMode)) {
+      handled.add(declaration.name);
+    }
+  }
   let progress = true;
   while (progress) {
     progress = false;
@@ -106,17 +189,19 @@ export function readModuleEdges(file: string, text: string): ModuleEdge[] {
       if (!binding) continue;
       if (ts.isIdentifier(declaration.name)) {
         const name = declaration.name.text;
-        if (aliases.has(name) || ["module", "require", "arguments"].includes(name)) fail(declaration, "Ambiguous loader alias");
-        aliases.set(name, binding);
+        const symbol = symbolOf(declaration.name);
+        if (!symbol || aliases.has(symbol) || ["module", "arguments"].includes(name)) fail(declaration, "Ambiguous loader alias");
+        aliases.set(symbol!, binding);
       } else if (ts.isObjectBindingPattern(declaration.name) && binding === "module") {
         for (const element of declaration.name.elements) {
           const key = element.propertyName ?? element.name;
+          const symbol = ts.isIdentifier(element.name) ? symbolOf(element.name) : undefined;
           if (!ts.isIdentifier(element.name) || !(ts.isIdentifier(key) || ts.isStringLiteral(key))
             || key.text !== "require" || element.dotDotDotToken || element.initializer
-            || aliases.has(element.name.text) || ["require", "module", "arguments"].includes(element.name.text)) {
+            || !symbol || aliases.has(symbol) || ["module", "arguments"].includes(element.name.text)) {
             fail(element, "Unsupported CommonJS module destructuring");
           }
-          aliases.set(element.name.getText(source), "require");
+          aliases.set(symbol!, "require");
           handled.add(element.name);
           handled.add(key);
         }
@@ -128,13 +213,15 @@ export function readModuleEdges(file: string, text: string): ModuleEdge[] {
   }
 
   for (const node of nodes) {
-    if (ts.isImportDeclaration(node)) edge(node.moduleSpecifier, node, node.importClause?.isTypeOnly ? "type" : "module");
-    if (ts.isExportDeclaration(node) && node.moduleSpecifier) edge(node.moduleSpecifier, node, node.isTypeOnly ? "type" : "module");
+    if (ts.isImportDeclaration(node)) edge(node.moduleSpecifier, node, declarationFile || node.importClause?.isTypeOnly ? "type" : "module");
+    if (ts.isExportDeclaration(node) && node.moduleSpecifier) edge(node.moduleSpecifier, node, declarationFile || node.isTypeOnly ? "type" : "module");
     if (ts.isExternalModuleReference(node)) {
-      const typeOnly = ts.isImportEqualsDeclaration(node.parent) && node.parent.isTypeOnly;
+      const typeOnly = declarationFile || (ts.isImportEqualsDeclaration(node.parent) && node.parent.isTypeOnly);
       edge(node.expression, node, typeOnly ? "type" : "module", "require");
     }
-    if (ts.isImportTypeNode(node)) edge(ts.isLiteralTypeNode(node.argument) ? node.argument.literal : undefined, node, "type");
+    if (ts.isImportTypeNode(node)) {
+      edge(ts.isLiteralTypeNode(node.argument) ? node.argument.literal : undefined, node, "type", resolutionOverride(node.attributes));
+    }
     if (ts.isJSDocImportTag(node)) edge(node.moduleSpecifier, node, "type");
     if (ts.isCallExpression(node)) {
       if (node.expression.kind === ts.SyntaxKind.ImportKeyword) edge(node.arguments[0], node, "module", "import");
@@ -154,9 +241,10 @@ export function readModuleEdges(file: string, text: string): ModuleEdge[] {
     if (handled.has(node)) continue;
     if (ts.isIdentifier(node) && !isPropertyName(node)) {
       const name = node.text;
+      const symbol = symbolOf(node);
       if (/^(?:SkillBeliefV1|SeededRecipe|TutorGraph)$/iu.test(name)) fail(node, `Closed-core symbol ${name}`);
-      if (aliases.has(name) || name === "createRequire" || name === "eval" || name === "Function"
-        || name === "require" || name === "module" || (name === "arguments" && usesWrapperArguments(node))) {
+      if ((symbol && (aliases.has(symbol) || factories.has(symbol))) || name === "createRequire" || name === "eval" || name === "Function"
+        || ((name === "require" || name === "module") && !localValue(symbol, fileMode)) || (name === "arguments" && usesWrapperArguments(node))) {
         fail(node, `Unresolved or escaping loader ${name}`);
       }
     }

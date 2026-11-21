@@ -4,6 +4,14 @@ import { posix } from "node:path";
 export const packageRoots = ["packages/contracts", "packages/domain", "packages/jingwei", "packages/ui"] as const;
 export const apacheLicensePath = "scripts/community-edition/apache-2.0.txt";
 export const sourceExtension = /\.(?:[cm]?[jt]s|[jt]sx)$/u;
+const declarationExtension = /\.d\.(?:[cm]?ts|[^./]+\.ts)$/u;
+export const isDeclaration = (file: string): boolean => declarationExtension.test(file);
+
+export function declarationCompanion(file: string): string | undefined {
+  const extension = posix.extname(file);
+  if (!extension || sourceExtension.test(file)) return undefined;
+  return file.slice(0, -extension.length) + ".d" + extension + ".ts";
+}
 const sourceRoots = [
   "packages/contracts/src/", "packages/domain/src/portability/native/", "packages/domain/src/cartridge-sdk-lite/",
   "packages/jingwei/src/", "packages/ui/src/",
@@ -20,10 +28,12 @@ export function isSafeGitPath(file: string): boolean {
 
 export function isPublicFile(file: string): boolean {
   return isSafeGitPath(file) && sourceRoots.some(root => file.startsWith(root))
-    && !file.split("/").some(part => closedProduct.test(part) || closedSegment.test(part.replace(/\.(?:d\.json\.ts|json|(?:d\.)?[cm]?[jt]sx?)$/u, "")))
+    && !file.split("/").some(part => closedProduct.test(part) || closedSegment.test(part.replace(
+      isDeclaration(part) ? declarationExtension : /\.(?:json|[cm]?[jt]sx?)$/u, "",
+    )))
     && !/(?:^|\/)opening\/(?:cartridges|exam-sprint|share|teachback-arena|span-[^/]+)\//iu.test(file)
     && !/(?:^|\/)(?:fixtures|__fixtures__|__tests__|seeds|migrations)\//iu.test(file)
-    && !/\.(?:test|spec)\.(?:d\.json\.ts|json|[cm]?[jt]sx?)$/iu.test(file)
+    && !/\.(?:test|spec)\.(?:d\.[^./]+\.ts|json|[cm]?[jt]sx?)$/iu.test(file)
     && (sourceExtension.test(file) || (file.endsWith(".json") && !/^package(?:-lock)?\.json$/iu.test(posix.basename(file))));
 }
 

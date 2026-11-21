@@ -2,13 +2,15 @@ import { isBuiltin } from "node:module";
 import { posix } from "node:path";
 import ts from "typescript";
 import { readModuleEdges, type ResolutionMode } from "./module-edges.ts";
-import { GitSnapshot, isPublicFile, isRecord, isSafeGitPath, sourceExtension, sourceOwner } from "./snapshot.ts";
+import { declarationCompanion, GitSnapshot, isDeclaration, isPublicFile, isRecord, isSafeGitPath, sourceExtension, sourceOwner } from "./snapshot.ts";
 
 type Profile = "browser-ui" | "portable-runtime";
 type Target = { path: string; typeOnly: boolean };
 type PackageMatch = { value: unknown; capture?: string };
-type PackageTarget = { types: string; runtime?: string };
-type ProjectedTarget = { types: Partial<Record<ResolutionMode, string>> } & Partial<Record<ResolutionMode, string>>;
+type Selection = { file: string; route: Array<string | number> };
+type SelectedTargets = { types?: string; runtime?: Selection };
+type PackageTarget = { bundler: SelectedTargets; node: SelectedTargets };
+type PackageProjection = { original: unknown; modes: Partial<Record<ResolutionMode, PackageTarget>> };
 type Json = Record<string, unknown>;
 
 const publicEntries = [
@@ -30,10 +32,9 @@ const declarations = [".d.ts", ".d.mts", ".d.cts"];
 const extensionlessSources = [".ts", ".tsx", ".d.ts", ".js", ".jsx"];
 const opaqueExtensions = [".json", ".node", ".wasm"];
 const substitutes: Record<string, string[]> = {
-  ".js": [".ts", ".tsx", ".d.ts"], ".jsx": [".tsx", ".d.ts"], ".mjs": [".mts", ".d.mts"], ".cjs": [".cts", ".d.cts"],
+  ".js": [".ts", ".tsx", ".d.ts"], ".jsx": [".tsx", ".ts", ".d.ts"], ".mjs": [".mts", ".d.mts"], ".cjs": [".cts", ".d.cts"],
   ".ts": [".d.ts"], ".tsx": [".d.ts"], ".mts": [".d.mts"], ".cts": [".d.cts"],
 };
-const isDeclaration = (file: string) => file.endsWith(".d.json.ts") || declarations.some(ext => file.endsWith(ext));
 const declarationOptions: ts.CompilerOptions = {
   module: ts.ModuleKind.ESNext, moduleResolution: ts.ModuleResolutionKind.Bundler, allowArbitraryExtensions: true, resolveJsonModule: false,
 };
@@ -52,28 +53,32 @@ function matchKey(map: Json, spec: string): PackageMatch | undefined {
 }
 
 function selectTarget(
-  value: unknown, capture: string | undefined, mode: ResolutionMode, lookupType?: (target: string) => string | undefined,
-): string | null | undefined {
-  if (typeof value === "string") {
-    const path = capture === undefined ? value : value.replaceAll("*", () => capture);
-    return lookupType ? lookupType(path) : path;
-  }
-  if (value === null) return null;
-  if (Array.isArray(value)) {
-    for (const branch of value) {
-      const target = selectTarget(branch, capture, mode, lookupType);
-      if (target) return target;
+  match: PackageMatch, mode: ResolutionMode, node: boolean, lookupType?: (target: string) => string | undefined,
+): Selection | null | undefined {
+  function visit(value: unknown, route: Selection["route"]): Selection | null | undefined {
+    if (typeof value === "string") {
+      const path = match.capture === undefined ? value : value.replaceAll("*", () => match.capture!);
+      const file = lookupType ? lookupType(path) : path;
+      return file === undefined ? undefined : { file, route };
+    }
+    if (value === null) return null;
+    if (Array.isArray(value)) {
+      for (const [index, branch] of value.entries()) {
+        const target = visit(branch, [...route, index]);
+        if (target) return target;
+      }
+      return undefined;
+    }
+    if (!isRecord(value)) throw new Error("Invalid conditional package target");
+    for (const [name, branch] of Object.entries(value)) {
+      if (lookupType && name.startsWith("types@")) throw new Error(`Unsupported versioned types condition ${name}`);
+      if (name !== mode && name !== "default" && !(lookupType && name === "types") && !(node && name === "node")) continue;
+      const target = visit(branch, [...route, name]);
+      if (target !== undefined) return target;
     }
     return undefined;
   }
-  if (!isRecord(value)) throw new Error("Invalid conditional package target");
-  for (const [name, branch] of Object.entries(value)) {
-    if (lookupType && name.startsWith("types@")) throw new Error(`Unsupported versioned types condition ${name}`);
-    if (name !== mode && name !== "default" && !(lookupType && name === "types")) continue;
-    const target = selectTarget(branch, capture, mode, lookupType);
-    if (target !== undefined) return target;
-  }
-  return undefined;
+  return visit(match.value, []);
 }
 
 function exportMapping(manifest: Json, key: string) {
@@ -98,19 +103,48 @@ function mappedPath(directory: string, target: string): string {
   return localPath(directory, target, directory);
 }
 
-function recordTarget(map: Map<string, ProjectedTarget>, key: string, mode: ResolutionMode, target: PackageTarget): void {
-  const previous = map.get(key);
-  map.set(key, {
-    ...previous,
-    types: { ...previous?.types, [mode]: target.types },
-    ...(target.runtime ? { [mode]: target.runtime } : {}),
-  });
+function recordTarget(map: Map<string, PackageProjection>, key: string, mode: ResolutionMode, match: PackageMatch, target: PackageTarget): void {
+  const projection = map.get(key) ?? { original: match.value, modes: {} };
+  const previous = projection.modes[mode];
+  projection.modes[mode] = { bundler: { ...previous?.bundler, ...target.bundler }, node: { ...previous?.node, ...target.node } };
+  map.set(key, projection);
+}
+
+function pruneRuntime(value: unknown, selections: Selection[], depth = 0): unknown {
+  const leaf = selections.find(selection => selection.route.length === depth);
+  if (leaf) return leaf.file;
+  const descend = (child: unknown, key: string | number) => {
+    const matches = selections.filter(selection => selection.route[depth] === key);
+    return matches.length ? pruneRuntime(child, matches, depth + 1) : undefined;
+  };
+  if (Array.isArray(value)) return value.map(descend).filter(child => child !== undefined);
+  return Object.fromEntries(Object.entries(value as Json).map(([key, child]) => [key, descend(child, key)]).filter(([, child]) => child !== undefined));
+}
+
+export function publicMappings(mappings: Map<string, PackageProjection>): Json {
+  return Object.fromEntries([...mappings].map(([key, { original, modes }]) => {
+    const branches = Object.entries(modes);
+    const runtime = branches.flatMap(([, { bundler, node }]) => [bundler.runtime, node.runtime].filter(selection => selection !== undefined));
+    const needsNode = runtime.some(selection => selection.route.includes("node"))
+      || branches.some(([, { bundler, node }]) => node.types && node.types !== bundler.types);
+    if (!needsNode) {
+      return [key, Object.fromEntries(branches.map(([mode, { bundler }]) => [mode, { types: bundler.types, default: bundler.runtime?.file }]))];
+    }
+    // Retain the original order of matched runtime conditions. A separate
+    // type overlay preserves the compiler's mode-specific declaration choices.
+    const types = {
+      node: Object.fromEntries(branches.map(([mode, selected]) => [mode, selected.node.types])),
+      ...Object.fromEntries(branches.map(([mode, selected]) => [mode, selected.bundler.types])),
+    };
+    const selected = runtime.length ? pruneRuntime(original, runtime) : undefined;
+    return [key, { types, ...(isRecord(selected) ? selected : { default: selected }) }];
+  }));
 }
 
 type ManifestProjection = {
   source: Json;
-  exports: Map<string, ProjectedTarget>;
-  imports: Map<string, ProjectedTarget>;
+  exports: Map<string, PackageProjection>;
+  imports: Map<string, PackageProjection>;
   versions: Map<string, Map<string, string[]>>;
   legacy: Json;
 };
@@ -132,7 +166,9 @@ export class CommunityGraph {
       this.walk(`${owner}/${source}`, profile, [spec]);
       this.workspace(spec, profile, [spec], "import", false);
       const match = exportMapping(this.manifest(owner).source, key);
-      if (match && selectTarget(match.value, match.capture, "require")) this.workspace(spec, profile, [spec], "require", false);
+      if (match && (selectTarget(match, "require", false) || selectTarget(match, "require", true))) {
+        this.workspace(spec, profile, [spec], "require", false, true);
+      }
     }
   }
 
@@ -171,19 +207,18 @@ export class CommunityGraph {
     if (this.visited.has(key)) return;
     this.visited.add(key);
     this.files.add(file);
-    this.owner(file);
+    const packageType = this.manifest(this.owner(file)).source.type;
     if (json) {
       JSON.parse(this.snapshot.text(file));
-      const declaration = file.slice(0, -".json".length) + ".d.json.ts";
-      if (this.snapshot.entries.has(declaration)) this.walk(declaration, profile, chain);
+      const declaration = declarationCompanion(file);
+      if (declaration && this.snapshot.entries.has(declaration)) this.walk(declaration, profile, chain);
       return;
     }
     let edges = this.targetCache.get(file);
     if (!edges) {
-      edges = readModuleEdges(file, this.snapshot.text(file));
+      edges = readModuleEdges(file, this.snapshot.text(file), packageType);
       this.targetCache.set(file, edges);
     }
-    if (/\.[jt]sx$/u.test(file)) this.specifier("react/jsx-runtime", file, profile, [...chain, file], "import", false);
     for (const { spec, line, kind, mode } of edges) {
       const next = [...chain, `${file}:${line}`];
       try {
@@ -207,7 +242,7 @@ export class CommunityGraph {
       const match = isRecord(manifest.source.imports) && matchKey(manifest.source.imports, spec);
       if (!match) throw new Error(`Unresolved package import ${spec}`);
       const target = this.projectTarget(owner, match, "import", mode, typeOnly, profile, chain);
-      recordTarget(manifest.imports, spec, mode, target);
+      recordTarget(manifest.imports, spec, mode, match, target);
       return;
     }
     if (entries.has(spec)) {
@@ -225,38 +260,40 @@ export class CommunityGraph {
     throw new Error(`Closed or unresolved module ${spec}`);
   }
 
-  private workspace(spec: string, profile: Profile, chain: string[], mode: ResolutionMode, typeOnly: boolean): void {
+  private workspace(spec: string, profile: Profile, chain: string[], mode: ResolutionMode, typeOnly: boolean, allowNodeOnly = false): void {
     const [, owner, key] = entries.get(spec)!;
     const manifest = this.manifest(owner);
     const match = exportMapping(manifest.source, key);
     if (!match) throw new Error(`Missing public export ${spec}`);
-    const cacheKey = `export:${profile}:${spec}:${mode}:${typeOnly}`;
+    const cacheKey = `export:${profile}:${spec}:${mode}:${typeOnly}:${allowNodeOnly}`;
     if (this.visited.has(cacheKey)) return;
     this.visited.add(cacheKey);
-    const target = this.projectTarget(owner, match, "export", mode, typeOnly, profile, chain);
-    recordTarget(manifest.exports, key, mode, target);
+    const target = this.projectTarget(owner, match, "export", mode, typeOnly, profile, chain, allowNodeOnly);
+    recordTarget(manifest.exports, key, mode, match, target);
     const legacy = key === "." ? this.legacyTargets(owner, manifest, profile, chain) : [];
-    const names = target.runtime ? [target.types, target.runtime] : [target.types];
+    const names = [target.bundler.types, target.bundler.runtime?.file, target.node.types, target.node.runtime?.file]
+      .filter(name => name !== undefined);
     this.versionTargets(owner, manifest, [...names, ...legacy.map(entry => entry.path)], profile, chain);
   }
 
   private projectTarget(
     owner: string, match: PackageMatch, kind: "import" | "export", mode: ResolutionMode, typeOnly: boolean, profile: Profile, chain: string[],
+    allowNodeOnly = false,
   ): PackageTarget {
     const lookup = (file: string) => this.declarationTarget(owner, file, kind, mode);
-    const declared = selectTarget(match.value, match.capture, mode, lookup);
-    const types = declared ?? (kind === "import"
-      ? selectTarget(match.value, match.capture, mode, file => file.endsWith(".json") ? file : undefined) : undefined);
-    if (!types) throw new Error(`Package ${kind} has no active type target in ${mode} mode`);
-    let runtime: string | undefined;
-    if (!typeOnly) {
-      const selected = selectTarget(match.value, match.capture, mode);
-      if (!selected) throw new Error(`Package ${kind} has no active runtime target in ${mode} mode`);
-      this.packageTarget(owner, { path: selected, typeOnly: false }, profile, chain, kind);
-      runtime = selected;
-    }
-    this.packageTarget(owner, { path: types, typeOnly: true }, profile, chain, kind);
-    return { types, runtime };
+    const collect = (node: boolean): SelectedTargets => {
+      const runtime = !typeOnly ? selectTarget(match, mode, node) : undefined;
+      const types = selectTarget(match, mode, node, lookup) ?? (kind === "import"
+        ? selectTarget(match, mode, node, file => file.endsWith(".json") ? file : undefined) : undefined);
+      const environment = node ? "Node" : "Bundler";
+      const nodeOnly = !node && allowNodeOnly && !runtime;
+      if (!types && !nodeOnly) throw new Error(`Package ${kind} has no active type target in ${mode} mode (${environment})`);
+      if (!typeOnly && !runtime && !nodeOnly) throw new Error(`Package ${kind} has no active runtime target in ${mode} mode (${environment})`);
+      if (types) this.packageTarget(owner, { path: types.file, typeOnly: true }, profile, chain, kind);
+      if (runtime) this.packageTarget(owner, { path: runtime.file, typeOnly: false }, profile, chain, kind);
+      return { ...(types ? { types: types.file } : {}), ...(runtime ? { runtime } : {}) };
+    };
+    return { bundler: collect(false), node: collect(true) };
   }
 
   private declarationTarget(owner: string, target: string, kind: "import" | "export", mode: ResolutionMode): string | undefined {
@@ -318,19 +355,24 @@ export class CommunityGraph {
   }
 
   private local(file: string, typeOnly: boolean, profile: Profile, chain: string[]): void {
+    const ext = posix.extname(file);
+    const declaration = declarationCompanion(file);
+    if (ext !== ".json" && declaration && this.snapshot.entries.has(declaration)) {
+      this.walk(declaration, profile, chain);
+      return;
+    }
     const exact = this.snapshot.entries.get(file);
     const found = new Set<string>();
+    if (!isDeclaration(file) && ext !== ".json") {
+      const extensionCandidates = substitutes[ext]?.map(replacement => file.slice(0, -ext.length) + replacement)
+        ?? extensionlessSources.map(replacement => file + replacement);
+      for (const candidate of extensionCandidates) if (this.snapshot.entries.has(candidate)) found.add(candidate);
+    }
     if (exact && exact.type !== "tree") found.add(file);
     else {
       // Node may select opaque assets ahead of an index or a TypeScript substitution.
       const fallback = [".js", ...opaqueExtensions].find(ext => this.snapshot.entries.has(file + ext));
       if (fallback) found.add(file + fallback);
-    }
-    const ext = posix.extname(file);
-    if (!isDeclaration(file) && ext !== ".json") {
-      const extensionCandidates = substitutes[ext]?.map(replacement => file.slice(0, -ext.length) + replacement)
-        ?? extensionlessSources.map(replacement => file + replacement);
-      for (const candidate of extensionCandidates) if (this.snapshot.entries.has(candidate)) found.add(candidate);
     }
     if (exact?.type === "tree") {
       if (this.snapshot.entries.has(`${file}/package.json`)) {

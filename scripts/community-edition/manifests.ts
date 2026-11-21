@@ -1,5 +1,5 @@
 import { posix } from "node:path";
-import type { CommunityGraph } from "./graph.ts";
+import { publicMappings, type CommunityGraph } from "./graph.ts";
 import { isRecord, packageRoots } from "./snapshot.ts";
 
 type Json = Record<string, unknown>;
@@ -109,8 +109,8 @@ export function createPublicManifests(graph: CommunityGraph): { manifests: Map<s
       manifest.type = source.type;
     }
     Object.assign(manifest, legacy);
-    if (exports.size) manifest.exports = Object.fromEntries(exports);
-    if (imports.size) manifest.imports = Object.fromEntries(imports);
+    if (exports.size) manifest.exports = publicMappings(exports);
+    if (imports.size) manifest.imports = publicMappings(imports);
     if (versions.size) manifest.typesVersions = Object.fromEntries([...versions].map(([key, values]) => [key, Object.fromEntries(values)]));
 
     const expectedName = `@aistudy/${posix.basename(directory)}`;
