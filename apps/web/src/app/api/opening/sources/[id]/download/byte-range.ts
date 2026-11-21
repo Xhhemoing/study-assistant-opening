@@ -19,6 +19,7 @@ export function parseByteRange(header: string | null, length: number): ByteRange
   return { start: Number(start), end: end === null || end >= total ? length - 1 : Number(end) };
 }
 
+// Phase 1 slices the storage stream here. S3 GetObject Range pass-through is a separate follow-up.
 export function streamByteRange(body: ReadableStream<Uint8Array>, { start, end }: ByteRange): ReadableStream<Uint8Array> {
   const reader = body.getReader();
   const endExclusive = end + 1;

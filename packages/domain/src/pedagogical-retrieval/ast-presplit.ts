@@ -193,25 +193,27 @@ function parseTimestampToMs(raw: string): number | null {
   return ((hours * 60 + minutes) * 60 + seconds) * 1000 + millis;
 }
 
-function parseInlineTranscriptCue(line: string): { startMs: number; endMs: number } | null {
-  const msMatch = /^[ \t]*\[startMs=(\d+),\s*endMs=(\d+)\]/.exec(line);
+type InlineCueTiming = { startMs: number; endMs: number; prefixLength: number };
+
+function parseInlineTranscriptCue(line: string): InlineCueTiming | null {
+  const msMatch = /^[ \t]*\[startMs=(\d+),\s*endMs=(\d+)\][ \t]?/.exec(line);
   if (msMatch) {
     const startMs = Number(msMatch[1]);
     const endMs = Number(msMatch[2]);
     if (Number.isSafeInteger(startMs) && Number.isSafeInteger(endMs) && startMs >= 0 && endMs >= startMs) {
-      return { startMs, endMs };
+      return { startMs, endMs, prefixLength: msMatch[0].length };
     }
     return null;
   }
   const clockMatch =
-    /^[ \t]*\[(\d{1,2}:\d{2}(?::\d{2})?(?:\.\d{1,3})?)\s*(?:-|–|—|->)\s*(\d{1,2}:\d{2}(?::\d{2})?(?:\.\d{1,3})?)\]/.exec(
+    /^[ \t]*\[(\d{1,2}:\d{2}(?::\d{2})?(?:\.\d{1,3})?)\s*(?:-|–|—|->)\s*(\d{1,2}:\d{2}(?::\d{2})?(?:\.\d{1,3})?)\][ \t]?/.exec(
       line,
     );
   if (!clockMatch) return null;
   const startMs = parseTimestampToMs(clockMatch[1]!);
   const endMs = parseTimestampToMs(clockMatch[2]!);
   if (startMs == null || endMs == null || endMs < startMs) return null;
-  return { startMs, endMs };
+  return { startMs, endMs, prefixLength: clockMatch[0].length };
 }
 
 function resolvePageRange(
@@ -422,6 +424,33 @@ function parseTableRowCells(
 const THEMATIC_BREAK_RE = /^[ ]{0,3}(?:(?:-[ \t]*){3,}|(?:\*[ \t]*){3,}|(?:_[ \t]*){3,})$/;
 const LIST_ITEM_RE = /^([ ]{0,3}(?:[-+*]|\d{1,9}[.)])(?:[ \t]+|$))(?:\[[ xX]\][ \t]+)?/;
 const SETEXT_UNDERLINE_RE = /^[ ]{0,3}(=+|-+)[ \t]*$/;
+const BLOCKQUOTE_PREFIX_RE = /^[ \t]*>[ \t]?/;
+const CALLOUT_HEADER_RE = /^\[!([a-zA-Z_-]+)\][+-]?(.*)$/;
+const CALLOUT_RE = /^[ \t]*>[ \t]*\[!([a-zA-Z_-]+)\][+-]?(.*)$/;
+
+function innermostQuoteBody(line: string): string | null {
+  let rest = line;
+  let quoted = false;
+  while (rest) {
+    const quote = BLOCKQUOTE_PREFIX_RE.exec(rest);
+    if (quote) {
+      quoted = true;
+      rest = rest.slice(quote[0].length);
+      continue;
+    }
+    const list = LIST_ITEM_RE.exec(rest);
+    if (!list) break;
+    rest = rest.slice(list[0].length);
+  }
+  return quoted ? rest : null;
+}
+
+function transcriptCueSeparator(previous: string, next: string): string {
+  const previousLine = previous.slice(previous.lastIndexOf("\n") + 1);
+  const nextLine = next.split(/\r?\n/, 1)[0]!;
+  const continuesQuote = innermostQuoteBody(previousLine) !== null && innermostQuoteBody(nextLine) !== null;
+  return continuesQuote || SETEXT_UNDERLINE_RE.test(nextLine) ? "\n" : "\n\n";
+}
 
 function nextMarkdownColumn(column: number, character: string): number {
   return character === "\t" ? column + (4 - column % 4) : column + 1;
@@ -452,10 +481,10 @@ function findMathBoundary(text: string, afterOpen: number, through = text.length
     const latex = /^[ \t]*\\begin\{([a-zA-Z][\w-]*\*?)\}/.exec(line);
     if (
       !line.trim() ||
-      /^[ \t]*(?:#{1,6}(?:[ \t]|$)|:{3,}|>|\x60{3,}|~{3,})/.test(line) ||
+      /^[ \t]*(?:#{1,6}(?:[ \t]|$)|:{3,}|\x60{3,}|~{3,})/.test(line) ||
+      CALLOUT_HEADER_RE.test(innermostQuoteBody(line)?.trimStart() ?? "") ||
       DETAILS_OPEN_RE.test(line.trimStart()) ||
       (latex && classifyLabel(latex[1], "public") !== null) ||
-      LIST_ITEM_RE.test(line) ||
       parseInlineTranscriptCue(line) !== null ||
       THEMATIC_BREAK_RE.test(line) ||
       (!/^[ \t]*(?:\$\$|\\\]|\\end\{)/.test(line) && SETEXT_UNDERLINE_RE.test(nextLine))
@@ -511,8 +540,7 @@ function findMathEnvironment(text: string, envName: string, afterOpen: number) {
   return { ...bounds, closed: bounds.closeStart < limit };
 }
 
-function startsSpecialBlock(lines: readonly SourceLine[], index: number): boolean {
-  const raw = lines[index]!.raw;
+function startsSpecialLine(raw: string, next?: string, interruptsParagraph = false): boolean {
   if (/^\s*$/.test(raw)) return true;
   if (/^[ \t]{0,3}(`{3,}|~{3,})/.test(raw)) return true;
   if (/^[ \t]{0,3}:{3,}[ \t]*[a-zA-Z]/.test(raw)) return true;
@@ -525,14 +553,52 @@ function startsSpecialBlock(lines: readonly SourceLine[], index: number): boolea
   if (/^[ \t]*\$\$/.test(raw) && !isEscaped(raw, raw.indexOf("$$"))) return true;
   if (/^[ \t]*\\\[/.test(raw)) return true;
   if (/^[ \t]*>/.test(raw)) return true;
-  if (/^[ \t]{0,3}#{1,6}[ \t]+/.test(raw)) return true;
+  if (/^[ \t]{0,3}#{1,6}(?:[ \t]+|$)/.test(raw)) return true;
   if (THEMATIC_BREAK_RE.test(raw)) return true;
-  if (LIST_ITEM_RE.test(raw)) return true;
-  if (raw.includes("|") && index + 1 < lines.length && isTableDelimiterRow(lines[index + 1]!.raw)) {
+  const list = LIST_ITEM_RE.exec(raw);
+  if (list && (!interruptsParagraph ||
+    (raw.slice(list[1]!.length).trim() && /^(?:[-+*]|1[.)])/.test(list[1]!.trimStart())))) return true;
+  if (next && raw.includes("|") && isTableDelimiterRow(next)) {
     return true;
   }
   if (parseInlineTranscriptCue(raw) !== null) return true;
   return false;
+}
+
+function startsSpecialBlock(lines: readonly SourceLine[], index: number): boolean {
+  return startsSpecialLine(lines[index]!.raw, lines[index + 1]?.raw);
+}
+
+function findBlockquoteEnd(
+  lines: readonly SourceLine[],
+  start: number,
+  interruptsQuote: (line: string) => boolean,
+): number {
+  let paragraphOpen = false;
+  let openFence: string | undefined;
+  for (let index = start; index < lines.length; index++) {
+    const raw = lines[index]!.raw;
+    if (BLOCKQUOTE_PREFIX_RE.test(raw)) {
+      if (!openFence && index > start && interruptsQuote(raw)) return index;
+      const body = innermostQuoteBody(raw)!.trimStart();
+      const fence = /^(\x60{3,}|~{3,}|\$\$(?=[ \t]*$))(.*)$/.exec(body);
+      if (openFence) {
+        if (fence && fence[1]![0] === openFence[0] && fence[1]!.length >= openFence.length && !fence[2]!.trim()) {
+          openFence = undefined;
+        }
+        continue;
+      }
+      if (fence) openFence = fence[1];
+      paragraphOpen = !startsSpecialLine(body);
+    } else if (
+      !paragraphOpen ||
+      startsSpecialLine(raw, lines[index + 1]?.raw, true) ||
+      /^[ \t]*:{3,}[ \t]*$/.test(raw)
+    ) {
+      return index;
+    }
+  }
+  return lines.length;
 }
 
 function findSetextUnderline(lines: readonly SourceLine[], firstLine: number) {
@@ -690,7 +756,7 @@ function parsePrefixedInnerBlocks(
   outerVisibility: PedagogicalVisibility,
   propagateSectionVisibility: boolean,
   innerSealProofs: boolean,
-  prefixLength = (line: SourceLine, _index: number) => /^[ \t]*>[ \t]?/.exec(line.raw)?.[0].length ?? 0,
+  prefixLength = (line: SourceLine, _index: number) => BLOCKQUOTE_PREFIX_RE.exec(line.raw)?.[0].length ?? 0,
 ): MappedInnerBlock[] {
   const bodyParts: string[] = [];
   const charOrigStart: number[] = [];
@@ -754,6 +820,161 @@ function parsePrefixedInnerBlocks(
   });
 }
 
+type ReadAstRange = (
+  start: number,
+  end: number,
+  visit: (block: PedagogicalAstBlock, start: number, end: number) => void,
+) => void;
+
+function readAstRanges(blocks: readonly PedagogicalAstBlock[]): ReadAstRange {
+  let index = 0;
+  return (start, end, visit) => {
+    while (index < blocks.length && blocks[index]!.endOffset <= start) index++;
+    while (index < blocks.length && blocks[index]!.startOffset < end) {
+      const block = blocks[index]!;
+      visit(block, Math.max(start, block.startOffset), Math.min(end, block.endOffset));
+      if (block.endOffset > end) break;
+      index++;
+    }
+  };
+}
+
+interface CueSpan {
+  start: number;
+  end: number;
+  visibility: PedagogicalVisibility;
+  construct?: PedagogicalAstBlock;
+}
+
+function splitCueVisibility(
+  text: string,
+  start: number,
+  end: number,
+  floor: PedagogicalVisibility,
+  readRange: ReadAstRange,
+  keepProtectedKinds = false,
+): CueSpan[] {
+  const spans: CueSpan[] = [];
+  let cursor = start;
+  const addSpan = (spanEnd: number, visibility: PedagogicalVisibility, construct?: PedagogicalAstBlock) => {
+    if (spanEnd <= cursor) return;
+    const previous = spans.at(-1);
+    if (previous?.visibility === visibility && previous.construct === construct) previous.end = spanEnd;
+    else spans.push({ start: cursor, end: spanEnd, visibility, construct });
+    cursor = spanEnd;
+  };
+  const addGap = (gapEnd: number, nearbyVisibility: PedagogicalVisibility, construct?: PedagogicalAstBlock) => {
+    if (gapEnd <= cursor) return;
+    // Whitespace can follow a neighboring span. Unclassified content stays sealed.
+    if (/\S/u.test(text.slice(cursor, gapEnd))) addSpan(gapEnd, "sealed");
+    else addSpan(gapEnd, nearbyVisibility, construct);
+  };
+  readRange(start, end, (block, blockStart, blockEnd) => {
+    const visibility = maxVisibility(floor, block.visibility);
+    const construct = keepProtectedKinds && visibility !== "public" && block.kind !== "prose" && block.kind !== "heading"
+      ? block
+      : undefined;
+    const previous = spans.at(-1);
+    addGap(blockStart, previous?.visibility ?? visibility, previous ? previous.construct : construct);
+    addSpan(blockEnd, visibility, construct);
+  });
+  const last = spans.at(-1);
+  addGap(end, last?.visibility ?? floor, last?.construct);
+  return spans;
+}
+
+interface AstParseOptions {
+  readonly pageSpans?: readonly PageSpan[];
+  readonly defaultVisibility?: PedagogicalVisibility;
+  readonly propagateSectionVisibility?: boolean;
+}
+
+interface TranscriptRegion {
+  readonly start: number;
+  end: number;
+  readonly sourceStart: number;
+  readonly cue?: { readonly timing: InlineCueTiming; readonly lineStart: number };
+}
+
+function parseInlineCuedDocument(
+  source: string,
+  lines: readonly SourceLine[],
+  timings: readonly (InlineCueTiming | null)[],
+  options: AstParseOptions,
+  sealProofs: boolean,
+): PedagogicalAstBlock[] {
+  const parts: string[] = [];
+  const regions: TranscriptRegion[] = [];
+  let offset = 0;
+  for (const [index, line] of lines.entries()) {
+    const timing = timings[index];
+    if (timing) {
+      const body = line.raw.slice(timing.prefixLength);
+      const next = timings[index + 1];
+      const separator = next
+        ? transcriptCueSeparator(body, lines[index + 1]!.raw.slice(next.prefixLength))
+        : source.slice(line.contentEnd, line.end);
+      regions.push({
+        start: offset, end: offset + body.length, sourceStart: line.start + timing.prefixLength,
+        cue: { timing, lineStart: line.start },
+      });
+      parts.push(body, separator);
+      offset += body.length + separator.length;
+    } else {
+      const previous = regions.at(-1);
+      const end = offset + line.end - line.start;
+      if (previous && !previous.cue) previous.end = end;
+      else regions.push({ start: offset, end, sourceStart: line.start });
+      parts.push(source.slice(line.start, line.end));
+      offset = end;
+    }
+  }
+
+  const markdown = parts.join("");
+  const readRange = readAstRanges(parsePedagogicalAstInternal(markdown, {
+    defaultVisibility: options.defaultVisibility,
+    propagateSectionVisibility: options.propagateSectionVisibility,
+  }, sealProofs));
+  const blocks: PedagogicalAstBlock[] = [];
+  for (const region of regions) {
+    const { start, end, sourceStart, cue } = region;
+    const sourceDelta = sourceStart - start;
+    if (!cue) {
+      readRange(start, end, (block, from, to) => {
+        const startOffset = from + sourceDelta;
+        const endOffset = to + sourceDelta;
+        blocks.push({
+          ...block, startOffset, endOffset, text: source.slice(startOffset, endOffset),
+          ...resolvePageRange(startOffset, endOffset, options.pageSpans),
+        });
+      });
+      continue;
+    }
+
+    const spans = start === end
+      ? [{ start, end, visibility: "sealed" } satisfies CueSpan]
+      : splitCueVisibility(markdown, start, end, options.defaultVisibility ?? "public", readRange, true);
+    for (const span of spans) {
+      const startOffset = span.start === start ? cue.lineStart : span.start + sourceDelta;
+      const endOffset = span.end + sourceDelta;
+      blocks.push({
+        kind: span.construct?.kind ?? "transcript_cue",
+        visibility: span.visibility,
+        atomicConstruct: true,
+        text: source.slice(startOffset, endOffset),
+        startOffset,
+        endOffset,
+        ...resolvePageRange(startOffset, endOffset, options.pageSpans),
+        startMs: cue.timing.startMs,
+        endMs: cue.timing.endMs,
+        keyframeChunkId: null,
+        ...(span.construct?.label ? { label: span.construct.label } : {}),
+      });
+    }
+  }
+  return blocks;
+}
+
 /**
  * Parse a pedagogical document into an AST of blocks where indivisible
  * constructs (display math, theorem/lemma/proof/definition/example/solution
@@ -762,28 +983,22 @@ function parsePrefixedInnerBlocks(
  */
 export function parsePedagogicalAst(
   text: string,
-  options: {
-    readonly pageSpans?: readonly PageSpan[];
-    readonly defaultVisibility?: PedagogicalVisibility;
-    readonly propagateSectionVisibility?: boolean;
-  } = {},
+  options: AstParseOptions = {},
 ): PedagogicalAstBlock[] {
   return parsePedagogicalAstInternal(text, options, false);
 }
 
 function parsePedagogicalAstInternal(
   text: string,
-  options: {
-    readonly pageSpans?: readonly PageSpan[];
-    readonly defaultVisibility?: PedagogicalVisibility;
-    readonly propagateSectionVisibility?: boolean;
-  },
+  options: AstParseOptions,
   sealProofs: boolean,
 ): PedagogicalAstBlock[] {
   if (!text) return [];
   const defaultVisibility = options.defaultVisibility ?? "public";
   const propagateSectionVisibility = options.propagateSectionVisibility ?? true;
   const lines = splitLinesWithOffsets(text);
+  const timings = lines.map(line => parseInlineTranscriptCue(line.raw));
+  if (timings.some(Boolean)) return parseInlineCuedDocument(text, lines, timings, options, sealProofs);
   const blocks: PedagogicalAstBlock[] = [];
   const headingStack: Array<{ readonly level: number; readonly visibility: PedagogicalVisibility }> = [];
   const getActiveSectionVisibility = (): PedagogicalVisibility =>
@@ -1570,26 +1785,15 @@ function parsePedagogicalAstInternal(
     }
 
     // 7. Markdown callout (> [!theorem], > [!proof], > [!solution], ...) and blockquotes
-    const calloutRe = /^[ \t]*>[ \t]*\[!([a-zA-Z_-]+)\][+-]?(.*)$/;
-    const calloutMatch = calloutRe.exec(raw);
+    const calloutMatch = CALLOUT_RE.exec(raw);
     if (calloutMatch) {
       const activeVis = getActiveSectionVisibility();
       const classified = classifyLabel(calloutMatch[1], activeVis, sealProofs);
       if (classified) {
-        let j = i + 1;
-        while (j < lines.length && /^[ \t]*>/.test(lines[j]!.raw)) {
-          const nextCallout = calloutRe.exec(lines[j]!.raw);
-          if (nextCallout) {
-            const nextClassified = classifyLabel(nextCallout[1], activeVis, sealProofs);
-            if (
-              nextClassified &&
-              VISIBILITY_RANK[nextClassified.visibility] > VISIBILITY_RANK[classified.visibility]
-            ) {
-              break;
-            }
-          }
-          j++;
-        }
+        const j = findBlockquoteEnd(lines, i, candidate => {
+          const next = classifyLabel(CALLOUT_RE.exec(candidate)?.[1], activeVis, sealProofs);
+          return next !== null && VISIBILITY_RANK[next.visibility] > VISIBILITY_RANK[classified.visibility];
+        });
         let endLineIdx = j - 1;
         while (endLineIdx > i && /^[ \t]*>[ \t]*$/.test(lines[endLineIdx]!.raw)) {
           endLineIdx--;
@@ -1639,16 +1843,11 @@ function parsePedagogicalAstInternal(
       }
     }
 
-    if (/^[ \t]*>/.test(raw)) {
+    if (BLOCKQUOTE_PREFIX_RE.test(raw)) {
       const activeVis = getActiveSectionVisibility();
-      let j = i + 1;
-      while (j < lines.length && /^[ \t]*>/.test(lines[j]!.raw)) {
-        const nextCallout = calloutRe.exec(lines[j]!.raw);
-        if (nextCallout && classifyLabel(nextCallout[1], activeVis, sealProofs) !== null) {
-          break;
-        }
-        j++;
-      }
+      const j = findBlockquoteEnd(lines, i, candidate =>
+        classifyLabel(CALLOUT_RE.exec(candidate)?.[1], activeVis, sealProofs) !== null,
+      );
       let endLineIdx = j - 1;
       while (endLineIdx > i && /^[ \t]*>[ \t]*$/.test(lines[endLineIdx]!.raw)) {
         endLineIdx--;
@@ -1873,75 +2072,6 @@ function parsePedagogicalAstInternal(
         pushTableFragment(cursor, tableEnd);
       }
       i = j;
-      continue;
-    }
-
-    // 9. Inline timestamped transcript cue line
-    const cueTiming = parseInlineTranscriptCue(raw);
-    if (cueTiming) {
-      const activeVis = getActiveSectionVisibility();
-      const cueInlineSpans = findInlineConstructSpans(
-        text,
-        line.start,
-        line.contentEnd,
-        activeVis,
-        sealProofs,
-      );
-      const extracted = extractProtectedBlocksFromSpans(cueInlineSpans, line.contentEnd, activeVis);
-      if (extracted.length === 0) {
-        pushBlock("transcript_cue", activeVis, true, line.start, line.contentEnd, {
-          startMs: cueTiming.startMs,
-          endMs: cueTiming.endMs,
-        });
-        i++;
-        continue;
-      }
-      extracted.sort((a, b) => a.startOffset - b.startOffset || a.endOffset - b.endOffset);
-      let cursor = line.start;
-      for (const block of extracted) {
-        if (block.startOffset > cursor) {
-          const pre = trimWhitespaceBounds(text, cursor, block.startOffset, false);
-          if (pre) {
-            pushBlock("transcript_cue", activeVis, true, pre.start, pre.end, {
-              startMs: cueTiming.startMs,
-              endMs: cueTiming.endMs,
-            });
-          }
-        }
-        pushBlock(block.kind, block.visibility, block.atomicConstruct, block.startOffset, block.endOffset, {
-          startMs: block.startMs ?? cueTiming.startMs,
-          endMs: block.endMs ?? cueTiming.endMs,
-          ...(block.label ? { label: block.label } : {}),
-        });
-        cursor = Math.max(cursor, block.endOffset);
-      }
-      if (cursor > line.contentEnd) {
-        const closeLineIdx = lineIndexContaining(lines, Math.max(line.start, cursor - 1), i);
-        const closeLine = lines[closeLineIdx]!;
-        const trailingOnCloseLine = text.slice(cursor, closeLine.contentEnd);
-        if (!/^[ \t]*$/.test(trailingOnCloseLine)) {
-          lines[closeLineIdx] = {
-            start: cursor,
-            contentEnd: closeLine.contentEnd,
-            end: closeLine.end,
-            raw: trailingOnCloseLine,
-          };
-          i = closeLineIdx;
-        } else {
-          i = closeLineIdx + 1;
-        }
-        continue;
-      }
-      if (cursor < line.contentEnd) {
-        const suf = trimWhitespaceBounds(text, cursor, line.contentEnd, false);
-        if (suf) {
-          pushBlock("transcript_cue", activeVis, true, suf.start, suf.end, {
-            startMs: cueTiming.startMs,
-            endMs: cueTiming.endMs,
-          });
-        }
-      }
-      i++;
       continue;
     }
 
@@ -2277,27 +2407,23 @@ export function chunkTranscriptCues(input: ChunkTranscriptCuesInput): Pedagogica
   const cueStarts: number[] = [];
   const textParts: string[] = [];
   let virtualOffset = 0;
-  let previousLine = "";
+  let previousCue = "";
   for (const cue of input.cues) {
     if (textParts.length) {
-      const firstLine = cue.text.split(/\r?\n/, 1)[0]!;
-      const previousQuote = /^[ \t]*>/.test(previousLine.slice(LIST_ITEM_RE.exec(previousLine)?.[0].length ?? 0));
-      const continuesQuote = previousQuote && /^[ \t]*>/.test(firstLine);
-      const separator = continuesQuote || SETEXT_UNDERLINE_RE.test(firstLine) ? "\n" : "\n\n";
+      const separator = transcriptCueSeparator(previousCue, cue.text);
       virtualOffset += separator.length;
       textParts.push(separator);
     }
     cueStarts.push(virtualOffset);
     textParts.push(cue.text);
     virtualOffset += cue.text.length;
-    previousLine = cue.text.slice(cue.text.lastIndexOf("\n") + 1);
+    previousCue = cue.text;
   }
   const text = textParts.join("");
-  const blocks = parsePedagogicalAst(text, { defaultVisibility });
+  const readRange = readAstRanges(parsePedagogicalAst(text, { defaultVisibility }));
   const chunks: PedagogicalChunk[] = [];
   let seq = 0;
   let originalOffset = 0;
-  let blockIndex = 0;
 
   for (const [cueIndex, cue] of input.cues.entries()) {
     if (
@@ -2315,31 +2441,7 @@ export function chunkTranscriptCues(input: ChunkTranscriptCuesInput): Pedagogica
     if (!cue.text) continue;
 
     const visibilityFloor = maxVisibility(defaultVisibility, cue.visibility ?? defaultVisibility);
-    const spans: Array<{ start: number; end: number; visibility: PedagogicalVisibility }> = [];
-    let cursor = start;
-    const addSpan = (spanEnd: number, visibility: PedagogicalVisibility) => {
-      if (spanEnd <= cursor) return;
-      const last = spans.at(-1);
-      if (last?.visibility === visibility) last.end = spanEnd;
-      else spans.push({ start: cursor, end: spanEnd, visibility });
-      cursor = spanEnd;
-    };
-    const addGap = (gapEnd: number, nearbyVisibility: PedagogicalVisibility) => {
-      if (gapEnd <= cursor) return;
-      // Whitespace can follow its neighboring span. Unclassified content stays sealed.
-      addSpan(gapEnd, /\S/u.test(text.slice(cursor, gapEnd)) ? "sealed" : nearbyVisibility);
-    };
-
-    while (blockIndex < blocks.length && blocks[blockIndex]!.endOffset <= start) blockIndex++;
-    while (blockIndex < blocks.length && blocks[blockIndex]!.startOffset < end) {
-      const block = blocks[blockIndex]!;
-      const visibility = maxVisibility(visibilityFloor, block.visibility);
-      addGap(block.startOffset, spans.at(-1)?.visibility ?? visibility);
-      addSpan(Math.min(end, block.endOffset), visibility);
-      if (block.endOffset > end) break;
-      blockIndex++;
-    }
-    addGap(end, spans.at(-1)?.visibility ?? visibilityFloor);
+    const spans = splitCueVisibility(text, start, end, visibilityFloor, readRange);
 
     for (const span of spans) {
       const spanText = text.slice(span.start, span.end);

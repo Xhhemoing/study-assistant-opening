@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   buildDualCitationBundle,
   chunkPedagogicalDocument,
@@ -354,10 +354,105 @@ describe("AST pre-split structure-preserving pedagogical chunker", () => {
     ["- :::solution", "  PRIVATE_LIST\n  :::", "sealed"],
     ["- <details><summary>Answer</summary>", "  PRIVATE_LIST\n  </details>", "sealed"],
   ] as const)("protects nested list and quote content after %s", (opener, body, visibility) => {
-    const text = [opener, body, "Public afterward"].join("\n");
+    const text = [opener, body, opener.startsWith("> >") ? "\nPublic afterward" : "Public afterward"].join("\n");
     const chunks = chunkPedagogicalDocument({ sourceId: "doc", sourceVersion: 1, text });
     expect(chunks.filter(chunk => chunk.text.includes("PRIVATE_LIST")).map(chunk => chunk.visibility)).toEqual([visibility]);
     expect(chunks.find(chunk => chunk.text.includes("Public afterward"))?.visibility).toBe("public");
+  });
+
+  it.each([
+    { bodies: ["$$", "## Answer Key", "VALUE", "$$y = 2$$", "## Lecture", "Public afterward"], index: 2, visibility: "sealed" },
+    { bodies: ["参考答案", "---", "VALUE", "## Lecture", "Public afterward"], index: 2, visibility: "sealed" },
+    { bodies: ["> [!hint]", "> VALUE", "Public afterward"], index: 1, visibility: "hint_gated" },
+    { bodies: [":::solution", "VALUE", ":::", "Public afterward"], index: 1, visibility: "sealed" },
+    { bodies: ["<details>", "VALUE</details>", "Public afterward"], index: 1, visibility: "sealed" },
+    { bodies: ["- - > [!solution]", "    > VALUE", "Public afterward"], index: 1, visibility: "sealed" },
+  ])("parses timestamped cue bodies as Markdown and keeps each raw anchor (%j)", ({ bodies, index, visibility }) => {
+    const lines = bodies.map((body, i) => `[00:0${i}-00:0${i + 1}] ${body}`);
+    const text = ["Public introduction", "", ...lines, ""].join("\r\n");
+    const chunks = chunkPedagogicalDocument({ sourceId: "captions", sourceVersion: 1, text });
+    expect(chunks.find(chunk => chunk.text.includes("VALUE"))).toMatchObject({
+      visibility, startMs: index * 1000, endMs: (index + 1) * 1000,
+      startOffset: text.indexOf(lines[index]!), text: lines[index],
+    });
+    expect(chunks.find(chunk => chunk.text.includes("Public introduction"))).toMatchObject({ visibility: "public", startMs: null });
+    expect(chunks.find(chunk => chunk.text.includes("Public afterward"))?.visibility).toBe("public");
+    for (const chunk of chunks) {
+      expect(text.slice(chunk.startOffset, chunk.endOffset)).toBe(chunk.text);
+      if (chunk.startMs !== null) {
+        const line = lines[chunk.startMs / 1000]!;
+        expect(chunk.endOffset).toBeLessThanOrEqual(text.indexOf(line) + line.length);
+      }
+    }
+  });
+
+  it.each(["- - > [!solution]", "1. * > [!solution]", "> - - > [!solution]"])(
+    "keeps a nested list callout active across structured cues after %s", opener => {
+      const continuation = opener.startsWith(">") ? ">     > Value is 42" : /^\d/.test(opener) ? "     > Value is 42" : "    > Value is 42";
+      const cues = [opener, continuation, "Public afterward"].map((text, i) => ({
+        text, startMs: i * 1000, endMs: (i + 1) * 1000, keyframeChunkId: `k${i}`,
+      }));
+      const chunks = chunkTranscriptCues({ sourceId: "media", sourceVersion: 1, cues });
+      expect(chunks.find(chunk => chunk.text.includes("Value is 42"))).toMatchObject({
+        visibility: "sealed", startMs: 1000, endMs: 2000, keyframeChunkId: "k1",
+      });
+      expect(chunks.find(chunk => chunk.text.includes("Public afterward"))).toMatchObject({
+        visibility: "public", startMs: 2000, endMs: 3000, keyframeChunkId: "k2",
+      });
+    },
+  );
+
+  it.each([["solution", "sealed"], ["hint", "hint_gated"]])(
+    "keeps lazy continuations inside a %s callout", (kind, visibility) => {
+      const text = `> [!${kind}]\n> The result is\nforty-two.\n2. The unit is seconds.\n\nPublic afterward`;
+      const blocks = parsePedagogicalAst(text);
+      expect(blocks.find(block => block.text.includes("forty-two."))?.visibility).toBe(visibility);
+      expect(blocks.find(block => block.text.includes("The unit is seconds."))?.visibility).toBe(visibility);
+      expect(blocks.at(-1)).toMatchObject({ visibility: "public", text: "Public afterward" });
+    },
+  );
+
+  it("keeps a nested lazy continuation sealed across dropped quote markers", () => {
+    const text = "> > [!solution]\n> > The result is\n> forty-two.\nThe unit is seconds.\n\nPublic afterward";
+    const blocks = parsePedagogicalAst(text);
+    expect(blocks.find(block => block.text.includes("forty-two."))?.visibility).toBe("sealed");
+    expect(blocks.find(block => block.text.includes("The unit is seconds."))?.visibility).toBe("sealed");
+    expect(blocks.at(-1)).toMatchObject({ visibility: "public", text: "Public afterward" });
+  });
+
+  it("shares heading state between timed and untimed lines and maps raw page spans", () => {
+    const text = [
+      "## Answer Key", "[startMs=100,endMs=200] Timed secret",
+      "[startMs=200,endMs=300] ## Lecture", "Public afterward",
+    ].join("\n");
+    const pageSpans = [
+      { page: 1, startOffset: 0, endOffset: text.indexOf("[startMs=200") },
+      { page: 2, startOffset: text.indexOf("[startMs=200"), endOffset: text.length },
+    ];
+    const blocks = parsePedagogicalAst(text, { pageSpans });
+    expect(blocks.find(block => block.text.includes("Timed secret"))).toMatchObject({
+      visibility: "sealed", startMs: 100, endMs: 200, pageStart: 1, pageEnd: 1,
+    });
+    expect(blocks.at(-1)).toMatchObject({ visibility: "public", startMs: null, pageStart: 2, pageEnd: 2 });
+  });
+
+  it.each(["## Lecture", "---", "```text\ncode\n```", "~~~text\ncode\n~~~", ":::example\nexample\n:::"])(
+    "ends a lazy callout at the block boundary %s", boundary => {
+      const text = `> [!solution]\n> The result is\nThe answer is forty-two.\n${boundary}\nPublic afterward`;
+      const blocks = parsePedagogicalAst(text);
+      expect(blocks.find(block => block.text.includes("forty-two."))?.visibility).toBe("sealed");
+      expect(blocks.at(-1)).toMatchObject({ visibility: "public", text: "Public afterward" });
+    },
+  );
+
+  it.each([
+    ["$$", "+ b", "$$"], ["$$", "- b", "$$"], ["$$", "* b", "$$"], ["\\[", "- b", "\\]"],
+  ])("keeps arithmetic operators inside balanced display math (%j)", (open, operator, close) => {
+    const math = [open, "a", operator, close].join("\n");
+    expect(parsePedagogicalAst(`${math}\nPublic afterward`)).toMatchObject([
+      { kind: "display_math", visibility: "public", text: math },
+      { kind: "prose", visibility: "public", text: "Public afterward" },
+    ]);
   });
 
   it("tracks multi-line Setext titles, heading levels and thematic breaks", () => {
@@ -1422,6 +1517,45 @@ describe("rankPedagogicalEvidence security isolation, prerequisite recall, and f
       }
     },
   );
+
+  it.each([false, true])("keeps ordering work linear for 512 chunks and one result (ordering=%s)", orderFoundationsFirst => {
+    const chunks = Array.from({ length: 512 }, (_, i) => makeChunk({ id: `chunk-${i}` }));
+    const edges: PedagogicalGraphEdge[] = chunks.slice(1).map((chunk, i) => ({
+      from: chunks[i]!.id, to: chunk.id, kind: "prerequisite", privacyEpoch: 7,
+    }));
+    const add = Set.prototype.add;
+    let additions = 0;
+    const counted = vi.spyOn(Set.prototype, "add").mockImplementation(function (this: Set<unknown>, value) {
+      additions++;
+      return add.call(this, value);
+    });
+    let ranked;
+    try {
+      ranked = rankPedagogicalEvidence({
+        chunks, edges, seedScores: { "chunk-511": 1 },
+        authorization: { admissibleSourceIds: ["src-notes"], expectedPrivacyEpoch: 7 },
+        options: { maxResults: 1, orderFoundationsFirst },
+      }).ranked;
+    } finally {
+      counted.mockRestore();
+    }
+    expect(ranked.map(result => result.chunk.id)).toEqual(["chunk-511"]);
+    expect(additions).toBeLessThan(chunks.length * 20);
+  });
+
+  it("orders selected endpoints across an unselected prerequisite", () => {
+    const chunks = [makeChunk({ id: "first" }), makeChunk({ id: "middle" }), makeChunk({ id: "last" })];
+    const edges: PedagogicalGraphEdge[] = [
+      { from: "first", to: "middle", kind: "prerequisite", privacyEpoch: 7 },
+      { from: "middle", to: "last", kind: "prerequisite", privacyEpoch: 7 },
+    ];
+    const result = rankPedagogicalEvidence({
+      chunks, edges, seedScores: { last: 1, first: 0.5 },
+      authorization: { admissibleSourceIds: ["src-notes"], expectedPrivacyEpoch: 7 },
+      options: { maxResults: 2, seedWeight: 1, pprWeight: 0, prerequisiteWeight: 0 },
+    });
+    expect(result.ranked.map(item => item.chunk.id)).toEqual(["first", "last"]);
+  });
 
   it("preserves the acyclic constraints into and out of explicit prerequisite cycles", () => {
     const chunks = [

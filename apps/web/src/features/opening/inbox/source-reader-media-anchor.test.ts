@@ -117,6 +117,7 @@ describe("media anchor bounded playback controller", () => {
 
     controller.activate(media);
     expect(media.currentTime).toBe(10);
+    controller.handleSeeked(media);
 
     // Mid-segment manual pause & resume must keep the endMs stop boundary active.
     media.currentTime = 16;
@@ -251,6 +252,25 @@ describe("media anchor bounded playback controller", () => {
     controller.handlePlay(media);
     expect(controller.snapshot()).toMatchObject({ phase: "continued_past_end", userReleasedBound: true });
     expect(media.pauseMock).toHaveBeenCalledOnce();
+  });
+
+  it("ignores a queued play delivered while paused before replay seeked", () => {
+    const anchor = validateMediaAnchorRange({ startMs: 1_000, endMs: 1_010 })!;
+    const media = createFakeMedia(2);
+    const controller = createMediaAnchorPlaybackController(anchor);
+    controller.replay(media);
+    media.currentTime = 1.015;
+    controller.handleTimeUpdate(media);
+    expect(media.paused).toBe(true);
+    controller.handlePlay(media);
+    controller.handleSeeked(media);
+    expect(controller.snapshot()).toMatchObject({
+      phase: "paused_at_end", autoPausedAtEnd: true, userReleasedBound: false,
+    });
+    expect(media.pauseMock).toHaveBeenCalledOnce();
+    void media.play();
+    controller.handlePlay(media);
+    expect(controller.snapshot()).toMatchObject({ phase: "continued_past_end", userReleasedBound: true });
   });
 
   it("keeps rangeHighlightActive true while paused on jumped range and after auto-pause at endMs until manual play or seek elsewhere", () => {

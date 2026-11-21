@@ -238,12 +238,52 @@ function edgeDirectionPlan(
   }
 }
 
+// Traverse dependencies from selected results and project only reachable
+// selected endpoints, including paths through unselected chunks or concepts.
+function collectSelectedPrerequisitePairs(
+  selected: readonly RankedPedagogicalChunk[],
+  prerequisiteTargetsBySource: ReadonlyMap<string, ReadonlySet<string>>,
+  conceptsByChunkId: ReadonlyMap<string, ReadonlySet<string>>,
+): ReadonlySet<string> {
+  const selectedIdsByNode = new Map<string, string[]>();
+  for (const { chunk } of selected) {
+    selectedIdsByNode.set(chunk.id, [chunk.id]);
+    for (const conceptId of conceptsByChunkId.get(chunk.id) ?? []) {
+      const ids = selectedIdsByNode.get(conceptId);
+      if (ids) ids.push(chunk.id);
+      else selectedIdsByNode.set(conceptId, [chunk.id]);
+    }
+  }
+
+  const pairs = new Set<string>();
+  for (const { chunk: dependent } of selected) {
+    const stack: string[] = [];
+    const seen = new Set<string>();
+    const enqueuePrerequisites = (nodeId: string) => {
+      for (const id of prerequisiteTargetsBySource.get(nodeId) ?? []) {
+        if (seen.has(id)) continue;
+        seen.add(id);
+        stack.push(id);
+      }
+    };
+    enqueuePrerequisites(dependent.id);
+    for (const conceptId of conceptsByChunkId.get(dependent.id) ?? []) enqueuePrerequisites(conceptId);
+    while (stack.length > 0) {
+      const id = stack.pop()!;
+      for (const prerequisiteId of selectedIdsByNode.get(id) ?? []) {
+        if (prerequisiteId !== dependent.id) pairs.add(`${prerequisiteId}\0${dependent.id}`);
+      }
+      enqueuePrerequisites(id);
+    }
+  }
+  return pairs;
+}
+
 function orderFoundationsBeforeDependents(
   selected: readonly RankedPedagogicalChunk[],
   prereqBeforePairs: ReadonlySet<string>,
   conceptsByChunkId: ReadonlyMap<string, ReadonlySet<string>>,
 ): RankedPedagogicalChunk[] {
-  if (selected.length <= 1) return [...selected];
   const n = selected.length;
   const outgoing: number[][] = Array.from({ length: n }, () => []);
   const inDegree = new Int32Array(n);
@@ -683,40 +723,6 @@ export function rankPedagogicalEvidence(
     if (currentLevel.length === 0) break;
   }
 
-  // Expand transitive chunk-level `prereqBeforePairs` from direct chunk edges
-  // and concept-level prerequisite chains over the filtered subgraph.
-  const prereqBeforePairs = new Set<string>();
-  const transitivePrereqsOf = (startId: string): Set<string> => {
-    const visited = new Set<string>();
-    const queue = [startId];
-    while (queue.length > 0) {
-      const current = queue.shift()!;
-      for (const prereqId of prerequisiteTargetsBySource.get(current) ?? []) {
-        if (!visited.has(prereqId)) {
-          visited.add(prereqId);
-          queue.push(prereqId);
-        }
-      }
-    }
-    return visited;
-  };
-  for (const dependentId of prerequisiteTargetsBySource.keys()) {
-    const depChunks = survivingChunkIds.has(dependentId)
-      ? [dependentId]
-      : [...(chunksByConceptId.get(dependentId) ?? [])];
-    if (depChunks.length === 0) continue;
-    for (const prereqId of transitivePrereqsOf(dependentId)) {
-      const preChunks = survivingChunkIds.has(prereqId)
-        ? [prereqId]
-        : [...(chunksByConceptId.get(prereqId) ?? [])];
-      for (const pre of preChunks) {
-        for (const dep of depChunks) {
-          if (pre !== dep) prereqBeforePairs.add(`${pre}\0${dep}`);
-        }
-      }
-    }
-  }
-
   // 7. Score surviving chunks (normalize seed & PPR scales cleanly).
   let maxSeed = 0;
   let maxPpr = 0;
@@ -786,8 +792,12 @@ export function rankPedagogicalEvidence(
     selected.push(item);
   }
 
-  const finalRanked = orderFoundationsFirst
-    ? orderFoundationsBeforeDependents(selected, prereqBeforePairs, conceptsByChunkId)
+  const finalRanked = orderFoundationsFirst && selected.length > 1
+    ? orderFoundationsBeforeDependents(
+        selected,
+        collectSelectedPrerequisitePairs(selected, prerequisiteTargetsBySource, conceptsByChunkId),
+        conceptsByChunkId,
+      )
     : selected;
 
   return {

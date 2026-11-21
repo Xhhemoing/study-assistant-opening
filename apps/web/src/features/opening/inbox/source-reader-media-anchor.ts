@@ -185,7 +185,12 @@ export function createMediaAnchorPlaybackController(
       pauseAtEnd(media);
     },
     handlePlay(media) {
+      if (media.paused) return;
       if (autoPausedAtEnd) {
+        if (awaitingProgrammaticSeeked) {
+          media.pause();
+          return;
+        }
         userReleasedBound = true;
         autoPausedAtEnd = false;
         boundActive = false;
