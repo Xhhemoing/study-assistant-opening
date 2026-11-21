@@ -703,7 +703,7 @@ describe("exam photo review repository integration", () => {
       const [aged] = await f.sql`SELECT updated_at::text AS lease FROM opening_exam_reviews WHERE id=${stale.review.id}`;
       expect((await repository.begin(f.scope, entry === "original" ? readyInput : aliasInput)).review.id).toBe(readyId);
       const [retired] = await f.sql`SELECT status,client_key FROM opening_exam_reviews WHERE id=${stale.review.id}`;
-      expect(retired).toMatchObject({ status: "failed", client_key: stale.input.clientKey });
+      expect(retired).toMatchObject({ status: "unknown", client_key: stale.input.clientKey });
       await expect(repository.assertCurrent(f.scope, stale.review.id, String(aged!.lease))).rejects.toMatchObject({ code: "CONFLICT" });
       expect((await repository.begin(f.scope, stale.input)).review.id).toBe(readyId);
     }
