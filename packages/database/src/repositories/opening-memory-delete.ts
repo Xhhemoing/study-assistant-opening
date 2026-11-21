@@ -5,7 +5,7 @@ import { parseContextSourceRefs } from "./opening-context-provenance";
 import { OpeningMemoryError } from "./opening-memory-types";
 import { lockWorkspaceLearningHistory, nextWorkspaceLearningHistoryRevision } from "./opening-learning-facts";
 import { invalidateOpeningLearningEligibility } from "./opening-learning-eligibility";
-import { advanceOpeningWorkspacePrivacyEpoch } from "./opening-tutor-stream-fence";
+import { advanceOpeningWorkspacePrivacyEpoch, withOpeningTutorStreamFenceCommit } from "./opening-tutor-stream-fence";
 
 export type MemoryDeletionReceipt = {
   memoryId: string;
@@ -21,7 +21,7 @@ export function deleteOwnedMemory(
   scope: OpeningScope,
   input: { id: string; expectedVersion: number; deleteSourceText: boolean; clientKey: string },
 ): Promise<MemoryDeletionReceipt> {
-  return sql.begin(async (tx) => {
+  return withOpeningTutorStreamFenceCommit(sql, async (tx) => {
     await lockWorkspaceLearningHistory(tx, scope);
     const owners = await tx`
       SELECT id, privacy_epoch FROM workspaces

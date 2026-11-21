@@ -13,11 +13,13 @@ import type { Sql, TransactionSql } from "postgres";
 import { createOpeningCourseReadySourcesRepository } from "./opening-course-ready-sources";
 import { courseSourcePurposeAllows, helpInputSnapshotSchema, openingMaterialPurposePinSchema, type CourseSourcePurpose, type HelpInputSnapshot, type OpeningMaterialPurposePin } from "@aistudy/contracts";
 import { TERMINAL_TURN_STATUSES, terminalTurnStatusForJobError, systemQueryReceiptSchema, type Citation, type SystemQueryReceipt, type StudyContextAnchor, type ComposerPurpose, type StudyIntentEvent } from "@aistudy/contracts";
-import { contextSourceRefsIncluded, mergeContextSourceRefs } from "./opening-context-provenance";
+import { contextSourceRefsIncluded, mergeContextSourceRefs, turnContextSourceRefs } from "./opening-context-provenance";
 import type { OpeningScope } from "./opening-sources";
 import type { ContextSourceRef } from "./opening-context-provenance";
 import { loadTutorHistory, loadTutorHistoryContext, type TutorHistoryPurpose } from "./opening-tutor-history";
-import { fenceCancelledOpeningTutorStream, isUnconfirmedStreamSealError } from "./opening-tutor-stream-fence";
+import {
+  fenceCancelledOpeningTutorStream, isUnconfirmedStreamSealError, markFallbackStreamSealAttempted,
+} from "./opening-tutor-stream-fence";
 
 /** Terminal job error; nextAction "clarify" routes a refusal to the Clarify path (LAB-A01). */
 export type OpeningTutorJobError = { message: string; code?: string; nextAction?: "clarify" };
@@ -60,16 +62,19 @@ export type OpeningTutorJobsRepository = ReturnType<typeof createOpeningTutorJob
 type StreamPublicationContext = {
   privacyEpoch: number; contextSourceRefs: ContextSourceRef[]; claimToken?: string; executionId?: string;
   materialPurposePin?: OpeningMaterialPurposePin;
+  memoryLineageSourceIds?: readonly string[];
 };
 
 type StreamTurnBinding = {
   attempt_id?: unknown;
   context_anchor?: unknown;
   source_ids?: unknown;
+  source_versions?: unknown;
   course_id?: unknown;
 };
 
 const PUBLICATION_CLEANUP_DEADLINE_MS = 1_500;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 async function assertStreamMaterialAdmission(
   sql: Sql,
@@ -79,7 +84,11 @@ async function assertStreamMaterialAdmission(
   materialPurposePin: OpeningMaterialPurposePin | undefined,
   contextSourceRefs: readonly ContextSourceRef[] = [],
   verifiedAttemptRefs?: readonly ContextSourceRef[],
-  admissionOptions: { allowMissingPin?: boolean; skipPinRepoAssert?: boolean } = {},
+  admissionOptions: {
+    allowMissingPin?: boolean;
+    skipPinRepoAssert?: boolean;
+    memoryLineageSourceIds?: readonly string[];
+  } = {},
 ): Promise<void> {
   const anchor = turn.context_anchor as StudyContextAnchor | null | undefined;
   const courseId = (typeof turn.course_id === "string" ? turn.course_id : null)
@@ -88,6 +97,18 @@ async function assertStreamMaterialAdmission(
   const turnSourceIds = Array.isArray(turn.source_ids)
     ? [...new Set(turn.source_ids.filter((value): value is string => typeof value === "string"))]
     : [];
+  const memoryLineageSet = new Set<string>();
+  if (admissionOptions.memoryLineageSourceIds !== undefined) {
+    if (!Array.isArray(admissionOptions.memoryLineageSourceIds)) {
+      throw Object.assign(new Error("stream memory lineage invalid"), { code: "CONFLICT" });
+    }
+    for (const sourceId of admissionOptions.memoryLineageSourceIds) {
+      if (typeof sourceId !== "string" || !UUID_PATTERN.test(sourceId)) {
+        throw Object.assign(new Error("stream memory lineage invalid"), { code: "CONFLICT" });
+      }
+      memoryLineageSet.add(sourceId.toLowerCase());
+    }
+  }
   let pin: OpeningMaterialPurposePin | undefined;
   if (materialPurposePin === undefined) {
     if (turnSourceIds.length && !admissionOptions.allowMissingPin) {
@@ -126,6 +147,11 @@ async function assertStreamMaterialAdmission(
   const attemptRefSet = new Set((verifiedAttemptRefs ?? []).map(ref => `${ref.sourceId.toLowerCase()}:${ref.sourceVersion}`));
   const verifiedAttemptSourceIds = new Set((verifiedAttemptRefs ?? []).map(ref => ref.sourceId.toLowerCase()));
   const pinnedSourceIds = new Set((pin?.sources ?? []).map(source => source.sourceId.toLowerCase()));
+  const explicitSourceIds = new Set([
+    ...pinnedSourceIds,
+    ...turnSourceIds.map(sourceId => sourceId.toLowerCase()),
+    ...(typeof anchor?.sourceId === "string" ? [anchor.sourceId.toLowerCase()] : []),
+  ]);
   const derivedSourceIds = [...new Set([
     ...contextSourceRefs
       .filter(ref => !attemptRefSet.has(`${ref.sourceId.toLowerCase()}:${ref.sourceVersion}`))
@@ -134,10 +160,15 @@ async function assertStreamMaterialAdmission(
       ? [anchor.sourceId.toLowerCase()]
       : []),
   ].filter(sourceId => !pinnedSourceIds.has(sourceId)))].sort();
+  const memoryOnlySourceIds = derivedSourceIds.filter(
+    sourceId => memoryLineageSet.has(sourceId) && !explicitSourceIds.has(sourceId),
+  );
+  const memoryOnlySet = new Set(memoryOnlySourceIds);
+  const courseDerivedSourceIds = derivedSourceIds.filter(sourceId => !memoryOnlySet.has(sourceId));
   if (derivedSourceIds.length) {
-    // Lock courses -> all opening_sources (pinned + derived) in deterministic ID order
+    // Lock courses -> all opening_sources (pinned + derived + memory lineage) in deterministic ID order
     // BEFORE any course_asset_memberships lock so addAssetMembership(FOR UPDATE on opening_sources)
-    // can never deadlock or race standalone classification.
+    // can never deadlock or race standalone/mock_exam classification.
     if (courseId !== null) {
       const course = await tx`SELECT id FROM courses WHERE id=${courseId} AND workspace_id=${scope.workspaceId}
         AND archived_at IS NULL FOR SHARE`;
@@ -154,10 +185,53 @@ async function assertStreamMaterialAdmission(
   if (pin && !admissionOptions.skipPinRepoAssert && (pin.courseId !== null || pin.sources.length > 0)) {
     await createOpeningCourseReadySourcesRepository(sql).assertMaterialPurposePin(scope, pin, tx);
   }
-  if (!derivedSourceIds.length) return;
+  if (memoryOnlySourceIds.length) {
+    // Workspace-wide global memory lineage does not require active-course membership,
+    // but must still be genuinely backed by an active global memory and never mock_exam.
+    const backed = await tx`
+      SELECT DISTINCT lower(sid.id::text) AS source_id
+      FROM unnest(${memoryOnlySourceIds}::uuid[]) AS sid(id)
+      WHERE EXISTS (
+        SELECT 1
+        FROM opening_memories m
+        WHERE m.workspace_id = ${scope.workspaceId}
+          AND m.status = 'active'
+          AND m.course_id IS NULL
+          AND EXISTS (
+            SELECT 1
+            FROM jsonb_array_elements_text(m.source_turn_ids) AS ref(turn_id)
+            JOIN opening_turns t ON t.id::text = ref.turn_id AND t.workspace_id = ${scope.workspaceId}
+            JOIN opening_conversations c ON c.id = t.conversation_id
+              AND c.workspace_id = ${scope.workspaceId}
+              AND c.owner_user_id = ${scope.ownerUserId}
+            WHERE sid.id = ANY(t.source_ids)
+              OR EXISTS (
+                SELECT 1
+                FROM jsonb_array_elements(
+                  CASE WHEN jsonb_typeof(${turnContextSourceRefs(tx, "t")}) = 'array'
+                    THEN ${turnContextSourceRefs(tx, "t")}
+                    ELSE '[]'::jsonb
+                  END
+                ) AS turn_ref
+                WHERE lower(turn_ref->>'sourceId') = lower(sid.id::text)
+              )
+          )
+      )`;
+    if (backed.length !== memoryOnlySourceIds.length) {
+      throw Object.assign(new Error("source purpose no longer permits this use"), { code: "CONFLICT" });
+    }
+    const mockExam = await tx`SELECT id FROM course_asset_memberships
+      WHERE workspace_id=${scope.workspaceId} AND asset_type='source'
+        AND asset_id=ANY(${memoryOnlySourceIds}::uuid[]) AND purpose='mock_exam'
+      ORDER BY asset_id FOR SHARE`;
+    if (mockExam.length) {
+      throw Object.assign(new Error("source purpose no longer permits this use"), { code: "CONFLICT" });
+    }
+  }
+  if (!courseDerivedSourceIds.length) return;
   if (courseId === null) {
     const classified = await tx`SELECT id FROM course_asset_memberships WHERE workspace_id=${scope.workspaceId}
-      AND asset_type='source' AND asset_id=ANY(${derivedSourceIds}::uuid[]) AND purpose IS NOT NULL FOR SHARE`;
+      AND asset_type='source' AND asset_id=ANY(${courseDerivedSourceIds}::uuid[]) AND purpose IS NOT NULL FOR SHARE`;
     if (classified.length) {
       throw Object.assign(new Error("select a course to use classified materials"), { code: "CONFLICT" });
     }
@@ -165,22 +239,51 @@ async function assertStreamMaterialAdmission(
   }
   const memberships = await tx`SELECT asset_id,purpose FROM course_asset_memberships
     WHERE workspace_id=${scope.workspaceId} AND course_id=${courseId}
-      AND asset_type='source' AND asset_id=ANY(${derivedSourceIds}::uuid[]) ORDER BY asset_id FOR SHARE`;
+      AND asset_type='source' AND asset_id=ANY(${courseDerivedSourceIds}::uuid[]) ORDER BY asset_id FOR SHARE`;
   const bySource = new Map(memberships.map(row => [String(row.asset_id).toLowerCase(), row.purpose as CourseSourcePurpose | null]));
-  for (const sourceId of derivedSourceIds) {
+  for (const sourceId of courseDerivedSourceIds) {
     if (!bySource.has(sourceId) || !courseSourcePurposeAllows(bySource.get(sourceId) ?? null, materialUse)) {
       throw Object.assign(new Error("source purpose no longer permits this use"), { code: "CONFLICT" });
     }
   }
 }
 
-async function assertStreamSources(tx: TransactionSql, scope: OpeningScope, refs: ContextSourceRef[], verifiedAttemptRefs?: ContextSourceRef[]) {
+async function assertStreamSources(
+  tx: TransactionSql,
+  scope: OpeningScope,
+  refs: ContextSourceRef[],
+  verifiedAttemptRefs?: ContextSourceRef[],
+  turnSourceVersions?: Record<string, unknown> | null,
+) {
   // The attempt-context read already checks historical availability and privacy for these exact versions.
   const liveRefs = verifiedAttemptRefs?.length
     ? refs.filter(ref => !verifiedAttemptRefs.some(pinned => pinned.sourceId === ref.sourceId && pinned.sourceVersion === ref.sourceVersion))
     : refs;
-  const [available] = await tx`SELECT 1 WHERE ${contextSourceRefsIncluded(tx, scope.workspaceId, tx`${tx.json(liveRefs)}::jsonb`)}`;
-  if (!available) throw Object.assign(new Error("stream material unavailable or excluded"), { code: "CONFLICT" });
+  const snapshotVersionBySource = new Map<string, number>();
+  if (turnSourceVersions && typeof turnSourceVersions === "object") {
+    for (const [sourceId, version] of Object.entries(turnSourceVersions)) {
+      if (typeof version === "number" && Number.isSafeInteger(version) && version >= 0) {
+        snapshotVersionBySource.set(sourceId.toLowerCase(), version);
+      }
+    }
+  }
+  const snapshotRefs: ContextSourceRef[] = [];
+  const currentRefs: ContextSourceRef[] = [];
+  for (const ref of liveRefs) {
+    if (snapshotVersionBySource.get(ref.sourceId.toLowerCase()) === ref.sourceVersion) {
+      snapshotRefs.push(ref);
+    } else {
+      currentRefs.push(ref);
+    }
+  }
+  if (snapshotRefs.length) {
+    const [snapshotAvailable] = await tx`SELECT 1 WHERE ${contextSourceRefsIncluded(tx, scope.workspaceId, tx`${tx.json(snapshotRefs)}::jsonb`, true, true)}`;
+    if (!snapshotAvailable) throw Object.assign(new Error("stream material unavailable or excluded"), { code: "CONFLICT" });
+  }
+  if (currentRefs.length || !snapshotRefs.length) {
+    const [available] = await tx`SELECT 1 WHERE ${contextSourceRefsIncluded(tx, scope.workspaceId, tx`${tx.json(currentRefs)}::jsonb`)}`;
+    if (!available) throw Object.assign(new Error("stream material unavailable or excluded"), { code: "CONFLICT" });
+  }
 }
 
 type UserTurnIntentInput = { userTurnId: string; jobId: string; claimToken?: string };
@@ -693,7 +796,9 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
               { jobId: id, userTurnId: String(job.user_turn_id), claimToken: context.claimToken }, context.attemptContext);
           }
           await assertStreamMaterialAdmission(sql, tx, scope, job, context.materialPurposePin,
-            context.contextSourceRefs, context.attemptContext?.sourceRefs);
+            context.contextSourceRefs, context.attemptContext?.sourceRefs, {
+              memoryLineageSourceIds: context.memoryLineageSourceIds,
+            });
           if (context.contextSourceRefs.length) {
             await assertStreamSources(tx, scope, context.contextSourceRefs, context.attemptContext?.sourceRefs);
           }
@@ -722,25 +827,30 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
       } catch (error: unknown) {
         transactionClosed = true;
         if (publicationStarted) {
+          const sealRedisUrl = options.tutorStreamRedisUrl ?? process.env.REDIS_URL?.trim();
+          const shouldAttemptRedisSeal = Boolean(context.executionId && !hasUnconfirmedSealError && sealRedisUrl);
+          // Share a single <= 1,500 ms deadline across pending publish drain, PG execution fencing,
+          // and best-effort Redis fallback sealing so callers never double-wait on a Redis outage.
+          const cleanupTasks: Array<Promise<unknown>> = [];
+          if (publishPromise) cleanupTasks.push(Promise.allSettled([publishPromise]));
+          cleanupTasks.push(Promise.resolve().then(() => clearExecutionFence(sql)).catch(() => undefined));
+          if (shouldAttemptRedisSeal) {
+            markFallbackStreamSealAttempted(error);
+            cleanupTasks.push(
+              fenceCancelledOpeningTutorStream(
+                scope.workspaceId, id, context.executionId!, sealRedisUrl, PUBLICATION_CLEANUP_DEADLINE_MS,
+              ).catch(() => undefined),
+            );
+          }
           let cleanupTimer: ReturnType<typeof setTimeout> | undefined;
           try {
-            if (publishPromise) {
-              const deadline = new Promise<void>(resolve => {
-                cleanupTimer = setTimeout(resolve, PUBLICATION_CLEANUP_DEADLINE_MS);
-                cleanupTimer.unref?.();
-              });
-              await Promise.race([Promise.allSettled([publishPromise]), deadline]);
-            }
+            const deadline = new Promise<void>(resolve => {
+              cleanupTimer = setTimeout(resolve, PUBLICATION_CLEANUP_DEADLINE_MS);
+              cleanupTimer.unref?.();
+            });
+            await Promise.race([Promise.allSettled(cleanupTasks), deadline]);
           } finally {
             clearTimeout(cleanupTimer);
-          }
-          // Always fence timing_execution_id in PostgreSQL whenever sql.begin fails
-          // after publication started — even if publish() already resolved before COMMIT failed.
-          try { await clearExecutionFence(sql); } catch { /* Best effort; preserve original error. */ }
-          if (context.executionId && !hasUnconfirmedSealError) {
-            try {
-              await fenceCancelledOpeningTutorStream(scope.workspaceId, id, context.executionId, options.tutorStreamRedisUrl);
-            } catch { /* Best effort; PostgreSQL fence already blocks stale reads. */ }
           }
         }
         if (hasUnconfirmedSealError) throw unconfirmedSealError;
@@ -795,7 +905,9 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
           verifiedAttemptRefs = current.sourceRefs;
         }
         await assertStreamMaterialAdmission(sql, tx, scope, row, context.materialPurposePin,
-          context.contextSourceRefs, verifiedAttemptRefs);
+          context.contextSourceRefs, verifiedAttemptRefs, {
+            memoryLineageSourceIds: context.memoryLineageSourceIds,
+          });
         await assertStreamSources(tx, scope, context.contextSourceRefs, verifiedAttemptRefs);
         return job;
       };
@@ -883,7 +995,11 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
       expectedPrivacyEpoch?: number;
       claimToken?: string;
       enqueueMetadata?: boolean;
-    }, options?: { materialPurposePin?: OpeningMaterialPurposePin; attemptContext?: { target: TutorAttemptContextTarget; snapshot: TutorAttemptContext } }): Promise<void> {
+    }, options?: {
+      materialPurposePin?: OpeningMaterialPurposePin;
+      memoryLineageSourceIds?: readonly string[];
+      attemptContext?: { target: TutorAttemptContextTarget; snapshot: TutorAttemptContext };
+    }): Promise<void> {
       await sql.begin(async (tx) => {
         if (input.helpExposure || input.generatedExposure) {
           await lockWorkspaceLearningHistory(tx, input.scope);
@@ -931,7 +1047,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
           }
         }
         if (!receipt && (options?.materialPurposePin !== undefined || input.contextSourceRefs !== undefined)) {
-          const [boundTurn] = await tx`SELECT t.attempt_id,t.context_anchor,t.source_ids,c.course_id FROM opening_tutor_jobs j
+          const [boundTurn] = await tx`SELECT t.attempt_id,t.context_anchor,t.source_ids,t.source_versions,c.course_id FROM opening_tutor_jobs j
             JOIN opening_conversations c ON c.id=j.conversation_id AND c.workspace_id=j.workspace_id
             JOIN opening_turns t ON t.id=j.user_turn_id AND t.workspace_id=j.workspace_id AND t.conversation_id=j.conversation_id
             WHERE j.id=${input.jobId} AND j.workspace_id=${input.scope.workspaceId} AND c.owner_user_id=${input.scope.ownerUserId}
@@ -940,15 +1056,23 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
             await assertStreamMaterialAdmission(
               sql, tx, input.scope, boundTurn, options?.materialPurposePin,
               input.contextSourceRefs ?? [], options?.attemptContext?.snapshot.sourceRefs,
-              { allowMissingPin: options?.materialPurposePin === undefined, skipPinRepoAssert: options?.materialPurposePin !== undefined },
+              {
+                allowMissingPin: options?.materialPurposePin === undefined,
+                skipPinRepoAssert: options?.materialPurposePin !== undefined,
+                memoryLineageSourceIds: options?.memoryLineageSourceIds,
+              },
             );
             if (input.contextSourceRefs?.length) {
-              await assertStreamSources(tx, input.scope, input.contextSourceRefs, options?.attemptContext?.snapshot.sourceRefs);
+              await assertStreamSources(
+                tx, input.scope, input.contextSourceRefs,
+                options?.attemptContext?.snapshot.sourceRefs,
+                boundTurn.source_versions as Record<string, unknown> | null | undefined,
+              );
             }
           }
         }
         const claimed = await tx`
-          UPDATE opening_tutor_jobs SET status = 'succeeded', error = NULL, updated_at = now()
+          UPDATE opening_tutor_jobs SET status = 'succeeded', timing_execution_id = NULL, error = NULL, updated_at = now()
           WHERE id = ${input.jobId}
             AND workspace_id = ${input.scope.workspaceId}
             AND status = 'running'
@@ -1125,7 +1249,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
      */
     async completeFromReplay(scope: OpeningScope, jobId: string, assistantTurnId: string, claimToken?: string): Promise<boolean> {
       const rows = await sql`
-        UPDATE opening_tutor_jobs j SET status = 'succeeded', error = NULL, updated_at = now()
+        UPDATE opening_tutor_jobs j SET status = 'succeeded', timing_execution_id = NULL, error = NULL, updated_at = now()
         WHERE j.id = ${jobId} AND j.workspace_id = ${scope.workspaceId}
           AND j.assistant_turn_id = ${assistantTurnId}
           AND j.status = 'running'

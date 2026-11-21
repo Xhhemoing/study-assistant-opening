@@ -4,7 +4,7 @@ import type { SourceActionInput, SourceDeletion, SourceImpact } from "@aistudy/c
 import { OpeningSourceError, type OpeningScope } from "./opening-sources";
 import { lockWorkspaceLearningHistory, nextWorkspaceLearningHistoryRevision } from "./opening-learning-facts";
 import { invalidateOpeningLearningEligibility } from "./opening-learning-eligibility";
-import { advanceOpeningWorkspacePrivacyEpoch } from "./opening-tutor-stream-fence";
+import { advanceOpeningWorkspacePrivacyEpoch, withOpeningTutorStreamFenceCommit } from "./opening-tutor-stream-fence";
 
 type Keys = { stagingKey(id: string): string; finalKey(id: string, version: number): string };
 type Cleanup = { keys: string[]; notBefore: string | null };
@@ -42,7 +42,7 @@ export function createOpeningSourceActionsRepository(sql: Sql) {
     },
 
     async apply(scope: OpeningScope, id: string, input: Exclude<SourceActionInput, { action: "retry_cleanup" }>, keys: Keys, now: Date): Promise<{ deleted: boolean; cleanup: Cleanup }> {
-      return sql.begin(async tx => {
+      return withOpeningTutorStreamFenceCommit(sql, async tx => {
         await lockWorkspaceLearningHistory(tx, scope);
         await owner(tx, scope, true);
         const sourceRows = await tx`SELECT version, upload_url_expires_at FROM opening_sources

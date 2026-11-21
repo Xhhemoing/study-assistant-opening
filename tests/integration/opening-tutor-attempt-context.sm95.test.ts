@@ -179,6 +179,12 @@ describe("sm95 same-attempt explain context", () => {
         const newHead = submitted ? (await submitted.correct(submitted.original.id.toUpperCase())).headObservationId
           : (await f.submit(attempt)).id;
         rootId ??= newHead;
+        const headKey = submitted
+          ? tutorStreamAttemptHeadKey(scope.workspaceId, submitted.original.id)
+          : tutorStreamPreAnswerHeadKey(scope.workspaceId, attempt.id);
+        await vi.waitFor(async () => {
+          expect(await redis.get(headKey)).toBe(newHead);
+        });
         const latest = (await jobs.readAttemptContext(scope, target))!;
         expect(latest.headObservationId).toBe(newHead);
         const reply = stalled.nextReply();
@@ -191,11 +197,15 @@ describe("sm95 same-attempt explain context", () => {
         await checkpoint.promise;
         expect(events).toEqual([]);
         const currentFence = tutorAttemptFence(latest);
-        await writer.begin(scope.workspaceId, saved.jobId, { ...context, attemptFence: currentFence });
+        // The crashed executionId was sealed in Redis; a new execution with the updated attempt head succeeds.
+        const nextExecutionId = randomUUID();
+        await writer.begin(scope.workspaceId, saved.jobId, { ...context, executionId: nextExecutionId, attemptFence: currentFence });
         expect(await writer.append(scope.workspaceId, saved.jobId, "late bytes after new head began",
           target.executionId, snapshot.privacyEpoch, context.attemptFence)).toBe(0);
+        expect(await writer.append(scope.workspaceId, saved.jobId, "late bytes with stale head on new execution",
+          nextExecutionId, snapshot.privacyEpoch, context.attemptFence)).toBe(0);
         expect(await writer.append(scope.workspaceId, saved.jobId, "current head bytes",
-          target.executionId, snapshot.privacyEpoch, currentFence)).toBe(1);
+          nextExecutionId, snapshot.privacyEpoch, currentFence)).toBe(1);
         expect(await reader.read(scope.workspaceId, saved.jobId)).toMatchObject({ text: "current head bytes", sequence: 1 });
       } finally {
         stalled.release();
@@ -215,23 +225,43 @@ describe("sm95 same-attempt explain context", () => {
     }
   }, 15_000);
 
-  it("requires a confirmed Redis revision fence even after a claimed job reaches a terminal state", async () => {
+  it("commits learner revisions in PostgreSQL without blocking on Redis outages while still fencing stale streams", async () => {
     const f = await seed(), target = await f.claim();
-    const server = createServer(socket => socket.once("data", () => socket.end("-ERR head fence failed\r\n")));
+    const beforeSnapshot = (await f.jobs.readAttemptContext(fixture.scope, target))!;
+    const staleContext = {
+      privacyEpoch: beforeSnapshot.privacyEpoch, contextSourceRefs: beforeSnapshot.sourceRefs,
+      exposureReceiptId: null, claimToken: target.claimToken, executionId: target.executionId,
+      attemptFence: tutorAttemptFence(beforeSnapshot),
+    };
+    const sockets = new Set<import("node:net").Socket>();
+    const server = createServer(socket => {
+      sockets.add(socket);
+      socket.on("close", () => sockets.delete(socket));
+    });
     server.listen(0, "127.0.0.1");
     await once(server, "listening");
     try {
+      // Blackholed Redis: revision commits immediately in PG and PG rejects stale stream snapshots.
       vi.stubEnv("REDIS_URL", `redis://127.0.0.1:${(server.address() as AddressInfo).port}`);
-      await expect(f.correct()).rejects.toThrow("ERR head fence failed");
-      expect(await f.jobs.readAttemptContext(fixture.scope, target)).toMatchObject({ headObservationId: f.graded.id });
+      const startedAt = performance.now();
+      const revised = await f.correct();
+      expect(performance.now() - startedAt).toBeLessThan(1_000);
+      expect(await f.jobs.readAttemptContext(fixture.scope, target)).toMatchObject({ headObservationId: revised.headObservationId });
+      await expect(f.jobs.readStream(fixture.scope, f.saved.jobId, staleContext)).rejects.toThrow("stream attempt context changed");
+
+      // Completed/terminal Tutor job + missing REDIS_URL: subsequent revision succeeds cleanly.
       vi.stubEnv("REDIS_URL", undefined);
-      await expect(f.correct()).rejects.toThrow("Redis is required");
       await fixture.sql`UPDATE opening_tutor_jobs SET status='succeeded' WHERE id=${f.saved.jobId}`;
-      await expect(f.correct()).rejects.toThrow("Redis is required");
+      const revisedAgain = await reviseOpeningLearningObservation(fixture.sql, fixture.scope, {
+        rootObservationId: f.original.id, revisesObservationId: revised.headObservationId,
+        expectedHead: revised.headObservationId, revisionKind: "replace", reason: "修正步骤2",
+        clientKey: randomUUID(), replacement: { answer: "2x = 6, x = 3", outcome: "unverified", assistance: "independent" },
+      });
       expect(await fixture.sql`SELECT effective_head_id FROM opening_learning_observations WHERE id=${f.original.id}`)
-        .toMatchObject([{ effective_head_id: f.graded.id }]);
+        .toMatchObject([{ effective_head_id: revisedAgain.headObservationId }]);
     } finally {
       vi.unstubAllEnvs();
+      for (const socket of sockets) socket.destroy();
       await new Promise<void>(resolve => { server.close(() => resolve()); });
     }
   });
@@ -248,14 +278,21 @@ describe("sm95 same-attempt explain context", () => {
     }
   });
 
-  it("rolls back the first submission if Redis cannot fence a claimed pre-answer turn", async () => {
+  it("commits the first submission in PostgreSQL when Redis is unavailable while PG still fences stale pre-answer streams", async () => {
     const f = await learningAttemptFixture(fixture), attempt = await f.start();
-    const { jobs, claim } = await bindAttempt(f, attempt, "hint");
+    const { jobs, saved, claim } = await bindAttempt(f, attempt, "hint");
     const target = await claim();
+    const preAnswerSnapshot = (await jobs.readAttemptContext(fixture.scope, target))!;
+    const preAnswerContext = {
+      privacyEpoch: preAnswerSnapshot.privacyEpoch, contextSourceRefs: preAnswerSnapshot.sourceRefs,
+      exposureReceiptId: null, claimToken: target.claimToken, executionId: target.executionId,
+      attemptFence: tutorAttemptFence(preAnswerSnapshot),
+    };
     vi.stubEnv("REDIS_URL", undefined);
     try {
-      await expect(f.submit(attempt)).rejects.toThrow("Redis is required");
-      expect(await jobs.readAttemptContext(fixture.scope, target)).toMatchObject({ headObservationId: null });
+      const submitted = await f.submit(attempt);
+      expect(await jobs.readAttemptContext(fixture.scope, target)).toMatchObject({ headObservationId: submitted.id });
+      await expect(jobs.readStream(fixture.scope, saved.jobId, preAnswerContext)).rejects.toThrow("stream attempt context changed");
     } finally { vi.unstubAllEnvs(); }
   });
 

@@ -3,7 +3,10 @@ import { expect, it, vi } from "vitest";
 
 const fence = vi.hoisted(() => ({ call: vi.fn().mockResolvedValue(undefined) }));
 vi.mock("./opening-learning-facts", () => ({ lockWorkspaceLearningHistory: vi.fn().mockResolvedValue(undefined) }));
-vi.mock("./opening-tutor-stream-fence", () => ({ fenceCancelledOpeningTutorStream: fence.call }));
+vi.mock("./opening-tutor-stream-fence", async original => ({
+  ...await original<typeof import("./opening-tutor-stream-fence")>(),
+  fenceCancelledOpeningTutorStream: fence.call,
+}));
 
 import { createOpeningTutorJobsRepository } from "./opening-tutor-jobs";
 

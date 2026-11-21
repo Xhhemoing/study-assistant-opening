@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { OpeningProviderError, OpeningModelRoutingError, selectContext } from "@aistudy/ai";
-import { OpeningBudgetError, UnconfirmedStreamSealError, type OpeningTutorJobsRepository, type OpeningTutorTimingInput } from "@aistudy/database";
+import {
+  markFallbackStreamSealAttempted, OpeningBudgetError, UnconfirmedStreamSealError,
+  type OpeningTutorJobsRepository, type OpeningTutorTimingInput,
+} from "@aistudy/database";
 import type { ConversationPlanningContext, HelpInputSnapshot, SourceChunk, StudyIntentEvent, TutorMode } from "@aistudy/contracts";
 import { PrivacyEpochError } from "../runtime/privacy-guard";
 import { composerMessageText, studyIntentForMessage, DEFAULT_STRATEGY_TEMPLATE_ID, PAGE_CITATION_CLARIFY_MESSAGE, PageCitationClarifyError, TUTOR_FAILURE_MESSAGE } from "@aistudy/domain";
@@ -1681,5 +1684,86 @@ describe("tutor turn handler", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("skips duplicate fallback stream.seal when withStreamPublication already attempted bounded sealing", async () => {
+    const claimedWithExecution = {
+      ...claimedJob,
+      claimToken: "00000000-0000-4000-8000-0000000000ce",
+      executionId: "00000000-0000-4000-8000-0000000000f0",
+    };
+    const { deps, provider, tutorJobs } = setup({ claim: claimedWithExecution });
+    const pgDrop = Object.assign(new Error("connection dropped"), { code: "CONNECTION_CLOSED" });
+    markFallbackStreamSealAttempted(pgDrop);
+    const onStreamUnavailable = vi.fn();
+    tutorJobs.withStreamPublication
+      .mockImplementationOnce(async (_scope, _job, _context, publish) => publish())
+      .mockRejectedValueOnce(pgDrop);
+    const stream = {
+      begin: vi.fn(async () => {}),
+      seal: vi.fn(() => new Promise<void>(() => undefined)),
+      append: vi.fn(async () => 1),
+    };
+    provider.complete.mockImplementationOnce(async (_input, _signal, delta) => {
+      await delta("First");
+      return { text: "First", citedChunkIds: [], candidates: [], requestId: null, inputTokens: 10, outputTokens: 10 };
+    });
+    await expect(createTutorTurnHandler({ ...deps, stream, onStreamUnavailable })(claimedJob.id)).rejects.toBe(pgDrop);
+    expect(stream.seal).not.toHaveBeenCalled();
+    expect(onStreamUnavailable).not.toHaveBeenCalled();
+    expect(tutorJobs.fail).toHaveBeenCalledOnce();
+  });
+
+  it("separates global memory lineage sources from explicit course material across stream publication and completeTurn", async () => {
+    const memoryOnlySourceId = "00000000-0000-4000-8000-000000000099";
+    const { deps, tutorJobs } = setup();
+    const stream = {
+      begin: vi.fn(async () => {}),
+      seal: vi.fn(async () => {}),
+      append: vi.fn(async () => 1),
+    };
+    const memories = {
+      listContext: vi.fn(async () => ({
+        memories: [{
+          id: "00000000-0000-4000-8000-0000000000aa", workspaceId: claimedJob.workspaceId, courseId: null,
+          kind: "confirmed" as const, text: "Learner prefers visual steps", sourceTurnIds: [claimedJob.userTurnId],
+          version: 0, expiresAt: null, status: "active" as const, createdAt: claimedJob.createdAt, updatedAt: claimedJob.updatedAt,
+        }],
+        sourceRefs: [
+          { sourceId: chunkA.sourceId, sourceVersion: 0 },
+          { sourceId: memoryOnlySourceId, sourceVersion: 0 },
+        ],
+      })),
+    };
+
+    await expect(createTutorTurnHandler({ ...deps, stream, memories })(claimedJob.id)).resolves.toEqual({ skipped: false });
+    // Full union stays in contextSourceRefs for provenance/privacy revocation, while memoryLineageSourceIds
+    // carries ONLY non-explicit global memory lineage (excluding chunkA.sourceId which is explicitly selected).
+    expect(stream.begin).toHaveBeenCalledWith(
+      claimedJob.workspaceId,
+      claimedJob.id,
+      expect.objectContaining({
+        contextSourceRefs: expect.arrayContaining([
+          { sourceId: chunkA.sourceId, sourceVersion: 0 },
+          { sourceId: memoryOnlySourceId, sourceVersion: 0 },
+        ]),
+        memoryLineageSourceIds: [memoryOnlySourceId],
+      }),
+    );
+    expect(tutorJobs.withStreamPublication).toHaveBeenCalledWith(
+      expect.anything(),
+      claimedJob.id,
+      expect.objectContaining({ memoryLineageSourceIds: [memoryOnlySourceId] }),
+      expect.any(Function),
+    );
+    expect(tutorJobs.completeTurn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        contextSourceRefs: expect.arrayContaining([
+          { sourceId: chunkA.sourceId, sourceVersion: 0 },
+          { sourceId: memoryOnlySourceId, sourceVersion: 0 },
+        ]),
+      }),
+      expect.objectContaining({ memoryLineageSourceIds: [memoryOnlySourceId] }),
+    );
   });
 });

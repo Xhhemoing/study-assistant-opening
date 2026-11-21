@@ -1,12 +1,13 @@
 import { connect, isIP } from "node:net";
 import { connect as connectTls } from "node:tls";
 import { parse } from "node:url";
-import type { TransactionSql } from "postgres";
+import type { Sql, TransactionSql } from "postgres";
 import type { OpeningScope } from "./opening-sources";
 
 export const TUTOR_STREAM_TTL_SECONDS = 15 * 60;
 
 const unconfirmedStreamSealErrors = new WeakSet<object>();
+const attemptedFallbackStreamSealErrors = new WeakSet<object>();
 
 export class UnconfirmedStreamSealError extends Error {
   readonly code = "UNCONFIRMED_STREAM_SEAL" as const;
@@ -38,6 +39,79 @@ export function isUnconfirmedStreamSealError(error: unknown): boolean {
     return "code" in error && (error as { code?: unknown }).code === "UNCONFIRMED_STREAM_SEAL";
   }
   return false;
+}
+
+/** Mark that withStreamPublication already ran bounded fallback sealing so callers do not double-wait. */
+export function markFallbackStreamSealAttempted(error: unknown): void {
+  if (error !== null && (typeof error === "object" || typeof error === "function")) {
+    attemptedFallbackStreamSealErrors.add(error);
+  }
+}
+
+export function hasAttemptedFallbackStreamSeal(error: unknown): boolean {
+  return error !== null
+    && (typeof error === "object" || typeof error === "function")
+    && attemptedFallbackStreamSealErrors.has(error);
+}
+
+type PostCommitFence = () => void;
+const postCommitFences = new WeakMap<object, PostCommitFence[]>();
+
+function enqueuePostCommitFence(tx: TransactionSql, task: PostCommitFence): boolean {
+  const queue = postCommitFences.get(tx);
+  if (!queue) return false;
+  queue.push(task);
+  return true;
+}
+
+/**
+ * Run a PostgreSQL transaction and dispatch queued best-effort Redis stream fences
+ * ONLY after the outermost transaction commits (never before commit, never on rollback).
+ */
+export async function withOpeningTutorStreamFenceCommit<T>(
+  sql: Sql,
+  fn: (tx: TransactionSql) => Promise<T>,
+): Promise<T> {
+  const tasks: PostCommitFence[] = [];
+  let inheritedOuterQueue = false;
+  const result = await sql.begin(async (tx) => {
+    const existing = postCommitFences.get(tx);
+    if (existing) {
+      inheritedOuterQueue = true;
+      return fn(tx);
+    }
+    postCommitFences.set(tx, tasks);
+    try {
+      return await fn(tx);
+    } finally {
+      postCommitFences.delete(tx);
+    }
+  }) as T;
+  if (!inheritedOuterQueue) {
+    for (const task of tasks) {
+      try { task(); } catch { /* Best-effort post-commit Redis fence. */ }
+    }
+  }
+  return result;
+}
+
+/** Forward queued fences from a nested savepoint to its parent transaction only if the savepoint succeeds. */
+export async function runWithNestedTutorStreamFences<T>(
+  parentTx: TransactionSql,
+  nestedTx: TransactionSql,
+  fn: (tx: TransactionSql) => Promise<T>,
+): Promise<T> {
+  const parentQueue = postCommitFences.get(parentTx);
+  if (!parentQueue) return fn(nestedTx);
+  const nestedTasks: PostCommitFence[] = [];
+  postCommitFences.set(nestedTx, nestedTasks);
+  try {
+    const result = await fn(nestedTx);
+    parentQueue.push(...nestedTasks);
+    return result;
+  } finally {
+    postCommitFences.delete(nestedTx);
+  }
 }
 export const tutorStreamKey = (workspaceId: string, jobId: string) =>
   `opening:tutor-stream:${workspaceId.trim().toLowerCase()}:${jobId.trim().toLowerCase()}`;
@@ -183,7 +257,13 @@ function redisCommand(args: RedisArgument[]): Buffer {
 }
 
 /** One connection and one deadline for connect, optional AUTH/SELECT, and EVAL. */
-async function evalRevocationRedis(redisUrl: string, script: string, keyCount: number, ...args: RedisArgument[]): Promise<void> {
+async function evalRevocationRedis(
+  redisUrl: string,
+  script: string,
+  keyCount: number,
+  args: RedisArgument[],
+  timeoutMs = FENCE_TIMEOUT_MS,
+): Promise<void> {
   const { host, port, family, path, db, username, password, tls } = openingRedisEndpoint(redisUrl);
   const useTls = Boolean(tls);
   const commands: RedisArgument[][] = [];
@@ -204,7 +284,7 @@ async function evalRevocationRedis(redisUrl: string, script: string, keyCount: n
       if (error) reject(error);
       else resolve();
     };
-    const timeout = setTimeout(() => finish(new Error("Redis fence timed out")), FENCE_TIMEOUT_MS);
+    const timeout = setTimeout(() => finish(new Error("Redis fence timed out")), Math.max(1, timeoutMs));
     timeout.unref?.();
     socket.unref?.();
     const send = () => socket.write(redisCommand(commands[command]!));
@@ -233,9 +313,9 @@ async function evalRevocationRedis(redisUrl: string, script: string, keyCount: n
 }
 
 export async function fenceCancelledOpeningTutorStream(workspaceId: string, jobId: string, executionId: string,
-  redisUrl = process.env.REDIS_URL?.trim()) {
+  redisUrl = process.env.REDIS_URL?.trim(), timeoutMs = FENCE_TIMEOUT_MS) {
   if (!redisUrl) throw new Error("Redis is required to cancel a claimed tutor execution");
-  await sealOpeningTutorStream({ eval: (script, keyCount, ...args) => evalRevocationRedis(redisUrl, script, keyCount, ...args) },
+  await sealOpeningTutorStream({ eval: (script, keyCount, ...args) => evalRevocationRedis(redisUrl, script, keyCount, args, timeoutMs) },
     workspaceId, jobId, executionId);
 }
 
@@ -243,23 +323,29 @@ export async function fenceCancelledOpeningTutorStream(workspaceId: string, jobI
 export async function fenceOpeningTutorAttemptHead(tx: TransactionSql, workspaceId: string, attemptId: string,
   rootObservationId: string | null, headObservationId: string,
   redisUrl = process.env.REDIS_URL?.trim()): Promise<void> {
-  // A terminal claim can still have Redis bytes in flight. New publications
-  // must acquire the history lock and check the attempt again after commit.
+  // Only actively running executions can still publish attempt-bound stream deltas.
+  // Completed/terminal jobs never trigger Redis revocation, and PostgreSQL's
+  // attempt/observation head checks already fence readStream/withStreamPublication/completeTurn.
   const [execution] = await tx`SELECT 1 FROM opening_tutor_jobs j
     JOIN opening_turns t ON t.id=j.user_turn_id AND t.workspace_id=j.workspace_id AND t.conversation_id=j.conversation_id
-    WHERE j.workspace_id=${workspaceId} AND j.timing_execution_id IS NOT NULL
-      AND (t.attempt_id=${attemptId} OR (t.attempt_id IS NULL AND lower(t.context_anchor->>'attemptId')=${attemptId})) LIMIT 1`;
-  if (!execution) return;
-  if (!redisUrl) throw new Error("Redis is required to revoke tutor attempt stream publication");
+    WHERE j.workspace_id=${workspaceId}
+      AND j.status='running'
+      AND j.timing_execution_id IS NOT NULL
+      AND (t.attempt_id=${attemptId} OR (t.attempt_id IS NULL AND lower(t.context_anchor->>'attemptId')=${attemptId}))
+    LIMIT 1`;
+  if (!execution || !redisUrl) return;
   const key = rootObservationId === null ? tutorStreamPreAnswerHeadKey(workspaceId, attemptId)
     : tutorStreamAttemptHeadKey(workspaceId, rootObservationId);
-  // Outlive existing stream snapshots, while bounding the effect of a failed PG commit.
-  await evalRevocationRedis(redisUrl, `
-    redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])
-  `, 1, key, headObservationId, TUTOR_STREAM_TTL_SECONDS);
+  // Dispatch strictly after PostgreSQL commits (never before commit, never on rollback,
+  // and never blocking or failing learner answer submissions/revisions during a Redis outage).
+  enqueuePostCommitFence(tx, () => {
+    void evalRevocationRedis(redisUrl, `
+      redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])
+    `, 1, [key, headObservationId, TUTOR_STREAM_TTL_SECONDS]).catch(() => undefined);
+  });
 }
 
-/** Call inside the revocation transaction, before it can commit. */
+/** Call inside the revocation transaction (wrapped in withOpeningTutorStreamFenceCommit). */
 export async function advanceOpeningWorkspacePrivacyEpoch(tx: TransactionSql, scope: OpeningScope,
   redisUrl = process.env.REDIS_URL?.trim()): Promise<number> {
   const [workspace] = await tx`UPDATE workspaces SET privacy_epoch=privacy_epoch+1, updated_at=now()
@@ -289,23 +375,24 @@ export async function advanceOpeningWorkspacePrivacyEpoch(tx: TransactionSql, sc
 
   const streamKeys = priorExecutions.map(row => tutorStreamKey(workspaceId, String(row.id)));
   const executionIds = priorExecutions.map(row => String(row.timing_execution_id));
-  // Fire bounded, unref'd best-effort Redis epoch + stream seals without blocking or
-  // failing PostgreSQL privacy commits; PostgreSQL privacy_epoch + timing_execution_id=NULL
-  // already fences all subsequent readStream and withStreamPublication calls.
-  void evalRevocationRedis(redisUrl, `
-    local minimum = tonumber(redis.call('GET', KEYS[1]) or '0')
-    redis.call('SET', KEYS[1], math.max(minimum, tonumber(ARGV[1])), 'EX', ARGV[2])
-    for i = 2, #KEYS do
-      local execution = redis.call('HGET', KEYS[i], 'executionId')
-      local expected = ARGV[i + 1]
-      if execution == expected then
-        redis.call('HSET', KEYS[i], 'sealed', '1')
-      elseif not execution then
-        redis.call('HSET', KEYS[i], 'executionId', expected, 'sealed', '1')
-        redis.call('EXPIRE', KEYS[i], ARGV[2])
+  // Queue bounded, unref'd best-effort Redis epoch + stream seals strictly AFTER PostgreSQL commits:
+  // a rolled-back transaction must NEVER advance Redis privacy_epoch or seal active streams.
+  enqueuePostCommitFence(tx, () => {
+    void evalRevocationRedis(redisUrl, `
+      local minimum = tonumber(redis.call('GET', KEYS[1]) or '0')
+      redis.call('SET', KEYS[1], math.max(minimum, tonumber(ARGV[1])), 'EX', ARGV[2])
+      for i = 2, #KEYS do
+        local execution = redis.call('HGET', KEYS[i], 'executionId')
+        local expected = ARGV[i + 1]
+        if execution == expected then
+          redis.call('HSET', KEYS[i], 'sealed', '1')
+        elseif not execution then
+          redis.call('HSET', KEYS[i], 'executionId', expected, 'sealed', '1')
+          redis.call('EXPIRE', KEYS[i], ARGV[2])
+        end
       end
-    end
-  `, 1 + streamKeys.length, tutorStreamEpochKey(workspaceId), ...streamKeys, epoch, TUTOR_STREAM_TTL_SECONDS, ...executionIds)
-    .catch(() => undefined);
+    `, 1 + streamKeys.length, [tutorStreamEpochKey(workspaceId), ...streamKeys, epoch, TUTOR_STREAM_TTL_SECONDS, ...executionIds])
+      .catch(() => undefined);
+  });
   return epoch;
 }

@@ -38,7 +38,9 @@ import type {
   OpeningStudyExposureInput,
   OpeningTutorTimingInput,
 } from "@aistudy/database";
-import { mergeContextSourceRefs, OpeningBudgetError, tutorAttemptFence } from "@aistudy/database";
+import {
+  hasAttemptedFallbackStreamSeal, mergeContextSourceRefs, OpeningBudgetError, tutorAttemptFence,
+} from "@aistudy/database";
 import { randomUUID } from "node:crypto";
 import { assertCurrentEpoch } from "../runtime/privacy-guard";
 import {
@@ -338,6 +340,18 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
         : { memories: [], sourceRefs: [] };
       const learnerContext = await deps.learnerContext?.read(scope, { courseId: turn.courseId ?? turn.contextAnchor?.courseId,
         sourceIds: allowedSourceIds }) ?? null;
+      const explicitMaterialSourceIds = new Set(
+        [
+          ...allowedSourceIds,
+          ...context.map(({ sourceId }) => sourceId),
+          ...(turn.contextAnchor?.sourceId ? [turn.contextAnchor.sourceId] : []),
+        ].map(sourceId => sourceId.toLowerCase()),
+      );
+      const memoryLineageSourceIds = [...new Set(
+        memoryContext.sourceRefs
+          .map(({ sourceId }) => sourceId.toLowerCase())
+          .filter(sourceId => !explicitMaterialSourceIds.has(sourceId)),
+      )].sort();
       const contextSourceRefs = mergeContextSourceRefs(
         context.map(({ sourceId, sourceVersion }) => ({ sourceId, sourceVersion })),
         historySourceRefs, memoryContext.sourceRefs, learnerContext?.sourceRefs ?? [], attemptContext?.sourceRefs ?? [],
@@ -404,7 +418,8 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
         ? await deps.streamExposures!.generate(scope, streamExposure) : null;
       const streamContext = { privacyEpoch: jobEpoch ?? 0, contextSourceRefs, claimToken: claimed.claimToken,
         executionId: claimed.executionId,
-        ...(retrieved?.purposePin ? { materialPurposePin: retrieved.purposePin } : {}) };
+        ...(retrieved?.purposePin ? { materialPurposePin: retrieved.purposePin } : {}),
+        ...(memoryLineageSourceIds.length ? { memoryLineageSourceIds } : {}) };
       const publicationContext = { ...streamContext, attemptContext: attemptContext ?? undefined };
       const attemptFence = attemptContext && deps.stream ? tutorAttemptFence(attemptContext) : undefined;
       let streamAvailable = Boolean(deps.stream);
@@ -444,7 +459,12 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
             }
           });
         } catch (error) {
-          if (claimed.executionId && deps.stream?.seal && !isUnconfirmedStreamSealError(error)) {
+          if (
+            claimed.executionId
+            && deps.stream?.seal
+            && !isUnconfirmedStreamSealError(error)
+            && !hasAttemptedFallbackStreamSeal(error)
+          ) {
             let sealTimer: ReturnType<typeof setTimeout> | undefined;
             try {
               const sealAttempt = Promise.resolve().then(() => deps.stream!.seal!(scope.workspaceId, claimed.id, claimed.executionId!));
@@ -618,6 +638,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
         claimToken: claimed.claimToken,
         enqueueMetadata: Boolean(deps.stream),
       }, { materialPurposePin: retrieved?.purposePin,
+        ...(memoryLineageSourceIds.length ? { memoryLineageSourceIds } : {}),
         ...(attemptContext ? { attemptContext: { target: attemptTarget, snapshot: attemptContext } } : {}) });
       // The answer and optional metadata outbox entry are durable. Release this
       // tutor worker slot; suggestions run in their own bounded queue.

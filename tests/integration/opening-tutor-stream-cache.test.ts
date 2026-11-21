@@ -4,9 +4,10 @@ import { createServer, type AddressInfo } from "node:net";
 import { Redis } from "ioredis";
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import { advanceOpeningWorkspacePrivacyEpoch, createCourseMembershipRepository, createOpeningBudgetRepository,
-  createOpeningConversationRepository, createOpeningCourseReadySourcesRepository, createOpeningPrivacyRepository,
-  createOpeningSourceActionsRepository, createOpeningSourceChunksRepository, createOpeningTutorJobsRepository,
-  tutorStreamEpochKey, tutorStreamKey } from "@aistudy/database";
+  createOpeningConversationRepository, createOpeningCourseReadySourcesRepository, createOpeningMemoryRepository,
+  createOpeningPrivacyRepository, createOpeningSourceActionsRepository, createOpeningSourceChunksRepository,
+  createOpeningTutorJobsRepository, tutorStreamEpochKey, tutorStreamKey,
+  withOpeningTutorStreamFenceCommit } from "@aistudy/database";
 import { fenceCancelledOpeningTutorStream } from "../../packages/database/src/repositories/opening-tutor-stream-fence";
 import { createProducerRedisConnection } from "../../apps/worker/src/runtime/queue";
 import { createTutorTurnHandler, type TutorTurnDeps } from "../../apps/worker/src/jobs/tutor-turn";
@@ -151,7 +152,7 @@ it("revokes the same Redis privacy epoch for upper- and lowercase workspace UUID
     expect(await writer.append(scope.workspaceId, jobId, "before revocation", job.executionId, 0)).toBe(1);
     const before = await reader.read(scope.workspaceId, jobId);
     expect(before).toMatchObject({ text: "before revocation", sequence: 1, executionId: job.executionId });
-    await expect(sql.begin(tx => advanceOpeningWorkspacePrivacyEpoch(tx, mixedCase))).resolves.toBe(1);
+    await expect(withOpeningTutorStreamFenceCommit(sql, tx => advanceOpeningWorkspacePrivacyEpoch(tx, mixedCase))).resolves.toBe(1);
     expect(await sql`SELECT timing_execution_id FROM opening_tutor_jobs WHERE id=${jobId}`)
       .toMatchObject([{ timing_execution_id: null }]);
     await vi.waitFor(async () => {
@@ -236,7 +237,7 @@ it.each(["cancellation", "privacy epoch"])("fences a timed-out append before %s 
       await Promise.race([stalledAppend.received, publishing.then(() => { throw new Error("append settled before reaching TCP"); })]);
       const revoking = revocation === "cancellation"
         ? track(createOpeningTutorJobsRepository(revocationSession.sql).cancel(scope, jobId))
-        : track(revocationSession.sql.begin(tx => advanceOpeningWorkspacePrivacyEpoch(tx, scope, redisUrl)));
+        : track(withOpeningTutorStreamFenceCommit(revocationSession.sql, tx => advanceOpeningWorkspacePrivacyEpoch(tx, scope, redisUrl)));
       const first = await Promise.race([
         stalledControl.received.then(async () => {
           await expect(controlEval.mock.results[0]?.value).rejects.toThrow("Command timed out");
@@ -438,7 +439,7 @@ it.each(["missing configuration", "unreachable Redis", "blackholed Redis"] as co
       vi.stubEnv("REDIS_URL", failure === "missing configuration" ? undefined : `redis://127.0.0.1:${port}`);
 
       const privacyStartedAt = performance.now();
-      await expect(sql.begin(tx => advanceOpeningWorkspacePrivacyEpoch(tx, scope))).resolves.toBe(1);
+      await expect(withOpeningTutorStreamFenceCommit(sql, tx => advanceOpeningWorkspacePrivacyEpoch(tx, scope))).resolves.toBe(1);
       expect(performance.now() - privacyStartedAt).toBeLessThan(1_000);
       expect(await sql`SELECT privacy_epoch FROM workspaces WHERE id=${scope.workspaceId}`).toMatchObject([{ privacy_epoch: 1 }]);
       expect(await sql`SELECT status, timing_execution_id FROM opening_tutor_jobs WHERE id=${jobId}`)
@@ -1008,3 +1009,128 @@ it.each(["pinned", "derived"] as const)(
   },
   15_000,
 );
+
+it("never advances Redis privacy_epoch or seals an active stream when a privacy transaction rolls back", async () => {
+  const { fixture, scope, sql, jobId, key, writer, reader, jobs } = await streamFixture();
+  try {
+    const claimed = (await jobs.claim(jobId))!;
+    const context = {
+      privacyEpoch: 0, contextSourceRefs: [], exposureReceiptId: null,
+      claimToken: claimed.claimToken, executionId: claimed.executionId,
+    };
+    await writer.begin(scope.workspaceId, jobId, context);
+    expect(await writer.append(scope.workspaceId, jobId, "Still active", claimed.executionId, 0)).toBe(1);
+
+    await expect(withOpeningTutorStreamFenceCommit(sql, async tx => {
+      expect(await advanceOpeningWorkspacePrivacyEpoch(tx, scope, redisUrl)).toBe(1);
+      throw new Error("abort privacy tx");
+    })).rejects.toThrow("abort privacy tx");
+
+    await new Promise(resolve => setTimeout(resolve, 60));
+    expect(await sql`SELECT privacy_epoch FROM workspaces WHERE id=${scope.workspaceId}`).toMatchObject([{ privacy_epoch: 0 }]);
+    expect(await redis.get(tutorStreamEpochKey(scope.workspaceId))).toBe("0");
+    expect(await redis.hget(key, "sealed")).toBeNull();
+    expect(await writer.append(scope.workspaceId, jobId, " after rollback", claimed.executionId, 0)).toBe(2);
+    expect(await reader.read(scope.workspaceId, jobId)).toMatchObject({ text: "Still active after rollback", sequence: 2 });
+  } finally {
+    await fixture.close();
+  }
+});
+
+it("allows global memory backed by an unclassified standalone source on a course turn while still rejecting mock_exam", async () => {
+  const fixture = await createOpeningFixture();
+  const { scope, sql } = fixture;
+  const courses = createCourseMembershipRepository(sql);
+  const conversations = createOpeningConversationRepository(sql);
+  const memories = createOpeningMemoryRepository(sql);
+  const jobs = createOpeningTutorJobsRepository(sql);
+  const chunks = createOpeningSourceChunksRepository(sql);
+  const writer = createTutorStreamWriter(redis), reader = createTutorStreamReader(redis);
+  const course = await courses.createCourse({ workspaceId: scope.workspaceId, title: "Course With Global Memory", slug: randomUUID() });
+  const courseSourceId = randomUUID();
+  const globalMemorySourceId = randomUUID();
+  for (const [id, name, hash] of [
+    [courseSourceId, "course-notes.txt", "e".repeat(64)],
+    [globalMemorySourceId, "standalone-memory.txt", "f".repeat(64)],
+  ] as const) {
+    await sql`INSERT INTO opening_sources (id,workspace_id,name,mime,bytes,sha256,version,upload_state,parse_state)
+      VALUES (${id},${scope.workspaceId},${name},'text/plain',16,${hash},0,'uploaded','ready')`;
+    await sql`INSERT INTO opening_source_versions (source_id,version,workspace_id,availability)
+      VALUES (${id},0,${scope.workspaceId},'available')`;
+    await chunks.replaceChunks(scope, {
+      sourceId: id, sourceVersion: 0,
+      chunks: [{ page: 1, text: `Material for ${name}`, slideLabel: null, startMs: null, endMs: null, imageObjectKey: null }],
+    });
+  }
+  await courses.addAssetMembership({
+    workspaceId: scope.workspaceId, courseId: course.id, assetType: "source", assetId: courseSourceId,
+    role: "core", sortOrder: 0, visibility: "course", purpose: "teaching",
+  });
+
+  // Create an active global (workspace-wide, course_id = NULL) memory backed by the unclassified standalone source.
+  const standaloneConversation = await conversations.create(scope, { title: "Standalone origin", courseId: null });
+  const originTurn = await conversations.appendSavedTurn({
+    scope, conversationId: standaloneConversation.id, text: "Remember my study style", mode: "explain",
+    clientKey: randomUUID(), sourceIds: [globalMemorySourceId], learningSessionId: null, currentPage: null, chunkId: null,
+  });
+  const proposed = await memories.proposeMemory(scope, {
+    text: "Learner prefers step-by-step derivations", sourceTurnIds: [originTurn.turnId], courseId: null, expiresAt: null,
+  });
+  await memories.confirm(scope, proposed.id, proposed.version, randomUUID());
+
+  const courseConversation = await conversations.create(scope, { title: "Course turn", courseId: course.id });
+  const turn = await conversations.appendSavedTurn({
+    scope, conversationId: courseConversation.id, text: "Explain course concept", mode: "explain",
+    clientKey: randomUUID(), sourceIds: [courseSourceId], learningSessionId: null, currentPage: 1, chunkId: null,
+  });
+  keys.push(tutorStreamKey(scope.workspaceId, turn.jobId), tutorStreamEpochKey(scope.workspaceId));
+  try {
+    const claimed = (await jobs.claim(turn.jobId))!;
+    const materialPurposePin = await createOpeningCourseReadySourcesRepository(sql).readMaterialPurposePin(scope, {
+      courseId: course.id, materialUse: "citation", sourceIds: [courseSourceId],
+    });
+    const contextSourceRefs = [
+      { sourceId: courseSourceId, sourceVersion: 0 },
+      { sourceId: globalMemorySourceId, sourceVersion: 0 },
+    ];
+    const context = {
+      privacyEpoch: 0, contextSourceRefs, memoryLineageSourceIds: [globalMemorySourceId],
+      exposureReceiptId: null, claimToken: claimed.claimToken, executionId: claimed.executionId, materialPurposePin,
+    };
+    await jobs.withStreamPublication(scope, turn.jobId, context, async () => {
+      await writer.begin(scope.workspaceId, turn.jobId, context);
+      expect(await writer.append(scope.workspaceId, turn.jobId, "Course answer using global memory", claimed.executionId, 0)).toBe(1);
+    });
+    const cached = (await reader.read(scope.workspaceId, turn.jobId))!;
+    expect(cached.memoryLineageSourceIds).toEqual([globalMemorySourceId]);
+    expect(await jobs.readStream(scope, turn.jobId, cached)).toMatchObject({ status: "running" });
+
+    // Once the standalone memory source is classified mock_exam, readStream/withStreamPublication/completeTurn reject.
+    const examCourse = await courses.createCourse({ workspaceId: scope.workspaceId, title: "Mock Exam Course", slug: randomUUID() });
+    await courses.addAssetMembership({
+      workspaceId: scope.workspaceId, courseId: examCourse.id, assetType: "source", assetId: globalMemorySourceId,
+      role: "core", sortOrder: 0, visibility: "course", purpose: "mock_exam",
+    });
+    await expect(jobs.readStream(scope, turn.jobId, cached)).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(jobs.withStreamPublication(scope, turn.jobId, context, async () => {})).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(jobs.completeTurn({
+      scope, jobId: turn.jobId, assistantTurnId: turn.assistantTurnId,
+      text: "Must not persist after mock_exam classification", citations: [], candidates: [],
+      contextSourceRefs, expectedPrivacyEpoch: 0, claimToken: claimed.claimToken,
+    }, { materialPurposePin, memoryLineageSourceIds: [globalMemorySourceId] })).rejects.toMatchObject({ code: "CONFLICT" });
+
+    // Removing the mock_exam classification restores completion for the valid course turn with global memory lineage.
+    await courses.removeAssetMembership({
+      workspaceId: scope.workspaceId, courseId: examCourse.id, assetType: "source", assetId: globalMemorySourceId,
+    });
+    await expect(jobs.completeTurn({
+      scope, jobId: turn.jobId, assistantTurnId: turn.assistantTurnId,
+      text: "Completed course answer with global memory", citations: [], candidates: [],
+      contextSourceRefs, expectedPrivacyEpoch: 0, claimToken: claimed.claimToken,
+    }, { materialPurposePin, memoryLineageSourceIds: [globalMemorySourceId] })).resolves.toBeUndefined();
+    expect((await sql`SELECT status, timing_execution_id FROM opening_tutor_jobs WHERE id=${turn.jobId}`)[0])
+      .toMatchObject({ status: "succeeded", timing_execution_id: null });
+  } finally {
+    await fixture.close();
+  }
+});

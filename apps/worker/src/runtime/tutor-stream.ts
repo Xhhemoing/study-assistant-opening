@@ -15,6 +15,7 @@ export type TutorStreamContext = {
   executionId?: string;
   attemptFence?: TutorAttemptFence;
   materialPurposePin?: OpeningMaterialPurposePin;
+  memoryLineageSourceIds?: string[];
 };
 export type TutorStreamDelta = { text: string; sequence: number };
 export type TutorStreamSnapshot = TutorStreamContext & TutorStreamDelta;
@@ -382,8 +383,18 @@ function parseSnapshot(row: Record<string, string>): TutorStreamSnapshot | null 
   const fence = context.attemptFence === undefined ? undefined : tutorAttemptFenceSchema.parse(context.attemptFence);
   const materialPurposePin = context.materialPurposePin === undefined ? undefined
     : openingMaterialPurposePinSchema.parse(context.materialPurposePin);
+  let memoryLineageSourceIds: string[] | undefined;
+  if (context.memoryLineageSourceIds !== undefined) {
+    if (!Array.isArray(context.memoryLineageSourceIds)
+      || context.memoryLineageSourceIds.some(id => !uuidSchema.safeParse(id).success)) {
+      throw new Error("invalid tutor stream cache");
+    }
+    memoryLineageSourceIds = [...new Set(context.memoryLineageSourceIds.map(id => id.toLowerCase()))].sort();
+  }
   return { ...context, ...(fence ? { attemptFence: fence } : {}),
-    ...(materialPurposePin ? { materialPurposePin } : {}), contextSourceRefs: refs, text: row.text, sequence };
+    ...(materialPurposePin ? { materialPurposePin } : {}),
+    ...(memoryLineageSourceIds ? { memoryLineageSourceIds } : {}),
+    contextSourceRefs: refs, text: row.text, sequence };
 }
 
 export function createTutorStreamReader(redis: IORedis) {

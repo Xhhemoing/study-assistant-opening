@@ -10,7 +10,7 @@ import { qualifyObservationRevision } from "./opening-observation-revision-histo
 import { reconcileOpeningRetestEvidence } from "./opening-retests";
 import { acceptedAiGradingOutcome, corroborateArithmeticGrade } from "@aistudy/domain";
 import { readOpeningAiGradingContext } from "./opening-ai-grading-context";
-import { fenceOpeningTutorAttemptHead } from "./opening-tutor-stream-fence";
+import { fenceOpeningTutorAttemptHead, withOpeningTutorStreamFenceCommit } from "./opening-tutor-stream-fence";
 export { readOpeningObservationHistory } from "./opening-observation-revision-history";
 
 /** Workspace watermark → owner/privacy → sorted course watermarks → root → candidates. */
@@ -22,7 +22,7 @@ export async function reviseOpeningLearningObservation(sql: Sql, scope: Scope, r
     proposal: aiGradingProposalSchema.parse(options.aiGrading.proposal), modelLabel: options.aiGrading.modelLabel } : null;
   const interpretation=options.answerInterpretation?answerInterpretationMetadataSchema.parse(options.answerInterpretation):null;
   const intent = JSON.parse(JSON.stringify({ ...input, ...(grading ? { aiGrading: grading } : {}),...(interpretation?{answerInterpretation:interpretation}:{}) }));
-  return sql.begin(async tx => {
+  return withOpeningTutorStreamFenceCommit(sql, async tx => {
     await lockWorkspaceLearningHistory(tx, scope);
     await lockLearningOwner(tx, scope);
     const initial = await tx`SELECT root.*,head.course_id AS head_course_id FROM opening_learning_observations root

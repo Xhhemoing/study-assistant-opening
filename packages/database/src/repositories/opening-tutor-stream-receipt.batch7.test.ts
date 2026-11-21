@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Sql } from "postgres";
 import { createOpeningTutorJobsRepository } from "./opening-tutor-jobs";
-import { UnconfirmedStreamSealError } from "./opening-tutor-stream-fence";
+import { hasAttemptedFallbackStreamSeal, UnconfirmedStreamSealError } from "./opening-tutor-stream-fence";
 const hooks = vi.hoisted(() => ({ release: vi.fn(), lock: vi.fn(), readAttempt: vi.fn() }));
 vi.mock("./opening-study-exposure", async original => ({ ...await original<typeof import("./opening-study-exposure")>(), releaseOpeningStudyExposure: hooks.release }));
 vi.mock("./opening-learning-facts", async original => ({ ...await original<typeof import("./opening-learning-facts")>(), lockWorkspaceLearningHistory: hooks.lock }));
@@ -24,7 +24,8 @@ const job = { id: jobId, workspace_id: workspace, conversation_id: "conversation
 type Options = { missingWorkspace?: boolean; missingJob?: boolean; status?: string; phase2Status?: string; epoch?: number; token?: string; execution?: string | null;
   unavailableSource?: boolean; missingExposure?: boolean; failAt?: string; failCommitAtTx?: number; boundAttempt?: string; anchorAttempt?: string;
   anchorSourceId?: string; courseId?: string | null; sourceIds?: string[]; membershipRemoved?: boolean; archivedCourse?: boolean; classifiedStandalone?: boolean;
-  derivedMembershipPurpose?: "teaching" | "practice" | "mock_exam" | "reference" | null };
+  derivedMembershipPurpose?: "teaching" | "practice" | "mock_exam" | "reference" | null;
+  backedMemorySourceIds?: string[]; mockExamSourceIds?: string[]; tutorStreamRedisUrl?: string };
 function fixture(options: Options = {}) {
   const calls: Array<{ sql: string; values: unknown[] }> = []; const failure = new Error(`synthetic ${options.failAt ?? "commit"}`);
   const txEvents: string[] = [];
@@ -52,8 +53,18 @@ function fixture(options: Options = {}) {
     }
     if (sql.startsWith("SELECT id FROM workspaces")) return options.missingWorkspace ? [] : [{ id: workspace }];
     if (sql.startsWith("SELECT id FROM courses")) return options.archivedCourse ? [] : [{ id: options.courseId ?? courseId }];
-    if (sql.startsWith("SELECT s.id,s.version FROM opening_sources")) return options.unavailableSource ? [] : [{ id: sourceId, version: 0 }];
+    if (sql.startsWith("SELECT s.id,s.version FROM opening_sources")) {
+      if (options.unavailableSource) return [];
+      const requested = Array.isArray(values[1]) ? values[1] as string[] : [sourceId];
+      return requested.map(id => ({ id, version: 0 }));
+    }
+    if (sql.startsWith("SELECT DISTINCT lower(sid.id::text) AS source_id")) {
+      return (options.backedMemorySourceIds ?? []).map(id => ({ source_id: id }));
+    }
     if (sql.startsWith("SELECT id FROM course_asset_memberships")) {
+      if (sql.includes("purpose='mock_exam'")) {
+        return (options.mockExamSourceIds ?? []).length ? [{ id: membershipId }] : [];
+      }
       return options.classifiedStandalone ? [{ id: membershipId }] : [];
     }
     if (sql.startsWith("SELECT asset_id,purpose FROM course_asset_memberships")) {
@@ -65,8 +76,10 @@ function fixture(options: Options = {}) {
     if (sql.startsWith("SELECT source_id FROM opening_privacy_exclusions")) return [];
     if (sql.startsWith("SELECT 1 WHERE")) return options.unavailableSource ? [] : [{ "?column?": 1 }];
     if (sql.startsWith("SELECT id FROM opening_help_exposures")) return options.missingExposure ? [] : [{ id: receipt }];
+    if (sql.startsWith("UPDATE opening_tutor_jobs SET status = 'succeeded'")) return [{ id: jobId }];
+    if (sql.startsWith("UPDATE opening_turns SET text =")) return [{ id: assistant }];
     throw new Error(`Unsupported fixture query: ${sql}`);
-  }), { json: (value: unknown) => value });
+  }), { json: (value: unknown) => value, unsafe: (value: string) => value });
   const outerCalls: string[] = [];
   const sql = Object.assign(vi.fn(async (parts: TemplateStringsArray) => {
     const query = parts.join("?").replace(/\s+/g, " ").trim();
@@ -92,7 +105,11 @@ function fixture(options: Options = {}) {
       }
     },
   });
-  return { repo: createOpeningTutorJobsRepository(sql as unknown as Sql), tx, sql, calls, outerCalls, txEvents, failure };
+  return {
+    repo: createOpeningTutorJobsRepository(sql as unknown as Sql,
+      options.tutorStreamRedisUrl ? { tutorStreamRedisUrl: options.tutorStreamRedisUrl } : {}),
+    tx, sql, calls, outerCalls, txEvents, failure,
+  };
 }
 beforeEach(() => { vi.resetAllMocks(); hooks.lock.mockResolvedValue(undefined); hooks.release.mockResolvedValue({ id: receipt });
   hooks.readAttempt.mockResolvedValue({ anchor: { attemptId: attempt, itemVersionId: item }, rootObservationId: null, headObservationId: null, currentAnswer: null }); });
@@ -351,5 +368,58 @@ describe("stream receipt release waits for current job authorization and assista
     const allowed = fixture({ courseId, sourceIds: [], derivedMembershipPurpose: "teaching" });
     expect(await allowed.repo.readStream(scope, jobId, { ...context, contextSourceRefs: derivedRefs }))
       .toMatchObject({ status: "running" });
+  });
+
+  it("allows active global memory lineage sources on course turns without course membership while still blocking spoofed or mock_exam sources", async () => {
+    const memorySourceId = "12000000-0000-4000-8000-000000000099";
+    const memoryRefs = [{ sourceId: memorySourceId, sourceVersion: 0 }];
+    // Active global memory backed by an unclassified standalone workspace source succeeds across stream & completeTurn.
+    const admitted = fixture({
+      courseId, sourceIds: [], membershipRemoved: true, backedMemorySourceIds: [memorySourceId],
+    });
+    await expect(admitted.repo.withStreamPublication(
+      scope, jobId, { ...context, contextSourceRefs: memoryRefs, memoryLineageSourceIds: [memorySourceId] }, async () => {},
+    )).resolves.toBeUndefined();
+    expect(await admitted.repo.readStream(
+      scope, jobId, { ...context, contextSourceRefs: memoryRefs, memoryLineageSourceIds: [memorySourceId] },
+    )).toMatchObject({ status: "running" });
+    await expect(admitted.repo.completeTurn({
+      scope, jobId, assistantTurnId: assistant, text: "course answer with global memory", citations: [], candidates: [],
+      contextSourceRefs: memoryRefs, expectedPrivacyEpoch: 2, claimToken: token,
+    }, { memoryLineageSourceIds: [memorySourceId] })).resolves.toBeUndefined();
+
+    // Spoofed memoryLineageSourceIds (not backed by an active global memory) is rejected fail-closed.
+    const spoofed = fixture({ courseId, sourceIds: [], membershipRemoved: true, backedMemorySourceIds: [] });
+    await expect(spoofed.repo.readStream(
+      scope, jobId, { ...context, contextSourceRefs: memoryRefs, memoryLineageSourceIds: [memorySourceId] },
+    )).rejects.toMatchObject({ code: "CONFLICT" });
+
+    // A global memory source classified as mock_exam is still rejected.
+    const mockExamMemory = fixture({
+      courseId, sourceIds: [], membershipRemoved: true,
+      backedMemorySourceIds: [memorySourceId], mockExamSourceIds: [memorySourceId],
+    });
+    await expect(mockExamMemory.repo.readStream(
+      scope, jobId, { ...context, contextSourceRefs: memoryRefs, memoryLineageSourceIds: [memorySourceId] },
+    )).rejects.toMatchObject({ code: "CONFLICT" });
+  });
+
+  it("marks fallback stream sealing attempted once when withStreamPublication owns a Redis URL", async () => {
+    vi.stubEnv("REDIS_URL", undefined);
+    try {
+      const noRedis = fixture({ failCommitAtTx: 1 });
+      const errNoRedis = await noRedis.repo.withStreamPublication(scope, jobId, context, async () => {})
+        .then(() => undefined, error => error);
+      expect(errNoRedis).toBe(noRedis.failure);
+      expect(hasAttemptedFallbackStreamSeal(errNoRedis)).toBe(false);
+
+      const withRedis = fixture({ failCommitAtTx: 1, tutorStreamRedisUrl: "redis://127.0.0.1:1" });
+      const errWithRedis = await withRedis.repo.withStreamPublication(scope, jobId, context, async () => {})
+        .then(() => undefined, error => error);
+      expect(errWithRedis).toBe(withRedis.failure);
+      expect(hasAttemptedFallbackStreamSeal(errWithRedis)).toBe(true);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });

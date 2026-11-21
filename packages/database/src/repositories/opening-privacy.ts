@@ -3,7 +3,7 @@ import type { Sql, TransactionSql } from "postgres";
 import type { OpeningScope } from "./opening-sources";
 import { lockWorkspaceLearningHistory, nextWorkspaceLearningHistoryRevision } from "./opening-learning-facts";
 import { invalidateOpeningLearningEligibility } from "./opening-learning-eligibility";
-import { advanceOpeningWorkspacePrivacyEpoch } from "./opening-tutor-stream-fence";
+import { advanceOpeningWorkspacePrivacyEpoch, withOpeningTutorStreamFenceCommit } from "./opening-tutor-stream-fence";
 
 export type PrivacyExclusion = {
   workspaceId: string;
@@ -68,7 +68,7 @@ export function createOpeningPrivacyRepository(sql: Sql | TransactionSql) {
     ): Promise<string[]> {
       const sourceIds = [...new Set(input.sourceIds)];
       if (!sourceIds.length) return [];
-      return db.begin(async (tx) => {
+      return withOpeningTutorStreamFenceCommit(db, async (tx) => {
         await lockWorkspaceLearningHistory(tx, scope);
         await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId}
           AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;

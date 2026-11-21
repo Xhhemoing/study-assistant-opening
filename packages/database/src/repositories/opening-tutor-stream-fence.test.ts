@@ -2,10 +2,10 @@ import { once } from "node:events";
 import { createServer, type AddressInfo, type Socket } from "node:net";
 import Redis from "ioredis";
 import { expect, it, vi } from "vitest";
-import type { TransactionSql } from "postgres";
+import type { Sql, TransactionSql } from "postgres";
 import {
-  advanceOpeningWorkspacePrivacyEpoch, fenceCancelledOpeningTutorStream, openingRedisConnectionOptions,
-  tutorStreamAttemptHeadKey, tutorStreamKey,
+  advanceOpeningWorkspacePrivacyEpoch, fenceCancelledOpeningTutorStream, fenceOpeningTutorAttemptHead,
+  openingRedisConnectionOptions, tutorStreamAttemptHeadKey, tutorStreamKey, withOpeningTutorStreamFenceCommit,
 } from "./opening-tutor-stream-fence";
 
 async function withRedisServer(run: (url: string) => Promise<void>, onConnection: (socket: Socket) => void) {
@@ -158,32 +158,108 @@ it("refuses an unconfirmed seal and closes the socket on a Redis error", async (
   });
 });
 
-it("advanceOpeningWorkspacePrivacyEpoch skips Redis in idle workspaces and never blocks or rolls back during a Redis outage", async () => {
+it("advanceOpeningWorkspacePrivacyEpoch skips Redis in idle workspaces, never fires before commit/on rollback, and never blocks during a Redis outage", async () => {
   const scope = { workspaceId: "00000000-0000-4000-8000-000000000001", ownerUserId: "00000000-0000-4000-8000-000000000002" };
   let connections = 0;
   await withRedisServer(async address => {
-    const makeTx = (priorExecutions: Array<{ id: string; timing_execution_id: string }>) =>
-      (async (parts: TemplateStringsArray) => {
+    const makeSql = (priorExecutions: Array<{ id: string; timing_execution_id: string }>) => {
+      const tx = (async (parts: TemplateStringsArray) => {
         const query = parts.join("?").replace(/\s+/g, " ").trim();
         if (query.startsWith("UPDATE workspaces SET privacy_epoch")) return [{ id: scope.workspaceId, privacy_epoch: 5 }];
         if (query.startsWith("UPDATE opening_tutor_jobs j SET timing_execution_id = NULL")) return priorExecutions;
         throw new Error(`unexpected query: ${query}`);
       }) as unknown as TransactionSql;
+      return {
+        begin: async (fn: (db: TransactionSql) => Promise<unknown>) => fn(tx),
+      } as unknown as Sql;
+    };
 
     // Idle workspace: zero running executions => zero Redis connections even when REDIS_URL is set.
-    expect(await advanceOpeningWorkspacePrivacyEpoch(makeTx([]), scope, `redis://${address}`)).toBe(5);
+    expect(await withOpeningTutorStreamFenceCommit(
+      makeSql([]),
+      tx => advanceOpeningWorkspacePrivacyEpoch(tx, scope, `redis://${address}`),
+    )).toBe(5);
     expect(connections).toBe(0);
 
-    // Active workspace with blackholed Redis: returns immediately without throwing or blocking PG commit.
+    // Rolled-back PG transaction must NEVER contact Redis or advance Redis privacy_epoch.
+    await expect(withOpeningTutorStreamFenceCommit(
+      makeSql([{ id: "00000000-0000-4000-8000-000000000003", timing_execution_id: "00000000-0000-4000-8000-000000000004" }]),
+      async tx => {
+        expect(await advanceOpeningWorkspacePrivacyEpoch(tx, scope, `redis://${address}`)).toBe(5);
+        expect(connections).toBe(0);
+        throw new Error("rollback privacy tx");
+      },
+    )).rejects.toThrow("rollback privacy tx");
+    await new Promise(resolve => setTimeout(resolve, 40));
+    expect(connections).toBe(0);
+
+    // Committed active workspace with blackholed Redis: fires strictly post-commit and never blocks PG commit.
+    let sawZeroBeforeCommit = false;
     const startedAt = performance.now();
-    expect(await advanceOpeningWorkspacePrivacyEpoch(
-      makeTx([{ id: "00000000-0000-4000-8000-000000000003", timing_execution_id: "00000000-0000-4000-8000-000000000004" }]),
-      scope, `redis://${address}`,
+    expect(await withOpeningTutorStreamFenceCommit(
+      makeSql([{ id: "00000000-0000-4000-8000-000000000003", timing_execution_id: "00000000-0000-4000-8000-000000000004" }]),
+      async tx => {
+        const epoch = await advanceOpeningWorkspacePrivacyEpoch(tx, scope, `redis://${address}`);
+        sawZeroBeforeCommit = connections === 0;
+        return epoch;
+      },
     )).toBe(5);
+    expect(sawZeroBeforeCommit).toBe(true);
     expect(performance.now() - startedAt).toBeLessThan(500);
     await vi.waitFor(() => expect(connections).toBe(1));
   }, () => {
     // Blackhole: accept TCP and never reply.
+    connections += 1;
+  });
+});
+
+it("fenceOpeningTutorAttemptHead filters to running jobs, skips Redis on rollback, and never blocks learner writes during a Redis outage", async () => {
+  const workspaceId = "00000000-0000-4000-8000-000000000001";
+  const attemptId = "00000000-0000-4000-8000-000000000005";
+  const rootId = "00000000-0000-4000-8000-000000000006";
+  const headId = "00000000-0000-4000-8000-000000000007";
+  let connections = 0;
+  const queries: string[] = [];
+  await withRedisServer(async address => {
+    const makeSql = (hasRunningJob: boolean) => {
+      const tx = (async (parts: TemplateStringsArray) => {
+        const query = parts.join("?").replace(/\s+/g, " ").trim();
+        queries.push(query);
+        if (query.startsWith("SELECT 1 FROM opening_tutor_jobs j")) return hasRunningJob ? [{ "?column?": 1 }] : [];
+        throw new Error(`unexpected query: ${query}`);
+      }) as unknown as TransactionSql;
+      return {
+        begin: async (fn: (db: TransactionSql) => Promise<unknown>) => fn(tx),
+      } as unknown as Sql;
+    };
+
+    // No running job (e.g. completed/terminal job only): zero Redis calls even with missing or blackholed Redis.
+    await withOpeningTutorStreamFenceCommit(makeSql(false), tx =>
+      fenceOpeningTutorAttemptHead(tx, workspaceId, attemptId, rootId, headId, undefined));
+    expect(queries[0]).toContain("j.status='running'");
+    expect(connections).toBe(0);
+
+    // Rolled-back transaction with a running job: zero Redis calls.
+    await expect(withOpeningTutorStreamFenceCommit(makeSql(true), async tx => {
+      await fenceOpeningTutorAttemptHead(tx, workspaceId, attemptId, rootId, headId, `redis://${address}`);
+      expect(connections).toBe(0);
+      throw new Error("rollback observation");
+    })).rejects.toThrow("rollback observation");
+    await new Promise(resolve => setTimeout(resolve, 40));
+    expect(connections).toBe(0);
+
+    // Missing REDIS_URL with a running job: succeeds without throwing.
+    await expect(withOpeningTutorStreamFenceCommit(makeSql(true), tx =>
+      fenceOpeningTutorAttemptHead(tx, workspaceId, attemptId, null, headId, undefined))).resolves.toBeUndefined();
+    expect(connections).toBe(0);
+
+    // Blackholed Redis with a running job: commits immediately (< 500 ms) and fires post-commit.
+    const startedAt = performance.now();
+    await withOpeningTutorStreamFenceCommit(makeSql(true), tx =>
+      fenceOpeningTutorAttemptHead(tx, workspaceId, attemptId, rootId, headId, `redis://${address}`));
+    expect(performance.now() - startedAt).toBeLessThan(500);
+    await vi.waitFor(() => expect(connections).toBe(1));
+  }, () => {
     connections += 1;
   });
 });
