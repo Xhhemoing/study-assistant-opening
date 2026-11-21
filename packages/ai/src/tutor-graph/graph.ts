@@ -374,7 +374,8 @@ export function runTutorGraph(input: TutorGraphInput): TutorGraphResult {
   const isPureTurn = assessmentMode !== "practice";
   const turnCap = isPureTurn ? Math.min(rawTurnCap, PURE_MAX_LEAKAGE_BITS) : rawTurnCap;
 
-  if (rawTurnCap === 0 || (isPureTurn && (turnCap < 1 || budget.leakageBits + 1 >= PURE_MAX_LEAKAGE_BITS))) {
+  const remainingBits = turnCap - budget.leakageBits;
+  if (remainingBits < 1 || (isPureTurn && budget.leakageBits + 1 >= PURE_MAX_LEAKAGE_BITS)) {
     const preCheck = budget.canRelease(1, nowMs);
     return blockedByBudgetResult(
       budget,

@@ -1,4 +1,13 @@
-import { addRational, divideRational, equalRational, multiplyRational, rational, subtractRational, type SpanRational } from "../opening/span-rational";
+import {
+  addRational,
+  divideRational,
+  equalRational,
+  multiplyRational,
+  PolyComplexityError,
+  rational,
+  subtractRational,
+  type SpanRational,
+} from "./rational-bounds";
 import { formatRational, toRational, type VerificationResult } from "./types";
 
 export type RationalMatrixInput = readonly (readonly (string | number | bigint | SpanRational)[])[];
@@ -59,8 +68,13 @@ function rrefParsed(inputRows: readonly (readonly SpanRational[])[]): RrefResult
 }
 
 export function rref(input: RationalMatrixInput): RrefResult | null {
-  const rows = parseMatrix(input);
-  return rows ? rrefParsed(rows) : null;
+  try {
+    const rows = parseMatrix(input);
+    return rows ? rrefParsed(rows) : null;
+  } catch (err) {
+    if (err instanceof PolyComplexityError) return null;
+    throw err;
+  }
 }
 
 function transpose(input: SpanRational[][]): SpanRational[][] {
@@ -80,21 +94,26 @@ function isZeroVector(vector: readonly SpanRational[]): boolean {
 }
 
 export function findLinearDependency(input: RationalMatrixInput): { dependent: boolean; coefficients?: string[]; pivotTrace: PivotTrace[] } | null {
-  const matrix = parseMatrix(input, { allowEmpty: true });
-  if (!matrix) return null;
-  if (matrix.length === 0) return { dependent: false, pivotTrace: [] };
-  const columns = transpose(matrix);
-  const reduced = rrefParsed(columns);
-  if (reduced.rank === matrix.length) return { dependent: false, pivotTrace: reduced.trace };
-  const vectorCount = matrix.length;
-  const free = Array.from({ length: vectorCount }, (_, i) => i).find((i) => !reduced.pivots.includes(i));
-  if (free === undefined) return { dependent: false, pivotTrace: reduced.trace };
-  const coefficients = zeroVector(vectorCount);
-  coefficients[free] = rational(1n);
-  reduced.pivots.forEach((pivot, row) => {
-    coefficients[pivot] = multiplyRational(rational(-1n), reduced.matrix[row]![free]!);
-  });
-  return { dependent: true, coefficients: coefficients.map(formatRational), pivotTrace: reduced.trace };
+  try {
+    const matrix = parseMatrix(input, { allowEmpty: true });
+    if (!matrix) return null;
+    if (matrix.length === 0) return { dependent: false, pivotTrace: [] };
+    const columns = transpose(matrix);
+    const reduced = rrefParsed(columns);
+    if (reduced.rank === matrix.length) return { dependent: false, pivotTrace: reduced.trace };
+    const vectorCount = matrix.length;
+    const free = Array.from({ length: vectorCount }, (_, i) => i).find((i) => !reduced.pivots.includes(i));
+    if (free === undefined) return { dependent: false, pivotTrace: reduced.trace };
+    const coefficients = zeroVector(vectorCount);
+    coefficients[free] = rational(1n);
+    reduced.pivots.forEach((pivot, row) => {
+      coefficients[pivot] = multiplyRational(rational(-1n), reduced.matrix[row]![free]!);
+    });
+    return { dependent: true, coefficients: coefficients.map(formatRational), pivotTrace: reduced.trace };
+  } catch (err) {
+    if (err instanceof PolyComplexityError) return null;
+    throw err;
+  }
 }
 
 export function verifySubspaceEquality(
@@ -102,32 +121,39 @@ export function verifySubspaceEquality(
   studentInput: RationalMatrixInput,
   options: { basisRequired?: boolean } = {},
 ): SubspaceResult {
-  const reference = parseMatrix(referenceInput, { allowEmpty: true });
-  const student = parseMatrix(studentInput, { allowEmpty: true });
-  if (!reference || !student || (reference.length > 0 && student.length > 0 && reference[0]!.length !== student[0]!.length)) {
-    return { status: "unverified", reason: "invalid_matrix", rankReference: 0, rankStudent: 0, rankCombined: 0, pivotTrace: [] };
+  try {
+    const reference = parseMatrix(referenceInput, { allowEmpty: true });
+    const student = parseMatrix(studentInput, { allowEmpty: true });
+    if (!reference || !student || (reference.length > 0 && student.length > 0 && reference[0]!.length !== student[0]!.length)) {
+      return { status: "unverified", reason: "invalid_matrix", rankReference: 0, rankStudent: 0, rankCombined: 0, pivotTrace: [] };
+    }
+    const refRref = rrefParsed(reference);
+    const studentRref = rrefParsed(student);
+    const combined = rrefParsed([...reference, ...student]);
+    const dependency = options.basisRequired && student.length > studentRref.rank ? findLinearDependency(studentInput)?.coefficients : undefined;
+    const equal =
+      refRref.rank === studentRref.rank &&
+      studentRref.rank === combined.rank &&
+      (!options.basisRequired || student.length === studentRref.rank);
+    return {
+      status: equal ? "equivalent" : "inequivalent",
+      reason: equal
+        ? "rank_and_span_verified"
+        : options.basisRequired && student.length !== studentRref.rank
+          ? "student_vectors_dependent"
+          : "rank_or_span_mismatch",
+      rankReference: refRref.rank,
+      rankStudent: studentRref.rank,
+      rankCombined: combined.rank,
+      pivotTrace: [...refRref.trace, ...studentRref.trace, ...combined.trace],
+      dependency,
+    };
+  } catch (err) {
+    if (err instanceof PolyComplexityError) {
+      return { status: "unverified", reason: "polynomial_complexity_exceeded", rankReference: 0, rankStudent: 0, rankCombined: 0, pivotTrace: [] };
+    }
+    throw err;
   }
-  const refRref = rrefParsed(reference);
-  const studentRref = rrefParsed(student);
-  const combined = rrefParsed([...reference, ...student]);
-  const dependency = options.basisRequired && student.length > studentRref.rank ? findLinearDependency(studentInput)?.coefficients : undefined;
-  const equal =
-    refRref.rank === studentRref.rank &&
-    studentRref.rank === combined.rank &&
-    (!options.basisRequired || student.length === studentRref.rank);
-  return {
-    status: equal ? "equivalent" : "inequivalent",
-    reason: equal
-      ? "rank_and_span_verified"
-      : options.basisRequired && student.length !== studentRref.rank
-        ? "student_vectors_dependent"
-        : "rank_or_span_mismatch",
-    rankReference: refRref.rank,
-    rankStudent: studentRref.rank,
-    rankCombined: combined.rank,
-    pivotTrace: [...refRref.trace, ...studentRref.trace, ...combined.trace],
-    dependency,
-  };
 }
 
 export function verifySubspaceBasis(reference: RationalMatrixInput, student: RationalMatrixInput): SubspaceResult {
@@ -136,65 +162,79 @@ export function verifySubspaceBasis(reference: RationalMatrixInput, student: Rat
 
 export type NullspaceResult = VerificationResult & { rank: number; nullity: number; pivotTrace: PivotTrace[]; basis?: string[][] };
 export function verifyNullspace(matrixInput: RationalMatrixInput, basisInput: RationalMatrixInput): NullspaceResult {
-  const matrix = parseMatrix(matrixInput);
-  const basis = parseMatrix(basisInput, { allowEmpty: true });
-  if (!matrix || !basis || (basis.length > 0 && basis[0]!.length !== matrix[0]!.length)) {
-    return { status: "unverified", reason: "invalid_matrix", rank: 0, nullity: 0, pivotTrace: [] };
+  try {
+    const matrix = parseMatrix(matrixInput);
+    const basis = parseMatrix(basisInput, { allowEmpty: true });
+    if (!matrix || !basis || (basis.length > 0 && basis[0]!.length !== matrix[0]!.length)) {
+      return { status: "unverified", reason: "invalid_matrix", rank: 0, nullity: 0, pivotTrace: [] };
+    }
+    const reduced = rrefParsed(matrix);
+    const nullity = matrix[0]!.length - reduced.rank;
+    const products = basis.map((vector) => matrixVector(matrix, vector));
+    const inKernel = products.every((product) => product.every((entry) => entry.n === 0n));
+    const nonZeroVectors = basis.every((vector) => !isZeroVector(vector));
+    const basisRank = rrefParsed(basis).rank;
+    const valid = inKernel && nonZeroVectors && basis.length === nullity && basisRank === nullity;
+    return {
+      status: valid ? "equivalent" : "inequivalent",
+      reason: valid ? "nullspace_and_rank_nullity_verified" : "nullspace_dimension_or_equation_mismatch",
+      rank: reduced.rank,
+      nullity,
+      pivotTrace: reduced.trace,
+      basis: basis.map((row) => row.map(formatRational)),
+    };
+  } catch (err) {
+    if (err instanceof PolyComplexityError) {
+      return { status: "unverified", reason: "polynomial_complexity_exceeded", rank: 0, nullity: 0, pivotTrace: [] };
+    }
+    throw err;
   }
-  const reduced = rrefParsed(matrix);
-  const nullity = matrix[0]!.length - reduced.rank;
-  const products = basis.map((vector) => matrixVector(matrix, vector));
-  const inKernel = products.every((product) => product.every((entry) => entry.n === 0n));
-  const nonZeroVectors = basis.every((vector) => !isZeroVector(vector));
-  const basisRank = rrefParsed(basis).rank;
-  const valid = inKernel && nonZeroVectors && basis.length === nullity && basisRank === nullity;
-  return {
-    status: valid ? "equivalent" : "inequivalent",
-    reason: valid ? "nullspace_and_rank_nullity_verified" : "nullspace_dimension_or_equation_mismatch",
-    rank: reduced.rank,
-    nullity,
-    pivotTrace: reduced.trace,
-    basis: basis.map((row) => row.map(formatRational)),
-  };
 }
 
 export type EigenspaceInput = { matrix: RationalMatrixInput; eigenvalue: string | number | bigint | SpanRational; vectors: RationalMatrixInput };
 export function verifyEigenspace(input: EigenspaceInput): VerificationResult & { pivotTrace: PivotTrace[] } {
-  const matrix = parseMatrix(input.matrix);
-  const vectors = parseMatrix(input.vectors, { allowEmpty: true });
-  const eigenvalue = toRational(input.eigenvalue);
-  if (
-    !matrix ||
-    !vectors ||
-    !eigenvalue ||
-    matrix.length !== matrix[0]!.length ||
-    (vectors.length > 0 && vectors[0]!.length !== matrix.length)
-  ) {
-    return { status: "unverified", reason: "invalid_eigenspace_input", pivotTrace: [] };
+  try {
+    const matrix = parseMatrix(input.matrix);
+    const vectors = parseMatrix(input.vectors, { allowEmpty: true });
+    const eigenvalue = toRational(input.eigenvalue);
+    if (
+      !matrix ||
+      !vectors ||
+      !eigenvalue ||
+      matrix.length !== matrix[0]!.length ||
+      (vectors.length > 0 && vectors[0]!.length !== matrix.length)
+    ) {
+      return { status: "unverified", reason: "invalid_eigenspace_input", pivotTrace: [] };
+    }
+    const n = matrix.length;
+    const shifted = matrix.map((row, i) => row.map((value, j) => (i === j ? subtractRational(value, eigenvalue) : value)));
+    const shiftedRref = rrefParsed(shifted);
+    const geometricMultiplicity = n - shiftedRref.rank;
+    if (geometricMultiplicity < 1) {
+      return { status: "inequivalent", reason: "not_an_eigenvalue", pivotTrace: shiftedRref.trace };
+    }
+    if (vectors.length === 0) {
+      return { status: "inequivalent", reason: "incomplete_eigenspace", pivotTrace: shiftedRref.trace };
+    }
+    const products = vectors.map((vector) => matrixVector(shifted, vector));
+    const allEigenvectors = vectors.every((vector, i) => !isZeroVector(vector) && products[i]!.every((entry) => entry.n === 0n));
+    if (!allEigenvectors) {
+      return { status: "inequivalent", reason: "zero_or_non_eigenvector", pivotTrace: shiftedRref.trace };
+    }
+    const vecRref = rrefParsed(vectors);
+    if (vecRref.rank !== vectors.length) {
+      return { status: "inequivalent", reason: "dependent_eigenvectors", pivotTrace: shiftedRref.trace };
+    }
+    if (vecRref.rank !== geometricMultiplicity) {
+      return { status: "inequivalent", reason: "incomplete_eigenspace", pivotTrace: shiftedRref.trace };
+    }
+    return { status: "equivalent", reason: "eigenspace_basis_verified", pivotTrace: shiftedRref.trace };
+  } catch (err) {
+    if (err instanceof PolyComplexityError) {
+      return { status: "unverified", reason: "polynomial_complexity_exceeded", pivotTrace: [] };
+    }
+    throw err;
   }
-  const n = matrix.length;
-  const shifted = matrix.map((row, i) => row.map((value, j) => (i === j ? subtractRational(value, eigenvalue) : value)));
-  const shiftedRref = rrefParsed(shifted);
-  const geometricMultiplicity = n - shiftedRref.rank;
-  if (geometricMultiplicity < 1) {
-    return { status: "inequivalent", reason: "not_an_eigenvalue", pivotTrace: shiftedRref.trace };
-  }
-  if (vectors.length === 0) {
-    return { status: "inequivalent", reason: "incomplete_eigenspace", pivotTrace: shiftedRref.trace };
-  }
-  const products = vectors.map((vector) => matrixVector(shifted, vector));
-  const allEigenvectors = vectors.every((vector, i) => !isZeroVector(vector) && products[i]!.every((entry) => entry.n === 0n));
-  if (!allEigenvectors) {
-    return { status: "inequivalent", reason: "zero_or_non_eigenvector", pivotTrace: shiftedRref.trace };
-  }
-  const vecRref = rrefParsed(vectors);
-  if (vecRref.rank !== vectors.length) {
-    return { status: "inequivalent", reason: "dependent_eigenvectors", pivotTrace: shiftedRref.trace };
-  }
-  if (vecRref.rank !== geometricMultiplicity) {
-    return { status: "inequivalent", reason: "incomplete_eigenspace", pivotTrace: shiftedRref.trace };
-  }
-  return { status: "equivalent", reason: "eigenspace_basis_verified", pivotTrace: shiftedRref.trace };
 }
 
 export const verifySubspace = verifySubspaceEquality;

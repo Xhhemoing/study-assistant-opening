@@ -758,5 +758,64 @@ describe("TutorGraph fast path", () => {
     expect(pureOnPractice2.state).toBe("budget_contaminated");
     expect(pureOnPractice2.releaseApproved).toBe(false);
     expect(reusedPracticeBudget.leakageBits).toBe(1);
+
+    // Round-14 P2-1: practice turns with fractional remaining budget (< 1 bit) must not invoke verifyCaps.verify
+    for (const remainingCase of [
+      { scaffoldBitBudget: 0.5, preSpend: false },
+      { scaffoldBitBudget: 1.5, preSpend: true },
+    ]) {
+      const fractionalShapes = new Set<string>();
+      let verifyInvocations = 0;
+      for (const makeOutput of [
+        () => ({ steps: [{ id: "s1", text: "a", status: "unknown" as const }] }),
+        () => ({ steps: [{ id: "s1", text: "a", status: "valid" as const }] }),
+        () => ({
+          steps: [{ id: "s1", text: "a", status: "invalid" as const }],
+          firstError: { stepId: "s1", kind: "domain" as const, message: "SECRET_42" },
+        }),
+      ]) {
+        const fracBudget = createMinEntropyBudget({
+          assessmentMode: "practice",
+          scaffoldBitBudget: remainingCase.scaffoldBitBudget,
+          now: () => 1000,
+        });
+        if (remainingCase.preSpend) {
+          const warmup = runTutorGraph({
+            questionStem: "积分",
+            submission: {},
+            budget: fracBudget,
+            attemptSubmitted: true,
+            assessmentMode: "practice",
+            verifyCaps: { verify: () => ({ steps: [{ id: "s0", text: "w", status: "valid" }] }), assertCurrent: () => undefined },
+            releaseCaps: { assertCurrent: () => undefined, answerLeakageBlocker: () => false },
+          });
+          expect(warmup.state).toBe("released");
+          expect(fracBudget.leakageBits).toBe(1);
+        }
+
+        const res = runTutorGraph({
+          questionStem: "积分",
+          submission: {},
+          budget: fracBudget,
+          attemptSubmitted: true,
+          assessmentMode: "practice",
+          verifyCaps: {
+            verify: () => {
+              verifyInvocations += 1;
+              return makeOutput();
+            },
+            assertCurrent: () => undefined,
+          },
+          releaseCaps: { assertCurrent: () => undefined, answerLeakageBlocker: () => false },
+        });
+        expect(res.state).toBe("budget_contaminated");
+        expect(res.releaseApproved).toBe(false);
+        expect(res.reason).toBe("budget_exhausted");
+        expect(JSON.stringify(res)).not.toContain("SECRET_42");
+        fractionalShapes.add(JSON.stringify(res));
+      }
+      expect(verifyInvocations).toBe(0);
+      expect(fractionalShapes.size).toBe(1);
+    }
   });
 });

@@ -1,10 +1,19 @@
 import {
-  addRational as rawAddRational,
+  addRational,
+  bigAbs,
+  bigGcd,
+  bigLcm,
+  checkPolyCoeffBound,
+  divideRational,
   equalRational,
-  multiplyRational as rawMultiplyRational,
-  rational as rawRational,
+  MAX_POLY_COEFF_MAGNITUDE,
+  MAX_RATIONAL_DECIMAL_DIGITS,
+  multiplyRational,
+  PolyComplexityError,
+  rational,
+  subtractRational,
   type SpanRational,
-} from "../opening/span-rational";
+} from "./rational-bounds";
 
 export type EquivalenceStatus = "equivalent" | "inequivalent" | "unverified";
 export type VerificationResult = {
@@ -40,120 +49,6 @@ export type PiecewiseExpr = { split: string | number; left: ScalarExpr | string;
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-class PolyComplexityError extends Error {
-  constructor() {
-    super("polynomial_complexity_exceeded");
-  }
-}
-
-const MAX_POLY_COEFF_BITS = 4096;
-const MAX_POLY_COEFF_MAGNITUDE = 1n << BigInt(MAX_POLY_COEFF_BITS);
-const MAX_RATIONAL_DECIMAL_DIGITS = 1235;
-
-function bigAbs(n: bigint): bigint {
-  return n < 0n ? -n : n;
-}
-
-function bigIntBitLength(n: bigint): number {
-  const abs = n < 0n ? -n : n;
-  if (abs === 0n) return 0;
-  const hex = abs.toString(16);
-  return (hex.length - 1) * 4 + (32 - Math.clz32(Number.parseInt(hex[0]!, 16)));
-}
-
-function checkPolyCoeffBound(coeff: SpanRational): void {
-  if (bigAbs(coeff.n) > MAX_POLY_COEFF_MAGNITUDE || coeff.d > MAX_POLY_COEFF_MAGNITUDE) {
-    throw new PolyComplexityError();
-  }
-}
-
-function bigGcd(a: bigint, b: bigint): bigint {
-  a = bigAbs(a);
-  b = bigAbs(b);
-  while (b !== 0n) [a, b] = [b, a % b];
-  return a;
-}
-
-function bigLcm(a: bigint, b: bigint): bigint {
-  if (a === 0n || b === 0n) return 0n;
-  const reducedA = bigAbs(a) / bigGcd(a, b);
-  if (bigIntBitLength(reducedA) + bigIntBitLength(b) > MAX_POLY_COEFF_BITS + 1) {
-    throw new PolyComplexityError();
-  }
-  const out = bigAbs(reducedA * b);
-  if (out > MAX_POLY_COEFF_MAGNITUDE) throw new PolyComplexityError();
-  return out;
-}
-
-function rational(n: bigint, d = 1n): SpanRational {
-  if (d === 0n) throw new RangeError("Zero denominator");
-  if (bigIntBitLength(n) > MAX_POLY_COEFF_BITS * 4 || bigIntBitLength(d) > MAX_POLY_COEFF_BITS * 4) {
-    throw new PolyComplexityError();
-  }
-  const out = rawRational(n, d);
-  checkPolyCoeffBound(out);
-  return out;
-}
-
-function addRational(a: SpanRational, b: SpanRational): SpanRational {
-  checkPolyCoeffBound(a);
-  checkPolyCoeffBound(b);
-  if (a.n === 0n) return b;
-  if (b.n === 0n) return a;
-  const g = bigGcd(a.d, b.d);
-  const da = a.d / g;
-  const db = b.d / g;
-  if (bigIntBitLength(da) + bigIntBitLength(db) > MAX_POLY_COEFF_BITS + 1) {
-    throw new PolyComplexityError();
-  }
-  const leftTermBits = bigIntBitLength(a.n) + bigIntBitLength(db);
-  const rightTermBits = bigIntBitLength(b.n) + bigIntBitLength(da);
-  if (
-    g === 1n &&
-    Math.abs(leftTermBits - rightTermBits) >= 2 &&
-    Math.max(leftTermBits, rightTermBits) > MAX_POLY_COEFF_BITS + 2
-  ) {
-    throw new PolyComplexityError();
-  }
-  if (Math.max(leftTermBits, rightTermBits) > MAX_POLY_COEFF_BITS * 2 + 2) {
-    throw new PolyComplexityError();
-  }
-  const out = rawAddRational(a, b);
-  checkPolyCoeffBound(out);
-  return out;
-}
-
-function subtractRational(a: SpanRational, b: SpanRational): SpanRational {
-  return addRational(a, { n: -b.n, d: b.d });
-}
-
-function multiplyRational(a: SpanRational, b: SpanRational): SpanRational {
-  checkPolyCoeffBound(a);
-  checkPolyCoeffBound(b);
-  if (a.n === 0n || b.n === 0n) return rawRational(0n);
-  const g1 = bigGcd(bigAbs(a.n), b.d);
-  const g2 = bigGcd(bigAbs(b.n), a.d);
-  const an = a.n / g1;
-  const bd = b.d / g1;
-  const bn = b.n / g2;
-  const ad = a.d / g2;
-  if (
-    bigIntBitLength(an) + bigIntBitLength(bn) > MAX_POLY_COEFF_BITS + 1 ||
-    bigIntBitLength(ad) + bigIntBitLength(bd) > MAX_POLY_COEFF_BITS + 1
-  ) {
-    throw new PolyComplexityError();
-  }
-  const out = rawMultiplyRational({ n: an, d: ad }, { n: bn, d: bd });
-  checkPolyCoeffBound(out);
-  return out;
-}
-
-function divideRational(a: SpanRational, b: SpanRational): SpanRational {
-  if (b.n === 0n) throw new RangeError("Zero denominator");
-  const invB: SpanRational = b.n < 0n ? { n: -b.d, d: -b.n } : { n: b.d, d: b.n };
-  return multiplyRational(a, invB);
 }
 
 export function toRational(value: unknown): SpanRational | null {
@@ -578,6 +473,12 @@ export type RationalForm = {
 const MAX_SYMBOLIC_POLY_DEGREE = 64;
 const MAX_SYMBOLIC_POLY_TERMS = 512;
 const MAX_SYMBOLIC_MUL_STEPS = 4096;
+const MAX_AST_WALK_STEPS = 16384;
+
+function bumpAstSteps(state: { steps: number }): void {
+  state.steps++;
+  if (state.steps > MAX_AST_WALK_STEPS) throw new PolyComplexityError();
+}
 
 type PolyMulBudget = { mulSteps: number };
 
@@ -659,7 +560,9 @@ function rationalFormInner(
   expr: ScalarExpr,
   variable = "x",
   budget: PolyMulBudget = { mulSteps: 0 },
+  walkState: { steps: number } = { steps: 0 },
 ): RationalForm {
+  bumpAstSteps(walkState);
   switch (expr.kind) {
     case "const": {
       const value = toRational(expr.value);
@@ -676,7 +579,7 @@ function rationalFormInner(
         ? { numerator: polynomialVariable(), denominator: polynomialConstant(rational(1n)), domainDenominators: [] }
         : { numerator: new Map(), denominator: new Map(), domainDenominators: [], unsupported: "foreign_variable" };
     case "neg": {
-      const inner = rationalFormInner(expr.value, variable, budget);
+      const inner = rationalFormInner(expr.value, variable, budget, walkState);
       if (inner.unsupported) return inner;
       return {
         ...inner,
@@ -685,8 +588,8 @@ function rationalFormInner(
     }
     case "add":
     case "sub": {
-      const left = rationalFormInner(expr.left, variable, budget);
-      const right = rationalFormInner(expr.right, variable, budget);
+      const left = rationalFormInner(expr.left, variable, budget, walkState);
+      const right = rationalFormInner(expr.right, variable, budget, walkState);
       if (left.unsupported || right.unsupported) {
         return {
           numerator: new Map(),
@@ -709,8 +612,8 @@ function rationalFormInner(
       };
     }
     case "mul": {
-      const left = rationalFormInner(expr.left, variable, budget);
-      const right = rationalFormInner(expr.right, variable, budget);
+      const left = rationalFormInner(expr.left, variable, budget, walkState);
+      const right = rationalFormInner(expr.right, variable, budget, walkState);
       if (left.unsupported || right.unsupported) {
         return {
           numerator: new Map(),
@@ -730,8 +633,8 @@ function rationalFormInner(
       };
     }
     case "div": {
-      const left = rationalFormInner(expr.left, variable, budget);
-      const right = rationalFormInner(expr.right, variable, budget);
+      const left = rationalFormInner(expr.left, variable, budget, walkState);
+      const right = rationalFormInner(expr.right, variable, budget, walkState);
       if (left.unsupported || right.unsupported) {
         return {
           numerator: new Map(),
@@ -760,7 +663,7 @@ function rationalFormInner(
       if (!Number.isInteger(expr.exponent) || Math.abs(expr.exponent) > 12) {
         return { numerator: new Map(), denominator: new Map(), domainDenominators: [], unsupported: "power_out_of_bounds" };
       }
-      const inner = rationalFormInner(expr.base, variable, budget);
+      const inner = rationalFormInner(expr.base, variable, budget, walkState);
       if (inner.unsupported) {
         return { numerator: new Map(), denominator: new Map(), domainDenominators: [], unsupported: inner.unsupported };
       }
@@ -802,6 +705,16 @@ function rationalFormInner(
 }
 
 function evaluateConstantInt(expr: ScalarExpr): number | null {
+  try {
+    return evaluateConstantIntInner(expr);
+  } catch (err) {
+    if (err instanceof PolyComplexityError) return null;
+    throw err;
+  }
+}
+
+function evaluateConstantIntInner(expr: ScalarExpr, state: { steps: number } = { steps: 0 }): number | null {
+  bumpAstSteps(state);
   switch (expr.kind) {
     case "const": {
       const q = toRational(expr.value);
@@ -810,26 +723,26 @@ function evaluateConstantInt(expr: ScalarExpr): number | null {
       return Number.isSafeInteger(n) ? n : null;
     }
     case "neg": {
-      const v = evaluateConstantInt(expr.value);
+      const v = evaluateConstantIntInner(expr.value, state);
       return v === null ? null : -v;
     }
     case "add":
     case "sub":
     case "mul": {
-      const l = evaluateConstantInt(expr.left);
-      const r = evaluateConstantInt(expr.right);
+      const l = evaluateConstantIntInner(expr.left, state);
+      const r = evaluateConstantIntInner(expr.right, state);
       if (l === null || r === null) return null;
       const out = expr.kind === "add" ? l + r : expr.kind === "sub" ? l - r : l * r;
       return Number.isSafeInteger(out) ? out : null;
     }
     case "div": {
-      const l = evaluateConstantInt(expr.left);
-      const r = evaluateConstantInt(expr.right);
+      const l = evaluateConstantIntInner(expr.left, state);
+      const r = evaluateConstantIntInner(expr.right, state);
       if (l === null || r === null || r === 0 || l % r !== 0) return null;
       return l / r;
     }
     case "pow": {
-      const b = evaluateConstantInt(expr.base);
+      const b = evaluateConstantIntInner(expr.base, state);
       if (b === null || !Number.isInteger(expr.exponent) || expr.exponent < 0 || expr.exponent > 12) return null;
       if (b === 0 && expr.exponent <= 0) return null;
       const out = b ** expr.exponent;
@@ -1284,7 +1197,19 @@ export function parseScalarExpr(
   input: ScalarExpr | string | number,
   options?: NormalizeLatexOptions,
 ): ScalarExpr | null {
-  if (typeof input === "number") return Number.isFinite(input) ? parseScalarExpr(String(input), options) : null;
+  try {
+    return parseScalarExprInner(input, options);
+  } catch (err) {
+    if (err instanceof PolyComplexityError || err instanceof MPolyOverflowError) return null;
+    throw err;
+  }
+}
+
+function parseScalarExprInner(
+  input: ScalarExpr | string | number,
+  options?: NormalizeLatexOptions,
+): ScalarExpr | null {
+  if (typeof input === "number") return Number.isFinite(input) ? parseScalarExprInner(String(input), options) : null;
   if (typeof input !== "string") return input;
   const shouldNormalize =
     Boolean(options?.matrixImplicitMul) ||
@@ -1564,7 +1489,11 @@ function radicalSign(a: RadicalSum): -1 | 0 | 1 | null {
   return null;
 }
 
-function evaluateRadicalConst(expr: ScalarExpr): { ok: true; value: RadicalSum } | { ok: false; defined: boolean; reason: string } {
+function evaluateRadicalConst(
+  expr: ScalarExpr,
+  state: { steps: number } = { steps: 0 },
+): { ok: true; value: RadicalSum } | { ok: false; defined: boolean; reason: string } {
+  bumpAstSteps(state);
   switch (expr.kind) {
     case "const": {
       const q = toRational(expr.value);
@@ -1575,18 +1504,18 @@ function evaluateRadicalConst(expr: ScalarExpr): { ok: true; value: RadicalSum }
     case "variable":
       return { ok: false, defined: true, reason: "contains_variable" };
     case "neg": {
-      const inner = evaluateRadicalConst(expr.value);
+      const inner = evaluateRadicalConst(expr.value, state);
       return inner.ok ? { ok: true, value: radicalAdd(new Map(), inner.value, -1) } : inner;
     }
     case "abs": {
-      const inner = evaluateRadicalConst(expr.value);
+      const inner = evaluateRadicalConst(expr.value, state);
       if (!inner.ok) return inner;
       const sign = radicalSign(inner.value);
       if (sign === null) return { ok: false, defined: true, reason: "ambiguous_radical_sign" };
       return { ok: true, value: sign < 0 ? radicalAdd(new Map(), inner.value, -1) : inner.value };
     }
     case "sqrt": {
-      const inner = evaluateRadicalConst(expr.value);
+      const inner = evaluateRadicalConst(expr.value, state);
       if (!inner.ok) return inner;
       const sign = radicalSign(inner.value);
       if (sign !== null && sign < 0) return { ok: false, defined: false, reason: "even_root_domain" };
@@ -1603,9 +1532,9 @@ function evaluateRadicalConst(expr: ScalarExpr): { ok: true; value: RadicalSum }
     case "sub":
     case "mul":
     case "div": {
-      const left = evaluateRadicalConst(expr.left);
+      const left = evaluateRadicalConst(expr.left, state);
       if (!left.ok) return left;
-      const right = evaluateRadicalConst(expr.right);
+      const right = evaluateRadicalConst(expr.right, state);
       if (!right.ok) return right;
       if (expr.kind === "add") return { ok: true, value: radicalAdd(left.value, right.value, 1) };
       if (expr.kind === "sub") return { ok: true, value: radicalAdd(left.value, right.value, -1) };
@@ -1620,7 +1549,7 @@ function evaluateRadicalConst(expr: ScalarExpr): { ok: true; value: RadicalSum }
       if (!Number.isInteger(expr.exponent) || Math.abs(expr.exponent) > 12) {
         return { ok: false, defined: true, reason: "power_out_of_bounds" };
       }
-      const base = evaluateRadicalConst(expr.base);
+      const base = evaluateRadicalConst(expr.base, state);
       if (!base.ok) return base;
       if (expr.exponent === 0) {
         return base.value.size === 0
@@ -1689,11 +1618,12 @@ export function simplifyRadical(expr: ScalarExpr): ScalarExpr {
   }
 }
 
-function simplifyRadicalInner(expr: ScalarExpr): ScalarExpr {
-  const evaluated = evaluateRadicalConst(expr);
+function simplifyRadicalInner(expr: ScalarExpr, state: { steps: number } = { steps: 0 }): ScalarExpr {
+  bumpAstSteps(state);
+  const evaluated = evaluateRadicalConst(expr, state);
   if (evaluated.ok) return radicalSumToExpr(evaluated.value);
   if (expr.kind === "sqrt") {
-    const inner = simplifyRadicalInner(expr.value);
+    const inner = simplifyRadicalInner(expr.value, state);
     if (inner.kind === "pow" && inner.exponent === 2) return { kind: "abs", value: inner.base };
     if (inner.kind === "const") {
       const q = toRational(inner.value);
@@ -1708,8 +1638,8 @@ function simplifyRadicalInner(expr: ScalarExpr): ScalarExpr {
     return { kind: "sqrt", value: inner };
   }
   if (expr.kind === "mul") {
-    const left = simplifyRadicalInner(expr.left);
-    const right = simplifyRadicalInner(expr.right);
+    const left = simplifyRadicalInner(expr.left, state);
+    const right = simplifyRadicalInner(expr.right, state);
     if (left.kind === "sqrt" && right.kind === "sqrt" && left.value.kind === "const" && right.value.kind === "const") {
       const a = toRational(left.value.value);
       const b = toRational(right.value.value);
@@ -1723,12 +1653,12 @@ function simplifyRadicalInner(expr: ScalarExpr): ScalarExpr {
     return { kind: "mul", left, right };
   }
   if (expr.kind === "add" || expr.kind === "sub" || expr.kind === "div") {
-    return { ...expr, left: simplifyRadicalInner(expr.left), right: simplifyRadicalInner(expr.right) };
+    return { ...expr, left: simplifyRadicalInner(expr.left, state), right: simplifyRadicalInner(expr.right, state) };
   }
-  if (expr.kind === "neg") return { kind: "neg", value: simplifyRadicalInner(expr.value) };
-  if (expr.kind === "pow") return { kind: "pow", base: simplifyRadicalInner(expr.base), exponent: expr.exponent };
+  if (expr.kind === "neg") return { kind: "neg", value: simplifyRadicalInner(expr.value, state) };
+  if (expr.kind === "pow") return { kind: "pow", base: simplifyRadicalInner(expr.base, state), exponent: expr.exponent };
   if (expr.kind === "abs" || expr.kind === "ln" || expr.kind === "sin" || expr.kind === "cos" || expr.kind === "exp") {
-    return { kind: expr.kind, value: simplifyRadicalInner(expr.value) };
+    return { kind: expr.kind, value: simplifyRadicalInner(expr.value, state) };
   }
   return expr;
 }
@@ -1837,14 +1767,19 @@ type LinearRadicalComb = {
   rads: Array<{ coeff: RationalForm; radicand: RationalForm }>;
 };
 
-function extractLinearRadicalCombination(expr: ScalarExpr, variable: string): LinearRadicalComb | null {
+function extractLinearRadicalCombination(
+  expr: ScalarExpr,
+  variable: string,
+  state: { steps: number } = { steps: 0 },
+): LinearRadicalComb | null {
+  bumpAstSteps(state);
   const rf = rationalForm(expr, variable);
   if (!rf.unsupported) {
     return { constTerm: rf, rads: [] };
   }
   switch (expr.kind) {
     case "neg": {
-      const inner = extractLinearRadicalCombination(expr.value, variable);
+      const inner = extractLinearRadicalCombination(expr.value, variable, state);
       if (!inner) return null;
       return {
         constTerm: rfNeg(inner.constTerm),
@@ -1853,8 +1788,8 @@ function extractLinearRadicalCombination(expr: ScalarExpr, variable: string): Li
     }
     case "add":
     case "sub": {
-      const l = extractLinearRadicalCombination(expr.left, variable);
-      const r = extractLinearRadicalCombination(expr.right, variable);
+      const l = extractLinearRadicalCombination(expr.left, variable, state);
+      const r = extractLinearRadicalCombination(expr.right, variable, state);
       if (!l || !r) return null;
       const sign: 1 | -1 = expr.kind === "add" ? 1 : -1;
       const constTerm = rfAdd(l.constTerm, r.constTerm, sign);
@@ -1873,8 +1808,8 @@ function extractLinearRadicalCombination(expr: ScalarExpr, variable: string): Li
       return { constTerm, rads: nonZeroRads };
     }
     case "mul": {
-      const l = extractLinearRadicalCombination(expr.left, variable);
-      const r = extractLinearRadicalCombination(expr.right, variable);
+      const l = extractLinearRadicalCombination(expr.left, variable, state);
+      const r = extractLinearRadicalCombination(expr.right, variable, state);
       if (!l || !r) return null;
       if (l.rads.length === 0) {
         return {
@@ -1891,8 +1826,8 @@ function extractLinearRadicalCombination(expr: ScalarExpr, variable: string): Li
       return null;
     }
     case "div": {
-      const l = extractLinearRadicalCombination(expr.left, variable);
-      const r = extractLinearRadicalCombination(expr.right, variable);
+      const l = extractLinearRadicalCombination(expr.left, variable, state);
+      const r = extractLinearRadicalCombination(expr.right, variable, state);
       if (!l || !r || r.rads.length > 0 || r.constTerm.numerator.size === 0) return null;
       return {
         constTerm: rfDiv(l.constTerm, r.constTerm),
@@ -1912,49 +1847,77 @@ function extractLinearRadicalCombination(expr: ScalarExpr, variable: string): Li
   }
 }
 
-function isProvablyPositiveExpr(expr: ScalarExpr): boolean {
+type SignMemo = { pos: WeakMap<object, boolean>; nonneg: WeakMap<object, boolean>; steps: number };
+
+function isProvablyPositiveExpr(
+  expr: ScalarExpr,
+  memo: SignMemo = { pos: new WeakMap(), nonneg: new WeakMap(), steps: 0 },
+): boolean {
+  const cached = memo.pos.get(expr);
+  if (cached !== undefined) return cached;
+  bumpAstSteps(memo);
+  let result = false;
   switch (expr.kind) {
     case "const": {
       const q = toRational(expr.value);
-      return q !== null && q.n > 0n;
+      result = q !== null && q.n > 0n;
+      break;
     }
     case "exp":
-      return true;
+      result = true;
+      break;
     case "add":
-      return (
-        (isProvablyPositiveExpr(expr.left) && isProvablyNonnegExpr(expr.right)) ||
-        (isProvablyNonnegExpr(expr.left) && isProvablyPositiveExpr(expr.right))
-      );
+      result =
+        (isProvablyPositiveExpr(expr.left, memo) && isProvablyNonnegExpr(expr.right, memo)) ||
+        (isProvablyNonnegExpr(expr.left, memo) && isProvablyPositiveExpr(expr.right, memo));
+      break;
     case "mul":
     case "div":
-      return isProvablyPositiveExpr(expr.left) && isProvablyPositiveExpr(expr.right);
+      result = isProvablyPositiveExpr(expr.left, memo) && isProvablyPositiveExpr(expr.right, memo);
+      break;
     case "pow":
-      return expr.exponent !== 0 && isProvablyPositiveExpr(expr.base);
-    default:
-      return false;
+      result = expr.exponent !== 0 && isProvablyPositiveExpr(expr.base, memo);
+      break;
   }
+  memo.pos.set(expr, result);
+  return result;
 }
 
-function isProvablyNonnegExpr(expr: ScalarExpr): boolean {
-  if (isProvablyPositiveExpr(expr)) return true;
+function isProvablyNonnegExpr(
+  expr: ScalarExpr,
+  memo: SignMemo = { pos: new WeakMap(), nonneg: new WeakMap(), steps: 0 },
+): boolean {
+  const cached = memo.nonneg.get(expr);
+  if (cached !== undefined) return cached;
+  if (isProvablyPositiveExpr(expr, memo)) {
+    memo.nonneg.set(expr, true);
+    return true;
+  }
+  bumpAstSteps(memo);
+  let result = false;
   switch (expr.kind) {
     case "const": {
       const q = toRational(expr.value);
-      return q !== null && q.n >= 0n;
+      result = q !== null && q.n >= 0n;
+      break;
     }
     case "abs":
     case "sqrt":
-      return true;
+      result = true;
+      break;
     case "pow":
-      return expr.exponent >= 0 && expr.exponent % 2 === 0;
+      result = expr.exponent >= 0 && expr.exponent % 2 === 0;
+      break;
     case "add":
     case "mul":
-      return isProvablyNonnegExpr(expr.left) && isProvablyNonnegExpr(expr.right);
+      result = isProvablyNonnegExpr(expr.left, memo) && isProvablyNonnegExpr(expr.right, memo);
+      break;
     case "div":
-      return isProvablyNonnegExpr(expr.left) && isProvablyPositiveExpr(expr.right);
-    default:
-      return false;
+      result = isProvablyNonnegExpr(expr.left, memo) && isProvablyPositiveExpr(expr.right, memo);
+      break;
   }
+  memo.nonneg.set(expr, result);
+  return result;
 }
 
 function collectConstraints(expr: ScalarExpr, variable: string): CollectedConstraints {
@@ -1964,6 +1927,8 @@ function collectConstraints(expr: ScalarExpr, variable: string): CollectedConstr
   const uncheckedOps: UncheckedDomainOp[] = [];
   let hasNonRationalDomainOps = false;
   let alwaysUndefined = false;
+  const walkState = { steps: 0 };
+  const signMemo: SignMemo = { pos: new WeakMap(), nonneg: new WeakMap(), steps: 0 };
 
   const pushSplitPoly = (poly: Polynomial) => {
     if (polynomialDegree(poly) >= 1) splitPolys.push(poly);
@@ -2004,6 +1969,7 @@ function collectConstraints(expr: ScalarExpr, variable: string): CollectedConstr
   };
 
   const extractDenominatorConstraints = (denExpr: ScalarExpr) => {
+    bumpAstSteps(walkState);
     switch (denExpr.kind) {
       case "neg":
       case "abs":
@@ -2030,7 +1996,7 @@ function collectConstraints(expr: ScalarExpr, variable: string): CollectedConstr
       else if (polynomialDegree(rf.numerator) >= 1) rationalList.push({ kind: "nonzero", poly: rf.numerator });
       return;
     }
-    const lin = extractLinearRadicalCombination(denExpr, variable);
+    const lin = extractLinearRadicalCombination(denExpr, variable, walkState);
     if (lin) {
       if (lin.rads.length === 0) {
         addRfDens(lin.constTerm);
@@ -2049,12 +2015,13 @@ function collectConstraints(expr: ScalarExpr, variable: string): CollectedConstr
         return;
       }
     }
-    if (isProvablyPositiveExpr(denExpr)) return;
+    if (isProvablyPositiveExpr(denExpr, signMemo)) return;
     uncheckedOps.push({ kind: "nonzero", expr: denExpr });
     hasNonRationalDomainOps = true;
   };
 
   const walk = (node: ScalarExpr) => {
+    bumpAstSteps(walkState);
     switch (node.kind) {
       case "const":
       case "variable":
@@ -2075,7 +2042,7 @@ function collectConstraints(expr: ScalarExpr, variable: string): CollectedConstr
           pushSplitPoly(rf.denominator);
           for (const den of rf.domainDenominators) pushSplitPoly(den);
         } else {
-          const lin = extractLinearRadicalCombination(node.value, variable);
+          const lin = extractLinearRadicalCombination(node.value, variable, walkState);
           if (lin && (lin.rads.length === 1 || (lin.rads.length === 2 && lin.constTerm.numerator.size === 0))) {
             const a = lin.rads[0]!.coeff;
             const p = lin.rads[0]!.radicand;
@@ -2119,7 +2086,7 @@ function collectConstraints(expr: ScalarExpr, variable: string): CollectedConstr
             uncheckedOps.push({ kind: "ge0", expr: node.value });
             hasNonRationalDomainOps = true;
           }
-        } else if (!isProvablyNonnegExpr(node.value)) {
+        } else if (!isProvablyNonnegExpr(node.value, signMemo)) {
           uncheckedOps.push({ kind: "ge0", expr: node.value });
           hasNonRationalDomainOps = true;
         }
@@ -2149,7 +2116,7 @@ function collectConstraints(expr: ScalarExpr, variable: string): CollectedConstr
             uncheckedOps.push({ kind: "gt0", expr: node.value });
             hasNonRationalDomainOps = true;
           }
-        } else if (!isProvablyPositiveExpr(node.value)) {
+        } else if (!isProvablyPositiveExpr(node.value, signMemo)) {
           uncheckedOps.push({ kind: "gt0", expr: node.value });
           hasNonRationalDomainOps = true;
         }
@@ -2483,7 +2450,9 @@ function evaluateExactRationalExt(
   expr: ScalarExpr,
   x: SpanRational,
   variable: string,
+  state: { steps: number } = { steps: 0 },
 ): { status: "value"; value: SpanRational } | { status: "undefined_domain"; reason: string } | { status: "unsupported"; reason: string } {
+  bumpAstSteps(state);
   switch (expr.kind) {
     case "const": {
       const v = toRational(expr.value);
@@ -2494,21 +2463,21 @@ function evaluateExactRationalExt(
     case "variable":
       return expr.name === variable ? { status: "value", value: x } : { status: "unsupported", reason: "foreign_variable" };
     case "neg": {
-      const inner = evaluateExactRationalExt(expr.value, x, variable);
+      const inner = evaluateExactRationalExt(expr.value, x, variable, state);
       if (inner.status !== "value") return inner;
       const out = rational(-inner.value.n, inner.value.d);
       checkPolyCoeffBound(out);
       return { status: "value", value: out };
     }
     case "abs": {
-      const inner = evaluateExactRationalExt(expr.value, x, variable);
+      const inner = evaluateExactRationalExt(expr.value, x, variable, state);
       if (inner.status !== "value") return inner;
       const out = inner.value.n < 0n ? rational(-inner.value.n, inner.value.d) : inner.value;
       checkPolyCoeffBound(out);
       return { status: "value", value: out };
     }
     case "sqrt": {
-      const inner = evaluateExactRationalExt(expr.value, x, variable);
+      const inner = evaluateExactRationalExt(expr.value, x, variable, state);
       if (inner.status !== "value") return inner;
       if (inner.value.n < 0n) return { status: "undefined_domain", reason: "even_root_domain" };
       const n = integerSquareRoot(inner.value.n);
@@ -2519,23 +2488,23 @@ function evaluateExactRationalExt(
       return { status: "value", value: out };
     }
     case "ln": {
-      const inner = evaluateExactRationalExt(expr.value, x, variable);
+      const inner = evaluateExactRationalExt(expr.value, x, variable, state);
       if (inner.status !== "value") return inner;
       if (inner.value.n <= 0n) return { status: "undefined_domain", reason: "ln_domain" };
       return inner.value.n === 1n && inner.value.d === 1n ? { status: "value", value: rational(0n) } : { status: "unsupported", reason: "irrational_ln" };
     }
     case "sin": {
-      const inner = evaluateExactRationalExt(expr.value, x, variable);
+      const inner = evaluateExactRationalExt(expr.value, x, variable, state);
       if (inner.status !== "value") return inner;
       return inner.value.n === 0n ? { status: "value", value: rational(0n) } : { status: "unsupported", reason: "irrational_sin" };
     }
     case "cos": {
-      const inner = evaluateExactRationalExt(expr.value, x, variable);
+      const inner = evaluateExactRationalExt(expr.value, x, variable, state);
       if (inner.status !== "value") return inner;
       return inner.value.n === 0n ? { status: "value", value: rational(1n) } : { status: "unsupported", reason: "irrational_cos" };
     }
     case "exp": {
-      const inner = evaluateExactRationalExt(expr.value, x, variable);
+      const inner = evaluateExactRationalExt(expr.value, x, variable, state);
       if (inner.status !== "value") return inner;
       return inner.value.n === 0n ? { status: "value", value: rational(1n) } : { status: "unsupported", reason: "irrational_exp" };
     }
@@ -2543,8 +2512,8 @@ function evaluateExactRationalExt(
     case "sub":
     case "mul":
     case "div": {
-      const left = evaluateExactRationalExt(expr.left, x, variable);
-      const right = evaluateExactRationalExt(expr.right, x, variable);
+      const left = evaluateExactRationalExt(expr.left, x, variable, state);
+      const right = evaluateExactRationalExt(expr.right, x, variable, state);
       if (left.status === "undefined_domain") return left;
       if (right.status === "undefined_domain") return right;
       if (expr.kind === "div" && right.status === "value" && right.value.n === 0n) {
@@ -2564,7 +2533,7 @@ function evaluateExactRationalExt(
       return { status: "value", value: out };
     }
     case "pow": {
-      const base = evaluateExactRationalExt(expr.base, x, variable);
+      const base = evaluateExactRationalExt(expr.base, x, variable, state);
       if (base.status === "undefined_domain") return base;
       if (!Number.isInteger(expr.exponent) || Math.abs(expr.exponent) > 12) {
         return { status: "unsupported", reason: "power_out_of_bounds" };
@@ -2612,7 +2581,14 @@ function rationalToFloatArg(q: SpanRational): { fx: number; xRadius: number } | 
   return { fx, xRadius };
 }
 
-function evaluateFloatSafe(expr: ScalarExpr, x: number, variable: string, xRadius = 0): FloatEvalResult {
+function evaluateFloatSafe(
+  expr: ScalarExpr,
+  x: number,
+  variable: string,
+  xRadius = 0,
+  state: { steps: number } = { steps: 0 },
+): FloatEvalResult {
+  bumpAstSteps(state);
   const BOUND_EPS = 1e-9;
   switch (expr.kind) {
     case "const": {
@@ -2652,13 +2628,13 @@ function evaluateFloatSafe(expr: ScalarExpr, x: number, variable: string, xRadiu
       };
     }
     case "neg": {
-      const inner = evaluateFloatSafe(expr.value, x, variable, xRadius);
+      const inner = evaluateFloatSafe(expr.value, x, variable, xRadius, state);
       return inner.status === "ok"
         ? { status: "ok", value: -inner.value, err: inner.err, marginOk: inner.marginOk, irrational: inner.irrational }
         : inner;
     }
     case "abs": {
-      const inner = evaluateFloatSafe(expr.value, x, variable, xRadius);
+      const inner = evaluateFloatSafe(expr.value, x, variable, xRadius, state);
       return inner.status === "ok"
         ? {
             status: "ok",
@@ -2670,7 +2646,7 @@ function evaluateFloatSafe(expr: ScalarExpr, x: number, variable: string, xRadiu
         : inner;
     }
     case "sqrt": {
-      const inner = evaluateFloatSafe(expr.value, x, variable, xRadius);
+      const inner = evaluateFloatSafe(expr.value, x, variable, xRadius, state);
       if (inner.status !== "ok") return inner;
       if (inner.value + inner.err < -BOUND_EPS) return { status: "undefined_domain", reason: "even_root_domain" };
       if (inner.value === 0 && !inner.irrational && inner.err === 0) {
@@ -2686,7 +2662,7 @@ function evaluateFloatSafe(expr: ScalarExpr, x: number, variable: string, xRadiu
         : { status: "unstable" };
     }
     case "ln": {
-      const inner = evaluateFloatSafe(expr.value, x, variable, xRadius);
+      const inner = evaluateFloatSafe(expr.value, x, variable, xRadius, state);
       if (inner.status !== "ok") return inner;
       if (inner.value + inner.err < -BOUND_EPS) {
         return { status: "undefined_domain", reason: "ln_domain" };
@@ -2700,7 +2676,7 @@ function evaluateFloatSafe(expr: ScalarExpr, x: number, variable: string, xRadiu
         : { status: "unstable" };
     }
     case "sin": {
-      const inner = evaluateFloatSafe(expr.value, x, variable, xRadius);
+      const inner = evaluateFloatSafe(expr.value, x, variable, xRadius, state);
       if (inner.status !== "ok") return inner;
       const exactZero = !inner.irrational && inner.err === 0 && inner.value === 0;
       const val = exactZero ? 0 : Math.sin(inner.value);
@@ -2708,7 +2684,7 @@ function evaluateFloatSafe(expr: ScalarExpr, x: number, variable: string, xRadiu
       return { status: "ok", value: val, err, marginOk: inner.marginOk, irrational: !exactZero };
     }
     case "cos": {
-      const inner = evaluateFloatSafe(expr.value, x, variable, xRadius);
+      const inner = evaluateFloatSafe(expr.value, x, variable, xRadius, state);
       if (inner.status !== "ok") return inner;
       const exactOne = !inner.irrational && inner.err === 0 && inner.value === 0;
       const val = exactOne ? 1 : Math.cos(inner.value);
@@ -2716,7 +2692,7 @@ function evaluateFloatSafe(expr: ScalarExpr, x: number, variable: string, xRadiu
       return { status: "ok", value: val, err, marginOk: inner.marginOk, irrational: !exactOne };
     }
     case "exp": {
-      const inner = evaluateFloatSafe(expr.value, x, variable, xRadius);
+      const inner = evaluateFloatSafe(expr.value, x, variable, xRadius, state);
       if (inner.status !== "ok") return inner;
       if (inner.value + inner.err > 50 || inner.value - inner.err < -50 || inner.err > 10) return { status: "unstable" };
       const exactOne = !inner.irrational && inner.err === 0 && inner.value === 0;
@@ -2730,8 +2706,8 @@ function evaluateFloatSafe(expr: ScalarExpr, x: number, variable: string, xRadiu
     case "sub":
     case "mul":
     case "div": {
-      const l = evaluateFloatSafe(expr.left, x, variable, xRadius);
-      const r = evaluateFloatSafe(expr.right, x, variable, xRadius);
+      const l = evaluateFloatSafe(expr.left, x, variable, xRadius, state);
+      const r = evaluateFloatSafe(expr.right, x, variable, xRadius, state);
       if (l.status === "undefined_domain") return l;
       if (r.status === "undefined_domain") return r;
       if (l.status !== "ok") return l;
@@ -2758,7 +2734,7 @@ function evaluateFloatSafe(expr: ScalarExpr, x: number, variable: string, xRadiu
         : { status: "unstable" };
     }
     case "pow": {
-      const b = evaluateFloatSafe(expr.base, x, variable, xRadius);
+      const b = evaluateFloatSafe(expr.base, x, variable, xRadius, state);
       if (b.status !== "ok") return b;
       if (expr.exponent <= 0 && b.value === 0 && b.err === 0) {
         return { status: "undefined_domain", reason: "natural_domain_denominator_zero" };
@@ -3221,7 +3197,9 @@ function ringNormalizeRational(
     return outNum;
   };
 
+  const convertState = { steps: 0 };
   const convert = (node: ScalarExpr): RingRational | null => {
+    bumpAstSteps(convertState);
     switch (node.kind) {
       case "const": {
         const q = toRational(node.value);
@@ -3419,7 +3397,15 @@ function ringNormalizeRational(
   }
 }
 
-function collectVariables(expr: ScalarExpr, out = new Set<string>()): Set<string> {
+function collectVariables(
+  expr: ScalarExpr,
+  out = new Set<string>(),
+  seen = new WeakSet<object>(),
+  state: { steps: number } = { steps: 0 },
+): Set<string> {
+  if (seen.has(expr)) return out;
+  seen.add(expr);
+  bumpAstSteps(state);
   switch (expr.kind) {
     case "const":
       return out;
@@ -3433,19 +3419,26 @@ function collectVariables(expr: ScalarExpr, out = new Set<string>()): Set<string
     case "sin":
     case "cos":
     case "exp":
-      return collectVariables(expr.value, out);
+      return collectVariables(expr.value, out, seen, state);
     case "add":
     case "sub":
     case "mul":
     case "div":
-      collectVariables(expr.left, out);
-      return collectVariables(expr.right, out);
+      collectVariables(expr.left, out, seen, state);
+      return collectVariables(expr.right, out, seen, state);
     case "pow":
-      return collectVariables(expr.base, out);
+      return collectVariables(expr.base, out, seen, state);
   }
 }
 
-function hasTranscendental(expr: ScalarExpr): boolean {
+function hasTranscendental(
+  expr: ScalarExpr,
+  seen = new WeakSet<object>(),
+  state: { steps: number } = { steps: 0 },
+): boolean {
+  if (seen.has(expr)) return false;
+  seen.add(expr);
+  bumpAstSteps(state);
   switch (expr.kind) {
     case "const":
     case "variable":
@@ -3458,14 +3451,14 @@ function hasTranscendental(expr: ScalarExpr): boolean {
     case "neg":
     case "sqrt":
     case "abs":
-      return hasTranscendental(expr.value);
+      return hasTranscendental(expr.value, seen, state);
     case "add":
     case "sub":
     case "mul":
     case "div":
-      return hasTranscendental(expr.left) || hasTranscendental(expr.right);
+      return hasTranscendental(expr.left, seen, state) || hasTranscendental(expr.right, seen, state);
     case "pow":
-      return hasTranscendental(expr.base);
+      return hasTranscendental(expr.base, seen, state);
   }
 }
 
@@ -4502,24 +4495,38 @@ function verifyIndefiniteIntegralInner(input: IntegralVerificationInput): Verifi
 }
 
 export function differentiate(expr: ScalarExpr, variable = "x"): ScalarExpr | null {
+  try {
+    return differentiateInner(expr, variable);
+  } catch (err) {
+    if (err instanceof PolyComplexityError || err instanceof MPolyOverflowError) return null;
+    throw err;
+  }
+}
+
+function differentiateInner(
+  expr: ScalarExpr,
+  variable = "x",
+  state: { steps: number } = { steps: 0 },
+): ScalarExpr | null {
+  bumpAstSteps(state);
   switch (expr.kind) {
     case "const":
       return { kind: "const", value: 0 };
     case "variable":
       return { kind: "const", value: expr.name === variable ? 1 : 0 };
     case "neg": {
-      const value = differentiate(expr.value, variable);
+      const value = differentiateInner(expr.value, variable, state);
       return value ? { kind: "neg", value } : null;
     }
     case "add":
     case "sub": {
-      const left = differentiate(expr.left, variable);
-      const right = differentiate(expr.right, variable);
+      const left = differentiateInner(expr.left, variable, state);
+      const right = differentiateInner(expr.right, variable, state);
       return left && right ? { kind: expr.kind, left, right } : null;
     }
     case "mul": {
-      const left = differentiate(expr.left, variable);
-      const right = differentiate(expr.right, variable);
+      const left = differentiateInner(expr.left, variable, state);
+      const right = differentiateInner(expr.right, variable, state);
       return left && right
         ? {
             kind: "add",
@@ -4529,8 +4536,8 @@ export function differentiate(expr: ScalarExpr, variable = "x"): ScalarExpr | nu
         : null;
     }
     case "div": {
-      const left = differentiate(expr.left, variable);
-      const right = differentiate(expr.right, variable);
+      const left = differentiateInner(expr.left, variable, state);
+      const right = differentiateInner(expr.right, variable, state);
       return left && right
         ? {
             kind: "div",
@@ -4544,7 +4551,7 @@ export function differentiate(expr: ScalarExpr, variable = "x"): ScalarExpr | nu
         : null;
     }
     case "pow": {
-      const du = differentiate(expr.base, variable);
+      const du = differentiateInner(expr.base, variable, state);
       if (!du) return null;
       if (expr.exponent === 0) return { kind: "const", value: 0 };
       if (expr.exponent === 1) return du;
@@ -4556,7 +4563,7 @@ export function differentiate(expr: ScalarExpr, variable = "x"): ScalarExpr | nu
       return { kind: "mul", left: powerPart, right: du };
     }
     case "sqrt": {
-      const du = differentiate(expr.value, variable);
+      const du = differentiateInner(expr.value, variable, state);
       if (!du) return null;
       return {
         kind: "div",
@@ -4566,24 +4573,24 @@ export function differentiate(expr: ScalarExpr, variable = "x"): ScalarExpr | nu
     }
     case "ln": {
       const inner = expr.value.kind === "abs" ? expr.value.value : expr.value;
-      const du = differentiate(inner, variable);
+      const du = differentiateInner(inner, variable, state);
       if (!du) return null;
       return { kind: "div", left: du, right: inner };
     }
     case "sin": {
-      const du = differentiate(expr.value, variable);
+      const du = differentiateInner(expr.value, variable, state);
       return du ? { kind: "mul", left: { kind: "cos", value: expr.value }, right: du } : null;
     }
     case "cos": {
-      const du = differentiate(expr.value, variable);
+      const du = differentiateInner(expr.value, variable, state);
       return du ? { kind: "mul", left: { kind: "neg", value: { kind: "sin", value: expr.value } }, right: du } : null;
     }
     case "exp": {
-      const du = differentiate(expr.value, variable);
+      const du = differentiateInner(expr.value, variable, state);
       return du ? { kind: "mul", left: { kind: "exp", value: expr.value }, right: du } : null;
     }
     case "abs": {
-      const du = differentiate(expr.value, variable);
+      const du = differentiateInner(expr.value, variable, state);
       return du ? { kind: "mul", left: { kind: "div", left: expr.value, right: { kind: "abs", value: expr.value } }, right: du } : null;
     }
     default:
@@ -4591,7 +4598,13 @@ export function differentiate(expr: ScalarExpr, variable = "x"): ScalarExpr | nu
   }
 }
 
-function substituteScalar(expr: ScalarExpr, variable: string, replacement: ScalarExpr): ScalarExpr {
+function substituteScalar(
+  expr: ScalarExpr,
+  variable: string,
+  replacement: ScalarExpr,
+  state: { steps: number } = { steps: 0 },
+): ScalarExpr {
+  bumpAstSteps(state);
   switch (expr.kind) {
     case "const":
       return expr;
@@ -4604,18 +4617,18 @@ function substituteScalar(expr: ScalarExpr, variable: string, replacement: Scala
     case "sin":
     case "cos":
     case "exp":
-      return { kind: expr.kind, value: substituteScalar(expr.value, variable, replacement) };
+      return { kind: expr.kind, value: substituteScalar(expr.value, variable, replacement, state) };
     case "add":
     case "sub":
     case "mul":
     case "div":
       return {
         kind: expr.kind,
-        left: substituteScalar(expr.left, variable, replacement),
-        right: substituteScalar(expr.right, variable, replacement),
+        left: substituteScalar(expr.left, variable, replacement, state),
+        right: substituteScalar(expr.right, variable, replacement, state),
       };
     case "pow":
-      return { kind: "pow", base: substituteScalar(expr.base, variable, replacement), exponent: expr.exponent };
+      return { kind: "pow", base: substituteScalar(expr.base, variable, replacement, state), exponent: expr.exponent };
   }
 }
 
@@ -4682,9 +4695,24 @@ export function verifySubstitutionBounds(input: SubstitutionBounds): Verificatio
   }
 }
 
-type MatrixWordMap = Map<string, ScalarExpr>;
+type WeightedScalar = {
+  expr: ScalarExpr;
+  weight: number;
+};
 
-function exprContainsAnyVar(expr: ScalarExpr, targetVars: ReadonlySet<string>): boolean {
+type MatrixWeightedWordMap = Map<string, WeightedScalar>;
+
+const MAX_MATRIX_SCALAR_AST_NODES = 4096;
+
+function exprContainsAnyVar(
+  expr: ScalarExpr,
+  targetVars: ReadonlySet<string>,
+  seen = new WeakSet<object>(),
+  state: { steps: number } = { steps: 0 },
+): boolean {
+  if (seen.has(expr)) return false;
+  seen.add(expr);
+  bumpAstSteps(state);
   switch (expr.kind) {
     case "const":
       return false;
@@ -4697,20 +4725,163 @@ function exprContainsAnyVar(expr: ScalarExpr, targetVars: ReadonlySet<string>): 
     case "sin":
     case "cos":
     case "exp":
-      return exprContainsAnyVar(expr.value, targetVars);
+      return exprContainsAnyVar(expr.value, targetVars, seen, state);
     case "pow":
-      return exprContainsAnyVar(expr.base, targetVars);
+      return exprContainsAnyVar(expr.base, targetVars, seen, state);
     case "add":
     case "sub":
     case "mul":
     case "div":
-      return exprContainsAnyVar(expr.left, targetVars) || exprContainsAnyVar(expr.right, targetVars);
+      return (
+        exprContainsAnyVar(expr.left, targetVars, seen, state) ||
+        exprContainsAnyVar(expr.right, targetVars, seen, state)
+      );
   }
 }
 
-function combineMatrixScalarExpr(left: ScalarExpr | undefined, right: ScalarExpr, op: "add" | "sub"): ScalarExpr {
-  if (!left) return op === "add" ? right : { kind: "neg", value: right };
-  return { kind: op, left, right };
+function measureScalarAstWeight(expr: ScalarExpr, maxNodes = MAX_MATRIX_SCALAR_AST_NODES): number {
+  let nodes = 0;
+  const stack: ScalarExpr[] = [expr];
+  while (stack.length > 0) {
+    const cur = stack.pop()!;
+    nodes++;
+    if (nodes > maxNodes) throw new PolyComplexityError();
+    switch (cur.kind) {
+      case "const":
+      case "variable":
+        break;
+      case "neg":
+      case "sqrt":
+      case "abs":
+      case "ln":
+      case "sin":
+      case "cos":
+      case "exp":
+        stack.push(cur.value);
+        break;
+      case "pow":
+        stack.push(cur.base);
+        break;
+      case "add":
+      case "sub":
+      case "mul":
+      case "div":
+        stack.push(cur.left, cur.right);
+        break;
+    }
+  }
+  return nodes;
+}
+
+function isDomainHazardFreeExpr(expr: ScalarExpr, maxSteps = MAX_MATRIX_SCALAR_AST_NODES): boolean {
+  let steps = 0;
+  const stack: ScalarExpr[] = [expr];
+  while (stack.length > 0) {
+    const cur = stack.pop()!;
+    steps++;
+    if (steps > maxSteps) return false;
+    switch (cur.kind) {
+      case "const":
+        if (toRational(cur.value) === null) return false;
+        break;
+      case "variable":
+        break;
+      case "neg":
+      case "abs":
+      case "sin":
+      case "cos":
+      case "exp":
+        stack.push(cur.value);
+        break;
+      case "add":
+      case "sub":
+      case "mul":
+        stack.push(cur.left, cur.right);
+        break;
+      case "pow":
+        if (!Number.isInteger(cur.exponent) || cur.exponent <= 0) return false;
+        stack.push(cur.base);
+        break;
+      case "div":
+      case "sqrt":
+      case "ln":
+        return false;
+    }
+  }
+  return true;
+}
+
+function tryScalarConstRational(expr: ScalarExpr): SpanRational | null {
+  if (expr.kind !== "const") return null;
+  return toRational(expr.value);
+}
+
+function makeWeightedConst(q: SpanRational): WeightedScalar {
+  checkPolyCoeffBound(q);
+  return { expr: { kind: "const", value: q }, weight: 1 };
+}
+
+function makeWeightedLeafScalar(expr: ScalarExpr): WeightedScalar {
+  const vars = collectVariables(expr);
+  if (vars.size === 0) {
+    const evaluated = evaluateExactRationalExt(expr, rational(0n), "__const__");
+    if (evaluated.status === "value") {
+      return makeWeightedConst(evaluated.value);
+    }
+  }
+  return { expr, weight: measureScalarAstWeight(expr) };
+}
+
+function negWeightedScalar(scalar: WeightedScalar, maxNodes = MAX_MATRIX_SCALAR_AST_NODES): WeightedScalar {
+  const q = tryScalarConstRational(scalar.expr);
+  if (q !== null) return makeWeightedConst(rational(-q.n, q.d));
+  const weight = scalar.weight + 1;
+  if (weight > maxNodes) throw new PolyComplexityError();
+  return { expr: { kind: "neg", value: scalar.expr }, weight };
+}
+
+function combineWeightedScalars(
+  left: WeightedScalar | undefined,
+  right: WeightedScalar,
+  op: "add" | "sub",
+  maxNodes = MAX_MATRIX_SCALAR_AST_NODES,
+): WeightedScalar {
+  if (!left) return op === "add" ? right : negWeightedScalar(right, maxNodes);
+  const lq = tryScalarConstRational(left.expr);
+  const rq = tryScalarConstRational(right.expr);
+  if (lq !== null && rq !== null) {
+    return makeWeightedConst(op === "add" ? addRational(lq, rq) : subtractRational(lq, rq));
+  }
+  if (rq !== null && rq.n === 0n) return left;
+  if (lq !== null && lq.n === 0n) return op === "add" ? right : negWeightedScalar(right, maxNodes);
+  const weight = left.weight + right.weight + 1;
+  if (weight > maxNodes) throw new PolyComplexityError();
+  return { expr: { kind: op, left: left.expr, right: right.expr }, weight };
+}
+
+function mulWeightedScalars(
+  left: WeightedScalar,
+  right: WeightedScalar,
+  maxNodes = MAX_MATRIX_SCALAR_AST_NODES,
+): WeightedScalar {
+  const lq = tryScalarConstRational(left.expr);
+  const rq = tryScalarConstRational(right.expr);
+  if (lq !== null && rq !== null) {
+    return makeWeightedConst(multiplyRational(lq, rq));
+  }
+  if (lq !== null) {
+    if (lq.n === 1n && lq.d === 1n) return right;
+    if (lq.n === -1n && lq.d === 1n) return negWeightedScalar(right, maxNodes);
+    if (lq.n === 0n && isDomainHazardFreeExpr(right.expr, maxNodes)) return makeWeightedConst(rational(0n));
+  }
+  if (rq !== null) {
+    if (rq.n === 1n && rq.d === 1n) return left;
+    if (rq.n === -1n && rq.d === 1n) return negWeightedScalar(left, maxNodes);
+    if (rq.n === 0n && isDomainHazardFreeExpr(left.expr, maxNodes)) return makeWeightedConst(rational(0n));
+  }
+  const weight = left.weight + right.weight + 1;
+  if (weight > maxNodes) throw new PolyComplexityError();
+  return { expr: { kind: "mul", left: left.expr, right: right.expr }, weight };
 }
 
 function matrixWordDegree(word: string): number {
@@ -4732,50 +4903,52 @@ function decomposeMatrixExpr(
   expr: ScalarExpr,
   nonCommVars: ReadonlySet<string>,
   budget: PolyMulBudget,
-): { ok: true; words: MatrixWordMap; scalarFactors: ScalarExpr[] } | { ok: false; reason: string } {
+  walkState: { steps: number } = { steps: 0 },
+): { ok: true; words: MatrixWeightedWordMap; scalarFactors: ScalarExpr[] } | { ok: false; reason: string } {
+  bumpAstSteps(walkState);
   if (!exprContainsAnyVar(expr, nonCommVars)) {
     const scalarFactors = expr.kind === "const" && toRational(expr.value)?.n === 0n ? [] : [expr];
-    return { ok: true, words: new Map([["", expr]]), scalarFactors };
+    return { ok: true, words: new Map([["", makeWeightedLeafScalar(expr)]]), scalarFactors };
   }
   switch (expr.kind) {
     case "variable":
-      return { ok: true, words: new Map([[expr.name, { kind: "const", value: 1 }]]), scalarFactors: [] };
+      return { ok: true, words: new Map([[expr.name, makeWeightedConst(rational(1n))]]), scalarFactors: [] };
     case "neg": {
-      const inner = decomposeMatrixExpr(expr.value, nonCommVars, budget);
+      const inner = decomposeMatrixExpr(expr.value, nonCommVars, budget, walkState);
       if (!inner.ok) return inner;
-      const words: MatrixWordMap = new Map();
+      const words: MatrixWeightedWordMap = new Map();
       for (const [w, coeff] of inner.words) {
-        words.set(w, { kind: "neg", value: coeff });
+        words.set(w, negWeightedScalar(coeff));
       }
       return { ok: true, words, scalarFactors: inner.scalarFactors };
     }
     case "add":
     case "sub": {
-      const l = decomposeMatrixExpr(expr.left, nonCommVars, budget);
+      const l = decomposeMatrixExpr(expr.left, nonCommVars, budget, walkState);
       if (!l.ok) return l;
-      const r = decomposeMatrixExpr(expr.right, nonCommVars, budget);
+      const r = decomposeMatrixExpr(expr.right, nonCommVars, budget, walkState);
       if (!r.ok) return r;
-      const words: MatrixWordMap = new Map(l.words);
+      const words: MatrixWeightedWordMap = new Map(l.words);
       for (const [w, coeff] of r.words) {
-        words.set(w, combineMatrixScalarExpr(words.get(w), coeff, expr.kind));
+        words.set(w, combineWeightedScalars(words.get(w), coeff, expr.kind));
         if (words.size > MAX_SYMBOLIC_POLY_TERMS) throw new PolyComplexityError();
       }
       return { ok: true, words, scalarFactors: [...l.scalarFactors, ...r.scalarFactors] };
     }
     case "mul": {
-      const l = decomposeMatrixExpr(expr.left, nonCommVars, budget);
+      const l = decomposeMatrixExpr(expr.left, nonCommVars, budget, walkState);
       if (!l.ok) return l;
-      const r = decomposeMatrixExpr(expr.right, nonCommVars, budget);
+      const r = decomposeMatrixExpr(expr.right, nonCommVars, budget, walkState);
       if (!r.ok) return r;
-      const words: MatrixWordMap = new Map();
+      const words: MatrixWeightedWordMap = new Map();
       for (const [wl, cl] of l.words) {
         for (const [wr, cr] of r.words) {
           budget.mulSteps++;
           if (budget.mulSteps > MAX_SYMBOLIC_MUL_STEPS) throw new PolyComplexityError();
           const combinedWord = concatMatrixWords(wl, wr);
           if (matrixWordDegree(combinedWord) > MAX_SYMBOLIC_POLY_DEGREE) throw new PolyComplexityError();
-          const prodCoeff: ScalarExpr = { kind: "mul", left: cl, right: cr };
-          words.set(combinedWord, combineMatrixScalarExpr(words.get(combinedWord), prodCoeff, "add"));
+          const prodCoeff = mulWeightedScalars(cl, cr);
+          words.set(combinedWord, combineWeightedScalars(words.get(combinedWord), prodCoeff, "add"));
           if (words.size > MAX_SYMBOLIC_POLY_TERMS) throw new PolyComplexityError();
         }
       }
@@ -4785,13 +4958,24 @@ function decomposeMatrixExpr(
       if (exprContainsAnyVar(expr.right, nonCommVars)) {
         return { ok: false, reason: "non_commutative_division_unsupported" };
       }
-      const l = decomposeMatrixExpr(expr.left, nonCommVars, budget);
+      const l = decomposeMatrixExpr(expr.left, nonCommVars, budget, walkState);
       if (!l.ok) return l;
-      const words: MatrixWordMap = new Map();
+      const foldedDen = makeWeightedLeafScalar(expr.right);
+      const denConst = tryScalarConstRational(foldedDen.expr);
+      const rawDenWeight = denConst !== null && denConst.n !== 0n ? 1 : measureScalarAstWeight(expr.right);
+      const words: MatrixWeightedWordMap = new Map();
       for (const [w, coeff] of l.words) {
-        words.set(w, { kind: "div", left: coeff, right: expr.right });
+        const lq = tryScalarConstRational(coeff.expr);
+        if (lq !== null && denConst !== null && denConst.n !== 0n) {
+          words.set(w, makeWeightedConst(divideRational(lq, denConst)));
+          continue;
+        }
+        const weight = coeff.weight + rawDenWeight + 1;
+        if (weight > MAX_MATRIX_SCALAR_AST_NODES) throw new PolyComplexityError();
+        words.set(w, { expr: { kind: "div", left: coeff.expr, right: expr.right }, weight });
       }
-      return { ok: true, words, scalarFactors: [...l.scalarFactors, expr.right] };
+      const recipFactor: ScalarExpr = { kind: "div", left: { kind: "const", value: 1 }, right: expr.right };
+      return { ok: true, words, scalarFactors: [...l.scalarFactors, recipFactor] };
     }
     case "pow": {
       if (!Number.isInteger(expr.exponent) || Math.abs(expr.exponent) > 12) {
@@ -4800,19 +4984,19 @@ function decomposeMatrixExpr(
       if (expr.exponent <= 0) {
         return { ok: false, reason: "non_commutative_power_unsupported" };
       }
-      const base = decomposeMatrixExpr(expr.base, nonCommVars, budget);
+      const base = decomposeMatrixExpr(expr.base, nonCommVars, budget, walkState);
       if (!base.ok) return base;
-      let accWords: MatrixWordMap = new Map([["", { kind: "const", value: 1 }]]);
+      let accWords: MatrixWeightedWordMap = new Map([["", makeWeightedConst(rational(1n))]]);
       for (let i = 0; i < expr.exponent; i++) {
-        const next: MatrixWordMap = new Map();
+        const next: MatrixWeightedWordMap = new Map();
         for (const [wl, cl] of accWords) {
           for (const [wr, cr] of base.words) {
             budget.mulSteps++;
             if (budget.mulSteps > MAX_SYMBOLIC_MUL_STEPS) throw new PolyComplexityError();
             const combinedWord = concatMatrixWords(wl, wr);
             if (matrixWordDegree(combinedWord) > MAX_SYMBOLIC_POLY_DEGREE) throw new PolyComplexityError();
-            const prodCoeff: ScalarExpr = { kind: "mul", left: cl, right: cr };
-            next.set(combinedWord, combineMatrixScalarExpr(next.get(combinedWord), prodCoeff, "add"));
+            const prodCoeff = mulWeightedScalars(cl, cr);
+            next.set(combinedWord, combineWeightedScalars(next.get(combinedWord), prodCoeff, "add"));
             if (next.size > MAX_SYMBOLIC_POLY_TERMS) throw new PolyComplexityError();
           }
         }
@@ -4869,6 +5053,256 @@ function firstUnverifiedFactorReason(factors: readonly ScalarExpr[], scalarDomai
   return null;
 }
 
+function collectUniqueScalarTerms(decomp: { words: MatrixWeightedWordMap; scalarFactors: ScalarExpr[] }): ScalarExpr[] {
+  const seen = new Set<ScalarExpr>();
+  const out: ScalarExpr[] = [];
+  for (const scalar of decomp.words.values()) {
+    if (!seen.has(scalar.expr)) {
+      seen.add(scalar.expr);
+      out.push(scalar.expr);
+    }
+  }
+  for (const factor of decomp.scalarFactors) {
+    if (!seen.has(factor)) {
+      seen.add(factor);
+      out.push(factor);
+    }
+  }
+  return out;
+}
+
+function mergeCollectedConstraints(terms: readonly ScalarExpr[], variable: string): CollectedConstraints {
+  const out: CollectedConstraints = {
+    rational: [],
+    quadBinomials: [],
+    splitPolys: [],
+    uncheckedOps: [],
+    hasNonRationalDomainOps: false,
+    alwaysUndefined: false,
+  };
+  for (const term of terms) {
+    const c = collectConstraints(term, variable);
+    out.rational.push(...c.rational);
+    out.quadBinomials.push(...c.quadBinomials);
+    out.splitPolys.push(...c.splitPolys);
+    out.uncheckedOps.push(...c.uncheckedOps);
+    if (c.hasNonRationalDomainOps) out.hasNonRationalDomainOps = true;
+    if (c.alwaysUndefined) out.alwaysUndefined = true;
+  }
+  return out;
+}
+
+function collectJointRationalDens(
+  terms: readonly ScalarExpr[],
+  variable: string,
+): { allRational: true; dens: Polynomial[]; alwaysUndefined: boolean } | { allRational: false } {
+  const dens: Polynomial[] = [];
+  let alwaysUndefined = false;
+  for (const term of terms) {
+    const rf = rationalForm(term, variable);
+    if (rf.unsupported === "polynomial_complexity_exceeded") throw new PolyComplexityError();
+    if (rf.unsupported) return { allRational: false };
+    if (rf.zeroDenominator || rf.denominator.size === 0) alwaysUndefined = true;
+    for (const den of rf.domainDenominators) {
+      if (den.size === 0) alwaysUndefined = true;
+      else if (polynomialDegree(den) >= 1) dens.push(den);
+    }
+    if (polynomialDegree(rf.denominator) >= 1) dens.push(rf.denominator);
+  }
+  return { allRational: true, dens, alwaysUndefined };
+}
+
+function resolveTermsDefinedAtSite(
+  terms: readonly ScalarExpr[],
+  site: SampleSite,
+  variable: string,
+): "defined" | "undefined_domain" | "unresolved" {
+  let sawUnresolved = false;
+  for (const term of terms) {
+    const status = resolveExprDefinedAtSite(term, site, variable);
+    if (status === "undefined_domain") return "undefined_domain";
+    if (status === "unresolved") sawUnresolved = true;
+  }
+  return sawUnresolved ? "unresolved" : "defined";
+}
+
+function tightenWordDomainFromCad(
+  scalarDomain: DomainSpec,
+  parsedDomain: { intervals: NormalizedInterval[]; excluded: SpanRational[] },
+  cad: CadPlan,
+  sConstraints: CollectedConstraints,
+  rConstraints: CollectedConstraints,
+): DomainSpec {
+  const extraExcluded: string[] = [];
+  const validRationalKeys = new Set<string>();
+  const validRationals: SpanRational[] = [];
+  let hasIsolated = false;
+
+  for (const site of cad.sites) {
+    if (site.kind === "isolated") {
+      hasIsolated = true;
+      continue;
+    }
+    const ok =
+      constraintsSatisfiedAtSite(sConstraints, site) && constraintsSatisfiedAtSite(rConstraints, site);
+    if (!ok) {
+      extraExcluded.push(formatRational(site.x));
+    } else {
+      const key = formatRational(site.x);
+      if (!validRationalKeys.has(key)) {
+        validRationalKeys.add(key);
+        validRationals.push(site.x);
+      }
+    }
+  }
+
+  const excluded = [...(scalarDomain.excluded ?? []), ...extraExcluded];
+  if (hasIsolated) {
+    return {
+      ...scalarDomain,
+      ...(excluded.length > 0 ? { excluded } : {}),
+    };
+  }
+
+  const activeCells = cad.openCells
+    .filter((cell) => {
+      const sampleSite: SampleSite = { kind: "rational", x: cell.sample };
+      return constraintsSatisfiedAtSite(sConstraints, sampleSite) && constraintsSatisfiedAtSite(rConstraints, sampleSite);
+    })
+    .sort((a, b) => {
+      if (a.left === null && b.left === null) return 0;
+      if (a.left === null) return -1;
+      if (b.left === null) return 1;
+      return compareRational(a.left, b.left);
+    });
+
+  const mergedIntervals: DomainInterval[] = [];
+  const coveredPoints = new Set<string>();
+  const intervalsFromCells: NormalizedInterval[] = [];
+
+  for (const cell of activeCells) {
+    const leftValid = cell.left !== null && validRationalKeys.has(formatRational(cell.left));
+    const rightValid = cell.right !== null && validRationalKeys.has(formatRational(cell.right));
+    const nextIv: NormalizedInterval = {
+      left: cell.left,
+      right: cell.right,
+      leftOpen: !leftValid,
+      rightOpen: !rightValid,
+    };
+    const prev = intervalsFromCells[intervalsFromCells.length - 1];
+    if (
+      prev &&
+      prev.right !== null &&
+      nextIv.left !== null &&
+      equalRational(prev.right, nextIv.left) &&
+      validRationalKeys.has(formatRational(prev.right))
+    ) {
+      prev.right = nextIv.right;
+      prev.rightOpen = nextIv.rightOpen;
+    } else {
+      intervalsFromCells.push(nextIv);
+    }
+  }
+
+  for (const iv of intervalsFromCells) {
+    for (const pt of validRationals) {
+      if (pointInInterval(pt, iv)) coveredPoints.add(formatRational(pt));
+    }
+    mergedIntervals.push({
+      ...(iv.left !== null ? { left: formatRational(iv.left), leftOpen: iv.leftOpen } : {}),
+      ...(iv.right !== null ? { right: formatRational(iv.right), rightOpen: iv.rightOpen } : {}),
+    });
+  }
+
+  for (const pt of validRationals) {
+    const key = formatRational(pt);
+    if (!coveredPoints.has(key) && parsedDomain.intervals.some((iv) => pointInInterval(pt, iv))) {
+      mergedIntervals.push({ left: key, right: key });
+    }
+  }
+
+  if (mergedIntervals.length === 0) {
+    return {
+      ...scalarDomain,
+      ...(excluded.length > 0 ? { excluded } : {}),
+    };
+  }
+  return {
+    ...scalarDomain,
+    intervals: mergedIntervals,
+    ...(excluded.length > 0 ? { excluded } : {}),
+  };
+}
+
+function verifyMatchedDomainRationalWord(
+  sCoeff: ScalarExpr,
+  rCoeff: ScalarExpr,
+  variable: string,
+  validJointSites: readonly SampleSite[],
+  parsedDomain: { intervals: NormalizedInterval[]; excluded: SpanRational[] },
+  domain: DomainSpec | undefined,
+): VerificationResult | null {
+  const sRf = rationalForm(sCoeff, variable);
+  const rRf = rationalForm(rCoeff, variable);
+  if (sRf.unsupported || rRf.unsupported) return null;
+  const crossBudget: PolyMulBudget = { mulSteps: 0 };
+  const combinedDen = boundedPolyMultiply(sRf.denominator, rRf.denominator, crossBudget);
+  const leftCross = boundedPolyMultiply(sRf.numerator, rRf.denominator, crossBudget);
+  const rightCross = boundedPolyMultiply(rRf.numerator, sRf.denominator, crossBudget);
+  if (!combinedDen || !leftCross || !rightCross) {
+    return { status: "unverified", reason: "polynomial_complexity_exceeded", domain };
+  }
+  const residual = polynomialAdd(leftCross, rightCross, -1);
+  if (exceedsPolyLimits(residual)) {
+    return { status: "unverified", reason: "polynomial_complexity_exceeded", domain };
+  }
+  if (residual.size === 0) {
+    return { status: "equivalent", reason: "exact_rational_identity_on_locked_domain", domain };
+  }
+  for (const site of validJointSites) {
+    if (site.kind !== "rational") continue;
+    if (polynomialEvaluate(combinedDen, site.x).n === 0n) continue;
+    if (polynomialEvaluate(residual, site.x).n !== 0n) {
+      return {
+        status: "inequivalent",
+        reason: "residual_nonzero",
+        witness: { input: formatRational(site.x), detail: "exact residual is non-zero" },
+        domain,
+      };
+    }
+  }
+  const deg = polynomialDegree(residual);
+  const hasNonDegenerateInterval = parsedDomain.intervals.some(
+    (iv) => !(iv.left && iv.right && equalRational(iv.left, iv.right)),
+  );
+  if (!hasNonDegenerateInterval) {
+    return { status: "equivalent", reason: "exact_rational_identity_on_locked_domain", domain };
+  }
+  const maxProbes = deg + Math.max(0, polynomialDegree(combinedDen)) + parsedDomain.excluded.length + 5;
+  for (const iv of parsedDomain.intervals) {
+    if (iv.left && iv.right && equalRational(iv.left, iv.right)) continue;
+    let probe = pickRationalBetween(iv.left, iv.right);
+    for (let i = 0; i < maxProbes; i++) {
+      if (
+        pointInInterval(probe, iv) &&
+        !parsedDomain.excluded.some((e) => equalRational(e, probe)) &&
+        polynomialEvaluate(combinedDen, probe).n !== 0n
+      ) {
+        if (polynomialEvaluate(residual, probe).n !== 0n) {
+          return {
+            status: "inequivalent",
+            reason: "residual_nonzero",
+            witness: { input: formatRational(probe), detail: "exact residual is non-zero" },
+            domain,
+          };
+        }
+      }
+      probe = iv.right !== null ? divideRational(addRational(probe, iv.right), rational(2n)) : addRational(probe, rational(1n));
+    }
+  }
+  return { status: "unverified", reason: "residual_nonzero_unwitnessed", domain };
+}
+
 function verifyNonCommutativeParsed(
   student: ScalarExpr,
   reference: ScalarExpr,
@@ -4889,8 +5323,9 @@ function verifyNonCommutativeParsed(
     const rDecomp = decomposeMatrixExpr(reference, nonCommVars, budget);
     if (!rDecomp.ok) return { status: "unverified", reason: rDecomp.reason, domain };
 
+    const effectiveScalarVar = scalarVar ?? "x";
     const scalarDomain: DomainSpec = {
-      variable: scalarVar ?? "x",
+      variable: effectiveScalarVar,
       ...(domain?.intervals ? { intervals: domain.intervals } : {}),
       ...(domain?.excluded ? { excluded: domain.excluded } : {}),
     };
@@ -4901,13 +5336,241 @@ function verifyNonCommutativeParsed(
       return { status: "unverified", reason: sUnverifiedFactor, domain };
     }
 
+    const sTerms = collectUniqueScalarTerms(sDecomp);
+    const rTerms = collectUniqueScalarTerms(rDecomp);
+    const sJointRat = collectJointRationalDens(sTerms, effectiveScalarVar);
+    const rJointRat = collectJointRationalDens(rTerms, effectiveScalarVar);
+    const sConstraints = mergeCollectedConstraints(sTerms, effectiveScalarVar);
+    const rConstraints = mergeCollectedConstraints(rTerms, effectiveScalarVar);
+
+    if (sConstraints.alwaysUndefined && rConstraints.alwaysUndefined) {
+      return { status: "unverified", reason: "empty_natural_domain", domain };
+    }
+    if (sConstraints.alwaysUndefined !== rConstraints.alwaysUndefined) {
+      if (sUnverifiedFactor || rUnverifiedFactor) {
+        return { status: "unverified", reason: sUnverifiedFactor ?? rUnverifiedFactor!, domain };
+      }
+      const otherConstraints = sConstraints.alwaysUndefined ? rConstraints : sConstraints;
+      const otherTerms = sConstraints.alwaysUndefined ? rTerms : sTerms;
+      const cad = buildCadPlan(otherConstraints.rational, parsedDomain, otherConstraints.splitPolys);
+      if (cad.complexityExceeded) return { status: "unverified", reason: "polynomial_complexity_exceeded", domain };
+      let verifiedWitness: string | null = null;
+      const candidateSites: SampleSite[] = [
+        ...cad.sites,
+        ...cad.openCells.map((cell) => ({ kind: "rational", x: cell.sample }) as SampleSite),
+      ];
+      for (const site of candidateSites) {
+        if (!constraintsSatisfiedAtSite(otherConstraints, site)) continue;
+        if (!otherConstraints.hasNonRationalDomainOps || resolveTermsDefinedAtSite(otherTerms, site, effectiveScalarVar) === "defined") {
+          verifiedWitness = formatSampleSite(site);
+          break;
+        }
+      }
+      if (!verifiedWitness) {
+        return {
+          status: "unverified",
+          reason: otherConstraints.hasNonRationalDomainOps || cad.unresolvedRootIsolation ? "unresolved_nonrational_domain" : "empty_natural_domain",
+          domain,
+        };
+      }
+      return {
+        status: "inequivalent",
+        reason: "natural_domain_mismatch",
+        witness: { input: verifiedWitness, detail: sConstraints.alwaysUndefined ? "student undefined" : "reference undefined" },
+        domain,
+      };
+    }
+
+    let wordDomain: DomainSpec = scalarDomain;
+    let validJointSites: SampleSite[] = [];
+    let jointMatchedPureRational = false;
+    let hasUnresolvedJointDomain = false;
+
+    if (sJointRat.allRational && rJointRat.allRational) {
+      if (sUnverifiedFactor || rUnverifiedFactor) {
+        return { status: "unverified", reason: sUnverifiedFactor ?? rUnverifiedFactor!, domain };
+      }
+      const denDiff = checkDenominatorSetsEquivalent(
+        sJointRat.dens,
+        rJointRat.dens,
+        parsedDomain.intervals,
+        parsedDomain.excluded,
+      );
+      if (!denDiff.equal) {
+        if (denDiff.complexityExceeded) {
+          return { status: "unverified", reason: "polynomial_complexity_exceeded", domain };
+        }
+        return {
+          status: "inequivalent",
+          reason: "natural_domain_mismatch",
+          witness: denDiff.witness,
+          domain,
+        };
+      }
+      const jointUnion = squareFreeProduct([...sJointRat.dens, ...rJointRat.dens]);
+      if (!jointUnion) {
+        return { status: "unverified", reason: "polynomial_complexity_exceeded", domain };
+      }
+      const cad = buildCadPlan(
+        [...sConstraints.rational, ...rConstraints.rational],
+        parsedDomain,
+        [...sConstraints.splitPolys, ...rConstraints.splitPolys],
+      );
+      if (cad.complexityExceeded) return { status: "unverified", reason: "polynomial_complexity_exceeded", domain };
+      if (cad.unresolvedRootIsolation) return { status: "unverified", reason: "unresolved_root_isolation", domain };
+      validJointSites = cad.sites.filter(
+        (site) => constraintsSatisfiedAtSite(sConstraints, site) && constraintsSatisfiedAtSite(rConstraints, site),
+      );
+      if (validJointSites.length === 0) {
+        return { status: "unverified", reason: "empty_natural_domain", domain };
+      }
+      const extraExcluded: string[] = [];
+      if (polynomialDegree(jointUnion) >= 1) {
+        for (const iv of parsedDomain.intervals) {
+          const { roots } = isolateRealRoots(jointUnion, iv);
+          for (const root of roots) {
+            if (root.kind === "exact") extraExcluded.push(formatRational(root.value));
+          }
+        }
+      }
+      if (extraExcluded.length > 0) {
+        wordDomain = {
+          ...scalarDomain,
+          excluded: [...(scalarDomain.excluded ?? []), ...extraExcluded],
+        };
+      }
+      jointMatchedPureRational = true;
+    } else {
+      if (sUnverifiedFactor || rUnverifiedFactor) {
+        return { status: "unverified", reason: sUnverifiedFactor ?? rUnverifiedFactor!, domain };
+      }
+      const cad = buildCadPlan(
+        [...sConstraints.rational, ...rConstraints.rational],
+        parsedDomain,
+        [...sConstraints.splitPolys, ...rConstraints.splitPolys],
+      );
+      if (cad.complexityExceeded) return { status: "unverified", reason: "polynomial_complexity_exceeded", domain };
+      if (cad.unresolvedRootIsolation) return { status: "unverified", reason: "unresolved_root_isolation", domain };
+
+      const ambiguousSites: Array<{ site: SampleSite; definedSide: "student" | "reference" }> = [];
+      for (const site of cad.sites) {
+        const sOk = constraintsSatisfiedAtSite(sConstraints, site);
+        const rOk = constraintsSatisfiedAtSite(rConstraints, site);
+        if (sOk !== rOk) {
+          const okSideHasNonRational = sOk ? sConstraints.hasNonRationalDomainOps : rConstraints.hasNonRationalDomainOps;
+          if (!okSideHasNonRational) {
+            return {
+              status: "inequivalent",
+              reason: "natural_domain_mismatch",
+              witness: { input: formatSampleSite(site), detail: sOk ? "reference undefined" : "student undefined" },
+              domain,
+            };
+          }
+          ambiguousSites.push({ site, definedSide: sOk ? "student" : "reference" });
+        } else if (sOk && rOk) {
+          validJointSites.push(site);
+        }
+      }
+      for (const amb of ambiguousSites) {
+        const definedTerms = amb.definedSide === "student" ? sTerms : rTerms;
+        const status = resolveTermsDefinedAtSite(definedTerms, amb.site, effectiveScalarVar);
+        if (status === "defined") {
+          return {
+            status: "inequivalent",
+            reason: "natural_domain_mismatch",
+            witness: {
+              input: formatSampleSite(amb.site),
+              detail: amb.definedSide === "student" ? "reference undefined" : "student undefined",
+            },
+            domain,
+          };
+        }
+        if (status === "unresolved") hasUnresolvedJointDomain = true;
+      }
+      for (const cell of cad.openCells) {
+        const sampleSite: SampleSite = { kind: "rational", x: cell.sample };
+        const sOk = constraintsSatisfiedAtSite(sConstraints, sampleSite);
+        const rOk = constraintsSatisfiedAtSite(rConstraints, sampleSite);
+        if (sOk !== rOk) {
+          const okSideHasNonRational = sOk ? sConstraints.hasNonRationalDomainOps : rConstraints.hasNonRationalDomainOps;
+          if (!okSideHasNonRational) {
+            return {
+              status: "inequivalent",
+              reason: "natural_domain_mismatch",
+              witness: { input: formatRational(cell.sample), detail: sOk ? "reference undefined" : "student undefined" },
+              domain,
+            };
+          }
+          const definedTerms = sOk ? sTerms : rTerms;
+          for (const probe of collectOpenCellProbes(cell, parsedDomain.excluded)) {
+            if (resolveTermsDefinedAtSite(definedTerms, { kind: "rational", x: probe }, effectiveScalarVar) === "defined") {
+              return {
+                status: "inequivalent",
+                reason: "natural_domain_mismatch",
+                witness: { input: formatRational(probe), detail: sOk ? "reference undefined" : "student undefined" },
+                domain,
+              };
+            }
+          }
+          hasUnresolvedJointDomain = true;
+        }
+      }
+      for (const site of validJointSites) {
+        if (!sConstraints.hasNonRationalDomainOps && !rConstraints.hasNonRationalDomainOps) continue;
+        const sStatus = resolveTermsDefinedAtSite(sTerms, site, effectiveScalarVar);
+        const rStatus = resolveTermsDefinedAtSite(rTerms, site, effectiveScalarVar);
+        if (sStatus === "undefined_domain" && rStatus === "defined") {
+          return {
+            status: "inequivalent",
+            reason: "natural_domain_mismatch",
+            witness: { input: formatSampleSite(site), detail: "student undefined" },
+            domain,
+          };
+        }
+        if (rStatus === "undefined_domain" && sStatus === "defined") {
+          return {
+            status: "inequivalent",
+            reason: "natural_domain_mismatch",
+            witness: { input: formatSampleSite(site), detail: "reference undefined" },
+            domain,
+          };
+        }
+        if ((sStatus === "undefined_domain" && rStatus === "unresolved") || (rStatus === "undefined_domain" && sStatus === "unresolved")) {
+          hasUnresolvedJointDomain = true;
+        }
+      }
+      if (validJointSites.length === 0) {
+        return {
+          status: "unverified",
+          reason: hasUnresolvedJointDomain ? "unresolved_nonrational_domain" : "empty_natural_domain",
+          domain,
+        };
+      }
+      wordDomain = tightenWordDomainFromCad(scalarDomain, parsedDomain, cad, sConstraints, rConstraints);
+    }
+
     const allWords = new Set([...sDecomp.words.keys(), ...rDecomp.words.keys()]);
     const zeroConst: ScalarExpr = { kind: "const", value: 0 };
     const inequivalentResults: VerificationResult[] = [];
     for (const word of allWords) {
-      const sCoeff = sDecomp.words.get(word) ?? zeroConst;
-      const rCoeff = rDecomp.words.get(word) ?? zeroConst;
-      const res = verifyScalarEquivalence(sCoeff, rCoeff, scalarDomain);
+      const sCoeff = sDecomp.words.get(word)?.expr ?? zeroConst;
+      const rCoeff = rDecomp.words.get(word)?.expr ?? zeroConst;
+      let res = verifyScalarEquivalence(sCoeff, rCoeff, wordDomain);
+      if (
+        res.status === "inequivalent" &&
+        res.reason === "natural_domain_mismatch" &&
+        jointMatchedPureRational
+      ) {
+        const matched = verifyMatchedDomainRationalWord(
+          sCoeff,
+          rCoeff,
+          effectiveScalarVar,
+          validJointSites,
+          parsedDomain,
+          wordDomain,
+        );
+        if (matched) res = matched;
+      }
       if (res.status === "unverified") {
         return { status: "unverified", reason: res.reason, domain };
       }
@@ -4917,8 +5580,8 @@ function verifyNonCommutativeParsed(
     }
 
     if (inequivalentResults.length === 0) {
-      if (sUnverifiedFactor || rUnverifiedFactor) {
-        return { status: "unverified", reason: sUnverifiedFactor ?? rUnverifiedFactor!, domain };
+      if (hasUnresolvedJointDomain) {
+        return { status: "unverified", reason: "unresolved_nonrational_domain", domain };
       }
       return {
         status: "equivalent",
@@ -4926,22 +5589,29 @@ function verifyNonCommutativeParsed(
         domain,
       };
     }
-    if (sUnverifiedFactor || rUnverifiedFactor) {
-      return { status: "unverified", reason: sUnverifiedFactor ?? rUnverifiedFactor!, domain };
-    }
 
     // Check if the nonzero discrepancy disappears under commutative word sorting (pure commutation error)
-    const collapsedWords = new Map<string, ScalarExpr>();
+    const collapsedWords = new Map<string, WeightedScalar>();
     for (const word of allWords) {
       const sCoeff = sDecomp.words.get(word);
       const rCoeff = rDecomp.words.get(word);
       const sorted = sortMatrixWord(word);
-      if (sCoeff) collapsedWords.set(sorted, combineMatrixScalarExpr(collapsedWords.get(sorted), sCoeff, "add"));
-      if (rCoeff) collapsedWords.set(sorted, combineMatrixScalarExpr(collapsedWords.get(sorted), rCoeff, "sub"));
+      if (sCoeff) {
+        collapsedWords.set(
+          sorted,
+          combineWeightedScalars(collapsedWords.get(sorted), sCoeff, "add", MAX_AST_WALK_STEPS),
+        );
+      }
+      if (rCoeff) {
+        collapsedWords.set(
+          sorted,
+          combineWeightedScalars(collapsedWords.get(sorted), rCoeff, "sub", MAX_AST_WALK_STEPS),
+        );
+      }
     }
     let allCollapsedEquivalent = collapsedWords.size > 0;
-    for (const diffExpr of collapsedWords.values()) {
-      const chk = verifyScalarEquivalence(diffExpr, zeroConst, scalarDomain);
+    for (const diffScalar of collapsedWords.values()) {
+      const chk = verifyScalarEquivalence(diffScalar.expr, zeroConst, wordDomain);
       if (chk.status !== "equivalent") {
         allCollapsedEquivalent = false;
         break;
@@ -4952,6 +5622,14 @@ function verifyNonCommutativeParsed(
         status: "inequivalent",
         reason: "non_commutative_mismatch",
         witness: { input: "factor_order", detail: "non-commutative multiplication order differs" },
+        domain,
+      };
+    }
+    if (inequivalentResults.every((r) => r.reason === "natural_domain_mismatch")) {
+      return {
+        status: "inequivalent",
+        reason: "natural_domain_mismatch",
+        witness: inequivalentResults[0]?.witness ?? { input: "expression", detail: "natural domain mismatch" },
         domain,
       };
     }
@@ -4977,23 +5655,33 @@ export function verifyMatrixExpressionEquivalence(
   referenceInput: ScalarExpr | string,
   domain?: DomainSpec,
 ): VerificationResult {
-  const parsedDomain = parseDomainSpec(domain);
-  if (!parsedDomain) return { status: "unverified", reason: "invalid_domain", domain };
-  if (parsedDomain.empty) return { status: "unverified", reason: "empty_domain", domain };
-  const implicitMulIdents = [
-    ...(domain?.nonCommutativeVars ?? []),
-    ...(domain?.variable ? [domain.variable] : []),
-  ];
-  const preserved = [...implicitMulIdents];
-  const parseOpts: NormalizeLatexOptions = {
-    preservedIdentifiers: preserved,
-    implicitMulIdentifiers: implicitMulIdents,
-    matrixImplicitMul: true,
-  };
-  const student = parseScalarExpr(studentInput, parseOpts);
-  const reference = parseScalarExpr(referenceInput, parseOpts);
-  if (!student || !reference) return { status: "unverified", reason: "parse_outside_decidable_fragment", domain };
-  return verifyNonCommutativeParsed(student, reference, domain, true);
+  try {
+    const parsedDomain = parseDomainSpec(domain);
+    if (!parsedDomain) return { status: "unverified", reason: "invalid_domain", domain };
+    if (parsedDomain.empty) return { status: "unverified", reason: "empty_domain", domain };
+    const implicitMulIdents = [
+      ...(domain?.nonCommutativeVars ?? []),
+      ...(domain?.variable ? [domain.variable] : []),
+    ];
+    const preserved = [...implicitMulIdents];
+    const parseOpts: NormalizeLatexOptions = {
+      preservedIdentifiers: preserved,
+      implicitMulIdentifiers: implicitMulIdents,
+      matrixImplicitMul: true,
+    };
+    const student = parseScalarExpr(studentInput, parseOpts);
+    const reference = parseScalarExpr(referenceInput, parseOpts);
+    if (!student || !reference) return { status: "unverified", reason: "parse_outside_decidable_fragment", domain };
+    return verifyNonCommutativeParsed(student, reference, domain, true);
+  } catch (err) {
+    if (err instanceof PolyComplexityError) {
+      return { status: "unverified", reason: "polynomial_complexity_exceeded", domain };
+    }
+    if (err instanceof MPolyOverflowError) {
+      return { status: "unverified", reason: "symbolic_complexity_exceeded", domain };
+    }
+    throw err;
+  }
 }
 
 export const checkScalarEquivalence = verifyScalarEquivalence;

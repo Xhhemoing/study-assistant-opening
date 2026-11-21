@@ -1,12 +1,16 @@
 import { describe, expect, it } from "vitest";
 import {
+  differentiate,
+  evaluateScalar,
   findLinearDependency,
   normalizeLatexExpr,
   parseScalarExpr,
   rationalForm,
+  rref,
   runCSubset408,
   simplifyRadical,
   sturmCount,
+  type ScalarExpr,
   verifyEigenspace,
   verifyIndefiniteIntegral,
   verifyMatrixExpressionEquivalence,
@@ -641,6 +645,95 @@ describe("bounded symbolic equivalence", () => {
     expect(verifyMatrixExpressionEquivalence("foo(x)", "foo * x", { nonCommutativeVars: ["A"] }).status).toBe(
       "unverified",
     );
+
+    // Round-14 P1-1: matrix AST weight + constant folding prevents exponential DAG blowup
+    const tMatrixConstStart = performance.now();
+    expect(verifyMatrixExpressionEquivalence("((A + 1)^10)^4", "(A + 1)^10 * (A + 1)^10 * (A + 1)^10 * (A + 1)^10").status).toBe("equivalent");
+    expect(performance.now() - tMatrixConstStart).toBeLessThan(200);
+
+    const tMatrixSymbolicStart = performance.now();
+    const matrixSymbolicOverflow = verifyMatrixExpressionEquivalence("((A + x)^12)^5", "A^60", {
+      variable: "x",
+      nonCommutativeVars: ["A"],
+    });
+    expect(matrixSymbolicOverflow.status).toBe("unverified");
+    expect(matrixSymbolicOverflow.reason).toBe("polynomial_complexity_exceeded");
+    expect(performance.now() - tMatrixSymbolicStart).toBeLessThan(200);
+
+    // Round-14 P1-1: shared ScalarExpr DAG defense-in-depth in scalar equivalence, differentiate, and simplifyRadical
+    let sharedDag: ScalarExpr = { kind: "variable", name: "x" };
+    for (let i = 0; i < 35; i++) {
+      sharedDag = { kind: "add", left: sharedDag, right: sharedDag };
+    }
+    const tDagStart = performance.now();
+    const dagScalarRes = verifyScalarEquivalence(sharedDag, sharedDag);
+    expect(dagScalarRes.status).toBe("unverified");
+    expect(dagScalarRes.reason).toBe("polynomial_complexity_exceeded");
+    expect(differentiate(sharedDag)).toBeNull();
+    expect(simplifyRadical(sharedDag)).toBe(sharedDag);
+    expect(performance.now() - tDagStart).toBeLessThan(200);
+
+    // Round-14 P1-2: oversized integer/decimal inputs never throw uncaught PolyComplexityError from exported entrypoints
+    const hugeDigits = "9".repeat(2000);
+    expect(parseScalarExpr(`2^${hugeDigits}`)).toBeNull();
+    expect(verifyScalarEquivalence(hugeDigits, hugeDigits)).toMatchObject({
+      status: "unverified",
+      reason: "polynomial_complexity_exceeded",
+    });
+    expect(evaluateScalar({ kind: "const", value: hugeDigits }, rational(0n))).toEqual({
+      defined: false,
+      reason: "polynomial_complexity_exceeded",
+    });
+    expect(rationalForm({ kind: "const", value: hugeDigits }).unsupported).toBe("polynomial_complexity_exceeded");
+    expect(verifyIndefiniteIntegral({ student: `${hugeDigits} * x`, integrand: hugeDigits })).toMatchObject({
+      status: "unverified",
+      reason: "polynomial_complexity_exceeded",
+    });
+    expect(
+      verifySubstitutionBounds({
+        lower: 0,
+        upper: 1,
+        substitution: "x",
+        transformedLower: hugeDigits,
+        transformedUpper: "1",
+      }),
+    ).toMatchObject({ status: "unverified", reason: "polynomial_complexity_exceeded" });
+    expect(simplifyRadical({ kind: "const", value: hugeDigits })).toEqual({ kind: "const", value: hugeDigits });
+    expect(verifyMatrixExpressionEquivalence(hugeDigits, hugeDigits).status).toBe("unverified");
+    expect(
+      verifyMatrixExpressionEquivalence("A", "A", {
+        variable: "x",
+        nonCommutativeVars: ["A"],
+        excluded: [hugeDigits],
+      }),
+    ).toMatchObject({ status: "unverified", reason: "polynomial_complexity_exceeded" });
+    expect(differentiate({ kind: "const", value: hugeDigits })).toEqual({ kind: "const", value: 0 });
+
+    // Round-14 P2-2: whole-expression joint scalar domain checking in matrix / non-commutative verification
+    expect(
+      verifyMatrixExpressionEquivalence("(1 / (x - 1)) * A + B", "(1 / (x - 1)) * A + ((x - 1) / (x - 1)) * B", {
+        variable: "x",
+        nonCommutativeVars: ["A", "B"],
+      }).status,
+    ).toBe("equivalent");
+    expect(
+      verifyMatrixExpressionEquivalence("(1 / (x - 1)) * A + B", "A + B", {
+        variable: "x",
+        nonCommutativeVars: ["A", "B"],
+      }),
+    ).toMatchObject({ status: "inequivalent", reason: "natural_domain_mismatch" });
+    expect(
+      verifyMatrixExpressionEquivalence("(1 / (x^2 - 2)) * A + B", "(1 / (x^2 - 2)) * A + ((x^2 - 2) / (x^2 - 2)) * B", {
+        variable: "x",
+        nonCommutativeVars: ["A", "B"],
+      }).status,
+    ).toBe("equivalent");
+    expect(
+      verifyMatrixExpressionEquivalence("sqrt(x) * A + abs(x) * B", "sqrt(x) * A + x * B", {
+        variable: "x",
+        nonCommutativeVars: ["A", "B"],
+      }).status,
+    ).toBe("equivalent");
   });
 });
 
@@ -672,6 +765,28 @@ describe("exact rational subspaces", () => {
     expect(verifyEigenspace({ matrix: [[2, 0], [0, 2]], eigenvalue: 2, vectors: [[1, 0], [2, 0]] }).status).toBe("inequivalent");
     expect(verifyEigenspace({ matrix: [[2, 0], [0, 2]], eigenvalue: 3, vectors: [] }).status).toBe("inequivalent");
     expect(verifyEigenspace({ matrix: [[2, 1], [0, 2]], eigenvalue: 2, vectors: [[1, 0]] }).status).toBe("equivalent");
+
+    // Round-14 P1-2: subspace / RREF / eigenspace entrypoints fail closed on > 4096-bit inputs and intermediate overflow
+    const hugeDigits = "9".repeat(2000);
+    const hugeBigint = 1n << 4097n;
+    expect(rref([[hugeDigits]])).toBeNull();
+    expect(findLinearDependency([[hugeDigits]])).toBeNull();
+    expect(verifySubspaceEquality([[hugeDigits]], [[1]])).toMatchObject({
+      status: "unverified",
+      reason: "polynomial_complexity_exceeded",
+    });
+    expect(verifySubspaceBasis([[hugeBigint]], [[1]])).toMatchObject({
+      status: "unverified",
+      reason: "polynomial_complexity_exceeded",
+    });
+    expect(verifyNullspace([[hugeDigits]], [])).toMatchObject({
+      status: "unverified",
+      reason: "polynomial_complexity_exceeded",
+    });
+    expect(verifyEigenspace({ matrix: [[1]], eigenvalue: hugeDigits, vectors: [[1]] })).toMatchObject({
+      status: "unverified",
+      reason: "polynomial_complexity_exceeded",
+    });
   });
 });
 
