@@ -111,9 +111,8 @@ export interface ClinicDataShape {
 
 export const ACTIVE_SOURCES_SHAPE: ClinicDataShape = { allowMap: true, maxDepth: 32 };
 
-type DataCallback = (...args: never[]) => unknown;
 type ClinicDataSnapshot =
-  | { readonly ok: true; readonly value: unknown; readonly firstCallback?: DataCallback; readonly hasMap?: boolean }
+  | { readonly ok: true; readonly value: unknown; readonly hasCallback?: boolean; readonly hasMap?: boolean }
   | { readonly ok: false };
 
 interface ClinicDataNode {
@@ -122,9 +121,9 @@ interface ClinicDataNode {
   readonly entries: ReadonlyArray<readonly [string, unknown]>;
 }
 
-function hasCollectionSlot(value: object, sizeGetter: () => unknown): boolean {
+function hasInternalSlot(value: object, check: (...args: never[]) => unknown, args: readonly unknown[] = []): boolean {
   try {
-    Reflect.apply(sizeGetter, value, []);
+    Reflect.apply(check, value, args);
     return true;
   } catch {
     return false;
@@ -171,35 +170,62 @@ function readClinicDataNode(value: object, allowMap = false): ClinicDataNode | n
   return { kind: array ? "array" : "record", proto, entries };
 }
 
-function cloneErrorMessage(value: unknown): string | undefined {
-  try {
-    structuredClone(value);
-  } catch (error) {
-    if (error instanceof Error && error.name === "DataCloneError") return error.message;
+const FUNCTION_SOURCE = Function.prototype.toString;
+const PROXY_CALLBACK_SOURCE = FUNCTION_SOURCE.call(new Proxy(() => undefined, {}));
+const PROMISE_RESOLVE = Promise.resolve;
+const BRAND_CHECKS = [
+  Date.prototype.getTime,
+  Number.prototype.valueOf,
+  String.prototype.valueOf,
+  Boolean.prototype.valueOf,
+  BigInt.prototype.valueOf,
+  Symbol.prototype.valueOf,
+  Object.getOwnPropertyDescriptor(RegExp.prototype, "source")?.get,
+  Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, "byteLength")?.get,
+  typeof SharedArrayBuffer === "undefined"
+    ? undefined
+    : Object.getOwnPropertyDescriptor(SharedArrayBuffer.prototype, "byteLength")?.get,
+  typeof WeakRef === "undefined" ? undefined : WeakRef.prototype.deref,
+];
+const WEAK_BRAND_KEY = {};
+
+function isAllowedCallback(value: object): boolean {
+  // Check the intrinsic source first. Tag lookup on an unchecked Proxy can run its get trap.
+  if (FUNCTION_SOURCE.call(value) === PROXY_CALLBACK_SOURCE || Reflect.getPrototypeOf(value) !== Function.prototype) {
+    return false;
   }
-  return undefined;
+  for (const key of Reflect.ownKeys(value)) {
+    const descriptor = Reflect.getOwnPropertyDescriptor(value, key);
+    if (!descriptor || !Object.hasOwn(descriptor, "value")) return false;
+  }
+  return Object.prototype.toString.call(value) === "[object Function]";
 }
 
-const NON_DATA_CLONE_ERRORS = new Set([
-  cloneErrorMessage(new Proxy({}, {})),
-  cloneErrorMessage(new Proxy([], {})),
-  cloneErrorMessage(new Proxy(Object.create(null) as object, {})),
-  cloneErrorMessage(Object.setPrototypeOf((async function* () {})(), Object.prototype)),
-  cloneErrorMessage(Object.setPrototypeOf((function* () {})(), Object.prototype)),
-  cloneErrorMessage(Promise.resolve()),
-]);
-const PROXY_CALLBACK_SOURCE = Function.prototype.toString.call(new Proxy(() => undefined, {}));
-
-function passesNativeClone(raw: object, container: ClinicDataNode, firstCallback?: DataCallback): boolean {
-  if (firstCallback) {
-    // An allowed callback can make a plain container unclonable. Accept its diagnostic
-    // only when the engine distinguishes it from a root Proxy or exotic.
-    const expected = cloneErrorMessage(firstCallback);
-    return expected !== undefined && !NON_DATA_CLONE_ERRORS.has(expected) && cloneErrorMessage(raw) === expected;
+function isCallbackCarrier(raw: object, data: ClinicDataNode): boolean {
+  if (data.kind === "array") return true;
+  if (
+    data.kind !== "record" ||
+    data.proto !== Object.prototype ||
+    data.entries.some(([key]) => key === "constructor") ||
+    ArrayBuffer.isView(raw) ||
+    BRAND_CHECKS.some((check) => check !== undefined && hasInternalSlot(raw, check)) ||
+    hasInternalSlot(raw, WeakMap.prototype.has, [WEAK_BRAND_KEY]) ||
+    hasInternalSlot(raw, WeakSet.prototype.has, [WEAK_BRAND_KEY]) ||
+    (typeof FinalizationRegistry !== "undefined" &&
+      hasInternalSlot(raw, FinalizationRegistry.prototype.unregister, [WEAK_BRAND_KEY]))
+  ) {
+    return false;
   }
-  const clone = structuredClone(raw);
-  const expectedProto = container.kind === "record" ? Object.prototype : container.proto;
-  return Object.getPrototypeOf(clone) === expectedProto;
+
+  // PromiseResolve returns a genuine Promise whose constructor is Object unchanged.
+  // Object cannot create a Promise capability, so other records throw without reading
+  // their properties or installing reactions. The constructor is the verified intrinsic.
+  if (Object.getOwnPropertyDescriptor(Object.prototype, "constructor")?.value !== Object) return false;
+  try {
+    return Reflect.apply(PROMISE_RESOLVE, Object, [raw]) !== raw;
+  } catch {
+    return true;
+  }
 }
 
 /** Verify a descriptor graph in DFS post-order, then expose only the detached snapshot. */
@@ -213,15 +239,14 @@ export function snapshotClinicData(value: unknown, shape?: ClinicDataShape): Cli
   const inStack = new WeakSet<object>();
   const done = new WeakMap<object, CompleteNode>();
   const postOrder: CompleteNode[] = [];
+  const callbacks = new Set<object>();
 
   function visit(raw: unknown, policy: ClinicDataShape | undefined, remainingDepth: number): ClinicDataSnapshot {
     if (typeof raw === "symbol") return { ok: false };
     if (typeof raw === "function") {
-      // Callable Proxies and bound functions can share the same opaque source.
-      if (!policy?.allowFunction || Function.prototype.toString.call(raw) === PROXY_CALLBACK_SOURCE) {
-        return { ok: false };
-      }
-      return { ok: true, value: raw, firstCallback: raw as DataCallback };
+      if (!policy?.allowFunction || !isAllowedCallback(raw)) return { ok: false };
+      callbacks.add(raw);
+      return { ok: true, value: raw, hasCallback: true };
     }
     if (raw === null || typeof raw !== "object") return { ok: true, value: raw };
     const depth = Math.min(remainingDepth, policy?.maxDepth ?? Infinity);
@@ -230,7 +255,7 @@ export function snapshotClinicData(value: unknown, shape?: ClinicDataShape): Cli
     if (prior) {
       // Data-only aliases can occur in several slots. Special values are allowed
       // only along the paths that explicitly opted into them.
-      return prior.shape === policy || (!prior.snapshot.firstCallback && !prior.snapshot.hasMap)
+      return prior.shape === policy || (!prior.snapshot.hasCallback && !prior.snapshot.hasMap)
         ? prior.snapshot
         : { ok: false };
     }
@@ -240,7 +265,7 @@ export function snapshotClinicData(value: unknown, shape?: ClinicDataShape): Cli
     const data = readClinicDataNode(raw, policy?.allowMap);
     if (!data) return { ok: false };
     // Reassigned collection prototypes can hide entries outside the descriptor graph.
-    if (data.kind !== "map" && (hasCollectionSlot(raw, MAP_SIZE_GET) || hasCollectionSlot(raw, SET_SIZE_GET))) {
+    if (data.kind !== "map" && (hasInternalSlot(raw, MAP_SIZE_GET) || hasInternalSlot(raw, SET_SIZE_GET))) {
       return { ok: false };
     }
     const copy: object = data.kind === "map"
@@ -248,7 +273,7 @@ export function snapshotClinicData(value: unknown, shape?: ClinicDataShape): Cli
       : data.kind === "array"
         ? []
         : Object.create(data.proto) as object;
-    let firstCallback: DataCallback | undefined;
+    let hasCallback = false;
     let hasMap = data.kind === "map";
     for (const [key, child] of data.entries) {
       const fields = policy?.fields;
@@ -262,10 +287,10 @@ export function snapshotClinicData(value: unknown, shape?: ClinicDataShape): Cli
       } else {
         Object.defineProperty(copy, key, { value: childSnapshot.value, enumerable: true });
       }
-      firstCallback ??= childSnapshot.firstCallback;
+      hasCallback ||= childSnapshot.hasCallback === true;
       hasMap ||= childSnapshot.hasMap === true;
     }
-    const snapshot = { ok: true as const, value: Object.freeze(copy), firstCallback, hasMap };
+    const snapshot = { ok: true as const, value: Object.freeze(copy), hasCallback, hasMap };
     const complete = { raw, shape: policy, data, snapshot };
     inStack.delete(raw);
     done.set(raw, complete);
@@ -273,14 +298,15 @@ export function snapshotClinicData(value: unknown, shape?: ClinicDataShape): Cli
     return snapshot;
   }
 
+  const checked = new WeakSet<object>();
   const verified = new WeakSet<object>();
   const verifiedList: CompleteNode[] = [];
-  function isVerifiedChild(child: unknown): boolean {
-    return child === null || typeof child !== "object" || verified.has(child);
-  }
 
   function remainsClosed(container: CompleteNode): boolean {
-    const { raw, data } = container;
+    const { raw, data, snapshot } = container;
+    const closure = snapshot.hasCallback ? checked : verified;
+    const isVerifiedChild = (child: unknown): boolean =>
+      child === null || typeof child !== "object" || closure.has(child);
     if (Object.getPrototypeOf(raw) !== data.proto) return false;
     if (data.kind === "map") {
       // Capture a fixed readback of Map keys and values before comparing entries.
@@ -309,12 +335,22 @@ export function snapshotClinicData(value: unknown, shape?: ClinicDataShape): Cli
     if (!snapshot.ok) return snapshot;
     for (const node of postOrder) {
       if (!remainsClosed(node)) return { ok: false };
-      // The current node may have run descriptor traps. Only previously checked,
-      // genuine containers are reread here, so the closure stays intact until cloning.
+      // Only native-verified objects are reread here. Carriers may be transparent
+      // wrappers and can never be part of a pure graph passed to structuredClone.
       if (!verifiedList.every(remainsClosed)) return { ok: false };
-      if (!passesNativeClone(node.raw, node.data, node.snapshot.firstCallback)) return { ok: false };
-      verified.add(node.raw);
-      verifiedList.push(node);
+      if (node.snapshot.hasCallback) {
+        if (!isCallbackCarrier(node.raw, node.data)) return { ok: false };
+      } else {
+        const clone = structuredClone(node.raw);
+        const expectedProto = node.data.kind === "record" ? Object.prototype : node.data.proto;
+        if (Object.getPrototypeOf(clone) !== expectedProto) return { ok: false };
+        verified.add(node.raw);
+        verifiedList.push(node);
+      }
+      checked.add(node.raw);
+    }
+    for (const callback of callbacks) {
+      if (!isAllowedCallback(callback)) return { ok: false };
     }
     return snapshot;
   } catch {
@@ -386,6 +422,7 @@ export function parseActiveSourcesSnapshot(value: unknown): ActiveSourcesInspect
     ? (value as ReadonlyMap<string, unknown>).entries()
     : Object.entries(value);
   for (const [key, entryValue] of entries) {
+    if (!isNonBlankText(key)) continue;
     const entry = parsePlainActiveSourceEntry(entryValue);
     if (entry !== undefined) sources.set(key, entry);
   }
@@ -400,6 +437,7 @@ function isFrozenSourceRefActive(
   ref: RemedySourceRef,
   verifiedSources: ReadonlyMap<string, ActiveSourceEntry>,
 ): boolean {
+  if (!isNonBlankText(ref.sourceId) || !isValidSourceVersion(ref.sourceVersion)) return false;
   const entry = verifiedSources.get(ref.sourceId);
   if (entry === undefined) return false;
   if (typeof entry === "string" || typeof entry === "number") {
@@ -456,16 +494,23 @@ export function areFrozenSourceRefsActive(
   return refs.length > 0 && refs.every((ref) => isFrozenSourceRefActive(ref, verifiedSources));
 }
 
+/** Validate one reference from a detached snapshot. */
+export function parseSourceRef(item: unknown): RemedySourceRef | null {
+  if (item === null || typeof item !== "object" || Array.isArray(item)) return null;
+  if (!Object.values(item).every(isPrimitiveValue)) return null;
+  const sourceId: unknown = Object.getOwnPropertyDescriptor(item, "sourceId")?.value;
+  const sourceVersion: unknown = Object.getOwnPropertyDescriptor(item, "sourceVersion")?.value;
+  if (!isNonBlankText(sourceId) || !isValidSourceVersion(sourceVersion)) return null;
+  return Object.freeze({ sourceId, sourceVersion });
+}
+
 function parseSourceRefs(items: unknown): readonly RemedySourceRef[] | null {
   if (!Array.isArray(items)) return null;
   const cloned: RemedySourceRef[] = [];
   for (const item of items as readonly unknown[]) {
-    if (item === null || typeof item !== "object" || Array.isArray(item)) return null;
-    if (!Object.values(item).every(isPrimitiveValue)) return null;
-    const sourceId: unknown = Object.getOwnPropertyDescriptor(item, "sourceId")?.value;
-    const sourceVersion: unknown = Object.getOwnPropertyDescriptor(item, "sourceVersion")?.value;
-    if (!isNonBlankText(sourceId) || !isValidSourceVersion(sourceVersion)) return null;
-    cloned.push(Object.freeze({ sourceId, sourceVersion }));
+    const ref = parseSourceRef(item);
+    if (!ref) return null;
+    cloned.push(ref);
   }
   return Object.freeze(cloned);
 }

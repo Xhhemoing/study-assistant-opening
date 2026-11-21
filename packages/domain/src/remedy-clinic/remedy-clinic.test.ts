@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { DistinguishableProbeSpec } from "../opening/cartridges/probe-protocol";
 import {
   areSourceRefsActive,
@@ -229,7 +229,106 @@ describe("RemedyClinicGenerator 14-minute 3-step clinic & #469 probe distinguish
     makeAttempt({ attemptId: "a4", rootAttemptId: "r4", chapterId: "ch-3", localDate: "2026-11-05" }),
   ];
 
-  it("requires genuine input and probe array containers even when a probe fails schema validation", () => {
+  it("generates a clinic when structuredClone uses a single DataCloneError diagnostic", async () => {
+    const nativeClone = globalThis.structuredClone;
+    vi.stubGlobal("structuredClone", (value: unknown) => {
+      try {
+        return nativeClone(value);
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "DataCloneError") {
+          throw new DOMException("The object can not be cloned.", "DataCloneError");
+        }
+        throw error;
+      }
+    });
+
+    try {
+      vi.resetModules();
+      const { generateRemedyClinic: generate } = await import("./clinic-generator");
+      const input = {
+        learnerId: "learner-1",
+        courseId: "course-alg-1",
+        ruleId: RULE_ID,
+        currentPrivacyEpoch: 5,
+        activeSourcesMap: DEFAULT_SOURCES,
+        verifyRuleViolation: verifyNegativeSignFlip,
+        attempts: qualifyingAttempts,
+        candidateProbes: [
+          makeProbe({ probeId: "p1", input: { a: -2, b: 8 } }),
+          makeProbe({ probeId: "p2", input: { a: -3, b: 12 } }),
+        ],
+      };
+      expect(generate(input).status).toBe("active");
+      expect(generate({ ...input, attempts: new Proxy(qualifyingAttempts, {}) }).status).toBe("invalid_input");
+    } finally {
+      vi.unstubAllGlobals();
+      vi.resetModules();
+    }
+  });
+
+  it.each([
+    { sourceId: "", sourceVersion: "v1" },
+    { sourceId: "   ", sourceVersion: "v1" },
+    { sourceId: "invalid-version", sourceVersion: "" },
+    { sourceId: "invalid-version", sourceVersion: "   " },
+    { sourceId: "invalid-version", sourceVersion: Infinity },
+    { sourceId: "invalid-version", sourceVersion: NaN },
+  ])("rejects invalid source reference %j even if the active map lists it", (sourceRef) => {
+    const { sourceId, sourceVersion } = sourceRef;
+    const activeSourcesMap = new Map<string, string | number>([
+      ["src-ch-1", "v1"], ["src-ch-2", "v1"], ["src-ch-3", "v1"], [sourceId, sourceVersion],
+      ["src-numeric", 0],
+    ]);
+    const candidateProbes = [
+      makeProbe({ probeId: "p1", input: { a: -2, b: 8 } }),
+      makeProbe({ probeId: "p2", input: { a: -3, b: 12 } }),
+    ];
+    const input = {
+      learnerId: "learner-1",
+      courseId: "course-alg-1",
+      ruleId: RULE_ID,
+      currentPrivacyEpoch: 5,
+      activeSourcesMap,
+      verifyRuleViolation: verifyNegativeSignFlip,
+      attempts: qualifyingAttempts,
+      candidateProbes,
+    };
+    const result = generateRemedyClinic(input);
+    expect(result.status).toBe("active");
+    const clinic = result.clinic!;
+
+    const numericRef = { sourceId: "src-numeric", sourceVersion: 0 };
+    expect(isSourceRefActive(numericRef, activeSourcesMap)).toBe(true);
+    expect(generateRemedyClinic({ ...input, ruleSourceRefs: [numericRef] }).status).toBe("active");
+    expect(isSourceRefActive(sourceRef, activeSourcesMap)).toBe(false);
+    expect(inspectActiveSourcesMap(activeSourcesMap).sources.has(sourceId)).toBe(false);
+    expect(inspectActiveSourcesMap(Object.fromEntries(activeSourcesMap)).sources.has(sourceId)).toBe(false);
+    expect(generateRemedyClinic({ ...input, ruleSourceRefs: [sourceRef] }).status).toBe("invalid_input");
+    expect(generateRemedyClinic({
+      ...input,
+      candidateProbes: [
+        { ...makeProbe({ probeId: "blank-source", input: { a: -4, b: 16 } }), sourceRefs: [sourceRef] },
+        ...candidateProbes,
+      ],
+    })).toMatchObject({
+      status: "active",
+      verifiedProbeCount: 2,
+      rejectedProbes: [expect.objectContaining({ probeId: "blank-source" })],
+    });
+
+    expect(revalidateRemedyClinic({ ...clinic, ruleSourceRefs: [sourceRef] }, activeSourcesMap, 5)).toMatchObject({
+      status: "stale_source_revoked",
+      revocationSummary: { reason: "rule_source_revoked" },
+    });
+    const [step1, step2, step3] = clinic.steps;
+    const probes = [{ ...step3.probes[0]!, sourceRefs: [sourceRef] }, ...step3.probes.slice(1)];
+    expect(revalidateRemedyClinic({
+      ...clinic,
+      steps: [step1, step2, { ...step3, probes }],
+    }, activeSourcesMap, 5).status).toBe("stale_source_revoked");
+  });
+
+  it("rejects unsafe descriptors and callable Proxies before filtering probes", () => {
     const valid1 = makeProbe({ probeId: "valid-1", input: { a: -2, b: 8 } });
     const valid2 = makeProbe({ probeId: "valid-2", input: { a: -3, b: 12 } });
     const candidateProbes = [
@@ -263,13 +362,61 @@ describe("RemedyClinicGenerator 14-minute 3-step clinic & #469 probe distinguish
       verifiedProbeCount: 2,
       rejectedProbes: [expect.objectContaining({ probeId: "degenerate", reason: "not_distinguishable" })],
     });
+    let getterRuns = 0;
+    const unread = () => {
+      getterRuns += 1;
+      throw new Error("Ordinary property read");
+    };
+    const getterCallback = Object.defineProperty(() => true, Symbol.toStringTag, { get: unread });
+    const accessorDescriptor = new Proxy(input, {
+      get: unread,
+      getOwnPropertyDescriptor(target, key) {
+        if (key === "verifyRuleViolation") return { enumerable: true, configurable: true, get: unread };
+        return Reflect.getOwnPropertyDescriptor(target, key);
+      },
+    });
+    const inconsistentLength = new Proxy(candidateProbes, {
+      get: unread,
+      getOwnPropertyDescriptor(target, key) {
+        const descriptor = Reflect.getOwnPropertyDescriptor(target, key);
+        return key === "length" ? { ...descriptor, value: 10 } : descriptor;
+      },
+    });
+    const invalidKeys = new Proxy(valid1, {
+      get: unread,
+      ownKeys(target) {
+        return [...Reflect.ownKeys(target), Symbol("unexpected")];
+      },
+      getOwnPropertyDescriptor(target, key) {
+        if (typeof key === "symbol") return { value: true, enumerable: true, configurable: true };
+        return Reflect.getOwnPropertyDescriptor(target, key);
+      },
+    });
+
     for (const invalid of [
-      new Proxy(input, {}),
-      { ...input, candidateProbes: new Proxy(candidateProbes, {}) },
-      { ...input, candidateProbes: [candidateProbes[0]!, new Proxy(valid1, {}), valid2] },
+      accessorDescriptor,
+      new Proxy(input, { get: unread, getPrototypeOf: () => null }),
+      { ...input, candidateProbes: inconsistentLength },
+      { ...input, candidateProbes: [candidateProbes[0]!, invalidKeys, valid2] },
+      { ...input, verifyRuleViolation: new Proxy(verifyNegativeSignFlip, { get: unread, apply: unread }) },
+      { ...input, verifyRuleViolation: getterCallback },
+      { ...input, candidateProbes: [{ ...valid1, input: new Proxy(valid1.input, {}) }, ...candidateProbes] },
+      { ...input, rubricCalibration: new Proxy({ calibrated: true }, {}) },
+      { ...input, ruleSourceRefs: new Proxy([{ sourceId: "src-ch-1", sourceVersion: "v1" }], {}) },
     ]) {
       expect(generateRemedyClinic(invalid)).toMatchObject({ status: "invalid_input", clinic: null });
     }
+
+    const wrappedCarriers = new Proxy({
+      ...input,
+      candidateProbes: new Proxy([
+        candidateProbes[0]!,
+        new Proxy(valid1, { get: unread }),
+        valid2,
+      ], { get: unread }),
+    }, { get: unread });
+    expect(generateRemedyClinic(wrappedCarriers).status).toBe("active");
+    expect(getterRuns).toBe(0);
   });
 
   it.each([1, 2])("rejects shared probe data without reading a getter added on descriptor read %i", (mutationRead) => {
@@ -1961,8 +2108,7 @@ describe("revalidateRemedyClinic privacy_epoch and source-revocation read guard"
     expect(proxyCasesReval.status).toBe("stale_source_revoked");
 
     // 2. Prototype-reassigned rejected Promise (verifying unhandledRejection is NOT suppressed!) and
-    //    Generator carrying valid properties passed as attempt, activeSourcesMap Record, candidateProbe,
-    //    and correctModel are ALL rejected.
+    //    Generator objects as attempts, source records, and callback carriers are rejected at their respective boundaries.
     const unhandledReasons: unknown[] = [];
     const onUnhandled = (reason: unknown): void => {
       unhandledReasons.push(reason);
@@ -1990,8 +2136,8 @@ describe("revalidateRemedyClinic privacy_epoch and source-revocation read guard"
     const pModel = makeReassignedRejectedPromise("model", { ...probe1.correctModel });
     const gAttempt = makeReassignedGenerator({ ...baseAttempts[0]! });
     const gSources = makeReassignedGenerator({ ...allSources });
-    const gProbe = makeReassignedGenerator({ ...probe1 });
-    const gModel = makeReassignedGenerator({ ...probe1.correctModel });
+    const gProbe = Object.assign((function* () {})(), probe1);
+    const gModel = Object.assign((function* () {})(), probe1.correctModel);
 
     try {
       const pAttemptRes = generateRemedyClinic({
@@ -2268,7 +2414,7 @@ describe("revalidateRemedyClinic privacy_epoch and source-revocation read guard"
     expect(getterRuns).toBe(0);
     expect(proxyRefsDescReads).toBe(2);
 
-    // [P2-2] Reassigned-prototype AsyncGenerator passed as input, candidateProbe, correctModel, and hypothesis
+    // [P2-2] AsyncGenerator passed as input, candidateProbe, correctModel, and hypothesis
     // MUST be rejected cleanly, while plain objects succeed with ZERO unhandledRejection events.
     const unhandledErrors: unknown[] = [];
     const onUnhandled = (reason: unknown): void => {
@@ -2280,7 +2426,6 @@ describe("revalidateRemedyClinic privacy_epoch and source-revocation read guard"
         const ag = (async function* () {
           yield 1;
         })();
-        Object.setPrototypeOf(ag, Object.prototype);
         Object.assign(ag, props);
         return ag;
       };

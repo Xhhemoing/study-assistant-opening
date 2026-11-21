@@ -15,6 +15,7 @@ import {
   isValidPrivacyEpoch,
   meetsClinicThreshold,
   parseActiveSourcesSnapshot,
+  parseSourceRef,
   readOwnDataIndex,
   selectSpreadRepresentativeCases,
   snapshotActiveSourcesMap,
@@ -346,17 +347,9 @@ function snapshotSourceRefsWithKind(sourceRefs: unknown): SourceRefsSnapshotResu
       hasNullRef = true;
       continue;
     }
-    if (!isSnapshotRecord(el)) return { kind: "invalid_descriptor" };
-    if (Object.values(el).some((val: unknown) =>
-      val !== null && (typeof val === "object" || typeof val === "function"))) {
-      return { kind: "invalid_descriptor" };
-    }
-    const sourceId = readOwnDataProp(el, "sourceId");
-    const sourceVersion = readOwnDataProp(el, "sourceVersion");
-    if (typeof sourceId !== "string" || (typeof sourceVersion !== "string" && typeof sourceVersion !== "number")) {
-      return { kind: "invalid_descriptor" };
-    }
-    frozen.push(Object.freeze({ sourceId, sourceVersion }));
+    const ref = parseSourceRef(el);
+    if (!ref) return { kind: "invalid_descriptor" };
+    frozen.push(ref);
   }
 
   if (sourceRefs.length === 0 || hasNullRef) return { kind: "empty_or_null_ref" };
