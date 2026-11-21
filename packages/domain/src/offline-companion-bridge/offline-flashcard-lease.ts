@@ -1234,11 +1234,21 @@ const WRAPPED_OPTION_LETTER_RE = new RegExp(
 const OPTION_WORD_CONNECTOR = /\b(?:and|or|then)\b/.source;
 const OPTION_END_PUNCTUATION = /[\s.!?。！？;；:：,，、…—–-]*/u.source;
 const OPTION_CLOSING = `${OPTION_END_PUNCTUATION}${OPTION_WRAPPER_CLOSE}`;
-const TRAILING_OPTION_END = `${OPTION_CLOSING}${OPTION_END_PUNCTUATION}$`;
-const OPTION_SEQUENCE_SEPARATOR =
-  `(?:${OPTION_CLOSING})?\\s*` +
+const OPTION_SENTENCE_TERMINATOR_RE = /[.!?。！？;；]/u;
+const OPTION_SENTENCE_BOUNDARY = `(?:\\s|$|${CJK_SCRIPT_RE.source})`;
+const OPTION_SENTENCE_END =
+  `${OPTION_END_PUNCTUATION}(?:${OPTION_SENTENCE_TERMINATOR_RE.source}(?=${OPTION_SENTENCE_BOUNDARY})|$)`;
+const END_AFTER_OPTION_RE = new RegExp(`^${OPTION_SENTENCE_END}`, "u");
+const BOUNDARY_AFTER_QUOTED_END_RE = new RegExp(`^${OPTION_SENTENCE_BOUNDARY}`, "u");
+const OPTION_CONNECTOR_TO_NEXT =
+  `\\s*` +
   `(?:[,，、](?:\\s*${OPTION_WORD_CONNECTOR})?|[;/&+→]|->|=>|${OPTION_WORD_CONNECTOR})` +
   `\\s*(?:${OPTION_WRAPPER_OPEN}\\s*)?`;
+const OPTION_SEQUENCE_SEPARATOR = `(?:${OPTION_CLOSING})?${OPTION_CONNECTOR_TO_NEXT}`;
+const NEXT_OPTION_RE = new RegExp(
+  `^${OPTION_CONNECTOR_TO_NEXT}[a-z](?:${OPTION_CLOSING}|(?=${OPTION_SENTENCE_END}))`,
+  "iu",
+);
 
 function containsSingleChoiceReveal(syntax: string, normalizedText: string, choiceLetter: string): boolean {
   const escaped = escapeRegExp(choiceLetter);
@@ -1252,15 +1262,31 @@ function containsSingleChoiceReveal(syntax: string, normalizedText: string, choi
   ];
   if (patterns.some(pattern => pattern.test(syntax))) return true;
 
-  const trailing = new RegExp(`${OPTION_WRAPPER_OPEN}\\s*${escaped}${TRAILING_OPTION_END}`, "iu");
-  if (!trailing.test(syntax)) return false;
-
-  // Only suppress the trailing-label heuristic for a list the ordered matcher also recognizes.
-  const trailingSequence = new RegExp(
-    `(?<!${NON_CJK_WORD_CHAR})[a-z]${OPTION_SEQUENCE_SEPARATOR}${escaped}${TRAILING_OPTION_END}`,
+  const wrapped = new RegExp(
+    `${OPTION_WRAPPER_OPEN}\\s*${escaped}(${OPTION_END_PUNCTUATION})${OPTION_WRAPPER_CLOSE}`,
+    "giu",
+  );
+  const precedingOption = new RegExp(
+    `(?<!${NON_CJK_WORD_CHAR})[a-z]${OPTION_SEQUENCE_SEPARATOR}${escaped}${OPTION_CLOSING}$`,
     "iu",
   );
-  return !trailingSequence.test(normalizedText);
+  const lines = LINE_BREAK_RE.test(syntax)
+    ? syntax.split(LINE_BREAK_RE).map(line => canonicalizeMathNotationPreserveCase(line))
+    : [normalizedText];
+  for (const line of lines) {
+    for (const match of line.matchAll(wrapped)) {
+      const end = match.index + match[0].length;
+      const remainder = line.slice(end);
+      const endsInsideWrapper = OPTION_SENTENCE_TERMINATOR_RE.test(match[1] ?? "") &&
+        BOUNDARY_AFTER_QUOTED_END_RE.test(remainder);
+      if (!endsInsideWrapper && !END_AFTER_OPTION_RE.test(remainder)) continue;
+
+      // A semicolon or punctuation inside a quote can occur within an option list.
+      if (precedingOption.test(line.slice(0, end)) || NEXT_OPTION_RE.test(remainder)) continue;
+      return true;
+    }
+  }
+  return false;
 }
 
 const COMPOUND_BINARY_ADD_SUB_RE =
