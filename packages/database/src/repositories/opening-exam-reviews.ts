@@ -106,7 +106,9 @@ export function createOpeningExamReviewsRepository(sql: Sql) {
           request_id=${operationId}
           OR left(request_id, length(${operationId}) + 1)=${`${operationId}:`}
           OR parent_interaction_id=${operationId}
-        )`;
+        )
+      ORDER BY id
+      FOR UPDATE`;
     if (!rows.length) return "none";
     const allReleasedNotSent = rows.every(row =>
       row.state === "released"
@@ -127,11 +129,22 @@ export function createOpeningExamReviewsRepository(sql: Sql) {
     const load = () => options.wrapCommittedReceipt
       ? readCommittedExamReceipt(() => readContext(tx, scope, id))
       : readContext(tx, scope, id);
-    if (row.status !== "pending") {
+    if (row.status === "unknown") {
+      if (row.is_stale) {
+        const ledger = await inspectReviewLedger(tx, scope.workspaceId, id);
+        if (ledger === "released_only" || ledger === "none") {
+          await tx`UPDATE opening_exam_reviews
+            SET status='failed', updated_at=GREATEST(now(), updated_at + interval '1 microsecond')
+            WHERE id=${id} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND status='unknown'`;
+          if (options.allowFreshOnReleasedStale) return null;
+          return await load();
+        }
+      }
       const context = await load();
-      return context.review.status === "unknown"
-        ? { ...context, reusedUnresolved: true }
-        : context;
+      return { ...context, reusedUnresolved: true };
+    }
+    if (row.status !== "pending") {
+      return await load();
     }
     if (!row.is_stale) {
       const context = await load();
@@ -139,13 +152,16 @@ export function createOpeningExamReviewsRepository(sql: Sql) {
     }
     const ledger = await inspectReviewLedger(tx, scope.workspaceId, id);
     if (ledger === "active_or_billed") {
-      await tx`UPDATE opening_exam_reviews SET status='unknown',updated_at=now()
+      // Preserve updated_at so the in-flight worker's lease still matches if it later
+      // confirms a no-charge release, and stale-unknown recovery stays eligible once released.
+      await tx`UPDATE opening_exam_reviews SET status='unknown'
         WHERE id=${id} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND status='pending'`;
       const context = await load();
       return { ...context, reusedUnresolved: true };
     }
     if (ledger === "released_only") {
-      await tx`UPDATE opening_exam_reviews SET status='failed',updated_at=now()
+      await tx`UPDATE opening_exam_reviews
+        SET status='failed', updated_at=GREATEST(now(), updated_at + interval '1 microsecond')
         WHERE id=${id} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND status='pending'`;
       if (options.allowFreshOnReleasedStale) return null;
       return await load();
@@ -270,37 +286,54 @@ export function createOpeningExamReviewsRepository(sql: Sql) {
     async read(scope: Scope, id: string): Promise<ExamWorkReview> {
       return sql.begin(async tx => (await readContext(tx, scope, id)).review);
     },
-    async assertCurrent(scope: Scope, id: string): Promise<void> {
-      await sql.begin(async tx => { await readContext(tx, scope, id); });
+    async assertCurrent(scope: Scope, id: string, expectedUpdatedAt?: string): Promise<void> {
+      await sql.begin(async tx => {
+        const [workspace] = await tx`SELECT id FROM workspaces
+          WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR SHARE`;
+        if (!workspace) throw learningError("NOT_FOUND", "工作区不存在");
+        const [active] = await tx`SELECT id FROM opening_exam_reviews
+          WHERE id=${id} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
+            AND status='pending'
+            ${expectedUpdatedAt ? tx`AND updated_at=${expectedUpdatedAt}::timestamptz` : tx``}
+          FOR SHARE`;
+        if (!active) throw learningError("CONFLICT", "评阅状态已变化，本次尝试已中止");
+        await readContext(tx, scope, id);
+      });
     },
     async complete(scope: Scope, id: string, raw: ExamWorkReviewProposal, modelLabel: string | null): Promise<void> {
       const proposal = examWorkReviewProposalSchema.parse(raw);
       await sql.begin(async tx => {
         await readContext(tx, scope, id);
         await tx`UPDATE opening_exam_reviews SET status='ready',proposal=${tx.json(proposal)},model_label=${modelLabel},updated_at=now()
-          WHERE id=${id} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND status<>'ready'`;
+          WHERE id=${id} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND status IN ('pending', 'unknown')`;
       });
     },
     async fail(scope: Scope, id: string, status: "unknown" | "failed", expectedUpdatedAt?: string): Promise<void> {
       const operationId = reviewOperationId(scope.workspaceId, id);
-      await sql`UPDATE opening_exam_reviews SET status=${status},updated_at=now() WHERE id=${id}
-        AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND status='pending'
-        ${expectedUpdatedAt ? sql`AND updated_at=${expectedUpdatedAt}::timestamptz` : sql``}
-        ${status === "failed" ? sql`AND NOT EXISTS (
-          SELECT 1 FROM opening_budget_reservations b
-          WHERE b.workspace_id=${scope.workspaceId}
-            AND (
-              b.request_id=${operationId}
-              OR left(b.request_id, length(${operationId}) + 1)=${`${operationId}:`}
-              OR b.parent_interaction_id=${operationId}
-            )
-            AND NOT (
-              b.state='released'
-              AND b.release_reason IN ('not_sent','cancelled')
-              AND b.outcome_unknown_at IS NULL
-              AND COALESCE(b.pending_reconcile_cents,0)=0
-            )
-        )` : sql``}`;
+      const allowedStatuses = status === "failed" && expectedUpdatedAt
+        ? sql`AND status IN ('pending', 'unknown')`
+        : sql`AND status='pending'`;
+      await sql`UPDATE opening_exam_reviews
+        SET status=${status}, updated_at=GREATEST(now(), updated_at + interval '1 microsecond')
+        WHERE id=${id}
+          AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
+          ${allowedStatuses}
+          ${expectedUpdatedAt ? sql`AND updated_at=${expectedUpdatedAt}::timestamptz` : sql``}
+          ${status === "failed" ? sql`AND NOT EXISTS (
+            SELECT 1 FROM opening_budget_reservations b
+            WHERE b.workspace_id=${scope.workspaceId}
+              AND (
+                b.request_id=${operationId}
+                OR left(b.request_id, length(${operationId}) + 1)=${`${operationId}:`}
+                OR b.parent_interaction_id=${operationId}
+              )
+              AND NOT (
+                b.state='released'
+                AND b.release_reason IN ('not_sent','cancelled')
+                AND b.outcome_unknown_at IS NULL
+                AND COALESCE(b.pending_reconcile_cents,0)=0
+              )
+          )` : sql``}`;
     },
   };
 }

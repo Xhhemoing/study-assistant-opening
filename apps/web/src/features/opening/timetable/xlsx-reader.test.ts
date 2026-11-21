@@ -141,6 +141,15 @@ it.each([
   "高等数学 周次：1-",
   "高等数学 周次：1~?",
   "高等数学 周次：1,?",
+  "高等数学（第1周）-?",
+  "高等数学（第1周）-",
+  "高等数学（第1周）~?",
+  "高等数学（第1周）-第8周",
+  "高数 1-8周 - 9-?",
+  "高数 1-8周 / 9-?",
+  "高数 1-8周 - TBD",
+  "高数 1-8周-",
+  "高数 1-8周/",
   "大学英语 第TBD周",
   "大学英语 第 1-? 周",
   "大学英语 [TBD周]",
@@ -176,6 +185,21 @@ it.each([
     [title, "周一", "1-8周", "1-2节"],
   ] }]);
   expect(result.sessions).toMatchObject([{ courseName: title, weeks: [1, 2, 3, 4, 5, 6, 7, 8] }]);
+  expect(result.warnings).toEqual([]);
+});
+
+it.each([
+  ["高数 1-8周 / 一教101", "高数 / 一教101", [1, 2, 3, 4, 5, 6, 7, 8]],
+  ["高数 1-8周 - 上机", "高数 - 上机", [1, 2, 3, 4, 5, 6, 7, 8]],
+  ["高数 1-8周 / 3-201", "高数 / 3-201", [1, 2, 3, 4, 5, 6, 7, 8]],
+  ["高数（1-8周） / 一教101", "高数 / 一教101", [1, 2, 3, 4, 5, 6, 7, 8]],
+  ["高数（1-8周） - 上机", "高数 - 上机", [1, 2, 3, 4, 5, 6, 7, 8]],
+] as const)("keeps benign room or subtitle separator after completed weeks in %s", (title, courseName, weeks) => {
+  const result = parseTimetableSheets([{ sheet: "课表", data: [
+    ["课程", "星期", "节次"],
+    [title, "周一", "1-2节"],
+  ] }]);
+  expect(result.sessions).toMatchObject([{ courseName, weeks, weekday: 1, startPeriod: 1, endPeriod: 2 }]);
   expect(result.warnings).toEqual([]);
 });
 

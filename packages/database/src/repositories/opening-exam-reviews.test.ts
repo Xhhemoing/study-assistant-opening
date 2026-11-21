@@ -63,8 +63,10 @@ function makeFakeSql(options: {
   isStale: boolean;
   ledgerRows: Array<Record<string, unknown>>;
   matchByClientKey?: boolean;
+  leaseTimestamp?: string;
 }) {
   let currentStatus = options.existingStatus ?? "pending";
+  let currentLease = options.leaseTimestamp ?? "2026-10-17 00:00:00.000000+00";
   let insertedRow: Record<string, unknown> | null = null;
   const matchByClientKey = options.matchByClientKey ?? true;
   const calls: Array<{ query: string; values: unknown[] }> = [];
@@ -110,6 +112,13 @@ function makeFakeSql(options: {
     }
     if (query.includes("UPDATE opening_exam_reviews SET status='failed'")) {
       currentStatus = "failed";
+      currentLease = "2026-10-17 00:02:00.000001+00";
+      return Promise.resolve([]);
+    }
+    if (query.includes("UPDATE opening_exam_reviews SET status='ready'")) {
+      if (currentStatus === "pending" || currentStatus === "unknown") {
+        currentStatus = "ready";
+      }
       return Promise.resolve([]);
     }
     if (query.includes("UPDATE opening_exam_reviews SET status=?")) {
@@ -117,13 +126,21 @@ function makeFakeSql(options: {
       return Promise.resolve([]);
     }
     if (query.includes("UPDATE opening_exam_reviews SET updated_at=GREATEST")) {
-      return Promise.resolve([{ lease_updated_at: "2026-10-17 00:02:00.123456+00" }]);
+      currentLease = "2026-10-17 00:02:00.123456+00";
+      return Promise.resolve([{ lease_updated_at: currentLease }]);
     }
     if (query.includes("INSERT INTO opening_exam_reviews")) {
       const newId = String(values[0]);
       const newKey = String(values[10]);
       insertedRow = makeReviewRow(newId, "pending", newKey);
       return Promise.resolve([{ lease_updated_at: "2026-10-17 00:03:00.654321+00" }]);
+    }
+    if (query.includes("SELECT id FROM opening_exam_reviews") && query.includes("AND status='pending'")) {
+      const leaseFrag = values.find((v): v is { __fragment: string; values?: unknown[] } =>
+        Boolean(v && typeof v === "object" && "__fragment" in v && String((v as { __fragment: string }).__fragment).includes("updated_at")));
+      const expectedLease = leaseFrag?.values?.[0];
+      const matches = currentStatus === "pending" && (!expectedLease || expectedLease === currentLease);
+      return Promise.resolve(matches ? [{ id: reviewId }] : []);
     }
     if (query.includes("FROM opening_exam_reviews")) {
       if (query.includes("AND client_key=?") && !matchByClientKey) return Promise.resolve([]);
@@ -138,7 +155,7 @@ function makeFakeSql(options: {
     json: (value: unknown) => value,
     begin: async <T>(fn: (tx: unknown) => Promise<T>) => fn(sql),
   }) as unknown as Sql;
-  return { sql, calls, getStatus: () => currentStatus };
+  return { sql, calls, getStatus: () => currentStatus, getLease: () => currentLease };
 }
 
 describe("opening-exam-reviews stale pending reconciliation and fail guards", () => {
@@ -158,7 +175,7 @@ describe("opening-exam-reviews stale pending reconciliation and fail guards", ()
     expect(f.calls.some(c => c.query.includes("UPDATE opening_exam_reviews SET updated_at=GREATEST"))).toBe(true);
   });
 
-  it("transitions a stale pending review with an active/billed reservation to unknown and never reclaims execution", async () => {
+  it("transitions a stale pending review with an active/billed reservation to unknown, locks ledger FOR UPDATE, and preserves lease updated_at", async () => {
     const f = makeFakeSql({
       isStale: true,
       ledgerRows: [{ state: "reserved", outcome_unknown_at: null, pending_reconcile_cents: 0 }],
@@ -168,6 +185,71 @@ describe("opening-exam-reviews stale pending reconciliation and fail guards", ()
     expect(ctx.reusedUnresolved).toBe(true);
     expect(ctx.executionUpdatedAt).toBeUndefined();
     expect(f.getStatus()).toBe("unknown");
+    const ledgerQuery = f.calls.find(c => c.query.includes("FROM opening_budget_reservations"));
+    expect(ledgerQuery?.query).toContain("FOR UPDATE");
+    const unknownUpdate = f.calls.find(c => c.query.includes("SET status='unknown'"));
+    expect(unknownUpdate?.query).not.toContain("updated_at=");
+  });
+
+  it("keeps fresh unknown reviews non-recoverable without querying the budget ledger, and recovers stale released-only/none unknown reviews to failed", async () => {
+    const fresh = makeFakeSql({ existingStatus: "unknown", isStale: false, ledgerRows: [] });
+    const freshCtx = await createOpeningExamReviewsRepository(fresh.sql).begin(scope, input);
+    expect(freshCtx.review.status).toBe("unknown");
+    expect(freshCtx.reusedUnresolved).toBe(true);
+    expect(fresh.calls.some(c => c.query.includes("opening_budget_reservations"))).toBe(false);
+
+    const staleBilled = makeFakeSql({
+      existingStatus: "unknown",
+      isStale: true,
+      ledgerRows: [{ state: "completed", release_reason: null, outcome_unknown_at: null, pending_reconcile_cents: 0 }],
+    });
+    const staleBilledCtx = await createOpeningExamReviewsRepository(staleBilled.sql).begin(scope, input);
+    expect(staleBilledCtx.review.status).toBe("unknown");
+    expect(staleBilledCtx.reusedUnresolved).toBe(true);
+
+    const staleReleased = makeFakeSql({
+      existingStatus: "unknown",
+      isStale: true,
+      ledgerRows: [{ state: "released", release_reason: "not_sent", outcome_unknown_at: null, pending_reconcile_cents: 0 }],
+    });
+    const staleReleasedCtx = await createOpeningExamReviewsRepository(staleReleased.sql).begin(scope, input);
+    expect(staleReleasedCtx.review.status).toBe("failed");
+    expect(staleReleasedCtx.reusedUnresolved).toBeUndefined();
+    expect(staleReleased.getStatus()).toBe("failed");
+
+    const staleReleasedFreshKey = makeFakeSql({
+      existingStatus: "unknown",
+      isStale: true,
+      matchByClientKey: false,
+      ledgerRows: [{ state: "released", release_reason: "not_sent", outcome_unknown_at: null, pending_reconcile_cents: 0 }],
+    });
+    const freshAfterUnknown = await createOpeningExamReviewsRepository(staleReleasedFreshKey.sql).begin(scope, {
+      ...input,
+      clientKey: "review-key-after-unknown-999",
+    });
+    expect(staleReleasedFreshKey.getStatus()).toBe("failed");
+    expect(freshAfterUnknown.review.id).not.toBe(reviewId);
+    expect(freshAfterUnknown.review.status).toBe("pending");
+    expect(freshAfterUnknown.executionUpdatedAt).toBe("2026-10-17 00:03:00.654321+00");
+  });
+
+  it("fences assertCurrent with status='pending' and lease updated_at, and blocks complete() on failed reviews", async () => {
+    const lease = "2026-10-17 00:00:00.000000+00";
+    const f = makeFakeSql({ isStale: false, ledgerRows: [], leaseTimestamp: lease });
+    const repo = createOpeningExamReviewsRepository(f.sql);
+    await expect(repo.assertCurrent(scope, reviewId, lease)).resolves.toBeUndefined();
+    await expect(repo.assertCurrent(scope, reviewId, "2026-10-17 00:01:00.000000+00")).rejects.toThrow("评阅状态已变化");
+
+    const failedFake = makeFakeSql({ existingStatus: "failed", isStale: false, ledgerRows: [], leaseTimestamp: lease });
+    const failedRepo = createOpeningExamReviewsRepository(failedFake.sql);
+    await expect(failedRepo.assertCurrent(scope, reviewId, lease)).rejects.toThrow("评阅状态已变化");
+    await failedRepo.complete(scope, reviewId, {
+      transcription: "x=1", questionMatch: true, outcome: "correct",
+      steps: [{ label: "Step 1", verdict: "correct", feedback: "ok" }], summary: "ok", errorCause: null,
+    }, "model");
+    const completeCall = failedFake.calls.find(c => c.query.includes("SET status='ready'"));
+    expect(completeCall?.query).toContain("AND status IN ('pending', 'unknown')");
+    expect(failedFake.getStatus()).toBe("failed");
   });
 
   it("transitions a stale pending review with an unconfirmed released reservation (missing release_reason) to unknown", async () => {
@@ -209,23 +291,28 @@ describe("opening-exam-reviews stale pending reconciliation and fail guards", ()
     expect(ctx.executionUpdatedAt).toBe("2026-10-17 00:03:00.654321+00");
   });
 
-  it("guards fail() with pending status, optional lease timestamp, and budget reservation check on failed", async () => {
+  it("guards fail() with lease-scoped unknown->failed recovery, unleased pending-only guard, and budget ledger check", async () => {
     const f = makeFakeSql({ isStale: false, ledgerRows: [] });
     const repo = createOpeningExamReviewsRepository(f.sql);
-    await repo.fail(scope, reviewId, "failed", "2026-10-17 00:02:00.123456+00");
-    const failedCall = f.calls.at(-1)!;
-    expect(failedCall.query).toContain("AND status='pending'");
-    const failedFragments = failedCall.values.filter((v): v is { __fragment: string; values?: unknown[] } =>
+    const getFrags = (call: { values: unknown[] }) => call.values.filter((v): v is { __fragment: string; values?: unknown[] } =>
       Boolean(v && typeof v === "object" && "__fragment" in v));
-    expect(failedFragments.some(fr => fr.__fragment.includes("AND updated_at=?::timestamptz"))).toBe(true);
-    expect(failedFragments.some(fr => fr.__fragment.includes("opening_budget_reservations"))).toBe(true);
+
+    await repo.fail(scope, reviewId, "failed", "2026-10-17 00:02:00.123456+00");
+    const leasedFailedFrags = getFrags(f.calls.at(-1)!);
+    expect(leasedFailedFrags.some(fr => fr.__fragment.includes("AND status IN ('pending', 'unknown')"))).toBe(true);
+    expect(leasedFailedFrags.some(fr => fr.__fragment.includes("AND updated_at=?::timestamptz"))).toBe(true);
+    expect(leasedFailedFrags.some(fr => fr.__fragment.includes("opening_budget_reservations"))).toBe(true);
+
+    await repo.fail(scope, reviewId, "failed");
+    const unleasedFailedFrags = getFrags(f.calls.at(-1)!);
+    expect(unleasedFailedFrags.some(fr => fr.__fragment.includes("AND status='pending'"))).toBe(true);
+    expect(unleasedFailedFrags.some(fr => fr.__fragment.includes("updated_at"))).toBe(false);
+    expect(unleasedFailedFrags.some(fr => fr.__fragment.includes("opening_budget_reservations"))).toBe(true);
 
     await repo.fail(scope, reviewId, "unknown", "2026-10-17 00:02:00.123456+00");
-    const unknownCall = f.calls.at(-1)!;
-    expect(unknownCall.query).toContain("AND status='pending'");
-    const unknownFragments = unknownCall.values.filter((v): v is { __fragment: string; values?: unknown[] } =>
-      Boolean(v && typeof v === "object" && "__fragment" in v));
-    expect(unknownFragments.some(fr => fr.__fragment.includes("AND updated_at=?::timestamptz"))).toBe(true);
-    expect(unknownFragments.some(fr => fr.__fragment.includes("opening_budget_reservations"))).toBe(false);
+    const unknownFrags = getFrags(f.calls.at(-1)!);
+    expect(unknownFrags.some(fr => fr.__fragment.includes("AND status='pending'"))).toBe(true);
+    expect(unknownFrags.some(fr => fr.__fragment.includes("AND updated_at=?::timestamptz"))).toBe(true);
+    expect(unknownFrags.some(fr => fr.__fragment.includes("opening_budget_reservations"))).toBe(false);
   });
 });

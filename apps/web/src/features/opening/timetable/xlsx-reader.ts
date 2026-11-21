@@ -37,8 +37,24 @@ const wrappedPeriodPattern = /\s*(?:\(\s*[0-9]+\s*[-－至]\s*[0-9]+\s*节\s*\)|
 const globalPeriodPattern = /[0-9]+\s*[-－至]\s*[0-9]+\s*节/g;
 const weekPrefixBeforeBracket = /^(?:周次\s*[:：]?|周\s*[:：])\s*/;
 const weekMarkerHint = /周次|第\s*(?:[^\s()（）[\]【】]{0,16}|[\d\s\-－至,，、?？]{1,24})\s*周(?!期|围|边|年|末|转|折|密|全|到|游|旋|长|率|律)|\d\s*[单双]?周|周\s*[:：\d一二三四五六日天]|[单双]周/;
-const malformedWeekTail = /^\s*(?:[-－至~～—–/]|[,，、]\s*(?:[?？]|待定|暂定|另行|未定|TBD\b))/i;
+const weekPlaceholder = /(?:[?？]|待定|暂定|另行|未定|TBD\b)/.source;
+const malformedBareWeekTail = new RegExp(`^\\s*(?:[-－至~～—–/]|[,，、]\\s*${weekPlaceholder})`, "i");
+const malformedCompletedWeekTail = new RegExp(
+  `^\\s*(?:`
+  + `[~～至]`
+  + `|[,，、]\\s*${weekPlaceholder}`
+  + `|[-－—–/]\\s*(?:$`
+    + `|(?:第\\s*)?${weekPlaceholder}`
+    + `|(?:第\\s*)?\\d+(?:\\s*[-－至]\\s*\\d+)?\\s*[单双]?周(?!期|围|边|年|末|转|折|密|全|到|游|旋|长|率|律)`
+    + `|\\d+(?:\\s*[-－至]\\s*\\d+)?\\s*(?:${weekPlaceholder}|[~～至]|[-－—–/]\\s*(?:$|${weekPlaceholder})|[,，、]\\s*${weekPlaceholder})`
+  + `))`,
+  "i",
+);
 const bracketWeekIndicator = /(?:[0-9A-Za-z?？\-－至~～—–,，、;；:：/]|待定|暂定|另行|未定|全|(?:第|前|后)\s*[一二三四五六七八九十百零两]+)/;
+
+function hasMalformedWeekTail(tail: string, completedUnit: boolean): boolean {
+  return (completedUnit ? malformedCompletedWeekTail : malformedBareWeekTail).test(tail);
+}
 
 function looksLikeMalformedWeekBracket(segment: string): boolean {
   if (weekMarkerHint.test(segment)) return true;
@@ -163,7 +179,8 @@ function parseInlineCourseLine(line: string): { courseName: string; weeks: numbe
     if (!precededByDigit) {
       const token = matchInlineWeekToken(withoutPeriods, i);
       if (token) {
-        if (!addWeeks(weeks, token.list, token.parity) || malformedWeekTail.test(withoutPeriods.slice(token.end))) {
+        const completedUnit = /(?:周|[单双]周?|[)）])$/.test(withoutPeriods.slice(i, token.end));
+        if (!addWeeks(weeks, token.list, token.parity) || hasMalformedWeekTail(withoutPeriods.slice(token.end), completedUnit)) {
           invalid = true;
         }
         matchedSpans.push({ start: i, end: token.end });
@@ -194,6 +211,9 @@ function parseInlineCourseLine(line: string): { courseName: string; weeks: numbe
               invalid = true;
               break;
             }
+          }
+          if (hasMalformedWeekTail(withoutPeriods.slice(closeIdx + 1), true)) {
+            invalid = true;
           }
           matchedSpans.push({ start: i, end: closeIdx + 1 });
         } else if (looksLikeMalformedWeekBracket(segment)) {

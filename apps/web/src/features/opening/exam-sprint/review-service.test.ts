@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { BudgetReplayError, type ModelGateway } from "@aistudy/ai";
+import { BudgetReplayError, createModelGateway, OpeningProviderError, type ModelGateway } from "@aistudy/ai";
 import type { ExamWorkReview, ExamWorkReviewInput, ProviderInput, Scope } from "@aistudy/contracts";
 import { createExamPhotoReviewService } from "./review-service";
 
@@ -61,14 +61,71 @@ describe("exam photo review is a durable proposal", () => {
     expect(call).not.toHaveBeenCalled();
     expect(repository.fail).not.toHaveBeenCalled();
   });
-  it("forwards the executionUpdatedAt lease timestamp to fail so a zombie attempt cannot clobber a reclaimed retry", async () => {
-    const lease = "2026-10-17T00:00:00.000Z";
+  it("forwards the executionUpdatedAt lease timestamp to assertCurrent and fail, and aborts a stale fallback in beforeSend with zero spend", async () => {
+    const lease = "2026-10-17 00:00:00.000000+00";
     repository.begin.mockResolvedValueOnce({
       review: { ...stored }, input, privacyEpoch: 2, referencePage: 3, questionLabel: "题1", executionUpdatedAt: lease,
     });
     images.mockResolvedValueOnce([]);
     expect((await service.review(scope, input)).status).toBe("failed");
     expect(repository.fail).toHaveBeenCalledWith(scope, "review-1", "failed", lease);
+
+    // End-to-end gateway fallback race: primary releases not_sent, retry flips R1 to failed before fallback sends.
+    stored = { ...stored, status: "pending" };
+    repository.begin.mockResolvedValueOnce({
+      review: { ...stored }, input, privacyEpoch: 2, referencePage: 3, questionLabel: "题1", executionUpdatedAt: lease,
+    });
+    const primaryComplete = vi.fn(async () => {
+      throw new OpeningProviderError("PROVIDER_RATE_LIMIT", "rate limited", { requestSent: false });
+    });
+    const fallbackComplete = vi.fn(async () => ({ ...output, citedChunkIds: [], candidates: [], requestId: null }));
+    const released: Array<{ requestId: string; reason?: string }> = [];
+    const budget: Options["budget"] = {
+      reserve: vi.fn(async ({ requestId }) => ({ id: `res:${requestId}`, requestId, state: "reserved" })),
+      claimExecution: vi.fn(async () => true),
+      release: vi.fn(async (requestId, reason) => {
+        released.push({ requestId, ...(reason ? { reason } : {}) });
+        if (requestId === "exam-review:workspace:review-1") {
+          // Concurrent stale retry saw primary released_only and marked R1 failed while minting R2.
+          stored = { ...stored, status: "failed" };
+        }
+      }),
+      settle: vi.fn(async () => undefined),
+      markUnknown: vi.fn(async () => undefined),
+    };
+    repository.assertCurrent.mockImplementation(async (_scope, _id, expectedLease) => {
+      if (stored.status !== "pending" || expectedLease !== lease) {
+        throw Object.assign(new Error("评阅状态已变化，本次尝试已中止"), { code: "CONFLICT" });
+      }
+    });
+    const modelSnapshot = {
+      provider: "openai" as const, modelName: "gpt-vision", baseUrl: "https://api.example.com",
+      mediaInputTokenUpperBound: 1000, mediaInputCentsPerMillion: 100, mediaMaxInputBytes: 1_000_000,
+    };
+    const gateway = createModelGateway({
+      resolve: async () => ({
+        provider: { complete: primaryComplete }, modelSnapshot,
+        inputCentsPerMillion: 100, outputCentsPerMillion: 100,
+        mediaInputTokenUpperBound: 1000, mediaInputCentsPerMillion: 100, mediaMaxInputBytes: 1_000_000,
+      }),
+      resolveFallback: async () => ({
+        provider: { complete: fallbackComplete }, modelSnapshot: { ...modelSnapshot, modelName: "gpt-vision-fallback" },
+        inputCentsPerMillion: 100, outputCentsPerMillion: 100,
+        mediaInputTokenUpperBound: 1000, mediaInputCentsPerMillion: 100, mediaMaxInputBytes: 1_000_000,
+      }),
+    });
+    const racedService = createExamPhotoReviewService({ repository, gateway, images, budget: () => budget });
+    const result = await racedService.review(scope, input);
+    expect(result.status).toBe("failed");
+    expect(primaryComplete).toHaveBeenCalledTimes(1);
+    expect(fallbackComplete).not.toHaveBeenCalled();
+    expect(repository.assertCurrent).toHaveBeenNthCalledWith(1, scope, "review-1", lease);
+    expect(repository.assertCurrent).toHaveBeenNthCalledWith(2, scope, "review-1", lease);
+    expect(released).toEqual([
+      { requestId: "exam-review:workspace:review-1", reason: "not_sent" },
+      { requestId: "exam-review:workspace:review-1:fallback", reason: "not_sent" },
+    ]);
+    expect(repository.fail).toHaveBeenLastCalledWith(scope, "review-1", "failed", lease);
   });
   it("does not charge again when a reused secondary client key replays after completion", async () => {
     const ready: ExamWorkReview = { ...stored, status: "ready", proposal, modelLabel: "vision-model" };
