@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  createOpeningBudgetRepository, createOpeningConversationRepository,
+  createCourseMembershipRepository, createOpeningBudgetRepository, createOpeningConversationRepository,
   createOpeningMemoryRepository, createOpeningPrivacyRepository,
   createOpeningSourceChunksRepository, createOpeningTutorJobsRepository,
 } from "@aistudy/database";
@@ -50,7 +50,7 @@ function handler(text: string, memoryText?: string) {
     budget,
     retrieveContext: createOpeningMaterialRetriever(f.sql, budget, null),
     privacy: createOpeningPrivacyRepository(f.sql), provider,
-    memories: { listContext: (scope, now) => createOpeningMemoryRepository(f.sql).listContext(scope, now) },
+    memories: { listContext: (scope, now, activeCourseId) => createOpeningMemoryRepository(f.sql).listContext(scope, now, activeCourseId ?? null) },
     config: { maxContextCharacters: 12_000, reservedCents: 100, maxOutputTokens: 256,
       inputCentsPerMillion: 1, outputCentsPerMillion: 1 },
   });
@@ -58,6 +58,94 @@ function handler(text: string, memoryText?: string) {
 }
 
 describe("saved tutor material provenance", () => {
+  it("carries matching course memories through Worker completion and fences their exact IDs against the saved job", async () => {
+    const { sql, scope } = f;
+    const courses = createCourseMembershipRepository(sql);
+    const conversations = createOpeningConversationRepository(sql);
+    const jobs = createOpeningTutorJobsRepository(sql);
+    const memories = createOpeningMemoryRepository(sql);
+    const courseA = await courses.createCourse({ workspaceId: scope.workspaceId, title: "Tutor memory course A", slug: "tutor-memory-a" });
+    const courseB = await courses.createCourse({ workspaceId: scope.workspaceId, title: "Tutor memory course B", slug: "tutor-memory-b" });
+    const material = await source();
+    const origin = await conversations.create(scope, { title: "Standalone origin", courseId: null });
+    const evidence = await append(origin.id, [material]);
+    const globalEvidence = await append(origin.id);
+    const createMemory = async (courseId: string | null, sourceTurnId: string, text: string) => {
+      const candidate = await memories.proposeMemory(scope, { courseId, text, sourceTurnIds: [sourceTurnId], expiresAt: null });
+      return memories.confirm(scope, candidate.id, candidate.version, randomUUID());
+    };
+    const global = await createMemory(null, globalEvidence.turnId, "Global preference");
+    const a = await createMemory(courseA.id, evidence.turnId, "Course A preference");
+    const b = await createMemory(courseB.id, evidence.turnId, "Course B preference");
+    const conversation = await conversations.create(scope, { title: "Use course A", courseId: courseA.id });
+    const first = await append(conversation.id);
+    const worker = handler("Course A response");
+    await worker.run(first.jobId);
+    expect(worker.calls[0]?.instruction).toContain(global.text);
+    expect(worker.calls[0]?.instruction).toContain(a.text);
+    expect(worker.calls[0]?.instruction).not.toContain(b.text);
+    const [saved] = await sql`SELECT context_source_refs FROM opening_turns WHERE id=${first.assistantTurnId}`;
+    const sourceRef = { sourceId: material, sourceVersion: 0, memoryOnly: true };
+    expect(saved?.context_source_refs).toEqual([sourceRef, { memoryDependencyIds: [global.id, a.id].sort() }]);
+    const completed = await jobs.get(scope, first.jobId);
+    const metadataTarget = { scope, jobId: first.jobId, assistantTurnId: first.assistantTurnId, claimToken: completed?.claimToken };
+    await expect(jobs.canAppendCompletedTurnCandidates(metadataTarget)).resolves.toBe(true);
+
+    const pending = await append(origin.id);
+    await sql`UPDATE opening_turns SET context_anchor=${sql.json({ purpose: "learning_help", courseId: courseA.id.toUpperCase() })} WHERE id=${pending.turnId}`;
+    const claim = (await jobs.claim(pending.jobId))!;
+    const send = { claimToken: claim.claimToken, executionId: claim.executionId, contextSourceRefs: [sourceRef],
+      memoryLineageSourceIds: [material], globalMemoryIds: [a.id] };
+    await expect(jobs.assertGlobalMemoriesCurrent(scope, [global.id, a.id], pending.jobId)).resolves.toBeUndefined();
+    await expect(jobs.assertGlobalMemoriesCurrent(scope, [a.id])).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(jobs.assertGlobalMemoriesCurrent(scope, [b.id], pending.jobId)).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(jobs.assertSendAuthorized(scope, pending.jobId, send)).resolves.toBeUndefined();
+    const membership = { workspaceId: scope.workspaceId, courseId: courseB.id, assetType: "source" as const, assetId: material };
+    await courses.addAssetMembership({ ...membership, role: "core", purpose: "teaching", visibility: "course" });
+    await expect(jobs.assertSendAuthorized(scope, pending.jobId, send)).rejects.toMatchObject({ code: "CONFLICT" });
+    await courses.removeAssetMembership(membership);
+    const sameCourse = { ...membership, courseId: courseA.id };
+    await courses.addAssetMembership({ ...sameCourse, role: "core", purpose: "practice", visibility: "course" });
+    await expect(jobs.assertSendAuthorized(scope, pending.jobId, send)).rejects.toMatchObject({ code: "CONFLICT" });
+    await courses.removeAssetMembership(sameCourse);
+    const publication = { ...send, privacyEpoch: await createOpeningPrivacyRepository(sql).getWorkspaceEpoch(scope) };
+    const publish = vi.fn(async () => {});
+    await jobs.withStreamPublication(scope, pending.jobId, publication, publish);
+    expect(publish).toHaveBeenCalledOnce();
+    const deliver = vi.fn();
+    await jobs.readStream(scope, pending.jobId, { ...publication, exposureReceiptId: null }, deliver);
+    expect(deliver).toHaveBeenCalledOnce();
+    await expect(jobs.withStreamPublication(scope, pending.jobId,
+      { ...publication, privacyEpoch: publication.privacyEpoch + 1 }, publish)).rejects.toMatchObject({ code: "PRIVACY_EPOCH_MISMATCH" });
+    await sql`UPDATE opening_sources SET upload_state='rejected' WHERE id=${material}`;
+    await expect(jobs.assertSendAuthorized(scope, pending.jobId, send)).rejects.toMatchObject({ code: "CONFLICT" });
+    await sql`UPDATE opening_sources SET upload_state='uploaded' WHERE id=${material}`;
+    await sql`UPDATE opening_turns SET context_anchor=NULL WHERE id=${pending.turnId}`;
+    await expect(jobs.assertGlobalMemoriesCurrent(scope, [a.id], pending.jobId)).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(jobs.assertGlobalMemoriesCurrent(scope, [b.id], pending.jobId)).rejects.toMatchObject({ code: "CONFLICT" });
+    await sql`UPDATE opening_turns SET context_anchor=${sql.json({ purpose: "learning_help", courseId: courseA.id })} WHERE id=${pending.turnId}`;
+
+    const record = await conversations.appendSavedTurn({ scope, conversationId: conversation.id, querySystem: true,
+      text: "What did I study?", mode: "explain", sourceIds: [], clientKey: randomUUID(),
+      learningSessionId: null, currentPage: null, chunkId: null });
+    const recordClaim = (await jobs.claim(record.jobId))!;
+    const completion: Parameters<typeof jobs.completeTurn>[0] = {
+      scope, jobId: record.jobId, assistantTurnId: record.assistantTurnId, claimToken: recordClaim.claimToken,
+      text: "Saved record response", citations: [], candidates: [], contextSourceRefs: [],
+      systemQuery: { authorization: { purpose: "system_record_lookup", workspaceId: scope.workspaceId,
+        principalId: scope.ownerUserId, role: "workspace_owner", permissionRevision: "1" },
+      version: "study-query-v1", asOf: new Date().toISOString(), privacyEpoch: publication.privacyEpoch,
+      mode: "deterministic", status: "ok", reason: "read", results: [] },
+    };
+    await expect(jobs.completeTurn(completion, { globalMemoryIds: [b.id] })).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(jobs.completeTurn(completion, { globalMemoryIds: [a.id] })).resolves.toBeUndefined();
+    expect(await jobs.get(scope, record.jobId)).toMatchObject({ status: "succeeded" });
+
+    await courses.setArchived({ ...scope, courseId: courseA.id, archived: true });
+    await expect(jobs.assertGlobalMemoriesCurrent(scope, [a.id], pending.jobId)).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(jobs.canAppendCompletedTurnCandidates(metadataTarget)).resolves.toBe(false);
+  });
+
   it("carries material through a memory into another conversation and filters its later history", async () => {
     const id = await source();
     const conversations = createOpeningConversationRepository(f.sql);

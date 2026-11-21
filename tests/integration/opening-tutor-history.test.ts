@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, expect, it } from "vitest";
-import { createOpeningConversationRepository, createOpeningTutorJobsRepository } from "@aistudy/database";
+import { createCourseMembershipRepository, createOpeningConversationRepository, createOpeningMemoryRepository, createOpeningTutorJobsRepository } from "@aistudy/database";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 let f: OpeningFixture;
 beforeAll(async () => { f = await createOpeningFixture(); });
@@ -72,4 +72,45 @@ it("bounds history by whole exchanges and excludes oversized recent turns", asyn
   const { current, jobs, prior } = await seed();
   await f.sql`UPDATE opening_turns SET text=${'x'.repeat(12001)} WHERE id=${prior.turnId}`;
   expect(await jobs.loadHistory(f.scope, current.turnId)).toEqual([]);
+});
+
+it("keeps course-scoped memory history only while both turns resolve to its active course", async () => {
+  const { current, jobs, prior, c } = await seed();
+  const courses = createCourseMembershipRepository(f.sql);
+  const courseA = await courses.createCourse({ workspaceId: f.scope.workspaceId, title: "History course A", slug: "history-a" });
+  const courseB = await courses.createCourse({ workspaceId: f.scope.workspaceId, title: "History course B", slug: "history-b" });
+  const expiresAt = new Date(Date.now() + 60 * 60 * 1_000).toISOString();
+  const memory = await createOpeningMemoryRepository(f.sql).proposeMemory(f.scope, {
+    courseId: courseA.id, text: "Course A study preference", sourceTurnIds: [prior.turnId], expiresAt,
+  });
+  const [source] = await f.sql<{ id: string }[]>`INSERT INTO opening_sources
+    (id,workspace_id,name,mime,bytes,sha256,version,upload_state,parse_state)
+    VALUES (${randomUUID()},${f.scope.workspaceId},'notes.txt','text/plain',1,${"a".repeat(64)},0,'uploaded','ready') RETURNING id`;
+  await f.sql`UPDATE opening_turns SET source_ids=ARRAY[${source!.id}]::uuid[],
+    source_versions=jsonb_build_object(${source!.id}::text,0) WHERE id=${prior.turnId}`;
+  const refs = [{ sourceId: source!.id, sourceVersion: 0, memoryOnly: true }, { memoryDependencyIds: [memory.id] }];
+  await f.sql`UPDATE opening_turns SET context_source_refs=${f.sql.json(refs)} WHERE id=${prior.assistantTurnId}`;
+  const anchor = async (id: string, courseId: string | null) => f.sql`UPDATE opening_turns
+    SET context_anchor=${courseId === null ? null : f.sql.json({ purpose: "learning_help", courseId })} WHERE id=${id}`;
+  const history = () => jobs.loadHistoryContext(f.scope, current.turnId);
+  const expected = { history: [{ role: "user", text: "previous question" }, { role: "assistant", text: "step two" }],
+    sourceRefs: [{ sourceId: source!.id, sourceVersion: 0 }], memoryIds: [memory.id], temporaryMemoryExpiresAt: expiresAt };
+
+  await anchor(prior.turnId, courseA.id.toUpperCase());
+  await anchor(current.turnId, courseA.id);
+  expect(await history()).toEqual(expected);
+  await anchor(current.turnId, null);
+  expect(await history()).toEqual({ history: [], sourceRefs: [] });
+  await anchor(current.turnId, courseB.id);
+  expect(await history()).toEqual({ history: [], sourceRefs: [] });
+
+  await f.sql`UPDATE opening_conversations SET course_id=${courseA.id} WHERE id=${c.id}`;
+  expect(await history()).toEqual(expected);
+  await f.sql`UPDATE opening_memories SET expires_at=now() - interval '1 second' WHERE id=${memory.id}`;
+  expect(await history()).toEqual({ history: [], sourceRefs: [] });
+  await f.sql`UPDATE opening_memories SET expires_at=${expiresAt}, status='deleted' WHERE id=${memory.id}`;
+  expect(await history()).toEqual({ history: [], sourceRefs: [] });
+  await f.sql`UPDATE opening_memories SET status='active' WHERE id=${memory.id}`;
+  await courses.setArchived({ ...f.scope, courseId: courseA.id, archived: true });
+  expect(await history()).toEqual({ history: [], sourceRefs: [] });
 });

@@ -13,9 +13,11 @@ import type { Sql, TransactionSql } from "postgres";
 import { createOpeningCourseReadySourcesRepository } from "./opening-course-ready-sources";
 import { courseSourcePurposeAllows, helpInputSnapshotSchema, openingMaterialPurposePinSchema, type CourseSourcePurpose, type HelpInputSnapshot, type OpeningMaterialPurposePin } from "@aistudy/contracts";
 import { TERMINAL_TURN_STATUSES, terminalTurnStatusForJobError, systemQueryReceiptSchema, type Citation, type SystemQueryReceipt, type StudyContextAnchor, type ComposerPurpose, type StudyIntentEvent } from "@aistudy/contracts";
-import { contextSourceRefsIncluded, memoryTransitiveDependenciesActive, mergeContextSourceRefs, parseContextSourceRefs, turnContextSourceRefs } from "./opening-context-provenance";
+import {
+  contextSourceRefsIncluded, lineageUuid, memoryCourseAllows, memoryTransitiveDependenciesActive, mergeContextSourceRefs,
+  parseContextSourceRefs, turnContextSourceRefs, turnTransitiveDependenciesActive, type ContextSourceRef,
+} from "./opening-context-provenance";
 import type { OpeningScope } from "./opening-sources";
-import type { ContextSourceRef } from "./opening-context-provenance";
 import { loadTutorHistory, loadTutorHistoryContext, type TutorHistoryPurpose } from "./opening-tutor-history";
 import {
   fenceCancelledOpeningTutorStream, isUnconfirmedStreamSealError, markFallbackStreamSealAttempted,
@@ -77,6 +79,21 @@ type StreamTurnBinding = {
 const PUBLICATION_CLEANUP_DEADLINE_MS = 1_500;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+function boundTurnCourseId(turn: StreamTurnBinding): string | null {
+  const courseId = turn.course_id ?? (turn.context_anchor as StudyContextAnchor | null | undefined)?.courseId;
+  if (courseId == null) return null;
+  if (typeof courseId !== "string" || !UUID_PATTERN.test(courseId)) {
+    throw Object.assign(new Error("stream course binding invalid"), { code: "CONFLICT" });
+  }
+  return courseId.toLowerCase();
+}
+
+async function lockStreamCourse(tx: TransactionSql, scope: OpeningScope, courseId: string) {
+  const course = await tx`SELECT id FROM courses WHERE id=${courseId} AND workspace_id=${scope.workspaceId}
+    AND archived_at IS NULL FOR SHARE`;
+  if (!course.length) throw Object.assign(new Error("course is no longer available"), { code: "CONFLICT" });
+}
+
 type SendAuthorizationContext = {
   expectedPrivacyEpoch?: number;
   claimToken?: string;
@@ -93,6 +110,7 @@ async function assertGlobalMemoriesUnexpiredInTx(
   tx: TransactionSql,
   scope: OpeningScope,
   globalMemoryIds: readonly string[] | undefined,
+  courseId: string | null,
 ): Promise<void> {
   if (!globalMemoryIds?.length) return;
   const ids = [...new Set(globalMemoryIds.map(id => {
@@ -105,7 +123,7 @@ async function assertGlobalMemoriesUnexpiredInTx(
     WHERE workspace_id=${scope.workspaceId}
       AND id=ANY(${ids}::uuid[])
       AND status='active'
-      AND course_id IS NULL
+      AND ${memoryCourseAllows(tx, () => tx`opening_memories.course_id`, () => tx`${courseId}::uuid`, () => tx`opening_memories.workspace_id`)}
       AND (kind='confirmed' OR (kind='temporary' AND expires_at IS NOT NULL AND expires_at > clock_timestamp()))
       AND ${memoryTransitiveDependenciesActive(tx, "")}
     ORDER BY id`;
@@ -124,14 +142,12 @@ async function assertStreamMaterialAdmission(
   verifiedAttemptRefs?: readonly ContextSourceRef[],
   admissionOptions: {
     allowMissingPin?: boolean;
-    skipPinRepoAssert?: boolean;
     memoryLineageSourceIds?: readonly string[];
     globalMemoryIds?: readonly string[];
   } = {},
-): Promise<void> {
+): Promise<string | null> {
   const anchor = turn.context_anchor as StudyContextAnchor | null | undefined;
-  const courseId = (typeof turn.course_id === "string" ? turn.course_id : null)
-    ?? (typeof anchor?.courseId === "string" ? anchor.courseId : null);
+  const courseId = boundTurnCourseId(turn);
   const materialUse = turn.attempt_id || anchor?.itemVersionId ? "practice" as const : "citation" as const;
   const turnSourceIds = Array.isArray(turn.source_ids)
     ? [...new Set(turn.source_ids.filter((value): value is string => typeof value === "string"))]
@@ -147,6 +163,9 @@ async function assertStreamMaterialAdmission(
       }
       memoryLineageSet.add(sourceId.toLowerCase());
     }
+  }
+  for (const ref of contextSourceRefs) {
+    if (ref.memoryOnly === true) memoryLineageSet.add(ref.sourceId.toLowerCase());
   }
   const globalMemoryIdSet = new Set<string>();
   if (admissionOptions.globalMemoryIds !== undefined) {
@@ -218,15 +237,13 @@ async function assertStreamMaterialAdmission(
   );
   const memoryOnlySet = new Set(memoryOnlySourceIds);
   const courseDerivedSourceIds = derivedSourceIds.filter(sourceId => !memoryOnlySet.has(sourceId));
+  if (courseId !== null && (derivedSourceIds.length || globalMemoryIdList.length)) {
+    await lockStreamCourse(tx, scope, courseId);
+  }
   if (derivedSourceIds.length) {
     // Lock courses -> all opening_sources (pinned + derived + memory lineage) in deterministic ID order
     // BEFORE any course_asset_memberships lock so addAssetMembership(FOR UPDATE on opening_sources)
     // can never deadlock or race standalone/mock_exam classification.
-    if (courseId !== null) {
-      const course = await tx`SELECT id FROM courses WHERE id=${courseId} AND workspace_id=${scope.workspaceId}
-        AND archived_at IS NULL FOR SHARE`;
-      if (!course.length) throw Object.assign(new Error("course is no longer available"), { code: "CONFLICT" });
-    }
     const allSourceIds = [...new Set([...pinnedSourceIds, ...derivedSourceIds])].sort();
     const lockedSources = await tx`SELECT s.id,s.version FROM opening_sources s
       WHERE s.workspace_id=${scope.workspaceId} AND s.id=ANY(${allSourceIds}::uuid[])
@@ -235,41 +252,23 @@ async function assertStreamMaterialAdmission(
       throw Object.assign(new Error("stream material unavailable or excluded"), { code: "CONFLICT" });
     }
   }
-  if (pin && !admissionOptions.skipPinRepoAssert && (pin.courseId !== null || pin.sources.length > 0)) {
+  if (pin && (pin.courseId !== null || pin.sources.length > 0)) {
     await createOpeningCourseReadySourcesRepository(sql).assertMaterialPurposePin(scope, pin, tx);
-  }
-  if (globalMemoryIdList.length) {
-    // Lock and verify every exact injected global memory is still active and unexpired (never superseded/rejected/expired).
-    // Use post-lock clock_timestamp() rather than transaction-start now() so waiting on workspace/job locks cannot admit expired temporary memory.
-    const activeMemories = await tx`SELECT id FROM opening_memories
-      WHERE workspace_id=${scope.workspaceId}
-        AND id=ANY(${globalMemoryIdList}::uuid[])
-        AND status='active'
-        AND course_id IS NULL
-        AND (kind='confirmed' OR (kind='temporary' AND expires_at IS NOT NULL AND expires_at > clock_timestamp()))
-        AND ${memoryTransitiveDependenciesActive(tx, "")}
-      ORDER BY id FOR SHARE`;
-    if (activeMemories.length !== globalMemoryIdList.length) {
-      throw Object.assign(new Error("stream global memory is no longer active"), { code: "CONFLICT" });
-    }
   }
   if (memoryOnlySourceIds.length) {
     if (!globalMemoryIdList.length) {
       throw Object.assign(new Error("stream global memory binding missing"), { code: "CONFLICT" });
     }
-    // Workspace-wide global memory lineage does not require active-course membership,
-    // but must still be genuinely backed by the exact active, unexpired global memories and never mock_exam.
+    // Global backing can cross courses. Course-only backing retains course and purpose limits.
     const backed = await tx`
-      SELECT DISTINCT lower(sid.id::text) AS source_id
+      SELECT lower(sid.id::text) AS source_id, bool_or(m.course_id IS NULL) AS backed_by_global
       FROM unnest(${memoryOnlySourceIds}::uuid[]) AS sid(id)
-      WHERE EXISTS (
-        SELECT 1
-        FROM opening_memories m
-        WHERE m.workspace_id = ${scope.workspaceId}
+      JOIN opening_memories m ON m.workspace_id = ${scope.workspaceId}
           AND m.id = ANY(${globalMemoryIdList}::uuid[])
           AND m.status = 'active'
-          AND m.course_id IS NULL
+          AND ${memoryCourseAllows(tx, () => tx`m.course_id`, () => tx`${courseId}::uuid`, () => tx`m.workspace_id`)}
           AND (m.kind = 'confirmed' OR (m.kind = 'temporary' AND m.expires_at IS NOT NULL AND m.expires_at > clock_timestamp()))
+          AND ${memoryTransitiveDependenciesActive(tx)}
           AND EXISTS (
             SELECT 1
             FROM jsonb_array_elements_text(m.source_turn_ids) AS ref(turn_id)
@@ -287,9 +286,11 @@ async function assertStreamMaterialAdmission(
                   END
                 ) AS turn_ref
                 WHERE lower(turn_ref->>'sourceId') = lower(sid.id::text)
+                  AND ((turn_ref->>'memoryOnly') IS DISTINCT FROM 'true'
+                    OR t.context_source_refs @? '$[*].memoryDependencyIds[*]')
               )
           )
-      )`;
+      GROUP BY sid.id`;
     if (backed.length !== memoryOnlySourceIds.length) {
       throw Object.assign(new Error("source purpose no longer permits this use"), { code: "CONFLICT" });
     }
@@ -299,6 +300,21 @@ async function assertStreamMaterialAdmission(
       ORDER BY asset_id FOR SHARE`;
     if (mockExam.length) {
       throw Object.assign(new Error("source purpose no longer permits this use"), { code: "CONFLICT" });
+    }
+    const courseOnlySourceIds = backed.filter(row => !row.backed_by_global).map(row => String(row.source_id));
+    if (courseOnlySourceIds.length) {
+      const memberships = await tx`SELECT asset_id,course_id,purpose FROM course_asset_memberships
+        WHERE workspace_id=${scope.workspaceId} AND asset_type='source'
+          AND asset_id=ANY(${courseOnlySourceIds}::uuid[]) ORDER BY asset_id,course_id FOR SHARE`;
+      for (const sourceId of courseOnlySourceIds) {
+        const forSource = memberships.filter(row => row.asset_id === sourceId);
+        const inCourse = forSource.find(row => row.course_id === courseId);
+        const purpose = (inCourse?.purpose ?? null) as CourseSourcePurpose | null;
+        if (inCourse ? !courseSourcePurposeAllows(purpose, materialUse) || (purpose === "practice" && materialUse !== "practice")
+          : forSource.some(row => row.purpose !== null)) {
+          throw Object.assign(new Error("source purpose no longer permits this use"), { code: "CONFLICT" });
+        }
+      }
     }
   }
   if (courseDerivedSourceIds.length) {
@@ -320,10 +336,20 @@ async function assertStreamMaterialAdmission(
       }
     }
   }
-  // Re-evaluate post-lock clock_timestamp() after any course_asset_memberships FOR SHARE lock wait.
-  if (globalMemoryIdList.length && (memoryOnlySourceIds.length || courseDerivedSourceIds.length)) {
-    await assertGlobalMemoriesUnexpiredInTx(tx, scope, globalMemoryIdList);
+  if (globalMemoryIdList.length) {
+    const activeMemories = await tx`SELECT id FROM opening_memories
+      WHERE workspace_id=${scope.workspaceId}
+        AND id=ANY(${globalMemoryIdList}::uuid[])
+        AND status='active'
+        AND ${memoryCourseAllows(tx, () => tx`opening_memories.course_id`, () => tx`${courseId}::uuid`, () => tx`opening_memories.workspace_id`)}
+        AND (kind='confirmed' OR (kind='temporary' AND expires_at IS NOT NULL AND expires_at > clock_timestamp()))
+        AND ${memoryTransitiveDependenciesActive(tx, "")}
+      ORDER BY id FOR SHARE`;
+    if (activeMemories.length !== globalMemoryIdList.length) {
+      throw Object.assign(new Error("stream global memory is no longer active"), { code: "CONFLICT" });
+    }
   }
+  return courseId;
 }
 
 async function assertStreamSources(
@@ -442,46 +468,8 @@ async function findCompletedCandidateTarget(db: Sql | TransactionSql, input: Com
       AND j.claim_token IS NOT DISTINCT FROM ${input.claimToken ?? null}::uuid
       AND (${input.expectedPrivacyEpoch ?? null}::integer IS NULL OR w.privacy_epoch=${input.expectedPrivacyEpoch ?? null})
       AND ${contextSourceRefsIncluded(db, input.scope.workspaceId, () => db`t.context_source_refs`)}
-      AND NOT EXISTS (
-        WITH RECURSIVE mem_deps(dep_id) AS (
-          SELECT lower(dep.id)
-          FROM jsonb_array_elements(
-            CASE WHEN jsonb_typeof(t.context_source_refs) = 'array' THEN t.context_source_refs ELSE '[]'::jsonb END
-          ) AS dep_elem
-          CROSS JOIN LATERAL jsonb_array_elements_text(
-            CASE WHEN dep_elem = jsonb_build_object('memoryDependencyIds', dep_elem->'memoryDependencyIds')
-              AND jsonb_typeof(dep_elem->'memoryDependencyIds') = 'array'
-              THEN dep_elem->'memoryDependencyIds' ELSE '[]'::jsonb END
-          ) AS dep(id)
-          UNION
-          SELECT lower(dep.id)
-          FROM mem_deps prev
-          JOIN opening_memories pm ON pm.id::text = prev.dep_id AND pm.workspace_id = j.workspace_id
-          CROSS JOIN LATERAL jsonb_array_elements_text(
-            CASE WHEN jsonb_typeof(pm.source_turn_ids) = 'array' THEN pm.source_turn_ids ELSE '[]'::jsonb END
-          ) AS st(turn_id)
-          JOIN opening_turns dt ON dt.id::text = lower(st.turn_id) AND dt.workspace_id = j.workspace_id
-          CROSS JOIN LATERAL jsonb_array_elements(
-            CASE WHEN jsonb_typeof(dt.context_source_refs) = 'array' THEN dt.context_source_refs ELSE '[]'::jsonb END
-          ) AS dep_elem
-          CROSS JOIN LATERAL jsonb_array_elements_text(
-            CASE WHEN dep_elem = jsonb_build_object('memoryDependencyIds', dep_elem->'memoryDependencyIds')
-              AND jsonb_typeof(dep_elem->'memoryDependencyIds') = 'array'
-              THEN dep_elem->'memoryDependencyIds' ELSE '[]'::jsonb END
-          ) AS dep(id)
-        )
-        SELECT 1
-        FROM mem_deps d
-        WHERE NOT EXISTS (
-          SELECT 1
-          FROM opening_memories m
-          WHERE m.id::text = d.dep_id
-            AND m.workspace_id = j.workspace_id
-            AND m.status = 'active'
-            AND m.course_id IS NULL
-            AND (m.kind = 'confirmed' OR (m.kind = 'temporary' AND m.expires_at IS NOT NULL AND m.expires_at > clock_timestamp()))
-        )
-      )
+      AND ${turnTransitiveDependenciesActive(db, "t", undefined,
+        () => db`COALESCE(c.course_id, ${lineageUuid(db, () => db`u.context_anchor->>'courseId'`)})`)}
       AND (${input.metadataLease === undefined} OR EXISTS (
         SELECT 1 FROM opening_jobs metadata WHERE metadata.id=${input.metadataLease?.id ?? null}::uuid
           AND metadata.workspace_id=j.workspace_id AND metadata.owner_user_id=w.owner_user_id
@@ -760,7 +748,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
    * Final atomic send gate before external provider dispatch.
    * Locks workspaces -> opening_tutor_jobs FOR SHARE in canonical lock order, verifying
    * running status, claim_token, timing_execution_id, privacy_epoch, attempt context,
-   * material admission, and post-lock clock_timestamp() global memory eligibility, then
+   * material admission, and post-lock clock_timestamp() memory eligibility, then
    * invokes startSend() SYNCHRONOUSLY while PostgreSQL still holds FOR SHARE locks
    * (releasing the DB connection on commit immediately without awaiting network I/O).
    */
@@ -802,7 +790,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
         await assertTutorAttemptContext(tx, scope,
           { jobId: id, userTurnId: String(job.user_turn_id), claimToken: context.claimToken }, context.attemptContext);
       }
-      await assertStreamMaterialAdmission(sql, tx, scope, job, context.materialPurposePin,
+      const courseId = await assertStreamMaterialAdmission(sql, tx, scope, job, context.materialPurposePin,
         context.contextSourceRefs, context.attemptContext?.sourceRefs, {
           memoryLineageSourceIds: context.memoryLineageSourceIds,
           globalMemoryIds: context.globalMemoryIds,
@@ -812,8 +800,8 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
           tx, scope, context.contextSourceRefs, context.attemptContext?.sourceRefs,
           job.source_versions as Record<string, unknown> | null | undefined,
         );
-        await assertGlobalMemoriesUnexpiredInTx(tx, scope, context.globalMemoryIds);
       }
+      await assertGlobalMemoriesUnexpiredInTx(tx, scope, context.globalMemoryIds, courseId);
       beforeStartSend?.();
       inFlight = startSend();
       void inFlight.catch(() => undefined);
@@ -1014,7 +1002,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
             await assertTutorAttemptContext(tx, scope,
               { jobId: id, userTurnId: String(job.user_turn_id), claimToken: context.claimToken }, context.attemptContext);
           }
-          await assertStreamMaterialAdmission(sql, tx, scope, job, context.materialPurposePin,
+          const courseId = await assertStreamMaterialAdmission(sql, tx, scope, job, context.materialPurposePin,
             context.contextSourceRefs, context.attemptContext?.sourceRefs, {
               memoryLineageSourceIds: context.memoryLineageSourceIds,
               globalMemoryIds: context.globalMemoryIds,
@@ -1024,8 +1012,8 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
               tx, scope, context.contextSourceRefs, context.attemptContext?.sourceRefs,
               job.source_versions as Record<string, unknown> | null | undefined,
             );
-            await assertGlobalMemoriesUnexpiredInTx(tx, scope, context.globalMemoryIds);
           }
+          await assertGlobalMemoriesUnexpiredInTx(tx, scope, context.globalMemoryIds, courseId);
           try {
             publicationStarted = true;
             publishPromise = Promise.resolve().then(() => publish());
@@ -1128,7 +1116,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
           if (!current || !isDeepStrictEqual(tutorAttemptFence(current), fence.data)) throw new Error("stream attempt context changed");
           verifiedAttemptRefs = current.sourceRefs;
         }
-        await assertStreamMaterialAdmission(sql, tx, scope, row, context.materialPurposePin,
+        const courseId = await assertStreamMaterialAdmission(sql, tx, scope, row, context.materialPurposePin,
           context.contextSourceRefs, verifiedAttemptRefs, {
             memoryLineageSourceIds: context.memoryLineageSourceIds,
             globalMemoryIds: context.globalMemoryIds,
@@ -1137,7 +1125,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
           tx, scope, context.contextSourceRefs, verifiedAttemptRefs,
           row.source_versions as Record<string, unknown> | null | undefined,
         );
-        await assertGlobalMemoriesUnexpiredInTx(tx, scope, context.globalMemoryIds);
+        await assertGlobalMemoriesUnexpiredInTx(tx, scope, context.globalMemoryIds, courseId);
         return job;
       };
 
@@ -1193,7 +1181,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
     assertAttemptContext: (scope: OpeningScope, target: TutorAttemptContextTarget, expected: TutorAttemptContext) =>
       sql.begin("isolation level repeatable read", tx => assertTutorAttemptContext(tx, scope, target, expected)) as Promise<void>,
 
-    async assertGlobalMemoriesCurrent(scope: OpeningScope, memoryIds: readonly string[]): Promise<void> {
+    async assertGlobalMemoriesCurrent(scope: OpeningScope, memoryIds: readonly string[], jobId?: string): Promise<void> {
       const ids = [...new Set(memoryIds.map(id => {
         if (typeof id !== "string" || !UUID_PATTERN.test(id)) {
           throw Object.assign(new Error("stream global memory binding invalid"), { code: "CONFLICT" });
@@ -1201,6 +1189,24 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
         return id.toLowerCase();
       }))].sort();
       if (!ids.length) return;
+      if (jobId !== undefined) {
+        await sql.begin(async tx => {
+          const [workspace] = await tx`SELECT id FROM workspaces
+            WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR SHARE`;
+          if (!workspace) throw Object.assign(new Error("tutor job workspace is no longer available"), { code: "CONFLICT" });
+          const [turn] = await tx`SELECT t.attempt_id,t.context_anchor,c.course_id FROM opening_tutor_jobs j
+            JOIN opening_conversations c ON c.id=j.conversation_id AND c.workspace_id=j.workspace_id
+            JOIN opening_turns t ON t.id=j.user_turn_id AND t.workspace_id=j.workspace_id
+              AND t.conversation_id=j.conversation_id AND t.role='user'
+            WHERE j.id=${jobId} AND j.workspace_id=${scope.workspaceId} AND c.owner_user_id=${scope.ownerUserId}
+              AND j.status='running' FOR SHARE OF j`;
+          if (!turn) throw Object.assign(new Error("tutor job is no longer current"), { code: "CONFLICT" });
+          const courseId = boundTurnCourseId(turn);
+          if (courseId !== null) await lockStreamCourse(tx, scope, courseId);
+          await assertGlobalMemoriesUnexpiredInTx(tx, scope, ids, courseId);
+        });
+        return;
+      }
       const active = await sql`SELECT m.id FROM opening_memories m
         JOIN workspaces w ON w.id = m.workspace_id AND w.owner_user_id = ${scope.ownerUserId}
         WHERE m.workspace_id = ${scope.workspaceId}
@@ -1283,9 +1289,6 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
           SELECT privacy_epoch FROM workspaces WHERE id = ${input.scope.workspaceId} AND owner_user_id=${input.scope.ownerUserId} FOR UPDATE
         `;
         if (!workspace.length) throw new Error("workspace permission changed");
-        if (options?.materialPurposePin) {
-          await createOpeningCourseReadySourcesRepository(sql).assertMaterialPurposePin(input.scope, options.materialPurposePin, tx);
-        }
         if (options?.attemptContext) {
           if (options.attemptContext.target.jobId !== input.jobId) throw new Error("attempt context job mismatch");
           await assertTutorAttemptContext(tx, input.scope, options.attemptContext.target, options.attemptContext.snapshot);
@@ -1308,32 +1311,34 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
             );
           }
         }
-        if (!receipt && (options?.materialPurposePin !== undefined || input.contextSourceRefs !== undefined || options?.globalMemoryIds !== undefined)) {
-          const [boundTurn] = await tx`SELECT t.attempt_id,t.context_anchor,t.source_ids,t.source_versions,c.course_id FROM opening_tutor_jobs j
+        if (options?.materialPurposePin !== undefined || options?.globalMemoryIds !== undefined
+          || (!receipt && input.contextSourceRefs !== undefined)) {
+          const [boundTurn] = await tx`SELECT t.attempt_id,t.context_anchor,t.source_ids,t.source_versions,c.course_id,j.assistant_turn_id FROM opening_tutor_jobs j
             JOIN opening_conversations c ON c.id=j.conversation_id AND c.workspace_id=j.workspace_id
-            JOIN opening_turns t ON t.id=j.user_turn_id AND t.workspace_id=j.workspace_id AND t.conversation_id=j.conversation_id
+            JOIN opening_turns t ON t.id=j.user_turn_id AND t.workspace_id=j.workspace_id AND t.conversation_id=j.conversation_id AND t.role='user'
             WHERE j.id=${input.jobId} AND j.workspace_id=${input.scope.workspaceId} AND c.owner_user_id=${input.scope.ownerUserId}
               AND j.status='running' AND j.claim_token IS NOT DISTINCT FROM ${input.claimToken ?? null}::uuid FOR UPDATE OF j`;
-          if (boundTurn) {
-            await assertStreamMaterialAdmission(
-              sql, tx, input.scope, boundTurn, options?.materialPurposePin,
-              input.contextSourceRefs ?? [], options?.attemptContext?.snapshot.sourceRefs,
-              {
-                allowMissingPin: options?.materialPurposePin === undefined,
-                skipPinRepoAssert: options?.materialPurposePin !== undefined,
-                memoryLineageSourceIds: options?.memoryLineageSourceIds,
-                globalMemoryIds: options?.globalMemoryIds,
-              },
-            );
-            if (input.contextSourceRefs?.length) {
-              await assertStreamSources(
-                tx, input.scope, input.contextSourceRefs,
-                options?.attemptContext?.snapshot.sourceRefs,
-                boundTurn.source_versions as Record<string, unknown> | null | undefined,
-              );
-              await assertGlobalMemoriesUnexpiredInTx(tx, input.scope, options?.globalMemoryIds);
-            }
+          if (!boundTurn) return;
+          if (boundTurn.assistant_turn_id !== input.assistantTurnId.toLowerCase()) throw new Error("assistant turn was not persisted");
+          const pinnedCourseId = options?.materialPurposePin?.courseId;
+          if (pinnedCourseId && pinnedCourseId.toLowerCase() !== boundTurnCourseId(boundTurn)) {
+            throw Object.assign(new Error("course is no longer available"), { code: "CONFLICT" });
           }
+          const refs = input.contextSourceRefs ?? [];
+          const courseId = await assertStreamMaterialAdmission(
+            sql, tx, input.scope, boundTurn, options?.materialPurposePin,
+            receipt ? refs.filter(ref => ref.memoryOnly === true) : refs, options?.attemptContext?.snapshot.sourceRefs,
+            {
+              allowMissingPin: options?.materialPurposePin === undefined,
+              memoryLineageSourceIds: options?.memoryLineageSourceIds,
+              globalMemoryIds: options?.globalMemoryIds,
+            },
+          );
+          if (!receipt && refs.length) {
+            await assertStreamSources(tx, input.scope, refs, options?.attemptContext?.snapshot.sourceRefs,
+              boundTurn.source_versions as Record<string, unknown> | null | undefined);
+          }
+          await assertGlobalMemoriesUnexpiredInTx(tx, input.scope, options?.globalMemoryIds, courseId);
         }
         const claimed = await tx`
           UPDATE opening_tutor_jobs SET status = 'succeeded', timing_execution_id = NULL, error = NULL, updated_at = now()

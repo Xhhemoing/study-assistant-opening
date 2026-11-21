@@ -108,7 +108,7 @@ export type TutorTurnDeps = {
   };
   /** M01: confirmed/unexpired temporary memories only. Optional. */
   memories?: {
-    listContext(scope: Scope, now: string): Promise<{
+    listContext(scope: Scope, now: string, activeCourseId?: string | null): Promise<{
       memories: MemoryItem[];
       sourceRefs: ContextSourceRef[];
       temporaryMemoryExpiresAt?: string;
@@ -324,8 +324,9 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
       const imageOnlySources = isImageOnlySourceChunks(chunks);
       // Photo sources default to page 1 so empty-text image chunks stay preferred.
       const preferPage = turn.currentPage ?? (imageOnlySources ? 1 : undefined);
+      const resolvedCourseId = turn.courseId ?? turn.contextAnchor?.courseId ?? null;
       const retrievalInput = {
-        courseContext: { courseId: turn.courseId ?? turn.contextAnchor?.courseId ?? null,
+        courseContext: { courseId: resolvedCourseId,
           materialUse: turn.attemptId || turn.contextAnchor?.itemVersionId ? "practice" as const : "citation" as const },
         chunks,
         sourceIds: allowedSourceIds,
@@ -347,9 +348,9 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
       const historyTempExpiresAt = loadedHistory.temporaryMemoryExpiresAt;
       const contextNow = new Date().toISOString();
       const memoryContext = deps.memories
-        ? await deps.memories.listContext(scope, contextNow)
+        ? await deps.memories.listContext(scope, contextNow, resolvedCourseId)
         : { memories: [], sourceRefs: [] };
-      const learnerContext = await deps.learnerContext?.read(scope, { courseId: turn.courseId ?? turn.contextAnchor?.courseId,
+      const learnerContext = await deps.learnerContext?.read(scope, { courseId: resolvedCourseId,
         sourceIds: allowedSourceIds }) ?? null;
       const nonMemorySourceIds = new Set(
         [
@@ -369,7 +370,8 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
           .map(({ sourceId }) => sourceId.toLowerCase())
           .filter(sourceId => !nonMemorySourceIds.has(sourceId)),
       )].sort();
-      const eligibleMemories = memoryContext.memories.filter(memory => isMemoryEligible(memory, contextNow));
+      const eligibleMemories = memoryContext.memories.filter(memory => isMemoryEligible(memory, contextNow)
+        && (memory.courseId == null || (resolvedCourseId != null && memory.courseId.toLowerCase() === resolvedCourseId.toLowerCase())));
       const injectedTemporaryMemories = eligibleMemories.filter(memory => memory.kind === "temporary");
       const temporaryExpiryCandidates = [
         ...injectedTemporaryMemories.map(memory => memory.expiresAt!),
@@ -389,9 +391,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
         }
       };
       const globalMemoryIds = [...new Set([
-        ...eligibleMemories
-          .filter(memory => memory.courseId == null)
-          .map(memory => memory.id.toLowerCase()),
+        ...eligibleMemories.map(memory => memory.id.toLowerCase()),
         ...(memoryContext.dependencyMemoryIds ?? []).map(id => id.toLowerCase()),
         ...historyMemoryIds.map(id => id.toLowerCase()),
       ])].sort();
@@ -405,7 +405,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
       const mode = helpInputSnapshot.tutorMode;
       const baseInstruction = instructionWithMemories(
         makeTutorInstruction(mode, { text: turn.text }),
-        memoryContext.memories,
+        eligibleMemories,
         contextNow,
       );
       const strategyTemplate = resolveStrategyTemplate(turn.strategyTemplateId);
@@ -610,7 +610,7 @@ export function createTutorTurnHandler(deps: TutorTurnDeps) {
               await deps.tutorJobs.assertSendAuthorized(scope, claimed.id, sendContext);
             } else {
               if (globalMemoryIds.length) {
-                await deps.tutorJobs.assertGlobalMemoriesCurrent?.(scope, globalMemoryIds);
+                await deps.tutorJobs.assertGlobalMemoriesCurrent?.(scope, globalMemoryIds, claimed.id);
               }
               if (deps.privacy && jobEpoch !== null) {
                 assertCurrentEpoch(jobEpoch, await deps.privacy.getWorkspaceEpoch(scope));

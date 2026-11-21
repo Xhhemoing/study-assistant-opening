@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { createOpeningMemoryRepository } from "@aistudy/database";
+import { createCourseMembershipRepository, createOpeningMemoryRepository } from "@aistudy/database";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { insertMemory, insertOwnedTurn, insertSource } from "./opening-memory-context-fixture";
 
@@ -40,6 +40,25 @@ describe("opening memory context admission", () => {
     expect(await memories.listContext(fixture.scope, "2026-10-01T00:00:00Z")).toEqual({ memories: [], sourceRefs: [] });
     await fixture.sql`UPDATE opening_memories SET kind='candidate', expires_at=NULL WHERE id=${temporary}`;
     expect(await memories.listContext(fixture.scope, "2026-09-30T23:59:59Z")).toEqual({ memories: [], sourceRefs: [] });
+  });
+
+  it("filters archived and foreign course memories while keeping global context", async () => {
+    const { sql, scope } = fixture;
+    const courses = createCourseMembershipRepository(sql);
+    const course = await courses.createCourse({ workspaceId: scope.workspaceId, title: "Memory context A", slug: "memory-context-a" });
+    const foreign = await courses.createCourse({ workspaceId: fixture.otherScope.workspaceId, title: "Foreign memory context", slug: "memory-context-foreign" });
+    const origin = await insertOwnedTurn(sql, scope);
+    const global = await insertMemory(sql, scope, "global memory", [origin]);
+    const matching = await insertMemory(sql, scope, "scoped memory", [origin]);
+    const wrongWorkspace = await insertMemory(sql, scope, "foreign course memory", [origin]);
+    await sql`UPDATE opening_memories SET course_id=${course.id} WHERE id=${matching}`;
+    await sql`UPDATE opening_memories SET course_id=${foreign.id} WHERE id=${wrongWorkspace}`;
+    const ids = async (courseId: string | null) => (await memories.listForContext(scope, courseId)).map(row => row.id);
+    expect(await ids(course.id.toUpperCase())).toEqual([global, matching]);
+    expect(await ids(null)).toEqual([global]);
+    expect(await ids(foreign.id)).toEqual([global]);
+    await courses.setArchived({ ...scope, courseId: course.id, archived: true });
+    expect(await ids(course.id)).toEqual([global]);
   });
   it("hides memories with a missing or foreign turn and a foreign conversation owner", async () => {
     const missing = await insertMemory(fixture.sql, fixture.scope, "missing turn", [randomUUID()]);

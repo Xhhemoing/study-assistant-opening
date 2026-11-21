@@ -2,8 +2,8 @@ import type { Sql, TransactionSql } from "postgres";
 import type { MemoryItem } from "@aistudy/contracts";
 import { isMemoryEligible } from "@aistudy/domain";
 import {
-  contextSourceRefsIncluded, memoryTransitiveDependenciesActive, memoryTransitiveDepsCte,
-  mergeContextSourceRefs, parseContextSourceRefs, turnContextSourceRefs, type ContextSourceRef,
+  contextSourceRefsIncluded, memoryCourseAllows, memoryTransitiveDependenciesActive, memoryTransitiveDepsCte,
+  mergeContextSourceRefs, parseContextSourceRefs, turnContextSourceRefs, turnMemoryOnlySourcesBacked, type ContextSourceRef,
 } from "./opening-context-provenance";
 import type { OpeningScope } from "./opening-sources";
 import { lockOwnedWorkspace } from "./opening-memory-admission";
@@ -23,7 +23,7 @@ export type LoadedMemoryContext = {
 /**
  * One scope query. A memory is excluded when any source turn is missing, foreign,
  * unowned, references a missing, revoked, excluded, or version-drifted source,
- * or transitively depends on an expired/revoked global memory.
+ * or transitively depends on a memory that is no longer usable in its course.
  */
 async function readMemoryContext(
   db: Db,
@@ -53,7 +53,7 @@ async function readMemoryContext(
       JOIN opening_memories dep_m ON dep_m.id::text = d.dep_id
         AND dep_m.workspace_id = m.workspace_id
         AND dep_m.status = 'active'
-        AND dep_m.course_id IS NULL
+        AND (dep_m.course_id IS NULL OR dep_m.course_id = m.course_id)
         AND dep_m.kind = 'temporary'
         AND dep_m.expires_at IS NOT NULL
     ) AS ancestor_temporary_expires_at,
@@ -65,7 +65,7 @@ async function readMemoryContext(
     FROM opening_memories m
     WHERE m.workspace_id = ${scope.workspaceId}
       AND m.status = 'active'
-      AND (m.course_id IS NULL OR m.course_id = ${activeCourseId})
+      AND ${memoryCourseAllows(db, () => db`m.course_id`, () => db`${activeCourseId}::uuid`, () => db`m.workspace_id`)}
       AND jsonb_array_length(m.source_turn_ids) > 0
       AND ${memoryTransitiveDependenciesActive(db, "m")}
       AND NOT EXISTS (
@@ -83,6 +83,8 @@ async function readMemoryContext(
           WHERE t.id::text = lower(ref.turn_id) AND t.workspace_id = ${scope.workspaceId}
             AND (
               NOT (${contextSourceRefsIncluded(db, scope.workspaceId, () => turnContextSourceRefs(db, "t"))}) OR
+              NOT (${turnMemoryOnlySourcesBacked(db, "t", scope.workspaceId, scope.ownerUserId, () => db`m.course_id`,
+                undefined, () => db`m.id`)}) OR
               EXISTS (
                 SELECT 1 FROM unnest(t.source_ids) AS sid(id)
                 WHERE NOT EXISTS (

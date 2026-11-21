@@ -1,7 +1,10 @@
 import type { Sql } from "postgres";
 import type { MemoryItem } from "@aistudy/contracts";
 import type { OpeningScope } from "./opening-sources";
-import { memoryDependencyRows } from "./opening-context-provenance";
+import {
+  lineageUuid, memoryCourseAllows, memoryDependencyRows, memoryTransitiveDependenciesActive,
+  turnMemoryOnlySourcesBacked, turnTransitiveDependenciesActive, type FragmentFactory,
+} from "./opening-context-provenance";
 import { lockOwnedWorkspace, turnSourceMaterialsActive } from "./opening-memory-admission";
 import { lockWorkspaceLearningHistory } from "./opening-learning-facts";
 import { OpeningMemoryError, mapMemoryRow } from "./opening-memory-types";
@@ -50,39 +53,42 @@ export function confirmOwnedMemory(
       throw new OpeningMemoryError("CONFLICT", "memory cannot be confirmed");
     }
     let expiryBeforeCommit: string | null = null;
-    if (current.kind === "temporary" || current.sourceTurnIds.length > 0) {
+    if (current.courseId !== null || current.kind === "temporary" || current.sourceTurnIds.length > 0) {
+      const memoryCourse: FragmentFactory = () => tx`m.course_id`;
+      const workspace: FragmentFactory = () => tx`m.workspace_id`;
       const admitted = await tx`
         SELECT m.id, (
           WITH RECURSIVE mem_deps(dep_id) AS (
             SELECT lower(dep.id)
             FROM jsonb_array_elements_text(
               CASE WHEN jsonb_typeof(m.source_turn_ids) = 'array' THEN m.source_turn_ids ELSE '[]'::jsonb END
-            ) AS st(turn_id)
-            JOIN opening_turns dt ON dt.id::text = lower(st.turn_id) AND dt.workspace_id = m.workspace_id
-            CROSS JOIN LATERAL ${memoryDependencyRows(tx, () => tx`dt.context_source_refs`)} AS dep
+            ) st(turn_id)
+            JOIN opening_turns dt ON dt.id = ${lineageUuid(tx, () => tx`st.turn_id`)} AND dt.workspace_id = m.workspace_id
+            CROSS JOIN LATERAL ${memoryDependencyRows(tx, () => tx`dt.context_source_refs`)} dep
             UNION
             SELECT lower(dep.id)
             FROM mem_deps prev
-            JOIN opening_memories pm ON pm.id::text = prev.dep_id AND pm.workspace_id = m.workspace_id
+            JOIN opening_memories pm ON pm.id = ${lineageUuid(tx, () => tx`prev.dep_id`)} AND pm.workspace_id = m.workspace_id
             CROSS JOIN LATERAL jsonb_array_elements_text(
               CASE WHEN jsonb_typeof(pm.source_turn_ids) = 'array' THEN pm.source_turn_ids ELSE '[]'::jsonb END
-            ) AS st(turn_id)
-            JOIN opening_turns dt ON dt.id::text = lower(st.turn_id) AND dt.workspace_id = m.workspace_id
-            CROSS JOIN LATERAL ${memoryDependencyRows(tx, () => tx`dt.context_source_refs`)} AS dep
+            ) st(turn_id)
+            JOIN opening_turns dt ON dt.id = ${lineageUuid(tx, () => tx`st.turn_id`)} AND dt.workspace_id = m.workspace_id
+            CROSS JOIN LATERAL ${memoryDependencyRows(tx, () => tx`dt.context_source_refs`)} dep
           )
           SELECT min(dep_m.expires_at)
           FROM mem_deps d
           JOIN opening_memories dep_m ON dep_m.id::text = d.dep_id
             AND dep_m.workspace_id = m.workspace_id
             AND dep_m.status = 'active'
-            AND dep_m.course_id IS NULL
+            AND ${memoryCourseAllows(tx, () => tx`dep_m.course_id`, memoryCourse, workspace)}
             AND dep_m.kind = 'temporary'
-            AND dep_m.expires_at IS NOT NULL
+            AND dep_m.expires_at > clock_timestamp()
         ) AS ancestor_temporary_expires_at
         FROM opening_memories m
         WHERE m.id = ${id}
           AND m.workspace_id = ${scope.workspaceId}
           AND m.status = 'active'
+          AND ${memoryCourseAllows(tx, memoryCourse, memoryCourse, workspace)}
           AND (m.kind <> 'temporary' OR (m.expires_at IS NOT NULL AND m.expires_at > clock_timestamp()))
           AND NOT EXISTS (
             SELECT 1 FROM jsonb_array_elements_text(
@@ -96,38 +102,12 @@ export function confirmOwnedMemory(
                 AND c.workspace_id = ${scope.workspaceId}
                 AND c.owner_user_id = ${scope.ownerUserId}
                 AND ${turnSourceMaterialsActive(tx, scope.workspaceId)}
+                AND ${turnTransitiveDependenciesActive(tx, "t", memoryCourse)}
+                AND ${turnMemoryOnlySourcesBacked(tx, "t", scope.workspaceId, scope.ownerUserId, memoryCourse,
+                  undefined, () => tx`m.id`)}
             )
           )
-          AND NOT EXISTS (
-            WITH RECURSIVE mem_deps(dep_id) AS (
-              SELECT lower(dep.id)
-              FROM jsonb_array_elements_text(
-                CASE WHEN jsonb_typeof(m.source_turn_ids) = 'array' THEN m.source_turn_ids ELSE '[]'::jsonb END
-              ) AS st(turn_id)
-              JOIN opening_turns dt ON dt.id::text = lower(st.turn_id) AND dt.workspace_id = m.workspace_id
-              CROSS JOIN LATERAL ${memoryDependencyRows(tx, () => tx`dt.context_source_refs`)} AS dep
-              UNION
-              SELECT lower(dep.id)
-              FROM mem_deps prev
-              JOIN opening_memories pm ON pm.id::text = prev.dep_id AND pm.workspace_id = m.workspace_id
-              CROSS JOIN LATERAL jsonb_array_elements_text(
-                CASE WHEN jsonb_typeof(pm.source_turn_ids) = 'array' THEN pm.source_turn_ids ELSE '[]'::jsonb END
-              ) AS st(turn_id)
-              JOIN opening_turns dt ON dt.id::text = lower(st.turn_id) AND dt.workspace_id = m.workspace_id
-              CROSS JOIN LATERAL ${memoryDependencyRows(tx, () => tx`dt.context_source_refs`)} AS dep
-            )
-            SELECT 1
-            FROM mem_deps d
-            WHERE NOT EXISTS (
-              SELECT 1
-              FROM opening_memories dep_m
-              WHERE dep_m.id::text = d.dep_id
-                AND dep_m.workspace_id = m.workspace_id
-                AND dep_m.status = 'active'
-                AND dep_m.course_id IS NULL
-                AND (dep_m.kind = 'confirmed' OR (dep_m.kind = 'temporary' AND dep_m.expires_at IS NOT NULL AND dep_m.expires_at > clock_timestamp()))
-            )
-          )`;
+          AND ${memoryTransitiveDependenciesActive(tx)}`;
       if (!admitted.length) {
         throw new OpeningMemoryError("VALIDATION", "memory source or dependency is no longer active");
       }

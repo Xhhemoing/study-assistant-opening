@@ -234,7 +234,7 @@ function createTeachingHandlers(sql: WorkerSql, env: WorkerEnv, producer: Return
       listExcludedSourceIds: (scope) => privacyRepo.listExcludedSourceIds(scope),
     },
     memories: {
-      listContext: (scope, now) => memory.listContext(scope, now),
+      listContext: (scope, now, activeCourseId) => memory.listContext(scope, now, activeCourseId ?? null),
     },
     ...(loadFeatureSwitches().adaptivePlanning ? {
       planningContext: { read: (scope: { workspaceId: string; ownerUserId: string }, now: Date) => readOpeningConversationPlanningContext(sql, scope, now) },

@@ -4,9 +4,9 @@ import type { OpeningScope } from "./opening-sources";
 import { createOpeningPrivacyRepository } from "./opening-privacy";
 
 import {
-  contextSourceRefsIncluded, mergeContextSourceRefs, parseContextMemoryDependencyIds,
+  contextSourceRefsIncluded, lineageUuid, memoryCourseAllows, mergeContextSourceRefs, parseContextMemoryDependencyIds,
   parseContextSourceRefs, turnContextSourceRefs, turnTransitiveDependenciesActive,
-  turnTransitiveDepsCte, type ContextSourceRef,
+  turnMemoryOnlySourcesBacked, turnTransitiveDepsCte, type ContextSourceRef, type FragmentFactory,
 } from "./opening-context-provenance";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 type HistoryTurn = { role: "user" | "assistant"; text: string };
@@ -22,6 +22,8 @@ export type TutorHistoryContext = {
 export async function loadTutorHistoryContext(sql: Sql, scope: OpeningScope, currentTurnId: string, purpose: TutorHistoryPurpose = "model"): Promise<TutorHistoryContext> {
   const recordReferents = purpose === "record_referents";
   const excludedSourceIds = await createOpeningPrivacyRepository(sql).listExcludedSourceIds(scope);
+  const priorCourse: FragmentFactory = () => sql`COALESCE(c.course_id, ${lineageUuid(sql, () => sql`u.context_anchor->>'courseId'`)})`;
+  const currentCourse: FragmentFactory = () => sql`COALESCE(c.course_id, ${lineageUuid(sql, () => sql`current.context_anchor->>'courseId'`)})`;
   const rows = await sql`
     WITH prior AS (
       SELECT u.text AS question, a.text AS answer, u.created_at, u.id,
@@ -35,7 +37,8 @@ export async function loadTutorHistoryContext(sql: Sql, scope: OpeningScope, cur
           JOIN opening_memories m ON m.id::text = d.dep_id
             AND m.workspace_id = ${scope.workspaceId}
             AND m.status = 'active'
-            AND m.course_id IS NULL
+            AND ${memoryCourseAllows(sql, () => sql`m.course_id`, priorCourse, () => sql`m.workspace_id`)}
+            AND ${memoryCourseAllows(sql, () => sql`m.course_id`, currentCourse, () => sql`m.workspace_id`)}
             AND m.kind = 'temporary'
             AND m.expires_at IS NOT NULL
         ) AS memory_temporary_expires_at,
@@ -61,49 +64,14 @@ export async function loadTutorHistoryContext(sql: Sql, scope: OpeningScope, cur
           WHERE citation->>'sourceId' = ANY(${excludedSourceIds}::text[])
         ) OR NOT (${contextSourceRefsIncluded(sql, scope.workspaceId, () => turnContextSourceRefs(sql, "u"))})
           OR NOT (${contextSourceRefsIncluded(sql, scope.workspaceId, () => turnContextSourceRefs(sql, "a"))})
-          OR NOT (${turnTransitiveDependenciesActive(sql, "a")})
-          OR EXISTS (
-            SELECT 1
-            FROM jsonb_array_elements(
-              CASE WHEN jsonb_typeof(a.context_source_refs) = 'array' THEN a.context_source_refs ELSE '[]'::jsonb END
-            ) AS mem_ref
-            WHERE (mem_ref->>'memoryOnly') = 'true'
-              AND NOT EXISTS (
-                SELECT 1
-                FROM opening_memories m
-                WHERE m.workspace_id = ${scope.workspaceId}
-                  AND m.status = 'active'
-                  AND m.course_id IS NULL
-                  AND (m.kind = 'confirmed' OR (m.kind = 'temporary' AND m.expires_at IS NOT NULL AND m.expires_at > clock_timestamp()))
-                  AND EXISTS (
-                    SELECT 1
-                    FROM jsonb_array_elements_text(m.source_turn_ids) AS mref(turn_id)
-                    JOIN opening_turns mt ON mt.id::text = lower(mref.turn_id) AND mt.workspace_id = ${scope.workspaceId}
-                    JOIN opening_conversations mc ON mc.id = mt.conversation_id
-                      AND mc.workspace_id = ${scope.workspaceId}
-                      AND mc.owner_user_id = ${scope.ownerUserId}
-                    WHERE EXISTS (
-                      SELECT 1 FROM unnest(mt.source_ids) AS sid(id)
-                      WHERE lower(sid.id::text) = lower(mem_ref->>'sourceId')
-                    ) OR EXISTS (
-                      SELECT 1
-                      FROM jsonb_array_elements(
-                        CASE WHEN jsonb_typeof(${turnContextSourceRefs(sql, "mt")}) = 'array'
-                          THEN ${turnContextSourceRefs(sql, "mt")}
-                          ELSE '[]'::jsonb
-                        END
-                      ) AS mt_ref
-                      WHERE lower(mt_ref->>'sourceId') = lower(mem_ref->>'sourceId')
-                    )
-                  )
-              )
-          ) AS invalid
+          OR NOT (${turnTransitiveDependenciesActive(sql, "a", currentCourse, priorCourse)})
+          OR NOT (${turnMemoryOnlySourcesBacked(sql, "a", scope.workspaceId, scope.ownerUserId, currentCourse, priorCourse)}) AS invalid
       FROM opening_turns current
       JOIN opening_conversations c ON c.id=current.conversation_id
       JOIN workspaces w ON w.id=c.workspace_id
       JOIN opening_tutor_jobs j ON j.conversation_id=c.id AND j.workspace_id=c.workspace_id
-      JOIN opening_turns u ON u.id=j.user_turn_id AND u.workspace_id=c.workspace_id
-      JOIN opening_turns a ON a.id=j.assistant_turn_id AND a.workspace_id=c.workspace_id
+      JOIN opening_turns u ON u.id=j.user_turn_id AND u.workspace_id=c.workspace_id AND u.conversation_id=c.id AND u.role='user'
+      JOIN opening_turns a ON a.id=j.assistant_turn_id AND a.workspace_id=c.workspace_id AND a.conversation_id=c.id AND a.role='assistant'
       WHERE current.id=${currentTurnId} AND current.role='user'
         AND current.workspace_id=${scope.workspaceId} AND c.workspace_id=${scope.workspaceId}
         AND c.owner_user_id=${scope.ownerUserId}

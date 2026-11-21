@@ -23,9 +23,10 @@ const job = { id: jobId, workspace_id: workspace, conversation_id: "conversation
   attempt_id: null, context_anchor: null, source_ids: [] as string[], course_id: null as string | null };
 type Options = { missingWorkspace?: boolean; missingJob?: boolean; status?: string; phase2Status?: string; epoch?: number; token?: string; execution?: string | null;
   unavailableSource?: boolean; missingExposure?: boolean; failAt?: string; failCommitAtTx?: number; boundAttempt?: string; anchorAttempt?: string;
-  anchorSourceId?: string; courseId?: string | null; sourceIds?: string[]; sourceVersions?: Record<string, number>; membershipRemoved?: boolean; archivedCourse?: boolean; classifiedStandalone?: boolean;
+  anchorSourceId?: string; anchorCourseId?: string; courseId?: string | null; sourceIds?: string[]; sourceVersions?: Record<string, number>; membershipRemoved?: boolean; archivedCourse?: boolean; classifiedStandalone?: boolean;
   derivedMembershipPurpose?: "teaching" | "practice" | "mock_exam" | "reference" | null;
-  activeGlobalMemoryIds?: string[]; backedMemorySourceIds?: string[]; mockExamSourceIds?: string[]; tutorStreamRedisUrl?: string };
+  activeGlobalMemoryIds?: string[]; backedMemorySourceIds?: string[]; courseOnlyMemorySourceIds?: string[];
+  classifiedMemoryCourseId?: string; mockExamSourceIds?: string[]; tutorStreamRedisUrl?: string };
 function fixture(options: Options = {}) {
   const calls: Array<{ sql: string; values: unknown[] }> = []; const failure = new Error(`synthetic ${options.failAt ?? "commit"}`);
   const txEvents: string[] = [];
@@ -37,7 +38,8 @@ function fixture(options: Options = {}) {
       txEvents.push("clear-execution-fence");
       return [];
     }
-    if (sql.startsWith("NOT EXISTS ( WITH RECURSIVE mem_deps(")) return { fragmentSql: sql };
+    if (sql.startsWith("WITH RECURSIVE mem_deps(")) return { fragmentSql: sql };
+    if (sql.startsWith("NOT EXISTS ( ? SELECT 1 FROM mem_deps")) return values[0];
     if (!sql.startsWith("SELECT")) return "fragment";
     calls.push({ sql, values });
     if (options.failAt && sql.startsWith(options.failAt)) throw failure;
@@ -45,8 +47,8 @@ function fixture(options: Options = {}) {
     if (sql.startsWith("SELECT j.*,t.attempt_id") || sql.startsWith("SELECT j.user_turn_id,t.attempt_id") || sql.startsWith("SELECT t.attempt_id,t.context_anchor")) {
       const execValue = options.execution === undefined ? execution : options.execution;
       const status = txNumber >= 2 && options.phase2Status ? options.phase2Status : (options.status ?? "running");
-      const anchor = options.anchorAttempt || options.anchorSourceId
-        ? { ...(options.anchorAttempt ? { attemptId: options.anchorAttempt } : {}), ...(options.anchorSourceId ? { sourceId: options.anchorSourceId } : {}) }
+      const anchor = options.anchorAttempt || options.anchorSourceId || options.anchorCourseId
+        ? { attemptId: options.anchorAttempt, sourceId: options.anchorSourceId, courseId: options.anchorCourseId }
         : null;
       return options.missingJob ? [] : [{ ...job, status, claim_token: options.token ?? token, timing_execution_id: execValue,
         attempt_id: options.boundAttempt ?? null, context_anchor: anchor,
@@ -62,8 +64,13 @@ function fixture(options: Options = {}) {
     if (sql.startsWith("SELECT id FROM opening_memories")) {
       return (options.activeGlobalMemoryIds ?? []).map(id => ({ id }));
     }
-    if (sql.startsWith("SELECT DISTINCT lower(sid.id::text) AS source_id")) {
-      return (options.backedMemorySourceIds ?? []).map(id => ({ source_id: id }));
+    if (sql.startsWith("SELECT lower(sid.id::text) AS source_id")) {
+      return (options.backedMemorySourceIds ?? []).map(id => ({ source_id: id, backed_by_global: true }))
+        .concat((options.courseOnlyMemorySourceIds ?? []).map(id => ({ source_id: id, backed_by_global: false })));
+    }
+    if (sql.startsWith("SELECT asset_id,course_id,purpose FROM course_asset_memberships")) {
+      return options.classifiedMemoryCourseId ? [{ asset_id: sourceId, course_id: options.classifiedMemoryCourseId,
+        purpose: options.derivedMembershipPurpose ?? "teaching" }] : [];
     }
     if (sql.startsWith("SELECT id FROM course_asset_memberships")) {
       if (sql.includes("purpose='mock_exam'")) {
@@ -403,7 +410,7 @@ describe("stream receipt release waits for current job authorization and assista
       contextSourceRefs: memoryRefs, expectedPrivacyEpoch: 2, claimToken: token,
     }, { memoryLineageSourceIds: [memorySourceId], globalMemoryIds: [memoryId] })).resolves.toBeUndefined();
     expect(admitted.calls.some(c => c.sql.startsWith("SELECT id FROM opening_memories") && c.sql.includes("expires_at > clock_timestamp()"))).toBe(true);
-    expect(admitted.calls.some(c => c.sql.startsWith("SELECT DISTINCT lower(sid.id::text) AS source_id") && c.sql.includes("m.expires_at > clock_timestamp()"))).toBe(true);
+    expect(admitted.calls.some(c => c.sql.startsWith("SELECT lower(sid.id::text) AS source_id") && c.sql.includes("m.expires_at > clock_timestamp()"))).toBe(true);
     await expect(admitted.repo.assertGlobalMemoriesCurrent(scope, [memoryId])).resolves.toBeUndefined();
     expect(admitted.outerCalls.some(sql => sql.startsWith("SELECT m.id FROM opening_memories m") && sql.includes("m.expires_at > clock_timestamp()"))).toBe(true);
     await expect(admitted.repo.assertGlobalMemoriesCurrent(scope, ["not-a-uuid"])).rejects.toMatchObject({ code: "CONFLICT" });
@@ -588,7 +595,43 @@ describe("stream receipt release waits for current job authorization and assista
       memoryLineageSourceIds: [sourceId],
       globalMemoryIds: [memoryId],
     })).resolves.toBeUndefined();
-    const backedCall = f.calls.find(c => c.sql.startsWith("SELECT DISTINCT lower(sid.id::text) AS source_id"));
+    const backedCall = f.calls.find(c => c.sql.startsWith("SELECT lower(sid.id::text) AS source_id"));
     expect(backedCall?.sql).toContain("JOIN opening_turns t ON t.id::text = lower(ref.turn_id)");
+  });
+
+  it("locks the saved anchor course before the source-less memory fence", async () => {
+    const memoryId = "12000000-0000-4000-8000-0000000000ad";
+    const anchorCourseId = "12000000-0000-4000-8000-0000000000EA";
+    const f = fixture({ anchorCourseId, activeGlobalMemoryIds: [memoryId] });
+    const publish = vi.fn(async () => {});
+    await f.repo.withStreamPublication(scope, jobId, { ...context, globalMemoryIds: [memoryId] }, publish);
+    const jobIndex = f.calls.findIndex(call => call.sql.includes("FOR SHARE OF j"));
+    const courseIndex = f.calls.findIndex(call => call.sql.startsWith("SELECT id FROM courses"));
+    const memoryIndex = f.calls.findIndex(call => call.sql.startsWith("SELECT id FROM opening_memories") && call.sql.endsWith("FOR SHARE"));
+    expect(jobIndex).toBeGreaterThan(0);
+    expect(courseIndex).toBeGreaterThan(jobIndex);
+    expect(f.calls[courseIndex]?.values[0]).toBe(anchorCourseId.toLowerCase());
+    expect(memoryIndex).toBeGreaterThan(courseIndex);
+    expect(publish).toHaveBeenCalledOnce();
+    await expect(f.repo.assertGlobalMemoriesCurrent(scope, [memoryId], jobId)).resolves.toBeUndefined();
+
+    const archived = fixture({ anchorCourseId, archivedCourse: true, activeGlobalMemoryIds: [memoryId] });
+    const blocked = vi.fn(async () => {});
+    await expect(archived.repo.withStreamPublication(scope, jobId, { ...context, globalMemoryIds: [memoryId] }, blocked))
+      .rejects.toMatchObject({ code: "CONFLICT" });
+    expect(archived.calls.some(call => call.sql.startsWith("SELECT id FROM opening_memories"))).toBe(false);
+    expect(blocked).not.toHaveBeenCalled();
+  });
+
+  it.each(["other course", "practice", "mock exam"])("blocks course-only memory lineage classified for %s", async purpose => {
+    const memoryId = "12000000-0000-4000-8000-0000000000ad";
+    const f = fixture({ courseId, activeGlobalMemoryIds: [memoryId], courseOnlyMemorySourceIds: [sourceId],
+      classifiedMemoryCourseId: purpose === "other course" ? "12000000-0000-4000-8000-0000000000ea" : courseId,
+      derivedMembershipPurpose: purpose === "practice" ? "practice" : "teaching",
+      mockExamSourceIds: purpose === "mock exam" ? [sourceId] : [] });
+    await expect(f.repo.assertSendAuthorized(scope, jobId, { ...context,
+      contextSourceRefs: [{ sourceId, sourceVersion: 0, memoryOnly: true }],
+      memoryLineageSourceIds: [sourceId], globalMemoryIds: [memoryId],
+    })).rejects.toMatchObject({ code: "CONFLICT" });
   });
 });

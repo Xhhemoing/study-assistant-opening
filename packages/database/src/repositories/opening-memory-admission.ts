@@ -1,6 +1,7 @@
 import type { Sql, TransactionSql } from "postgres";
 import type { OpeningScope } from "./opening-sources";
-import { memoryDependencyRows, turnPinnedSourcesIncluded } from "./opening-context-provenance";
+import { globalMemoryDoesNotDependOnCourseMemory, lineageUuid, memoryCourseAllows, memoryDependencyRows,
+  turnLineageCourse, turnMemoryOnlySourcesBacked, turnPinnedSourcesIncluded, type FragmentFactory } from "./opening-context-provenance";
 import { OpeningMemoryError } from "./opening-memory-types";
 
 type Db = Sql | TransactionSql;
@@ -97,9 +98,13 @@ export async function assertSourceTurnsOwned(
   scope: OpeningScope,
   sourceTurnIds: readonly string[],
   excludeMemoryId: string | null = null,
+  targetCourseId: string | null = null,
 ): Promise<void> {
   if (!sourceTurnIds.length) return;
   const unique = [...new Set(sourceTurnIds.map(id => id.toLowerCase()))];
+  const targetCourse: FragmentFactory = () => db`${targetCourseId}::uuid`;
+  const depCourse: FragmentFactory = () => db`dep_m.course_id`;
+  const workspace: FragmentFactory = () => db`t.workspace_id`;
   const rows = await db`
     SELECT t.id FROM opening_turns t
     INNER JOIN opening_conversations c ON c.id = t.conversation_id
@@ -111,29 +116,30 @@ export async function assertSourceTurnsOwned(
       AND NOT EXISTS (
         WITH RECURSIVE mem_deps(dep_id) AS (
           SELECT lower(dep.id)
-          FROM ${memoryDependencyRows(db, () => db`t.context_source_refs`)} AS dep
+          FROM ${memoryDependencyRows(db, () => db`t.context_source_refs`)} dep
           UNION
           SELECT lower(dep.id)
           FROM mem_deps prev
-          JOIN opening_memories pm ON pm.id::text = prev.dep_id AND pm.workspace_id = t.workspace_id
+          JOIN opening_memories pm ON pm.id = ${lineageUuid(db, () => db`prev.dep_id`)} AND pm.workspace_id = t.workspace_id
           CROSS JOIN LATERAL jsonb_array_elements_text(
             CASE WHEN jsonb_typeof(pm.source_turn_ids) = 'array' THEN pm.source_turn_ids ELSE '[]'::jsonb END
-          ) AS st(turn_id)
-          JOIN opening_turns dt ON dt.id::text = lower(st.turn_id) AND dt.workspace_id = t.workspace_id
-          CROSS JOIN LATERAL ${memoryDependencyRows(db, () => db`dt.context_source_refs`)} AS dep
+          ) st(turn_id)
+          JOIN opening_turns dt ON dt.id = ${lineageUuid(db, () => db`st.turn_id`)} AND dt.workspace_id = t.workspace_id
+          CROSS JOIN LATERAL ${memoryDependencyRows(db, () => db`dt.context_source_refs`)} dep
         )
-        SELECT 1
-        FROM mem_deps d
-        WHERE d.dep_id = lower(${excludeMemoryId}::text) OR NOT EXISTS (
-          SELECT 1
-          FROM opening_memories dep_m
-          WHERE dep_m.id::text = d.dep_id
-            AND dep_m.workspace_id = t.workspace_id
+        SELECT 1 FROM mem_deps d
+        WHERE d.dep_id = ${excludeMemoryId}::uuid::text OR NOT EXISTS (
+          SELECT 1 FROM opening_memories dep_m
+          WHERE dep_m.id = ${lineageUuid(db, () => db`d.dep_id`)} AND dep_m.workspace_id = t.workspace_id
             AND dep_m.status = 'active'
-            AND dep_m.course_id IS NULL
-            AND (dep_m.kind = 'confirmed' OR (dep_m.kind = 'temporary' AND dep_m.expires_at IS NOT NULL AND dep_m.expires_at > clock_timestamp()))
+            AND ${memoryCourseAllows(db, depCourse, targetCourse, workspace)}
+            AND ${memoryCourseAllows(db, depCourse, () => turnLineageCourse(db, "t"), workspace)}
+            AND ${globalMemoryDoesNotDependOnCourseMemory(db, () => db`dep_m`)}
+            AND (dep_m.kind = 'confirmed' OR (dep_m.kind = 'temporary' AND dep_m.expires_at > clock_timestamp()))
         )
-      )`;
+      )
+      AND ${turnMemoryOnlySourcesBacked(db, "t", scope.workspaceId, scope.ownerUserId, targetCourse,
+        undefined, () => db`${excludeMemoryId}::uuid`)}`;
   if (rows.length !== unique.length) {
     throw new OpeningMemoryError("VALIDATION", "source turns must belong to an owned conversation");
   }
@@ -144,11 +150,13 @@ export async function assertCourseInWorkspace(
   db: Db,
   scope: OpeningScope,
   courseId: string | null | undefined,
+  requireActive = false,
 ): Promise<void> {
   if (courseId == null) return;
   const rows = await db`
     SELECT id FROM courses
     WHERE id = ${courseId} AND workspace_id = ${scope.workspaceId}
+      AND (${!requireActive} OR archived_at IS NULL)
     LIMIT 1`;
   if (!rows.length) {
     throw new OpeningMemoryError("VALIDATION", "course is not in this workspace");

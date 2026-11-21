@@ -18,6 +18,8 @@ import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { closeRace, openRaceSession, track } from "./opening-race-helpers";
 import { lockWorkspaceLearningHistory } from "../../packages/database/src/repositories/opening-learning-facts";
 import { applyAssistantProposal, proposalTransactionClient } from "../../packages/database/src/repositories/opening-assistant-proposal-effects";
+import { readTurnsWithActiveMemoryDependencies } from "../../packages/database/src/repositories/opening-context-provenance";
+import { insertOwnedTurn, insertSource } from "./opening-memory-context-fixture";
 
 let fixture: OpeningFixture;
 let memories: ReturnType<typeof createOpeningMemoryRepository>;
@@ -57,6 +59,54 @@ afterAll(async () => {
 });
 
 describe("opening memory owner and source admission", () => {
+  it("admits same-course memory descendants and rejects laundering through global or other-course memory", async () => {
+    const { sql, scope } = fixture;
+    const courses = createCourseMembershipRepository(sql);
+    const conversations = createOpeningConversationRepository(sql);
+    const courseA = await courses.createCourse({ workspaceId: scope.workspaceId, title: "Memory lineage A", slug: "memory-lineage-a" });
+    const courseB = await courses.createCourse({ workspaceId: scope.workspaceId, title: "Memory lineage B", slug: "memory-lineage-b" });
+    const material = await insertSource(sql, scope);
+    const evidence = await insertOwnedTurn(sql, scope, { sourceIds: [material] });
+    const unrelatedEvidence = await insertOwnedTurn(sql, scope);
+    const expiresAt = new Date(Date.now() + 3_600_000).toISOString();
+    const ancestor = await memories.proposeMemory(scope, {
+      courseId: courseA.id, text: "Temporary course A ancestor", sourceTurnIds: [evidence], expiresAt,
+    });
+    const conversation = await conversations.create(scope, { title: "Anchored assistant lineage", courseId: null });
+    const turn = await conversations.appendSavedTurn({ scope, conversationId: conversation.id,
+      text: "Follow the course preference", mode: "explain", sourceIds: [], clientKey: randomUUID(),
+      learningSessionId: null, currentPage: null, chunkId: null });
+    await sql`UPDATE opening_turns SET context_anchor=${sql.json({ purpose: "learning_help", courseId: courseA.id })} WHERE id=${turn.turnId}`;
+    const memoryRef = { sourceId: material, sourceVersion: 0, memoryOnly: true };
+    const saveRefs = async (refs: Array<typeof memoryRef | { memoryDependencyIds: string[] }>) => sql`UPDATE opening_turns
+      SET status='complete', context_source_refs=${sql.json(refs)} WHERE id=${turn.assistantTurnId}`;
+    await saveRefs([memoryRef, { memoryDependencyIds: [ancestor.id] }]);
+    const sourceTurnIds = [turn.assistantTurnId];
+    const proposal = { text: "Derived course preference", sourceTurnIds, expiresAt: null };
+    await expect(readTurnsWithActiveMemoryDependencies(sql, scope.workspaceId, sourceTurnIds)).resolves.toEqual(new Set(sourceTurnIds));
+    for (const courseId of [null, courseB.id]) {
+      await expect(memories.proposeMemory(scope, { ...proposal, courseId })).rejects.toMatchObject({ code: "VALIDATION" });
+    }
+    const scoped = await memories.proposeMemory(scope, { ...proposal, courseId: courseA.id });
+    await expect(memories.confirm(scope, scoped.id, scoped.version, randomUUID())).resolves.toMatchObject({ courseId: courseA.id });
+    const active = await memories.listContext(scope, new Date().toISOString(), courseA.id);
+    expect(active.memories.map(memory => memory.id)).toEqual([ancestor.id, scoped.id]);
+    expect(active).toMatchObject({ temporaryMemoryExpiresAt: expiresAt, dependencyMemoryIds: [ancestor.id] });
+
+    const global = await memories.proposeMemory(scope, { text: "Unrelated global", sourceTurnIds: [unrelatedEvidence], expiresAt: null });
+    const confirmedGlobal = await memories.confirm(scope, global.id, global.version, randomUUID());
+    const replace = { text: "Corrected from the derived turn", sourceTurnIds, clientKey: randomUUID() };
+    await expect(memories.replaceMemory(scope, { ...replace, id: global.id, expectedVersion: confirmedGlobal.version }))
+      .rejects.toMatchObject({ code: "VALIDATION" });
+    await expect(memories.replaceMemory(scope, { ...replace, id: scoped.id, expectedVersion: scoped.version + 1 }))
+      .resolves.toMatchObject({ courseId: courseA.id });
+    // Even a legacy source reference without exact dependency IDs cannot make scoped lineage global.
+    await saveRefs([memoryRef]);
+    await expect(memories.proposeMemory(scope, proposal)).rejects.toMatchObject({ code: "VALIDATION" });
+    await expect(memories.replaceMemory(scope, { ...replace, id: global.id, expectedVersion: confirmedGlobal.version, clientKey: randomUUID() }))
+      .rejects.toMatchObject({ code: "VALIDATION" });
+  });
+
   it("rejects a same-workspace impostor on list, get, propose, and reject", async () => {
     const turnId = await insertTurn(fixture.scope.workspaceId, fixture.scope.ownerUserId);
     const owned = await memories.proposeMemory(fixture.scope, {
