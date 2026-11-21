@@ -390,6 +390,9 @@ describe("teaching-verifiers", () => {
     ["tight comma contradiction immediately before thousands numeral", "2 + 2 = 5,1,000 + 2 = 1,002", "2 + 2 = 5"],
     ["consecutive commas followed by contradictory equation", "1 + 1 = 2,2,,2 + 2 = 5", "2 + 2 = 5"],
     ["thousands numeral before consecutive commas and contradiction", "1,000,,2 + 2 = 5", "2 + 2 = 5"],
+    ["decimal-comma equation followed by consecutive commas and contradiction", "1 + 2 = 1,5 * 2,,2 + 2 = 5", "2 + 2 = 5"],
+    ["decimal-comma equation followed by space comma and contradiction", "1 + 2 = 1,5 * 2, 2 + 2 = 5", "2 + 2 = 5"],
+    ["decimal-comma equation followed by tight comma and contradiction", "1 + 2 = 1,5 * 2,2 + 2 = 5", "2 + 2 = 5"],
   ])("flags multiline LaTeX contradiction with real arithmetic probe (%s)", async (_label, latex, expectedDetail) => {
     const report = await verifyTeachingContent({
       activityId: ACT, publishInput: basePublish(), pack: packWithSupport(), keyClaims: [],
@@ -475,6 +478,9 @@ describe("teaching-verifiers", () => {
       "1 + 1 = 2,2,,3",
       ",,1,000 + 2 = 1,002,,",
       "1,000,,2 = 1,002",
+      "1 + 2 = 1,5 * 2,,2 + 2 = 4",
+      "1 + 2 = 1,5 * 2, 2 + 2 = 4",
+      "1 + 2 = 1,5 * 2,2 + 2 = 4",
       "50\\% = 0.5\n% \\\\ 1 + 1 = 5",
       "% \\\\ 1 + 1 = 5",
       "\\begin{aligned}\nA &= \\begin{pmatrix}\n1 & 2 \\\\\n3 & 4\n\\end{pmatrix} \\\\\n1 + 1 &= 2\n\\end{aligned}",

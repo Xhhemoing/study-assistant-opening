@@ -991,71 +991,154 @@ function checkEqualityWithRational(sideA: string, sideB: string): "correct" | "i
   return checkArithmeticAnswer(`0 + (${left})`, `${left} = ${right}`);
 }
 
+function normalizeNumericCommas(expr: string): string {
+  return expr
+    .replace(/(?<![\d.])\d{1,3}(?:,\d{3})+(?![\d,])/g, match => match.replace(/,/g, ""))
+    .replace(/(?<![\d.])(\d+),(\d+)(?![\d,.])/g, "$1.$2");
+}
+
+function expandAlternatingDigitCommaRun(text: string, seedIndex: number, minIndex: number): { left: number; right: number } {
+  let left = seedIndex - 1;
+  while (left > minIndex && (/\d/.test(text[left - 1]!) || (text[left - 1] === "," && left - 1 > minIndex && /\d/.test(text[left - 2]!)))) {
+    left--;
+  }
+  let right = seedIndex + 2;
+  while (right < text.length && (/\d/.test(text[right]!) || (text[right] === "," && right + 1 < text.length && /\d/.test(text[right + 1]!)))) {
+    right++;
+  }
+  return { left, right };
+}
+
+function inspectMultiCommaRun(run: string, targetOffset?: number): boolean | number {
+  let pos = 0;
+  while (pos < run.length) {
+    const rest = run.slice(pos);
+    const grouped = /^(\d{1,3}(?:,\d{3})+)(?=,|$)/.exec(rest);
+    if (grouped) {
+      const end = pos + grouped[1]!.length;
+      if (targetOffset !== undefined) {
+        if (targetOffset > pos && targetOffset < end) return true;
+        if (targetOffset === end) return false;
+      } else if (end < run.length) {
+        return end;
+      }
+      pos = end + 1;
+      continue;
+    }
+    const plain = /^(\d+)/.exec(rest);
+    if (!plain) {
+      pos++;
+      continue;
+    }
+    const end = pos + plain[1]!.length;
+    if (targetOffset !== undefined) {
+      if (targetOffset === end) return false;
+    } else if (end < run.length) {
+      return end;
+    }
+    pos = end + 1;
+  }
+  return targetOffset !== undefined ? false : -1;
+}
+
+function findRightBoundary(text: string, clauseStart: number, fromIndex: number): number {
+  let depth = 0;
+  for (let k = fromIndex; k < text.length; k++) {
+    const ch = text[k]!;
+    if (ch === "\\") {
+      const cmdMatch = /^\\([A-Za-z]+)/.exec(text.slice(k));
+      if (cmdMatch) {
+        const cmd = cmdMatch[1]!;
+        if (depth === 0 && (CLAUSE_SPLIT_MACROS.has(cmd) || TEXT_MACRO_NAMES.has(cmd) || cmd === "mathrm" || cmd === "quad")) {
+          return k;
+        }
+        k += cmd.length;
+        continue;
+      }
+      if (k + 1 < text.length) k++;
+      continue;
+    }
+    if (ch === "{" || ch === "(" || ch === "[") { depth++; continue; }
+    if (ch === "}" || ch === ")" || ch === "]") { depth = Math.max(0, depth - 1); continue; }
+    if (depth !== 0) continue;
+    if (ch === ",") {
+      if (k === 0 || !/\d/.test(text[k - 1]!) || k + 1 >= text.length || !/\d/.test(text[k + 1]!)) {
+        return k;
+      }
+      const { left: subLeft, right: subRight } = expandAlternatingDigitCommaRun(text, k, fromIndex);
+      const subRun = text.slice(subLeft, subRight);
+      const subDotBefore = subLeft > 0 && text[subLeft - 1] === ".";
+      if (!subDotBefore && subRun.indexOf(",") !== subRun.lastIndexOf(",")) {
+        const sepOffset = inspectMultiCommaRun(subRun) as number;
+        if (sepOffset >= 0) return subLeft + sepOffset;
+        k = subRight - 1;
+        continue;
+      }
+      if (!subDotBefore && /^\d{1,3},\d{3}$/.test(subRun)) {
+        k = subRight - 1;
+        continue;
+      }
+      const beforeK = text.slice(clauseStart, k);
+      const eqParts = beforeK.split("=");
+      if (eqParts.length >= 2) {
+        const prefixCheck = checkEqualityWithRational(
+          normalizeNumericCommas(eqParts[eqParts.length - 2]!),
+          normalizeNumericCommas(eqParts[eqParts.length - 1]!),
+        );
+        if (prefixCheck === "correct") return k;
+      }
+      k = subRight - 1;
+      continue;
+    }
+    if (/[;，；。<>≠≤≥≈≡⇒⇐⇔→←↔↦∴∵\r\n\u4e00-\u9fff\u3400-\u4dbf]/.test(ch)) return k;
+  }
+  return text.length;
+}
+
 function isDigitInternalComma(text: string, index: number, clauseStart: number): boolean {
   if (index <= clauseStart || index >= text.length - 1) return false;
   if (!/\d/.test(text[index - 1]!) || !/\d/.test(text[index + 1]!)) return false;
 
-  let left = index - 1;
-  while (left > clauseStart && (/\d/.test(text[left - 1]!) || (text[left - 1] === "," && left - 1 > clauseStart && /\d/.test(text[left - 2]!)))) {
-    left--;
-  }
-  let right = index + 2;
-  while (right < text.length && (/\d/.test(text[right]!) || (text[right] === "," && right + 1 < text.length && /\d/.test(text[right + 1]!)))) {
-    right++;
-  }
+  const { left, right } = expandAlternatingDigitCommaRun(text, index, clauseStart);
   const run = text.slice(left, right);
   const dotBefore = left > 0 && text[left - 1] === ".";
   const dotAfter = right < text.length && text[right] === ".";
 
   if (!dotBefore) {
     if (run.indexOf(",") !== run.lastIndexOf(",")) {
-      const targetOffset = index - left;
-      let pos = 0;
-      while (pos < run.length) {
-        const rest = run.slice(pos);
-        const grouped = /^(\d{1,3}(?:,\d{3})+)(?=,|$)/.exec(rest);
-        if (grouped) {
-          const end = pos + grouped[1]!.length;
-          if (targetOffset > pos && targetOffset < end) return true;
-          if (targetOffset === end) return false;
-          pos = end + 1;
-          continue;
-        }
-        const plain = /^(\d+)/.exec(rest);
-        if (!plain) {
-          pos++;
-          continue;
-        }
-        const end = pos + plain[1]!.length;
-        if (targetOffset === end) return false;
-        pos = end + 1;
-      }
-      return false;
+      return inspectMultiCommaRun(run, index - left) as boolean;
     }
     if (/^\d{1,3},\d{3}$/.test(run)) return true;
   }
 
   const lhs = text.slice(clauseStart, index);
-  const restAfter = text.slice(index + 1);
-  const nextBoundary = restAfter.search(/[;，；。<>≠≤≥≈≡⇒⇐⇔→←↔↦∴∵\r\n]|,\s|[\u4e00-\u9fff\u3400-\u4dbf]|\\(?:implies|iff|Rightarrow|Leftrightarrow|text|quad)/);
-  const rhsEnd = nextBoundary < 0 ? text.length : index + 1 + nextBoundary;
+  const rhsEnd = findRightBoundary(text, clauseStart, right);
   const rhs = text.slice(index + 1, rhsEnd);
   if (!lhs.includes("=") || !rhs.includes("=")) return true;
   if (dotBefore || dotAfter) return false;
 
   const leftParts = lhs.split("=");
   const leftCheck = leftParts.length >= 2
-    ? checkEqualityWithRational(leftParts[leftParts.length - 2]!, leftParts[leftParts.length - 1]!)
+    ? checkEqualityWithRational(
+      normalizeNumericCommas(leftParts[leftParts.length - 2]!),
+      normalizeNumericCommas(leftParts[leftParts.length - 1]!),
+    )
     : null;
   if (leftCheck === null) return true;
 
   const dotToken = run.replace(",", ".");
   const leftWithDotParts = (text.slice(clauseStart, left) + dotToken).split("=");
   const leftWithDotCorrect = leftWithDotParts.length >= 2
-    && checkEqualityWithRational(leftWithDotParts[leftWithDotParts.length - 2]!, leftWithDotParts[leftWithDotParts.length - 1]!) === "correct";
+    && checkEqualityWithRational(
+      normalizeNumericCommas(leftWithDotParts[leftWithDotParts.length - 2]!),
+      normalizeNumericCommas(leftWithDotParts[leftWithDotParts.length - 1]!),
+    ) === "correct";
   const rightWithDotParts = (dotToken + text.slice(right, rhsEnd)).split("=");
   const rightWithDotCorrect = rightWithDotParts.length >= 2
-    && checkEqualityWithRational(rightWithDotParts[0]!, rightWithDotParts[1]!) === "correct";
+    && checkEqualityWithRational(
+      normalizeNumericCommas(rightWithDotParts[0]!),
+      normalizeNumericCommas(rightWithDotParts[1]!),
+    ) === "correct";
   return leftWithDotCorrect || rightWithDotCorrect;
 }
 
