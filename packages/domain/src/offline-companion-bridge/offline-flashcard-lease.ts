@@ -179,7 +179,6 @@ const LATEX_ONE_ARG_NON_OPERAND_COMMANDS: ReadonlySet<string> = new Set([
   "begin",
   "end",
   "label",
-  "tag",
   "style",
   "class",
   "cssid",
@@ -286,6 +285,25 @@ function stripLatexNonOperandCommands(text: string): string {
       }
       out += " ";
       i = nameEnd;
+      continue;
+    }
+
+    if (cmdLower === "tag") {
+      let cursor = nameEnd;
+      while (cursor < text.length && /\s/.test(text[cursor] ?? "")) cursor += 1;
+      const isStarred = text[cursor] === "*";
+      if (isStarred) cursor += 1;
+      const argEnd = skipBalancedGroup(text, cursor, "{", "}");
+      if (argEnd !== -1) {
+        let openBrace = cursor;
+        while (openBrace < argEnd && text[openBrace] !== "{") openBrace += 1;
+        const inner = stripLatexNonOperandCommands(text.slice(openBrace + 1, argEnd - 1));
+        out += isStarred ? ` ; ${inner} ` : ` (${inner}) `;
+        i = argEnd;
+        continue;
+      }
+      out += " ; ";
+      i = cursor;
       continue;
     }
 
@@ -402,9 +420,6 @@ const DEFINITE_BINARY_LEFT_OPERAND_END_RE = new RegExp(
 
 const AMBIGUOUS_PROSE_SINGLE_LETTER_END_RE = /(?<![\p{L}\p{N}_])[aAiI]\s*$/u;
 
-const CLAUSE_ALGEBRAIC_RELATION_RE =
-  /(?:<=|>=|!=|~=|==|=|<|>|\u2264|\u2265|\u2260|\\(?:le|leq|ge|geq|ne|neq)\b)/i;
-
 const MATH_PROSE_CONJUNCTIONS: ReadonlySet<string> = new Set([
   "where",
   "when",
@@ -414,38 +429,189 @@ const MATH_PROSE_CONJUNCTIONS: ReadonlySet<string> = new Set([
   "or",
 ]);
 
-function extractLocalClause(text: string, index: number): string {
-  let start = index;
-  while (start > 0) {
-    const ch = text[start - 1];
-    if (
-      ch === "\n" ||
-      ch === ";" ||
-      ch === ":" ||
-      ch === "!" ||
-      ch === "?" ||
-      (ch === "." && !/\d/.test(text[start] ?? ""))
-    ) {
-      break;
-    }
+const ALGEBRAIC_EXPR_WORDS: ReadonlySet<string> = new Set([
+  "pi",
+  "tau",
+  "phi",
+  "psi",
+  "rho",
+  "eta",
+  "chi",
+  "mu",
+  "nu",
+  "xi",
+  "alpha",
+  "beta",
+  "gamma",
+  "delta",
+  "epsilon",
+  "theta",
+  "lambda",
+  "sigma",
+  "omega",
+  "inf",
+  "infinity",
+  "sqrt",
+  "sin",
+  "cos",
+  "tan",
+  "log",
+  "ln",
+  "exp",
+  "abs",
+]);
+
+const LEADING_ALGEBRAIC_RELATION_RE =
+  /^(?:<=|>=|!=|~=|==|=|<|>|\u2264|\u2265|\u2260|\\(?:le|leq|ge|geq|ne|neq)\b)/i;
+
+const TRAILING_ALGEBRAIC_RELATION_RE =
+  /(?:<=|>=|!=|~=|==|=|<|>|\u2264|\u2265|\u2260|\\(?:le|leq|ge|geq|ne|neq))$/i;
+
+const DIRECT_LEFT_VAR_CONNECTOR_END_RE =
+  /(?:[=<>+\-*/^([{\u2212\u00D7\u00F7\u00B7\u2264\u2265\u2260]|\\(?:le|leq|ge|geq|ne|neq|cdot|times)|\b(?:sin|cos|tan|log|ln|exp))\s*$/i;
+
+const ALGEBRAIC_SYMBOL_CHAR_RE = /^[\d.+\-*/^|'\u2032\u2019\u2212\u00D7\u00F7\u00B7\u221A!%_]$/;
+
+function isClauseDelimiter(text: string, index: number): boolean {
+  const ch = text[index];
+  if (
+    ch === "\n" ||
+    ch === "\r" ||
+    ch === "," ||
+    ch === "\uFF0C" ||
+    ch === "\u3001" ||
+    ch === ";" ||
+    ch === "\uFF1B" ||
+    ch === ":" ||
+    ch === "\uFF1A" ||
+    ch === "\uFF01" ||
+    ch === "?" ||
+    ch === "\uFF1F" ||
+    ch === "\u3002"
+  ) {
+    return true;
+  }
+  if (ch === "!") {
+    return text[index + 1] !== "=";
+  }
+  if (ch === ".") {
+    return !/\d/.test(text[index + 1] ?? "");
+  }
+  return false;
+}
+
+function extractLocalClauseRange(
+  text: string,
+  startIndex: number,
+  endIndex: number,
+): readonly [number, number] {
+  let start = startIndex;
+  while (start > 0 && !isClauseDelimiter(text, start - 1)) {
     start -= 1;
   }
-  let end = index;
-  while (end < text.length) {
-    const ch = text[end];
-    if (
-      ch === "\n" ||
-      ch === ";" ||
-      ch === ":" ||
-      ch === "!" ||
-      ch === "?" ||
-      (ch === "." && !/\d/.test(text[end + 1] ?? ""))
-    ) {
-      break;
-    }
+  let end = endIndex;
+  while (end < text.length && !isClauseDelimiter(text, end)) {
     end += 1;
   }
-  return text.slice(start, end);
+  return [start, end];
+}
+
+function hasDirectRightAlgebraicRelation(segment: string): boolean {
+  let i = 0;
+  let groupDepth = 0;
+  while (i < segment.length) {
+    const ch = segment[i] ?? "";
+    if (/\s/.test(ch)) {
+      i += 1;
+      continue;
+    }
+    if (groupDepth === 0 && LEADING_ALGEBRAIC_RELATION_RE.test(segment.slice(i))) {
+      return true;
+    }
+    if (ch === "(" || ch === "[" || ch === "{") {
+      groupDepth += 1;
+      i += 1;
+      continue;
+    }
+    if (ch === ")" || ch === "]" || ch === "}") {
+      if (groupDepth > 0) groupDepth -= 1;
+      i += 1;
+      continue;
+    }
+    if (ch === "\\") {
+      let cmdEnd = i + 1;
+      while (cmdEnd < segment.length && /[A-Za-z]/.test(segment[cmdEnd] ?? "")) cmdEnd += 1;
+      if (cmdEnd > i + 1) {
+        i = cmdEnd;
+        continue;
+      }
+      return false;
+    }
+    if (ALGEBRAIC_SYMBOL_CHAR_RE.test(ch) || /\p{Script=Greek}/u.test(ch)) {
+      i += 1;
+      continue;
+    }
+    if (/[A-Za-z]/.test(ch)) {
+      let wordEnd = i + 1;
+      while (wordEnd < segment.length && /[A-Za-z]/.test(segment[wordEnd] ?? "")) wordEnd += 1;
+      const word = segment.slice(i, wordEnd).toLowerCase();
+      if (word.length === 1 || ALGEBRAIC_EXPR_WORDS.has(word)) {
+        i = wordEnd;
+        continue;
+      }
+      return false;
+    }
+    return false;
+  }
+  return false;
+}
+
+function hasDirectLeftAlgebraicRelation(segment: string): boolean {
+  if (!DIRECT_LEFT_VAR_CONNECTOR_END_RE.test(segment)) {
+    return false;
+  }
+  let i = segment.length;
+  let closeDepth = 0;
+  while (i > 0) {
+    const ch = segment[i - 1] ?? "";
+    if (/\s/.test(ch)) {
+      i -= 1;
+      continue;
+    }
+    if (closeDepth === 0 && TRAILING_ALGEBRAIC_RELATION_RE.test(segment.slice(0, i))) {
+      return true;
+    }
+    if (ch === ")" || ch === "]" || ch === "}") {
+      closeDepth += 1;
+      i -= 1;
+      continue;
+    }
+    if (ch === "(" || ch === "[" || ch === "{") {
+      if (closeDepth > 0) closeDepth -= 1;
+      i -= 1;
+      continue;
+    }
+    if (ALGEBRAIC_SYMBOL_CHAR_RE.test(ch) || /\p{Script=Greek}/u.test(ch)) {
+      i -= 1;
+      continue;
+    }
+    if (/[A-Za-z]/.test(ch)) {
+      let wordStart = i - 1;
+      while (wordStart > 0 && /[A-Za-z]/.test(segment[wordStart - 1] ?? "")) wordStart -= 1;
+      if (wordStart > 0 && segment[wordStart - 1] === "\\") {
+        i = wordStart - 1;
+        continue;
+      }
+      const word = segment.slice(wordStart, i).toLowerCase();
+      if (word.length === 1 || ALGEBRAIC_EXPR_WORDS.has(word)) {
+        i = wordStart;
+        continue;
+      }
+      return false;
+    }
+    return false;
+  }
+  return false;
 }
 
 function isBinaryLeftOperandBeforeSign(
@@ -464,14 +630,22 @@ function isBinaryLeftOperandBeforeSign(
   if (isInsideMathRange(signIndex, mathRanges)) {
     return true;
   }
-  const clause = extractLocalClause(text, signIndex);
-  if (!CLAUSE_ALGEBRAIC_RELATION_RE.test(clause)) {
+  let varEnd = signIndex;
+  while (varEnd > 0 && /\s/.test(text[varEnd - 1] ?? "")) varEnd -= 1;
+  const varStart = Math.max(0, varEnd - 1);
+  const [clauseStart, clauseEnd] = extractLocalClauseRange(text, varStart, operandEndIndex);
+  const clauseBeforeVar = text.slice(clauseStart, varStart);
+  const clauseAfterOperand = text.slice(operandEndIndex, clauseEnd);
+  if (
+    !hasDirectRightAlgebraicRelation(clauseAfterOperand) &&
+    !hasDirectLeftAlgebraicRelation(clauseBeforeVar)
+  ) {
     return false;
   }
-  const trailingWordMatch = /^\s+([A-Za-z]{2,})\b/.exec(text.slice(operandEndIndex));
+  const trailingWordMatch = /^\s+([A-Za-z]{2,})\b/.exec(clauseAfterOperand);
   if (trailingWordMatch) {
     const trailingWord = (trailingWordMatch[1] ?? "").toLowerCase();
-    if (!MATH_PROSE_CONJUNCTIONS.has(trailingWord)) {
+    if (!MATH_PROSE_CONJUNCTIONS.has(trailingWord) && !ALGEBRAIC_EXPR_WORDS.has(trailingWord)) {
       return false;
     }
   }

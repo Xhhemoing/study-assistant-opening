@@ -1386,6 +1386,75 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
       expect(r14Allowed.ok).toBe(true);
     }
 
+    // [Round-15 P1-1 & P1-2] Visible LaTeX `\tag{...}` / `\tag*{...}` equation tags MUST preserve
+    // their rendered inner content for leak detection without fusing into preceding operands (`x=0`),
+    // and prose `a`/`A`/`I` negative answers MUST NOT be masked by a later/earlier equation separated
+    // by a comma, prose words, or parenthesized side-note while contiguous algebraic relations
+    // (`Solve a − 4 = 0`, `0 = a − 4`, `If a − 4 < 0, find a.`) remain allowed!
+    for (const [idx, r15LeakStem] of [
+      "$$x=0\\tag{-4}$$",
+      "$$x=0\\tag*{-4}$$",
+      "$$x=0\\tag{\u2212 4}$$",
+      "$$x=0\\tag*{\\color{red} \u2212 4}$$",
+      "$$x=0\\tag{- 4}$$",
+      "Apply a \u22124, then solve x = 0.",
+      "Apply a \u2212 4, then solve x = 0.",
+      "Apply a \u22124 before solving x = 0.",
+      "Apply a \u22124 where x = 0.",
+      "Apply a \u22124 (x = 0).",
+      "Apply a \u22124 point adjustment = 0.",
+      "x = 0 and apply a \u22124.",
+      "x = 0, apply a \u22124.",
+      "Set x = 0 a \u22124.",
+    ].entries()) {
+      expect(containsAnswerLeak(r15LeakStem, "-4")).toBe(true);
+      const r15Rejected = issueOfflineFlashcardLease({
+        leaseId: `lease-r15-leak-${idx}`,
+        workspaceId: "ws-1",
+        learnerId: "learner-1",
+        issuedAtMs: T0,
+        candidates: [
+          makeMissVariantCandidate({
+            answerKey: "-4",
+            freshVariantStem: r15LeakStem,
+          }),
+        ],
+      });
+      expect(r15Rejected.ok).toBe(false);
+      if (!r15Rejected.ok) {
+        expect(r15Rejected.httpStatus).toBe(422);
+        expect(r15Rejected.code).toBe("miss_variant_answer_leak");
+      }
+    }
+
+    for (const [idx, r15BenignStem] of [
+      "Solve a \u2212 4 = 0",
+      "0 = a \u2212 4",
+      "y = 2 + a \u2212 4",
+      "If a \u2212 4 < 0, find a.",
+      "If a \u2212 4 != 0, find a.",
+      "Solve (a \u2212 4) / 2 = 3",
+      "Solve x \u22124 = 0",
+      "$$x=0\\tag{1}$$",
+      "$$x=0\\tag*{1}$$",
+      "$$x=0\\tag{1-4}$$",
+    ].entries()) {
+      expect(containsAnswerLeak(r15BenignStem, "-4")).toBe(false);
+      const r15Allowed = issueOfflineFlashcardLease({
+        leaseId: `lease-r15-benign-${idx}`,
+        workspaceId: "ws-1",
+        learnerId: "learner-1",
+        issuedAtMs: T0,
+        candidates: [
+          makeMissVariantCandidate({
+            answerKey: "-4",
+            freshVariantStem: r15BenignStem,
+          }),
+        ],
+      });
+      expect(r15Allowed.ok).toBe(true);
+    }
+
     for (const [idx, spacedOrCjk] of [
       { answerKey: "π/2", prompt: "Right-angle measure.", backSummary: "The angle is π / 2 radians" },
       { answerKey: "π/2", prompt: "直角弧度。", backSummary: "其值为π/2弧度。" },
