@@ -178,17 +178,76 @@ function matchPatternMap(map: Record<string, unknown>, spec: string, use: Use) {
   return { key: pattern, targets };
 }
 
-function isRequireLoader(expression: ts.Expression): boolean {
-  if (ts.isIdentifier(expression)) return expression.text === "require";
-  if (!ts.isPropertyAccessExpression(expression) && !ts.isElementAccessExpression(expression)) return false;
-  if (!ts.isIdentifier(expression.expression) || expression.expression.text !== "module") return false;
-  return ts.isPropertyAccessExpression(expression) ? expression.name.text === "require" :
-    ts.isStringLiteralLike(expression.argumentExpression) && expression.argumentExpression.text === "require";
+function unwrapParens(expr: ts.Expression): ts.Expression {
+  while (ts.isParenthesizedExpression(expr) || ts.isNonNullExpression(expr) || ts.isAsExpression(expr) ||
+         ts.isTypeAssertionExpression(expr) || ts.isSatisfiesExpression(expr)) expr = expr.expression;
+  return expr;
+}
+
+function mentionsCreateRequire(node: ts.Node): true | undefined {
+  if ((ts.isIdentifier(node) || ts.isStringLiteralLike(node)) && node.text === "createRequire") return true;
+  return ts.forEachChild(node, mentionsCreateRequire);
+}
+
+function localBindingChecker(source: ts.SourceFile): ts.TypeChecker {
+  // Bind this AST only. Resolution of imports stays with the boundary graph.
+  const options = { allowJs: true, noLib: true, noResolve: true, types: [] };
+  const host = ts.createCompilerHost(options);
+  const isSource = (file: string) => normalizeFile(file) === normalizeFile(source.fileName);
+  return ts.createProgram([source.fileName], options, {
+    ...host, getSourceFile: file => isSource(file) ? source : undefined,
+    fileExists: isSource, directoryExists: () => false, readFile: file => isSource(file) ? source.text : undefined,
+  }).getTypeChecker();
+}
+
+function nodeModuleAPI(expr: ts.Expression | undefined): boolean {
+  const name = expr && unwrapParens(expr);
+  return !!name && ts.isStringLiteralLike(name) && (name.text === "node:module" || name.text === "module");
+}
+
+type LoaderBinding = "require" | "factory" | "module-api";
+
+function loaderBinding(expr: ts.Expression, checker?: ts.TypeChecker, seen = new Set<ts.Declaration>()): LoaderBinding | undefined {
+  const value = unwrapParens(expr);
+  if (ts.isPropertyAccessExpression(value) || ts.isElementAccessExpression(value)) {
+    const receiver = unwrapParens(value.expression);
+    const key = ts.isElementAccessExpression(value) ? unwrapParens(value.argumentExpression) : undefined;
+    const name = ts.isPropertyAccessExpression(value) ? value.name.text : key && ts.isStringLiteralLike(key) ? key.text : undefined;
+    if (name === "require" && ts.isIdentifier(receiver) && receiver.text === "module") return "require";
+    if (name === "createRequire" && loaderBinding(receiver, checker, seen) === "module-api") return "factory";
+  }
+  if (ts.isIdentifier(value) && value.text === "require") return "require";
+  if (!checker) return undefined;
+  if (ts.isCallExpression(value)) {
+    const binding = loaderBinding(value.expression, checker, seen);
+    if (binding === "factory") return "require";
+    if (binding === "require" && nodeModuleAPI(value.arguments[0])) return "module-api";
+  }
+  if (!ts.isIdentifier(value)) return undefined;
+  const decl = checker.getSymbolAtLocation(value)?.declarations?.[0];
+  if (!decl) return value.text === "createRequire" ? "factory" : undefined;
+  if (seen.has(decl)) return undefined;
+  seen.add(decl);
+  if (ts.isVariableDeclaration(decl) && decl.initializer) return loaderBinding(decl.initializer, checker, seen);
+  if (ts.isImportSpecifier(decl) && (decl.propertyName ?? decl.name).text === "createRequire" &&
+      nodeModuleAPI(decl.parent.parent.parent.moduleSpecifier)) return "factory";
+  if (ts.isNamespaceImport(decl) && ts.isImportDeclaration(decl.parent.parent) &&
+      nodeModuleAPI(decl.parent.parent.moduleSpecifier)) return "module-api";
+  if (ts.isImportClause(decl) && nodeModuleAPI(decl.parent.moduleSpecifier)) return "module-api";
+  if (ts.isBindingElement(decl) && ts.isObjectBindingPattern(decl.parent)) {
+    const name = decl.propertyName ?? decl.name;
+    if (!(ts.isIdentifier(name) || ts.isStringLiteralLike(name)) || name.text !== "createRequire") return undefined;
+    const owner = decl.parent.parent;
+    if (ts.isVariableDeclaration(owner) && owner.initializer &&
+        loaderBinding(owner.initializer, checker, seen) === "module-api") return "factory";
+  }
+  return undefined;
 }
 
 function parseEdges(file: string, text: string): Edge[] {
   // TypeScript infers ScriptKind from the filename, including TSX and JS variants.
   const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true);
+  const checker = mentionsCreateRequire(source) ? localBindingChecker(source) : undefined;
   const edges: Edge[] = [];
   for (const ref of source.referencedFiles) {
     const name = slash(ref.fileName);
@@ -207,7 +266,8 @@ function parseEdges(file: string, text: string): Edge[] {
     });
   }
   const line = (node: ts.Node) => source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1;
-  function addEdge(node: ts.Node, argument: ts.Node | undefined, kind: EdgeKind) {
+  function addEdge(node: ts.Node, expression: ts.Expression | undefined, kind: EdgeKind) {
+    const argument = expression && unwrapParens(expression);
     const spec = argument && ts.isStringLiteralLike(argument) ? slash(argument.text) : "<dynamic-non-literal>";
     edges.push({ spec, line: line(node), kind });
   }
@@ -235,11 +295,10 @@ function parseEdges(file: string, text: string): Edge[] {
       addEdge(node, ts.isLiteralTypeNode(node.argument) ? node.argument.literal : undefined, "type");
     } else if (ts.isImportEqualsDeclaration(node) && ts.isExternalModuleReference(node.moduleReference)) {
       addEdge(node, node.moduleReference.expression, node.isTypeOnly ? "type" : "require");
-    } else if (
-      ts.isCallExpression(node) &&
-      (node.expression.kind === ts.SyntaxKind.ImportKeyword || isRequireLoader(node.expression))
-    ) {
-      addEdge(node, node.arguments[0], node.expression.kind === ts.SyntaxKind.ImportKeyword ? "dynamic" : "require");
+    } else if (ts.isCallExpression(node)) {
+      const callee = unwrapParens(node.expression);
+      if (callee.kind === ts.SyntaxKind.ImportKeyword) addEdge(node, node.arguments[0], "dynamic");
+      else if (loaderBinding(callee, checker) === "require") addEdge(node, node.arguments[0], "require");
     }
     ts.forEachChild(node, visit);
   };
@@ -430,12 +489,26 @@ class ModuleGraph {
     return undefined;
   }
 
+  // An exact artifact wins before extension substitution. Inspect metadata only.
+  private targetKind(file: string, spec: string): "file" | "directory" | undefined {
+    const virtualFile = this.files.has(file);
+    const disk = virtualFile || this.virtualOnly ? undefined : this.diskEntry(file);
+    if (disk?.stats.isDirectory()) return "directory";
+    if (!disk && !virtualFile) {
+      return this.virtualOnly && [...this.files.keys()].some(child => within(file, child)) ? "directory" : undefined;
+    }
+    if (!SOURCE_EXTENSIONS.includes(path.extname(file)) ||
+        (disk && (!disk.stats.isFile() || !SOURCE_EXTENSIONS.includes(path.extname(disk.physical))))) throw new BlockedPath(spec);
+    return "file";
+  }
+
   private resolvePath(
     base: string, spec: string, use: Use, lookup: "module" | "relative" | "file-reference" | "package-root" = "module", seenDirs = new Set<string>(),
     packageScope?: string,
   ): Resolution[] {
     const relative = path.relative(this.root, base);
     if (relative.split(path.sep)[0] === ".." || path.isAbsolute(relative) || seenDirs.has(base)) return [{ violation: spec }];
+    const mappedDirectory = this.targetKind(base, spec) === "directory" && lookup === "module";
     const extension = /\.d\.[cm]?ts$/u.exec(base)?.[0] ?? path.extname(base);
     let candidates: string[];
     if (lookup === "file-reference") {
@@ -460,12 +533,16 @@ class ModuleGraph {
       candidates.push(...SOURCE_EXTENSIONS.map(ext => path.join(base, "index" + ext)));
     }
     const results: Resolution[] = [];
+    const siblings: Resolution[] = [];
     for (const file of candidates) {
-      results.push(...resolveBranch(() => {
+      // Scan siblings too, but they cannot satisfy a manifest entry naming an existing directory.
+      const branch = mappedDirectory && path.dirname(file) !== base ? siblings : results;
+      branch.push(...resolveBranch(() => {
         if (packageScope) this.checkPackagePath(packageScope, file, spec);
         const source = this.sourcePath(file);
         if (!source) return [];
-        const implementation = SOURCE_EXTENSIONS.includes(path.extname(source)) && !declaration(source) && !declaration(file);
+        if (!SOURCE_EXTENSIONS.includes(path.extname(source))) return [{ violation: spec }];
+        const implementation = !declaration(source) && !declaration(file);
         return [{ file, use: implementation ? use : "type" }];
       }));
     }
@@ -484,14 +561,14 @@ class ModuleGraph {
       if (manifest.typesVersions !== undefined) {
         const names = [...exports, ...legacy].map(target => target.spec);
         const versioned = this.versionedDeclarations(base, manifest, spec, names, results);
-        return [...requireTarget(results, spec, use), ...versioned];
+        return [...siblings, ...requireTarget(results, spec, use), ...versioned];
       }
     }
     if (!manifest && !results.length && (lookup === "relative" || lookup === "file-reference")) {
       // Only a plain lookup miss may be satisfied from the other side of a link.
       if (!this.files.has(base) && (this.virtualOnly || !this.diskEntry(base))) return [{ violation: spec, absent: true }];
     }
-    return requireTarget(results, spec, use);
+    return [...siblings, ...requireTarget(results, spec, use)];
   }
 
   private exportTargets(exports: unknown, subpath: string, use: Use): ManifestTarget[] {
@@ -597,24 +674,24 @@ class ModuleGraph {
   private declarationFiles(owner: string, target: string, spec: string): Resolution[] {
     const base = path.resolve(owner, target);
     if (rootedPath(target) || !within(owner, base)) return [{ violation: spec }];
+    this.checkPackagePath(owner, base, spec);
+    const directory = this.targetKind(base, spec) === "directory";
     const ext = path.extname(base);
-    const suffixes = SOURCE_SUBSTITUTIONS[ext];
-    const candidates = declaration(base) ? [base] : [
-      ...(suffixes ? suffixes.filter(declaration).map(suffix => base.slice(0, -ext.length) + suffix)
-        : DECLARATION_EXTENSIONS.map(suffix => base + suffix)),
-      ...DECLARATION_EXTENSIONS.map(suffix => path.join(base, "index" + suffix)),
-    ];
-    const physicalOwner = this.virtualOnly ? undefined : this.diskEntry(owner)?.physical;
-    return candidates.flatMap(file => resolveBranch(() => {
+    const suffixes = SOURCE_SUBSTITUTIONS[ext]?.filter(declaration);
+    const stem = suffixes ? base.slice(0, -ext.length) : base;
+    const candidates = declaration(base) ? [base] : (suffixes ?? DECLARATION_EXTENSIONS).map(suffix => stem + suffix);
+    const declarationsAt = (file: string) => resolveBranch(() => {
       // The package root can supply index declarations, never a same-named sibling.
       if (!within(owner, file)) return [];
+      this.checkPackagePath(owner, file, spec);
       const source = this.sourcePath(file);
       if (!source) return [];
-      if (physicalOwner && !within(physicalOwner, path.join(this.realRoot, path.relative(this.root, source)))) {
-        return [{ violation: spec }];
-      }
       return declaration(source) ? [{ file, use: "type" }] : [{ violation: spec }];
-    }));
+    });
+    const files = candidates.flatMap(declarationsAt);
+    if (!directory) return files;
+    const indexes = DECLARATION_EXTENSIONS.flatMap(suffix => declarationsAt(path.join(base, "index" + suffix)));
+    return [...files, ...requireTarget(indexes, spec, "type")];
   }
 
   private versionedDeclarations(owner: string, manifest: PackageJson, spec: string, declaredNames: string[], entries: Resolution[], rootEntry = true): Resolution[] {
@@ -636,7 +713,7 @@ class ModuleGraph {
             // Equivalent spellings satisfy the same replacement for this entry only.
             const targets = versionTargets(pattern, replacement, spellings);
             if (!targets.length) continue;
-            const branch = targets.flatMap(target => this.declarationFiles(owner, target, spec));
+            const branch = targets.flatMap(target => resolveBranch(() => this.declarationFiles(owner, target, spec)));
             results.push(...requireTarget(branch, spec, "type"));
           }
         }
@@ -653,15 +730,24 @@ class ModuleGraph {
       if (!exports.length) return [{ violation: spec }];
       targets.push(...exports);
     }
-    if (!targets.length) targets.push({ spec: "index.d.ts", use: "type" });
+    if (!targets.length && manifest?.main === undefined) targets.push({ spec: "index.d.ts", use: "type" });
+    const includeIndex = !targets.length || manifest?.typesVersions !== undefined;
     const resolved = targets.flatMap(target => resolveBranch(() => {
       const name = exports.includes(target) ? this.packageTargetName(owner, target.spec) : target.spec;
       const results = this.declarationFiles(owner, name, spec);
       // An explicit declaration must exist. JS export conditions contribute any paired declarations.
       return target.use === "type" || declaration(target.spec) ? requireTarget(results, spec, "type") : results;
     }));
+    if (includeIndex) resolved.push(...resolveBranch(() => this.declarationFiles(owner, "index", spec)));
+    if (manifest?.main !== undefined) {
+      if (typeof manifest.main !== "string" || !manifest.main.length) return [{ violation: spec }];
+      const main: ManifestTarget = { spec: slash(manifest.main), use: "type" };
+      targets.push(main);
+      const entries = this.resolveManifestTarget(owner, main, new Set([owner]), owner);
+      // Ambient directives consume the paired declarations, even when exports names another entry.
+      resolved.push(...entries.filter(entry => "violation" in entry || declaration(entry.file)));
+    }
     if (manifest?.typesVersions !== undefined) {
-      resolved.push(...this.declarationFiles(owner, "index", spec));
       resolved.push(...this.versionedDeclarations(owner, manifest, spec, targets.map(target => target.spec), resolved));
     }
     return requireTarget(resolved, spec, "type");
@@ -1076,6 +1162,51 @@ describe("v3 Open-Core public candidate boundary", () => {
     expect(virtualAnalyze(files, "index.d.ts").violations).toHaveLength(1);
   });
 
+  it("walks ambient main declarations and their filename and stem version mappings alongside exports", () => {
+    const owner = "node_modules/@types/local";
+    const result = virtualAnalyze({
+      "public.d.ts": '/// <reference types="local" />',
+      [owner + "/package.json"]: JSON.stringify({ exports: "./public.js", main: "./legacy.js",
+        typesVersions: { "*": { "legacy.js": ["v5.d.ts"], legacy: ["stem.d.ts"] } } }),
+      [owner + "/public.d.ts"]: "", [owner + "/legacy.js"]: "",
+      ...Object.fromEntries(["legacy", "v5", "stem"].map(name => [owner + "/" + name + ".d.ts", 'import "pg";'])),
+    }, "public.d.ts");
+    expect(result.violations.map(v => [v.target, v.chain[2]]).sort()).toEqual(
+      ["legacy", "stem", "v5"].map(name => ["pg", owner + "/" + name + ".d.ts"]),
+    );
+  });
+
+  it.each(["../shared.js", "./addon.node"])("rejects an invalid ambient main %s alongside a clean declaration", main => {
+    const owner = "node_modules/@types/local";
+    const result = virtualAnalyze({
+      "public.d.ts": '/// <reference types="local" />',
+      [owner + "/package.json"]: JSON.stringify({ exports: "./public.js", main }),
+      [owner + "/public.d.ts"]: "", "node_modules/@types/shared.d.ts": "",
+      [owner + "/addon.node"]: "", [owner + "/addon.node.d.ts"]: "",
+    }, "public.d.ts");
+    expect(result.violations.map(v => v.target)).toEqual([main]);
+  });
+
+  it("keeps an ambient main and its declaration inside the physical package", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "aistudy-ambient-main-"));
+    try {
+      const owner = path.join(root, "node_modules/@types/local");
+      const sibling = path.join(root, "other");
+      const main = "./linked/main.js";
+      mkdirSync(owner, { recursive: true });
+      mkdirSync(sibling);
+      symlinkSync(sibling, path.join(owner, "linked"), "junction");
+      writeFileSync(path.join(owner, "package.json"), JSON.stringify({ exports: "./public.js", main }), "utf8");
+      writeFileSync(path.join(owner, "public.d.ts"), "", "utf8");
+      writeFileSync(path.join(sibling, "main.d.ts"), "", "utf8");
+      const entry = path.join(root, "public.d.ts");
+      writeFileSync(entry, '/// <reference types="local" />', "utf8");
+      expect(analyzeModuleGraph([entry], { root }).violations.map(v => v.target)).toEqual([main]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("checks ambient index declarations and rejects prohibited names or traversal even if a file exists", () => {
     const names = ["local", "pg", "../internal", "node:buffer"];
     const result = virtualAnalyze({
@@ -1242,10 +1373,74 @@ describe("v3 Open-Core public candidate boundary", () => {
   it.each([
     ["module.require('pg')", "pg"], ["module['require']('jose')", "jose"],
     ["module.require(name)", "<dynamic-non-literal>"], ["module['require']()", "<dynamic-non-literal>"],
+    ["(module.require)('pg')", "pg"], ["(module)['require']('pg')", "pg"], ["((require))('pg')", "pg"],
+    ["(module[('require')])(('pg'))", "pg"], ["((module).require)((dynamicName))", "<dynamic-non-literal>"],
+    ["((createRequire)(import.meta.url))(('pg'))", "pg"],
+    ["const load = ((createRequire)(import.meta.url)); (load)(('pg'))", "pg"],
   ])("follows a CommonJS loader call in a reachable module: %s", (code, target) => {
     const result = virtualAnalyze({ "index.ts": 'import "./helper.cjs";', "helper.cjs": code }, "index.ts");
     expect(result.violations.map(v => v.target)).toEqual([target]);
     expect(result.violations[0].chain).toContain(`helper.cjs:1 -> ${target} [require]`);
+  });
+
+  it("follows grouped factory import bindings and keeps dynamic import argument classification", () => {
+    const result = virtualAnalyze({
+      "entry.mts": 'import { createRequire as make } from "node:module";\n' +
+        'const load = ((make)(import.meta.url)); (load)(("pg"));\n' +
+        'import((("jose"))); import((expr));',
+    }, "entry.mts");
+    expect(result.violations.map(v => v.target)).toEqual(["node:module", "pg", "jose", "<dynamic-non-literal>"]);
+  });
+
+  it("resolves factory bindings by scope for namespace imports and CommonJS destructuring", () => {
+    const result = virtualAnalyze({
+      "entry.ts": 'import * as mod from "node:module";\n' +
+        'const load = ((mod)[("createRequire")])(import.meta.url); (load!)(("pg" as const));\n' +
+        'function format(load: (s: string) => string) { load("unrelated"); }\n' +
+        'const { createRequire: make } = (require)(("module")); (make(import.meta.url))((expr));',
+    }, "entry.ts");
+    expect(result.violations.map(v => v.target)).toEqual(["node:module", "pg", "module", "<dynamic-non-literal>"]);
+  });
+
+  it("rejects the existing binary require export beside its same-named TypeScript source", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "aistudy-native-export-"));
+    try {
+      const dir = path.join(root, "packages/domain");
+      const dist = path.join(dir, "dist");
+      mkdirSync(dist, { recursive: true });
+      writeFileSync(path.join(dir, "package.json"), JSON.stringify({ name: "@aistudy/domain",
+        exports: { "./native": { import: "./public.ts", require: "./dist/native.node" } } }), "utf8");
+      writeFileSync(path.join(dir, "public.ts"), "", "utf8");
+      writeFileSync(path.join(dist, "native.node.ts"), "", "utf8");
+      writeFileSync(path.join(dist, "native.node"), Uint8Array.of(0, 255));
+      const entry = path.join(root, "entry.ts");
+      writeFileSync(entry, 'import "@aistudy/domain/native";', "utf8");
+      expect(analyzeModuleGraph([entry], { root }).violations.map(v => v.target)).toEqual(["./dist/native.node"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it.each(["main", "module", "types", "typings", "imports"])("rejects an existing unsupported %s target before probing siblings", field => {
+    const target = "./mapped.wasm";
+    const files = {
+      "entry.ts": 'import "@aistudy/lite";',
+      "lite/package.json": JSON.stringify({ name: "@aistudy/lite", exports: "./public.ts",
+        [field]: field === "imports" ? { "#mapped": target } : target }),
+      "lite/public.ts": field === "imports" ? 'import "#mapped";' : "",
+      "lite/mapped.wasm": "", "lite/mapped.wasm.ts": "", "lite/mapped.wasm.d.ts": "",
+    };
+    expect(virtualAnalyze(files, "entry.ts").violations.map(v => v.target)).toEqual([target]);
+  });
+
+  it("requires a mapped directory to supply its own entry even when a source sibling exists", () => {
+    const files = {
+      "entry.ts": 'import "@aistudy/lite";',
+      "lite/package.json": JSON.stringify({ name: "@aistudy/lite", exports: "./helper" }),
+      "lite/helper.ts": 'import "pg";', "lite/helper/readme.txt": "",
+    };
+    expect(virtualAnalyze(files, "entry.ts").violations.map(v => v.target).sort()).toEqual(["./helper", "pg"]);
+    expect(virtualAnalyze({ ...files, "lite/helper/index.ts": "" }, "entry.ts").violations.map(v => v.target)).toEqual(["pg"]);
   });
 
   it("does not satisfy a version mapping to the package directory with a sibling declaration", () => {

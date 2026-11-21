@@ -176,11 +176,14 @@ React scan starts from both its source file and every target of the package's
 Export still requires a separate blob allowlist.
 
 The analyzer checks that each selected entry is a readable file, then follows runtime
-and type-only edges across workspace packages and local modules. CommonJS calls to
-`require`, `module.require` and `module["require"]` follow the same rules. Triple-slash path
+and type-only edges across workspace packages and local modules. It follows CommonJS
+`require`, `module.require`, `module["require"]` and loaders returned by Node's
+`createRequire`, including grouped calls and arguments. Triple-slash path
 references resolve relative to the declaring file. Ambient type directives resolve
 through in-repository `node_modules/@types` declarations, including their transitive
-references. The pinned TypeScript compiler parses every `typesVersions` selector in ambient packages,
+references. An ambient package's legacy `main` contributes its paired declaration
+and its filename and stem for version mappings, even when the package defines `exports`.
+The pinned TypeScript compiler parses every `typesVersions` selector in ambient packages,
 workspace packages, and relative directory imports. It scans unversioned declarations
 and every matching replacement. For workspace and directory entries, a mapping can
 match the declared runtime filename, its declaration filename, or its extensionless name.
@@ -190,7 +193,9 @@ apply only to module imports.
 
 Directory resolution checks root export conditions, legacy entries, browser mappings,
 and existing index files. Runtime targets require an implementation, and the gate also
-scans any paired declarations. Missing entries and directory entry cycles fail the check.
+scans any paired declarations. An existing native addon or other unsupported artifact
+fails the check before source substitution. A mapped directory must supply its own
+resolvable entry. Missing entries and directory entry cycles fail the check.
 Before reading disk files or manifests, the analyzer resolves links within the real
 repository root. It checks both the requested path and its destination for closed-core
 content and, during export, for the owning package's license. A linked file's outgoing
