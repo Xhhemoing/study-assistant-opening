@@ -308,6 +308,36 @@ describe("408.stack.v1 continuity (L1)", () => {
       nextRequirementKey: "408.ds.stack.pointer-convention" });
   });
 
+  it("preserves completion and review scheduling across history rollover and restore", () => {
+    const startedAt = Date.parse("2026-11-19T00:00:00.000Z");
+    const pointerEvaluation = stack408Cartridge.evaluateProbeResponse(
+      POINTER_PROBE, { outputs: ["OVERFLOW", "UNINITIALIZED"], finalTop: 1 },
+    );
+    let state = recordStack408ProbeAttempt(createInitialStack408State(), evaluation, new Date(startedAt).toISOString());
+    for (let attempt = 1; attempt <= 500; attempt += 1) {
+      state = recordStack408ProbeAttempt(state, pointerEvaluation, new Date(startedAt + attempt * 1_000).toISOString());
+    }
+
+    const persisted = stack408Cartridge.serializeContinuityState(state);
+    const restored = stack408Cartridge.parseContinuityState(persisted);
+    expect(restored.ok).toBe(true);
+    if (!restored.ok) return;
+    expect(stack408Cartridge.buildResumeSummary(restored.value)).toMatchObject({
+      completedSteps: 1, totalSteps: 3, nextRequirementKey: "408.ds.stack.pointer-convention",
+    });
+    expect(restored.value.probeHistory).toHaveLength(500);
+    expect(restored.value.probeHistory[0]).toMatchObject({ probeId: TRACE_PROBE, outcome: "correct" });
+    expect(restored.value.probeHistory[1]).toMatchObject({
+      probeId: POINTER_PROBE, at: "2026-11-19T00:00:02.000Z",
+    });
+    const candidates = stack408Cartridge.projectTaskCandidates({
+      state: restored.value, now: "2026-11-20T00:00:00.000Z", activeRetestWindows: [],
+    });
+    expect(candidates).toContainEqual(expect.objectContaining({
+      requirementKey: "408.ds.stack.lifo-trace", kind: "review", earliestAt: "2026-11-22T00:00:00.000Z",
+    }));
+  });
+
   it("rejects malformed or inconsistent state", () => {
     expect(stack408Cartridge.parseContinuityState("{")).toEqual({ ok: false, issues: ["state_not_json"] });
     expect(stack408Cartridge.parseContinuityState({ ...createInitialStack408State(), extra: 1 }).ok).toBe(false);

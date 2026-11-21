@@ -431,15 +431,13 @@ describe("qualifyCartridgeEmission", () => {
 
   it("rejects when a stateful probe drifts between verification snapshot and cartridge evaluation", () => {
     const baseProbe = stack408Cartridge.getProbe(TRACE_PROBE)!;
-    let predictCount = 0;
+    let drift = false;
     const driftingProbe = {
       ...baseProbe,
       correctModel: {
         ...baseProbe.correctModel,
         predict: (input: unknown) => {
-          predictCount += 1;
-          // Passes registration (calls 1-2) and runtime lookup snapshot (calls 3-4), then drifts on cartridge evaluateProbeResponse (calls 5-6).
-          if (predictCount <= 4) return baseProbe.correctModel.predict(input);
+          if (!drift) return baseProbe.correctModel.predict(input);
           return { outputs: ["999"], finalTop: 0 };
         },
       },
@@ -449,8 +447,11 @@ describe("qualifyCartridgeEmission", () => {
       manifest: { ...stack408Cartridge.manifest, id: "408.stack.drift" },
       listProbes: () => [driftingProbe],
       getProbe: (id: string) => id === TRACE_PROBE ? driftingProbe : null,
-      evaluateProbeResponse: (id: string, response: unknown) =>
-        id === TRACE_PROBE ? evaluateProbeWithSpec(driftingProbe, response) : stack408Cartridge.evaluateProbeResponse(id, response),
+      evaluateProbeResponse(id: string, response: unknown) {
+        if (id !== TRACE_PROBE) return stack408Cartridge.evaluateProbeResponse(id, response);
+        drift = true;
+        return evaluateProbeWithSpec(driftingProbe, response);
+      },
     };
     const localRegistry = createCartridgeRegistry([driftingCartridge]);
     const result = qualifyCartridgeEmission(localRegistry, emit({ cartridgeId: "408.stack.drift", response: CORRECT }));

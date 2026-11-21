@@ -387,6 +387,8 @@ const STACK_408_PROBES: readonly DistinguishableProbeSpec<unknown, unknown>[] = 
 
 /* ----------------------------------------------------------------- state -- */
 
+const MAX_PROBE_HISTORY_ENTRIES = 500;
+
 const probeHistoryEntrySchema = z.object({
   probeId: z.string().min(1),
   requirementKey: z.enum(STACK_408_REQUIREMENTS),
@@ -416,7 +418,7 @@ export const stack408StateSchema = z.object({
   schemaVersion: z.literal(1),
   cartridgeId: z.literal(STACK_408_CARTRIDGE_ID),
   currentRequirementKey: z.enum(STACK_408_REQUIREMENTS).nullable(),
-  probeHistory: z.array(probeHistoryEntrySchema).max(500),
+  probeHistory: z.array(probeHistoryEntrySchema).max(MAX_PROBE_HISTORY_ENTRIES),
 }).strict();
 export type Stack408State = z.infer<typeof stack408StateSchema>;
 
@@ -431,8 +433,18 @@ export function recordStack408ProbeAttempt(rawState: Stack408State, rawEvaluatio
   const requirementKey = STACK_408_REQUIREMENTS.find(key => key === evaluation.requirementKey);
   if (!requirementKey) return rawState;
   const probeHistory = [...state.probeHistory, { probeId: evaluation.probeId, requirementKey, outcome: evaluation.outcome,
-    diagnosis: evaluation.diagnosis, matchedHypothesisId: evaluation.matchedHypothesisId, at }].slice(-500);
+    diagnosis: evaluation.diagnosis, matchedHypothesisId: evaluation.matchedHypothesisId, at }];
   const next = { ...state, probeHistory };
+  let entriesToTrim = probeHistory.length - MAX_PROBE_HISTORY_ENTRIES;
+  if (entriesToTrim > 0) {
+    const checkpoints = new Set(STACK_408_REQUIREMENTS.map(key => latestAttempt(next, key)));
+    probeHistory.sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
+    next.probeHistory = probeHistory.filter(entry => {
+      if (entriesToTrim === 0 || checkpoints.has(entry)) return true;
+      entriesToTrim -= 1;
+      return false;
+    });
+  }
   return { ...next, currentRequirementKey: nextPendingRequirement(next) };
 }
 

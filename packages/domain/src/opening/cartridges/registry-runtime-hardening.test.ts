@@ -123,7 +123,7 @@ describe("runtime cartridge probe hardening", () => {
       (probe.input as Record<string, unknown>).nan = Number.POSITIVE_INFINITY;
     }],
   ] as const)("rejects a listed probe whose cloned data has %s", (_name, mutate) => {
-    const probe = createProbe();
+    const probe = createProbe(undefined, true);
     let runtime = false;
     let mutated = false;
     const candidate = createCandidate(probe, () => {
@@ -137,7 +137,9 @@ describe("runtime cartridge probe hardening", () => {
     const registered = registry.getCartridge(candidate.manifest.id)!;
     runtime = true;
 
-    expect(() => registered.getProbe(probe.probeId)).toThrow(TypeError);
+    expect(() => registered.getProbe(probe.probeId)).toThrow(
+      `Cartridge getProbe(${probe.probeId}) disagrees with listProbes()`,
+    );
   });
 
   it.each([
