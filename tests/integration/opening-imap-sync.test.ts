@@ -12,7 +12,7 @@ import { createOpeningSourceService } from "../../apps/web/src/features/opening/
 import { readOpeningSourceQuotaUsage } from "../../packages/database/src/repositories/opening-source-quota";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { startOpeningImapServer, type OpeningImapServer } from "./opening-imap-server";
-import { syncMailbox } from "../../apps/worker/src/connectors/imap-sync";
+import { syncMailbox, MAX_MAIL_BYTES } from "../../apps/worker/src/connectors/imap-sync";
 import { importIdentityKey } from "../../apps/worker/src/connectors/import-identity";
 
 let f: OpeningFixture;
@@ -433,5 +433,18 @@ describe("isolated standard IMAP sync gate", () => {
       sourceId,
     })).rejects.toMatchObject({ code: "CONFLICT" });
     expect(await f.sql`SELECT state FROM opening_connections WHERE id=${fixtureConnection.id}`).toMatchObject([{ state: "revoked" }]);
+  });
+
+  it("rejects oversized mail from wire RFC822.SIZE without publishing or buffering body", async () => {
+    server.mails.splice(0, server.mails.length, {
+      ...initialMail,
+      uid: 12,
+      advertisedSize: MAX_MAIL_BYTES + 1,
+    });
+    await expect(runSync()).rejects.toThrow("mail exceeds limit");
+    expect(server.activeConnectionCount()).toBe(0);
+    expect(objectByKey.size).toBe(0);
+    expect(await f.sql`SELECT 1 FROM opening_sources WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
+    expect(await f.sql`SELECT 1 FROM opening_import_cursors WHERE connection_id=${fixtureConnection.id}`).toHaveLength(0);
   });
 });

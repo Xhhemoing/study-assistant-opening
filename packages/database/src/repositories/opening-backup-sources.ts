@@ -45,9 +45,25 @@ export function readOpeningBackupSources(
     if (!owners.length) throw new OpeningBackupSourceError();
     const memoryDeletions = await readOpeningMemoryDeletions(tx, scope.workspaceId);
     const marks = await tx`
-      SELECT source_id, deleted_at, asset_deleted_at FROM opening_privacy_exclusions
-      WHERE workspace_id = ${scope.workspaceId}
-      ORDER BY source_id ASC`;
+      SELECT e.source_id, e.deleted_at, e.asset_deleted_at FROM opening_privacy_exclusions e
+      WHERE e.workspace_id = ${scope.workspaceId}
+        AND NOT (
+          e.source_id IS NOT NULL
+          AND e.id::text = overlay(e.source_id::text placing '8' from 15 for 1)
+          AND e.memory_id IS NULL
+          AND e.asset_deleted_at IS NOT NULL
+          AND cardinality(e.pending_object_keys) = 1
+          AND EXISTS (
+            SELECT 1 FROM opening_source_versions v
+            WHERE v.workspace_id = e.workspace_id
+              AND v.source_id = e.source_id
+              AND v.version = 0
+              AND v.availability = 'unavailable'
+              AND v.sha256 IS NULL
+              AND v.material_manifest IS NULL
+          )
+        )
+      ORDER BY e.source_id ASC`;
     const versions = await readOpeningBackupVersionRows(tx, scope);
     const rows = versions.filter(row => row.availability === "available");
     return {

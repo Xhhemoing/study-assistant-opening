@@ -7,6 +7,7 @@ import { simpleParser } from "mailparser";
 import { publishConnectorSource, type ConnectorSourceStorage } from "./publish-source";
 
 export const IMAP_BATCH_SIZE = 100;
+export const DEFAULT_IMAP_SYNC_DURATION_MS = 120_000;
 export const MAX_MAIL_BYTES = 25 * 1024 * 1024;
 export const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 export const MAX_TOTAL_ATTACHMENT_BYTES = 25 * 1024 * 1024;
@@ -75,7 +76,49 @@ export type ImapSyncDeps = {
   client: ImapClient;
   imports: OpeningImports;
   storage: ConnectorSourceStorage;
+  maxSyncDurationMs?: number;
+  signal?: AbortSignal;
+  now?: () => number;
 };
+
+async function nextWithDeadline<T>(
+  iterator: AsyncIterator<T>,
+  deadlineMs: number,
+  clock: () => number,
+  signal?: AbortSignal,
+): Promise<IteratorResult<T>> {
+  if (signal?.aborted) throw new Error("IMAP sync aborted during discovery");
+  const remainingMs = deadlineMs - clock();
+  if (remainingMs < 0) throw new Error("IMAP sync exceeded time budget during discovery");
+  if (!signal && remainingMs >= 2_147_483_647) {
+    return iterator.next();
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: (() => void) | undefined;
+  try {
+    const guard = new Promise<never>((_, reject) => {
+      if (signal) {
+        onAbort = () => reject(new Error("IMAP sync aborted during discovery"));
+        if (signal.aborted) {
+          onAbort();
+          return;
+        }
+        signal.addEventListener("abort", onAbort, { once: true });
+      }
+      if (remainingMs < 2_147_483_647) {
+        timer = setTimeout(
+          () => reject(new Error("IMAP sync exceeded time budget during discovery")),
+          remainingMs,
+        );
+        timer.unref?.();
+      }
+    });
+    return await Promise.race([iterator.next(), guard]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    if (signal && onAbort) signal.removeEventListener("abort", onAbort);
+  }
+}
 
 /** Bounded read-only IMAP adapter. Cursor advances only after commit succeeds. */
 export async function syncMailbox(deps: ImapSyncDeps): Promise<{
@@ -83,6 +126,22 @@ export async function syncMailbox(deps: ImapSyncDeps): Promise<{
   skipped: number;
   cursor: ImapCursor;
 }> {
+  const clock = deps.now ?? (() => Date.now());
+  const maxDurationMs = deps.maxSyncDurationMs ?? DEFAULT_IMAP_SYNC_DURATION_MS;
+  if (!Number.isFinite(maxDurationMs) || maxDurationMs <= 0) {
+    throw new Error("IMAP sync maxSyncDurationMs must be positive");
+  }
+  const deadlineMs = clock() + maxDurationMs;
+  const assertWithinBudget = (phase: "discovery" | "fetch") => {
+    if (deps.signal?.aborted) {
+      throw new Error(`IMAP sync aborted during ${phase}`);
+    }
+    if (clock() > deadlineMs) {
+      throw new Error(`IMAP sync exceeded time budget during ${phase}`);
+    }
+  };
+  assertWithinBudget("discovery");
+
   const opened = await deps.client.mailboxOpen(deps.folder, { readOnly: true });
   if (!opened) throw new Error(`folder is unavailable: ${deps.folder}`);
   const uidValidity = String(opened.uidValidity);
@@ -94,21 +153,41 @@ export async function syncMailbox(deps: ImapSyncDeps): Promise<{
   // is consumed. A mailbox can contain millions of eligible messages, so do
   // not retain and sort the entire discovery result in memory.
   const eligibleUids = new Set<number>();
+  const sizeByUid = new Map<number, number>();
   const stream = deps.client.fetch(
     { uid: `${cursor.lastUid + 1}:*` },
-    { uid: true, internalDate: true },
+    { uid: true, internalDate: true, size: true },
   );
-  for await (const message of stream) {
-    if (!Number.isSafeInteger(message.uid) || message.uid <= cursor.lastUid
-      || (message.internalDate && message.internalDate < deps.since)) continue;
-    if (eligibleUids.has(message.uid)) continue;
-    if (eligibleUids.size === IMAP_BATCH_SIZE) {
-      let highest = -1;
-      for (const uid of eligibleUids) highest = Math.max(highest, uid);
-      if (message.uid >= highest) continue;
-      eligibleUids.delete(highest);
+  const iterator = stream[Symbol.asyncIterator]();
+  let discoveryFinished = false;
+  try {
+    while (true) {
+      const step = await nextWithDeadline(iterator, deadlineMs, clock, deps.signal);
+      if (step.done) {
+        discoveryFinished = true;
+        break;
+      }
+      const message = step.value;
+      assertWithinBudget("discovery");
+      if (!Number.isSafeInteger(message.uid) || message.uid <= cursor.lastUid
+        || (message.internalDate && message.internalDate < deps.since)) continue;
+      if (eligibleUids.has(message.uid)) continue;
+      if (eligibleUids.size === IMAP_BATCH_SIZE) {
+        let highest = -1;
+        for (const uid of eligibleUids) highest = Math.max(highest, uid);
+        if (message.uid >= highest) continue;
+        eligibleUids.delete(highest);
+        sizeByUid.delete(highest);
+      }
+      eligibleUids.add(message.uid);
+      if (typeof message.size === "number" && Number.isFinite(message.size)) {
+        sizeByUid.set(message.uid, message.size);
+      }
     }
-    eligibleUids.add(message.uid);
+  } finally {
+    if (!discoveryFinished) {
+      await iterator.return?.(undefined).catch(() => undefined);
+    }
   }
   // The server can return UIDs in any order. Sorting the bounded set keeps
   // publication and cursor advancement ascending without an unbounded array.
@@ -117,6 +196,11 @@ export async function syncMailbox(deps: ImapSyncDeps): Promise<{
   let imported = 0;
   let skipped = 0;
   for (const uid of uids) {
+    assertWithinBudget("fetch");
+    const knownSize = sizeByUid.get(uid);
+    if (knownSize !== undefined && knownSize > MAX_MAIL_BYTES) {
+      throw new Error("mail exceeds limit");
+    }
     const identity = {
       connectionId: deps.connectionId,
       container: deps.folder,
@@ -125,7 +209,7 @@ export async function syncMailbox(deps: ImapSyncDeps): Promise<{
     };
     const fetched = await deps.client.fetchOne(
       String(uid),
-      { source: true },
+      { source: { start: 0, maxLength: MAX_MAIL_BYTES + 1 }, size: true },
       { uid: true },
     );
     if (fetched === false) {
@@ -134,6 +218,9 @@ export async function syncMailbox(deps: ImapSyncDeps): Promise<{
       continue;
     }
     if (!fetched?.source || fetched.uid !== uid) throw new Error("IMAP body response did not match the requested UID");
+    if (typeof fetched.size === "number" && fetched.size > MAX_MAIL_BYTES) {
+      throw new Error("mail exceeds limit");
+    }
     if (fetched.source.byteLength > MAX_MAIL_BYTES) throw new Error("mail exceeds limit");
     const parsed = await simpleParser(fetched.source, {
       skipImageLinks: true,

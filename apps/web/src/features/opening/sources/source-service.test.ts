@@ -836,4 +836,70 @@ describe("opening signed upload service", () => {
     expect(has(`final/${ticket.source.id}/v0`)).toBe(true);
   });
 
+  it("canonicalizes mixed-case source IDs on new writes while falling back cleanly for legacy mixed-case keys", async () => {
+    const { svc, sql, has, put } = setup();
+    const first = await svc.beginUpload(principal, {
+      name: "canon.pdf",
+      mime: "application/pdf",
+      bytes: pdfBytes.length,
+      sha256: pdfSha,
+    });
+    const upper = first.source.id.toUpperCase();
+    await svc.putStaging(principal, upper, {
+      contentType: "application/pdf",
+      bytes: pdfBytes,
+    });
+    expect(has(`staging/${first.source.id}`)).toBe(true);
+    expect(has(`staging/${upper}`)).toBe(false);
+    await svc.completeUpload(principal, upper);
+    expect(has(`staging/${first.source.id}`)).toBe(false);
+    expect(has(`final/${first.source.id}/v0`)).toBe(true);
+    expect(has(`final/${upper}/v0`)).toBe(false);
+    const dl = await svc.getDownloadUrl(principal, upper);
+    expect(dl.url).toContain(`final/${first.source.id}/v0`);
+    const dlStream = await svc.getDownloadStream(principal, upper);
+    await dlStream.body.cancel();
+
+    const streamed = await svc.beginUpload(principal, {
+      name: "stream.pdf",
+      mime: "application/pdf",
+      bytes: pdfBytes.length,
+      sha256: pdfSha,
+    });
+    const streamedUpper = streamed.source.id.toUpperCase();
+    await svc.putStagingStream(principal, streamedUpper, {
+      contentType: "application/pdf",
+      body: new ReadableStream<Uint8Array>({ start(c) { c.enqueue(pdfBytes); c.close(); } }),
+    });
+    expect(has(`staging/${streamed.source.id}`)).toBe(true);
+    expect(has(`staging/${streamedUpper}`)).toBe(false);
+
+    const legacy = await svc.beginUpload(principal, {
+      name: "legacy.pdf",
+      mime: "application/pdf",
+      bytes: pdfBytes.length,
+      sha256: pdfSha,
+    });
+    const legacyUpper = legacy.source.id.toUpperCase();
+    put(`staging/${legacyUpper}`, pdfBytes);
+    await svc.completeUpload(principal, legacyUpper);
+    expect(has(`staging/${legacyUpper}`)).toBe(false);
+    expect(has(`final/${legacy.source.id}/v0`)).toBe(true);
+    expect(has(`final/${legacyUpper}/v0`)).toBe(false);
+
+    const legacyDownload = await svc.beginUpload(principal, {
+      name: "legacy-dl.pdf",
+      mime: "application/pdf",
+      bytes: pdfBytes.length,
+      sha256: pdfSha,
+    });
+    const legacyDlUpper = legacyDownload.source.id.toUpperCase();
+    sql.sources.get(legacyDownload.source.id)!.upload_state = "uploaded";
+    put(`final/${legacyDlUpper}/v0`, pdfBytes);
+    const legacyDlResult = await svc.getDownloadUrl(principal, legacyDlUpper);
+    expect(legacyDlResult.url).toContain(`final/${legacyDlUpper}/v0`);
+    const legacyDlStream = await svc.getDownloadStream(principal, legacyDlUpper);
+    await legacyDlStream.body.cancel();
+  });
+
 });

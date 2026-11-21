@@ -27,13 +27,14 @@ function normalizeMime(value: string): string {
 
 function stagingUploadUrl(sourceId: string): string {
   const configured = process.env.PUBLIC_BASE_URL?.trim();
+  const canonicalId = sourceId.toLowerCase();
   if (!configured) {
     if (process.env.NODE_ENV === "production") {
       throw new Error("PUBLIC_BASE_URL is required in production to mint staging upload URLs");
     }
-    return new URL(`/api/opening/sources/${sourceId}/staging`, "http://127.0.0.1:3000").toString();
+    return new URL(`/api/opening/sources/${canonicalId}/staging`, "http://127.0.0.1:3000").toString();
   }
-  return new URL(`/api/opening/sources/${sourceId}/staging`, configured).toString();
+  return new URL(`/api/opening/sources/${canonicalId}/staging`, configured).toString();
 }
 
 function contentDispositionHeader(filename: string, kind: "attachment" | "inline"): string {
@@ -87,7 +88,7 @@ export function createOpeningSourceService(sql: Sql, storage: OpeningStorage = n
      */
     async getStagingPutTarget(p: Principal, id: string): Promise<{ bytes: number; mime: string; expiresAt: string }> {
       auth(p, "source.create");
-      const { source, expiresAt } = await sources.getPendingUpload(scopeOf(p), id);
+      const { source, expiresAt } = await sources.getPendingUpload(scopeOf(p), id.toLowerCase());
       return { bytes: source.bytes, mime: source.mime, expiresAt };
     },
     async putStagingStream(
@@ -101,7 +102,8 @@ export function createOpeningSourceService(sql: Sql, storage: OpeningStorage = n
       const cancelUpload = () => uploadAbort?.abort();
       try {
         auth(p, "source.create");
-        const { source, expiresAt } = await sources.getPendingUpload(scopeOf(p), id);
+        const sourceId = id.toLowerCase();
+        const { source, expiresAt } = await sources.getPendingUpload(scopeOf(p), sourceId);
         const requestMime = normalizeMime(input.contentType);
         if (!requestMime || requestMime !== normalizeMime(source.mime)) {
           throw new UploadPolicyError(`request mime ${requestMime || "(missing)"} != expected ${source.mime}`);
@@ -115,7 +117,7 @@ export function createOpeningSourceService(sql: Sql, storage: OpeningStorage = n
         deadline = setTimeout(cancelUpload, Math.min(STAGING_UPLOAD_LEASE_MS, remaining));
         deadline.unref();
         const body = validatedUploadStream(input.body, source, signal);
-        await storage.putObjectStream(storage.stagingKey(id), body, { mime: source.mime, bytes: source.bytes, signal });
+        await storage.putObjectStream(storage.stagingKey(sourceId), body, { mime: source.mime, bytes: source.bytes, signal });
       } catch (error) {
         // Also close the sender on ownership/MIME/expired-lease failures before
         // storage started; the HTTP route and internal callers share this path.
@@ -140,7 +142,8 @@ export function createOpeningSourceService(sql: Sql, storage: OpeningStorage = n
     ): Promise<{ ok: true }> {
       auth(p, "source.create");
       const scope = scopeOf(p);
-      const source = await sources.get(scope, id);
+      const sourceId = id.toLowerCase();
+      const source = await sources.get(scope, sourceId);
       if (source.uploadState !== "pending") {
         throw new OpeningSourceError("NOT_FOUND", "source is not pending");
       }
@@ -155,29 +158,52 @@ export function createOpeningSourceService(sql: Sql, storage: OpeningStorage = n
           `request bytes ${input.bytes.byteLength} != expected ${source.bytes}`,
         );
       }
-      await storage.putObject(storage.stagingKey(id), input.bytes, { mime: source.mime });
+      await storage.putObject(storage.stagingKey(sourceId), input.bytes, { mime: source.mime });
       return { ok: true };
     },
     async completeUpload(p: Principal, id: string): Promise<SourceRecord> {
-      auth(p, "source.complete"); const scope = scopeOf(p); const source = await sources.get(scope, id); if (source.uploadState === "uploaded") return source;
-      const key = storage.stagingKey(id); const head = await storage.headObject(key); if (!head.exists) throw new UploadPolicyError("upload not found; PUT to uploadUrl first");
-      const digest = await storage.streamDigest(key, source.bytes + 1); if (!magicMatchesMime(digest.firstBytes, source.mime)) throw new UploadPolicyError("stored object magic bytes do not match declared MIME");
-      const actual = { bytes: digest.bytes, sha256: digest.sha256, mime: source.mime }; validateStoredUpload(source, actual);
-      const done = await sources.completeWithParseJob(scope, id, { key: storage.finalKey(id, source.version), payload: { sourceId: id, sourceVersion: source.version }, privacyEpoch: await privacy.getWorkspaceEpoch(scope), actual,
-        beforeComplete: current => storage.copyStagingToFinal(key, storage.finalKey(id, current.version), { expectedEtag: head.etag }),
-      }); await storage.deleteObject(key); return done;
+      auth(p, "source.complete");
+      const scope = scopeOf(p);
+      const sourceId = id.toLowerCase();
+      const source = await sources.get(scope, sourceId);
+      if (source.uploadState === "uploaded") return source;
+      let key = storage.stagingKey(sourceId);
+      let head = await storage.headObject(key);
+      if (!head.exists && id !== sourceId) {
+        const legacyKey = storage.stagingKey(id);
+        const legacyHead = await storage.headObject(legacyKey);
+        if (legacyHead.exists) {
+          key = legacyKey;
+          head = legacyHead;
+        }
+      }
+      if (!head.exists) throw new UploadPolicyError("upload not found; PUT to uploadUrl first");
+      const digest = await storage.streamDigest(key, source.bytes + 1);
+      if (!magicMatchesMime(digest.firstBytes, source.mime)) throw new UploadPolicyError("stored object magic bytes do not match declared MIME");
+      const actual = { bytes: digest.bytes, sha256: digest.sha256, mime: source.mime };
+      validateStoredUpload(source, actual);
+      const done = await sources.completeWithParseJob(scope, sourceId, {
+        key: storage.finalKey(sourceId, source.version),
+        payload: { sourceId, sourceVersion: source.version },
+        privacyEpoch: await privacy.getWorkspaceEpoch(scope),
+        actual,
+        beforeComplete: current => storage.copyStagingToFinal(key, storage.finalKey(sourceId, current.version), { expectedEtag: head.etag }),
+      });
+      await storage.deleteObject(key);
+      return done;
     },
     async retryParse(p: Principal, id: string): Promise<SourceRecord> {
       auth(p, "source.complete");
       const scope = scopeOf(p);
-      const source = await sources.get(scope, id);
-      return sources.retryParseWithJob(scope, id, {
-        key: `parse:${id}:v${source.version}:retry:${randomUUID()}`,
-        payload: { sourceId: id, sourceVersion: source.version },
+      const sourceId = id.toLowerCase();
+      const source = await sources.get(scope, sourceId);
+      return sources.retryParseWithJob(scope, sourceId, {
+        key: `parse:${sourceId}:v${source.version}:retry:${randomUUID()}`,
+        payload: { sourceId, sourceVersion: source.version },
         privacyEpoch: await privacy.getWorkspaceEpoch(scope),
       });
     },
-    async getSourceImpact(p: Principal, id: string) { auth(p, "source.read"); return actions.impact(scopeOf(p), id); },
+    async getSourceImpact(p: Principal, id: string) { auth(p, "source.read"); return actions.impact(scopeOf(p), id.toLowerCase()); },
     async listSourceDeletions(p: Principal) { auth(p, "source.list"); return actions.listPending(scopeOf(p), now()); },
     async actOnSource(p: Principal, id: string, raw: SourceActionInput): Promise<SourceActionResult> {
       auth(p, "source.delete");
@@ -185,7 +211,7 @@ export function createOpeningSourceService(sql: Sql, storage: OpeningStorage = n
       const input = sourceActionInputSchema.parse(raw), scope = scopeOf(p);
       const result = input.action === "retry_cleanup"
         ? { deleted: true, cleanup: await actions.cleanup(scope, sourceId) }
-        : await actions.apply(scope, sourceId, input, storage, now());
+        : await actions.apply(scope, id, input, storage, now());
       if (input.action !== "retry_cleanup") {
         try {
           await createOpeningKnowledgeRepository(sql).reconcileCoursesForSource(scope, {
@@ -201,7 +227,8 @@ export function createOpeningSourceService(sql: Sql, storage: OpeningStorage = n
       for (const key of result.cleanup.keys) {
         try { await storage.deleteObject(key); }
         catch { continue; } // The receipt keeps this failed key visible and retryable.
-        if (key === storage.stagingKey(sourceId) && result.cleanup.notBefore && new Date(result.cleanup.notBefore) > now()) continue;
+        const isStagingKey = key === storage.stagingKey(sourceId) || (id !== sourceId && key === storage.stagingKey(id));
+        if (isStagingKey && result.cleanup.notBefore && new Date(result.cleanup.notBefore) > now()) continue;
         if (await actions.cleaned(scope, sourceId, key)) released = true;
       }
       let remaining: { keys: string[]; notBefore: string | null };
@@ -228,15 +255,20 @@ export function createOpeningSourceService(sql: Sql, storage: OpeningStorage = n
      */
     async getDownloadUrl(p: Principal, id: string, version?: number) {
       auth(p, "source.read");
-      const source = await sources.get(scopeOf(p), id);
+      const sourceId = id.toLowerCase();
+      const source = await sources.get(scopeOf(p), sourceId);
       if (source.uploadState !== "uploaded") throw new OpeningSourceError("CONFLICT", "source is not uploaded");
       const requested = version ?? source.version;
       if (!Number.isInteger(requested) || requested < 0 || requested > source.version) {
         throw new OpeningSourceError("NOT_FOUND", "cited source version is unavailable");
       }
-      const key = storage.finalKey(id, requested);
+      let key = storage.finalKey(sourceId, requested);
       if (!(await storage.objectExists(key))) {
-        throw new OpeningSourceError("NOT_FOUND", "cited source version is unavailable");
+        const legacyKey = id !== sourceId ? storage.finalKey(id, requested) : null;
+        if (!legacyKey || !(await storage.objectExists(legacyKey))) {
+          throw new OpeningSourceError("NOT_FOUND", "cited source version is unavailable");
+        }
+        key = legacyKey;
       }
       return {
         url: await storage.presignGet(key, { expiresInSeconds: 900, responseContentDisposition: contentDispositionAttachment(source.name), responseCacheControl: "private, no-store" }),
@@ -256,21 +288,27 @@ export function createOpeningSourceService(sql: Sql, storage: OpeningStorage = n
       options?: { disposition?: DownloadDisposition },
     ) {
       auth(p, "source.read");
-      const source = await sources.get(scopeOf(p), id);
+      const sourceId = id.toLowerCase();
+      const source = await sources.get(scopeOf(p), sourceId);
       if (source.uploadState !== "uploaded") throw new OpeningSourceError("CONFLICT", "source is not uploaded");
       const requested = version ?? source.version;
       if (!Number.isInteger(requested) || requested < 0 || requested > source.version) {
         throw new OpeningSourceError("NOT_FOUND", "cited source version is unavailable");
       }
       const publicSource = source.mime === "text/plain" && requested === 0
-        ? await readOpeningExamPublicSource(sql, scopeOf(p), id, requested) : null;
+        ? await readOpeningExamPublicSource(sql, scopeOf(p), sourceId, requested) : null;
+      let downloadKey = storage.finalKey(sourceId, requested);
+      if (!publicSource && id !== sourceId && !(await storage.objectExists(downloadKey))) {
+        const legacyKey = storage.finalKey(id, requested);
+        if (await storage.objectExists(legacyKey)) downloadKey = legacyKey;
+      }
       const object = publicSource ? {
         body: new ReadableStream<Uint8Array>({ start(controller) {
           controller.enqueue(new TextEncoder().encode(publicSource.text));
           controller.close();
         } }),
         contentType: "text/plain", contentLength: publicSource.bytes,
-      } : await storage.getObjectStream(storage.finalKey(id, requested));
+      } : await storage.getObjectStream(downloadKey);
       const contentType = source.mime || object.contentType;
       const disposition = resolveDownloadDisposition(contentType, options?.disposition ?? "attachment");
       return {
@@ -289,7 +327,7 @@ export function createOpeningSourceService(sql: Sql, storage: OpeningStorage = n
     async reissueUploadTicket(p: Principal, id: string): Promise<UploadTicket> {
       auth(p, "source.create");
       const scope = scopeOf(p);
-      return sources.issueUploadTicket(scope, id, async current => {
+      return sources.issueUploadTicket(scope, id.toLowerCase(), async current => {
         const uploadUrl = stagingUploadUrl(current.id);
         return { uploadUrl, expiresAt: new Date(now().getTime() + STAGING_UPLOAD_LEASE_MS).toISOString() };
       });

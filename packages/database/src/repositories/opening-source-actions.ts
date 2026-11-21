@@ -115,14 +115,23 @@ export function createOpeningSourceActionsRepository(sql: Sql) {
 
         const versions = await tx`SELECT version FROM opening_source_versions WHERE workspace_id=${scope.workspaceId} AND source_id=${canonicalId}
           UNION SELECT source_version AS version FROM opening_source_chunks WHERE source_id=${canonicalId}`;
-        const objectKeys = new Set([keys.stagingKey(canonicalId), keys.finalKey(canonicalId, Number(source.version)),
-          ...versions.map(row => keys.finalKey(canonicalId, Number(row.version)))]);
-        const images = await tx`SELECT image_object_key FROM opening_source_chunks
-          WHERE source_id=${canonicalId} AND image_object_key IS NOT NULL`;
+        const versionNumbers = [Number(source.version), ...versions.map(row => Number(row.version))];
+        const objectKeys = new Set([
+          keys.stagingKey(canonicalId),
+          ...versionNumbers.map(version => keys.finalKey(canonicalId, version)),
+          ...(id !== canonicalId
+            ? [keys.stagingKey(id), ...versionNumbers.map(version => keys.finalKey(id, version))]
+            : []),
+        ]);
         const ownPrefix = `opening/sources/${canonicalId}/`;
+        const images = await tx`SELECT image_object_key FROM opening_source_chunks
+          WHERE source_id=${canonicalId} AND image_object_key IS NOT NULL
+          UNION ALL SELECT key AS image_object_key FROM opening_jobs
+          WHERE workspace_id=${scope.workspaceId} AND kind IN ('parse', 'parse-media')
+            AND lower(payload->>'sourceId')=${canonicalId} AND lower(key) LIKE ${`${ownPrefix}v%`}`;
         for (const row of images) {
           const key = String(row.image_object_key);
-          if (!key.startsWith(ownPrefix) || key.includes("..")) {
+          if (!key.toLowerCase().startsWith(ownPrefix) || key.includes("..")) {
             throw new OpeningSourceError("CONFLICT", "A stored image has unverifiable ownership; deletion requires repair");
           }
           objectKeys.add(key);

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ImapCursor } from "@aistudy/contracts";
-import { mailToImportInput, nextImapCursor, syncMailbox, type ImapSyncDeps } from "./imap-sync";
+import { mailToImportInput, MAX_MAIL_BYTES, nextImapCursor, syncMailbox, type ImapSyncDeps } from "./imap-sync";
 import { publishConnectorSource } from "./publish-source";
 
 vi.mock("./publish-source", () => ({ publishConnectorSource: vi.fn() }));
@@ -87,5 +87,111 @@ describe("imap sync cursor and parser guards", () => {
     expect(input.bodyText).toBe("hello");
     expect(input.attachments[0]?.filename).toBe("evil.png");
     expect(input.attachments[0]?.size).toBe(3);
+  });
+
+  it("rejects oversized mail from discovery metadata before fetching its body", async () => {
+    const fetchOne = vi.fn();
+    const deps = {
+      scope: { workspaceId: "workspace", ownerUserId: "owner" },
+      connectionId: "connection",
+      connectionVersion: 1,
+      folder: "INBOX",
+      cursor: null,
+      since: new Date(0),
+      client: {
+        mailboxOpen: vi.fn(async () => ({ uidValidity: 42n })),
+        async *fetch() {
+          yield { uid: 15, size: MAX_MAIL_BYTES + 1 };
+        },
+        fetchOne,
+        logout: vi.fn(),
+      },
+      imports: { advanceImapCursor: vi.fn() },
+      storage: {},
+    } as unknown as ImapSyncDeps;
+
+    await expect(syncMailbox(deps)).rejects.toThrow("mail exceeds limit");
+    expect(fetchOne).not.toHaveBeenCalled();
+  });
+
+  it("requests a bounded partial body + size and rejects if server under-reported size in discovery", async () => {
+    const fetchOne = vi.fn(async (uid: string) => ({
+      uid: Number(uid),
+      seq: Number(uid),
+      size: MAX_MAIL_BYTES + 10,
+      source: Buffer.from("Subject: Truncated\r\n\r\nhi"),
+    }));
+    const deps = {
+      scope: { workspaceId: "workspace", ownerUserId: "owner" },
+      connectionId: "connection",
+      connectionVersion: 1,
+      folder: "INBOX",
+      cursor: null,
+      since: new Date(0),
+      client: {
+        mailboxOpen: vi.fn(async () => ({ uidValidity: 42n })),
+        async *fetch() {
+          yield { uid: 21, size: 128 };
+        },
+        fetchOne,
+        logout: vi.fn(),
+      },
+      imports: { advanceImapCursor: vi.fn() },
+      storage: {},
+    } as unknown as ImapSyncDeps;
+
+    await expect(syncMailbox(deps)).rejects.toThrow("mail exceeds limit");
+    expect(fetchOne).toHaveBeenCalledWith(
+      "21",
+      { source: { start: 0, maxLength: MAX_MAIL_BYTES + 1 }, size: true },
+      { uid: true },
+    );
+  });
+
+  it("stops discovery cleanly when elapsed sync time budget or signal expires", async () => {
+    let returned = false;
+    let tick = 1000;
+    const { deps } = mailbox([], null);
+    deps.now = () => tick;
+    deps.maxSyncDurationMs = 50;
+    deps.client.fetch = (() => ({
+      async *[Symbol.asyncIterator]() {
+        try {
+          tick += 10;
+          yield { uid: 1 };
+          tick += 100;
+          yield { uid: 2 };
+        } finally {
+          returned = true;
+        }
+      },
+    })) as unknown as ImapSyncDeps["client"]["fetch"];
+
+    await expect(syncMailbox(deps)).rejects.toThrow("IMAP sync exceeded time budget during discovery");
+    expect(returned).toBe(true);
+
+    let stalledReturned = false;
+    const stalled = mailbox([], null);
+    stalled.deps.maxSyncDurationMs = 15;
+    stalled.deps.client.fetch = (() => ({
+      [Symbol.asyncIterator]() {
+        return {
+          next: () => new Promise<IteratorResult<{ uid: number }>>(() => undefined),
+          return: async () => {
+            stalledReturned = true;
+            return { value: undefined, done: true as const };
+          },
+        };
+      },
+    })) as unknown as ImapSyncDeps["client"]["fetch"];
+
+    await expect(syncMailbox(stalled.deps)).rejects.toThrow("IMAP sync exceeded time budget during discovery");
+    expect(stalledReturned).toBe(true);
+
+    const ac = new AbortController();
+    ac.abort();
+    const aborted = mailbox([1], null);
+    aborted.deps.signal = ac.signal;
+    await expect(syncMailbox(aborted.deps)).rejects.toThrow("IMAP sync aborted during discovery");
   });
 });

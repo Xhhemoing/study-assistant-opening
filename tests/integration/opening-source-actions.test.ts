@@ -263,4 +263,62 @@ describe("source actions", () => {
       await f.sql`DELETE FROM opening_connections WHERE id=${connectionId}`;
     }
   });
+  it("cleans up legacy mixed-case staging, final, and job-recorded keys on source deletion", async () => {
+    const storage = new OpeningS3({
+      endpoint: process.env.S3_ENDPOINT!,
+      region: process.env.S3_REGION!,
+      bucket: process.env.S3_BUCKET!,
+      accessKeyId: process.env.S3_ACCESS_KEY_ID!,
+      secretAccessKey: process.env.S3_SECRET_ACCESS_KEY!,
+      forcePathStyle: true,
+    });
+    const service = createOpeningSourceService(f.sql, storage);
+    const putBytes = async (key: string) => {
+      const url = await storage.presignPut(key, { mime: "application/pdf", bytes: 4, expiresInSeconds: 60 });
+      const response = await fetch(url, { method: "PUT", headers: { "content-type": "application/pdf" }, body: Buffer.from("%PDF") });
+      expect(response.ok).toBe(true);
+      expect(await storage.objectExists(key)).toBe(true);
+    };
+
+    const a = await asset(), s = setup();
+    const upperId = a.sourceId.toUpperCase();
+    const mixedKeys = [
+      storage.stagingKey(a.sourceId),
+      storage.stagingKey(upperId),
+      storage.finalKey(a.sourceId, 2),
+      storage.finalKey(upperId, 2),
+    ];
+    try {
+      for (const key of mixedKeys) await putBytes(key);
+      expect(await service.actOnSource(s.principal, upperId, {
+        action: "delete",
+        expectedVersion: 2,
+        expectedMembershipIds: a.memberships.map(row => row.id),
+      })).toMatchObject({ sourceId: a.sourceId, deleted: true, cleanupPending: 0 });
+      for (const key of mixedKeys) expect(await storage.objectExists(key)).toBe(false);
+    } finally {
+      for (const key of mixedKeys) await storage.deleteObject(key);
+    }
+
+    const b = await asset();
+    const bUpper = b.sourceId.toUpperCase();
+    const legacyJobKey = storage.finalKey(bUpper, 0);
+    const bKeys = [storage.finalKey(b.sourceId, 2), legacyJobKey];
+    const legacyJobId = randomUUID();
+    try {
+      for (const key of bKeys) await putBytes(key);
+      await f.sql`INSERT INTO opening_jobs (id, workspace_id, owner_user_id, key, kind, payload, privacy_epoch)
+        VALUES (${legacyJobId}, ${f.scope.workspaceId}, ${f.scope.ownerUserId}, ${legacyJobKey}, 'parse',
+          ${f.sql.json({ sourceId: bUpper, sourceVersion: 0 } as never)}, 0)`;
+      expect(await service.actOnSource(s.principal, b.sourceId, {
+        action: "delete",
+        expectedVersion: 2,
+        expectedMembershipIds: b.memberships.map(row => row.id),
+      })).toMatchObject({ sourceId: b.sourceId, deleted: true, cleanupPending: 0 });
+      for (const key of bKeys) expect(await storage.objectExists(key)).toBe(false);
+    } finally {
+      await f.sql`DELETE FROM opening_jobs WHERE id=${legacyJobId}`;
+      for (const key of bKeys) await storage.deleteObject(key);
+    }
+  });
 });

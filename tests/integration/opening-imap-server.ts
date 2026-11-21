@@ -5,6 +5,7 @@ export type OpeningImapMail = {
   uid: number;
   internalDate?: Date;
   source: string;
+  advertisedSize?: number;
 };
 
 export type OpeningImapServer = {
@@ -93,10 +94,30 @@ export async function startOpeningImapServer(inputMails: OpeningImapMail[]): Pro
             const sequence = sequenceByUid.get(mail.uid);
             const date = (mail.internalDate ?? new Date("2026-01-02T03:04:05.000Z")).toUTCString().replace("GMT", "+0000");
             const fields = match[3]!;
-            const metadata = `UID ${mail.uid}` + (/\bINTERNALDATE\b/i.test(fields) ? ` INTERNALDATE "${date}"` : "");
-            const body = /BODY(?:\.PEEK)?\[\]/i.test(fields)
-              ? ` BODY[] {${Buffer.byteLength(mail.source)}}\r\n${mail.source}` : "";
-            send(`* ${sequence} FETCH (${metadata}${body})`);
+            const rawSource = Buffer.from(mail.source, "utf8");
+            const advertisedSize = mail.advertisedSize ?? rawSource.byteLength;
+            const metadata = `UID ${mail.uid}`
+              + (/\bINTERNALDATE\b/i.test(fields) ? ` INTERNALDATE "${date}"` : "")
+              + (/\bRFC822\.SIZE\b/i.test(fields) ? ` RFC822.SIZE ${advertisedSize}` : "");
+            const partialMatch = /BODY(?:\.PEEK)?\[\]<(\d+)\.(\d+)>/i.exec(fields);
+            if (partialMatch) {
+              const startByte = Number(partialMatch[1]);
+              const maxLength = Number(partialMatch[2]);
+              const slice = rawSource.subarray(startByte, startByte + maxLength);
+              socket.write(Buffer.concat([
+                Buffer.from(`* ${sequence} FETCH (${metadata} BODY[]<${startByte}> {${slice.byteLength}}\r\n`, "utf8"),
+                slice,
+                Buffer.from(")\r\n", "utf8"),
+              ]));
+            } else if (/BODY(?:\.PEEK)?\[\]/i.test(fields)) {
+              socket.write(Buffer.concat([
+                Buffer.from(`* ${sequence} FETCH (${metadata} BODY[] {${rawSource.byteLength}}\r\n`, "utf8"),
+                rawSource,
+                Buffer.from(")\r\n", "utf8"),
+              ]));
+            } else {
+              send(`* ${sequence} FETCH (${metadata})`);
+            }
           }
           tagged(tag, "OK FETCH completed");
         } else if (verb === "LOGOUT") {
