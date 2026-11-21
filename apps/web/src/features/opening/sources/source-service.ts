@@ -6,9 +6,11 @@ import {
   createOpeningPrivacyRepository,
   createOpeningKnowledgeRepository,
   readOpeningExamPublicSource,
+  resolveLegacySourceFinalKey,
   OpeningSourceError,
   OpeningS3,
   magicMatchesMime,
+  type OpeningScope,
   type OpeningStorage,
   type OpeningSourceRepository,
 } from "@aistudy/database";
@@ -72,6 +74,35 @@ export function createOpeningSourceService(sql: Sql, storage: OpeningStorage = n
   const now = options.now ?? (() => new Date());
   const scopeOf = (p: Principal) => ({ workspaceId: boundWorkspaceId(p), ownerUserId: p.userId });
   const auth = (p: Principal, action: string) => assertAuthorized(p, action as never, { type: "workspace", workspaceId: boundWorkspaceId(p) });
+  async function resolveReadableFinalKey(
+    scope: OpeningScope,
+    rawId: string,
+    sourceId: string,
+    version: number,
+    requireExisting: boolean,
+  ): Promise<string> {
+    const canonicalKey = storage.finalKey(sourceId, version);
+    if (typeof storage.objectExists !== "function") {
+      return canonicalKey;
+    }
+    if (await storage.objectExists(canonicalKey)) {
+      return canonicalKey;
+    }
+    if (rawId !== sourceId) {
+      const rawKey = storage.finalKey(rawId, version);
+      if (await storage.objectExists(rawKey)) return rawKey;
+    }
+    const recordedKey = await (sources.resolveLegacyFinalKey
+      ? sources.resolveLegacyFinalKey(scope, sourceId, canonicalKey)
+      : resolveLegacySourceFinalKey(sql, scope, sourceId, canonicalKey));
+    if (recordedKey && await storage.objectExists(recordedKey)) {
+      return recordedKey;
+    }
+    if (requireExisting) {
+      throw new OpeningSourceError("NOT_FOUND", "cited source version is unavailable");
+    }
+    return canonicalKey;
+  }
   return {
     async listSources(p: Principal): Promise<SourceRecord[]> { auth(p, "source.list"); return sources.list(scopeOf(p)); },
     async beginUpload(p: Principal, input: UploadInput): Promise<UploadTicket> {
@@ -197,9 +228,15 @@ export function createOpeningSourceService(sql: Sql, storage: OpeningStorage = n
       const scope = scopeOf(p);
       const sourceId = id.toLowerCase();
       const source = await sources.get(scope, sourceId);
+      const canonicalFinalKey = storage.finalKey(sourceId, source.version);
+      const objectKey = await resolveReadableFinalKey(scope, id, sourceId, source.version, false);
       return sources.retryParseWithJob(scope, sourceId, {
         key: `parse:${sourceId}:v${source.version}:retry:${randomUUID()}`,
-        payload: { sourceId, sourceVersion: source.version },
+        payload: {
+          sourceId,
+          sourceVersion: source.version,
+          ...(objectKey !== canonicalFinalKey ? { objectKey } : {}),
+        },
         privacyEpoch: await privacy.getWorkspaceEpoch(scope),
       });
     },
@@ -227,7 +264,7 @@ export function createOpeningSourceService(sql: Sql, storage: OpeningStorage = n
       for (const key of result.cleanup.keys) {
         try { await storage.deleteObject(key); }
         catch { continue; } // The receipt keeps this failed key visible and retryable.
-        const isStagingKey = key === storage.stagingKey(sourceId) || (id !== sourceId && key === storage.stagingKey(id));
+        const isStagingKey = key.toLowerCase() === storage.stagingKey(sourceId).toLowerCase();
         if (isStagingKey && result.cleanup.notBefore && new Date(result.cleanup.notBefore) > now()) continue;
         if (await actions.cleaned(scope, sourceId, key)) released = true;
       }
@@ -255,21 +292,15 @@ export function createOpeningSourceService(sql: Sql, storage: OpeningStorage = n
      */
     async getDownloadUrl(p: Principal, id: string, version?: number) {
       auth(p, "source.read");
+      const scope = scopeOf(p);
       const sourceId = id.toLowerCase();
-      const source = await sources.get(scopeOf(p), sourceId);
+      const source = await sources.get(scope, sourceId);
       if (source.uploadState !== "uploaded") throw new OpeningSourceError("CONFLICT", "source is not uploaded");
       const requested = version ?? source.version;
       if (!Number.isInteger(requested) || requested < 0 || requested > source.version) {
         throw new OpeningSourceError("NOT_FOUND", "cited source version is unavailable");
       }
-      let key = storage.finalKey(sourceId, requested);
-      if (!(await storage.objectExists(key))) {
-        const legacyKey = id !== sourceId ? storage.finalKey(id, requested) : null;
-        if (!legacyKey || !(await storage.objectExists(legacyKey))) {
-          throw new OpeningSourceError("NOT_FOUND", "cited source version is unavailable");
-        }
-        key = legacyKey;
-      }
+      const key = await resolveReadableFinalKey(scope, id, sourceId, requested, true);
       return {
         url: await storage.presignGet(key, { expiresInSeconds: 900, responseContentDisposition: contentDispositionAttachment(source.name), responseCacheControl: "private, no-store" }),
         expiresAt: new Date(Date.now() + 900000).toISOString(),
@@ -288,27 +319,37 @@ export function createOpeningSourceService(sql: Sql, storage: OpeningStorage = n
       options?: { disposition?: DownloadDisposition },
     ) {
       auth(p, "source.read");
+      const scope = scopeOf(p);
       const sourceId = id.toLowerCase();
-      const source = await sources.get(scopeOf(p), sourceId);
+      const source = await sources.get(scope, sourceId);
       if (source.uploadState !== "uploaded") throw new OpeningSourceError("CONFLICT", "source is not uploaded");
       const requested = version ?? source.version;
       if (!Number.isInteger(requested) || requested < 0 || requested > source.version) {
         throw new OpeningSourceError("NOT_FOUND", "cited source version is unavailable");
       }
       const publicSource = source.mime === "text/plain" && requested === 0
-        ? await readOpeningExamPublicSource(sql, scopeOf(p), sourceId, requested) : null;
-      let downloadKey = storage.finalKey(sourceId, requested);
-      if (!publicSource && id !== sourceId && !(await storage.objectExists(downloadKey))) {
-        const legacyKey = storage.finalKey(id, requested);
-        if (await storage.objectExists(legacyKey)) downloadKey = legacyKey;
-      }
+        ? await readOpeningExamPublicSource(sql, scope, sourceId, requested) : null;
+      const downloadKey = !publicSource
+        ? await resolveReadableFinalKey(scope, id, sourceId, requested, false)
+        : "";
       const object = publicSource ? {
         body: new ReadableStream<Uint8Array>({ start(controller) {
           controller.enqueue(new TextEncoder().encode(publicSource.text));
           controller.close();
         } }),
         contentType: "text/plain", contentLength: publicSource.bytes,
-      } : await storage.getObjectStream(downloadKey);
+      } : await storage.getObjectStream(downloadKey).catch(async (error) => {
+        if (typeof storage.objectExists === "function") throw error;
+        const rawKey = id !== sourceId ? storage.finalKey(id, requested) : null;
+        if (rawKey) {
+          try { return await storage.getObjectStream(rawKey); } catch { /* fall through */ }
+        }
+        const recordedKey = await (sources.resolveLegacyFinalKey
+          ? sources.resolveLegacyFinalKey(scope, sourceId, downloadKey)
+          : resolveLegacySourceFinalKey(sql, scope, sourceId, downloadKey));
+        if (recordedKey) return storage.getObjectStream(recordedKey);
+        throw error;
+      });
       const contentType = source.mime || object.contentType;
       const disposition = resolveDownloadDisposition(contentType, options?.disposition ?? "attachment");
       return {

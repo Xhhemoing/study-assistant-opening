@@ -194,4 +194,30 @@ describe("imap sync cursor and parser guards", () => {
     aborted.deps.signal = ac.signal;
     await expect(syncMailbox(aborted.deps)).rejects.toThrow("IMAP sync aborted during discovery");
   });
+
+  it("invokes onDeadlineAbort and does not hang behind a stalled iterator.return()", async () => {
+    const onDeadlineAbort = vi.fn();
+    let returnCalled = false;
+    const stalled = mailbox([], null);
+    stalled.deps.maxSyncDurationMs = 15;
+    stalled.deps.teardownTimeoutMs = 25;
+    stalled.deps.onDeadlineAbort = onDeadlineAbort;
+    stalled.deps.client.fetch = (() => ({
+      [Symbol.asyncIterator]() {
+        return {
+          next: () => new Promise<IteratorResult<{ uid: number }>>(() => undefined),
+          return: () => {
+            returnCalled = true;
+            return new Promise<IteratorResult<{ uid: number }>>(() => undefined);
+          },
+        };
+      },
+    })) as unknown as ImapSyncDeps["client"]["fetch"];
+
+    const startedAt = Date.now();
+    await expect(syncMailbox(stalled.deps)).rejects.toThrow("IMAP sync exceeded time budget during discovery");
+    expect(Date.now() - startedAt).toBeLessThan(400);
+    expect(returnCalled).toBe(true);
+    expect(onDeadlineAbort).toHaveBeenCalledOnce();
+  });
 });

@@ -630,4 +630,73 @@ describe("parse source handler", () => {
     expect(d.runs()).toBe(0);
     expect(d.replaceInput()).toBeUndefined();
   });
+
+  it("falls back to verified historical mixed-case object keys on parse and retry when canonical finalKey is absent", async () => {
+    const hexSourceId = "00000000-0000-4000-8000-0000000000ab";
+    const mixedId = hexSourceId.toUpperCase();
+    const canonicalKey = `opening/sources/${hexSourceId}/v7`;
+    const legacyKey = `opening/sources/${mixedId}/v7`;
+    const textBytes = Buffer.from("Hello legacy markdown");
+    const presignedKeys: string[] = [];
+    const hexSource = source({ id: hexSourceId, mime: "text/plain", bytes: textBytes.byteLength, sha256: digest(textBytes) });
+    const d = await deps({ source: hexSource });
+
+    const resolveLegacyFinalKey = vi.fn(async () => legacyKey);
+    const handler = createParseSourceHandler({
+      sources: {
+        get: async () => hexSource,
+        markParseState: async () => hexSource,
+        resolveLegacyFinalKey,
+      },
+      chunks: {
+        replaceChunks: async () => {},
+        replacePdfChunks: async () => {},
+        listChunksAtVersion: async () => [],
+      },
+      storage: {
+        finalKey: (id, version) => `opening/sources/${id}/v${version}`,
+        objectExists: async (key) => key === legacyKey,
+        presignGet: async (key) => {
+          presignedKeys.push(key);
+          if (key === legacyKey) return `data:text/plain;base64,${textBytes.toString("base64")}`;
+          return "data:text/plain,not-found";
+        },
+      },
+      runner: async () => ({ exitCode: 0, stdout: "" }),
+      tempDir: d.tempDir,
+    });
+
+    await expect(handler({ ...job, key: `parse:${hexSourceId}:v7:retry:abc` }, { sourceId: hexSourceId })).resolves.toEqual({ pages: 1 });
+    expect(resolveLegacyFinalKey).toHaveBeenCalledWith(scope, hexSourceId, canonicalKey);
+    expect(presignedKeys).toEqual([legacyKey]);
+
+    presignedKeys.length = 0;
+    const rejectingHandler = createParseSourceHandler({
+      sources: {
+        get: async () => hexSource,
+        markParseState: async () => hexSource,
+        resolveLegacyFinalKey: vi.fn(async () => null),
+      },
+      chunks: {
+        replaceChunks: async () => {},
+        replacePdfChunks: async () => {},
+        listChunksAtVersion: async () => [],
+      },
+      storage: {
+        finalKey: (id, version) => `opening/sources/${id}/v${version}`,
+        objectExists: async () => false,
+        presignGet: async (key) => {
+          presignedKeys.push(key);
+          throw new Error("missing object in storage");
+        },
+      },
+      runner: async () => ({ exitCode: 0, stdout: "" }),
+      tempDir: d.tempDir,
+    });
+    await expect(rejectingHandler({ ...job, key: `parse:${hexSourceId}:v7:retry:def` }, {
+      sourceId: hexSourceId,
+      objectKey: `opening/sources/other-source/../${mixedId}/v7`,
+    })).rejects.toThrow("missing object in storage");
+    expect(presignedKeys).toEqual([canonicalKey]);
+  });
 });

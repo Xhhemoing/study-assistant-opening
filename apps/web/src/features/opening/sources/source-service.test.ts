@@ -902,4 +902,100 @@ describe("opening signed upload service", () => {
     await legacyDlStream.body.cancel();
   });
 
+  it("resolves historical mixed-case opening_jobs.key on normal lowercase downloads and retryParse, and keeps notBefore on lowercase retry_cleanup", async () => {
+    const { sql, storage, objects } = (() => {
+      const fake = makeFakeSql();
+      const s3 = makeFakeStorage();
+      const baseStorage: OpeningStorage = {
+        ...s3.storage,
+        stagingKey: (id) => `opening/staging/${id}`,
+        finalKey: (id, version) => `opening/sources/${id}/v${version}`,
+      };
+      return { sql: fake, storage: baseStorage, objects: s3.objects };
+    })();
+    const jobs: { key: string; kind: string; payload: { sourceId: string; objectKey?: string } }[] = [];
+    let pendingKeys = ["opening/staging/00000000-0000-4000-8000-0000000000ef"];
+    let cleanedCalls = 0;
+    const futureNotBefore = new Date("2030-01-01T01:00:00.000Z");
+    const wrappedSql = Object.assign(((parts: TemplateStringsArray, ...values: unknown[]) => {
+      const query = parts.join("?").replace(/\s+/g, " ").trim();
+      if (query === "" || query === "FOR UPDATE") return query;
+      if (query.startsWith("INSERT INTO opening_jobs")) {
+        const key = String(values[3]);
+        const kind = String(values[4]);
+        const payload = values[5] as { sourceId: string; objectKey?: string };
+        jobs.push({ key, kind, payload });
+      }
+      if (query.startsWith("SELECT j.key FROM opening_jobs j")) {
+        const canonicalLower = String(values[3]).toLowerCase();
+        const canonicalExact = String(values[4]);
+        const matched = jobs.find(j => j.key.toLowerCase() === canonicalLower && j.key !== canonicalExact);
+        return matched ? [{ key: matched.key }] : [];
+      }
+      if (query.startsWith("SELECT id, source_id, pending_object_keys, cleanup_not_before FROM opening_privacy_exclusions")) {
+        return pendingKeys.length
+          ? [{
+              id: "00000000-0000-4000-8000-000000000088",
+              workspace_id: principal.workspaceId,
+              source_id: "00000000-0000-4000-8000-0000000000ef",
+              asset_deleted_at: new Date("2030-01-01T00:00:00.000Z"),
+              pending_object_keys: pendingKeys,
+              cleanup_not_before: futureNotBefore,
+            }]
+          : [];
+      }
+      if (query.startsWith("SELECT pg_try_advisory_xact_lock")) {
+        return [{ acquired: true }];
+      }
+      if (query.startsWith("UPDATE opening_privacy_exclusions SET pending_object_keys=array_remove")) {
+        cleanedCalls += 1;
+        pendingKeys = pendingKeys.filter(k => k !== values[0]);
+        return [];
+      }
+      return (sql as unknown as (p: TemplateStringsArray, ...v: unknown[]) => unknown)(parts, ...values);
+    }) as unknown as typeof sql, {
+      json: sql.json,
+      begin: (cb: (tx: Sql) => Promise<unknown>) => cb(wrappedSql as unknown as Sql),
+    });
+
+    const fixedNow = new Date("2030-01-01T00:10:00.000Z");
+    const svc = createOpeningSourceService(wrappedSql as unknown as Sql, storage, { now: () => fixedNow });
+    const ticket = await svc.beginUpload(principal, {
+      name: "legacy-inbox.pdf",
+      mime: "application/pdf",
+      bytes: pdfBytes.length,
+      sha256: pdfSha,
+    });
+    const canonicalId = ticket.source.id;
+    const upperId = canonicalId.toUpperCase();
+    const legacyFinalKey = storage.finalKey(upperId, 0);
+    objects.set(legacyFinalKey, { bytes: pdfBytes, etag: "etag-legacy" });
+    sql.sources.get(canonicalId)!.upload_state = "uploaded";
+    sql.sources.get(canonicalId)!.parse_state = "failed";
+    jobs.push({ key: legacyFinalKey, kind: "parse", payload: { sourceId: upperId } });
+
+    const dl = await svc.getDownloadUrl(principal, canonicalId);
+    expect(dl.url).toContain(legacyFinalKey);
+    const stream = await svc.getDownloadStream(principal, canonicalId);
+    await stream.body.cancel();
+
+    const retried = await svc.retryParse(principal, canonicalId);
+    expect(retried.parseState).toBe("queued");
+    expect(jobs.at(-1)?.payload.objectKey).toBe(legacyFinalKey);
+
+    const upperStagingKey = "opening/staging/" + "00000000-0000-4000-8000-0000000000ef".toUpperCase();
+    pendingKeys = [upperStagingKey];
+    objects.set(upperStagingKey, { bytes: pdfBytes, etag: "etag-staging" });
+    const retryResult = await svc.actOnSource(principal, "00000000-0000-4000-8000-0000000000ef", {
+      action: "retry_cleanup",
+    });
+    expect(objects.has(upperStagingKey)).toBe(false);
+    expect(cleanedCalls).toBe(0);
+    expect(retryResult).toMatchObject({
+      deleted: true,
+      cleanupPending: 1,
+      retryAfter: futureNotBefore.toISOString(),
+    });
+  });
+
 });

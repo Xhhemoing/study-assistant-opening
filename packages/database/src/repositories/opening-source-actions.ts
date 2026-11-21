@@ -123,7 +123,8 @@ export function createOpeningSourceActionsRepository(sql: Sql) {
             ? [keys.stagingKey(id), ...versionNumbers.map(version => keys.finalKey(id, version))]
             : []),
         ]);
-        const ownPrefix = `opening/sources/${canonicalId}/`;
+        const sourcePrefix = "opening/sources/";
+        const ownPrefix = `${sourcePrefix}${canonicalId}/`;
         const images = await tx`SELECT image_object_key FROM opening_source_chunks
           WHERE source_id=${canonicalId} AND image_object_key IS NOT NULL
           UNION ALL SELECT key AS image_object_key FROM opening_jobs
@@ -135,6 +136,13 @@ export function createOpeningSourceActionsRepository(sql: Sql) {
             throw new OpeningSourceError("CONFLICT", "A stored image has unverifiable ownership; deletion requires repair");
           }
           objectKeys.add(key);
+          const recordedId = key.slice(sourcePrefix.length, sourcePrefix.length + canonicalId.length);
+          if (recordedId !== canonicalId) {
+            objectKeys.add(keys.stagingKey(recordedId));
+            for (const version of versionNumbers) {
+              objectKeys.add(keys.finalKey(recordedId, version));
+            }
+          }
         }
         // Legacy rows predate lease tracking: wait one complete signing lifetime from this deletion.
         const notBefore = source.upload_url_expires_at ? new Date(source.upload_url_expires_at) : new Date(now.getTime() + 900_000);

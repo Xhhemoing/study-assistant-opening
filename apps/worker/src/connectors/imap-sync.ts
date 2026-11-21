@@ -8,6 +8,7 @@ import { publishConnectorSource, type ConnectorSourceStorage } from "./publish-s
 
 export const IMAP_BATCH_SIZE = 100;
 export const DEFAULT_IMAP_SYNC_DURATION_MS = 120_000;
+export const DEFAULT_IMAP_TEARDOWN_WAIT_MS = 500;
 export const MAX_MAIL_BYTES = 25 * 1024 * 1024;
 export const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 export const MAX_TOTAL_ATTACHMENT_BYTES = 25 * 1024 * 1024;
@@ -77,28 +78,42 @@ export type ImapSyncDeps = {
   imports: OpeningImports;
   storage: ConnectorSourceStorage;
   maxSyncDurationMs?: number;
+  teardownTimeoutMs?: number;
   signal?: AbortSignal;
   now?: () => number;
+  onDeadlineAbort?: () => void;
 };
 
 async function nextWithDeadline<T>(
   iterator: AsyncIterator<T>,
   deadlineMs: number,
   clock: () => number,
-  signal?: AbortSignal,
+  signal: AbortSignal | undefined,
+  onDeadlineAbort: () => void,
 ): Promise<IteratorResult<T>> {
-  if (signal?.aborted) throw new Error("IMAP sync aborted during discovery");
-  const remainingMs = deadlineMs - clock();
-  if (remainingMs < 0) throw new Error("IMAP sync exceeded time budget during discovery");
-  if (!signal && remainingMs >= 2_147_483_647) {
-    return iterator.next();
+  if (signal?.aborted) {
+    onDeadlineAbort();
+    throw new Error("IMAP sync aborted during discovery");
   }
+  const remainingMs = deadlineMs - clock();
+  if (remainingMs < 0) {
+    onDeadlineAbort();
+    throw new Error("IMAP sync exceeded time budget during discovery");
+  }
+  const nextPromise = Promise.resolve(iterator.next());
+  if (!signal && remainingMs >= 2_147_483_647) {
+    return nextPromise;
+  }
+  void nextPromise.catch(() => undefined);
   let timer: ReturnType<typeof setTimeout> | undefined;
   let onAbort: (() => void) | undefined;
   try {
     const guard = new Promise<never>((_, reject) => {
       if (signal) {
-        onAbort = () => reject(new Error("IMAP sync aborted during discovery"));
+        onAbort = () => {
+          onDeadlineAbort();
+          reject(new Error("IMAP sync aborted during discovery"));
+        };
         if (signal.aborted) {
           onAbort();
           return;
@@ -106,14 +121,14 @@ async function nextWithDeadline<T>(
         signal.addEventListener("abort", onAbort, { once: true });
       }
       if (remainingMs < 2_147_483_647) {
-        timer = setTimeout(
-          () => reject(new Error("IMAP sync exceeded time budget during discovery")),
-          remainingMs,
-        );
+        timer = setTimeout(() => {
+          onDeadlineAbort();
+          reject(new Error("IMAP sync exceeded time budget during discovery"));
+        }, remainingMs);
         timer.unref?.();
       }
     });
-    return await Promise.race([iterator.next(), guard]);
+    return await Promise.race([nextPromise, guard]);
   } finally {
     if (timer !== undefined) clearTimeout(timer);
     if (signal && onAbort) signal.removeEventListener("abort", onAbort);
@@ -131,12 +146,28 @@ export async function syncMailbox(deps: ImapSyncDeps): Promise<{
   if (!Number.isFinite(maxDurationMs) || maxDurationMs <= 0) {
     throw new Error("IMAP sync maxSyncDurationMs must be positive");
   }
+  const teardownWaitMs = deps.teardownTimeoutMs ?? DEFAULT_IMAP_TEARDOWN_WAIT_MS;
+  if (!Number.isFinite(teardownWaitMs) || teardownWaitMs <= 0) {
+    throw new Error("IMAP sync teardownTimeoutMs must be positive");
+  }
   const deadlineMs = clock() + maxDurationMs;
+  let abortHookInvoked = false;
+  const invokeDeadlineAbort = () => {
+    if (abortHookInvoked) return;
+    abortHookInvoked = true;
+    try {
+      deps.onDeadlineAbort?.();
+    } catch {
+      // Teardown hook errors must not mask timeout or abort errors.
+    }
+  };
   const assertWithinBudget = (phase: "discovery" | "fetch") => {
     if (deps.signal?.aborted) {
+      invokeDeadlineAbort();
       throw new Error(`IMAP sync aborted during ${phase}`);
     }
     if (clock() > deadlineMs) {
+      invokeDeadlineAbort();
       throw new Error(`IMAP sync exceeded time budget during ${phase}`);
     }
   };
@@ -162,7 +193,7 @@ export async function syncMailbox(deps: ImapSyncDeps): Promise<{
   let discoveryFinished = false;
   try {
     while (true) {
-      const step = await nextWithDeadline(iterator, deadlineMs, clock, deps.signal);
+      const step = await nextWithDeadline(iterator, deadlineMs, clock, deps.signal, invokeDeadlineAbort);
       if (step.done) {
         discoveryFinished = true;
         break;
@@ -185,8 +216,18 @@ export async function syncMailbox(deps: ImapSyncDeps): Promise<{
       }
     }
   } finally {
-    if (!discoveryFinished) {
-      await iterator.return?.(undefined).catch(() => undefined);
+    if (!discoveryFinished && typeof iterator.return === "function") {
+      const returnPromise = Promise.resolve(iterator.return(undefined)).catch(() => undefined);
+      let teardownTimer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const timeout = new Promise<void>((resolve) => {
+          teardownTimer = setTimeout(resolve, teardownWaitMs);
+          teardownTimer.unref?.();
+        });
+        await Promise.race([returnPromise, timeout]);
+      } finally {
+        if (teardownTimer !== undefined) clearTimeout(teardownTimer);
+      }
     }
   }
   // The server can return UIDs in any order. Sorting the bounded set keeps

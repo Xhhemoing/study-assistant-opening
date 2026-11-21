@@ -58,6 +58,7 @@ export type OpeningSourceRepository = {
   ): Promise<SourceRecord>;
   completeWithParseJob(scope: OpeningScope, id: string, input: { key: string; payload: unknown; privacyEpoch: number; actual: { bytes: number; sha256: string; mime: string }; beforeComplete?: (current: SourceRecord) => Promise<void> }): Promise<SourceRecord>;
   retryParseWithJob(scope: OpeningScope, id: string, input: { key: string; payload: unknown; privacyEpoch: number }): Promise<SourceRecord>;
+  resolveLegacyFinalKey?(scope: OpeningScope, sourceId: string, canonicalFinalKey: string): Promise<string | null>;
   list(scope: OpeningScope): Promise<SourceRecord[]>;
   markParseState(scope: OpeningScope, id: string, state: SourceRecord["parseState"], error?: unknown): Promise<SourceRecord>;
   /**
@@ -199,6 +200,41 @@ export async function sweepExpiredPendingUploadsAll(
   options: SweepExpiredPendingUploadsOptions = {},
 ): Promise<SweptPendingUpload[]> {
   return sweepExpiredPendingUploadsQuery(sql, {}, options);
+}
+
+/**
+ * Resolves a historical mixed-case object key recorded on an initial parse job
+ * when the canonical lowercase finalKey object does not exist in storage.
+ */
+export async function resolveLegacySourceFinalKey(
+  sql: Sql,
+  scope: OpeningScope,
+  sourceId: string,
+  canonicalFinalKey: string,
+): Promise<string | null> {
+  const canonicalId = sourceId.toLowerCase();
+  const ownPrefix = `opening/sources/${canonicalId}/`;
+  const canonicalLower = canonicalFinalKey.toLowerCase();
+  if (!canonicalLower.startsWith(ownPrefix) || canonicalFinalKey.includes("..")) {
+    return null;
+  }
+  const rows = await sql`
+    SELECT j.key FROM opening_jobs j
+    JOIN workspaces w ON w.id = j.workspace_id
+    WHERE j.workspace_id = ${scope.workspaceId}
+      AND w.owner_user_id = ${scope.ownerUserId}
+      AND j.kind IN ('parse', 'parse-media')
+      AND lower(j.payload->>'sourceId') = ${canonicalId}
+      AND lower(j.key) = ${canonicalLower}
+      AND j.key <> ${canonicalFinalKey}
+    ORDER BY j.created_at DESC, j.id DESC
+    LIMIT 1
+  `;
+  const key = rows[0]?.key ? String(rows[0].key) : null;
+  if (!key || !key.toLowerCase().startsWith(ownPrefix) || key.includes("..")) {
+    return null;
+  }
+  return key;
 }
 
 export function createOpeningSourceRepository(sql: Sql, options: OpeningSourceRepositoryOptions = {}): OpeningSourceRepository {
@@ -556,6 +592,10 @@ export function createOpeningSourceRepository(sql: Sql, options: OpeningSourceRe
 
     sweepExpiredPendingUploads(scope, options) {
       return sweepExpiredPendingUploadsQuery(sql, { workspaceId: scope.workspaceId }, options);
+    },
+
+    resolveLegacyFinalKey(scope, sourceId, canonicalFinalKey) {
+      return resolveLegacySourceFinalKey(sql, scope, sourceId, canonicalFinalKey);
     },
   };
 }

@@ -62,6 +62,7 @@ export function createSyncMailHandler(sql = createSqlClient(loadWorkerEnv().data
       await client.connect();
       return await syncMailbox({
         scope, connectionId, connectionVersion: version, folder, cursor, since, client, imports,
+        onDeadlineAbort: () => client.close(),
         storage: {
           upload: ({ key, bytes, mime }) => storage.putObject(key, bytes, { mime }),
           remove: key => storage.deleteObject(key),
