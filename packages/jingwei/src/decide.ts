@@ -8,7 +8,11 @@ import { findUnsafeContent, type UnsafeContentKind } from "./sanitize";
 import { resolveDisplayMode, type ViewPrefs } from "./view";
 
 export type BlockProducer = "model" | "rules" | "host";
-export type DecideOptions = { producer?: BlockProducer };
+export type DecideOptions = {
+  producer?: BlockProducer;
+  /** Explicit host-verified attestation that this block/artifact originated as an AI candidate. */
+  aiCandidateProvenance?: boolean;
+};
 
 export type BlockFailReason =
   | "unknown_capability"
@@ -58,6 +62,11 @@ export function decideBlock(
     return { ok: false, blockId: block.id, reason: "unauthorized_capability", detail: capability.id };
   }
 
+  // Never trust block.params.aiCandidateOnly; require explicit host-verified AI candidate provenance.
+  if (capability.aiCandidateOnly === true && options.aiCandidateProvenance !== true) {
+    return { ok: false, blockId: block.id, reason: "untrusted_provenance", detail: "ai_candidate" };
+  }
+
   if (claimsRuleOrigin(block.params) && producer !== "rules" && producer !== "host") {
     return { ok: false, blockId: block.id, reason: "untrusted_provenance", detail: "rules" };
   }
@@ -98,6 +107,12 @@ export function resolveArtifactBlockProducer(artifact: Artifact, producer: Block
   return producer === "rules" && artifact.provenance.origin !== "rules" ? "model" : producer;
 }
 
+export function resolveAiCandidateProvenance(artifact: Artifact, options: DecideOptions = {}): boolean {
+  const origin = artifact.provenance.origin;
+  const isCandidateOrigin = origin === "ai_candidate" || origin === "assistant";
+  return options.aiCandidateProvenance === true && isCandidateOrigin;
+}
+
 export function decideArtifact(
   artifact: Artifact,
   registry: CapabilityRegistry,
@@ -105,7 +120,10 @@ export function decideArtifact(
   options: DecideOptions = {},
 ): BlockDecision[] {
   const effectiveProducer = resolveArtifactBlockProducer(artifact, options.producer);
-  return artifact.blocks.map((block) => decideBlock(block, registry, prefs, { producer: effectiveProducer }));
+  const aiCandidateProvenance = resolveAiCandidateProvenance(artifact, options);
+  return artifact.blocks.map((block) =>
+    decideBlock(block, registry, prefs, { producer: effectiveProducer, aiCandidateProvenance }),
+  );
 }
 
 export const decide = decideArtifact;

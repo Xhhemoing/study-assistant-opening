@@ -145,11 +145,9 @@ export function verifyNullspace(matrixInput: RationalMatrixInput, basisInput: Ra
   const nullity = matrix[0]!.length - reduced.rank;
   const products = basis.map((vector) => matrixVector(matrix, vector));
   const inKernel = products.every((product) => product.every((entry) => entry.n === 0n));
+  const nonZeroVectors = basis.every((vector) => !isZeroVector(vector));
   const basisRank = rrefParsed(basis).rank;
-  const valid =
-    nullity === 0
-      ? inKernel && basisRank === 0 && (basis.length === 0 || (basis.length === 1 && isZeroVector(basis[0]!)))
-      : inKernel && basis.length === nullity && basisRank === nullity;
+  const valid = inKernel && nonZeroVectors && basis.length === nullity && basisRank === nullity;
   return {
     status: valid ? "equivalent" : "inequivalent",
     reason: valid ? "nullspace_and_rank_nullity_verified" : "nullspace_dimension_or_equation_mismatch",

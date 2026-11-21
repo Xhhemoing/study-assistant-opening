@@ -298,6 +298,11 @@ describe("bounded symbolic equivalence", () => {
         intervals: [{ left: 10, right: 12 }],
       }).status,
     ).toBe("inequivalent");
+
+    // Round-8 P1-3: nested symbolic polynomial powers fail closed before degree/term explosion
+    const nestedPow = verifyScalarEquivalence("((((x + 1)^12)^12)^12)^12", "((((x + 1)^12)^12)^12)^12");
+    expect(nestedPow.status).toBe("unverified");
+    expect(nestedPow.reason).toBe("polynomial_complexity_exceeded");
   });
 
   it("checks derivative residuals, variable forwarding, piecewise integrals, and general substitution bounds", () => {
@@ -368,8 +373,10 @@ describe("exact rational subspaces", () => {
   it("checks nullspaces including trivial zero nullspaces and complete independent eigenspaces", () => {
     expect(verifyNullspace([[1, 1]], [[1, -1]]).status).toBe("equivalent");
     expect(verifyNullspace([[1, 0], [0, 1]], []).status).toBe("equivalent");
-    expect(verifyNullspace([[1, 0], [0, 1]], [[0, 0]]).status).toBe("equivalent");
+    expect(verifyNullspace([[1, 0], [0, 1]], [[0, 0]]).status).toBe("inequivalent");
     expect(verifyNullspace([[1, 0], [0, 1]], [[1, 0]]).status).toBe("inequivalent");
+    expect(verifyNullspace([[1, 1, 0]], [[1, -1, 0], [0, 0, 0]]).status).toBe("inequivalent");
+    expect(verifyNullspace([[1, 1, 0]], [[1, -1, 0], [2, -2, 0]]).status).toBe("inequivalent");
 
     expect(verifyEigenspace({ matrix: [[2, 0], [0, 2]], eigenvalue: 2, vectors: [[1, 0], [0, 1]] }).status).toBe("equivalent");
     expect(verifyEigenspace({ matrix: [[2, 0], [0, 2]], eigenvalue: 2, vectors: [[1, 0]] }).status).toBe("inequivalent");
@@ -511,5 +518,61 @@ describe("bounded 408 VM", () => {
     if (freedUaf.status === "unverified") expect(freedUaf.reason).toBe("use_after_free");
     const postFreeSnapshot = freedUaf.trace.find((snap) => snap.op === "free" && snap.phase === "after");
     expect(postFreeSnapshot?.heap["1"]).toEqual({ generation: 2, live: false, fields: {} });
+
+    // Round-8 P1-4: reject undeclared field load/store/field ops and reclaim exact allocated + dynamic bytes on free
+    const undeclaredStore = runCSubset408({
+      initial: { crafted: { objectId: 1, generation: 1, fieldOrIndex: "rogueKey".repeat(500) } },
+      instructions: [
+        { op: "alloc", target: "p", fields: { safe: 1 } },
+        { op: "store", pointer: { variable: "crafted" }, value: 99 },
+      ],
+    });
+    expect(undeclaredStore.status).toBe("unverified");
+    if (undeclaredStore.status === "unverified") {
+      expect(undeclaredStore.reason).toBe("out_of_bounds");
+      expect(undeclaredStore.detail).toBe("undeclared_field");
+    }
+
+    const undeclaredLoad = runCSubset408({
+      initial: { crafted: { objectId: 1, generation: 1, fieldOrIndex: "missing" } },
+      instructions: [
+        { op: "alloc", target: "p", fields: { safe: 1 } },
+        { op: "load", target: "out", pointer: { variable: "crafted" } },
+      ],
+    });
+    expect(undeclaredLoad.status).toBe("unverified");
+    if (undeclaredLoad.status === "unverified") {
+      expect(undeclaredLoad.reason).toBe("out_of_bounds");
+      expect(undeclaredLoad.detail).toBe("undeclared_field");
+    }
+
+    const undeclaredFieldOp = runCSubset408({
+      instructions: [
+        { op: "alloc", target: "p", fields: { safe: 1 } },
+        { op: "field", target: "q", pointer: { variable: "p" }, field: "missing" },
+      ],
+    });
+    expect(undeclaredFieldOp.status).toBe("unverified");
+    if (undeclaredFieldOp.status === "unverified") {
+      expect(undeclaredFieldOp.reason).toBe("out_of_bounds");
+      expect(undeclaredFieldOp.detail).toBe("undeclared_field");
+    }
+
+    const storeAndFreeLoop = runCSubset408({
+      memoryBytes: 256_000,
+      instructions: [
+        { op: "const", target: "i", value: 0 },
+        { op: "alloc", target: "p", fields: { payload: "a" } },
+        { op: "field", target: "slot", pointer: { variable: "p" }, field: "payload" },
+        { op: "store", pointer: { variable: "slot" }, value: payload },
+        { op: "free", pointer: { variable: "p" } },
+        { op: "binary", target: "i", operator: "+", left: { variable: "i" }, right: 1 },
+        { op: "binary", target: "cont", operator: "<", left: { variable: "i" }, right: 8 },
+        { op: "branch", condition: { variable: "cont" }, ifTrue: 1, ifFalse: 8 },
+        { op: "return", value: { variable: "i" } },
+      ],
+    });
+    expect(storeAndFreeLoop.status).toBe("verified");
+    if (storeAndFreeLoop.status === "verified") expect(storeAndFreeLoop.value).toBe(8);
   });
 });

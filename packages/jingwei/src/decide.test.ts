@@ -144,6 +144,57 @@ describe("decideBlock", () => {
     expect(forgedDecisions[0]).toMatchObject({ ok: false, reason: "unauthorized_capability" });
     expect(forgedDecisions[1]).toMatchObject({ ok: false, reason: "untrusted_provenance" });
   });
+
+  it("rejects aiCandidateOnly capabilities without trusted host+artifact AI candidate provenance", () => {
+    const aiCap = defineCapability({
+      id: "ai-proposal@1",
+      title: "Proposal",
+      tasks: ["compare"],
+      modes: ["text"],
+      params: z.object({ aiCandidateOnly: z.literal(true), note: z.string() }).strict(),
+      limits: [],
+      hostOnly: true,
+      aiCandidateOnly: true,
+      toText: ({ note }) => note,
+    });
+    const extRegistry = createCapabilityRegistry([aiCap]);
+    const proposalBlock = block({
+      id: "p1",
+      capability: "ai-proposal@1",
+      params: { aiCandidateOnly: true, note: "candidate change" },
+    });
+
+    for (const origin of ["user", "import", "model", "rules"] as const) {
+      const artifact: Artifact = {
+        schemaVersion: "1",
+        artifactId: `art-${origin}`,
+        revision: 1,
+        provenance: { origin },
+        blocks: [proposalBlock],
+      };
+      expect(decideArtifact(artifact, extRegistry, {}, { producer: "host", aiCandidateProvenance: true })[0]).toMatchObject({
+        ok: false,
+        reason: "untrusted_provenance",
+      });
+    }
+
+    for (const origin of ["ai_candidate", "assistant"] as const) {
+      const candidateArtifact: Artifact = {
+        schemaVersion: "1",
+        artifactId: `art-${origin}`,
+        revision: 1,
+        provenance: { origin },
+        blocks: [proposalBlock],
+      };
+      expect(decideArtifact(candidateArtifact, extRegistry, {}, { producer: "host" })[0]).toMatchObject({
+        ok: false,
+        reason: "untrusted_provenance",
+      });
+      expect(
+        decideArtifact(candidateArtifact, extRegistry, {}, { producer: "host", aiCandidateProvenance: true })[0],
+      ).toMatchObject({ ok: true, text: "candidate change" });
+    }
+  });
 });
 
 describe("artifactToText", () => {

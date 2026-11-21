@@ -74,7 +74,8 @@ describe("rule witness and proposal capabilities", () => {
     };
     expect(decideBlock(proposalBlock, registry)).toMatchObject({ ok: false, reason: "unauthorized_capability" });
     expect(decideBlock(proposalBlock, registry, {}, { producer: "rules" })).toMatchObject({ ok: false, reason: "unauthorized_capability" });
-    expect(decideBlock(proposalBlock, registry, {}, { producer: "host" }).ok).toBe(true);
+    expect(decideBlock(proposalBlock, registry, {}, { producer: "host" })).toMatchObject({ ok: false, reason: "untrusted_provenance" });
+    expect(decideBlock(proposalBlock, registry, {}, { producer: "host", aiCandidateProvenance: true }).ok).toBe(true);
 
     const illegalAction = decideBlock(
       {

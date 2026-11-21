@@ -51,9 +51,12 @@ type HeapObject = {
   generation: number;
   live: boolean;
   fields: Map<string | number, C408Value>;
+  declaredFields: Set<string>;
   initialized: Set<string | number>;
   length?: number;
   slotCount: number;
+  readonly allocatedBytes: number;
+  storedStringDeltaBytes: number;
 };
 
 function normalizeNumeric(value: C408Value): C408Value {
@@ -326,9 +329,12 @@ export function runCSubset408(program: C408Program, options: { fuel?: number; me
             generation: 1,
             live: true,
             fields: new Map(),
+            declaredFields: new Set(fieldEntries.map(([key]) => key)),
             initialized: new Set(),
             length: instruction.length,
             slotCount,
+            allocatedBytes: allocBytes,
+            storedStringDeltaBytes: 0,
           };
           for (const [key, value] of fieldEntries) {
             if (value === undefined) return failure("invalid_instruction", "undefined_field_value");
@@ -354,22 +360,13 @@ export function runCSubset408(program: C408Program, options: { fuel?: number; me
           }
           const object = requirePointer(pointer);
           if (!object) return heap.has(pointer.objectId) ? failure("use_after_free") : failure("wild_pointer");
-          let freedFieldStringBytes = 0;
-          for (const [key, value] of object.fields) {
-            if (typeof key === "string") freedFieldStringBytes += key.length * 2;
-            if (typeof value === "string") freedFieldStringBytes += value.length * 2;
-          }
+          const reclaimBytes = Math.max(0, object.allocatedBytes + object.storedStringDeltaBytes - HEAP_TOMBSTONE_BYTES);
           object.live = false;
           object.generation++;
           object.fields.clear();
+          object.declaredFields.clear();
           object.initialized.clear();
-          heapBytes = Math.max(
-            0,
-            heapBytes -
-              (HEAP_HEADER_BYTES - HEAP_TOMBSTONE_BYTES) -
-              object.slotCount * HEAP_SLOT_BYTES -
-              freedFieldStringBytes,
-          );
+          heapBytes = Math.max(0, heapBytes - reclaimBytes);
           break;
         }
         case "load": {
@@ -381,6 +378,7 @@ export function runCSubset408(program: C408Program, options: { fuel?: number; me
           const key = isPointer(pointer) ? pointer.fieldOrIndex : null;
           if (key === null) return failure("type_error", "root_pointer_has_no_load_field");
           if (typeof key === "number" && (object.length === undefined || key < 0 || key >= object.length)) return failure("out_of_bounds");
+          if (typeof key === "string" && !object.declaredFields.has(key)) return failure("out_of_bounds", "undeclared_field");
           if (!object.initialized.has(key)) return failure("uninitialized_read");
           const loaded = object.fields.get(key);
           const error = writeTarget(instruction.target, loaded === undefined ? null : loaded);
@@ -398,6 +396,7 @@ export function runCSubset408(program: C408Program, options: { fuel?: number; me
           const key = isPointer(pointer) ? pointer.fieldOrIndex : null;
           if (key === null) return failure("type_error", "root_pointer_has_no_store_field");
           if (typeof key === "number" && (object.length === undefined || key < 0 || key >= object.length)) return failure("out_of_bounds");
+          if (typeof key === "string" && !object.declaredFields.has(key)) return failure("out_of_bounds", "undeclared_field");
           const prevField = object.fields.get(key);
           const prevStrBytes = typeof prevField === "string" ? prevField.length * 2 : 0;
           const nextStrBytes = typeof value === "string" ? value.length * 2 : 0;
@@ -406,6 +405,7 @@ export function runCSubset408(program: C408Program, options: { fuel?: number; me
             return failure("memory_limit_exceeded");
           }
           heapBytes = Math.max(0, heapBytes + deltaStrBytes);
+          object.storedStringDeltaBytes += deltaStrBytes;
           object.fields.set(key, cloneValue(value));
           object.initialized.add(key);
           break;
@@ -416,7 +416,7 @@ export function runCSubset408(program: C408Program, options: { fuel?: number; me
           if (pointer === null) return failure("null_dereference");
           const object = requirePointer(pointer);
           if (!object) return isPointer(pointer) && heap.has(pointer.objectId) ? failure("use_after_free") : failure("wild_pointer");
-          if (!object.fields.has(instruction.field)) return failure("uninitialized_read");
+          if (!object.declaredFields.has(instruction.field)) return failure("out_of_bounds", "undeclared_field");
           const error = writeTarget(instruction.target, { objectId: object.id, generation: object.generation, fieldOrIndex: instruction.field });
           if (error) return error;
           break;

@@ -5,6 +5,7 @@ import type { Artifact, ArtifactBlock } from "../artifact";
 import type { CapabilityRegistry, DisplayMode } from "../capability";
 import {
   decideBlock,
+  resolveAiCandidateProvenance,
   resolveArtifactBlockProducer,
   type BlockDecision,
   type BlockFailReason,
@@ -48,6 +49,7 @@ export type BlockViewProps = {
   renderers: RendererMap;
   prefs?: ViewPrefs;
   producer?: BlockProducer;
+  aiCandidateProvenance?: boolean;
   /** Usually the artifact revision; a new value retries a crashed renderer. */
   resetKey?: string | number;
   /** Hosts may keep their own fail-soft copy; defaults to BLOCK_FAIL_LABELS. */
@@ -78,11 +80,12 @@ export function BlockView({
   renderers,
   prefs = {},
   producer = "model",
+  aiCandidateProvenance = false,
   resetKey = 0,
   renderSkipped,
   onRenderError,
 }: BlockViewProps) {
-  const decision = decideBlock(block, registry, prefs, { producer });
+  const decision = decideBlock(block, registry, prefs, { producer, aiCandidateProvenance });
   if (!decision.ok) return <>{renderSkipped ? renderSkipped(decision) : <SkippedBlock decision={decision} />}</>;
 
   const Renderer = renderers[decision.capability.id];
@@ -113,13 +116,21 @@ export function BlockView({
 
 export type ArtifactViewProps = Omit<BlockViewProps, "block" | "resetKey"> & { artifact: Artifact };
 
-export function ArtifactView({ artifact, producer, ...rest }: ArtifactViewProps) {
+export function ArtifactView({ artifact, producer, aiCandidateProvenance, ...rest }: ArtifactViewProps) {
   const effectiveProducer = resolveArtifactBlockProducer(artifact, producer);
+  const effectiveAiCandidate = resolveAiCandidateProvenance(artifact, { producer, aiCandidateProvenance });
   return (
     <article className="space-y-4" data-jingwei-artifact={artifact.artifactId} data-jingwei-revision={artifact.revision}>
       {artifact.title ? <h3 className="text-sm font-semibold text-zinc-950">{artifact.title}</h3> : null}
       {artifact.blocks.map((block) => (
-        <BlockView key={block.id} block={block} resetKey={artifact.revision} producer={effectiveProducer} {...rest} />
+        <BlockView
+          key={block.id}
+          block={block}
+          resetKey={artifact.revision}
+          producer={effectiveProducer}
+          aiCandidateProvenance={effectiveAiCandidate}
+          {...rest}
+        />
       ))}
     </article>
   );

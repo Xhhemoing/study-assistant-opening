@@ -422,7 +422,58 @@ export type RationalForm = {
   unsupported?: string;
 };
 
-export function rationalForm(expr: ScalarExpr, variable = "x"): RationalForm {
+const MAX_SYMBOLIC_POLY_DEGREE = 64;
+const MAX_SYMBOLIC_POLY_TERMS = 512;
+const MAX_SYMBOLIC_MUL_STEPS = 4096;
+
+type PolyMulBudget = { mulSteps: number };
+
+function exceedsPolyLimits(poly: Polynomial, maxDegree = MAX_SYMBOLIC_POLY_DEGREE): boolean {
+  return polynomialDegree(poly) > maxDegree || poly.size > MAX_SYMBOLIC_POLY_TERMS;
+}
+
+function boundedPolyMultiply(
+  a: Polynomial,
+  b: Polynomial,
+  budget: PolyMulBudget,
+  maxDegree = MAX_SYMBOLIC_POLY_DEGREE,
+): Polynomial | null {
+  if (a.size > MAX_SYMBOLIC_POLY_TERMS || b.size > MAX_SYMBOLIC_POLY_TERMS) return null;
+  if (a.size === 0 || b.size === 0) return new Map();
+  const degA = polynomialDegree(a);
+  const degB = polynomialDegree(b);
+  if (degA + degB > maxDegree) return null;
+  if (budget.mulSteps + a.size * b.size > MAX_SYMBOLIC_MUL_STEPS) return null;
+
+  const out = new Map<number, SpanRational>();
+  for (const [da, va] of a) {
+    for (const [db, vb] of b) {
+      budget.mulSteps++;
+      if (budget.mulSteps > MAX_SYMBOLIC_MUL_STEPS) return null;
+      const degree = da + db;
+      const next = addRational(out.get(degree) ?? rational(0n), multiplyRational(va, vb));
+      if (next.n === 0n) out.delete(degree);
+      else {
+        out.set(degree, next);
+        if (out.size > MAX_SYMBOLIC_POLY_TERMS) return null;
+      }
+    }
+  }
+  return out;
+}
+
+const polyComplexityFailure = (): RationalForm => ({
+  numerator: new Map(),
+  denominator: new Map(),
+  domainDenominators: [],
+  unsupported: "polynomial_complexity_exceeded",
+});
+
+export function rationalForm(
+  expr: ScalarExpr,
+  variable = "x",
+  budget: PolyMulBudget = { mulSteps: 0 },
+): RationalForm {
   switch (expr.kind) {
     case "const": {
       const value = toRational(expr.value);
@@ -435,55 +486,62 @@ export function rationalForm(expr: ScalarExpr, variable = "x"): RationalForm {
         ? { numerator: polynomialVariable(), denominator: polynomialConstant(rational(1n)), domainDenominators: [] }
         : { numerator: new Map(), denominator: new Map(), domainDenominators: [], unsupported: "foreign_variable" };
     case "neg": {
-      const inner = rationalForm(expr.value, variable);
+      const inner = rationalForm(expr.value, variable, budget);
       if (inner.unsupported) return inner;
       return {
         ...inner,
-        numerator: polynomialMultiply(polynomialConstant(rational(-1n)), inner.numerator),
+        numerator: polynomialScale(inner.numerator, rational(-1n)),
       };
     }
     case "add":
     case "sub": {
-      const left = rationalForm(expr.left, variable);
-      const right = rationalForm(expr.right, variable);
+      const left = rationalForm(expr.left, variable, budget);
+      const right = rationalForm(expr.right, variable, budget);
       if (left.unsupported || right.unsupported) {
         return { numerator: new Map(), denominator: new Map(), domainDenominators: [], unsupported: left.unsupported ?? right.unsupported };
       }
-      const numerator = polynomialAdd(
-        polynomialMultiply(left.numerator, right.denominator),
-        polynomialMultiply(right.numerator, left.denominator),
-        expr.kind === "add" ? 1 : -1,
-      );
+      const leftTerm = boundedPolyMultiply(left.numerator, right.denominator, budget);
+      const rightTerm = boundedPolyMultiply(right.numerator, left.denominator, budget);
+      const denominator = boundedPolyMultiply(left.denominator, right.denominator, budget);
+      if (!leftTerm || !rightTerm || !denominator) return polyComplexityFailure();
+      const numerator = polynomialAdd(leftTerm, rightTerm, expr.kind === "add" ? 1 : -1);
+      if (exceedsPolyLimits(numerator)) return polyComplexityFailure();
       return {
         numerator,
-        denominator: polynomialMultiply(left.denominator, right.denominator),
+        denominator,
         domainDenominators: [...left.domainDenominators, ...right.domainDenominators],
         zeroDenominator: left.zeroDenominator || right.zeroDenominator,
       };
     }
     case "mul": {
-      const left = rationalForm(expr.left, variable);
-      const right = rationalForm(expr.right, variable);
+      const left = rationalForm(expr.left, variable, budget);
+      const right = rationalForm(expr.right, variable, budget);
       if (left.unsupported || right.unsupported) {
         return { numerator: new Map(), denominator: new Map(), domainDenominators: [], unsupported: left.unsupported ?? right.unsupported };
       }
+      const numerator = boundedPolyMultiply(left.numerator, right.numerator, budget);
+      const denominator = boundedPolyMultiply(left.denominator, right.denominator, budget);
+      if (!numerator || !denominator) return polyComplexityFailure();
       return {
-        numerator: polynomialMultiply(left.numerator, right.numerator),
-        denominator: polynomialMultiply(left.denominator, right.denominator),
+        numerator,
+        denominator,
         domainDenominators: [...left.domainDenominators, ...right.domainDenominators],
         zeroDenominator: left.zeroDenominator || right.zeroDenominator,
       };
     }
     case "div": {
-      const left = rationalForm(expr.left, variable);
-      const right = rationalForm(expr.right, variable);
+      const left = rationalForm(expr.left, variable, budget);
+      const right = rationalForm(expr.right, variable, budget);
       if (left.unsupported || right.unsupported) {
         return { numerator: new Map(), denominator: new Map(), domainDenominators: [], unsupported: left.unsupported ?? right.unsupported };
       }
+      const numerator = boundedPolyMultiply(left.numerator, right.denominator, budget);
+      const denominator = boundedPolyMultiply(left.denominator, right.numerator, budget);
+      if (!numerator || !denominator) return polyComplexityFailure();
       const zeroDenominator = left.zeroDenominator || right.zeroDenominator || right.numerator.size === 0 || right.denominator.size === 0;
       return {
-        numerator: polynomialMultiply(left.numerator, right.denominator),
-        denominator: polynomialMultiply(left.denominator, right.numerator),
+        numerator,
+        denominator,
         domainDenominators: [
           ...left.domainDenominators,
           ...right.domainDenominators,
@@ -497,16 +555,31 @@ export function rationalForm(expr: ScalarExpr, variable = "x"): RationalForm {
       if (!Number.isInteger(expr.exponent) || Math.abs(expr.exponent) > 12) {
         return { numerator: new Map(), denominator: new Map(), domainDenominators: [], unsupported: "power_out_of_bounds" };
       }
-      const inner = rationalForm(expr.base, variable);
+      const inner = rationalForm(expr.base, variable, budget);
       if (inner.unsupported) {
         return { numerator: new Map(), denominator: new Map(), domainDenominators: [], unsupported: inner.unsupported };
       }
       const count = Math.abs(expr.exponent);
+      const stepNum = expr.exponent >= 0 ? inner.numerator : inner.denominator;
+      const stepDen = expr.exponent >= 0 ? inner.denominator : inner.numerator;
+      const degNum = Math.max(0, polynomialDegree(stepNum));
+      const degDen = Math.max(0, polynomialDegree(stepDen));
+      if (
+        degNum * count > MAX_SYMBOLIC_POLY_DEGREE ||
+        degDen * count > MAX_SYMBOLIC_POLY_DEGREE ||
+        stepNum.size > MAX_SYMBOLIC_POLY_TERMS ||
+        stepDen.size > MAX_SYMBOLIC_POLY_TERMS
+      ) {
+        return polyComplexityFailure();
+      }
       let numerator = polynomialConstant(rational(1n));
       let denominator = polynomialConstant(rational(1n));
       for (let i = 0; i < count; i++) {
-        numerator = polynomialMultiply(numerator, expr.exponent >= 0 ? inner.numerator : inner.denominator);
-        denominator = polynomialMultiply(denominator, expr.exponent >= 0 ? inner.denominator : inner.numerator);
+        const nextNum = boundedPolyMultiply(numerator, stepNum, budget);
+        const nextDen = boundedPolyMultiply(denominator, stepDen, budget);
+        if (!nextNum || !nextDen) return polyComplexityFailure();
+        numerator = nextNum;
+        denominator = nextDen;
       }
       const extraDens = expr.exponent < 0 ? [inner.numerator, inner.denominator] : [];
       const zeroDenominator =
@@ -2393,11 +2466,27 @@ function ringNormalizeRational(
         if (!b) return null;
         if (node.exponent === 0) return { num: mpolyConst(rational(1n)), den: mpolyConst(rational(1n)) };
         if (node.exponent < 0 && b.num.size === 0) return null;
-        let num = mpolyConst(rational(1n));
-        let den = mpolyConst(rational(1n));
         const stepNum = node.exponent >= 0 ? b.num : b.den;
         const stepDen = node.exponent >= 0 ? b.den : b.num;
-        for (let i = 0; i < Math.abs(node.exponent); i++) {
+        const mpolyDeg = (p: MPoly): number => {
+          let max = 0;
+          for (const key of p.keys()) {
+            let sum = 0;
+            for (const exp of parseMonomialKey(key).values()) sum += exp;
+            if (sum > max) max = sum;
+          }
+          return max;
+        };
+        const absExp = Math.abs(node.exponent);
+        if (
+          mpolyDeg(stepNum) * absExp > MAX_SYMBOLIC_POLY_DEGREE ||
+          mpolyDeg(stepDen) * absExp > MAX_SYMBOLIC_POLY_DEGREE
+        ) {
+          throw new MPolyOverflowError();
+        }
+        let num = mpolyConst(rational(1n));
+        let den = mpolyConst(rational(1n));
+        for (let i = 0; i < absExp; i++) {
           num = mpolyMultiply(num, stepNum, reg);
           den = mpolyMultiply(den, stepDen, reg);
         }
@@ -2738,6 +2827,9 @@ export function verifyScalarEquivalence(
 
   const sf = rationalForm(student, variable);
   const rf = rationalForm(reference, variable);
+  if (sf.unsupported === "polynomial_complexity_exceeded" || rf.unsupported === "polynomial_complexity_exceeded") {
+    return { status: "unverified", reason: "polynomial_complexity_exceeded", domain };
+  }
   const sConstraints = collectConstraints(student, variable);
   const rConstraints = collectConstraints(reference, variable);
 

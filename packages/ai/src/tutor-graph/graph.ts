@@ -125,9 +125,9 @@ function guardRelease(
 ): string | undefined {
   release.assertCurrent();
   if (isStopped(release.stopSignal)) return undefined;
-  const proseText = [caps.questionStem, ...caps.publicBlocks.map((block) => block.text)].join("\n");
   const blocker = release.answerLeakageBlocker;
-  if (!blocker) return proseText;
+  if (typeof blocker !== "function") return undefined;
+  const proseText = [caps.questionStem, ...caps.publicBlocks.map((block) => block.text)].join("\n");
   if (blocker(proseText)) return undefined;
 
   const structuredValues: string[] = [];
@@ -237,13 +237,18 @@ export function runTutorGraph(input: TutorGraphInput): TutorGraphResult {
     };
   }
 
-  const worstBranchBits = verification.firstError || verification.ruleWitness ? 1 : 0;
+  const steps = propagateSteps(verification.steps, verification.firstError);
+  const disclosesAnswerDependentInfo = Boolean(
+    verification.firstError ||
+      verification.ruleWitness ||
+      steps.some((step) => step.status !== "unknown" || step.error !== undefined),
+  );
+  const worstBranchBits = disclosesAnswerDependentInfo ? 1 : 0;
   const releaseCheck = budget.canRelease(worstBranchBits, nowMs);
   if (!releaseCheck.allowed) {
     return blockedByBudgetResult(budget, releaseCheck.reason ?? "budget_exhausted");
   }
 
-  const steps = propagateSteps(verification.steps, verification.firstError);
   const publicTeaching = toPublicCaps(input.questionStem, steps, verification);
 
   const releasedText = guardRelease(publicTeaching, { ...verification, steps }, input.releaseCaps);
@@ -262,10 +267,29 @@ export function runTutorGraph(input: TutorGraphInput): TutorGraphResult {
   }
 
   budget.commitRelease(worstBranchBits, nowMs);
+  const publicVerification: VerifyOutput = {
+    steps: steps.map((step) => ({
+      id: step.id,
+      text: step.text,
+      status: step.status,
+      ...(step.error !== undefined ? { error: step.error } : {}),
+      ...(step.dependsOn !== undefined ? { dependsOn: [...step.dependsOn] } : {}),
+    })),
+    ...(verification.deterministic !== undefined ? { deterministic: verification.deterministic } : {}),
+    ...(verification.firstError
+      ? {
+          firstError: {
+            stepId: verification.firstError.stepId,
+            kind: verification.firstError.kind,
+            message: verification.firstError.message,
+          },
+        }
+      : {}),
+  };
   return {
     state: "released",
     providerCalls: 0,
-    verification: { ...verification, steps },
+    verification: publicVerification,
     publicTeaching,
     releasedText,
     leakageBits: budget.leakageBits,

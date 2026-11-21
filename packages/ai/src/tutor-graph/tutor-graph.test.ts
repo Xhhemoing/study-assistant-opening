@@ -71,7 +71,7 @@ describe("TutorGraph fast path", () => {
         }),
         assertCurrent: () => undefined,
       },
-      releaseCaps: { assertCurrent: () => undefined },
+      releaseCaps: { assertCurrent: () => undefined, answerLeakageBlocker: (text) => text.includes("SECRET_42") },
     });
     expect(result.state).toBe("released");
     expect(result.releaseApproved).toBe(true);
@@ -226,7 +226,7 @@ describe("TutorGraph fast path", () => {
         }),
         assertCurrent: () => undefined,
       },
-      releaseCaps: { assertCurrent: () => undefined },
+      releaseCaps: { assertCurrent: () => undefined, answerLeakageBlocker: (text) => text.includes("SECRET_42") },
     });
     expect(first.state).toBe("released");
     expect(budget.leakageBits).toBe(1);
@@ -243,7 +243,7 @@ describe("TutorGraph fast path", () => {
         }),
         assertCurrent: () => undefined,
       },
-      releaseCaps: { assertCurrent: () => undefined },
+      releaseCaps: { assertCurrent: () => undefined, answerLeakageBlocker: (text) => text.includes("SECRET_42") },
     });
     expect(second.state).toBe("budget_contaminated");
     expect(second.publicTeaching).toBeUndefined();
@@ -316,5 +316,102 @@ describe("TutorGraph fast path", () => {
     expect(() => guardBudget.commitRelease(1, Number.NaN)).toThrow(RangeError);
     expect(() => guardBudget.resetForFreshVariant("seed-2", Number.NaN)).toThrow(RangeError);
     expect(() => guardBudget.resetForFreshVariant("seed-2", Number.POSITIVE_INFINITY)).toThrow(RangeError);
+  });
+
+  it("fails closed when answerLeakageBlocker is omitted, scrubs raw witnesses, and charges entropy for step verdicts", () => {
+    const budget = createMinEntropyBudget({ scaffoldBitBudget: 1.5, now: () => 1000 });
+    const missingBlocker = runTutorGraph({
+      questionStem: "求导",
+      submission: {},
+      budget,
+      attemptSubmitted: true,
+      verifyCaps: {
+        verify: () => ({
+          steps: [{ id: "s1", text: "一步", status: "valid" }],
+        }),
+        assertCurrent: () => undefined,
+      },
+      releaseCaps: { assertCurrent: () => undefined },
+    });
+    expect(missingBlocker.state).toBe("unverified");
+    expect(missingBlocker.reason).toBe("release_guard_rejected");
+    expect(missingBlocker.releaseApproved).toBe(false);
+    expect(missingBlocker.verification).toEqual({ steps: [] });
+    expect(missingBlocker.publicTeaching).toBeUndefined();
+    expect(missingBlocker.releasedText).toBeUndefined();
+    expect(budget.leakageBits).toBe(0);
+
+    const zeroBudget = createMinEntropyBudget({ scaffoldBitBudget: 0, now: () => 1000 });
+    const zeroBlocked = runTutorGraph({
+      questionStem: "求导",
+      submission: {},
+      budget: zeroBudget,
+      attemptSubmitted: true,
+      verifyCaps: {
+        verify: () => ({
+          steps: [{ id: "s1", text: "一步", status: "valid" }],
+        }),
+        assertCurrent: () => undefined,
+      },
+      releaseCaps: {
+        assertCurrent: () => undefined,
+        answerLeakageBlocker: () => false,
+      },
+    });
+    expect(zeroBlocked.state).toBe("budget_contaminated");
+    expect(zeroBlocked.releaseApproved).toBe(false);
+    expect(zeroBlocked.verification).toEqual({ steps: [] });
+    expect(zeroBlocked.publicTeaching).toBeUndefined();
+
+    const stepBudget = createMinEntropyBudget({ scaffoldBitBudget: 1.5, now: () => 1000 });
+    const firstValidStep = runTutorGraph({
+      questionStem: "求导",
+      submission: {},
+      budget: stepBudget,
+      attemptSubmitted: true,
+      verifyCaps: {
+        verify: () =>
+          ({
+            steps: [{ id: "s1", text: "一步", status: "valid" }],
+            firstError: { stepId: "s1", kind: "notation", message: "检查符号", witness: { hiddenAnswer: "x^2" } },
+            ruleWitness: { capability: "function-diff-plot@1", params: { origin: "rules", title: "提示", points: [], explanation: "ok" } },
+            sealedSolutionRef: "sealed-internal",
+          }) as never,
+        assertCurrent: () => undefined,
+      },
+      releaseCaps: {
+        assertCurrent: () => undefined,
+        answerLeakageBlocker: () => false,
+      },
+    });
+    expect(firstValidStep.state).toBe("released");
+    expect(stepBudget.leakageBits).toBe(1);
+    expect(firstValidStep.verification.firstError).toEqual({
+      stepId: "s1",
+      kind: "notation",
+      message: "检查符号",
+    });
+    expect((firstValidStep.verification.firstError as { witness?: unknown }).witness).toBeUndefined();
+    expect((firstValidStep.verification as { ruleWitness?: unknown }).ruleWitness).toBeUndefined();
+    expect((firstValidStep.verification as { sealedSolutionRef?: unknown }).sealedSolutionRef).toBeUndefined();
+
+    const secondStepTurn = runTutorGraph({
+      questionStem: "求导",
+      submission: {},
+      budget: stepBudget,
+      attemptSubmitted: true,
+      verifyCaps: {
+        verify: () => ({
+          steps: [{ id: "s1", text: "一步", status: "invalid" }],
+        }),
+        assertCurrent: () => undefined,
+      },
+      releaseCaps: {
+        assertCurrent: () => undefined,
+        answerLeakageBlocker: () => false,
+      },
+    });
+    expect(secondStepTurn.state).toBe("budget_contaminated");
+    expect(secondStepTurn.verification).toEqual({ steps: [] });
   });
 });
