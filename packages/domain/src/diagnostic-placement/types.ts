@@ -86,6 +86,7 @@ export type KstSnapshotV1 = {
   createdAtMs: number;
   approximationMode: KstApproximationMode;
   totalFeasibleStateCount: number | null;
+  totalFeasibleStateCountExact: string | null;
   wByState: Readonly<Record<string, number>> | null;
   componentJointWeights: readonly KstComponentJointWeights[];
   piBySkill: Readonly<Record<string, number>>;
@@ -194,7 +195,10 @@ export type FrozenOriginalContext = {
   readonly startedAtMs: number;
 };
 
-export type DrilldownRootCause = "prerequisite_deficit" | typeof INTEGRATION_STEP_COORDINATION;
+export type DrilldownRootCause =
+  | "prerequisite_deficit"
+  | typeof INTEGRATION_STEP_COORDINATION
+  | "insufficient_diagnostic_evidence";
 export type RepairPlanStepKind = "foundational_prerequisite" | "bridging_step" | "restore_original_attempt";
 export type RepairPlanStep = { stepIndex: number; kind: RepairPlanStepKind; skillId: string; itemId: string | null; label: string };
 export type DrilldownHypothesisPosterior = { hypothesisId: string; kind: DrilldownRootCause; skillId: string | null; probability: number };

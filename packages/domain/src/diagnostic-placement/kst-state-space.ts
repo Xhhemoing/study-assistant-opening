@@ -21,6 +21,14 @@ const EPSILON = 1e-12;
 const clamp = (v: number, min: number, max: number): number => Math.min(max, Math.max(min, v));
 const cmpStr = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
 
+export function defineRecordEntry<T>(target: Record<string, T>, key: string, value: T): void {
+  Object.defineProperty(target, key, { value, enumerable: true, writable: true, configurable: true });
+}
+
+export function readRecordEntry<T>(record: Readonly<Record<string, T>>, key: string): T | undefined {
+  return Object.hasOwn(record, key) ? record[key] : undefined;
+}
+
 export type ValidatedSkillRecord = {
   skillId: string;
   chapterId: string;
@@ -277,7 +285,7 @@ function buildComponentSpace(
   const localIndexBySkill = new Map(skillIds.map((id, i) => [id, i]));
   const skillLogOdds = skillIds.map(id => {
     const p = graph.skillsById.get(id)!.priorMastery;
-    return Math.log(p / (1 - p));
+    return Math.log(p) - Math.log1p(-p);
   });
   const logW = new Float64Array(states.length);
   const w = new Float64Array(states.length);
@@ -290,17 +298,32 @@ function buildComponentSpace(
   return { componentId, skillIds, localIndexBySkill, parentMasks, states, approximationMode, exactStateCountEstimate, logW, w };
 }
 
-function validateProbabilityRecord(record: unknown, label: string, allowNegative = false): void {
+function validateProbabilityRecord(
+  record: unknown,
+  label: string,
+  options: { min?: number; max?: number; requireSumOne?: boolean; requireNonEmpty?: boolean } = {},
+): void {
+  const min = options.min ?? 0;
+  const max = options.max ?? 1;
   if (!record || typeof record !== "object" || Array.isArray(record)) {
     throw new DiagnosticPlacementError("VALIDATION", `${label} must be a non-null record`);
   }
-  for (const [key, value] of Object.entries(record as Record<string, unknown>)) {
+  const entries = Object.entries(record as Record<string, unknown>);
+  if (options.requireNonEmpty && entries.length === 0) {
+    throw new DiagnosticPlacementError("VALIDATION", `${label} must not be empty`);
+  }
+  let sum = 0;
+  for (const [key, value] of entries) {
     if (typeof value !== "number" || !Number.isFinite(value)) {
       throw new DiagnosticPlacementError("VALIDATION", `${label}[${key}] must be a finite number`);
     }
-    if (!allowNegative && (value < 0 || value > 1)) {
-      throw new DiagnosticPlacementError("VALIDATION", `${label}[${key}] must be within [0, 1]`);
+    if (value < min || value > max) {
+      throw new DiagnosticPlacementError("VALIDATION", `${label}[${key}] must be within [${min}, ${max}]`);
     }
+    sum += value;
+  }
+  if (options.requireSumOne && Math.abs(sum - 1) > 1e-5) {
+    throw new DiagnosticPlacementError("VALIDATION", `${label} weights must sum to 1 (got ${sum})`);
   }
 }
 
@@ -308,17 +331,44 @@ export function validateKstSnapshot(snapshot: KstSnapshotV1): void {
   if (!snapshot || typeof snapshot !== "object" || snapshot.schemaVersion !== 1 || typeof snapshot.snapshotId !== "string" || !snapshot.snapshotId.trim()) {
     throw new DiagnosticPlacementError("VALIDATION", "Invalid KstSnapshotV1 header");
   }
+  if (
+    snapshot.approximationMode !== "exact" &&
+    snapshot.approximationMode !== "component_decomposed" &&
+    snapshot.approximationMode !== "bounded_component_envelope"
+  ) {
+    throw new DiagnosticPlacementError("VALIDATION", "Invalid KstSnapshotV1 approximationMode");
+  }
   if (!Number.isFinite(snapshot.createdAtMs)) {
     throw new DiagnosticPlacementError("VALIDATION", "KstSnapshotV1 createdAtMs must be finite");
   }
-  if (snapshot.totalFeasibleStateCount !== null && (!Number.isFinite(snapshot.totalFeasibleStateCount) || snapshot.totalFeasibleStateCount < 0)) {
-    throw new DiagnosticPlacementError("VALIDATION", "KstSnapshotV1 totalFeasibleStateCount must be null or >= 0");
+  if (
+    snapshot.totalFeasibleStateCount !== null &&
+    (typeof snapshot.totalFeasibleStateCount !== "number" || !Number.isSafeInteger(snapshot.totalFeasibleStateCount) || snapshot.totalFeasibleStateCount < 0)
+  ) {
+    throw new DiagnosticPlacementError("VALIDATION", "KstSnapshotV1 totalFeasibleStateCount must be null or a non-negative safe integer");
+  }
+  if (
+    snapshot.totalFeasibleStateCountExact !== undefined &&
+    snapshot.totalFeasibleStateCountExact !== null &&
+    (typeof snapshot.totalFeasibleStateCountExact !== "string" || !/^\d+$/.test(snapshot.totalFeasibleStateCountExact))
+  ) {
+    throw new DiagnosticPlacementError("VALIDATION", "KstSnapshotV1 totalFeasibleStateCountExact must be null or a non-negative integer string");
   }
   validateProbabilityRecord(snapshot.piBySkill, "piBySkill");
   validateProbabilityRecord(snapshot.outerFringeBySkill, "outerFringeBySkill");
   validateProbabilityRecord(snapshot.parentsSatisfiedBySkill, "parentsSatisfiedBySkill");
+  for (const [skillId, outer] of Object.entries(snapshot.outerFringeBySkill)) {
+    const parentsSat = readRecordEntry(snapshot.parentsSatisfiedBySkill, skillId);
+    if (parentsSat !== undefined && outer > parentsSat + 1e-6) {
+      throw new DiagnosticPlacementError("VALIDATION", `outerFringeBySkill[${skillId}] exceeds parentsSatisfiedBySkill[${skillId}]`);
+    }
+    const pi = readRecordEntry(snapshot.piBySkill, skillId);
+    if (pi !== undefined && outer + pi > 1 + 1e-6) {
+      throw new DiagnosticPlacementError("VALIDATION", `outerFringeBySkill[${skillId}] + piBySkill[${skillId}] exceeds 1`);
+    }
+  }
   if (snapshot.wByState !== null) {
-    validateProbabilityRecord(snapshot.wByState, "wByState");
+    validateProbabilityRecord(snapshot.wByState, "wByState", { requireSumOne: true, requireNonEmpty: true });
   }
   if (!Array.isArray(snapshot.componentJointWeights)) {
     throw new DiagnosticPlacementError("VALIDATION", "KstSnapshotV1 componentJointWeights must be an array");
@@ -327,13 +377,16 @@ export function validateKstSnapshot(snapshot: KstSnapshotV1): void {
     if (!comp || typeof comp !== "object") {
       throw new DiagnosticPlacementError("VALIDATION", `componentJointWeights[${idx}] must be an object`);
     }
-    validateProbabilityRecord(comp.wByState, `componentJointWeights[${idx}].wByState`);
+    if (comp.approximationMode !== "exact" && comp.approximationMode !== "bounded_component_envelope") {
+      throw new DiagnosticPlacementError("VALIDATION", `componentJointWeights[${idx}] has invalid approximationMode`);
+    }
+    validateProbabilityRecord(comp.wByState, `componentJointWeights[${idx}].wByState`, { requireSumOne: true, requireNonEmpty: true });
   });
   if (!snapshot.skillCovariance || typeof snapshot.skillCovariance !== "object" || Array.isArray(snapshot.skillCovariance)) {
     throw new DiagnosticPlacementError("VALIDATION", "KstSnapshotV1 skillCovariance must be a record");
   }
   for (const [skillId, row] of Object.entries(snapshot.skillCovariance)) {
-    validateProbabilityRecord(row, `skillCovariance[${skillId}]`, true);
+    validateProbabilityRecord(row, `skillCovariance[${skillId}]`, { min: -0.25 - 1e-6, max: 0.25 + 1e-6 });
   }
   if (!Array.isArray(snapshot.consumedProbeObservationIds) || snapshot.consumedProbeObservationIds.some(id => typeof id !== "string")) {
     throw new DiagnosticPlacementError("VALIDATION", "KstSnapshotV1 consumedProbeObservationIds must be string[]");
@@ -344,6 +397,7 @@ export class KstStateSpace {
   readonly graph: ValidatedSkillGraph;
   readonly approximationMode: KstApproximationMode;
   readonly totalFeasibleStateCount: number | null;
+  readonly totalFeasibleStateCountExact: string | null;
   readonly consumedProbeObservationIds: string[] = [];
   private _components: ComponentSpace[];
   private _componentIndexBySkill: Map<string, number>;
@@ -369,6 +423,7 @@ export class KstStateSpace {
     }
     const productWithinCap = !anyExceeded && exactProduct <= BigInt(MAX_EXACT_KST_STATES);
     const totalExactCount = !anyExceeded && exactProduct <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(exactProduct) : null;
+    this.totalFeasibleStateCountExact = anyExceeded ? null : exactProduct.toString();
 
     if (productWithinCap) {
       this.approximationMode = "exact";
@@ -425,6 +480,44 @@ export class KstStateSpace {
     }
     const touchedIndices = [...this.touchedMasks(probe.requiredSkillIds).keys()].sort((a, b) => a - b);
     return this.checkCrossComponentMerge(touchedIndices).feasible;
+  }
+
+  canEvaluateProbeAfter(priorCandidate: DiagnosticProbeItem, nextProbe: DiagnosticProbeItem): boolean {
+    if (
+      priorCandidate.requiredSkillIds.length === 0 || priorCandidate.requiredSkillIds.some(id => !this.graph.skillsById.has(id)) ||
+      nextProbe.requiredSkillIds.length === 0 || nextProbe.requiredSkillIds.some(id => !this.graph.skillsById.has(id))
+    ) {
+      return false;
+    }
+    const priorTouchedIndices = [...this.touchedMasks(priorCandidate.requiredSkillIds).keys()].sort((a, b) => a - b);
+    const priorMerge = this.checkCrossComponentMerge(priorTouchedIndices);
+    if (!priorMerge.feasible) return false;
+
+    if (priorTouchedIndices.length <= 1) {
+      return this.canEvaluateProbe(nextProbe);
+    }
+
+    const priorTouchedSet = new Set(priorTouchedIndices);
+    const mergedGroupId = priorTouchedIndices[0]!;
+    const groupStateCount = (groupId: number): number =>
+      groupId === mergedGroupId ? priorMerge.productCount : this._components[groupId]!.states.length;
+    const groupApproxMode = (groupId: number): KstComponentMode =>
+      groupId === mergedGroupId ? "exact" : this._components[groupId]!.approximationMode;
+
+    const nextGroups = new Set<number>();
+    for (const skillId of nextProbe.requiredSkillIds) {
+      const origCompIdx = this._componentIndexBySkill.get(skillId)!;
+      nextGroups.add(priorTouchedSet.has(origCompIdx) ? mergedGroupId : origCompIdx);
+    }
+    if (nextGroups.size <= 1) return true;
+
+    let product = 1n;
+    for (const gId of nextGroups) {
+      if (groupApproxMode(gId) !== "exact") return false;
+      product *= BigInt(groupStateCount(gId));
+      if (product > BigInt(MAX_EXACT_KST_STATES)) return false;
+    }
+    return true;
   }
 
   private buildMergedComponentCandidate(touchedIndices: readonly number[]): ComponentSpace {
@@ -592,7 +685,7 @@ export class KstStateSpace {
         const bit = 1n << BigInt(k);
         let sum = 0;
         for (let s = 0; s < comp.states.length; s++) if ((comp.states[s]! & bit) !== 0n) sum += comp.w[s]!;
-        marginals[comp.skillIds[k]!] = clamp(sum, 0, 1);
+        defineRecordEntry(marginals, comp.skillIds[k]!, clamp(sum, 0, 1));
       }
     }
     return marginals;
@@ -616,8 +709,8 @@ export class KstStateSpace {
             if ((state & bit) === 0n) outerSum += weight;
           }
         }
-        outerFringeBySkill[skillId] = clamp(outerSum, 0, 1);
-        parentsSatisfiedBySkill[skillId] = clamp(parentsSum, 0, 1);
+        defineRecordEntry(outerFringeBySkill, skillId, clamp(outerSum, 0, 1));
+        defineRecordEntry(parentsSatisfiedBySkill, skillId, clamp(parentsSum, 0, 1));
       }
     }
     return { outerFringeBySkill, parentsSatisfiedBySkill };
@@ -626,25 +719,30 @@ export class KstStateSpace {
   getSkillCovariance(marginals = this.getSkillMarginals()): Record<string, Record<string, number>> {
     const covariance: Record<string, Record<string, number>> = {};
     const allSkills = this.graph.topoOrder;
-    for (const id of allSkills) covariance[id] = {};
+    for (const id of allSkills) defineRecordEntry(covariance, id, {});
     for (const comp of this.components) {
       for (let i = 0; i < comp.skillIds.length; i++) {
         const u = comp.skillIds[i]!;
-        const piU = marginals[u]!;
-        covariance[u]![u] = clamp(piU * (1 - piU), 0, 0.25);
+        const piU = readRecordEntry(marginals, u)!;
+        const rowU = readRecordEntry(covariance, u)!;
+        defineRecordEntry(rowU, u, clamp(piU * (1 - piU), 0, 0.25));
         for (let j = i + 1; j < comp.skillIds.length; j++) {
           const v = comp.skillIds[j]!;
+          const piV = readRecordEntry(marginals, v)!;
           const both = (1n << BigInt(i)) | (1n << BigInt(j));
           let eUV = 0;
           for (let s = 0; s < comp.states.length; s++) if ((comp.states[s]! & both) === both) eUV += comp.w[s]!;
-          const cov = Math.abs(eUV - piU * marginals[v]!) < EPSILON ? 0 : eUV - piU * marginals[v]!;
-          covariance[u]![v] = cov;
-          covariance[v]![u] = cov;
+          const cov = Math.abs(eUV - piU * piV) < EPSILON ? 0 : eUV - piU * piV;
+          defineRecordEntry(rowU, v, cov);
+          defineRecordEntry(readRecordEntry(covariance, v)!, u, cov);
         }
       }
     }
     if (allSkills.length <= 100) {
-      for (const u of allSkills) for (const v of allSkills) if (covariance[u]![v] === undefined) covariance[u]![v] = 0;
+      for (const u of allSkills) {
+        const rowU = readRecordEntry(covariance, u)!;
+        for (const v of allSkills) if (!Object.hasOwn(rowU, v)) defineRecordEntry(rowU, v, 0);
+      }
     }
     return covariance;
   }
@@ -657,7 +755,7 @@ export class KstStateSpace {
       const wByState: Record<string, number> = {};
       for (let s = 0; s < comp.states.length; s++) {
         const mastered = comp.skillIds.filter((_, k) => (comp.states[s]! & (1n << BigInt(k))) !== 0n);
-        wByState[canonicalStateKey(mastered)] = comp.w[s]!;
+        defineRecordEntry(wByState, canonicalStateKey(mastered), comp.w[s]!);
       }
       return { componentId: comp.componentId, skillIds: [...comp.skillIds], approximationMode: comp.approximationMode, exactStateCountEstimate: comp.exactStateCountEstimate, stateCount: comp.states.length, wByState };
     });
@@ -670,6 +768,7 @@ export class KstStateSpace {
       createdAtMs: options.createdAtMs ?? 0,
       approximationMode: this.approximationMode,
       totalFeasibleStateCount: this.totalFeasibleStateCount,
+      totalFeasibleStateCountExact: this.totalFeasibleStateCountExact,
       wByState: componentJointWeights.length === 1 ? componentJointWeights[0]!.wByState : null,
       componentJointWeights,
       piBySkill,
@@ -688,8 +787,22 @@ export const buildKstPriorSnapshot = (
   options: { snapshotId?: string; courseId?: string; learnerId?: string; createdAtMs?: number } = {},
 ): KstSnapshotV1 => stateSpace.buildPriorSnapshot(options);
 
-export const getSkillCovariance = (snapshot: KstSnapshotV1, skillA: string, skillB: string): number =>
-  snapshot.skillCovariance[skillA]?.[skillB] ?? 0;
+export const getSkillCovariance = (snapshot: KstSnapshotV1, skillA: string, skillB: string): number => {
+  if (!snapshot.skillCovariance || typeof snapshot.skillCovariance !== "object" || Array.isArray(snapshot.skillCovariance)) {
+    throw new DiagnosticPlacementError("VALIDATION", "KstSnapshotV1 skillCovariance must be a non-null record");
+  }
+  const row = readRecordEntry(snapshot.skillCovariance, skillA);
+  if (row === undefined) return 0;
+  if (!row || typeof row !== "object" || Array.isArray(row)) {
+    throw new DiagnosticPlacementError("VALIDATION", `Invalid skillCovariance row for ${skillA}`);
+  }
+  const val = readRecordEntry(row, skillB);
+  if (val === undefined) return 0;
+  if (typeof val !== "number" || !Number.isFinite(val)) {
+    throw new DiagnosticPlacementError("VALIDATION", `Non-finite skillCovariance entry for (${skillA}, ${skillB})`);
+  }
+  return val;
+};
 
 export function partitionObservationsAgainstKstSnapshot<T extends {
   observationId: string;
@@ -750,10 +863,10 @@ export function buildSkillBeliefFromKstSnapshot(
   meta: { workspaceId: string; learnerId: string; courseId: string; confirmedSkillVersion: string | number },
 ): SkillBeliefV1 {
   validateKstSnapshot(snapshot);
-  const marginal = snapshot.piBySkill[skillId];
+  const marginal = readRecordEntry(snapshot.piBySkill, skillId);
   if (marginal === undefined) throw new DiagnosticPlacementError("VALIDATION", `Skill ${skillId} missing from KstSnapshotV1`);
   const bounded = clamp(marginal, 1e-9, 1 - 1e-9);
-  return createSkillBelief({ ...meta, abilityMean: Math.log(bounded / (1 - bounded)) });
+  return createSkillBelief({ ...meta, abilityMean: Math.log(bounded) - Math.log1p(-bounded) });
 }
 
 export function updateSkillMasteryFromKstSnapshot(
@@ -763,14 +876,14 @@ export function updateSkillMasteryFromKstSnapshot(
   beliefMeta?: { workspaceId: string; learnerId: string; courseId: string; confirmedSkillVersion: string | number },
 ): DownstreamSkillPosteriorResult {
   validateKstSnapshot(snapshot);
-  const prior = snapshot.piBySkill[skillId];
+  const prior = readRecordEntry(snapshot.piBySkill, skillId);
   if (prior === undefined) throw new DiagnosticPlacementError("VALIDATION", `Skill ${skillId} missing from KstSnapshotV1`);
   const partitioned = partitionObservationsAgainstKstSnapshot(snapshot, observations);
   const appliedObservationIds: string[] = [];
   let posterior = clamp(prior, 0, 1);
 
   if (posterior > 0 && posterior < 1) {
-    let logOdds = Math.log(posterior / (1 - posterior));
+    let logOdds = Math.log(posterior) - Math.log1p(-posterior);
     for (const obs of partitioned.unconsumedObservations) {
       if (obs.skillId !== skillId || !isUnassistedValidObservation(obs)) continue;
       if (!Number.isFinite(obs.slip) || obs.slip < 0 || obs.slip >= 0.49
@@ -782,15 +895,16 @@ export function updateSkillMasteryFromKstSnapshot(
       appliedObservationIds.push(obs.observationId);
       if (pM === 0 && pU > 0) { posterior = 0; break; }
       if (pU === 0 && pM > 0) { posterior = 1; break; }
-      if (pM > 0 && pU > 0) logOdds += Math.log(pM / pU);
+      if (pM > 0 && pU > 0) logOdds += Math.log(pM) - Math.log(pU);
     }
     if (posterior > 0 && posterior < 1) {
       posterior = logOdds >= 0 ? 1 / (1 + Math.exp(-logOdds)) : Math.exp(logOdds) / (1 + Math.exp(logOdds));
     }
   }
 
+  const boundedPost = clamp(posterior, 1e-9, 1 - 1e-9);
   const belief = beliefMeta
-    ? createSkillBelief({ ...beliefMeta, abilityMean: Math.log(clamp(posterior, 1e-9, 1 - 1e-9) / (1 - clamp(posterior, 1e-9, 1 - 1e-9))) })
+    ? createSkillBelief({ ...beliefMeta, abilityMean: Math.log(boundedPost) - Math.log1p(-boundedPost) })
     : undefined;
   return { skillId, priorProbability: prior, posteriorProbability: posterior, appliedObservationIds, partitioned, ...(belief ? { belief } : {}) };
 }

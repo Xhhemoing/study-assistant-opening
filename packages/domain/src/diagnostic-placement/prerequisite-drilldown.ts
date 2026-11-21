@@ -2,6 +2,7 @@ import { logSumExp } from "../epistemic/gauss-hermite";
 import {
   binaryEntropyBits,
   isUnassistedValidObservation,
+  readRecordEntry,
   validateKstSnapshot,
   validateProbeItem,
   validateSkillGraph,
@@ -68,8 +69,9 @@ function freezeOriginalContext(ctx: FrozenOriginalContext): FrozenOriginalContex
 export class PrerequisiteDrilldownStateMachine {
   readonly graph: ValidatedSkillGraph;
   readonly targetSkillId: string;
-  readonly maxTotalProbes: number;
+  declare readonly maxTotalProbes: number;
 
+  readonly #effectiveMaxProbes: number;
   private readonly frozenContext: FrozenOriginalContext;
   private readonly prerequisitesInTopoOrder: readonly string[];
   private readonly prerequisiteSet: ReadonlySet<string>;
@@ -82,12 +84,15 @@ export class PrerequisiteDrilldownStateMachine {
   private readonly usedItemIds = new Set<string>();
   private readonly usedFamilyIds = new Set<string>();
   private readonly seenObservationIds = new Set<string>();
+  private readonly snapshotConsumedObservationIds = new Set<string>();
 
   private status: DrilldownStatus = "probing";
   private rootCause: DrilldownRootCause | null = null;
   private confirmedDeficitSkillIds: string[] = [];
   private repairPlan: RepairPlanStep[] = [];
   private probesAdministered = 0;
+  private unassistedProbeCount = 0;
+  private unassistedFailureCount = 0;
   private unassistedCorrectCount = 0;
   private hadNonUnassistedProbe = false;
   private pendingProbeId: string | null = null;
@@ -100,7 +105,14 @@ export class PrerequisiteDrilldownStateMachine {
     this.frozenContext = freezeOriginalContext(input.originalContext);
 
     const reqMax = input.maxProbes ?? MAX_TOTAL_DRILLDOWN_PROBES;
-    this.maxTotalProbes = Math.min(MAX_TOTAL_DRILLDOWN_PROBES, Math.max(1, Number.isFinite(reqMax) ? Math.floor(reqMax) : MAX_TOTAL_DRILLDOWN_PROBES));
+    const effectiveMax = Math.min(MAX_TOTAL_DRILLDOWN_PROBES, Math.max(1, Number.isFinite(reqMax) ? Math.floor(reqMax) : MAX_TOTAL_DRILLDOWN_PROBES));
+    this.#effectiveMaxProbes = effectiveMax;
+    Object.defineProperty(this, "maxTotalProbes", {
+      value: effectiveMax,
+      writable: false,
+      configurable: false,
+      enumerable: true,
+    });
     this.prerequisitesInTopoOrder = this.graph.topoOrder.filter(id => target.ancestorIds.has(id));
     this.prerequisiteSet = new Set(this.prerequisitesInTopoOrder);
 
@@ -111,6 +123,15 @@ export class PrerequisiteDrilldownStateMachine {
     }
     this.probePool = input.probePool;
 
+    const kstSnapshot = input.kstSnapshot;
+    if (kstSnapshot) {
+      validateKstSnapshot(kstSnapshot);
+      for (const id of kstSnapshot.consumedProbeObservationIds) {
+        const trimmed = id.trim();
+        if (trimmed) this.snapshotConsumedObservationIds.add(trimmed);
+      }
+    }
+
     this.hypotheses = [
       ...this.prerequisitesInTopoOrder.map(skillId => ({ id: skillId, kind: "prerequisite_deficit" as const, skillId })),
       { id: INTEGRATION_STEP_COORDINATION, kind: INTEGRATION_STEP_COORDINATION, skillId: null },
@@ -119,9 +140,9 @@ export class PrerequisiteDrilldownStateMachine {
     this.weights = new Float64Array(this.hypotheses.length);
     for (let i = 0; i < this.hypotheses.length; i++) {
       const h = this.hypotheses[i]!;
-      const prior = !input.kstSnapshot ? 1
-        : (validateKstSnapshot(input.kstSnapshot), h.kind === INTEGRATION_STEP_COORDINATION ? Math.max(0.05, input.kstSnapshot.parentsSatisfiedBySkill[this.targetSkillId] ?? 0.5)
-        : Math.max(0.05, 1 - (input.kstSnapshot.piBySkill[h.skillId!] ?? 0.5)));
+      const prior = !kstSnapshot ? 1
+        : h.kind === INTEGRATION_STEP_COORDINATION ? Math.max(0.05, readRecordEntry(kstSnapshot.parentsSatisfiedBySkill, this.targetSkillId) ?? 0.5)
+        : Math.max(0.05, 1 - (readRecordEntry(kstSnapshot.piBySkill, h.skillId!) ?? 0.5));
       this.logWeights[i] = Math.log(prior);
     }
     this.renormalize();
@@ -173,6 +194,14 @@ export class PrerequisiteDrilldownStateMachine {
     this.repairPlan = [{ stepIndex: 0, kind: "restore_original_attempt", skillId: this.targetSkillId, itemId: this.frozenContext.originalItemId, label: `Restore ${this.targetSkillId}` }];
   }
 
+  private transitionToInsufficientEvidence(): void {
+    this.status = "restore_original_attempt";
+    this.rootCause = "insufficient_diagnostic_evidence";
+    this.confirmedDeficitSkillIds = [];
+    this.pendingProbeId = null;
+    this.repairPlan = [{ stepIndex: 0, kind: "restore_original_attempt", skillId: this.targetSkillId, itemId: this.frozenContext.originalItemId, label: `Restore ${this.targetSkillId}` }];
+  }
+
   private transitionToRepairPlan(): void {
     let bestDeficit = this.prerequisitesInTopoOrder[0]!;
     let bestWeight = -1;
@@ -196,26 +225,35 @@ export class PrerequisiteDrilldownStateMachine {
   }
 
   private finalizeOutcome(): void {
-    if (this.probesAdministered > 0 && this.unassistedCorrectCount === this.probesAdministered && !this.hadNonUnassistedProbe) {
+    if (this.unassistedProbeCount === 0) {
+      this.transitionToInsufficientEvidence();
+    } else if (this.unassistedCorrectCount === this.probesAdministered && !this.hadNonUnassistedProbe) {
       this.transitionToRestoreOriginal();
+    } else if (this.unassistedFailureCount === 0) {
+      this.transitionToInsufficientEvidence();
     } else {
       this.transitionToRepairPlan();
     }
   }
 
+  private capLimit(): number {
+    return Math.min(this.#effectiveMaxProbes, MAX_TOTAL_DRILLDOWN_PROBES);
+  }
+
   selectNextProbe(): DrilldownProbeSelection {
+    const cap = this.capLimit();
     if (this.status !== "probing") {
       return { status: this.status, probe: null, mutualInformationBits: null, probesAdministered: this.probesAdministered, remainingProbes: 0 };
     }
     if (this.pendingProbeId) {
       const pending = this.probeById.get(this.pendingProbeId);
-      if (pending && !this.usedItemIds.has(pending.itemId) && !this.usedFamilyIds.has(pending.familyId)
+      if (pending && this.probesAdministered < cap && !this.usedItemIds.has(pending.itemId) && !this.usedFamilyIds.has(pending.familyId)
         && pending.requiredSkillIds.length > 0 && pending.requiredSkillIds.every(id => this.prerequisiteSet.has(id))) {
-        return { status: this.status, probe: pending, mutualInformationBits: this.computeProbeMutualInformation(pending), probesAdministered: this.probesAdministered, remainingProbes: Math.max(0, this.maxTotalProbes - this.probesAdministered) };
+        return { status: this.status, probe: pending, mutualInformationBits: this.computeProbeMutualInformation(pending), probesAdministered: this.probesAdministered, remainingProbes: Math.max(0, cap - this.probesAdministered) };
       }
       this.pendingProbeId = null;
     }
-    const candidates = this.probesAdministered < this.maxTotalProbes ? this.eligibleUnusedProbes() : [];
+    const candidates = this.probesAdministered < cap ? this.eligibleUnusedProbes() : [];
     if (candidates.length === 0) {
       this.finalizeOutcome();
       return { status: this.status, probe: null, mutualInformationBits: null, probesAdministered: this.probesAdministered, remainingProbes: 0 };
@@ -235,13 +273,18 @@ export class PrerequisiteDrilldownStateMachine {
       return { status: this.status, probe: null, mutualInformationBits: null, probesAdministered: this.probesAdministered, remainingProbes: 0 };
     }
     this.pendingProbeId = bestProbe.itemId;
-    return { status: this.status, probe: bestProbe, mutualInformationBits: bestMi, probesAdministered: this.probesAdministered, remainingProbes: Math.max(0, this.maxTotalProbes - this.probesAdministered) };
+    return { status: this.status, probe: bestProbe, mutualInformationBits: bestMi, probesAdministered: this.probesAdministered, remainingProbes: Math.max(0, cap - this.probesAdministered) };
   }
 
   recordProbeResponse(observation: DiagnosticProbeObservation): DrilldownStateSnapshot {
-    if (!observation.observationId.trim()) throw new DiagnosticPlacementError("VALIDATION", "observationId must be non-empty");
+    const trimmedObsId = observation.observationId.trim();
+    if (!trimmedObsId) throw new DiagnosticPlacementError("VALIDATION", "observationId must be non-empty");
+    if (this.snapshotConsumedObservationIds.has(trimmedObsId)) {
+      throw new DiagnosticPlacementError("VALIDATION", `Observation ${trimmedObsId} was already consumed by KST placement snapshot`);
+    }
     if (this.seenObservationIds.has(observation.observationId)) return this.getState();
-    if (this.status !== "probing" || this.probesAdministered >= this.maxTotalProbes) {
+    const cap = this.capLimit();
+    if (this.status !== "probing" || this.probesAdministered >= cap) {
       throw new DiagnosticPlacementError("INVALID_STATE", `Drilldown hard cap (${MAX_TOTAL_DRILLDOWN_PROBES}) reached or already finalized`);
     }
     const probe = this.probeById.get(observation.itemId);
@@ -263,6 +306,7 @@ export class PrerequisiteDrilldownStateMachine {
     this.probesAdministered += 1;
 
     if (isUnassistedValidObservation(observation)) {
+      this.unassistedProbeCount += 1;
       const savedLogW = this.logWeights.slice();
       const savedW = this.weights.slice();
       for (let i = 0; i < this.hypotheses.length; i++) {
@@ -272,11 +316,12 @@ export class PrerequisiteDrilldownStateMachine {
       }
       if (!this.renormalize()) { this.logWeights.set(savedLogW); this.weights.set(savedW); }
       if (observation.correct) this.unassistedCorrectCount += 1;
+      else this.unassistedFailureCount += 1;
     } else {
       this.hadNonUnassistedProbe = true;
     }
 
-    const canContinue = this.probesAdministered < this.maxTotalProbes &&
+    const canContinue = this.probesAdministered < cap &&
       this.eligibleUnusedProbes().some(c => this.computeProbeMutualInformation(c) > 1e-12);
     if (!canContinue) this.finalizeOutcome();
     return this.getState();
@@ -291,7 +336,7 @@ export class PrerequisiteDrilldownStateMachine {
       status: this.status,
       rootCause: this.rootCause,
       targetSkillId: this.targetSkillId,
-      maxTotalProbes: this.maxTotalProbes,
+      maxTotalProbes: this.capLimit(),
       probesAdministered: this.probesAdministered,
       confirmedDeficitSkillIds: [...this.confirmedDeficitSkillIds],
       posteriors: this.hypotheses.map((h, i) => ({ hypothesisId: h.id, kind: h.kind, skillId: h.skillId, probability: this.weights[i]! })),

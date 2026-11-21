@@ -287,12 +287,14 @@ describe("Hard-capped 2-probe PrerequisiteDrilldownStateMachine", () => {
     expect(oneDone.rootCause).toBe(INTEGRATION_STEP_COORDINATION);
     expect(oneDone.restoreContext).toEqual(originalContext);
 
-    // Assisted probes must never qualify as integration_step_coordination
+    // Assisted-only probes have zero unassisted diagnostic evidence -> honest insufficient_diagnostic_evidence restore
     const assisted = new PrerequisiteDrilldownStateMachine({ skills: chainSkills, targetSkillId: "TARGET", probePool: chainProbes, originalContext, maxProbes: 1 });
     const aSel = assisted.selectNextProbe();
     const aDone = assisted.recordProbeResponse({ observationId: "a-pass", itemId: aSel.probe!.itemId, correct: true, channel: "assisted" });
-    expect(aDone.status).toBe("repair_plan_ready");
-    expect(aDone.rootCause).toBe("prerequisite_deficit");
+    expect(aDone.status).toBe("restore_original_attempt");
+    expect(aDone.rootCause).toBe("insufficient_diagnostic_evidence");
+    expect(aDone.confirmedDeficitSkillIds).toEqual([]);
+    expect(aDone.repairPlan.map(s => s.kind)).toEqual(["restore_original_attempt"]);
   });
 });
 
@@ -407,19 +409,23 @@ describe("Round-2 correctness, anti-double-counting & fail-closed regression che
     expect(session.getSessionSummary().remainingBudgetSeconds).toBe(100);
     expect(session.selectNextProbe().probe?.itemId).toBe("p1");
 
-    // Valid response for a different item p2 clears pendingProbeId (p1) and reaches maxItems
-    const rec = session.recordResponse({ observationId: "obs-p2", itemId: "p2", correct: true });
+    // While p1 is pending, submitting a different item p2 fails VALIDATION without mutating state
+    expect(() => session.recordResponse({ observationId: "obs-mismatch", itemId: "p2", correct: true })).toThrow(DiagnosticPlacementError);
+    expect(session.selectNextProbe().probe?.itemId).toBe("p1");
+
+    // Valid response for pending p1 clears pendingProbeId and reaches maxItems
+    const rec = session.recordResponse({ observationId: "obs-p1", itemId: "p1", correct: true });
     expect(rec.applied).toBe(true);
     expect(session.getSessionSummary().stopReason).toBe("max_items_reached");
 
     // Replay remains idempotent after stop
-    const replay = session.recordResponse({ observationId: "obs-p2", itemId: "p2", correct: true });
+    const replay = session.recordResponse({ observationId: "obs-p1", itemId: "p1", correct: true });
     expect(replay.applied).toBe(false);
     expect(replay.reason).toBe("duplicate_observation");
 
     // Fresh observation after stop/maxItems fails closed with INVALID_STATE
     try {
-      session.recordResponse({ observationId: "obs-after-stop", itemId: "p1", correct: true });
+      session.recordResponse({ observationId: "obs-after-stop", itemId: "p2", correct: true });
       expect.unreachable("should throw INVALID_STATE");
     } catch (err) {
       expect(err).toBeInstanceOf(DiagnosticPlacementError);
@@ -548,5 +554,211 @@ describe("Round-2 correctness, anti-double-counting & fail-closed regression che
     const stoppedByTime = timeSession.selectNextProbe();
     expect(stoppedByTime.status).toBe("stopped");
     expect(stoppedByTime.stopReason).toBe("time_budget_exhausted");
+  });
+});
+
+describe("Round-3 multi-merge lookahead, envelope gating, cap integrity & prototype-safety fixes", () => {
+  const makeChain = (prefix: string, chapterId: string, len: number): DiagnosticSkillNode[] =>
+    Array.from({ length: len }, (_, i) => ({
+      skillId: `${prefix}_${i}`,
+      chapterId,
+      ...(i > 0 ? { prerequisiteIds: [`${prefix}_${i - 1}`] } : {}),
+    }));
+
+  it("[P1-1] simulates post-candidate merged component sizes so selecting A+B cannot strand chapter C's B+C probe", () => {
+    const skills = [...makeChain("A", "chA", 27), ...makeChain("B", "chB", 27), ...makeChain("C", "chC", 27)];
+    const probeAB: DiagnosticProbeItem = { itemId: "p-ab", familyId: "f-ab", chapterId: "chA", requiredSkillIds: ["A_26", "B_26"], slip: 0.05, guess: 0.05, estimatedSeconds: 20 };
+    const probeAOnly: DiagnosticProbeItem = { itemId: "p-a-only", familyId: "f-a-only", chapterId: "chA", requiredSkillIds: ["A_0"], slip: 0.25, guess: 0.25, estimatedSeconds: 20 };
+    const probeBC: DiagnosticProbeItem = { itemId: "p-bc", familyId: "f-bc", chapterId: "chC", requiredSkillIds: ["B_26", "C_26"], slip: 0.1, guess: 0.1, estimatedSeconds: 20 };
+
+    const session = new DiagnosticPlacementSession({
+      skills,
+      candidatePool: [probeAB, probeAOnly, probeBC],
+      config: { minItems: 2, maxItems: 3, totalBudgetSeconds: 120, chapterQuotas: { chA: 1, chC: 1 } },
+    });
+
+    // p-ab has highest MI (slip=guess=0.05), but picking it would make p-bc (784 * 28 = 21_952 > 20_000) infeasible!
+    const sel1 = session.selectNextProbe();
+    expect(sel1.status).toBe("selected");
+    expect(sel1.probe?.itemId).not.toBe("p-ab");
+    session.recordResponse({ observationId: "look-1", itemId: sel1.probe!.itemId, correct: true });
+
+    const sel2 = session.selectNextProbe();
+    expect(sel2.status).toBe("selected");
+    session.recordResponse({ observationId: "look-2", itemId: sel2.probe!.itemId, correct: true });
+
+    const summary = session.getSessionSummary();
+    expect(summary.chapterCounts["chA"]).toBeGreaterThanOrEqual(1);
+    expect(summary.chapterCounts["chC"]).toBeGreaterThanOrEqual(1);
+  });
+
+  it("[P1-2] enforces maxItems across assisted/hinted responses and validates direct recordResponse submissions", () => {
+    const skills: DiagnosticSkillNode[] = [
+      { skillId: "A", chapterId: "ch1" },
+      { skillId: "B", chapterId: "ch2" },
+    ];
+    const pool: DiagnosticProbeItem[] = [
+      { itemId: "q-a", familyId: "fa", chapterId: "ch1", requiredSkillIds: ["A"], slip: 0.1, guess: 0.1, estimatedSeconds: 20 },
+      { itemId: "q-b", familyId: "fb", chapterId: "ch2", requiredSkillIds: ["B"], slip: 0.1, guess: 0.1, estimatedSeconds: 20 },
+      { itemId: "q-a2", familyId: "fa2", chapterId: "ch1", requiredSkillIds: ["A"], slip: 0.1, guess: 0.1, estimatedSeconds: 20 },
+    ];
+
+    // Assisted responses still increment total administeredCount and stop cleanly at maxItems = 2
+    const hintedSession = new DiagnosticPlacementSession({
+      skills,
+      candidatePool: pool,
+      config: { minItems: 1, maxItems: 2, totalBudgetSeconds: 100 },
+    });
+    const s1 = hintedSession.selectNextProbe();
+    const r1 = hintedSession.recordResponse({ observationId: "h-1", itemId: s1.probe!.itemId, correct: true, channel: "assisted" });
+    expect(r1.applied).toBe(false);
+    expect(r1.administeredCount).toBe(1);
+
+    const s2 = hintedSession.selectNextProbe();
+    const r2 = hintedSession.recordResponse({ observationId: "h-2", itemId: s2.probe!.itemId, correct: true, channel: "hinted" });
+    expect(r2.applied).toBe(false);
+    expect(r2.administeredCount).toBe(2);
+    expect(hintedSession.getSessionSummary().appliedEvidenceCount).toBe(0);
+    expect(hintedSession.selectNextProbe().stopReason).toBe("max_items_reached");
+    expect(() => hintedSession.recordResponse({ observationId: "h-3", itemId: "q-a2", correct: true })).toThrow(DiagnosticPlacementError);
+
+    // Direct submission with pendingProbeId === null validates chapter maxItems, budget, and feasibility
+    const directSession = new DiagnosticPlacementSession({
+      skills,
+      candidatePool: [
+        { itemId: "c1-ok", familyId: "fc1", chapterId: "ch1", requiredSkillIds: ["A"], slip: 0.1, guess: 0.1, estimatedSeconds: 30 },
+        { itemId: "c1-over", familyId: "fc2", chapterId: "ch1", requiredSkillIds: ["A"], slip: 0.1, guess: 0.1, estimatedSeconds: 90 },
+      ],
+      config: { minItems: 1, maxItems: 2, totalBudgetSeconds: 50, chapterQuotas: { ch1: { minItems: 0, maxItems: 1 } } },
+    });
+    expect(() => directSession.recordResponse({ observationId: "d-over-budget", itemId: "c1-over", correct: true })).toThrow(DiagnosticPlacementError);
+    expect(directSession.recordResponse({ observationId: "d-ok", itemId: "c1-ok", correct: true }).administeredCount).toBe(1);
+    expect(() => directSession.recordResponse({ observationId: "d-over-cap", itemId: "c1-over", correct: true })).toThrow(DiagnosticPlacementError);
+    expect(directSession.getSessionSummary().administeredCount).toBe(1);
+  });
+
+  it("[P1-3] never grants inferred_ready from bounded_component_envelope approximations", () => {
+    const boundedSkills: DiagnosticSkillNode[] = [
+      { skillId: "ROOT", chapterId: "c1" },
+      ...Array.from({ length: 16 }, (_, i) => ({ skillId: `LEAF_${String(i).padStart(2, "0")}`, chapterId: "c1", prerequisiteIds: ["ROOT"] })),
+      { skillId: "EXACT_P", chapterId: "c2" },
+      { skillId: "EXACT_CHILD", chapterId: "c2", prerequisiteIds: ["EXACT_P"] },
+    ];
+    const space = createKstStateSpace(boundedSkills);
+    expect(space.approximationMode).toBe("bounded_component_envelope");
+    const routes = classifyPlacementRoutes(space, boundedSkills, { readyThreshold: 0.1, skipThreshold: 0.99 });
+
+    const leafRoute = routes.find(r => r.skillId === "LEAF_00")!;
+    expect(leafRoute.parentsSatisfiedProbability).toBeGreaterThanOrEqual(0.1);
+    expect(leafRoute.route).toBe("prerequisite_gap_blocked");
+
+    // Disconnected exact component in the same graph remains certified
+    const exactRoute = routes.find(r => r.skillId === "EXACT_CHILD")!;
+    expect(exactRoute.route).toBe("inferred_ready");
+  });
+
+  it("[P1-4 & P1-5 & P2-3 & P2-6] enforces honest inconclusive drilldown, snapshot consumed rejection, and non-writable 2-probe cap", () => {
+    const skills: DiagnosticSkillNode[] = [
+      { skillId: "L0", chapterId: "c1" },
+      { skillId: "L1", chapterId: "c1", prerequisiteIds: ["L0"] },
+      { skillId: "TARGET", chapterId: "c1", prerequisiteIds: ["L1"] },
+    ];
+    const originalContext = { originalAttemptId: "att-r3", originalItemId: "item-r3", frozenDraftText: "x = ", frozenCursorOffset: 4, startedAtMs: 1_700_000_000_000 };
+
+    // Empty/unrelated pool finalizes without fabricating deficits
+    const noProbeMachine = new PrerequisiteDrilldownStateMachine({
+      skills,
+      targetSkillId: "TARGET",
+      probePool: [{ itemId: "p-tgt-only", familyId: "ft", chapterId: "c1", requiredSkillIds: ["TARGET"], slip: 0.05, guess: 0.05, estimatedSeconds: 20 }],
+      originalContext,
+    });
+    const noPick = noProbeMachine.selectNextProbe();
+    expect(noPick.status).toBe("restore_original_attempt");
+    const noState = noProbeMachine.getState();
+    expect(noState.rootCause).toBe("insufficient_diagnostic_evidence");
+    expect(noState.confirmedDeficitSkillIds).toEqual([]);
+    expect(noState.repairPlan.map(s => s.kind)).toEqual(["restore_original_attempt"]);
+
+    // Non-writable maxTotalProbes + consumedProbeObservationIds rejection + mixed/assisted inconclusive outcome
+    const kst = createKstStateSpace(skills);
+    const pL0: DiagnosticProbeItem = { itemId: "dd-l0", familyId: "f-l0", chapterId: "c1", requiredSkillIds: ["L0"], slip: 0.05, guess: 0.05, estimatedSeconds: 20 };
+    const pL1: DiagnosticProbeItem = { itemId: "dd-l1", familyId: "f-l1", chapterId: "c1", requiredSkillIds: ["L1"], slip: 0.05, guess: 0.05, estimatedSeconds: 20 };
+    kst.applyProbeObservation(pL0, { observationId: "already-in-placement", itemId: "dd-l0", correct: true });
+    const kstSnap = buildKstPriorSnapshot(kst);
+
+    const machine = new PrerequisiteDrilldownStateMachine({
+      skills,
+      targetSkillId: "TARGET",
+      probePool: [pL0, pL1],
+      originalContext,
+      maxProbes: 5,
+      kstSnapshot: kstSnap,
+    });
+    expect(Reflect.set(machine, "maxTotalProbes", 4)).toBe(false);
+    expect(machine.maxTotalProbes).toBe(MAX_TOTAL_DRILLDOWN_PROBES);
+
+    expect(() => machine.recordProbeResponse({ observationId: "  already-in-placement  ", itemId: "dd-l0", correct: true })).toThrow(DiagnosticPlacementError);
+    expect(machine.getState().probesAdministered).toBe(0);
+
+    // 1 unassisted pass + 1 assisted pass -> cannot confirm deficit or coordination -> insufficient_diagnostic_evidence
+    machine.recordProbeResponse({ observationId: "dd-u1", itemId: "dd-l0", correct: true });
+    const finalMix = machine.recordProbeResponse({ observationId: "dd-a2", itemId: "dd-l1", correct: true, channel: "assisted" });
+    expect(finalMix.rootCause).toBe("insufficient_diagnostic_evidence");
+    expect(finalMix.confirmedDeficitSkillIds).toEqual([]);
+    expect(finalMix.repairPlan.map(s => s.kind)).toEqual(["restore_original_attempt"]);
+
+    // Empty-prerequisite target validates corrupted kstSnapshot once in constructor
+    expect(() => new PrerequisiteDrilldownStateMachine({
+      skills: [{ skillId: "ONLY", chapterId: "c1" }],
+      targetSkillId: "ONLY",
+      probePool: [],
+      originalContext,
+      kstSnapshot: { ...kstSnap, outerFringeBySkill: { ...kstSnap.outerFringeBySkill, L0: 2 } },
+    })).toThrow(DiagnosticPlacementError);
+  });
+
+  it("[P2-1 & P2-2 & P2-4 & P2-5] handles __proto__/constructor IDs safely, preserves BigInt string count at 53 skills, avoids log overflow, and enforces strict snapshot invariants", () => {
+    // P2-1: Prototype-safe skill IDs
+    const protoSkills: DiagnosticSkillNode[] = [
+      { skillId: "__proto__", chapterId: "__proto__" },
+      { skillId: "constructor", chapterId: "c2", prerequisiteIds: ["__proto__"] },
+    ];
+    const protoSpace = createKstStateSpace(protoSkills);
+    const protoSnap = buildKstPriorSnapshot(protoSpace);
+    expect(Object.prototype).toEqual({});
+    expect(typeof Object.getOwnPropertyDescriptor(protoSnap.piBySkill, "__proto__")?.value).toBe("number");
+    expect(getSkillCovariance(protoSnap, "__proto__", "constructor")).toBeGreaterThan(0);
+    const protoRoutes = classifyPlacementRoutes(protoSnap, protoSkills);
+    expect(protoRoutes).toHaveLength(2);
+    const protoDd = new PrerequisiteDrilldownStateMachine({
+      skills: protoSkills,
+      targetSkillId: "constructor",
+      probePool: [{ itemId: "p-proto", familyId: "f-proto", chapterId: "__proto__", requiredSkillIds: ["__proto__"], slip: 0.05, guess: 0.05, estimatedSeconds: 20 }],
+      originalContext: { originalAttemptId: "a", originalItemId: "i", frozenDraftText: "", frozenCursorOffset: 0, startedAtMs: 1 },
+      kstSnapshot: protoSnap,
+    });
+    expect(protoDd.selectNextProbe().probe?.itemId).toBe("p-proto");
+
+    // P2-2: 53 independent skills => 2^53 = 9007199254740992 (> Number.MAX_SAFE_INTEGER)
+    const ind53 = Array.from({ length: 53 }, (_, i) => ({ skillId: `K_${i}`, chapterId: "c1" }));
+    const space53 = createKstStateSpace(ind53);
+    expect(space53.totalFeasibleStateCount).toBeNull();
+    expect(space53.totalFeasibleStateCountExact).toBe("9007199254740992");
+    expect(buildKstPriorSnapshot(space53).totalFeasibleStateCountExact).toBe("9007199254740992");
+
+    // P2-4: Overflow-safe log-likelihood ratio for Number.MIN_VALUE slip/guess
+    const baseSnap = buildKstPriorSnapshot(createKstStateSpace([{ skillId: "Z", chapterId: "c1" }]));
+    const minRes = updateSkillMasteryFromKstSnapshot(baseSnap, "Z", [
+      { observationId: "min-1", skillId: "Z", correct: true, slip: Number.MIN_VALUE, guess: Number.MIN_VALUE },
+      { observationId: "min-2", skillId: "Z", correct: false, slip: Number.MIN_VALUE, guess: Number.MIN_VALUE },
+    ]);
+    expect(Number.isFinite(minRes.posteriorProbability)).toBe(true);
+    expect(minRes.posteriorProbability).toBeCloseTo(0.5, 10);
+
+    // P2-5: Tight validateKstSnapshot & getSkillCovariance guards
+    expect(() => validateKstSnapshot({ ...protoSnap, wByState: { "[]": 0.4 } })).toThrow(DiagnosticPlacementError);
+    expect(() => validateKstSnapshot({ ...protoSnap, outerFringeBySkill: { ...protoSnap.outerFringeBySkill, constructor: 0.9 } })).toThrow(DiagnosticPlacementError);
+    expect(() => validateKstSnapshot({ ...protoSnap, skillCovariance: { ...protoSnap.skillCovariance, ["__proto__"]: { ["__proto__"]: 0.5 } } })).toThrow(DiagnosticPlacementError);
+    expect(() => getSkillCovariance({ ...protoSnap, skillCovariance: { constructor: { constructor: Number.NaN } } }, "constructor", "constructor")).toThrow(DiagnosticPlacementError);
   });
 });
