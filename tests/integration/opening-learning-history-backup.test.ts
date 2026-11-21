@@ -4,14 +4,14 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, beforeEach, expect, it } from "vitest";
-import { createOpeningSourceRepository, createOpeningLearningRepository, readOpeningObservationHistory, reviseOpeningLearningObservation, readOpeningCourseEvidence } from "@aistudy/database";
-import { composeOpeningBackupDraft } from "@aistudy/domain";
+import { executeOpeningRestoreApply, readOpeningRestoreNamespaceCounts, createOpeningSourceRepository, createOpeningLearningRepository, readOpeningObservationHistory, reviseOpeningLearningObservation, readOpeningCourseEvidence } from "@aistudy/database";
+import { composeOpeningBackupDraft, validateOpeningRestore } from "@aistudy/domain";
 import { planOpeningRestoreApply } from "../../packages/domain/src/opening/backup-apply-plan";
 import { normalizeOpeningRestoreHistory } from "../../packages/domain/src/opening/backup-policy";
 import { readOpeningCourseLearningHistory } from "../../packages/database/src/repositories/opening-learning-history-read";
-import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
+import { createOpeningFixture, insertTestTeachingActivity, type OpeningFixture } from "./opening-fixture";
 import { learningAttemptFixture } from "./opening-learning-attempt-fixture";
-import { sourceBytes } from "./opening-backup-records-fixture";
+import { deleteBackupFixtureRows, sourceBytes } from "./opening-backup-records-fixture";
 import { readOpeningBackupRecords } from "../../packages/database/src/repositories/opening-backup-records";
 import { prepareOpeningSourceBackup } from "../../packages/database/src/repositories/opening-backup-prepare";
 import { writeOpeningBackupArchive, readOpeningBackupArchive } from "../../packages/database/src/storage/opening-backup-archive";
@@ -32,6 +32,37 @@ afterAll(async () => {
   try { for(const key of objectKeys) await storage.deleteObject(key); }
   finally { if(storage.client instanceof S3Client) storage.client.destroy(); await fixture?.close(); }
 });
+it("restores one empty document for legacy teaching metadata sharing a missing library inventory", async () => {
+  const scope = fixture.otherScope, sql = fixture.sql, documentId = randomUUID(), unitId = randomUUID(), specId = randomUUID();
+  const activityId = await insertTestTeachingActivity(sql, scope);
+  const records = await readOpeningBackupRecords(sql, scope);
+  const composed = composeOpeningBackupDraft({ records, staging: { snapshot: { workspaceId: scope.workspaceId,
+    privacyEpoch: records.privacyEpoch, deletionJournal: records.deletionJournal, memoryDeletions: records.memoryDeletions, sources: [] }, objects: [] } });
+  expect(composed.ok).toBe(true);
+  if (!composed.ok) return;
+  const archive = composed.backup;
+  const owner = { workspace_id: scope.workspaceId, owner_user_id: scope.ownerUserId };
+  archive.tables.opening_teaching_units = [{ ...owner, id: unitId, title: "Legacy lesson", document_id: documentId }];
+  archive.tables.opening_teaching_activity_specs = [{ ...owner, id: specId, activity_id: activityId,
+    teaching_unit_id: unitId, document_id: documentId, revision_number: 1, version: 1 }];
+  expect(validateOpeningRestore(archive, [], records.memoryDeletions).allowed).toBe(false);
+  delete archive.tables.library_documents;
+  expect(validateOpeningRestore(archive, [], records.memoryDeletions).allowed).toBe(true);
+  const apply = () => executeOpeningRestoreApply(sql, { confirmLocalRestore: true, backup: archive,
+    currentMemoryDeletions: records.memoryDeletions, currentLearningState: { workspacePreferences: null, courses: [] } });
+  expect(await apply()).toMatchObject({ ok: false, code: "TARGET_NOT_EMPTY" });
+  await sql.begin(tx => deleteBackupFixtureRows(tx, scope));
+  const result = await apply();
+  expect(result, result.errors.join(", ")).toMatchObject({ ok: true });
+  expect(await readOpeningRestoreNamespaceCounts(sql, scope.workspaceId)).toMatchObject({
+    library_documents: 1, library_blocks: 0, library_revisions: 0, opening_teaching_units: 1, opening_teaching_activity_specs: 1,
+  });
+  expect(await sql`SELECT d.id,d.workspace_id FROM library_documents d
+    JOIN opening_teaching_units u ON u.document_id=d.id
+    JOIN opening_teaching_activity_specs s ON s.teaching_unit_id=u.id AND s.document_id=d.id WHERE s.id=${specId}`)
+    .toEqual([{ id: documentId, workspace_id: scope.workspaceId }]);
+});
+
 it.each(["complete", "completeWithParseJob"])("captures immutable finalized source metadata through %s", async method => {
   const repo = createOpeningSourceRepository(fixture.sql);
   const actual = { bytes: 4, sha256: "ab".repeat(32), mime: "application/pdf" as const };
@@ -106,7 +137,7 @@ it.each([[false, false], [true, false], [false, true]])("restores attempt facts,
       const plan = planOpeningRestoreApply(archive.metadata, [], { confirmLocalRestore: true, availableCourseIds, currentLearningState, currentMemoryDeletions });
       expect(plan.ok).toBe(true); if (!plan.ok) return;
       await fixture.sql.begin(async tx => {
-        for (const { table } of [...plan.plan.batches].reverse()) await tx.unsafe(`DELETE FROM ${table}`);
+        await deleteBackupFixtureRows(tx, fixture.scope);
         for (const { table, rows } of plan.plan.batches) if (rows) {
           // Select only archived columns so newly added SQL defaults remain defaults,
           // rather than json_populate_recordset turning absent fields into NULL.
@@ -191,7 +222,7 @@ it.each([false, true])("restores interleaved course facts with explicit workspac
   expect(plan.plan.batches.map(batch => batch.table)).not.toContain("opening_jobs");
   expect(plan.plan.batches.map(batch => batch.table)).not.toContain("opening_outbox");
   await fixture.sql.begin(async tx => {
-    for (const { table } of [...plan.plan.batches].reverse()) await tx.unsafe(`DELETE FROM ${table}`);
+    await deleteBackupFixtureRows(tx, fixture.scope);
     for (const { table, rows } of plan.plan.batches) if (rows) {
       await tx.unsafe(`INSERT INTO ${table} SELECT * FROM json_populate_recordset(NULL::${table}, $1::text::json)`, [JSON.stringify(restoredBackup.tables[table])]);
     }

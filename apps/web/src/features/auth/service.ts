@@ -604,11 +604,13 @@ export async function getDocumentForPrincipal(
   runtime: AuthRuntime,
   principal: Principal,
   documentId: string,
+  options: { redactAnswerKeys?: boolean } = {},
 ) {
   try {
     const doc = await runtime.library.getDocument({
       workspaceId: principal.workspaceId,
       documentId,
+      ...options,
     });
     assertAuthorized(principal, "document.read", {
       type: "document",
@@ -632,12 +634,13 @@ export async function getDocumentForPrincipal(
 export async function listDocumentsForPrincipal(
   runtime: AuthRuntime,
   principal: Principal,
+  options: { redactAnswerKeys?: boolean } = {},
 ) {
   assertAuthorized(principal, "document.read", {
     type: "document",
     workspaceId: principal.workspaceId,
   });
-  return runtime.library.listDocuments({ workspaceId: principal.workspaceId });
+  return runtime.library.listDocuments({ workspaceId: principal.workspaceId, ...options });
 }
 
 function summaryText(value: unknown): string | null {

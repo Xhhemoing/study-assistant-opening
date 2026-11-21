@@ -1,3 +1,4 @@
+import { findForbiddenBackupTable, isForbiddenBackupTable } from "./opening/backup-inventory";
 import { z } from "zod";
 import { lossEntrySchema } from "./portability";
 
@@ -8,7 +9,7 @@ export const backupConflictPolicySchema = z.enum(["reject", "skip"]);
 export const backupSchemaManifestSchema = z.object({
   formatVersion: z.literal(NATIVE_BACKUP_FORMAT_VERSION),
   latestMigrationId: z.string().min(1),
-  tables: z.array(z.string().min(1)).min(1),
+  tables: z.array(z.string().min(1).refine(name => !isForbiddenBackupTable(name), "Forbidden backup table")).min(1),
   workspaceSchemaVersion: z.number().int().positive(),
 });
 
@@ -39,7 +40,7 @@ export const backupFileManifestEntrySchema = z.object({
 
 const jsonRecordSchema = z.record(z.string(), z.unknown());
 
-export const nativeBackupPackageSchema = z.object({
+const nativePackageFields = z.object({
   format: z.literal("aistudy-native"),
   schemaManifest: backupSchemaManifestSchema,
   sourceWorkspaceId: z.string().uuid(),
@@ -61,6 +62,12 @@ export const nativeBackupPackageSchema = z.object({
   }),
   files: z.array(backupFileManifestEntrySchema),
 });
+
+export const nativeBackupPackageSchema = z.preprocess((value, ctx) => {
+  const forbidden = findForbiddenBackupTable(value);
+  if (forbidden) ctx.addIssue({ code: "custom", message: `Forbidden backup table: ${forbidden}` });
+  return value;
+}, nativePackageFields);
 
 export const backupExportRequestSchema = z.object({});
 

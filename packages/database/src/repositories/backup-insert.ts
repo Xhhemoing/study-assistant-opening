@@ -1,6 +1,5 @@
 import { uuidSchema } from "@aistudy/contracts";
 import { BackupRestoreError } from "./backup-types";
-import { readNoteBackupProvenance } from "./native-note-privacy";
 import { restoreNativeLearningLinks } from "./native-learning-links";
 import type { Sql } from "postgres";
 import type { NativeBackupPackage } from "@aistudy/contracts";
@@ -158,13 +157,6 @@ export async function applyRestorePlan(tx: Sql, plan: NativeRestorePlan): Promis
     if (step.collection === "goals") {
       for (const goal of step.records) for (const courseId of new Set((goal.courseIds ?? [goal.courseId]) as string[])) {
         await tx`INSERT INTO course_goal_links(workspace_id,goal_id,course_id) VALUES(${String(goal.workspaceId)},${goal.id},${courseId})`;
-      }
-    }
-    if (step.collection === "documents") {
-      for (const record of step.records) {
-        const provenance = readNoteBackupProvenance(record, false);
-        if (provenance) await tx`INSERT INTO opening_note_provenance(document_id,workspace_id,context_source_refs)
-          VALUES(${record.id},${String(record.workspaceId)},${tx.json(provenance.contextSourceRefs)})`;
       }
     }
     if (step.collection === "explorations") {

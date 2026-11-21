@@ -10,6 +10,11 @@ export const knowledgeSnapshotSchema = z.object({
   edges: z.array(knowledgeEdgeSchema),
   coveredSourceVersions: z.record(z.string(), z.number().int().nonnegative()).optional(),
 }).strict();
+/** Persistence and Backup v2 metadata kept out of the public knowledge snapshot. */
+export const storedKnowledgeSnapshotSchema = knowledgeSnapshotSchema.extend({
+  coveredSourceChunkDigests: z.record(z.string(), z.string().regex(/^[0-9a-f]{64}$/)).optional(),
+});
+export type StoredKnowledgeSnapshot = z.infer<typeof storedKnowledgeSnapshotSchema>;
 export const skillEvidenceSchema = z.object({ nodeId: uuidSchema, observationId: uuidSchema, dimension: z.enum(["recall", "explain", "procedure", "transfer", "timed"]) }).strict();
 export const tutorActionSchema = z.object({ nodeId: uuidSchema, kind: z.enum(["clarify", "worked_example", "guided", "independent_variant", "delayed_retest"]), evidenceIds: z.array(uuidSchema), reason: z.string().min(1).max(2000) }).strict();
 export const courseKnowledgeSyncStatusSchema = z.enum(["empty", "up_to_date", "pending", "needs_rebuild"]);
