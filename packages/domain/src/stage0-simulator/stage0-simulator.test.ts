@@ -1205,8 +1205,83 @@ describe("Stage-0 768-episode deterministic student simulator", () => {
   });
 
   it.each([
+    ["row spacing", String.raw`\\[1ex]`],
+    ["starred row", String.raw`\\*`],
+    ["star and spacing", String.raw`\\ * [2.5pt]`],
+  ])("consumes the full TeX row break (%s) in inline and display math", (_name, rowBreak) => {
+    for (const [open, close] of [
+      ["$", "$"], ["$$", "$$"], ["\\(", "\\)"], ["\\[", "\\]"],
+      ["\\begin{align}", "\\end{align}"], ["\\begin{aligned}", "\\end{aligned}"],
+    ] as const) {
+      for (const equation of ["x = 4", "-x = 4", "x = 4/5"]) {
+        const body = "y = 2 " + rowBreak + "\n" + equation;
+        for (const gap of ["", "\n"]) {
+          const hint = open + gap + body + gap + close;
+          expect(detectProtectedLeakage(hint, ["x = 4"], []), hint).toEqual(equation === "x = 4" ? ["x = 4"] : []);
+        }
+      }
+    }
+  });
+
+  it.each([
+    ["x &= 4", ["x = 4"]],
+    ["x =& 4", ["x = 4"]],
+    ["x & = & 4", ["x = 4"]],
+    ["x =& -4", ["x = -4"]],
+    ["2 & x = 4", ["x = 4"]],
+    ["y = 2 & x = 4", ["x = 4"]],
+    ["& x = 4", ["x = 4"]],
+    ["x = 4 & 5", ["x = 4"]],
+    ["x = 4 & \\text{ok}", ["x = 4"]],
+    ["2 x =& 4", []],
+    ["x =& 4/5", []],
+    ["x &:=& 4", []],
+    ["x &\\approx& 4", []],
+    ["x &\\equiv& 4", []],
+    ["x = &amp;4", []],
+    ["x = &#52;", []],
+    ["x = &#x34;", []],
+    ["x \\&= 4", []],
+  ] as const)("resolves TeX alignment columns around %j", (row, expected) => {
+    for (const hint of ["$" + row + "$", "\\begin{align}\n" + row + "\n\\end{align}"]) {
+      expect(detectProtectedLeakage(hint, ["x = 4", "x = -4"], []), hint).toEqual(expected);
+    }
+  });
+
+  it.each([
+    ["Step 2 $x = 4$.", true],
+    ["2 $x = 4$", true],
+    ["Part 2) $x = 4$.", true],
+    ["Step 2 **$x = 4$**.", true],
+    ["Item 3 \\(x = 4\\)", true],
+    ["Item 3 \\[x = 4\\]", true],
+    ["Item 3 $$x = 4$$", true],
+    ["$x$ = $4$", true],
+    ["Step 2 $x$ = $4$.", true],
+    ["Step 2 $2 x = 4$.", false],
+    ["\\(2 x = 4\\)", false],
+    ["2$x$ = 4", false],
+    ["2(x) = 4", false],
+    ["-$x = 4$", false],
+    ["$2$ $x = 4$", false],
+    ["$x = 4$ 2", true],
+    ["$x = 4$ for part 2", true],
+    ["$x = 4$ / 5", false],
+    ["x = 4 $/ 5$", false],
+    ["x = 4 $+ 1$", false],
+    ["$x = 4/5$", false],
+    ["The price is $5. Then x = 4.", true],
+    ["The price is $5\nx = 4.", true],
+  ] as const)("preserves math boundaries next to prose in %j", (hint, leaked) => {
+    expect(detectProtectedLeakage(hint, ["x = 4"], [])).toEqual(leaked ? ["x = 4"] : []);
+  });
+
+  it.each([
     ["$$\nx =\n4\n$$", true],
     ["$$\nx = 4\n/5\n$$", false],
+    ["\\begin{align}\ny = 2 \\\\ * [2.5pt]\nx = 4\n\\end{align}", true],
+    ["$$\nx =& 4\n$$", true],
+    ["Step 2 $x$ = $4$.", true],
     ["Text $a\n- x = 4$", true],
     ["$$ label\n- x = 4\n$$", false],
     ["Text `unpaired\n\n$$ marker`\n- x = 4\n$$", false],

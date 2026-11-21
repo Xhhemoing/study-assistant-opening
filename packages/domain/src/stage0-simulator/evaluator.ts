@@ -145,32 +145,70 @@ function stripEquationLine(line: string): string {
   return candidates.map(stripEquationSegment).join(";");
 }
 
-/** TeX newlines and spacing commands are whitespace. Only a row break ends an equation. */
+const texRelation = /[:!<>]?=|[<>≈≡≤≥≠]|\\(?:approx|equiv|cong|sim|simeq|leq?|geq?|neq?)(?![A-Za-z])/u;
+const startsWithRelation = new RegExp(`^\\s*(?:${texRelation.source})`, "u");
+const endsWithRelation = new RegExp(`(?:${texRelation.source})\\s*$`, "u");
+const texLayoutTokens = /\\\\(?:\s*\*)?(?:\s*\[[^\]]*\])?|\\(?:begin|end)\{[a-zA-Z]+\*?\}|\\.|&(?:[a-zA-Z][a-zA-Z0-9]*|#\d+|#[xX][\da-fA-F]+);|&|\n/gu;
+
+/** TeX rows and independent columns end equations. A tab beside a relation only aligns it. */
 function normalizeMathLayout(text: string): string {
-  return text.replace(/\\\\|\\(?:begin|end)\{[a-zA-Z]+\*?\}|\\.|&(?=\s*=)|\n/gu, (token) => {
-    if (token === "\\\\") return ";";
-    if (token === "\n" || /^\\[ ,;!]$/u.test(token)) return " ";
-    if (token === "&" || token.startsWith("\\begin{") || token.startsWith("\\end{")) return "";
-    return token;
-  });
+  const columns: string[] = [];
+  let column = "";
+  let start = 0;
+  for (const { 0: token, index } of text.matchAll(texLayoutTokens)) {
+    column += text.slice(start, index);
+    start = index + token.length;
+    if (token === "&") {
+      columns.push(column);
+      column = "";
+    } else if (token.startsWith("\\\\")) {
+      column += ";";
+    } else if (token === "\n" || /^\\[ ,;!]$/u.test(token)) {
+      column += " ";
+    } else if (!token.startsWith("\\begin{") && !token.startsWith("\\end{")) {
+      column += token;
+    }
+  }
+  column += text.slice(start);
+  if (columns.length === 0) return column;
+  columns.push(column);
+  return columns.map((value, i) =>
+    i > 0 && !endsWithRelation.test(columns[i - 1]!) && !startsWithRelation.test(value) ? ";" + value : value,
+  ).join("");
 }
 
+/** Normalize each complete formula before either interpretation of a pipe splits it. */
 function inlineEquationParts(segment: string) {
-  const parts = segment.split(equationMarkers);
-  const spanEnds = equationSpanEnds(parts);
-  for (let i = 1; i < parts.length; i += 2) {
-    const end = spanEnds.get(i);
-    if (end === undefined) continue;
-    if (mathSpanClosers.has(parts[i]!) || parts[i]!.startsWith("\\begin{")) {
-      for (let j = i + 1; j < end; j++) parts[j] = normalizeMathLayout(parts[j]!);
+  const raw = segment.split(equationMarkers);
+  const pairs = equationSpanEnds(raw);
+  const mathSpans: [number, number][] = [];
+  if (!pairs.size) return { parts: raw, spanEnds: pairs, mathSpans };
+  const parts = [raw[0]!];
+  const spanEnds = new Map<number, number>();
+  for (let i = 1; i < raw.length; i += 2) {
+    const marker = raw[i]!;
+    const open = parts.length;
+    parts.push(marker);
+    const end = pairs.get(i);
+    if (end !== undefined) {
+      let body = raw.slice(i + 1, end);
+      if (mathSpanClosers.has(marker) || marker.startsWith("\\begin{")) {
+        // A row command and its modifiers can span several Markdown marker tokens.
+        body = normalizeMathLayout(body.join("")).split(equationMarkers);
+        mathSpans.push([open, parts.length + body.length]);
+      }
+      for (const part of body) parts.push(part);
+      spanEnds.set(open, parts.length);
+      parts.push(raw[end]!);
+      i = end;
     }
-    i = end;
+    parts.push(raw[i + 1]!);
   }
-  return { parts, spanEnds };
+  return { parts, spanEnds, mathSpans };
 }
 
 function stripEquationSegment(segment: string): string {
-  const { parts, spanEnds } = inlineEquationParts(segment);
+  const { parts, spanEnds, mathSpans } = inlineEquationParts(segment);
   const hardBreak = /(?: {2}|\\)\n/gu;
   if (parts.length === 1) return segment.replace(hardBreak, ";");
   parts[0] = parts[0]!.replace(hardBreak, ";");
@@ -191,6 +229,16 @@ function stripEquationSegment(segment: string): string {
     }
     // The body of a closed code/math span has already been consumed above.
     parts[i + 1] = parts[i + 1]!.replace(hardBreak, ";");
+  }
+  // Check rendered prose after emphasis removal. A spaced number may label the
+  // next formula, while a number inside a preceding formula can be a coefficient.
+  let proseStart = 0;
+  for (const [open, close] of mathSpans) {
+    const prose = parts.slice(proseStart, open).join("");
+    if (/\d[.)]?\s+$/u.test(prose) && /^\s*\p{L}/u.test(parts.slice(open + 1, close).join(""))) {
+      parts[open] = ";";
+    }
+    proseStart = close + 1;
   }
   return parts.join("");
 }
