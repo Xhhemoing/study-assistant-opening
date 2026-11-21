@@ -658,14 +658,22 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
       setRecoveryNow(Date.now());
       const discovered = pendingJobDiscoveryState({ ok: true, job: pendingJob });
       if (discovered.kind === "active") {
+        if (pendingStop.current?.conversationId === id) {
+          setActiveJobId(null);
+          setPending(false);
+          await stopSavedJobRef.current(discovered.activeJobId, id, { fromDeferredStop: true });
+          return true;
+        }
         setActiveJobId(discovered.activeJobId);
         setPending(discovered.pending);
         setPendingHint(discovered.hint);
       } else if (discovered.kind === "unknown") {
+        if (pendingStop.current?.conversationId === id) pendingStop.current = null;
         setActiveJobId(null);
         setPending(false);
         setPendingHint(discovered.hint);
       } else {
+        if (pendingStop.current?.conversationId === id) pendingStop.current = null;
         setActiveJobId(null);
         setPending(false);
         if (!guard.receipt || nextTurns.length) setPendingHint("");
@@ -826,21 +834,26 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
   }
 
   const turnStopLock = useRef(false);
-  const savedSubmission = useRef<{ dispatched: boolean; stopRequested: boolean } | null>(null);
+  const savedSubmission = useRef<{ conversationId: string | null; clientKey: string; dispatched: boolean; stopRequested: boolean } | null>(null);
+  const pendingStop = useRef<{ conversationId: string; clientKey: string } | null>(null);
 
-  async function stopSavedJob(jobId: string, id: string | null) {
+  async function stopSavedJob(jobId: string, id: string | null, options?: { fromDeferredStop?: boolean }) {
     if (turnStopLock.current) return;
     turnStopLock.current = true;
     try {
       const job = await api.cancelJob(jobId);
+      if (id && pendingStop.current?.conversationId === id) pendingStop.current = null;
       setActiveJobId(null);
       setPending(false);
       setPendingHint(jobStatusHint(job) || "已停止这次回答。");
       if (id) await refreshConversation(id);
     } catch (cancelError) {
+      if (options?.fromDeferredStop) setRecoveryRequired(true);
       setPendingHint(`还没确认是否已停止：${userFacingMessage(cancelError, "网络暂时不可用")}`);
     } finally { turnStopLock.current = false; }
   }
+  const stopSavedJobRef = useRef(stopSavedJob);
+  stopSavedJobRef.current = stopSavedJob;
 
   function cancelCurrentTurn(): void {
     if (activeJobId && turnStopLock.current) return;
@@ -876,7 +889,8 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
     submitClocks.current.set(target.clientKey, startedAt);
     setWaitRequestKey(target.clientKey);
     let submitted = false;
-    const saved = { dispatched: true, stopRequested: false };
+    pendingStop.current = null;
+    const saved = { conversationId, clientKey: target.clientKey, dispatched: true, stopRequested: false };
     savedSubmission.current = saved;
     try {
       const result = await submitFailedTurnRetry(conversationId, target, input => api.submitTurn(input));
@@ -891,6 +905,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
     } catch (error) {
       if (!submitted) setPending(false);
       if (saved.stopRequested && !submitted) {
+        pendingStop.current = { conversationId: saved.conversationId, clientKey: saved.clientKey };
         setPendingHint("尚未确认发送结果，请重新读取对话。");
         setRecoveryRequired(true);
       }
@@ -989,7 +1004,10 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
     let jobSubmitted = false;
     const abortController = new AbortController();
     abortRef.current = abortController;
-    const saved = input.privacy === "ephemeral" && !learningAttempt ? null : { dispatched: false, stopRequested: false };
+    const saved = input.privacy === "ephemeral" && !learningAttempt
+      ? null
+      : { conversationId: null as string | null, clientKey: input.clientKey, dispatched: false, stopRequested: false };
+    if (saved) pendingStop.current = null;
     savedSubmission.current = saved;
     try {
       if (!saved) {
@@ -1057,6 +1075,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
         gradedExplanation.markStarted(id, input.clientKey);
         setConversationId(id);
       }
+      saved.conversationId = id;
       saved.dispatched = true;
       const submitted = await api.submitTurn({
         ...(input.purpose ? { purpose: input.purpose } : {}),
@@ -1091,6 +1110,9 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
     } catch (err) {
       if (saved?.stopRequested && !jobSubmitted) {
         if (saved.dispatched) {
+          if (saved.conversationId) {
+            pendingStop.current = { conversationId: saved.conversationId, clientKey: saved.clientKey };
+          }
           setPendingHint("尚未确认发送结果，请重新读取对话。");
           setRecoveryRequired(true);
         }

@@ -376,4 +376,41 @@ describe("exam photo review repository integration", () => {
     expect(client.getSnapshot().review?.id).not.toBe(rowA!.id);
     expect(immediateCall).toHaveBeenCalledOnce();
   });
+
+  it("omits answerText from review alias rows and prunes stale aliases after source cascade deletion", async () => {
+    const secretAnswer = "Sensitive handwritten derivation only for this photo";
+    const keyA = randomUUID(), keyB = randomUUID();
+    const first = await repository.begin(f.scope, input({ clientKey: keyA, answerText: secretAnswer }));
+    const reused = await repository.begin(f.scope, input({ clientKey: keyB, answerText: secretAnswer }));
+    expect(reused.review.id).toBe(first.review.id);
+    expect(reused.reusedUnresolved).toBe(true);
+
+    const aliasRowsBefore = await f.sql`SELECT c.client_key, c.intent FROM opening_exam_integration_commands c
+      JOIN opening_exam_sprints s ON s.id=c.sprint_id
+      WHERE s.workspace_id=${f.scope.workspaceId} AND c.client_key LIKE ${`%${keyB}`}`;
+    expect(aliasRowsBefore).toHaveLength(1);
+    expect(aliasRowsBefore[0]!.intent).toEqual({ reviewId: first.review.id });
+
+    // Deleting the work source cascades opening_exam_reviews and must leave zero answerText in commands.
+    await f.sql`DELETE FROM opening_sources WHERE id=${workId}`;
+    expect(await f.sql`SELECT id FROM opening_exam_reviews WHERE workspace_id=${f.scope.workspaceId}`).toHaveLength(0);
+    const remainingCommands = await f.sql`SELECT c.intent::text AS raw_intent FROM opening_exam_integration_commands c
+      JOIN opening_exam_sprints s ON s.id=c.sprint_id
+      WHERE s.workspace_id=${f.scope.workspaceId}`;
+    for (const row of remainingCommands) {
+      expect(String(row.raw_intent)).not.toContain(secretAnswer);
+      expect(String(row.raw_intent)).not.toContain("answerText");
+    }
+
+    // Reusing keyB with a valid replacement source prunes the stale alias and creates a fresh review.
+    const replacementWorkId = await source();
+    const fresh = await repository.begin(f.scope, input({
+      clientKey: keyB, workSourceId: replacementWorkId, answerText: "Replacement explanation",
+    }));
+    expect(fresh.review.id).not.toBe(first.review.id);
+    expect(fresh.reusedUnresolved).toBeUndefined();
+    expect(await f.sql`SELECT c.id FROM opening_exam_integration_commands c
+      JOIN opening_exam_sprints s ON s.id=c.sprint_id
+      WHERE s.workspace_id=${f.scope.workspaceId} AND c.client_key LIKE ${`%${keyB}`}`).toHaveLength(0);
+  });
 });

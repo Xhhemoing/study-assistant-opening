@@ -67,3 +67,74 @@ it.each(["creating", "submitting"] as const)("honors Stop while %s a saved turn"
     host.remove();
   }
 });
+
+it("preserves pending Stop across a lost submitTurn ack and cancels the rediscovered job on reread", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 404 })));
+  vi.stubGlobal("matchMedia", () => ({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() }));
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  let rejectSubmit!: (reason?: unknown) => void;
+  const submitPending = new Promise<never>((_resolve, reject) => { rejectSubmit = reject; });
+  const id = "22222222-2222-4222-8222-222222222222";
+  const jobId = "33333333-3333-4333-8333-333333333333";
+  let runningOnServer = true;
+  const createConversation = vi.fn(async () => ({ id, title: "学习对话", courseId: null }));
+  const submitTurn = vi.fn(() => submitPending);
+  const getJob = vi.fn(async () => ({ id: jobId, status: "running", error: null, updatedAt: new Date().toISOString() }));
+  const cancelJob = vi.fn()
+    .mockRejectedValueOnce(new TypeError("cancel network drop"))
+    .mockImplementationOnce(async () => {
+      runningOnServer = false;
+      return { id: jobId, status: "cancelled", error: null, updatedAt: new Date().toISOString() };
+    });
+  const getPendingJob = vi.fn(async () => (
+    runningOnServer
+      ? { id: jobId, status: "running" as const, error: null, updatedAt: new Date().toISOString() }
+      : null
+  ));
+  const api = {
+    listSources: async () => [],
+    createConversation,
+    submitTurn,
+    cancelJob,
+    resumeConversation: async () => ({ conversationId: id, courseId: null, sourceIds: [], boundedHistory: [] }),
+    listTurns: async () => [],
+    getPendingJob,
+    getJob,
+  } as unknown as OpeningApi;
+  try {
+    await act(async () => root.render(<AssistantView api={api} startFresh initialDraft="请解释这道题" />));
+    await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="发送"]')!.click());
+    expect(submitTurn).toHaveBeenCalledOnce();
+    await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="停止回答"]')!.click());
+    expect(host.textContent).toContain("正在等待确认后停止回答");
+
+    // Simulate network drop after the server already committed the job.
+    await act(async () => {
+      rejectSubmit(new TypeError("lost ack"));
+      await Promise.resolve();
+    });
+    expect(cancelJob).not.toHaveBeenCalled();
+    expect(host.textContent).toContain("尚未确认发送结果，请重新读取对话");
+
+    const reloadButton = () => Array.from(host.querySelectorAll("button")).find(b => b.textContent === "重新读取对话");
+    expect(reloadButton()).toBeTruthy();
+
+    // First reread discovers the running job and attempts cancel; cancel fails transiently so recovery remains available without resuming polling.
+    await act(async () => reloadButton()!.click());
+    expect(cancelJob.mock.calls).toEqual([[jobId]]);
+    expect(getJob).not.toHaveBeenCalled();
+    expect(reloadButton()).toBeTruthy();
+
+    // Second reread retries cancel, succeeds, and settles without polling or streaming.
+    await act(async () => reloadButton()!.click());
+    expect(cancelJob.mock.calls).toEqual([[jobId], [jobId]]);
+    expect(getJob).not.toHaveBeenCalled();
+    expect(reloadButton()).toBeUndefined();
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
+  }
+});

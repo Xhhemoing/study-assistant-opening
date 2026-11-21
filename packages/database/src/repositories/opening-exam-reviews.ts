@@ -20,13 +20,14 @@ export type ExamReviewContext = {
 const REVIEW_ALIAS_KEY_PREFIX = `exam-review-alias:v1:${"_".repeat(180)}:`;
 const reviewAliasKey = (clientKey: string) => `${REVIEW_ALIAS_KEY_PREFIX}${clientKey}`;
 const examReviewAliasSchema = z.object({
-  kind: z.literal("exam_work_review_alias"),
   reviewId: uuidSchema,
-  courseId: uuidSchema,
-  privacyEpoch: z.number().int().nonnegative(),
-  intent: examWorkReviewInputSchema,
 }).strict();
 type ExamReviewAlias = z.infer<typeof examReviewAliasSchema>;
+
+function reviewIntentBody(input: ExamWorkReviewInput) {
+  const { clientKey: _clientKey, ...body } = input;
+  return body;
+}
 
 function epochExpiredError() {
   return Object.assign(
@@ -75,25 +76,19 @@ export function createOpeningExamReviewsRepository(sql: Sql) {
       AND source_version=${reference.sourceVersion} AND page=${item.sourcePage}
       AND (text ~ '[^[:space:]]' OR (image_object_key IS NOT NULL AND image_object_key<>'')) LIMIT 1`;
     if (!pages.length) throw learningError("CONFLICT", "原材料中找不到这道题对应的物理页");
-    return { sprintId: String(row.id), courseId: binding.courseId, privacyEpoch, referencePage: item.sourcePage,
+    return { sprintId: String(row.id), privacyEpoch, referencePage: item.sourcePage,
       questionLabel: `${item.sourceTitle}，物理页 ${item.sourcePage}，${item.label}` };
   }
-  async function readValidated(tx: TransactionSql, scope: Scope, id: string) {
+  async function readContext(tx: TransactionSql, scope: Scope, id: string): Promise<ExamReviewContext> {
     const [row] = await tx`SELECT * FROM opening_exam_reviews WHERE id=${id}
       AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
     if (!row) throw learningError("NOT_FOUND", "评阅记录不存在");
     const input = examWorkReviewInputSchema.parse(row.intent);
     const checked = await validate(tx, scope, input, Number(row.privacy_epoch));
     return {
-      context: {
-        review: view(row), input, privacyEpoch: checked.privacyEpoch,
-        referencePage: checked.referencePage, questionLabel: checked.questionLabel,
-      } satisfies ExamReviewContext,
-      courseId: checked.courseId,
+      review: view(row), input, privacyEpoch: checked.privacyEpoch,
+      referencePage: checked.referencePage, questionLabel: checked.questionLabel,
     };
-  }
-  async function readContext(tx: TransactionSql, scope: Scope, id: string): Promise<ExamReviewContext> {
-    return (await readValidated(tx, scope, id)).context;
   }
   return {
     async begin(scope: Scope, raw: ExamWorkReviewInput): Promise<ExamReviewContext> {
@@ -110,23 +105,30 @@ export function createOpeningExamReviewsRepository(sql: Sql) {
           if (!isDeepStrictEqual(existing.intent, input)) throw learningError("CONFLICT", "同一评阅标识不能提交不同作答");
           return readCommittedExamReceipt(() => readContext(tx, scope, String(existing.id)));
         }
-        const [aliasRow] = await tx`SELECT c.intent FROM opening_exam_integration_commands c
+        const [aliasRow] = await tx`SELECT c.id,c.sprint_id,c.intent FROM opening_exam_integration_commands c
           JOIN opening_exam_sprints s ON s.id=c.sprint_id
           WHERE s.workspace_id=${scope.workspaceId} AND s.owner_user_id=${scope.ownerUserId}
             AND c.client_key=${reviewAliasKey(input.clientKey)} LIMIT 1`;
         if (aliasRow) {
           const parsed = examReviewAliasSchema.safeParse(aliasRow.intent);
           if (!parsed.success) throw learningError("CONFLICT", "评阅记录无法校验，请保留数据并联系维护者");
-          if (!isDeepStrictEqual(parsed.data.intent, input)) throw learningError("CONFLICT", "同一评阅标识不能提交不同作答");
-          if (parsed.data.privacyEpoch !== workspacePrivacyEpoch) throw epochExpiredError();
-          const context = await readCommittedExamReceipt(async () => {
-            const current = await readValidated(tx, scope, parsed.data.reviewId);
-            if (current.courseId !== parsed.data.courseId) throw learningError("CONFLICT", "课程绑定已变化，请重新提交评阅");
-            return current.context;
-          });
-          return context.review.status === "pending" || context.review.status === "unknown"
-            ? { ...context, reusedUnresolved: true }
-            : context;
+          const [target] = await tx`SELECT * FROM opening_exam_reviews
+            WHERE id=${parsed.data.reviewId} AND sprint_id=${aliasRow.sprint_id}
+              AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+          if (!target) {
+            await tx`DELETE FROM opening_exam_integration_commands WHERE id=${aliasRow.id}`;
+          } else {
+            const targetIntent = examWorkReviewInputSchema.safeParse(target.intent);
+            if (!targetIntent.success) throw learningError("CONFLICT", "评阅记录无法校验，请保留数据并联系维护者");
+            if (!isDeepStrictEqual(reviewIntentBody(targetIntent.data), reviewIntentBody(input))) {
+              throw learningError("CONFLICT", "同一评阅标识不能提交不同作答");
+            }
+            if (Number(target.privacy_epoch) !== workspacePrivacyEpoch) throw epochExpiredError();
+            const context = await readCommittedExamReceipt(() => readContext(tx, scope, String(target.id)));
+            return context.review.status === "pending" || context.review.status === "unknown"
+              ? { ...context, reusedUnresolved: true }
+              : context;
+          }
         }
         const checked = await validate(tx, scope, input), id = randomUUID();
         const [unresolved] = await tx`SELECT * FROM opening_exam_reviews
@@ -138,13 +140,7 @@ export function createOpeningExamReviewsRepository(sql: Sql) {
           ORDER BY created_at, id LIMIT 1 FOR UPDATE`;
         if (unresolved) {
           const context = await readContext(tx, scope, String(unresolved.id));
-          const alias: ExamReviewAlias = {
-            kind: "exam_work_review_alias",
-            reviewId: String(unresolved.id),
-            courseId: checked.courseId,
-            privacyEpoch: Number(unresolved.privacy_epoch),
-            intent: input,
-          };
+          const alias: ExamReviewAlias = { reviewId: String(unresolved.id) };
           await tx`INSERT INTO opening_exam_integration_commands(id,sprint_id,client_key,intent,recorded_at)
             VALUES(${randomUUID()},${checked.sprintId},${reviewAliasKey(input.clientKey)},${tx.json(alias)},now())`;
           return { ...context, reusedUnresolved: true };
