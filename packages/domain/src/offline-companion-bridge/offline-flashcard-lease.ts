@@ -79,7 +79,7 @@ function normalizeLeakSyntax(text: string): string {
   // NFKC folds these spaces to plain spaces. Preserve them long enough to
   // distinguish typographic digit grouping from separate numbers in prose.
   const normalized = (hasGroupingSpace
-    ? text.replace(/[^\u00A0\u2007\u2009\u202F]+/gu, part => part.normalize("NFKC"))
+    ? text.replace(LOCALE_NON_GROUPING_RUN, part => part.normalize("NFKC"))
     : text.normalize("NFKC")).replace(/[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu, "");
   const grouped = hasGroupingSpace || /\d,\d/.test(normalized)
     ? normalizeGroupedDecimals(normalized)
@@ -88,25 +88,27 @@ function normalizeLeakSyntax(text: string): string {
 }
 
 function normalizeGroupedDecimals(text: string): string {
-  // Pair containers before deciding whether their commas separate members.
-  const openBrackets: { index: number; close: string }[] = [];
-  const pairedBrackets = new Set<number>();
+  // Only complete numeric lists give their commas the meaning of separators.
+  const openBrackets: { index: number; close: string; nested: boolean }[] = [];
+  const tupleBrackets = new Set<number>();
   for (const bracket of text.matchAll(DECIMAL_CONTEXT_BRACKET_RE)) {
+    const open = openBrackets.at(-1);
     const close = DECIMAL_CONTAINER_CLOSER.get(bracket[0]);
     if (close !== undefined) {
-      openBrackets.push({ index: bracket.index, close });
-    } else {
-      const open = openBrackets.at(-1);
-      if (open?.close !== bracket[0]) continue;
+      if (open) open.nested = true;
+      openBrackets.push({ index: bracket.index, close, nested: false });
+    } else if (open?.close === bracket[0]) {
       openBrackets.pop();
-      pairedBrackets.add(open.index);
-      pairedBrackets.add(bracket.index);
+      if (!open.nested && NUMERIC_TUPLE_RE.test(text.slice(open.index + 1, bracket.index))) {
+        tupleBrackets.add(open.index);
+        tupleBrackets.add(bracket.index);
+      }
     }
   }
 
   let depth = 0;
-  return text.replace(GROUPED_DECIMAL_OR_BRACKET_RE, (token, _space: string | undefined, offset: number) => {
-    if (pairedBrackets.has(offset)) {
+  return text.replace(GROUPED_DECIMAL_OR_BRACKET_RE, (token, offset: number) => {
+    if (tupleBrackets.has(offset)) {
       depth += DECIMAL_CONTAINER_CLOSER.has(token) ? 1 : -1;
       return token;
     }
@@ -136,7 +138,7 @@ function extractLeakSegments(normalizedSecret: string): string[] {
 const SIGN_PREFIX = "(?:\\+-|-\\+|[+-])?";
 const DECIMAL_DIGITS = /\d+(?:_\d+)*/.source;
 const COMMA_GROUPED_INTEGER = /(?:\d{1,3}(?:,\d{3})+|\d{1,2}(?:,\d{2})+,\d{3})(?!,\d)/.source;
-const APOSTROPHE_GROUPED_INTEGER = /\d{1,3}(?:'\d{3})+(?!'\d)/.source;
+const APOSTROPHE_GROUPED_INTEGER = /\d{1,3}(?:['’]\d{3})+(?!['’]\d)/.source;
 const GROUPED_INTEGER = `(?:${COMMA_GROUPED_INTEGER}|${APOSTROPHE_GROUPED_INTEGER})`;
 const DECIMAL_FRACTION = `\\.${DECIMAL_DIGITS}`;
 const DECIMAL_EXPONENT = "[+-]?" + DECIMAL_DIGITS;
@@ -1328,23 +1330,30 @@ const ENGLISH_ANSWER_CUE =
   "(?:(?:correct|right|selected|marked|final|official)[_\\s-]*(?:" + ANSWER_CUE_NOUN + "|response|letter|value)" +
   "|(?:ans(?:wer)?|option|choice|solution|result|selection)[_\\s-]*key|" + ANSWER_CUE_NOUN + ")";
 const BOUNDED_ANSWER_CUE = `(?:(?<!${NON_CJK_WORD_CHAR})${ENGLISH_ANSWER_CUE}(?!${NON_CJK_WORD_CHAR})|选|答案|正确选项)`;
-const BARE_CHOICE_VERB = `(?<!${NON_CJK_WORD_CHAR})(?:correct|select|choose)(?!${NON_CJK_WORD_CHAR})`;
+const BARE_CHOICE_VERB = `(?<!${NON_CJK_WORD_CHAR})(?:correct|select|choose|pick)(?!${NON_CJK_WORD_CHAR})`;
 const ANSWER_CUE_BEFORE_DASH_RE = new RegExp(`(?:${BOUNDED_ANSWER_CUE}|${BARE_CHOICE_VERB})\\s+$`, "iu");
 
 const NUMERIC_TOKEN_END = `(?!${ALPHA_NUM_IDENT_CHAR}|\\.\\d|[eE][+-]?\\d)`;
-const LOCALE_GROUPING_SPACE = /[\u00A0\u2007\u2009\u202F]/gu;
+const LOCALE_GROUPING_SPACES = "\u00A0\u2007\u2009\u202F";
+const LOCALE_GROUPING_SPACE = new RegExp(`[${LOCALE_GROUPING_SPACES}]`, "gu");
+const LOCALE_NON_GROUPING_RUN = new RegExp(`[^${LOCALE_GROUPING_SPACES}]+`, "gu");
+const SPACE_GROUPED_INTEGER =
+  `\\d{1,3}(?:${[...LOCALE_GROUPING_SPACES].map(space => `(?:${space}\\d{3})+`).join("|")})`;
 const LOCALE_SPACE_GROUPED_DECIMAL = standaloneNumericSource(
-  `(?<!\\d${LOCALE_GROUPING_SPACE.source})\\d{1,3}(${LOCALE_GROUPING_SPACE.source})\\d{3}(?:\\1\\d{3})*` +
+  `(?<!\\d${LOCALE_GROUPING_SPACE.source})${SPACE_GROUPED_INTEGER}` +
   `(?!${LOCALE_GROUPING_SPACE.source}\\d)(?:,${DECIMAL_DIGITS}${OPTIONAL_DECIMAL_EXPONENT}(?!,\\d)|` +
   `(?:${DECIMAL_FRACTION})?${OPTIONAL_DECIMAL_EXPONENT})`,
 );
+const TUPLE_NUMBER = `(?:[+−-]\\s*)?(?:${UNGROUPED_DECIMAL}|` +
+  `(?:${SPACE_GROUPED_INTEGER}|${APOSTROPHE_GROUPED_INTEGER})(?:${DECIMAL_FRACTION})?${OPTIONAL_DECIMAL_EXPONENT})`;
+const NUMERIC_TUPLE_RE = new RegExp(`^\\s*${TUPLE_NUMBER}(?:\\s*[,;]\\s*${TUPLE_NUMBER})+\\s*$`, "u");
 const DECIMAL_CONTAINER_CLOSER = new Map([["(", ")"], ["[", "]"], ["{", "}"], ["<", ">"], ["⟨", "⟩"], ["〈", "〉"]]);
 // An angle opener is a tuple delimiter only when it encloses a numeric list.
 const DECIMAL_CONTEXT_BRACKET_RE =
-  /(?<!\\)(?:[()[\]{}⟨⟩〈〉>]|<(?=\s*[+-]?(?:\d|\.\d)[\d.'_’eE\s+-]*,\s*[+-]?(?:\d|\.\d)[\d.,'_’eE\s+-]*>))/gu;
+  /(?<!\\)(?:[()[\]{}⟨⟩〈〉>]|<(?=\s*[+−-]?(?:\d|\.\d)[\d.'_’eE\s+−-]*[,;]\s*[+−-]?(?:\d|\.\d)[\d.,;'_’eE\s+−-]*>))/gu;
 const GROUPED_DECIMAL_OR_BRACKET_RE = new RegExp(
   DECIMAL_CONTEXT_BRACKET_RE.source + "|" + LOCALE_SPACE_GROUPED_DECIMAL + "|" + standaloneNumericSource(
-    `\\d{1,3}(?:(?:\\.\\d{3})+|(?:['’]\\d{3})+),${DECIMAL_DIGITS}${OPTIONAL_DECIMAL_EXPONENT}(?!,\\d)`,
+    `(?:\\d{1,3}(?:\\.\\d{3})+|${APOSTROPHE_GROUPED_INTEGER}),${DECIMAL_DIGITS}${OPTIONAL_DECIMAL_EXPONENT}(?!,\\d)`,
   ),
   "gu",
 );
@@ -1399,7 +1408,7 @@ function canonicalDecimalValueKey(literal: string): string | null {
   if (!parts) return null;
   const [, sign, integer = "", rawFraction = "", exponent = "0"] = parts;
   const fraction = rawFraction.replaceAll("_", "");
-  const digits = integer.replace(/[_,']/g, "") + fraction;
+  const digits = integer.replace(/[_,’']/g, "") + fraction;
   if (!digits) return null;
   const significant = digits.replace(/^0+/, "");
   if (!significant) return "0";
@@ -1518,34 +1527,36 @@ const NEXT_OPTION_RE = new RegExp(
   `^${OPTION_SEQUENCE_CONNECTOR}(?:${WRAPPED_NEIGHBOR_OPTION}|${BARE_NEIGHBOR_OPTION}(?=${OPTION_SENTENCE_END}))`,
   "iu",
 );
-const ARTICLE_FUNCTION_WORD_RE = new RegExp("^(?:" +
+const ARTICLE_STOP_WORD_RE = new RegExp("^(?:" +
   "for|in|on|at|to|of|by|with|from|into|onto|upon|over|under|after|before|between|among|through|during|" +
   "without|within|about|against|per|via|as|up|off|out|across|along|past|around|inside|outside|despite|except|towards?|" +
   "is|was|are|were|be|been|being|has|have|had|do|does|did|can|could|will|would|shall|should|may|might|must|equals?|" +
   "and|or|but|nor|yet|so|if|then|else|when|while|where|whereas|because|since|unless|until|till|although|though|than|whether|" +
   "that|which|who|whom|whose|what|he|him|his|she|her|hers|it|its|we|us|our|ours|you|your|yours|they|them|their|theirs|" +
   "me|my|mine|this|these|those|the|an|another|each|every|all|both|any|either|neither|some|several|many|much|no|none|" +
-  "instead|rather|apart|aside|away|regardless|irrespective|only|alone|just|merely|simply|solely|even|still|already|" +
-  "also|too|again|once|twice|here|there|now|today|tomorrow|yesterday|otherwise|therefore|however|thus|hence|" +
+  "instead|apart|aside|away|regardless|irrespective|only|alone|already|" +
+  "also|too|again|once|twice|here|there|now|today|tomorrow|yesterday|tonight|otherwise|therefore|however|thus|hence|" +
   "versus|vs|plus|minus|modulo|mod|times)$");
-const ARTICLE_MODIFIER_WORD_RE =
-  /^(?:zeroth|first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth|\w+(?:teenth|tieth|illionth)|hundredth|thousandth|next|last|\w+ly)$/;
+const ARTICLE_MODIFIER_WORD_RE = new RegExp("^(?:" +
+  "zeroth|first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth|" +
+  "[a-z]+(?:teenth|tieth|illionth)|hundredth|thousandth|next|last|[a-z]+ly|almost|pairwise|" +
+  "right|left|single|double|triple|fast|hard|early|late|soon|far|near|close|very|quite|pretty|rather|well|ill|just|even|still)$");
 const ARTICLE_LY_NOUN_RE =
   /^(?:family|anomaly|assembly|monopoly|supply|reply|ally|tally|rally|valley|pulley|belly|jelly|lily|(?:butter|dragon|fire|may)?fly|bully|folly|gully|holly)$/;
 const ARTICLE_QUANTITY_TOKEN = /\d(?:[^\s.,;:!?()[\]{}<>]|\.(?=\d))*/u.source;
-const ARTICLE_QUANTITY_PREFIX_RE = new RegExp(
-  `^[ \\t]+${ARTICLE_QUANTITY_TOKEN}(?:[ \\t]+(?:by|[x×*])[ \\t]+${ARTICLE_QUANTITY_TOKEN})*`,
-  "iu",
-);
+const ARTICLE_QUANTITY = `${ARTICLE_QUANTITY_TOKEN}(?:[ \\t]+(?:by|[x×*])[ \\t]+${ARTICLE_QUANTITY_TOKEN})*`;
 
 function startsArticleNounPhrase(text: string): boolean {
-  const quantity = ARTICLE_QUANTITY_PREFIX_RE.exec(text);
-  const words = /[ \t]+([a-z]{2,})(?:-[a-z]+)*\b/iy;
-  words.lastIndex = quantity?.[0].length ?? 0;
-  for (let match = words.exec(text); match !== null; match = words.exec(text)) {
-    const word = match[1]!.toLowerCase();
-    if (ARTICLE_FUNCTION_WORD_RE.test(word)) return false;
-    if (!ARTICLE_MODIFIER_WORD_RE.test(word) || ARTICLE_LY_NOUN_RE.test(word)) return true;
+  const tokens = new RegExp(`[ \\t]+(?:${ARTICLE_QUANTITY}(?=[ \\t])|([a-z]+)(?:-[a-z]+)*\\b)`, "iyu");
+  let modifiers = 0;
+  for (let match = tokens.exec(text); match !== null; match = tokens.exec(text)) {
+    const word = match[1]?.toLowerCase();
+    if (word !== undefined) {
+      if (match[0].trim().length < 2 || ARTICLE_STOP_WORD_RE.test(word)) return false;
+      if (!ARTICLE_MODIFIER_WORD_RE.test(word) || ARTICLE_LY_NOUN_RE.test(word)) return true;
+    }
+    if (modifiers === 3) return false;
+    modifiers += 1;
   }
   return false;
 }

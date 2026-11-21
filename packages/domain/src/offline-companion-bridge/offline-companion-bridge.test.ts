@@ -2529,6 +2529,8 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
     { answerKey: "[1000,5]", text: "Use (1\u202F000,5).", leaks: true },
     { answerKey: "[1000,5,6]", text: "Use [1\u202F000,5,6].", leaks: true },
     { answerKey: "[1000,5]", text: "Use <1'000,5>.", leaks: true },
+    { answerKey: "[1000,5,60]", text: "Use {+1\u202F000,5; +6e1}.", leaks: true },
+    { answerKey: "[1000.5,17]", text: "Use (mass: 1\u202F000,5 g) and 17.", leaks: false },
     { answerKey: "[1,5]", text: "Use (1.000,5).", leaks: true },
     { answerKey: "[1,5,6]", text: "Use 1.000,5,6 as the initial values.", leaks: true },
   ])("matches only the exact numeric sequence $answerKey in $text", ({ answerKey, text, leaks }) => {
@@ -2564,6 +2566,15 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
       { answerKey: "[1000.5]", text: "Use (7, (1.000,5)) as the starting tuple.", ok: true },
       { answerKey: "[1000.5]", text: "Use 1.000,5,6 as the initial values.", ok: true },
       { answerKey: "[1000.5]", text: "The hint has an unmatched [. The value is 1.000,5.", ok: false },
+      ...["Use the measured mass (approximately 1\u202F000,5 kg) to estimate the force.",
+        "Use the measured mass (mass: 1\u202F000,5 g) to estimate the force.",
+        "Use the measured mass [about 1'000,5 kg] to estimate the force.",
+        "Use the measured mass {1.000,5 kg} to estimate the force.",
+        "Use the measured mass (given (1\u202F000,5 kg)) to estimate the force."].flatMap(text => [
+        { answerKey: "[1000.5]", text, ok: false },
+        { answerKey: "[1000]", text, ok: true },
+      ]),
+      { answerKey: "[1000.5]", text: "Use the signed tuple (initial values [+1\u202F000,5; -2e1]).", ok: true },
       ...["[1\u202F000,5]", "(1\u202F000,5)", "{1\u202F000,5}", "<1\u202F000,5>", "[1\u00A0000,5]",
         "[1'000,5]", "{1\u2019000,5}", "[1\u2009000,5]", "⟨1\u202F000,5⟩"].flatMap(pair => [
         { answerKey: "[1000,5]", text: `Use the ordered pair ${pair} as the two coordinates.`, ok: false },
@@ -2639,7 +2650,8 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
         "Choose a 90° angle.", "Select a 95% confidence interval.", "Choose a 1/2 scale factor.",
         "Choose a 0.05 tolerance.", "Select a 3.5-inch gauge.", "Choose a 10² scale factor.",
         "Select a first step.", "Choose a first-order approximation.", "Select a linearly independent set.",
-        "Choose a next logical step.",
+        "Choose a next logical step.", "Choose a simply connected domain.", "Choose a right triangle.",
+        "Find a right inverse.", "Pick a very short proof.", "Choose a locally strictly right inverse.",
         "Choose a family of functions.", "Select a pulley."].map(text => ({
         answerKey: "A", text, ok: true,
       })),
@@ -2657,6 +2669,8 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
         "Correct a was chosen.", "Correct a will work.", "Correct a after checking.",
         "Correct a 2.", "Correct a 2 by 2.", "Correct a 2×2.",
         "Choose a instead of b.", "Select a only.", "Select a first.", "Select a directly.",
+        "Select a right now.", "Choose a right away.", "Pick a right here.", "Select a simply.",
+        "Select a very.", "Choose a first locally strictly right inverse.",
         "Select a second.", "Select a twelfth.", "Select a next.", "Select a linearly.", "Select a rather than b.",
         "Select a again.", "Choose a versus b.", "Select a modulo b.", "Choose a 90°.",
         "Choose a 2D.", "Choose a 95% only.", "Select a no matter what.",
