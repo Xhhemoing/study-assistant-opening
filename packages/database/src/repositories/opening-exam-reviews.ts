@@ -138,19 +138,22 @@ export function createOpeningExamReviewsRepository(sql: Sql) {
             }
           }
           const checked = await validate(tx, scope, input), id = randomUUID();
-          const [unresolved] = await tx`SELECT * FROM opening_exam_reviews
+          const [reusable] = await tx`SELECT * FROM opening_exam_reviews
             WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
               AND sprint_id=${checked.sprintId} AND source_item_id=${input.sourceItemId}
               AND work_source_id=${input.workSourceId} AND work_source_version=${input.workSourceVersion}
               AND reference_source_id=${input.referenceSourceId} AND reference_source_version=${input.referenceSourceVersion}
-              AND privacy_epoch=${checked.privacyEpoch} AND answer_text=${input.answerText} AND status IN ('pending', 'unknown')
-            ORDER BY created_at, id LIMIT 1 FOR UPDATE`;
-          if (unresolved) {
-            const context = await readContext(tx, scope, String(unresolved.id));
-            const alias: ExamReviewAlias = { reviewId: String(unresolved.id) };
+              AND privacy_epoch=${checked.privacyEpoch} AND answer_text=${input.answerText}
+              AND status IN ('pending', 'unknown', 'ready')
+            ORDER BY CASE WHEN status='ready' THEN 0 ELSE 1 END, created_at, id LIMIT 1 FOR UPDATE`;
+          if (reusable) {
+            const context = await readContext(tx, scope, String(reusable.id));
+            const alias: ExamReviewAlias = { reviewId: String(reusable.id) };
             await tx`INSERT INTO opening_exam_integration_commands(id,sprint_id,client_key,intent,recorded_at)
               VALUES(${randomUUID()},${checked.sprintId},${reviewAliasKey(input.clientKey)},${tx.json(alias)},now())`;
-            return { ...context, reusedUnresolved: true };
+            return context.review.status === "pending" || context.review.status === "unknown"
+              ? { ...context, reusedUnresolved: true }
+              : context;
           }
           await tx`INSERT INTO opening_exam_reviews(id,sprint_id,workspace_id,owner_user_id,source_item_id,
             work_source_id,work_source_version,reference_source_id,reference_source_version,answer_text,

@@ -120,8 +120,26 @@ it.each([
   "数学（1-4周）；（6-8周 1-2节",
   "数学（1-4周）；6-8周） 1-2节",
   "数学（1-4周）；第周 1-2节",
+  "数学 1-4周（单周)；6-8周 1-2节",
+  "数学 1-4周(单周） 1-2节",
+  "数学 1-4周(单周 1-2节",
+  "数学 1-4周单周) 1-2节",
 ])("warns and drops inline course cell with unparseable residual week segment %s", title => {
   const result = parseTimetableSheets([{ sheet: "课表", data: [["课程", "星期"], [title, "周一"]] }]);
+  expect(result.sessions).toEqual([]);
+  expect(result.warnings).toMatchObject([{ raw: title, address: "A2" }]);
+});
+
+it.each([
+  "数学（8-6周）",
+  "数学（1-4周）；（6-8周",
+  "数学 1-4周（单周)；6-8周",
+  "数学（1-4周）；（周7）",
+])("warns and drops malformed inline week expression %s even when the dedicated weeks column is valid", title => {
+  const result = parseTimetableSheets([{ sheet: "课表", data: [
+    ["课程", "星期", "周次", "节次"],
+    [title, "周一", "1-8周", "1-2节"],
+  ] }]);
   expect(result.sessions).toEqual([]);
   expect(result.warnings).toMatchObject([{ raw: title, address: "A2" }]);
 });

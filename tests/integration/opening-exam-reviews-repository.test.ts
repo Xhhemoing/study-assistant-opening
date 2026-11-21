@@ -420,4 +420,36 @@ describe("exam photo review repository integration", () => {
       JOIN opening_exam_sprints s ON s.id=c.sprint_id
       WHERE s.workspace_id=${f.scope.workspaceId} AND c.client_key LIKE ${`%${keyB}`}`).toHaveLength(0);
   });
+
+  it("reuses an already-ready review in the same privacy epoch when sessionStorage is lost and a fresh clientKey retries", async () => {
+    type Options = Parameters<ModelGateway["call"]>[2];
+    const output = { text: JSON.stringify(proposal), inputTokens: 10, outputTokens: 20, citedChunkIds: [], candidates: [], requestId: null };
+    const call = vi.fn(async (_scope: Scope, _task: string, options: Options) => {
+      await options.beforeSend?.();
+      await options.persistResult?.(output, { reservationId: randomUUID(), settledCents: 1 });
+      return output;
+    });
+    const service = createExamPhotoReviewService({ repository, gateway: { call },
+      images: async () => [{ mediaType: "image/png", data: "data:image/png;base64,AAAA" }],
+      budget: () => ({} as Options["budget"]) });
+
+    const first = await service.review(f.scope, input({ clientKey: randomUUID(), answerText: "My explanation" }));
+    expect(first).toMatchObject({ status: "ready", proposal });
+    expect(call).toHaveBeenCalledTimes(1);
+
+    // Simulate reload with unavailable/cleared sessionStorage -> fresh clientKey for identical intent.
+    const freshKey = randomUUID();
+    const replayed = await service.review(f.scope, input({ clientKey: freshKey, answerText: "  My explanation  " }));
+    expect(replayed).toMatchObject({ id: first.id, status: "ready", proposal });
+    expect(call).toHaveBeenCalledTimes(1);
+    expect(await f.sql`SELECT id FROM opening_exam_reviews WHERE workspace_id=${f.scope.workspaceId}`).toEqual([{ id: first.id }]);
+
+    // Alias row still omits answerText and rejects mismatched intent on freshKey.
+    const aliasRows = await f.sql`SELECT c.intent FROM opening_exam_integration_commands c
+      JOIN opening_exam_sprints s ON s.id=c.sprint_id
+      WHERE s.workspace_id=${f.scope.workspaceId} AND c.client_key LIKE ${`%${freshKey}`}`;
+    expect(aliasRows).toEqual([{ intent: { reviewId: first.id } }]);
+    await expect(repository.begin(f.scope, input({ clientKey: freshKey, answerText: "Changed answer" })))
+      .rejects.toMatchObject({ code: "CONFLICT" });
+  });
 });

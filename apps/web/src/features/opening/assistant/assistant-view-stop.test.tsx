@@ -301,3 +301,135 @@ it("allows dismissing uncertain Stop recovery via 继续提问 when the POST nev
     host.remove();
   }
 });
+
+it("preserves deferred Stop recovery when submitRequest resolves after Stop and the first cancelJob fails", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 404 })));
+  vi.stubGlobal("matchMedia", () => ({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() }));
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const jobId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  let resolveSubmit!: (value: { jobId: string; turnId: string }) => void;
+  const submitPending = new Promise<{ jobId: string; turnId: string }>(resolve => { resolveSubmit = resolve; });
+  let submittedClientKey = "";
+  let runningOnServer = true;
+  const submitTurn = vi.fn((input: { clientKey: string }) => {
+    submittedClientKey = input.clientKey;
+    return submitPending;
+  });
+  const getJob = vi.fn(async () => ({ id: jobId, status: "running", error: null, updatedAt: new Date().toISOString() }));
+  const cancelJob = vi.fn()
+    .mockRejectedValueOnce(new TypeError("cancel network drop"))
+    .mockImplementationOnce(async () => {
+      runningOnServer = false;
+      return { id: jobId, status: "cancelled", error: null, updatedAt: new Date().toISOString() };
+    });
+  const api = {
+    listSources: async () => [],
+    createConversation: vi.fn(async () => ({ id, title: "学习对话", courseId: null })),
+    submitTurn,
+    cancelJob,
+    resumeConversation: async () => ({ conversationId: id, courseId: null, sourceIds: [], boundedHistory: [] }),
+    listTurns: async () => [],
+    getPendingJob: vi.fn(async () => (
+      runningOnServer
+        ? { id: jobId, status: "running" as const, error: null, updatedAt: new Date().toISOString(), clientKey: submittedClientKey }
+        : null
+    )),
+    getJob,
+  } as unknown as OpeningApi;
+  try {
+    await act(async () => root.render(<AssistantView api={api} startFresh initialDraft="请解释这道题" />));
+    await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="发送"]')!.click());
+    await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="停止回答"]')!.click());
+    await act(async () => {
+      resolveSubmit({ jobId, turnId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc" });
+      await Promise.resolve();
+    });
+    const reloadButton = () => Array.from(host.querySelectorAll("button")).find(b => b.textContent === "重新读取对话");
+    expect(cancelJob.mock.calls).toEqual([[jobId]]);
+    expect(getJob).not.toHaveBeenCalled();
+    expect(reloadButton()).toBeTruthy();
+
+    await act(async () => reloadButton()!.click());
+    expect(cancelJob.mock.calls).toEqual([[jobId], [jobId]]);
+    expect(getJob).not.toHaveBeenCalled();
+    expect(reloadButton()).toBeUndefined();
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
+  }
+});
+
+it("preserves deferred Stop recovery when retryFailedTurn resolves after Stop and the first cancelJob fails", async () => {
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 404 })));
+  vi.stubGlobal("matchMedia", () => ({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() }));
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const id = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+  const failedAssistantId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+  const retryJobId = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+  const now = new Date().toISOString();
+  let resolveRetry!: (value: { jobId: string; turnId: string }) => void;
+  const retryPending = new Promise<{ jobId: string; turnId: string }>(resolve => { resolveRetry = resolve; });
+  let retriedClientKey = "";
+  let runningOnServer = false;
+  const submitTurn = vi.fn((input: { clientKey: string }) => {
+    retriedClientKey = input.clientKey;
+    runningOnServer = true;
+    return retryPending;
+  });
+  const getJob = vi.fn(async () => ({ id: retryJobId, status: "running", error: null, updatedAt: now }));
+  const cancelJob = vi.fn()
+    .mockRejectedValueOnce(new TypeError("retry cancel drop"))
+    .mockImplementationOnce(async () => {
+      runningOnServer = false;
+      return { id: retryJobId, status: "cancelled", error: null, updatedAt: now };
+    });
+  const api = {
+    listSources: async () => [],
+    createConversation: vi.fn(),
+    submitTurn,
+    cancelJob,
+    resumeConversation: async () => ({ conversationId: id, courseId: null, sourceIds: [], boundedHistory: [] }),
+    listTurns: async () => [
+      { id: "12121212-1212-4212-8212-121212121212", conversationId: id, role: "user" as const, text: "上次失败的提问", citations: [], createdAt: now, mode: "explain" as const, status: "complete" as const },
+      { id: failedAssistantId, conversationId: id, role: "assistant" as const, text: "回答失败", citations: [], createdAt: now, mode: "explain" as const, status: "failed" as const },
+    ],
+    getPendingJob: vi.fn(async () => (
+      runningOnServer
+        ? { id: retryJobId, status: "running" as const, error: null, updatedAt: now, clientKey: retriedClientKey }
+        : null
+    )),
+    getJob,
+  } as unknown as OpeningApi;
+  try {
+    await act(async () => root.render(<AssistantView api={api} initialConversationId={id} />));
+    const retryButton = Array.from(host.querySelectorAll("button")).find(b => b.textContent?.includes("重试"))!;
+    expect(retryButton).toBeTruthy();
+    await act(async () => retryButton.click());
+    expect(submitTurn).toHaveBeenCalledOnce();
+    expect(retriedClientKey).toBe(`retry-${failedAssistantId}`);
+    await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="停止回答"]')!.click());
+    await act(async () => {
+      resolveRetry({ jobId: retryJobId, turnId: "34343434-3434-4434-8434-343434343434" });
+      await Promise.resolve();
+    });
+    const reloadButton = () => Array.from(host.querySelectorAll("button")).find(b => b.textContent === "重新读取对话");
+    expect(cancelJob.mock.calls).toEqual([[retryJobId]]);
+    expect(getJob).not.toHaveBeenCalled();
+    expect(reloadButton()).toBeTruthy();
+
+    await act(async () => reloadButton()!.click());
+    expect(cancelJob.mock.calls).toEqual([[retryJobId], [retryJobId]]);
+    expect(getJob).not.toHaveBeenCalled();
+    expect(reloadButton()).toBeUndefined();
+  } finally {
+    await act(async () => root.unmount());
+    host.remove();
+  }
+});

@@ -886,8 +886,10 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
       if (id) await refreshConversation(id);
     } catch (cancelError) {
       if (options?.fromDeferredStop) {
+        setActiveJobId(null);
+        setPending(false);
         setRecoveryRequired(true);
-        setPendingStopRecovery(true);
+        if (pendingStop.current) setPendingStopRecovery(true);
       }
       setPendingHint(`还没确认是否已停止：${userFacingMessage(cancelError, "网络暂时不可用")}`);
     } finally { turnStopLock.current = false; }
@@ -936,10 +938,15 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
     try {
       const result = await submitFailedTurnRetry(conversationId, target, input => api.submitTurn(input));
       submitted = true;
-      setActiveJobId(result.jobId); setUnknownJob(null);
-      setFirstTextTiming({ jobId: result.jobId, clientKey: target.clientKey, startedAt });
-      if (saved.stopRequested) await stopSavedJob(result.jobId, conversationId);
-      else {
+      setUnknownJob(null);
+      if (saved.stopRequested) {
+        pendingStop.current = { conversationId: saved.conversationId, clientKey: saved.clientKey };
+        setActiveJobId(null);
+        setPending(false);
+        await stopSavedJob(result.jobId, conversationId, { fromDeferredStop: true });
+      } else {
+        setActiveJobId(result.jobId);
+        setFirstTextTiming({ jobId: result.jobId, clientKey: target.clientKey, startedAt });
         setPendingHint("已按原提问重试，正在准备回答…");
         await refreshConversation(conversationId);
       }
@@ -1139,18 +1146,24 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
         ...(!options?.gradedAttempt && !querySystem && materialMode !== "none" && page !== undefined ? { currentPage: page } : {}),
         ...(!options?.gradedAttempt && !querySystem && studyContext?.chunkId ? { chunkId: studyContext.chunkId } : {}),
       });
-      if (submitted.replayed === false || priorSubmittedAt !== undefined) {
-        setFirstTextTiming({ jobId: submitted.jobId, clientKey: input.clientKey, startedAt: submittedAt });
-      }
-      setActiveJobId(submitted.jobId);
       setUnknownJob(null);
       jobSubmitted = true;
-      if (!saved.stopRequested) setPendingHint("已发送，正在准备回答…");
       abortRef.current = null;
       preserveEntrySelection.current = false;
       if (!options?.preserveDraft) setDraft("");
-      if (saved.stopRequested) await stopSavedJob(submitted.jobId, id);
-      else await refreshConversation(id);
+      if (saved.stopRequested) {
+        pendingStop.current = { conversationId: id, clientKey: saved.clientKey };
+        setActiveJobId(null);
+        setPending(false);
+        await stopSavedJob(submitted.jobId, id, { fromDeferredStop: true });
+      } else {
+        if (submitted.replayed === false || priorSubmittedAt !== undefined) {
+          setFirstTextTiming({ jobId: submitted.jobId, clientKey: input.clientKey, startedAt: submittedAt });
+        }
+        setActiveJobId(submitted.jobId);
+        setPendingHint("已发送，正在准备回答…");
+        await refreshConversation(id);
+      }
       return { accepted: true };
     } catch (err) {
       if (saved?.stopRequested && !jobSubmitted) {

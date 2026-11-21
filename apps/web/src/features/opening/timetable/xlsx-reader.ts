@@ -16,11 +16,12 @@ const dayMap: Record<string, number> = {
 };
 const weekRange = /\d+(?:\s*[-－至]\s*\d+)?/.source;
 const weekListPattern = `(${weekRange}(?:\\s*[,，、]\\s*${weekRange})*)`;
-const paritySuffix = /(?:\s*[(（]?([单双])周?[)）]?)?/.source;
-const inlineWeeks = new RegExp(`第?\\s*${weekListPattern}\\s*([单双])?周(?!次|[一二三四五六日天0-9])${paritySuffix}`);
-const labeledWeeks = new RegExp(`(?:周次\\s*[:：]?|周\\s*[:：])\\s*第?\\s*${weekListPattern}\\s*([单双])?周?${paritySuffix}`);
+const paritySuffix = /(?:\s*(?:\(\s*([单双])周?\s*\)|（\s*([单双])周?\s*）|([单双])周?))?/.source;
+const inlineWeeks = new RegExp(`第?\\s*${weekListPattern}\\s*([单双])?周(?!次|[一二三四五六日天0-9])${paritySuffix}`, "y");
+const labeledWeeks = new RegExp(`(?:周次\\s*[:：]?|周\\s*[:：])\\s*第?\\s*${weekListPattern}\\s*([单双])?周?${paritySuffix}`, "y");
 // A bare 周1 can name a weekday. Require a range or list after the prefix.
-const leadingWeeks = new RegExp(`周\\s*(?=\\d+\\s*[-－至,，、]\\s*\\d)${weekListPattern}\\s*([单双])?周?${paritySuffix}`);
+const leadingWeeks = new RegExp(`周\\s*(?=\\d+\\s*[-－至,，、]\\s*\\d)${weekListPattern}\\s*([单双])?周?${paritySuffix}`, "y");
+const inlineWeekMatchers = [labeledWeeks, leadingWeeks, inlineWeeks];
 // Consume one complete list and its delimiter so a parity suffix applies to the whole list.
 const columnSegment = new RegExp(
   /((?:\s*(?:(?:周次\s*[:：]?|周\s*[:：])\s*)?[[（【(])*)/.source
@@ -34,10 +35,6 @@ const closeBracketChars = new Set(Object.values(matchingClose));
 const periodPattern = /([0-9]+)\s*[-－至]\s*([0-9]+)\s*节/;
 const wrappedPeriodPattern = /\s*(?:\(\s*[0-9]+\s*[-－至]\s*[0-9]+\s*节\s*\)|（\s*[0-9]+\s*[-－至]\s*[0-9]+\s*节\s*）|\[\s*[0-9]+\s*[-－至]\s*[0-9]+\s*节\s*\]|【\s*[0-9]+\s*[-－至]\s*[0-9]+\s*节\s*】)/g;
 const globalPeriodPattern = /[0-9]+\s*[-－至]\s*[0-9]+\s*节/g;
-const inlineWeekToken = new RegExp(
-  `${labeledWeeks.source}|${leadingWeeks.source}|${inlineWeeks.source}`,
-  "y",
-);
 const weekPrefixBeforeBracket = /^(?:周次\s*[:：]?|周\s*[:：])\s*/;
 const weekMarkerHint = /周次|第\s*(?:\d+\s*[-－至,，、\s]*)?周|\d\s*[单双]?周|周\s*[:：\d一二三四五六日天]|[单双]周/;
 
@@ -125,7 +122,22 @@ function hasUnbalancedBrackets(source: string): boolean {
   return stack.length > 0;
 }
 
-function parseInlineCourseLine(line: string): { courseName: string; weeks: number[] | undefined } {
+function matchInlineWeekToken(source: string, index: number) {
+  for (const matcher of inlineWeekMatchers) {
+    matcher.lastIndex = index;
+    const match = matcher.exec(source);
+    if (match) {
+      return {
+        end: matcher.lastIndex,
+        list: match[1]!,
+        parity: match[2] ?? match[3] ?? match[4] ?? match[5],
+      };
+    }
+  }
+  return null;
+}
+
+function parseInlineCourseLine(line: string): { courseName: string; weeks: number[] | undefined; invalid: boolean } {
   const withoutPeriods = line
     .replace(wrappedPeriodPattern, "")
     .replace(globalPeriodPattern, "");
@@ -141,17 +153,13 @@ function parseInlineCourseLine(line: string): { courseName: string; weeks: numbe
     }
     const precededByDigit = i > 0 && /\d/.test(withoutPeriods[i - 1]!);
     if (!precededByDigit) {
-      inlineWeekToken.lastIndex = i;
-      const token = inlineWeekToken.exec(withoutPeriods);
+      const token = matchInlineWeekToken(withoutPeriods, i);
       if (token) {
-        const list = token[1] ?? token[4] ?? token[7];
-        const beforeWeek = token[2] ?? token[5] ?? token[8];
-        const afterWeek = token[3] ?? token[6] ?? token[9];
-        if (!addWeeks(weeks, list!, beforeWeek ?? afterWeek)) {
+        if (!addWeeks(weeks, token.list, token.parity)) {
           invalid = true;
         }
-        matchedSpans.push({ start: i, end: inlineWeekToken.lastIndex });
-        i = inlineWeekToken.lastIndex;
+        matchedSpans.push({ start: i, end: token.end });
+        i = token.end;
         continue;
       }
     }
@@ -222,6 +230,7 @@ function parseInlineCourseLine(line: string): { courseName: string; weeks: numbe
   return {
     courseName,
     weeks: !invalid && weeks.size > 0 ? [...weeks] : undefined,
+    invalid,
   };
 }
 
@@ -277,7 +286,7 @@ export function parseTimetableSheets(sheets: TimetableSheet[]): ParsedTimetable 
           const inline = parseInlineCourseLine(line);
           const courseName = inline.courseName;
           const weekCell = weekColumn >= 0 ? text(rows[r]![weekColumn]!) : "";
-          const weekList = weekCell ? columnWeekList(weekCell) : inline.weeks;
+          const weekList = inline.invalid ? undefined : weekCell ? columnWeekList(weekCell) : inline.weeks;
           const weekday = day(dayColumn >= 0 ? text(rows[r]![dayColumn]!) : header[c]!);
           const range = period(line) ?? (periodColumn >= 0 ? period(text(rows[r]![periodColumn]!)) : undefined);
           if (!weekList || weekday === undefined || !range) {
