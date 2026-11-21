@@ -28,7 +28,7 @@ export const DEFAULT_SYMBOL_CONFIDENCE_THRESHOLD = 0.85;
 const CRITICAL_KIND_SET: ReadonlySet<string> = new Set(CRITICAL_HANDWRITING_TOKEN_KINDS);
 const NON_SEMANTIC_KIND_SET: ReadonlySet<string> = new Set(NON_SEMANTIC_HANDWRITING_TOKEN_KINDS);
 
-const NON_SEMANTIC_TEXT_RE = /^(?:[.,;:，。；：、…·•\-–—"'“”‘’]|\.{2,})$/u;
+const NON_SEMANTIC_TEXT_RE = /^(?:[,;:，。；：、…·•\-–—"'“”‘’]|\.{2,})$/u;
 const CRITICAL_AUTO_TEXT_RE =
   /(?:[0-9()[\]{}]|!=|==|<=|>=|->|=>|<-|←|→|[+\-*/=<>^_∑∫∂×÷≤≥≠∈∉⊂⊆∪∩∀∃]|[A-Za-zα-ωΑ-Ω])/u;
 
@@ -151,6 +151,66 @@ function normalizeExpressionKey(expr: string): string {
   return expr.replace(/\s+/g, " ").trim();
 }
 
+function findNeighborEffectiveText(
+  tokens: readonly { kind: HandwrittenTokenKind; effectiveText: string }[],
+  index: number,
+  direction: -1 | 1,
+): string {
+  for (let cursor = index + direction; cursor >= 0 && cursor < tokens.length; cursor += direction) {
+    const candidate = tokens[cursor]!;
+    if (candidate.kind === "whitespace") continue;
+    const trimmed = candidate.effectiveText.trim();
+    if (trimmed.length === 0) continue;
+    return trimmed;
+  }
+  return "";
+}
+
+function isStepTokenCritical(
+  tokens: readonly { kind: HandwrittenTokenKind; effectiveText: string }[],
+  index: number,
+): boolean {
+  const token = tokens[index]!;
+  const trimmed = token.effectiveText.trim();
+  if (isCriticalMathOr408Token({ kind: token.kind, rawText: trimmed })) {
+    return true;
+  }
+  if (token.kind === "whitespace") {
+    return false;
+  }
+  // Contextual decimal separators (even if upstream OCR tagged "." or "," as punctuation):
+  // "." immediately preceding digits (e.g. ["1", ".", "2"] or [".", "5"]) or "," between digits.
+  if (trimmed === ".") {
+    const nextText = findNeighborEffectiveText(tokens, index, 1);
+    return /^[0-9]/u.test(nextText);
+  }
+  if (trimmed === ",") {
+    const prevText = findNeighborEffectiveText(tokens, index, -1);
+    const nextText = findNeighborEffectiveText(tokens, index, 1);
+    return /[0-9]$/u.test(prevText) && /^[0-9]/u.test(nextText);
+  }
+  return false;
+}
+
+function assembleCriticalTokenExpression(criticalTexts: readonly string[]): string {
+  let assembled = "";
+  for (let i = 0; i < criticalTexts.length; i += 1) {
+    const current = criticalTexts[i]!.trim();
+    if (current.length === 0) continue;
+    if (assembled.length === 0) {
+      assembled = current;
+      continue;
+    }
+    const prev = criticalTexts[i - 1]!.trim();
+    const next = i + 1 < criticalTexts.length ? criticalTexts[i + 1]!.trim() : "";
+    const joinDecimalDot =
+      (current === "." && /^[0-9]/u.test(next)) ||
+      (prev === "." && /^[0-9]/u.test(current));
+    assembled += joinDecimalDot ? current : ` ${current}`;
+  }
+  return assembled.trim();
+}
+
 type StepExpressionKeys = Readonly<{
   effectiveKey: string;
   semanticKey: string;
@@ -161,8 +221,10 @@ function computeStepExpressionKeys(
   tokens: readonly HandwrittenAstTokenInput[],
   rawExpression?: string,
 ): StepExpressionKeys {
-  const effectiveTexts: string[] = [];
-  const semanticTexts: string[] = [];
+  const prepared: {
+    kind: HandwrittenTokenKind;
+    effectiveText: string;
+  }[] = [];
   let hasConfirmedTextMutation = false;
 
   for (const token of tokens) {
@@ -174,19 +236,23 @@ function computeStepExpressionKeys(
     if (confirmedByLearner && effectiveText.trim() !== token.rawText.trim()) {
       hasConfirmedTextMutation = true;
     }
-    effectiveTexts.push(effectiveText);
-    if (isCriticalMathOr408Token({ kind: token.kind, rawText: effectiveText })) {
-      semanticTexts.push(effectiveText);
+    prepared.push({ kind: token.kind, effectiveText });
+  }
+
+  const semanticTexts: string[] = [];
+  for (let i = 0; i < prepared.length; i += 1) {
+    if (isStepTokenCritical(prepared, i)) {
+      semanticTexts.push(prepared[i]!.effectiveText);
     }
   }
 
-  const joinedEffective = effectiveTexts.join(" ").trim();
+  const joinedEffective = prepared.map((t) => t.effectiveText).join(" ").trim();
   const effectiveExpression =
     joinedEffective.length > 0 ? joinedEffective : (rawExpression ?? "").trim();
 
   return {
     effectiveKey: normalizeExpressionKey(effectiveExpression),
-    semanticKey: normalizeExpressionKey(semanticTexts.join(" ")),
+    semanticKey: normalizeExpressionKey(assembleCriticalTokenExpression(semanticTexts)),
     hasConfirmedTextMutation,
   };
 }
@@ -358,13 +424,26 @@ export function applyLearnerSymbolConfirmations(
       } = step;
 
       const ancestorIds = collectTransitiveAncestors(step.stepId, updatedById);
-      const mutatedUpstreamIds = new Set<string>();
+      const stepDeps = step.dependsOnStepIds ?? [];
+      const hasMutatedAncestor = [...ancestorIds].some(
+        (ancestorId) =>
+          directlyMutatedIds.has(ancestorId) ||
+          stepKeysById.get(ancestorId)?.hasConfirmedTextMutation === true,
+      );
+      const hasMutatedPremiseDependency =
+        stepDeps.length > 0 && (directlyMutatedIds.has(step.stepId) || hasMutatedAncestor);
+      const requiredUpstreamIds = new Set<string>();
       for (const ancestorId of ancestorIds) {
         if (
           directlyMutatedIds.has(ancestorId) ||
           stepKeysById.get(ancestorId)?.hasConfirmedTextMutation === true
         ) {
-          mutatedUpstreamIds.add(ancestorId);
+          requiredUpstreamIds.add(ancestorId);
+        }
+      }
+      if (hasMutatedPremiseDependency) {
+        for (const depId of stepDeps) {
+          requiredUpstreamIds.add(depId);
         }
       }
 
@@ -373,7 +452,7 @@ export function applyLearnerSymbolConfirmations(
         stepKeysById.get(step.stepId)!,
         ancestorIds,
         stepKeysById,
-        mutatedUpstreamIds,
+        requiredUpstreamIds,
       );
 
       return {
@@ -416,11 +495,15 @@ export function evaluateHandwritingStage1(
 
     const stepBbox = validateNormalizedBoundingBox(step.bbox, `step[${stepIndex}].bbox`);
     const seenTokenIds = new Set<string>();
-    const normalizedTokens: HandwritingNormalizedToken[] = [];
-    let stepHasUnconfirmedCritical = false;
+    const preparedTokens: {
+      token: HandwrittenAstTokenInput;
+      effectiveText: string;
+      confirmedByLearner: boolean;
+      confidence: number;
+      tokenBbox: NormalizedBoundingBox;
+      kind: HandwrittenTokenKind;
+    }[] = [];
     let stepHasConfirmedTextMutation = false;
-    let criticalTokenCount = 0;
-    let cursor = 0;
 
     for (const [tokenIndex, token] of step.ast.tokens.entries()) {
       if (typeof token.tokenId !== "string" || token.tokenId.trim().length === 0) {
@@ -464,10 +547,25 @@ export function evaluateHandwritingStage1(
         stepHasConfirmedTextMutation = true;
       }
 
-      const isCritical = isCriticalMathOr408Token({
+      preparedTokens.push({
+        token,
+        effectiveText,
+        confirmedByLearner,
+        confidence,
+        tokenBbox,
         kind: token.kind,
-        rawText: effectiveText,
       });
+    }
+
+    const normalizedTokens: HandwritingNormalizedToken[] = [];
+    let stepHasUnconfirmedCritical = false;
+    let criticalTokenCount = 0;
+    let cursor = 0;
+
+    for (let i = 0; i < preparedTokens.length; i += 1) {
+      const { token, effectiveText, confirmedByLearner, confidence, tokenBbox } =
+        preparedTokens[i]!;
+      const isCritical = isStepTokenCritical(preparedTokens, i);
       if (isCritical) {
         criticalTokenCount += 1;
       }
@@ -903,6 +1001,11 @@ function powNumeric(base: NumericEvalResult, exp: NumericEvalResult): NumericEva
 }
 
 function evaluateNumericExpression(expr: string): NumericEvalResult {
+  // Never silently concatenate separate adjacent numeric fragments across whitespace
+  // (e.g. ["1", "2"] without an operator or "." must fail closed as "unknown").
+  if (/[0-9.]\s+[0-9.]/u.test(expr.trim())) {
+    return { kind: "unknown" };
+  }
   const cleaned = expr.replace(/\s+/g, "");
   if (cleaned.length === 0 || !/^[0-9+\-*/^().]+$/u.test(cleaned)) {
     return { kind: "unknown" };
@@ -1233,11 +1336,9 @@ export function evaluateHandwritingStage2(
   const stepKeysById = new Map<string, StepExpressionKeys>();
   const semanticExprById = new Map<string, string>();
   for (const s1 of stage1.steps) {
-    const semanticTokenExpression = s1.tokens
-      .filter((t) => t.isCritical)
-      .map((t) => t.effectiveText)
-      .join(" ")
-      .trim();
+    const semanticTokenExpression = assembleCriticalTokenExpression(
+      s1.tokens.filter((t) => t.isCritical).map((t) => t.effectiveText),
+    );
     semanticExprById.set(s1.stepId, semanticTokenExpression);
     stepKeysById.set(s1.stepId, {
       effectiveKey: normalizeExpressionKey(s1.effectiveExpression),
@@ -1272,14 +1373,22 @@ export function evaluateHandwritingStage2(
     ancestorsById.set(step.stepId, ancestors);
 
     const hasMutatedUpstreamPremise = deps.some((depId) => mutatedPremiseStepIds.has(depId));
+    const selfMutated = stage1Step.hasConfirmedTextMutation && deps.length === 0;
+    const hasMutatedPremiseDependency =
+      deps.length > 0 && (stage1Step.hasConfirmedTextMutation || hasMutatedUpstreamPremise);
     if (stage1Step.hasConfirmedTextMutation || hasMutatedUpstreamPremise) {
       mutatedPremiseStepIds.add(step.stepId);
     }
 
-    const mutatedUpstreamIds = new Set<string>();
+    const requiredUpstreamIds = new Set<string>();
     for (const ancId of ancestors) {
       if (stepKeysById.get(ancId)?.hasConfirmedTextMutation === true) {
-        mutatedUpstreamIds.add(ancId);
+        requiredUpstreamIds.add(ancId);
+      }
+    }
+    if (hasMutatedPremiseDependency) {
+      for (const depId of deps) {
+        requiredUpstreamIds.add(depId);
       }
     }
 
@@ -1288,7 +1397,7 @@ export function evaluateHandwritingStage2(
       stepKeysById.get(step.stepId)!,
       ancestors,
       stepKeysById,
-      mutatedUpstreamIds,
+      requiredUpstreamIds,
     )
       ? step.postConfirmationVerdict
       : undefined;
@@ -1307,9 +1416,19 @@ export function evaluateHandwritingStage2(
       stepMisconceptionId = matchedPostVerdict.misconceptionId ?? null;
       stepErrorCode = matchedPostVerdict.errorCode ?? null;
       stepErrorSummary = matchedPostVerdict.errorSummary ?? null;
-    } else if (mutatedPremiseStepIds.has(step.stepId)) {
-      // Confirmed symbol mutation on this step or any transitive upstream premise invalidates
-      // stale pre-confirmation localVerdict / misconception / error metadata.
+    } else if (hasMutatedPremiseDependency) {
+      // Transition validity from mutated upstream premise(s) cannot be inferred from
+      // isolated arithmetic truth alone (e.g. "6 * 2 = 12" after s1 changed "2 + 3 = 6" -> "5").
+      // Deterministic arithmetic falsehood / div_by_zero may fail as "invalid"; everything else
+      // fails closed as "unknown" until a bound postConfirmationVerdict certifies the transition.
+      const isolatedNumericVerdict =
+        step.ast.kind === "equation" || step.ast.kind === "inequality"
+          ? tryVerifyPureNumericRelation(semanticTokenExpression)
+          : null;
+      localVerdict = isolatedNumericVerdict === "invalid" ? "invalid" : "unknown";
+    } else if (selfMutated) {
+      // Confirmed symbol mutation on a root step (no dependencies) invalidates stale
+      // pre-confirmation localVerdict / misconception metadata and evaluates pure numeric relations.
       localVerdict =
         step.ast.kind === "equation" || step.ast.kind === "inequality"
           ? (tryVerifyPureNumericRelation(semanticTokenExpression) ?? "unknown")

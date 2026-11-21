@@ -519,6 +519,8 @@ export function issueSpeechTimingReceipt(
     silenceDurationMs,
     wordCount,
     syllableCount: totalSyllables,
+    speechRateMetric,
+    speechRateSylOrWordsPerMin,
     minorHesitationCount,
     breakdownPauseCount,
     sentenceBoundaryPauseCount: sentenceBoundaryPauses.length,

@@ -1025,48 +1025,300 @@ describe("multimodal-evidence: Two-Stage Handwritten Math & 408 Diagram Verifier
     expect(boundStage2.canUpdateSkillBelief).toBe(true);
     expect(boundStage2.firstRootCauseError).toBeNull();
 
-    // 4. Downstream pure-numeric step re-evaluates purely arithmetically instead of trusting stale misconceptionId.
-    const numericDownstream = applyLearnerSymbolConfirmations(
+    // 4. Downstream pure-numeric step does NOT auto-certify isolated arithmetic truth ("2 * 3 = 6")
+    // when upstream n1 mutated without a bound postConfirmationVerdict; only deterministic arithmetic
+    // falsehood ("2 * 3 = 7") fails as "invalid" (with stale misconceptionId ignored).
+    const makeNumericDownstreamChain = (rhsValue: string) =>
+      applyLearnerSymbolConfirmations(
+        [
+          {
+            stepId: "n1",
+            bbox: [0.1, 0.1, 0.9, 0.3],
+            ast: {
+              kind: "equation",
+              tokens: [
+                { tokenId: "n1-1", rawText: "2", kind: "digit", confidence: 0.99 },
+                { tokenId: "n1-2", rawText: "+", kind: "operator", confidence: 0.99 },
+                { tokenId: "n1-3", rawText: "2", kind: "digit", confidence: 0.99 },
+                { tokenId: "n1-4", rawText: "=", kind: "operator", confidence: 0.99 },
+                { tokenId: "n1-5", rawText: "5", kind: "digit", confidence: 0.5 },
+              ],
+            },
+            localVerdict: "invalid",
+            misconceptionId: "old_n1",
+          },
+          {
+            stepId: "n2",
+            bbox: [0.1, 0.4, 0.9, 0.6],
+            dependsOnStepIds: ["n1"],
+            ast: {
+              kind: "equation",
+              tokens: [
+                { tokenId: "n2-1", rawText: "2", kind: "digit", confidence: 0.99 },
+                { tokenId: "n2-2", rawText: "*", kind: "operator", confidence: 0.99 },
+                { tokenId: "n2-3", rawText: "3", kind: "digit", confidence: 0.99 },
+                { tokenId: "n2-4", rawText: "=", kind: "operator", confidence: 0.99 },
+                { tokenId: "n2-5", rawText: rhsValue, kind: "digit", confidence: 0.99 },
+              ],
+            },
+            localVerdict: "invalid",
+            misconceptionId: "stale_n2_misconception",
+          },
+        ],
+        [{ stepId: "n1", tokenId: "n1-5", confirmedText: "4" }],
+      );
+
+    const isolatedTrueDownstream = evaluateHandwritingStage2(makeNumericDownstreamChain("6"), {
+      assisted: false,
+    });
+    expect(isolatedTrueDownstream.overallVerdict).toBe("unknown");
+    expect(isolatedTrueDownstream.canUpdateSkillBelief).toBe(false);
+    expect(isolatedTrueDownstream.steps[1]!.localVerdict).toBe("unknown");
+    expect(isolatedTrueDownstream.steps[1]!.attributedMisconceptionId).toBeNull();
+
+    const isolatedFalseDownstream = evaluateHandwritingStage2(makeNumericDownstreamChain("7"), {
+      assisted: false,
+    });
+    expect(isolatedFalseDownstream.overallVerdict).toBe("invalid");
+    expect(isolatedFalseDownstream.firstRootCauseError?.stepId).toBe("n2");
+    expect(isolatedFalseDownstream.firstRootCauseError?.misconceptionId).toBeNull();
+  });
+
+  it("Round-5 [P1-1]: treats standalone '.' and decimal separators as critical tokens and never concatenates adjacent bare digits", () => {
+    const initialBelief = makeBelief();
+
+    // 1. Standalone "." under kind: "auto" is critical even at < 0.90 confidence -> Stage 1 blocks.
+    expect(isCriticalMathOr408Token({ kind: "auto", rawText: "." })).toBe(true);
+    const lowConfDecimal: readonly HandwritingStepInput[] = [
+      {
+        stepId: "dec-low",
+        bbox: [0.1, 0.1, 0.9, 0.3],
+        ast: {
+          kind: "equation",
+          tokens: [
+            { tokenId: "d1", rawText: "1", kind: "auto", confidence: 0.99 },
+            { tokenId: "d2", rawText: ".", kind: "auto", confidence: 0.8 },
+            { tokenId: "d3", rawText: "2", kind: "auto", confidence: 0.99 },
+            { tokenId: "d4", rawText: "=", kind: "auto", confidence: 0.99 },
+            { tokenId: "d5", rawText: "12", kind: "auto", confidence: 0.99 },
+          ],
+        },
+      },
+    ];
+    const blockedStage1 = evaluateHandwritingStage1(lowConfDecimal, { confidenceThreshold: 0.9 });
+    expect(blockedStage1.status).toBe("awaiting_symbol_confirmation");
+    expect(blockedStage1.canUpdateSkillBelief).toBe(false);
+    expect(blockedStage1.cropConfirmationPrompts.map((p) => p.tokenId)).toEqual(["d2"]);
+
+    const blockedStage2 = evaluateHandwritingStage2(lowConfDecimal, { confidenceThreshold: 0.9 });
+    expect(blockedStage2.status).toBe("blocked_unconfirmed_ocr");
+    expect(blockedStage2.canUpdateSkillBelief).toBe(false);
+
+    // 2. Contextual "." and decimal "," even when tagged kind: "punctuation" between digits are critical.
+    const punctDecimalLow = evaluateHandwritingStage1(
       [
         {
-          stepId: "n1",
+          stepId: "dec-punct",
           bbox: [0.1, 0.1, 0.9, 0.3],
           ast: {
             kind: "equation",
             tokens: [
-              { tokenId: "n1-1", rawText: "2", kind: "digit", confidence: 0.99 },
-              { tokenId: "n1-2", rawText: "+", kind: "operator", confidence: 0.99 },
-              { tokenId: "n1-3", rawText: "2", kind: "digit", confidence: 0.99 },
-              { tokenId: "n1-4", rawText: "=", kind: "operator", confidence: 0.99 },
-              { tokenId: "n1-5", rawText: "5", kind: "digit", confidence: 0.5 },
+              { tokenId: "p1", rawText: "1", kind: "digit", confidence: 0.99 },
+              { tokenId: "p2", rawText: ".", kind: "punctuation", confidence: 0.75 },
+              { tokenId: "p3", rawText: "2", kind: "digit", confidence: 0.99 },
+              { tokenId: "p4", rawText: "=", kind: "operator", confidence: 0.99 },
+              { tokenId: "p5", rawText: "12", kind: "number", confidence: 0.99 },
             ],
           },
-          localVerdict: "invalid",
-          misconceptionId: "old_n1",
         },
+      ],
+      { confidenceThreshold: 0.9 },
+    );
+    expect(punctDecimalLow.status).toBe("awaiting_symbol_confirmation");
+    expect(punctDecimalLow.cropConfirmationPrompts.map((p) => p.tokenId)).toEqual(["p2"]);
+
+    const commaDecimalLow = evaluateHandwritingStage1(
+      [
         {
-          stepId: "n2",
-          bbox: [0.1, 0.4, 0.9, 0.6],
-          dependsOnStepIds: ["n1"],
+          stepId: "dec-comma",
+          bbox: [0.1, 0.1, 0.9, 0.3],
           ast: {
             kind: "equation",
             tokens: [
-              { tokenId: "n2-1", rawText: "2", kind: "digit", confidence: 0.99 },
-              { tokenId: "n2-2", rawText: "*", kind: "operator", confidence: 0.99 },
-              { tokenId: "n2-3", rawText: "3", kind: "digit", confidence: 0.99 },
-              { tokenId: "n2-4", rawText: "=", kind: "operator", confidence: 0.99 },
-              { tokenId: "n2-5", rawText: "6", kind: "digit", confidence: 0.99 },
+              { tokenId: "c1", rawText: "1", kind: "auto", confidence: 0.99 },
+              { tokenId: "c2", rawText: ",", kind: "auto", confidence: 0.72 },
+              { tokenId: "c3", rawText: "2", kind: "auto", confidence: 0.99 },
+              { tokenId: "c4", rawText: "=", kind: "auto", confidence: 0.99 },
+              { tokenId: "c5", rawText: "12", kind: "auto", confidence: 0.99 },
             ],
           },
-          localVerdict: "invalid",
-          misconceptionId: "stale_n2_misconception",
         },
       ],
-      [{ stepId: "n1", tokenId: "n1-5", confirmedText: "4" }],
+      { confidenceThreshold: 0.9 },
     );
-    const numericStage2 = evaluateHandwritingStage2(numericDownstream, { assisted: false });
-    expect(numericStage2.overallVerdict).toBe("valid");
-    expect(numericStage2.firstRootCauseError).toBeNull();
+    expect(commaDecimalLow.status).toBe("awaiting_symbol_confirmation");
+    expect(commaDecimalLow.cropConfirmationPrompts.map((p) => p.tokenId)).toEqual(["c2"]);
+
+    // 3. High-confidence ["1", ".", "2", "=", "12"] joins as "1.2 = 12" -> "invalid" (never "12 = 12" valid!).
+    const highConfDecimal = evaluateHandwritingStage2(
+      [
+        {
+          stepId: "dec-high",
+          bbox: [0.1, 0.1, 0.9, 0.3],
+          ast: {
+            kind: "equation",
+            tokens: [
+              { tokenId: "h1", rawText: "1", kind: "auto", confidence: 0.99 },
+              { tokenId: "h2", rawText: ".", kind: "auto", confidence: 0.98 },
+              { tokenId: "h3", rawText: "2", kind: "auto", confidence: 0.99 },
+              { tokenId: "h4", rawText: "=", kind: "auto", confidence: 0.99 },
+              { tokenId: "h5", rawText: "12", kind: "auto", confidence: 0.99 },
+            ],
+          },
+        },
+      ],
+      { assisted: false },
+    );
+    expect(highConfDecimal.overallVerdict).toBe("invalid");
+    expect(highConfDecimal.firstRootCauseError?.stepId).toBe("dec-high");
+
+    // Matching decimal equation ["1", ".", "2", "=", "1.2"] is "valid".
+    const matchingDecimal = evaluateHandwritingStage2(
+      [
+        {
+          stepId: "dec-match",
+          bbox: [0.1, 0.1, 0.9, 0.3],
+          ast: {
+            kind: "equation",
+            tokens: [
+              { tokenId: "m1", rawText: "1", kind: "auto", confidence: 0.99 },
+              { tokenId: "m2", rawText: ".", kind: "auto", confidence: 0.98 },
+              { tokenId: "m3", rawText: "2", kind: "auto", confidence: 0.99 },
+              { tokenId: "m4", rawText: "=", kind: "auto", confidence: 0.99 },
+              { tokenId: "m5", rawText: "1.2", kind: "auto", confidence: 0.99 },
+            ],
+          },
+        },
+      ],
+      { assisted: false },
+    );
+    expect(matchingDecimal.overallVerdict).toBe("valid");
+
+    // 4. Adjacent separate digit tokens ["1", "2", "=", "12"] without "." NEVER silently concatenate into "12".
+    const ambiguousAdjacentDigits = evaluateHandwritingStage2(
+      [
+        {
+          stepId: "adj-digits",
+          bbox: [0.1, 0.1, 0.9, 0.3],
+          ast: {
+            kind: "equation",
+            tokens: [
+              { tokenId: "a1", rawText: "1", kind: "auto", confidence: 0.99 },
+              { tokenId: "a2", rawText: "2", kind: "auto", confidence: 0.99 },
+              { tokenId: "a3", rawText: "=", kind: "auto", confidence: 0.99 },
+              { tokenId: "a4", rawText: "12", kind: "auto", confidence: 0.99 },
+            ],
+          },
+        },
+      ],
+      { assisted: false },
+    );
+    expect(ambiguousAdjacentDigits.overallVerdict).toBe("unknown");
+    expect(ambiguousAdjacentDigits.canUpdateSkillBelief).toBe(false);
+    expect(
+      applyHandwritingStage2ToSkillBelief({
+        stage2: ambiguousAdjacentDigits,
+        belief: initialBelief,
+        item: skillItem,
+        atMs: 86_400_000,
+      }).applied,
+    ).toBe(false);
+  });
+
+  it("Round-5 [P1-2]: refuses to certify isolated arithmetic truth ('6 * 2 = 12') after upstream premise OCR mutation without bound postConfirmationVerdict", () => {
+    const initialBelief = makeBelief();
+    const rawSteps: readonly HandwritingStepInput[] = [
+      {
+        stepId: "s1",
+        bbox: [0.1, 0.1, 0.9, 0.3],
+        ast: {
+          kind: "equation",
+          tokens: [
+            { tokenId: "s1-1", rawText: "2", kind: "digit", confidence: 0.99 },
+            { tokenId: "s1-2", rawText: "+", kind: "operator", confidence: 0.99 },
+            { tokenId: "s1-3", rawText: "3", kind: "digit", confidence: 0.99 },
+            { tokenId: "s1-4", rawText: "=", kind: "operator", confidence: 0.99 },
+            {
+              tokenId: "s1-5",
+              rawText: "6",
+              kind: "digit",
+              confidence: 0.48,
+              visualCandidates: ["6", "5"],
+            },
+          ],
+        },
+      },
+      {
+        stepId: "s2",
+        dependsOnStepIds: ["s1"],
+        bbox: [0.1, 0.4, 0.9, 0.6],
+        ast: {
+          kind: "equation",
+          tokens: [
+            { tokenId: "s2-1", rawText: "6", kind: "digit", confidence: 0.99 },
+            { tokenId: "s2-2", rawText: "*", kind: "operator", confidence: 0.99 },
+            { tokenId: "s2-3", rawText: "2", kind: "digit", confidence: 0.99 },
+            { tokenId: "s2-4", rawText: "=", kind: "operator", confidence: 0.99 },
+            { tokenId: "s2-5", rawText: "12", kind: "number", confidence: 0.99 },
+          ],
+        },
+      },
+    ];
+
+    // Learner corrects OCR on s1: "2 + 3 = 6" -> "2 + 3 = 5".
+    // s1 becomes locally "valid" (selfMutated root step), while s2 ("6 * 2 = 12") STILL references
+    // the uncorrected premise 6 and MUST become "unknown" (canUpdateSkillBelief: false), NOT "valid"!
+    const afterConfirm = applyLearnerSymbolConfirmations(rawSteps, [
+      { stepId: "s1", tokenId: "s1-5", confirmedText: "5" },
+    ]);
+    const stage2UnverifiedTransition = evaluateHandwritingStage2(afterConfirm, { assisted: false });
+    expect(stage2UnverifiedTransition.steps[0]!.localVerdict).toBe("valid");
+    expect(stage2UnverifiedTransition.steps[1]!.localVerdict).toBe("unknown");
+    expect(stage2UnverifiedTransition.steps[1]!.propagatedState).toBe("unknown");
+    expect(stage2UnverifiedTransition.overallVerdict).toBe("unknown");
+    expect(stage2UnverifiedTransition.canUpdateSkillBelief).toBe(false);
+
+    const blockedBelief = applyHandwritingStage2ToSkillBelief({
+      stage2: stage2UnverifiedTransition,
+      belief: initialBelief,
+      item: skillItem,
+      atMs: 86_400_000,
+    });
+    expect(blockedBelief.applied).toBe(false);
+    expect(blockedBelief.belief).toBe(initialBelief);
+
+    // Providing a transition-aware postConfirmationVerdict bound to { s1: "2 + 3 = 5" } unlocks evaluation.
+    const verifiedTransition = evaluateHandwritingStage2(
+      afterConfirm.map((step) =>
+        step.stepId === "s2"
+          ? {
+              ...step,
+              postConfirmationVerdict: {
+                confirmedExpression: "6 * 2 = 12",
+                upstreamConfirmedExpressions: { s1: "2 + 3 = 5" },
+                localVerdict: "invalid",
+                misconceptionId: "wrong_final_answer",
+                errorSummary: "Step 2 carried over uncorrected 6 instead of 5 from step 1.",
+              },
+            }
+          : step,
+      ),
+      { assisted: false },
+    );
+    expect(verifiedTransition.overallVerdict).toBe("invalid");
+    expect(verifiedTransition.canUpdateSkillBelief).toBe(true);
+    expect(verifiedTransition.firstRootCauseError?.stepId).toBe("s2");
+    expect(verifiedTransition.firstRootCauseError?.misconceptionId).toBe("wrong_final_answer");
   });
 });
 
@@ -1285,6 +1537,36 @@ describe("multimodal-evidence: Pre-VAD Original PCM Clock & 0080 Raw Audio Reten
     expect(noneReceipt.filledPauseCount).toBe(0);
     expect(fillerReceipt.filledPauseCount).toBe(1);
     expect(fillerReceipt.integrityDigest).not.toBe(noneReceipt.integrityDigest);
+  });
+
+  it("Round-5 [P2-1]: includes speechRateMetric in integrityDigest even for identical inputs", () => {
+    const sharedInput = {
+      receiptId: "rcpt-rate-metric-digest",
+      issuedAtMs: 1_700_000_000_000,
+      totalOriginalDurationMs: 4000,
+      voicedSegments: [
+        { originalStartMs: 0, originalEndMs: 2000, strippedStartMs: 0, strippedEndMs: 2000 },
+      ],
+      words: [
+        { word: "one", startMs: 0, endMs: 400 },
+        { word: "two", startMs: 500, endMs: 900 },
+      ],
+      defaultTokenClock: "original_pcm" as const,
+    };
+
+    const wpmReceipt = issueSpeechTimingReceipt({
+      ...sharedInput,
+      speechRateMetric: "words_per_min",
+    });
+    const spmReceipt = issueSpeechTimingReceipt({
+      ...sharedInput,
+      speechRateMetric: "syllables_per_min",
+    });
+
+    expect(wpmReceipt.speechRateMetric).toBe("words_per_min");
+    expect(spmReceipt.speechRateMetric).toBe("syllables_per_min");
+    expect(wpmReceipt.speechRateSylOrWordsPerMin).toBe(spmReceipt.speechRateSylOrWordsPerMin);
+    expect(spmReceipt.integrityDigest).not.toBe(wpmReceipt.integrityDigest);
   });
 
   it("rejects mismatched VAD segment durations, overlaps, and out-of-range timestamps", () => {
