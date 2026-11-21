@@ -7,6 +7,7 @@ import { createOpeningDayAdjustmentRepository } from "./opening-day-adjustment";
 import { assertOpeningLearningManagementDraft } from "./opening-learning-management-draft";
 import { validateOpeningLocalReplan } from "./opening-local-replan-validation";
 import { acceptOpeningPlan } from "./opening-plan-accept";
+import { assertOpeningPlanConstraints } from "./opening-plan-constraints";
 import {
   assertCardSessionStop,
   resolveCardSessionRecoveryAllowance,
@@ -28,7 +29,8 @@ function uuid(prefix: string, index: number): string {
 function createMockSql(
   handler: (query: string, values: unknown[]) => unknown[] | Promise<unknown[]>,
 ): Sql {
-  const fn = (parts: TemplateStringsArray, ...values: unknown[]) => {
+  const fn = (parts: TemplateStringsArray | unknown[], ...values: unknown[]) => {
+    if (!("raw" in parts)) return parts;
     const query = parts.join("?");
     return Promise.resolve(handler(query, values));
   };
@@ -1668,7 +1670,14 @@ describe("Round-9 fixes: standalone draft/replan 30% card cap, intraday post-adj
         return [{ day, accepted_version: 1, accepted_blocks: [existingBlockC1], hard_blocks_fingerprint: "" }];
       }
       if (query.includes("SELECT DISTINCT course_id")) return [];
-      if (query.includes("FROM opening_tasks")) return cardTasks;
+      if (query.includes("FROM opening_tasks")) {
+        const idFilter = values.find((value): value is string[] => Array.isArray(value));
+        if (idFilter) {
+          const requested = new Set(idFilter);
+          return cardTasks.filter((task) => requested.has(task.id));
+        }
+        return cardTasks;
+      }
       return [];
     });
 
@@ -1814,5 +1823,376 @@ describe("Round-9 fixes: standalone draft/replan 30% card cap, intraday post-adj
       labelCardOnOtherNode.id,
       labelCardOnSharedNode.id,
     ]);
+  });
+});
+
+describe("Round-11 fixes: intraday preview/confirm card-cap parity and explicitFree standalone constraints", () => {
+  const planningSettings = {
+    weekOneMonday: "2026-09-07",
+    periodTimes: {},
+    dailyWindow: { start: "07:30", end: "22:30" },
+    lunch: { start: "12:00", end: "12:45" },
+    dinner: { start: "18:00", end: "18:45" },
+    sleep: { start: "23:00", end: "07:00" },
+    timeZone: "Asia/Shanghai",
+  };
+
+  it("P1: enforces strict preview -> confirm 30% card-recovery cap parity on a 40m day (12m cap, 25m free window) across same-day quick add, replacement/move, and cross-day move", async () => {
+    const sourceDate = "2026-11-19";
+    const targetDate = "2026-11-20";
+    const now = new Date("2026-11-19T10:55:00.000Z"); // 18:55 Asia/Shanghai
+    const cardTask1 = uuid("17171717", 1);
+    const cardTask2 = uuid("17171717", 2);
+    const excId = uuid("17171717", 9);
+
+    const existingBlockC1 = {
+      taskId: cardTask1,
+      start: "2026-11-19T11:00:00.000Z", // 19:00 Asia/Shanghai
+      end: "2026-11-19T11:10:00.000Z",   // 19:10 Asia/Shanghai (10m)
+      reason: "planned" as const,
+    };
+    const targetExistingBlockC2 = {
+      taskId: cardTask2,
+      start: "2026-11-20T01:00:00.000Z", // 09:00 Asia/Shanghai
+      end: "2026-11-20T01:10:00.000Z",   // 09:10 Asia/Shanghai (10m)
+      reason: "planned" as const,
+    };
+
+    const cardTasks = [
+      {
+        id: cardTask1,
+        workspace_id: WS,
+        owner_user_id: OWNER,
+        title: "到期卡片复习 1",
+        minutes: 10,
+        status: "pending",
+        version: 1,
+        priority: 2,
+        due_at: null,
+        not_before: null,
+        course_id: null,
+        origin: "planner",
+        client_key: `planner:${sourceDate}:review_cards:c1:long-term`,
+        candidate_id: null,
+        retest_id: null,
+        retest_activity_id: null,
+        candidate_reference_id: null,
+        scheduled_start_at: null,
+        recommended_at: null,
+        not_before_at: null,
+        snoozed_until: null,
+        learning_protocol: null,
+      },
+      {
+        id: cardTask2,
+        workspace_id: WS,
+        owner_user_id: OWNER,
+        title: "到期卡片复习 2",
+        minutes: 10,
+        status: "pending",
+        version: 1,
+        priority: 2,
+        due_at: null,
+        not_before: null,
+        course_id: null,
+        origin: "planner",
+        client_key: `planner:${sourceDate}:review_cards:c2:long-term`,
+        candidate_id: null,
+        retest_id: null,
+        retest_activity_id: null,
+        candidate_reference_id: null,
+        scheduled_start_at: null,
+        recommended_at: null,
+        not_before_at: null,
+        snoozed_until: null,
+        learning_protocol: null,
+      },
+    ];
+
+    const buildDayAdjustmentSql = (targetDayBlocks: readonly typeof existingBlockC1[] = []) => createMockSql((query, values) => {
+      if (query.includes("pg_advisory_xact_lock") || query.includes("opening_workspace_history_revisions")) return [];
+      if (query.includes("FROM workspaces w LEFT JOIN workspace_preferences")) {
+        // 55 - 15 = 40m executable day -> strict 30% card cap = 12m.
+        return [{
+          learning_management: { dailyMinutes: 55, bufferMinutes: 15, revision: 1, updatedAt: "2026-11-19T00:00:00.000Z" },
+          planning_settings: planningSettings,
+        }];
+      }
+      if (query.includes("FROM workspaces")) return [{ id: WS }];
+      if (query.includes("FROM workspace_preferences")) return [{ planning_settings: planningSettings }];
+      if (query.includes("FROM opening_plan_drafts") && query.includes("strategy_version")) {
+        if (values[2] !== sourceDate) return [];
+        return [{
+          id: excId,
+          version: 1,
+          input_snapshot: {
+            dayException: {
+              kind: DAY_EXCEPTION_SNAPSHOT_KIND,
+              clientKey: "17171717-1717-4171-8171-171717171717",
+              localDate: sourceDate,
+              timeZone: "Asia/Shanghai",
+              effectiveAt: "2026-11-19T10:55:00.000Z",
+              remainingMinutes: 25,
+              expectedExceptionRevision: 0,
+              revision: 1,
+            },
+          },
+        }];
+      }
+      if (query.includes("FROM opening_plan_state")) {
+        const rows: Array<{ day: string; accepted_version: number; accepted_blocks: unknown[]; hard_blocks_fingerprint: string }> = [
+          { day: sourceDate, accepted_version: 1, accepted_blocks: [existingBlockC1], hard_blocks_fingerprint: "" },
+          ...(targetDayBlocks.length > 0
+            ? [{ day: targetDate, accepted_version: 1, accepted_blocks: [...targetDayBlocks], hard_blocks_fingerprint: "" }]
+            : []),
+        ];
+        if (typeof values[1] === "string") {
+          return rows.filter((row) => row.day === values[1]);
+        }
+        if (Array.isArray(values[1])) {
+          const requestedDays = new Set(values[1] as string[]);
+          return rows.filter((row) => requestedDays.has(row.day));
+        }
+        if (values[1] instanceof Date && values[2] instanceof Date) {
+          const nextDayStartMs = values[1].getTime();
+          const dayStartMs = values[2].getTime();
+          return rows.filter((row) =>
+            (row.accepted_blocks as Array<{ start: string; end: string }>).some(
+              (block) => Date.parse(block.start) < nextDayStartMs && Date.parse(block.end) > dayStartMs,
+            ),
+          );
+        }
+        return rows;
+      }
+      if (query.includes("SELECT DISTINCT course_id")) return [];
+      if (query.includes("FROM opening_tasks")) {
+        const idFilter = values.find((value): value is string[] => Array.isArray(value));
+        if (idFilter) {
+          const requested = new Set(idFilter);
+          return cardTasks.filter((task) => requested.has(task.id));
+        }
+        return cardTasks;
+      }
+      return [];
+    });
+
+    // 1. Keeping 10m C1 + adding second 10m C2 (20m > 12m cap) -> preview blocks & marks quickCandidate fits=false, confirm rejects with CONFLICT.
+    const keepBothRepo = createOpeningDayAdjustmentRepository(buildDayAdjustmentSql(), { clock: () => now });
+    const overCapPreview = await keepBothRepo.preview(SCOPE, {
+      date: sourceDate,
+      targetDate: null,
+      quickTaskId: cardTask2,
+      quickStartAt: "2026-11-19T11:20:00.000Z",
+    });
+    expect(overCapPreview.status).not.toBe("ready");
+    expect(overCapPreview.status).toBe("shortfall");
+    expect(overCapPreview.canConfirm).toBe(false);
+    expect(overCapPreview.blockers.some((message) => message.includes("卡片恢复可用上限"))).toBe(true);
+    const c2Candidate = overCapPreview.quickCandidates.find((item) => item.taskId === cardTask2);
+    expect(c2Candidate).toMatchObject({
+      taskId: cardTask2,
+      fits: false,
+      suggestedSlot: null,
+      reason: expect.stringContaining("卡片恢复可用上限"),
+    });
+    expect(overCapPreview.sourceAddedBlocks).toHaveLength(1);
+    await expect(
+      keepBothRepo.confirm(SCOPE, {
+        clientKey: "day-adjust:preview-confirm-over-cap-20m",
+        sourceDate: overCapPreview.sourceDate,
+        expectedTimeZone: overCapPreview.timeZone,
+        expectedExceptionRevision: overCapPreview.exceptionRevision,
+        expectedBudgetRevision: overCapPreview.budgetRevision,
+        expectedSourceAcceptedVersion: overCapPreview.sourceAcceptedVersion,
+        expectedTaskRevisions: overCapPreview.taskRevisions,
+        expectedRetestRevisions: overCapPreview.retestRevisions,
+        sourceActions: {
+          keptBlocks: overCapPreview.keptBlocks,
+          removedBlocks: overCapPreview.removedBlocks,
+          addedBlocks: overCapPreview.sourceAddedBlocks,
+        },
+        targetActions: null,
+      }),
+    ).rejects.toMatchObject({
+      code: "CONFLICT",
+      message: expect.stringContaining("卡片恢复可用上限"),
+    });
+
+    // 2. Moving 10m C1 to a non-overlapping 10m slot (10m <= 12m) -> preview is ready/canConfirm=true AND passing preview directly into confirm succeeds!
+    const moveRepo = createOpeningDayAdjustmentRepository(buildDayAdjustmentSql(), { clock: () => now });
+    const movePreview = await moveRepo.preview(SCOPE, {
+      date: sourceDate,
+      targetDate: null,
+      removeTaskIds: [cardTask1],
+      quickTaskId: cardTask1,
+      quickStartAt: "2026-11-19T11:20:00.000Z",
+    });
+    expect(movePreview.status).toBe("ready");
+    expect(movePreview.canConfirm).toBe(true);
+    expect(movePreview.blockers).toEqual([]);
+    expect(movePreview.sourceAfterBlocks).toEqual([{
+      taskId: cardTask1,
+      start: "2026-11-19T11:20:00.000Z",
+      end: "2026-11-19T11:30:00.000Z",
+      reason: "planned",
+    }]);
+    const moveReceipt = await moveRepo.confirm(SCOPE, {
+      clientKey: "day-adjust:preview-confirm-move-card-10m",
+      sourceDate: movePreview.sourceDate,
+      expectedTimeZone: movePreview.timeZone,
+      expectedExceptionRevision: movePreview.exceptionRevision,
+      expectedBudgetRevision: movePreview.budgetRevision,
+      expectedSourceAcceptedVersion: movePreview.sourceAcceptedVersion,
+      expectedTaskRevisions: movePreview.taskRevisions,
+      expectedRetestRevisions: movePreview.retestRevisions,
+      sourceActions: {
+        keptBlocks: movePreview.keptBlocks,
+        removedBlocks: movePreview.removedBlocks,
+        addedBlocks: movePreview.sourceAddedBlocks,
+      },
+      targetActions: null,
+    });
+    expect(moveReceipt.replayed).toBe(false);
+    expect(moveReceipt.sourceBlocks).toEqual(movePreview.sourceAfterBlocks);
+
+    // 3. Replacing 10m C1 with 10m C2 (10m <= 12m) -> preview marks C2 fits=true, ready/canConfirm=true AND passing preview directly into confirm succeeds!
+    const replaceRepo = createOpeningDayAdjustmentRepository(buildDayAdjustmentSql(), { clock: () => now });
+    const replacePreview = await replaceRepo.preview(SCOPE, {
+      date: sourceDate,
+      targetDate: null,
+      removeTaskIds: [cardTask1],
+      quickTaskId: cardTask2,
+      quickStartAt: "2026-11-19T11:20:00.000Z",
+    });
+    expect(replacePreview.status).toBe("ready");
+    expect(replacePreview.canConfirm).toBe(true);
+    expect(replacePreview.quickCandidates.find((item) => item.taskId === cardTask2)?.fits).toBe(true);
+    const replaceReceipt = await replaceRepo.confirm(SCOPE, {
+      clientKey: "day-adjust:preview-confirm-replace-card-10m",
+      sourceDate: replacePreview.sourceDate,
+      expectedTimeZone: replacePreview.timeZone,
+      expectedExceptionRevision: replacePreview.exceptionRevision,
+      expectedBudgetRevision: replacePreview.budgetRevision,
+      expectedSourceAcceptedVersion: replacePreview.sourceAcceptedVersion,
+      expectedTaskRevisions: replacePreview.taskRevisions,
+      expectedRetestRevisions: replacePreview.retestRevisions,
+      sourceActions: {
+        keptBlocks: replacePreview.keptBlocks,
+        removedBlocks: replacePreview.removedBlocks,
+        addedBlocks: replacePreview.sourceAddedBlocks,
+      },
+      targetActions: null,
+    });
+    expect(replaceReceipt.replayed).toBe(false);
+    expect(replaceReceipt.sourceBlocks).toEqual(replacePreview.sourceAfterBlocks);
+
+    // 4. Cross-day move of 10m C1 onto targetDate that already has 10m C2 (20m > 12m cap) -> preview blocks & confirm rejects!
+    const crossDayRepo = createOpeningDayAdjustmentRepository(
+      buildDayAdjustmentSql([targetExistingBlockC2]),
+      { clock: () => now },
+    );
+    const crossDayPreview = await crossDayRepo.preview(SCOPE, {
+      date: sourceDate,
+      targetDate,
+      moveTaskIds: [cardTask1],
+    });
+    expect(crossDayPreview.status).toBe("shortfall");
+    expect(crossDayPreview.canConfirm).toBe(false);
+    expect(crossDayPreview.blockers.some((message) => message.includes("卡片恢复可用上限"))).toBe(true);
+    await expect(
+      crossDayRepo.confirm(SCOPE, {
+        clientKey: "day-adjust:preview-confirm-target-over-cap-20m",
+        sourceDate: crossDayPreview.sourceDate,
+        targetDate: crossDayPreview.targetDate,
+        expectedTimeZone: crossDayPreview.timeZone,
+        expectedExceptionRevision: crossDayPreview.exceptionRevision,
+        expectedBudgetRevision: crossDayPreview.budgetRevision,
+        expectedSourceAcceptedVersion: crossDayPreview.sourceAcceptedVersion,
+        expectedTargetAcceptedVersion: crossDayPreview.targetAcceptedVersion,
+        expectedTaskRevisions: crossDayPreview.taskRevisions,
+        expectedRetestRevisions: crossDayPreview.retestRevisions,
+        sourceActions: {
+          keptBlocks: crossDayPreview.keptBlocks,
+          removedBlocks: crossDayPreview.removedBlocks,
+          addedBlocks: crossDayPreview.sourceAddedBlocks,
+        },
+        targetActions: {
+          targetDate: crossDayPreview.targetDate!,
+          addedBlocks: crossDayPreview.targetAddedBlocks,
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: "CONFLICT",
+      message: expect.stringContaining("卡片恢复可用上限"),
+    });
+  });
+
+  it("Hydrogen P2-2 direct coverage: assertOpeningPlanConstraints with explicitFree rejects over-cap card recovery with 卡片恢复可用上限", async () => {
+    const day = "2026-11-19";
+    const cardTask1 = uuid("18181818", 1);
+    const cardTask2 = uuid("18181818", 2);
+    const existingBlock = {
+      taskId: cardTask1,
+      start: "2026-11-19T01:00:00.000Z", // 09:00 Asia/Shanghai (10m)
+      end: "2026-11-19T01:10:00.000Z",
+      reason: "planned" as const,
+    };
+    const addedCardBlock = {
+      taskId: cardTask2,
+      start: "2026-11-19T06:00:00.000Z", // 14:00 Asia/Shanghai (10m)
+      end: "2026-11-19T06:10:00.000Z",
+      reason: "planned" as const,
+    };
+    const explicitFree = [{
+      start: "2026-11-19T05:30:00.000Z", // 13:30 Asia/Shanghai
+      end: "2026-11-19T08:00:00.000Z",   // 16:00 Asia/Shanghai
+      kind: "free" as const,
+    }];
+
+    const tx = createMockSql((query) => {
+      if (query.includes("FROM workspaces w LEFT JOIN workspace_preferences")) {
+        // 55 - 15 = 40m executable day -> strict 30% card cap = 12m.
+        return [{
+          learning_management: { dailyMinutes: 55, bufferMinutes: 15, revision: 1, updatedAt: "2026-11-19T00:00:00.000Z" },
+          planning_settings: planningSettings,
+        }];
+      }
+      if (query.includes("SELECT planning_settings FROM workspace_preferences")) {
+        return [{ planning_settings: planningSettings }];
+      }
+      if (query.includes("FROM opening_plan_state")) {
+        return [{ day, accepted_blocks: [existingBlock] }];
+      }
+      if (query.includes("FROM opening_tasks")) {
+        return [
+          {
+            id: cardTask1,
+            minutes: 10,
+            status: "pending",
+            origin: "planner",
+            client_key: `planner:${day}:review_cards:c1:long-term`,
+            due_at: null,
+            updated_at: "2026-11-19T00:00:00.000Z",
+          },
+          {
+            id: cardTask2,
+            minutes: 10,
+            status: "pending",
+            origin: "planner",
+            client_key: `planner:${day}:review_cards:c2:long-term`,
+            due_at: null,
+            updated_at: "2026-11-19T00:00:00.000Z",
+          },
+        ];
+      }
+      return [];
+    }) as unknown as TransactionSql;
+
+    await expect(
+      assertOpeningPlanConstraints(tx, SCOPE, day, [addedCardBlock], false, explicitFree),
+    ).rejects.toMatchObject({
+      code: "CONFLICT",
+      message: expect.stringContaining("卡片恢复可用上限"),
+    });
   });
 });
