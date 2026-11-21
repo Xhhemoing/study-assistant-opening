@@ -59,6 +59,7 @@ describe("bounded resumable PDF parser", () => {
     const legacyProfile = "docling-2.126.0/pdf-segments-v3-visual/text";
     await collectPdfSegments({ ...d.input, parserProfile: legacyProfile });
     const profile = pdfParserProfile({});
+    expect(profile).toBe("docling-2.126.0/pdf-segments-v11-discourse/text");
     expect(profile).not.toBe(legacyProfile);
     d.ranges.length = 0;
     await collectPdfSegments({ ...d.input, parserProfile: profile });
@@ -550,7 +551,7 @@ describe("bounded resumable PDF parser", () => {
     }
   });
 
-  it("handles astral math symbols (𝑥) safely while sealing PPTX and PDF pages", async () => {
+  async function runPptxScenario(page: { text: string; hadSealedContent?: boolean }, previousChunks: NewSourceChunk[] = []) {
     const tempDir = await mkdtemp(path.join(os.tmpdir(), "pdf-astral-seal-"));
     try {
       const pdfBytes = Buffer.from("pptx-astral");
@@ -581,12 +582,17 @@ describe("bounded resumable PDF parser", () => {
         privacyEpoch: 0,
       } as OpeningJobRecord;
 
-      const publishedChunks: NewSourceChunk[] = [];
-      const rawText = "Exercise 1: Compute 𝑥 + 1.\nAnswer Key: 𝑥 = 2.\n\nTheorem 1: 𝑥 ∈ ℝ.";
+      const publishedChunks = [...previousChunks];
+      const replaceChunks = vi.fn<Parameters<typeof createParseSourceHandler>[0]["chunks"]["replaceChunks"]>(
+        async (_scope, publication) => {
+          if (!publication.chunks.length && !publication.allowSealedEmpty) throw new Error("source has no readable text");
+          publishedChunks.splice(0, publishedChunks.length, ...publication.chunks);
+        },
+      );
       const pptxHandler = createParseSourceHandler({
         sources: { get: async () => pptxSource, markParseState: async () => pptxSource },
         chunks: {
-          replaceChunks: async (_scope, publication) => { publishedChunks.push(...publication.chunks); },
+          replaceChunks,
           replacePdfChunks: async () => {},
           listChunksAtVersion: async () => [],
         },
@@ -596,19 +602,35 @@ describe("bounded resumable PDF parser", () => {
         },
         runner: async () => ({
           exitCode: 0,
-          stdout: JSON.stringify({ pages: [{ page: 1, text: rawText, imagePath: null }] }),
+          stdout: JSON.stringify({ pages: [{ page: 1, imagePath: null, ...page }] }),
         }),
         tempDir,
       });
 
       await pptxHandler(jobRecord, { sourceId: pptxSource.id, sourceVersion: 0 });
-      expect(publishedChunks).toHaveLength(1);
-      expect(publishedChunks[0]?.text).toBe("Exercise 1: Compute 𝑥 + 1.\nTheorem 1: 𝑥 ∈ ℝ.");
-      expect(publishedChunks[0]?.text).not.toContain("Answer Key");
-      expect(publishedChunks[0]?.text).not.toContain("𝑥 = 2");
+      return { publishedChunks, replaceChunks };
     } finally {
       await rm(tempDir, { recursive: true, force: true });
     }
+  }
+
+  it("preserves astral math symbols while sealing PPTX answers", async () => {
+    const { publishedChunks } = await runPptxScenario({
+      text: "Exercise 1: Compute 𝑥 + 1.\nAnswer Key: 𝑥 = 2.\n\nTheorem 1: 𝑥 ∈ ℝ.",
+    });
+    expect(publishedChunks.map(chunk => chunk.text)).toEqual(["Exercise 1: Compute 𝑥 + 1.\nTheorem 1: 𝑥 ∈ ℝ."]);
+  });
+
+  it("withdraws stale chunks when every PPTX slide has been sealed", async () => {
+    const { publishedChunks, replaceChunks } = await runPptxScenario({ text: "", hadSealedContent: true }, [
+      { page: 1, slideLabel: null, startMs: null, endMs: null, text: "1.1 x = 3", imageObjectKey: null },
+    ]);
+    expect(replaceChunks.mock.calls.map(([, input]) => input)).toMatchObject([{ chunks: [], allowSealedEmpty: true }]);
+    expect(publishedChunks).toEqual([]);
+  });
+
+  it("rejects an unsealed blank PPTX", async () => {
+    await expect(runPptxScenario({ text: "", hadSealedContent: false })).rejects.toThrow("source has no readable text");
   });
 
   async function runPdfScenario(options: {
@@ -624,8 +646,10 @@ describe("bounded resumable PDF parser", () => {
     savedChunks?: NewSourceChunk[];
     failedStarts?: number[];
     segmentData?: Map<string, PdfSegment>;
+    recognizePage?: (input: ParseSourceVisualPageInput) => Promise<ParseSourceVisualPageResult | null>;
     recognizePages?: (
       inputs: readonly ParseSourceVisualPageInput[],
+      cacheOnly?: boolean,
     ) => AsyncGenerator<ParseSourceVisualPageResult | null, void, void>;
   }) {
     const tempDir = await mkdtemp(path.join(os.tmpdir(), "pdf-r3-"));
@@ -711,9 +735,8 @@ describe("bounded resumable PDF parser", () => {
             }),
           };
         },
-        ...(options.recognizePages
-          ? { recognizePages: inputs => options.recognizePages!(inputs) }
-          : {}),
+        ...(options.recognizePage ? { recognizePage: options.recognizePage } : {}),
+        ...(options.recognizePages ? { recognizePages: options.recognizePages } : {}),
         assertCurrent: async () => {},
         tempDir,
       });
@@ -1106,7 +1129,71 @@ describe("bounded resumable PDF parser", () => {
     expect(result.publishedChunks.find(chunk => chunk.page === 10)?.text).toContain("Exercise 1: Find x.");
   });
 
-  it.each(["Answer:", "答案：", "【参考答案】", "Solution (continued)"])("keeps the label-only %s open at a page boundary", async label => {
+  it("rereads raw Vision on a same-version retry after recognition becomes cache-only", async () => {
+    const segmentData = new Map<string, PdfSegment>();
+    const pages = [
+      { page: 1, text: "Public introduction.", visualKinds: ["picture" as const] },
+      ...Array.from({ length: 18 }, (_, index) => ({ page: index + 2, text: "Public page." })),
+      { page: 20, text: "Exercise 1: Find x.", visualKinds: ["picture" as const] },
+      { page: 21, text: "5 units." },
+      { page: 22, text: "Chapter 2: Vectors" },
+    ];
+    const cacheReads: number[] = [];
+    async function* recognizePages(inputs: readonly ParseSourceVisualPageInput[], cacheOnly?: boolean) {
+      for (const { physicalPage } of inputs) {
+        if (physicalPage === 20) {
+          expect(cacheOnly).toBe(true);
+          cacheReads.push(physicalPage);
+          yield { text: "【原图忠实转写，尚需核对】\nExercise 1: Find x.\nAnswer: x =", imageObjectKey: "vision/page-20" };
+        } else {
+          expect(physicalPage).toBe(1);
+          expect(cacheOnly).toBe(false);
+          yield null;
+        }
+      }
+    }
+    const first = await runPdfScenario({ pages, segmentData, recognizePages });
+    expect(first.publishedChunks.find(chunk => chunk.page === 20)).toMatchObject({
+      text: "[原生提取]\nExercise 1: Find x.\n\n[视觉转写与描述]\n【原图忠实转写，尚需核对】\nExercise 1: Find x.",
+      imageObjectKey: null,
+    });
+    const seededRange = [...segmentData.keys()].find(key => key.endsWith("/from-inline_sealed/21-22"))!;
+    expect(seededRange).toBeDefined();
+    segmentData.delete(seededRange);
+
+    const retry = await runPdfScenario({ pages, segmentData, recognizePages, savedChunks: first.publishedChunks });
+    expect(cacheReads).toEqual([20, 20]);
+    expect(retry.requests).toEqual([{ start: 21, seed: "inline_sealed" }]);
+    expect(retry.publishedChunks.some(chunk => chunk.page === 21)).toBe(false);
+    expect(retry.publishedChunks.at(-1)?.text).toBe("Chapter 2: Vectors");
+  });
+
+  it("falls back to saved Vision after a single-page route failure and reports missing OCR pages", async () => {
+    const recognizePage = vi.fn(async () => null);
+    const savedPage = { slideLabel: null, startMs: null, endMs: null, imageObjectKey: null };
+    const result = await runPdfScenario({
+      pages: [
+        { page: 1, text: "Native prose." },
+        { page: 2, text: "Local formula.", visualKinds: ["formula"] },
+        { page: 3, text: "Local OCR.", visualKinds: ["scan"] },
+        { page: 4, text: "", visualKinds: ["scan"] },
+      ],
+      recognizePage,
+      savedChunks: [
+        { ...savedPage, page: 3, text: "Local OCR." },
+        { ...savedPage, page: 4, text: "[视觉转写与描述]\n【原图忠实转写，尚需核对】\nCached readable text." },
+      ],
+    });
+    expect(recognizePage).toHaveBeenCalledOnce();
+    expect(result.outcome).toEqual({ pages: 4, warnings: 2, degraded: true });
+    expect(result.pdfWarning).toMatchObject({ message: "第 2–3 页未能识别，可以重新解析" });
+    expect(result.publishedChunks.map(({ text }) => text)).toEqual([
+      "Native prose.", "Local formula.", "Local OCR.", "[视觉转写与描述]\n【原图忠实转写，尚需核对】\nCached readable text.",
+    ]);
+  });
+
+  it.each(["Answer:", "ANSWER:", "Correct Answer:", "Official Answer:", "Model Answer:", "Solution:",
+    "答案：", "解答：", "【正确答案】", "【答案】", "Solution (continued)"])("keeps the label-only %s open at a page boundary", async label => {
     const result = await runPdfScenario({
       pages: [
         ...Array.from({ length: 9 }, (_, index) => ({ page: index + 1, text: "Public page." })),
@@ -1119,6 +1206,19 @@ describe("bounded resumable PDF parser", () => {
     expect(result.publishedChunks.slice(-2).map(chunk => [chunk.page, chunk.text]))
       .toEqual([[10, "Exercise 1: Find x."], [12, "Public explanation."]]);
   });
+
+  it.each(["【参考答案】", "【标准答案】", "【习题答案】", "【课后答案】", "参考答案", "标准答案", "答案："])(
+    "seals all answers under %s across blank lines and pages", async title => {
+      const result = await runPdfScenario({ pages: [
+        ...Array.from({ length: 9 }, (_, index) => ({ page: index + 1, text: "Exercise 1: Find x." })),
+        { page: 10, text: title + "\n1. x = 3.\n\n2. y = 4." },
+        { page: 11, text: "5 units.\nChapter 2: Vectors" },
+      ] });
+      expect(result.requests[1]).toEqual({ start: 11, seed: "section_sealed" });
+      expect(result.publishedChunks.slice(-2).map(chunk => [chunk.page, chunk.text]))
+        .toEqual([[9, "Exercise 1: Find x."], [11, "Chapter 2: Vectors"]]);
+    },
+  );
 
   it("closes a completed inline answer before the next page", async () => {
     const result = await runPdfScenario({ pages: [
@@ -1219,6 +1319,36 @@ describe("bounded resumable PDF parser", () => {
     });
     expect(result.publishedChunks).toEqual([]);
     expect(result.allowSealedEmpty).toBeUndefined();
+  });
+
+  it.each(["live", "saved"] as const)("rejects a first-page scan containing only %s Vision uncertainty", async origin => {
+    const text = "【识别不确定，不能据此判定正确】\nNo legible text.";
+    const imageObjectKey = "vision/blank-scan";
+    await expect(runPdfScenario({
+      pages: [{ page: 1, text: "", visualKinds: ["scan"] }],
+      ...(origin === "live" ? {
+        recognizePages: async function* () { yield { text, imageObjectKey }; },
+      } : {
+        savedChunks: [{ page: 1, slideLabel: null, startMs: null, endMs: null, imageObjectKey, text: "[视觉转写与描述]\n" + text }],
+      }),
+    })).rejects.toThrow("第 1 页未能识别");
+  });
+
+  it("keeps descriptions with uncertainty when the transcription is empty", async () => {
+    const description = "【图表观察描述，非原文或解答】\nTwo circles overlap.";
+    const uncertainty = "【识别不确定，不能据此判定正确】\nLabels are blurred.";
+    const result = await runPdfScenario({
+      pages: [{ page: 1, text: "", visualKinds: ["scan"] }],
+      recognizePages: async function* () {
+        yield {
+          text: `【原图忠实转写，尚需核对】\n${description}\n${uncertainty}`,
+          imageObjectKey: "vision/diagram",
+        };
+      },
+    });
+    expect(result.publishedChunks).toMatchObject([{
+      text: `[视觉转写与描述]\n${description}\n\n${uncertainty}`, imageObjectKey: "vision/diagram",
+    }]);
   });
 
   it("keeps the public tail after Docling closes the carried inline seal", async () => {

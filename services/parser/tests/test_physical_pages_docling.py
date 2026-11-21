@@ -516,8 +516,15 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
         for mode, opener, continuation, flag in (
             ("inline_sealed", "Answer: x =", "5 units.", "inlineSealedAtEnd"),
             ("inline_sealed", "Answer:", "5 units.", "inlineSealedAtEnd"),
+            ("inline_sealed", "ANSWER:", "5 units.", "inlineSealedAtEnd"),
+            ("inline_sealed", "Correct Answer:", "5 units.", "inlineSealedAtEnd"),
+            ("inline_sealed", "Official Answer:", "5 units.", "inlineSealedAtEnd"),
+            ("inline_sealed", "Model Answer:", "5 units.", "inlineSealedAtEnd"),
+            ("inline_sealed", "Solution:", "5 units.", "inlineSealedAtEnd"),
             ("inline_sealed", "答案：", "5 units.", "inlineSealedAtEnd"),
-            ("inline_sealed", "【参考答案】", "5 units.", "inlineSealedAtEnd"),
+            ("inline_sealed", "解答：", "5 units.", "inlineSealedAtEnd"),
+            ("inline_sealed", "【正确答案】", "5 units.", "inlineSealedAtEnd"),
+            ("inline_sealed", "【答案】", "5 units.", "inlineSealedAtEnd"),
             ("inline_sealed", "Answer:\n\n", "5 units.", "inlineSealedAtEnd"),
             ("inline_sealed", "Solution (continued)", "5 units.", "inlineSealedAtEnd"),
             ("section_sealed", "Answer Key\n1. x =", "5 units.", "sectionSealedAtEnd"),
@@ -551,6 +558,48 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
                     self.assertIs(pages[0].get("hadSealedContent"), True)
                     self.assertEqual(bool(pages[0].get(flag)), mode == "section_sealed")
                     self.assertIn("Public chapter.", pages[1]["text"])
+
+    def test_chinese_answer_section_spans_blank_lines_and_pages(self):
+        for title in ("【参考答案】", "【标准答案】", "【习题答案】", "【课后答案】", "参考答案", "标准答案", "答案："):
+            with self.subTest(title=title):
+                result = result_for(
+                    [text_element(9, "Exercise 1: Find x.")],
+                    [text_element(10, title + "\n1. x = 3.\n\n2. y = 4.")],
+                    [text_element(11, "5 units.\nChapter 2: Vectors")],
+                    start_page=9,
+                )
+                ext = physical_pages.extract_physical_pages(result)
+                self.assertEqual(ext.texts_by_page[10], [])
+                self.assertTrue(ext.section_sealed_by_page[10])
+                self.assertFalse(ext.inline_sealed_by_page[10])
+                self.assertEqual(ext.texts_by_page[11], ["Chapter 2: Vectors"])
+
+    def test_pptx_cli_preserves_seal_metadata_for_empty_slides(self):
+        import io
+        import json
+        import tempfile
+        from contextlib import redirect_stdout
+
+        for text, sealed in (("Answer Key\n1.1 x = 3", True), ("", False)):
+            with self.subTest(text=text), tempfile.TemporaryDirectory() as tmp:
+                slide = Path(tmp) / "sample.pptx"
+                slide.touch()
+                doc = DoclingDocument(name="slides")
+                doc.add_page(page_no=1, size=SIZE)
+                if text:
+                    doc.add_text(label=DocItemLabel.TEXT, text=text, prov=ProvenanceItem(
+                        page_no=1, bbox=cluster(1).bbox, charspan=(0, len(text)),
+                    ))
+                source = InputDocument.model_construct(file=slide, format=InputFormat.PPTX, document_hash="0" * 64)
+                result = ConversionResult(input=source, status=ConversionStatus.SUCCESS, pages=[], document=doc)
+                stdout = io.StringIO()
+                with patch.object(cli, "convert", return_value=result), redirect_stdout(stdout):
+                    self.assertEqual(cli.main(["--input", str(slide), "--mime", cli.PPTX, "--max-pages", "1"]), 0)
+                page = json.loads(stdout.getvalue())["pages"][0]
+                self.assertEqual(page["text"], "")
+                self.assertEqual(page["visualKinds"], [])
+                self.assertEqual(page.get("hadSealedContent", False), sealed)
+                self.assertEqual(page.get("sectionSealedAtEnd", False), sealed)
 
     def test_completed_inline_answer_releases_next_page_but_label_before_blank_does_not(self):
         result = result_for(

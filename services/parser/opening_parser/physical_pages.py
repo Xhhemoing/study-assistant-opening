@@ -209,7 +209,8 @@ _NEXT_CONTINUATION_RE = re.compile(
 _PROOF_TERMINATOR_RE = re.compile(r"(?:[□■∎]|Q\.?E\.?D\.?|证毕|证完)\s*[.。]?\s*$", re.IGNORECASE)
 _SECTION_SEALED_TERMINATOR_RE = re.compile(r"(?:End\s+of\s+(?:Answers?|Solutions?)|答案完|解答完)\s*[.。]?\s*$", re.IGNORECASE)
 _INLINE_SEALED_TERMINATOR_RE = re.compile(r"(?:[□■∎]|End\s+of\s+Answers?|答案完|解答完)\s*[.。]?\s*$", re.IGNORECASE)
-_INLINE_LABEL_ONLY_RE = re.compile(r"^(?:(?:参考答案|答案)\s*[:：]|【\s*参考答案\s*】)$")
+_BARE_ANSWER_LABEL_RE = re.compile(r"^(?:答案|解答)\s*[:：]$")
+_MODEL_ANSWER_LABEL_RE = re.compile(r"^(?:Model\s+Answer|MODEL\s+ANSWER)\s*[:：]$")
 _TERMINAL_PUNCTUATION_RE = re.compile(r"[.。!?！？;；)）\]】□■∎]\s*$")
 
 
@@ -507,7 +508,7 @@ def _caption_visual_kind(caption_text: str, page_visuals: set[str]) -> str | Non
 
 
 def _is_section_sealed_opener(stripped: str) -> bool:
-    if not _SECTION_SEALED_RE.match(stripped):
+    if not _SECTION_SEALED_RE.match(stripped) or _MODEL_ANSWER_LABEL_RE.match(stripped):
         return False
     # Inline "Answer Key: text" is inline_sealed unless it is header-only ("Answer Key:" or "Answer Key").
     if _INLINE_WITH_BODY_CHECK_RE.search(stripped):
@@ -515,7 +516,7 @@ def _is_section_sealed_opener(stripped: str) -> bool:
     return True
 
 
-def _classify_segment(line_text: str, frag_label: str | None, page_visuals: set[str], *, in_worked_example: bool, seal_mode: str | None):
+def _classify_segment(line_text: str, frag_label: str | None, page_visuals: set[str], *, in_worked_example: bool, in_exercise: bool, seal_mode: str | None):
     """Return (kind, seal_kind, is_explicit_opener, is_section_break, is_major_non_answer, caption_ref, associated_visual_kind)."""
     raw_trimmed = line_text.strip()
     is_markdown_heading = bool(_MD_HEADING_LINE_RE.match(raw_trimmed))
@@ -544,7 +545,7 @@ def _classify_segment(line_text: str, frag_label: str | None, page_visuals: set[
     if in_worked_example and _WORKED_EXAMPLE_INTERNAL_SOLUTION_RE.match(stripped):
         return "worked_example", None, False, False, False, None, None
 
-    if _is_section_sealed_opener(stripped) and not _INLINE_LABEL_ONLY_RE.match(stripped):
+    if _is_section_sealed_opener(stripped) and not (in_exercise and _BARE_ANSWER_LABEL_RE.match(stripped)):
         return "solution_sealed", "section_sealed", True, False, False, None, None
 
     if _INLINE_SEALED_ALWAYS_RE.match(stripped):
@@ -616,6 +617,7 @@ def _build_page_blocks(page_number: int, fragments: list[tuple[str, str | None]]
     current = None  # [kind, start, end, visual_kind, caption_ref, is_furniture, explicit_opener, seal_mode, is_section_exit]
     page_seal_mode = initial_seal_mode
     in_worked_example = initial_in_worked_example
+    in_exercise = False
     last_inline_body = ""
     inline_break_pending = False
 
@@ -670,6 +672,7 @@ def _build_page_blocks(page_number: int, fragments: list[tuple[str, str | None]]
             frag_label,
             page_visuals,
             in_worked_example=in_worked_example,
+            in_exercise=in_exercise,
             seal_mode=active_seal,
         )
 
@@ -680,11 +683,13 @@ def _build_page_blocks(page_number: int, fragments: list[tuple[str, str | None]]
             if seal_kind == "section_sealed":
                 page_seal_mode = "section_sealed"
                 in_worked_example = False
+                in_exercise = False
             continue
 
         # Update worked_example context on explicit non-example transitions.
         if explicit_opener or section_break:
             in_worked_example = kind == "worked_example"
+            in_exercise = kind == "exercise"
             page_seal_mode = seal_kind
 
         if current is None or explicit_opener or section_break:

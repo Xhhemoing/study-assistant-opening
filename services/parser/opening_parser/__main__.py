@@ -145,19 +145,12 @@ def main(argv=None):
         page_range = (args.page_start, args.page_end) if args.page_start is not None else None
         conversion = convert(path, args.timeout_seconds, page_range) if page_range else convert(path, args.timeout_seconds)
         pages = []
-        if args.mime == PDF:
-            extraction = extract_physical_pages(conversion, initial_seal_mode=args.initial_seal_mode)
-            by_page = extraction.texts_by_page
-            visual_kinds = extraction.visual_kinds_by_page
-            sealed_by_page = extraction.section_sealed_by_page
-            inline_sealed_by_page = extraction.inline_sealed_by_page
-            had_sealed_by_page = extraction.had_sealed_by_page
-        else:
-            by_page = texts_by_page(conversion)
-            visual_kinds = {}
-            sealed_by_page = {}
-            inline_sealed_by_page = {}
-            had_sealed_by_page = {}
+        extraction = extract_physical_pages(conversion, initial_seal_mode=args.initial_seal_mode)
+        by_page = extraction.texts_by_page
+        visual_kinds = extraction.visual_kinds_by_page if args.mime == PDF else {}
+        sealed_by_page = extraction.section_sealed_by_page
+        inline_sealed_by_page = extraction.inline_sealed_by_page
+        had_sealed_by_page = extraction.had_sealed_by_page
         if page_range:
             expected = set(range(args.page_start, args.page_end + 1))
             if set(by_page) != expected:
