@@ -243,15 +243,30 @@ describe("metacognition: exact Murphy (1973) Brier decomposition & epistemic hon
         isFirstSubmission: true,
         assisted: false,
       },
-      // Repeat of item-1 even if caller forgot isFirstSubmission=false
+      // Explicit repeat of item-1
       {
         itemId: "item-1",
+        preAnswerConfidence: "sure",
+        isCorrect: false,
+        isFirstSubmission: false,
+        assisted: false,
+      },
+      // Forged duplicate first submissions on item-dup -> both excluded symmetrically
+      {
+        itemId: "item-dup",
+        preAnswerConfidence: "sure",
+        isCorrect: true,
+        isFirstSubmission: true,
+        assisted: false,
+      },
+      {
+        itemId: "item-dup",
         preAnswerConfidence: "sure",
         isCorrect: false,
         isFirstSubmission: true,
         assisted: false,
       },
-      // Assisted submission
+      // Assisted submission + unassisted forged first submission on same item-2 -> both excluded
       {
         itemId: "item-2",
         preAnswerConfidence: "sure",
@@ -259,7 +274,6 @@ describe("metacognition: exact Murphy (1973) Brier decomposition & epistemic hon
         isFirstSubmission: true,
         assisted: true,
       },
-      // Subsequent unassisted attempt on already-assisted item-2 (repeat exposure)
       {
         itemId: "item-2",
         preAnswerConfidence: "sure",
@@ -324,9 +338,9 @@ describe("metacognition: exact Murphy (1973) Brier decomposition & epistemic hon
     expect(receipt.status).toBe("computed");
     if (receipt.status !== "computed") throw new Error("expected computed receipt");
 
-    expect(receipt.totalInputCount).toBe(10);
+    expect(receipt.totalInputCount).toBe(12);
     expect(receipt.sampleCount).toBe(2);
-    expect(receipt.excludedAssistedOrRepeatCount).toBe(6);
+    expect(receipt.excludedAssistedOrRepeatCount).toBe(8);
     expect(receipt.excludedInvalidOutcomeCount).toBe(2);
 
     // Only item-1 (p=0.9, y=1) and item-8 (p=0.25, y=0) should be included.
@@ -349,6 +363,124 @@ describe("metacognition: exact Murphy (1973) Brier decomposition & epistemic hon
       ),
     ).toBeLessThan(1e-12);
     expect(receipt.identityResidual).toBeLessThan(1e-12);
+  });
+
+  it("is bit-for-bit permutation-invariant when repeats, invalid outcomes, or duplicate first submissions appear in any order", () => {
+    const base: MurphyBrierObservation[] = [
+      // Repeat arrives BEFORE genuine first submission for item-a
+      {
+        itemId: "item-a",
+        preAnswerConfidence: "sure",
+        isCorrect: false,
+        isFirstSubmission: false,
+        assisted: false,
+      },
+      {
+        itemId: "item-a",
+        preAnswerConfidence: "sure",
+        isCorrect: true,
+        isFirstSubmission: true,
+        assisted: false,
+      },
+      // Invalid outcome arrives BEFORE genuine first submission for item-b
+      {
+        itemId: "item-b",
+        preAnswerConfidence: "unsure",
+        isCorrect: null,
+        isFirstSubmission: true,
+        assisted: false,
+      },
+      {
+        itemId: "item-b",
+        preAnswerConfidence: "unsure",
+        isCorrect: true,
+        isFirstSubmission: true,
+        assisted: false,
+      },
+      // Two conflicting isFirstSubmission: true entries for item-c -> both excluded regardless of order
+      {
+        itemId: "item-c",
+        preAnswerConfidence: "sure",
+        isCorrect: true,
+        isFirstSubmission: true,
+        assisted: false,
+      },
+      {
+        itemId: "item-c",
+        preAnswerConfidence: "guessing",
+        isCorrect: false,
+        isFirstSubmission: true,
+        assisted: false,
+      },
+      // Assisted + unassisted first submission for item-d -> both excluded regardless of order
+      {
+        itemId: "item-d",
+        preAnswerConfidence: "unsure",
+        isCorrect: false,
+        isFirstSubmission: true,
+        assisted: false,
+      },
+      {
+        itemId: "item-d",
+        preAnswerConfidence: "unsure",
+        isCorrect: true,
+        isFirstSubmission: true,
+        assisted: true,
+      },
+      // Additional valid observations across all 3 bins (with and without itemId)
+      {
+        itemId: "item-e",
+        preAnswerConfidence: "guessing",
+        isCorrect: false,
+        isFirstSubmission: true,
+        assisted: false,
+      },
+      {
+        preAnswerConfidence: "sure",
+        isCorrect: false,
+        isFirstSubmission: true,
+        assisted: false,
+      },
+      {
+        preAnswerConfidence: "unsure",
+        isCorrect: false,
+        isFirstSubmission: true,
+        assisted: false,
+      },
+    ];
+
+    const baseline = computeMurphyBrierReceipt(base);
+    expect(baseline.status).toBe("computed");
+    if (baseline.status !== "computed") throw new Error("expected computed receipt");
+    expect(baseline.sampleCount).toBe(5);
+    expect(baseline.excludedAssistedOrRepeatCount).toBe(5);
+    expect(baseline.excludedInvalidOutcomeCount).toBe(1);
+
+    // Reversed order must match bit-for-bit
+    const reversed = computeMurphyBrierReceipt([...base].reverse());
+    expect(reversed).toStrictEqual(baseline);
+
+    // 25 deterministic Fisher-Yates permutations must all match bit-for-bit
+    const rand = createPrng(987654321);
+    for (let trial = 0; trial < 25; trial++) {
+      const shuffled = [...base];
+      for (let i = shuffled.length - 1; i > 0; i--) {
+        const j = Math.floor(rand() * (i + 1));
+        const tmp = shuffled[i]!;
+        shuffled[i] = shuffled[j]!;
+        shuffled[j] = tmp;
+      }
+      const permuted = computeMurphyBrierReceipt(shuffled);
+      expect(permuted).toStrictEqual(baseline);
+      if (permuted.status !== "computed") throw new Error("expected computed receipt");
+      expect(Object.is(permuted.brierScore, baseline.brierScore)).toBe(true);
+      expect(Object.is(permuted.reliability, baseline.reliability)).toBe(true);
+      expect(Object.is(permuted.resolution, baseline.resolution)).toBe(true);
+      expect(Object.is(permuted.uncertainty, baseline.uncertainty)).toBe(true);
+      expect(Object.is(permuted.bias, baseline.bias)).toBe(true);
+      expect(Object.is(permuted.ece, baseline.ece)).toBe(true);
+      expect(permuted.diagnosis).toBe(baseline.diagnosis);
+    }
   });
 
   it("returns insufficient_sample when all observations are excluded by the honesty gate", () => {
@@ -692,7 +824,7 @@ describe("metacognition: 20-minute sliding-window wheelSpinningGuard & non-destr
         hintEscalations: 3,
         bottomOutReached: true,
       },
-      // Exactly at window start -> INCLUDED
+      // Exactly at window start -> INCLUDED, but dwell clips to 0 ms (all dwell pre-window)
       {
         timestampMs: NOW - WHEEL_SPINNING_WINDOW_MS,
         isCorrect: false,
@@ -706,7 +838,7 @@ describe("metacognition: 20-minute sliding-window wheelSpinningGuard & non-destr
         isCorrect: false,
         assisted: false,
         hasValidIntermediateSteps: false,
-        dwellMs: 360_000,
+        dwellMs: WHEEL_SPINNING_DWELL_STALL_MS,
         hintEscalations: 1,
       },
     ];
@@ -726,6 +858,62 @@ describe("metacognition: 20-minute sliding-window wheelSpinningGuard & non-destr
     expect(decision.signals.dwellStall).toBe(true);
     expect(decision.signals.hintSaturation).toBe(true);
     expect(decision.triggered).toBe(false);
+  });
+
+  it("clips event dwell to [windowStartMs, nowMs] so pre-window dwell cannot trigger D", () => {
+    const windowStartMs = NOW - WHEEL_SPINNING_WINDOW_MS;
+
+    // Event 1 finishes `firstOffsetMs` after windowStartMs with 10 minutes of raw dwell:
+    // only `min(10 min, firstOffsetMs)` elapsed inside [windowStartMs, nowMs].
+    const makeEvents = (firstOffsetMs: number): WheelSpinningAttemptEvent[] => [
+      {
+        timestampMs: windowStartMs + firstOffsetMs,
+        isCorrect: false,
+        assisted: false,
+        hasValidIntermediateSteps: false,
+        dwellMs: 10 * 60_000, // 600_000 ms raw
+      },
+      {
+        timestampMs: NOW - 5 * 60_000,
+        isCorrect: false,
+        assisted: false,
+        hasValidIntermediateSteps: false,
+        dwellMs: 3 * 60_000, // 180_000 ms fully inside window
+      },
+      {
+        timestampMs: NOW - 1 * 60_000,
+        isCorrect: false,
+        assisted: false,
+        hasValidIntermediateSteps: false,
+        dwellMs: 3 * 60_000, // 180_000 ms fully inside window
+      },
+    ];
+
+    // Raw dwell = 16 min >= 12 min, but clipped in-window dwell = 2 + 3 + 3 = 8 min < 12 min.
+    // With R=true, H=false, L=true, trigger depends solely on D.
+    const clippedUnderThreshold = wheelSpinningGuard({
+      taskId: "task-dwell-clip",
+      nowMs: NOW,
+      events: makeEvents(2 * 60_000),
+    });
+
+    expect(clippedUnderThreshold.metrics.activeWindowDwellMs).toBe(8 * 60_000);
+    expect(clippedUnderThreshold.signals.repeatedFailure).toBe(true);
+    expect(clippedUnderThreshold.signals.dwellStall).toBe(false);
+    expect(clippedUnderThreshold.signals.hintSaturation).toBe(false);
+    expect(clippedUnderThreshold.signals.lowVelocity).toBe(true);
+    expect(clippedUnderThreshold.triggered).toBe(false);
+
+    // When Event 1 finishes 6 minutes into the window, clipped dwell = 6 + 3 + 3 = 12 min -> D=true -> triggers!
+    const clippedAtThreshold = wheelSpinningGuard({
+      taskId: "task-dwell-clip",
+      nowMs: NOW,
+      events: makeEvents(6 * 60_000),
+    });
+
+    expect(clippedAtThreshold.metrics.activeWindowDwellMs).toBe(WHEEL_SPINNING_DWELL_STALL_MS);
+    expect(clippedAtThreshold.signals.dwellStall).toBe(true);
+    expect(clippedAtThreshold.triggered).toBe(true);
   });
 
   it("resets consecutive failure streak R when learner produces valid intermediate steps", () => {

@@ -268,7 +268,11 @@ export function wheelSpinningGuard(
   const latencies: number[] = [];
 
   for (const event of inWindowEvents) {
-    activeWindowDwellMs += event.dwellMs;
+    const clippedDwellMs = Math.min(
+      event.dwellMs,
+      Math.max(0, event.timestampMs - windowStartMs),
+    );
+    activeWindowDwellMs += clippedDwellMs;
     hintEscalationCount += event.hintEscalations ?? 0;
     if (event.bottomOutReached === true) {
       bottomOutReached = true;

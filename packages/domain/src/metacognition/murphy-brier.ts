@@ -77,53 +77,81 @@ export function computeMurphyBrierReceipt(
   let excludedAssistedOrRepeatCount = 0;
   let excludedInvalidOutcomeCount = 0;
 
-  const seenItemIds = new Set<string>();
-  const eligible: Array<{
-    confidence: PreAnswerConfidence;
-    forecast: number;
-    outcome: 0 | 1;
-  }> = [];
-
-  for (const observation of observations) {
+  // Pre-index first-submission claims per itemId so deduplication is strictly
+  // order-independent (permutation-invariant). Explicit repeats
+  // (`isFirstSubmission !== true`) and unassisted invalid-outcome records never
+  // claim an itemId ahead of a genuine first submission; conversely, if >1
+  // claiming `isFirstSubmission === true` entries exist for the same itemId
+  // (e.g., forged duplicate first submissions or assisted + unassisted first
+  // attempts), all claims for that itemId are excluded symmetrically.
+  const firstClaimCountByItemId = new Map<string, number>();
+  const analyzed = observations.map((observation) => {
     const normalizedItemId =
       typeof observation.itemId === "string" && observation.itemId.length > 0
         ? observation.itemId
         : null;
-    const isRepeatItem = normalizedItemId !== null && seenItemIds.has(normalizedItemId);
-    if (normalizedItemId !== null) {
-      seenItemIds.add(normalizedItemId);
-    }
-
-    const isAssistedOrRepeat =
+    const isFirstSubmission = observation.isFirstSubmission === true;
+    const isAssistedOrMultiDraft =
       observation.assisted === true ||
       observation.hinted === true ||
-      observation.isFirstSubmission !== true ||
-      observation.isMultiDraft === true ||
-      isRepeatItem;
-
-    if (isAssistedOrRepeat) {
-      excludedAssistedOrRepeatCount += 1;
-      continue;
-    }
-
+      observation.isMultiDraft === true;
     const hasValidOutcome =
       observation.validOutcome !== false &&
       typeof observation.isCorrect === "boolean" &&
       isPreAnswerConfidence(observation.preAnswerConfidence);
 
-    if (!hasValidOutcome) {
+    if (
+      normalizedItemId !== null &&
+      isFirstSubmission &&
+      (isAssistedOrMultiDraft || hasValidOutcome)
+    ) {
+      firstClaimCountByItemId.set(
+        normalizedItemId,
+        (firstClaimCountByItemId.get(normalizedItemId) ?? 0) + 1,
+      );
+    }
+
+    return {
+      observation,
+      normalizedItemId,
+      isFirstSubmission,
+      isAssistedOrMultiDraft,
+      hasValidOutcome,
+    };
+  });
+
+  const binAcc: Record<PreAnswerConfidence, { count: number; correctCount: number }> = {
+    guessing: { count: 0, correctCount: 0 },
+    unsure: { count: 0, correctCount: 0 },
+    sure: { count: 0, correctCount: 0 },
+  };
+  let sampleCount = 0;
+
+  for (const entry of analyzed) {
+    const hasConflictingFirstClaim =
+      entry.normalizedItemId !== null &&
+      (firstClaimCountByItemId.get(entry.normalizedItemId) ?? 0) > 1;
+
+    if (!entry.isFirstSubmission || entry.isAssistedOrMultiDraft) {
+      excludedAssistedOrRepeatCount += 1;
+      continue;
+    }
+
+    if (!entry.hasValidOutcome) {
       excludedInvalidOutcomeCount += 1;
       continue;
     }
 
-    eligible.push({
-      confidence: observation.preAnswerConfidence,
-      forecast: PRE_ANSWER_CONFIDENCE_PROBABILITY[observation.preAnswerConfidence],
-      outcome: observation.isCorrect ? 1 : 0,
-    });
-  }
+    if (hasConflictingFirstClaim) {
+      excludedAssistedOrRepeatCount += 1;
+      continue;
+    }
 
-  const sampleCount = eligible.length;
+    const bucket = binAcc[entry.observation.preAnswerConfidence];
+    bucket.count += 1;
+    bucket.correctCount += entry.observation.isCorrect ? 1 : 0;
+    sampleCount += 1;
+  }
 
   if (sampleCount === 0 || sampleCount < minSampleSize) {
     return Object.freeze({
@@ -146,25 +174,19 @@ export function computeMurphyBrierReceipt(
     });
   }
 
-  const binAcc: Record<PreAnswerConfidence, { count: number; correctCount: number }> = {
-    guessing: { count: 0, correctCount: 0 },
-    unsure: { count: 0, correctCount: 0 },
-    sure: { count: 0, correctCount: 0 },
-  };
-
+  // Accumulate exact sums from canonical-order integer bin counts so floating-point
+  // results are bit-for-bit identical under any permutation of input observations.
   let brierSum = 0;
   let biasSum = 0;
   let correctSum = 0;
 
-  for (const item of eligible) {
-    const diff = item.forecast - item.outcome;
-    brierSum += diff * diff;
-    biasSum += diff;
-    correctSum += item.outcome;
-
-    const bucket = binAcc[item.confidence];
-    bucket.count += 1;
-    bucket.correctCount += item.outcome;
+  for (const confidence of PRE_ANSWER_CONFIDENCE_STATES) {
+    const forecast = PRE_ANSWER_CONFIDENCE_PROBABILITY[confidence];
+    const { count, correctCount } = binAcc[confidence];
+    const incorrectCount = count - correctCount;
+    brierSum += correctCount * (forecast - 1) ** 2 + incorrectCount * forecast ** 2;
+    biasSum += correctCount * (forecast - 1) + incorrectCount * forecast;
+    correctSum += correctCount;
   }
 
   const brierScore = normalizeZero(brierSum / sampleCount);
