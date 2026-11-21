@@ -1700,6 +1700,7 @@ describe("Speaking clause and evidence regressions", () => {
       taskMode: "writing_task2",
       baselineDraft: DRAFT_1,
       draft: DRAFT_2,
+      transferTargets: TARGETS,
       assessments: buildValidDraft2Assessments(),
       crossDraftTransferVerified: true,
     });
@@ -1776,6 +1777,7 @@ describe("Speaking clause and evidence regressions", () => {
       taskMode: "writing_task2",
       baselineDraft: DRAFT_1,
       draft: DRAFT_2,
+      transferTargets: TARGETS,
       assessments: buildValidDraft2Assessments(),
       crossDraftTransferVerified: true,
     });
@@ -2838,5 +2840,396 @@ describe("IELTS Cartridge SPI v1 L1_CONTINUITY adapter", () => {
         `expected buildResumeSummary to throw for ${label}`,
       ).toThrow();
     }
+  });
+
+  it("protects vs. / v. / e.g. abbreviations when extracting two-sided contrast facets", () => {
+    const abbreviationPrompts = [
+      ["vs-dot", "Should governments subsidize public housing vs. private housing?"],
+      [
+        "eg-and-vs-dot",
+        "Housing costs (e.g. rent and heating) have risen sharply in many cities. Should governments subsidize public housing vs. private housing?",
+      ],
+      ["v-dot", "Should governments subsidize public housing v. private housing?"],
+    ] as const;
+
+    const publicOnlyEssay: IeltsEssayDraft = {
+      ...DRAFT_2,
+      draftId: "draft-2-vsdot-public-only",
+      promptId: "housing-vsdot-v1",
+      paragraphs: [
+        "Housing costs have risen sharply in many cities, and governments should subsidize public housing extensively so working families can secure stable accommodation near schools, clinics, and major transit hubs. Municipal housing boards can construct durable apartment blocks on underused civic land and encourage long-term neighbourhood stability across generations.",
+        "Expanding public housing also reduces residential turnover, strengthens community cohesion, and lowers emergency shelter spending for municipal treasuries during economic downturns. When governments fund reliable public housing estates, teachers, nurses, social workers, and transit staff stay close to essential workplaces instead of facing exhausting commutes.",
+        "Furthermore, sustained public housing subsidies help cities retrofit ageing municipal blocks with clean heating systems, better thermal insulation, solar rooftops, and accessible courtyards for older residents. Transparent housing waitlists and regular maintenance audits ensure low-income households receive fair placement and safe living conditions.",
+        "Overall, steady municipal investment in public housing delivers dependable social stability, lower energy bills, and fairer urban living standards for essential families throughout growing metropolitan regions.",
+      ],
+    };
+
+    const privateOnlyEssay: IeltsEssayDraft = {
+      ...DRAFT_2,
+      draftId: "draft-2-vsdot-private-only",
+      promptId: "housing-vsdot-v1",
+      paragraphs: [
+        "Housing costs have risen sharply in many cities, so governments should encourage private housing development through streamlined planning approvals and clear zoning rules that let commercial builders deliver new apartments rapidly across expanding districts. Experienced housing firms mobilize investment capital quickly and adapt floor plans to varied household budgets.",
+        "Supporting private housing projects also encourages architectural innovation, faster maintenance response times, and stronger local retail growth around newly completed residential corridors. When cities partner with private housing developers and accelerate permit inspections, total housing supply expands far more quickly and eases bidding pressure among young renters.",
+        "In addition, targeted private housing tax credits attract institutional lenders and pension funds who finance energy-efficient apartment blocks without straining municipal construction budgets over coming decades. Competitive tenders among builders also reward modern construction techniques that shorten delivery schedules.",
+        "Overall, encouraging private housing development accelerates residential construction capacity, attracts sustained capital investment, and modernises urban neighbourhoods across fast-growing cities.",
+      ],
+    };
+
+    const balancedEssay: IeltsEssayDraft = {
+      ...DRAFT_2,
+      draftId: "draft-2-vsdot-balanced",
+      promptId: "housing-vsdot-v1",
+      paragraphs: [
+        "Housing costs have risen sharply in many cities, prompting sustained debate over whether governments should subsidize public housing vs. private housing. While commercial developers add residential units swiftly during construction booms, directing core municipal subsidies toward durable civic estates protects long-term affordability that market incentives rarely preserve across changing cycles.",
+        "Financing community apartments enables cities to lock in income-indexed rents for nurses, school teachers, transit workers, and municipal service staff without surrendering valuable civic land when property markets surge. By contrast, commercial tax reliefs often yield temporary rent caps that expire once grant agreements lapse, leaving working households exposed to sudden rent spikes and repeated displacement.",
+        "Admittedly, well-regulated private builders can expand total supply in fast-growing transit corridors whenever local construction pipelines face severe land, financing, or engineering bottlenecks. Pairing durable public housing investment with strict multi-decade affordability covenants and transparent oversight on any developer grant resolves both construction speed and urban equity concerns.",
+        "Overall, metropolitan authorities should anchor long-term affordability in permanent civic estates while using private housing strictly as a regulated supplement for expanding neighbourhoods.",
+      ],
+    };
+
+    for (const [label, promptStatement] of abbreviationPrompts) {
+      const publicOnly = evaluateNonEmptyRevision({
+        baselineDraft: DRAFT_1,
+        revisedDraft: publicOnlyEssay,
+        targets: [],
+        promptStatement,
+        receiptId: `r-abbr-public-${label}`,
+      });
+      expect(publicOnly.receipt.criteria.TR.band, label).toBeLessThanOrEqual(4.5);
+      expect(publicOnly.receipt.overallBand, label).toBeLessThanOrEqual(4.5);
+      expect(publicOnly.receipt.masteryQualified, label).toBe(false);
+
+      const privateOnly = evaluateNonEmptyRevision({
+        baselineDraft: DRAFT_1,
+        revisedDraft: privateOnlyEssay,
+        targets: [],
+        promptStatement,
+        receiptId: `r-abbr-private-${label}`,
+      });
+      expect(privateOnly.receipt.criteria.TR.band, label).toBeLessThanOrEqual(4.5);
+      expect(privateOnly.receipt.overallBand, label).toBeLessThanOrEqual(4.5);
+      expect(privateOnly.receipt.masteryQualified, label).toBe(false);
+
+      const balanced = evaluateNonEmptyRevision({
+        baselineDraft: DRAFT_1,
+        revisedDraft: balancedEssay,
+        targets: [],
+        promptStatement,
+        receiptId: `r-abbr-balanced-${label}`,
+      });
+      expect(balanced.receipt.criteria.TR.band, label).toBeGreaterThanOrEqual(6);
+      expect(balanced.receipt.overallBand, label).toBeGreaterThanOrEqual(6);
+    }
+  });
+
+  it("rejects malformed optional target patterns without throwing and recomputes cross-draft transfer to block identical-draft forgery", () => {
+    const { receipt: validWritingReceipt } = evaluateNonEmptyRevision({
+      baselineDraft: DRAFT_1,
+      revisedDraft: DRAFT_2,
+      targets: TARGETS,
+      receiptId: "r-writing-recompute-valid",
+    });
+    expect(isVerifiedWritingReceipt(validWritingReceipt)).toBe(true);
+
+    // 1. Malformed optional pattern fields (null / blank entries) MUST return { ok: false } instead of throwing TypeError.
+    const malformedNullWeak = {
+      ...validWritingReceipt,
+      transferSource: {
+        ...validWritingReceipt.transferSource!,
+        targets: [
+          {
+            ...validWritingReceipt.transferSource!.targets[0]!,
+            weakBaselinePatterns: null as unknown as readonly string[],
+          },
+          ...validWritingReceipt.transferSource!.targets.slice(1),
+        ],
+      },
+    };
+    const malformedNullCliche = {
+      ...validWritingReceipt,
+      transferSource: {
+        ...validWritingReceipt.transferSource!,
+        targets: [
+          {
+            ...validWritingReceipt.transferSource!.targets[0]!,
+            clichePatterns: null as unknown as readonly string[],
+          },
+          ...validWritingReceipt.transferSource!.targets.slice(1),
+        ],
+      },
+    };
+    const malformedBlankWeak = {
+      ...validWritingReceipt,
+      transferSource: {
+        ...validWritingReceipt.transferSource!,
+        targets: [
+          {
+            ...validWritingReceipt.transferSource!.targets[0]!,
+            weakBaselinePatterns: ["   "],
+          },
+          ...validWritingReceipt.transferSource!.targets.slice(1),
+        ],
+      },
+    };
+    for (const [label, candidate] of [
+      ["null weakBaselinePatterns", malformedNullWeak],
+      ["null clichePatterns", malformedNullCliche],
+      ["blank weakBaselinePatterns", malformedBlankWeak],
+    ] as const) {
+      let validationResult: ReturnType<typeof validateWritingRubricReceipt> | undefined;
+      expect(() => {
+        validationResult = validateWritingRubricReceipt(candidate, { requireVerifiedMastery: true });
+      }, label).not.toThrow();
+      expect(validationResult?.ok, label).toBe(false);
+      expect(isVerifiedWritingReceipt(candidate), label).toBe(false);
+    }
+
+    // 2. Identical baseline and revised prose with forged evidenceSource / mastery flags MUST fail closed.
+    const forgedIdenticalDrafts = {
+      ...validWritingReceipt,
+      transferSource: {
+        ...validWritingReceipt.transferSource!,
+        baseline: {
+          ...validWritingReceipt.transferSource!.baseline,
+          paragraphs: [...validWritingReceipt.sourceDraft!.paragraphs],
+        },
+      },
+    };
+    // 3. Stripped transferSource or empty targets MUST also fail closed for cross-draft mastery.
+    const forgedStrippedTransfer = {
+      ...validWritingReceipt,
+      transferSource: undefined,
+    };
+    const forgedEmptyTargets = {
+      ...validWritingReceipt,
+      transferSource: {
+        ...validWritingReceipt.transferSource!,
+        targets: [],
+      },
+    };
+
+    const speakingSeed = {
+      ...buildSpeakingPart3Seed(
+        {
+          promptId: DRAFT_2.promptId,
+          topic: "Urban rail funding",
+          coreClaim: "Cities should prioritize urban rail.",
+          supportingReason: "Rail cuts per-capita emissions.",
+          activeCollocations: ["per-capita emissions"],
+        },
+        DRAFT_2.draftId,
+      ),
+      requiresVerifiedReceipt: true,
+    };
+    const spokenTranscript =
+      "Personally, I think city planners should compare both travel demand and long-term maintenance costs before funding major roads. " +
+      "When commuting depends mostly on private vehicles, rush-hour delays quickly worsen across inner neighbourhoods and air quality drops for families living near busy junctions. " +
+      "On top of that, widening urban highways often attracts even more drivers within a few years instead of fixing everyday bottlenecks for working residents. " +
+      "Because modern commuter trains carry far more passengers along a single corridor, local councils reduced harmful per-capita emissions across the entire city.";
+
+    for (const [label, forged] of [
+      ["identical baseline and revised drafts", forgedIdenticalDrafts],
+      ["stripped transferSource", forgedStrippedTransfer],
+      ["empty transfer targets", forgedEmptyTargets],
+    ] as const) {
+      expect(validateWritingRubricReceipt(forged, { requireVerifiedMastery: true }).ok, label).toBe(
+        false,
+      );
+      expect(isVerifiedWritingReceipt(forged), label).toBe(false);
+      expect(hasRequiredWritingReceipt({ ...speakingSeed, verifiedWritingReceipt: forged }), label).toBe(
+        false,
+      );
+      const speakingOutcome = evaluateSpeakingRetelling({
+        seed: { ...speakingSeed, verifiedWritingReceipt: forged },
+        transcript: spokenTranscript,
+        durationSeconds: 75,
+        assisted: false,
+      });
+      expect(speakingOutcome.epistemicStatus, label).toBe("practice_feedback");
+      expect(speakingOutcome.countsTowardMastery, label).toBe(false);
+      expect(speakingOutcome.masteryQualified, label).toBe(false);
+    }
+  });
+
+  it("recomputes Speaking paceStatus and enforces Writing prerequisite, 60-90s duration, and anti-stuffing in continuity state", () => {
+    const { receipt: writingReceipt } = evaluateNonEmptyRevision({
+      baselineDraft: DRAFT_1,
+      revisedDraft: DRAFT_2,
+      targets: TARGETS,
+      receiptId: "r-cartridge-speaking-strict",
+    });
+    const baseState = createInitialIeltsContinuityState(
+      DRAFT_2.promptId,
+      "2026-11-21T08:00:00.000Z",
+      { draft1Id: DRAFT_1.draftId },
+    );
+    const speakingSeed = {
+      ...buildSpeakingPart3Seed(
+        {
+          promptId: DRAFT_2.promptId,
+          topic: "Urban rail funding",
+          coreClaim: "Cities should prioritize urban rail.",
+          supportingReason: "Rail cuts per-capita emissions.",
+          activeCollocations: ["per-capita emissions"],
+        },
+        DRAFT_2.draftId,
+      ),
+      requiresVerifiedReceipt: true,
+      verifiedWritingReceipt: writingReceipt,
+    };
+    const validSpeaking = evaluateSpeakingRetelling({
+      seed: speakingSeed,
+      transcript:
+        "Personally, I think city planners should compare travel demand and long-term maintenance costs before widening roads. " +
+        "When commuting relies heavily on private vehicles, peak congestion builds quickly across central districts and local air quality worsens for families living near busy junctions. " +
+        "On top of that, extra motorway lanes usually encourage more car trips within a couple of years instead of giving commuters reliable schedules during rush hour. " +
+        "Because commuter rail transports far more passengers per corridor, local councils reduced harmful per-capita emissions across the city.",
+      durationSeconds: 75,
+      assisted: false,
+      createdAt: "2026-11-21T08:30:00.000Z",
+    });
+    expect(validSpeaking.masteryQualified).toBe(true);
+
+    const practiceSpeaking = evaluateSpeakingRetelling({
+      seed: speakingSeed,
+      transcript: validSpeaking.sourceTranscript,
+      durationSeconds: 45,
+      assisted: false,
+      createdAt: "2026-11-21T08:30:00.000Z",
+    });
+    expect(practiceSpeaking.paceStatus).toBe("too_short");
+
+    // Low-entropy repetitive transcript (80+ words) for stuffing tamper test:
+    const repetitiveSentence = "Local councils reduced harmful per-capita emissions across the city every single week.";
+    const stuffedTranscript = Array.from({ length: 8 }, () => repetitiveSentence).join(" ");
+    const stiffConnectorTranscript =
+      `Furthermore, ${validSpeaking.sourceTranscript}`;
+
+    const rejectedStates: readonly [string, unknown][] = [
+      [
+        "paceStatus disagrees with durationSeconds (45s claimed on_target)",
+        {
+          ...baseState,
+          draft2Receipt: writingReceipt,
+          speakingReceipt: { ...validSpeaking, durationSeconds: 45, paceStatus: "on_target" },
+        },
+      ],
+      [
+        "paceStatus disagrees with durationSeconds (120s claimed on_target)",
+        {
+          ...baseState,
+          draft2Receipt: writingReceipt,
+          speakingReceipt: { ...validSpeaking, durationSeconds: 120, paceStatus: "on_target" },
+        },
+      ],
+      [
+        "paceStatus disagrees with null durationSeconds",
+        {
+          ...baseState,
+          draft2Receipt: writingReceipt,
+          speakingReceipt: { ...validSpeaking, durationSeconds: null, paceStatus: "on_target" },
+        },
+      ],
+      [
+        "practice speaking receipt with mismatched paceStatus (45s stored as over_time)",
+        {
+          ...baseState,
+          draft2Receipt: writingReceipt,
+          speakingReceipt: { ...practiceSpeaking, paceStatus: "over_time" },
+        },
+      ],
+      [
+        "verified speaking receipt missing Writing draft2Receipt prerequisite",
+        {
+          ...baseState,
+          draft2Receipt: null,
+          speakingReceipt: validSpeaking,
+        },
+      ],
+      [
+        "verified speaking receipt missing evaluationContext",
+        {
+          ...baseState,
+          draft2Receipt: writingReceipt,
+          speakingReceipt: { ...validSpeaking, evaluationContext: undefined },
+        },
+      ],
+      [
+        "verified speaking receipt with writingReceiptEligible false",
+        {
+          ...baseState,
+          draft2Receipt: writingReceipt,
+          speakingReceipt: {
+            ...validSpeaking,
+            evaluationContext: {
+              timeWindowSeconds: { min: 60, max: 90 },
+              writingReceiptEligible: false,
+            },
+          },
+        },
+      ],
+      [
+        "verified speaking receipt with low-entropy repetitive stuffing",
+        {
+          ...baseState,
+          draft2Receipt: writingReceipt,
+          speakingReceipt: {
+            ...validSpeaking,
+            sourceTranscript: stuffedTranscript,
+            wordCount: countDraftWords([stuffedTranscript]),
+            evidenceQuotes: [],
+          },
+        },
+      ],
+      [
+        "verified speaking receipt with stiff written-only connector",
+        {
+          ...baseState,
+          draft2Receipt: writingReceipt,
+          speakingReceipt: {
+            ...validSpeaking,
+            sourceTranscript: stiffConnectorTranscript,
+            wordCount: countDraftWords([stiffConnectorTranscript]),
+            evidenceQuotes: [],
+          },
+        },
+      ],
+      [
+        "verified speaking receipt with only 1 of 2 required collocations",
+        {
+          ...baseState,
+          draft2Receipt: writingReceipt,
+          speakingReceipt: {
+            ...validSpeaking,
+            transferredCollocations: ["per-capita emissions"],
+            pendingCollocations: ["alleviate chronic congestion"],
+          },
+        },
+      ],
+    ];
+
+    for (const [label, candidate] of rejectedStates) {
+      const parsed = ieltsWritingSpeakingCartridge.parseContinuityState(candidate);
+      expect(parsed.ok, `expected parseContinuityState to reject: ${label}`).toBe(false);
+      expect(
+        () => ieltsWritingSpeakingCartridge.buildResumeSummary(candidate as IeltsContinuityState),
+        `expected buildResumeSummary to throw: ${label}`,
+      ).toThrow();
+    }
+
+    // Legitimate practice Speaking receipt without verified Writing prerequisite is still accepted,
+    // and buildResumeSummary MUST report only Draft-1 complete (1/3), never Speaking complete.
+    const practiceOnlyState: IeltsContinuityState = {
+      ...baseState,
+      draft2Receipt: null,
+      speakingReceipt: practiceSpeaking,
+    };
+    expect(ieltsWritingSpeakingCartridge.parseContinuityState(practiceOnlyState).ok).toBe(true);
+    expect(ieltsWritingSpeakingCartridge.buildResumeSummary(practiceOnlyState)).toMatchObject({
+      completedSteps: 1,
+      totalSteps: 3,
+      nextRequirementKey: "ielts.writing.draft2-verified-transfer",
+    });
   });
 });

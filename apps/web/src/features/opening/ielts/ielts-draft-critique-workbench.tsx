@@ -202,7 +202,6 @@ function WritingWorkbenchPromptSession({
           hasExternalFixture,
           fixture.promptId,
           draftIdentity(fixture.draft1),
-          fixture.draft1Receipt.receiptId,
           draftIdentity(fixture.draft2),
           fixture.draft2Receipt.receiptId,
         ]
@@ -211,7 +210,6 @@ function WritingWorkbenchPromptSession({
           hasExternalFixture,
           fixture.promptId,
           draftIdentity(fixture.draft1),
-          fixture.draft1Receipt.receiptId,
           initialDraft ?? "",
         ],
   );

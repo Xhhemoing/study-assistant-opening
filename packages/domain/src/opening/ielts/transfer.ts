@@ -5,24 +5,31 @@ import { segmentIeltsText, type GroundedClause, type GroundedSentence, type Grou
 import { getUniqueWritingTargets, getWritingDraftSource, getWritingTransferSource } from "./writing-source";
 import {
   clampToIeltsBand,
+  countDraftWords,
   createValidatedRubricReceipt,
   detectMemorizedTemplates,
   getWritingTransferLineage,
   hasMemorizedTemplateStuffing,
+  isValidIeltsBand,
   resolveIeltsEpistemicStatus,
 } from "./rubric";
-import type {
-  IeltsBandScore,
-  IeltsCriterion,
-  IeltsCriterionAssessment,
-  IeltsCrossDraftTransferReport,
-  IeltsEssayDraft,
-  IeltsParagraphDiff,
-  IeltsRubricReceipt,
-  IeltsSpanEvidence,
-  IeltsTransferStatus,
-  IeltsUpgradeTarget,
-  IeltsUpgradeTransferItem,
+import {
+  IELTS_CARTRIDGE_ID,
+  IELTS_CRITERIA,
+  type IeltsBandScore,
+  type IeltsCriterion,
+  type IeltsCriterionAssessment,
+  type IeltsCrossDraftTransferReport,
+  type IeltsEssayDraft,
+  type IeltsEvidenceSourceKind,
+  type IeltsParagraphDiff,
+  type IeltsRubricReceipt,
+  type IeltsSpanEvidence,
+  type IeltsTransferStatus,
+  type IeltsUpgradeCategory,
+  type IeltsUpgradeTarget,
+  type IeltsUpgradeTransferItem,
+  type IeltsWritingDraftSource,
 } from "./types";
 
 const STOP_WORDS = new Set([
@@ -114,7 +121,10 @@ type PromptTopicSpec = {
   readonly fromPromptStatement: boolean;
 };
 
-const PROMPT_CONTRAST_SPLIT = /\b(?:instead\s+of|rather\s+than|versus|vs\.?)\b/iu;
+const PROMPT_CONTRAST_SPLIT =
+  /\b(?:instead\s+of|rather\s+than|versus|vs\.?|v\.)(?=\s|$|[.,;:?!])/iu;
+const PROMPT_ABBREVIATION_DOT =
+  /(?:^|[^\p{L}])(?:vs|v|e\.g|i\.e|cf|dr|mr|mrs|ms|prof|st|no|fig|vol|al)$/iu;
 const PROMPT_ADVERSATIVE_SPLIT = /(?:,\s*\b(?:while|whereas)\b|\b(?:while\s+others|whereas\s+others|whereas)\b)/iu;
 const PROMPT_NEXT_VIEW_OPENER =
   /^\s*(?:others|other\s+people|other\s+citizens|however\s*,?\s*others|on\s+the\s+other\s+hand|in\s+contrast|by\s+contrast|conversely|alternatively)\b/iu;
@@ -178,12 +188,47 @@ function buildContrastFacetsFromPair(
   return left.size > 0 && right.size > 0 ? [left, right] : null;
 }
 
+function splitPromptSentences(text: string): string[] {
+  const sentences: string[] = [];
+  let start = 0;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i]!;
+    if (ch !== "." && ch !== "?" && ch !== "!" && ch !== ";") continue;
+    if (ch === ".") {
+      const beforeDot = text.slice(start, i);
+      const afterDot = text.slice(i + 1);
+      // Protect abbreviations such as vs., v., e.g., i.e., cf., titles when followed by more text.
+      if (PROMPT_ABBREVIATION_DOT.test(beforeDot) && /\s+\S/u.test(afterDot)) {
+        continue;
+      }
+      // Protect etc. when followed by lowercase text or punctuation before continuing a sentence.
+      if (/(?:^|[^\p{L}])etc$/iu.test(beforeDot) && /^(?:\s+[a-z]|[,;)])/u.test(afterDot)) {
+        continue;
+      }
+      // Protect multi-dot initialisms (e.g., i.e., U.S.) between adjacent single letters.
+      if (/(?:^|[^\p{L}])[\p{L}]$/u.test(beforeDot) && /^[\p{L}]\./u.test(afterDot)) {
+        continue;
+      }
+    }
+    while (
+      i + 1 < text.length &&
+      (text[i + 1] === "." || text[i + 1] === "?" || text[i + 1] === "!" || text[i + 1] === ";")
+    ) {
+      i += 1;
+    }
+    const piece = text.slice(start, i + 1).trim();
+    if (piece) sentences.push(piece);
+    start = i + 1;
+  }
+  const tail = text.slice(start).trim();
+  if (tail) sentences.push(tail);
+  return sentences;
+}
+
 function extractContrastFacets(
   trimmedStatement: string,
 ): readonly [ReadonlySet<string>, ReadonlySet<string>] | null {
-  const sentences = (trimmedStatement.match(/[^.?!;]+(?:[.?!;]+|$)/gu) ?? [trimmedStatement])
-    .map((sentence) => sentence.trim())
-    .filter(Boolean);
+  const sentences = splitPromptSentences(trimmedStatement);
 
   // Pass 1: explicit contrast marker ("instead of", "rather than", "versus", "vs.") in any sentence.
   for (const sentence of sentences) {
@@ -1602,4 +1647,458 @@ export function evaluateRevisedDraftDeterministically(
     transferReport: finalizeTransferReport(transferReport, validated.receipt.masteryQualified),
     receipt: validated.receipt,
   };
+}
+
+const VALID_EVIDENCE_SOURCES: ReadonlySet<IeltsEvidenceSourceKind> = new Set([
+  "single_draft_diagnostic",
+  "assisted_revision",
+  "unassisted_cross_draft_transfer",
+  "unassisted_fresh_prompt_transfer",
+]);
+
+const VALID_UPGRADE_CATEGORIES: ReadonlySet<IeltsUpgradeCategory> = new Set([
+  "targetCollocations",
+  "syntacticStructures",
+  "cohesiveDevices",
+  "counterargumentDepth",
+]);
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+function isNonBlankString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function isValidOptionalPatternList(value: unknown): value is readonly string[] | undefined {
+  return (
+    value === undefined ||
+    (Array.isArray(value) && value.every((pattern) => isNonBlankString(pattern)))
+  );
+}
+
+function isValidDraftSourceRecord(
+  value: unknown,
+  label: string,
+  issues: string[],
+): value is IeltsWritingDraftSource {
+  if (!isPlainRecord(value)) {
+    issues.push(`${label} must be a plain object`);
+    return false;
+  }
+  const initialCount = issues.length;
+  if (!isNonBlankString(value.draftId)) issues.push(`${label}.draftId must be a non-blank string`);
+  if (!isNonBlankString(value.promptId)) issues.push(`${label}.promptId must be a non-blank string`);
+  if (typeof value.version !== "number" || !Number.isSafeInteger(value.version) || value.version < 1) {
+    issues.push(`${label}.version must be a positive integer`);
+  }
+  if (
+    value.basedOnVersion !== undefined &&
+    (typeof value.basedOnVersion !== "number" ||
+      !Number.isSafeInteger(value.basedOnVersion) ||
+      value.basedOnVersion < 1 ||
+      (typeof value.version === "number" && value.basedOnVersion >= value.version))
+  ) {
+    issues.push(`${label}.basedOnVersion must be a positive integer lower than version`);
+  }
+  if (typeof value.assisted !== "boolean") issues.push(`${label}.assisted must be a boolean`);
+  if (
+    !Array.isArray(value.paragraphs) ||
+    value.paragraphs.length === 0 ||
+    !value.paragraphs.every((paragraph) => typeof paragraph === "string")
+  ) {
+    issues.push(`${label}.paragraphs must be a non-empty string array`);
+  }
+  return issues.length === initialCount;
+}
+
+export type ValidateWritingRubricReceiptOptions = {
+  readonly requireVerifiedMastery?: boolean;
+  readonly expectedPromptId?: string;
+  readonly expectedDraftId?: string;
+  readonly promptStatement?: string;
+};
+
+/**
+ * Fail-closed structural, provenance, and cross-draft transfer validation for a
+ * serialized or externally supplied IELTS Writing Task 2 rubric receipt.
+ * Never trusts self-reported evidenceSource or mastery flags: recomputes
+ * analyzeCrossDraftTransfer and createValidatedRubricReceipt against sourceDraft
+ * and transferSource.
+ */
+export function validateWritingRubricReceipt(
+  rawReceipt: unknown,
+  options?: ValidateWritingRubricReceiptOptions,
+): { readonly ok: true; readonly receipt: IeltsRubricReceipt } | { readonly ok: false; readonly issues: readonly string[] } {
+  const issues: string[] = [];
+  if (!isPlainRecord(rawReceipt)) {
+    return { ok: false, issues: ["writing receipt must be a plain object"] };
+  }
+
+  if (!isNonBlankString(rawReceipt.receiptId)) issues.push("receiptId must be a non-blank string");
+  if (rawReceipt.cartridgeId !== IELTS_CARTRIDGE_ID) issues.push("cartridgeId mismatch");
+  if (rawReceipt.taskMode !== "writing_task2") issues.push("taskMode must be writing_task2");
+  if (!isNonBlankString(rawReceipt.promptId)) issues.push("promptId must be a non-blank string");
+  if (!isNonBlankString(rawReceipt.draftId)) issues.push("draftId must be a non-blank string");
+  if (
+    typeof rawReceipt.draftVersion !== "number" ||
+    !Number.isSafeInteger(rawReceipt.draftVersion) ||
+    rawReceipt.draftVersion < 1
+  ) {
+    issues.push("draftVersion must be a positive integer");
+  }
+  if (typeof rawReceipt.overallBand !== "number" || !isValidIeltsBand(rawReceipt.overallBand)) {
+    issues.push("overallBand must be a valid IELTS band score");
+  }
+  if (
+    rawReceipt.epistemicStatus !== "practice_feedback" &&
+    rawReceipt.epistemicStatus !== "rubric_verified_evidence"
+  ) {
+    issues.push("invalid epistemicStatus");
+  }
+  if (typeof rawReceipt.countsTowardMastery !== "boolean") issues.push("countsTowardMastery must be a boolean");
+  if (typeof rawReceipt.masteryQualified !== "boolean") issues.push("masteryQualified must be a boolean");
+  if (!isNonBlankString(rawReceipt.epistemicReason)) issues.push("epistemicReason must be a non-blank string");
+  if (
+    typeof rawReceipt.evidenceSource !== "string" ||
+    !VALID_EVIDENCE_SOURCES.has(rawReceipt.evidenceSource as IeltsEvidenceSourceKind)
+  ) {
+    issues.push("invalid evidenceSource");
+  }
+  if (
+    typeof rawReceipt.wordCount !== "number" ||
+    !Number.isSafeInteger(rawReceipt.wordCount) ||
+    rawReceipt.wordCount < 1
+  ) {
+    issues.push("wordCount must be a positive integer");
+  }
+  if (!isNonBlankString(rawReceipt.createdAt)) issues.push("createdAt must be a non-blank string");
+  if (!Array.isArray(rawReceipt.memorizedTemplateFlags)) {
+    issues.push("memorizedTemplateFlags must be an array");
+  }
+
+  if (options?.expectedPromptId !== undefined && rawReceipt.promptId !== options.expectedPromptId) {
+    issues.push("promptId does not match expectedPromptId");
+  }
+  if (options?.expectedDraftId !== undefined && rawReceipt.draftId !== options.expectedDraftId) {
+    issues.push("draftId does not match expectedDraftId");
+  }
+
+  const rawSourceDraft = rawReceipt.sourceDraft;
+  const hasValidSourceDraft = isValidDraftSourceRecord(rawSourceDraft, "sourceDraft", issues);
+  if (isValidDraftSourceRecord(rawSourceDraft, "sourceDraft", [])) {
+    if (rawSourceDraft.draftId !== rawReceipt.draftId) issues.push("sourceDraft.draftId mismatch");
+    if (rawSourceDraft.promptId !== rawReceipt.promptId) issues.push("sourceDraft.promptId mismatch");
+    if (rawSourceDraft.version !== rawReceipt.draftVersion) issues.push("sourceDraft.version mismatch");
+  }
+
+  let validatedBaseline: IeltsWritingDraftSource | undefined;
+  let validatedTargets: IeltsUpgradeTarget[] | undefined;
+
+  if (rawReceipt.transferSource !== undefined) {
+    if (!isPlainRecord(rawReceipt.transferSource)) {
+      issues.push("transferSource must be a plain object");
+    } else {
+      const rawBaseline = rawReceipt.transferSource.baseline;
+      if (isValidDraftSourceRecord(rawBaseline, "transferSource.baseline", issues)) {
+        if (countDraftWords(rawBaseline.paragraphs) === 0) {
+          issues.push("transferSource.baseline must contain prose words");
+        } else {
+          validatedBaseline = {
+            draftId: rawBaseline.draftId,
+            promptId: rawBaseline.promptId,
+            version: rawBaseline.version,
+            basedOnVersion: rawBaseline.basedOnVersion,
+            assisted: rawBaseline.assisted,
+            paragraphs: [...rawBaseline.paragraphs],
+          };
+        }
+      }
+      if (!Array.isArray(rawReceipt.transferSource.targets)) {
+        issues.push("transferSource.targets must be an array");
+      } else {
+        const sanitizedTargets: IeltsUpgradeTarget[] = [];
+        for (const [index, target] of rawReceipt.transferSource.targets.entries()) {
+          if (
+            !isPlainRecord(target) ||
+            !isNonBlankString(target.id) ||
+            !isNonBlankString(target.label) ||
+            !isNonBlankString(target.guidance) ||
+            typeof target.category !== "string" ||
+            !VALID_UPGRADE_CATEGORIES.has(target.category as IeltsUpgradeCategory) ||
+            !IELTS_CRITERIA.includes(target.criterion as IeltsCriterion) ||
+            !Array.isArray(target.targetPatterns) ||
+            target.targetPatterns.length === 0 ||
+            !target.targetPatterns.every((pattern) => isNonBlankString(pattern)) ||
+            !isValidOptionalPatternList(target.weakBaselinePatterns) ||
+            !isValidOptionalPatternList(target.clichePatterns)
+          ) {
+            issues.push(`transferSource.targets[${index}] is invalid`);
+            continue;
+          }
+          sanitizedTargets.push({
+            id: target.id,
+            category: target.category as IeltsUpgradeCategory,
+            criterion: target.criterion as IeltsCriterion,
+            label: target.label,
+            targetPatterns: [...target.targetPatterns],
+            ...(target.weakBaselinePatterns !== undefined
+              ? { weakBaselinePatterns: [...target.weakBaselinePatterns] }
+              : {}),
+            ...(target.clichePatterns !== undefined
+              ? { clichePatterns: [...target.clichePatterns] }
+              : {}),
+            guidance: target.guidance,
+          });
+        }
+        validatedTargets = sanitizedTargets;
+      }
+    }
+  }
+
+  const assessments: IeltsCriterionAssessment[] = [];
+  if (!isPlainRecord(rawReceipt.criteria)) {
+    issues.push("criteria must be a plain object");
+  } else {
+    for (const criterion of IELTS_CRITERIA) {
+      const entry = rawReceipt.criteria[criterion];
+      if (!isPlainRecord(entry)) {
+        issues.push(`criteria.${criterion} must be a plain object`);
+        continue;
+      }
+      if (entry.criterion !== criterion) issues.push(`criteria.${criterion}.criterion mismatch`);
+      if (typeof entry.band !== "number" || !isValidIeltsBand(entry.band)) {
+        issues.push(`criteria.${criterion}.band is invalid`);
+      }
+      if (!isNonBlankString(entry.summary)) {
+        issues.push(`criteria.${criterion}.summary must be a non-blank string`);
+      }
+      if (!Array.isArray(entry.evidenceSpans) || entry.evidenceSpans.length === 0) {
+        issues.push(`criteria.${criterion}.evidenceSpans must be a non-empty array`);
+        continue;
+      }
+      const spans: IeltsSpanEvidence[] = [];
+      for (const [spanIdx, rawSpan] of entry.evidenceSpans.entries()) {
+        if (
+          !isPlainRecord(rawSpan) ||
+          !isNonBlankString(rawSpan.id) ||
+          typeof rawSpan.paragraphIndex !== "number" ||
+          !isNonBlankString(rawSpan.excerpt) ||
+          !isNonBlankString(rawSpan.diagnosis) ||
+          !isNonBlankString(rawSpan.upgradeRewrite) ||
+          !IELTS_CRITERIA.includes(rawSpan.criterion as IeltsCriterion) ||
+          (rawSpan.startOffset !== undefined && typeof rawSpan.startOffset !== "number") ||
+          (rawSpan.endOffset !== undefined && typeof rawSpan.endOffset !== "number")
+        ) {
+          issues.push(`criteria.${criterion}.evidenceSpans[${spanIdx}] is invalid`);
+          continue;
+        }
+        spans.push({
+          id: rawSpan.id,
+          paragraphIndex: rawSpan.paragraphIndex,
+          excerpt: rawSpan.excerpt,
+          criterion: rawSpan.criterion as IeltsCriterion,
+          diagnosis: rawSpan.diagnosis,
+          upgradeRewrite: rawSpan.upgradeRewrite,
+          ...(rawSpan.startOffset !== undefined ? { startOffset: rawSpan.startOffset } : {}),
+          ...(rawSpan.endOffset !== undefined ? { endOffset: rawSpan.endOffset } : {}),
+        });
+      }
+      if (
+        spans.length === entry.evidenceSpans.length &&
+        typeof entry.band === "number" &&
+        isValidIeltsBand(entry.band)
+      ) {
+        assessments.push({
+          criterion,
+          band: entry.band,
+          summary: String(entry.summary ?? ""),
+          evidenceSpans: spans,
+        });
+      }
+    }
+  }
+
+  if (issues.length > 0 || !hasValidSourceDraft) {
+    return { ok: false, issues };
+  }
+
+  const receipt = rawReceipt as IeltsRubricReceipt;
+  const sourceDraft = receipt.sourceDraft!;
+  const isCrossDraftTransfer = receipt.evidenceSource === "unassisted_cross_draft_transfer";
+  const isFreshPromptTransfer = receipt.evidenceSource === "unassisted_fresh_prompt_transfer";
+  const claimsVerified =
+    receipt.epistemicStatus === "rubric_verified_evidence" ||
+    receipt.countsTowardMastery ||
+    receipt.masteryQualified;
+
+  const sourceAsEssayDraft: IeltsEssayDraft = {
+    draftId: sourceDraft.draftId,
+    promptId: sourceDraft.promptId,
+    version: sourceDraft.version,
+    basedOnVersion: sourceDraft.basedOnVersion,
+    assisted: sourceDraft.assisted,
+    paragraphs: sourceDraft.paragraphs,
+    label: "",
+    timeSpentSeconds: 0,
+    timeBoxSeconds: 0,
+    createdAt: receipt.createdAt,
+  };
+
+  let recomputedCrossDraftVerified = false;
+  let recomputedFreshPromptTransfer = false;
+  let recomputedDisqualificationReason: string | undefined;
+
+  if (validatedBaseline && validatedTargets) {
+    const lineage = getWritingTransferLineage(validatedBaseline, sourceDraft);
+    if (isCrossDraftTransfer && lineage !== "advancing_revision") {
+      issues.push("transferSource.baseline does not establish advancing_revision lineage");
+    }
+    if (isFreshPromptTransfer && lineage !== "fresh_prompt") {
+      issues.push("transferSource.baseline does not establish fresh_prompt lineage");
+    }
+
+    const baselineAsEssayDraft: IeltsEssayDraft = {
+      draftId: validatedBaseline.draftId,
+      promptId: validatedBaseline.promptId,
+      version: validatedBaseline.version,
+      basedOnVersion: validatedBaseline.basedOnVersion,
+      assisted: validatedBaseline.assisted,
+      paragraphs: validatedBaseline.paragraphs,
+      label: "",
+      timeSpentSeconds: 0,
+      timeBoxSeconds: 0,
+      createdAt: receipt.createdAt,
+    };
+
+    const transferReport = analyzeCrossDraftTransfer({
+      draft1: baselineAsEssayDraft,
+      draft2: sourceAsEssayDraft,
+      targets: validatedTargets,
+      promptStatement: options?.promptStatement,
+    });
+
+    recomputedCrossDraftVerified =
+      isCrossDraftTransfer &&
+      transferReport.summary.hasSubstantiveRevision &&
+      transferReport.summary.meetsCrossDraftVerification &&
+      !transferReport.summary.hasLowEntropyStuffing &&
+      !transferReport.summary.hasMechanicalKeywordPaste &&
+      !transferReport.summary.hasMemorizedStuffing;
+
+    recomputedFreshPromptTransfer =
+      isFreshPromptTransfer &&
+      lineage === "fresh_prompt" &&
+      transferReport.summary.hasSubstantiveRevision &&
+      !transferReport.summary.hasLowEntropyStuffing &&
+      !transferReport.summary.hasMechanicalKeywordPaste &&
+      !transferReport.summary.hasMemorizedStuffing;
+
+    if (isCrossDraftTransfer) {
+      recomputedDisqualificationReason = transferReport.summary.disqualificationReason;
+      if ((options?.requireVerifiedMastery || claimsVerified) && !recomputedCrossDraftVerified) {
+        issues.push(
+          transferReport.summary.disqualificationReason
+            ? `recomputed cross-draft transfer failed: ${transferReport.summary.disqualificationReason}`
+            : "recomputed cross-draft transfer did not meet mastery verification criteria",
+        );
+      }
+    } else if (isFreshPromptTransfer && (options?.requireVerifiedMastery || claimsVerified) && !recomputedFreshPromptTransfer) {
+      issues.push("recomputed fresh-prompt transfer failed substantive or anti-stuffing checks");
+    }
+  } else if (isCrossDraftTransfer && (options?.requireVerifiedMastery || claimsVerified)) {
+    issues.push("verified unassisted_cross_draft_transfer receipt requires transferSource");
+  } else if (isFreshPromptTransfer && (options?.requireVerifiedMastery || claimsVerified)) {
+    const prose = maskIeltsParagraphs(sourceDraft.paragraphs);
+    const sentences = prose.map((paragraph) => segmentIeltsText(paragraph));
+    const hasLowEntropy = detectLowEntropyStuffing(prose, sentences);
+    if (hasLowEntropy) {
+      issues.push("sourceDraft failed low-entropy anti-stuffing check");
+    } else {
+      recomputedFreshPromptTransfer = true;
+    }
+  }
+
+  const effectiveBaseline =
+    validatedBaseline ??
+    (isFreshPromptTransfer
+      ? {
+          promptId: `${sourceDraft.promptId}:baseline`,
+          version: 1,
+          paragraphs: ["baseline"],
+        }
+      : undefined);
+
+  const recomputed = createValidatedRubricReceipt({
+    receiptId: receipt.receiptId,
+    taskMode: "writing_task2",
+    draft: sourceAsEssayDraft,
+    baselineDraft: effectiveBaseline,
+    transferTargets: validatedTargets,
+    assessments,
+    crossDraftTransferVerified: recomputedCrossDraftVerified,
+    freshPromptTransfer: recomputedFreshPromptTransfer,
+    disqualificationReason: recomputedDisqualificationReason,
+    createdAt: receipt.createdAt,
+  });
+
+  if (!recomputed.ok) {
+    for (const err of recomputed.errors) {
+      issues.push(`${err.code}: ${err.message}`);
+    }
+    return { ok: false, issues };
+  }
+
+  if (recomputed.receipt.overallBand !== receipt.overallBand) {
+    issues.push("overallBand does not match criterion bands");
+  }
+  if (recomputed.receipt.wordCount !== receipt.wordCount) {
+    issues.push("wordCount does not match sourceDraft prose");
+  }
+
+  if (options?.requireVerifiedMastery || claimsVerified) {
+    if (
+      receipt.epistemicStatus !== "rubric_verified_evidence" ||
+      receipt.countsTowardMastery !== true ||
+      receipt.masteryQualified !== true
+    ) {
+      issues.push("verified receipt must have consistent rubric_verified_evidence mastery flags");
+    }
+    if (!isCrossDraftTransfer && !isFreshPromptTransfer) {
+      issues.push("verified receipt requires unassisted transfer evidenceSource");
+    }
+    if (sourceDraft.assisted !== false) {
+      issues.push("verified receipt cannot originate from an assisted sourceDraft");
+    }
+    if (
+      recomputed.receipt.epistemicStatus !== "rubric_verified_evidence" ||
+      recomputed.receipt.countsTowardMastery !== true ||
+      recomputed.receipt.masteryQualified !== true
+    ) {
+      issues.push("sourceDraft failed authoritative rubric verification");
+    }
+  } else {
+    if (
+      receipt.epistemicStatus !== "practice_feedback" ||
+      receipt.countsTowardMastery !== false ||
+      receipt.masteryQualified !== false
+    ) {
+      issues.push("practice receipt must not claim mastery");
+    }
+  }
+
+  if (issues.length > 0) {
+    return { ok: false, issues };
+  }
+  return { ok: true, receipt };
+}
+
+export function isVerifiedWritingReceipt(
+  receipt: unknown,
+  options?: Omit<ValidateWritingRubricReceiptOptions, "requireVerifiedMastery">,
+): receipt is IeltsRubricReceipt {
+  return validateWritingRubricReceipt(receipt, { ...options, requireVerifiedMastery: true }).ok;
 }

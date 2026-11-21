@@ -5,9 +5,8 @@ import { segmentIeltsText, type GroundedSentence } from "./text-segments";
 import {
   detectMemorizedTemplates,
   hasMemorizedTemplateStuffing,
-  isVerifiedWritingReceipt,
 } from "./rubric";
-import { detectLowEntropyStuffing } from "./transfer";
+import { detectLowEntropyStuffing, isVerifiedWritingReceipt } from "./transfer";
 import {
   IELTS_CARTRIDGE_ID,
   type IeltsSpeakingEvidenceQuote,
@@ -366,16 +365,20 @@ export function buildSpeakingPart3Seed(
   };
 }
 
-function classifySpeakingPace(
-  durationSeconds: number,
+export function classifySpeakingPace(
+  durationSeconds: number | null,
   window: { readonly min: number; readonly max: number },
 ): IeltsSpeakingPaceStatus {
-  if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) {
+  if (durationSeconds === null || !Number.isFinite(durationSeconds) || durationSeconds <= 0) {
     return "invalid_duration";
   }
   if (durationSeconds < window.min) return "too_short";
   if (durationSeconds > window.max) return "over_time";
   return "on_target";
+}
+
+export function hasStiffWrittenSpeakingConnector(text: string): boolean {
+  return /\b(furthermore|moreover|henceforth|in conclusion)\b/iu.test(text);
 }
 
 export function getSpeakingTargets(collocations: readonly string[]): ReadonlyMap<string, string> {
@@ -507,8 +510,7 @@ export function evaluateSpeakingRetelling(
     /\b(while|although|even though|whereas|which|because|if|unless)\b/iu.test(
       trimmedTranscript,
     );
-  const hasStiffWrittenConnector =
-    /\b(furthermore|moreover|henceforth|in conclusion)\b/iu.test(trimmedTranscript);
+  const hasStiffWrittenConnector = hasStiffWrittenSpeakingConnector(trimmedTranscript);
 
   // Build exact, untrimmed-offset evidence quotes: 1 fluency quote + 1 quote per credited target hit.
   const evidenceQuotes: IeltsSpeakingEvidenceQuote[] = [];

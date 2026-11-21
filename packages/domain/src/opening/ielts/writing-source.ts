@@ -17,8 +17,10 @@ export function getWritingTransferSource(
   baseline: IeltsWritingDraftSource,
   targets: readonly IeltsUpgradeTarget[],
 ): IeltsWritingTransferSource {
-  const normalizePatterns = (patterns: readonly string[] = []) =>
-    patterns.map((pattern) => pattern.trim().replace(/\s+/gu, " "));
+  const normalizePatterns = (patterns: readonly string[] | undefined) =>
+    Array.isArray(patterns)
+      ? patterns.map((pattern) => pattern.trim().replace(/\s+/gu, " "))
+      : [];
 
   return {
     baseline: getWritingDraftSource(baseline),

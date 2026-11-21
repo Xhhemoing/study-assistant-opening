@@ -3432,4 +3432,35 @@ it("preserves Prompt-B local submission when host refreshes Draft-1 feedback whi
   expect(draft2PanelText()).not.toContain(stalePromptAExcerpt);
   expect(host.textContent).not.toContain(stalePromptAExcerpt);
   expect(host.querySelector('[data-epistemic-badge="rubric_verified_evidence"]')).not.toBeNull();
+
+  // 4. Host re-issues a fresh Prompt-B draft1Receipt with a NEW receiptId (promptId & Draft-1 content unchanged,
+  //    stale Prompt-A draft2/receipt still passed). Local Prompt-B Draft-2 submission & score MUST NOT be wiped!
+  const reissuedDraft1ReceiptFixture = {
+    ...refreshedPromptBFixture,
+    draft1Receipt: {
+      ...refreshedPromptBFixture.draft1Receipt,
+      receiptId: "prompt-b-draft1-receipt-reissued-v2",
+      epistemicReason: "一稿初评已重新签发新回执编号，仅作参考诊断。",
+      criteria: {
+        ...refreshedPromptBFixture.draft1Receipt.criteria,
+        TR: {
+          ...refreshedPromptBFixture.draft1Receipt.criteria.TR,
+          summary: "重新签发后的一稿任务回应诊断摘要。",
+        },
+      },
+    },
+  };
+  await render(reissuedDraft1ReceiptFixture);
+
+  expect(draft2PanelText()).toContain("income-indexed rents");
+  expect(draft2PanelText()).not.toContain(stalePromptAExcerpt);
+  expect(host.textContent).not.toContain(stalePromptAExcerpt);
+  expect(host.querySelector('[data-epistemic-badge="rubric_verified_evidence"]')).not.toBeNull();
+
+  // Switching to Draft 1 tab confirms updated re-issued draft1Receipt metadata still renders cleanly.
+  const draft1Tab = [...host.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find(
+    (tab) => tab.textContent?.trim() === "一稿",
+  )!;
+  await act(async () => draft1Tab.click());
+  expect(host.textContent).toContain("重新签发后的一稿任务回应诊断摘要。");
 });

@@ -49,17 +49,14 @@ export {
   detectMemorizedTemplates,
   hasMemorizedTemplateStuffing,
   isValidIeltsBand,
-  isVerifiedWritingReceipt,
   locateGroundedExcerpt,
   resolveIeltsEpistemicStatus,
-  validateWritingRubricReceipt,
 } from "./rubric";
 
 export type {
   CreateRubricReceiptInput,
   EpistemicResolution,
   EpistemicResolutionInput,
-  ValidateWritingRubricReceiptOptions,
 } from "./rubric";
 
 export {
@@ -67,20 +64,25 @@ export {
   detectLowEntropyStuffing,
   diffEssayParagraphs,
   evaluateRevisedDraftDeterministically,
+  isVerifiedWritingReceipt,
+  validateWritingRubricReceipt,
 } from "./transfer";
 
 export type {
   AnalyzeCrossDraftTransferInput,
   EvaluateRevisedDraftInput,
   EvaluateRevisedDraftResult,
+  ValidateWritingRubricReceiptOptions,
 } from "./transfer";
 
 export {
   buildSpeakingPart3Seed,
+  classifySpeakingPace,
   evaluateSpeakingRetelling,
   getSpeakingEvaluationContext,
   getSpeakingTargets,
   hasRequiredWritingReceipt,
+  hasStiffWrittenSpeakingConnector,
 } from "./speaking";
 
 export { getWritingDraftSource, getWritingTransferSource } from "./writing-source";
