@@ -173,7 +173,14 @@ function taskNotBeforeMs(task: TaskItem): number {
  * Original free windows are disjoint after subtracting hard constraints.
  * A draft partitions each window into available and occupied segments.
  */
-type Work = { task: TaskItem; duration: number; earliest: number; due: number; preferShortGap: boolean };
+type Work = {
+  task: TaskItem;
+  duration: number;
+  earliest: number;
+  due: number;
+  deadlineInDay: boolean;
+  preferShortGap: boolean;
+};
 type Segment = MutableSlot & { window: number; work?: Work };
 const MAX_REPAIR_ATTEMPTS = 8;
 const MAX_RELOCATED_BLOCKS = 2;
@@ -196,9 +203,12 @@ class LiveReservations {
     this.feasible.delete(work);
   }
 
-  reservedSegments(): ReadonlySet<Segment> {
+  reservedSegments(forWork: Work): ReadonlySet<Segment> {
     const reserved = new Set<Segment>();
-    for (const feasible of this.feasible.values()) {
+    for (const [pending, feasible] of this.feasible) {
+      // Future-deadline tasks must not steer same-day or earlier-deadline placements;
+      // keep their sole-gap guard only for equal/later future deadlines or undated work.
+      if (!pending.deadlineInDay && (forWork.deadlineInDay || pending.due > forWork.due)) continue;
       if (feasible.size === 1) {
         for (const segment of feasible) reserved.add(segment);
       }
@@ -235,7 +245,7 @@ function placeAt(segments: readonly Segment[], index: number, start: number, wor
 
 /** Prefer unreserved gaps, then use the shortest gap for flexible ranked work. */
 function placeAvailable(segments: readonly Segment[], work: Work, reservations: LiveReservations): Segment[] | null {
-  const reserved = reservations.reservedSegments();
+  const reserved = reservations.reservedSegments(work);
   let choice: { index: number; reserved: boolean; length: number } | undefined;
   for (const [index, segment] of segments.entries()) {
     if (segment.work || !fits(segment, work)) continue;
@@ -405,6 +415,7 @@ export function planDay(
     duration: task.minutes * 60_000,
     earliest: Math.max(taskNotBeforeMs(task), planningNowMs),
     due: deadline(task),
+    deadlineInDay: deadlineInDay(task),
     preferShortGap: preferShortGap(task),
   }));
 

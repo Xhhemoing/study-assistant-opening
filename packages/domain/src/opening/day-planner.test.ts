@@ -545,4 +545,67 @@ describe("bounded feasibility repair", () => {
       [carry.id, at("11:10"), at("11:40")],
     ]);
   });
+
+  it.each([
+    ["default dayEnd", undefined],
+    ["explicit localDate/timeZone with future task ranked first", {
+      localDate: "2026-09-14",
+      timeZone: "UTC",
+      preferredOrder: [id(6), id(1), id(2), id(3), id(4), id(5)],
+    }],
+  ] as const)("does not let a tomorrow-deadline reservation steer today's deadlines (%s)", (_, options) => {
+    const result = planDay([
+      task(1, { minutes: 10, dueAt: at("12:00") }),
+      task(2, { minutes: 10, dueAt: at("12:00") }),
+      task(3, { minutes: 10, dueAt: at("12:00") }),
+      task(4, { minutes: 60, notBefore: at("11:00"), dueAt: at("14:00") }),
+      task(5, { minutes: 60, notBefore: at("11:00"), dueAt: at("14:00") }),
+      task(6, { minutes: 90, dueAt: "2026-09-15T10:00:00.000Z" }),
+    ], [
+      slot("09:00", "10:30"),
+      slot("11:00", "12:00"),
+      slot("13:00", "14:00"),
+    ], options);
+    expect(result.blocks.map(({ taskId, start, end }) => [taskId, start, end])).toEqual([
+      [id(1), at("09:00"), at("09:10")],
+      [id(2), at("09:10"), at("09:20")],
+      [id(3), at("09:20"), at("09:30")],
+      [id(4), at("11:00"), at("12:00")],
+      [id(5), at("13:00"), at("14:00")],
+    ]);
+    expect(result.unscheduled).toEqual([{ taskId: id(6), reason: "free_time_exhausted" }]);
+  });
+
+  it("does not let a later future-deadline reservation starve earlier future deadlines while still guarding against undated carry-over", () => {
+    const earlierFuture = planDay([
+      task(1, { minutes: 10, dueAt: "2026-09-15T12:00:00.000Z" }),
+      task(2, { minutes: 10, dueAt: "2026-09-15T12:00:00.000Z" }),
+      task(3, { minutes: 10, dueAt: "2026-09-15T12:00:00.000Z" }),
+      task(4, { minutes: 60, notBefore: at("11:00"), dueAt: "2026-09-15T14:00:00.000Z" }),
+      task(5, { minutes: 60, notBefore: at("11:00"), dueAt: "2026-09-15T14:00:00.000Z" }),
+      task(6, { minutes: 90, dueAt: "2026-09-16T10:00:00.000Z" }),
+    ], [
+      slot("09:00", "10:30"),
+      slot("11:00", "12:00"),
+      slot("13:00", "14:00"),
+    ]);
+    expect(earlierFuture.blocks.map(({ taskId }) => taskId)).toEqual([id(1), id(2), id(3), id(4), id(5)]);
+    expect(earlierFuture.unscheduled).toEqual([{ taskId: id(6), reason: "free_time_exhausted" }]);
+
+    const carryOverVsFuture = planDay([
+      task(1, { minutes: 10 }),
+      task(2, { minutes: 10 }),
+      task(3, { minutes: 10 }),
+      task(4, { minutes: 30, notBefore: at("11:00"), dueAt: "2026-09-15T10:30:00.000Z" }),
+    ], [slot("09:00", "10:00"), slot("11:00", "11:30")], {
+      preferredOrder: [id(1), id(2), id(3), id(4)],
+    });
+    expect(carryOverVsFuture.unscheduled).toEqual([]);
+    expect(carryOverVsFuture.blocks.map(({ taskId, start }) => [taskId, start])).toEqual([
+      [id(1), at("09:00")],
+      [id(2), at("09:10")],
+      [id(3), at("09:20")],
+      [id(4), at("11:00")],
+    ]);
+  });
 });
