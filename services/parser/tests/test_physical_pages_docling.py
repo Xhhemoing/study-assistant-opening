@@ -31,9 +31,9 @@ def text_element(page_no, text, identifier=1, label=DocItemLabel.TEXT):
     return TextElement(id=identifier, label=label, page_no=page_no, text=text, cluster=cluster(identifier, label))
 
 
-def result_for(*page_elements):
+def result_for(*page_elements, start_page=11):
     pages = [Page(page_no=number, size=SIZE, assembled=AssembledUnit(elements=elements))
-        for number, elements in enumerate(page_elements, 11)]
+        for number, elements in enumerate(page_elements, start_page)]
     # A data-only InputDocument avoids opening any backend or PDF file.
     source = InputDocument.model_construct(file=Path("physical-pages.pdf"), format=InputFormat.PDF, document_hash="0" * 64)
     doc = DoclingDocument(name="physical-pages")
@@ -506,6 +506,58 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
         self.assertEqual(payload["pages"][0]["text"], "Theorem 1.")
         self.assertIs(payload["pages"][0].get("sectionSealedAtEnd"), True)
         self.assertNotIn("sectionSealedAtEnd", payload["pages"][1])
+
+    def test_segment_cli_restores_unfinished_inline_and_section_seals(self):
+        import io
+        import json
+        import tempfile
+        from contextlib import redirect_stdout
+
+        for mode, opener, continuation, flag in (
+            ("inline_sealed", "Answer: x =", "5 units.", "inlineSealedAtEnd"),
+            ("section_sealed", "Answer Key\n1. x =", "5 units.", "sectionSealedAtEnd"),
+        ):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
+                leading = [[text_element(page, "Public page.")] for page in range(1, 10)]
+                page10 = [text_element(10, "Exercise 1: Find x.\n" + opener)]
+                page11 = [text_element(11, continuation)]
+                page12 = [text_element(12, "## 第 2 单元 向量空间\nPublic chapter.")]
+                book = result_for(*leading, page10, page11, page12, start_page=1)
+                self.assertEqual(physical_pages.extract_physical_pages(book).texts_by_page[11], [])
+                first = result_for(*leading, page10, start_page=1)
+                second = result_for(page11, page12, start_page=11)
+                pdf_path = Path(tmp) / "sample.pdf"
+                pdf_path.write_bytes(b"%PDF-1.4\n")
+                common = ["--input", str(pdf_path), "--mime", "application/pdf", "--max-pages", "12"]
+                with patch.object(cli, "pdf_page_count", return_value=12), patch.object(cli, "convert", side_effect=[first, second]):
+                    first_output = io.StringIO()
+                    with redirect_stdout(first_output):
+                        self.assertEqual(cli.main(common + ["--page-start", "1", "--page-end", "10"]), 0)
+                    page = json.loads(first_output.getvalue())["pages"][-1]
+                    self.assertEqual(page["page"], 10)
+                    self.assertEqual(page["text"], "Exercise 1: Find x.")
+                    self.assertIs(page.get(flag), True)
+                    second_output = io.StringIO()
+                    with redirect_stdout(second_output):
+                        self.assertEqual(cli.main(common + ["--page-start", "11", "--page-end", "12", "--initial-seal-mode", mode]), 0)
+                    pages = json.loads(second_output.getvalue())["pages"]
+                    self.assertEqual(pages[0]["text"], "")
+                    self.assertEqual(pages[0]["visualKinds"], [])
+                    self.assertIs(pages[0].get("hadSealedContent"), True)
+                    self.assertEqual(bool(pages[0].get(flag)), mode == "section_sealed")
+                    self.assertIn("Public chapter.", pages[1]["text"])
+
+    def test_assignment_and_bare_multichar_container_titles_keep_answers_sealed(self):
+        for title in (
+            "Lecture 4: Homework", "Lecture 4: Assignments", "Lecture 4: Lab",
+            "第 3 讲 作业题", "第 3 部分", "第 2 单元", "第 2 单元：阶段练习",
+        ):
+            with self.subTest(title=title):
+                result = result_for([text_element(
+                    11, f"Lecture 4: Solutions\n## {title}\n1. x = 5\n## 第 4 部分 向量空间\n定义：向量空间。",
+                )])
+                public = physical_pages.extract_physical_pages(result).texts_by_page[11]
+                self.assertEqual(public, ["## 第 4 部分 向量空间\n定义：向量空间。"])
 
     def test_round7_caption_inside_seal_lecture_answer_guard_and_had_sealed(self):
         import io

@@ -93,6 +93,36 @@ describe("bounded resumable PDF parser", () => {
     expect(pages.map(p => p.page)).toEqual(Array.from({ length: 23 }, (_, i) => i + 1));
   });
 
+  it.each(["inline_sealed", "section_sealed"])("passes cached page 10's %s state to page 11 and separates differently seeded cache entries", async mode => {
+    const d = setup(11);
+    const runner = d.input.runner;
+    const seedKey = mode === "inline_sealed" ? "inlineSealedAtEnd" : "sectionSealedAtEnd";
+    d.data.set("source/0/text-v1/1-10", {
+      state: "ready",
+      pages: Array.from({ length: 10 }, (_, index) => ({
+        page: index + 1, text: "Public", imagePath: null,
+        ...(index === 9 ? { [seedKey]: true, hadSealedContent: true } : {}),
+      })),
+    });
+    // A previous attempt could parse the tail after an unavailable first range.
+    d.data.set("source/0/text-v1/11-11", {
+      state: "ready", pages: [{ page: 11, text: "5 units.", imagePath: null }],
+    });
+    const seeds: string[] = [];
+    d.input.runner = async (argv, signal) => {
+      if (argv.includes("--inspect-pdf")) return runner(argv, signal);
+      const flagIndex = argv.indexOf("--initial-seal-mode");
+      seeds.push(flagIndex === -1 ? "none" : argv[flagIndex + 1]!);
+      return { exitCode: 0, stdout: JSON.stringify({
+        pages: [{ page: 11, text: flagIndex === -1 ? "5 units." : "", imagePath: null, hadSealedContent: true }],
+      }) };
+    };
+    expect((await collectPdfSegments(d.input)).at(-1)?.text).toBe("");
+    expect(seeds).toEqual([mode]);
+    expect((await collectPdfSegments(d.input)).at(-1)?.text).toBe("");
+    expect(seeds).toEqual([mode]);
+  });
+
   it("assembles over 8 MiB of cached pages and resumes the missing tail in order", async () => {
     const d = setup(51);
     const text = "x".repeat(180_000);
@@ -588,6 +618,7 @@ describe("bounded resumable PDF parser", () => {
       visualKinds?: VisualPageKind[];
       discourseBlocks?: Array<Record<string, unknown>>;
       sectionSealedAtEnd?: boolean;
+      inlineSealedAtEnd?: boolean;
       hadSealedContent?: boolean;
     }>;
     savedChunks?: NewSourceChunk[];
@@ -667,7 +698,7 @@ describe("bounded resumable PDF parser", () => {
             stdout: JSON.stringify({
               pages: options.pages
                 .filter(p => p.page >= start && p.page <= end)
-                .map(p => ({ page: p.page, text: p.text, imagePath: null, visualKinds: p.visualKinds ?? [], ...(p.discourseBlocks ? { discourseBlocks: p.discourseBlocks } : {}), ...(p.sectionSealedAtEnd !== undefined ? { sectionSealedAtEnd: p.sectionSealedAtEnd } : {}), ...(p.hadSealedContent !== undefined ? { hadSealedContent: p.hadSealedContent } : {}) })),
+                .map(p => ({ ...p, imagePath: null, visualKinds: p.visualKinds ?? [] })),
             }),
           };
         },
@@ -757,7 +788,7 @@ describe("bounded resumable PDF parser", () => {
     expect(mixedSealedVision.publishedChunks[0]?.text).toBe("Theorem 1: Continuous functions on [a,b] are bounded.");
   });
 
-  it("sanitizes oversized stale saved chunks instead of keeping them in preservePages and strips rawCharStart/rawCharEnd spans", async () => {
+  it("replaces contaminated oversized saved text with the fresh public text and strips rawCharStart/rawCharEnd spans", async () => {
     const oversizedPublic = "A".repeat(100_050);
     const staleSaved: NewSourceChunk = {
       page: 1,
@@ -775,8 +806,7 @@ describe("bounded resumable PDF parser", () => {
     });
     expect(sanitized.preservePages).toEqual([]);
     expect(sanitized.publishedChunks).toHaveLength(1);
-    expect(sanitized.publishedChunks[0]?.text.length).toBe(100_000);
-    expect(sanitized.publishedChunks[0]?.text).not.toContain("Answer Key");
+    expect(sanitized.publishedChunks[0]?.text).toBe("Public fallback");
 
     const rawSpanText = sealTextWithState(
       "Problem 1.\n\n𝑥 = 2.\nTheorem 1.",
@@ -1030,6 +1060,61 @@ describe("bounded resumable PDF parser", () => {
     expect(multiSegmentBoundary.publishedChunks.map(c => c.page)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12]);
     expect(multiSegmentBoundary.publishedChunks[9]?.text).toBe("Public theorem.");
     expect(multiSegmentBoundary.publishedChunks[10]?.text).toBe("Chapter 2: Rings\nDef.");
+  });
+
+  it("seals an unmarked continuation after page 10 when the page's inline opener was already filtered", async () => {
+    const { publishedChunks } = await runPdfScenario({
+      pages: [
+        ...Array.from({ length: 9 }, (_, index) => ({ page: index + 1, text: "Public page." })),
+        { page: 10, text: "Exercise 1: Find x.", hadSealedContent: true, inlineSealedAtEnd: true },
+        { page: 11, text: "5 units." },
+        { page: 12, text: "Chapter 2: Rings\nPublic chapter." },
+      ],
+    });
+    expect(publishedChunks.map(chunk => chunk.page)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12]);
+  });
+
+  it("keeps the public tail after Docling closes the carried inline seal", async () => {
+    const { publishedChunks } = await runPdfScenario({
+      pages: [
+        ...Array.from({ length: 9 }, (_, index) => ({ page: index + 1, text: "Public page." })),
+        { page: 10, text: "Exercise 1: Find x.", hadSealedContent: true, inlineSealedAtEnd: true },
+        { page: 11, text: "A separate public paragraph.", hadSealedContent: true, inlineSealedAtEnd: false },
+        { page: 12, text: "Public explanation." },
+      ],
+    });
+    expect(publishedChunks.slice(-2).map(chunk => [chunk.page, chunk.text]))
+      .toEqual([[11, "A separate public paragraph."], [12, "Public explanation."]]);
+  });
+
+  it.each([
+    "Lecture 4: Homework",
+    "Lecture 4: Assignments",
+    "Lecture 4: Lab",
+    "第 3 讲 作业题",
+    "第 3 部分",
+    "第 2 单元",
+    "第 2 单元：阶段练习",
+  ])("keeps %s sealed inside an answer section", async title => {
+    const { publishedChunks } = await runPdfScenario({
+      pages: [
+        { page: 1, text: "Lecture 4: Solutions\n## " + title + "\n1. x = 5\n## 第 4 部分 向量空间\n定义：向量空间。" },
+      ],
+    });
+    expect(publishedChunks.map(chunk => chunk.text)).toEqual(["## 第 4 部分 向量空间\n定义：向量空间。"]);
+  });
+
+  it.each(["native only", "native and Vision"])("rebuilds a reused %s chunk from the freshly filtered page", async scenario => {
+    const vision = scenario === "native and Vision" ? "\n\n[视觉转写与描述]\nChapter 2: Rings\nPublic diagram." : "";
+    const { publishedChunks } = await runPdfScenario({
+      pages: [{ page: 1, text: "Current stem.", visualKinds: [], hadSealedContent: true }],
+      savedChunks: [{
+        page: 1, slideLabel: null, startMs: null, endMs: null,
+        text: "Old stem.\n1.1 x = 3" + vision, imageObjectKey: "vision/old",
+      }],
+    });
+    expect(publishedChunks[0]?.text).toBe(vision ? "[原生提取]\nCurrent stem." + vision : "Current stem.");
+    expect(publishedChunks[0]?.imageObjectKey).toBeNull();
   });
 
   it("Round-6 [P1-2]: parses production Vision wrappers, redacts sealed descriptions/images, and keeps clean diagrams", async () => {

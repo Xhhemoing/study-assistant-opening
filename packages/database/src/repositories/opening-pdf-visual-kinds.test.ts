@@ -11,13 +11,16 @@ it("rejects untrusted visual classifications rather than skipping visual extract
 it("preserves optional sectionSealedAtEnd metadata and rejects non-boolean values", () => {
   const sealedPage = { page: 1, text: "Public theorem.", imagePath: null, visualKinds: [], sectionSealedAtEnd: true, hadSealedContent: true };
   expect(validatePdfSegmentPages([sealedPage], 1, 1)).toEqual([sealedPage]);
-  const inlineSealedPage = { page: 1, text: "Public stem.", imagePath: null, visualKinds: ["picture"], hadSealedContent: true };
+  const inlineSealedPage = { page: 1, text: "Public stem.", imagePath: null, visualKinds: ["picture"], inlineSealedAtEnd: true, hadSealedContent: true };
   expect(validatePdfSegmentPages([inlineSealedPage], 1, 1)).toEqual([inlineSealedPage]);
   const plainPage = { page: 1, text: "Public theorem.", imagePath: null };
   expect(validatePdfSegmentPages([plainPage], 1, 1)).toEqual([plainPage]);
   const validatedPlain = validatePdfSegmentPages([plainPage], 1, 1)[0]!;
   expect("sectionSealedAtEnd" in validatedPlain).toBe(false);
+  expect("inlineSealedAtEnd" in validatedPlain).toBe(false);
   expect("hadSealedContent" in validatedPlain).toBe(false);
   expect(() => validatePdfSegmentPages([{ page: 1, text: "x", imagePath: null, sectionSealedAtEnd: "yes" }], 1, 1)).toThrow();
+  expect(() => validatePdfSegmentPages([{ page: 1, text: "x", imagePath: null, inlineSealedAtEnd: "yes" }], 1, 1)).toThrow();
+  expect(() => validatePdfSegmentPages([{ ...inlineSealedPage, sectionSealedAtEnd: true }], 1, 1)).toThrow();
   expect(() => validatePdfSegmentPages([{ page: 1, text: "x", imagePath: null, hadSealedContent: "yes" }], 1, 1)).toThrow();
 });

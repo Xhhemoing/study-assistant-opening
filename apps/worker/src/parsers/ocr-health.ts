@@ -29,6 +29,6 @@ export async function probeParserOcr(
 /** A version, not a file hash: models are pinned, and file content is source-versioned.
  * Bump when extraction semantics/models change. Never reuse non-OCR output for OCR. */
 export function pdfParserProfile(env: NodeJS.ProcessEnv = process.env): string {
-  // v8 includes page furniture in reading order and requires public boundaries on mixed pages.
-  return `docling-2.126.0/pdf-segments-v8-discourse/${env.PARSER_OCR_MODEL_DIR?.trim() ? "rapidocr-3.9.2-torch-ppocrv4" : "text"}`;
+  // v9 carries native seal state between segments and rebuilds contaminated cached chunks.
+  return `docling-2.126.0/pdf-segments-v9-discourse/${env.PARSER_OCR_MODEL_DIR?.trim() ? "rapidocr-3.9.2-torch-ppocrv4" : "text"}`;
 }

@@ -52,7 +52,7 @@ _VISUAL_CAPTION_REF_RE = re.compile(r"^(?:Figure|Fig\.?|Chart|Diagram|Scheme|图
 # avoid matching lowercase wrapped prose like "solution." or bare chemistry "Solutions").
 _SECTION_SEALED_RE = re.compile(
     r"^(?:"
-    r"(?:(?:Appendix\s+[A-Z0-9]+|APPENDIX\s+[A-Z0-9]+|Chapter\s+\d+|CHAPTER\s+\d+|Section\s+\d+(?:\.\d+)*|SECTION\s+\d+(?:\.\d+)*|Lecture\s+(?:\d+|[IVXLCDM]+)|LECTURE\s+(?:\d+|[IVXLCDM]+)|第\s*[一二三四五六七八九十百千\d]+\s*[章节篇部讲]|附录\s*[A-Z0-9一二三四五六七八九十]+)\s*[:：.\-—]?\s*)?"
+    r"(?:(?:Appendix\s+[A-Z0-9]+|APPENDIX\s+[A-Z0-9]+|Chapter\s+\d+|CHAPTER\s+\d+|Section\s+\d+(?:\.\d+)*|SECTION\s+\d+(?:\.\d+)*|Lecture\s+(?:\d+|[IVXLCDM]+)|LECTURE\s+(?:\d+|[IVXLCDM]+)|第\s*[一二三四五六七八九十百千\d]+\s*(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课])|附录\s*[A-Z0-9一二三四五六七八九十]+)\s*[:：.\-—]?\s*)?"
     r"(?:(?:Answer\s+Key|ANSWER\s+KEY|Answers?\s+Key|ANSWERS?\s+KEY|Key\s+(?:to|TO)\s+(?:the\s+|THE\s+)?(?:Exercises|EXERCISES|Problems|PROBLEMS|Questions|QUESTIONS))(?:\s*\(\s*(?:continued|cont\.?|CONTD?\.?|CONTINUED)\s*\))?\s*(?:[:：]|$)"
     r"|(?:Answers?|ANSWERS?|Solutions?|SOLUTIONS?)\s+(?:to|TO)\s+(?:(?:Selected|SELECTED|Odd-Numbered|ODD-NUMBERED|Even-Numbered|EVEN-NUMBERED|All|ALL|the|THE|Chapter\s+\d+|CHAPTER\s+\d+|Section\s+\d+(?:\.\d+)*|SECTION\s+\d+(?:\.\d+)*)\s+)*(?:Exercises?|EXERCISES?|Problems?|PROBLEMS?|Questions?|QUESTIONS?|Review\s+Questions?|REVIEW\s+QUESTIONS?|Practice\s+Problems?|PRACTICE\s+PROBLEMS?|Self-Check\s+Exercises?|SELF-CHECK\s+EXERCISES?|Chapter\s+\d+|CHAPTER\s+\d+|Section\s+\d+(?:\.\d+)*|SECTION\s+\d+(?:\.\d+)*)(?:\s*\(\s*(?:continued|cont\.?|CONTD?\.?|CONTINUED)\s*\))?\s*(?:[:：]|$)"
     r"|(?:Selected\s+Answers?|SELECTED\s+ANSWERS?|Model\s+Answers?|MODEL\s+ANSWERS?|Official\s+Solutions?|OFFICIAL\s+SOLUTIONS?|Reference\s+Solutions?|REFERENCE\s+SOLUTIONS?|Answer\s+Section|ANSWER\s+SECTION|Solutions?\s+Manual|SOLUTIONS?\s+MANUAL|Answers?\s+(?:and|AND)\s+Solutions?|ANSWERS?\s+(?:and|AND)\s+SOLUTIONS?|Odd-Numbered\s+Answers?|ODD-NUMBERED\s+ANSWERS?|Even-Numbered\s+Answers?|EVEN-NUMBERED\s+ANSWERS?)(?:\s*\(\s*(?:continued|cont\.?|CONTD?\.?|CONTINUED)\s*\))?\s*(?:[:：]|$)"
@@ -61,12 +61,12 @@ _SECTION_SEALED_RE = re.compile(
     r"|(?:参考答案与解析|参考答案|标准答案|课后习题答案|课后练习答案|课后答案|课后解答|习题答案|习题解答|练习答案|练习解答|思考题答案|部分习题答案|答案与解析|参考解答|详细解答)(?:\s*(?:（续）|\(续\)|（接上页）|\(接上页\)))?\s*(?:[:：]|$)"
     r"|(?:习题\s*)?(?:答案|解答)(?:\s*(?:（续）|\(续\)|（接上页）|\(接上页\)))?\s*(?:[:：]|$)"
     r")"
-    r"|(?:Appendix\s+[A-Z0-9]+|APPENDIX\s+[A-Z0-9]+|Chapter\s+\d+|CHAPTER\s+\d+|Section\s+\d+(?:\.\d+)*|SECTION\s+\d+(?:\.\d+)*|Lecture\s+(?:\d+|[IVXLCDM]+)|LECTURE\s+(?:\d+|[IVXLCDM]+)|第\s*[一二三四五六七八九十百千\d]+\s*[章节篇部讲]|附录\s*[A-Z0-9一二三四五六七八九十]+)(?:\s*[:：.\-—]\s*|\s+)(?:Solutions|SOLUTIONS)(?:\s*\(\s*(?:continued|cont\.?|CONTD?\.?|CONTINUED)\s*\))?\s*(?:[:：]|$)"
+    r"|(?:Appendix\s+[A-Z0-9]+|APPENDIX\s+[A-Z0-9]+|Chapter\s+\d+|CHAPTER\s+\d+|Section\s+\d+(?:\.\d+)*|SECTION\s+\d+(?:\.\d+)*|Lecture\s+(?:\d+|[IVXLCDM]+)|LECTURE\s+(?:\d+|[IVXLCDM]+)|第\s*[一二三四五六七八九十百千\d]+\s*(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课])|附录\s*[A-Z0-9一二三四五六七八九十]+)(?:\s*[:：.\-—]\s*|\s+)(?:Solutions|SOLUTIONS)(?:\s*\(\s*(?:continued|cont\.?|CONTD?\.?|CONTINUED)\s*\))?\s*(?:[:：]|$)"
     r")"
 )
 _INLINE_WITH_BODY_CHECK_RE = re.compile(r"[:：]\s*\S")
 _QUALIFIED_MULTI_SECTION_RE = re.compile(
-    r"^(?:(?:(?:Appendix\s+[A-Z0-9]+|APPENDIX\s+[A-Z0-9]+|Chapter\s+\d+|CHAPTER\s+\d+|Section\s+\d+(?:\.\d+)*|SECTION\s+\d+(?:\.\d+)*|Lecture\s+(?:\d+|[IVXLCDM]+)|LECTURE\s+(?:\d+|[IVXLCDM]+)|附录\s*[A-Z0-9一二三四五六七八九十]+|第\s*[一二三四五六七八九十百千\d]+\s*[章节篇部讲])\s*[:：.\-—]?\s*)?"
+    r"^(?:(?:(?:Appendix\s+[A-Z0-9]+|APPENDIX\s+[A-Z0-9]+|Chapter\s+\d+|CHAPTER\s+\d+|Section\s+\d+(?:\.\d+)*|SECTION\s+\d+(?:\.\d+)*|Lecture\s+(?:\d+|[IVXLCDM]+)|LECTURE\s+(?:\d+|[IVXLCDM]+)|附录\s*[A-Z0-9一二三四五六七八九十]+|第\s*[一二三四五六七八九十百千\d]+\s*(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课]))\s*[:：.\-—]?\s*)?"
     r"(?:Answers?\s+(?:to|TO)\s+|ANSWERS?\s+(?:to|TO)\s+|Selected\s+Answers?|SELECTED\s+ANSWERS?|Model\s+Answers?|MODEL\s+ANSWERS?|"
     r"Official\s+Solutions?|OFFICIAL\s+SOLUTIONS?|Reference\s+Solutions?|REFERENCE\s+SOLUTIONS?|"
     r"Solutions?\s+(?:to|TO)\s+|SOLUTIONS?\s+(?:to|TO)\s+|Solutions?\s+Manual|SOLUTIONS?\s+MANUAL|"
@@ -74,7 +74,7 @@ _QUALIFIED_MULTI_SECTION_RE = re.compile(
     r"Answers?\s+(?:and|AND)\s+Solutions?|ANSWERS?\s+AND\s+SOLUTIONS?|"
     r"Odd-Numbered\s+Answers?|ODD-NUMBERED\s+ANSWERS?|Even-Numbered\s+Answers?|EVEN-NUMBERED\s+ANSWERS?|"
     r"参考答案与解析|答案与解析|课后习题答案|课后练习答案|课后答案|课后解答|练习答案|练习解答|习题答案|习题解答|思考题答案|部分习题答案)"
-    r"|(?:Appendix\s+[A-Z0-9]+|APPENDIX\s+[A-Z0-9]+|Chapter\s+\d+|CHAPTER\s+\d+|Section\s+\d+(?:\.\d+)*|SECTION\s+\d+(?:\.\d+)*|Lecture\s+(?:\d+|[IVXLCDM]+)|LECTURE\s+(?:\d+|[IVXLCDM]+)|附录\s*[A-Z0-9一二三四五六七八九十]+|第\s*[一二三四五六七八九十百千\d]+\s*[章节篇部讲])\s*[:：.\-—]\s*"
+    r"|(?:Appendix\s+[A-Z0-9]+|APPENDIX\s+[A-Z0-9]+|Chapter\s+\d+|CHAPTER\s+\d+|Section\s+\d+(?:\.\d+)*|SECTION\s+\d+(?:\.\d+)*|Lecture\s+(?:\d+|[IVXLCDM]+)|LECTURE\s+(?:\d+|[IVXLCDM]+)|附录\s*[A-Z0-9一二三四五六七八九十]+|第\s*[一二三四五六七八九十百千\d]+\s*(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课]))\s*[:：.\-—]\s*"
     r"(?:Answer\s+Key|ANSWER\s+KEY|Answers?\s+Key|ANSWERS?\s+KEY|Answers|ANSWERS|Solutions|SOLUTIONS|参考答案|标准答案|参考解答|详细解答|答案|解答)"
     r"(?:\s*\(\s*(?:continued|cont\.?|CONTD?\.?|CONTINUED)\s*\))?\s*[:：]?$)"
 )
@@ -156,20 +156,23 @@ _EXERCISE_RE = re.compile(
 )
 _SECTION_BREAK_RE = re.compile(
     r"^(?:"
-    r"(?:Chapter|Section|Part)\s+(?:\d+(?:\.\d+)*|[IVXLCDM]+)(?:\b|$)"
+    r"(?:Chapter|Section|Part|Unit)\s+(?:\d+(?:\.\d+)*|[IVXLCDM]+)(?:\b|$)"
     r"|(?:Appendix\s+[A-Z0-9]+|Lecture\s+(?:\d+|[IVXLCDM]+))(?:\b|$)"
-    r"|第\s*[一二三四五六七八九十百千\d]+\s*[章节篇部分讲]"
+    r"|第\s*[一二三四五六七八九十百千\d]+\s*(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课])"
     r"|附录\s*[A-Z0-9一二三四五六七八九十]+(?:\s*[:：.\-—]|$|\s+\S)"
     r"|\d+(?:\.\d+)+\s+\S"
     r")",
     re.IGNORECASE,
 )
-_TITLED_CHAPTER_RE = re.compile(
-    r"^(?:(?:Chapter|Part|Section|Lecture)\s+(?:\d+(?:\.\d+)*|[IVXLCDM]+)|第\s*[一二三四五六七八九十百千\d]+\s*[章节篇部分讲])(?:\s*[:：.\-—]\s*|\s+)?(?P<title>.*)$",
+_NUMBERED_CONTAINER_PREFIX_RE = re.compile(
+    r"^(?:(?:(?:Chapter|Part|Unit|Lecture)\s+(?:\d+(?:\.\d+)*|[IVXLCDM]+)|Section\s+\d+(?:\.\d+)*)(?=[\s:：.．—–-]|$)"
+    r"|第\s*[一二三四五六七八九十百千\d]+\s*(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课]))",
     re.IGNORECASE,
 )
 _ANSWER_TITLE_WORD_RE = re.compile(
-    r"(?:Answer|Solution|Exercise|Problem|Review|Practice|Question|Quiz|Drill|答案|解答|习题|练习题?|思考题|复习题|自测题)",
+    r"\b(?:Answers?|Solutions?|Exercises?|Problems?|Questions?|Review|Practice|Quiz|Drills?|Self-Check"
+    r"|Homework|Assignments?|Problem\s*Sets?|Worksheets?|Tutorials?|Recitations?|Labs?)\b"
+    r"|答案|解答|习题|练习|思考题|复习题|自测题|作业|课后题|单元测试",
     re.IGNORECASE,
 )
 _TEXTBOOK_NON_ANSWER_HEADING_RE = re.compile(
@@ -250,6 +253,7 @@ class PhysicalPagesExtraction:
     discourse_blocks_by_page: dict[int, list[DiscourseBlock]]
     visual_kinds_by_page: dict[int, list[str]]
     section_sealed_by_page: dict[int, bool] = field(default_factory=dict)
+    inline_sealed_by_page: dict[int, bool] = field(default_factory=dict)
     had_sealed_by_page: dict[int, bool] = field(default_factory=dict)
 
 
@@ -441,13 +445,17 @@ def _strip_heading_markup(line_text: str) -> str:
 
 
 def _is_titled_non_answer_chapter(stripped: str) -> bool:
-    m = _TITLED_CHAPTER_RE.match(stripped)
+    m = _NUMBERED_CONTAINER_PREFIX_RE.match(stripped)
     if not m:
         return False
-    title = m.group("title").strip()
-    if not title or re.fullmatch(r"[\d.\-:：—]+", title):
+    title = re.sub(r"^[\s:：.．—–-]+", "", stripped[m.end():])
+    if not any(char.isalpha() for char in title) or _ANSWER_TITLE_WORD_RE.search(title):
         return False
-    return not _ANSWER_TITLE_WORD_RE.search(title)
+    if re.match(r"^(?:\*\*|__)?(?:Key\b|\(?cont|\(?续)", title, re.IGNORECASE):
+        return False
+    return not m[0].lower().startswith("section ") or bool(
+        re.match(r"^(?:\*\*|__)?(?!(?:is|are|was|see)\b)[A-Za-z\u4e00-\u9fff]", title, re.IGNORECASE)
+    )
 
 
 def _is_section_sealed_exit(stripped: str, frag_label: str | None, is_markdown_heading: bool) -> bool:
@@ -590,13 +598,13 @@ def _iter_page_units(fragments: list[tuple[str, str | None]]):
             offset += 1  # '\n' joiner
 
 
-def _build_page_blocks(page_number: int, fragments: list[tuple[str, str | None]], page_visuals: set[str], *, initial_in_worked_example: bool = False):
+def _build_page_blocks(page_number: int, fragments: list[tuple[str, str | None]], page_visuals: set[str], *, initial_in_worked_example: bool = False, initial_seal_mode: str | None = None):
     page_text = "\n".join(text for text, _ in fragments)
     blocks = []
     # Track tuple entries: (block_index, is_furniture, explicit_opener, seal_mode, is_section_exit)
     entries = []
     current = None  # [kind, start, end, visual_kind, caption_ref, is_furniture, explicit_opener, seal_mode, is_section_exit]
-    page_seal_mode: str | None = None
+    page_seal_mode = initial_seal_mode
     in_worked_example = initial_in_worked_example
 
     def flush():
@@ -627,14 +635,14 @@ def _build_page_blocks(page_number: int, fragments: list[tuple[str, str | None]]
 
     for unit_start, unit_end, unit_text, frag_label, is_frag_start in _iter_page_units(fragments):
         if not unit_text.strip():
-            if is_frag_start:
+            if current is not None and current[7] == "inline_sealed":
+                flush()
+                page_seal_mode = None
+            elif is_frag_start:
                 # Empty fragments are omitted from sealed public_texts; do not merge blocks across them.
                 flush()
             elif current is not None and current[0] == "figure_caption":
                 flush()
-            elif current is not None and current[7] == "inline_sealed":
-                flush()
-                page_seal_mode = None
             continue
 
         is_furniture = frag_label in _FURNITURE_LABELS
@@ -661,72 +669,47 @@ def _build_page_blocks(page_number: int, fragments: list[tuple[str, str | None]]
             in_worked_example = kind == "worked_example"
             page_seal_mode = seal_kind
 
-        if current is None:
+        if current is None or explicit_opener or section_break:
+            flush()
+            if active_seal == "inline_sealed" and not (explicit_opener or section_break):
+                kind, seal_kind = "solution_sealed", "inline_sealed"
             current = [kind, unit_start, unit_end, assoc_visual, cap_ref, False, explicit_opener, seal_kind, major_non_answer]
-            continue
-
-        prev_kind = current[0]
-        prev_seal = current[7]
-        prev_text = page_text[current[1]:current[2]]
-
-        if prev_seal == "section_sealed" and not (explicit_opener or section_break):
+        elif current[0] == "figure_caption" or (
+            current[0] == "proof" and _PROOF_TERMINATOR_RE.search(page_text[current[1]:current[2]])
+        ):
+            flush()
+            current = [kind, unit_start, unit_end, assoc_visual, cap_ref, False, explicit_opener, seal_kind, major_non_answer]
+        else:
+            # Unmarked lines, tables and formulas continue the active block.
             current[2] = unit_end
-            if _SECTION_SEALED_TERMINATOR_RE.search(unit_text):
-                flush()
-                page_seal_mode = None
-            continue
-
-        if explicit_opener or section_break:
-            flush()
-            current = [kind, unit_start, unit_end, assoc_visual, cap_ref, False, explicit_opener, seal_kind, major_non_answer]
-            continue
-
-        # Continuation within the same page under an open block.
-        if prev_kind == "figure_caption":
-            flush()
-            current = [kind, unit_start, unit_end, assoc_visual, cap_ref, False, explicit_opener, seal_kind, major_non_answer]
-            continue
-        if prev_kind == "proof" and _PROOF_TERMINATOR_RE.search(prev_text):
-            flush()
-            current = [kind, unit_start, unit_end, assoc_visual, cap_ref, False, explicit_opener, seal_kind, major_non_answer]
-            continue
-        if prev_seal == "inline_sealed" and _INLINE_SEALED_TERMINATOR_RE.search(prev_text):
-            flush()
-            page_seal_mode = None
-            current = [kind, unit_start, unit_end, assoc_visual, cap_ref, False, explicit_opener, seal_kind, major_non_answer]
-            continue
-
-        # Merge unmarked continuation line/table/formula into the active block.
-        current[2] = unit_end
-        if prev_seal == "inline_sealed" and _INLINE_SEALED_TERMINATOR_RE.search(unit_text):
+        active_seal = current[7]
+        if (
+            active_seal == "section_sealed" and _SECTION_SEALED_TERMINATOR_RE.search(unit_text)
+        ) or (
+            active_seal == "inline_sealed" and _INLINE_SEALED_TERMINATOR_RE.search(unit_text)
+        ):
             flush()
             page_seal_mode = None
 
     flush()
-    return page_text, blocks, entries, in_worked_example
+    substantive = [entry for entry in entries if not entry[1]]
+    if substantive:
+        first_idx, _, explicit, first_seal, _ = substantive[0]
+        if initial_seal_mode is not None and first_seal == initial_seal_mode and not explicit:
+            blocks[first_idx] = replace(blocks[first_idx], continued_from_prev_page=True)
+        last_text = blocks[substantive[-1][0]].text
+        if page_seal_mode == "inline_sealed" and _TERMINAL_PUNCTUATION_RE.search(last_text) and not _NEXT_CONTINUATION_RE.search(last_text):
+            page_seal_mode = None
+    return blocks, entries, in_worked_example, page_seal_mode
 
-
-def _is_next_page_section_exit(block: DiscourseBlock) -> bool:
-    raw_trimmed = block.text.strip()
-    is_markdown_heading = bool(_MD_HEADING_LINE_RE.match(raw_trimmed))
-    first_line = raw_trimmed.splitlines()[0] if raw_trimmed else ""
-    stripped = _strip_heading_markup(first_line)
-    return _is_section_sealed_exit(stripped, None, is_markdown_heading)
-
-
-def _apply_cross_page_continuations(page_order, blocks_by_page, entries_by_page):
+def _apply_cross_page_continuations(page_order, blocks_by_page, entries_by_page, end_seals):
     for index, page_number in enumerate(page_order):
         blocks = blocks_by_page[page_number]
         entries = entries_by_page[page_number]
-        substantive = [(idx, seal_mode) for idx, is_furniture, _explicit, seal_mode, _exit in entries if not is_furniture]
+        substantive = [idx for idx, is_furniture, _explicit, _seal_mode, _exit in entries if not is_furniture]
         if not substantive:
-            # Check if furniture activated section_sealed for this page even with no body blocks.
-            furniture_sealed = any(seal_mode == "section_sealed" for _idx, is_furniture, _exp, seal_mode, _exit in entries if is_furniture)
-            if furniture_sealed and index + 1 < len(page_order) and page_order[index + 1] == page_number + 1:
-                next_page = page_order[index + 1]
-                _propagate_section_seal_to_page(blocks_by_page[next_page], entries_by_page[next_page])
             continue
-        last_idx, last_seal_mode = substantive[-1]
+        last_idx = substantive[-1]
         last_block = blocks[last_idx]
         explicit_next = bool(_NEXT_CONTINUATION_RE.search(last_block.text)) or (
             last_block.kind == "narrative" and last_block.text.endswith(("-", "\u00ad"))
@@ -734,17 +717,11 @@ def _apply_cross_page_continuations(page_order, blocks_by_page, entries_by_page)
         mid_sentence = not _TERMINAL_PUNCTUATION_RE.search(last_block.text)
         has_next_adjacent = index + 1 < len(page_order) and page_order[index + 1] == page_number + 1
 
-        sealed_closed = (
-            last_seal_mode == "section_sealed" and bool(_SECTION_SEALED_TERMINATOR_RE.search(last_block.text))
-        ) or (
-            last_seal_mode == "inline_sealed" and bool(_INLINE_SEALED_TERMINATOR_RE.search(last_block.text))
-        )
-
         if not has_next_adjacent:
             if explicit_next or (
                 last_block.kind == "proof" and not _PROOF_TERMINATOR_RE.search(last_block.text)
             ) or (
-                last_block.kind == "solution_sealed" and not sealed_closed and (last_seal_mode == "section_sealed" or mid_sentence)
+                last_block.kind == "solution_sealed" and end_seals[page_number] is not None
             ) or (
                 last_block.kind in _CONTINUABLE_KINDS and last_block.kind not in ("proof", "solution_sealed") and mid_sentence
             ):
@@ -754,14 +731,20 @@ def _apply_cross_page_continuations(page_order, blocks_by_page, entries_by_page)
         next_page = page_order[index + 1]
         next_blocks = blocks_by_page[next_page]
         next_entries = entries_by_page[next_page]
-        next_substantive = [(idx, explicit, section_exit) for idx, is_furniture, explicit, _seal, section_exit in next_entries if not is_furniture]
+        next_substantive = [(idx, explicit) for idx, is_furniture, explicit, _seal, _exit in next_entries if not is_furniture]
         if not next_substantive:
             continue
 
-        first_idx, first_explicit, first_section_exit = next_substantive[0]
+        first_idx, first_explicit = next_substantive[0]
         first_block = next_blocks[first_idx]
-        prev_block = blocks[last_idx]
-        exits_section_seal = first_section_exit or _is_next_page_section_exit(first_block)
+        prev_block = last_block
+
+        if prev_block.kind == "solution_sealed":
+            if end_seals[page_number] is not None and first_block.kind == "solution_sealed" and first_block.continued_from_prev_page:
+                blocks[last_idx] = replace(prev_block, continues_on_next_page=True)
+            continue
+        if first_block.kind == "solution_sealed":
+            continue
 
         continues = explicit_next or first_block.continued_from_prev_page
         inherit_kind = False
@@ -771,14 +754,6 @@ def _apply_cross_page_continuations(page_order, blocks_by_page, entries_by_page)
                 if not first_explicit or (first_block.kind == "proof" and first_block.continued_from_prev_page):
                     continues = True
                     inherit_kind = not first_explicit
-            elif prev_block.kind == "solution_sealed" and not sealed_closed:
-                if last_seal_mode == "section_sealed":
-                    if not exits_section_seal:
-                        continues = True
-                        inherit_kind = True
-                elif not first_explicit and mid_sentence:
-                    continues = True
-                    inherit_kind = True
             elif prev_block.kind in ("definition", "theorem", "worked_example", "exercise") and mid_sentence and not first_explicit:
                 continues = True
                 inherit_kind = True
@@ -787,9 +762,7 @@ def _apply_cross_page_continuations(page_order, blocks_by_page, entries_by_page)
 
         if continues:
             blocks[last_idx] = replace(prev_block, continues_on_next_page=True)
-            if last_seal_mode == "section_sealed" and prev_block.kind == "solution_sealed" and not exits_section_seal:
-                _propagate_section_seal_to_page(next_blocks, next_entries, mark_first_continued=True)
-            elif inherit_kind or (not first_explicit and prev_block.kind in _CONTINUABLE_KINDS and first_block.kind == "narrative"):
+            if inherit_kind or (not first_explicit and prev_block.kind in _CONTINUABLE_KINDS and first_block.kind == "narrative"):
                 target_kind = prev_block.kind
                 next_blocks[first_idx] = replace(
                     first_block,
@@ -799,27 +772,6 @@ def _apply_cross_page_continuations(page_order, blocks_by_page, entries_by_page)
                 )
             else:
                 next_blocks[first_idx] = replace(first_block, continued_from_prev_page=True)
-
-
-def _propagate_section_seal_to_page(next_blocks, next_entries, *, mark_first_continued: bool = False):
-    first_marked = False
-    for i, entry in enumerate(next_entries):
-        idx, is_furniture, _explicit, _seal_mode, section_exit = entry
-        if is_furniture:
-            continue
-        block = next_blocks[idx]
-        if section_exit or _is_next_page_section_exit(block):
-            break
-        next_blocks[idx] = replace(
-            block,
-            kind="solution_sealed",
-            visibility_hint="sealed",
-            continued_from_prev_page=block.continued_from_prev_page or (mark_first_continued and not first_marked),
-        )
-        next_entries[i] = (idx, is_furniture, False, "section_sealed", section_exit)
-        first_marked = True
-        if _SECTION_SEALED_TERMINATOR_RE.search(block.text):
-            break
 
 
 def _filter_fragments_by_visibility(fragments: list[tuple[str, str | None]], blocks: list[DiscourseBlock], *, sealed_only: bool) -> list[str]:
@@ -939,42 +891,31 @@ def _seal_furniture_on_all_sealed_page(blocks: list[DiscourseBlock], entries: li
     return updated
 
 
-def _compute_section_sealed_by_page(page_order, blocks_by_page, entries_by_page) -> dict[int, bool]:
-    result: dict[int, bool] = {}
-    for page_number in page_order:
-        blocks = blocks_by_page[page_number]
-        sealed = False
-        for idx, is_furniture, _explicit, seal_mode, _section_exit in entries_by_page[page_number]:
-            block = blocks[idx]
-            if seal_mode == "section_sealed" and not _SECTION_SEALED_TERMINATOR_RE.search(block.text):
-                sealed = True
-            elif not is_furniture:
-                sealed = False
-        result[page_number] = sealed
-    return result
-
-
-def extract_physical_pages(conversion, *, include_sealed: bool = False) -> PhysicalPagesExtraction:
+def extract_physical_pages(conversion, *, include_sealed: bool = False, initial_seal_mode: str | None = None) -> PhysicalPagesExtraction:
     page_order, raw_fragments, visual_sets = _collect_page_fragments(conversion)
     blocks_by_page: dict[int, list[DiscourseBlock]] = {}
     entries_by_page = {}
+    end_seals: dict[int, str | None] = {}
+    seal_mode = initial_seal_mode
     in_worked_example = False
     prev_page_number: int | None = None
     for page_number in page_order:
         if prev_page_number is not None and page_number != prev_page_number + 1:
             in_worked_example = False
-        _page_text, blocks, entries, in_worked_example = _build_page_blocks(
+            seal_mode = None
+        blocks, entries, in_worked_example, seal_mode = _build_page_blocks(
             page_number,
             raw_fragments[page_number],
             visual_sets.get(page_number, set()),
             initial_in_worked_example=in_worked_example,
+            initial_seal_mode=seal_mode,
         )
         blocks_by_page[page_number] = blocks
         entries_by_page[page_number] = entries
+        end_seals[page_number] = seal_mode
         prev_page_number = page_number
 
-    _apply_cross_page_continuations(page_order, blocks_by_page, entries_by_page)
-    section_sealed_by_page = _compute_section_sealed_by_page(page_order, blocks_by_page, entries_by_page)
+    _apply_cross_page_continuations(page_order, blocks_by_page, entries_by_page, end_seals)
 
     raw_texts = {p: [t for t, _ in raw_fragments[p]] for p in page_order}
     public_texts: dict[int, list[str]] = {}
@@ -1003,7 +944,8 @@ def extract_physical_pages(conversion, *, include_sealed: bool = False) -> Physi
         sealed_texts_by_page=sealed_texts,
         discourse_blocks_by_page=blocks_by_page,
         visual_kinds_by_page=visuals,
-        section_sealed_by_page=section_sealed_by_page,
+        section_sealed_by_page={page: mode == "section_sealed" for page, mode in end_seals.items()},
+        inline_sealed_by_page={page: mode == "inline_sealed" for page, mode in end_seals.items()},
         had_sealed_by_page=had_sealed_by_page,
     )
 

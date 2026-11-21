@@ -1,7 +1,7 @@
 import { validatePdfSegmentPages, type OpeningPdfSegmentsRepository, type OpeningScope, type PdfSegmentPage } from "@aistudy/database";
 import { BoundsExceededError, ConversionFailedError, UnsupportedMimeError, UsageError, createDoclingProcess } from "./docling-process";
 import { pdfParserProfile } from "./ocr-health";
-import type { ParserRunner } from "./types";
+import type { ParsedPage, ParserRunner, PdfSealMode } from "./types";
 
 export const DEFAULT_PDF_SEGMENT_PAGES = 10;
 export const DEFAULT_PDF_SEGMENT_TIMEOUT_SECONDS = 240;
@@ -49,6 +49,11 @@ export type PdfSegmentBatch = {
 
 export type PdfSegmentParseResult = { pageCount: number; failedRanges: string[] };
 
+export function pdfPageEndSeal(page: Pick<ParsedPage, "sectionSealedAtEnd" | "inlineSealedAtEnd"> | undefined): PdfSealMode | undefined {
+  if (page?.sectionSealedAtEnd) return "section_sealed";
+  if (page?.inlineSealedAtEnd) return "inline_sealed";
+}
+
 function parseInspectOutput(stdout: string): { pageCount?: unknown } {
   const start = stdout.indexOf("{");
   return JSON.parse(start < 0 ? stdout : stdout.slice(start)) as { pageCount?: unknown };
@@ -84,7 +89,7 @@ export async function watchPdfExecution(assertCurrent: () => Promise<void>, poll
 export async function parsePdfSegments(input: {
   path: string; sourceId: string; sourceVersion: number; scope: OpeningScope;
   runner: ParserRunner; segments?: OpeningPdfSegmentsRepository; signal: AbortSignal;
-  onPages?: (pages: PdfSegmentPage[]) => void | Promise<void>;
+  onPages?: (pages: PdfSegmentPage[], initialSealMode?: PdfSealMode) => void | Promise<void>;
   onSegment?: (segment: PdfSegmentBatch) => void | Promise<void>;
   segmentPages?: number; timeoutSeconds?: number; parserProfile?: string;
   maxPages?: number; maxSegmentBytes?: number; maxPageTextBytes?: number; maxBookBytes?: number;
@@ -148,14 +153,17 @@ export async function parsePdfSegments(input: {
     return { pages, segmentBytes, segmentTextBytes };
   };
 
-  const emitSegment = async (pageStart: number, pageEnd: number, pages: PdfSegmentPage[], cached: boolean, segmentBytes: number) => {
-    await input.onSegment?.({ pageStart, pageEnd, pages, cached, segmentBytes });
-    await input.onPages?.(pages);
-  };
-
   // Enforce the 8 MiB serialized payload cap per individual segment while streaming
   // segments sequentially so 500-2,000 page books stay bounded in worker memory.
+  const parserProfile = input.parserProfile ?? pdfParserProfile();
+  let initialSealMode: PdfSealMode | undefined;
   let parsedPageCount = 0;
+  const emitSegment = async (pageStart: number, pageEnd: number, pages: PdfSegmentPage[], cached: boolean, segmentBytes: number) => {
+    const nextSealMode = pdfPageEndSeal(pages.at(-1));
+    await input.onSegment?.({ pageStart, pageEnd, pages, cached, segmentBytes });
+    await input.onPages?.(pages, initialSealMode);
+    initialSealMode = nextSealMode;
+  };
   const failed: string[] = [];
   for (let start = 1; start <= pageCount; start += size) {
     input.signal.throwIfAborted();
@@ -163,7 +171,9 @@ export async function parsePdfSegments(input: {
     const identity = {
       sourceId: input.sourceId,
       sourceVersion: input.sourceVersion,
-      parserProfile: input.parserProfile ?? pdfParserProfile(),
+      // A recovered predecessor can change the text and ending state of a
+      // previously cached range, even when the source version is unchanged.
+      parserProfile: initialSealMode ? parserProfile + "/from-" + initialSealMode : parserProfile,
       pageStart: start,
       pageEnd: end,
     };
@@ -188,6 +198,7 @@ export async function parsePdfSegments(input: {
           pageStart: start,
           pageEnd: end,
           timeoutSeconds,
+          initialSealMode,
         }, input.signal);
         parsed = validateSegment(rawPages, start, end);
       } catch (caught) {

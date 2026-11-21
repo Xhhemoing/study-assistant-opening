@@ -11,11 +11,11 @@ import type { OpeningSourceRepository } from "@aistudy/database";
 import { createDoclingProcess, UnsupportedMimeError, ConversionFailedError } from "../parsers/docling-process";
 import { markdownChunks } from "./markdown-chunks";
 import { htmlChunks } from "./html-chunks";
-import type { ParserRunner, ParsedPage, VisualPageKind } from "../parsers/types";
+import type { ParserRunner, ParsedPage, PdfSealMode, VisualPageKind } from "../parsers/types";
 import type { OpeningScope } from "@aistudy/database";
 import type { NewSourceChunk, OpeningPdfChunkPublisher, OpeningSourceChunksRepository } from "@aistudy/database";
 import type { OpeningPdfSegmentsRepository } from "@aistudy/database";
-import { parsePdfSegments, watchPdfExecution, type PdfDiscourseBlock } from "../parsers/pdf-segments";
+import { parsePdfSegments, pdfPageEndSeal, watchPdfExecution, type PdfDiscourseBlock } from "../parsers/pdf-segments";
 import { checkPdfPageQuality } from "../parsers/pdf-page-quality";
 import { createPdfPartialError } from "./pdf-partial-error";
 
@@ -31,7 +31,7 @@ type AnnotatedParsedPage = ParsedPage & {
 };
 
 export type SealState = {
-  mode: "none" | "section_sealed" | "inline_sealed";
+  mode: "none" | PdfSealMode;
   inWorkedExample: boolean;
   afterAllSealedPage: boolean;
 };
@@ -51,7 +51,7 @@ function stripHeadingMarkup(line: string): { stripped: string; isMarkdownHeading
 
 const SECTION_SEALED_RE = new RegExp(
   "^(?:" +
-  "(?:(?:Appendix\\s+[A-Z0-9]+|APPENDIX\\s+[A-Z0-9]+|Chapter\\s+\\d+|CHAPTER\\s+\\d+|Section\\s+\\d+(?:\\.\\d+)*|SECTION\\s+\\d+(?:\\.\\d+)*|Lecture\\s+(?:\\d+|[IVXLCDM]+)|LECTURE\\s+(?:\\d+|[IVXLCDM]+)|第\\s*[一二三四五六七八九十百千\\d]+\\s*[章节篇部讲]|附录\\s*[A-Z0-9一二三四五六七八九十]+)\\s*[:：.\\-—]?\\s*)?" +
+  "(?:(?:Appendix\\s+[A-Z0-9]+|APPENDIX\\s+[A-Z0-9]+|Chapter\\s+\\d+|CHAPTER\\s+\\d+|Section\\s+\\d+(?:\\.\\d+)*|SECTION\\s+\\d+(?:\\.\\d+)*|Lecture\\s+(?:\\d+|[IVXLCDM]+)|LECTURE\\s+(?:\\d+|[IVXLCDM]+)|第\\s*[一二三四五六七八九十百千\\d]+\\s*(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课])|附录\\s*[A-Z0-9一二三四五六七八九十]+)\\s*[:：.\\-—]?\\s*)?" +
   "(?:(?:Answer\\s+Key|ANSWER\\s+KEY|Answers?\\s+Key|ANSWERS?\\s+KEY|Key\\s+(?:to|TO)\\s+(?:the\\s+|THE\\s+)?(?:Exercises|EXERCISES|Problems|PROBLEMS|Questions|QUESTIONS))(?:\\s*\\(\\s*(?:continued|cont\\.?|CONTD?\\.?|CONTINUED)\\s*\\))?\\s*(?:[:：]|$)" +
   "|(?:Answers?|ANSWERS?|Solutions?|SOLUTIONS?)\\s+(?:to|TO)\\s+(?:(?:Selected|SELECTED|Odd-Numbered|ODD-NUMBERED|Even-Numbered|EVEN-NUMBERED|All|ALL|the|THE|Chapter\\s+\\d+|CHAPTER\\s+\\d+|Section\\s+\\d+(?:\\.\\d+)*|SECTION\\s+\\d+(?:\\.\\d+)*)\\s+)*(?:Exercises?|EXERCISES?|Problems?|PROBLEMS?|Questions?|QUESTIONS?|Review\\s+Questions?|REVIEW\\s+QUESTIONS?|Practice\\s+Problems?|PRACTICE\\s+PROBLEMS?|Self-Check\\s+Exercises?|SELF-CHECK\\s+EXERCISES?|Chapter\\s+\\d+|CHAPTER\\s+\\d+|Section\\s+\\d+(?:\\.\\d+)*|SECTION\\s+\\d+(?:\\.\\d+)*)(?:\\s*\\(\\s*(?:continued|cont\\.?|CONTD?\\.?|CONTINUED)\\s*\\))?\\s*(?:[:：]|$)" +
   "|(?:Selected\\s+Answers?|SELECTED\\s+ANSWERS?|Model\\s+Answers?|MODEL\\s+ANSWERS?|Official\\s+Solutions?|OFFICIAL\\s+SOLUTIONS?|Reference\\s+Solutions?|REFERENCE\\s+SOLUTIONS?|Answer\\s+Section|ANSWER\\s+SECTION|Solutions?\\s+Manual|SOLUTIONS?\\s+MANUAL|Answers?\\s+(?:and|AND)\\s+Solutions?|ANSWERS?\\s+AND\\s+SOLUTIONS?|Odd-Numbered\\s+Answers?|ODD-NUMBERED\\s+ANSWERS?|Even-Numbered\\s+Answers?|EVEN-NUMBERED\\s+ANSWERS?)(?:\\s*\\(\\s*(?:continued|cont\\.?|CONTD?\\.?|CONTINUED)\\s*\\))?\\s*(?:[:：]|$)" +
@@ -60,12 +60,12 @@ const SECTION_SEALED_RE = new RegExp(
   "|(?:参考答案与解析|参考答案|标准答案|课后习题答案|课后练习答案|课后答案|课后解答|习题答案|习题解答|练习答案|练习解答|思考题答案|部分习题答案|答案与解析|参考解答|详细解答)(?:\\s*(?:（续）|\\(续\\)|（接上页）|\\(接上页\\)))?\\s*(?:[:：]|$)" +
   "|(?:习题\\s*)?(?:答案|解答)(?:\\s*(?:（续）|\\(续\\)|（接上页）|\\(接上页\\)))?\\s*(?:[:：]|$)" +
   ")" +
-  "|(?:Appendix\\s+[A-Z0-9]+|APPENDIX\\s+[A-Z0-9]+|Chapter\\s+\\d+|CHAPTER\\s+\\d+|Section\\s+\\d+(?:\\.\\d+)*|SECTION\\s+\\d+(?:\\.\\d+)*|Lecture\\s+(?:\\d+|[IVXLCDM]+)|LECTURE\\s+(?:\\d+|[IVXLCDM]+)|第\\s*[一二三四五六七八九十百千\\d]+\\s*[章节篇部讲]|附录\\s*[A-Z0-9一二三四五六七八九十]+)(?:\\s*[:：.\\-—]\\s*|\\s+)(?:Solutions|SOLUTIONS)(?:\\s*\\(\\s*(?:continued|cont\\.?|CONTD?\\.?|CONTINUED)\\s*\\))?\\s*(?:[:：]|$)" +
+  "|(?:Appendix\\s+[A-Z0-9]+|APPENDIX\\s+[A-Z0-9]+|Chapter\\s+\\d+|CHAPTER\\s+\\d+|Section\\s+\\d+(?:\\.\\d+)*|SECTION\\s+\\d+(?:\\.\\d+)*|Lecture\\s+(?:\\d+|[IVXLCDM]+)|LECTURE\\s+(?:\\d+|[IVXLCDM]+)|第\\s*[一二三四五六七八九十百千\\d]+\\s*(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课])|附录\\s*[A-Z0-9一二三四五六七八九十]+)(?:\\s*[:：.\\-—]\\s*|\\s+)(?:Solutions|SOLUTIONS)(?:\\s*\\(\\s*(?:continued|cont\\.?|CONTD?\\.?|CONTINUED)\\s*\\))?\\s*(?:[:：]|$)" +
   ")",
   "u",
 );
 const INLINE_WITH_BODY_RE = /[:：]\s*\S/u;
-const QUALIFIED_MULTI_SECTION_RE = /^(?:(?:(?:Appendix\s+[A-Z0-9]+|APPENDIX\s+[A-Z0-9]+|Chapter\s+\d+|CHAPTER\s+\d+|Section\s+\d+(?:\.\d+)*|SECTION\s+\d+(?:\.\d+)*|Lecture\s+(?:\d+|[IVXLCDM]+)|LECTURE\s+(?:\d+|[IVXLCDM]+)|附录\s*[A-Z0-9一二三四五六七八九十]+|第\s*[一二三四五六七八九十百千\d]+\s*[章节篇部讲])\s*[:：.—-]?\s*)?(?:Answers?\s+(?:to|TO)\b|ANSWERS?\s+(?:TO|to)\b|Selected\s+Answers?|SELECTED\s+ANSWERS?|Model\s+Answers?|MODEL\s+ANSWERS?|Official\s+Solutions?|OFFICIAL\s+SOLUTIONS?|Reference\s+Solutions?|REFERENCE\s+SOLUTIONS?|Solutions?\s+(?:to|TO)\b|SOLUTIONS?\s+(?:TO|to)\b|Solutions?\s+Manual|SOLUTIONS?\s+MANUAL|Key\s+(?:to|TO)\b|KEY\s+(?:TO|to)\b|Answers?\s+(?:and|AND)\s+Solutions?|ANSWERS?\s+AND\s+SOLUTIONS?|Odd-Numbered\s+Answers?|ODD-NUMBERED\s+ANSWERS?|Even-Numbered\s+Answers?|EVEN-NUMBERED\s+ANSWERS?|参考答案与解析|答案与解析|课后习题答案|课后练习答案|课后答案|课后解答|练习答案|练习解答|习题答案|习题解答|思考题答案|部分习题答案)|(?:Appendix\s+[A-Z0-9]+|APPENDIX\s+[A-Z0-9]+|Chapter\s+\d+|CHAPTER\s+\d+|Section\s+\d+(?:\.\d+)*|SECTION\s+\d+(?:\.\d+)*|Lecture\s+(?:\d+|[IVXLCDM]+)|LECTURE\s+(?:\d+|[IVXLCDM]+)|附录\s*[A-Z0-9一二三四五六七八九十]+|第\s*[一二三四五六七八九十百千\d]+\s*[章节篇部讲])\s*[:：.—-]\s*(?:Answer\s+Key|ANSWER\s+KEY|Answers?\s+Key|ANSWERS?\s+KEY|Answers|ANSWERS|Solutions|SOLUTIONS|参考答案|标准答案|参考解答|详细解答|答案|解答)(?:\s*\(\s*(?:continued|cont\.?|CONTD?\.?|CONTINUED)\s*\))?\s*[:：]?$)/u;
+const QUALIFIED_MULTI_SECTION_RE = /^(?:(?:(?:Appendix\s+[A-Z0-9]+|APPENDIX\s+[A-Z0-9]+|Chapter\s+\d+|CHAPTER\s+\d+|Section\s+\d+(?:\.\d+)*|SECTION\s+\d+(?:\.\d+)*|Lecture\s+(?:\d+|[IVXLCDM]+)|LECTURE\s+(?:\d+|[IVXLCDM]+)|附录\s*[A-Z0-9一二三四五六七八九十]+|第\s*[一二三四五六七八九十百千\d]+\s*(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课]))\s*[:：.—-]?\s*)?(?:Answers?\s+(?:to|TO)\b|ANSWERS?\s+(?:TO|to)\b|Selected\s+Answers?|SELECTED\s+ANSWERS?|Model\s+Answers?|MODEL\s+ANSWERS?|Official\s+Solutions?|OFFICIAL\s+SOLUTIONS?|Reference\s+Solutions?|REFERENCE\s+SOLUTIONS?|Solutions?\s+(?:to|TO)\b|SOLUTIONS?\s+(?:TO|to)\b|Solutions?\s+Manual|SOLUTIONS?\s+MANUAL|Key\s+(?:to|TO)\b|KEY\s+(?:TO|to)\b|Answers?\s+(?:and|AND)\s+Solutions?|ANSWERS?\s+AND\s+SOLUTIONS?|Odd-Numbered\s+Answers?|ODD-NUMBERED\s+ANSWERS?|Even-Numbered\s+Answers?|EVEN-NUMBERED\s+ANSWERS?|参考答案与解析|答案与解析|课后习题答案|课后练习答案|课后答案|课后解答|练习答案|练习解答|习题答案|习题解答|思考题答案|部分习题答案)|(?:Appendix\s+[A-Z0-9]+|APPENDIX\s+[A-Z0-9]+|Chapter\s+\d+|CHAPTER\s+\d+|Section\s+\d+(?:\.\d+)*|SECTION\s+\d+(?:\.\d+)*|Lecture\s+(?:\d+|[IVXLCDM]+)|LECTURE\s+(?:\d+|[IVXLCDM]+)|附录\s*[A-Z0-9一二三四五六七八九十]+|第\s*[一二三四五六七八九十百千\d]+\s*(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课]))\s*[:：.—-]\s*(?:Answer\s+Key|ANSWER\s+KEY|Answers?\s+Key|ANSWERS?\s+KEY|Answers|ANSWERS|Solutions|SOLUTIONS|参考答案|标准答案|参考解答|详细解答|答案|解答)(?:\s*\(\s*(?:continued|cont\.?|CONTD?\.?|CONTINUED)\s*\))?\s*[:：]?$)/u;
 
 const INLINE_SEALED_ALWAYS_RE = new RegExp(
   "^(?:" +
@@ -88,16 +88,16 @@ const INLINE_SEALED_NON_EXAMPLE_RE = new RegExp(
 const STANDALONE_SOLUTION_HEADING_RE = /^(?:Worked\s+Solution|WORKED\s+SOLUTION|Full\s+Solution|FULL\s+SOLUTION|Sample\s+Solution|SAMPLE\s+SOLUTION|Solution|SOLUTION|解答|详细解答|参考解答|解析|详解)(?:\s*\(\s*(?:continued|cont\.?|CONTD?\.?|CONTINUED)\s*\))?\s*$/u;
 const WORKED_EXAMPLE_RE = /^(?:(?:Worked\s+Example|WORKED\s+EXAMPLE|Example|EXAMPLE)(?:\s+\d+(?:[.-]\d+)*(?:\s*\([^)]+\))?(?:\s*[:：.—-]|\s+|$)|(?:\s*\([^)]+\))?\s*(?:[:：.—-]|$))|例题(?:\s*\d+(?:[.-]\d+)*(?:\s*[（(][^）)]+[）)])?(?:\s*[:：.．—-]|\s+|$)|\s*(?:[:：.．—-]|$))|例(?:\s*\d+(?:[.-]\d+)*(?:\s*[（(][^）)]+[）)])?(?:\s*[:：.．—-]|\s+|$)|\s*[:：]))/u;
 const WORKED_EXAMPLE_INTERNAL_RE = /^(?:(?:Worked\s+Solution|WORKED\s+SOLUTION|Full\s+Solution|FULL\s+SOLUTION|Sample\s+Solution|SAMPLE\s+SOLUTION|Solution|SOLUTION|Proof|PROOF)(?:\s*\(\s*(?:continued|cont\.?|CONTD?\.?|CONTINUED)\s*\))?\s*(?:[:：]|(?:\.(?:\s|$))|$)|(?:详细解答|参考解答|解答|详解|解析|证明|证|解|分析)(?:\s*(?:（续）|\(续\)|（接上页）|\(接上页\)))?\s*(?:[:：]|$)|【\s*(?:解答|证明|证|解|分析|详解|解析)\s*】)/u;
-const PUBLIC_BLOCK_OPENER_RE = /^(?:(?:Definition|DEFINITION|Notation|NOTATION|Terminology|TERMINOLOGY|Convention|CONVENTION|Theorem|THEOREM|Lemma|LEMMA|Proposition|PROPOSITION|Corollary|COROLLARY|Axiom|AXIOM|Conjecture|CONJECTURE|Claim|CLAIM|Proof|PROOF|Exercises?|EXERCISES?|Practice\s+Problems?|PRACTICE\s+PROBLEMS?|Problem\s+\d+|PROBLEM\s+\d+|Question\s+\d+|QUESTION\s+\d+|Chapter\s+\d+|CHAPTER\s+\d+|Section\s+\d+|SECTION\s+\d+|Part\s+\d+|PART\s+\d+|Figure\s+\d+|Fig\.?\s+\d+|Table\s+\d+)\b|(?:定义|记号|术语|约定|定理|引理|推论|命题|公理|猜想|证明|习题|练习题|练习|思考题|作业题|图\s*\d+|表\s*\d+|第\s*[一二三四五六七八九十百千\d]+\s*[章节篇部讲])|\d+(?:\.\d+)+\s+\S)/u;
+const PUBLIC_BLOCK_OPENER_RE = /^(?:(?:Definition|DEFINITION|Notation|NOTATION|Terminology|TERMINOLOGY|Convention|CONVENTION|Theorem|THEOREM|Lemma|LEMMA|Proposition|PROPOSITION|Corollary|COROLLARY|Axiom|AXIOM|Conjecture|CONJECTURE|Claim|CLAIM|Proof|PROOF|Exercises?|EXERCISES?|Practice\s+Problems?|PRACTICE\s+PROBLEMS?|Problem\s+\d+|PROBLEM\s+\d+|Question\s+\d+|QUESTION\s+\d+|Chapter\s+\d+|CHAPTER\s+\d+|Section\s+\d+|SECTION\s+\d+|Part\s+\d+|PART\s+\d+|Figure\s+\d+|Fig\.?\s+\d+|Table\s+\d+)\b|(?:定义|记号|术语|约定|定理|引理|推论|命题|公理|猜想|证明|习题|练习题|练习|思考题|作业题|图\s*\d+|表\s*\d+|第\s*[一二三四五六七八九十百千\d]+\s*(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课]))|\d+(?:\.\d+)+\s+\S)/u;
 const NON_ANSWER_AFTER_BLANK_RE = /^(?:(?:Exercises?|EXERCISES?|Practice\s+Problems?|PRACTICE\s+PROBLEMS?|Problems?|PROBLEMS?|Questions?|QUESTIONS?|Proof|PROOF|Figures?|FIGURES?|Fig\.?|Tables?|TABLES?)\b|(?:习题|练习题|练习|问题|思考题|作业题|证明|图\s*\d+|表\s*\d+|第\s*\d+\s*题|题\s*\d+))/u;
 const MAJOR_NON_ANSWER_HEADING_RE = /^(?:(?:Bibliography|BIBLIOGRAPHY|References|REFERENCES|Works\s+Cited|WORKS\s+CITED|Index|INDEX|Subject\s+Index|Author\s+Index|Glossary|GLOSSARY|Notation\s+Index|Acknowledgements?|ACKNOWLEDGEMENTS?|About\s+the\s+Authors?)|(?:参考文献|索引|名词索引|主题索引|符号表|后记|致谢)|(?:Appendix|APPENDIX)\s+[A-Z0-9]+(?:\s*[:.—-]\s*(?!.*(?:Answer|ANSWER|Solution|SOLUTION)).*)?$|附录\s*[A-Z0-9一二三四五六七八九十]+(?:\s*[:：.—-]\s*(?!.*(?:答案|解答)).*)?$)(?:\s*[:：.—-]|$)/u;
-const SECTION_SEALED_SUBHEADER_RE = /^(?:(?:Chapter|CHAPTER|Part|PART|Unit|UNIT|Section|SECTION|Lecture|LECTURE)\s+(?:\d+(?:\.\d+)*|[IVXLCDM]+)\s*[:：.—-]?$|(?:Exercises?|EXERCISES?|Problems?|PROBLEMS?|Questions?|QUESTIONS?|Review|REVIEW|Practice|PRACTICE|Quiz|QUIZ|Drills?|DRILLS?|Self-Check|SELF-CHECK)\b|第\s*[一二三四五六七八九十百千\d]+\s*[章节篇部讲]\s*$|(?:习题|练习题?|思考题|复习题|作业题|自测题|第\s*[一二三四五六七八九十百千\d]+\s*[题小题])|(?:\d+[.)]|[A-Za-z][.)])(?:\s|$)|(?:\d+(?:\.\d+)*|[A-Za-z])$|[（(]\s*(?:\d+|[a-zA-Z]|[一二三四五六七八九十]+)\s*[)）])/u;
+const SECTION_SEALED_SUBHEADER_RE = /^(?:(?:Chapter|CHAPTER|Part|PART|Unit|UNIT|Section|SECTION|Lecture|LECTURE)\s+(?:\d+(?:\.\d+)*|[IVXLCDM]+)\s*[:：.—-]?$|(?:Exercises?|EXERCISES?|Problems?|PROBLEMS?|Questions?|QUESTIONS?|Review|REVIEW|Practice|PRACTICE|Quiz|QUIZ|Drills?|DRILLS?|Self-Check|SELF-CHECK)\b|第\s*[一二三四五六七八九十百千\d]+\s*(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课])\s*$|(?:习题|练习题?|思考题|复习题|作业题|自测题|第\s*[一二三四五六七八九十百千\d]+\s*[题小题])|(?:\d+[.)]|[A-Za-z][.)])(?:\s|$)|(?:\d+(?:\.\d+)*|[A-Za-z])$|[（(]\s*(?:\d+|[a-zA-Z]|[一二三四五六七八九十]+)\s*[)）])/u;
 const TEXTBOOK_STRUCTURAL_OPENER_RE = /^(?:(?:Definition|DEFINITION|Notation|NOTATION|Terminology|TERMINOLOGY|Convention|CONVENTION|Axiom|AXIOM|Theorem|THEOREM|Lemma|LEMMA|Proposition|PROPOSITION|Corollary|COROLLARY|Conjecture|CONJECTURE|Claim|CLAIM)\b|(?:Worked\s+Example|WORKED\s+EXAMPLE|Example|EXAMPLE)(?:\s+\d+(?:[.-]\d+)*)?(?:\s*\([^)]+\))?(?:\s*[:：.—-]|\s+\S|$)|(?:定义|记号|术语|约定|公理|定理|引理|推论|命题|猜想|例题)(?:\b|\s*\d|\s*[:：]|$)|例\s*\d+)/u;
-const NUMBERED_CONTAINER_PREFIX_RE = /^(?:(?:(?:Chapter|Part|Unit|Lecture)\s+(?:\d+(?:\.\d+)*|[IVXLCDM]+)|Section\s+\d+(?:\.\d+)*)(?=[\s:：.．—–-]|$)|第\s*[一二三四五六七八九十百千\d]+\s*(?:部分|[章节篇部讲]))/iu;
-const UNHEADED_ANSWER_CONTINUATION_RE = /^(?:(?:\d+[.)]|\d+(?:\.\d+)+[.)]?|\(\d+\)|\(\s*[a-zA-Z]\s*\)|[a-zA-Z][.)]|第\s*[一二三四五六七八九十百千\d]+\s*[题小题]|[（(]\s*[一二三四五六七八九十]+\s*[)）])(?:\s+|$)|(?:Chapter|CHAPTER|Section|SECTION|Part|PART|Unit|UNIT|Lecture|LECTURE)\s+(?:\d+(?:\.\d+)*|[IVXLCDM]+)\s*[:：.—-]?$|第\s*[一二三四五六七八九十百千\d]+\s*[章节篇部讲]\s*$)/u;
+const NUMBERED_CONTAINER_PREFIX_RE = /^(?:(?:(?:Chapter|Part|Unit|Lecture)\s+(?:\d+(?:\.\d+)*|[IVXLCDM]+)|Section\s+\d+(?:\.\d+)*)(?=[\s:：.．—–-]|$)|第\s*[一二三四五六七八九十百千\d]+\s*(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课]))/iu;
+const UNHEADED_ANSWER_CONTINUATION_RE = /^(?:(?:\d+[.)]|\d+(?:\.\d+)+[.)]?|\(\d+\)|\(\s*[a-zA-Z]\s*\)|[a-zA-Z][.)]|第\s*[一二三四五六七八九十百千\d]+\s*[题小题]|[（(]\s*[一二三四五六七八九十]+\s*[)）])(?:\s+|$)|(?:Chapter|CHAPTER|Section|SECTION|Part|PART|Unit|UNIT|Lecture|LECTURE)\s+(?:\d+(?:\.\d+)*|[IVXLCDM]+)\s*[:：.—-]?$|第\s*[一二三四五六七八九十百千\d]+\s*(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课])\s*$)/u;
 const TITLE_CASE_SECTION_HEADING_RE = /^\d+(?:\.\d+)+\s+(?!True$|False$|Yes$|No$|None$|[A-F](?:\s*,\s*[A-F])*$)[A-Z][A-Za-z0-9]*(?:\s+[A-Za-z0-9,&-]+){0,8}$/u;
-const ANSWER_OR_REVIEW_TITLE_RE = /\b(?:Answers?|Solutions?|Exercises?|Problems?|Questions?|Review|Practice|Quiz|Drills?|Homework|Self-Check)\b|答案|解答|习题|练习|思考题|复习题|作业题|自测题/iu;
-const CONTAINER_OR_NUMBERED_HEADING_RE = /^(?:(?:Chapters?|Sections?|Parts?|Units?|Lectures?|Appendix)\b|第\s*[一二三四五六七八九十百千\d]+\s*[章节篇部分讲]|附录|\d+(?:\.\d+)+\s+)/iu;
+const ANSWER_OR_REVIEW_TITLE_RE = /\b(?:Answers?|Solutions?|Exercises?|Problems?|Questions?|Review|Practice|Quiz|Drills?|Self-Check|Homework|Assignments?|Problem\s*Sets?|Worksheets?|Tutorials?|Recitations?|Labs?)\b|答案|解答|习题|练习|思考题|复习题|自测题|作业|课后题|单元测试/iu;
+const CONTAINER_OR_NUMBERED_HEADING_RE = /^(?:(?:Chapters?|Sections?|Parts?|Units?|Lectures?|Appendix)\b|第\s*[一二三四五六七八九十百千\d]+\s*(?:部分|单元|章节|讲义|专题|模块|[章节讲部篇卷册课])|附录|\d+(?:\.\d+)+\s+)/iu;
 const SECTION_SEALED_TERMINATOR_RE = /(?:End\s+of\s+(?:Answers?|Solutions?)|答案完|解答完)\s*[.。]?\s*$/iu;
 const INLINE_SEALED_TERMINATOR_RE = /(?:[□■∎]|End\s+of\s+Answers?|答案完|解答完)\s*[.。]?\s*$/iu;
 
@@ -489,36 +489,27 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
         target: SealState,
         options: {
           hasNativeText: boolean;
-          sectionSealedAtEnd: boolean;
+          doclingEndSeal?: PdfSealMode;
           incomingSeal: SealState;
           nativeOutSeal: SealState;
           visionOutSeal?: SealState;
           visionReenteredSection?: boolean;
         },
       ) => {
-        if (options.sectionSealedAtEnd) {
-          target.mode = "section_sealed";
-          target.inWorkedExample = false;
-          target.afterAllSealedPage = false;
-          return;
-        }
-        if (!options.hasNativeText) {
-          const picked = options.visionOutSeal ?? options.nativeOutSeal;
-          target.mode = picked.mode;
-          target.inWorkedExample = picked.inWorkedExample;
-          target.afterAllSealedPage = picked.afterAllSealedPage;
-          return;
-        }
-        target.mode = options.nativeOutSeal.mode;
-        target.inWorkedExample = options.nativeOutSeal.inWorkedExample;
-        target.afterAllSealedPage = options.nativeOutSeal.afterAllSealedPage;
-        if (options.visionOutSeal?.mode === "section_sealed") {
+        const picked = options.hasNativeText ? options.nativeOutSeal : options.visionOutSeal ?? options.nativeOutSeal;
+        Object.assign(target, picked);
+        if (options.hasNativeText && options.visionOutSeal?.mode === "section_sealed") {
           const enteredNewSection = options.incomingSeal.mode !== "section_sealed" || Boolean(options.visionReenteredSection);
           if (enteredNewSection) {
             target.mode = "section_sealed";
             target.inWorkedExample = false;
             target.afterAllSealedPage = false;
           }
+        }
+        if (options.doclingEndSeal && (options.doclingEndSeal === "section_sealed" || target.mode !== "section_sealed")) {
+          target.mode = options.doclingEndSeal;
+          target.inWorkedExample = false;
+          target.afterAllSealedPage = false;
         }
       };
       const sealVisionText = (
@@ -584,32 +575,22 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
       };
       const sanitizeSavedChunk = (
         saved: NewSourceChunk,
-        incomingSeal: SealState,
-        nativeContaminatedOnPage: boolean,
-        anyNativeOrIncomingSeal: boolean,
-      ): { sanitized: NewSourceChunk | undefined; savedSeal: SealState; hasVisionMarker: boolean; visionPreserved: boolean } => {
-        const savedSeal: SealState = { ...incomingSeal };
+        page: ParsedPage,
+        { incomingSeal, nativeOutSeal, doclingEndSeal, nativeContaminatedOnPage }: {
+          incomingSeal: SealState; nativeOutSeal: SealState; doclingEndSeal?: PdfSealMode; nativeContaminatedOnPage: boolean;
+        },
+      ): { sanitized: NewSourceChunk | undefined; savedSeal: SealState; hasVisionMarker: boolean } => {
+        const anyNativeOrIncomingSeal = nativeContaminatedOnPage || incomingSeal.mode !== "none";
+        const savedSeal: SealState = { ...nativeOutSeal };
         const visionMatch = /(?:^|\r?\n)(\[视觉转写与描述\](?:\r?\n|$))/u.exec(saved.text);
         if (!visionMatch || visionMatch.index === undefined) {
-          if (!saved.text.trim()) {
-            return {
-              sanitized: anyNativeOrIncomingSeal && saved.imageObjectKey ? { ...saved, imageObjectKey: null } : saved,
-              savedSeal,
-              hasVisionMarker: false,
-              visionPreserved: false,
-            };
+          if (!anyNativeOrIncomingSeal && (!saved.text.trim() || sealTextWithState(saved.text, { ...incomingSeal }) === saved.text)) {
+            return { sanitized: saved, savedSeal, hasVisionMarker: false };
           }
-          const sealedText = sealTextWithState(saved.text, savedSeal);
-          if (!sealedText.trim()) return { sanitized: undefined, savedSeal, hasVisionMarker: false, visionPreserved: false };
-          const textChanged = sealedText !== saved.text;
-          const nextImageKey = (anyNativeOrIncomingSeal || textChanged || incomingSeal.mode !== "none")
-            ? null
-            : saved.imageObjectKey;
           return {
-            sanitized: !textChanged && nextImageKey === saved.imageObjectKey ? saved : { ...saved, text: sealedText, imageObjectKey: nextImageKey },
+            sanitized: page.text.trim() ? { ...saved, text: page.text, imageObjectKey: null } : undefined,
             savedSeal,
             hasVisionMarker: false,
-            visionPreserved: false,
           };
         }
         const prefix = saved.text.slice(0, visionMatch.index);
@@ -617,8 +598,8 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
         const nativeHeaderMatch = /^(\[(?:原生提取|本地提取（可能含OCR）)\]\r?\n)/u.exec(prefix);
         const nativeHeader = nativeHeaderMatch?.[1] ?? "";
         const nativeBody = (nativeHeader ? prefix.slice(nativeHeader.length) : prefix).replace(/(?:\r?\n)+$/u, "");
-        const nativeOutSeal: SealState = { ...incomingSeal };
-        const sealedNativeBody = nativeBody.trim() ? sealTextWithState(nativeBody, nativeOutSeal) : "";
+        const cachedNativeOutSeal: SealState = { ...incomingSeal };
+        const sealedNativeBody = nativeBody.trim() ? sealTextWithState(nativeBody, cachedNativeOutSeal) : "";
         const savedNativeChanged = sealedNativeBody !== nativeBody;
         const pageContaminated = nativeContaminatedOnPage || savedNativeChanged;
         const pageHadAnySeal = anyNativeOrIncomingSeal || savedNativeChanged;
@@ -628,35 +609,34 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
           : { text: "", hadSealedContent: false, reenteredSectionSealed: false };
         const sealedVisionBody = visionSealed.text;
         const pageHadSealed = pageHadAnySeal || visionSealed.hadSealedContent;
+        const publicNative = pageHadAnySeal ? page.text : sealedNativeBody;
         reconcileEndSealState(savedSeal, {
-          hasNativeText: Boolean(nativeBody.trim()),
-          sectionSealedAtEnd: false,
+          hasNativeText: Boolean(publicNative.trim()),
+          doclingEndSeal,
           incomingSeal,
-          nativeOutSeal,
+          nativeOutSeal: pageHadAnySeal ? nativeOutSeal : cachedNativeOutSeal,
           visionOutSeal: visionBody.trim() ? visionSeal : undefined,
           visionReenteredSection: visionSealed.reenteredSectionSealed,
         });
         if (!sealedVisionBody.trim()) {
-          if (!sealedNativeBody.trim()) return { sanitized: undefined, savedSeal, hasVisionMarker: true, visionPreserved: false };
           return {
-            sanitized: { ...saved, text: sealedNativeBody, imageObjectKey: null },
+            sanitized: publicNative.trim() ? { ...saved, text: publicNative, imageObjectKey: null } : undefined,
             savedSeal,
             hasVisionMarker: true,
-            visionPreserved: false,
           };
         }
-        const rebuilt = sealedNativeBody.trim()
-          ? `${nativeHeader || "[原生提取]\n"}${sealedNativeBody}\n\n[视觉转写与描述]\n${sealedVisionBody}`
+        const currentNativeHeader = page.visualKinds?.includes("scan") ? "[本地提取（可能含OCR）]\n" : "[原生提取]\n";
+        const rebuilt = publicNative.trim()
+          ? `${pageHadAnySeal ? currentNativeHeader : (nativeHeader || "[原生提取]\n")}${publicNative}\n\n[视觉转写与描述]\n${sealedVisionBody}`
           : `[视觉转写与描述]\n${sealedVisionBody}`;
         const nextImageKey = pageHadSealed ? null : saved.imageObjectKey;
         return {
           sanitized: rebuilt === saved.text && nextImageKey === saved.imageObjectKey ? saved : { ...saved, text: rebuilt, imageObjectKey: nextImageKey },
           savedSeal,
           hasVisionMarker: true,
-          visionPreserved: true,
         };
       };
-      const preparePage = (rawPage: AnnotatedParsedPage, saved: NewSourceChunk | undefined, sealState: SealState) => {
+      const preparePage = (rawPage: AnnotatedParsedPage, saved: NewSourceChunk | undefined, sealState: SealState, doclingIncomingSeal?: PdfSealMode) => {
         const hadRawText = Boolean(rawPage.text.trim());
         const doclingSealedBlank = isPdf && rawPage.text === "" && Array.isArray(rawPage.visualKinds) && rawPage.visualKinds.length === 0;
         if (doclingSealedBlank && sealState.mode === "none") {
@@ -664,18 +644,23 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
           sealState.inWorkedExample = false;
         }
         const incomingSeal: SealState = { ...sealState };
+        const nativeOutSeal: SealState = { ...incomingSeal };
+        // Docling already removed the sealed prefix with this same input state.
+        // Keep worker-only seals in effect and still scan the remaining text.
+        if (doclingIncomingSeal && doclingIncomingSeal === incomingSeal.mode
+          && rawPage.hadSealedContent && rawPage.inlineSealedAtEnd !== undefined) {
+          nativeOutSeal.mode = "none";
+        }
         const publicText = !isImage
-          ? sealTextWithState(rawPage.text, sealState, rawPage.page, rawPage.discourseBlocks)
+          ? sealTextWithState(rawPage.text, nativeOutSeal, rawPage.page, rawPage.discourseBlocks)
           : rawPage.text;
-        const nativeOutSeal: SealState = { ...sealState };
-        const sectionSealedAtEnd = isPdf && rawPage.sectionSealedAtEnd === true;
-        const pageHadNativeSeal = isPdf && Boolean(rawPage.hadSealedContent || sectionSealedAtEnd);
+        const doclingEndSeal = isPdf ? pdfPageEndSeal(rawPage) : undefined;
+        const pageHadNativeSeal = isPdf && Boolean(rawPage.hadSealedContent || doclingEndSeal);
         const nativeContaminatedOnPage = !isImage && (
           doclingSealedBlank
           || publicText !== rawPage.text
           || pageHadNativeSeal
         );
-        const anyNativeOrIncomingSeal = nativeContaminatedOnPage || (!isImage && incomingSeal.mode !== "none");
         const sealedAllText = !isImage && ((hadRawText && !publicText.trim()) || doclingSealedBlank);
         const page: ParsedPage = publicText === rawPage.text ? rawPage : { ...rawPage, text: publicText };
         const visualKinds = sealedAllText
@@ -694,7 +679,9 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
         let savedHasVision = false;
         if (!sealedAllText && saved) {
           if (!isImage) {
-            const cleaned = sanitizeSavedChunk(saved, incomingSeal, nativeContaminatedOnPage, anyNativeOrIncomingSeal);
+            const cleaned = sanitizeSavedChunk(saved, page, {
+              incomingSeal, nativeOutSeal, doclingEndSeal, nativeContaminatedOnPage,
+            });
             sanitizedSaved = cleaned.sanitized;
             savedSeal = cleaned.savedSeal;
             savedHasVision = cleaned.hasVisionMarker;
@@ -709,14 +696,9 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
           ? sanitizedSaved
           : undefined;
         if (reusable && !isImage && savedSeal && savedHasVision) {
-          sealState.mode = savedSeal.mode;
-          sealState.inWorkedExample = savedSeal.inWorkedExample;
-          sealState.afterAllSealedPage = savedSeal.afterAllSealedPage;
-        }
-        if (sectionSealedAtEnd) {
-          sealState.mode = "section_sealed";
-          sealState.inWorkedExample = false;
-          sealState.afterAllSealedPage = false;
+          Object.assign(sealState, savedSeal);
+        } else {
+          reconcileEndSealState(sealState, { hasNativeText: hadRawText, doclingEndSeal, incomingSeal, nativeOutSeal });
         }
         return {
           page,
@@ -729,7 +711,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
           savedSeal,
           savedHasVision,
           nativeContaminatedOnPage,
-          sectionSealedAtEnd,
+          doclingEndSeal,
           incomingSeal,
           nativeOutSeal,
         };
@@ -745,7 +727,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
           savedSeal,
           savedHasVision,
           nativeContaminatedOnPage,
-          sectionSealedAtEnd,
+          doclingEndSeal,
           incomingSeal,
           nativeOutSeal,
         }: ReturnType<typeof preparePage>,
@@ -785,7 +767,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
             const pageHadSealed = visionSealed.hadSealedContent;
             reconcileEndSealState(liveSealState, {
               hasNativeText: hadRawText,
-              sectionSealedAtEnd,
+              doclingEndSeal,
               incomingSeal,
               nativeOutSeal,
               visionOutSeal: visionSeal,
@@ -815,14 +797,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
           }
         }
         if (!visionHandled && !isImage && savedSeal && savedHasVision) {
-          liveSealState.mode = savedSeal.mode;
-          liveSealState.inWorkedExample = savedSeal.inWorkedExample;
-          liveSealState.afterAllSealedPage = savedSeal.afterAllSealedPage;
-        }
-        if (sectionSealedAtEnd) {
-          liveSealState.mode = "section_sealed";
-          liveSealState.inWorkedExample = false;
-          liveSealState.afterAllSealedPage = false;
+          Object.assign(liveSealState, savedSeal);
         }
         if (droppedAllVisionOnly) return undefined;
         if (isPdf && visual && imageObjectKey === null && !visionHandled && !cappedTextPages.has(page.page)) {
@@ -858,7 +833,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
         const stage = await open(stagePath, "wx", 0o600);
         const result = await parsePdfSegments({ path: temp, ...publication, scope, runner: deps.runner,
           segments: deps.segments, signal, segmentPages: deps.segmentPages, timeoutSeconds: deps.segmentTimeoutSeconds,
-          onPages: async pages => {
+          onPages: async (pages, initialDoclingSeal) => {
             // Read only this segment's previously published text, including saved vision.
             const existing = deps.segments
               ? await deps.chunks.listChunksAtVersion(scope, source.id, source.version, pages.map(page => page.page))
@@ -866,9 +841,12 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
             const published = new Map(existing.map(({ page, slideLabel, startMs, endMs, text, imageObjectKey }) =>
               [page, { page, slideLabel, startMs, endMs, text, imageObjectKey }]));
             const drySealState: SealState = { ...pdfSealState };
+            let doclingIncomingSeal = initialDoclingSeal;
             const planned = pages.map(rawPage => {
-              const prep = preparePage(rawPage, published.get(rawPage.page), drySealState);
-              return { rawPage, visualInput: prep.visual && !prep.reusable ? prep.visual : undefined };
+              const seed = doclingIncomingSeal;
+              const prep = preparePage(rawPage, published.get(rawPage.page), drySealState, seed);
+              doclingIncomingSeal = pdfPageEndSeal(rawPage);
+              return { rawPage, doclingIncomingSeal: seed, visualInput: prep.visual && !prep.reusable ? prep.visual : undefined };
             });
             const recognition = deps.recognizePages?.(
               planned.flatMap(({ visualInput }) => visualInput ? [visualInput] : []), visualRecognitionUnavailable,
@@ -879,9 +857,9 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
               return next.value;
             } : undefined;
             try {
-              for (const { rawPage, visualInput } of planned) {
+              for (const { rawPage, doclingIncomingSeal, visualInput } of planned) {
                 signal.throwIfAborted();
-                const preparedPage = preparePage(rawPage, published.get(rawPage.page), pdfSealState);
+                const preparedPage = preparePage(rawPage, published.get(rawPage.page), pdfSealState, doclingIncomingSeal);
                 let prefetched: { value: ParseSourceVisualPageResult | null } | undefined;
                 if (visualInput && recognizePage) {
                   try {
