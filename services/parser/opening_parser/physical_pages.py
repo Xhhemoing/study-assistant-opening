@@ -150,8 +150,10 @@ _EXERCISE_RE = re.compile(
 )
 _SECTION_BREAK_RE = re.compile(
     r"^(?:"
-    r"(?:Chapter|Section|Part|Appendix)\s+(?:\d+(?:\.\d+)*|[IVXLCDM]+)(?:\b|$)"
-    r"|第\s*[一二三四五六七八九十百千\d]+\s*[章节篇部分]"
+    r"(?:Chapter|Section|Part)\s+(?:\d+(?:\.\d+)*|[IVXLCDM]+)(?:\b|$)"
+    r"|(?:Appendix\s+[A-Z0-9]+|Lecture\s+(?:\d+|[IVXLCDM]+))(?:\b|$)"
+    r"|第\s*[一二三四五六七八九十百千\d]+\s*[章节篇部分讲]"
+    r"|附录\s*[A-Z0-9一二三四五六七八九十]+(?:\s*[:：.\-—]|$|\s+\S)"
     r"|\d+(?:\.\d+)+\s+\S"
     r")",
     re.IGNORECASE,
@@ -376,7 +378,7 @@ def _is_section_sealed_exit(stripped: str, frag_label: str | None, is_markdown_h
         return False
     if (frag_label in _HEADING_LABELS or is_markdown_heading) and not _SECTION_BREAK_RE.match(stripped) and not _EXERCISE_RE.match(stripped) and not _SECTION_SEALED_RE.match(stripped) and not _INLINE_SEALED_ALWAYS_RE.match(stripped) and not _INLINE_SEALED_NON_EXAMPLE_RE.match(stripped) and not re.search(r"(?:\b(?:Answers?|Solutions?|Exercises?|Problems?|Chapters?|Sections?|Parts?)\b|答案|解答|习题|练习|章|节)", stripped, re.IGNORECASE):
         return True
-    if (frag_label in _HEADING_LABELS or is_markdown_heading) and re.match(r"^\d+(?:\.\d+)+\s+[A-Z]", stripped) and not _ANSWER_TITLE_WORD_RE.search(stripped):
+    if (frag_label in _HEADING_LABELS or is_markdown_heading) and re.match(r"^\d+(?:\.\d+)+\s+(?!True\.?$|False\.?$|Yes\.?$|No\.?$|None\.?$|[A-F](?:\s*,\s*[A-F])*\.?$)[A-Z]", stripped) and not _ANSWER_TITLE_WORD_RE.search(stripped):
         return True
     return False
 
@@ -466,7 +468,12 @@ def _classify_segment(line_text: str, frag_label: str | None, page_visuals: set[
         cap_ref = (cap_match.group("ref") or cap_match.group("zh_ref")).strip()
         return "figure_caption", None, True, False, exited_section_seal, cap_ref, _caption_visual_kind(stripped, page_visuals)
 
-    if is_markdown_heading or frag_label in _HEADING_LABELS or _SECTION_BREAK_RE.match(stripped) or exited_section_seal:
+    section_exit_candidate = bool(
+        _MAJOR_NON_ANSWER_HEADING_RE.match(stripped)
+        or _is_titled_non_answer_chapter(stripped)
+        or _SECTION_BREAK_RE.match(stripped)
+    )
+    if is_markdown_heading or frag_label in _HEADING_LABELS or section_exit_candidate or exited_section_seal:
         return "narrative", None, True, True, _is_section_sealed_exit(stripped, frag_label, is_markdown_heading) or exited_section_seal, None, None
 
     return "narrative", None, False, False, False, None, None

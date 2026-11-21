@@ -390,6 +390,39 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
         self.assertIn("Partial Differential Equations", p14_pub)
         self.assertIn("Wave equation u_tt = c^2 u_xx.", p14_pub)
 
+    def test_round5_mid_page_continuation_backmatter_split_and_short_numbered_answer_guard(self):
+        result = result_for(
+            [
+                text_element(11, "Appendix A: Answers to the Exercises\n1.1 x = 3", 1),
+            ],
+            [
+                text_element(12, "1.2 y = 4", 1),
+                text_element(12, "Bibliography", 2),
+                text_element(12, "[1] Knuth, TAOCP.", 3),
+            ],
+            [
+                text_element(13, "参考文献", 1),
+                text_element(13, "华罗庚《高等数学引论》。", 2),
+            ],
+            [
+                text_element(14, "Answer Key\n1.1 A", 1),
+            ],
+            [
+                text_element(15, "1.2 True", 1, DocItemLabel.SECTION_HEADER),
+                text_element(15, "1.3 A, B", 2, DocItemLabel.SECTION_HEADER),
+                text_element(15, "附录 B：符号表", 3),
+                text_element(15, "R denotes real numbers.", 4),
+            ],
+        )
+        blocks = physical_pages.discourse_blocks_by_page(result)
+        pub = cli.texts_by_page(result)
+
+        self.assertEqual(pub[12], ["Bibliography", "[1] Knuth, TAOCP."])
+        self.assertEqual([b.kind for b in blocks[12]], ["solution_sealed", "narrative"])
+
+        self.assertEqual(pub[13], ["参考文献", "华罗庚《高等数学引论》。"])
+        self.assertEqual(pub[15], ["附录 B：符号表", "R denotes real numbers."])
+
 
 if __name__ == "__main__":
     unittest.main()

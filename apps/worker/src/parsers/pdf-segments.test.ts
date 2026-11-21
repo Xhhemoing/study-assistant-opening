@@ -915,4 +915,88 @@ describe("bounded resumable PDF parser", () => {
     expect(fallbackOnDynamicInvalidation.publishedChunks[0]?.page).toBe(2);
     expect(fallbackOnDynamicInvalidation.publishedChunks[0]?.text).toContain("Recovered page 2.");
   });
+
+  it("Round-5: preserves Vision after trailing inline_sealed, keeps bold Section exits, and propagates savedSeal on degraded fallback", async () => {
+    const inlineBeforeVision = await runPdfScenario({
+      pages: [
+        { page: 1, text: "Find the vertex.\nAnswer: (0, 0).", visualKinds: ["picture"] },
+        { page: 2, text: "Next theorem.", visualKinds: [] },
+      ],
+      recognizePages: async function* () {
+        yield { text: "A parabola opening upward.", imageObjectKey: "vision/parabola" };
+      },
+    });
+    expect(inlineBeforeVision.publishedChunks.map(c => c.page)).toEqual([1, 2]);
+    expect(inlineBeforeVision.publishedChunks[0]?.imageObjectKey).toBe("vision/parabola");
+    expect(inlineBeforeVision.publishedChunks[0]?.text).toContain("A parabola opening upward.");
+
+    const boldSectionAndSavedInline = await runPdfScenario({
+      pages: [
+        { page: 1, text: "Answer Key\n1. x = 1", visualKinds: [] },
+        { page: 2, text: "**Section 1.2**: **Vector Spaces**\nDefinition 1.2: Closure.", visualKinds: [] },
+        { page: 3, text: "Find the vertex.", visualKinds: ["picture"] },
+      ],
+      savedChunks: [
+        {
+          page: 3,
+          slideLabel: null,
+          startMs: null,
+          endMs: null,
+          text: "[原生提取]\nFind the vertex.\nAnswer: (0, 0).\n\n[视觉转写与描述]\nA parabola opening upward.",
+          imageObjectKey: "vision/saved-parabola",
+        },
+      ],
+    });
+    expect(boldSectionAndSavedInline.publishedChunks.map(c => c.page)).toEqual([2, 3]);
+    expect(boldSectionAndSavedInline.publishedChunks[0]?.text).toBe("**Section 1.2**: **Vector Spaces**\nDefinition 1.2: Closure.");
+    expect(boldSectionAndSavedInline.publishedChunks[1]?.imageObjectKey).toBe("vision/saved-parabola");
+    expect(boldSectionAndSavedInline.publishedChunks[1]?.text).toContain("A parabola opening upward.");
+
+    const degradedSavedVisionPropagation = await runPdfScenario({
+      pages: [
+        { page: 1, text: "", visualKinds: ["scan"] },
+        { page: 2, text: "3. z = 3", visualKinds: [] },
+        { page: 3, text: "Chapter 2: Linear Maps\nIntro.", visualKinds: [] },
+      ],
+      savedChunks: [
+        {
+          page: 1,
+          slideLabel: null,
+          startMs: null,
+          endMs: null,
+          text: "[视觉转写与描述]\nAnswer Key\n1. x = 1",
+          imageObjectKey: "vision/secret-p1",
+        },
+      ],
+      recognizePages: async function* () {
+        yield null;
+      },
+    });
+    expect(degradedSavedVisionPropagation.publishedChunks.map(c => c.page)).toEqual([3]);
+    expect(degradedSavedVisionPropagation.publishedChunks[0]?.text).toBe("Chapter 2: Linear Maps\nIntro.");
+
+    const degradedMixedRedaction = await runPdfScenario({
+      pages: [
+        { page: 1, text: "Theorem 1.", visualKinds: ["picture"] },
+        { page: 2, text: "3. z = 3", visualKinds: [] },
+        { page: 3, text: "Chapter 2: Rings\nDef.", visualKinds: [] },
+      ],
+      savedChunks: [
+        {
+          page: 1,
+          slideLabel: null,
+          startMs: null,
+          endMs: null,
+          text: "[原生提取]\nTheorem 1.\n\n[视觉转写与描述]\nAnswer Key\n2. y = 2",
+          imageObjectKey: "vision/secret-mixed",
+        },
+      ],
+      recognizePages: async function* () {
+        yield null;
+      },
+    });
+    expect(degradedMixedRedaction.publishedChunks.map(c => c.page)).toEqual([1, 3]);
+    expect(degradedMixedRedaction.publishedChunks[0]?.text).toBe("Theorem 1.");
+    expect(degradedMixedRedaction.publishedChunks[0]?.imageObjectKey).toBeNull();
+  });
 });

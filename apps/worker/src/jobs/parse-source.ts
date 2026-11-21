@@ -91,7 +91,7 @@ const NON_ANSWER_AFTER_BLANK_RE = /^(?:(?:Exercises?|EXERCISES?|Practice\s+Probl
 const MAJOR_NON_ANSWER_HEADING_RE = /^(?:(?:Bibliography|BIBLIOGRAPHY|References|REFERENCES|Works\s+Cited|WORKS\s+CITED|Index|INDEX|Subject\s+Index|Author\s+Index|Glossary|GLOSSARY|Notation\s+Index|Acknowledgements?|ACKNOWLEDGEMENTS?|About\s+the\s+Authors?)|(?:参考文献|索引|名词索引|主题索引|符号表|后记|致谢)|(?:Appendix|APPENDIX)\s+[A-Z0-9]+(?:\s*[:.—-]\s*(?!.*(?:Answer|ANSWER|Solution|SOLUTION)).*)?$|附录\s*[A-Z0-9一二三四五六七八九十]+(?:\s*[:：.—-]\s*(?!.*(?:答案|解答)).*)?$)(?:\s*[:：.—-]|$)/u;
 const SECTION_SEALED_SUBHEADER_RE = /^(?:(?:Chapter|CHAPTER|Part|PART|Unit|UNIT|Section|SECTION)\s+(?:\d+(?:\.\d+)*|[IVXLCDM]+)\s*[:：.—-]?$|(?:Exercises?|EXERCISES?|Problems?|PROBLEMS?|Questions?|QUESTIONS?|Review|REVIEW|Practice|PRACTICE|Self-Check|SELF-CHECK)\b|第\s*[一二三四五六七八九十百千\d]+\s*[章节篇部]\s*$|(?:习题|练习题|练习|思考题|作业题|自测题|第\s*[一二三四五六七八九十百千\d]+\s*[题小题])|(?:\d+[.)]|[A-Za-z][.)])(?:\s|$)|(?:\d+(?:\.\d+)*|[A-Za-z])$|[（(]\s*(?:\d+|[a-zA-Z]|[一二三四五六七八九十]+)\s*[)）])/u;
 const TEXTBOOK_STRUCTURAL_OPENER_RE = /^(?:(?:Definition|DEFINITION|Notation|NOTATION|Terminology|TERMINOLOGY|Convention|CONVENTION|Axiom|AXIOM|Theorem|THEOREM|Lemma|LEMMA|Proposition|PROPOSITION|Corollary|COROLLARY|Conjecture|CONJECTURE|Claim|CLAIM)\b|(?:Lecture|LECTURE)\s+(?:\d+|[IVXLCDM]+)\b|(?:Worked\s+Example|WORKED\s+EXAMPLE|Example|EXAMPLE)(?:\s+\d+(?:[.-]\d+)*)?(?:\s*\([^)]+\))?(?:\s*[:：.—-]|\s+\S|$)|(?:定义|记号|术语|约定|公理|定理|引理|推论|命题|猜想|例题)(?:\b|\s*\d|\s*[:：]|$)|例\s*\d+|第\s*[一二三四五六七八九十百千\d]+\s*讲\b)/u;
-const TITLED_NON_ANSWER_CONTAINER_RE = /^(?:(?:Chapter|CHAPTER|Part|PART|Unit|UNIT)\s+(?:\d+(?:\.\d+)*|[IVXLCDM]+)\s*(?:[:：.—-]\s*|\s+)(?!\s*(?:Answers?|Solutions?|Key|Exercises?|Problems?|Questions?|Review|Practice|\(?cont))(?!.*\b(?:Answers?|Solutions?|Answer\s+Key)\b)\S.*$|(?:Section|SECTION)\s+\d+(?:\.\d+)*\s*(?:[:：.—-]\s+|\s+(?!\s*(?:Answers?|Solutions?|Key|Exercises?|Problems?|Questions?|Review|Practice|is\b|are\b|was\b|see\b|\(?cont)))(?!.*\b(?:Answers?|Solutions?|Answer\s+Key)\b)(?=[A-Za-z\u4e00-\u9fff])\S.*$|第\s*[一二三四五六七八九十百千\d]+\s*[章节篇部]\s*(?:[:：.—-]\s*)?(?!\s*(?:参考|标准|课后|习题|练习)?(?:答案|解答)|习题|练习|思考题|（续）|\(续\))(?!.*(?:参考答案|标准答案|课后答案|习题答案|练习答案|答案与解析|参考解答))\S.*$)/iu;
+const TITLED_NON_ANSWER_CONTAINER_RE = /^(?:(?:Chapter|CHAPTER|Part|PART|Unit|UNIT)\s+(?:\d+(?:\.\d+)*|[IVXLCDM]+)\s*(?:[:：.—-]\s*|\s+)(?!\s*(?:Answers?|Solutions?|Key|Exercises?|Problems?|Questions?|Review|Practice|\(?cont))(?!.*\b(?:Answers?|Solutions?|Answer\s+Key)\b)\S.*$|(?:Section|SECTION)\s+\d+(?:\.\d+)*\s*(?:[:：.—-]\s+|\s+(?!\s*(?:Answers?|Solutions?|Key|Exercises?|Problems?|Questions?|Review|Practice|is\b|are\b|was\b|see\b|\(?cont)))(?!.*\b(?:Answers?|Solutions?|Answer\s+Key)\b)(?=(?:\*\*|__)?[A-Za-z\u4e00-\u9fff])\S.*$|第\s*[一二三四五六七八九十百千\d]+\s*[章节篇部]\s*(?:[:：.—-]\s*)?(?!\s*(?:参考|标准|课后|习题|练习)?(?:答案|解答)|习题|练习|思考题|（续）|\(续\))(?!.*(?:参考答案|标准答案|课后答案|习题答案|练习答案|答案与解析|参考解答))\S.*$)/iu;
 const UNHEADED_ANSWER_CONTINUATION_RE = /^(?:(?:\d+[.)]|\d+(?:\.\d+)+[.)]?|\(\d+\)|\(\s*[a-zA-Z]\s*\)|[a-zA-Z][.)]|第\s*[一二三四五六七八九十百千\d]+\s*[题小题]|[（(]\s*[一二三四五六七八九十]+\s*[)）])(?:\s+|$)|(?:Chapter|CHAPTER|Section|SECTION|Part|PART|Unit|UNIT)\s+(?:\d+(?:\.\d+)*|[IVXLCDM]+)\s*[:：.—-]?$|第\s*[一二三四五六七八九十百千\d]+\s*[章节篇部]\s*$)/u;
 const TITLE_CASE_SECTION_HEADING_RE = /^\d+(?:\.\d+)+\s+(?!True$|False$|Yes$|No$|None$|[A-F](?:\s*,\s*[A-F])*$)[A-Z][A-Za-z0-9]*(?:\s+[A-Za-z0-9,&-]+){0,8}$/u;
 const SECTION_SEALED_TERMINATOR_RE = /(?:End\s+of\s+(?:Answers?|Solutions?)|答案完|解答完)\s*[.。]?\s*$/iu;
@@ -438,6 +438,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
         const nativeHeader = nativeHeaderMatch?.[1] ?? "";
         const nativeBody = (nativeHeader ? prefix.slice(nativeHeader.length) : prefix).replace(/(?:\r?\n)+$/u, "");
         const sealedNativeBody = nativeBody.trim() ? sealTextWithState(nativeBody, savedSeal) : "";
+        if (savedSeal.mode === "inline_sealed") savedSeal.mode = "none";
         const sealedVisionBody = visionBody.trim() ? sealTextWithState(visionBody, savedSeal) : "";
         if (!sealedVisionBody.trim()) {
           if (!sealedNativeBody.trim()) return { sanitized: undefined, savedSeal, hasVisionMarker: true };
@@ -499,9 +500,9 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
           sealState.inWorkedExample = savedSeal.inWorkedExample;
           sealState.afterAllSealedPage = savedSeal.afterAllSealedPage;
         }
-        return { page, visual, originalSaved: saved, saved: sanitizedSaved, reusable, sealedAllText };
+        return { page, visual, originalSaved: saved, saved: sanitizedSaved, reusable, sealedAllText, savedSeal, savedHasVision };
       };
-      const consumePage = async ({ page, visual, saved, reusable, sealedAllText }: ReturnType<typeof preparePage>,
+      const consumePage = async ({ page, visual, saved, reusable, sealedAllText, savedSeal, savedHasVision }: ReturnType<typeof preparePage>,
         liveSealState: SealState,
         recognizePage: ((input: ParseSourceVisualPageInput) => Promise<ParseSourceVisualPageResult | null>) | undefined =
           visualRecognitionUnavailable ? undefined : deps.recognizePage,
@@ -529,6 +530,9 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
           } else {
             if (!result || typeof result.text !== "string" || !result.text.trim() || typeof result.imageObjectKey !== "string" || !result.imageObjectKey.trim()) throw new Error(`visual recognition returned no readable content or image for physical page ${page.page}`);
             visionHandled = true;
+            if (!isImage && page.text.trim() && liveSealState.mode === "inline_sealed") {
+              liveSealState.mode = "none";
+            }
             const sealedVisionText = !isImage ? sealTextWithState(result.text, liveSealState) : result.text;
             if (!isImage && !sealedVisionText.trim()) {
               if (!page.text.trim()) return undefined;
@@ -550,6 +554,11 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
               }
             }
           }
+        }
+        if (!visionHandled && !isImage && savedSeal && savedHasVision) {
+          liveSealState.mode = savedSeal.mode;
+          liveSealState.inWorkedExample = savedSeal.inWorkedExample;
+          liveSealState.afterAllSealedPage = savedSeal.afterAllSealedPage;
         }
         if (isPdf && visual && imageObjectKey === null && !visionHandled && !cappedTextPages.has(page.page)) {
           skippedVisionPages.push(page.page);
