@@ -2,6 +2,7 @@ import type {
   ExamBlueprintV1,
   ExamItemSpec,
   ExamSectionBlueprint,
+  ExamTimeModel,
   RawToScoreBand,
 } from "./types";
 
@@ -300,6 +301,15 @@ function hasCompleteRawTable(section: ExamSectionBlueprint): boolean {
 /** Cholesky factor L such that L * L^T ≈ matrix. Rejects asymmetric or non-PSD matrices. */
 export function choleskyDecompose(matrix: readonly (readonly number[])[]): number[][] {
   const n = matrix.length;
+  let maxDiag = 0;
+  for (let i = 0; i < n; i++) {
+    const diagVal = matrix[i]?.[i];
+    if (diagVal !== undefined && Number.isFinite(diagVal)) {
+      maxDiag = Math.max(maxDiag, Math.abs(diagVal));
+    }
+  }
+  const pivotTol = 1e-12 * Math.max(1, maxDiag);
+  const offDiagTol = 1e-8 * Math.max(1, Math.sqrt(maxDiag));
   const lower: number[][] = Array.from({ length: n }, () => Array<number>(n).fill(0));
   for (let i = 0; i < n; i++) {
     const row = matrix[i];
@@ -312,19 +322,24 @@ export function choleskyDecompose(matrix: readonly (readonly number[])[]): numbe
         mirror === undefined ||
         !Number.isFinite(entry) ||
         !Number.isFinite(mirror) ||
-        Math.abs(entry - mirror) > 1e-8
+        Math.abs(entry - mirror) > 1e-8 * Math.max(1, Math.abs(entry), Math.abs(mirror))
       ) {
         throw new RangeError("thetaCovariance must be finite and symmetric");
       }
       let sum = entry;
       for (let k = 0; k < j; k++) sum -= lower[i]![k]! * lower[j]![k]!;
       if (i === j) {
-        if (sum < -1e-6) throw new RangeError("thetaCovariance must be positive semidefinite");
-        lower[i]![j] = sum > 0 ? Math.sqrt(sum) : 0;
+        if (sum > 0) {
+          lower[i]![j] = Math.sqrt(sum);
+        } else if (sum >= -pivotTol) {
+          lower[i]![j] = 0;
+        } else {
+          throw new RangeError("thetaCovariance must be positive semidefinite");
+        }
       } else {
         const diag = lower[j]![j]!;
-        if (diag <= 1e-12) {
-          if (Math.abs(sum) > 1e-8) {
+        if (diag === 0) {
+          if (Math.abs(sum) > offDiagTol) {
             throw new RangeError("thetaCovariance must be positive semidefinite");
           }
           lower[i]![j] = 0;
@@ -348,6 +363,15 @@ function isSymmetricPsdMatrix(matrix: readonly (readonly number[])[]): boolean {
 
 function isValidScoreRange(range: readonly [number, number]): boolean {
   return range.length === 2 && Number.isFinite(range[0]) && Number.isFinite(range[1]) && range[0] < range[1];
+}
+
+function isValidTimeModel(tm: ExamTimeModel): boolean {
+  if (!Number.isFinite(tm.mu) || !Number.isFinite(tm.sigma) || tm.sigma <= 0) return false;
+  if ((tm.speedLoading as number | undefined) !== undefined && !Number.isFinite(tm.speedLoading)) return false;
+  for (const loading of Object.values(tm.skillLoading)) {
+    if (!Number.isFinite(loading)) return false;
+  }
+  return true;
 }
 
 export function validateExamBlueprint(blueprint: ExamBlueprintV1): string[] {
@@ -398,7 +422,7 @@ export function validateExamBlueprint(blueprint: ExamBlueprintV1): string[] {
             missing.push(`sections.${section.sectionId}.items.${item.itemId}.points`);
             break;
           }
-          if (!(Number.isFinite(item.timeModel.sigma) && item.timeModel.sigma > 0 && Number.isFinite(item.timeModel.mu))) {
+          if (!isValidTimeModel(item.timeModel)) {
             missing.push(`sections.${section.sectionId}.items.${item.itemId}.timeModel`);
             break;
           }
@@ -417,10 +441,11 @@ export function validateExamBlueprint(blueprint: ExamBlueprintV1): string[] {
           missing.push(`sections.${section.sectionId}.parts.${part.partId}.skillIds`);
           break;
         }
-        if (
-          part.timeModel !== undefined &&
-          !(Number.isFinite(part.timeModel.sigma) && part.timeModel.sigma > 0 && Number.isFinite(part.timeModel.mu))
-        ) {
+        if (blueprint.clockMode === "shared_full_paper" && part.timeModel === undefined) {
+          missing.push(`sections.${section.sectionId}.parts.${part.partId}.timeModel`);
+          break;
+        }
+        if (part.timeModel !== undefined && !isValidTimeModel(part.timeModel)) {
           missing.push(`sections.${section.sectionId}.parts.${part.partId}.timeModel`);
           break;
         }

@@ -1,6 +1,6 @@
 import { IELTS_ACADEMIC_V1_BLUEPRINT, snapToScoreGrid, validateExamBlueprint } from "./ielts-blueprint";
 import { IELTS_ACADEMIC_DIAGNOSTIC_SEEDS } from "./ielts-diagnostic-seeds";
-import { partitionExamEvidence, simulateExamPaper } from "./simulator";
+import { partitionExamEvidence, sectionRangesMap, simulateExamPaper, validateNumDraws } from "./simulator";
 import type {
   ExamBlueprintV1,
   ExamEvidenceRecord,
@@ -111,14 +111,19 @@ export function filterIndependentCalibrationRecords(input: {
   const excludedFamilies = input.excludePaperFamilyIds
     ? new Set([...input.excludePaperFamilyIds].map((id) => id.trim()).filter(Boolean))
     : null;
+  const seenRecordIds = new Set<string>();
+  const seenLearnerFamilies = new Set<string>();
+
   return input.records.filter((rec) => {
     if (rec.blueprintId !== input.blueprintId) return false;
     if (rec.targetKind !== input.targetKind) return false;
     if (rec.evidenceKind !== requiredEvidenceKind) return false;
     if (!rec.countsTowardMastery || rec.assisted || rec.exposed === true) return false;
+
+    const recId = rec.recordId?.trim() ?? "";
     const recLearner = rec.learnerId?.trim() ?? "";
     const recFamily = rec.paperFamilyId?.trim() ?? "";
-    if (!recLearner || !recFamily) return false;
+    if (!recId || !recLearner || !recFamily) return false;
     if (excludedLearner && recLearner === excludedLearner) return false;
     if (excludedFamilies && excludedFamilies.has(recFamily)) return false;
 
@@ -138,6 +143,11 @@ export function filterIndependentCalibrationRecords(input: {
       if (!Number.isFinite(low) || !Number.isFinite(high) || low > high) return false;
       if (range && (low < range[0] || high > range[1])) return false;
     }
+
+    const learnerFamilyKey = `${recLearner}\u0000${recFamily}`;
+    if (seenRecordIds.has(recId) || seenLearnerFamilies.has(learnerFamilyKey)) return false;
+    seenRecordIds.add(recId);
+    seenLearnerFamilies.add(learnerFamilyKey);
     return true;
   });
 }
@@ -148,34 +158,53 @@ function observedPassesJointTarget(
   blueprint: ExamBlueprintV1,
 ): number | null {
   let overallLow: number;
+  let overallHigh: number;
   if (record.observedScore.kind === "exact") {
     const score = record.observedScore.score;
     if (!Number.isFinite(score)) return null;
     overallLow = score;
+    overallHigh = score;
   } else {
     const { low, high } = record.observedScore;
     if (!Number.isFinite(low) || !Number.isFinite(high) || low > high) return null;
     overallLow = low;
+    overallHigh = high;
   }
-
-  const overallPass = overallLow >= target.targetOverall ? 1 : 0;
-  if (target.targetMinSection <= blueprint.scoreRange[0]) return overallPass;
 
   const sectionMap = record.observedSectionScores;
-  if (!sectionMap) return null;
-  let sectionsPass = true;
-  for (const section of blueprint.sections) {
-    const val = sectionMap[section.sectionId];
-    if (val === undefined) return null;
-    if (typeof val === "number") {
-      if (!Number.isFinite(val)) return null;
-      if (val < target.targetMinSection) sectionsPass = false;
-    } else {
-      if (!Number.isFinite(val.low) || !Number.isFinite(val.high) || val.low > val.high) return null;
-      if (val.low < target.targetMinSection) sectionsPass = false;
+  const parsedSections = new Map<string, { readonly low: number; readonly high: number }>();
+  if (sectionMap) {
+    for (const [secId, val] of Object.entries(sectionMap)) {
+      if (val === undefined) continue;
+      if (typeof val === "number") {
+        if (!Number.isFinite(val)) return null;
+        parsedSections.set(secId, { low: val, high: val });
+      } else {
+        if (!Number.isFinite(val.low) || !Number.isFinite(val.high) || val.low > val.high) return null;
+        parsedSections.set(secId, { low: val.low, high: val.high });
+      }
     }
   }
-  return overallPass && sectionsPass ? 1 : 0;
+
+  // Provable failure check before checking missing sections (prevents MNAR bias).
+  if (overallHigh < target.targetOverall) return 0;
+  for (const section of blueprint.sections) {
+    const secBounds = parsedSections.get(section.sectionId);
+    if (secBounds !== undefined && secBounds.high < target.targetMinSection) return 0;
+  }
+
+  const needsAllSections = target.targetMinSection > blueprint.scoreRange[0];
+  if (overallLow >= target.targetOverall) {
+    if (!needsAllSections) return 1;
+    const allPass = blueprint.sections.every((section) => {
+      const secBounds = parsedSections.get(section.sectionId);
+      return secBounds !== undefined && secBounds.low >= target.targetMinSection;
+    });
+    if (allPass) return 1;
+  }
+
+  // Remaining straddling or missing-required-section cases default to worst-case lower bound.
+  return 0;
 }
 
 function rawJointPassFromSimulation(
@@ -184,14 +213,16 @@ function rawJointPassFromSimulation(
   target: JointPassTarget,
 ): number {
   const n = simulation.timedScores.length;
-  if (n === 0) return 0;
+  if (n === 0 || simulation.drawSectionScores.length !== n) {
+    throw new RangeError("simulation must contain non-empty matching draws");
+  }
   let passed = 0;
   for (let i = 0; i < n; i++) {
     const overall = simulation.timedScores[i]!;
     if (overall < target.targetOverall) continue;
-    const secMap = simulation.drawSectionScores[i] ?? {};
+    const secMap = simulation.drawSectionScores[i]!;
     const allSectionsPass = blueprint.sections.every(
-      (section) => (secMap[section.sectionId] ?? 0) >= target.targetMinSection,
+      (section) => (Object.hasOwn(secMap, section.sectionId) ? secMap[section.sectionId]! : 0) >= target.targetMinSection,
     );
     if (allSectionsPass) passed += 1;
   }
@@ -205,10 +236,21 @@ export function formatJointTargetKey(target: JointPassTarget): string {
 function recordRawProbForTarget(record: WholePaperCalibrationRecord, target: JointPassTarget): number | null {
   if (!Number.isFinite(target.targetOverall) || !Number.isFinite(target.targetMinSection)) return null;
   const canonicalKey = formatJointTargetKey(target);
-  const fixedKey = `${Number(target.targetOverall).toFixed(1)}:${Number(target.targetMinSection).toFixed(1)}`;
+  const canUseFixedKey =
+    Number(target.targetOverall.toFixed(1)) === target.targetOverall &&
+    Number(target.targetMinSection.toFixed(1)) === target.targetMinSection;
+  const fixedKey = canUseFixedKey
+    ? `${target.targetOverall.toFixed(1)}:${target.targetMinSection.toFixed(1)}`
+    : null;
   const keyed =
-    record.predictedJointPassByTarget?.[canonicalKey] ??
-    record.predictedJointPassByTarget?.[fixedKey];
+    (record.predictedJointPassByTarget && Object.hasOwn(record.predictedJointPassByTarget, canonicalKey)
+      ? record.predictedJointPassByTarget[canonicalKey]
+      : undefined) ??
+    (fixedKey !== null &&
+    record.predictedJointPassByTarget &&
+    Object.hasOwn(record.predictedJointPassByTarget, fixedKey)
+      ? record.predictedJointPassByTarget[fixedKey]
+      : undefined);
   if (keyed !== undefined && Number.isFinite(keyed) && keyed >= 0 && keyed <= 1) return keyed;
 
   const matched = record.predictedTargetPassProbs?.find(
@@ -227,7 +269,9 @@ export function calibrateJointPassTargets(input: {
   readonly blueprint: ExamBlueprintV1;
   readonly calibrationRecords: readonly WholePaperCalibrationRecord[];
   readonly targets: readonly JointPassTarget[];
+  readonly minCalibrationSamples?: number;
 }): JointPassProbabilityEstimate[] {
+  const minSamples = Math.max(1, Math.round(input.minCalibrationSamples ?? 4));
   const rawEstimates = input.targets.map((target) => {
     const rawProbability = rawJointPassFromSimulation(input.simulation, input.blueprint, target);
     const points: Array<{ x: number; y: number }> = [];
@@ -238,27 +282,31 @@ export function calibrateJointPassTargets(input: {
       if (rawProb === null) continue;
       points.push({ x: rawProb, y });
     }
-    const blocks = fitPavIsotonic(points);
-    const calibratedProbability = points.length > 0 ? evaluatePavIsotonic(blocks, rawProbability) : rawProbability;
+    const isCalibrated = points.length >= minSamples;
+    const blocks = isCalibrated ? fitPavIsotonic(points) : [];
+    const calibratedProbability = isCalibrated ? evaluatePavIsotonic(blocks, rawProbability) : null;
     return {
       targetOverall: target.targetOverall,
       targetMinSection: target.targetMinSection,
       rawProbability,
       calibratedProbability,
+      isCalibrated,
       calibrationSampleCount: points.length,
     };
   });
 
-  // Enforce poset monotonicity: whenever target B dominates target A (B >= A), P(B) <= P(A).
+  // Enforce poset monotonicity across calibrated targets: whenever B >= A, P(B) <= P(A).
   const indexed = rawEstimates.map((est, idx) => ({ est, idx, calibrated: est.calibratedProbability }));
   indexed.sort(
     (a, b) =>
       a.est.targetOverall - b.est.targetOverall || a.est.targetMinSection - b.est.targetMinSection,
   );
   for (let i = 0; i < indexed.length; i++) {
+    const harder = indexed[i]!;
+    if (harder.calibrated === null) continue;
     for (let j = 0; j < i; j++) {
       const easier = indexed[j]!;
-      const harder = indexed[i]!;
+      if (easier.calibrated === null) continue;
       if (
         harder.est.targetOverall >= easier.est.targetOverall &&
         harder.est.targetMinSection >= easier.est.targetMinSection &&
@@ -307,6 +355,7 @@ export function evaluateExamForecast(input: {
   if (!Number.isFinite(maxInformativeWidth) || maxInformativeWidth <= 0) {
     throw new RangeError("maxInformativeWidth must be finite and positive");
   }
+  const numDraws = validateNumDraws(input.numDraws, 400);
 
   const trimmedLearnerId = input.learnerId.trim();
   const isIeltsBlueprint = input.blueprint.blueprintId === IELTS_ACADEMIC_V1_BLUEPRINT.blueprintId;
@@ -335,7 +384,11 @@ export function evaluateExamForecast(input: {
     };
   }
 
-  const { admitted, rejectedCount } = partitionExamEvidence(input.evidence, { learnerId: trimmedLearnerId });
+  const { admitted, rejectedCount } = partitionExamEvidence(input.evidence, {
+    learnerId: trimmedLearnerId,
+    examAtMs: input.examAtMs,
+    sectionRanges: sectionRangesMap(input.blueprint),
+  });
   const coveredSections = new Set(admitted.map((e) => e.sectionId));
   const missingSections = input.blueprint.sections
     .map((s) => s.sectionId)
@@ -394,10 +447,11 @@ export function evaluateExamForecast(input: {
 
   const simulation = simulateExamPaper({
     blueprint: input.blueprint,
+    learnerId: trimmedLearnerId,
     beliefs: input.beliefs,
     evidence: admitted,
     examAtMs: input.examAtMs,
-    numDraws: input.numDraws,
+    numDraws,
     seed: input.seed,
   });
 

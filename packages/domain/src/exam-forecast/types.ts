@@ -127,6 +127,8 @@ export type ExamEvidenceRecord = {
   readonly elapsedSeconds?: number | null;
   readonly rightCensored?: boolean;
   readonly rubricScore?: ScoreObservationValue;
+  readonly observedScore?: ScoreObservationValue | number;
+  readonly observedBand?: ScoreObservationValue | number;
   readonly speechTimingReceipt?: SpeechTimingReceiptV1;
 };
 
@@ -194,6 +196,9 @@ export type PaperSimulationSummary = {
   readonly examAtMs: number;
   readonly numDraws: number;
   readonly timedScores: readonly number[];
+  readonly untimedScores: readonly number[];
+  readonly matchedUntimedExpectedScore: number;
+  readonly matchedTimeSqueezeDelta: number;
   readonly untimedExpectedScore: number;
   readonly timedExpectedScore: number;
   readonly timeSqueezeDelta: number;
@@ -222,7 +227,8 @@ export type JointPassProbabilityEstimate = {
   readonly targetOverall: number;
   readonly targetMinSection: number;
   readonly rawProbability: number;
-  readonly calibratedProbability: number;
+  readonly calibratedProbability: number | null;
+  readonly isCalibrated: boolean;
   readonly calibrationSampleCount: number;
 };
 

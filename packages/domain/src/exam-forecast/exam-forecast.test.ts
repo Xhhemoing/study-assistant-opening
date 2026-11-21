@@ -226,7 +226,7 @@ describe("IELTS Academic blueprint & official rounding", () => {
       "math.calc": createSkillBelief({ workspaceId: "w", learnerId: "l", courseId: "c", confirmedSkillVersion: 1, abilityMean: 1.5, lastDirectRecallAtMs: 0 }),
       "math.linalg": createSkillBelief({ workspaceId: "w", learnerId: "l", courseId: "c", confirmedSkillVersion: 1, abilityMean: 1.5, lastDirectRecallAtMs: 0 }),
     };
-    const sim = simulateExamPaper({ blueprint: mathBlueprint, beliefs, evidence: [], examAtMs: DAY_MS, numDraws: 120, seed: 7 });
+    const sim = simulateExamPaper({ blueprint: mathBlueprint, learnerId: "l", beliefs, evidence: [], examAtMs: DAY_MS, numDraws: 120, seed: 7 });
     expect(sim.rightCensoringRateBySection["sec-b"]).toBeGreaterThan(0.5);
     expect(sim.timeSqueezeDelta).toBeGreaterThan(5);
   });
@@ -250,15 +250,16 @@ describe("Correlated simulator, purity gate & Lord-Wingersky untimed baseline", 
     const clean = makeIndependentSectionEvidence();
     const contaminated: ExamEvidenceRecord[] = [
       ...clean,
-      { evidenceId: "bad-pf", sectionId: "reading", countsTowardMastery: true, assisted: false, evidenceKind: "practice_feedback", observedAtMs: 100 },
-      { evidenceId: "bad-sr", sectionId: "reading", countsTowardMastery: true, assisted: false, evidenceKind: "self_report", observedAtMs: 100 },
-      { evidenceId: "bad-ast", sectionId: "reading", countsTowardMastery: true, assisted: true, evidenceKind: "diagnostic_item", observedAtMs: 100 },
-      { evidenceId: "bad-exp", sectionId: "reading", countsTowardMastery: true, assisted: false, exposed: true, evidenceKind: "diagnostic_item", observedAtMs: 100 },
+      { evidenceId: "bad-pf", learnerId: "learner-target", sectionId: "reading", countsTowardMastery: true, assisted: false, evidenceKind: "practice_feedback", observedAtMs: 100, correct: true },
+      { evidenceId: "bad-sr", learnerId: "learner-target", sectionId: "reading", countsTowardMastery: true, assisted: false, evidenceKind: "self_report", observedAtMs: 100, correct: true },
+      { evidenceId: "bad-ast", learnerId: "learner-target", sectionId: "reading", countsTowardMastery: true, assisted: true, evidenceKind: "diagnostic_item", observedAtMs: 100, correct: true },
+      { evidenceId: "bad-exp", learnerId: "learner-target", sectionId: "reading", countsTowardMastery: true, assisted: false, exposed: true, evidenceKind: "diagnostic_item", observedAtMs: 100, correct: true },
     ];
     expect(partitionExamEvidence(contaminated).rejectedCount).toBe(4);
 
     const noCredit = simulateExamPaper({
       blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+      learnerId: "learner-target",
       beliefs: makeIeltsBeliefs({ implicitLogCredit: 0 }),
       evidence: clean,
       examAtMs: 10 * DAY_MS,
@@ -267,6 +268,7 @@ describe("Correlated simulator, purity gate & Lord-Wingersky untimed baseline", 
     });
     const withImplicitCredit = simulateExamPaper({
       blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+      learnerId: "learner-target",
       beliefs: makeIeltsBeliefs({ implicitLogCredit: Math.log(1.2) }),
       evidence: clean,
       examAtMs: 10 * DAY_MS,
@@ -296,6 +298,7 @@ describe("Correlated simulator, purity gate & Lord-Wingersky untimed baseline", 
     const slowBeliefs = makeIeltsBeliefs({ abilityMean: -1.1, logStability: Math.log(5) });
     const timed = simulateExamPaper({
       blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+      learnerId: "learner-target",
       beliefs: slowBeliefs,
       evidence: makeIndependentSectionEvidence(),
       examAtMs: 3 * DAY_MS,
@@ -314,6 +317,7 @@ describe("Correlated simulator, purity gate & Lord-Wingersky untimed baseline", 
 
     const untimed = simulateExamPaper({
       blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+      learnerId: "learner-target",
       beliefs: slowBeliefs,
       evidence: makeIndependentSectionEvidence(),
       examAtMs: 3 * DAY_MS,
@@ -458,6 +462,7 @@ describe("3-State Split CQR 80% calibration & monotonic joint pass", () => {
   it("enforces PAV monotonic joint pass probabilities across harder targets", () => {
     const sim = simulateExamPaper({
       blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+      learnerId: "learner-target",
       beliefs: makeIeltsBeliefs({ abilityMean: 0.8 }),
       evidence: makeIndependentSectionEvidence(),
       examAtMs: 2 * DAY_MS,
@@ -465,10 +470,10 @@ describe("3-State Split CQR 80% calibration & monotonic joint pass", () => {
       seed: 12,
     });
     const noisyCal: WholePaperCalibrationRecord[] = [
-      { ...makeCalibrationRecords(1)[0]!, recordId: "c1", predictedTargetPassProbs: [{ targetOverall: 6.5, targetMinSection: 6.0, rawProbability: 0.7 }, { targetOverall: 7.0, targetMinSection: 6.5, rawProbability: 0.4 }], observedScore: { kind: "exact", score: 6.5 }, observedSectionScores: { listening: 6.5, reading: 6.5, writing: 6.0, speaking: 6.5 } },
-      { ...makeCalibrationRecords(1)[0]!, recordId: "c2", learnerId: "l2", predictedTargetPassProbs: [{ targetOverall: 6.5, targetMinSection: 6.0, rawProbability: 0.8 }, { targetOverall: 7.0, targetMinSection: 6.5, rawProbability: 0.5 }], observedScore: { kind: "exact", score: 7.0 }, observedSectionScores: { listening: 7.0, reading: 7.0, writing: 6.5, speaking: 7.0 } },
-      { ...makeCalibrationRecords(1)[0]!, recordId: "c3", learnerId: "l3", predictedTargetPassProbs: [{ targetOverall: 6.5, targetMinSection: 6.0, rawProbability: 0.4 }, { targetOverall: 7.0, targetMinSection: 6.5, rawProbability: 0.6 }], observedScore: { kind: "exact", score: 7.5 }, observedSectionScores: { listening: 7.5, reading: 7.5, writing: 7.0, speaking: 7.0 } },
-      { ...makeCalibrationRecords(1)[0]!, recordId: "c4", learnerId: "l4", predictedTargetPassProbs: [{ targetOverall: 6.5, targetMinSection: 6.0, rawProbability: 0.5 }, { targetOverall: 7.0, targetMinSection: 6.5, rawProbability: 0.2 }], observedScore: { kind: "exact", score: 6.0 }, observedSectionScores: { listening: 6.0, reading: 6.0, writing: 5.5, speaking: 6.0 } },
+      { ...makeCalibrationRecords(1)[0]!, recordId: "c1", paperFamilyId: "f1", predictedTargetPassProbs: [{ targetOverall: 6.5, targetMinSection: 6.0, rawProbability: 0.7 }, { targetOverall: 7.0, targetMinSection: 6.5, rawProbability: 0.4 }, { targetOverall: 7.5, targetMinSection: 7.0, rawProbability: 0.3 }], observedScore: { kind: "exact", score: 6.5 }, observedSectionScores: { listening: 6.5, reading: 6.5, writing: 6.0, speaking: 6.5 } },
+      { ...makeCalibrationRecords(1)[0]!, recordId: "c2", learnerId: "l2", paperFamilyId: "f2", predictedTargetPassProbs: [{ targetOverall: 6.5, targetMinSection: 6.0, rawProbability: 0.8 }, { targetOverall: 7.0, targetMinSection: 6.5, rawProbability: 0.5 }, { targetOverall: 7.5, targetMinSection: 7.0, rawProbability: 0.4 }], observedScore: { kind: "exact", score: 7.0 }, observedSectionScores: { listening: 7.0, reading: 7.0, writing: 6.5, speaking: 7.0 } },
+      { ...makeCalibrationRecords(1)[0]!, recordId: "c3", learnerId: "l3", paperFamilyId: "f3", predictedTargetPassProbs: [{ targetOverall: 6.5, targetMinSection: 6.0, rawProbability: 0.4 }, { targetOverall: 7.0, targetMinSection: 6.5, rawProbability: 0.6 }, { targetOverall: 7.5, targetMinSection: 7.0, rawProbability: 0.5 }], observedScore: { kind: "exact", score: 7.5 }, observedSectionScores: { listening: 7.5, reading: 7.5, writing: 7.0, speaking: 7.0 } },
+      { ...makeCalibrationRecords(1)[0]!, recordId: "c4", learnerId: "l4", paperFamilyId: "f4", predictedTargetPassProbs: [{ targetOverall: 6.5, targetMinSection: 6.0, rawProbability: 0.5 }, { targetOverall: 7.0, targetMinSection: 6.5, rawProbability: 0.2 }, { targetOverall: 7.5, targetMinSection: 7.0, rawProbability: 0.1 }], observedScore: { kind: "exact", score: 6.0 }, observedSectionScores: { listening: 6.0, reading: 6.0, writing: 5.5, speaking: 6.0 } },
     ];
     const ladder = calibrateJointPassTargets({
       simulation: sim,
@@ -480,8 +485,9 @@ describe("3-State Split CQR 80% calibration & monotonic joint pass", () => {
         { targetOverall: 7.5, targetMinSection: 7.0 },
       ],
     });
-    expect(ladder[0]!.calibratedProbability).toBeGreaterThanOrEqual(ladder[1]!.calibratedProbability);
-    expect(ladder[1]!.calibratedProbability).toBeGreaterThanOrEqual(ladder[2]!.calibratedProbability);
+    expect(ladder.every((item) => item.isCalibrated && item.calibratedProbability !== null)).toBe(true);
+    expect(ladder[0]!.calibratedProbability!).toBeGreaterThanOrEqual(ladder[1]!.calibratedProbability!);
+    expect(ladder[1]!.calibratedProbability!).toBeGreaterThanOrEqual(ladder[2]!.calibratedProbability!);
   });
 });
 
@@ -511,6 +517,7 @@ describe("CRN marginal ROI sandbox & UnifiedDecisionSnapshotV1", () => {
     const beliefs = makeIeltsBeliefs({ abilityMean: -0.9, logStability: Math.log(6) });
     const speedEval = evaluateCrnActionRoi({
       blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+      learnerId: "learner-target",
       beliefs,
       evidence: makeIndependentSectionEvidence(),
       examAtMs: 2 * DAY_MS,
@@ -575,6 +582,7 @@ describe("CRN marginal ROI sandbox & UnifiedDecisionSnapshotV1", () => {
     const anchoredEvidence = makeIndependentSectionEvidence(anchorMs);
     const atAnchor = simulateExamPaper({
       blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+      learnerId: "learner-target",
       beliefs,
       evidence: anchoredEvidence,
       examAtMs: anchorMs,
@@ -583,6 +591,7 @@ describe("CRN marginal ROI sandbox & UnifiedDecisionSnapshotV1", () => {
     });
     const after180d = simulateExamPaper({
       blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+      learnerId: "learner-target",
       beliefs,
       evidence: anchoredEvidence,
       examAtMs: anchorMs + 180 * DAY_MS,
@@ -610,6 +619,7 @@ describe("CRN marginal ROI sandbox & UnifiedDecisionSnapshotV1", () => {
     };
     const writingRoi = evaluateCrnActionRoi({
       blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+      learnerId: "learner-target",
       beliefs,
       evidence: anchoredEvidence,
       examAtMs: anchorMs + 20 * DAY_MS,
@@ -670,18 +680,20 @@ describe("CRN marginal ROI sandbox & UnifiedDecisionSnapshotV1", () => {
       expect(nanRes.calibrationCount).toBe(3);
     }
 
-    // [P1-5] Missing or NaN section scores must be skipped when targetMinSection > scoreRange[0].
+    // [P1-5] Corrupt NaN section scores must be skipped (null), while provable failures return 0.
     const sim = simulateExamPaper({
       blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+      learnerId: "learner-target",
       beliefs,
       evidence: anchoredEvidence,
       examAtMs: DAY_MS,
       numDraws: 60,
       seed: 19,
     });
-    const incompleteSectionsCal: WholePaperCalibrationRecord[] = makeCalibrationRecords(4).map((r, idx) => ({
+    const incompleteSectionsCal: WholePaperCalibrationRecord[] = makeCalibrationRecords(4).map((r) => ({
       ...r,
-      observedSectionScores: idx === 0 ? undefined : { listening: 7.0, reading: 7.0, writing: 7.0 },
+      observedScore: { kind: "exact" as const, score: 7.0 },
+      observedSectionScores: { listening: 7.0, reading: Number.NaN, writing: 7.0, speaking: 7.0 },
     }));
     const ladder = calibrateJointPassTargets({
       simulation: sim,
@@ -690,6 +702,8 @@ describe("CRN marginal ROI sandbox & UnifiedDecisionSnapshotV1", () => {
       targets: [{ targetOverall: 7.0, targetMinSection: 6.5 }],
     });
     expect(ladder[0]!.calibrationSampleCount).toBe(0);
+    expect(ladder[0]!.isCalibrated).toBe(false);
+    expect(ladder[0]!.calibratedProbability).toBeNull();
 
     // [P2-1] computeWritingBand & computeIeltsOverallBand clamp finite [0, 9] and throw on non-finite.
     expect(() => computeWritingBand(Number.NaN, 7)).toThrow(RangeError);
@@ -759,6 +773,7 @@ describe("CRN marginal ROI sandbox & UnifiedDecisionSnapshotV1", () => {
     });
     const sharedSim = simulateExamPaper({
       blueprint: sharedRubricBp,
+      learnerId: "l",
       beliefs: {
         s1: createSkillBelief({ workspaceId: "w", learnerId: "l", courseId: "c", confirmedSkillVersion: 1, abilityMean: 1, lastDirectRecallAtMs: 0 }),
         s2: createSkillBelief({ workspaceId: "w", learnerId: "l", courseId: "c", confirmedSkillVersion: 1, abilityMean: 1, lastDirectRecallAtMs: 0 }),
@@ -827,6 +842,7 @@ describe("CRN marginal ROI sandbox & UnifiedDecisionSnapshotV1", () => {
       candidateActions: [recoveryAction],
     });
     expect(uncalibratedSnap.allocatedRecoveryMinutes).toBe(0);
+    expect(uncalibratedSnap.maxRecoveryMinutes).toBe(0);
     expect(uncalibratedSnap.executableMinutes).toBe(0);
     expect(uncalibratedSnap.selectedActionIds).toEqual([]);
 
@@ -854,6 +870,7 @@ describe("CRN marginal ROI sandbox & UnifiedDecisionSnapshotV1", () => {
     const evidence = makeIndependentSectionEvidence(1_000);
     const sim = simulateExamPaper({
       blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+      learnerId: "learner-target",
       beliefs,
       evidence,
       examAtMs: DAY_MS,
@@ -861,7 +878,7 @@ describe("CRN marginal ROI sandbox & UnifiedDecisionSnapshotV1", () => {
       seed: 21,
     });
 
-    // [R3 P1-1] MNAR bias guard & inverted interval rejection in observedPassesJointTarget.
+    // [R3 P1-1 / R4 P1-4] Provable failures with missing sections count as 0; inverted intervals return null; < minCalibrationSamples yields null.
     const target7 = { targetOverall: 7.0, targetMinSection: 6.5 };
     const mnarCal: WholePaperCalibrationRecord[] = [
       {
@@ -888,8 +905,18 @@ describe("CRN marginal ROI sandbox & UnifiedDecisionSnapshotV1", () => {
       blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
       calibrationRecords: mnarCal,
       targets: [target7],
+      minCalibrationSamples: 1,
     });
-    expect(mnarRes[0]!.calibrationSampleCount).toBe(0);
+    expect(mnarRes[0]!.calibrationSampleCount).toBe(1);
+    expect(mnarRes[0]!.calibratedProbability).toBe(0);
+    const uncalibratedJoint = calibrateJointPassTargets({
+      simulation: sim,
+      blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+      calibrationRecords: mnarCal.slice(1),
+      targets: [target7],
+    });
+    expect(uncalibratedJoint[0]!.isCalibrated).toBe(false);
+    expect(uncalibratedJoint[0]!.calibratedProbability).toBeNull();
 
     // [R3 P1-2] Reject calibration records whose predictedQuantiles fall outside blueprint.scoreRange.
     const outOfRangeQuantilesCal = makeCalibrationRecords(4).map((r, idx) =>
@@ -988,6 +1015,7 @@ describe("CRN marginal ROI sandbox & UnifiedDecisionSnapshotV1", () => {
     ];
     const nanPauseSim = simulateExamPaper({
       blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+      learnerId: "learner-target",
       beliefs,
       evidence: nanPauseEvidence,
       examAtMs: DAY_MS,
@@ -1071,5 +1099,320 @@ describe("CRN marginal ROI sandbox & UnifiedDecisionSnapshotV1", () => {
       ),
     };
     expect(validateExamBlueprint(badRubricTimeBp)).toContain("sections.writing.parts.writing-task-1.timeModel");
+  });
+
+  it("enforces all Round-4 7 P1 & 6 P2 edge-case and security invariants", () => {
+    const beliefs = makeIeltsBeliefs({ abilityMean: 0.4, logStability: Math.log(14), lastDirectRecallAtMs: 0 });
+    const evidence = makeIndependentSectionEvidence(1_000);
+
+    // [R4 P1-1] Mandatory learnerId isolation on beliefs and evidence in simulateExamPaper & evaluateCrnActionRoi.
+    expect(() =>
+      simulateExamPaper({ blueprint: IELTS_ACADEMIC_V1_BLUEPRINT, learnerId: "  ", beliefs, evidence, examAtMs: DAY_MS }),
+    ).toThrow(RangeError);
+    expect(() =>
+      evaluateCrnActionRoi({
+        blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+        learnerId: "",
+        beliefs,
+        evidence,
+        examAtMs: DAY_MS,
+        baselineActions: [],
+        candidateAction: { actionId: "a", title: "A", durationHours: 1, kind: "skill_repair" },
+        crnSeed: 1,
+      }),
+    ).toThrow(RangeError);
+
+    const foreignBeliefs: SkillBeliefMap = Object.fromEntries(
+      Object.entries(makeIeltsBeliefs({ abilityMean: 4.0 })).map(([k, v]) => [k, { ...v, learnerId: "other-learner" }]),
+    );
+    const foreignSimA = simulateExamPaper({
+      blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+      learnerId: "learner-target",
+      beliefs: foreignBeliefs,
+      evidence: [],
+      examAtMs: DAY_MS,
+      numDraws: 40,
+      seed: 17,
+    });
+    const emptyBeliefSim = simulateExamPaper({
+      blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+      learnerId: "learner-target",
+      beliefs: {},
+      evidence: [],
+      examAtMs: DAY_MS,
+      numDraws: 40,
+      seed: 17,
+    });
+    expect(foreignSimA.timedScores).toEqual(emptyBeliefSim.timedScores);
+
+    // [R4 P1-2] Future timestamp cutoff (observedAtMs > examAtMs) & metadata-only shell rejection.
+    const futureOrShellEvidence: ExamEvidenceRecord[] = [
+      ...evidence.filter((e) => e.sectionId !== "reading" && e.sectionId !== "writing"),
+      {
+        evidenceId: "shell-reading",
+        learnerId: "learner-target",
+        sectionId: "reading",
+        countsTowardMastery: true,
+        assisted: false,
+        evidenceKind: "diagnostic_item",
+        observedAtMs: 500,
+      },
+      {
+        evidenceId: "future-writing",
+        learnerId: "learner-target",
+        sectionId: "writing",
+        partId: "writing-task-2",
+        countsTowardMastery: true,
+        assisted: false,
+        evidenceKind: "rubric_assessment",
+        observedAtMs: 10 * DAY_MS,
+        rubricScore: { kind: "exact", score: 9.0 },
+      },
+    ];
+    const blockedFutureShell = evaluateExamForecast({
+      blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+      learnerId: "learner-target",
+      beliefs,
+      evidence: futureOrShellEvidence,
+      calibrationRecords: makeCalibrationRecords(5),
+      examAtMs: 2 * DAY_MS,
+    });
+    expect(blockedFutureShell.status).toBe("insufficient_independent_evidence");
+    if (blockedFutureShell.status === "insufficient_independent_evidence") {
+      expect(blockedFutureShell.missingSections).toEqual(["reading", "writing"]);
+    }
+
+    // [R4 P1-3] Deduplicate calibration observations by recordId and (learnerId, paperFamilyId).
+    const dupById = Array.from({ length: 4 }, () => makeCalibrationRecords(1)[0]!);
+    const dupByPair = Array.from({ length: 4 }, (_, idx) => ({ ...makeCalibrationRecords(1)[0]!, recordId: `dup-${idx}` }));
+    expect(
+      filterIndependentCalibrationRecords({
+        records: dupById,
+        blueprintId: IELTS_ACADEMIC_V1_BLUEPRINT.blueprintId,
+        targetKind: "same_blueprint_mock",
+      }).length,
+    ).toBe(1);
+    expect(
+      filterIndependentCalibrationRecords({
+        records: dupByPair,
+        blueprintId: IELTS_ACADEMIC_V1_BLUEPRINT.blueprintId,
+        targetKind: "same_blueprint_mock",
+      }).length,
+    ).toBe(1);
+
+    // [R4 P1-5] Reject non-finite speedLoading and skillLoading on items and rubric parts.
+    const badLoadBp = {
+      ...IELTS_ACADEMIC_V1_BLUEPRINT,
+      sections: IELTS_ACADEMIC_V1_BLUEPRINT.sections.map((sec) =>
+        sec.sectionId === "listening" && sec.items
+          ? {
+              ...sec,
+              items: [{ ...sec.items[0]!, timeModel: { ...sec.items[0]!.timeModel, speedLoading: Number.NaN } }, ...sec.items.slice(1)],
+            }
+          : sec.sectionId === "writing"
+            ? {
+                ...sec,
+                parts: [{ ...sec.parts[0]!, timeModel: { ...sec.parts[0]!.timeModel!, skillLoading: { "ielts.writing.task1_overview": Number.POSITIVE_INFINITY } } }, ...sec.parts.slice(1)],
+              }
+            : sec,
+      ),
+    };
+    const loadMissing = validateExamBlueprint(badLoadBp);
+    expect(loadMissing).toContain("sections.listening.items.ielts-l-1.timeModel");
+    expect(loadMissing).toContain("sections.writing.parts.writing-task-1.timeModel");
+
+    // [R4 P1-6] shared_full_paper requires rubric part timeModel; exhausted clock awards score floor 0 & rightCensored: true.
+    const missingRubricTimeBp = createSharedFullPaperBlueprint({
+      blueprintId: "shared-no-rubric-tm",
+      title: "Missing Rubric TM",
+      totalTimeLimitMinutes: 30,
+      totalPoints: 20,
+      skillIds: ["s1"],
+      sections: [
+        {
+          sectionId: "essay",
+          label: "Essay",
+          scoringKind: "rubric_band",
+          timeLimitMinutes: null,
+          weight: 1,
+          scoreRange: [0, 20],
+          scoreStep: 1,
+          parts: [{ partId: "e1", label: "E1", weight: 1, skillIds: ["s1"] }],
+        },
+      ],
+    });
+    expect(validateExamBlueprint(missingRubricTimeBp)).toContain("sections.essay.parts.e1.timeModel");
+
+    const exhaustedRubricBp = createSharedFullPaperBlueprint({
+      blueprintId: "shared-exhausted-rubric",
+      title: "Exhausted Clock Rubric Floor",
+      totalTimeLimitMinutes: 10,
+      totalPoints: 20,
+      skillIds: ["s1", "s2"],
+      sections: [
+        {
+          sectionId: "mcq",
+          label: "MCQ",
+          scoringKind: "item_raw_table",
+          timeLimitMinutes: null,
+          weight: 1,
+          scoreRange: [0, 10],
+          scoreStep: 1,
+          parts: [{ partId: "mcq-p1", label: "P1", weight: 1, skillIds: ["s1"] }],
+          items: [
+            {
+              itemId: "m-long",
+              sectionId: "mcq",
+              partId: "mcq-p1",
+              skillIds: ["s1"],
+              guess: 0,
+              lapse: 0,
+              points: 10,
+              timeModel: { mu: Math.log(900), speedLoading: 0, skillLoading: { s1: 0 }, sigma: 0.01 },
+            },
+          ],
+          rawToBandTable: Array.from({ length: 11 }, (_, raw) => ({ rawMin: raw, rawMax: raw, score: raw })),
+        },
+        {
+          sectionId: "essay",
+          label: "Essay",
+          scoringKind: "rubric_band",
+          timeLimitMinutes: null,
+          weight: 1,
+          scoreRange: [0, 10],
+          scoreStep: 1,
+          parts: [
+            {
+              partId: "essay-unstarted",
+              label: "Essay",
+              weight: 1,
+              skillIds: ["s2"],
+              timeModel: { mu: Math.log(300), speedLoading: 0, skillLoading: { s2: 0 }, sigma: 0.01 },
+            },
+          ],
+        },
+      ],
+    });
+    const exhaustedSim = simulateExamPaper({
+      blueprint: exhaustedRubricBp,
+      learnerId: "l",
+      beliefs: {
+        s1: createSkillBelief({ workspaceId: "w", learnerId: "l", courseId: "c", confirmedSkillVersion: 1, abilityMean: 3, lastDirectRecallAtMs: 0 }),
+        s2: createSkillBelief({ workspaceId: "w", learnerId: "l", courseId: "c", confirmedSkillVersion: 1, abilityMean: 3, lastDirectRecallAtMs: 0 }),
+      },
+      evidence: [],
+      examAtMs: DAY_MS,
+      numDraws: 10,
+      seed: 3,
+    });
+    expect(exhaustedSim.sectionSummaries["essay"]!.timedMeanScore).toBe(0);
+    expect(exhaustedSim.sampleRightCensoredItems.some((o) => o.partId === "essay-unstarted" && o.rightCensored && o.observedTimeSeconds === null)).toBe(true);
+
+    // [R4 P1-7 & P2-2] Prototype-safe Map accumulation & set-union action deduplication by actionId.
+    const protoAction: CandidateStudyAction = {
+      actionId: "dup-action",
+      title: "Prototype Safe Action",
+      durationHours: 1,
+      kind: "skill_repair",
+      skillEffects: {
+        constructor: { abilityDelta: 0.5 },
+        "ielts.reading.inference": { abilityDelta: 1.0 },
+      },
+    };
+    const dupEval = evaluateCrnActionRoi({
+      blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+      learnerId: "learner-target",
+      beliefs,
+      evidence,
+      examAtMs: 2 * DAY_MS,
+      baselineActions: [protoAction],
+      candidateAction: { ...protoAction, actionId: " dup-action " },
+      crnSeed: 11,
+      numDraws: 40,
+    });
+    expect(dupEval.pairedMeanGain).toBe(0);
+    expect(dupEval.monteCarloSe).toBe(0);
+    expect(({} as { abilityDelta?: number }).abilityDelta).toBeUndefined();
+
+    // [R4 P2-1] Matched CRN untimed counterfactual yields exact 0 difference when zero draws censor.
+    const ampleClockBlueprint = {
+      ...IELTS_ACADEMIC_V1_BLUEPRINT,
+      sections: IELTS_ACADEMIC_V1_BLUEPRINT.sections.map((section) => ({
+        ...section,
+        timeLimitMinutes: 600,
+      })),
+    };
+    const uncensoredSim = simulateExamPaper({
+      blueprint: ampleClockBlueprint,
+      learnerId: "learner-target",
+      beliefs,
+      evidence,
+      examAtMs: DAY_MS,
+      numDraws: 40,
+      seed: 9,
+    });
+    expect(Object.values(uncensoredSim.rightCensoringRateBySection).every((rate) => rate === 0)).toBe(true);
+    expect(uncensoredSim.matchedTimeSqueezeDelta).toBe(0);
+    const uncensoredRoi = evaluateCrnActionRoi({
+      blueprint: ampleClockBlueprint,
+      learnerId: "learner-target",
+      beliefs,
+      evidence,
+      examAtMs: DAY_MS,
+      baselineActions: [],
+      candidateAction: { actionId: "speed-noop", title: "Speed", durationHours: 1, kind: "speed_drill", expectedSpeedShift: 0.5 },
+      crnSeed: 9,
+      numDraws: 40,
+    });
+    expect(uncensoredRoi.timeSqueezeReduction).toBe(0);
+
+    // [R4 P2-3] Exact numeric target-key lookup: 7.04:6.5 must NOT match "7.0:6.5".
+    const sim = simulateExamPaper({
+      blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+      learnerId: "learner-target",
+      beliefs,
+      evidence,
+      examAtMs: DAY_MS,
+      numDraws: 30,
+      seed: 1,
+    });
+    const fixedKeyCal = makeCalibrationRecords(4).map((r, idx) => ({
+      ...r,
+      predictedTargetPassProbs: undefined,
+      predictedJointPassByTarget: { "7.0:6.5": 0.2 + idx * 0.2 },
+    }));
+    const mismatchKeyRes = calibrateJointPassTargets({
+      simulation: sim,
+      blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+      calibrationRecords: fixedKeyCal,
+      targets: [{ targetOverall: 7.04, targetMinSection: 6.5 }],
+    });
+    expect(mismatchKeyRes[0]!.calibrationSampleCount).toBe(0);
+    expect(mismatchKeyRes[0]!.calibratedProbability).toBeNull();
+
+    // [R4 P2-4] Scale-aware Cholesky preserves tiny positive pivots in valid rank-one PSD matrices.
+    const scaledPsd = choleskyDecompose([
+      [2 ** -82, 2 ** -21],
+      [2 ** -21, 2 ** 40],
+    ]);
+    expect(scaledPsd[0]![0]).toBeCloseTo(2 ** -41, 15);
+    expect(scaledPsd[1]![0]).toBeCloseTo(2 ** 20, 5);
+    expect(scaledPsd[1]![1]).toBe(0);
+
+    // [R4 P2-5] Reject invalid numDraws & empty draws in calibrateJointPassTargets.
+    expect(() =>
+      simulateExamPaper({ blueprint: IELTS_ACADEMIC_V1_BLUEPRINT, learnerId: "learner-target", beliefs, evidence, examAtMs: DAY_MS, numDraws: 0 }),
+    ).toThrow(RangeError);
+    expect(() =>
+      simulateExamPaper({ blueprint: IELTS_ACADEMIC_V1_BLUEPRINT, learnerId: "learner-target", beliefs, evidence, examAtMs: DAY_MS, numDraws: 50_001 }),
+    ).toThrow(RangeError);
+    expect(() =>
+      calibrateJointPassTargets({
+        simulation: { ...sim, timedScores: [], drawSectionScores: [] },
+        blueprint: IELTS_ACADEMIC_V1_BLUEPRINT,
+        calibrationRecords: makeCalibrationRecords(4),
+        targets: [{ targetOverall: 7.0, targetMinSection: 6.5 }],
+      }),
+    ).toThrow(RangeError);
   });
 });

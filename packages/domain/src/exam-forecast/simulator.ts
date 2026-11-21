@@ -13,33 +13,121 @@ import type {
   ExamSectionBlueprint,
   PaperSimulationSummary,
   ScoreBucketProbability,
+  ScoreObservationValue,
   SectionSimulationSummary,
   SimulatedItemOutcome,
   SkillBeliefMap,
 } from "./types";
 
+export const MAX_SIMULATION_DRAWS = 50_000;
+
 const clamp = (value: number, min: number, max: number): number => Math.min(max, Math.max(min, value));
 const sigmoid = (x: number): number => (x >= 0 ? 1 / (1 + Math.exp(-x)) : Math.exp(x) / (1 + Math.exp(x)));
 
-export function isIndependentExamEvidence(record: ExamEvidenceRecord, learnerId?: string): boolean {
-  const trimmedTarget = learnerId?.trim();
+export function validateNumDraws(numDraws: number | undefined, fallback = 400): number {
+  const n = numDraws ?? fallback;
+  if (!Number.isInteger(n) || n < 1 || n > MAX_SIMULATION_DRAWS) {
+    throw new RangeError(`numDraws must be an integer in [1, ${MAX_SIMULATION_DRAWS}]`);
+  }
+  return n;
+}
+
+function parseScoreObservationBounds(
+  value: ScoreObservationValue | number | undefined,
+  range?: readonly [number, number],
+): { readonly low: number; readonly high: number } | null {
+  if (value === undefined) return null;
+  let low: number;
+  let high: number;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) return null;
+    low = value;
+    high = value;
+  } else if (value.kind === "exact") {
+    if (!Number.isFinite(value.score)) return null;
+    low = value.score;
+    high = value.score;
+  } else {
+    if (!Number.isFinite(value.low) || !Number.isFinite(value.high) || value.low > value.high) return null;
+    low = value.low;
+    high = value.high;
+  }
+  if (range && (low < range[0] || high > range[1])) return null;
+  return { low, high };
+}
+
+export function hasUsableObservedPayload(
+  record: ExamEvidenceRecord,
+  sectionRange?: readonly [number, number],
+): boolean {
+  const scoreBounds = parseScoreObservationBounds(
+    record.rubricScore ?? record.observedScore ?? record.observedBand,
+    sectionRange,
+  );
+  if (record.evidenceKind === "rubric_assessment") {
+    return scoreBounds !== null;
+  }
+  if (record.evidenceKind === "speech_timing") {
+    const receipt = record.speechTimingReceipt;
+    const validReceipt =
+      receipt !== undefined &&
+      receipt.calibrated === true &&
+      Number.isFinite(receipt.durationSeconds) &&
+      receipt.durationSeconds > 0 &&
+      ((receipt.fluencyScore !== undefined &&
+        Number.isFinite(receipt.fluencyScore) &&
+        receipt.fluencyScore >= 0 &&
+        receipt.fluencyScore <= 9) ||
+        (receipt.speechRateWpm !== undefined &&
+          Number.isFinite(receipt.speechRateWpm) &&
+          receipt.speechRateWpm > 0));
+    return validReceipt || scoreBounds !== null;
+  }
+  if (record.evidenceKind === "diagnostic_item") {
+    return typeof record.correct === "boolean" || scoreBounds !== null;
+  }
+  if (record.evidenceKind === "independent_mock" || record.evidenceKind === "official_exam") {
+    return typeof record.correct === "boolean" || scoreBounds !== null;
+  }
+  return false;
+}
+
+export type EvidenceFilterOptions = {
+  readonly learnerId?: string;
+  readonly examAtMs?: number;
+  readonly sectionRanges?: ReadonlyMap<string, readonly [number, number]>;
+};
+
+export function isIndependentExamEvidence(
+  record: ExamEvidenceRecord,
+  learnerIdOrOptions?: string | EvidenceFilterOptions,
+): boolean {
+  const options: EvidenceFilterOptions =
+    typeof learnerIdOrOptions === "string"
+      ? { learnerId: learnerIdOrOptions }
+      : (learnerIdOrOptions ?? {});
+  const trimmedTarget = options.learnerId?.trim();
   const learnerMatches =
-    learnerId === undefined ||
+    options.learnerId === undefined ||
     (trimmedTarget !== undefined && trimmedTarget.length > 0 && record.learnerId?.trim() === trimmedTarget);
+  if (!learnerMatches) return false;
+  if (!Number.isFinite(record.observedAtMs)) return false;
+  if (options.examAtMs !== undefined) {
+    if (!Number.isFinite(options.examAtMs) || record.observedAtMs > options.examAtMs) return false;
+  }
   return (
     record.countsTowardMastery === true &&
     record.assisted === false &&
     record.exposed !== true &&
     record.evidenceKind !== "practice_feedback" &&
     record.evidenceKind !== "self_report" &&
-    Number.isFinite(record.observedAtMs) &&
-    learnerMatches
+    hasUsableObservedPayload(record, options.sectionRanges?.get(record.sectionId))
   );
 }
 
 export function partitionExamEvidence(
   records: readonly ExamEvidenceRecord[],
-  options: { readonly learnerId?: string } = {},
+  options: EvidenceFilterOptions = {},
 ): {
   readonly admitted: readonly ExamEvidenceRecord[];
   readonly rejectedCount: number;
@@ -47,10 +135,14 @@ export function partitionExamEvidence(
   const admitted: ExamEvidenceRecord[] = [];
   let rejectedCount = 0;
   for (const record of records) {
-    if (isIndependentExamEvidence(record, options.learnerId)) admitted.push(record);
+    if (isIndependentExamEvidence(record, options)) admitted.push(record);
     else rejectedCount += 1;
   }
   return { admitted, rejectedCount };
+}
+
+export function sectionRangesMap(blueprint: ExamBlueprintV1): ReadonlyMap<string, readonly [number, number]> {
+  return new Map(blueprint.sections.map((section) => [section.sectionId, section.scoreRange] as const));
 }
 
 export { choleskyDecompose };
@@ -85,13 +177,14 @@ export function generatePaperRandomDraws(
   numDraws: number,
   seed: number,
 ): PaperRandomDraw[] {
+  const validDraws = validateNumDraws(numDraws);
   const lower = choleskyDecompose(blueprint.thetaCovariance);
   const nSkills = blueprint.skillIds.length;
   const totalItems = blueprint.sections.reduce((sum, s) => sum + (s.items?.length ?? 0), 0);
   const totalParts = blueprint.sections.reduce((sum, s) => sum + s.parts.length, 0);
   const rng = createSeededRng(seed);
   const draws: PaperRandomDraw[] = [];
-  for (let d = 0; d < numDraws; d++) {
+  for (let d = 0; d < validDraws; d++) {
     const xi = Array.from({ length: nSkills }, () => sampleStandardNormal(rng));
     const zLatent = Array.from({ length: nSkills }, (_, i) => {
       let acc = 0;
@@ -161,11 +254,20 @@ export function sampleLogNormalStepTimeSeconds(
   mBySkill: Readonly<Record<string, number>>,
   epsNormal: number,
 ): number {
-  let skillTerm = 0;
-  for (const [skillId, loading] of Object.entries(item.timeModel.skillLoading)) {
-    skillTerm += loading * (mBySkill[skillId] ?? 0.5);
+  const { mu, speedLoading, skillLoading, sigma } = item.timeModel;
+  if (!Number.isFinite(mu) || !Number.isFinite(sigma) || sigma <= 0 || !Number.isFinite(nuSpeed) || !Number.isFinite(epsNormal)) {
+    throw new RangeError("Non-finite time-model predictor");
   }
-  const logT = item.timeModel.mu - item.timeModel.speedLoading * nuSpeed - skillTerm + item.timeModel.sigma * epsNormal;
+  const safeSpeedLoading = (speedLoading as number | undefined) === undefined ? 0 : speedLoading;
+  if (!Number.isFinite(safeSpeedLoading)) throw new RangeError("Non-finite speedLoading");
+  let skillTerm = 0;
+  for (const [skillId, loading] of Object.entries(skillLoading)) {
+    if (!Number.isFinite(loading)) throw new RangeError("Non-finite skillLoading");
+    const mastery = Object.hasOwn(mBySkill, skillId) ? mBySkill[skillId]! : 0.5;
+    skillTerm += loading * mastery;
+  }
+  const logT = mu - safeSpeedLoading * nuSpeed - skillTerm + sigma * epsNormal;
+  if (!Number.isFinite(logT)) throw new RangeError("Non-finite log-normal step time");
   return Math.exp(clamp(logT, -6, 12));
 }
 
@@ -191,35 +293,27 @@ type RubricEvidenceSummary = {
   readonly speakingFluencyShift: number;
 };
 
-function summarizeRubricAndTimingEvidence(admitted: readonly ExamEvidenceRecord[]): RubricEvidenceSummary {
+function summarizeRubricAndTimingEvidence(
+  admitted: readonly ExamEvidenceRecord[],
+  sectionRanges: ReadonlyMap<string, readonly [number, number]>,
+): RubricEvidenceSummary {
   const partAnchors = new Map<string, RubricAnchor>();
   const sectionAnchors = new Map<string, RubricAnchor>();
   let speakingShiftSum = 0;
   let speakingCount = 0;
 
   for (const record of admitted) {
-    if (record.rubricScore) {
-      let anchor: RubricAnchor | null = null;
-      if (record.rubricScore.kind === "exact" && Number.isFinite(record.rubricScore.score)) {
-        anchor = { low: record.rubricScore.score, high: record.rubricScore.score, observedAtMs: record.observedAtMs };
-      } else if (
-        record.rubricScore.kind === "interval_only" &&
-        Number.isFinite(record.rubricScore.low) &&
-        Number.isFinite(record.rubricScore.high)
-      ) {
-        anchor = {
-          low: Math.min(record.rubricScore.low, record.rubricScore.high),
-          high: Math.max(record.rubricScore.low, record.rubricScore.high),
-          observedAtMs: record.observedAtMs,
-        };
-      }
-      if (anchor) {
-        const targetMap = record.partId ? partAnchors : sectionAnchors;
-        const key = record.partId ?? record.sectionId;
-        const existing = targetMap.get(key);
-        if (!existing || anchor.observedAtMs >= existing.observedAtMs) {
-          targetMap.set(key, anchor);
-        }
+    const scoreBounds = parseScoreObservationBounds(
+      record.rubricScore ?? record.observedScore ?? record.observedBand,
+      sectionRanges.get(record.sectionId),
+    );
+    if (scoreBounds) {
+      const anchor: RubricAnchor = { low: scoreBounds.low, high: scoreBounds.high, observedAtMs: record.observedAtMs };
+      const targetMap = record.partId ? partAnchors : sectionAnchors;
+      const key = record.partId ?? record.sectionId;
+      const existing = targetMap.get(key);
+      if (!existing || anchor.observedAtMs >= existing.observedAtMs) {
+        targetMap.set(key, anchor);
       }
     }
     if (record.sectionId === "speaking" && record.speechTimingReceipt?.calibrated) {
@@ -227,7 +321,7 @@ function summarizeRubricAndTimingEvidence(admitted: readonly ExamEvidenceRecord[
       if (receipt.fluencyScore !== undefined && Number.isFinite(receipt.fluencyScore)) {
         speakingShiftSum += clamp((receipt.fluencyScore - 6) * 0.25, -1, 1);
         speakingCount += 1;
-      } else if (receipt.speechRateWpm !== undefined && Number.isFinite(receipt.speechRateWpm)) {
+      } else if (receipt.speechRateWpm !== undefined && Number.isFinite(receipt.speechRateWpm) && receipt.speechRateWpm > 0) {
         const wpmDelta = clamp((receipt.speechRateWpm - 125) / 80, -0.5, 0.5);
         const pausePenalty =
           receipt.pauseRatio !== undefined && Number.isFinite(receipt.pauseRatio)
@@ -245,18 +339,41 @@ function summarizeRubricAndTimingEvidence(admitted: readonly ExamEvidenceRecord[
   };
 }
 
+export type SkillDeltaOverride = {
+  readonly abilityDelta?: number;
+  readonly logStabilityDelta?: number;
+};
+
+function readSkillOverride(
+  skillOverrides: ReadonlyMap<string, SkillDeltaOverride> | Readonly<Record<string, SkillDeltaOverride>> | undefined,
+  skillId: string,
+): SkillDeltaOverride | undefined {
+  if (!skillOverrides) return undefined;
+  if (skillOverrides instanceof Map) return skillOverrides.get(skillId);
+  const record = skillOverrides as Readonly<Record<string, SkillDeltaOverride>>;
+  return Object.hasOwn(record, skillId) ? record[skillId] : undefined;
+}
+
+function readLearnerBelief(beliefs: SkillBeliefMap, skillId: string, trimmedLearnerId: string): SkillBeliefV1 | undefined {
+  if (!Object.hasOwn(beliefs, skillId)) return undefined;
+  const belief = beliefs[skillId];
+  if (!belief || belief.learnerId?.trim() !== trimmedLearnerId) return undefined;
+  return belief;
+}
+
 function buildDecayedSkillParams(
   blueprint: ExamBlueprintV1,
   beliefs: SkillBeliefMap,
+  trimmedLearnerId: string,
   examAtMs: number,
-  skillOverrides?: Readonly<Record<string, { readonly abilityDelta?: number; readonly logStabilityDelta?: number }>>,
+  skillOverrides?: ReadonlyMap<string, SkillDeltaOverride> | Readonly<Record<string, SkillDeltaOverride>>,
 ): { readonly rd: readonly number[]; readonly mu: readonly number[]; readonly sd: readonly number[] } {
   const rd: number[] = [];
   const mu: number[] = [];
   const sd: number[] = [];
   for (const skillId of blueprint.skillIds) {
-    const belief: SkillBeliefV1 | undefined = beliefs[skillId];
-    const override = skillOverrides?.[skillId];
+    const belief = readLearnerBelief(beliefs, skillId, trimmedLearnerId);
+    const override = readSkillOverride(skillOverrides, skillId);
     if (!belief) {
       rd.push(0.5);
       mu.push(override?.abilityDelta ?? 0);
@@ -310,6 +427,7 @@ type DrawItemSectionResult = {
   readonly totalItems: number;
   readonly censoredCount: number;
   readonly timedScore: number;
+  readonly matchedUntimedScore: number;
   readonly untimedDist: ReadonlyMap<number, number>;
   readonly untimedMean: number;
 };
@@ -319,6 +437,7 @@ function simulateItemSectionDraw(input: DrawItemSectionInput): DrawItemSectionRe
   let itemCursor = input.itemCursorStart;
   let clockUsedSec = input.initialClockUsedSec;
   let rawTimed = 0;
+  let rawUntimed = 0;
   let anyCensored = false;
   let censoredCount = 0;
   const itemProbs: number[] = [];
@@ -339,6 +458,9 @@ function simulateItemSectionDraw(input: DrawItemSectionInput): DrawItemSectionRe
     }
     itemProbs.push(pSuccess);
     itemPoints.push(pts);
+
+    const untimedCorrect = u < pSuccess;
+    if (untimedCorrect) rawUntimed += pts;
 
     const stepSec = sampleLogNormalStepTimeSeconds(item, input.nu, input.mBySkill, eps);
     const partKey = `${input.section.sectionId}:${item.partId}`;
@@ -363,11 +485,14 @@ function simulateItemSectionDraw(input: DrawItemSectionInput): DrawItemSectionRe
       }
     } else {
       clockUsedSec += stepSec;
-      if (u < pSuccess) rawTimed += pts;
+      if (untimedCorrect) rawTimed += pts;
     }
   }
 
   const timedScore = input.section.rawToBandTable ? rawScoreToBand(rawTimed, input.section.rawToBandTable) : rawTimed;
+  const matchedUntimedScore = input.section.rawToBandTable
+    ? rawScoreToBand(rawUntimed, input.section.rawToBandTable)
+    : rawUntimed;
   const untimedDist = collapseRawDistributionToScoreMap(convolveLordWingersky(itemProbs, itemPoints), input.section);
   let untimedMean = 0;
   for (const [score, prob] of untimedDist.entries()) untimedMean += score * prob;
@@ -382,13 +507,19 @@ function simulateItemSectionDraw(input: DrawItemSectionInput): DrawItemSectionRe
     totalItems: items.length,
     censoredCount,
     timedScore,
+    matchedUntimedScore,
     untimedDist,
     untimedMean,
   };
 }
 
-function referenceSkillMasteryAt(beliefs: SkillBeliefMap, skillId: string, observedAtMs: number): number {
-  const belief = beliefs[skillId];
+function referenceSkillMasteryAt(
+  beliefs: SkillBeliefMap,
+  skillId: string,
+  observedAtMs: number,
+  trimmedLearnerId: string,
+): number {
+  const belief = readLearnerBelief(beliefs, skillId, trimmedLearnerId);
   if (!belief) return 0.5 * sigmoid(0);
   return clamp(retrievability(belief, observedAtMs) * sigmoid(belief.abilityMean), 0, 1);
 }
@@ -396,6 +527,7 @@ function referenceSkillMasteryAt(beliefs: SkillBeliefMap, skillId: string, obser
 function simulateRubricSectionDraw(input: {
   readonly section: ExamSectionBlueprint;
   readonly beliefs: SkillBeliefMap;
+  readonly trimmedLearnerId: string;
   readonly mBySkill: Readonly<Record<string, number>>;
   readonly nu: number;
   readonly draw: PaperRandomDraw;
@@ -403,10 +535,12 @@ function simulateRubricSectionDraw(input: {
   readonly sectionLimitSec: number;
   readonly initialClockUsedSec: number;
   readonly rubricSummary: RubricEvidenceSummary;
+  readonly captureCensored: boolean;
 }): {
   readonly nextRubricCursor: number;
   readonly finalClockUsedSec: number;
   readonly anyCensored: boolean;
+  readonly censoredItems: readonly SimulatedItemOutcome[];
   readonly timedScore: number;
   readonly untimedScore: number;
 } {
@@ -416,6 +550,7 @@ function simulateRubricSectionDraw(input: {
   let untimedWeightedSum = 0;
   let weightSum = 0;
   let anyCensored = false;
+  const censoredItems: SimulatedItemOutcome[] = [];
   const sectionAnchor = input.rubricSummary.sectionAnchors.get(input.section.sectionId);
   const [minB, maxB] = input.section.scoreRange;
   const baseOffset = maxB > minB + 3 ? minB + 3 : minB;
@@ -427,12 +562,14 @@ function simulateRubricSectionDraw(input: {
     const epsTime = input.draw.rubricTimeNormals[rubricCursor] ?? 0;
     rubricCursor += 1;
     const partAnchor = input.rubricSummary.partAnchors.get(part.partId) ?? sectionAnchor;
-    const skillVals = part.skillIds.map((id) => input.mBySkill[id] ?? 0.5 * sigmoid(0));
+    const skillVals = part.skillIds.map((id) => (Object.hasOwn(input.mBySkill, id) ? input.mBySkill[id]! : 0.5 * sigmoid(0)));
     const meanMastery = skillVals.length > 0 ? skillVals.reduce((a, b) => a + b, 0) / skillVals.length : 0.5 * sigmoid(0);
 
     let untimedPartScore: number;
     if (partAnchor) {
-      const refVals = part.skillIds.map((id) => referenceSkillMasteryAt(input.beliefs, id, partAnchor.observedAtMs));
+      const refVals = part.skillIds.map((id) =>
+        referenceSkillMasteryAt(input.beliefs, id, partAnchor.observedAtMs, input.trimmedLearnerId),
+      );
       const refMastery = refVals.length > 0 ? refVals.reduce((a, b) => a + b, 0) / refVals.length : 0.5 * sigmoid(0);
       const span = partAnchor.high - partAnchor.low;
       const anchorPos = span > 0 ? partAnchor.low + span * clamp(0.5 + 0.25 * epsScore, 0, 1) : partAnchor.low;
@@ -444,18 +581,46 @@ function simulateRubricSectionDraw(input: {
 
     let timedPartScore = untimedPartScore;
     if (part.timeModel && Number.isFinite(input.sectionLimitSec)) {
-      let skillTerm = 0;
-      for (const [id, load] of Object.entries(part.timeModel.skillLoading)) {
-        skillTerm += load * (input.mBySkill[id] ?? 0.5);
-      }
-      const partDuration = Math.exp(
-        clamp(part.timeModel.mu - part.timeModel.speedLoading * input.nu - skillTerm + part.timeModel.sigma * epsTime, 4, 10),
-      );
       const remaining = Math.max(0, input.sectionLimitSec - usedSec);
-      usedSec = Math.min(input.sectionLimitSec, usedSec + partDuration);
-      if (partDuration > remaining) {
+      if (remaining <= 0) {
         anyCensored = true;
-        timedPartScore = clamp(untimedPartScore * clamp(remaining / partDuration, 0.35, 1), minB, maxB);
+        timedPartScore = minB;
+        if (input.captureCensored) {
+          censoredItems.push({
+            itemId: part.partId,
+            sectionId: input.section.sectionId,
+            partId: part.partId,
+            attempted: false,
+            correct: false,
+            rightCensored: true,
+            observedTimeSeconds: null,
+            successProbability: 0,
+          });
+        }
+      } else {
+        const { mu, speedLoading, skillLoading, sigma } = part.timeModel;
+        if (!Number.isFinite(mu) || !Number.isFinite(sigma) || sigma <= 0 || !Number.isFinite(input.nu) || !Number.isFinite(epsTime)) {
+          throw new RangeError("Non-finite rubric time-model predictor");
+        }
+        const safeSpeedLoading = (speedLoading as number | undefined) === undefined ? 0 : speedLoading;
+        if (!Number.isFinite(safeSpeedLoading)) throw new RangeError("Non-finite rubric speedLoading");
+        let skillTerm = 0;
+        for (const [id, load] of Object.entries(skillLoading)) {
+          if (!Number.isFinite(load)) throw new RangeError("Non-finite rubric skillLoading");
+          const mastery = Object.hasOwn(input.mBySkill, id) ? input.mBySkill[id]! : 0.5;
+          skillTerm += load * mastery;
+        }
+        const logDuration = mu - safeSpeedLoading * input.nu - skillTerm + sigma * epsTime;
+        if (!Number.isFinite(logDuration)) throw new RangeError("Non-finite rubric log duration");
+        const partDuration = Math.exp(clamp(logDuration, 4, 10));
+        if (partDuration > remaining) {
+          anyCensored = true;
+          usedSec = input.sectionLimitSec;
+          const completionRatio = clamp(remaining / partDuration, 0.35, 1);
+          timedPartScore = clamp(minB + (untimedPartScore - minB) * completionRatio, minB, maxB);
+        } else {
+          usedSec += partDuration;
+        }
       }
     }
     untimedWeightedSum += part.weight * untimedPartScore;
@@ -467,6 +632,7 @@ function simulateRubricSectionDraw(input: {
     nextRubricCursor: rubricCursor,
     finalClockUsedSec: usedSec,
     anyCensored,
+    censoredItems,
     timedScore: weightSum > 0 ? partWeightedSum / weightSum : 0,
     untimedScore: weightSum > 0 ? untimedWeightedSum / weightSum : 0,
   };
@@ -506,27 +672,43 @@ function accumulateWeightedUntimedPmf(
   return expectedAdd;
 }
 
-export function simulateExamPaper(input: {
+export type SimulateExamPaperInput = {
   readonly blueprint: ExamBlueprintV1;
+  readonly learnerId: string;
   readonly beliefs: SkillBeliefMap;
   readonly evidence: readonly ExamEvidenceRecord[];
   readonly examAtMs: number;
   readonly numDraws?: number;
   readonly seed?: number;
   readonly precomputedDraws?: readonly PaperRandomDraw[];
-  readonly skillOverrides?: Readonly<Record<string, { readonly abilityDelta?: number; readonly logStabilityDelta?: number }>>;
+  readonly skillOverrides?: ReadonlyMap<string, SkillDeltaOverride> | Readonly<Record<string, SkillDeltaOverride>>;
   readonly speedShift?: number;
   readonly forceUntimed?: boolean;
-}): PaperSimulationSummary {
+};
+
+export function simulateExamPaper(input: SimulateExamPaperInput): PaperSimulationSummary {
   const { blueprint, beliefs, examAtMs } = input;
-  const numDraws = Math.max(1, Math.round(input.numDraws ?? 400));
+  const trimmedLearnerId = input.learnerId.trim();
+  if (!trimmedLearnerId) {
+    throw new RangeError("learnerId must be a non-empty string");
+  }
+  const numDraws =
+    input.precomputedDraws !== undefined
+      ? validateNumDraws(input.precomputedDraws.length)
+      : validateNumDraws(input.numDraws, 400);
   const draws = input.precomputedDraws ?? generatePaperRandomDraws(blueprint, numDraws, input.seed ?? 20261121);
-  const { admitted } = partitionExamEvidence(input.evidence);
-  const rubricSummary = summarizeRubricAndTimingEvidence(admitted);
-  const skillParams = buildDecayedSkillParams(blueprint, beliefs, examAtMs, input.skillOverrides);
+  const ranges = sectionRangesMap(blueprint);
+  const { admitted } = partitionExamEvidence(input.evidence, {
+    learnerId: trimmedLearnerId,
+    examAtMs,
+    sectionRanges: ranges,
+  });
+  const rubricSummary = summarizeRubricAndTimingEvidence(admitted, ranges);
+  const skillParams = buildDecayedSkillParams(blueprint, beliefs, trimmedLearnerId, examAtMs, input.skillOverrides);
   const speedShift = input.speedShift ?? 0;
 
   const timedScores: number[] = [];
+  const untimedScores: number[] = [];
   const drawSectionScores: Array<Record<string, number>> = [];
   let sampleRightCensoredItems: SimulatedItemOutcome[] = [];
 
@@ -553,7 +735,7 @@ export function simulateExamPaper(input: {
   let untimedExpectedTotal = 0;
 
   for (const draw of draws) {
-    const mBySkill: Record<string, number> = {};
+    const mBySkill: Record<string, number> = Object.create(null) as Record<string, number>;
     for (let k = 0; k < blueprint.skillIds.length; k++) {
       const z = draw.zLatent[k] ?? 0;
       mBySkill[blueprint.skillIds[k]!] = clamp(skillParams.rd[k]! * sigmoid(skillParams.mu[k]! + skillParams.sd[k]! * z), 0, 1);
@@ -569,6 +751,7 @@ export function simulateExamPaper(input: {
         : Infinity;
 
     const timedSectionBand: Record<string, number> = {};
+    const matchedUntimedSectionBand: Record<string, number> = {};
     const untimedSectionDistributions = new Map<string, ReadonlyMap<number, number>>();
     const untimedContinuousSections = new Map<string, number>();
     const drawCensoredItems: SimulatedItemOutcome[] = [];
@@ -600,6 +783,7 @@ export function simulateExamPaper(input: {
         sectionCensoredItemsCount.set(section.sectionId, (sectionCensoredItemsCount.get(section.sectionId) ?? 0) + res.censoredCount);
         drawCensoredItems.push(...res.censoredItems);
         timedSectionBand[section.sectionId] = res.timedScore;
+        matchedUntimedSectionBand[section.sectionId] = res.matchedUntimedScore;
         sectionTimedTotal.set(section.sectionId, (sectionTimedTotal.get(section.sectionId) ?? 0) + res.timedScore);
         untimedSectionDistributions.set(section.sectionId, res.untimedDist);
         sectionUntimedTotal.set(section.sectionId, (sectionUntimedTotal.get(section.sectionId) ?? 0) + res.untimedMean);
@@ -607,6 +791,7 @@ export function simulateExamPaper(input: {
         const res = simulateRubricSectionDraw({
           section,
           beliefs,
+          trimmedLearnerId,
           mBySkill,
           nu,
           draw,
@@ -614,11 +799,14 @@ export function simulateExamPaper(input: {
           sectionLimitSec,
           initialClockUsedSec: blueprint.clockMode === "shared_full_paper" ? sharedClockUsedSec : 0,
           rubricSummary,
+          captureCensored: sampleRightCensoredItems.length === 0,
         });
         rubricCursor = res.nextRubricCursor;
         if (blueprint.clockMode === "shared_full_paper") sharedClockUsedSec = res.finalClockUsedSec;
         if (res.anyCensored) sectionCensoredDraws.set(section.sectionId, (sectionCensoredDraws.get(section.sectionId) ?? 0) + 1);
+        drawCensoredItems.push(...res.censoredItems);
         timedSectionBand[section.sectionId] = res.timedScore;
+        matchedUntimedSectionBand[section.sectionId] = res.untimedScore;
         untimedContinuousSections.set(section.sectionId, res.untimedScore);
         sectionTimedTotal.set(section.sectionId, (sectionTimedTotal.get(section.sectionId) ?? 0) + res.timedScore);
         sectionUntimedTotal.set(section.sectionId, (sectionUntimedTotal.get(section.sectionId) ?? 0) + res.untimedScore);
@@ -636,10 +824,14 @@ export function simulateExamPaper(input: {
       const speaking = timedSectionBand["speaking"] ?? 0;
       timedScores.push(computeIeltsOverallBand({ listening, reading, writing, speaking }));
 
-      const lDist = untimedSectionDistributions.get("listening") ?? new Map([[listening, 1]]);
-      const rDist = untimedSectionDistributions.get("reading") ?? new Map([[reading, 1]]);
+      const uL = matchedUntimedSectionBand["listening"] ?? 0;
+      const uR = matchedUntimedSectionBand["reading"] ?? 0;
       const uW = untimedContinuousSections.get("writing") ?? writing;
       const uS = untimedContinuousSections.get("speaking") ?? speaking;
+      untimedScores.push(computeIeltsOverallBand({ listening: uL, reading: uR, writing: uW, speaking: uS }));
+
+      const lDist = untimedSectionDistributions.get("listening") ?? new Map([[listening, 1]]);
+      const rDist = untimedSectionDistributions.get("reading") ?? new Map([[reading, 1]]);
       for (const [bL, pL] of lDist.entries()) {
         for (const [bR, pR] of rDist.entries()) {
           const prob = pL * pR * drawWeight;
@@ -652,12 +844,18 @@ export function simulateExamPaper(input: {
     } else {
       const totalTimed = blueprint.sections.reduce((s, sec) => s + sec.weight * (timedSectionBand[sec.sectionId] ?? 0), 0);
       timedScores.push(snapToScoreGrid(totalTimed, blueprint.scoreRange, blueprint.scoreStep, "nearest"));
+      const totalMatchedUntimed = blueprint.sections.reduce(
+        (s, sec) => s + sec.weight * (matchedUntimedSectionBand[sec.sectionId] ?? 0),
+        0,
+      );
+      untimedScores.push(snapToScoreGrid(totalMatchedUntimed, blueprint.scoreRange, blueprint.scoreStep, "nearest"));
       untimedExpectedTotal += accumulateWeightedUntimedPmf(blueprint, untimedSectionDistributions, untimedContinuousSections, drawWeight, untimedOverallPmf);
     }
   }
 
   const sortedTimed = [...timedScores].sort((a, b) => a - b);
   const timedExpectedScore = timedScores.reduce((a, b) => a + b, 0) / draws.length;
+  const matchedUntimedExpectedScore = untimedScores.reduce((a, b) => a + b, 0) / draws.length;
   const untimedExpectedScore = untimedExpectedTotal;
   const sectionSummaries: Record<string, SectionSimulationSummary> = {};
   const rightCensoringRateBySection: Record<string, number> = {};
@@ -693,6 +891,9 @@ export function simulateExamPaper(input: {
     examAtMs,
     numDraws: draws.length,
     timedScores,
+    untimedScores,
+    matchedUntimedExpectedScore,
+    matchedTimeSqueezeDelta: matchedUntimedExpectedScore - timedExpectedScore,
     untimedExpectedScore,
     timedExpectedScore,
     timeSqueezeDelta: untimedExpectedScore - timedExpectedScore,
