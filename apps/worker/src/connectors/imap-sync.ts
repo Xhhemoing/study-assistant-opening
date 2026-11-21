@@ -329,18 +329,38 @@ export async function syncMailbox(deps: ImapSyncDeps): Promise<{
       continue;
     }
     if (!fetched?.source || fetched.uid !== uid) throw new Error("IMAP body response did not match the requested UID");
+    const fetchedSource = fetched.source;
     if (typeof fetched.size === "number" && fetched.size > MAX_MAIL_BYTES) {
       throw new Error("mail exceeds limit");
     }
-    if (fetched.source.byteLength > MAX_MAIL_BYTES) throw new Error("mail exceeds limit");
+    if (fetchedSource.byteLength > MAX_MAIL_BYTES) throw new Error("mail exceeds limit");
     const reportedSize = Math.max(
       typeof fetched.size === "number" && Number.isFinite(fetched.size) && fetched.size > 0 ? fetched.size : 0,
       knownSize !== undefined && Number.isFinite(knownSize) && knownSize > 0 ? knownSize : 0,
     );
-    if (reportedSize > 0 && fetched.source.byteLength < reportedSize) {
-      throw new Error("IMAP message body was truncated before reaching reported size");
+    if (reportedSize > 0 && fetchedSource.byteLength < reportedSize) {
+      const receivedBytes = fetchedSource.byteLength;
+      if (receivedBytes === 0) {
+        throw new Error("IMAP message body was truncated before reaching reported size");
+      }
+      // Exchange / Office 365 / Maildir can over-report RFC822.SIZE relative to BODY[].
+      // Probe 1 byte at receivedBytes: RFC 3501 s.6.4.5 returns an empty buffer at
+      // true EOF, whereas any non-empty or invalid response proves truncation.
+      const probe = await withDeadline("fetch", () => deps.client.fetchOne(
+        String(uid),
+        { source: { start: receivedBytes, maxLength: 1 } },
+        { uid: true },
+      ));
+      if (probe === false) {
+        // The message was expunged after the initial fetch.
+        skipped += 1;
+        continue;
+      }
+      if (!probe || probe.uid !== uid || !Buffer.isBuffer(probe.source) || probe.source.byteLength !== 0) {
+        throw new Error("IMAP message body was truncated before reaching reported size");
+      }
     }
-    const parsed = await simpleParser(fetched.source, {
+    const parsed = await simpleParser(fetchedSource, {
       skipImageLinks: true,
       skipHtmlToText: true,
     });

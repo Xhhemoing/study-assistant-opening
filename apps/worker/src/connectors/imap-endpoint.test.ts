@@ -1,5 +1,6 @@
 import net, { type AddressInfo, type NetConnectOpts } from "node:net";
 import tls from "node:tls";
+import { ImapFlow } from "imapflow";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createApprovedImapClient,
@@ -120,5 +121,88 @@ describe("approved IMAP dialer", () => {
     // Emitting another error directly while idle also stays contained without crashing the process.
     expect(() => client.emit("error", new Error("post-close socket error"))).not.toThrow();
     client.close();
+  });
+
+  it("parses 1-byte EOF and non-EOF partial fetchOne responses on ImapFlow via BODY.PEEK[]<start.1>", async () => {
+    const partialQueries: string[] = [];
+    const payload = Buffer.from("Subject: Probe\r\n\r\n" + "x".repeat(162), "utf8");
+    expect(payload.byteLength).toBe(180);
+
+    const server = net.createServer(socket => {
+      socket.on("error", () => undefined);
+      socket.write("* OK ready\r\n");
+      let buffered = "";
+      socket.on("data", chunk => {
+        buffered += chunk.toString("utf8");
+        for (let end = buffered.indexOf("\r\n"); end >= 0; end = buffered.indexOf("\r\n")) {
+          const line = buffered.slice(0, end);
+          buffered = buffered.slice(end + 2);
+          const space = line.indexOf(" ");
+          const tag = space < 0 ? line : line.slice(0, space);
+          const rest = space < 0 ? "" : line.slice(space + 1);
+          const verb = (rest.split(" ")[0] ?? "").toUpperCase();
+          if (verb === "CAPABILITY") socket.write(`* CAPABILITY IMAP4rev1 UIDPLUS\r\n${tag} OK done\r\n`);
+          else if (verb === "LOGIN") socket.write(`${tag} OK done\r\n`);
+          else if (verb === "NAMESPACE") socket.write(`* NAMESPACE (("" "/")) NIL NIL\r\n${tag} OK done\r\n`);
+          else if (verb === "LIST") socket.write(`* LIST () "/" "INBOX"\r\n${tag} OK done\r\n`);
+          else if (verb === "EXAMINE" || verb === "SELECT") {
+            socket.write(`* 1 EXISTS\r\n* OK [UIDVALIDITY 42] ok\r\n* OK [UIDNEXT 12] ok\r\n${tag} OK [READ-ONLY] done\r\n`);
+          } else if (verb === "UID" && /^FETCH\b/i.test(rest.slice(4))) {
+            const match = /BODY(?:\.PEEK)?\[\]<(\d+)\.(\d+)>/i.exec(rest);
+            if (match) {
+              partialQueries.push(match[0]);
+              const start = Number(match[1]);
+              const maxLen = Number(match[2]);
+              const slice = payload.subarray(start, start + maxLen);
+              socket.write(Buffer.concat([
+                Buffer.from(`* 1 FETCH (UID 11 BODY[]<${start}> {${slice.byteLength}}\r\n`, "utf8"),
+                slice,
+                Buffer.from(")\r\n", "utf8"),
+              ]));
+            }
+            socket.write(`${tag} OK done\r\n`);
+          } else if (verb === "LOGOUT") {
+            socket.write(`* BYE bye\r\n${tag} OK done\r\n`);
+            socket.end();
+          } else {
+            socket.write(`${tag} OK done\r\n`);
+          }
+        }
+      });
+    });
+
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const { port } = server.address() as AddressInfo;
+    const client = new ImapFlow({
+      host: "127.0.0.1",
+      port,
+      secure: false,
+      logger: false,
+      auth,
+    });
+    try {
+      await client.connect();
+      await client.mailboxOpen("INBOX", { readOnly: true });
+      const eofProbe = await client.fetchOne("11", { source: { start: 180, maxLength: 1 } }, { uid: true });
+      expect(eofProbe).toBeTruthy();
+      if (eofProbe) {
+        expect(eofProbe.uid).toBe(11);
+        expect(Buffer.isBuffer(eofProbe.source)).toBe(true);
+        expect(eofProbe.source?.byteLength).toBe(0);
+      }
+
+      const moreProbe = await client.fetchOne("11", { source: { start: 179, maxLength: 1 } }, { uid: true });
+      expect(moreProbe).toBeTruthy();
+      if (moreProbe) {
+        expect(moreProbe.uid).toBe(11);
+        expect(Buffer.isBuffer(moreProbe.source)).toBe(true);
+        expect(moreProbe.source?.toString("utf8")).toBe("x");
+      }
+      expect(partialQueries).toEqual(["BODY.PEEK[]<180.1>", "BODY.PEEK[]<179.1>"]);
+      await client.logout();
+    } finally {
+      client.close();
+      await new Promise<void>((resolve, reject) => server.close(error => (error ? reject(error) : resolve())));
+    }
   });
 });
