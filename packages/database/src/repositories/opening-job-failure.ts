@@ -109,15 +109,18 @@ export async function failOpeningJob(sql: Sql, id: string, value: unknown,
       : state === "outcome_unknown"
         ? { code: "PARSE_OUTCOME_UNKNOWN", message: "转写结果尚未确认，为避免重复计费未重发；原件仍已保存。", retryable: false }
         : { code: "PARSE_FAILED", message: "材料解析失败，原件仍已保存。", retryable };
+    // A later retry can still retain these chunks, even after an unrelated privacy change.
+    await tx`
+      UPDATE opening_sources s SET parse_state = 'failed', error = ${tx.json(error)}::jsonb ||
+        CASE WHEN s.error ? 'pdfTextCap' THEN jsonb_build_object('pdfTextCap', s.error->'pdfTextCap') ELSE '{}'::jsonb END,
+        updated_at = now()
+      WHERE s.id = ${sourceId} AND s.workspace_id = ${workspace.id}
+        AND s.upload_state = 'uploaded'
+        AND (${sourceVersion}::integer IS NULL OR s.version = ${sourceVersion}::integer)
+        AND s.parse_state IN ('not_started', 'queued', 'running')
+        AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e
+          WHERE e.workspace_id = s.workspace_id AND e.source_id = s.id)`;
     if (stale) {
-      await tx`
-        UPDATE opening_sources s SET parse_state = 'failed', error = ${tx.json(error)}, updated_at = now()
-        WHERE s.id = ${sourceId} AND s.workspace_id = ${workspace.id}
-          AND s.upload_state = 'uploaded'
-          AND (${sourceVersion}::integer IS NULL OR s.version = ${sourceVersion}::integer)
-          AND s.parse_state IN ('not_started', 'queued', 'running')
-          AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e
-            WHERE e.workspace_id = s.workspace_id AND e.source_id = s.id)`;
       await tx`
         UPDATE opening_sources s SET parse_state = 'failed', error = ${tx.json({ code: "PRIVACY_EXCLUDED", message: "材料已从学习上下文中排除。", retryable: false })}, updated_at = now()
         WHERE s.id = ${sourceId} AND s.workspace_id = ${workspace.id}
@@ -125,17 +128,6 @@ export async function failOpeningJob(sql: Sql, id: string, value: unknown,
           AND (${sourceVersion}::integer IS NULL OR s.version = ${sourceVersion}::integer)
           AND s.parse_state IN ('not_started', 'queued', 'running')
           AND EXISTS (SELECT 1 FROM opening_privacy_exclusions e
-            WHERE e.workspace_id = s.workspace_id AND e.source_id = s.id)`;
-    } else {
-      await tx`
-        UPDATE opening_sources s SET parse_state = 'failed', error = ${tx.json(error)}::jsonb ||
-          CASE WHEN s.error ? 'pdfTextCap' THEN jsonb_build_object('pdfTextCap', s.error->'pdfTextCap') ELSE '{}'::jsonb END,
-          updated_at = now()
-        WHERE s.id = ${sourceId} AND s.workspace_id = ${workspace.id}
-          AND s.upload_state = 'uploaded'
-          AND (${sourceVersion}::integer IS NULL OR s.version = ${sourceVersion}::integer)
-          AND s.parse_state IN ('not_started', 'queued', 'running')
-          AND NOT EXISTS (SELECT 1 FROM opening_privacy_exclusions e
             WHERE e.workspace_id = s.workspace_id AND e.source_id = s.id)`;
     }
     // Fenced-out failures (new version, exclusion) leave the claim marker behind.

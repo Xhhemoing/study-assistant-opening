@@ -278,6 +278,7 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
                   if (chunk === preparedPage.saved) {
                     // Existing rows can fit PostgreSQL's code-point limit but exceed the UTF-16 bound.
                     preservePages.push(page);
+                    if (checkPdfPageQuality(chunk.text).quality === "low_quality") lowQualityPages.push(page);
                     usablePages++;
                     continue;
                   }

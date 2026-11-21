@@ -74,6 +74,21 @@ async function deps(input: VisualDeps & { source?: SourceRecord; exitCode?: numb
 }
 
 describe("parse source handler", () => {
+  it("reports low quality on a saved legacy page preserved beyond the UTF-16 staging limit", async () => {
+    const legacyText = "😀".repeat(51_000) + "\uFFFD".repeat(2_000);
+    const saved = { id: "00000000-0000-4000-8000-000000000004", sourceId, sourceVersion: 7, page: 1,
+      slideLabel: null, startMs: null, endMs: null, text: legacyText, imageObjectKey: null };
+    const d = await deps({ pageCount: 1, published: [saved],
+      segments: { assertCurrent: async () => {}, read: async () => null, save: async () => {} },
+      stdout: JSON.stringify({ pages: [{ page: 1, text: "Readable native text", imagePath: null }] }),
+    });
+
+    await expect(d.handler(job, { sourceId })).resolves.toEqual({ pages: 1 });
+    expect(d.replaceInput()).toEqual({ sourceId, sourceVersion: 7, preservePages: [1], chunks: [],
+      warning: { code: "PARSE_PARTIAL", message: "第 1 页识别质量低", retryable: false },
+    });
+  });
+
   it("retains published pages when their segment fails during a partial retry", async () => {
     const saved = { id: "saved-page", sourceId, sourceVersion: 7, page: 1, slideLabel: null,
       startMs: null, endMs: null, text: "Previously published page", imageObjectKey: "saved/page-1" };

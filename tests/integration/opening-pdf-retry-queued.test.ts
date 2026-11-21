@@ -5,8 +5,8 @@ import path from "node:path";
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import { OpeningModelRoutingError } from "@aistudy/ai";
 import { sourceRecordSchema } from "@aistudy/contracts";
-import { openingJobScope, createOpeningJobRepository, createOpeningPdfSegmentsRepository, createOpeningSourceChunksRepository,
-  createOpeningSourceRepository, readOpeningSourceContent } from "@aistudy/database";
+import { openingJobScope, createOpeningJobRepository, createOpeningPdfSegmentsRepository, createOpeningPrivacyRepository,
+  createOpeningSourceChunksRepository, createOpeningSourceRepository, readOpeningSourceContent } from "@aistudy/database";
 import { createOpeningSourceService } from "../../apps/web/src/features/opening/sources/source-service";
 import { createOpeningTestStorage } from "./opening-storage-fixture";
 import { createParseSourceHandler, type ParseSourceVisualPageInput } from "../../apps/worker/src/jobs/parse-source";
@@ -17,7 +17,7 @@ let f: OpeningFixture;
 beforeAll(async () => { f = await createOpeningFixture(); });
 afterAll(async () => { await f?.close(); });
 const originalText = "This first page is already readable and its existing citation must remain stable across a retry.";
-async function seedRetry(partial = false, publishedText = originalText) {
+async function seedRetry(partial = false, publishedText = originalText, pdfTextCap?: number[]) {
   const sourceId = randomUUID(), bytes = Buffer.from("%PDF synthetic retry");
   const sources = createOpeningSourceRepository(f.sql), chunks = createOpeningSourceChunksRepository(f.sql);
   const jobs = createOpeningJobRepository(f.sql);
@@ -27,8 +27,8 @@ async function seedRetry(partial = false, publishedText = originalText) {
     { page: 1, slideLabel: null, startMs: null, endMs: null, text: publishedText, imageObjectKey: null },
   ] });
   const original = await chunks.listChunks(f.scope, sourceId);
-  await sources.markParseState(f.scope, sourceId, partial ? "ready" : "failed",
-    { code: partial ? "PARSE_PARTIAL" : "PARSE_FAILED", message: "interrupted", retryable: true });
+  const error = { code: partial ? "PARSE_PARTIAL" : "PARSE_FAILED", message: "interrupted", retryable: true, pdfTextCap };
+  await sources.markParseState(f.scope, sourceId, partial ? "ready" : "failed", error);
   const service = createOpeningSourceService(f.sql, createOpeningTestStorage());
   expect(await service.retryParse({ userId: f.scope.ownerUserId, workspaceId: f.scope.workspaceId, sessionId: "pdf-retry" }, sourceId))
     .toMatchObject({ id: sourceId, version: 0, parseState: "queued", error: null });
@@ -342,4 +342,45 @@ it("records retry failure without replacing saved page identities, and rejects a
   expect(await d.chunks.listChunks(f.scope, d.sourceId)).toEqual(d.original);
   expect(await d.jobs.finish(d.id, "succeeded", { pages: 2 }, randomUUID())).toBe(false);
   expect(await d.sources.get(f.scope, d.sourceId)).toMatchObject({ parseState: "failed" });
+});
+
+it("retains a capped citation and warning after another source makes a queued retry stale", async () => {
+  const d = await seedRetry(true, "x".repeat(100_000), [1]);
+  const staleJob = await d.jobs.get(f.scope, d.id);
+  const other = await d.sources.create(f.scope, {
+    name: "other.pdf", mime: "application/pdf", bytes: 3, sha256: "a".repeat(64),
+  });
+  const privacy = createOpeningPrivacyRepository(f.sql);
+  await privacy.recordExclusions(f.sql, f.scope, { sourceIds: [other.id], memoryId: randomUUID(), deletedAt: new Date() });
+  expect(await privacy.getWorkspaceEpoch(f.scope)).toBe(staleJob.privacyEpoch + 1);
+  const staleHandler = vi.fn();
+  expect(await runJob(d.jobs, d.id, staleHandler)).toBe(false);
+  expect(staleHandler).not.toHaveBeenCalled();
+  const staleSource = await d.sources.get(f.scope, d.sourceId);
+  expect(staleSource.parseState).toBe("failed");
+  expect(staleSource.error).toEqual({ code: "PARSE_STALE", message: "隐私设置已变化，解析结果已丢弃。", retryable: false });
+
+  const service = createOpeningSourceService(f.sql, createOpeningTestStorage());
+  const principal = { userId: f.scope.ownerUserId, workspaceId: f.scope.workspaceId, sessionId: "stale-pdf-retry" };
+  expect(await service.retryParse(principal, d.sourceId)).toMatchObject({ parseState: "queued", error: null });
+  const [retry] = await f.sql`SELECT id FROM opening_jobs WHERE workspace_id=${f.scope.workspaceId}
+    AND kind='parse' AND payload->>'sourceId'=${d.sourceId} AND state='queued'`;
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "pdf-retry-stale-cap-"));
+  try {
+    const handler = createParseSourceHandler({ sources: d.sources, chunks: d.chunks, tempDir, segmentPages: 1,
+      segments: createOpeningPdfSegmentsRepository(f.sql),
+      storage: { finalKey: () => "synthetic-original", presignGet: async () => `data:application/pdf;base64,${d.bytes.toString("base64")}` },
+      runner: async argv => {
+        if (argv.includes("--inspect-pdf")) return { exitCode: 0, stdout: '{"pageCount":2}' };
+        if (argv[argv.indexOf("--page-start") + 1] === "1") return { exitCode: 4, stdout: "" };
+        return { exitCode: 0, stdout: JSON.stringify({ pages: [{ page: 2, text: "Recovered second page", imagePath: null }] }) };
+      },
+    });
+    expect(await runJob(d.jobs, String(retry!.id), handler)).toBe(true);
+    expect(await d.chunks.listChunks(f.scope, d.sourceId)).toEqual([d.original[0],
+      expect.objectContaining({ page: 2, text: "Recovered second page" }),
+    ]);
+    expect((await d.sources.get(f.scope, d.sourceId)).error).toEqual({ code: "PARSE_PARTIAL", retryable: true,
+      message: "第 1 页未能识别，可以重新解析；第 1 页达到文本长度上限，已保留原文或截短" });
+  } finally { await rm(tempDir, { recursive: true, force: true }); }
 });
