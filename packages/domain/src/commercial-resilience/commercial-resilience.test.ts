@@ -9,9 +9,11 @@ import {
   authorizeModelRoute,
   buildCohortHeatmap,
   calculateCreatorRoyalty,
+  cohortSnapshotPublicationKey,
   CommercialResilienceError,
   computeFrozenRosterDigest,
   computePeriodBudgetEnvelope,
+  createCohortSnapshotPublicationLedger,
   createCreatorRoyaltyLedger,
   createLearnerCreditEntry,
   createLearnerCreditLedger,
@@ -34,9 +36,11 @@ import {
   MICROS_PER_UNIT,
   parseIsoWeekKey,
   projectCreatorRoyaltyPosition,
+  recordCreatorRoyaltyPayoutSettlement,
   recordPostReleaseRoyaltyClawback,
   resolveCohortSurfacePolicy,
   ROYALTY_ESCROW_WINDOW_MS,
+  sealCohortWeeklySnapshot,
   summarizeCreatorRoyaltyPayableBalance,
   summarizeProviderCostLedger,
   validateFixedIsoWeekWindow,
@@ -1035,7 +1039,18 @@ describe("commercial-resilience: micro-unit three-ledger accounting & creator ro
       }),
     ).toThrow(CommercialResilienceError);
 
-    // Creator payable summary nets matured releasable earnings against post-release clawbacks
+    // Creator payout settlement & clawback offset accounting:
+    // Step 1: Settle Order A's original day-14 release ($44.10) as Payout #1 before clawbacks were deducted.
+    ledger = recordCreatorRoyaltyPayoutSettlement(ledger, {
+      entryId: "ps-1",
+      idempotencyKey: "payout-1",
+      creatorAccountId: "creator-1",
+      currency: "USD",
+      settledAtMs: exactMaturity,
+      settledReleaseEntryIds: ["cr-a-rel"],
+    }).ledger;
+
+    // Step 2: Order D matures ($70.00). Before settling clawbacks, netPayable = $70.00 - $44.10 = $25.90.
     ledger = appendCreatorRoyaltyAccrual(ledger, {
       entryId: "cr-d-1",
       idempotencyKey: "accrual-d",
@@ -1054,21 +1069,154 @@ describe("commercial-resilience: micro-unit three-ledger accounting & creator ro
       },
     }).ledger;
 
-    const payableSummary = summarizeCreatorRoyaltyPayableBalance(ledger, {
-      creatorAccountId: "creator-1",
-      currency: "USD",
-      nowMs: exactMaturity + 3 * DAY_MS,
-    });
-    expect(payableSummary).toEqual({
+    const payableBeforeSettlement = summarizeCreatorRoyaltyPayableBalance(
+      ledger,
+      {
+        creatorAccountId: "creator-1",
+        currency: "USD",
+        nowMs: exactMaturity + 3 * DAY_MS,
+      },
+    );
+    expect(payableBeforeSettlement).toEqual({
       creatorAccountId: "creator-1",
       currency: "USD",
       pendingEscrowMicros: 0n,
       maturedReleasableMicros: 70_000_000n,
       grossReleasedMicros: 44_100_000n,
+      paidOutReleasedGrossMicros: 44_100_000n,
+      unsettledReleasedMicros: 0n,
       postReleaseClawbackMicros: 44_100_000n,
-      netPayableMicros: 25_900_000n, // 70_000_000n matured - 44_100_000n clawback offset
+      settledClawbackMicros: 0n,
+      outstandingClawbackOffsetMicros: 44_100_000n,
+      totalNetDisbursedMicros: 44_100_000n,
+      netPayableMicros: 25_900_000n, // 70_000_000n matured - 44_100_000n unsettled clawback offset
       netSettledLifetimeMicros: 0n,
     });
+
+    // Step 3: Release Order D ($70.00) and settle Payout #2 applying both clawbacks ($14.70 + $29.40 = $44.10) -> $25.90 net disbursement.
+    ledger = appendCreatorRoyaltyRelease(ledger, {
+      entryId: "cr-d-rel",
+      idempotencyKey: "release-d",
+      purchaseId: "order-d",
+      nowMs: exactMaturity + 3 * DAY_MS,
+    }).ledger;
+
+    const payout2 = recordCreatorRoyaltyPayoutSettlement(ledger, {
+      entryId: "ps-2",
+      idempotencyKey: "payout-2",
+      creatorAccountId: "creator-1",
+      currency: "USD",
+      settledAtMs: exactMaturity + 3 * DAY_MS,
+      settledReleaseEntryIds: ["cr-d-rel"],
+      settledClawbackEntryIds: ["cr-a-claw-1", "cr-a-claw-2"],
+    });
+    ledger = payout2.ledger;
+    expect(payout2.entry).toMatchObject({
+      entryKind: "payout_settlement",
+      grossReleasedMicros: 70_000_000n,
+      settledClawbackMicros: 44_100_000n,
+      netDisbursementMicros: 25_900_000n,
+    });
+
+    // Exact replay of Payout #2 is idempotent
+    expect(
+      recordCreatorRoyaltyPayoutSettlement(ledger, {
+        entryId: "ps-2",
+        idempotencyKey: "payout-2",
+        creatorAccountId: "creator-1",
+        currency: "USD",
+        settledAtMs: exactMaturity + 3 * DAY_MS,
+        settledReleaseEntryIds: ["cr-d-rel"],
+        settledClawbackEntryIds: ["cr-a-claw-1", "cr-a-claw-2"],
+      }).idempotentReplay,
+    ).toBe(true);
+
+    // Step 4: New Order E ($50.00 royalty) matures — previously settled $44.10 clawbacks MUST NOT be deducted a second time!
+    ledger = appendCreatorRoyaltyAccrual(ledger, {
+      entryId: "cr-e-1",
+      idempotencyKey: "accrual-e",
+      purchaseId: "order-e",
+      creatorAccountId: "creator-1",
+      buyerAccountId: "buyer-5",
+      cartridgeId: "cs408-os",
+      currency: "USD",
+      settledPurchaseAtMs: settledAt,
+      grossReceiptsMicros: 100_000_000n,
+      channelFeeMicros: 0n,
+      quality: {
+        eligibleCohortSize: 10,
+        blindSevenDayTransferRate: 0.5,
+        severeLeakCount: 0,
+      },
+    }).ledger;
+
+    const payableAfterSettlement = summarizeCreatorRoyaltyPayableBalance(
+      ledger,
+      {
+        creatorAccountId: "creator-1",
+        currency: "USD",
+        nowMs: exactMaturity + 4 * DAY_MS,
+      },
+    );
+    expect(payableAfterSettlement).toEqual({
+      creatorAccountId: "creator-1",
+      currency: "USD",
+      pendingEscrowMicros: 0n,
+      maturedReleasableMicros: 70_000_000n,
+      grossReleasedMicros: 114_100_000n,
+      paidOutReleasedGrossMicros: 114_100_000n,
+      unsettledReleasedMicros: 0n,
+      postReleaseClawbackMicros: 44_100_000n,
+      settledClawbackMicros: 44_100_000n,
+      outstandingClawbackOffsetMicros: 0n,
+      totalNetDisbursedMicros: 70_000_000n,
+      netPayableMicros: 70_000_000n, // Full Order E payable — clawbacks already settled, zero double-deduction!
+      netSettledLifetimeMicros: 70_000_000n,
+    });
+
+    // Attempting to apply an already-settled clawback entry again MUST fail closed with CLAWBACK_ALREADY_SETTLED
+    ledger = appendCreatorRoyaltyRelease(ledger, {
+      entryId: "cr-e-rel",
+      idempotencyKey: "release-e",
+      purchaseId: "order-e",
+      nowMs: exactMaturity + 4 * DAY_MS,
+    }).ledger;
+
+    try {
+      recordCreatorRoyaltyPayoutSettlement(ledger, {
+        entryId: "ps-3-dup-claw",
+        idempotencyKey: "payout-3-dup-claw",
+        creatorAccountId: "creator-1",
+        currency: "USD",
+        settledAtMs: exactMaturity + 4 * DAY_MS,
+        settledReleaseEntryIds: ["cr-e-rel"],
+        settledClawbackEntryIds: ["cr-a-claw-1"],
+      });
+      expect.unreachable("Expected CLAWBACK_ALREADY_SETTLED");
+    } catch (err) {
+      expect(err).toBeInstanceOf(CommercialResilienceError);
+      expect((err as CommercialResilienceError).code).toBe(
+        "CLAWBACK_ALREADY_SETTLED",
+      );
+    }
+
+    // Attempting to pay out an already-settled release entry again MUST fail closed with RELEASE_ALREADY_SETTLED
+    try {
+      recordCreatorRoyaltyPayoutSettlement(ledger, {
+        entryId: "ps-3-dup-rel",
+        idempotencyKey: "payout-3-dup-rel",
+        creatorAccountId: "creator-1",
+        currency: "USD",
+        settledAtMs: exactMaturity + 4 * DAY_MS,
+        settledReleaseEntryIds: ["cr-d-rel"],
+      });
+      expect.unreachable("Expected RELEASE_ALREADY_SETTLED");
+    } catch (err) {
+      expect(err).toBeInstanceOf(CommercialResilienceError);
+      expect((err as CommercialResilienceError).code).toBe(
+        "RELEASE_ALREADY_SETTLED",
+      );
+    }
 
     // Purchase B: full chargeback within 14d voids escrowed entry cleanly before release
     ledger = appendCreatorRoyaltyAccrual(ledger, {
@@ -1168,6 +1316,7 @@ describe("commercial-resilience: bilateral-privacy cohort heatmap & LTI 1.3 vali
     ).toBe(false);
 
     const soloHeatmap = buildCohortHeatmap({
+      cohortId: "cohort-cs408",
       mode: "solo",
       role: "instructor",
       window: {
@@ -1180,9 +1329,13 @@ describe("commercial-resilience: bilateral-privacy cohort heatmap & LTI 1.3 vali
     });
     expect(soloHeatmap).toEqual({
       cohortSurfaceVisible: false,
+      cohortId: null,
+      publicationKey: null,
       window: null,
       finalizedAtMs: null,
       frozenRosterDigest: null,
+      sealed: false,
+      idempotentReplay: false,
       cells: [],
       disclosedCellCount: 0,
       suppressedCellCount: 0,
@@ -1335,6 +1488,7 @@ describe("commercial-resilience: bilateral-privacy cohort heatmap & LTI 1.3 vali
     for (const runOpenWeek of [
       () =>
         buildCohortHeatmap({
+          cohortId: "cohort-cs408",
           mode: "cohort",
           role: "instructor",
           window: {
@@ -1356,6 +1510,7 @@ describe("commercial-resilience: bilateral-privacy cohort heatmap & LTI 1.3 vali
         }),
       () =>
         aggregateCohortEventsToHeatmap({
+          cohortId: "cohort-cs408",
           mode: "cohort",
           role: "instructor",
           window: {
@@ -1385,17 +1540,25 @@ describe("commercial-resilience: bilateral-privacy cohort heatmap & LTI 1.3 vali
         learnerId: "stu-1",
         skillId: "spam-single-student",
         occurredAtMs: validWeek.weekStartUtcMs + (i + 1) * 60_000,
+        recordedAtMs: validWeek.weekStartUtcMs + (i + 1) * 60_000,
       })),
-      // 5 distinct students inside the window (+ 1 event outside window + 1 late enrollee ignored) => E = 5, N-E = 5 => DISCLOSED!
+      // 5 distinct students inside the window (+ 1 event outside window + 1 late-ingested event + 1 late enrollee ignored) => E = 5, N-E = 5 => DISCLOSED!
       ...["stu-1", "stu-2", "stu-3", "stu-4", "stu-5"].map((id, i) => ({
         learnerId: id,
         skillId: "genuine-five-students",
         occurredAtMs: validWeek.weekStartUtcMs + (i + 1) * 60_000,
+        recordedAtMs: validWeek.weekStartUtcMs + (i + 1) * 60_000,
       })),
       {
         learnerId: "stu-6",
         skillId: "genuine-five-students",
         occurredAtMs: validWeek.weekEndUtcMs, // exclusive end boundary -> ignored
+      },
+      {
+        learnerId: "stu-7",
+        skillId: "genuine-five-students",
+        occurredAtMs: validWeek.weekStartUtcMs + 30_000, // dated inside week
+        recordedAtMs: validWeek.weekEndUtcMs + 60_000, // late-ingested AFTER week close -> excluded!
       },
       {
         learnerId: "stu-late-11",
@@ -1410,6 +1573,7 @@ describe("commercial-resilience: bilateral-privacy cohort heatmap & LTI 1.3 vali
     ];
 
     const heatmap = aggregateCohortEventsToHeatmap({
+      cohortId: "cohort-cs408",
       mode: "cohort",
       role: "instructor",
       window: {
@@ -1423,6 +1587,7 @@ describe("commercial-resilience: bilateral-privacy cohort heatmap & LTI 1.3 vali
     });
 
     const heatmapWithoutLate = aggregateCohortEventsToHeatmap({
+      cohortId: "cohort-cs408",
       mode: "cohort",
       role: "instructor",
       window: {
@@ -1436,6 +1601,10 @@ describe("commercial-resilience: bilateral-privacy cohort heatmap & LTI 1.3 vali
     });
 
     expect(heatmap.cohortSurfaceVisible).toBe(true);
+    expect(heatmap.cohortId).toBe("cohort-cs408");
+    expect(heatmap.publicationKey).toBe(
+      cohortSnapshotPublicationKey("cohort-cs408", "2026-W47"),
+    );
     expect(heatmap.finalizedAtMs).toBe(validWeek.weekEndUtcMs);
     expect(heatmap.frozenRosterDigest).toMatch(/^sha256:[0-9a-f]{64}$/);
     expect(heatmap.frozenRosterDigest).toBe(
@@ -1452,6 +1621,62 @@ describe("commercial-resilience: bilateral-privacy cohort heatmap & LTI 1.3 vali
       complementLearnerCount: 5,
       eventRate: 0.5,
     });
+
+    // Seal snapshot once per (cohortId, isoWeekKey): identical replay returns frozen original; mutated count throws COHORT_WEEK_ALREADY_PUBLISHED
+    let pubLedger = createCohortSnapshotPublicationLedger();
+    const firstSeal = sealCohortWeeklySnapshot(pubLedger, heatmap);
+    pubLedger = firstSeal.ledger;
+    expect(firstSeal.idempotentReplay).toBe(false);
+    expect(firstSeal.snapshot.sealed).toBe(true);
+
+    const replayViaAggregate = aggregateCohortEventsToHeatmap({
+      cohortId: "cohort-cs408",
+      mode: "cohort",
+      role: "instructor",
+      window: {
+        weekStartUtcMs: validWeek.weekStartUtcMs,
+        weekEndUtcMs: validWeek.weekEndUtcMs,
+      },
+      evaluatedAtMs: validWeek.weekEndUtcMs + 7_200_000,
+      enrolledRoster,
+      skillIds: ["spam-single-student", "genuine-five-students"],
+      events: baseEvents,
+      publishedSnapshots: pubLedger,
+    });
+    expect(replayViaAggregate.idempotentReplay).toBe(true);
+    expect(replayViaAggregate.sealed).toBe(true);
+    expect(replayViaAggregate.finalizedAtMs).toBe(validWeek.weekEndUtcMs); // original sealed timestamp preserved
+
+    // Attempting to republish the same (cohortId, isoWeekKey) with an extra backdated event (E=6 instead of E=5) MUST fail closed
+    try {
+      aggregateCohortEventsToHeatmap({
+        cohortId: "cohort-cs408",
+        mode: "cohort",
+        role: "instructor",
+        window: {
+          weekStartUtcMs: validWeek.weekStartUtcMs,
+          weekEndUtcMs: validWeek.weekEndUtcMs,
+        },
+        evaluatedAtMs: validWeek.weekEndUtcMs + 7_200_000,
+        enrolledRoster,
+        skillIds: ["spam-single-student", "genuine-five-students"],
+        events: [
+          ...baseEvents,
+          {
+            learnerId: "stu-8",
+            skillId: "genuine-five-students",
+            occurredAtMs: validWeek.weekStartUtcMs + 45_000,
+          },
+        ],
+        publishedSnapshots: pubLedger,
+      });
+      expect.unreachable("Expected COHORT_WEEK_ALREADY_PUBLISHED");
+    } catch (err) {
+      expect(err).toBeInstanceOf(CommercialResilienceError);
+      expect((err as CommercialResilienceError).code).toBe(
+        "COHORT_WEEK_ALREADY_PUBLISHED",
+      );
+    }
   });
 
   it("validates LTI 1.3 deep-linking claims, binds initiated launch nonces, blocks spoofing/replay/expiry, and forbids private note/transcript leakage", () => {
@@ -1648,20 +1873,46 @@ describe("commercial-resilience: bilateral-privacy cohort heatmap & LTI 1.3 vali
       "UNRECOGNIZED_NONCE",
     );
 
-    // Consuming a valid initiated nonce returns nextUsedNonces so replay fails closed with NONCE_REPLAYED
-    const multiNoncePolicy: Lti13ValidationPolicy = {
+    // Single-launch expectedNonce + optional active-session registry:
+    // An unused nonce from ANOTHER launch MUST fail even when present in issuedLaunchNonces!
+    const registryPolicy: Lti13ValidationPolicy = {
       expectedIssuer: policy.expectedIssuer,
       expectedClientId: policy.expectedClientId,
       allowedDeploymentIds: policy.allowedDeploymentIds,
-      issuedLaunchNonces: ["fresh-nonce-abc123", "second-launch-nonce"],
+      expectedNonce: "fresh-nonce-abc123",
+      issuedLaunchNonces: ["fresh-nonce-abc123", "other-launch-nonce"],
       nowMs,
       maxClockSkewSeconds: 30,
       allowedReturnOrigins: policy.allowedReturnOrigins,
       allowedCartridgeIds: policy.allowedCartridgeIds,
     };
+
+    const crossLaunchNonce = validateLti13DeepLinkingClaims(
+      {
+        ...validClaims,
+        nonce: "other-launch-nonce",
+      },
+      registryPolicy,
+    );
+    expect(crossLaunchNonce.valid).toBe(false);
+    expect(crossLaunchNonce.errors.map((e) => e.code)).toContain(
+      "UNRECOGNIZED_NONCE",
+    );
+
+    // Matching expectedNonce missing from active-session registry also fails closed
+    const missingFromRegistry = validateLti13DeepLinkingClaims(validClaims, {
+      ...registryPolicy,
+      issuedLaunchNonces: ["other-launch-nonce"],
+    });
+    expect(missingFromRegistry.valid).toBe(false);
+    expect(missingFromRegistry.errors.map((e) => e.code)).toContain(
+      "UNRECOGNIZED_NONCE",
+    );
+
+    // Exact expectedNonce match present in active-session registry succeeds and returns nextUsedNonces so replay fails closed
     const firstLaunch = validateLti13DeepLinkingClaims(
       validClaims,
-      multiNoncePolicy,
+      registryPolicy,
     );
     expect(firstLaunch.valid).toBe(true);
     if (firstLaunch.valid) {
@@ -1669,7 +1920,7 @@ describe("commercial-resilience: bilateral-privacy cohort heatmap & LTI 1.3 vali
       expect(firstLaunch.nextUsedNonces.has("fresh-nonce-abc123")).toBe(true);
 
       const replayedLaunch = validateLti13DeepLinkingClaims(validClaims, {
-        ...multiNoncePolicy,
+        ...registryPolicy,
         usedNonces: firstLaunch.nextUsedNonces,
       });
       expect(replayedLaunch.valid).toBe(false);
@@ -1678,11 +1929,17 @@ describe("commercial-resilience: bilateral-privacy cohort heatmap & LTI 1.3 vali
       );
     }
 
-    // Empty issuedLaunchNonces allowlist in policy fails closed
+    // Empty issuedLaunchNonces registry or blank expectedNonce in policy fails closed
     expect(() =>
       validateLti13DeepLinkingClaims(validClaims, {
-        ...multiNoncePolicy,
+        ...registryPolicy,
         issuedLaunchNonces: [],
+      }),
+    ).toThrow(CommercialResilienceError);
+    expect(() =>
+      validateLti13DeepLinkingClaims(validClaims, {
+        ...registryPolicy,
+        expectedNonce: "   ",
       }),
     ).toThrow(CommercialResilienceError);
   });

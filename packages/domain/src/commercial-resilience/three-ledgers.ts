@@ -703,9 +703,43 @@ export interface CreatorRoyaltyReleaseInput {
   readonly nowMs: number;
 }
 
+export interface ClawbackOffsetAllocation {
+  readonly clawbackEntryId: string;
+  readonly amountMicros: MicroCurrency;
+}
+
+export interface CreatorRoyaltyPayoutSettlementEntry {
+  readonly ledgerKind: "creator_royalty_entry";
+  readonly entryKind: "payout_settlement";
+  readonly entryId: string;
+  readonly idempotencyKey: string;
+  readonly creatorAccountId: string;
+  readonly currency: CurrencyCode;
+  readonly settledAtMs: number;
+  readonly settledReleaseEntryIds: ReadonlyArray<string>;
+  readonly settledClawbackEntryIds: ReadonlyArray<string>;
+  readonly clawbackAllocations: ReadonlyArray<ClawbackOffsetAllocation>;
+  readonly grossReleasedMicros: MicroCurrency;
+  readonly settledClawbackMicros: MicroCurrency;
+  readonly netDisbursementMicros: MicroCurrency;
+}
+
+export interface CreatorRoyaltyPayoutSettlementInput {
+  readonly entryId: string;
+  readonly idempotencyKey: string;
+  readonly creatorAccountId: string;
+  readonly currency: CurrencyCode;
+  readonly settledAtMs: number;
+  readonly settledReleaseEntryIds: ReadonlyArray<string>;
+  readonly settledClawbackEntryIds?: ReadonlyArray<string>;
+  /** Optional explicit clawback deduction bounded by available unsettled clawbacks and gross release amount. */
+  readonly settledClawbackMicros?: MicroCurrency;
+}
+
 export interface CreatorRoyaltyLedger {
   readonly ledgerKind: "creator_royalty_entry";
   readonly entries: ReadonlyArray<CreatorRoyaltyEntry>;
+  readonly payoutSettlements: ReadonlyArray<CreatorRoyaltyPayoutSettlementEntry>;
 }
 
 export interface CreatorRoyaltyPosition {
@@ -744,8 +778,13 @@ export interface CreatorRoyaltyPayableSummary {
   readonly pendingEscrowMicros: MicroCurrency;
   readonly maturedReleasableMicros: MicroCurrency;
   readonly grossReleasedMicros: MicroCurrency;
+  readonly paidOutReleasedGrossMicros: MicroCurrency;
+  readonly unsettledReleasedMicros: MicroCurrency;
   readonly postReleaseClawbackMicros: MicroCurrency;
-  /** Signed net payout balance: maturedReleasableMicros - postReleaseClawbackMicros. */
+  readonly settledClawbackMicros: MicroCurrency;
+  readonly outstandingClawbackOffsetMicros: MicroCurrency;
+  readonly totalNetDisbursedMicros: MicroCurrency;
+  /** Signed net payable balance: maturedReleasableMicros + unsettledReleasedMicros - outstandingClawbackOffsetMicros. */
   readonly netPayableMicros: bigint;
   /** Lifetime net settled creator earnings: grossReleasedMicros - postReleaseClawbackMicros (>= 0n). */
   readonly netSettledLifetimeMicros: MicroCurrency;
@@ -755,6 +794,7 @@ export function createCreatorRoyaltyLedger(): CreatorRoyaltyLedger {
   return {
     ledgerKind: "creator_royalty_entry",
     entries: [],
+    payoutSettlements: [],
   };
 }
 
@@ -920,10 +960,25 @@ function appendValidatedRoyaltyEntry(
       );
     }
   }
+  for (const existingSettlement of ledger.payoutSettlements) {
+    if (existingSettlement.idempotencyKey === entry.idempotencyKey) {
+      throw new CommercialResilienceError(
+        "IDEMPOTENCY_CONFLICT",
+        `Conflicting creator_royalty_entry for idempotencyKey "${entry.idempotencyKey}"`,
+      );
+    }
+    if (existingSettlement.entryId === entry.entryId) {
+      throw new CommercialResilienceError(
+        "DUPLICATE_ENTRY_ID",
+        `Duplicate creator_royalty_entry entryId "${entry.entryId}"`,
+      );
+    }
+  }
   return {
     ledger: {
       ledgerKind: "creator_royalty_entry",
       entries: [...ledger.entries, entry],
+      payoutSettlements: ledger.payoutSettlements,
     },
     entry,
     idempotentReplay: false,
@@ -1503,9 +1558,304 @@ export function appendCreatorRoyaltyRelease(
   return appendValidatedRoyaltyEntry(ledger, entry);
 }
 
+function stringArraysEqual(
+  a: ReadonlyArray<string>,
+  b: ReadonlyArray<string>,
+): boolean {
+  if (a.length !== b.length) {
+    return false;
+  }
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i] !== b[i]) {
+      return false;
+    }
+  }
+  return true;
+}
+
 /**
- * Summarizes a creator's append-only escrow, matured releasable, released, and
- * post-release clawback payable balance in a single currency at `nowMs`.
+ * Appends an immutable `payout_settlement` entry settling released royalty
+ * entries and applying outstanding post-release clawback offsets so each
+ * release is paid out at most once and each clawback is deducted at most once.
+ */
+export function recordCreatorRoyaltyPayoutSettlement(
+  ledger: CreatorRoyaltyLedger,
+  input: CreatorRoyaltyPayoutSettlementInput,
+): AppendLedgerResult<
+  CreatorRoyaltyLedger,
+  CreatorRoyaltyPayoutSettlementEntry
+> {
+  const entryId = normalizeIdentifier(input.entryId, "entryId");
+  const idempotencyKey = normalizeIdentifier(
+    input.idempotencyKey,
+    "idempotencyKey",
+  );
+  const creatorAccountId = normalizeIdentifier(
+    input.creatorAccountId,
+    "creatorAccountId",
+  );
+  const currency = normalizeCurrency(input.currency);
+  const settledAtMs = assertSafeTimestampMs(input.settledAtMs, "settledAtMs");
+
+  const settledReleaseEntryIds: string[] = [];
+  const seenReleaseIds = new Set<string>();
+  for (const [idx, rawId] of input.settledReleaseEntryIds.entries()) {
+    const id = normalizeIdentifier(rawId, `settledReleaseEntryIds[${idx}]`);
+    if (seenReleaseIds.has(id)) {
+      throw new CommercialResilienceError(
+        "INVALID_REFERENCE_ENTRY",
+        `Duplicate release entryId "${id}" in settledReleaseEntryIds`,
+      );
+    }
+    seenReleaseIds.add(id);
+    settledReleaseEntryIds.push(id);
+  }
+  if (settledReleaseEntryIds.length === 0) {
+    throw new CommercialResilienceError(
+      "INVALID_REFERENCE_ENTRY",
+      "payout_settlement requires at least one settledReleaseEntryId",
+    );
+  }
+
+  const settledClawbackEntryIds: string[] = [];
+  const seenClawbackIds = new Set<string>();
+  for (const [idx, rawId] of (input.settledClawbackEntryIds ?? []).entries()) {
+    const id = normalizeIdentifier(rawId, `settledClawbackEntryIds[${idx}]`);
+    if (seenClawbackIds.has(id)) {
+      throw new CommercialResilienceError(
+        "INVALID_REFERENCE_ENTRY",
+        `Duplicate clawback entryId "${id}" in settledClawbackEntryIds`,
+      );
+    }
+    seenClawbackIds.add(id);
+    settledClawbackEntryIds.push(id);
+  }
+
+  const explicitSettledClawback =
+    input.settledClawbackMicros === undefined
+      ? null
+      : assertNonNegativeMicros(
+          input.settledClawbackMicros,
+          "settledClawbackMicros",
+        );
+
+  // Check exact idempotent replay before checking already-settled guards.
+  const existingSettlement = ledger.payoutSettlements.find(
+    (item) => item.idempotencyKey === idempotencyKey,
+  );
+  if (existingSettlement) {
+    const sameInputs =
+      existingSettlement.entryId === entryId &&
+      existingSettlement.creatorAccountId === creatorAccountId &&
+      existingSettlement.currency === currency &&
+      existingSettlement.settledAtMs === settledAtMs &&
+      stringArraysEqual(
+        existingSettlement.settledReleaseEntryIds,
+        settledReleaseEntryIds,
+      ) &&
+      stringArraysEqual(
+        existingSettlement.settledClawbackEntryIds,
+        settledClawbackEntryIds,
+      ) &&
+      (explicitSettledClawback === null ||
+        existingSettlement.settledClawbackMicros === explicitSettledClawback);
+    if (sameInputs) {
+      return { ledger, entry: existingSettlement, idempotentReplay: true };
+    }
+    throw new CommercialResilienceError(
+      "IDEMPOTENCY_CONFLICT",
+      `Conflicting payout_settlement for idempotencyKey "${idempotencyKey}"`,
+    );
+  }
+
+  for (const existing of ledger.entries) {
+    if (existing.idempotencyKey === idempotencyKey) {
+      throw new CommercialResilienceError(
+        "IDEMPOTENCY_CONFLICT",
+        `Conflicting creator_royalty_entry for idempotencyKey "${idempotencyKey}"`,
+      );
+    }
+    if (existing.entryId === entryId) {
+      throw new CommercialResilienceError(
+        "DUPLICATE_ENTRY_ID",
+        `Duplicate creator_royalty_entry entryId "${entryId}"`,
+      );
+    }
+  }
+  for (const existing of ledger.payoutSettlements) {
+    if (existing.entryId === entryId) {
+      throw new CommercialResilienceError(
+        "DUPLICATE_ENTRY_ID",
+        `Duplicate payout_settlement entryId "${entryId}"`,
+      );
+    }
+  }
+
+  const previouslySettledReleases = new Set<string>();
+  const settledByClawbackId = new Map<string, MicroCurrency>();
+  for (const prior of ledger.payoutSettlements) {
+    for (const relId of prior.settledReleaseEntryIds) {
+      previouslySettledReleases.add(relId);
+    }
+    for (const alloc of prior.clawbackAllocations) {
+      settledByClawbackId.set(
+        alloc.clawbackEntryId,
+        (settledByClawbackId.get(alloc.clawbackEntryId) ?? 0n) +
+          alloc.amountMicros,
+      );
+    }
+  }
+
+  let grossReleasedMicros = 0n;
+  for (const relId of settledReleaseEntryIds) {
+    if (previouslySettledReleases.has(relId)) {
+      throw new CommercialResilienceError(
+        "RELEASE_ALREADY_SETTLED",
+        `Release entry "${relId}" was already settled in a prior payout_settlement`,
+      );
+    }
+    const relEntry = ledger.entries.find(
+      (item) => item.entryId === relId && item.eventType === "escrow_release",
+    );
+    if (
+      !relEntry ||
+      relEntry.creatorAccountId !== creatorAccountId ||
+      relEntry.currency !== currency
+    ) {
+      throw new CommercialResilienceError(
+        "INVALID_REFERENCE_ENTRY",
+        `Release entry "${relId}" does not match an escrow_release for creator "${creatorAccountId}" in "${currency}"`,
+      );
+    }
+    if (settledAtMs < relEntry.recordedAtMs) {
+      throw new CommercialResilienceError(
+        "INVALID_TIMESTAMP",
+        `payout_settlement settledAtMs cannot precede escrow_release "${relId}"`,
+      );
+    }
+    grossReleasedMicros += relEntry.resultingRoyaltyMicros;
+  }
+
+  const remainingByClawback: Array<{
+    readonly clawbackEntryId: string;
+    readonly remainingMicros: MicroCurrency;
+  }> = [];
+  let totalAvailableClawbackMicros = 0n;
+  for (const clawId of settledClawbackEntryIds) {
+    const clawEntry = ledger.entries.find(
+      (item) =>
+        item.entryId === clawId && item.eventType === "post_release_clawback",
+    );
+    if (
+      !clawEntry ||
+      clawEntry.creatorAccountId !== creatorAccountId ||
+      clawEntry.currency !== currency
+    ) {
+      throw new CommercialResilienceError(
+        "INVALID_REFERENCE_ENTRY",
+        `Clawback entry "${clawId}" does not match a post_release_clawback for creator "${creatorAccountId}" in "${currency}"`,
+      );
+    }
+    if (settledAtMs < clawEntry.recordedAtMs) {
+      throw new CommercialResilienceError(
+        "INVALID_TIMESTAMP",
+        `payout_settlement settledAtMs cannot precede post_release_clawback "${clawId}"`,
+      );
+    }
+    const originalClawbackMagnitude = -clawEntry.deltaRoyaltyMicros;
+    const alreadySettled = settledByClawbackId.get(clawId) ?? 0n;
+    const remainingMicros =
+      originalClawbackMagnitude > alreadySettled
+        ? originalClawbackMagnitude - alreadySettled
+        : 0n;
+    if (remainingMicros === 0n) {
+      throw new CommercialResilienceError(
+        "CLAWBACK_ALREADY_SETTLED",
+        `Clawback entry "${clawId}" has already been fully settled and cannot be deducted again`,
+      );
+    }
+    remainingByClawback.push({ clawbackEntryId: clawId, remainingMicros });
+    totalAvailableClawbackMicros += remainingMicros;
+  }
+
+  const settledClawbackMicros =
+    explicitSettledClawback !== null
+      ? explicitSettledClawback
+      : totalAvailableClawbackMicros > grossReleasedMicros
+        ? grossReleasedMicros
+        : totalAvailableClawbackMicros;
+
+  if (settledClawbackMicros > totalAvailableClawbackMicros) {
+    throw new CommercialResilienceError(
+      "INVALID_MONETARY_AMOUNT",
+      "settledClawbackMicros exceeds remaining unsettled clawback balance of specified entries",
+    );
+  }
+  if (settledClawbackMicros > grossReleasedMicros) {
+    throw new CommercialResilienceError(
+      "INVALID_MONETARY_AMOUNT",
+      "settledClawbackMicros cannot exceed grossReleasedMicros in a single payout_settlement",
+    );
+  }
+
+  let remainingToAllocate = settledClawbackMicros;
+  const clawbackAllocations: ClawbackOffsetAllocation[] = [];
+  for (const item of remainingByClawback) {
+    if (remainingToAllocate === 0n) {
+      break;
+    }
+    const alloc =
+      item.remainingMicros > remainingToAllocate
+        ? remainingToAllocate
+        : item.remainingMicros;
+    if (alloc > 0n) {
+      clawbackAllocations.push({
+        clawbackEntryId: item.clawbackEntryId,
+        amountMicros: alloc,
+      });
+      remainingToAllocate -= alloc;
+    }
+  }
+
+  const settlementEntry: CreatorRoyaltyPayoutSettlementEntry = {
+    ledgerKind: "creator_royalty_entry",
+    entryKind: "payout_settlement",
+    entryId,
+    idempotencyKey,
+    creatorAccountId,
+    currency,
+    settledAtMs,
+    settledReleaseEntryIds,
+    settledClawbackEntryIds,
+    clawbackAllocations,
+    grossReleasedMicros,
+    settledClawbackMicros,
+    netDisbursementMicros: grossReleasedMicros - settledClawbackMicros,
+  };
+
+  if (remainingToAllocate !== 0n) {
+    throw new CommercialResilienceError(
+      "INVALID_MONETARY_AMOUNT",
+      "Failed to allocate full settledClawbackMicros across specified clawback entries",
+    );
+  }
+
+  return {
+    ledger: {
+      ledgerKind: "creator_royalty_entry",
+      entries: ledger.entries,
+      payoutSettlements: [...ledger.payoutSettlements, settlementEntry],
+    },
+    entry: settlementEntry,
+    idempotentReplay: false,
+  };
+}
+
+/**
+ * Summarizes a creator's append-only escrow, matured releasable, unsettled
+ * released, post-release clawback, and settled payout balances at `nowMs`.
+ * Settled clawback offsets are subtracted from outstanding clawbacks so each
+ * clawback is deducted at most once.
  */
 export function summarizeCreatorRoyaltyPayableBalance(
   ledger: CreatorRoyaltyLedger,
@@ -1536,6 +1886,24 @@ export function summarizeCreatorRoyaltyPayableBalance(
     purchaseIds.add(entry.purchaseId);
   }
 
+  let paidOutReleasedGrossMicros = 0n;
+  let settledClawbackMicros = 0n;
+  let totalNetDisbursedMicros = 0n;
+  for (const settlement of ledger.payoutSettlements) {
+    if (settlement.creatorAccountId !== creatorAccountId) {
+      continue;
+    }
+    if (settlement.currency !== currency) {
+      throw new CommercialResilienceError(
+        "CURRENCY_MISMATCH",
+        `Payout settlement "${settlement.entryId}" has currency "${settlement.currency}", expected "${currency}"`,
+      );
+    }
+    paidOutReleasedGrossMicros += settlement.grossReleasedMicros;
+    settledClawbackMicros += settlement.settledClawbackMicros;
+    totalNetDisbursedMicros += settlement.netDisbursementMicros;
+  }
+
   let pendingEscrowMicros = 0n;
   let maturedReleasableMicros = 0n;
   let grossReleasedMicros = 0n;
@@ -1554,14 +1922,31 @@ export function summarizeCreatorRoyaltyPayableBalance(
     postReleaseClawbackMicros += pos.clawedBackMicros;
   }
 
+  const unsettledReleasedMicros =
+    grossReleasedMicros > paidOutReleasedGrossMicros
+      ? grossReleasedMicros - paidOutReleasedGrossMicros
+      : 0n;
+  const outstandingClawbackOffsetMicros =
+    postReleaseClawbackMicros > settledClawbackMicros
+      ? postReleaseClawbackMicros - settledClawbackMicros
+      : 0n;
+
   return {
     creatorAccountId,
     currency,
     pendingEscrowMicros,
     maturedReleasableMicros,
     grossReleasedMicros,
+    paidOutReleasedGrossMicros,
+    unsettledReleasedMicros,
     postReleaseClawbackMicros,
-    netPayableMicros: maturedReleasableMicros - postReleaseClawbackMicros,
+    settledClawbackMicros,
+    outstandingClawbackOffsetMicros,
+    totalNetDisbursedMicros,
+    netPayableMicros:
+      maturedReleasableMicros +
+      unsettledReleasedMicros -
+      outstandingClawbackOffsetMicros,
     netSettledLifetimeMicros:
       grossReleasedMicros > postReleaseClawbackMicros
         ? grossReleasedMicros - postReleaseClawbackMicros

@@ -417,7 +417,157 @@ export function computeFrozenRosterDigest(
   return `sha256:${sha256HexPure(payload)}`;
 }
 
+export interface CohortSnapshotPublicationLedger {
+  readonly ledgerKind: "cohort_snapshot_publication";
+  readonly snapshotsByKey: ReadonlyMap<string, CohortHeatmapResult>;
+}
+
+export function createCohortSnapshotPublicationLedger(): CohortSnapshotPublicationLedger {
+  return {
+    ledgerKind: "cohort_snapshot_publication",
+    snapshotsByKey: new Map<string, CohortHeatmapResult>(),
+  };
+}
+
+export function cohortSnapshotPublicationKey(
+  cohortId: string,
+  isoWeekKey: string,
+): string {
+  return `${normalizeIdentifier(cohortId, "cohortId")}::${normalizeIdentifier(isoWeekKey, "isoWeekKey")}`;
+}
+
+function cohortCellsEqual(
+  a: ReadonlyArray<BilateralCohortCell>,
+  b: ReadonlyArray<BilateralCohortCell>,
+): boolean {
+  if (a.length !== b.length) {
+    return false;
+  }
+  for (let i = 0; i < a.length; i += 1) {
+    const ca = a[i];
+    const cb = b[i];
+    if (
+      !ca ||
+      !cb ||
+      ca.skillId !== cb.skillId ||
+      ca.suppressed !== cb.suppressed ||
+      ca.enrolledActiveCount !== cb.enrolledActiveCount ||
+      ca.eventLearnerCount !== cb.eventLearnerCount ||
+      ca.complementLearnerCount !== cb.complementLearnerCount ||
+      ca.eventRate !== cb.eventRate ||
+      ca.eventRateBps !== cb.eventRateBps ||
+      ca.suppressionReason !== cb.suppressionReason
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function cohortSnapshotsEquivalent(
+  a: CohortHeatmapResult,
+  b: CohortHeatmapResult,
+): boolean {
+  return (
+    a.cohortSurfaceVisible === b.cohortSurfaceVisible &&
+    a.cohortId === b.cohortId &&
+    a.publicationKey === b.publicationKey &&
+    a.frozenRosterDigest === b.frozenRosterDigest &&
+    a.disclosedCellCount === b.disclosedCellCount &&
+    a.suppressedCellCount === b.suppressedCellCount &&
+    a.window?.isoWeekKey === b.window?.isoWeekKey &&
+    a.window?.weekStartUtcMs === b.window?.weekStartUtcMs &&
+    a.window?.weekEndUtcMs === b.window?.weekEndUtcMs &&
+    cohortCellsEqual(a.cells, b.cells)
+  );
+}
+
+function lookupPublishedSnapshot(
+  source:
+    | ReadonlyMap<string, CohortHeatmapResult>
+    | CohortSnapshotPublicationLedger
+    | undefined,
+  publicationKey: string,
+): CohortHeatmapResult | undefined {
+  if (!source) {
+    return undefined;
+  }
+  if ("ledgerKind" in source) {
+    return source.snapshotsByKey.get(publicationKey);
+  }
+  return source.get(publicationKey);
+}
+
+/**
+ * Seals at most ONE immutable finalized snapshot per `(cohortId, isoWeekKey)`.
+ * Replaying an identical snapshot returns the original sealed snapshot verbatim;
+ * attempting to publish any altered count/cell/digest for an already-published
+ * `(cohortId, isoWeekKey)` throws `COHORT_WEEK_ALREADY_PUBLISHED`.
+ */
+export function sealCohortWeeklySnapshot(
+  ledger: CohortSnapshotPublicationLedger,
+  snapshot: CohortHeatmapResult,
+): {
+  readonly ledger: CohortSnapshotPublicationLedger;
+  readonly snapshot: CohortHeatmapResult;
+  readonly idempotentReplay: boolean;
+} {
+  if (
+    !snapshot.cohortSurfaceVisible ||
+    snapshot.cohortId === null ||
+    snapshot.window === null ||
+    snapshot.frozenRosterDigest === null ||
+    snapshot.finalizedAtMs === null
+  ) {
+    throw new CommercialResilienceError(
+      "COHORT_WEEK_NOT_FINALIZED",
+      "Only a visible, finalized cohort weekly snapshot can be sealed for publication",
+    );
+  }
+
+  const key = cohortSnapshotPublicationKey(
+    snapshot.cohortId,
+    snapshot.window.isoWeekKey,
+  );
+  const existing = ledger.snapshotsByKey.get(key);
+  if (existing) {
+    if (cohortSnapshotsEquivalent(existing, snapshot)) {
+      return {
+        ledger,
+        snapshot: {
+          ...existing,
+          sealed: true,
+          idempotentReplay: true,
+        },
+        idempotentReplay: true,
+      };
+    }
+    throw new CommercialResilienceError(
+      "COHORT_WEEK_ALREADY_PUBLISHED",
+      `Cohort snapshot for (${snapshot.cohortId}, ${snapshot.window.isoWeekKey}) was already published and cannot be mutated`,
+    );
+  }
+
+  const sealedSnapshot: CohortHeatmapResult = {
+    ...snapshot,
+    publicationKey: key,
+    sealed: true,
+    idempotentReplay: false,
+  };
+  const nextMap = new Map(ledger.snapshotsByKey);
+  nextMap.set(key, sealedSnapshot);
+  return {
+    ledger: {
+      ledgerKind: "cohort_snapshot_publication",
+      snapshotsByKey: nextMap,
+    },
+    snapshot: sealedSnapshot,
+    idempotentReplay: false,
+  };
+}
+
 export interface CohortHeatmapInput {
+  readonly cohortId: string;
   readonly mode: WorkspaceLearningMode;
   readonly role: CohortViewerRole;
   readonly window: {
@@ -429,13 +579,21 @@ export interface CohortHeatmapInput {
   /** Digest binding this finalized week snapshot to its frozen enrolled roster. */
   readonly frozenRosterDigest: string;
   readonly cells: ReadonlyArray<BilateralCohortCellInput>;
+  /** Previously sealed weekly snapshots; enforces at most one immutable snapshot per (cohortId, isoWeekKey). */
+  readonly publishedSnapshots?:
+    | ReadonlyMap<string, CohortHeatmapResult>
+    | CohortSnapshotPublicationLedger;
 }
 
 export interface CohortHeatmapResult {
   readonly cohortSurfaceVisible: boolean;
+  readonly cohortId: string | null;
+  readonly publicationKey: string | null;
   readonly window: IsoWeekWindow | null;
   readonly finalizedAtMs: number | null;
   readonly frozenRosterDigest: string | null;
+  readonly sealed: boolean;
+  readonly idempotentReplay: boolean;
   readonly cells: ReadonlyArray<BilateralCohortCell>;
   readonly disclosedCellCount: number;
   readonly suppressedCellCount: number;
@@ -443,7 +601,8 @@ export interface CohortHeatmapResult {
 
 /**
  * Produces a bilateral-privacy-gated cohort heatmap locked strictly to a
- * finalized (closed) immutable ISO calendar week (`evaluatedAtMs >= weekEndUtcMs`).
+ * finalized (closed) immutable ISO calendar week (`evaluatedAtMs >= weekEndUtcMs`)
+ * and sealed at most once per `(cohortId, isoWeekKey)`.
  * Solo learners (and cohort learners) receive zero cohort UI or query results.
  */
 export function buildCohortHeatmap(
@@ -457,15 +616,20 @@ export function buildCohortHeatmap(
   if (!policy.cohortSurfaceVisible || !policy.allowCohortQueries) {
     return {
       cohortSurfaceVisible: false,
+      cohortId: null,
+      publicationKey: null,
       window: null,
       finalizedAtMs: null,
       frozenRosterDigest: null,
+      sealed: false,
+      idempotentReplay: false,
       cells: [],
       disclosedCellCount: 0,
       suppressedCellCount: 0,
     };
   }
 
+  const cohortId = normalizeIdentifier(input.cohortId, "cohortId");
   const validatedWindow = validateFixedIsoWeekWindow(input.window);
   const evaluatedAtMs = assertSafeTimestampMs(
     input.evaluatedAtMs,
@@ -496,15 +660,43 @@ export function buildCohortHeatmap(
     }
   }
 
-  return {
+  const publicationKey = cohortSnapshotPublicationKey(
+    cohortId,
+    validatedWindow.isoWeekKey,
+  );
+  const candidate: CohortHeatmapResult = {
     cohortSurfaceVisible: true,
+    cohortId,
+    publicationKey,
     window: validatedWindow,
     finalizedAtMs: evaluatedAtMs,
     frozenRosterDigest,
+    sealed: false,
+    idempotentReplay: false,
     cells: evaluatedCells,
     disclosedCellCount,
     suppressedCellCount,
   };
+
+  const existing = lookupPublishedSnapshot(
+    input.publishedSnapshots,
+    publicationKey,
+  );
+  if (existing) {
+    if (cohortSnapshotsEquivalent(existing, candidate)) {
+      return {
+        ...existing,
+        sealed: true,
+        idempotentReplay: true,
+      };
+    }
+    throw new CommercialResilienceError(
+      "COHORT_WEEK_ALREADY_PUBLISHED",
+      `Cohort snapshot for (${cohortId}, ${validatedWindow.isoWeekKey}) was already published and cannot be mutated`,
+    );
+  }
+
+  return candidate;
 }
 
 export interface CohortRosterMember {
@@ -517,9 +709,12 @@ export interface CohortSkillEventRecord {
   readonly learnerId: string;
   readonly skillId: string;
   readonly occurredAtMs: number;
+  /** Optional server ingestion timestamp; late-ingested events with recordedAtMs > weekEndUtcMs are excluded from closed weeks. */
+  readonly recordedAtMs?: number;
 }
 
 export interface AggregateCohortEventsInput {
+  readonly cohortId: string;
   readonly mode: WorkspaceLearningMode;
   readonly role: CohortViewerRole;
   readonly window: {
@@ -531,12 +726,17 @@ export interface AggregateCohortEventsInput {
   readonly enrolledRoster: ReadonlyArray<CohortRosterMember>;
   readonly skillIds: ReadonlyArray<string>;
   readonly events: ReadonlyArray<CohortSkillEventRecord>;
+  /** Previously sealed weekly snapshots; enforces at most one immutable snapshot per (cohortId, isoWeekKey). */
+  readonly publishedSnapshots?:
+    | ReadonlyMap<string, CohortHeatmapResult>
+    | CohortSnapshotPublicationLedger;
 }
 
 /**
  * Publishes a finalized weekly cohort heatmap strictly after `window.weekEndUtcMs`,
- * freezing the enrolled roster to learners with `enrolledAtMs <= window.weekEndUtcMs`
- * and deduplicating learner-level events inside `[weekStartUtcMs, weekEndUtcMs)`.
+ * freezing the enrolled roster to learners with `enrolledAtMs <= window.weekEndUtcMs`,
+ * excluding late-ingested events (`recordedAtMs > window.weekEndUtcMs`), and
+ * enforcing once-per-`(cohortId, isoWeekKey)` immutability when sealed snapshots exist.
  */
 export function aggregateCohortEventsToHeatmap(
   input: AggregateCohortEventsInput,
@@ -549,15 +749,20 @@ export function aggregateCohortEventsToHeatmap(
   if (!policy.cohortSurfaceVisible || !policy.allowCohortQueries) {
     return {
       cohortSurfaceVisible: false,
+      cohortId: null,
+      publicationKey: null,
       window: null,
       finalizedAtMs: null,
       frozenRosterDigest: null,
+      sealed: false,
+      idempotentReplay: false,
       cells: [],
       disclosedCellCount: 0,
       suppressedCellCount: 0,
     };
   }
 
+  const cohortId = normalizeIdentifier(input.cohortId, "cohortId");
   const validatedWindow = validateFixedIsoWeekWindow(input.window);
   const evaluatedAtMs = assertSafeTimestampMs(
     input.evaluatedAtMs,
@@ -614,6 +819,16 @@ export function aggregateCohortEventsToHeatmap(
       ev.occurredAtMs,
       `events[${i}].occurredAtMs`,
     );
+    if (ev.recordedAtMs !== undefined) {
+      const recordedAtMs = assertSafeTimestampMs(
+        ev.recordedAtMs,
+        `events[${i}].recordedAtMs`,
+      );
+      // Post-close late-ingested events cannot retroactively mutate a closed week.
+      if (recordedAtMs > validatedWindow.weekEndUtcMs) {
+        continue;
+      }
+    }
 
     if (
       occurredAtMs < validatedWindow.weekStartUtcMs ||
@@ -638,6 +853,7 @@ export function aggregateCohortEventsToHeatmap(
   }));
 
   return buildCohortHeatmap({
+    cohortId,
     mode: input.mode,
     role: input.role,
     window: {
@@ -647,6 +863,7 @@ export function aggregateCohortEventsToHeatmap(
     evaluatedAtMs,
     frozenRosterDigest,
     cells,
+    publishedSnapshots: input.publishedSnapshots,
   });
 }
 
@@ -714,20 +931,14 @@ export interface Lti13DeepLinkingClaimsPayload {
   readonly [LTI_CLAIM_CUSTOM]?: Readonly<Record<string, unknown>>;
 }
 
-export type Lti13InitiatedNoncePolicy =
-  | {
-      readonly expectedNonce: string;
-      readonly issuedLaunchNonces?: ReadonlySet<string> | ReadonlyArray<string>;
-    }
-  | {
-      readonly expectedNonce?: string;
-      readonly issuedLaunchNonces: ReadonlySet<string> | ReadonlyArray<string>;
-    };
-
-export type Lti13ValidationPolicy = Lti13InitiatedNoncePolicy & {
+export interface Lti13ValidationPolicy {
   readonly expectedIssuer: string;
   readonly expectedClientId: string;
   readonly allowedDeploymentIds: ReadonlyArray<string>;
+  /** Exact single-launch nonce initiated for this OIDC/LTI request (OIDC Core §3.1.3.7). */
+  readonly expectedNonce: string;
+  /** Optional active-session launch nonce registry; when supplied, claims.nonce MUST match BOTH expectedNonce AND this registry. */
+  readonly issuedLaunchNonces?: ReadonlySet<string> | ReadonlyArray<string>;
   readonly nowMs: number;
   readonly maxClockSkewSeconds?: number;
   readonly usedNonces?: ReadonlySet<string>;
@@ -735,7 +946,7 @@ export type Lti13ValidationPolicy = Lti13InitiatedNoncePolicy & {
   readonly allowedReturnOrigins?: ReadonlyArray<string>;
   readonly allowedCartridgeIds?: ReadonlyArray<string>;
   readonly allowedCourseIds?: ReadonlyArray<string>;
-};
+}
 
 export type Lti13ValidationErrorCode =
   | "INVALID_ISSUER"
@@ -955,21 +1166,19 @@ export function validateLti13DeepLinkingClaims(
       normalizeIdentifier(id, `policy.allowedDeploymentIds[${idx}]`),
     ),
   );
-  const initiatedLaunchNonces = new Set<string>();
-  if (policy.expectedNonce !== undefined) {
-    const normalizedExpected = normalizeIdentifier(
-      policy.expectedNonce,
-      "policy.expectedNonce",
+  const expectedNonce = normalizeIdentifier(
+    policy.expectedNonce,
+    "policy.expectedNonce",
+  );
+  if (/\s/.test(expectedNonce)) {
+    throw new CommercialResilienceError(
+      "INVALID_IDENTIFIER",
+      "policy.expectedNonce must not contain whitespace",
     );
-    if (/\s/.test(normalizedExpected)) {
-      throw new CommercialResilienceError(
-        "INVALID_IDENTIFIER",
-        "policy.expectedNonce must not contain whitespace",
-      );
-    }
-    initiatedLaunchNonces.add(normalizedExpected);
   }
+  let activeLaunchRegistry: Set<string> | null = null;
   if (policy.issuedLaunchNonces !== undefined) {
+    activeLaunchRegistry = new Set<string>();
     let idx = 0;
     for (const rawNonce of policy.issuedLaunchNonces) {
       const normalized = normalizeIdentifier(
@@ -982,15 +1191,15 @@ export function validateLti13DeepLinkingClaims(
           `policy.issuedLaunchNonces[${idx}] must not contain whitespace`,
         );
       }
-      initiatedLaunchNonces.add(normalized);
+      activeLaunchRegistry.add(normalized);
       idx += 1;
     }
-  }
-  if (initiatedLaunchNonces.size === 0) {
-    throw new CommercialResilienceError(
-      "INVALID_IDENTIFIER",
-      "Lti13ValidationPolicy requires a non-empty expectedNonce or issuedLaunchNonces allowlist",
-    );
+    if (activeLaunchRegistry.size === 0) {
+      throw new CommercialResilienceError(
+        "INVALID_IDENTIFIER",
+        "policy.issuedLaunchNonces must be non-empty when provided",
+      );
+    }
   }
   const allowedMessageTypes = new Set<Lti13MessageType>(
     policy.allowedMessageTypes ?? ["LtiDeepLinkingRequest"],
@@ -1076,7 +1285,7 @@ export function validateLti13DeepLinkingClaims(
     });
   }
 
-  // 5. Nonce bound to initiated launch nonces + replay protection
+  // 5. Nonce strictly bound to single-launch expectedNonce (+ optional active-session registry) + replay protection
   const nonce = typeof claims.nonce === "string" ? claims.nonce.trim() : "";
   if (nonce.length === 0 || /\s/.test(nonce)) {
     errors.push({
@@ -1088,11 +1297,14 @@ export function validateLti13DeepLinkingClaims(
       code: "NONCE_REPLAYED",
       message: `LTI 1.3 nonce "${nonce}" has already been consumed`,
     });
-  } else if (!initiatedLaunchNonces.has(nonce)) {
+  } else if (
+    nonce !== expectedNonce ||
+    (activeLaunchRegistry !== null && !activeLaunchRegistry.has(nonce))
+  ) {
     errors.push({
       code: "UNRECOGNIZED_NONCE",
       message:
-        "LTI 1.3 nonce does not match any initiated launch nonce in policy",
+        "LTI 1.3 nonce must match this launch's exact expectedNonce (and active session registry if provided)",
     });
   }
 
