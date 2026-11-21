@@ -298,6 +298,125 @@ export function evaluateBilateralPrivacyCell(
   };
 }
 
+const SHA256_K = new Uint32Array([
+  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1,
+  0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+  0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786,
+  0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
+  0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+  0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+  0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
+  0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+  0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+]);
+
+function sha256HexPure(message: string): string {
+  const input = new TextEncoder().encode(message);
+  const bitLen = BigInt(input.length) * 8n;
+  const paddedLen = Math.ceil((input.length + 9) / 64) * 64;
+  const padded = new Uint8Array(paddedLen);
+  padded.set(input);
+  padded[input.length] = 0x80;
+  const view = new DataView(padded.buffer);
+  view.setUint32(paddedLen - 8, Number((bitLen >> 32n) & 0xffffffffn), false);
+  view.setUint32(paddedLen - 4, Number(bitLen & 0xffffffffn), false);
+
+  let h0 = 0x6a09e667;
+  let h1 = 0xbb67ae85;
+  let h2 = 0x3c6ef372;
+  let h3 = 0xa54ff53a;
+  let h4 = 0x510e527f;
+  let h5 = 0x9b05688c;
+  let h6 = 0x1f83d9ab;
+  let h7 = 0x5be0cd19;
+
+  const w = new Uint32Array(64);
+  for (let offset = 0; offset < paddedLen; offset += 64) {
+    for (let i = 0; i < 16; i += 1) {
+      w[i] = view.getUint32(offset + i * 4, false);
+    }
+    for (let i = 16; i < 64; i += 1) {
+      const w15 = w[i - 15] ?? 0;
+      const w2 = w[i - 2] ?? 0;
+      const s0 =
+        ((w15 >>> 7) | (w15 << 25)) ^
+        ((w15 >>> 18) | (w15 << 14)) ^
+        (w15 >>> 3);
+      const s1 =
+        ((w2 >>> 17) | (w2 << 15)) ^
+        ((w2 >>> 19) | (w2 << 13)) ^
+        (w2 >>> 10);
+      w[i] = ((w[i - 16] ?? 0) + s0 + (w[i - 7] ?? 0) + s1) >>> 0;
+    }
+
+    let a = h0;
+    let b = h1;
+    let c = h2;
+    let d = h3;
+    let e = h4;
+    let f = h5;
+    let g = h6;
+    let h = h7;
+
+    for (let i = 0; i < 64; i += 1) {
+      const S1 =
+        ((e >>> 6) | (e << 26)) ^
+        ((e >>> 11) | (e << 21)) ^
+        ((e >>> 25) | (e << 7));
+      const ch = (e & f) ^ (~e & g);
+      const temp1 = (h + S1 + ch + (SHA256_K[i] ?? 0) + (w[i] ?? 0)) >>> 0;
+      const S0 =
+        ((a >>> 2) | (a << 30)) ^
+        ((a >>> 13) | (a << 19)) ^
+        ((a >>> 22) | (a << 10));
+      const maj = (a & b) ^ (a & c) ^ (b & c);
+      const temp2 = (S0 + maj) >>> 0;
+
+      h = g;
+      g = f;
+      f = e;
+      e = (d + temp1) >>> 0;
+      d = c;
+      c = b;
+      b = a;
+      a = (temp1 + temp2) >>> 0;
+    }
+
+    h0 = (h0 + a) >>> 0;
+    h1 = (h1 + b) >>> 0;
+    h2 = (h2 + c) >>> 0;
+    h3 = (h3 + d) >>> 0;
+    h4 = (h4 + e) >>> 0;
+    h5 = (h5 + f) >>> 0;
+    h6 = (h6 + g) >>> 0;
+    h7 = (h7 + h) >>> 0;
+  }
+
+  return [h0, h1, h2, h3, h4, h5, h6, h7]
+    .map((word) => word.toString(16).padStart(8, "0"))
+    .join("");
+}
+
+/**
+ * Computes a deterministic, locale-independent SHA-256 digest binding a
+ * closed ISO calendar week to its frozen enrolled learner roster.
+ */
+export function computeFrozenRosterDigest(
+  window: IsoWeekWindow,
+  learnerIds: ReadonlyArray<string>,
+): string {
+  const uniqueSorted = [...new Set(learnerIds)].sort((a, b) =>
+    a < b ? -1 : a > b ? 1 : 0,
+  );
+  const canonicalBody = uniqueSorted
+    .map((id) => `${id.length}:${id}`)
+    .join("|");
+  const payload = `cohort-roster-v1|${window.isoWeekKey}|${window.weekEndUtcMs}|${uniqueSorted.length}|${canonicalBody}`;
+  return `sha256:${sha256HexPure(payload)}`;
+}
+
 export interface CohortHeatmapInput {
   readonly mode: WorkspaceLearningMode;
   readonly role: CohortViewerRole;
@@ -305,21 +424,27 @@ export interface CohortHeatmapInput {
     readonly weekStartUtcMs: number;
     readonly weekEndUtcMs: number;
   };
+  /** Evaluation/publication UTC ms; MUST be >= window.weekEndUtcMs (closed week only). */
+  readonly evaluatedAtMs: number;
+  /** Digest binding this finalized week snapshot to its frozen enrolled roster. */
+  readonly frozenRosterDigest: string;
   readonly cells: ReadonlyArray<BilateralCohortCellInput>;
 }
 
 export interface CohortHeatmapResult {
   readonly cohortSurfaceVisible: boolean;
   readonly window: IsoWeekWindow | null;
+  readonly finalizedAtMs: number | null;
+  readonly frozenRosterDigest: string | null;
   readonly cells: ReadonlyArray<BilateralCohortCell>;
   readonly disclosedCellCount: number;
   readonly suppressedCellCount: number;
 }
 
 /**
- * Produces a bilateral-privacy-gated cohort heatmap locked to an immutable ISO
- * calendar week. Solo learners (and cohort learners) receive zero cohort UI or
- * query results (`cohortSurfaceVisible: false`, `cells: []`).
+ * Produces a bilateral-privacy-gated cohort heatmap locked strictly to a
+ * finalized (closed) immutable ISO calendar week (`evaluatedAtMs >= weekEndUtcMs`).
+ * Solo learners (and cohort learners) receive zero cohort UI or query results.
  */
 export function buildCohortHeatmap(
   input: CohortHeatmapInput,
@@ -333,6 +458,8 @@ export function buildCohortHeatmap(
     return {
       cohortSurfaceVisible: false,
       window: null,
+      finalizedAtMs: null,
+      frozenRosterDigest: null,
       cells: [],
       disclosedCellCount: 0,
       suppressedCellCount: 0,
@@ -340,6 +467,21 @@ export function buildCohortHeatmap(
   }
 
   const validatedWindow = validateFixedIsoWeekWindow(input.window);
+  const evaluatedAtMs = assertSafeTimestampMs(
+    input.evaluatedAtMs,
+    "evaluatedAtMs",
+  );
+  if (evaluatedAtMs < validatedWindow.weekEndUtcMs) {
+    throw new CommercialResilienceError(
+      "COHORT_WEEK_NOT_FINALIZED",
+      `Cohort heatmap for ${validatedWindow.isoWeekKey} cannot be published before week close (${validatedWindow.weekEndUtcMs})`,
+    );
+  }
+  const frozenRosterDigest = normalizeIdentifier(
+    input.frozenRosterDigest,
+    "frozenRosterDigest",
+  );
+
   const evaluatedCells = input.cells.map((cell) =>
     evaluateBilateralPrivacyCell(cell),
   );
@@ -357,10 +499,18 @@ export function buildCohortHeatmap(
   return {
     cohortSurfaceVisible: true,
     window: validatedWindow,
+    finalizedAtMs: evaluatedAtMs,
+    frozenRosterDigest,
     cells: evaluatedCells,
     disclosedCellCount,
     suppressedCellCount,
   };
+}
+
+export interface CohortRosterMember {
+  readonly learnerId: string;
+  /** UTC ms timestamp when the learner enrolled; only <= window.weekEndUtcMs are frozen into the week snapshot. */
+  readonly enrolledAtMs: number;
 }
 
 export interface CohortSkillEventRecord {
@@ -376,15 +526,17 @@ export interface AggregateCohortEventsInput {
     readonly weekStartUtcMs: number;
     readonly weekEndUtcMs: number;
   };
-  readonly enrolledActiveLearnerIds: ReadonlyArray<string>;
+  /** Evaluation/publication UTC ms; MUST be >= window.weekEndUtcMs (closed week only). */
+  readonly evaluatedAtMs: number;
+  readonly enrolledRoster: ReadonlyArray<CohortRosterMember>;
   readonly skillIds: ReadonlyArray<string>;
   readonly events: ReadonlyArray<CohortSkillEventRecord>;
 }
 
 /**
- * Deduplicates learner-level events inside a fixed ISO calendar week against
- * the enrolled active cohort before evaluating the bilateral privacy gate,
- * preventing a single learner from inflating `E` via repeated submissions.
+ * Publishes a finalized weekly cohort heatmap strictly after `window.weekEndUtcMs`,
+ * freezing the enrolled roster to learners with `enrolledAtMs <= window.weekEndUtcMs`
+ * and deduplicating learner-level events inside `[weekStartUtcMs, weekEndUtcMs)`.
  */
 export function aggregateCohortEventsToHeatmap(
   input: AggregateCohortEventsInput,
@@ -398,6 +550,8 @@ export function aggregateCohortEventsToHeatmap(
     return {
       cohortSurfaceVisible: false,
       window: null,
+      finalizedAtMs: null,
+      frozenRosterDigest: null,
       cells: [],
       disclosedCellCount: 0,
       suppressedCellCount: 0,
@@ -405,11 +559,36 @@ export function aggregateCohortEventsToHeatmap(
   }
 
   const validatedWindow = validateFixedIsoWeekWindow(input.window);
-  const enrolledSet = new Set(
-    input.enrolledActiveLearnerIds.map((id, idx) =>
-      normalizeIdentifier(id, `enrolledActiveLearnerIds[${idx}]`),
-    ),
+  const evaluatedAtMs = assertSafeTimestampMs(
+    input.evaluatedAtMs,
+    "evaluatedAtMs",
   );
+  if (evaluatedAtMs < validatedWindow.weekEndUtcMs) {
+    throw new CommercialResilienceError(
+      "COHORT_WEEK_NOT_FINALIZED",
+      `Cohort heatmap for ${validatedWindow.isoWeekKey} cannot be published before week close (${validatedWindow.weekEndUtcMs})`,
+    );
+  }
+
+  // Freeze roster strictly to learners enrolled at or before week close.
+  const enrolledSet = new Set<string>();
+  for (const [idx, member] of input.enrolledRoster.entries()) {
+    const learnerId = normalizeIdentifier(
+      member.learnerId,
+      `enrolledRoster[${idx}].learnerId`,
+    );
+    const enrolledAtMs = assertSafeTimestampMs(
+      member.enrolledAtMs,
+      `enrolledRoster[${idx}].enrolledAtMs`,
+    );
+    if (enrolledAtMs <= validatedWindow.weekEndUtcMs) {
+      enrolledSet.add(learnerId);
+    }
+  }
+  const frozenRosterDigest = computeFrozenRosterDigest(validatedWindow, [
+    ...enrolledSet,
+  ]);
+
   const distinctSkillIds: string[] = [];
   const seenSkills = new Set<string>();
   for (const [i, rawSkillId] of input.skillIds.entries()) {
@@ -465,6 +644,8 @@ export function aggregateCohortEventsToHeatmap(
       weekStartUtcMs: validatedWindow.weekStartUtcMs,
       weekEndUtcMs: validatedWindow.weekEndUtcMs,
     },
+    evaluatedAtMs,
+    frozenRosterDigest,
     cells,
   });
 }
@@ -533,7 +714,17 @@ export interface Lti13DeepLinkingClaimsPayload {
   readonly [LTI_CLAIM_CUSTOM]?: Readonly<Record<string, unknown>>;
 }
 
-export interface Lti13ValidationPolicy {
+export type Lti13InitiatedNoncePolicy =
+  | {
+      readonly expectedNonce: string;
+      readonly issuedLaunchNonces?: ReadonlySet<string> | ReadonlyArray<string>;
+    }
+  | {
+      readonly expectedNonce?: string;
+      readonly issuedLaunchNonces: ReadonlySet<string> | ReadonlyArray<string>;
+    };
+
+export type Lti13ValidationPolicy = Lti13InitiatedNoncePolicy & {
   readonly expectedIssuer: string;
   readonly expectedClientId: string;
   readonly allowedDeploymentIds: ReadonlyArray<string>;
@@ -544,7 +735,7 @@ export interface Lti13ValidationPolicy {
   readonly allowedReturnOrigins?: ReadonlyArray<string>;
   readonly allowedCartridgeIds?: ReadonlyArray<string>;
   readonly allowedCourseIds?: ReadonlyArray<string>;
-}
+};
 
 export type Lti13ValidationErrorCode =
   | "INVALID_ISSUER"
@@ -552,6 +743,7 @@ export type Lti13ValidationErrorCode =
   | "INVALID_SUBJECT"
   | "INVALID_DEPLOYMENT_ID"
   | "INVALID_NONCE"
+  | "UNRECOGNIZED_NONCE"
   | "NONCE_REPLAYED"
   | "TOKEN_EXPIRED"
   | "INVALID_TIMESTAMPS"
@@ -600,11 +792,16 @@ export type Lti13ValidationResult =
   | {
       readonly valid: true;
       readonly context: ValidatedLti13DeepLinkingContext;
+      readonly consumedNonce: string;
+      /** Immutable updated used-nonce set including `consumedNonce` so replay fails closed. */
+      readonly nextUsedNonces: ReadonlySet<string>;
       readonly errors: readonly [];
     }
   | {
       readonly valid: false;
       readonly context: null;
+      readonly consumedNonce: null;
+      readonly nextUsedNonces: null;
       readonly errors: ReadonlyArray<Lti13ValidationIssue>;
     };
 
@@ -758,6 +955,43 @@ export function validateLti13DeepLinkingClaims(
       normalizeIdentifier(id, `policy.allowedDeploymentIds[${idx}]`),
     ),
   );
+  const initiatedLaunchNonces = new Set<string>();
+  if (policy.expectedNonce !== undefined) {
+    const normalizedExpected = normalizeIdentifier(
+      policy.expectedNonce,
+      "policy.expectedNonce",
+    );
+    if (/\s/.test(normalizedExpected)) {
+      throw new CommercialResilienceError(
+        "INVALID_IDENTIFIER",
+        "policy.expectedNonce must not contain whitespace",
+      );
+    }
+    initiatedLaunchNonces.add(normalizedExpected);
+  }
+  if (policy.issuedLaunchNonces !== undefined) {
+    let idx = 0;
+    for (const rawNonce of policy.issuedLaunchNonces) {
+      const normalized = normalizeIdentifier(
+        rawNonce,
+        `policy.issuedLaunchNonces[${idx}]`,
+      );
+      if (/\s/.test(normalized)) {
+        throw new CommercialResilienceError(
+          "INVALID_IDENTIFIER",
+          `policy.issuedLaunchNonces[${idx}] must not contain whitespace`,
+        );
+      }
+      initiatedLaunchNonces.add(normalized);
+      idx += 1;
+    }
+  }
+  if (initiatedLaunchNonces.size === 0) {
+    throw new CommercialResilienceError(
+      "INVALID_IDENTIFIER",
+      "Lti13ValidationPolicy requires a non-empty expectedNonce or issuedLaunchNonces allowlist",
+    );
+  }
   const allowedMessageTypes = new Set<Lti13MessageType>(
     policy.allowedMessageTypes ?? ["LtiDeepLinkingRequest"],
   );
@@ -842,7 +1076,7 @@ export function validateLti13DeepLinkingClaims(
     });
   }
 
-  // 5. Nonce & replay protection
+  // 5. Nonce bound to initiated launch nonces + replay protection
   const nonce = typeof claims.nonce === "string" ? claims.nonce.trim() : "";
   if (nonce.length === 0 || /\s/.test(nonce)) {
     errors.push({
@@ -853,6 +1087,12 @@ export function validateLti13DeepLinkingClaims(
     errors.push({
       code: "NONCE_REPLAYED",
       message: `LTI 1.3 nonce "${nonce}" has already been consumed`,
+    });
+  } else if (!initiatedLaunchNonces.has(nonce)) {
+    errors.push({
+      code: "UNRECOGNIZED_NONCE",
+      message:
+        "LTI 1.3 nonce does not match any initiated launch nonce in policy",
     });
   }
 
@@ -1043,6 +1283,8 @@ export function validateLti13DeepLinkingClaims(
     return {
       valid: false,
       context: null,
+      consumedNonce: null,
+      nextUsedNonces: null,
       errors,
     };
   }
@@ -1053,8 +1295,13 @@ export function validateLti13DeepLinkingClaims(
       ? claims[LTI_CLAIM_CONTEXT].id.trim()
       : null;
 
+  const nextUsedNonces = new Set<string>(policy.usedNonces ?? []);
+  nextUsedNonces.add(nonce);
+
   return {
     valid: true,
+    consumedNonce: nonce,
+    nextUsedNonces,
     errors: [],
     context: {
       issuer: trimmedIssuer,

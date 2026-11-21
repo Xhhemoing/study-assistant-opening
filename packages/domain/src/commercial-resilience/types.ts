@@ -16,6 +16,7 @@ export const WEEK_MS = 7 * DAY_MS;
 
 export type CommercialResilienceErrorCode =
   | "INVALID_MONETARY_AMOUNT"
+  | "MISSING_OR_ZERO_COST_ESTIMATE"
   | "INVALID_TIMESTAMP"
   | "INVALID_IDENTIFIER"
   | "INVALID_CURRENCY"
@@ -31,10 +32,13 @@ export type CommercialResilienceErrorCode =
   | "INVALID_REFERENCE_ENTRY"
   | "ESCROW_NOT_MATURED"
   | "ROYALTY_ALREADY_RELEASED"
+  | "ROYALTY_NOT_RELEASED"
+  | "ROYALTY_CLAWBACK_EXHAUSTED"
   | "ROYALTY_VOIDED"
   | "ROYALTY_EXCLUDED"
   | "PURCHASE_NOT_FOUND"
   | "SLIDING_OR_INVALID_WEEK_WINDOW"
+  | "COHORT_WEEK_NOT_FINALIZED"
   | "INVALID_COHORT_COUNTS";
 
 export class CommercialResilienceError extends Error {

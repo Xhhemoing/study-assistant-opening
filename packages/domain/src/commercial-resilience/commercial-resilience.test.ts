@@ -10,6 +10,7 @@ import {
   buildCohortHeatmap,
   calculateCreatorRoyalty,
   CommercialResilienceError,
+  computeFrozenRosterDigest,
   computePeriodBudgetEnvelope,
   createCreatorRoyaltyLedger,
   createLearnerCreditEntry,
@@ -33,8 +34,10 @@ import {
   MICROS_PER_UNIT,
   parseIsoWeekKey,
   projectCreatorRoyaltyPosition,
+  recordPostReleaseRoyaltyClawback,
   resolveCohortSurfacePolicy,
   ROYALTY_ESCROW_WINDOW_MS,
+  summarizeCreatorRoyaltyPayableBalance,
   summarizeProviderCostLedger,
   validateFixedIsoWeekWindow,
   validateLti13DeepLinkingClaims,
@@ -366,7 +369,7 @@ describe("commercial-resilience: margin guardrail & 3-tier degradation router", 
     }
   });
 
-  it("rejects negative BigInt monetary inputs", () => {
+  it("rejects negative BigInt monetary inputs and requires explicit positive cost bounds + daily burst projection on paid platform calls", () => {
     expect(() =>
       computePeriodBudgetEnvelope({
         recognizedRevenueMicros: -1n,
@@ -374,6 +377,98 @@ describe("commercial-resilience: margin guardrail & 3-tier degradation router", 
         fixedInfraReserveMicros: 0n,
       }),
     ).toThrow(CommercialResilienceError);
+
+    // Tier 0 with B = 3_000_000n, dailyBurst = 200_000n, dailySpend = 180_000n
+    const tier0NearBurst = evaluateMarginGuardrail({
+      accountId: "acct-burst",
+      currency: "USD",
+      recognizedRevenueMicros: 10_000_000n,
+      channelAndRefundReserveMicros: 500_000n,
+      fixedInfraReserveMicros: 0n,
+      periodSpendMicros: 180_000n,
+      dailySpendMicros: 180_000n,
+    });
+    expect(tier0NearBurst.tier).toBe("normal");
+    expect(tier0NearBurst.envelope.dailyBurstCapMicros).toBe(200_000n);
+
+    // Omitting or passing 0n on a paid platform call MUST fail closed with MISSING_OR_ZERO_COST_ESTIMATE
+    for (const badCost of [undefined, 0n, -5n] as const) {
+      try {
+        authorizeModelRoute({
+          guardrail: tier0NearBurst,
+          credentialMode: "platform",
+          stepKind: "standard_draft",
+          estimatedPlatformCostMicros: badCost,
+        });
+        expect.unreachable("Expected MISSING_OR_ZERO_COST_ESTIMATE");
+      } catch (err) {
+        expect(err).toBeInstanceOf(CommercialResilienceError);
+        expect((err as CommercialResilienceError).code).toBe(
+          "MISSING_OR_ZERO_COST_ESTIMATE",
+        );
+      }
+    }
+
+    // Fitting at exact daily burst boundary (180_000n + 20_000n === 200_000n) stays Tier 0
+    expect(
+      authorizeModelRoute({
+        guardrail: tier0NearBurst,
+        credentialMode: "platform",
+        stepKind: "standard_draft",
+        estimatedPlatformCostMicros: 20_000n,
+      }),
+    ).toMatchObject({
+      target: "platform_flagship",
+      effectiveTier: "normal",
+      upgradedByDailyBurstProjection: false,
+      allowPaidModelCall: true,
+      platformBudgetDebitMicros: 20_000n,
+    });
+
+    // Crossing daily burst cap (180_000n + 20_001n > 200_000n) upgrades immediately into Tier 1
+    expect(
+      authorizeModelRoute({
+        guardrail: tier0NearBurst,
+        credentialMode: "platform",
+        stepKind: "standard_draft",
+        estimatedPlatformCostMicros: 20_001n,
+      }),
+    ).toMatchObject({
+      target: "platform_distilled_cached",
+      effectiveTier: "economical_70_90",
+      upgradedByDailyBurstProjection: true,
+      allowPaidModelCall: true,
+      platformBudgetDebitMicros: 20_001n,
+    });
+
+    // Exam grading crossing daily burst still upgrades effectiveTier to Tier 1 while keeping flagship accuracy
+    expect(
+      authorizeModelRoute({
+        guardrail: tier0NearBurst,
+        credentialMode: "platform",
+        stepKind: "exam_grading",
+        estimatedPlatformCostMicros: 20_001n,
+      }),
+    ).toMatchObject({
+      target: "platform_flagship",
+      effectiveTier: "economical_70_90",
+      upgradedByDailyBurstProjection: true,
+      allowPaidModelCall: true,
+      platformBudgetDebitMicros: 20_001n,
+    });
+
+    // BYOK and local zero-cost steps remain allowed even when estimatedPlatformCostMicros is omitted
+    expect(
+      authorizeModelRoute({
+        guardrail: tier0NearBurst,
+        credentialMode: "byok",
+        stepKind: "standard_draft",
+      }),
+    ).toMatchObject({
+      target: "byok_isolated",
+      allowByokModelCall: true,
+      platformBudgetDebitMicros: 0n,
+    });
   });
 });
 
@@ -828,18 +923,152 @@ describe("commercial-resilience: micro-unit three-ledger accounting & creator ro
       exactMaturity,
     );
     expect(released.status).toBe("released");
+    expect(released.releasedEntryId).toBe("cr-a-rel");
     expect(released.releasedMicros).toBe(44_100_000n);
+    expect(released.clawedBackMicros).toBe(0n);
+    expect(released.netSettledMicros).toBe(44_100_000n);
+    expect(released.payableOffsetMicros).toBe(0n);
 
-    // Post-release escrow refund mutation is rejected
-    expect(() =>
-      appendCreatorRoyaltyRefund(ledger, {
-        entryId: "cr-a-late-ref",
-        idempotencyKey: "refund-a-late",
+    // Delayed day-13 refund webhook arriving on day 15 appends an immutable post_release_clawback
+    // referencing cr-a-rel WITHOUT mutating the released entry in place
+    const releaseEntryBefore = ledger.entries.find(
+      (item) => item.entryId === "cr-a-rel",
+    );
+    const partialClawback = appendCreatorRoyaltyRefund(ledger, {
+      entryId: "cr-a-claw-1",
+      idempotencyKey: "refund-a-day13-delayed",
+      purchaseId: "order-a",
+      additionalRefundMicros: 20_000_000n, // net $60 -> $40 => 73.5% = $29.40, clawback = -$14.70
+      refundOccurredAtMs: settledAt + 13 * DAY_MS,
+      recordedAtMs: exactMaturity + DAY_MS,
+    });
+    ledger = partialClawback.ledger;
+    expect(partialClawback.entry.eventType).toBe("post_release_clawback");
+    expect(partialClawback.entry.referenceEntryId).toBe("cr-a-rel");
+    expect(partialClawback.entry.deltaRoyaltyMicros).toBe(-14_700_000n);
+    expect(partialClawback.entry.resultingRoyaltyMicros).toBe(29_400_000n);
+    expect(partialClawback.entry.statusAfterEvent).toBe("partially_clawed_back");
+
+    // Original released entry remains 100% immutable
+    expect(
+      ledger.entries.find((item) => item.entryId === "cr-a-rel"),
+    ).toEqual(releaseEntryBefore);
+
+    // Exact idempotent replay of post-release clawback does NOT double-claw back
+    const clawbackReplay = recordPostReleaseRoyaltyClawback(ledger, {
+      entryId: "cr-a-claw-1",
+      idempotencyKey: "refund-a-day13-delayed",
+      purchaseId: "order-a",
+      additionalRefundMicros: 20_000_000n,
+      refundOccurredAtMs: settledAt + 13 * DAY_MS,
+      recordedAtMs: exactMaturity + DAY_MS,
+    });
+    expect(clawbackReplay.idempotentReplay).toBe(true);
+    expect(clawbackReplay.ledger.entries).toHaveLength(ledger.entries.length);
+
+    const afterPartialClawback = projectCreatorRoyaltyPosition(
+      ledger,
+      "order-a",
+      exactMaturity + DAY_MS,
+    );
+    expect(afterPartialClawback).toMatchObject({
+      status: "partially_clawed_back",
+      releasedEntryId: "cr-a-rel",
+      releasedMicros: 44_100_000n,
+      clawedBackMicros: 14_700_000n,
+      netSettledMicros: 29_400_000n,
+      payableOffsetMicros: -14_700_000n,
+      royaltyMicros: 29_400_000n,
+    });
+
+    // Subsequent full chargeback ($100) caps cumulative clawback at originally released $44.10
+    const fullClawback = recordPostReleaseRoyaltyClawback(ledger, {
+      entryId: "cr-a-claw-2",
+      idempotencyKey: "refund-a-full-chargeback",
+      purchaseId: "order-a",
+      additionalRefundMicros: 100_000_000n,
+      refundOccurredAtMs: exactMaturity + 2 * DAY_MS,
+    });
+    ledger = fullClawback.ledger;
+    expect(fullClawback.entry.deltaRoyaltyMicros).toBe(-29_400_000n);
+    expect(fullClawback.entry.resultingRoyaltyMicros).toBe(0n);
+    expect(fullClawback.entry.statusAfterEvent).toBe("clawed_back");
+
+    const afterFullClawback = projectCreatorRoyaltyPosition(
+      ledger,
+      "order-a",
+      exactMaturity + 2 * DAY_MS,
+    );
+    expect(afterFullClawback).toMatchObject({
+      status: "clawed_back",
+      releasedMicros: 44_100_000n,
+      clawedBackMicros: 44_100_000n,
+      netSettledMicros: 0n,
+      payableOffsetMicros: -44_100_000n,
+      royaltyMicros: 0n,
+    });
+
+    // Further clawback after full exhaustion fails closed (never double-claws back)
+    try {
+      recordPostReleaseRoyaltyClawback(ledger, {
+        entryId: "cr-a-claw-3",
+        idempotencyKey: "refund-a-over-claw",
         purchaseId: "order-a",
         additionalRefundMicros: 1_000_000n,
-        refundOccurredAtMs: exactMaturity + 1000,
+        refundOccurredAtMs: exactMaturity + 3 * DAY_MS,
+      });
+      expect.unreachable("Expected ROYALTY_CLAWBACK_EXHAUSTED");
+    } catch (err) {
+      expect(err).toBeInstanceOf(CommercialResilienceError);
+      expect((err as CommercialResilienceError).code).toBe(
+        "ROYALTY_CLAWBACK_EXHAUSTED",
+      );
+    }
+
+    // Re-releasing a clawed-back purchase is forbidden
+    expect(() =>
+      appendCreatorRoyaltyRelease(ledger, {
+        entryId: "cr-a-rel-dup",
+        idempotencyKey: "release-a-dup",
+        purchaseId: "order-a",
+        nowMs: exactMaturity + 3 * DAY_MS,
       }),
     ).toThrow(CommercialResilienceError);
+
+    // Creator payable summary nets matured releasable earnings against post-release clawbacks
+    ledger = appendCreatorRoyaltyAccrual(ledger, {
+      entryId: "cr-d-1",
+      idempotencyKey: "accrual-d",
+      purchaseId: "order-d",
+      creatorAccountId: "creator-1",
+      buyerAccountId: "buyer-4",
+      cartridgeId: "cs408-os",
+      currency: "USD",
+      settledPurchaseAtMs: settledAt,
+      grossReceiptsMicros: 100_000_000n,
+      channelFeeMicros: 0n, // 70% = 70_000_000n matured releasable
+      quality: {
+        eligibleCohortSize: 10,
+        blindSevenDayTransferRate: 0.5,
+        severeLeakCount: 0,
+      },
+    }).ledger;
+
+    const payableSummary = summarizeCreatorRoyaltyPayableBalance(ledger, {
+      creatorAccountId: "creator-1",
+      currency: "USD",
+      nowMs: exactMaturity + 3 * DAY_MS,
+    });
+    expect(payableSummary).toEqual({
+      creatorAccountId: "creator-1",
+      currency: "USD",
+      pendingEscrowMicros: 0n,
+      maturedReleasableMicros: 70_000_000n,
+      grossReleasedMicros: 44_100_000n,
+      postReleaseClawbackMicros: 44_100_000n,
+      netPayableMicros: 25_900_000n, // 70_000_000n matured - 44_100_000n clawback offset
+      netSettledLifetimeMicros: 0n,
+    });
 
     // Purchase B: full chargeback within 14d voids escrowed entry cleanly before release
     ledger = appendCreatorRoyaltyAccrual(ledger, {
@@ -945,11 +1174,15 @@ describe("commercial-resilience: bilateral-privacy cohort heatmap & LTI 1.3 vali
         weekStartUtcMs: validWeek.weekStartUtcMs,
         weekEndUtcMs: validWeek.weekEndUtcMs,
       },
+      evaluatedAtMs: validWeek.weekEndUtcMs,
+      frozenRosterDigest: "sha256:solo-ignored",
       cells: [{ skillId: "os-paging", enrolledActiveCount: 30, eventLearnerCount: 15 }],
     });
     expect(soloHeatmap).toEqual({
       cohortSurfaceVisible: false,
       window: null,
+      finalizedAtMs: null,
+      frozenRosterDigest: null,
       cells: [],
       disclosedCellCount: 0,
       suppressedCellCount: 0,
@@ -1085,8 +1318,97 @@ describe("commercial-resilience: bilateral-privacy cohort heatmap & LTI 1.3 vali
     expect(() => parseIsoWeekKey("2025-W53")).toThrow(CommercialResilienceError);
     expect(parseIsoWeekKey("2026-W53").isoWeekKey).toBe("2026-W53");
 
-    // Repeated events from ONE learner cannot inflate E from 1 to 5 to bypass bilateral gate
-    const enrolled = Array.from({ length: 10 }, (_, idx) => `stu-${idx + 1}`);
+    // Repeated events from ONE learner cannot inflate E from 1 to 5; in-progress weeks fail closed; late enrollees are excluded from frozen roster
+    const enrolledRoster = Array.from({ length: 10 }, (_, idx) => ({
+      learnerId: `stu-${idx + 1}`,
+      enrolledAtMs: validWeek.weekStartUtcMs - DAY_MS,
+    }));
+    const rosterWithLateEnrollee = [
+      ...enrolledRoster,
+      {
+        learnerId: "stu-late-11",
+        enrolledAtMs: validWeek.weekEndUtcMs + 1, // enrolled AFTER week close -> excluded from frozen roster
+      },
+    ];
+
+    // In-progress week (evaluatedAtMs < weekEndUtcMs) MUST fail closed with COHORT_WEEK_NOT_FINALIZED
+    for (const runOpenWeek of [
+      () =>
+        buildCohortHeatmap({
+          mode: "cohort",
+          role: "instructor",
+          window: {
+            weekStartUtcMs: validWeek.weekStartUtcMs,
+            weekEndUtcMs: validWeek.weekEndUtcMs,
+          },
+          evaluatedAtMs: validWeek.weekEndUtcMs - 1,
+          frozenRosterDigest: computeFrozenRosterDigest(
+            validWeek,
+            enrolledRoster.map((m) => m.learnerId),
+          ),
+          cells: [
+            {
+              skillId: "genuine-five-students",
+              enrolledActiveCount: 10,
+              eventLearnerCount: 5,
+            },
+          ],
+        }),
+      () =>
+        aggregateCohortEventsToHeatmap({
+          mode: "cohort",
+          role: "instructor",
+          window: {
+            weekStartUtcMs: validWeek.weekStartUtcMs,
+            weekEndUtcMs: validWeek.weekEndUtcMs,
+          },
+          evaluatedAtMs: validWeek.weekEndUtcMs - 1,
+          enrolledRoster,
+          skillIds: ["genuine-five-students"],
+          events: [],
+        }),
+    ]) {
+      try {
+        runOpenWeek();
+        expect.unreachable("Expected COHORT_WEEK_NOT_FINALIZED");
+      } catch (err) {
+        expect(err).toBeInstanceOf(CommercialResilienceError);
+        expect((err as CommercialResilienceError).code).toBe(
+          "COHORT_WEEK_NOT_FINALIZED",
+        );
+      }
+    }
+
+    const baseEvents = [
+      // 1 student submits 6 times => distinct E = 1 (< 5) => SUPPRESSED!
+      ...Array.from({ length: 6 }, (_, i) => ({
+        learnerId: "stu-1",
+        skillId: "spam-single-student",
+        occurredAtMs: validWeek.weekStartUtcMs + (i + 1) * 60_000,
+      })),
+      // 5 distinct students inside the window (+ 1 event outside window + 1 late enrollee ignored) => E = 5, N-E = 5 => DISCLOSED!
+      ...["stu-1", "stu-2", "stu-3", "stu-4", "stu-5"].map((id, i) => ({
+        learnerId: id,
+        skillId: "genuine-five-students",
+        occurredAtMs: validWeek.weekStartUtcMs + (i + 1) * 60_000,
+      })),
+      {
+        learnerId: "stu-6",
+        skillId: "genuine-five-students",
+        occurredAtMs: validWeek.weekEndUtcMs, // exclusive end boundary -> ignored
+      },
+      {
+        learnerId: "stu-late-11",
+        skillId: "genuine-five-students",
+        occurredAtMs: validWeek.weekStartUtcMs + 15_000, // late enrollee -> excluded from frozen roster
+      },
+      {
+        learnerId: "unenrolled-ghost",
+        skillId: "genuine-five-students",
+        occurredAtMs: validWeek.weekStartUtcMs + 10_000, // not enrolled -> ignored
+      },
+    ];
+
     const heatmap = aggregateCohortEventsToHeatmap({
       mode: "cohort",
       role: "instructor",
@@ -1094,35 +1416,31 @@ describe("commercial-resilience: bilateral-privacy cohort heatmap & LTI 1.3 vali
         weekStartUtcMs: validWeek.weekStartUtcMs,
         weekEndUtcMs: validWeek.weekEndUtcMs,
       },
-      enrolledActiveLearnerIds: enrolled,
+      evaluatedAtMs: validWeek.weekEndUtcMs,
+      enrolledRoster: rosterWithLateEnrollee,
       skillIds: ["spam-single-student", "genuine-five-students"],
-      events: [
-        // 1 student submits 6 times => distinct E = 1 (< 5) => SUPPRESSED!
-        ...Array.from({ length: 6 }, (_, i) => ({
-          learnerId: "stu-1",
-          skillId: "spam-single-student",
-          occurredAtMs: validWeek.weekStartUtcMs + (i + 1) * 60_000,
-        })),
-        // 5 distinct students inside the window (+ 1 event outside window ignored) => E = 5, N-E = 5 => DISCLOSED!
-        ...["stu-1", "stu-2", "stu-3", "stu-4", "stu-5"].map((id, i) => ({
-          learnerId: id,
-          skillId: "genuine-five-students",
-          occurredAtMs: validWeek.weekStartUtcMs + (i + 1) * 60_000,
-        })),
-        {
-          learnerId: "stu-6",
-          skillId: "genuine-five-students",
-          occurredAtMs: validWeek.weekEndUtcMs, // exclusive end boundary -> ignored
-        },
-        {
-          learnerId: "unenrolled-ghost",
-          skillId: "genuine-five-students",
-          occurredAtMs: validWeek.weekStartUtcMs + 10_000, // not enrolled -> ignored
-        },
-      ],
+      events: baseEvents,
+    });
+
+    const heatmapWithoutLate = aggregateCohortEventsToHeatmap({
+      mode: "cohort",
+      role: "instructor",
+      window: {
+        weekStartUtcMs: validWeek.weekStartUtcMs,
+        weekEndUtcMs: validWeek.weekEndUtcMs,
+      },
+      evaluatedAtMs: validWeek.weekEndUtcMs + 3_600_000,
+      enrolledRoster: [...enrolledRoster].reverse(), // order-independent digest
+      skillIds: ["spam-single-student", "genuine-five-students"],
+      events: baseEvents,
     });
 
     expect(heatmap.cohortSurfaceVisible).toBe(true);
+    expect(heatmap.finalizedAtMs).toBe(validWeek.weekEndUtcMs);
+    expect(heatmap.frozenRosterDigest).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(heatmap.frozenRosterDigest).toBe(
+      heatmapWithoutLate.frozenRosterDigest,
+    );
     expect(heatmap.disclosedCellCount).toBe(1);
     expect(heatmap.suppressedCellCount).toBe(1);
     expect(heatmap.cells[0]?.suppressed).toBe(true);
@@ -1136,7 +1454,7 @@ describe("commercial-resilience: bilateral-privacy cohort heatmap & LTI 1.3 vali
     });
   });
 
-  it("validates LTI 1.3 deep-linking claims, blocks spoofing/replay/expiry, and forbids private note/transcript leakage", () => {
+  it("validates LTI 1.3 deep-linking claims, binds initiated launch nonces, blocks spoofing/replay/expiry, and forbids private note/transcript leakage", () => {
     const nowMs = Date.UTC(2026, 10, 21, 8, 0, 0);
     const nowSec = Math.floor(nowMs / 1000);
 
@@ -1144,6 +1462,7 @@ describe("commercial-resilience: bilateral-privacy cohort heatmap & LTI 1.3 vali
       expectedIssuer: "https://lms.university.edu",
       expectedClientId: "aistudy-lti-client-1",
       allowedDeploymentIds: ["dep-cs408-2026"],
+      expectedNonce: "fresh-nonce-abc123",
       nowMs,
       maxClockSkewSeconds: 30,
       usedNonces: new Set(["used-nonce-999"]),
@@ -1315,6 +1634,57 @@ describe("commercial-resilience: bilateral-privacy cohort heatmap & LTI 1.3 vali
       policy,
     );
     expect(falsyForbidden.valid).toBe(true);
+
+    // Forged / foreign launch nonce NOT in policy expectedNonce / issuedLaunchNonces MUST fail closed
+    const foreignNonce = validateLti13DeepLinkingClaims(
+      {
+        ...validClaims,
+        nonce: "forged-foreign-nonce-777",
+      },
+      policy,
+    );
+    expect(foreignNonce.valid).toBe(false);
+    expect(foreignNonce.errors.map((e) => e.code)).toContain(
+      "UNRECOGNIZED_NONCE",
+    );
+
+    // Consuming a valid initiated nonce returns nextUsedNonces so replay fails closed with NONCE_REPLAYED
+    const multiNoncePolicy: Lti13ValidationPolicy = {
+      expectedIssuer: policy.expectedIssuer,
+      expectedClientId: policy.expectedClientId,
+      allowedDeploymentIds: policy.allowedDeploymentIds,
+      issuedLaunchNonces: ["fresh-nonce-abc123", "second-launch-nonce"],
+      nowMs,
+      maxClockSkewSeconds: 30,
+      allowedReturnOrigins: policy.allowedReturnOrigins,
+      allowedCartridgeIds: policy.allowedCartridgeIds,
+    };
+    const firstLaunch = validateLti13DeepLinkingClaims(
+      validClaims,
+      multiNoncePolicy,
+    );
+    expect(firstLaunch.valid).toBe(true);
+    if (firstLaunch.valid) {
+      expect(firstLaunch.consumedNonce).toBe("fresh-nonce-abc123");
+      expect(firstLaunch.nextUsedNonces.has("fresh-nonce-abc123")).toBe(true);
+
+      const replayedLaunch = validateLti13DeepLinkingClaims(validClaims, {
+        ...multiNoncePolicy,
+        usedNonces: firstLaunch.nextUsedNonces,
+      });
+      expect(replayedLaunch.valid).toBe(false);
+      expect(replayedLaunch.errors.map((e) => e.code)).toContain(
+        "NONCE_REPLAYED",
+      );
+    }
+
+    // Empty issuedLaunchNonces allowlist in policy fails closed
+    expect(() =>
+      validateLti13DeepLinkingClaims(validClaims, {
+        ...multiNoncePolicy,
+        issuedLaunchNonces: [],
+      }),
+    ).toThrow(CommercialResilienceError);
   });
 
   it("satisfies deterministic property invariants across margin ceilings, bilateral privacy cells, and royalty splits", () => {

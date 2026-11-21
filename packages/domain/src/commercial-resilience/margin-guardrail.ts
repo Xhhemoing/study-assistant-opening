@@ -13,6 +13,7 @@
 
 import {
   assertNonNegativeMicros,
+  CommercialResilienceError,
   normalizeCurrency,
   normalizeIdentifier,
   type CurrencyCode,
@@ -119,6 +120,8 @@ export type ModelRouteTarget =
 export interface ModelRouteAuthorization {
   readonly target: ModelRouteTarget;
   readonly credentialMode: ModelCredentialMode;
+  readonly effectiveTier: MarginGuardrailTier;
+  readonly upgradedByDailyBurstProjection: boolean;
   readonly allowPaidModelCall: boolean;
   readonly allowByokModelCall: boolean;
   readonly allowPlatformCredentialFallback: false;
@@ -348,16 +351,21 @@ export function evaluateMarginGuardrail(
 export function authorizeModelRoute(
   input: ModelRouteAuthorizationInput,
 ): ModelRouteAuthorization {
-  const estimatedCostMicros = assertNonNegativeMicros(
-    input.estimatedPlatformCostMicros ?? 0n,
-    "estimatedPlatformCostMicros",
-  );
+  const { guardrail, stepKind } = input;
 
   // Zero-cost local steps are ALWAYS allowed and NEVER incur platform spend.
-  if (ZERO_COST_LOCAL_STEPS.has(input.stepKind)) {
+  if (ZERO_COST_LOCAL_STEPS.has(stepKind)) {
+    if (input.estimatedPlatformCostMicros !== undefined) {
+      assertNonNegativeMicros(
+        input.estimatedPlatformCostMicros,
+        "estimatedPlatformCostMicros",
+      );
+    }
     return {
       target: "local_zero_cost",
       credentialMode: input.credentialMode,
+      effectiveTier: guardrail.tier,
+      upgradedByDailyBurstProjection: false,
       allowPaidModelCall: false,
       allowByokModelCall: false,
       allowPlatformCredentialFallback: false,
@@ -370,9 +378,17 @@ export function authorizeModelRoute(
   // BYOK calls stay strictly isolated on user-supplied credentials:
   // never debit platform budget, never fall back to platform keys, never bricked by Tier 3.
   if (input.credentialMode === "byok") {
+    if (input.estimatedPlatformCostMicros !== undefined) {
+      assertNonNegativeMicros(
+        input.estimatedPlatformCostMicros,
+        "estimatedPlatformCostMicros",
+      );
+    }
     return {
       target: "byok_isolated",
       credentialMode: "byok",
+      effectiveTier: guardrail.tier,
+      upgradedByDailyBurstProjection: false,
       allowPaidModelCall: false,
       allowByokModelCall: true,
       allowPlatformCredentialFallback: false,
@@ -382,12 +398,25 @@ export function authorizeModelRoute(
     };
   }
 
-  const { guardrail, stepKind } = input;
+  // Fail-closed: paid platform model calls MUST supply an explicit positive cost bound (> 0n).
+  if (
+    input.estimatedPlatformCostMicros === undefined ||
+    typeof input.estimatedPlatformCostMicros !== "bigint" ||
+    input.estimatedPlatformCostMicros <= 0n
+  ) {
+    throw new CommercialResilienceError(
+      "MISSING_OR_ZERO_COST_ESTIMATE",
+      "Paid platform model calls require an explicit positive estimatedPlatformCostMicros > 0n",
+    );
+  }
+  const estimatedCostMicros = input.estimatedPlatformCostMicros;
 
   if (!guardrail.allowPaidModelCall || guardrail.tier === "zero_cost_floor_100") {
     return {
       target: "local_zero_cost",
       credentialMode: "platform",
+      effectiveTier: "zero_cost_floor_100",
+      upgradedByDailyBurstProjection: false,
       allowPaidModelCall: false,
       allowByokModelCall: false,
       allowPlatformCredentialFallback: false,
@@ -397,13 +426,12 @@ export function authorizeModelRoute(
     };
   }
 
-  if (
-    estimatedCostMicros > 0n &&
-    estimatedCostMicros > guardrail.remainingPeriodBudgetMicros
-  ) {
+  if (estimatedCostMicros > guardrail.remainingPeriodBudgetMicros) {
     return {
       target: "local_zero_cost",
       credentialMode: "platform",
+      effectiveTier: guardrail.tier,
+      upgradedByDailyBurstProjection: false,
       allowPaidModelCall: false,
       allowByokModelCall: false,
       allowPlatformCredentialFallback: false,
@@ -418,6 +446,8 @@ export function authorizeModelRoute(
       return {
         target: "local_zero_cost",
         credentialMode: "platform",
+        effectiveTier: "deterministic_90_100",
+        upgradedByDailyBurstProjection: false,
         allowPaidModelCall: false,
         allowByokModelCall: false,
         allowPlatformCredentialFallback: false,
@@ -430,6 +460,8 @@ export function authorizeModelRoute(
     return {
       target: "platform_irreducible_only",
       credentialMode: "platform",
+      effectiveTier: "deterministic_90_100",
+      upgradedByDailyBurstProjection: false,
       allowPaidModelCall: true,
       allowByokModelCall: false,
       allowPlatformCredentialFallback: false,
@@ -439,7 +471,14 @@ export function authorizeModelRoute(
     };
   }
 
-  if (guardrail.tier === "economical_70_90") {
+  // Upgrade immediately into Tier 1 if this call would cross the daily burst cap.
+  const projectedDailySpendMicros =
+    guardrail.dailySpendMicros + estimatedCostMicros;
+  const crossesDailyBurstCap =
+    guardrail.tier === "normal" &&
+    projectedDailySpendMicros > guardrail.envelope.dailyBurstCapMicros;
+
+  if (guardrail.tier === "economical_70_90" || crossesDailyBurstCap) {
     const target: ModelRouteTarget =
       stepKind === "exam_grading"
         ? "platform_flagship"
@@ -447,6 +486,8 @@ export function authorizeModelRoute(
     return {
       target,
       credentialMode: "platform",
+      effectiveTier: "economical_70_90",
+      upgradedByDailyBurstProjection: crossesDailyBurstCap,
       allowPaidModelCall: true,
       allowByokModelCall: false,
       allowPlatformCredentialFallback: false,
@@ -459,6 +500,8 @@ export function authorizeModelRoute(
   return {
     target: "platform_flagship",
     credentialMode: "platform",
+    effectiveTier: "normal",
+    upgradedByDailyBurstProjection: false,
     allowPaidModelCall: true,
     allowByokModelCall: false,
     allowPlatformCredentialFallback: false,

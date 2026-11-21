@@ -600,13 +600,16 @@ export type CreatorRoyaltyExclusionReason =
 export type CreatorRoyaltyStatus =
   | "pending_escrow"
   | "released"
+  | "partially_clawed_back"
+  | "clawed_back"
   | "voided"
   | "excluded";
 
 export type CreatorRoyaltyEventType =
   | "accrual"
   | "escrow_refund_adjustment"
-  | "escrow_release";
+  | "escrow_release"
+  | "post_release_clawback";
 
 export interface TransferQualityMetrics {
   readonly eligibleCohortSize: number;
@@ -644,6 +647,7 @@ export interface CreatorRoyaltyEntry {
   readonly cartridgeId: string;
   readonly currency: CurrencyCode;
   readonly eventType: CreatorRoyaltyEventType;
+  readonly referenceEntryId: string | null;
   readonly statusAfterEvent: CreatorRoyaltyStatus;
   readonly excludedReason: CreatorRoyaltyExclusionReason | null;
   readonly settledPurchaseAtMs: number;
@@ -686,7 +690,11 @@ export interface CreatorRoyaltyRefundInput {
   readonly purchaseId: string;
   readonly additionalRefundMicros: MicroCurrency;
   readonly refundOccurredAtMs: number;
+  /** Optional ledger booking timestamp (e.g. delayed webhook arrival >= release.recordedAtMs). */
+  readonly recordedAtMs?: number;
 }
+
+export type PostReleaseRoyaltyClawbackInput = CreatorRoyaltyRefundInput;
 
 export interface CreatorRoyaltyReleaseInput {
   readonly entryId: string;
@@ -720,7 +728,27 @@ export interface CreatorRoyaltyPosition {
   readonly qualityMultiplierApplied: boolean;
   readonly royaltyMicros: MicroCurrency;
   readonly releasableMicros: MicroCurrency;
+  readonly releasedEntryId: string | null;
   readonly releasedMicros: MicroCurrency;
+  /** Cumulative post-release clawback magnitude (>= 0n, capped at releasedMicros). */
+  readonly clawedBackMicros: MicroCurrency;
+  /** Net settled royalty after post-release clawbacks (releasedMicros - clawedBackMicros >= 0n). */
+  readonly netSettledMicros: MicroCurrency;
+  /** Signed payable balance offset (<= 0n) owed back against future payouts. */
+  readonly payableOffsetMicros: bigint;
+}
+
+export interface CreatorRoyaltyPayableSummary {
+  readonly creatorAccountId: string;
+  readonly currency: CurrencyCode;
+  readonly pendingEscrowMicros: MicroCurrency;
+  readonly maturedReleasableMicros: MicroCurrency;
+  readonly grossReleasedMicros: MicroCurrency;
+  readonly postReleaseClawbackMicros: MicroCurrency;
+  /** Signed net payout balance: maturedReleasableMicros - postReleaseClawbackMicros. */
+  readonly netPayableMicros: bigint;
+  /** Lifetime net settled creator earnings: grossReleasedMicros - postReleaseClawbackMicros (>= 0n). */
+  readonly netSettledLifetimeMicros: MicroCurrency;
 }
 
 export function createCreatorRoyaltyLedger(): CreatorRoyaltyLedger {
@@ -847,6 +875,7 @@ function royaltyEntriesEqual(
     a.cartridgeId === b.cartridgeId &&
     a.currency === b.currency &&
     a.eventType === b.eventType &&
+    a.referenceEntryId === b.referenceEntryId &&
     a.statusAfterEvent === b.statusAfterEvent &&
     a.excludedReason === b.excludedReason &&
     a.settledPurchaseAtMs === b.settledPurchaseAtMs &&
@@ -971,6 +1000,7 @@ export function appendCreatorRoyaltyAccrual(
     cartridgeId,
     currency,
     eventType: "accrual",
+    referenceEntryId: null,
     statusAfterEvent,
     excludedReason: calculation.excludedReason,
     settledPurchaseAtMs,
@@ -1042,12 +1072,23 @@ export function projectCreatorRoyaltyPosition(
     ? 0
     : latest.escrowReleaseAtMs - evaluatedAtMs;
 
+  const releaseEntry =
+    history.find((item) => item.eventType === "escrow_release") ?? null;
+  const releasedMicros = releaseEntry ? releaseEntry.resultingRoyaltyMicros : 0n;
+  let clawedBackMicros = 0n;
+  for (const item of history) {
+    if (item.eventType === "post_release_clawback") {
+      clawedBackMicros += -item.deltaRoyaltyMicros;
+    }
+  }
+  const netSettledMicros =
+    releasedMicros > clawedBackMicros ? releasedMicros - clawedBackMicros : 0n;
+  const payableOffsetMicros = -clawedBackMicros;
+
   const releasableMicros =
     latest.statusAfterEvent === "pending_escrow" && escrowMatured
       ? latest.resultingRoyaltyMicros
       : 0n;
-  const releasedMicros =
-    latest.statusAfterEvent === "released" ? latest.resultingRoyaltyMicros : 0n;
 
   return {
     purchaseId: latest.purchaseId,
@@ -1069,13 +1110,176 @@ export function projectCreatorRoyaltyPosition(
     qualityMultiplierApplied: latest.qualityMultiplierApplied,
     royaltyMicros: latest.resultingRoyaltyMicros,
     releasableMicros,
+    releasedEntryId: releaseEntry ? releaseEntry.entryId : null,
     releasedMicros,
+    clawedBackMicros,
+    netSettledMicros,
+    payableOffsetMicros,
   };
 }
 
 /**
- * Applies a refund or chargeback against a pending escrowed royalty entry,
- * cleanly pro-rating (partial refund) or voiding (full refund) before release.
+ * Appends an immutable `post_release_clawback` offset entry referencing the
+ * immutable `escrow_release` entry when a delayed refund/chargeback arrives
+ * after escrow release. Cumulatively capped at the originally released royalty
+ * amount so net payable balance reflects the exact clawback without ever
+ * mutating the released entry or double-clawing back.
+ */
+export function recordPostReleaseRoyaltyClawback(
+  ledger: CreatorRoyaltyLedger,
+  input: PostReleaseRoyaltyClawbackInput,
+): AppendLedgerResult<CreatorRoyaltyLedger, CreatorRoyaltyEntry> {
+  const entryId = normalizeIdentifier(input.entryId, "entryId");
+  const idempotencyKey = normalizeIdentifier(
+    input.idempotencyKey,
+    "idempotencyKey",
+  );
+  const purchaseId = normalizeIdentifier(input.purchaseId, "purchaseId");
+  const additionalRefundMicros = assertPositiveMicros(
+    input.additionalRefundMicros,
+    "additionalRefundMicros",
+  );
+  const refundOccurredAtMs = assertSafeTimestampMs(
+    input.refundOccurredAtMs,
+    "refundOccurredAtMs",
+  );
+  const explicitRecordedAtMs =
+    input.recordedAtMs === undefined
+      ? null
+      : assertSafeTimestampMs(input.recordedAtMs, "recordedAtMs");
+
+  const releaseEntry =
+    ledger.entries.find(
+      (item) =>
+        item.purchaseId === purchaseId && item.eventType === "escrow_release",
+    ) ?? null;
+
+  const expectedRecordedAtMs = releaseEntry
+    ? (explicitRecordedAtMs ??
+      Math.max(refundOccurredAtMs, releaseEntry.recordedAtMs))
+    : explicitRecordedAtMs;
+
+  const existingByKey = ledger.entries.find(
+    (item) => item.idempotencyKey === idempotencyKey,
+  );
+  if (existingByKey) {
+    if (
+      existingByKey.entryId === entryId &&
+      existingByKey.purchaseId === purchaseId &&
+      existingByKey.eventType === "post_release_clawback" &&
+      existingByKey.eventRefundMicros === additionalRefundMicros &&
+      expectedRecordedAtMs !== null &&
+      existingByKey.recordedAtMs === expectedRecordedAtMs
+    ) {
+      return { ledger, entry: existingByKey, idempotentReplay: true };
+    }
+    throw new CommercialResilienceError(
+      "IDEMPOTENCY_CONFLICT",
+      `Conflicting creator_royalty_entry for idempotencyKey "${idempotencyKey}"`,
+    );
+  }
+
+  const current = projectCreatorRoyaltyPosition(
+    ledger,
+    purchaseId,
+    expectedRecordedAtMs ?? refundOccurredAtMs,
+  );
+
+  if (refundOccurredAtMs < current.settledPurchaseAtMs) {
+    throw new CommercialResilienceError(
+      "INVALID_TIMESTAMP",
+      "refundOccurredAtMs cannot precede settledPurchaseAtMs",
+    );
+  }
+
+  if (!releaseEntry) {
+    throw new CommercialResilienceError(
+      "ROYALTY_NOT_RELEASED",
+      `Purchase "${purchaseId}" has no released royalty entry eligible for post-release clawback`,
+    );
+  }
+
+  const effectiveRecordedAtMs =
+    explicitRecordedAtMs ??
+    Math.max(refundOccurredAtMs, releaseEntry.recordedAtMs);
+  if (effectiveRecordedAtMs < releaseEntry.recordedAtMs) {
+    throw new CommercialResilienceError(
+      "INVALID_TIMESTAMP",
+      "Post-release clawback recordedAtMs cannot precede escrow release timestamp",
+    );
+  }
+
+  if (
+    current.status === "clawed_back" ||
+    current.clawedBackMicros >= releaseEntry.resultingRoyaltyMicros ||
+    current.royaltyMicros === 0n
+  ) {
+    throw new CommercialResilienceError(
+      "ROYALTY_CLAWBACK_EXHAUSTED",
+      `Released royalty for purchase "${purchaseId}" has already been fully clawed back`,
+    );
+  }
+
+  const cumulativeRefundsMicros =
+    current.cumulativeRefundsMicros + additionalRefundMicros;
+  const rawNet =
+    current.grossReceiptsMicros -
+    current.channelFeeMicros -
+    cumulativeRefundsMicros;
+  const netReceiptsMicros = rawNet > 0n ? rawNet : 0n;
+  const targetEarnedRoyaltyMicros =
+    (current.ratePermille * netReceiptsMicros) / ROYALTY_RATE_DENOMINATOR;
+
+  const remainingClawbackable =
+    releaseEntry.resultingRoyaltyMicros - current.clawedBackMicros;
+  const rawClawbackMagnitude =
+    current.royaltyMicros > targetEarnedRoyaltyMicros
+      ? current.royaltyMicros - targetEarnedRoyaltyMicros
+      : 0n;
+  const clawbackMagnitude =
+    rawClawbackMagnitude > remainingClawbackable
+      ? remainingClawbackable
+      : rawClawbackMagnitude;
+  const resultingRoyaltyMicros = current.royaltyMicros - clawbackMagnitude;
+  const statusAfterEvent: CreatorRoyaltyStatus =
+    resultingRoyaltyMicros === 0n ? "clawed_back" : "partially_clawed_back";
+
+  const entry: CreatorRoyaltyEntry = {
+    ledgerKind: "creator_royalty_entry",
+    entryId,
+    idempotencyKey,
+    purchaseId: current.purchaseId,
+    creatorAccountId: current.creatorAccountId,
+    buyerAccountId: current.buyerAccountId,
+    cartridgeId: current.cartridgeId,
+    currency: current.currency,
+    eventType: "post_release_clawback",
+    referenceEntryId: releaseEntry.entryId,
+    statusAfterEvent,
+    excludedReason: null,
+    settledPurchaseAtMs: current.settledPurchaseAtMs,
+    escrowReleaseAtMs: current.escrowReleaseAtMs,
+    recordedAtMs: effectiveRecordedAtMs,
+    grossReceiptsMicros: current.grossReceiptsMicros,
+    channelFeeMicros: current.channelFeeMicros,
+    eventRefundMicros: additionalRefundMicros,
+    cumulativeRefundsMicros,
+    netReceiptsMicros,
+    ratePermille: current.ratePermille,
+    qualityMultiplierApplied: current.qualityMultiplierApplied,
+    deltaRoyaltyMicros: -clawbackMagnitude,
+    resultingRoyaltyMicros,
+  };
+
+  return appendValidatedRoyaltyEntry(ledger, entry);
+}
+
+/**
+ * Applies a refund or chargeback against a purchase's creator royalty:
+ * - While `pending_escrow`: appends an `escrow_refund_adjustment` pro-rating
+ *   or voiding the escrowed entry before release.
+ * - After `escrow_release`: preserves the released entry immutably and appends
+ *   a `post_release_clawback` payable offset referencing the released entry.
  */
 export function appendCreatorRoyaltyRefund(
   ledger: CreatorRoyaltyLedger,
@@ -1095,18 +1299,25 @@ export function appendCreatorRoyaltyRefund(
     input.refundOccurredAtMs,
     "refundOccurredAtMs",
   );
+  const effectiveEscrowRecordedAtMs =
+    input.recordedAtMs === undefined
+      ? refundOccurredAtMs
+      : assertSafeTimestampMs(input.recordedAtMs, "recordedAtMs");
 
   // Check exact idempotent replay before checking current post-refund status.
   const existingByKey = ledger.entries.find(
     (item) => item.idempotencyKey === idempotencyKey,
   );
   if (existingByKey) {
+    if (existingByKey.eventType === "post_release_clawback") {
+      return recordPostReleaseRoyaltyClawback(ledger, input);
+    }
     if (
       existingByKey.entryId === entryId &&
       existingByKey.purchaseId === purchaseId &&
       existingByKey.eventType === "escrow_refund_adjustment" &&
       existingByKey.eventRefundMicros === additionalRefundMicros &&
-      existingByKey.recordedAtMs === refundOccurredAtMs
+      existingByKey.recordedAtMs === effectiveEscrowRecordedAtMs
     ) {
       return { ledger, entry: existingByKey, idempotentReplay: true };
     }
@@ -1128,11 +1339,12 @@ export function appendCreatorRoyaltyRefund(
       "refundOccurredAtMs cannot precede settledPurchaseAtMs",
     );
   }
-  if (current.status === "released") {
-    throw new CommercialResilienceError(
-      "ROYALTY_ALREADY_RELEASED",
-      `Royalty for purchase "${purchaseId}" was already released and cannot be adjusted inside escrow`,
-    );
+  if (
+    current.status === "released" ||
+    current.status === "partially_clawed_back" ||
+    current.status === "clawed_back"
+  ) {
+    return recordPostReleaseRoyaltyClawback(ledger, input);
   }
   if (current.status === "excluded") {
     throw new CommercialResilienceError(
@@ -1147,6 +1359,9 @@ export function appendCreatorRoyaltyRefund(
     );
   }
 
+  const accrualEntry = ledger.entries.find(
+    (item) => item.purchaseId === purchaseId && item.eventType === "accrual",
+  );
   const cumulativeRefundsMicros =
     current.cumulativeRefundsMicros + additionalRefundMicros;
   const rawNet =
@@ -1170,11 +1385,12 @@ export function appendCreatorRoyaltyRefund(
     cartridgeId: current.cartridgeId,
     currency: current.currency,
     eventType: "escrow_refund_adjustment",
+    referenceEntryId: accrualEntry ? accrualEntry.entryId : null,
     statusAfterEvent,
     excludedReason: null,
     settledPurchaseAtMs: current.settledPurchaseAtMs,
     escrowReleaseAtMs: current.escrowReleaseAtMs,
-    recordedAtMs: refundOccurredAtMs,
+    recordedAtMs: effectiveEscrowRecordedAtMs,
     grossReceiptsMicros: current.grossReceiptsMicros,
     channelFeeMicros: current.channelFeeMicros,
     eventRefundMicros: additionalRefundMicros,
@@ -1237,7 +1453,11 @@ export function appendCreatorRoyaltyRelease(
       `Cannot release voided royalty for purchase "${purchaseId}"`,
     );
   }
-  if (current.status === "released") {
+  if (
+    current.status === "released" ||
+    current.status === "partially_clawed_back" ||
+    current.status === "clawed_back"
+  ) {
     throw new CommercialResilienceError(
       "ROYALTY_ALREADY_RELEASED",
       `Royalty for purchase "${purchaseId}" was already released`,
@@ -1250,6 +1470,9 @@ export function appendCreatorRoyaltyRelease(
     );
   }
 
+  const accrualEntry = ledger.entries.find(
+    (item) => item.purchaseId === purchaseId && item.eventType === "accrual",
+  );
   const entry: CreatorRoyaltyEntry = {
     ledgerKind: "creator_royalty_entry",
     entryId,
@@ -1260,6 +1483,7 @@ export function appendCreatorRoyaltyRelease(
     cartridgeId: current.cartridgeId,
     currency: current.currency,
     eventType: "escrow_release",
+    referenceEntryId: accrualEntry ? accrualEntry.entryId : null,
     statusAfterEvent: "released",
     excludedReason: null,
     settledPurchaseAtMs: current.settledPurchaseAtMs,
@@ -1277,4 +1501,70 @@ export function appendCreatorRoyaltyRelease(
   };
 
   return appendValidatedRoyaltyEntry(ledger, entry);
+}
+
+/**
+ * Summarizes a creator's append-only escrow, matured releasable, released, and
+ * post-release clawback payable balance in a single currency at `nowMs`.
+ */
+export function summarizeCreatorRoyaltyPayableBalance(
+  ledger: CreatorRoyaltyLedger,
+  options: {
+    readonly creatorAccountId: string;
+    readonly currency: CurrencyCode;
+    readonly nowMs: number;
+  },
+): CreatorRoyaltyPayableSummary {
+  const creatorAccountId = normalizeIdentifier(
+    options.creatorAccountId,
+    "creatorAccountId",
+  );
+  const currency = normalizeCurrency(options.currency);
+  const nowMs = assertSafeTimestampMs(options.nowMs, "nowMs");
+
+  const purchaseIds = new Set<string>();
+  for (const entry of ledger.entries) {
+    if (entry.creatorAccountId !== creatorAccountId) {
+      continue;
+    }
+    if (entry.currency !== currency) {
+      throw new CommercialResilienceError(
+        "CURRENCY_MISMATCH",
+        `Creator royalty entry "${entry.entryId}" has currency "${entry.currency}", expected "${currency}"`,
+      );
+    }
+    purchaseIds.add(entry.purchaseId);
+  }
+
+  let pendingEscrowMicros = 0n;
+  let maturedReleasableMicros = 0n;
+  let grossReleasedMicros = 0n;
+  let postReleaseClawbackMicros = 0n;
+
+  for (const purchaseId of purchaseIds) {
+    const pos = projectCreatorRoyaltyPosition(ledger, purchaseId, nowMs);
+    if (pos.status === "pending_escrow") {
+      if (pos.escrowMaturedAtEvaluation) {
+        maturedReleasableMicros += pos.releasableMicros;
+      } else {
+        pendingEscrowMicros += pos.royaltyMicros;
+      }
+    }
+    grossReleasedMicros += pos.releasedMicros;
+    postReleaseClawbackMicros += pos.clawedBackMicros;
+  }
+
+  return {
+    creatorAccountId,
+    currency,
+    pendingEscrowMicros,
+    maturedReleasableMicros,
+    grossReleasedMicros,
+    postReleaseClawbackMicros,
+    netPayableMicros: maturedReleasableMicros - postReleaseClawbackMicros,
+    netSettledLifetimeMicros:
+      grossReleasedMicros > postReleaseClawbackMicros
+        ? grossReleasedMicros - postReleaseClawbackMicros
+        : 0n,
+  };
 }
