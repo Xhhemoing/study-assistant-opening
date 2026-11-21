@@ -1,0 +1,280 @@
+import { z } from "zod";
+import { cloneCartridgeData, isInspectableCartridgeFunction, readCartridgeDataProperty } from "./clone-cartridge-data";
+import type { DistinguishableProbeSpec } from "./probe-protocol";
+
+/**
+ * Progressive TeachingCartridge capability levels. Each level strictly extends the
+ * previous one; only L4 may contribute to formal evidence qualification.
+ */
+export const CARTRIDGE_CAPABILITY_LEVELS = [
+  "L1_CONTINUITY",
+  "L2_SCHEDULABLE",
+  "L3_MATERIAL_REACTIVE",
+  "L4_EVIDENCE",
+] as const;
+export type CartridgeCapabilityLevel = (typeof CARTRIDGE_CAPABILITY_LEVELS)[number];
+
+export function cartridgeLevelRank(level: CartridgeCapabilityLevel): 1 | 2 | 3 | 4 {
+  return (CARTRIDGE_CAPABILITY_LEVELS.indexOf(level) + 1) as 1 | 2 | 3 | 4;
+}
+
+/** True when `level` declares at least the `required` capability. */
+export function meetsCapabilityLevel(level: CartridgeCapabilityLevel, required: CartridgeCapabilityLevel): boolean {
+  const levelRank = cartridgeLevelRank(level);
+  const requiredRank = cartridgeLevelRank(required);
+  return levelRank > 0 && requiredRank > 0 && levelRank >= requiredRank;
+}
+
+export const cartridgeManifestSchema = z
+  .object({
+    /** Stable dotted identity, e.g. `408.stack.v1`. */
+    id: z.string().regex(/^[a-z0-9][a-z0-9._-]{0,63}$/),
+    /** Semantic version of the cartridge implementation. */
+    version: z.string().regex(/^\d+\.\d+\.\d+$/),
+    domain: z.string().min(1).max(64),
+    title: z.string().min(1).max(120),
+    level: z.enum(CARTRIDGE_CAPABILITY_LEVELS),
+  })
+  .strict();
+export type CartridgeManifest = z.infer<typeof cartridgeManifestSchema>;
+
+export type CartridgeValidationResult<T> =
+  | { ok: true; value: T }
+  | { ok: false; issues: string[] };
+
+export interface CartridgeResumeSummary {
+  cartridgeId: string;
+  cartridgeVersion: string;
+  headline: string;
+  completedSteps: number;
+  totalSteps: number | null;
+  /** Next requirement the learner can continue with; null when nothing is pending. */
+  nextRequirementKey: string | null;
+}
+
+/* ---------------------------------------------------------------- L1 ---- */
+
+/** L1: the cartridge can persist and restore its own continuity state. */
+export interface ContinuityCartridge<TState = unknown> {
+  readonly manifest: CartridgeManifest;
+  serializeContinuityState(state: TState): string;
+  /** Accepts serialized strings or plain values; never trusts unvalidated input. */
+  parseContinuityState(raw: unknown): CartridgeValidationResult<TState>;
+  /** Registry lookups restore unknown input and throw CartridgeContinuityStateError on invalid state. */
+  buildResumeSummary(state: TState): CartridgeResumeSummary;
+}
+
+export class CartridgeContinuityStateError extends Error {
+  constructor(readonly issues: readonly string[]) {
+    super("Cartridge continuity state could not be restored");
+    this.name = "CartridgeContinuityStateError";
+  }
+}
+
+export function restoreContinuityState<TState>(
+  parse: ContinuityCartridge<TState>["parseContinuityState"],
+  raw: unknown,
+): TState {
+  let issues: string[];
+  try {
+    if (!isInspectableCartridgeFunction(parse)) throw new TypeError("Cartridge parser requires an inspectable function");
+    const restored = cloneCartridgeData(parse(cloneCartridgeData(raw)));
+    if (restored?.ok === true && Object.hasOwn(restored, "value")) return restored.value;
+    issues = restored?.ok === false && Array.isArray(restored.issues) && restored.issues.every(issue => typeof issue === "string")
+      ? restored.issues : ["invalid_state_restore_result"];
+  } catch (error) {
+    issues = [safeErrorDetail(error)];
+  }
+  throw new CartridgeContinuityStateError(issues);
+}
+
+/* ---------------------------------------------------------------- L2 ---- */
+
+export interface CartridgeActiveRetestWindow {
+  requirementKey: string;
+  /** ISO timestamps; `closesAt: null` keeps the window open until the host closes it. */
+  opensAt: string;
+  closesAt: string | null;
+}
+
+export type CartridgeTaskKind = "learn" | "practice" | "review";
+
+export interface CartridgeTaskCandidate {
+  candidateId: string;
+  requirementKey: string;
+  kind: CartridgeTaskKind;
+  cadenceDays: number;
+  earliestAt: string;
+  priority: number;
+}
+
+export interface CartridgeScheduleInput<TState> {
+  state: TState;
+  /** Host-supplied ISO clock; cartridges never read wall-clock time. */
+  now: string;
+  activeRetestWindows: readonly CartridgeActiveRetestWindow[];
+  limit?: number;
+}
+
+/** L2: deterministic task/cadence candidate projection. */
+export interface SchedulableCartridge<TState = unknown> extends ContinuityCartridge<TState> {
+  projectTaskCandidates(input: CartridgeScheduleInput<TState>): CartridgeTaskCandidate[];
+}
+
+/* ---------------------------------------------------------------- L3 ---- */
+
+export interface CartridgeMaterialChunk {
+  sourceId: string;
+  sourceVersion: number;
+  chunkId: string;
+  page: number | null;
+  text: string;
+}
+
+export interface CartridgeChunkBinding {
+  requirementKey: string;
+  sourceId: string;
+  sourceVersion: number;
+  chunkId: string;
+  page: number | null;
+  matchedTerms: string[];
+}
+
+export interface CartridgeCitation {
+  sourceId: string;
+  sourceVersion: number;
+  chunkId: string;
+  page: number | null;
+  /** Exact substring of the cited chunk text. */
+  quote: string;
+}
+
+export interface CartridgeExerciseSeed {
+  seedId: string;
+  requirementKey: string;
+  prompt: string;
+  citation: CartridgeCitation;
+  parameters: Readonly<Record<string, string>>;
+}
+
+/** L3: binds supplied material chunks and extracts citation-grounded exercise seeds. */
+export interface MaterialReactiveCartridge<TState = unknown> extends SchedulableCartridge<TState> {
+  bindMaterialChunks(chunks: readonly CartridgeMaterialChunk[]): CartridgeChunkBinding[];
+  extractExerciseSeeds(
+    chunks: readonly CartridgeMaterialChunk[],
+    bindings: readonly CartridgeChunkBinding[],
+  ): CartridgeExerciseSeed[];
+}
+
+/* ---------------------------------------------------------------- L4 ---- */
+
+export type CartridgeProbeDiagnosis = "correct_model" | "misconception" | "unclassified" | "invalid_response";
+
+export interface CartridgeProbeEvaluation {
+  probeId: string;
+  requirementKey: string;
+  outcome: "correct" | "incorrect" | "unverified";
+  diagnosis: CartridgeProbeDiagnosis;
+  /** Hypothesis whose prediction matches the response; at most one for a verified probe. */
+  matchedHypothesisId: string | null;
+  observableKey: string | null;
+}
+
+export interface CartridgeEvidenceContract {
+  evaluatorVersion: string;
+  specVersion: string;
+}
+
+function isNonBlankString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+export function hasValidEvidenceContract(contract: unknown): contract is CartridgeEvidenceContract {
+  try {
+    const captured = cloneCartridgeData(contract);
+    return isNonBlankString(readCartridgeDataProperty(captured, "evaluatorVersion"))
+      && isNonBlankString(readCartridgeDataProperty(captured, "specVersion"));
+  } catch {
+    return false;
+  }
+}
+
+/** L4: distinguishable misconception probes and formal evidence gating. */
+export interface EvidenceCartridge<TState = unknown> extends MaterialReactiveCartridge<TState> {
+  readonly evidenceContract: CartridgeEvidenceContract;
+  listProbes(): readonly DistinguishableProbeSpec<unknown, unknown>[];
+  getProbe(probeId: string): DistinguishableProbeSpec<unknown, unknown> | null;
+  evaluateProbeResponse(probeId: string, response: unknown): CartridgeProbeEvaluation;
+}
+
+export type AnyTeachingCartridge = ContinuityCartridge<unknown>;
+
+/* ------------------------------------------------------- type guards ---- */
+
+function hasMethods(value: object, names: readonly string[]): boolean {
+  return names.every(name => isInspectableCartridgeFunction(readCartridgeDataProperty(value, name)));
+}
+
+const L1_METHODS = ["serializeContinuityState", "parseContinuityState", "buildResumeSummary"] as const;
+const L2_METHODS = ["projectTaskCandidates"] as const;
+const L3_METHODS = ["bindMaterialChunks", "extractExerciseSeeds"] as const;
+const L4_METHODS = ["listProbes", "getProbe", "evaluateProbeResponse"] as const;
+
+export const CARTRIDGE_LEVEL_METHODS: Readonly<Record<CartridgeCapabilityLevel, readonly string[]>> = {
+  L1_CONTINUITY: L1_METHODS,
+  L2_SCHEDULABLE: [...L1_METHODS, ...L2_METHODS],
+  L3_MATERIAL_REACTIVE: [...L1_METHODS, ...L2_METHODS, ...L3_METHODS],
+  L4_EVIDENCE: [...L1_METHODS, ...L2_METHODS, ...L3_METHODS, ...L4_METHODS],
+};
+
+function declares(cartridge: AnyTeachingCartridge, level: CartridgeCapabilityLevel): boolean {
+  try {
+    const parsed = cartridgeManifestSchema.safeParse(cloneCartridgeData(readCartridgeDataProperty(cartridge, "manifest")));
+    return parsed.success && meetsCapabilityLevel(parsed.data.level, level)
+      && hasMethods(cartridge, CARTRIDGE_LEVEL_METHODS[level]);
+  } catch {
+    return false;
+  }
+}
+
+export function hasSchedulableCapability<TState>(
+  cartridge: ContinuityCartridge<TState>,
+): cartridge is SchedulableCartridge<TState> {
+  return declares(cartridge as AnyTeachingCartridge, "L2_SCHEDULABLE");
+}
+
+export function hasMaterialReactiveCapability<TState>(
+  cartridge: ContinuityCartridge<TState>,
+): cartridge is MaterialReactiveCartridge<TState> {
+  return declares(cartridge as AnyTeachingCartridge, "L3_MATERIAL_REACTIVE");
+}
+
+export function hasEvidenceCapability<TState>(
+  cartridge: ContinuityCartridge<TState>,
+): cartridge is EvidenceCartridge<TState> {
+  try {
+    return declares(cartridge as AnyTeachingCartridge, "L4_EVIDENCE")
+      && hasValidEvidenceContract(readCartridgeDataProperty(cartridge, "evidenceContract"));
+  } catch {
+    return false;
+  }
+}
+
+/** Format an unknown thrown value into a string without ever throwing a secondary error. */
+export function safeErrorDetail(error: unknown): string {
+  try {
+    if (error instanceof Error) {
+      const message = error.message;
+      if (typeof message === "string" && message.length > 0) return message;
+      const name = error.name;
+      if (typeof name === "string" && name.length > 0) return name;
+    }
+  } catch {
+    // Fall through to safe string coercion below.
+  }
+  try {
+    return String(error);
+  } catch {
+    return "unprintable thrown value";
+  }
+}
