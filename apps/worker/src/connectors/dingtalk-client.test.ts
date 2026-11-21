@@ -83,6 +83,27 @@ describe("dingtalk callback client", () => {
   it("rejects stale callbacks using the injected clock", () => {
     expect(isFreshDingTalkEventTimestamp("60", 300, () => 60_000 + 301_000)).toBe(false);
     expect(isFreshDingTalkEventTimestamp("60", 300, () => 60_000 + 299_000)).toBe(true);
+    expect(isFreshDingTalkEventTimestamp("1760000000000", 300, () => 1_760_000_000_000 + 299_000)).toBe(true);
+    expect(isFreshDingTalkEventTimestamp("1760000000000", 300, () => 1_760_000_000_000 - 301_000)).toBe(false);
+    expect(isFreshDingTalkEventTimestamp("1760000300000", 300, () => 1_760_000_000_000)).toBe(true);
+    expect(isFreshDingTalkEventTimestamp("1760000301000", 300, () => 1_760_000_000_000)).toBe(false);
+  });
+
+  it("accepts only the exact DingTalk URL verification plaintext", () => {
+    const timestamp = "1760000000";
+    const nonce = "nonce";
+    const config = { token, encodingAesKey: key43, corpIdOrKey: corpId };
+    const checkUrl = encryptCallback("check_url", aesKey, corpId);
+    expect(verifyAndDecryptDingTalkEvent({
+      ...config, msg_signature: signatureFor(token, timestamp, nonce, checkUrl),
+      timeStamp: timestamp, nonce, encrypt: checkUrl,
+    })).toBe("check_url");
+
+    const arbitrary = encryptCallback("arbitrary plaintext", aesKey, corpId);
+    expect(() => verifyAndDecryptDingTalkEvent({
+      ...config, msg_signature: signatureFor(token, timestamp, nonce, arbitrary),
+      timeStamp: timestamp, nonce, encrypt: arbitrary,
+    })).toThrowError(new DingTalkClientError("FORMAT", "callback payload is not JSON"));
   });
 
   it("returns a signed encrypted success response", () => {

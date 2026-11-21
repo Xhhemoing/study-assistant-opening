@@ -7,6 +7,7 @@ import {
   createOpeningImportsRepository,
   createOpeningSourceActionsRepository,
 } from "@aistudy/database";
+import { readOpeningSourceQuotaUsage } from "../../packages/database/src/repositories/opening-source-quota";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { startOpeningImapServer, type OpeningImapServer } from "./opening-imap-server";
 import { syncMailbox } from "../../apps/worker/src/connectors/imap-sync";
@@ -197,6 +198,11 @@ describe("isolated standard IMAP sync gate", () => {
     expect(journal).toMatchObject({ asset_deleted_at: expect.anything(), pending_object_keys: expect.any(Array) });
     const key = String((journal!.pending_object_keys as string[])[0]);
     expect(objectByKey.has(key)).toBe(true);
+    const [orphan] = await f.sql`SELECT bytes FROM opening_source_versions
+      WHERE workspace_id=${f.scope.workspaceId} AND source_id=${journal!.source_id} AND version=0`;
+    expect(orphan).toMatchObject({ bytes: expect.anything() });
+    await expect(readOpeningSourceQuotaUsage(f.sql, f.scope.workspaceId, 2 * 1024 ** 3))
+      .resolves.toEqual({ bytes: BigInt(String(orphan!.bytes)), objects: 1n });
     expect(await f.sql`SELECT state FROM opening_connections WHERE id=${fixtureConnection.id}`)
       .toEqual([{ state: "revoked" }]);
 
@@ -207,7 +213,11 @@ describe("isolated standard IMAP sync gate", () => {
       objectByKey.delete(pendingKey);
       await actions.cleaned(f.scope, String(journal!.source_id), pendingKey);
     }
-    await expect(actions.cleanup(f.scope, String(journal!.source_id))).resolves.toMatchObject({ keys: [] });
+    await expect(actions.cleanup(f.scope, String(journal!.source_id))).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(f.sql`SELECT 1 FROM opening_privacy_exclusions WHERE source_id=${journal!.source_id}`).resolves.toHaveLength(0);
+    await expect(f.sql`SELECT 1 FROM opening_source_versions WHERE source_id=${journal!.source_id}`).resolves.toHaveLength(0);
+    await expect(readOpeningSourceQuotaUsage(f.sql, f.scope.workspaceId, 2 * 1024 ** 3))
+      .resolves.toEqual({ bytes: 0n, objects: 0n });
     expect(objectByKey.has(key)).toBe(false);
   });
 

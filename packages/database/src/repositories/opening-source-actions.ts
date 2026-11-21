@@ -103,6 +103,38 @@ export function createOpeningSourceActionsRepository(sql: Sql) {
     },
 
     async cleaned(scope: OpeningScope, id: string, key: string): Promise<void> {
+      // A connector rollback journal has exactly one final-v0 key and a
+      // synthetic version row carrying its exact byte count. Remove both
+      // temporary records atomically after the object is acknowledged.
+      if (key === `opening/sources/${id}/v0`) {
+        await sql`
+          WITH connector_candidate AS (
+            SELECT e.id, e.workspace_id, e.source_id
+            FROM opening_privacy_exclusions e
+            WHERE e.workspace_id=${scope.workspaceId} AND e.source_id=${id}
+              AND e.asset_deleted_at IS NOT NULL
+              AND e.pending_object_keys=ARRAY[${key}]::text[]
+              AND EXISTS (SELECT 1 FROM workspaces w
+                WHERE w.id=e.workspace_id AND w.owner_user_id=${scope.ownerUserId})
+            FOR UPDATE
+          ), removed_version AS (
+            DELETE FROM opening_source_versions v
+            USING connector_candidate c
+            WHERE v.workspace_id=c.workspace_id AND v.source_id=c.source_id AND v.version=0
+            RETURNING v.source_id
+          ), removed_connector AS (
+            DELETE FROM opening_privacy_exclusions e
+            USING connector_candidate c, removed_version v
+            WHERE e.id=c.id
+            AND e.asset_deleted_at IS NOT NULL
+              AND NOT EXISTS (SELECT 1 FROM opening_sources s
+                WHERE s.workspace_id=e.workspace_id AND s.id=e.source_id)
+              AND NOT EXISTS (SELECT 1 FROM opening_source_versions v2
+                WHERE v2.workspace_id=e.workspace_id AND v2.source_id=e.source_id)
+            RETURNING e.id
+          )
+          SELECT count(*)::int AS removed FROM removed_connector`;
+      }
       await sql`UPDATE opening_privacy_exclusions e SET pending_object_keys=array_remove(e.pending_object_keys,${key})
         WHERE e.workspace_id=${scope.workspaceId} AND e.source_id=${id} AND e.asset_deleted_at IS NOT NULL
           AND EXISTS(SELECT 1 FROM workspaces w WHERE w.id=e.workspace_id AND w.owner_user_id=${scope.ownerUserId})`;

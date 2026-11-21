@@ -162,10 +162,10 @@ export function verifyAndDecryptDingTalkEvent(input: DingTalkCallbackConfig & Di
   try {
     return JSON.parse(plaintext) as unknown;
   } catch {
-    // DingTalk's URL verification payload is a signed encrypted string. Event
-    // delivery remains JSON, while the check_url path only needs verification
-    // and a compliant encrypted acknowledgement.
-    return plaintext;
+    // DingTalk's URL verification payload is a signed encrypted string. Any
+    // other plaintext is malformed callback data and must fail closed.
+    if (plaintext === "check_url") return plaintext;
+    throw new DingTalkClientError("FORMAT", "callback payload is not JSON");
   }
 }
 
@@ -202,10 +202,16 @@ export function isFreshDingTalkEventTimestamp(
   timestamp: string,
   maxAgeSeconds = 300,
   now: () => number = Date.now,
+  maxFutureSeconds = maxAgeSeconds,
 ): boolean {
   if (!/^\d+$/.test(timestamp)) return false;
-  const seconds = Number(timestamp);
-  return Math.abs(now() - seconds * 1000) <= maxAgeSeconds * 1000;
+  const value = Number(timestamp);
+  if (!Number.isSafeInteger(value) || value <= 0) return false;
+  const timestampMs = value >= 1_000_000_000_000 ? value : value * 1000;
+  const currentMs = now();
+  if (!Number.isFinite(currentMs)) return false;
+  return timestampMs >= currentMs - maxAgeSeconds * 1000
+    && timestampMs <= currentMs + maxFutureSeconds * 1000;
 }
 
 /**

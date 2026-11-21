@@ -19,7 +19,7 @@ it("reconciles the same unreferenced object on redelivery after bounded delete r
       await stage();
       return duplicate;
     }),
-    removeUnpublishedSource: vi.fn<Imports["removeUnpublishedSource"]>(async (_scope, _identity, _sourceId, _key, remove) => {
+    removeUnpublishedSource: vi.fn<Imports["removeUnpublishedSource"]>(async (_scope, _identity, _sourceId, _key, _byteSize, remove) => {
       await remove();
     }),
   };
@@ -31,12 +31,13 @@ it("reconciles the same unreferenced object on redelivery after bounded delete r
   };
 
   await expect(publishConnectorSource(imports, storage, scope, delivery)).rejects.toThrow("delete temporarily unavailable");
-  const [stagedKey] = objects;
+  const [firstKey] = objects;
   expect(objects.size).toBe(1);
-  expect(storage.remove.mock.calls).toEqual([[stagedKey], [stagedKey], [stagedKey]]);
+  expect(storage.remove.mock.calls).toEqual([[firstKey], [firstKey], [firstKey]]);
 
   storageHealthy = true;
   await expect(publishConnectorSource(imports, storage, scope, delivery)).resolves.toEqual(duplicate);
-  expect(storage.remove).toHaveBeenLastCalledWith(stagedKey);
-  expect(objects.size).toBe(0);
+  expect(storage.remove).toHaveBeenCalledTimes(4);
+  expect(objects.size).toBe(1);
+  expect(objects.has(firstKey)).toBe(true);
 });

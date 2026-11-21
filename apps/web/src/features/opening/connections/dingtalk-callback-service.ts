@@ -36,7 +36,6 @@ const callbackConnectionMapSchema = z.record(z.string(), callbackConnectionSchem
 export type DingTalkCallbackConnection = z.infer<typeof callbackConnectionSchema>;
 
 export type DingTalkCallbackInput = DingTalkCallbackEnvelope & {
-  now?: () => number;
 };
 
 export type DingTalkCallbackDeps = {
@@ -100,7 +99,7 @@ export async function receiveDingTalkCallback(
   deps: DingTalkCallbackDeps,
 ): Promise<DingTalkCallbackResult> {
   const timestamp = input.timeStamp ?? input.timestamp ?? "";
-  const now = input.now ?? deps.now ?? (() => Date.now());
+  const now = deps.now ?? (() => Date.now());
   if (!isFreshDingTalkEventTimestamp(timestamp, DINGTALK_EVENT_TIMESTAMP_MAX_AGE_SECONDS, now)) {
     throw new DingTalkClientError("FORMAT", "callback timestamp is stale");
   }
@@ -110,7 +109,7 @@ export async function receiveDingTalkCallback(
     ...config,
     ...input,
   });
-  if (typeof event === "string" || (
+  if (event === "check_url" || (
     event && typeof event === "object" && !Array.isArray(event)
       && typeof ((event as Record<string, unknown>).eventType ?? (event as Record<string, unknown>).EventType) === "string"
       && String((event as Record<string, unknown>).eventType ?? (event as Record<string, unknown>).EventType).toLowerCase() === "check_url"
