@@ -1,13 +1,39 @@
 // @vitest-environment jsdom
-import { act } from "react";
+import { act, useEffect, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { beforeEach, afterEach, expect, it, vi } from "vitest";
-import type { LearningCardSession, ReviewQueueItem } from "@aistudy/contracts";
+import type { LearningCardSession, ReviewCard, ReviewQueueItem, ReviewState } from "@aistudy/contracts";
 import { BudgetCardSession } from "./budget-card-session";
 import type { LearningManagementClient } from "../planning/learning-management-client";
 import type { OpeningCardsClient } from "../cards/cards-client";
 vi.mock("../../auth/session-identity", () => ({ getVerifiedSessionNamespace: () => "verified-card-test" }));
-vi.mock("../cards/card-review-view", () => ({ CardReviewView: ({ onGraded, onBusyChange }: { onGraded: (id: string, result: unknown) => void; onBusyChange: (value: boolean) => void }) => <div><p>受限真实卡片队列</p><button onClick={() => { onBusyChange(false); onGraded(id, { evidence: "saved" }); }}>已收评分回执</button></div> }));
+vi.mock("../cards/card-review-view", () => ({
+  CardReviewView: ({
+    client,
+    onGraded,
+    onBusyChange,
+  }: {
+    client: OpeningCardsClient;
+    onGraded: (id: string, result: unknown) => void;
+    onBusyChange: (value: boolean) => void;
+  }) => {
+    const [presentedIds, setPresentedIds] = useState<string[]>([]);
+    useEffect(() => {
+      let live = true;
+      void client.listDue("auto").then((items) => {
+        if (live) setPresentedIds(items.map((item) => item.card.id));
+      });
+      return () => { live = false; };
+    }, [client]);
+    return (
+      <div>
+        <p>受限真实卡片队列</p>
+        <output data-testid="presented-order">{presentedIds.join(",")}</output>
+        <button onClick={() => { onBusyChange(false); onGraded(presentedIds[0] ?? id, { evidence: "saved" }); }}>已收评分回执</button>
+      </div>
+    );
+  },
+}));
 const id = "11111111-1111-4111-8111-111111111111";
 const session: LearningCardSession = { activityId: id, status: "active", revision: 1, cardIds: [id], reviewedCardIds: [], budgetMinutes: 10, elapsedSeconds: 0, startedAt: "2026-10-27T00:00:00Z", stoppedAt: null, href: `/opening/review?cardSession=${id}` };
 let host: HTMLDivElement, root: Root;
@@ -63,4 +89,111 @@ it("still clears a first definite HTTP 409 card command rejection", async () => 
   expect(sessionStorage.getItem("aistudy:card-session-command:verified-card-test")).toBeNull();
   expect([...host.querySelectorAll("button")].some(node => node.textContent === "重新确认这次开始")).toBe(false);
   expect((button("开始本次限时复习") as HTMLButtonElement).disabled).toBe(false);
+});
+
+function queueItem(
+  cardId: string,
+  options: { stability: number; daysAgo: number; dueAt: string; goalPriority: number },
+  nowMs: number,
+): ReviewQueueItem {
+  const lastReview = new Date(nowMs - options.daysAgo * 86_400_000).toISOString();
+  const card: ReviewCard = {
+    id: cardId,
+    ownerUserId: "22222222-2222-4222-8222-222222222222",
+    front: `Q-${cardId}`,
+    back: `A-${cardId}`,
+    sourceDocumentId: null,
+    syllabusPointId: null,
+    tags: ["review:concept"],
+    courseId: null,
+    skillLabel: null,
+    archived: false,
+    contentVersion: 1,
+    pausedUntil: null,
+    maintainUntil: null,
+    excludeFromAssessment: false,
+    createdAt: "2026-08-01T00:00:00.000Z",
+  };
+  const state: ReviewState = {
+    cardId,
+    ease: 2.5,
+    intervalDays: 1,
+    dueAt: options.dueAt,
+    reps: 2,
+    lapses: 0,
+    lastGrade: "good",
+    updatedAt: lastReview,
+    srsVersion: "fsrs-5.4.2",
+    fsrs: {
+      stability: options.stability,
+      difficulty: 5,
+      elapsedDays: 1,
+      scheduledDays: Math.max(1, Math.round(options.stability)),
+      learningSteps: 0,
+      reps: 2,
+      lapses: 0,
+      state: 2,
+      lastReview,
+    },
+  };
+  return { card, state, goalPriority: options.goalPriority };
+}
+
+it("triages the full due queue before the 200-card start cap so high-priority salvageable item #201 is placed first", async () => {
+  const nowMs = Date.now();
+  const makeUuid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+  const dueItems: ReviewQueueItem[] = [];
+  for (let i = 1; i <= 200; i += 1) {
+    dueItems.push(queueItem(
+      makeUuid(i),
+      { stability: 30, daysAgo: 1, dueAt: "2026-08-01T00:00:00.000Z", goalPriority: 5 },
+      nowMs,
+    ));
+  }
+  const criticalId = makeUuid(201);
+  dueItems.push(queueItem(
+    criticalId,
+    { stability: 1.5, daysAgo: 10, dueAt: "2026-08-14T23:00:00.000Z", goalPriority: 8 },
+    nowMs,
+  ));
+
+  const value = clients();
+  vi.mocked(value.cards.listDue).mockResolvedValue(dueItems);
+  vi.mocked(value.management.cardCommand).mockImplementation(async (command) => ({
+    ...session,
+    cardIds: command.action === "start" ? command.cardIds : session.cardIds,
+  }));
+
+  await render(value);
+  await act(async () => button("开始本次限时复习").click());
+
+  const startCall = vi.mocked(value.management.cardCommand).mock.calls[0]?.[0];
+  expect(startCall?.action).toBe("start");
+  if (startCall?.action === "start") {
+    expect(startCall.cardIds).toHaveLength(200);
+    expect(startCall.cardIds[0]).toBe(criticalId);
+  }
+});
+
+it("presents active and resumed cards in exact session.cardIds order while skipping reviewed cards", async () => {
+  const cardA = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const cardB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const cardC = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+  const nowMs = Date.now();
+  const value = clients();
+  vi.mocked(value.cards.listDue).mockResolvedValue([
+    queueItem(cardA, { stability: 5, daysAgo: 2, dueAt: "2026-08-10T00:00:00.000Z", goalPriority: 1 }, nowMs),
+    queueItem(cardB, { stability: 5, daysAgo: 2, dueAt: "2026-08-11T00:00:00.000Z", goalPriority: 1 }, nowMs),
+    queueItem(cardC, { stability: 5, daysAgo: 2, dueAt: "2026-08-12T00:00:00.000Z", goalPriority: 1 }, nowMs),
+  ]);
+  vi.mocked(value.management.cardSessions).mockResolvedValue([
+    {
+      ...session,
+      cardIds: [cardC, cardB, cardA],
+      reviewedCardIds: [cardC],
+    },
+  ]);
+
+  await render(value, id);
+  expect(host.querySelector('[data-testid="presented-order"]')?.textContent).toBe(`${cardB},${cardA}`);
 });

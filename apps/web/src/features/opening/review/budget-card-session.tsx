@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { z } from "zod";
 import { learningCardSessionCommandSchema, type GradeReviewResponse, type LearningCardSession, type ReviewQueueItem } from "@aistudy/contracts";
+import { buildReviewQueue } from "@aistudy/domain";
 import { getVerifiedSessionNamespace } from "../../auth/session-identity";
 import { CardReviewView } from "../cards/card-review-view";
 import { createOpeningCardsClient, type OpeningCardsClient } from "../cards/cards-client";
@@ -12,6 +13,24 @@ type Command = z.infer<typeof learningCardSessionCommandSchema>;
 const progressSchema = z.object({ elapsedSeconds: z.number().int().min(0).max(43200), reviewedCardIds: z.array(z.string().uuid()).max(200) });
 function pendingKey(namespace: string) { return `aistudy:card-session-command:${namespace}`; }
 function readPending(namespace: string | null): Command | null { if (!namespace) return null; try { const raw = sessionStorage.getItem(pendingKey(namespace)); const parsed = raw ? learningCardSessionCommandSchema.safeParse(JSON.parse(raw)) : null; return parsed?.success ? parsed.data : null; } catch { return null; } }
+function triageSessionQueue(items: readonly ReviewQueueItem[], now: Date): ReviewQueueItem[] {
+  const triagable: ReviewQueueItem[] = [];
+  const fallback: ReviewQueueItem[] = [];
+  for (const item of items) {
+    if (item.state && typeof item.state.dueAt === "string") {
+      triagable.push({
+        ...item,
+        goalPriority: typeof item.goalPriority === "number" ? item.goalPriority : 0,
+      });
+    } else {
+      fallback.push(item);
+    }
+  }
+  const ordered = triagable.length
+    ? buildReviewQueue(triagable, "free", now, now.toISOString().slice(0, 10))
+    : [];
+  return [...ordered, ...fallback];
+}
 export function BudgetCardSession({ initialActivityId, client: suppliedClient, cardsClient: suppliedCards }: { initialActivityId?: string; client?: Pick<LearningManagementClient, "cardSessions" | "cardCommand">; cardsClient?: OpeningCardsClient }) {
   const client = useMemo(() => suppliedClient ?? createLearningManagementClient(), [suppliedClient]);
   const cards = useMemo(() => suppliedCards ?? createOpeningCardsClient(), [suppliedCards]);
@@ -59,13 +78,45 @@ export function BudgetCardSession({ initialActivityId, client: suppliedClient, c
     catch (reason) { if (reason instanceof LearningManagementRequestError && reason.status >= 400 && reason.status < 500 && reason.status !== 408 && !retryingUnknown) { remember(null); setPending(null); setSession(null); } setError(userFacingMessage(reason, command.action === "stop" ? "停止点保存待确认，请原样重新确认。" : "本次活动创建待确认，请原样重新确认。")); }
     finally { writing.current = false; setBusy(false); }
   }
-  function start() { const budget = Number(minutes); if (!minutes.trim() || !Number.isInteger(budget) || budget < 1 || budget > 120) { setError("本次卡片时长须为 1–120 分钟。"); return; } if (!queue.length) { setError("当前没有可开始的到期卡片。"); return; } void execute({ action: "start", budgetMinutes: budget, cardIds: queue.slice(0, 200).map(item => item.card.id), goalIds: [], clientKey: `card-session:${crypto.randomUUID()}` }); }
+  function start() {
+    const budget = Number(minutes);
+    if (!minutes.trim() || !Number.isInteger(budget) || budget < 1 || budget > 120) {
+      setError("本次卡片时长须为 1–120 分钟。");
+      return;
+    }
+    const triaged = triageSessionQueue(queue, new Date());
+    if (!triaged.length) {
+      setError("当前没有可开始的到期卡片。");
+      return;
+    }
+    void execute({
+      action: "start",
+      budgetMinutes: budget,
+      cardIds: triaged.slice(0, 200).map(item => item.card.id),
+      goalIds: [],
+      clientKey: `card-session:${crypto.randomUUID()}`,
+    });
+  }
   function stop(reason: "pause" | "finished" | "time_used") { if (!session || pending || gradeBusy) return; void execute({ action: "stop", activityId: session.activityId, expectedRevision: session.revision, elapsedSeconds: Math.floor(elapsedRef.current), reviewedCardIds: [...reviewedRef.current], reason }); }
   const timeUsed = Boolean(session && elapsed >= session.budgetMinutes * 60);
   useEffect(() => { if (timeUsed && session?.status === "active" && !gradeBusy && !pending && !busy) stop("time_used");
   // The current exact stop intent is captured once; a pending request blocks repeats.
   }, [timeUsed, session?.status, gradeBusy, pending, busy]);
-  const limitedCards = useMemo<OpeningCardsClient>(() => ({ ...cards, listDue: async () => queue.filter(item => session?.cardIds.includes(item.card.id) && !reviewedRef.current.includes(item.card.id)) }), [cards, queue, session?.activityId, session?.cardIds]);
+  const sessionCardIds = session?.cardIds;
+  const limitedCards = useMemo<OpeningCardsClient>(() => ({
+    ...cards,
+    listDue: async () => {
+      if (!sessionCardIds?.length) return [];
+      const byId = new Map(queue.map(item => [item.card.id, item]));
+      const reviewedSet = new Set(reviewedRef.current);
+      return sessionCardIds
+        .filter(id => !reviewedSet.has(id))
+        .flatMap(id => {
+          const item = byId.get(id);
+          return item ? [item] : [];
+        });
+    },
+  }), [cards, queue, sessionCardIds]);
   const onGraded = useCallback((cardId: string, _receipt: GradeReviewResponse) => {
     // CardReviewView invokes this only after its typed, persisted grade receipt.
     if (!current.current?.cardIds.includes(cardId) || !ownedRef.current()) return;

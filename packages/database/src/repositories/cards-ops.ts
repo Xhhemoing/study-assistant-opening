@@ -132,6 +132,27 @@ export async function listWorkspaceCards(
   return rows.map((row) => mapCard(row as Row));
 }
 
+function deriveCardKnowledgeUnitKey(card: CardRecord): string | undefined {
+  if (!card.syllabusPointId && !card.skillLabel) return undefined;
+  const scope = card.courseId ?? "workspace";
+  const unit = card.syllabusPointId
+    ? `sp:${card.syllabusPointId}`
+    : `sk:${card.skillLabel!.trim().toLowerCase()}`;
+  const dimension = card.originObservationRootId || card.tags.includes("review:question")
+    ? "question"
+    : card.tags.includes("review:concept")
+      ? "concept"
+      : "general";
+  return `${scope}:${unit}:${dimension}`;
+}
+
+function deriveCardFamilyKey(card: CardRecord): string | undefined {
+  if (card.originObservationRootId) return `obs:${card.originObservationRootId}`;
+  if (card.skillLabel) return `${card.courseId ?? "workspace"}:skill:${card.skillLabel.trim().toLowerCase()}`;
+  if (card.syllabusPointId) return `${card.courseId ?? "workspace"}:sp:${card.syllabusPointId}`;
+  return undefined;
+}
+
 export async function listCardQueue(
   sql: Sql,
   input: {
@@ -146,16 +167,29 @@ export async function listCardQueue(
      * (explicit failure, never a silent UTC fallback).
      */
     timeZone?: string | null;
+    /** Optional session card cap applied strictly after global 5-band triage. */
+    maxSessionCards?: number;
   },
 ): Promise<CardQueueEntry[]> {
   const mode = reviewQueueModeSchema.parse(input.mode);
   const now = input.now ?? new Date();
   // Local business day of `now` in the workspace zone — NOT the UTC date (TZ01).
   const today = input.today ?? localDateKeyInZone(now, resolveWorkspaceTimeZone(input.timeZone));
+  // Pure read across all eligible cards (no pre-triage SQL LIMIT and zero writes to cards/review_states/events).
   const rows = await sql`
     SELECT c.*, s.srs_version, s.fsrs_state, s.ease, s.interval_days, s.due_at, s.reps, s.lapses, s.last_grade,
       s.updated_at AS state_updated_at, s.owner_user_id AS state_owner_user_id,
-      COALESCE(MAX(g.priority), 0)::int AS goal_priority
+      COALESCE(MAX(g.priority), 0)::int AS goal_priority,
+      EXISTS (
+        SELECT 1 FROM opening_retest_activities r
+        WHERE r.workspace_id = c.workspace_id
+          AND r.owner_user_id = ${input.ownerUserId}
+          AND c.course_id IS NOT NULL
+          AND c.skill_label IS NOT NULL
+          AND r.course_id = c.course_id
+          AND r.skill_label = c.skill_label
+          AND r.status IN ('proposed', 'accepted', 'in_progress')
+      ) AS delayed_check_covered
     FROM cards c
     INNER JOIN card_review_states s
       ON s.card_id = c.id
@@ -183,10 +217,24 @@ export async function listCardQueue(
       workspace_id: input.workspaceId,
       updated_at: raw.state_updated_at,
     });
-    return { card, state, goalPriority: Number(raw.goal_priority ?? 0) };
+    const knowledgeUnitKey = deriveCardKnowledgeUnitKey(card);
+    const familyKey = deriveCardFamilyKey(card);
+    const delayedCheckCovered = Boolean(raw.delayed_check_covered);
+    return {
+      card,
+      state,
+      goalPriority: Number(raw.goal_priority ?? 0),
+      ...(knowledgeUnitKey ? { knowledgeUnitKey } : {}),
+      ...(familyKey ? { familyKey } : {}),
+      ...(delayedCheckCovered ? { delayedCheckCovered: true } : {}),
+    };
   });
 
-  return buildReviewQueue(items, mode, now, today).map(
+  const queueOptions = input.maxSessionCards !== undefined
+    ? { maxSessionCards: input.maxSessionCards }
+    : undefined;
+
+  return buildReviewQueue(items, mode, now, today, queueOptions).map(
     (item): CardQueueEntry => ({
       card: item.card as CardRecord,
       state: {

@@ -11,7 +11,8 @@ type Row = Record<string, unknown>;
 const object = (value: unknown): Row => value && typeof value === "object" && !Array.isArray(value) ? value as Row : {};
 export function mapLearningCardSession(row: Row): LearningCardSession {
   const goal = object(object(row.goal_json).cardReviewSession), state = object(object(row.checkpoint_json).cardReviewSession);
-  return learningCardSessionSchema.parse({ activityId: row.id, status: row.status, revision: Number(row.path_version), cardIds: goal.cardIds,
+  const cardIds = Array.isArray(goal.orderedCardIds) ? goal.orderedCardIds : goal.cardIds;
+  return learningCardSessionSchema.parse({ activityId: row.id, status: row.status, revision: Number(row.path_version), cardIds,
     reviewedCardIds: state.reviewedCardIds ?? [], budgetMinutes: goal.budgetMinutes, elapsedSeconds: state.elapsedSeconds ?? 0,
     startedAt: goal.startedAt, stoppedAt: state.stoppedAt ?? null, href: `/opening/review?cardSession=${row.id}` });
 }
@@ -33,27 +34,33 @@ export async function writeLearningCardSession(sql: Sql, scope: Scope, raw: unkn
     const [owner] = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR UPDATE`;
     if (!owner) throw learningError("NOT_FOUND", "工作区不存在。");
     if (input.action === "stop") return stop(tx, scope, input, now);
-    const intent = { protocol: "card-review-session-v1", cardIds: [...new Set(input.cardIds)].sort(), goalIds: [...new Set(input.goalIds)].sort(), budgetMinutes: input.budgetMinutes };
+    const orderedCardIds = [...new Set(input.cardIds)];
+    const sortedCardIds = [...orderedCardIds].sort();
+    const sortedGoalIds = [...new Set(input.goalIds)].sort();
+    const intent = { protocol: "card-review-session-v1", cardIds: sortedCardIds, orderedCardIds, goalIds: sortedGoalIds, budgetMinutes: input.budgetMinutes };
+    const legacyIntent = { protocol: "card-review-session-v1", cardIds: sortedCardIds, goalIds: sortedGoalIds, budgetMinutes: input.budgetMinutes };
     const [prior] = await tx`SELECT * FROM opening_teaching_activities WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND client_key=${`card-session:${input.clientKey}`}`;
     if (prior) {
-      if (!isDeepStrictEqual(prior.create_intent, intent)) throw learningError("CONFLICT", "原卡片会话请求内容已变化。");
+      const priorIntent = object(prior.create_intent);
+      const expected = "orderedCardIds" in priorIntent ? intent : legacyIntent;
+      if (!isDeepStrictEqual(prior.create_intent, expected)) throw learningError("CONFLICT", "原卡片会话请求内容已变化。");
       return mapLearningCardSession(prior);
     }
     const active = await tx`SELECT id FROM opening_teaching_activities WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}
       AND create_intent->>'protocol'='card-review-session-v1' AND status='active' LIMIT 1`;
     if (active.length) throw learningError("CONFLICT", "请先恢复或停止当前卡片会话，再开始下一次。");
     const cards = createCardRepository(tx as unknown as Sql);
-    for (const cardId of intent.cardIds) {
+    for (const cardId of sortedCardIds) {
       const card = await cards.getCard({ workspaceId: scope.workspaceId, cardId });
       if (card.ownerUserId !== scope.ownerUserId || card.archived || card.autoPaused || (card.pausedUntil && Date.parse(card.pausedUntil) > now.getTime())) throw learningError("CONFLICT", "所选卡片已暂停、归档或不可读取。");
     }
-    for (const goalId of intent.goalIds) {
+    for (const goalId of sortedGoalIds) {
       const goal = await readLearningGoal(tx, scope, goalId);
       if (!goal) throw learningError("NOT_FOUND", "卡片关联目标不存在。");
       await assertLearningGoalAction(tx, scope, goalId, goal.revision);
     }
     const id = randomUUID(), startedAt = now.toISOString();
-    const goal = { cardReviewSession: { ...intent, startedAt } };
+    const goal = { cardReviewSession: { protocol: intent.protocol, cardIds: orderedCardIds, orderedCardIds, goalIds: sortedGoalIds, budgetMinutes: input.budgetMinutes, startedAt } };
     const checkpoint = { cardReviewSession: { reviewedCardIds: [], elapsedSeconds: 0, stoppedAt: null } };
     await tx`INSERT INTO opening_teaching_activities(id,workspace_id,owner_user_id,status,intent_kind,intent_summary,goal_json,checkpoint_json,client_key,create_intent)
       VALUES(${id},${scope.workspaceId},${scope.ownerUserId},'active','course_continue','有界卡片复习',${tx.json(goal)},${tx.json(checkpoint)},${`card-session:${input.clientKey}`},${tx.json(intent)})`;
