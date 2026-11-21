@@ -1398,6 +1398,177 @@ describe("IeltsDraftCritiqueWorkbench", () => {
       }),
     });
   });
+
+  it("rejects stale foreign-prompt draft2/receipt on prompt switch, preserves revealed scaffolds across same-prompt host refresh, and lets Reset retype a prior independent essay cleanly", async () => {
+    const promptAFixture = IELTS_WRITING_SPEAKING_FIXTURE;
+    const onRevisionEvaluated = vi.fn();
+
+    // [P1-1] Switch fixture to Prompt B while draft2 & draft2Receipt STILL carry Prompt A's promptId & verified receipt.
+    const promptBWithStalePromptADraft2 = {
+      ...promptAFixture,
+      promptId: "ielts-task2-museum-admission-fees",
+      promptTitleZh: "国家博物馆：应对国际游客收取门票，还是面向所有人免费开放？",
+      promptStatementEn:
+        "Should national museums charge entrance fees to international visitors instead of offering free admission to everyone?",
+      draft1: {
+        ...promptAFixture.draft1,
+        draftId: "museum-stale-test-d1",
+        promptId: "ielts-task2-museum-admission-fees",
+      },
+      draft1Receipt: {
+        ...promptAFixture.draft1Receipt,
+        receiptId: "museum-stale-test-d1-receipt",
+        promptId: "ielts-task2-museum-admission-fees",
+      },
+      // Stale Prompt A draft2 & verified draft2Receipt NOT cleared yet by parent host:
+      draft2: promptAFixture.draft2,
+      draft2Receipt: promptAFixture.draft2Receipt,
+    };
+    await act(async () =>
+      root.render(
+        createElement(IeltsDraftCritiqueWorkbench, {
+          fixture: promptAFixture,
+          onRevisionEvaluated,
+        }),
+      ),
+    );
+    expect(host.querySelector('[data-epistemic-badge="rubric_verified_evidence"]')).not.toBeNull();
+
+    await act(async () =>
+      root.render(
+        createElement(IeltsDraftCritiqueWorkbench, {
+          fixture: promptBWithStalePromptADraft2,
+          onRevisionEvaluated,
+        }),
+      ),
+    );
+    expect(host.querySelector('[data-submission-state="unsubmitted"]')).not.toBeNull();
+    expect(host.querySelector('[data-epistemic-badge="rubric_verified_evidence"]')).toBeNull();
+    expect(host.querySelector("[data-epistemic-badge]")).toBeNull();
+    expect(host.querySelector<HTMLTextAreaElement>('[aria-label="二稿改写编辑区"]')?.value).toBe("");
+    expect(host.textContent).not.toContain(
+      promptAFixture.draft2Receipt.criteria.TR.evidenceSpans[0]!.upgradeRewrite,
+    );
+
+    // [P1-2] Same-prompt host refresh BEFORE first submission must NOT erase revealed scaffold latch or sources.
+    const unsubmittedPromptA = {
+      ...promptAFixture,
+      draft2: { ...promptAFixture.draft2, paragraphs: [] as string[], assisted: false },
+    };
+    await act(async () =>
+      root.render(
+        createElement(IeltsDraftCritiqueWorkbench, {
+          key: "same-prompt-refresh-before-submit",
+          fixture: unsubmittedPromptA,
+          onRevisionEvaluated,
+        }),
+      ),
+    );
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-reveal-scaffold]")!.click());
+    expect(host.querySelector('[data-writing-scaffold="true"]')).not.toBeNull();
+    const revealedRewrite =
+      promptAFixture.draft1Receipt.criteria.LR.evidenceSpans[0]!.upgradeRewrite;
+    expect(host.textContent).toContain(revealedRewrite);
+
+    // Host refreshes same-prompt fixture props (e.g. updated draft1Receipt id) before learner submits.
+    await act(async () =>
+      root.render(
+        createElement(IeltsDraftCritiqueWorkbench, {
+          key: "same-prompt-refresh-before-submit",
+          fixture: {
+            ...unsubmittedPromptA,
+            draft1Receipt: {
+              ...unsubmittedPromptA.draft1Receipt,
+              receiptId: "receipt-d1-refreshed",
+            },
+          },
+          onRevisionEvaluated,
+        }),
+      ),
+    );
+    expect(host.querySelector('[data-writing-scaffold="true"]')).not.toBeNull();
+    const afterRefreshCheckbox = host.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    expect(afterRefreshCheckbox.checked).toBe(true);
+    expect(afterRefreshCheckbox.disabled).toBe(true);
+
+    // Even after Reset, pasting the rewrite revealed before the host refresh MUST still evaluate assisted: true!
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-reset-attempt]")!.click());
+    const postRefreshResetTextarea = host.querySelector<HTMLTextAreaElement>('[aria-label="二稿改写编辑区"]')!;
+    const postRefreshResetCheckbox = host.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    await act(async () =>
+      setNativeInputValue(
+        postRefreshResetTextarea,
+        `${revealedRewrite}\n\n${GENUINE_ORIGINAL_WRITING_ESSAY}`,
+      ),
+    );
+    expect(postRefreshResetCheckbox.checked).toBe(true);
+    expect(postRefreshResetCheckbox.disabled).toBe(true);
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-submit-writing]")!.click());
+    expect(onRevisionEvaluated.mock.lastCall?.[0]).toMatchObject({
+      revisedDraft: expect.objectContaining({ assisted: true }),
+      receipt: expect.objectContaining({
+        epistemicStatus: "practice_feedback",
+        masteryQualified: false,
+        countsTowardMastery: false,
+      }),
+    });
+
+    // [P1-3] Restored independent essay -> click Reset -> retype prior independent essay with benign edit -> assisted: false!
+    // While pasting a novel post-submit rewrite after Reset -> assisted: true!
+    await act(async () =>
+      root.render(
+        createElement(IeltsDraftCritiqueWorkbench, {
+          key: "reset-preserves-independent-baseline",
+          fixture: promptAFixture,
+          onRevisionEvaluated,
+        }),
+      ),
+    );
+    expect(host.querySelector('[data-epistemic-badge="rubric_verified_evidence"]')).not.toBeNull();
+    await act(async () => writingButton("打开改写编辑区").click());
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-reset-attempt]")!.click());
+    const retypeTextarea = host.querySelector<HTMLTextAreaElement>('[aria-label="二稿改写编辑区"]')!;
+    const retypeCheckbox = host.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    expect(retypeTextarea.value).toBe("");
+    expect(retypeCheckbox.checked).toBe(false);
+    expect(retypeCheckbox.disabled).toBe(false);
+
+    const benignRetypedIndependent = `${promptAFixture.draft2.paragraphs.join("\n\n")} Consistent regional scheduling also shortens late-evening commute waits.`;
+    await act(async () => setNativeInputValue(retypeTextarea, benignRetypedIndependent));
+    expect(retypeCheckbox.checked).toBe(false);
+    expect(retypeCheckbox.disabled).toBe(false);
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-submit-writing]")!.click());
+    expect(onRevisionEvaluated.mock.lastCall?.[0]).toMatchObject({
+      revisedDraft: expect.objectContaining({ assisted: false }),
+      receipt: expect.objectContaining({
+        epistemicStatus: "rubric_verified_evidence",
+        masteryQualified: true,
+        countsTowardMastery: true,
+      }),
+    });
+
+    // Reset again and paste a novel post-submit rewrite (d2-tr-1) -> MUST evaluate assisted: true!
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-reset-attempt]")!.click());
+    const novelRewriteTextarea = host.querySelector<HTMLTextAreaElement>('[aria-label="二稿改写编辑区"]')!;
+    const novelRewriteCheckbox = host.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    await act(async () =>
+      setNativeInputValue(
+        novelRewriteTextarea,
+        `${benignRetypedIndependent} ${promptAFixture.draft2Receipt.criteria.TR.evidenceSpans[0]!.upgradeRewrite}`,
+      ),
+    );
+    expect(novelRewriteCheckbox.checked).toBe(true);
+    expect(novelRewriteCheckbox.disabled).toBe(true);
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-submit-writing]")!.click());
+    expect(onRevisionEvaluated.mock.lastCall?.[0]).toMatchObject({
+      revisedDraft: expect.objectContaining({ assisted: true }),
+      receipt: expect.objectContaining({
+        epistemicStatus: "practice_feedback",
+        masteryQualified: false,
+        countsTowardMastery: false,
+      }),
+    });
+  });
 });
 
 describe("IeltsSpeakingTransferCard", () => {
@@ -2461,6 +2632,196 @@ describe("IeltsSpeakingTransferCard", () => {
       epistemicStatus: "rubric_verified_evidence",
       masteryQualified: true,
       countsTowardMastery: true,
+    });
+  });
+
+  it("rejects stale foreign-prompt Speaking receipts on seed switch, preserves revealed scaffolds across same-prompt refresh, and lets Reset retype a prior independent speech cleanly", async () => {
+    const fixture = IELTS_WRITING_SPEAKING_FIXTURE;
+    const onEvaluated = vi.fn();
+
+    // [P1-1] Switch seed to Prompt B while initialTranscript, initialDurationSeconds, and initialReceipt still belong to Prompt A.
+    const promptBSeed = {
+      ...fixture.speakingSeed,
+      seedId: "speaking-p3-museum-fees",
+      sourcePromptId: "ielts-task2-museum-admission-fees",
+      topic: "museum entrance fees",
+    };
+    await act(async () =>
+      root.render(
+        createElement(IeltsSpeakingTransferCard, {
+          seed: fixture.speakingSeed,
+          initialTranscript: fixture.initialSpeakingTranscript,
+          initialDurationSeconds: fixture.initialSpeakingDurationSeconds,
+          initialReceipt: fixture.initialSpeakingReceipt,
+          onEvaluated,
+        }),
+      ),
+    );
+    expect(host.querySelector('[data-speaking-epistemic="rubric_verified_evidence"]')).not.toBeNull();
+
+    await act(async () =>
+      root.render(
+        createElement(IeltsSpeakingTransferCard, {
+          seed: promptBSeed,
+          initialTranscript: fixture.initialSpeakingTranscript,
+          initialDurationSeconds: fixture.initialSpeakingDurationSeconds,
+          initialReceipt: fixture.initialSpeakingReceipt,
+          onEvaluated,
+        }),
+      ),
+    );
+    expect(host.querySelector("[data-speaking-epistemic]")).toBeNull();
+    expect(host.querySelector<HTMLTextAreaElement>('[aria-label="口语复述记录输入框"]')?.value).toBe("");
+    expect(host.querySelector<HTMLInputElement>('[aria-label="口语作答时长秒数"]')?.value).toBe("");
+
+    // [P1-2] Same-prompt seed refresh (e.g. updated sourceDraftId) before first submission preserves revealed scaffold latch & sources.
+    const customSeed = {
+      ...buildSpeakingPart3Seed(
+        {
+          promptId: fixture.promptId,
+          topic: "urban public transport funding",
+          coreClaim:
+            "Municipal councils should prioritise electrified urban rail networks over continual motorway expansion for sustainable commuter capacity.",
+          supportingReason:
+            "High-capacity trains alleviate chronic congestion and reduce per-capita emissions without carving extra highway lanes through residential blocks.",
+          counterPerspective:
+            "Admittedly, distant suburban households still rely on feeder buses to connect comfortably with major transit corridors.",
+          activeCollocations: fixture.coreArgument.activeCollocations,
+        },
+        fixture.draft2.draftId,
+      ),
+      seedId: "speaking-same-prompt-refresh-seed",
+      requiresVerifiedReceipt: true,
+      verifiedWritingReceipt: fixture.draft2Receipt,
+    };
+    await act(async () =>
+      root.render(
+        createElement(IeltsSpeakingTransferCard, {
+          key: "speaking-same-prompt-refresh",
+          seed: customSeed,
+          onEvaluated,
+        }),
+      ),
+    );
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-reveal-scaffold]")!.click());
+    expect(host.querySelector('[data-speaking-scaffold="true"]')).not.toBeNull();
+
+    // Refresh same-prompt seed prop (sourceDraftId updated before submission).
+    await act(async () =>
+      root.render(
+        createElement(IeltsSpeakingTransferCard, {
+          key: "speaking-same-prompt-refresh",
+          seed: {
+            ...customSeed,
+            sourceDraftId: `${fixture.draft2.draftId}-refreshed`,
+            verifiedWritingReceipt: {
+              ...fixture.draft2Receipt,
+              draftId: `${fixture.draft2.draftId}-refreshed`,
+            },
+          },
+          onEvaluated,
+        }),
+      ),
+    );
+    expect(host.querySelector('[data-speaking-scaffold="true"]')).not.toBeNull();
+    const refreshedCheckbox = host.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    expect(refreshedCheckbox.checked).toBe(true);
+    expect(refreshedCheckbox.disabled).toBe(true);
+
+    // Even after Reset, pasting the cue revealed before the refresh still locks assistance!
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-reset-attempt]")!.click());
+    const refreshedTextarea = host.querySelector<HTMLTextAreaElement>('[aria-label="口语复述记录输入框"]')!;
+    const refreshedDuration = host.querySelector<HTMLInputElement>('[aria-label="口语作答时长秒数"]')!;
+    await act(async () => {
+      setNativeInputValue(
+        refreshedTextarea,
+        "Municipal councils should prioritise electrified urban rail networks over continual motorway expansion for sustainable commuter capacity. " +
+          "Planners should also fund feeder buses for outer suburbs.",
+      );
+      setNativeInputValue(refreshedDuration, "75");
+    });
+    expect(refreshedCheckbox.checked).toBe(true);
+    expect(refreshedCheckbox.disabled).toBe(true);
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-speaking-evaluate]")!.click());
+    expect(onEvaluated.mock.lastCall?.[0]).toMatchObject({
+      assisted: true,
+      epistemicStatus: "practice_feedback",
+      masteryQualified: false,
+      countsTowardMastery: false,
+    });
+
+    // [P1-3] Independent Speaking attempt overlapping post-submit rewrite phrasing -> Reset -> retype with benign edit -> assisted: false!
+    // While pasting the novel post-submit quote rewrite after Reset -> assisted: true!
+    const independentSpeechNearRewrite =
+      "Personally, I think the core tension is that voters see highway paving right away, whereas urban rail takes years to finish. " +
+      "That said, backing urban trains helps cities alleviate chronic congestion and lower per-capita emissions across crowded residential districts. " +
+      "Admittedly, households in outer towns still rely on personal vehicles where stations sit miles away, so local planners should pair core lines with frequent feeder buses. " +
+      "Overall, cities can only protect long-term fiscal viability when councils fund dependable rail corridors instead of endless asphalt projects that trigger induced traffic demand.";
+    await act(async () =>
+      root.render(
+        createElement(IeltsSpeakingTransferCard, {
+          key: "speaking-reset-independent-baseline",
+          seed: customSeed,
+          onEvaluated,
+        }),
+      ),
+    );
+    const spTextarea = host.querySelector<HTMLTextAreaElement>('[aria-label="口语复述记录输入框"]')!;
+    const spDuration = host.querySelector<HTMLInputElement>('[aria-label="口语作答时长秒数"]')!;
+    const spCheckbox = host.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    await act(async () => {
+      setNativeInputValue(spTextarea, independentSpeechNearRewrite);
+      setNativeInputValue(spDuration, "76");
+    });
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-speaking-evaluate]")!.click());
+    const attempt1Receipt = onEvaluated.mock.lastCall?.[0];
+    expect(attempt1Receipt).toMatchObject({
+      assisted: false,
+      epistemicStatus: "rubric_verified_evidence",
+      masteryQualified: true,
+      countsTowardMastery: true,
+    });
+    const postSubmitRewrite = attempt1Receipt?.evidenceQuotes[0]?.upgradeRewrite;
+    expect(postSubmitRewrite).toContain("drivers feel highway widening right away");
+
+    // Reset and retype the learner's own independent speech with a benign edit -> MUST stay assisted: false!
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-reset-attempt]")!.click());
+    expect(spCheckbox.checked).toBe(false);
+    expect(spCheckbox.disabled).toBe(false);
+    await act(async () => {
+      setNativeInputValue(
+        spTextarea,
+        `${independentSpeechNearRewrite} Better evening bus connections also help shift workers.`,
+      );
+      setNativeInputValue(spDuration, "78");
+    });
+    expect(spCheckbox.checked).toBe(false);
+    expect(spCheckbox.disabled).toBe(false);
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-speaking-evaluate]")!.click());
+    expect(onEvaluated.mock.lastCall?.[0]).toMatchObject({
+      assisted: false,
+      epistemicStatus: "rubric_verified_evidence",
+      masteryQualified: true,
+      countsTowardMastery: true,
+    });
+
+    // Reset again and paste the novel post-submit quote rewrite -> MUST evaluate assisted: true!
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-reset-attempt]")!.click());
+    await act(async () => {
+      setNativeInputValue(
+        spTextarea,
+        `${postSubmitRewrite} That said, backing urban trains helps cities alleviate chronic congestion and lower per-capita emissions across dense districts.`,
+      );
+      setNativeInputValue(spDuration, "76");
+    });
+    expect(spCheckbox.checked).toBe(true);
+    expect(spCheckbox.disabled).toBe(true);
+    await act(async () => host.querySelector<HTMLButtonElement>("[data-speaking-evaluate]")!.click());
+    expect(onEvaluated.mock.lastCall?.[0]).toMatchObject({
+      assisted: true,
+      epistemicStatus: "practice_feedback",
+      masteryQualified: false,
+      countsTowardMastery: false,
     });
   });
 });

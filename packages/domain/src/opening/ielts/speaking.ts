@@ -697,6 +697,7 @@ export function evaluateSpeakingRetelling(
     receiptId: `speaking-receipt-${input.seed.seedId}`,
     cartridgeId: IELTS_CARTRIDGE_ID,
     seedId: input.seed.seedId,
+    sourcePromptId: input.seed.sourcePromptId,
     sourceTranscript: rawTranscript,
     assisted: input.assisted,
     evaluationContext,

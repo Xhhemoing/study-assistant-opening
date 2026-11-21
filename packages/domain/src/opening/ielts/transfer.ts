@@ -224,9 +224,15 @@ function assessPromptTopicRelevance(
       totalSentenceWords += sentenceWords;
       const sStems = new Set<string>();
       collectTopicStems(sentence.text, STOP_WORDS, 3, sStems);
-      if ([...spec.keywords].some((kw) => sStems.has(kw))) {
+      let sentenceTopicHits = 0;
+      for (const kw of spec.keywords) {
+        if (sStems.has(kw)) sentenceTopicHits += 1;
+      }
+      if (sentenceTopicHits > 0) {
         sentencesWithHit += 1;
-        wordsInOnTopicSentences += sentenceWords;
+        // Cap credited on-topic words per hitting sentence so stuffing keywords into one
+        // run-on sentence cannot inflate on-topic word share across unrelated filler.
+        wordsInOnTopicSentences += Math.min(sentenceWords, sentenceTopicHits * 12 + 6);
       }
     }
   }
@@ -234,6 +240,11 @@ function assessPromptTopicRelevance(
   const sentenceHitRatio = totalSentences > 0 ? sentencesWithHit / totalSentences : 0;
   const onTopicWordRatio =
     totalSentenceWords > 0 ? wordsInOnTopicSentences / totalSentenceWords : 0;
+  const meetsMultiSentenceRatio =
+    totalSentences < 2 ||
+    (totalSentences === 2
+      ? sentencesWithHit === 2
+      : sentencesWithHit >= 2 && sentenceHitRatio >= 0.4);
 
   if (revisedWordCount < 160) {
     const minShortMatches = keywordCount >= 2 ? 2 : 1;
@@ -241,10 +252,9 @@ function assessPromptTopicRelevance(
       return { isOffTopic: true, isTangential: false, keywordCount, overlapCount };
     }
     const isSingleSentenceOrLowShareStuffing =
-      (totalSentences >= 3 && (sentencesWithHit < 2 || sentenceHitRatio < 0.35)) ||
       (revisedWordCount >= 60 &&
-        (onTopicWordRatio < 0.35 ||
-          (totalSentences >= 2 && sentencesWithHit < 2 && overlapCount < 3)));
+        (sentencesWithHit < 2 || !meetsMultiSentenceRatio || onTopicWordRatio < 0.35)) ||
+      (totalSentences >= 3 && (sentencesWithHit < 2 || sentenceHitRatio < 0.4));
     if (isSingleSentenceOrLowShareStuffing) {
       return { isOffTopic: true, isTangential: false, keywordCount, overlapCount };
     }
@@ -268,8 +278,7 @@ function assessPromptTopicRelevance(
   const hasSufficientSpread =
     nonEmptyParagraphs >= 2 ? paragraphsWithHit >= 2 : sentencesWithHit >= 2;
   const hasSufficientSentenceShare =
-    totalSentences < 3 ||
-    (sentencesWithHit >= 2 && sentenceHitRatio >= 0.35 && onTopicWordRatio >= 0.3);
+    sentencesWithHit >= 2 && meetsMultiSentenceRatio && onTopicWordRatio >= 0.35;
 
   if (overlapCount < requiredMatches || !hasSufficientSpread || !hasSufficientSentenceShare) {
     return { isOffTopic: true, isTangential: false, keywordCount, overlapCount };

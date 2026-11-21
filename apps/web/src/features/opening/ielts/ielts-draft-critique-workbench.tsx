@@ -115,10 +115,16 @@ function collectVisibleWritingGuidanceSources(
   receipt: IeltsRubricReceipt,
 ): string[] {
   const sources: string[] = [];
-  const d1 = draftEditorText(fixture.draft1).trim();
-  if (d1) sources.push(d1);
-  sources.push(...collectReceiptUpgradeRewrites(fixture.draft1Receipt));
-  sources.push(...collectReceiptUpgradeRewrites(receipt));
+  if (fixture.draft1.promptId === fixture.promptId) {
+    const d1 = draftEditorText(fixture.draft1).trim();
+    if (d1) sources.push(d1);
+  }
+  if (fixture.draft1Receipt.promptId === fixture.promptId) {
+    sources.push(...collectReceiptUpgradeRewrites(fixture.draft1Receipt));
+  }
+  if (receipt.promptId === fixture.promptId) {
+    sources.push(...collectReceiptUpgradeRewrites(receipt));
+  }
   return [...new Set(sources)];
 }
 
@@ -163,8 +169,14 @@ function WritingWorkbenchPromptSession({
   const hasExternalFixture = providedFixture !== undefined;
   const fixture = providedFixture ?? IELTS_WRITING_SPEAKING_FIXTURE;
   const isDemoPreview = demoFixtureMode === true;
+  const hasPromptMatchingDraft2 =
+    fixture.draft2.promptId === fixture.promptId &&
+    fixture.draft2Receipt.promptId === fixture.promptId &&
+    (fixture.draft2Receipt.sourceDraft === undefined ||
+      fixture.draft2Receipt.sourceDraft.promptId === fixture.promptId) &&
+    countDraftWords(fixture.draft2.paragraphs) > 0;
   const hasPreloadedSubmission =
-    isDemoPreview || (hasExternalFixture && countDraftWords(fixture.draft2.paragraphs) > 0);
+    isDemoPreview || (hasExternalFixture && hasPromptMatchingDraft2);
 
   const attemptKey = JSON.stringify(
     hasPreloadedSubmission
@@ -251,6 +263,9 @@ function WritingWorkbenchPromptSession({
   const [localAssistedSources, setLocalAssistedSources] = useState<readonly string[]>(
     () => initialAssistedSources,
   );
+  // Monotonic per-prompt history of explicitly revealed scaffold/exemplar guidance.
+  // Never erased by same-prompt host prop refreshes before or after submission.
+  const [revealedScaffoldSources, setRevealedScaffoldSources] = useState<readonly string[]>(() => []);
   // Monotonic per-prompt history of visible exemplar/critique guidance.
   // Seeded immediately from any initial/restored visible receipt on mount so copying a displayed
   // rewrite or baseline exemplar before reset is always detected as assisted.
@@ -276,41 +291,62 @@ function WritingWorkbenchPromptSession({
         hasExternalFixture &&
         (fixture.draft2.draftId === evaluation.draft2.draftId ||
           fixture.draft2Receipt.receiptId === evaluation.draft2Receipt.receiptId);
-      const nextAssistedSources = isOwnWriteBack
-        ? [...new Set([...localAssistedSources, ...authoritativeAssistedSources])]
+      const isNewPreloadedAttempt =
+        hasPreloadedSubmission &&
+        fixture.draft2.draftId !== evaluation.draft2.draftId &&
+        !isOwnWriteBack;
+      const preserveActiveSession = samePrompt && !isNewPreloadedAttempt;
+      const nextHintsRevealed = preserveActiveSession ? hintsRevealed : false;
+      const nextAssistedSources = preserveActiveSession
+        ? [...new Set([...localAssistedSources, ...authoritativeAssistedSources, ...initialAssistedSources])]
         : initialAssistedSources;
+      const nextRevealedSources = samePrompt
+        ? [
+            ...new Set([
+              ...revealedScaffoldSources,
+              ...(nextHintsRevealed ? collectFixtureSampleSources(fixture) : []),
+            ]),
+          ]
+        : [];
       const nextExposedSources = samePrompt
         ? [...new Set([...exposedGuidanceSources, ...initialRestoredGuidanceSources])]
         : initialRestoredGuidanceSources;
       const nextFingerprints = collectAssistedFingerprints(nextAssistedSources);
-      const nextLatched = isOwnWriteBack
+      const nextLatched = preserveActiveSession
         ? attemptAssistedLatched || initiallyLatched
         : initiallyLatched;
-      const nextBaselines = isOwnWriteBack
+      const nextBaselines = samePrompt
         ? hasPreloadedSubmission && !nextLatched && authoritativeDraft2Text.trim().length > 0
           ? [...new Set([...unassistedBaselineTexts, authoritativeDraft2Text])]
           : unassistedBaselineTexts
         : hasPreloadedSubmission && !nextLatched && authoritativeDraft2Text.trim().length > 0
           ? [authoritativeDraft2Text]
           : [];
-      const nextExposedMatcher = buildExposedGuidanceMatcher(nextExposedSources, nextBaselines);
+      const nextExposedMatcher = buildExposedGuidanceMatcher(
+        [...new Set([...nextExposedSources, ...nextRevealedSources])],
+        nextBaselines,
+      );
+      const nextComposerText = hasPreloadedSubmission
+        ? draftEditorText(fixture.draft2)
+        : preserveActiveSession && composerText.trim().length > 0
+          ? composerText
+          : (initialDraft ?? "");
       setLocalAssistedSources(nextAssistedSources);
+      setRevealedScaffoldSources(nextRevealedSources);
       setExposedGuidanceSources(nextExposedSources);
       setUnassistedBaselineTexts(nextBaselines);
       setAttemptAssistedLatched(nextLatched);
+      setHintsRevealed(nextHintsRevealed);
       setHasSubmitted(hasPreloadedSubmission);
-      if (!isOwnWriteBack) {
-        setHintsRevealed(false);
+      if (!preserveActiveSession) {
         setResetPastAuthorityFingerprint(null);
       }
-      setComposerText(
-        hasPreloadedSubmission ? draftEditorText(fixture.draft2) : (initialDraft ?? ""),
-      );
+      setComposerText(nextComposerText);
       setComposerAssisted(
         nextLatched ||
-          (hasPreloadedSubmission &&
-            (matchesAssistedFingerprint(authoritativeDraft2Text, nextFingerprints) ||
-              matchesExposedGuidance(authoritativeDraft2Text, nextExposedMatcher))),
+          (preserveActiveSession && composerAssisted) ||
+          matchesAssistedFingerprint(nextComposerText, nextFingerprints) ||
+          matchesExposedGuidance(nextComposerText, nextExposedMatcher),
       );
       setViewMode(initialView);
       setCriterionFilter("ALL");
@@ -363,9 +399,13 @@ function WritingWorkbenchPromptSession({
       ]),
     [localAssistedSources, authoritativeAssistedSources, hasSubmitted, draft2, draft2Receipt],
   );
+  const allExposedGuidanceSources = useMemo(
+    () => [...new Set([...exposedGuidanceSources, ...revealedScaffoldSources])],
+    [exposedGuidanceSources, revealedScaffoldSources],
+  );
   const exposedGuidanceMatcher = useMemo(
-    () => buildExposedGuidanceMatcher(exposedGuidanceSources, unassistedBaselineTexts),
-    [exposedGuidanceSources, unassistedBaselineTexts],
+    () => buildExposedGuidanceMatcher(allExposedGuidanceSources, unassistedBaselineTexts),
+    [allExposedGuidanceSources, unassistedBaselineTexts],
   );
   const draft2EffectivelyAssisted =
     attemptAssistedLatched ||
@@ -420,6 +460,8 @@ function WritingWorkbenchPromptSession({
     activeReceipt.masteryQualified &&
     activeReceipt.countsTowardMastery &&
     !activeDraftAssisted &&
+    activeDraft.promptId === fixture.promptId &&
+    activeReceipt.promptId === fixture.promptId &&
     activeReceipt.promptId === activeDraft.promptId &&
     activeReceipt.draftId === activeDraft.draftId &&
     activeReceipt.draftVersion === activeDraft.version &&
@@ -487,29 +529,29 @@ function WritingWorkbenchPromptSession({
   }
 
   function handleRevealScaffold() {
-    const sampleSources = [
-      ...collectFixtureSampleSources(fixture),
-      ...exposedGuidanceSources,
-      ...currentlyVisibleGuidance,
-    ];
+    const sampleSources = collectFixtureSampleSources(fixture);
     const currentTrimmed = composerText.trim();
-    if (currentTrimmed) sampleSources.push(currentTrimmed);
     setHintsRevealed(true);
     setAttemptAssistedLatched(true);
     setComposerAssisted(true);
-    setUnassistedBaselineTexts([]);
     if (sampleSources.length > 0) {
-      setLocalAssistedSources((current) => [...new Set([...current, ...sampleSources])]);
+      setRevealedScaffoldSources((current) => [...new Set([...current, ...sampleSources])]);
+    }
+    if (currentlyVisibleGuidance.length > 0) {
+      setExposedGuidanceSources((current) => [...new Set([...current, ...currentlyVisibleGuidance])]);
+    }
+    if (currentTrimmed) {
+      setLocalAssistedSources((current) => [...new Set([...current, currentTrimmed])]);
     }
   }
 
   function handleAnalyzeRevision() {
     const paragraphs = composerText.split(PARAGRAPH_BREAK);
     const mergedExposedSources = [
-      ...new Set([...exposedGuidanceSources, ...currentlyVisibleGuidance]),
+      ...new Set([...allExposedGuidanceSources, ...currentlyVisibleGuidance]),
     ];
     const activeExposedMatcher =
-      mergedExposedSources.length > exposedGuidanceSources.length
+      mergedExposedSources.length > allExposedGuidanceSources.length
         ? buildExposedGuidanceMatcher(mergedExposedSources, unassistedBaselineTexts)
         : exposedGuidanceMatcher;
     const nextAssisted =
@@ -518,10 +560,16 @@ function WritingWorkbenchPromptSession({
       attemptAssistedLatched ||
       matchesAssistedFingerprint(composerText, stickyAssistedFingerprints) ||
       matchesExposedGuidance(composerText, activeExposedMatcher);
+    const promptBoundDraftId =
+      fixture.draft2.promptId === fixture.promptId
+        ? fixture.draft2.draftId
+        : `${fixture.promptId}-draft-2`;
     const baseDraft: IeltsEssayDraft = hasSubmitted
       ? draft2
       : {
           ...fixture.draft2,
+          promptId: fixture.promptId,
+          draftId: promptBoundDraftId,
           version: Math.max(2, fixture.draft1.version + 1),
           basedOnVersion: fixture.draft1.version,
           paragraphs: [],
@@ -544,7 +592,8 @@ function WritingWorkbenchPromptSession({
     const nextCount = revisionCount + 1;
     const updatedDraft: IeltsEssayDraft = {
       ...composerDraft,
-      draftId: `${fixture.draft2.draftId}-rev-${nextCount}`,
+      promptId: fixture.promptId,
+      draftId: `${promptBoundDraftId}-rev-${nextCount}`,
       version: Math.max(2, baseDraft.version),
       createdAt: new Date().toISOString(),
     };
@@ -577,7 +626,7 @@ function WritingWorkbenchPromptSession({
     // so any subsequent edit or reset retry that copies them is marked assisted.
     const newlyVisibleGuidance = collectVisibleWritingGuidanceSources(fixture, evaluated.receipt);
     setExposedGuidanceSources((current) => [
-      ...new Set([...current, ...mergedExposedSources, ...newlyVisibleGuidance]),
+      ...new Set([...current, ...currentlyVisibleGuidance, ...newlyVisibleGuidance]),
     ]);
     if (!updatedDraft.assisted && composerText.trim().length > 0) {
       setUnassistedBaselineTexts((current) =>
@@ -618,21 +667,25 @@ function WritingWorkbenchPromptSession({
       setSelectedSpanId(null);
       return;
     }
-    const retainedSources: string[] = [
-      ...exposedGuidanceSources,
-      ...currentlyVisibleGuidance,
-    ];
-    if (hintsRevealed || attemptAssistedLatched || effectiveComposerAssisted) {
-      const currentTrimmed = composerText.trim();
-      if (currentTrimmed) retainedSources.push(currentTrimmed);
+    // Preserve unassistedBaselineTexts and keep exposed/revealed guidance in their baseline-aware
+    // lists so retyping an earlier independent essay with benign edits is never falsely marked assisted,
+    // while copying any novel exposed rewrite, baseline exemplar, revealed scaffold, or prior assisted
+    // draft still locks assistance.
+    if (currentlyVisibleGuidance.length > 0) {
+      setExposedGuidanceSources((current) => [...new Set([...current, ...currentlyVisibleGuidance])]);
     }
     if (hintsRevealed) {
-      retainedSources.push(...collectFixtureSampleSources(fixture));
+      const sampleSources = collectFixtureSampleSources(fixture);
+      if (sampleSources.length > 0) {
+        setRevealedScaffoldSources((current) => [...new Set([...current, ...sampleSources])]);
+      }
     }
-    if (retainedSources.length > 0) {
-      setLocalAssistedSources((current) => [...new Set([...current, ...retainedSources])]);
+    if (hintsRevealed || attemptAssistedLatched || effectiveComposerAssisted) {
+      const currentTrimmed = composerText.trim();
+      if (currentTrimmed) {
+        setLocalAssistedSources((current) => [...new Set([...current, currentTrimmed])]);
+      }
     }
-    setUnassistedBaselineTexts([]);
     setHasSubmitted(false);
     setHintsRevealed(false);
     setAttemptAssistedLatched(false);
@@ -1072,13 +1125,15 @@ function WritingWorkbenchPromptSession({
                       const nextValue = event.target.value;
                       const mergedExposedSources =
                         currentlyVisibleGuidance.length > 0
-                          ? [...new Set([...exposedGuidanceSources, ...currentlyVisibleGuidance])]
-                          : exposedGuidanceSources;
-                      if (mergedExposedSources.length > exposedGuidanceSources.length) {
-                        setExposedGuidanceSources(mergedExposedSources);
+                          ? [...new Set([...allExposedGuidanceSources, ...currentlyVisibleGuidance])]
+                          : allExposedGuidanceSources;
+                      if (currentlyVisibleGuidance.some((s) => !exposedGuidanceSources.includes(s))) {
+                        setExposedGuidanceSources((current) => [
+                          ...new Set([...current, ...currentlyVisibleGuidance]),
+                        ]);
                       }
                       const activeExposedMatcher =
-                        mergedExposedSources.length > exposedGuidanceSources.length
+                        mergedExposedSources.length > allExposedGuidanceSources.length
                           ? buildExposedGuidanceMatcher(
                               mergedExposedSources,
                               unassistedBaselineTexts,

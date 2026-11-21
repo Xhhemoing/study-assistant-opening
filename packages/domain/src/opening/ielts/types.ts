@@ -285,6 +285,7 @@ export type IeltsSpeakingFeedbackReceipt = {
   readonly receiptId: string;
   readonly cartridgeId: typeof IELTS_CARTRIDGE_ID;
   readonly seedId: string;
+  readonly sourcePromptId?: string;
   readonly sourceTranscript: string;
   readonly assisted: boolean;
   readonly evaluationContext?: {

@@ -2270,4 +2270,62 @@ describe("Writing topic-relevance band grounding", () => {
     expect(shortOnTopicRailResult.receipt.criteria.TR.band).toBeGreaterThanOrEqual(5.5);
     expect(shortOnTopicRailResult.receipt.overallBand).toBeGreaterThanOrEqual(5.5);
   });
+
+  it("caps 2-sentence 90-word drafts when sentence 1 stuffs 3 prompt terms and sentence 2 is completely off-topic", () => {
+    const railVsRoadPrompt =
+      "Some people believe that governments should invest public funds primarily in urban rail networks rather than expanding road systems for private vehicles. To what extent do you agree or disagree?";
+
+    // 2-sentence ~90-word draft: sentence 1 (~35w) stuffs 3 prompt terms ("urban", "rail", "road") amidst filler,
+    // while sentence 2 (~55w) is completely unrelated off-topic prose (~61% off-topic).
+    const twoSentenceStuffedDraft: IeltsEssayDraft = {
+      ...DRAFT_2,
+      draftId: "draft-2-two-sentence-90w-stuffing",
+      paragraphs: [
+        "Yesterday morning I walked past an urban rail depot near the coastal road before buying artisanal sourdough rye loaves, roasted chestnuts, beeswax candles, ceramic bowls, and fresh rosemary sprigs from our quiet weekend market.",
+        "Inside the botanical conservatory across the hillside, patient curators carefully regulate warm glasshouse humidity, filtered morning sunlight, mineral misting schedules, pine bark drainage beds, and delicate root ventilation so rare alpine orchids survive harsh winter frost cycles while visiting illustrators record petal pigmentation, nocturnal moth pollination timing, nectar chemistry, and seasonal germination records in archival notebooks.",
+      ],
+    };
+    const words = countDraftWords(twoSentenceStuffedDraft.paragraphs);
+    expect(words).toBeGreaterThanOrEqual(85);
+    expect(words).toBeLessThan(160);
+
+    const evaluated = evaluateNonEmptyRevision({
+      baselineDraft: DRAFT_1,
+      revisedDraft: twoSentenceStuffedDraft,
+      targets: TARGETS,
+      promptStatement: railVsRoadPrompt,
+      receiptId: "r-two-sentence-90w-stuffing",
+    });
+    expect(evaluated.transferReport.summary.transferredCount).toBe(0);
+    expect(evaluated.receipt.criteria.TR.band).toBeLessThanOrEqual(4);
+    expect(evaluated.receipt.criteria.CC.band).toBeLessThanOrEqual(4.5);
+    expect(evaluated.receipt.overallBand).toBeLessThanOrEqual(4.5);
+    expect(evaluated.receipt.masteryQualified).toBe(false);
+    expect(evaluated.receipt.countsTowardMastery).toBe(false);
+    expect(evaluated.receipt.epistemicStatus).toBe("practice_feedback");
+
+    // 1-sentence ~85-word run-on draft stuffing 3 prompt terms into one opening clause amidst unrelated filler also fails.
+    const singleRunOnStuffedDraft: IeltsEssayDraft = {
+      ...DRAFT_2,
+      draftId: "draft-2-single-runon-85w-stuffing",
+      paragraphs: [
+        "Yesterday morning I walked past an urban rail depot beside the road before spending hours inside a quiet baroque luthier workshop where dedicated apprentices sharpen curved gouges, match flamed maple grain patterns, carve seasoned spruce soundboards, glue decorative rose inlays, layer translucent amber varnish over wooden soundboxes, fit ebony tuning pegs, inspect acoustic resonance during chamber recitals, and preserve handmade string craftsmanship for curious collectors who value patient tactile discipline over modern mass production.",
+      ],
+    };
+    const runOnWords = countDraftWords(singleRunOnStuffedDraft.paragraphs);
+    expect(runOnWords).toBeGreaterThanOrEqual(60);
+    expect(runOnWords).toBeLessThan(160);
+
+    const runOnResult = evaluateNonEmptyRevision({
+      baselineDraft: DRAFT_1,
+      revisedDraft: singleRunOnStuffedDraft,
+      targets: TARGETS,
+      promptStatement: railVsRoadPrompt,
+      receiptId: "r-single-runon-85w-stuffing",
+    });
+    expect(runOnResult.transferReport.summary.transferredCount).toBe(0);
+    expect(runOnResult.receipt.criteria.TR.band).toBeLessThanOrEqual(4);
+    expect(runOnResult.receipt.overallBand).toBeLessThanOrEqual(4.5);
+    expect(runOnResult.receipt.masteryQualified).toBe(false);
+  });
 });

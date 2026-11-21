@@ -73,13 +73,23 @@ export function IeltsSpeakingTransferCard({
     initialTranscript === undefined &&
     initialDurationSeconds === undefined &&
     initialReceipt === undefined;
+  const candidateReceipt = useDemoFixture ? demo.initialSpeakingReceipt : initialReceipt;
+  const receiptBelongsToSeed =
+    candidateReceipt !== undefined &&
+    candidateReceipt.seedId === seed.seedId &&
+    (candidateReceipt.sourcePromptId === undefined ||
+      candidateReceipt.sourcePromptId === seed.sourcePromptId);
+  const hasForeignReceipt = candidateReceipt !== undefined && !receiptBelongsToSeed;
   const startingTranscript = useDemoFixture
     ? demo.initialSpeakingTranscript
-    : (initialTranscript ?? "");
+    : hasForeignReceipt
+      ? ""
+      : (initialTranscript ?? "");
   const startingDuration = useDemoFixture
     ? demo.initialSpeakingDurationSeconds
-    : initialDurationSeconds;
-  const candidateReceipt = useDemoFixture ? demo.initialSpeakingReceipt : initialReceipt;
+    : hasForeignReceipt
+      ? undefined
+      : initialDurationSeconds;
   const scaffoldSampleTranscript =
     sampleTranscript ?? (providedSeed === undefined ? demo.initialSpeakingTranscript : undefined);
   const seedFixtureSamplesUpfront =
@@ -91,8 +101,8 @@ export function IeltsSpeakingTransferCard({
     seed.seedId,
     seed.cartridgeId,
     seed.sourcePromptId,
-    seed.sourceDraftId,
   ]);
+  const matchedSeedReceipt = receiptBelongsToSeed ? candidateReceipt : null;
   return (
     <SpeakingAttempt
       key={attemptKey}
@@ -101,11 +111,15 @@ export function IeltsSpeakingTransferCard({
       scaffoldSampleTranscript={scaffoldSampleTranscript}
       seedFixtureSamplesUpfront={seedFixtureSamplesUpfront}
       startingTranscript={startingTranscript}
-      seedReceipt={candidateReceipt?.seedId === seed.seedId ? candidateReceipt : null}
+      seedReceipt={matchedSeedReceipt}
       external={{
-        transcript: useDemoFixture ? demo.initialSpeakingTranscript : initialTranscript,
+        transcript: useDemoFixture
+          ? demo.initialSpeakingTranscript
+          : hasForeignReceipt
+            ? undefined
+            : initialTranscript,
         durationSeconds: startingDuration,
-        receiptSnapshot: candidateReceipt && snapshotReceipt(candidateReceipt),
+        receiptSnapshot: matchedSeedReceipt ? snapshotReceipt(matchedSeedReceipt) : undefined,
       }}
       onEvaluated={onEvaluated}
     />
@@ -148,6 +162,7 @@ function isSpeakingReceiptVisibleForAttempt(
   const evaluatedContext = receipt.evaluationContext;
   return (
     receipt.seedId === seed.seedId &&
+    (receipt.sourcePromptId === undefined || receipt.sourcePromptId === seed.sourcePromptId) &&
     receipt.sourceTranscript === transcript &&
     receipt.durationSeconds === durationSeconds &&
     receipt.assisted === assisted &&
@@ -249,6 +264,8 @@ function SpeakingAttempt({
       : null;
   })();
 
+  // Append-only history of explicitly revealed scaffolds & cues shown on screen for this seed.
+  const [revealedScaffoldSources, setRevealedScaffoldSources] = useState<readonly string[]>(() => []);
   // Append-only history of cues and quote rewrites actually shown on screen for this seed.
   // Seeded immediately from any initial/restored visible receipt so editing duration or transcript
   // (which hides the receipt) can never erase previously displayed guidance.
@@ -260,6 +277,10 @@ function SpeakingAttempt({
       ? [startingTranscript]
       : [],
   );
+
+  if (hintsRevealed && scaffoldSources.some((src) => !revealedScaffoldSources.includes(src))) {
+    setRevealedScaffoldSources([...new Set([...revealedScaffoldSources, ...scaffoldSources])]);
+  }
 
   if (seedReceipt?.assisted && external.receiptSnapshot !== seenAssistedReceiptSnapshot) {
     setSeenAssistedReceiptSnapshot(external.receiptSnapshot);
@@ -282,9 +303,13 @@ function SpeakingAttempt({
       ]),
     [assistedSources, seedReceiptAssistedSource],
   );
+  const allExposedGuidanceSources = useMemo(
+    () => [...new Set([...exposedGuidanceSources, ...revealedScaffoldSources])],
+    [exposedGuidanceSources, revealedScaffoldSources],
+  );
   const exposedGuidanceMatcher = useMemo(
-    () => buildExposedGuidanceMatcher(exposedGuidanceSources, unassistedBaselineTexts),
-    [exposedGuidanceSources, unassistedBaselineTexts],
+    () => buildExposedGuidanceMatcher(allExposedGuidanceSources, unassistedBaselineTexts),
+    [allExposedGuidanceSources, unassistedBaselineTexts],
   );
 
   const isPersistedReceiptCleared =
@@ -386,35 +411,39 @@ function SpeakingAttempt({
   }
 
   function handleRevealScaffold() {
-    const nextSources = [...scaffoldSources, ...exposedGuidanceSources, ...displayedPostSubmitSources];
     const currentTrimmed = transcript.trim();
-    if (currentTrimmed) nextSources.push(currentTrimmed);
     setHintsRevealed(true);
     setAttemptAssistedLatched(true);
-    if (nextSources.length > 0) {
-      setAssistedSources((current) => [...new Set([...current, ...nextSources])]);
+    if (scaffoldSources.length > 0) {
+      setRevealedScaffoldSources((current) => [...new Set([...current, ...scaffoldSources])]);
     }
-    setUnassistedBaselineTexts([]);
+    if (displayedPostSubmitSources.length > 0) {
+      setExposedGuidanceSources((current) => [...new Set([...current, ...displayedPostSubmitSources])]);
+    }
+    if (currentTrimmed) {
+      setAssistedSources((current) => [...new Set([...current, currentTrimmed])]);
+    }
     setEditedAnswer((current) => ({ ...(current ?? answer), assisted: true }));
     setLocalEvaluation(null);
   }
 
   function handleResetForFreshAttempt() {
-    const retainedSources: string[] = [
-      ...exposedGuidanceSources,
-      ...displayedPostSubmitSources,
-    ];
-    if (hintsRevealed || attemptAssistedLatched || assisted) {
-      const currentTrimmed = transcript.trim();
-      if (currentTrimmed) retainedSources.push(currentTrimmed);
+    // Preserve unassistedBaselineTexts and keep exposed/revealed guidance in their baseline-aware
+    // lists so retyping an earlier independent speech with benign edits is never falsely marked assisted,
+    // while pasting any novel post-submit cue/rewrite, revealed scaffold, or prior assisted transcript
+    // still locks assistance.
+    if (displayedPostSubmitSources.length > 0) {
+      setExposedGuidanceSources((current) => [...new Set([...current, ...displayedPostSubmitSources])]);
     }
     if (hintsRevealed && scaffoldSources.length > 0) {
-      retainedSources.push(...scaffoldSources);
+      setRevealedScaffoldSources((current) => [...new Set([...current, ...scaffoldSources])]);
     }
-    if (retainedSources.length > 0) {
-      setAssistedSources((current) => [...new Set([...current, ...retainedSources])]);
+    if (hintsRevealed || attemptAssistedLatched || assisted) {
+      const currentTrimmed = transcript.trim();
+      if (currentTrimmed) {
+        setAssistedSources((current) => [...new Set([...current, currentTrimmed])]);
+      }
     }
-    setUnassistedBaselineTexts([]);
     setEditedAnswer({ transcript: "", durationInput: "", assisted: false });
     setLocalEvaluation(null);
     setHintsRevealed(false);
@@ -425,10 +454,10 @@ function SpeakingAttempt({
 
   function handleEvaluate() {
     const mergedExposedSources = [
-      ...new Set([...exposedGuidanceSources, ...displayedPostSubmitSources]),
+      ...new Set([...allExposedGuidanceSources, ...displayedPostSubmitSources]),
     ];
     const activeExposedMatcher =
-      mergedExposedSources.length > exposedGuidanceSources.length
+      mergedExposedSources.length > allExposedGuidanceSources.length
         ? buildExposedGuidanceMatcher(mergedExposedSources, unassistedBaselineTexts)
         : exposedGuidanceMatcher;
     const matchedExposed = matchesExposedGuidance(transcript, activeExposedMatcher);
@@ -454,9 +483,9 @@ function SpeakingAttempt({
     // Latch them monotonically so any subsequent edit, duration change, or reset retry checks against them.
     if (nextReceipt.wordCount > 0) {
       const nextDisplayed = collectSpeakingReceiptGuidance(seed, nextReceipt);
-      if (nextDisplayed.length > 0 || mergedExposedSources.length > exposedGuidanceSources.length) {
+      if (nextDisplayed.length > 0 || displayedPostSubmitSources.length > 0) {
         setExposedGuidanceSources((current) => [
-          ...new Set([...current, ...mergedExposedSources, ...nextDisplayed]),
+          ...new Set([...current, ...displayedPostSubmitSources, ...nextDisplayed]),
         ]);
       }
       if (!nextReceipt.assisted && nextReceipt.sourceTranscript.trim().length > 0) {
@@ -593,13 +622,15 @@ function SpeakingAttempt({
               const nextTranscript = event.target.value;
               const mergedExposedSources =
                 displayedPostSubmitSources.length > 0
-                  ? [...new Set([...exposedGuidanceSources, ...displayedPostSubmitSources])]
-                  : exposedGuidanceSources;
-              if (mergedExposedSources.length > exposedGuidanceSources.length) {
-                setExposedGuidanceSources(mergedExposedSources);
+                  ? [...new Set([...allExposedGuidanceSources, ...displayedPostSubmitSources])]
+                  : allExposedGuidanceSources;
+              if (displayedPostSubmitSources.some((s) => !exposedGuidanceSources.includes(s))) {
+                setExposedGuidanceSources((current) => [
+                  ...new Set([...current, ...displayedPostSubmitSources]),
+                ]);
               }
               const activeExposedMatcher =
-                mergedExposedSources.length > exposedGuidanceSources.length
+                mergedExposedSources.length > allExposedGuidanceSources.length
                   ? buildExposedGuidanceMatcher(mergedExposedSources, unassistedBaselineTexts)
                   : exposedGuidanceMatcher;
               const matchedAssisted =
