@@ -2200,12 +2200,25 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
       { text: "The marked response [\\,B].", answerKey: "B", ok: false },
       { text: "The marked response [\\quad \\mathrm{B}].", answerKey: "B", ok: false },
       { text: "The marked response <\\text{\\mathbf{B}}.> Show your work.", answerKey: "B", ok: false },
+      { text: "The marked response [$\\mathbf{B}$].", answerKey: "B", ok: false },
+      { text: "Correct option is «$\\mathrm{B}$».", answerKey: "B", ok: false },
+      { text: "The marked response [$$B$$].", answerKey: "B", ok: false },
+      { text: "The marked response [\\(B\\)].", answerKey: "B", ok: false },
+      { text: "The marked response (\\[B\\]).", answerKey: "B", ok: false },
+      { text: "The marked response <**$B$**.> Show your work.", answerKey: "B", ok: false },
+      { text: "The marked response «*B*».", answerKey: "B", ok: false },
+      { text: "The marked response (_B_).", answerKey: "B", ok: false },
+      { text: "The marked response [`B`].", answerKey: "B", ok: false },
+      { text: "A ticket costs $5. The marked response [$B$].", answerKey: "B", ok: false },
+      { text: "A ticket costs $5. The marked response [$ B $].", answerKey: "B", ok: false },
+      { text: "A ticket costs $5 or $10.", answerKey: "B", ok: true },
       { text: "The marked response (B)\r\nShow your work.", answerKey: "B", ok: false },
       { text: "标记结果 «B»。解释理由。", answerKey: "B", ok: false },
       { text: "Compare «D»,\n«B». Show your work.", answerKey: "B", ok: false },
       { text: "Compare «D» and «B». Then see «B». Explain both.", answerKey: "B", ok: false },
       { text: "Correct option is B.", answerKey: "B", ok: false },
       { text: "Use the sequence «B.» and «D.»", answerKey: "B", ok: false },
+      { text: "Use the sequence [$B$] and [_D_].", answerKey: "B", ok: false },
       { text: "Compare «D» and «B»", answerKey: "B", ok: true },
       { text: "Compare «D» and «B».", answerKey: "B", ok: true },
       { text: "Compare [D], [B].", answerKey: "B", ok: true },
@@ -2213,6 +2226,7 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
       { text: 'Compare "D." and "B."!', answerKey: "B", ok: true },
       { text: "Compare «D» and «B». Show your work.", answerKey: "B", ok: true },
       { text: "Compare <D> and <B>. Show your work.", answerKey: "B", ok: true },
+      { text: "Compare <**$D$**> and <**$B$**>. Show your work.", answerKey: "B", ok: true },
       { text: "Compare <D> and <\nB>. Show your work.", answerKey: "B", ok: true },
       { text: "Compare [D], [B]. Explain both.", answerKey: "B", ok: true },
       { text: "Compare [D]; [B]. Explain both.", answerKey: "B", ok: true },
@@ -2253,6 +2267,7 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
   });
 
   describe.each(["variant stem", "sibling card back"] as const)("canonical math options in a %s", surface => {
+    const formattedOrder = ["\\mathbf{π}", "\\mathrm{θ}"];
     it.each([
       { secret: { answerKey: '["π","θ"]' }, text: "Use pi and theta.", ok: false },
       { secret: { answerKey: '["π","θ"]' }, text: "Compare theta and pi.", ok: true },
@@ -2288,6 +2303,14 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
         text: "Correct option is D and B.",
         ok: false,
       },
+      ...[{ sealedPayload: { order: formattedOrder } }, { answerKey: JSON.stringify(formattedOrder) }]
+        .flatMap(secret => [
+          { secret, text: "The selected value is pi.", ok: false },
+          { secret, text: "The marked response [pi].", ok: false },
+          { secret, text: "Compare theta and pi.", ok: true },
+          { secret, text: "Compare \\mathrm{θ} and \\mathbf{π}.", ok: true },
+          { secret, text: "Compare theta and pi. The selected value is theta.", ok: false },
+        ]),
     ])("sets ok=$ok for $text ($secret)", ({ secret, text, ok }) => {
       const variant = makeMissVariantCandidate({
         ...secret,
