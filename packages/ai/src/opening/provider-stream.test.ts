@@ -74,6 +74,13 @@ describe("direct Markdown streaming", () => {
     expect(receipt).toHaveBeenCalledExactlyOnceWith({ requestId: "stream-1", inputTokens: 24, outputTokens: 1100, cachedInputTokens: null });
   });
 
+  it.each([0, undefined])("retains earlier usage through trailing text and a %s output count", async completionTokens => {
+    const h = harness();
+    h.write(delta("answer") + event({ choices: [], usage: { prompt_tokens: 24, completion_tokens: 1100 } })
+      + delta("!") + stop + event({ choices: [], usage: { prompt_tokens: 0, completion_tokens: completionTokens } }) + done);
+    await expect(h.provider.complete(input)).resolves.toMatchObject({ text: "answer!", inputTokens: 24, outputTokens: 1100 });
+  });
+
   it.each(["one chunk", "two chunks"])("collects terminal usage after length (%s)", async chunks => {
     const h = harness(), receipt = vi.fn();
     const truncated = delta("partial") + event({ choices: [{ index: 0, delta: { content: "truncated" }, finish_reason: "length" }] });

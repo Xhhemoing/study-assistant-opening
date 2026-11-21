@@ -316,7 +316,23 @@ function ephemeralRollbackSiblings(workspaceId: string, row: {
   const legacy = `eph:${clientKey}`;
   const encoded = `eph-v2:${workspaceId}:${Buffer.from(clientKey, "utf16le").toString("base64url")}`;
   const keys = [legacy, `${legacy}:fallback`, encoded, `${encoded}:fallback`];
-  return keys.includes(row.request_id) ? keys.filter(key => key !== row.request_id) : [];
+  return keys.includes(row.request_id) ? keys.filter(key => key !== row.request_id).sort() : [];
+}
+
+async function insertRollbackFences(tx: TransactionSql, keys: string[], row: {
+  workspaceId: string; purpose: string; parentId: string | null; reservedAmount?: 0; instant?: Date;
+}) {
+  if (!keys.length) return;
+  await tx`
+    INSERT INTO opening_budget_reservations (id, workspace_id, purpose, amount_cents, reserved_amount_cents,
+      request_id, parent_interaction_id, state, release_reason, created_at, updated_at)
+    SELECT keys.id, ${row.workspaceId}, ${row.purpose}, 0, ${row.reservedAmount ?? null},
+      keys.request_id, ${row.parentId}, 'released', 'not_sent',
+      COALESCE(${row.instant ?? null}::timestamptz, now()), COALESCE(${row.instant ?? null}::timestamptz, now())
+    FROM unnest(${keys.map(() => randomUUID())}::uuid[], ${keys}::text[]) WITH ORDINALITY AS keys(id, request_id, position)
+    ORDER BY keys.position
+    ON CONFLICT (request_id) DO NOTHING
+  `;
 }
 
 function isRollbackFence(row: BudgetReservationRecord) {
@@ -348,7 +364,7 @@ async function assertRequestFamilyAvailable(tx: TransactionSql, workspaceId: str
   const family = input.requestFamily;
   const root = family ?? input.requestId.replace(attemptSuffix, "");
   const familyMatch = family === null
-    ? tx`request_id = ANY(${rollbackSiblings}::text[])`
+    ? tx`false`
     : family === undefined
     ? tx`(request_id = ${root} OR starts_with(request_id, ${root + ":"}))
       AND regexp_replace(request_id, ${attemptSuffix.source}, '') = ${root}`
@@ -357,9 +373,10 @@ async function assertRequestFamilyAvailable(tx: TransactionSql, workspaceId: str
   const familyScopedMatch = family !== null && parentId && input.alternateRequestFamily
     ? tx`parent_interaction_id = ${parentId} AND ((${familyMatch}) OR ${attemptsOf(tx, input.alternateRequestFamily)})`
     : familyMatch;
-  const siblingMatch = family === null || !rollbackSiblings.length
-    ? familyScopedMatch
-    : tx`(${familyScopedMatch}) OR request_id = ANY(${rollbackSiblings}::text[])`;
+  const siblingMatch = rollbackSiblings.length
+    ? tx`(${familyScopedMatch}) OR (request_id = ANY(${rollbackSiblings}::text[])
+        AND (parent_interaction_id = ${parentId ?? null} OR parent_interaction_id IS NULL))`
+    : familyScopedMatch;
   const [sibling] = await tx`
     SELECT id, state, purpose, result_ref, outcome_unknown_at, reconciled_at, pending_reconcile_cents
     FROM opening_budget_reservations
@@ -568,6 +585,8 @@ export function createOpeningBudgetRepository(
             AND workspace_id = ${scope.workspaceId} AND parent_interaction_id = ${parentBudget?.id ?? null})`;
         const primary = exactRows.find(row => row.request_id === input.requestId);
         const alternate = exactRows.find(row => row.request_id === alternateId);
+        const primaryRow = primary ? mapReservation(primary as Record<string, unknown>) : null;
+        const alternateRow = alternate ? mapReservation(alternate as Record<string, unknown>) : null;
         // Keep an existing exact key unless it belongs to another interaction.
         const primaryOccupied = primary && (primary.workspace_id !== scope.workspaceId
           || (primary.parent_interaction_id !== null && primary.parent_interaction_id !== parentBudget?.id));
@@ -578,10 +597,11 @@ export function createOpeningBudgetRepository(
         // A fallback that starts a family has no primary reservation to adopt.
         // Keep the suffix as the real attempt, then leave terminal sibling
         // markers so an exact legacy retry cannot reactivate another call.
-        const requestId = fallbackStartsFamily ? input.requestId
-          : alternateId && (primaryOccupied || (!primary && alternate)) ? alternateId : input.requestId;
-        const existing = requestId === input.requestId ? primary : alternate;
-        const exactRow = existing ? mapReservation(existing as Record<string, unknown>) : null;
+        const alternateHasAttempt = alternateRow && !isRollbackFence(alternateRow) && !isTerminalRollbackFence(alternateRow);
+        const primaryFenced = primaryRow && isRollbackFence(primaryRow);
+        const requestId = !fallbackStartsFamily && alternateId
+          && (primaryOccupied || (!primary && alternate) || (primaryFenced && alternateHasAttempt)) ? alternateId : input.requestId;
+        const exactRow = requestId === input.requestId ? primaryRow : alternateRow;
         // Leave the exact key occupied for rollback, including when another
         // turn relies on its ownership. The current family can reuse its own
         // unused fence only after sibling, quota and budget checks below.
@@ -682,6 +702,14 @@ export function createOpeningBudgetRepository(
               created_at = excluded.created_at, updated_at = excluded.updated_at
           WHERE opening_budget_reservations.id = ${fence.id} AND opening_budget_reservations.state = 'released'
             AND opening_budget_reservations.reserved_amount_cents IS NULL AND opening_budget_reservations.outcome_unknown_at IS NULL` : tx``;
+        const rollbackSiblings = ephemeralRollbackSiblings(scope.workspaceId, {
+          request_id: requestId, parent_interaction_id: parentBudget?.id ?? null, purpose: input.purpose,
+        });
+        const fenceTerms = { workspaceId: scope.workspaceId, purpose: input.purpose, parentId: parentBudget?.id ?? null,
+          reservedAmount: fallbackStartsFamily ? 0 as const : undefined, instant };
+        // The unique request key is global. Take it and every sibling fence in
+        // the same order even when workspaces start on different attempts.
+        await insertRollbackFences(tx, rollbackSiblings.filter(key => key < requestId), fenceTerms);
         const rows = await tx`
           INSERT INTO opening_budget_reservations (id, workspace_id, purpose, amount_cents, reserved_amount_cents, request_id, model_snapshot, parent_interaction_id, created_at, updated_at)
           SELECT ${randomUUID()}, ${scope.workspaceId}, ${input.purpose}, ${input.amountCents}, ${input.amountCents}, ${requestId}, ${modelSnapshot === null ? null : tx.json(modelSnapshot)}, ${parentBudget?.id ?? null}, ${instant}, ${instant}
@@ -693,24 +721,7 @@ export function createOpeningBudgetRepository(
           RETURNING *
         `;
         if (!rows.length) throw new OpeningBudgetError("BUDGET_EXCEEDED", "daily workspace budget exceeded");
-        const rollbackSiblings = ephemeralRollbackSiblings(scope.workspaceId, {
-          request_id: requestId, parent_interaction_id: parentBudget?.id ?? null, purpose: input.purpose,
-        });
-        if (rollbackSiblings.length) {
-          const rollbackSiblingIds = rollbackSiblings.map(() => randomUUID());
-          // Fence both exact legacy rollback keys in the reserve transaction so
-          // an older reader cannot reserve a sibling between reserve and claim.
-          await tx`
-            INSERT INTO opening_budget_reservations (id, workspace_id, purpose, amount_cents, reserved_amount_cents,
-              request_id, model_snapshot, parent_interaction_id, state, release_reason, created_at, updated_at)
-            SELECT keys.id, ${scope.workspaceId}, ${input.purpose}, 0,
-              ${fallbackStartsFamily ? 0 : null},
-              keys.request_id, NULL, ${parentBudget?.id ?? null},
-              'released', 'not_sent', ${instant}, ${instant}
-            FROM unnest(${rollbackSiblingIds}::uuid[], ${rollbackSiblings}::text[]) AS keys(id, request_id)
-            ON CONFLICT (request_id) DO NOTHING
-          `;
-        }
+        await insertRollbackFences(tx, rollbackSiblings.filter(key => key > requestId), fenceTerms);
         return mapReservation(rows[0] as Record<string, unknown>);
       });
       } catch (error) {
@@ -773,16 +784,10 @@ export function createOpeningBudgetRepository(
           return false;
         }
         if (!(await claim(tx))) return false;
-        // An exact key owned by another turn already rejects rollback's scope/parent check.
-        const siblingFenceIds = siblings.map(() => randomUUID());
-        await tx`
-          INSERT INTO opening_budget_reservations
-            (id, workspace_id, purpose, amount_cents, request_id, parent_interaction_id, state, release_reason)
-          SELECT keys.id, ${scope.workspaceId}, ${candidate.purpose}, 0, keys.request_id,
-            ${candidate.parent_interaction_id}, 'released', 'not_sent'
-          FROM unnest(${siblingFenceIds}::uuid[], ${siblings}::text[]) AS keys(id, request_id)
-          ON CONFLICT (request_id) DO NOTHING
-        `;
+        // Claim updates the existing row without modifying its unique key.
+        await insertRollbackFences(tx, siblings, {
+          workspaceId: scope.workspaceId, purpose: candidate.purpose, parentId: candidate.parent_interaction_id,
+        });
         return true;
       });
     },

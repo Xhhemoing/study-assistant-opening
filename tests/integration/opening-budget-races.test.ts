@@ -214,14 +214,18 @@ describe("opening budget races (two independent connections, deterministic barri
     expect(fallback).toHaveBeenCalledOnce();
     expect(otherPrimary).toHaveBeenCalledTimes(2);
     const rows = await fixture.sql`SELECT request_id, state, amount_cents FROM opening_budget_reservations WHERE workspace_id=${scope.workspaceId}`;
+    const encoded = (key: string) => `eph-v2:${scope.workspaceId}:${Buffer.from(key, "utf16le").toString("base64url")}`;
     const completed = rows.filter(row => row.state === "completed");
-    expect(completed).toHaveLength(4);
-    expect(completed.map(row => row.request_id)).toEqual(expect.arrayContaining(["eph:lesson-123", "eph:lesson-123:retry", "eph:lesson-123:retry:bar"]));
+    expect(completed.map(row => row.request_id).sort()).toEqual([
+      encoded("lesson-123:fallback"), "eph:lesson-123:fallback", "eph:lesson-123:retry", "eph:lesson-123:retry:bar",
+    ].sort());
     const fences = rows.filter(row => row.state !== "completed");
     expect(fences.map(row => row.request_id).sort()).toEqual([
-      "eph:lesson-123:fallback", "eph:lesson-123:fallback:fallback",
+      "eph:lesson-123", "eph:lesson-123:fallback:fallback",
       "eph:lesson-123:retry:bar:fallback", "eph:lesson-123:retry:fallback",
-    ]);
+      encoded("lesson-123"), encoded("lesson-123:retry"), encoded("lesson-123:retry:bar"),
+      ...["lesson-123", "lesson-123:fallback", "lesson-123:retry", "lesson-123:retry:bar"].map(key => `${encoded(key)}:fallback`),
+    ].sort());
     for (const row of fences) expect(row).toMatchObject({ state: "released", amount_cents: 0 });
   });
 
@@ -243,6 +247,28 @@ describe("opening budget races (two independent connections, deterministic barri
     await expect(budgetB.reserve(scope, { ...terms, requestId: "eph-v2:distinct", requestFamily: "eph-v2:distinct",
       alternateRequestFamily: legacyFallback, parentBudget: { id: `${parentBudget.id}:fallback` },
     })).resolves.toMatchObject({ state: "reserved" });
+  });
+
+  it("admits a suffix-shaped turn after the earlier turn paid on its legacy fallback key", async () => {
+    const scope = fixture.scope;
+    const repo = createOpeningBudgetRepository(a.sql, { envCapCents: 100 });
+    const terms = (key: string) => ({
+      purpose: "tutor", amountCents: 1,
+      parentBudget: { id: `study-ephemeral:${scope.workspaceId}:${key}` },
+      requestFamily: `eph:${key}`,
+      alternateRequestFamily: `eph-v2:${scope.workspaceId}:${Buffer.from(key, "utf16le").toString("base64url")}`,
+    });
+    const first = terms("lesson"), second = terms("lesson:fallback");
+    const paid = await repo.reserve(scope, { ...first, requestId: second.requestFamily });
+    expect(await repo.claimExecution(scope, paid.id)).toBe(true);
+    await repo.settle(scope, paid.id, 1);
+
+    // Rollback still sees the paid sibling for the original parent.
+    await expect(repo.reserve(scope, { ...first, requestId: first.requestFamily, requestFamily: null }))
+      .rejects.toMatchObject({ code: "BUDGET_REPLAY_COMPLETED", disposition: { reservationId: paid.id } });
+    const independent = await repo.reserve(scope, { ...second, requestId: second.requestFamily });
+    expect(independent).toMatchObject({ requestId: second.alternateRequestFamily, parentInteractionId: second.parentBudget.id, state: "reserved" });
+    expect(await repo.claimExecution(scope, independent.id)).toBe(true);
   });
 
   it("records actual cost for an interrupted SSE response without persisting or replaying partial text", async () => {
@@ -397,6 +423,35 @@ describe("opening budget races (two independent connections, deterministic barri
     await expect(contender).rejects.toMatchObject({ name: "OpeningBudgetError", code: "CONFLICT" });
     const rows = await fixture.sql`SELECT workspace_id FROM opening_budget_reservations WHERE request_id='xws-key'`;
     expect(rows.map((r) => r.workspace_id)).toEqual([fixture.scope.workspaceId]);
+  });
+
+  it("waits on the lower shared key before inserting an active fallback in another workspace", async () => {
+    const key = "cross-workspace-family", primary = `eph:${key}`, fallback = `${primary}:fallback`;
+    const budgetB = createOpeningBudgetRepository(b.sql, { envCapCents: 100 });
+    const inserted = latch(), finishFamily = latch();
+    const holder = track(a.sql.begin(async tx => {
+      await tx`INSERT INTO opening_budget_reservations (workspace_id, purpose, amount_cents, request_id)
+        VALUES (${fixture.scope.workspaceId}, 'tutor', 10, ${primary})`;
+      inserted.open();
+      await finishFamily.wait;
+      await tx`INSERT INTO opening_budget_reservations (workspace_id, purpose, amount_cents, request_id)
+        VALUES (${fixture.scope.workspaceId}, 'tutor', 10, ${fallback})`;
+    }));
+    await Promise.race([inserted.wait, holder]);
+    const scope = fixture.otherScope;
+    const contender = track(budgetB.reserve(scope, {
+      purpose: "tutor", amountCents: 10, requestId: fallback,
+      parentBudget: { id: `study-ephemeral:${scope.workspaceId}:${key}` }, requestFamily: primary,
+      alternateRequestFamily: `eph-v2:${scope.workspaceId}:${Buffer.from(key, "utf16le").toString("base64url")}`,
+    }));
+    try {
+      await waitUntilBlocked(fixture.sql, b.pid, a.pid, "cross-workspace fallback", /INSERT INTO opening_budget_reservations/);
+    } finally {
+      finishFamily.open();
+      await Promise.allSettled([holder, contender]);
+    }
+    await holder;
+    await expect(contender).rejects.toMatchObject({ code: "CONFLICT" });
   });
 
   it("concurrent balance race: workspace FOR UPDATE serializes two connections; only one fits the cap", async () => {

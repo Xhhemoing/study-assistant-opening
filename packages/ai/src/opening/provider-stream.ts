@@ -41,7 +41,7 @@ export async function readOpeningProviderStream(body: ReadableStream<Uint8Array>
   const reader = body.getReader(), decoder = new TextDecoder("utf-8", { fatal: true });
   let buffer = "", data: string[] = [], text = "", bytes = 0, done = false, stopped = false;
   let requestId: string | null = null;
-  let latestUsage: ParsedProviderUsage | null = null;
+  let highestUsage: ParsedProviderUsage | null = null;
   let hasTerminalOutputUsage = false;
   let answerFailure: OpeningProviderStreamError | undefined;
   function invalid(message: string): never { throw new OpeningProviderStreamError("PROVIDER_RESPONSE", message); }
@@ -55,10 +55,9 @@ export async function readOpeningProviderStream(body: ReadableStream<Uint8Array>
     try { parsed = JSON.parse(payload); } catch { invalid("provider returned malformed stream JSON"); }
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) invalid("invalid provider stream event");
     const value = parsed as Record<string, unknown>;
-    // Earlier output usage becomes partial when another generated delta arrives.
-    // Usage in this same frame can describe the output it carries.
+    // A new delta invalidates terminal usage for a failed response, but the
+    // counts already reported remain a lower bound for the whole stream.
     if (Array.isArray(value.choices) && value.choices.some(hasGeneratedDelta)) {
-      if (latestUsage) latestUsage.outputTokens = null;
       hasTerminalOutputUsage = false;
     }
     // Even an embedded rate-limit error follows a sent request; never release its reservation.
@@ -75,10 +74,10 @@ export async function readOpeningProviderStream(body: ReadableStream<Uint8Array>
       // without emitting a finish reason.
       const trailer = value.choices.length === 0 && (stopped || answerFailure?.code === "PROVIDER_REFUSAL");
       if (!stopped || trailer) {
-        latestUsage = {
-          inputTokens: maxReportedTokens(latestUsage?.inputTokens, parsedUsage.inputTokens),
-          outputTokens: maxReportedTokens(latestUsage?.outputTokens, parsedUsage.outputTokens),
-          cachedInputTokens: maxReportedTokens(latestUsage?.cachedInputTokens, parsedUsage.cachedInputTokens),
+        highestUsage = {
+          inputTokens: maxReportedTokens(highestUsage?.inputTokens, parsedUsage.inputTokens),
+          outputTokens: maxReportedTokens(highestUsage?.outputTokens, parsedUsage.outputTokens),
+          cachedInputTokens: maxReportedTokens(highestUsage?.cachedInputTokens, parsedUsage.cachedInputTokens),
         };
         if ((terminal || trailer) && parsedUsage.outputTokens !== null) hasTerminalOutputUsage = true;
       }
@@ -135,7 +134,7 @@ export async function readOpeningProviderStream(body: ReadableStream<Uint8Array>
     }
   }
   function usageSnapshot(): ParsedProviderUsage {
-    const { inputTokens = null, outputTokens = null, cachedInputTokens = null } = latestUsage ?? {};
+    const { inputTokens = null, outputTokens = null, cachedInputTokens = null } = highestUsage ?? {};
     return { inputTokens, outputTokens, cachedInputTokens: cachedInputTokens === null || inputTokens === null
       ? cachedInputTokens : Math.min(cachedInputTokens, inputTokens) };
   }

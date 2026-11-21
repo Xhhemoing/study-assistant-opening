@@ -29,6 +29,10 @@ function model(name: string, complete: ResolvedTaskModel["provider"]["complete"]
   };
 }
 
+function encodedKey(workspaceId: string, clientKey: string) {
+  return `eph-v2:${workspaceId}:${Buffer.from(clientKey, "utf16le").toString("base64url")}`;
+}
+
 it.each(["old-to-new", "new-to-old", "unclaimed-legacy", "unclaimed-encoded"] as const)("reuses the paid reservation and its provenance for %s", async scenario => {
   const { repo, budget } = ledger();
   const scope = f.scope;
@@ -132,15 +136,17 @@ it("fences a rollback reader between reserve and claim and releases its unsent s
 
   // Preserve coverage for a legacy active sibling that is observed by
   // claimExecution after reserve. The unsent primary must be released atomically.
-  const secondaryKey = `eph:${randomUUID()}`;
-  const secondaryParent = { id: `study-ephemeral:${scope.workspaceId}:${randomUUID()}` };
+  const secondaryClientKey = randomUUID();
+  const secondaryKey = `eph:${secondaryClientKey}`;
+  const secondaryParent = { id: `study-ephemeral:${scope.workspaceId}:${secondaryClientKey}` };
   const secondary = await repo.reserve(scope, {
     purpose: "tutor", amountCents: 10, requestId: secondaryKey, parentBudget: secondaryParent,
     requestFamily: secondaryKey,
-    alternateRequestFamily: `eph-v2:${scope.workspaceId}:${Buffer.from(secondaryKey.slice(4), "utf16le").toString("base64url")}`,
+    alternateRequestFamily: encodedKey(scope.workspaceId, secondaryClientKey),
   });
-  await f.sql`UPDATE opening_budget_reservations SET state='reserved', amount_cents=10,
-    reserved_amount_cents=10, release_reason=NULL WHERE request_id=${`${secondaryKey}:fallback`}`;
+  const activated = await f.sql`UPDATE opening_budget_reservations SET state='reserved', amount_cents=10,
+    reserved_amount_cents=10, release_reason=NULL WHERE request_id=${`${secondaryKey}:fallback`} RETURNING id`;
+  expect(activated).toHaveLength(1);
   expect(await repo.claimExecution(scope, secondary.id)).toBe(false);
   const [unsent] = await f.sql`SELECT state, amount_cents, release_reason FROM opening_budget_reservations WHERE id=${secondary.id}`;
   expect(unsent).toEqual({ state: "released", amount_cents: 0, release_reason: "not_sent" });
@@ -149,7 +155,8 @@ it("fences a rollback reader between reserve and claim and releases its unsent s
   await f.sql`UPDATE opening_budget_reservations SET created_at=now()-interval '31 minutes' WHERE id=${secondary.id}`;
   await repo.reserve(scope, { purpose: "tutor", amountCents: 1, requestId: `tick-${clientKey}` });
   const completed = await f.sql`SELECT request_id, amount_cents FROM opening_budget_reservations
-    WHERE workspace_id=${scope.workspaceId} AND state='completed' ORDER BY request_id`;
+    WHERE workspace_id=${scope.workspaceId} AND parent_interaction_id IN (${parentBudget.id}, ${secondaryParent.id})
+      AND state='completed' ORDER BY request_id`;
   expect(completed).toEqual([{ request_id: requestId, amount_cents: 3 }]);
 });
 
@@ -222,13 +229,21 @@ it.each(["pre-reservation failure", "released not_sent"] as const)("fences both 
     code: "BUDGET_REPLAY_COMPLETED",
   });
   expect(paidCall).toHaveBeenCalledOnce();
-  const rows = await f.sql`SELECT request_id, state, amount_cents FROM opening_budget_reservations
+  const rows = await f.sql`SELECT request_id, state, amount_cents, reserved_amount_cents, release_reason FROM opening_budget_reservations
     WHERE workspace_id=${scope.workspaceId} AND parent_interaction_id=${parentBudget.id}`;
-  expect(rows).toHaveLength(2);
-  expect(rows.filter(row => row.state !== "released")).toEqual([{
-    request_id: `${requestId}:fallback`,
-    state: "completed", amount_cents: 1,
-  }]);
+  const encoded = encodedKey(scope.workspaceId, clientKey);
+  const fence = { state: "released", amount_cents: 0, release_reason: "not_sent",
+    reserved_amount_cents: primaryFailure === "pre-reservation failure" ? 0 : null };
+  const primaryRow = primaryFailure === "pre-reservation failure" ? fence : {
+    state: "released", amount_cents: 10, reserved_amount_cents: 10, release_reason: "not_sent",
+  };
+  expect(rows).toHaveLength(4);
+  expect(rows).toEqual(expect.arrayContaining([
+    { request_id: requestId, ...primaryRow },
+    { request_id: `${requestId}:fallback`, state: "completed", amount_cents: 1, reserved_amount_cents: 10, release_reason: null },
+    { request_id: encoded, ...fence },
+    { request_id: `${encoded}:fallback`, ...fence },
+  ]));
   await expect(service.replyEphemeral(scope, request)).rejects.toMatchObject({ code: "BUDGET_REPLAY_COMPLETED" });
   expect(paidCall).toHaveBeenCalledOnce();
 });
@@ -254,33 +269,37 @@ it("does not reactivate the fallback fence after a fallbackStartsFamily release"
 
   await expect(service.replyEphemeral(scope, request)).rejects.toMatchObject({ code: "EPHEMERAL_REQUEST_NOT_SENT" });
   expect(fallbackCall).toHaveBeenCalledOnce();
-  const before = await f.sql`SELECT request_id, state, release_reason, reserved_amount_cents, model_snapshot
+  const readRows = () => f.sql`SELECT request_id, state, amount_cents, release_reason, reserved_amount_cents, model_snapshot
     FROM opening_budget_reservations WHERE workspace_id=${scope.workspaceId} AND parent_interaction_id=${parentId}
     ORDER BY request_id`;
-  expect(before).toHaveLength(2);
+  const before = await readRows();
+  expect(before).toHaveLength(4);
+  const encoded = encodedKey(scope.workspaceId, clientKey);
+  const fence = { state: "released", amount_cents: 0, release_reason: "not_sent", reserved_amount_cents: 0, model_snapshot: null };
   expect(before).toEqual(expect.arrayContaining([
-    expect.objectContaining({ request_id: `eph:${clientKey}`, state: "released", release_reason: "not_sent", reserved_amount_cents: 0 }),
-    expect.objectContaining({ request_id: `eph:${clientKey}:fallback`, state: "released", release_reason: "not_sent", reserved_amount_cents: 10 }),
+    { request_id: `eph:${clientKey}`, ...fence },
+    { request_id: encoded, ...fence },
+    { request_id: `${encoded}:fallback`, ...fence },
+    { request_id: `eph:${clientKey}:fallback`, state: "released", amount_cents: 10, release_reason: "not_sent",
+      reserved_amount_cents: 10, model_snapshot: fallback.modelSnapshot },
   ]));
 
   await expect(service.replyEphemeral(scope, request)).rejects.toMatchObject({ code: "EPHEMERAL_REQUEST_NOT_SENT" });
   expect(fallbackCall).toHaveBeenCalledOnce();
-  await expect(f.sql`SELECT request_id, state, release_reason FROM opening_budget_reservations
-    WHERE workspace_id=${scope.workspaceId} AND parent_interaction_id=${parentId} ORDER BY request_id`).resolves.toEqual([
-    { request_id: `eph:${clientKey}`, state: "released", release_reason: "not_sent" },
-    { request_id: `eph:${clientKey}:fallback`, state: "released", release_reason: "not_sent" },
-  ]);
+  await expect(readRows()).resolves.toEqual(before);
 });
 
 it("blocks a legacy rollback reader on an active encoded sibling after a workspace collision", async () => {
   const repo = createOpeningBudgetRepository(f.sql, { envCapCents: 100_000 });
   const clientKey = randomUUID();
   const legacy = `eph:${clientKey}`;
-  const encoded = `eph-v2:${f.otherScope.workspaceId}:${Buffer.from(clientKey, "utf16le").toString("base64url")}`;
+  const encoded = encodedKey(f.otherScope.workspaceId, clientKey);
+  const legacyParentId = `study-ephemeral:${f.scope.workspaceId}:${clientKey}`;
+  await f.sql`INSERT INTO opening_parent_interaction_budgets (workspace_id, id, budget_cents, max_provider_calls)
+    VALUES (${f.scope.workspaceId}, ${legacyParentId}, 100, 2)`;
   await f.sql`INSERT INTO opening_budget_reservations
-    (id, workspace_id, purpose, amount_cents, reserved_amount_cents, request_id, parent_interaction_id)
-    VALUES (${randomUUID()}, ${f.scope.workspaceId}, 'tutor', 10, 10, ${legacy},
-      ${`study-ephemeral:${f.scope.workspaceId}:${clientKey}`})`;
+    (workspace_id, purpose, amount_cents, reserved_amount_cents, request_id, parent_interaction_id)
+    VALUES (${f.scope.workspaceId}, 'tutor', 10, 10, ${legacy}, ${legacyParentId})`;
   const encodedReservation = await repo.reserve(f.otherScope, {
     purpose: "tutor", amountCents: 10, requestId: legacy,
     parentBudget: { id: `study-ephemeral:${f.otherScope.workspaceId}:${clientKey}` },
@@ -313,20 +332,28 @@ it.each(["unknown", "completed", "not_sent"] as const)("keeps the whole operatio
   expect(primaryCall).toHaveBeenCalledOnce(); expect(fallbackCall).toHaveBeenCalledOnce();
   if (outcome === "unknown") expect(first).toMatchObject({ code: "PROVIDER_TIMEOUT" });
   if (outcome === "completed") expect(first).toMatchObject({ text: "answered" });
-  const before = await f.sql`SELECT request_id, state, release_reason, outcome_unknown_at FROM opening_budget_reservations
+  const readRows = () => f.sql`SELECT request_id, state, amount_cents, reserved_amount_cents, release_reason, outcome_unknown_at
+    FROM opening_budget_reservations
     WHERE workspace_id=${f.scope.workspaceId} AND parent_interaction_id=${`study-ephemeral:${f.scope.workspaceId}:${key}`} ORDER BY request_id`;
-  expect(before).toHaveLength(2);
-  expect(before[0]).toMatchObject({ request_id: `eph:${key}`, state: "released", release_reason: "not_sent" });
-  expect(before[1]).toMatchObject({ request_id: `eph:${key}:fallback`, state: outcome === "completed" ? "completed" : outcome === "unknown" ? "reserved" : "released" });
-  if (outcome === "unknown") expect(before[1]!.outcome_unknown_at).not.toBeNull();
+  const before = await readRows();
+  const encoded = encodedKey(f.scope.workspaceId, key);
+  const fence = { state: "released", amount_cents: 0, reserved_amount_cents: null, release_reason: "not_sent", outcome_unknown_at: null };
+  expect(before).toHaveLength(4);
+  expect(before).toEqual(expect.arrayContaining([
+    { request_id: encoded, ...fence },
+    { request_id: `${encoded}:fallback`, ...fence },
+    { request_id: `eph:${key}`, state: "released", amount_cents: 10, reserved_amount_cents: 10,
+      release_reason: "not_sent", outcome_unknown_at: null },
+    { request_id: `eph:${key}:fallback`, state: outcome === "completed" ? "completed" : outcome === "unknown" ? "reserved" : "released",
+      amount_cents: outcome === "completed" ? 1 : 10, reserved_amount_cents: 10,
+      release_reason: outcome === "not_sent" ? "not_sent" : null, outcome_unknown_at: outcome === "unknown" ? expect.any(Date) : null },
+  ]));
   configuredFallback = null; // Normal settings change; the primary snapshot stays identical.
   const replay = await service.replyEphemeral(f.scope, request).catch((error: unknown) => error);
   const mayIssueNewKey = (replay as { code?: string }).code === "EPHEMERAL_REQUEST_NOT_SENT";
   expect(mayIssueNewKey).toBe(outcome === "not_sent");
   expect(primaryCall).toHaveBeenCalledOnce(); expect(fallbackCall).toHaveBeenCalledOnce();
-  const after = await f.sql`SELECT request_id, state, release_reason, outcome_unknown_at FROM opening_budget_reservations
-    WHERE workspace_id=${f.scope.workspaceId} AND parent_interaction_id=${`study-ephemeral:${f.scope.workspaceId}:${key}`} ORDER BY request_id`;
-  expect(after).toEqual(before);
+  await expect(readRows()).resolves.toEqual(before);
   if (mayIssueNewKey) {
     await service.replyEphemeral(f.scope, { ...request, clientKey: randomUUID() }).catch(() => undefined);
     expect(primaryCall).toHaveBeenCalledTimes(2); expect(fallbackCall).toHaveBeenCalledOnce();
