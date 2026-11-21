@@ -913,10 +913,174 @@ function extractFormulaSnippets(formula: string): string[] {
   return [...new Set(equations)];
 }
 
+const CLAUSE_SPLIT_MACROS = new Set([
+  "implies", "impliedby", "iff", "Rightarrow", "Leftarrow", "Leftrightarrow",
+  "Longrightarrow", "Longleftrightarrow", "Longleftarrow",
+  "to", "rightarrow", "leftarrow", "leftrightarrow", "mapsto", "therefore", "because",
+  "le", "leq", "leqslant", "ge", "geq", "geqslant", "neq", "ne",
+  "approx", "sim", "simeq", "cong", "equiv", "propto",
+]);
+
+const TEXT_MACRO_NAMES = new Set(["text", "mtext", "textbf", "textit", "textrm", "textsf", "texttt", "mbox", "hbox"]);
+
+const PROSE_CONNECTIVE_WORD = /^(?:and|or|when|where|if|then|so|for|with|hence|thus|since|as|therefore|because|but|otherwise|while)$/i;
+
+const CJK_CLAUSE_CONNECTIVE = /^(?:所以|因此|于是|从而|进而|并且|而且|但是|然而|如果|因为|由于|其中|此时|例如|比如|验证|检查|步骤|且|或|和|与|即|故|则|若|当|得|由)$/;
+
+function isProseTextMacroBody(body: string): boolean {
+  const trimmed = body.trim();
+  if (!trimmed) return true;
+  if (/[\u4e00-\u9fff\u3400-\u4dbf,;，；。:：()]/.test(trimmed)) return true;
+  const words = trimmed.split(/\s+/).filter(Boolean);
+  if (words.length >= 2) return true;
+  return words.some(word => PROSE_CONNECTIVE_WORD.test(word));
+}
+
+function splitMultiClauseFormula(text: string): string[] {
+  const clauses: string[] = [];
+  let start = 0;
+  let braceDepth = 0;
+  let parenDepth = 0;
+  let bracketDepth = 0;
+  let envDepth = 0;
+
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]!;
+    if (ch === "\\") {
+      const open = matchEnvTag(text, i, "begin");
+      if (open) {
+        envDepth++;
+        i = open.endIndex - 1;
+        continue;
+      }
+      const close = matchEnvTag(text, i, "end");
+      if (close) {
+        envDepth = Math.max(0, envDepth - 1);
+        i = close.endIndex - 1;
+        continue;
+      }
+      const cmdMatch = /^\\([A-Za-z]+)/.exec(text.slice(i));
+      if (cmdMatch) {
+        const cmd = cmdMatch[1]!;
+        const afterCmd = i + 1 + cmd.length;
+        if (braceDepth === 0 && parenDepth === 0 && bracketDepth === 0 && envDepth === 0) {
+          if (CLAUSE_SPLIT_MACROS.has(cmd)) {
+            clauses.push(text.slice(start, i));
+            start = afterCmd;
+            i = afterCmd - 1;
+            continue;
+          }
+          if (TEXT_MACRO_NAMES.has(cmd) || cmd === "mathrm") {
+            let argPos = afterCmd;
+            while (argPos < text.length && /\s/.test(text[argPos]!)) argPos++;
+            if (text[argPos] === "{") {
+              const groupEnd = readBalancedGroup(text, argPos);
+              if (groupEnd > 0) {
+                const body = text.slice(argPos + 1, groupEnd - 1);
+                const shouldSplit = cmd === "mathrm"
+                  ? PROSE_CONNECTIVE_WORD.test(body.trim())
+                  : isProseTextMacroBody(body);
+                if (shouldSplit) {
+                  clauses.push(text.slice(start, i));
+                  start = groupEnd;
+                  i = groupEnd - 1;
+                  continue;
+                }
+                i = groupEnd - 1;
+                continue;
+              }
+            }
+          }
+        }
+        i = afterCmd - 1;
+        continue;
+      }
+      if (i + 1 < text.length) i++;
+      continue;
+    }
+
+    if (ch === "{") { braceDepth++; continue; }
+    if (ch === "}") { braceDepth = Math.max(0, braceDepth - 1); continue; }
+    if (ch === "(") { parenDepth++; continue; }
+    if (ch === ")") { parenDepth = Math.max(0, parenDepth - 1); continue; }
+    if (ch === "[") { bracketDepth++; continue; }
+    if (ch === "]") { bracketDepth = Math.max(0, bracketDepth - 1); continue; }
+
+    if (braceDepth !== 0 || parenDepth !== 0 || bracketDepth !== 0 || envDepth !== 0) continue;
+
+    if (/[,;，；。<>≠≤≥≈≡⇒⇐⇔→←↔↦∴∵]/.test(ch)) {
+      clauses.push(text.slice(start, i));
+      if ((ch === "<" || ch === ">") && text[i + 1] === "=") i++;
+      start = i + 1;
+      continue;
+    }
+
+    if (ch === "!" && text[i + 1] === "=") {
+      clauses.push(text.slice(start, i));
+      start = i + 2;
+      i++;
+      continue;
+    }
+
+    if (/[\u4e00-\u9fff\u3400-\u4dbf]/.test(ch)) {
+      const cjkMatch = /^[\u4e00-\u9fff\u3400-\u4dbf]+/.exec(text.slice(i));
+      if (cjkMatch) {
+        const word = cjkMatch[0];
+        const nextIndex = i + word.length;
+        const before = text.slice(start, i);
+        const after = text.slice(nextIndex);
+        if (CJK_CLAUSE_CONNECTIVE.test(word) || (before.includes("=") && after.includes("="))) {
+          clauses.push(before);
+          start = nextIndex;
+          i = nextIndex - 1;
+          continue;
+        }
+        i = nextIndex - 1;
+        continue;
+      }
+    }
+
+    if (/[A-Za-z]/.test(ch)) {
+      const prev = i > 0 ? text[i - 1]! : "";
+      if (!/[A-Za-z0-9\\]/.test(prev)) {
+        const wordMatch = /^[A-Za-z]+/.exec(text.slice(i));
+        if (wordMatch) {
+          const word = wordMatch[0];
+          const nextIndex = i + word.length;
+          const next = nextIndex < text.length ? text[nextIndex]! : "";
+          if (PROSE_CONNECTIVE_WORD.test(word) && (!next || /[\s,;:)}\\[\]]/.test(next))) {
+            clauses.push(text.slice(start, i));
+            start = nextIndex;
+            i = nextIndex - 1;
+            continue;
+          }
+          i = nextIndex - 1;
+        }
+      }
+    }
+  }
+  clauses.push(text.slice(start));
+  return clauses.map(clause => cleanEquationClause(clause)).filter(Boolean);
+}
+
+function isCleanEqualityMember(segment: string): boolean {
+  const trimmed = segment.trim();
+  if (!trimmed || trimmed.includes("=")) return false;
+  if (/[\u4e00-\u9fff\u3400-\u4dbf,;，；。<>≠≤≥≈≡⇒⇐⇔→←↔↦∴∵]/.test(trimmed)) return false;
+  if (/\\(?:text|mtext|textbf|textit|textrm|textsf|texttt|mbox|hbox)\b/.test(trimmed)) return false;
+  const cmdRe = new RegExp(`\\\\(?:${[...CLAUSE_SPLIT_MACROS].join("|")})\\b`);
+  if (cmdRe.test(trimmed)) return false;
+  const withoutMacros = trimmed.replace(/\\[A-Za-z]+/g, " ");
+  const tokens = withoutMacros.split(/[^A-Za-z]+/).filter(Boolean);
+  return !tokens.some(token => PROSE_CONNECTIVE_WORD.test(token));
+}
+
 function splitTopLevelEquals(text: string): string[] {
   const parts: string[] = [];
   let start = 0;
   let braceDepth = 0;
+  let parenDepth = 0;
+  let bracketDepth = 0;
   let envDepth = 0;
   for (let i = 0; i < text.length; i++) {
     const ch = text[i]!;
@@ -938,7 +1102,11 @@ function splitTopLevelEquals(text: string): string[] {
     }
     if (ch === "{") braceDepth++;
     else if (ch === "}") braceDepth = Math.max(0, braceDepth - 1);
-    else if (ch === "=" && braceDepth === 0 && envDepth === 0) {
+    else if (ch === "(") parenDepth++;
+    else if (ch === ")") parenDepth = Math.max(0, parenDepth - 1);
+    else if (ch === "[") bracketDepth++;
+    else if (ch === "]") bracketDepth = Math.max(0, bracketDepth - 1);
+    else if (ch === "=" && braceDepth === 0 && parenDepth === 0 && bracketDepth === 0 && envDepth === 0) {
       const prev = i > 0 ? text[i - 1]! : "";
       const next = i + 1 < text.length ? text[i + 1]! : "";
       if (prev === "<" || prev === ">" || prev === "!" || prev === "=" || prev === ":" || prev === "~"
@@ -1041,17 +1209,29 @@ async function verifyToolResult(input: VerifyTeachingInput): Promise<LayerResult
     if (checked.outcome === "fail") return checked.result;
     if (checked.outcome === "unknown") {
       unknown ??= checked.result;
-      // Mixed symbolic-numeric chains (e.g. 1 + 1 = 3 = x) return unknown on the full chain;
-      // probe numeric pairs across the chain so contradictory arithmetic still fails.
-      const members = splitTopLevelEquals(latex).map(member => member.trim());
-      if (members.length >= 3 && members.length <= 12 && members.every(Boolean)) {
-        for (let i = 0; i < members.length; i++) {
-          for (let j = i + 1; j < members.length; j++) {
-            const forward = await runSingleFormulaCheck(checkFormula, `${members[i]} = ${members[j]}`);
-            if (forward.outcome === "fail") return forward.result;
-            if (forward.outcome === "unknown") {
-              const reverse = await runSingleFormulaCheck(checkFormula, `${members[j]} = ${members[i]}`);
-              if (reverse.outcome === "fail") return reverse.result;
+      // Split independent multi-clause segments before probing equality chains so
+      // separate equations separated by ',', ';', '\implies', '<', or prose never cross-bridge.
+      const clauses = splitMultiClauseFormula(latex);
+      const multiClause = clauses.length > 1 || (clauses.length === 1 && clauses[0] !== latex.trim());
+      for (const clause of clauses) {
+        if (!clause.includes("=")) continue;
+        if (multiClause) {
+          const clauseCheck = await runSingleFormulaCheck(checkFormula, clause);
+          if (clauseCheck.outcome === "fail") return clauseCheck.result;
+          if (clauseCheck.outcome === "pass") continue;
+        }
+        const members = splitTopLevelEquals(clause).map(member => member.trim());
+        if (members.length >= 3 && members.length <= 12 && members.every(Boolean)) {
+          for (let i = 0; i < members.length; i++) {
+            if (!isCleanEqualityMember(members[i]!)) continue;
+            for (let j = i + 1; j < members.length; j++) {
+              if (!isCleanEqualityMember(members[j]!)) break;
+              const forward = await runSingleFormulaCheck(checkFormula, `${members[i]} = ${members[j]}`);
+              if (forward.outcome === "fail") return forward.result;
+              if (forward.outcome === "unknown") {
+                const reverse = await runSingleFormulaCheck(checkFormula, `${members[j]} = ${members[i]}`);
+                if (reverse.outcome === "fail") return reverse.result;
+              }
             }
           }
         }

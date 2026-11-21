@@ -359,7 +359,11 @@ describe("teaching-verifiers", () => {
     ["prose header before signed equation contradiction", String.raw`\begin{align*} \text{Step 1} \\ -2 + 5 &= 4 \end{align*}`, "-2 + 5 = 4"],
     ["aligned mixed symbolic-numeric equality chain contradiction", String.raw`\begin{aligned} 1 + 1 &= 3 \\ &= x \end{aligned}`, "1 + 1 = 3"],
     ["inline mixed symbolic-numeric equality chain contradiction", String.raw`x = 2 + 2 = 5`, "2 + 2 = 5"],
+    ["mixed chain with symbolic head and numeric tail contradiction", String.raw`x = 1 + 1 = 5`, "1 + 1 = 5"],
+    ["mixed chain with numeric head, symbolic middle, and numeric tail contradiction", String.raw`1 + 1 = x = 5`, "1 + 1 = 5"],
     ["reversed non-adjacent numeric contradiction in symbolic chain", String.raw`x = 3 = y = 1 + 1`, "1 + 1 = 3"],
+    ["multi-clause implication contradiction in second clause", String.raw`1 + 1 = 2 \implies 2 + 2 = 5`, "2 + 2 = 5"],
+    ["multi-clause inequality contradiction on RHS of <", String.raw`1 + 1 = 2 < 2 + 2 = 5`, "2 + 2 = 5"],
   ])("flags multiline LaTeX contradiction with real arithmetic probe (%s)", async (_label, latex, expectedDetail) => {
     const report = await verifyTeachingContent({
       activityId: ACT, publishInput: basePublish(), pack: packWithSupport(), keyClaims: [],
@@ -399,6 +403,17 @@ describe("teaching-verifiers", () => {
       String.raw`\begin{aligned} 1 + 1 &= 2 \\ &= x \end{aligned}`,
       String.raw`x <= 1 = 2`,
       String.raw`\sum_{k=1}^{2} k = 3 = x`,
+      String.raw`1 + 1 = 2 \implies 2 + 2 = 4`,
+      String.raw`1 + 1 = 2, \; 2 + 2 = 4`,
+      String.raw`1 + 1 = 2; 2 + 2 = 4`,
+      String.raw`1 + 1 = 2 \text{ and } 2 + 2 = 4`,
+      "1 + 1 = 2，所以 2 + 2 = 4",
+      String.raw`1 + 1 = 2 < 2 + 2 = 4`,
+      String.raw`1 + 1 = 2 \neq 3 = 1 + 2`,
+      String.raw`1 + 1 = 2 \text{ when } x = 3`,
+      String.raw`(x + 1)^2 = 4 \quad (x = 1)`,
+      "1 米 + 2 = 300 厘米",
+      String.raw`1 + 2 = 300 \text{ cm}`,
     ]) {
       const unknownReport = await verifyTeachingContent({
         activityId: ACT, publishInput: basePublish(), pack: packWithSupport(), keyClaims: [],
