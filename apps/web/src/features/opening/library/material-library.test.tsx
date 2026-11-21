@@ -8,10 +8,10 @@ import { setupUploadIdentity } from "../inbox/upload-identity-test-fixture";
 import { clearSessionExpiry } from "../../auth/session-expiry";
 import type { LibraryFileBatch } from "./library-view";
 
-const state = vi.hoisted(() => ({ sources: [] as SourceRecord[], upload: vi.fn(), addToCourse: vi.fn(), read: vi.fn() }));
+const state = vi.hoisted(() => ({ sources: [] as SourceRecord[], upload: vi.fn(), addToCourse: vi.fn(), createCourse: vi.fn(), read: vi.fn() }));
 vi.mock("../inbox/upload-client", () => ({ createUploadClient: () => ({ uploadFile: state.upload }) }));
 vi.mock("../inbox/source-cleanup-panel", () => ({ SourceCleanupPanel: () => null }));
-vi.mock("./material-organization-client", () => ({ createMaterialOrganizationClient: () => ({ read: state.read, addToCourse: state.addToCourse }) }));
+vi.mock("./material-organization-client", () => ({ createMaterialOrganizationClient: () => ({ read: state.read, addToCourse: state.addToCourse, createCourse: state.createCourse }) }));
 import { MaterialLibrary } from "./material-library";
 import { LibraryView } from "./library-view";
 
@@ -28,6 +28,7 @@ beforeEach(() => {
   state.sources = [source];
   state.read.mockReset().mockResolvedValue({ courses: [{ id: "course-a", title: "课程 A", archived: false }, { id: "course-b", title: "课程 B", archived: false }], memberships: [{ courseId: "course-a", sourceId: source.id, role: "reference" }] });
   state.addToCourse.mockReset().mockResolvedValue({ succeeded: [source.id], failed: [] });
+  state.createCourse.mockReset().mockResolvedValue({ id: "course-b", title: "课程 B" });
   state.upload.mockReset().mockResolvedValue(source);
   container = document.createElement("div"); document.body.append(container); root = createRoot(container);
 });
@@ -39,6 +40,78 @@ function button(text: string) { return Array.from(container.querySelectorAll("bu
 function fileBatch(id: number): LibraryFileBatch {
   return { id, files: [{ name: `notes-${id}.pdf`, type: "application/pdf", size: 3, arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer } as File] };
 }
+
+it.each(["course-a", null])("captures into a new course while its refresh is still pending (initial=%s)", async initialCourse => {
+  let finishRefresh!: (value: { courses: { id: string; title: string; archived: boolean }[]; memberships: [] }) => void;
+  const courses = [{ id: "course-a", title: "课程 A", archived: false }, { id: "course-b", title: "课程 B", archived: false }];
+  state.read.mockResolvedValue({ courses, memberships: [] })
+    .mockImplementationOnce(async () => ({ courses: [courses[0]!], memberships: [] }))
+    .mockImplementationOnce(() => new Promise(resolve => { finishRefresh = resolve; }));
+  const fetcher = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => Response.json({ sourceId: "saved", taskId: "task" }));
+  vi.stubGlobal("fetch", fetcher);
+  const planningApi = { listSources: async () => state.sources, getPlanningSettings: async () => ({ settings: null }) } as unknown as OpeningApi;
+  await act(async () => root.render(createElement(LibraryView, { api: planningApi, courseId: initialCourse })));
+  await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="新建课程空间"]')!.click());
+  const input = container.querySelector<HTMLInputElement>('[aria-label="新课程名称"]')!;
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "课程 B");
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await act(async () => { button("创建").click(); await Promise.resolve(); });
+  expect(state.createCourse).toHaveBeenCalledWith("课程 B");
+  await act(async () => button("粘贴讲解").click());
+  const area = container.querySelector("textarea")!;
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(area, "先列出方程");
+    area.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  try {
+    await act(async () => button("保存讲解").click());
+    expect(JSON.parse(fetcher.mock.calls[0]![1]!.body as string)).toMatchObject({ courseId: "course-b" });
+  } finally {
+    await act(async () => finishRefresh({ courses, memberships: [] }));
+  }
+  expect(button("课程 B").getAttribute("aria-pressed")).toBe("true");
+});
+
+it("keeps the newly created course selected when its refresh fails", async () => {
+  // The initial organization read succeeds; only the post-create read fails.
+  state.read.mockReset().mockResolvedValueOnce({ courses: [{ id: "course-a", title: "课程 A", archived: false }], memberships: [] })
+    .mockRejectedValueOnce(new Error("refresh unavailable"))
+    .mockResolvedValue({ courses: [{ id: "course-b", title: "课程 B", archived: false }], memberships: [] });
+  const fetcher = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => Response.json({ sourceId: "saved", taskId: "task" }));
+  vi.stubGlobal("fetch", fetcher);
+  const planningApi = { listSources: async () => [], getPlanningSettings: async () => ({ settings: null }) } as unknown as OpeningApi;
+  await act(async () => root.render(createElement(LibraryView, { api: planningApi, courseId: "course-a" })));
+  await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="新建课程空间"]')!.click());
+  const input = container.querySelector<HTMLInputElement>('[aria-label="新课程名称"]')!;
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "课程 B");
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await act(async () => button("创建").click());
+  expect(container.textContent).toContain("课程已创建，但列表刷新失败");
+  await act(async () => button("粘贴讲解").click());
+  const area = container.querySelector("textarea")!;
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(area, "先列出方程");
+    area.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await act(async () => button("保存讲解").click());
+  expect(JSON.parse(fetcher.mock.calls[0]![1]!.body as string)).toMatchObject({ courseId: "course-b" });
+});
+
+it("keeps a newly created space selected when used without a parent course callback", async () => {
+  await render("course-a");
+  await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="新建课程空间"]')!.click());
+  const input = container.querySelector<HTMLInputElement>('[aria-label="新课程名称"]')!;
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "课程 B");
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await act(async () => button("创建").click());
+  expect(button("课程 B").getAttribute("aria-pressed")).toBe("true");
+});
 
 it("refreshes materials and course memberships after saving a pasted explanation", async () => {
   state.sources = [];
