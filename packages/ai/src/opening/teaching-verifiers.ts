@@ -929,11 +929,15 @@ const CJK_CLAUSE_CONNECTIVE = /^(?:所以|因此|于是|从而|进而|并且|而
 
 function isProseTextMacroBody(body: string): boolean {
   const trimmed = body.trim();
-  if (!trimmed) return true;
-  if (/[\u4e00-\u9fff\u3400-\u4dbf,;，；。:：()]/.test(trimmed)) return true;
-  const words = trimmed.split(/\s+/).filter(Boolean);
-  if (words.length >= 2) return true;
-  return words.some(word => PROSE_CONNECTIVE_WORD.test(word));
+  if (!trimmed) return false;
+  // Split only on pure clause punctuation / explicit prose connectives so units
+  // (e.g. \text{厘米}, \text{square cm}, \text{(cm)}, \text{in}) stay attached.
+  const stripped = trimmed.replace(/[,;，；。:：]/g, " ").trim();
+  if (!stripped) return true;
+  const tokens = stripped.split(/\s+/).filter(Boolean);
+  return tokens.length > 0 && tokens.every(token =>
+    PROSE_CONNECTIVE_WORD.test(token) || CJK_CLAUSE_CONNECTIVE.test(token),
+  );
 }
 
 function splitMultiClauseFormula(text: string): string[] {
@@ -1027,10 +1031,8 @@ function splitMultiClauseFormula(text: string): string[] {
       if (cjkMatch) {
         const word = cjkMatch[0];
         const nextIndex = i + word.length;
-        const before = text.slice(start, i);
-        const after = text.slice(nextIndex);
-        if (CJK_CLAUSE_CONNECTIVE.test(word) || (before.includes("=") && after.includes("="))) {
-          clauses.push(before);
+        if (CJK_CLAUSE_CONNECTIVE.test(word)) {
+          clauses.push(text.slice(start, i));
           start = nextIndex;
           i = nextIndex - 1;
           continue;

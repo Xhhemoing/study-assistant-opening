@@ -364,6 +364,7 @@ describe("teaching-verifiers", () => {
     ["reversed non-adjacent numeric contradiction in symbolic chain", String.raw`x = 3 = y = 1 + 1`, "1 + 1 = 3"],
     ["multi-clause implication contradiction in second clause", String.raw`1 + 1 = 2 \implies 2 + 2 = 5`, "2 + 2 = 5"],
     ["multi-clause inequality contradiction on RHS of <", String.raw`1 + 1 = 2 < 2 + 2 = 5`, "2 + 2 = 5"],
+    ["unit equation followed by arithmetic contradiction", "1 + 2 = 300 厘米, 1 + 1 = 5", "1 + 1 = 5"],
   ])("flags multiline LaTeX contradiction with real arithmetic probe (%s)", async (_label, latex, expectedDetail) => {
     const report = await verifyTeachingContent({
       activityId: ACT, publishInput: basePublish(), pack: packWithSupport(), keyClaims: [],
@@ -414,6 +415,15 @@ describe("teaching-verifiers", () => {
       String.raw`(x + 1)^2 = 4 \quad (x = 1)`,
       "1 米 + 2 = 300 厘米",
       String.raw`1 + 2 = 300 \text{ cm}`,
+      String.raw`1 + 2 = 300 \text{ 厘米}`,
+      String.raw`100 + 200 = 3 \text{ 米}`,
+      String.raw`1 + 2 = 1 \text{ 米} + 2 \text{ 米}`,
+      String.raw`1 + 2 = 300 \text{ square cm}`,
+      String.raw`1 + 2 = 300 \text{ (cm)}`,
+      String.raw`1 \text{ ft} = 12 \text{ in}`,
+      "1 + 2 = 300 厘米, 1 + 1 = 2",
+      "1 + 1 = 2 得到 2 + 2 = 4",
+      String.raw`3 \text{ 米} = 300 厘米 = 3000 毫米`,
     ]) {
       const unknownReport = await verifyTeachingContent({
         activityId: ACT, publishInput: basePublish(), pack: packWithSupport(), keyClaims: [],
