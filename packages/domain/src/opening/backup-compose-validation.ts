@@ -1,21 +1,10 @@
+import { OPENING_BACKUP_TABLE_SET as BACKUP_TABLES, OPTIONAL_ASSET_TABLES } from "./backup-inventory";
+import { isForbiddenBackupTable } from "../../../contracts/src/opening/backup-inventory";
 import { LEARNING_STATE_TABLES } from "./backup-learning-state";
 import type { OpeningBackupObject, OpeningDeletionMark } from "./backup-policy";
 import { isJournal, isUuid } from "./backup-validation";
 
-export const BACKUP_TABLES = new Set([
-  ...LEARNING_STATE_TABLES,
-  "course_goals", "course_goal_links", "goal_time_windows", "course_requirements",
-  "course_requirement_evidence_links", "opening_learning_asset_links",
-  "cards", "card_review_states", "learning_events",
-  "opening_sources", "opening_source_chunks", "opening_conversations", "opening_turns",
-  "opening_teaching_activities", "opening_teaching_units", "opening_teaching_activity_specs", "opening_learning_sessions", "opening_problem_refs", "opening_help_exposures",
-  "opening_learning_observations", "opening_skill_evidence", "opening_assistant_candidates", "opening_memories",
-  "opening_privacy_exclusions", "opening_tasks", "opening_plan_feedback", "opening_retest_activities", "opening_timetable_sessions", "opening_hard_blocks",
-  "opening_plan_state", "opening_plan_drafts", "opening_plan_acceptances", "opening_suggestion_feedback",
-  "opening_source_versions", "opening_learning_item_versions", "opening_learning_attempts",
-  "opening_learning_history_revisions", "opening_learning_activity_history_revisions", "opening_workspace_history_revisions",
-  "opening_learning_decisions", "opening_learning_shadow_predictions", "opening_study_intent_events",
-]);
+export { BACKUP_TABLES };
 
 const SHA256 = /^[0-9a-f]{64}$/i;
 
@@ -128,7 +117,7 @@ export function sourceVersionMap(
 /** Existing inventories stay complete; learning state and workspace history are additive. */
 export function validBackupTableSet(tables: Record<string, unknown[]>): boolean {
   const names = Object.keys(tables);
-  return names.every(name => BACKUP_TABLES.has(name))
-    && [...BACKUP_TABLES].every(name => (LEARNING_STATE_TABLES as readonly string[]).includes(name)
+  return names.every(name => !isForbiddenBackupTable(name) && BACKUP_TABLES.has(name))
+    && [...BACKUP_TABLES].every(name => OPTIONAL_ASSET_TABLES.has(name) || (LEARNING_STATE_TABLES as readonly string[]).includes(name)
       || name === "opening_study_intent_events" || name === "opening_learning_decisions" || name === "opening_learning_shadow_predictions" || name === "opening_suggestion_feedback" || name === "opening_plan_feedback" || name === "opening_workspace_history_revisions" || ["cards", "card_review_states", "learning_events", "course_goals", "course_goal_links", "goal_time_windows", "course_requirements", "course_requirement_evidence_links", "opening_learning_asset_links"].includes(name) || name in tables);
 }

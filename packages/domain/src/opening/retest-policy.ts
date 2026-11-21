@@ -6,6 +6,12 @@ export const DEFAULT_RETEST_DELAY_DAYS = 2;
 /** Small candidate batch cap for L02. */
 export const DEFAULT_RETEST_BATCH_LIMIT = 1;
 
+const DAY_MS = 86_400_000;
+
+function compareText(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
 function newCandidateId(): string {
   if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
   return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (character) => {
@@ -26,7 +32,7 @@ export function suggestRetestAt(occurredAt: string, delayDays: number): string {
   if (!Number.isFinite(delayDays) || delayDays < 0) {
     throw new Error(`invalid delayDays: ${delayDays}`);
   }
-  const ms = base + delayDays * 24 * 60 * 60 * 1000;
+  const ms = base + delayDays * DAY_MS;
   return new Date(ms).toISOString();
 }
 
@@ -49,17 +55,28 @@ export function buildRetestCandidates(
 ): RetestCandidate[] {
   const delayDays = input.delayDays ?? DEFAULT_RETEST_DELAY_DAYS;
   const limit = input.limit ?? DEFAULT_RETEST_BATCH_LIMIT;
-  const eligible = input.summaries.filter(
-    (s) => s.status === "needs_check" || s.status === "needs_review",
-  );
+  const nowMs = Date.parse(input.now);
+  const eligible = input.summaries
+    .filter((summary) => summary.status === "needs_check" || summary.status === "needs_review")
+    .map((summary) => {
+      const occurredAt = summary.lastObservedAt ?? input.now;
+      const ageMs = nowMs - Date.parse(occurredAt);
+      const elapsedMs = Number.isFinite(ageMs) ? Math.max(0, ageMs) : 0;
+      // Review gaps have half the base half-life. The common base cancels
+      // when comparing elapsed half-lives, even for sub-millisecond delays.
+      const weightedElapsedMs = elapsedMs * (summary.status === "needs_review" ? 2 : 1);
+      return { summary, occurredAt, weightedElapsedMs };
+    })
+    .sort((a, b) => b.weightedElapsedMs - a.weightedElapsedMs
+      || compareText(a.summary.skillLabel, b.summary.skillLabel)
+      || compareText(a.occurredAt, b.occurredAt));
 
   const out: RetestCandidate[] = [];
-  for (const summary of eligible) {
+  for (const { summary, occurredAt } of eligible) {
     if (out.length >= limit) break;
     const sourceIds = input.sourceIdsBySkill[summary.skillLabel] ?? [];
     const prompt = input.promptsBySkill[summary.skillLabel];
     if (!sourceIds.length || !prompt) continue;
-    const occurredAt = summary.lastObservedAt ?? input.now;
     out.push({
       id: newCandidateId(),
       courseId: input.courseId,

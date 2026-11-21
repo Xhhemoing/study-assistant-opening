@@ -216,7 +216,7 @@ export async function issueOpeningReservedQuestion(tx: TransactionSql, scope: Sc
     VALUES(${unitId},${scope.workspaceId},${scope.ownerUserId},${requirement.title},${documentId},1)`;
   await tx`INSERT INTO opening_teaching_activity_specs(id,workspace_id,owner_user_id,activity_id,teaching_unit_id,document_id,revision_number,block_order,source_refs,version)
     VALUES(${randomUUID()},${scope.workspaceId},${scope.ownerUserId},${activityId},${unitId},${documentId},1,${tx.json(order)},${tx.json(refs)},1)`;
-  await tx`UPDATE opening_teaching_activities SET content_version=1,generate_status='needs_check',updated_at=now()
+  await tx`UPDATE opening_teaching_activities SET content_version=1,generate_status='needs_check'
     WHERE id=${activityId} AND workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND content_version=0`;
   const { createOpeningLearningSessionInTx } = await import("./opening-learning-session-create");
   const { createOpeningLearningAttemptInTx } = await import("./opening-learning-attempts");

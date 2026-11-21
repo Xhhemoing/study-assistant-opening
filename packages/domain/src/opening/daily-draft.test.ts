@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { PlannedBlock, TaskItem, TimeBlock } from "@aistudy/contracts";
 import { buildDailyDraftInput } from "./daily-draft";
+import { carryOverTaskIds, planDay } from "./day-planner";
 
 const tz = "Asia/Shanghai";
 /** 2026-09-14 12:00 CST = 2026-09-14T04:00:00.000Z */
@@ -161,5 +162,42 @@ describe("buildDailyDraftInput", () => {
     });
     expect(result.orderedTaskIds).toEqual([id(2)]);
     expect(result.reasons[id(2)]?.code).toBe("carry_over_yesterday");
+    expect([...result.carryOverTaskIds]).toEqual([id(2)]);
+    expect((result.orderedTaskIds as { [carryOverTaskIds]?: ReadonlySet<string> })[carryOverTaskIds]?.has(id(2))).toBe(true);
+  });
+
+  it("ranks an end-of-local-day deadline ahead of undated carry-over and preserves carryOverTaskIds for planDay", () => {
+    const date = "2026-09-14", timeZone = "America/Los_Angeles";
+    const laNow = new Date("2026-09-15T06:00:00.000Z");
+    const carry = task(1, { priority: 5 });
+    const endOfDayDeadline = task(2, { priority: 1, dueAt: "2026-09-15T07:00:00.000Z" });
+    const soleSlot: TimeBlock[] = [{
+      start: "2026-09-15T06:30:00.000Z", end: "2026-09-15T07:00:00.000Z", kind: "free",
+    }];
+    const draftInput = buildDailyDraftInput({
+      tasks: [carry, endOfDayDeadline],
+      yesterdayAccepted: [{
+        taskId: carry.id, start: "2026-09-14T06:00:00.000Z", end: "2026-09-14T06:30:00.000Z", reason: "昨天",
+      }],
+      dueRetests: [],
+      freeBlocks: soleSlot,
+      now: laNow,
+      timeZone,
+      date,
+    });
+    expect(draftInput.orderedTaskIds).toEqual([endOfDayDeadline.id, carry.id]);
+    expect([...draftInput.carryOverTaskIds]).toEqual([carry.id]);
+    expect(draftInput.reasons[carry.id]?.code).toBe("carry_over_yesterday");
+    expect(draftInput.reasons[endOfDayDeadline.id]).toBeUndefined();
+
+    const planned = planDay([carry, endOfDayDeadline], soleSlot, {
+      localDate: date,
+      timeZone,
+      planningNow: laNow.toISOString(),
+      preferredOrder: draftInput.orderedTaskIds,
+      carryOverTaskIds: draftInput.carryOverTaskIds,
+    });
+    expect(planned.blocks.map((block) => block.taskId)).toEqual([endOfDayDeadline.id]);
+    expect(planned.unscheduledTaskIds).toEqual([carry.id]);
   });
 });

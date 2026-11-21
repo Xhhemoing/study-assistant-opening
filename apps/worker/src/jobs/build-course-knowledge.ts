@@ -1,4 +1,4 @@
-import { openingJobScope } from "@aistudy/database";
+import { knowledgeChunkDigests, openingJobScope } from "@aistudy/database";
 import { randomUUID } from "node:crypto";
 import type {
   KnowledgeEdge,
@@ -46,6 +46,7 @@ export type BuildCourseKnowledgeDeps = {
       expectedVersion: number;
       expectedReferencedNodeIds?: readonly string[];
       extractedSourceVersions?: Record<string, number>;
+      extractedChunkDigests?: Record<string, string>;
       snapshot: KnowledgeSnapshot;
       sourceVersions: Record<string, number>;
     },
@@ -225,6 +226,7 @@ export function createBuildCourseKnowledgeHandler(deps: BuildCourseKnowledgeDeps
       (chunk) => chunk.courseId === body.courseId && Boolean(chunk.text?.trim()),
     );
     const coveredSourceVersions = sourceVersionsFromChunks(chunks);
+    const extractedChunkDigests = knowledgeChunkDigests(chunks);
     const batches = knowledgeExtractionBatches(chunks), extracted: KnowledgeSnapshot[] = [];
     const chapterEdges: ExtractedGraph["edges"] = [];
     for (const batch of batches) {
@@ -265,6 +267,7 @@ export function createBuildCourseKnowledgeHandler(deps: BuildCourseKnowledgeDeps
         expectedVersion: baseVersion,
         ...(deps.listReferencedNodeIds ? { expectedReferencedNodeIds: baseReferenced } : {}),
         extractedSourceVersions: coveredSourceVersions,
+        extractedChunkDigests,
         snapshot: validated,
         sourceVersions,
       });
@@ -294,13 +297,14 @@ export function createBuildCourseKnowledgeHandler(deps: BuildCourseKnowledgeDeps
         latestReferenced,
       );
     }
+    const committedCoverage = saved.snapshot.coveredSourceVersions ?? coveredSourceVersions;
     if (deps.onBuildCompleted) {
       try {
-        await deps.onBuildCompleted(scope, body.courseId, coveredSourceVersions);
+        await deps.onBuildCompleted(scope, body.courseId, committedCoverage);
       } catch {
         // Best-effort post-build reconciliation; saved snapshot is already durable.
       }
     }
-    return { version: saved.version, snapshot: saved.snapshot, coveredSourceVersions };
+    return { version: saved.version, snapshot: saved.snapshot, coveredSourceVersions: committedCoverage };
   };
 }

@@ -52,6 +52,11 @@ describe("loadWorkerEnv", () => {
     expect(() => loadWorkerEnv({ ...configured, S3_FORCE_PATH_STYLE: "yes" })).toThrow(/S3_FORCE_PATH_STYLE/);
   });
 
+  it.each([["logistics", "logistics"], ["teaching", "teaching"], [" tutor ", "teaching"]])(
+    "resolves WORKER_ROLE=%s to the canonical chamber %s", (role, expected) => {
+      expect(loadWorkerEnv({ ...configured, NODE_ENV: "production", WORKER_ROLE: role }).workerRole).toBe(expected);
+    });
+
   it("accepts trimmed roles and rejects accidental role typos in production", () => {
     expect(loadWorkerEnv({ ...configured, NODE_ENV: "production", WORKER_ROLE: " learning " }).workerRole).toBe("learning");
     expect(loadWorkerEnv({ WORKER_ROLE: " " }).workerRole).toBe("all");

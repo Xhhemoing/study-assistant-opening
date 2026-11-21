@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { loadEnv, loadOpeningUploadQuota, loadOpeningAutoGradeDailyCap, EnvValidationError } from "./env";
 import { loadOpeningModel, loadOpeningTutorConfig } from "./opening-model";
-import { loadFeatureSwitches, resolveCapabilities } from "./server-config";
+import { loadFeatureSwitches, loadServerConfig, resolveCapabilities } from "./server-config";
 import { loadOpeningEmbeddingConfig } from "./opening-embedding";
 import { loadWorkerEnv } from "./worker-env";
 import { loadWorkerStartupConfig } from "./worker-startup";
@@ -18,6 +18,7 @@ it("defaults auto grading to 50 and rejects malformed or out-of-range caps", () 
 });
 
 it("SenseWeave beta allowlist and gating configuration fail closed", () => {
+  expect(resolveCapabilities(loadFeatureSwitches({}), "private-account").chatSenseWeave).toBe("off");
   expect(() => loadFeatureSwitches({ OPENING_CHAT_SENSEWEAVE_BETA_USERS: "*" })).toThrow(EnvValidationError);
   const caps = resolveCapabilities(loadFeatureSwitches({ OPENING_CHAT_SENSEWEAVE: "on", OPENING_CHAT_SENSEWEAVE_BETA_USERS: "private-account" }), "private-account");
   expect(caps.chatSenseWeave).toBe("on");
@@ -119,6 +120,12 @@ describe("loadEnv", () => {
     expect(env.authSecret).toBe(valid.AUTH_SECRET);
     expect(env.sessionTtlSeconds).toBe(604800);
     expect(env.sessionCookieSecure).toBe(false);
+  });
+
+  it("allows existing knowledge edge rollback values at web startup", () => {
+    for (const value of ["off", "false", "0"]) {
+      expect(() => loadServerConfig({ ...valid, OPENING_ASSET_GRAPH_KNOWLEDGE_EDGE_DETAILS: value }, "web")).not.toThrow();
+    }
   });
 
   it("uses secure session cookies by default in production and accepts an explicit override", () => {

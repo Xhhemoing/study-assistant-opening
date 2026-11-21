@@ -1,5 +1,6 @@
 /** Restored bytes never carry server scoring authority, even on a historical revision. */
 export function normalizeOpeningImportedEvaluation(table: string, row: Record<string, unknown>): Record<string, unknown> {
+  if (table === "opening_exam_help_receipts") return { ...row, content_snapshot: null };
   if (table === "course_goals") return { ...row, active: false,
     lifecycle: ["archived", "stopped"].includes(String(row.lifecycle)) ? row.lifecycle : "paused" };
   if (table === "course_requirements") return { ...row, approved_at: null };
@@ -26,6 +27,12 @@ export function normalizeOpeningImportedEvaluation(table: string, row: Record<st
   }
   if (table === "opening_learning_attempts" && record(row.create_intent)) {
     const intent = { ...row.create_intent };
+    if (record(intent.examSprint)) {
+      const exam = { ...intent.examSprint };
+      delete exam.partSnapshot;
+      delete exam.spec;
+      intent.examSprint = exam;
+    }
     delete intent.spanCourseBinding;
     return { ...row, create_intent: intent };
   }

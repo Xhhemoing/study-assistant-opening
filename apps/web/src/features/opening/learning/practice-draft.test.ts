@@ -1,15 +1,26 @@
+// @vitest-environment jsdom
+import { act, createElement } from "react";
+import { createRoot, type Root } from "react-dom/client";
 import { describe, expect, it, vi } from "vitest";
 import type { LearningAttempt, LearningObservation } from "@aistudy/contracts";
 import type { createOpeningLearningClient } from "../client/learning-client";
 import { learningObservation } from "../../../../../../packages/domain/src/opening/learning-summary-fixtures";
 import { getSpanProblem } from "@aistudy/domain";
-import { assertPracticeAttempt, emptyPracticeDraft, parsePracticeDraft, patchPracticeDraft, practiceScope, readPracticeDraft, readPracticeRecord, restoredPracticeAssistance, runPracticeRequest, writePracticeDraft } from "./practice-draft";
+import { assertPracticeAttempt, emptyPracticeDraft, parsePracticeDraft, parsePracticeDraftCollection, patchPracticeDraft, practiceScope, readPartitionedPracticeDraftCollection, readPracticeDraft, readPracticeDraftCollection, readPracticeRecord, restoredPracticeAssistance, runPracticeRequest, usePracticeDraft, writePracticeDraft } from "./practice-draft";
+
+Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
 const courseId = "33333333-3333-4333-8333-333333333333";
 const sessionId = "22222222-2222-4222-8222-222222222222";
 const attemptId = "44444444-4444-4444-8444-444444444444";
 const sourceId = "55555555-5555-4555-8555-555555555555";
 const retestId = "66666666-6666-4666-8666-666666666666";
+
+function matrixDraft(scope: string, variant: number, answer = "matrix answer") {
+  const clientKey = `matrix-start:${crypto.randomUUID()}`;
+  return { ...emptyPracticeDraft(scope, { sourceId, matrixMode: true, matrixKey: "addition", matrixVariant: variant, answer }),
+    start: { sessionId, clientKey, createInput: { sessionId, clientKey, matrixExercise: { sourceId, exerciseKey: "addition" as const, variant } }, sessionInput: { courseId, sourceIds: [sourceId], skillLabel: "矩阵加法" } } };
+}
 const attempt: LearningAttempt = { id: attemptId, workspaceId: courseId, sessionId, courseId, skillLabel: "矩阵", requirementKey: null, problemId: null, itemVersionId: null, sourceIds: [], sourceVersions: {}, startedAt: "2026-10-18T00:00:00.000Z", submittedAt: null, observationId: null, historyRevision: 0 };
 type Client = ReturnType<typeof createOpeningLearningClient>;
 
@@ -18,6 +29,40 @@ function checkpoint(scope = practiceScope(courseId, "ordinary")) {
     start: { clientKey: "start-original-key", sessionId, sessionInput: { courseId, skillLabel: "矩阵", sourceIds: [] }, createInput: { sessionId, clientKey: "start-original-key" } },
     submission: { attemptId, input: { clientKey: "answer-original-key", answer: "[[1,2]]", assistance: "independent" as const, outcome: "unverified" as const } } };
 }
+
+it("keeps a moved matrix archive hidden after a concurrent source refresh canonicalizes its draft", async () => {
+  const source = practiceScope(courseId, "matrix", null, undefined, undefined, { sourceId, exerciseKey: "addition", variant: 2 });
+  const target = practiceScope(courseId, "matrix", null, undefined, undefined, { sourceId, exerciseKey: "addition", variant: 3 });
+  const current = emptyPracticeDraft(source, { matrixMode: true, sourceId, matrixKey: "addition", matrixVariant: 2 });
+  const archived = matrixDraft(source, 3, "archived answer");
+  const other = emptyPracticeDraft(source, { matrixMode: true, sourceId, matrixKey: "addition", matrixVariant: 2, answer: "another editor" });
+  const moved = parsePracticeDraft({ ...archived, scope: target }, target)!;
+
+  window.sessionStorage.clear();
+  expect(writePracticeDraft(current, window.sessionStorage)).toBe(true);
+  expect(writePracticeDraft(archived, window.sessionStorage)).toBe(true);
+  const cached = readPracticeDraftCollection(source, null)!;
+  const canonical = parsePracticeDraftCollection(cached, source)!;
+  window.sessionStorage.setItem(`opening-practice:v2:${source}`, JSON.stringify({ ...canonical, activeId: other.id, drafts: [...canonical.drafts, other] }));
+  window.sessionStorage.setItem(`opening-practice:v2:${target}`, JSON.stringify({ version: 2, scope: target, activeId: moved.id, drafts: [moved] }));
+
+  let host: HTMLDivElement | undefined;
+  let root: Root | undefined;
+  const targetFor = () => target;
+  function Probe() {
+    const continuity = usePracticeDraft(source, {}, undefined, targetFor);
+    return createElement("output", null, continuity.drafts.map(draft => draft.id).join("|"));
+  }
+  try {
+    host = document.createElement("div"); document.body.append(host); root = createRoot(host);
+    await act(async () => { root!.render(createElement(Probe)); });
+    expect(host.textContent).toContain(other.id);
+    expect(host.textContent).not.toContain(archived.id);
+  } finally {
+    if (root) await act(async () => root!.unmount());
+    host?.remove();
+  }
+});
 
 it("restores unsent input and frozen request identities without accepting stored server results", () => {
   const draft = checkpoint();
@@ -51,11 +96,75 @@ it("rejects a matrix request changed to a different variant or material", () => 
 it("keeps the newest document checkpoint when storage writes fail but old reads still succeed", () => {
   const scope = practiceScope(courseId, "ordinary", { retestId, skillLabel: "quota-test", prompt: crypto.randomUUID() });
   const stale = emptyPracticeDraft(scope, { answer: "old" });
-  const current = emptyPracticeDraft(scope, { answer: "latest unsent answer" });
-  const storage = { getItem: vi.fn(() => JSON.stringify(stale)), setItem: vi.fn(() => { throw new Error("quota"); }) };
+  const current = { ...stale, fields: { ...stale.fields, answer: "latest unsent answer" } };
+  const bytes = JSON.stringify({ version: 2, scope, activeId: stale.id, drafts: [stale] });
+  const storage = { getItem: () => bytes, setItem: () => { throw new Error("quota"); } };
   expect(writePracticeDraft(current, storage)).toBe(false);
   expect(readPracticeDraft(scope, storage)?.fields.answer).toBe("latest unsent answer");
-  expect(storage.getItem).not.toHaveBeenCalled();
+});
+
+it("keeps the newer manual selection and moves legacy answers in shelf order on a matrix-first read", () => {
+  const ordinary = practiceScope(courseId, "ordinary");
+  const manual = practiceScope(courseId, "manual");
+  const saved = checkpoint(ordinary);
+  const archived = emptyPracticeDraft(ordinary, { answer: "archived manual answer" });
+  const matrix = emptyPracticeDraft(ordinary, { matrixMode: true, answer: "matrix answer" });
+  const current = emptyPracticeDraft(manual, { answer: "newer manual answer" });
+  const stored = new Map([
+    [`opening-practice:v2:${ordinary}`, JSON.stringify({ version: 2, scope: ordinary, activeId: saved.id, drafts: [archived, matrix, saved] })],
+    [`opening-practice:v2:${manual}`, JSON.stringify({ version: 2, scope: manual, activeId: current.id, drafts: [current] })],
+  ]);
+  const storage = {
+    getItem: (key: string) => stored.get(key) ?? null,
+    setItem: (key: string, value: string) => { stored.set(key, value); },
+    removeItem: (key: string) => { stored.delete(key); },
+  };
+  const scopes = { ordinary, manual };
+  const matrixFallback = emptyPracticeDraft(ordinary, { matrixMode: true });
+  const manualFallback = emptyPracticeDraft(manual);
+
+  expect(readPartitionedPracticeDraftCollection(scopes, matrixFallback, storage)).toMatchObject({ activeId: matrix.id, drafts: [matrix] });
+  expect(readPartitionedPracticeDraftCollection(scopes, manualFallback, storage)).toMatchObject({
+    activeId: current.id, drafts: [current, { ...archived, scope: manual }, { ...saved, scope: manual }],
+  });
+});
+
+it("retries a v1 migration after source cleanup fails without creating a second draft", async () => {
+  const course = crypto.randomUUID();
+  const ordinary = practiceScope(course, "ordinary");
+  const manual = practiceScope(course, "manual");
+  const legacy = { ...emptyPracticeDraft(ordinary, { answer: "original answer" }), id: undefined };
+  const oldKey = `opening-practice:v1:${ordinary}`;
+  const manualKey = `opening-practice:v2:${manual}`;
+  const stored = new Map([[oldKey, JSON.stringify(legacy)]]);
+  let blockCleanup = true;
+  const storage = {
+    getItem: (key: string) => stored.get(key) ?? null,
+    setItem: (key: string, value: string) => { stored.set(key, value); },
+    removeItem: (key: string) => {
+      if (key === oldKey && blockCleanup) throw new Error("cleanup failed");
+      stored.delete(key);
+    },
+  };
+  const scopes = { ordinary, manual };
+  const fallback = emptyPracticeDraft(manual);
+  const loaded = readPartitionedPracticeDraftCollection(scopes, fallback, storage);
+  const copied = JSON.parse(stored.get(manualKey)!);
+  expect(loaded).toEqual(copied);
+  expect(copied.drafts).toHaveLength(1);
+  expect(copied.drafts[0].fields.answer).toBe("original answer");
+  expect(stored.has(oldKey)).toBe(true);
+
+  blockCleanup = false;
+  vi.resetModules();
+  const reloaded = await import("./practice-draft-storage");
+  expect(reloaded.readPartitionedPracticeDraftCollection(scopes, fallback, storage)).toEqual(copied);
+  expect([...stored.keys()]).toEqual([manualKey]);
+  stored.delete(manualKey);
+
+  vi.resetModules();
+  const afterDeletion = await import("./practice-draft-storage");
+  expect(afterDeletion.readPartitionedPracticeDraftCollection(scopes, fallback, storage)).toBeNull();
 });
 
 it("joins an existing in-flight request during route remount and retains its identity", async () => {

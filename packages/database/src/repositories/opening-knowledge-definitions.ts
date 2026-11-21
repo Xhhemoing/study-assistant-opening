@@ -1,44 +1,112 @@
-import { knowledgeSnapshotSchema, type Scope, type SourceChunk } from "@aistudy/contracts";
-import { knowledgeNodeDefinition } from "@aistudy/domain";
+import type { Scope, SourceChunk } from "@aistudy/contracts";
+import { knowledgeDefinitionHeader, knowledgeNodeDefinition, serializeKnowledgeEvidence } from "@aistudy/domain";
 import type { TransactionSql } from "postgres";
+import { storedKnowledgeSnapshotSchema } from "./opening-knowledge-snapshot";
+
+const definitionPatchByteLimit = 256 * 1024;
+
+async function readCitedChunk(tx: TransactionSql, scope: Scope, courseId: string, id: string) {
+  // Read one text at a time. A single existing chunk can itself exceed 256 KiB in UTF-8.
+  const [chunk] = await tx<SourceChunk[]>`SELECT c.id,c.source_id AS "sourceId",c.source_version AS "sourceVersion",
+    c.page,c.slide_label AS "slideLabel",c.start_ms AS "startMs",c.end_ms AS "endMs",c.text,c.image_object_key AS "imageObjectKey"
+    FROM opening_source_chunks c
+    JOIN opening_sources s ON s.id=c.source_id AND s.workspace_id=${scope.workspaceId} AND s.upload_state='uploaded'
+    JOIN opening_source_versions v ON v.source_id=s.id AND v.workspace_id=s.workspace_id
+      AND v.version=c.source_version AND v.availability='available'
+    JOIN course_asset_memberships m ON m.workspace_id=s.workspace_id AND m.course_id=${courseId}
+      AND m.asset_type='source' AND m.asset_id=s.id
+    JOIN opening_course_knowledge graph ON graph.workspace_id=s.workspace_id AND graph.course_id=m.course_id
+      AND graph.owner_user_id=${scope.ownerUserId}
+    WHERE c.id=${id} AND c.source_version::text=graph.source_versions->>s.id::text
+      AND NOT EXISTS(SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=s.workspace_id AND e.source_id=s.id)
+    FOR SHARE OF c,s,v,m`;
+  return chunk?.id === id ? chunk : undefined;
+}
 
 /** Upgrade pre-definition graphs before the parser replaces their evidence UUIDs.
  * Workspace → graph → source/chunks matches graph publication and privacy writes. */
-export async function preserveOpeningKnowledgeDefinitions(tx: TransactionSql, scope: Scope, sourceId: string): Promise<void> {
+export async function preserveOpeningKnowledgeDefinitions(tx: TransactionSql, scope: Scope, sourceId: string, sourceVersion: number): Promise<void> {
   const [owner] = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} FOR SHARE`;
   if (!owner) throw new Error("workspace not found");
-  const graphs = await tx`SELECT course_id,snapshot,source_versions,node_definitions FROM opening_course_knowledge
-    WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND source_versions ? ${sourceId}
-    ORDER BY course_id FOR UPDATE`;
-  for (const graph of graphs) {
-    const parsed = knowledgeSnapshotSchema.safeParse(graph.snapshot);
-    if (!parsed.success || parsed.data.courseId !== graph.course_id) continue;
-    const definitions = { ...graph.node_definitions as Record<string, string> };
-    const missing = parsed.data.nodes.filter(node => !definitions[node.id] && node.evidenceChunkIds.length);
-    if (!missing.length) continue;
-    const ids = [...new Set(missing.flatMap(node => node.evidenceChunkIds))];
-    const rows = await tx`SELECT c.* FROM opening_source_chunks c
-      JOIN opening_sources s ON s.id=c.source_id AND s.workspace_id=${scope.workspaceId} AND s.upload_state='uploaded'
-      JOIN opening_source_versions v ON v.source_id=s.id AND v.workspace_id=s.workspace_id
-        AND v.version=c.source_version AND v.availability='available'
-      JOIN course_asset_memberships m ON m.workspace_id=s.workspace_id AND m.course_id=${String(graph.course_id)}
-        AND m.asset_type='source' AND m.asset_id=s.id
-      WHERE c.id=ANY(${ids}::uuid[])
-        AND c.source_version::text=${tx.json(graph.source_versions as Record<string, number>)}->>s.id::text
-        AND NOT EXISTS(SELECT 1 FROM opening_privacy_exclusions e WHERE e.workspace_id=s.workspace_id AND e.source_id=s.id)
-      FOR SHARE OF c,s,v,m`;
-    const chunks: SourceChunk[] = rows.map(row => ({ id: String(row.id), sourceId: String(row.source_id), sourceVersion: Number(row.source_version),
-      page: row.page == null ? null : Number(row.page), slideLabel: row.slide_label as string | null,
-      startMs: row.start_ms == null ? null : Number(row.start_ms), endMs: row.end_ms == null ? null : Number(row.end_ms),
-      text: typeof row.text === "string" ? row.text : "", imageObjectKey: row.image_object_key as string | null }));
-    const replacing = new Set(chunks.filter(chunk => chunk.sourceId === sourceId).map(chunk => chunk.id));
-    let changed = false;
-    for (const node of missing) {
-      if (!node.evidenceChunkIds.some(id => replacing.has(id))) continue;
-      const definition = knowledgeNodeDefinition(node, chunks);
-      if (definition) { definitions[node.id] = definition; changed = true; }
+  const graphs = await tx<{ course_id: string; node_indexes: number[] }[]>`SELECT graph.course_id, missing.node_indexes
+    FROM opening_course_knowledge graph
+    CROSS JOIN LATERAL (
+      SELECT array_agg((node.position - 1)::int ORDER BY node.position) AS node_indexes
+      FROM jsonb_array_elements(CASE WHEN jsonb_typeof(graph.snapshot->'nodes')='array'
+        THEN graph.snapshot->'nodes' ELSE '[]'::jsonb END) WITH ORDINALITY AS node(value,position)
+      WHERE COALESCE(graph.node_definitions->(node.value->>'id'), 'null'::jsonb)
+        IN ('null'::jsonb, '""'::jsonb, 'false'::jsonb, '0'::jsonb)
+        AND EXISTS (
+          SELECT 1 FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(node.value->'evidenceChunkIds')='array'
+            THEN node.value->'evidenceChunkIds' ELSE '[]'::jsonb END) AS cited(id)
+          JOIN opening_source_chunks c ON c.id=CASE WHEN pg_input_is_valid(cited.id, 'uuid') THEN cited.id::uuid END
+          WHERE c.source_id=${sourceId} AND c.source_version=${sourceVersion}
+        )
+    ) missing
+    WHERE graph.workspace_id=${scope.workspaceId} AND graph.owner_user_id=${scope.ownerUserId}
+      AND graph.source_versions->>${sourceId}=${String(sourceVersion)} AND missing.node_indexes IS NOT NULL
+    ORDER BY graph.course_id FOR UPDATE OF graph`;
+  let evidenceStageReady = false;
+  for (const { course_id: courseId, node_indexes: nodeIndexes } of graphs) {
+    const [graph] = await tx`SELECT snapshot FROM opening_course_knowledge
+      WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND course_id=${courseId}`;
+    const parsed = storedKnowledgeSnapshotSchema.safeParse(graph?.snapshot);
+    if (!parsed.success || parsed.data.courseId !== courseId) continue;
+
+    let patch: Record<string, string> = {};
+    let patchCount = 0;
+    let patchBytes = 0;
+    const flush = async () => {
+      if (!patchCount) return;
+      await tx`UPDATE opening_course_knowledge SET node_definitions=node_definitions || ${tx.json(patch)}::jsonb
+        WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND course_id=${courseId}`;
+      patch = {};
+      patchCount = 0;
+      patchBytes = 0;
+    };
+
+    for (const index of nodeIndexes) {
+      const node = parsed.data.nodes[index]!;
+      const evidenceIds = new Set(node.evidenceChunkIds);
+      if (evidenceIds.size === 1) {
+        const chunk = await readCitedChunk(tx, scope, courseId, node.evidenceChunkIds[0]!);
+        const definition = chunk && knowledgeNodeDefinition(node, [chunk]);
+        if (!definition) continue;
+        const bytes = Buffer.byteLength(JSON.stringify(definition)) + node.id.length + 4;
+        if (patchCount === 16 || patchBytes + bytes > definitionPatchByteLimit) await flush();
+        patch[node.id] = definition;
+        patchCount++;
+        patchBytes += bytes;
+        continue;
+      }
+
+      // A single definition can cite every page. Keep its serialized evidence in
+      // PostgreSQL, using UTF-16 sort keys to match JavaScript's exact definition format.
+      await flush();
+      if (!evidenceStageReady) {
+        await tx`CREATE TEMP TABLE opening_legacy_knowledge_evidence (content text, sort_key bytea) ON COMMIT DROP`;
+        evidenceStageReady = true;
+      }
+      let complete = true;
+      for (const id of evidenceIds) {
+        const chunk = await readCitedChunk(tx, scope, courseId, id);
+        const content = chunk && serializeKnowledgeEvidence(chunk);
+        if (!content) { complete = false; break; }
+        const sortKey = Buffer.from(content, "utf16le").swap16();
+        await tx`INSERT INTO pg_temp.opening_legacy_knowledge_evidence (content,sort_key) VALUES (${content},${sortKey})`;
+      }
+      if (complete) {
+        const header = JSON.stringify(knowledgeDefinitionHeader(node)).slice(0, -1);
+        await tx`UPDATE opening_course_knowledge SET node_definitions=node_definitions || jsonb_build_object(
+            ${node.id}::text, ${header}::text || ',[' || (
+              SELECT string_agg(to_json(content)::text, ',' ORDER BY sort_key)
+              FROM (SELECT DISTINCT ON (sort_key) content,sort_key FROM pg_temp.opening_legacy_knowledge_evidence
+                ORDER BY sort_key) evidence
+            ) || ']]')
+          WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND course_id=${courseId}`;
+      }
+      await tx`TRUNCATE pg_temp.opening_legacy_knowledge_evidence`;
     }
-    if (changed) await tx`UPDATE opening_course_knowledge SET node_definitions=${tx.json(definitions)}
-      WHERE workspace_id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId} AND course_id=${String(graph.course_id)}`;
+    await flush();
   }
 }

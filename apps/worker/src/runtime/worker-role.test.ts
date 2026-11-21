@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { loadWorkerEnv } from "@aistudy/config";
 import { OPENING_QUEUE_KINDS } from "./queue";
-import { prepareWorkerRole, reconcileParserConsumers } from "./worker-role";
+import { parseWorkerRole, prepareWorkerRole, reconcileParserConsumers } from "./worker-role";
 import { createParserHealthLease } from "./parser-health-lease";
 
 const unconfigured = { status: "not_configured", directoryConfigured: false, directoryExists: false, missingFiles: [], inferenceMs: null } as const;
@@ -118,5 +118,36 @@ describe("worker parser isolation", () => {
       await reconcileParserConsumers(consumers, lease.isCurrent, () => true);
       expect(consumers.map(c => c.resume.mock.calls.length)).toEqual(before);
     } finally { lease.stop(); }
+  });
+});
+
+describe("explicit chamber roles", () => {
+  it("parses the raw WORKER_ROLE using the legacy default and rejects unknown roles", async () => {
+    for (const value of [undefined, "", "  "]) expect(parseWorkerRole(value)).toBe("all");
+    for (const role of ["all", "parser", "learning", "logistics", "teaching"]) {
+      expect(parseWorkerRole(`  ${role} `)).toBe(role);
+    }
+    const report = health();
+    await expect(prepareWorkerRole("logistic", vi.fn(), report)).rejects.toThrow(/WORKER_ROLE/);
+    expect(report.probe).not.toHaveBeenCalled();
+  });
+
+  it("splits legacy learning consumers into logistical batch work and teaching", async () => {
+    const check = vi.fn(), report = health();
+    const logistics = await prepareWorkerRole(" logistics ", check, report);
+    const teaching = await prepareWorkerRole("teaching", check, report);
+    const learning = await prepareWorkerRole("learning", check, report);
+    expect([...logistics.queueKinds]).toEqual(["remind", "build-course-knowledge", "extract-study-actions", "index-source"]);
+    expect((await prepareWorkerRole("tutor", check, report)).queueKinds).toEqual(teaching.queueKinds);
+    expect(teaching.queueKinds.has("grade-observation")).toBe(true);
+    expect(teaching.queueKinds.has("retest")).toBe(true);
+    expect([...logistics.queueKinds, ...teaching.queueKinds].sort()).toEqual([...learning.queueKinds].sort());
+    for (const runtime of [logistics, teaching]) {
+      expect(runtime.parserRunner).toBeNull();
+      expect(runtime.refreshParserHealth).toBeNull();
+      expect(runtime.parserOcrHealth).toBeNull();
+    }
+    expect(check).not.toHaveBeenCalled();
+    expect(report.probe).not.toHaveBeenCalled();
   });
 });

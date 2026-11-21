@@ -3,12 +3,14 @@ import type { CourseGoal, PlannedBlock, PlanningAutonomy, SuggestedTask, TaskIte
 import {
   ADAPTIVE_STRATEGY_VERSION,
   availableTimeSlots,
+  carryOverTaskIds,
   planDay,
   proposeAdaptiveTasks,
   rankForPlan,
   suggestionsAsTasks,
   type LearnerSnapshot,
   type PlanDayOptions,
+  type PreferredTaskOrder,
 } from "@aistudy/domain";
 import type { AdaptiveDraftInput } from "@aistudy/database";
 
@@ -28,7 +30,7 @@ export type BuildAdaptiveDraftInput = {
   date: string;
   timeZone: string;
   now: Date;
-  planDayOptions(preferredOrder: readonly string[]): PlanDayOptions;
+  planDayOptions(preferredOrder: PreferredTaskOrder, carryOverTaskIds?: ReadonlySet<string>): PlanDayOptions;
   suppressedSuggestionIdentities?: readonly string[];
 };
 
@@ -64,8 +66,17 @@ export function buildAdaptiveDraft(input: BuildAdaptiveDraftInput): {
     .filter((course): course is typeof course & { goal: CourseGoal } => course.goal !== null)
     .map(course => [course.courseId, course.goal]));
   const rankInput = { tasks, yesterdayAccepted, date, timeZone, now, courseGoals };
-  const optionsFor = (preferredOrder: readonly string[]): PlanDayOptions => {
-    const options = { ...input.planDayOptions(preferredOrder) };
+  const optionsFor = (
+    preferredOrder: readonly string[],
+    carryOver?: ReadonlySet<string>,
+  ): PlanDayOptions => {
+    const order: PreferredTaskOrder = carryOver !== undefined
+      ? Object.defineProperty([...preferredOrder], carryOverTaskIds, { value: carryOver })
+      : preferredOrder;
+    const options = { ...input.planDayOptions(order, carryOver) };
+    if (carryOver !== undefined) {
+      options.carryOverTaskIds = carryOver;
+    }
     // Leave one minute to review and confirm before acceptance.
     if (options.planningNow) {
       options.planningNow = new Date(Math.ceil((Date.parse(options.planningNow) + 60_000) / 60_000) * 60_000).toISOString();
@@ -87,10 +98,17 @@ export function buildAdaptiveDraft(input: BuildAdaptiveDraftInput): {
       courseId, skillLabel: null, reasonCode: "new_skill", reason: "budget-probe",
     };
     const ranked = rankForPlan({ ...rankInput, suggestions: [...suggestions, probe] });
-    const earlierIds = ranked.orderedTaskIds.slice(0, ranked.orderedTaskIds.indexOf(probe.id));
+    const probeIndex = ranked.orderedTaskIds.indexOf(probe.id);
+    const earlierIds = probeIndex === -1
+      ? [...ranked.orderedTaskIds]
+      : ranked.orderedTaskIds.slice(0, probeIndex);
+    const earlierSet = new Set(earlierIds);
+    const earlierCarryOver = new Set(
+      [...ranked.carryOverTaskIds].filter((id) => earlierSet.has(id)),
+    );
     const byId = new Map([...ownById, ...suggestionsAsTasks(suggestions).map(task => [task.id, task] as const)]);
     const earlierTasks = earlierIds.map(id => byId.get(id)).filter((task): task is TaskItem => Boolean(task));
-    const reserved = planDay(earlierTasks, remainingFree, optionsFor(earlierIds));
+    const reserved = planDay(earlierTasks, remainingFree, optionsFor(earlierIds, earlierCarryOver));
     const minutes = reserved.blocks.reduce((sum, block) => sum + (Date.parse(block.end) - Date.parse(block.start)) / 60_000, 0);
     const slots = availableTimeSlots([...remainingFree, ...reserved.blocks.map(block => ({
       start: block.start, end: block.end, kind: "locked" as const,
@@ -124,7 +142,7 @@ export function buildAdaptiveDraft(input: BuildAdaptiveDraftInput): {
   const ordered = ranked.orderedTaskIds
     .map((id) => byId.get(id))
     .filter((task): task is TaskItem => Boolean(task));
-  const planned = planDay(ordered, input.freeBlocks, optionsFor(ranked.orderedTaskIds));
+  const planned = planDay(ordered, input.freeBlocks, optionsFor(ranked.orderedTaskIds, ranked.carryOverTaskIds));
   return {
     blocks: planned.blocks.map((block) => {
       const reason = ranked.reasons[block.taskId];

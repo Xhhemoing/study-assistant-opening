@@ -10,9 +10,9 @@ vi.mock("next/navigation", () => ({
 afterEach(() => { vi.unstubAllEnvs(); vi.clearAllMocks(); });
 
 describe("registration page", () => {
-  it("shows the closed registration page in opening release without redirecting", () => {
+  it("shows the closed registration page in opening release without redirecting", async () => {
     vi.stubEnv("OPENING_RELEASE", "1");
-    const html = renderToStaticMarkup(RegisterPage());
+    const html = renderToStaticMarkup(await RegisterPage({ searchParams: Promise.resolve({}) }));
     expect(redirect).not.toHaveBeenCalled();
     expect(html).toContain("创建你的学习空间");
     expect(html).toContain("当前版本仅对已有账户开放。");
@@ -21,9 +21,9 @@ describe("registration page", () => {
     expect(html).toContain('href="/login"');
   });
 
-  it("enables registration outside opening release with accessible field constraints", () => {
+  it("enables registration outside opening release with accessible field constraints", async () => {
     vi.stubEnv("OPENING_RELEASE", "0");
-    const html = renderToStaticMarkup(RegisterPage());
+    const html = renderToStaticMarkup(await RegisterPage({ searchParams: Promise.resolve({}) }));
     expect(html).not.toContain('disabled=""');
     expect(html).not.toContain("注册暂未开放");
     const inputs = Object.fromEntries([...html.matchAll(/<input\b[^>]*\bname="([^"]+)"[^>]*>/g)].map(([tag, name]) => [name, tag]));
