@@ -111,17 +111,12 @@ function stripEquationFormatting(text: string): string {
 
 const mathSpanClosers = new Map([["$", "$"], ["$$", "$$"], ["\\(", "\\)"], ["\\[", "\\]"]]);
 
-/** Index exact-length code fences and TeX pairs without rescanning for each opener. */
+/** Index the first matching closer to the right. The forward scan consumes each span once. */
 function equationSpanEnds(parts: readonly string[]): Map<number, number> {
-  const nextFence = new Map<string, { index: number; cell: number; count: number; pairedInCell: boolean }>();
+  const nextFence = new Map<string, number>();
   const spanEnds = new Map<number, number>();
-  let cell = 0;
   for (let i = parts.length - 2; i > 0; i -= 2) {
     const marker = parts[i]!;
-    if (marker === "|") {
-      cell++;
-      continue;
-    }
     // A backslash escapes the first opening tick, but is literal inside code.
     const escapedTick = marker.startsWith("\\`");
     const fence = escapedTick ? marker.slice(1) : marker;
@@ -129,13 +124,8 @@ function equationSpanEnds(parts: readonly string[]): Map<number, number> {
       ? (escapedTick ? fence.slice(1) : fence)
       : mathSpanClosers.get(marker);
     const end = closer ? nextFence.get(closer) : undefined;
-    // With an odd run of matching fences, prefer the complete pair in the
-    // later cell. A dangling fence in this cell must not consume its opener.
-    const keepLaterPair = end && end.cell !== cell && end.pairedInCell && end.count % 2 === 0;
-    if (end && !keepLaterPair) spanEnds.set(i, end.index);
-    nextFence.set(fence, {
-      index: i, cell, count: (nextFence.get(fence)?.count ?? 0) + 1, pairedInCell: end?.cell === cell,
-    });
+    if (end !== undefined) spanEnds.set(i, end);
+    nextFence.set(fence, i);
   }
   return spanEnds;
 }
@@ -143,6 +133,26 @@ function equationSpanEnds(parts: readonly string[]): Map<number, number> {
 function stripEquationLine(line: string): string {
   const parts = line.split(/(\\?`+|\\[\\|$()[\]]|\*+|_+|~~|\$\$?|\|)/u);
   if (parts.length === 1) return line;
+  // A tutor can emit a table fragment with an entire cell of literal delimiters.
+  // Audit that block-level reading independently of the inline spans on the line.
+  const sections: string[][] = [];
+  let sectionStart = 0;
+  let cellStart = 0;
+  for (let i = 1; i < parts.length; i += 2) {
+    if (parts[i] !== "|") continue;
+    const cell = parts.slice(cellStart, i).join("").trim();
+    if (/^[*_~]*(?:`+|\${1,2})[*_~]*$/u.test(cell)) {
+      if (cellStart > sectionStart) sections.push(parts.slice(sectionStart, cellStart - 1));
+      sectionStart = i + 1;
+    }
+    cellStart = i + 1;
+  }
+  if (sectionStart === 0) return stripEquationSegment(parts);
+  sections.push(parts.slice(sectionStart));
+  return [stripEquationSegment(parts), ...sections.map(stripEquationSegment)].join(";");
+}
+
+function stripEquationSegment(parts: string[]): string {
   const spanEnds = equationSpanEnds(parts);
   const cellOpeners = new Map<string, number[]>();
   for (let i = 1; i < parts.length; i += 2) {
