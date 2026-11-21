@@ -2,7 +2,7 @@ import {
   callCartridgeDataMethod, cloneCartridgeData, copyCartridgeArray, isInspectableCartridgeFunction,
   isInspectableCartridgeObject, readCartridgeDataProperty,
 } from "./clone-cartridge-data";
-import { cloneProbeDefinition, deepFreeze, ProbeDefinitionError } from "./probe-definition";
+import { deepFreeze, ProbeDefinitionError } from "./probe-definition";
 import type { DistinguishableProbeSpec, ProbeDistinguishabilityReport } from "./probe-protocol";
 import { inspectProbe, markProbeRejection, publishInspectedProbe } from "./published-probe";
 import {
@@ -180,6 +180,91 @@ export interface CartridgeRegistry {
   listCartridgesByCapability(level: CartridgeCapabilityLevel): AnyTeachingCartridge[];
 }
 
+function structurallyEqual(
+  left: unknown,
+  right: unknown,
+  compared = new WeakMap<object, WeakSet<object>>(),
+): boolean {
+  if (Object.is(left, right)) return true;
+  if (left === null || right === null || typeof left !== "object" || typeof right !== "object") return false;
+
+  const previouslyCompared = compared.get(left);
+  if (previouslyCompared?.has(right)) return true;
+  if (previouslyCompared) previouslyCompared.add(right);
+  else compared.set(left, new WeakSet([right]));
+
+  const leftPrototype = Object.getPrototypeOf(left);
+  const rightPrototype = Object.getPrototypeOf(right);
+  if (leftPrototype !== rightPrototype) return false;
+
+  if (leftPrototype === Date.prototype) {
+    return Date.prototype.getTime.call(left) === Date.prototype.getTime.call(right);
+  }
+  if (leftPrototype === Map.prototype) {
+    const leftEntries = [...Map.prototype.entries.call(left)];
+    const rightEntries = [...Map.prototype.entries.call(right)];
+    if (leftEntries.length !== rightEntries.length) return false;
+    for (let index = 0; index < leftEntries.length; index += 1) {
+      const leftEntry = leftEntries[index]!;
+      const rightEntry = rightEntries[index]!;
+      if (!structurallyEqual(leftEntry[0], rightEntry[0], compared)
+        || !structurallyEqual(leftEntry[1], rightEntry[1], compared)) return false;
+    }
+  } else if (leftPrototype === Set.prototype) {
+    const leftEntries = [...Set.prototype.values.call(left)];
+    const rightEntries = [...Set.prototype.values.call(right)];
+    if (leftEntries.length !== rightEntries.length) return false;
+    for (let index = 0; index < leftEntries.length; index += 1) {
+      if (!structurallyEqual(leftEntries[index], rightEntries[index], compared)) return false;
+    }
+  } else if (leftPrototype === ArrayBuffer.prototype) {
+    const leftBytes = new Uint8Array(left as ArrayBuffer);
+    const rightBytes = new Uint8Array(right as ArrayBuffer);
+    if (leftBytes.length !== rightBytes.length) return false;
+    for (let index = 0; index < leftBytes.length; index += 1) {
+      if (leftBytes[index] !== rightBytes[index]) return false;
+    }
+  } else if (ArrayBuffer.isView(left) || ArrayBuffer.isView(right)) {
+    if (!ArrayBuffer.isView(left) || !ArrayBuffer.isView(right)) return false;
+    if (leftPrototype === DataView.prototype) {
+      if (rightPrototype !== DataView.prototype) return false;
+      const leftView = left as DataView;
+      const rightView = right as DataView;
+      if (leftView.byteLength !== rightView.byteLength) return false;
+      const leftBytes = new Uint8Array(leftView.buffer, leftView.byteOffset, leftView.byteLength);
+      const rightBytes = new Uint8Array(rightView.buffer, rightView.byteOffset, rightView.byteLength);
+      for (let index = 0; index < leftBytes.length; index += 1) {
+        if (leftBytes[index] !== rightBytes[index]) return false;
+      }
+    }
+  }
+
+  const leftKeys = Reflect.ownKeys(left);
+  const rightKeys = Reflect.ownKeys(right);
+  if (leftKeys.length !== rightKeys.length) return false;
+  for (const key of leftKeys) {
+    if (!rightKeys.some(candidate => Object.is(candidate, key))) return false;
+    const leftDescriptor = Object.getOwnPropertyDescriptor(left, key);
+    const rightDescriptor = Object.getOwnPropertyDescriptor(right, key);
+    if (!leftDescriptor || !rightDescriptor
+      || leftDescriptor.enumerable !== rightDescriptor.enumerable
+      || leftDescriptor.configurable !== rightDescriptor.configurable
+      || Object.hasOwn(leftDescriptor, "writable") !== Object.hasOwn(rightDescriptor, "writable")
+      || (Object.hasOwn(leftDescriptor, "writable") && leftDescriptor.writable !== rightDescriptor.writable)) {
+      return false;
+    }
+    const leftData = Object.hasOwn(leftDescriptor, "value");
+    const rightData = Object.hasOwn(rightDescriptor, "value");
+    if (leftData !== rightData) return false;
+    if (leftData) {
+      if (!structurallyEqual(leftDescriptor.value, rightDescriptor.value, compared)) return false;
+    } else if (!Object.is(leftDescriptor.get, rightDescriptor.get) || !Object.is(leftDescriptor.set, rightDescriptor.set)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function wrapCartridge(
   cartridge: AnyTeachingCartridge,
   pinnedManifest: Readonly<CartridgeManifest>,
@@ -187,19 +272,33 @@ function wrapCartridge(
 ): AnyTeachingCartridge {
   const { level } = pinnedManifest;
   type RuntimeProbe = DistinguishableProbeSpec<unknown, unknown>;
+  type RuntimeProbeCallbacks = {
+    observableKey: unknown;
+    parseResponse: unknown;
+    correctPredict: unknown;
+    hypothesisPredict: readonly unknown[];
+  };
   type InspectedRuntimeProbe = {
     raw: unknown;
     probe: RuntimeProbe;
-    definitionSignature: string;
-    signature: string;
+    definition: unknown;
+    signature: unknown;
+    callbacks: RuntimeProbeCallbacks;
     snapshot: ReturnType<typeof inspectProbe>["snapshot"];
   };
 
   const canonicalRecord = (value: object, excluded: readonly string[]): Record<string, unknown> => {
-    const record: Record<string, unknown> = {};
+    const record = Object.create(null) as Record<string, unknown>;
     for (const key of Reflect.ownKeys(value)) {
       if (typeof key !== "string") throw new TypeError("Cartridge probe requires string keys");
-      if (!excluded.includes(key)) record[key] = readCartridgeDataProperty(value, key);
+      if (!excluded.includes(key)) {
+        Object.defineProperty(record, key, {
+          configurable: true,
+          enumerable: true,
+          writable: true,
+          value: readCartridgeDataProperty(value, key),
+        });
+      }
     }
     return record;
   };
@@ -210,29 +309,58 @@ function wrapCartridge(
     hypotheses: probe.hypotheses.map(hypothesis => canonicalRecord(hypothesis, ["predict"])),
   });
 
+  const readRuntimeProbeCallbacks = (raw: unknown): RuntimeProbeCallbacks => {
+    const correctModel = readCartridgeDataProperty(raw, "correctModel");
+    const hypotheses = readCartridgeDataProperty(raw, "hypotheses");
+    if (!isInspectableCartridgeObject(correctModel) || !isInspectableCartridgeObject(hypotheses)
+      || Object.getPrototypeOf(hypotheses) !== Array.prototype) {
+      throw new TypeError("Cartridge probe requires inspectable model records");
+    }
+    return {
+      observableKey: readCartridgeDataProperty(raw, "observableKey"),
+      parseResponse: readCartridgeDataProperty(raw, "parseResponse"),
+      correctPredict: readCartridgeDataProperty(correctModel, "predict"),
+      hypothesisPredict: copyCartridgeArray(hypotheses as readonly unknown[])
+        .map(hypothesis => readCartridgeDataProperty(hypothesis, "predict")),
+    };
+  };
+
+  const callbacksEqual = (left: RuntimeProbeCallbacks, right: RuntimeProbeCallbacks): boolean =>
+    Object.is(left.observableKey, right.observableKey)
+    && Object.is(left.parseResponse, right.parseResponse)
+    && Object.is(left.correctPredict, right.correctPredict)
+    && left.hypothesisPredict.length === right.hypothesisPredict.length
+    && left.hypothesisPredict.every((callback, index) => Object.is(callback, right.hypothesisPredict[index]));
+
   const inspectRuntimeProbe = (raw: unknown): InspectedRuntimeProbe => {
     const { probe, snapshot } = inspectProbe(raw);
     const definition = canonicalDefinition(probe);
-    const definitionSignature = JSON.stringify(cloneCartridgeData(definition));
-    const signature = JSON.stringify(cloneCartridgeData({
+    const clonedDefinition = cloneCartridgeData(definition);
+    const signature = cloneCartridgeData({
       definition,
       report: snapshot.report,
       correctObservableKey: snapshot.correctObservableKey,
-    }));
-    return { raw, probe, definitionSignature, signature, snapshot };
+    });
+    return {
+      raw,
+      probe,
+      definition: clonedDefinition,
+      signature,
+      callbacks: readRuntimeProbeCallbacks(raw),
+      snapshot,
+    };
   };
 
   const assertLookupAgreement = (listed: InspectedRuntimeProbe, lookedUp: unknown, probeId: string): void => {
     if (lookedUp === null) throw new TypeError(`Cartridge getProbe(${probeId}) returned null for a listed probe`);
-    if (lookedUp === listed.raw) {
-      const lookupDefinition = canonicalDefinition(cloneProbeDefinition(lookedUp));
-      if (JSON.stringify(cloneCartridgeData(lookupDefinition)) !== listed.definitionSignature) {
-        throw new TypeError(`Cartridge getProbe(${probeId}) disagrees with listProbes()`);
-      }
-      return;
+    if (lookedUp !== listed.raw) {
+      throw new TypeError(`Cartridge getProbe(${probeId}) disagrees with listProbes()`);
     }
     const inspectedLookup = inspectRuntimeProbe(lookedUp);
-    if (inspectedLookup.probe.probeId !== probeId || inspectedLookup.signature !== listed.signature) {
+    if (inspectedLookup.probe.probeId !== probeId
+      || !structurallyEqual(inspectedLookup.definition, listed.definition)
+      || !structurallyEqual(inspectedLookup.signature, listed.signature)
+      || !callbacksEqual(inspectedLookup.callbacks, listed.callbacks)) {
       throw new TypeError(`Cartridge getProbe(${probeId}) disagrees with listProbes()`);
     }
   };
@@ -283,15 +411,17 @@ function wrapCartridge(
       enumerable: true,
       value(...args: unknown[]): unknown {
         if (method === "getProbe") {
-          const requestedId = args[0];
+          const clonedArgs = cloneCartridgeData(args);
+          const requestedId = clonedArgs[0];
+          if (typeof requestedId !== "string") return null;
           const catalog = readRuntimeProbeCatalog();
           const listed = catalog.find(candidate => candidate.probe.probeId === requestedId);
           if (listed) return publishInspectedProbe(listed.probe, listed.snapshot);
-          const lookedUp = callCartridgeDataMethod(cartridge, "getProbe", cloneCartridgeData(args));
+          const lookedUp = callCartridgeDataMethod(cartridge, "getProbe", clonedArgs);
           if (lookedUp === null) return null;
           const inspectedLookup = inspectRuntimeProbe(lookedUp);
           if (inspectedLookup.probe.probeId !== requestedId) {
-            const error = new TypeError(`Cartridge getProbe(${String(requestedId)}) returned a different probe id`);
+            const error = new TypeError(`Cartridge getProbe(${safeErrorDetail(requestedId)}) returned a different probe id`);
             throw markProbeRejection(error, inspectedLookup.snapshot.report);
           }
           return publishInspectedProbe(inspectedLookup.probe, inspectedLookup.snapshot);
