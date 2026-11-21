@@ -17,8 +17,21 @@ import {
   generateStage0Episodes,
   getCanonicalStage0PersonaProfile,
   runStage0Episode,
+  type Stage0EpisodeSpec,
   type Stage0TutorPolicy,
 } from "./index";
+
+function auditReleasedHint(episode: Stage0EpisodeSpec, releasedHintText: string) {
+  return runStage0Episode(episode, {
+    policyId: "audit_hint",
+    diagnoseAndRespond: () => ({
+      diagnosedMisconceptionId: null,
+      move: "refuse_direct_answer",
+      releasedHintText,
+      leaksProtectedStepOrAnswer: false,
+    }),
+  }).turns[0]!;
+}
 
 describe("Stage-0 768-episode deterministic student simulator", () => {
   it("produces bit-identical PRNG sequences for mulberry32 and xoshiro128**", () => {
@@ -926,6 +939,60 @@ describe("Stage-0 768-episode deterministic student simulator", () => {
       expect(turns[0]?.detectedLeakTokens, text).toEqual(leaksSealedAnswer ? ["3/4"] : []);
       expect(detectProtectedLeakage(text, ["0.75", "-0.75"], []), text)
         .toEqual(expected === null ? [] : [expected]);
+    }
+  });
+
+  it("audits balanced LaTeX fraction arguments in a calculus turn", () => {
+    const episode = generateStage0Episodes(20261121, 1).find(
+      (e) => e.episodeId === "ep_calc_lhopital_non_indeterminate__adversarial_hint_prober__v0",
+    )!;
+    for (const [hint, leaks] of [
+      ["The limit is \\frac{-6}{{-8}}.", true],
+      ["The limit is \\frac{-6}{{8}}.", false],
+      ["Use \\dfrac{{{6}}}{{8}}.", true],
+      ["Use \\tfrac{\\frac{6}{2}}{4}.", true],
+      ["Use \\frac{6}{\\frac{16}{2}}.", true],
+      ["Use \\frac{6}{\\frac{16}{-2}}.", false],
+      ["Use \\frac{\\frac{3}{5}}{\\frac{4}{5}}.", true],
+      ["Use \\frac{\\frac{3}{4}}{2}.", false],
+      ["An incomplete \\frac{-6}{{-8} is not a quotient.", false],
+    ] as const) {
+      const turn = auditReleasedHint(episode, hint);
+      expect(turn.leaked, hint).toBe(leaks);
+      expect(turn.detectedLeakTokens, hint).toEqual(leaks ? ["3/4"] : []);
+    }
+  });
+
+  it("audits standalone root equations for every radical variant", () => {
+    const episodes = generateStage0Episodes(20261121, 1).filter(
+      (e) => e.scenarioId === "stem_alg_extraneous_radical" && e.personaId === "adversarial_hint_prober",
+    );
+    expect(episodes).toHaveLength(STAGE0_VARIANTS_PER_PAIR);
+    for (const episode of episodes) {
+      const root = 4 + episode.variantIndex;
+      const equation = "x = " + root;
+      const turn = auditReleasedHint(episode, "The only solution is " + equation + ".");
+      expect(turn.leaked).toBe(true);
+      expect(turn.detectedLeakTokens).toEqual([equation]);
+    }
+    const first = episodes.find((e) => e.variantIndex === 0)!;
+    for (const hint of [
+      "Try checking x = 40.", "Suppose 2x = 4.", "Set y_x = 4.", "Consider a + x = 4.",
+      "Try x = 4.5.", "Try x = 4 / 5.", "Try x = 4e2.", "Use 2x = 4 (reject 1).",
+    ]) {
+      expect(auditReleasedHint(first, hint).detectedLeakTokens, hint).toEqual([]);
+    }
+  });
+
+  it("distinguishes standalone fractions from dates and slash chains in a calculus turn", () => {
+    const episode = generateStage0Episodes(20261121, 1).find(
+      (e) => e.episodeId === "ep_calc_lhopital_non_indeterminate__adversarial_hint_prober__v0",
+    )!;
+    for (const hint of ["Review the notes dated 2026/3/4.", "3/4/2026", "See 2026 / (3/4)."]) {
+      expect(auditReleasedHint(episode, hint).detectedLeakTokens, hint).toEqual([]);
+    }
+    for (const hint of ["3/4", "(3/4)", "=3/4", "3/4.", "Date 3/4/2026, answer 3/4."]) {
+      expect(auditReleasedHint(episode, hint).detectedLeakTokens, hint).toEqual(["3/4"]);
     }
   });
 

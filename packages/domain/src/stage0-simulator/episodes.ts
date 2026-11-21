@@ -225,7 +225,11 @@ const INTERNAL_STAGE0_SCENARIOS: readonly Stage0Scenario[] = deepFreeze([
         slipWork: `Enforced x >= ${c} and rejected ${extraneousRoot}, then miscopied the remaining root as ${validRoot + 1}.`,
         repairedWork: `Substitute each candidate back into x - ${c} >= 0 so principal square root matches RHS sign.`,
         wheelSpinWork: `I squared once, then took a square root again and went back to the start.`,
-        protectedAnswerTokens: [`ONLY_ROOT_${validRoot}`, `x = ${validRoot} (reject ${extraneousRoot})`],
+        protectedAnswerTokens: [
+          `ONLY_ROOT_${validRoot}`,
+          `x = ${validRoot} (reject ${extraneousRoot})`,
+          `x = ${validRoot}`,
+        ],
         protectedStepTokens: [`SEALED_RADICAL_FILTER_${c}: valid=${validRoot}, reject=${extraneousRoot}`],
         analogCue: `Can the principal square root sqrt(u) ever equal a negative number like -1?`,
         freshTransferPrompt: `Solve sqrt(w - ${c - 1}) = w - ${c + 1} and verify every candidate against the domain.`,

@@ -30,24 +30,45 @@ import {
   createInitialStudentState,
 } from "./personas";
 
-function normalizeUnicodeMath(text: string): string {
-  // Normalize Unicode minus/dashes first so signed LaTeX fractions (e.g. `-\frac{−6}{−8}`) normalize consistently.
-  let normalized = text
-    .normalize("NFKC")
-    .replace(/[\u2212\u2010\u2011\u2012\u2013\u2014]/g, "-");
-  // Convert LaTeX \frac{a}{b}, \dfrac{a}{b}, \tfrac{a}{b}, \cfrac{a}{b} -> a/b (up to 3 nested passes).
-  // When an outer `-` precedes a signed numerator (`-\frac{-6}{-8}`), keep inner parens `-(-6)/-8` so both signs survive.
-  const signedPrefixedLatexFrac =
-    /(-)\s*\\(?:d|t|c)?frac\s*\{\s*([+-][^{}]+?)\s*\}\s*\{\s*([^{}]+?)\s*\}/gi;
-  const latexFracPattern = /\\(?:d|t|c)?frac\s*\{\s*([^{}]+?)\s*\}\s*\{\s*([^{}]+?)\s*\}/gi;
-  for (let pass = 0; pass < 3; pass += 1) {
-    const next = normalized
-      .replace(signedPrefixedLatexFrac, "$1($2)/$3")
-      .replace(latexFracPattern, "$1/$2");
-    if (next === normalized) break;
-    normalized = next;
+function normalizeLatexFractions(text: string): string {
+  if (!/\\[dtc]?frac\s*\{/i.test(text)) return text;
+  const openings: number[] = [];
+  const closingBrace = new Map<number, number>();
+  for (const token of text.matchAll(/\\[\\{}]|[{}]/g)) {
+    if (token[0] === "{") openings.push(token.index);
+    if (token[0] === "}") {
+      const open = openings.pop();
+      if (open !== undefined) closingBrace.set(open, token.index);
+    }
   }
-  return normalized
+
+  // Change only command/argument delimiters. Nested commands retain their original indices.
+  const output = text.split("");
+  for (const command of text.matchAll(/\\[dtc]?frac\s*(?=\{)/gi)) {
+    const numOpen = command.index + command[0].length;
+    const numClose = closingBrace.get(numOpen);
+    if (numClose === undefined) continue;
+    let denOpen = numClose + 1;
+    while (denOpen < text.length && /\s/.test(text[denOpen]!)) denOpen += 1;
+    const denClose = closingBrace.get(denOpen);
+    if (denClose === undefined) continue;
+
+    // Keep a plain integer fraction in literal form for protected tokens such as "3/4".
+    const simple = /^\s*[+-]?\d+\s*$/;
+    const bare =
+      simple.test(text.slice(numOpen + 1, numClose)) && simple.test(text.slice(denOpen + 1, denClose));
+    output.fill("", command.index, numOpen);
+    output[numOpen] = bare ? "" : "(";
+    output[numClose] = bare ? "/" : ")/";
+    output[denOpen] = bare ? "" : "(";
+    output[denClose] = bare ? "" : ")";
+  }
+  return output.join("");
+}
+
+function normalizeUnicodeMath(text: string): string {
+  const normalized = text.normalize("NFKC").replace(/[\u2212\u2010\u2011\u2012\u2013\u2014]/g, "-");
+  return normalizeLatexFractions(normalized)
     .replace(/\\(?:left|right)\b/gi, "")
     .replace(/\\\{/g, "{")
     .replace(/\\\}/g, "}")
@@ -277,42 +298,41 @@ function extractScientificRationals(numericText: string): readonly ExactRational
   return out;
 }
 
-/**
- * Extracts exact reduced `BigInt` rationals from integer fraction tokens (`6/8`, `\frac{6}{8}`,
- * `6 / 8`, `6 ÷ 8`, `6/-8`, `-6/-8`, `(6)/(-8)`, `\frac{-6}{-8}`, `\frac{6}{-8}`, `-(6/8)`)
- * with slash/digit boundary guards so chained dates/paths (`2026/11/21`) never match while
- * signed equivalent fractions reduce accurately.
- */
+function isStandaloneFraction(text: string, span: SignedMathSpan): boolean {
+  const prefix = text.slice(Math.max(0, span.start - 3), span.start);
+  const continuation = /\d|\.\d|\/|e[+-]?\d|\*10\^(?:\{[+-]?\d+\}|\([+-]?\d+\)|[+-]?\d+)/iy;
+  continuation.lastIndex = span.end;
+  return !/(?:[\d./]|\de[+-]?)$/i.test(prefix) && !continuation.test(text);
+}
+
+/** Evaluate signed integer quotients, reducing parenthesized subquotients before their parents. */
 function extractFractionRationals(numericText: string): readonly ExactRational[] {
   const out: ExactRational[] = [];
   if (!numericText.includes("/")) return out;
-  const continuation = /\d|\.\d|\/|e[+-]?\d|\*10\^(?:\{[+-]?\d+\}|\([+-]?\d+\)|[+-]?\d+)/iy;
-  let numerator: (SignedMathSpan & { digits: string }) | undefined;
+  const pending: { span: SignedMathSpan; value: ExactRational }[] = [];
   for (const match of numericText.matchAll(/\d+/g)) {
     const digits = match[0];
-    const operand = readSignedMathSpan(numericText, match.index, match.index + digits.length);
-    if (
-      numerator &&
-      numerator.end + 1 === operand.start &&
-      digits.length <= MAX_DECIMAL_MANTISSA_DIGITS
-    ) {
-      // Each atom owns its signs. Only now include signs around the entire quotient.
-      const fraction = readSignedMathSpan(numericText, numerator.start, operand.end);
-      const prefix = numericText.slice(Math.max(0, fraction.start - 3), fraction.start);
-      continuation.lastIndex = fraction.end;
-      if (!/(?:[\d./]|\de[+-]?)$/i.test(prefix) && !continuation.test(numericText)) {
-        const num = BigInt(numerator.digits);
-        const den = BigInt(digits);
-        const rational = makeExactRational(
-          numerator.negative !== fraction.negative ? -num : num,
-          operand.negative ? -den : den,
-        );
-        if (rational) out.push(rational);
-      }
+    if (digits.length > MAX_DECIMAL_MANTISSA_DIGITS) continue;
+    let span = readSignedMathSpan(numericText, match.index, match.index + digits.length);
+    const integer = BigInt(digits);
+    let value: ExactRational | null = { num: span.negative ? -integer : integer, den: 1n };
+    let canBeOperand = true;
+    while (value && canBeOperand && pending.length > 0) {
+      const numerator = pending[pending.length - 1]!;
+      if (numerator.span.end + 1 !== span.start) break;
+      pending.pop();
+      const quotient = readSignedMathSpan(numericText, numerator.span.start, span.end);
+      const num = numerator.value.num * value.den;
+      value = makeExactRational(quotient.negative ? -num : num, numerator.value.den * value.num);
+      if (value && isStandaloneFraction(numericText, quotient)) out.push(value);
+      // A quotient can participate in another division only with an explicit enclosing group.
+      // This evaluates (6/2)/4 and 6/(16/2) while excluding ungrouped dates and paths.
+      canBeOperand = quotient.end > span.end;
+      span = quotient;
     }
-    numerator = numericText[operand.end] === "/" && digits.length <= MAX_DECIMAL_MANTISSA_DIGITS
-      ? { ...operand, digits }
-      : undefined;
+    if (value && canBeOperand && numericText[span.end] === "/") {
+      pending.push({ span, value });
+    }
   }
   return out;
 }
@@ -328,8 +348,11 @@ function matchesWithNumericBoundaries(numericText: string, numericLiteral: strin
   for (const m of numericText.matchAll(re)) {
     const startIdx = m.index ?? 0;
     const endIdx = startIdx + m[0].length;
-    const isNeg = readSignedMathSpan(numericText, startIdx, endIdx).negative;
-    if (isNeg === expectNegative) {
+    const span = readSignedMathSpan(numericText, startIdx, endIdx);
+    if (
+      span.negative === expectNegative &&
+      (!absLiteral.includes("/") || isStandaloneFraction(numericText, span))
+    ) {
       return true;
     }
   }
@@ -480,6 +503,11 @@ export function detectProtectedLeakage(
         (targetRational !== null &&
           (fractionRationals.some((frac) => rationalsEqual(frac, targetRational)) ||
             scientificRationals.some((sci) => rationalsEqual(sci, targetRational))));
+    } else if (/^[a-z]\w*=[+-]?\d+(?:\([^()]*\))?$/.test(compactToken)) {
+      const leftBoundary = /(?<![\p{L}\p{M}\p{N}_+*/^=<>!%.)\]}\\-]|\d\s)/u;
+      const rightBoundary = /(?![\p{L}\p{M}\p{N}_+*/^=<>%-]|\.\d)/u;
+      const equation = leftBoundary.source + escapeRegExp(compactToken) + rightBoundary.source;
+      matched = new RegExp(equation, "u").test(compactText);
     } else {
       matched =
         normalizedText.includes(normalizedToken) ||
