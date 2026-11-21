@@ -1854,6 +1854,7 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
     "Speed change: (m/s) −4 (b) m = 6 and s = 2.",
     "Speed change: (m/s) −4 (b): m = 6 and s = 2.",
     "Speed change: (m/s) −4 (b):m = 6 and s = 2.",
+    "Ｓｐｅｅｄ change： （ｍ／ｓ） −４ （b）：ｍ = ６ and ｓ = ２.",
     "Speed change: (m/s) −4 (b).m = 6 and s = 2.",
     "Speed change: (m/s) −4 (b);m = 6 and s = 2.",
     "Speed change: (m/s) −4 b):m = 6 and s = 2.",
@@ -2106,6 +2107,58 @@ describe("Offline Flashcard Lease & Idempotent Outbox (Wave R / Lane R4-A)", () 
         issuedAtMs: T0,
         candidates,
       })).toMatchObject(ok ? { ok: true } : { ok: false, httpStatus: 422, code: "miss_variant_answer_leak" });
+    });
+  });
+
+  describe.each(["variant stem", "sibling card back"] as const)("Unicode answer checks in a %s", surface => {
+    it.each([
+      { secret: { sealedPayload: { order: ["Ｂ", "Ｄ"] } }, text: "Use B and D" },
+      { secret: { sealedPayload: { order: ["Ｂ", "Ｄ"] } }, text: "Use ［Ｂ］ and ［Ｄ］" },
+      { secret: { sealedPayload: { order: ["⒝", "Ⓓ"] } }, text: "Use «B» and «D»" },
+      { secret: { sealedPayload: { order: ["\u200B Ｂ", "Ｄ\u2060 "] } }, text: "Use [B] and [D]" },
+      { secret: { sealedPayload: { order: ["Ｂ Ｘ", "Ｄ Ｙ"] } }, text: "Use B X and D Y" },
+      { secret: { answerKey: "B" }, text: "The marked response [Ｂ]" },
+      { secret: { answerKey: "B" }, text: "The marked response ［Ｂ］" },
+      { secret: { answerKey: "Ｂ" }, text: "Correct option is Ｂ." },
+      { secret: { answerKey: "Ｂ\u200B" }, text: "Correct option is ［Ｂ\u2060］." },
+      { secret: { answerKey: "B" }, text: "Ｃｏｒｒｅｃｔ ｏｐｔｉｏｎ ｉｓ B." },
+      { secret: { answerKey: "42" }, text: "The reading is ４\u034F２." },
+      { secret: {}, text: "Ｓｏｌｕｔｉｏｎ： Show the derivation." },
+    ])("rejects $text", ({ secret, text }) => {
+      const variant = makeMissVariantCandidate({
+        ...secret,
+        freshVariantStem: surface === "variant stem" ? text : "Which ordering is correct?",
+      });
+      const candidates = surface === "variant stem" ? [variant] : [
+        variant,
+        { ...makeFlashcardCandidate(900), backSummary: text },
+      ];
+      expect(issueOfflineFlashcardLease({
+        leaseId: "lease-unicode-answer",
+        workspaceId: "ws-1",
+        learnerId: "learner-1",
+        issuedAtMs: T0,
+        candidates,
+      })).toMatchObject({ ok: false, httpStatus: 422, code: "miss_variant_answer_leak" });
+    });
+
+    it("allows a reversed full-width sequence", () => {
+      const text = "Compare ［Ｄ］ and ［Ｂ］";
+      const variant = makeMissVariantCandidate({
+        sealedPayload: { order: ["Ｂ", "Ｄ"] },
+        freshVariantStem: surface === "variant stem" ? text : "Which ordering is correct?",
+      });
+      const candidates = surface === "variant stem" ? [variant] : [
+        variant,
+        { ...makeFlashcardCandidate(900), backSummary: text },
+      ];
+      expect(issueOfflineFlashcardLease({
+        leaseId: "lease-unicode-answer-decoy",
+        workspaceId: "ws-1",
+        learnerId: "learner-1",
+        issuedAtMs: T0,
+        candidates,
+      })).toMatchObject({ ok: true });
     });
   });
 

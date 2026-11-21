@@ -74,8 +74,13 @@ function containsTokenBoundedSubstring(haystack: string, needle: string): boolea
   return pattern.test(haystack);
 }
 
-function containsSolutionDirectiveMarker(rawStem: string): boolean {
-  return SOLUTION_DIRECTIVE_PATTERNS.some(pattern => pattern.test(rawStem));
+function normalizeLeakSyntax(text: string): string {
+  return text.normalize("NFKC").replace(/[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu, "");
+}
+
+function containsSolutionDirectiveMarker(stem: string): boolean {
+  const syntax = normalizeLeakSyntax(stem);
+  return SOLUTION_DIRECTIVE_PATTERNS.some(pattern => pattern.test(syntax));
 }
 
 function extractLeakSegments(normalizedSecret: string): string[] {
@@ -1137,11 +1142,11 @@ function normalizeMathOperators(text: string): string {
   return text;
 }
 
-function canonicalizeMathNotationPreserveCase(value: string, preserveLineBreaks = false): string {
+function canonicalizeMathNotationPreserveCase(syntax: string, preserveLineBreaks = false): string {
   // Strip non-operand LaTeX before classifying signs. Unicode minus retains its
   // unary hint until this check, before it is converted to ASCII.
   let text = collapseSpacedUnaryUnicodeMinus(
-    stripLatexNonOperandCommands(value.normalize("NFKC")),
+    stripLatexNonOperandCommands(syntax),
     preserveLineBreaks,
   );
   text = preserveLineBreaks
@@ -1162,7 +1167,7 @@ function canonicalizeMathNotationPreserveCase(value: string, preserveLineBreaks 
  * so leak checks match symmetrically across spaced, ASCII, Unicode, and CJK contexts.
  */
 export function canonicalizeMathNotation(value: string): string {
-  return canonicalizeMathNotationPreserveCase(value).toLowerCase();
+  return canonicalizeMathNotationPreserveCase(normalizeLeakSyntax(value)).toLowerCase();
 }
 
 const CJK_SCRIPT_RE = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
@@ -1222,13 +1227,17 @@ function containsCjkBoundedSubstring(haystack: string, needle: string): boolean 
 
 const OPTION_WRAPPER_OPEN = /[\p{Pi}\p{Ps}\p{Quotation_Mark}<`]/u.source;
 const OPTION_WRAPPER_CLOSE = /[\p{Pf}\p{Pe}\p{Quotation_Mark}>`]/u.source;
+const WRAPPED_OPTION_LETTER_RE = new RegExp(
+  `^${OPTION_WRAPPER_OPEN}\\s*([a-z])\\s*${OPTION_WRAPPER_CLOSE}$`,
+  "iu",
+);
 const OPTION_WORD_CONNECTOR = /\b(?:and|or|then)\b/.source;
 const OPTION_SEQUENCE_SEPARATOR =
   `\\s*(?:${OPTION_WRAPPER_CLOSE}\\s*)?` +
   `(?:[,，、](?:\\s*${OPTION_WORD_CONNECTOR})?|[;/&+→]|->|=>|${OPTION_WORD_CONNECTOR})` +
   `\\s*(?:${OPTION_WRAPPER_OPEN}\\s*)?`;
 
-function containsSingleChoiceReveal(rawText: string, normalizedText: string, choiceLetter: string): boolean {
+function containsSingleChoiceReveal(syntax: string, normalizedText: string, choiceLetter: string): boolean {
   const escaped = escapeRegExp(choiceLetter);
   const patterns = [
     new RegExp(
@@ -1237,10 +1246,10 @@ function containsSingleChoiceReveal(rawText: string, normalizedText: string, cho
     ),
     new RegExp(`=\\s*[\\[(（]?\\s*${escaped}\\s*[\\])）]?(?!${ALPHA_NUM_IDENT_CHAR})`, "iu"),
   ];
-  if (patterns.some(pattern => pattern.test(rawText))) return true;
+  if (patterns.some(pattern => pattern.test(syntax))) return true;
 
   const trailing = new RegExp(`[\\[(（]\\s*${escaped}\\s*[\\])）]\\s*$`, "iu");
-  if (!trailing.test(rawText)) return false;
+  if (!trailing.test(syntax)) return false;
 
   // Only suppress the trailing-label heuristic for a list the ordered matcher also recognizes.
   const trailingSequence = new RegExp(
@@ -1288,10 +1297,13 @@ function compactJsonPunctuation(text: string): string {
 }
 
 function containsArrayAnswerLeak(stem: string, normalizedSecret: string, rawSecret: string): boolean {
-  if (!rawSecret.trimStart().startsWith("[")) return false;
+  if (!normalizedSecret.startsWith("[")) return false;
+  // Preserve JSON quoting and escapes when the protected value is already serialized.
+  const serialized = rawSecret.trim();
+  const json = serialized.startsWith("[") ? serialized : normalizeLeakSyntax(serialized).trim();
   let values: unknown;
   try {
-    values = JSON.parse(rawSecret);
+    values = JSON.parse(json);
   } catch {
     return false;
   }
@@ -1300,11 +1312,16 @@ function containsArrayAnswerLeak(stem: string, normalizedSecret: string, rawSecr
   const compactStem = compactJsonPunctuation(stem);
   if (compactStem.includes(compactJsonPunctuation(normalizedSecret))) return true;
 
-  // Complete letter-choice sequences can also be disclosed outside JSON arrays.
-  if (values.length < 2 || !values.every((value: unknown) => typeof value === "string" && /^[a-z]$/i.test(value))) {
-    return false;
+  // Normalize each decoded label before building the ordered sequence.
+  if (values.length < 2) return false;
+  const labels: string[] = [];
+  for (const value of values) {
+    if (typeof value !== "string") return false;
+    const label = normalizeComparableText(value);
+    if (!label) return false;
+    labels.push(WRAPPED_OPTION_LETTER_RE.exec(label)?.[1] ?? label);
   }
-  const sequence = values.join(OPTION_SEQUENCE_SEPARATOR);
+  const sequence = labels.map(escapeRegExp).join(OPTION_SEQUENCE_SEPARATOR);
   return new RegExp(`(?<!${NON_CJK_WORD_CHAR})${sequence}(?!${NON_CJK_WORD_CHAR})`, "iu").test(stem);
 }
 
@@ -1321,7 +1338,8 @@ export function containsAnswerLeak(
   secretText: string,
   options: { readonly includeShortTokens?: boolean } = {},
 ): boolean {
-  const casedStem = canonicalizeMathNotationPreserveCase(rawText);
+  const stemSyntax = normalizeLeakSyntax(rawText);
+  const casedStem = canonicalizeMathNotationPreserveCase(stemSyntax);
   const normalizedStem = casedStem.toLowerCase();
   const normalizedSecret = normalizeComparableText(secretText);
   if (!normalizedStem || !normalizedSecret) return false;
@@ -1402,14 +1420,14 @@ export function containsAnswerLeak(
         ) {
           // Ordinary matching folds whitespace. Signed tokens need the original
           // sentence boundaries to decide whether a unit group is algebraic.
-          const stemForToken = isStandaloneSigned && LINE_BREAK_RE.test(rawText)
-            ? (signedStemWithLineBreaks ??= canonicalizeMathNotationPreserveCase(rawText, true))
+          const stemForToken = isStandaloneSigned && LINE_BREAK_RE.test(stemSyntax)
+            ? (signedStemWithLineBreaks ??= canonicalizeMathNotationPreserveCase(stemSyntax, true))
             : casedStem;
           if (containsStandaloneNumericOrSymbolicToken(stemForToken, segment)) {
             return true;
           }
         } else if (SINGLE_CHOICE_LETTER_RE.test(segment)) {
-          if (containsSingleChoiceReveal(rawText, normalizedStem, segment)) {
+          if (containsSingleChoiceReveal(stemSyntax, normalizedStem, segment)) {
             return true;
           }
         } else if (segment.length >= 2 && segment.length < 6 && /[\p{L}\p{N}]/u.test(segment)) {
