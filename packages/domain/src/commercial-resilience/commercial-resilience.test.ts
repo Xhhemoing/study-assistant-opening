@@ -2055,6 +2055,54 @@ describe("commercial-resilience: bilateral-privacy cohort heatmap & LTI 1.3 vali
         suppressedCellCount: 0,
         cells: [heatmap.cells[1]!, heatmap.cells[1]!],
       },
+      // Extra PII / unsuppressed count property smuggled onto a suppressed cell
+      {
+        ...heatmap,
+        cells: [
+          {
+            ...heatmap.cells[0]!,
+            leakedStudentIds: ["stu-1"],
+            rawEventCount: 1,
+          } as unknown as (typeof heatmap.cells)[number],
+          heatmap.cells[1]!,
+        ],
+      },
+      // Extra property smuggled onto a disclosed cell
+      {
+        ...heatmap,
+        cells: [
+          heatmap.cells[0]!,
+          {
+            ...heatmap.cells[1]!,
+            rawLearnerNotes: "private",
+          } as unknown as (typeof heatmap.cells)[number],
+        ],
+      },
+      // Symbol property smuggled onto a suppressed cell
+      (() => {
+        const symCell: Record<PropertyKey, unknown> = { ...heatmap.cells[0]! };
+        symCell[Symbol("pii")] = "stu-1";
+        return {
+          ...heatmap,
+          cells: [
+            symCell as unknown as (typeof heatmap.cells)[number],
+            heatmap.cells[1]!,
+          ],
+        };
+      })(),
+      // Extra property smuggled onto window
+      {
+        ...heatmap,
+        window: {
+          ...heatmap.window!,
+          leakedQueryWindow: "sliding",
+        } as unknown as NonNullable<typeof heatmap.window>,
+      },
+      // Extra property smuggled onto top-level snapshot
+      {
+        ...heatmap,
+        extraMetadata: { studentEmail: "alice@example.edu" },
+      } as unknown as typeof heatmap,
     ];
 
     for (const invalidSnapshot of privacyViolatingSnapshots) {
@@ -2072,7 +2120,59 @@ describe("commercial-resilience: bilateral-privacy cohort heatmap & LTI 1.3 vali
       }
     }
 
-    // Incomplete, malformed-shape, or tampered-finalizedAtMs ledger states fail closed with COHORT_PUBLICATION_LEDGER_CORRUPTED (never raw TypeError)
+    // Tampered ledger entries carrying extra own properties or symbols on cell/window/snapshot MUST fail closed with COHORT_PUBLICATION_LEDGER_CORRUPTED
+    const tamperedExtraCellLedger = {
+      ledgerKind: "cohort_snapshot_publication" as const,
+      snapshotsByKey: new Map([
+        [
+          firstSeal.snapshot.publicationKey!,
+          {
+            ...firstSeal.snapshot,
+            cells: [
+              {
+                ...firstSeal.snapshot.cells[0]!,
+                secretRawCount: 1,
+              } as unknown as (typeof firstSeal.snapshot.cells)[number],
+              firstSeal.snapshot.cells[1]!,
+            ],
+          },
+        ],
+      ]),
+      snapshotDigestsByKey: new Map(pubLedger.snapshotDigestsByKey),
+    };
+    const tamperedSymbolSnapshot = { ...firstSeal.snapshot } as Record<
+      PropertyKey,
+      unknown
+    >;
+    tamperedSymbolSnapshot[Symbol("leak")] = "stu-1";
+    const tamperedSymbolLedger = {
+      ledgerKind: "cohort_snapshot_publication" as const,
+      snapshotsByKey: new Map([
+        [
+          firstSeal.snapshot.publicationKey!,
+          tamperedSymbolSnapshot as unknown as typeof firstSeal.snapshot,
+        ],
+      ]),
+      snapshotDigestsByKey: new Map(pubLedger.snapshotDigestsByKey),
+    };
+    const tamperedExtraWindowLedger = {
+      ledgerKind: "cohort_snapshot_publication" as const,
+      snapshotsByKey: new Map([
+        [
+          firstSeal.snapshot.publicationKey!,
+          {
+            ...firstSeal.snapshot,
+            window: {
+              ...firstSeal.snapshot.window!,
+              extraWindowField: true,
+            } as unknown as NonNullable<typeof firstSeal.snapshot.window>,
+          },
+        ],
+      ]),
+      snapshotDigestsByKey: new Map(pubLedger.snapshotDigestsByKey),
+    };
+
+    // Incomplete, malformed-shape, extra-property, or tampered-finalizedAtMs ledger states fail closed with COHORT_PUBLICATION_LEDGER_CORRUPTED (never raw TypeError)
     const missingDigestLedger = {
       ledgerKind: "cohort_snapshot_publication" as const,
       snapshotsByKey: new Map(pubLedger.snapshotsByKey),
@@ -2120,6 +2220,9 @@ describe("commercial-resilience: bilateral-privacy cohort heatmap & LTI 1.3 vali
       malformedDigestLedger,
       malformedShapeLedger,
       tamperedFinalizedAtLedger,
+      tamperedExtraCellLedger,
+      tamperedSymbolLedger,
+      tamperedExtraWindowLedger,
     ]) {
       for (const action of [
         () => sealCohortWeeklySnapshot(corruptedLedger, heatmap),

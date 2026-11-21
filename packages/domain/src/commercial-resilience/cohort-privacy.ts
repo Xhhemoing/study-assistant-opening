@@ -431,6 +431,41 @@ export function createCohortSnapshotPublicationLedger(): CohortSnapshotPublicati
   });
 }
 
+function cloneAndFreezeWindow(window: IsoWeekWindow): IsoWeekWindow {
+  return Object.freeze({
+    isoWeekKey: window.isoWeekKey,
+    isoYear: window.isoYear,
+    isoWeek: window.isoWeek,
+    weekStartUtcMs: window.weekStartUtcMs,
+    weekEndUtcMs: window.weekEndUtcMs,
+  });
+}
+
+function cloneAndFreezeCell(cell: BilateralCohortCell): BilateralCohortCell {
+  if (cell.suppressed) {
+    return Object.freeze({
+      skillId: cell.skillId,
+      suppressed: true as const,
+      enrolledActiveCount: null,
+      eventLearnerCount: null,
+      complementLearnerCount: null,
+      eventRate: null,
+      eventRateBps: null,
+      suppressionReason: "bilateral_privacy_threshold" as const,
+    });
+  }
+  return Object.freeze({
+    skillId: cell.skillId,
+    suppressed: false as const,
+    enrolledActiveCount: cell.enrolledActiveCount,
+    eventLearnerCount: cell.eventLearnerCount,
+    complementLearnerCount: cell.complementLearnerCount,
+    eventRate: cell.eventRate,
+    eventRateBps: cell.eventRateBps,
+    suppressionReason: null,
+  });
+}
+
 function cloneAndFreezeCohortSnapshot(
   snapshot: CohortHeatmapResult,
   overrides?: {
@@ -440,10 +475,10 @@ function cloneAndFreezeCohortSnapshot(
   },
 ): CohortHeatmapResult {
   const frozenWindow = snapshot.window
-    ? Object.freeze({ ...snapshot.window })
+    ? cloneAndFreezeWindow(snapshot.window)
     : null;
   const frozenCells = Object.freeze(
-    snapshot.cells.map((cell) => Object.freeze({ ...cell })),
+    snapshot.cells.map((cell) => cloneAndFreezeCell(cell)),
   );
   return Object.freeze({
     cohortSurfaceVisible: snapshot.cohortSurfaceVisible,
@@ -465,7 +500,12 @@ function cloneAndFreezeCohortSnapshot(
 
 function computeCohortSnapshotStructuralDigest(
   snapshot: CohortHeatmapResult,
+  finalizedAtMsOverride?: number | null,
 ): string {
+  const effectiveFinalizedAtMs =
+    finalizedAtMsOverride !== undefined
+      ? finalizedAtMsOverride
+      : snapshot.finalizedAtMs;
   const cellPayload = snapshot.cells
     .map((cell) =>
       [
@@ -487,7 +527,7 @@ function computeCohortSnapshotStructuralDigest(
     snapshot.window?.isoWeekKey ?? "null",
     String(snapshot.window?.weekStartUtcMs ?? "null"),
     String(snapshot.window?.weekEndUtcMs ?? "null"),
-    String(snapshot.finalizedAtMs ?? "null"),
+    String(effectiveFinalizedAtMs ?? "null"),
     snapshot.frozenRosterDigest ?? "null",
     String(snapshot.disclosedCellCount),
     String(snapshot.suppressedCellCount),
@@ -552,12 +592,114 @@ function cohortSnapshotsEquivalent(
 
 const SHA256_DIGEST_PATTERN = /^sha256:[0-9a-f]{64}$/;
 
+const SNAPSHOT_ALLOWED_KEYS: ReadonlySet<string> = new Set([
+  "cohortSurfaceVisible",
+  "cohortId",
+  "publicationKey",
+  "window",
+  "finalizedAtMs",
+  "frozenRosterDigest",
+  "sealed",
+  "idempotentReplay",
+  "cells",
+  "disclosedCellCount",
+  "suppressedCellCount",
+]);
+
+const WINDOW_ALLOWED_KEYS: ReadonlySet<string> = new Set([
+  "isoWeekKey",
+  "isoYear",
+  "isoWeek",
+  "weekStartUtcMs",
+  "weekEndUtcMs",
+]);
+
+const CELL_ALLOWED_KEYS: ReadonlySet<string> = new Set([
+  "skillId",
+  "suppressed",
+  "enrolledActiveCount",
+  "eventLearnerCount",
+  "complementLearnerCount",
+  "eventRate",
+  "eventRateBps",
+  "suppressionReason",
+]);
+
 function isValidSha256Digest(value: unknown): value is string {
   return typeof value === "string" && SHA256_DIGEST_PATTERN.test(value);
 }
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value) &&
+    Object.getPrototypeOf(value) === Object.prototype
+  );
+}
+
+function assertStrictAllowedProperties(
+  obj: Record<string, unknown>,
+  allowedKeys: ReadonlySet<string>,
+  label: string,
+  fail: (
+    sealCode: "COHORT_WEEK_NOT_FINALIZED" | "COHORT_PRIVACY_VIOLATION",
+    message: string,
+  ) => never,
+): void {
+  if (Object.getOwnPropertySymbols(obj).length > 0) {
+    fail(
+      "COHORT_PRIVACY_VIOLATION",
+      `${label} must not contain symbol properties`,
+    );
+  }
+  for (const key of Object.getOwnPropertyNames(obj)) {
+    if (!allowedKeys.has(key)) {
+      fail(
+        "COHORT_PRIVACY_VIOLATION",
+        `${label} contains disallowed extra property "${key}"`,
+      );
+    }
+  }
+}
+
+function assertStrictPlainArray(
+  arr: unknown[],
+  label: string,
+  fail: (
+    sealCode: "COHORT_WEEK_NOT_FINALIZED" | "COHORT_PRIVACY_VIOLATION",
+    message: string,
+  ) => never,
+): void {
+  if (Object.getPrototypeOf(arr) !== Array.prototype) {
+    fail(
+      "COHORT_PRIVACY_VIOLATION",
+      `${label} must have standard Array.prototype`,
+    );
+  }
+  if (Object.getOwnPropertySymbols(arr).length > 0) {
+    fail(
+      "COHORT_PRIVACY_VIOLATION",
+      `${label} must not contain symbol properties`,
+    );
+  }
+  for (const prop of Object.getOwnPropertyNames(arr)) {
+    if (prop === "length") {
+      continue;
+    }
+    const idx = Number(prop);
+    if (
+      !Number.isInteger(idx) ||
+      idx < 0 ||
+      idx >= arr.length ||
+      String(idx) !== prop
+    ) {
+      fail(
+        "COHORT_PRIVACY_VIOLATION",
+        `${label} contains disallowed extra array property "${prop}"`,
+      );
+    }
+  }
 }
 
 function validatePublishedSnapshotInvariants(
@@ -581,14 +723,31 @@ function validatePublishedSnapshotInvariants(
   if (!isPlainRecord(rawSnapshot)) {
     fail("COHORT_PRIVACY_VIOLATION", "Cohort snapshot must be a plain object");
   }
-  const snap = rawSnapshot as unknown as CohortHeatmapResult;
+  assertStrictAllowedProperties(
+    rawSnapshot,
+    SNAPSHOT_ALLOWED_KEYS,
+    "Cohort snapshot",
+    fail,
+  );
+
+  const cohortSurfaceVisible = rawSnapshot["cohortSurfaceVisible"];
+  const rawCohortId = rawSnapshot["cohortId"];
+  const rawPublicationKey = rawSnapshot["publicationKey"];
+  const rawWindow = rawSnapshot["window"];
+  const rawFinalizedAtMs = rawSnapshot["finalizedAtMs"];
+  const rawFrozenRosterDigest = rawSnapshot["frozenRosterDigest"];
+  const rawSealed = rawSnapshot["sealed"];
+  const rawIdempotentReplay = rawSnapshot["idempotentReplay"];
+  const rawCells = rawSnapshot["cells"];
+  const rawDisclosedCellCount = rawSnapshot["disclosedCellCount"];
+  const rawSuppressedCellCount = rawSnapshot["suppressedCellCount"];
 
   if (
-    snap.cohortSurfaceVisible !== true ||
-    snap.cohortId === null ||
-    snap.window === null ||
-    snap.frozenRosterDigest === null ||
-    snap.finalizedAtMs === null
+    cohortSurfaceVisible !== true ||
+    rawCohortId === null ||
+    rawWindow === null ||
+    rawFrozenRosterDigest === null ||
+    rawFinalizedAtMs === null
   ) {
     fail(
       "COHORT_WEEK_NOT_FINALIZED",
@@ -596,7 +755,6 @@ function validatePublishedSnapshotInvariants(
     );
   }
 
-  const rawCohortId = snap.cohortId;
   if (
     typeof rawCohortId !== "string" ||
     rawCohortId.trim().length === 0 ||
@@ -609,15 +767,34 @@ function validatePublishedSnapshotInvariants(
   }
   const cohortId: string = rawCohortId;
 
-  const rawWindow = snap.window;
-  if (!isPlainRecord(rawWindow)) {
-    fail("COHORT_PRIVACY_VIOLATION", "Cohort snapshot window must be an object");
+  if (rawPublicationKey !== null && typeof rawPublicationKey !== "string") {
+    fail(
+      "COHORT_PRIVACY_VIOLATION",
+      "Cohort snapshot publicationKey must be a string or null",
+    );
   }
+  if (typeof rawSealed !== "boolean" || typeof rawIdempotentReplay !== "boolean") {
+    fail(
+      "COHORT_PRIVACY_VIOLATION",
+      "Cohort snapshot sealed/idempotentReplay flags must be booleans",
+    );
+  }
+
+  if (!isPlainRecord(rawWindow)) {
+    fail("COHORT_PRIVACY_VIOLATION", "Cohort snapshot window must be a plain object");
+  }
+  assertStrictAllowedProperties(
+    rawWindow,
+    WINDOW_ALLOWED_KEYS,
+    "Cohort snapshot window",
+    fail,
+  );
+
   let validatedWindow: IsoWeekWindow;
   try {
     validatedWindow = validateFixedIsoWeekWindow({
-      weekStartUtcMs: rawWindow.weekStartUtcMs as number,
-      weekEndUtcMs: rawWindow.weekEndUtcMs as number,
+      weekStartUtcMs: rawWindow["weekStartUtcMs"] as number,
+      weekEndUtcMs: rawWindow["weekEndUtcMs"] as number,
     });
   } catch (err) {
     if (mode === "ledger_read") {
@@ -629,9 +806,9 @@ function validatePublishedSnapshotInvariants(
     throw err;
   }
   if (
-    rawWindow.isoWeekKey !== validatedWindow.isoWeekKey ||
-    rawWindow.isoYear !== validatedWindow.isoYear ||
-    rawWindow.isoWeek !== validatedWindow.isoWeek
+    rawWindow["isoWeekKey"] !== validatedWindow.isoWeekKey ||
+    rawWindow["isoYear"] !== validatedWindow.isoYear ||
+    rawWindow["isoWeek"] !== validatedWindow.isoWeek
   ) {
     fail(
       "COHORT_PRIVACY_VIOLATION",
@@ -639,7 +816,6 @@ function validatePublishedSnapshotInvariants(
     );
   }
 
-  const rawFinalizedAtMs = snap.finalizedAtMs;
   if (
     typeof rawFinalizedAtMs !== "number" ||
     !Number.isSafeInteger(rawFinalizedAtMs) ||
@@ -657,30 +833,39 @@ function validatePublishedSnapshotInvariants(
     );
   }
 
-  if (!isValidSha256Digest(snap.frozenRosterDigest)) {
+  if (!isValidSha256Digest(rawFrozenRosterDigest)) {
     fail(
       "COHORT_PRIVACY_VIOLATION",
       "Cohort snapshot frozenRosterDigest must be a valid sha256 digest",
     );
   }
 
-  if (!Array.isArray(snap.cells)) {
+  if (!Array.isArray(rawCells)) {
     fail("COHORT_PRIVACY_VIOLATION", "Cohort snapshot cells must be an array");
   }
+  assertStrictPlainArray(rawCells, "Cohort snapshot cells", fail);
 
   const seenSkillIds = new Set<string>();
+  const validatedCells: BilateralCohortCell[] = [];
   let expectedEnrolledCount: number | null = null;
   let disclosedCount = 0;
   let suppressedCount = 0;
 
-  for (let i = 0; i < snap.cells.length; i += 1) {
-    const rawCell: unknown = snap.cells[i];
+  for (let i = 0; i < rawCells.length; i += 1) {
+    const rawCell: unknown = rawCells[i];
     if (!isPlainRecord(rawCell)) {
       fail(
         "COHORT_PRIVACY_VIOLATION",
         `Cohort snapshot cell[${i}] must be a plain object`,
       );
     }
+    assertStrictAllowedProperties(
+      rawCell,
+      CELL_ALLOWED_KEYS,
+      `Cohort snapshot cell[${i}]`,
+      fail,
+    );
+
     const rawSkillId = rawCell["skillId"];
     if (
       typeof rawSkillId !== "string" ||
@@ -716,6 +901,18 @@ function validatePublishedSnapshotInvariants(
           `Suppressed cell "${skillId}" must redact all counts/rates to null with uniform suppressionReason`,
         );
       }
+      validatedCells.push(
+        Object.freeze({
+          skillId,
+          suppressed: true as const,
+          enrolledActiveCount: null,
+          eventLearnerCount: null,
+          complementLearnerCount: null,
+          eventRate: null,
+          eventRateBps: null,
+          suppressionReason: "bilateral_privacy_threshold" as const,
+        }),
+      );
       suppressedCount += 1;
     } else if (suppressed === false) {
       const n = rawCell["enrolledActiveCount"];
@@ -760,6 +957,18 @@ function validatePublishedSnapshotInvariants(
           `Disclosed cell "${skillId}" enrolledActiveCount (${n}) disagrees with frozen cohort size (${expectedEnrolledCount})`,
         );
       }
+      validatedCells.push(
+        Object.freeze({
+          skillId,
+          suppressed: false as const,
+          enrolledActiveCount: n,
+          eventLearnerCount: e,
+          complementLearnerCount: c,
+          eventRate,
+          eventRateBps,
+          suppressionReason: null,
+        }),
+      );
       disclosedCount += 1;
     } else {
       fail(
@@ -770,8 +979,8 @@ function validatePublishedSnapshotInvariants(
   }
 
   if (
-    snap.disclosedCellCount !== disclosedCount ||
-    snap.suppressedCellCount !== suppressedCount
+    rawDisclosedCellCount !== disclosedCount ||
+    rawSuppressedCellCount !== suppressedCount
   ) {
     fail(
       "COHORT_PRIVACY_VIOLATION",
@@ -779,8 +988,22 @@ function validatePublishedSnapshotInvariants(
     );
   }
 
+  const canonicalSnapshot: CohortHeatmapResult = Object.freeze({
+    cohortSurfaceVisible: true,
+    cohortId,
+    publicationKey: rawPublicationKey,
+    window: cloneAndFreezeWindow(validatedWindow),
+    finalizedAtMs: rawFinalizedAtMs,
+    frozenRosterDigest: rawFrozenRosterDigest,
+    sealed: rawSealed,
+    idempotentReplay: rawIdempotentReplay,
+    cells: Object.freeze(validatedCells),
+    disclosedCellCount: disclosedCount,
+    suppressedCellCount: suppressedCount,
+  });
+
   return {
-    snapshot: snap,
+    snapshot: canonicalSnapshot,
     validatedWindow,
     cohortId,
   };
@@ -903,10 +1126,10 @@ export function sealCohortWeeklySnapshot(
 
   const existingRecord = readVerifiedPublicationLedgerEntry(ledger, key);
   if (existingRecord) {
-    const replayDigestAligned = computeCohortSnapshotStructuralDigest({
-      ...candidateFrozen,
-      finalizedAtMs: existingRecord.snapshot.finalizedAtMs,
-    });
+    const replayDigestAligned = computeCohortSnapshotStructuralDigest(
+      candidateFrozen,
+      existingRecord.snapshot.finalizedAtMs,
+    );
     if (
       replayDigestAligned === existingRecord.expectedDigest &&
       cohortSnapshotsEquivalent(existingRecord.snapshot, candidateFrozen)
@@ -1062,10 +1285,10 @@ export function buildCohortHeatmap(
     const existingDigest = computeCohortSnapshotStructuralDigest(
       existingRecord.snapshot,
     );
-    const replayDigestAligned = computeCohortSnapshotStructuralDigest({
-      ...candidate,
-      finalizedAtMs: existingRecord.snapshot.finalizedAtMs,
-    });
+    const replayDigestAligned = computeCohortSnapshotStructuralDigest(
+      candidate,
+      existingRecord.snapshot.finalizedAtMs,
+    );
     const digestIntact =
       existingRecord.expectedDigest === null ||
       existingDigest === existingRecord.expectedDigest;
