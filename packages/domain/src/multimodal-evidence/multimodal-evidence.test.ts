@@ -1320,6 +1320,82 @@ describe("multimodal-evidence: Two-Stage Handwritten Math & 408 Diagram Verifier
     expect(verifiedTransition.firstRootCauseError?.stepId).toBe("s2");
     expect(verifiedTransition.firstRootCauseError?.misconceptionId).toBe("wrong_final_answer");
   });
+
+  it("Round-6 [P1]: reclassifies confirmed/edited punctuation tokens ('.2 = 2' -> '-2 = 2') by effectiveText so '-' is never dropped", () => {
+    const initialBelief = makeBelief();
+    const dotLeadingSteps: readonly HandwritingStepInput[] = [
+      {
+        stepId: "neg-or-dot",
+        bbox: [0.1, 0.1, 0.9, 0.3],
+        ast: {
+          kind: "equation",
+          tokens: [
+            {
+              tokenId: "p1",
+              rawText: ".",
+              kind: "punctuation",
+              confidence: 0.42,
+              visualCandidates: [".", "-"],
+            },
+            { tokenId: "p2", rawText: "2", kind: "digit", confidence: 0.99 },
+            { tokenId: "p3", rawText: "=", kind: "operator", confidence: 0.99 },
+            { tokenId: "p4", rawText: "2", kind: "digit", confidence: 0.99 },
+          ],
+        },
+      },
+    ];
+
+    // Before confirmation: contextual leading "." before "2" blocks Stage 1 at low confidence.
+    const stage1Blocked = evaluateHandwritingStage1(dotLeadingSteps);
+    expect(stage1Blocked.status).toBe("awaiting_symbol_confirmation");
+    expect(stage1Blocked.cropConfirmationPrompts.map((p) => p.tokenId)).toEqual(["p1"]);
+
+    // Via applyLearnerSymbolConfirmations: token kind normalizes to "auto" and "- 2 = 2" evaluates to "invalid" (never "2 = 2" valid).
+    const confirmedViaHelper = applyLearnerSymbolConfirmations(dotLeadingSteps, [
+      { stepId: "neg-or-dot", tokenId: "p1", confirmedText: "-" },
+    ]);
+    expect(confirmedViaHelper[0]!.ast.tokens[0]!.kind).toBe("auto");
+
+    const stage1AfterHelper = evaluateHandwritingStage1(confirmedViaHelper);
+    expect(stage1AfterHelper.readyForStage2).toBe(true);
+    expect(stage1AfterHelper.steps[0]!.tokens[0]!.isCritical).toBe(true);
+
+    const stage2AfterHelper = evaluateHandwritingStage2(confirmedViaHelper, { assisted: false });
+    expect(stage2AfterHelper.overallVerdict).toBe("invalid");
+    expect(stage2AfterHelper.firstRootCauseError?.stepId).toBe("neg-or-dot");
+
+    const beliefAfterNegError = applyHandwritingStage2ToSkillBelief({
+      stage2: stage2AfterHelper,
+      belief: initialBelief,
+      item: skillItem,
+      atMs: 86_400_000,
+    });
+    expect(beliefAfterNegError.applied).toBe(true);
+    expect(beliefAfterNegError.belief.abilityMean).toBeLessThan(initialBelief.abilityMean);
+
+    // Direct call without applyLearnerSymbolConfirmations (stale kind: "punctuation" kept on input token)
+    // STILL classifies confirmed "-" as critical and evaluates "- 2 = 2" as "invalid".
+    const directConfirmedSteps: readonly HandwritingStepInput[] = [
+      {
+        ...dotLeadingSteps[0]!,
+        ast: {
+          ...dotLeadingSteps[0]!.ast,
+          tokens: [
+            {
+              ...dotLeadingSteps[0]!.ast.tokens[0]!,
+              confirmedByLearner: true,
+              confirmedText: "-",
+            },
+            ...dotLeadingSteps[0]!.ast.tokens.slice(1),
+          ],
+        },
+        localVerdict: "valid", // stale pre-confirmation verdict must also be ignored
+      },
+    ];
+    const directStage2 = evaluateHandwritingStage2(directConfirmedSteps, { assisted: false });
+    expect(directStage2.overallVerdict).toBe("invalid");
+    expect(directStage2.firstRootCauseError?.stepId).toBe("neg-or-dot");
+  });
 });
 
 describe("multimodal-evidence: Pre-VAD Original PCM Clock & 0080 Raw Audio Retention", () => {

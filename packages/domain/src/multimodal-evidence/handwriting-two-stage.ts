@@ -29,8 +29,10 @@ const CRITICAL_KIND_SET: ReadonlySet<string> = new Set(CRITICAL_HANDWRITING_TOKE
 const NON_SEMANTIC_KIND_SET: ReadonlySet<string> = new Set(NON_SEMANTIC_HANDWRITING_TOKEN_KINDS);
 
 const NON_SEMANTIC_TEXT_RE = /^(?:[,;:，。；：、…·•\-–—"'“”‘’]|\.{2,})$/u;
+const CRITICAL_MATH_CONTENT_RE =
+  /(?:[0-9()[\]{}]|!=|==|<=|>=|->|=>|<-|←|→|[+\-−*/=<>^±!%∑∫∂×÷≤≥≠∈∉⊂⊆∪∩∀∃]|[A-Za-zα-ωΑ-Ω])/u;
 const CRITICAL_AUTO_TEXT_RE =
-  /(?:[0-9()[\]{}]|!=|==|<=|>=|->|=>|<-|←|→|[+\-*/=<>^_∑∫∂×÷≤≥≠∈∉⊂⊆∪∩∀∃]|[A-Za-zα-ωΑ-Ω])/u;
+  /(?:[0-9()[\]{}]|!=|==|<=|>=|->|=>|<-|←|→|[+\-−*/=<>^_±!%∑∫∂×÷≤≥≠∈∉⊂⊆∪∩∀∃]|[A-Za-zα-ωΑ-Ω])/u;
 
 export function validateNormalizedBoundingBox(
   bbox: NormalizedBoundingBox,
@@ -172,11 +174,17 @@ function isStepTokenCritical(
 ): boolean {
   const token = tokens[index]!;
   const trimmed = token.effectiveText.trim();
+  if (trimmed.length === 0) return false;
   if (isCriticalMathOr408Token({ kind: token.kind, rawText: trimmed })) {
     return true;
   }
   if (token.kind === "whitespace") {
     return false;
+  }
+  // Never drop mathematical operators, digits, letters, or brackets as punctuation/decoration
+  // even when upstream OCR tagged the raw crop with a non-semantic kind (e.g. punctuation "." -> "-").
+  if (CRITICAL_MATH_CONTENT_RE.test(trimmed)) {
+    return true;
   }
   // Contextual decimal separators (even if upstream OCR tagged "." or "," as punctuation):
   // "." immediately preceding digits (e.g. ["1", ".", "2"] or [".", "5"]) or "," between digits.
@@ -233,10 +241,11 @@ function computeStepExpressionKeys(
       confirmedByLearner && token.confirmedText !== undefined
         ? token.confirmedText.trim()
         : token.rawText;
-    if (confirmedByLearner && effectiveText.trim() !== token.rawText.trim()) {
+    const textMutated = confirmedByLearner && effectiveText.trim() !== token.rawText.trim();
+    if (textMutated) {
       hasConfirmedTextMutation = true;
     }
-    prepared.push({ kind: token.kind, effectiveText });
+    prepared.push({ kind: textMutated ? "auto" : token.kind, effectiveText });
   }
 
   const semanticTexts: string[] = [];
@@ -367,6 +376,7 @@ export function applyLearnerSymbolConfirmations(
         }
         return {
           ...token,
+          kind: confirmedText !== token.rawText.trim() ? ("auto" as const) : token.kind,
           confirmedByLearner: true,
           confirmedText,
         };
@@ -543,7 +553,8 @@ export function evaluateHandwritingStage1(
         effectiveText = trimmedConfirmed;
       }
 
-      if (confirmedByLearner && effectiveText.trim() !== token.rawText.trim()) {
+      const tokenTextMutated = confirmedByLearner && effectiveText.trim() !== token.rawText.trim();
+      if (tokenTextMutated) {
         stepHasConfirmedTextMutation = true;
       }
 
@@ -553,7 +564,7 @@ export function evaluateHandwritingStage1(
         confirmedByLearner,
         confidence,
         tokenBbox,
-        kind: token.kind,
+        kind: tokenTextMutated ? "auto" : token.kind,
       });
     }
 
@@ -563,7 +574,7 @@ export function evaluateHandwritingStage1(
     let cursor = 0;
 
     for (let i = 0; i < preparedTokens.length; i += 1) {
-      const { token, effectiveText, confirmedByLearner, confidence, tokenBbox } =
+      const { token, effectiveText, confirmedByLearner, confidence, tokenBbox, kind } =
         preparedTokens[i]!;
       const isCritical = isStepTokenCritical(preparedTokens, i);
       if (isCritical) {
@@ -599,7 +610,7 @@ export function evaluateHandwritingStage1(
           tokenId: token.tokenId,
           rawText: token.rawText,
           effectiveText,
-          kind: token.kind,
+          kind,
           isCritical,
           confidence,
           bbox: tokenBbox,
