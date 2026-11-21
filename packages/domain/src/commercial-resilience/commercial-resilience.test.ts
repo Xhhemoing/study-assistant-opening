@@ -553,6 +553,76 @@ describe("commercial-resilience: micro-unit three-ledger accounting & creator ro
       }),
     ).ledger;
     expect(getLearnerCreditBalance(ledger, "learner-1", "USD")).toBe(0n);
+
+    // Fail-closed: unlinked refund or reversal (missing/null/blank referenceEntryId) is rejected in both factory and append
+    const expectInvalidRef = (fn: () => unknown) => {
+      try {
+        fn();
+        expect.unreachable("Expected CommercialResilienceError");
+      } catch (err) {
+        expect(err).toBeInstanceOf(CommercialResilienceError);
+        expect((err as CommercialResilienceError).code).toBe(
+          "INVALID_REFERENCE_ENTRY",
+        );
+      }
+    };
+
+    expectInvalidRef(() =>
+      createLearnerCreditEntry({
+        entryId: "lc-unlinked-refund",
+        idempotencyKey: "unlinked-refund",
+        accountId: "learner-1",
+        currency: "USD",
+        operation: "refund",
+        amountMicros: 1_000_000n,
+        referenceEntryId: null as unknown as string,
+        recordedAtMs: 1_700_000_060_000,
+      }),
+    );
+
+    expectInvalidRef(() =>
+      createLearnerCreditEntry({
+        entryId: "lc-unlinked-reversal",
+        idempotencyKey: "unlinked-reversal",
+        accountId: "learner-1",
+        currency: "USD",
+        operation: "reversal",
+        amountMicros: 1_000_000n,
+        referenceEntryId: "   ",
+        recordedAtMs: 1_700_000_061_000,
+      }),
+    );
+
+    // Bypassing createLearnerCreditEntry with forged null referenceEntryId is also blocked by appendLearnerCreditEntry
+    expectInvalidRef(() =>
+      appendLearnerCreditEntry(ledger, {
+        ledgerKind: "learner_credit_entry",
+        entryId: "lc-forged-unlinked-refund",
+        idempotencyKey: "forged-unlinked-refund",
+        accountId: "learner-1",
+        currency: "USD",
+        operation: "refund",
+        amountMicros: 999_000_000n,
+        signedDeltaMicros: 999_000_000n,
+        referenceEntryId: null,
+        recordedAtMs: 1_700_000_062_000,
+      }),
+    );
+
+    expectInvalidRef(() =>
+      appendLearnerCreditEntry(ledger, {
+        ledgerKind: "learner_credit_entry",
+        entryId: "lc-forged-unlinked-reversal",
+        idempotencyKey: "forged-unlinked-reversal",
+        accountId: "learner-1",
+        currency: "USD",
+        operation: "reversal",
+        amountMicros: 1_000_000n,
+        signedDeltaMicros: -1_000_000n,
+        referenceEntryId: null,
+        recordedAtMs: 1_700_000_063_000,
+      }),
+    );
   });
 
   it("enforces self-purchase/related-party/BYOK 0n exclusion and 70% vs 73.5% (1.05x) quality multiplier", () => {
@@ -1173,6 +1243,78 @@ describe("commercial-resilience: bilateral-privacy cohort heatmap & LTI 1.3 vali
     expect(invertedTimestamps.errors.map((e) => e.code)).toContain(
       "INVALID_TIMESTAMPS",
     );
+
+    // OIDC Core §3.1.3.7: mismatched azp MUST fail even when aud is single-valued (string or 1-element array)
+    for (const singleAud of [
+      "aistudy-lti-client-1",
+      ["aistudy-lti-client-1"],
+    ] as const) {
+      const badAzp = validateLti13DeepLinkingClaims(
+        {
+          ...validClaims,
+          aud: singleAud,
+          azp: "some-other-client",
+        },
+        policy,
+      );
+      expect(badAzp.valid).toBe(false);
+      expect(badAzp.errors.map((e) => e.code)).toContain("INVALID_CLIENT_ID");
+
+      const matchingAzp = validateLti13DeepLinkingClaims(
+        {
+          ...validClaims,
+          aud: singleAud,
+          azp: "aistudy-lti-client-1",
+        },
+        policy,
+      );
+      expect(matchingAzp.valid).toBe(true);
+    }
+
+    // Truthy non-string values on forbidden privacy custom keys (boolean true / number 1) MUST be rejected
+    const nonStringForbiddenBool = validateLti13DeepLinkingClaims(
+      {
+        ...validClaims,
+        [LTI_CLAIM_CUSTOM]: {
+          cartridge_id: "cs408-os-v1",
+          solo_private_notes: true,
+        },
+      },
+      policy,
+    );
+    expect(nonStringForbiddenBool.valid).toBe(false);
+    expect(nonStringForbiddenBool.errors.map((e) => e.code)).toContain(
+      "FORBIDDEN_PRIVACY_SCOPE",
+    );
+
+    const nonStringForbiddenNum = validateLti13DeepLinkingClaims(
+      {
+        ...validClaims,
+        [LTI_CLAIM_CUSTOM]: {
+          cartridge_id: "cs408-os-v1",
+          raw_attempt_transcripts: 1,
+        },
+      },
+      policy,
+    );
+    expect(nonStringForbiddenNum.valid).toBe(false);
+    expect(nonStringForbiddenNum.errors.map((e) => e.code)).toContain(
+      "FORBIDDEN_PRIVACY_SCOPE",
+    );
+
+    // Explicitly disabled falsy values (false / 0) on forbidden keys stay allowed
+    const falsyForbidden = validateLti13DeepLinkingClaims(
+      {
+        ...validClaims,
+        [LTI_CLAIM_CUSTOM]: {
+          cartridge_id: "cs408-os-v1",
+          solo_private_notes: false,
+          raw_attempt_transcripts: 0,
+        },
+      },
+      policy,
+    );
+    expect(falsyForbidden.valid).toBe(true);
   });
 
   it("satisfies deterministic property invariants across margin ceilings, bilateral privacy cells, and royalty splits", () => {

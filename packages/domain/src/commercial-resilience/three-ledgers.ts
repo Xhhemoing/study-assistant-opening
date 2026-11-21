@@ -311,16 +311,27 @@ export interface LearnerCreditEntry {
   readonly recordedAtMs: number;
 }
 
-export interface CreateLearnerCreditEntryInput {
-  readonly entryId: string;
-  readonly idempotencyKey: string;
-  readonly accountId: string;
-  readonly currency: CurrencyCode;
-  readonly operation: LearnerCreditOperation;
-  readonly amountMicros: MicroCurrency;
-  readonly referenceEntryId?: string | null;
-  readonly recordedAtMs: number;
-}
+export type CreateLearnerCreditEntryInput =
+  | {
+      readonly entryId: string;
+      readonly idempotencyKey: string;
+      readonly accountId: string;
+      readonly currency: CurrencyCode;
+      readonly operation: "grant" | "consumption";
+      readonly amountMicros: MicroCurrency;
+      readonly referenceEntryId?: string | null;
+      readonly recordedAtMs: number;
+    }
+  | {
+      readonly entryId: string;
+      readonly idempotencyKey: string;
+      readonly accountId: string;
+      readonly currency: CurrencyCode;
+      readonly operation: "refund" | "reversal";
+      readonly amountMicros: MicroCurrency;
+      readonly referenceEntryId: string;
+      readonly recordedAtMs: number;
+    };
 
 export interface LearnerCreditLedger {
   readonly ledgerKind: "learner_credit_entry";
@@ -349,10 +360,25 @@ export function createLearnerCreditEntry(
     input.recordedAtMs,
     "recordedAtMs",
   );
-  const referenceEntryId =
-    input.referenceEntryId == null
-      ? null
-      : normalizeIdentifier(input.referenceEntryId, "referenceEntryId");
+
+  let referenceEntryId: string | null;
+  if (input.operation === "refund" || input.operation === "reversal") {
+    if (
+      typeof input.referenceEntryId !== "string" ||
+      input.referenceEntryId.trim().length === 0
+    ) {
+      throw new CommercialResilienceError(
+        "INVALID_REFERENCE_ENTRY",
+        `Operation "${input.operation}" requires a non-empty backing referenceEntryId`,
+      );
+    }
+    referenceEntryId = input.referenceEntryId.trim();
+  } else {
+    referenceEntryId =
+      input.referenceEntryId == null
+        ? null
+        : normalizeIdentifier(input.referenceEntryId, "referenceEntryId");
+  }
 
   const signedDeltaMicros =
     input.operation === "grant" || input.operation === "refund"
@@ -443,6 +469,22 @@ export function appendLearnerCreditEntry(
     );
   }
 
+  // Fail-closed: refund and reversal entries MUST always carry a canonical non-empty backing referenceEntryId.
+  let requiredRefId: string | null = null;
+  if (entry.operation === "refund" || entry.operation === "reversal") {
+    if (
+      typeof entry.referenceEntryId !== "string" ||
+      entry.referenceEntryId.trim().length === 0 ||
+      entry.referenceEntryId.trim() !== entry.referenceEntryId
+    ) {
+      throw new CommercialResilienceError(
+        "INVALID_REFERENCE_ENTRY",
+        `Operation "${entry.operation}" requires a canonical non-empty backing referenceEntryId`,
+      );
+    }
+    requiredRefId = entry.referenceEntryId;
+  }
+
   for (const existing of ledger.entries) {
     if (existing.idempotencyKey === entry.idempotencyKey) {
       if (learnerEntriesEqual(existing, entry)) {
@@ -461,17 +503,18 @@ export function appendLearnerCreditEntry(
     }
   }
 
-  // Validate reference linkage when refunding a consumption or reversing a grant.
-  if (entry.operation === "refund" && entry.referenceEntryId !== null) {
+  // Validate required reference linkage when refunding a consumption or reversing a grant.
+  if (entry.operation === "refund" && requiredRefId !== null) {
     const target = ledger.entries.find(
       (item) =>
-        item.entryId === entry.referenceEntryId &&
-        item.accountId === entry.accountId,
+        item.entryId === requiredRefId &&
+        item.accountId === entry.accountId &&
+        item.currency === entry.currency,
     );
     if (!target || target.operation !== "consumption") {
       throw new CommercialResilienceError(
         "INVALID_REFERENCE_ENTRY",
-        `Refund reference "${entry.referenceEntryId}" must refer to a prior consumption entry for the same account`,
+        `Refund reference "${requiredRefId}" must refer to a prior consumption entry for the same account`,
       );
     }
     let refundedSoFar = 0n;
@@ -492,16 +535,17 @@ export function appendLearnerCreditEntry(
     }
   }
 
-  if (entry.operation === "reversal" && entry.referenceEntryId !== null) {
+  if (entry.operation === "reversal" && requiredRefId !== null) {
     const target = ledger.entries.find(
       (item) =>
-        item.entryId === entry.referenceEntryId &&
-        item.accountId === entry.accountId,
+        item.entryId === requiredRefId &&
+        item.accountId === entry.accountId &&
+        item.currency === entry.currency,
     );
     if (!target || target.operation !== "grant") {
       throw new CommercialResilienceError(
         "INVALID_REFERENCE_ENTRY",
-        `Reversal reference "${entry.referenceEntryId}" must refer to a prior grant entry for the same account`,
+        `Reversal reference "${requiredRefId}" must refer to a prior grant entry for the same account`,
       );
     }
     let reversedSoFar = 0n;

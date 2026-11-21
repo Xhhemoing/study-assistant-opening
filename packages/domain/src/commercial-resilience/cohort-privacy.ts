@@ -530,7 +530,7 @@ export interface Lti13DeepLinkingClaimsPayload {
   readonly [LTI_CLAIM_CONTEXT]?: Lti13ContextClaim;
   readonly [LTI_CLAIM_RESOURCE_LINK]?: Lti13ResourceLinkClaim;
   readonly [LTI_CLAIM_DEEP_LINKING_SETTINGS]?: Lti13DeepLinkingSettingsClaim;
-  readonly [LTI_CLAIM_CUSTOM]?: Readonly<Record<string, string>>;
+  readonly [LTI_CLAIM_CUSTOM]?: Readonly<Record<string, unknown>>;
 }
 
 export interface Lti13ValidationPolicy {
@@ -638,6 +638,29 @@ const FORBIDDEN_PRIVACY_CUSTOM_KEYS: ReadonlySet<string> = new Set([
   "attempt_transcripts",
   "include_raw_transcripts",
 ]);
+
+function isForbiddenPrivacyClaimValue(value: unknown): boolean {
+  if (value === null || value === undefined || value === false) {
+    return false;
+  }
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "number") {
+    return !Number.isNaN(value) && value !== 0;
+  }
+  if (typeof value === "bigint") {
+    return value !== 0n;
+  }
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    return normalized !== "" && normalized !== "false" && normalized !== "0";
+  }
+  if (Array.isArray(value)) {
+    return value.length > 0;
+  }
+  return true;
+}
 
 function parseHttpsUrl(raw: string | undefined): URL | null {
   if (typeof raw !== "string") {
@@ -768,30 +791,33 @@ export function validateLti13DeepLinkingClaims(
     });
   }
 
-  // 2. Client ID (`aud` + OIDC `azp` when `aud` is multi-valued)
+  // 2. Client ID (`aud` + OIDC Core §3.1.3.7 `azp` validation)
   const rawAud = claims.aud;
+  const azpPresent = claims.azp !== undefined;
+  const azpMatchesClient =
+    typeof claims.azp === "string" && claims.azp.trim() === expectedClientId;
   let audValid = false;
   if (typeof rawAud === "string") {
-    audValid = rawAud.trim() === expectedClientId;
-  } else if (Array.isArray(rawAud) && rawAud.length > 0) {
-    const trimmedAud = rawAud
-      .filter((item): item is string => typeof item === "string")
-      .map((item) => item.trim());
+    audValid =
+      rawAud.trim() === expectedClientId && (!azpPresent || azpMatchesClient);
+  } else if (
+    Array.isArray(rawAud) &&
+    rawAud.length > 0 &&
+    rawAud.every((item): item is string => typeof item === "string")
+  ) {
+    const trimmedAud = rawAud.map((item) => item.trim());
     const containsClient = trimmedAud.includes(expectedClientId);
     if (trimmedAud.length === 1) {
-      audValid = containsClient;
+      audValid = containsClient && (!azpPresent || azpMatchesClient);
     } else if (trimmedAud.length > 1) {
-      audValid =
-        containsClient &&
-        typeof claims.azp === "string" &&
-        claims.azp.trim() === expectedClientId;
+      audValid = containsClient && azpMatchesClient;
     }
   }
   if (!audValid) {
     errors.push({
       code: "INVALID_CLIENT_ID",
       message:
-        "LTI 1.3 aud (and azp for multi-audience tokens) must match registered client_id",
+        "LTI 1.3 aud (and azp when present or for multi-audience tokens) must match registered client_id",
     });
   }
 
@@ -906,16 +932,21 @@ export function validateLti13DeepLinkingClaims(
 
   // 9. Target cartridge/course resource link validation
   const rawCustom = claims[LTI_CLAIM_CUSTOM];
-  const custom: Readonly<Record<string, string>> =
+  const custom: Readonly<Record<string, unknown>> =
     typeof rawCustom === "object" && rawCustom !== null && !Array.isArray(rawCustom)
-      ? rawCustom
+      ? (rawCustom as Readonly<Record<string, unknown>>)
       : {};
   const resourceLink = claims[LTI_CLAIM_RESOURCE_LINK];
 
-  const rawResourceLinkId = resourceLink?.id ?? custom.resource_link_id;
+  const customResourceLinkId =
+    typeof custom.resource_link_id === "string"
+      ? custom.resource_link_id
+      : undefined;
+  const rawResourceLinkId = resourceLink?.id ?? customResourceLinkId;
   const rawCartridgeId = custom.cartridge_id;
   const rawCourseId = custom.course_id;
-  const rawTargetUri = resourceLink?.target_link_uri ?? custom.target_link_uri;
+  const rawTargetUri =
+    resourceLink?.target_link_uri ?? custom.target_link_uri;
 
   const resourceLinkId = isSafeResourceIdentifier(rawResourceLinkId)
     ? rawResourceLinkId.trim()
@@ -923,20 +954,22 @@ export function validateLti13DeepLinkingClaims(
   const cartridgeId =
     rawCartridgeId === undefined
       ? null
-      : isSafeResourceIdentifier(rawCartridgeId)
+      : typeof rawCartridgeId === "string" &&
+          isSafeResourceIdentifier(rawCartridgeId)
         ? rawCartridgeId.trim()
         : "INVALID";
   const courseId =
     rawCourseId === undefined
       ? null
-      : isSafeResourceIdentifier(rawCourseId)
+      : typeof rawCourseId === "string" && isSafeResourceIdentifier(rawCourseId)
         ? rawCourseId.trim()
         : "INVALID";
 
   let targetLinkUri: string | null = null;
   let targetUriValid = true;
   if (rawTargetUri !== undefined) {
-    const parsed = parseHttpsUrl(rawTargetUri);
+    const parsed =
+      typeof rawTargetUri === "string" ? parseHttpsUrl(rawTargetUri) : null;
     if (!parsed) {
       targetUriValid = false;
     } else {
@@ -988,13 +1021,9 @@ export function validateLti13DeepLinkingClaims(
   // 11. Hard Privacy Boundary Guard against forbidden custom scopes/claims
   for (const [key, value] of Object.entries(custom)) {
     const normalizedKey = key.trim().toLowerCase();
-    const normalizedVal =
-      typeof value === "string" ? value.trim().toLowerCase() : "";
     if (
       FORBIDDEN_PRIVACY_CUSTOM_KEYS.has(normalizedKey) &&
-      normalizedVal !== "" &&
-      normalizedVal !== "false" &&
-      normalizedVal !== "0"
+      isForbiddenPrivacyClaimValue(value)
     ) {
       errors.push({
         code: "FORBIDDEN_PRIVACY_SCOPE",
