@@ -386,6 +386,8 @@ describe("teaching-verifiers", () => {
     ["comma-separated arithmetic contradiction with space", "1 + 1 = 2, 2 + 2 = 5", "2 + 2 = 5"],
     ["tight comma-separated arithmetic contradiction without space", "1 + 1 = 2,2 + 2 = 5", "2 + 2 = 5"],
     ["comma-separated contradiction after thousands-grouped unknown equation", "1,000 + 2 = 1,002, 2 + 2 = 5", "2 + 2 = 5"],
+    ["tight comma contradiction immediately after thousands numeral", "1,000 + 2 = 1,002,2 + 2 = 5", "2 + 2 = 5"],
+    ["tight comma contradiction immediately before thousands numeral", "2 + 2 = 5,1,000 + 2 = 1,002", "2 + 2 = 5"],
   ])("flags multiline LaTeX contradiction with real arithmetic probe (%s)", async (_label, latex, expectedDetail) => {
     const report = await verifyTeachingContent({
       activityId: ACT, publishInput: basePublish(), pack: packWithSupport(), keyClaims: [],
@@ -464,6 +466,10 @@ describe("teaching-verifiers", () => {
       "x = 1,000 + 2 = 1,002",
       "1,000 + 2 = 1,002, 1 + 1 = 2",
       "1,5 = 1,5 得到 2 + 2 = 4",
+      "x = 1,5 * 2 = 3",
+      "3 / 2 = 1,5 * 2 = 3",
+      "2 * 0,75 = 1,5 = 3 / 2",
+      "1,000 + 2 = 1,002.5",
       "50\\% = 0.5\n% \\\\ 1 + 1 = 5",
       "% \\\\ 1 + 1 = 5",
       "\\begin{aligned}\nA &= \\begin{pmatrix}\n1 & 2 \\\\\n3 & 4\n\\end{pmatrix} \\\\\n1 + 1 &= 2\n\\end{aligned}",

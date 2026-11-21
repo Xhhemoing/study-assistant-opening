@@ -8,6 +8,7 @@ import type { ActivitySpecPublishInput, ProviderOutput, SourceChunk } from "@ais
 import {
   ALLOWED_TEACHING_BLOCK_TYPES,
   buildValidationReport,
+  checkArithmeticAnswer,
   denyIncompleteStreamActions,
   mayPublishVerified,
   type LayerResult,
@@ -983,6 +984,13 @@ function isProseTextMacroBody(body: string): boolean {
   );
 }
 
+function checkEqualityWithRational(sideA: string, sideB: string): "correct" | "incorrect" | null {
+  const left = sideA.trim();
+  const right = sideB.trim();
+  if (!left || !right) return null;
+  return checkArithmeticAnswer(`0 + (${left})`, `${left} = ${right}`);
+}
+
 function isDigitInternalComma(text: string, index: number, clauseStart: number): boolean {
   const prev = index > clauseStart ? text[index - 1]! : "";
   const next = index + 1 < text.length ? text[index + 1]! : "";
@@ -992,16 +1000,56 @@ function isDigitInternalComma(text: string, index: number, clauseStart: number):
   while (left > clauseStart && /[\d,]/.test(text[left - 1]!)) left--;
   let right = index + 2;
   while (right < text.length && /[\d,]/.test(text[right]!)) right++;
-  const token = text.slice(left, right);
-  if ((left === 0 || text[left - 1] !== ".") && /^\d{1,3}(?:,\d{3})+$/.test(token)) {
-    return true;
+  const run = text.slice(left, right);
+  const dotBefore = left > 0 && text[left - 1] === ".";
+  const dotAfter = right < text.length && text[right] === ".";
+
+  if (!dotBefore) {
+    if (run.indexOf(",") !== run.lastIndexOf(",")) {
+      const targetOffset = index - left;
+      let pos = 0;
+      while (pos < run.length) {
+        const rest = run.slice(pos);
+        const grouped = /^(\d{1,3}(?:,\d{3})+)(?=,|$)/.exec(rest);
+        if (grouped) {
+          const end = pos + grouped[1]!.length;
+          if (targetOffset > pos && targetOffset < end) return true;
+          if (targetOffset === end) return false;
+          pos = end + 1;
+          continue;
+        }
+        const plain = /^(\d+)/.exec(rest)!;
+        const end = pos + plain[1]!.length;
+        if (targetOffset === end) return false;
+        pos = end + 1;
+      }
+      return false;
+    }
+    if (/^\d{1,3},\d{3}$/.test(run)) return true;
   }
 
   const lhs = text.slice(clauseStart, index);
   const restAfter = text.slice(index + 1);
   const nextBoundary = restAfter.search(/[;，；。<>≠≤≥≈≡⇒⇐⇔→←↔↦∴∵\r\n]|,\s|[\u4e00-\u9fff\u3400-\u4dbf]|\\(?:implies|iff|Rightarrow|Leftrightarrow|text|quad)/);
-  const rhs = nextBoundary < 0 ? restAfter : restAfter.slice(0, nextBoundary);
-  return !(lhs.includes("=") && rhs.includes("="));
+  const rhsEnd = nextBoundary < 0 ? text.length : index + 1 + nextBoundary;
+  const rhs = text.slice(index + 1, rhsEnd);
+  if (!lhs.includes("=") || !rhs.includes("=")) return true;
+  if (dotBefore || dotAfter) return false;
+
+  const leftParts = lhs.split("=");
+  const leftCheck = leftParts.length >= 2
+    ? checkEqualityWithRational(leftParts[leftParts.length - 2]!, leftParts[leftParts.length - 1]!)
+    : null;
+  if (leftCheck === null) return true;
+
+  const dotToken = run.replace(",", ".");
+  const leftWithDotParts = (text.slice(clauseStart, left) + dotToken).split("=");
+  const leftWithDotCorrect = leftWithDotParts.length >= 2
+    && checkEqualityWithRational(leftWithDotParts[leftWithDotParts.length - 2]!, leftWithDotParts[leftWithDotParts.length - 1]!) === "correct";
+  const rightWithDotParts = (dotToken + text.slice(right, rhsEnd)).split("=");
+  const rightWithDotCorrect = rightWithDotParts.length >= 2
+    && checkEqualityWithRational(rightWithDotParts[0]!, rightWithDotParts[1]!) === "correct";
+  return leftWithDotCorrect || rightWithDotCorrect;
 }
 
 function splitMultiClauseFormula(text: string): string[] {
