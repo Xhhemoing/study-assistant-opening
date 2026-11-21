@@ -117,6 +117,26 @@ function collectConditionalTargets(value: unknown, use: Use): ManifestTarget[] {
   return [];
 }
 
+function legacyEntries(manifest: PackageJson): ManifestTarget[] {
+  const browser = isStringRecord(manifest.browser) ? Object.values(manifest.browser) : [manifest.browser];
+  return [
+    ...collectConditionalTargets([manifest.main, manifest.module, ...browser], "runtime"),
+    ...collectConditionalTargets([manifest.types, manifest.typings], "type"),
+  ];
+}
+
+function validVersionSelector(selector: string): boolean {
+  if (selector.split("||").some(range => !range.trim())) return false;
+  // The pinned compiler exposes its typesVersions parser at runtime but omits it from its public typings.
+  const { VersionRange } = ts as typeof ts & { VersionRange: { tryParse(text: string): unknown } };
+  try {
+    return VersionRange.tryParse(selector) !== undefined;
+  } catch {
+    // Malformed prerelease or build identifiers can raise a compiler assertion.
+    return false;
+  }
+}
+
 function declarationQueries(name: string): string[] {
   const relative = path.posix.normalize(slash(name));
   const ext = path.posix.extname(relative);
@@ -440,16 +460,18 @@ class ModuleGraph {
       const physical = this.virtualOnly ? base : this.diskEntry(base)?.physical ?? base;
       if (seenDirs.has(physical)) return [{ violation: spec }];
       const seen = new Set(seenDirs).add(physical);
+      const exports = this.exportTargets(manifest.exports, ".", use);
       if (manifest.exports !== undefined) {
-        results.push(...this.resolveExports(base, manifest.exports, ".", spec, use, seen));
+        results.push(...this.resolveExports(base, exports, spec, use, seen));
       }
-      const browser = isStringRecord(manifest.browser) ? Object.values(manifest.browser) : [manifest.browser];
-      const targets = [
-        ...collectConditionalTargets([manifest.main, manifest.module, ...browser], "runtime"),
-        ...collectConditionalTargets([manifest.types, manifest.typings], "type"),
-      ];
-      for (const target of targets) {
+      const legacy = legacyEntries(manifest);
+      for (const target of legacy) {
         results.push(...this.resolveManifestTarget(base, target, seen));
+      }
+      if (manifest.typesVersions !== undefined) {
+        const names = [...exports, ...legacy].map(target => target.spec);
+        const versioned = this.versionedDeclarations(base, manifest.typesVersions, spec, names, results);
+        return [...requireTarget(results, spec, use), ...versioned];
       }
     }
     if (!manifest && !results.length && (lookup === "relative" || lookup === "file-reference")) {
@@ -477,8 +499,7 @@ class ModuleGraph {
     return [...paths].flatMap(file => resolveBranch(() => this.resolvePath(file, target.spec, target.use, "module", seenDirs)));
   }
 
-  private resolveExports(root: string, exports: unknown, subpath: string, spec: string, use: Use, seenDirs: Set<string>): Resolution[] {
-    const targets = this.exportTargets(exports, subpath, use);
+  private resolveExports(root: string, targets: ManifestTarget[], spec: string, use: Use, seenDirs: Set<string>): Resolution[] {
     const results = targets.flatMap(target => target.spec.startsWith("./")
       ? this.resolveManifestTarget(root, target, seenDirs)
       : [{ violation: target.spec }]);
@@ -491,17 +512,21 @@ class ModuleGraph {
     const manifest = root && this.loadManifest(root);
     if (!root || !manifest) return [{ violation: spec }];
     const subpath = rest ? "." + rest : ".";
+    if (subpath === "." && manifest.exports === undefined) return this.resolvePath(root, spec, use, "package-root");
+    const exports = this.exportTargets(manifest.exports, subpath, use);
     const results = manifest.exports === undefined
-      ? this.resolvePath(path.resolve(root, subpath), spec, use, subpath === "." ? "package-root" : "module")
-      : this.resolveExports(root, manifest.exports, subpath, spec, use, new Set([root]));
+      ? this.resolvePath(path.resolve(root, subpath), spec, use)
+      : this.resolveExports(root, exports, spec, use, new Set([root]));
     if (manifest.typesVersions !== undefined) {
-      if (subpath === "." && manifest.exports !== undefined) {
-        for (const target of collectConditionalTargets([manifest.types, manifest.typings], "type")) {
-          results.push(...this.resolveManifestTarget(root, target, new Set([root])));
+      const names = exports.map(target => target.spec);
+      if (subpath === ".") {
+        for (const target of legacyEntries(manifest)) {
+          names.push(target.spec);
+          if (target.use === "type") results.push(...this.resolveManifestTarget(root, target, new Set([root])));
         }
         results.push(...this.declarationFiles(root, "index", spec));
-      }
-      results.push(...this.versionedDeclarations(root, manifest, subpath, spec, results));
+      } else names.push(subpath);
+      results.push(...this.versionedDeclarations(root, manifest.typesVersions, spec, names, results));
     }
     return results;
   }
@@ -548,19 +573,16 @@ class ModuleGraph {
     }));
   }
 
-  private versionedDeclarations(owner: string, manifest: PackageJson, subpath: string, spec: string, entries: Resolution[]): Resolution[] {
-    const versions = manifest.typesVersions;
+  private versionedDeclarations(owner: string, versions: unknown, spec: string, declaredNames: string[], entries: Resolution[]): Resolution[] {
     if (!isStringRecord(versions)) return [{ violation: spec }];
-    const names = subpath === "." ? [manifest.types, manifest.typings] : [subpath];
-    names.push(...this.exportTargets(manifest.exports, subpath, "runtime").map(entry => entry.spec));
-    names.push(...entries.flatMap(entry => "file" in entry && declaration(entry.file)
-      ? [slash(path.relative(owner, entry.file))] : []));
-    if (!names.some(Boolean)) names.push("index.d.ts");
-    const queries = [...new Set(names)].filter((name): name is string => Boolean(name)).map(declarationQueries);
+    const names = [...declaredNames, ...entries.flatMap(entry => "file" in entry && within(owner, entry.file) && declaration(entry.file)
+      ? [slash(path.relative(owner, entry.file))] : [])];
+    if (!names.length) names.push("index.d.ts");
+    const queries = [...new Set(names)].map(declarationQueries);
     const results: Resolution[] = [];
     // Manifests are parsed JSON. Validate even selectors and patterns without a current match.
-    for (const mapping of Object.values(versions)) {
-      if (!isStringRecord(mapping)) return [{ violation: spec }];
+    for (const [selector, mapping] of Object.entries(versions)) {
+      if (!validVersionSelector(selector) || !isStringRecord(mapping)) return [{ violation: spec }];
       for (const [pattern, replacements] of Object.entries(mapping)) {
         if (pattern.indexOf("*") !== pattern.lastIndexOf("*") || !Array.isArray(replacements) || !replacements.length ||
             !replacements.every(item => typeof item === "string" && item.length)) return [{ violation: spec }];
@@ -594,7 +616,7 @@ class ModuleGraph {
     });
     if (manifest?.typesVersions !== undefined) {
       resolved.push(...this.declarationFiles(owner, "index", spec));
-      resolved.push(...this.versionedDeclarations(owner, manifest, ".", spec, resolved));
+      resolved.push(...this.versionedDeclarations(owner, manifest.typesVersions, spec, targets.map(target => target.spec), resolved));
     }
     return requireTarget(resolved, spec, "type");
   }
@@ -630,9 +652,14 @@ class ModuleGraph {
     if (this.profile === "browser-ui" && UI_EXTERNALS.has(spec)) return [];
     if (spec.startsWith("#")) {
       const owner = this.findPackageRoot(from);
-      const imports = owner && this.loadManifest(owner)?.imports;
+      const imports = owner ? this.loadManifest(owner)?.imports : undefined;
+      if (imports !== undefined && !isStringRecord(imports)) return [{ violation: spec }];
       const match = imports && matchPatternMap(imports, spec, use);
-      if (!owner || !match || !match.targets.length || seenSpecs.has(match.key)) return [{ violation: spec }];
+      if (!owner || !match) {
+        // Only an unmapped original specifier may fall back to the other side of a link.
+        return seenSpecs.size ? [{ violation: spec }] : [{ violation: spec, absent: true }];
+      }
+      if (!match.targets.length || seenSpecs.has(match.key)) return [{ violation: spec }];
       // Track matched keys per branch so even a wildcard that expands itself must terminate.
       const seen = new Set(seenSpecs).add(match.key);
       const results = match.targets.flatMap(target => resolveBranch(() => target.spec.startsWith("./")
@@ -652,10 +679,30 @@ class ModuleGraph {
     const relative = path.relative(this.root, normalizeFile(file));
     return slash(relative || path.basename(file));
   }
+
+  candidateFiles(required: readonly string[], optional: readonly string[]): string[] {
+    return [...required, ...optional].flatMap(name => {
+      const file = path.join(this.root, name);
+      try {
+        const entry = this.diskEntry(file);
+        if (!entry && !required.includes(name)) return [];
+        if (entry?.stats.isFile()) {
+          accessSync(entry.physical, constants.R_OK);
+          return [file];
+        }
+      } catch (error) {
+        if (!(error instanceof BlockedPath || (error instanceof Error && "code" in error))) throw error;
+      }
+      return expect.fail(`Public candidate ${name} must be a readable file`);
+    });
+  }
 }
 
 export function analyzeModuleGraph(entries: readonly string[], options: GraphOptions): { violations: BoundaryViolation[] } {
-  const graph = new ModuleGraph(options);
+  return scanEntries(new ModuleGraph(options), entries, options.requirePermissiveCandidateLicense);
+}
+
+function scanEntries(graph: ModuleGraph, entries: readonly string[], checkLicense = false) {
   const violations: BoundaryViolation[] = [];
   for (const rawEntry of entries) {
     const entry = normalizeFile(rawEntry);
@@ -667,7 +714,7 @@ export function analyzeModuleGraph(entries: readonly string[], options: GraphOpt
       const current = stack.pop()!;
       let module: ReturnType<ModuleGraph["readSource"]>;
       try {
-        module = graph.readSource(current.file, options.requirePermissiveCandidateLicense);
+        module = graph.readSource(current.file, checkLicense);
         if (!module) throw new BlockedPath(graph.label(current.file));
       } catch (error) {
         if (!(error instanceof BlockedPath)) throw error;
@@ -758,15 +805,8 @@ describe("v3 Open-Core public candidate boundary", () => {
     };
     for (const profile of ["browser-ui", "portable-runtime"] as const) {
       const { required, optional } = candidates[profile];
-      const entries = [
-        ...required,
-        ...optional.filter(file => lstatSync(path.join(root, file), { throwIfNoEntry: false }) !== undefined),
-      ].map(file => path.join(root, file));
-      for (const entry of entries) {
-        expect(statSync(entry).isFile(), entry).toBe(true);
-        accessSync(entry, constants.R_OK);
-      }
-      const { violations } = analyzeModuleGraph(entries, { root, profile });
+      const graph = new ModuleGraph({ root, profile });
+      const { violations } = scanEntries(graph, graph.candidateFiles(required, optional));
       expect(violations, formatViolations(violations)).toEqual([]);
     }
   });
@@ -1008,6 +1048,58 @@ describe("v3 Open-Core public candidate boundary", () => {
     expect(violations.map(v => v.target).sort()).toEqual(["jose", "pg", "postgres"]);
   });
 
+  it("walks versioned declarations inside a relative directory alongside same-named sibling files", () => {
+    const files = {
+      "public.d.ts": 'export type * from "./lite";',
+      "lite.d.ts": 'import "jose";', "lite/index.d.ts": "",
+      "lite/package.json": JSON.stringify({ typesVersions: { ">=4.8": { "*": ["v5/*"] } } }),
+    };
+    const run = (extra: Record<string, string>) =>
+      virtualAnalyze({ ...files, ...extra }, "public.d.ts").violations.map(v => v.target).sort();
+    expect(run({ "lite/v5/index.d.ts": 'import "pg";' })).toEqual(["jose", "pg"]);
+    expect(run({})).toEqual(["./lite", "jose"]);
+  });
+
+  it("keeps a missing unversioned directory entry visible while walking the mapped declaration", () => {
+    const { violations } = virtualAnalyze({
+      "public.d.ts": 'export type * from "./lite";',
+      "lite/package.json": JSON.stringify({ typesVersions: { "4.x": { index: ["v4/index.d.ts"] } } }),
+      "lite/v4/index.d.ts": 'import "pg";',
+    }, "public.d.ts");
+    expect(violations.map(v => v.target).sort()).toEqual(["./lite", "pg"]);
+  });
+
+  it.each([
+    { main: "./dist/entry.js" }, { module: "./dist/entry.js" },
+    { browser: "./dist/entry.js" }, { browser: { "./server.js": "./dist/entry.js", unused: false } },
+  ])("keeps each legacy runtime specifier for exact version mappings (%j)", fields => {
+    const violations = virtualAnalyze({
+      "public.ts": 'import "@aistudy/lite";',
+      "lite/package.json": JSON.stringify({
+        name: "@aistudy/lite", ...fields, typesVersions: { "*": {
+          "dist/entry.js": ["./v5/runtime.d.ts"], "dist/entry.d.ts": ["./v5/types.d.ts"], "dist/entry": ["./v5/stem.d.ts"],
+        } },
+      }),
+      "lite/dist/entry.js": "", "lite/dist/entry.d.ts": "",
+      "lite/v5/runtime.d.ts": 'import "pg";', "lite/v5/types.d.ts": 'import "jose";', "lite/v5/stem.d.ts": 'import "postgres";',
+    }, "public.ts").violations;
+    expect(violations.map(v => v.target).sort()).toEqual(["jose", "pg", "postgres"]);
+  });
+
+  it("validates compiler-version selectors even when their path patterns do not match", () => {
+    const check = (selector: string) => virtualAnalyze({
+      "public.d.ts": '/// <reference types="local" />',
+      "node_modules/@types/local/package.json": JSON.stringify({ typesVersions: { [selector]: { unused: ["unused.d.ts"] } } }),
+      "node_modules/@types/local/index.d.ts": "",
+    }, "public.d.ts").violations.map(v => v.target);
+    for (const selector of ["*", ">=4.5", "<5.0.0-0", ">=4.8 <5.2", "^5.0.0", "~4.9", "4.x", "5.0.0", "4 - 5 || >=6"]) {
+      expect(check(selector), selector).toEqual([]);
+    }
+    for (const selector of ["not-a-version", "", "   ", "||", ">=4.8 garbage", "5.0.0-alpha..1"]) {
+      expect(check(selector), selector).toEqual(["local"]);
+    }
+  });
+
   it("does not satisfy a version mapping to the package directory with a sibling declaration", () => {
     const spec = "@aistudy/lite/sub";
     const result = virtualAnalyze({
@@ -1167,6 +1259,69 @@ describe("v3 Open-Core public candidate boundary", () => {
       writeFileSync(path.join(link, "package.json"), "invalid", "utf8");
       expect(check()).toEqual(["alias/helper/package.json"]);
     });
+  });
+
+  it("accepts a one-sided imports map across a junction and preserves failures in configured targets", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "aistudy-linked-imports-"));
+    try {
+      const portable = path.join(root, "portable");
+      const lexical = path.join(root, "view");
+      mkdirSync(path.join(portable, "src"), { recursive: true });
+      mkdirSync(lexical);
+      symlinkSync(path.join(portable, "src"), path.join(lexical, "src"), "junction");
+      writeFileSync(path.join(portable, "src/entry.ts"), 'import "#helper";', "utf8");
+      const map = (dir: string, imports: unknown) =>
+        writeFileSync(path.join(dir, "package.json"), JSON.stringify({ imports }), "utf8");
+      const check = () => analyzeModuleGraph([path.join(lexical, "src/entry.ts")], { root }).violations.map(v => v.target);
+      map(portable, { "#helper": "./safe.ts" });
+      writeFileSync(path.join(portable, "safe.ts"), "", "utf8");
+      expect(check()).toEqual([]);
+      map(lexical, { "#other": "./missing.ts" });
+      expect(check()).toEqual([]);
+      for (const [mapping, target] of [
+        [null, "#helper"], ["#unmapped", "#unmapped"], ["./missing", "./missing"],
+        ["pg", "pg"], ["./../../outside", "./../../outside"],
+      ]) {
+        map(lexical, { "#helper": mapping });
+        expect(check()).toEqual([target]);
+      }
+      map(lexical, null);
+      expect(check()).toEqual(["#helper"]);
+      map(lexical, { "#helper": "./safe.ts" });
+      map(portable, {});
+      writeFileSync(path.join(lexical, "safe.ts"), 'import "jose";', "utf8");
+      expect(check()).toEqual(["jose"]);
+      map(lexical, {});
+      expect(check()).toEqual(["#helper"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("skips absent optional candidates and reports unreadable entries by repository-relative name", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "aistudy-candidate-"));
+    try {
+      writeFileSync(path.join(root, "entry.ts"), "", "utf8");
+      mkdirSync(path.join(root, "directory"));
+      const loop = path.join(root, "loop");
+      symlinkSync(loop, loop, "junction");
+      symlinkSync(path.join(root, "missing"), path.join(root, "broken"), "junction");
+      const graph = new ModuleGraph({ root });
+      const absent = ["missing", "entry.ts/child.ts"];
+      expect(graph.candidateFiles(["entry.ts"], absent)).toEqual([path.join(root, "entry.ts")]);
+      for (const name of [...absent, "directory", "loop", "loop/entry.ts", "broken"]) {
+        expect(() => graph.candidateFiles([name], [])).toThrowError(expect.objectContaining({
+          name: "AssertionError", message: `Public candidate ${name} must be a readable file`,
+        }));
+      }
+      for (const name of ["directory", "loop/entry.ts", "broken"]) {
+        expect(() => graph.candidateFiles([], [name])).toThrowError(expect.objectContaining({
+          name: "AssertionError", message: `Public candidate ${name} must be a readable file`,
+        }));
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("imports a disk file directly and through a junction, and reports a subpath beneath the file", () => {

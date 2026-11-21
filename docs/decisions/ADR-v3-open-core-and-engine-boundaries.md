@@ -176,8 +176,10 @@ The analyzer checks that each selected entry is a readable file, then follows ru
 and type-only edges across workspace packages and local modules. Triple-slash path
 references resolve relative to the declaring file. Ambient type directives resolve
 through in-repository `node_modules/@types` declarations, including their transitive
-references. For ambient and workspace packages, the gate scans unversioned declarations
-and every matching `typesVersions` replacement across all compiler-version selectors.
+references. The gate validates every `typesVersions` selector in ambient packages,
+workspace packages, and relative directory imports. It scans unversioned declarations
+and every matching replacement. For workspace and directory entries, a mapping can
+match the declared runtime filename, its declaration filename, or its extensionless name.
 Each replacement must resolve to a declaration inside its package. Runtime allowlists
 apply only to module imports.
 
@@ -188,9 +190,10 @@ Before reading disk files or manifests, the analyzer resolves links within the r
 repository root. It checks both the requested path and its destination for closed-core
 content and, during export, for the owning package's license. A linked file's outgoing
 edges resolve from both its requested directory and its physical directory. A plain
-lookup miss can be satisfied by the other directory. Broken links, invalid manifest
-entries and boundary violations from either directory fail the check. The gate matches exact
-subpaths before wildcard patterns and reports the chain to each violation.
+lookup miss, including an unmapped package import such as `#helper`, can be satisfied
+by the other directory. Broken links, invalid manifest entries and boundary violations
+from either directory fail the check. The gate matches exact subpaths before wildcard
+patterns and reports the chain to each violation.
 The in-memory cases cover mixed public and private conditional branches, alias cycles,
 Node built-ins, Wave P directories, dynamic calls, declaration files, and private
 manifests in an export candidate. The `requirePermissiveCandidateLicense` option selects
