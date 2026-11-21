@@ -350,6 +350,13 @@ function isolateRealRoots(sfPoly: Polynomial, interval: NormalizedInterval): Iso
     work = polynomialDivMod(work, linearFactor(interval.right)).quotient;
   }
   if (polynomialDegree(work) <= 0) return roots.sort((a, b) => compareRational(rootSortKey(a), rootSortKey(b)));
+  if (polynomialDegree(work) === 1) {
+    const a1 = work.get(1)!;
+    const a0 = work.get(0) ?? rational(0n);
+    const root = divideRational(rational(-a0.n, a0.d), a1);
+    if (pointInInterval(root, interval)) roots.push({ kind: "exact", value: root });
+    return roots.sort((a, b) => compareRational(rootSortKey(a), rootSortKey(b)));
+  }
 
   const bound = cauchyRootBound(work);
   let low = interval.left ?? rational(-bound.n, bound.d);
@@ -949,16 +956,215 @@ type DomainConstraint =
   | { kind: "ge0"; poly: Polynomial }
   | { kind: "gt0"; poly: Polynomial };
 
+type QuadBinomialConstraint = {
+  a: RationalForm;
+  p: RationalForm;
+  b: RationalForm;
+  q: RationalForm;
+  locus: Polynomial;
+};
+
+type UncheckedDomainOp = {
+  kind: "nonzero" | "ge0" | "gt0";
+  expr: ScalarExpr;
+};
+
 type CollectedConstraints = {
   rational: DomainConstraint[];
+  quadBinomials: QuadBinomialConstraint[];
+  splitPolys: Polynomial[];
+  uncheckedOps: UncheckedDomainOp[];
   hasNonRationalDomainOps: boolean;
   alwaysUndefined: boolean;
 };
 
+function rfConst(q: SpanRational): RationalForm {
+  return {
+    numerator: polynomialConstant(q),
+    denominator: polynomialConstant(rational(1n)),
+    domainDenominators: [],
+  };
+}
+
+function rfNeg(a: RationalForm): RationalForm {
+  return {
+    ...a,
+    numerator: polynomialScale(a.numerator, rational(-1n)),
+  };
+}
+
+function rfAdd(a: RationalForm, b: RationalForm, sign: 1 | -1 = 1): RationalForm {
+  return {
+    numerator: polynomialAdd(
+      polynomialMultiply(a.numerator, b.denominator),
+      polynomialMultiply(b.numerator, a.denominator),
+      sign,
+    ),
+    denominator: polynomialMultiply(a.denominator, b.denominator),
+    domainDenominators: [...a.domainDenominators, ...b.domainDenominators],
+    zeroDenominator: a.zeroDenominator || b.zeroDenominator,
+  };
+}
+
+function rfMul(a: RationalForm, b: RationalForm): RationalForm {
+  return {
+    numerator: polynomialMultiply(a.numerator, b.numerator),
+    denominator: polynomialMultiply(a.denominator, b.denominator),
+    domainDenominators: [...a.domainDenominators, ...b.domainDenominators],
+    zeroDenominator: a.zeroDenominator || b.zeroDenominator,
+  };
+}
+
+function rfDiv(a: RationalForm, b: RationalForm): RationalForm {
+  return {
+    numerator: polynomialMultiply(a.numerator, b.denominator),
+    denominator: polynomialMultiply(a.denominator, b.numerator),
+    domainDenominators: [...a.domainDenominators, ...b.domainDenominators, b.numerator, b.denominator],
+    zeroDenominator: a.zeroDenominator || b.zeroDenominator || b.numerator.size === 0 || b.denominator.size === 0,
+  };
+}
+
+function rfEqual(a: RationalForm, b: RationalForm): boolean {
+  if (a.unsupported || b.unsupported || a.denominator.size === 0 || b.denominator.size === 0) return false;
+  return polynomialAdd(polynomialMultiply(a.numerator, b.denominator), polynomialMultiply(b.numerator, a.denominator), -1).size === 0;
+}
+
+type LinearRadicalComb = {
+  constTerm: RationalForm;
+  rads: Array<{ coeff: RationalForm; radicand: RationalForm }>;
+};
+
+function extractLinearRadicalCombination(expr: ScalarExpr, variable: string): LinearRadicalComb | null {
+  const rf = rationalForm(expr, variable);
+  if (!rf.unsupported) {
+    return { constTerm: rf, rads: [] };
+  }
+  switch (expr.kind) {
+    case "neg": {
+      const inner = extractLinearRadicalCombination(expr.value, variable);
+      if (!inner) return null;
+      return {
+        constTerm: rfNeg(inner.constTerm),
+        rads: inner.rads.map((r) => ({ coeff: rfNeg(r.coeff), radicand: r.radicand })),
+      };
+    }
+    case "add":
+    case "sub": {
+      const l = extractLinearRadicalCombination(expr.left, variable);
+      const r = extractLinearRadicalCombination(expr.right, variable);
+      if (!l || !r) return null;
+      const sign: 1 | -1 = expr.kind === "add" ? 1 : -1;
+      const constTerm = rfAdd(l.constTerm, r.constTerm, sign);
+      const rads = l.rads.map((item) => ({ ...item }));
+      for (const item of r.rads) {
+        const signedCoeff = sign === 1 ? item.coeff : rfNeg(item.coeff);
+        const existing = rads.find((x) => rfEqual(x.radicand, item.radicand));
+        if (existing) {
+          existing.coeff = rfAdd(existing.coeff, signedCoeff, 1);
+        } else {
+          rads.push({ coeff: signedCoeff, radicand: item.radicand });
+        }
+      }
+      const nonZeroRads = rads.filter((item) => item.coeff.numerator.size > 0);
+      if (nonZeroRads.length > 2) return null;
+      return { constTerm, rads: nonZeroRads };
+    }
+    case "mul": {
+      const l = extractLinearRadicalCombination(expr.left, variable);
+      const r = extractLinearRadicalCombination(expr.right, variable);
+      if (!l || !r) return null;
+      if (l.rads.length === 0) {
+        return {
+          constTerm: rfMul(l.constTerm, r.constTerm),
+          rads: r.rads.map((item) => ({ coeff: rfMul(l.constTerm, item.coeff), radicand: item.radicand })),
+        };
+      }
+      if (r.rads.length === 0) {
+        return {
+          constTerm: rfMul(l.constTerm, r.constTerm),
+          rads: l.rads.map((item) => ({ coeff: rfMul(item.coeff, r.constTerm), radicand: item.radicand })),
+        };
+      }
+      return null;
+    }
+    case "div": {
+      const l = extractLinearRadicalCombination(expr.left, variable);
+      const r = extractLinearRadicalCombination(expr.right, variable);
+      if (!l || !r || r.rads.length > 0 || r.constTerm.numerator.size === 0) return null;
+      return {
+        constTerm: rfDiv(l.constTerm, r.constTerm),
+        rads: l.rads.map((item) => ({ coeff: rfDiv(item.coeff, r.constTerm), radicand: item.radicand })),
+      };
+    }
+    case "sqrt": {
+      const innerRf = rationalForm(expr.value, variable);
+      if (innerRf.unsupported) return null;
+      return {
+        constTerm: rfConst(rational(0n)),
+        rads: [{ coeff: rfConst(rational(1n)), radicand: innerRf }],
+      };
+    }
+    default:
+      return null;
+  }
+}
+
+function isProvablyPositiveExpr(expr: ScalarExpr): boolean {
+  switch (expr.kind) {
+    case "const": {
+      const q = toRational(expr.value);
+      return q !== null && q.n > 0n;
+    }
+    case "exp":
+      return true;
+    case "add":
+      return (
+        (isProvablyPositiveExpr(expr.left) && isProvablyNonnegExpr(expr.right)) ||
+        (isProvablyNonnegExpr(expr.left) && isProvablyPositiveExpr(expr.right))
+      );
+    case "mul":
+    case "div":
+      return isProvablyPositiveExpr(expr.left) && isProvablyPositiveExpr(expr.right);
+    case "pow":
+      return expr.exponent !== 0 && isProvablyPositiveExpr(expr.base);
+    default:
+      return false;
+  }
+}
+
+function isProvablyNonnegExpr(expr: ScalarExpr): boolean {
+  if (isProvablyPositiveExpr(expr)) return true;
+  switch (expr.kind) {
+    case "const": {
+      const q = toRational(expr.value);
+      return q !== null && q.n >= 0n;
+    }
+    case "abs":
+    case "sqrt":
+      return true;
+    case "pow":
+      return expr.exponent >= 0 && expr.exponent % 2 === 0;
+    case "add":
+    case "mul":
+      return isProvablyNonnegExpr(expr.left) && isProvablyNonnegExpr(expr.right);
+    case "div":
+      return isProvablyNonnegExpr(expr.left) && isProvablyPositiveExpr(expr.right);
+    default:
+      return false;
+  }
+}
+
 function collectConstraints(expr: ScalarExpr, variable: string): CollectedConstraints {
   const rationalList: DomainConstraint[] = [];
+  const quadBinomials: QuadBinomialConstraint[] = [];
+  const splitPolys: Polynomial[] = [];
+  const uncheckedOps: UncheckedDomainOp[] = [];
   let hasNonRationalDomainOps = false;
   let alwaysUndefined = false;
+
+  const pushSplitPoly = (poly: Polynomial) => {
+    if (polynomialDegree(poly) >= 1) splitPolys.push(poly);
+  };
 
   const addRfDens = (rf: RationalForm) => {
     if (rf.zeroDenominator) alwaysUndefined = true;
@@ -970,18 +1176,112 @@ function collectConstraints(expr: ScalarExpr, variable: string): CollectedConstr
     else if (polynomialDegree(rf.denominator) >= 1) rationalList.push({ kind: "nonzero", poly: rf.denominator });
   };
 
+  const pushQuadBinomial = (a: RationalForm, p: RationalForm, b: RationalForm, q: RationalForm): boolean => {
+    addRfDens(a);
+    addRfDens(p);
+    addRfDens(b);
+    addRfDens(q);
+    const locusRf = rfAdd(rfMul(rfMul(a, a), p), rfMul(rfMul(b, b), q), -1);
+    if (locusRf.zeroDenominator || locusRf.denominator.size === 0) {
+      alwaysUndefined = true;
+      return true;
+    }
+    const locus = locusRf.numerator;
+    quadBinomials.push({ a, p, b, q, locus });
+    pushSplitPoly(locus);
+    pushSplitPoly(a.numerator);
+    pushSplitPoly(a.denominator);
+    pushSplitPoly(b.numerator);
+    pushSplitPoly(b.denominator);
+    pushSplitPoly(p.numerator);
+    pushSplitPoly(p.denominator);
+    pushSplitPoly(q.numerator);
+    pushSplitPoly(q.denominator);
+    return true;
+  };
+
+  const extractDenominatorConstraints = (denExpr: ScalarExpr) => {
+    switch (denExpr.kind) {
+      case "neg":
+      case "abs":
+        extractDenominatorConstraints(denExpr.value);
+        return;
+      case "pow":
+        if (denExpr.exponent > 0) extractDenominatorConstraints(denExpr.base);
+        return;
+      case "mul":
+        extractDenominatorConstraints(denExpr.left);
+        extractDenominatorConstraints(denExpr.right);
+        return;
+      case "div":
+        extractDenominatorConstraints(denExpr.left);
+        return;
+      default:
+        break;
+    }
+    const rf = rationalForm(denExpr, variable);
+    if (!rf.unsupported) {
+      addRfDens(rf);
+      if (rf.numerator.size === 0) alwaysUndefined = true;
+      else if (polynomialDegree(rf.numerator) >= 1) rationalList.push({ kind: "nonzero", poly: rf.numerator });
+      return;
+    }
+    const lin = extractLinearRadicalCombination(denExpr, variable);
+    if (lin) {
+      if (lin.rads.length === 0) {
+        addRfDens(lin.constTerm);
+        if (lin.constTerm.numerator.size === 0) alwaysUndefined = true;
+        else if (polynomialDegree(lin.constTerm.numerator) >= 1) {
+          rationalList.push({ kind: "nonzero", poly: lin.constTerm.numerator });
+        }
+        return;
+      }
+      if (lin.rads.length === 1) {
+        pushQuadBinomial(lin.rads[0]!.coeff, lin.rads[0]!.radicand, lin.constTerm, rfConst(rational(1n)));
+        return;
+      }
+      if (lin.rads.length === 2 && lin.constTerm.numerator.size === 0) {
+        pushQuadBinomial(lin.rads[0]!.coeff, lin.rads[0]!.radicand, lin.rads[1]!.coeff, lin.rads[1]!.radicand);
+        return;
+      }
+    }
+    if (isProvablyPositiveExpr(denExpr)) return;
+    uncheckedOps.push({ kind: "nonzero", expr: denExpr });
+    hasNonRationalDomainOps = true;
+  };
+
   const walk = (node: ScalarExpr) => {
     switch (node.kind) {
       case "const":
       case "variable":
         return;
       case "neg":
-      case "abs":
       case "sin":
       case "cos":
       case "exp":
         walk(node.value);
         return;
+      case "abs": {
+        walk(node.value);
+        const rf = rationalForm(node.value, variable);
+        if (!rf.unsupported) {
+          addRfDens(rf);
+          pushSplitPoly(rf.numerator);
+          pushSplitPoly(rf.denominator);
+          for (const den of rf.domainDenominators) pushSplitPoly(den);
+        } else {
+          const lin = extractLinearRadicalCombination(node.value, variable);
+          if (lin && (lin.rads.length === 1 || (lin.rads.length === 2 && lin.constTerm.numerator.size === 0))) {
+            const a = lin.rads[0]!.coeff;
+            const p = lin.rads[0]!.radicand;
+            const b = lin.rads.length === 1 ? lin.constTerm : lin.rads[1]!.coeff;
+            const q = lin.rads.length === 1 ? rfConst(rational(1n)) : lin.rads[1]!.radicand;
+            const locusRf = rfAdd(rfMul(rfMul(a, a), p), rfMul(rfMul(b, b), q), -1);
+            if (!locusRf.zeroDenominator) pushSplitPoly(locusRf.numerator);
+          }
+        }
+        return;
+      }
       case "add":
       case "sub":
       case "mul":
@@ -991,27 +1291,13 @@ function collectConstraints(expr: ScalarExpr, variable: string): CollectedConstr
       case "div": {
         walk(node.left);
         walk(node.right);
-        const rf = rationalForm(node.right, variable);
-        if (!rf.unsupported) {
-          addRfDens(rf);
-          if (rf.numerator.size === 0) alwaysUndefined = true;
-          else if (polynomialDegree(rf.numerator) >= 1) rationalList.push({ kind: "nonzero", poly: rf.numerator });
-        } else {
-          hasNonRationalDomainOps = true;
-        }
+        extractDenominatorConstraints(node.right);
         return;
       }
       case "pow": {
         walk(node.base);
         if (node.exponent < 0) {
-          const rf = rationalForm(node.base, variable);
-          if (!rf.unsupported) {
-            addRfDens(rf);
-            if (rf.numerator.size === 0) alwaysUndefined = true;
-            else if (polynomialDegree(rf.numerator) >= 1) rationalList.push({ kind: "nonzero", poly: rf.numerator });
-          } else {
-            hasNonRationalDomainOps = true;
-          }
+          extractDenominatorConstraints(node.base);
         }
         return;
       }
@@ -1022,20 +1308,31 @@ function collectConstraints(expr: ScalarExpr, variable: string): CollectedConstr
           addRfDens(rf);
           const prod = polynomialMultiply(rf.numerator, rf.denominator);
           if (prod.size > 0) rationalList.push({ kind: "ge0", poly: prod });
-        } else {
+        } else if (!isProvablyNonnegExpr(node.value)) {
+          uncheckedOps.push({ kind: "ge0", expr: node.value });
           hasNonRationalDomainOps = true;
         }
         return;
       }
       case "ln": {
         walk(node.value);
+        if (node.value.kind === "abs") {
+          const rfAbs = rationalForm(node.value.value, variable);
+          if (!rfAbs.unsupported) {
+            addRfDens(rfAbs);
+            if (rfAbs.numerator.size === 0) alwaysUndefined = true;
+            else if (polynomialDegree(rfAbs.numerator) >= 1) rationalList.push({ kind: "nonzero", poly: rfAbs.numerator });
+            return;
+          }
+        }
         const rf = rationalForm(node.value, variable);
         if (!rf.unsupported) {
           addRfDens(rf);
           const prod = polynomialMultiply(rf.numerator, rf.denominator);
           if (prod.size === 0) alwaysUndefined = true;
           else rationalList.push({ kind: "gt0", poly: prod });
-        } else {
+        } else if (!isProvablyPositiveExpr(node.value)) {
+          uncheckedOps.push({ kind: "gt0", expr: node.value });
           hasNonRationalDomainOps = true;
         }
         return;
@@ -1044,7 +1341,7 @@ function collectConstraints(expr: ScalarExpr, variable: string): CollectedConstr
   };
 
   walk(expr);
-  return { rational: rationalList, hasNonRationalDomainOps, alwaysUndefined };
+  return { rational: rationalList, quadBinomials, splitPolys, uncheckedOps, hasNonRationalDomainOps, alwaysUndefined };
 }
 
 function parseDomainSpec(domain: DomainSpec | undefined): {
@@ -1104,22 +1401,56 @@ function domainAllows(domain: DomainSpec | undefined, x: SpanRational): boolean 
 
 type SampleSite =
   | { kind: "rational"; x: SpanRational }
-  | { kind: "isolated"; low: SpanRational; high: SpanRational; master: Polynomial };
+  | { kind: "isolated"; low: SpanRational; high: SpanRational; master: Polynomial; bracketed?: boolean };
 
 function signAtSampleSite(poly: Polynomial, site: SampleSite): -1 | 0 | 1 {
   if (poly.size === 0) return 0;
   if (site.kind === "rational") return signOfBigint(polynomialEvaluate(poly, site.x).n);
   const g = polynomialGcd(poly, site.master);
-  if (polynomialDegree(g) >= 1 && sturmCountOpen(polynomialSquareFree(g), site.low, site.high) === 1) return 0;
-  return signOfBigint(polynomialEvaluate(poly, site.low).n);
+  if (
+    polynomialDegree(g) >= 1 &&
+    sturmCount(g, { left: site.low, right: site.high, leftOpen: true, rightOpen: true }) === 1
+  ) {
+    return 0;
+  }
+  const mid = divideRational(addRational(site.low, site.high), rational(2n));
+  return signOfBigint(polynomialEvaluate(poly, mid).n);
 }
 
-function constraintsSatisfiedAtSite(constraints: readonly DomainConstraint[], site: SampleSite): boolean {
-  for (const c of constraints) {
+function rationalFormSignAtSite(rf: RationalForm, site: SampleSite): -1 | 0 | 1 | null {
+  const denSign = signAtSampleSite(rf.denominator, site);
+  if (denSign === 0) return null;
+  const numSign = signAtSampleSite(rf.numerator, site);
+  return (numSign * denSign) as -1 | 0 | 1;
+}
+
+function quadBinomialIsZeroAtSite(qb: QuadBinomialConstraint, site: SampleSite): boolean {
+  const sLocus = qb.locus.size === 0 ? 0 : signAtSampleSite(qb.locus, site);
+  if (sLocus !== 0) return false;
+  const sA = rationalFormSignAtSite(qb.a, site);
+  const sB = rationalFormSignAtSite(qb.b, site);
+  const sP = rationalFormSignAtSite(qb.p, site);
+  const sQ = rationalFormSignAtSite(qb.q, site);
+  if (sA === null || sB === null || sP === null || sQ === null) return false;
+  if (sA === 0 && sB === 0) return true;
+  if (sA === 0 && sQ === 0) return true;
+  if (sB === 0 && sP === 0) return true;
+  if (sP === 0 && sQ === 0) return true;
+  return sA * sB === -1;
+}
+
+function constraintsSatisfiedAtSite(
+  constraints: Pick<CollectedConstraints, "rational" | "quadBinomials">,
+  site: SampleSite,
+): boolean {
+  for (const c of constraints.rational) {
     const sign = signAtSampleSite(c.poly, site);
     if (c.kind === "nonzero" && sign === 0) return false;
     if (c.kind === "ge0" && sign < 0) return false;
     if (c.kind === "gt0" && sign <= 0) return false;
+  }
+  for (const qb of constraints.quadBinomials) {
+    if (quadBinomialIsZeroAtSite(qb, site)) return false;
   }
   return true;
 }
@@ -1135,10 +1466,14 @@ function pickRationalBetween(a: SpanRational | null, b: SpanRational | null): Sp
   return divideRational(addRational(a, b), rational(2n));
 }
 
-function buildCadSampleSites(
+type CadOpenCell = { left: SpanRational | null; right: SpanRational | null; sample: SpanRational };
+type CadPlan = { sites: SampleSite[]; openCells: CadOpenCell[] };
+
+function buildCadPlan(
   constraints: readonly DomainConstraint[],
   parsedDomain: { intervals: NormalizedInterval[]; excluded: SpanRational[] },
-): SampleSite[] {
+  extraSplitPolys: readonly Polynomial[] = [],
+): CadPlan {
   let master = polynomialConstant(rational(1n));
   for (const c of constraints) {
     if (polynomialDegree(c.poly) < 1) continue;
@@ -1147,23 +1482,23 @@ function buildCadSampleSites(
     const factor = polynomialDegree(g) >= 1 ? polynomialDivMod(sf, g).quotient : sf;
     if (polynomialDegree(factor) >= 1) master = polynomialPrimitivePositive(polynomialMultiply(master, factor));
   }
+  for (const p of extraSplitPolys) {
+    if (polynomialDegree(p) < 1) continue;
+    const sf = polynomialSquareFree(p);
+    const g = polynomialGcd(master, sf);
+    const factor = polynomialDegree(g) >= 1 ? polynomialDivMod(sf, g).quotient : sf;
+    if (polynomialDegree(factor) >= 1) master = polynomialPrimitivePositive(polynomialMultiply(master, factor));
+  }
 
   const sites: SampleSite[] = [];
-  for (const iv of parsedDomain.intervals) {
-    const roots = polynomialDegree(master) >= 1 ? isolateRealRoots(master, iv) : [];
-    const rootBounds: Array<{ low: SpanRational; high: SpanRational }> = [];
-    for (const r of roots) {
-      if (r.kind === "exact") {
-        if (!parsedDomain.excluded.some((e) => equalRational(e, r.value))) {
-          sites.push({ kind: "rational", x: r.value });
-        }
-        rootBounds.push({ low: r.value, high: r.value });
-      } else {
-        sites.push({ kind: "isolated", low: r.low, high: r.high, master });
-        rootBounds.push({ low: r.low, high: r.high });
-      }
+  const openCells: CadOpenCell[] = [];
+  const pushRationalSite = (x: SpanRational) => {
+    if (!sites.some((s) => s.kind === "rational" && equalRational(s.x, x))) {
+      sites.push({ kind: "rational", x });
     }
+  };
 
+  for (const iv of parsedDomain.intervals) {
     const emitOpenSample = (leftBound: SpanRational | null, rightBound: SpanRational | null) => {
       if (leftBound && rightBound && compareRational(leftBound, rightBound) >= 0) return;
       let candidate = pickRationalBetween(leftBound, rightBound);
@@ -1181,14 +1516,72 @@ function buildCadSampleSites(
         }
       }
       if (pointInInterval(candidate, iv) && !parsedDomain.excluded.some((e) => equalRational(e, candidate))) {
-        sites.push({ kind: "rational", x: candidate });
+        pushRationalSite(candidate);
+        openCells.push({ left: leftBound, right: rightBound, sample: candidate });
       }
     };
+
+    const roots = polynomialDegree(master) >= 1 ? isolateRealRoots(master, iv) : [];
+    const rootBounds: Array<{ low: SpanRational; high: SpanRational }> = [];
+    for (const r of roots) {
+      if (r.kind === "exact") {
+        if (!parsedDomain.excluded.some((e) => equalRational(e, r.value))) {
+          pushRationalSite(r.value);
+        }
+        rootBounds.push({ low: r.value, high: r.value });
+      } else {
+        let curLo = r.low;
+        let curHi = r.high;
+        let leftWitness: SpanRational | null = null;
+        let rightWitness: SpanRational | null = null;
+        let exactRootMid: SpanRational | null = null;
+        for (let step = 0; step < 64 && (leftWitness === null || rightWitness === null); step++) {
+          const mid = divideRational(addRational(curLo, curHi), rational(2n));
+          if (polynomialEvaluate(master, mid).n === 0n) {
+            exactRootMid = mid;
+            break;
+          }
+          const leftCount = sturmCount(master, { left: curLo, right: mid, leftOpen: true, rightOpen: true });
+          if (leftCount === 0) {
+            if (pointInInterval(mid, iv) && !parsedDomain.excluded.some((e) => equalRational(e, mid))) {
+              leftWitness = mid;
+            }
+            curLo = mid;
+          } else if (leftCount === 1) {
+            if (pointInInterval(mid, iv) && !parsedDomain.excluded.some((e) => equalRational(e, mid))) {
+              rightWitness = mid;
+            }
+            curHi = mid;
+          } else {
+            break;
+          }
+        }
+        if (exactRootMid !== null && sturmCount(master, { left: r.low, right: r.high, leftOpen: true, rightOpen: true }) === 1) {
+          if (pointInInterval(exactRootMid, iv) && !parsedDomain.excluded.some((e) => equalRational(e, exactRootMid))) {
+            pushRationalSite(exactRootMid);
+          }
+          emitOpenSample(r.low, exactRootMid);
+          emitOpenSample(exactRootMid, r.high);
+          rootBounds.push({ low: r.low, high: r.high });
+          continue;
+        }
+        if (leftWitness !== null) {
+          pushRationalSite(leftWitness);
+          if (compareRational(r.low, curLo) < 0) openCells.push({ left: r.low, right: curLo, sample: leftWitness });
+        }
+        sites.push({ kind: "isolated", low: curLo, high: curHi, master, bracketed: leftWitness !== null && rightWitness !== null });
+        if (rightWitness !== null) {
+          pushRationalSite(rightWitness);
+          if (compareRational(curHi, r.high) < 0) openCells.push({ left: curHi, right: r.high, sample: rightWitness });
+        }
+        rootBounds.push({ low: r.low, high: r.high });
+      }
+    }
 
     if (rootBounds.length === 0) {
       if (iv.left && iv.right && equalRational(iv.left, iv.right)) {
         if (!parsedDomain.excluded.some((e) => equalRational(e, iv.left!))) {
-          sites.push({ kind: "rational", x: iv.left });
+          pushRationalSite(iv.left);
         }
       } else {
         emitOpenSample(iv.left, iv.right);
@@ -1202,7 +1595,7 @@ function buildCadSampleSites(
         const leftNext = rootBounds[i + 1]!.low;
         if (equalRational(rightPrev, leftNext)) {
           if (!parsedDomain.excluded.some((e) => equalRational(e, rightPrev)) && polynomialEvaluate(master, rightPrev).n !== 0n) {
-            sites.push({ kind: "rational", x: rightPrev });
+            pushRationalSite(rightPrev);
           }
         } else {
           emitOpenSample(rightPrev, leftNext);
@@ -1216,16 +1609,12 @@ function buildCadSampleSites(
 
     for (const n of [-3, -2, -1, 0, 1, 2, 3]) {
       const q = rational(BigInt(n));
-      if (
-        pointInInterval(q, iv) &&
-        !parsedDomain.excluded.some((e) => equalRational(e, q)) &&
-        !sites.some((s) => s.kind === "rational" && equalRational(s.x, q))
-      ) {
-        sites.push({ kind: "rational", x: q });
+      if (pointInInterval(q, iv) && !parsedDomain.excluded.some((e) => equalRational(e, q))) {
+        pushRationalSite(q);
       }
     }
   }
-  return sites;
+  return { sites, openCells };
 }
 
 function evaluateExactRationalExt(
@@ -1297,7 +1686,7 @@ function evaluateExactRationalExt(
 }
 
 type FloatEvalResult =
-  | { status: "ok"; value: number; marginOk: boolean }
+  | { status: "ok"; value: number; marginOk: boolean; irrational: boolean }
   | { status: "undefined_domain"; reason: string }
   | { status: "unstable" };
 
@@ -1308,50 +1697,66 @@ function evaluateFloatSafe(expr: ScalarExpr, x: number, variable: string): Float
       const q = toRational(expr.value);
       if (q) {
         const val = Number(q.n) / Number(q.d);
-        return Number.isFinite(val) ? { status: "ok", value: val, marginOk: true } : { status: "unstable" };
+        if (q.n !== 0n && val === 0) return { status: "unstable" };
+        return Number.isFinite(val) ? { status: "ok", value: val, marginOk: true, irrational: false } : { status: "unstable" };
       }
       const val = Number(expr.value);
-      return Number.isFinite(val) ? { status: "ok", value: val, marginOk: true } : { status: "unstable" };
+      return Number.isFinite(val)
+        ? { status: "ok", value: val, marginOk: true, irrational: !Number.isInteger(val) }
+        : { status: "unstable" };
     }
     case "variable":
-      return expr.name === variable ? { status: "ok", value: x, marginOk: true } : { status: "unstable" };
+      return expr.name === variable ? { status: "ok", value: x, marginOk: true, irrational: false } : { status: "unstable" };
     case "neg": {
       const inner = evaluateFloatSafe(expr.value, x, variable);
-      return inner.status === "ok" ? { status: "ok", value: -inner.value, marginOk: inner.marginOk } : inner;
+      return inner.status === "ok"
+        ? { status: "ok", value: -inner.value, marginOk: inner.marginOk, irrational: inner.irrational }
+        : inner;
     }
     case "abs": {
       const inner = evaluateFloatSafe(expr.value, x, variable);
       return inner.status === "ok"
-        ? { status: "ok", value: Math.abs(inner.value), marginOk: inner.marginOk && Math.abs(inner.value) > BOUND_EPS }
+        ? { status: "ok", value: Math.abs(inner.value), marginOk: inner.marginOk && Math.abs(inner.value) > BOUND_EPS, irrational: inner.irrational }
         : inner;
     }
     case "sqrt": {
       const inner = evaluateFloatSafe(expr.value, x, variable);
       if (inner.status !== "ok") return inner;
       if (inner.value < -BOUND_EPS) return { status: "undefined_domain", reason: "even_root_domain" };
+      if (inner.value === 0 && !inner.irrational) return { status: "ok", value: 0, marginOk: inner.marginOk, irrational: false };
       if (inner.value < BOUND_EPS) return { status: "unstable" };
-      return { status: "ok", value: Math.sqrt(inner.value), marginOk: inner.marginOk };
+      const s = Math.sqrt(inner.value);
+      const exactInt = !inner.irrational && Number.isInteger(inner.value) && Number.isInteger(s);
+      return { status: "ok", value: s, marginOk: inner.marginOk, irrational: !exactInt };
     }
     case "ln": {
       const inner = evaluateFloatSafe(expr.value, x, variable);
       if (inner.status !== "ok") return inner;
-      if (inner.value <= -BOUND_EPS) return { status: "undefined_domain", reason: "ln_domain" };
+      if ((inner.value === 0 && !inner.irrational) || inner.value <= -BOUND_EPS) {
+        return { status: "undefined_domain", reason: "ln_domain" };
+      }
       if (inner.value <= BOUND_EPS) return { status: "unstable" };
-      return { status: "ok", value: Math.log(inner.value), marginOk: inner.marginOk };
+      const exactZero = !inner.irrational && inner.value === 1;
+      return { status: "ok", value: exactZero ? 0 : Math.log(inner.value), marginOk: inner.marginOk, irrational: !exactZero };
     }
     case "sin": {
       const inner = evaluateFloatSafe(expr.value, x, variable);
-      return inner.status === "ok" ? { status: "ok", value: Math.sin(inner.value), marginOk: inner.marginOk } : inner;
+      if (inner.status !== "ok") return inner;
+      const exactZero = !inner.irrational && inner.value === 0;
+      return { status: "ok", value: exactZero ? 0 : Math.sin(inner.value), marginOk: inner.marginOk, irrational: !exactZero };
     }
     case "cos": {
       const inner = evaluateFloatSafe(expr.value, x, variable);
-      return inner.status === "ok" ? { status: "ok", value: Math.cos(inner.value), marginOk: inner.marginOk } : inner;
+      if (inner.status !== "ok") return inner;
+      const exactOne = !inner.irrational && inner.value === 0;
+      return { status: "ok", value: exactOne ? 1 : Math.cos(inner.value), marginOk: inner.marginOk, irrational: !exactOne };
     }
     case "exp": {
       const inner = evaluateFloatSafe(expr.value, x, variable);
       if (inner.status !== "ok") return inner;
-      if (inner.value > 50) return { status: "unstable" };
-      return { status: "ok", value: Math.exp(inner.value), marginOk: inner.marginOk };
+      if (inner.value > 50 || inner.value < -50) return { status: "unstable" };
+      const exactOne = !inner.irrational && inner.value === 0;
+      return { status: "ok", value: exactOne ? 1 : Math.exp(inner.value), marginOk: inner.marginOk, irrational: !exactOne };
     }
     case "add":
     case "sub":
@@ -1361,24 +1766,33 @@ function evaluateFloatSafe(expr: ScalarExpr, x: number, variable: string): Float
       if (l.status !== "ok") return l;
       const r = evaluateFloatSafe(expr.right, x, variable);
       if (r.status !== "ok") return r;
+      const irrational = l.irrational || r.irrational;
       if (expr.kind === "div") {
+        if (r.value === 0) {
+          return r.irrational ? { status: "unstable" } : { status: "undefined_domain", reason: "natural_domain_denominator_zero" };
+        }
         if (Math.abs(r.value) <= BOUND_EPS) return { status: "unstable" };
         const val = l.value / r.value;
         return Number.isFinite(val) && Math.abs(val) < 1e10
-          ? { status: "ok", value: val, marginOk: l.marginOk && r.marginOk }
+          ? { status: "ok", value: val, marginOk: l.marginOk && r.marginOk, irrational }
           : { status: "unstable" };
       }
       const val = expr.kind === "add" ? l.value + r.value : expr.kind === "sub" ? l.value - r.value : l.value * r.value;
       return Number.isFinite(val) && Math.abs(val) < 1e10
-        ? { status: "ok", value: val, marginOk: l.marginOk && r.marginOk }
+        ? { status: "ok", value: val, marginOk: l.marginOk && r.marginOk, irrational }
         : { status: "unstable" };
     }
     case "pow": {
       const b = evaluateFloatSafe(expr.base, x, variable);
       if (b.status !== "ok") return b;
+      if (expr.exponent < 0 && b.value === 0) {
+        return b.irrational ? { status: "unstable" } : { status: "undefined_domain", reason: "natural_domain_denominator_zero" };
+      }
       if (expr.exponent < 0 && Math.abs(b.value) <= BOUND_EPS) return { status: "unstable" };
       const val = b.value ** expr.exponent;
-      return Number.isFinite(val) && Math.abs(val) < 1e10 ? { status: "ok", value: val, marginOk: b.marginOk } : { status: "unstable" };
+      return Number.isFinite(val) && Math.abs(val) < 1e10
+        ? { status: "ok", value: val, marginOk: b.marginOk, irrational: b.irrational && expr.exponent !== 0 }
+        : { status: "unstable" };
     }
   }
 }
@@ -1403,12 +1817,19 @@ function formatMonomialKey(powers: Map<string, number>): string {
   return entries.map(([a, e]) => `${a}^${e}`).join("\u0001");
 }
 
+class MPolyOverflowError extends Error {
+  constructor() {
+    super("mpoly_complexity_exceeded");
+  }
+}
+
 function mpolyAdd(a: MPoly, b: MPoly, sign: 1 | -1 = 1): MPoly {
   const out = new Map(a);
   for (const [k, v] of b) {
     const next = sign === 1 ? addRational(out.get(k) ?? rational(0n), v) : subtractRational(out.get(k) ?? rational(0n), v);
     if (next.n === 0n) out.delete(k);
     else out.set(k, next);
+    if (out.size > 1024) throw new MPolyOverflowError();
   }
   return out;
 }
@@ -1442,6 +1863,16 @@ function mpolyScale(p: MPoly, q: SpanRational): MPoly {
     if (next.n !== 0n) out.set(k, next);
   }
   return out;
+}
+
+function mpolyContent(p: MPoly): { gcdNum: bigint; lcmDen: bigint; primitive: MPoly } {
+  if (p.size === 0) return { gcdNum: 0n, lcmDen: 1n, primitive: new Map() };
+  let lcmDen = 1n;
+  for (const coeff of p.values()) lcmDen = bigLcm(lcmDen, coeff.d);
+  let gcdNum = 0n;
+  for (const coeff of p.values()) gcdNum = bigGcd(gcdNum, bigAbs(coeff.n) * (lcmDen / coeff.d));
+  if (gcdNum === 0n) return { gcdNum: 0n, lcmDen: 1n, primitive: new Map() };
+  return { gcdNum, lcmDen, primitive: mpolyScale(p, rational(lcmDen, gcdNum)) };
 }
 
 type RingAtomRegistry = {
@@ -1512,7 +1943,7 @@ function mpolyMultiply(a: MPoly, b: MPoly, reg: RingAtomRegistry): MPoly {
       term = new Map([[formatMonomialKey(remPowers), multiplyRational(ca, cb)]]);
       for (const factor of extraFactors) term = mpolyMultiply(term, factor, reg);
       acc = mpolyAdd(acc, term, 1);
-      if (acc.size > 512) return acc;
+      if (acc.size > 512) throw new MPolyOverflowError();
     }
   }
   return acc;
@@ -1561,13 +1992,43 @@ function factorSquarePolynomial(poly: Polynomial): { square: Polynomial; squareF
 
 type RingRational = { num: MPoly; den: MPoly };
 
+function buildSqrtOfMPoly(p: MPoly, reg: RingAtomRegistry): MPoly | null {
+  if (p.size === 0) return new Map();
+  const constVal = mpolyIsConst(p);
+  if (constVal !== null) {
+    if (constVal.n < 0n) return null;
+    const { square, rest } = extractSquareFree(constVal.n * constVal.d);
+    const coeff = rational(square, constVal.d);
+    if (rest === 1n) return mpolyConst(coeff);
+    const radKey = `sqrt(${rest})`;
+    reg.sqrtDefs.set(radKey, mpolyConst(rational(rest)));
+    return mpolyScale(mpolyAtom(radKey), coeff);
+  }
+  const { gcdNum, lcmDen, primitive } = mpolyContent(p);
+  const { square, rest } = extractSquareFree(gcdNum * lcmDen);
+  const coeff = rational(square, lcmDen);
+  const primKey = `sqrt(${formatMPolyKey(primitive)})`;
+  reg.sqrtDefs.set(primKey, primitive);
+  let out = mpolyScale(mpolyAtom(primKey), coeff);
+  if (rest > 1n) {
+    const cKey = `sqrt(${rest})`;
+    reg.sqrtDefs.set(cKey, mpolyConst(rational(rest)));
+    out = mpolyMultiply(out, mpolyAtom(cKey), reg);
+  }
+  return out;
+}
+
 function ringNormalizeRational(
   expr: ScalarExpr,
   variable: string,
   validSites: readonly SampleSite[],
   reg: RingAtomRegistry,
+  activeOpenIntervals: readonly NormalizedInterval[] = [],
 ): RingRational | null {
   const checkPolySign = (poly: Polynomial): "nonneg" | "nonpos" | "pos" | "neg" | "mixed" => {
+    if (poly.size === 0) return "nonneg";
+    if (polynomialDegree(poly) === 0) return poly.get(0)!.n > 0n ? "pos" : "neg";
+    if (validSites.length === 0) return "mixed";
     let hasPos = false;
     let hasNeg = false;
     let hasZero = false;
@@ -1578,6 +2039,20 @@ function ringNormalizeRational(
       else hasZero = true;
     }
     if (hasPos && hasNeg) return "mixed";
+    const oddPoly = factorSquarePolynomial(poly).squareFree;
+    if (polynomialDegree(oddPoly) >= 1) {
+      for (const iv of activeOpenIntervals) {
+        if (sturmCount(oddPoly, iv) > 0) return "mixed";
+      }
+      for (const site of validSites) {
+        if (site.kind !== "isolated") continue;
+        const openRoots = sturmCount(oddPoly, { left: site.low, right: site.high, leftOpen: true, rightOpen: true });
+        if (openRoots > 0) {
+          const sHere = signAtSampleSite(poly, site);
+          if (sHere !== 0 || openRoots > 1 || !site.bracketed) return "mixed";
+        }
+      }
+    }
     if (!hasNeg && !hasZero && hasPos) return "pos";
     if (!hasPos && !hasZero && hasNeg) return "neg";
     if (!hasNeg) return "nonneg";
@@ -1721,14 +2196,11 @@ function ringNormalizeRational(
         if (inner.num.size === 0) return { num: new Map(), den: mpolyConst(rational(1n)) };
         if (inner.den.size === 1 && inner.den.has("")) {
           const dVal = inner.den.get("")!;
+          if (dVal.n === 0n) return null;
           const scaled = mpolyScale(inner.num, dVal);
-          const key = `sqrt(${formatMPolyKey(scaled)})`;
-          reg.sqrtDefs.set(key, scaled);
-          const { square: dSq, rest: dRest } = extractSquareFree(bigAbs(dVal.n) * dVal.d);
-          if (dRest === 1n) {
-            return { num: mpolyAtom(key), den: mpolyConst(rational(dSq, dVal.d)) };
-          }
-          return { num: mpolyAtom(key), den: buildSqrtOfPoly(polynomialConstant(dVal)) };
+          const numSqrt = buildSqrtOfMPoly(scaled, reg);
+          if (!numSqrt) return null;
+          return { num: numSqrt, den: mpolyConst(rational(bigAbs(dVal.n), dVal.d)) };
         }
         return null;
       }
@@ -1804,7 +2276,12 @@ function ringNormalizeRational(
     }
   };
 
-  return convert(expr);
+  try {
+    return convert(expr);
+  } catch (err) {
+    if (err instanceof MPolyOverflowError) return null;
+    throw err;
+  }
 }
 
 function collectVariables(expr: ScalarExpr, out = new Set<string>()): Set<string> {
@@ -1857,6 +2334,56 @@ function hasTranscendental(expr: ScalarExpr): boolean {
   }
 }
 
+function stringSetsEqual(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
+  if (a.size !== b.size) return false;
+  for (const item of a) if (!b.has(item)) return false;
+  return true;
+}
+
+function canonicalizeUncheckedOps(
+  ops: readonly UncheckedDomainOp[],
+  variable: string,
+  validSites: readonly SampleSite[],
+  activeOpenIntervals: readonly NormalizedInterval[],
+): Set<string> | null {
+  const keys = new Set<string>();
+  const reg: RingAtomRegistry = { sqrtDefs: new Map(), absDefs: new Map(), sinPairs: new Map(), expExps: new Map() };
+  for (const op of ops) {
+    const norm = ringNormalizeRational(op.expr, variable, validSites, reg, activeOpenIntervals);
+    if (!norm || norm.den.size === 0) return null;
+    let poly: MPoly;
+    try {
+      poly = op.kind === "nonzero" ? norm.num : mpolyMultiply(norm.num, norm.den, reg);
+    } catch (err) {
+      if (err instanceof MPolyOverflowError) return null;
+      throw err;
+    }
+    const c = mpolyIsConst(poly);
+    if (c !== null) {
+      if (op.kind === "nonzero") {
+        if (c.n === 0n) return null;
+        continue;
+      }
+      if (op.kind === "ge0") {
+        if (c.n < 0n) return null;
+        continue;
+      }
+      if (c.n <= 0n) return null;
+      continue;
+    }
+    const { primitive } = mpolyContent(poly);
+    let canonical = primitive;
+    if (op.kind === "nonzero") {
+      const entries = [...primitive.entries()].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+      if (entries[0] && entries[0][1].n < 0n) {
+        canonical = mpolyScale(primitive, rational(-1n));
+      }
+    }
+    keys.add(`${op.kind}:${formatMPolyKey(canonical)}`);
+  }
+  return keys;
+}
+
 export function verifyScalarEquivalence(
   studentInput: ScalarExpr | string,
   referenceInput: ScalarExpr | string,
@@ -1892,6 +2419,9 @@ export function verifyScalarEquivalence(
     if (!rRad.ok && !rRad.defined && sRad.ok) {
       return { status: "inequivalent", reason: "natural_domain_mismatch", witness: { input: "const", detail: "reference undefined" }, domain };
     }
+    if (!sRad.ok && !sRad.defined && !rRad.ok && !rRad.defined) {
+      return { status: "unverified", reason: "empty_natural_domain", domain };
+    }
     const sfFloat = evaluateFloatSafe(student, 0, variable);
     const rfFloat = evaluateFloatSafe(reference, 0, variable);
     if (sfFloat.status === "undefined_domain" && rfFloat.status === "ok") {
@@ -1899,6 +2429,9 @@ export function verifyScalarEquivalence(
     }
     if (rfFloat.status === "undefined_domain" && sfFloat.status === "ok") {
       return { status: "inequivalent", reason: "natural_domain_mismatch", witness: { input: "const", detail: "reference undefined" }, domain };
+    }
+    if (sfFloat.status === "undefined_domain" && rfFloat.status === "undefined_domain") {
+      return { status: "unverified", reason: "empty_natural_domain", domain };
     }
     if (sfFloat.status === "ok" && rfFloat.status === "ok" && sfFloat.marginOk && rfFloat.marginOk) {
       const tol = 1e-6 * Math.max(1, Math.abs(sfFloat.value), Math.abs(rfFloat.value));
@@ -1910,8 +2443,13 @@ export function verifyScalarEquivalence(
     const sn = ringNormalizeRational(student, variable, [], reg);
     const rn = ringNormalizeRational(reference, variable, [], reg);
     if (sn && rn) {
-      const diff = mpolyAdd(mpolyMultiply(sn.num, rn.den, reg), mpolyMultiply(rn.num, sn.den, reg), -1);
-      if (diff.size === 0) return { status: "equivalent", reason: "canonical_symbolic_identity", domain };
+      try {
+        const diff = mpolyAdd(mpolyMultiply(sn.num, rn.den, reg), mpolyMultiply(rn.num, sn.den, reg), -1);
+        if (diff.size === 0) return { status: "equivalent", reason: "canonical_symbolic_identity", domain };
+      } catch (err) {
+        if (!(err instanceof MPolyOverflowError)) throw err;
+        return { status: "unverified", reason: "symbolic_complexity_exceeded", domain };
+      }
     }
     return { status: "unverified", reason: "constant_outside_exact_fragment", domain };
   }
@@ -1956,9 +2494,10 @@ export function verifyScalarEquivalence(
       polynomialMultiply(rf.numerator, sf.denominator),
       -1,
     );
-    const sites = buildCadSampleSites(
+    const { sites } = buildCadPlan(
       [...sConstraints.rational, ...rConstraints.rational],
       parsedDomain,
+      [...sConstraints.splitPolys, ...rConstraints.splitPolys],
     );
     const validRationalPoints = sites
       .filter((s): s is { kind: "rational"; x: SpanRational } => s.kind === "rational")
@@ -1983,51 +2522,122 @@ export function verifyScalarEquivalence(
       }
     }
 
-    // Residual is nonzero as polynomial: check if an open interval exists to guarantee finding a non-root
+    const hasNonDegenerateInterval = parsedDomain.intervals.some(
+      (iv) => !(iv.left && iv.right && equalRational(iv.left, iv.right)),
+    );
+    if (!hasNonDegenerateInterval) {
+      if (validRationalPoints.length === 0) {
+        return { status: "unverified", reason: "empty_natural_domain", domain };
+      }
+      return { status: "equivalent", reason: "exact_rational_identity_on_locked_domain", domain };
+    }
+
+    // Residual is nonzero as polynomial: bounded probes on non-degenerate intervals, fail closed if insufficient valid points
     const deg = polynomialDegree(residual);
+    const evaluatedKeys = new Set(validRationalPoints.map((x) => formatRational(x)));
+    const maxProbes = deg + Math.max(0, polynomialDegree(combinedDen)) + parsedDomain.excluded.length + 5;
     for (const iv of parsedDomain.intervals) {
       if (iv.left && iv.right && equalRational(iv.left, iv.right)) continue;
       let probe = pickRationalBetween(iv.left, iv.right);
-      for (let i = 0; i <= deg + 4; i++) {
+      for (let i = 0; i < maxProbes; i++) {
         if (
           pointInInterval(probe, iv) &&
           !parsedDomain.excluded.some((e) => equalRational(e, probe)) &&
-          polynomialEvaluate(combinedDen, probe).n !== 0n &&
-          polynomialEvaluate(residual, probe).n !== 0n
+          polynomialEvaluate(combinedDen, probe).n !== 0n
         ) {
-          return {
-            status: "inequivalent",
-            reason: "residual_nonzero",
-            witness: { input: formatRational(probe), detail: "exact residual is non-zero" },
-            domain,
-          };
+          if (polynomialEvaluate(residual, probe).n !== 0n) {
+            return {
+              status: "inequivalent",
+              reason: "residual_nonzero",
+              witness: { input: formatRational(probe), detail: "exact residual is non-zero" },
+              domain,
+            };
+          }
+          evaluatedKeys.add(formatRational(probe));
         }
         probe = iv.right !== null ? divideRational(addRational(probe, iv.right), rational(2n)) : addRational(probe, rational(1n));
       }
     }
-    return { status: "equivalent", reason: "exact_rational_identity_on_locked_domain", domain };
+    return {
+      status: "unverified",
+      reason: evaluatedKeys.size < deg + 1 ? "rational_probe_budget_exhausted" : "residual_nonzero_unwitnessed",
+      domain,
+    };
   }
 
   // Extended fragment (radicals, abs, ln, sin, cos, exp): 1D CAD domain verification first
   const allRationalConstraints = [...sConstraints.rational, ...rConstraints.rational];
-  const sites = buildCadSampleSites(allRationalConstraints, parsedDomain);
+  const { sites, openCells } = buildCadPlan(
+    allRationalConstraints,
+    parsedDomain,
+    [...sConstraints.splitPolys, ...rConstraints.splitPolys],
+  );
   const validSites: SampleSite[] = [];
+  const ambiguousRationalSites: Array<{ x: SpanRational; definedSide: "student" | "reference" }> = [];
   for (const site of sites) {
-    const sOk = constraintsSatisfiedAtSite(sConstraints.rational, site);
-    const rOk = constraintsSatisfiedAtSite(rConstraints.rational, site);
+    const sOk = constraintsSatisfiedAtSite(sConstraints, site);
+    const rOk = constraintsSatisfiedAtSite(rConstraints, site);
     if (sOk !== rOk) {
-      return {
-        status: "inequivalent",
-        reason: "natural_domain_mismatch",
-        witness: { input: formatSampleSite(site), detail: sOk ? "reference undefined" : "student undefined" },
-        domain,
-      };
+      const okSideHasNonRational = sOk ? sConstraints.hasNonRationalDomainOps : rConstraints.hasNonRationalDomainOps;
+      if (!okSideHasNonRational) {
+        return {
+          status: "inequivalent",
+          reason: "natural_domain_mismatch",
+          witness: { input: formatSampleSite(site), detail: sOk ? "reference undefined" : "student undefined" },
+          domain,
+        };
+      }
+      if (site.kind === "rational") {
+        ambiguousRationalSites.push({ x: site.x, definedSide: sOk ? "student" : "reference" });
+      }
+      continue;
     }
     if (sOk && rOk) validSites.push(site);
   }
 
+  for (const amb of ambiguousRationalSites) {
+    const definedExpr = amb.definedSide === "student" ? student : reference;
+    const exactVal = evaluateExactRationalExt(definedExpr, amb.x, variable);
+    if (exactVal.status === "value") {
+      return {
+        status: "inequivalent",
+        reason: "natural_domain_mismatch",
+        witness: {
+          input: formatRational(amb.x),
+          detail: amb.definedSide === "student" ? "reference undefined" : "student undefined",
+        },
+        domain,
+      };
+    }
+    if (exactVal.status === "unsupported") {
+      const fx = Number(amb.x.n) / Number(amb.x.d);
+      if (Number.isFinite(fx)) {
+        const floatVal = evaluateFloatSafe(definedExpr, fx, variable);
+        if (floatVal.status === "ok" && floatVal.marginOk) {
+          return {
+            status: "inequivalent",
+            reason: "natural_domain_mismatch",
+            witness: {
+              input: formatRational(amb.x),
+              detail: amb.definedSide === "student" ? "reference undefined" : "student undefined",
+            },
+            domain,
+          };
+        }
+      }
+    }
+  }
+
   if (validSites.length === 0) {
     return { status: "unverified", reason: "empty_natural_domain", domain };
+  }
+
+  const activeOpenIntervals: NormalizedInterval[] = [];
+  for (const cell of openCells) {
+    const sampleSite: SampleSite = { kind: "rational", x: cell.sample };
+    if (constraintsSatisfiedAtSite(sConstraints, sampleSite) && constraintsSatisfiedAtSite(rConstraints, sampleSite)) {
+      activeOpenIntervals.push({ left: cell.left, right: cell.right, leftOpen: true, rightOpen: true });
+    }
   }
 
   // Exact rational evaluation on valid rational sites (handles sqrt/abs/ln(1) counterexamples cleanly)
@@ -2069,7 +2679,9 @@ export function verifyScalarEquivalence(
     const q = toRational(String(offset));
     if (q && domainAllows(domain, q)) {
       const site: SampleSite = { kind: "rational", x: q };
-      if (constraintsSatisfiedAtSite(allRationalConstraints, site)) floatCandidates.push(offset);
+      if (constraintsSatisfiedAtSite(sConstraints, site) && constraintsSatisfiedAtSite(rConstraints, site)) {
+        floatCandidates.push(offset);
+      }
     }
   }
 
@@ -2101,28 +2713,29 @@ export function verifyScalarEquivalence(
   }
 
   // Symbolic / algebraic ring equivalence over atoms (only when domains matched and non-empty)
-  if (!sConstraints.hasNonRationalDomainOps && !rConstraints.hasNonRationalDomainOps) {
+  let uncheckedConstraintsMatch = !sConstraints.hasNonRationalDomainOps && !rConstraints.hasNonRationalDomainOps;
+  if (!uncheckedConstraintsMatch) {
+    const sKeys = canonicalizeUncheckedOps(sConstraints.uncheckedOps, variable, validSites, activeOpenIntervals);
+    const rKeys = canonicalizeUncheckedOps(rConstraints.uncheckedOps, variable, validSites, activeOpenIntervals);
+    uncheckedConstraintsMatch = sKeys !== null && rKeys !== null && stringSetsEqual(sKeys, rKeys);
+  }
+  if (uncheckedConstraintsMatch) {
     const reg: RingAtomRegistry = { sqrtDefs: new Map(), absDefs: new Map(), sinPairs: new Map(), expExps: new Map() };
-    const sn = ringNormalizeRational(student, variable, validSites, reg);
-    const rn = ringNormalizeRational(reference, variable, validSites, reg);
+    const sn = ringNormalizeRational(student, variable, validSites, reg, activeOpenIntervals);
+    const rn = ringNormalizeRational(reference, variable, validSites, reg, activeOpenIntervals);
     if (sn && rn) {
-      const diff = mpolyAdd(mpolyMultiply(sn.num, rn.den, reg), mpolyMultiply(rn.num, sn.den, reg), -1);
-      if (diff.size === 0) {
-        return {
-          status: "equivalent",
-          reason: hasTranscendental(student) || hasTranscendental(reference) ? "canonical_symbolic_identity" : "canonical_radical_identity",
-          domain,
-        };
-      }
-    }
-  } else {
-    const reg: RingAtomRegistry = { sqrtDefs: new Map(), absDefs: new Map(), sinPairs: new Map(), expExps: new Map() };
-    const sn = ringNormalizeRational(student, variable, validSites, reg);
-    const rn = ringNormalizeRational(reference, variable, validSites, reg);
-    if (sn && rn) {
-      const diff = mpolyAdd(mpolyMultiply(sn.num, rn.den, reg), mpolyMultiply(rn.num, sn.den, reg), -1);
-      if (diff.size === 0) {
-        return { status: "equivalent", reason: "canonical_symbolic_identity", domain };
+      try {
+        const diff = mpolyAdd(mpolyMultiply(sn.num, rn.den, reg), mpolyMultiply(rn.num, sn.den, reg), -1);
+        if (diff.size === 0) {
+          return {
+            status: "equivalent",
+            reason: hasTranscendental(student) || hasTranscendental(reference) ? "canonical_symbolic_identity" : "canonical_radical_identity",
+            domain,
+          };
+        }
+      } catch (err) {
+        if (!(err instanceof MPolyOverflowError)) throw err;
+        return { status: "unverified", reason: "symbolic_complexity_exceeded", domain };
       }
     }
   }
@@ -2294,6 +2907,13 @@ export function verifyIndefiniteIntegral(input: IntegralVerificationInput): Veri
             domain: effectiveDomain,
           };
         }
+        if (leftAtSplit.status !== "equivalent") {
+          return {
+            status: "unverified",
+            reason: leftAtSplit.reason ?? "piecewise_split_continuity_unverified",
+            domain: effectiveDomain,
+          };
+        }
       }
     }
     return { status: "equivalent", reason: "piecewise_antiderivative_verified", domain: effectiveDomain };
@@ -2309,15 +2929,34 @@ export function verifyIndefiniteIntegral(input: IntegralVerificationInput): Veri
   if (parsedDomain && !parsedDomain.empty) {
     const sConstraints = collectConstraints(student, variable);
     const iConstraints = collectConstraints(integrand, variable);
-    const sites = buildCadSampleSites([...sConstraints.rational, ...iConstraints.rational], parsedDomain);
+    const { sites } = buildCadPlan(
+      [...sConstraints.rational, ...iConstraints.rational],
+      parsedDomain,
+      [...sConstraints.splitPolys, ...iConstraints.splitPolys],
+    );
     for (const site of sites) {
-      if (constraintsSatisfiedAtSite(iConstraints.rational, site) && !constraintsSatisfiedAtSite(sConstraints.rational, site)) {
-        return {
-          status: "inequivalent",
-          reason: "natural_domain_mismatch",
-          witness: { input: formatSampleSite(site), detail: "student antiderivative undefined on integrand domain" },
-          domain: effectiveDomain,
-        };
+      if (constraintsSatisfiedAtSite(iConstraints, site) && !constraintsSatisfiedAtSite(sConstraints, site)) {
+        if (!iConstraints.hasNonRationalDomainOps) {
+          return {
+            status: "inequivalent",
+            reason: "natural_domain_mismatch",
+            witness: { input: formatSampleSite(site), detail: "student antiderivative undefined on integrand domain" },
+            domain: effectiveDomain,
+          };
+        }
+        if (site.kind === "rational") {
+          const exactI = evaluateExactRationalExt(integrand, site.x, variable);
+          const fx = Number(site.x.n) / Number(site.x.d);
+          const floatI = exactI.status === "unsupported" && Number.isFinite(fx) ? evaluateFloatSafe(integrand, fx, variable) : null;
+          if (exactI.status === "value" || (floatI && floatI.status === "ok" && floatI.marginOk)) {
+            return {
+              status: "inequivalent",
+              reason: "natural_domain_mismatch",
+              witness: { input: formatSampleSite(site), detail: "student antiderivative undefined on integrand domain" },
+              domain: effectiveDomain,
+            };
+          }
+        }
       }
     }
   }

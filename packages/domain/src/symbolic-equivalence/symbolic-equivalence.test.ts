@@ -74,9 +74,73 @@ describe("bounded symbolic equivalence", () => {
 
     expect(verifyScalarEquivalence("ln(x^2)", "2 * ln(x)").status).toBe("inequivalent");
     expect(verifyScalarEquivalence("ln(x^2)", "2 * ln(x)", { intervals: [{ left: 0, leftOpen: true }] }).status).toBe("equivalent");
+    expect(verifyScalarEquivalence("ln(x^2)", "2 * ln(abs(x))").status).toBe("equivalent");
     expect(verifyScalarEquivalence("sin(x)^2 + cos(x)^2", "1").status).toBe("equivalent");
     expect(verifyScalarEquivalence("sin(x)", "cos(x)").status).toBe("inequivalent");
     expect(verifyScalarEquivalence("ln(exp(x))", "x").status).toBe("equivalent");
+  });
+
+  it("closes Round-3 soundness guards for abs cell-splitting, non-rational domains, isolated irrational roots, sqrt scaling, and fail-closed limits", () => {
+    // P1-1: abs(...) CAD cell splitting & Sturm interior sign check
+    expect(verifyScalarEquivalence("abs(x - 4)", "4 - x").status).toBe("inequivalent");
+    expect(verifyScalarEquivalence("abs(x^2 - 100)", "100 - x^2").status).toBe("inequivalent");
+    expect(verifyScalarEquivalence("abs(x - 3/4)", "3/4 - x", { intervals: [{ left: 0, right: 1, rightOpen: true }] }).status).toBe("inequivalent");
+    expect(verifyScalarEquivalence("abs((4 * x - 3) * (x^2 + 1))", "(3 - 4 * x) * (x^2 + 1)", { intervals: [{ left: 0, right: 1, rightOpen: true }] }).status).toBe("inequivalent");
+    expect(verifyScalarEquivalence("abs(x^2 - 2)", "2 - x^2", { intervals: [{ left: 1, right: "3/2" }] }).status).toBe("inequivalent");
+    expect(verifyScalarEquivalence("abs(x - 4)", "4 - x", { intervals: [{ left: 0, right: 4 }] }).status).toBe("equivalent");
+
+    // P1-2: non-rational domain holes & quadratic binomial denominators
+    expect(verifyScalarEquivalence("sin(x) / sin(x)", "1").status).toBe("inequivalent");
+    expect(verifyScalarEquivalence("(exp(x) - 2) / (exp(x) - 2)", "1").status).toBe("unverified");
+    expect(verifyScalarEquivalence("1 / x", "1 / sin(x)", { intervals: [{ left: 0, right: 0 }] }).status).toBe("unverified");
+    expect(verifyScalarEquivalence("(sqrt(x) - 2) / (sqrt(x) - 2)", "1", { intervals: [{ left: 0 }] }).status).toBe("inequivalent");
+    expect(verifyScalarEquivalence("(x - 100) / (sqrt(x) - 10)", "sqrt(x) + 10", { intervals: [{ left: 0 }] }).status).toBe("inequivalent");
+    expect(verifyScalarEquivalence("(x - 100) / (sqrt(x) - 10)", "sqrt(x) + 10", { intervals: [{ left: 0 }], excluded: [100] }).status).toBe("equivalent");
+    expect(verifyScalarEquivalence("(sqrt(x) + 2) / (sqrt(x) + 2)", "1", { intervals: [{ left: 0 }] }).status).toBe("equivalent");
+    expect(verifyScalarEquivalence("exp(ln(abs(x - 10)))", "abs(x - 10)").status).toBe("inequivalent");
+    expect(verifyScalarEquivalence("exp(ln(abs(x - 10)))", "abs(x - 10)", { excluded: [10] }).status).toBe("equivalent");
+
+    // P1-3: signAtSampleSite on isolated irrational roots adjacent to rational roots
+    expect(
+      verifyScalarEquivalence("sqrt(2*x^2 - 1) * ((x - 1)*(2*x^2 - 1)) / ((x - 1)*(2*x^2 - 1))", "sqrt(2*x^2 - 1)", {
+        intervals: [{ left: 0, right: 2 }],
+        excluded: [1],
+      }).status,
+    ).toBe("inequivalent");
+    expect(
+      verifyScalarEquivalence("sqrt(x^2 - 2) * (x - 1) / (x - 1)", "sqrt(x^2 - 2)", {
+        intervals: [{ left: 0, right: 2 }],
+        excluded: [1],
+      }).status,
+    ).toBe("equivalent");
+
+    // P1-4: sqrt(inner / dVal) denominator |dVal| scaling
+    expect(verifyScalarEquivalence("sqrt((sin(x) + 2) / 4)", "sqrt(sin(x) + 2) / 2").status).toBe("equivalent");
+    expect(verifyScalarEquivalence("sqrt((exp(x) + 1) / 2)", "sqrt(2 * exp(x) + 2) / 2").status).toBe("equivalent");
+    expect(verifyScalarEquivalence("sqrt((exp(x) + 1) / 2)", "sqrt(2 * exp(x) + 2) / sqrt(2)").status).toBe("inequivalent");
+
+    // P2-2: mpolyMultiply overflow fails closed instead of silently truncating
+    const largeSum = "sin(x) + sin(2*x) + sin(3*x) + sin(4*x) + sin(5*x) + sin(6*x) + sin(7*x) + sin(8*x) + sin(9*x) + sin(10*x)";
+    expect(verifyScalarEquivalence(`(${largeSum})^4`, `(${largeSum})^4`).status).toBe("unverified");
+
+    // P2-3: rational probe count accounts for excluded points & combinedDen degree, and singleton checks stay valid
+    expect(
+      verifyScalarEquivalence("x - 1/2", "0", {
+        intervals: [{ left: 0, right: 1, leftOpen: true, rightOpen: true }],
+        excluded: ["3/4", "7/8", "15/16", "31/32", "63/64", "127/128"],
+      }).status,
+    ).toBe("inequivalent");
+    expect(
+      verifyIndefiniteIntegral({
+        student: "x * abs(x) / 2",
+        integrand: "abs(x)",
+        piecewise: {
+          split: 0,
+          left: "-x^2 / 2",
+          right: "x^2 / 2",
+        },
+      }).status,
+    ).toBe("equivalent");
   });
 
   it("checks derivative residuals, variable forwarding, piecewise integrals, and general substitution bounds", () => {
