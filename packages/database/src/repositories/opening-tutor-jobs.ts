@@ -299,12 +299,14 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
     status: OpeningTutorJobRecord["status"];
     error: OpeningTutorJobError | null;
     updatedAt: string;
+    clientKey?: string;
   } | null> {
     const rows = await sql`
-      SELECT j.id, j.status, j.error, j.updated_at, t.status AS turn_status
+      SELECT j.id, j.status, j.error, j.updated_at, t.status AS turn_status, u.client_key
       FROM opening_tutor_jobs j
       JOIN opening_conversations c ON c.id = j.conversation_id
       JOIN opening_turns t ON t.id = j.assistant_turn_id
+      LEFT JOIN opening_turns u ON u.id = j.user_turn_id AND u.workspace_id = j.workspace_id
       WHERE j.conversation_id = ${conversationId}
         AND j.workspace_id = ${scope.workspaceId}
         AND c.workspace_id = ${scope.workspaceId}
@@ -326,6 +328,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
       status: row.status as OpeningTutorJobRecord["status"],
       error: tutorFailureForDisplay(row.status, row.error),
       updatedAt: new Date(row.updated_at as string | Date).toISOString(),
+      ...(active && typeof row.client_key === "string" && row.client_key.length > 0 ? { clientKey: row.client_key } : {}),
     };
   }
 
@@ -407,6 +410,7 @@ export function createOpeningTutorJobsRepository(sql: Sql, options: OpeningTutor
       status: OpeningTutorJobRecord["status"];
       error: OpeningTutorJobError | null;
       updatedAt: string;
+      clientKey?: string;
     } | null> {
       const pending = await findPending(scope, conversationId);
       if (pending && await expireIfStale(scope, pending.id, pending.status)) return findPending(scope, conversationId);

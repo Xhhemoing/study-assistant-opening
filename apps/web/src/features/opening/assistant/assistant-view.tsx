@@ -121,6 +121,13 @@ export type PendingJobDiscovery =
   | { kind: "unknown"; pending: false; hint: string };
 
 /** Null is no pending job. A lookup error must stay unavailable, not empty. */
+function pendingStopTurnSettled(turns: readonly TurnRecord[], clientKey: string): boolean {
+  const index = turns.findIndex(turn => turn.role === "user" && turn.clientKey === clientKey);
+  if (index < 0) return false;
+  const assistant = turns[index + 1];
+  return !assistant || assistant.role !== "assistant" || assistant.status !== "pending";
+}
+
 export function pendingJobDiscoveryState(
   result: { ok: true; job: JobStatusResponse | null } | { ok: false; error: unknown },
 ): PendingJobDiscovery {
@@ -387,6 +394,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
   const [queuedRetry, setQueuedRetry] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [recoveryRequired, setRecoveryRequired] = useState(false);
+  const [pendingStopRecovery, setPendingStopRecovery] = useState(false);
   const [reload, setReload] = useState(0);
   const [contextOpen, setContextOpen] = useState(false);
   const [error, setError] = useState("");
@@ -653,30 +661,56 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
         return true;
       }
       const pendingJob = discovery.job;
+      const deferredStop = pendingStop.current?.conversationId === id ? pendingStop.current : null;
       setRecoveryRequired(false);
       setUnknownJob(pendingJob?.status === "outcome_unknown" ? pendingJob : null);
       setRecoveryNow(Date.now());
       const discovered = pendingJobDiscoveryState({ ok: true, job: pendingJob });
       if (discovered.kind === "active") {
-        if (pendingStop.current?.conversationId === id) {
-          setActiveJobId(null);
-          setPending(false);
-          await stopSavedJobRef.current(discovered.activeJobId, id, { fromDeferredStop: true });
-          return true;
+        if (deferredStop) {
+          if (pendingJob?.clientKey === deferredStop.clientKey) {
+            setActiveJobId(null);
+            setPending(false);
+            await stopSavedJobRef.current(discovered.activeJobId, id, { fromDeferredStop: true });
+            return true;
+          }
+          // Another turn is now active; clear our stale Stop marker without cancelling it.
+          pendingStop.current = null;
+          setPendingStopRecovery(false);
         }
         setActiveJobId(discovered.activeJobId);
         setPending(discovered.pending);
         setPendingHint(discovered.hint);
       } else if (discovered.kind === "unknown") {
-        if (pendingStop.current?.conversationId === id) pendingStop.current = null;
+        if (deferredStop) {
+          if (pendingStopTurnSettled(nextTurns, deferredStop.clientKey)) {
+            pendingStop.current = null;
+            setPendingStopRecovery(false);
+          } else {
+            setRecoveryRequired(true);
+            setPendingStopRecovery(true);
+          }
+        }
         setActiveJobId(null);
         setPending(false);
         setPendingHint(discovered.hint);
       } else {
-        if (pendingStop.current?.conversationId === id) pendingStop.current = null;
         setActiveJobId(null);
         setPending(false);
-        if (!guard.receipt || nextTurns.length) setPendingHint("");
+        if (deferredStop) {
+          if (pendingStopTurnSettled(nextTurns, deferredStop.clientKey)) {
+            pendingStop.current = null;
+            setPendingStopRecovery(false);
+            if (!guard.receipt || nextTurns.length) setPendingHint("");
+          } else {
+            // Keep pendingStop and recovery active while delivery of the stopped turn is still uncertain.
+            setRecoveryRequired(true);
+            setPendingStopRecovery(true);
+            setPendingHint("尚未确认发送结果，请重新读取对话。");
+          }
+        } else if (!guard.receipt || nextTurns.length) {
+          setPendingHint("");
+        }
       }
       return true;
     },
@@ -842,13 +876,19 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
     turnStopLock.current = true;
     try {
       const job = await api.cancelJob(jobId);
-      if (id && pendingStop.current?.conversationId === id) pendingStop.current = null;
+      if (id && pendingStop.current?.conversationId === id) {
+        pendingStop.current = null;
+        setPendingStopRecovery(false);
+      }
       setActiveJobId(null);
       setPending(false);
       setPendingHint(jobStatusHint(job) || "已停止这次回答。");
       if (id) await refreshConversation(id);
     } catch (cancelError) {
-      if (options?.fromDeferredStop) setRecoveryRequired(true);
+      if (options?.fromDeferredStop) {
+        setRecoveryRequired(true);
+        setPendingStopRecovery(true);
+      }
       setPendingHint(`还没确认是否已停止：${userFacingMessage(cancelError, "网络暂时不可用")}`);
     } finally { turnStopLock.current = false; }
   }
@@ -890,6 +930,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
     setWaitRequestKey(target.clientKey);
     let submitted = false;
     pendingStop.current = null;
+    setPendingStopRecovery(false);
     const saved = { conversationId, clientKey: target.clientKey, dispatched: true, stopRequested: false };
     savedSubmission.current = saved;
     try {
@@ -906,6 +947,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
       if (!submitted) setPending(false);
       if (saved.stopRequested && !submitted) {
         pendingStop.current = { conversationId: saved.conversationId, clientKey: saved.clientKey };
+        setPendingStopRecovery(true);
         setPendingHint("尚未确认发送结果，请重新读取对话。");
         setRecoveryRequired(true);
       }
@@ -1007,7 +1049,10 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
     const saved = input.privacy === "ephemeral" && !learningAttempt
       ? null
       : { conversationId: null as string | null, clientKey: input.clientKey, dispatched: false, stopRequested: false };
-    if (saved) pendingStop.current = null;
+    if (saved) {
+      pendingStop.current = null;
+      setPendingStopRecovery(false);
+    }
     savedSubmission.current = saved;
     try {
       if (!saved) {
@@ -1112,6 +1157,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
         if (saved.dispatched) {
           if (saved.conversationId) {
             pendingStop.current = { conversationId: saved.conversationId, clientKey: saved.clientKey };
+            setPendingStopRecovery(true);
           }
           setPendingHint("尚未确认发送结果，请重新读取对话。");
           setRecoveryRequired(true);
@@ -1324,7 +1370,7 @@ function AssistantWorkspace({ api: apiProp, initialConversationId = null, implic
           <button type="button" className="min-h-6 min-w-6 shrink-0 rounded px-1.5 py-0.5 text-accent underline decoration-accent/40 underline-offset-2 hover:text-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent" onClick={() => setAutoSelectNotice(null)} aria-label="关闭自动选入提示">关闭</button>
         </div>
       ) : null}
-      {error || recoveryRequired ? <div className="mx-5 mb-2 border border-danger/30 bg-danger/10 px-3 py-2">{error ? <p role="alert" className="text-xs leading-5 text-danger">{error}{error === TUTOR_MODEL_SETUP_MESSAGE ? <Link href={objectHref ? objectHref(MODEL_SETUP_HREF) : MODEL_SETUP_HREF} className="ml-2 font-medium underline underline-offset-2">去设置</Link> : null}</p> : null}{recoveryRequired ? <button type="button" className={`${secondaryButtonClass} mt-2`} onClick={() => setReload((value) => value + 1)} disabled={loading}>重新读取对话</button> : null}</div> : null}
+      {error || recoveryRequired ? <div className="mx-5 mb-2 border border-danger/30 bg-danger/10 px-3 py-2">{error ? <p role="alert" className="text-xs leading-5 text-danger">{error}{error === TUTOR_MODEL_SETUP_MESSAGE ? <Link href={objectHref ? objectHref(MODEL_SETUP_HREF) : MODEL_SETUP_HREF} className="ml-2 font-medium underline underline-offset-2">去设置</Link> : null}</p> : null}{recoveryRequired ? <div className="mt-2 flex flex-wrap gap-2"><button type="button" className={secondaryButtonClass} onClick={() => setReload((value) => value + 1)} disabled={loading}>重新读取对话</button>{pendingStopRecovery ? <button type="button" className={secondaryButtonClass} onClick={() => { pendingStop.current = null; setPendingStopRecovery(false); setRecoveryRequired(false); setPendingHint(""); }} disabled={loading}>继续提问</button> : null}</div> : null}</div> : null}
       {tutorActionError ? <p role="status" className="mx-5 mb-2 border border-warn/30 bg-warn-soft px-3 py-2 text-xs leading-5 text-warn">{tutorActionError}</p> : null}
       {tutorActions.length > 0 && learningAttempt ? (
         <div className="mx-5 mb-2 flex flex-wrap gap-1.5">

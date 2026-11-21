@@ -30,7 +30,16 @@ const columnSegment = new RegExp(
   "y",
 );
 const matchingClose: Record<string, string> = { "(": ")", "（": "）", "[": "]", "【": "】" };
+const closeBracketChars = new Set(Object.values(matchingClose));
 const periodPattern = /([0-9]+)\s*[-－至]\s*([0-9]+)\s*节/;
+const wrappedPeriodPattern = /\s*(?:\(\s*[0-9]+\s*[-－至]\s*[0-9]+\s*节\s*\)|（\s*[0-9]+\s*[-－至]\s*[0-9]+\s*节\s*）|\[\s*[0-9]+\s*[-－至]\s*[0-9]+\s*节\s*\]|【\s*[0-9]+\s*[-－至]\s*[0-9]+\s*节\s*】)/g;
+const globalPeriodPattern = /[0-9]+\s*[-－至]\s*[0-9]+\s*节/g;
+const inlineWeekToken = new RegExp(
+  `${labeledWeeks.source}|${leadingWeeks.source}|${inlineWeeks.source}`,
+  "y",
+);
+const weekPrefixBeforeBracket = /^(?:周次\s*[:：]?|周\s*[:：])\s*/;
+const weekMarkerHint = /周次|第\s*(?:\d+\s*[-－至,，、\s]*)?周|\d\s*[单双]?周|周\s*[:：\d一二三四五六日天]|[单双]周/;
 
 function text(value: CellValue): string {
   return value == null ? "" : String(value).trim();
@@ -88,10 +97,132 @@ function columnWeekList(value: string): number[] | undefined {
   return !closers.length && result.size ? [...result] : undefined;
 }
 
-function inlineWeekList(match: RegExpMatchArray | null): number[] | undefined {
-  if (!match) return undefined;
-  const result = new Set<number>();
-  return addWeeks(result, match[1]!, match[2] ?? match[3]) && result.size ? [...result] : undefined;
+function findMatchingClose(source: string, start: number): number {
+  const stack: string[] = [];
+  for (let i = start; i < source.length; i++) {
+    const ch = source[i]!;
+    const closer = matchingClose[ch];
+    if (closer) {
+      stack.push(closer);
+    } else if (closeBracketChars.has(ch)) {
+      if (stack.pop() !== ch) return -1;
+      if (stack.length === 0) return i;
+    }
+  }
+  return -1;
+}
+
+function hasUnbalancedBrackets(source: string): boolean {
+  const stack: string[] = [];
+  for (const ch of source) {
+    const closer = matchingClose[ch];
+    if (closer) {
+      stack.push(closer);
+    } else if (closeBracketChars.has(ch) && stack.pop() !== ch) {
+      return true;
+    }
+  }
+  return stack.length > 0;
+}
+
+function parseInlineCourseLine(line: string): { courseName: string; weeks: number[] | undefined } {
+  const withoutPeriods = line
+    .replace(wrappedPeriodPattern, "")
+    .replace(globalPeriodPattern, "");
+  const weeks = new Set<number>();
+  const matchedSpans: Array<{ start: number; end: number }> = [];
+  let invalid = false;
+
+  for (let i = 0; i < withoutPeriods.length;) {
+    const ch = withoutPeriods[i]!;
+    if (/\s/.test(ch)) {
+      i += 1;
+      continue;
+    }
+    const precededByDigit = i > 0 && /\d/.test(withoutPeriods[i - 1]!);
+    if (!precededByDigit) {
+      inlineWeekToken.lastIndex = i;
+      const token = inlineWeekToken.exec(withoutPeriods);
+      if (token) {
+        const list = token[1] ?? token[4] ?? token[7];
+        const beforeWeek = token[2] ?? token[5] ?? token[8];
+        const afterWeek = token[3] ?? token[6] ?? token[9];
+        if (!addWeeks(weeks, list!, beforeWeek ?? afterWeek)) {
+          invalid = true;
+        }
+        matchedSpans.push({ start: i, end: inlineWeekToken.lastIndex });
+        i = inlineWeekToken.lastIndex;
+        continue;
+      }
+    }
+
+    const prefixMatch = weekPrefixBeforeBracket.exec(withoutPeriods.slice(i));
+    const bracketStart = i + (prefixMatch?.[0].length ?? 0);
+    if (bracketStart < withoutPeriods.length && matchingClose[withoutPeriods[bracketStart]!]) {
+      const closeIdx = findMatchingClose(withoutPeriods, bracketStart);
+      if (closeIdx < 0) {
+        if (weekMarkerHint.test(withoutPeriods.slice(i))) {
+          invalid = true;
+          break;
+        }
+        i += 1;
+        continue;
+      }
+      const segment = withoutPeriods.slice(i, closeIdx + 1);
+      if (segment.includes("周")) {
+        const parsed = columnWeekList(segment);
+        if (parsed) {
+          for (const week of parsed) {
+            weeks.add(week);
+            if (weeks.size > 60) {
+              invalid = true;
+              break;
+            }
+          }
+          matchedSpans.push({ start: i, end: closeIdx + 1 });
+        } else if (weekMarkerHint.test(segment)) {
+          invalid = true;
+        }
+      }
+      i = closeIdx + 1;
+      continue;
+    }
+
+    i += 1;
+  }
+
+  const merged: Array<{ start: number; end: number }> = [];
+  for (const span of matchedSpans) {
+    const prev = merged.at(-1);
+    if (prev && /^[\s,，、;；]*$/.test(withoutPeriods.slice(prev.end, span.start))) {
+      prev.end = span.end;
+    } else {
+      merged.push({ ...span });
+    }
+  }
+  const lastSpan = merged.at(-1);
+  if (lastSpan && /^[\s,，、;；]+$/.test(withoutPeriods.slice(lastSpan.end))) {
+    lastSpan.end = withoutPeriods.length;
+  }
+
+  let cursor = 0;
+  let residual = "";
+  for (const span of merged) {
+    residual += withoutPeriods.slice(cursor, span.start);
+    if (residual && !/\s$/.test(residual)) residual += " ";
+    cursor = span.end;
+  }
+  residual += withoutPeriods.slice(cursor);
+  const courseName = residual.replace(/\s+/g, " ").trim();
+
+  if (matchedSpans.length > 0 && (hasUnbalancedBrackets(courseName) || weekMarkerHint.test(courseName))) {
+    invalid = true;
+  }
+
+  return {
+    courseName,
+    weeks: !invalid && weeks.size > 0 ? [...weeks] : undefined,
+  };
 }
 
 function day(value: string): number | undefined {
@@ -143,17 +274,10 @@ export function parseTimetableSheets(sheets: TimetableSheet[]): ParsedTimetable 
         if (courseColumn >= 0 && c !== courseColumn) continue;
         const lines = value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
         for (const line of lines) {
-          const withoutPeriods = line.replace(periodPattern, "");
-          const annotation = withoutPeriods.match(labeledWeeks) ?? withoutPeriods.match(leadingWeeks) ?? withoutPeriods.match(inlineWeeks);
-          const weekText = annotation?.[0].trim() ?? "";
-          const courseName = line
-            // Keep a parenthesized parity suffix attached until the whole week annotation is removed.
-            .replace(/\s*[(（][^)）]*(?:周|节)[^)）]*[)）]/, group => weekText.includes(group.trim()) ? group : "")
-            .replace(weekText, "")
-            .replace(/\s+[0-9]+\s*[-－至]\s*[0-9]+\s*节\s*$/, "")
-            .trim();
+          const inline = parseInlineCourseLine(line);
+          const courseName = inline.courseName;
           const weekCell = weekColumn >= 0 ? text(rows[r]![weekColumn]!) : "";
-          const weekList = weekCell ? columnWeekList(weekCell) : inlineWeekList(annotation);
+          const weekList = weekCell ? columnWeekList(weekCell) : inline.weeks;
           const weekday = day(dayColumn >= 0 ? text(rows[r]![dayColumn]!) : header[c]!);
           const range = period(line) ?? (periodColumn >= 0 ? period(text(rows[r]![periodColumn]!)) : undefined);
           if (!weekList || weekday === undefined || !range) {

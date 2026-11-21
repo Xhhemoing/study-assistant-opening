@@ -155,6 +155,43 @@ describe("opening tutor jobs repository", () => {
     expect(sql.calls[0]).toContain("conversation_id");
   });
 
+  it("includes user turn clientKey on active pending jobs and omits it on outcome_unknown", async () => {
+    const activeSql = fakeSql((query) => query.includes("FROM opening_tutor_jobs j")
+      ? [{
+          id: "job-active",
+          status: "running",
+          turn_status: "pending",
+          client_key: "turn-client-key-1",
+          error: null,
+          updated_at: new Date("2026-09-13T12:00:00.000Z"),
+        }]
+      : []);
+    await expect(createOpeningTutorJobsRepository(activeSql).findPendingForConversation(scope, "conversation-1")).resolves.toEqual({
+      id: "job-active",
+      status: "running",
+      error: null,
+      updatedAt: "2026-09-13T12:00:00.000Z",
+      clientKey: "turn-client-key-1",
+    });
+
+    const unknownSql = fakeSql((query) => query.includes("FROM opening_tutor_jobs j")
+      ? [{
+          id: "job-unknown",
+          status: "outcome_unknown",
+          turn_status: "outcome_unknown",
+          client_key: "turn-client-key-2",
+          error: null,
+          updated_at: new Date("2026-09-13T12:00:00.000Z"),
+        }]
+      : []);
+    await expect(createOpeningTutorJobsRepository(unknownSql).findPendingForConversation(scope, "conversation-1")).resolves.toEqual({
+      id: "job-unknown",
+      status: "outcome_unknown",
+      error: { message: TUTOR_UNKNOWN_MESSAGE },
+      updatedAt: "2026-09-13T12:00:00.000Z",
+    });
+  });
+
   it("discovers a recovered unknown outcome without marking it active", async () => {
     const sql = fakeSql((query) => query.includes("FROM opening_tutor_jobs j")
       ? [{

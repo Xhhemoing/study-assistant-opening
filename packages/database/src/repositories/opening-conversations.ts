@@ -246,7 +246,7 @@ export function createOpeningConversationRepository(sql: Sql) {
       const rows = await sql`
         SELECT t.id, t.conversation_id, t.role,
           CASE WHEN t.role='assistant' AND ${turnUsesDeletedSource(sql)} THEN '关联材料已删除，此回答内容不再显示。' ELSE t.text END AS text,
-          t.mode, t.status, j.status AS job_status, j.error AS job_error, t.created_at,t.context_anchor,CASE WHEN ${turnUsesDeletedSource(sql)} THEN NULL ELSE to_jsonb(h) END AS exposure_receipt, CASE WHEN ${turnUsesDeletedSource(sql)} THEN NULL ELSE t.system_query END AS system_query,
+          t.mode, t.status, t.client_key, j.status AS job_status, j.error AS job_error, t.created_at,t.context_anchor,CASE WHEN ${turnUsesDeletedSource(sql)} THEN NULL ELSE to_jsonb(h) END AS exposure_receipt, CASE WHEN ${turnUsesDeletedSource(sql)} THEN NULL ELSE t.system_query END AS system_query,
           CASE WHEN ${turnUsesDeletedSource(sql)} THEN '[]'::jsonb ELSE t.citations END AS citations
         FROM opening_turns t
         LEFT JOIN opening_help_exposures h ON h.turn_id=t.id AND h.workspace_id=t.workspace_id
@@ -274,6 +274,7 @@ export function createOpeningConversationRepository(sql: Sql) {
           createdAt: iso(r.created_at as string | Date),
           mode: r.mode as TutorMode,
           status: r.status as TurnRecord["status"],
+          ...(typeof r.client_key === "string" && r.client_key.length > 0 ? { clientKey: r.client_key } : {}),
           ...(r.exposure_receipt ? { exposureReceipt: released.get(String((r.exposure_receipt as Record<string, unknown>).id)) ?? mapOpeningStudyExposure(r.exposure_receipt as Record<string, unknown>) } : {}),
           ...(r.context_anchor ? { contextAnchor: r.context_anchor as StudyContextAnchor } : {}),
           systemQuery: display.systemQuery,

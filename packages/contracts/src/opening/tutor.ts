@@ -229,6 +229,7 @@ export const turnRecordSchema = z
     createdAt: isoDateTimeSchema,
     mode: tutorModeSchema,
     status: turnStatusSchema,
+    clientKey: z.string().min(1).max(200).optional(),
     contextAnchor: studyContextAnchorSchema.nullable().optional(),
     exposureReceipt: studyExposureReceiptSchema.nullable().optional(),
     systemQuery: systemQueryReceiptSchema.nullable().optional(),

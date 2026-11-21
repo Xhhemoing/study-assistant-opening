@@ -402,7 +402,14 @@ describe("exam photo review repository integration", () => {
       expect(String(row.raw_intent)).not.toContain("answerText");
     }
 
-    // Reusing keyB with a valid replacement source prunes the stale alias and creates a fresh review.
+    // Replaying the original deleted-source input fails validation AND persists stale alias deletion.
+    await expect(repository.begin(f.scope, input({ clientKey: keyB, answerText: secretAnswer })))
+      .rejects.toMatchObject({ code: "CONFLICT" });
+    expect(await f.sql`SELECT c.id FROM opening_exam_integration_commands c
+      JOIN opening_exam_sprints s ON s.id=c.sprint_id
+      WHERE s.workspace_id=${f.scope.workspaceId} AND c.client_key LIKE ${`%${keyB}`}`).toHaveLength(0);
+
+    // Reusing keyB with a valid replacement source succeeds cleanly.
     const replacementWorkId = await source();
     const fresh = await repository.begin(f.scope, input({
       clientKey: keyB, workSourceId: replacementWorkId, answerText: "Replacement explanation",

@@ -96,10 +96,34 @@ it.each([
   ["物理2 周次：第 1, 3, 5 周 1-2节", "物理2", [1, 3, 5], 1, 2],
   ["物理2 1-16周（双周） 1-2节", "物理2", [2, 4, 6, 8, 10, 12, 14, 16], 1, 2],
   ["物理2 1-8周(单周) 1-2节", "物理2", [1, 3, 5, 7], 1, 2],
+  ["数学（1-4周）；（6-8周） 1-2节", "数学", [1, 2, 3, 4, 6, 7, 8], 1, 2],
+  ["数学 (1-4周), (6-8双周) 1-2节", "数学", [1, 2, 3, 4, 6, 8], 1, 2],
+  ["数学 1-4周；6-8周 1-2节", "数学", [1, 2, 3, 4, 6, 7, 8], 1, 2],
+  ["数学(1-4周)、(6周)、(8-10单周) 3-4节", "数学", [1, 2, 3, 4, 6, 9], 3, 4],
+  ["数学【1-4周】；【6-8周】 1-2节", "数学", [1, 2, 3, 4, 6, 7, 8], 1, 2],
+  ["数学（1-4单周；6-8双周） 1-2节", "数学", [1, 3, 6, 8], 1, 2],
+  ["数学 1-4周（单周）；6-8周（双周） 1-2节", "数学", [1, 3, 6, 8], 1, 2],
+  ["数学 周1-4；周6-8 1-2节", "数学", [1, 2, 3, 4, 6, 7, 8], 1, 2],
+  ["周期信号分析（1-4周）；（6-8周） 1-2节", "周期信号分析", [1, 2, 3, 4, 6, 7, 8], 1, 2],
+  ["高等数学（实验班）（1-4周）；（6-8周） 1-2节", "高等数学（实验班）", [1, 2, 3, 4, 6, 7, 8], 1, 2],
 ] as const)("separates the course, weeks and periods in %s", (title, courseName, weeks, startPeriod, endPeriod) => {
   const result = parseTimetableSheets([{ sheet: "课表", data: [["课程", "星期"], [title, "周一"]] }]);
   expect(result.sessions).toMatchObject([{ courseName, weeks, weekday: 1, startPeriod, endPeriod }]);
   expect(result.warnings).toEqual([]);
+});
+
+it.each([
+  "数学（1-4周）；（8-6周） 1-2节",
+  "数学（1-4周）；（5-61周） 1-2节",
+  "数学（1-4周）；（周三） 1-2节",
+  "数学（1-4周）；（周7） 1-2节",
+  "数学（1-4周）；（6-8周 1-2节",
+  "数学（1-4周）；6-8周） 1-2节",
+  "数学（1-4周）；第周 1-2节",
+])("warns and drops inline course cell with unparseable residual week segment %s", title => {
+  const result = parseTimetableSheets([{ sheet: "课表", data: [["课程", "星期"], [title, "周一"]] }]);
+  expect(result.sessions).toEqual([]);
+  expect(result.warnings).toMatchObject([{ raw: title, address: "A2" }]);
 });
 
 it.each(["物理2", "英语4", "高数1 1-2节", "物理2 周三", "物理2 周一", "物理2 周1"])("warns about missing weeks for %s", title => {
