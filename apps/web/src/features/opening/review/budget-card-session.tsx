@@ -144,11 +144,13 @@ function triageSessionQueue(items: readonly ReviewQueueItem[], now: Date): Revie
 
   // Exact monotone fixed-point solver: reconstructs whether `triagable` is a valid server
   // `listCardQueue` output with server-side `delayedCheckCovered: true` Band-5 demotions.
+  const entryById = new Map<string, TriageAwareQueueItem>();
   const peersByCourseSkill = new Map<string, string[]>();
   const keysById = new Map<string, { ku: string | undefined; fam: string | undefined }>();
   const triagableIndexById = new Map<string, number>();
   for (let i = 0; i < triagable.length; i += 1) {
     const entry = triagable[i]!;
+    entryById.set(entry.card.id, entry);
     triagableIndexById.set(entry.card.id, i);
     keysById.set(entry.card.id, resolveEntryKeys(entry));
     const scopedKey = courseScopedSkillKey(entry.card);
@@ -158,19 +160,37 @@ function triageSessionQueue(items: readonly ReviewQueueItem[], now: Date): Revie
     else peersByCourseSkill.set(scopedKey, [entry.card.id]);
   }
 
+  // Compute `@aistudy/domain`'s exact intrinsic candidate order once using unique synthetic keys
+  // so blocker attribution mirrors `eligibility.ts`'s `seenKnowledgeUnits`/`seenFamilies` pass.
+  const intrinsicOrder = buildReviewQueue(
+    triagable.map((entry, idx) => ({
+      ...entry,
+      delayedCheckCovered: false,
+      knowledgeUnitKey: `__intr_ku_${idx}`,
+      familyKey: `__intr_fam_${idx}`,
+    })),
+    "free",
+    now,
+    today,
+    { recoveryTriage: true },
+  ).map((item) => entryById.get(item.card.id)!);
+  const intrinsicRankById = new Map(intrinsicOrder.map((entry, idx) => [entry.card.id, idx]));
+
   const inferredDelayedIds = new Set<string>();
   for (let step = 0; step <= triagable.length; step += 1) {
-    const candidate = buildReviewQueue(
-      triagable.map((entry) => (
-        entry.delayedCheckCovered === true || inferredDelayedIds.has(entry.card.id)
-          ? { ...entry, delayedCheckCovered: true }
-          : entry
-      )),
-      "free",
-      now,
-      today,
-      { recoveryTriage: true },
-    );
+    const candidate = step === 0
+      ? baseline
+      : buildReviewQueue(
+        triagable.map((entry) => (
+          entry.delayedCheckCovered === true || inferredDelayedIds.has(entry.card.id)
+            ? { ...entry, delayedCheckCovered: true }
+            : entry
+        )),
+        "free",
+        now,
+        today,
+        { recoveryTriage: true },
+      );
     if (sameCardIdSequence(candidate, triagable)) {
       // Verify SQL group consistency across all cards sharing non-null (courseId, skillLabel).
       const groupConsistent = new Set(inferredDelayedIds);
@@ -205,36 +225,58 @@ function triageSessionQueue(items: readonly ReviewQueueItem[], now: Date): Revie
     }
     if (mismatchIndex < 0) break;
 
-    const candidateIndexById = new Map(candidate.map((entry, idx) => [entry.card.id, idx]));
-    const expected = triagable[mismatchIndex]!;
-    const expectedCandIdx = candidateIndexById.get(expected.card.id) ?? -1;
-    const expectedKeys = keysById.get(expected.card.id);
-
-    // First blame any active knowledgeUnitKey/familyKey blocker of `expected` that ranked ahead
-    // of `expected` in `candidate` yet appeared after `expected` in `triagable`.
-    let blamed: TriageAwareQueueItem | null = null;
-    for (let j = 0; j < expectedCandIdx; j += 1) {
-      const candidateItem = candidate[j]! as TriageAwareQueueItem;
-      if (candidateItem.delayedCheckCovered === true || inferredDelayedIds.has(candidateItem.card.id)) continue;
-      if ((triagableIndexById.get(candidateItem.card.id) ?? -1) <= mismatchIndex) continue;
-      if (!candidateItem.card.skillLabel?.trim()) continue;
-      const blockerKeys = keysById.get(candidateItem.card.id);
-      const blocksKu = expectedKeys?.ku !== undefined && blockerKeys?.ku === expectedKeys.ku;
-      const blocksFam = expectedKeys?.fam !== undefined && blockerKeys?.fam === expectedKeys.fam;
-      if (blocksKu || blocksFam) {
-        blamed = candidateItem;
-        break;
-      }
+    // Mirror `eligibility.ts`'s single-pass `seenKnowledgeUnits`/`seenFamilies` claim order over `intrinsicOrder`.
+    const kuOwnerByKey = new Map<string, TriageAwareQueueItem>();
+    const famFirstOwnerByKey = new Map<string, TriageAwareQueueItem>();
+    for (const intrEntry of intrinsicOrder) {
+      if (intrEntry.delayedCheckCovered === true || inferredDelayedIds.has(intrEntry.card.id)) continue;
+      const { ku, fam } = keysById.get(intrEntry.card.id) ?? { ku: undefined, fam: undefined };
+      if (ku !== undefined && kuOwnerByKey.has(ku)) continue;
+      if (ku === undefined && fam !== undefined && famFirstOwnerByKey.has(fam)) continue;
+      if (ku !== undefined) kuOwnerByKey.set(ku, intrEntry);
+      if (fam !== undefined && !famFirstOwnerByKey.has(fam)) famFirstOwnerByKey.set(fam, intrEntry);
     }
 
-    if (!blamed) {
-      const candidateAtMismatch = candidate[mismatchIndex]! as TriageAwareQueueItem;
+    const expected = triagable[mismatchIndex]!;
+    const expectedIntrRank = intrinsicRankById.get(expected.card.id) ?? Number.POSITIVE_INFINITY;
+    const expectedKeys = keysById.get(expected.card.id);
+    const isBlameable = (item: TriageAwareQueueItem | undefined): item is TriageAwareQueueItem => Boolean(
+      item
+      && item.delayedCheckCovered !== true
+      && !inferredDelayedIds.has(item.card.id)
+      && (triagableIndexById.get(item.card.id) ?? -1) > mismatchIndex
+      && item.card.skillLabel?.trim(),
+    );
+
+    let blamed: TriageAwareQueueItem | null = null;
+    // Tier 1: active knowledgeUnitKey owner that precedes `expected` in intrinsic order.
+    if (expectedKeys?.ku !== undefined) {
+      const kuOwner = kuOwnerByKey.get(expectedKeys.ku);
       if (
-        candidateAtMismatch.delayedCheckCovered !== true
-        && !inferredDelayedIds.has(candidateAtMismatch.card.id)
-        && (triagableIndexById.get(candidateAtMismatch.card.id) ?? -1) > mismatchIndex
-        && Boolean(candidateAtMismatch.card.skillLabel?.trim())
+        kuOwner
+        && kuOwner.card.id !== expected.card.id
+        && (intrinsicRankById.get(kuOwner.card.id) ?? Number.POSITIVE_INFINITY) < expectedIntrRank
+        && isBlameable(kuOwner)
       ) {
+        blamed = kuOwner;
+      }
+    }
+    // Tier 2: active familyKey primary owner that precedes `expected` in intrinsic order.
+    if (!blamed && expectedKeys?.fam !== undefined) {
+      const famOwner = famFirstOwnerByKey.get(expectedKeys.fam);
+      if (
+        famOwner
+        && famOwner.card.id !== expected.card.id
+        && (intrinsicRankById.get(famOwner.card.id) ?? Number.POSITIVE_INFINITY) < expectedIntrRank
+        && isBlameable(famOwner)
+      ) {
+        blamed = famOwner;
+      }
+    }
+    // Tier 3: candidate[mismatchIndex] itself was demoted by server `delayedCheckCovered`.
+    if (!blamed) {
+      const candidateAtMismatch = entryById.get(candidate[mismatchIndex]?.card.id ?? "");
+      if (isBlameable(candidateAtMismatch)) {
         blamed = candidateAtMismatch;
       }
     }

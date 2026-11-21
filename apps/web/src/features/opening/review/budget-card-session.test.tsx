@@ -849,3 +849,177 @@ it("unconditionally triages a >= 200 strict dueAt-ASC raw queue even when the fi
     expect(startCall.cardIds[1]).toBe(makeUuid(1));
   }
 });
+
+it.each([
+  ["0-padded", 0],
+  ["198-padded (>= 200)", 198],
+] as const)(
+  "uses intrinsic-order kuOwner attribution on [P, E, U, A] so A (not U) is blamed (%s)",
+  async (_label, padCount) => {
+    const now = new Date();
+    const nowMs = now.getTime();
+    const courseId = "99999999-9999-4999-8999-999999999999";
+    const obsRoot1 = "70000000-0000-4000-8000-000000000001";
+    const obsRoot2 = "70000000-0000-4000-8000-000000000002";
+    const spP = "10000000-0000-4000-8000-000000000101";
+    const spE = "10000000-0000-4000-8000-000000000102";
+    const spU = "10000000-0000-4000-8000-000000000103";
+    const cardP = "11111111-1111-4111-8111-000000000001";
+    const cardA = "22222222-2222-4222-8222-000000000002";
+    const cardE = "33333333-3333-4333-8333-000000000003";
+    const cardU = "44444444-4444-4444-8444-000000000004";
+
+    const rawServerInputs: Array<ReviewQueueItem & { delayedCheckCovered?: boolean }> = [
+      queueItem(
+        cardP,
+        { stability: 1.0, daysAgo: 20, dueAt: "2026-08-10T00:00:00.000Z", goalPriority: 200, courseId, skillLabel: null, syllabusPointId: spP, originObservationRootId: obsRoot1, tags: ["review:question"] },
+        nowMs,
+      ),
+      {
+        ...queueItem(
+          cardA,
+          { stability: 1.0, daysAgo: 20, dueAt: "2026-08-10T00:00:00.000Z", goalPriority: 100, courseId, skillLabel: "Limits", syllabusPointId: spE, originObservationRootId: obsRoot1, tags: ["review:question"] },
+          nowMs,
+        ),
+        delayedCheckCovered: true,
+      },
+      queueItem(
+        cardE,
+        { stability: 1.0, daysAgo: 20, dueAt: "2026-08-12T00:00:00.000Z", goalPriority: 90, courseId, skillLabel: null, syllabusPointId: spE, originObservationRootId: obsRoot2, tags: ["review:question"] },
+        nowMs,
+      ),
+      queueItem(
+        cardU,
+        { stability: 1.0, daysAgo: 20, dueAt: "2026-08-10T00:00:00.000Z", goalPriority: 80, courseId, skillLabel: "Derivatives", syllabusPointId: spU, originObservationRootId: obsRoot2, tags: ["review:question"] },
+        nowMs,
+      ),
+    ];
+
+    for (let i = 1; i <= padCount; i += 1) {
+      rawServerInputs.push(queueItem(
+        `50000000-0000-4000-8000-${String(i).padStart(12, "0")}`,
+        { stability: 30, daysAgo: 1, dueAt: "2026-08-01T00:00:00.000Z", goalPriority: 5, courseId, skillLabel: `pad-${i}` },
+        nowMs,
+      ));
+    }
+
+    const serverTriagedPublic: ReviewQueueItem[] = buildReviewQueue(
+      rawServerInputs,
+      "auto",
+      now,
+      now.toISOString().slice(0, 10),
+      { recoveryTriage: true },
+    ).map(({ card, state, goalPriority }) => ({ card, state, goalPriority }));
+    expect(serverTriagedPublic.slice(0, 3).map((item) => item.card.id)).toEqual([cardP, cardE, cardU]);
+    expect(serverTriagedPublic.at(-1)?.card.id).toBe(cardA);
+
+    const value = clients();
+    vi.mocked(value.cards.listDue).mockResolvedValue(serverTriagedPublic);
+    vi.mocked(value.management.cardCommand).mockImplementation(async (command) => ({
+      ...session,
+      cardIds: command.action === "start" ? command.cardIds : session.cardIds,
+    }));
+
+    await render(value);
+    await act(async () => button("开始本次限时复习").click());
+
+    const startCall = vi.mocked(value.management.cardCommand).mock.calls[0]?.[0];
+    expect(startCall?.action).toBe("start");
+    if (startCall?.action === "start") {
+      expect(startCall.cardIds).toEqual(serverTriagedPublic.slice(0, 200).map((item) => item.card.id));
+      expect(startCall.cardIds.slice(0, 3)).toEqual([cardP, cardE, cardU]);
+      if (padCount > 0) expect(startCall.cardIds).not.toContain(cardA);
+    }
+  },
+);
+
+it.each([
+  ["0-padded", 0],
+  ["198-padded (>= 200)", 198],
+] as const)(
+  "resolves 2-hop [P, D, C, H, Q] attribution without falsely blaming H or Q (%s)",
+  async (_label, padCount) => {
+    const now = new Date();
+    const nowMs = now.getTime();
+    const courseId = "99999999-9999-4999-8999-999999999999";
+    const obsRoot1 = "71000000-0000-4000-8000-000000000001";
+    const obsRoot2 = "71000000-0000-4000-8000-000000000002";
+    const obsRoot3 = "71000000-0000-4000-8000-000000000003";
+    const spP = "11000000-0000-4000-8000-000000000001";
+    const spC = "11000000-0000-4000-8000-000000000002";
+    const spH = "11000000-0000-4000-8000-000000000003";
+    const spQ = "11000000-0000-4000-8000-000000000004";
+    const cardP = "12111111-1111-4111-8111-000000000001";
+    const cardD = "12222222-2222-4222-8222-000000000002";
+    const cardC = "12333333-3333-4333-8333-000000000003";
+    const cardH = "12444444-4444-4444-8444-000000000004";
+    const cardQ = "12555555-5555-4555-8555-000000000005";
+
+    const rawServerInputs: Array<ReviewQueueItem & { delayedCheckCovered?: boolean }> = [
+      queueItem(
+        cardP,
+        { stability: 1.0, daysAgo: 20, dueAt: "2026-08-10T00:00:00.000Z", goalPriority: 200, courseId, skillLabel: null, syllabusPointId: spP, originObservationRootId: obsRoot1, tags: ["review:question"] },
+        nowMs,
+      ),
+      {
+        ...queueItem(
+          cardD,
+          { stability: 1.0, daysAgo: 20, dueAt: "2026-08-10T00:00:00.000Z", goalPriority: 150, courseId, skillLabel: "Limits", syllabusPointId: spC, originObservationRootId: obsRoot1, tags: ["review:question"] },
+          nowMs,
+        ),
+        delayedCheckCovered: true,
+      },
+      queueItem(
+        cardC,
+        { stability: 1.0, daysAgo: 20, dueAt: "2026-08-12T00:00:00.000Z", goalPriority: 120, courseId, skillLabel: null, syllabusPointId: spC, originObservationRootId: obsRoot2, tags: ["review:question"] },
+        nowMs,
+      ),
+      queueItem(
+        cardH,
+        { stability: 1.0, daysAgo: 20, dueAt: "2026-08-10T00:00:00.000Z", goalPriority: 110, courseId, skillLabel: "Derivatives", syllabusPointId: spH, originObservationRootId: obsRoot2, tags: ["review:question"] },
+        nowMs,
+      ),
+      queueItem(
+        cardQ,
+        { stability: 1.0, daysAgo: 20, dueAt: "2026-08-10T00:00:00.000Z", goalPriority: 100, courseId, skillLabel: "Integrals", syllabusPointId: spQ, originObservationRootId: obsRoot3, tags: ["review:question"] },
+        nowMs,
+      ),
+    ];
+
+    for (let i = 1; i <= padCount; i += 1) {
+      rawServerInputs.push(queueItem(
+        `60000000-0000-4000-8000-${String(i).padStart(12, "0")}`,
+        { stability: 30, daysAgo: 1, dueAt: "2026-08-01T00:00:00.000Z", goalPriority: 5, courseId, skillLabel: `pad2-${i}` },
+        nowMs,
+      ));
+    }
+
+    const serverTriagedPublic: ReviewQueueItem[] = buildReviewQueue(
+      rawServerInputs,
+      "auto",
+      now,
+      now.toISOString().slice(0, 10),
+      { recoveryTriage: true },
+    ).map(({ card, state, goalPriority }) => ({ card, state, goalPriority }));
+    expect(serverTriagedPublic.slice(0, 4).map((item) => item.card.id)).toEqual([cardP, cardC, cardQ, cardH]);
+    expect(serverTriagedPublic.at(-1)?.card.id).toBe(cardD);
+
+    const value = clients();
+    vi.mocked(value.cards.listDue).mockResolvedValue(serverTriagedPublic);
+    vi.mocked(value.management.cardCommand).mockImplementation(async (command) => ({
+      ...session,
+      cardIds: command.action === "start" ? command.cardIds : session.cardIds,
+    }));
+
+    await render(value);
+    await act(async () => button("开始本次限时复习").click());
+
+    const startCall = vi.mocked(value.management.cardCommand).mock.calls[0]?.[0];
+    expect(startCall?.action).toBe("start");
+    if (startCall?.action === "start") {
+      expect(startCall.cardIds).toEqual(serverTriagedPublic.slice(0, 200).map((item) => item.card.id));
+      expect(startCall.cardIds.slice(0, 4)).toEqual([cardP, cardC, cardQ, cardH]);
+      if (padCount > 0) expect(startCall.cardIds).not.toContain(cardD);
+    }
+  },
+);
