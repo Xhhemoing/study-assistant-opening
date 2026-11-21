@@ -65,6 +65,7 @@ export function createSyncMailHandler(sql = createSqlClient(loadWorkerEnv().data
         phase: "connect",
         deadlineMs,
         now: Date.now,
+        client,
         onDeadlineAbort: closeClient,
       });
       return await syncMailbox({
@@ -96,6 +97,7 @@ export function createCheckMailHandler(sql = createSqlClient(loadWorkerEnv().dat
         phase: "connect",
         deadlineMs,
         now: Date.now,
+        client,
         onDeadlineAbort: closeClient,
       });
       if (folder) {
@@ -103,6 +105,7 @@ export function createCheckMailHandler(sql = createSqlClient(loadWorkerEnv().dat
           phase: "mailboxOpen",
           deadlineMs,
           now: Date.now,
+          client,
           onDeadlineAbort: closeClient,
         });
       } else {
@@ -110,6 +113,7 @@ export function createCheckMailHandler(sql = createSqlClient(loadWorkerEnv().dat
           phase: "list",
           deadlineMs,
           now: Date.now,
+          client,
           onDeadlineAbort: closeClient,
         });
       }
@@ -117,6 +121,7 @@ export function createCheckMailHandler(sql = createSqlClient(loadWorkerEnv().dat
         phase: "logout",
         deadlineMs,
         now: Date.now,
+        client,
         onDeadlineAbort: closeClient,
       }).catch(() => undefined);
       return { ok: true, kind: "imap" };

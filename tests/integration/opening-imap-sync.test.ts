@@ -13,7 +13,7 @@ import { createOpeningSourceService } from "../../apps/web/src/features/opening/
 import { readOpeningSourceQuotaUsage } from "../../packages/database/src/repositories/opening-source-quota";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { startOpeningImapServer, type OpeningImapServer } from "./opening-imap-server";
-import { syncMailbox, MAX_MAIL_BYTES } from "../../apps/worker/src/connectors/imap-sync";
+import { attachImapClientErrorGuard, syncMailbox, MAX_MAIL_BYTES } from "../../apps/worker/src/connectors/imap-sync";
 import { importIdentityKey } from "../../apps/worker/src/connectors/import-identity";
 
 let f: OpeningFixture;
@@ -56,14 +56,14 @@ function seedConnection(version = 1) {
 }
 
 function makeClient() {
-  return new ImapFlow({
+  return attachImapClientErrorGuard(new ImapFlow({
     host: "127.0.0.1",
     port: server.port,
     secure: false,
     logger: false,
     auth: { user: "fixture", pass: "fixture" },
     tls: { rejectUnauthorized: true },
-  });
+  }));
 }
 
 async function runSync(options: { cursor?: ImapCursor | null; onUpload?: (bytes: Uint8Array) => Promise<void>;
@@ -223,7 +223,10 @@ describe("isolated standard IMAP sync gate", () => {
     expect(await f.sql`SELECT 1 FROM opening_sources`).toEqual([]);
     expect(await f.sql`SELECT 1 FROM opening_import_receipts`).toEqual([]);
     objectByKey.delete(key);
-    await actions.cleaned(f.scope, sourceId, key);
+    await expect(actions.cleaned(f.scope, sourceId, key)).resolves.toBe(false);
+    expect(await usage()).toEqual({ bytes: BigInt(Buffer.byteLength(initialMail.source)), objects: 1n });
+    const afterGrace = new Date(Date.now() + CONNECTOR_RESERVATION_GRACE_MS + 1_000);
+    await expect(actions.cleaned(f.scope, sourceId, key, afterGrace)).resolves.toBe(true);
     expect(await usage()).toEqual({ bytes: 0n, objects: 0n });
     await expect(actions.cleanup(f.scope, sourceId)).rejects.toMatchObject({ code: "NOT_FOUND" });
     expect(await f.sql`SELECT 1 FROM opening_source_versions WHERE source_id=${sourceId}`).toEqual([]);
@@ -329,9 +332,10 @@ describe("isolated standard IMAP sync gate", () => {
     failImmediateDeletes = false;
     const actions = createOpeningSourceActionsRepository(f.sql);
     const cleanup = await actions.cleanup(f.scope, String(journal!.source_id));
+    const afterGrace = new Date(Date.now() + CONNECTOR_RESERVATION_GRACE_MS + 1_000);
     for (const pendingKey of cleanup.keys) {
       objectByKey.delete(pendingKey);
-      await actions.cleaned(f.scope, String(journal!.source_id), pendingKey);
+      await actions.cleaned(f.scope, String(journal!.source_id), pendingKey, afterGrace);
     }
     await expect(actions.cleanup(f.scope, String(journal!.source_id))).rejects.toMatchObject({ code: "NOT_FOUND" });
     await expect(f.sql`SELECT 1 FROM opening_privacy_exclusions WHERE source_id=${journal!.source_id}`).resolves.toHaveLength(0);

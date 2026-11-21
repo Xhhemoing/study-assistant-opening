@@ -47,3 +47,42 @@ it("reconciles the same unreferenced object on redelivery after bounded delete r
   expect(uploadSignals).toHaveLength(2);
   expect(uploadSignals.every(signal => signal instanceof AbortSignal)).toBe(true);
 });
+
+it("forwards putAttempted on uncertain PUT failure and skips cleanup on pre-PUT publish failure", async () => {
+  const scope = { workspaceId: "workspace", ownerUserId: "owner" };
+  const delivery = {
+    connectionVersion: 1,
+    identity: { connectionId: "connection", container: "INBOX", generation: "42", remoteId: "11" },
+    name: "message.eml", mime: "message/rfc822" as const, bytes: Buffer.from("Subject: Msg\r\n\r\nBody"),
+  };
+  const removeSpy = vi.fn(async () => undefined);
+  const removeUnpublishedSource = vi.fn(async () => undefined);
+
+  // Pre-PUT failure: publish rejects before entering stage().
+  const prePutImports: Imports = {
+    publish: vi.fn(async () => { throw new Error("connection locked"); }),
+    removeUnpublishedSource,
+  };
+  await expect(publishConnectorSource(prePutImports, { upload: vi.fn(), remove: removeSpy }, scope, delivery))
+    .rejects.toThrow("connection locked");
+  expect(removeUnpublishedSource).not.toHaveBeenCalled();
+
+  // Uncertain PUT failure: storage.upload starts then aborts/throws.
+  const putErrorImports: Imports = {
+    publish: vi.fn(async (_s, _i, stage) => { await stage(); throw new Error("unreachable"); }),
+    removeUnpublishedSource,
+  };
+  await expect(publishConnectorSource(putErrorImports, {
+    upload: vi.fn(async () => { throw new Error("PUT timed out"); }),
+    remove: removeSpy,
+  }, scope, delivery)).rejects.toThrow("PUT timed out");
+  expect(removeUnpublishedSource).toHaveBeenCalledWith(
+    scope,
+    delivery.identity,
+    expect.any(String),
+    expect.stringMatching(/^opening\/sources\/.+\/v0$/),
+    delivery.bytes.byteLength,
+    expect.any(Function),
+    { putAttempted: true },
+  );
+});

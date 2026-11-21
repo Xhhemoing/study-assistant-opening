@@ -221,6 +221,7 @@ export function createOpeningImportsRepository(sql: Sql) {
     async removeUnpublishedSource(
       scope: OpeningScope, identity: ImportIdentity, sourceId: string, key: string, _byteSize: number,
       remove: () => Promise<void>,
+      options?: { putAttempted?: boolean; now?: Date },
     ): Promise<void> {
       const canonicalId = sourceId.toLowerCase();
       await sql.begin(async tx => {
@@ -228,12 +229,27 @@ export function createOpeningImportsRepository(sql: Sql) {
         await tx`SELECT pg_advisory_xact_lock(hashtextextended(${importLock(scope, identity)}, 0))`;
         const [owner] = await tx`SELECT id FROM workspaces WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
         if (!owner) throw new OpeningConnectionError("NOT_FOUND", "workspace not found");
-        if (await releaseConnectorReservation(tx, scope, canonicalId, key)) {
+        const [published] = await tx`SELECT 1 FROM opening_sources WHERE id=${canonicalId} LIMIT 1`;
+        if (published) return;
+        const uncertainPut = options?.putAttempted ?? true;
+        if (await releaseConnectorReservation(tx, scope, canonicalId, key, {
+          enforceNotBefore: uncertainPut,
+          now: options?.now,
+        })) {
           await remove();
           return;
         }
-        const [retained] = await tx`SELECT 1 FROM opening_sources WHERE id=${canonicalId}
-          UNION ALL SELECT 1 FROM opening_source_versions WHERE source_id=${canonicalId}
+        const [reservation] = await tx`SELECT id FROM opening_privacy_exclusions
+          WHERE workspace_id=${scope.workspaceId} AND source_id=${canonicalId}
+            AND id=${connectorReservationId(canonicalId)} AND asset_deleted_at IS NOT NULL
+          LIMIT 1`;
+        if (reservation) {
+          // Uncertain PUT inside the grace window: attempt immediate S3 DELETE
+          // best-effort, while leaving the reservation intact until cleanup_not_before.
+          await remove();
+          return;
+        }
+        const [retained] = await tx`SELECT 1 FROM opening_source_versions WHERE source_id=${canonicalId}
           UNION ALL SELECT 1 FROM opening_privacy_exclusions WHERE source_id=${canonicalId} LIMIT 1`;
         if (!retained) await remove();
       });

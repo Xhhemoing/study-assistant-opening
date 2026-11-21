@@ -85,6 +85,40 @@ export type ImapSyncDeps = {
   onDeadlineAbort?: () => void;
 };
 
+type ErrorEventClient = {
+  on?: (event: string, listener: (error: unknown) => void) => unknown;
+  close?: () => void;
+};
+
+type ClientErrorState = {
+  firstError: Error | null;
+  waiters: Set<(error: Error) => void>;
+};
+
+const clientErrorStates = new WeakMap<object, ClientErrorState>();
+
+/** Attach a persistent 'error' listener once per client so wire/socket errors never crash Node. */
+export function attachImapClientErrorGuard<T extends object>(client: T): T {
+  if (clientErrorStates.has(client)) return client;
+  const state: ClientErrorState = { firstError: null, waiters: new Set() };
+  clientErrorStates.set(client, state);
+  const emitter = client as ErrorEventClient;
+  if (typeof emitter.on === "function") {
+    emitter.on("error", (err: unknown) => {
+      const normalized = err instanceof Error ? err : new Error(String(err));
+      if (!state.firstError) state.firstError = normalized;
+      try {
+        emitter.close?.();
+      } catch {
+        // Ignore socket teardown errors after recording the original client failure.
+      }
+      for (const reject of state.waiters) reject(state.firstError);
+      state.waiters.clear();
+    });
+  }
+  return client;
+}
+
 export async function runWithSyncDeadline<T>(
   operation: () => Promise<T>,
   options: {
@@ -92,10 +126,16 @@ export async function runWithSyncDeadline<T>(
     deadlineMs: number;
     now: () => number;
     signal?: AbortSignal;
+    client?: object;
     onDeadlineAbort: () => void;
   },
 ): Promise<T> {
-  const { phase, deadlineMs, now, signal, onDeadlineAbort } = options;
+  const { phase, deadlineMs, now, signal, client, onDeadlineAbort } = options;
+  const errorState = client ? clientErrorStates.get(attachImapClientErrorGuard(client)) : undefined;
+  if (errorState?.firstError) {
+    onDeadlineAbort();
+    throw errorState.firstError;
+  }
   if (signal?.aborted) {
     onDeadlineAbort();
     throw new Error(`IMAP sync aborted during ${phase}`);
@@ -106,14 +146,26 @@ export async function runWithSyncDeadline<T>(
     throw new Error(`IMAP sync exceeded time budget during ${phase}`);
   }
   const opPromise = Promise.resolve().then(operation);
-  if (!signal && remainingMs >= 2_147_483_647) {
+  if (!signal && !errorState && remainingMs >= 2_147_483_647) {
     return opPromise;
   }
   void opPromise.catch(() => undefined);
   let timer: ReturnType<typeof setTimeout> | undefined;
   let onAbort: (() => void) | undefined;
+  let onClientError: ((error: Error) => void) | undefined;
   try {
     const guard = new Promise<never>((_, reject) => {
+      if (errorState) {
+        onClientError = (err: Error) => {
+          onDeadlineAbort();
+          reject(err);
+        };
+        if (errorState.firstError) {
+          onClientError(errorState.firstError);
+          return;
+        }
+        errorState.waiters.add(onClientError);
+      }
       if (signal) {
         onAbort = () => {
           onDeadlineAbort();
@@ -134,9 +186,13 @@ export async function runWithSyncDeadline<T>(
       }
     });
     return await Promise.race([opPromise, guard]);
+  } catch (error) {
+    if (errorState?.firstError) throw errorState.firstError;
+    throw error;
   } finally {
     if (timer !== undefined) clearTimeout(timer);
     if (signal && onAbort) signal.removeEventListener("abort", onAbort);
+    if (onClientError) errorState?.waiters.delete(onClientError);
   }
 }
 
@@ -146,6 +202,7 @@ export async function syncMailbox(deps: ImapSyncDeps): Promise<{
   skipped: number;
   cursor: ImapCursor;
 }> {
+  attachImapClientErrorGuard(deps.client);
   const clock = deps.now ?? (() => Date.now());
   const maxDurationMs = deps.maxSyncDurationMs ?? DEFAULT_IMAP_SYNC_DURATION_MS;
   if (!Number.isFinite(maxDurationMs) || maxDurationMs <= 0) {
@@ -171,6 +228,7 @@ export async function syncMailbox(deps: ImapSyncDeps): Promise<{
     deadlineMs,
     now: clock,
     signal: deps.signal,
+    client: deps.client,
     onDeadlineAbort: invokeDeadlineAbort,
   });
   const assertWithinBudget = (phase: string) => {

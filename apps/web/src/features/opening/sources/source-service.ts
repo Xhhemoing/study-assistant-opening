@@ -263,12 +263,23 @@ export function createOpeningSourceService(sql: Sql, storage: OpeningStorage = n
       const sourceId = id.toLowerCase();
       const input = sourceActionInputSchema.parse(raw), scope = scopeOf(p);
       const currentTime = now();
-      const discoveredStagingKeys = input.action === "exclude"
-        ? []
-        : await (storage.listMatchingStagingKeys?.(sourceId).catch(() => []) ?? Promise.resolve([]));
+      let stagingDiscoveryFailed = false;
+      let discoveredStagingKeys: string[] = [];
+      const discoverStagingKeys = async () => {
+        if (typeof storage.listMatchingStagingKeys !== "function") return;
+        try {
+          discoveredStagingKeys = await storage.listMatchingStagingKeys(sourceId);
+        } catch {
+          stagingDiscoveryFailed = true;
+        }
+      };
+      if (input.action === "delete") await discoverStagingKeys();
       const result = input.action === "retry_cleanup"
         ? { deleted: true, cleanup: await actions.cleanup(scope, sourceId) }
         : await actions.apply(scope, id, input, storage, currentTime, { extraKeys: discoveredStagingKeys });
+      if (input.action === "retry_cleanup" && !result.cleanup.connectorReservation) {
+        await discoverStagingKeys();
+      }
       if (input.action !== "retry_cleanup") {
         try {
           await createOpeningKnowledgeRepository(sql).reconcileCoursesForSource(scope, {
@@ -303,12 +314,15 @@ export function createOpeningSourceService(sql: Sql, storage: OpeningStorage = n
           catch { extraStagingFailed = true; }
         }
         const hasCanonicalStagingDeferred = cleanupKeys.has(canonicalStagingKey);
+        const hasStagingKeyInResult = result.cleanup.keys.some(
+          key => key.toLowerCase() === canonicalStagingKey.toLowerCase(),
+        );
         const notBeforeActive = Boolean(result.cleanup.notBefore && new Date(result.cleanup.notBefore) > currentTime);
         for (const key of result.cleanup.keys) {
           try { await storage.deleteObject(key); }
           catch { continue; } // The receipt keeps this failed key visible and retryable.
           const isStagingKey = key.toLowerCase() === canonicalStagingKey.toLowerCase();
-          if (isStagingKey && extraStagingFailed) continue;
+          if ((stagingDiscoveryFailed || extraStagingFailed) && (isStagingKey || !hasStagingKeyInResult)) continue;
           const keepStagingDeferred = isStagingKey && notBeforeActive && (
             key === canonicalStagingKey
             || key === requestedStagingKey

@@ -1,3 +1,4 @@
+import { EventEmitter } from "node:events";
 import { describe, expect, it, vi } from "vitest";
 import type { ImapCursor } from "@aistudy/contracts";
 import { mailToImportInput, MAX_MAIL_BYTES, nextImapCursor, runWithSyncDeadline, syncMailbox, type ImapSyncDeps } from "./imap-sync";
@@ -249,5 +250,26 @@ describe("imap sync cursor and parser guards", () => {
       onDeadlineAbort,
     })).rejects.toThrow("IMAP sync exceeded time budget during connect");
     expect(onDeadlineAbort).toHaveBeenCalledOnce();
+  });
+
+  it("captures emitter client error events during syncMailbox and prefers them over generic close errors", async () => {
+    const base = mailbox([1], null);
+    const emitter = new EventEmitter();
+    const wireError = Object.assign(new Error("Line length exceeds maximum allowed size"), { code: "LineTooLarge" });
+    const client = Object.assign(emitter, {
+      ...base.deps.client,
+      close: vi.fn(),
+      fetchOne: (() => new Promise<never>((_resolve, reject) => {
+        setTimeout(() => {
+          emitter.emit("error", wireError);
+          reject(new Error("Connection closed"));
+        }, 5);
+      })) as ImapSyncDeps["client"]["fetchOne"],
+    });
+    base.deps.client = client as unknown as ImapSyncDeps["client"];
+    base.deps.onDeadlineAbort = () => client.close();
+
+    await expect(syncMailbox(base.deps)).rejects.toBe(wireError);
+    expect(client.close).toHaveBeenCalled();
   });
 });

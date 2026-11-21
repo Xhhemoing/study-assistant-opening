@@ -4,6 +4,7 @@ import { isIP } from "node:net";
 import { ImapFlow } from "imapflow";
 import { isPublicProviderAddress } from "@aistudy/ai/provider-network";
 import { imapEndpointSchema, isApprovedImapHost } from "@aistudy/contracts";
+import { attachImapClientErrorGuard } from "./imap-sync";
 
 export const MAX_IMAP_LINE_BYTES = 2 * 1024 * 1024;
 export const MAX_IMAP_LITERAL_BYTES = 26 * 1024 * 1024;
@@ -26,7 +27,7 @@ export async function createApprovedImapClient(
   }
   // ImapFlow passes this literal directly to net.connect / tls.connect. The
   // TLS name is independent and survives the STARTTLS upgrade on that socket.
-  return new ImapFlow({
+  const client = new ImapFlow({
     host: address.address,
     port,
     servername: host,
@@ -39,4 +40,5 @@ export async function createApprovedImapClient(
     maxResponseSize: MAX_IMAP_RESPONSE_BYTES,
     logger: false,
   });
+  return attachImapClientErrorGuard(client);
 }

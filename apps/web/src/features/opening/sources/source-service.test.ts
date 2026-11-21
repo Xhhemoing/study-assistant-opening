@@ -1239,4 +1239,96 @@ describe("opening signed upload service", () => {
     expect(reservationActive).toBe(false);
   });
 
+  it("keeps staging cleanup pending when listMatchingStagingKeys fails or is incomplete until retry succeeds", async () => {
+    const baseSql = makeFakeSql();
+    const s3 = makeFakeStorage();
+    let listShouldFail = true;
+    const storage: OpeningStorage = {
+      ...s3.storage,
+      stagingKey: (id) => `opening/staging/${id}`,
+      finalKey: (id, version) => `opening/sources/${id}/v${version}`,
+      listMatchingStagingKeys: async (canonicalId) => {
+        if (listShouldFail) throw new Error("incomplete storage listing");
+        return [...s3.objects.keys()].filter(key => key.toLowerCase() === `opening/staging/${canonicalId.toLowerCase()}`);
+      },
+    };
+    let canonicalId = "";
+    let pendingKeys: string[] = [];
+    let exclusionCreated = false;
+    const wrappedSql = Object.assign(((parts: TemplateStringsArray, ...values: unknown[]) => {
+      const query = parts.join("?").replace(/\s+/g, " ").trim();
+      if (query === "" || query === "FOR UPDATE") return query;
+      if (query.startsWith("SELECT version, upload_url_expires_at FROM opening_sources")) {
+        const row = baseSql.sources.get(String(values[0]));
+        return row ? [{ version: 0, upload_url_expires_at: new Date("2020-01-01T00:00:00.000Z") }] : [];
+      }
+      if (query.startsWith("SELECT * FROM opening_privacy_exclusions")) {
+        return exclusionCreated ? [{ id: "00000000-0000-4000-8000-000000000099", source_id: canonicalId, pending_object_keys: pendingKeys, cleanup_not_before: null }] : [];
+      }
+      if (query.startsWith("SELECT m.id") || query.startsWith("UPDATE opening_course_knowledge")
+        || query.startsWith("UPDATE workspaces SET privacy_epoch")
+        || query.startsWith("SELECT version FROM opening_source_versions") || query.startsWith("SELECT image_object_key")
+        || query.startsWith("DELETE FROM course_asset_memberships") || query.startsWith("UPDATE opening_source_versions")) {
+        return [];
+      }
+      if (query.startsWith("DELETE FROM opening_sources")) {
+        baseSql.sources.delete(String(values[1]));
+        return [];
+      }
+      if (query.startsWith("INSERT INTO opening_privacy_exclusions")) {
+        exclusionCreated = true;
+        return [];
+      }
+      if (query.startsWith("UPDATE opening_privacy_exclusions SET asset_deleted_at")) {
+        pendingKeys = values[1] as string[];
+        return [];
+      }
+      if (query.startsWith("SELECT id, source_id, pending_object_keys, cleanup_not_before FROM opening_privacy_exclusions")) {
+        return pendingKeys.length ? [{ id: "00000000-0000-4000-8000-000000000099", source_id: canonicalId, pending_object_keys: pendingKeys, cleanup_not_before: null }] : [];
+      }
+      if (query.startsWith("SELECT id, cleanup_not_before FROM opening_privacy_exclusions")) return [];
+      if (query.startsWith("UPDATE opening_privacy_exclusions SET pending_object_keys=array_remove")) {
+        pendingKeys = pendingKeys.filter(k => k !== values[0]);
+        return [];
+      }
+      return (baseSql as unknown as (p: TemplateStringsArray, ...v: unknown[]) => unknown)(parts, ...values);
+    }) as unknown as typeof baseSql, {
+      json: baseSql.json,
+      begin: (cb: (tx: Sql) => Promise<unknown>) => cb(wrappedSql as unknown as Sql),
+    });
+
+    const svc = createOpeningSourceService(wrappedSql as unknown as Sql, storage);
+    const ticket = await svc.beginUpload(principal, {
+      name: "listing-retry.pdf",
+      mime: "application/pdf",
+      bytes: pdfBytes.length,
+      sha256: pdfSha,
+    });
+    canonicalId = ticket.source.id;
+    const mixedKey = `opening/staging/${canonicalId.slice(0, 6).toUpperCase()}${canonicalId.slice(6)}`;
+    s3.objects.set(mixedKey, { bytes: pdfBytes, etag: "etag-mixed" });
+
+    // Listing error on delete still removes DB source, but leaves staging receipt pending.
+    const firstDelete = await svc.actOnSource(principal, canonicalId, {
+      action: "delete",
+      expectedVersion: 0,
+      expectedMembershipIds: [],
+    });
+    expect(firstDelete.deleted).toBe(true);
+    expect(firstDelete.cleanupPending).toBeGreaterThan(0);
+    expect(s3.objects.has(mixedKey)).toBe(true);
+
+    // Retry while listing still fails must keep the receipt pending instead of clearing it.
+    const failedRetry = await svc.actOnSource(principal, canonicalId, { action: "retry_cleanup" });
+    expect(failedRetry.cleanupPending).toBeGreaterThan(0);
+    expect(s3.objects.has(mixedKey)).toBe(true);
+
+    // Once listing completes, retry discovers, deletes, and clears the receipt.
+    listShouldFail = false;
+    const succeededRetry = await svc.actOnSource(principal, canonicalId, { action: "retry_cleanup" });
+    expect(succeededRetry).toMatchObject({ sourceId: canonicalId, deleted: true, cleanupPending: 0, retryAfter: null });
+    expect(s3.objects.has(mixedKey)).toBe(false);
+    expect(pendingKeys).toEqual([]);
+  });
+
 });

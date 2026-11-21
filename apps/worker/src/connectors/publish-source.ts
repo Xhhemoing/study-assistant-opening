@@ -38,17 +38,18 @@ export async function publishConnectorSource(
   // The final key is private staging until its source transaction commits.
   const key = `opening/sources/${sourceId}/v0`;
   const quota = loadOpeningUploadQuota();
-  const cleanup = () => imports.removeUnpublishedSource(
+  let putAttempted = false;
+  const cleanup = (uncertainPut: boolean) => imports.removeUnpublishedSource(
     scope, input.identity, sourceId, key, source.bytes, () => removeWithRetry(storage, key),
+    { putAttempted: uncertainPut },
   );
-  let staged = false;
   let receipt: Awaited<ReturnType<typeof imports.publish>>;
   try {
     receipt = await imports.publish(scope, {
       identity: input.identity, connectionVersion: input.connectionVersion, cursor: input.cursor,
       sourceId, source, key, quota,
     }, async () => {
-      staged = true;
+      putAttempted = true;
       await storage.upload({
         key,
         bytes: input.bytes,
@@ -57,15 +58,15 @@ export async function publishConnectorSource(
       });
     });
   } catch (error) {
-    if (staged) {
+    if (putAttempted) {
       try {
-        await cleanup();
+        await cleanup(true);
       } catch (cleanupError) {
         throw new AggregateError([error, cleanupError], "Connector publication failed and object cleanup could not be confirmed");
       }
     }
     throw error;
   }
-  if (staged && receipt.duplicate && !receipt.sourceIds.includes(sourceId)) await cleanup();
+  if (putAttempted && receipt.duplicate && !receipt.sourceIds.includes(sourceId)) await cleanup(true);
   return receipt;
 }

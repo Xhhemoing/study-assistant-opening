@@ -7,6 +7,7 @@ import {
   MAX_IMAP_LITERAL_BYTES,
   MAX_IMAP_RESPONSE_BYTES,
 } from "./imap-endpoint";
+import { runWithSyncDeadline } from "./imap-sync";
 
 const host = "imap.example.edu";
 const approvedIp = "1.1.1.1";
@@ -89,6 +90,35 @@ describe("approved IMAP dialer", () => {
     expect(MAX_IMAP_LITERAL_BYTES).toBeGreaterThan(25 * 1024 * 1024);
     expect(MAX_IMAP_LITERAL_BYTES).toBeLessThan(64 * 1024 * 1024);
     expect(MAX_IMAP_RESPONSE_BYTES).toBeGreaterThan(MAX_IMAP_LITERAL_BYTES);
+    client.close();
+  });
+
+  it("contains post-connect client error events and surfaces the wire error instead of closing generically", async () => {
+    const client = await createApprovedImapClient(endpoint, auth, publicAnswers);
+    const closeSpy = vi.spyOn(client, "close");
+    const wireError = Object.assign(new Error("Literal size exceeds maximum"), { code: "LiteralTooLarge" });
+
+    // Emitting 'error' before or outside an awaited command must not trigger ERR_UNHANDLED_ERROR.
+    const inflight = runWithSyncDeadline(
+      () => new Promise<never>((_resolve, reject) => {
+        setTimeout(() => {
+          client.emit("error", wireError);
+          reject(new Error("Connection closed"));
+        }, 5);
+      }),
+      {
+        phase: "fetch",
+        deadlineMs: Date.now() + 5000,
+        now: Date.now,
+        client,
+        onDeadlineAbort: () => client.close(),
+      },
+    );
+    await expect(inflight).rejects.toBe(wireError);
+    expect(closeSpy).toHaveBeenCalled();
+
+    // Emitting another error directly while idle also stays contained without crashing the process.
+    expect(() => client.emit("error", new Error("post-close socket error"))).not.toThrow();
     client.close();
   });
 });
