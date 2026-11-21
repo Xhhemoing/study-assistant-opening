@@ -1,7 +1,9 @@
+import { createCipheriv, createHash, randomBytes } from "node:crypto";
 import { NextRequest } from "next/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { middleware } from "../../../../../../middleware";
 import { POST } from "./route";
+import { decryptDingTalkCallbackPlaintext } from "../../../../../../../../worker/src/connectors/dingtalk-client";
 
 const path = "/api/opening/connections/dingtalk/events";
 const base = "https://study.example";
@@ -18,15 +20,33 @@ describe("DingTalk webhook ingress", () => {
   });
   afterEach(() => vi.unstubAllEnvs());
 
-  function webhook(body: BodyInit, headers?: HeadersInit) {
+  function webhook(body: BodyInit, input: { signature?: string; timestamp?: string; msgSignature?: string; timeStamp?: string } = {}, headers?: HeadersInit) {
     const timestamp = Math.floor(Date.now() / 1000);
-    return new NextRequest(`${base}${path}?signature=forged&timestamp=${timestamp}&nonce=fixture`, {
+    const signature = input.msgSignature ?? input.signature ?? "forged";
+    const timeStamp = input.timeStamp ?? input.timestamp ?? String(timestamp);
+    return new NextRequest(`${base}${path}?msg_signature=${signature}&timeStamp=${timeStamp}&nonce=fixture`, {
       method: "POST", body, headers, duplex: "half",
     });
   }
 
+  function encryptedEnvelope(plaintext: string) {
+    const encodingAesKey = "A".repeat(43);
+    const key = Buffer.from(`${encodingAesKey}=`, "base64");
+    const message = Buffer.from(plaintext, "utf8");
+    const length = Buffer.alloc(4);
+    length.writeUInt32BE(message.byteLength);
+    const plain = Buffer.concat([randomBytes(16), length, message, Buffer.from("fixture-corp", "ascii")]);
+    const padding = 32 - (plain.byteLength % 32);
+    const cipher = createCipheriv("aes-256-cbc", key, key.subarray(0, 16));
+    cipher.setAutoPadding(false);
+    const encrypt = Buffer.concat([cipher.update(Buffer.concat([plain, Buffer.alloc(padding, padding)])), cipher.final()]).toString("base64");
+    const timestamp = String(Math.floor(Date.now() / 1000));
+    const msgSignature = createHash("sha1").update(["fixture-token", timestamp, "fixture", encrypt].sort().join("")).digest("hex");
+    return { body: JSON.stringify({ encrypt }), request: webhook(JSON.stringify({ encrypt }), { msgSignature, timeStamp: timestamp }), encrypt, timestamp };
+  }
+
   it("passes an originless webhook to signature verification and strips cookies", async () => {
-    const request = webhook("encrypted", { cookie: "aistudy_session=fixture" });
+    const request = webhook(JSON.stringify({ encrypt: "encrypted" }), {}, { cookie: "aistudy_session=fixture" });
     const next = middleware(request);
     expect(next.headers.get("x-middleware-next")).toBe("1");
     expect(next.headers.get("x-middleware-override-headers")?.split(",")).not.toContain("cookie");
@@ -34,6 +54,16 @@ describe("DingTalk webhook ingress", () => {
     expect(response.status).toBe(400);
     expect(await response.json()).toMatchObject({ error: { code: "SIGNATURE" } });
     expect(sql).not.toHaveBeenCalled();
+  });
+
+  it("accepts a signed provider check_url envelope and returns its encrypted acknowledgement", async () => {
+    const input = encryptedEnvelope(JSON.stringify({ EventType: "check_url" }));
+    const request = new NextRequest(input.request.url, { method: "POST", body: input.body, duplex: "half" });
+    const response = await POST(request);
+    expect(response.status).toBe(200);
+    const ack = await response.json() as { msg_signature: string; timeStamp: string; nonce: string; encrypt: string };
+    expect(ack).toMatchObject({ timeStamp: input.timestamp, nonce: "fixture" });
+    expect(decryptDingTalkCallbackPlaintext({ encodingAesKey: "A".repeat(43), corpIdOrKey: "fixture-corp", encrypt: ack.encrypt })).toBe("success");
   });
 
   it.each([

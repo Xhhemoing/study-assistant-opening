@@ -19,7 +19,7 @@ it("reconciles the same unreferenced object on redelivery after bounded delete r
       await stage();
       return duplicate;
     }),
-    removeUnpublishedSource: vi.fn<Imports["removeUnpublishedSource"]>(async (_scope, _identity, _sourceId, remove) => {
+    removeUnpublishedSource: vi.fn<Imports["removeUnpublishedSource"]>(async (_scope, _identity, _sourceId, _key, remove) => {
       await remove();
     }),
   };

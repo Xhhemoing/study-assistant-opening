@@ -160,15 +160,42 @@ export function createOpeningImportsRepository(sql: Sql) {
       });
     },
     async removeUnpublishedSource(
-      scope: OpeningScope, identity: ImportIdentity, sourceId: string, remove: () => Promise<void>,
+      scope: OpeningScope, identity: ImportIdentity, sourceId: string, key: string, remove: () => Promise<void>,
     ): Promise<void> {
+      let shouldRemove = false;
       await sql.begin(async tx => {
-        // Wait out an ambiguous COMMIT and hold the lock through the delete:
-        // a redelivery can otherwise publish after the check but before deletion.
+        // Wait out an ambiguous COMMIT before deciding whether the object is
+        // still unpublished. The journal write must commit independently from
+        // the storage delete so a failed delete remains recoverable.
         await lockImportObject(tx, scope, identity);
         const [source] = await tx`SELECT id FROM opening_sources WHERE id=${sourceId}`;
-        if (!source) await remove();
+        if (source) return;
+        await tx`SELECT id FROM workspaces
+          WHERE id=${scope.workspaceId} AND owner_user_id=${scope.ownerUserId}`;
+        await tx`INSERT INTO opening_privacy_exclusions
+            (id, workspace_id, source_id, deleted_at, asset_deleted_at,
+             pending_object_keys, cleanup_not_before)
+          VALUES (${randomUUID()}, ${scope.workspaceId}, ${sourceId}, now(), now(),
+            ARRAY[${key}]::text[], now())
+          ON CONFLICT (workspace_id, source_id) DO UPDATE SET
+            asset_deleted_at = COALESCE(opening_privacy_exclusions.asset_deleted_at, now()),
+            pending_object_keys = array_append(
+              array_remove(COALESCE(opening_privacy_exclusions.pending_object_keys, ARRAY[]::text[]),
+                ${key}),
+              ${key}),
+            cleanup_not_before = COALESCE(opening_privacy_exclusions.cleanup_not_before, now())`;
+        shouldRemove = true;
       });
+      if (shouldRemove) {
+        await remove();
+        // The durable journal is written before the external delete. Remove
+        // this key only after storage confirms success, leaving failed deletes
+        // visible to the existing source cleanup/reaper path.
+        await sql`UPDATE opening_privacy_exclusions e SET pending_object_keys=array_remove(e.pending_object_keys,${key})
+          WHERE e.workspace_id=${scope.workspaceId} AND e.source_id=${sourceId}
+            AND e.asset_deleted_at IS NOT NULL
+            AND EXISTS(SELECT 1 FROM workspaces w WHERE w.id=e.workspace_id AND w.owner_user_id=${scope.ownerUserId})`;
+      }
     },
   };
 }

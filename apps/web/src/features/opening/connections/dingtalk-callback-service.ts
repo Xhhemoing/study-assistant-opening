@@ -14,6 +14,8 @@ import {
 import {
   buildDingTalkCallbackResponse,
   DingTalkClientError,
+  type DingTalkCallbackEnvelope,
+  type DingTalkEncryptedCallback,
   isFreshDingTalkEventTimestamp,
   verifyAndDecryptDingTalkEvent,
 } from "../../../../../worker/src/connectors/dingtalk-client";
@@ -33,11 +35,7 @@ const callbackConnectionMapSchema = z.record(z.string(), callbackConnectionSchem
 
 export type DingTalkCallbackConnection = z.infer<typeof callbackConnectionSchema>;
 
-export type DingTalkCallbackInput = {
-  signature: string;
-  timestamp: string;
-  nonce: string;
-  encryptedBody: string;
+export type DingTalkCallbackInput = DingTalkCallbackEnvelope & {
   now?: () => number;
 };
 
@@ -56,12 +54,7 @@ export type DingTalkCallbackResult = {
   receiptId: string | null;
 };
 
-export type DingTalkCallbackResponse = {
-  signature: string;
-  timestamp: string;
-  nonce: string;
-  encrypted: string;
-};
+export type DingTalkCallbackResponse = DingTalkEncryptedCallback;
 
 function requiredEnv(name: string): string {
   const value = process.env[name]?.trim() ?? "";
@@ -106,19 +99,24 @@ export async function receiveDingTalkCallback(
   input: DingTalkCallbackInput,
   deps: DingTalkCallbackDeps,
 ): Promise<DingTalkCallbackResult> {
-  const now = deps.now ?? (() => Date.now());
-  if (!isFreshDingTalkEventTimestamp(input.timestamp, DINGTALK_EVENT_TIMESTAMP_MAX_AGE_SECONDS, now)) {
+  const timestamp = input.timeStamp ?? input.timestamp ?? "";
+  const now = input.now ?? deps.now ?? (() => Date.now());
+  if (!isFreshDingTalkEventTimestamp(timestamp, DINGTALK_EVENT_TIMESTAMP_MAX_AGE_SECONDS, now)) {
     throw new DingTalkClientError("FORMAT", "callback timestamp is stale");
   }
 
   const config = responseConfig();
   const event = verifyAndDecryptDingTalkEvent({
     ...config,
-    signature: input.signature,
-    timestamp: input.timestamp,
-    nonce: input.nonce,
-    encryptedBody: input.encryptedBody,
+    ...input,
   });
+  if (typeof event === "string" || (
+    event && typeof event === "object" && !Array.isArray(event)
+      && typeof ((event as Record<string, unknown>).eventType ?? (event as Record<string, unknown>).EventType) === "string"
+      && String((event as Record<string, unknown>).eventType ?? (event as Record<string, unknown>).EventType).toLowerCase() === "check_url"
+  )) {
+    return { eventId: "check_url", duplicate: false, imported: 0, sourceId: null, receiptId: null };
+  }
   if (!event || typeof event !== "object" || Array.isArray(event)) {
     throw new DingTalkClientError("FORMAT", "callback event must be an object");
   }

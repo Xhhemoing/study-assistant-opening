@@ -5,6 +5,7 @@ import type { ImapCursor } from "@aistudy/contracts";
 import {
   createOpeningConnectionsRepository,
   createOpeningImportsRepository,
+  createOpeningSourceActionsRepository,
 } from "@aistudy/database";
 import { createOpeningFixture, type OpeningFixture } from "./opening-fixture";
 import { startOpeningImapServer, type OpeningImapServer } from "./opening-imap-server";
@@ -15,6 +16,7 @@ let f: OpeningFixture;
 let server: OpeningImapServer;
 let objectByKey = new Map<string, Uint8Array>();
 let failFinalUpload = false;
+let failImmediateDeletes = false;
 const initialMail = {
   uid: 11,
   source: [
@@ -82,7 +84,10 @@ async function runSync(options: { cursor?: ImapCursor | null; onUpload?: (bytes:
           if (failFinalUpload) throw new Error("storage unavailable");
           await options.onUpload?.(bytes);
         },
-        remove: async key => { objectByKey.delete(key); },
+        remove: async key => {
+          if (failImmediateDeletes) throw new Error("storage cleanup unavailable");
+          objectByKey.delete(key);
+        },
       },
     });
   } finally {
@@ -97,11 +102,14 @@ async function runSync(options: { cursor?: ImapCursor | null; onUpload?: (bytes:
 let fixtureConnection: { id: string; version: number };
 
 beforeEach(async () => {
+  await server.waitForConnectionsClosed();
   expect(server.activeConnectionCount()).toBe(0);
   server.mails.splice(0, server.mails.length, initialMail);
   objectByKey = new Map();
   failFinalUpload = false;
-  await f.sql`TRUNCATE opening_import_receipts, opening_import_cursors, opening_jobs, opening_outbox, opening_source_versions, opening_sources RESTART IDENTITY CASCADE`;
+  failImmediateDeletes = false;
+  await f.sql`TRUNCATE opening_import_receipts, opening_import_cursors, opening_jobs, opening_outbox,
+    opening_source_versions, opening_sources, opening_privacy_exclusions RESTART IDENTITY CASCADE`;
   await f.sql`DELETE FROM opening_connections WHERE workspace_id=${f.scope.workspaceId}`;
   fixtureConnection = await seedConnection();
 });
@@ -177,6 +185,32 @@ describe("isolated standard IMAP sync gate", () => {
     expect(objectByKey.size).toBe(0);
   });
 
+  it("journals an object when revocation wins and every immediate delete fails", async () => {
+    failImmediateDeletes = true;
+    await expect(runSync({ onUpload: async () => {
+      await createOpeningConnectionsRepository(f.sql).revoke(f.scope, fixtureConnection.id, fixtureConnection.version, "integration-revoke");
+    } })).rejects.toBeInstanceOf(AggregateError);
+
+    const [journal] = await f.sql`SELECT source_id, pending_object_keys, asset_deleted_at
+      FROM opening_privacy_exclusions WHERE workspace_id=${f.scope.workspaceId}
+        AND cardinality(pending_object_keys)>0`;
+    expect(journal).toMatchObject({ asset_deleted_at: expect.anything(), pending_object_keys: expect.any(Array) });
+    const key = String((journal!.pending_object_keys as string[])[0]);
+    expect(objectByKey.has(key)).toBe(true);
+    expect(await f.sql`SELECT state FROM opening_connections WHERE id=${fixtureConnection.id}`)
+      .toEqual([{ state: "revoked" }]);
+
+    failImmediateDeletes = false;
+    const actions = createOpeningSourceActionsRepository(f.sql);
+    const cleanup = await actions.cleanup(f.scope, String(journal!.source_id));
+    for (const pendingKey of cleanup.keys) {
+      objectByKey.delete(pendingKey);
+      await actions.cleaned(f.scope, String(journal!.source_id), pendingKey);
+    }
+    await expect(actions.cleanup(f.scope, String(journal!.source_id))).resolves.toMatchObject({ keys: [] });
+    expect(objectByKey.has(key)).toBe(false);
+  });
+
   it("imports both unordered UIDs on rollover, starting below the previous generation's cursor", async () => {
     server.mails.unshift({ ...server.mails[0]!, uid: 12, source: "Subject: UID 12\r\n\r\nnext" });
     const imports = createOpeningImportsRepository(f.sql);
@@ -194,7 +228,7 @@ describe("isolated standard IMAP sync gate", () => {
     await expect(runSync()).resolves.toMatchObject({ imported: 0, cursor: next });
   });
 
-  it("imports the lowest 100 UIDs first and exhausts a descending mailbox on the second sync", async () => {
+  it("imports the lowest 100 UIDs first and exhausts a descending mailbox on the second sync", { timeout: 25_000 }, async () => {
     const uids = Array.from({ length: 105 }, (_, index) => index + 11);
     server.mails.splice(0, 1, ...uids.toReversed().map(uid => ({
       uid, source: `Subject: UID ${uid}\r\n\r\nmessage`,

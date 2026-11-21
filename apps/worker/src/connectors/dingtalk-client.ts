@@ -13,10 +13,20 @@ export type DingTalkCallbackConfig = {
 };
 
 export type DingTalkEncryptedCallback = {
-  signature: string;
-  timestamp: string;
+  msg_signature: string;
+  timeStamp: string;
   nonce: string;
-  encrypted: string;
+  encrypt: string;
+};
+
+export type DingTalkCallbackEnvelope = {
+  msg_signature?: string;
+  signature?: string;
+  timeStamp?: string;
+  timestamp?: string;
+  nonce?: string;
+  encrypt?: string;
+  encryptedBody?: string;
 };
 
 export class DingTalkClientError extends Error {
@@ -44,6 +54,15 @@ function safeEquals(left: string, right: string) {
   const leftBytes = Buffer.from(left, "utf8");
   const rightBytes = Buffer.from(right, "utf8");
   return leftBytes.length === rightBytes.length && timingSafeEqual(leftBytes, rightBytes);
+}
+
+function callbackParts(input: DingTalkCallbackEnvelope) {
+  return {
+    signature: input.msg_signature ?? input.signature ?? "",
+    timestamp: input.timeStamp ?? input.timestamp ?? "",
+    nonce: input.nonce ?? "",
+    encryptedBody: input.encrypt ?? input.encryptedBody ?? "",
+  };
 }
 
 function aesKey(encodingAesKey: string): Buffer {
@@ -121,33 +140,32 @@ function encryptPayload(input: {
  * Verify before parsing/trusting event content, then decrypt and bind the
  * payload to the configured enterprise identity.
  */
-export function verifyAndDecryptDingTalkEvent(input: DingTalkCallbackConfig & {
-  signature: string;
-  timestamp: string;
-  nonce: string;
-  encryptedBody: string;
-}): unknown {
-  if (!input.token || !input.nonce || !/^\d+$/.test(input.timestamp)) {
+export function verifyAndDecryptDingTalkEvent(input: DingTalkCallbackConfig & DingTalkCallbackEnvelope): unknown {
+  const callback = callbackParts(input);
+  if (!input.token || !callback.nonce || !/^\d+$/.test(callback.timestamp)) {
     throw new DingTalkClientError("FORMAT", "callback request is incomplete");
   }
   const expectedSignature = sortedSignature(
     input.token,
-    input.timestamp,
-    input.nonce,
-    input.encryptedBody,
+    callback.timestamp,
+    callback.nonce,
+    callback.encryptedBody,
   );
-  if (!safeEquals(input.signature, expectedSignature)) {
+  if (!safeEquals(callback.signature, expectedSignature)) {
     throw new DingTalkClientError("SIGNATURE", "callback signature is invalid");
   }
   const plaintext = decryptPayload({
     encodingAesKey: input.encodingAesKey,
     corpIdOrKey: input.corpIdOrKey,
-    encryptedBody: input.encryptedBody,
+    encryptedBody: callback.encryptedBody,
   });
   try {
     return JSON.parse(plaintext) as unknown;
   } catch {
-    throw new DingTalkClientError("FORMAT", "callback payload is not JSON");
+    // DingTalk's URL verification payload is a signed encrypted string. Event
+    // delivery remains JSON, while the check_url path only needs verification
+    // and a compliant encrypted acknowledgement.
+    return plaintext;
   }
 }
 
@@ -155,9 +173,10 @@ export function verifyAndDecryptDingTalkEvent(input: DingTalkCallbackConfig & {
 export function decryptDingTalkCallbackPlaintext(input: {
   encodingAesKey: string;
   corpIdOrKey: string;
-  encryptedBody: string;
+  encryptedBody?: string;
+  encrypt?: string;
 }): string {
-  return decryptPayload(input);
+  return decryptPayload({ ...input, encryptedBody: input.encrypt ?? input.encryptedBody ?? "" });
 }
 
 /** Encrypt DingTalk's required success acknowledgement; never return plaintext. */
@@ -171,10 +190,10 @@ export function buildDingTalkCallbackResponse(input: DingTalkCallbackConfig & {
     message: "success",
   });
   return {
-    signature: sortedSignature(input.token, input.timestamp, input.nonce, encrypted),
-    timestamp: input.timestamp,
+    msg_signature: sortedSignature(input.token, input.timestamp, input.nonce, encrypted),
+    timeStamp: input.timestamp,
     nonce: input.nonce,
-    encrypted,
+    encrypt: encrypted,
   };
 }
 

@@ -47,7 +47,7 @@ export async function publishConnectorSource(
   // The final key is private staging until its source transaction commits.
   const key = `opening/sources/${sourceId}/v0`;
   const quota = loadOpeningUploadQuota();
-  const cleanup = () => imports.removeUnpublishedSource(scope, input.identity, sourceId, () => removeWithRetry(storage, key));
+  const cleanup = () => imports.removeUnpublishedSource(scope, input.identity, sourceId, key, () => removeWithRetry(storage, key));
   let receipt: Awaited<ReturnType<typeof imports.publish>>;
   try {
     receipt = await imports.publish(scope, {

@@ -46,6 +46,18 @@ describe("dingtalk callback client", () => {
     expect(event).toEqual({ eventId: "event-1" });
   });
 
+  it("accepts DingTalk's standard envelope field names", () => {
+    const timeStamp = "1760000000";
+    const nonce = "nonce";
+    const encrypt = encryptCallback('{"eventId":"standard-envelope"}', aesKey, corpId);
+    const event = verifyAndDecryptDingTalkEvent({
+      token, encodingAesKey: key43, corpIdOrKey: corpId,
+      msg_signature: signatureFor(token, timeStamp, nonce, encrypt),
+      timeStamp, nonce, encrypt,
+    });
+    expect(event).toEqual({ eventId: "standard-envelope" });
+  });
+
   it("rejects forged signatures before trusting event content", () => {
     const timestamp = "1760000000";
     const nonce = "nonce";
@@ -78,10 +90,15 @@ describe("dingtalk callback client", () => {
     const nonce = "nonce";
     const response = buildDingTalkCallbackResponse({ token, encodingAesKey: key43, corpIdOrKey: corpId, timestamp, nonce });
     const decrypted = decryptDingTalkCallbackPlaintext({
-      encodingAesKey: key43, corpIdOrKey: corpId, encryptedBody: response.encrypted,
+      encodingAesKey: key43, corpIdOrKey: corpId, encryptedBody: response.encrypt,
     });
     expect(decrypted).toBe("success");
-    expect(response.signature).toBe(signatureFor(token, timestamp, nonce, response.encrypted));
+    expect(response).toEqual({
+      msg_signature: signatureFor(token, timestamp, nonce, response.encrypt),
+      timeStamp: timestamp,
+      nonce,
+      encrypt: response.encrypt,
+    });
   });
 
   it("tracks replayed event keys idempotently", () => {

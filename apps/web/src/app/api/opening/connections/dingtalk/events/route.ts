@@ -13,17 +13,26 @@ import { getOpeningConnectorStorage } from "../../../../../../features/opening/s
 export async function POST(request: Request): Promise<Response> {
   let response: Response;
   try {
-    const encryptedBody = new TextDecoder().decode(await readOpeningRawBody(request, MAX_DINGTALK_EVENT_BYTES));
+    const rawBody = new TextDecoder().decode(await readOpeningRawBody(request, MAX_DINGTALK_EVENT_BYTES));
     const url = new URL(request.url);
-    const signature = url.searchParams.get("signature");
-    const timestamp = url.searchParams.get("timestamp");
+    const signature = url.searchParams.get("msg_signature") ?? url.searchParams.get("signature");
+    const timestamp = url.searchParams.get("timeStamp") ?? url.searchParams.get("timestamp");
     const nonce = url.searchParams.get("nonce");
     if (!signature || !timestamp || !nonce) {
       throw new DingTalkClientError("FORMAT", "callback query parameters are incomplete");
     }
-    if (!encryptedBody) {
+    let envelope: unknown;
+    try {
+      envelope = JSON.parse(rawBody) as unknown;
+    } catch {
       throw new DingTalkClientError("FORMAT", "callback body is invalid");
     }
+    if (!envelope || typeof envelope !== "object" || Array.isArray(envelope)
+      || typeof (envelope as Record<string, unknown>).encrypt !== "string"
+      || !(envelope as Record<string, unknown>).encrypt) {
+      throw new DingTalkClientError("FORMAT", "callback body is invalid");
+    }
+    const encryptedBody = (envelope as { encrypt: string }).encrypt;
     const runtime = getAuthRuntime();
     const service = createDingTalkCallbackHttpService(runtime.sql, getOpeningConnectorStorage());
     await service.callback({ signature, timestamp, nonce, encryptedBody });

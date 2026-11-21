@@ -90,6 +90,9 @@ export async function syncMailbox(deps: ImapSyncDeps): Promise<{
   let cursor = expectedCursor?.uidValidity === uidValidity
     ? expectedCursor : { folder: deps.folder, uidValidity, lastUid: 0 };
 
+  // Keep only the lowest batch-size distinct UIDs while the discovery stream
+  // is consumed. A mailbox can contain millions of eligible messages, so do
+  // not retain and sort the entire discovery result in memory.
   const eligibleUids = new Set<number>();
   const stream = deps.client.fetch(
     { uid: `${cursor.lastUid + 1}:*` },
@@ -98,10 +101,17 @@ export async function syncMailbox(deps: ImapSyncDeps): Promise<{
   for await (const message of stream) {
     if (!Number.isSafeInteger(message.uid) || message.uid <= cursor.lastUid
       || (message.internalDate && message.internalDate < deps.since)) continue;
+    if (eligibleUids.has(message.uid)) continue;
+    if (eligibleUids.size === IMAP_BATCH_SIZE) {
+      let highest = -1;
+      for (const uid of eligibleUids) highest = Math.max(highest, uid);
+      if (message.uid >= highest) continue;
+      eligibleUids.delete(highest);
+    }
     eligibleUids.add(message.uid);
   }
-  // The server can return UIDs in any order. Apply the batch limit only after
-  // discovery finishes so advancing the cursor never jumps over eligible mail.
+  // The server can return UIDs in any order. Sorting the bounded set keeps
+  // publication and cursor advancement ascending without an unbounded array.
   const uids = [...eligibleUids].sort((a, b) => a - b).slice(0, IMAP_BATCH_SIZE);
 
   let imported = 0;
