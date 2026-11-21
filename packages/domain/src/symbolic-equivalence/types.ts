@@ -1707,19 +1707,42 @@ type FloatEvalResult =
   | { status: "undefined_domain"; reason: string }
   | { status: "unstable" };
 
+function rationalToFloatArg(q: SpanRational): { fx: number; xRadius: number } | null {
+  if (q.n === 0n) return { fx: 0, xRadius: 0 };
+  let fx: number;
+  const nNum = Number(q.n);
+  const dNum = Number(q.d);
+  if (Number.isFinite(nNum) && Number.isFinite(dNum)) {
+    fx = nNum / dNum;
+  } else {
+    const sign = q.n < 0n ? -1 : 1;
+    const absN = q.n < 0n ? -q.n : q.n;
+    const absD = q.d;
+    const shift = absN.toString(2).length - absD.toString(2).length;
+    if (shift > 1024 || shift < -1075) return null;
+    const scaleShift = 60 - shift;
+    const scaled = scaleShift >= 0 ? (absN << BigInt(scaleShift)) / absD : absN / (absD << BigInt(-scaleShift));
+    const unit = Number(scaled) * 2 ** -60;
+    fx = shift < -1022 ? sign * unit * 2 ** -1022 * 2 ** (shift + 1022) : sign * unit * 2 ** shift;
+  }
+  if (!Number.isFinite(fx) || (q.n !== 0n && fx === 0)) return null;
+  const isExactSafeInt = q.d === 1n && Number.isSafeInteger(fx) && BigInt(fx) === q.n;
+  const xRadius = isExactSafeInt ? 0 : Math.abs(fx) * 1e-13 + Number.MIN_VALUE;
+  return { fx, xRadius };
+}
+
 function evaluateFloatSafe(expr: ScalarExpr, x: number, variable: string, xRadius = 0): FloatEvalResult {
   const BOUND_EPS = 1e-9;
   switch (expr.kind) {
     case "const": {
       const q = toRational(expr.value);
       if (q) {
-        const val = Number(q.n) / Number(q.d);
-        if ((q.n !== 0n && val === 0) || !Number.isFinite(val)) return { status: "unstable" };
-        const exactInt = q.d === 1n && Number.isSafeInteger(val);
+        const arg = rationalToFloatArg(q);
+        if (!arg) return { status: "unstable" };
         return {
           status: "ok",
-          value: val,
-          err: exactInt ? 0 : Math.abs(val) * 1e-13 + Number.MIN_VALUE,
+          value: arg.fx,
+          err: arg.xRadius,
           marginOk: true,
           irrational: false,
         };
@@ -1880,9 +1903,9 @@ function resolveExprDefinedAtSite(
     const exactVal = evaluateExactRationalExt(expr, site.x, variable);
     if (exactVal.status === "value") return "defined";
     if (exactVal.status === "undefined_domain") return "undefined_domain";
-    const fx = Number(site.x.n) / Number(site.x.d);
-    if (!Number.isFinite(fx)) return "unresolved";
-    const floatVal = evaluateFloatSafe(expr, fx, variable);
+    const arg = rationalToFloatArg(site.x);
+    if (!arg) return "unresolved";
+    const floatVal = evaluateFloatSafe(expr, arg.fx, variable, arg.xRadius);
     if (floatVal.status === "ok") return "defined";
     if (floatVal.status === "undefined_domain") return "undefined_domain";
     return "unresolved";
@@ -1930,15 +1953,48 @@ function resolveExprDefinedAtSite(
     }
   }
 
-  const loNum = Number(lo.n) / Number(lo.d);
-  const hiNum = Number(hi.n) / Number(hi.d);
-  if (!Number.isFinite(loNum) || !Number.isFinite(hiNum)) return "unresolved";
-  const midNum = (loNum + hiNum) / 2;
-  const radius = Math.abs(hiNum - loNum) / 2 + Math.abs(midNum) * 1e-14 + 1e-15;
+  const loArg = rationalToFloatArg(lo);
+  const hiArg = rationalToFloatArg(hi);
+  if (!loArg || !hiArg) return "unresolved";
+  const midNum = (loArg.fx + hiArg.fx) / 2;
+  const radius = Math.abs(hiArg.fx - loArg.fx) / 2 + loArg.xRadius + hiArg.xRadius + Math.abs(midNum) * 1e-14 + 1e-15;
   const floatVal = evaluateFloatSafe(expr, midNum, variable, radius);
   if (floatVal.status === "ok") return "defined";
   if (floatVal.status === "undefined_domain") return "undefined_domain";
   return "unresolved";
+}
+
+function collectOpenCellProbes(cell: CadOpenCell, excluded: readonly SpanRational[]): SpanRational[] {
+  const candidates: SpanRational[] = [cell.sample];
+  const pushIfValid = (q: SpanRational) => {
+    if (cell.left !== null && compareRational(q, cell.left) <= 0) return;
+    if (cell.right !== null && compareRational(q, cell.right) >= 0) return;
+    if (excluded.some((e) => equalRational(e, q))) return;
+    if (!candidates.some((c) => equalRational(c, q))) candidates.push(q);
+  };
+
+  if (cell.left !== null && cell.right !== null) {
+    const span = subtractRational(cell.right, cell.left);
+    for (let k = 1n; k <= 7n; k++) {
+      pushIfValid(addRational(cell.left, divideRational(multiplyRational(span, rational(k)), rational(8n))));
+    }
+  } else if (cell.left === null && cell.right !== null) {
+    for (const offset of ["0.5", "1", "2", "3", "4", "4.5", "5", "6", "8", "10"]) {
+      const q = toRational(offset);
+      if (q) pushIfValid(subtractRational(cell.right, q));
+    }
+  } else if (cell.left !== null && cell.right === null) {
+    for (const offset of ["0.5", "1", "2", "3", "4", "4.5", "5", "6", "8", "10"]) {
+      const q = toRational(offset);
+      if (q) pushIfValid(addRational(cell.left, q));
+    }
+  } else {
+    for (const pt of ["0", "0.5", "-0.5", "1", "-1", "2", "-2", "3", "-3", "4", "-4", "4.5", "-4.5", "5", "-5", "6", "-6", "8", "-8"]) {
+      const q = toRational(pt);
+      if (q) pushIfValid(q);
+    }
+  }
+  return candidates;
 }
 
 // Multivariate polynomials over canonical algebraic atoms for symbolic identity checking.
@@ -2781,6 +2837,25 @@ export function verifyScalarEquivalence(
     if (sOk && rOk) validSites.push(site);
   }
 
+  const ambiguousOpenCells: Array<{ cell: CadOpenCell; definedSide: "student" | "reference" }> = [];
+  for (const cell of openCells) {
+    const cellSite: SampleSite = { kind: "rational", x: cell.sample };
+    const sOk = constraintsSatisfiedAtSite(sConstraints, cellSite);
+    const rOk = constraintsSatisfiedAtSite(rConstraints, cellSite);
+    if (sOk !== rOk) {
+      const okSideHasNonRational = sOk ? sConstraints.hasNonRationalDomainOps : rConstraints.hasNonRationalDomainOps;
+      if (!okSideHasNonRational) {
+        return {
+          status: "inequivalent",
+          reason: "natural_domain_mismatch",
+          witness: { input: formatRational(cell.sample), detail: sOk ? "reference undefined" : "student undefined" },
+          domain,
+        };
+      }
+      ambiguousOpenCells.push({ cell, definedSide: sOk ? "student" : "reference" });
+    }
+  }
+
   let hasUnresolvedDomainMismatch = false;
   for (const amb of ambiguousSites) {
     const definedExpr = amb.definedSide === "student" ? student : reference;
@@ -2799,6 +2874,24 @@ export function verifyScalarEquivalence(
     if (resolution === "unresolved") {
       hasUnresolvedDomainMismatch = true;
     }
+  }
+
+  for (const amb of ambiguousOpenCells) {
+    const definedExpr = amb.definedSide === "student" ? student : reference;
+    for (const probe of collectOpenCellProbes(amb.cell, parsedDomain.excluded)) {
+      if (resolveExprDefinedAtSite(definedExpr, { kind: "rational", x: probe }, variable) === "defined") {
+        return {
+          status: "inequivalent",
+          reason: "natural_domain_mismatch",
+          witness: {
+            input: formatRational(probe),
+            detail: amb.definedSide === "student" ? "reference undefined" : "student undefined",
+          },
+          domain,
+        };
+      }
+    }
+    hasUnresolvedDomainMismatch = true;
   }
 
   if (validSites.length === 0) {
@@ -2843,8 +2936,8 @@ export function verifyScalarEquivalence(
         };
       }
       const otherExpr = sVal.status === "undefined_domain" ? reference : student;
-      const fx = Number(x.n) / Number(x.d);
-      const otherFloat = Number.isFinite(fx) ? evaluateFloatSafe(otherExpr, fx, variable) : null;
+      const arg = rationalToFloatArg(x);
+      const otherFloat = arg ? evaluateFloatSafe(otherExpr, arg.fx, variable, arg.xRadius) : null;
       if (otherFloat?.status === "ok") {
         return {
           status: "inequivalent",
@@ -2872,24 +2965,25 @@ export function verifyScalarEquivalence(
   }
 
   // Numeric domain & clear counterexample check across non-singular sample points inside domain
-  const floatCandidates: number[] = [];
+  const floatCandidates: Array<{ label: string; fx: number; xRadius: number }> = [];
   for (const x of validRationalSamples) {
-    const fx = Number(x.n) / Number(x.d);
-    if (Number.isFinite(fx)) floatCandidates.push(fx);
+    const arg = rationalToFloatArg(x);
+    if (arg) floatCandidates.push({ label: formatRational(x), ...arg });
   }
   for (const offset of [-3.1, -2.3, -1.7, -0.7, -0.3, 0.3, 0.7, 1.3, 2.3, 3.1]) {
     const q = toRational(String(offset));
-    if (q && domainAllows(domain, q)) {
+    const arg = q ? rationalToFloatArg(q) : null;
+    if (q && arg && domainAllows(domain, q)) {
       const site: SampleSite = { kind: "rational", x: q };
       if (constraintsSatisfiedAtSite(sConstraints, site) && constraintsSatisfiedAtSite(rConstraints, site)) {
-        floatCandidates.push(offset);
+        floatCandidates.push({ label: String(offset), ...arg });
       }
     }
   }
 
-  for (const fx of floatCandidates) {
-    const sfRes = evaluateFloatSafe(student, fx, variable);
-    const rfRes = evaluateFloatSafe(reference, fx, variable);
+  for (const cand of floatCandidates) {
+    const sfRes = evaluateFloatSafe(student, cand.fx, variable, cand.xRadius);
+    const rfRes = evaluateFloatSafe(reference, cand.fx, variable, cand.xRadius);
     if (
       (sfRes.status === "undefined_domain" && rfRes.status === "ok") ||
       (rfRes.status === "undefined_domain" && sfRes.status === "ok")
@@ -2897,7 +2991,7 @@ export function verifyScalarEquivalence(
       return {
         status: "inequivalent",
         reason: "natural_domain_mismatch",
-        witness: { input: String(fx), detail: sfRes.status === "undefined_domain" ? "student undefined" : "reference undefined" },
+        witness: { input: cand.label, detail: sfRes.status === "undefined_domain" ? "student undefined" : "reference undefined" },
         domain,
       };
     }
@@ -2915,7 +3009,7 @@ export function verifyScalarEquivalence(
           return {
             status: "inequivalent",
             reason: "numeric_counterexample",
-            witness: { input: String(fx), detail: "evaluated values differ" },
+            witness: { input: cand.label, detail: "evaluated values differ" },
             domain,
           };
         }
@@ -3075,6 +3169,88 @@ export type IntegralVerificationInput = {
   piecewise?: PiecewiseExpr;
 };
 
+function checkAntiderivativeDefinedOnIntegrandDomain(
+  antiderivative: ScalarExpr,
+  integrand: ScalarExpr,
+  variable: string,
+  domain: DomainSpec,
+): VerificationResult | null {
+  const parsedDomain = parseDomainSpec(domain);
+  if (!parsedDomain || parsedDomain.empty) return null;
+  const sConstraints = collectConstraints(antiderivative, variable);
+  const iConstraints = collectConstraints(integrand, variable);
+  const { sites, openCells } = buildCadPlan(
+    [...sConstraints.rational, ...iConstraints.rational],
+    parsedDomain,
+    [...sConstraints.splitPolys, ...iConstraints.splitPolys],
+  );
+  let hasUnresolvedDomainMismatch = false;
+  const ambiguousSites: SampleSite[] = [];
+  for (const site of sites) {
+    const iOk = !iConstraints.alwaysUndefined && constraintsSatisfiedAtSite(iConstraints, site);
+    const sOk = !sConstraints.alwaysUndefined && constraintsSatisfiedAtSite(sConstraints, site);
+    if (iOk && !sOk) {
+      if (!iConstraints.hasNonRationalDomainOps) {
+        return {
+          status: "inequivalent",
+          reason: "natural_domain_mismatch",
+          witness: { input: formatSampleSite(site), detail: "student antiderivative undefined on integrand domain" },
+          domain,
+        };
+      }
+      ambiguousSites.push(site);
+    }
+  }
+  const ambiguousOpenCells: CadOpenCell[] = [];
+  for (const cell of openCells) {
+    const sampleSite: SampleSite = { kind: "rational", x: cell.sample };
+    const iOk = !iConstraints.alwaysUndefined && constraintsSatisfiedAtSite(iConstraints, sampleSite);
+    const sOk = !sConstraints.alwaysUndefined && constraintsSatisfiedAtSite(sConstraints, sampleSite);
+    if (iOk && !sOk) {
+      if (!iConstraints.hasNonRationalDomainOps) {
+        return {
+          status: "inequivalent",
+          reason: "natural_domain_mismatch",
+          witness: { input: formatRational(cell.sample), detail: "student antiderivative undefined on integrand domain" },
+          domain,
+        };
+      }
+      ambiguousOpenCells.push(cell);
+    }
+  }
+  for (const site of ambiguousSites) {
+    const resolution = resolveExprDefinedAtSite(integrand, site, variable);
+    if (resolution === "defined") {
+      return {
+        status: "inequivalent",
+        reason: "natural_domain_mismatch",
+        witness: { input: formatSampleSite(site), detail: "student antiderivative undefined on integrand domain" },
+        domain,
+      };
+    }
+    if (resolution === "unresolved") {
+      hasUnresolvedDomainMismatch = true;
+    }
+  }
+  for (const cell of ambiguousOpenCells) {
+    for (const probe of collectOpenCellProbes(cell, parsedDomain.excluded)) {
+      if (resolveExprDefinedAtSite(integrand, { kind: "rational", x: probe }, variable) === "defined") {
+        return {
+          status: "inequivalent",
+          reason: "natural_domain_mismatch",
+          witness: { input: formatRational(probe), detail: "student antiderivative undefined on integrand domain" },
+          domain,
+        };
+      }
+    }
+    hasUnresolvedDomainMismatch = true;
+  }
+  if (hasUnresolvedDomainMismatch) {
+    return { status: "unverified", reason: "unresolved_nonrational_domain", domain };
+  }
+  return null;
+}
+
 export function verifyIndefiniteIntegral(input: IntegralVerificationInput): VerificationResult {
   const student = parseScalarExpr(input.student);
   const integrand = parseScalarExpr(input.integrand);
@@ -3110,13 +3286,21 @@ export function verifyIndefiniteIntegral(input: IntegralVerificationInput): Veri
     const rightDeriv = verifyScalarEquivalence(dRight, integrand, rightDomain);
     if (rightDeriv.status !== "equivalent") return rightDeriv;
 
+    const leftDomainCoverage = checkAntiderivativeDefinedOnIntegrandDomain(pwLeft, integrand, variable, leftDomain);
+    if (leftDomainCoverage) return leftDomainCoverage;
+    const rightDomainCoverage = checkAntiderivativeDefinedOnIntegrandDomain(pwRight, integrand, variable, rightDomain);
+    if (rightDomainCoverage) return rightDomainCoverage;
+
     if (domainAllows(effectiveDomain, split)) {
       const integrandAtSplit = evaluateExactRationalExt(integrand, split, variable);
       if (integrandAtSplit.status !== "undefined_domain") {
-        const leftAtSplit = verifyScalarEquivalence(pwLeft, pwRight, {
+        const splitDomain: DomainSpec = {
           variable,
           intervals: [{ left: formatRational(split), right: formatRational(split) }],
-        });
+        };
+        const splitDomainCoverage = checkAntiderivativeDefinedOnIntegrandDomain(student, integrand, variable, splitDomain);
+        if (splitDomainCoverage) return splitDomainCoverage;
+        const leftAtSplit = verifyScalarEquivalence(pwLeft, pwRight, splitDomain);
         if (leftAtSplit.status === "inequivalent") {
           return {
             status: "inequivalent",
@@ -3143,48 +3327,8 @@ export function verifyIndefiniteIntegral(input: IntegralVerificationInput): Veri
   if (derivCheck.status !== "equivalent") return derivCheck;
 
   // An antiderivative must remain defined wherever the integrand is defined on the target domain.
-  const parsedDomain = parseDomainSpec(effectiveDomain);
-  if (parsedDomain && !parsedDomain.empty) {
-    const sConstraints = collectConstraints(student, variable);
-    const iConstraints = collectConstraints(integrand, variable);
-    const { sites } = buildCadPlan(
-      [...sConstraints.rational, ...iConstraints.rational],
-      parsedDomain,
-      [...sConstraints.splitPolys, ...iConstraints.splitPolys],
-    );
-    let hasUnresolvedDomainMismatch = false;
-    const ambiguousSites: SampleSite[] = [];
-    for (const site of sites) {
-      if (constraintsSatisfiedAtSite(iConstraints, site) && !constraintsSatisfiedAtSite(sConstraints, site)) {
-        if (!iConstraints.hasNonRationalDomainOps) {
-          return {
-            status: "inequivalent",
-            reason: "natural_domain_mismatch",
-            witness: { input: formatSampleSite(site), detail: "student antiderivative undefined on integrand domain" },
-            domain: effectiveDomain,
-          };
-        }
-        ambiguousSites.push(site);
-      }
-    }
-    for (const site of ambiguousSites) {
-      const resolution = resolveExprDefinedAtSite(integrand, site, variable);
-      if (resolution === "defined") {
-        return {
-          status: "inequivalent",
-          reason: "natural_domain_mismatch",
-          witness: { input: formatSampleSite(site), detail: "student antiderivative undefined on integrand domain" },
-          domain: effectiveDomain,
-        };
-      }
-      if (resolution === "unresolved") {
-        hasUnresolvedDomainMismatch = true;
-      }
-    }
-    if (hasUnresolvedDomainMismatch) {
-      return { status: "unverified", reason: "unresolved_nonrational_domain", domain: effectiveDomain };
-    }
-  }
+  const domainCoverage = checkAntiderivativeDefinedOnIntegrandDomain(student, integrand, variable, effectiveDomain);
+  if (domainCoverage) return domainCoverage;
   return derivCheck;
 }
 

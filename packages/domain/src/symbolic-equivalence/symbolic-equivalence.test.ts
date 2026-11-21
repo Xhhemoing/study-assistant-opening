@@ -206,6 +206,44 @@ describe("bounded symbolic equivalence", () => {
     expect(verifyScalarEquivalence("sqrt(sin(x) - 2)", "sqrt(sin(x) - 2)").status).toBe("unverified");
   });
 
+  it("closes Round-5 open-cell non-rational mismatches, rational-to-float radius gaps, and piecewise integrand domain checks", () => {
+    // P1-1: open-cell non-rational domain mismatches must not be dismissed by finite undefined_domain probes
+    expect(
+      verifyScalarEquivalence("(sqrt(x) / sqrt(x)) * sqrt(sin(x) - 1/2)", "sqrt(sin(x) - 1/2)").status,
+    ).toBe("inequivalent");
+    expect(
+      verifyScalarEquivalence("(sqrt(x) / sqrt(x)) * sqrt(exp(x^2) - 10000)", "sqrt(exp(x^2) - 10000)").status,
+    ).toBe("inequivalent");
+    expect(
+      verifyIndefiniteIntegral({
+        student: "ln(x) + 2 * sqrt(sin(x) - 1/2)",
+        integrand: "1 / x + cos(x) / sqrt(sin(x) - 1/2)",
+      }).status,
+    ).toBe("inequivalent");
+
+    // P1-2: rationalToFloatArg preserves rounding radius so 99999999999999999/100000000000000000 does not round to exact 1
+    expect(
+      verifyScalarEquivalence(
+        "((100000000000000000 * x - 99999999999999999) / (100000000000000000 * x - 99999999999999999)) * sqrt(exp(x - 1) - 1)",
+        "sqrt(exp(x - 1) - 1)",
+      ).status,
+    ).not.toBe("inequivalent");
+    expect(
+      verifyScalarEquivalence("sqrt(ln(x))", "sqrt(ln(x))", {
+        intervals: [{ left: "99999999999999999/100000000000000000", right: "99999999999999999/100000000000000000" }],
+      }).status,
+    ).toBe("unverified");
+
+    // P2: piecewise antiderivative integrand domain coverage check
+    expect(
+      verifyIndefiniteIntegral({
+        student: "ln(x - 10)",
+        integrand: "1 / (x - 10)",
+        piecewise: { split: 20, left: "ln(x - 10)", right: "ln(x - 10)" },
+      }).status,
+    ).toBe("inequivalent");
+  });
+
   it("checks derivative residuals, variable forwarding, piecewise integrals, and general substitution bounds", () => {
     expect(verifyIndefiniteIntegral({ student: "x^2 / 2", integrand: "x" }).status).toBe("equivalent");
     expect(verifyIndefiniteIntegral({ student: "t^2 / 2", integrand: "t", variable: "t" }).status).toBe("equivalent");
