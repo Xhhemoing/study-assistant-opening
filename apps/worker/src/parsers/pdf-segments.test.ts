@@ -1,6 +1,13 @@
+import { createHash } from "node:crypto";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import type { OpeningPdfSegmentsRepository, PdfSegment, PdfSegmentIdentity, PdfSegmentPage } from "@aistudy/database";
-import { parsePdfSegments, watchPdfExecution } from "./pdf-segments";
+import type { SourceRecord } from "@aistudy/contracts";
+import type { NewSourceChunk, OpeningJobRecord, OpeningPdfSegmentsRepository, PdfSegment, PdfSegmentIdentity, PdfSegmentPage } from "@aistudy/database";
+import { createParseSourceHandler } from "../jobs/parse-source";
+import { BoundsExceededError } from "./docling-process";
+import { MAX_PDF_BOOK_PAGES, parsePdfSegments, watchPdfExecution, type PdfSegmentBatch } from "./pdf-segments";
 import { pdfParserProfile } from "./ocr-health";
 import type { ParserRunner } from "./types";
 
@@ -206,5 +213,184 @@ describe("bounded resumable PDF parser", () => {
       expect(execution.signal.reason.message).toBe("lease lost");
       expect(calls).toBe(2);
     } finally { await execution.stop(); }
+  });
+
+  it("streams a 600-page dense textbook beyond 8 MiB cumulative text without hitting the old per-segment cap", async () => {
+    const total = 600;
+    const pageText = "Linear algebra proof step. ".repeat(700); // ~18.9 KB/page -> ~11.3 MB total (> 8 MiB!), ~189 KB/segment
+    expect(Buffer.byteLength(pageText, "utf8") * total).toBeGreaterThan(10 * 1024 * 1024);
+    const d = setup(total);
+    d.input.runner = async (argv) => {
+      if (argv.includes("--inspect-pdf")) return { exitCode: 0, stdout: JSON.stringify({ pageCount: total }) };
+      const start = Number(argv[argv.indexOf("--page-start") + 1]);
+      const end = Number(argv[argv.indexOf("--page-end") + 1]);
+      d.ranges.push([start, end]);
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          pages: Array.from({ length: end - start + 1 }, (_, i) => ({ page: start + i, text: pageText, imagePath: null })),
+        }),
+      };
+    };
+
+    const segmentsSeen: PdfSegmentBatch[] = [];
+    let consumedPages = 0;
+    const result = await parsePdfSegments({
+      ...d.input,
+      onSegment: (segment) => {
+        segmentsSeen.push({ ...segment, pages: [] });
+        consumedPages += segment.pages.length;
+      },
+    });
+    expect(result).toEqual({ pageCount: total, failedRanges: [] });
+    expect(consumedPages).toBe(total);
+    expect(segmentsSeen).toHaveLength(60);
+    expect(segmentsSeen.every(s => s.segmentBytes <= 8 * 1024 * 1024)).toBe(true);
+  });
+
+  it("enforces per-segment, per-page, whole-book byte caps and MAX_PDF_BOOK_PAGES with BoundsExceededError", async () => {
+    const oversizedPage = setup(1);
+    oversizedPage.input.runner = async (argv) => argv.includes("--inspect-pdf")
+      ? { exitCode: 0, stdout: '{"pageCount":1}' }
+      : { exitCode: 0, stdout: JSON.stringify({ pages: [{ page: 1, text: "a".repeat(20_000), imagePath: null }] }) };
+    await expect(parsePdfSegments({ ...oversizedPage.input, maxPageTextBytes: 10_000, onPages: () => {} }))
+      .rejects.toBeInstanceOf(BoundsExceededError);
+    expect(oversizedPage.segments.save).not.toHaveBeenCalled();
+
+    const oversizedSegment = setup(10);
+    oversizedSegment.input.runner = async (argv) => argv.includes("--inspect-pdf")
+      ? { exitCode: 0, stdout: '{"pageCount":10}' }
+      : {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          pages: Array.from({ length: 10 }, (_, i) => ({ page: i + 1, text: "b".repeat(1500), imagePath: null })),
+        }),
+      };
+    await expect(parsePdfSegments({ ...oversizedSegment.input, maxSegmentBytes: 10_000, onPages: () => {} }))
+      .rejects.toBeInstanceOf(BoundsExceededError);
+
+    const oversizedBook = setup(30);
+    oversizedBook.input.runner = async (argv) => {
+      if (argv.includes("--inspect-pdf")) return { exitCode: 0, stdout: '{"pageCount":30}' };
+      const start = Number(argv[argv.indexOf("--page-start") + 1]);
+      const end = Number(argv[argv.indexOf("--page-end") + 1]);
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          pages: Array.from({ length: end - start + 1 }, (_, i) => ({ page: start + i, text: "c".repeat(1000), imagePath: null })),
+        }),
+      };
+    };
+    const seen: number[] = [];
+    await expect(parsePdfSegments({ ...oversizedBook.input, maxBookBytes: 25_000, onPages: pages => { seen.push(...pages.map(p => p.page)); } }))
+      .rejects.toBeInstanceOf(BoundsExceededError);
+    expect(seen).toEqual(Array.from({ length: 20 }, (_, i) => i + 1));
+
+    const tooManyPages = setup(MAX_PDF_BOOK_PAGES + 1);
+    await expect(collectPdfSegments(tooManyPages.input)).rejects.toBeInstanceOf(BoundsExceededError);
+
+    const maxBook = setup(MAX_PDF_BOOK_PAGES);
+    const smallDense = "Theorem and proof step. ".repeat(220); // ~5.5 KB/page -> ~11 MB across 2,000 pages (> 8 MiB, < 64 MiB)
+    maxBook.input.runner = async (argv) => {
+      if (argv.includes("--inspect-pdf")) return { exitCode: 0, stdout: JSON.stringify({ pageCount: MAX_PDF_BOOK_PAGES }) };
+      const start = Number(argv[argv.indexOf("--page-start") + 1]);
+      const end = Number(argv[argv.indexOf("--page-end") + 1]);
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          pages: Array.from({ length: end - start + 1 }, (_, i) => ({ page: start + i, text: smallDense, imagePath: null })),
+        }),
+      };
+    };
+    const fullBookResult = await parsePdfSegments({ ...maxBook.input, onPages: () => {} });
+    expect(fullBookResult).toEqual({ pageCount: MAX_PDF_BOOK_PAGES, failedRanges: [] });
+  });
+
+  it("seals same-page solution_sealed answer keys before public chunk staging and skips vision on all-sealed pages", async () => {
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), "pdf-seal-test-"));
+    try {
+      const pdfBytes = Buffer.from("pdf-payload");
+      const sha256 = createHash("sha256").update(pdfBytes).digest("hex");
+      const sourceRecord: SourceRecord = {
+        id: "00000000-0000-4000-8000-000000000011",
+        workspaceId: "00000000-0000-4000-8000-000000000012",
+        name: "exercises.pdf",
+        mime: "application/pdf",
+        bytes: pdfBytes.byteLength,
+        sha256,
+        version: 0,
+        uploadState: "uploaded",
+        parseState: "queued",
+        error: null,
+        createdAt: new Date().toISOString(),
+      };
+      const jobRecord = {
+        id: "00000000-0000-4000-8000-000000000013",
+        workspaceId: sourceRecord.workspaceId,
+        ownerUserId: "00000000-0000-4000-8000-000000000014",
+        key: "parse-seal-test",
+        kind: "parse",
+        payload: { sourceId: sourceRecord.id, sourceVersion: 0 },
+        result: null,
+        state: "running",
+        claimToken: "claim-1",
+        privacyEpoch: 0,
+      } as OpeningJobRecord;
+
+      const publishedChunks: NewSourceChunk[] = [];
+      const recognizePage = vi.fn(async () => ({ text: "SHOULD_NOT_RUN", imageObjectKey: "bad" }));
+      const handler = createParseSourceHandler({
+        sources: { get: async () => sourceRecord, markParseState: async () => sourceRecord },
+        chunks: {
+          replaceChunks: async () => { throw new Error("expected replacePdfChunks"); },
+          replacePdfChunks: async (_scope, publication) => {
+            for await (const chunk of publication.chunks) publishedChunks.push(chunk);
+          },
+          listChunksAtVersion: async () => [],
+        },
+        storage: {
+          finalKey: () => "sources/test/0/original",
+          presignGet: async () => `data:application/pdf;base64,${pdfBytes.toString("base64")}`,
+        },
+        runner: async (argv) => argv.includes("--inspect-pdf")
+          ? { exitCode: 0, stdout: '{"pageCount":2}' }
+          : {
+            exitCode: 0,
+            stdout: JSON.stringify({
+              pages: [
+                {
+                  page: 1,
+                  text: "Exercise 1: Solve x + 2 = 5.\nAnswer Key: x = 3.\nExercise 2: Solve y * 2 = 8.\n参考答案：y = 4。",
+                  imagePath: null,
+                  visualKinds: [],
+                },
+                {
+                  page: 2,
+                  text: "参考答案\n1. x = 3\n2. y = 4",
+                  imagePath: null,
+                },
+              ],
+            }),
+          },
+        tempDir,
+        segments: { assertCurrent: async () => {}, read: async () => null, save: async () => {} },
+        recognizePage,
+      });
+
+      await expect(handler(jobRecord, { sourceId: sourceRecord.id, sourceVersion: 0 })).resolves.toEqual({ pages: 2 });
+      expect(recognizePage).not.toHaveBeenCalled();
+      expect(publishedChunks).toHaveLength(1);
+      expect(publishedChunks[0]).toMatchObject({
+        page: 1,
+        text: "Exercise 1: Solve x + 2 = 5.\nExercise 2: Solve y * 2 = 8.",
+        imageObjectKey: null,
+      });
+      expect(publishedChunks[0]!.text).not.toContain("Answer Key");
+      expect(publishedChunks[0]!.text).not.toContain("x = 3");
+      expect(publishedChunks[0]!.text).not.toContain("y = 4");
+      expect(await readdir(tempDir)).toEqual([]);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
   });
 });

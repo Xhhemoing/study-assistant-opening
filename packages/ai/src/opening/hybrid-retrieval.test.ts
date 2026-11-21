@@ -56,4 +56,43 @@ describe("material hybrid retrieval", () => {
     expect(budgetRankedMaterial([source], overhead + 1)).toEqual([]);
     expect(budgetRankedMaterial([source], overhead + 2)[0]?.text).toBe("𝑥");
   });
+
+  it("keeps LaTeX display, inline, and nested environments unbroken across segment boundaries", () => {
+    const cases = [
+      { name: "display $$", prefix: "a".repeat(90), formula: "$$\\int_0^1 x^2 \\, dx = \\frac{1}{3}$$" },
+      { name: "display \\[...\\]", prefix: "b".repeat(90), formula: "\\[\\sum_{k=1}^{n} k = \\frac{n(n+1)}{2}\\]" },
+      { name: "inline \\(...\\)", prefix: "c".repeat(90), formula: "\\(\\alpha + \\beta = \\gamma\\)" },
+      { name: "nested env", prefix: "d".repeat(85), formula: "\\begin{cases} x & \\begin{cases} 1 \\\\ 2 \\end{cases} \\\\ y & 3 \\end{cases}" },
+      { name: "inline $...$ with currency", prefix: "Item costs $25 and $30; " + "e".repeat(70), formula: "$f(x) = x^2 + 1$" },
+      { name: "escaped \\$", prefix: "Price \\$10 " + "f".repeat(80), formula: "$g(x) = \\sqrt{x}$" },
+    ];
+    const encoder = new TextEncoder();
+    for (const item of cases) {
+      const full = item.prefix + item.formula + " tail";
+      const segments = segmentMaterialChunks([chunk(item.name, full)], 120);
+      expect(segments.map(s => s.chunk.text).join("")).toBe(full);
+      expect(segments.every(s => encoder.encode(s.chunk.text).length <= 120)).toBe(true);
+      expect(segments.some(s => s.chunk.text.includes(item.formula))).toBe(true);
+    }
+  });
+
+  it("falls back safely on oversized, unclosed, or currency $ spans without dropping bytes or breaking surrogate pairs", () => {
+    const encoder = new TextEncoder();
+    const unclosed = "Cost $25\n\n" + "😀".repeat(40) + "$$unclosed math " + "z".repeat(150);
+    const segUnclosed = segmentMaterialChunks([chunk("unclosed", unclosed)], 100);
+    expect(segUnclosed.map(s => s.chunk.text).join("")).toBe(unclosed);
+    expect(segUnclosed.every(s => encoder.encode(s.chunk.text).length <= 100)).toBe(true);
+
+    const oversizedFormula = "$$" + "\\alpha + ".repeat(40) + "\\beta$$";
+    const segOver = segmentMaterialChunks([chunk("oversized", oversizedFormula)], 80);
+    expect(segOver.length).toBeGreaterThan(1);
+    expect(segOver.map(s => s.chunk.text).join("")).toBe(oversizedFormula);
+    expect(segOver.every(s => encoder.encode(s.chunk.text).length <= 80)).toBe(true);
+
+    const unclosedEnv = "\\begin{align} x = 1 " + "😀".repeat(35) + "\\begin{cases} a \\\\ b \\end{cases}";
+    const segEnv = segmentMaterialChunks([chunk("env", unclosedEnv)], 96);
+    expect(segEnv.map(s => s.chunk.text).join("")).toBe(unclosedEnv);
+    expect(segEnv.every(s => encoder.encode(s.chunk.text).length <= 96)).toBe(true);
+    expect(segEnv.some(s => s.chunk.text.includes("\\begin{cases} a \\\\ b \\end{cases}"))).toBe(true);
+  });
 });

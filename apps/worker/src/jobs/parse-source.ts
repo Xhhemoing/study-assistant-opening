@@ -15,7 +15,7 @@ import type { ParserRunner, ParsedPage, VisualPageKind } from "../parsers/types"
 import type { OpeningScope } from "@aistudy/database";
 import type { NewSourceChunk, OpeningPdfChunkPublisher, OpeningSourceChunksRepository } from "@aistudy/database";
 import type { OpeningPdfSegmentsRepository } from "@aistudy/database";
-import { parsePdfSegments, watchPdfExecution } from "../parsers/pdf-segments";
+import { parsePdfSegments, watchPdfExecution, type PdfDiscourseBlock } from "../parsers/pdf-segments";
 import { checkPdfPageQuality } from "../parsers/pdf-page-quality";
 import { createPdfPartialError } from "./pdf-partial-error";
 
@@ -25,6 +25,105 @@ const IMAGE_SOURCE_MIMES = new Set(["image/jpeg", "image/png", "image/webp"]);
 const PDF_CHUNK_TEXT_LIMIT = 100_000;
 type Storage = { presignGet(key: string, input: { expiresInSeconds: number; responseContentDisposition: string; responseCacheControl: string }): Promise<string>; finalKey(id: string, version: number): string };
 type SourceRepo = Pick<OpeningSourceRepository, "get" | "markParseState">;
+
+type AnnotatedParsedPage = ParsedPage & {
+  discourseBlocks?: ReadonlyArray<Partial<PdfDiscourseBlock> & {
+    visibility_hint?: unknown;
+    page_number?: unknown;
+    char_start?: unknown;
+    char_end?: unknown;
+  }>;
+};
+
+const SEALED_HEADING_RE = new RegExp(
+  "^(?:#{1,6}\\s+|\\*\\*|__)*(?:" +
+  "(?:Answer\\s+Key|Answers?\\s+to\\s+(?:Exercises?|Problems?|Selected\\s+(?:Exercises?|Problems?)|Odd-Numbered\\s+(?:Exercises?|Problems?))|Selected\\s+Answers?|Model\\s+Answers?|Key\\s+to\\s+Exercises?)\\b(?:\\s*(?:\\(\\s*continued\\s*\\))?\\s*(?:[:：.\\-—]|$))?" +
+  "|(?:Answer|Answers)\\s*(?:\\d+(?:\\.\\d+)*)?\\s*(?:\\(\\s*continued\\s*\\))?\\s*(?:[:：.\\-—]|$)" +
+  "|(?:(?:Worked|Full|Official|Reference|Sample)\\s+)?Solutions?(?:\\s+to\\s+(?:Exercises?|Problems?|Questions?)?(?:\\s*\\d+(?:\\.\\d+)*)?)?\\s*(?:\\(\\s*continued\\s*\\))?\\s*(?:\\d+(?:\\.\\d+)*)?\\s*(?:[:：.\\-—]|$)" +
+  "|【\\s*(?:参考答案|标准答案|习题答案|练习答案|课后答案|答案与解析|参考解答|详细解答|答案|解答|详解|解析)\\s*】" +
+  "|(?:参考答案|标准答案|习题答案|练习答案|课后答案|答案与解析|参考解答|详细解答)\\s*(?:（续）|\\(续\\)|（接上页）|\\(接上页\\))?\\s*(?:[:：.．、\\-—]|$)" +
+  "|(?:答案|解答|详解|解析)\\s*(?:\\d+(?:[.\\-]\\d+)*)?\\s*(?:（续）|\\(续\\)|（接上页）|\\(接上页\\))?\\s*(?:[:：.．、\\-—]|$)" +
+  "|解\\s*(?:\\d+(?:[.\\-]\\d+)*)?\\s*[:：]" +
+  ")",
+  "iu",
+);
+
+const PUBLIC_SECTION_RE = new RegExp(
+  "^(?:#{1,6}\\s+|\\*\\*|__)*(?:" +
+  "(?:Definition|Notation|Terminology|Theorem|Lemma|Proposition|Corollary|Axiom|Example|Worked\\s+Example|Exercises?|Practice\\s+Problems?|Problem\\s+\\d+|Question\\s+\\d+|Chapter\\s+\\d+|Section\\s+\\d+|Part\\s+\\d+|Appendix\\s+\\d+|Figure\\s+\\d+|Fig\\.?\\s+\\d+|Table\\s+\\d+)\\b" +
+  "|(?:定义|定理|引理|推论|命题|公理|例题|例\\s*\\d+|例\\s*[:：]|习题|练习题|练习|思考题|作业题|图\\s*\\d+|表\\s*\\d+|第\\s*[一二三四五六七八九十百千\\d]+\\s*[章节篇部分])" +
+  "|#{1,6}\\s+\\S" +
+  "|\\d+(?:\\.\\d+)+\\s+\\S" +
+  ")",
+  "iu",
+);
+
+const SEALED_TERMINATOR_RE = /(?:[□■∎]|答案完|解答完)\s*$/u;
+
+function stripSealedSolutionLines(text: string): string {
+  const lines = text.split(/\r?\n/u);
+  const kept: string[] = [];
+  let inSealed = false;
+  let changed = false;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      if (!inSealed) kept.push(line);
+      else changed = true;
+      continue;
+    }
+    if (SEALED_HEADING_RE.test(trimmed)) {
+      inSealed = true;
+      changed = true;
+      if (SEALED_TERMINATOR_RE.test(trimmed)) inSealed = false;
+      continue;
+    }
+    if (inSealed) {
+      if (PUBLIC_SECTION_RE.test(trimmed)) {
+        inSealed = false;
+        kept.push(line);
+      } else {
+        changed = true;
+        if (SEALED_TERMINATOR_RE.test(trimmed)) inSealed = false;
+      }
+      continue;
+    }
+    kept.push(line);
+  }
+  if (!changed) return text;
+  while (kept.length && !kept[kept.length - 1]!.trim()) kept.pop();
+  return kept.join("\n");
+}
+
+function sealPdfPageText(page: AnnotatedParsedPage): string {
+  let text = page.text;
+  if (Array.isArray(page.discourseBlocks) && page.discourseBlocks.length > 0) {
+    const spans: Array<[number, number]> = [];
+    for (const block of page.discourseBlocks) {
+      const blockPage = block.pageNumber ?? block.page_number;
+      if (typeof blockPage === "number" && blockPage !== page.page) continue;
+      const hint = block.visibilityHint ?? block.visibility_hint;
+      if (block.kind !== "solution_sealed" && hint !== "sealed") continue;
+      const start = block.charStart ?? block.char_start;
+      const end = block.charEnd ?? block.char_end;
+      if (typeof start === "number" && typeof end === "number" && Number.isInteger(start) && Number.isInteger(end) && start >= 0 && start < end && end <= text.length) {
+        spans.push([start, end]);
+      }
+    }
+    if (spans.length > 0) {
+      spans.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+      let cursor = 0;
+      const parts: string[] = [];
+      for (const [start, end] of spans) {
+        if (start > cursor) parts.push(text.slice(cursor, start));
+        cursor = Math.max(cursor, end);
+      }
+      if (cursor < text.length) parts.push(text.slice(cursor));
+      text = parts.join("").replace(/\n{3,}/g, "\n\n").trim();
+    }
+  }
+  return stripSealedSolutionLines(text);
+}
 
 function readCappedPdfPages(value: unknown): Set<number> {
   if (Array.isArray(value)) {
@@ -178,8 +277,18 @@ export function createParseSourceHandler(deps: { sources: SourceRepo; chunks: Pi
       let visualRecognitionUnavailable = !deps.recognizePage && !(isPdf && deps.recognizePages);
       const skippedVisionPages: number[] = [];
       const cappedTextPages = new Set<number>();
-      const preparePage = (page: ParsedPage, saved?: NewSourceChunk) => {
-        const visualKinds = page.visualKinds?.length ? page.visualKinds : !page.text.trim() && (isImage || isPdf) ? ["scan" as const] : [];
+      const preparePage = (rawPage: AnnotatedParsedPage, saved?: NewSourceChunk) => {
+        const hadRawText = Boolean(rawPage.text.trim());
+        const publicText = isPdf ? sealPdfPageText(rawPage) : rawPage.text;
+        const sealedAllText = isPdf && hadRawText && !publicText.trim();
+        const page: ParsedPage = publicText === rawPage.text ? rawPage : { ...rawPage, text: publicText };
+        const visualKinds = sealedAllText
+          ? []
+          : page.visualKinds !== undefined
+            ? page.visualKinds
+            : !page.text.trim() && (isImage || isPdf)
+              ? ["scan" as const]
+              : [];
         const visual = (isPdf || isImage) && visualKinds.length > 0
           ? { scope, job, sourceId: source.id, sourceVersion: source.version, physicalPage: page.page,
             nativeText: page.text, visualKinds, localFilePath: temp, mime: source.mime, signal }

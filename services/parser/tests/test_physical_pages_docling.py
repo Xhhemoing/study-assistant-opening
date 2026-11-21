@@ -129,6 +129,84 @@ class PhysicalPagesDoclingTests(unittest.TestCase):
         self.assertIn("table", visual[12])
         self.assertEqual(visual[13], ["scan"])
 
+    def test_academic_discourse_blocks_preserve_single_page_charspans_and_sealing(self):
+        result = result_for(
+            [
+                text_element(11, "Definition 1.1: A metric space is a pair (X, d).", 1),
+                text_element(11, "Theorem 1.2: Every compact set is closed.", 2),
+                text_element(11, "Proof: Assume K is compact. Let x be a limit point", 3),
+            ],
+            [
+                text_element(12, "Proof (continued): Then x lies in K. □", 1),
+                text_element(12, "Worked Example 1: Evaluate d(0, 1) = 1.", 2),
+                text_element(12, "Figure 1: Unit interval diagram", 3, DocItemLabel.CAPTION),
+                text_element(12, "Exercise 1: Show d(x, y) >= 0.\nAnswer Key: By non-negativity axiom.", 4),
+            ],
+            [
+                text_element(13, "参考答案\n1. 由非负性可得。\n2. 略。", 1),
+            ],
+        )
+        blocks_by_page = cli.physical_pages.discourse_blocks_by_page(result)
+        raw_texts = cli.texts_by_page(result, include_sealed=True)
+        public_texts = cli.texts_by_page(result)
+
+        p11_raw = "\n".join(raw_texts[11])
+        p12_raw = "\n".join(raw_texts[12])
+        p13_raw = "\n".join(raw_texts[13])
+
+        self.assertEqual([b.kind for b in blocks_by_page[11]], ["definition", "theorem", "proof"])
+        self.assertEqual([b.visibility_hint for b in blocks_by_page[11]], ["public", "public", "hint_gated"])
+        self.assertFalse(blocks_by_page[11][2].continued_from_prev_page)
+        self.assertTrue(blocks_by_page[11][2].continues_on_next_page)
+
+        self.assertEqual([b.kind for b in blocks_by_page[12]], ["proof", "worked_example", "figure_caption", "exercise", "solution_sealed"])
+        self.assertTrue(blocks_by_page[12][0].continued_from_prev_page)
+        self.assertFalse(blocks_by_page[12][0].continues_on_next_page)
+        self.assertEqual(blocks_by_page[12][2].caption_ref, "Figure 1")
+        self.assertEqual(blocks_by_page[12][2].associated_visual_kind, "picture")
+        self.assertEqual(blocks_by_page[12][3].visibility_hint, "public")
+        self.assertEqual(blocks_by_page[12][4].visibility_hint, "sealed")
+
+        self.assertEqual([b.kind for b in blocks_by_page[13]], ["solution_sealed"])
+        self.assertEqual(blocks_by_page[13][0].visibility_hint, "sealed")
+
+        for page_no, raw_text in ((11, p11_raw), (12, p12_raw), (13, p13_raw)):
+            for block in blocks_by_page[page_no]:
+                self.assertEqual(block.page_number, page_no)
+                self.assertEqual(raw_text[block.char_start:block.char_end], block.text)
+
+        # Public texts preserve exercises and public blocks on page 12 while sealing inline & standalone answer keys.
+        self.assertIn("Exercise 1: Show d(x, y) >= 0.", "\n".join(public_texts[12]))
+        self.assertNotIn("Answer Key", "\n".join(public_texts[12]))
+        self.assertNotIn("non-negativity axiom", "\n".join(public_texts[12]))
+        self.assertEqual(public_texts[13], [])
+        visuals = cli.visual_kinds_by_page(result, public_texts)
+        self.assertEqual(visuals[13], [])
+
+    def test_chinese_academic_headings_and_implicit_proof_continuation(self):
+        result = result_for(
+            [
+                text_element(11, "定义 1.1：设 V 为线性空间。", 1),
+                text_element(11, "引理 1.2：零向量唯一。", 2),
+                text_element(11, "证明：设存在两个零向量 0₁ 与 0₂，则", 3),
+            ],
+            [
+                text_element(12, "0₁ = 0₁ + 0₂ = 0₂。证毕。", 1),
+                text_element(12, "例题 2：计算矩阵的秩。", 2),
+                text_element(12, "习题 1：证明转置矩阵的秩不变。", 3),
+                text_element(12, "解答：利用行秩等于列秩即可。", 4),
+            ],
+        )
+        blocks = cli.physical_pages.discourse_blocks_by_page(result)
+        self.assertEqual([b.kind for b in blocks[11]], ["definition", "theorem", "proof"])
+        self.assertTrue(blocks[11][2].continues_on_next_page)
+        self.assertEqual([b.kind for b in blocks[12]], ["proof", "worked_example", "exercise", "solution_sealed"])
+        self.assertTrue(blocks[12][0].continued_from_prev_page)
+        self.assertFalse(blocks[12][0].continues_on_next_page)
+        public_p12 = "\n".join(cli.texts_by_page(result)[12])
+        self.assertIn("习题 1", public_p12)
+        self.assertNotIn("行秩等于列秩", public_p12)
+
 
 if __name__ == "__main__":
     unittest.main()

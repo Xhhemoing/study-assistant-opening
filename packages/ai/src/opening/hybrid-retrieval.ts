@@ -29,26 +29,246 @@ export type MaterialRetriever = (
   input: MaterialRetrievalInput,
 ) => Promise<MaterialRetrievalResult>;
 
-/** Split at Unicode code points, including the entire tail of long physical pages. */
+type MathSpan = { start: number; end: number };
+
+function codePointUtf8Bytes(cp: number): number {
+  if (cp <= 0x7f) return 1;
+  if (cp <= 0x7ff) return 2;
+  if (cp >= 0xd800 && cp <= 0xdfff) return 3;
+  if (cp <= 0xffff) return 3;
+  return 4;
+}
+
+function isEscaped(text: string, index: number): boolean {
+  let backslashes = 0;
+  for (let i = index - 1; i >= 0 && text[i] === "\\"; i--) backslashes++;
+  return (backslashes & 1) === 1;
+}
+
+function isBareCurrencyStart(text: string, dollarIndex: number): boolean {
+  const after = text.slice(dollarIndex + 1);
+  return /^\d+(?:,\d{3})*(?:\.\d+)?(?=$|[,.;:!?)\]]|\s+(?![+\-*/=<>^_\\]))/.test(after);
+}
+
+function isBlankLineBreakAt(text: string, newlineIndex: number): boolean {
+  for (let j = newlineIndex + 1; j < text.length; j++) {
+    const ch = text[j]!;
+    if (ch === "\n") return true;
+    if (ch !== " " && ch !== "\t" && ch !== "\r") return false;
+  }
+  return false;
+}
+
+function scanMathSpans(text: string): MathSpan[] {
+  const spans: MathSpan[] = [];
+  const bracketStack: number[] = [];
+  const parenStack: number[] = [];
+  const envStack: Array<{ name: string; start: number }> = [];
+  let displayDollarStart: number | null = null;
+  let inlineDollarStart: number | null = null;
+
+  const scanRange = (from: number, to: number) => {
+    for (let i = from; i < to; ) {
+      const ch = text[i]!;
+      if (displayDollarStart !== null) {
+        if (ch === "$" && text[i + 1] === "$" && !isEscaped(text, i)) {
+          spans.push({ start: displayDollarStart, end: i + 2 });
+          displayDollarStart = null;
+          i += 2;
+          continue;
+        }
+        i += 1;
+        continue;
+      }
+
+      if (ch === "\n" && inlineDollarStart !== null && isBlankLineBreakAt(text, i)) {
+        inlineDollarStart = null;
+      }
+
+      if (ch === "$" && !isEscaped(text, i)) {
+        if (text[i + 1] === "$") {
+          if (inlineDollarStart !== null) {
+            const prev = text[i - 1] ?? "";
+            const next = text[i + 1] ?? "";
+            if (!/\s/.test(prev) && !/[0-9]/.test(next)) {
+              spans.push({ start: inlineDollarStart, end: i + 1 });
+              inlineDollarStart = null;
+              i += 1;
+              continue;
+            }
+            inlineDollarStart = null;
+          }
+          displayDollarStart = i;
+          i += 2;
+          continue;
+        }
+        if (inlineDollarStart !== null) {
+          const prev = text[i - 1] ?? "";
+          const next = text[i + 1] ?? "";
+          if (!/\s/.test(prev) && !/[0-9]/.test(next)) {
+            spans.push({ start: inlineDollarStart, end: i + 1 });
+            inlineDollarStart = null;
+          } else if (/\s/.test(prev) && next && !/\s/.test(next) && !isBareCurrencyStart(text, i)) {
+            inlineDollarStart = i;
+          }
+          i += 1;
+          continue;
+        }
+        const next = text[i + 1] ?? "";
+        if (next && !/\s/.test(next) && !isBareCurrencyStart(text, i)) {
+          inlineDollarStart = i;
+        }
+        i += 1;
+        continue;
+      }
+
+      if (ch === "\\" && !isEscaped(text, i)) {
+        const next = text[i + 1];
+        if (next === "[") { bracketStack.push(i); i += 2; continue; }
+        if (next === "]") {
+          const open = bracketStack.pop();
+          if (open !== undefined) spans.push({ start: open, end: i + 2 });
+          i += 2;
+          continue;
+        }
+        if (next === "(") { parenStack.push(i); i += 2; continue; }
+        if (next === ")") {
+          const open = parenStack.pop();
+          if (open !== undefined) spans.push({ start: open, end: i + 2 });
+          i += 2;
+          continue;
+        }
+        if (text.startsWith("\\begin{", i)) {
+          const match = /^\\begin\{([A-Za-z][A-Za-z0-9*]*)\}/.exec(text.slice(i));
+          if (match) {
+            envStack.push({ name: match[1]!, start: i });
+            i += match[0].length;
+            continue;
+          }
+        }
+        if (text.startsWith("\\end{", i)) {
+          const match = /^\\end\{([A-Za-z][A-Za-z0-9*]*)\}/.exec(text.slice(i));
+          if (match) {
+            const target = match[1]!;
+            for (let idx = envStack.length - 1; idx >= 0; idx--) {
+              if (envStack[idx]!.name === target) {
+                const open = envStack[idx]!;
+                envStack.length = idx;
+                spans.push({ start: open.start, end: i + match[0].length });
+                break;
+              }
+            }
+            i += match[0].length;
+            continue;
+          }
+        }
+      }
+
+      i += 1;
+    }
+  };
+
+  scanRange(0, text.length);
+  if (displayDollarStart !== null) {
+    // At most one unclosed $$ can exist (near EOF); re-scan its suffix for inline/env spans.
+    const suffixStart = displayDollarStart + 2;
+    displayDollarStart = null;
+    inlineDollarStart = null;
+    bracketStack.length = 0;
+    parenStack.length = 0;
+    envStack.length = 0;
+    scanRange(suffixStart, text.length);
+  }
+  return spans;
+}
+
+function buildCodePointIndex(text: string): { cpStarts: number[]; prefixBytes: Int32Array } {
+  const cpStarts: number[] = [];
+  const bytesList: number[] = [0];
+  let totalBytes = 0;
+  for (let i = 0; i < text.length; ) {
+    cpStarts.push(i);
+    const cp = text.codePointAt(i)!;
+    totalBytes += codePointUtf8Bytes(cp);
+    bytesList.push(totalBytes);
+    i += cp > 0xffff ? 2 : 1;
+  }
+  cpStarts.push(text.length);
+  return { cpStarts, prefixBytes: Int32Array.from(bytesList) };
+}
+
+function findCodePointForOffset(cpStarts: number[], offset: number): number {
+  let lo = 0;
+  let hi = cpStarts.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (cpStarts[mid]! < offset) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+function selectSafeMathSpans(text: string, cpStarts: number[], prefixBytes: Int32Array, maxBytes: number): MathSpan[] {
+  const valid = scanMathSpans(text)
+    .filter((span) => {
+      const startCp = findCodePointForOffset(cpStarts, span.start);
+      const endCp = findCodePointForOffset(cpStarts, span.end);
+      return prefixBytes[endCp]! - prefixBytes[startCp]! <= maxBytes;
+    })
+    .sort((a, b) => a.start - b.start || b.end - a.end);
+
+  const topLevel: MathSpan[] = [];
+  for (const span of valid) {
+    const prev = topLevel[topLevel.length - 1];
+    if (!prev || span.start >= prev.end) topLevel.push(span);
+  }
+  return topLevel;
+}
+
+/** Split at Unicode code points while keeping closed LaTeX math spans <= maxBytes unbroken. */
 export function segmentMaterialChunks(chunks: SourceChunk[], maxBytes = 6000): MaterialSegment[] {
-  if (maxBytes < 4 || maxBytes > 8192) throw new Error("embedding segment byte limit must be 4..8192");
-  const encoder = new TextEncoder();
+  if (!Number.isInteger(maxBytes) || maxBytes < 4 || maxBytes > 8192) {
+    throw new Error("embedding segment byte limit must be 4..8192");
+  }
   const segments: MaterialSegment[] = [];
   for (const chunk of chunks) {
     if (!chunk.text.trim()) {
       if (chunk.imageObjectKey) segments.push({ chunk, segmentIndex: 0 });
       continue;
     }
-    let text = "", bytes = 0, segmentIndex = 0;
-    for (const character of chunk.text) {
-      const size = encoder.encode(character).length;
-      if (bytes + size > maxBytes) {
-        segments.push({ chunk: { ...chunk, text }, segmentIndex: segmentIndex++ });
-        text = ""; bytes = 0;
+    const { cpStarts, prefixBytes } = buildCodePointIndex(chunk.text);
+    const cpTotal = cpStarts.length - 1;
+    const mathSpans = selectSafeMathSpans(chunk.text, cpStarts, prefixBytes, maxBytes);
+    let spanIdx = 0;
+    let cpStart = 0;
+    let segmentIndex = 0;
+
+    while (cpStart < cpTotal) {
+      const baseBytes = prefixBytes[cpStart]!;
+      let lo = cpStart + 1;
+      let hi = cpTotal;
+      while (lo < hi) {
+        const mid = (lo + hi + 1) >>> 1;
+        if (prefixBytes[mid]! - baseBytes <= maxBytes) lo = mid;
+        else hi = mid - 1;
       }
-      text += character; bytes += size;
+      let cpSplit = lo;
+
+      if (cpSplit < cpTotal) {
+        const cutOffset = cpStarts[cpSplit]!;
+        const segmentStartOffset = cpStarts[cpStart]!;
+        while (spanIdx < mathSpans.length && mathSpans[spanIdx]!.end <= cutOffset) spanIdx++;
+        const activeSpan = mathSpans[spanIdx];
+        if (activeSpan && activeSpan.start < cutOffset && cutOffset < activeSpan.end && activeSpan.start > segmentStartOffset) {
+          const backedUpCp = findCodePointForOffset(cpStarts, activeSpan.start);
+          if (backedUpCp > cpStart) cpSplit = backedUpCp;
+        }
+      }
+
+      const sliceText = chunk.text.slice(cpStarts[cpStart]!, cpStarts[cpSplit]!);
+      segments.push({ chunk: { ...chunk, text: sliceText }, segmentIndex: segmentIndex++ });
+      cpStart = cpSplit;
     }
-    if (text) segments.push({ chunk: { ...chunk, text }, segmentIndex });
   }
   return segments;
 }
