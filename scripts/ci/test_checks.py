@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -38,7 +39,7 @@ class ClassificationTests(unittest.TestCase):
     def put(self, path, text):
         p = self.root / path
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(text)
+        p.write_text(text, encoding="utf-8", newline="\n")
 
     def commit(self):
         self.git("add", "-A")
@@ -47,7 +48,7 @@ class ClassificationTests(unittest.TestCase):
 
     def run_check(self, mode, base=None):
         return subprocess.run(
-            ["python3", str(SCRIPT), mode], cwd=self.root,
+            [sys.executable, str(SCRIPT), mode], cwd=self.root,
             env={**self.env, "DIFF_BASE": self.base if base is None else base,
                  "DIFF_HEAD": self.git("rev-parse", "HEAD"),
                  "GITHUB_OUTPUT": str(self.root / ".git/output")},
@@ -60,13 +61,16 @@ class ClassificationTests(unittest.TestCase):
         self.assertEqual(result.stdout.strip(), f"docs_only={str(expected).lower()}")
 
     def test_docs_with_spaces_and_newline_and_actual_light_check(self):
-        self.put("docs/a space\nand newline.md", "valid\n")
-        self.commit()
+        # A Git tree can hold this name even when the checkout filesystem cannot.
+        blob = self.git("rev-parse", "HEAD:docs/a.md")
+        self.git("-c", "core.protectNTFS=false", "update-index", "--add", "--cacheinfo",
+                 "100644", blob, "docs/a space\nand newline.md")
+        self.git("commit", "-qm", "add unusual documentation path")
         self.assert_classification(True)
         self.assertEqual(self.run_check("docs").returncode, 0)
 
     def copy_repo_file(self, path):
-        self.put(path, (REPO / path).read_text())
+        self.put(path, (REPO / path).read_text(encoding="utf-8"))
 
     def assert_full_and_light_rejected(self):
         self.assert_classification(False)
@@ -76,7 +80,7 @@ class ClassificationTests(unittest.TestCase):
         path = "docs/superpowers/plans/opening-release/00-baseline.md"
         self.copy_repo_file(path)
         self.base = self.commit()
-        original = (self.root / path).read_text()
+        original = (self.root / path).read_text(encoding="utf-8")
         self.put(path, original + "\nTODO\n")
         self.commit()
         self.assert_full_and_light_rejected()
@@ -85,7 +89,7 @@ class ClassificationTests(unittest.TestCase):
         path = "docs/operations/ci.md"
         self.copy_repo_file(path)
         self.base = self.commit()
-        original = (self.root / path).read_text()
+        original = (self.root / path).read_text(encoding="utf-8")
         self.assertIn("exact commit SHA", original)
         self.put(path, original.replace("exact commit SHA", "commit"))
         self.commit()
@@ -94,7 +98,7 @@ class ClassificationTests(unittest.TestCase):
     def test_task_referenced_evidence_deletion_is_full(self):
         manifest = "docs/superpowers/plans/opening-release/tasks.json"
         self.copy_repo_file(manifest)
-        tasks = json.loads((self.root / manifest).read_text())["tasks"]
+        tasks = json.loads((self.root / manifest).read_text(encoding="utf-8"))["tasks"]
         reference = next(e for t in tasks for e in t.get("evidence", []) if e.endswith(".md"))
         evidence = (REPO / manifest).parent.joinpath(reference).resolve().relative_to(REPO)
         self.copy_repo_file(evidence)
@@ -189,25 +193,50 @@ class ClassificationTests(unittest.TestCase):
         self.assertNotEqual(self.run_check("classify", "invalid-sha").returncode, 0)
 
 
+QUALITY_WORKERS = ["static-unit", "integration-parser", "handler-browser-spikes", "build"]
+WORKER_FLOW = ["opening-worker-flow"]
+
+
+class WorkflowTests(unittest.TestCase):
+    def test_draft_routing_and_required_gate_inputs(self):
+        # Use the YAML parser already installed by npm ci, including its anchor resolution.
+        script = """const fs = require('node:fs');
+const workflow = require('js-yaml').load(fs.readFileSync('.github/workflows/ci.yml', 'utf8'));
+console.log(JSON.stringify(workflow));"""
+        workflow = json.loads(subprocess.check_output(["node", "-e", script], cwd=REPO))
+        self.assertIn("ready_for_review", workflow["on"]["pull_request"]["types"])
+        jobs = workflow["jobs"]
+        self.assertIn("fast-draft-check", jobs)
+        for name, workers in (("quality", QUALITY_WORKERS), ("worker-gate", WORKER_FLOW)):
+            with self.subTest(gate=name):
+                gate = jobs[name]
+                self.assertIn("fast-draft-check", gate["needs"])
+                step = next(step for step in gate["steps"] if "checks.py gate" in step.get("run", ""))
+                self.assertIn("CI_IS_DRAFT", step["env"])
+                self.assertCountEqual(step["run"].split("checks.py gate ")[1].split(), workers)
+
+
 class GateTests(unittest.TestCase):
     def fixture(self, docs=False):
         return {
             "changes": {"result": "success", "outputs": {"docs_only": str(docs).lower()}},
             "docs": {"result": "success" if docs else "skipped"},
             "static-unit": {"result": "skipped" if docs else "success"},
-            "integration-browser": {"result": "skipped" if docs else "success"},
+            "integration-parser": {"result": "skipped" if docs else "success"},
+            "handler-browser-spikes": {"result": "skipped" if docs else "success"},
+            "fast-draft-check": {"result": "skipped"},
             "build": {"result": "skipped" if docs else "success"},
             "opening-worker-flow": {"result": "skipped" if docs else "success"},
         }
 
     def test_both_required_gates_success_on_real_checks(self):
         for docs in (False, True):
-            for workers in (["static-unit", "integration-browser", "build"], ["opening-worker-flow"]):
+            for workers in (QUALITY_WORKERS, WORKER_FLOW):
                 check_gate(self.fixture(docs), workers)
 
     def test_every_required_failure_cancellation_skip_or_absence_fails(self):
         for docs in (False, True):
-            jobs = ["changes", "docs"] if docs else ["changes", "static-unit", "integration-browser", "build", "opening-worker-flow"]
+            jobs = ["changes", "docs"] if docs else ["changes", *QUALITY_WORKERS, *WORKER_FLOW]
             for name in jobs:
                 for result in ("failure", "cancelled", "skipped", None):
                     needs = self.fixture(docs)
@@ -217,7 +246,7 @@ class GateTests(unittest.TestCase):
                         needs[name]["result"] = result
                     with self.subTest(docs=docs, name=name, result=result):
                         with self.assertRaises(ValueError):
-                            check_gate(needs, ["static-unit", "integration-browser", "build", "opening-worker-flow"])
+                            check_gate(needs, QUALITY_WORKERS + WORKER_FLOW)
 
     def test_invalid_or_missing_classifier_output_fails(self):
         for output in ({}, {"docs_only": ""}, {"docs_only": "TRUE"}):
@@ -226,14 +255,58 @@ class GateTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 check_gate(needs, ["build"])
 
+    def run_gate(self, needs, workers, draft):
+        env = {**os.environ, "CI_NEEDS": json.dumps(needs)}
+        if draft is None:
+            env.pop("CI_IS_DRAFT", None)
+        else:
+            env["CI_IS_DRAFT"] = draft
+        return subprocess.run([sys.executable, str(SCRIPT), "gate", *workers],
+                              env=env, text=True, capture_output=True)
+
+    def test_draft_code_rejects_both_gates_even_after_fast_success(self):
+        for workers in (QUALITY_WORKERS, WORKER_FLOW):
+            for status in ("success", "failure", "cancelled", "skipped", None):
+                with self.subTest(workers=workers, status=status):
+                    needs = self.fixture()
+                    if status is None:
+                        del needs["fast-draft-check"]
+                    else:
+                        needs["fast-draft-check"]["result"] = status
+                    for worker in workers:
+                        needs[worker]["result"] = "skipped"
+                    result = self.run_gate(needs, workers, "true")
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("Ready for Review" if status == "success" else
+                                  "fast-draft-check did not succeed", result.stderr)
+
+    def test_draft_fast_success_never_authorizes_merge(self):
+        needs = self.fixture()
+        needs["fast-draft-check"]["result"] = "success"
+        for workers in (QUALITY_WORKERS, WORKER_FLOW):
+            with self.assertRaisesRegex(ValueError, "Ready for Review"):
+                check_gate(needs, workers, is_draft=True)
+
+    def test_docs_only_draft_uses_documentation_check(self):
+        for workers in (QUALITY_WORKERS, WORKER_FLOW):
+            needs = self.fixture(docs=True)
+            check_gate(needs, workers, is_draft=True)
+            needs["docs"]["result"] = "skipped"
+            with self.assertRaisesRegex(ValueError, "docs did not succeed"):
+                check_gate(needs, workers, is_draft=True)
+
+    def test_invalid_or_missing_draft_flag_cannot_pass_full_gate(self):
+        for flag in ("TRUE", "unknown", "", None):
+            with self.subTest(flag=flag):
+                result = self.run_gate(self.fixture(), QUALITY_WORKERS, flag)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("CI_IS_DRAFT", result.stderr)
+
     def test_cli_exit_code_does_not_swallow_failure(self):
         for status, expected in (("success", 0), ("failure", 1), ("cancelled", 1), ("skipped", 1)):
             needs = self.fixture()
             needs["build"]["result"] = status
-            result = subprocess.run(
-                ["python3", str(SCRIPT), "gate", "build"],
-                env={**os.environ, "CI_NEEDS": json.dumps(needs)}, capture_output=True,
-            )
+            result = self.run_gate(needs, ["build"], "false")
             self.assertEqual(result.returncode, expected, result.stderr)
 
 

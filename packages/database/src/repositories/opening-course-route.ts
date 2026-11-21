@@ -7,7 +7,7 @@ import { assertCourseRouteCourse, readCourseRequirements, readCourseRouteMateria
 import { decideCourseRouteVerification, readConfirmedCourseSpanExerciseKeys, resolveCourseSpanExerciseKeys } from "./opening-course-route-verification-policy";
 import { readLearningGoal } from "./opening-learning-goals";
 import { createOpeningCourseRouteActions } from "./opening-course-route-actions";
-export { readOpeningCourseRoute } from "./opening-course-route-read";
+export { readOpeningCourseRoute, readOpeningCourseRouteActivityObservationId } from "./opening-course-route-read";
 
 export function createOpeningCourseRouteRepository(sql:Sql,options:{compilerEnabled:boolean;exactVerificationEnabled?:boolean}){
   return {read:(scope:Scope,courseId:string,activityId?:string)=>readOpeningCourseRoute(sql,scope,courseId,activityId,options.exactVerificationEnabled),

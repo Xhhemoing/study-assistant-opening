@@ -510,6 +510,37 @@ describe("opening knowledge manual confirmation", () => {
 });
 
 describe("opening knowledge repository", () => {
+  it.each(["repeatable read", "serializable"])("reads uncommitted graph changes inside a %s transaction", async (isolation) => {
+    const { courseId, sourceId, chunkId } = await seedCourseMaterial();
+    const repo = createOpeningKnowledgeRepository(f.sql);
+    await repo.replace(f.scope, courseId, { expectedVersion: 0, snapshot: snapshotFor(courseId, chunkId, 1),
+      sourceVersions: { [sourceId]: 1 } });
+
+    const rollback = new Error("rollback nested snapshot fixture");
+    await expect(f.sql.begin(`isolation level ${isolation}`, async tx => {
+      await tx`UPDATE opening_course_knowledge SET version=2, snapshot=jsonb_set(snapshot,'{version}','2')
+        WHERE workspace_id=${f.scope.workspaceId} AND course_id=${courseId}`;
+      const nested = createOpeningKnowledgeRepository(tx);
+      expect(await nested.getForRebuild(f.scope, courseId)).toMatchObject({ version: 2 });
+      expect(await nested.get(f.scope, courseId)).toMatchObject({ version: 2 });
+      const sync = await nested.readSyncStatus(f.scope, courseId);
+      expect(await nested.getWithSync(f.scope, courseId)).toMatchObject({ version: 2, sync });
+      expect(await tx`SHOW transaction_read_only`).toEqual([{ transaction_read_only: "off" }]);
+      throw rollback;
+    })).rejects.toBe(rollback);
+    expect(await repo.get(f.scope, courseId)).toMatchObject({ version: 1 });
+  });
+
+  it("refuses a read committed transaction without aborting the caller's transaction", async () => {
+    const { courseId } = await seedCourseMaterial();
+    await f.sql.begin("isolation level read committed", async tx => {
+      await tx`SELECT id FROM courses WHERE id=${courseId}`;
+      const nested = createOpeningKnowledgeRepository(tx);
+      await expect(nested.getWithSync(f.scope, courseId)).rejects.toThrow(/repeatable read or serializable/i);
+      expect(await tx`SHOW transaction_isolation`).toEqual([{ transaction_isolation: "read committed" }]);
+    });
+  });
+
   it("returns null from get/getVersion when no row exists", async () => {
     const { courseId } = await seedCourseMaterial();
     const repo = createOpeningKnowledgeRepository(f.sql);

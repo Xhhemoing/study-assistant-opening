@@ -52,10 +52,10 @@ test('all real Git entry families preserve hostile caller metadata across Bash i
       assert(!/^not ok|# SKIP/m.test(result.stdout));
       t.diagnostic(`Executed nested Git tests: ${expected.join('; ')}; count=${count}; skip=0`);
     }else{
-      assert.match(result.stderr,/Ran 21 tests/);
+      assert.match(result.stderr,/Ran 26 tests/);
       assert.match(result.stderr,/\nOK\s*$/);
       assert(!/skipped=/i.test(result.stderr));
-      t.diagnostic('Executed Python CI fixture/CLI: 21 tests; skip=0');
+      t.diagnostic('Executed Python CI fixture/CLI: 26 tests; skip=0');
     }
   }
 });

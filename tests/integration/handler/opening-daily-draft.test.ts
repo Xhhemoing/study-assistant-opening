@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { applyMigrations, createSqlClient } from "@aistudy/database";
 import type { OpeningPlanningSettings } from "@aistudy/contracts";
-import { GET as getToday } from "../../../apps/web/src/app/api/opening/today/route";
+import { GET as readToday, POST as prepareToday } from "../../../apps/web/src/app/api/opening/today/route";
 import { POST as createTask } from "../../../apps/web/src/app/api/opening/tasks/route";
 import { POST as proposePlan } from "../../../apps/web/src/app/api/opening/plans/route";
 import { POST as acceptPlan } from "../../../apps/web/src/app/api/opening/plans/[id]/accept/route";
@@ -100,11 +100,16 @@ afterAll(async () => {
 });
 
 describe("opening daily auto-draft (P04a)", () => {
-  it("two opens of today the same day produce one auto-draft", async () => {
+  it("keeps Today reads read-only and produces one draft across two explicit requests", async () => {
     await putPlanningSettings(req("/api/opening/planning-settings", "PUT", settings));
     await seedTask();
 
-    const first = await getToday(req(`/api/opening/today?date=${day}`));
+    const read = await readToday(req(`/api/opening/today?date=${day}&refresh=suggestions`));
+    expect(read.status).toBe(200);
+    expect(await read.json()).toMatchObject({ dailyDraft: null, acceptedVersion: 0 });
+    expect(await sql`SELECT id FROM opening_plan_drafts`).toHaveLength(0);
+
+    const first = await prepareToday(req(`/api/opening/today?date=${day}`, "POST"));
     expect(first.status).toBe(200);
     const body1 = await first.json();
     expect(body1.dailyDraft).toMatchObject({
@@ -114,7 +119,9 @@ describe("opening daily auto-draft (P04a)", () => {
     expect(body1.dailyDraftSkippedReason).toBeNull();
     const draftId = body1.dailyDraft.id as string;
 
-    const second = await getToday(req(`/api/opening/today?date=${day}`));
+    const second = await prepareToday(req(`/api/opening/today?date=${day}`, "POST"));
+    const reread = await readToday(req(`/api/opening/today?date=${day}`));
+    expect(await reread.json()).toMatchObject({ dailyDraft: { id: body1.dailyDraft.id }, acceptedVersion: 0 });
     expect(second.status).toBe(200);
     const body2 = await second.json();
     expect(body2.dailyDraft.id).toBe(draftId);
@@ -149,7 +156,7 @@ describe("opening daily auto-draft (P04a)", () => {
     );
     expect(accepted.status).toBe(200);
 
-    const today = await getToday(req(`/api/opening/today?date=${day}`));
+    const today = await prepareToday(req(`/api/opening/today?date=${day}`, "POST"));
     expect(today.status).toBe(200);
     const body = await today.json();
     expect(body.acceptedVersion).toBe(1);
@@ -168,8 +175,8 @@ describe("opening daily auto-draft (P04a)", () => {
     await seedTask();
 
     const [a, b] = await Promise.all([
-      getToday(req(`/api/opening/today?date=${day}`)),
-      getToday(req(`/api/opening/today?date=${day}`)),
+      prepareToday(req(`/api/opening/today?date=${day}`, "POST")),
+      prepareToday(req(`/api/opening/today?date=${day}`, "POST")),
     ]);
     expect(a.status).toBe(200);
     expect(b.status).toBe(200);
@@ -187,7 +194,7 @@ describe("opening daily auto-draft (P04a)", () => {
     await putPlanningSettings(req("/api/opening/planning-settings", "PUT", settings));
     await seedTask();
 
-    const first = await (await getToday(req(`/api/opening/today?date=${day}`))).json();
+    const first = await (await prepareToday(req(`/api/opening/today?date=${day}`, "POST"))).json();
     const draftId = first.dailyDraft.id as string;
     expect(first.dailyDraft.status).toBe("draft");
 
@@ -197,7 +204,7 @@ describe("opening daily auto-draft (P04a)", () => {
     );
     expect(rejected.status).toBe(200);
 
-    const second = await (await getToday(req(`/api/opening/today?date=${day}`))).json();
+    const second = await (await prepareToday(req(`/api/opening/today?date=${day}`, "POST"))).json();
     expect(second.dailyDraft).toBeNull();
     expect(second.dailyDraftSkippedReason).toBe("rejected");
 
@@ -210,7 +217,7 @@ describe("opening daily auto-draft (P04a)", () => {
 
   it("without planning settings, today does not 500 and skips auto-draft", async () => {
     await seedTask();
-    const today = await getToday(req(`/api/opening/today?date=${day}`));
+    const today = await prepareToday(req(`/api/opening/today?date=${day}`, "POST"));
     expect(today.status).toBe(200);
     const body = await today.json();
     expect(body.dailyDraft).toBeNull();

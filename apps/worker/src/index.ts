@@ -140,7 +140,7 @@ function createParserHandlers(sql: WorkerSql, env: WorkerEnv, runner: ParserRunn
   const parse = createParseSourceHandler({ sources, chunks, storage, runner, tempDir: env.parserTempDir,
     segments: createOpeningPdfSegmentsRepository(sql), segmentTimeoutSeconds,
     assertCurrent: (scope, identity) => visualRecognitions.assertCurrent(scope, identity),
-    recognizePage: createSourceVisualRecognition({ repository: visualRecognitions, gateway: models,
+    ...createSourceVisualRecognition({ repository: visualRecognitions, gateway: models,
       budget: scope => scopeBudget(budget, scope), storage }),
     onSourceReady: async (scope, { sourceId }) => {
       await knowledge.reconcileCoursesForSource(scope, { sourceId });

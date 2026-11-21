@@ -83,12 +83,12 @@ export function AppShell({ children, counts = {}, recent = [], navExtra, account
           <PanelLeft size={18} aria-hidden="true" />
         </button>
         {onOpenSearch ? (
-          <div className="mb-2 px-1.5">
+          <div className="mb-2.5 px-1.5">
             <button type="button" onClick={onOpenSearch} aria-label="打开全局搜索" title="全局搜索与快捷导航 (Ctrl / ⌘ K)"
-              className="flex min-h-(--control-h) w-full items-center rounded-pill text-text-2 transition-colors duration-(--duration-micro) hover:bg-text/5 hover:text-text">
-              <span className="grid w-11 shrink-0 justify-items-center"><Search size={17} aria-hidden="true" /></span>
+              className={`flex min-h-(--control-h) w-full items-center rounded-pill text-text-2 transition-[color,background-color,box-shadow] duration-(--duration-micro) hover:text-text ${compact ? "hover:bg-text/6" : "well-recessed hover:bg-surface/80"}`}>
+              <span className="grid w-11 shrink-0 justify-items-center"><Search size={16} aria-hidden="true" /></span>
               <span data-hidden={compact} className="flex-1 whitespace-nowrap text-left text-ui data-[hidden=true]:sr-only">搜索</span>
-              {!compact && <kbd className="mr-3 rounded-ctl border border-line px-1.5 text-cap text-text-2">⌘K</kbd>}
+              {!compact && <kbd className="kbd-cap mr-2.5">⌘K</kbd>}
             </button>
           </div>
         ) : null}
@@ -96,7 +96,7 @@ export function AppShell({ children, counts = {}, recent = [], navExtra, account
         {navExtra ? <div className="mt-1 px-1.5">{navExtra}</div> : null}
         <NavGroup items={nav?.tools ?? NAV_TOOLS} isActive={isActive} compact={compact} counts={counts} divided />
         <section aria-label="最近对话" data-hidden={compact || recent.length === 0} inert={compact}
-          className="mt-4 min-h-0 flex-1 overflow-y-auto px-2 pt-1 transition-opacity duration-(--duration-state) data-[hidden=true]:pointer-events-none data-[hidden=true]:opacity-0">
+          className="no-scrollbar mt-4 min-h-0 flex-1 overflow-y-auto px-2 pt-1 transition-opacity duration-(--duration-state) data-[hidden=true]:pointer-events-none data-[hidden=true]:opacity-0">
           <p className="px-3 pb-1 text-cap text-text-3">最近</p>
           <ul>{recent.slice(0, 8).map(thread => (
             <li key={thread.id}><TransitionLink href={thread.href} className="block truncate whitespace-nowrap rounded-pill px-3 py-1.5 text-meta text-text-2 transition-colors hover:bg-text/5 hover:text-text">{thread.title}</TransitionLink></li>
@@ -130,14 +130,14 @@ function NavGroup({ items, isActive, compact, counts, divided = false }: { items
         return (
           <li key={item.id} className="px-1.5">
             <TransitionLink href={item.route} aria-current={current ? "page" : undefined}
-              className="group relative flex min-h-(--control-h) items-center rounded-pill text-text-2 transition-colors duration-(--duration-micro) hover:bg-text/5 hover:text-text aria-[current=page]:font-medium aria-[current=page]:text-text">
-              {current && <span aria-hidden="true" className="absolute inset-0 rounded-pill bg-surface shadow-card [view-transition-name:nav-active]" />}
+              className="group relative flex min-h-(--control-h) items-center rounded-pill text-text-2 transition-colors duration-(--duration-micro) hover:bg-text/[0.055] hover:text-text aria-[current=page]:font-medium aria-[current=page]:text-text">
+              {current && <span aria-hidden="true" className="keycap absolute inset-0 rounded-pill [view-transition-name:nav-active]" />}
               <span className={`relative grid w-11 shrink-0 justify-items-center ${compact ? "gap-0.5 py-1.5" : ""}`}>
                 <Icon size={17} aria-hidden="true" />
                 {compact && <span className="text-cap motion-safe:animate-fade-in">{item.label}</span>}
               </span>
               <span data-hidden={compact} className="relative flex-1 whitespace-nowrap text-ui transition-opacity duration-(--duration-micro) data-[hidden=true]:sr-only">{item.label}</span>
-              {count ? <span key={count} className={`tabular-nums text-cap text-accent motion-safe:animate-badge-pop ${compact ? "absolute right-2 top-1" : "relative mr-3"}`}>{count}<span className="sr-only">{countDescription(item.id)}</span></span> : null}
+              {count ? <span key={count} className={`tabular-nums text-cap font-medium text-accent motion-safe:animate-badge-pop ${compact ? "absolute right-2 top-1" : "relative mr-3 rounded-pill bg-accent-soft px-1.5 py-0.5"}`}>{count}<span className="sr-only">{countDescription(item.id)}</span></span> : null}
             </TransitionLink>
           </li>
         );
@@ -155,10 +155,10 @@ function MobileTabBar({ items, label, isActive, counts, trailing }: { items: Fea
         const current = isActive(item);
         return (
           <TransitionLink key={item.id} href={item.route} aria-current={current ? "page" : undefined}
-            className="relative flex h-12 flex-col items-center justify-center gap-0.5 rounded-pill text-cap text-text-2 transition-transform duration-(--duration-micro) active:scale-95 aria-[current=page]:font-medium aria-[current=page]:text-text">
-            {current && <span aria-hidden="true" className="absolute inset-0 rounded-pill bg-surface shadow-card [view-transition-name:tab-active]" />}
+            className="relative flex h-12 flex-col items-center justify-center gap-0.5 rounded-pill text-cap text-text-2 transition-transform duration-(--duration-micro) active:translate-y-px aria-[current=page]:font-medium aria-[current=page]:text-text">
+            {current && <span aria-hidden="true" className="keycap absolute inset-0 rounded-pill [view-transition-name:tab-active]" />}
             <Icon size={19} aria-hidden="true" className="relative" />
-            <span className="relative">{item.label}{counts[item.id] ? <>{` ${counts[item.id]}`}<span className="sr-only">{countDescription(item.id)}</span></> : null}</span>
+            <span className="relative tabular-nums">{item.label}{counts[item.id] ? <>{` ${counts[item.id]}`}<span className="sr-only">{countDescription(item.id)}</span></> : null}</span>
           </TransitionLink>
         );
       })}

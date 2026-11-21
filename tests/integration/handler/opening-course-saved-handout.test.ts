@@ -49,7 +49,7 @@ async function seed() {
 }
 it("reads authenticated PG → loader → real DOM, including archived/completed and paused, without writes or answer exposure", async () => {
   const x = await seed();
-  await createLibraryRepository(f.sql).updateDocument({ workspaceId: f.scope.workspaceId, documentId: x.unit.documentId, expectedRevisionNumber: 1, blocks: x.blocks.map(b => ({ ...b, content: { ...b.content, text: "未采用的新版本" } })) });
+  await createLibraryRepository(f.sql).updateDocument({ workspaceId: f.scope.workspaceId, documentId: x.unit.documentId, expectedRevisionNumber: 1, blocks: x.blocks.map(b => ({ ...b, content: { ...b.content, text: "未采用的新版本" } })), includeAnswerKeys: true });
   for (const status of ["active", "completed", "paused"]) {
     await f.sql`UPDATE opening_teaching_activities SET status=${status} WHERE id=${x.activityId}`;
     if (status !== "active") await f.sql`UPDATE courses SET archived_at=now() WHERE id=${x.courseId}`;

@@ -5,8 +5,7 @@ export type OpeningNavigationItem = {
   group: "core" | "tools";
 };
 
-/** The same three destinations own desktop, mobile and legacy entry routes. */
-type OpeningNavigationOptions = { studySessionV2?: boolean };
+export type OpeningNavigationOptions = { studySessionV2?: boolean };
 
 export function openingNavigation({ studySessionV2 = false }: OpeningNavigationOptions = {}): OpeningNavigationItem[] {
   return [
@@ -14,6 +13,7 @@ export function openingNavigation({ studySessionV2 = false }: OpeningNavigationO
     studySessionV2
       ? { href: "/opening/courses", label: "课程", icon: "courses", group: "core" }
       : { href: "/opening/review", label: "复习", icon: "review", group: "core" },
+    ...(studySessionV2 ? [{ href: "/opening/agent", label: "探索", icon: "assistant", group: "core" } as const] : []),
     { href: "/opening/library", label: "资料", icon: "library", group: "core" },
   ];
 }
@@ -23,7 +23,8 @@ export function navigationIsActive(href: string, pathname: string, _search = "",
   const path = pathname.split("?")[0] ?? pathname;
   const within = (owner: string) => path === owner || path.startsWith(`${owner}/`);
   if (within("/opening/courses")) return hrefPath === (studySessionV2 ? "/opening/courses" : "/opening/today");
-  if (["/opening/agent", "/opening/assistant", "/opening/sprint", "/opening/suggestions"].some(within)) return hrefPath === "/opening/today";
+  if (["/opening/agent", "/opening/assistant"].some(within)) return hrefPath === (studySessionV2 ? "/opening/agent" : "/opening/today");
+  if (["/opening/sprint", "/opening/suggestions"].some(within)) return hrefPath === "/opening/today";
   if (within("/opening/cards") || (studySessionV2 && within("/opening/review"))) return hrefPath === (studySessionV2 ? "/opening/today" : "/opening/review");
   if (within("/opening/search") || within("/opening/map")) return hrefPath === "/opening/library";
   return within(hrefPath);
