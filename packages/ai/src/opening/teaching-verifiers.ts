@@ -769,6 +769,10 @@ function startsWithContinuationOperator(text: string): boolean {
   return /^\s*(?:\\times|\\div|\\cdot|\\pm|\\mp|[+\-*/×÷−±])/.test(stripLeadingHorizontalSpacing(text));
 }
 
+function startsWithBinaryOnlyOperator(text: string): boolean {
+  return /^(?:\\(?:times|div|cdot|ast|star|circ|bullet|oplus|otimes|bmod|mod)(?![A-Za-z])|[*/×÷·⋅∕⁄^_])/.test(stripLeadingHorizontalSpacing(text));
+}
+
 function looksLikeMathExpression(text: string): boolean {
   const trimmed = text.trim();
   if (!trimmed || /[:：]$/.test(trimmed)) return false;
@@ -1220,16 +1224,15 @@ function splitMultiClauseFormula(text: string, mode: "layout" | "logical"): stri
         if (rhs && !endsWithOperatorOrEquals(rhs)) pendingSpaces.push({ start: at, end });
       }
     } else {
-      let lhsEnd = at;
       for (let i = pendingSpaces.length - 1; i >= 0; i--) {
         const space = pendingSpaces[i]!;
-        if (text.slice(space.end, lhsEnd).trim()) {
+        const candidateLhs = stripLeadingHorizontalSpacing(text.slice(space.end, at)).trim();
+        if (candidateLhs.length > 0 && !startsWithBinaryOnlyOperator(candidateLhs)) {
           clauses.push(text.slice(start, space.start));
           start = space.end;
           if (kind === "equality") logicalStart = start;
           break;
         }
-        lhsEnd = space.start;
       }
       relationEnd = end;
       pendingSpaces.length = 0;

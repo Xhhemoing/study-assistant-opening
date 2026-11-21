@@ -346,6 +346,12 @@ describe("teaching-verifiers", () => {
     [String.raw`1 + 2 = 1,5 * 2 \qquad -1 + 3 = 2`, "unknown"],
     [String.raw`1 + 2 = 3 \qquad 1 + 1 = 2`, "pass"],
     [String.raw`1 + 2 = 3 \qquad -1 + 3 \quad = 2`, "pass"],
+    [String.raw`2 + 2 = 2 \quad \times 2 = 4`, "pass"],
+    [String.raw`2 + 2 = 8 \qquad \div 2 = 4`, "pass"],
+    [String.raw`2 + 2 = 2 \quad \quad \times 2 = 4`, "pass"],
+    [String.raw`1 + 1 = 2 \quad 2 \quad \times 2 = 4`, "pass"],
+    [String.raw`2 + 2 = 2 \quad × 2 = 4`, "pass"],
+    [String.raw`2 + 2 = 2 \quad \oplus 2 = 4`, "unknown"],
     [String.raw`1 + 2 = 1 \quad + 2`, "pass"],
     [String.raw`1 + 2 = (1 \qquad + 2)`, "pass"],
     [String.raw`1 + 2 = 300 \quad \text{cm}`, "unknown"],
@@ -419,6 +425,8 @@ describe("teaching-verifiers", () => {
     ["contradiction after wide-spaced decimal-comma equation", String.raw`1 + 2 = 1,5 * 2 \qquad 2 + 2 = 5`, "2 + 2 = 5"],
     ["contradiction before wide-spaced equation", String.raw`1 + 2 = 5 \quad 2 + 2 = 4`, "1 + 2 = 5"],
     ["contradiction before wide-spaced inequality", String.raw`1 + 2 = 5 \quad x \neq y`, "1 + 2 = 5"],
+    ["contradiction in a continued product", String.raw`2 + 2 = 2 \quad \times 2 = 5`, String.raw`2 + 2 = 2 \times 2 = 5`],
+    ["contradiction before a distinct macro with an operator prefix", String.raw`1 + 2 = 5 \quad \timeseries = x`, "1 + 2 = 5"],
   ])("flags multiline LaTeX contradiction with real arithmetic probe (%s)", async (_label, latex, expectedDetail) => {
     const report = await verifyTeachingContent({
       activityId: ACT, publishInput: basePublish(), pack: packWithSupport(), keyClaims: [],
